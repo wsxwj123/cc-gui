@@ -10,12 +10,91 @@ import { ProcessPanel } from './components/ProcessPanel.jsx';
 import { SettingsPanel } from './components/SettingsPanel.jsx';
 import { MCPPanel } from './components/MCPPanel.jsx';
 import { FileChangesPanel } from './components/FileChangesPanel.jsx';
+import { AgentsPanel } from './components/AgentsPanel.jsx';
 import {
   FolderOpen, MessageSquare, ChevronLeft, ChevronRight, ChevronDown,
   Search, Hash, Layers, BarChart3, ArrowLeft, Plus,
   RefreshCw, Activity, Settings, Server, GitBranch, FileDiff, Check, Wrench, X,
-  Sun, Moon, Monitor, Play,
+  Sun, Moon, Monitor, Play, Bot, Camera, History,
 } from 'lucide-react';
+
+// ── Per-session shadow-git checkpoints ──────────────────────────
+function CheckpointButton({ sessionId, cwd }) {
+  const [open, setOpen] = useState(false);
+  const [entries, setEntries] = useState([]);
+  const [busy, setBusy] = useState(false);
+
+  const load = async () => {
+    if (!sessionId) return;
+    try {
+      const r = await fetch(`/api/checkpoints/${sessionId}`);
+      const d = await r.json();
+      setEntries(d.entries || []);
+    } catch {}
+  };
+  useEffect(() => { if (open) load(); }, [open, sessionId]);
+
+  const snapshot = async () => {
+    if (!sessionId || !cwd) return;
+    setBusy(true);
+    try {
+      await fetch('/api/checkpoints', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sessionId, cwd, label: `checkpoint ${new Date().toLocaleTimeString()}` }),
+      });
+      await load();
+    } catch (err) { alert('快照失败：' + err.message); }
+    setBusy(false);
+  };
+
+  const restore = async (sha) => {
+    if (!confirm(`恢复 cwd 到该 checkpoint？\n${sha.slice(0, 7)}\n会覆盖未提交的修改。`)) return;
+    try {
+      const r = await fetch(`/api/checkpoints/${sessionId}/restore`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sha, cwd }),
+      });
+      const d = await r.json();
+      if (!r.ok) alert('恢复失败：' + (d.error || r.status));
+    } catch (err) { alert('恢复失败：' + err.message); }
+  };
+
+  return (
+    <div className="relative">
+      <button onClick={() => setOpen(!open)}
+        className={`flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[11px] font-body transition-colors ${open ? 'bg-accent/15 text-accent' : 'bg-canvas-warm text-ink-faint hover:text-ink-muted'}`}
+        title="Checkpoint 时间线">
+        <History size={12} />检查点
+      </button>
+      {open && (
+        <>
+          <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
+          <div className="glass-popover absolute right-0 top-full mt-2 w-72 z-50 py-1 animate-glass-rise">
+            <div className="px-3 py-2 flex items-center justify-between border-b border-white/10">
+              <span className="text-[10px] uppercase tracking-wider text-ink-muted font-body">Checkpoints</span>
+              <button onClick={snapshot} disabled={busy} className="btn-accent flex items-center gap-1 text-[10px] px-2 py-0.5">
+                <Camera size={10} />{busy ? '快照中…' : '新快照'}
+              </button>
+            </div>
+            <div className="max-h-72 overflow-y-auto">
+              {entries.length === 0 ? (
+                <p className="px-3 py-4 text-[11px] text-ink-faint text-center font-body">还没有 checkpoint</p>
+              ) : entries.map((e) => (
+                <button key={e.sha} onClick={() => restore(e.sha)}
+                  className="w-full text-left px-3 py-2 hover:bg-black/5 border-b border-white/5">
+                  <div className="text-[11px] font-mono text-ink-soft truncate">{e.label}</div>
+                  <div className="text-[9px] text-ink-faint font-mono mt-0.5">
+                    {e.sha.slice(0, 7)} · {new Date(e.ts).toLocaleString('zh-CN')}
+                  </div>
+                </button>
+              ))}
+            </div>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
 
 // ── Continue most recent session (mirrors `claude --continue`) ────
 function ContinueButton() {
@@ -100,6 +179,7 @@ const PANEL_MAP = {
   usage: { label: '用量统计', icon: BarChart3, component: UsagePanel },
   processes: { label: '进程管理', icon: Activity, component: ProcessPanel },
   mcp: { label: 'MCP 服务器', icon: Server, component: MCPPanel },
+  agents: { label: 'Subagents', icon: Bot, component: AgentsPanel },
   settings: { label: '设置', icon: Settings, component: SettingsPanel },
 };
 
@@ -364,6 +444,30 @@ function SessionList() {
     useStore.setState({ messages: [] });
   };
 
+  // Spin up a git worktree off the current project and put the GUI into draft
+  // mode pointing at the new isolated working tree. Mirrors `claude --worktree`.
+  const handleNewWorktree = async () => {
+    if (!selectedProject) return;
+    const name = prompt('worktree 名称（会作为分支名 gui/<name>）', `session-${Date.now()}`);
+    if (!name) return;
+    try {
+      const r = await fetch('/api/worktree', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cwd: selectedProject.path, name }),
+      });
+      const d = await r.json();
+      if (!r.ok) return alert('创建 worktree 失败：' + d.error);
+      setSelectedSession({
+        draft: true,
+        sessionId: null,
+        projectHash: selectedProject.hash,
+        projectPath: d.path,
+        firstPrompt: `新会话 · ${d.branch}`,
+      });
+      useStore.setState({ messages: [] });
+    } catch (err) { alert('创建 worktree 失败：' + err.message); }
+  };
+
   const handleFork = async (session) => {
     setForking(session.sessionId);
     try {
@@ -394,8 +498,15 @@ function SessionList() {
           <h2 className="text-[11px] font-medium uppercase tracking-widest text-ink-faint font-body">会话</h2>
           <span className="text-[10px] text-ink-ghost font-mono">{sessions.length}</span>
           <button
+            onClick={handleNewWorktree}
+            className="ml-auto btn-glass flex items-center gap-1 px-2 py-1 text-[11px] font-body text-ink-soft"
+            title="在新 git worktree 中开会话（隔离）"
+          >
+            <GitBranch size={11} />worktree
+          </button>
+          <button
             onClick={handleNew}
-            className="ml-auto btn-accent flex items-center gap-1 px-2 py-1 text-[11px] font-body"
+            className="btn-accent flex items-center gap-1 px-2 py-1 text-[11px] font-body"
             title="新建会话"
           >
             <Plus size={11} />新建
@@ -629,7 +740,11 @@ function SessionDetail() {
               <div className="flex gap-1">{models.map((m) => <ModelBadge key={m} model={m} compact />)}</div>
             </div>
           </div>
-          <div className="flex items-center gap-3 shrink-0 ml-4">
+          <div className="flex items-center gap-2 shrink-0 ml-4">
+            <CheckpointButton
+              sessionId={selectedSession?.sessionId}
+              cwd={selectedProject?.path || selectedSession?.projectPath}
+            />
             <button
               onClick={() => setShowFileChanges(!showFileChanges)}
               className={`flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[11px] font-body transition-colors ${

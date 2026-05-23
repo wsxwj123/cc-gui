@@ -14,6 +14,9 @@ import mcpRoutes from './routes/mcp.js';
 import forkRoutes from './routes/fork.js';
 import fileChangesRoutes from './routes/file-changes.js';
 import searchRoutes from './routes/search.js';
+import checkpointsRoutes from './routes/checkpoints.js';
+import agentsRoutes from './routes/agents.js';
+import worktreeRoutes from './routes/worktree.js';
 import { setupFileWatcher } from './services/file-watcher.js';
 import { getDefaultModel, getAvailableModels, setDefaultModel } from './services/model-resolver.js';
 import { readdir, readFile } from 'fs/promises';
@@ -36,6 +39,9 @@ app.use('/api', mcpRoutes);
 app.use('/api', forkRoutes);
 app.use('/api', fileChangesRoutes);
 app.use('/api', searchRoutes);
+app.use('/api', checkpointsRoutes);
+app.use('/api', agentsRoutes);
+app.use('/api', worktreeRoutes);
 
 // GET /api/model — current default model + available models
 app.get('/api/model', async (req, res) => {
