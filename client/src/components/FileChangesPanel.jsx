@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { FileText, Edit3, Terminal, RefreshCw, ChevronDown, ChevronRight } from 'lucide-react';
+import { FileText, Edit3, Terminal, RefreshCw, ChevronDown, ChevronRight, ExternalLink, RotateCcw, Check } from 'lucide-react';
 
 function formatTime(ts) {
   if (!ts) return '';
@@ -12,6 +12,38 @@ function formatTime(ts) {
 
 function ChangeItem({ change }) {
   const [expanded, setExpanded] = useState(false);
+  const [busy, setBusy] = useState(null);
+  const [reverted, setReverted] = useState(false);
+
+  const revert = async (e) => {
+    e.stopPropagation();
+    if (!change.file) return;
+    if (!confirm(`恢复到 HEAD：\n${change.file}\n\n会丢失所有未提交修改，确定？`)) return;
+    setBusy('revert');
+    try {
+      const res = await fetch('/api/file/revert', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ file: change.file }),
+      });
+      const d = await res.json();
+      if (res.ok) setReverted(true);
+      else alert('恢复失败：' + (d.error || res.status));
+    } catch (err) { alert('恢复失败：' + err.message); }
+    setBusy(null);
+  };
+
+  const open = async (e) => {
+    e.stopPropagation();
+    if (!change.file) return;
+    setBusy('open');
+    try {
+      await fetch('/api/file/open', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ file: change.file }),
+      });
+    } catch {}
+    setBusy(null);
+  };
 
   const icon = change.type === 'edit' ? Edit3 : change.type === 'write' ? FileText : Terminal;
   const Icon = icon;
@@ -23,7 +55,7 @@ function ChangeItem({ change }) {
     : change.file;
 
   return (
-    <div className="border border-canvas-deep rounded-lg overflow-hidden animate-fade-up">
+    <div className="group border border-canvas-deep rounded-lg overflow-hidden animate-fade-up">
       <button
         onClick={() => setExpanded(!expanded)}
         className="w-full flex items-center gap-2 px-3 py-2 hover:bg-canvas-warm/60 transition-colors text-left"
@@ -35,6 +67,20 @@ function ChangeItem({ change }) {
         )}
         <Icon size={12} className={change.type === 'bash' ? 'text-warning/70' : 'text-accent/60'} shrink-0 />
         <span className="text-xs text-ink-soft font-mono truncate flex-1">{label}</span>
+        {change.file && (
+          <span className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity shrink-0">
+            <button onClick={open} disabled={busy === 'open'}
+              className="p-1 hover:bg-black/10 rounded" title="在编辑器中打开">
+              <ExternalLink size={11} className="text-ink-muted" />
+            </button>
+            <button onClick={revert} disabled={busy === 'revert' || reverted}
+              className="p-1 hover:bg-error/15 rounded" title={reverted ? '已恢复' : '恢复到 git HEAD'}>
+              {reverted
+                ? <Check size={11} className="text-success" />
+                : <RotateCcw size={11} className={busy === 'revert' ? 'text-ink-faint animate-spin' : 'text-error'} />}
+            </button>
+          </span>
+        )}
         <span className="text-[10px] text-ink-faint font-mono shrink-0">
           {formatTime(change.timestamp)}
         </span>

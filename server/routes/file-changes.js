@@ -1,7 +1,12 @@
 import { Router } from 'express';
 import { parseJsonl } from '../utils/jsonl-parser.js';
-import { join } from 'path';
+import { execFile } from 'child_process';
+import { promisify } from 'util';
+import { join, resolve as pathResolve, dirname } from 'path';
 import { homedir } from 'os';
+import { stat } from 'fs/promises';
+
+const execFileP = promisify(execFile);
 
 const router = Router();
 const PROJECTS_DIR = join(homedir(), '.claude', 'projects');
@@ -84,6 +89,60 @@ router.get('/sessions/:sessionId/file-changes', async (req, res) => {
     const records = await parseJsonl(filePath);
     const changes = extractFileChanges(records);
     res.json(changes);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Make sure callers can't reach outside the user's home with a crafted path.
+function assertSafePath(p) {
+  if (typeof p !== 'string' || !p.startsWith('/')) throw new Error('invalid path');
+  const resolved = pathResolve(p);
+  if (resolved !== p) throw new Error('invalid path');
+  if (!resolved.startsWith(homedir())) throw new Error('refusing to touch path outside $HOME');
+  return resolved;
+}
+
+/**
+ * POST /api/file/revert  { file }
+ * `git checkout HEAD -- <file>` from the file's enclosing repo. Reverts the
+ * file to whatever HEAD has — same semantics a user would type at the shell.
+ */
+router.post('/file/revert', async (req, res) => {
+  try {
+    const file = assertSafePath(req.body?.file);
+    // Find the git root by climbing parents until `.git` appears.
+    let cwd = dirname(file);
+    let gitRoot = null;
+    for (let i = 0; i < 24 && cwd !== '/'; i++) {
+      try {
+        const st = await stat(join(cwd, '.git'));
+        if (st) { gitRoot = cwd; break; }
+      } catch {}
+      cwd = dirname(cwd);
+    }
+    if (!gitRoot) return res.status(400).json({ error: 'file is not inside a git repo' });
+
+    const rel = file.slice(gitRoot.length + 1);
+    await execFileP('git', ['-C', gitRoot, 'checkout', 'HEAD', '--', rel], { timeout: 10000 });
+    res.json({ ok: true, file, gitRoot });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * POST /api/file/open  { file }
+ * Hand off to the OS to open the file in the default editor.
+ */
+router.post('/file/open', async (req, res) => {
+  try {
+    const file = assertSafePath(req.body?.file);
+    const opener = process.platform === 'darwin' ? 'open'
+                 : process.platform === 'win32' ? 'explorer'
+                 : 'xdg-open';
+    await execFileP(opener, [file], { timeout: 5000 }).catch(() => {});
+    res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
