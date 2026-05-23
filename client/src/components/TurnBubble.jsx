@@ -4,7 +4,7 @@ import {
   Wrench, BookOpen, Pencil, Terminal, FileText, Search,
   Globe, Edit3, Loader2
 } from 'lucide-react';
-import { ModelBadge } from './ModelBadge.jsx';
+import { ModelBadge, ProviderAvatar } from './ModelBadge.jsx';
 import { MarkdownRenderer } from './MarkdownRenderer.jsx';
 
 // ─── Tool category config ──────────────────────────────────────
@@ -246,11 +246,9 @@ export function TurnBubble({ turn }) {
   return (
     <div className="group px-6 py-4 animate-fade-up" style={{ animationDuration: '0.25s' }}>
       <div className="max-w-3xl mx-auto flex gap-4">
-        {/* Avatar */}
-        <div className="shrink-0 mt-0.5">
-          <div className="w-7 h-7 rounded-full bg-accent-subtle flex items-center justify-center">
-            <Sparkles size={14} className="text-accent" />
-          </div>
+        {/* Avatar — tinted by the actual provider behind the model */}
+        <div className="mt-0.5">
+          <ProviderAvatar model={turn.model} size={28} />
         </div>
 
         {/* Content */}

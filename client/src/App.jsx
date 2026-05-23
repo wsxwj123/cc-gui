@@ -4,7 +4,7 @@ import { useWebSocket } from './hooks/useWebSocket.js';
 import { MessageBubble } from './components/MessageBubble.jsx';
 import { TurnBubble } from './components/TurnBubble.jsx';
 import { ChatInput } from './components/ChatInput.jsx';
-import { ModelBadge } from './components/ModelBadge.jsx';
+import { ModelBadge, ProviderAvatar } from './components/ModelBadge.jsx';
 import { UsagePanel } from './components/UsagePanel.jsx';
 import { ProcessPanel } from './components/ProcessPanel.jsx';
 import { SettingsPanel } from './components/SettingsPanel.jsx';
@@ -254,6 +254,20 @@ function SessionList() {
   const { sessions, selectedSession, setSelectedSession, fetchMessages, selectedProject } = useStore();
   const [forking, setForking] = useState(null);
 
+  const handleNew = () => {
+    if (!selectedProject) return;
+    // A "draft" session has no sessionId yet; the real one is captured from the
+    // first stream-json system/init event and patched into selectedSession.
+    setSelectedSession({
+      draft: true,
+      sessionId: null,
+      projectHash: selectedProject.hash,
+      projectPath: selectedProject.path,
+      firstPrompt: '新会话',
+    });
+    useStore.setState({ messages: [] });
+  };
+
   const handleFork = async (session) => {
     setForking(session.sessionId);
     try {
@@ -283,6 +297,13 @@ function SessionList() {
           </button>
           <h2 className="text-[11px] font-medium uppercase tracking-widest text-ink-faint font-body">会话</h2>
           <span className="text-[10px] text-ink-ghost font-mono">{sessions.length}</span>
+          <button
+            onClick={handleNew}
+            className="ml-auto btn-accent flex items-center gap-1 px-2 py-1 text-[11px] font-body"
+            title="新建会话"
+          >
+            <Plus size={11} />新建
+          </button>
         </div>
         <p className="text-xs text-ink-muted font-body truncate ml-6">{formatPath(selectedProject?.path)}</p>
       </div>
@@ -364,8 +385,11 @@ function SessionDetail() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          prompt, sessionId: selectedSession?.sessionId,
-          cwd: selectedProject?.path || process.env.HOME, model: currentModel,
+          prompt,
+          // Omit sessionId for a draft so the CLI creates a fresh session.
+          sessionId: selectedSession?.sessionId || undefined,
+          cwd: selectedProject?.path || selectedSession?.projectPath,
+          model: currentModel,
         }),
       });
       const { pid, model } = await res.json();
@@ -389,6 +413,17 @@ function SessionDetail() {
           if (!line.startsWith('data: ')) continue;
           try {
             const event = JSON.parse(line.slice(6));
+            // Capture the new session id when starting from a draft.
+            if (event.type === 'system' && event.subtype === 'init' && event.session_id) {
+              const sel = useStore.getState().selectedSession;
+              if (sel && !sel.sessionId) {
+                useStore.setState({
+                  selectedSession: { ...sel, draft: false, sessionId: event.session_id },
+                });
+                const hash = sel.projectHash;
+                if (hash) setTimeout(() => useStore.getState().fetchSessions(hash), 800);
+              }
+            }
             if (event.type === 'assistant' && event.message?.content) {
               for (const block of event.message.content) {
                 if (block.type === 'text') { accumulatedText += block.text; setStreamingText(accumulatedText); }
@@ -441,8 +476,23 @@ function SessionDetail() {
     if (activeProcRef.current) fetch(`/api/chat/${activeProcRef.current}/stop`, { method: 'POST' });
   }, []);
 
+  // Reset per-session UI state — BUT skip the reset when a draft session gets
+  // promoted to a real one mid-stream (null → uuid transition). Otherwise we'd
+  // wipe the user's just-sent message right after we capture the new session id.
+  const prevSessionIdRef = useRef(selectedSession?.sessionId ?? null);
   useEffect(() => {
-    setChatMessages([]); setStreamingText(''); setStreamingToolCalls([]); setShowFileChanges(false);
+    const prev = prevSessionIdRef.current;
+    const curr = selectedSession?.sessionId ?? null;
+    if (prev !== curr) {
+      const promoted = prev === null && curr !== null;
+      if (!promoted) {
+        setChatMessages([]);
+        setStreamingText('');
+        setStreamingToolCalls([]);
+        setShowFileChanges(false);
+      }
+      prevSessionIdRef.current = curr;
+    }
   }, [selectedSession?.sessionId]);
 
   if (!selectedSession) return <EmptyState />;
@@ -474,7 +524,7 @@ function SessionDetail() {
             </div>
             <div className="flex items-center gap-3 mt-0.5">
               <span className="text-[10px] text-ink-faint font-mono flex items-center gap-1">
-                <Hash size={10} />{selectedSession.sessionId.slice(0, 8)}
+                <Hash size={10} />{selectedSession.sessionId?.slice(0, 8) || '新会话'}
               </span>
               <span className="text-[10px] text-ink-faint font-mono">{messages.length + chatMessages.length} 条消息</span>
               {toolCallCount > 0 && <span className="text-[10px] text-ink-faint font-mono">{toolCallCount} 工具调用</span>}
@@ -513,7 +563,9 @@ function SessionDetail() {
       ) : (
         <div ref={containerRef} onScroll={handleScroll} className="flex-1 overflow-y-auto relative z-10">
           {messages.length === 0 && chatMessages.length === 0 ? (
-            <div className="flex items-center justify-center h-full text-ink-faint text-sm font-body">该会话没有可显示的消息</div>
+            <div className="flex items-center justify-center h-full text-ink-muted text-sm font-body">
+              {selectedSession?.draft ? '开始你的第一条消息 ↓' : '该会话没有可显示的消息'}
+            </div>
           ) : (
             <>
               {messages.map((msg, i) => msg.type === 'turn'
@@ -534,9 +586,7 @@ function SessionDetail() {
               {isStreaming && !streamingText && streamingToolCalls.length === 0 && (
                 <div className="px-6 py-4 animate-fade-in">
                   <div className="max-w-3xl mx-auto flex gap-4">
-                    <div className="w-7 h-7 rounded-full bg-accent-subtle flex items-center justify-center shrink-0">
-                      <RefreshCw size={14} className="text-accent animate-spin" />
-                    </div>
+                    <ProviderAvatar model={streamingModel} size={28} />
                     <div className="flex items-center gap-1.5 pt-1">
                       {[0, 0.2, 0.4].map((d) => (
                         <div key={d} className="w-2 h-2 rounded-full bg-accent/40" style={{ animation: `breathe 1.4s ease-in-out infinite ${d}s` }} />

@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
-import { User, Brain, Copy, Check, Sparkles } from 'lucide-react';
-import { ModelBadge } from './ModelBadge.jsx';
+import { User, Brain, Copy, Check } from 'lucide-react';
+import { ModelBadge, ProviderAvatar } from './ModelBadge.jsx';
 import { ToolCallCard } from './ToolCallCard.jsx';
 import { MarkdownRenderer } from './MarkdownRenderer.jsx';
 
@@ -80,10 +80,8 @@ export function MessageBubble({ message }) {
   return (
     <div className="group px-6 py-4 animate-fade-up" style={{ animationDuration: '0.25s' }}>
       <div className="max-w-3xl mx-auto flex gap-3">
-        <div className="shrink-0 mt-0.5">
-          <div className="w-7 h-7 rounded-full bg-accent-subtle flex items-center justify-center">
-            <Sparkles size={14} className="text-accent" />
-          </div>
+        <div className="mt-0.5">
+          <ProviderAvatar model={message.model} size={28} />
         </div>
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2 mb-1.5">
