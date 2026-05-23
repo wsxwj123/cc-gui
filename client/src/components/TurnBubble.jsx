@@ -244,7 +244,7 @@ export function TurnBubble({ turn }) {
   const isStreaming = !fullText && !fullThinking && !hasToolCalls;
 
   return (
-    <div className="group px-6 py-4 bg-canvas-warm animate-fade-up" style={{ animationDuration: '0.25s' }}>
+    <div className="group px-6 py-4 animate-fade-up" style={{ animationDuration: '0.25s' }}>
       <div className="max-w-3xl mx-auto flex gap-4">
         {/* Avatar */}
         <div className="shrink-0 mt-0.5">

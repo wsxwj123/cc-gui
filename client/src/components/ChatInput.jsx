@@ -122,12 +122,12 @@ export function ChatInput({ onSend, onStop, disabled, isStreaming }) {
   };
 
   return (
-    <div className="border-t border-canvas-deep bg-canvas px-6 py-4">
+    <div className="px-6 py-5">
       <div className="max-w-3xl mx-auto relative">
         {/* Slash command dropdown */}
         {showCommands && (
-          <div className="absolute bottom-full left-0 right-0 mb-2 bg-canvas border border-canvas-deep rounded-lg shadow-lg max-h-72 overflow-y-auto z-30">
-            <div className="px-3 py-1.5 text-[10px] text-ink-faint uppercase tracking-wider font-body border-b border-canvas-deep flex items-center justify-between">
+          <div className="glass-popover absolute bottom-full left-0 right-0 mb-3 max-h-80 overflow-y-auto z-30 animate-glass-rise">
+            <div className="px-3 py-2 text-[10px] text-ink-muted uppercase tracking-wider font-body border-b border-white/20 flex items-center justify-between">
               <span>Slash 命令</span>
               <span className="text-ink-ghost">
                 {filteredCommands.length} 个 · {provider}{!isAnthropic && ' (cc switch)'}
@@ -150,10 +150,10 @@ export function ChatInput({ onSend, onStop, disabled, isStreaming }) {
                   onClick={() => selectCommand(c)}
                   disabled={blocked}
                   title={tip}
-                  className={`w-full text-left px-3 py-2 flex items-center gap-2 transition-colors ${
+                  className={`w-full text-left px-3 py-2.5 flex items-center gap-2 transition-colors ${
                     blocked
                       ? 'opacity-40 cursor-not-allowed'
-                      : i === selectedIndex ? 'bg-accent-subtle/50' : 'hover:bg-canvas-warm'
+                      : i === selectedIndex ? 'bg-accent/12' : 'hover:bg-black/5'
                   }`}
                 >
                   <Icon size={12} className="text-accent shrink-0" />
@@ -183,14 +183,14 @@ export function ChatInput({ onSend, onStop, disabled, isStreaming }) {
               );
             })}
             {filteredCommands.length > 50 && (
-              <div className="px-3 py-1.5 text-[10px] text-ink-ghost text-center font-body">
+              <div className="px-3 py-2 text-[10px] text-ink-faint text-center font-body">
                 还有 {filteredCommands.length - 50} 个命令...
               </div>
             )}
           </div>
         )}
 
-        <div className="chat-composer flex items-end gap-3 bg-canvas-warm border border-canvas-deep rounded-xl px-4 py-3">
+        <div className="chat-composer glass-capsule flex items-end gap-3 px-5 py-3.5">
           <ModelSelector compact />
           <textarea
             ref={textareaRef}
@@ -200,13 +200,13 @@ export function ChatInput({ onSend, onStop, disabled, isStreaming }) {
             placeholder="输入消息... (/ 打开命令, Enter 发送, Shift+Enter 换行)"
             disabled={disabled}
             rows={1}
-            className="flex-1 bg-transparent text-sm text-ink placeholder-ink-faint resize-none focus:outline-none font-body leading-relaxed min-h-[24px] max-h-[200px]"
+            className="flex-1 bg-transparent text-[14px] text-ink placeholder-ink-faint resize-none focus:outline-none font-body leading-relaxed min-h-[24px] max-h-[200px]"
           />
 
           {isStreaming ? (
             <button
               onClick={onStop}
-              className="shrink-0 w-8 h-8 rounded-lg bg-error/10 hover:bg-error/20 flex items-center justify-center transition-colors"
+              className="shrink-0 w-9 h-9 rounded-full bg-error/15 hover:bg-error/25 flex items-center justify-center transition-colors"
               title="停止生成"
             >
               <Square size={14} className="text-error" />
@@ -215,20 +215,20 @@ export function ChatInput({ onSend, onStop, disabled, isStreaming }) {
             <button
               onClick={handleSend}
               disabled={!text.trim() || disabled}
-              className="shrink-0 w-8 h-8 rounded-lg bg-accent hover:bg-accent-hover disabled:bg-canvas-deep disabled:text-ink-ghost flex items-center justify-center transition-colors"
+              className="btn-accent shrink-0 w-9 h-9 rounded-full flex items-center justify-center"
               title="发送"
             >
               {disabled ? (
-                <Loader2 size={14} className="text-ink-faint animate-spin" />
+                <Loader2 size={15} className="text-white/80 animate-spin" />
               ) : (
-                <Send size={14} className="text-white" />
+                <Send size={15} className="text-white -mr-0.5" />
               )}
             </button>
           )}
         </div>
 
-        <p className="text-[10px] text-ink-faint mt-2 text-center font-body">
-          Claude Code GUI · 本地运行 · 数据不离开你的设备
+        <p className="text-[10.5px] text-ink-faint mt-2.5 text-center font-body tracking-wide">
+          本地运行 · 数据不离开设备
         </p>
       </div>
     </div>

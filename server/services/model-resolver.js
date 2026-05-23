@@ -43,9 +43,35 @@ export async function getDefaultModel() {
   return 'claude-sonnet-4-6';
 }
 
+// Infer a tier label from an env-var key or a model id, purely heuristic.
+function inferTier(s) {
+  const u = (s || '').toUpperCase();
+  if (u.includes('OPUS'))   return 'Opus';
+  if (u.includes('SONNET')) return 'Sonnet';
+  if (u.includes('HAIKU'))  return 'Haiku';
+  if (u.includes('FAST') || u.includes('SMALL')) return 'Fast';
+  return null;
+}
+
+// Pretty-name an env-var key for display when no explicit *_NAME is set.
+function envKeyToLabel(key, id) {
+  const stripped = key
+    .replace(/^ANTHROPIC_/, '')
+    .replace(/^DEFAULT_/, '')
+    .replace(/_MODEL$/, '');
+  if (!stripped) return id; // e.g. ANTHROPIC_MODEL → "" → fall back to model id
+  return stripped.toLowerCase().replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
 /**
- * Get available models dynamically from env vars.
- * Returns models from ANTHROPIC_DEFAULT_*_MODEL env vars, plus the current model.
+ * Dynamically enumerate every model the CLI environment exposes:
+ *   - any env/settings key ending in `_MODEL` (covers ANTHROPIC_MODEL,
+ *     ANTHROPIC_DEFAULT_{HAIKU,SONNET,OPUS}_MODEL, ANTHROPIC_SMALL_FAST_MODEL,
+ *     CLAUDE_MODEL, and any user-defined XXX_MODEL)
+ *   - plus the resolved current default (ensures it's always selectable)
+ *   - plus the CLI aliases `sonnet`/`opus`/`haiku` so users can pin to "latest tier"
+ *
+ * No hardcoded model IDs — adapts automatically as cc switch rewrites settings.json.
  */
 export async function getAvailableModels() {
   const settings = await readSettings();
@@ -53,38 +79,52 @@ export async function getAvailableModels() {
   const current = await getDefaultModel();
 
   const models = new Map();
-
-  // From ANTHROPIC_DEFAULT_*_MODEL env vars
-  const tierMap = {
-    ANTHROPIC_DEFAULT_HAIKU_MODEL: 'Haiku',
-    ANTHROPIC_DEFAULT_SONNET_MODEL: 'Sonnet',
-    ANTHROPIC_DEFAULT_OPUS_MODEL: 'Opus',
+  const add = (id, label, tier, source) => {
+    if (!id) return;
+    const cleanId = String(id).replace(/\[.*\]/, '');
+    if (models.has(cleanId)) return;
+    models.set(cleanId, {
+      id: cleanId,
+      name: label || cleanId,
+      tier: tier || inferTier(cleanId) || '',
+      source,
+    });
   };
 
-  for (const [envKey, tier] of Object.entries(tierMap)) {
-    const id = env[envKey];
-    if (id) {
-      const cleanId = id.replace(/\[.*\]/, ''); // Remove [1M] suffix
-      const nameKey = envKey + '_NAME';
-      const displayName = env[nameKey] || cleanId;
-      models.set(cleanId, { id: cleanId, name: displayName, tier });
-    }
+  // Every *_MODEL env key (skip *_MODEL_NAME companions and aliases we expand below)
+  for (const [key, val] of Object.entries(env)) {
+    if (typeof val !== 'string' || !val) continue;
+    if (!/_MODEL$/.test(key)) continue;
+    const nameKey = key + '_NAME';
+    const tier = inferTier(key) || inferTier(val);
+    add(val, env[nameKey] || envKeyToLabel(key, val), tier, key);
   }
 
-  // Ensure current model is in the list
-  if (!models.has(current)) {
-    const cleanCurrent = current.replace(/\[.*\]/, '');
-    models.set(cleanCurrent, { id: cleanCurrent, name: cleanCurrent, tier: '当前' });
+  // CLI aliases — `claude --model sonnet` resolves to latest of that tier server-side
+  add('sonnet', 'Sonnet (alias)', 'Sonnet', 'cli-alias');
+  add('opus',   'Opus (alias)',   'Opus',   'cli-alias');
+  add('haiku',  'Haiku (alias)',  'Haiku',  'cli-alias');
+
+  // Guarantee current model is selectable
+  if (!models.has(current.replace(/\[.*\]/, ''))) {
+    add(current, current, inferTier(current) || 'Current', 'resolved-default');
   }
 
-  // Provider info
+  // Endpoint label
   const baseUrl = env.ANTHROPIC_BASE_URL || '';
   let provider = 'Anthropic';
-  if (baseUrl.includes('mimo')) provider = 'MiMo';
-  else if (baseUrl.includes('openai')) provider = 'OpenAI';
-  else if (baseUrl.includes('amazonaws')) provider = 'AWS Bedrock';
-  else if (baseUrl.includes('googleapis')) provider = 'Google Vertex';
-  else if (baseUrl && !baseUrl.includes('anthropic.com')) provider = new URL(baseUrl).hostname;
+  if (baseUrl) {
+    try {
+      const host = new URL(baseUrl).hostname;
+      if (host.endsWith('anthropic.com')) provider = 'Anthropic';
+      else if (host.includes('mimo')) provider = 'Xiaomi MiMo';
+      else if (host.includes('openrouter')) provider = 'OpenRouter';
+      else if (host.includes('deepseek')) provider = 'DeepSeek';
+      else if (host.includes('amazonaws')) provider = 'AWS Bedrock';
+      else if (host.includes('googleapis')) provider = 'Google Vertex';
+      else provider = host;
+    } catch {}
+  }
 
   return { models: [...models.values()], provider, current };
 }

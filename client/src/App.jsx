@@ -52,7 +52,7 @@ function RightPanel({ panelId, onClose }) {
   const { label, icon: Icon, component: PanelComponent } = PANEL_MAP[panelId];
 
   return (
-    <div className="w-[320px] border-l border-canvas-deep bg-canvas shrink-0 flex flex-col animate-fade-in">
+    <div className="glass-thick w-[340px] shrink-0 flex flex-col m-3 ml-0 rounded-2xl overflow-hidden animate-glass-rise">
       <div className="flex items-center justify-between px-4 py-3 border-b border-canvas-deep shrink-0">
         <div className="flex items-center gap-2">
           <Icon size={14} className="text-accent" />
@@ -286,13 +286,13 @@ function SessionList() {
 // ─── Empty State ───────────────────────────────────────────────
 function EmptyState() {
   return (
-    <div className="flex-1 flex items-center justify-center bg-canvas grain relative">
-      <div className="text-center animate-fade-up relative z-10">
-        <div className="w-16 h-16 rounded-2xl bg-canvas-warm border border-canvas-deep flex items-center justify-center mx-auto mb-5">
-          <Layers size={28} className="text-ink-ghost" />
+    <div className="flex-1 flex items-center justify-center glass-base m-3 rounded-2xl relative animate-glass-rise">
+      <div className="text-center relative z-10">
+        <div className="w-20 h-20 rounded-3xl glass-thin flex items-center justify-center mx-auto mb-6">
+          <Layers size={32} className="text-accent" />
         </div>
-        <h3 className="text-lg font-display font-medium text-ink-soft mb-1">选择一个会话</h3>
-        <p className="text-sm text-ink-faint font-body">从左侧项目列表开始浏览历史记录</p>
+        <h3 className="text-[22px] font-display font-semibold text-ink mb-1.5 tracking-tight">选择一个会话</h3>
+        <p className="text-[13px] text-ink-muted font-body">从左侧项目列表开始浏览历史记录</p>
       </div>
     </div>
   );
@@ -441,8 +441,8 @@ function SessionDetail() {
   const models = [...new Set(allMessages.filter((m) => m.model).map((m) => m.model))];
 
   return (
-    <div className="flex-1 flex flex-col min-h-0 bg-canvas grain relative">
-      <div className="shrink-0 px-6 py-3 border-b border-canvas-deep bg-canvas/80 backdrop-blur-sm relative z-10">
+    <div className="flex-1 flex flex-col min-h-0 glass-base relative">
+      <div className="glass-bar shrink-0 px-6 py-3 relative z-10">
         <div className="max-w-3xl mx-auto flex items-center justify-between">
           <div className="min-w-0">
             <div className="text-sm text-ink font-display font-medium truncate">
@@ -508,7 +508,7 @@ function SessionDetail() {
                 }} />
               )}
               {isStreaming && !streamingText && streamingToolCalls.length === 0 && (
-                <div className="px-6 py-4 bg-canvas-warm animate-fade-in">
+                <div className="px-6 py-4 animate-fade-in">
                   <div className="max-w-3xl mx-auto flex gap-4">
                     <div className="w-7 h-7 rounded-full bg-accent-subtle flex items-center justify-center shrink-0">
                       <RefreshCw size={14} className="text-accent animate-spin" />
@@ -576,7 +576,7 @@ export function ModelSelector({ compact = false }) {
       {open && (
         <>
           <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
-          <div className="absolute left-0 bottom-full mb-1 w-72 bg-canvas border border-canvas-deep rounded-lg shadow-lg z-50 py-1 animate-fade-in">
+          <div className="glass-popover absolute left-0 bottom-full mb-2 w-72 z-50 py-1 animate-glass-rise">
             <div className="px-3 py-1.5 text-[10px] text-ink-faint uppercase tracking-wider font-body flex items-center justify-between">
               <span>选择模型</span>
               {provider && <span className="text-ink-ghost normal-case">{provider}</span>}
@@ -620,32 +620,32 @@ export default function App() {
   const [rightPanel, setRightPanel] = useState(null);
 
   return (
-    <div className="h-screen flex flex-col bg-canvas">
-      {/* Top bar */}
-      <header className="h-11 px-4 flex items-center justify-between border-b border-canvas-deep bg-canvas shrink-0 relative z-20">
+    <div className="h-screen flex flex-col">
+      {/* Top bar — glass */}
+      <header className="glass-bar h-12 px-4 flex items-center justify-between shrink-0 relative z-20">
         <div className="flex items-center gap-2">
-          <button onClick={toggleSidebar} className="p-1.5 hover:bg-canvas-warm rounded-lg transition-colors" title={sidebarCollapsed ? '展开' : '收起'}>
-            {sidebarCollapsed ? <ChevronRight size={15} className="text-ink-faint" /> : <ChevronLeft size={15} className="text-ink-faint" />}
+          <button onClick={toggleSidebar} className="btn-glass p-1.5 transition-colors" title={sidebarCollapsed ? '展开' : '收起'}>
+            {sidebarCollapsed ? <ChevronRight size={15} className="text-ink-muted" /> : <ChevronLeft size={15} className="text-ink-muted" />}
           </button>
-          <span className="text-sm font-display font-semibold text-ink tracking-tight">Claude Code</span>
+          <span className="text-[15px] font-display font-semibold text-ink tracking-tight">Claude Code</span>
           {selectedProject && (
-            <span className="text-[10px] text-ink-faint font-mono bg-canvas-warm px-1.5 py-0.5 rounded truncate max-w-[180px]">
+            <span className="chip font-mono truncate max-w-[200px]">
               {formatPathShort(selectedProject.path)}
             </span>
           )}
           {selectedSession && (
             <>
               <span className="text-ink-ghost">/</span>
-              <span className="text-[10px] text-ink-muted font-body truncate max-w-[200px]">
-                {selectedSession.firstPrompt?.slice(0, 30) || selectedSession.sessionId.slice(0, 8)}
+              <span className="text-[11px] text-ink-muted font-body truncate max-w-[220px]">
+                {selectedSession.firstPrompt?.slice(0, 36) || selectedSession.sessionId.slice(0, 8)}
               </span>
             </>
           )}
         </div>
-        <div className="flex items-center gap-0.5">
+        <div className="flex items-center gap-1">
           {Object.entries(PANEL_MAP).map(([id, { icon: Icon, label }]) => (
             <button key={id} onClick={() => setRightPanel(rightPanel === id ? null : id)}
-              className={`p-2 rounded-lg transition-colors ${rightPanel === id ? 'bg-accent-subtle text-accent' : 'text-ink-faint hover:text-ink-muted hover:bg-canvas-warm'}`}
+              className={`p-2 rounded-lg transition-all ${rightPanel === id ? 'bg-accent-subtle text-accent' : 'text-ink-muted hover:text-ink hover:bg-black/5'}`}
               title={label}>
               <Icon size={15} />
             </button>
@@ -654,17 +654,17 @@ export default function App() {
       </header>
 
       {/* Main content */}
-      <div className="flex-1 flex min-h-0">
+      <div className="flex-1 flex min-h-0 gap-0 p-0">
         {!sidebarCollapsed && (
-          <div className="w-[260px] border-r border-canvas-deep bg-canvas shrink-0 flex flex-col">
+          <aside className="glass-thick w-[268px] shrink-0 flex flex-col m-3 mr-0 rounded-2xl overflow-hidden animate-glass-rise">
             <div className="flex-1 min-h-0 overflow-hidden">
               {selectedProject ? <SessionList /> : <ProjectList />}
             </div>
-          </div>
+          </aside>
         )}
-        <div className="flex-1 flex flex-col min-w-0 relative">
+        <main className="flex-1 flex flex-col min-w-0 relative m-3 rounded-2xl overflow-hidden">
           <SessionDetail />
-        </div>
+        </main>
         {rightPanel && <RightPanel panelId={rightPanel} onClose={() => setRightPanel(null)} />}
       </div>
     </div>

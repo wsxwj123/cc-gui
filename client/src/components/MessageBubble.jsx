@@ -78,7 +78,7 @@ export function MessageBubble({ message }) {
   }
 
   return (
-    <div className="group px-6 py-4 bg-canvas-warm animate-fade-up" style={{ animationDuration: '0.25s' }}>
+    <div className="group px-6 py-4 animate-fade-up" style={{ animationDuration: '0.25s' }}>
       <div className="max-w-3xl mx-auto flex gap-3">
         <div className="shrink-0 mt-0.5">
           <div className="w-7 h-7 rounded-full bg-accent-subtle flex items-center justify-center">
