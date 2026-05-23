@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import {
-  Sparkles, Brain, Copy, Check, ChevronDown, ChevronRight,
+  Brain, Copy, Check, ChevronDown, ChevronRight,
   Wrench, BookOpen, Pencil, Terminal, FileText, Search,
   Globe, Edit3, Loader2
 } from 'lucide-react';
