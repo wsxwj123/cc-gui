@@ -1,6 +1,52 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Send, Loader2, Square, Terminal, Puzzle, Wrench } from 'lucide-react';
+import { Send, Loader2, Square, Terminal, Puzzle, Wrench, Gauge, ChevronDown } from 'lucide-react';
 import { ModelSelector } from '../App.jsx';
+import { useStore } from '../stores/sessionStore.js';
+
+const EFFORT_LEVELS = [
+  { id: '',       label: '默认', desc: '让 CLI 自己决定' },
+  { id: 'low',    label: '低',   desc: '快速、便宜' },
+  { id: 'medium', label: '中',   desc: '平衡' },
+  { id: 'high',   label: '高',   desc: '深思' },
+  { id: 'xhigh',  label: '极高', desc: '复杂推理' },
+  { id: 'max',    label: '极限', desc: '最大努力' },
+];
+
+function EffortSelector() {
+  const effort = useStore((s) => s.effort);
+  const setEffort = useStore((s) => s.setEffort);
+  const [open, setOpen] = useState(false);
+  const current = EFFORT_LEVELS.find((e) => e.id === effort) || EFFORT_LEVELS[0];
+  return (
+    <div className="relative">
+      <button onClick={() => setOpen(!open)}
+        className="flex items-center gap-1 px-2 py-1 rounded-md hover:bg-black/5 transition-colors"
+        title={`Effort: ${current.label}`}>
+        <Gauge size={12} className="text-ink-muted" />
+        <span className="text-[11px] font-body text-ink-muted">{current.label}</span>
+        <ChevronDown size={10} className="text-ink-faint" />
+      </button>
+      {open && (
+        <>
+          <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
+          <div className="glass-popover absolute left-0 bottom-full mb-2 w-44 z-50 py-1 animate-glass-rise">
+            <div className="px-3 py-1.5 text-[10px] text-ink-faint uppercase tracking-wider font-body">推理力度 (--effort)</div>
+            {EFFORT_LEVELS.map((e) => (
+              <button key={e.id || 'default'} onClick={() => { setEffort(e.id); setOpen(false); }}
+                className={`w-full text-left px-3 py-1.5 hover:bg-black/5 flex items-center justify-between ${effort === e.id ? 'bg-accent/12' : ''}`}>
+                <div>
+                  <div className="text-xs font-medium text-ink font-body">{e.label}</div>
+                  <div className="text-[10px] text-ink-faint font-body">{e.desc}</div>
+                </div>
+                {effort === e.id && <div className="w-1.5 h-1.5 rounded-full bg-accent" />}
+              </button>
+            ))}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
 
 const TYPE_ICONS = {
   builtin: Terminal,
@@ -190,8 +236,9 @@ export function ChatInput({ onSend, onStop, disabled, isStreaming }) {
           </div>
         )}
 
-        <div className="chat-composer glass-capsule flex items-end gap-3 px-5 py-3.5">
+        <div className="chat-composer glass-capsule flex items-end gap-2 px-5 py-3.5">
           <ModelSelector compact />
+          <EffortSelector />
           <textarea
             ref={textareaRef}
             value={text}

@@ -7,6 +7,10 @@ export const useStore = create((set, get) => ({
   messages: [],
   currentModel: null,
   availableModels: [],
+  // CLI session knobs. Persisted to localStorage so they survive reload.
+  effort: typeof localStorage !== 'undefined' ? (localStorage.getItem('cgui-effort') || '') : '',
+  addDirs: typeof localStorage !== 'undefined'
+    ? JSON.parse(localStorage.getItem('cgui-add-dirs') || '[]') : [],
 
   // UI state
   selectedProject: null,
@@ -21,6 +25,8 @@ export const useStore = create((set, get) => ({
   setSessions: (sessions) => set({ sessions }),
   setMessages: (messages) => set({ messages }),
   setCurrentModel: (model) => set({ currentModel: model }),
+  setEffort: (e) => { set({ effort: e }); try { localStorage.setItem('cgui-effort', e); } catch {} },
+  setAddDirs: (dirs) => { set({ addDirs: dirs }); try { localStorage.setItem('cgui-add-dirs', JSON.stringify(dirs)); } catch {} },
   setSelectedProject: (project) => set({ selectedProject: project, selectedSession: null, messages: [] }),
   setSelectedSession: (session) => set({ selectedSession: session }),
   setLoading: (loading) => set({ loading }),

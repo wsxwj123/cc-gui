@@ -7,8 +7,10 @@ const router = Router();
 // Each entry: { proc, earlyLines: string[], earlyTail: string, exitCode: number|null, attached: boolean }
 const activeProcesses = new Map();
 
+const VALID_EFFORTS = new Set(['low', 'medium', 'high', 'xhigh', 'max']);
+
 router.post('/chat', async (req, res) => {
-  const { prompt, sessionId, cwd, model: requestedModel } = req.body;
+  const { prompt, sessionId, cwd, model: requestedModel, effort, addDirs } = req.body;
   if (!prompt) return res.status(400).json({ error: 'prompt is required' });
 
   const model = requestedModel || await getDefaultModel();
@@ -16,6 +18,12 @@ router.post('/chat', async (req, res) => {
 
   const args = ['-p', prompt, '--output-format', 'stream-json', '--model', model];
   if (sessionId) args.push('--resume', sessionId);
+  if (effort && VALID_EFFORTS.has(effort)) args.push('--effort', effort);
+  if (Array.isArray(addDirs)) {
+    for (const dir of addDirs) {
+      if (typeof dir === 'string' && dir.startsWith('/')) args.push('--add-dir', dir);
+    }
+  }
 
   const proc = spawn('claude', args, {
     cwd: workingDir,

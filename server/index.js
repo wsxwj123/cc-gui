@@ -13,6 +13,7 @@ import usageRoutes from './routes/usage.js';
 import mcpRoutes from './routes/mcp.js';
 import forkRoutes from './routes/fork.js';
 import fileChangesRoutes from './routes/file-changes.js';
+import searchRoutes from './routes/search.js';
 import { setupFileWatcher } from './services/file-watcher.js';
 import { getDefaultModel, getAvailableModels, setDefaultModel } from './services/model-resolver.js';
 import { readdir, readFile } from 'fs/promises';
@@ -34,6 +35,7 @@ app.use('/api', usageRoutes);
 app.use('/api', mcpRoutes);
 app.use('/api', forkRoutes);
 app.use('/api', fileChangesRoutes);
+app.use('/api', searchRoutes);
 
 // GET /api/model — current default model + available models
 app.get('/api/model', async (req, res) => {

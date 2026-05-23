@@ -14,8 +14,40 @@ import {
   FolderOpen, MessageSquare, ChevronLeft, ChevronRight, ChevronDown,
   Search, Hash, Layers, BarChart3, ArrowLeft, Plus,
   RefreshCw, Activity, Settings, Server, GitBranch, FileDiff, Check, Wrench, X,
-  Sun, Moon, Monitor,
+  Sun, Moon, Monitor, Play,
 } from 'lucide-react';
+
+// ── Continue most recent session (mirrors `claude --continue`) ────
+function ContinueButton() {
+  const { projects, selectedProject } = useStore();
+  const handle = async () => {
+    const params = selectedProject ? `?projectHash=${encodeURIComponent(selectedProject.hash)}` : '';
+    try {
+      const res = await fetch(`/api/recent-session${params}`);
+      if (!res.ok) return;
+      const { projectHash, sessionId } = await res.json();
+      const project = (selectedProject && selectedProject.hash === projectHash)
+        ? selectedProject
+        : projects.find((p) => p.hash === projectHash);
+      if (project) {
+        useStore.getState().setSelectedProject(project);
+        await useStore.getState().fetchSessions(project.hash);
+        const target = useStore.getState().sessions.find((s) => s.sessionId === sessionId);
+        if (target) {
+          useStore.getState().setSelectedSession(target);
+          useStore.getState().fetchMessages(target.sessionId, target.projectHash);
+        }
+      }
+    } catch {}
+  };
+  return (
+    <button onClick={handle}
+      className="p-2 rounded-lg text-ink-muted hover:text-ink hover:bg-black/5 transition-colors"
+      title="继续最近的会话（claude --continue）">
+      <Play size={14} />
+    </button>
+  );
+}
 
 // ── Theme toggle (cycles auto → light → dark) ─────────────────────
 function ThemeToggle() {
@@ -93,6 +125,51 @@ function RightPanel({ panelId, onClose }) {
   );
 }
 
+// ─── Global search results (full-text across all session jsonl) ─
+function GlobalSearchResults({ q, onPick }) {
+  const [hits, setHits] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [truncated, setTruncated] = useState(false);
+
+  useEffect(() => {
+    if (!q || q.length < 2) { setHits([]); return; }
+    setLoading(true);
+    const ctl = new AbortController();
+    // Debounce so we don't spam the disk on every keystroke
+    const id = setTimeout(() => {
+      fetch(`/api/search?q=${encodeURIComponent(q)}`, { signal: ctl.signal })
+        .then((r) => r.json())
+        .then((d) => { setHits(d.hits || []); setTruncated(!!d.truncated); })
+        .catch(() => {})
+        .finally(() => setLoading(false));
+    }, 220);
+    return () => { clearTimeout(id); ctl.abort(); };
+  }, [q]);
+
+  if (q.length < 2) return null;
+  return (
+    <div className="px-2 stagger">
+      <div className="px-2 py-1.5 text-[10px] text-ink-faint uppercase tracking-widest font-body flex items-center justify-between">
+        <span>消息匹配</span>
+        <span className="text-ink-ghost font-mono">{loading ? '…' : hits.length}{truncated ? '+' : ''}</span>
+      </div>
+      {hits.map((h, i) => (
+        <button key={i} onClick={() => onPick(h)}
+          className="sidebar-item w-full text-left px-3 py-2 rounded-lg mb-0.5 animate-slide-in">
+          <div className="flex items-center gap-2 mb-0.5">
+            <span className={`chip ${h.role === 'user' ? 'chip-accent' : ''}`}>{h.role}</span>
+            <span className="text-[10px] text-ink-ghost font-mono truncate">{h.sessionId.slice(0, 8)}</span>
+          </div>
+          <p className="text-[12px] text-ink-soft font-body leading-snug line-clamp-2">{h.snippet}</p>
+        </button>
+      ))}
+      {!loading && hits.length === 0 && (
+        <p className="px-3 py-4 text-[12px] text-ink-faint text-center font-body">没有匹配</p>
+      )}
+    </div>
+  );
+}
+
 // ─── Project List ──────────────────────────────────────────────
 function ProjectList() {
   const { projects, selectedProject, setSelectedProject, fetchProjects, fetchSessions, searchQuery, setSearchQuery } = useStore();
@@ -102,6 +179,22 @@ function ProjectList() {
   const filtered = projects.filter((p) =>
     p.path.toLowerCase().includes(searchQuery.toLowerCase())
   );
+
+  const handlePickHit = async (hit) => {
+    const project = projects.find((p) => p.hash === hit.projectHash);
+    if (project) {
+      setSelectedProject(project);
+      await fetchSessions(project.hash);
+      // Then select the matching session
+      const list = useStore.getState().sessions;
+      const target = list.find((s) => s.sessionId === hit.sessionId);
+      if (target) {
+        useStore.getState().setSelectedSession(target);
+        useStore.getState().fetchMessages(target.sessionId, target.projectHash);
+      }
+    }
+    setSearchQuery('');
+  };
 
   return (
     <div className="flex flex-col h-full">
@@ -131,7 +224,7 @@ function ProjectList() {
           <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-ghost" />
           <input
             type="text"
-            placeholder="搜索..."
+            placeholder="搜索项目 / 消息 (≥2 字符)..."
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
             className="w-full bg-canvas border border-canvas-sunken rounded-lg pl-8 pr-3 py-1.5 text-xs text-ink placeholder-ink-ghost focus:outline-none focus:border-accent/40 font-body"
@@ -139,6 +232,9 @@ function ProjectList() {
         </div>
       </div>
       <div className="flex-1 overflow-y-auto px-2 stagger">
+        {searchQuery.length >= 2 && (
+          <GlobalSearchResults q={searchQuery} onPick={handlePickHit} />
+        )}
         {filtered.map((project) => (
           <button
             key={project.hash}
@@ -380,7 +476,7 @@ function SessionDetail() {
     }]);
 
     try {
-      const currentModel = useStore.getState().currentModel;
+      const { currentModel, effort, addDirs } = useStore.getState();
       const res = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -390,6 +486,8 @@ function SessionDetail() {
           sessionId: selectedSession?.sessionId || undefined,
           cwd: selectedProject?.path || selectedSession?.projectPath,
           model: currentModel,
+          effort: effort || undefined,
+          addDirs: addDirs && addDirs.length ? addDirs : undefined,
         }),
       });
       const { pid, model } = await res.json();
@@ -725,6 +823,7 @@ export default function App() {
             </button>
           ))}
           <div className="w-px h-4 bg-ink-ghost/30 mx-1" />
+          <ContinueButton />
           <ThemeToggle />
         </div>
       </header>
