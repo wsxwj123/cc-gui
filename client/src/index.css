@@ -52,39 +52,43 @@
   --radius-2xl: 28px;
 }
 
-@media (prefers-color-scheme: dark) {
-  @theme {
-    --color-canvas: #0C0E14;
-    --color-canvas-warm: #11131A;
-    --color-canvas-deep: #181A22;
-    --color-canvas-sunken: #060810;
+/* Dark tokens — packed into a mixin selector so they can be triggered by
+ * (a) explicit user choice via [data-theme="dark"] on <html>, or
+ * (b) system preference when no user choice has been made.
+ * Light is ALWAYS the default; dark only kicks in if explicitly chosen or
+ * if data-theme="auto" + system-dark. */
+:root[data-theme="dark"],
+:root[data-theme="auto"]:where([data-theme-system="dark"]) {
+  --color-canvas: #1C1E26;
+  --color-canvas-warm: #232530;
+  --color-canvas-deep: #2A2D38;
+  --color-canvas-sunken: #14161C;
 
-    --color-ink: #F5F5F7;
-    --color-ink-soft: #D8D9DE;
-    --color-ink-muted: #9A9CA3;
-    --color-ink-faint: #5E6068;
-    --color-ink-ghost: #3A3C44;
+  --color-ink: #F5F5F7;
+  --color-ink-soft: #D8D9DE;
+  --color-ink-muted: #9A9CA3;
+  --color-ink-faint: #5E6068;
+  --color-ink-ghost: #3A3C44;
 
-    --color-accent: #0A84FF;
-    --color-accent-hover: #2A95FF;
-    --color-accent-subtle: rgba(10, 132, 255, 0.18);
-    --color-accent-muted: rgba(10, 132, 255, 0.32);
+  --color-accent: #0A84FF;
+  --color-accent-hover: #2A95FF;
+  --color-accent-subtle: rgba(10, 132, 255, 0.18);
+  --color-accent-muted: rgba(10, 132, 255, 0.32);
 
-    --color-success: #32D74B;
-    --color-error: #FF453A;
-    --color-error-subtle: rgba(255, 69, 58, 0.16);
-    --color-warning: #FF9F0A;
+  --color-success: #32D74B;
+  --color-error: #FF453A;
+  --color-error-subtle: rgba(255, 69, 58, 0.16);
+  --color-warning: #FF9F0A;
 
-    --glass-base-bg: rgba(28, 28, 32, 0.55);
-    --glass-thick-bg: rgba(28, 28, 32, 0.78);
-    --glass-thin-bg: rgba(50, 50, 58, 0.35);
-    --glass-bar-bg: rgba(20, 20, 24, 0.68);
-    --glass-specular: rgba(255, 255, 255, 0.08);
-    --glass-shade: rgba(0, 0, 0, 0.32);
-    --glass-edge: rgba(255, 255, 255, 0.10);
-    --glass-edge-outer: rgba(0, 0, 0, 0.5);
-    --glass-shadow: 0 1px 1px rgba(0, 0, 0, 0.4), 0 18px 50px -16px rgba(0, 0, 0, 0.55);
-  }
+  --glass-base-bg: rgba(40, 42, 50, 0.72);
+  --glass-thick-bg: rgba(40, 42, 50, 0.88);
+  --glass-thin-bg: rgba(60, 62, 70, 0.55);
+  --glass-bar-bg: rgba(30, 32, 38, 0.82);
+  --glass-specular: rgba(255, 255, 255, 0.08);
+  --glass-shade: rgba(0, 0, 0, 0.28);
+  --glass-edge: rgba(255, 255, 255, 0.10);
+  --glass-edge-outer: rgba(0, 0, 0, 0.5);
+  --glass-shadow: 0 1px 1px rgba(0, 0, 0, 0.4), 0 14px 40px -16px rgba(0, 0, 0, 0.55);
 }
 
 /* ════════════════════════════════════════════════════════════════
@@ -99,24 +103,22 @@ body {
   margin: 0;
   overflow: hidden;
   height: 100vh;
-  /* The canvas is a colored field; ALL glass surfaces refract this. */
+  /* Light: subtle cool-warm wash. Kept faint so it doesn't overwhelm content
+     and so layers above don't need expensive blur to feel airy. */
   background-color: var(--color-canvas);
   background-image:
-    radial-gradient(ellipse 60% 50% at 18% 12%, rgba(135, 170, 255, 0.30), transparent 60%),
-    radial-gradient(ellipse 55% 45% at 88% 18%, rgba(255, 195, 145, 0.22), transparent 60%),
-    radial-gradient(ellipse 70% 60% at 72% 92%, rgba(190, 140, 255, 0.22), transparent 60%),
-    radial-gradient(ellipse 50% 50% at 8% 88%, rgba(120, 220, 200, 0.18), transparent 60%);
+    radial-gradient(ellipse 60% 50% at 18% 12%, rgba(135, 170, 255, 0.18), transparent 62%),
+    radial-gradient(ellipse 55% 45% at 88% 18%, rgba(255, 195, 145, 0.14), transparent 62%),
+    radial-gradient(ellipse 70% 60% at 72% 92%, rgba(190, 140, 255, 0.14), transparent 62%);
   background-attachment: fixed;
 }
 
-@media (prefers-color-scheme: dark) {
-  body {
-    background-image:
-      radial-gradient(ellipse 60% 50% at 18% 12%, rgba(40, 80, 200, 0.32), transparent 62%),
-      radial-gradient(ellipse 55% 45% at 88% 18%, rgba(150, 60, 200, 0.26), transparent 62%),
-      radial-gradient(ellipse 70% 60% at 72% 92%, rgba(180, 60, 140, 0.22), transparent 62%),
-      radial-gradient(ellipse 50% 50% at 8% 88%, rgba(40, 180, 200, 0.18), transparent 62%);
-  }
+:root[data-theme="dark"] body,
+:root[data-theme="auto"]:where([data-theme-system="dark"]) body {
+  background-image:
+    radial-gradient(ellipse 60% 50% at 18% 12%, rgba(60, 110, 220, 0.22), transparent 62%),
+    radial-gradient(ellipse 55% 45% at 88% 18%, rgba(180, 80, 220, 0.18), transparent 62%),
+    radial-gradient(ellipse 70% 60% at 72% 92%, rgba(40, 180, 200, 0.14), transparent 62%);
 }
 
 #root { height: 100vh; }
@@ -137,18 +139,28 @@ body {
    Use as utility classes; each one already includes blur + tint +
    specular highlight + edge shadow + macro drop shadow.
    ════════════════════════════════════════════════════════════════ */
+/* Performance note: backdrop-filter is the single most expensive CSS prop
+ * available; macOS Safari is fast, Chrome/Blink struggles when many layers
+ * stack OR when the layer is a long scroll container. Strategy:
+ *   - Reserve blur ONLY for occasional/short surfaces (chrome bars, popovers,
+ *     chat capsule). Use solid translucent fills for big scroll regions
+ *     (sidebar list, main chat area, message bubbles).
+ *   - Promote glass layers with `transform: translateZ(0)` so the compositor
+ *     keeps them on their own GPU texture and doesn't repaint on every scroll.
+ *   - Keep blur radii small (≤ 24px) and drop saturate boost. */
 .glass-base,
 .glass-thick,
 .glass-thin,
-.glass-bar {
+.glass-bar,
+.glass-capsule,
+.glass-popover {
   position: relative;
   isolation: isolate;
 }
 
+/* SOLID translucent — no backdrop-filter. Used for big scroll containers. */
 .glass-base {
   background: var(--glass-base-bg);
-  -webkit-backdrop-filter: blur(40px) saturate(180%);
-  backdrop-filter: blur(40px) saturate(180%);
   border: 0.5px solid var(--glass-edge);
   box-shadow:
     inset 0 1px 0 var(--glass-specular),
@@ -158,58 +170,56 @@ body {
 
 .glass-thick {
   background: var(--glass-thick-bg);
-  -webkit-backdrop-filter: blur(60px) saturate(180%);
-  backdrop-filter: blur(60px) saturate(180%);
   border: 0.5px solid var(--glass-edge);
   box-shadow:
     inset 0 1px 0 var(--glass-specular),
     inset 0 -1px 0 var(--glass-shade),
-    0 2px 4px rgba(0, 0, 0, 0.06),
-    0 24px 70px -20px rgba(20, 30, 60, 0.30);
+    0 2px 4px rgba(0, 0, 0, 0.05),
+    0 12px 32px -12px rgba(20, 30, 60, 0.18);
 }
 
 .glass-thin {
   background: var(--glass-thin-bg);
-  -webkit-backdrop-filter: blur(28px) saturate(170%);
-  backdrop-filter: blur(28px) saturate(170%);
   border: 0.5px solid var(--glass-edge);
   box-shadow:
     inset 0 1px 0 var(--glass-specular),
     inset 0 -1px 0 var(--glass-shade);
 }
 
+/* CHEAP BLUR — only on small chrome surfaces. */
 .glass-bar {
   background: var(--glass-bar-bg);
-  -webkit-backdrop-filter: blur(44px) saturate(180%);
-  backdrop-filter: blur(44px) saturate(180%);
+  -webkit-backdrop-filter: blur(18px);
+  backdrop-filter: blur(18px);
   border-bottom: 0.5px solid var(--glass-edge-outer);
   box-shadow: inset 0 1px 0 var(--glass-specular);
+  transform: translateZ(0);
 }
 
-/* Glass capsule — for chat composer, pills */
 .glass-capsule {
   background: var(--glass-thick-bg);
-  -webkit-backdrop-filter: blur(36px) saturate(180%);
-  backdrop-filter: blur(36px) saturate(180%);
+  -webkit-backdrop-filter: blur(16px);
+  backdrop-filter: blur(16px);
   border: 0.5px solid var(--glass-edge);
   border-radius: 9999px;
   box-shadow:
     inset 0 1px 0 var(--glass-specular),
     inset 0 -1px 0 var(--glass-shade),
-    0 6px 22px -8px rgba(20, 30, 60, 0.18);
+    0 4px 14px -6px rgba(20, 30, 60, 0.14);
+  transform: translateZ(0);
 }
 
-/* Pop-up surface — dropdowns, menus, palettes */
 .glass-popover {
   background: var(--glass-thick-bg);
-  -webkit-backdrop-filter: blur(50px) saturate(180%);
-  backdrop-filter: blur(50px) saturate(180%);
+  -webkit-backdrop-filter: blur(20px);
+  backdrop-filter: blur(20px);
   border: 0.5px solid var(--glass-edge);
   border-radius: var(--radius-lg);
   box-shadow:
     inset 0 1px 0 var(--glass-specular),
     0 4px 12px rgba(0, 0, 0, 0.08),
-    0 28px 80px -16px rgba(20, 30, 60, 0.32);
+    0 18px 50px -14px rgba(20, 30, 60, 0.24);
+  transform: translateZ(0);
 }
 
 /* ── Typography helpers ──────────────────────────────────────── */
@@ -323,16 +333,16 @@ body {
 }
 
 .assistant-bubble {
+  /* No backdrop-filter — assistant bubbles can repeat 100x in a long chat.
+     A solid translucent fill gives the same visual rhythm at 1/100 the cost. */
   background: var(--glass-base-bg);
-  -webkit-backdrop-filter: blur(36px) saturate(180%);
-  backdrop-filter: blur(36px) saturate(180%);
   border: 0.5px solid var(--glass-edge);
   border-radius: 22px;
   box-shadow:
     inset 0 1px 0 var(--glass-specular),
     inset 0 -1px 0 var(--glass-shade),
     0 1px 2px rgba(0, 0, 0, 0.05),
-    0 18px 48px -18px rgba(20, 30, 60, 0.25);
+    0 8px 24px -10px rgba(20, 30, 60, 0.16);
 }
 
 /* ════════════════════════════════════════════════════════════════
@@ -394,8 +404,6 @@ body {
 /* ── Buttons ─────────────────────────────────────────────────── */
 .btn-glass {
   background: var(--glass-thin-bg);
-  -webkit-backdrop-filter: blur(20px) saturate(170%);
-  backdrop-filter: blur(20px) saturate(170%);
   border: 0.5px solid var(--glass-edge);
   border-radius: var(--radius-md);
   box-shadow: inset 0 1px 0 var(--glass-specular);

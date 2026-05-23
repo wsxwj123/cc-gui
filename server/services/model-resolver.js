@@ -58,7 +58,8 @@ function envKeyToLabel(key, id) {
   const stripped = key
     .replace(/^ANTHROPIC_/, '')
     .replace(/^DEFAULT_/, '')
-    .replace(/_MODEL$/, '');
+    .replace(/_MODEL$/, '')
+    .replace(/^MODEL$/, '');
   if (!stripped) return id; // e.g. ANTHROPIC_MODEL → "" → fall back to model id
   return stripped.toLowerCase().replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
 }
@@ -124,6 +125,18 @@ export async function getAvailableModels() {
       else if (host.includes('googleapis')) provider = 'Google Vertex';
       else provider = host;
     } catch {}
+  }
+
+  // For Anthropic-official: when the user is on the subscription auth (no env-defined
+  // model ids), supplement with the latest known Anthropic model IDs. Third-party
+  // providers don't need this — their env vars carry their own model list.
+  if (provider === 'Anthropic') {
+    const ANTHROPIC_KNOWN = [
+      { id: 'claude-opus-4-7',           name: 'Claude Opus 4.7',  tier: 'Opus' },
+      { id: 'claude-sonnet-4-6',         name: 'Claude Sonnet 4.6', tier: 'Sonnet' },
+      { id: 'claude-haiku-4-5-20251001', name: 'Claude Haiku 4.5',  tier: 'Haiku' },
+    ];
+    for (const m of ANTHROPIC_KNOWN) add(m.id, m.name, m.tier, 'anthropic-catalog');
   }
 
   return { models: [...models.values()], provider, current };

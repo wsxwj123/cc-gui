@@ -13,8 +13,32 @@ import { FileChangesPanel } from './components/FileChangesPanel.jsx';
 import {
   FolderOpen, MessageSquare, ChevronLeft, ChevronRight, ChevronDown,
   Search, Hash, Layers, BarChart3, ArrowLeft, Plus,
-  RefreshCw, Activity, Settings, Server, GitBranch, FileDiff, Check, Wrench, X
+  RefreshCw, Activity, Settings, Server, GitBranch, FileDiff, Check, Wrench, X,
+  Sun, Moon, Monitor,
 } from 'lucide-react';
+
+// ── Theme toggle (cycles auto → light → dark) ─────────────────────
+function ThemeToggle() {
+  const [theme, setTheme] = useState(() =>
+    typeof document !== 'undefined' ? document.documentElement.getAttribute('data-theme') || 'auto' : 'auto'
+  );
+  const next = { auto: 'light', light: 'dark', dark: 'auto' };
+  const Icon = theme === 'light' ? Sun : theme === 'dark' ? Moon : Monitor;
+  const label = theme === 'light' ? '浅色' : theme === 'dark' ? '深色' : '跟随系统';
+  const cycle = () => {
+    const n = next[theme] || 'auto';
+    setTheme(n);
+    document.documentElement.setAttribute('data-theme', n);
+    localStorage.setItem('cgui-theme', n);
+  };
+  return (
+    <button onClick={cycle}
+      className="p-2 rounded-lg text-ink-muted hover:text-ink hover:bg-black/5 transition-colors"
+      title={`主题：${label}（点击切换）`}>
+      <Icon size={15} />
+    </button>
+  );
+}
 
 function formatDate(iso) {
   if (!iso) return '';
@@ -650,6 +674,8 @@ export default function App() {
               <Icon size={15} />
             </button>
           ))}
+          <div className="w-px h-4 bg-ink-ghost/30 mx-1" />
+          <ThemeToggle />
         </div>
       </header>
 
