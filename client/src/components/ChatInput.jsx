@@ -1,0 +1,236 @@
+import React, { useState, useRef, useEffect } from 'react';
+import { Send, Loader2, Square, Terminal, Puzzle, Wrench } from 'lucide-react';
+import { ModelSelector } from '../App.jsx';
+
+const TYPE_ICONS = {
+  builtin: Terminal,
+  skill: Wrench,
+  plugin: Puzzle,
+};
+
+const TYPE_LABELS = {
+  builtin: '内置',
+  skill: '技能',
+  plugin: '插件',
+};
+
+export function ChatInput({ onSend, onStop, disabled, isStreaming }) {
+  const [text, setText] = useState('');
+  const [showCommands, setShowCommands] = useState(false);
+  const [selectedIndex, setSelectedIndex] = useState(0);
+  const [commands, setCommands] = useState([]);
+  const [provider, setProvider] = useState('Anthropic');
+  const [isAnthropic, setIsAnthropic] = useState(true);
+  const textareaRef = useRef(null);
+
+  // Refresh slash commands whenever the model/provider may have changed
+  // (re-fetch on focus so cc switch picks up without page reload).
+  useEffect(() => {
+    let cancelled = false;
+    const load = () => {
+      fetch('/api/slash-commands')
+        .then(r => r.json())
+        .then(data => {
+          if (cancelled) return;
+          setCommands(data.commands || []);
+          setProvider(data.provider || 'Anthropic');
+          setIsAnthropic(data.isAnthropic !== false);
+        })
+        .catch(() => {});
+    };
+    load();
+    const onFocus = () => load();
+    window.addEventListener('focus', onFocus);
+    return () => { cancelled = true; window.removeEventListener('focus', onFocus); };
+  }, []);
+
+  // Auto-resize textarea
+  useEffect(() => {
+    const el = textareaRef.current;
+    if (!el) return;
+    el.style.height = 'auto';
+    el.style.height = Math.min(el.scrollHeight, 200) + 'px';
+  }, [text]);
+
+  // Case-insensitive prefix match; rank exact-case matches first.
+  const filteredCommands = (() => {
+    if (!text.startsWith('/') || text.length === 0) return [];
+    const q = text.toLowerCase();
+    return commands
+      .filter((c) => c.name.toLowerCase().startsWith(q))
+      .sort((a, b) => {
+        const aBlocked = a.requiresAnthropic === 'full' && !isAnthropic;
+        const bBlocked = b.requiresAnthropic === 'full' && !isAnthropic;
+        if (aBlocked !== bBlocked) return aBlocked ? 1 : -1;
+        return 0;
+      });
+  })();
+
+  useEffect(() => {
+    setShowCommands(filteredCommands.length > 0 && text.startsWith('/') && text.length > 0);
+    setSelectedIndex(0);
+  }, [text]);
+
+  const handleSend = () => {
+    const trimmed = text.trim();
+    if (!trimmed || disabled) return;
+    onSend(trimmed);
+    setText('');
+    setShowCommands(false);
+    textareaRef.current?.focus();
+  };
+
+  const selectCommand = (cmd) => {
+    if (typeof cmd === 'object') {
+      // Block selecting a fully-incompatible slash on a third-party endpoint.
+      if (cmd.requiresAnthropic === 'full' && !isAnthropic) return;
+      setText(cmd.name + ' ');
+    } else {
+      setText(cmd + ' ');
+    }
+    setShowCommands(false);
+    textareaRef.current?.focus();
+  };
+
+  const handleKeyDown = (e) => {
+    if (showCommands) {
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        setSelectedIndex((i) => Math.min(i + 1, filteredCommands.length - 1));
+        return;
+      }
+      if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        setSelectedIndex((i) => Math.max(i - 1, 0));
+        return;
+      }
+      if (e.key === 'Tab' || (e.key === 'Enter' && !e.shiftKey && filteredCommands.length > 0)) {
+        e.preventDefault();
+        selectCommand(filteredCommands[selectedIndex]);
+        return;
+      }
+      if (e.key === 'Escape') {
+        setShowCommands(false);
+        return;
+      }
+    }
+
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      handleSend();
+    }
+  };
+
+  return (
+    <div className="border-t border-canvas-deep bg-canvas px-6 py-4">
+      <div className="max-w-3xl mx-auto relative">
+        {/* Slash command dropdown */}
+        {showCommands && (
+          <div className="absolute bottom-full left-0 right-0 mb-2 bg-canvas border border-canvas-deep rounded-lg shadow-lg max-h-72 overflow-y-auto z-30">
+            <div className="px-3 py-1.5 text-[10px] text-ink-faint uppercase tracking-wider font-body border-b border-canvas-deep flex items-center justify-between">
+              <span>Slash 命令</span>
+              <span className="text-ink-ghost">
+                {filteredCommands.length} 个 · {provider}{!isAnthropic && ' (cc switch)'}
+              </span>
+            </div>
+            {filteredCommands.slice(0, 50).map((c, i) => {
+              const Icon = TYPE_ICONS[c.type] || Terminal;
+              const blocked = c.requiresAnthropic === 'full' && !isAnthropic;
+              const partial = c.requiresAnthropic === 'partial' && !isAnthropic;
+              const interactiveOnly = !!c.interactiveOnly;
+              const tipParts = [];
+              if (c.note) tipParts.push(c.note);
+              if (interactiveOnly) tipParts.push('CLI 仅在交互式终端响应此命令；GUI 内会收到 "isn\'t available in this environment"');
+              if (blocked) tipParts.push(`当前端点 ${provider} 不支持此命令`);
+              else if (partial) tipParts.push(`当前端点 ${provider} 下行为可能不准`);
+              const tip = tipParts.join(' · ') || c.desc;
+              return (
+                <button
+                  key={c.name}
+                  onClick={() => selectCommand(c)}
+                  disabled={blocked}
+                  title={tip}
+                  className={`w-full text-left px-3 py-2 flex items-center gap-2 transition-colors ${
+                    blocked
+                      ? 'opacity-40 cursor-not-allowed'
+                      : i === selectedIndex ? 'bg-accent-subtle/50' : 'hover:bg-canvas-warm'
+                  }`}
+                >
+                  <Icon size={12} className="text-accent shrink-0" />
+                  <span className={`text-xs font-mono shrink-0 ${blocked ? 'line-through text-ink-ghost' : 'text-ink-soft'}`}>
+                    {c.name}
+                  </span>
+                  <span className="text-[11px] text-ink-faint font-body truncate flex-1">{c.desc}</span>
+                  {interactiveOnly && (
+                    <span className="text-[9px] px-1 py-0.5 bg-canvas-deep text-ink-faint rounded font-mono shrink-0" title="仅交互式终端可用">
+                      TUI
+                    </span>
+                  )}
+                  {partial && (
+                    <span className="text-[9px] px-1 py-0.5 bg-warning/10 text-warning rounded font-mono shrink-0">
+                      partial
+                    </span>
+                  )}
+                  {blocked && (
+                    <span className="text-[9px] px-1 py-0.5 bg-error/10 text-error rounded font-mono shrink-0">
+                      仅订阅
+                    </span>
+                  )}
+                  <span className="text-[9px] px-1 py-0.5 bg-canvas-deep text-ink-ghost rounded font-mono shrink-0">
+                    {TYPE_LABELS[c.type] || c.type}
+                  </span>
+                </button>
+              );
+            })}
+            {filteredCommands.length > 50 && (
+              <div className="px-3 py-1.5 text-[10px] text-ink-ghost text-center font-body">
+                还有 {filteredCommands.length - 50} 个命令...
+              </div>
+            )}
+          </div>
+        )}
+
+        <div className="chat-composer flex items-end gap-3 bg-canvas-warm border border-canvas-deep rounded-xl px-4 py-3">
+          <ModelSelector compact />
+          <textarea
+            ref={textareaRef}
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+            onKeyDown={handleKeyDown}
+            placeholder="输入消息... (/ 打开命令, Enter 发送, Shift+Enter 换行)"
+            disabled={disabled}
+            rows={1}
+            className="flex-1 bg-transparent text-sm text-ink placeholder-ink-faint resize-none focus:outline-none font-body leading-relaxed min-h-[24px] max-h-[200px]"
+          />
+
+          {isStreaming ? (
+            <button
+              onClick={onStop}
+              className="shrink-0 w-8 h-8 rounded-lg bg-error/10 hover:bg-error/20 flex items-center justify-center transition-colors"
+              title="停止生成"
+            >
+              <Square size={14} className="text-error" />
+            </button>
+          ) : (
+            <button
+              onClick={handleSend}
+              disabled={!text.trim() || disabled}
+              className="shrink-0 w-8 h-8 rounded-lg bg-accent hover:bg-accent-hover disabled:bg-canvas-deep disabled:text-ink-ghost flex items-center justify-center transition-colors"
+              title="发送"
+            >
+              {disabled ? (
+                <Loader2 size={14} className="text-ink-faint animate-spin" />
+              ) : (
+                <Send size={14} className="text-white" />
+              )}
+            </button>
+          )}
+        </div>
+
+        <p className="text-[10px] text-ink-faint mt-2 text-center font-body">
+          Claude Code GUI · 本地运行 · 数据不离开你的设备
+        </p>
+      </div>
+    </div>
+  );
+}
