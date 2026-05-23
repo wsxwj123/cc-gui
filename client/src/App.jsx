@@ -578,6 +578,39 @@ function SessionDetail() {
   };
 
   const handleSend = useCallback(async (prompt) => {
+    // Pre-flight: if the project's cwd isn't a git repo, offer to init+commit
+    // before the first message of a session. Skipped/declined cwds are
+    // remembered in sessionStorage so we never nag twice.
+    const cwd = selectedProject?.path || selectedSession?.projectPath;
+    if (cwd) {
+      const skipKey = `cgui-git-skip-${cwd}`;
+      const isFirstMessage = chatMessages.length === 0 && messages.length === 0;
+      if (isFirstMessage && !sessionStorage.getItem(skipKey)) {
+        try {
+          const r = await fetch(`/api/git/status?cwd=${encodeURIComponent(cwd)}`);
+          const s = await r.json();
+          if (s && s.isRepo === false) {
+            const ok = confirm(
+              `这个目录还不是 git 仓库：\n${cwd}\n\n` +
+              `Claude 会修改文件，建议先 git init 并提交一次基线，方便日后回滚。\n` +
+              `点确定 → 自动执行 git init + git add -A + git commit\n点取消 → 跳过（本会话不再询问）`
+            );
+            if (ok) {
+              const ir = await fetch('/api/git/init', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ cwd }),
+              });
+              const id = await ir.json();
+              if (!ir.ok) alert('git init 失败：' + (id.error || ir.status));
+            }
+            sessionStorage.setItem(skipKey, '1');
+          }
+        } catch {
+          // Network/route issue — silently skip the check rather than blocking the send.
+        }
+      }
+    }
+
     setIsStreaming(true);
     setStreamingText('');
     setStreamingToolCalls([]);

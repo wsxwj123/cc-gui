@@ -287,14 +287,17 @@ body {
    Chat composer
    ════════════════════════════════════════════════════════════════ */
 .chat-composer {
-  transition: box-shadow 0.22s ease, border-color 0.22s ease, transform 0.22s ease;
+  transition: box-shadow 0.22s ease, border-color 0.22s ease;
 }
-.chat-composer:focus-within {
+/* Only ring when the textarea itself is focused — :focus-within would also
+ * fire when the model/effort/add-dir buttons inside the capsule get focus,
+ * making it look like the whole composer "scaled up" with a giant halo. */
+.chat-composer:has(textarea:focus) {
   box-shadow:
     inset 0 1px 0 var(--glass-specular),
     inset 0 -1px 0 var(--glass-shade),
-    0 0 0 4px rgba(10, 132, 255, 0.22),
-    0 10px 28px -8px rgba(20, 30, 60, 0.24);
+    0 0 0 2px rgba(10, 132, 255, 0.28),
+    0 6px 18px -8px rgba(20, 30, 60, 0.18);
 }
 
 /* ── Thinking block ──────────────────────────────────────────── */
