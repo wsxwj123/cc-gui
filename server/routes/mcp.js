@@ -202,6 +202,51 @@ function getServerDetails(name) {
   }
 }
 
+/**
+ * GET /api/mcp/:name/ping
+ * Hit `claude mcp get <name>` to verify the server is registered and (for
+ * stdio servers) its command resolves. Returns the raw CLI output plus a
+ * parsed status: ok | error | unknown. For HTTP transport, also attempts
+ * a HEAD request to the URL.
+ */
+router.get('/mcp/:name/ping', async (req, res) => {
+  try {
+    const { name } = req.params;
+    assertSafeName(name);
+    const start = Date.now();
+    let output, status = 'ok', detail = '';
+    try {
+      output = runClaude(['mcp', 'get', name]);
+    } catch (err) {
+      output = err.stderr?.toString() || err.message;
+      status = 'error';
+      detail = err.message;
+    }
+    // If it's an HTTP transport, attempt a HEAD ping too.
+    const urlMatch = output && output.match(/URL:\s*(https?:\/\/\S+)/);
+    let httpStatus = null;
+    if (urlMatch) {
+      try {
+        const r = await fetch(urlMatch[1], { method: 'HEAD', redirect: 'follow' });
+        httpStatus = r.status;
+      } catch (err) {
+        httpStatus = -1;
+        status = status === 'ok' ? 'error' : status;
+        detail = err.message;
+      }
+    }
+    res.json({
+      name, status,
+      ms: Date.now() - start,
+      httpStatus,
+      output: (output || '').slice(0, 1500),
+      detail,
+    });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
 router.put('/mcp/:name/enable', async (req, res) => {
   try {
     const { name } = req.params;

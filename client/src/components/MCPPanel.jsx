@@ -1,5 +1,37 @@
 import React, { useEffect, useState, useRef } from 'react';
-import { Server, Package, FolderOpen, RefreshCw, Plug } from 'lucide-react';
+import { Server, Package, FolderOpen, RefreshCw, Plug, Activity, Check, X } from 'lucide-react';
+
+function PingButton({ name }) {
+  const [state, setState] = useState(null); // null | 'busy' | 'ok' | 'err'
+  const [detail, setDetail] = useState('');
+  const ping = async (e) => {
+    e?.stopPropagation();
+    setState('busy');
+    try {
+      const r = await fetch(`/api/mcp/${encodeURIComponent(name)}/ping`);
+      const d = await r.json();
+      setState(d.status === 'ok' ? 'ok' : 'err');
+      setDetail(`${d.ms}ms${d.httpStatus ? ` · HTTP ${d.httpStatus}` : ''}${d.detail ? '\n' + d.detail : ''}`);
+      setTimeout(() => setState(null), 3000);
+    } catch (err) {
+      setState('err'); setDetail(err.message);
+    }
+  };
+  return (
+    <button onClick={ping} title={detail || '测试连接'}
+      className={`p-1 rounded transition-colors ${
+        state === 'ok' ? 'text-success' :
+        state === 'err' ? 'text-error' :
+        state === 'busy' ? 'text-ink-muted' :
+        'text-ink-faint hover:text-ink-muted'
+      }`}>
+      {state === 'busy' ? <Activity size={11} className="animate-pulse" />
+        : state === 'ok' ? <Check size={11} />
+        : state === 'err' ? <X size={11} />
+        : <Activity size={11} />}
+    </button>
+  );
+}
 
 function Toggle({ enabled, onToggle, loading }) {
   return (
@@ -142,6 +174,7 @@ export function MCPPanel() {
                     {disabled && (
                       <span className="text-[10px] text-ink-ghost">已禁用</span>
                     )}
+                    <PingButton name={srv.name} />
                     <Toggle
                       enabled={!disabled}
                       loading={toggling === srv.name}

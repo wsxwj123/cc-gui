@@ -1,10 +1,23 @@
 import React, { useEffect, useState } from 'react';
-import { BarChart3, Cpu, Database, Calendar, ArrowLeft, RefreshCw } from 'lucide-react';
+import { BarChart3, Cpu, Database, Calendar, ArrowLeft, RefreshCw, FolderOpen, Download } from 'lucide-react';
 import { ModelBadge } from './ModelBadge.jsx';
 
 function decodeProjectHash(hash) {
   if (hash.startsWith('-')) return '/' + hash.slice(1).replace(/-/g, '/');
   return hash;
+}
+
+function downloadCSV(stats) {
+  const lines = ['section,key,input_tokens,output_tokens,cache_read,calls'];
+  for (const m of stats.byModel) lines.push(`model,${m.model},${m.input},${m.output},${m.cacheRead},${m.calls}`);
+  for (const p of stats.byProject) lines.push(`project,${decodeProjectHash(p.hash)},${p.input},${p.output},${p.cacheRead},${p.calls}`);
+  for (const d of stats.byDay) lines.push(`day,${d.day},${d.input},${d.output},${d.cacheRead},${d.calls}`);
+  const blob = new Blob([lines.join('\n')], { type: 'text/csv' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = `claude-usage-${new Date().toISOString().slice(0, 10)}.csv`;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 0);
 }
 
 function formatNum(n) {
@@ -121,32 +134,50 @@ export function UsagePanel() {
         </div>
       </div>
 
+      {/* By project — top 10 */}
+      {stats.byProject?.length > 0 && (
+        <div>
+          <h3 className="text-[10px] font-medium uppercase tracking-widest text-ink-faint font-body mb-3 flex items-center gap-1.5">
+            <FolderOpen size={11} />按项目
+          </h3>
+          <div className="bg-canvas-warm border border-canvas-deep rounded-lg p-3">
+            {(() => {
+              const maxP = Math.max(...stats.byProject.map((p) => p.input + p.output), 1);
+              return stats.byProject.slice(0, 10).map((p) => {
+                const path = decodeProjectHash(p.hash);
+                const name = path.split('/').filter(Boolean).slice(-2).join('/');
+                return (
+                  <BarRow key={p.hash} label={name || p.hash} value={p.input + p.output}
+                    max={maxP} color="var(--color-accent)" />
+                );
+              });
+            })()}
+          </div>
+        </div>
+      )}
+
       {/* By day (recent 14) */}
       <div>
         <h3 className="text-[10px] font-medium uppercase tracking-widest text-ink-faint font-body mb-3 flex items-center gap-1.5">
-          <Calendar size={11} />
-          最近用量
+          <Calendar size={11} />最近用量
         </h3>
         <div className="bg-canvas-warm border border-canvas-deep rounded-lg p-3">
           {stats.byDay.slice(0, 14).map((d) => (
-            <BarRow
-              key={d.day}
-              label={d.day.slice(5)}
-              value={d.input + d.output}
-              max={maxDayTokens}
-            />
+            <BarRow key={d.day} label={d.day.slice(5)} value={d.input + d.output} max={maxDayTokens} />
           ))}
         </div>
       </div>
 
-      {/* Refresh button */}
-      <button
-        onClick={fetchStats}
-        className="w-full flex items-center justify-center gap-1.5 py-2 text-xs text-ink-faint hover:text-ink-muted font-body transition-colors"
-      >
-        <RefreshCw size={12} />
-        刷新数据
-      </button>
+      <div className="flex gap-2">
+        <button onClick={fetchStats}
+          className="flex-1 flex items-center justify-center gap-1.5 py-2 text-xs text-ink-muted hover:text-ink font-body transition-colors bg-canvas-warm border border-canvas-deep rounded-lg">
+          <RefreshCw size={12} />刷新
+        </button>
+        <button onClick={() => downloadCSV(stats)}
+          className="flex-1 flex items-center justify-center gap-1.5 py-2 text-xs text-ink-muted hover:text-ink font-body transition-colors bg-canvas-warm border border-canvas-deep rounded-lg">
+          <Download size={12} />导出 CSV
+        </button>
+      </div>
     </div>
   );
 }
