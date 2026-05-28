@@ -62,12 +62,13 @@ async function main() {
     allow(`auto-allow ${toolName} (read-class)`);
   }
 
-  // Plan mode: let exploration flow. The CLI (--permission-mode plan) already
-  // blocks writes and ends the turn with ExitPlanMode; we only intercept
-  // ExitPlanMode so the GUI can show the plan-review card. Everything else
-  // (Read, Grep, Agent/Task exploration subagents, …) passes through, so the
-  // turn doesn't freeze on the first exploration tool.
-  if (process.env.CGUI_PLAN_MODE && toolName !== 'ExitPlanMode') {
+  // Plan mode: let EXPLORATION flow (Read, Grep, Bash, Agent/Task subagents…)
+  // so the turn doesn't freeze on the first exploration tool, while still
+  // gating ExitPlanMode (→ plan-review card) and, as defense-in-depth, any
+  // write-class tool (a plan-mode turn shouldn't be editing files; if it tries,
+  // make the user confirm rather than silently allowing it).
+  const PLAN_GATED = ['ExitPlanMode', 'Edit', 'Write', 'NotebookEdit'];
+  if (process.env.CGUI_PLAN_MODE && !PLAN_GATED.includes(toolName)) {
     allow(`plan-mode passthrough ${toolName}`);
   }
 
