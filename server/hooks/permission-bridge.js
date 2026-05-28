@@ -62,6 +62,15 @@ async function main() {
     allow(`auto-allow ${toolName} (read-class)`);
   }
 
+  // Plan mode: let exploration flow. The CLI (--permission-mode plan) already
+  // blocks writes and ends the turn with ExitPlanMode; we only intercept
+  // ExitPlanMode so the GUI can show the plan-review card. Everything else
+  // (Read, Grep, Agent/Task exploration subagents, …) passes through, so the
+  // turn doesn't freeze on the first exploration tool.
+  if (process.env.CGUI_PLAN_MODE && toolName !== 'ExitPlanMode') {
+    allow(`plan-mode passthrough ${toolName}`);
+  }
+
   // 3. POST to server and wait for user decision
   const body = JSON.stringify({
     toolName: payload.tool_name || payload.toolName || 'unknown',

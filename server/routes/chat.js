@@ -172,6 +172,16 @@ router.post('/chat', async (req, res) => {
       if (autoAllowList.length > 0) {
         childEnv.CGUI_AUTO_ALLOW_TOOLS = autoAllowList.join(',');
       }
+      // Plan mode: Claude must be free to EXPLORE (read files, spawn Explore
+      // subagents) before it can produce a plan. The CLI's own --permission-mode
+      // plan already blocks writes and emits ExitPlanMode at the end, so the
+      // bridge should pass everything EXCEPT ExitPlanMode straight through —
+      // otherwise the very first exploration tool (often an `Agent` spawn) sits
+      // gated forever and the turn looks frozen. Only ExitPlanMode pops the
+      // plan-review card.
+      if (chosenMode === 'plan') {
+        childEnv.CGUI_PLAN_MODE = '1';
+      }
     }
     console.log('[chat] spawn', JSON.stringify({
       cwd: workingDir,

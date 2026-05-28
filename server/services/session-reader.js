@@ -304,6 +304,18 @@ function classifyTool(name) {
 }
 
 /**
+ * Slash commands like /context, /clear, /compact write echo records into the
+ * jsonl as `user` messages whose text is a synthetic `<local-command-caveat>`,
+ * `<command-name>…`, `<command-message>`, `<command-args>` or
+ * `<local-command-stdout>` block. These are CLI bookkeeping, not real user
+ * prompts — rendering them as user bubbles is the "斜杠命令多出两条隐藏消息"
+ * bug. Detect and drop them.
+ */
+function isLocalCommandEcho(text) {
+  return /^\s*<(local-command-(caveat|stdout|stderr)|command-(name|message|args))\b/.test(text);
+}
+
+/**
  * Build turn-based message groups from a session's JSONL records.
  *
  * A "turn" = one user prompt + all assistant responses (thinking, text, tool calls)
@@ -351,7 +363,7 @@ export async function getSessionMessages(sessionId, projectHash) {
       const textParts = content.filter((c) => c.type === 'text');
       const text = textParts.map((c) => c.text).join('\n').trim();
 
-      if (text) {
+      if (text && !isLocalCommandEcho(text)) {
         // This is a real user prompt — flush previous turn and start new user message
         flushTurn();
         messages.push({

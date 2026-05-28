@@ -53,7 +53,13 @@ export function useWebSocket() {
               //   2. acceptEdits + tool in read-class list → auto-allow
               //   3. per-session "永远允许 X" whitelist → auto-allow
               //   4. otherwise → render popup
-              const mode = useStore.getState().permissionMode;
+              // Use the mode of the SESSION THIS REQUEST belongs to — NOT the
+              // global/active mirror. Otherwise a request for session B gets
+              // auto-allowed because session A happens to be in bypass/accept
+              // (the "授权串号" bug). Falls back to 'default' (prompt) when the
+              // session has no stored mode.
+              const modeMap = useStore.getState().permissionModeBySession || {};
+              const mode = modeMap[req.sessionId] || 'default';
               const READ_CLASS = ['Read', 'Glob', 'Grep', 'LS', 'TodoWrite', 'NotebookRead', 'Skill'];
               if (mode === 'bypassPermissions') {
                 fetch(`/api/permissions/respond/${req.id}`, {

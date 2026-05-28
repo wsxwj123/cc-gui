@@ -2490,6 +2490,7 @@ function SessionDetail({ tabIndex = 0 }) {
         }}
         todos={currentTodos}
         permKey={sessionQueueKey}
+        sessionId={selectedSession?.sessionId || null}
       />
     </div>
   );
@@ -2680,16 +2681,16 @@ export default function App() {
     } catch {}
   }, [cguiTheme]);
 
-  // Mid-stream mode change → bulk-resolve any waiting popups. This is the
-  // "切到放任后所有待处理工具直接放行" UX. Doesn't kill or respawn the
-  // CLI — the hook bridge keeps running with its original env, but the
-  // server holds responses open until WE respond, so flipping a switch
-  // here is enough.
+  // Mid-stream mode change → bulk-resolve waiting popups, but ONLY for the
+  // session that was switched to 放任. "切到放任后该会话待处理工具直接放行"。
+  // Must NOT touch other sessions' pending requests (that was the 授权串号 bug).
   const permissionMode = useStore((s) => s.permissionModeBySession[permKey] || 'default');
   useEffect(() => {
     if (permissionMode !== 'bypassPermissions') return;
+    const sid = activeSession?.sessionId;
+    if (!sid) return;
     const pending = useStore.getState().pendingPermissions;
-    pending.forEach((p) => {
+    pending.filter((p) => p.sessionId === sid).forEach((p) => {
       fetch(`/api/permissions/respond/${p.id}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -2697,7 +2698,7 @@ export default function App() {
       }).catch(() => {});
       useStore.getState().removePendingPermission(p.id);
     });
-  }, [permissionMode]);
+  }, [permissionMode, activeSession?.sessionId]);
 
   // Rehydrate after refresh: if a session was persisted, reload its message
   // history + the project's session list. silent:true so we don't render the

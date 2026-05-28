@@ -168,7 +168,7 @@ const TYPE_LABELS = {
   plugin: '插件',
 };
 
-export function ChatInput({ onSend, onStop, onAccelerate, disabled, isStreaming, backgroundWorking = false, queueLength = 0, queueItems = [], onRemoveFromQueue, onEditFromQueue, todos = null, permKey = null }) {
+export function ChatInput({ onSend, onStop, onAccelerate, disabled, isStreaming, backgroundWorking = false, queueLength = 0, queueItems = [], onRemoveFromQueue, onEditFromQueue, todos = null, permKey = null, sessionId = null }) {
   const [text, setText] = useState('');
   const [showCommands, setShowCommands] = useState(false);
   const [selectedIndex, setSelectedIndex] = useState(0);
@@ -392,7 +392,7 @@ export function ChatInput({ onSend, onStop, onAccelerate, disabled, isStreaming,
     <div>
       {/* Permission popup — sits ABOVE the composer (Claude Desktop style),
           filtered to the active session. No-op when no requests pending. */}
-      <PermissionPrompt />
+      <PermissionPrompt sessionId={sessionId} />
       {/* TODO checklist — sits between permission popup and composer, mirroring
           Claude Desktop. Auto-hides when there's no TodoWrite snapshot. */}
       <TodoPanel todos={todos} />

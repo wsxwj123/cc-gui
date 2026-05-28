@@ -147,7 +147,7 @@ function PlanReviewCard({ req, onResolve, processing, position }) {
   );
 }
 
-function PermissionCard({ req, onResolve, onWhitelistAndAllow, processing, position }) {
+function PermissionCard({ req, onResolve, onWhitelistAndAllow, onResolveSame, sameCount, processing, position }) {
   const [remember, setRemember] = useState(false);
   // Enter = allow, Esc = deny — only when this is the top card.
   useEffect(() => {
@@ -187,6 +187,18 @@ function PermissionCard({ req, onResolve, onWhitelistAndAllow, processing, posit
         )}
       </div>
       <div className="px-4 py-3">{renderInput(req.toolName, req.toolInput)}</div>
+      {sameCount > 0 && (
+        <div className="px-4 pb-2 -mt-1">
+          <button
+            disabled={processing}
+            onClick={() => onResolveSame(req, 'allow')}
+            className="w-full text-[11px] text-accent hover:bg-accent/10 border border-accent/30 rounded-md px-2 py-1.5 transition-colors disabled:opacity-50"
+            title="把本分屏其他会话里相同工具+相同参数的请求一并允许；不同请求仍单独询问"
+          >
+            同时允许其他 {sameCount} 个会话的相同请求（{req.toolName}）
+          </button>
+        </div>
+      )}
       <div className="px-4 py-2.5 flex items-center gap-2 bg-canvas-warm/60 border-t border-canvas-deep">
         <label className="flex items-center gap-1.5 text-[11px] text-ink-muted mr-auto cursor-pointer select-none">
           <input
@@ -236,12 +248,18 @@ function PendingPill({ req, position }) {
  * currently-selected session — other sessions' requests stay in the store
  * but don't render here.
  */
-export function PermissionPrompt() {
+export function PermissionPrompt({ sessionId = null }) {
   const all = useStore((s) => s.pendingPermissions);
-  const selectedSid = useStore((s) => s.selectedSession?.sessionId);
+  const globalSid = useStore((s) => s.selectedSession?.sessionId);
+  const paneSessions = useStore((s) => s.paneSessions);
+  const paneCount = useStore((s) => s.paneCount);
   const removePendingPermission = useStore((s) => s.removePendingPermission);
   const whitelist = useStore((s) => s.whitelistPermissionTool);
   const [busyId, setBusyId] = useState(null);
+  // This card belongs to a specific pane's session. Prefer the explicit prop
+  // (correct in split mode where each pane has its own session); fall back to
+  // the global selection for single-pane callers.
+  const selectedSid = sessionId || globalSid;
 
   // Hydrate on first mount so a page refresh while a request is mid-flight
   // doesn't leave it invisible (the WS broadcast already fired before we
@@ -276,6 +294,23 @@ export function PermissionPrompt() {
     await resolve(req, 'allow');
   };
 
+  // Opt-in batch: resolve the SAME request (same tool + identical input) in the
+  // OTHER sessions currently open in panes. Different requests are untouched.
+  const sameInputKey = (r) => `${r.toolName} ${JSON.stringify(r.toolInput || {})}`;
+  const paneSidSet = new Set(
+    (paneSessions || []).slice(0, paneCount || 1).map((p) => p?.sessionId).filter(Boolean)
+  );
+  const matchesAcrossPanes = (req) => all.filter(
+    (p) => p.id !== req.id
+      && p.sessionId !== req.sessionId
+      && paneSidSet.has(p.sessionId)
+      && sameInputKey(p) === sameInputKey(req)
+  );
+  const resolveSame = async (req, decision) => {
+    const others = matchesAcrossPanes(req);
+    await Promise.all([req, ...others].map((r) => resolve(r, decision)));
+  };
+
   return (
     <div className="px-6 pb-2 space-y-2 max-w-3xl mx-auto w-full">
       {mine.length > 1 && (
@@ -295,6 +330,8 @@ export function PermissionPrompt() {
           req={mine[0]}
           onResolve={resolve}
           onWhitelistAndAllow={whitelistAndAllow}
+          onResolveSame={resolveSame}
+          sameCount={matchesAcrossPanes(mine[0]).length}
           processing={busyId === mine[0].id}
           position={0}
         />
