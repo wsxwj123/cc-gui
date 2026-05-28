@@ -277,20 +277,51 @@ function _SplitterDead({ onMouseDown, axis = 'x' }) {
 // sidebar clicks and right-panel data sources.
 // Top-bar split toggle. Same shape as the right-panel icon buttons so it
 // visually fits inline. Active state mirrors splitMode.
-function SplitModeToggle() {
-  const splitMode = useStore((s) => s.splitMode);
-  const toggleSplitMode = useStore((s) => s.toggleSplitMode);
+function PaneCountPicker() {
+  const paneCount = useStore((s) => s.paneCount);
+  const setPaneCount = useStore((s) => s.setPaneCount);
+  const [open, setOpen] = useState(false);
+  const wrapRef = useRef(null);
+  useEffect(() => {
+    if (!open) return;
+    const onDoc = (e) => { if (!wrapRef.current?.contains(e.target)) setOpen(false); };
+    const onEsc = (e) => { if (e.key === 'Escape') setOpen(false); };
+    document.addEventListener('mousedown', onDoc);
+    document.addEventListener('keydown', onEsc);
+    return () => { document.removeEventListener('mousedown', onDoc); document.removeEventListener('keydown', onEsc); };
+  }, [open]);
   return (
-    <button
-      onClick={toggleSplitMode}
-      title={splitMode ? '关闭分屏' : '开启分屏（双会话并排）'}
-      className={`px-1.5 py-1 rounded-lg transition-all flex flex-col items-center gap-0.5 ${
-        splitMode ? 'bg-accent-subtle text-accent' : 'text-ink-muted hover:text-ink hover:bg-black/5'
-      }`}
-    >
-      <Columns2 size={15} />
-      <span className="text-[9px] leading-none font-body">分屏</span>
-    </button>
+    <div ref={wrapRef} className="relative">
+      <button
+        onClick={() => setOpen(!open)}
+        title="分屏数量（1–6）"
+        className={`px-1.5 py-1 rounded-lg transition-all flex flex-col items-center gap-0.5 ${
+          paneCount > 1 ? 'bg-accent-subtle text-accent' : 'text-ink-muted hover:text-ink hover:bg-black/5'
+        }`}
+      >
+        <Columns2 size={15} />
+        <span className="text-[9px] leading-none font-body">分屏{paneCount > 1 ? ` ${paneCount}` : ''}</span>
+      </button>
+      {open && (
+        <div className="glass-popover absolute right-0 top-full mt-2 w-44 z-50 py-1 animate-glass-rise">
+          <div className="px-3 py-1.5 text-[10px] text-ink-faint uppercase tracking-wider font-body">分屏数量</div>
+          <div className="grid grid-cols-3 gap-1 px-2 pb-2">
+            {[1, 2, 3, 4, 5, 6].map((n) => (
+              <button
+                key={n}
+                onClick={() => { setPaneCount(n); setOpen(false); }}
+                className={`py-1.5 rounded text-[12px] font-mono transition-colors ${
+                  paneCount === n ? 'bg-accent text-white' : 'hover:bg-canvas-warm text-ink'
+                }`}
+              >{n}</button>
+            ))}
+          </div>
+          <div className="px-3 pb-2 text-[10px] text-ink-faint font-body leading-snug">
+            点格选数量，再点左侧会话填入当前高亮分屏。关闭分屏用每栏右上角 ✕（不结束会话/进程）。
+          </div>
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -305,7 +336,7 @@ function MainLayout({ sidebarCollapsed, selectedProject, rightPanel, setRightPan
   const activeTabIndex = useStore((s) => s.activeTabIndex);
   const setActiveTabIndex = useStore((s) => s.setActiveTabIndex);
   return (
-    <div className="flex-1 flex min-h-0 gap-0 p-0">
+    <div className="flex-1 flex min-h-0 gap-0 p-0 overflow-hidden">
       {!sidebarCollapsed && (
         <>
           <aside
@@ -339,39 +370,62 @@ function MainLayout({ sidebarCollapsed, selectedProject, rightPanel, setRightPan
   );
 }
 
-// Renders 2 SessionDetail panes side-by-side. Active pane gets a thin
-// accent ring on top so the user knows which one sidebar clicks will fill.
+// Renders `paneCount` (1..6) SessionDetail panes side-by-side. The active pane
+// gets an accent ring so the user knows which one a sidebar click fills. Each
+// pane carries a slim chrome bar (pane # + close ✕). Closing only removes the
+// pane from view (closePane) — it never kills the CLI process or the session.
 //
-// Adaptive: min-width is expressed in `em` (relative to the document font
-// size + the user's zoom). At default size 1em ≈ 16px so 26em ≈ 416px —
-// enough for header buttons. As the user scales font up, the floor grows
-// proportionally so the panes never crush their own chrome.
+// Adaptive: min-width is `em` (scales with font + zoom). 26em ≈ 416px keeps a
+// pane's chrome usable; the row scrolls horizontally when N panes exceed the
+// viewport instead of crushing each pane.
 function SplitMain({ activeTabIndex, setActiveTabIndex }) {
-  const [leftWidth, onMidDrag] = useResizable({
-    initial: 620, min: 380, max: 1600, axis: 'x', storageKey: 'cgui-split-mid-width',
-  });
-  const paneCls = (focused) =>
-    `flex flex-col relative m-3 rounded-2xl overflow-hidden transition-shadow min-w-0 ${
-      focused ? 'ring-2 ring-accent/40 shadow-lg' : 'ring-1 ring-canvas-deep/40'
-    }`;
+  const paneCount = useStore((s) => s.paneCount);
+  const paneSessions = useStore((s) => s.paneSessions);
+  const closePane = useStore((s) => s.closePane);
+  const panes = Array.from({ length: paneCount }, (_, i) => i);
   return (
-    <>
-      <div
-        onMouseDown={() => setActiveTabIndex(0)}
-        style={{ width: leftWidth, minWidth: '26em', flexShrink: 0 }}
-        className={paneCls(activeTabIndex === 0)}
-      >
-        <SessionDetail tabIndex={0} />
-      </div>
-      <Splitter onMouseDown={onMidDrag} axis="x" />
-      <div
-        onMouseDown={() => setActiveTabIndex(1)}
-        className={paneCls(activeTabIndex === 1)}
-        style={{ flex: '1 1 0', minWidth: '26em' }}
-      >
-        <SessionDetail tabIndex={1} />
-      </div>
-    </>
+    <div className="flex-1 flex min-w-0 overflow-x-auto">
+      {panes.map((i) => {
+        const focused = activeTabIndex === i;
+        const hasSession = !!(paneSessions && paneSessions[i]);
+        return (
+          <div
+            key={i}
+            onMouseDown={() => setActiveTabIndex(i)}
+            style={{ flex: '1 1 0', minWidth: '26em' }}
+            className={`flex flex-col relative my-3 mx-1.5 rounded-2xl overflow-hidden transition-shadow min-w-0 ${
+              focused ? 'ring-2 ring-accent/40 shadow-lg' : 'ring-1 ring-canvas-deep/40'
+            }`}
+          >
+            <div className="flex items-center justify-between px-2.5 py-1 bg-canvas-warm/70 border-b border-canvas-deep shrink-0 z-20">
+              <span className={`text-[10px] font-mono ${focused ? 'text-accent' : 'text-ink-faint'}`}>
+                分屏 {i + 1}{focused ? ' · 当前' : ''}
+              </span>
+              <button
+                onClick={(e) => { e.stopPropagation(); closePane(i); }}
+                className="w-5 h-5 rounded flex items-center justify-center text-ink-faint hover:text-ink hover:bg-canvas-deep transition-colors"
+                title="关闭此分屏（不结束会话 / 不杀进程）"
+              >
+                <X size={12} />
+              </button>
+            </div>
+            {hasSession ? (
+              <SessionDetail tabIndex={i} />
+            ) : (
+              <div className="flex-1 flex items-center justify-center glass-base">
+                <div className="text-center px-4">
+                  <div className="w-12 h-12 rounded-2xl glass-thin flex items-center justify-center mx-auto mb-3">
+                    <Layers size={20} className="text-accent" />
+                  </div>
+                  <p className="text-[12px] text-ink-muted font-body">点左侧任一会话填入本分屏</p>
+                  <p className="text-[10px] text-ink-faint font-body mt-1">（此栏已高亮为当前）</p>
+                </div>
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </div>
   );
 }
 
@@ -973,7 +1027,7 @@ function SessionList() {
             className="glass-popover w-[480px] max-h-[80vh] flex flex-col py-1 animate-glass-rise"
             onClick={(e) => e.stopPropagation()}
           >
-            <div className="px-4 py-2.5 text-[11px] text-ink-faint uppercase tracking-wider font-body flex items-center justify-between border-b border-canvas-deep">
+            <div className="px-4 py-2.5 text-[11px] text-ink-faint uppercase tracking-wider font-body flex items-center justify-between border-b border-canvas-deep shrink-0">
               <span>选择 / 新建 Git Worktree</span>
               <button onClick={() => setWorktreeOpen(false)} className="p-1 hover:bg-canvas-warm rounded">
                 <X size={12} />
@@ -991,9 +1045,9 @@ function SessionList() {
                     onClick={() => enterWorktree(t)}
                     className="w-full text-left px-3 py-2 mb-1 rounded-lg hover:bg-canvas-warm border border-canvas-deep transition-colors group"
                   >
-                    <div className="flex items-center gap-2 mb-0.5">
+                    <div className="flex items-center gap-2 mb-0.5 min-w-0">
                       <GitBranch size={12} className="text-accent shrink-0" />
-                      <span className="text-xs font-medium font-mono text-ink">
+                      <span className="text-xs font-medium font-mono text-ink truncate min-w-0">
                         {t.branch || '(detached)'}
                       </span>
                       {t.isMain && (
@@ -1018,7 +1072,7 @@ function SessionList() {
                 ))
               )}
             </div>
-            <div className="border-t border-canvas-deep p-3 bg-canvas-warm/40">
+            <div className="border-t border-canvas-deep p-3 bg-canvas-warm/40 shrink-0">
               <div className="text-[10px] text-ink-faint uppercase tracking-wider font-body mb-1.5">新建 worktree</div>
               <div className="flex gap-1.5">
                 <input
@@ -1286,33 +1340,27 @@ function SessionDetail({ tabIndex = 0 }) {
   // reference reads the local alias below, so the rest of this 700-line
   // component is unchanged.
   const { selectedProject, loading } = useStore();
-  const globalSelectedSession = useStore((s) => s.selectedSession);
-  const globalSecondarySession = useStore((s) => s.secondarySession);
-  const globalMessages = useStore((s) => s.messages);
-  const globalSecondaryMessages = useStore((s) => s.secondaryMessages);
-  const selectedSession = tabIndex === 1 ? globalSecondarySession : globalSelectedSession;
-  const messages = tabIndex === 1 ? globalSecondaryMessages : globalMessages;
-  // Wrapped setters that route by tab. `setLocalMessages` is the equivalent of
-  // `useStore.setState({ messages: ... })` but writes the right slot.
+  // Pane routing generalized to N panes (0..5). Each SessionDetail reads/writes
+  // its own slot in paneSessions/paneMessages. setPaneSession/setPaneMessages
+  // keep the legacy selectedSession/messages (pane 0) + secondary* (pane 1)
+  // mirrors in sync, so the rest of this component is unchanged.
+  const paneSessions = useStore((s) => s.paneSessions);
+  const paneMessages = useStore((s) => s.paneMessages);
+  const selectedSession = (paneSessions && paneSessions[tabIndex]) || null;
+  const messages = (paneMessages && paneMessages[tabIndex]) || [];
   const setSelectedSession = useCallback((s) => {
-    if (tabIndex === 1) useStore.getState().setSecondarySession(s);
-    else useStore.getState().setSelectedSession(s);
+    useStore.getState().setPaneSession(tabIndex, s);
   }, [tabIndex]);
   const setLocalMessages = useCallback((msgs) => {
-    if (tabIndex === 1) useStore.getState().setSecondaryMessages(msgs);
-    else useStore.setState({ messages: Array.isArray(msgs) ? msgs : [] });
+    useStore.getState().setPaneMessages(tabIndex, Array.isArray(msgs) ? msgs : []);
   }, [tabIndex]);
   const getLocalMessages = useCallback(() => {
-    return tabIndex === 1
-      ? (useStore.getState().secondaryMessages || [])
-      : (useStore.getState().messages || []);
+    return useStore.getState().paneMessages[tabIndex] || [];
   }, [tabIndex]);
   // Latest session for the local tab — used inside async callbacks where
   // closure'd `selectedSession` would be stale.
   const getLocalSession = useCallback(() => {
-    return tabIndex === 1
-      ? useStore.getState().secondarySession
-      : useStore.getState().selectedSession;
+    return useStore.getState().paneSessions[tabIndex] || null;
   }, [tabIndex]);
   // Tab-aware fetchMessages wrapper: forwards tabIndex so the store writes
   // into the correct messages slot.
@@ -1324,6 +1372,7 @@ function SessionDetail({ tabIndex = 0 }) {
   // hook below the early return → React #310 → blank page.
   const currentProvider = useStore((s) => s.currentProvider);
   const currentModel = useStore((s) => s.currentModel);
+  const modelBySession = useStore((s) => s.modelBySession);
   const messagesEndRef = useRef(null);
   const containerRef = useRef(null);
   const [autoScroll, setAutoScroll] = useState(true);
@@ -1522,6 +1571,8 @@ function SessionDetail({ tabIndex = 0 }) {
   // fresh array reference on every render and triggers React error #185
   // "Maximum update depth exceeded" (which blanks the whole page).
   const sessionQueueKey = selectedSession?.sessionId || `draft-${selectedSession?.projectHash || 'none'}`;
+  // Model shown in THIS pane's header — the session's own pick, else default.
+  const headerModel = modelBySession[sessionQueueKey] || currentModel;
   const messageQueueRaw = useStore((s) => s.messageQueue[sessionQueueKey]);
   const messageQueue = messageQueueRaw || EMPTY_ARRAY;
 
@@ -1654,11 +1705,13 @@ function SessionDetail({ tabIndex = 0 }) {
         pid = reattachPid;
         activeProcRef.current = pid;
       } else {
-      const { currentModel, effort, addDirs, globalRead } = useStore.getState();
-      // Permission mode is per-session: read THIS session's stored mode (keyed
-      // by sessionQueueKey, same key the header chip + banner write to) so a
-      // plan-mode session B doesn't inherit放任 from session A.
+      const { addDirs, globalRead } = useStore.getState();
+      // Permission mode / model / effort are all per-session: read THIS
+      // session's stored value (keyed by sessionQueueKey) so each pane/session
+      // sends with its own settings, not whatever was last globally selected.
       const permissionMode = useStore.getState().getPermissionModeFor(sessionQueueKey);
+      const currentModel = useStore.getState().getModelFor(sessionQueueKey);
+      const effort = useStore.getState().getEffortFor(sessionQueueKey);
       // When resuming an existing session, cwd MUST be the EXACT string the
       // CLI was launched with — including Unicode chars (e.g. `/foo/肠骨轴`).
       // Reconstructing from the hash dir name is lossy: CLI maps every non-
@@ -2336,11 +2389,11 @@ function SessionDetail({ tabIndex = 0 }) {
                   the dropdown but seeing the past message's Sonnet badge
                   looked like the GUI ignored the switch. */}
               <div className="flex items-center gap-1">
-                {currentModel && <ModelBadge model={currentModel} compact />}
-                {models.filter((m) => m !== currentModel).length > 0 && (
+                {headerModel && <ModelBadge model={headerModel} compact />}
+                {models.filter((m) => m !== headerModel).length > 0 && (
                   <span className="text-[9px] text-ink-ghost font-mono"
                     title={`本会话历史用过: ${models.join(', ')}`}>
-                    曾用 {models.filter((m) => m !== currentModel).length} 个其他
+                    曾用 {models.filter((m) => m !== headerModel).length} 个其他
                   </span>
                 )}
               </div>
@@ -2500,8 +2553,13 @@ function SessionDetail({ tabIndex = 0 }) {
 // Dropdown anchored to the trigger button (lightweight: no full-screen blur).
 // Outside-click closes via a document-level listener — needed because the
 // usual "fixed inset-0" trick is trapped inside header's transform context.
-export function ModelSelector({ compact = false }) {
-  const { currentModel, availableModels, setModel } = useStore();
+export function ModelSelector({ compact = false, permKey = null }) {
+  const { availableModels } = useStore();
+  // Per-session model: show/select THIS session's model (falls back to the
+  // global resolved default when the session has no explicit pick). Picking
+  // writes only the session override — never the global settings.json default.
+  const currentModel = useStore((s) => (permKey && s.modelBySession[permKey]) || s.currentModel);
+  const setModel = (id) => useStore.getState().setModelFor(permKey, id);
   const [open, setOpen] = useState(false);
   const [customInput, setCustomInput] = useState('');
   const [provider, setProvider] = useState('');
@@ -2513,7 +2571,10 @@ export function ModelSelector({ compact = false }) {
       fetch('/api/model').then(r => r.json()).then(data => {
         if (cancelled) return;
         setProvider(data.provider || '');
-        if (data.model) setModel(data.model);
+        // Seed the GLOBAL default only (never a per-session override) — this is
+        // the resolved settings.json default, used as fallback for sessions
+        // without an explicit pick.
+        if (data.model) useStore.setState({ currentModel: data.model });
         if (data.available) useStore.setState({ availableModels: data.available });
       }).catch(() => {});
     };
@@ -2772,14 +2833,14 @@ export default function App() {
           )}
         </div>
         <div className="flex items-center gap-1 flex-wrap justify-end">
-          <ModelSelector placement="bottom" align="right" compact />
-          <EffortSelector placement="bottom" align="right" />
+          <ModelSelector placement="bottom" align="right" compact permKey={permKey} />
+          <EffortSelector placement="bottom" align="right" permKey={permKey} />
           <PermissionModeSelector permKey={permKey} />
           <div className="w-px h-4 bg-ink-ghost/30 mx-1" />
           {/* Split-screen toggle. Activates the right pane (initially empty
               until user clicks a session in the sidebar). Click again to
               collapse back to a single SessionDetail. */}
-          <SplitModeToggle />
+          <PaneCountPicker />
           {Object.entries(PANEL_MAP).map(([id, { icon: Icon, label }]) => {
             // Short chip label (always visible under the icon). Long `label`
             // stays as the hover tooltip for the full name.

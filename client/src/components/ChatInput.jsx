@@ -107,9 +107,11 @@ function AddDirSelector() {
 }
 
 // Dropdown anchored to the trigger button (lightweight, no full-screen blur).
-export function EffortSelector() {
-  const effort = useStore((s) => s.effort);
-  const setEffort = useStore((s) => s.setEffort);
+export function EffortSelector({ permKey = null }) {
+  // Per-session effort (#9): show/select THIS session's level, falling back to
+  // the global default when the session has no explicit pick.
+  const effort = useStore((s) => (permKey && permKey in s.effortBySession ? s.effortBySession[permKey] : s.effort));
+  const setEffort = (id) => useStore.getState().setEffortFor(permKey, id);
   const [open, setOpen] = useState(false);
   const wrapRef = useRef(null);
   const current = EFFORT_LEVELS.find((e) => e.id === effort) || EFFORT_LEVELS[0];

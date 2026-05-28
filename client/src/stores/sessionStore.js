@@ -40,6 +40,11 @@ export const useStore = create((set, get) => ({
   // (bypass) shows B's mode, not A's. Keyed by sessionId, or `draft-<hash>`
   // for unsent drafts (mirrors sessionQueueKey).
   permissionModeBySession: readLs('cgui-perm-mode-by-session', {}),
+  // Same per-session pattern for model + effort (#9). currentModel/effort stay
+  // as the GLOBAL default (resolved from settings.json / WS); these maps hold
+  // each session's explicit override. A session with no entry uses the default.
+  modelBySession: readLs('cgui-model-by-session', {}),
+  effortBySession: readLs('cgui-effort-by-session', {}),
   // When enabled, spawn includes `--add-dir $HOME` so Claude can READ any file
   // under the user's home directory by default. Writes/edits still require
   // permission (unless mode is bypassPermissions / acceptEdits).
@@ -169,6 +174,35 @@ export const useStore = create((set, get) => ({
     if (!key) return get().permissionMode || 'default';
     const map = get().permissionModeBySession || {};
     return map[key] || 'default';
+  },
+  // Per-session model. No entry → global currentModel (the resolved default).
+  // Does NOT write settings.json — a per-session pick must not change the CLI's
+  // global default (which terminal use + cc switch rely on).
+  setModelFor: (key, model) => {
+    if (!model) return;
+    if (key) {
+      const map = { ...get().modelBySession, [key]: model };
+      writeLs('cgui-model-by-session', map);
+      set({ modelBySession: map, currentModel: model });
+    } else {
+      set({ currentModel: model });
+    }
+  },
+  getModelFor: (key) => (key && get().modelBySession[key]) || get().currentModel,
+  // Per-session effort. '' is a valid value (CLI default), so use key presence.
+  setEffortFor: (key, e) => {
+    if (key) {
+      const map = { ...get().effortBySession, [key]: e };
+      writeLs('cgui-effort-by-session', map);
+      set({ effortBySession: map, effort: e });
+    } else {
+      set({ effort: e });
+      try { localStorage.setItem('cgui-effort', e); } catch {}
+    }
+  },
+  getEffortFor: (key) => {
+    const map = get().effortBySession || {};
+    return key && key in map ? map[key] : get().effort;
   },
   setGlobalRead: (v) => {
     set({ globalRead: !!v });
@@ -437,19 +471,24 @@ export const useStore = create((set, get) => ({
   //   opts.tab=1   → write into secondaryMessages instead of messages
   //                  (tab=1 always forces silent so tab 0 doesn't flash loader)
   fetchMessages: async (sessionId, projectHash, opts = {}) => {
-    const tab = opts.tab === 1 ? 1 : 0;
-    const silent = !!opts.silent || tab === 1;
+    // tab 0..5 → write into paneMessages[tab] via setPaneMessages (which also
+    // mirrors the legacy messages/secondaryMessages slots). Only tab 0 drives
+    // the global loading flag; other panes load silently so they don't flash
+    // the whole-screen loader.
+    const tab = Number.isInteger(opts.tab) && opts.tab >= 0 && opts.tab <= 5 ? opts.tab : 0;
+    const silent = !!opts.silent || tab !== 0;
     if (!silent) set({ loading: true, error: null });
-    const key = tab === 1 ? 'secondaryMessages' : 'messages';
     try {
       const res = await fetch(
         `/api/sessions/${sessionId}/messages?projectHash=${encodeURIComponent(projectHash)}`
       );
       const data = await res.json();
       const messages = Array.isArray(data) ? data : [];
-      set(silent ? { [key]: messages } : { [key]: messages, loading: false });
+      get().setPaneMessages(tab, messages);
+      if (!silent) set({ loading: false });
     } catch (err) {
-      set(silent ? { [key]: [] } : { [key]: [], error: err.message, loading: false });
+      get().setPaneMessages(tab, []);
+      if (!silent) set({ error: err.message, loading: false });
     }
   },
 
