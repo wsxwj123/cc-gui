@@ -39,6 +39,11 @@ router.post('/worktree', async (req, res) => {
     // when the repo sat directly under it). e.g. repo `/a/b/myrepo` →
     // worktree `/a/b/myrepo-worktrees/<name>`.
     const container = pathResolve(root, '..', `${basename(root)}-worktrees`);
+    // Guard: never create the container outside $HOME (e.g. if root sits
+    // directly under /Users, its parent escapes HOME).
+    if (!container.startsWith(homedir())) {
+      return res.status(400).json({ error: 'worktree container would fall outside $HOME' });
+    }
     await mkdir(container, { recursive: true });
     const target = join(container, name);
     const branch = `gui/${name}`;

@@ -19,9 +19,19 @@ async function readSidecarCwd(projectDir) {
   }
 }
 
-/** Extract the exact launch cwd from a session jsonl's first `system` record. */
+/**
+ * Extract the exact launch cwd from a session jsonl's head records.
+ *
+ * NOTE: the CLI does NOT put cwd on the `system` record — in real jsonl the
+ * `cwd` field rides on `attachment` / `user` / `assistant` records (verified
+ * against live data: first cwd appears around line 3 on an `attachment`). The
+ * old `type === 'system'` filter therefore returned null on essentially every
+ * real session, which silently disabled both the de-collision filter and the
+ * Unicode-cwd recovery. Match ANY record that carries a string cwd — all
+ * records in one session share the same launch cwd, so the first hit is right.
+ */
 function cwdFromHead(head) {
-  return head.find((r) => r.type === 'system' && typeof r.cwd === 'string')?.cwd || null;
+  return head.find((r) => typeof r?.cwd === 'string' && r.cwd)?.cwd || null;
 }
 
 const CLAUDE_DIR = join(homedir(), '.claude');
@@ -83,7 +93,8 @@ export async function listProjects() {
       //   1. .cgui-meta.json sidecar (exact, Unicode-safe — set when GUI added it)
       //   2. newest session jsonl's launch cwd (exact, recovers Unicode)
       //   3. decodeProjectHash (lossy fallback for pure-ASCII dirs)
-      let realPath = await readSidecarCwd(projectPath);
+      const sidecarCwd = await readSidecarCwd(projectPath);
+      let realPath = sidecarCwd;
       if (!realPath && newestFile) {
         try {
           const { head } = await readJsonlEdges(join(projectPath, newestFile), 10);
@@ -92,10 +103,29 @@ export async function listProjects() {
       }
       if (!realPath) realPath = decodeProjectHash(entry.name);
 
+      // sessionCount must match what listSessions will actually show. For a
+      // sidecar project sharing a collapsed hash dir with another real path,
+      // the raw jsonl count would over-report (it includes the sibling's
+      // sessions), giving a non-zero badge over an empty list. Count only the
+      // jsonl whose launch cwd matches the sidecar (cwd-less files are kept,
+      // matching the filter in listSessions).
+      let sessionCount = jsonlFiles.length;
+      if (sidecarCwd && jsonlFiles.length > 0) {
+        let matched = 0;
+        for (const f of jsonlFiles) {
+          try {
+            const { head } = await readJsonlEdges(join(projectPath, f), 10);
+            const c = cwdFromHead(head);
+            if (!c || c === sidecarCwd) matched += 1;
+          } catch { matched += 1; }
+        }
+        sessionCount = matched;
+      }
+
       projects.push({
         hash: entry.name,
         path: realPath,
-        sessionCount: jsonlFiles.length,
+        sessionCount,
         lastActivity: new Date(lastModified).toISOString(),
       });
     } catch {
@@ -147,10 +177,10 @@ export async function listSessions(projectHash) {
       // Extract metadata from first user message
       const firstUser = head.find((r) => r.type === 'user');
       const lastRecord = tail[tail.length - 1];
-      // The session jsonl's first `system` record carries the EXACT cwd
-      // (including any Unicode characters) the CLI was launched with. We
-      // must pass this exact string back to --resume; reconstructing from
-      // the hash dir name loses Unicode (`肠骨轴` → `----` is one-way).
+      // The session jsonl records carry the EXACT cwd (including any Unicode
+      // characters) the CLI was launched with. We must pass this exact string
+      // back to --resume; reconstructing from the hash dir name loses Unicode
+      // (`肠骨轴` → `----` is one-way).
       const realCwd = cwdFromHead(head);
 
       // De-collision: drop sessions that belong to a different real path which
@@ -411,7 +441,7 @@ export async function getSessionMeta(sessionId, projectHash) {
   )];
   // EXACT cwd the CLI was launched with (Unicode-safe). Same logic as
   // listSessions — clients use this for --resume.
-  const realCwd = head.find((r) => r.type === 'system' && typeof r.cwd === 'string')?.cwd || null;
+  const realCwd = cwdFromHead(head);
 
   return {
     sessionId,

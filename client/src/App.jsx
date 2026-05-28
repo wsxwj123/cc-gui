@@ -2654,9 +2654,13 @@ export default function App() {
   const { sidebarCollapsed, toggleSidebar, selectedProject, selectedSession } = useStore();
   const [rightPanel, setRightPanel] = useState(null);
   // Per-session permission key for the header chip + bypass auto-resolve.
-  // Mirrors SessionDetail's sessionQueueKey so the header controls the same
-  // session's mode the composer sends with.
-  const permKey = selectedSession?.sessionId || `draft-${selectedSession?.projectHash || 'none'}`;
+  // Follows the ACTIVE pane (not always pane 0) so in split mode the top-bar
+  // mode chip controls whichever pane the user last focused — matching the
+  // sessionQueueKey that pane's composer sends with.
+  const activeTabIndex = useStore((s) => s.activeTabIndex);
+  const paneSessions = useStore((s) => s.paneSessions);
+  const activeSession = (paneSessions && paneSessions[activeTabIndex]) || selectedSession;
+  const permKey = activeSession?.sessionId || `draft-${activeSession?.projectHash || 'none'}`;
 
   // Apply persisted UI font scale on mount. Use document.documentElement.style
   // .zoom so even text-[12px]-style hardcoded sizes scale (not just rem).
