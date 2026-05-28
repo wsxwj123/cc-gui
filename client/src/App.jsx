@@ -1,21 +1,31 @@
-import React, { useEffect, useRef, useState, useCallback } from 'react';
+import React, { useEffect, useRef, useState, useCallback, useMemo } from 'react';
+
+// Stable empty array reference for zustand selectors — prevents React error
+// #185 (Maximum update depth exceeded) caused by returning fresh `[]` on
+// every selector call. Any selector with `|| []` fallback must point here.
+const EMPTY_ARRAY = Object.freeze([]);
 import { useStore } from './stores/sessionStore.js';
 import { useWebSocket } from './hooks/useWebSocket.js';
 import { MessageBubble } from './components/MessageBubble.jsx';
 import { TurnBubble } from './components/TurnBubble.jsx';
-import { ChatInput } from './components/ChatInput.jsx';
+import { ChatInput, EffortSelector, PermissionModeSelector } from './components/ChatInput.jsx';
 import { ModelBadge, ProviderAvatar } from './components/ModelBadge.jsx';
 import { UsagePanel } from './components/UsagePanel.jsx';
 import { ProcessPanel } from './components/ProcessPanel.jsx';
 import { SettingsPanel } from './components/SettingsPanel.jsx';
+import { FileExplorerPanel } from './components/FileExplorerPanel.jsx';
+import { useResizable as useResizableHook, Splitter as SplitterCmp } from './hooks/useResizable.jsx';
 import { MCPPanel } from './components/MCPPanel.jsx';
 import { FileChangesPanel } from './components/FileChangesPanel.jsx';
 import { AgentsPanel } from './components/AgentsPanel.jsx';
+import { AgentMonitorPanel } from './components/AgentMonitorPanel.jsx';
+import { computeCost, formatCost } from './utils/pricing.js';
 import {
   FolderOpen, MessageSquare, ChevronLeft, ChevronRight, ChevronDown,
   Search, Hash, Layers, BarChart3, ArrowLeft, Plus,
   RefreshCw, Activity, Settings, Server, GitBranch, FileDiff, Check, Wrench, X,
-  Sun, Moon, Monitor, Play, Bot, Camera, History,
+  Sun, Moon, Monitor, Play, Bot, Camera, History, Loader2, Shield, FolderTree,
+  Archive, ArchiveRestore, Trash2, EyeOff, Columns2,
 } from 'lucide-react';
 
 // ── Per-session shadow-git checkpoints ──────────────────────────
@@ -99,31 +109,46 @@ function CheckpointButton({ sessionId, cwd }) {
 // ── Continue most recent session (mirrors `claude --continue`) ────
 function ContinueButton() {
   const { projects, selectedProject } = useStore();
+  const [loading, setLoading] = useState(false);
   const handle = async () => {
-    const params = selectedProject ? `?projectHash=${encodeURIComponent(selectedProject.hash)}` : '';
+    if (loading) return;
+    setLoading(true);
     try {
+      const params = selectedProject ? `?projectHash=${encodeURIComponent(selectedProject.hash)}` : '';
       const res = await fetch(`/api/recent-session${params}`);
-      if (!res.ok) return;
+      if (!res.ok) { alert('没有最近会话'); return; }
       const { projectHash, sessionId } = await res.json();
-      const project = (selectedProject && selectedProject.hash === projectHash)
+      if (!projectHash || !sessionId) { alert('没有最近会话'); return; }
+      // Make sure projects are loaded — first launch may not have them yet.
+      let project = (selectedProject && selectedProject.hash === projectHash)
         ? selectedProject
         : projects.find((p) => p.hash === projectHash);
-      if (project) {
-        useStore.getState().setSelectedProject(project);
-        await useStore.getState().fetchSessions(project.hash);
-        const target = useStore.getState().sessions.find((s) => s.sessionId === sessionId);
-        if (target) {
-          useStore.getState().setSelectedSession(target);
-          useStore.getState().fetchMessages(target.sessionId, target.projectHash);
-        }
+      if (!project) {
+        await useStore.getState().fetchProjects();
+        project = useStore.getState().projects.find((p) => p.hash === projectHash);
       }
-    } catch {}
+      if (!project) { alert('找不到对应项目'); return; }
+      useStore.getState().setSelectedProject(project);
+      await useStore.getState().fetchSessions(project.hash, { silent: true });
+      const target = useStore.getState().sessions.find((s) => s.sessionId === sessionId);
+      if (target) {
+        useStore.getState().setSelectedSession(target);
+        useStore.getState().fetchMessages(target.sessionId, target.projectHash);
+      } else {
+        alert('会话已不存在');
+      }
+    } catch (err) {
+      alert('加载最近会话失败：' + err.message);
+    } finally {
+      setLoading(false);
+    }
   };
   return (
-    <button onClick={handle}
-      className="p-2 rounded-lg text-ink-muted hover:text-ink hover:bg-black/5 transition-colors"
+    <button onClick={handle} disabled={loading}
+      className="px-1.5 py-1 rounded-lg text-ink-muted hover:text-ink hover:bg-black/5 transition-colors disabled:opacity-50 flex flex-col items-center gap-0.5"
       title="继续最近的会话（claude --continue）">
-      <Play size={14} />
+      {loading ? <Loader2 size={14} className="animate-spin" /> : <Play size={14} />}
+      <span className="text-[9px] leading-none font-body">继续</span>
     </button>
   );
 }
@@ -144,9 +169,10 @@ function ThemeToggle() {
   };
   return (
     <button onClick={cycle}
-      className="p-2 rounded-lg text-ink-muted hover:text-ink hover:bg-black/5 transition-colors"
+      className="px-1.5 py-1 rounded-lg text-ink-muted hover:text-ink hover:bg-black/5 transition-colors flex flex-col items-center gap-0.5"
       title={`主题：${label}（点击切换）`}>
       <Icon size={15} />
+      <span className="text-[9px] leading-none font-body">主题</span>
     </button>
   );
 }
@@ -175,20 +201,186 @@ function formatPathShort(path) {
 }
 
 // ─── Right Panel (overlay) ────────────────────────────────────
+// Top-right panels. AgentsPanel (定义编辑器) is now reachable from inside
+// AgentMonitorPanel — no longer needs its own header icon.
 const PANEL_MAP = {
+  files: { label: '文件浏览器', icon: FolderTree, component: FileExplorerPanel },
+  monitor: { label: 'Subagent 监控', icon: Bot, component: AgentMonitorPanel },
   usage: { label: '用量统计', icon: BarChart3, component: UsagePanel },
-  processes: { label: '进程管理', icon: Activity, component: ProcessPanel },
+  processes: { label: '进程管理 / 停止', icon: Activity, component: ProcessPanel },
   mcp: { label: 'MCP 服务器', icon: Server, component: MCPPanel },
-  agents: { label: 'Subagents', icon: Bot, component: AgentsPanel },
   settings: { label: '设置', icon: Settings, component: SettingsPanel },
 };
 
-function RightPanel({ panelId, onClose }) {
+// useResizable + Splitter live in hooks/useResizable.js — kept aliased for
+// the in-file callsites below.
+const useResizable = useResizableHook;
+const Splitter = SplitterCmp;
+
+function _RESIZABLE_DEAD_({ initial, min, max, axis = 'x', storageKey, invert = false }) {
+  const [size, setSize] = useState(() => {
+    if (storageKey) {
+      try {
+        const v = parseFloat(localStorage.getItem(storageKey));
+        if (Number.isFinite(v)) return Math.max(min, Math.min(max, v));
+      } catch {}
+    }
+    return initial;
+  });
+  useEffect(() => {
+    if (!storageKey) return;
+    try { localStorage.setItem(storageKey, String(size)); } catch {}
+  }, [size, storageKey]);
+  const onMouseDown = useCallback((e) => {
+    e.preventDefault();
+    const startCoord = axis === 'x' ? e.clientX : e.clientY;
+    const startSize = size;
+    document.body.style.cursor = axis === 'x' ? 'col-resize' : 'row-resize';
+    document.body.style.userSelect = 'none';
+    const onMove = (ev) => {
+      const delta = (axis === 'x' ? ev.clientX : ev.clientY) - startCoord;
+      const next = Math.max(min, Math.min(max, startSize + (invert ? -delta : delta)));
+      setSize(next);
+    };
+    const onUp = () => {
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    };
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  }, [size, axis, min, max, invert]);
+  return [size, onMouseDown];
+}
+
+// (dead — replaced by import from hooks/useResizable.js)
+function _SplitterDead({ onMouseDown, axis = 'x' }) {
+  const isVert = axis === 'x';
+  return (
+    <div
+      onMouseDown={onMouseDown}
+      className={`shrink-0 ${isVert ? 'w-1 cursor-col-resize hover:w-1.5' : 'h-1 cursor-row-resize hover:h-1.5'} bg-transparent hover:bg-accent/30 transition-all relative z-10`}
+      title={isVert ? '拖动调节宽度' : '拖动调节高度'}
+    />
+  );
+}
+
+// Three-column resizable layout. Sidebar | main | optional right panel.
+// Widths persist to localStorage. Main has a min-width floor to stop the
+// chat from collapsing when both sides are stretched.
+//
+// Split mode: when splitMode=true, the main column splits into two equal
+// SessionDetail panes with a vertical Splitter between them. Pane widths
+// are managed by a single useResizable on the left pane (right pane = 1fr).
+// Clicking inside a pane focuses it (sets activeTabIndex) which drives
+// sidebar clicks and right-panel data sources.
+// Top-bar split toggle. Same shape as the right-panel icon buttons so it
+// visually fits inline. Active state mirrors splitMode.
+function SplitModeToggle() {
+  const splitMode = useStore((s) => s.splitMode);
+  const toggleSplitMode = useStore((s) => s.toggleSplitMode);
+  return (
+    <button
+      onClick={toggleSplitMode}
+      title={splitMode ? '关闭分屏' : '开启分屏（双会话并排）'}
+      className={`px-1.5 py-1 rounded-lg transition-all flex flex-col items-center gap-0.5 ${
+        splitMode ? 'bg-accent-subtle text-accent' : 'text-ink-muted hover:text-ink hover:bg-black/5'
+      }`}
+    >
+      <Columns2 size={15} />
+      <span className="text-[9px] leading-none font-body">分屏</span>
+    </button>
+  );
+}
+
+function MainLayout({ sidebarCollapsed, selectedProject, rightPanel, setRightPanel }) {
+  const [sidebarWidth, onSidebarDrag] = useResizable({
+    initial: 268, min: 200, max: 480, axis: 'x', storageKey: 'cgui-sidebar-width',
+  });
+  const [rightPanelWidth, onRightDrag] = useResizable({
+    initial: 340, min: 280, max: 600, axis: 'x', invert: true, storageKey: 'cgui-right-panel-width',
+  });
+  const splitMode = useStore((s) => s.splitMode);
+  const activeTabIndex = useStore((s) => s.activeTabIndex);
+  const setActiveTabIndex = useStore((s) => s.setActiveTabIndex);
+  return (
+    <div className="flex-1 flex min-h-0 gap-0 p-0">
+      {!sidebarCollapsed && (
+        <>
+          <aside
+            style={{ width: sidebarWidth }}
+            className="glass-thick shrink-0 flex flex-col m-3 mr-0 rounded-2xl overflow-hidden animate-glass-rise"
+          >
+            <div className="flex-1 min-h-0 overflow-hidden">
+              {selectedProject ? <SessionList /> : <ProjectList />}
+            </div>
+          </aside>
+          <Splitter onMouseDown={onSidebarDrag} axis="x" />
+        </>
+      )}
+      {splitMode ? (
+        <SplitMain
+          activeTabIndex={activeTabIndex}
+          setActiveTabIndex={setActiveTabIndex}
+        />
+      ) : (
+        <main className="flex-1 flex flex-col relative m-3 rounded-2xl overflow-hidden min-w-0" style={{ minWidth: '26em' }}>
+          <SessionDetail tabIndex={0} />
+        </main>
+      )}
+      {rightPanel && (
+        <>
+          <Splitter onMouseDown={onRightDrag} axis="x" />
+          <RightPanel panelId={rightPanel} onClose={() => setRightPanel(null)} width={rightPanelWidth} />
+        </>
+      )}
+    </div>
+  );
+}
+
+// Renders 2 SessionDetail panes side-by-side. Active pane gets a thin
+// accent ring on top so the user knows which one sidebar clicks will fill.
+//
+// Adaptive: min-width is expressed in `em` (relative to the document font
+// size + the user's zoom). At default size 1em ≈ 16px so 26em ≈ 416px —
+// enough for header buttons. As the user scales font up, the floor grows
+// proportionally so the panes never crush their own chrome.
+function SplitMain({ activeTabIndex, setActiveTabIndex }) {
+  const [leftWidth, onMidDrag] = useResizable({
+    initial: 620, min: 380, max: 1600, axis: 'x', storageKey: 'cgui-split-mid-width',
+  });
+  const paneCls = (focused) =>
+    `flex flex-col relative m-3 rounded-2xl overflow-hidden transition-shadow min-w-0 ${
+      focused ? 'ring-2 ring-accent/40 shadow-lg' : 'ring-1 ring-canvas-deep/40'
+    }`;
+  return (
+    <>
+      <div
+        onMouseDown={() => setActiveTabIndex(0)}
+        style={{ width: leftWidth, minWidth: '26em', flexShrink: 0 }}
+        className={paneCls(activeTabIndex === 0)}
+      >
+        <SessionDetail tabIndex={0} />
+      </div>
+      <Splitter onMouseDown={onMidDrag} axis="x" />
+      <div
+        onMouseDown={() => setActiveTabIndex(1)}
+        className={paneCls(activeTabIndex === 1)}
+        style={{ flex: '1 1 0', minWidth: '26em' }}
+      >
+        <SessionDetail tabIndex={1} />
+      </div>
+    </>
+  );
+}
+
+function RightPanel({ panelId, onClose, width }) {
   if (!panelId || !PANEL_MAP[panelId]) return null;
   const { label, icon: Icon, component: PanelComponent } = PANEL_MAP[panelId];
 
   return (
-    <div className="glass-thick w-[340px] shrink-0 flex flex-col m-3 ml-0 rounded-2xl overflow-hidden animate-glass-rise">
+    <div style={{ width }} className="glass-thick shrink-0 flex flex-col m-3 ml-0 rounded-2xl overflow-hidden animate-glass-rise">
       <div className="flex items-center justify-between px-4 py-3 border-b border-canvas-deep shrink-0">
         <div className="flex items-center gap-2">
           <Icon size={14} className="text-accent" />
@@ -253,11 +445,27 @@ function GlobalSearchResults({ q, onPick }) {
 // ─── Project List ──────────────────────────────────────────────
 function ProjectList() {
   const { projects, selectedProject, setSelectedProject, fetchProjects, fetchSessions, searchQuery, setSearchQuery } = useStore();
+  // Per-project local hide. Reads/writes a Set of project hashes in localStorage.
+  // "Hidden" projects vanish from this sidebar but stay on disk — restore by
+  // re-adding via the + button (same path → same hash → re-shown).
+  const readHidden = () => {
+    try { return new Set(JSON.parse(localStorage.getItem('cgui-hidden-projects') || '[]')); }
+    catch { return new Set(); }
+  };
+  const [hidden, setHidden] = useState(readHidden);
+  const toggleHidden = (hash) => {
+    setHidden((prev) => {
+      const next = new Set(prev);
+      if (next.has(hash)) next.delete(hash); else next.add(hash);
+      try { localStorage.setItem('cgui-hidden-projects', JSON.stringify([...next])); } catch {}
+      return next;
+    });
+  };
 
   useEffect(() => { fetchProjects(); }, []);
 
   const filtered = projects.filter((p) =>
-    p.path.toLowerCase().includes(searchQuery.toLowerCase())
+    !hidden.has(p.hash) && p.path.toLowerCase().includes(searchQuery.toLowerCase())
   );
 
   const handlePickHit = async (hit) => {
@@ -284,18 +492,71 @@ function ProjectList() {
             项目
           </h2>
           <button
-            onClick={() => {
-              const path = prompt('输入项目路径（如 ~/Desktop/my-project）');
-              if (path) {
-                fetch('/api/settings', {
+            onClick={async () => {
+              let path = null;
+              // Remember where the user picked last — open the dialog at the
+              // parent of that dir so they don't have to navigate from
+              // ~/Desktop every time. Falls back to Desktop on first run.
+              const lastStart = (() => {
+                try { return localStorage.getItem('cgui-picker-last-start') || ''; } catch { return ''; }
+              })();
+              try {
+                const r = await fetch('/api/pick-directory', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ prompt: '选择项目目录', startDir: lastStart || undefined }),
+                });
+                if (r.ok) {
+                  const data = await r.json();
+                  if (data.path === null) return;  // user cancelled
+                  path = data.path;
+                }
+              } catch {}
+              if (!path) {
+                path = prompt('输入项目路径（如 ~/Desktop/my-project）');
+              }
+              if (!path) return;
+              // Persist the parent dir so next "+" opens here, not at Desktop.
+              try {
+                const parent = path.replace(/\/[^/]+\/?$/, '') || '/';
+                localStorage.setItem('cgui-picker-last-start', parent);
+              } catch {}
+              // Register + auto-enter. Previously this only refreshed the list
+              // and left the user to click the new project manually.
+              try {
+                await fetch('/api/settings', {
                   method: 'PUT',
                   headers: { 'Content-Type': 'application/json' },
                   body: JSON.stringify({ _addProject: path }),
-                }).then(() => fetchProjects());
+                });
+              } catch {}
+              await fetchProjects();
+              // Find the project entry (server returns array of {hash, path}).
+              const fresh = useStore.getState().projects;
+              const proj = fresh.find((p) => p.path === path);
+              if (proj) {
+                useStore.getState().setSelectedProject(proj);
+                useStore.getState().fetchSessions(proj.hash, { silent: true });
+              } else {
+                // Path may not have any sessions yet — synthesize a project entry
+                // so the user can immediately start a new chat in it.
+                // IMPORTANT: must match claude-code CLI's hash format exactly —
+                // CLI uses `path.replace(/[/\s]/g, '-')` which KEEPS the leading
+                // slash as a leading dash (e.g. `-Users-foo-bar` for `/Users/foo bar`).
+                // The previous version stripped the leading slash before replacing,
+                // producing `Users-foo-bar` which never matched the CLI's output dir
+                // → fetchSessions(hash) returned 404 forever, so new-project chats
+                // would appear to "vanish" from sidebar history.
+                useStore.getState().setSelectedProject({
+                  path,
+                  hash: path.replace(/[/\s]/g, '-'),
+                  sessionCount: 0,
+                  lastActivity: null,
+                });
               }
             }}
             className="p-1 hover:bg-canvas-warm rounded transition-colors"
-            title="添加项目"
+            title="添加项目（系统文件选择器）"
           >
             <Plus size={14} className="text-ink-faint hover:text-accent" />
           </button>
@@ -316,33 +577,41 @@ function ProjectList() {
           <GlobalSearchResults q={searchQuery} onPick={handlePickHit} />
         )}
         {filtered.map((project) => (
-          <button
-            key={project.hash}
-            onClick={() => {
-              setSelectedProject(project);
-              fetchSessions(project.hash);
-            }}
-            className={`sidebar-item w-full text-left px-3 py-2.5 rounded-lg mb-0.5 transition-all animate-slide-in ${
-              selectedProject?.hash === project.hash
-                ? 'active bg-canvas-warm'
-                : 'hover:bg-canvas-warm/60'
-            }`}
-          >
-            <div className="flex items-center gap-2">
-              <FolderOpen size={13} className="text-warning/70 shrink-0" />
-              <span className="text-[13px] text-ink-soft truncate font-body font-medium">
-                {formatPathShort(project.path)}
-              </span>
-            </div>
-            <div className="flex items-center gap-3 mt-0.5 ml-[21px]">
-              <span className="text-[10px] text-ink-faint font-mono">
-                {project.sessionCount} 会话
-              </span>
-              <span className="text-[10px] text-ink-ghost">
-                {formatDate(project.lastActivity)}
-              </span>
-            </div>
-          </button>
+          <div key={project.hash} className="relative group">
+            <button
+              onClick={() => {
+                setSelectedProject(project);
+                fetchSessions(project.hash);
+              }}
+              className={`sidebar-item w-full text-left px-3 py-2.5 rounded-lg mb-0.5 transition-all animate-slide-in ${
+                selectedProject?.hash === project.hash
+                  ? 'active bg-canvas-warm'
+                  : 'hover:bg-canvas-warm/60'
+              }`}
+            >
+              <div className="flex items-center gap-2">
+                <FolderOpen size={13} className="text-warning/70 shrink-0" />
+                <span className="text-[13px] text-ink-soft truncate font-body font-medium">
+                  {formatPathShort(project.path)}
+                </span>
+              </div>
+              <div className="flex items-center gap-3 mt-0.5 ml-[21px]">
+                <span className="text-[10px] text-ink-faint font-mono">
+                  {project.sessionCount} 会话
+                </span>
+                <span className="text-[10px] text-ink-ghost">
+                  {formatDate(project.lastActivity)}
+                </span>
+              </div>
+            </button>
+            <button
+              onClick={(e) => { e.stopPropagation(); toggleHidden(project.hash); }}
+              className="absolute top-1.5 right-1.5 opacity-0 group-hover:opacity-100 transition-opacity p-1 hover:bg-canvas-deep rounded"
+              title="从侧栏隐藏（不删除本地文件，下次按 + 重新添加同路径即可恢复）"
+            >
+              <EyeOff size={12} className="text-ink-faint" />
+            </button>
+          </div>
         ))}
         {filtered.length === 0 && (
           <div className="px-4 py-8 text-center">
@@ -357,9 +626,10 @@ function ProjectList() {
 }
 
 // ─── Session List ──────────────────────────────────────────────
-function SessionItem({ session, isSelected, onSelect, onFork, forking }) {
+function SessionItem({ session, isSelected, onSelect, onFork, onArchive, onDelete, forking }) {
   const [expanded, setExpanded] = useState(false);
   const hasSubagents = session.subagents?.length > 0;
+  const isArchived = !!session.archived;
 
   return (
     <div className="relative group">
@@ -395,14 +665,35 @@ function SessionItem({ session, isSelected, onSelect, onFork, forking }) {
           </div>
         </div>
       </button>
-      <button
-        onClick={(e) => { e.stopPropagation(); onFork(session); }}
-        disabled={forking}
-        className="absolute top-2 right-2 opacity-0 group-hover:opacity-100 transition-opacity p-1 hover:bg-canvas-deep rounded"
-        title="分叉会话"
-      >
-        <GitBranch size={12} className={forking ? 'text-accent animate-spin' : 'text-ink-faint'} />
-      </button>
+      <div className="absolute top-1.5 right-1.5 opacity-0 group-hover:opacity-100 transition-opacity flex items-center gap-0.5">
+        <button
+          onClick={(e) => { e.stopPropagation(); onFork(session); }}
+          disabled={forking}
+          className="p-1 hover:bg-canvas-deep rounded"
+          title="分叉会话"
+        >
+          <GitBranch size={12} className={forking ? 'text-accent animate-spin' : 'text-ink-faint'} />
+        </button>
+        <button
+          onClick={(e) => { e.stopPropagation(); onArchive(session); }}
+          className="p-1 hover:bg-canvas-deep rounded"
+          title={isArchived ? '取消归档' : '归档（折叠到归档页）'}
+        >
+          {isArchived
+            ? <ArchiveRestore size={12} className="text-accent" />
+            : <Archive size={12} className="text-ink-faint" />}
+        </button>
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            if (confirm('永久删除该会话历史？（jsonl 文件将被删除，无法恢复）')) onDelete(session);
+          }}
+          className="p-1 hover:bg-red-50 rounded"
+          title="删除本地会话历史"
+        >
+          <Trash2 size={12} className="text-ink-faint hover:text-red-600" />
+        </button>
+      </div>
       {expanded && hasSubagents && (
         <div className="ml-5 pl-2 border-l border-canvas-deep space-y-0.5 mb-1">
           {session.subagents.map((sub) => (
@@ -428,28 +719,134 @@ function SessionItem({ session, isSelected, onSelect, onFork, forking }) {
 
 function SessionList() {
   const { sessions, selectedSession, setSelectedSession, fetchMessages, selectedProject } = useStore();
+  // In split mode, sidebar clicks fill the focused pane (tab 0 or 1).
+  // Outside split mode the call collapses to setSelectedSession + tab-0
+  // fetch — i.e. identical to the legacy single-pane behavior.
+  const splitMode = useStore((s) => s.splitMode);
+  const activeTabIndex = useStore((s) => s.activeTabIndex);
+  const setActiveTabSession = useStore((s) => s.setActiveTabSession);
+  const secondarySession = useStore((s) => s.secondarySession);
   const [forking, setForking] = useState(null);
+  const [showArchived, setShowArchived] = useState(false);
+
+  const visible = sessions.filter((s) => !!s.archived === showArchived);
+  const activeCount = sessions.filter((s) => !s.archived).length;
+  const archivedCount = sessions.filter((s) => !!s.archived).length;
+
+  const handleArchive = async (session) => {
+    try {
+      await fetch(`/api/sessions/${session.sessionId}/archive`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ projectHash: session.projectHash, archived: !session.archived }),
+      });
+      useStore.getState().fetchSessions(selectedProject.hash, { silent: true });
+    } catch (err) {
+      alert('归档失败：' + err.message);
+    }
+  };
+
+  const handleDelete = async (session) => {
+    try {
+      const r = await fetch(
+        `/api/sessions/${session.sessionId}?projectHash=${encodeURIComponent(session.projectHash)}`,
+        { method: 'DELETE' }
+      );
+      if (!r.ok) { const e = await r.json().catch(() => ({})); alert('删除失败：' + (e.error || r.status)); return; }
+      if (selectedSession?.sessionId === session.sessionId) setSelectedSession(null);
+      useStore.getState().fetchSessions(selectedProject.hash, { silent: true });
+    } catch (err) {
+      alert('删除失败：' + err.message);
+    }
+  };
+
+  // Auto-refresh the session list when any .jsonl in ~/.claude/projects/
+  // changes (file watcher dispatches via useWebSocket). Debounced so a busy
+  // stream doesn't spam fetches. This fixes the "new session A → new session B
+  // → A missing from history" race: the moment claude appends to A's jsonl,
+  // sidebar refetches and A shows up.
+  useEffect(() => {
+    if (!selectedProject?.hash) return;
+    let timer = null;
+    const onChange = () => {
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => {
+        useStore.getState().fetchSessions(selectedProject.hash, { silent: true });
+      }, 600);
+    };
+    window.addEventListener('cgui:sessions-changed', onChange);
+    return () => {
+      window.removeEventListener('cgui:sessions-changed', onChange);
+      if (timer) clearTimeout(timer);
+    };
+  }, [selectedProject?.hash]);
 
   const handleNew = () => {
     if (!selectedProject) return;
     // A "draft" session has no sessionId yet; the real one is captured from the
-    // first stream-json system/init event and patched into selectedSession.
-    setSelectedSession({
+    // first stream-json system/init event and patched into the active session
+    // slot (split or single).
+    const draft = {
       draft: true,
       sessionId: null,
       projectHash: selectedProject.hash,
       projectPath: selectedProject.path,
       firstPrompt: '新会话',
-    });
-    useStore.setState({ messages: [] });
+    };
+    if (splitMode) {
+      setActiveTabSession(draft);
+      if (activeTabIndex === 1) useStore.getState().setSecondaryMessages([]);
+      else useStore.setState({ messages: [] });
+    } else {
+      setSelectedSession(draft);
+      useStore.setState({ messages: [] });
+    }
   };
 
-  // Spin up a git worktree off the current project and put the GUI into draft
-  // mode pointing at the new isolated working tree. Mirrors `claude --worktree`.
-  const handleNewWorktree = async () => {
+  // Worktree picker modal — opens with list of existing worktrees (each
+  // showing branch / last commit / dirty file count) so user can pick one,
+  // OR create a new one by filling a name input.
+  const [worktreeOpen, setWorktreeOpen] = useState(false);
+  const [worktreeList, setWorktreeList] = useState(null);
+  const [newWorktreeName, setNewWorktreeName] = useState('');
+
+  const openWorktreePicker = async () => {
     if (!selectedProject) return;
-    const name = prompt('worktree 名称（会作为分支名 gui/<name>）', `session-${Date.now()}`);
-    if (!name) return;
+    setWorktreeOpen(true);
+    setWorktreeList(null);
+    try {
+      const r = await fetch(`/api/worktree?cwd=${encodeURIComponent(selectedProject.path)}`);
+      const d = await r.json();
+      if (r.ok) setWorktreeList(d.trees || []);
+      else setWorktreeList([]);
+    } catch {
+      setWorktreeList([]);
+    }
+  };
+
+  const enterWorktree = (tree) => {
+    if (!tree?.path || !selectedProject) return;
+    const draft = {
+      draft: true,
+      sessionId: null,
+      projectHash: selectedProject.hash,
+      projectPath: tree.path,
+      firstPrompt: `新会话 · ${tree.branch || tree.path.split('/').pop()}`,
+    };
+    if (splitMode) {
+      setActiveTabSession(draft);
+      if (activeTabIndex === 1) useStore.getState().setSecondaryMessages([]);
+      else useStore.setState({ messages: [] });
+    } else {
+      setSelectedSession(draft);
+      useStore.setState({ messages: [] });
+    }
+    setWorktreeOpen(false);
+  };
+
+  const createWorktree = async () => {
+    if (!selectedProject) return;
+    const name = (newWorktreeName || '').trim() || `session-${Date.now()}`;
     try {
       const r = await fetch('/api/worktree', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -457,16 +854,15 @@ function SessionList() {
       });
       const d = await r.json();
       if (!r.ok) return alert('创建 worktree 失败：' + d.error);
-      setSelectedSession({
-        draft: true,
-        sessionId: null,
-        projectHash: selectedProject.hash,
-        projectPath: d.path,
-        firstPrompt: `新会话 · ${d.branch}`,
-      });
-      useStore.setState({ messages: [] });
-    } catch (err) { alert('创建 worktree 失败：' + err.message); }
+      enterWorktree({ path: d.path, branch: d.branch });
+      setNewWorktreeName('');
+    } catch (err) {
+      alert('创建 worktree 失败：' + err.message);
+    }
   };
+
+  // Back-compat: keep handleNewWorktree name pointing at the new picker.
+  const handleNewWorktree = openWorktreePicker;
 
   const handleFork = async (session) => {
     setForking(session.sessionId);
@@ -484,8 +880,15 @@ function SessionList() {
   };
 
   const handleSelect = (session) => {
-    setSelectedSession(session);
-    fetchMessages(session.sessionId, session.projectHash);
+    if (splitMode) {
+      setActiveTabSession(session);
+      // Pass tab index so messages land in the correct slot (tab 1 stays
+      // silent so it never flashes the global loader on tab 0).
+      fetchMessages(session.sessionId, session.projectHash, { tab: activeTabIndex });
+    } else {
+      setSelectedSession(session);
+      fetchMessages(session.sessionId, session.projectHash);
+    }
   };
 
   return (
@@ -513,24 +916,133 @@ function SessionList() {
           </button>
         </div>
         <p className="text-xs text-ink-muted font-body truncate ml-6">{formatPath(selectedProject?.path)}</p>
+        {/* Git status check at project level — fires immediately on project
+            selection, doesn't wait for a session to be opened. This was the
+            missing piece behind "新建项目文件夹不再自动检测 git 仓库"; the banner
+            previously only mounted inside SessionDetail. */}
+        <div className="-mx-4 mt-2">
+          <GitInitBanner cwd={selectedProject?.path} />
+        </div>
+        <div className="flex items-center gap-1 mt-2 -mb-1">
+          <button
+            onClick={() => setShowArchived(false)}
+            className={`px-2 py-0.5 text-[10.5px] rounded font-body transition-colors ${
+              !showArchived ? 'bg-accent/15 text-accent' : 'text-ink-faint hover:text-ink-muted'
+            }`}
+          >活跃 <span className="font-mono opacity-70">{activeCount}</span></button>
+          <button
+            onClick={() => setShowArchived(true)}
+            className={`px-2 py-0.5 text-[10.5px] rounded font-body transition-colors ${
+              showArchived ? 'bg-accent/15 text-accent' : 'text-ink-faint hover:text-ink-muted'
+            }`}
+          >已归档 <span className="font-mono opacity-70">{archivedCount}</span></button>
+        </div>
       </div>
       <div className="flex-1 overflow-y-auto px-2 stagger">
-        {sessions.map((session) => (
+        {visible.map((session) => (
           <SessionItem
             key={session.sessionId}
             session={session}
-            isSelected={selectedSession?.sessionId === session.sessionId}
+            isSelected={
+              selectedSession?.sessionId === session.sessionId
+              || (splitMode && secondarySession?.sessionId === session.sessionId)
+            }
             onSelect={handleSelect}
             onFork={handleFork}
+            onArchive={handleArchive}
+            onDelete={handleDelete}
             forking={forking === session.sessionId}
           />
         ))}
-        {sessions.length === 0 && (
+        {visible.length === 0 && (
           <div className="px-4 py-8 text-center">
-            <p className="text-xs text-ink-faint font-body">该项目没有会话</p>
+            <p className="text-xs text-ink-faint font-body">
+              {showArchived ? '没有已归档的会话' : '该项目没有活跃会话'}
+            </p>
           </div>
         )}
       </div>
+
+      {/* Worktree picker modal */}
+      {worktreeOpen && (
+        <div
+          className="fixed inset-0 z-[100] flex items-center justify-center bg-black/30 backdrop-blur-sm animate-fade-in"
+          onClick={() => setWorktreeOpen(false)}
+        >
+          <div
+            className="glass-popover w-[480px] max-h-[80vh] flex flex-col py-1 animate-glass-rise"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="px-4 py-2.5 text-[11px] text-ink-faint uppercase tracking-wider font-body flex items-center justify-between border-b border-canvas-deep">
+              <span>选择 / 新建 Git Worktree</span>
+              <button onClick={() => setWorktreeOpen(false)} className="p-1 hover:bg-canvas-warm rounded">
+                <X size={12} />
+              </button>
+            </div>
+            <div className="flex-1 overflow-y-auto p-2">
+              {worktreeList === null ? (
+                <div className="text-[11px] text-ink-faint py-6 text-center font-body">加载中…</div>
+              ) : worktreeList.length === 0 ? (
+                <div className="text-[11px] text-ink-faint py-6 text-center font-body">没有现有 worktree</div>
+              ) : (
+                worktreeList.map((t) => (
+                  <button
+                    key={t.path}
+                    onClick={() => enterWorktree(t)}
+                    className="w-full text-left px-3 py-2 mb-1 rounded-lg hover:bg-canvas-warm border border-canvas-deep transition-colors group"
+                  >
+                    <div className="flex items-center gap-2 mb-0.5">
+                      <GitBranch size={12} className="text-accent shrink-0" />
+                      <span className="text-xs font-medium font-mono text-ink">
+                        {t.branch || '(detached)'}
+                      </span>
+                      {t.isMain && (
+                        <span className="text-[9px] px-1.5 py-0.5 bg-canvas-deep text-ink-faint rounded font-mono">主</span>
+                      )}
+                      {t.dirtyFileCount > 0 && (
+                        <span className="text-[9px] px-1.5 py-0.5 bg-amber-50 text-amber-700 rounded font-mono">
+                          {t.dirtyFileCount} 未提交
+                        </span>
+                      )}
+                    </div>
+                    <div className="text-[10.5px] text-ink-faint font-mono truncate">{t.path}</div>
+                    {t.lastCommit?.subject && (
+                      <div className="text-[10.5px] text-ink-muted font-body truncate mt-0.5">
+                        {t.lastCommit.subject}
+                        <span className="text-ink-ghost ml-2 font-mono">
+                          {t.lastCommit.ts ? new Date(t.lastCommit.ts).toLocaleDateString('zh-CN') : ''}
+                        </span>
+                      </div>
+                    )}
+                  </button>
+                ))
+              )}
+            </div>
+            <div className="border-t border-canvas-deep p-3 bg-canvas-warm/40">
+              <div className="text-[10px] text-ink-faint uppercase tracking-wider font-body mb-1.5">新建 worktree</div>
+              <div className="flex gap-1.5">
+                <input
+                  type="text"
+                  value={newWorktreeName}
+                  onChange={(e) => setNewWorktreeName(e.target.value)}
+                  onKeyDown={(e) => e.key === 'Enter' && createWorktree()}
+                  placeholder="分支名 (如 feature-X)"
+                  className="flex-1 bg-canvas border border-canvas-deep rounded px-2 py-1 text-[11px] font-mono text-ink focus:outline-none focus:border-accent/40"
+                />
+                <button
+                  onClick={createWorktree}
+                  className="btn-accent px-3 py-1 text-[11px] font-body"
+                >
+                  新建
+                </button>
+              </div>
+              <p className="text-[10px] text-ink-faint font-body mt-1.5">
+                创建 <code className="font-mono">gui/&lt;name&gt;</code> 分支 + 检出到隔离工作树
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -550,100 +1062,654 @@ function EmptyState() {
   );
 }
 
+// ─── CLI-style spinner ─────────────────────────────────────────
+// Mimics claude-code terminal: a 6-point asterisk that cycles through Unicode
+// frames every ~100ms, paired with a verb that changes every ~3s.
+const SPINNER_FRAMES = ['✻', '✶', '✷', '✸', '✹', '✺'];
+const THINKING_VERBS = [
+  'Frolicking', 'Pondering', 'Brewing', 'Cogitating', 'Mulling',
+  'Conjuring', 'Crafting', 'Weaving', 'Synthesizing', 'Noodling',
+  'Spelunking', 'Marinating', 'Percolating', 'Ruminating',
+];
+// Bigger, brand-colored spinner — Claude terracotta #D97757, ~20px default
+// (was 14px and accent-blue). Matches Claude's official brand color so the
+// "thinking..." indicator feels like Claude's own UI.
+function CliSpinner({ size = 20 }) {
+  const [frame, setFrame] = useState(0);
+  useEffect(() => {
+    const id = setInterval(() => setFrame((f) => (f + 1) % SPINNER_FRAMES.length), 120);
+    return () => clearInterval(id);
+  }, []);
+  return (
+    <span
+      className="font-mono inline-block leading-none"
+      style={{ fontSize: size, color: '#D97757' }}
+    >
+      {SPINNER_FRAMES[frame]}
+    </span>
+  );
+}
+function useCyclingVerb() {
+  const [i, setI] = useState(() => Math.floor(Math.random() * THINKING_VERBS.length));
+  useEffect(() => {
+    const id = setInterval(() => setI((x) => (x + 1) % THINKING_VERBS.length), 3000);
+    return () => clearInterval(id);
+  }, []);
+  return THINKING_VERBS[i];
+}
+
+// ─── Streaming status line ─────────────────────────────────────
+// Inline status that mirrors the CLI's "✻ Frolicking…" prompt — spinner
+// char + verb + optional tool/phase detail. Updates live as the model
+// moves through phases inside one turn.
+function StreamingStatusLine({ thinking, text, toolCalls }) {
+  const verb = useCyclingVerb();
+  let label = null;
+  // Latest unresolved tool call (no result yet) → "Bash(ls)"
+  const pendingTool = [...toolCalls].reverse().find((tc) => !tc.result);
+  if (pendingTool) {
+    const preview =
+      pendingTool.input?.command ||
+      pendingTool.input?.file_path?.split('/').pop() ||
+      pendingTool.input?.pattern ||
+      pendingTool.input?.query || '';
+    const previewStr = String(preview).slice(0, 60);
+    label = `${pendingTool.name}${previewStr ? `(${previewStr})` : ''}`;
+  } else if (text) {
+    label = 'Writing';
+  } else if (thinking) {
+    label = verb;
+  } else {
+    return null;
+  }
+  return (
+    <div className="px-6 pt-3 pb-1 animate-fade-in">
+      <div className="max-w-3xl mx-auto flex items-center gap-2.5 text-[14px] text-ink-soft font-body">
+        <CliSpinner size={22} />
+        <span className="font-mono truncate font-medium" style={{ color: '#D97757' }}>{label}</span>
+        <span style={{ color: '#D97757' }}>…</span>
+      </div>
+    </div>
+  );
+}
+
+// ─── Git Init Banner ───────────────────────────────────────────
+// Non-blocking replacement for the native confirm() git preflight (which got
+// silently suppressed by browsers / hidden behind modals, leaving sends stuck).
+// Shows an orange bar above the chat when cwd isn't a git repo. User can
+// either click "立即初始化" or dismiss ("本会话忽略" → sessionStorage).
+// Permission-mode hint — sits below the session title when in `default`
+// mode. Originally warned the CLI couldn't prompt for permissions in -p
+// mode; that's no longer true after the PreToolUse bridge ships the popup.
+// The banner now just nudges users who'd prefer a faster mode, with quick
+// switches + a one-click "永久忽略" stored in localStorage.
+function PermissionModeHintBanner({ permKey }) {
+  const permissionMode = useStore((s) => (permKey ? (s.permissionModeBySession[permKey] || 'default') : s.permissionMode));
+  const setPermissionMode = useStore((s) => s.setPermissionMode);
+  const [dismissed, setDismissed] = useState(() => {
+    try { return localStorage.getItem('cgui-perm-hint-dismissed') === '1'; }
+    catch { return false; }
+  });
+  if (permissionMode !== 'default' || dismissed) return null;
+  const dismiss = () => {
+    try { localStorage.setItem('cgui-perm-hint-dismissed', '1'); } catch {}
+    setDismissed(true);
+  };
+  return (
+    <div className="shrink-0 mx-6 mt-2 px-3 py-2 rounded-md bg-amber-50 border border-amber-200 flex items-center gap-2 text-[11px] font-body animate-fade-up">
+      <Shield size={13} className="text-amber-600 shrink-0" />
+      <span className="text-amber-800 flex-1">
+        当前是<b>默认权限</b>模式：每次工具调用都会在输入框上方弹窗征求你同意。
+        想加速可切换到接受编辑或放任。
+      </span>
+      <button
+        onClick={() => setPermissionMode('acceptEdits', permKey)}
+        className="px-2 py-0.5 rounded bg-amber-100 hover:bg-amber-200 text-amber-900 text-[10px] font-medium shrink-0"
+        title="自动接受 Edit/Write 工具的调用"
+      >接受编辑</button>
+      <button
+        onClick={() => setPermissionMode('bypassPermissions', permKey)}
+        className="px-2 py-0.5 rounded bg-red-100 hover:bg-red-200 text-red-900 text-[10px] font-medium shrink-0"
+        title="跳过全部权限检查（危险）"
+      >放任所有</button>
+      <button
+        onClick={dismiss}
+        className="px-2 py-0.5 rounded hover:bg-amber-100 text-amber-700 text-[10px] shrink-0"
+        title="永久隐藏此提示（仍可通过权限模式选择器手动切换）"
+      >忽略</button>
+    </div>
+  );
+}
+
+function GitInitBanner({ cwd }) {
+  // 'unknown' | 'repo' | 'norepo' | 'dismissed' | 'busy' | 'done' | 'partial'
+  const [status, setStatus] = useState(null);
+  const [warning, setWarning] = useState(null);
+  // Recheck git status whenever `cwd` changes OR a kick counter ticks (so we
+  // can re-run the check after a successful init without remounting).
+  const [kick, setKick] = useState(0);
+  useEffect(() => {
+    if (!cwd) return;
+    const skipKey = `cgui-git-skip-${cwd}`;
+    if (sessionStorage.getItem(skipKey)) { setStatus('dismissed'); return; }
+    setStatus('unknown');
+    fetch(`/api/git/status?cwd=${encodeURIComponent(cwd)}`)
+      .then((r) => r.json())
+      .then((s) => setStatus(s?.isRepo === false ? 'norepo' : 'repo'))
+      .catch(() => setStatus('repo'));  // network err → silent
+  }, [cwd, kick]);
+
+  if (status !== 'norepo' && status !== 'busy' && status !== 'done' && status !== 'partial') return null;
+
+  const init = async () => {
+    setStatus('busy');
+    setWarning(null);
+    try {
+      const r = await fetch('/api/git/init', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cwd }),
+      });
+      const data = await r.json().catch(() => ({}));
+      if (r.ok) {
+        // Re-check status from the server — banner hides if isRepo flipped.
+        setKick((k) => k + 1);
+        if (data.baselineWarning) {
+          setWarning(data.baselineWarning);
+          setStatus('partial');
+        } else {
+          setStatus('done');
+        }
+      } else {
+        alert('git init 失败：' + (data.error || r.status));
+        setStatus('norepo');
+      }
+    } catch (err) { alert('git init 失败：' + err.message); setStatus('norepo'); }
+  };
+
+  const dismiss = () => {
+    try { sessionStorage.setItem(`cgui-git-skip-${cwd}`, '1'); } catch {}
+    setStatus('dismissed');
+  };
+
+  if (status === 'done') {
+    return (
+      <div className="bg-green-50 border-b border-green-200 px-4 py-2 text-[12px] font-body text-green-800 flex items-center gap-2">
+        <GitBranch size={13} className="text-green-700 shrink-0" />
+        <span className="flex-1">已 <code className="font-mono">git init</code> + 基线提交，AI 修改可随时回滚。</span>
+      </div>
+    );
+  }
+
+  if (status === 'partial') {
+    return (
+      <div className="bg-amber-50 border-b border-amber-200 px-4 py-2 text-[12px] font-body text-amber-900 flex items-start gap-2">
+        <GitBranch size={13} className="text-amber-700 shrink-0 mt-0.5" />
+        <span className="flex-1">
+          <b>已 <code className="font-mono">git init</code>，基线提交跳过</b>
+          ：目录里含嵌入式 git 仓库无法 <code className="font-mono">add -A</code>。回滚仍可用（基于发送前的 checkpoint），但全量基线提交不会被记录。
+          {warning && <span className="block text-[10.5px] text-amber-700 mt-1 font-mono truncate">{warning.slice(0, 200)}</span>}
+        </span>
+        <button onClick={dismiss} className="text-amber-700 hover:text-amber-900 underline text-[11px] shrink-0">本会话忽略</button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="bg-amber-50 border-b border-amber-200 px-4 py-2 text-[12px] font-body text-amber-900 flex items-center gap-2">
+      <GitBranch size={13} className="text-amber-700 shrink-0" />
+      <span className="flex-1">
+        <b>这个目录不是 git 仓库</b>。建议先 init + 基线提交，方便回滚 AI 的修改。
+      </span>
+      <button
+        onClick={init}
+        disabled={status === 'busy'}
+        className="px-2.5 py-1 rounded bg-amber-700 text-white text-[11px] font-medium hover:bg-amber-800 disabled:opacity-50 shrink-0"
+      >
+        {status === 'busy' ? '初始化中…' : '立即初始化'}
+      </button>
+      <button
+        onClick={dismiss}
+        className="px-2 py-1 rounded text-amber-800 text-[11px] hover:bg-amber-100 shrink-0"
+      >
+        本会话忽略
+      </button>
+    </div>
+  );
+}
+
 // ─── Session Detail ────────────────────────────────────────────
-function SessionDetail() {
-  const { messages, selectedSession, selectedProject, loading } = useStore();
+function SessionDetail({ tabIndex = 0 }) {
+  // Split-mode tab routing: when tabIndex===1 we render the SECOND pane and
+  // read from secondary{Session,Messages} + write back via setSecondarySession
+  // / setSecondaryMessages. tabIndex===0 keeps the legacy globals untouched
+  // so single-pane behavior is identical. EVERY downstream selectedSession
+  // reference reads the local alias below, so the rest of this 700-line
+  // component is unchanged.
+  const { selectedProject, loading } = useStore();
+  const globalSelectedSession = useStore((s) => s.selectedSession);
+  const globalSecondarySession = useStore((s) => s.secondarySession);
+  const globalMessages = useStore((s) => s.messages);
+  const globalSecondaryMessages = useStore((s) => s.secondaryMessages);
+  const selectedSession = tabIndex === 1 ? globalSecondarySession : globalSelectedSession;
+  const messages = tabIndex === 1 ? globalSecondaryMessages : globalMessages;
+  // Wrapped setters that route by tab. `setLocalMessages` is the equivalent of
+  // `useStore.setState({ messages: ... })` but writes the right slot.
+  const setSelectedSession = useCallback((s) => {
+    if (tabIndex === 1) useStore.getState().setSecondarySession(s);
+    else useStore.getState().setSelectedSession(s);
+  }, [tabIndex]);
+  const setLocalMessages = useCallback((msgs) => {
+    if (tabIndex === 1) useStore.getState().setSecondaryMessages(msgs);
+    else useStore.setState({ messages: Array.isArray(msgs) ? msgs : [] });
+  }, [tabIndex]);
+  const getLocalMessages = useCallback(() => {
+    return tabIndex === 1
+      ? (useStore.getState().secondaryMessages || [])
+      : (useStore.getState().messages || []);
+  }, [tabIndex]);
+  // Latest session for the local tab — used inside async callbacks where
+  // closure'd `selectedSession` would be stale.
+  const getLocalSession = useCallback(() => {
+    return tabIndex === 1
+      ? useStore.getState().secondarySession
+      : useStore.getState().selectedSession;
+  }, [tabIndex]);
+  // Tab-aware fetchMessages wrapper: forwards tabIndex so the store writes
+  // into the correct messages slot.
+  const fetchMessagesForTab = useCallback((sid, ph, opts = {}) => {
+    return useStore.getState().fetchMessages(sid, ph, { ...opts, tab: tabIndex });
+  }, [tabIndex]);
+  // Subscribe to these EARLY (before any conditional return) so React's hook
+  // order stays stable. After a session-load transition we'd otherwise add a
+  // hook below the early return → React #310 → blank page.
+  const currentProvider = useStore((s) => s.currentProvider);
+  const currentModel = useStore((s) => s.currentModel);
   const messagesEndRef = useRef(null);
   const containerRef = useRef(null);
   const [autoScroll, setAutoScroll] = useState(true);
   const [chatMessages, setChatMessages] = useState([]);
   const [isStreaming, setIsStreaming] = useState(false);
+  // Mirror of isStreaming in a ref. Used by handleSend's gate instead of the
+  // closure'd state — closures lag one render behind, so a rapid rollback →
+  // updateStreaming(false) → setTimeout(handleSend, 50) chain would see stale
+  // `true` and enqueue the message instead of sending it. The ref is updated
+  // synchronously alongside every setIsStreaming call.
+  const streamingRef = useRef(false);
+  const updateStreaming = (v) => { streamingRef.current = v; setIsStreaming(v); };
   const [streamingText, setStreamingText] = useState('');
+  const [streamingThinking, setStreamingThinking] = useState('');
   const [streamingModel, setStreamingModel] = useState(null);
   const [streamingToolCalls, setStreamingToolCalls] = useState([]);
+  // Ordered blocks for in-order rendering (text → tool → text → tool → write).
+  const [streamingBlocks, setStreamingBlocks] = useState([]);
   const [showFileChanges, setShowFileChanges] = useState(false);
   const activeProcRef = useRef(null);
   const abortRef = useRef(null);
 
-  useEffect(() => {
-    if (autoScroll && messagesEndRef.current) {
-      messagesEndRef.current.scrollIntoView({ behavior: 'smooth' });
+  // Latest TodoWrite snapshot for the composer's checklist panel. TodoWrite
+  // calls REPLACE the full list each time, so the newest call wins. Search
+  // freshest-first: streaming blocks → chatMessages → persisted messages.
+  // DECLARED HERE (above any conditional early return) so hook order stays
+  // stable when selectedSession flips from null → set → null (React #310).
+  const currentTodos = useMemo(() => {
+    const scanToolCalls = (toolCalls) => {
+      if (!Array.isArray(toolCalls)) return null;
+      for (let j = toolCalls.length - 1; j >= 0; j--) {
+        const tc = toolCalls[j];
+        if (tc?.name === 'TodoWrite' && Array.isArray(tc.input?.todos)) {
+          return tc.input.todos;
+        }
+      }
+      return null;
+    };
+    for (let i = streamingBlocks.length - 1; i >= 0; i--) {
+      const b = streamingBlocks[i];
+      if (b?.type === 'tool_use' && b.toolCall?.name === 'TodoWrite' && Array.isArray(b.toolCall.input?.todos)) {
+        return b.toolCall.input.todos;
+      }
     }
-  }, [messages, chatMessages, streamingText, autoScroll]);
+    for (let i = chatMessages.length - 1; i >= 0; i--) {
+      const m = chatMessages[i];
+      if (m?.type !== 'turn') continue;
+      const found = scanToolCalls(m.toolCalls);
+      if (found) return found;
+    }
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const m = messages[i];
+      if (m?.type !== 'turn') continue;
+      const found = scanToolCalls(m.toolCalls);
+      if (found) return found;
+    }
+    return null;
+  }, [streamingBlocks, chatMessages, messages]);
+
+  // When the file watcher reports a write to THIS session's jsonl (e.g. a
+  // detached background stream from another tab/session is still writing),
+  // silently re-pull messages so the UI catches up.
+  //
+  // ALSO clear local chatMessages once the jsonl-derived messages have the
+  // user prompt that's currently sitting in chatMessages. Otherwise the same
+  // turn would render twice — once from `messages` (persisted, from jsonl)
+  // and once from `chatMessages` (the in-memory copy from the just-finished
+  // local stream).
+  useEffect(() => {
+    if (!selectedSession?.sessionId || !selectedSession?.projectHash) return;
+    const onChange = async (e) => {
+      const p = e?.detail?.path || '';
+      if (!p.endsWith(`/${selectedSession.sessionId}.jsonl`)) return;
+      // If a stream is running RIGHT NOW for this session, skip the disk
+      // refresh — local streamingBlocks is the source of truth during the
+      // turn. Otherwise the partial jsonl renders alongside the live
+      // streaming bubble and the user sees the reply twice.
+      if (streamingRef.current) return;
+      await fetchMessagesForTab(
+        selectedSession.sessionId,
+        selectedSession.projectHash,
+        { silent: true },
+      );
+      // After re-fetch, if any chatMessages entry shares timestamp+text with
+      // a freshly-pulled message, the persisted copy now owns it — drop the
+      // local one to avoid double rendering.
+      setChatMessages((prev) => {
+        if (!prev.length) return prev;
+        const persisted = getLocalMessages();
+        // text may be a string (user msg) or array of strings (assistant turn).
+        const tkey = (m) => {
+          const t = Array.isArray(m.text) ? m.text.join('') : (m.text || '');
+          return `${m.type}|${(t || '').slice(0, 80)}`;
+        };
+        const known = new Set(persisted.map(tkey));
+        return prev.filter((m) => !known.has(tkey(m)));
+      });
+    };
+    window.addEventListener('cgui:sessions-changed', onChange);
+    return () => window.removeEventListener('cgui:sessions-changed', onChange);
+  }, [selectedSession?.sessionId, selectedSession?.projectHash]);
+
+  // Detect "this session has a background CLI proc still running" — happens
+  // when the user navigated away while it was streaming. We poll the active-
+  // agents endpoint and look for a chat-process with our sessionId. If found,
+  // expose `backgroundPid` so the composer can render the stop button + a
+  // "正在继续工作…" indicator, matching how multi-terminal CLI sessions feel.
+  const [backgroundPid, setBackgroundPid] = useState(null);
+  // Transient toast for "auto-stripped thinking blocks after provider switch".
+  // { text, expires } — set by handleSend's pre-flight check, auto-cleared.
+  const [providerSwitchNotice, setProviderSwitchNotice] = useState(null);
+  useEffect(() => {
+    if (!providerSwitchNotice) return;
+    const id = setTimeout(() => setProviderSwitchNotice(null), 5000);
+    return () => clearTimeout(id);
+  }, [providerSwitchNotice]);
+  useEffect(() => {
+    if (!selectedSession?.sessionId) { setBackgroundPid(null); return; }
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const r = await fetch('/api/agents/active');
+        const d = await r.json();
+        if (cancelled) return;
+        const hit = (d.agents || []).find(
+          (a) => a.kind === 'chat-process'
+            && a.sessionId === selectedSession.sessionId
+            && a.exitCode == null
+        );
+        // Only show "background working" if we're NOT actively streaming
+        // locally — otherwise the local stream UI is already showing it.
+        setBackgroundPid(hit && !streamingRef.current ? String(hit.pid) : null);
+      } catch {}
+    };
+    poll();
+    const id = setInterval(poll, 1500);
+    return () => { cancelled = true; clearInterval(id); };
+  }, [selectedSession?.sessionId]);
+
+  // Auto-scroll: coalesce frequent stream deltas into a single rAF tick so the
+  // page doesn't visibly "flicker" with smooth-scroll animations on every
+  // token. Use direct scrollTop write (cheaper than scrollIntoView + smooth,
+  // which forces synchronous layout and animation engine each call).
+  useEffect(() => {
+    if (!autoScroll) return;
+    const id = requestAnimationFrame(() => {
+      const el = containerRef.current;
+      if (el) el.scrollTop = el.scrollHeight;
+    });
+    return () => cancelAnimationFrame(id);
+  }, [messages, chatMessages, streamingText, streamingThinking, streamingToolCalls, autoScroll]);
+
+  // Persist scroll position per session so refresh keeps the user where they
+  // were (not at top, not at bottom — wherever they were reading).
+  const scrollPersistKey = selectedSession?.sessionId
+    ? `cgui-scroll-${selectedSession.sessionId}`
+    : null;
 
   const handleScroll = () => {
     if (!containerRef.current) return;
     const { scrollTop, scrollHeight, clientHeight } = containerRef.current;
     setAutoScroll(scrollHeight - scrollTop - clientHeight < 120);
+    if (scrollPersistKey) {
+      try { localStorage.setItem(scrollPersistKey, String(scrollTop)); } catch {}
+    }
   };
 
-  const handleSend = useCallback(async (prompt) => {
-    // Pre-flight: if the project's cwd isn't a git repo, offer to init+commit
-    // before the first message of a session. Skipped/declined cwds are
-    // remembered in sessionStorage so we never nag twice.
-    const cwd = selectedProject?.path || selectedSession?.projectPath;
-    if (cwd) {
-      const skipKey = `cgui-git-skip-${cwd}`;
-      const isFirstMessage = chatMessages.length === 0 && messages.length === 0;
-      if (isFirstMessage && !sessionStorage.getItem(skipKey)) {
-        try {
-          const r = await fetch(`/api/git/status?cwd=${encodeURIComponent(cwd)}`);
-          const s = await r.json();
-          if (s && s.isRepo === false) {
-            const ok = confirm(
-              `这个目录还不是 git 仓库：\n${cwd}\n\n` +
-              `Claude 会修改文件，建议先 git init 并提交一次基线，方便日后回滚。\n` +
-              `点确定 → 自动执行 git init + git add -A + git commit\n点取消 → 跳过（本会话不再询问）`
-            );
-            if (ok) {
-              const ir = await fetch('/api/git/init', {
-                method: 'POST', headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ cwd }),
-              });
-              const id = await ir.json();
-              if (!ir.ok) alert('git init 失败：' + (id.error || ir.status));
-            }
-            sessionStorage.setItem(skipKey, '1');
-          }
-        } catch {
-          // Network/route issue — silently skip the check rather than blocking the send.
+  // Restore the saved scroll position when messages first load (or session changes).
+  // Only runs once per "session messages loaded" — autoScroll/streaming effect
+  // handles live updates without overwriting the restored position.
+  const scrollRestoredRef = useRef(null);
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el || !scrollPersistKey) return;
+    // Only attempt restore once per session's messages-loaded state.
+    if (scrollRestoredRef.current === selectedSession?.sessionId) return;
+    if (messages.length === 0 && chatMessages.length === 0) return;
+    const saved = localStorage.getItem(scrollPersistKey);
+    if (saved !== null) {
+      const top = Number(saved);
+      // Defer to next frame so DOM is laid out
+      requestAnimationFrame(() => {
+        if (el) {
+          el.scrollTop = top;
+          setAutoScroll(el.scrollHeight - el.scrollTop - el.clientHeight < 120);
         }
-      }
+      });
+    }
+    scrollRestoredRef.current = selectedSession?.sessionId;
+  }, [messages.length, chatMessages.length, selectedSession?.sessionId, scrollPersistKey]);
+
+  // Message queue plumbing (#3) — when user types during streaming, the message
+  // is queued and dispatched after the current chat finishes (or when the user
+  // clicks "⚡ 引导" to abort + send the queue immediately).
+  // CRITICAL: never use `|| []` inside a zustand selector — that returns a
+  // fresh array reference on every render and triggers React error #185
+  // "Maximum update depth exceeded" (which blanks the whole page).
+  const sessionQueueKey = selectedSession?.sessionId || `draft-${selectedSession?.projectHash || 'none'}`;
+  const messageQueueRaw = useStore((s) => s.messageQueue[sessionQueueKey]);
+  const messageQueue = messageQueueRaw || EMPTY_ARRAY;
+
+  const handleSend = useCallback(async (prompt, opts = {}) => {
+    const { reattachPid } = opts;
+    // On a normal send, gate against duplicate streams and enqueue overflow.
+    // On reattach, the caller is the backgroundPid effect — we WANT it to take
+    // over the stream, so skip the gate and the prep work (no user bubble,
+    // no checkpoint, no provider-mismatch strip, no POST /api/chat).
+    if (!reattachPid && streamingRef.current) {
+      useStore.getState().enqueueMessage(sessionQueueKey, { text: prompt, queuedAt: Date.now() });
+      return;
     }
 
-    setIsStreaming(true);
+    const cwd = selectedProject?.path || selectedSession?.projectPath;
+    // Note: previously this function had a blocking `confirm()` for git preflight.
+    // That dialog could appear behind other modals or get auto-suppressed by
+    // browsers, leaving sends silently stuck. Git preflight is now opportunistic
+    // and non-blocking — kicked off in the background, never gates the send.
+    // (User can still run git init manually anytime.)
+
+    updateStreaming(true);
     setStreamingText('');
+    setStreamingThinking('');
     setStreamingToolCalls([]);
+    setStreamingBlocks([]);
+
+    if (!reattachPid) {
+    // Push the user bubble IMMEDIATELY so multi-turn sends don't appear to
+    // "swallow" the user's message while waiting on git checkpoint I/O. The
+    // checkpoint runs in parallel and back-fills `checkpointSha` on the same
+    // chatMessages entry when ready (rollback menu reads it from there).
+    const userMsgUuid = 'chat-user-' + Date.now();
     setChatMessages((prev) => [...prev, {
-      uuid: 'chat-user-' + Date.now(), type: 'user',
+      uuid: userMsgUuid, type: 'user',
       timestamp: new Date().toISOString(), text: prompt,
+      checkpointSha: null,
     }]);
 
+    // Fire-and-forget git checkpoint. Failures (not a git repo etc.) are
+    // silent — no checkpointSha just means the rollback menu's "files only"
+    // option will be disabled for this message.
+    (async () => {
+      try {
+        const sel = selectedSession;
+        if (!sel?.sessionId || !cwd) return;
+        const cr = await fetch('/api/checkpoints', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            sessionId: sel.sessionId,
+            cwd,
+            label: `before: ${prompt.slice(0, 60)}`,
+          }),
+        });
+        if (!cr.ok) return;
+        const lr = await fetch(`/api/checkpoints/${sel.sessionId}`);
+        if (!lr.ok) return;
+        const data = await lr.json();
+        const sha = data.entries?.[0]?.sha || null;
+        if (!sha) return;
+        setChatMessages((prev) =>
+          prev.map((m) => (m.uuid === userMsgUuid ? { ...m, checkpointSha: sha } : m))
+        );
+      } catch {}
+    })();
+
+    // Provider-switch guard: when cc switch routes the backend to a different
+    // provider than what generated the last assistant turn's thinking block,
+    // the new backend rejects the resumed history with `400 Invalid signature
+    // in thinking block`. Strip thinking blocks from the on-disk jsonl before
+    // the CLI calls --resume so the conversation continues seamlessly.
     try {
-      const { currentModel, effort, addDirs } = useStore.getState();
+      const sid0 = selectedSession?.sessionId;
+      if (sid0 && selectedSession?.projectHash) {
+        const inferProv = (m) => {
+          if (!m) return null;
+          const s = String(m).toLowerCase();
+          if (s.startsWith('claude-')) return 'anthropic';
+          if (s.startsWith('deepseek')) return 'deepseek';
+          if (s.startsWith('mimo')) return 'mimo';
+          return null;
+        };
+        const persisted = getLocalMessages();
+        let histProv = null;
+        for (let i = persisted.length - 1; i >= 0; i--) {
+          const m = persisted[i];
+          const hasThinking = (Array.isArray(m.thinking) && m.thinking.length > 0)
+            || (Array.isArray(m.blocks) && m.blocks.some((b) => b?.type === 'thinking'));
+          if (m.type === 'turn' && hasThinking && m.model) {
+            histProv = inferProv(m.model);
+            break;
+          }
+        }
+        const currProv = useStore.getState().currentProvider?.providerHint || 'anthropic';
+        if (histProv && histProv !== currProv) {
+          try {
+            const r = await fetch(`/api/sessions/${sid0}/strip-thinking`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ projectHash: selectedSession.projectHash }),
+            });
+            if (r.ok) {
+              const d = await r.json().catch(() => ({}));
+              await fetchMessagesForTab(
+                sid0, selectedSession.projectHash, { silent: true },
+              );
+              // Only surface the banner when we actually stripped something —
+              // otherwise the user sees "已剥离 0 条" which is misleading
+              // (the call was an idempotent no-op against an already-clean file).
+              if (d.strippedBlocks > 0) {
+                setProviderSwitchNotice({
+                  text: `切换到 ${currProv}：已剥离 ${d.strippedBlocks} 条历史思考块（${histProv} 签名，新后端不认）。备份在 ${sid0.slice(0, 8)}…jsonl.bak`,
+                });
+              }
+            }
+          } catch {}
+        }
+      }
+    } catch {}
+    } // end if (!reattachPid)
+
+    try {
+      let pid;
+      if (reattachPid) {
+        // Re-attach path: the CLI process is already running in the background
+        // (user navigated away mid-stream, then came back). Skip POST /api/chat
+        // and connect straight to the existing stream so the user sees the
+        // live tokens flow as if they never left.
+        pid = reattachPid;
+        activeProcRef.current = pid;
+      } else {
+      const { currentModel, effort, addDirs, globalRead } = useStore.getState();
+      // Permission mode is per-session: read THIS session's stored mode (keyed
+      // by sessionQueueKey, same key the header chip + banner write to) so a
+      // plan-mode session B doesn't inherit放任 from session A.
+      const permissionMode = useStore.getState().getPermissionModeFor(sessionQueueKey);
+      // When resuming an existing session, cwd MUST be the EXACT string the
+      // CLI was launched with — including Unicode chars (e.g. `/foo/肠骨轴`).
+      // Reconstructing from the hash dir name is lossy: CLI maps every non-
+      // ASCII char to `-`, so `肠骨轴` → `----` is one-way. The server now
+      // reads the real cwd out of the jsonl's first system record and ships
+      // it as `projectPath` on the session object — always trust that first.
+      const sid = selectedSession?.sessionId;
+      const chatCwd = (sid && selectedSession?.projectPath)
+        ? selectedSession.projectPath
+        : (selectedProject?.path || selectedSession?.projectPath);
       const res = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           prompt,
           // Omit sessionId for a draft so the CLI creates a fresh session.
-          sessionId: selectedSession?.sessionId || undefined,
-          cwd: selectedProject?.path || selectedSession?.projectPath,
+          sessionId: sid || undefined,
+          cwd: chatCwd,
           model: currentModel,
           effort: effort || undefined,
           addDirs: addDirs && addDirs.length ? addDirs : undefined,
+          permissionMode: permissionMode || 'default',
+          globalRead: globalRead !== false,
         }),
       });
-      const { pid, model } = await res.json();
+      const respJson = await res.json();
+      pid = respJson.pid;
       activeProcRef.current = pid;
-      setStreamingModel(model);
+      setStreamingModel(respJson.model);
+      }
 
       const controller = new AbortController();
       abortRef.current = controller;
       const streamRes = await fetch(`/api/chat/${pid}/stream`, { signal: controller.signal });
       const reader = streamRes.body.getReader();
       const decoder = new TextDecoder();
-      let buffer = '', accumulatedText = '', currentToolCalls = [];
+      let buffer = '';
+      // Aggregated per-message turn state (matches what gets pushed to chatMessages on done).
+      let accumulatedText = '';
+      let accumulatedThinking = '';
+      let currentToolCalls = [];
+      // **ORDERED** blocks list — preserves the chronological sequence of
+      // text/thinking/tool_use content blocks so the UI can render them in the
+      // exact order the model emitted them (which is what Claude Desktop / the
+      // CLI terminal do). Without this, all text would group at the top and
+      // tool calls dump at the bottom — losing the "tool → think → tool → write"
+      // narrative.
+      let orderedBlocks = [];  // [{ type, blockIndex, content?, toolCall? }, ...]
+      // Per-content-block scratch indexed by Anthropic SDK's block `index` field.
+      // Each entry: { type: 'text'|'thinking'|'tool_use', toolId?, name?, jsonBuf?, orderIdx? }
+      const blocks = {};
 
       while (true) {
         const { done, value } = await reader.read();
@@ -653,92 +1719,567 @@ function SessionDetail() {
         buffer = lines.pop() || '';
         for (const line of lines) {
           if (!line.startsWith('data: ')) continue;
-          try {
-            const event = JSON.parse(line.slice(6));
-            // Capture the new session id when starting from a draft.
-            if (event.type === 'system' && event.subtype === 'init' && event.session_id) {
-              const sel = useStore.getState().selectedSession;
-              if (sel && !sel.sessionId) {
-                useStore.setState({
-                  selectedSession: { ...sel, draft: false, sessionId: event.session_id },
-                });
-                const hash = sel.projectHash;
-                if (hash) setTimeout(() => useStore.getState().fetchSessions(hash), 800);
+          let event;
+          try { event = JSON.parse(line.slice(6)); } catch { continue; }
+
+          // Capture the new session id when starting from a draft.
+          // IMPORTANT: go through `setSelectedSession` setter so the new id is
+          // persisted to localStorage. Bypassing it (raw `useStore.setState`)
+          // leaves localStorage with the old draft (sessionId=null), so a
+          // page refresh forgets the session even though it exists on disk.
+          if (event.type === 'system' && event.subtype === 'init' && event.session_id) {
+            const sel = getLocalSession();
+            if (sel && !sel.sessionId) {
+              setSelectedSession({
+                ...sel,
+                draft: false,
+                sessionId: event.session_id,
+              });
+              const hash = sel.projectHash;
+              // Retry triple — jsonl write timing varies. First attempt may
+              // hit the brief window before the CLI flushes; later ones catch
+              // up. silent so loading flag doesn't flicker.
+              if (hash) {
+                [400, 1200, 3000].forEach((ms) =>
+                  setTimeout(() => useStore.getState().fetchSessions(hash, { silent: true }), ms)
+                );
               }
             }
-            if (event.type === 'assistant' && event.message?.content) {
-              for (const block of event.message.content) {
-                if (block.type === 'text') { accumulatedText += block.text; setStreamingText(accumulatedText); }
-                if (block.type === 'tool_use') {
+          }
+
+          // Token-level deltas (--include-partial-messages). This is the path that
+          // makes the GUI feel like the CLI terminal: text appears as it's generated.
+          if (event.type === 'stream_event' && event.event) {
+            const ev = event.event;
+            // When parent_tool_use_id is set, this delta belongs to a subagent
+            // spawned via the Task tool — not the main turn. Route it to the
+            // store's activeAgents map instead of the main streaming buffers,
+            // and TaskCard / AgentMonitorPanel will render it.
+            const parentToolUseId = event.parent_tool_use_id || null;
+            const store = useStore.getState();
+            if (parentToolUseId) {
+              if (ev.type === 'content_block_start') {
+                const cb = ev.content_block || {};
+                if (cb.type === 'tool_use') {
+                  store.appendAgentTool(parentToolUseId, { id: cb.id, name: cb.name, input: {}, result: null });
+                }
+                blocks[`a:${parentToolUseId}:${ev.index}`] = { type: cb.type, toolId: cb.id, name: cb.name, jsonBuf: '' };
+              } else if (ev.type === 'content_block_delta') {
+                const blkKey = `a:${parentToolUseId}:${ev.index}`;
+                const block = blocks[blkKey];
+                const delta = ev.delta || {};
+                if (!block) continue;
+                if (delta.type === 'text_delta' && block.type === 'text') {
+                  store.appendAgentText(parentToolUseId, delta.text || '');
+                } else if (delta.type === 'thinking_delta' && block.type === 'thinking') {
+                  store.appendAgentThinking(parentToolUseId, delta.thinking || '');
+                } else if (delta.type === 'input_json_delta' && block.type === 'tool_use') {
+                  block.jsonBuf += delta.partial_json || '';
+                  try {
+                    const parsed = JSON.parse(block.jsonBuf);
+                    store.updateAgentTool(parentToolUseId, block.toolId, { input: parsed });
+                  } catch {}
+                }
+              }
+              continue;
+            }
+
+            // Main turn — top-level model output
+            if (ev.type === 'message_start' && ev.message?.model) {
+              setStreamingModel(ev.message.model);
+            } else if (ev.type === 'content_block_start') {
+              const cb = ev.content_block || {};
+              if (cb.type === 'text') {
+                const orderIdx = orderedBlocks.length;
+                orderedBlocks.push({ type: 'text', content: '' });
+                blocks[ev.index] = { type: 'text', orderIdx };
+                setStreamingBlocks([...orderedBlocks]);
+              } else if (cb.type === 'thinking') {
+                const orderIdx = orderedBlocks.length;
+                orderedBlocks.push({ type: 'thinking', content: '' });
+                blocks[ev.index] = { type: 'thinking', orderIdx };
+                setStreamingBlocks([...orderedBlocks]);
+              } else if (cb.type === 'tool_use') {
+                const orderIdx = orderedBlocks.length;
+                const newTc = { id: cb.id, name: cb.name, input: {}, result: null };
+                orderedBlocks.push({ type: 'tool_use', toolCall: newTc });
+                blocks[ev.index] = { type: 'tool_use', toolId: cb.id, name: cb.name, jsonBuf: '', orderIdx };
+                currentToolCalls.push(newTc);
+                setStreamingToolCalls([...currentToolCalls]);
+                setStreamingBlocks([...orderedBlocks]);
+                if (cb.name === 'Task') {
+                  store.upsertAgent(cb.id, {
+                    name: 'Task',
+                    description: '',
+                    status: 'starting',
+                    startedAt: Date.now(),
+                  });
+                }
+              }
+            } else if (ev.type === 'content_block_delta') {
+              const block = blocks[ev.index];
+              const delta = ev.delta || {};
+              if (!block) continue;
+              if (delta.type === 'text_delta' && block.type === 'text') {
+                accumulatedText += delta.text || '';
+                if (block.orderIdx != null && orderedBlocks[block.orderIdx]) {
+                  orderedBlocks[block.orderIdx] = {
+                    ...orderedBlocks[block.orderIdx],
+                    content: orderedBlocks[block.orderIdx].content + (delta.text || ''),
+                  };
+                  setStreamingBlocks([...orderedBlocks]);
+                }
+                setStreamingText(accumulatedText);
+              } else if (delta.type === 'thinking_delta' && block.type === 'thinking') {
+                accumulatedThinking += delta.thinking || '';
+                if (block.orderIdx != null && orderedBlocks[block.orderIdx]) {
+                  orderedBlocks[block.orderIdx] = {
+                    ...orderedBlocks[block.orderIdx],
+                    content: orderedBlocks[block.orderIdx].content + (delta.thinking || ''),
+                  };
+                  setStreamingBlocks([...orderedBlocks]);
+                }
+                setStreamingThinking(accumulatedThinking);
+              } else if (delta.type === 'input_json_delta' && block.type === 'tool_use') {
+                block.jsonBuf += delta.partial_json || '';
+                try {
+                  const parsed = JSON.parse(block.jsonBuf);
+                  const idx = currentToolCalls.findIndex((tc) => tc.id === block.toolId);
+                  if (idx !== -1) {
+                    currentToolCalls[idx] = { ...currentToolCalls[idx], input: parsed };
+                    setStreamingToolCalls([...currentToolCalls]);
+                  }
+                  if (block.orderIdx != null && orderedBlocks[block.orderIdx]) {
+                    orderedBlocks[block.orderIdx] = {
+                      ...orderedBlocks[block.orderIdx],
+                      toolCall: { ...orderedBlocks[block.orderIdx].toolCall, input: parsed },
+                    };
+                    setStreamingBlocks([...orderedBlocks]);
+                  }
+                  if (block.name === 'Task' && parsed) {
+                    store.upsertAgent(block.toolId, {
+                      name: parsed.subagent_type || parsed.agent || 'Task',
+                      description: parsed.description || parsed.prompt?.slice(0, 80) || '',
+                      status: 'working',
+                    });
+                  }
+                } catch {}
+              }
+            }
+            continue;
+          }
+
+          // Snapshot events (non-partial mode, or final reconciliation):
+          // when --include-partial-messages is on, the CLI still emits a final
+          // `assistant` message after the deltas. Use it to backfill anything
+          // we might have missed (e.g. tool_use input that didn't stream cleanly).
+          if (event.type === 'assistant' && event.message?.content) {
+            for (const block of event.message.content) {
+              if (block.type === 'text') {
+                // Only replace if we haven't been streaming this block already.
+                if (!accumulatedText) {
+                  accumulatedText = block.text;
+                  setStreamingText(accumulatedText);
+                }
+              }
+              if (block.type === 'thinking') {
+                if (!accumulatedThinking) {
+                  accumulatedThinking = block.thinking || '';
+                  setStreamingThinking(accumulatedThinking);
+                }
+              }
+              if (block.type === 'tool_use') {
+                const idx = currentToolCalls.findIndex((tc) => tc.id === block.id);
+                if (idx === -1) {
                   currentToolCalls.push({ id: block.id, name: block.name, input: block.input, result: null });
+                } else {
+                  // Reconcile final tool input from the snapshot.
+                  currentToolCalls[idx] = { ...currentToolCalls[idx], input: block.input };
+                }
+                setStreamingToolCalls([...currentToolCalls]);
+              }
+            }
+            if (event.message.model) setStreamingModel(event.message.model);
+          }
+          if (event.type === 'user' && event.message?.content) {
+            for (const block of event.message.content) {
+              if (block.type === 'tool_result') {
+                // If this result closes a Task tool_use, mark the subagent done.
+                const store = useStore.getState();
+                if (store.activeAgents[block.tool_use_id]) {
+                  store.upsertAgent(block.tool_use_id, {
+                    status: block.is_error ? 'error' : 'done',
+                    result: typeof block.content === 'string' ? block.content : JSON.stringify(block.content),
+                  });
+                }
+                // Also patch the ordered blocks list so the in-place card shows result.
+                const resultPayload = {
+                  toolUseId: block.tool_use_id,
+                  content: typeof block.content === 'string' ? block.content : JSON.stringify(block.content),
+                  isError: block.is_error || false,
+                };
+                orderedBlocks = orderedBlocks.map((b) =>
+                  b.type === 'tool_use' && b.toolCall?.id === block.tool_use_id
+                    ? { ...b, toolCall: { ...b.toolCall, result: resultPayload } }
+                    : b
+                );
+                setStreamingBlocks([...orderedBlocks]);
+                const idx = currentToolCalls.findIndex((tc) => tc.id === block.tool_use_id);
+                if (idx !== -1) {
+                  currentToolCalls[idx] = { ...currentToolCalls[idx], result: {
+                    toolUseId: block.tool_use_id,
+                    content: typeof block.content === 'string' ? block.content : JSON.stringify(block.content),
+                    isError: block.is_error || false,
+                  }};
                   setStreamingToolCalls([...currentToolCalls]);
                 }
               }
-              if (event.message.model) setStreamingModel(event.message.model);
             }
-            if (event.type === 'user' && event.message?.content) {
-              for (const block of event.message.content) {
-                if (block.type === 'tool_result') {
-                  const idx = currentToolCalls.findIndex((tc) => tc.id === block.tool_use_id);
-                  if (idx !== -1) {
-                    currentToolCalls[idx] = { ...currentToolCalls[idx], result: {
-                      toolUseId: block.tool_use_id,
-                      content: typeof block.content === 'string' ? block.content : JSON.stringify(block.content),
-                      isError: block.is_error || false,
-                    }};
-                    setStreamingToolCalls([...currentToolCalls]);
-                  }
-                }
-              }
-            }
-            if (event.type === 'done') break;
-          } catch {}
+          }
+          // Surface CLI-side errors that previously got silently dropped:
+          //   - type:"error"  (our server's stderr/spawn fail wrapper)
+          //   - type:"result" with is_error:true (CLI's own error envelope,
+          //     e.g. "No conversation found with session ID: ...")
+          if (event.type === 'error' || (event.type === 'result' && event.is_error)) {
+            const msg = (event.errors && event.errors.join('; '))
+              || event.error
+              || event.subtype
+              || 'CLI 报错（无消息体）';
+            setChatMessages((prev) => [...prev, {
+              uuid: 'chat-error-' + Date.now(),
+              type: 'turn',
+              timestamp: new Date().toISOString(),
+              model: streamingModel,
+              text: [`❌ **${msg}**\n\n常见原因：\n- session 不在当前 cwd 对应的项目目录 → 新建会话\n- jsonl 被 trim 后损坏 → 新建会话\n- CLI 版本异常 → 终端跑 \`claude --help\` 验证`],
+              thinking: [],
+              toolCalls: [],
+              blocks: [{ type: 'text', content: `❌ **${msg}**` }],
+              usage: null,
+            }]);
+            break;
+          }
+          if (event.type === 'done') break;
         }
       }
 
-      if (accumulatedText || currentToolCalls.length > 0) {
+      if (accumulatedText || accumulatedThinking || currentToolCalls.length > 0) {
         setChatMessages((prev) => [...prev, {
           uuid: 'chat-assistant-' + Date.now(), type: 'turn',
           timestamp: new Date().toISOString(), model: streamingModel,
-          text: accumulatedText ? [accumulatedText] : [], thinking: [],
+          text: accumulatedText ? [accumulatedText] : [],
+          thinking: accumulatedThinking ? [accumulatedThinking] : [],
           toolCalls: currentToolCalls.map((tc) => ({ ...tc, category: tc.category || 'call' })),
+          // The canonical ordered view used by TurnBubble for in-order rendering.
+          blocks: orderedBlocks,
           usage: null,
         }]);
       }
     } catch (err) {
       if (err.name !== 'AbortError') console.error('Chat error:', err);
     } finally {
-      setIsStreaming(false); setStreamingText(''); setStreamingToolCalls([]);
-      activeProcRef.current = null; abortRef.current = null;
+      updateStreaming(false);
+      setStreamingText('');
+      setStreamingThinking('');
+      setStreamingToolCalls([]);
+      setStreamingBlocks([]);
+      activeProcRef.current = null;
+      abortRef.current = null;
+      // After the stream ends locally, pull the persisted jsonl and let it
+      // own the displayed history. Then dedup chatMessages — anything that
+      // also exists in persisted is dropped, so the assistant turn we just
+      // pushed locally doesn't render alongside its jsonl twin.
+      const _sel = getLocalSession();
+      if (_sel?.sessionId && _sel?.projectHash) {
+        try {
+          await fetchMessagesForTab(_sel.sessionId, _sel.projectHash, { silent: true });
+        } catch {}
+        setChatMessages((prev) => {
+          if (!prev.length) return prev;
+          const persisted = getLocalMessages();
+          const tkey = (m) => {
+            const t = Array.isArray(m.text) ? m.text.join('') : (m.text || '');
+            return `${m.type}|${(t || '').slice(0, 80)}`;
+          };
+          const known = new Set(persisted.map(tkey));
+          return prev.filter((m) => !known.has(tkey(m)));
+        });
+      }
+      // Background refresh of sidebar session list. `silent:true` means the
+      // global loading flag is NOT toggled, so SessionDetail doesn't swap to
+      // a loading screen and wipe out the user's scroll position.
+      const sel = getLocalSession();
+      const hash = sel?.projectHash;
+      if (hash) {
+        [500, 1500, 3500].forEach((ms) =>
+          setTimeout(() => useStore.getState().fetchSessions(hash, { silent: true }), ms)
+        );
+      }
+      // Notify panels (UsagePanel) to refresh their stats.
+      window.dispatchEvent(new CustomEvent('cgui:chat-done'));
+
+      // After the chat fully finishes, drain the queue: pop the head and send
+      // it. This runs once per chat — if more were queued, the next send's
+      // finally block will pop again. setTimeout 0 gets us out of this finally
+      // first so React commits isStreaming=false before the next send starts.
+      // Skip on reattach — the queue belongs to whoever did the original send.
+      if (!reattachPid) {
+        const tabSel = getLocalSession();
+        const queueKey = tabSel?.sessionId
+          || `draft-${tabSel?.projectHash || 'none'}`;
+        const next = useStore.getState().shiftMessage(queueKey);
+        if (next?.text) {
+          setTimeout(() => handleSendRef.current?.(next.text), 50);
+        }
+      }
     }
-  }, [selectedSession, selectedProject, streamingModel]);
+  }, [selectedSession, selectedProject, streamingModel, isStreaming, sessionQueueKey]);
+
+  // Ref to handleSend so the finally-block drain doesn't form a circular closure dep.
+  const handleSendRef = useRef(null);
+  useEffect(() => { handleSendRef.current = handleSend; }, [handleSend]);
+
+  // Auto-reattach: when the backgroundPid poll finds this session has a live
+  // CLI proc that nobody's listening to (user navigated away mid-stream),
+  // re-open the SSE stream so the live tokens render again in this tab.
+  // Without this the user would only see the static "still working in background"
+  // banner — exactly what they complained about.
+  const reattachedPidRef = useRef(null);
+  useEffect(() => {
+    if (!backgroundPid) { reattachedPidRef.current = null; return; }
+    if (streamingRef.current) return;
+    if (reattachedPidRef.current === backgroundPid) return; // already reattached
+    reattachedPidRef.current = backgroundPid;
+    handleSendRef.current?.(null, { reattachPid: backgroundPid });
+  }, [backgroundPid]);
 
   const handleStop = useCallback(() => {
     abortRef.current?.abort();
-    if (activeProcRef.current) fetch(`/api/chat/${activeProcRef.current}/stop`, { method: 'POST' });
+    if (activeProcRef.current) {
+      fetch(`/api/chat/${activeProcRef.current}/stop`, { method: 'POST' });
+    } else if (backgroundPid) {
+      // Background CLI proc — we're not holding the SSE but can still kill it.
+      fetch(`/api/chat/${backgroundPid}/stop`, { method: 'POST' });
+      setBackgroundPid(null);
+    }
+  }, [backgroundPid]);
+
+  // Global ESC → interrupt streaming (matches Claude Code CLI behavior where
+  // Esc aborts the current generation). Skip when typing in an input/textarea
+  // (those have their own Escape semantics) and when a permission dialog is
+  // open (the permission card binds Esc to "deny" — let it handle).
+  useEffect(() => {
+    if (!isStreaming && !backgroundPid) return;
+    const hasPendingPerm = () => useStore.getState().pendingPermissions
+      .some((p) => p.sessionId === selectedSession?.sessionId);
+    const onKey = (e) => {
+      if (e.key !== 'Escape') return;
+      const t = e.target;
+      if (t && (t.tagName === 'TEXTAREA' || t.tagName === 'INPUT')) return;
+      if (hasPendingPerm()) return; // permission card handles Esc
+      e.preventDefault();
+      handleStop();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [isStreaming, backgroundPid, handleStop, selectedSession?.sessionId]);
+
+  // "⚡ 引导" — abort the in-flight chat and immediately fire the queued message.
+  const handleAccelerate = useCallback(() => {
+    if (abortRef.current) try { abortRef.current.abort(); } catch {}
+    if (activeProcRef.current) {
+      fetch(`/api/chat/${activeProcRef.current}/stop`, { method: 'POST' }).catch(() => {});
+    }
+    // The abort triggers handleSend's finally, which drains the queue.
   }, []);
 
-  // Reset per-session UI state — BUT skip the reset when a draft session gets
-  // promoted to a real one mid-stream (null → uuid transition). Otherwise we'd
-  // wipe the user's just-sent message right after we capture the new session id.
-  const prevSessionIdRef = useRef(selectedSession?.sessionId ?? null);
+  // Reset per-session UI state when the selectedSession object changes.
+  // KEY DIFFERENCE FROM PREVIOUS IMPL: depend on the selectedSession reference,
+  // not just sessionId. Otherwise: draft1 (sessionId=null) → real → click 新建 →
+  // draft2 (sessionId=null) leaves sessionId unchanged, useEffect doesn't fire,
+  // and the old chatMessages bleed into the new draft.
+  //
+  // The exception is the "draft promotion" — when the same draft acquires a
+  // real sessionId mid-stream via the system/init event. We don't want to wipe
+  // the user's just-sent message in that case.
+  const prevSessionRef = useRef(selectedSession);
   useEffect(() => {
-    const prev = prevSessionIdRef.current;
-    const curr = selectedSession?.sessionId ?? null;
+    const prev = prevSessionRef.current;
+    const curr = selectedSession;
     if (prev !== curr) {
-      const promoted = prev === null && curr !== null;
-      if (!promoted) {
+      const isPromotion =
+        prev && curr &&
+        !prev.sessionId && curr.sessionId &&
+        prev.projectHash === curr.projectHash;
+      if (!isPromotion) {
+        // Detach (NOT kill) any in-flight stream. Aborting the client-side
+        // fetch closes our SSE connection — the server now keeps the CLI
+        // process running and the jsonl on disk continues to grow. When the
+        // user navigates back to the original session, fetchMessages reads
+        // whatever has been persisted so far. This trades live-streaming
+        // continuity for the user's actual ask: "don't kill my reply just
+        // because I clicked elsewhere."
+        if (abortRef.current) {
+          try { abortRef.current.abort(); } catch {}
+          abortRef.current = null;
+        }
+        // Do NOT POST /api/chat/:pid/stop here — that would kill the proc.
+        // Just forget the ref so we don't accidentally stop it later.
+        activeProcRef.current = null;
+        updateStreaming(false);
         setChatMessages([]);
         setStreamingText('');
+        setStreamingThinking('');
         setStreamingToolCalls([]);
+        setStreamingBlocks([]);
         setShowFileChanges(false);
+        // Clear reattach guard so navigating back to a session with the same
+        // backgroundPid triggers a fresh reattach attempt.
+        reattachedPidRef.current = null;
       }
-      prevSessionIdRef.current = curr;
+      prevSessionRef.current = curr;
     }
-  }, [selectedSession?.sessionId]);
+  }, [selectedSession]);
 
+  // Roll back a user message. Three modes:
+  //   'message' — restore git (if sha) + trim on-disk jsonl + trim UI + auto re-send
+  //                the original text. "Pretend I never sent this and try again."
+  //   'edit'    — same restore as above, but instead of auto-resend, drop the
+  //                text into the composer so the user can edit before sending.
+  //   'files'   — git restore only; conversation untouched.
+  //
+  // We MUST trim the on-disk jsonl too. Claude CLI resumes a session by
+  // reading the jsonl; without trimming it, the next prompt sees the rolled-
+  // back AI reply as still-valid history, which defeats the whole rollback.
+  //
+  // Declared BEFORE the early returns below to keep hook order stable across
+  // renders (React #310).
+  const handleRollback = useCallback(async (msg, { mode }) => {
+    const sel = getLocalSession();
+    const proj = useStore.getState().selectedProject;
+    const cwd = proj?.path || sel?.projectPath;
+    const projectHash = proj?.hash || sel?.projectHash;
+    const idxInChat = chatMessages.findIndex((m) => m.uuid === msg.uuid);
+    const idxInStore = messages.findIndex((m) => m.uuid === msg.uuid);
+
+    const truncateUi = () => {
+      if (idxInStore !== -1) {
+        setLocalMessages(messages.slice(0, idxInStore));
+        setChatMessages([]);
+      } else if (idxInChat !== -1) {
+        setChatMessages((prev) => prev.slice(0, idxInChat));
+      }
+    };
+
+    // ── files only ────────────────────────────────────────────
+    if (mode === 'files') {
+      if (!msg.checkpointSha) { alert('该消息发送时没有 git 快照，无法还原文件。'); return; }
+      if (!sel?.sessionId || !cwd) { alert('缺少 sessionId 或工作目录，无法还原文件。'); return; }
+      try {
+        const r = await fetch(`/api/checkpoints/${sel.sessionId}/restore`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ sha: msg.checkpointSha, cwd }),
+        });
+        if (!r.ok) {
+          const e = await r.json().catch(() => ({}));
+          alert('文件还原失败：' + (e.error || r.status));
+        }
+      } catch (err) {
+        alert('文件还原失败：' + err.message);
+      }
+      return;
+    }
+
+    // ── message / edit: full rollback ─────────────────────────
+    // For edit mode, fill the composer FIRST — before any state lookups,
+    // index checks, or awaits. Even if idx lookup fails or the message has
+    // already been removed from both arrays (re-fetch raced ahead, etc.),
+    // the user still gets the original text in the input box, which is the
+    // primary visible signal they expect from "重新编辑".
+    const originalText = msg.text || '';
+    if (mode === 'edit' && originalText) {
+      useStore.setState({ composerDraft: originalText });
+      window.dispatchEvent(new CustomEvent('cgui:composer-fill', { detail: { text: originalText } }));
+    }
+
+    if (idxInChat === -1 && idxInStore === -1) return;
+
+    // 1) git restore (best-effort — silently skip if no sha / no repo)
+    if (msg.checkpointSha && sel?.sessionId && cwd) {
+      try {
+        await fetch(`/api/checkpoints/${sel.sessionId}/restore`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ sha: msg.checkpointSha, cwd }),
+        });
+      } catch {}
+    }
+
+    // 2) trim on-disk jsonl so the resumed CLI doesn't see stale history.
+    //    Strategy: prefer uuid match (historical store messages); fall back to
+    //    timestamp for freshly-sent messages whose chat-user-<ts> uuid never
+    //    landed in the jsonl (the CLI persists its own uuid but keeps the ts).
+    if (sel?.sessionId && projectHash) {
+      const body = msg.uuid && !msg.uuid.startsWith('chat-')
+        ? { projectHash, uuid: msg.uuid }
+        : { projectHash, fromTimestamp: msg.timestamp };
+      try {
+        const tr = await fetch(`/api/sessions/${sel.sessionId}/trim`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        const trData = await tr.json().catch(() => ({}));
+        // If trim wiped the session (no real messages would remain), we must
+        // drop the sessionId locally — otherwise the next /api/chat would
+        // try --resume on a deleted jsonl and CLI silently exits with
+        // "No conversation found".
+        if (trData?.sessionReset) {
+          setSelectedSession({
+            ...sel,
+            sessionId: null,
+            draft: true,
+          });
+        }
+      } catch {}
+    }
+
+    // 3) abort any in-flight stream from this session so the resend doesn't
+    //    collide with it.
+    if (abortRef.current) { try { abortRef.current.abort(); } catch {} }
+    if (activeProcRef.current) {
+      fetch(`/api/chat/${activeProcRef.current}/stop`, { method: 'POST' }).catch(() => {});
+      activeProcRef.current = null;
+    }
+    updateStreaming(false);
+    setStreamingText('');
+    setStreamingThinking('');
+    setStreamingToolCalls([]);
+    setStreamingBlocks([]);
+
+    // 4) trim UI
+    truncateUi();
+
+    // 5) Re-fetch the (now-trimmed) message list so the UI mirrors disk —
+    //    avoids any drift between in-memory slice and what the CLI will see.
+    if (sel?.sessionId && projectHash) {
+      try { await fetchMessagesForTab(sel.sessionId, projectHash, { silent: true }); } catch {}
+    }
+
+    // 6) act per mode
+    if (mode === 'edit') return; // composer was filled at the top of this branch
+    // mode === 'message': auto-resend.
+    if (originalText && handleSendRef.current) {
+      setTimeout(() => { handleSendRef.current(originalText); }, 50);
+    }
+  }, [chatMessages, messages, fetchMessagesForTab, setLocalMessages, setSelectedSession, getLocalSession]);
+
+  // In split mode, tab 0's `loading` would otherwise blank out tab 1 too.
+  // We only let the loading screen short-circuit the primary tab — tab 1
+  // fetches with silent:true so it never sets the global flag, and tab 0
+  // remains the one that owns the spinner.
   if (!selectedSession) return <EmptyState />;
-  if (loading) return (
+  if (loading && tabIndex === 0) return (
     <div className="flex-1 flex items-center justify-center bg-canvas">
       <div className="flex gap-1.5">
         {[0, 0.2, 0.4].map((d) => (
@@ -753,27 +2294,59 @@ function SessionDetail() {
     if (m.usage) { acc.input += m.usage.input_tokens || 0; acc.output += m.usage.output_tokens || 0; acc.cacheRead += m.usage.cache_read_input_tokens || 0; }
     return acc;
   }, { input: 0, output: 0, cacheRead: 0 });
+  // Sum per-message cost. Skipping models we don't have prices for. Uses
+  // currentProvider (subscribed above, before early returns) so cc switch
+  // redirects (Claude → DeepSeek/MiMo) get the right backend price table.
+  const totalCostUsd = allMessages.reduce((acc, m) => {
+    if (m.usage && (m.model || currentProvider?.model)) {
+      const c = computeCost(m.model, m.usage, currentProvider);
+      if (c) acc += c.totalUsd;
+    }
+    return acc;
+  }, 0);
   const toolCallCount = allMessages.reduce((acc, m) => acc + (m.toolCalls?.length || 0), 0);
   const models = [...new Set(allMessages.filter((m) => m.model).map((m) => m.model))];
 
   return (
     <div className="flex-1 flex flex-col min-h-0 glass-base relative">
       <div className="glass-bar shrink-0 px-6 py-3 relative z-10">
-        <div className="max-w-3xl mx-auto flex items-center justify-between">
-          <div className="min-w-0">
+        {/* Title row wraps when the pane is narrow or font is scaled up so
+            the right-side stats/buttons drop to a second line instead of
+            clipping the title. */}
+        <div className="max-w-3xl mx-auto flex items-center justify-between gap-y-2 flex-wrap">
+          <div className="min-w-0 flex-1">
             <div className="text-sm text-ink font-display font-medium truncate">
               {selectedSession.firstPrompt?.slice(0, 80) || '会话详情'}
             </div>
-            <div className="flex items-center gap-3 mt-0.5">
+            <div className="flex items-center gap-3 mt-0.5 flex-wrap">
               <span className="text-[10px] text-ink-faint font-mono flex items-center gap-1">
                 <Hash size={10} />{selectedSession.sessionId?.slice(0, 8) || '新会话'}
               </span>
               <span className="text-[10px] text-ink-faint font-mono">{messages.length + chatMessages.length} 条消息</span>
               {toolCallCount > 0 && <span className="text-[10px] text-ink-faint font-mono">{toolCallCount} 工具调用</span>}
-              <div className="flex gap-1">{models.map((m) => <ModelBadge key={m} model={m} compact />)}</div>
+              {currentProvider?.providerHint && currentProvider.providerHint !== 'anthropic' && (
+                <span className="text-[10px] text-amber-700 bg-amber-50 border border-amber-200 rounded px-1.5 py-px font-mono"
+                  title={`cc switch 路由：${currentProvider.baseUrl}`}>
+                  {currentProvider.providerHint}
+                </span>
+              )}
+              {/* Show the model the NEXT send will use (current selection),
+                  plus any historical models in muted form. Previously this
+                  only showed the historical aggregate, so picking Haiku in
+                  the dropdown but seeing the past message's Sonnet badge
+                  looked like the GUI ignored the switch. */}
+              <div className="flex items-center gap-1">
+                {currentModel && <ModelBadge model={currentModel} compact />}
+                {models.filter((m) => m !== currentModel).length > 0 && (
+                  <span className="text-[9px] text-ink-ghost font-mono"
+                    title={`本会话历史用过: ${models.join(', ')}`}>
+                    曾用 {models.filter((m) => m !== currentModel).length} 个其他
+                  </span>
+                )}
+              </div>
             </div>
           </div>
-          <div className="flex items-center gap-2 shrink-0 ml-4">
+          <div className="flex items-center gap-2 shrink-0 flex-wrap justify-end">
             <CheckpointButton
               sessionId={selectedSession?.sessionId}
               cwd={selectedProject?.path || selectedSession?.projectPath}
@@ -788,8 +2361,13 @@ function SessionDetail() {
               <FileDiff size={12} />变更
             </button>
             <div className="text-right">
-              <div className="text-[10px] text-ink-faint font-mono flex items-center gap-1">
+              <div className="text-[10px] text-ink-faint font-mono flex items-center gap-1 justify-end">
                 <BarChart3 size={10} />{(totalTokens.input + totalTokens.output).toLocaleString()} tokens
+                {totalCostUsd > 0 && (
+                  <span className="text-accent/80 ml-1.5" title="按当前各模型官网价估算的累计费用（CNY 模型按 1 USD ≈ 7.2 CNY 换算）">
+                    · {formatCost(totalCostUsd)}
+                  </span>
+                )}
               </div>
               {totalTokens.cacheRead > 0 && (
                 <div className="text-[10px] text-ink-ghost font-mono">缓存命中 {totalTokens.cacheRead.toLocaleString()}</div>
@@ -798,6 +2376,32 @@ function SessionDetail() {
           </div>
         </div>
       </div>
+
+      {/* Permission-mode hint banner — moved here from ChatInput so it sits
+          directly under the session title. With our PreToolUse permission
+          bridge, default mode now correctly pops a dialog per tool. Banner is
+          dismissible per-user (localStorage). */}
+      <PermissionModeHintBanner permKey={sessionQueueKey} />
+
+      {/* Non-blocking git-init prompt — replaces the old native confirm() that
+          got auto-suppressed by browsers and silently froze sends. */}
+      <GitInitBanner cwd={selectedProject?.path || selectedSession?.projectPath} />
+
+      {/* Provider-switch notice — fades after 5s. Tells the user we just
+          stripped thinking blocks from on-disk jsonl so cc switch's new
+          backend won't reject the resumed history. */}
+      {providerSwitchNotice && (
+        <div className="shrink-0 mx-6 mt-2 px-3 py-2 rounded-md bg-amber-50 border border-amber-200 flex items-start gap-2 animate-fade-up">
+          <span className="text-amber-700 text-[12px] font-body leading-snug flex-1">
+            🔄 {providerSwitchNotice.text}
+          </span>
+          <button
+            onClick={() => setProviderSwitchNotice(null)}
+            className="text-amber-600 hover:text-amber-800 text-[14px] leading-none px-1"
+            title="关闭"
+          >×</button>
+        </div>
+      )}
 
       {showFileChanges ? (
         <div className="flex-1 overflow-y-auto relative z-10 px-6 py-4">
@@ -816,28 +2420,37 @@ function SessionDetail() {
             <>
               {messages.map((msg, i) => msg.type === 'turn'
                 ? <TurnBubble key={msg.uuid || i} turn={msg} />
-                : <MessageBubble key={msg.uuid || i} message={{ ...msg, role: msg.type }} />
+                : <MessageBubble key={msg.uuid || i} message={{ ...msg, role: msg.type }}
+                    onRollback={msg.type === 'user' ? handleRollback : undefined} />
               )}
               {chatMessages.map((msg, i) => msg.type === 'turn'
                 ? <TurnBubble key={msg.uuid || i} turn={msg} />
-                : <MessageBubble key={msg.uuid || i} message={{ ...msg, role: msg.type }} />
+                : <MessageBubble key={msg.uuid || i} message={{ ...msg, role: msg.type }}
+                    onRollback={msg.type === 'user' ? handleRollback : undefined} />
               )}
-              {isStreaming && (streamingText || streamingToolCalls.length > 0) && (
-                <TurnBubble turn={{
-                  uuid: 'streaming', type: 'turn', timestamp: new Date().toISOString(), model: streamingModel,
-                  text: streamingText ? [streamingText] : [], thinking: [],
-                  toolCalls: streamingToolCalls.map((tc) => ({ ...tc, category: 'call' })), usage: null,
-                }} />
+              {isStreaming && (streamingText || streamingThinking || streamingToolCalls.length > 0 || streamingBlocks.length > 0) && (
+                <>
+                  <StreamingStatusLine
+                    thinking={streamingThinking}
+                    text={streamingText}
+                    toolCalls={streamingToolCalls}
+                  />
+                  <TurnBubble turn={{
+                    uuid: 'streaming', type: 'turn', timestamp: new Date().toISOString(), model: streamingModel,
+                    text: streamingText ? [streamingText] : [],
+                    thinking: streamingThinking ? [streamingThinking] : [],
+                    toolCalls: streamingToolCalls.map((tc) => ({ ...tc, category: 'call' })),
+                    blocks: streamingBlocks,
+                    usage: null,
+                  }} />
+                </>
               )}
-              {isStreaming && !streamingText && streamingToolCalls.length === 0 && (
-                <div className="px-6 py-4 animate-fade-in">
-                  <div className="max-w-3xl mx-auto flex gap-4">
-                    <ProviderAvatar model={streamingModel} size={28} />
-                    <div className="flex items-center gap-1.5 pt-1">
-                      {[0, 0.2, 0.4].map((d) => (
-                        <div key={d} className="w-2 h-2 rounded-full bg-accent/40" style={{ animation: `breathe 1.4s ease-in-out infinite ${d}s` }} />
-                      ))}
-                    </div>
+              {isStreaming && !streamingText && !streamingThinking && streamingToolCalls.length === 0 && (
+                <div className="px-6 py-3 animate-fade-in">
+                  <div className="max-w-3xl mx-auto flex items-center gap-2.5 text-[14px] font-body" style={{ color: '#D97757' }}>
+                    <CliSpinner size={22} />
+                    <span className="font-mono font-medium">Connecting</span>
+                    <span>…</span>
                   </div>
                 </div>
               )}
@@ -856,35 +2469,97 @@ function SessionDetail() {
         </div>
       )}
 
-      <ChatInput onSend={handleSend} onStop={handleStop} disabled={false} isStreaming={isStreaming} />
+      <ChatInput
+        onSend={handleSend}
+        onStop={handleStop}
+        onAccelerate={messageQueue.length > 0 ? handleAccelerate : undefined}
+        disabled={false}
+        // Composer treats "background CLI still running" the same as local
+        // streaming for UI purposes: send button becomes the small rounded-
+        // rect stop, banner shows "继续工作中…".
+        isStreaming={isStreaming || !!backgroundPid}
+        backgroundWorking={!isStreaming && !!backgroundPid}
+        queueLength={messageQueue.length}
+        queueItems={messageQueue}
+        onRemoveFromQueue={(i) => useStore.getState().removeFromQueue(sessionQueueKey, i)}
+        onEditFromQueue={(i) => {
+          const item = messageQueue[i];
+          if (!item) return;
+          useStore.getState().removeFromQueue(sessionQueueKey, i);
+          window.dispatchEvent(new CustomEvent('cgui:composer-fill', { detail: { text: item.text } }));
+        }}
+        todos={currentTodos}
+        permKey={sessionQueueKey}
+      />
     </div>
   );
 }
 
-// ─── Model Selector (compact, for chat input area) ─────────────
+// ─── Model Selector ────────────────────────────────────────────
+// Dropdown anchored to the trigger button (lightweight: no full-screen blur).
+// Outside-click closes via a document-level listener — needed because the
+// usual "fixed inset-0" trick is trapped inside header's transform context.
 export function ModelSelector({ compact = false }) {
   const { currentModel, availableModels, setModel } = useStore();
   const [open, setOpen] = useState(false);
   const [customInput, setCustomInput] = useState('');
   const [provider, setProvider] = useState('');
+  const wrapRef = useRef(null);
 
   useEffect(() => {
-    fetch('/api/model').then(r => r.json()).then(data => {
-      setProvider(data.provider || '');
-      if (data.model) setModel(data.model);
-      if (data.available) useStore.setState({ availableModels: data.available });
-    }).catch(() => {});
+    let cancelled = false;
+    const load = () => {
+      fetch('/api/model').then(r => r.json()).then(data => {
+        if (cancelled) return;
+        setProvider(data.provider || '');
+        if (data.model) setModel(data.model);
+        if (data.available) useStore.setState({ availableModels: data.available });
+      }).catch(() => {});
+    };
+    load();
+    const onProviderChange = () => load();
+    window.addEventListener('cgui:provider-change', onProviderChange);
+    return () => {
+      cancelled = true;
+      window.removeEventListener('cgui:provider-change', onProviderChange);
+    };
   }, []);
+
+  // Outside-click close. Document listener works regardless of transform
+  // containing blocks (the fixed-inset trick would be trapped in header).
+  useEffect(() => {
+    if (!open) return;
+    const onDocClick = (e) => {
+      if (!wrapRef.current?.contains(e.target)) setOpen(false);
+    };
+    const onEsc = (e) => { if (e.key === 'Escape') setOpen(false); };
+    document.addEventListener('mousedown', onDocClick);
+    document.addEventListener('keydown', onEsc);
+    return () => {
+      document.removeEventListener('mousedown', onDocClick);
+      document.removeEventListener('keydown', onEsc);
+    };
+  }, [open]);
 
   const handleCustomSubmit = () => {
     const id = customInput.trim();
     if (id) { setModel(id); setCustomInput(''); setOpen(false); }
   };
 
+  // 1M-context toggle: Claude Code enables the 1M beta via a `[1m]` suffix on
+  // the model id (same thing the CLI's /model picker writes). Toggling just
+  // adds/removes the suffix on whatever model is current.
+  const has1m = /\[1m\]/i.test(currentModel || '');
+  const toggle1m = () => {
+    const base = (currentModel || '').replace(/\[1m\]/i, '');
+    if (!base) return;
+    setModel(has1m ? base : `${base}[1m]`);
+  };
+
   if (!currentModel) return null;
 
   return (
-    <div className="relative">
+    <div ref={wrapRef} className="relative">
       <button onClick={() => setOpen(!open)}
         className={`flex items-center gap-1 px-2 py-1 rounded-md hover:bg-canvas-deep transition-colors ${compact ? '' : 'px-2.5'}`}>
         <ModelBadge model={currentModel} compact={compact} />
@@ -894,40 +2569,80 @@ export function ModelSelector({ compact = false }) {
         <ChevronDown size={10} className="text-ink-faint" />
       </button>
       {open && (
-        <>
-          <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
-          <div className="glass-popover absolute left-0 bottom-full mb-2 w-72 z-50 py-1 animate-glass-rise">
-            <div className="px-3 py-1.5 text-[10px] text-ink-faint uppercase tracking-wider font-body flex items-center justify-between">
+        <div className="glass-popover absolute right-0 top-full mt-2 w-80 z-50 py-1 animate-glass-rise max-h-[70vh] overflow-y-auto">
+          <div className="px-3 py-2 sticky top-0 bg-canvas border-b border-canvas-deep">
+            <div className="text-[10px] text-ink-faint uppercase tracking-wider font-body flex items-center justify-between">
               <span>选择模型</span>
               {provider && <span className="text-ink-ghost normal-case">{provider}</span>}
             </div>
-            {availableModels.map((m) => (
+            <p className="text-[10px] text-ink-faint font-body mt-1 leading-snug">
+              <b>alias</b> = CLI 接收 <code className="font-mono">sonnet/opus/haiku</code> 简称，由 CLI 解析到当前 tier 最新模型。
+              {provider && provider !== 'Anthropic' && (
+                <span className="block text-amber-700 mt-0.5">
+                  ⚠ 当前 provider 是 <b>{provider}</b>，alias 可能被该 provider 重定向到其默认模型。建议用具体模型 ID。
+                </span>
+              )}
+            </p>
+          </div>
+          {/* 1M context toggle — appends [1m] to the active model id */}
+          <button onClick={toggle1m}
+            className="w-full text-left px-3 py-2 hover:bg-canvas-warm transition-colors flex items-center gap-2 border-b border-canvas-deep">
+            <div className="flex-1 min-w-0">
+              <div className="text-xs font-medium text-ink font-body">1M 上下文</div>
+              <div className="text-[10px] text-ink-faint font-body leading-snug">
+                给当前模型追加 <code className="font-mono">[1m]</code> 后缀（1M tokens 上下文 beta）
+              </div>
+            </div>
+            <span className={`text-[9px] px-1.5 py-0.5 rounded font-mono shrink-0 ${
+              has1m ? 'bg-accent text-white' : 'bg-canvas-deep text-ink-faint'}`}>
+              {has1m ? '已开启' : '关闭'}
+            </span>
+          </button>
+          {availableModels.map((m) => {
+            const isAlias = m.source === 'cli-alias';
+            return (
               <button key={m.id} onClick={() => { setModel(m.id); setOpen(false); }}
                 className={`w-full text-left px-3 py-2 hover:bg-canvas-warm transition-colors flex items-center gap-2 ${
                   currentModel === m.id ? 'bg-accent-subtle/50' : ''}`}>
                 <div className="flex-1 min-w-0">
-                  <div className="text-xs font-medium text-ink font-body">{m.name}</div>
-                  <div className="text-[10px] text-ink-faint font-mono truncate">{m.id}</div>
+                  <div className="text-xs font-medium text-ink font-body flex items-center gap-1.5">
+                    {m.name}
+                    {isAlias && (
+                      <span className="text-[8.5px] px-1 py-px bg-amber-50 text-amber-700 rounded font-mono"
+                        title="CLI 解析的简称，实际模型由 CLI 决定">
+                        alias
+                      </span>
+                    )}
+                    {m.context1m && (
+                      <span className="text-[8.5px] px-1 py-px bg-accent text-white rounded font-mono"
+                        title="1M tokens 上下文">
+                        1M
+                      </span>
+                    )}
+                  </div>
+                  <div className="text-[10px] text-ink-faint font-mono truncate">
+                    {isAlias ? '由 CLI 解析到当前 tier 最新' : m.id}
+                  </div>
                 </div>
                 <span className="text-[9px] px-1.5 py-0.5 bg-canvas-deep text-ink-faint rounded font-mono shrink-0">{m.tier}</span>
                 {currentModel === m.id && <Check size={12} className="text-accent shrink-0" />}
               </button>
-            ))}
-            <div className="border-t border-canvas-deep mt-1 pt-1 px-3 pb-2">
-              <div className="text-[10px] text-ink-faint mb-1 font-body">自定义模型 ID</div>
-              <div className="flex gap-1.5">
-                <input type="text" value={customInput} onChange={e => setCustomInput(e.target.value)}
-                  onKeyDown={e => e.key === 'Enter' && handleCustomSubmit()}
-                  placeholder="输入模型 ID..."
-                  className="flex-1 bg-canvas-warm border border-canvas-deep rounded px-2 py-1 text-xs font-mono text-ink focus:outline-none focus:border-accent/40" />
-                <button onClick={handleCustomSubmit} disabled={!customInput.trim()}
-                  className="px-2 py-1 text-[10px] bg-accent text-white rounded hover:bg-accent-hover disabled:bg-canvas-deep disabled:text-ink-ghost transition-colors">
-                  应用
-                </button>
-              </div>
+            );
+          })}
+          <div className="border-t border-canvas-deep mt-1 pt-1 px-3 pb-2">
+            <div className="text-[10px] text-ink-faint mb-1 font-body">自定义模型 ID</div>
+            <div className="flex gap-1.5">
+              <input type="text" value={customInput} onChange={e => setCustomInput(e.target.value)}
+                onKeyDown={e => e.key === 'Enter' && handleCustomSubmit()}
+                placeholder="输入模型 ID..."
+                className="flex-1 bg-canvas-warm border border-canvas-deep rounded px-2 py-1 text-xs font-mono text-ink focus:outline-none focus:border-accent/40" />
+              <button onClick={handleCustomSubmit} disabled={!customInput.trim()}
+                className="px-2 py-1 text-[10px] bg-accent text-white rounded hover:bg-accent-hover disabled:bg-canvas-deep disabled:text-ink-ghost transition-colors">
+                应用
+              </button>
             </div>
           </div>
-        </>
+        </div>
       )}
     </div>
   );
@@ -938,38 +2653,145 @@ export default function App() {
   useWebSocket();
   const { sidebarCollapsed, toggleSidebar, selectedProject, selectedSession } = useStore();
   const [rightPanel, setRightPanel] = useState(null);
+  // Per-session permission key for the header chip + bypass auto-resolve.
+  // Mirrors SessionDetail's sessionQueueKey so the header controls the same
+  // session's mode the composer sends with.
+  const permKey = selectedSession?.sessionId || `draft-${selectedSession?.projectHash || 'none'}`;
+
+  // Apply persisted UI font scale on mount. Use document.documentElement.style
+  // .zoom so even text-[12px]-style hardcoded sizes scale (not just rem).
+  const uiFontScale = useStore((s) => s.uiFontScale);
+  useEffect(() => {
+    try { document.documentElement.style.zoom = String(uiFontScale || 1); } catch {}
+  }, [uiFontScale]);
+
+  // Apply persisted color theme on mount. Maps `cguiTheme` store value to
+  // the `data-cgui-theme="<name>"` attribute on <html>, picked up by the
+  // theme blocks in index.css.
+  const cguiTheme = useStore((s) => s.cguiTheme);
+  useEffect(() => {
+    try {
+      if (cguiTheme) document.documentElement.setAttribute('data-cgui-theme', cguiTheme);
+      else document.documentElement.removeAttribute('data-cgui-theme');
+    } catch {}
+  }, [cguiTheme]);
+
+  // Mid-stream mode change → bulk-resolve any waiting popups. This is the
+  // "切到放任后所有待处理工具直接放行" UX. Doesn't kill or respawn the
+  // CLI — the hook bridge keeps running with its original env, but the
+  // server holds responses open until WE respond, so flipping a switch
+  // here is enough.
+  const permissionMode = useStore((s) => s.permissionModeBySession[permKey] || 'default');
+  useEffect(() => {
+    if (permissionMode !== 'bypassPermissions') return;
+    const pending = useStore.getState().pendingPermissions;
+    pending.forEach((p) => {
+      fetch(`/api/permissions/respond/${p.id}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ decision: 'allow' }),
+      }).catch(() => {});
+      useStore.getState().removePendingPermission(p.id);
+    });
+  }, [permissionMode]);
+
+  // Rehydrate after refresh: if a session was persisted, reload its message
+  // history + the project's session list. silent:true so we don't render the
+  // loading screen and lose the page's restored scroll position.
+  useEffect(() => {
+    let { selectedProject: p, selectedSession: s } = useStore.getState();
+    const { fetchProjects, fetchSessions, fetchMessages, setSelectedProject, setSelectedSession } = useStore.getState();
+
+    // Self-heal: if a previous bug stored the project with a wrong hash
+    // (missing the leading "-"), or if the hash doesn't match what the CLI
+    // actually uses for this path, regenerate it. Otherwise fetchSessions
+    // 404s and the session list stays empty forever.
+    if (p?.path) {
+      // Normalize the SELECTED PROJECT's path for nice display + clean git
+      // operations. But DO NOT touch selectedSession.projectHash — that hash
+      // must continue to match the on-disk jsonl directory exactly, even if
+      // it has trailing dashes, because the CLI uses it to locate the session
+      // for --resume. Sanitizing it here would orphan the session pointer.
+      const cleanPath = p.path.replace(/\/{2,}/g, '/').replace(/(.)\/$/, '$1');
+      const expectedHash = cleanPath.replace(/[/\s]/g, '-');
+      if (p.path !== cleanPath || p.hash !== expectedHash) {
+        const corrected = { ...p, path: cleanPath, hash: expectedHash };
+        setSelectedProject(corrected);
+        p = corrected;
+        // selectedSession kept as-is on purpose.
+      }
+    }
+
+    fetchProjects();
+    if (p?.hash) fetchSessions(p.hash, { silent: true });
+    if (s?.sessionId && s?.projectHash) fetchMessages(s.sessionId, s.projectHash, { silent: true });
+    // Detect the active upstream provider (anthropic / deepseek / mimo / ...)
+    // so pricing is computed against the real backend even when cc switch
+    // routes Claude-shaped API calls elsewhere. Refresh on settings.json
+    // change (the WS file-watcher dispatches cgui:provider-change).
+    useStore.getState().fetchProvider();
+    const onProvCh = () => useStore.getState().fetchProvider();
+    window.addEventListener('cgui:provider-change', onProvCh);
+    // Warm the MCP cache so the first click on the MCP panel is instant
+    // (claude mcp list cold spawn is ~2s).
+    fetch('/api/mcp').catch(() => {});
+    return () => window.removeEventListener('cgui:provider-change', onProvCh);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   return (
     <div className="h-screen flex flex-col">
       {/* Top bar — glass */}
-      <header className="glass-bar h-12 px-4 flex items-center justify-between shrink-0 relative z-20">
-        <div className="flex items-center gap-2">
-          <button onClick={toggleSidebar} className="btn-glass p-1.5 transition-colors" title={sidebarCollapsed ? '展开' : '收起'}>
+      {/* Top bar uses min-height instead of fixed h-12 so when font scales up
+          and the right cluster wraps to a second line, the bar grows with the
+          content instead of clipping. flex-wrap on both sides keeps it from
+          horizontally overflowing on narrow viewports. */}
+      <header className="glass-bar min-h-12 px-4 py-1 flex items-center justify-between gap-y-1 flex-wrap shrink-0 relative z-20">
+        <div className="flex items-center gap-2 min-w-0">
+          <button onClick={toggleSidebar} className="btn-glass p-1.5 transition-colors shrink-0" title={sidebarCollapsed ? '展开' : '收起'}>
             {sidebarCollapsed ? <ChevronRight size={15} className="text-ink-muted" /> : <ChevronLeft size={15} className="text-ink-muted" />}
           </button>
-          <span className="text-[15px] font-display font-semibold text-ink tracking-tight">Claude Code</span>
+          <span className="text-[15px] font-display font-semibold text-ink tracking-tight shrink-0">Claude Code</span>
           {selectedProject && (
-            <span className="chip font-mono truncate max-w-[200px]">
+            <span className="chip font-mono truncate min-w-0 max-w-[200px]">
               {formatPathShort(selectedProject.path)}
             </span>
           )}
           {selectedSession && (
             <>
-              <span className="text-ink-ghost">/</span>
-              <span className="text-[11px] text-ink-muted font-body truncate max-w-[220px]">
+              <span className="text-ink-ghost shrink-0">/</span>
+              <span className="text-[11px] text-ink-muted font-body truncate min-w-0 max-w-[220px]">
                 {selectedSession.firstPrompt?.slice(0, 36) || selectedSession.sessionId.slice(0, 8)}
               </span>
             </>
           )}
         </div>
-        <div className="flex items-center gap-1">
-          {Object.entries(PANEL_MAP).map(([id, { icon: Icon, label }]) => (
-            <button key={id} onClick={() => setRightPanel(rightPanel === id ? null : id)}
-              className={`p-2 rounded-lg transition-all ${rightPanel === id ? 'bg-accent-subtle text-accent' : 'text-ink-muted hover:text-ink hover:bg-black/5'}`}
-              title={label}>
-              <Icon size={15} />
-            </button>
-          ))}
+        <div className="flex items-center gap-1 flex-wrap justify-end">
+          <ModelSelector placement="bottom" align="right" compact />
+          <EffortSelector placement="bottom" align="right" />
+          <PermissionModeSelector permKey={permKey} />
+          <div className="w-px h-4 bg-ink-ghost/30 mx-1" />
+          {/* Split-screen toggle. Activates the right pane (initially empty
+              until user clicks a session in the sidebar). Click again to
+              collapse back to a single SessionDetail. */}
+          <SplitModeToggle />
+          {Object.entries(PANEL_MAP).map(([id, { icon: Icon, label }]) => {
+            // Short chip label (always visible under the icon). Long `label`
+            // stays as the hover tooltip for the full name.
+            const SHORT = {
+              files: '文件', monitor: '监控', usage: '用量', processes: '进程',
+              mcp: 'MCP', settings: '设置',
+            };
+            const short = SHORT[id] || label;
+            return (
+              <button key={id} onClick={() => setRightPanel(rightPanel === id ? null : id)}
+                className={`px-1.5 py-1 rounded-lg transition-all flex flex-col items-center gap-0.5 ${rightPanel === id ? 'bg-accent-subtle text-accent' : 'text-ink-muted hover:text-ink hover:bg-black/5'}`}
+                title={label}>
+                <Icon size={15} />
+                <span className="text-[9px] leading-none font-body">{short}</span>
+              </button>
+            );
+          })}
           <div className="w-px h-4 bg-ink-ghost/30 mx-1" />
           <ContinueButton />
           <ThemeToggle />
@@ -977,19 +2799,12 @@ export default function App() {
       </header>
 
       {/* Main content */}
-      <div className="flex-1 flex min-h-0 gap-0 p-0">
-        {!sidebarCollapsed && (
-          <aside className="glass-thick w-[268px] shrink-0 flex flex-col m-3 mr-0 rounded-2xl overflow-hidden animate-glass-rise">
-            <div className="flex-1 min-h-0 overflow-hidden">
-              {selectedProject ? <SessionList /> : <ProjectList />}
-            </div>
-          </aside>
-        )}
-        <main className="flex-1 flex flex-col min-w-0 relative m-3 rounded-2xl overflow-hidden">
-          <SessionDetail />
-        </main>
-        {rightPanel && <RightPanel panelId={rightPanel} onClose={() => setRightPanel(null)} />}
-      </div>
+      <MainLayout
+        sidebarCollapsed={sidebarCollapsed}
+        selectedProject={selectedProject}
+        rightPanel={rightPanel}
+        setRightPanel={setRightPanel}
+      />
     </div>
   );
 }

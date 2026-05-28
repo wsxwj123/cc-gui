@@ -18,6 +18,10 @@ import checkpointsRoutes from './routes/checkpoints.js';
 import agentsRoutes from './routes/agents.js';
 import worktreeRoutes from './routes/worktree.js';
 import gitRoutes from './routes/git.js';
+import uploadRoutes from './routes/upload.js';
+import pickerRoutes from './routes/picker.js';
+import permissionsRoutes from './routes/permissions.js';
+import filesRoutes from './routes/files.js';
 import { setupFileWatcher } from './services/file-watcher.js';
 import { getDefaultModel, getAvailableModels, setDefaultModel } from './services/model-resolver.js';
 import { readdir, readFile } from 'fs/promises';
@@ -28,7 +32,8 @@ const PORT = process.env.PORT || 6677;
 
 const app = express();
 app.use(cors());
-app.use(express.json());
+// Bumped from default 100kb to 25mb so dragged-in screenshots fit in the JSON body.
+app.use(express.json({ limit: '25mb' }));
 
 // API routes
 app.use('/api', sessionRoutes);
@@ -44,6 +49,10 @@ app.use('/api', checkpointsRoutes);
 app.use('/api', agentsRoutes);
 app.use('/api', worktreeRoutes);
 app.use('/api', gitRoutes);
+app.use('/api', uploadRoutes);
+app.use('/api', pickerRoutes);
+app.use('/api', permissionsRoutes);
+app.use('/api', filesRoutes);
 
 // GET /api/model — current default model + available models
 app.get('/api/model', async (req, res) => {
@@ -175,12 +184,50 @@ app.get('/api/slash-commands', async (req, res) => {
   }
 });
 
-// Serve static frontend in production
+// Serve static frontend in production.
+// IMPORTANT: index.html must NEVER be cached — its inline <script src> points
+// to a content-hashed bundle (e.g. index-G15SFXlT.js). If the browser caches
+// index.html, it keeps loading the OLD bundle hash forever even after rebuilds.
+// Hashed assets under /assets/* CAN be cached aggressively (the filename itself
+// busts the cache on change).
 const clientDist = join(__dirname, '..', 'client', 'dist');
 if (existsSync(clientDist)) {
-  app.use(express.static(clientDist));
-  app.get('/{*splat}', (req, res) => {
-    res.sendFile(join(clientDist, 'index.html'));
+  app.use(express.static(clientDist, {
+    // index: false → don't auto-serve index.html for "/" — that path must
+    // hit our app.get('/{*splat}') handler below so we can inject the
+    // per-request meta tag (busts stuck browser HTML caches).
+    index: false,
+    setHeaders: (res, filePath) => {
+      if (filePath.endsWith('index.html')) {
+        res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+        res.setHeader('Pragma', 'no-cache');
+        res.setHeader('Expires', '0');
+      } else if (filePath.includes('/assets/')) {
+        res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+      }
+    },
+  }));
+  app.get('/{*splat}', async (req, res) => {
+    // Inject a per-request timestamp meta into index.html so the response
+    // bytes change every time. This works around browser HTTP-cache stickiness
+    // some users hit even with Cache-Control: no-cache (because the previously
+    // cached entry didn't have the no-cache header). After one new visit
+    // through this path, the browser stores the fresh no-cache HTML and
+    // future requests revalidate properly — no more need for `?v=` suffixes.
+    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+    try {
+      const { readFile } = await import('fs/promises');
+      let html = await readFile(join(clientDist, 'index.html'), 'utf-8');
+      html = html.replace(
+        '</head>',
+        `<meta name="cgui-build" content="${Date.now()}"></head>`,
+      );
+      res.type('html').send(html);
+    } catch {
+      res.sendFile(join(clientDist, 'index.html'));
+    }
   });
 }
 
@@ -213,19 +260,43 @@ function broadcast(data) {
   }
 }
 
-// File watcher → WebSocket broadcast
+// File watcher → WebSocket broadcast.
+// settings.json is the file `cc switch` rewrites — when it changes, tell every
+// connected client so ModelSelector / ProviderAvatar can refetch /api/model and
+// reflect the new provider without a page reload.
 let watcher = null;
 try {
   watcher = setupFileWatcher((eventType, filePath) => {
+    if (filePath.endsWith('/.claude/settings.json') || filePath.endsWith('\\.claude\\settings.json')) {
+      broadcast({ type: 'provider-change', path: filePath });
+    }
     broadcast({ type: 'file-change', eventType, path: filePath });
   });
 } catch {
   console.warn('File watcher failed to start (chokidar)');
 }
 
+// Don't let a single bad request kill the whole dev server. Log loudly,
+// but keep serving the GUI — concurrently kills both processes on exit.
+process.on('uncaughtException', (err) => {
+  console.error('[uncaughtException]', err);
+});
+process.on('unhandledRejection', (reason) => {
+  console.error('[unhandledRejection]', reason);
+});
+
 server.listen(PORT, () => {
-  console.log(`Claude GUI server running at http://localhost:${PORT}`);
-  console.log(`WebSocket at ws://localhost:${PORT}/ws`);
+  console.log('═'.repeat(60));
+  console.log(`  Claude GUI server READY   http://localhost:${PORT}`);
+  console.log(`  WebSocket                  ws://localhost:${PORT}/ws`);
+  console.log(`  Started at                 ${new Date().toLocaleString()}`);
+  console.log('═'.repeat(60));
+}).on('error', (err) => {
+  if (err.code === 'EADDRINUSE') {
+    console.error(`\n[!] Port ${PORT} already in use. Run: npm run stop (then npm start)\n`);
+    process.exit(1);
+  }
+  throw err;
 });
 
 export { broadcast };

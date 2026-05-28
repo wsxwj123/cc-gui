@@ -2,10 +2,50 @@ import React, { useState } from 'react';
 import {
   Brain, Copy, Check, ChevronDown, ChevronRight,
   Wrench, BookOpen, Pencil, Terminal, FileText, Search,
-  Globe, Edit3, Loader2
+  Globe, Edit3, Loader2, CheckSquare, Square, CircleDot, ListTodo
 } from 'lucide-react';
 import { ModelBadge, ProviderAvatar } from './ModelBadge.jsx';
 import { MarkdownRenderer } from './MarkdownRenderer.jsx';
+import { BashCard } from './tools/BashCard.jsx';
+import { EditDiffCard } from './tools/EditDiffCard.jsx';
+import { ReadCard } from './tools/ReadCard.jsx';
+import { TaskCard } from './tools/TaskCard.jsx';
+import { GrepGlobCard } from './tools/GrepGlobCard.jsx';
+import { WebCard } from './tools/WebCard.jsx';
+import { SkillCard } from './tools/SkillCard.jsx';
+import { computeCost, formatCost } from '../utils/pricing.js';
+import { useStore } from '../stores/sessionStore.js';
+
+// Tools that get their own bespoke inline card (rendered in chronological order
+// inside the turn). Anything not in this set falls through to ToolCallsGroup,
+// the generic category-grouped collapsible.
+const INLINE_TOOL_NAMES = new Set([
+  'Bash', 'Edit', 'MultiEdit', 'Write', 'Read',
+  'Task', 'Grep', 'Glob', 'WebSearch', 'WebFetch', 'Skill',
+]);
+
+function InlineToolCard({ toolCall }) {
+  return renderRichToolCard(toolCall);
+}
+
+// Returns the rich card React element for a tool, or null when no
+// specialty renderer exists for that tool name.
+function renderRichToolCard(toolCall) {
+  switch (toolCall.name) {
+    case 'Bash': return <BashCard toolCall={toolCall} />;
+    case 'Edit':
+    case 'MultiEdit':
+    case 'Write': return <EditDiffCard toolCall={toolCall} />;
+    case 'Read': return <ReadCard toolCall={toolCall} />;
+    case 'Task': return <TaskCard toolCall={toolCall} />;
+    case 'Grep':
+    case 'Glob': return <GrepGlobCard toolCall={toolCall} />;
+    case 'WebSearch':
+    case 'WebFetch': return <WebCard toolCall={toolCall} />;
+    case 'Skill': return <SkillCard toolCall={toolCall} />;
+    default: return null;
+  }
+}
 
 // ─── Tool category config ──────────────────────────────────────
 const CATEGORY_CONFIG = {
@@ -143,6 +183,59 @@ function ToolCallRow({ toolCall }) {
   );
 }
 
+// ─── TodoWrite renderer ───────────────────────────────────────
+// The TodoWrite tool's input is `{ todos: [{ content, status, activeForm }] }`.
+// CLI renders it as a checkbox list with status markers; we mirror that here so
+// users see the plan rather than a raw JSON dump.
+function TodoListCard({ toolCall }) {
+  const todos = Array.isArray(toolCall.input?.todos) ? toolCall.input.todos : [];
+  if (todos.length === 0) return null;
+
+  // Status counts for the header badge.
+  const completed = todos.filter((t) => t.status === 'completed').length;
+  const active = todos.filter((t) => t.status === 'in_progress').length;
+  const pending = todos.filter((t) => t.status === 'pending').length;
+
+  const statusIcon = (status) => {
+    if (status === 'completed') return <CheckSquare size={13} className="text-success shrink-0" />;
+    if (status === 'in_progress') return <CircleDot size={13} className="text-accent shrink-0 animate-pulse" />;
+    return <Square size={13} className="text-ink-faint shrink-0" />;
+  };
+
+  const rowClass = (status) => {
+    if (status === 'completed') return 'text-ink-faint line-through';
+    if (status === 'in_progress') return 'text-ink font-medium';
+    return 'text-ink-soft';
+  };
+
+  return (
+    <div className="border border-canvas-deep rounded-lg overflow-hidden bg-canvas animate-fade-up">
+      <div className="px-3 py-2 bg-canvas-warm flex items-center gap-2 border-b border-canvas-deep">
+        <ListTodo size={13} className="text-accent shrink-0" />
+        <span className="text-xs text-ink-soft font-body">任务清单</span>
+        <span className="text-[10px] text-ink-faint font-mono">
+          {completed}/{todos.length} 完成{active > 0 && ` · ${active} 进行中`}{pending > 0 && ` · ${pending} 待办`}
+        </span>
+        {!toolCall.result && (
+          <Loader2 size={11} className="text-ink-faint animate-spin ml-auto" />
+        )}
+      </div>
+      <ul className="py-1.5">
+        {todos.map((todo, i) => {
+          // Show activeForm for in_progress items (matches CLI behavior — verb form for the active task)
+          const text = todo.status === 'in_progress' && todo.activeForm ? todo.activeForm : todo.content;
+          return (
+            <li key={i} className="px-3 py-1 flex items-start gap-2 text-[12px] font-body leading-snug">
+              {statusIcon(todo.status)}
+              <span className={rowClass(todo.status)}>{text}</span>
+            </li>
+          );
+        })}
+      </ul>
+    </div>
+  );
+}
+
 // ─── Tool Calls Group (collapsed by category) ─────────────────
 function ToolCallsGroup({ toolCalls }) {
   const [expanded, setExpanded] = useState(false);
@@ -206,9 +299,15 @@ function ToolCallsGroup({ toolCalls }) {
                   </span>
                 </div>
                 <div className="space-y-1">
-                  {items.map((tc, i) => (
-                    <ToolCallRow key={tc.id || i} toolCall={tc} />
-                  ))}
+                  {items.map((tc, i) => {
+                    // Use the rich specialty card (BashCard/EditDiffCard/...)
+                    // when one exists — each is independently collapsible.
+                    // Falls back to generic ToolCallRow for unknown tools.
+                    const rich = renderRichToolCard(tc);
+                    return rich
+                      ? <div key={tc.id || i}>{rich}</div>
+                      : <ToolCallRow key={tc.id || i} toolCall={tc} />;
+                  })}
                 </div>
               </div>
             );
@@ -220,16 +319,34 @@ function ToolCallsGroup({ toolCalls }) {
 }
 
 // ─── Usage Display ─────────────────────────────────────────────
-function UsageDisplay({ usage }) {
+function UsageDisplay({ usage, model }) {
   if (!usage) return null;
   const input = usage.input_tokens || 0;
   const output = usage.output_tokens || 0;
   const cacheRead = usage.cache_read_input_tokens || 0;
+  const cacheWrite = usage.cache_creation_input_tokens || 0;
+  const provider = useStore((s) => s.currentProvider);
+  const cost = computeCost(model, usage, provider);
   return (
-    <div className="flex gap-3 text-[10px] text-ink-faint mt-2 pt-2 border-t border-canvas-deep/50">
+    <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[10px] text-ink-faint mt-2 pt-2 border-t border-canvas-deep/50">
       <span>输入 {input.toLocaleString()}</span>
       <span>输出 {output.toLocaleString()}</span>
-      {cacheRead > 0 && <span>缓存 {cacheRead.toLocaleString()}</span>}
+      {cacheRead > 0 && <span title="cache_read_input_tokens">缓存命中 {cacheRead.toLocaleString()}</span>}
+      {cacheWrite > 0 && <span title="cache_creation_input_tokens">缓存写入 {cacheWrite.toLocaleString()}</span>}
+      {cost && (
+        <span
+          className="ml-auto text-accent/80 font-mono"
+          title={
+            `本条估算（${cost.currency === 'CNY' ? '原价 CNY，已按 1 USD ≈ 7.2 CNY 换算' : 'USD'}）\n` +
+            `input ${formatCost(cost.breakdown.input)}\n` +
+            `output ${formatCost(cost.breakdown.output)}\n` +
+            `cache read ${formatCost(cost.breakdown.cacheRead)}\n` +
+            `cache write ${formatCost(cost.breakdown.cacheWrite)}`
+          }
+        >
+          {formatCost(cost.totalUsd)}
+        </span>
+      )}
     </div>
   );
 }
@@ -240,15 +357,35 @@ export function TurnBubble({ turn }) {
 
   const fullText = turn.text.join('\n');
   const fullThinking = turn.thinking.join('\n');
-  const hasToolCalls = turn.toolCalls.length > 0;
-  const isStreaming = !fullText && !fullThinking && !hasToolCalls;
+
+  // NEW canonical render path: if `turn.blocks` is present, render content
+  // strictly in the order Claude emitted it (text → tool → text → tool → write).
+  // This is what makes the UI match the CLI: a "thinking" segment, then a Bash
+  // call+result, then more reasoning text, then an Edit, then summary text.
+  const hasOrderedBlocks = Array.isArray(turn.blocks) && turn.blocks.length > 0;
+
+  // Legacy bucket path (kept for historical messages loaded from .jsonl which
+  // don't have a blocks array — they get the old grouped-by-type layout).
+  const todoCalls = turn.toolCalls.filter((tc) => tc.name === 'TodoWrite');
+  const latestTodo = todoCalls.length > 0 ? todoCalls[todoCalls.length - 1] : null;
+  const inlineCalls = turn.toolCalls.filter((tc) => INLINE_TOOL_NAMES.has(tc.name));
+  const groupedCalls = turn.toolCalls.filter(
+    (tc) => tc.name !== 'TodoWrite' && !INLINE_TOOL_NAMES.has(tc.name)
+  );
+  const hasInlineCalls = inlineCalls.length > 0;
+  const hasGroupedCalls = groupedCalls.length > 0;
+  const isStreaming = !fullText && !fullThinking && !latestTodo && !hasInlineCalls && !hasGroupedCalls && !hasOrderedBlocks;
+
+  // turn.uuid === 'streaming' is App.jsx's signal that this turn is still being
+  // produced — spin the avatar mark to mirror the CLI's rotating progress glyph.
+  const isLiveStream = turn.uuid === 'streaming';
 
   return (
     <div className="group px-6 py-4 animate-fade-up" style={{ animationDuration: '0.25s' }}>
       <div className="max-w-3xl mx-auto flex gap-4">
         {/* Avatar — tinted by the actual provider behind the model */}
         <div className="mt-0.5">
-          <ProviderAvatar model={turn.model} size={28} />
+          <ProviderAvatar model={turn.model} size={34} thinking={isLiveStream} />
         </div>
 
         {/* Content */}
@@ -262,35 +399,100 @@ export function TurnBubble({ turn }) {
             <CopyButton text={fullText} />
           </div>
 
-          {/* Thinking */}
-          {fullThinking && (
-            <div className="mb-3">
-              <button
-                onClick={() => setShowThinking(!showThinking)}
-                className="flex items-center gap-1.5 text-[11px] text-ink-faint hover:text-ink-muted transition-colors font-body"
-              >
-                <Brain size={12} />
-                <span>思考过程</span>
-                <span className="text-[10px]">{showThinking ? '▾' : '▸'}</span>
-              </button>
-              {showThinking && (
-                <div className="thinking-block mt-2 p-4 rounded-lg text-xs text-ink-muted whitespace-pre-wrap max-h-64 overflow-y-auto font-body leading-relaxed">
-                  {fullThinking}
+          {/* Primary render path — preserves chronological order.
+              We fold every RUN of consecutive tool_use blocks into a single
+              ToolCallsGroup so the layout reads as: text → [round 1 tools] →
+              text → [round 2 tools] → … instead of one card per tool. The
+              user can expand the round bar to see each tool's collapsed card,
+              then expand individual cards for details. */}
+          {hasOrderedBlocks ? (
+            <div className="space-y-2">
+              {(() => {
+                const out = [];
+                let bucket = [];
+                const flushBucket = (keyHint) => {
+                  if (bucket.length > 0) {
+                    out.push(<ToolCallsGroup key={`bucket-${keyHint}`} toolCalls={bucket} />);
+                    bucket = [];
+                  }
+                };
+                turn.blocks.forEach((b, i) => {
+                  if (b.type === 'text' && b.content) {
+                    flushBucket(i);
+                    out.push(<MarkdownRenderer key={`b-${i}`} content={b.content} />);
+                    return;
+                  }
+                  if (b.type === 'thinking' && b.content) {
+                    flushBucket(i);
+                    out.push(
+                      <details key={`b-${i}`} className="mb-1">
+                        <summary className="flex items-center gap-1.5 text-[11px] text-ink-faint hover:text-ink-muted cursor-pointer font-body">
+                          <Brain size={12} />
+                          <span>思考过程</span>
+                        </summary>
+                        <div className="thinking-block mt-2 p-4 rounded-lg text-xs text-ink-muted whitespace-pre-wrap max-h-64 overflow-y-auto font-body leading-relaxed">
+                          {b.content}
+                        </div>
+                      </details>
+                    );
+                    return;
+                  }
+                  if (b.type === 'tool_use' && b.toolCall) {
+                    // TodoWrite: only render the latest snapshot; never bucket.
+                    if (b.toolCall.name === 'TodoWrite') {
+                      flushBucket(i);
+                      const isLatestTodo = !turn.blocks.slice(i + 1).some(
+                        (b2) => b2.type === 'tool_use' && b2.toolCall?.name === 'TodoWrite'
+                      );
+                      if (isLatestTodo) {
+                        out.push(<TodoListCard key={`b-${i}`} toolCall={b.toolCall} />);
+                      }
+                      return;
+                    }
+                    // Every other tool — Bash/Read/Edit/Grep/Web/Skill/Task/etc.
+                    // accumulates into the current round bucket regardless of
+                    // whether it was previously rendered as an inline card.
+                    bucket.push(b.toolCall);
+                    return;
+                  }
+                });
+                flushBucket('end');
+                return out;
+              })()}
+            </div>
+          ) : (
+            <>
+              {/* Legacy path for historical messages (no blocks array) */}
+              {fullThinking && (
+                <div className="mb-3">
+                  <button
+                    onClick={() => setShowThinking(!showThinking)}
+                    className="flex items-center gap-1.5 text-[11px] text-ink-faint hover:text-ink-muted transition-colors font-body"
+                  >
+                    <Brain size={12} />
+                    <span>思考过程</span>
+                    <span className="text-[10px]">{showThinking ? '▾' : '▸'}</span>
+                  </button>
+                  {showThinking && (
+                    <div className="thinking-block mt-2 p-4 rounded-lg text-xs text-ink-muted whitespace-pre-wrap max-h-64 overflow-y-auto font-body leading-relaxed">
+                      {fullThinking}
+                    </div>
+                  )}
                 </div>
               )}
-            </div>
-          )}
-
-          {/* Text */}
-          {fullText && (
-            <MarkdownRenderer content={fullText} />
-          )}
-
-          {/* Tool calls — all grouped in one collapsible block */}
-          {hasToolCalls && (
-            <div className="mt-2">
-              <ToolCallsGroup toolCalls={turn.toolCalls} />
-            </div>
+              {fullText && <MarkdownRenderer content={fullText} />}
+              {latestTodo && <div className="mt-2"><TodoListCard toolCall={latestTodo} /></div>}
+              {hasInlineCalls && (
+                <div className="mt-2 space-y-2">
+                  {inlineCalls.map((tc, i) => (
+                    <InlineToolCard key={tc.id || `inline-${i}`} toolCall={tc} />
+                  ))}
+                </div>
+              )}
+              {hasGroupedCalls && (
+                <div className="mt-2"><ToolCallsGroup toolCalls={groupedCalls} /></div>
+              )}
+            </>
           )}
 
           {/* Streaming indicator */}
@@ -303,7 +505,7 @@ export function TurnBubble({ turn }) {
           )}
 
           {/* Usage */}
-          <UsageDisplay usage={turn.usage} />
+          <UsageDisplay usage={turn.usage} model={turn.model} />
         </div>
       </div>
     </div>

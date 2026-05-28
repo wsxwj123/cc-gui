@@ -57,8 +57,23 @@ function parseMcpList(output) {
   return servers;
 }
 
+// In-memory cache. `runClaude(['mcp', 'list'])` spawns the claude CLI, which
+// takes ~2s cold start. Result is stable for a session, so cache it. Enable/
+// disable mutations invalidate the cache below.
+let mcpCache = null;
+let mcpCacheAt = 0;
+// Long TTL because mcp/plugin list rarely changes mid-session.
+// Mutations (enable/disable) invalidate explicitly via invalidateMcpCache().
+// Pass `?fresh=1` to force a refresh.
+const MCP_CACHE_TTL_MS = 5 * 60_000;
+function invalidateMcpCache() { mcpCache = null; mcpCacheAt = 0; }
+
 // GET /api/mcp — list all MCP servers and plugins
 router.get('/mcp', async (req, res) => {
+  const now = Date.now();
+  if (req.query.fresh !== '1' && mcpCache && (now - mcpCacheAt) < MCP_CACHE_TTL_MS) {
+    return res.json(mcpCache);
+  }
   try {
     const result = { mcpServers: [], plugins: [], external: [] };
 
@@ -115,7 +130,22 @@ router.get('/mcp', async (req, res) => {
       } catch {}
     }
 
-    // 3. Installed plugins
+    // 3. Installed plugins (also parse `claude plugin list` for enabled state)
+    let pluginEnabled = {};
+    try {
+      const out = runClaude(['plugin', 'list'], { timeout: 8000 });
+      // Format: blocks separated by blank lines, each containing
+      //   ❯ <name>@<marketplace>
+      //   ...
+      //   Status: ✔ enabled | ✘ disabled | ✘ failed to load
+      const blocks = out.split(/\n(?=\s*❯)/);
+      for (const block of blocks) {
+        const nameMatch = block.match(/❯\s*([^@\s]+)/);
+        if (!nameMatch) continue;
+        const name = nameMatch[1];
+        pluginEnabled[name] = /Status:\s*✔\s*enabled/i.test(block);
+      }
+    } catch {}
     try {
       const pluginsData = JSON.parse(
         await readFile(join(CLAUDE_DIR, 'plugins', 'installed_plugins.json'), 'utf-8')
@@ -123,6 +153,7 @@ router.get('/mcp', async (req, res) => {
       const plugins = pluginsData.plugins || {};
       for (const [name, instances] of Object.entries(plugins)) {
         const inst = Array.isArray(instances) ? instances[0] : instances;
+        const bareName = name.split('@')[0];
         result.plugins.push({
           name,
           version: inst.version || '?',
@@ -130,6 +161,9 @@ router.get('/mcp', async (req, res) => {
           installPath: inst.installPath || '',
           installedAt: inst.installedAt || null,
           lastUpdated: inst.lastUpdated || null,
+          // Match by bare name first (installed_plugins.json keys can include
+          // `@marketplace`), fall back to assuming enabled if unparseable.
+          enabled: pluginEnabled[bareName] !== undefined ? pluginEnabled[bareName] : true,
         });
       }
     } catch {}
@@ -173,6 +207,8 @@ router.get('/mcp', async (req, res) => {
       }
     }
 
+    mcpCache = result;
+    mcpCacheAt = Date.now();
     res.json(result);
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -222,17 +258,40 @@ router.get('/mcp/:name/ping', async (req, res) => {
       status = 'error';
       detail = err.message;
     }
-    // If it's an HTTP transport, attempt a HEAD ping too.
+    // Parse the actual connection status from CLI output (not just exit code):
+    //   "Status: ✓ Connected" → ok
+    //   "Status: ✘ disconnected" / "Status: ✘ failed" → error
+    //   "Status: ✘ Failed to connect" → error
+    if (status === 'ok' && output) {
+      if (/Status:\s*✘|failed to connect|not connected|disconnected/i.test(output)) {
+        status = 'error';
+        const m = output.match(/Status:\s*✘\s*([^\n]+)/i);
+        detail = m ? m[1].trim() : 'not connected';
+      } else if (/Status:\s*✔|Connected/i.test(output)) {
+        status = 'ok';
+        detail = 'connected';
+      }
+    }
+    // If it's an HTTP transport, attempt a HEAD ping too — purely informational.
     const urlMatch = output && output.match(/URL:\s*(https?:\/\/\S+)/);
     let httpStatus = null;
     if (urlMatch) {
       try {
         const r = await fetch(urlMatch[1], { method: 'HEAD', redirect: 'follow' });
         httpStatus = r.status;
+        // HTTP server may not allow HEAD — that's not a real failure if
+        // the CLI itself says Connected.
+        if (httpStatus >= 500 && status === 'ok') {
+          status = 'error';
+          detail = `HTTP ${httpStatus}`;
+        }
       } catch (err) {
         httpStatus = -1;
-        status = status === 'ok' ? 'error' : status;
-        detail = err.message;
+        // CLI Connected + HEAD failed is normal for some transports.
+        if (status === 'ok' && !/Connected/i.test(output)) {
+          status = 'error';
+          detail = err.message;
+        }
       }
     }
     res.json({
@@ -269,6 +328,7 @@ router.put('/mcp/:name/enable', async (req, res) => {
 
     delete disabled[name];
     await writeDisabled(disabled);
+    invalidateMcpCache();
     res.json({ ok: true, name, enabled: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -299,6 +359,33 @@ router.put('/mcp/:name/disable', async (req, res) => {
     await writeDisabled(disabled);
 
     runClaude(['mcp', 'remove', name]);
+    invalidateMcpCache();
+    res.json({ ok: true, name, enabled: false });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Plugin enable/disable — delegates to `claude plugin {enable|disable} <name>`.
+// Accepts either bare name ("pua") or qualified ("pua@pua-skills"); CLI handles both.
+router.put('/plugins/:name/enable', async (req, res) => {
+  try {
+    const { name } = req.params;
+    if (!/^[A-Za-z0-9._@\-/]{1,100}$/.test(name)) throw new Error('invalid plugin name');
+    runClaude(['plugin', 'enable', name], { timeout: 15000 });
+    invalidateMcpCache();
+    res.json({ ok: true, name, enabled: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.put('/plugins/:name/disable', async (req, res) => {
+  try {
+    const { name } = req.params;
+    if (!/^[A-Za-z0-9._@\-/]{1,100}$/.test(name)) throw new Error('invalid plugin name');
+    runClaude(['plugin', 'disable', name], { timeout: 15000 });
+    invalidateMcpCache();
     res.json({ ok: true, name, enabled: false });
   } catch (err) {
     res.status(500).json({ error: err.message });

@@ -1,7 +1,28 @@
-import { readdir, stat } from 'fs/promises';
+import { readdir, stat, readFile } from 'fs/promises';
 import { join, basename } from 'path';
 import { homedir } from 'os';
 import { parseJsonl, readJsonlEdges } from '../utils/jsonl-parser.js';
+
+/**
+ * Read the real absolute cwd a GUI-registered project was created with, from
+ * the `.cgui-meta.json` sidecar. Returns null when absent (legacy / CLI-made
+ * dirs). The sidecar is the only reliable source for non-ASCII paths because
+ * the CLI hash collapses Unicode to dashes (one-way, and possibly colliding).
+ */
+async function readSidecarCwd(projectDir) {
+  try {
+    const raw = await readFile(join(projectDir, '.cgui-meta.json'), 'utf-8');
+    const meta = JSON.parse(raw);
+    return typeof meta?.cwd === 'string' && meta.cwd ? meta.cwd : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Extract the exact launch cwd from a session jsonl's first `system` record. */
+function cwdFromHead(head) {
+  return head.find((r) => r.type === 'system' && typeof r.cwd === 'string')?.cwd || null;
+}
 
 const CLAUDE_DIR = join(homedir(), '.claude');
 const PROJECTS_DIR = join(CLAUDE_DIR, 'projects');
@@ -11,12 +32,20 @@ const SESSIONS_DIR = join(CLAUDE_DIR, 'sessions');
 /**
  * Decode project hash back to a readable path.
  * -Users-wsxwj-Desktop-claude → /Users/wsxwj/Desktop/claude
+ *
+ * Some legacy project dirs in ~/.claude/projects/ have trailing dashes
+ * (e.g. `-Users-wsxwj-Desktop-claude----`) — they were created when the CLI
+ * was spawned with a cwd ending in extra slashes. Decoding them naively
+ * produces `/Users/wsxwj/Desktop/claude////` which then breaks git status,
+ * checkpoints, and CLI resume downstream. Collapse multiple slashes here.
  */
 function decodeProjectHash(hash) {
-  if (hash.startsWith('-')) {
-    return '/' + hash.slice(1).replace(/-/g, '/');
-  }
-  return hash;
+  let path = hash.startsWith('-')
+    ? '/' + hash.slice(1).replace(/-/g, '/')
+    : hash;
+  // Collapse runs of `/` and strip trailing `/` (but keep leading `/`).
+  path = path.replace(/\/{2,}/g, '/').replace(/(.)\/$/, '$1');
+  return path;
 }
 
 /**
@@ -32,18 +61,40 @@ export async function listProjects() {
     try {
       const files = await readdir(projectPath);
       const jsonlFiles = files.filter((f) => f.endsWith('.jsonl'));
-      if (jsonlFiles.length === 0) continue;
 
-      // Get last activity time
+      // Empty dirs are usually projects that were just registered via
+      // `_addProject` but have no chat sessions yet. We DO want to list
+      // them — otherwise the user adds a folder and watches it disappear
+      // until they send their first message. Use directory mtime as a
+      // proxy for activity in that case.
       let lastModified = 0;
-      for (const f of jsonlFiles) {
-        const s = await stat(join(projectPath, f));
-        if (s.mtimeMs > lastModified) lastModified = s.mtimeMs;
+      let newestFile = null;
+      if (jsonlFiles.length > 0) {
+        for (const f of jsonlFiles) {
+          const s = await stat(join(projectPath, f));
+          if (s.mtimeMs > lastModified) { lastModified = s.mtimeMs; newestFile = f; }
+        }
+      } else {
+        const ds = await stat(projectPath);
+        lastModified = ds.mtimeMs;
       }
+
+      // Resolve the project's real path. Priority:
+      //   1. .cgui-meta.json sidecar (exact, Unicode-safe — set when GUI added it)
+      //   2. newest session jsonl's launch cwd (exact, recovers Unicode)
+      //   3. decodeProjectHash (lossy fallback for pure-ASCII dirs)
+      let realPath = await readSidecarCwd(projectPath);
+      if (!realPath && newestFile) {
+        try {
+          const { head } = await readJsonlEdges(join(projectPath, newestFile), 10);
+          realPath = cwdFromHead(head);
+        } catch {}
+      }
+      if (!realPath) realPath = decodeProjectHash(entry.name);
 
       projects.push({
         hash: entry.name,
-        path: decodeProjectHash(entry.name),
+        path: realPath,
         sessionCount: jsonlFiles.length,
         lastActivity: new Date(lastModified).toISOString(),
       });
@@ -78,6 +129,13 @@ export async function listSessions(projectHash) {
   const files = await readdir(projectPath);
   const jsonlFiles = files.filter((f) => f.endsWith('.jsonl'));
 
+  // If this project was GUI-registered, its sidecar holds the real path. The
+  // CLI hash is lossy and can collapse several DIFFERENT real paths into one
+  // dir (e.g. two CJK-named folders). When a sidecar exists we only surface
+  // sessions whose launch cwd matches it — otherwise a freshly-added project
+  // would show another project's old sessions (the "旧会话串入新项目" bug).
+  const sidecarCwd = await readSidecarCwd(projectPath);
+
   const sessions = [];
   for (const file of jsonlFiles) {
     const filePath = join(projectPath, file);
@@ -89,6 +147,17 @@ export async function listSessions(projectHash) {
       // Extract metadata from first user message
       const firstUser = head.find((r) => r.type === 'user');
       const lastRecord = tail[tail.length - 1];
+      // The session jsonl's first `system` record carries the EXACT cwd
+      // (including any Unicode characters) the CLI was launched with. We
+      // must pass this exact string back to --resume; reconstructing from
+      // the hash dir name loses Unicode (`肠骨轴` → `----` is one-way).
+      const realCwd = cwdFromHead(head);
+
+      // De-collision: drop sessions that belong to a different real path which
+      // the CLI hash collapsed into this same dir. Sessions whose cwd can't be
+      // determined (realCwd === null) are kept — they're rare and more likely
+      // ours than a sibling's.
+      if (sidecarCwd && realCwd && realCwd !== sidecarCwd) continue;
 
       let firstPrompt = '';
       if (firstUser?.message?.content) {
@@ -101,10 +170,20 @@ export async function listSessions(projectHash) {
         }
       }
 
-      // Skip trivial sessions (< 20 lines AND meaningless first prompt)
-      if (totalLines < 20 && !isMeaningfulPrompt(firstPrompt)) continue;
+      // Skip ONLY truly empty sessions. A brand-new session (just one prompt +
+      // reply) is ~3-8 lines, which we want to show. The old `< 20 && !meaningful`
+      // filter swallowed every new chat whose prompt didn't pass isMeaningfulPrompt
+      // — the user's #1 complaint was new sessions never appearing in history.
+      if (totalLines < 3) continue;
 
       const s = await stat(filePath);
+
+      // Archive marker — sibling `<sid>.jsonl.archived` flips visibility.
+      let archived = false;
+      try {
+        await stat(filePath + '.archived');
+        archived = true;
+      } catch {}
 
       // Check for subagent sessions
       const subagents = [];
@@ -144,6 +223,7 @@ export async function listSessions(projectHash) {
       sessions.push({
         sessionId,
         projectHash,
+        projectPath: realCwd || decodeProjectHash(projectHash),
         filePath,
         firstPrompt,
         messageCount: totalLines,
@@ -152,6 +232,7 @@ export async function listSessions(projectHash) {
         model: head.find((r) => r.type === 'assistant')?.message?.model || null,
         fileSize: s.size,
         subagents: subagents.length > 0 ? subagents : undefined,
+        archived,
       });
     } catch {
       // skip unreadable files
@@ -268,6 +349,12 @@ export async function getSessionMessages(sessionId, projectHash) {
           thinking: [],
           text: [],
           toolCalls: [],
+          // `blocks` mirrors the live-stream's orderedBlocks shape so the
+          // client's primary render path (chronological text/thinking/tool
+          // interleaving) works for historical messages too. Without this,
+          // legacy fallback put all text first and dumped all tools at the
+          // bottom — exactly the symptom the user just reported.
+          blocks: [],
           model: record.message?.model || null,
           usage: null,
           timestamp: record.timestamp,
@@ -275,25 +362,25 @@ export async function getSessionMessages(sessionId, projectHash) {
         };
       }
 
-      // Accumulate thinking
-      for (const t of thinkingParts) {
-        if (t.thinking) currentTurn.thinking.push(t.thinking);
-      }
-
-      // Accumulate text
-      for (const t of textParts) {
-        if (t.text) currentTurn.text.push(t.text);
-      }
-
-      // Accumulate tool calls with linked results
-      for (const tu of toolUses) {
-        currentTurn.toolCalls.push({
-          id: tu.id,
-          name: tu.name,
-          input: tu.input,
-          result: toolResultMap.get(tu.id) || null,
-          category: classifyTool(tu.name),
-        });
+      // Walk content in ORDER, appending to both the flat arrays AND blocks.
+      for (const c of content) {
+        if (c.type === 'thinking' && c.thinking) {
+          currentTurn.thinking.push(c.thinking);
+          currentTurn.blocks.push({ type: 'thinking', content: c.thinking });
+        } else if (c.type === 'text' && c.text) {
+          currentTurn.text.push(c.text);
+          currentTurn.blocks.push({ type: 'text', content: c.text });
+        } else if (c.type === 'tool_use') {
+          const toolCall = {
+            id: c.id,
+            name: c.name,
+            input: c.input,
+            result: toolResultMap.get(c.id) || null,
+            category: classifyTool(c.name),
+          };
+          currentTurn.toolCalls.push(toolCall);
+          currentTurn.blocks.push({ type: 'tool_use', toolCall });
+        }
       }
 
       // Update model and usage (last one wins)
@@ -322,10 +409,14 @@ export async function getSessionMeta(sessionId, projectHash) {
       .filter((r) => r.type === 'assistant' && r.message?.model)
       .map((r) => r.message.model)
   )];
+  // EXACT cwd the CLI was launched with (Unicode-safe). Same logic as
+  // listSessions — clients use this for --resume.
+  const realCwd = head.find((r) => r.type === 'system' && typeof r.cwd === 'string')?.cwd || null;
 
   return {
     sessionId,
     projectHash,
+    projectPath: realCwd || decodeProjectHash(projectHash),
     messageCount: totalLines,
     fileSize: s.size,
     startTime: firstUser?.timestamp,

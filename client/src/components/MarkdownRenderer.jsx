@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import { Copy, Check } from 'lucide-react';
 
 function CopyButton({ text }) {
@@ -163,7 +164,12 @@ const markdownComponents = {
 export function MarkdownRenderer({ content }) {
   return (
     <div className="markdown-content text-[14px] font-body">
-      <ReactMarkdown components={markdownComponents}>{content}</ReactMarkdown>
+      {/* remarkGfm: GitHub-flavored markdown — tables, strikethrough, task
+          lists, autolinks. Without it Claude's `| col | col |` tables come
+          out as a single run-on text line (which is what was happening). */}
+      <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
+        {content}
+      </ReactMarkdown>
     </div>
   );
 }

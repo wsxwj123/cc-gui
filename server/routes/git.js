@@ -10,8 +10,13 @@ const router = Router();
 
 function safeCwd(p) {
   if (typeof p !== 'string' || !p.startsWith('/')) throw new Error('invalid cwd');
+  // pathResolve normalizes `//+` → `/` and strips trailing `/`. We used to
+  // reject when `r !== p` (paranoid "no symlink / no traversal"), but that
+  // also rejected harmlessly non-canonical inputs like `/Users/foo/bar////`
+  // — which is exactly what decodeProjectHash produces for legacy project
+  // dirs ending in dashes. Return the resolved form and rely on the
+  // startsWith($HOME) check below for sandboxing.
   const r = pathResolve(p);
-  if (r !== p) throw new Error('invalid cwd');
   if (!r.startsWith(homedir())) throw new Error('refusing to operate outside $HOME');
   return r;
 }
@@ -65,35 +70,46 @@ router.post('/git/init', async (req, res) => {
       await execFileP('git', ['-C', cwd, 'init'], { timeout: 8000 });
     }
 
+    // Baseline commit phase. `add -A` may fail when the working tree contains
+    // embedded git repos with no commits, or other corner cases. In that
+    // scenario the user STILL has a usable git repo (init succeeded) — only
+    // the baseline snapshot is missing. We surface a warning instead of a
+    // 500 so the GUI stops nagging "not a git repo" forever.
     let committed = false, sha = null;
+    let baselineWarning = null;
     if (commit) {
-      await execFileP('git', ['-C', cwd, 'add', '-A'], { timeout: 15000 });
-      // Skip commit if nothing is staged (empty dir).
       try {
-        await execFileP('git', ['-C', cwd, 'diff', '--cached', '--quiet'], { timeout: 4000 });
-      } catch {
-        // Non-zero exit = staged changes exist → commit them.
+        await execFileP('git', ['-C', cwd, 'add', '-A'], { timeout: 15000 });
         try {
-          await execFileP('git', ['-C', cwd, 'commit', '-m', message], {
-            timeout: 30000,
-            env: {
-              ...process.env,
-              GIT_AUTHOR_NAME: process.env.GIT_AUTHOR_NAME || 'claude-gui',
-              GIT_AUTHOR_EMAIL: process.env.GIT_AUTHOR_EMAIL || 'gui@claude',
-              GIT_COMMITTER_NAME: process.env.GIT_COMMITTER_NAME || 'claude-gui',
-              GIT_COMMITTER_EMAIL: process.env.GIT_COMMITTER_EMAIL || 'gui@claude',
-            },
-          });
-          committed = true;
-          const rev = await execFileP('git', ['-C', cwd, 'rev-parse', 'HEAD'], { timeout: 4000 });
-          sha = rev.stdout.trim();
-        } catch (err) {
-          return res.status(500).json({ error: 'commit failed: ' + err.message });
+          await execFileP('git', ['-C', cwd, 'diff', '--cached', '--quiet'], { timeout: 4000 });
+          // No staged changes — nothing to commit.
+        } catch {
+          try {
+            await execFileP('git', ['-C', cwd, 'commit', '-m', message], {
+              timeout: 30000,
+              env: {
+                ...process.env,
+                GIT_AUTHOR_NAME: process.env.GIT_AUTHOR_NAME || 'claude-gui',
+                GIT_AUTHOR_EMAIL: process.env.GIT_AUTHOR_EMAIL || 'gui@claude',
+                GIT_COMMITTER_NAME: process.env.GIT_COMMITTER_NAME || 'claude-gui',
+                GIT_COMMITTER_EMAIL: process.env.GIT_COMMITTER_EMAIL || 'gui@claude',
+              },
+            });
+            committed = true;
+            const rev = await execFileP('git', ['-C', cwd, 'rev-parse', 'HEAD'], { timeout: 4000 });
+            sha = rev.stdout.trim();
+          } catch (err) {
+            baselineWarning = 'commit failed: ' + (err.stderr || err.message);
+          }
         }
+      } catch (err) {
+        // `git add -A` failed (most commonly: embedded repo without commits).
+        // Repo itself is fine — just skip baseline commit.
+        baselineWarning = 'add -A failed (embedded repos?): ' + (err.stderr || err.message);
       }
     }
 
-    res.json({ ok: true, already, committed, sha });
+    res.json({ ok: true, already, committed, sha, baselineWarning });
   } catch (err) {
     res.status(400).json({ error: err.message });
   }

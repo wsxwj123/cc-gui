@@ -50,8 +50,8 @@ export function UsagePanel() {
   const [stats, setStats] = useState(null);
   const [loading, setLoading] = useState(true);
 
-  const fetchStats = async () => {
-    setLoading(true);
+  const fetchStats = async (silent = false) => {
+    if (!silent) setLoading(true);
     try {
       const res = await fetch('/api/usage');
       const data = await res.json();
@@ -59,10 +59,22 @@ export function UsagePanel() {
     } catch (err) {
       console.error('Failed to fetch usage stats:', err);
     }
-    setLoading(false);
+    if (!silent) setLoading(false);
   };
 
-  useEffect(() => { fetchStats(); }, []);
+  useEffect(() => {
+    fetchStats();
+    // Auto-refresh when a chat turn finishes — silent so the panel doesn't
+    // flicker through its loading state.
+    const onChatDone = () => fetchStats(true);
+    window.addEventListener('cgui:chat-done', onChatDone);
+    // Also poll every 30s as fallback (covers external claude invocations).
+    const id = setInterval(() => fetchStats(true), 30_000);
+    return () => {
+      window.removeEventListener('cgui:chat-done', onChatDone);
+      clearInterval(id);
+    };
+  }, []);
 
   if (loading) {
     return (

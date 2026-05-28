@@ -8,6 +8,25 @@
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,300;0,6..72,400;0,6..72,500;0,6..72,600;1,6..72,400&family=DM+Sans:ital,wght@0,300;0,400;0,500;0,600;1,400&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+    <!-- Aggressive cache buster: kills any stale ServiceWorker or CacheStorage
+         entry the moment the user opens the page. This is here because users
+         repeatedly reported "I refreshed but nothing changed" — browser kept
+         serving an old bundle hash because some extension / prior SW registered
+         offline caching. Runs once per page load, cheap, never blocks render. -->
+    <script>
+      (function () {
+        if ('serviceWorker' in navigator) {
+          navigator.serviceWorker.getRegistrations().then(function (regs) {
+            regs.forEach(function (r) { r.unregister(); });
+          }).catch(function () {});
+        }
+        if (window.caches) {
+          window.caches.keys().then(function (keys) {
+            keys.forEach(function (k) { window.caches.delete(k); });
+          }).catch(function () {});
+        }
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

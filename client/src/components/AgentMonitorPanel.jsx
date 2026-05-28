@@ -1,0 +1,328 @@
+import React, { useEffect, useState } from 'react';
+import { Bot, Loader2, Square, Clock, RefreshCw, Terminal, ChevronDown, ChevronRight } from 'lucide-react';
+import { useStore } from '../stores/sessionStore.js';
+import { MarkdownRenderer } from './MarkdownRenderer.jsx';
+
+function fmtElapsed(ms) {
+  if (!ms || ms < 0) return '—';
+  const s = Math.floor(ms / 1000);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m${s % 60}s`;
+  const h = Math.floor(m / 60);
+  return `${h}h${m % 60}m`;
+}
+
+// Card for a single server-side agent (chat-process or cli-session). Shows
+// the prompt preview, elapsed time, model, and a stop button that the parent
+// has wired with a fallback path for cli-session pids.
+function RemoteAgentCard({ agent, stoppingPid, onStop }) {
+  return (
+    <div className="bg-canvas-warm border border-canvas-deep rounded-lg p-2.5">
+      <div className="flex items-center gap-2 mb-1">
+        <Terminal size={11} className="text-blue-600" />
+        <span className="text-xs font-medium text-ink font-mono truncate">
+          {agent.kind === 'chat-process' ? `chat #${agent.pid}` : (agent.name || `cli #${agent.pid}`)}
+        </span>
+        <div className="ml-auto"><StatusBadge status={agent.status} /></div>
+      </div>
+      {(agent.promptPreview || agent.lastResponse) && (
+        <div className="text-[10.5px] text-ink-muted font-body line-clamp-2" title={agent.promptPreview || agent.lastResponse}>
+          {agent.promptPreview || agent.lastResponse}
+        </div>
+      )}
+      <div className="flex items-center gap-3 mt-1.5 text-[10px] text-ink-faint font-mono">
+        {agent.startedAt && <span className="flex items-center gap-1"><Clock size={9} />{fmtElapsed(agent.elapsedMs ?? (Date.now() - agent.startedAt))}</span>}
+        {agent.model && <span className="truncate">{agent.model}</span>}
+        {agent.cwd && <span className="truncate opacity-70" title={agent.cwd}>{agent.cwd.split('/').pop()}</span>}
+      </div>
+      {agent.pid && agent.stoppable !== false && (
+        <div className="mt-2 flex justify-end">
+          <button
+            onClick={() => onStop(agent.pid)}
+            disabled={stoppingPid === agent.pid}
+            className="flex items-center gap-1 text-[10px] px-2 py-1 rounded bg-red-50 hover:bg-red-100 text-red-700 border border-red-200 transition-colors disabled:opacity-50"
+          >
+            {stoppingPid === agent.pid ? <Loader2 size={10} className="animate-spin" /> : <Square size={10} />}
+            停止
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Bucket wrapping multiple remote agent cards under a status heading.
+function RemoteBucket({ title, titleColor, defaultOpen, agents, stoppingPid, onStop }) {
+  const [open, setOpen] = useState(defaultOpen);
+  return (
+    <div>
+      <button
+        onClick={() => setOpen(!open)}
+        className="w-full flex items-center gap-1.5 text-[10px] uppercase tracking-wider text-ink-faint font-body py-1 hover:text-ink-muted"
+      >
+        {open ? <ChevronDown size={10} /> : <ChevronRight size={10} />}
+        <span className={titleColor}>{title}</span>
+        <span className="text-ink-ghost">({agents.length})</span>
+      </button>
+      {open && (
+        <div className="space-y-2 mt-1.5">
+          {agents.map((a, i) => <RemoteAgentCard key={a.pid || a.id || i} agent={a} stoppingPid={stoppingPid} onStop={onStop} />)}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Collapsible bucket — group header click toggles open, click on each
+// agent card expands its details inline.
+function AgentBucket({ title, titleColor, defaultOpen, agents }) {
+  const [open, setOpen] = useState(defaultOpen);
+  return (
+    <div>
+      <button
+        onClick={() => setOpen(!open)}
+        className="w-full flex items-center gap-1.5 text-[10px] uppercase tracking-wider text-ink-faint font-body py-1 hover:text-ink-muted"
+      >
+        {open ? <ChevronDown size={10} /> : <ChevronRight size={10} />}
+        <span className={titleColor}>{title}</span>
+        <span className="text-ink-ghost">({agents.length})</span>
+      </button>
+      {open && (
+        <div className="space-y-2 mt-1.5">
+          {agents.map((a) => <AgentCard key={a.id} agent={a} />)}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Single agent card — click to expand and see thinking / tool calls / final result.
+function AgentCard({ agent }) {
+  const [expanded, setExpanded] = useState(false);
+  const text = agent.text ? agent.text.join('') : '';
+  const thinking = agent.thinking ? agent.thinking.join('') : '';
+  const tools = agent.toolCalls || [];
+  const hasDetail = text || thinking || tools.length > 0 || agent.result;
+  return (
+    <div className="bg-canvas-warm border border-violet-200 rounded-lg overflow-hidden">
+      <button
+        onClick={() => hasDetail && setExpanded(!expanded)}
+        className="w-full p-2.5 text-left"
+        disabled={!hasDetail}
+      >
+        <div className="flex items-center gap-2 mb-1">
+          {hasDetail && (expanded ? <ChevronDown size={11} className="text-violet-600 shrink-0" /> : <ChevronRight size={11} className="text-violet-600 shrink-0" />)}
+          <Bot size={11} className="text-violet-600 shrink-0" />
+          <span className="text-xs font-medium text-ink font-mono truncate">{agent.name || 'Task'}</span>
+          <div className="ml-auto"><StatusBadge status={agent.status} /></div>
+        </div>
+        {agent.description && (
+          <div className="text-[10.5px] text-ink-muted font-body truncate pl-5">{agent.description}</div>
+        )}
+        <div className="flex items-center gap-3 mt-1.5 pl-5 text-[10px] text-ink-faint font-mono">
+          {agent.startedAt && <span className="flex items-center gap-1"><Clock size={9} />{fmtElapsed(Date.now() - agent.startedAt)}</span>}
+          {tools.length > 0 && <span>{tools.length} 工具</span>}
+        </div>
+      </button>
+      {expanded && hasDetail && (
+        <div className="border-t border-violet-200 px-3 py-2 space-y-2 text-[11px] bg-canvas">
+          {thinking && (
+            <details>
+              <summary className="cursor-pointer text-[10px] text-ink-faint uppercase tracking-wider font-body">思考 ({thinking.length} 字)</summary>
+              <div className="mt-1 text-ink-muted whitespace-pre-wrap max-h-40 overflow-y-auto font-body">{thinking}</div>
+            </details>
+          )}
+          {tools.length > 0 && (
+            <div>
+              <div className="text-[10px] text-ink-faint uppercase tracking-wider font-body mb-1">工具调用 ({tools.length})</div>
+              {tools.map((tc, i) => (
+                <div key={tc.id || i} className="flex items-center gap-1.5 text-[11px] font-mono text-ink-soft py-0.5">
+                  <span className="w-1 h-1 rounded-full bg-violet-400 shrink-0" />
+                  <span>{tc.name}</span>
+                  {tc.result ? (tc.result.isError ? <span className="text-error">✗</span> : <span className="text-success">✓</span>) : <Loader2 size={10} className="text-ink-faint animate-spin" />}
+                </div>
+              ))}
+            </div>
+          )}
+          {text && (
+            <div>
+              <div className="text-[10px] text-ink-faint uppercase tracking-wider font-body mb-1">回复</div>
+              <div className="text-ink"><MarkdownRenderer content={text} /></div>
+            </div>
+          )}
+          {agent.result && (
+            <details>
+              <summary className="cursor-pointer text-[10px] text-ink-faint uppercase tracking-wider font-body">最终结果</summary>
+              <pre className="mt-1 font-mono whitespace-pre-wrap max-h-48 overflow-y-auto p-1.5 rounded bg-canvas-warm text-ink-muted">{String(agent.result).slice(0, 4000)}</pre>
+            </details>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function StatusBadge({ status }) {
+  const map = {
+    streaming:   { label: '运行中',  bg: 'bg-blue-50',  fg: 'text-blue-700',   border: 'border-blue-200' },
+    starting:    { label: '启动中',  bg: 'bg-amber-50', fg: 'text-amber-700',  border: 'border-amber-200' },
+    working:     { label: '工作中',  bg: 'bg-blue-50',  fg: 'text-blue-700',   border: 'border-blue-200' },
+    done:        { label: '完成',    bg: 'bg-green-50', fg: 'text-green-700',  border: 'border-green-200' },
+    error:       { label: '错误',    bg: 'bg-red-50',   fg: 'text-red-700',    border: 'border-red-200' },
+    needs_input: { label: '待输入',  bg: 'bg-violet-50', fg: 'text-violet-700', border: 'border-violet-200' },
+  };
+  const m = map[status] || { label: status || '—', bg: 'bg-canvas-warm', fg: 'text-ink-muted', border: 'border-canvas-deep' };
+  return (
+    <span className={`text-[10px] px-1.5 py-0.5 rounded font-mono ${m.bg} ${m.fg} border ${m.border}`}>
+      {m.label}
+    </span>
+  );
+}
+
+/**
+ * Right-side panel showing live subagent / chat-process state. Polls
+ * /api/agents/active every 1.5s while mounted. Also merges in the
+ * client-side `activeAgents` store (Task-tool subagents we tracked locally
+ * from the current stream).
+ */
+export function AgentMonitorPanel() {
+  const [remote, setRemote] = useState({ agents: [], sources: { chatProcesses: 0, cliSessions: 0 } });
+  const [loading, setLoading] = useState(true);
+  const [stoppingPid, setStoppingPid] = useState(null);
+  const localAgents = useStore((s) => s.activeAgents);
+
+  const fetchActive = async (silent = false) => {
+    if (!silent) setLoading(true);
+    try {
+      const r = await fetch('/api/agents/active');
+      const data = await r.json();
+      setRemote({
+        agents: Array.isArray(data.agents) ? data.agents : [],
+        sources: data.sources || { chatProcesses: 0, cliSessions: 0 },
+      });
+    } catch {}
+    if (!silent) setLoading(false);
+  };
+
+  useEffect(() => {
+    fetchActive();
+    const id = setInterval(() => fetchActive(true), 1500);
+    return () => clearInterval(id);
+  }, []);
+
+  // Stop a child process. Two endpoints exist:
+  //   /api/chat/:pid/stop      — only knows our own chat-process spawns
+  //   /api/processes/:pid/kill — whitelist-checked kill for any pid in the CLI
+  //                              sessions registry (covers cli-session agents)
+  // Try chat-stop first; on 404 fall back to processes-kill.
+  const stop = async (pid) => {
+    if (!pid) return;
+    setStoppingPid(pid);
+    try {
+      const r = await fetch(`/api/chat/${pid}/stop`, { method: 'POST' });
+      if (r.status === 404) {
+        await fetch(`/api/processes/${pid}/kill`, { method: 'POST' });
+      }
+      await new Promise((r) => setTimeout(r, 400));
+      await fetchActive(true);
+    } catch {}
+    setStoppingPid(null);
+  };
+
+  // Merge local + remote — local agents come from current stream's Task
+  // tool_uses; remote includes our chat-process metadata and CLI's view.
+  const localList = Object.values(localAgents);
+
+  // Bucket by status. 'working'/'starting' default expanded, the rest folded.
+  const buckets = {
+    working:    localList.filter((a) => a.status === 'working' || a.status === 'starting' || !a.status),
+    waiting:    localList.filter((a) => a.status === 'needs_input'),
+    done:       localList.filter((a) => a.status === 'done'),
+    error:      localList.filter((a) => a.status === 'error'),
+  };
+  const BUCKET_META = {
+    working: { label: '工作中', defaultOpen: true,  color: 'text-blue-600' },
+    waiting: { label: '等待输入', defaultOpen: true, color: 'text-violet-600' },
+    done:    { label: '已完成', defaultOpen: false, color: 'text-green-600' },
+    error:   { label: '错误',   defaultOpen: false, color: 'text-red-600' },
+  };
+
+  return (
+    <div className="h-full flex flex-col">
+      <div className="px-4 py-3 border-b border-canvas-deep shrink-0">
+        <div className="flex items-center justify-between">
+          <span className="text-[10px] uppercase tracking-widest text-ink-faint font-body flex items-center gap-1.5">
+            <Bot size={11} />Subagent 监控
+          </span>
+          <button onClick={() => fetchActive()} className="p-1 text-ink-faint hover:text-ink-muted" title="刷新">
+            <RefreshCw size={11} className={loading ? 'animate-spin' : ''} />
+          </button>
+        </div>
+        <p className="text-[10px] text-ink-faint mt-1 font-body leading-snug">
+          实时显示当前活跃的 subagent 与本地 Claude 子进程。
+          数据源：本地 chat <b>{remote.sources.chatProcesses}</b> · CLI session <b>{remote.sources.cliSessions}</b>
+        </p>
+      </div>
+
+      <div className="flex-1 overflow-y-auto p-3 space-y-3">
+        {/* Local Task tool subagents (from current stream) — grouped by status */}
+        {localList.length > 0 && (
+          <section>
+            <h3 className="text-[10px] uppercase tracking-widest text-ink-faint font-body mb-2 flex items-center gap-1.5">
+              <Bot size={10} />当前对话内 Task ({localList.length})
+            </h3>
+            <div className="space-y-3">
+              {Object.entries(buckets).map(([key, agents]) => {
+                if (agents.length === 0) return null;
+                return (
+                  <AgentBucket
+                    key={key}
+                    title={BUCKET_META[key].label}
+                    titleColor={BUCKET_META[key].color}
+                    defaultOpen={BUCKET_META[key].defaultOpen}
+                    agents={agents}
+                  />
+                );
+              })}
+            </div>
+          </section>
+        )}
+
+        {/* Server-side chat children + CLI agents — bucketed by status so the
+            "working" ones default open and finished/errored ones fold away. */}
+        <section>
+          <h3 className="text-[10px] uppercase tracking-widest text-ink-faint font-body mb-2 flex items-center gap-1.5">
+            <Terminal size={10} />Claude 子进程 ({remote.agents.length})
+          </h3>
+          {remote.agents.length > 0 ? (
+            (() => {
+              const isWorking = (a) => ['streaming', 'starting', 'running', 'working'].includes(a.status);
+              const isDone = (a) => ['done', 'finished', 'completed'].includes(a.status);
+              const isError = (a) => ['error', 'failed'].includes(a.status);
+              const isWaiting = (a) => ['needs_input', 'waiting'].includes(a.status);
+              const groups = [
+                { key: 'working', label: '工作中', color: 'text-blue-600', defaultOpen: true, list: remote.agents.filter(isWorking) },
+                { key: 'waiting', label: '等待输入', color: 'text-violet-600', defaultOpen: true, list: remote.agents.filter(isWaiting) },
+                { key: 'done', label: '已完成', color: 'text-green-600', defaultOpen: false, list: remote.agents.filter(isDone) },
+                { key: 'error', label: '错误', color: 'text-red-600', defaultOpen: false, list: remote.agents.filter(isError) },
+                { key: 'other', label: '其他', color: 'text-ink-muted', defaultOpen: false, list: remote.agents.filter((a) => !isWorking(a) && !isDone(a) && !isError(a) && !isWaiting(a)) },
+              ].filter((g) => g.list.length > 0);
+              return (
+                <div className="space-y-3">
+                  {groups.map((g) => (
+                    <RemoteBucket key={g.key} title={g.label} titleColor={g.color} defaultOpen={g.defaultOpen} agents={g.list} stoppingPid={stoppingPid} onStop={stop} />
+                  ))}
+                </div>
+              );
+            })()
+          ) : (
+            <div className="text-[11px] text-ink-faint font-body py-4 text-center bg-canvas-warm border border-canvas-deep rounded-lg">
+              {loading ? '加载中…' : '没有活跃的 subagent'}
+            </div>
+          )}
+        </section>
+      </div>
+    </div>
+  );
+}

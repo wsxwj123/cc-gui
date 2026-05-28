@@ -23,23 +23,29 @@ async function readSettings() {
 }
 
 /**
- * Resolve the current default model from env vars + settings.json.
- * Priority: ANTHROPIC_MODEL env > settings.env.ANTHROPIC_MODEL > settings.model > fallback
+ * Resolve the current default model.
+ * Priority: settings.json env > settings.model > process.env > fallback
+ *
+ * settings.json comes FIRST because that's where both `cc switch` and the
+ * GUI's own setDefaultModel write. process.env is the inherited shell value,
+ * which is fine as a fallback but must not override an explicit user choice
+ * — otherwise picking "sonnet" in the GUI silently reverts to whatever
+ * ANTHROPIC_MODEL was set when the server was launched.
  */
 export async function getDefaultModel() {
-  // 1. Process env (set by the server's own environment)
-  if (process.env.ANTHROPIC_MODEL) return process.env.ANTHROPIC_MODEL;
-  if (process.env.CLAUDE_MODEL) return process.env.CLAUDE_MODEL;
-
-  // 2. Settings.json env section (what the CLI actually sees)
+  // 1. Settings.json env section (what `cc switch` and our PUT /api/model write)
   const settings = await readSettings();
   if (settings.env?.ANTHROPIC_MODEL) return settings.env.ANTHROPIC_MODEL;
 
-  // 3. settings.model / settings.defaultModel
+  // 2. settings.model / settings.defaultModel
   if (settings.model) return settings.model;
   if (settings.defaultModel) return settings.defaultModel;
 
-  // 4. Fallback
+  // 3. Process env (inherited from shell at launch — fallback only)
+  if (process.env.ANTHROPIC_MODEL) return process.env.ANTHROPIC_MODEL;
+  if (process.env.CLAUDE_MODEL) return process.env.CLAUDE_MODEL;
+
+  // 4. Hardcoded fallback
   return 'claude-sonnet-4-6';
 }
 
@@ -80,14 +86,23 @@ export async function getAvailableModels() {
   const current = await getDefaultModel();
 
   const models = new Map();
+  // IMPORTANT: keep the FULL id, including a trailing `[1m]` suffix. That
+  // suffix is how Claude Code opts a model into the 1M-context beta (it's what
+  // the CLI's own `/model` picker writes). Stripping it here — as the old code
+  // did via replace(/\[.*\]/,'') — meant the GUI could never request 1M, and
+  // worse, picking from the dropdown persisted the stripped id back to
+  // settings.json, silently deleting the user's `[1m]`. We dedup on the full
+  // id so `foo` and `foo[1m]` can coexist as separate choices.
   const add = (id, label, tier, source) => {
     if (!id) return;
-    const cleanId = String(id).replace(/\[.*\]/, '');
-    if (models.has(cleanId)) return;
-    models.set(cleanId, {
-      id: cleanId,
-      name: label || cleanId,
-      tier: tier || inferTier(cleanId) || '',
+    const fullId = String(id);
+    if (models.has(fullId)) return;
+    const has1m = /\[1m\]/i.test(fullId);
+    models.set(fullId, {
+      id: fullId,
+      name: label || fullId.replace(/\[1m\]/i, ''),
+      tier: tier || inferTier(fullId) || '',
+      context1m: has1m,
       source,
     });
   };
@@ -106,9 +121,9 @@ export async function getAvailableModels() {
   add('opus',   'Opus (alias)',   'Opus',   'cli-alias');
   add('haiku',  'Haiku (alias)',  'Haiku',  'cli-alias');
 
-  // Guarantee current model is selectable
-  if (!models.has(current.replace(/\[.*\]/, ''))) {
-    add(current, current, inferTier(current) || 'Current', 'resolved-default');
+  // Guarantee current model is selectable (full id, [1m] preserved)
+  if (!models.has(current)) {
+    add(current, current.replace(/\[1m\]/i, ''), inferTier(current) || 'Current', 'resolved-default');
   }
 
   // Endpoint label
@@ -127,17 +142,11 @@ export async function getAvailableModels() {
     } catch {}
   }
 
-  // For Anthropic-official: when the user is on the subscription auth (no env-defined
-  // model ids), supplement with the latest known Anthropic model IDs. Third-party
-  // providers don't need this — their env vars carry their own model list.
-  if (provider === 'Anthropic') {
-    const ANTHROPIC_KNOWN = [
-      { id: 'claude-opus-4-7',           name: 'Claude Opus 4.7',  tier: 'Opus' },
-      { id: 'claude-sonnet-4-6',         name: 'Claude Sonnet 4.6', tier: 'Sonnet' },
-      { id: 'claude-haiku-4-5-20251001', name: 'Claude Haiku 4.5',  tier: 'Haiku' },
-    ];
-    for (const m of ANTHROPIC_KNOWN) add(m.id, m.name, m.tier, 'anthropic-catalog');
-  }
+  // No hardcoded Anthropic catalog anymore.
+  // Reason: hardcoded IDs go stale (e.g. opus-4-6 was deprecated, 4-7 may not
+  // exist for all subscriptions). The CLI aliases sonnet/opus/haiku resolve
+  // server-side to the latest available tier — that's the truth source.
+  // Users who want a specific dated ID can still type it via "自定义模型 ID".
 
   return { models: [...models.values()], provider, current };
 }

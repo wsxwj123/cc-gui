@@ -55,14 +55,19 @@ export function AgentsPanel() {
 
   return (
     <div className="h-full flex flex-col">
-      <div className="px-4 py-3 border-b border-canvas-deep flex items-center justify-between shrink-0">
-        <span className="text-[10px] uppercase tracking-widest text-ink-faint font-body flex items-center gap-1.5">
-          <Bot size={11} />Subagents · {agents.length}
-        </span>
-        <div className="flex gap-1">
-          <button onClick={() => setCreating(!creating)} className="p-1 text-ink-faint hover:text-accent" title="新建"><Plus size={12} /></button>
-          <button onClick={fetchAgents} className="p-1 text-ink-faint hover:text-ink-muted" title="刷新"><RefreshCw size={11} /></button>
+      <div className="px-4 py-3 border-b border-canvas-deep shrink-0">
+        <div className="flex items-center justify-between">
+          <span className="text-[10px] uppercase tracking-widest text-ink-faint font-body flex items-center gap-1.5">
+            <Bot size={11} />Subagents · {agents.length}
+          </span>
+          <div className="flex gap-1">
+            <button onClick={() => setCreating(!creating)} className="p-1 text-ink-faint hover:text-accent" title="新建 subagent 定义"><Plus size={12} /></button>
+            <button onClick={fetchAgents} className="p-1 text-ink-faint hover:text-ink-muted" title="刷新列表"><RefreshCw size={11} /></button>
+          </div>
         </div>
+        <p className="text-[10px] text-ink-faint mt-1 font-body leading-snug">
+          这是 <code className="text-ink-muted">~/.claude/agents/*.md</code> 里的 subagent <b>定义</b>（不是运行实时状态）。在主对话里调用 <code className="text-ink-muted">Task</code> 工具时由 Claude 派给这些代理。
+        </p>
       </div>
 
       {creating && (

@@ -30,7 +30,7 @@
   --color-warning: #FF9F0A;
 
   /* ── Glass surface ingredients (mixed in utility classes) ─── */
-  --glass-base-bg: rgba(255, 255, 255, 0.55);
+  --glass-base-bg: rgba(255, 255, 255, 0.12);
   --glass-thick-bg: rgba(255, 255, 255, 0.72);
   --glass-thin-bg: rgba(255, 255, 255, 0.35);
   --glass-bar-bg: rgba(255, 255, 255, 0.62);
@@ -80,7 +80,7 @@
   --color-error-subtle: rgba(255, 69, 58, 0.16);
   --color-warning: #FF9F0A;
 
-  --glass-base-bg: rgba(40, 42, 50, 0.72);
+  --glass-base-bg: rgba(40, 42, 50, 0.20);
   --glass-thick-bg: rgba(40, 42, 50, 0.88);
   --glass-thin-bg: rgba(60, 62, 70, 0.55);
   --glass-bar-bg: rgba(30, 32, 38, 0.82);
@@ -89,6 +89,550 @@
   --glass-edge: rgba(255, 255, 255, 0.10);
   --glass-edge-outer: rgba(0, 0, 0, 0.5);
   --glass-shadow: 0 1px 1px rgba(0, 0, 0, 0.4), 0 14px 40px -16px rgba(0, 0, 0, 0.55);
+}
+
+/* ════════════════════════════════════════════════════════════════
+   THEME PRESETS — applied via data-cgui-theme="<name>" on <html>.
+   Bridge: Claude Code CLI `claude` token + opencode `primary` ⇄ --color-accent.
+   These override the @theme defaults; user picks via SettingsPanel.
+   ════════════════════════════════════════════════════════════════ */
+
+/* Claude Warm — brand orange on warm cream (matches Claude Code CLI). */
+:root[data-cgui-theme="claude-warm"] {
+  --color-canvas: #FAF7F2;
+  --color-canvas-warm: #F2EDE3;
+  --color-canvas-deep: #EBE5D8;
+  --color-canvas-sunken: #E2DBCC;
+  --color-ink: #1A1A1A;
+  --color-ink-soft: #2A2A2A;
+  --color-ink-muted: #6B6260;
+  --color-ink-faint: #9A8F89;
+  --color-ink-ghost: #C7BDB5;
+  --color-accent: #D97757;
+  --color-accent-hover: #C26545;
+  --color-accent-subtle: rgba(217, 119, 87, 0.12);
+  --color-accent-muted: rgba(217, 119, 87, 0.28);
+  --glass-base-bg: rgba(250, 247, 242, 0.18);
+  --glass-thick-bg: rgba(250, 247, 242, 0.78);
+  --glass-thin-bg: rgba(250, 247, 242, 0.42);
+  --glass-bar-bg: rgba(250, 247, 242, 0.66);
+  --glass-specular: rgba(255, 255, 255, 0.7);
+  --glass-shade: rgba(120, 80, 50, 0.05);
+  --glass-edge: rgba(217, 119, 87, 0.25);
+  --glass-edge-outer: rgba(60, 40, 20, 0.06);
+  --glass-shadow: 0 1px 1px rgba(60, 40, 20, 0.04), 0 14px 40px -16px rgba(120, 80, 50, 0.18);
+  --scrollbar-thumb: rgba(120, 80, 50, 0.22);
+  --scrollbar-thumb-hover: rgba(120, 80, 50, 0.36);
+}
+
+/* OpenCode Dark — opencode default dark, peach primary on charcoal. */
+:root[data-cgui-theme="opencode-dark"] {
+  --color-canvas: #0A0A0A;
+  --color-canvas-warm: #141414;
+  --color-canvas-deep: #1E1E1E;
+  --color-canvas-sunken: #050505;
+  --color-ink: #EEEEEE;
+  --color-ink-soft: #D0D0D0;
+  --color-ink-muted: #808080;
+  --color-ink-faint: #606060;
+  --color-ink-ghost: #404040;
+  --color-accent: #FAB283;
+  --color-accent-hover: #FFCB9F;
+  --color-accent-subtle: rgba(250, 178, 131, 0.16);
+  --color-accent-muted: rgba(250, 178, 131, 0.32);
+  --glass-base-bg: rgba(20, 20, 20, 0.30);
+  --glass-thick-bg: rgba(20, 20, 20, 0.88);
+  --glass-thin-bg: rgba(30, 30, 30, 0.58);
+  --glass-bar-bg: rgba(10, 10, 10, 0.82);
+  --glass-specular: rgba(255, 255, 255, 0.04);
+  --glass-shade: rgba(0, 0, 0, 0.40);
+  --glass-edge: rgba(250, 178, 131, 0.14);
+  --glass-edge-outer: rgba(0, 0, 0, 0.6);
+  --glass-shadow: 0 1px 1px rgba(0, 0, 0, 0.5), 0 14px 40px -16px rgba(0, 0, 0, 0.7);
+  --scrollbar-thumb: rgba(255, 255, 255, 0.12);
+  --scrollbar-thumb-hover: rgba(255, 255, 255, 0.22);
+}
+
+/* Tokyonight — opencode tokyonight dark. */
+:root[data-cgui-theme="tokyonight"] {
+  --color-canvas: #1A1B26;
+  --color-canvas-warm: #1E2030;
+  --color-canvas-deep: #222436;
+  --color-canvas-sunken: #16161E;
+  --color-ink: #C8D3F5;
+  --color-ink-soft: #B0BCE0;
+  --color-ink-muted: #737AA2;
+  --color-ink-faint: #565F89;
+  --color-ink-ghost: #3B4261;
+  --color-accent: #82AAFF;
+  --color-accent-hover: #98B8FF;
+  --color-accent-subtle: rgba(130, 170, 255, 0.16);
+  --color-accent-muted: rgba(130, 170, 255, 0.32);
+  --glass-base-bg: rgba(26, 27, 38, 0.30);
+  --glass-thick-bg: rgba(26, 27, 38, 0.88);
+  --glass-thin-bg: rgba(30, 32, 48, 0.58);
+  --glass-bar-bg: rgba(22, 22, 30, 0.82);
+  --glass-specular: rgba(255, 255, 255, 0.06);
+  --glass-shade: rgba(0, 0, 0, 0.36);
+  --glass-edge: rgba(130, 170, 255, 0.12);
+  --glass-edge-outer: rgba(0, 0, 0, 0.55);
+  --glass-shadow: 0 1px 1px rgba(0, 0, 0, 0.45), 0 14px 40px -16px rgba(0, 0, 0, 0.6);
+  --scrollbar-thumb: rgba(255, 255, 255, 0.12);
+  --scrollbar-thumb-hover: rgba(255, 255, 255, 0.22);
+}
+
+/* Nord — opencode nord dark. */
+:root[data-cgui-theme="nord"] {
+  --color-canvas: #2E3440;
+  --color-canvas-warm: #3B4252;
+  --color-canvas-deep: #434C5E;
+  --color-canvas-sunken: #242933;
+  --color-ink: #ECEFF4;
+  --color-ink-soft: #D8DEE9;
+  --color-ink-muted: #8B95A7;
+  --color-ink-faint: #6B7484;
+  --color-ink-ghost: #4C566A;
+  --color-accent: #88C0D0;
+  --color-accent-hover: #A2D2E0;
+  --color-accent-subtle: rgba(136, 192, 208, 0.16);
+  --color-accent-muted: rgba(136, 192, 208, 0.32);
+  --glass-base-bg: rgba(46, 52, 64, 0.30);
+  --glass-thick-bg: rgba(46, 52, 64, 0.88);
+  --glass-thin-bg: rgba(59, 66, 82, 0.58);
+  --glass-bar-bg: rgba(36, 41, 51, 0.82);
+  --glass-specular: rgba(255, 255, 255, 0.06);
+  --glass-shade: rgba(0, 0, 0, 0.32);
+  --glass-edge: rgba(136, 192, 208, 0.14);
+  --glass-edge-outer: rgba(0, 0, 0, 0.5);
+  --glass-shadow: 0 1px 1px rgba(0, 0, 0, 0.42), 0 14px 40px -16px rgba(0, 0, 0, 0.6);
+  --scrollbar-thumb: rgba(255, 255, 255, 0.12);
+  --scrollbar-thumb-hover: rgba(255, 255, 255, 0.22);
+}
+
+/* Rose Pine — soft purple foam. */
+:root[data-cgui-theme="rosepine"] {
+  --color-canvas: #191724;
+  --color-canvas-warm: #1F1D2E;
+  --color-canvas-deep: #26233A;
+  --color-canvas-sunken: #131019;
+  --color-ink: #E0DEF4;
+  --color-ink-soft: #C7C4DC;
+  --color-ink-muted: #908CAA;
+  --color-ink-faint: #6E6A86;
+  --color-ink-ghost: #403D52;
+  --color-accent: #9CCFD8;
+  --color-accent-hover: #B7DFE7;
+  --color-accent-subtle: rgba(156, 207, 216, 0.16);
+  --color-accent-muted: rgba(156, 207, 216, 0.32);
+  --glass-base-bg: rgba(25, 23, 36, 0.30);
+  --glass-thick-bg: rgba(25, 23, 36, 0.88);
+  --glass-thin-bg: rgba(31, 29, 46, 0.58);
+  --glass-bar-bg: rgba(19, 16, 25, 0.82);
+  --glass-specular: rgba(255, 255, 255, 0.05);
+  --glass-shade: rgba(0, 0, 0, 0.38);
+  --glass-edge: rgba(156, 207, 216, 0.12);
+  --glass-edge-outer: rgba(0, 0, 0, 0.55);
+  --glass-shadow: 0 1px 1px rgba(0, 0, 0, 0.46), 0 14px 40px -16px rgba(0, 0, 0, 0.6);
+  --scrollbar-thumb: rgba(224, 222, 244, 0.14);
+  --scrollbar-thumb-hover: rgba(224, 222, 244, 0.26);
+}
+
+/* Catppuccin Mocha — flagship opencode dark, soft pastel on charcoal. */
+:root[data-cgui-theme="catppuccin-mocha"] {
+  --color-canvas: #1E1E2E;
+  --color-canvas-warm: #313244;
+  --color-canvas-deep: #45475A;
+  --color-canvas-sunken: #181825;
+  --color-ink: #CDD6F4;
+  --color-ink-soft: #BAC2DE;
+  --color-ink-muted: #A6ADC8;
+  --color-ink-faint: #7F849C;
+  --color-ink-ghost: #585B70;
+  --color-accent: #89B4FA;
+  --color-accent-hover: #A6C5FF;
+  --color-accent-subtle: rgba(137, 180, 250, 0.16);
+  --color-accent-muted: rgba(137, 180, 250, 0.32);
+  --glass-base-bg: rgba(30, 30, 46, 0.30);
+  --glass-thick-bg: rgba(30, 30, 46, 0.88);
+  --glass-thin-bg: rgba(49, 50, 68, 0.58);
+  --glass-bar-bg: rgba(24, 24, 37, 0.82);
+  --glass-specular: rgba(255, 255, 255, 0.06);
+  --glass-shade: rgba(0, 0, 0, 0.34);
+  --glass-edge: rgba(137, 180, 250, 0.14);
+  --glass-edge-outer: rgba(0, 0, 0, 0.5);
+  --glass-shadow: 0 1px 1px rgba(0, 0, 0, 0.42), 0 14px 40px -16px rgba(0, 0, 0, 0.6);
+  --scrollbar-thumb: rgba(205, 214, 244, 0.14);
+  --scrollbar-thumb-hover: rgba(205, 214, 244, 0.26);
+}
+
+/* Catppuccin Latte — Mocha's light counterpart. */
+:root[data-cgui-theme="catppuccin-latte"] {
+  --color-canvas: #EFF1F5;
+  --color-canvas-warm: #E6E9EF;
+  --color-canvas-deep: #DCE0E8;
+  --color-canvas-sunken: #CCD0DA;
+  --color-ink: #4C4F69;
+  --color-ink-soft: #5C5F77;
+  --color-ink-muted: #6C6F85;
+  --color-ink-faint: #8C8FA1;
+  --color-ink-ghost: #ACB0BE;
+  --color-accent: #1E66F5;
+  --color-accent-hover: #0B57E0;
+  --color-accent-subtle: rgba(30, 102, 245, 0.12);
+  --color-accent-muted: rgba(30, 102, 245, 0.28);
+  --glass-base-bg: rgba(239, 241, 245, 0.18);
+  --glass-thick-bg: rgba(239, 241, 245, 0.78);
+  --glass-thin-bg: rgba(239, 241, 245, 0.42);
+  --glass-bar-bg: rgba(239, 241, 245, 0.66);
+  --glass-specular: rgba(255, 255, 255, 0.7);
+  --glass-shade: rgba(76, 79, 105, 0.05);
+  --glass-edge: rgba(30, 102, 245, 0.20);
+  --glass-edge-outer: rgba(76, 79, 105, 0.06);
+  --glass-shadow: 0 1px 1px rgba(76, 79, 105, 0.04), 0 14px 40px -16px rgba(76, 79, 105, 0.18);
+  --scrollbar-thumb: rgba(76, 79, 105, 0.22);
+  --scrollbar-thumb-hover: rgba(76, 79, 105, 0.36);
+}
+
+/* Dracula — classic high-contrast dark with violet primary. */
+:root[data-cgui-theme="dracula"] {
+  --color-canvas: #282A36;
+  --color-canvas-warm: #383A4A;
+  --color-canvas-deep: #44475A;
+  --color-canvas-sunken: #21222C;
+  --color-ink: #F8F8F2;
+  --color-ink-soft: #E0E0DA;
+  --color-ink-muted: #BFBFB8;
+  --color-ink-faint: #7A7E8E;
+  --color-ink-ghost: #555766;
+  --color-accent: #BD93F9;
+  --color-accent-hover: #D0AEFB;
+  --color-accent-subtle: rgba(189, 147, 249, 0.16);
+  --color-accent-muted: rgba(189, 147, 249, 0.32);
+  --glass-base-bg: rgba(40, 42, 54, 0.30);
+  --glass-thick-bg: rgba(40, 42, 54, 0.88);
+  --glass-thin-bg: rgba(56, 58, 74, 0.58);
+  --glass-bar-bg: rgba(33, 34, 44, 0.82);
+  --glass-specular: rgba(255, 255, 255, 0.06);
+  --glass-shade: rgba(0, 0, 0, 0.32);
+  --glass-edge: rgba(189, 147, 249, 0.14);
+  --glass-edge-outer: rgba(0, 0, 0, 0.5);
+  --glass-shadow: 0 1px 1px rgba(0, 0, 0, 0.42), 0 14px 40px -16px rgba(0, 0, 0, 0.6);
+  --scrollbar-thumb: rgba(248, 248, 242, 0.14);
+  --scrollbar-thumb-hover: rgba(248, 248, 242, 0.26);
+}
+
+/* Gruvbox Dark — warm retro terminal palette. */
+:root[data-cgui-theme="gruvbox-dark"] {
+  --color-canvas: #282828;
+  --color-canvas-warm: #3C3836;
+  --color-canvas-deep: #504945;
+  --color-canvas-sunken: #1D2021;
+  --color-ink: #EBDBB2;
+  --color-ink-soft: #D5C4A1;
+  --color-ink-muted: #A89984;
+  --color-ink-faint: #7C6F64;
+  --color-ink-ghost: #5A5450;
+  --color-accent: #FE8019;
+  --color-accent-hover: #FFA94D;
+  --color-accent-subtle: rgba(254, 128, 25, 0.14);
+  --color-accent-muted: rgba(254, 128, 25, 0.32);
+  --glass-base-bg: rgba(40, 40, 40, 0.30);
+  --glass-thick-bg: rgba(40, 40, 40, 0.88);
+  --glass-thin-bg: rgba(60, 56, 54, 0.58);
+  --glass-bar-bg: rgba(29, 32, 33, 0.82);
+  --glass-specular: rgba(255, 255, 255, 0.06);
+  --glass-shade: rgba(0, 0, 0, 0.32);
+  --glass-edge: rgba(254, 128, 25, 0.14);
+  --glass-edge-outer: rgba(0, 0, 0, 0.55);
+  --glass-shadow: 0 1px 1px rgba(0, 0, 0, 0.46), 0 14px 40px -16px rgba(0, 0, 0, 0.6);
+  --scrollbar-thumb: rgba(235, 219, 178, 0.14);
+  --scrollbar-thumb-hover: rgba(235, 219, 178, 0.26);
+}
+
+/* Kanagawa — opencode's painterly Japanese dark. */
+:root[data-cgui-theme="kanagawa"] {
+  --color-canvas: #1F1F28;
+  --color-canvas-warm: #2A2A37;
+  --color-canvas-deep: #363646;
+  --color-canvas-sunken: #16161D;
+  --color-ink: #DCD7BA;
+  --color-ink-soft: #C8C093;
+  --color-ink-muted: #957FB8;
+  --color-ink-faint: #727169;
+  --color-ink-ghost: #54546D;
+  --color-accent: #7E9CD8;
+  --color-accent-hover: #9CB4E0;
+  --color-accent-subtle: rgba(126, 156, 216, 0.16);
+  --color-accent-muted: rgba(126, 156, 216, 0.32);
+  --glass-base-bg: rgba(31, 31, 40, 0.30);
+  --glass-thick-bg: rgba(31, 31, 40, 0.88);
+  --glass-thin-bg: rgba(42, 42, 55, 0.58);
+  --glass-bar-bg: rgba(22, 22, 29, 0.82);
+  --glass-specular: rgba(255, 255, 255, 0.06);
+  --glass-shade: rgba(0, 0, 0, 0.34);
+  --glass-edge: rgba(126, 156, 216, 0.14);
+  --glass-edge-outer: rgba(0, 0, 0, 0.55);
+  --glass-shadow: 0 1px 1px rgba(0, 0, 0, 0.46), 0 14px 40px -16px rgba(0, 0, 0, 0.6);
+  --scrollbar-thumb: rgba(220, 215, 186, 0.14);
+  --scrollbar-thumb-hover: rgba(220, 215, 186, 0.26);
+}
+
+/* Everforest Dark — soft sage on forest. */
+:root[data-cgui-theme="everforest-dark"] {
+  --color-canvas: #2D353B;
+  --color-canvas-warm: #374145;
+  --color-canvas-deep: #475258;
+  --color-canvas-sunken: #232A2E;
+  --color-ink: #D3C6AA;
+  --color-ink-soft: #C2B295;
+  --color-ink-muted: #9DA9A0;
+  --color-ink-faint: #7A8478;
+  --color-ink-ghost: #555F5C;
+  --color-accent: #A7C080;
+  --color-accent-hover: #BCD299;
+  --color-accent-subtle: rgba(167, 192, 128, 0.16);
+  --color-accent-muted: rgba(167, 192, 128, 0.32);
+  --glass-base-bg: rgba(45, 53, 59, 0.30);
+  --glass-thick-bg: rgba(45, 53, 59, 0.88);
+  --glass-thin-bg: rgba(55, 65, 69, 0.58);
+  --glass-bar-bg: rgba(35, 42, 46, 0.82);
+  --glass-specular: rgba(255, 255, 255, 0.06);
+  --glass-shade: rgba(0, 0, 0, 0.32);
+  --glass-edge: rgba(167, 192, 128, 0.14);
+  --glass-edge-outer: rgba(0, 0, 0, 0.5);
+  --glass-shadow: 0 1px 1px rgba(0, 0, 0, 0.42), 0 14px 40px -16px rgba(0, 0, 0, 0.6);
+  --scrollbar-thumb: rgba(211, 198, 170, 0.14);
+  --scrollbar-thumb-hover: rgba(211, 198, 170, 0.26);
+}
+
+/* ════════════════════════════════════════════════════════════════
+   LIGHT THEMES — opencode JSON 来源，亮色风格矩阵
+   纯白(github) / 冷灰(tokyonight-day) / 暖黄(gruvbox/solarized/everforest-light)
+   米纸(flexoki) / 粉玫(rose-pine-dawn) / 陶土(kanagawa-lotus)
+   ════════════════════════════════════════════════════════════════ */
+
+/* Rose Pine Dawn — 薰衣草米白 + 松木蓝。 */
+:root[data-cgui-theme="rose-pine-dawn"] {
+  --color-canvas: #FAF4ED;
+  --color-canvas-warm: #FFFAF3;
+  --color-canvas-deep: #DFDAD9;
+  --color-canvas-sunken: #F2E9E1;
+  --color-ink: #575279;
+  --color-ink-soft: #575279;
+  --color-ink-muted: #797593;
+  --color-ink-faint: #9893A5;
+  --color-ink-ghost: #C9C4D2;
+  --color-accent: #31748F;
+  --color-accent-hover: #286983;
+  --color-accent-subtle: rgba(49, 116, 143, 0.12);
+  --color-accent-muted: rgba(49, 116, 143, 0.28);
+  --glass-base-bg: rgba(250, 244, 237, 0.18);
+  --glass-thick-bg: rgba(250, 244, 237, 0.80);
+  --glass-thin-bg: rgba(250, 244, 237, 0.45);
+  --glass-bar-bg: rgba(250, 244, 237, 0.66);
+  --glass-specular: rgba(255, 255, 255, 0.7);
+  --glass-shade: rgba(87, 82, 121, 0.05);
+  --glass-edge: rgba(49, 116, 143, 0.20);
+  --glass-edge-outer: rgba(87, 82, 121, 0.06);
+  --glass-shadow: 0 1px 1px rgba(87, 82, 121, 0.04), 0 14px 40px -16px rgba(87, 82, 121, 0.18);
+  --scrollbar-thumb: rgba(87, 82, 121, 0.20);
+  --scrollbar-thumb-hover: rgba(87, 82, 121, 0.34);
+}
+
+/* Gruvbox Light — 暖米黄 + 复古橄榄棕。 */
+:root[data-cgui-theme="gruvbox-light"] {
+  --color-canvas: #FBF1C7;
+  --color-canvas-warm: #F2E5BC;
+  --color-canvas-deep: #D5C4A1;
+  --color-canvas-sunken: #EBDBB2;
+  --color-ink: #3C3836;
+  --color-ink-soft: #504945;
+  --color-ink-muted: #7C6F64;
+  --color-ink-faint: #928374;
+  --color-ink-ghost: #A89984;
+  --color-accent: #076678;
+  --color-accent-hover: #427B58;
+  --color-accent-subtle: rgba(7, 102, 120, 0.10);
+  --color-accent-muted: rgba(7, 102, 120, 0.26);
+  --glass-base-bg: rgba(251, 241, 199, 0.18);
+  --glass-thick-bg: rgba(251, 241, 199, 0.80);
+  --glass-thin-bg: rgba(251, 241, 199, 0.45);
+  --glass-bar-bg: rgba(251, 241, 199, 0.66);
+  --glass-specular: rgba(255, 255, 255, 0.7);
+  --glass-shade: rgba(60, 56, 54, 0.05);
+  --glass-edge: rgba(7, 102, 120, 0.18);
+  --glass-edge-outer: rgba(60, 56, 54, 0.06);
+  --glass-shadow: 0 1px 1px rgba(60, 56, 54, 0.05), 0 14px 40px -16px rgba(60, 56, 54, 0.18);
+  --scrollbar-thumb: rgba(60, 56, 54, 0.22);
+  --scrollbar-thumb-hover: rgba(60, 56, 54, 0.36);
+}
+
+/* Solarized Light — 奶油米 + 蓝青，科技复古。 */
+:root[data-cgui-theme="solarized-light"] {
+  --color-canvas: #FDF6E3;
+  --color-canvas-warm: #F5EFD6;
+  --color-canvas-deep: #C8C2A6;
+  --color-canvas-sunken: #EEE8D5;
+  --color-ink: #586E75;
+  --color-ink-soft: #657B83;
+  --color-ink-muted: #839496;
+  --color-ink-faint: #93A1A1;
+  --color-ink-ghost: #B7B19A;
+  --color-accent: #268BD2;
+  --color-accent-hover: #1E6BA0;
+  --color-accent-subtle: rgba(38, 139, 210, 0.12);
+  --color-accent-muted: rgba(38, 139, 210, 0.28);
+  --glass-base-bg: rgba(253, 246, 227, 0.18);
+  --glass-thick-bg: rgba(253, 246, 227, 0.80);
+  --glass-thin-bg: rgba(253, 246, 227, 0.45);
+  --glass-bar-bg: rgba(253, 246, 227, 0.66);
+  --glass-specular: rgba(255, 255, 255, 0.7);
+  --glass-shade: rgba(88, 110, 117, 0.05);
+  --glass-edge: rgba(38, 139, 210, 0.18);
+  --glass-edge-outer: rgba(88, 110, 117, 0.06);
+  --glass-shadow: 0 1px 1px rgba(88, 110, 117, 0.05), 0 14px 40px -16px rgba(88, 110, 117, 0.18);
+  --scrollbar-thumb: rgba(88, 110, 117, 0.22);
+  --scrollbar-thumb-hover: rgba(88, 110, 117, 0.36);
+}
+
+/* GitHub Light — 纯白 + GitHub 品牌蓝，最接近主流 IDE。 */
+:root[data-cgui-theme="github-light"] {
+  --color-canvas: #FFFFFF;
+  --color-canvas-warm: #F6F8FA;
+  --color-canvas-deep: #D0D7DE;
+  --color-canvas-sunken: #EAEEF2;
+  --color-ink: #24292F;
+  --color-ink-soft: #32383F;
+  --color-ink-muted: #57606A;
+  --color-ink-faint: #6E7781;
+  --color-ink-ghost: #AFB8C1;
+  --color-accent: #0969DA;
+  --color-accent-hover: #0550AE;
+  --color-accent-subtle: rgba(9, 105, 218, 0.10);
+  --color-accent-muted: rgba(9, 105, 218, 0.26);
+  --glass-base-bg: rgba(255, 255, 255, 0.18);
+  --glass-thick-bg: rgba(255, 255, 255, 0.82);
+  --glass-thin-bg: rgba(255, 255, 255, 0.50);
+  --glass-bar-bg: rgba(255, 255, 255, 0.70);
+  --glass-specular: rgba(255, 255, 255, 0.8);
+  --glass-shade: rgba(36, 41, 47, 0.04);
+  --glass-edge: rgba(208, 215, 222, 0.5);
+  --glass-edge-outer: rgba(36, 41, 47, 0.06);
+  --glass-shadow: 0 1px 1px rgba(36, 41, 47, 0.04), 0 14px 40px -16px rgba(36, 41, 47, 0.18);
+  --scrollbar-thumb: rgba(36, 41, 47, 0.20);
+  --scrollbar-thumb-hover: rgba(36, 41, 47, 0.36);
+}
+
+/* Everforest Light — 淡草绿 + 森林深绿，护眼。 */
+:root[data-cgui-theme="everforest-light"] {
+  --color-canvas: #FDF6E3;
+  --color-canvas-warm: #F4F0D9;
+  --color-canvas-deep: #BDC3AF;
+  --color-canvas-sunken: #EFEBD4;
+  --color-ink: #5C6A72;
+  --color-ink-soft: #708089;
+  --color-ink-muted: #829181;
+  --color-ink-faint: #939F91;
+  --color-ink-ghost: #A6B0A0;
+  --color-accent: #8DA101;
+  --color-accent-hover: #35A77C;
+  --color-accent-subtle: rgba(141, 161, 1, 0.12);
+  --color-accent-muted: rgba(141, 161, 1, 0.28);
+  --glass-base-bg: rgba(253, 246, 227, 0.18);
+  --glass-thick-bg: rgba(253, 246, 227, 0.82);
+  --glass-thin-bg: rgba(253, 246, 227, 0.48);
+  --glass-bar-bg: rgba(253, 246, 227, 0.68);
+  --glass-specular: rgba(255, 255, 255, 0.7);
+  --glass-shade: rgba(92, 106, 114, 0.05);
+  --glass-edge: rgba(141, 161, 1, 0.18);
+  --glass-edge-outer: rgba(92, 106, 114, 0.06);
+  --glass-shadow: 0 1px 1px rgba(92, 106, 114, 0.04), 0 14px 40px -16px rgba(92, 106, 114, 0.18);
+  --scrollbar-thumb: rgba(92, 106, 114, 0.22);
+  --scrollbar-thumb-hover: rgba(92, 106, 114, 0.36);
+}
+
+/* Tokyonight Day — 灰蓝白 + 电蓝，现代编辑器感。 */
+:root[data-cgui-theme="tokyonight-day"] {
+  --color-canvas: #E1E2E7;
+  --color-canvas-warm: #D5D6DB;
+  --color-canvas-deep: #B3B5BE;
+  --color-canvas-sunken: #C8C9CE;
+  --color-ink: #3760BF;
+  --color-ink-soft: #4264C0;
+  --color-ink-muted: #737A8C;
+  --color-ink-faint: #8990A3;
+  --color-ink-ghost: #9699A8;
+  --color-accent: #2E7DE9;
+  --color-accent-hover: #1A6CE7;
+  --color-accent-subtle: rgba(46, 125, 233, 0.12);
+  --color-accent-muted: rgba(46, 125, 233, 0.28);
+  --glass-base-bg: rgba(225, 226, 231, 0.18);
+  --glass-thick-bg: rgba(225, 226, 231, 0.82);
+  --glass-thin-bg: rgba(225, 226, 231, 0.48);
+  --glass-bar-bg: rgba(225, 226, 231, 0.68);
+  --glass-specular: rgba(255, 255, 255, 0.6);
+  --glass-shade: rgba(55, 96, 191, 0.05);
+  --glass-edge: rgba(46, 125, 233, 0.18);
+  --glass-edge-outer: rgba(55, 96, 191, 0.06);
+  --glass-shadow: 0 1px 1px rgba(55, 96, 191, 0.04), 0 14px 40px -16px rgba(55, 96, 191, 0.16);
+  --scrollbar-thumb: rgba(55, 96, 191, 0.22);
+  --scrollbar-thumb-hover: rgba(55, 96, 191, 0.36);
+}
+
+/* Flexoki Light — 米纸 + 橙土棕，Obsidian 官方风。 */
+:root[data-cgui-theme="flexoki-light"] {
+  --color-canvas: #FFFCF0;
+  --color-canvas-warm: #F2F0E5;
+  --color-canvas-deep: #CECDC3;
+  --color-canvas-sunken: #E6E4D9;
+  --color-ink: #100F0F;
+  --color-ink-soft: #1C1B1A;
+  --color-ink-muted: #575653;
+  --color-ink-faint: #6F6E69;
+  --color-ink-ghost: #B7B5AC;
+  --color-accent: #205EA6;
+  --color-accent-hover: #1A4F8F;
+  --color-accent-subtle: rgba(32, 94, 166, 0.10);
+  --color-accent-muted: rgba(32, 94, 166, 0.26);
+  --glass-base-bg: rgba(255, 252, 240, 0.18);
+  --glass-thick-bg: rgba(255, 252, 240, 0.82);
+  --glass-thin-bg: rgba(255, 252, 240, 0.48);
+  --glass-bar-bg: rgba(255, 252, 240, 0.68);
+  --glass-specular: rgba(255, 255, 255, 0.75);
+  --glass-shade: rgba(16, 15, 15, 0.04);
+  --glass-edge: rgba(32, 94, 166, 0.18);
+  --glass-edge-outer: rgba(16, 15, 15, 0.06);
+  --glass-shadow: 0 1px 1px rgba(16, 15, 15, 0.04), 0 14px 40px -16px rgba(16, 15, 15, 0.18);
+  --scrollbar-thumb: rgba(16, 15, 15, 0.20);
+  --scrollbar-thumb-hover: rgba(16, 15, 15, 0.34);
+}
+
+/* Kanagawa Lotus — 暖陶土米白 + 深靛蓝，日式沉静。 */
+:root[data-cgui-theme="kanagawa-lotus"] {
+  --color-canvas: #F2E9DE;
+  --color-canvas-warm: #EAE4D7;
+  --color-canvas-deep: #C9BFB1;
+  --color-canvas-sunken: #E3DCD2;
+  --color-ink: #54433A;
+  --color-ink-soft: #635146;
+  --color-ink-muted: #7E6B5A;
+  --color-ink-faint: #9E9389;
+  --color-ink-ghost: #BFB5A8;
+  --color-accent: #2D4F67;
+  --color-accent-hover: #1F3A4D;
+  --color-accent-subtle: rgba(45, 79, 103, 0.10);
+  --color-accent-muted: rgba(45, 79, 103, 0.26);
+  --glass-base-bg: rgba(242, 233, 222, 0.18);
+  --glass-thick-bg: rgba(242, 233, 222, 0.82);
+  --glass-thin-bg: rgba(242, 233, 222, 0.48);
+  --glass-bar-bg: rgba(242, 233, 222, 0.68);
+  --glass-specular: rgba(255, 255, 255, 0.7);
+  --glass-shade: rgba(84, 67, 58, 0.05);
+  --glass-edge: rgba(45, 79, 103, 0.18);
+  --glass-edge-outer: rgba(84, 67, 58, 0.06);
+  --glass-shadow: 0 1px 1px rgba(84, 67, 58, 0.04), 0 14px 40px -16px rgba(84, 67, 58, 0.18);
+  --scrollbar-thumb: rgba(84, 67, 58, 0.22);
+  --scrollbar-thumb-hover: rgba(84, 67, 58, 0.36);
 }
 
 /* ════════════════════════════════════════════════════════════════
@@ -106,32 +650,40 @@ body {
   /* Light: subtle cool-warm wash. Kept faint so it doesn't overwhelm content
      and so layers above don't need expensive blur to feel airy. */
   background-color: var(--color-canvas);
+  /* Faint corner tints. Kept smaller & dimmer so the un-tinted middle no longer
+     creates a "false ellipse" that reads as a popover behind the chat panel. */
   background-image:
-    radial-gradient(ellipse 60% 50% at 18% 12%, rgba(135, 170, 255, 0.18), transparent 62%),
-    radial-gradient(ellipse 55% 45% at 88% 18%, rgba(255, 195, 145, 0.14), transparent 62%),
-    radial-gradient(ellipse 70% 60% at 72% 92%, rgba(190, 140, 255, 0.14), transparent 62%);
+    radial-gradient(ellipse 45% 35% at 10% 6%,  rgba(135, 170, 255, 0.10), transparent 70%),
+    radial-gradient(ellipse 40% 32% at 92% 10%, rgba(255, 195, 145, 0.08), transparent 70%),
+    radial-gradient(ellipse 50% 40% at 78% 96%, rgba(190, 140, 255, 0.08), transparent 70%);
   background-attachment: fixed;
 }
 
 :root[data-theme="dark"] body,
 :root[data-theme="auto"]:where([data-theme-system="dark"]) body {
   background-image:
-    radial-gradient(ellipse 60% 50% at 18% 12%, rgba(60, 110, 220, 0.22), transparent 62%),
-    radial-gradient(ellipse 55% 45% at 88% 18%, rgba(180, 80, 220, 0.18), transparent 62%),
-    radial-gradient(ellipse 70% 60% at 72% 92%, rgba(40, 180, 200, 0.14), transparent 62%);
+    radial-gradient(ellipse 45% 35% at 10% 6%,  rgba(60, 110, 220, 0.14), transparent 70%),
+    radial-gradient(ellipse 40% 32% at 92% 10%, rgba(180, 80, 220, 0.10), transparent 70%),
+    radial-gradient(ellipse 50% 40% at 78% 96%, rgba(40, 180, 200, 0.10), transparent 70%);
 }
 
 #root { height: 100vh; }
 
-/* ── Scrollbars — barely there, glass-friendly ───────────────── */
-* { scrollbar-width: thin; scrollbar-color: var(--color-ink-ghost) transparent; }
+/* ── Scrollbars — barely there, glass-friendly ─────────────────
+   Track follows --scrollbar-thumb / --scrollbar-thumb-hover so every
+   theme preset can tune contrast. Fallback to ink-ghost which always
+   exists. */
+* { scrollbar-width: thin; scrollbar-color: var(--scrollbar-thumb, var(--color-ink-ghost)) transparent; }
 *::-webkit-scrollbar { width: 6px; height: 6px; }
 *::-webkit-scrollbar-track { background: transparent; }
-*::-webkit-scrollbar-thumb { background: rgba(0, 0, 0, 0.18); border-radius: 6px; }
-*::-webkit-scrollbar-thumb:hover { background: rgba(0, 0, 0, 0.28); }
+*::-webkit-scrollbar-thumb { background: var(--scrollbar-thumb, rgba(0, 0, 0, 0.18)); border-radius: 6px; }
+*::-webkit-scrollbar-thumb:hover { background: var(--scrollbar-thumb-hover, rgba(0, 0, 0, 0.28)); }
+/* Only let the system dark preference drive scrollbar color when the user
+   hasn't explicitly picked a theme — otherwise dark scrollbar would clash
+   with a chosen light theme on a dark-mode OS. */
 @media (prefers-color-scheme: dark) {
-  *::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.14); }
-  *::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.22); }
+  :root:not([data-cgui-theme]) *::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.14); }
+  :root:not([data-cgui-theme]) *::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.22); }
 }
 
 /* ════════════════════════════════════════════════════════════════
@@ -148,24 +700,30 @@ body {
  *   - Promote glass layers with `transform: translateZ(0)` so the compositor
  *     keeps them on their own GPU texture and doesn't repaint on every scroll.
  *   - Keep blur radii small (≤ 24px) and drop saturate boost. */
+/* NB: .glass-popover is intentionally NOT in this group. It's always positioned
+ * by a utility class (absolute / fixed) on the call site; forcing position:relative
+ * here used to override Tailwind's .absolute (same specificity, source later),
+ * pulling the popover into normal flow and pushing its parent header off-screen. */
 .glass-base,
 .glass-thick,
 .glass-thin,
 .glass-bar,
-.glass-capsule,
-.glass-popover {
+.glass-capsule {
   position: relative;
   isolation: isolate;
 }
+.glass-popover {
+  isolation: isolate;
+}
 
-/* SOLID translucent — no backdrop-filter. Used for big scroll containers. */
+/* SOLID translucent — no backdrop-filter. Used for big scroll containers.
+   Kept very faint so the main chat panel reads as "the canvas" rather than
+   a card with edges — avoids the "false elliptical halo" effect when
+   popovers above it provide a high-contrast reference. */
 .glass-base {
   background: var(--glass-base-bg);
-  border: 0.5px solid var(--glass-edge);
-  box-shadow:
-    inset 0 1px 0 var(--glass-specular),
-    inset 0 -1px 0 var(--glass-shade),
-    var(--glass-shadow);
+  border: none;
+  box-shadow: none;
 }
 
 .glass-thick {
@@ -210,9 +768,10 @@ body {
 }
 
 .glass-popover {
-  background: var(--glass-thick-bg);
-  -webkit-backdrop-filter: blur(20px);
-  backdrop-filter: blur(20px);
+  /* 100% opaque — dropdowns must be readable. Use solid canvas color in
+     both light & dark mode (CSS variable adapts). Previous translucent
+     fill made options hard to read against busy chat backgrounds. */
+  background: var(--color-canvas);
   border: 0.5px solid var(--glass-edge);
   border-radius: var(--radius-lg);
   box-shadow:
@@ -273,14 +832,10 @@ body {
   opacity: 0; transform: scaleY(0.4);
   transition: all 0.22s cubic-bezier(0.4, 0, 0.2, 1);
 }
-.sidebar-item:hover { background: rgba(127, 127, 127, 0.07); }
-.sidebar-item.active { background: rgba(10, 132, 255, 0.10); }
+.sidebar-item:hover { background: var(--color-canvas-warm); }
+.sidebar-item.active { background: var(--color-accent-subtle); }
 .sidebar-item.active::before, .sidebar-item:hover::before {
   opacity: 1; transform: scaleY(1);
-}
-@media (prefers-color-scheme: dark) {
-  .sidebar-item:hover { background: rgba(255, 255, 255, 0.04); }
-  .sidebar-item.active { background: rgba(10, 132, 255, 0.16); }
 }
 
 /* ════════════════════════════════════════════════════════════════
@@ -365,6 +920,15 @@ body {
 .animate-fade-in { animation: fadeIn 0.22s ease-out both; }
 .animate-slide-in { animation: slideIn 0.28s cubic-bezier(0.2, 0.8, 0.2, 1) both; }
 .animate-glass-rise { animation: glassRise 0.32s cubic-bezier(0.2, 0.8, 0.2, 1) both; }
+
+/* Thinking pulse — mimics CLI's spinner glyph cycling. Pulse (scale+opacity)
+ * instead of full rotation: easier on the eye and closer to the CLI's
+ * "breathing star" feel than a 360° spin. */
+@keyframes avatarThinkingPulse {
+  0%, 100% { transform: scale(1);    opacity: 1;   }
+  50%      { transform: scale(1.18); opacity: 0.65; }
+}
+.avatar-thinking-spin { animation: avatarThinkingPulse 1.4s ease-in-out infinite; transform-origin: center; }
 
 .stagger > *:nth-child(1) { animation-delay: 0ms; }
 .stagger > *:nth-child(2) { animation-delay: 40ms; }

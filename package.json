@@ -8,7 +8,9 @@
     "server": "node server/index.js",
     "client": "cd client && npx vite --port 5173",
     "build": "cd client && npx vite build",
-    "start": "NODE_ENV=production node server/index.js"
+    "start": "NODE_ENV=production node server/index.js",
+    "stop": "lsof -ti:6677 | xargs kill -9 2>/dev/null || true",
+    "restart": "npm run stop && npm start"
   },
   "dependencies": {
     "chokidar": "^4.0.0",

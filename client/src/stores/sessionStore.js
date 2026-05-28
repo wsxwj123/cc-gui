@@ -1,5 +1,21 @@
 import { create } from 'zustand';
 
+// Helper: read JSON from localStorage with fallback.
+const readLs = (key, fallback) => {
+  if (typeof localStorage === 'undefined') return fallback;
+  try {
+    const raw = localStorage.getItem(key);
+    if (raw === null) return fallback;
+    return JSON.parse(raw);
+  } catch { return fallback; }
+};
+const writeLs = (key, val) => {
+  try { localStorage.setItem(key, JSON.stringify(val)); } catch {}
+};
+
+// Valid `--permission-mode` values per `claude --help`.
+export const PERMISSION_MODES = ['default', 'acceptEdits', 'plan', 'bypassPermissions'];
+
 export const useStore = create((set, get) => ({
   // Data
   projects: [],
@@ -7,18 +23,123 @@ export const useStore = create((set, get) => ({
   messages: [],
   currentModel: null,
   availableModels: [],
+  // Live-detected backend (set by fetchProvider). When cc switch routes the
+  // CLI's Claude-shaped API calls to deepseek/mimo/etc, this tells us the
+  // real upstream so pricing.js can charge correctly. Defaults to anthropic.
+  currentProvider: { providerHint: 'anthropic', baseUrl: '', model: null },
   // CLI session knobs. Persisted to localStorage so they survive reload.
   effort: typeof localStorage !== 'undefined' ? (localStorage.getItem('cgui-effort') || '') : '',
-  addDirs: typeof localStorage !== 'undefined'
-    ? JSON.parse(localStorage.getItem('cgui-add-dirs') || '[]') : [],
+  addDirs: readLs('cgui-add-dirs', []),
+  // Default to 'default' (each tool call asks for permission via CLI built-in flow).
+  // Users can switch to acceptEdits/bypassPermissions/plan from the header.
+  // `permissionMode` is the value for the CURRENTLY active session (a mirror
+  // kept in sync so existing `s.permissionMode` readers keep working).
+  permissionMode: readLs('cgui-permission-mode', 'default'),
+  // Per-session override map { [sessionKey]: mode }. Each session (or draft)
+  // remembers its OWN mode so switching from session A (plan) to session B
+  // (bypass) shows B's mode, not A's. Keyed by sessionId, or `draft-<hash>`
+  // for unsent drafts (mirrors sessionQueueKey).
+  permissionModeBySession: readLs('cgui-perm-mode-by-session', {}),
+  // When enabled, spawn includes `--add-dir $HOME` so Claude can READ any file
+  // under the user's home directory by default. Writes/edits still require
+  // permission (unless mode is bypassPermissions / acceptEdits).
+  globalRead: readLs('cgui-global-read', true),
 
-  // UI state
-  selectedProject: null,
-  selectedSession: null,
+  // UI state — selectedProject + selectedSession persisted so refresh
+  // restores the user's current conversation instead of dumping them on Empty.
+  selectedProject: readLs('cgui-selected-project', null),
+  selectedSession: readLs('cgui-selected-session', null),
+
+  // Multi-pane state (Phase 2). paneCount = 1..6 panes visible side-by-side.
+  // Pane 0 MIRRORS the legacy selectedSession / messages so existing reads
+  // outside SessionDetail keep working unchanged. Panes 1..5 live in the
+  // sparse arrays below — each slot is independently null-able so closing a
+  // middle pane just splices it out without disturbing other slots.
+  //
+  // splitMode is derived (paneCount > 1) but exported for legacy code that
+  // checks `if (splitMode)` for branching.
+  paneCount: (() => {
+    const n = parseInt(readLs('cgui-pane-count', 1), 10);
+    return Number.isFinite(n) && n >= 1 && n <= 6 ? n : 1;
+  })(),
+  // paneSessions[0] always == selectedSession; index 1..5 are extra panes.
+  paneSessions: (() => {
+    const arr = readLs('cgui-pane-sessions', [null, null, null, null, null, null]);
+    const padded = Array.isArray(arr) ? arr.slice(0, 6) : [];
+    while (padded.length < 6) padded.push(null);
+    // pane 0 reload from legacy slot so refresh in single mode also restores
+    padded[0] = readLs('cgui-selected-session', null);
+    return padded;
+  })(),
+  // paneMessages is in-memory only (re-fetched on session load). Persisting
+  // it would bloat localStorage and the on-disk jsonl is the source of truth.
+  paneMessages: [[], [], [], [], [], []],
+  activeTabIndex: (() => {
+    const n = parseInt(readLs('cgui-active-tab-index', 0), 10);
+    return Number.isFinite(n) && n >= 0 && n <= 5 ? n : 0;
+  })(),
+  // Background-process pids per session, surfaced for sidebar dots + top
+  // badge. Populated by SessionDetail's backgroundPid poll. Shape:
+  //   { [sessionId]: pid }
+  backgroundSessions: {},
+
+  // ── Legacy aliases for Phase 1 callers (kept for back-compat) ──
+  // splitMode is `paneCount > 1`; secondarySession/Messages mirror pane 1.
+  // These fields are also mutated by the new pane actions below so reads
+  // stay in sync. Eventually App.jsx + components will be refactored to use
+  // pane APIs directly and these can be dropped.
+  splitMode: (() => {
+    const n = parseInt(readLs('cgui-pane-count', 1), 10);
+    return Number.isFinite(n) && n > 1;
+  })(),
+  secondarySession: (() => {
+    const arr = readLs('cgui-pane-sessions', null);
+    return Array.isArray(arr) ? arr[1] || null : null;
+  })(),
+  secondaryMessages: [],
+  // Pending text to drop into ChatInput's textarea (used by message rollback
+  // "重新编辑" action). ChatInput watches this, sets its local text, clears.
+  composerDraft: '',
+
+  // In-flight subagent state keyed by the parent Task tool_use.id. Each entry:
+  //   { id, name, description, status, startedAt,
+  //     text: [], thinking: [], toolCalls: [], result }
+  // App.jsx reader populates this; AgentMonitorPanel + TaskCard render it.
+  activeAgents: {},
+
+  // Message queue per session: { [sessionKey]: [{ text, attachments, queuedAt }] }
+  // Keyed by sessionId (or 'draft' for unsent drafts). When user types during
+  // streaming + clicks 入队, message goes here. handleSend pops the queue after
+  // the current chat finishes.
+  messageQueue: {},
+
+  // Pending CLI permission requests waiting on the user. Each entry:
+  //   { id, toolName, toolInput, sessionId, cwd, hookEvent, createdAt }
+  // Populated by useWebSocket on `permission:request`. Removed when
+  // /respond is called OR `permission:resolved` arrives (e.g. CLI exited).
+  pendingPermissions: [],
+
+  // 0.80 ~ 1.40, applied as `document.documentElement.style.zoom` on mount.
+  // Use zoom (not html font-size) so px-hardcoded Tailwind classes also scale.
+  uiFontScale: (() => {
+    try {
+      const v = parseFloat(localStorage.getItem('cgui-ui-font-scale') || '1');
+      if (Number.isFinite(v) && v >= 0.6 && v <= 2) return v;
+    } catch {}
+    return 1;
+  })(),
+
+  // Theme preset name. '' = default (Apple-system blue from @theme block).
+  // Other values map to data-cgui-theme blocks in index.css.
+  cguiTheme: (() => {
+    try { return localStorage.getItem('cgui-theme-preset') || ''; }
+    catch { return ''; }
+  })(),
+
   loading: false,
   error: null,
   searchQuery: '',
-  sidebarCollapsed: false,
+  sidebarCollapsed: !!readLs('cgui-sidebar-collapsed', false),
 
   // Actions
   setProjects: (projects) => set({ projects }),
@@ -26,49 +147,309 @@ export const useStore = create((set, get) => ({
   setMessages: (messages) => set({ messages }),
   setCurrentModel: (model) => set({ currentModel: model }),
   setEffort: (e) => { set({ effort: e }); try { localStorage.setItem('cgui-effort', e); } catch {} },
-  setAddDirs: (dirs) => { set({ addDirs: dirs }); try { localStorage.setItem('cgui-add-dirs', JSON.stringify(dirs)); } catch {} },
-  setSelectedProject: (project) => set({ selectedProject: project, selectedSession: null, messages: [] }),
-  setSelectedSession: (session) => set({ selectedSession: session }),
+  setAddDirs: (dirs) => { set({ addDirs: dirs }); writeLs('cgui-add-dirs', dirs); },
+  // setPermissionMode(mode, key?) — when `key` is given, store it against that
+  // session and also refresh the active mirror. Without a key it just sets the
+  // global default (used before any session is active).
+  setPermissionMode: (m, key) => {
+    const mode = PERMISSION_MODES.includes(m) ? m : 'default';
+    if (key) {
+      const map = { ...get().permissionModeBySession, [key]: mode };
+      writeLs('cgui-perm-mode-by-session', map);
+      writeLs('cgui-permission-mode', mode);
+      set({ permissionModeBySession: map, permissionMode: mode });
+    } else {
+      set({ permissionMode: mode });
+      writeLs('cgui-permission-mode', mode);
+    }
+  },
+  // Resolve the effective mode for a session key. No entry → 'default' (NOT the
+  // last-used global value — that's exactly the cross-session bleed we fixed).
+  getPermissionModeFor: (key) => {
+    if (!key) return get().permissionMode || 'default';
+    const map = get().permissionModeBySession || {};
+    return map[key] || 'default';
+  },
+  setGlobalRead: (v) => {
+    set({ globalRead: !!v });
+    writeLs('cgui-global-read', !!v);
+  },
+  setSelectedProject: (project) => {
+    // Only switch which project's session list shows in the sidebar — do NOT
+    // touch selectedSession or messages. User explicitly wants to browse other
+    // projects' session lists while keeping the current chat in the right
+    // panel running. The session detail only switches when user clicks a
+    // session entry (setSelectedSession).
+    set({ selectedProject: project });
+    writeLs('cgui-selected-project', project);
+  },
+  setSelectedSession: (session) => {
+    // Setting selectedSession also writes pane 0, keeping the mirror in sync.
+    const panes = [...(get().paneSessions || [])];
+    panes[0] = session;
+    set({ selectedSession: session, paneSessions: panes });
+    writeLs('cgui-selected-session', session);
+    writeLs('cgui-pane-sessions', panes);
+  },
+
+  // ── Multi-pane actions (Phase 2) ───────────────────────────
+  // Set how many panes are visible (1..6). Snaps activeTabIndex if it ends
+  // up out of range. Persists so refresh restores the layout.
+  setPaneCount: (n) => {
+    const next = Math.max(1, Math.min(6, n | 0));
+    const cur = get();
+    writeLs('cgui-pane-count', next);
+    const newActive = cur.activeTabIndex >= next ? 0 : cur.activeTabIndex;
+    writeLs('cgui-active-tab-index', newActive);
+    set({ paneCount: next, activeTabIndex: newActive, splitMode: next > 1 });
+  },
+  // Close one pane — splice it out (panes after shift left), paneCount--.
+  // Sessions in closed panes are DROPPED from view only; their CLI processes
+  // keep running. The sidebar's background-dot is how the user finds them
+  // again.
+  closePane: (i) => {
+    const cur = get();
+    if (cur.paneCount <= 1) {
+      // Last pane: don't drop count to 0, just clear its session binding.
+      const next = [...cur.paneSessions];
+      next[0] = null;
+      const nextMsgs = [...cur.paneMessages];
+      nextMsgs[0] = [];
+      set({ paneSessions: next, paneMessages: nextMsgs, selectedSession: null, messages: [] });
+      writeLs('cgui-selected-session', null);
+      writeLs('cgui-pane-sessions', next);
+      return;
+    }
+    const sessions = [...cur.paneSessions];
+    const msgs = [...cur.paneMessages];
+    // Splice (i) out then pad back to length 6 so index math stays stable.
+    sessions.splice(i, 1); sessions.push(null);
+    msgs.splice(i, 1); msgs.push([]);
+    const newCount = cur.paneCount - 1;
+    const newActive = cur.activeTabIndex >= newCount
+      ? Math.max(0, newCount - 1)
+      : cur.activeTabIndex;
+    writeLs('cgui-pane-count', newCount);
+    writeLs('cgui-pane-sessions', sessions);
+    writeLs('cgui-active-tab-index', newActive);
+    set({
+      paneCount: newCount,
+      paneSessions: sessions,
+      paneMessages: msgs,
+      activeTabIndex: newActive,
+      // pane 0 changed if we removed pane 0 — keep legacy mirrors current.
+      selectedSession: sessions[0],
+      messages: msgs[0] || [],
+    });
+  },
+  // Tab-index setter, clamped.
+  setActiveTabIndex: (i) => {
+    const cur = get();
+    const idx = Math.max(0, Math.min(cur.paneCount - 1, i | 0));
+    writeLs('cgui-active-tab-index', idx);
+    set({ activeTabIndex: idx });
+  },
+  // Write session to a specific pane. Pane 0 also updates the legacy
+  // selectedSession mirror so reads outside SessionDetail keep working.
+  setPaneSession: (i, session) => {
+    const idx = Math.max(0, Math.min(5, i | 0));
+    const sessions = [...get().paneSessions];
+    sessions[idx] = session;
+    writeLs('cgui-pane-sessions', sessions);
+    const patch = { paneSessions: sessions };
+    if (idx === 0) {
+      patch.selectedSession = session;
+      writeLs('cgui-selected-session', session);
+    }
+    // Mirror to legacy `secondarySession` (pane 1) so Phase-1-era reads work.
+    if (idx === 1) patch.secondarySession = session;
+    set(patch);
+  },
+  setPaneMessages: (i, messages) => {
+    const idx = Math.max(0, Math.min(5, i | 0));
+    const arr = [...get().paneMessages];
+    arr[idx] = Array.isArray(messages) ? messages : [];
+    const patch = { paneMessages: arr };
+    if (idx === 0) patch.messages = arr[0];
+    if (idx === 1) patch.secondaryMessages = arr[1];
+    set(patch);
+  },
+  // ── Legacy Phase-1 aliases ─────────────────────────────────
+  toggleSplitMode: () => {
+    const cur = get();
+    get().setPaneCount(cur.paneCount > 1 ? 1 : 2);
+  },
+  setSecondarySession: (session) => get().setPaneSession(1, session),
+  setSecondaryMessages: (messages) => get().setPaneMessages(1, messages),
+  // Writes a session into whichever pane is active. Used by SessionList click.
+  setActiveTabSession: (session) => {
+    const idx = get().activeTabIndex;
+    get().setPaneSession(idx, session);
+  },
+  // Mark/unmark a session as having a live background CLI process. Drives
+  // sidebar dots + top "运行中" badge.
+  setBackgroundSession: (sessionId, pid) => {
+    if (!sessionId) return;
+    const cur = { ...get().backgroundSessions };
+    if (pid) cur[sessionId] = pid;
+    else delete cur[sessionId];
+    set({ backgroundSessions: cur });
+  },
+
+  // ── Permission popup helpers ───────────────────────────────
+  addPendingPermission: (req) => set((s) => {
+    if (s.pendingPermissions.some((p) => p.id === req.id)) return s;
+    return { pendingPermissions: [...s.pendingPermissions, req] };
+  }),
+  removePendingPermission: (id) => set((s) => ({
+    pendingPermissions: s.pendingPermissions.filter((p) => p.id !== id),
+  })),
+  setPendingPermissions: (list) => set({ pendingPermissions: Array.isArray(list) ? list : [] }),
+  // "本会话内永远允许 X" — write to localStorage so future incoming requests
+  // for `toolName` under `sessionId` auto-resolve in useWebSocket without
+  // popping the dialog.
+  setUiFontScale: (v) => {
+    const n = Math.max(0.6, Math.min(2, Number(v) || 1));
+    set({ uiFontScale: n });
+    try { localStorage.setItem('cgui-ui-font-scale', String(n)); } catch {}
+    try { document.documentElement.style.zoom = String(n); } catch {}
+  },
+  setCguiTheme: (name) => {
+    set({ cguiTheme: name || '' });
+    try { localStorage.setItem('cgui-theme-preset', name || ''); } catch {}
+    try {
+      if (name) document.documentElement.setAttribute('data-cgui-theme', name);
+      else document.documentElement.removeAttribute('data-cgui-theme');
+    } catch {}
+  },
+
+  whitelistPermissionTool: (sessionId, toolName) => {
+    try {
+      const key = `cgui-perm-wl-${sessionId || 'none'}`;
+      const cur = JSON.parse(localStorage.getItem(key) || '[]');
+      if (!cur.includes(toolName)) cur.push(toolName);
+      localStorage.setItem(key, JSON.stringify(cur));
+    } catch {}
+  },
+
+  // ── Active subagent helpers ─────────────────────────────────
+  upsertAgent: (id, patch) => set((s) => ({
+    activeAgents: {
+      ...s.activeAgents,
+      [id]: { ...(s.activeAgents[id] || { id, text: [], thinking: [], toolCalls: [] }), ...patch },
+    },
+  })),
+  appendAgentText: (id, delta) => set((s) => {
+    const cur = s.activeAgents[id];
+    if (!cur) return s;
+    return { activeAgents: { ...s.activeAgents, [id]: { ...cur, text: [...cur.text, delta] } } };
+  }),
+  appendAgentThinking: (id, delta) => set((s) => {
+    const cur = s.activeAgents[id];
+    if (!cur) return s;
+    return { activeAgents: { ...s.activeAgents, [id]: { ...cur, thinking: [...cur.thinking, delta] } } };
+  }),
+  appendAgentTool: (id, tc) => set((s) => {
+    const cur = s.activeAgents[id];
+    if (!cur) return s;
+    return { activeAgents: { ...s.activeAgents, [id]: { ...cur, toolCalls: [...cur.toolCalls, tc] } } };
+  }),
+  updateAgentTool: (id, toolId, patch) => set((s) => {
+    const cur = s.activeAgents[id];
+    if (!cur) return s;
+    return { activeAgents: { ...s.activeAgents, [id]: {
+      ...cur,
+      toolCalls: cur.toolCalls.map((tc) => tc.id === toolId ? { ...tc, ...patch } : tc),
+    } } };
+  }),
+  clearAgents: () => set({ activeAgents: {} }),
+
+  // ── Message queue helpers (#3) ──────────────────────────────
+  enqueueMessage: (sessionKey, msg) => set((s) => {
+    const list = s.messageQueue[sessionKey] || [];
+    return { messageQueue: { ...s.messageQueue, [sessionKey]: [...list, msg] } };
+  }),
+  shiftMessage: (sessionKey) => {
+    const list = useStore.getState().messageQueue[sessionKey] || [];
+    if (list.length === 0) return null;
+    const [head, ...rest] = list;
+    useStore.setState((s) => ({ messageQueue: { ...s.messageQueue, [sessionKey]: rest } }));
+    return head;
+  },
+  clearQueue: (sessionKey) => set((s) => {
+    const next = { ...s.messageQueue };
+    delete next[sessionKey];
+    return { messageQueue: next };
+  }),
+  removeFromQueue: (sessionKey, index) => set((s) => {
+    const list = s.messageQueue[sessionKey] || [];
+    if (index < 0 || index >= list.length) return s;
+    const next = [...list.slice(0, index), ...list.slice(index + 1)];
+    return { messageQueue: { ...s.messageQueue, [sessionKey]: next } };
+  }),
   setLoading: (loading) => set({ loading }),
   setError: (error) => set({ error }),
   setSearchQuery: (query) => set({ searchQuery: query }),
-  toggleSidebar: () => set((s) => ({ sidebarCollapsed: !s.sidebarCollapsed })),
+  toggleSidebar: () => set((s) => {
+    const collapsed = !s.sidebarCollapsed;
+    writeLs('cgui-sidebar-collapsed', collapsed);
+    return { sidebarCollapsed: collapsed };
+  }),
 
   // Fetch projects
   fetchProjects: async () => {
     set({ loading: true, error: null });
     try {
       const res = await fetch('/api/projects');
-      const projects = await res.json();
+      const data = await res.json();
+      const projects = Array.isArray(data) ? data : [];
       set({ projects, loading: false });
     } catch (err) {
-      set({ error: err.message, loading: false });
+      set({ projects: [], error: err.message, loading: false });
     }
   },
 
-  // Fetch sessions for a project
-  fetchSessions: async (projectHash) => {
-    set({ loading: true, error: null });
+  // Fetch sessions for a project.
+  // `silent` = true means a background refresh (e.g. after a chat just
+  // finished) — don't flip the global `loading` flag, which causes
+  // SessionDetail to swap to a breathing-dots screen mid-conversation and
+  // makes the page feel like it's reloading.
+  fetchSessions: async (projectHash, opts = {}) => {
+    const silent = !!opts.silent;
+    if (!silent) set({ loading: true, error: null });
     try {
       const res = await fetch(`/api/projects/${encodeURIComponent(projectHash)}/sessions`);
-      const sessions = await res.json();
-      set({ sessions, loading: false });
+      const data = await res.json();
+      // Treat non-array response (e.g. {error:"..."} from a 500) as empty.
+      // Without this, on 500 `data` would still be a non-array object — we
+      // already coerce to [], but earlier bugs let stale `sessions` linger
+      // because the spread didn't include the key. The explicit `sessions: []`
+      // below guarantees the list is reset for every project switch.
+      const sessions = Array.isArray(data) ? data : [];
+      set(silent ? { sessions } : { sessions, loading: false });
     } catch (err) {
-      set({ error: err.message, loading: false });
+      set(silent ? { sessions: [] } : { sessions: [], error: err.message, loading: false });
     }
   },
 
-  // Fetch messages for a session
-  fetchMessages: async (sessionId, projectHash) => {
-    set({ loading: true, error: null });
+  // Fetch messages for a session.
+  //   opts.silent  → don't toggle global loading (used by background refresh)
+  //   opts.tab=1   → write into secondaryMessages instead of messages
+  //                  (tab=1 always forces silent so tab 0 doesn't flash loader)
+  fetchMessages: async (sessionId, projectHash, opts = {}) => {
+    const tab = opts.tab === 1 ? 1 : 0;
+    const silent = !!opts.silent || tab === 1;
+    if (!silent) set({ loading: true, error: null });
+    const key = tab === 1 ? 'secondaryMessages' : 'messages';
     try {
       const res = await fetch(
         `/api/sessions/${sessionId}/messages?projectHash=${encodeURIComponent(projectHash)}`
       );
-      const messages = await res.json();
-      set({ messages, loading: false });
+      const data = await res.json();
+      const messages = Array.isArray(data) ? data : [];
+      set(silent ? { [key]: messages } : { [key]: messages, loading: false });
     } catch (err) {
-      set({ error: err.message, loading: false });
+      set(silent ? { [key]: [] } : { [key]: [], error: err.message, loading: false });
     }
   },
 
@@ -78,6 +459,19 @@ export const useStore = create((set, get) => ({
       const res = await fetch('/api/model');
       const data = await res.json();
       set({ currentModel: data.model, availableModels: data.available || [] });
+    } catch {}
+  },
+
+  // Detect active provider (anthropic / deepseek / mimo / ...) from
+  // ~/.claude/settings.json env. Used by pricing.js so cost is computed
+  // against the real upstream, not the Claude-shaped display name.
+  fetchProvider: async () => {
+    try {
+      const res = await fetch('/api/provider');
+      const data = await res.json();
+      if (data && data.providerHint) {
+        set({ currentProvider: data });
+      }
     } catch {}
   },
 

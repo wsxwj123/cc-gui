@@ -18,7 +18,8 @@ function PingButton({ name }) {
     }
   };
   return (
-    <button onClick={ping} title={detail || '测试连接'}
+    <button onClick={ping}
+      title={detail ? `健康检查\n${detail}` : '点击测试 MCP 服务器连通性 (ping)'}
       className={`p-1 rounded transition-colors ${
         state === 'ok' ? 'text-success' :
         state === 'err' ? 'text-error' :
@@ -82,6 +83,24 @@ export function MCPPanel() {
     fetchData();
     return () => { mounted.current = false; };
   }, []);
+
+  const handleTogglePlugin = async (index) => {
+    const plugin = plugins[index];
+    if (!plugin) return;
+    const newEnabled = plugin.enabled === false;
+    setPlugins((prev) => prev.map((p, i) => i === index ? { ...p, enabled: newEnabled } : p));
+    setToggling(plugin.name);
+    const endpoint = newEnabled
+      ? `/api/plugins/${encodeURIComponent(plugin.name)}/enable`
+      : `/api/plugins/${encodeURIComponent(plugin.name)}/disable`;
+    fetch(endpoint, { method: 'PUT' })
+      .then((r) => { if (!r.ok) return r.json().then((e) => { throw new Error(e.error); }); })
+      .catch((err) => {
+        console.error('Plugin toggle failed:', err);
+        setPlugins((prev) => prev.map((p, i) => i === index ? { ...p, enabled: !newEnabled } : p));
+      })
+      .finally(() => setToggling(null));
+  };
 
   const handleToggle = async (index) => {
     const srv = servers[index];
@@ -157,22 +176,28 @@ export function MCPPanel() {
                   }`}
                 >
                   <div className="flex items-center gap-2 mb-1">
-                    <Plug size={12} className={disabled ? 'text-ink-ghost' : srv.status === 'connected' ? 'text-success' : 'text-ink-faint'} />
-                    <span className={`text-xs font-medium font-body ${disabled ? 'text-ink-faint line-through' : 'text-ink'}`}>
+                    <Plug
+                      size={12}
+                      className={disabled ? 'text-ink-ghost' : srv.status === 'connected' ? 'text-success' : 'text-ink-faint'}
+                      aria-label="服务器图标"
+                    />
+                    <span className={`text-xs font-medium font-body ${disabled ? 'text-ink-faint line-through' : 'text-ink'}`}
+                      title={srv.source || ''}>
                       {srv.name}
                     </span>
-                    <span className="text-[10px] px-1.5 py-0.5 bg-canvas-deep text-ink-faint rounded font-mono">
+                    <span className="text-[10px] px-1.5 py-0.5 bg-canvas-deep text-ink-faint rounded font-mono"
+                      title="传输协议 (stdio = 子进程, http = HTTP MCP)">
                       {srv.transport}
                     </span>
                     <div className="flex-1" />
                     {!disabled && srv.status === 'connected' && (
-                      <span className="text-[10px] text-success">✓</span>
+                      <span className="text-[10px] text-success" title="已连接（claude mcp list 显示 connected）">✓</span>
                     )}
                     {!disabled && srv.status === 'disconnected' && (
-                      <span className="text-[10px] text-error">✗</span>
+                      <span className="text-[10px] text-error" title="未连接">✗</span>
                     )}
                     {disabled && (
-                      <span className="text-[10px] text-ink-ghost">已禁用</span>
+                      <span className="text-[10px] text-ink-ghost" title="已禁用（CLI 不会启动此 MCP）">已禁用</span>
                     )}
                     <PingButton name={srv.name} />
                     <Toggle
@@ -208,23 +233,40 @@ export function MCPPanel() {
         </h3>
         {plugins.length > 0 ? (
           <div className="space-y-2">
-            {plugins.map((plugin) => (
-              <div key={plugin.name} className="bg-canvas-warm border border-canvas-deep rounded-lg p-3">
-                <div className="flex items-center gap-2 mb-1">
-                  <Package size={12} className="text-warning/70" />
-                  <span className="text-xs font-medium text-ink font-body">{plugin.name}</span>
-                  <span className="text-[10px] px-1.5 py-0.5 bg-canvas-deep text-ink-faint rounded font-mono">
-                    v{plugin.version}
-                  </span>
+            {plugins.map((plugin, index) => {
+              const disabled = plugin.enabled === false;
+              return (
+                <div
+                  key={plugin.name}
+                  className={`bg-canvas-warm border rounded-lg p-3 transition-opacity ${
+                    disabled ? 'border-ink-ghost/30 opacity-50' : 'border-canvas-deep'
+                  }`}
+                >
+                  <div className="flex items-center gap-2 mb-1">
+                    <Package size={12} className={disabled ? 'text-ink-ghost' : 'text-warning/70'} />
+                    <span className={`text-xs font-medium font-body ${disabled ? 'text-ink-faint line-through' : 'text-ink'}`}>
+                      {plugin.name}
+                    </span>
+                    <span className="text-[10px] px-1.5 py-0.5 bg-canvas-deep text-ink-faint rounded font-mono">
+                      v{plugin.version}
+                    </span>
+                    <div className="ml-auto">
+                      <Toggle
+                        enabled={!disabled}
+                        loading={toggling === plugin.name}
+                        onToggle={() => handleTogglePlugin(index)}
+                      />
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-3 text-[10px] text-ink-faint font-mono">
+                    <span>scope: {plugin.scope}</span>
+                    {plugin.installedAt && (
+                      <span>安装: {new Date(plugin.installedAt).toLocaleDateString('zh-CN')}</span>
+                    )}
+                  </div>
                 </div>
-                <div className="flex items-center gap-3 text-[10px] text-ink-faint font-mono">
-                  <span>scope: {plugin.scope}</span>
-                  {plugin.installedAt && (
-                    <span>安装: {new Date(plugin.installedAt).toLocaleDateString('zh-CN')}</span>
-                  )}
-                </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         ) : (
           <div className="text-xs text-ink-faint font-body py-3 text-center bg-canvas-warm border border-canvas-deep rounded-lg">

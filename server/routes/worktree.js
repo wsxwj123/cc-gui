@@ -1,7 +1,8 @@
 import { Router } from 'express';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
-import { join, dirname, resolve as pathResolve } from 'path';
+import { join, dirname, basename, resolve as pathResolve } from 'path';
+import { mkdir } from 'fs/promises';
 import { homedir } from 'os';
 import { stat } from 'fs/promises';
 
@@ -33,7 +34,13 @@ router.post('/worktree', async (req, res) => {
     const root = await findGitRoot(cwd);
     if (!root) return res.status(400).json({ error: 'not inside a git repo' });
 
-    const target = pathResolve(root, '..', `${name}`);
+    // Collect all worktrees in a single `<repo名>-worktrees/` folder beside the
+    // repo, instead of scattering loose sibling dirs (which landed on Desktop
+    // when the repo sat directly under it). e.g. repo `/a/b/myrepo` →
+    // worktree `/a/b/myrepo-worktrees/<name>`.
+    const container = pathResolve(root, '..', `${basename(root)}-worktrees`);
+    await mkdir(container, { recursive: true });
+    const target = join(container, name);
     const branch = `gui/${name}`;
     await execFileP('git', ['-C', root, 'worktree', 'add', '-b', branch, target], { timeout: 30000 });
     res.json({ ok: true, path: target, branch, root });
@@ -42,7 +49,7 @@ router.post('/worktree', async (req, res) => {
   }
 });
 
-/** GET /api/worktree?cwd=... → list worktrees of the enclosing repo */
+/** GET /api/worktree?cwd=... → list worktrees + last commit + dirty file count */
 router.get('/worktree', async (req, res) => {
   try {
     const cwd = safe(String(req.query.cwd || ''));
@@ -52,11 +59,28 @@ router.get('/worktree', async (req, res) => {
     const trees = [];
     let cur = null;
     for (const line of out.stdout.split('\n')) {
-      if (line.startsWith('worktree ')) { if (cur) trees.push(cur); cur = { path: line.slice(9), branch: null, head: null }; }
-      else if (cur && line.startsWith('HEAD ')) cur.head = line.slice(5);
+      if (line.startsWith('worktree ')) {
+        if (cur) trees.push(cur);
+        cur = { path: line.slice(9), branch: null, head: null };
+      } else if (cur && line.startsWith('HEAD ')) cur.head = line.slice(5);
       else if (cur && line.startsWith('branch ')) cur.branch = line.slice(7).replace(/^refs\/heads\//, '');
     }
     if (cur) trees.push(cur);
+
+    // Enrich each worktree with last-commit subject + timestamp + uncommitted change count.
+    for (const t of trees) {
+      try {
+        const log = await execFileP('git', ['-C', t.path, 'log', '-1', '--format=%H%x09%ct%x09%s'], { timeout: 4000 });
+        const [sha, ts, ...rest] = log.stdout.trim().split('\t');
+        t.lastCommit = { sha, ts: Number(ts) * 1000, subject: rest.join('\t') };
+      } catch {}
+      try {
+        const status = await execFileP('git', ['-C', t.path, 'status', '--porcelain'], { timeout: 4000 });
+        t.dirtyFileCount = status.stdout.trim().split('\n').filter(Boolean).length;
+      } catch { t.dirtyFileCount = 0; }
+      t.isMain = t.path === root;
+    }
+
     res.json({ root, trees });
   } catch (err) {
     res.status(500).json({ error: err.message });
