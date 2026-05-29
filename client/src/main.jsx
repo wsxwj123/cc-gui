@@ -1,7 +1,7 @@
 import React from 'react';
 import ReactDOM from 'react-dom/client';
 import App from './App.jsx';
-import { THEME_FAMILIES, resolveTheme } from './stores/sessionStore.js';
+import { THEME_FAMILIES, resolveTheme, applyReadingFont } from './stores/sessionStore.js';
 import './index.css';
 
 // ── Theme bootstrap ──────────────────────────────────────────────
@@ -38,6 +38,10 @@ import './index.css';
 
   // Persist the migrated family so subsequent loads skip derivation.
   try { localStorage.setItem('cgui-theme-family', family); } catch {}
+
+  // Apply the saved reading font before mount so message prose doesn't flash
+  // the default serif then swap.
+  try { applyReadingFont(localStorage.getItem('cgui-reading-font') || 'newsreader'); } catch {}
 })();
 
 ReactDOM.createRoot(document.getElementById('root')).render(

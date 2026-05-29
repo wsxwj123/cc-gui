@@ -239,8 +239,8 @@ export function MessageBubble({ message, onRollback }) {
               <span className="text-[11px] text-ink-faint font-mono">{formatTime(message.timestamp)}</span>
               <span className="text-[13px] font-medium text-ink font-body">你</span>
             </div>
-            <div className="max-w-[85%] px-1 py-1">
-              <div className="text-[14px] font-body leading-relaxed whitespace-pre-wrap text-ink">{message.text}</div>
+            <div className="max-w-[85%] bg-canvas-warm border border-canvas-deep rounded-2xl rounded-tr-md px-4 py-2.5">
+              <div className="text-[15px] font-reading leading-relaxed whitespace-pre-wrap text-ink">{message.text}</div>
             </div>
           </div>
         </div>

@@ -4,7 +4,7 @@ import React, { useEffect, useRef, useState, useCallback, useMemo } from 'react'
 // #185 (Maximum update depth exceeded) caused by returning fresh `[]` on
 // every selector call. Any selector with `|| []` fallback must point here.
 const EMPTY_ARRAY = Object.freeze([]);
-import { useStore, THEME_FAMILIES, systemPrefersDark } from './stores/sessionStore.js';
+import { useStore, THEME_FAMILIES, FONT_OPTIONS, systemPrefersDark } from './stores/sessionStore.js';
 import { useWebSocket } from './hooks/useWebSocket.js';
 import { MessageBubble } from './components/MessageBubble.jsx';
 import { TurnBubble } from './components/TurnBubble.jsx';
@@ -177,6 +177,8 @@ function ThemeToggle() {
   const setTheme = useStore((s) => s.setTheme);
   const uiFontScale = useStore((s) => s.uiFontScale);
   const setUiFontScale = useStore((s) => s.setUiFontScale);
+  const readingFont = useStore((s) => s.readingFont);
+  const setReadingFont = useStore((s) => s.setReadingFont);
 
   useEffect(() => {
     if (!open) return;
@@ -226,6 +228,23 @@ function ThemeToggle() {
               <span className="text-[13px] text-ink-faint">A</span>
               <button onClick={() => setUiFontScale(1)}
                 className="text-[9px] text-ink-muted hover:text-ink underline-offset-2 hover:underline shrink-0">重置</button>
+            </div>
+          </div>
+
+          {/* ── Reading font (Claude message prose) ───────────── */}
+          <div className="space-y-1.5">
+            <div className="flex items-center gap-2">
+              <Type size={12} className="text-ink-muted" />
+              <span className="text-[11px] text-ink font-body font-medium">对话正文字体</span>
+            </div>
+            <select value={readingFont} onChange={(e) => setReadingFont(e.target.value)}
+              className="w-full text-[11px] font-body rounded-lg border border-canvas-deep bg-canvas px-2.5 py-1.5 text-ink focus:outline-none focus:border-accent cursor-pointer">
+              {FONT_OPTIONS.map((f) => (
+                <option key={f.id} value={f.id}>{f.name}</option>
+              ))}
+            </select>
+            <div className="text-[14px] text-ink-muted leading-snug px-0.5 font-reading">
+              示例 The quick brown fox · 敏捷的棕色狐狸
             </div>
           </div>
 
@@ -3140,6 +3159,7 @@ export default function App() {
           <button onClick={toggleSidebar} className="btn-glass p-1.5 transition-colors shrink-0" title={sidebarCollapsed ? '展开' : '收起'}>
             {sidebarCollapsed ? <ChevronRight size={15} className="text-ink-muted" /> : <ChevronLeft size={15} className="text-ink-muted" />}
           </button>
+          <span className="text-accent text-[15px] leading-none shrink-0 select-none font-mono">✻</span>
           <span className="text-[15px] font-display font-semibold text-ink tracking-tight shrink-0">Claude Code</span>
           {selectedProject && (
             <span className="chip font-mono truncate min-w-0 max-w-[200px]">

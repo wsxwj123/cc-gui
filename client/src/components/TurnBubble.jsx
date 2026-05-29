@@ -52,23 +52,23 @@ const CATEGORY_CONFIG = {
   skill: {
     label: '读取',
     icon: BookOpen,
-    color: 'text-blue-600',
-    bg: 'bg-blue-50',
-    border: 'border-blue-200',
+    color: 'text-ink-muted',
+    bg: 'bg-canvas-warm',
+    border: 'border-canvas-deep',
   },
   write: {
     label: '写入',
     icon: Pencil,
-    color: 'text-amber-600',
-    bg: 'bg-amber-50',
-    border: 'border-amber-200',
+    color: 'text-accent',
+    bg: 'bg-accent-subtle',
+    border: 'border-accent-muted',
   },
   call: {
     label: '调用',
     icon: Wrench,
-    color: 'text-violet-600',
-    bg: 'bg-violet-50',
-    border: 'border-violet-200',
+    color: 'text-ink-soft',
+    bg: 'bg-canvas-warm',
+    border: 'border-canvas-deep',
   },
 };
 
@@ -132,7 +132,7 @@ function ToolCallRow({ toolCall }) {
   const preview = formatInputPreview(toolCall.input);
 
   return (
-    <div className={`border rounded-md overflow-hidden ${hasError ? 'border-red-200 bg-red-50/50' : 'border-canvas-sunken bg-canvas'}`}>
+    <div className={`border rounded-md overflow-hidden ${hasError ? 'border-error/30 bg-error-subtle/40' : 'border-canvas-sunken bg-canvas'}`}>
       <button
         onClick={() => setExpanded(!expanded)}
         className="w-full flex items-center gap-2 px-2.5 py-1.5 hover:bg-canvas-warm/60 transition-colors text-left"
@@ -148,7 +148,7 @@ function ToolCallRow({ toolCall }) {
         )}
         {toolCall.result ? (
           hasError ? (
-            <span className="text-[10px] text-red-500">错误</span>
+            <span className="text-[10px] text-error">错误</span>
           ) : (
             <span className="text-[10px] text-success">✓</span>
           )
@@ -168,9 +168,9 @@ function ToolCallRow({ toolCall }) {
           {toolCall.result && (
             <div>
               <div className="text-[9px] uppercase tracking-wider text-ink-faint mb-1">
-                结果 {hasError && <span className="text-red-500">错误</span>}
+                结果 {hasError && <span className="text-error">错误</span>}
               </div>
-              <pre className={`text-[11px] rounded p-2 overflow-x-auto max-h-48 font-mono ${hasError ? 'bg-red-50 text-red-700' : 'bg-canvas-warm text-ink-muted'}`}>
+              <pre className={`text-[11px] rounded p-2 overflow-x-auto max-h-48 font-mono ${hasError ? 'bg-error-subtle text-error' : 'bg-canvas-warm text-ink-muted'}`}>
                 {typeof toolCall.result.content === 'string'
                   ? toolCall.result.content.slice(0, 4000)
                   : JSON.stringify(toolCall.result.content, null, 2)?.slice(0, 4000)}
@@ -279,7 +279,7 @@ function ToolCallsGroup({ toolCalls }) {
           ({summaryParts.join(', ')})
         </span>
         {errorCount > 0 && (
-          <span className="text-[10px] text-red-500 ml-auto">{errorCount} 错误</span>
+          <span className="text-[10px] text-error ml-auto">{errorCount} 错误</span>
         )}
       </button>
 

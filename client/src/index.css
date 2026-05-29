@@ -4,41 +4,50 @@
    Studio Glass — Apple iOS 26 / macOS Tahoe Liquid Glass
    ════════════════════════════════════════════════════════════════ */
 @theme {
-  /* ── Canvas (the colored substrate underneath all glass) ───── */
-  --color-canvas: #F2F4F8;
-  --color-canvas-warm: #ECEFF5;
-  --color-canvas-deep: #E4E8F0;
-  --color-canvas-sunken: #DADFE9;
+  /* ── Fonts — Claude Desktop feel (loaded in index.html) ────── */
+  /* UI chrome = clean grotesk; reading/message text = warm serif; code = mono.
+     --font-reading is overridable at runtime by the font picker (see store). */
+  --font-ui: 'DM Sans', -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+  --font-reading: 'Newsreader', Georgia, 'Times New Roman', serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, monospace;
 
-  /* ── Ink — Apple-grade neutrals (kept opaque for legibility) ── */
-  --color-ink: #0B0B0F;
-  --color-ink-soft: #2A2B33;
-  --color-ink-muted: #54565E;
-  --color-ink-faint: #8A8C93;
-  --color-ink-ghost: #C1C3CB;
+  /* ── Canvas — Claude Desktop warm ivory (default look) ─────── */
+  --color-canvas: #FAF9F5;
+  --color-canvas-warm: #F3F1E9;
+  --color-canvas-deep: #ECE8DD;
+  --color-canvas-sunken: #E4DFD2;
 
-  /* ── Accent — Apple system blue ───────────────────────────── */
-  --color-accent: #0A84FF;
-  --color-accent-hover: #006FE5;
-  --color-accent-subtle: #E6F0FF;
-  --color-accent-muted: #BFDBFE;
+  /* ── Ink — warm charcoal neutrals ──────────────────────────── */
+  --color-ink: #141413;
+  --color-ink-soft: #3D3A35;
+  --color-ink-muted: #6B6960;
+  --color-ink-faint: #9B988C;
+  --color-ink-ghost: #CBC5B8;
 
-  /* ── Semantic — Apple system palette ──────────────────────── */
-  --color-success: #30D158;
-  --color-error: #FF3B30;
-  --color-error-subtle: #FFE5E2;
-  --color-warning: #FF9F0A;
+  /* ── Accent — Claude clay/terracotta ──────────────────────── */
+  --color-accent: #D97757;
+  --color-accent-hover: #C15F3C;
+  --color-accent-subtle: rgba(217, 119, 87, 0.12);
+  --color-accent-muted: rgba(217, 119, 87, 0.28);
 
-  /* ── Glass surface ingredients (mixed in utility classes) ─── */
-  --glass-base-bg: rgba(255, 255, 255, 0.12);
-  --glass-thick-bg: rgba(255, 255, 255, 0.72);
-  --glass-thin-bg: rgba(255, 255, 255, 0.35);
-  --glass-bar-bg: rgba(255, 255, 255, 0.62);
+  /* ── Semantic — warm-tuned ────────────────────────────────── */
+  --color-success: #788C5D;
+  --color-error: #C0492F;
+  --color-error-subtle: #F7E2DB;
+  --color-warning: #C97B27;
+
+  /* ── Glass surface ingredients (warm whites) ──────────────── */
+  --glass-base-bg: rgba(250, 249, 245, 0.16);
+  --glass-thick-bg: rgba(250, 249, 245, 0.80);
+  --glass-thin-bg: rgba(250, 249, 245, 0.42);
+  --glass-bar-bg: rgba(250, 249, 245, 0.68);
   --glass-specular: rgba(255, 255, 255, 0.7);
-  --glass-shade: rgba(0, 0, 0, 0.04);
-  --glass-edge: rgba(255, 255, 255, 0.65);
-  --glass-edge-outer: rgba(0, 0, 0, 0.06);
-  --glass-shadow: 0 1px 1px rgba(0, 0, 0, 0.04), 0 14px 40px -16px rgba(20, 30, 60, 0.22);
+  --glass-shade: rgba(90, 70, 50, 0.04);
+  --glass-edge: rgba(217, 119, 87, 0.18);
+  --glass-edge-outer: rgba(90, 70, 50, 0.07);
+  --glass-shadow: 0 1px 1px rgba(90, 70, 50, 0.04), 0 14px 40px -16px rgba(120, 90, 60, 0.18);
+  --scrollbar-thumb: rgba(120, 100, 80, 0.20);
+  --scrollbar-thumb-hover: rgba(120, 100, 80, 0.34);
 
   /* ── Spacing ──────────────────────────────────────────────── */
   --spacing-sidebar: 268px;
@@ -59,36 +68,39 @@
  * if data-theme="auto" + system-dark. */
 :root[data-theme="dark"],
 :root[data-theme="auto"]:where([data-theme-system="dark"]) {
-  --color-canvas: #1C1E26;
-  --color-canvas-warm: #232530;
-  --color-canvas-deep: #2A2D38;
-  --color-canvas-sunken: #14161C;
+  /* Claude Desktop dark — warm charcoal + clay (mirrors claude-dark). */
+  --color-canvas: #1F1D1A;
+  --color-canvas-warm: #29251F;
+  --color-canvas-deep: #332E27;
+  --color-canvas-sunken: #161412;
 
-  --color-ink: #F5F5F7;
-  --color-ink-soft: #D8D9DE;
-  --color-ink-muted: #9A9CA3;
-  --color-ink-faint: #5E6068;
-  --color-ink-ghost: #3A3C44;
+  --color-ink: #F5F0E8;
+  --color-ink-soft: #DDD6CA;
+  --color-ink-muted: #A69E92;
+  --color-ink-faint: #756E64;
+  --color-ink-ghost: #4A453E;
 
-  --color-accent: #0A84FF;
-  --color-accent-hover: #2A95FF;
-  --color-accent-subtle: rgba(10, 132, 255, 0.18);
-  --color-accent-muted: rgba(10, 132, 255, 0.32);
+  --color-accent: #E08A6B;
+  --color-accent-hover: #ECA084;
+  --color-accent-subtle: rgba(224, 138, 107, 0.16);
+  --color-accent-muted: rgba(224, 138, 107, 0.32);
 
-  --color-success: #32D74B;
-  --color-error: #FF453A;
-  --color-error-subtle: rgba(255, 69, 58, 0.16);
-  --color-warning: #FF9F0A;
+  --color-success: #A7C080;
+  --color-error: #E07A5F;
+  --color-error-subtle: rgba(224, 122, 95, 0.18);
+  --color-warning: #E0A458;
 
-  --glass-base-bg: rgba(40, 42, 50, 0.20);
-  --glass-thick-bg: rgba(40, 42, 50, 0.88);
-  --glass-thin-bg: rgba(60, 62, 70, 0.55);
-  --glass-bar-bg: rgba(30, 32, 38, 0.82);
-  --glass-specular: rgba(255, 255, 255, 0.08);
+  --glass-base-bg: rgba(41, 37, 31, 0.22);
+  --glass-thick-bg: rgba(41, 37, 31, 0.88);
+  --glass-thin-bg: rgba(51, 46, 39, 0.56);
+  --glass-bar-bg: rgba(31, 29, 26, 0.82);
+  --glass-specular: rgba(255, 240, 220, 0.06);
   --glass-shade: rgba(0, 0, 0, 0.28);
-  --glass-edge: rgba(255, 255, 255, 0.10);
+  --glass-edge: rgba(224, 138, 107, 0.14);
   --glass-edge-outer: rgba(0, 0, 0, 0.5);
   --glass-shadow: 0 1px 1px rgba(0, 0, 0, 0.4), 0 14px 40px -16px rgba(0, 0, 0, 0.55);
+  --scrollbar-thumb: rgba(245, 240, 232, 0.14);
+  --scrollbar-thumb-hover: rgba(245, 240, 232, 0.26);
 }
 
 /* ════════════════════════════════════════════════════════════════
@@ -842,30 +854,26 @@
 html { -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; }
 
 body {
-  font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'SF Pro Display',
-               'Segoe UI', system-ui, sans-serif;
+  font-family: var(--font-ui);
   color: var(--color-ink);
   margin: 0;
   overflow: hidden;
   height: 100vh;
-  /* Light: subtle cool-warm wash. Kept faint so it doesn't overwhelm content
-     and so layers above don't need expensive blur to feel airy. */
+  /* Light: warm ivory canvas with faint clay/amber corner tints (Claude). */
   background-color: var(--color-canvas);
-  /* Faint corner tints. Kept smaller & dimmer so the un-tinted middle no longer
-     creates a "false ellipse" that reads as a popover behind the chat panel. */
   background-image:
-    radial-gradient(ellipse 45% 35% at 10% 6%,  rgba(135, 170, 255, 0.10), transparent 70%),
-    radial-gradient(ellipse 40% 32% at 92% 10%, rgba(255, 195, 145, 0.08), transparent 70%),
-    radial-gradient(ellipse 50% 40% at 78% 96%, rgba(190, 140, 255, 0.08), transparent 70%);
+    radial-gradient(ellipse 45% 35% at 10% 6%,  rgba(217, 119, 87, 0.06), transparent 70%),
+    radial-gradient(ellipse 40% 32% at 92% 10%, rgba(201, 123, 39, 0.05), transparent 70%),
+    radial-gradient(ellipse 50% 40% at 78% 96%, rgba(120, 140, 93, 0.05), transparent 70%);
   background-attachment: fixed;
 }
 
 :root[data-theme="dark"] body,
 :root[data-theme="auto"]:where([data-theme-system="dark"]) body {
   background-image:
-    radial-gradient(ellipse 45% 35% at 10% 6%,  rgba(60, 110, 220, 0.14), transparent 70%),
-    radial-gradient(ellipse 40% 32% at 92% 10%, rgba(180, 80, 220, 0.10), transparent 70%),
-    radial-gradient(ellipse 50% 40% at 78% 96%, rgba(40, 180, 200, 0.10), transparent 70%);
+    radial-gradient(ellipse 45% 35% at 10% 6%,  rgba(224, 138, 107, 0.10), transparent 70%),
+    radial-gradient(ellipse 40% 32% at 92% 10%, rgba(201, 123, 39, 0.08), transparent 70%),
+    radial-gradient(ellipse 50% 40% at 78% 96%, rgba(120, 140, 93, 0.07), transparent 70%);
 }
 
 #root { height: 100vh; }
@@ -984,16 +992,22 @@ body {
 
 /* ── Typography helpers ──────────────────────────────────────── */
 .font-display {
-  font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', system-ui, sans-serif;
-  letter-spacing: -0.02em;
+  font-family: var(--font-ui);
+  letter-spacing: -0.015em;
 }
 
 .font-body {
-  font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', system-ui, sans-serif;
+  font-family: var(--font-ui);
+}
+
+/* Reading font — Claude's message prose. Honors the runtime font picker via
+   --font-reading (set on :root by the store). Default = Newsreader serif. */
+.font-reading {
+  font-family: var(--font-reading);
 }
 
 .font-mono {
-  font-family: ui-monospace, 'SF Mono', 'JetBrains Mono', Menlo, Consolas, monospace;
+  font-family: var(--font-mono);
   letter-spacing: -0.01em;
 }
 

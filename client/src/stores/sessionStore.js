@@ -22,8 +22,8 @@ export const PERMISSION_MODES = ['default', 'acceptEdits', 'plan', 'bypassPermis
 // bg/bg2/fg/accent are preview swatch colors for the theme popover cards.
 export const THEME_FAMILIES = [
   { id: 'default', name: '默认',
-    light: { id: '', bg: '#ECEFF5', bg2: '#DADFE9', fg: '#0B0B0F', accent: '#0A84FF' },
-    dark:  { id: '', bg: '#232530', bg2: '#14161C', fg: '#F5F5F7', accent: '#0A84FF' } },
+    light: { id: '', bg: '#FAF9F5', bg2: '#ECE8DD', fg: '#141413', accent: '#D97757' },
+    dark:  { id: '', bg: '#1F1D1A', bg2: '#161412', fg: '#F5F0E8', accent: '#E08A6B' } },
   { id: 'claude', name: 'Claude',
     light: { id: 'claude-warm', bg: '#F2EDE3', bg2: '#E2DBCC', fg: '#1A1A1A', accent: '#D97757' },
     dark:  { id: 'claude-dark', bg: '#29251F', bg2: '#161412', fg: '#F5F0E8', accent: '#D97757' } },
@@ -93,6 +93,27 @@ function initThemeFamily() {
 function initThemeTone() {
   try { return localStorage.getItem('cgui-theme') || 'auto'; }
   catch { return 'auto'; }
+}
+
+// ── Reading font (Claude message prose) ──────────────────────────
+// Like Claude Desktop's font setting. `css` is the font stack written to the
+// --font-reading custom property; system serifs (Times/Georgia) need no load,
+// 'Newsreader'/'JetBrains Mono'/'DM Sans' are already loaded in index.html.
+export const FONT_OPTIONS = [
+  { id: 'newsreader', name: '默认衬线 (Newsreader)', css: "'Newsreader', Georgia, serif" },
+  { id: 'times',      name: 'Times New Roman',       css: "'Times New Roman', Times, serif" },
+  { id: 'georgia',    name: 'Georgia',               css: "Georgia, 'Times New Roman', serif" },
+  { id: 'sans',       name: '无衬线 (DM Sans)',      css: "'DM Sans', -apple-system, system-ui, sans-serif" },
+  { id: 'mono',       name: '等宽 (JetBrains Mono)', css: "'JetBrains Mono', ui-monospace, monospace" },
+];
+function initReadingFont() {
+  try { return localStorage.getItem('cgui-reading-font') || 'newsreader'; }
+  catch { return 'newsreader'; }
+}
+// Apply a reading-font id to the <html> --font-reading custom property.
+export function applyReadingFont(id) {
+  const opt = FONT_OPTIONS.find((f) => f.id === id) || FONT_OPTIONS[0];
+  try { document.documentElement.style.setProperty('--font-reading', opt.css); } catch {}
 }
 
 // Monotonic counter for fresh stable pane identity tokens (see paneIds).
@@ -235,6 +256,9 @@ export const useStore = create((set, get) => ({
   themeFamily: initThemeFamily(),
   themeTone: initThemeTone(),
   cguiTheme: resolveTheme(initThemeFamily(), initThemeTone()).cguiTheme,
+
+  // Reading font for Claude's message prose (see FONT_OPTIONS).
+  readingFont: initReadingFont(),
 
   loading: false,
   error: null,
@@ -490,6 +514,12 @@ export const useStore = create((set, get) => ({
       if (cguiTheme) root.setAttribute('data-cgui-theme', cguiTheme);
       else root.removeAttribute('data-cgui-theme');
     } catch {}
+  },
+  // Reading font: persist + apply the --font-reading custom property.
+  setReadingFont: (id) => {
+    set({ readingFont: id });
+    try { localStorage.setItem('cgui-reading-font', id); } catch {}
+    applyReadingFont(id);
   },
 
   whitelistPermissionTool: (sessionId, toolName) => {

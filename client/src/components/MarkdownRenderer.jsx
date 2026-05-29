@@ -12,7 +12,7 @@ function CopyButton({ text }) {
         setCopied(true);
         setTimeout(() => setCopied(false), 1500);
       }}
-      className="flex items-center gap-1 text-[10px] text-ink-faint hover:text-ink-muted transition-colors"
+      className="flex items-center gap-1 text-[10px] text-[#9a8e78] hover:text-[#cabba0] transition-colors"
     >
       {copied ? <Check size={10} /> : <Copy size={10} />}
       {copied ? '已复制' : '复制'}
@@ -62,13 +62,13 @@ const markdownComponents = {
     if (isBlock) {
       return (
         <div className="relative group my-3">
-          <div className="flex items-center justify-between px-3.5 py-1.5 bg-[#2d2b55] rounded-t-lg border border-[#3d3a6a] border-b-0">
-            <span className="text-[10px] font-mono text-[#a6accd] uppercase tracking-wider">
+          <div className="flex items-center justify-between px-3.5 py-1.5 bg-[#2b2722] rounded-t-lg border border-[#3a342b] border-b-0">
+            <span className="text-[10px] font-mono text-[#b5a48c] uppercase tracking-wider">
               {lang || 'code'}
             </span>
             <CopyButton text={codeStr} />
           </div>
-          <pre className="bg-[#1e1e2e] border border-[#3d3a6a] border-t-0 rounded-b-lg p-4 overflow-x-auto text-[13px] leading-relaxed font-mono text-[#cdd6f4]">
+          <pre className="bg-[#211e19] border border-[#3a342b] border-t-0 rounded-b-lg p-4 overflow-x-auto text-[13px] leading-relaxed font-mono text-[#e8e2d6]">
             <code>{codeStr}</code>
           </pre>
         </div>
@@ -77,7 +77,7 @@ const markdownComponents = {
 
     return (
       <code
-        className="bg-canvas-warm border border-canvas-deep px-1.5 py-0.5 rounded text-[0.88em] font-mono text-[#c2185b]"
+        className="bg-canvas-warm border border-canvas-deep px-1.5 py-0.5 rounded text-[0.88em] font-mono text-[#a65a3a]"
         {...props}
       >
         {children}
@@ -169,7 +169,7 @@ const markdownComponents = {
 
 export function MarkdownRenderer({ content }) {
   return (
-    <div className="markdown-content text-[14px] font-body">
+    <div className="markdown-content text-[15px] font-reading leading-relaxed">
       {/* remarkGfm: GitHub-flavored markdown — tables, strikethrough, task
           lists, autolinks. Without it Claude's `| col | col |` tables come
           out as a single run-on text line (which is what was happening). */}
