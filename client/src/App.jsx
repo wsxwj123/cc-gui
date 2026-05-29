@@ -3151,7 +3151,13 @@ export default function App() {
   // .zoom so even text-[12px]-style hardcoded sizes scale (not just rem).
   const uiFontScale = useStore((s) => s.uiFontScale);
   useEffect(() => {
-    try { document.documentElement.style.zoom = String(uiFontScale || 1); } catch {}
+    try {
+      const z = String(uiFontScale || 1);
+      document.documentElement.style.zoom = z;
+      // Root container uses calc(100dvh / var(--ui-zoom)) to stay exactly one
+      // physical viewport tall regardless of zoom (keeps the composer visible).
+      document.documentElement.style.setProperty('--ui-zoom', z);
+    } catch {}
   }, [uiFontScale]);
 
   // Apply persisted color theme on mount. Maps `cguiTheme` store value to
@@ -3240,7 +3246,7 @@ export default function App() {
   }, []);
 
   return (
-    <div className="h-screen flex flex-col">
+    <div className="flex flex-col overflow-hidden" style={{ width: 'calc(100vw / var(--ui-zoom, 1))', height: 'calc(100dvh / var(--ui-zoom, 1))' }}>
       {/* Top bar — glass */}
       {/* Top bar uses min-height instead of fixed h-12 so when font scales up
           and the right cluster wraps to a second line, the bar grows with the

@@ -495,7 +495,13 @@ export const useStore = create((set, get) => ({
     const n = Math.max(0.6, Math.min(2, Number(v) || 1));
     set({ uiFontScale: n });
     try { localStorage.setItem('cgui-ui-font-scale', String(n)); } catch {}
-    try { document.documentElement.style.zoom = String(n); } catch {}
+    try {
+      document.documentElement.style.zoom = String(n);
+      // Mirror into a CSS var so the root container can size itself as
+      // calc(100dvh / var(--ui-zoom)) — otherwise zoom>1 makes the page taller
+      // than the viewport and the bottom composer scrolls off-screen.
+      document.documentElement.style.setProperty('--ui-zoom', String(n));
+    } catch {}
   },
   // Apply a (family, tone) pair: persists both, derives the variant id, and
   // syncs data-theme + data-cgui-theme on <html>. data-theme-system is handled
