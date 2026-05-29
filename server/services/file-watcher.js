@@ -13,12 +13,23 @@ export function setupFileWatcher(onChange) {
     persistent: true,
     ignoreInitial: true,
     depth: 3,
+    // chokidar v4 dropped fsevents and watches via fs.watch, which opens one fd
+    // per directory. A large ~/.claude (thousands of session jsonls) blows past
+    // the OS file-descriptor limit → EMFILE, which kills live updates. Polling
+    // is stat-based and opens NO fds, so it's immune to EMFILE; a longer
+    // interval keeps CPU modest on big trees.
+    usePolling: true,
+    interval: 2500,
+    binaryInterval: 5000,
     ignored: [
       '**/telemetry/**',
       '**/debug/**',
       '**/paste-cache/**',
       '**/shell-snapshots/**',
       '**/media/**',
+      '**/todos/**',
+      '**/statsig/**',
+      '**/.git/**',
     ],
   });
 
