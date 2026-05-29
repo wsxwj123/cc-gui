@@ -30,9 +30,32 @@ import { homedir } from 'os';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PORT = process.env.PORT || 6677;
+// Bind to loopback by default so the GUI is NEVER reachable from the network.
+// This server has no auth and can read/write $HOME + spawn `claude`; exposing it
+// on 0.0.0.0 would hand any machine on the LAN full shell access. Advanced users
+// who knowingly want LAN access can set HOST=0.0.0.0 (do so behind a firewall).
+const HOST = process.env.HOST || '127.0.0.1';
 
 const app = express();
-app.use(cors());
+// Same-origin only: in prod the SPA is served from this same port; in dev Vite
+// proxies /api + /ws server-side. So the only legitimate browser origins are
+// localhost/127.0.0.1. Reject everything else to blunt drive-by cross-origin
+// requests from arbitrary web pages the user may have open.
+app.use(cors({
+  origin: (origin, cb) => {
+    // Non-browser clients (curl, same-origin fetch) send no Origin header.
+    if (!origin) return cb(null, true);
+    try {
+      const { hostname } = new URL(origin);
+      if (hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1') {
+        return cb(null, true);
+      }
+    } catch {}
+    const err = new Error('Cross-origin request blocked by Claude GUI');
+    err.status = 403; // surfaced as a clean 403 by the error handler below
+    return cb(err);
+  },
+}));
 // Bumped from default 100kb to 25mb so dragged-in screenshots fit in the JSON body.
 app.use(express.json({ limit: '25mb' }));
 
@@ -186,6 +209,15 @@ app.get('/api/slash-commands', async (req, res) => {
   }
 });
 
+// CORS / error handler: a blocked cross-origin request reaches here via the
+// cors callback's Error. Return a clean 403 (with JSON) instead of letting it
+// fall through to Express's default 500 HTML page.
+app.use('/api', (err, req, res, next) => {
+  if (res.headersSent) return next(err);
+  const status = err?.status || 500;
+  res.status(status).json({ error: err?.message || 'internal error' });
+});
+
 // Serve static frontend in production.
 // IMPORTANT: index.html must NEVER be cached — its inline <script src> points
 // to a content-hashed bundle (e.g. index-G15SFXlT.js). If the browser caches
@@ -287,10 +319,11 @@ process.on('unhandledRejection', (reason) => {
   console.error('[unhandledRejection]', reason);
 });
 
-server.listen(PORT, () => {
+server.listen(PORT, HOST, () => {
   console.log('═'.repeat(60));
   console.log(`  Claude GUI server READY   http://localhost:${PORT}`);
   console.log(`  WebSocket                  ws://localhost:${PORT}/ws`);
+  console.log(`  Bound to                   ${HOST}${HOST === '127.0.0.1' ? ' (loopback only)' : ' (⚠ network-exposed, no auth!)'}`);
   console.log(`  Started at                 ${new Date().toLocaleString()}`);
   console.log('═'.repeat(60));
 }).on('error', (err) => {

@@ -265,12 +265,14 @@ export function PermissionPrompt({ sessionId = null }) {
   // doesn't leave it invisible (the WS broadcast already fired before we
   // attached).
   useEffect(() => {
-    fetch('/api/permissions/pending')
-      .then((r) => r.json())
+    const ctrl = new AbortController();
+    fetch('/api/permissions/pending', { signal: ctrl.signal })
+      .then((r) => (r.ok ? r.json() : { items: [] }))
       .then((d) => {
-        useStore.getState().setPendingPermissions(d.items || []);
+        useStore.getState().setPendingPermissions(d?.items || []);
       })
       .catch(() => {});
+    return () => ctrl.abort();
   }, []);
 
   const mine = all.filter((p) => !selectedSid || p.sessionId === selectedSid);

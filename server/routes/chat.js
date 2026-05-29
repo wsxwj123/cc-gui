@@ -294,6 +294,12 @@ router.get('/chat/:pid/stream', (req, res) => {
   slot.attached = true;
   const { proc } = slot;
 
+  // Remove the detached re-buffer listeners left by a previous disconnect.
+  // Without this, every disconnect→reattach cycle leaks a stdout/stderr pair
+  // (they're inert while attached but accumulate → MaxListenersExceededWarning).
+  if (slot.detachedStdout) { try { proc.stdout.removeListener('data', slot.detachedStdout); } catch {} slot.detachedStdout = null; }
+  if (slot.detachedStderr) { try { proc.stderr.removeListener('data', slot.detachedStderr); } catch {} slot.detachedStderr = null; }
+
   res.writeHead(200, {
     'Content-Type': 'text/event-stream',
     'Cache-Control': 'no-cache',
@@ -403,18 +409,22 @@ router.get('/chat/:pid/stream', (req, res) => {
     // Re-buffer subsequent stdout into earlyLines so a future /stream
     // re-attach can replay anything that arrived while detached.
     slot.attached = false;
-    proc.stdout.on('data', (chunk) => {
+    // Name these listeners and stash them on the slot so the next /stream
+    // re-attach can remove them (see top of GET /stream) — otherwise they leak.
+    slot.detachedStdout = (chunk) => {
       if (slot.attached) return;
       slot.earlyTail += chunk.toString();
       const lines = slot.earlyTail.split('\n');
       slot.earlyTail = lines.pop() || '';
       for (const l of lines) if (l.trim()) slot.earlyLines.push(l);
-    });
-    proc.stderr.on('data', (chunk) => {
+    };
+    slot.detachedStderr = (chunk) => {
       if (slot.attached) return;
       const t = chunk.toString().trim();
       if (t) slot.earlyErrors.push(t);
-    });
+    };
+    proc.stdout.on('data', slot.detachedStdout);
+    proc.stderr.on('data', slot.detachedStderr);
   });
 });
 

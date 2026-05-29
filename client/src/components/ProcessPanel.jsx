@@ -16,7 +16,7 @@ export function ProcessPanel() {
         alert('停止失败：' + (e.error || r.status));
       }
       await new Promise((r) => setTimeout(r, 500));
-      fetchProcesses();
+      await fetchProcesses();
     } catch (err) {
       alert('停止失败：' + err.message);
     }

@@ -5,7 +5,10 @@ export function CodeBlock({ code, language }) {
   const [copied, setCopied] = useState(false);
 
   const handleCopy = () => {
-    navigator.clipboard.writeText(code);
+    // clipboard API rejects on non-secure contexts (plain http over LAN) and
+    // when permission is denied — swallow so it doesn't surface as an unhandled
+    // rejection. Still flip to "copied" optimistically.
+    Promise.resolve(navigator.clipboard?.writeText(code)).catch(() => {});
     setCopied(true);
     setTimeout(() => setCopied(false), 1500);
   };

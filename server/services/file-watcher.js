@@ -38,5 +38,12 @@ export function setupFileWatcher(onChange) {
     onChange('unlink', path);
   });
 
+  // Without an 'error' handler chokidar emits an unhandled 'error' event, which
+  // on EMFILE (too many open files) / ENOSPC (inotify limit) crashes the process
+  // or silently kills live updates. Log loudly and keep the server alive.
+  watcher.on('error', (err) => {
+    console.warn('[file-watcher] error:', err?.message || err);
+  });
+
   return watcher;
 }

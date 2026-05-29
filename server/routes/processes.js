@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { readdir, readFile } from 'fs/promises';
 import { join } from 'path';
 import { homedir } from 'os';
-import { execSync, execFileSync } from 'child_process';
+import { execFileSync } from 'child_process';
 import { getActiveChatProcesses } from './chat.js';
 
 const router = Router();
@@ -83,11 +83,14 @@ router.get('/processes', async (req, res) => {
       } catch {}
     }
 
-    // Also find claude processes via ps
+    // Also find claude processes via ps — no shell, filter in JS to avoid a
+    // shell pipe (`ps aux | grep`) spawning /bin/sh on every poll.
     let claudeProcesses = [];
     try {
-      const psOutput = execSync("ps aux | grep -E 'claude' | grep -v grep | grep -v 'claude-gui'", { encoding: 'utf-8' });
-      claudeProcesses = psOutput.trim().split('\n').filter(Boolean).map((line) => {
+      const psOutput = execFileSync('ps', ['aux'], { encoding: 'utf-8', maxBuffer: 8 * 1024 * 1024 });
+      claudeProcesses = psOutput.trim().split('\n').filter((line) => {
+        return /\bclaude\b/.test(line) && !/claude-gui/.test(line) && !/\bgrep\b/.test(line);
+      }).map((line) => {
         const parts = line.trim().split(/\s+/);
         return {
           pid: parseInt(parts[1]),

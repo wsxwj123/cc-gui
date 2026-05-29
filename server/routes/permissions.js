@@ -10,6 +10,21 @@ const router = Router();
  */
 const pending = new Map();
 
+// Safety-net sweep: a held request whose socket never fires 'close' (CLI wedged
+// without exiting) would otherwise pin its entry — and its held HTTP socket —
+// forever. Drop anything older than 15 min. Normal requests resolve in seconds.
+const PENDING_TTL_MS = 15 * 60 * 1000;
+setInterval(() => {
+  const now = Date.now();
+  for (const [id, slot] of pending.entries()) {
+    if (now - slot.request.createdAt > PENDING_TTL_MS) {
+      pending.delete(id);
+      try { slot.res.json({ decision: 'deny', reason: '权限请求超时（15 分钟未响应）' }); } catch {}
+      broadcast({ type: 'permission:resolved', id, decision: 'timeout' });
+    }
+  }
+}, 60 * 1000).unref();
+
 /**
  * POST /api/permissions/request   (called by the hook bridge)
  * Body: { toolName, toolInput, sessionId, cwd, hookEvent }

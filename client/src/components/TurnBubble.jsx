@@ -355,8 +355,10 @@ function UsageDisplay({ usage, model }) {
 export function TurnBubble({ turn }) {
   const [showThinking, setShowThinking] = useState(false);
 
-  const fullText = turn.text.join('\n');
-  const fullThinking = turn.thinking.join('\n');
+  // Historical turns loaded from .jsonl may have these fields absent or as a
+  // bare string instead of an array — guard so .join() never throws.
+  const fullText = Array.isArray(turn.text) ? turn.text.join('\n') : (turn.text || '');
+  const fullThinking = Array.isArray(turn.thinking) ? turn.thinking.join('\n') : (turn.thinking || '');
 
   // NEW canonical render path: if `turn.blocks` is present, render content
   // strictly in the order Claude emitted it (text → tool → text → tool → write).
@@ -366,10 +368,11 @@ export function TurnBubble({ turn }) {
 
   // Legacy bucket path (kept for historical messages loaded from .jsonl which
   // don't have a blocks array — they get the old grouped-by-type layout).
-  const todoCalls = turn.toolCalls.filter((tc) => tc.name === 'TodoWrite');
+  const toolCalls = Array.isArray(turn.toolCalls) ? turn.toolCalls : [];
+  const todoCalls = toolCalls.filter((tc) => tc.name === 'TodoWrite');
   const latestTodo = todoCalls.length > 0 ? todoCalls[todoCalls.length - 1] : null;
-  const inlineCalls = turn.toolCalls.filter((tc) => INLINE_TOOL_NAMES.has(tc.name));
-  const groupedCalls = turn.toolCalls.filter(
+  const inlineCalls = toolCalls.filter((tc) => INLINE_TOOL_NAMES.has(tc.name));
+  const groupedCalls = toolCalls.filter(
     (tc) => tc.name !== 'TodoWrite' && !INLINE_TOOL_NAMES.has(tc.name)
   );
   const hasInlineCalls = inlineCalls.length > 0;

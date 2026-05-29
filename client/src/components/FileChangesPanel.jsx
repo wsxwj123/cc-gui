@@ -129,7 +129,10 @@ export function FileChangesPanel({ sessionId, projectHash }) {
       const res = await fetch(
         `/api/sessions/${sessionId}/file-changes?projectHash=${encodeURIComponent(projectHash)}`
       );
-      setChanges(await res.json());
+      // Server may return a 5xx HTML error page; .json() would throw and a
+      // non-array body would crash the .map() below. Coerce to [] defensively.
+      const data = res.ok ? await res.json().catch(() => []) : [];
+      setChanges(Array.isArray(data) ? data : []);
     } catch (err) {
       console.error('Failed to fetch file changes:', err);
     }

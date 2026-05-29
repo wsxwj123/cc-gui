@@ -327,7 +327,10 @@ export function ChatInput({ onSend, onStop, onAccelerate, disabled, isStreaming,
     const el = textareaRef.current;
     if (!el) return;
     el.style.height = 'auto';
-    el.style.height = (text ? Math.min(el.scrollHeight, 200) : 24) + 'px';
+    // Use el.value (not React `text`) so mid-IME-composition content — which the
+    // DOM holds before onChange commits it to state — still sizes correctly and
+    // doesn't snap back to 24px under the caret.
+    el.style.height = (el.value ? Math.min(el.scrollHeight, 200) : 24) + 'px';
   }, [text]);
 
   // Case-insensitive prefix match; rank exact-case matches first.
@@ -379,6 +382,10 @@ export function ChatInput({ onSend, onStop, onAccelerate, disabled, isStreaming,
   };
 
   const handleKeyDown = (e) => {
+    // While the IME is composing (typing Chinese/Japanese/Korean via candidates),
+    // Enter commits the candidate — it must NOT send the message or pick a slash
+    // command, and arrows navigate the candidate list. Let the IME own all keys.
+    if (e.nativeEvent?.isComposing || e.key === 'Process' || e.keyCode === 229) return;
     if (showCommands) {
       if (e.key === 'ArrowDown') {
         e.preventDefault();

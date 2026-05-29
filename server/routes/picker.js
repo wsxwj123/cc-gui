@@ -37,8 +37,13 @@ router.post('/pick-directory', async (req, res) => {
     const startDirRaw = (req.body?.startDir && typeof req.body.startDir === 'string')
       ? req.body.startDir
       : `${homedir()}/Desktop`;
-    const safeStart = startDirRaw.replace(/"/g, '\\"');
-    const safePrompt = promptText.replace(/"/g, '\\"');
+    // Proper AppleScript string escaping: backslash FIRST (else we'd double-
+    // escape the quotes we add next), then double-quote, then drop newlines/
+    // control chars so a crafted prompt can't break out of the quoted literal
+    // and append `& (do shell script ...)`.
+    const escAS = (s) => s.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/[\r\n]+/g, ' ');
+    const safeStart = escAS(startDirRaw);
+    const safePrompt = escAS(promptText);
     const { stdout } = await execFileP(
       'osascript',
       ['-e', `POSIX path of (choose folder with prompt "${safePrompt}" default location POSIX file "${safeStart}")`],

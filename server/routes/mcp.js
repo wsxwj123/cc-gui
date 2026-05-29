@@ -2,16 +2,22 @@ import { Router } from 'express';
 import { readFile, readdir, stat, writeFile, mkdir } from 'fs/promises';
 import { join } from 'path';
 import { homedir } from 'os';
-import { execFileSync } from 'child_process';
+import { execFile } from 'child_process';
+import { promisify } from 'util';
 
-// All `claude ...` invocations go through execFileSync with an args array — no shell, no injection.
-function runClaude(args, { timeout = 10000 } = {}) {
-  return execFileSync('claude', args, {
+const execFileP = promisify(execFile);
+
+// All `claude ...` invocations go through execFile with an args array — no shell, no injection.
+// Async (not execFileSync) so a slow CLI cold start doesn't freeze the whole event loop —
+// and with it every other client's live SSE stream — for up to `timeout` ms.
+async function runClaude(args, { timeout = 10000 } = {}) {
+  const { stdout } = await execFileP('claude', args, {
     encoding: 'utf-8',
     timeout,
     env: { ...process.env },
-    stdio: ['ignore', 'pipe', 'pipe'],
+    maxBuffer: 8 * 1024 * 1024,
   });
+  return stdout;
 }
 
 const NAME_RE = /^[A-Za-z0-9_.:@/-]{1,128}$/;
@@ -79,7 +85,7 @@ router.get('/mcp', async (req, res) => {
 
     // 1. MCP servers from `claude mcp list` (the authoritative source)
     try {
-      const output = runClaude(['mcp', 'list']);
+      const output = await runClaude(['mcp', 'list']);
       result.mcpServers = parseMcpList(output);
     } catch (err) {
       // Fallback: try reading from settings.json
@@ -133,7 +139,7 @@ router.get('/mcp', async (req, res) => {
     // 3. Installed plugins (also parse `claude plugin list` for enabled state)
     let pluginEnabled = {};
     try {
-      const out = runClaude(['plugin', 'list'], { timeout: 8000 });
+      const out = await runClaude(['plugin', 'list'], { timeout: 8000 });
       // Format: blocks separated by blank lines, each containing
       //   ❯ <name>@<marketplace>
       //   ...
@@ -229,10 +235,10 @@ async function writeDisabled(data) {
   await writeFile(DISABLED_FILE, JSON.stringify(data, null, 2) + '\n');
 }
 
-function getServerDetails(name) {
+async function getServerDetails(name) {
   try {
     assertSafeName(name);
-    return runClaude(['mcp', 'get', name]);
+    return await runClaude(['mcp', 'get', name]);
   } catch {
     return null;
   }
@@ -252,7 +258,7 @@ router.get('/mcp/:name/ping', async (req, res) => {
     const start = Date.now();
     let output, status = 'ok', detail = '';
     try {
-      output = runClaude(['mcp', 'get', name]);
+      output = await runClaude(['mcp', 'get', name]);
     } catch (err) {
       output = err.stderr?.toString() || err.message;
       status = 'error';
@@ -324,7 +330,7 @@ router.put('/mcp/:name/enable', async (req, res) => {
       args.push('--', String(config.command), ...((config.args || []).map(String)));
     }
 
-    runClaude(args, { timeout: 15000 });
+    await runClaude(args, { timeout: 15000 });
 
     delete disabled[name];
     await writeDisabled(disabled);
@@ -340,7 +346,7 @@ router.put('/mcp/:name/disable', async (req, res) => {
     const { name } = req.params;
     assertSafeName(name);
 
-    const details = getServerDetails(name);
+    const details = await getServerDetails(name);
     if (!details) return res.status(404).json({ error: 'Server not found' });
 
     const config = { name };
@@ -358,7 +364,7 @@ router.put('/mcp/:name/disable', async (req, res) => {
     disabled[name] = config;
     await writeDisabled(disabled);
 
-    runClaude(['mcp', 'remove', name]);
+    await runClaude(['mcp', 'remove', name]);
     invalidateMcpCache();
     res.json({ ok: true, name, enabled: false });
   } catch (err) {
@@ -372,7 +378,7 @@ router.put('/plugins/:name/enable', async (req, res) => {
   try {
     const { name } = req.params;
     if (!/^[A-Za-z0-9._@\-/]{1,100}$/.test(name)) throw new Error('invalid plugin name');
-    runClaude(['plugin', 'enable', name], { timeout: 15000 });
+    await runClaude(['plugin', 'enable', name], { timeout: 15000 });
     invalidateMcpCache();
     res.json({ ok: true, name, enabled: true });
   } catch (err) {
@@ -384,7 +390,7 @@ router.put('/plugins/:name/disable', async (req, res) => {
   try {
     const { name } = req.params;
     if (!/^[A-Za-z0-9._@\-/]{1,100}$/.test(name)) throw new Error('invalid plugin name');
-    runClaude(['plugin', 'disable', name], { timeout: 15000 });
+    await runClaude(['plugin', 'disable', name], { timeout: 15000 });
     invalidateMcpCache();
     res.json({ ok: true, name, enabled: false });
   } catch (err) {

@@ -33,7 +33,13 @@ export function SettingsPanel() {
   const save = async (next) => {
     setSaving(true); setError(null);
     try {
-      const body = next !== undefined ? next : JSON.parse(rawJson);
+      let body;
+      if (next !== undefined) {
+        body = next;
+      } else {
+        try { body = JSON.parse(rawJson); }
+        catch { throw new Error('JSON 格式错误，请检查后再保存'); }
+      }
       const res = await fetch('/api/settings', {
         method: 'PUT', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),

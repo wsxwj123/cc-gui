@@ -141,16 +141,22 @@ const markdownComponents = {
   ),
 
   // ── Links ─────────────────────────────────────────────────────
-  a: ({ href, children }) => (
-    <a
-      href={href}
-      target="_blank"
-      rel="noopener noreferrer"
-      className="text-accent hover:text-accent-hover underline underline-offset-2 decoration-accent-muted hover:decoration-accent transition-colors"
-    >
-      {children}
-    </a>
-  ),
+  // Only allow http/https/mailto hrefs. Claude's markdown output is trusted-ish,
+  // but a `javascript:`/`data:` URL in a link would execute on click — neutralize
+  // it by dropping the href so the text still renders inert.
+  a: ({ href, children }) => {
+    const safe = typeof href === 'string' && /^(https?:|mailto:)/i.test(href.trim());
+    return (
+      <a
+        href={safe ? href : undefined}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="text-accent hover:text-accent-hover underline underline-offset-2 decoration-accent-muted hover:decoration-accent transition-colors"
+      >
+        {children}
+      </a>
+    );
+  },
 
   // ── Strong / Em ───────────────────────────────────────────────
   strong: ({ children }) => (

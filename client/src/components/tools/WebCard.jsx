@@ -28,16 +28,16 @@ export function WebCard({ toolCall }) {
         <span className="text-xs font-mono text-sky-900 shrink-0">{name}</span>
         <span className="text-[11px] text-ink truncate flex-1" title={queryOrUrl}>{queryOrUrl}</span>
         {isFetch && queryOrUrl && (
-          <a
-            href={queryOrUrl}
-            target="_blank"
-            rel="noopener noreferrer"
-            onClick={(e) => e.stopPropagation()}
-            className="text-sky-600 hover:text-sky-800 shrink-0"
+          // A <span>, not <a>: nesting an anchor inside this <button> is invalid
+          // HTML (browsers hoist it unpredictably). Open via window.open instead.
+          <span
+            role="link"
+            onClick={(e) => { e.stopPropagation(); window.open(queryOrUrl, '_blank', 'noopener,noreferrer'); }}
+            className="text-sky-600 hover:text-sky-800 shrink-0 cursor-pointer"
             title="在浏览器打开"
           >
             <ExternalLink size={11} />
-          </a>
+          </span>
         )}
         {!result && <Loader2 size={11} className="text-sky-500 animate-spin shrink-0" />}
         {result && (isError

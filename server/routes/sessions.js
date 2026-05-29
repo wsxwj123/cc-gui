@@ -80,6 +80,9 @@ router.get('/sessions/:sessionId/messages', async (req, res) => {
 router.get('/recent-session', async (req, res) => {
   try {
     const { projectHash } = req.query;
+    if (projectHash && !safeId(projectHash)) {
+      return res.status(400).json({ error: 'invalid projectHash' });
+    }
     const projectsDir = join(homedir(), '.claude', 'projects');
     const dirs = projectHash
       ? [projectHash]
@@ -127,6 +130,9 @@ router.post('/sessions/:sessionId/trim', async (req, res) => {
     const { projectHash, uuid, fromTimestamp } = req.body || {};
     if (!projectHash || (!uuid && !fromTimestamp)) {
       return res.status(400).json({ error: 'projectHash + (uuid or fromTimestamp) required' });
+    }
+    if (!safeId(projectHash) || !safeId(req.params.sessionId)) {
+      return res.status(400).json({ error: 'invalid projectHash or sessionId' });
     }
     const file = join(homedir(), '.claude', 'projects', projectHash, `${req.params.sessionId}.jsonl`);
     let raw;
@@ -250,6 +256,9 @@ router.delete('/sessions/:sessionId', async (req, res) => {
   try {
     const { projectHash } = req.query;
     if (!projectHash) return res.status(400).json({ error: 'projectHash required' });
+    if (!safeId(projectHash) || !safeId(req.params.sessionId)) {
+      return res.status(400).json({ error: 'invalid projectHash or sessionId' });
+    }
     const file = join(homedir(), '.claude', 'projects', projectHash, `${req.params.sessionId}.jsonl`);
     const { unlink } = await import('fs/promises');
     let deletedJsonl = false;
@@ -281,6 +290,9 @@ router.post('/sessions/:sessionId/archive', async (req, res) => {
   try {
     const { projectHash, archived } = req.body || {};
     if (!projectHash) return res.status(400).json({ error: 'projectHash required' });
+    if (!safeId(projectHash) || !safeId(req.params.sessionId)) {
+      return res.status(400).json({ error: 'invalid projectHash or sessionId' });
+    }
     const projectDir = join(homedir(), '.claude', 'projects', projectHash);
     const jsonl = join(projectDir, `${req.params.sessionId}.jsonl`);
     const marker = `${jsonl}.archived`;

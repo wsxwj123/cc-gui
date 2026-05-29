@@ -131,7 +131,7 @@ export function UsagePanel() {
     );
   }
 
-  const maxDayTokens = Math.max(...stats.byDay.map((d) => d.input + d.output), 1);
+  const maxDayTokens = stats.byDay.reduce((m, d) => Math.max(m, d.input + d.output), 1);
 
   return (
     <div className="px-4 py-4 space-y-5 overflow-y-auto h-full">
