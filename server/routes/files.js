@@ -1,12 +1,23 @@
 import { Router } from 'express';
 import { readdir, stat, readFile, realpath } from 'fs/promises';
-import { join, resolve, relative } from 'path';
-import { homedir } from 'os';
+import { createReadStream } from 'fs';
+import { join, resolve, relative, extname } from 'path';
+import { homedir, platform } from 'os';
+import { execFile } from 'child_process';
 
 const router = Router();
 
 const HOME = homedir();
 const MAX_PREVIEW_BYTES = 256 * 1024; // 256KB cap for the read endpoint
+
+// Extension → MIME for the raw byte endpoint (image/video/audio/pdf preview).
+const MIME = {
+  png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif',
+  webp: 'image/webp', svg: 'image/svg+xml', bmp: 'image/bmp', ico: 'image/x-icon',
+  mp4: 'video/mp4', webm: 'video/webm', mov: 'video/quicktime', m4v: 'video/x-m4v',
+  ogg: 'video/ogg', mp3: 'audio/mpeg', wav: 'audio/wav', m4a: 'audio/mp4',
+  pdf: 'application/pdf',
+};
 
 // Skip patterns — directories/files that explode the tree or just add noise.
 const SKIP_DIRS = new Set(['node_modules', '.git', '.next', 'dist', 'build', '.cache', '__pycache__', '.venv', 'venv', '.idea', '.vscode']);
@@ -77,6 +88,17 @@ router.get('/files/read', async (req, res) => {
     const st = await stat(real);
     if (st.isDirectory()) return res.status(400).json({ error: 'not a file' });
 
+    // raw=1 → stream the actual bytes (images/video/audio/pdf preview), not JSON.
+    if (req.query.raw === '1') {
+      const e = extname(real).slice(1).toLowerCase();
+      res.setHeader('Content-Type', MIME[e] || 'application/octet-stream');
+      res.setHeader('Content-Length', st.size);
+      res.setHeader('Cache-Control', 'no-cache');
+      const stream = createReadStream(real);
+      stream.on('error', () => { if (!res.headersSent) res.status(500).end(); });
+      return stream.pipe(res);
+    }
+
     if (st.size === 0) {
       return res.json({ path: real, size: 0, content: '', truncated: false, binary: false });
     }
@@ -104,6 +126,31 @@ router.get('/files/read', async (req, res) => {
       truncated: bytesRead < st.size,
       binary: false,
     });
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
+/**
+ * POST /api/files/open  { path }
+ * Open a file/dir with the OS default application (Finder/Explorer's
+ * double-click behaviour). The path is passed as an argv element to execFile
+ * — never through a shell — so there's no command-injection surface.
+ */
+router.post('/files/open', async (req, res) => {
+  try {
+    const real = await safePath(req.body?.path);
+    const os = platform();
+    let cmd, args;
+    if (os === 'darwin') { cmd = 'open'; args = [real]; }
+    else if (os === 'win32') { cmd = 'cmd'; args = ['/c', 'start', '', real]; }
+    else { cmd = 'xdg-open'; args = [real]; }
+    execFile(cmd, args, (err) => {
+      // execFile already returned to the event loop; the response was sent
+      // optimistically below. Log failures only.
+      if (err) console.error('[files/open]', err.message);
+    });
+    res.json({ ok: true, path: real });
   } catch (err) {
     res.status(err.status || 500).json({ error: err.message });
   }

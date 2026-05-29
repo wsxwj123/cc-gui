@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Send, Loader2, Square, Terminal, Puzzle, Wrench, Gauge, ChevronDown, FolderPlus, X, Image as ImageIcon, Shield, ShieldOff, ClipboardList, Check, Pencil } from 'lucide-react';
+import { Send, Loader2, Square, Terminal, Puzzle, Wrench, Gauge, ChevronDown, FolderPlus, X, Image as ImageIcon, Shield, ShieldOff, ClipboardList, Check, Pencil, Smartphone } from 'lucide-react';
 import { useStore, PERMISSION_MODES } from '../stores/sessionStore.js';
 import { PermissionPrompt } from './PermissionPrompt.jsx';
 import { TodoPanel } from './TodoPanel.jsx';
@@ -186,6 +186,20 @@ export function ChatInput({ onSend, onStop, onAccelerate, disabled, isStreaming,
   // no key is supplied (shouldn't happen in normal render).
   const permissionMode = useStore((s) => (permKey ? (s.permissionModeBySession[permKey] || 'default') : s.permissionMode));
   const setPermissionMode = useStore((s) => s.setPermissionMode);
+  // While the session is handed off to phone remote control, lock the composer:
+  // the hidden `--remote-control` pty owns the session file, so spawning a `-p`
+  // turn here would double-write the same jsonl. Reclaim to unlock.
+  const rcLocked = useStore((s) => (sessionId ? !!s.remoteControlled[sessionId] : false));
+  const reclaimRemote = async () => {
+    if (!sessionId) return;
+    try {
+      await fetch('/api/remote-control/stop', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sessionId }),
+      });
+    } catch {}
+    useStore.getState().setRemoteControl(sessionId, false);
+  };
 
   // Watch for "重新编辑" rollback action — store sets composerDraft to the
   // original message text; we lift it into our local input and clear the store.
@@ -336,7 +350,7 @@ export function ChatInput({ onSend, onStop, onAccelerate, disabled, isStreaming,
     const trimmed = text.trim();
     // Allow send if there's text OR attachments (so "just describe this image" works).
     if (!trimmed && attachments.length === 0) return;
-    if (disabled) return;
+    if (disabled || rcLocked) return;
     // Append attachment paths to the prompt — Claude CLI sees absolute image
     // paths in user text and loads them as image content blocks automatically.
     const attachmentRefs = attachments.length > 0
@@ -398,6 +412,21 @@ export function ChatInput({ onSend, onStop, onAccelerate, disabled, isStreaming,
       {/* TODO checklist — sits between permission popup and composer, mirroring
           Claude Desktop. Auto-hides when there's no TodoWrite snapshot. */}
       <TodoPanel todos={todos} />
+      {rcLocked && (
+        <div className="px-6 pt-3">
+          <div className="max-w-3xl mx-auto flex items-center justify-between gap-3 rounded-lg border border-green-200 bg-green-50 px-3 py-2 text-[12px] text-green-800 font-body">
+            <span className="flex items-center gap-1.5">
+              <Smartphone size={14} /> 已交给手机远程控制 · 输入框已锁定以避免双写
+            </span>
+            <button
+              onClick={reclaimRemote}
+              className="shrink-0 px-2 py-1 rounded-md bg-green-600 text-white hover:bg-green-700 transition-colors text-[11px]"
+            >
+              收回控制
+            </button>
+          </div>
+        </div>
+      )}
     <div className="px-6 py-5">
       <div className="max-w-3xl mx-auto relative">
         {/* Slash command dropdown */}
@@ -505,8 +534,8 @@ export function ChatInput({ onSend, onStop, onAccelerate, disabled, isStreaming,
             onChange={(e) => setText(e.target.value)}
             onKeyDown={handleKeyDown}
             onPaste={handlePaste}
-            placeholder={dragging ? '松开以添加图片…' : '输入消息... (/ 打开命令, Enter 发送, Shift+Enter 换行, 可粘贴/拖入图片)'}
-            disabled={disabled}
+            placeholder={rcLocked ? '已交给手机远程控制 · 点上方「收回控制」解锁' : (dragging ? '松开以添加图片…' : '输入消息... (/ 打开命令, Enter 发送, Shift+Enter 换行, 可粘贴/拖入图片)')}
+            disabled={disabled || rcLocked}
             rows={1}
             className="flex-1 bg-transparent text-[14px] text-ink placeholder-ink-faint resize-none focus:outline-none font-body leading-relaxed min-h-[24px] max-h-[200px]"
           />
@@ -536,7 +565,7 @@ export function ChatInput({ onSend, onStop, onAccelerate, disabled, isStreaming,
           ) : (
             <button
               onClick={handleSend}
-              disabled={(!text.trim() && attachments.length === 0) || disabled}
+              disabled={(!text.trim() && attachments.length === 0) || disabled || rcLocked}
               className="btn-accent shrink-0 w-9 h-9 rounded-full flex items-center justify-center"
               title="发送"
             >

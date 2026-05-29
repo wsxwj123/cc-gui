@@ -16,6 +16,10 @@ const writeLs = (key, val) => {
 // Valid `--permission-mode` values per `claude --help`.
 export const PERMISSION_MODES = ['default', 'acceptEdits', 'plan', 'bypassPermissions'];
 
+// Monotonic counter for fresh stable pane identity tokens (see paneIds).
+let nextPaneId = 6;
+const freshPaneId = () => `p${nextPaneId++}`;
+
 export const useStore = create((set, get) => ({
   // Data
   projects: [],
@@ -45,6 +49,10 @@ export const useStore = create((set, get) => ({
   // each session's explicit override. A session with no entry uses the default.
   modelBySession: readLs('cgui-model-by-session', {}),
   effortBySession: readLs('cgui-effort-by-session', {}),
+  // Sessions currently handed off to phone remote control (sessionId → true).
+  // While set, the GUI must NOT spawn `-p` turns for that session (both would
+  // write the same jsonl). The composer locks and shows a reclaim banner.
+  remoteControlled: {},
   // When enabled, spawn includes `--add-dir $HOME` so Claude can READ any file
   // under the user's home directory by default. Writes/edits still require
   // permission (unless mode is bypassPermissions / acceptEdits).
@@ -79,6 +87,11 @@ export const useStore = create((set, get) => ({
   // paneMessages is in-memory only (re-fetched on session load). Persisting
   // it would bloat localStorage and the on-disk jsonl is the source of truth.
   paneMessages: [[], [], [], [], [], []],
+  // Stable per-pane identity tokens. SplitMain keys each SessionDetail by these
+  // (not by position), so closePane's left-shift keeps every surviving pane's
+  // React instance — and its live streaming state — paired with its session.
+  // In-memory only; layout positions are restored from paneSessions on reload.
+  paneIds: ['p0', 'p1', 'p2', 'p3', 'p4', 'p5'],
   activeTabIndex: (() => {
     const n = parseInt(readLs('cgui-active-tab-index', 0), 10);
     return Number.isFinite(n) && n >= 0 && n <= 5 ? n : 0;
@@ -189,6 +202,13 @@ export const useStore = create((set, get) => ({
     }
   },
   getModelFor: (key) => (key && get().modelBySession[key]) || get().currentModel,
+  // Mark/unmark a session as handed off to phone remote control.
+  setRemoteControl: (sessionId, on) => {
+    if (!sessionId) return;
+    const map = { ...get().remoteControlled };
+    if (on) map[sessionId] = true; else delete map[sessionId];
+    set({ remoteControlled: map });
+  },
   // Per-session effort. '' is a valid value (CLI default), so use key presence.
   setEffortFor: (key, e) => {
     if (key) {
@@ -249,16 +269,22 @@ export const useStore = create((set, get) => ({
       next[0] = null;
       const nextMsgs = [...cur.paneMessages];
       nextMsgs[0] = [];
-      set({ paneSessions: next, paneMessages: nextMsgs, selectedSession: null, messages: [] });
+      // Fresh id so the now-empty pane's SessionDetail unmounts cleanly.
+      const ids = [...cur.paneIds];
+      ids[0] = freshPaneId();
+      set({ paneSessions: next, paneMessages: nextMsgs, paneIds: ids, selectedSession: null, messages: [] });
       writeLs('cgui-selected-session', null);
       writeLs('cgui-pane-sessions', next);
       return;
     }
     const sessions = [...cur.paneSessions];
     const msgs = [...cur.paneMessages];
+    const ids = [...cur.paneIds];
     // Splice (i) out then pad back to length 6 so index math stays stable.
+    // paneIds splices in lockstep so surviving panes keep their React instance.
     sessions.splice(i, 1); sessions.push(null);
     msgs.splice(i, 1); msgs.push([]);
+    ids.splice(i, 1); ids.push(freshPaneId());
     const newCount = cur.paneCount - 1;
     const newActive = cur.activeTabIndex >= newCount
       ? Math.max(0, newCount - 1)
@@ -268,8 +294,13 @@ export const useStore = create((set, get) => ({
     writeLs('cgui-active-tab-index', newActive);
     set({
       paneCount: newCount,
+      // Keep splitMode derived (paneCount>1) in sync — without this, closing
+      // 2→1 leaves splitMode stale-true so MainLayout keeps rendering the split
+      // chrome around a single pane instead of collapsing to the default view.
+      splitMode: newCount > 1,
       paneSessions: sessions,
       paneMessages: msgs,
+      paneIds: ids,
       activeTabIndex: newActive,
       // pane 0 changed if we removed pane 0 — keep legacy mirrors current.
       selectedSession: sessions[0],

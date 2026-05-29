@@ -1,10 +1,27 @@
 import React, { useEffect, useState, useCallback, useMemo, useRef } from 'react';
-import { Folder, FolderOpen, File, RefreshCw, AlertCircle, ChevronRight, ChevronDown, FileText, Image as ImageIcon, ArrowLeft } from 'lucide-react';
+import { Folder, FolderOpen, File, RefreshCw, AlertCircle, ChevronRight, ChevronDown, FileText, Image as ImageIcon, ArrowLeft, ExternalLink, Film } from 'lucide-react';
 import { useStore } from '../stores/sessionStore.js';
 import { MarkdownRenderer } from './MarkdownRenderer.jsx';
 import { useResizable, Splitter } from '../hooks/useResizable.jsx';
 
 const IMAGE_EXT = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'ico']);
+const VIDEO_EXT = new Set(['mp4', 'webm', 'mov', 'm4v', 'ogv']);
+const AUDIO_EXT = new Set(['mp3', 'wav', 'm4a', 'ogg', 'flac']);
+
+function rawUrl(path) {
+  return `/api/files/read?path=${encodeURIComponent(path)}&raw=1`;
+}
+
+// Open a file with the OS default app (Finder/Explorer double-click behaviour).
+async function openWithDefaultApp(path) {
+  try {
+    await fetch('/api/files/open', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path }),
+    });
+  } catch {}
+}
 
 function ext(name) {
   const i = name.lastIndexOf('.');
@@ -28,11 +45,11 @@ export function FileExplorerPanel() {
   // session has focus. Falls back to selectedSession / selectedProject in
   // single-pane mode.
   const selectedSession = useStore((s) => s.selectedSession);
-  const secondarySession = useStore((s) => s.secondarySession);
-  const splitMode = useStore((s) => s.splitMode);
+  const paneSessions = useStore((s) => s.paneSessions);
   const activeTabIndex = useStore((s) => s.activeTabIndex);
   const selectedProject = useStore((s) => s.selectedProject);
-  const activeSession = splitMode && activeTabIndex === 1 ? secondarySession : selectedSession;
+  // Follow whichever pane has focus (multi-pane: 0..5), falling back to pane 0.
+  const activeSession = paneSessions?.[activeTabIndex] || selectedSession;
   const rootPath = activeSession?.projectPath || selectedProject?.path || '';
 
   // Map<absPath, { entries, loading, error }> — cached so re-expand is instant.
@@ -223,33 +240,48 @@ function PreviewBody({ preview }) {
   }
   const e = ext(preview.name || '');
   const isImage = IMAGE_EXT.has(e);
+  const isVideo = VIDEO_EXT.has(e);
+  const isAudio = AUDIO_EXT.has(e);
+  const isMedia = isImage || isVideo || isAudio;
+  const HeaderIcon = isVideo || isAudio ? Film : isImage ? ImageIcon : FileText;
 
   return (
     <div className="flex-1 flex flex-col min-h-0">
       <div className="px-3 py-1.5 border-b border-canvas-deep bg-canvas-warm/60 flex items-center gap-2 shrink-0">
-        {isImage ? <ImageIcon size={11} className="text-ink-faint" /> : <FileText size={11} className="text-ink-faint" />}
+        <HeaderIcon size={11} className="text-ink-faint shrink-0" />
         <span className="text-[11px] font-mono text-ink truncate flex-1" title={preview.path}>{preview.name}</span>
         <span className="text-[10px] text-ink-faint font-mono shrink-0">
           {fmtSize(preview.size || 0)}{preview.truncated ? ' · 已截断' : ''}
         </span>
+        <button
+          onClick={() => openWithDefaultApp(preview.path)}
+          className="flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded text-ink-faint hover:text-ink hover:bg-canvas-deep transition-colors shrink-0"
+          title="用系统默认应用打开"
+        >
+          <ExternalLink size={10} />用默认App打开
+        </button>
       </div>
       <div className="flex-1 overflow-auto">
-        {preview.binary ? (
-          isImage ? (
-            <div className="p-3 flex items-center justify-center">
-              <img
-                src={`/api/files/read?path=${encodeURIComponent(preview.path)}&raw=1`}
-                alt={preview.name}
-                onError={(ev) => { ev.target.style.display = 'none'; }}
-                className="max-w-full max-h-[300px] object-contain rounded border border-canvas-deep"
-              />
-              <div className="text-[11px] text-ink-faint">二进制图片（点开原文件查看）</div>
-            </div>
-          ) : (
-            <div className="px-3 py-4 text-[11px] text-ink-faint">
-              二进制文件 · 不渲染预览
-            </div>
-          )
+        {isImage ? (
+          <div className="p-3 flex items-center justify-center">
+            <img
+              src={rawUrl(preview.path)}
+              alt={preview.name}
+              className="max-w-full max-h-[400px] object-contain rounded border border-canvas-deep"
+            />
+          </div>
+        ) : isVideo ? (
+          <div className="p-3 flex items-center justify-center">
+            <video src={rawUrl(preview.path)} controls className="max-w-full max-h-[400px] rounded border border-canvas-deep" />
+          </div>
+        ) : isAudio ? (
+          <div className="p-3">
+            <audio src={rawUrl(preview.path)} controls className="w-full" />
+          </div>
+        ) : preview.binary ? (
+          <div className="px-3 py-4 text-[11px] text-ink-faint">
+            二进制文件 · 不渲染预览（用默认App打开查看）
+          </div>
         ) : e === 'md' || e === 'markdown' ? (
           <div className="px-3 py-2">
             <MarkdownRenderer content={preview.content || ''} />

@@ -22,6 +22,7 @@ import uploadRoutes from './routes/upload.js';
 import pickerRoutes from './routes/picker.js';
 import permissionsRoutes from './routes/permissions.js';
 import filesRoutes from './routes/files.js';
+import remoteControlRoutes from './routes/remote-control.js';
 import { setupFileWatcher } from './services/file-watcher.js';
 import { getDefaultModel, getAvailableModels, setDefaultModel } from './services/model-resolver.js';
 import { readdir, readFile } from 'fs/promises';
@@ -53,6 +54,7 @@ app.use('/api', uploadRoutes);
 app.use('/api', pickerRoutes);
 app.use('/api', permissionsRoutes);
 app.use('/api', filesRoutes);
+app.use('/api', remoteControlRoutes);
 
 // GET /api/model — current default model + available models
 app.get('/api/model', async (req, res) => {

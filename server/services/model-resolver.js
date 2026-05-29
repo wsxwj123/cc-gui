@@ -107,26 +107,10 @@ export async function getAvailableModels() {
     });
   };
 
-  // Every *_MODEL env key (skip *_MODEL_NAME companions and aliases we expand below)
-  for (const [key, val] of Object.entries(env)) {
-    if (typeof val !== 'string' || !val) continue;
-    if (!/_MODEL$/.test(key)) continue;
-    const nameKey = key + '_NAME';
-    const tier = inferTier(key) || inferTier(val);
-    add(val, env[nameKey] || envKeyToLabel(key, val), tier, key);
-  }
-
-  // CLI aliases — `claude --model sonnet` resolves to latest of that tier server-side
-  add('sonnet', 'Sonnet (alias)', 'Sonnet', 'cli-alias');
-  add('opus',   'Opus (alias)',   'Opus',   'cli-alias');
-  add('haiku',  'Haiku (alias)',  'Haiku',  'cli-alias');
-
-  // Guarantee current model is selectable (full id, [1m] preserved)
-  if (!models.has(current)) {
-    add(current, current.replace(/\[1m\]/i, ''), inferTier(current) || 'Current', 'resolved-default');
-  }
-
-  // Endpoint label
+  // Resolve the upstream provider first — it decides whether CLI aliases make
+  // sense. A non-Anthropic baseUrl (cc switch → mimo/deepseek/openrouter) means
+  // sonnet/opus/haiku get silently redirected to that provider's default, so
+  // they show up as misleading "duplicate" rows next to the real model ids.
   const baseUrl = env.ANTHROPIC_BASE_URL || '';
   let provider = 'Anthropic';
   if (baseUrl) {
@@ -140,6 +124,30 @@ export async function getAvailableModels() {
       else if (host.includes('googleapis')) provider = 'Google Vertex';
       else provider = host;
     } catch {}
+  }
+  const isAnthropic = provider === 'Anthropic';
+
+  // Every *_MODEL env key (skip *_MODEL_NAME companions and aliases we expand below)
+  for (const [key, val] of Object.entries(env)) {
+    if (typeof val !== 'string' || !val) continue;
+    if (!/_MODEL$/.test(key)) continue;
+    const nameKey = key + '_NAME';
+    const tier = inferTier(key) || inferTier(val);
+    add(val, env[nameKey] || envKeyToLabel(key, val), tier, key);
+  }
+
+  // CLI aliases — `claude --model sonnet` resolves to latest of that tier
+  // server-side. Only meaningful on Anthropic; on a redirected provider they're
+  // noise (and look like duplicates of the concrete model ids), so skip them.
+  if (isAnthropic) {
+    add('sonnet', 'Sonnet (alias)', 'Sonnet', 'cli-alias');
+    add('opus',   'Opus (alias)',   'Opus',   'cli-alias');
+    add('haiku',  'Haiku (alias)',  'Haiku',  'cli-alias');
+  }
+
+  // Guarantee current model is selectable (full id, [1m] preserved)
+  if (!models.has(current)) {
+    add(current, current.replace(/\[1m\]/i, ''), inferTier(current) || 'Current', 'resolved-default');
   }
 
   // No hardcoded Anthropic catalog anymore.

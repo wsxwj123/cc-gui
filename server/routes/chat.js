@@ -29,6 +29,7 @@ export function getActiveChatProcesses() {
       promptPreview: slot.promptPreview || '',
       permissionMode: slot.permissionMode || 'default',
       startedAt: slot.startedAt || null,
+      finishedAt: slot.finishedAt || null,
       exitCode: slot.exitCode,
       attached: slot.attached,
     });
@@ -257,6 +258,7 @@ router.post('/chat', async (req, res) => {
 
   proc.on('close', (code) => {
     slot.exitCode = code;
+    slot.finishedAt = Date.now();
     const dur = Date.now() - slot.startedAt;
     // Drop any pending permission requests for this session — otherwise the
     // hook bridge process stays blocked forever waiting on the held HTTP
@@ -359,7 +361,12 @@ router.get('/chat/:pid/stream', (req, res) => {
     }
     safeWrite(`data: ${JSON.stringify({ type: 'done', exitCode: code })}\n\n`);
     safeEnd();
-    activeProcesses.delete(req.params.pid);
+    // Keep the finished slot around for a grace window so the subagent monitor
+    // can show recently-completed turns (状态 已完成/错误 = 会话在等待用户回复),
+    // instead of the slot vanishing the instant the stream ends.
+    slot.exitCode = code;
+    slot.finishedAt = Date.now();
+    setTimeout(() => activeProcesses.delete(req.params.pid), 60_000);
   };
 
   proc.stdout.on('data', onStdout);

@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "postinstall": "chmod +x node_modules/node-pty/prebuilds/*/spawn-helper 2>/dev/null || true",
     "dev": "concurrently \"npm run server\" \"npm run client\"",
     "server": "node server/index.js",
     "client": "cd client && npx vite --port 5173",
@@ -17,6 +18,7 @@
     "cors": "^2.8.5",
     "express": "^5.1.0",
     "glob": "^11.0.0",
+    "node-pty": "^1.1.0",
     "ws": "^8.18.0"
   },
   "devDependencies": {

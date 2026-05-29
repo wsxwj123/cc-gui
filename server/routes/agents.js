@@ -77,9 +77,14 @@ router.get('/agents/active', async (req, res) => {
   const out = [];
   const seenPids = new Set();
 
-  // 1. Live chat children — always available, richest metadata
+  // 1. Live chat children — always available, richest metadata.
+  // Finished turns linger for a 60s grace window (chat.js) so they show as
+  // 已完成/错误 (= 会话等待用户回复) instead of vanishing the instant they end.
   for (const p of getActiveChatProcesses()) {
-    if (p.exitCode !== null) continue;
+    const finished = p.exitCode !== null;
+    const status = finished
+      ? (p.exitCode === 0 ? 'done' : 'error')
+      : (p.attached ? 'streaming' : 'starting');
     out.push({
       kind: 'chat-process',
       pid: p.pid,
@@ -89,9 +94,11 @@ router.get('/agents/active', async (req, res) => {
       promptPreview: p.promptPreview,
       permissionMode: p.permissionMode,
       startedAt: p.startedAt,
-      elapsedMs: p.startedAt ? Date.now() - p.startedAt : 0,
-      status: p.attached ? 'streaming' : 'starting',
-      stoppable: true,
+      elapsedMs: finished
+        ? (p.startedAt && p.finishedAt ? p.finishedAt - p.startedAt : 0)
+        : (p.startedAt ? Date.now() - p.startedAt : 0),
+      status,
+      stoppable: !finished,
     });
     seenPids.add(Number(p.pid));
   }

@@ -25,7 +25,7 @@ import {
   Search, Hash, Layers, BarChart3, ArrowLeft, Plus,
   RefreshCw, Activity, Settings, Server, GitBranch, FileDiff, Check, Wrench, X,
   Sun, Moon, Monitor, Play, Bot, Camera, History, Loader2, Shield, FolderTree,
-  Archive, ArchiveRestore, Trash2, EyeOff, Columns2,
+  Archive, ArchiveRestore, Trash2, EyeOff, Columns2, Smartphone,
 } from 'lucide-react';
 
 // ── Per-session shadow-git checkpoints ──────────────────────────
@@ -381,48 +381,108 @@ function MainLayout({ sidebarCollapsed, selectedProject, rightPanel, setRightPan
 function SplitMain({ activeTabIndex, setActiveTabIndex }) {
   const paneCount = useStore((s) => s.paneCount);
   const paneSessions = useStore((s) => s.paneSessions);
+  const paneIds = useStore((s) => s.paneIds);
   const closePane = useStore((s) => s.closePane);
+  const rowRef = useRef(null);
+  // Per-pane flex-grow weights — drag a splitter between two panes to shift
+  // width between them. In-memory only; reset to equal when paneCount changes.
+  const [weights, setWeights] = useState(() => Array(paneCount).fill(1));
+  useEffect(() => {
+    setWeights((prev) => (prev.length === paneCount ? prev : Array(paneCount).fill(1)));
+  }, [paneCount]);
+
+  // Splitter drag: transfer weight between pane `idx` and `idx+1` proportional
+  // to the pixel delta over the row width, clamped so neither shrinks below 15%
+  // of their combined weight.
+  const startResize = (idx) => (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const row = rowRef.current;
+    if (!row) return;
+    const rowWidth = row.getBoundingClientRect().width || 1;
+    const startX = e.clientX;
+    const start = [...weights];
+    while (start.length < paneCount) start.push(1);
+    const total = start.reduce((a, b) => a + (b || 1), 0);
+    const pairSum = (start[idx] || 1) + (start[idx + 1] || 1);
+    const minW = 0.15 * pairSum;
+    const onMove = (ev) => {
+      const dW = ((ev.clientX - startX) / rowWidth) * total;
+      let left = (start[idx] || 1) + dW;
+      let right = (start[idx + 1] || 1) - dW;
+      if (left < minW) { left = minW; right = pairSum - minW; }
+      if (right < minW) { right = minW; left = pairSum - minW; }
+      setWeights((w) => {
+        const n = [...w];
+        while (n.length < paneCount) n.push(1);
+        n[idx] = left; n[idx + 1] = right;
+        return n;
+      });
+    };
+    const onUp = () => {
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    };
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+  };
+
   const panes = Array.from({ length: paneCount }, (_, i) => i);
   return (
-    <div className="flex-1 flex min-w-0 overflow-x-auto">
+    <div ref={rowRef} className="flex-1 flex min-w-0 overflow-x-auto">
       {panes.map((i) => {
         const focused = activeTabIndex === i;
-        const hasSession = !!(paneSessions && paneSessions[i]);
+        const paneSession = paneSessions && paneSessions[i];
+        const hasSession = !!paneSession;
+        // Key by the STABLE pane id (which splices alongside paneSessions in
+        // closePane), NOT position. A positional key would make React reuse the
+        // closed pane's SessionDetail instance (and its live streaming state)
+        // for whatever pane shifted into its slot. The pane id survives the
+        // draft→real sessionId transition (unlike keying by sessionId), so a
+        // brand-new session's in-progress stream isn't remounted away.
+        const paneKey = (paneIds && paneIds[i]) ?? `pane-${i}`;
         return (
-          <div
-            key={i}
-            onMouseDown={() => setActiveTabIndex(i)}
-            style={{ flex: '1 1 0', minWidth: '26em' }}
-            className={`flex flex-col relative my-3 mx-1.5 rounded-2xl overflow-hidden transition-shadow min-w-0 ${
-              focused ? 'ring-2 ring-accent/40 shadow-lg' : 'ring-1 ring-canvas-deep/40'
-            }`}
-          >
-            <div className="flex items-center justify-between px-2.5 py-1 bg-canvas-warm/70 border-b border-canvas-deep shrink-0 z-20">
-              <span className={`text-[10px] font-mono ${focused ? 'text-accent' : 'text-ink-faint'}`}>
-                分屏 {i + 1}{focused ? ' · 当前' : ''}
-              </span>
-              <button
-                onClick={(e) => { e.stopPropagation(); closePane(i); }}
-                className="w-5 h-5 rounded flex items-center justify-center text-ink-faint hover:text-ink hover:bg-canvas-deep transition-colors"
-                title="关闭此分屏（不结束会话 / 不杀进程）"
-              >
-                <X size={12} />
-              </button>
-            </div>
-            {hasSession ? (
-              <SessionDetail tabIndex={i} />
-            ) : (
-              <div className="flex-1 flex items-center justify-center glass-base">
-                <div className="text-center px-4">
-                  <div className="w-12 h-12 rounded-2xl glass-thin flex items-center justify-center mx-auto mb-3">
-                    <Layers size={20} className="text-accent" />
-                  </div>
-                  <p className="text-[12px] text-ink-muted font-body">点左侧任一会话填入本分屏</p>
-                  <p className="text-[10px] text-ink-faint font-body mt-1">（此栏已高亮为当前）</p>
-                </div>
+          <React.Fragment key={paneKey}>
+            <div
+              onMouseDown={() => setActiveTabIndex(i)}
+              style={{ flex: `${weights[i] ?? 1} 1 0`, minWidth: '16em' }}
+              className={`flex flex-col relative my-3 mx-1.5 rounded-2xl overflow-hidden transition-shadow min-w-0 ${
+                focused ? 'ring-2 ring-accent/40 shadow-lg' : 'ring-1 ring-canvas-deep/40'
+              }`}
+            >
+              <div className="flex items-center justify-between px-2.5 py-1 bg-canvas-warm/70 border-b border-canvas-deep shrink-0 z-20">
+                <span className={`text-[10px] font-mono ${focused ? 'text-accent' : 'text-ink-faint'}`}>
+                  分屏 {i + 1}{focused ? ' · 当前' : ''}
+                </span>
+                <button
+                  onClick={(e) => { e.stopPropagation(); closePane(i); }}
+                  className="w-5 h-5 rounded flex items-center justify-center text-ink-faint hover:text-ink hover:bg-canvas-deep transition-colors"
+                  title="关闭此分屏（不结束会话 / 不杀进程）"
+                >
+                  <X size={12} />
+                </button>
               </div>
-            )}
-          </div>
+              {hasSession ? (
+                <SessionDetail tabIndex={i} />
+              ) : (
+                <div className="flex-1 flex items-center justify-center glass-base">
+                  <div className="text-center px-4">
+                    <div className="w-12 h-12 rounded-2xl glass-thin flex items-center justify-center mx-auto mb-3">
+                      <Layers size={20} className="text-accent" />
+                    </div>
+                    <p className="text-[12px] text-ink-muted font-body">点左侧任一会话填入本分屏</p>
+                    <p className="text-[10px] text-ink-faint font-body mt-1">（此栏已高亮为当前）</p>
+                  </div>
+                </div>
+              )}
+            </div>
+            {/* Draggable boundary between this pane and the next */}
+            {i < paneCount - 1 && <SplitterCmp onMouseDown={startResize(i)} axis="x" />}
+          </React.Fragment>
         );
       })}
     </div>
@@ -849,8 +909,7 @@ function SessionList() {
     };
     if (splitMode) {
       setActiveTabSession(draft);
-      if (activeTabIndex === 1) useStore.getState().setSecondaryMessages([]);
-      else useStore.setState({ messages: [] });
+      useStore.getState().setPaneMessages(activeTabIndex, []);
     } else {
       setSelectedSession(draft);
       useStore.setState({ messages: [] });
@@ -889,8 +948,7 @@ function SessionList() {
     };
     if (splitMode) {
       setActiveTabSession(draft);
-      if (activeTabIndex === 1) useStore.getState().setSecondaryMessages([]);
-      else useStore.setState({ messages: [] });
+      useStore.getState().setPaneMessages(activeTabIndex, []);
     } else {
       setSelectedSession(draft);
       useStore.setState({ messages: [] });
@@ -1578,6 +1636,35 @@ function SessionDetail({ tabIndex = 0 }) {
 
   const handleSend = useCallback(async (prompt, opts = {}) => {
     const { reattachPid } = opts;
+    // Intercept the /remote-control (alias /rc) command. It CANNOT be sent
+    // through `claude -p` — slash commands are interactive-only and the CLI
+    // rejects them ("isn't available in this environment"). Instead we launch
+    // `claude --remote-control --resume <id>` in a real terminal (TTY required)
+    // so the Claude mobile app can take over; the GUI keeps syncing via jsonl.
+    if (!reattachPid) {
+      const cmd = (prompt || '').trim().toLowerCase();
+      if (cmd === '/remote-control' || cmd === '/rc' || cmd === 'remote-control') {
+        const sel = getLocalSession();
+        const rcCwd = selectedProject?.path || sel?.projectPath;
+        if (!sel?.sessionId) {
+          window.alert('请先发送至少一条消息以创建会话，然后再输入 /remote-control 开启手机远程控制。');
+          return;
+        }
+        try {
+          const r = await fetch('/api/remote-control', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ sessionId: sel.sessionId, cwd: rcCwd }),
+          });
+          const d = await r.json();
+          if (!r.ok) throw new Error(d.error || r.status);
+          useStore.getState().setRemoteControl(sel.sessionId, true);
+          window.alert('远程控制已激活（后台运行，无终端窗口）。\n手机用 Claude App 接管此会话；电脑端 GUI 会自动同步消息。\n输入框已锁定，避免双写——点顶部「已激活」可收回控制。\n（需 Claude 账号登录，且当前未切到 deepseek/mimo 等三方模型）');
+        } catch (e) {
+          window.alert('开启远程控制失败：' + e.message);
+        }
+        return;
+      }
+    }
     // On a normal send, gate against duplicate streams and enqueue overflow.
     // On reattach, the caller is the backgroundPid effect — we WANT it to take
     // over the stream, so skip the gate and the prep work (no user bubble,
@@ -2553,6 +2640,56 @@ function SessionDetail({ tabIndex = 0 }) {
 // Dropdown anchored to the trigger button (lightweight: no full-screen blur).
 // Outside-click closes via a document-level listener — needed because the
 // usual "fixed inset-0" trick is trapped inside header's transform context.
+// Header button that hands the active session off to phone control. Like
+// Claude Desktop, the server hosts `claude --remote-control --resume <id>` on a
+// HIDDEN pseudo-terminal (node-pty) — no terminal window pops up. The Claude
+// mobile app then takes over the SAME account/session via Anthropic's relay;
+// the GUI keeps syncing via jsonl. While active, the composer is locked to
+// avoid two processes writing the same session file. Clicking again reclaims.
+// Disabled until the session exists (a sessionId is needed to --resume).
+function RemoteControlButton({ session }) {
+  const [busy, setBusy] = useState(false);
+  const sid = session?.sessionId || null;
+  const cwd = session?.projectPath || null;
+  const active = useStore((s) => (sid ? !!s.remoteControlled[sid] : false));
+
+  const toggle = async () => {
+    if (!sid || busy) return;
+    setBusy(true);
+    try {
+      const url = active ? '/api/remote-control/stop' : '/api/remote-control';
+      const r = await fetch(url, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sessionId: sid, cwd }),
+      });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || r.status);
+      useStore.getState().setRemoteControl(sid, !active);
+    } catch (e) {
+      window.alert((active ? '收回远程控制失败：' : '开启远程控制失败：') + e.message);
+    }
+    setBusy(false);
+  };
+
+  return (
+    <button
+      onClick={toggle}
+      disabled={!sid || busy}
+      title={sid
+        ? (active
+          ? '已在手机上远程控制此会话 · 点击收回控制'
+          : '在手机上同账号控制此会话（用 Claude App 接管，需 Claude 账号、非 deepseek/mimo）')
+        : '先发送一条消息创建会话，再开启远程控制'}
+      className={`flex items-center gap-1 px-2 py-1 rounded-md transition-colors text-[11px] font-body ${
+        active ? 'bg-green-50 text-green-700' : 'hover:bg-canvas-deep text-ink-muted'
+      } disabled:opacity-40 disabled:cursor-not-allowed`}
+    >
+      {busy ? <Loader2 size={13} className="animate-spin" /> : <Smartphone size={13} />}
+      {active ? '已激活' : '远程'}
+    </button>
+  );
+}
+
 export function ModelSelector({ compact = false, permKey = null }) {
   const { availableModels } = useStore();
   // Per-session model: show/select THIS session's model (falls back to the
@@ -2836,6 +2973,7 @@ export default function App() {
           <ModelSelector placement="bottom" align="right" compact permKey={permKey} />
           <EffortSelector placement="bottom" align="right" permKey={permKey} />
           <PermissionModeSelector permKey={permKey} />
+          <RemoteControlButton session={activeSession} />
           <div className="w-px h-4 bg-ink-ghost/30 mx-1" />
           {/* Split-screen toggle. Activates the right pane (initially empty
               until user clicks a session in the sidebar). Click again to
