@@ -1,7 +1,12 @@
 import { Router } from 'express';
-import { readFile, writeFile, mkdir } from 'fs/promises';
+import { readFile, writeFile, mkdir, copyFile } from 'fs/promises';
+import { execFile } from 'child_process';
+import { promisify } from 'util';
 import { join } from 'path';
 import { homedir } from 'os';
+
+const execFileP = promisify(execFile);
+const CC_SWITCH_DB = join(homedir(), '.cc-switch', 'cc-switch.db');
 
 const router = Router();
 const SETTINGS_PATH = join(homedir(), '.claude', 'settings.json');
@@ -136,6 +141,75 @@ router.get('/provider', async (_req, res) => {
     else providerHint = 'unknown';
 
     res.json({ baseUrl, providerHint, model });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── CC Switch provider integration ──────────────────────────────
+// CC Switch stores ONE full settings.json snapshot per provider in a SQLite db
+// (~/.cc-switch/cc-switch.db, table `providers`). We READ it (never write it) to
+// list the user's claude providers and switch by overwriting ~/.claude/settings.json
+// with the chosen snapshot — same semantics as the CC Switch desktop app, so the
+// phone gets a one-tap switch. The CLI reads settings.json on its next spawn.
+
+// Read-only query through the system `sqlite3` CLI (no new npm dependency, and
+// -readonly guarantees we can't mutate the user's CC Switch db). Returns parsed
+// rows, or [] if the db / CLI is unavailable.
+async function ccSwitchQuery(sql) {
+  try {
+    const { stdout } = await execFileP('sqlite3', ['-json', '-readonly', CC_SWITCH_DB, sql], {
+      timeout: 5000, maxBuffer: 16 * 1024 * 1024,
+    });
+    const t = stdout.trim();
+    return t ? JSON.parse(t) : [];
+  } catch {
+    return [];
+  }
+}
+
+// GET /api/providers — list the user's `claude` providers from CC Switch.
+// Returns names + ids only; NEVER the settings_config (which holds API keys).
+router.get('/providers', async (_req, res) => {
+  const rows = await ccSwitchQuery(
+    "SELECT id, name, is_current FROM providers WHERE app_type='claude' ORDER BY sort_index"
+  );
+  res.json({
+    available: rows.length > 0,
+    providers: rows.map((r) => ({ id: r.id, name: r.name, isCurrent: r.is_current === 1 })),
+  });
+});
+
+// POST /api/provider/switch { id } — overwrite ~/.claude/settings.json with the
+// chosen provider's snapshot. Timestamped backup first so it's reversible. We
+// never write the CC Switch db (so its own is_current may lag — GUI reads the
+// live settings.json via GET /provider, which is authoritative).
+router.post('/provider/switch', async (req, res) => {
+  try {
+    const { id } = req.body || {};
+    if (!id || typeof id !== 'string') return res.status(400).json({ error: 'id required' });
+
+    // Read ALL claude providers and match in JS — user input never touches SQL.
+    const rows = await ccSwitchQuery(
+      "SELECT id, name, settings_config FROM providers WHERE app_type='claude'"
+    );
+    if (rows.length === 0) return res.status(503).json({ error: 'CC Switch 数据库不可用' });
+    const hit = rows.find((r) => r.id === id);
+    if (!hit) return res.status(404).json({ error: 'provider 不存在' });
+
+    let snapshot;
+    try { snapshot = JSON.parse(hit.settings_config); }
+    catch { return res.status(500).json({ error: 'provider 配置解析失败' }); }
+    if (!snapshot || typeof snapshot !== 'object' || Array.isArray(snapshot)) {
+      return res.status(500).json({ error: 'provider 配置非法' });
+    }
+
+    // Back up the current settings.json (timestamped) before overwriting.
+    const ts = new Date().toISOString().replace(/[:.]/g, '-');
+    await copyFile(SETTINGS_PATH, `${SETTINGS_PATH}.${ts}.bak`).catch(() => {});
+
+    await writeFile(SETTINGS_PATH, JSON.stringify(snapshot, null, 2));
+    res.json({ ok: true, name: hit.name });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

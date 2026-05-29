@@ -2883,6 +2883,98 @@ function RemoteControlButton({ session }) {
   );
 }
 
+// One-tap API provider switch, sourced from the user's CC Switch config (read
+// only, no keys leave the server). Switching overwrites ~/.claude/settings.json
+// with the chosen provider snapshot (server backs it up first); the file-watcher
+// then broadcasts provider-change so ModelSelector/cost displays self-refresh.
+// Hidden entirely when CC Switch isn't installed/empty.
+function ProviderSwitcher() {
+  const [providers, setProviders] = useState([]);
+  const [open, setOpen] = useState(false);
+  const [switching, setSwitching] = useState(false);
+  // Optimistic current id: the CC Switch db's is_current isn't updated by us
+  // (we never write that db), so after a switch we mark the active one locally.
+  const [activeId, setActiveId] = useState(null);
+  const wrapRef = useRef(null);
+  const currentProvider = useStore((s) => s.currentProvider);
+
+  const load = () => {
+    fetch('/api/providers').then((r) => r.json()).then((d) => {
+      setProviders(Array.isArray(d.providers) ? d.providers : []);
+    }).catch(() => {});
+  };
+  useEffect(() => {
+    load();
+    const onCh = () => load();
+    window.addEventListener('cgui:provider-change', onCh);
+    return () => window.removeEventListener('cgui:provider-change', onCh);
+  }, []);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDocClick = (e) => { if (!wrapRef.current?.contains(e.target)) setOpen(false); };
+    const onEsc = (e) => { if (e.key === 'Escape') setOpen(false); };
+    document.addEventListener('mousedown', onDocClick);
+    document.addEventListener('keydown', onEsc);
+    return () => {
+      document.removeEventListener('mousedown', onDocClick);
+      document.removeEventListener('keydown', onEsc);
+    };
+  }, [open]);
+
+  if (providers.length === 0) return null;
+
+  const isCur = (p) => (activeId != null ? p.id === activeId : p.isCurrent);
+  const cur = providers.find(isCur);
+  const label = cur?.name || currentProvider?.providerHint || 'Provider';
+
+  const switchTo = async (id) => {
+    setSwitching(true);
+    try {
+      const r = await fetch('/api/provider/switch', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id }),
+      });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || '切换失败');
+      setActiveId(id);
+      useStore.getState().fetchProvider?.();
+      setOpen(false);
+    } catch (e) {
+      window.alert('切换 provider 失败：' + e.message);
+    }
+    setSwitching(false);
+  };
+
+  return (
+    <div ref={wrapRef} className="relative">
+      <button onClick={() => setOpen(!open)} title="切换 API Provider（来自 CC Switch）"
+        className="flex items-center gap-1 px-2 py-1 rounded-md hover:bg-canvas-deep transition-colors">
+        <Server size={12} className="text-ink-muted" />
+        <span className="text-[11px] text-ink-soft font-body max-w-[88px] truncate">{label}</span>
+        <ChevronDown size={10} className="text-ink-faint" />
+      </button>
+      {open && (
+        <div className="glass-popover absolute left-0 top-full mt-2 w-60 z-50 py-1 animate-glass-rise max-h-[70vh] overflow-y-auto">
+          <div className="px-3 py-2 sticky top-0 bg-canvas border-b border-canvas-deep">
+            <div className="text-[10px] text-ink-faint uppercase tracking-wider font-body">切换 Provider</div>
+            <p className="text-[10px] text-ink-faint font-body mt-1 leading-snug">
+              来自 CC Switch。切换会改写 <code className="font-mono">~/.claude/settings.json</code>（自动备份），<b>对新发的消息生效</b>。
+            </p>
+          </div>
+          {providers.map((p) => (
+            <button key={p.id} disabled={switching} onClick={() => switchTo(p.id)}
+              className={`w-full text-left px-3 py-2 hover:bg-canvas-warm transition-colors flex items-center gap-2 ${isCur(p) ? 'bg-accent-subtle' : ''} ${switching ? 'opacity-50' : ''}`}>
+              <span className={`flex-1 text-xs font-body truncate ${isCur(p) ? 'text-accent font-medium' : 'text-ink'}`}>{p.name}</span>
+              {isCur(p) && <Check size={12} className="text-accent shrink-0" />}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function ModelSelector({ compact = false, permKey = null }) {
   const { availableModels } = useStore();
   // Per-session model: show/select THIS session's model (falls back to the
@@ -3176,6 +3268,7 @@ export default function App() {
           )}
         </div>
         <div className="flex items-center gap-1 flex-wrap justify-end">
+          <ProviderSwitcher />
           <ModelSelector placement="bottom" align="right" compact permKey={permKey} />
           <EffortSelector placement="bottom" align="right" permKey={permKey} />
           <PermissionModeSelector permKey={permKey} />
