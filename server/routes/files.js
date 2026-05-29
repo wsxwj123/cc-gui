@@ -34,7 +34,9 @@ async function safePath(p) {
   }
   const real = await realpath(resolve(p)).catch(() => null);
   if (!real) { const err = new Error('not found'); err.status = 404; throw err; }
-  if (!real.startsWith(HOME)) {
+  // Must be HOME itself or a path UNDER it. A bare startsWith(HOME) check is
+  // bypassable: '/Users/wsxwj2/x'.startsWith('/Users/wsxwj') is true.
+  if (real !== HOME && !real.startsWith(HOME + '/')) {
     const err = new Error('outside $HOME'); err.status = 403; throw err;
   }
   return real;
@@ -95,7 +97,10 @@ router.get('/files/read', async (req, res) => {
       res.setHeader('Content-Length', st.size);
       res.setHeader('Cache-Control', 'no-cache');
       const stream = createReadStream(real);
-      stream.on('error', () => { if (!res.headersSent) res.status(500).end(); });
+      // Content-Length/200 are already flushed, so we can't switch to 500 mid-
+      // stream. Destroy the socket instead — the client sees a truncated body +
+      // aborted connection rather than a silently-incomplete 200.
+      stream.on('error', () => { res.headersSent ? res.destroy() : res.status(500).end(); });
       return stream.pipe(res);
     }
 
@@ -134,8 +139,10 @@ router.get('/files/read', async (req, res) => {
 /**
  * POST /api/files/open  { path }
  * Open a file/dir with the OS default application (Finder/Explorer's
- * double-click behaviour). The path is passed as an argv element to execFile
- * — never through a shell — so there's no command-injection surface.
+ * double-click behaviour). On macOS/Linux the path is a plain argv element to
+ * `open`/`xdg-open` (no shell). On Windows `cmd /c start` IS parsed by cmd.exe,
+ * so a HOME-internal filename containing cmd metachars (& | < > ^ ") could
+ * inject — reject those before launching.
  */
 router.post('/files/open', async (req, res) => {
   try {
@@ -143,7 +150,10 @@ router.post('/files/open', async (req, res) => {
     const os = platform();
     let cmd, args;
     if (os === 'darwin') { cmd = 'open'; args = [real]; }
-    else if (os === 'win32') { cmd = 'cmd'; args = ['/c', 'start', '', real]; }
+    else if (os === 'win32') {
+      if (/[&|<>^"]/.test(real)) { const e = new Error('unsafe path for Windows open'); e.status = 400; throw e; }
+      cmd = 'cmd'; args = ['/c', 'start', '', real];
+    }
     else { cmd = 'xdg-open'; args = [real]; }
     execFile(cmd, args, (err) => {
       // execFile already returned to the event loop; the response was sent

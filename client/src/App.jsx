@@ -1664,6 +1664,14 @@ function SessionDetail({ tabIndex = 0 }) {
         }
         return;
       }
+      // Defense-in-depth: ChatInput already locks the composer when the session
+      // is under remote control, but handleSend can be reached by other paths.
+      // A new `-p` turn here would double-write the RC pty's session jsonl.
+      const lockedSid = getLocalSession()?.sessionId;
+      if (lockedSid && useStore.getState().remoteControlled[lockedSid]) {
+        window.alert('此会话已交给手机远程控制，输入框已锁定。点顶部「已激活」收回控制后再发送。');
+        return;
+      }
     }
     // On a normal send, gate against duplicate streams and enqueue overflow.
     // On reattach, the caller is the backgroundPid effect — we WANT it to take
@@ -2878,6 +2886,17 @@ export default function App() {
       else document.documentElement.removeAttribute('data-cgui-theme');
     } catch {}
   }, [cguiTheme]);
+
+  // Resync remote-control locks on mount. The `remoteControlled` map lives in
+  // memory only, so a refresh would clear the composer lock while the server's
+  // hidden RC pty is still alive — re-enabling sends and risking a double-write
+  // to the same session jsonl. Pull the server's active list and restore locks.
+  useEffect(() => {
+    fetch('/api/remote-control')
+      .then((r) => r.json())
+      .then((d) => (d?.active || []).forEach((sid) => useStore.getState().setRemoteControl(sid, true)))
+      .catch(() => {});
+  }, []);
 
   // Mid-stream mode change → bulk-resolve waiting popups, but ONLY for the
   // session that was switched to 放任. "切到放任后该会话待处理工具直接放行"。

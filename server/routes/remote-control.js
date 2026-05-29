@@ -26,6 +26,19 @@ const UUID_RE = /^[0-9a-fA-F-]{36}$/;
  */
 const active = new Map();
 
+// Kill every hosted RC pty. Without this, a server restart (Ctrl+C / crash)
+// leaves the `claude --remote-control` children orphaned — they keep writing
+// the session jsonl, and since the in-memory Map is gone, re-activating the
+// same sessionId spawns a SECOND writer → corruption. Registered once.
+function killAll() {
+  for (const e of active.values()) { try { e.term.kill(); } catch {} }
+  active.clear();
+}
+process.once('exit', killAll);
+for (const sig of ['SIGINT', 'SIGTERM']) {
+  process.once(sig, () => { killAll(); process.exit(0); });
+}
+
 function statusOf(sessionId) {
   const e = active.get(sessionId);
   return e ? { active: true, startedAt: e.startedAt, cwd: e.cwd } : { active: false };
@@ -44,7 +57,9 @@ router.post('/remote-control', async (req, res) => {
     let dir = HOME;
     if (cwd) {
       const real = await realpath(resolve(cwd)).catch(() => null);
-      if (!real || !real.startsWith(HOME)) throw new Error('cwd outside $HOME');
+      // HOME itself or a path under it. Bare startsWith(HOME) is bypassable
+      // ('/Users/wsxwj2'.startsWith('/Users/wsxwj') === true).
+      if (!real || (real !== HOME && !real.startsWith(HOME + '/'))) throw new Error('cwd outside $HOME');
       dir = real;
     }
 
