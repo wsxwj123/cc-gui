@@ -36,6 +36,9 @@ router.get('/projects', async (req, res) => {
 // GET /api/projects/:hash/sessions — list sessions for a project
 router.get('/projects/:hash/sessions', async (req, res) => {
   try {
+    if (!safeId(req.params.hash)) {
+      return res.status(400).json({ error: 'invalid hash' });
+    }
     const sessions = await listSessions(req.params.hash);
     res.json(sessions);
   } catch (err) {

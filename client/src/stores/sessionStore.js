@@ -132,7 +132,7 @@ export const useStore = create((set, get) => ({
   // real upstream so pricing.js can charge correctly. Defaults to anthropic.
   currentProvider: { providerHint: 'anthropic', baseUrl: '', model: null },
   // CLI session knobs. Persisted to localStorage so they survive reload.
-  effort: typeof localStorage !== 'undefined' ? (localStorage.getItem('cgui-effort') || '') : '',
+  effort: (() => { try { return (typeof localStorage !== 'undefined' && localStorage.getItem('cgui-effort')) || ''; } catch { return ''; } })(),
   addDirs: readLs('cgui-add-dirs', []),
   // Default to 'default' (each tool call asks for permission via CLI built-in flow).
   // Users can switch to acceptEdits/bypassPermissions/plan from the header.

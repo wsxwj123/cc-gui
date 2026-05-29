@@ -387,12 +387,17 @@ router.get('/chat/:pid/stream', (req, res) => {
     return finish(slot.exitCode);
   }
 
-  proc.on('close', (code) => finish(code));
-  proc.on('error', (err) => {
+  // Named (not anonymous) so req.on('close') can remove them on detach — a
+  // session reconnected N times would otherwise accumulate N close/error
+  // listeners (MaxListenersExceededWarning past 10 + retained closures).
+  const onProcClose = (code) => finish(code);
+  const onProcError = (err) => {
     safeWrite(`data: ${JSON.stringify({ type: 'error', error: err.message })}\n\n`);
     safeEnd();
     activeProcesses.delete(req.params.pid);
-  });
+  };
+  proc.on('close', onProcClose);
+  proc.on('error', onProcError);
 
   req.on('close', () => {
     // Client disconnected — STOP WRITING to the SSE response but DO NOT kill
@@ -402,6 +407,10 @@ router.get('/chat/:pid/stream', (req, res) => {
     // abort" so a long-running session keeps producing output while the
     // user looks at other sessions.
     closed = true;
+    // Remove the close/error listeners registered for THIS attach so repeated
+    // reconnects don't pile up listeners on the long-lived child process.
+    try { proc.removeListener('close', onProcClose); } catch {}
+    try { proc.removeListener('error', onProcError); } catch {}
     // Detach our stdout/stderr listeners so the proc isn't blocked on a
     // backpressured stream and so a future re-attach gets fresh listeners.
     try { proc.stdout.removeListener('data', onStdout); } catch {}

@@ -20,6 +20,7 @@ export function SettingsPanel() {
     setLoading(true);
     try {
       const res = await fetch('/api/settings');
+      if (!res.ok) throw new Error(`加载设置失败 (HTTP ${res.status})`);
       const data = await res.json();
       setSettings(data);
       setRawJson(JSON.stringify(data, null, 2));
@@ -322,6 +323,9 @@ function HooksTab({ settings, onSave, saving, saved }) {
 
   const persist = (next) => {
     setHooks(next);
+    // Guard: if settings failed to load (null), spreading it would persist ONLY
+    // hooks and wipe the rest of settings.json. Bail rather than corrupt.
+    if (!settings) return;
     onSave({ ...settings, hooks: next });
   };
 

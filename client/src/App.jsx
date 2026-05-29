@@ -3170,7 +3170,7 @@ export default function App() {
             <>
               <span className="text-ink-ghost shrink-0">/</span>
               <span className="text-[11px] text-ink-muted font-body truncate min-w-0 max-w-[220px]">
-                {customTitles[selectedSession.sessionId] || selectedSession.firstPrompt?.slice(0, 36) || selectedSession.sessionId.slice(0, 8)}
+                {customTitles[selectedSession.sessionId] || selectedSession.firstPrompt?.slice(0, 36) || selectedSession.sessionId?.slice(0, 8) || '新会话'}
               </span>
             </>
           )}

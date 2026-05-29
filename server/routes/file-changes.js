@@ -11,6 +11,14 @@ const execFileP = promisify(execFile);
 const router = Router();
 const PROJECTS_DIR = join(homedir(), '.claude', 'projects');
 
+// projectHash / sessionId arrive from the request and get concatenated into an
+// fs path under PROJECTS_DIR. A crafted `../../` would escape it. Real values
+// have no slashes / dots-dots. (Mirrors safeId in sessions.js.)
+function safeId(s) {
+  if (typeof s !== 'string' || !s) return false;
+  return !(s.includes('/') || s.includes('\\') || s.includes('..') || s.includes('\0'));
+}
+
 /**
  * Extract file changes from a session's tool calls.
  * Looks for Edit, Write, and Bash commands that modify files.
@@ -84,6 +92,9 @@ router.get('/sessions/:sessionId/file-changes', async (req, res) => {
     const { projectHash } = req.query;
     if (!projectHash) {
       return res.status(400).json({ error: 'projectHash required' });
+    }
+    if (!safeId(projectHash) || !safeId(req.params.sessionId)) {
+      return res.status(400).json({ error: 'invalid id' });
     }
     const filePath = join(PROJECTS_DIR, projectHash, `${req.params.sessionId}.jsonl`);
     const records = await parseJsonl(filePath);
