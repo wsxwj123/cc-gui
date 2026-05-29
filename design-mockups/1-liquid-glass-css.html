@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>方案 1 · 液态玻璃(CSS 仿真 · 全平台)</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700;12..96,800&family=Hanken+Grotesk:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --accent:#e0795b; --ink:#f4eef0; --ink-soft:#cfc6cf; --ink-faint:#9b909e;
+    --glass-stroke:rgba(255,255,255,.28); --glass-fill:rgba(255,255,255,.06);
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100%}
+  body{
+    font-family:'Hanken Grotesk',system-ui,sans-serif;color:var(--ink);
+    overflow:hidden;
+    background:
+      radial-gradient(120% 120% at 12% 8%, #4a2f55 0%, transparent 55%),
+      radial-gradient(120% 120% at 92% 12%, #b6553b 0%, transparent 48%),
+      radial-gradient(140% 140% at 70% 100%, #243047 0%, transparent 60%),
+      linear-gradient(150deg,#1a1320,#241a2e 60%,#161019);
+  }
+  /* floating ambient orbs to give the glass something to refract */
+  .orb{position:fixed;border-radius:50%;filter:blur(8px);opacity:.7;animation:float 18s ease-in-out infinite}
+  .orb.a{width:420px;height:420px;left:-80px;top:30%;background:radial-gradient(circle,#ff9a76,transparent 70%)}
+  .orb.b{width:360px;height:360px;right:6%;top:-60px;background:radial-gradient(circle,#8e6cff,transparent 70%);animation-delay:-6s}
+  .orb.c{width:300px;height:300px;right:24%;bottom:-40px;background:radial-gradient(circle,#49d0c4,transparent 70%);animation-delay:-11s}
+  @keyframes float{0%,100%{transform:translate(0,0)}50%{transform:translate(28px,-34px)}}
+
+  /* ─── the liquid-glass material (pure CSS, WebKit-safe) ─── */
+  .glass{
+    position:relative;border-radius:26px;
+    background:linear-gradient(135deg, rgba(255,255,255,.12), rgba(255,255,255,.03));
+    -webkit-backdrop-filter:blur(18px) saturate(170%);
+    backdrop-filter:blur(18px) saturate(170%);
+    border:1px solid var(--glass-stroke);
+    box-shadow:
+      0 12px 40px rgba(0,0,0,.45),
+      inset 0 1px 0 rgba(255,255,255,.5),
+      inset 0 -1px 1px rgba(255,255,255,.08),
+      inset 0 0 24px rgba(255,255,255,.04);
+  }
+  /* specular sheen sweeping the top edge — the "liquid" tell */
+  .glass::before{
+    content:"";position:absolute;inset:0;border-radius:inherit;pointer-events:none;
+    background:linear-gradient(135deg, rgba(255,255,255,.45) 0%, transparent 22%, transparent 78%, rgba(255,255,255,.12) 100%);
+    -webkit-mask:linear-gradient(#000,#000) content-box, linear-gradient(#000,#000);
+    -webkit-mask-composite:xor;mask-composite:exclude;padding:1px;opacity:.6;
+  }
+
+  .app{position:relative;display:grid;grid-template-columns:300px 1fr;height:100vh;padding:16px;gap:16px}
+
+  /* sidebar */
+  .side{display:flex;flex-direction:column;padding:18px 14px;overflow:hidden}
+  .brand{display:flex;align-items:center;gap:10px;padding:4px 8px 16px}
+  .brand .mark{width:30px;height:30px;border-radius:9px;background:linear-gradient(135deg,var(--accent),#b6553b);display:grid;place-items:center;font-weight:800;color:#1a1320;box-shadow:0 4px 14px rgba(224,121,91,.5)}
+  .brand b{font-family:'Bricolage Grotesque';font-size:17px;letter-spacing:-.3px}
+  .search{display:flex;align-items:center;gap:8px;padding:9px 12px;border-radius:12px;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.1);color:var(--ink-faint);font-size:12.5px;margin-bottom:14px}
+  .sec{font-size:10px;letter-spacing:.18em;text-transform:uppercase;color:var(--ink-faint);padding:4px 8px;display:flex;justify-content:space-between;align-items:center}
+  .list{display:flex;flex-direction:column;gap:6px;margin-top:6px;overflow-y:auto;flex:1}
+  .card{padding:11px 12px;border-radius:14px;cursor:pointer;border:1px solid transparent;transition:.18s}
+  .card:hover{background:rgba(255,255,255,.05)}
+  .card.on{background:linear-gradient(135deg,rgba(255,255,255,.14),rgba(255,255,255,.04));border-color:var(--glass-stroke);box-shadow:inset 0 1px 0 rgba(255,255,255,.4)}
+  .card .t{font-size:13px;font-weight:600;color:var(--ink);margin-bottom:5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .meta{display:flex;align-items:center;gap:7px;font-size:10.5px;color:var(--ink-faint)}
+  .badge{font-size:9.5px;font-weight:600;padding:2px 7px;border-radius:6px;background:rgba(224,121,91,.2);color:#ffb39a;border:1px solid rgba(224,121,91,.35)}
+  .newbtn{margin-top:12px;padding:11px;border-radius:13px;border:none;font-family:inherit;font-weight:600;font-size:13px;color:#1a1320;background:linear-gradient(135deg,#f0a085,var(--accent));cursor:pointer;box-shadow:0 6px 18px rgba(224,121,91,.4)}
+
+  /* main */
+  .main{display:flex;flex-direction:column;overflow:hidden}
+  .head{display:flex;align-items:center;gap:12px;padding:18px 24px;border-bottom:1px solid rgba(255,255,255,.08)}
+  .head h1{font-family:'Bricolage Grotesque';font-size:16px;font-weight:700;letter-spacing:-.2px}
+  .head .stat{font-size:11px;color:var(--ink-faint);font-variant-numeric:tabular-nums}
+  .chat{flex:1;overflow-y:auto;padding:26px 28px;display:flex;flex-direction:column;gap:20px}
+  .msg{max-width:80%}
+  .msg.user{align-self:flex-end}
+  .bubble{padding:13px 17px;border-radius:18px;font-size:14px;line-height:1.6}
+  .user .bubble{background:linear-gradient(135deg,rgba(224,121,91,.9),#c4634a);color:#fff;border-bottom-right-radius:6px;box-shadow:0 6px 20px rgba(224,121,91,.35)}
+  .ai{align-self:flex-start;max-width:88%}
+  .ai .who{display:flex;align-items:center;gap:8px;margin-bottom:9px;font-size:12px;color:var(--ink-soft)}
+  .ai .dot{width:22px;height:22px;border-radius:7px;background:linear-gradient(135deg,var(--accent),#b6553b);display:grid;place-items:center;font-size:11px;color:#1a1320;font-weight:800}
+  .ai .text{font-size:14px;line-height:1.7;color:var(--ink-soft)}
+  .tool{margin:11px 0;border-radius:13px;overflow:hidden;border:1px solid rgba(255,255,255,.12);background:rgba(0,0,0,.22)}
+  .tool .bar{display:flex;align-items:center;gap:8px;padding:8px 12px;font-size:11.5px;background:rgba(255,255,255,.05);color:var(--ink-soft);font-family:'Hanken Grotesk'}
+  .tool code{font-family:ui-monospace,monospace;font-size:11.5px}
+  .tool pre{padding:11px 14px;font-family:ui-monospace,monospace;font-size:11.5px;color:#bfe6c8;white-space:pre-wrap;line-height:1.55}
+  .diff .add{color:#86e0a0}.diff .del{color:#ff9a93}
+  .composer{margin:0 22px 22px;padding:6px 6px 6px 18px;display:flex;align-items:center;gap:12px;border-radius:22px}
+  .composer input{flex:1;background:transparent;border:none;outline:none;color:var(--ink);font-family:inherit;font-size:14px;padding:12px 0}
+  .composer input::placeholder{color:var(--ink-faint)}
+  .chip{font-size:10.5px;padding:5px 10px;border-radius:9px;background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.14);color:var(--ink-soft)}
+  .send{width:42px;height:42px;border-radius:15px;border:none;background:linear-gradient(135deg,#f0a085,var(--accent));color:#1a1320;font-size:17px;cursor:pointer;box-shadow:0 6px 18px rgba(224,121,91,.4)}
+  .tag{position:fixed;left:16px;bottom:14px;font-size:10.5px;color:var(--ink-faint);background:rgba(0,0,0,.3);padding:6px 12px;border-radius:20px;border:1px solid rgba(255,255,255,.1);backdrop-filter:blur(8px)}
+  .chat::-webkit-scrollbar,.list::-webkit-scrollbar{width:7px}
+  .chat::-webkit-scrollbar-thumb,.list::-webkit-scrollbar-thumb{background:rgba(255,255,255,.14);border-radius:4px}
+</style>
+</head>
+<body>
+  <div class="orb a"></div><div class="orb b"></div><div class="orb c"></div>
+
+  <div class="app">
+    <!-- SIDEBAR -->
+    <aside class="side glass">
+      <div class="brand"><span class="mark">✳</span><b>Claude GUI</b></div>
+      <div class="search">🔍 搜索会话…</div>
+      <div class="sec">会话 <span>12</span></div>
+      <div class="list">
+        <div class="card on">
+          <div class="t">修复 Tauri 壳后端拉起</div>
+          <div class="meta"><span class="badge">Opus 4.8</span><span>48 条</span><span>· 刚刚</span></div>
+        </div>
+        <div class="card">
+          <div class="t">全面 Bug 排查与安全加固</div>
+          <div class="meta"><span class="badge">Opus 4.8</span><span>132 条</span><span>· 1 小时前</span></div>
+        </div>
+        <div class="card">
+          <div class="t">分屏 1-6 栏升级</div>
+          <div class="meta"><span class="badge">Sonnet</span><span>+3 子任务</span><span>· 昨天</span></div>
+        </div>
+        <div class="card">
+          <div class="t">用量按 provider 分组</div>
+          <div class="meta"><span class="badge">Sonnet</span><span>27 条</span><span>· 周二</span></div>
+        </div>
+      </div>
+      <button class="newbtn">＋ 新建会话</button>
+    </aside>
+
+    <!-- MAIN -->
+    <section class="main glass">
+      <div class="head">
+        <h1>修复 Tauri 壳后端拉起</h1>
+        <span class="badge">Opus 4.8</span>
+        <span class="stat">· 48 条消息 · 12 工具调用</span>
+        <span style="flex:1"></span>
+        <span class="chip">⏵ 接受编辑</span>
+      </div>
+
+      <div class="chat">
+        <div class="msg user"><div class="bubble">用 Tauri 壳包装一下,启动时自动拉起 node 后端</div></div>
+
+        <div class="msg ai">
+          <div class="who"><span class="dot">✳</span> Claude · Opus 4.8</div>
+          <div class="text">我会在 <code>setup()</code> 里检测 6677 端口,未就绪则 spawn <code>node server/index.js</code>,等端口响应后再创建窗口,退出时杀子进程。</div>
+          <div class="tool">
+            <div class="bar">⚙ Bash · <code>cargo build</code></div>
+            <pre>   Compiling tauri v2.10.0
+   Compiling claude-gui v0.1.0
+    Finished `dev` profile in 1m 12s</pre>
+          </div>
+          <div class="tool diff">
+            <div class="bar">✎ Edit · <code>src-tauri/src/lib.rs</code></div>
+            <pre><span class="add">+ fn port_up() -> bool { TcpStream::connect_timeout(..) }</span>
+<span class="add">+ WebviewWindowBuilder::new(app,"main",External(URL)).build()?;</span></pre>
+          </div>
+          <div class="text">壳已就绪。<code>npm run tauri:dev</code> 会拉起原生窗口并自动启动后端。</div>
+        </div>
+      </div>
+
+      <div class="composer glass" style="border-radius:22px">
+        <input placeholder="输入消息…  (/ 命令 · Enter 发送 · 可拖入图片)">
+        <span class="chip">📎</span>
+        <button class="send">↑</button>
+      </div>
+    </section>
+  </div>
+
+  <div class="tag">方案 1 · 液态玻璃 CSS 仿真 — backdrop-filter + 多层高光/边缘高光,Chromium & WebKit(Tauri)均可渲染</div>
+</body>
+</html>

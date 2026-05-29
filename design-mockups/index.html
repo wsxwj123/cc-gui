@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Claude GUI · UI/UX 方案预览</title>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,800&family=Hanken+Grotesk:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:'Hanken Grotesk',sans-serif;background:#15101b;color:#eee;min-height:100vh;padding:48px 32px;
+    background:radial-gradient(120% 100% at 20% 0%,#2a1d35,transparent 60%),radial-gradient(100% 100% at 100% 0%,#5a2f22,transparent 55%),#15101b}
+  h1{font-family:'Bricolage Grotesque';font-size:34px;font-weight:800;letter-spacing:-1px;margin-bottom:6px}
+  .sub{color:#a99fb0;font-size:15px;margin-bottom:36px;max-width:680px;line-height:1.6}
+  .grid{display:grid;grid-template-columns:repeat(2,1fr);gap:20px;max-width:1000px}
+  a.card{display:block;text-decoration:none;color:inherit;border:1px solid rgba(255,255,255,.12);border-radius:16px;padding:24px;background:rgba(255,255,255,.04);transition:.2s}
+  a.card:hover{transform:translateY(-3px);border-color:rgba(255,255,255,.3);background:rgba(255,255,255,.07)}
+  .n{font-family:'Bricolage Grotesque';font-size:12px;color:#e0795b;letter-spacing:.1em;text-transform:uppercase;margin-bottom:10px}
+  .ti{font-family:'Bricolage Grotesque';font-size:21px;font-weight:600;margin-bottom:8px}
+  .de{font-size:13.5px;color:#a99fb0;line-height:1.55}
+  .pill{display:inline-block;font-size:10.5px;margin-top:14px;padding:3px 9px;border-radius:20px;border:1px solid rgba(255,255,255,.18);color:#cfc6cf}
+  .pill.warn{border-color:rgba(255,140,90,.5);color:#ffb39a}
+  .pill.ok{border-color:rgba(120,220,150,.4);color:#9fe0b0}
+</style>
+</head>
+<body>
+  <h1>Claude GUI · UI/UX 方案</h1>
+  <div class="sub">同一套界面(侧栏 + 对话 + 输入框)的四个设计方向,内容一致便于对比。点开任一卡片查看全屏效果。<b>玻璃两版只换折射技术,其余完全一致</b>。</div>
+  <div class="grid">
+    <a class="card" href="1-liquid-glass-css.html">
+      <div class="n">方案 01</div><div class="ti">液态玻璃 · CSS 仿真</div>
+      <div class="de">backdrop-filter + 多层高光/边缘高光模拟玻璃质感,深色氛围背景透出折射感。无真实位移,但<b>全平台一致</b>。</div>
+      <span class="pill ok">Tauri/WebKit ✓</span> <span class="pill ok">Chrome ✓</span>
+    </a>
+    <a class="card" href="2-liquid-glass-real.html">
+      <div class="n">方案 02</div><div class="ti">液态玻璃 · 真折射</div>
+      <div class="de">复刻 liquid-glass-react:SVG feDisplacementMap 真实弯折背景边缘。效果最惊艳,但<b>仅 Chromium 生效</b>,Tauri/Safari 退化为毛玻璃。</div>
+      <span class="pill ok">Chrome ✓</span> <span class="pill warn">Tauri/WebKit ✗ 退化</span>
+    </a>
+    <a class="card" href="3-editorial-warm.html">
+      <div class="n">方案 03</div><div class="ti">编辑 · 暖陶</div>
+      <div class="de">亮色暖纸 + Fraunces 衬线 + IBM Plex Mono,Claude 陶土色点缀。安静、有书卷气,长时间阅读舒适。</div>
+      <span class="pill ok">全平台 ✓</span>
+    </a>
+    <a class="card" href="4-mono-terminal.html">
+      <div class="n">方案 04</div><div class="ti">终端 · 极简开发</div>
+      <div class="de">深色 + JetBrains Mono 等宽 + 锐利栅格 + 荧光高亮。高密度、工具感强,贴合开发者直觉。</div>
+      <span class="pill ok">全平台 ✓</span>
+    </a>
+  </div>
+</body>
+</html>
