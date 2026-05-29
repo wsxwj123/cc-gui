@@ -4,7 +4,7 @@ import { WebSocketServer } from 'ws';
 import cors from 'cors';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
-import { existsSync } from 'fs';
+import { existsSync, readFileSync } from 'fs';
 import sessionRoutes from './routes/sessions.js';
 import chatRoutes from './routes/chat.js';
 import processRoutes from './routes/processes.js';
@@ -25,16 +25,33 @@ import filesRoutes from './routes/files.js';
 import remoteControlRoutes from './routes/remote-control.js';
 import { setupFileWatcher } from './services/file-watcher.js';
 import { getDefaultModel, getAvailableModels, setDefaultModel } from './services/model-resolver.js';
-import { readdir, readFile } from 'fs/promises';
-import { homedir } from 'os';
+import { readdir, readFile, writeFile, mkdir } from 'fs/promises';
+import { homedir, networkInterfaces } from 'os';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const PORT = process.env.PORT || 6677;
-// Bind to loopback by default so the GUI is NEVER reachable from the network.
-// This server has no auth and can read/write $HOME + spawn `claude`; exposing it
-// on 0.0.0.0 would hand any machine on the LAN full shell access. Advanced users
-// who knowingly want LAN access can set HOST=0.0.0.0 (do so behind a firewall).
-const HOST = process.env.HOST || '127.0.0.1';
+// Network binding: env > ~/.claude-gui/network.json > loopback default.
+// The GUI has no auth and can read/write $HOME + spawn `claude`; binding 0.0.0.0
+// hands any machine that can reach the port full shell access. The Settings UI
+// exposes a LAN toggle (writes the config below) behind a red warning — access
+// control is delegated to the network layer (tailscale ACL / LAN isolation).
+const NETWORK_CONFIG_PATH = join(homedir(), '.claude-gui', 'network.json');
+function loadNetworkConfig() {
+  try {
+    if (existsSync(NETWORK_CONFIG_PATH)) {
+      const cfg = JSON.parse(readFileSync(NETWORK_CONFIG_PATH, 'utf-8'));
+      const host = cfg.host === '0.0.0.0' ? '0.0.0.0' : '127.0.0.1';
+      const port = Number.isInteger(cfg.port) && cfg.port >= 1024 && cfg.port <= 65535 ? cfg.port : 6677;
+      return { host, port };
+    }
+  } catch {}
+  return { host: '127.0.0.1', port: 6677 };
+}
+const _netCfg = loadNetworkConfig();
+const PORT = process.env.PORT || _netCfg.port;
+const HOST = process.env.HOST || _netCfg.host;
+// LAN mode = bound to all interfaces. Loosens CORS (below) so a phone hitting
+// http://<lanIp>:PORT isn't rejected as cross-origin.
+const lanMode = HOST === '0.0.0.0';
 
 const app = express();
 // Same-origin only: in prod the SPA is served from this same port; in dev Vite
@@ -45,6 +62,9 @@ app.use(cors({
   origin: (origin, cb) => {
     // Non-browser clients (curl, same-origin fetch) send no Origin header.
     if (!origin) return cb(null, true);
+    // LAN mode: user opted into network exposure (UI toggle + warning), so allow
+    // any origin — access control is delegated to the network layer (tailscale/LAN).
+    if (lanMode) return cb(null, true);
     try {
       const { hostname } = new URL(origin);
       if (hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1') {
@@ -78,6 +98,41 @@ app.use('/api', pickerRoutes);
 app.use('/api', permissionsRoutes);
 app.use('/api', filesRoutes);
 app.use('/api', remoteControlRoutes);
+
+// GET /api/network — current binding + LAN addresses for the Settings UI.
+function lanIps() {
+  const out = [];
+  const nets = networkInterfaces();
+  for (const name of Object.keys(nets)) {
+    for (const ni of nets[name] || []) {
+      if (ni.family === 'IPv4' && !ni.internal) out.push(ni.address);
+    }
+  }
+  return out;
+}
+app.get('/api/network', (req, res) => {
+  res.json({ host: HOST, port: PORT, lanMode, lanIps: lanIps(), configPath: NETWORK_CONFIG_PATH });
+});
+// POST /api/network — persist binding to ~/.claude-gui/network.json. Takes effect
+// on next server start (we never relisten at runtime). host limited to loopback or
+// all-interfaces; port to the unprivileged range.
+app.post('/api/network', async (req, res) => {
+  const { host, port } = req.body || {};
+  if (host !== '0.0.0.0' && host !== '127.0.0.1') {
+    return res.status(400).json({ error: 'host 必须是 127.0.0.1 或 0.0.0.0' });
+  }
+  const p = Number(port);
+  if (!Number.isInteger(p) || p < 1024 || p > 65535) {
+    return res.status(400).json({ error: '端口需为 1024–65535 的整数' });
+  }
+  try {
+    await mkdir(dirname(NETWORK_CONFIG_PATH), { recursive: true });
+    await writeFile(NETWORK_CONFIG_PATH, JSON.stringify({ host, port: p }, null, 2));
+    res.json({ ok: true, host, port: p, restartRequired: true });
+  } catch (e) {
+    res.status(500).json({ error: '写入配置失败：' + e.message });
+  }
+});
 
 // GET /api/model — current default model + available models
 app.get('/api/model', async (req, res) => {

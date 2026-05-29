@@ -58,7 +58,7 @@ export function SettingsPanel() {
   return (
     <div className="px-4 py-4 space-y-4 overflow-y-auto h-full">
       <div className="flex items-center gap-1 border-b border-canvas-deep -mx-4 px-4 pb-2">
-        {[['overview', '概览'], ['hooks', 'Hooks'], ['json', 'JSON'], ['storage', '存储']].map(([id, label]) => (
+        {[['overview', '概览'], ['hooks', 'Hooks'], ['json', 'JSON'], ['storage', '存储'], ['network', '网络']].map(([id, label]) => (
           <button key={id} onClick={() => setTab(id)}
             className={`text-[11px] px-2.5 py-1 rounded font-body transition-colors ${tab === id ? 'bg-accent/15 text-accent' : 'text-ink-muted hover:text-ink'}`}>
             {label}
@@ -85,6 +85,93 @@ export function SettingsPanel() {
           saving={saving} saved={saved} />
       )}
       {tab === 'storage' && <StorageTab />}
+      {tab === 'network' && <NetworkTab />}
+    </div>
+  );
+}
+
+// Network access controls — toggle LAN binding (0.0.0.0) + custom port. Writes
+// ~/.claude-gui/network.json; takes effect on next server start (no runtime
+// relisten). No auth is added — access control is delegated to the network layer
+// (tailscale/LAN) per the user's explicit choice, so a red warning is shown.
+function NetworkTab() {
+  const [cfg, setCfg] = useState(null);
+  const [lanOn, setLanOn] = useState(false);
+  const [port, setPort] = useState(6677);
+  const [saving, setSaving] = useState(false);
+  const [msg, setMsg] = useState(null);
+  const [err, setErr] = useState(null);
+
+  const load = async () => {
+    try {
+      const r = await fetch('/api/network');
+      const d = await r.json();
+      setCfg(d); setLanOn(d.host === '0.0.0.0'); setPort(d.port);
+    } catch (e) { setErr(e.message); }
+  };
+  useEffect(() => { load(); }, []);
+
+  const save = async () => {
+    setSaving(true); setErr(null); setMsg(null);
+    try {
+      const r = await fetch('/api/network', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ host: lanOn ? '0.0.0.0' : '127.0.0.1', port: Number(port) }),
+      });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || '保存失败');
+      setMsg('已保存。重启 server 后生效。'); load();
+    } catch (e) { setErr(e.message); }
+    setSaving(false);
+  };
+
+  if (!cfg) return <div className="py-8 flex justify-center"><RefreshCw size={14} className="animate-spin text-ink-faint" /></div>;
+  const lanAddr = cfg.lanIps?.[0] ? `http://${cfg.lanIps[0]}:${port}` : null;
+
+  return (
+    <div className="space-y-4">
+      <div className="text-[11px] text-ink-muted font-body">
+        当前绑定：<span className="font-mono text-ink">{cfg.host}:{cfg.port}</span>
+        <span className="ml-2">{cfg.lanMode ? '（局域网可访问）' : '（仅本机）'}</span>
+      </div>
+
+      <label className="flex items-start gap-3 cursor-pointer">
+        <input type="checkbox" checked={lanOn} onChange={(e) => setLanOn(e.target.checked)} className="mt-0.5" />
+        <div>
+          <div className="text-[13px] text-ink font-body font-medium">开放局域网访问（绑定 0.0.0.0）</div>
+          <div className="text-[11px] text-ink-faint font-body">关闭时仅本机 127.0.0.1 可访问；开启后同局域网 / Tailscale 设备（含手机）可用下方地址打开。</div>
+        </div>
+      </label>
+
+      <div className="flex items-center gap-2">
+        <span className="text-[12px] text-ink-soft font-body">端口</span>
+        <input type="number" min={1024} max={65535} value={port} onChange={(e) => setPort(e.target.value)}
+          className="w-24 px-2 py-1 text-[12px] font-mono border border-canvas-deep rounded bg-canvas text-ink" />
+      </div>
+
+      {lanOn && lanAddr && (
+        <div className="text-[11px] text-ink-muted font-body">
+          局域网地址：<span className="font-mono text-accent">{lanAddr}</span>
+          {cfg.lanIps.length > 1 && <span className="text-ink-faint"> （共 {cfg.lanIps.length} 个网卡，按需选用）</span>}
+        </div>
+      )}
+
+      {lanOn && (
+        <div className="flex items-start gap-2 text-[11px] text-error bg-error-subtle rounded-lg p-2.5 font-body leading-relaxed">
+          <AlertCircle size={14} className="mt-0.5 shrink-0" />
+          <span><b>安全警告：</b>本服务无任何鉴权，凡能连到该端口的设备都可在你电脑上运行 claude、读写主目录。仅在 Tailscale ACL 或可信局域网内开启，<b>切勿暴露到公网或公共 WiFi</b>。</span>
+        </div>
+      )}
+
+      <div className="flex items-center gap-2">
+        <button onClick={save} disabled={saving}
+          className="btn-accent flex items-center gap-1.5 px-3 py-1.5 text-[12px] font-body disabled:opacity-50">
+          <Save size={12} />{saving ? '保存中…' : '保存'}
+        </button>
+        {msg && <span className="text-[11px] text-success font-body">{msg}</span>}
+        {err && <span className="text-[11px] text-error font-body">{err}</span>}
+      </div>
+      <p className="text-[10.5px] text-ink-faint font-body">改动写入 <span className="font-mono">~/.claude-gui/network.json</span>，下次启动 server 生效（运行时不热切换绑定）。重启：终端运行 <span className="font-mono">npm run restart</span>。</p>
     </div>
   );
 }
