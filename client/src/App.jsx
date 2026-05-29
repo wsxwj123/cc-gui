@@ -4,7 +4,7 @@ import React, { useEffect, useRef, useState, useCallback, useMemo } from 'react'
 // #185 (Maximum update depth exceeded) caused by returning fresh `[]` on
 // every selector call. Any selector with `|| []` fallback must point here.
 const EMPTY_ARRAY = Object.freeze([]);
-import { useStore } from './stores/sessionStore.js';
+import { useStore, THEME_FAMILIES, systemPrefersDark } from './stores/sessionStore.js';
 import { useWebSocket } from './hooks/useWebSocket.js';
 import { MessageBubble } from './components/MessageBubble.jsx';
 import { TurnBubble } from './components/TurnBubble.jsx';
@@ -24,11 +24,64 @@ import {
   FolderOpen, MessageSquare, ChevronLeft, ChevronRight, ChevronDown,
   Search, Hash, Layers, BarChart3, ArrowLeft, Plus,
   RefreshCw, Activity, Settings, Server, GitBranch, FileDiff, Check, Wrench, X,
-  Sun, Moon, Monitor, Play, Bot, Camera, History, Loader2, Shield, FolderTree,
-  Archive, ArchiveRestore, Trash2, EyeOff, Columns2, Smartphone,
+  Sun, Moon, Monitor, Bot, Camera, History, Loader2, Shield, FolderTree,
+  Archive, ArchiveRestore, Trash2, EyeOff, Columns2, Smartphone, Pencil, Type, Palette,
 } from 'lucide-react';
 
 // ── Per-session shadow-git checkpoints ──────────────────────────
+// Session title with inline rename (click pencil → edit → Enter/blur saves,
+// Esc cancels). Empty value reverts to the auto firstPrompt. Drafts (no stable
+// sessionId yet) can't be renamed — the pencil is hidden until the first send.
+function EditableSessionTitle({ session }) {
+  const customTitles = useStore((s) => s.customTitles);
+  const setCustomTitle = useStore((s) => s.setCustomTitle);
+  const sid = session?.sessionId;
+  const auto = session?.firstPrompt?.slice(0, 80) || '会话详情';
+  const display = (sid && customTitles[sid]) || auto;
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState('');
+  const inputRef = useRef(null);
+  useEffect(() => { if (editing) inputRef.current?.focus(); }, [editing]);
+
+  const start = () => {
+    if (!sid) return;
+    setDraft((customTitles[sid] || session.firstPrompt || '').slice(0, 200));
+    setEditing(true);
+  };
+  const save = () => { setCustomTitle(sid, draft); setEditing(false); };
+
+  if (editing) {
+    return (
+      <input
+        ref={inputRef}
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') { e.preventDefault(); save(); }
+          else if (e.key === 'Escape') { e.preventDefault(); setEditing(false); }
+        }}
+        onBlur={save}
+        maxLength={200}
+        placeholder="自定义标题（留空恢复默认）"
+        className="text-sm text-ink font-display font-medium bg-canvas-warm border border-accent/40 rounded px-1.5 py-0.5 w-full focus:outline-none"
+      />
+    );
+  }
+  return (
+    <div className="group/title flex items-center gap-1.5 min-w-0">
+      <span className="text-sm text-ink font-display font-medium truncate" title={display}>{display}</span>
+      <button
+        onClick={start}
+        disabled={!sid}
+        className="shrink-0 opacity-0 group-hover/title:opacity-100 transition-opacity p-0.5 rounded hover:bg-canvas-deep disabled:hidden"
+        title="重命名会话"
+      >
+        <Pencil size={11} className="text-ink-faint" />
+      </button>
+    </div>
+  );
+}
+
 function CheckpointButton({ sessionId, cwd }) {
   const [open, setOpen] = useState(false);
   const [entries, setEntries] = useState([]);
@@ -106,74 +159,111 @@ function CheckpointButton({ sessionId, cwd }) {
   );
 }
 
-// ── Continue most recent session (mirrors `claude --continue`) ────
-function ContinueButton() {
-  const { projects, selectedProject } = useStore();
-  const [loading, setLoading] = useState(false);
-  const handle = async () => {
-    if (loading) return;
-    setLoading(true);
-    try {
-      const params = selectedProject ? `?projectHash=${encodeURIComponent(selectedProject.hash)}` : '';
-      const res = await fetch(`/api/recent-session${params}`);
-      if (!res.ok) { alert('没有最近会话'); return; }
-      const { projectHash, sessionId } = await res.json();
-      if (!projectHash || !sessionId) { alert('没有最近会话'); return; }
-      // Make sure projects are loaded — first launch may not have them yet.
-      let project = (selectedProject && selectedProject.hash === projectHash)
-        ? selectedProject
-        : projects.find((p) => p.hash === projectHash);
-      if (!project) {
-        await useStore.getState().fetchProjects();
-        project = useStore.getState().projects.find((p) => p.hash === projectHash);
-      }
-      if (!project) { alert('找不到对应项目'); return; }
-      useStore.getState().setSelectedProject(project);
-      await useStore.getState().fetchSessions(project.hash, { silent: true });
-      const target = useStore.getState().sessions.find((s) => s.sessionId === sessionId);
-      if (target) {
-        useStore.getState().setSelectedSession(target);
-        useStore.getState().fetchMessages(target.sessionId, target.projectHash);
-      } else {
-        alert('会话已不存在');
-      }
-    } catch (err) {
-      alert('加载最近会话失败：' + err.message);
-    } finally {
-      setLoading(false);
-    }
-  };
-  return (
-    <button onClick={handle} disabled={loading}
-      className="px-1.5 py-1 rounded-lg text-ink-muted hover:text-ink hover:bg-black/5 transition-colors disabled:opacity-50 flex flex-col items-center gap-0.5"
-      title="继续最近的会话（claude --continue）">
-      {loading ? <Loader2 size={14} className="animate-spin" /> : <Play size={14} />}
-      <span className="text-[9px] leading-none font-body">继续</span>
-    </button>
-  );
-}
+// ── Theme popover (tone + font size + color family picker) ────────
+// Theme is a (family, tone) pair. tone ∈ {light, dark, auto}; family maps to a
+// data-cgui-theme variant. The follow-system option lives in the tone control;
+// the font-size slider and family grid moved here from the old Settings 外观 tab.
+const TONES = [
+  { id: 'light', label: '浅色', Icon: Sun },
+  { id: 'dark', label: '深色', Icon: Moon },
+  { id: 'auto', label: '跟随系统', Icon: Monitor },
+];
 
-// ── Theme toggle (cycles auto → light → dark) ─────────────────────
 function ThemeToggle() {
-  const [theme, setTheme] = useState(() =>
-    typeof document !== 'undefined' ? document.documentElement.getAttribute('data-theme') || 'auto' : 'auto'
-  );
-  const next = { auto: 'light', light: 'dark', dark: 'auto' };
-  const Icon = theme === 'light' ? Sun : theme === 'dark' ? Moon : Monitor;
-  const label = theme === 'light' ? '浅色' : theme === 'dark' ? '深色' : '跟随系统';
-  const cycle = () => {
-    const n = next[theme] || 'auto';
-    setTheme(n);
-    document.documentElement.setAttribute('data-theme', n);
-    localStorage.setItem('cgui-theme', n);
-  };
+  const [open, setOpen] = useState(false);
+  const wrapRef = useRef(null);
+  const themeFamily = useStore((s) => s.themeFamily);
+  const themeTone = useStore((s) => s.themeTone);
+  const setTheme = useStore((s) => s.setTheme);
+  const uiFontScale = useStore((s) => s.uiFontScale);
+  const setUiFontScale = useStore((s) => s.setUiFontScale);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e) => { if (wrapRef.current && !wrapRef.current.contains(e.target)) setOpen(false); };
+    document.addEventListener('mousedown', onDown);
+    return () => document.removeEventListener('mousedown', onDown);
+  }, [open]);
+
+  const effDark = themeTone === 'auto' ? systemPrefersDark() : themeTone === 'dark';
+  const toneKey = effDark ? 'dark' : 'light';
+  const ToneIcon = themeTone === 'light' ? Sun : themeTone === 'dark' ? Moon : Monitor;
+
   return (
-    <button onClick={cycle}
-      className="px-1.5 py-1 rounded-lg text-ink-muted hover:text-ink hover:bg-black/5 transition-colors flex flex-col items-center gap-0.5"
-      title={`主题：${label}（点击切换）`}>
-      <Icon size={15} />
-      <span className="text-[9px] leading-none font-body">主题</span>
-    </button>
+    <div ref={wrapRef} className="relative">
+      <button onClick={() => setOpen((v) => !v)}
+        className="px-1.5 py-1 rounded-lg text-ink-muted hover:text-ink hover:bg-black/5 transition-colors flex flex-col items-center gap-0.5"
+        title="主题与外观">
+        <ToneIcon size={15} />
+        <span className="text-[9px] leading-none font-body">主题</span>
+      </button>
+
+      {open && (
+        <div className="absolute right-0 top-full mt-2 z-50 w-[300px] glass-popover rounded-2xl border border-canvas-deep shadow-xl p-3 space-y-3">
+          {/* ── Tone (light / dark / follow-system) ───────────── */}
+          <div className="flex items-center gap-1 p-1 rounded-xl bg-black/5">
+            {TONES.map(({ id, label, Icon }) => (
+              <button key={id} onClick={() => setTheme(themeFamily, id)}
+                className={`flex-1 flex items-center justify-center gap-1 py-1.5 rounded-lg text-[11px] font-body transition-colors ${
+                  themeTone === id ? 'bg-accent text-white shadow-sm' : 'text-ink-muted hover:text-ink'}`}>
+                <Icon size={12} /> {label}
+              </button>
+            ))}
+          </div>
+
+          {/* ── Font scale ────────────────────────────────────── */}
+          <div className="space-y-1.5">
+            <div className="flex items-center gap-2">
+              <Type size={12} className="text-ink-muted" />
+              <span className="text-[11px] text-ink font-body font-medium">界面字体大小</span>
+              <span className="ml-auto text-[10px] text-ink-faint font-mono">{Math.round(uiFontScale * 100)}%</span>
+            </div>
+            <div className="flex items-center gap-2 px-0.5">
+              <span className="text-[9px] text-ink-faint">A</span>
+              <input type="range" min="0.8" max="1.5" step="0.05" value={uiFontScale}
+                onChange={(e) => setUiFontScale(parseFloat(e.target.value))}
+                className="flex-1 accent-accent" />
+              <span className="text-[13px] text-ink-faint">A</span>
+              <button onClick={() => setUiFontScale(1)}
+                className="text-[9px] text-ink-muted hover:text-ink underline-offset-2 hover:underline shrink-0">重置</button>
+            </div>
+          </div>
+
+          {/* ── Color family ──────────────────────────────────── */}
+          <div className="space-y-1.5">
+            <div className="flex items-center gap-2">
+              <Palette size={12} className="text-ink-muted" />
+              <span className="text-[11px] text-ink font-body font-medium">配色外观</span>
+              <span className="ml-auto text-[9px] text-ink-faint font-body">当前 {toneKey === 'dark' ? '深色' : '浅色'}</span>
+            </div>
+            <div className="grid grid-cols-2 gap-1.5 max-h-[300px] overflow-y-auto pr-0.5">
+              {THEME_FAMILIES.map((fam) => {
+                const sw = fam[toneKey];
+                const active = themeFamily === fam.id;
+                return (
+                  <button key={fam.id} onClick={() => setTheme(fam.id, themeTone)}
+                    style={{
+                      backgroundColor: sw.bg, color: sw.fg,
+                      borderColor: active ? sw.accent : sw.bg2,
+                      borderWidth: active ? 2 : 1,
+                      boxShadow: active ? `0 0 0 3px ${sw.accent}22` : 'none',
+                    }}
+                    className="text-left px-2 py-2 rounded-lg border flex items-center gap-2 transition-all hover:brightness-110">
+                    <div className="flex gap-0.5 shrink-0 items-stretch">
+                      <div className="w-3 h-6 rounded-sm" style={{ background: sw.accent }} />
+                      <div className="w-1.5 h-6 rounded-sm" style={{ background: sw.bg2 }} />
+                      <div className="w-1.5 h-6 rounded-sm" style={{ background: sw.fg, opacity: 0.85 }} />
+                    </div>
+                    <span style={{ color: sw.fg }} className="text-[10px] font-body font-medium leading-tight flex-1 min-w-0 truncate">{fam.name}</span>
+                    {active && <Check size={12} style={{ color: sw.accent }} className="shrink-0" />}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -384,38 +474,32 @@ function SplitMain({ activeTabIndex, setActiveTabIndex }) {
   const paneIds = useStore((s) => s.paneIds);
   const closePane = useStore((s) => s.closePane);
   const rowRef = useRef(null);
-  // Per-pane flex-grow weights — drag a splitter between two panes to shift
-  // width between them. In-memory only; reset to equal when paneCount changes.
-  const [weights, setWeights] = useState(() => Array(paneCount).fill(1));
+  const MIN_PANE_PX = 280;
+  // Per-pane width in px. Each pane keeps its own fixed width; the row scrolls
+  // horizontally when their sum exceeds the viewport. Default = half the
+  // viewport so 2 panes fill the screen and 3+ overflow into a scroll (rather
+  // than crushing every pane to fit). Reset on paneCount change.
+  const [widths, setWidths] = useState([]);
   useEffect(() => {
-    setWeights((prev) => (prev.length === paneCount ? prev : Array(paneCount).fill(1)));
+    const cw = rowRef.current?.getBoundingClientRect().width || 0;
+    // Subtract per-pane margins + splitter so 2 panes fit without a scrollbar.
+    const def = cw > 0 ? Math.max(MIN_PANE_PX, Math.round(cw / 2) - 18) : 480;
+    setWidths(Array(paneCount).fill(def));
   }, [paneCount]);
 
-  // Splitter drag: transfer weight between pane `idx` and `idx+1` proportional
-  // to the pixel delta over the row width, clamped so neither shrinks below 15%
-  // of their combined weight.
+  // Splitter drag: resize ONLY the pane left of the handle (independent sizing).
+  // Panes to the right just shift along; the row scrolls if the total grows.
   const startResize = (idx) => (e) => {
     e.preventDefault();
     e.stopPropagation();
-    const row = rowRef.current;
-    if (!row) return;
-    const rowWidth = row.getBoundingClientRect().width || 1;
     const startX = e.clientX;
-    const start = [...weights];
-    while (start.length < paneCount) start.push(1);
-    const total = start.reduce((a, b) => a + (b || 1), 0);
-    const pairSum = (start[idx] || 1) + (start[idx + 1] || 1);
-    const minW = 0.15 * pairSum;
+    const startW = widths[idx] ?? 480;
     const onMove = (ev) => {
-      const dW = ((ev.clientX - startX) / rowWidth) * total;
-      let left = (start[idx] || 1) + dW;
-      let right = (start[idx + 1] || 1) - dW;
-      if (left < minW) { left = minW; right = pairSum - minW; }
-      if (right < minW) { right = minW; left = pairSum - minW; }
-      setWeights((w) => {
-        const n = [...w];
-        while (n.length < paneCount) n.push(1);
-        n[idx] = left; n[idx + 1] = right;
+      const w = Math.max(MIN_PANE_PX, startW + (ev.clientX - startX));
+      setWidths((prev) => {
+        const n = [...prev];
+        while (n.length < paneCount) n.push(startW);
+        n[idx] = w;
         return n;
       });
     };
@@ -449,8 +533,8 @@ function SplitMain({ activeTabIndex, setActiveTabIndex }) {
           <React.Fragment key={paneKey}>
             <div
               onMouseDown={() => setActiveTabIndex(i)}
-              style={{ flex: `${weights[i] ?? 1} 1 0`, minWidth: '16em' }}
-              className={`flex flex-col relative my-3 mx-1.5 rounded-2xl overflow-hidden transition-shadow min-w-0 ${
+              style={{ width: widths[i] ?? 480, flexShrink: 0, flexGrow: 0 }}
+              className={`flex flex-col relative my-3 mx-1.5 rounded-2xl overflow-hidden transition-shadow ${
                 focused ? 'ring-2 ring-accent/40 shadow-lg' : 'ring-1 ring-canvas-deep/40'
               }`}
             >
@@ -480,8 +564,8 @@ function SplitMain({ activeTabIndex, setActiveTabIndex }) {
                 </div>
               )}
             </div>
-            {/* Draggable boundary between this pane and the next */}
-            {i < paneCount - 1 && <SplitterCmp onMouseDown={startResize(i)} axis="x" />}
+            {/* Draggable right edge — resizes THIS pane (every pane, last included) */}
+            <SplitterCmp onMouseDown={startResize(i)} axis="x" />
           </React.Fragment>
         );
       })}
@@ -742,56 +826,96 @@ function ProjectList() {
 // ─── Session List ──────────────────────────────────────────────
 function SessionItem({ session, isSelected, onSelect, onFork, onArchive, onDelete, forking }) {
   const [expanded, setExpanded] = useState(false);
+  const customTitle = useStore((s) => s.customTitles[session.sessionId]);
+  const setCustomTitle = useStore((s) => s.setCustomTitle);
+  const [renaming, setRenaming] = useState(false);
+  const [draft, setDraft] = useState('');
   const hasSubagents = session.subagents?.length > 0;
   const isArchived = !!session.archived;
+  const isDraft = !!session.draft || !session.sessionId;
+
+  const startRename = (e) => {
+    e?.stopPropagation();
+    if (isDraft) return;
+    setDraft((customTitle || session.firstPrompt || '').slice(0, 200));
+    setRenaming(true);
+  };
+  const saveRename = () => { setCustomTitle(session.sessionId, draft); setRenaming(false); };
 
   return (
     <div className="relative group">
-      <button
-        onClick={() => onSelect(session)}
-        className={`sidebar-item w-full text-left px-3 py-3 rounded-lg mb-0.5 transition-all ${
-          isSelected ? 'active bg-canvas-warm' : 'hover:bg-canvas-warm/60'
-        }`}
-      >
-        <div className="flex items-start gap-2">
-          {hasSubagents ? (
-            <button
-              onClick={(e) => { e.stopPropagation(); setExpanded(!expanded); }}
-              className="shrink-0 mt-0.5 p-0.5 hover:bg-canvas-deep rounded"
-            >
-              <ChevronRight size={12} className={`text-ink-faint transition-transform ${expanded ? 'rotate-90' : ''}`} />
-            </button>
-          ) : (
-            <MessageSquare size={13} className="text-accent/40 shrink-0 mt-0.5" />
-          )}
-          <div className="min-w-0 flex-1">
-            <div className="text-[13px] text-ink-soft line-clamp-2 font-body leading-snug">
-              {session.firstPrompt || '(空会话)'}
-            </div>
-            <div className="flex items-center gap-2 mt-1.5">
-              {session.model && <ModelBadge model={session.model} compact />}
-              <span className="text-[10px] text-ink-faint font-mono">{session.messageCount}</span>
-              {hasSubagents && (
-                <span className="text-[10px] text-accent/60 font-mono">+{session.subagents.length} 子任务</span>
-              )}
-              <span className="text-[10px] text-ink-ghost">{formatDate(session.lastActivity)}</span>
+      {renaming ? (
+        <div className="px-3 py-3 mb-0.5">
+          <input
+            autoFocus
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') { e.preventDefault(); saveRename(); }
+              else if (e.key === 'Escape') { e.preventDefault(); setRenaming(false); }
+            }}
+            onBlur={saveRename}
+            placeholder="自定义标题（清空恢复默认）"
+            className="w-full bg-canvas border border-accent/40 rounded-md px-2 py-1 text-[13px] text-ink font-body focus:outline-none focus:ring-2 focus:ring-accent/30"
+          />
+        </div>
+      ) : (
+        <button
+          onClick={() => onSelect(session)}
+          className={`sidebar-item w-full text-left px-3 py-3 rounded-lg mb-0.5 transition-all ${
+            isSelected ? 'active bg-canvas-warm' : 'hover:bg-canvas-warm/60'
+          }`}
+        >
+          <div className="flex items-start gap-2">
+            {hasSubagents ? (
+              <button
+                onClick={(e) => { e.stopPropagation(); setExpanded(!expanded); }}
+                className="shrink-0 mt-0.5 p-0.5 hover:bg-canvas-deep rounded"
+              >
+                <ChevronRight size={12} className={`text-ink-faint transition-transform ${expanded ? 'rotate-90' : ''}`} />
+              </button>
+            ) : (
+              <MessageSquare size={13} className="text-accent/40 shrink-0 mt-0.5" />
+            )}
+            <div className="min-w-0 flex-1">
+              <div className="text-[13px] text-ink-soft line-clamp-2 font-body leading-snug pr-1">
+                {customTitle || session.firstPrompt || '(空会话)'}
+              </div>
+              {/* Bottom row leaves space on the right for the hover action bar. */}
+              <div className="flex items-center gap-2 gap-y-1 flex-wrap mt-1.5 pr-20">
+                {session.model && <ModelBadge model={session.model} compact />}
+                <span className="text-[10px] text-ink-faint font-mono shrink-0 whitespace-nowrap">{session.messageCount}</span>
+                {hasSubagents && (
+                  <span className="text-[10px] text-accent/60 font-mono shrink-0 whitespace-nowrap">+{session.subagents.length} 子任务</span>
+                )}
+                <span className="text-[10px] text-ink-ghost shrink-0 whitespace-nowrap">{formatDate(session.lastActivity)}</span>
+              </div>
             </div>
           </div>
-        </div>
-      </button>
-      <div className="absolute top-1.5 right-1.5 opacity-0 group-hover:opacity-100 transition-opacity flex items-center gap-0.5">
+        </button>
+      )}
+      {!renaming && (
+      <div className="absolute bottom-1.5 right-1.5 opacity-0 group-hover:opacity-100 transition-opacity flex items-center gap-0.5">
+        <button
+          onClick={startRename}
+          disabled={isDraft}
+          className="p-1 hover:bg-canvas-deep rounded disabled:opacity-30"
+          title="重命名（自定义标题）"
+        >
+          <Pencil size={12} className="text-ink-faint" />
+        </button>
         <button
           onClick={(e) => { e.stopPropagation(); onFork(session); }}
           disabled={forking}
           className="p-1 hover:bg-canvas-deep rounded"
-          title="分叉会话"
+          title="分支会话（复制完整上下文为新会话）"
         >
           <GitBranch size={12} className={forking ? 'text-accent animate-spin' : 'text-ink-faint'} />
         </button>
         <button
           onClick={(e) => { e.stopPropagation(); onArchive(session); }}
           className="p-1 hover:bg-canvas-deep rounded"
-          title={isArchived ? '取消归档' : '归档（折叠到归档页）'}
+          title={isArchived ? '取消归档' : '收纳（折叠到归档页）'}
         >
           {isArchived
             ? <ArchiveRestore size={12} className="text-accent" />
@@ -808,6 +932,7 @@ function SessionItem({ session, isSelected, onSelect, onFork, onArchive, onDelet
           <Trash2 size={12} className="text-ink-faint hover:text-red-600" />
         </button>
       </div>
+      )}
       {expanded && hasSubagents && (
         <div className="ml-5 pl-2 border-l border-canvas-deep space-y-0.5 mb-1">
           {session.subagents.map((sub) => (
@@ -979,16 +1104,55 @@ function SessionList() {
   const handleFork = async (session) => {
     setForking(session.sessionId);
     try {
-      await fetch('/api/fork', {
+      const res = await fetch('/api/fork', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ sessionId: session.sessionId, projectHash: session.projectHash }),
       });
-      if (selectedProject) {
-        setTimeout(() => useStore.getState().fetchSessions(selectedProject.hash), 2000);
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.newSessionId) {
+        alert('分支失败：' + (data.error || res.status));
+        return;
       }
-    } catch (err) { console.error('Fork failed:', err); }
-    setForking(null);
+      // The fork is a full-context copy under a new id. Open it: no split → add
+      // a pane beside the current one; already split → replace the active pane.
+      const fork = {
+        sessionId: data.newSessionId,
+        projectHash: session.projectHash,
+        projectPath: session.projectPath,
+        firstPrompt: session.firstPrompt,
+        model: session.model,
+        messageCount: session.messageCount,
+      };
+      const st = useStore.getState();
+      // Name the fork after its source: "<source title>分支N". Strip an existing
+      // 分支N suffix so branching a branch stays in the same family (会话A分支1 →
+      // 会话A分支2, not 会话A分支1分支1). N = max existing +1 across custom titles.
+      const baseTitle = (st.customTitles[session.sessionId] || session.firstPrompt || '会话')
+        .slice(0, 60).trim().replace(/分支\d+$/, '').trim();
+      const reBranch = new RegExp('^' + baseTitle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '分支(\\d+)$');
+      let maxN = 0;
+      for (const t of Object.values(st.customTitles)) {
+        const m = reBranch.exec(t);
+        if (m) maxN = Math.max(maxN, parseInt(m[1], 10));
+      }
+      st.setCustomTitle(data.newSessionId, `${baseTitle}分支${maxN + 1}`);
+      if (selectedProject) st.fetchSessions(selectedProject.hash, { silent: true });
+      if (st.splitMode) {
+        const idx = st.activeTabIndex;
+        st.setPaneSession(idx, fork);
+        st.fetchMessages(fork.sessionId, fork.projectHash, { tab: idx });
+      } else {
+        st.setPaneCount(2);
+        st.setPaneSession(1, fork);
+        st.setActiveTabIndex(1);
+        st.fetchMessages(fork.sessionId, fork.projectHash, { tab: 1 });
+      }
+    } catch (err) {
+      alert('分支失败：' + err.message);
+    } finally {
+      setForking(null);
+    }
   };
 
   const handleSelect = (session) => {
@@ -1010,18 +1174,18 @@ function SessionList() {
           <button onClick={() => useStore.getState().setSelectedProject(null)} className="p-0.5 hover:bg-canvas-deep rounded transition-colors">
             <ArrowLeft size={14} className="text-ink-faint" />
           </button>
-          <h2 className="text-[11px] font-medium uppercase tracking-widest text-ink-faint font-body">会话</h2>
-          <span className="text-[10px] text-ink-ghost font-mono">{sessions.length}</span>
+          <h2 className="text-[11px] font-medium uppercase tracking-widest text-ink-faint font-body shrink-0">会话</h2>
+          <span className="text-[10px] text-ink-ghost font-mono shrink-0">{sessions.length}</span>
           <button
             onClick={handleNewWorktree}
-            className="ml-auto btn-glass flex items-center gap-1 px-2 py-1 text-[11px] font-body text-ink-soft"
+            className="ml-auto btn-glass flex items-center gap-1 px-2 py-1 text-[11px] font-body text-ink-soft shrink-0 whitespace-nowrap"
             title="在新 git worktree 中开会话（隔离）"
           >
             <GitBranch size={11} />worktree
           </button>
           <button
             onClick={handleNew}
-            className="btn-accent flex items-center gap-1 px-2 py-1 text-[11px] font-body"
+            className="btn-accent flex items-center gap-1 px-2 py-1 text-[11px] font-body shrink-0 whitespace-nowrap"
             title="新建会话"
           >
             <Plus size={11} />新建
@@ -1268,9 +1432,9 @@ function PermissionModeHintBanner({ permKey }) {
     setDismissed(true);
   };
   return (
-    <div className="shrink-0 mx-6 mt-2 px-3 py-2 rounded-md bg-amber-50 border border-amber-200 flex items-center gap-2 text-[11px] font-body animate-fade-up">
+    <div className="shrink-0 mx-6 mt-2 px-3 py-2 rounded-md bg-amber-50 border border-amber-200 flex items-center gap-2 gap-y-1.5 flex-wrap text-[11px] font-body animate-fade-up">
       <Shield size={13} className="text-amber-600 shrink-0" />
-      <span className="text-amber-800 flex-1">
+      <span className="text-amber-800 flex-1 min-w-[12rem]">
         当前是<b>默认权限</b>模式：每次工具调用都会在输入框上方弹窗征求你同意。
         想加速可切换到接受编辑或放任。
       </span>
@@ -1555,10 +1719,14 @@ function SessionDetail({ tabIndex = 0 }) {
         const r = await fetch('/api/agents/active');
         const d = await r.json();
         if (cancelled) return;
+        // Use `stoppable` (= server's !finished), NOT `exitCode`: the
+        // /agents/active payload has no exitCode field, so `a.exitCode == null`
+        // was always true and kept finished procs (lingering in the 60s grace
+        // window) flagged as "still working" → the stop→banner→stop infinite loop.
         const hit = (d.agents || []).find(
           (a) => a.kind === 'chat-process'
             && a.sessionId === selectedSession.sessionId
-            && a.exitCode == null
+            && a.stoppable === true
         );
         // Only show "background working" if we're NOT actively streaming
         // locally — otherwise the local stream UI is already showing it.
@@ -2457,23 +2625,21 @@ function SessionDetail({ tabIndex = 0 }) {
 
   return (
     <div className="flex-1 flex flex-col min-h-0 glass-base relative">
-      <div className="glass-bar shrink-0 px-6 py-3 relative z-10">
+      <div className="glass-bar shrink-0 px-6 py-3 relative z-30">
         {/* Title row wraps when the pane is narrow or font is scaled up so
             the right-side stats/buttons drop to a second line instead of
             clipping the title. */}
         <div className="max-w-3xl mx-auto flex items-center justify-between gap-y-2 flex-wrap">
           <div className="min-w-0 flex-1">
-            <div className="text-sm text-ink font-display font-medium truncate">
-              {selectedSession.firstPrompt?.slice(0, 80) || '会话详情'}
-            </div>
+            <EditableSessionTitle session={selectedSession} />
             <div className="flex items-center gap-3 mt-0.5 flex-wrap">
-              <span className="text-[10px] text-ink-faint font-mono flex items-center gap-1">
+              <span className="text-[10px] text-ink-faint font-mono flex items-center gap-1 shrink-0 whitespace-nowrap">
                 <Hash size={10} />{selectedSession.sessionId?.slice(0, 8) || '新会话'}
               </span>
-              <span className="text-[10px] text-ink-faint font-mono">{messages.length + chatMessages.length} 条消息</span>
-              {toolCallCount > 0 && <span className="text-[10px] text-ink-faint font-mono">{toolCallCount} 工具调用</span>}
+              <span className="text-[10px] text-ink-faint font-mono shrink-0 whitespace-nowrap">{messages.length + chatMessages.length} 条消息</span>
+              {toolCallCount > 0 && <span className="text-[10px] text-ink-faint font-mono shrink-0 whitespace-nowrap">{toolCallCount} 工具调用</span>}
               {currentProvider?.providerHint && currentProvider.providerHint !== 'anthropic' && (
-                <span className="text-[10px] text-amber-700 bg-amber-50 border border-amber-200 rounded px-1.5 py-px font-mono"
+                <span className="text-[10px] text-amber-700 bg-amber-50 border border-amber-200 rounded px-1.5 py-px font-mono shrink-0 whitespace-nowrap"
                   title={`cc switch 路由：${currentProvider.baseUrl}`}>
                   {currentProvider.providerHint}
                 </span>
@@ -2483,10 +2649,10 @@ function SessionDetail({ tabIndex = 0 }) {
                   only showed the historical aggregate, so picking Haiku in
                   the dropdown but seeing the past message's Sonnet badge
                   looked like the GUI ignored the switch. */}
-              <div className="flex items-center gap-1">
+              <div className="flex items-center gap-1 shrink-0">
                 {headerModel && <ModelBadge model={headerModel} compact />}
                 {models.filter((m) => m !== headerModel).length > 0 && (
-                  <span className="text-[9px] text-ink-ghost font-mono"
+                  <span className="text-[9px] text-ink-ghost font-mono whitespace-nowrap"
                     title={`本会话历史用过: ${models.join(', ')}`}>
                     曾用 {models.filter((m) => m !== headerModel).length} 个其他
                   </span>
@@ -2866,6 +3032,7 @@ export default function App() {
   // sessionQueueKey that pane's composer sends with.
   const activeTabIndex = useStore((s) => s.activeTabIndex);
   const paneSessions = useStore((s) => s.paneSessions);
+  const customTitles = useStore((s) => s.customTitles);
   const activeSession = (paneSessions && paneSessions[activeTabIndex]) || selectedSession;
   const permKey = activeSession?.sessionId || `draft-${activeSession?.projectHash || 'none'}`;
 
@@ -2968,7 +3135,7 @@ export default function App() {
           and the right cluster wraps to a second line, the bar grows with the
           content instead of clipping. flex-wrap on both sides keeps it from
           horizontally overflowing on narrow viewports. */}
-      <header className="glass-bar min-h-12 px-4 py-1 flex items-center justify-between gap-y-1 flex-wrap shrink-0 relative z-20">
+      <header className="glass-bar min-h-12 px-4 py-1 flex items-center justify-between gap-y-1 flex-wrap shrink-0 relative z-40">
         <div className="flex items-center gap-2 min-w-0">
           <button onClick={toggleSidebar} className="btn-glass p-1.5 transition-colors shrink-0" title={sidebarCollapsed ? '展开' : '收起'}>
             {sidebarCollapsed ? <ChevronRight size={15} className="text-ink-muted" /> : <ChevronLeft size={15} className="text-ink-muted" />}
@@ -2983,7 +3150,7 @@ export default function App() {
             <>
               <span className="text-ink-ghost shrink-0">/</span>
               <span className="text-[11px] text-ink-muted font-body truncate min-w-0 max-w-[220px]">
-                {selectedSession.firstPrompt?.slice(0, 36) || selectedSession.sessionId.slice(0, 8)}
+                {customTitles[selectedSession.sessionId] || selectedSession.firstPrompt?.slice(0, 36) || selectedSession.sessionId.slice(0, 8)}
               </span>
             </>
           )}
@@ -3016,7 +3183,6 @@ export default function App() {
             );
           })}
           <div className="w-px h-4 bg-ink-ghost/30 mx-1" />
-          <ContinueButton />
           <ThemeToggle />
         </div>
       </header>

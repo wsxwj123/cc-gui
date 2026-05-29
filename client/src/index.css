@@ -636,6 +636,207 @@
 }
 
 /* ════════════════════════════════════════════════════════════════
+   INVERSE VARIANTS — 官方反色配对，补全单色家族的另一色调
+   每个家族都拥有 浅/深 两套，主题弹窗按家族 + 色调解析到对应 id。
+   ════════════════════════════════════════════════════════════════ */
+
+/* Claude Dark — 品牌橙 on 暖炭黑（claude-warm 的深色对应）。 */
+:root[data-cgui-theme="claude-dark"] {
+  --color-canvas: #1F1D1A;
+  --color-canvas-warm: #29251F;
+  --color-canvas-deep: #332E27;
+  --color-canvas-sunken: #161412;
+  --color-ink: #F5F0E8;
+  --color-ink-soft: #DDD6CA;
+  --color-ink-muted: #A69E92;
+  --color-ink-faint: #756E64;
+  --color-ink-ghost: #4A453E;
+  --color-accent: #D97757;
+  --color-accent-hover: #E68A6B;
+  --color-accent-subtle: rgba(217, 119, 87, 0.16);
+  --color-accent-muted: rgba(217, 119, 87, 0.32);
+  --glass-base-bg: rgba(31, 29, 26, 0.30);
+  --glass-thick-bg: rgba(31, 29, 26, 0.88);
+  --glass-thin-bg: rgba(41, 37, 31, 0.58);
+  --glass-bar-bg: rgba(22, 20, 18, 0.82);
+  --glass-specular: rgba(255, 255, 255, 0.05);
+  --glass-shade: rgba(0, 0, 0, 0.34);
+  --glass-edge: rgba(217, 119, 87, 0.16);
+  --glass-edge-outer: rgba(0, 0, 0, 0.55);
+  --glass-shadow: 0 1px 1px rgba(0, 0, 0, 0.46), 0 14px 40px -16px rgba(0, 0, 0, 0.6);
+  --scrollbar-thumb: rgba(245, 240, 232, 0.14);
+  --scrollbar-thumb-hover: rgba(245, 240, 232, 0.26);
+}
+
+/* OpenCode Light — 蜜桃赤土 on 近白（opencode-dark 的浅色对应）。 */
+:root[data-cgui-theme="opencode-light"] {
+  --color-canvas: #FAFAFA;
+  --color-canvas-warm: #F0F0F0;
+  --color-canvas-deep: #E0E0E0;
+  --color-canvas-sunken: #EAEAEA;
+  --color-ink: #1A1A1A;
+  --color-ink-soft: #2E2E2E;
+  --color-ink-muted: #606060;
+  --color-ink-faint: #808080;
+  --color-ink-ghost: #B0B0B0;
+  --color-accent: #D2691E;
+  --color-accent-hover: #B85816;
+  --color-accent-subtle: rgba(210, 105, 30, 0.10);
+  --color-accent-muted: rgba(210, 105, 30, 0.26);
+  --glass-base-bg: rgba(250, 250, 250, 0.18);
+  --glass-thick-bg: rgba(250, 250, 250, 0.82);
+  --glass-thin-bg: rgba(250, 250, 250, 0.48);
+  --glass-bar-bg: rgba(250, 250, 250, 0.68);
+  --glass-specular: rgba(255, 255, 255, 0.75);
+  --glass-shade: rgba(26, 26, 26, 0.04);
+  --glass-edge: rgba(210, 105, 30, 0.18);
+  --glass-edge-outer: rgba(26, 26, 26, 0.06);
+  --glass-shadow: 0 1px 1px rgba(26, 26, 26, 0.04), 0 14px 40px -16px rgba(26, 26, 26, 0.18);
+  --scrollbar-thumb: rgba(26, 26, 26, 0.20);
+  --scrollbar-thumb-hover: rgba(26, 26, 26, 0.34);
+}
+
+/* Nord Light — Snow Storm 雪原 + Frost 霜蓝（nord 的浅色对应）。 */
+:root[data-cgui-theme="nord-light"] {
+  --color-canvas: #ECEFF4;
+  --color-canvas-warm: #E5E9F0;
+  --color-canvas-deep: #D8DEE9;
+  --color-canvas-sunken: #DDE3EC;
+  --color-ink: #2E3440;
+  --color-ink-soft: #3B4252;
+  --color-ink-muted: #4C566A;
+  --color-ink-faint: #6B7484;
+  --color-ink-ghost: #AEB6C4;
+  --color-accent: #5E81AC;
+  --color-accent-hover: #4C6E97;
+  --color-accent-subtle: rgba(94, 129, 172, 0.12);
+  --color-accent-muted: rgba(94, 129, 172, 0.28);
+  --glass-base-bg: rgba(236, 239, 244, 0.18);
+  --glass-thick-bg: rgba(236, 239, 244, 0.82);
+  --glass-thin-bg: rgba(236, 239, 244, 0.48);
+  --glass-bar-bg: rgba(236, 239, 244, 0.68);
+  --glass-specular: rgba(255, 255, 255, 0.7);
+  --glass-shade: rgba(46, 52, 64, 0.05);
+  --glass-edge: rgba(94, 129, 172, 0.18);
+  --glass-edge-outer: rgba(46, 52, 64, 0.06);
+  --glass-shadow: 0 1px 1px rgba(46, 52, 64, 0.04), 0 14px 40px -16px rgba(46, 52, 64, 0.18);
+  --scrollbar-thumb: rgba(46, 52, 64, 0.20);
+  --scrollbar-thumb-hover: rgba(46, 52, 64, 0.34);
+}
+
+/* Dracula Light (Alucard) — 官方 Alucard 奶油白 + 紫罗兰（dracula 的浅色对应）。 */
+:root[data-cgui-theme="dracula-light"] {
+  --color-canvas: #FFFBEB;
+  --color-canvas-warm: #F5F1E0;
+  --color-canvas-deep: #CFCFDE;
+  --color-canvas-sunken: #EDE9D8;
+  --color-ink: #1F1F1F;
+  --color-ink-soft: #36354A;
+  --color-ink-muted: #6C664B;
+  --color-ink-faint: #8C8870;
+  --color-ink-ghost: #BDBAA8;
+  --color-accent: #644AC9;
+  --color-accent-hover: #533CB0;
+  --color-accent-subtle: rgba(100, 74, 201, 0.10);
+  --color-accent-muted: rgba(100, 74, 201, 0.26);
+  --glass-base-bg: rgba(255, 251, 235, 0.18);
+  --glass-thick-bg: rgba(255, 251, 235, 0.82);
+  --glass-thin-bg: rgba(255, 251, 235, 0.48);
+  --glass-bar-bg: rgba(255, 251, 235, 0.68);
+  --glass-specular: rgba(255, 255, 255, 0.7);
+  --glass-shade: rgba(31, 31, 31, 0.05);
+  --glass-edge: rgba(100, 74, 201, 0.18);
+  --glass-edge-outer: rgba(31, 31, 31, 0.06);
+  --glass-shadow: 0 1px 1px rgba(31, 31, 31, 0.04), 0 14px 40px -16px rgba(31, 31, 31, 0.18);
+  --scrollbar-thumb: rgba(31, 31, 31, 0.20);
+  --scrollbar-thumb-hover: rgba(31, 31, 31, 0.34);
+}
+
+/* Solarized Dark — 官方 base03 深青 + 蓝（solarized-light 的深色对应）。 */
+:root[data-cgui-theme="solarized-dark"] {
+  --color-canvas: #002B36;
+  --color-canvas-warm: #073642;
+  --color-canvas-deep: #0E4451;
+  --color-canvas-sunken: #00212B;
+  --color-ink: #93A1A1;
+  --color-ink-soft: #839496;
+  --color-ink-muted: #657B83;
+  --color-ink-faint: #586E75;
+  --color-ink-ghost: #3E5660;
+  --color-accent: #268BD2;
+  --color-accent-hover: #459BDB;
+  --color-accent-subtle: rgba(38, 139, 210, 0.16);
+  --color-accent-muted: rgba(38, 139, 210, 0.32);
+  --glass-base-bg: rgba(0, 43, 54, 0.30);
+  --glass-thick-bg: rgba(0, 43, 54, 0.88);
+  --glass-thin-bg: rgba(7, 54, 66, 0.58);
+  --glass-bar-bg: rgba(0, 33, 43, 0.82);
+  --glass-specular: rgba(255, 255, 255, 0.05);
+  --glass-shade: rgba(0, 0, 0, 0.34);
+  --glass-edge: rgba(38, 139, 210, 0.16);
+  --glass-edge-outer: rgba(0, 0, 0, 0.55);
+  --glass-shadow: 0 1px 1px rgba(0, 0, 0, 0.46), 0 14px 40px -16px rgba(0, 0, 0, 0.6);
+  --scrollbar-thumb: rgba(147, 161, 161, 0.18);
+  --scrollbar-thumb-hover: rgba(147, 161, 161, 0.30);
+}
+
+/* GitHub Dark — 官方 #0D1117 + 品牌蓝（github-light 的深色对应）。 */
+:root[data-cgui-theme="github-dark"] {
+  --color-canvas: #0D1117;
+  --color-canvas-warm: #161B22;
+  --color-canvas-deep: #21262D;
+  --color-canvas-sunken: #010409;
+  --color-ink: #E6EDF3;
+  --color-ink-soft: #C9D1D9;
+  --color-ink-muted: #8B949E;
+  --color-ink-faint: #6E7681;
+  --color-ink-ghost: #484F58;
+  --color-accent: #58A6FF;
+  --color-accent-hover: #79B8FF;
+  --color-accent-subtle: rgba(88, 166, 255, 0.16);
+  --color-accent-muted: rgba(88, 166, 255, 0.32);
+  --glass-base-bg: rgba(13, 17, 23, 0.30);
+  --glass-thick-bg: rgba(13, 17, 23, 0.88);
+  --glass-thin-bg: rgba(22, 27, 34, 0.58);
+  --glass-bar-bg: rgba(1, 4, 9, 0.82);
+  --glass-specular: rgba(255, 255, 255, 0.05);
+  --glass-shade: rgba(0, 0, 0, 0.36);
+  --glass-edge: rgba(88, 166, 255, 0.14);
+  --glass-edge-outer: rgba(0, 0, 0, 0.55);
+  --glass-shadow: 0 1px 1px rgba(0, 0, 0, 0.46), 0 14px 40px -16px rgba(0, 0, 0, 0.6);
+  --scrollbar-thumb: rgba(230, 237, 243, 0.14);
+  --scrollbar-thumb-hover: rgba(230, 237, 243, 0.26);
+}
+
+/* Flexoki Dark — 官方 #100F0F 墨黑 + 钴蓝（flexoki-light 的深色对应）。 */
+:root[data-cgui-theme="flexoki-dark"] {
+  --color-canvas: #100F0F;
+  --color-canvas-warm: #1C1B1A;
+  --color-canvas-deep: #282726;
+  --color-canvas-sunken: #0A0908;
+  --color-ink: #CECDC3;
+  --color-ink-soft: #B7B5AC;
+  --color-ink-muted: #878580;
+  --color-ink-faint: #575653;
+  --color-ink-ghost: #403E3C;
+  --color-accent: #4385BE;
+  --color-accent-hover: #5A9AD0;
+  --color-accent-subtle: rgba(67, 133, 190, 0.16);
+  --color-accent-muted: rgba(67, 133, 190, 0.32);
+  --glass-base-bg: rgba(16, 15, 15, 0.30);
+  --glass-thick-bg: rgba(16, 15, 15, 0.88);
+  --glass-thin-bg: rgba(28, 27, 26, 0.58);
+  --glass-bar-bg: rgba(10, 9, 8, 0.82);
+  --glass-specular: rgba(255, 255, 255, 0.05);
+  --glass-shade: rgba(0, 0, 0, 0.36);
+  --glass-edge: rgba(67, 133, 190, 0.14);
+  --glass-edge-outer: rgba(0, 0, 0, 0.55);
+  --glass-shadow: 0 1px 1px rgba(0, 0, 0, 0.46), 0 14px 40px -16px rgba(0, 0, 0, 0.6);
+  --scrollbar-thumb: rgba(206, 205, 195, 0.14);
+  --scrollbar-thumb-hover: rgba(206, 205, 195, 0.26);
+}
+
+/* ════════════════════════════════════════════════════════════════
    Base — canvas with floating color light (visible THROUGH glass)
    ════════════════════════════════════════════════════════════════ */
 html { -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; }
@@ -842,6 +1043,11 @@ body {
    Chat composer
    ════════════════════════════════════════════════════════════════ */
 .chat-composer {
+  /* Bounded radius (overrides glass-capsule's 9999px, which is defined earlier
+   * so source order wins). 9999px turned a tall+narrow composer — split panes,
+   * multi-line text — into a giant circle. 26px keeps the pill look at single
+   * line height yet stays a rounded-rect when the box grows tall. */
+  border-radius: 1.625rem;
   transition: box-shadow 0.22s ease, border-color 0.22s ease;
 }
 /* Only ring when the textarea itself is focused — :focus-within would also

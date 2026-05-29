@@ -16,6 +16,85 @@ const writeLs = (key, val) => {
 // Valid `--permission-mode` values per `claude --help`.
 export const PERMISSION_MODES = ['default', 'acceptEdits', 'plan', 'bypassPermissions'];
 
+// ── Theme families ───────────────────────────────────────────────
+// Each family carries a light + dark variant. `id` is the data-cgui-theme
+// value (empty = default Apple-system palette driven purely by data-theme).
+// bg/bg2/fg/accent are preview swatch colors for the theme popover cards.
+export const THEME_FAMILIES = [
+  { id: 'default', name: '默认',
+    light: { id: '', bg: '#ECEFF5', bg2: '#DADFE9', fg: '#0B0B0F', accent: '#0A84FF' },
+    dark:  { id: '', bg: '#232530', bg2: '#14161C', fg: '#F5F5F7', accent: '#0A84FF' } },
+  { id: 'claude', name: 'Claude',
+    light: { id: 'claude-warm', bg: '#F2EDE3', bg2: '#E2DBCC', fg: '#1A1A1A', accent: '#D97757' },
+    dark:  { id: 'claude-dark', bg: '#29251F', bg2: '#161412', fg: '#F5F0E8', accent: '#D97757' } },
+  { id: 'opencode', name: 'OpenCode',
+    light: { id: 'opencode-light', bg: '#F0F0F0', bg2: '#EAEAEA', fg: '#1A1A1A', accent: '#D2691E' },
+    dark:  { id: 'opencode-dark',  bg: '#141414', bg2: '#050505', fg: '#EEEEEE', accent: '#FAB283' } },
+  { id: 'tokyonight', name: 'Tokyo Night',
+    light: { id: 'tokyonight-day', bg: '#D5D6DB', bg2: '#C8C9CE', fg: '#3760BF', accent: '#2E7DE9' },
+    dark:  { id: 'tokyonight',     bg: '#1E2030', bg2: '#16161E', fg: '#C8D3F5', accent: '#82AAFF' } },
+  { id: 'nord', name: 'Nord',
+    light: { id: 'nord-light', bg: '#E5E9F0', bg2: '#DDE3EC', fg: '#2E3440', accent: '#5E81AC' },
+    dark:  { id: 'nord',       bg: '#3B4252', bg2: '#242933', fg: '#ECEFF4', accent: '#88C0D0' } },
+  { id: 'rosepine', name: 'Rosé Pine',
+    light: { id: 'rose-pine-dawn', bg: '#FFFAF3', bg2: '#F2E9E1', fg: '#575279', accent: '#31748F' },
+    dark:  { id: 'rosepine',       bg: '#1F1D2E', bg2: '#131019', fg: '#E0DEF4', accent: '#9CCFD8' } },
+  { id: 'catppuccin', name: 'Catppuccin',
+    light: { id: 'catppuccin-latte', bg: '#E6E9EF', bg2: '#CCD0DA', fg: '#4C4F69', accent: '#1E66F5' },
+    dark:  { id: 'catppuccin-mocha', bg: '#313244', bg2: '#181825', fg: '#CDD6F4', accent: '#89B4FA' } },
+  { id: 'dracula', name: 'Dracula',
+    light: { id: 'dracula-light', bg: '#F5F1E0', bg2: '#EDE9D8', fg: '#1F1F1F', accent: '#644AC9' },
+    dark:  { id: 'dracula',       bg: '#383A4A', bg2: '#21222C', fg: '#F8F8F2', accent: '#BD93F9' } },
+  { id: 'gruvbox', name: 'Gruvbox',
+    light: { id: 'gruvbox-light', bg: '#F2E5BC', bg2: '#EBDBB2', fg: '#3C3836', accent: '#076678' },
+    dark:  { id: 'gruvbox-dark',  bg: '#3C3836', bg2: '#1D2021', fg: '#EBDBB2', accent: '#FE8019' } },
+  { id: 'kanagawa', name: 'Kanagawa',
+    light: { id: 'kanagawa-lotus', bg: '#EAE4D7', bg2: '#E3DCD2', fg: '#54433A', accent: '#2D4F67' },
+    dark:  { id: 'kanagawa',       bg: '#2A2A37', bg2: '#16161D', fg: '#DCD7BA', accent: '#7E9CD8' } },
+  { id: 'everforest', name: 'Everforest',
+    light: { id: 'everforest-light', bg: '#F4F0D9', bg2: '#EFEBD4', fg: '#5C6A72', accent: '#8DA101' },
+    dark:  { id: 'everforest-dark',  bg: '#374145', bg2: '#232A2E', fg: '#D3C6AA', accent: '#A7C080' } },
+  { id: 'solarized', name: 'Solarized',
+    light: { id: 'solarized-light', bg: '#F5EFD6', bg2: '#EEE8D5', fg: '#586E75', accent: '#268BD2' },
+    dark:  { id: 'solarized-dark',  bg: '#073642', bg2: '#00212B', fg: '#93A1A1', accent: '#268BD2' } },
+  { id: 'github', name: 'GitHub',
+    light: { id: 'github-light', bg: '#F6F8FA', bg2: '#EAEEF2', fg: '#24292F', accent: '#0969DA' },
+    dark:  { id: 'github-dark',  bg: '#161B22', bg2: '#010409', fg: '#E6EDF3', accent: '#58A6FF' } },
+  { id: 'flexoki', name: 'Flexoki',
+    light: { id: 'flexoki-light', bg: '#F2F0E5', bg2: '#E6E4D9', fg: '#100F0F', accent: '#205EA6' },
+    dark:  { id: 'flexoki-dark',  bg: '#1C1B1A', bg2: '#0A0908', fg: '#CECDC3', accent: '#4385BE' } },
+];
+
+export function systemPrefersDark() {
+  try { return window.matchMedia('(prefers-color-scheme: dark)').matches; }
+  catch { return false; }
+}
+
+// Resolve a family + tone to the concrete { dataTheme, cguiTheme } pair.
+// tone 'auto' picks light/dark from the OS at call time; presets are fixed
+// palettes so the variant id itself must flip (CSS can't auto-switch them).
+export function resolveTheme(familyId, tone) {
+  const fam = THEME_FAMILIES.find((f) => f.id === familyId) || THEME_FAMILIES[0];
+  const effDark = tone === 'auto' ? systemPrefersDark() : tone === 'dark';
+  return { dataTheme: tone, cguiTheme: (effDark ? fam.dark.id : fam.light.id) || '' };
+}
+
+// Initial family: explicit choice, else derive from a legacy preset id, else default.
+function initThemeFamily() {
+  try {
+    const fam = localStorage.getItem('cgui-theme-family');
+    if (fam) return fam;
+    const preset = localStorage.getItem('cgui-theme-preset') || '';
+    if (!preset) return 'default';
+    const m = THEME_FAMILIES.find((f) => f.light.id === preset || f.dark.id === preset);
+    return m ? m.id : 'default';
+  } catch { return 'default'; }
+}
+function initThemeTone() {
+  try { return localStorage.getItem('cgui-theme') || 'auto'; }
+  catch { return 'auto'; }
+}
+
 // Monotonic counter for fresh stable pane identity tokens (see paneIds).
 let nextPaneId = 6;
 const freshPaneId = () => `p${nextPaneId++}`;
@@ -49,6 +128,10 @@ export const useStore = create((set, get) => ({
   // each session's explicit override. A session with no entry uses the default.
   modelBySession: readLs('cgui-model-by-session', {}),
   effortBySession: readLs('cgui-effort-by-session', {}),
+  // User-defined session titles { [sessionId]: title }. When set, overrides the
+  // auto firstPrompt everywhere the title shows (sidebar / header / breadcrumb).
+  // We never touch the on-disk jsonl — titles live only in localStorage.
+  customTitles: readLs('cgui-custom-titles', {}),
   // Sessions currently handed off to phone remote control (sessionId → true).
   // While set, the GUI must NOT spawn `-p` turns for that session (both would
   // write the same jsonl). The composer locks and shows a reclaim banner.
@@ -147,12 +230,11 @@ export const useStore = create((set, get) => ({
     return 1;
   })(),
 
-  // Theme preset name. '' = default (Apple-system blue from @theme block).
-  // Other values map to data-cgui-theme blocks in index.css.
-  cguiTheme: (() => {
-    try { return localStorage.getItem('cgui-theme-preset') || ''; }
-    catch { return ''; }
-  })(),
+  // Theme as a (family, tone) pair. `cguiTheme` is the derived data-cgui-theme
+  // variant id ('' = default Apple-system palette). themeTone drives data-theme.
+  themeFamily: initThemeFamily(),
+  themeTone: initThemeTone(),
+  cguiTheme: resolveTheme(initThemeFamily(), initThemeTone()).cguiTheme,
 
   loading: false,
   error: null,
@@ -244,6 +326,18 @@ export const useStore = create((set, get) => ({
     set({ selectedSession: session, paneSessions: panes });
     writeLs('cgui-selected-session', session);
     writeLs('cgui-pane-sessions', panes);
+  },
+
+  // Rename a session. Empty/whitespace title clears the override (reverts to
+  // the auto firstPrompt). Persisted to localStorage.
+  setCustomTitle: (sessionId, title) => {
+    if (!sessionId) return;
+    const next = { ...get().customTitles };
+    const trimmed = (title || '').trim();
+    if (trimmed) next[sessionId] = trimmed;
+    else delete next[sessionId];
+    writeLs('cgui-custom-titles', next);
+    set({ customTitles: next });
   },
 
   // ── Multi-pane actions (Phase 2) ───────────────────────────
@@ -379,12 +473,22 @@ export const useStore = create((set, get) => ({
     try { localStorage.setItem('cgui-ui-font-scale', String(n)); } catch {}
     try { document.documentElement.style.zoom = String(n); } catch {}
   },
-  setCguiTheme: (name) => {
-    set({ cguiTheme: name || '' });
-    try { localStorage.setItem('cgui-theme-preset', name || ''); } catch {}
+  // Apply a (family, tone) pair: persists both, derives the variant id, and
+  // syncs data-theme + data-cgui-theme on <html>. data-theme-system is handled
+  // separately by the OS-preference listener (needed by the default family).
+  setTheme: (familyId, tone) => {
+    const { dataTheme, cguiTheme } = resolveTheme(familyId, tone);
+    set({ themeFamily: familyId, themeTone: tone, cguiTheme });
     try {
-      if (name) document.documentElement.setAttribute('data-cgui-theme', name);
-      else document.documentElement.removeAttribute('data-cgui-theme');
+      localStorage.setItem('cgui-theme-family', familyId);
+      localStorage.setItem('cgui-theme', tone);
+      localStorage.setItem('cgui-theme-preset', cguiTheme);
+    } catch {}
+    try {
+      const root = document.documentElement;
+      root.setAttribute('data-theme', dataTheme);
+      if (cguiTheme) root.setAttribute('data-cgui-theme', cguiTheme);
+      else root.removeAttribute('data-cgui-theme');
     } catch {}
   },
 
@@ -556,3 +660,14 @@ export const useStore = create((set, get) => ({
     }).catch(() => {});
   },
 }));
+
+// When following the system, a preset family's fixed palette must flip with the
+// OS — re-resolve the variant id on every prefers-color-scheme change so React
+// state, localStorage and the DOM stay consistent. (data-theme-system mirroring
+// for the default family lives in main.jsx.)
+if (typeof window !== 'undefined' && window.matchMedia) {
+  window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
+    const s = useStore.getState();
+    if (s.themeTone === 'auto') s.setTheme(s.themeFamily, 'auto');
+  });
+}

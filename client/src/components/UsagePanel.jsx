@@ -1,6 +1,45 @@
 import React, { useEffect, useState } from 'react';
 import { BarChart3, Cpu, Database, Calendar, ArrowLeft, RefreshCw, FolderOpen, Download } from 'lucide-react';
-import { ModelBadge } from './ModelBadge.jsx';
+import { ModelBadge, modelProvider } from './ModelBadge.jsx';
+import { computeCost, formatCost } from '../utils/pricing.js';
+
+// Differentiated billing for the usage panel:
+//   Anthropic models (Max subscription) → no per-token charge ("订阅内")
+//   third-party (deepseek / mimo via cc switch) → real per-token cost
+// The server aggregates byModel as { input, output, cacheRead, calls }; we
+// adapt that into the usage shape computeCost expects (cacheWrite unknown → 0).
+function modelCost(model, m) {
+  const lower = (model || '').toLowerCase();
+  if (/claude|opus|sonnet|haiku/.test(lower)) return { subscription: true };
+  let provider = null;
+  if (lower.includes('deepseek')) provider = { providerHint: 'deepseek', model };
+  else if (lower.includes('mimo')) provider = { providerHint: 'mimo' };
+  if (!provider) return { unknown: true };
+  const c = computeCost(model, {
+    input_tokens: m.input, output_tokens: m.output,
+    cache_read_input_tokens: m.cacheRead, cache_creation_input_tokens: 0,
+  }, provider);
+  return c ? { usd: c.totalUsd } : { unknown: true };
+}
+
+// Group flat byModel rows under their provider. Each group carries its model
+// rows, summed tokens, summed third-party cost, and whether any member is an
+// Anthropic subscription model (→ provider shows "订阅内" instead of a price).
+function groupByProvider(byModel) {
+  const map = new Map();
+  for (const m of byModel) {
+    const { key, label } = modelProvider(m.model);
+    if (!map.has(key)) map.set(key, { key, label, models: [], tokens: 0, usd: 0, subscription: false });
+    const g = map.get(key);
+    g.models.push(m);
+    g.tokens += m.input + m.output;
+    const c = modelCost(m.model, m);
+    if (c.subscription) g.subscription = true;
+    if (c.usd) g.usd += c.usd;
+  }
+  // Paid providers first (by cost desc), then subscription/unknown by tokens.
+  return [...map.values()].sort((a, b) => (b.usd - a.usd) || (b.tokens - a.tokens));
+}
 
 function decodeProjectHash(hash) {
   if (hash.startsWith('-')) return '/' + hash.slice(1).replace(/-/g, '/');
@@ -92,7 +131,6 @@ export function UsagePanel() {
     );
   }
 
-  const maxTokens = Math.max(...stats.byModel.map((m) => m.input + m.output), 1);
   const maxDayTokens = Math.max(...stats.byDay.map((d) => d.input + d.output), 1);
 
   return (
@@ -122,27 +160,65 @@ export function UsagePanel() {
         </div>
       </div>
 
-      {/* By model */}
+      {/* By provider → models. Provider header shows total cost (no tokens);
+          each model row underneath shows its tokens + per-model cost. */}
       <div>
         <h3 className="text-[10px] font-medium uppercase tracking-widest text-ink-faint font-body mb-3 flex items-center gap-1.5">
           <Cpu size={11} />
-          按模型
+          按 Provider · 模型
         </h3>
-        <div className="bg-canvas-warm border border-canvas-deep rounded-lg p-3">
-          {stats.byModel.map((m) => (
-            <div key={m.model} className="flex items-center gap-2 py-1.5">
-              <ModelBadge model={m.model} compact />
-              <div className="flex-1 h-3 bg-canvas-deep rounded-full overflow-hidden">
-                <div
-                  className="h-full rounded-full bg-accent/60 transition-all duration-500"
-                  style={{ width: `${Math.max(((m.input + m.output) / maxTokens) * 100, 1)}%` }}
-                />
+        <div className="bg-canvas-warm border border-canvas-deep rounded-lg p-3 space-y-3">
+          {groupByProvider(stats.byModel).map((g) => (
+            <div key={g.key}>
+              {/* Provider header — name + total cost (订阅内 / $x / —). */}
+              <div className="flex items-center gap-2 mb-1.5">
+                <span className="text-[11px] font-semibold text-ink font-body">{g.label}</span>
+                <span className="text-[9px] text-ink-ghost font-mono">{g.models.length} 模型</span>
+                <div className="flex-1" />
+                {g.usd > 0 ? (
+                  <span className="text-[11px] text-accent font-mono">{formatCost(g.usd)}</span>
+                ) : g.subscription ? (
+                  <span className="text-[10px] text-ink-faint font-body" title="Anthropic 订阅额度内，不按 token 计费">订阅内</span>
+                ) : (
+                  <span className="text-[10px] text-ink-ghost font-mono" title="无定价数据">—</span>
+                )}
               </div>
-              <span className="text-[10px] text-ink-faint font-mono w-20 text-right">
-                {formatNum(m.input + m.output)}
-              </span>
+              {/* Model rows */}
+              <div className="pl-2 border-l border-canvas-deep space-y-1.5">
+                {g.models.map((m) => {
+                  const cost = modelCost(m.model, m);
+                  return (
+                    <div key={m.model} className="flex items-center gap-2">
+                      <ModelBadge model={m.model} compact />
+                      <span className="text-[10px] font-mono text-ink-soft truncate flex-1" title={m.model}>
+                        {m.model}
+                      </span>
+                      <span className="text-[10px] text-ink-faint font-mono shrink-0 w-16 text-right">
+                        {formatNum(m.input + m.output)}
+                      </span>
+                      {cost.subscription ? (
+                        <span className="text-[10px] text-ink-faint font-body shrink-0 w-14 text-right">订阅内</span>
+                      ) : cost.usd != null ? (
+                        <span className="text-[10px] text-accent font-mono shrink-0 w-14 text-right">{formatCost(cost.usd)}</span>
+                      ) : (
+                        <span className="text-[10px] text-ink-ghost font-mono shrink-0 w-14 text-right">—</span>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
             </div>
           ))}
+          {(() => {
+            const total = stats.byModel.reduce((acc, m) => acc + (modelCost(m.model, m).usd || 0), 0);
+            if (total <= 0) return null;
+            return (
+              <div className="mt-1 pt-2 border-t border-canvas-deep flex items-center justify-between">
+                <span className="text-[10px] text-ink-faint font-body">第三方计费合计 · Anthropic 走订阅</span>
+                <span className="text-[11px] text-accent font-mono">{formatCost(total)}</span>
+              </div>
+            );
+          })()}
         </div>
       </div>
 

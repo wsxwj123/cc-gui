@@ -84,39 +84,39 @@ export function MCPPanel() {
     return () => { mounted.current = false; };
   }, []);
 
-  const handleTogglePlugin = async (index) => {
-    const plugin = plugins[index];
+  // Toggle by name (not array index): the rendered list is sorted enabled-first,
+  // so the map index no longer matches the state array index.
+  const handleTogglePlugin = async (plugin) => {
     if (!plugin) return;
+    const { name } = plugin;
     const newEnabled = plugin.enabled === false;
-    setPlugins((prev) => prev.map((p, i) => i === index ? { ...p, enabled: newEnabled } : p));
-    setToggling(plugin.name);
+    setPlugins((prev) => prev.map((p) => p.name === name ? { ...p, enabled: newEnabled } : p));
+    setToggling(name);
     const endpoint = newEnabled
-      ? `/api/plugins/${encodeURIComponent(plugin.name)}/enable`
-      : `/api/plugins/${encodeURIComponent(plugin.name)}/disable`;
+      ? `/api/plugins/${encodeURIComponent(name)}/enable`
+      : `/api/plugins/${encodeURIComponent(name)}/disable`;
     fetch(endpoint, { method: 'PUT' })
       .then((r) => { if (!r.ok) return r.json().then((e) => { throw new Error(e.error); }); })
       .catch((err) => {
         console.error('Plugin toggle failed:', err);
-        setPlugins((prev) => prev.map((p, i) => i === index ? { ...p, enabled: !newEnabled } : p));
+        setPlugins((prev) => prev.map((p) => p.name === name ? { ...p, enabled: !newEnabled } : p));
       })
       .finally(() => setToggling(null));
   };
 
-  const handleToggle = async (index) => {
-    const srv = servers[index];
+  const handleToggle = async (srv) => {
     if (!srv) return;
+    const { name } = srv;
 
     // Optimistic update — instant UI feedback
     const newEnabled = srv.enabled === false;
-    setServers(prev => prev.map((s, i) =>
-      i === index ? { ...s, enabled: newEnabled } : s
-    ));
-    setToggling(srv.name);
+    setServers(prev => prev.map((s) => s.name === name ? { ...s, enabled: newEnabled } : s));
+    setToggling(name);
 
     // Fire CLI in background — don't block UI
     const endpoint = newEnabled
-      ? `/api/mcp/${encodeURIComponent(srv.name)}/enable`
-      : `/api/mcp/${encodeURIComponent(srv.name)}/disable`;
+      ? `/api/mcp/${encodeURIComponent(name)}/enable`
+      : `/api/mcp/${encodeURIComponent(name)}/disable`;
 
     fetch(endpoint, { method: 'PUT' })
       .then(res => {
@@ -125,12 +125,16 @@ export function MCPPanel() {
       .catch(err => {
         // Revert on failure
         console.error('Toggle failed:', err);
-        setServers(prev => prev.map((s, i) =>
-          i === index ? { ...s, enabled: !newEnabled } : s
-        ));
+        setServers(prev => prev.map((s) => s.name === name ? { ...s, enabled: !newEnabled } : s));
       })
       .finally(() => setToggling(null));
   };
+
+  // Enabled first, disabled last; stable within each group (Array.sort is
+  // stable). Re-sorts automatically when a toggle flips `enabled` in state.
+  const byEnabled = (a, b) => (a.enabled === false ? 1 : 0) - (b.enabled === false ? 1 : 0);
+  const sortedServers = [...servers].sort(byEnabled);
+  const sortedPlugins = [...plugins].sort(byEnabled);
 
   if (loading && servers.length === 0) {
     return (
@@ -166,7 +170,7 @@ export function MCPPanel() {
         </h3>
         {servers.length > 0 ? (
           <div className="space-y-2">
-            {servers.map((srv, index) => {
+            {sortedServers.map((srv) => {
               const disabled = srv.enabled === false;
               return (
                 <div
@@ -203,7 +207,7 @@ export function MCPPanel() {
                     <Toggle
                       enabled={!disabled}
                       loading={toggling === srv.name}
-                      onToggle={() => handleToggle(index)}
+                      onToggle={() => handleToggle(srv)}
                     />
                   </div>
                   <div className="text-[11px] text-ink-muted font-mono truncate">
@@ -233,7 +237,7 @@ export function MCPPanel() {
         </h3>
         {plugins.length > 0 ? (
           <div className="space-y-2">
-            {plugins.map((plugin, index) => {
+            {sortedPlugins.map((plugin) => {
               const disabled = plugin.enabled === false;
               return (
                 <div
@@ -254,7 +258,7 @@ export function MCPPanel() {
                       <Toggle
                         enabled={!disabled}
                         loading={toggling === plugin.name}
-                        onToggle={() => handleTogglePlugin(index)}
+                        onToggle={() => handleTogglePlugin(plugin)}
                       />
                     </div>
                   </div>

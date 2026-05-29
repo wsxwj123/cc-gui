@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useCallback, useMemo, useRef } from 'react';
-import { Folder, FolderOpen, File, RefreshCw, AlertCircle, ChevronRight, ChevronDown, FileText, Image as ImageIcon, ArrowLeft, ExternalLink, Film } from 'lucide-react';
+import { Folder, FolderOpen, File, RefreshCw, AlertCircle, ChevronRight, ChevronDown, FileText, Image as ImageIcon, ArrowLeft, ExternalLink, Film, Pencil, Save, Undo2, Redo2, X, Check } from 'lucide-react';
 import { useStore } from '../stores/sessionStore.js';
 import { MarkdownRenderer } from './MarkdownRenderer.jsx';
 import { useResizable, Splitter } from '../hooks/useResizable.jsx';
@@ -224,6 +224,75 @@ function TreeNode({ path, name, depth, isDir, isRoot, expanded, dirs, toggle, op
 }
 
 function PreviewBody({ preview }) {
+  const e = ext(preview.name || '');
+  const isImage = IMAGE_EXT.has(e);
+  const isVideo = VIDEO_EXT.has(e);
+  const isAudio = AUDIO_EXT.has(e);
+  const isMedia = isImage || isVideo || isAudio;
+  // Truncated files can't be edited — saving would write back only the first
+  // 256KB and silently destroy the tail.
+  const editable = !isMedia && !preview.binary && !preview.truncated && !preview.loading && !preview.error;
+  const isMarkdown = e === 'md' || e === 'markdown';
+
+  const [editing, setEditing] = useState(false);
+  // Undo/redo history of the textarea value. Bursts within 400ms collapse into
+  // one entry so a word's worth of typing isn't 20 undo steps.
+  const [hist, setHist] = useState({ stack: [''], ptr: 0 });
+  const [savedValue, setSavedValue] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [saveErr, setSaveErr] = useState(null);
+  const lastEditAt = useRef(0);
+
+  const value = hist.stack[hist.ptr];
+  const dirty = editing && value !== savedValue;
+
+  // Reset everything when a different file is opened, or content arrives.
+  useEffect(() => {
+    const c = preview.content || '';
+    setEditing(false);
+    setHist({ stack: [c], ptr: 0 });
+    setSavedValue(c);
+    setSaveErr(null);
+  }, [preview.path, preview.content]);
+
+  const pushValue = useCallback((next) => {
+    setHist((h) => {
+      const now = Date.now();
+      const coalesce = now - lastEditAt.current < 400 && h.ptr === h.stack.length - 1;
+      lastEditAt.current = now;
+      if (coalesce) {
+        const stack = h.stack.slice(0, h.ptr + 1);
+        stack[h.ptr] = next;
+        return { stack, ptr: h.ptr };
+      }
+      const stack = h.stack.slice(0, h.ptr + 1);
+      stack.push(next);
+      return { stack, ptr: stack.length - 1 };
+    });
+  }, []);
+
+  const undo = useCallback(() => setHist((h) => h.ptr > 0 ? { ...h, ptr: h.ptr - 1 } : h), []);
+  const redo = useCallback(() => setHist((h) => h.ptr < h.stack.length - 1 ? { ...h, ptr: h.ptr + 1 } : h), []);
+
+  const save = useCallback(async () => {
+    setSaving(true);
+    setSaveErr(null);
+    try {
+      const r = await fetch('/api/files/write', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: preview.path, content: value }),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(d.error || `${r.status}`);
+      setSavedValue(value);
+    } catch (err) {
+      setSaveErr(err.message);
+    } finally {
+      setSaving(false);
+    }
+  }, [preview.path, value]);
+
   if (preview.loading) {
     return (
       <div className="flex-1 flex items-center justify-center text-[11px] text-ink-faint">
@@ -238,31 +307,72 @@ function PreviewBody({ preview }) {
       </div>
     );
   }
-  const e = ext(preview.name || '');
-  const isImage = IMAGE_EXT.has(e);
-  const isVideo = VIDEO_EXT.has(e);
-  const isAudio = AUDIO_EXT.has(e);
-  const isMedia = isImage || isVideo || isAudio;
   const HeaderIcon = isVideo || isAudio ? Film : isImage ? ImageIcon : FileText;
 
   return (
     <div className="flex-1 flex flex-col min-h-0">
       <div className="px-3 py-1.5 border-b border-canvas-deep bg-canvas-warm/60 flex items-center gap-2 shrink-0">
         <HeaderIcon size={11} className="text-ink-faint shrink-0" />
-        <span className="text-[11px] font-mono text-ink truncate flex-1" title={preview.path}>{preview.name}</span>
+        <span className="text-[11px] font-mono text-ink truncate flex-1" title={preview.path}>
+          {preview.name}{dirty ? ' ·' : ''}
+        </span>
         <span className="text-[10px] text-ink-faint font-mono shrink-0">
           {fmtSize(preview.size || 0)}{preview.truncated ? ' · 已截断' : ''}
         </span>
-        <button
-          onClick={() => openWithDefaultApp(preview.path)}
-          className="flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded text-ink-faint hover:text-ink hover:bg-canvas-deep transition-colors shrink-0"
-          title="用系统默认应用打开"
-        >
-          <ExternalLink size={10} />用默认App打开
-        </button>
+        {editing ? (
+          <>
+            <button onClick={undo} disabled={hist.ptr === 0}
+              className="p-1 rounded text-ink-faint hover:text-ink hover:bg-canvas-deep disabled:opacity-30 disabled:hover:bg-transparent shrink-0"
+              title="撤回"><Undo2 size={12} /></button>
+            <button onClick={redo} disabled={hist.ptr >= hist.stack.length - 1}
+              className="p-1 rounded text-ink-faint hover:text-ink hover:bg-canvas-deep disabled:opacity-30 disabled:hover:bg-transparent shrink-0"
+              title="重做"><Redo2 size={12} /></button>
+            <button onClick={save} disabled={!dirty || saving}
+              className="flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded text-accent hover:bg-accent/10 disabled:opacity-40 disabled:hover:bg-transparent shrink-0"
+              title="保存到磁盘">
+              {saving ? <RefreshCw size={10} className="animate-spin" /> : <Save size={10} />}保存
+            </button>
+            <button onClick={() => { setEditing(false); setHist({ stack: [savedValue], ptr: 0 }); }}
+              className="flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded text-ink-faint hover:text-ink hover:bg-canvas-deep shrink-0"
+              title="取消编辑"><X size={10} />取消</button>
+          </>
+        ) : (
+          <>
+            {editable && (
+              <button onClick={() => setEditing(true)}
+                className="flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded text-ink-faint hover:text-ink hover:bg-canvas-deep transition-colors shrink-0"
+                title="编辑此文件"><Pencil size={10} />编辑</button>
+            )}
+            <button
+              onClick={() => openWithDefaultApp(preview.path)}
+              className="flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded text-ink-faint hover:text-ink hover:bg-canvas-deep transition-colors shrink-0"
+              title="用系统默认应用打开"
+            >
+              <ExternalLink size={10} />用默认App打开
+            </button>
+          </>
+        )}
       </div>
+      {saveErr && (
+        <div className="px-3 py-1 text-[10px] text-red-600 bg-red-500/5 border-b border-canvas-deep flex items-center gap-1 shrink-0">
+          <AlertCircle size={10} />保存失败：{saveErr}
+        </div>
+      )}
       <div className="flex-1 overflow-auto">
-        {isImage ? (
+        {editing ? (
+          <textarea
+            value={value}
+            onChange={(ev) => pushValue(ev.target.value)}
+            onKeyDown={(ev) => {
+              const mod = ev.metaKey || ev.ctrlKey;
+              if (mod && ev.key === 's') { ev.preventDefault(); if (dirty && !saving) save(); }
+              else if (mod && !ev.shiftKey && ev.key === 'z') { ev.preventDefault(); undo(); }
+              else if (mod && (ev.key === 'y' || (ev.shiftKey && ev.key === 'z'))) { ev.preventDefault(); redo(); }
+            }}
+            spellCheck={false}
+            className="w-full h-full min-h-[200px] px-3 py-2 text-[11px] font-mono leading-5 text-ink bg-canvas resize-none focus:outline-none"
+          />
+        ) : isImage ? (
           <div className="p-3 flex items-center justify-center">
             <img
               src={rawUrl(preview.path)}
@@ -282,14 +392,22 @@ function PreviewBody({ preview }) {
           <div className="px-3 py-4 text-[11px] text-ink-faint">
             二进制文件 · 不渲染预览（用默认App打开查看）
           </div>
-        ) : e === 'md' || e === 'markdown' ? (
+        ) : isMarkdown ? (
           <div className="px-3 py-2">
             <MarkdownRenderer content={preview.content || ''} />
           </div>
         ) : (
-          <pre className="px-3 py-2 text-[11px] font-mono text-ink whitespace-pre overflow-x-auto">
-            {preview.content || ''}
-          </pre>
+          <div className="flex text-[11px] font-mono leading-5 min-w-0">
+            {/* Line-number gutter — fixed on the left while the code column
+                scrolls horizontally (VS Code behaviour). Both columns share
+                py-2 + leading-5 so rows stay aligned. */}
+            <pre className="px-2 py-2 text-right text-ink-ghost select-none border-r border-canvas-deep bg-canvas-warm/40 shrink-0">
+              {(preview.content || '').split('\n').map((_, i) => i + 1).join('\n')}
+            </pre>
+            <pre className="px-3 py-2 text-ink whitespace-pre overflow-x-auto flex-1">
+              {preview.content || ''}
+            </pre>
+          </div>
         )}
       </div>
     </div>

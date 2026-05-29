@@ -128,6 +128,13 @@ function getModelStyle(model) {
   };
 }
 
+// Resolve a model id to its provider { key, label } using the same matching
+// as the badge, so the usage panel groups identically to what badges show.
+export function modelProvider(model) {
+  const key = getModelStyle(model).provider || 'system';
+  return { key, label: PROVIDER_AVATARS[key]?.label || key };
+}
+
 export function ModelBadge({ model, compact = false }) {
   const style = getModelStyle(model);
 

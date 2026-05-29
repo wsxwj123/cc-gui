@@ -1,22 +1,43 @@
 import React from 'react';
 import ReactDOM from 'react-dom/client';
 import App from './App.jsx';
+import { THEME_FAMILIES, resolveTheme } from './stores/sessionStore.js';
 import './index.css';
 
 // ── Theme bootstrap ──────────────────────────────────────────────
-// Apply the chosen theme on <html> BEFORE React mounts so we never
-// flash the wrong color. Stores: 'auto' | 'light' | 'dark'.
+// Apply the chosen (family, tone) on <html> BEFORE React mounts so we never
+// flash the wrong color. tone: 'auto' | 'light' | 'dark'; family maps to a
+// data-cgui-theme variant via resolveTheme.
 (function bootstrapTheme() {
   const root = document.documentElement;
-  const saved = localStorage.getItem('cgui-theme') || 'auto';
-  root.setAttribute('data-theme', saved);
 
-  // Mirror system preference into a separate attr the CSS keys off of
-  // when data-theme === 'auto'.
+  const family = (() => {
+    const fam = localStorage.getItem('cgui-theme-family');
+    if (fam) return fam;
+    // Migrate from the legacy single preset id.
+    const preset = localStorage.getItem('cgui-theme-preset') || '';
+    if (!preset) return 'default';
+    const m = THEME_FAMILIES.find((f) => f.light.id === preset || f.dark.id === preset);
+    return m ? m.id : 'default';
+  })();
+  const tone = localStorage.getItem('cgui-theme') || 'auto';
+
   const mql = window.matchMedia('(prefers-color-scheme: dark)');
-  const syncSystem = () => root.setAttribute('data-theme-system', mql.matches ? 'dark' : 'light');
-  syncSystem();
-  mql.addEventListener('change', syncSystem);
+  const apply = () => {
+    // CSS keys the default family's dark palette off data-theme-system.
+    root.setAttribute('data-theme-system', mql.matches ? 'dark' : 'light');
+    const { dataTheme, cguiTheme } = resolveTheme(family, tone);
+    root.setAttribute('data-theme', dataTheme);
+    if (cguiTheme) root.setAttribute('data-cgui-theme', cguiTheme);
+    else root.removeAttribute('data-cgui-theme');
+  };
+  apply();
+  // Keep data-theme-system fresh; the store's listener re-resolves the preset
+  // variant when tone === 'auto'.
+  mql.addEventListener('change', apply);
+
+  // Persist the migrated family so subsequent loads skip derivation.
+  try { localStorage.setItem('cgui-theme-family', family); } catch {}
 })();
 
 ReactDOM.createRoot(document.getElementById('root')).render(

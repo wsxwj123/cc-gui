@@ -1,100 +1,86 @@
 import { Router } from 'express';
-import { spawn } from 'child_process';
-import { resolve as pathResolve, sep } from 'path';
 import { homedir } from 'os';
-import { statSync } from 'fs';
+import { join, sep } from 'path';
+import { createReadStream, createWriteStream, existsSync } from 'fs';
+import { realpath } from 'fs/promises';
+import { randomUUID } from 'crypto';
+import readline from 'readline';
 
 const router = Router();
 
+const PROJECTS_DIR = join(homedir(), '.claude', 'projects');
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-// projectHash 是 Claude Code 把路径里的 '/' 换成 '-' 形成的，因此只允许这些字符。
-// 显式禁止 '..' 出现：路径段不能为空。
+// projectHash 是 Claude Code 把路径里的 '/' 换成 '-' 形成的目录名，只允许这些字符。
 const PROJECT_HASH_RE = /^-?[A-Za-z0-9._-]{1,300}$/;
 
-function resolveProjectCwd(projectHash) {
-  if (!PROJECT_HASH_RE.test(projectHash)) return null;
-  if (!projectHash.startsWith('-')) return homedir();
-  // Reverse the path-mangling: '-' becomes '/'. This produces tokens separated by '/',
-  // and the regex above already forbids unsafe characters, so '..' segments cannot occur.
-  const candidate = '/' + projectHash.slice(1).replace(/-/g, '/');
-  const resolved = pathResolve(candidate);
-  // Belt-and-suspenders: reject if pathResolve changed anything (shouldn't, but a stray
-  // double slash or trailing '..' would be caught here).
-  if (resolved !== candidate && resolved + sep !== candidate) return null;
-  try {
-    if (!statSync(resolved).isDirectory()) return null;
-  } catch { return null; }
-  return resolved;
-}
-
+/**
+ * Fork a session by COPYING its jsonl file under a fresh session id, rewriting
+ * only the top-level `sessionId` field on each line. The Claude CLI stores a
+ * session as a single <sessionId>.jsonl; `--resume <newId>` reads that file
+ * directly, so a faithful copy = a true fork that keeps the ENTIRE context with
+ * no model turn and no token cost.
+ *
+ * We deliberately do NOT use `claude --fork-session` headless: stream-json
+ * output requires --print, and an empty-stdin print run never materializes the
+ * forked file (the fork is only written on a real turn). The filesystem copy is
+ * deterministic and instant.
+ */
 router.post('/fork', async (req, res) => {
-  const { sessionId, projectHash, prompt } = req.body;
+  const { sessionId, projectHash } = req.body;
   if (!sessionId || !projectHash) {
     return res.status(400).json({ error: 'sessionId and projectHash required' });
   }
   if (!UUID_RE.test(String(sessionId))) {
     return res.status(400).json({ error: 'invalid sessionId' });
   }
+  if (!PROJECT_HASH_RE.test(String(projectHash))) {
+    return res.status(400).json({ error: 'invalid projectHash' });
+  }
 
-  const cwd = resolveProjectCwd(String(projectHash));
-  if (!cwd) return res.status(400).json({ error: 'invalid projectHash' });
+  const dir = join(PROJECTS_DIR, String(projectHash));
+  // Containment check — block '..' traversal escaping the projects dir.
+  const realDir = await realpath(dir).catch(() => null);
+  if (!realDir || !(realDir === PROJECTS_DIR || realDir.startsWith(PROJECTS_DIR + sep))) {
+    return res.status(400).json({ error: 'invalid projectHash' });
+  }
 
-  const args = ['--resume', sessionId, '--fork-session'];
-  if (prompt) args.push('-p', String(prompt));
-  args.push('--output-format', 'stream-json');
+  const src = join(realDir, `${sessionId}.jsonl`);
+  if (!existsSync(src)) {
+    return res.status(404).json({ error: 'session file not found' });
+  }
 
-  const proc = spawn('claude', args, {
-    cwd,
-    stdio: ['pipe', 'pipe', 'pipe'],
-    env: { ...process.env },
-  });
-  const pid = proc.pid.toString();
+  const newId = randomUUID();
+  const dest = join(realDir, `${newId}.jsonl`);
 
-  let responded = false;
-  const respond = (payload, status = 200) => {
-    if (responded || res.headersSent) return;
-    responded = true;
-    res.status(status).json(payload);
-  };
-
-  // Don't kill on a fixed timer — wait until we see the sessionId on stdout, then kill.
-  // Fall back to a generous 15s safety net so we don't leak a forked process if the CLI
-  // never emits the expected event.
-  const safety = setTimeout(() => {
-    if (!proc.killed) proc.kill('SIGTERM');
-  }, 15000);
-  safety.unref();
-
-  let buffer = '';
-  proc.stdout.on('data', (chunk) => {
-    if (responded) return;
-    buffer += chunk.toString();
-    const lines = buffer.split('\n');
-    buffer = lines.pop() || '';
-    for (const line of lines) {
-      if (!line.trim()) continue;
-      try {
-        const data = JSON.parse(line);
-        const newId = data.sessionId || data.session_id || data.session?.id;
-        if (newId) {
-          respond({ newSessionId: newId, pid });
-          clearTimeout(safety);
-          if (!proc.killed) proc.kill('SIGTERM');
-          return;
-        }
-      } catch {}
-    }
-  });
-
-  proc.on('close', () => {
-    clearTimeout(safety);
-    respond({ pid, message: 'Fork initiated. Check sessions list for the new session.' });
-  });
-
-  proc.on('error', (err) => {
-    clearTimeout(safety);
-    respond({ error: err.message }, 500);
-  });
+  try {
+    await forkJsonl(src, dest, String(sessionId), newId);
+    res.json({ newSessionId: newId });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
+
+// Stream src → dest line by line, rewriting only the top-level sessionId so we
+// never touch ids embedded inside message content.
+function forkJsonl(src, dest, oldId, newId) {
+  return new Promise((resolve, reject) => {
+    const out = createWriteStream(dest, { encoding: 'utf8' });
+    const rl = readline.createInterface({
+      input: createReadStream(src, { encoding: 'utf8' }),
+      crlfDelay: Infinity,
+    });
+    rl.on('line', (line) => {
+      if (!line.trim()) { out.write('\n'); return; }
+      let obj;
+      try { obj = JSON.parse(line); }
+      catch { out.write(line + '\n'); return; } // pass through unparseable lines verbatim
+      if (obj.sessionId === oldId) obj.sessionId = newId;
+      out.write(JSON.stringify(obj) + '\n');
+    });
+    rl.on('error', reject);
+    out.on('error', reject);
+    rl.on('close', () => out.end(resolve));
+  });
+}
 
 export default router;

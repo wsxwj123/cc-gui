@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { readdir, stat, readFile, realpath } from 'fs/promises';
+import { readdir, stat, readFile, realpath, writeFile } from 'fs/promises';
 import { createReadStream } from 'fs';
 import { join, resolve, relative, extname } from 'path';
 import { homedir, platform } from 'os';
@@ -161,6 +161,33 @@ router.post('/files/open', async (req, res) => {
       if (err) console.error('[files/open]', err.message);
     });
     res.json({ ok: true, path: real });
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
+/**
+ * PUT /api/files/write  { path, content }
+ * Overwrite an EXISTING text file under $HOME. safePath() requires the path to
+ * already resolve (realpath), so this never creates new files or follows a
+ * symlink outside $HOME. Size-capped to match the read endpoint's intent.
+ */
+const MAX_WRITE_BYTES = 5 * 1024 * 1024; // 5MB
+router.put('/files/write', async (req, res) => {
+  try {
+    const { path: p, content } = req.body || {};
+    if (typeof content !== 'string') {
+      return res.status(400).json({ error: 'content (string) required' });
+    }
+    if (Buffer.byteLength(content, 'utf-8') > MAX_WRITE_BYTES) {
+      return res.status(413).json({ error: 'file too large to save (>5MB)' });
+    }
+    const real = await safePath(p);
+    const st = await stat(real);
+    if (st.isDirectory()) return res.status(400).json({ error: 'not a file' });
+    await writeFile(real, content, 'utf-8');
+    const after = await stat(real);
+    res.json({ ok: true, path: real, size: after.size });
   } catch (err) {
     res.status(err.status || 500).json({ error: err.message });
   }

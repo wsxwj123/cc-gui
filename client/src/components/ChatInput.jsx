@@ -319,12 +319,15 @@ export function ChatInput({ onSend, onStop, onAccelerate, disabled, isStreaming,
     return () => { cancelled = true; window.removeEventListener('focus', onFocus); };
   }, []);
 
-  // Auto-resize textarea
+  // Auto-resize textarea. When empty, pin to a single line: an empty textarea's
+  // scrollHeight still counts the (long, wrappable) placeholder, so in a narrow
+  // split pane the placeholder wraps to 2 lines and inflates the resting height.
+  // Only grow to fit real content.
   useEffect(() => {
     const el = textareaRef.current;
     if (!el) return;
     el.style.height = 'auto';
-    el.style.height = Math.min(el.scrollHeight, 200) + 'px';
+    el.style.height = (text ? Math.min(el.scrollHeight, 200) : 24) + 'px';
   }, [text]);
 
   // Case-insensitive prefix match; rank exact-case matches first.
@@ -427,7 +430,7 @@ export function ChatInput({ onSend, onStop, onAccelerate, disabled, isStreaming,
           </div>
         </div>
       )}
-    <div className="px-6 py-5">
+    <div className="px-4 py-5">
       <div className="max-w-3xl mx-auto relative">
         {/* Slash command dropdown */}
         {showCommands && (
