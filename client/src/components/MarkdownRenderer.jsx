@@ -77,7 +77,7 @@ const markdownComponents = {
 
     return (
       <code
-        className="bg-canvas-warm border border-canvas-deep px-1.5 py-0.5 rounded text-[0.88em] font-mono text-[#a65a3a]"
+        className="bg-canvas-warm border border-canvas-deep px-1.5 py-0.5 rounded text-[0.88em] font-mono text-accent"
         {...props}
       >
         {children}

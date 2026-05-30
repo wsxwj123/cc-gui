@@ -107,8 +107,8 @@ export const FONT_OPTIONS = [
   { id: 'mono',       name: '等宽 (JetBrains Mono)', css: "'JetBrains Mono', ui-monospace, monospace" },
 ];
 function initReadingFont() {
-  try { return localStorage.getItem('cgui-reading-font') || 'sans'; }
-  catch { return 'sans'; }
+  try { return localStorage.getItem('cgui-reading-font') || 'newsreader'; }
+  catch { return 'newsreader'; }
 }
 // Apply a reading-font id to the <html> --font-reading custom property.
 export function applyReadingFont(id) {
