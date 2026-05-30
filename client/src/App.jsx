@@ -3375,7 +3375,12 @@ export default function App() {
   // just open the drawer so the user can pick one first.
   const startMobileNewChat = () => {
     const st = useStore.getState();
-    const proj = st.selectedProject;
+    // Prefer the explicitly-selected project; otherwise fall back to the project
+    // of the session currently open, so the ✎ button creates a new chat in the
+    // SAME project folder you're chatting in (not a dead no-op).
+    const sel = st.selectedSession;
+    const proj = st.selectedProject
+      || (sel && sel.projectHash ? { hash: sel.projectHash, path: sel.projectPath } : null);
     if (!proj) { if (st.sidebarCollapsed) st.toggleSidebar(); return; }
     st.setSelectedSession({
       draft: true, sessionId: null, projectHash: proj.hash,

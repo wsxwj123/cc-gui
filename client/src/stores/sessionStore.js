@@ -261,6 +261,12 @@ export const useStore = create((set, get) => ({
   readingFont: initReadingFont(),
 
   loading: false,
+  // Separate from `loading`: list refreshes (projects/sessions) must NOT flip
+  // `loading`, because SessionDetail reads `loading` to show a full-screen
+  // spinner over the CHAT. Sharing one flag meant every background sessions
+  // refresh (file-watcher poll) or project fetch blanked the open conversation
+  // — the "新建没反应 / 列表闪烁" bugs. `loading` is now message-view only.
+  listLoading: false,
   error: null,
   searchQuery: '',
   sidebarCollapsed: !!readLs('cgui-sidebar-collapsed', false),
@@ -603,14 +609,14 @@ export const useStore = create((set, get) => ({
 
   // Fetch projects
   fetchProjects: async () => {
-    set({ loading: true, error: null });
+    set({ listLoading: true, error: null });
     try {
       const res = await fetch('/api/projects');
       const data = await res.json();
       const projects = Array.isArray(data) ? data : [];
-      set({ projects, loading: false });
+      set({ projects, listLoading: false });
     } catch (err) {
-      set({ projects: [], error: err.message, loading: false });
+      set({ projects: [], error: err.message, listLoading: false });
     }
   },
 
@@ -621,7 +627,7 @@ export const useStore = create((set, get) => ({
   // makes the page feel like it's reloading.
   fetchSessions: async (projectHash, opts = {}) => {
     const silent = !!opts.silent;
-    if (!silent) set({ loading: true, error: null });
+    if (!silent) set({ listLoading: true, error: null });
     try {
       const res = await fetch(`/api/projects/${encodeURIComponent(projectHash)}/sessions`);
       const data = await res.json();
@@ -631,9 +637,9 @@ export const useStore = create((set, get) => ({
       // because the spread didn't include the key. The explicit `sessions: []`
       // below guarantees the list is reset for every project switch.
       const sessions = Array.isArray(data) ? data : [];
-      set(silent ? { sessions } : { sessions, loading: false });
+      set(silent ? { sessions } : { sessions, listLoading: false });
     } catch (err) {
-      set(silent ? { sessions: [] } : { sessions: [], error: err.message, loading: false });
+      set(silent ? { sessions: [] } : { sessions: [], error: err.message, listLoading: false });
     }
   },
 

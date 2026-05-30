@@ -397,17 +397,27 @@ function PreviewBody({ preview }) {
             <MarkdownRenderer content={preview.content || ''} />
           </div>
         ) : (
-          <div className="flex text-[11px] font-mono leading-5 min-w-0">
-            {/* Line-number gutter — fixed on the left while the code column
-                scrolls horizontally (VS Code behaviour). Both columns share
-                py-2 + leading-5 so rows stay aligned. */}
-            <pre className="px-2 py-2 text-right text-ink-ghost select-none border-r border-canvas-deep bg-canvas-warm/40 shrink-0">
-              {(preview.content || '').split('\n').map((_, i) => i + 1).join('\n')}
-            </pre>
-            <pre className="px-3 py-2 text-ink whitespace-pre overflow-x-auto flex-1">
-              {preview.content || ''}
-            </pre>
-          </div>
+          (() => {
+            // Both columns MUST derive from the SAME normalized line array.
+            // A CRLF file leaves a stray `\r` at each line end; the content
+            // <pre> renders those `\r` as extra visual breaks while the gutter
+            // (plain numbers) does not, so the columns drift and numbers land
+            // on the wrong rows. Splitting on /\r?\n/ and re-joining with \n
+            // keeps the two columns line-for-line identical.
+            const lines = (preview.content || '').split(/\r?\n/);
+            return (
+              <div className="flex text-[11px] font-mono leading-5 min-w-0">
+                {/* Line-number gutter — fixed on the left while the code column
+                    scrolls horizontally (VS Code behaviour). */}
+                <pre className="px-2 py-2 text-right text-ink-ghost select-none border-r border-canvas-deep bg-canvas-warm/40 shrink-0">
+                  {lines.map((_, i) => i + 1).join('\n')}
+                </pre>
+                <pre className="px-3 py-2 text-ink whitespace-pre overflow-x-auto flex-1">
+                  {lines.join('\n')}
+                </pre>
+              </div>
+            );
+          })()
         )}
       </div>
     </div>
