@@ -3200,7 +3200,22 @@ export function ModelSelector({ compact = false, permKey = null }) {
   const [open, setOpen] = useState(false);
   const [customInput, setCustomInput] = useState('');
   const [provider, setProvider] = useState('');
+  const [fetched, setFetched] = useState([]);
+  const [fetchNote, setFetchNote] = useState('');
+  const [fetching, setFetching] = useState(false);
+  const [query, setQuery] = useState('');
   const wrapRef = useRef(null);
+  const doFetch = async () => {
+    setFetching(true); setFetchNote('');
+    try {
+      const r = await fetch('/api/provider/fetch-models', { method: 'POST' });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || '拉取失败');
+      setFetched(Array.isArray(d.models) ? d.models : []);
+      setFetchNote(d.note || (d.models?.length ? `已拉取 ${d.models.length} 个` : '未返回模型'));
+    } catch (e) { setFetchNote('拉取失败：' + e.message); }
+    setFetching(false);
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -3246,9 +3261,15 @@ export function ModelSelector({ compact = false, permKey = null }) {
   };
   // Merge user-added ids that the server didn't already enumerate, so they show
   // as selectable rows (with a remove affordance).
+  const q = query.trim().toLowerCase();
+  const match = (id, name) => !q || id.toLowerCase().includes(q) || (name || '').toLowerCase().includes(q);
   const customRows = customModels
     .filter((id) => !availableModels.some((m) => m.id === id))
     .map((id) => ({ id, name: id.replace(/\[1m\]/i, ''), tier: '自定义', source: 'custom', context1m: /\[1m\]/i.test(id) }));
+  const fetchedRows = fetched
+    .filter((id) => !availableModels.some((m) => m.id === id) && !customModels.includes(id))
+    .filter((id) => match(id, id))
+    .map((id) => ({ id, name: id }));
 
   // 1M-context toggle: Claude Code enables the 1M beta via a `[1m]` suffix on
   // the model id (same thing the CLI's /model picker writes). Toggling just
@@ -3295,6 +3316,15 @@ export function ModelSelector({ compact = false, permKey = null }) {
                 </span>
               )}
             </p>
+            <div className="flex gap-1.5 mt-2">
+              <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="搜索模型…"
+                className="flex-1 bg-canvas-warm border border-canvas-deep rounded px-2 py-1 text-xs text-ink focus:outline-none focus:border-accent/40" />
+              <button onClick={doFetch} disabled={fetching}
+                className="px-2 py-1 text-[10px] border border-accent text-accent rounded disabled:opacity-50 shrink-0">
+                {fetching ? '拉取中…' : '拉取最新'}
+              </button>
+            </div>
+            {fetchNote && <div className="text-[10px] text-ink-faint font-body mt-1">{fetchNote}</div>}
           </div>
           {/* 1M context toggle — appends [1m] to the active model id */}
           <button onClick={toggle1m}
@@ -3310,7 +3340,7 @@ export function ModelSelector({ compact = false, permKey = null }) {
               {has1m ? '已开启' : '关闭'}
             </span>
           </button>
-          {availableModels.map((m) => {
+          {availableModels.filter((m) => match(m.id, m.name)).map((m) => {
             const isAlias = m.source === 'cli-alias';
             return (
               <button key={m.id} onClick={() => selectModel(m.id)}
@@ -3341,7 +3371,7 @@ export function ModelSelector({ compact = false, permKey = null }) {
               </button>
             );
           })}
-          {customRows.map((m) => (
+          {customRows.filter((m) => match(m.id, m.name)).map((m) => (
             <div key={m.id}
               className={`w-full px-3 py-2 hover:bg-canvas-warm transition-colors flex items-center gap-2 ${
                 currentModel === m.id ? 'bg-accent-subtle/50' : ''}`}>
@@ -3357,6 +3387,17 @@ export function ModelSelector({ compact = false, permKey = null }) {
               <button onClick={() => useStore.getState().removeCustomModel(m.id)} title="移除自定义模型"
                 className="p-1 text-ink-faint hover:text-error shrink-0"><X size={12} /></button>
             </div>
+          ))}
+          {fetchedRows.map((m) => (
+            <button key={`f-${m.id}`} onClick={() => selectModel(m.id)}
+              className={`w-full text-left px-3 py-2 hover:bg-canvas-warm transition-colors flex items-center gap-2 ${
+                currentModel === m.id ? 'bg-accent-subtle/50' : ''}`}>
+              <div className="flex-1 min-w-0">
+                <div className="text-xs font-medium text-ink font-body truncate">{m.name}</div>
+                <div className="text-[10px] text-ink-faint font-mono truncate">实时拉取</div>
+              </div>
+              {currentModel === m.id && <Check size={12} className="text-accent shrink-0" />}
+            </button>
           ))}
           <div className="border-t border-canvas-deep mt-1 pt-1 px-3 pb-2">
             <div className="text-[10px] text-ink-faint mb-1 font-body">自定义模型 ID</div>
@@ -3463,6 +3504,10 @@ function MobileModelPage({ permKey }) {
   const customModels = useStore((s) => s.customModels);
   const currentModel = useStore((s) => (permKey && s.modelBySession[permKey]) || s.currentModel);
   const [customInput, setCustomInput] = useState('');
+  const [fetched, setFetched] = useState([]);
+  const [fetchNote, setFetchNote] = useState('');
+  const [fetching, setFetching] = useState(false);
+  const [query, setQuery] = useState('');
   // The desktop ModelSelector normally fetches the model catalogue; it isn't
   // mounted on phones, so populate the global default + available list here.
   useEffect(() => {
@@ -3482,11 +3527,39 @@ function MobileModelPage({ permKey }) {
     useStore.getState().setModelFor(permKey, has1m ? base : `${base}[1m]`);
   };
   const addCustom = (v) => { useStore.getState().addCustomModel(v); pick(v); };
+  const doFetch = async () => {
+    setFetching(true); setFetchNote('');
+    try {
+      const r = await fetch('/api/provider/fetch-models', { method: 'POST' });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || '拉取失败');
+      setFetched(Array.isArray(d.models) ? d.models : []);
+      setFetchNote(d.note || (d.models?.length ? `已拉取 ${d.models.length} 个` : '未返回模型'));
+    } catch (e) { setFetchNote('拉取失败：' + e.message); }
+    setFetching(false);
+  };
+  const q = query.trim().toLowerCase();
+  const match = (id, name) => !q || id.toLowerCase().includes(q) || (name || '').toLowerCase().includes(q);
   const customRows = customModels
     .filter((id) => !availableModels.some((m) => m.id === id))
     .map((id) => ({ id, name: id.replace(/\[1m\]/i, ''), context1m: /\[1m\]/i.test(id) }));
+  const fetchedRows = fetched
+    .filter((id) => !availableModels.some((m) => m.id === id) && !customModels.includes(id))
+    .filter((id) => match(id, id))
+    .map((id) => ({ id, name: id }));
   return (
     <div className="py-1">
+      <div className="px-4 py-2.5 border-b border-canvas-deep/40 space-y-2">
+        <div className="flex gap-2">
+          <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="搜索模型…"
+            className="flex-1 bg-canvas-warm border border-canvas-deep rounded-lg px-3 py-2 text-[13px] text-ink focus:outline-none focus:border-accent" />
+          <button onClick={doFetch} disabled={fetching}
+            className="px-3 py-2 text-[12px] border border-accent text-accent rounded-lg disabled:opacity-50 shrink-0">
+            {fetching ? '拉取中…' : '拉取最新'}
+          </button>
+        </div>
+        {fetchNote && <div className="text-[11px] text-ink-faint font-body">{fetchNote}</div>}
+      </div>
       <button onClick={toggle1m}
         className="w-full flex items-center gap-3 px-4 py-3 text-left hover:bg-canvas-warm transition-colors border-b border-canvas-deep/40">
         <span className="flex-1 text-[14px] font-body text-ink">1M 上下文</span>
@@ -3494,7 +3567,7 @@ function MobileModelPage({ permKey }) {
           {has1m ? '已开启' : '关闭'}
         </span>
       </button>
-      {availableModels.map((m) => {
+      {availableModels.filter((m) => match(m.id, m.name)).map((m) => {
         const active = currentModel === m.id || currentModel === `${m.id}[1m]`;
         return (
           <button key={m.id} onClick={() => pick(m.id)}
@@ -3508,7 +3581,20 @@ function MobileModelPage({ permKey }) {
           </button>
         );
       })}
-      {customRows.map((m) => {
+      {fetchedRows.map((m) => {
+        const active = currentModel === m.id || currentModel === `${m.id}[1m]`;
+        return (
+          <button key={`f-${m.id}`} onClick={() => pick(m.id)}
+            className="w-full flex items-center gap-3 px-4 py-3 text-left hover:bg-canvas-warm transition-colors">
+            <div className="flex-1 min-w-0">
+              <div className="text-[14px] font-body text-ink truncate">{m.name}</div>
+              <div className="text-[11px] text-ink-faint font-mono truncate">实时拉取</div>
+            </div>
+            {active && <Check size={16} className="text-accent shrink-0" />}
+          </button>
+        );
+      })}
+      {customRows.filter((m) => match(m.id, m.name)).map((m) => {
         const active = currentModel === m.id || currentModel === `${m.id}[1m]`;
         return (
           <div key={m.id} className="w-full flex items-center gap-3 px-4 py-3">

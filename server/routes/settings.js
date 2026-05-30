@@ -441,30 +441,61 @@ router.delete('/custom-providers/:id', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// POST /api/custom-providers/fetch-models { type, baseURL, apiKey } — live-fetch
-// the upstream's model catalogue via GET {baseURL}/v1/models. Single-user local
-// tool, so an arbitrary baseURL here is the user's own choice (no SSRF guard).
-router.post('/custom-providers/fetch-models', async (req, res) => {
-  try {
-    const { type, baseURL, apiKey } = req.body || {};
-    let base; try { base = new URL(baseURL); } catch { return res.status(400).json({ error: 'baseURL 非法' }); }
-    if (!/^https?:$/.test(base.protocol)) return res.status(400).json({ error: 'baseURL 必须是 http(s)' });
-    const url = baseURL.trim().replace(/\/+$/, '') + '/v1/models';
-    const headers = type === 'anthropic'
-      ? { 'x-api-key': apiKey || '', 'anthropic-version': '2023-06-01' }
-      : { Authorization: `Bearer ${apiKey || ''}` };
+// Live-fetch a provider's model catalogue via GET {baseURL}/v1/models. Tries the
+// Anthropic header style first (x-api-key) then OpenAI (Bearer) — some relays
+// accept only one. Returns deduped model ids. Single-user local tool, so an
+// arbitrary baseURL is the user's own choice (no SSRF guard).
+async function probeUpstreamModels(baseURL, apiKey) {
+  const url = baseURL.trim().replace(/\/+$/, '') + '/v1/models';
+  const headerSets = [
+    { 'x-api-key': apiKey || '', 'anthropic-version': '2023-06-01' },
+    { Authorization: `Bearer ${apiKey || ''}` },
+  ];
+  let lastStatus = 0;
+  for (const headers of headerSets) {
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), 10000);
     let r;
     try { r = await fetch(url, { headers, signal: ctrl.signal }); }
-    finally { clearTimeout(timer); }
-    if (!r.ok) return res.status(502).json({ error: `上游返回 ${r.status}` });
-    const data = await r.json().catch(() => null);
-    const arr = Array.isArray(data?.data) ? data.data : (Array.isArray(data?.models) ? data.models : []);
-    const ids = [...new Set(arr.map((m) => (typeof m === 'string' ? m : m?.id)).filter(Boolean))];
-    res.json({ models: ids });
+    catch (e) { clearTimeout(timer); if (e.name === 'AbortError') throw new Error('拉取超时(10s)'); continue; }
+    clearTimeout(timer);
+    if (r.ok) {
+      const data = await r.json().catch(() => null);
+      const arr = Array.isArray(data?.data) ? data.data : (Array.isArray(data?.models) ? data.models : []);
+      return [...new Set(arr.map((m) => (typeof m === 'string' ? m : m?.id)).filter(Boolean))];
+    }
+    lastStatus = r.status;
+  }
+  throw new Error(`上游返回 ${lastStatus || '错误'}`);
+}
+
+// POST /api/custom-providers/fetch-models { type, baseURL, apiKey } — used by the
+// add-provider form (client supplies the key being entered).
+router.post('/custom-providers/fetch-models', async (req, res) => {
+  try {
+    const { baseURL, apiKey } = req.body || {};
+    let base; try { base = new URL(baseURL); } catch { return res.status(400).json({ error: 'baseURL 非法' }); }
+    if (!/^https?:$/.test(base.protocol)) return res.status(400).json({ error: 'baseURL 必须是 http(s)' });
+    res.json({ models: await probeUpstreamModels(baseURL, apiKey) });
   } catch (err) {
-    res.status(500).json({ error: err.name === 'AbortError' ? '拉取超时(10s)' : err.message });
+    res.status(502).json({ error: err.message });
+  }
+});
+
+// POST /api/provider/fetch-models — live-fetch the CURRENTLY active provider's
+// models. Reads base+token from settings.json server-side (the client never holds
+// the key). Official direct (no base) and the OpenAI proxy can't be probed.
+router.post('/provider/fetch-models', async (_req, res) => {
+  try {
+    let env = {};
+    try { env = (JSON.parse(await readFile(SETTINGS_PATH, 'utf-8')).env) || {}; } catch {}
+    const base = env.ANTHROPIC_BASE_URL || '';
+    const token = env.ANTHROPIC_AUTH_TOKEN || env.ANTHROPIC_API_KEY || '';
+    if (!base) return res.json({ models: [], note: '官方直连(无凭证),无法拉取;别名 opus/sonnet/haiku 即最新 tier' });
+    if (base.includes('127.0.0.1')) return res.json({ models: [], note: 'OpenAI 代理 provider,模型见 provider 配置' });
+    res.json({ models: await probeUpstreamModels(base, token) });
+  } catch (err) {
+    res.status(502).json({ error: err.message });
   }
 });
 
