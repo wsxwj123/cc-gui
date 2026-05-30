@@ -83,6 +83,9 @@ export function EffortSelector({ permKey = null }) {
   // not a session property.
   const effModel = useStore((s) => ((permKey && s.modelBySession[permKey]) || s.currentModel) || '');
   const effort = useStore((s) => { const b = effModel.replace(/\[1m\]/i, ''); return b && b in s.effortByModel ? s.effortByModel[b] : s.effort; });
+  // --effort is an Anthropic-protocol flag; it's meaningless on OpenAI-compat
+  // upstreams (cc switch → codex-local/deepseek/etc), where the CLI can't map it.
+  const isAnthropic = useStore((s) => (s.currentProvider?.providerHint || 'anthropic') === 'anthropic');
   const setEffort = (id) => useStore.getState().setEffortForModel(effModel, id);
   const [open, setOpen] = useState(false);
   const wrapRef = useRef(null);
@@ -101,6 +104,8 @@ export function EffortSelector({ permKey = null }) {
       document.removeEventListener('keydown', onEsc);
     };
   }, [open]);
+
+  if (!isAnthropic) return null;
 
   return (
     <div ref={wrapRef} className="relative">

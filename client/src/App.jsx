@@ -3998,6 +3998,8 @@ function MobileMenu({ setRightPanel, onClose }) {
   const currentModel = useStore((s) => s.modelBySession[permKey] || s.currentModel);
   const effort = useStore((s) => { const b = (currentModel || '').replace(/\[1m\]/i, ''); return b && b in s.effortByModel ? s.effortByModel[b] : s.effort; });
   const permissionMode = useStore((s) => s.permissionModeBySession[permKey] || 'default');
+  // --effort only applies on Anthropic upstreams; hide it on OpenAI-compat providers.
+  const isAnthropic = useStore((s) => (s.currentProvider?.providerHint || 'anthropic') === 'anthropic');
   const effortLabel = (EFFORT_LEVELS.find((e) => e.id === effort) || EFFORT_LEVELS[0]).label;
   const permLabel = (MODE_META[permissionMode] || MODE_META.default).label;
 
@@ -4046,7 +4048,7 @@ function MobileMenu({ setRightPanel, onClose }) {
               <MobileMenuRow icon={MessageSquare} label="会话与项目" onClick={() => push('history')} />
               <div className="px-4 pt-3 pb-1 text-[11px] text-ink-faint uppercase tracking-wider font-body">当前会话</div>
               <MobileMenuRow icon={Cpu} label="模型" value={<ModelBadge model={currentModel} compact />} onClick={() => push('model')} />
-              <MobileMenuRow icon={Gauge} label="推理力度" value={effortLabel} onClick={() => push('effort')} />
+              {isAnthropic && <MobileMenuRow icon={Gauge} label="推理力度" value={effortLabel} onClick={() => push('effort')} />}
               <MobileMenuRow icon={Shield} label="权限模式" value={permLabel} onClick={() => push('permission')} />
               <MobileMenuRow icon={Server} label="Provider" onClick={() => push('provider')} />
               {activeSession?.sessionId && (
