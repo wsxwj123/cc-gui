@@ -4,3 +4,10 @@ client/dist/
 *.log
 .DS_Store
 .claude/
+
+# Local-only, machine-private modules — never committed. Used for personal
+# integrations (e.g. driving desktop scripts) that shouldn't ship publicly.
+# The server auto-loads server/routes/*.local.js; the client auto-loads
+# client/src/components/*.local.jsx via import.meta.glob (absent → no-op).
+*.local.js
+*.local.jsx

@@ -99,7 +99,9 @@ function NetworkTab() {
   const [cfg, setCfg] = useState(null);
   const [lanOn, setLanOn] = useState(false);
   const [port, setPort] = useState(6677);
+  const [password, setPassword] = useState('');
   const [saving, setSaving] = useState(false);
+  const [restarting, setRestarting] = useState(false);
   const [msg, setMsg] = useState(null);
   const [err, setErr] = useState(null);
 
@@ -115,34 +117,74 @@ function NetworkTab() {
   const save = async () => {
     setSaving(true); setErr(null); setMsg(null);
     try {
+      const body = { host: lanOn ? '0.0.0.0' : '127.0.0.1', port: Number(port) };
+      if (password) body.password = password;
       const r = await fetch('/api/network', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ host: lanOn ? '0.0.0.0' : '127.0.0.1', port: Number(port) }),
+        body: JSON.stringify(body),
       });
       const d = await r.json();
       if (!r.ok) throw new Error(d.error || '保存失败');
-      setMsg('已保存。重启 server 后生效。'); load();
+      setPassword('');
+      setMsg('已保存，重启后生效。'); load();
     } catch (e) { setErr(e.message); }
     setSaving(false);
   };
 
+  // One-tap restart via the gui.command watchdog. Polls /api/network until the
+  // server answers again, then reloads (so the new binding/cookie state applies).
+  const restart = async () => {
+    setRestarting(true); setErr(null); setMsg(null);
+    try {
+      const r = await fetch('/api/restart', { method: 'POST' });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(d.error || '重启失败');
+      setMsg('正在重启…');
+      // Server exits ~250ms later; watchdog relaunches. Poll for it to come back.
+      let tries = 0;
+      const tick = async () => {
+        tries++;
+        try {
+          const p = await fetch('/api/network', { cache: 'no-store' });
+          if (p.ok) { window.location.reload(); return; }
+        } catch {}
+        if (tries < 40) setTimeout(tick, 500);
+        else { setRestarting(false); setErr('重启超时，请手动检查 server'); }
+      };
+      setTimeout(tick, 1200);
+    } catch (e) { setErr(e.message); setRestarting(false); }
+  };
+
   if (!cfg) return <div className="py-8 flex justify-center"><RefreshCw size={14} className="animate-spin text-ink-faint" /></div>;
   const lanAddr = cfg.lanIps?.[0] ? `http://${cfg.lanIps[0]}:${port}` : null;
+  const needPassword = lanOn && !cfg.hasPassword && !password;
 
   return (
     <div className="space-y-4">
       <div className="text-[11px] text-ink-muted font-body">
         当前绑定：<span className="font-mono text-ink">{cfg.host}:{cfg.port}</span>
         <span className="ml-2">{cfg.lanMode ? '（局域网可访问）' : '（仅本机）'}</span>
+        {cfg.hasPassword && <span className="ml-2 text-success">· 已设访问密码</span>}
       </div>
 
       <label className="flex items-start gap-3 cursor-pointer">
         <input type="checkbox" checked={lanOn} onChange={(e) => setLanOn(e.target.checked)} className="mt-0.5" />
         <div>
-          <div className="text-[13px] text-ink font-body font-medium">开放局域网访问（绑定 0.0.0.0）</div>
-          <div className="text-[11px] text-ink-faint font-body">关闭时仅本机 127.0.0.1 可访问；开启后同局域网 / Tailscale 设备（含手机）可用下方地址打开。</div>
+          <div className="text-[13px] text-ink font-body font-medium">{lanOn ? '局域网访问：开启（绑定 0.0.0.0）' : '开启局域网访问（绑定 0.0.0.0）'}</div>
+          <div className="text-[11px] text-ink-faint font-body">关闭=保存后回到仅本机 127.0.0.1；开启后同局域网 / Tailscale 设备（含手机）凭密码访问下方地址。</div>
         </div>
       </label>
+
+      {lanOn && (
+        <div className="space-y-1.5">
+          <div className="text-[12px] text-ink-soft font-body">
+            访问密码 {cfg.hasPassword ? <span className="text-ink-faint">（已设置，留空＝不修改）</span> : <span className="text-error">（必填，至少 4 位）</span>}
+          </div>
+          <input type="password" value={password} onChange={(e) => setPassword(e.target.value)}
+            placeholder={cfg.hasPassword ? '••••（留空保持原密码）' : '设置访问密码'}
+            className="w-full px-3 py-2 text-[13px] font-body border border-canvas-deep rounded-lg bg-canvas text-ink focus:outline-none focus:border-accent" />
+        </div>
+      )}
 
       <div className="flex items-center gap-2">
         <span className="text-[12px] text-ink-soft font-body">端口</span>
@@ -158,21 +200,28 @@ function NetworkTab() {
       )}
 
       {lanOn && (
-        <div className="flex items-start gap-2 text-[11px] text-error bg-error-subtle rounded-lg p-2.5 font-body leading-relaxed">
-          <AlertCircle size={14} className="mt-0.5 shrink-0" />
-          <span><b>安全警告：</b>本服务无任何鉴权，凡能连到该端口的设备都可在你电脑上运行 claude、读写主目录。仅在 Tailscale ACL 或可信局域网内开启，<b>切勿暴露到公网或公共 WiFi</b>。</span>
+        <div className="flex items-start gap-2 text-[11px] text-ink-soft bg-canvas-warm rounded-lg p-2.5 font-body leading-relaxed">
+          <AlertCircle size={14} className="mt-0.5 shrink-0 text-accent" />
+          <span>外部访问需密码登录；本机 127.0.0.1 始终免密。注意裸局域网 HTTP 下密码为明文传输——<b>优先走 Tailscale（已加密），勿暴露到公网或公共 WiFi</b>。</span>
         </div>
       )}
 
-      <div className="flex items-center gap-2">
-        <button onClick={save} disabled={saving}
+      <div className="flex items-center gap-2 flex-wrap">
+        <button onClick={save} disabled={saving || needPassword}
           className="btn-accent flex items-center gap-1.5 px-3 py-1.5 text-[12px] font-body disabled:opacity-50">
           <Save size={12} />{saving ? '保存中…' : '保存'}
+        </button>
+        <button onClick={restart} disabled={restarting}
+          className="flex items-center gap-1.5 px-3 py-1.5 text-[12px] font-body rounded-lg border border-canvas-deep text-ink-soft hover:bg-canvas-warm disabled:opacity-50">
+          <RefreshCw size={12} className={restarting ? 'animate-spin' : ''} />{restarting ? '重启中…' : '重启 server'}
         </button>
         {msg && <span className="text-[11px] text-success font-body">{msg}</span>}
         {err && <span className="text-[11px] text-error font-body">{err}</span>}
       </div>
-      <p className="text-[10.5px] text-ink-faint font-body">改动写入 <span className="font-mono">~/.claude-gui/network.json</span>，下次启动 server 生效（运行时不热切换绑定）。重启：终端运行 <span className="font-mono">npm run restart</span>。</p>
+      <p className="text-[10.5px] text-ink-faint font-body">
+        配置写入 <span className="font-mono">~/.claude-gui/network.json</span>，重启后生效。
+        {cfg.watchdog ? '“重启 server”按钮可直接生效。' : '当前未用守护脚本启动，“重启”按钮不可用——请用项目根目录的 '}{!cfg.watchdog && <span className="font-mono">gui.command</span>}{!cfg.watchdog && ' 启动 GUI。'}
+      </p>
     </div>
   );
 }

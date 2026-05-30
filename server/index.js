@@ -23,6 +23,11 @@ import pickerRoutes from './routes/picker.js';
 import permissionsRoutes from './routes/permissions.js';
 import filesRoutes from './routes/files.js';
 import remoteControlRoutes from './routes/remote-control.js';
+import prefsRoutes from './routes/prefs.js';
+import {
+  authMiddleware, isLocalReq, isAuthorized, parseCookies, verifyToken,
+  hasPassword, setPassword, clearPassword, verifyPassword, issueToken,
+} from './services/auth.js';
 import { setupFileWatcher } from './services/file-watcher.js';
 import { getDefaultModel, getAvailableModels, setDefaultModel } from './services/model-resolver.js';
 import { readdir, readFile, writeFile, mkdir } from 'fs/promises';
@@ -39,8 +44,15 @@ function loadNetworkConfig() {
   try {
     if (existsSync(NETWORK_CONFIG_PATH)) {
       const cfg = JSON.parse(readFileSync(NETWORK_CONFIG_PATH, 'utf-8'));
-      const host = cfg.host === '0.0.0.0' ? '0.0.0.0' : '127.0.0.1';
+      let host = cfg.host === '0.0.0.0' ? '0.0.0.0' : '127.0.0.1';
       const port = Number.isInteger(cfg.port) && cfg.port >= 1024 && cfg.port <= 65535 ? cfg.port : 6677;
+      // HARD SAFETY: never expose 0.0.0.0 without a password. A legacy or
+      // hand-edited config that requests network binding but has no passwordHash
+      // falls back to loopback so there's never an auth-less open port.
+      if (host === '0.0.0.0' && !cfg.passwordHash) {
+        console.warn('[network] config requests 0.0.0.0 but no password is set — falling back to 127.0.0.1. Set a password in Settings → 网络 to enable network access.');
+        host = '127.0.0.1';
+      }
       return { host, port };
     }
   } catch {}
@@ -79,6 +91,47 @@ app.use(cors({
 // Bumped from default 100kb to 25mb so dragged-in screenshots fit in the JSON body.
 app.use(express.json({ limit: '25mb' }));
 
+// Password gate for external clients (no-op for 127.0.0.1 / no-password). Must
+// sit before the API routes so an unauthorized phone gets 401 on every call
+// except /login + /auth-status. The Mac (loopback) is never challenged.
+app.use('/api', authMiddleware);
+
+// POST /api/login { password } — verify and hand back an HMAC cookie token.
+app.post('/api/login', (req, res) => {
+  if (!hasPassword()) return res.json({ ok: true, required: false });
+  const { password } = req.body || {};
+  if (!verifyPassword(password)) return res.status(401).json({ error: '密码错误' });
+  res.setHeader(
+    'Set-Cookie',
+    `cgui_token=${issueToken()}; HttpOnly; Path=/; SameSite=Lax; Max-Age=${30 * 24 * 3600}`,
+  );
+  res.json({ ok: true });
+});
+
+// GET /api/auth-status — lets the SPA decide whether to show the login screen.
+app.get('/api/auth-status', (req, res) => {
+  res.json({
+    required: hasPassword() && !isLocalReq(req),
+    authed: isAuthorized(req),
+    isLocal: isLocalReq(req),
+  });
+});
+
+// POST /api/restart — clean-exit so the gui.command watchdog relaunches with the
+// new config (e.g. after toggling LAN mode). Refuses when NOT under the watchdog
+// so a bare `node server/index.js` isn't silently killed (which would strand a
+// phone client with no way to bring it back).
+app.post('/api/restart', (req, res) => {
+  if (process.env.CGUI_WATCHDOG !== '1') {
+    return res.status(409).json({
+      error: '当前不是通过守护脚本启动，无法自动重启。请用 gui.command 启动 GUI。',
+      watchdog: false,
+    });
+  }
+  res.json({ ok: true, restarting: true });
+  setTimeout(() => process.exit(0), 250);
+});
+
 // API routes
 app.use('/api', sessionRoutes);
 app.use('/api', chatRoutes);
@@ -98,6 +151,21 @@ app.use('/api', pickerRoutes);
 app.use('/api', permissionsRoutes);
 app.use('/api', filesRoutes);
 app.use('/api', remoteControlRoutes);
+app.use('/api', prefsRoutes);
+
+// Auto-load optional local-only routes (server/routes/*.local.js) — gitignored
+// personal integrations. Absent on a fresh checkout, so this is a no-op there.
+// Mounted under /api AFTER authMiddleware, so they inherit the password gate.
+try {
+  const routesDir = join(__dirname, 'routes');
+  const localFiles = (await readdir(routesDir)).filter((f) => f.endsWith('.local.js'));
+  for (const f of localFiles) {
+    try {
+      const mod = await import(`./routes/${f}`);
+      if (mod.default) { app.use('/api', mod.default); console.log(`[local] mounted routes/${f}`); }
+    } catch (e) { console.warn(`[local] failed to load routes/${f}:`, e.message); }
+  }
+} catch {}
 
 // GET /api/network — current binding + LAN addresses for the Settings UI.
 function lanIps() {
@@ -111,13 +179,20 @@ function lanIps() {
   return out;
 }
 app.get('/api/network', (req, res) => {
-  res.json({ host: HOST, port: PORT, lanMode, lanIps: lanIps(), configPath: NETWORK_CONFIG_PATH });
+  res.json({
+    host: HOST, port: PORT, lanMode, lanIps: lanIps(),
+    configPath: NETWORK_CONFIG_PATH,
+    hasPassword: hasPassword(),
+    watchdog: process.env.CGUI_WATCHDOG === '1',
+  });
 });
 // POST /api/network — persist binding to ~/.claude-gui/network.json. Takes effect
-// on next server start (we never relisten at runtime). host limited to loopback or
-// all-interfaces; port to the unprivileged range.
+// after a restart (we never relisten at runtime). host limited to loopback or
+// all-interfaces; port to the unprivileged range. Enabling 0.0.0.0 REQUIRES a
+// password (set here or already on file) — no auth-less network exposure.
+// Merges into the config so the password hash / token secret survive.
 app.post('/api/network', async (req, res) => {
-  const { host, port } = req.body || {};
+  const { host, port, password } = req.body || {};
   if (host !== '0.0.0.0' && host !== '127.0.0.1') {
     return res.status(400).json({ error: 'host 必须是 127.0.0.1 或 0.0.0.0' });
   }
@@ -125,13 +200,30 @@ app.post('/api/network', async (req, res) => {
   if (!Number.isInteger(p) || p < 1024 || p > 65535) {
     return res.status(400).json({ error: '端口需为 1024–65535 的整数' });
   }
+  if (host === '0.0.0.0' && !hasPassword() && !(typeof password === 'string' && password.length >= 4)) {
+    return res.status(400).json({ error: '开启局域网访问必须先设置访问密码（至少 4 位）', needPassword: true });
+  }
   try {
-    await mkdir(dirname(NETWORK_CONFIG_PATH), { recursive: true });
-    await writeFile(NETWORK_CONFIG_PATH, JSON.stringify({ host, port: p }, null, 2));
-    res.json({ ok: true, host, port: p, restartRequired: true });
+    if (typeof password === 'string' && password.length >= 4) setPassword(password);
+    // updateConfig merges so passwordHash / tokenSecret aren't clobbered.
+    const { updateConfig } = await import('./services/auth.js');
+    updateConfig({ host, port: p });
+    res.json({ ok: true, host, port: p, restartRequired: true, watchdog: process.env.CGUI_WATCHDOG === '1' });
   } catch (e) {
     res.status(500).json({ error: '写入配置失败：' + e.message });
   }
+});
+
+// POST /api/network/password { password } | { clear:true } — change/remove the
+// access password independently of the host toggle.
+app.post('/api/network/password', (req, res) => {
+  const { password, clear } = req.body || {};
+  if (clear) { clearPassword(); return res.json({ ok: true, hasPassword: false }); }
+  if (typeof password !== 'string' || password.length < 4) {
+    return res.status(400).json({ error: '密码至少 4 位' });
+  }
+  setPassword(password);
+  res.json({ ok: true, hasPassword: true });
 });
 
 // GET /api/model — current default model + available models
@@ -322,7 +414,18 @@ if (existsSync(clientDist)) {
 
 // HTTP + WebSocket server
 const server = createServer(app);
-const wss = new WebSocketServer({ server, path: '/ws' });
+// Gate the WS handshake with the same rule as the HTTP API: local + no-password
+// pass; external clients need a valid cookie token. Without this an
+// unauthorized phone could still open the live stream after being 401'd on REST.
+const wss = new WebSocketServer({
+  server,
+  path: '/ws',
+  verifyClient: (info) => {
+    if (!hasPassword()) return true;
+    if (isLocalReq(info.req)) return true;
+    return verifyToken(parseCookies(info.req).cgui_token);
+  },
+});
 
 // Track connected clients
 const clients = new Set();
