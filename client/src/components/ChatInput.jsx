@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Send, Loader2, Square, Terminal, Puzzle, Wrench, Gauge, ChevronDown, FolderPlus, X, Image as ImageIcon, Shield, ShieldOff, ClipboardList, Check, Pencil, Smartphone } from 'lucide-react';
+import { Send, Loader2, Square, Terminal, Puzzle, Wrench, Gauge, ChevronDown, X, Image as ImageIcon, Shield, ShieldOff, ClipboardList, Check, Pencil, Smartphone } from 'lucide-react';
 import { useStore, PERMISSION_MODES } from '../stores/sessionStore.js';
 import { PermissionPrompt } from './PermissionPrompt.jsx';
 import { TodoPanel } from './TodoPanel.jsx';
@@ -75,36 +75,6 @@ const EFFORT_LEVELS = [
   { id: 'xhigh',  label: '极高', desc: '复杂推理' },
   { id: 'max',    label: '极限', desc: '最大努力' },
 ];
-
-function AddDirSelector() {
-  const addDirs = useStore((s) => s.addDirs);
-  const setAddDirs = useStore((s) => s.setAddDirs);
-  const handleAdd = () => {
-    const dir = prompt('额外可访问目录的绝对路径（CLI --add-dir）：');
-    if (!dir || !dir.startsWith('/')) return;
-    if (addDirs.includes(dir)) return;
-    setAddDirs([...addDirs, dir]);
-  };
-  const handleRemove = (d) => setAddDirs(addDirs.filter((x) => x !== d));
-  return (
-    <div className="flex items-center gap-1 flex-wrap">
-      {addDirs.map((d) => (
-        <span key={d} className="chip chip-accent group/dir gap-1" title={d}>
-          <span className="truncate max-w-[140px]">{d.replace(/^.*\//, '')}</span>
-          <button onClick={() => handleRemove(d)} className="opacity-50 hover:opacity-100">
-            <X size={9} />
-          </button>
-        </span>
-      ))}
-      <button onClick={handleAdd}
-        className="flex items-center gap-1 px-2 py-0.5 rounded-full hover:bg-black/5 transition-colors"
-        title="添加额外工作目录 (--add-dir)">
-        <FolderPlus size={11} className="text-ink-faint" />
-        <span className="text-[10px] text-ink-faint font-body">add-dir</span>
-      </button>
-    </div>
-  );
-}
 
 // Dropdown anchored to the trigger button (lightweight, no full-screen blur).
 export function EffortSelector({ permKey = null }) {
@@ -537,7 +507,6 @@ export function ChatInput({ onSend, onStop, onAccelerate, disabled, isStreaming,
           onDragLeave={() => setDragging(false)}
           onDrop={handleDrop}
         >
-          <AddDirSelector />
           <textarea
             ref={textareaRef}
             value={text}
