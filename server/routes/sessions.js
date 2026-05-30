@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { readdir, stat, readFile, writeFile, open } from 'fs/promises';
+import { readdir, stat, readFile, writeFile, rename, open } from 'fs/promises';
 import { join } from 'path';
 import { homedir } from 'os';
 
@@ -192,7 +192,14 @@ router.post('/sessions/:sessionId/trim', async (req, res) => {
 
     const next = keptLines.join('\n');
     const finalText = next.length && !next.endsWith('\n') ? next + '\n' : next;
-    await writeFile(file, finalText, 'utf-8');
+    // Atomic write (#12): a plain writeFile truncates-then-writes, so the
+    // polling file-watcher can read a half-written/empty jsonl mid-trim and
+    // momentarily blank the conversation until the next stream. Write to a
+    // same-dir temp and rename (POSIX-atomic on one filesystem) so no reader
+    // ever sees a truncated file.
+    const tmp = `${file}.tmp-trim`;
+    await writeFile(tmp, finalText, 'utf-8');
+    await rename(tmp, file);
     res.json({ trimmed: true, removedFromLine: cutIdx, totalLines: lines.length });
   } catch (err) {
     res.status(500).json({ error: err.message });
