@@ -3093,6 +3093,7 @@ function ProviderSwitcher() {
       const d = await r.json();
       if (!r.ok) throw new Error(d.error || '切换失败');
       setActiveId(id);
+      useStore.getState().clearModelOverrides?.();
       useStore.getState().fetchProvider?.();
       useStore.getState().fetchModel?.();
       setOpen(false);
@@ -3158,6 +3159,7 @@ function ProviderSwitcher() {
 
 export function ModelSelector({ compact = false, permKey = null }) {
   const { availableModels } = useStore();
+  const customModels = useStore((s) => s.customModels);
   // Per-session model: show/select THIS session's model (falls back to the
   // global resolved default when the session has no explicit pick). Picking
   // writes only the session override — never the global settings.json default.
@@ -3208,8 +3210,13 @@ export function ModelSelector({ compact = false, permKey = null }) {
 
   const handleCustomSubmit = () => {
     const id = customInput.trim();
-    if (id) { selectModel(id); setCustomInput(''); }
+    if (id) { useStore.getState().addCustomModel(id); selectModel(id); setCustomInput(''); }
   };
+  // Merge user-added ids that the server didn't already enumerate, so they show
+  // as selectable rows (with a remove affordance).
+  const customRows = customModels
+    .filter((id) => !availableModels.some((m) => m.id === id))
+    .map((id) => ({ id, name: id.replace(/\[1m\]/i, ''), tier: '自定义', source: 'custom', context1m: /\[1m\]/i.test(id) }));
 
   // 1M-context toggle: Claude Code enables the 1M beta via a `[1m]` suffix on
   // the model id (same thing the CLI's /model picker writes). Toggling just
@@ -3302,6 +3309,23 @@ export function ModelSelector({ compact = false, permKey = null }) {
               </button>
             );
           })}
+          {customRows.map((m) => (
+            <div key={m.id}
+              className={`w-full px-3 py-2 hover:bg-canvas-warm transition-colors flex items-center gap-2 ${
+                currentModel === m.id ? 'bg-accent-subtle/50' : ''}`}>
+              <button onClick={() => selectModel(m.id)} className="flex-1 min-w-0 text-left">
+                <div className="text-xs font-medium text-ink font-body flex items-center gap-1.5">
+                  {m.name}
+                  <span className="text-[8.5px] px-1 py-px bg-accent-subtle text-accent rounded font-mono">自定义</span>
+                  {m.context1m && <span className="text-[8.5px] px-1 py-px bg-accent text-white rounded font-mono">1M</span>}
+                </div>
+                <div className="text-[10px] text-ink-faint font-mono truncate">{m.id}</div>
+              </button>
+              {currentModel === m.id && <Check size={12} className="text-accent shrink-0" />}
+              <button onClick={() => useStore.getState().removeCustomModel(m.id)} title="移除自定义模型"
+                className="p-1 text-ink-faint hover:text-error shrink-0"><X size={12} /></button>
+            </div>
+          ))}
           <div className="border-t border-canvas-deep mt-1 pt-1 px-3 pb-2">
             <div className="text-[10px] text-ink-faint mb-1 font-body">自定义模型 ID</div>
             <div className="flex gap-1.5">
@@ -3404,6 +3428,7 @@ function MobileSegmented({ options, onChange }) {
 
 function MobileModelPage({ permKey }) {
   const availableModels = useStore((s) => s.availableModels);
+  const customModels = useStore((s) => s.customModels);
   const currentModel = useStore((s) => (permKey && s.modelBySession[permKey]) || s.currentModel);
   const [customInput, setCustomInput] = useState('');
   // The desktop ModelSelector normally fetches the model catalogue; it isn't
@@ -3424,6 +3449,10 @@ function MobileModelPage({ permKey }) {
     if (!base) return;
     useStore.getState().setModelFor(permKey, has1m ? base : `${base}[1m]`);
   };
+  const addCustom = (v) => { useStore.getState().addCustomModel(v); pick(v); };
+  const customRows = customModels
+    .filter((id) => !availableModels.some((m) => m.id === id))
+    .map((id) => ({ id, name: id.replace(/\[1m\]/i, ''), context1m: /\[1m\]/i.test(id) }));
   return (
     <div className="py-1">
       <button onClick={toggle1m}
@@ -3447,14 +3476,31 @@ function MobileModelPage({ permKey }) {
           </button>
         );
       })}
+      {customRows.map((m) => {
+        const active = currentModel === m.id || currentModel === `${m.id}[1m]`;
+        return (
+          <div key={m.id} className="w-full flex items-center gap-3 px-4 py-3">
+            <button onClick={() => pick(m.id)} className="flex-1 min-w-0 text-left">
+              <div className="text-[14px] font-body text-ink truncate flex items-center gap-1.5">
+                {m.name}
+                <span className="text-[9px] px-1 py-px bg-accent-subtle text-accent rounded font-mono shrink-0">自定义</span>
+              </div>
+              <div className="text-[11px] text-ink-faint font-mono truncate">{m.id}</div>
+            </button>
+            {active && <Check size={16} className="text-accent shrink-0" />}
+            <button onClick={() => useStore.getState().removeCustomModel(m.id)} title="移除"
+              className="p-1.5 text-ink-faint hover:text-error shrink-0"><X size={16} /></button>
+          </div>
+        );
+      })}
       <div className="px-4 py-3 border-t border-canvas-deep/40 mt-1">
         <div className="text-[11px] text-ink-faint mb-1.5 font-body">自定义模型 ID</div>
         <div className="flex gap-2">
           <input value={customInput} onChange={(e) => setCustomInput(e.target.value)}
-            onKeyDown={(e) => { if (e.key === 'Enter') { const v = customInput.trim(); if (v) { pick(v); setCustomInput(''); } } }}
+            onKeyDown={(e) => { if (e.key === 'Enter') { const v = customInput.trim(); if (v) { addCustom(v); setCustomInput(''); } } }}
             placeholder="输入模型 ID…"
             className="flex-1 bg-canvas-warm border border-canvas-deep rounded-lg px-3 py-2 text-[13px] font-mono text-ink focus:outline-none focus:border-accent" />
-          <button onClick={() => { const v = customInput.trim(); if (v) { pick(v); setCustomInput(''); } }}
+          <button onClick={() => { const v = customInput.trim(); if (v) { addCustom(v); setCustomInput(''); } }}
             disabled={!customInput.trim()}
             className="px-3 py-2 text-[12px] bg-accent text-white rounded-lg disabled:bg-canvas-deep disabled:text-ink-ghost">应用</button>
         </div>
@@ -3526,6 +3572,7 @@ function MobileProviderPage() {
       const d = await r.json();
       if (!r.ok) throw new Error(d.error || '切换失败');
       setActiveId(id);
+      useStore.getState().clearModelOverrides?.();
       useStore.getState().fetchProvider?.();
       useStore.getState().fetchModel?.();
     } catch (e) { window.alert('切换 provider 失败：' + e.message); }

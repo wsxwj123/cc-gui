@@ -314,6 +314,28 @@ export const useStore = create((set, get) => ({
     }
   },
   getModelFor: (key) => (key && get().modelBySession[key]) || get().currentModel,
+  // Drop every per-session model pin. Called on a provider switch: those pins
+  // reference the OLD provider's models (and would otherwise mask the new
+  // provider's default model + survive as invalid ids on the new backend).
+  clearModelOverrides: () => { writeLs('cgui-model-by-session', {}); set({ modelBySession: {} }); },
+  // User-defined model ids, persisted GUI-side and merged into the model list so
+  // a typed-in custom id actually SHOWS as a selectable row (the server's
+  // auto-enumeration only knows models from settings.json env + the provider's
+  // config). Kept separate from availableModels because that array is replaced
+  // wholesale on every /api/model fetch.
+  customModels: readLs('cgui-custom-models', []),
+  addCustomModel: (id) => {
+    const v = String(id || '').trim();
+    if (!v || get().customModels.includes(v)) return;
+    const list = [...get().customModels, v];
+    writeLs('cgui-custom-models', list);
+    set({ customModels: list });
+  },
+  removeCustomModel: (id) => {
+    const list = get().customModels.filter((m) => m !== id);
+    writeLs('cgui-custom-models', list);
+    set({ customModels: list });
+  },
   // Mark/unmark a session as handed off to phone remote control.
   setRemoteControl: (sessionId, on) => {
     if (!sessionId) return;
