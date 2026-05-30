@@ -159,6 +159,21 @@ router.post('/chat', async (req, res) => {
     const childEnv = { ...process.env };
     delete childEnv.ANTHROPIC_MODEL;
     delete childEnv.CLAUDE_MODEL;
+    // Provider ROUTING + AUTH must come solely from settings.json (cc switch and
+    // the GUI rewrite it on every provider switch) or the local OAuth login —
+    // NOT from inherited process env. This server is typically launched from a
+    // Claude-Desktop shell that injects official ANTHROPIC_BASE_URL +
+    // ANTHROPIC_API_KEY + ANTHROPIC_AUTH_TOKEN. Those inherited vars take
+    // precedence in the CLI, so they silently override the mimo/deepseek/proxy
+    // provider the user just switched to: the CLI hits the OFFICIAL endpoint with
+    // a third-party model id and dies with "model may not exist" (and would bill
+    // an official subscription to API credits). Drop all inherited routing/auth
+    // vars so settings.json (or OAuth) wins. Failure mode: a user who relied on a
+    // pure-shell ANTHROPIC_API_KEY with no settings.json provider now gets 401 —
+    // they must configure the provider in the GUI, which is the intended source.
+    for (const k of ['ANTHROPIC_BASE_URL', 'ANTHROPIC_API_URL', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_API_KEY']) {
+      delete childEnv[k];
+    }
     // Strip permission-related env so the CLI honours our --permission-mode
     // flag instead of an inherited override that could force bypass.
     delete childEnv.ANTHROPIC_PERMISSION_MODE;

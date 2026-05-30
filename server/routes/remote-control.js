@@ -69,12 +69,21 @@ router.post('/remote-control', async (req, res) => {
     // narrower than the login shell's. sessionId is UUID-validated, so it is
     // safe to interpolate; cwd is passed via the pty option (no interpolation).
     const shell = process.env.SHELL || '/bin/bash';
+    // Same provider-routing hygiene as the chat spawn (see chat.js): strip
+    // inherited official ANTHROPIC_* so the resumed session talks to the
+    // provider in settings.json, not a Claude-Desktop-injected official
+    // base/token. The login shell (-lc) won't re-add them — the user's profile
+    // doesn't export them.
+    const rcEnv = { ...process.env };
+    for (const k of ['ANTHROPIC_BASE_URL', 'ANTHROPIC_API_URL', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_API_KEY']) {
+      delete rcEnv[k];
+    }
     const term = pty.spawn(shell, ['-lc', `claude --remote-control --resume ${sessionId}`], {
       name: 'xterm-color',
       cols: 100,
       rows: 30,
       cwd: dir,
-      env: process.env,
+      env: rcEnv,
     });
 
     const entry = { term, startedAt: Date.now(), cwd: dir };
