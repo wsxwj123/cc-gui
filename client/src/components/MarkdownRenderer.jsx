@@ -63,7 +63,7 @@ const markdownComponents = {
       return (
         <div className="relative group my-3">
           <div className="flex items-center justify-between px-3.5 py-1.5 bg-[#2b2722] rounded-t-lg border border-[#3a342b] border-b-0">
-            <span className="text-[10px] font-mono text-[#b5a48c] uppercase tracking-wider">
+            <span className="text-[11px] font-mono text-[#9a8e78]">
               {lang || 'code'}
             </span>
             <CopyButton text={codeStr} />
@@ -90,7 +90,7 @@ const markdownComponents = {
 
   // ── Paragraph ─────────────────────────────────────────────────
   p: ({ children }) => (
-    <p className="my-2 leading-relaxed">{children}</p>
+    <p className="my-3 leading-relaxed">{children}</p>
   ),
 
   // ── Blockquote ────────────────────────────────────────────────

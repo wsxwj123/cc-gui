@@ -260,11 +260,11 @@ function ToolCallsGroup({ toolCalls }) {
   }
 
   return (
-    <div className="border border-canvas-deep rounded-lg overflow-hidden animate-fade-up">
+    <div className="border-l-2 border-canvas-deep/40 animate-fade-up">
       {/* Header — always visible */}
       <button
         onClick={() => setExpanded(!expanded)}
-        className="w-full flex items-center gap-2 px-3 py-2 hover:bg-canvas-warm/60 transition-colors text-left bg-canvas-warm"
+        className="w-full flex items-center gap-2 pl-3 pr-3 py-1.5 hover:bg-canvas-warm/40 rounded-r-md transition-colors text-left"
       >
         {expanded ? (
           <ChevronDown size={13} className="text-ink-faint shrink-0" />
@@ -285,7 +285,7 @@ function ToolCallsGroup({ toolCalls }) {
 
       {/* Expanded: show all tool calls grouped by category */}
       {expanded && (
-        <div className="border-t border-canvas-deep p-2.5 space-y-3 animate-fade-in">
+        <div className="pl-3 pr-2 pt-1 pb-2 space-y-3 animate-fade-in">
           {Object.entries(groups).map(([cat, items]) => {
             if (items.length === 0) return null;
             const cfg = CATEGORY_CONFIG[cat];
@@ -385,7 +385,7 @@ export function TurnBubble({ turn }) {
 
   return (
     <div className="group px-6 py-4 animate-fade-up" style={{ animationDuration: '0.25s' }}>
-      <div className="max-w-3xl mx-auto flex gap-4">
+      <div className="max-w-[720px] mx-auto flex gap-4">
         {/* Avatar — tinted by the actual provider behind the model */}
         <div className="mt-0.5">
           <ProviderAvatar model={turn.model} size={34} thinking={isLiveStream} />
@@ -428,8 +428,9 @@ export function TurnBubble({ turn }) {
                   if (b.type === 'thinking' && b.content) {
                     flushBucket(i);
                     out.push(
-                      <details key={`b-${i}`} className="mb-1">
-                        <summary className="flex items-center gap-1.5 text-[11px] text-ink-faint hover:text-ink-muted cursor-pointer font-body">
+                      <details key={`b-${i}`} className="mb-1 group">
+                        <summary className="flex items-center gap-1.5 text-[11px] text-ink-faint hover:text-ink-muted cursor-pointer font-body list-none [&::-webkit-details-marker]:hidden">
+                          <ChevronRight size={11} className="transition-transform group-open:rotate-90 shrink-0" />
                           <Brain size={12} />
                           <span>思考过程</span>
                         </summary>

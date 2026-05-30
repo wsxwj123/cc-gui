@@ -228,7 +228,7 @@ export function MessageBubble({ message, onRollback }) {
   if (isUser) {
     return (
       <div className="group px-6 py-4 animate-fade-up" style={{ animationDuration: '0.25s' }}>
-        <div className="max-w-3xl mx-auto flex flex-row-reverse gap-3">
+        <div className="max-w-[720px] mx-auto flex flex-row-reverse gap-3">
           <div className="shrink-0 mt-0.5">
             <UserAvatar />
           </div>
@@ -239,7 +239,7 @@ export function MessageBubble({ message, onRollback }) {
               <span className="text-[11px] text-ink-faint font-mono">{formatTime(message.timestamp)}</span>
               <span className="text-[13px] font-medium text-ink font-body">你</span>
             </div>
-            <div className="max-w-[85%] bg-canvas-warm border border-canvas-deep rounded-2xl rounded-tr-md px-4 py-2.5">
+            <div className="max-w-[85%] bg-canvas-warm border border-canvas-deep rounded-2xl px-4 py-2.5">
               <div className="text-[15px] font-reading leading-relaxed whitespace-pre-wrap text-ink">{message.text}</div>
             </div>
           </div>
@@ -250,7 +250,7 @@ export function MessageBubble({ message, onRollback }) {
 
   return (
     <div className="group px-6 py-4 animate-fade-up" style={{ animationDuration: '0.25s' }}>
-      <div className="max-w-3xl mx-auto flex gap-3">
+      <div className="max-w-[720px] mx-auto flex gap-3">
         <div className="mt-0.5">
           <ProviderAvatar model={message.model} size={34} />
         </div>

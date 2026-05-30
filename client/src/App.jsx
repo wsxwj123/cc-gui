@@ -26,6 +26,7 @@ import {
   RefreshCw, Activity, Settings, Server, GitBranch, FileDiff, Check, Wrench, X,
   Sun, Moon, Monitor, Bot, Camera, History, Loader2, Shield, FolderTree,
   Archive, ArchiveRestore, Trash2, EyeOff, Columns2, Smartphone, Pencil, Type, Palette,
+  Menu, SquarePen,
 } from 'lucide-react';
 
 // ── Per-session shadow-git checkpoints ──────────────────────────
@@ -201,7 +202,7 @@ function ThemeToggle() {
       </button>
 
       {open && (
-        <div className="absolute right-0 top-full mt-2 z-50 w-[300px] glass-popover rounded-2xl border border-canvas-deep shadow-xl p-3 space-y-3">
+        <div className="absolute right-0 top-full mt-2 z-[60] w-[300px] glass-popover rounded-2xl border border-canvas-deep shadow-xl p-3 space-y-3 max-md:fixed max-md:left-3 max-md:right-3 max-md:top-16 max-md:w-auto max-md:mt-0 max-md:max-h-[78dvh] max-md:overflow-y-auto">
           {/* ── Tone (light / dark / follow-system) ───────────── */}
           <div className="flex items-center gap-1 p-1 rounded-xl bg-black/5">
             {TONES.map(({ id, label, Icon }) => (
@@ -218,16 +219,22 @@ function ThemeToggle() {
             <div className="flex items-center gap-2">
               <Type size={12} className="text-ink-muted" />
               <span className="text-[11px] text-ink font-body font-medium">界面字体大小</span>
-              <span className="ml-auto text-[10px] text-ink-faint font-mono">{Math.round(uiFontScale * 100)}%</span>
             </div>
-            <div className="flex items-center gap-2 px-0.5">
-              <span className="text-[9px] text-ink-faint">A</span>
-              <input type="range" min="0.8" max="1.5" step="0.05" value={uiFontScale}
-                onChange={(e) => setUiFontScale(parseFloat(e.target.value))}
-                className="flex-1 accent-accent" />
-              <span className="text-[13px] text-ink-faint">A</span>
-              <button onClick={() => setUiFontScale(1)}
-                className="text-[9px] text-ink-muted hover:text-ink underline-offset-2 hover:underline shrink-0">重置</button>
+            <div className="flex items-center gap-1 rounded-xl bg-canvas-warm p-0.5">
+              {[
+                { label: '小', value: 0.9 },
+                { label: '中', value: 1 },
+                { label: '大', value: 1.2 },
+                { label: '超大', value: 1.45 },
+              ].map(({ label, value }) => (
+                <button key={label} onClick={() => setUiFontScale(value)}
+                  className={`flex-1 py-1.5 rounded-lg text-[11px] font-body transition-colors ${
+                    Math.abs(uiFontScale - value) < 0.03
+                      ? 'bg-accent text-white shadow-sm'
+                      : 'text-ink-muted hover:text-ink'}`}>
+                  {label}
+                </button>
+              ))}
             </div>
           </div>
 
@@ -434,7 +441,23 @@ function PaneCountPicker() {
   );
 }
 
-function MainLayout({ sidebarCollapsed, selectedProject, rightPanel, setRightPanel }) {
+// Tracks whether the viewport is phone-sized (≤767px). Drives the mobile
+// layout: sidebar/right-panel become full-height overlays instead of inline
+// columns, and split mode collapses to a single pane (no room to tile).
+function useIsMobile() {
+  const [isMobile, setIsMobile] = useState(
+    typeof window !== 'undefined' && window.matchMedia('(max-width: 767px)').matches,
+  );
+  useEffect(() => {
+    const mq = window.matchMedia('(max-width: 767px)');
+    const on = (e) => setIsMobile(e.matches);
+    mq.addEventListener('change', on);
+    return () => mq.removeEventListener('change', on);
+  }, []);
+  return isMobile;
+}
+
+function MainLayout({ sidebarCollapsed, selectedProject, rightPanel, setRightPanel, isMobile }) {
   const [sidebarWidth, onSidebarDrag] = useResizable({
     initial: 268, min: 200, max: 480, axis: 'x', storageKey: 'cgui-sidebar-width',
   });
@@ -444,6 +467,55 @@ function MainLayout({ sidebarCollapsed, selectedProject, rightPanel, setRightPan
   const splitMode = useStore((s) => s.splitMode);
   const activeTabIndex = useStore((s) => s.activeTabIndex);
   const setActiveTabIndex = useStore((s) => s.setActiveTabIndex);
+  const toggleSidebar = useStore((s) => s.toggleSidebar);
+
+  // ── Mobile: single column; sidebar + right panel are tap-away overlays ──
+  if (isMobile) {
+    return (
+      <div className="flex-1 flex min-h-0 overflow-hidden relative">
+        <main className="flex-1 flex flex-col relative overflow-hidden min-w-0">
+          {/* Split mode has no room on a phone — always show one pane. */}
+          <SessionDetail tabIndex={0} />
+        </main>
+
+        {/* Sidebar drawer */}
+        {!sidebarCollapsed && (
+          <>
+            <div className="fixed inset-0 z-40 bg-black/40 animate-fade-in" onClick={toggleSidebar} />
+            <aside className="fixed inset-y-0 left-0 z-50 w-[84vw] max-w-[330px] glass-thick flex flex-col overflow-hidden animate-glass-rise">
+              <div className="flex-1 min-h-0 overflow-hidden">
+                {selectedProject ? <SessionList /> : <ProjectList />}
+              </div>
+              {/* Tools footer — panels open as full-screen overlays on mobile. */}
+              <div className="shrink-0 border-t border-canvas-deep/60 px-2 py-2 grid grid-cols-3 gap-1">
+                {Object.entries(PANEL_MAP).map(([id, { icon: Icon, label }]) => {
+                  const SHORT = { files: '文件', monitor: '监控', usage: '用量', processes: '进程', mcp: 'MCP', settings: '设置' };
+                  return (
+                    <button key={id}
+                      onClick={() => { setRightPanel(id); toggleSidebar(); }}
+                      className="flex flex-col items-center gap-1 py-2 rounded-lg text-ink-muted hover:text-ink hover:bg-canvas-warm transition-colors"
+                      title={label}>
+                      <Icon size={17} />
+                      <span className="text-[10px] font-body leading-none">{SHORT[id] || label}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            </aside>
+          </>
+        )}
+
+        {/* Right panel — full-screen overlay */}
+        {rightPanel && (
+          <div className="fixed inset-0 z-50 bg-canvas animate-glass-rise">
+            <RightPanel panelId={rightPanel} onClose={() => setRightPanel(null)} width="100%" />
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  // ── Desktop / tablet: resizable inline columns ──
   return (
     <div className="flex-1 flex min-h-0 gap-0 p-0 overflow-hidden">
       {!sidebarCollapsed && (
@@ -662,24 +734,47 @@ function GlobalSearchResults({ q, onPick }) {
 // ─── Project List ──────────────────────────────────────────────
 function ProjectList() {
   const { projects, selectedProject, setSelectedProject, fetchProjects, fetchSessions, searchQuery, setSearchQuery } = useStore();
-  // Per-project local hide. Reads/writes a Set of project hashes in localStorage.
-  // "Hidden" projects vanish from this sidebar but stay on disk — restore by
-  // re-adding via the + button (same path → same hash → re-shown).
-  const readHidden = () => {
-    try { return new Set(JSON.parse(localStorage.getItem('cgui-hidden-projects') || '[]')); }
-    catch { return new Set(); }
+  // Per-project hide, now SERVER-BACKED so the list is identical on every device
+  // (phone + Mac). Previously this lived in each browser's localStorage, so a
+  // phone showed every project the user had hidden on the Mac. Hidden projects
+  // vanish from this sidebar but stay on disk — restore via the + button.
+  const [hidden, setHidden] = useState(new Set());
+  const persistHidden = (set) => {
+    fetch('/api/prefs/hidden-projects', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ hidden: [...set] }),
+    }).catch(() => {});
   };
-  const [hidden, setHidden] = useState(readHidden);
   const toggleHidden = (hash) => {
     setHidden((prev) => {
       const next = new Set(prev);
       if (next.has(hash)) next.delete(hash); else next.add(hash);
-      try { localStorage.setItem('cgui-hidden-projects', JSON.stringify([...next])); } catch {}
+      persistHidden(next);
       return next;
     });
   };
 
   useEffect(() => { fetchProjects(); }, []);
+  // Load the shared hidden list; one-time migration of any legacy localStorage
+  // entries so the user doesn't lose hides from before the server move.
+  useEffect(() => {
+    fetch('/api/prefs/hidden-projects')
+      .then((r) => r.json())
+      .then((d) => {
+        const serverSet = new Set(Array.isArray(d.hidden) ? d.hidden : []);
+        let legacy = [];
+        try { legacy = JSON.parse(localStorage.getItem('cgui-hidden-projects') || '[]'); } catch {}
+        if (serverSet.size === 0 && legacy.length > 0) {
+          const merged = new Set(legacy);
+          setHidden(merged);
+          persistHidden(merged);
+        } else {
+          setHidden(serverSet);
+        }
+      })
+      .catch(() => {});
+  }, []);
 
   const filtered = projects.filter((p) =>
     !hidden.has(p.hash) && p.path.toLowerCase().includes(searchQuery.toLowerCase())
@@ -3132,11 +3227,116 @@ export function ModelSelector({ compact = false, permKey = null }) {
   );
 }
 
+// Full-screen password gate shown to EXTERNAL clients (phone over LAN/Tailscale)
+// when a password is set. The Mac (loopback) never sees this. On success the
+// server sets an HttpOnly cookie; we reload so WS + every fetch carry it.
+function LoginScreen({ onSuccess }) {
+  const [password, setPassword] = useState('');
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+  const submit = async (e) => {
+    e.preventDefault();
+    if (!password) return;
+    setBusy(true); setError('');
+    try {
+      const res = await fetch('/api/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password }),
+      });
+      if (res.ok) { onSuccess(); return; }
+      setError('密码错误');
+    } catch { setError('网络错误'); }
+    finally { setBusy(false); }
+  };
+  return (
+    <div className="h-[100dvh] w-screen flex items-center justify-center bg-canvas px-6">
+      <form onSubmit={submit} className="w-full max-w-[320px] flex flex-col items-center gap-5">
+        <div className="flex items-center gap-2">
+          <span className="text-accent text-2xl leading-none font-mono">✻</span>
+          <span className="text-xl font-display font-semibold text-ink tracking-tight">Claude Code</span>
+        </div>
+        <p className="text-[13px] text-ink-muted font-body text-center">远程访问需要密码</p>
+        <input
+          type="password" autoFocus value={password}
+          onChange={(e) => setPassword(e.target.value)}
+          placeholder="访问密码"
+          className="w-full text-[15px] font-body rounded-xl border border-canvas-deep bg-canvas-warm px-4 py-3 text-ink focus:outline-none focus:border-accent"
+        />
+        {error && <span className="text-[12px] text-error font-body">{error}</span>}
+        <button
+          type="submit" disabled={busy || !password}
+          className="w-full py-3 rounded-xl bg-accent text-white font-body font-medium text-[15px] disabled:opacity-50 transition-opacity"
+        >
+          {busy ? '验证中…' : '进入'}
+        </button>
+      </form>
+    </div>
+  );
+}
+
+// ── Mobile chrome (Claude-app style) ─────────────────────────────
+// A minimal top app bar: drawer toggle · session title · new chat. The heavy
+// desktop header (10+ controls) is replaced on phones by this bar plus a
+// horizontally-scrolling control strip, so the layout reads like the Claude app
+// instead of cramming every button into a 3-row wrapped header.
+function MobileTopBar({ onMenu, onNew, title }) {
+  return (
+    <header className="glass-bar h-12 px-2 flex items-center gap-1 shrink-0 relative z-40">
+      <button onClick={onMenu} className="btn-glass p-2 shrink-0" title="会话">
+        <Menu size={18} className="text-ink-muted" />
+      </button>
+      <div className="flex-1 min-w-0 flex items-center justify-center gap-1.5">
+        <span className="text-accent text-[13px] leading-none shrink-0 select-none font-mono">✻</span>
+        <span className="text-[13px] font-display font-semibold text-ink tracking-tight truncate">{title}</span>
+      </div>
+      <button onClick={onNew} className="btn-glass p-2 shrink-0" title="新建会话">
+        <SquarePen size={18} className="text-ink-muted" />
+      </button>
+    </header>
+  );
+}
+
+// Control strip: the per-session knobs that must stay one tap away on a phone.
+// Lives in the main flow (NOT the drawer) so each control's popover can open
+// over the chat without being clipped by the drawer's overflow. Scrolls
+// horizontally when the chips don't fit.
+function MobileControlStrip({ permKey, activeSession }) {
+  return (
+    <div className="shrink-0 flex flex-wrap items-center gap-1 px-2 py-1 border-b border-canvas-deep/40 bg-canvas [&>*]:shrink-0 [&_button]:whitespace-nowrap">
+      <ProviderSwitcher />
+      <ModelSelector placement="bottom" align="left" compact permKey={permKey} />
+      <EffortSelector placement="bottom" align="left" permKey={permKey} />
+      <PermissionModeSelector permKey={permKey} />
+      <RemoteControlButton session={activeSession} />
+      <ThemeToggle />
+    </div>
+  );
+}
+
 // ─── Main App ──────────────────────────────────────────────────
 export default function App() {
   useWebSocket();
   const { sidebarCollapsed, toggleSidebar, selectedProject, selectedSession } = useStore();
   const [rightPanel, setRightPanel] = useState(null);
+  // Auth gate: external clients with a password set must log in first. Loopback
+  // (Mac) always reports authed, so this is a no-op locally.
+  const [authLocked, setAuthLocked] = useState(false);
+  useEffect(() => {
+    fetch('/api/auth-status').then((r) => r.json())
+      .then((d) => setAuthLocked(!!(d.required && !d.authed)))
+      .catch(() => {});
+  }, []);
+
+  // Optional local-only widgets (client/src/components/*.local.jsx). import.meta
+  // .glob resolves to {} when no such file exists, so on a fresh checkout this is
+  // a no-op and nothing renders — the personal bot controls never ship.
+  const [LocalWidget, setLocalWidget] = useState(null);
+  useEffect(() => {
+    const mods = import.meta.glob('./components/*.local.jsx');
+    const entry = Object.values(mods)[0];
+    if (entry) entry().then((m) => setLocalWidget(() => m.default)).catch(() => {});
+  }, []);
   // Per-session permission key for the header chip + bypass auto-resolve.
   // Follows the ACTIVE pane (not always pane 0) so in split mode the top-bar
   // mode chip controls whichever pane the user last focused — matching the
@@ -3149,6 +3349,44 @@ export default function App() {
 
   // Apply persisted UI font scale on mount. Use document.documentElement.style
   // .zoom so even text-[12px]-style hardcoded sizes scale (not just rem).
+  const isMobile = useIsMobile();
+  // On entering a phone-sized viewport, collapse the sidebar so the chat
+  // (not the drawer) is what's visible first. Desktop keeps its own state.
+  useEffect(() => {
+    if (isMobile && !useStore.getState().sidebarCollapsed) {
+      useStore.getState().toggleSidebar();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isMobile]);
+
+  // Mobile: picking a session (or starting a new chat) auto-closes the drawer so
+  // the chat is revealed — matching the Claude app. selectedSession changes
+  // identity on every pick; project-only changes don't touch it, so the drawer
+  // stays open while browsing a project's session list.
+  const mobileSelSession = useStore((s) => s.selectedSession);
+  useEffect(() => {
+    if (isMobile && mobileSelSession && !useStore.getState().sidebarCollapsed) {
+      useStore.getState().toggleSidebar();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mobileSelSession]);
+
+  // New chat from the mobile top bar's ✎. Needs a selected project; if none,
+  // just open the drawer so the user can pick one first.
+  const startMobileNewChat = () => {
+    const st = useStore.getState();
+    const proj = st.selectedProject;
+    if (!proj) { if (st.sidebarCollapsed) st.toggleSidebar(); return; }
+    st.setSelectedSession({
+      draft: true, sessionId: null, projectHash: proj.hash,
+      projectPath: proj.path, firstPrompt: '新会话',
+    });
+    useStore.setState({ messages: [] });
+  };
+  const mobileTitle = mobileSelSession
+    ? (customTitles[mobileSelSession.sessionId] || mobileSelSession.firstPrompt?.slice(0, 24) || '新会话')
+    : 'Claude Code';
+
   const uiFontScale = useStore((s) => s.uiFontScale);
   useEffect(() => {
     try {
@@ -3245,6 +3483,26 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // All hooks above; safe to short-circuit to the login gate here.
+  if (authLocked) return <LoginScreen onSuccess={() => window.location.reload()} />;
+
+  if (isMobile) {
+    return (
+      <div className="flex flex-col overflow-hidden" style={{ width: 'calc(100vw / var(--ui-zoom, 1))', height: 'calc(100dvh / var(--ui-zoom, 1))' }}>
+        <MobileTopBar onMenu={toggleSidebar} onNew={startMobileNewChat} title={mobileTitle} />
+        <MobileControlStrip permKey={permKey} activeSession={activeSession} />
+        <MainLayout
+          sidebarCollapsed={sidebarCollapsed}
+          selectedProject={selectedProject}
+          rightPanel={rightPanel}
+          setRightPanel={setRightPanel}
+          isMobile={isMobile}
+        />
+        {LocalWidget && <LocalWidget />}
+      </div>
+    );
+  }
+
   return (
     <div className="flex flex-col overflow-hidden" style={{ width: 'calc(100vw / var(--ui-zoom, 1))', height: 'calc(100dvh / var(--ui-zoom, 1))' }}>
       {/* Top bar — glass */}
@@ -3312,7 +3570,9 @@ export default function App() {
         selectedProject={selectedProject}
         rightPanel={rightPanel}
         setRightPanel={setRightPanel}
+        isMobile={isMobile}
       />
+      {LocalWidget && <LocalWidget />}
     </div>
   );
 }

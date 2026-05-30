@@ -41,7 +41,7 @@ import './index.css';
 
   // Apply the saved reading font before mount so message prose doesn't flash
   // the default serif then swap.
-  try { applyReadingFont(localStorage.getItem('cgui-reading-font') || 'newsreader'); } catch {}
+  try { applyReadingFont(localStorage.getItem('cgui-reading-font') || 'sans'); } catch {}
 })();
 
 ReactDOM.createRoot(document.getElementById('root')).render(

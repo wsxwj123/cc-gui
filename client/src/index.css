@@ -8,7 +8,7 @@
   /* UI chrome = clean grotesk; reading/message text = warm serif; code = mono.
      --font-reading is overridable at runtime by the font picker (see store). */
   --font-ui: 'DM Sans', -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
-  --font-reading: 'Newsreader', Georgia, 'Times New Roman', serif;
+  --font-reading: 'DM Sans', -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
   --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, monospace;
 
   /* ── Canvas — Claude Desktop warm ivory (default look) ─────── */
@@ -1001,10 +1001,14 @@ body {
 }
 
 /* Reading font — Claude's message prose. Honors the runtime font picker via
-   --font-reading (set on :root by the store). Default = Newsreader serif. */
+   --font-reading (set on :root by the store). Default = sans (DM Sans). */
 .font-reading {
   font-family: var(--font-reading);
 }
+
+/* Hide the scrollbar but keep scrolling (mobile control strip chips). */
+.no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+.no-scrollbar::-webkit-scrollbar { display: none; }
 
 .font-mono {
   font-family: var(--font-mono);
