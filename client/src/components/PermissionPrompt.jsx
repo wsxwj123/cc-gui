@@ -263,13 +263,32 @@ export function PermissionPrompt({ sessionId = null }) {
 
   // Hydrate on first mount so a page refresh while a request is mid-flight
   // doesn't leave it invisible (the WS broadcast already fired before we
-  // attached).
+  // attached). The live WS path auto-allows whitelisted tools before they
+  // ever render; the hydration path must do the same, otherwise a request
+  // for a "永远允许" tool that was pending at mount re-prompts despite the
+  // user having opted in. Auto-resolve those here (per-request sessionId
+  // whitelist only — no cross-session reach).
   useEffect(() => {
     const ctrl = new AbortController();
     fetch('/api/permissions/pending', { signal: ctrl.signal })
       .then((r) => (r.ok ? r.json() : { items: [] }))
       .then((d) => {
-        useStore.getState().setPendingPermissions(d?.items || []);
+        const items = Array.isArray(d?.items) ? d.items : [];
+        const keep = [];
+        for (const it of items) {
+          let wl = [];
+          try { wl = JSON.parse(localStorage.getItem(`cgui-perm-wl-${it.sessionId || 'none'}`) || '[]'); } catch {}
+          if (wl.includes(it.toolName)) {
+            fetch(`/api/permissions/respond/${it.id}`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ decision: 'allow' }),
+            }).catch(() => {});
+          } else {
+            keep.push(it);
+          }
+        }
+        useStore.getState().setPendingPermissions(keep);
       })
       .catch(() => {});
     return () => ctrl.abort();
