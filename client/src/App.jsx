@@ -2804,7 +2804,7 @@ function SessionDetail({ tabIndex = 0 }) {
               {currentProvider?.providerHint && currentProvider.providerHint !== 'anthropic' && (
                 <span className="text-[10px] text-amber-700 bg-amber-50 border border-amber-200 rounded px-1.5 py-px font-mono shrink-0 whitespace-nowrap"
                   title={`cc switch 路由：${currentProvider.baseUrl}`}>
-                  {currentProvider.providerHint}
+                  {currentProvider.providerHint.charAt(0).toUpperCase() + currentProvider.providerHint.slice(1)}
                 </span>
               )}
               {/* Show the model the NEXT send will use (current selection),
@@ -3088,7 +3088,10 @@ function ProviderSwitcher() {
 
   const isCur = (p) => (activeId != null ? p.id === activeId : p.isCurrent);
   const cur = providers.find(isCur) || openaiProviders.find(isCur) || customProviders.find(isCur);
-  const label = cur?.name || currentProvider?.providerHint || 'Provider';
+  // providerHint is lowercase server-side (pricing/compare logic depends on it),
+  // so capitalize only for display.
+  const capHint = (h) => (h ? h.charAt(0).toUpperCase() + h.slice(1) : h);
+  const label = cur?.name || capHint(currentProvider?.providerHint) || 'Provider';
 
   const switchTo = async (id, model) => {
     setSwitching(true);
