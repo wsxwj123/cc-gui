@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState, useCallback, useMemo } from 'react';
+import { createPortal } from 'react-dom';
 
 // Stable empty array reference for zustand selectors — prevents React error
 // #185 (Maximum update depth exceeded) caused by returning fresh `[]` on
@@ -123,17 +124,35 @@ function CheckpointButton({ sessionId, cwd }) {
     } catch (err) { alert('恢复失败：' + err.message); }
   };
 
+  // Anchor the dropdown to the button but render it in a body portal with fixed
+  // positioning, so a narrow split pane's overflow:hidden can't clip it and it
+  // never spills past the pane boundary (#10). Position is clamped to viewport.
+  const btnRef = useRef(null);
+  const [pos, setPos] = useState(null);
+  const toggle = () => {
+    if (open) { setOpen(false); return; }
+    const r = btnRef.current?.getBoundingClientRect();
+    if (r) {
+      const W = 288; // w-72
+      let left = r.right - W;
+      left = Math.max(8, Math.min(left, window.innerWidth - 8 - W));
+      setPos({ top: r.bottom + 8, left });
+    }
+    setOpen(true);
+  };
+
   return (
     <div className="relative">
-      <button onClick={() => setOpen(!open)}
+      <button ref={btnRef} onClick={toggle}
         className={`flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[11px] font-body transition-colors ${open ? 'bg-accent/15 text-accent' : 'bg-canvas-warm text-ink-faint hover:text-ink-muted'}`}
         title="Checkpoint 时间线">
         <History size={12} />检查点
       </button>
-      {open && (
+      {open && pos && createPortal(
         <>
-          <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
-          <div className="glass-popover absolute right-0 top-full mt-2 w-72 z-50 py-1 animate-glass-rise">
+          <div className="fixed inset-0 z-[55]" onClick={() => setOpen(false)} />
+          <div className="glass-popover fixed w-72 z-[56] py-1 animate-glass-rise"
+            style={{ top: pos.top, left: pos.left }}>
             <div className="px-3 py-2 flex items-center justify-between border-b border-white/10">
               <span className="text-[10px] uppercase tracking-wider text-ink-muted font-body">Checkpoints</span>
               <button onClick={snapshot} disabled={busy} className="btn-accent flex items-center gap-1 text-[10px] px-2 py-0.5">
@@ -154,7 +173,8 @@ function CheckpointButton({ sessionId, cwd }) {
               ))}
             </div>
           </div>
-        </>
+        </>,
+        document.body,
       )}
     </div>
   );
@@ -571,12 +591,24 @@ function SplitMain({ activeTabIndex, setActiveTabIndex }) {
   // viewport so 2 panes fill the screen and 3+ overflow into a scroll (rather
   // than crushing every pane to fit). Reset on paneCount change.
   const [widths, setWidths] = useState([]);
+  // Persist per-pane widths per paneCount so a refresh keeps your split layout
+  // (#15). Restore saved widths if they match the current pane count; else fall
+  // back to the half-viewport default.
+  const widthsKey = `cgui-pane-widths-${paneCount}`;
   useEffect(() => {
     const cw = rowRef.current?.getBoundingClientRect().width || 0;
     // Subtract per-pane margins + splitter so 2 panes fit without a scrollbar.
     const def = cw > 0 ? Math.max(MIN_PANE_PX, Math.round(cw / 2) - 18) : 480;
-    setWidths(Array(paneCount).fill(def));
-  }, [paneCount]);
+    let restored = null;
+    try {
+      const saved = JSON.parse(localStorage.getItem(widthsKey) || 'null');
+      if (Array.isArray(saved) && saved.length === paneCount
+          && saved.every((n) => typeof n === 'number' && n >= MIN_PANE_PX)) {
+        restored = saved;
+      }
+    } catch {}
+    setWidths(restored || Array(paneCount).fill(def));
+  }, [paneCount, widthsKey]);
 
   // Splitter drag: resize ONLY the pane left of the handle (independent sizing).
   // Panes to the right just shift along; the row scrolls if the total grows.
@@ -599,6 +631,11 @@ function SplitMain({ activeTabIndex, setActiveTabIndex }) {
       document.removeEventListener('mouseup', onUp);
       document.body.style.cursor = '';
       document.body.style.userSelect = '';
+      // Save the final widths so they survive a page refresh.
+      setWidths((prev) => {
+        try { localStorage.setItem(widthsKey, JSON.stringify(prev)); } catch {}
+        return prev;
+      });
     };
     document.addEventListener('mousemove', onMove);
     document.addEventListener('mouseup', onUp);
@@ -2737,6 +2774,19 @@ function SessionDetail({ tabIndex = 0 }) {
   const toolCallCount = allMessages.reduce((acc, m) => acc + (m.toolCalls?.length || 0), 0);
   const models = [...new Set(allMessages.filter((m) => m.model).map((m) => m.model))];
 
+  // Context-window fill of the LATEST turn (= what the next send carries), so
+  // you can see how full the context is and when to /compact (#13). The prompt
+  // size = input + cache_read + cache_creation of the most recent message that
+  // has usage. Window is 1M when the active model has the [1m] beta suffix.
+  const lastUsage = [...allMessages].reverse().find(
+    (m) => m.usage && ((m.usage.input_tokens || 0) + (m.usage.cache_read_input_tokens || 0)) > 0,
+  )?.usage;
+  const contextTokens = lastUsage
+    ? (lastUsage.input_tokens || 0) + (lastUsage.cache_read_input_tokens || 0) + (lastUsage.cache_creation_input_tokens || 0)
+    : 0;
+  const contextWindow = /\[1m\]/i.test(currentModel || '') ? 1_000_000 : 200_000;
+  const contextPct = contextTokens > 0 ? Math.min(100, Math.round((contextTokens / contextWindow) * 100)) : 0;
+
   return (
     <div className="flex-1 flex flex-col min-h-0 glass-base relative">
       <div className="glass-bar shrink-0 px-6 py-3 relative z-30">
@@ -2751,6 +2801,17 @@ function SessionDetail({ tabIndex = 0 }) {
                 <Hash size={10} />{selectedSession.sessionId?.slice(0, 8) || '新会话'}
               </span>
               <span className="text-[10px] text-ink-faint font-mono shrink-0 whitespace-nowrap">{messages.length + chatMessages.length} 条消息</span>
+              {contextTokens > 0 && (
+                <span
+                  className={`text-[10px] font-mono shrink-0 whitespace-nowrap px-1.5 py-px rounded ${
+                    contextPct >= 80 ? 'text-error bg-error-subtle'
+                      : contextPct >= 60 ? 'text-amber-700 bg-amber-50'
+                      : 'text-ink-faint'}`}
+                  title={`上下文 ${contextTokens.toLocaleString()} / ${contextWindow.toLocaleString()} tokens${contextPct >= 80 ? ' — 接近上限，建议 /compact' : ''}`}
+                >
+                  上下文 {contextPct}%
+                </span>
+              )}
               {toolCallCount > 0 && <span className="text-[10px] text-ink-faint font-mono shrink-0 whitespace-nowrap">{toolCallCount} 工具调用</span>}
               {currentProvider?.providerHint && currentProvider.providerHint !== 'anthropic' && (
                 <span className="text-[10px] text-amber-700 bg-amber-50 border border-amber-200 rounded px-1.5 py-px font-mono shrink-0 whitespace-nowrap"
@@ -2890,7 +2951,14 @@ function SessionDetail({ tabIndex = 0 }) {
 
       {!autoScroll && !showFileChanges && (
         <div className="absolute bottom-24 right-6 z-20">
-          <button onClick={() => { messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }); setAutoScroll(true); }}
+          <button onClick={() => {
+              // Scroll ONLY the messages container — scrollIntoView would scroll
+              // every scrollable ancestor (incl. the root flex), shoving the
+              // header off-screen and leaving a blank gap at the bottom (#16).
+              const el = containerRef.current;
+              if (el) el.scrollTop = el.scrollHeight;
+              setAutoScroll(true);
+            }}
             className="bg-canvas border border-canvas-deep hover:bg-canvas-warm rounded-full p-2 shadow-sm transition-colors">
             <ChevronRight size={14} className="text-ink-muted rotate-90" />
           </button>

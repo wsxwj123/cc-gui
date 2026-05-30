@@ -4,6 +4,44 @@ import { User, Brain, Copy, Check, RotateCcw, Pencil, X } from 'lucide-react';
 import { computeCost, formatCost } from '../utils/pricing.js';
 import { useStore } from '../stores/sessionStore.js';
 
+// User messages can be huge (pasted logs, long prompts). Collapse to ~10 lines
+// by default with a fade + "展开全部" toggle so the chat stays scannable.
+const COLLAPSED_MAX_PX = 240; // ≈ 10 lines at 15px / leading-relaxed
+function CollapsibleUserText({ text }) {
+  const ref = useRef(null);
+  const [expanded, setExpanded] = useState(false);
+  const [overflowing, setOverflowing] = useState(false);
+  useEffect(() => {
+    const el = ref.current;
+    if (el) setOverflowing(el.scrollHeight > COLLAPSED_MAX_PX + 4);
+  }, [text]);
+  const collapsed = overflowing && !expanded;
+  return (
+    <div>
+      <div className="relative">
+        <div
+          ref={ref}
+          className="text-[15px] font-reading leading-relaxed whitespace-pre-wrap text-ink overflow-hidden"
+          style={collapsed ? { maxHeight: COLLAPSED_MAX_PX } : undefined}
+        >
+          {text}
+        </div>
+        {collapsed && (
+          <div className="pointer-events-none absolute inset-x-0 bottom-0 h-10 bg-gradient-to-t from-canvas-warm to-transparent" />
+        )}
+      </div>
+      {overflowing && (
+        <button
+          onClick={() => setExpanded((v) => !v)}
+          className="mt-1 text-[12px] text-accent hover:underline font-body"
+        >
+          {expanded ? '收起' : '展开全部'}
+        </button>
+      )}
+    </div>
+  );
+}
+
 // Custom user avatar — persisted as data URL in localStorage. Click the
 // avatar circle (only on user messages) to upload an image. Showing the
 // chosen image makes the chat feel personal; falling back to the default
@@ -240,7 +278,7 @@ export function MessageBubble({ message, onRollback }) {
               <span className="text-[13px] font-medium text-ink font-body">你</span>
             </div>
             <div className="max-w-[85%] bg-canvas-warm border border-canvas-deep rounded-2xl px-4 py-2.5">
-              <div className="text-[15px] font-reading leading-relaxed whitespace-pre-wrap text-ink">{message.text}</div>
+              <CollapsibleUserText text={message.text} />
             </div>
           </div>
         </div>
