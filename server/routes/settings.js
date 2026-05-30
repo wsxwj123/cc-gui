@@ -215,7 +215,16 @@ router.get('/provider', async (_req, res) => {
     else if (u.includes('vertex') || u.includes('googleapis')) providerHint = 'vertex';
     else providerHint = 'unknown';
 
-    res.json({ baseUrl, providerHint, model });
+    // protocol: 'openai' only when we're routing through the embedded
+    // Anthropic→OpenAI proxy (codex-local etc). Every claude-format provider —
+    // official subscription AND relays like mimo/deepseek/openrouter — is
+    // 'anthropic' protocol: the CLI talks the Anthropic wire format and
+    // `--effort` is transmitted. The OpenAI proxy can't map --effort, so it's
+    // the only case where reasoning effort is meaningless.
+    let protocol = 'anthropic';
+    try { await readFile(OPENAI_ACTIVE_PATH, 'utf-8'); protocol = 'openai'; } catch {}
+
+    res.json({ baseUrl, providerHint, model, protocol });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

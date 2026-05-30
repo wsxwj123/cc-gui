@@ -3300,7 +3300,10 @@ export function ModelSelector({ compact = false, permKey = null }) {
       <button onClick={() => setOpen(!open)}
         className={`flex items-center gap-1 px-2 py-1 rounded-md hover:bg-canvas-deep transition-colors ${compact ? '' : 'px-2.5'}`}>
         <ModelBadge model={currentModel} compact={compact} />
-        {provider && !compact && (
+        {/* The vendor tag is redundant with the Claude model badge when on the
+            official Anthropic endpoint — only show it for relays (DeepSeek/MiMo/
+            OpenRouter) where it warns that aliases may be redirected. */}
+        {provider && provider !== 'Anthropic' && !compact && (
           <span className="text-[9px] px-1 py-0.5 bg-canvas-deep text-ink-faint rounded font-mono">{provider}</span>
         )}
         <ChevronDown size={10} className="text-ink-faint" />
@@ -3310,7 +3313,7 @@ export function ModelSelector({ compact = false, permKey = null }) {
           <div className="px-3 py-2 sticky top-0 bg-canvas border-b border-canvas-deep">
             <div className="text-[10px] text-ink-faint uppercase tracking-wider font-body flex items-center justify-between">
               <span>选择模型</span>
-              {provider && <span className="text-ink-ghost normal-case">{provider}</span>}
+              {provider && provider !== 'Anthropic' && <span className="text-ink-ghost normal-case">{provider}</span>}
             </div>
             <p className="text-[10px] text-ink-faint font-body mt-1 leading-snug">
               <b>alias</b> = CLI 接收 <code className="font-mono">sonnet/opus/haiku</code> 简称，由 CLI 解析到当前 tier 最新模型。
@@ -3998,8 +4001,10 @@ function MobileMenu({ setRightPanel, onClose }) {
   const currentModel = useStore((s) => s.modelBySession[permKey] || s.currentModel);
   const effort = useStore((s) => { const b = (currentModel || '').replace(/\[1m\]/i, ''); return b && b in s.effortByModel ? s.effortByModel[b] : s.effort; });
   const permissionMode = useStore((s) => s.permissionModeBySession[permKey] || 'default');
-  // --effort only applies on Anthropic upstreams; hide it on OpenAI-compat providers.
-  const isAnthropic = useStore((s) => (s.currentProvider?.providerHint || 'anthropic') === 'anthropic');
+  // --effort works on every claude-format upstream (official + mimo/deepseek/
+  // openrouter relays); only the OpenAI proxy (codex-local) can't map it. Gate
+  // on protocol, not providerHint.
+  const claudeProtocol = useStore((s) => (s.currentProvider?.protocol || 'anthropic') !== 'openai');
   const effortLabel = (EFFORT_LEVELS.find((e) => e.id === effort) || EFFORT_LEVELS[0]).label;
   const permLabel = (MODE_META[permissionMode] || MODE_META.default).label;
 
@@ -4048,7 +4053,7 @@ function MobileMenu({ setRightPanel, onClose }) {
               <MobileMenuRow icon={MessageSquare} label="会话与项目" onClick={() => push('history')} />
               <div className="px-4 pt-3 pb-1 text-[11px] text-ink-faint uppercase tracking-wider font-body">当前会话</div>
               <MobileMenuRow icon={Cpu} label="模型" value={<ModelBadge model={currentModel} compact />} onClick={() => push('model')} />
-              {isAnthropic && <MobileMenuRow icon={Gauge} label="推理力度" value={effortLabel} onClick={() => push('effort')} />}
+              {claudeProtocol && <MobileMenuRow icon={Gauge} label="推理力度" value={effortLabel} onClick={() => push('effort')} />}
               <MobileMenuRow icon={Shield} label="权限模式" value={permLabel} onClick={() => push('permission')} />
               <MobileMenuRow icon={Server} label="Provider" onClick={() => push('provider')} />
               {activeSession?.sessionId && (

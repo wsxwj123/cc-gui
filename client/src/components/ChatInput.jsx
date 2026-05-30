@@ -83,9 +83,12 @@ export function EffortSelector({ permKey = null }) {
   // not a session property.
   const effModel = useStore((s) => ((permKey && s.modelBySession[permKey]) || s.currentModel) || '');
   const effort = useStore((s) => { const b = effModel.replace(/\[1m\]/i, ''); return b && b in s.effortByModel ? s.effortByModel[b] : s.effort; });
-  // --effort is an Anthropic-protocol flag; it's meaningless on OpenAI-compat
-  // upstreams (cc switch → codex-local/deepseek/etc), where the CLI can't map it.
-  const isAnthropic = useStore((s) => (s.currentProvider?.providerHint || 'anthropic') === 'anthropic');
+  // --effort is an Anthropic-protocol flag. It IS transmitted on every
+  // claude-format upstream — official subscription AND relays (mimo/deepseek/
+  // openrouter). Only the OpenAI proxy (codex-local) can't map it, so hide
+  // there. Gate on protocol, NOT providerHint (which is 'mimo'/'deepseek' for
+  // those relays and would wrongly hide their effort control).
+  const claudeProtocol = useStore((s) => (s.currentProvider?.protocol || 'anthropic') !== 'openai');
   const setEffort = (id) => useStore.getState().setEffortForModel(effModel, id);
   const [open, setOpen] = useState(false);
   const wrapRef = useRef(null);
@@ -105,7 +108,7 @@ export function EffortSelector({ permKey = null }) {
     };
   }, [open]);
 
-  if (!isAnthropic) return null;
+  if (!claudeProtocol) return null;
 
   return (
     <div ref={wrapRef} className="relative">
