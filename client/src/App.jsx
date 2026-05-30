@@ -3190,7 +3190,7 @@ export function ModelSelector({ compact = false, permKey = null }) {
 
   const handleCustomSubmit = () => {
     const id = customInput.trim();
-    if (id) { setModel(id); setCustomInput(''); setOpen(false); }
+    if (id) { selectModel(id); setCustomInput(''); }
   };
 
   // 1M-context toggle: Claude Code enables the 1M beta via a `[1m]` suffix on
@@ -3201,6 +3201,14 @@ export function ModelSelector({ compact = false, permKey = null }) {
     const base = (currentModel || '').replace(/\[1m\]/i, '');
     if (!base) return;
     setModel(has1m ? base : `${base}[1m]`);
+  };
+  // Switching models PRESERVES the current 1M flag, so picking a different model
+  // doesn't silently drop your 1M-context choice (#4). Removing 1M is explicit
+  // via the toggle above.
+  const selectModel = (id) => {
+    const base = id.replace(/\[1m\]/i, '');
+    setModel(has1m ? `${base}[1m]` : base);
+    setOpen(false);
   };
 
   if (!currentModel) return null;
@@ -3248,7 +3256,7 @@ export function ModelSelector({ compact = false, permKey = null }) {
           {availableModels.map((m) => {
             const isAlias = m.source === 'cli-alias';
             return (
-              <button key={m.id} onClick={() => { setModel(m.id); setOpen(false); }}
+              <button key={m.id} onClick={() => selectModel(m.id)}
                 className={`w-full text-left px-3 py-2 hover:bg-canvas-warm transition-colors flex items-center gap-2 ${
                   currentModel === m.id ? 'bg-accent-subtle/50' : ''}`}>
                 <div className="flex-1 min-w-0">
