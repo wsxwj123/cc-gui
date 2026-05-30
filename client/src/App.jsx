@@ -1032,7 +1032,7 @@ function SessionItem({ session, isSelected, onSelect, onFork, onArchive, onDelet
         </div>
       )}
       {!renaming && (
-      <div className="absolute bottom-1.5 right-1.5 opacity-0 group-hover:opacity-100 transition-opacity flex items-center gap-0.5">
+      <div className="absolute bottom-1.5 right-1.5 opacity-100 md:opacity-0 md:group-hover:opacity-100 transition-opacity flex items-center gap-0.5">
         <button
           onClick={startRename}
           disabled={isDraft}
@@ -2784,7 +2784,7 @@ function SessionDetail({ tabIndex = 0 }) {
         <div className="max-w-3xl mx-auto flex items-center justify-between gap-y-2 flex-wrap">
           <div className="min-w-0 flex-1">
             <EditableSessionTitle session={selectedSession} />
-            <div className="flex items-center gap-3 mt-0.5 flex-wrap">
+            <div className="flex items-center gap-3 mt-0.5 flex-wrap max-md:hidden">
               <span className="text-[10px] text-ink-faint font-mono flex items-center gap-1 shrink-0 whitespace-nowrap">
                 <Hash size={10} />{selectedSession.sessionId?.slice(0, 8) || '新会话'}
               </span>
@@ -2837,7 +2837,7 @@ function SessionDetail({ tabIndex = 0 }) {
             >
               <FileDiff size={12} />变更
             </button>
-            <div className="text-right">
+            <div className="text-right max-md:hidden">
               <div className="text-[10px] text-ink-faint font-mono flex items-center gap-1 justify-end">
                 <BarChart3 size={10} />{(totalTokens.input + totalTokens.output).toLocaleString()} tokens
                 {totalCostUsd > 0 && (
@@ -3845,6 +3845,28 @@ export default function App() {
     } catch {}
   }, [uiFontScale]);
 
+  // Soft-keyboard awareness (#1): publish the keyboard height as `--kb` so the
+  // mobile root can lift its bottom above it. Divided by the font zoom because
+  // the root's `bottom` inset is itself scaled by the <html> zoom.
+  useEffect(() => {
+    if (!isMobile) return;
+    const vv = window.visualViewport;
+    if (!vv) return;
+    const sync = () => {
+      const kb = Math.max(0, window.innerHeight - vv.height - vv.offsetTop);
+      const z = useStore.getState().uiFontScale || 1;
+      document.documentElement.style.setProperty('--kb', `${kb / z}px`);
+    };
+    sync();
+    vv.addEventListener('resize', sync);
+    vv.addEventListener('scroll', sync);
+    return () => {
+      vv.removeEventListener('resize', sync);
+      vv.removeEventListener('scroll', sync);
+      document.documentElement.style.removeProperty('--kb');
+    };
+  }, [isMobile]);
+
   // Apply persisted color theme on mount. Maps `cguiTheme` store value to
   // the `data-cgui-theme="<name>"` attribute on <html>, picked up by the
   // theme blocks in index.css.
@@ -3934,8 +3956,13 @@ export default function App() {
   if (authLocked) return <LoginScreen onSuccess={() => window.location.reload()} />;
 
   if (isMobile) {
+    // Root is pinned with zero insets (not vw/vh): under the <html> font-zoom,
+    // `0` insets don't scale, so they don't cancel the zoom the way
+    // `calc(100vw / zoom)` did on iOS Safari (that made font scaling look dead).
+    // `bottom: var(--kb)` lifts the whole app above the soft keyboard so the
+    // composer stays visible while typing.
     return (
-      <div className="flex flex-col overflow-hidden" style={{ width: 'calc(100vw / var(--ui-zoom, 1))', height: 'calc(100dvh / var(--ui-zoom, 1))' }}>
+      <div className="flex flex-col overflow-hidden" style={{ position: 'fixed', left: 0, top: 0, right: 0, bottom: 'var(--kb, 0px)' }}>
         <MobileTopBar onMenu={toggleSidebar} onNew={startMobileNewChat} title={mobileTitle} />
         <MainLayout
           sidebarCollapsed={sidebarCollapsed}
