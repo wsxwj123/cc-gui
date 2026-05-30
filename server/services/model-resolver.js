@@ -127,13 +127,18 @@ export async function getAvailableModels() {
   }
   const isAnthropic = provider === 'Anthropic';
 
-  // Every *_MODEL env key (skip *_MODEL_NAME companions and aliases we expand below)
-  for (const [key, val] of Object.entries(env)) {
+  // Every *_MODEL key — enumerate from settings.json ONLY, never the inherited
+  // process.env. A shell that launched the server may carry stale ANTHROPIC_*
+  // model vars (e.g. a leftover ANTHROPIC_REASONING_MODEL=...opus-4-6-thinking),
+  // which otherwise leaked a phantom "Reasoning"/"sonnet" row onto EVERY provider
+  // regardless of the active settings.json. settings.json is the source of truth.
+  const senv = settings.env || {};
+  for (const [key, val] of Object.entries(senv)) {
     if (typeof val !== 'string' || !val) continue;
     if (!/_MODEL$/.test(key)) continue;
     const nameKey = key + '_NAME';
     const tier = inferTier(key) || inferTier(val);
-    add(val, env[nameKey] || envKeyToLabel(key, val), tier, key);
+    add(val, senv[nameKey] || envKeyToLabel(key, val), tier, key);
   }
 
   // CLI aliases — `claude --model sonnet` resolves to latest of that tier

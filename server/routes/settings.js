@@ -446,7 +446,10 @@ router.delete('/custom-providers/:id', async (req, res) => {
 // accept only one. Returns deduped model ids. Single-user local tool, so an
 // arbitrary baseURL is the user's own choice (no SSRF guard).
 async function probeUpstreamModels(baseURL, apiKey) {
-  const url = baseURL.trim().replace(/\/+$/, '') + '/v1/models';
+  // Some bases already end in /v1 (OpenAI-style: http://host:8317/v1) — don't
+  // double it into /v1/v1/models.
+  const b = baseURL.trim().replace(/\/+$/, '');
+  const url = /\/v\d+$/.test(b) ? `${b}/models` : `${b}/v1/models`;
   const headerSets = [
     { 'x-api-key': apiKey || '', 'anthropic-version': '2023-06-01' },
     { Authorization: `Bearer ${apiKey || ''}` },
