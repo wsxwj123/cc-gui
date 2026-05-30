@@ -15,6 +15,25 @@ const PROJECTS_DIR = join(homedir(), '.claude', 'projects');
 // Remembers which OpenAI-format provider is active so the proxy upstream can be
 // re-established after a server restart (only the provider id — never the key).
 const OPENAI_ACTIVE_PATH = join(homedir(), '.claude-gui', 'openai-active.json');
+// Remembers the LAST provider switched via the GUI (claude or openai). CC Switch's
+// own is_current flag never reflects a GUI switch (we only write settings.json,
+// not its db), so GET /providers reads this marker to mark the right row current —
+// otherwise the picker reverts to the stale db value every time it remounts.
+const ACTIVE_PROVIDER_PATH = join(homedir(), '.claude-gui', 'active-provider.json');
+
+async function readActiveProviderId() {
+  try {
+    const d = JSON.parse(await readFile(ACTIVE_PROVIDER_PATH, 'utf-8'));
+    return typeof d?.id === 'string' ? d.id : null;
+  } catch { return null; }
+}
+
+async function writeActiveProviderId(id) {
+  try {
+    await mkdir(join(homedir(), '.claude-gui'), { recursive: true });
+    await writeFile(ACTIVE_PROVIDER_PATH, JSON.stringify({ id }));
+  } catch {}
+}
 
 // CLI hash convention: the Claude CLI replaces EVERY character that is not
 // [A-Za-z0-9] with a single `-` (one-to-one, not collapsed). So `/`, space,
@@ -196,14 +215,18 @@ router.get('/providers', async (_req, res) => {
   const oaRows = await ccSwitchQuery(
     "SELECT id, name, settings_config FROM providers WHERE app_type IN ('codex','opencode') ORDER BY sort_index"
   );
+  // A GUI switch is authoritative over the db's stale is_current; fall back to
+  // the db flag only when the GUI hasn't switched anything yet.
+  const activeId = await readActiveProviderId();
+  const isCur = (id, dbCurrent) => (activeId != null ? id === activeId : dbCurrent);
   const openai = [];
   for (const r of oaRows) {
     const p = parseOpenAIProvider(r.settings_config);
-    if (p) openai.push({ id: r.id, name: r.name, format: 'openai', models: p.models });
+    if (p) openai.push({ id: r.id, name: r.name, format: 'openai', models: p.models, isCurrent: isCur(r.id, false) });
   }
   res.json({
     available: rows.length > 0 || openai.length > 0,
-    providers: rows.map((r) => ({ id: r.id, name: r.name, format: 'claude', isCurrent: r.is_current === 1 })),
+    providers: rows.map((r) => ({ id: r.id, name: r.name, format: 'claude', isCurrent: isCur(r.id, r.is_current === 1) })),
     openaiProviders: openai,
   });
 });
@@ -246,6 +269,7 @@ router.post('/provider/switch', async (req, res) => {
     await copyFile(SETTINGS_PATH, `${SETTINGS_PATH}.${ts}.bak`).catch(() => {});
 
     await writeFile(SETTINGS_PATH, JSON.stringify(snapshot, null, 2));
+    await writeActiveProviderId(hit.id);
     res.json({ ok: true, name: hit.name });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -298,6 +322,7 @@ async function switchToOpenAIProvider(oaHit, requestedModel, res) {
     await mkdir(join(homedir(), '.claude-gui'), { recursive: true });
     await writeFile(OPENAI_ACTIVE_PATH, JSON.stringify({ providerId: oaHit.id, model }));
   } catch {}
+  await writeActiveProviderId(oaHit.id);
   res.json({ ok: true, name: oaHit.name, model, via: 'openai-proxy' });
 }
 
