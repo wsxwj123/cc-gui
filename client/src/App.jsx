@@ -3053,6 +3053,9 @@ function RemoteControlButton({ session }) {
 // Hidden entirely when CC Switch isn't installed/empty.
 function ProviderSwitcher() {
   const [providers, setProviders] = useState([]);
+  // OpenAI-format providers (codex/opencode) — routed through the embedded
+  // Anthropic↔OpenAI proxy on switch so the claude CLI can use them.
+  const [openaiProviders, setOpenaiProviders] = useState([]);
   const [open, setOpen] = useState(false);
   const [switching, setSwitching] = useState(false);
   // Optimistic current id: the CC Switch db's is_current isn't updated by us
@@ -3064,6 +3067,7 @@ function ProviderSwitcher() {
   const load = () => {
     fetch('/api/providers').then((r) => r.json()).then((d) => {
       setProviders(Array.isArray(d.providers) ? d.providers : []);
+      setOpenaiProviders(Array.isArray(d.openaiProviders) ? d.openaiProviders : []);
     }).catch(() => {});
   };
   useEffect(() => {
@@ -3085,23 +3089,24 @@ function ProviderSwitcher() {
     };
   }, [open]);
 
-  if (providers.length === 0) return null;
+  if (providers.length === 0 && openaiProviders.length === 0) return null;
 
   const isCur = (p) => (activeId != null ? p.id === activeId : p.isCurrent);
-  const cur = providers.find(isCur);
+  const cur = providers.find(isCur) || openaiProviders.find(isCur);
   const label = cur?.name || currentProvider?.providerHint || 'Provider';
 
-  const switchTo = async (id) => {
+  const switchTo = async (id, model) => {
     setSwitching(true);
     try {
       const r = await fetch('/api/provider/switch', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id }),
+        body: JSON.stringify(model ? { id, model } : { id }),
       });
       const d = await r.json();
       if (!r.ok) throw new Error(d.error || '切换失败');
       setActiveId(id);
       useStore.getState().fetchProvider?.();
+      useStore.getState().fetchModel?.();
       setOpen(false);
     } catch (e) {
       window.alert('切换 provider 失败：' + e.message);
@@ -3131,6 +3136,31 @@ function ProviderSwitcher() {
               <span className={`flex-1 text-xs font-body truncate ${isCur(p) ? 'text-accent font-medium' : 'text-ink'}`}>{p.name}</span>
               {isCur(p) && <Check size={12} className="text-accent shrink-0" />}
             </button>
+          ))}
+          {openaiProviders.length > 0 && (
+            <div className="px-3 pt-2 pb-1 mt-1 border-t border-canvas-deep">
+              <div className="text-[10px] text-ink-faint uppercase tracking-wider font-body flex items-center gap-1">
+                OpenAI 格式 <span className="text-ink-ghost normal-case tracking-normal">· 经内置代理</span>
+              </div>
+            </div>
+          )}
+          {openaiProviders.map((p) => (
+            <div key={p.id} className={`px-3 py-2 ${isCur(p) ? 'bg-accent-subtle' : ''}`}>
+              <div className="flex items-center gap-2">
+                <span className={`flex-1 text-xs font-body truncate ${isCur(p) ? 'text-accent font-medium' : 'text-ink'}`}>{p.name}</span>
+                {isCur(p) && <Check size={12} className="text-accent shrink-0" />}
+              </div>
+              {/* One chip per model — clicking switches to that specific model. */}
+              <div className="flex flex-wrap gap-1 mt-1.5">
+                {(p.models.length ? p.models : ['(默认)']).map((m) => (
+                  <button key={m} disabled={switching}
+                    onClick={() => switchTo(p.id, p.models.length ? m : undefined)}
+                    className={`text-[10px] font-mono px-1.5 py-0.5 rounded border transition-colors ${switching ? 'opacity-50' : ''} border-canvas-deep text-ink-soft hover:border-accent hover:text-accent`}>
+                    {m}
+                  </button>
+                ))}
+              </div>
+            </div>
           ))}
         </div>
       )}

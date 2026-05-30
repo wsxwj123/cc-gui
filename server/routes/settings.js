@@ -4,6 +4,7 @@ import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { join } from 'path';
 import { homedir } from 'os';
+import { startOpenAIProxy, setOpenAIUpstream, getProxyPort } from '../services/openai-proxy.js';
 
 const execFileP = promisify(execFile);
 const CC_SWITCH_DB = join(homedir(), '.cc-switch', 'cc-switch.db');
@@ -11,6 +12,9 @@ const CC_SWITCH_DB = join(homedir(), '.cc-switch', 'cc-switch.db');
 const router = Router();
 const SETTINGS_PATH = join(homedir(), '.claude', 'settings.json');
 const PROJECTS_DIR = join(homedir(), '.claude', 'projects');
+// Remembers which OpenAI-format provider is active so the proxy upstream can be
+// re-established after a server restart (only the provider id — never the key).
+const OPENAI_ACTIVE_PATH = join(homedir(), '.claude-gui', 'openai-active.json');
 
 // CLI hash convention: the Claude CLI replaces EVERY character that is not
 // [A-Za-z0-9] with a single `-` (one-to-one, not collapsed). So `/`, space,
@@ -168,15 +172,39 @@ async function ccSwitchQuery(sql) {
   }
 }
 
-// GET /api/providers — list the user's `claude` providers from CC Switch.
-// Returns names + ids only; NEVER the settings_config (which holds API keys).
+// Parse an OpenAI-format (app_type=codex/opencode) provider's settings_config.
+// Returns { baseURL, apiKey, models[] } or null if it isn't usable.
+function parseOpenAIProvider(settingsConfig) {
+  let d;
+  try { d = JSON.parse(settingsConfig); } catch { return null; }
+  const o = d?.options || {};
+  const baseURL = o.baseURL || o.base_url;
+  const apiKey = o.apiKey || o.api_key;
+  if (!baseURL || !apiKey) return null;
+  const models = d.models && typeof d.models === 'object' ? Object.keys(d.models) : [];
+  return { baseURL, apiKey, models };
+}
+
+// GET /api/providers — list the user's providers from CC Switch.
+// `claude` providers are Anthropic-native; `openai` providers (codex/opencode
+// app_type) are OpenAI-compatible and routed through the embedded translation
+// proxy on switch. NEVER returns settings_config / API keys.
 router.get('/providers', async (_req, res) => {
   const rows = await ccSwitchQuery(
     "SELECT id, name, is_current FROM providers WHERE app_type='claude' ORDER BY sort_index"
   );
+  const oaRows = await ccSwitchQuery(
+    "SELECT id, name, settings_config FROM providers WHERE app_type IN ('codex','opencode') ORDER BY sort_index"
+  );
+  const openai = [];
+  for (const r of oaRows) {
+    const p = parseOpenAIProvider(r.settings_config);
+    if (p) openai.push({ id: r.id, name: r.name, format: 'openai', models: p.models });
+  }
   res.json({
-    available: rows.length > 0,
-    providers: rows.map((r) => ({ id: r.id, name: r.name, isCurrent: r.is_current === 1 })),
+    available: rows.length > 0 || openai.length > 0,
+    providers: rows.map((r) => ({ id: r.id, name: r.name, format: 'claude', isCurrent: r.is_current === 1 })),
+    openaiProviders: openai,
   });
 });
 
@@ -186,16 +214,25 @@ router.get('/providers', async (_req, res) => {
 // live settings.json via GET /provider, which is authoritative).
 router.post('/provider/switch', async (req, res) => {
   try {
-    const { id } = req.body || {};
+    const { id, model } = req.body || {};
     if (!id || typeof id !== 'string') return res.status(400).json({ error: 'id required' });
 
     // Read ALL claude providers and match in JS — user input never touches SQL.
     const rows = await ccSwitchQuery(
       "SELECT id, name, settings_config FROM providers WHERE app_type='claude'"
     );
-    if (rows.length === 0) return res.status(503).json({ error: 'CC Switch 数据库不可用' });
     const hit = rows.find((r) => r.id === id);
-    if (!hit) return res.status(404).json({ error: 'provider 不存在' });
+
+    // Not a claude provider? Try the OpenAI-format set (routed via proxy).
+    if (!hit) {
+      const oaRows = await ccSwitchQuery(
+        "SELECT id, name, settings_config FROM providers WHERE app_type IN ('codex','opencode')"
+      );
+      const oaHit = oaRows.find((r) => r.id === id);
+      if (oaHit) return switchToOpenAIProvider(oaHit, model, res);
+      if (rows.length === 0) return res.status(503).json({ error: 'CC Switch 数据库不可用' });
+      return res.status(404).json({ error: 'provider 不存在' });
+    }
 
     let snapshot;
     try { snapshot = JSON.parse(hit.settings_config); }
@@ -214,5 +251,78 @@ router.post('/provider/switch', async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
+// Switch to an OpenAI-compatible provider. Unlike claude providers (whose
+// settings_config IS a settings.json), these need the embedded proxy: we point
+// the CLI's ANTHROPIC_BASE_URL at the loopback proxy and feed it the real
+// upstream. We PRESERVE the current settings.json (hooks/plugins/permissions —
+// notably the PreToolUse permission bridge) and only override the env keys.
+async function switchToOpenAIProvider(oaHit, requestedModel, res) {
+  const parsed = parseOpenAIProvider(oaHit.settings_config);
+  if (!parsed) return res.status(500).json({ error: 'provider 配置缺少 baseURL/apiKey' });
+
+  const model = (requestedModel && parsed.models.includes(requestedModel))
+    ? requestedModel
+    : (parsed.models[0] || requestedModel);
+  if (!model) return res.status(400).json({ error: 'provider 未配置任何模型,需手动指定 model' });
+
+  // Start the proxy (idempotent, fixed port) and point it at this upstream.
+  let port = getProxyPort();
+  if (!port) port = await startOpenAIProxy();
+  setOpenAIUpstream({ baseURL: parsed.baseURL, apiKey: parsed.apiKey });
+
+  // Start from the live settings.json so hooks/permissions survive the switch.
+  let current = {};
+  try { current = JSON.parse(await readFile(SETTINGS_PATH, 'utf-8')); } catch {}
+  const env = { ...(current.env || {}) };
+  env.ANTHROPIC_BASE_URL = `http://127.0.0.1:${port}`;
+  // The CLI must send *some* token; the proxy ignores it and injects the real
+  // upstream key itself, so we never expose the real key to the CLI env file
+  // beyond what cc-switch already stores.
+  env.ANTHROPIC_AUTH_TOKEN = 'sk-openai-proxy';
+  env.ANTHROPIC_MODEL = model;
+  // Route subagent aliases (haiku/sonnet/opus) to the same model so Task
+  // subagents work under the OpenAI backend too.
+  env.ANTHROPIC_DEFAULT_HAIKU_MODEL = model;
+  env.ANTHROPIC_DEFAULT_SONNET_MODEL = model;
+  env.ANTHROPIC_DEFAULT_OPUS_MODEL = model;
+  delete env.ANTHROPIC_DEFAULT_OPUS_MODEL_NAME;
+  delete env.ANTHROPIC_DEFAULT_SONNET_MODEL_NAME;
+
+  const next = { ...current, env };
+  const ts = new Date().toISOString().replace(/[:.]/g, '-');
+  await copyFile(SETTINGS_PATH, `${SETTINGS_PATH}.${ts}.bak`).catch(() => {});
+  await writeFile(SETTINGS_PATH, JSON.stringify(next, null, 2));
+  // Remember the active provider id (not the key) for restart recovery.
+  try {
+    await mkdir(join(homedir(), '.claude-gui'), { recursive: true });
+    await writeFile(OPENAI_ACTIVE_PATH, JSON.stringify({ providerId: oaHit.id, model }));
+  } catch {}
+  res.json({ ok: true, name: oaHit.name, model, via: 'openai-proxy' });
+}
+
+// Called once on server boot: if an OpenAI-format provider was active before a
+// restart, re-establish the proxy upstream so the CLI's ANTHROPIC_BASE_URL
+// (still pointing at the fixed proxy port in settings.json) keeps working.
+export async function restoreOpenAIProvider() {
+  let active;
+  try { active = JSON.parse(await readFile(OPENAI_ACTIVE_PATH, 'utf-8')); } catch { return; }
+  if (!active?.providerId) return;
+  // Only restore if settings.json actually still points at the proxy — the user
+  // may have switched back to a claude provider since.
+  try {
+    const cur = JSON.parse(await readFile(SETTINGS_PATH, 'utf-8'));
+    if (!String(cur?.env?.ANTHROPIC_BASE_URL || '').includes('127.0.0.1')) return;
+  } catch { return; }
+  const oaRows = await ccSwitchQuery(
+    "SELECT id, name, settings_config FROM providers WHERE app_type IN ('codex','opencode')"
+  );
+  const hit = oaRows.find((r) => r.id === active.providerId);
+  if (!hit) return;
+  const parsed = parseOpenAIProvider(hit.settings_config);
+  if (!parsed) return;
+  await startOpenAIProxy();
+  setOpenAIUpstream({ baseURL: parsed.baseURL, apiKey: parsed.apiKey });
+}
 
 export default router;

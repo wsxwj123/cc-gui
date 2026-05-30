@@ -8,7 +8,7 @@ import { existsSync, readFileSync } from 'fs';
 import sessionRoutes from './routes/sessions.js';
 import chatRoutes from './routes/chat.js';
 import processRoutes from './routes/processes.js';
-import settingsRoutes from './routes/settings.js';
+import settingsRoutes, { restoreOpenAIProvider } from './routes/settings.js';
 import usageRoutes from './routes/usage.js';
 import mcpRoutes from './routes/mcp.js';
 import forkRoutes from './routes/fork.js';
@@ -484,6 +484,9 @@ server.listen(PORT, HOST, () => {
   console.log(`  Bound to                   ${HOST}${HOST === '127.0.0.1' ? ' (loopback only)' : ' (⚠ network-exposed, no auth!)'}`);
   console.log(`  Started at                 ${new Date().toLocaleString()}`);
   console.log('═'.repeat(60));
+  // Re-arm the OpenAI translation proxy if a codex/opencode provider was active
+  // before this (re)start, so settings.json's proxy URL keeps resolving.
+  restoreOpenAIProvider().catch(() => {});
 }).on('error', (err) => {
   if (err.code === 'EADDRINUSE') {
     console.error(`\n[!] Port ${PORT} already in use. Run: npm run stop (then npm start)\n`);

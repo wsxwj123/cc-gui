@@ -13,6 +13,11 @@
 
 import http from 'node:http';
 
+// Fixed loopback port so the ANTHROPIC_BASE_URL written into settings.json
+// stays valid across server restarts (watchdog). Falls back to an ephemeral
+// port only if this one is already taken.
+export const PROXY_PORT = 8788;
+
 // Mutable upstream — set when the user activates an OpenAI-format provider.
 // { baseURL: 'https://host/v1', apiKey: 'sk-...' }
 let upstream = null;
@@ -347,10 +352,21 @@ function streamFromWeb(webStream) {
   return emitter;
 }
 
-export function startOpenAIProxy(port = 0) {
+export function startOpenAIProxy(port = PROXY_PORT) {
   if (server) return boundPort;
   server = http.createServer((req, res) => { handle(req, res).catch(() => { try { res.end(); } catch {} }); });
   return new Promise((resolve) => {
+    const onErr = (err) => {
+      // Preferred port busy → fall back to ephemeral so the proxy still works
+      // this session (restart-robustness is lost only in this rare case).
+      if (err && err.code === 'EADDRINUSE' && port !== 0) {
+        server.removeListener('error', onErr);
+        server.listen(0, '127.0.0.1', () => { boundPort = server.address().port; resolve(boundPort); });
+      } else {
+        server = null; boundPort = 0; resolve(0);
+      }
+    };
+    server.once('error', onErr);
     server.listen(port, '127.0.0.1', () => {
       boundPort = server.address().port;
       resolve(boundPort);
