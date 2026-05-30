@@ -3044,6 +3044,7 @@ function ProviderSwitcher() {
   // OpenAI-format providers (codex/opencode) — routed through the embedded
   // Anthropic↔OpenAI proxy on switch so the claude CLI can use them.
   const [openaiProviders, setOpenaiProviders] = useState([]);
+  const [customProviders, setCustomProviders] = useState([]);
   const [open, setOpen] = useState(false);
   const [switching, setSwitching] = useState(false);
   // Optimistic current id: the CC Switch db's is_current isn't updated by us
@@ -3056,7 +3057,13 @@ function ProviderSwitcher() {
     fetch('/api/providers').then((r) => r.json()).then((d) => {
       setProviders(Array.isArray(d.providers) ? d.providers : []);
       setOpenaiProviders(Array.isArray(d.openaiProviders) ? d.openaiProviders : []);
+      setCustomProviders(Array.isArray(d.customProviders) ? d.customProviders : []);
     }).catch(() => {});
+  };
+  const removeCustom = async (id, name) => {
+    if (!window.confirm(`删除自定义 Provider「${name}」?`)) return;
+    await fetch(`/api/custom-providers/${id}`, { method: 'DELETE' }).catch(() => {});
+    load();
   };
   useEffect(() => {
     load();
@@ -3077,10 +3084,10 @@ function ProviderSwitcher() {
     };
   }, [open]);
 
-  if (providers.length === 0 && openaiProviders.length === 0) return null;
+  if (providers.length === 0 && openaiProviders.length === 0 && customProviders.length === 0) return null;
 
   const isCur = (p) => (activeId != null ? p.id === activeId : p.isCurrent);
-  const cur = providers.find(isCur) || openaiProviders.find(isCur);
+  const cur = providers.find(isCur) || openaiProviders.find(isCur) || customProviders.find(isCur);
   const label = cur?.name || currentProvider?.providerHint || 'Provider';
 
   const switchTo = async (id, model) => {
@@ -3151,6 +3158,31 @@ function ProviderSwitcher() {
               </div>
             </div>
           ))}
+          {customProviders.length > 0 && (
+            <div className="px-3 pt-2 pb-1 mt-1 border-t border-canvas-deep">
+              <div className="text-[10px] text-ink-faint uppercase tracking-wider font-body">自定义</div>
+            </div>
+          )}
+          {customProviders.map((p) => (
+            <div key={p.id} className={`px-3 py-2 ${isCur(p) ? 'bg-accent-subtle' : ''}`}>
+              <div className="flex items-center gap-2">
+                <span className={`flex-1 text-xs font-body truncate ${isCur(p) ? 'text-accent font-medium' : 'text-ink'}`}>{p.name}</span>
+                <span className="text-[9px] px-1 py-px bg-canvas-deep text-ink-faint rounded font-mono shrink-0">{p.type}</span>
+                {isCur(p) && <Check size={12} className="text-accent shrink-0" />}
+                <button onClick={() => removeCustom(p.id, p.name)} title="删除" className="p-0.5 text-ink-faint hover:text-error shrink-0"><Trash2 size={12} /></button>
+              </div>
+              <div className="flex flex-wrap gap-1 mt-1.5">
+                {(p.models.length ? p.models : ['(默认)']).map((m) => (
+                  <button key={m} disabled={switching}
+                    onClick={() => switchTo(p.id, p.models.length ? m : undefined)}
+                    className={`text-[10px] font-mono px-1.5 py-0.5 rounded border transition-colors ${switching ? 'opacity-50' : ''} border-canvas-deep text-ink-soft hover:border-accent hover:text-accent`}>
+                    {m}
+                  </button>
+                ))}
+              </div>
+            </div>
+          ))}
+          <CustomProviderForm onSaved={load} />
         </div>
       )}
     </div>
@@ -3550,17 +3582,100 @@ function MobilePermissionPage({ permKey }) {
   );
 }
 
+// Shared add-custom-provider form. Both protocols; can live-fetch the upstream's
+// model catalogue via /v1/models. onSaved() refreshes the parent's list.
+function CustomProviderForm({ onSaved }) {
+  const [open, setOpen] = useState(false);
+  const [name, setName] = useState('');
+  const [type, setType] = useState('openai');
+  const [baseURL, setBaseURL] = useState('');
+  const [apiKey, setApiKey] = useState('');
+  const [modelsText, setModelsText] = useState('');
+  const [busy, setBusy] = useState('');
+  const parseModels = () => modelsText.split(/[\n,]+/).map((s) => s.trim()).filter(Boolean);
+  const fetchModels = async () => {
+    if (!baseURL.trim()) return window.alert('先填 Base URL');
+    setBusy('fetch');
+    try {
+      const r = await fetch('/api/custom-providers/fetch-models', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ type, baseURL, apiKey }),
+      });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || '拉取失败');
+      if (!d.models?.length) window.alert('该端点未返回模型,请手动填写');
+      else setModelsText(d.models.join('\n'));
+    } catch (e) { window.alert('拉取模型失败：' + e.message); }
+    setBusy('');
+  };
+  const save = async () => {
+    if (!name.trim() || !baseURL.trim()) return window.alert('名称和 Base URL 必填');
+    setBusy('save');
+    try {
+      const r = await fetch('/api/custom-providers', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, type, baseURL, apiKey, models: parseModels() }),
+      });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || '保存失败');
+      setName(''); setBaseURL(''); setApiKey(''); setModelsText(''); setOpen(false);
+      onSaved?.();
+    } catch (e) { window.alert('保存失败：' + e.message); }
+    setBusy('');
+  };
+  const inputCls = 'w-full bg-canvas-warm border border-canvas-deep rounded-lg px-3 py-2 text-[13px] text-ink focus:outline-none focus:border-accent';
+  if (!open) {
+    return (
+      <button onClick={() => setOpen(true)}
+        className="w-full flex items-center gap-2 px-4 py-3 text-left text-accent hover:bg-canvas-warm transition-colors border-t border-canvas-deep/40 mt-1">
+        <Plus size={16} /><span className="text-[14px] font-body">添加自定义 Provider</span>
+      </button>
+    );
+  }
+  return (
+    <div className="px-4 py-3 border-t border-canvas-deep/40 mt-1 space-y-2.5">
+      <div className="flex items-center justify-between">
+        <span className="text-[13px] font-display font-semibold text-ink">新增自定义 Provider</span>
+        <button onClick={() => setOpen(false)} className="p-1 text-ink-faint hover:text-ink"><X size={16} /></button>
+      </div>
+      <MobileSegmented onChange={setType} options={[
+        { value: 'openai', label: 'OpenAI 兼容', active: type === 'openai' },
+        { value: 'anthropic', label: 'Anthropic 兼容', active: type === 'anthropic' },
+      ]} />
+      <input className={inputCls} placeholder="名称(如 我的中转)" value={name} onChange={(e) => setName(e.target.value)} />
+      <input className={`${inputCls} font-mono`} placeholder="Base URL (https://...)" value={baseURL} onChange={(e) => setBaseURL(e.target.value)} />
+      <input className={`${inputCls} font-mono`} type="password" placeholder="API Key" value={apiKey} onChange={(e) => setApiKey(e.target.value)} />
+      <div className="flex items-center gap-2">
+        <textarea className={`${inputCls} font-mono min-h-[60px]`} placeholder="模型(每行一个,或逗号分隔)" value={modelsText} onChange={(e) => setModelsText(e.target.value)} />
+      </div>
+      <div className="flex gap-2">
+        <button onClick={fetchModels} disabled={!!busy}
+          className="flex-1 px-3 py-2 text-[12px] border border-accent text-accent rounded-lg disabled:opacity-50">
+          {busy === 'fetch' ? '拉取中…' : '从 /v1/models 拉取'}
+        </button>
+        <button onClick={save} disabled={!!busy}
+          className="flex-1 px-3 py-2 text-[12px] bg-accent text-white rounded-lg disabled:opacity-50">
+          {busy === 'save' ? '保存中…' : '保存'}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function MobileProviderPage() {
   const [providers, setProviders] = useState([]);
   const [openaiProviders, setOpenaiProviders] = useState([]);
+  const [customProviders, setCustomProviders] = useState([]);
   const [switching, setSwitching] = useState(false);
   const [activeId, setActiveId] = useState(null);
-  useEffect(() => {
+  const load = () => {
     fetch('/api/providers').then((r) => r.json()).then((d) => {
       setProviders(Array.isArray(d.providers) ? d.providers : []);
       setOpenaiProviders(Array.isArray(d.openaiProviders) ? d.openaiProviders : []);
+      setCustomProviders(Array.isArray(d.customProviders) ? d.customProviders : []);
     }).catch(() => {});
-  }, []);
+  };
+  useEffect(load, []);
   const isCur = (p) => (activeId != null ? p.id === activeId : p.isCurrent);
   const switchTo = async (id, model) => {
     setSwitching(true);
@@ -3578,9 +3693,11 @@ function MobileProviderPage() {
     } catch (e) { window.alert('切换 provider 失败：' + e.message); }
     setSwitching(false);
   };
-  if (providers.length === 0 && openaiProviders.length === 0) {
-    return <div className="px-4 py-8 text-center text-[13px] text-ink-faint font-body">未检测到 CC Switch 配置</div>;
-  }
+  const removeCustom = async (id, name) => {
+    if (!window.confirm(`删除自定义 Provider「${name}」?`)) return;
+    await fetch(`/api/custom-providers/${id}`, { method: 'DELETE' }).catch(() => {});
+    load();
+  };
   return (
     <div className="py-1">
       {providers.map((p) => (
@@ -3604,6 +3721,28 @@ function MobileProviderPage() {
           </div>
         </div>
       ))}
+      {customProviders.length > 0 && (
+        <div className="px-4 pt-3 pb-1 text-[11px] text-ink-faint uppercase tracking-wider font-body border-t border-canvas-deep/40 mt-1">自定义</div>
+      )}
+      {customProviders.map((p) => (
+        <div key={p.id} className="px-4 py-2.5 flex items-start gap-2">
+          <div className="flex-1 min-w-0">
+            <div className={`text-[14px] font-body mb-1 flex items-center gap-1.5 ${isCur(p) ? 'text-accent font-medium' : 'text-ink'}`}>
+              <span className="truncate">{p.name}</span>
+              <span className="text-[9px] px-1 py-px bg-canvas-deep text-ink-faint rounded font-mono shrink-0">{p.type}</span>
+              {isCur(p) && <Check size={14} className="text-accent shrink-0" />}
+            </div>
+            <div className="flex flex-wrap gap-1.5">
+              {(p.models.length ? p.models : ['(默认)']).map((m) => (
+                <button key={m} disabled={switching} onClick={() => switchTo(p.id, p.models.length ? m : undefined)}
+                  className="text-[11px] font-mono px-2 py-1 rounded-lg border border-canvas-deep text-ink-soft hover:border-accent hover:text-accent">{m}</button>
+              ))}
+            </div>
+          </div>
+          <button onClick={() => removeCustom(p.id, p.name)} title="删除" className="p-1.5 text-ink-faint hover:text-error shrink-0"><Trash2 size={15} /></button>
+        </div>
+      ))}
+      <CustomProviderForm onSaved={load} />
     </div>
   );
 }

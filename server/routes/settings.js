@@ -4,6 +4,7 @@ import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { join } from 'path';
 import { homedir } from 'os';
+import { randomUUID } from 'crypto';
 import { startOpenAIProxy, setOpenAIUpstream, getProxyPort } from '../services/openai-proxy.js';
 
 const execFileP = promisify(execFile);
@@ -33,6 +34,24 @@ async function writeActiveProviderId(id) {
     await mkdir(join(homedir(), '.claude-gui'), { recursive: true });
     await writeFile(ACTIVE_PROVIDER_PATH, JSON.stringify({ id }));
   } catch {}
+}
+
+// GUI-managed custom providers (Option A: isolated from cc-switch.db). Each:
+// { id, name, type:'openai'|'anthropic', baseURL, apiKey, models[] }. apiKey is
+// stored plaintext here (same trust level as cc-switch's own db) and NEVER
+// returned by any GET — only used server-side at switch time.
+const CUSTOM_PROVIDERS_PATH = join(homedir(), '.claude-gui', 'custom-providers.json');
+
+async function readCustomProviders() {
+  try {
+    const d = JSON.parse(await readFile(CUSTOM_PROVIDERS_PATH, 'utf-8'));
+    return Array.isArray(d) ? d : [];
+  } catch { return []; }
+}
+
+async function writeCustomProviders(list) {
+  await mkdir(join(homedir(), '.claude-gui'), { recursive: true });
+  await writeFile(CUSTOM_PROVIDERS_PATH, JSON.stringify(list, null, 2));
 }
 
 // CLI hash convention: the Claude CLI replaces EVERY character that is not
@@ -224,10 +243,16 @@ router.get('/providers', async (_req, res) => {
     const p = parseOpenAIProvider(r.settings_config);
     if (p) openai.push({ id: r.id, name: r.name, format: 'openai', models: p.models, isCurrent: isCur(r.id, false) });
   }
+  // GUI custom providers (never expose apiKey — only whether one is stored).
+  const customProviders = (await readCustomProviders()).map((p) => ({
+    id: p.id, name: p.name, type: p.type, baseURL: p.baseURL,
+    models: p.models || [], hasKey: !!p.apiKey, isCustom: true, isCurrent: isCur(p.id, false),
+  }));
   res.json({
-    available: rows.length > 0 || openai.length > 0,
+    available: rows.length > 0 || openai.length > 0 || customProviders.length > 0,
     providers: rows.map((r) => ({ id: r.id, name: r.name, format: 'claude', isCurrent: isCur(r.id, r.is_current === 1) })),
     openaiProviders: openai,
+    customProviders,
   });
 });
 
@@ -252,7 +277,14 @@ router.post('/provider/switch', async (req, res) => {
         "SELECT id, name, settings_config FROM providers WHERE app_type IN ('codex','opencode')"
       );
       const oaHit = oaRows.find((r) => r.id === id);
-      if (oaHit) return switchToOpenAIProvider(oaHit, model, res);
+      if (oaHit) {
+        const parsed = parseOpenAIProvider(oaHit.settings_config);
+        if (!parsed) return res.status(500).json({ error: 'provider 配置缺少 baseURL/apiKey' });
+        return switchToOpenAIUpstream({ id: oaHit.id, name: oaHit.name, ...parsed }, model, res);
+      }
+      // GUI custom providers (stored outside cc-switch).
+      const custom = (await readCustomProviders()).find((p) => p.id === id);
+      if (custom) return switchToCustomProvider(custom, model, res);
       if (rows.length === 0) return res.status(503).json({ error: 'CC Switch 数据库不可用' });
       return res.status(404).json({ error: 'provider 不存在' });
     }
@@ -286,19 +318,19 @@ router.post('/provider/switch', async (req, res) => {
 // the CLI's ANTHROPIC_BASE_URL at the loopback proxy and feed it the real
 // upstream. We PRESERVE the current settings.json (hooks/plugins/permissions —
 // notably the PreToolUse permission bridge) and only override the env keys.
-async function switchToOpenAIProvider(oaHit, requestedModel, res) {
-  const parsed = parseOpenAIProvider(oaHit.settings_config);
-  if (!parsed) return res.status(500).json({ error: 'provider 配置缺少 baseURL/apiKey' });
-
-  const model = (requestedModel && parsed.models.includes(requestedModel))
+// Normalized OpenAI-upstream switch — used by both cc-switch openai providers
+// and GUI custom providers (type=openai). `up` = { id, name, baseURL, apiKey, models }.
+async function switchToOpenAIUpstream(up, requestedModel, res) {
+  const models = up.models || [];
+  const model = (requestedModel && models.includes(requestedModel))
     ? requestedModel
-    : (parsed.models[0] || requestedModel);
+    : (models[0] || requestedModel);
   if (!model) return res.status(400).json({ error: 'provider 未配置任何模型,需手动指定 model' });
 
   // Start the proxy (idempotent, fixed port) and point it at this upstream.
   let port = getProxyPort();
   if (!port) port = await startOpenAIProxy();
-  setOpenAIUpstream({ baseURL: parsed.baseURL, apiKey: parsed.apiKey });
+  setOpenAIUpstream({ baseURL: up.baseURL, apiKey: up.apiKey });
 
   // Start from the live settings.json so hooks/permissions survive the switch.
   let current = {};
@@ -325,11 +357,116 @@ async function switchToOpenAIProvider(oaHit, requestedModel, res) {
   // Remember the active provider id (not the key) for restart recovery.
   try {
     await mkdir(join(homedir(), '.claude-gui'), { recursive: true });
-    await writeFile(OPENAI_ACTIVE_PATH, JSON.stringify({ providerId: oaHit.id, model }));
+    await writeFile(OPENAI_ACTIVE_PATH, JSON.stringify({ providerId: up.id, model }));
   } catch {}
-  await writeActiveProviderId(oaHit.id);
-  res.json({ ok: true, name: oaHit.name, model, via: 'openai-proxy' });
+  await writeActiveProviderId(up.id);
+  res.json({ ok: true, name: up.name, model, via: 'openai-proxy' });
 }
+
+// Switch to a GUI custom provider. openai → proxy (reuse upstream switch);
+// anthropic → point the CLI straight at the upstream, no proxy.
+async function switchToCustomProvider(p, requestedModel, res) {
+  if (p.type === 'openai') {
+    return switchToOpenAIUpstream(
+      { id: p.id, name: p.name, baseURL: p.baseURL, apiKey: p.apiKey, models: p.models || [] },
+      requestedModel, res,
+    );
+  }
+  // anthropic-compatible upstream (third-party Claude relay).
+  const models = p.models || [];
+  const model = (requestedModel && models.includes(requestedModel))
+    ? requestedModel : (models[0] || requestedModel || '');
+  let current = {};
+  try { current = JSON.parse(await readFile(SETTINGS_PATH, 'utf-8')); } catch {}
+  const env = { ...(current.env || {}) };
+  env.ANTHROPIC_BASE_URL = p.baseURL;
+  env.ANTHROPIC_AUTH_TOKEN = p.apiKey;
+  if (model) env.ANTHROPIC_MODEL = model; else delete env.ANTHROPIC_MODEL;
+  // Drop proxy-era subagent overrides so aliases resolve against THIS upstream.
+  delete env.ANTHROPIC_DEFAULT_HAIKU_MODEL;
+  delete env.ANTHROPIC_DEFAULT_SONNET_MODEL;
+  delete env.ANTHROPIC_DEFAULT_OPUS_MODEL;
+  const next = { ...current, env };
+  const ts = new Date().toISOString().replace(/[:.]/g, '-');
+  await copyFile(SETTINGS_PATH, `${SETTINGS_PATH}.${ts}.bak`).catch(() => {});
+  await writeFile(SETTINGS_PATH, JSON.stringify(next, null, 2));
+  await unlink(OPENAI_ACTIVE_PATH).catch(() => {}); // off the proxy
+  await writeActiveProviderId(p.id);
+  res.json({ ok: true, name: p.name, model: model || null });
+}
+
+// GET /api/custom-providers — list custom providers (never returns apiKey).
+router.get('/custom-providers', async (_req, res) => {
+  const list = await readCustomProviders();
+  res.json({
+    providers: list.map((p) => ({
+      id: p.id, name: p.name, type: p.type, baseURL: p.baseURL,
+      models: p.models || [], hasKey: !!p.apiKey,
+    })),
+  });
+});
+
+// POST /api/custom-providers { name, type, baseURL, apiKey, models } — add one.
+router.post('/custom-providers', async (req, res) => {
+  try {
+    const { name, type, baseURL, apiKey, models } = req.body || {};
+    if (!name || typeof name !== 'string') return res.status(400).json({ error: 'name 必填' });
+    if (type !== 'openai' && type !== 'anthropic') return res.status(400).json({ error: 'type 必须是 openai 或 anthropic' });
+    let url; try { url = new URL(baseURL); } catch { return res.status(400).json({ error: 'baseURL 非法' }); }
+    if (!/^https?:$/.test(url.protocol)) return res.status(400).json({ error: 'baseURL 必须是 http(s)' });
+    const entry = {
+      id: randomUUID(),
+      name: name.trim(),
+      type,
+      baseURL: baseURL.trim().replace(/\/+$/, ''),
+      apiKey: typeof apiKey === 'string' ? apiKey.trim() : '',
+      models: Array.isArray(models) ? models.filter((m) => typeof m === 'string' && m.trim()).map((m) => m.trim()) : [],
+    };
+    const list = await readCustomProviders();
+    list.push(entry);
+    await writeCustomProviders(list);
+    res.json({ ok: true, id: entry.id });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// DELETE /api/custom-providers/:id — remove one.
+router.delete('/custom-providers/:id', async (req, res) => {
+  try {
+    const list = await readCustomProviders();
+    const next = list.filter((p) => p.id !== req.params.id);
+    if (next.length === list.length) return res.status(404).json({ error: 'not found' });
+    await writeCustomProviders(next);
+    if ((await readActiveProviderId()) === req.params.id) await unlink(ACTIVE_PROVIDER_PATH).catch(() => {});
+    res.json({ ok: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// POST /api/custom-providers/fetch-models { type, baseURL, apiKey } — live-fetch
+// the upstream's model catalogue via GET {baseURL}/v1/models. Single-user local
+// tool, so an arbitrary baseURL here is the user's own choice (no SSRF guard).
+router.post('/custom-providers/fetch-models', async (req, res) => {
+  try {
+    const { type, baseURL, apiKey } = req.body || {};
+    let base; try { base = new URL(baseURL); } catch { return res.status(400).json({ error: 'baseURL 非法' }); }
+    if (!/^https?:$/.test(base.protocol)) return res.status(400).json({ error: 'baseURL 必须是 http(s)' });
+    const url = baseURL.trim().replace(/\/+$/, '') + '/v1/models';
+    const headers = type === 'anthropic'
+      ? { 'x-api-key': apiKey || '', 'anthropic-version': '2023-06-01' }
+      : { Authorization: `Bearer ${apiKey || ''}` };
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 10000);
+    let r;
+    try { r = await fetch(url, { headers, signal: ctrl.signal }); }
+    finally { clearTimeout(timer); }
+    if (!r.ok) return res.status(502).json({ error: `上游返回 ${r.status}` });
+    const data = await r.json().catch(() => null);
+    const arr = Array.isArray(data?.data) ? data.data : (Array.isArray(data?.models) ? data.models : []);
+    const ids = [...new Set(arr.map((m) => (typeof m === 'string' ? m : m?.id)).filter(Boolean))];
+    res.json({ models: ids });
+  } catch (err) {
+    res.status(500).json({ error: err.name === 'AbortError' ? '拉取超时(10s)' : err.message });
+  }
+});
 
 // Called once on server boot: if an OpenAI-format provider was active before a
 // restart, re-establish the proxy upstream so the CLI's ANTHROPIC_BASE_URL
@@ -348,11 +485,15 @@ export async function restoreOpenAIProvider() {
     "SELECT id, name, settings_config FROM providers WHERE app_type IN ('codex','opencode')"
   );
   const hit = oaRows.find((r) => r.id === active.providerId);
-  if (!hit) return;
-  const parsed = parseOpenAIProvider(hit.settings_config);
-  if (!parsed) return;
+  let upstream = hit ? parseOpenAIProvider(hit.settings_config) : null;
+  // Custom openai providers live outside cc-switch — check the GUI store too.
+  if (!upstream) {
+    const custom = (await readCustomProviders()).find((p) => p.id === active.providerId && p.type === 'openai');
+    if (custom) upstream = { baseURL: custom.baseURL, apiKey: custom.apiKey };
+  }
+  if (!upstream) return;
   await startOpenAIProxy();
-  setOpenAIUpstream({ baseURL: parsed.baseURL, apiKey: parsed.apiKey });
+  setOpenAIUpstream({ baseURL: upstream.baseURL, apiKey: upstream.apiKey });
 }
 
 export default router;
