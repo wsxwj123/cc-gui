@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { readFile, writeFile, mkdir, copyFile } from 'fs/promises';
+import { readFile, writeFile, mkdir, copyFile, unlink } from 'fs/promises';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { join } from 'path';
@@ -270,6 +270,11 @@ router.post('/provider/switch', async (req, res) => {
 
     await writeFile(SETTINGS_PATH, JSON.stringify(snapshot, null, 2));
     await writeActiveProviderId(hit.id);
+    // Switching to a NATIVE claude provider means we're off the OpenAI proxy.
+    // Drop the openai-active marker, else restoreOpenAIProvider() on the next
+    // server boot would clobber this settings.json back to the proxy — the model
+    // would silently revert to the old gpt-* after any restart.
+    await unlink(OPENAI_ACTIVE_PATH).catch(() => {});
     res.json({ ok: true, name: hit.name });
   } catch (err) {
     res.status(500).json({ error: err.message });

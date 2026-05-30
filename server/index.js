@@ -96,6 +96,17 @@ app.use(express.json({ limit: '25mb' }));
 // except /login + /auth-status. The Mac (loopback) is never challenged.
 app.use('/api', authMiddleware);
 
+// API responses are dynamic — never cache them. Without this, iOS Safari applies
+// HEURISTIC caching to GET /api/* (no Cache-Control + an ETag is enough): after a
+// `cc switch`, the phone's `fetch('/api/model')` served a STALE cached body so the
+// model list "didn't change, even on refresh". Desktop Chromium revalidated the
+// ETag and dodged it, which is why it only reproduced on the phone.
+app.use('/api', (req, res, next) => {
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+  res.setHeader('Pragma', 'no-cache');
+  next();
+});
+
 // POST /api/login { password } — verify and hand back an HMAC cookie token.
 app.post('/api/login', (req, res) => {
   if (!hasPassword()) return res.json({ ok: true, required: false });
