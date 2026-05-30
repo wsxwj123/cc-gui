@@ -54,6 +54,39 @@ async function writeCustomProviders(list) {
   await writeFile(CUSTOM_PROVIDERS_PATH, JSON.stringify(list, null, 2));
 }
 
+// Per-provider chosen model lists (the user's multi-select out of an OpenAI
+// provider's auto-fetched catalogue). Shape: { [providerId]: [modelId, ...] }.
+const PROVIDER_MODELS_PATH = join(homedir(), '.claude-gui', 'provider-models.json');
+
+async function readProviderModels() {
+  try {
+    const d = JSON.parse(await readFile(PROVIDER_MODELS_PATH, 'utf-8'));
+    return d && typeof d === 'object' && !Array.isArray(d) ? d : {};
+  } catch { return {}; }
+}
+
+async function writeProviderModels(map) {
+  await mkdir(join(homedir(), '.claude-gui'), { recursive: true });
+  await writeFile(PROVIDER_MODELS_PATH, JSON.stringify(map, null, 2));
+}
+
+// Resolve an OpenAI-format provider's REAL upstream {baseURL, apiKey} by id —
+// from cc-switch (codex/opencode) or the GUI custom store. Used to fetch its
+// /v1/models directly (NOT through the loopback proxy).
+async function resolveOpenAIUpstreamById(id) {
+  const oaRows = await ccSwitchQuery(
+    "SELECT id, settings_config FROM providers WHERE app_type IN ('codex','opencode')"
+  );
+  const hit = oaRows.find((r) => r.id === id);
+  if (hit) {
+    const p = parseOpenAIProvider(hit.settings_config);
+    if (p) return { baseURL: p.baseURL, apiKey: p.apiKey };
+  }
+  const custom = (await readCustomProviders()).find((p) => p.id === id && p.type === 'openai');
+  if (custom) return { baseURL: custom.baseURL, apiKey: custom.apiKey };
+  return null;
+}
+
 // CLI hash convention: the Claude CLI replaces EVERY character that is not
 // [A-Za-z0-9] with a single `-` (one-to-one, not collapsed). So `/`, space,
 // `.`, and any Unicode char (中文 etc.) each become one dash. Verified against
@@ -238,10 +271,12 @@ router.get('/providers', async (_req, res) => {
   // the db flag only when the GUI hasn't switched anything yet.
   const activeId = await readActiveProviderId();
   const isCur = (id, dbCurrent) => (activeId != null ? id === activeId : dbCurrent);
+  // User's multi-select overrides the cc-switch static models list (when set).
+  const sel = await readProviderModels();
   const openai = [];
   for (const r of oaRows) {
     const p = parseOpenAIProvider(r.settings_config);
-    if (p) openai.push({ id: r.id, name: r.name, format: 'openai', models: p.models, isCurrent: isCur(r.id, false) });
+    if (p) openai.push({ id: r.id, name: r.name, format: 'openai', models: sel[r.id]?.length ? sel[r.id] : p.models, isCurrent: isCur(r.id, false) });
   }
   // GUI custom providers (never expose apiKey — only whether one is stored).
   const customProviders = (await readCustomProviders()).map((p) => ({
@@ -485,11 +520,18 @@ router.post('/custom-providers/fetch-models', async (req, res) => {
   }
 });
 
-// POST /api/provider/fetch-models — live-fetch the CURRENTLY active provider's
-// models. Reads base+token from settings.json server-side (the client never holds
-// the key). Official direct (no base) and the OpenAI proxy can't be probed.
-router.post('/provider/fetch-models', async (_req, res) => {
+// POST /api/provider/fetch-models { id? } — live-fetch a provider's /v1/models.
+// With `id`: fetch that OpenAI provider's REAL upstream (key read server-side).
+// Without `id`: fetch the CURRENTLY active provider from settings.json. Official
+// direct (no base) and the loopback proxy can't be probed.
+router.post('/provider/fetch-models', async (req, res) => {
   try {
+    const { id } = req.body || {};
+    if (id) {
+      const up = await resolveOpenAIUpstreamById(id);
+      if (!up) return res.status(404).json({ error: 'provider 不存在或非 OpenAI 格式' });
+      return res.json({ models: await probeUpstreamModels(up.baseURL, up.apiKey) });
+    }
     let env = {};
     try { env = (JSON.parse(await readFile(SETTINGS_PATH, 'utf-8')).env) || {}; } catch {}
     const base = env.ANTHROPIC_BASE_URL || '';
@@ -500,6 +542,25 @@ router.post('/provider/fetch-models', async (_req, res) => {
   } catch (err) {
     res.status(502).json({ error: err.message });
   }
+});
+
+// GET /api/provider-models — the user's per-provider model selections.
+router.get('/provider-models', async (_req, res) => {
+  res.json({ selections: await readProviderModels() });
+});
+
+// PUT /api/provider-models/:id { models } — set the chosen models for a provider.
+router.put('/provider-models/:id', async (req, res) => {
+  try {
+    const models = Array.isArray(req.body?.models)
+      ? req.body.models.filter((m) => typeof m === 'string' && m.trim()).map((m) => m.trim())
+      : [];
+    const map = await readProviderModels();
+    if (models.length) map[req.params.id] = [...new Set(models)];
+    else delete map[req.params.id];
+    await writeProviderModels(map);
+    res.json({ ok: true, models: map[req.params.id] || [] });
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 // Called once on server boot: if an OpenAI-format provider was active before a

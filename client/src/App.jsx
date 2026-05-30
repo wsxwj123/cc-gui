@@ -3156,6 +3156,7 @@ function ProviderSwitcher() {
                   </button>
                 ))}
               </div>
+              <OpenAIModelManager provider={p} onSaved={load} />
             </div>
           ))}
           {customProviders.length > 0 && (
@@ -3668,6 +3669,75 @@ function MobilePermissionPage({ permKey }) {
   );
 }
 
+// Per-OpenAI-provider model manager: live-fetch the upstream's /v1/models and
+// let the user multi-select which to show as switch targets. Selection persists
+// server-side (~/.claude-gui/provider-models.json). `provider.models` is the
+// current selection. onSaved() refreshes the parent list.
+function OpenAIModelManager({ provider, onSaved }) {
+  const [open, setOpen] = useState(false);
+  const [all, setAll] = useState([]);
+  const [checked, setChecked] = useState(() => new Set(provider.models || []));
+  const [busy, setBusy] = useState('');
+  const [note, setNote] = useState('');
+  const load = async () => {
+    setBusy('fetch'); setNote('');
+    try {
+      const r = await fetch('/api/provider/fetch-models', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: provider.id }),
+      });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || '拉取失败');
+      setAll(d.models || []);
+      setNote(d.models?.length ? `上游共 ${d.models.length} 个` : (d.note || '上游未返回模型'));
+    } catch (e) { setNote('拉取失败：' + e.message); }
+    setBusy('');
+  };
+  const toggleOpen = () => { const n = !open; setOpen(n); if (n && all.length === 0) load(); };
+  const flip = (m) => setChecked((s) => { const n = new Set(s); n.has(m) ? n.delete(m) : n.add(m); return n; });
+  const save = async () => {
+    setBusy('save');
+    try {
+      await fetch(`/api/provider-models/${provider.id}`, {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ models: [...checked] }),
+      });
+      setOpen(false); onSaved?.();
+    } catch {}
+    setBusy('');
+  };
+  // Union of fetched models and any already-selected ones not in the fetch.
+  const list = [...new Set([...all, ...(provider.models || [])])];
+  return (
+    <div className="mt-1.5">
+      <button onClick={toggleOpen} className="text-[11px] text-accent font-body flex items-center gap-1">
+        <Cpu size={12} /> 管理模型(自动拉取·多选){open ? ' ▴' : ' ▾'}
+      </button>
+      {open && (
+        <div className="mt-1.5 rounded-lg border border-canvas-deep p-2 space-y-1.5">
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-[10px] text-ink-faint font-body">{busy === 'fetch' ? '拉取中…' : note}</span>
+            <button onClick={load} disabled={!!busy} className="text-[10px] text-accent disabled:opacity-50">重新拉取</button>
+          </div>
+          <div className="max-h-44 overflow-y-auto space-y-0.5">
+            {list.map((m) => (
+              <label key={m} className="flex items-center gap-2 px-1 py-1 rounded hover:bg-canvas-warm cursor-pointer">
+                <input type="checkbox" checked={checked.has(m)} onChange={() => flip(m)} className="accent-[var(--color-accent)]" />
+                <span className="text-[12px] font-mono text-ink truncate">{m}</span>
+              </label>
+            ))}
+            {list.length === 0 && <div className="text-[11px] text-ink-faint px-1 py-2">无模型,点「重新拉取」或检查 provider 配置</div>}
+          </div>
+          <button onClick={save} disabled={busy === 'save'}
+            className="w-full px-3 py-1.5 text-[12px] bg-accent text-white rounded-lg disabled:opacity-50">
+            {busy === 'save' ? '保存中…' : `保存所选(${checked.size})`}
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // Shared add-custom-provider form. Both protocols; can live-fetch the upstream's
 // model catalogue via /v1/models. onSaved() refreshes the parent's list.
 function CustomProviderForm({ onSaved }) {
@@ -3805,6 +3875,7 @@ function MobileProviderPage() {
                 className="text-[11px] font-mono px-2 py-1 rounded-lg border border-canvas-deep text-ink-soft hover:border-accent hover:text-accent">{m}</button>
             ))}
           </div>
+          <OpenAIModelManager provider={p} onSaved={load} />
         </div>
       ))}
       {customProviders.length > 0 && (
