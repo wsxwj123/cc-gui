@@ -1,0 +1,363 @@
+// Embedded Anthropic↔OpenAI translation proxy.
+//
+// Why: the `claude` CLI only speaks the Anthropic Messages API. Some cc-switch
+// providers (app_type=codex/opencode) expose only an OpenAI-compatible
+// /v1/chat/completions endpoint. This loopback proxy lets the CLI target an
+// OpenAI-only model: point ANTHROPIC_BASE_URL at this proxy, and it rewrites
+// each request to OpenAI shape, forwards it upstream, and streams the reply
+// back as Anthropic SSE.
+//
+// Scope (MVP): text + tool calls + (optional) reasoning, streaming and
+// non-streaming. Images and prompt-caching headers are passed through best-
+// effort but not translated. Bound to 127.0.0.1 only — no auth, never exposed.
+
+import http from 'node:http';
+
+// Mutable upstream — set when the user activates an OpenAI-format provider.
+// { baseURL: 'https://host/v1', apiKey: 'sk-...' }
+let upstream = null;
+let server = null;
+let boundPort = 0;
+
+export function setOpenAIUpstream(next) {
+  upstream = next && next.baseURL && next.apiKey
+    ? { baseURL: String(next.baseURL).replace(/\/+$/, ''), apiKey: String(next.apiKey) }
+    : null;
+  return upstream;
+}
+
+export function getOpenAIUpstream() {
+  return upstream;
+}
+
+export function getProxyPort() {
+  return boundPort;
+}
+
+// ── request translation: Anthropic → OpenAI ──────────────────────────────
+function systemToText(system) {
+  if (!system) return '';
+  if (typeof system === 'string') return system;
+  if (Array.isArray(system)) {
+    return system.map((b) => (typeof b === 'string' ? b : b?.text || '')).join('\n');
+  }
+  return '';
+}
+
+function anthropicToOpenAIMessages(messages, system) {
+  const out = [];
+  const sys = systemToText(system);
+  if (sys) out.push({ role: 'system', content: sys });
+
+  for (const msg of messages || []) {
+    const role = msg.role;
+    const content = msg.content;
+
+    if (typeof content === 'string') {
+      out.push({ role, content });
+      continue;
+    }
+    if (!Array.isArray(content)) continue;
+
+    // Split a single Anthropic message into: text/image parts, tool_use
+    // (assistant tool_calls), and tool_result (separate role:'tool' msgs).
+    const textParts = [];
+    const toolCalls = [];
+    const toolResults = [];
+
+    for (const block of content) {
+      if (!block || typeof block !== 'object') continue;
+      if (block.type === 'text') {
+        textParts.push(block.text || '');
+      } else if (block.type === 'tool_use') {
+        toolCalls.push({
+          id: block.id,
+          type: 'function',
+          function: { name: block.name, arguments: JSON.stringify(block.input || {}) },
+        });
+      } else if (block.type === 'tool_result') {
+        const c = block.content;
+        let text;
+        if (typeof c === 'string') text = c;
+        else if (Array.isArray(c)) text = c.map((p) => (typeof p === 'string' ? p : p?.text || '')).join('\n');
+        else text = c == null ? '' : JSON.stringify(c);
+        toolResults.push({ role: 'tool', tool_call_id: block.tool_use_id, content: text });
+      }
+      // image blocks are skipped for now (MVP: text + tool calls only)
+    }
+
+    if (role === 'assistant') {
+      const m = { role: 'assistant' };
+      const txt = textParts.join('');
+      if (txt) m.content = txt;
+      if (toolCalls.length) m.tool_calls = toolCalls;
+      if (m.content != null || m.tool_calls) out.push(m);
+    } else {
+      // user (or tool) — emit text first, then each tool_result as a tool msg
+      const txt = textParts.join('');
+      if (txt) out.push({ role: 'user', content: txt });
+      for (const tr of toolResults) out.push(tr);
+    }
+  }
+  return out;
+}
+
+function anthropicToolsToOpenAI(tools) {
+  if (!Array.isArray(tools)) return undefined;
+  return tools.map((t) => ({
+    type: 'function',
+    function: {
+      name: t.name,
+      description: t.description || '',
+      parameters: t.input_schema || { type: 'object', properties: {} },
+    },
+  }));
+}
+
+function buildOpenAIRequest(body) {
+  const req = {
+    model: body.model,
+    messages: anthropicToOpenAIMessages(body.messages, body.system),
+    stream: body.stream !== false,
+  };
+  if (body.max_tokens) req.max_tokens = body.max_tokens;
+  if (typeof body.temperature === 'number') req.temperature = body.temperature;
+  if (typeof body.top_p === 'number') req.top_p = body.top_p;
+  const tools = anthropicToolsToOpenAI(body.tools);
+  if (tools && tools.length) {
+    req.tools = tools;
+    if (body.tool_choice) {
+      const tc = body.tool_choice;
+      if (tc.type === 'auto') req.tool_choice = 'auto';
+      else if (tc.type === 'any') req.tool_choice = 'required';
+      else if (tc.type === 'tool' && tc.name) req.tool_choice = { type: 'function', function: { name: tc.name } };
+    }
+  }
+  if (req.stream) req.stream_options = { include_usage: true };
+  return req;
+}
+
+// ── response translation: OpenAI stream → Anthropic SSE ───────────────────
+function sse(res, event, data) {
+  res.write(`event: ${event}\n`);
+  res.write(`data: ${JSON.stringify(data)}\n\n`);
+}
+
+const STOP_MAP = { stop: 'end_turn', length: 'max_tokens', tool_calls: 'tool_use', content_filter: 'end_turn' };
+
+function streamOpenAIToAnthropic(upstreamRes, clientRes, model) {
+  const msgId = 'msg_' + Math.random().toString(36).slice(2, 14);
+  clientRes.writeHead(200, {
+    'Content-Type': 'text/event-stream; charset=utf-8',
+    'Cache-Control': 'no-cache',
+    Connection: 'keep-alive',
+  });
+  sse(clientRes, 'message_start', {
+    type: 'message_start',
+    message: { id: msgId, type: 'message', role: 'assistant', model, content: [],
+      stop_reason: null, stop_sequence: null, usage: { input_tokens: 0, output_tokens: 0 } },
+  });
+
+  // Block bookkeeping. Index 0 reserved for text once it starts; tool calls get
+  // subsequent indices keyed by the OpenAI tool_call index.
+  let textOpen = false;
+  let nextIndex = 0;
+  const toolBlocks = new Map(); // openaiToolIndex → { anthropicIndex, started }
+  let finishReason = null;
+  let usage = null;
+  let buf = '';
+
+  const ensureTextBlock = () => {
+    if (textOpen === false) {
+      const idx = nextIndex++;
+      sse(clientRes, 'content_block_start', { type: 'content_block_start', index: idx,
+        content_block: { type: 'text', text: '' } });
+      textOpen = idx;
+    }
+    return textOpen;
+  };
+  const closeTextBlock = () => {
+    if (textOpen !== false) {
+      sse(clientRes, 'content_block_stop', { type: 'content_block_stop', index: textOpen });
+      textOpen = false;
+    }
+  };
+
+  const handleChunk = (json) => {
+    if (json.usage) {
+      usage = { input_tokens: json.usage.prompt_tokens || 0, output_tokens: json.usage.completion_tokens || 0 };
+    }
+    const choice = (json.choices || [])[0];
+    if (!choice) return;
+    const delta = choice.delta || {};
+
+    if (typeof delta.content === 'string' && delta.content.length) {
+      const idx = ensureTextBlock();
+      sse(clientRes, 'content_block_delta', { type: 'content_block_delta', index: idx,
+        delta: { type: 'text_delta', text: delta.content } });
+    }
+
+    if (Array.isArray(delta.tool_calls)) {
+      // text must close before tool blocks open (Anthropic orders blocks)
+      for (const tc of delta.tool_calls) {
+        const oaIdx = tc.index ?? 0;
+        let entry = toolBlocks.get(oaIdx);
+        if (!entry) {
+          closeTextBlock();
+          const aIdx = nextIndex++;
+          entry = { anthropicIndex: aIdx };
+          toolBlocks.set(oaIdx, entry);
+          sse(clientRes, 'content_block_start', { type: 'content_block_start', index: aIdx,
+            content_block: { type: 'tool_use', id: tc.id || ('toolu_' + oaIdx + '_' + msgId), name: tc.function?.name || '', input: {} } });
+        }
+        const argFrag = tc.function?.arguments;
+        if (argFrag) {
+          sse(clientRes, 'content_block_delta', { type: 'content_block_delta', index: entry.anthropicIndex,
+            delta: { type: 'input_json_delta', partial_json: argFrag } });
+        }
+      }
+    }
+
+    if (choice.finish_reason) finishReason = choice.finish_reason;
+  };
+
+  upstreamRes.on('data', (chunk) => {
+    buf += chunk.toString('utf-8');
+    let nl;
+    while ((nl = buf.indexOf('\n')) !== -1) {
+      const line = buf.slice(0, nl).trim();
+      buf = buf.slice(nl + 1);
+      if (!line || !line.startsWith('data:')) continue;
+      const payload = line.slice(5).trim();
+      if (payload === '[DONE]') continue;
+      try { handleChunk(JSON.parse(payload)); } catch {}
+    }
+  });
+
+  upstreamRes.on('end', () => {
+    closeTextBlock();
+    for (const entry of toolBlocks.values()) {
+      sse(clientRes, 'content_block_stop', { type: 'content_block_stop', index: entry.anthropicIndex });
+    }
+    sse(clientRes, 'message_delta', { type: 'message_delta',
+      delta: { stop_reason: STOP_MAP[finishReason] || 'end_turn', stop_sequence: null },
+      usage: usage || { output_tokens: 0 } });
+    sse(clientRes, 'message_stop', { type: 'message_stop' });
+    clientRes.end();
+  });
+
+  upstreamRes.on('error', () => { try { clientRes.end(); } catch {} });
+}
+
+// non-streaming fallback
+function openAIToAnthropicMessage(json, model) {
+  const choice = (json.choices || [])[0] || {};
+  const m = choice.message || {};
+  const content = [];
+  if (m.content) content.push({ type: 'text', text: m.content });
+  for (const tc of m.tool_calls || []) {
+    let input = {};
+    try { input = JSON.parse(tc.function?.arguments || '{}'); } catch {}
+    content.push({ type: 'tool_use', id: tc.id, name: tc.function?.name, input });
+  }
+  return {
+    id: json.id || ('msg_' + Math.random().toString(36).slice(2)),
+    type: 'message', role: 'assistant', model, content,
+    stop_reason: STOP_MAP[choice.finish_reason] || 'end_turn', stop_sequence: null,
+    usage: { input_tokens: json.usage?.prompt_tokens || 0, output_tokens: json.usage?.completion_tokens || 0 },
+  };
+}
+
+// ── proxy server ──────────────────────────────────────────────────────────
+function readBody(req) {
+  return new Promise((resolve, reject) => {
+    let data = '';
+    req.on('data', (c) => { data += c; });
+    req.on('end', () => resolve(data));
+    req.on('error', reject);
+  });
+}
+
+async function handle(req, clientRes) {
+  if (req.method !== 'POST' || !req.url.includes('/v1/messages')) {
+    clientRes.writeHead(404); clientRes.end('not found'); return;
+  }
+  if (!upstream) {
+    clientRes.writeHead(503, { 'Content-Type': 'application/json' });
+    clientRes.end(JSON.stringify({ type: 'error', error: { type: 'api_error', message: 'OpenAI upstream not configured' } }));
+    return;
+  }
+  let body;
+  try { body = JSON.parse(await readBody(req)); }
+  catch { clientRes.writeHead(400); clientRes.end('bad json'); return; }
+
+  const oaReq = buildOpenAIRequest(body);
+  const wantStream = oaReq.stream;
+  const url = upstream.baseURL + '/chat/completions';
+
+  let upstreamResp;
+  try {
+    upstreamResp = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${upstream.apiKey}` },
+      body: JSON.stringify(oaReq),
+    });
+  } catch (err) {
+    clientRes.writeHead(502, { 'Content-Type': 'application/json' });
+    clientRes.end(JSON.stringify({ type: 'error', error: { type: 'api_error', message: 'upstream fetch failed: ' + err.message } }));
+    return;
+  }
+
+  if (!upstreamResp.ok) {
+    const txt = await upstreamResp.text().catch(() => '');
+    clientRes.writeHead(upstreamResp.status, { 'Content-Type': 'application/json' });
+    clientRes.end(JSON.stringify({ type: 'error', error: { type: 'api_error', message: `upstream ${upstreamResp.status}: ${txt.slice(0, 500)}` } }));
+    return;
+  }
+
+  if (wantStream) {
+    // adapt web ReadableStream → node stream-ish via async iterator
+    const nodeStream = streamFromWeb(upstreamResp.body);
+    streamOpenAIToAnthropic(nodeStream, clientRes, body.model);
+  } else {
+    const json = await upstreamResp.json().catch(() => ({}));
+    clientRes.writeHead(200, { 'Content-Type': 'application/json' });
+    clientRes.end(JSON.stringify(openAIToAnthropicMessage(json, body.model)));
+  }
+}
+
+// Wrap a WHATWG ReadableStream in a minimal EventEmitter-like object exposing
+// .on('data'|'end'|'error') so streamOpenAIToAnthropic stays transport-agnostic.
+function streamFromWeb(webStream) {
+  const listeners = { data: [], end: [], error: [] };
+  const emitter = { on: (ev, cb) => { (listeners[ev] || []).push(cb); return emitter; } };
+  (async () => {
+    try {
+      const reader = webStream.getReader();
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        listeners.data.forEach((cb) => cb(Buffer.from(value)));
+      }
+      listeners.end.forEach((cb) => cb());
+    } catch (err) {
+      listeners.error.forEach((cb) => cb(err));
+    }
+  })();
+  return emitter;
+}
+
+export function startOpenAIProxy(port = 0) {
+  if (server) return boundPort;
+  server = http.createServer((req, res) => { handle(req, res).catch(() => { try { res.end(); } catch {} }); });
+  return new Promise((resolve) => {
+    server.listen(port, '127.0.0.1', () => {
+      boundPort = server.address().port;
+      resolve(boundPort);
+    });
+  });
+}
+
+export function stopOpenAIProxy() {
+  if (server) { try { server.close(); } catch {} server = null; boundPort = 0; }
+}
