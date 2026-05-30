@@ -5,11 +5,11 @@ import { createPortal } from 'react-dom';
 // #185 (Maximum update depth exceeded) caused by returning fresh `[]` on
 // every selector call. Any selector with `|| []` fallback must point here.
 const EMPTY_ARRAY = Object.freeze([]);
-import { useStore, THEME_FAMILIES, FONT_OPTIONS, systemPrefersDark } from './stores/sessionStore.js';
+import { useStore, THEME_FAMILIES, FONT_OPTIONS, systemPrefersDark, PERMISSION_MODES } from './stores/sessionStore.js';
 import { useWebSocket } from './hooks/useWebSocket.js';
 import { MessageBubble } from './components/MessageBubble.jsx';
 import { TurnBubble } from './components/TurnBubble.jsx';
-import { ChatInput, EffortSelector, PermissionModeSelector } from './components/ChatInput.jsx';
+import { ChatInput, EffortSelector, PermissionModeSelector, EFFORT_LEVELS, MODE_META } from './components/ChatInput.jsx';
 import { ModelBadge, ProviderAvatar } from './components/ModelBadge.jsx';
 import { UsagePanel } from './components/UsagePanel.jsx';
 import { ProcessPanel } from './components/ProcessPanel.jsx';
@@ -27,7 +27,7 @@ import {
   RefreshCw, Activity, Settings, Server, GitBranch, FileDiff, Check, Wrench, X,
   Sun, Moon, Monitor, Bot, Camera, History, Loader2, Shield, FolderTree,
   Archive, ArchiveRestore, Trash2, EyeOff, Columns2, Smartphone, Pencil, Type, Palette,
-  Menu, SquarePen,
+  Menu, SquarePen, Gauge, Cpu,
 } from 'lucide-react';
 
 // ── Per-session shadow-git checkpoints ──────────────────────────
@@ -498,29 +498,12 @@ function MainLayout({ sidebarCollapsed, selectedProject, rightPanel, setRightPan
           <SessionDetail tabIndex={0} />
         </main>
 
-        {/* Sidebar drawer */}
+        {/* Sidebar drawer — Claude-app style multi-level menu */}
         {!sidebarCollapsed && (
           <>
             <div className="fixed inset-0 z-40 bg-black/40 animate-fade-in" onClick={toggleSidebar} />
-            <aside className="fixed inset-y-0 left-0 z-50 w-[84vw] max-w-[330px] glass-thick flex flex-col overflow-hidden animate-glass-rise">
-              <div className="flex-1 min-h-0 overflow-hidden">
-                {selectedProject ? <SessionList /> : <ProjectList />}
-              </div>
-              {/* Tools footer — panels open as full-screen overlays on mobile. */}
-              <div className="shrink-0 border-t border-canvas-deep/60 px-2 py-2 grid grid-cols-3 gap-1">
-                {Object.entries(PANEL_MAP).map(([id, { icon: Icon, label }]) => {
-                  const SHORT = { files: '文件', monitor: '监控', usage: '用量', processes: '进程', mcp: 'MCP', settings: '设置' };
-                  return (
-                    <button key={id}
-                      onClick={() => { setRightPanel(id); toggleSidebar(); }}
-                      className="flex flex-col items-center gap-1 py-2 rounded-lg text-ink-muted hover:text-ink hover:bg-canvas-warm transition-colors"
-                      title={label}>
-                      <Icon size={17} />
-                      <span className="text-[10px] font-body leading-none">{SHORT[id] || label}</span>
-                    </button>
-                  );
-                })}
-              </div>
+            <aside className="fixed inset-y-0 left-0 z-50 w-[86vw] max-w-[360px] glass-thick flex flex-col overflow-hidden animate-glass-rise">
+              <MobileMenu setRightPanel={setRightPanel} onClose={toggleSidebar} />
             </aside>
           </>
         )}
@@ -1011,9 +994,12 @@ function SessionItem({ session, isSelected, onSelect, onFork, onArchive, onDelet
           />
         </div>
       ) : (
-        <button
+        <div
+          role="button"
+          tabIndex={0}
           onClick={() => onSelect(session)}
-          className={`sidebar-item w-full text-left px-3 py-3 rounded-lg mb-0.5 transition-all ${
+          onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onSelect(session); } }}
+          className={`sidebar-item w-full text-left px-3 py-3 rounded-lg mb-0.5 transition-all cursor-pointer ${
             isSelected ? 'active bg-canvas-warm' : 'hover:bg-canvas-warm/60'
           }`}
         >
@@ -1043,7 +1029,7 @@ function SessionItem({ session, isSelected, onSelect, onFork, onArchive, onDelet
               </div>
             </div>
           </div>
-        </button>
+        </div>
       )}
       {!renaming && (
       <div className="absolute bottom-1.5 right-1.5 opacity-0 group-hover:opacity-100 transition-opacity flex items-center gap-0.5">
@@ -1189,6 +1175,7 @@ function SessionList() {
     } else {
       setSelectedSession(draft);
       useStore.setState({ messages: [] });
+      useStore.getState().setPaneMessages(0, []);
     }
   };
 
@@ -1228,6 +1215,7 @@ function SessionList() {
     } else {
       setSelectedSession(draft);
       useStore.setState({ messages: [] });
+      useStore.getState().setPaneMessages(0, []);
     }
     setWorktreeOpen(false);
   };
@@ -1397,7 +1385,7 @@ function SessionList() {
           onClick={() => setWorktreeOpen(false)}
         >
           <div
-            className="glass-popover w-[480px] max-h-[80vh] flex flex-col py-1 animate-glass-rise"
+            className="glass-popover w-[480px] max-w-[calc(100vw-1.5rem)] max-h-[80vh] flex flex-col py-1 animate-glass-rise"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="px-4 py-2.5 text-[11px] text-ink-faint uppercase tracking-wider font-body flex items-center justify-between border-b border-canvas-deep shrink-0">
@@ -2835,7 +2823,7 @@ function SessionDetail({ tabIndex = 0 }) {
               </div>
             </div>
           </div>
-          <div className="flex items-center gap-2 shrink-0 flex-wrap justify-end">
+          <div className="flex items-center gap-2 min-w-0 flex-wrap justify-end">
             <CheckpointButton
               sessionId={selectedSession?.sessionId}
               cwd={selectedProject?.path || selectedSession?.projectPath}
@@ -3254,7 +3242,7 @@ export function ModelSelector({ compact = false, permKey = null }) {
         <ChevronDown size={10} className="text-ink-faint" />
       </button>
       {open && (
-        <div className="glass-popover absolute right-0 top-full mt-2 w-80 z-50 py-1 animate-glass-rise max-h-[70vh] overflow-y-auto">
+        <div className="glass-popover absolute right-0 top-full mt-2 w-80 z-50 py-1 animate-glass-rise max-h-[70vh] overflow-y-auto max-md:fixed max-md:left-3 max-md:right-3 max-md:top-16 max-md:w-auto max-md:mt-0">
           <div className="px-3 py-2 sticky top-0 bg-canvas border-b border-canvas-deep">
             <div className="text-[10px] text-ink-faint uppercase tracking-wider font-body flex items-center justify-between">
               <span>选择模型</span>
@@ -3381,11 +3369,370 @@ function LoginScreen({ onSuccess }) {
   );
 }
 
+// ── Mobile menu (Claude-app style multi-level push navigation) ───
+// Replaces the old cramped horizontal control strip. The phone's main view shows
+// ONLY the current session; this panel slides in from the left and drills into
+// sub-pages (会话/模型/外观/…) one screen at a time, so a control's options never
+// overflow the viewport the way the desktop popovers (w-80 etc.) did.
+function MobileMenuRow({ icon: Icon, label, value, onClick, danger = false, chevron = true }) {
+  return (
+    <button onClick={onClick}
+      className="w-full flex items-center gap-3 px-4 py-3 text-left hover:bg-canvas-warm active:bg-canvas-deep/30 transition-colors">
+      {Icon && <Icon size={18} strokeWidth={1.75} className={danger ? 'text-error' : 'text-ink-muted'} />}
+      <span className={`flex-1 text-[14px] font-body truncate ${danger ? 'text-error' : 'text-ink'}`}>{label}</span>
+      {value != null && value !== '' && (
+        <span className="text-[12px] text-ink-faint font-body truncate max-w-[44%] text-right shrink-0">{value}</span>
+      )}
+      {chevron && <ChevronRight size={16} className="text-ink-ghost shrink-0" />}
+    </button>
+  );
+}
+
+function MobileSegmented({ options, onChange }) {
+  return (
+    <div className="flex items-center gap-1 rounded-xl bg-canvas-warm p-0.5">
+      {options.map((o) => (
+        <button key={String(o.value)} onClick={() => onChange(o.value)}
+          className={`flex-1 flex items-center justify-center gap-1 py-2 rounded-lg text-[12px] font-body transition-colors ${
+            o.active ? 'bg-accent text-white shadow-sm' : 'text-ink-muted hover:text-ink'}`}>
+          {o.icon && <o.icon size={13} />}{o.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function MobileModelPage({ permKey }) {
+  const availableModels = useStore((s) => s.availableModels);
+  const currentModel = useStore((s) => (permKey && s.modelBySession[permKey]) || s.currentModel);
+  const [customInput, setCustomInput] = useState('');
+  // The desktop ModelSelector normally fetches the model catalogue; it isn't
+  // mounted on phones, so populate the global default + available list here.
+  useEffect(() => {
+    fetch('/api/model').then((r) => r.json()).then((d) => {
+      if (d.model) useStore.setState({ currentModel: d.model });
+      if (d.available) useStore.setState({ availableModels: d.available });
+    }).catch(() => {});
+  }, []);
+  const has1m = /\[1m\]/i.test(currentModel || '');
+  const pick = (id) => {
+    const base = id.replace(/\[1m\]/i, '');
+    useStore.getState().setModelFor(permKey, has1m ? `${base}[1m]` : base);
+  };
+  const toggle1m = () => {
+    const base = (currentModel || '').replace(/\[1m\]/i, '');
+    if (!base) return;
+    useStore.getState().setModelFor(permKey, has1m ? base : `${base}[1m]`);
+  };
+  return (
+    <div className="py-1">
+      <button onClick={toggle1m}
+        className="w-full flex items-center gap-3 px-4 py-3 text-left hover:bg-canvas-warm transition-colors border-b border-canvas-deep/40">
+        <span className="flex-1 text-[14px] font-body text-ink">1M 上下文</span>
+        <span className={`text-[10px] px-2 py-0.5 rounded font-mono ${has1m ? 'bg-accent text-white' : 'bg-canvas-deep text-ink-faint'}`}>
+          {has1m ? '已开启' : '关闭'}
+        </span>
+      </button>
+      {availableModels.map((m) => {
+        const active = currentModel === m.id || currentModel === `${m.id}[1m]`;
+        return (
+          <button key={m.id} onClick={() => pick(m.id)}
+            className="w-full flex items-center gap-3 px-4 py-3 text-left hover:bg-canvas-warm transition-colors">
+            <div className="flex-1 min-w-0">
+              <div className="text-[14px] font-body text-ink truncate">{m.name}</div>
+              <div className="text-[11px] text-ink-faint font-mono truncate">{m.source === 'cli-alias' ? '由 CLI 解析到当前 tier 最新' : m.id}</div>
+            </div>
+            <span className="text-[10px] px-1.5 py-0.5 bg-canvas-deep text-ink-faint rounded font-mono shrink-0">{m.tier}</span>
+            {active && <Check size={16} className="text-accent shrink-0" />}
+          </button>
+        );
+      })}
+      <div className="px-4 py-3 border-t border-canvas-deep/40 mt-1">
+        <div className="text-[11px] text-ink-faint mb-1.5 font-body">自定义模型 ID</div>
+        <div className="flex gap-2">
+          <input value={customInput} onChange={(e) => setCustomInput(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter') { const v = customInput.trim(); if (v) { pick(v); setCustomInput(''); } } }}
+            placeholder="输入模型 ID…"
+            className="flex-1 bg-canvas-warm border border-canvas-deep rounded-lg px-3 py-2 text-[13px] font-mono text-ink focus:outline-none focus:border-accent" />
+          <button onClick={() => { const v = customInput.trim(); if (v) { pick(v); setCustomInput(''); } }}
+            disabled={!customInput.trim()}
+            className="px-3 py-2 text-[12px] bg-accent text-white rounded-lg disabled:bg-canvas-deep disabled:text-ink-ghost">应用</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function MobileEffortPage({ permKey }) {
+  const effort = useStore((s) => (permKey && permKey in s.effortBySession ? s.effortBySession[permKey] : s.effort));
+  return (
+    <div className="py-1">
+      {EFFORT_LEVELS.map((e) => (
+        <button key={e.id || 'default'} onClick={() => useStore.getState().setEffortFor(permKey, e.id)}
+          className="w-full flex items-center gap-3 px-4 py-3 text-left hover:bg-canvas-warm transition-colors">
+          <div className="flex-1 min-w-0">
+            <div className="text-[14px] font-body text-ink">{e.label}</div>
+            <div className="text-[11px] text-ink-faint font-body">{e.desc}</div>
+          </div>
+          {effort === e.id && <Check size={16} className="text-accent shrink-0" />}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function MobilePermissionPage({ permKey }) {
+  const permissionMode = useStore((s) => (permKey ? (s.permissionModeBySession[permKey] || 'default') : s.permissionMode));
+  return (
+    <div className="py-1">
+      {PERMISSION_MODES.map((m) => {
+        const meta = MODE_META[m];
+        const MIcon = meta.icon;
+        return (
+          <button key={m} onClick={() => useStore.getState().setPermissionMode(m, permKey)}
+            className="w-full flex items-start gap-3 px-4 py-3 text-left hover:bg-canvas-warm transition-colors">
+            <MIcon size={16} className={`${meta.tone} mt-0.5 shrink-0`} />
+            <div className="flex-1 min-w-0">
+              <div className="text-[14px] font-body text-ink">{meta.label}</div>
+              <div className="text-[11px] text-ink-faint font-body">{meta.desc}</div>
+            </div>
+            {permissionMode === m && <Check size={16} className="text-accent shrink-0 mt-0.5" />}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+function MobileProviderPage() {
+  const [providers, setProviders] = useState([]);
+  const [openaiProviders, setOpenaiProviders] = useState([]);
+  const [switching, setSwitching] = useState(false);
+  const [activeId, setActiveId] = useState(null);
+  useEffect(() => {
+    fetch('/api/providers').then((r) => r.json()).then((d) => {
+      setProviders(Array.isArray(d.providers) ? d.providers : []);
+      setOpenaiProviders(Array.isArray(d.openaiProviders) ? d.openaiProviders : []);
+    }).catch(() => {});
+  }, []);
+  const isCur = (p) => (activeId != null ? p.id === activeId : p.isCurrent);
+  const switchTo = async (id, model) => {
+    setSwitching(true);
+    try {
+      const r = await fetch('/api/provider/switch', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(model ? { id, model } : { id }),
+      });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || '切换失败');
+      setActiveId(id);
+      useStore.getState().fetchProvider?.();
+      useStore.getState().fetchModel?.();
+    } catch (e) { window.alert('切换 provider 失败：' + e.message); }
+    setSwitching(false);
+  };
+  if (providers.length === 0 && openaiProviders.length === 0) {
+    return <div className="px-4 py-8 text-center text-[13px] text-ink-faint font-body">未检测到 CC Switch 配置</div>;
+  }
+  return (
+    <div className="py-1">
+      {providers.map((p) => (
+        <button key={p.id} disabled={switching} onClick={() => switchTo(p.id)}
+          className={`w-full flex items-center gap-3 px-4 py-3 text-left hover:bg-canvas-warm transition-colors ${switching ? 'opacity-50' : ''}`}>
+          <span className={`flex-1 text-[14px] font-body truncate ${isCur(p) ? 'text-accent font-medium' : 'text-ink'}`}>{p.name}</span>
+          {isCur(p) && <Check size={16} className="text-accent shrink-0" />}
+        </button>
+      ))}
+      {openaiProviders.length > 0 && (
+        <div className="px-4 pt-3 pb-1 text-[11px] text-ink-faint uppercase tracking-wider font-body border-t border-canvas-deep/40 mt-1">OpenAI 格式 · 经内置代理</div>
+      )}
+      {openaiProviders.map((p) => (
+        <div key={p.id} className="px-4 py-2.5">
+          <div className={`text-[14px] font-body mb-1.5 ${isCur(p) ? 'text-accent font-medium' : 'text-ink'}`}>{p.name}</div>
+          <div className="flex flex-wrap gap-1.5">
+            {(p.models.length ? p.models : ['(默认)']).map((m) => (
+              <button key={m} disabled={switching} onClick={() => switchTo(p.id, p.models.length ? m : undefined)}
+                className="text-[11px] font-mono px-2 py-1 rounded-lg border border-canvas-deep text-ink-soft hover:border-accent hover:text-accent">{m}</button>
+            ))}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function MobileAppearancePage({ push }) {
+  const themeFamily = useStore((s) => s.themeFamily);
+  const themeTone = useStore((s) => s.themeTone);
+  const setTheme = useStore((s) => s.setTheme);
+  const uiFontScale = useStore((s) => s.uiFontScale);
+  const setUiFontScale = useStore((s) => s.setUiFontScale);
+  const readingFont = useStore((s) => s.readingFont);
+  const famName = THEME_FAMILIES.find((f) => f.id === themeFamily)?.name || themeFamily;
+  const fontName = FONT_OPTIONS.find((f) => f.id === readingFont)?.name || readingFont;
+  return (
+    <div className="py-2">
+      <div className="px-4 pb-2 text-[11px] text-ink-faint font-body">明暗</div>
+      <div className="px-4 pb-1">
+        <MobileSegmented onChange={(v) => setTheme(themeFamily, v)}
+          options={TONES.map((t) => ({ value: t.id, label: t.label, icon: t.Icon, active: themeTone === t.id }))} />
+      </div>
+      <MobileMenuRow icon={Palette} label="配色方案" value={famName} onClick={() => push('theme')} />
+      <div className="px-4 pt-2 pb-2 text-[11px] text-ink-faint font-body">界面字体大小</div>
+      <div className="px-4 pb-1">
+        <MobileSegmented onChange={(v) => setUiFontScale(v)}
+          options={[{ label: '小', value: 0.9 }, { label: '中', value: 1 }, { label: '大', value: 1.2 }, { label: '超大', value: 1.45 }]
+            .map((o) => ({ ...o, active: Math.abs(uiFontScale - o.value) < 0.03 }))} />
+      </div>
+      <MobileMenuRow icon={Type} label="对话正文字体" value={fontName} onClick={() => push('readingfont')} />
+    </div>
+  );
+}
+
+function MobileThemePage() {
+  const themeFamily = useStore((s) => s.themeFamily);
+  const themeTone = useStore((s) => s.themeTone);
+  const setTheme = useStore((s) => s.setTheme);
+  const effDark = themeTone === 'auto' ? systemPrefersDark() : themeTone === 'dark';
+  const toneKey = effDark ? 'dark' : 'light';
+  return (
+    <div className="grid grid-cols-2 gap-2 p-3">
+      {THEME_FAMILIES.map((fam) => {
+        const sw = fam[toneKey];
+        const active = themeFamily === fam.id;
+        return (
+          <button key={fam.id} onClick={() => setTheme(fam.id, themeTone)}
+            style={{ backgroundColor: sw.bg, color: sw.fg, borderColor: active ? sw.accent : sw.bg2, borderWidth: active ? 2 : 1, boxShadow: active ? `0 0 0 3px ${sw.accent}22` : 'none' }}
+            className="text-left px-3 py-3 rounded-xl border flex items-center gap-2">
+            <div className="flex gap-0.5 shrink-0 items-stretch">
+              <div className="w-3 h-7 rounded-sm" style={{ background: sw.accent }} />
+              <div className="w-1.5 h-7 rounded-sm" style={{ background: sw.bg2 }} />
+              <div className="w-1.5 h-7 rounded-sm" style={{ background: sw.fg, opacity: 0.85 }} />
+            </div>
+            <span style={{ color: sw.fg }} className="text-[12px] font-body font-medium flex-1 min-w-0 truncate">{fam.name}</span>
+            {active && <Check size={14} style={{ color: sw.accent }} className="shrink-0" />}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+function MobileReadingFontPage() {
+  const readingFont = useStore((s) => s.readingFont);
+  const setReadingFont = useStore((s) => s.setReadingFont);
+  return (
+    <div className="py-1">
+      {FONT_OPTIONS.map((f) => (
+        <button key={f.id} onClick={() => setReadingFont(f.id)}
+          className="w-full flex items-center gap-3 px-4 py-3 text-left hover:bg-canvas-warm transition-colors">
+          <span className="flex-1 text-[15px] text-ink">{f.name}</span>
+          {readingFont === f.id && <Check size={16} className="text-accent shrink-0" />}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function MobileMenu({ setRightPanel, onClose }) {
+  const [stack, setStack] = useState(['root']);
+  const page = stack[stack.length - 1];
+  const push = (p) => setStack((s) => [...s, p]);
+  const back = () => setStack((s) => (s.length > 1 ? s.slice(0, -1) : s));
+
+  const activeTabIndex = useStore((s) => s.activeTabIndex);
+  const paneSessions = useStore((s) => s.paneSessions);
+  const selectedSession = useStore((s) => s.selectedSession);
+  const selectedProject = useStore((s) => s.selectedProject);
+  const activeSession = (paneSessions && paneSessions[activeTabIndex]) || selectedSession;
+  const permKey = activeSession?.sessionId || `draft-${activeSession?.projectHash || 'none'}`;
+
+  const currentModel = useStore((s) => s.modelBySession[permKey] || s.currentModel);
+  const effort = useStore((s) => (permKey in s.effortBySession ? s.effortBySession[permKey] : s.effort));
+  const permissionMode = useStore((s) => s.permissionModeBySession[permKey] || 'default');
+  const effortLabel = (EFFORT_LEVELS.find((e) => e.id === effort) || EFFORT_LEVELS[0]).label;
+  const permLabel = (MODE_META[permissionMode] || MODE_META.default).label;
+
+  // New chat: prefer the selected project; fall back to the open session's
+  // project so ✎ isn't a dead no-op. With no project at all, drop into the
+  // history page so the user can pick one (the old code silently did nothing).
+  const startNew = () => {
+    const st = useStore.getState();
+    const sel = st.selectedSession;
+    const proj = st.selectedProject || (sel?.projectHash ? { hash: sel.projectHash, path: sel.projectPath } : null);
+    if (!proj) { push('history'); return; }
+    st.setSelectedSession({ draft: true, sessionId: null, projectHash: proj.hash, projectPath: proj.path, firstPrompt: '新会话' });
+    useStore.setState({ messages: [] });
+    st.setPaneMessages(0, []);
+    onClose();
+  };
+  const openPanel = (id) => { setRightPanel(id); onClose(); };
+
+  const TITLES = { history: '会话与项目', model: '模型', effort: '推理力度', permission: '权限模式', provider: 'Provider', appearance: '外观', theme: '配色方案', readingfont: '对话正文字体' };
+
+  return (
+    <div className="flex flex-col h-full">
+      <div className="shrink-0 flex items-center gap-1 px-3 h-12 border-b border-canvas-deep/60">
+        {page === 'root' ? (
+          <>
+            <span className="flex-1 text-[15px] font-display font-semibold text-ink">菜单</span>
+            <button onClick={onClose} className="p-2 -mr-1 text-ink-muted hover:text-ink"><X size={18} /></button>
+          </>
+        ) : (
+          <>
+            <button onClick={back} className="flex items-center gap-0.5 text-accent -ml-1 px-1 py-2">
+              <ChevronLeft size={20} /><span className="text-[14px] font-body">返回</span>
+            </button>
+            <span className="flex-1 text-center text-[15px] font-display font-semibold text-ink truncate pr-12">{TITLES[page]}</span>
+          </>
+        )}
+      </div>
+
+      {page === 'history' ? (
+        <div className="flex-1 min-h-0">{selectedProject ? <SessionList /> : <ProjectList />}</div>
+      ) : (
+        <div className="flex-1 min-h-0 overflow-y-auto">
+          {page === 'root' && (
+            <div className="py-1">
+              <MobileMenuRow icon={SquarePen} label="新建会话" chevron={false} onClick={startNew} />
+              <MobileMenuRow icon={MessageSquare} label="会话与项目" onClick={() => push('history')} />
+              <div className="px-4 pt-3 pb-1 text-[11px] text-ink-faint uppercase tracking-wider font-body">当前会话</div>
+              <MobileMenuRow icon={Cpu} label="模型" value={<ModelBadge model={currentModel} compact />} onClick={() => push('model')} />
+              <MobileMenuRow icon={Gauge} label="推理力度" value={effortLabel} onClick={() => push('effort')} />
+              <MobileMenuRow icon={Shield} label="权限模式" value={permLabel} onClick={() => push('permission')} />
+              <MobileMenuRow icon={Server} label="Provider" onClick={() => push('provider')} />
+              {activeSession?.sessionId && (
+                <div className="px-4 py-2"><RemoteControlButton session={activeSession} /></div>
+              )}
+              <div className="px-4 pt-3 pb-1 text-[11px] text-ink-faint uppercase tracking-wider font-body">外观</div>
+              <MobileMenuRow icon={Palette} label="主题与字体" onClick={() => push('appearance')} />
+              <div className="px-4 pt-3 pb-1 text-[11px] text-ink-faint uppercase tracking-wider font-body">工具</div>
+              {Object.entries(PANEL_MAP).filter(([id]) => id !== 'settings').map(([id, { icon: Icon, label }]) => (
+                <MobileMenuRow key={id} icon={Icon} label={label} chevron={false} onClick={() => openPanel(id)} />
+              ))}
+              <div className="px-4 pt-3 pb-1 text-[11px] text-ink-faint uppercase tracking-wider font-body">系统</div>
+              <MobileMenuRow icon={Settings} label="设置（网络 / 密码 / 端口 / 存储）" chevron={false} onClick={() => openPanel('settings')} />
+              <div className="h-8" />
+            </div>
+          )}
+          {page === 'model' && <MobileModelPage permKey={permKey} />}
+          {page === 'effort' && <MobileEffortPage permKey={permKey} />}
+          {page === 'permission' && <MobilePermissionPage permKey={permKey} />}
+          {page === 'provider' && <MobileProviderPage />}
+          {page === 'appearance' && <MobileAppearancePage push={push} />}
+          {page === 'theme' && <MobileThemePage />}
+          {page === 'readingfont' && <MobileReadingFontPage />}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── Mobile chrome (Claude-app style) ─────────────────────────────
 // A minimal top app bar: drawer toggle · session title · new chat. The heavy
-// desktop header (10+ controls) is replaced on phones by this bar plus a
-// horizontally-scrolling control strip, so the layout reads like the Claude app
-// instead of cramming every button into a 3-row wrapped header.
+// desktop header (10+ controls) is replaced on phones by this bar plus the
+// slide-in MobileMenu, so the layout reads like the Claude app instead of
+// cramming every control into a wrapped header.
 function MobileTopBar({ onMenu, onNew, title }) {
   return (
     <header className="glass-bar h-12 px-2 flex items-center gap-1 shrink-0 relative z-40">
@@ -3400,23 +3747,6 @@ function MobileTopBar({ onMenu, onNew, title }) {
         <SquarePen size={18} className="text-ink-muted" />
       </button>
     </header>
-  );
-}
-
-// Control strip: the per-session knobs that must stay one tap away on a phone.
-// Lives in the main flow (NOT the drawer) so each control's popover can open
-// over the chat without being clipped by the drawer's overflow. Scrolls
-// horizontally when the chips don't fit.
-function MobileControlStrip({ permKey, activeSession }) {
-  return (
-    <div className="shrink-0 flex flex-wrap items-center gap-1 px-2 py-1 border-b border-canvas-deep/40 bg-canvas [&>*]:shrink-0 [&_button]:whitespace-nowrap">
-      <ProviderSwitcher />
-      <ModelSelector placement="bottom" align="left" compact permKey={permKey} />
-      <EffortSelector placement="bottom" align="left" permKey={permKey} />
-      <PermissionModeSelector permKey={permKey} />
-      <RemoteControlButton session={activeSession} />
-      <ThemeToggle />
-    </div>
   );
 }
 
@@ -3458,10 +3788,15 @@ export default function App() {
   const isMobile = useIsMobile();
   // On entering a phone-sized viewport, collapse the sidebar so the chat
   // (not the drawer) is what's visible first. Desktop keeps its own state.
+  // Also force single-pane: a phone only renders pane 0, but a stale paneCount>1
+  // (from desktop split usage persisted in this browser's localStorage) would
+  // leave splitMode=true, so SessionList.handleSelect routes picks into the
+  // hidden pane 1 instead of selectedSession — making "选会话/新建会话" look dead.
   useEffect(() => {
-    if (isMobile && !useStore.getState().sidebarCollapsed) {
-      useStore.getState().toggleSidebar();
-    }
+    if (!isMobile) return;
+    const st = useStore.getState();
+    if (!st.sidebarCollapsed) st.toggleSidebar();
+    if (st.paneCount > 1) st.setPaneCount(1);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isMobile]);
 
@@ -3493,6 +3828,7 @@ export default function App() {
       projectPath: proj.path, firstPrompt: '新会话',
     });
     useStore.setState({ messages: [] });
+    st.setPaneMessages(0, []);
   };
   const mobileTitle = mobileSelSession
     ? (customTitles[mobileSelSession.sessionId] || mobileSelSession.firstPrompt?.slice(0, 24) || '新会话')
@@ -3601,7 +3937,6 @@ export default function App() {
     return (
       <div className="flex flex-col overflow-hidden" style={{ width: 'calc(100vw / var(--ui-zoom, 1))', height: 'calc(100dvh / var(--ui-zoom, 1))' }}>
         <MobileTopBar onMenu={toggleSidebar} onNew={startMobileNewChat} title={mobileTitle} />
-        <MobileControlStrip permKey={permKey} activeSession={activeSession} />
         <MainLayout
           sidebarCollapsed={sidebarCollapsed}
           selectedProject={selectedProject}

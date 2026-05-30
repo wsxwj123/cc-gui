@@ -5,7 +5,7 @@ import { PermissionPrompt } from './PermissionPrompt.jsx';
 import { TodoPanel } from './TodoPanel.jsx';
 
 // Permission mode metadata — mirrors `claude --permission-mode <choice>`.
-const MODE_META = {
+export const MODE_META = {
   default:           { label: '默认', desc: '每次工具调用前都弹窗询问', icon: Shield,        tone: 'text-ink-muted' },
   acceptEdits:       { label: '接受编辑', desc: '读取/列举/查看类工具自动放行；写入/编辑/删除仍弹窗', icon: Check,         tone: 'text-amber-600' },
   plan:              { label: '规划', desc: '只规划，不执行任何工具', icon: ClipboardList, tone: 'text-blue-600' },
@@ -67,7 +67,7 @@ export function PermissionModeSelector({ permKey }) {
   );
 }
 
-const EFFORT_LEVELS = [
+export const EFFORT_LEVELS = [
   { id: '',       label: '默认', desc: '让 CLI 自己决定' },
   { id: 'low',    label: '低',   desc: '快速、便宜' },
   { id: 'medium', label: '中',   desc: '平衡' },
