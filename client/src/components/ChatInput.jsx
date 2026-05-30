@@ -78,10 +78,12 @@ export const EFFORT_LEVELS = [
 
 // Dropdown anchored to the trigger button (lightweight, no full-screen blur).
 export function EffortSelector({ permKey = null }) {
-  // Per-session effort (#9): show/select THIS session's level, falling back to
-  // the global default when the session has no explicit pick.
-  const effort = useStore((s) => (permKey && permKey in s.effortBySession ? s.effortBySession[permKey] : s.effort));
-  const setEffort = (id) => useStore.getState().setEffortFor(permKey, id);
+  // Per-MODEL effort: show/select the level for THIS session's current model,
+  // falling back to the global default. Reasoning effort is a model capability,
+  // not a session property.
+  const effModel = useStore((s) => ((permKey && s.modelBySession[permKey]) || s.currentModel) || '');
+  const effort = useStore((s) => { const b = effModel.replace(/\[1m\]/i, ''); return b && b in s.effortByModel ? s.effortByModel[b] : s.effort; });
+  const setEffort = (id) => useStore.getState().setEffortForModel(effModel, id);
   const [open, setOpen] = useState(false);
   const wrapRef = useRef(null);
   const current = EFFORT_LEVELS.find((e) => e.id === effort) || EFFORT_LEVELS[0];
