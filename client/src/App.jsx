@@ -3092,17 +3092,6 @@ function ProviderSwitcher() {
     await fetch(`/api/custom-providers/${id}`, { method: 'DELETE' }).catch(() => {});
     load();
   };
-  // Delete a CC Switch provider (writes cc-switch.db). Server backs the db up and
-  // refuses (409) while the CC Switch desktop app is running.
-  const removeCcProvider = async (appType, id, name) => {
-    if (!window.confirm(`删除 Provider「${name}」?\n\n写入 cc-switch 数据库(已自动备份)。若 CC Switch 桌面端正在运行,改动可能被它还原。`)) return;
-    try {
-      const r = await fetch(`/api/cc-providers/${appType}/${id}`, { method: 'DELETE' });
-      const d = await r.json().catch(() => ({}));
-      if (!r.ok) { window.alert('删除失败: ' + (d.error || r.status)); return; }
-      load();
-    } catch (e) { window.alert('删除失败: ' + e.message); }
-  };
   useEffect(() => {
     load();
     const onCh = () => load();
@@ -3122,7 +3111,9 @@ function ProviderSwitcher() {
     };
   }, [open]);
 
-  if (providers.length === 0 && openaiProviders.length === 0 && customProviders.length === 0) return null;
+  // Always render — even with zero providers the dropdown still hosts the
+  // "添加 Provider" form, so a fresh machine (no CC Switch, nothing added yet)
+  // can set up its first provider.
 
   const isCur = (p) => (activeId != null ? p.id === activeId : p.isCurrent);
   const cur = providers.find(isCur) || openaiProviders.find(isCur) || customProviders.find(isCur);
@@ -3174,7 +3165,6 @@ function ProviderSwitcher() {
                 <span className={`flex-1 text-xs font-body truncate ${isCur(p) ? 'text-accent font-medium' : 'text-ink'}`}>{p.name}</span>
                 {isCur(p) && <Check size={12} className="text-accent shrink-0" />}
               </button>
-              <button onClick={() => removeCcProvider(p.appType, p.id, p.name)} title="删除" className="p-1 text-ink-faint hover:text-error shrink-0"><Trash2 size={12} /></button>
             </div>
           ))}
           {openaiProviders.length > 0 && (
@@ -3189,7 +3179,6 @@ function ProviderSwitcher() {
               <div className="flex items-center gap-2">
                 <span className={`flex-1 text-xs font-body truncate ${isCur(p) ? 'text-accent font-medium' : 'text-ink'}`}>{p.name}</span>
                 {isCur(p) && <Check size={12} className="text-accent shrink-0" />}
-                <button onClick={() => removeCcProvider(p.appType, p.id, p.name)} title="删除" className="p-0.5 text-ink-faint hover:text-error shrink-0"><Trash2 size={12} /></button>
               </div>
               {/* One chip per model — clicking switches to that specific model. */}
               <div className="flex flex-wrap gap-1 mt-1.5">
@@ -3818,11 +3807,11 @@ function CustomProviderForm({ onSaved }) {
     if (!name.trim() || !baseURL.trim()) return window.alert('名称和 Base URL 必填');
     setBusy('save');
     try {
-      // Write into cc-switch.db so the new provider behaves like a CC Switch one
-      // (unified list). type maps anthropic→claude; first model becomes the default.
-      const r = await fetch('/api/cc-providers', {
+      // Store in the GUI's own custom-providers.json (no cc-switch.db dependency —
+      // works on a fresh machine without CC Switch installed).
+      const r = await fetch('/api/custom-providers', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ type: type === 'anthropic' ? 'claude' : 'openai', name, baseURL, apiKey, model: parseModels()[0] || '' }),
+        body: JSON.stringify({ name, type, baseURL, apiKey, models: parseModels() }),
       });
       const d = await r.json();
       if (!r.ok) throw new Error(d.error || '保存失败');
@@ -3843,7 +3832,7 @@ function CustomProviderForm({ onSaved }) {
   return (
     <div className="px-4 py-3 border-t border-canvas-deep/40 mt-1 space-y-2.5">
       <div className="flex items-center justify-between">
-        <span className="text-[13px] font-display font-semibold text-ink">新增 Provider<span className="text-[10px] font-body font-normal text-ink-faint ml-1">写入 cc-switch</span></span>
+        <span className="text-[13px] font-display font-semibold text-ink">新增 Provider<span className="text-[10px] font-body font-normal text-ink-faint ml-1">保存到本机</span></span>
         <button onClick={() => setOpen(false)} className="p-1 text-ink-faint hover:text-ink"><X size={16} /></button>
       </div>
       <MobileSegmented onChange={setType} options={[
@@ -3906,17 +3895,6 @@ function MobileProviderPage() {
     await fetch(`/api/custom-providers/${id}`, { method: 'DELETE' }).catch(() => {});
     load();
   };
-  // Delete a CC Switch provider (writes cc-switch.db). Server backs the db up and
-  // refuses (409) while the CC Switch desktop app is running.
-  const removeCcProvider = async (appType, id, name) => {
-    if (!window.confirm(`删除 Provider「${name}」?\n\n写入 cc-switch 数据库(已自动备份)。若 CC Switch 桌面端正在运行,改动可能被它还原。`)) return;
-    try {
-      const r = await fetch(`/api/cc-providers/${appType}/${id}`, { method: 'DELETE' });
-      const d = await r.json().catch(() => ({}));
-      if (!r.ok) { window.alert('删除失败: ' + (d.error || r.status)); return; }
-      load();
-    } catch (e) { window.alert('删除失败: ' + e.message); }
-  };
   return (
     <div className="py-1">
       {providers.map((p) => (
@@ -3926,7 +3904,6 @@ function MobileProviderPage() {
             <span className={`flex-1 text-[14px] font-body truncate ${isCur(p) ? 'text-accent font-medium' : 'text-ink'}`}>{p.name}</span>
             {isCur(p) && <Check size={16} className="text-accent shrink-0" />}
           </button>
-          <button onClick={() => removeCcProvider(p.appType, p.id, p.name)} title="删除" className="p-2 text-ink-faint hover:text-error shrink-0"><Trash2 size={16} /></button>
         </div>
       ))}
       {openaiProviders.length > 0 && (
@@ -3936,7 +3913,6 @@ function MobileProviderPage() {
         <div key={p.id} className="px-4 py-2.5">
           <div className={`text-[14px] font-body mb-1.5 flex items-center gap-2 ${isCur(p) ? 'text-accent font-medium' : 'text-ink'}`}>
             <span className="flex-1 truncate">{p.name}</span>
-            <button onClick={() => removeCcProvider(p.appType, p.id, p.name)} title="删除" className="p-1 text-ink-faint hover:text-error shrink-0"><Trash2 size={15} /></button>
           </div>
           <div className="flex flex-wrap gap-1.5">
             {(p.models.length ? p.models : ['(默认)']).map((m) => (

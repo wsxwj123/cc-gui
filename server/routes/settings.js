@@ -252,29 +252,6 @@ async function ccSwitchQuery(sql) {
   }
 }
 
-// sqlite3 CLI has no parameter binding — escape a value as a SQL string literal.
-function sqlLit(s) { return "'" + String(s).replace(/'/g, "''") + "'"; }
-
-// Write to cc-switch.db (NO -readonly). Used ONLY by the explicit provider
-// add/delete endpoints below — every other access stays read-only.
-async function ccSwitchExec(sql) {
-  await execFileP('sqlite3', [CC_SWITCH_DB, sql], { timeout: 5000 });
-}
-
-// Is the CC Switch desktop app running? It owns the db and rewrites it on its
-// own writes, which would revert our change — so the endpoints refuse while it's
-// up. Match the GUI app process, not our own sqlite3 query on the db file.
-async function ccSwitchDesktopRunning() {
-  try {
-    const { stdout } = await execFileP('pgrep', ['-fl', 'cc.?switch']);
-    return stdout.split('\n').some((l) => /\.app\/|CC.?Switch/i.test(l) && !/sqlite3|\bnode\b|pgrep/i.test(l));
-  } catch { return false; }
-}
-
-async function backupCcSwitch() {
-  try { await copyFile(CC_SWITCH_DB, `${CC_SWITCH_DB}.gui-bak`); } catch {}
-}
-
 // Parse an OpenAI-format (app_type=codex/opencode) provider's settings_config.
 // Returns { baseURL, apiKey, models[] } or null if it isn't usable.
 function parseOpenAIProvider(settingsConfig) {
@@ -506,67 +483,6 @@ router.delete('/custom-providers/:id', async (req, res) => {
     if ((await readActiveProviderId()) === req.params.id) await unlink(ACTIVE_PROVIDER_PATH).catch(() => {});
     res.json({ ok: true });
   } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-// ── cc-switch.db provider add/delete ──────────────────────────────────────
-// Unlike custom-providers (GUI-isolated), these mutate the user's CC Switch db
-// directly so an added/removed provider behaves exactly like a CC Switch one.
-// Always back the db up; refuse while the CC Switch desktop app is running
-// (it owns the db and would revert the change on its next write).
-
-// DELETE /api/cc-providers/:appType/:id — remove a provider from cc-switch.db.
-router.delete('/cc-providers/:appType/:id', async (req, res) => {
-  const { appType, id } = req.params;
-  if (!appType || !id) return res.status(400).json({ error: 'appType 和 id 必填' });
-  if (await ccSwitchDesktopRunning()) {
-    return res.status(409).json({ error: 'CC Switch 桌面端正在运行,会还原改动。请先退出 CC Switch 再操作。' });
-  }
-  try {
-    await backupCcSwitch();
-    await ccSwitchExec(`DELETE FROM providers WHERE id=${sqlLit(id)} AND app_type=${sqlLit(appType)}`);
-    if ((await readActiveProviderId()) === id) await unlink(ACTIVE_PROVIDER_PATH).catch(() => {});
-    res.json({ ok: true });
-  } catch (err) { res.status(500).json({ error: 'delete 失败: ' + err.message }); }
-});
-
-// POST /api/cc-providers { type:'claude'|'openai', name, baseURL, apiKey, model }
-// Adds a provider to cc-switch.db. claude → app_type 'claude' (Anthropic env
-// format); openai → app_type 'opencode' (OpenAI-compatible options format).
-router.post('/cc-providers', async (req, res) => {
-  try {
-    const { type, name, baseURL, apiKey, model } = req.body || {};
-    if (!name || typeof name !== 'string') return res.status(400).json({ error: 'name 必填' });
-    if (type !== 'claude' && type !== 'openai') return res.status(400).json({ error: "type 必须是 'claude' 或 'openai'" });
-    let url; try { url = new URL(baseURL); } catch { return res.status(400).json({ error: 'baseURL 非法' }); }
-    if (!/^https?:$/.test(url.protocol)) return res.status(400).json({ error: 'baseURL 必须是 http(s)' });
-    if (await ccSwitchDesktopRunning()) {
-      return res.status(409).json({ error: 'CC Switch 桌面端正在运行,会还原改动。请先退出 CC Switch 再操作。' });
-    }
-    const id = randomUUID();
-    const base = baseURL.trim().replace(/\/+$/, '');
-    const key = typeof apiKey === 'string' ? apiKey.trim() : '';
-    const mdl = typeof model === 'string' ? model.trim() : '';
-    let appType, settingsConfig, meta;
-    if (type === 'claude') {
-      appType = 'claude';
-      const env = { ANTHROPIC_BASE_URL: base, ANTHROPIC_AUTH_TOKEN: key };
-      if (mdl) env.ANTHROPIC_MODEL = mdl;
-      settingsConfig = JSON.stringify({ env });
-      meta = JSON.stringify({ apiFormat: 'anthropic' });
-    } else {
-      appType = 'opencode';
-      const sc = { npm: '@ai-sdk/openai-compatible', name: name.trim(), options: { baseURL: base, apiKey: key } };
-      if (mdl) sc.models = { [mdl]: { name: mdl } };
-      settingsConfig = JSON.stringify(sc);
-      meta = JSON.stringify({});
-    }
-    await backupCcSwitch();
-    await ccSwitchExec(
-      `INSERT INTO providers (id, app_type, name, settings_config, meta, is_current, in_failover_queue, cost_multiplier) ` +
-      `VALUES (${sqlLit(id)}, ${sqlLit(appType)}, ${sqlLit(name.trim())}, ${sqlLit(settingsConfig)}, ${sqlLit(meta)}, 0, 0, '1.0')`
-    );
-    res.json({ ok: true, id, appType });
-  } catch (err) { res.status(500).json({ error: 'add 失败: ' + err.message }); }
 });
 
 // Live-fetch a provider's model catalogue via GET {baseURL}/v1/models. Tries the
