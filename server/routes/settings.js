@@ -129,12 +129,22 @@ router.get('/settings', async (req, res) => {
 router.put('/settings', async (req, res) => {
   try {
     const body = { ...(req.body || {}) };
-    const addPath = typeof body._addProject === 'string' ? body._addProject : null;
+    const addPath = typeof body._addProject === 'string' ? body._addProject.trim() : null;
     delete body._addProject;
 
     let addedHash = null;
-    if (addPath && addPath.startsWith('/')) {
-      const clean = addPath.replace(/\/+$/, '') || '/';
+    let addedPath = null;
+    if (addPath) {
+      const absPath = addPath === '~'
+        ? homedir()
+        : addPath.startsWith('~/')
+          ? join(homedir(), addPath.slice(2))
+          : addPath;
+      if (!absPath.startsWith('/')) {
+        return res.status(400).json({ error: '项目路径必须是绝对路径或 ~/ 开头' });
+      }
+      const clean = absPath.replace(/\/+$/, '') || '/';
+      addedPath = clean;
       addedHash = pathToHash(clean);
       const projectDir = join(PROJECTS_DIR, addedHash);
       try {
@@ -167,7 +177,7 @@ router.put('/settings', async (req, res) => {
     delete current._addProject;
     const updated = { ...current, ...body };
     await writeFile(SETTINGS_PATH, JSON.stringify(updated, null, 2) + '\n');
-    res.json({ ...updated, ...(addedHash ? { _registeredHash: addedHash } : {}) });
+    res.json({ ...updated, ...(addedHash ? { addedHash, addedPath } : {}) });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

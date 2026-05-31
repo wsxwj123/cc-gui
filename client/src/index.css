@@ -1222,6 +1222,7 @@ body {
     padding-left: env(safe-area-inset-left);
     padding-right: env(safe-area-inset-right);
     touch-action: manipulation;
+    max-width: calc(100vw / var(--ui-zoom, 1));
   }
 
   .mobile-topbar {
@@ -1230,6 +1231,14 @@ body {
     padding-left: max(8px, env(safe-area-inset-left));
     padding-right: max(8px, env(safe-area-inset-right));
     box-sizing: content-box;
+    background: rgba(250, 249, 245, 0.88);
+    backdrop-filter: blur(18px);
+  }
+
+  .mobile-topbar .btn-glass {
+    width: 36px;
+    height: 36px;
+    border-radius: 16px;
   }
 
   .mobile-drawer {
@@ -1237,14 +1246,52 @@ body {
     top: 0;
     bottom: 0;
     left: 0;
+    width: min(calc(86vw / var(--ui-zoom, 1)), 360px);
     padding-top: env(safe-area-inset-top);
     padding-bottom: env(safe-area-inset-bottom);
     border-top-left-radius: 0;
     border-bottom-left-radius: 0;
+    background: rgba(250, 249, 245, 0.94);
+    box-shadow: 14px 0 40px -24px rgba(40, 30, 20, 0.38);
+  }
+
+  .mobile-empty-state {
+    margin: 0;
+    border-radius: 0;
+    background: var(--color-canvas);
+    box-shadow: none;
+  }
+
+  .mobile-empty-state > div {
+    transform: translateY(-4vh);
+    max-width: min(280px, 76vw);
+  }
+
+  .mobile-empty-state .glass-thin {
+    width: 78px;
+    height: 78px;
+    border-radius: 24px;
+    background: rgba(255, 253, 248, 0.68);
+    border: 1px solid rgba(217, 119, 87, 0.14);
+  }
+
+  .mobile-empty-state h3 {
+    font-size: 22px;
+    line-height: 1.15;
+  }
+
+  .mobile-empty-state p,
+  .mobile-draft-empty {
+    font-size: 14px;
+    line-height: 1.45;
+    text-align: center;
+    padding-left: 24px;
+    padding-right: 24px;
   }
 
   .chat-input-shell {
-    padding: 10px 12px calc(12px + env(safe-area-inset-bottom));
+    padding: 8px 10px calc(10px + env(safe-area-inset-bottom));
+    background: linear-gradient(to top, var(--color-canvas) 72%, rgba(250, 249, 245, 0));
   }
 
   .chat-input-shell .max-w-3xl {
@@ -1252,9 +1299,11 @@ body {
   }
 
   .chat-composer {
-    border-radius: 24px;
+    border-radius: 22px;
     gap: 8px;
-    padding: 10px 10px 10px 16px;
+    padding: 9px 9px 9px 15px;
+    background: rgba(255, 253, 248, 0.92);
+    border: 1px solid rgba(217, 119, 87, 0.18);
     box-shadow:
       inset 0 1px 0 var(--glass-specular),
       inset 0 -1px 0 var(--glass-shade),
@@ -1269,8 +1318,8 @@ body {
 
   .chat-composer .btn-accent,
   .chat-composer button[title="发送"] {
-    width: 40px;
-    height: 40px;
-    min-width: 40px;
+    width: 38px;
+    height: 38px;
+    min-width: 38px;
   }
 }

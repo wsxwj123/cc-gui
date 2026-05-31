@@ -754,6 +754,11 @@ function GlobalSearchResults({ q, onPick }) {
 // ─── Project List ──────────────────────────────────────────────
 function ProjectList() {
   const { projects, selectedProject, setSelectedProject, fetchProjects, fetchSessions, searchQuery, setSearchQuery } = useStore();
+  const isMobile = useIsMobile();
+  const [addDialogOpen, setAddDialogOpen] = useState(false);
+  const [addPathInput, setAddPathInput] = useState('');
+  const [addError, setAddError] = useState('');
+  const [addingProject, setAddingProject] = useState(false);
   // Per-project hide, now SERVER-BACKED so the list is identical on every device
   // (phone + Mac). Previously this lived in each browser's localStorage, so a
   // phone showed every project the user had hidden on the Mac. Hidden projects
@@ -799,6 +804,55 @@ function ProjectList() {
   const filtered = projects.filter((p) =>
     !hidden.has(p.hash) && p.path.toLowerCase().includes(searchQuery.toLowerCase())
   );
+  const hiddenOnly = projects.length > 0 && filtered.length === 0 && searchQuery.length === 0 && hidden.size > 0;
+
+  const registerProjectPath = async (rawPath) => {
+    const path = String(rawPath || '').trim();
+    if (!path) return;
+    setAddingProject(true);
+    setAddError('');
+    try {
+      const r = await fetch('/api/settings', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ _addProject: path }),
+      });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
+      await fetchProjects();
+      const fresh = useStore.getState().projects;
+      const clean = data.addedPath || path.replace(/\/+$/, '') || '/';
+      const proj = fresh.find((p) => p.path === clean) || (data.addedHash && fresh.find((p) => p.hash === data.addedHash));
+      if (proj) {
+        setHidden((prev) => {
+          if (!prev.has(proj.hash)) return prev;
+          const next = new Set(prev);
+          next.delete(proj.hash);
+          persistHidden(next);
+          return next;
+        });
+        useStore.getState().setSelectedProject(proj);
+        useStore.getState().fetchSessions(proj.hash, { silent: true });
+      } else {
+        useStore.getState().setSelectedProject({
+          path: clean,
+          hash: data.addedHash || clean.replace(/[/\s]/g, '-'),
+          sessionCount: 0,
+          lastActivity: null,
+        });
+      }
+      try {
+        const parent = clean.replace(/\/[^/]+\/?$/, '') || '/';
+        localStorage.setItem('cgui-picker-last-start', parent);
+      } catch {}
+      setAddDialogOpen(false);
+      setAddPathInput('');
+    } catch (err) {
+      setAddError(err.message || '添加失败');
+    } finally {
+      setAddingProject(false);
+    }
+  };
 
   const handlePickHit = async (hit) => {
     const project = projects.find((p) => p.hash === hit.projectHash);
@@ -838,7 +892,7 @@ function ProjectList() {
               // on the same machine as the server; remote/phone falls through to the
               // path prompt below.
               const isLocalHost = ['localhost', '127.0.0.1', '::1'].includes(window.location.hostname);
-              if (isLocalHost) {
+              if (isLocalHost && !isMobile) {
                 try {
                   const r = await fetch('/api/pick-directory', {
                     method: 'POST',
@@ -850,50 +904,16 @@ function ProjectList() {
                     if (data.path === null) return;  // user cancelled
                     path = data.path;
                   }
-                } catch {}
+                } catch {
+                  setAddDialogOpen(true);
+                  return;
+                }
               }
               if (!path) {
-                path = prompt('输入项目路径（如 ~/Desktop/my-project）');
+                setAddDialogOpen(true);
+                return;
               }
-              if (!path) return;
-              // Persist the parent dir so next "+" opens here, not at Desktop.
-              try {
-                const parent = path.replace(/\/[^/]+\/?$/, '') || '/';
-                localStorage.setItem('cgui-picker-last-start', parent);
-              } catch {}
-              // Register + auto-enter. Previously this only refreshed the list
-              // and left the user to click the new project manually.
-              try {
-                await fetch('/api/settings', {
-                  method: 'PUT',
-                  headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({ _addProject: path }),
-                });
-              } catch {}
-              await fetchProjects();
-              // Find the project entry (server returns array of {hash, path}).
-              const fresh = useStore.getState().projects;
-              const proj = fresh.find((p) => p.path === path);
-              if (proj) {
-                useStore.getState().setSelectedProject(proj);
-                useStore.getState().fetchSessions(proj.hash, { silent: true });
-              } else {
-                // Path may not have any sessions yet — synthesize a project entry
-                // so the user can immediately start a new chat in it.
-                // IMPORTANT: must match claude-code CLI's hash format exactly —
-                // CLI uses `path.replace(/[/\s]/g, '-')` which KEEPS the leading
-                // slash as a leading dash (e.g. `-Users-foo-bar` for `/Users/foo bar`).
-                // The previous version stripped the leading slash before replacing,
-                // producing `Users-foo-bar` which never matched the CLI's output dir
-                // → fetchSessions(hash) returned 404 forever, so new-project chats
-                // would appear to "vanish" from sidebar history.
-                useStore.getState().setSelectedProject({
-                  path,
-                  hash: path.replace(/[/\s]/g, '-'),
-                  sessionCount: 0,
-                  lastActivity: null,
-                });
-              }
+              await registerProjectPath(path);
             }}
             className="p-1 hover:bg-canvas-warm rounded transition-colors"
             title="添加项目（系统文件选择器）"
@@ -956,11 +976,56 @@ function ProjectList() {
         {filtered.length === 0 && (
           <div className="px-4 py-8 text-center">
             <p className="text-xs text-ink-faint font-body">
-              {searchQuery ? '没有匹配的项目' : '没有找到项目'}
+              {searchQuery ? '没有匹配的项目' : hiddenOnly ? '所有项目都已隐藏' : '没有找到项目'}
             </p>
+            {hiddenOnly && (
+              <button
+                onClick={() => { const next = new Set(); setHidden(next); persistHidden(next); }}
+                className="mt-3 px-3 py-1.5 rounded-full bg-accent text-white text-[12px] font-body"
+              >
+                显示全部项目
+              </button>
+            )}
           </div>
         )}
       </div>
+      {addDialogOpen && (
+        <div className="fixed inset-0 z-[80] bg-black/25 flex items-end md:items-center justify-center p-3">
+          <div className="w-full max-w-md rounded-2xl bg-canvas border border-canvas-deep shadow-2xl overflow-hidden">
+            <div className="flex items-center justify-between px-4 py-3 border-b border-canvas-deep">
+              <div className="text-[15px] font-display font-semibold text-ink">添加项目</div>
+              <button onClick={() => setAddDialogOpen(false)} className="p-1.5 rounded-lg hover:bg-canvas-warm">
+                <X size={16} className="text-ink-muted" />
+              </button>
+            </div>
+            <form
+              className="p-4"
+              onSubmit={(e) => {
+                e.preventDefault();
+                registerProjectPath(addPathInput);
+              }}
+            >
+              <label className="block text-[12px] text-ink-muted font-body mb-2">项目路径</label>
+              <input
+                autoFocus
+                value={addPathInput}
+                onChange={(e) => { setAddPathInput(e.target.value); setAddError(''); }}
+                placeholder="~/Desktop/my-project"
+                className="w-full bg-canvas-warm border border-canvas-deep rounded-xl px-3 py-3 text-[16px] text-ink font-body focus:outline-none focus:border-accent/50"
+              />
+              {addError && <div className="mt-2 text-[12px] text-error font-body">{addError}</div>}
+              <div className="mt-4 flex justify-end gap-2">
+                <button type="button" onClick={() => setAddDialogOpen(false)} className="px-3 py-2 rounded-lg text-[13px] text-ink-muted hover:bg-canvas-warm">
+                  取消
+                </button>
+                <button disabled={addingProject || !addPathInput.trim()} className="px-4 py-2 rounded-lg bg-accent text-white text-[13px] disabled:opacity-50">
+                  {addingProject ? '添加中...' : '添加'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -1473,7 +1538,7 @@ function SessionList() {
 // ─── Empty State ───────────────────────────────────────────────
 function EmptyState() {
   return (
-    <div className="flex-1 flex items-center justify-center glass-base m-3 rounded-2xl relative animate-glass-rise">
+    <div className="mobile-empty-state flex-1 flex items-center justify-center glass-base m-3 rounded-2xl relative animate-glass-rise">
       <div className="text-center relative z-10">
         <div className="w-20 h-20 rounded-3xl glass-thin flex items-center justify-center mx-auto mb-6">
           <Layers size={32} className="text-accent" />
@@ -2917,7 +2982,7 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
       ) : (
         <div ref={containerRef} onScroll={handleScroll} className="flex-1 overflow-y-auto relative z-10">
           {messages.length === 0 && chatMessages.length === 0 ? (
-            <div className="flex items-center justify-center h-full text-ink-muted text-sm font-body">
+            <div className="mobile-draft-empty flex items-center justify-center h-full text-ink-muted text-sm font-body">
               {selectedSession?.draft ? '开始你的第一条消息 ↓' : '该会话没有可显示的消息'}
             </div>
           ) : (
@@ -4348,13 +4413,20 @@ export default function App() {
   if (authLocked) return <LoginScreen onSuccess={() => window.location.reload()} />;
 
   if (isMobile) {
-    // Root is pinned with zero insets (not vw/vh): under the <html> font-zoom,
-    // `0` insets don't scale, so they don't cancel the zoom the way
-    // `calc(100vw / zoom)` did on iOS Safari (that made font scaling look dead).
-    // `bottom: var(--kb)` lifts the whole app above the soft keyboard so the
-    // composer stays visible while typing.
+    // CSS zoom scales fixed-size UI too. Keep the mobile root's layout box
+    // divided by the zoom factor so "超大" text does not push the app outside
+    // the physical viewport. `--kb` still lifts it above the soft keyboard.
     return (
-      <div className="cgui-mobile-root flex flex-col overflow-hidden" style={{ position: 'fixed', left: 0, top: 0, right: 0, bottom: 'var(--kb, 0px)' }}>
+      <div
+        className="cgui-mobile-root flex flex-col overflow-hidden"
+        style={{
+          position: 'fixed',
+          left: 0,
+          top: 0,
+          width: 'calc(100vw / var(--ui-zoom, 1))',
+          height: 'calc((100dvh / var(--ui-zoom, 1)) - var(--kb, 0px))',
+        }}
+      >
         <MobileTopBar onMenu={toggleSidebar} onNew={startMobileNewChat} title={mobileTitle} />
         <MainLayout
           sidebarCollapsed={sidebarCollapsed}
