@@ -2140,6 +2140,10 @@ function SessionDetail({ tabIndex = 0 }) {
         }),
       });
       const respJson = await res.json();
+      // Surface server rejections (e.g. invalid project dir → 400) instead of
+      // streaming a non-existent pid — that would hang forever as a stuck
+      // "connecting" with no reply (the catch below renders the message).
+      if (!res.ok || !respJson.pid) throw new Error(respJson.error || `发送失败 (${res.status})`);
       pid = respJson.pid;
       activeProcRef.current = pid;
       setStreamingModel(respJson.model);
@@ -2430,7 +2434,22 @@ function SessionDetail({ tabIndex = 0 }) {
         }]);
       }
     } catch (err) {
-      if (err.name !== 'AbortError') console.error('Chat error:', err);
+      if (err.name !== 'AbortError') {
+        console.error('Chat error:', err);
+        // Render the failure as a visible turn so the user isn't left staring at
+        // a frozen "connecting" with no explanation (e.g. invalid project dir).
+        setChatMessages((prev) => [...prev, {
+          uuid: 'chat-error-' + Date.now(),
+          type: 'turn',
+          timestamp: new Date().toISOString(),
+          model: null,
+          text: [`❌ ${err.message || '发送失败'}`],
+          thinking: [],
+          toolCalls: [],
+          blocks: [{ type: 'text', content: `❌ ${err.message || '发送失败'}` }],
+          usage: null,
+        }]);
+      }
     } finally {
       updateStreaming(false);
       setStreamingText('');

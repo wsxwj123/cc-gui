@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { spawn } from 'child_process';
 import { resolve as pathResolve, dirname, join as pathJoin } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { readFileSync } from 'node:fs';
+import { readFileSync, statSync } from 'node:fs';
 import { getDefaultModel } from '../services/model-resolver.js';
 import { dropPendingForSession } from './permissions.js';
 
@@ -59,6 +59,18 @@ router.post('/chat', async (req, res) => {
   // found with session ID". The client sends the cwd that matches each
   // session's original storage; we trust it as-is for CLI spawn.
   const workingDir = cwd || process.env.HOME;
+
+  // Validate the working dir exists and is a directory. A session whose project
+  // folder was deleted or moved (e.g. a stale cwd like /Desktop/gui) otherwise
+  // makes the CLI sit ~3min in an invalid dir before exiting 1 — surfacing in
+  // the UI as a stuck "connecting" with no reply. Fail fast with a clear message.
+  try {
+    if (!statSync(workingDir).isDirectory()) throw new Error('not a directory');
+  } catch {
+    return res.status(400).json({
+      error: `工作目录不存在或无法访问：${workingDir}\n该项目可能已被删除或移动，请在左侧选择一个有效的项目后重试。`,
+    });
+  }
 
   // `--print` + `--output-format=stream-json` requires `--verbose` on recent CLI versions,
   // otherwise the CLI refuses to start and exits with code 1 before any stream data.
