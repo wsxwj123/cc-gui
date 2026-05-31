@@ -1,19 +1,54 @@
 import { Router } from 'express';
 import { writeFile, mkdir } from 'fs/promises';
-import { join } from 'path';
+import { extname, join } from 'path';
 import { tmpdir } from 'os';
 import { randomUUID } from 'crypto';
 
 const router = Router();
 
-// Match common image MIMEs we accept from drag/paste. Restrict to images for now —
-// the goal is "drop a screenshot for Claude to see", not arbitrary file upload.
-const MIME_EXT = {
-  'image/png': 'png',
-  'image/jpeg': 'jpg',
-  'image/gif': 'gif',
-  'image/webp': 'webp',
-  'image/heic': 'heic',
+const MIME_TYPES = {
+  'image/png': { ext: 'png', kind: 'image' },
+  'image/jpeg': { ext: 'jpg', kind: 'image' },
+  'image/gif': { ext: 'gif', kind: 'image' },
+  'image/webp': { ext: 'webp', kind: 'image' },
+  'image/heic': { ext: 'heic', kind: 'image' },
+  'text/plain': { ext: 'txt', kind: 'text' },
+  'text/markdown': { ext: 'md', kind: 'text' },
+  'text/csv': { ext: 'csv', kind: 'text' },
+  'text/tab-separated-values': { ext: 'tsv', kind: 'text' },
+  'text/html': { ext: 'html', kind: 'text' },
+  'text/css': { ext: 'css', kind: 'text' },
+  'text/xml': { ext: 'xml', kind: 'text' },
+  'application/json': { ext: 'json', kind: 'text' },
+  'application/x-ndjson': { ext: 'jsonl', kind: 'text' },
+  'application/xml': { ext: 'xml', kind: 'text' },
+  'application/javascript': { ext: 'js', kind: 'text' },
+  'application/yaml': { ext: 'yaml', kind: 'text' },
+  'application/x-yaml': { ext: 'yaml', kind: 'text' },
+};
+
+const TEXT_EXTS = new Set([
+  'txt', 'md', 'markdown', 'csv', 'tsv', 'log', 'json', 'jsonl',
+  'js', 'jsx', 'ts', 'tsx', 'css', 'html', 'htm', 'xml',
+  'yaml', 'yml', 'toml', 'ini', 'env', 'sh', 'bash', 'zsh',
+  'py', 'rb', 'go', 'rs', 'java', 'c', 'cc', 'cpp', 'h', 'hpp',
+  'sql',
+]);
+
+function resolveUploadType(mime, name) {
+  const ext = extname(name || '').slice(1).toLowerCase();
+  const mapped = MIME_TYPES[mime];
+  if (mapped) {
+    if (mapped.kind === 'text' && TEXT_EXTS.has(ext)) return { ...mapped, ext };
+    return mapped;
+  }
+  if (mime && mime.startsWith('text/')) {
+    return { ext: TEXT_EXTS.has(ext) ? ext : 'txt', kind: 'text' };
+  }
+  if ((mime === 'application/octet-stream' || !mime) && TEXT_EXTS.has(ext)) {
+    return { ext, kind: 'text' };
+  }
+  return null;
 };
 
 // Per-process upload root. tmpdir() is /tmp on macOS — Claude CLI can read it
@@ -36,17 +71,17 @@ router.post('/upload', async (req, res) => {
     const match = dataUrl.match(/^data:([^;,]+)(?:;base64)?,(.+)$/);
     if (!match) return res.status(400).json({ error: 'invalid data URL' });
     const mime = match[1];
-    const ext = MIME_EXT[mime];
-    if (!ext) return res.status(415).json({ error: `unsupported mime: ${mime}` });
+    const uploadType = resolveUploadType(mime, req.body?.name);
+    if (!uploadType) return res.status(415).json({ error: `unsupported mime: ${mime}` });
     const buf = Buffer.from(match[2], 'base64');
     if (buf.length > 24 * 1024 * 1024) {
       return res.status(413).json({ error: 'file too large (>24MB)' });
     }
     await mkdir(UPLOAD_DIR, { recursive: true });
-    const filename = `${randomUUID()}.${ext}`;
+    const filename = `${randomUUID()}.${uploadType.ext}`;
     const fullPath = join(UPLOAD_DIR, filename);
     await writeFile(fullPath, buf);
-    res.json({ path: fullPath, url: fullPath, bytes: buf.length, mime });
+    res.json({ path: fullPath, url: fullPath, bytes: buf.length, mime, kind: uploadType.kind });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Send, Loader2, Square, Terminal, Puzzle, Wrench, Gauge, ChevronDown, X, Image as ImageIcon, Shield, ShieldOff, ClipboardList, Check, Pencil, Smartphone } from 'lucide-react';
+import { Send, Loader2, Square, Terminal, Puzzle, Wrench, Gauge, ChevronDown, X, FileText, Paperclip, Shield, ShieldOff, ClipboardList, Check, Pencil, Smartphone } from 'lucide-react';
 import { useStore, PERMISSION_MODES } from '../stores/sessionStore.js';
 import { PermissionPrompt } from './PermissionPrompt.jsx';
 import { TodoPanel } from './TodoPanel.jsx';
@@ -157,10 +157,11 @@ export function ChatInput({ onSend, onStop, onAccelerate, disabled, isStreaming,
   const [commands, setCommands] = useState([]);
   const [provider, setProvider] = useState('Anthropic');
   const [isAnthropic, setIsAnthropic] = useState(true);
-  // Pending image attachments: { path, preview (data URL), name, bytes }
+  // Pending attachments: { kind, path, preview?, name, bytes }
   const [attachments, setAttachments] = useState([]);
   const [dragging, setDragging] = useState(false);
   const textareaRef = useRef(null);
+  const fileInputRef = useRef(null);
   // Permission mode lives in the store, keyed per-session via permKey so each
   // conversation keeps its own mode. Fall back to the global value only when
   // no key is supplied (shouldn't happen in normal render).
@@ -224,10 +225,7 @@ export function ChatInput({ onSend, onStop, onAccelerate, disabled, isStreaming,
     reader.readAsDataURL(file);
   });
 
-  // Upload an image File → server tmp dir. Returns the local absolute path
-  // that gets appended to the outgoing prompt so Claude can read it.
-  const uploadImage = async (file) => {
-    if (!file.type.startsWith('image/')) return;
+  const uploadAttachment = async (file) => {
     try {
       const dataUrl = await fileToDataUrl(file);
       const res = await fetch('/api/upload', {
@@ -241,8 +239,9 @@ export function ChatInput({ onSend, onStop, onAccelerate, disabled, isStreaming,
         return;
       }
       setAttachments((prev) => [...prev, {
+        kind: data.kind || (file.type.startsWith('image/') ? 'image' : 'text'),
         path: data.path,
-        preview: dataUrl,
+        preview: data.kind === 'image' || file.type.startsWith('image/') ? dataUrl : null,
         name: file.name || data.path.split('/').pop(),
         bytes: data.bytes,
       }]);
@@ -259,7 +258,7 @@ export function ChatInput({ onSend, onStop, onAccelerate, disabled, isStreaming,
         const f = item.getAsFile();
         if (f) {
           e.preventDefault();
-          uploadImage(f);
+          uploadAttachment(f);
         }
       }
     }
@@ -270,8 +269,14 @@ export function ChatInput({ onSend, onStop, onAccelerate, disabled, isStreaming,
     setDragging(false);
     const files = Array.from(e.dataTransfer?.files || []);
     for (const f of files) {
-      if (f.type.startsWith('image/')) uploadImage(f);
+      uploadAttachment(f);
     }
+  };
+
+  const handleFilePick = (e) => {
+    const files = Array.from(e.target.files || []);
+    for (const f of files) uploadAttachment(f);
+    e.target.value = '';
   };
 
   const removeAttachment = (path) => {
@@ -337,12 +342,14 @@ export function ChatInput({ onSend, onStop, onAccelerate, disabled, isStreaming,
     // Allow send if there's text OR attachments (so "just describe this image" works).
     if (!trimmed && attachments.length === 0) return;
     if (disabled || rcLocked) return;
-    // Append attachment paths to the prompt — Claude CLI sees absolute image
-    // paths in user text and loads them as image content blocks automatically.
+    // Append attachment paths to the prompt. Claude CLI can read absolute paths;
+    // images become image references, text files are explicit file references.
     const attachmentRefs = attachments.length > 0
-      ? '\n\n' + attachments.map((a) => `[image: ${a.path}]`).join('\n')
+      ? '\n\n附件:\n' + attachments.map((a) => (
+        a.kind === 'image' ? `[image: ${a.path}]` : `[file: ${a.path}]`
+      )).join('\n')
       : '';
-    onSend((trimmed || '请描述这些图片') + attachmentRefs);
+    onSend((trimmed || '请查看这些附件') + attachmentRefs);
     setText('');
     setAttachments([]);
     setShowCommands(false);
@@ -486,16 +493,26 @@ export function ChatInput({ onSend, onStop, onAccelerate, disabled, isStreaming,
         )}
 
 
-        {/* Attachment thumbnails — sit above the composer when present */}
+        {/* Attachments — sit above the composer when present */}
         {attachments.length > 0 && (
           <div className="flex flex-wrap gap-2 mb-2 px-2">
             {attachments.map((a) => (
               <div key={a.path} className="relative group/att">
-                <img
-                  src={a.preview}
-                  alt={a.name}
-                  className="h-16 w-16 object-cover rounded-lg border border-canvas-deep shadow-sm"
-                />
+                {a.kind === 'image' ? (
+                  <img
+                    src={a.preview}
+                    alt={a.name}
+                    className="h-16 w-16 object-cover rounded-lg border border-canvas-deep shadow-sm"
+                  />
+                ) : (
+                  <div className="h-16 w-36 rounded-lg border border-canvas-deep bg-canvas-warm shadow-sm px-2 py-2 flex items-center gap-2">
+                    <FileText size={18} className="text-accent shrink-0" />
+                    <div className="min-w-0">
+                      <div className="text-[11px] text-ink font-body truncate" title={a.name}>{a.name}</div>
+                      <div className="text-[9px] text-ink-faint font-mono">{Math.ceil((a.bytes || 0) / 1024)} KB</div>
+                    </div>
+                  </div>
+                )}
                 <button
                   onClick={() => removeAttachment(a.path)}
                   className="absolute -top-1.5 -right-1.5 w-5 h-5 rounded-full bg-canvas-deep text-ink-soft hover:bg-error hover:text-white flex items-center justify-center transition-colors opacity-0 group-hover/att:opacity-100"
@@ -503,9 +520,11 @@ export function ChatInput({ onSend, onStop, onAccelerate, disabled, isStreaming,
                 >
                   <X size={11} />
                 </button>
-                <span className="absolute bottom-0 left-0 right-0 text-[9px] text-white bg-black/60 px-1 py-px rounded-b-lg truncate text-center">
-                  {a.name}
-                </span>
+                {a.kind === 'image' && (
+                  <span className="absolute bottom-0 left-0 right-0 text-[9px] text-white bg-black/60 px-1 py-px rounded-b-lg truncate text-center">
+                    {a.name}
+                  </span>
+                )}
               </div>
             ))}
           </div>
@@ -517,13 +536,30 @@ export function ChatInput({ onSend, onStop, onAccelerate, disabled, isStreaming,
           onDragLeave={() => setDragging(false)}
           onDrop={handleDrop}
         >
+          <input
+            ref={fileInputRef}
+            type="file"
+            multiple
+            accept="image/*,text/*,.txt,.md,.markdown,.csv,.tsv,.log,.json,.jsonl,.js,.jsx,.ts,.tsx,.css,.html,.xml,.yaml,.yml,.toml,.ini,.sh,.py,.sql"
+            onChange={handleFilePick}
+            className="hidden"
+          />
+          <button
+            type="button"
+            onClick={() => fileInputRef.current?.click()}
+            disabled={disabled || rcLocked}
+            className="shrink-0 h-9 w-9 rounded-full hover:bg-black/5 text-ink-muted hover:text-accent flex items-center justify-center transition-colors disabled:opacity-50"
+            title="添加附件（图片或文本文件）"
+          >
+            <Paperclip size={16} />
+          </button>
           <textarea
             ref={textareaRef}
             value={text}
             onChange={(e) => setText(e.target.value)}
             onKeyDown={handleKeyDown}
             onPaste={handlePaste}
-            placeholder={rcLocked ? '已交给手机远程控制 · 点上方「收回控制」解锁' : (dragging ? '松开以添加图片…' : '输入消息... (/ 打开命令)')}
+            placeholder={rcLocked ? '已交给手机远程控制 · 点上方「收回控制」解锁' : (dragging ? '松开以添加图片或文本…' : '输入消息... (/ 打开命令)')}
             disabled={disabled || rcLocked}
             rows={1}
             className="flex-1 bg-transparent text-[14px] text-ink placeholder-ink-faint resize-none focus:outline-none font-body leading-relaxed min-h-[24px] max-h-[200px]"
