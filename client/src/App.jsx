@@ -3092,6 +3092,17 @@ function ProviderSwitcher() {
     await fetch(`/api/custom-providers/${id}`, { method: 'DELETE' }).catch(() => {});
     load();
   };
+  // Delete a CC Switch provider (writes cc-switch.db). Server backs the db up and
+  // refuses (409) while the CC Switch desktop app is running.
+  const removeCcProvider = async (appType, id, name) => {
+    if (!window.confirm(`删除 Provider「${name}」?\n\n写入 cc-switch 数据库(已自动备份)。若 CC Switch 桌面端正在运行,改动可能被它还原。`)) return;
+    try {
+      const r = await fetch(`/api/cc-providers/${appType}/${id}`, { method: 'DELETE' });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) { window.alert('删除失败: ' + (d.error || r.status)); return; }
+      load();
+    } catch (e) { window.alert('删除失败: ' + e.message); }
+  };
   useEffect(() => {
     load();
     const onCh = () => load();
@@ -3157,11 +3168,14 @@ function ProviderSwitcher() {
             </p>
           </div>
           {providers.map((p) => (
-            <button key={p.id} disabled={switching} onClick={() => switchTo(p.id)}
-              className={`w-full text-left px-3 py-2 hover:bg-canvas-warm transition-colors flex items-center gap-2 ${isCur(p) ? 'bg-accent-subtle' : ''} ${switching ? 'opacity-50' : ''}`}>
-              <span className={`flex-1 text-xs font-body truncate ${isCur(p) ? 'text-accent font-medium' : 'text-ink'}`}>{p.name}</span>
-              {isCur(p) && <Check size={12} className="text-accent shrink-0" />}
-            </button>
+            <div key={p.id} className={`w-full flex items-center gap-0.5 pr-2 hover:bg-canvas-warm transition-colors ${isCur(p) ? 'bg-accent-subtle' : ''}`}>
+              <button disabled={switching} onClick={() => switchTo(p.id)}
+                className={`flex-1 min-w-0 text-left px-3 py-2 flex items-center gap-2 ${switching ? 'opacity-50' : ''}`}>
+                <span className={`flex-1 text-xs font-body truncate ${isCur(p) ? 'text-accent font-medium' : 'text-ink'}`}>{p.name}</span>
+                {isCur(p) && <Check size={12} className="text-accent shrink-0" />}
+              </button>
+              <button onClick={() => removeCcProvider(p.appType, p.id, p.name)} title="删除" className="p-1 text-ink-faint hover:text-error shrink-0"><Trash2 size={12} /></button>
+            </div>
           ))}
           {openaiProviders.length > 0 && (
             <div className="px-3 pt-2 pb-1 mt-1 border-t border-canvas-deep">
@@ -3175,6 +3189,7 @@ function ProviderSwitcher() {
               <div className="flex items-center gap-2">
                 <span className={`flex-1 text-xs font-body truncate ${isCur(p) ? 'text-accent font-medium' : 'text-ink'}`}>{p.name}</span>
                 {isCur(p) && <Check size={12} className="text-accent shrink-0" />}
+                <button onClick={() => removeCcProvider(p.appType, p.id, p.name)} title="删除" className="p-0.5 text-ink-faint hover:text-error shrink-0"><Trash2 size={12} /></button>
               </div>
               {/* One chip per model — clicking switches to that specific model. */}
               <div className="flex flex-wrap gap-1 mt-1.5">
@@ -3803,9 +3818,11 @@ function CustomProviderForm({ onSaved }) {
     if (!name.trim() || !baseURL.trim()) return window.alert('名称和 Base URL 必填');
     setBusy('save');
     try {
-      const r = await fetch('/api/custom-providers', {
+      // Write into cc-switch.db so the new provider behaves like a CC Switch one
+      // (unified list). type maps anthropic→claude; first model becomes the default.
+      const r = await fetch('/api/cc-providers', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name, type, baseURL, apiKey, models: parseModels() }),
+        body: JSON.stringify({ type: type === 'anthropic' ? 'claude' : 'openai', name, baseURL, apiKey, model: parseModels()[0] || '' }),
       });
       const d = await r.json();
       if (!r.ok) throw new Error(d.error || '保存失败');
@@ -3819,14 +3836,14 @@ function CustomProviderForm({ onSaved }) {
     return (
       <button onClick={() => setOpen(true)}
         className="w-full flex items-center gap-2 px-4 py-3 text-left text-accent hover:bg-canvas-warm transition-colors border-t border-canvas-deep/40 mt-1">
-        <Plus size={16} /><span className="text-[14px] font-body">添加自定义 Provider</span>
+        <Plus size={16} /><span className="text-[14px] font-body">添加 Provider</span>
       </button>
     );
   }
   return (
     <div className="px-4 py-3 border-t border-canvas-deep/40 mt-1 space-y-2.5">
       <div className="flex items-center justify-between">
-        <span className="text-[13px] font-display font-semibold text-ink">新增自定义 Provider</span>
+        <span className="text-[13px] font-display font-semibold text-ink">新增 Provider<span className="text-[10px] font-body font-normal text-ink-faint ml-1">写入 cc-switch</span></span>
         <button onClick={() => setOpen(false)} className="p-1 text-ink-faint hover:text-ink"><X size={16} /></button>
       </div>
       <MobileSegmented onChange={setType} options={[
@@ -3889,21 +3906,38 @@ function MobileProviderPage() {
     await fetch(`/api/custom-providers/${id}`, { method: 'DELETE' }).catch(() => {});
     load();
   };
+  // Delete a CC Switch provider (writes cc-switch.db). Server backs the db up and
+  // refuses (409) while the CC Switch desktop app is running.
+  const removeCcProvider = async (appType, id, name) => {
+    if (!window.confirm(`删除 Provider「${name}」?\n\n写入 cc-switch 数据库(已自动备份)。若 CC Switch 桌面端正在运行,改动可能被它还原。`)) return;
+    try {
+      const r = await fetch(`/api/cc-providers/${appType}/${id}`, { method: 'DELETE' });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) { window.alert('删除失败: ' + (d.error || r.status)); return; }
+      load();
+    } catch (e) { window.alert('删除失败: ' + e.message); }
+  };
   return (
     <div className="py-1">
       {providers.map((p) => (
-        <button key={p.id} disabled={switching} onClick={() => switchTo(p.id)}
-          className={`w-full flex items-center gap-3 px-4 py-3 text-left hover:bg-canvas-warm transition-colors ${switching ? 'opacity-50' : ''}`}>
-          <span className={`flex-1 text-[14px] font-body truncate ${isCur(p) ? 'text-accent font-medium' : 'text-ink'}`}>{p.name}</span>
-          {isCur(p) && <Check size={16} className="text-accent shrink-0" />}
-        </button>
+        <div key={p.id} className={`w-full flex items-center gap-1 pr-3 hover:bg-canvas-warm transition-colors ${isCur(p) ? 'bg-accent-subtle' : ''}`}>
+          <button disabled={switching} onClick={() => switchTo(p.id)}
+            className={`flex-1 min-w-0 flex items-center gap-3 px-4 py-3 text-left ${switching ? 'opacity-50' : ''}`}>
+            <span className={`flex-1 text-[14px] font-body truncate ${isCur(p) ? 'text-accent font-medium' : 'text-ink'}`}>{p.name}</span>
+            {isCur(p) && <Check size={16} className="text-accent shrink-0" />}
+          </button>
+          <button onClick={() => removeCcProvider(p.appType, p.id, p.name)} title="删除" className="p-2 text-ink-faint hover:text-error shrink-0"><Trash2 size={16} /></button>
+        </div>
       ))}
       {openaiProviders.length > 0 && (
         <div className="px-4 pt-3 pb-1 text-[11px] text-ink-faint uppercase tracking-wider font-body border-t border-canvas-deep/40 mt-1">OpenAI 格式 · 经内置代理</div>
       )}
       {openaiProviders.map((p) => (
         <div key={p.id} className="px-4 py-2.5">
-          <div className={`text-[14px] font-body mb-1.5 ${isCur(p) ? 'text-accent font-medium' : 'text-ink'}`}>{p.name}</div>
+          <div className={`text-[14px] font-body mb-1.5 flex items-center gap-2 ${isCur(p) ? 'text-accent font-medium' : 'text-ink'}`}>
+            <span className="flex-1 truncate">{p.name}</span>
+            <button onClick={() => removeCcProvider(p.appType, p.id, p.name)} title="删除" className="p-1 text-ink-faint hover:text-error shrink-0"><Trash2 size={15} /></button>
+          </div>
           <div className="flex flex-wrap gap-1.5">
             {(p.models.length ? p.models : ['(默认)']).map((m) => (
               <button key={m} disabled={switching} onClick={() => switchTo(p.id, p.models.length ? m : undefined)}
