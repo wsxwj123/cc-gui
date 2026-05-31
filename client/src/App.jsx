@@ -832,18 +832,26 @@ function ProjectList() {
               const lastStart = (() => {
                 try { return localStorage.getItem('cgui-picker-last-start') || ''; } catch { return ''; }
               })();
-              try {
-                const r = await fetch('/api/pick-directory', {
-                  method: 'POST',
-                  headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({ prompt: '选择项目目录', startDir: lastStart || undefined }),
-                });
-                if (r.ok) {
-                  const data = await r.json();
-                  if (data.path === null) return;  // user cancelled
-                  path = data.path;
-                }
-              } catch {}
+              // The native folder picker (osascript `choose folder`) opens on the
+              // SERVER's Mac screen — a phone/remote client never sees it and the
+              // fetch hangs, so the "+" looks dead. Only use it when the browser is
+              // on the same machine as the server; remote/phone falls through to the
+              // path prompt below.
+              const isLocalHost = ['localhost', '127.0.0.1', '::1'].includes(window.location.hostname);
+              if (isLocalHost) {
+                try {
+                  const r = await fetch('/api/pick-directory', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ prompt: '选择项目目录', startDir: lastStart || undefined }),
+                  });
+                  if (r.ok) {
+                    const data = await r.json();
+                    if (data.path === null) return;  // user cancelled
+                    path = data.path;
+                  }
+                } catch {}
+              }
               if (!path) {
                 path = prompt('输入项目路径（如 ~/Desktop/my-project）');
               }
