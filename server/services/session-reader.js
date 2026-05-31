@@ -1,7 +1,24 @@
 import { readdir, stat, readFile } from 'fs/promises';
+import { existsSync } from 'fs';
 import { join, basename } from 'path';
 import { homedir } from 'os';
 import { parseJsonl, readJsonlEdges } from '../utils/jsonl-parser.js';
+
+const HOME = homedir();
+
+// Directories that are claude/GUI infrastructure or transient scratch — not real
+// user projects. They otherwise clutter the project list (e.g. ~/.claude/dispatcher
+// agent state, ~/.claude/channels bots, ~/.claude-mem observer sessions, /tmp
+// scratch dirs, and folders that were deleted/moved so their cwd no longer exists).
+function isNonProjectPath(p) {
+  if (!p) return true;
+  if (!existsSync(p)) return true;                                       // deleted / moved (stale cwd)
+  if (p === '/') return true;                                            // filesystem root
+  if (p === '/tmp' || p.startsWith('/tmp/') || p.startsWith('/private/tmp')) return true;
+  if (p === `${HOME}/.claude` || p.startsWith(`${HOME}/.claude/`)) return true;       // ~/.claude/* internals
+  if (p === `${HOME}/.claude-mem` || p.startsWith(`${HOME}/.claude-mem/`)) return true; // claude-mem state
+  return false;
+}
 
 /**
  * Read the real absolute cwd a GUI-registered project was created with, from
@@ -102,6 +119,10 @@ export async function listProjects() {
         } catch {}
       }
       if (!realPath) realPath = decodeProjectHash(entry.name);
+
+      // Skip infrastructure/scratch/deleted dirs so the project list shows only
+      // real user projects (filters ~/.claude internals, /tmp, deleted folders).
+      if (isNonProjectPath(realPath)) continue;
 
       // sessionCount must match what listSessions will actually show. For a
       // sidecar project sharing a collapsed hash dir with another real path,
