@@ -3,6 +3,7 @@ name = "claude-gui"
 version = "0.1.0"
 description = "Claude GUI — native shell"
 authors = ["wsxwj"]
+license = "MIT"
 edition = "2021"
 
 [lib]
