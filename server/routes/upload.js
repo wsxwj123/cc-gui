@@ -68,12 +68,19 @@ router.post('/upload', async (req, res) => {
     if (typeof dataUrl !== 'string' || !dataUrl.startsWith('data:')) {
       return res.status(400).json({ error: 'dataUrl (base64) required' });
     }
-    const match = dataUrl.match(/^data:([^;,]+)(?:;base64)?,(.+)$/);
+    // Header can carry params (`text/plain;charset=utf-8;base64`) or be empty
+    // (`data:;base64,...` for unknown-type files), so split on the first comma
+    // and parse the header rather than demand a strict shape.
+    const match = dataUrl.match(/^data:([^,]*),(.+)$/);
     if (!match) return res.status(400).json({ error: 'invalid data URL' });
-    const mime = match[1];
+    const header = match[1];
+    const isBase64 = /;base64$/i.test(header);
+    const mime = header.replace(/;base64$/i, '').split(';')[0].trim().toLowerCase();
     const uploadType = resolveUploadType(mime, req.body?.name);
-    if (!uploadType) return res.status(415).json({ error: `unsupported mime: ${mime}` });
-    const buf = Buffer.from(match[2], 'base64');
+    if (!uploadType) return res.status(415).json({ error: `unsupported mime: ${mime || '(none)'}` });
+    const buf = isBase64
+      ? Buffer.from(match[2], 'base64')
+      : Buffer.from(decodeURIComponent(match[2]), 'utf8');
     if (buf.length > 24 * 1024 * 1024) {
       return res.status(413).json({ error: 'file too large (>24MB)' });
     }

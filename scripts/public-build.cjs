@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 const { spawnSync } = require('child_process');
-const { existsSync, mkdirSync, readdirSync, renameSync, statSync } = require('fs');
+const { existsSync, mkdirSync, readdirSync, renameSync, rmSync, statSync } = require('fs');
 const path = require('path');
 
 const root = path.resolve(__dirname, '..');
@@ -72,6 +72,10 @@ try {
   status = run(command[0], command[1]);
 } finally {
   restoreLocalFiles(moved);
+  // restoreLocalFiles only renames files back, leaving empty dir scaffolding in
+  // the stash. Remove it so it doesn't accumulate. If a restore threw above, the
+  // throw exits before this line, preserving the stash for manual recovery.
+  try { rmSync(stashRoot, { recursive: true, force: true }); } catch {}
 }
 
 if (status !== 0) process.exit(status);

@@ -8,10 +8,13 @@
 # avoid stranding a phone client when started bare).
 cd "$(dirname "$0")" || exit 1
 
-# Build the frontend once if it hasn't been built yet.
+# Build the frontend once if it hasn't been built yet. Use build:local (NOT the
+# public build) so this private launcher keeps the machine-local *.local widgets
+# (e.g. bot controls) in client/dist. client/dist is gitignored, so they never
+# leak to the public repo — public packaging uses `npm run build` which strips them.
 if [ ! -d client/dist ]; then
   echo "[gui] building frontend (first run)…"
-  npm run build || { echo "[gui] build failed"; exit 1; }
+  npm run build:local || { echo "[gui] build failed"; exit 1; }
 fi
 
 echo "[gui] starting with restart watchdog (Ctrl-C twice to fully stop)…"
