@@ -36,9 +36,14 @@ fn port_up() -> bool {
 // repo layout used during `cargo run`/`cargo tauri dev`.
 fn resolve_server_entry(app: &tauri::App) -> Option<PathBuf> {
     if let Ok(res) = app.path().resource_dir() {
-        let bundled = res.join("server").join("index.js");
-        if bundled.exists() {
-            return Some(bundled);
+        // tauri packs the `../server` resource under an `_up_` subdir; try that
+        // first, then the un-prefixed layout as a fallback.
+        for prefix in ["_up_", ""] {
+            let base = if prefix.is_empty() { res.clone() } else { res.join(prefix) };
+            let bundled = base.join("server").join("index.js");
+            if bundled.exists() {
+                return Some(bundled);
+            }
         }
     }
     let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
