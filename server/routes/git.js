@@ -1,24 +1,16 @@
 import { Router } from 'express';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
-import { resolve as pathResolve } from 'path';
-import { homedir } from 'os';
 import { stat } from 'fs/promises';
+import { resolveUnderHome } from '../utils/safe-path.js';
 
 const execFileP = promisify(execFile);
 const router = Router();
 
 function safeCwd(p) {
-  if (typeof p !== 'string' || !p.startsWith('/')) throw new Error('invalid cwd');
-  // pathResolve normalizes `//+` → `/` and strips trailing `/`. We used to
-  // reject when `r !== p` (paranoid "no symlink / no traversal"), but that
-  // also rejected harmlessly non-canonical inputs like `/Users/foo/bar////`
-  // — which is exactly what decodeProjectHash produces for legacy project
-  // dirs ending in dashes. Return the resolved form and rely on the
-  // startsWith($HOME) check below for sandboxing.
-  const r = pathResolve(p);
-  if (!r.startsWith(homedir())) throw new Error('refusing to operate outside $HOME');
-  return r;
+  // Normalize harmless `//+` / trailing slash inputs, but keep the HOME boundary
+  // exact (`/Users/me2` must not pass for `/Users/me`).
+  return resolveUnderHome(p, { label: 'cwd' });
 }
 
 /** GET /api/git/status?cwd=... → { isRepo, branch, hasChanges } */

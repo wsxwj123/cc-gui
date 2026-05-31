@@ -6,7 +6,7 @@
   "build": {
     "beforeDevCommand": "npm run server",
     "devUrl": "http://127.0.0.1:6677",
-    "beforeBuildCommand": "npm run build",
+    "beforeBuildCommand": "npm run build:tauri",
     "frontendDist": "../client/dist"
   },
   "app": {

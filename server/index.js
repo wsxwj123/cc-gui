@@ -35,10 +35,9 @@ import { homedir, networkInterfaces } from 'os';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 // Network binding: env > ~/.claude-gui/network.json > loopback default.
-// The GUI has no auth and can read/write $HOME + spawn `claude`; binding 0.0.0.0
-// hands any machine that can reach the port full shell access. The Settings UI
-// exposes a LAN toggle (writes the config below) behind a red warning — access
-// control is delegated to the network layer (tailscale ACL / LAN isolation).
+// External clients require the GUI password; binding 0.0.0.0 without one would
+// expose $HOME-backed actions and spawned Claude sessions to the network, so it
+// is forced back to loopback below.
 const NETWORK_CONFIG_PATH = join(homedir(), '.claude-gui', 'network.json');
 function loadNetworkConfig() {
   try {
@@ -60,7 +59,11 @@ function loadNetworkConfig() {
 }
 const _netCfg = loadNetworkConfig();
 const PORT = process.env.PORT || _netCfg.port;
-const HOST = process.env.HOST || _netCfg.host;
+let HOST = process.env.HOST || _netCfg.host;
+if (HOST === '0.0.0.0' && !hasPassword()) {
+  console.warn('[network] HOST=0.0.0.0 requested but no password is set — falling back to 127.0.0.1.');
+  HOST = '127.0.0.1';
+}
 // LAN mode = bound to all interfaces. Loosens CORS (below) so a phone hitting
 // http://<lanIp>:PORT isn't rejected as cross-origin.
 const lanMode = HOST === '0.0.0.0';
@@ -489,10 +492,15 @@ process.on('unhandledRejection', (reason) => {
 });
 
 server.listen(PORT, HOST, () => {
+  const exposure = HOST === '127.0.0.1'
+    ? ' (loopback only)'
+    : hasPassword()
+      ? ' (network-exposed, password protected)'
+      : ' (network-exposed)';
   console.log('═'.repeat(60));
   console.log(`  Claude GUI server READY   http://localhost:${PORT}`);
   console.log(`  WebSocket                  ws://localhost:${PORT}/ws`);
-  console.log(`  Bound to                   ${HOST}${HOST === '127.0.0.1' ? ' (loopback only)' : ' (⚠ network-exposed, no auth!)'}`);
+  console.log(`  Bound to                   ${HOST}${exposure}`);
   console.log(`  Started at                 ${new Date().toLocaleString()}`);
   console.log('═'.repeat(60));
   // Re-arm the OpenAI translation proxy if a codex/opencode provider was active

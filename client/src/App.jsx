@@ -495,14 +495,14 @@ function MainLayout({ sidebarCollapsed, selectedProject, rightPanel, setRightPan
       <div className="flex-1 flex min-h-0 overflow-hidden relative">
         <main className="flex-1 flex flex-col relative overflow-hidden min-w-0">
           {/* Split mode has no room on a phone — always show one pane. */}
-          <SessionDetail tabIndex={0} />
+          <SessionDetail tabIndex={0} mobileChrome />
         </main>
 
         {/* Sidebar drawer — Claude-app style multi-level menu */}
         {!sidebarCollapsed && (
           <>
             <div className="fixed inset-0 z-40 bg-black/40 animate-fade-in" onClick={toggleSidebar} />
-            <aside className="fixed inset-y-0 left-0 z-50 w-[86vw] max-w-[360px] glass-thick flex flex-col overflow-hidden animate-glass-rise">
+            <aside className="mobile-drawer fixed inset-y-0 left-0 z-50 w-[86vw] max-w-[360px] glass-thick flex flex-col overflow-hidden animate-glass-rise">
               <MobileMenu setRightPanel={setRightPanel} onClose={toggleSidebar} />
             </aside>
           </>
@@ -1701,7 +1701,7 @@ function GitInitBanner({ cwd }) {
 }
 
 // ─── Session Detail ────────────────────────────────────────────
-function SessionDetail({ tabIndex = 0 }) {
+function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
   // Split-mode tab routing: when tabIndex===1 we render the SECOND pane and
   // read from secondary{Session,Messages} + write back via setSecondarySession
   // / setSecondaryMessages. tabIndex===0 keeps the legacy globals untouched
@@ -2804,7 +2804,7 @@ function SessionDetail({ tabIndex = 0 }) {
 
   return (
     <div className="flex-1 flex flex-col min-h-0 glass-base relative">
-      <div className="glass-bar shrink-0 px-6 py-3 relative z-30">
+      {!mobileChrome && <div className="glass-bar shrink-0 px-6 py-3 relative z-30">
         {/* Title row wraps when the pane is narrow or font is scaled up so
             the right-side stats/buttons drop to a second line instead of
             clipping the title. */}
@@ -2879,7 +2879,7 @@ function SessionDetail({ tabIndex = 0 }) {
             </div>
           </div>
         </div>
-      </div>
+      </div>}
 
       {/* Permission-mode hint banner — moved here from ChatInput so it sits
           directly under the session title. With our PreToolUse permission
@@ -4127,7 +4127,7 @@ function MobileMenu({ setRightPanel, onClose }) {
 // cramming every control into a wrapped header.
 function MobileTopBar({ onMenu, onNew, title }) {
   return (
-    <header className="glass-bar h-12 px-2 flex items-center gap-1 shrink-0 relative z-40">
+    <header className="mobile-topbar glass-bar h-12 px-2 flex items-center gap-1 shrink-0 relative z-40">
       <button onClick={onMenu} className="btn-glass p-2 shrink-0" title="会话">
         <Menu size={18} className="text-ink-muted" />
       </button>
@@ -4156,9 +4156,9 @@ export default function App() {
       .catch(() => {});
   }, []);
 
-  // Optional local-only widgets (client/src/components/*.local.jsx). import.meta
-  // .glob resolves to {} when no such file exists, so on a fresh checkout this is
-  // a no-op and nothing renders — the personal bot controls never ship.
+  // Optional local-only widgets (client/src/components/*.local.jsx). Fresh
+  // checkouts have none; public builds temporarily move them out of the build
+  // graph so personal controls do not enter client/dist or Tauri bundles.
   const [LocalWidget, setLocalWidget] = useState(null);
   useEffect(() => {
     const mods = import.meta.glob('./components/*.local.jsx');
@@ -4354,7 +4354,7 @@ export default function App() {
     // `bottom: var(--kb)` lifts the whole app above the soft keyboard so the
     // composer stays visible while typing.
     return (
-      <div className="flex flex-col overflow-hidden" style={{ position: 'fixed', left: 0, top: 0, right: 0, bottom: 'var(--kb, 0px)' }}>
+      <div className="cgui-mobile-root flex flex-col overflow-hidden" style={{ position: 'fixed', left: 0, top: 0, right: 0, bottom: 'var(--kb, 0px)' }}>
         <MobileTopBar onMenu={toggleSidebar} onNew={startMobileNewChat} title={mobileTitle} />
         <MainLayout
           sidebarCollapsed={sidebarCollapsed}

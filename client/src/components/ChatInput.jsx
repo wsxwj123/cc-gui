@@ -417,7 +417,7 @@ export function ChatInput({ onSend, onStop, onAccelerate, disabled, isStreaming,
           </div>
         </div>
       )}
-    <div className="px-4 py-5">
+    <div className="chat-input-shell px-4 py-5">
       <div className="max-w-3xl mx-auto relative">
         {/* Slash command dropdown */}
         {showCommands && (
@@ -523,7 +523,7 @@ export function ChatInput({ onSend, onStop, onAccelerate, disabled, isStreaming,
             onChange={(e) => setText(e.target.value)}
             onKeyDown={handleKeyDown}
             onPaste={handlePaste}
-            placeholder={rcLocked ? '已交给手机远程控制 · 点上方「收回控制」解锁' : (dragging ? '松开以添加图片…' : '输入消息... (/ 打开命令, Enter 发送, Shift+Enter 换行, 可粘贴/拖入图片)')}
+            placeholder={rcLocked ? '已交给手机远程控制 · 点上方「收回控制」解锁' : (dragging ? '松开以添加图片…' : '输入消息... (/ 打开命令)')}
             disabled={disabled || rcLocked}
             rows={1}
             className="flex-1 bg-transparent text-[14px] text-ink placeholder-ink-faint resize-none focus:outline-none font-body leading-relaxed min-h-[24px] max-h-[200px]"

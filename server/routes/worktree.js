@@ -5,16 +5,13 @@ import { join, dirname, basename, resolve as pathResolve } from 'path';
 import { mkdir } from 'fs/promises';
 import { homedir } from 'os';
 import { stat } from 'fs/promises';
+import { isPathInside, resolveUnderHome } from '../utils/safe-path.js';
 
 const execFileP = promisify(execFile);
 const router = Router();
 
 function safe(p) {
-  if (typeof p !== 'string' || !p.startsWith('/')) throw new Error('invalid path');
-  const r = pathResolve(p);
-  if (r !== p) throw new Error('invalid path');
-  if (!r.startsWith(homedir())) throw new Error('out of $HOME');
-  return r;
+  return resolveUnderHome(p, { requireCanonical: true });
 }
 
 async function findGitRoot(start) {
@@ -41,7 +38,7 @@ router.post('/worktree', async (req, res) => {
     const container = pathResolve(root, '..', `${basename(root)}-worktrees`);
     // Guard: never create the container outside $HOME (e.g. if root sits
     // directly under /Users, its parent escapes HOME).
-    if (!container.startsWith(homedir())) {
+    if (!isPathInside(container, homedir())) {
       return res.status(400).json({ error: 'worktree container would fall outside $HOME' });
     }
     await mkdir(container, { recursive: true });

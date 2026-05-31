@@ -4,6 +4,8 @@ client/dist/
 *.log
 .DS_Store
 .claude/
+AGENTS.md
+.cgui-local-disabled/
 
 # Local-only, machine-private modules — never committed. Used for personal
 # integrations (e.g. driving desktop scripts) that shouldn't ship publicly.

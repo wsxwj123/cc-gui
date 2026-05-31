@@ -1,9 +1,10 @@
 import { Router } from 'express';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
-import { join, dirname, resolve as pathResolve } from 'path';
+import { join } from 'path';
 import { homedir } from 'os';
 import { stat, mkdir } from 'fs/promises';
+import { resolveUnderHome } from '../utils/safe-path.js';
 
 const execFileP = promisify(execFile);
 const router = Router();
@@ -15,12 +16,9 @@ const router = Router();
 const CHECKPOINTS_ROOT = join(homedir(), '.claude', 'gui', 'checkpoints');
 
 function safe(p) {
-  if (typeof p !== 'string' || !p.startsWith('/')) throw new Error('invalid path');
-  // Use pathResolve to canonicalize `//+` and trailing `/` rather than reject —
-  // legacy project dirs decode to non-canonical paths but are still valid.
-  const r = pathResolve(p);
-  if (!r.startsWith(homedir())) throw new Error('out of $HOME');
-  return r;
+  // Canonicalize `//+` and trailing `/` rather than reject — legacy project
+  // dirs decode to non-canonical paths but are still valid.
+  return resolveUnderHome(p);
 }
 
 const SESSION_RE = /^[A-Za-z0-9_-]{1,80}$/;

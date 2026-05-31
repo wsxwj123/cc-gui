@@ -2,9 +2,10 @@ import { Router } from 'express';
 import { parseJsonl } from '../utils/jsonl-parser.js';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
-import { join, resolve as pathResolve, dirname } from 'path';
+import { join, dirname } from 'path';
 import { homedir } from 'os';
 import { stat } from 'fs/promises';
+import { resolveUnderHome } from '../utils/safe-path.js';
 
 const execFileP = promisify(execFile);
 
@@ -107,11 +108,7 @@ router.get('/sessions/:sessionId/file-changes', async (req, res) => {
 
 // Make sure callers can't reach outside the user's home with a crafted path.
 function assertSafePath(p) {
-  if (typeof p !== 'string' || !p.startsWith('/')) throw new Error('invalid path');
-  const resolved = pathResolve(p);
-  if (resolved !== p) throw new Error('invalid path');
-  if (!resolved.startsWith(homedir())) throw new Error('refusing to touch path outside $HOME');
-  return resolved;
+  return resolveUnderHome(p, { requireCanonical: true });
 }
 
 /**

@@ -8,12 +8,15 @@
     "dev": "concurrently \"npm run server\" \"npm run client\"",
     "server": "node server/index.js",
     "client": "cd client && npx vite --port 5173",
-    "build": "cd client && npx vite build",
+    "build": "node scripts/public-build.cjs build",
+    "build:local": "cd client && npx vite build",
+    "build:tauri": "node scripts/require-public-build.cjs && npm run build:local",
+    "audit:public": "node scripts/audit-public.cjs",
     "start": "NODE_ENV=production node server/index.js",
     "stop": "lsof -ti:6677 | xargs kill -9 2>/dev/null || true",
     "restart": "npm run stop && npm start",
     "tauri:dev": "cargo tauri dev",
-    "tauri:build": "cargo tauri build"
+    "tauri:build": "node scripts/public-build.cjs tauri"
   },
   "dependencies": {
     "chokidar": "^4.0.0",
