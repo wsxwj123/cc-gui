@@ -183,7 +183,12 @@ router.post('/chat', async (req, res) => {
     // vars so settings.json (or OAuth) wins. Failure mode: a user who relied on a
     // pure-shell ANTHROPIC_API_KEY with no settings.json provider now gets 401 —
     // they must configure the provider in the GUI, which is the intended source.
-    for (const k of ['ANTHROPIC_BASE_URL', 'ANTHROPIC_API_URL', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_API_KEY']) {
+    // Also drop CLAUDE_CODE_OAUTH_TOKEN: an inherited (stale) value pins the CLI to
+    // an old subscription token and blocks it from refreshing the keychain OAuth on
+    // its own, causing 401 once that token expires. Removing it lets the CLI read
+    // the live keychain (`Claude Code-credentials`) and auto-refresh via refreshToken
+    // — the same reason restart-bots.sh `unset`s it before nudging a refresh.
+    for (const k of ['ANTHROPIC_BASE_URL', 'ANTHROPIC_API_URL', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN']) {
       delete childEnv[k];
     }
     // Strip permission-related env so the CLI honours our --permission-mode
