@@ -43,4 +43,30 @@ router.put('/prefs/hidden-projects', async (req, res) => {
   }
 });
 
+// GET /api/prefs/hidden-providers → { hidden: string[] }
+// Provider IDs the user "removed" from the GUI list. cc-switch providers can't
+// be deleted from cc-switch.db (read-only), so hiding is how a delete sticks:
+// the id is filtered out of GET /providers on the client. Custom providers are
+// truly deleted; this is only for the cc-switch-imported ones.
+router.get('/prefs/hidden-providers', async (_req, res) => {
+  const prefs = await loadPrefs();
+  res.json({ hidden: Array.isArray(prefs.hiddenProviders) ? prefs.hiddenProviders : [] });
+});
+
+// PUT /api/prefs/hidden-providers { hidden: string[] }
+router.put('/prefs/hidden-providers', async (req, res) => {
+  const { hidden } = req.body || {};
+  if (!Array.isArray(hidden) || !hidden.every((h) => typeof h === 'string')) {
+    return res.status(400).json({ error: 'hidden 必须是字符串数组' });
+  }
+  try {
+    const prefs = await loadPrefs();
+    prefs.hiddenProviders = hidden;
+    await savePrefs(prefs);
+    res.json({ ok: true, hidden });
+  } catch (e) {
+    res.status(500).json({ error: '写入偏好失败：' + e.message });
+  }
+});
+
 export default router;

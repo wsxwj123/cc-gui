@@ -3185,6 +3185,11 @@ function ProviderSwitcher() {
   // Optimistic current id: the CC Switch db's is_current isn't updated by us
   // (we never write that db), so after a switch we mark the active one locally.
   const [activeId, setActiveId] = useState(null);
+  // cc-switch providers can't be deleted from the read-only db, so "hiding" them
+  // (server-persisted set of ids) is how a removal sticks. Custom providers are
+  // truly deleted instead.
+  const [hiddenProviders, setHiddenProviders] = useState(new Set());
+  const [showHidden, setShowHidden] = useState(false);
   const wrapRef = useRef(null);
   const currentProvider = useStore((s) => s.currentProvider);
 
@@ -3194,6 +3199,23 @@ function ProviderSwitcher() {
       setOpenaiProviders(Array.isArray(d.openaiProviders) ? d.openaiProviders : []);
       setCustomProviders(Array.isArray(d.customProviders) ? d.customProviders : []);
     }).catch(() => {});
+    fetch('/api/prefs/hidden-providers').then((r) => r.json())
+      .then((d) => setHiddenProviders(new Set(Array.isArray(d.hidden) ? d.hidden : [])))
+      .catch(() => {});
+  };
+  const persistHiddenProviders = (set) => {
+    fetch('/api/prefs/hidden-providers', {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ hidden: [...set] }),
+    }).catch(() => {});
+  };
+  const toggleHideProvider = (id) => {
+    setHiddenProviders((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      persistHiddenProviders(next);
+      return next;
+    });
   };
   const removeCustom = async (id, name) => {
     if (!window.confirm(`删除自定义 Provider「${name}」?`)) return;
@@ -3266,12 +3288,15 @@ function ProviderSwitcher() {
               来自 CC Switch。切换会改写 <code className="font-mono">~/.claude/settings.json</code>（自动备份），<b>对新发的消息生效</b>。
             </p>
           </div>
-          {providers.map((p) => (
-            <div key={p.id} className={`w-full flex items-center gap-0.5 pr-2 hover:bg-canvas-warm transition-colors ${isCur(p) ? 'bg-accent-subtle' : ''}`}>
+          {providers.filter((p) => showHidden || !hiddenProviders.has(p.id)).map((p) => (
+            <div key={p.id} className={`w-full flex items-center gap-0.5 pr-2 hover:bg-canvas-warm transition-colors ${isCur(p) ? 'bg-accent-subtle' : ''} ${hiddenProviders.has(p.id) ? 'opacity-50' : ''}`}>
               <button disabled={switching} onClick={() => switchTo(p.id)}
                 className={`flex-1 min-w-0 text-left px-3 py-2 flex items-center gap-2 ${switching ? 'opacity-50' : ''}`}>
                 <span className={`flex-1 text-xs font-body truncate ${isCur(p) ? 'text-accent font-medium' : 'text-ink'}`}>{p.name}</span>
                 {isCur(p) && <Check size={12} className="text-accent shrink-0" />}
+              </button>
+              <button onClick={() => toggleHideProvider(p.id)} title={hiddenProviders.has(p.id) ? '取消隐藏' : '从列表隐藏'} className="p-1 text-ink-faint hover:text-ink-muted shrink-0">
+                {hiddenProviders.has(p.id) ? <ArchiveRestore size={12} /> : <EyeOff size={12} />}
               </button>
             </div>
           ))}
@@ -3282,11 +3307,14 @@ function ProviderSwitcher() {
               </div>
             </div>
           )}
-          {openaiProviders.map((p) => (
-            <div key={p.id} className={`px-3 py-2 ${isCur(p) ? 'bg-accent-subtle' : ''}`}>
+          {openaiProviders.filter((p) => showHidden || !hiddenProviders.has(p.id)).map((p) => (
+            <div key={p.id} className={`px-3 py-2 ${isCur(p) ? 'bg-accent-subtle' : ''} ${hiddenProviders.has(p.id) ? 'opacity-50' : ''}`}>
               <div className="flex items-center gap-2">
                 <span className={`flex-1 text-xs font-body truncate ${isCur(p) ? 'text-accent font-medium' : 'text-ink'}`}>{p.name}</span>
                 {isCur(p) && <Check size={12} className="text-accent shrink-0" />}
+                <button onClick={() => toggleHideProvider(p.id)} title={hiddenProviders.has(p.id) ? '取消隐藏' : '从列表隐藏'} className="p-0.5 text-ink-faint hover:text-ink-muted shrink-0">
+                  {hiddenProviders.has(p.id) ? <ArchiveRestore size={12} /> : <EyeOff size={12} />}
+                </button>
               </div>
               {/* One chip per model — clicking switches to that specific model. */}
               <div className="flex flex-wrap gap-1 mt-1.5">
@@ -3325,6 +3353,15 @@ function ProviderSwitcher() {
               </div>
             </div>
           ))}
+          {(() => {
+            const hc = [...providers, ...openaiProviders].filter((p) => hiddenProviders.has(p.id)).length;
+            return hc > 0 ? (
+              <button onClick={() => setShowHidden((v) => !v)}
+                className="w-full text-left px-3 py-1.5 text-[10px] text-ink-faint hover:text-ink-muted border-t border-canvas-deep font-body">
+                {showHidden ? '收起已隐藏' : `显示 ${hc} 个已隐藏的 provider`}
+              </button>
+            ) : null;
+          })()}
           <CustomProviderForm onSaved={load} />
         </div>
       )}
