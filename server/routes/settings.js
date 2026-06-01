@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { readFile, writeFile, mkdir, copyFile, unlink } from 'fs/promises';
+import { existsSync } from 'fs';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { join, isAbsolute } from 'path';
@@ -130,7 +131,9 @@ router.put('/settings', async (req, res) => {
   try {
     const body = { ...(req.body || {}) };
     const addPath = typeof body._addProject === 'string' ? body._addProject.trim() : null;
+    const createDir = body._createDir === true;
     delete body._addProject;
+    delete body._createDir;
 
     let addedHash = null;
     let addedPath = null;
@@ -145,6 +148,19 @@ router.put('/settings', async (req, res) => {
         return res.status(400).json({ error: '项目路径必须是绝对路径或 ~/ 开头' });
       }
       const clean = absPath.replace(/[/\\]+$/, '') || absPath;
+      // If the target folder doesn't exist, don't silently register a phantom.
+      // First call: tell the client (needsCreate) so it can ask the user. Second
+      // call (createDir=true): actually create the real folder, then register.
+      if (!existsSync(clean)) {
+        if (!createDir) {
+          return res.json({ needsCreate: true, addedPath: clean });
+        }
+        try {
+          await mkdir(clean, { recursive: true });
+        } catch (err) {
+          return res.status(500).json({ error: '新建文件夹失败: ' + err.message });
+        }
+      }
       addedPath = clean;
       addedHash = pathToHash(clean);
       const projectDir = join(PROJECTS_DIR, addedHash);

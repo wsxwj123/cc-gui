@@ -812,28 +812,51 @@ function ProjectList() {
     setAddingProject(true);
     setAddError('');
     try {
-      const r = await fetch('/api/settings', {
+      let r = await fetch('/api/settings', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ _addProject: path }),
       });
-      const data = await r.json().catch(() => ({}));
+      let data = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
+      // Folder doesn't exist → ask whether to create it. Decline = close dialog.
+      if (data.needsCreate) {
+        const ok = window.confirm(`文件夹不存在：\n${data.addedPath}\n\n是否新建该文件夹并作为项目？`);
+        if (!ok) { setAddDialogOpen(false); setAddPathInput(''); return; }
+        r = await fetch('/api/settings', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ _addProject: path, _createDir: true }),
+        });
+        data = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
+      }
       await fetchProjects();
       const fresh = useStore.getState().projects;
       const clean = data.addedPath || path.replace(/\/+$/, '') || '/';
-      const proj = fresh.find((p) => p.path === clean) || (data.addedHash && fresh.find((p) => p.hash === data.addedHash));
-      if (proj) {
+      // ALWAYS un-hide the added hash. A folder the user explicitly adds MUST be
+      // visible — even if it was hidden before, or its (lossy CLI) hash collides
+      // with a hidden sibling. Previously we only un-hid when `proj` was found AND
+      // already hidden, so a re-added/colliding folder stayed invisible: the exact
+      // "I add a folder but it never shows up" bug.
+      if (data.addedHash) {
         setHidden((prev) => {
-          if (!prev.has(proj.hash)) return prev;
+          if (!prev.has(data.addedHash)) return prev;
           const next = new Set(prev);
-          next.delete(proj.hash);
+          next.delete(data.addedHash);
           persistHidden(next);
           return next;
         });
+      }
+      // Prefer hash match (exact) over path-string equality.
+      const proj = (data.addedHash && fresh.find((p) => p.hash === data.addedHash))
+        || fresh.find((p) => p.path === clean);
+      if (proj) {
         useStore.getState().setSelectedProject(proj);
         useStore.getState().fetchSessions(proj.hash, { silent: true });
       } else {
+        // Created on disk but absent from the refreshed list — still usable (the
+        // hash dir exists), so enter it; the next refresh will surface it.
         useStore.getState().setSelectedProject({
           path: clean,
           hash: data.addedHash || clean.replace(/[^A-Za-z0-9]/g, '-'),
@@ -966,7 +989,7 @@ function ProjectList() {
             </button>
             <button
               onClick={(e) => { e.stopPropagation(); toggleHidden(project.hash); }}
-              className="absolute top-1.5 right-1.5 opacity-0 group-hover:opacity-100 transition-opacity p-1 hover:bg-canvas-deep rounded"
+              className="absolute top-1.5 right-1.5 opacity-100 md:opacity-0 md:group-hover:opacity-100 transition-opacity p-1 hover:bg-canvas-deep rounded"
               title="从侧栏隐藏（不删除本地文件，下次按 + 重新添加同路径即可恢复）"
             >
               <EyeOff size={12} className="text-ink-faint" />
