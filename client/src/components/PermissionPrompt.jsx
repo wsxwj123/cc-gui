@@ -453,7 +453,7 @@ export function PermissionPrompt({ sessionId = null, onExecutePlan = null }) {
 
   // Opt-in batch: resolve the SAME request (same tool + identical input) in the
   // OTHER sessions currently open in panes. Different requests are untouched.
-  const sameInputKey = (r) => `${r.toolName} ${JSON.stringify(r.toolInput || {})}`;
+  const sameInputKey = (r) => `${r.toolName} ${JSON.stringify(r.toolInput || {})}`;
   const paneSidSet = new Set(
     (paneSessions || []).slice(0, paneCount || 1).map((p) => p?.sessionId).filter(Boolean)
   );
