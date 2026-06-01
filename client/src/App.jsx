@@ -2551,7 +2551,7 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
         // is the "connecting → 空白" case, typically an OpenAI-proxy provider whose
         // upstream rejected auth / the model doesn't exist, so the CLI produced no
         // turn. Surface a fallback instead of a silent blank.
-        const msg = 'provider 没有返回任何内容（常见于认证失败 401 或模型不存在）。请检查当前 provider 的 key 与模型是否有效，或切换其它 provider。';
+        const msg = 'provider 没有返回任何内容。常见原因：① 会话上下文已满（看顶部 token 占比，接近/超过上限时上游会拒绝整个请求 → 用 /compact 压缩或新建会话）；② 认证失败 401 或模型不存在（检查 key 与模型，或切换其它 provider）。';
         setChatMessages((prev) => [...prev, {
           uuid: 'chat-empty-' + Date.now(),
           type: 'turn',
