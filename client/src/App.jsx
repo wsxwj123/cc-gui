@@ -3331,21 +3331,17 @@ function ProviderSwitcher() {
           {openaiProviders.filter((p) => showHidden || !hiddenProviders.has(p.id)).map((p) => (
             <div key={p.id} className={`px-3 py-2 ${isCur(p) ? 'bg-accent-subtle' : ''} ${hiddenProviders.has(p.id) ? 'opacity-50' : ''}`}>
               <div className="flex items-center gap-2">
-                <span className={`flex-1 text-xs font-body truncate ${isCur(p) ? 'text-accent font-medium' : 'text-ink'}`}>{p.name}</span>
-                {isCur(p) && <Check size={12} className="text-accent shrink-0" />}
+                {/* Click the provider to switch to it (default model). The full
+                    model list lives in the ModelSelector after switching. */}
+                <button disabled={switching} onClick={() => switchTo(p.id)}
+                  className={`flex-1 min-w-0 text-left flex items-center gap-2 ${switching ? 'opacity-50' : ''}`}>
+                  <span className={`flex-1 text-xs font-body truncate ${isCur(p) ? 'text-accent font-medium' : 'text-ink'}`}>{p.name}</span>
+                  {p.models.length > 0 && <span className="text-[9px] px-1 py-px bg-canvas-deep text-ink-faint rounded font-mono shrink-0">{p.models.length} 模型</span>}
+                  {isCur(p) && <Check size={12} className="text-accent shrink-0" />}
+                </button>
                 <button onClick={() => toggleHideProvider(p.id)} title={hiddenProviders.has(p.id) ? '取消隐藏' : '从列表隐藏'} className="p-0.5 text-ink-faint hover:text-ink-muted shrink-0">
                   {hiddenProviders.has(p.id) ? <ArchiveRestore size={12} /> : <EyeOff size={12} />}
                 </button>
-              </div>
-              {/* One chip per model — clicking switches to that specific model. */}
-              <div className="flex flex-wrap gap-1 mt-1.5">
-                {(p.models.length ? p.models : ['(默认)']).map((m) => (
-                  <button key={m} disabled={switching}
-                    onClick={() => switchTo(p.id, p.models.length ? m : undefined)}
-                    className={`text-[10px] font-mono px-1.5 py-0.5 rounded border transition-colors ${switching ? 'opacity-50' : ''} border-canvas-deep text-ink-soft hover:border-accent hover:text-accent`}>
-                    {m}
-                  </button>
-                ))}
               </div>
               <OpenAIModelManager provider={p} onSaved={load} />
             </div>

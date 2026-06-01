@@ -3,6 +3,15 @@ import { join } from 'path';
 import { homedir } from 'os';
 
 const CLAUDE_SETTINGS = join(homedir(), '.claude', 'settings.json');
+// Written by switchToOpenAIUpstream when an OpenAI-format provider is active.
+// Holds { providerId, name, model, models[] } so we can offer the provider's
+// full model list even though settings.json only carries the one active model.
+const OPENAI_ACTIVE = join(homedir(), '.claude-gui', 'openai-active.json');
+
+async function readOpenAIActive() {
+  try { return JSON.parse(await readFile(OPENAI_ACTIVE, 'utf-8')); }
+  catch { return null; }
+}
 
 // mtime-keyed cache so `cc switch` (which rewrites settings.json) takes effect immediately.
 let settingsCache = null;
@@ -113,7 +122,14 @@ export async function getAvailableModels() {
   // they show up as misleading "duplicate" rows next to the real model ids.
   const baseUrl = env.ANTHROPIC_BASE_URL || '';
   let provider = 'Anthropic';
-  if (baseUrl) {
+  // When an OpenAI-format provider is active, ANTHROPIC_BASE_URL points at the
+  // loopback proxy (127.0.0.1) — useless as a label. Use the real provider name
+  // and surface its WHOLE model list so the ModelSelector can pick any of them.
+  const oaActive = await readOpenAIActive();
+  const isProxyActive = /^https?:\/\/127\.0\.0\.1[:/]/.test(baseUrl) && oaActive;
+  if (isProxyActive) {
+    provider = oaActive.name || 'OpenAI';
+  } else if (baseUrl) {
     try {
       const host = new URL(baseUrl).hostname;
       if (host.endsWith('anthropic.com')) provider = 'Anthropic';
@@ -126,6 +142,11 @@ export async function getAvailableModels() {
     } catch {}
   }
   const isAnthropic = provider === 'Anthropic';
+  // Add every model the active OpenAI provider exposes (the user picks one in the
+  // ModelSelector; the CLI sends it and the proxy forwards it upstream).
+  if (isProxyActive && Array.isArray(oaActive.models)) {
+    for (const m of oaActive.models) add(m, m, '', 'openai-provider');
+  }
 
   // Every *_MODEL key — enumerate from settings.json ONLY, never the inherited
   // process.env. A shell that launched the server may carry stale ANTHROPIC_*

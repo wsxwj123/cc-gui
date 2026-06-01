@@ -351,7 +351,12 @@ router.post('/provider/switch', async (req, res) => {
       if (oaHit) {
         const parsed = parseOpenAIProvider(oaHit.settings_config);
         if (!parsed) return res.status(500).json({ error: 'provider 配置缺少 baseURL/apiKey' });
-        return switchToOpenAIUpstream({ id: oaHit.id, name: oaHit.name, ...parsed }, model, res);
+        // Use the user's multi-select model list (which may add ids cc-switch's
+        // static settings_config lacks, e.g. gpt-5.5) over the raw db list — same
+        // precedence GET /providers uses — so ModelSelector offers all of them.
+        const sel = await readProviderModels();
+        const models = sel[oaHit.id]?.length ? sel[oaHit.id] : parsed.models;
+        return switchToOpenAIUpstream({ id: oaHit.id, name: oaHit.name, baseURL: parsed.baseURL, apiKey: parsed.apiKey, models }, model, res);
       }
       // GUI custom providers (stored outside cc-switch).
       const custom = (await readCustomProviders()).find((p) => p.id === id);
@@ -425,10 +430,13 @@ async function switchToOpenAIUpstream(up, requestedModel, res) {
   const ts = new Date().toISOString().replace(/[:.]/g, '-');
   await copyFile(SETTINGS_PATH, `${SETTINGS_PATH}.${ts}.bak`).catch(() => {});
   await writeFile(SETTINGS_PATH, JSON.stringify(next, null, 2));
-  // Remember the active provider id (not the key) for restart recovery.
+  // Remember the active provider id (not the key) for restart recovery. Also
+  // persist the provider's FULL model list + name so model-resolver can offer
+  // every model in the ModelSelector (not just the one we switched to) — the CLI
+  // sends whichever model the user picks and the proxy forwards it upstream.
   try {
     await mkdir(join(homedir(), '.claude-gui'), { recursive: true });
-    await writeFile(OPENAI_ACTIVE_PATH, JSON.stringify({ providerId: up.id, model }));
+    await writeFile(OPENAI_ACTIVE_PATH, JSON.stringify({ providerId: up.id, name: up.name, model, models }));
   } catch {}
   await writeActiveProviderId(up.id);
   res.json({ ok: true, name: up.name, model, via: 'openai-proxy' });
