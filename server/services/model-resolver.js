@@ -176,6 +176,15 @@ export async function getAvailableModels() {
     add(val, senv[nameKey] || envKeyToLabel(key, val), tier, key);
   }
 
+  // Anthropic passthrough proxy: surface the provider's FULL model list in the
+  // ModelSelector. A custom anthropic provider only carries ANTHROPIC_MODEL in
+  // env, so its other models must come from the active marker. Added AFTER the
+  // env loop so cc-switch's nicely-labeled tier rows win the dedup; this only
+  // fills in models that env didn't already list.
+  if (isAnthropicProxyActive && Array.isArray(anthropicActive.models)) {
+    for (const m of anthropicActive.models) add(m, m, '', 'anthropic-provider');
+  }
+
   // CLI aliases — `claude --model sonnet` resolves to latest of that tier
   // server-side. Only meaningful on Anthropic; on a redirected provider they're
   // noise (and look like duplicates of the concrete model ids), so skip them.

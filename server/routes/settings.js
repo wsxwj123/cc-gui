@@ -505,9 +505,15 @@ async function switchToAnthropicUpstream(up, requestedModel, res) {
   const snapshot = (up.snapshot && typeof up.snapshot === 'object') ? up.snapshot : {};
   const env = { ...(snapshot.env || {}) };
   env.ANTHROPIC_BASE_URL = `http://127.0.0.1:${port}`;
-  if (requestedModel && (!up.models?.length || up.models.includes(requestedModel))) {
-    env.ANTHROPIC_MODEL = requestedModel;
-  }
+  // Pick the active model: explicit request (if valid) > the snapshot's existing
+  // ANTHROPIC_MODEL (if it belongs to THIS provider) > the provider's first model.
+  // Without this, clicking a custom provider row (no model arg) would inherit the
+  // PREVIOUS provider's stale ANTHROPIC_MODEL.
+  const models = up.models || [];
+  const chosen = (requestedModel && (!models.length || models.includes(requestedModel)))
+    ? requestedModel
+    : (models.includes(env.ANTHROPIC_MODEL) ? env.ANTHROPIC_MODEL : (models[0] || env.ANTHROPIC_MODEL));
+  if (chosen) env.ANTHROPIC_MODEL = chosen; else delete env.ANTHROPIC_MODEL;
   const next = { ...snapshot, env };
   const ts = new Date().toISOString().replace(/[:.]/g, '-');
   await copyFile(SETTINGS_PATH, `${SETTINGS_PATH}.${ts}.bak`).catch(() => {});
