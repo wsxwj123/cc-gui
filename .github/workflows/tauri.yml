@@ -1,9 +1,9 @@
 name: Build Desktop App
 
-# Builds unsigned desktop installers for macOS and Windows and uploads them as
-# downloadable artifacts. Windows can't be built from a Mac locally, so this CI
-# is the only path to a .exe — trigger it manually (Actions tab → Run workflow)
-# or by pushing a v* tag.
+# Builds unsigned desktop installers for macOS and Windows. On a v* tag push it
+# publishes them to a GitHub Release; it also uploads them as artifacts either way.
+# Windows can't be built from a Mac locally, so this CI is the only path to a .exe
+# — trigger it manually (Actions tab → Run workflow) or by pushing a v* tag.
 #
 # NOTE: this workflow has NOT been validated on a real Windows runner. The first
 # run may surface platform-specific issues (node-pty rebuild, NSIS/WiX, bundled
@@ -50,11 +50,25 @@ jobs:
       # CGUI_PUBLIC_BUILD=1 satisfies require-public-build.cjs (build:tauri refuses
       # without it). A CI checkout has no *.local.* files anyway (gitignored), so
       # the bundle is inherently clean — this just unblocks the guard.
+      # On a v* tag push, tauri-action also CREATES/UPDATES a GitHub Release and
+      # uploads each OS's installer to it (both matrix jobs target the same tag —
+      # the action creates the release once and appends the other platform's
+      # bundle). On manual workflow_dispatch (ref is a branch) it just builds.
       - name: Build app
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CGUI_PUBLIC_BUILD: '1'
+        with:
+          tagName: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || '' }}
+          releaseName: 'Claude GUI ${{ github.ref_name }}'
+          releaseBody: |
+            未签名安装包,首次打开需手动放行:
+
+            - **macOS**:仅支持 Apple Silicon(M 系列芯片);下载 `.dmg` 拖入「应用程序」后,右键 .app →「打开」,或在「系统设置 → 隐私与安全性」点「仍要打开」。
+            - **Windows**:`.exe`(NSIS)或 `.msi` 均可;SmartScreen 提示时点「更多信息 →仍要运行」。
+          releaseDraft: false
+          prerelease: false
 
       - name: Upload installers
         uses: actions/upload-artifact@v4
