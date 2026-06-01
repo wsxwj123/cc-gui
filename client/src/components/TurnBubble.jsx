@@ -352,7 +352,13 @@ function UsageDisplay({ usage, model }) {
 }
 
 // ─── Turn Bubble ───────────────────────────────────────────────
-export function TurnBubble({ turn }) {
+// Memoized: a long session renders dozens of these (each with markdown + many
+// tool-call rows). Without memo, every streaming token / dropdown toggle /
+// unrelated state change re-renders ALL of them, saturating the main thread and
+// making the whole UI (provider & model menus included) feel laggy. `turn` comes
+// from the persisted `messages` array which is referentially stable while a NEW
+// turn streams into separate state, so memo lets the old turns skip re-render.
+function TurnBubbleInner({ turn }) {
   const [showThinking, setShowThinking] = useState(false);
 
   // Historical turns loaded from .jsonl may have these fields absent or as a
@@ -515,3 +521,5 @@ export function TurnBubble({ turn }) {
     </div>
   );
 }
+
+export const TurnBubble = React.memo(TurnBubbleInner);
