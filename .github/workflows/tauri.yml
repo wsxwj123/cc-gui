@@ -44,13 +44,17 @@ jobs:
         run: npm ci
         working-directory: client
 
-      # tauri-action runs the conf's beforeBuildCommand (npm run build) then
+      # tauri-action runs the conf's beforeBuildCommand (npm run build:tauri) then
       # `tauri build`, bundling per-OS installers (dmg on macOS, nsis/msi on
       # Windows) because tauri.conf bundle.targets is "all".
+      # CGUI_PUBLIC_BUILD=1 satisfies require-public-build.cjs (build:tauri refuses
+      # without it). A CI checkout has no *.local.* files anyway (gitignored), so
+      # the bundle is inherently clean — this just unblocks the guard.
       - name: Build app
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CGUI_PUBLIC_BUILD: '1'
 
       - name: Upload installers
         uses: actions/upload-artifact@v4
