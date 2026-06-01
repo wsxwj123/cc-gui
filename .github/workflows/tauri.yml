@@ -16,6 +16,11 @@ on:
 
 jobs:
   build:
+    # tauri-action creates a GitHub Release on a v* tag, which needs a write token.
+    # The repo's default workflow permission is read-only, so request write here
+    # explicitly (scoped to this workflow — doesn't change the repo-wide default).
+    permissions:
+      contents: write
     strategy:
       fail-fast: false
       matrix:
