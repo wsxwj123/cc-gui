@@ -1,13 +1,14 @@
 name: Build Desktop App
 
-# Builds unsigned desktop installers for macOS and Windows. On a v* tag push it
-# publishes them to a GitHub Release; it also uploads them as artifacts either way.
-# Windows can't be built from a Mac locally, so this CI is the only path to a .exe
-# — trigger it manually (Actions tab → Run workflow) or by pushing a v* tag.
+# Builds unsigned desktop installers for macOS and Windows. On a v* tag push, a
+# SEPARATE release job gathers both platforms' artifacts and publishes ONE GitHub
+# Release. Windows can't be built from a Mac locally, so this CI is the only path
+# to a .exe — trigger it manually (Actions tab → Run workflow) or by pushing a v* tag.
 #
-# NOTE: this workflow has NOT been validated on a real Windows runner. The first
-# run may surface platform-specific issues (node-pty rebuild, NSIS/WiX, bundled
-# node_modules size) — read the failing step's log and adjust from there.
+# Why a separate release job: letting tauri-action create the release inside the
+# build MATRIX races — both OS jobs create/delete the same-tag release and one
+# clobbers the other (v0.1.2 was created then vanished this way). So the matrix
+# only BUILDS + uploads artifacts; a single ubuntu job then creates the release.
 
 on:
   workflow_dispatch:
@@ -16,11 +17,6 @@ on:
 
 jobs:
   build:
-    # tauri-action creates a GitHub Release on a v* tag, which needs a write token.
-    # The repo's default workflow permission is read-only, so request write here
-    # explicitly (scoped to this workflow — doesn't change the repo-wide default).
-    permissions:
-      contents: write
     strategy:
       fail-fast: false
       matrix:
@@ -49,31 +45,14 @@ jobs:
         run: npm ci
         working-directory: client
 
-      # tauri-action runs the conf's beforeBuildCommand (npm run build:tauri) then
-      # `tauri build`, bundling per-OS installers (dmg on macOS, nsis/msi on
-      # Windows) because tauri.conf bundle.targets is "all".
-      # CGUI_PUBLIC_BUILD=1 satisfies require-public-build.cjs (build:tauri refuses
-      # without it). A CI checkout has no *.local.* files anyway (gitignored), so
-      # the bundle is inherently clean — this just unblocks the guard.
-      # On a v* tag push, tauri-action also CREATES/UPDATES a GitHub Release and
-      # uploads each OS's installer to it (both matrix jobs target the same tag —
-      # the action creates the release once and appends the other platform's
-      # bundle). On manual workflow_dispatch (ref is a branch) it just builds.
+      # Build ONLY — no release inputs, so tauri-action just bundles per-OS
+      # installers (dmg on macOS, nsis/msi on Windows; bundle.targets="all").
+      # CGUI_PUBLIC_BUILD=1 satisfies require-public-build.cjs; a CI checkout has
+      # no *.local.* files (gitignored) so the bundle is inherently clean.
       - name: Build app
         uses: tauri-apps/tauri-action@v0
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CGUI_PUBLIC_BUILD: '1'
-        with:
-          tagName: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || '' }}
-          releaseName: 'Claude GUI ${{ github.ref_name }}'
-          releaseBody: |
-            未签名安装包,首次打开需手动放行:
-
-            - **macOS**:仅支持 Apple Silicon(M 系列芯片);下载 `.dmg` 拖入「应用程序」后,右键 .app →「打开」,或在「系统设置 → 隐私与安全性」点「仍要打开」。
-            - **Windows**:`.exe`(NSIS)或 `.msi` 均可;SmartScreen 提示时点「更多信息 →仍要运行」。
-          releaseDraft: false
-          prerelease: false
 
       - name: Upload installers
         uses: actions/upload-artifact@v4
@@ -84,3 +63,35 @@ jobs:
             src-tauri/target/release/bundle/dmg/*.dmg
             src-tauri/target/release/bundle/nsis/*.exe
             src-tauri/target/release/bundle/msi/*.msi
+
+  # Single, race-free release: runs once after both builds, gathers every
+  # installer, and publishes one GitHub Release for the pushed tag.
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all installers
+        uses: actions/download-artifact@v4
+        with:
+          path: dist-artifacts
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cat > notes.md <<'EOF'
+          未签名安装包,首次打开需手动放行:
+
+          - **macOS**:仅支持 Apple Silicon(M 系列芯片);下载 `.dmg` 拖入「应用程序」后,右键 .app →「打开」,或在「系统设置 → 隐私与安全性」点「仍要打开」。
+          - **Windows**:`.exe`(NSIS)或 `.msi` 均可;SmartScreen 提示时点「更多信息 → 仍要运行」。
+          EOF
+          FILES=$(find dist-artifacts -type f \( -name '*.dmg' -o -name '*.exe' -o -name '*.msi' \))
+          echo "Artifacts to attach:"; echo "$FILES"
+          gh release create "${{ github.ref_name }}" \
+            --repo "${{ github.repository }}" \
+            --title "Claude GUI ${{ github.ref_name }}" \
+            --notes-file notes.md \
+            $FILES
