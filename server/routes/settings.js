@@ -36,6 +36,14 @@ function isOfficialAnthropic(baseURL) {
   if (!baseURL) return true; // empty → CLI default endpoint (api.anthropic.com)
   try { return new URL(baseURL).hostname.endsWith('anthropic.com'); } catch { return false; }
 }
+
+// A claude-family model id (or CLI tier alias). Used to drop FOREIGN model ids
+// (e.g. deepseek) that cc-switch's "common config" leaks into the official
+// provider's env, so switching to official never requests a non-claude model.
+function isClaudeModel(id) {
+  if (!id || typeof id !== 'string') return false;
+  return /claude/i.test(id) || ['sonnet', 'opus', 'haiku'].includes(id);
+}
 // Remembers the LAST provider switched via the GUI (claude or openai). CC Switch's
 // own is_current flag never reflects a GUI switch (we only write settings.json,
 // not its db), so GET /providers reads this marker to mark the right row current —
@@ -366,7 +374,7 @@ router.post('/provider/switch', async (req, res) => {
 
     // Read ALL claude providers and match in JS — user input never touches SQL.
     const rows = await ccSwitchQuery(
-      "SELECT id, name, settings_config FROM providers WHERE app_type='claude'"
+      "SELECT id, name, category, settings_config FROM providers WHERE app_type='claude'"
     );
     const hit = rows.find((r) => r.id === id);
 
@@ -398,6 +406,30 @@ router.post('/provider/switch', async (req, res) => {
     catch { return res.status(500).json({ error: 'provider 配置解析失败' }); }
     if (!snapshot || typeof snapshot !== 'object' || Array.isArray(snapshot)) {
       return res.status(500).json({ error: 'provider 配置非法' });
+    }
+
+    // cc-switch marks the official Anthropic subscription with category='official'.
+    // Its stored settings_config can carry a STALE third-party env — cc-switch's
+    // "common config" leaks deepseek's baseURL+token+models into every provider,
+    // but cc-switch IGNORES them for official providers (uses the OAuth login). If
+    // we applied that env literally the user's "Claude Official" would wrongly route
+    // to deepseek. So for official: strip routing/auth env (use OAuth) and any
+    // NON-claude model overrides, then write directly (no proxy).
+    if (hit.category === 'official') {
+      const env = { ...(snapshot.env || {}) };
+      for (const k of ['ANTHROPIC_BASE_URL', 'ANTHROPIC_API_URL', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_API_KEY']) delete env[k];
+      for (const k of Object.keys(env)) {
+        if (/_MODEL$/.test(k) && !isClaudeModel(env[k])) { delete env[k]; delete env[k + '_NAME']; }
+      }
+      if (model && isClaudeModel(model)) env.ANTHROPIC_MODEL = model;
+      const next = { ...snapshot, env };
+      const ts = new Date().toISOString().replace(/[:.]/g, '-');
+      await copyFile(SETTINGS_PATH, `${SETTINGS_PATH}.${ts}.bak`).catch(() => {});
+      await writeFile(SETTINGS_PATH, JSON.stringify(next, null, 2));
+      await writeActiveProviderId(hit.id);
+      await unlink(OPENAI_ACTIVE_PATH).catch(() => {});
+      await unlink(ANTHROPIC_ACTIVE_PATH).catch(() => {});
+      return res.json({ ok: true, name: hit.name, via: 'official' });
     }
 
     // Third-party Anthropic-format provider (deepseek/mimo/relay): route through
