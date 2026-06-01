@@ -62,12 +62,25 @@ async function main() {
     allow(`auto-allow ${toolName} (read-class)`);
   }
 
-  // Plan mode: let EXPLORATION flow (Read, Grep, Bash, Agent/Task subagents…)
-  // so the turn doesn't freeze on the first exploration tool, while still
-  // gating ExitPlanMode (→ plan-review card) and, as defense-in-depth, any
-  // write-class tool (a plan-mode turn shouldn't be editing files; if it tries,
-  // make the user confirm rather than silently allowing it).
-  const PLAN_GATED = ['ExitPlanMode', 'Edit', 'Write', 'NotebookEdit'];
+  // Plan mode: only the GATED tools below reach the GUI; everything else passes
+  // through (so exploration — Read/Grep/Bash/Agent — never freezes on a popup).
+  //
+  //  - ExitPlanMode → plan-review card.
+  //  - AskUserQuestion → option picker. The CLI DISABLES this tool in headless
+  //    (-p) mode and returns an is_error result ("Answer questions?"), so it never
+  //    works on its own. But this PreToolUse hook fires BEFORE that rejection and
+  //    sees the tool input (questions/options). The GUI renders a picker and feeds
+  //    the user's choice back as the (deny) reason — the model reads that as the
+  //    answer and continues (verified). Gating it here also stops plan mode from
+  //    passing it straight through.
+  //
+  // Edit/Write/NotebookEdit are intentionally NOT gated in plan mode: empirically
+  // `claude -p --permission-mode plan` HARD-BLOCKS the actual filesystem write
+  // inside the CLI regardless of the hook's decision, so a popup would ask the
+  // user to authorize an edit that can never happen — and it would appear BEFORE
+  // the plan-review card (the model emits Edit attempts before ExitPlanMode),
+  // making the flow feel backwards. The CLI's own plan enforcement is the guard.
+  const PLAN_GATED = ['ExitPlanMode', 'AskUserQuestion'];
   if (process.env.CGUI_PLAN_MODE && !PLAN_GATED.includes(toolName)) {
     allow(`plan-mode passthrough ${toolName}`);
   }

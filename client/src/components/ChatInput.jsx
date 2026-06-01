@@ -405,7 +405,15 @@ export function ChatInput({ onSend, onStop, onAccelerate, disabled, isStreaming,
     <div>
       {/* Permission popup — sits ABOVE the composer (Claude Desktop style),
           filtered to the active session. No-op when no requests pending. */}
-      <PermissionPrompt sessionId={sessionId} />
+      <PermissionPrompt
+        sessionId={sessionId}
+        onExecutePlan={() => {
+          // Plan approved → switch THIS session to acceptEdits and resume so the
+          // CLI actually executes (headless plan mode can't execute in-process).
+          setPermissionMode('acceptEdits', permKey);
+          onSend('请严格按照刚才批准的计划开始执行，不要重新规划或再次询问。');
+        }}
+      />
       {/* TODO checklist — sits between permission popup and composer, mirroring
           Claude Desktop. Auto-hides when there's no TodoWrite snapshot. */}
       <TodoPanel todos={todos} />

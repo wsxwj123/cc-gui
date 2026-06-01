@@ -54,10 +54,17 @@ function renderInput(toolName, input) {
 }
 
 // Plan-mode review card. Triggered by ExitPlanMode tool_use which our hook
-// intercepts like any other PreToolUse. Approve → CLI continues turn with
-// acceptEdits-like execution. Refine → CLI sees a `deny` with the feedback
-// as `reason`, AI revises the plan and re-emits ExitPlanMode.
-function PlanReviewCard({ req, onResolve, processing, position }) {
+// intercepts like any other PreToolUse.
+//
+// Approve ("按计划执行") → onApprove: we DENY the ExitPlanMode (with an
+// "approved, end the turn" reason) so the headless planning turn stops cleanly
+// instead of looping — empirically, `claude -p --permission-mode plan` cannot
+// transition out of plan mode in-process, so allowing ExitPlanMode just makes
+// the model spin trying to re-confirm. The caller then re-spawns a fresh
+// acceptEdits turn to actually execute the approved plan.
+// Refine → CLI sees a `deny` with the feedback as `reason`, AI revises the
+// plan and re-emits ExitPlanMode. Cancel → plain deny.
+function PlanReviewCard({ req, onResolve, onApprove, processing, position }) {
   const plan = String(req.toolInput?.plan || '').trim();
   const [feedback, setFeedback] = useState('');
   const [showRefine, setShowRefine] = useState(false);
@@ -66,12 +73,12 @@ function PlanReviewCard({ req, onResolve, processing, position }) {
     const onKey = (e) => {
       const t = e.target;
       if (t && (t.tagName === 'TEXTAREA' || t.tagName === 'INPUT')) return;
-      if (e.key === 'Enter') { e.preventDefault(); onResolve(req, 'allow'); }
-      else if (e.key === 'Escape') { e.preventDefault(); onResolve(req, 'deny'); }
+      if (e.key === 'Enter') { e.preventDefault(); onApprove(req); }
+      else if (e.key === 'Escape') { e.preventDefault(); onResolve(req, 'deny', '用户取消计划'); }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [position, req, onResolve]);
+  }, [position, req, onResolve, onApprove]);
 
   const submitRefine = () => {
     onResolve(req, 'deny', feedback.trim() || '请修改计划');
@@ -134,7 +141,7 @@ function PlanReviewCard({ req, onResolve, processing, position }) {
           >取消</button>
           <button
             disabled={processing}
-            onClick={() => onResolve(req, 'allow')}
+            onClick={() => onApprove(req)}
             className="ml-auto px-3 py-1.5 rounded-md text-[12px] font-medium text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-50 inline-flex items-center gap-1.5"
             title="Enter"
           >
@@ -143,6 +150,117 @@ function PlanReviewCard({ req, onResolve, processing, position }) {
           </button>
         </div>
       )}
+    </div>
+  );
+}
+
+// AskUserQuestion picker. The CLI can't run this tool in headless mode, so the
+// GUI collects the choice and feeds it back via onAnswer (a deny whose reason is
+// the answer). toolInput.questions = [{ question, header, options:[{label,
+// description}], multiSelect? }].
+function AskQuestionCard({ req, onAnswer, processing, position }) {
+  const questions = Array.isArray(req.toolInput?.questions) ? req.toolInput.questions : [];
+  const [picks, setPicks] = useState({});    // qi -> string | string[]
+  const [customs, setCustoms] = useState({}); // qi -> free text
+
+  const choose = (qi, label, multi) => {
+    setPicks((prev) => {
+      if (!multi) return { ...prev, [qi]: prev[qi] === label ? undefined : label };
+      const cur = Array.isArray(prev[qi]) ? prev[qi] : [];
+      return { ...prev, [qi]: cur.includes(label) ? cur.filter((x) => x !== label) : [...cur, label] };
+    });
+  };
+  const answerOf = (qi) => {
+    const c = (customs[qi] || '').trim();
+    const p = picks[qi];
+    const sel = Array.isArray(p) ? p.join('、') : (p || '');
+    return [sel, c].filter(Boolean).join('；');
+  };
+  const allAnswered = questions.length > 0 && questions.every((_, qi) => answerOf(qi));
+
+  const submit = () => {
+    if (!allAnswered) return;
+    const text = questions
+      .map((q, qi) => `【${q.header || '问题' + (qi + 1)}】${q.question}\n→ ${answerOf(qi)}`)
+      .join('\n\n');
+    onAnswer(req, text);
+  };
+
+  useEffect(() => {
+    if (position !== 0) return;
+    const onKey = (e) => {
+      const t = e.target;
+      if (t && (t.tagName === 'TEXTAREA' || t.tagName === 'INPUT')) return;
+      if (e.key === 'Enter' && allAnswered) { e.preventDefault(); submit(); }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [position, allAnswered, picks, customs]);
+
+  return (
+    <div className="rounded-xl bg-white border border-canvas-deep shadow-lg overflow-hidden animate-fade-up relative">
+      <div className="px-4 py-2.5 flex items-center gap-2 border-b border-canvas-deep bg-violet-50/60">
+        <div className="w-6 h-6 rounded-md bg-violet-100 flex items-center justify-center shrink-0">
+          <AlertCircle size={13} className="text-violet-700" />
+        </div>
+        <div className="text-[13px] font-medium text-ink flex-1">Claude 需要你的选择</div>
+      </div>
+      <div className="px-4 py-3 max-h-[46vh] overflow-y-auto space-y-4">
+        {questions.map((q, qi) => {
+          const multi = !!q.multiSelect;
+          const opts = Array.isArray(q.options) ? q.options : [];
+          return (
+            <div key={qi} className="space-y-2">
+              {q.header && <div className="text-[10.5px] uppercase tracking-wide text-ink-faint">{q.header}</div>}
+              <div className="text-[13px] text-ink font-medium">{q.question}{multi && <span className="text-ink-faint font-normal">（可多选）</span>}</div>
+              <div className="grid gap-1.5">
+                {opts.map((o, oi) => {
+                  const label = typeof o === 'string' ? o : (o?.label ?? '');
+                  const desc = typeof o === 'object' ? o?.description : null;
+                  const p = picks[qi];
+                  const sel = multi ? (Array.isArray(p) && p.includes(label)) : p === label;
+                  return (
+                    <button
+                      key={oi}
+                      disabled={processing}
+                      onClick={() => choose(qi, label, multi)}
+                      className={`text-left px-3 py-2 rounded-lg border text-[12.5px] transition-colors disabled:opacity-50 ${
+                        sel ? 'border-violet-400 bg-violet-50 text-ink' : 'border-canvas-deep bg-canvas-warm/40 text-ink-soft hover:bg-canvas-deep'
+                      }`}
+                    >
+                      <span className="font-medium">{label}</span>
+                      {desc && <span className="block text-[11px] text-ink-faint mt-0.5">{desc}</span>}
+                    </button>
+                  );
+                })}
+                <input
+                  type="text"
+                  value={customs[qi] || ''}
+                  onChange={(e) => setCustoms((prev) => ({ ...prev, [qi]: e.target.value }))}
+                  placeholder="或自定义回答…"
+                  className="mt-0.5 text-[12px] font-body px-2.5 py-1.5 rounded-md border border-canvas-deep bg-white text-ink"
+                />
+              </div>
+            </div>
+          );
+        })}
+      </div>
+      <div className="px-4 py-2.5 flex items-center gap-2 bg-canvas-warm/60 border-t border-canvas-deep">
+        <button
+          disabled={processing}
+          onClick={() => onAnswer(req, '[用户跳过了此问题，请自行用合理默认值继续]')}
+          className="px-3 py-1.5 rounded-md text-[12px] font-medium text-ink-muted hover:bg-canvas-deep disabled:opacity-50"
+        >跳过</button>
+        <button
+          disabled={processing || !allAnswered}
+          onClick={submit}
+          className="ml-auto px-3 py-1.5 rounded-md text-[12px] font-medium text-white bg-violet-600 hover:bg-violet-700 disabled:opacity-50 inline-flex items-center gap-1.5"
+          title="Enter"
+        >
+          {processing && <Loader2 size={11} className="animate-spin" />}
+          提交 ↵
+        </button>
+      </div>
     </div>
   );
 }
@@ -248,7 +366,12 @@ function PendingPill({ req, position }) {
  * currently-selected session — other sessions' requests stay in the store
  * but don't render here.
  */
-export function PermissionPrompt({ sessionId = null }) {
+// Reason fed back to the CLI when the user approves a plan. Denying ExitPlanMode
+// with this (rather than allowing it) ends the one-shot headless planning turn
+// cleanly; the caller then re-spawns an acceptEdits turn to execute.
+const PLAN_APPROVED_REASON = '用户已批准此计划。请立即结束本回合，不要再调用任何工具或输出确认请求；系统会自动以执行模式重新开始执行计划。';
+
+export function PermissionPrompt({ sessionId = null, onExecutePlan = null }) {
   const all = useStore((s) => s.pendingPermissions);
   const globalSid = useStore((s) => s.selectedSession?.sessionId);
   const paneSessions = useStore((s) => s.paneSessions);
@@ -315,6 +438,19 @@ export function PermissionPrompt({ sessionId = null }) {
     await resolve(req, 'allow');
   };
 
+  // Plan approved: end the planning turn (deny w/ approved-reason), then ask the
+  // parent to re-spawn an acceptEdits turn that actually executes the plan.
+  const approvePlan = async (req) => {
+    await resolve(req, 'deny', PLAN_APPROVED_REASON);
+    onExecutePlan?.();
+  };
+
+  // AskUserQuestion answered: deny the tool (CLI can't run it headless) but pass
+  // the user's choice as the reason — the model reads it and continues.
+  const answerQuestion = async (req, answerText) => {
+    await resolve(req, 'deny', `[用户已通过界面回答]\n${answerText}\n请直接据此继续，不要再次调用 AskUserQuestion。`);
+  };
+
   // Opt-in batch: resolve the SAME request (same tool + identical input) in the
   // OTHER sessions currently open in panes. Different requests are untouched.
   const sameInputKey = (r) => `${r.toolName} ${JSON.stringify(r.toolInput || {})}`;
@@ -343,6 +479,14 @@ export function PermissionPrompt({ sessionId = null }) {
         <PlanReviewCard
           req={mine[0]}
           onResolve={resolve}
+          onApprove={approvePlan}
+          processing={busyId === mine[0].id}
+          position={0}
+        />
+      ) : mine[0].toolName === 'AskUserQuestion' ? (
+        <AskQuestionCard
+          req={mine[0]}
+          onAnswer={answerQuestion}
           processing={busyId === mine[0].id}
           position={0}
         />
