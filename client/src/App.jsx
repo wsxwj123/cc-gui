@@ -2276,6 +2276,9 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
       // tool calls dump at the bottom — losing the "tool → think → tool → write"
       // narrative.
       let orderedBlocks = [];  // [{ type, blockIndex, content?, toolCall? }, ...]
+      // Did we already render a visible error turn? Guards the empty-output
+      // fallback below so we don't double-report.
+      let sawError = false;
       // Per-content-block scratch indexed by Anthropic SDK's block `index` field.
       // Each entry: { type: 'text'|'thinking'|'tool_use', toolId?, name?, jsonBuf?, orderIdx? }
       const blocks = {};
@@ -2525,6 +2528,7 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
               blocks: [{ type: 'text', content: `❌ **${msg}**` }],
               usage: null,
             }]);
+            sawError = true;
             break;
           }
           if (event.type === 'done') break;
@@ -2540,6 +2544,23 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
           toolCalls: currentToolCalls.map((tc) => ({ ...tc, category: tc.category || 'call' })),
           // The canonical ordered view used by TurnBubble for in-order rendering.
           blocks: orderedBlocks,
+          usage: null,
+        }]);
+      } else if (!sawError) {
+        // Stream ended with NOTHING — no text, no tools, no error envelope. This
+        // is the "connecting → 空白" case, typically an OpenAI-proxy provider whose
+        // upstream rejected auth / the model doesn't exist, so the CLI produced no
+        // turn. Surface a fallback instead of a silent blank.
+        const msg = 'provider 没有返回任何内容（常见于认证失败 401 或模型不存在）。请检查当前 provider 的 key 与模型是否有效，或切换其它 provider。';
+        setChatMessages((prev) => [...prev, {
+          uuid: 'chat-empty-' + Date.now(),
+          type: 'turn',
+          timestamp: new Date().toISOString(),
+          model: streamingModel,
+          text: [`⚠️ ${msg}`],
+          thinking: [],
+          toolCalls: [],
+          blocks: [{ type: 'text', content: `⚠️ ${msg}` }],
           usage: null,
         }]);
       }
