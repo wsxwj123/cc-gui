@@ -1,9 +1,28 @@
 # Claude GUI
 
+[中文文档](README.zh-CN.md)
+
 Claude GUI is a local desktop and mobile-friendly web shell for Claude Code CLI.
 It provides a Tauri desktop app, a browser UI for local use, and a phone layout
 that works well when exposed through a private network such as Tailscale and
 added to the phone home screen.
+
+## Download
+
+Prebuilt installers are on the [Releases page](https://github.com/wsxwj123/claude-gui/releases/latest):
+
+| Platform | File |
+|---|---|
+| Windows (installer) | `Claude GUI_*_x64-setup.exe` |
+| Windows (MSI) | `Claude GUI_*_x64_en-US.msi` |
+| macOS (Apple Silicon) | `Claude GUI_*_aarch64.dmg` |
+
+> **macOS is Apple Silicon (aarch64) only.** Intel Macs are not covered yet;
+> build with the `x86_64-apple-darwin` target yourself.
+>
+> **The packages are unsigned / un-notarized.** On macOS, right-click the app
+> and choose **Open** the first time to bypass Gatekeeper. On Windows, click
+> **More info → Run anyway** past the SmartScreen warning.
 
 ## Features
 
