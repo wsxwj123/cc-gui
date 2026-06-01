@@ -1765,6 +1765,20 @@ function GitInitBanner({ cwd }) {
   );
 }
 
+// Collapsed marker shown where the CLI compacted the conversation (/compact).
+// The full summary lives in the JSONL; we deliberately don't render it.
+function CompactDivider() {
+  return (
+    <div className="max-w-3xl mx-auto px-4 py-3 flex items-center gap-3">
+      <div className="flex-1 h-px bg-canvas-deep/60" />
+      <span className="text-[10px] text-ink-faint font-body uppercase tracking-wider whitespace-nowrap">
+        上下文已压缩
+      </span>
+      <div className="flex-1 h-px bg-canvas-deep/60" />
+    </div>
+  );
+}
+
 // ─── Session Detail ────────────────────────────────────────────
 function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
   // Split-mode tab routing: when tabIndex===1 we render the SECOND pane and
@@ -2866,6 +2880,8 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
     : 0;
   const contextWindow = /\[1m\]/i.test(currentModel || '') ? 1_000_000 : 200_000;
   const contextPct = contextTokens > 0 ? Math.min(100, Math.round((contextTokens / contextWindow) * 100)) : 0;
+  const fmtTok = (n) => (n >= 1000 ? Math.round(n / 1000) + 'k' : String(n));
+  const winLabel = contextWindow >= 1_000_000 ? '1M' : '200k';
 
   return (
     <div className="flex-1 flex flex-col min-h-0 glass-base relative">
@@ -2889,7 +2905,7 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
                       : 'text-ink-faint'}`}
                   title={`上下文 ${contextTokens.toLocaleString()} / ${contextWindow.toLocaleString()} tokens${contextPct >= 80 ? ' — 接近上限，建议 /compact' : ''}`}
                 >
-                  上下文 {contextPct}%
+                  {fmtTok(contextTokens)}/{winLabel} ({contextPct}%)
                 </span>
               )}
               {toolCallCount > 0 && <span className="text-[10px] text-ink-faint font-mono shrink-0 whitespace-nowrap">{toolCallCount} 工具调用</span>}
@@ -2987,12 +3003,16 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
             </div>
           ) : (
             <>
-              {messages.map((msg, i) => msg.type === 'turn'
+              {messages.map((msg, i) => msg.type === 'compact'
+                ? <CompactDivider key={msg.uuid || i} />
+                : msg.type === 'turn'
                 ? <TurnBubble key={msg.uuid || i} turn={msg} />
                 : <MessageBubble key={msg.uuid || i} message={{ ...msg, role: msg.type }}
                     onRollback={msg.type === 'user' ? handleRollback : undefined} />
               )}
-              {chatMessages.map((msg, i) => msg.type === 'turn'
+              {chatMessages.map((msg, i) => msg.type === 'compact'
+                ? <CompactDivider key={msg.uuid || i} />
+                : msg.type === 'turn'
                 ? <TurnBubble key={msg.uuid || i} turn={msg} />
                 : <MessageBubble key={msg.uuid || i} message={{ ...msg, role: msg.type }}
                     onRollback={msg.type === 'user' ? handleRollback : undefined} />

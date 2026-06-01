@@ -380,23 +380,32 @@ export async function getSessionMessages(sessionId, projectHash) {
 
   for (const record of records) {
     if (record.type === 'user') {
-      const content = normalizeContent(record.message?.content);
-      const textParts = content.filter((c) => c.type === 'text');
-      const text = textParts.map((c) => c.text).join('\n').trim();
-
-      if (text && !isLocalCommandEcho(text)) {
-        // This is a real user prompt — flush previous turn and start new user message
+      // After /compact the CLI stores the summary as a synthetic `user` message
+      // flagged isCompactSummary. Render a collapsed "compacted" divider instead
+      // of dumping the full summary as a user bubble (matches Claude Desktop /
+      // the CLI terminal UI).
+      if (record.isCompactSummary) {
         flushTurn();
-        messages.push({
-          type: 'user',
-          uuid: record.uuid,
-          text,
-          timestamp: record.timestamp,
-          sessionId: record.sessionId,
-          permissionMode: record.permissionMode,
-        });
+        messages.push({ type: 'compact', uuid: record.uuid, timestamp: record.timestamp });
+      } else {
+        const content = normalizeContent(record.message?.content);
+        const textParts = content.filter((c) => c.type === 'text');
+        const text = textParts.map((c) => c.text).join('\n').trim();
+
+        if (text && !isLocalCommandEcho(text)) {
+          // This is a real user prompt — flush previous turn and start new user message
+          flushTurn();
+          messages.push({
+            type: 'user',
+            uuid: record.uuid,
+            text,
+            timestamp: record.timestamp,
+            sessionId: record.sessionId,
+            permissionMode: record.permissionMode,
+          });
+        }
+        // tool_result-only messages are silently merged via toolResultMap
       }
-      // tool_result-only messages are silently merged via toolResultMap
 
     } else if (record.type === 'assistant') {
       const content = normalizeContent(record.message?.content);
