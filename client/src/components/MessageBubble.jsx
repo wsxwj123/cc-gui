@@ -132,7 +132,15 @@ function RollbackMenu({ message, onAction }) {
       // a narrow phone screen: right ∈ [8, innerWidth - menuW - 8].
       const menuW = 256;
       const right = Math.max(8, Math.min(window.innerWidth - r.right, window.innerWidth - menuW - 8));
-      setCoords({ top: r.bottom + 6, right });
+      // Vertical clamp: the rollback trigger usually sits on the LAST message,
+      // just above the input box at the bottom of the viewport — opening the menu
+      // downward then spills it off the bottom edge (the actual overflow bug). If
+      // there isn't room below, flip it ABOVE the trigger. ~3 items + header ≈ 250px.
+      const menuH = 250;
+      const top = (r.bottom + 6 + menuH <= window.innerHeight - 8)
+        ? r.bottom + 6
+        : Math.max(8, r.top - menuH - 6);
+      setCoords({ top, right });
     }
     setOpen(!open);
   };
