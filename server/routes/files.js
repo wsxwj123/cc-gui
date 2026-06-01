@@ -1,9 +1,10 @@
 import { Router } from 'express';
 import { readdir, stat, readFile, realpath, writeFile } from 'fs/promises';
 import { createReadStream } from 'fs';
-import { join, resolve, relative, extname } from 'path';
+import { join, resolve, relative, extname, isAbsolute } from 'path';
 import { homedir, platform } from 'os';
 import { execFile } from 'child_process';
+import { isPathInside } from '../utils/safe-path.js';
 
 const router = Router();
 
@@ -29,14 +30,16 @@ const SKIP_EXACT = new Set(['.DS_Store']);
  * realpath on success, throws on rejection.
  */
 async function safePath(p) {
-  if (typeof p !== 'string' || !p.startsWith('/')) {
+  // isAbsolute is platform-aware (accepts /unix and C:\windows).
+  if (typeof p !== 'string' || !isAbsolute(p)) {
     const err = new Error('absolute path required'); err.status = 400; throw err;
   }
   const real = await realpath(resolve(p)).catch(() => null);
   if (!real) { const err = new Error('not found'); err.status = 404; throw err; }
-  // Must be HOME itself or a path UNDER it. A bare startsWith(HOME) check is
-  // bypassable: '/Users/wsxwj2/x'.startsWith('/Users/wsxwj') is true.
-  if (real !== HOME && !real.startsWith(HOME + '/')) {
+  // Must be HOME itself or a path UNDER it. isPathInside uses path.relative so it
+  // handles the separator per-OS and isn't fooled by '/Users/wsxwj2'.startsWith(
+  // '/Users/wsxwj').
+  if (!isPathInside(real, HOME)) {
     const err = new Error('outside $HOME'); err.status = 403; throw err;
   }
   return real;

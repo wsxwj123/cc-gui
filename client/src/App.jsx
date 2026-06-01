@@ -836,7 +836,7 @@ function ProjectList() {
       } else {
         useStore.getState().setSelectedProject({
           path: clean,
-          hash: data.addedHash || clean.replace(/[/\s]/g, '-'),
+          hash: data.addedHash || clean.replace(/[^A-Za-z0-9]/g, '-'),
           sessionCount: 0,
           lastActivity: null,
         });
@@ -4403,7 +4403,7 @@ export default function App() {
       // it has trailing dashes, because the CLI uses it to locate the session
       // for --resume. Sanitizing it here would orphan the session pointer.
       const cleanPath = p.path.replace(/\/{2,}/g, '/').replace(/(.)\/$/, '$1');
-      const expectedHash = cleanPath.replace(/[/\s]/g, '-');
+      const expectedHash = cleanPath.replace(/[^A-Za-z0-9]/g, '-');
       if (p.path !== cleanPath || p.hash !== expectedHash) {
         const corrected = { ...p, path: cleanPath, hash: expectedHash };
         setSelectedProject(corrected);

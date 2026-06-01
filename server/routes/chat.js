@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { spawn } from 'child_process';
-import { resolve as pathResolve, dirname, join as pathJoin } from 'node:path';
+import { resolve as pathResolve, dirname, join as pathJoin, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readFileSync, statSync } from 'node:fs';
 import { getDefaultModel } from '../services/model-resolver.js';
@@ -158,7 +158,7 @@ router.post('/chat', async (req, res) => {
   if (globalRead && process.env.HOME) dirSet.add(process.env.HOME);
   if (Array.isArray(addDirs)) {
     for (const dir of addDirs) {
-      if (typeof dir === 'string' && dir.startsWith('/')) dirSet.add(dir);
+      if (typeof dir === 'string' && isAbsolute(dir)) dirSet.add(dir);
     }
   }
   for (const d of dirSet) args.push('--add-dir', d);

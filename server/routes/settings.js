@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { readFile, writeFile, mkdir, copyFile, unlink } from 'fs/promises';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
-import { join } from 'path';
+import { join, isAbsolute } from 'path';
 import { homedir } from 'os';
 import { randomUUID } from 'crypto';
 import { startOpenAIProxy, setOpenAIUpstream, getProxyPort } from '../services/openai-proxy.js';
@@ -137,13 +137,14 @@ router.put('/settings', async (req, res) => {
     if (addPath) {
       const absPath = addPath === '~'
         ? homedir()
-        : addPath.startsWith('~/')
+        : /^~[/\\]/.test(addPath)
           ? join(homedir(), addPath.slice(2))
           : addPath;
-      if (!absPath.startsWith('/')) {
+      // isAbsolute is platform-aware: accepts /unix and C:\windows paths alike.
+      if (!isAbsolute(absPath)) {
         return res.status(400).json({ error: '项目路径必须是绝对路径或 ~/ 开头' });
       }
-      const clean = absPath.replace(/\/+$/, '') || '/';
+      const clean = absPath.replace(/[/\\]+$/, '') || absPath;
       addedPath = clean;
       addedHash = pathToHash(clean);
       const projectDir = join(PROJECTS_DIR, addedHash);
