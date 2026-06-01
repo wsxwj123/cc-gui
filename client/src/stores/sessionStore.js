@@ -297,12 +297,14 @@ export const useStore = create((set, get) => ({
       writeLs('cgui-permission-mode', mode);
     }
   },
-  // Resolve the effective mode for a session key. No entry → 'default' (NOT the
-  // last-used global value — that's exactly the cross-session bleed we fixed).
+  // Resolve the effective mode for a session key. An explicit per-session pick
+  // wins; otherwise fall back to the last-used global mode (persisted to
+  // localStorage) so the user's choice STICKS across page reloads and into new
+  // drafts instead of resetting to 'default' on every refresh.
   getPermissionModeFor: (key) => {
     if (!key) return get().permissionMode || 'default';
     const map = get().permissionModeBySession || {};
-    return map[key] || 'default';
+    return map[key] || get().permissionMode || 'default';
   },
   // Per-session model. No entry → global currentModel (the resolved default).
   // Does NOT write settings.json — a per-session pick must not change the CLI's

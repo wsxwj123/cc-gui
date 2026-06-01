@@ -128,7 +128,11 @@ function RollbackMenu({ message, onAction }) {
       const r = wrapRef.current.getBoundingClientRect();
       // Place menu just below trigger, right-aligned. Viewport-relative
       // (position: fixed) so it floats above every parent's stacking ctx.
-      setCoords({ top: r.bottom + 6, right: window.innerWidth - r.right });
+      // Clamp `right` so the 256px (w-64) menu never spills past either edge on
+      // a narrow phone screen: right ∈ [8, innerWidth - menuW - 8].
+      const menuW = 256;
+      const right = Math.max(8, Math.min(window.innerWidth - r.right, window.innerWidth - menuW - 8));
+      setCoords({ top: r.bottom + 6, right });
     }
     setOpen(!open);
   };
@@ -140,7 +144,7 @@ function RollbackMenu({ message, onAction }) {
     <div
       ref={menuRef}
       style={{ position: 'fixed', top: coords.top, right: coords.right, zIndex: 9999 }}
-      className="w-64 py-1 rounded-lg shadow-xl bg-canvas border border-canvas-deep animate-glass-rise"
+      className="w-64 max-w-[calc(100vw-16px)] py-1 rounded-lg shadow-xl bg-canvas border border-canvas-deep animate-glass-rise"
     >
       <div className="px-3 py-2 text-[10px] text-ink-faint uppercase tracking-wider font-body border-b border-canvas-deep">
         回滚此消息{hasSha ? '' : ' · 无 git 快照'}
