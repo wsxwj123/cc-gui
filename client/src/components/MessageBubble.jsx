@@ -132,15 +132,18 @@ function RollbackMenu({ message, onAction }) {
       // a narrow phone screen: right ∈ [8, innerWidth - menuW - 8].
       const menuW = 256;
       const right = Math.max(8, Math.min(window.innerWidth - r.right, window.innerWidth - menuW - 8));
-      // Vertical clamp: the rollback trigger usually sits on the LAST message,
-      // just above the input box at the bottom of the viewport — opening the menu
-      // downward then spills it off the bottom edge (the actual overflow bug). If
-      // there isn't room below, flip it ABOVE the trigger. ~3 items + header ≈ 250px.
-      const menuH = 250;
-      const top = (r.bottom + 6 + menuH <= window.innerHeight - 8)
-        ? r.bottom + 6
-        : Math.max(8, r.top - menuH - 6);
-      setCoords({ top, right });
+      // The menu must HUG the trigger. Decide below-vs-above with a conservative
+      // height estimate (the trigger sits just above the bottom input box, so
+      // opening downward would spill off-screen), but ANCHOR with `top` OR `bottom`
+      // so the menu's edge sits flush against the trigger regardless of the exact
+      // menu height — no gap from an inexact estimate:
+      //   • room below → top = trigger.bottom + 6  (menu hangs just under the button)
+      //   • no room    → bottom anchored to trigger.top - 6 (menu sits just above it)
+      const menuH = 250; // estimate used ONLY for the below/above choice
+      const coords = (r.bottom + 6 + menuH <= window.innerHeight - 8)
+        ? { top: r.bottom + 6, right }
+        : { bottom: Math.max(8, window.innerHeight - r.top + 6), right };
+      setCoords(coords);
     }
     setOpen(!open);
   };
@@ -151,7 +154,7 @@ function RollbackMenu({ message, onAction }) {
   const menu = open && coords && (
     <div
       ref={menuRef}
-      style={{ position: 'fixed', top: coords.top, right: coords.right, zIndex: 9999 }}
+      style={{ position: 'fixed', right: coords.right, zIndex: 9999, ...(coords.top != null ? { top: coords.top } : { bottom: coords.bottom }) }}
       className="w-64 max-w-[calc(100vw-16px)] py-1 rounded-lg shadow-xl bg-canvas border border-canvas-deep animate-glass-rise"
     >
       <div className="px-3 py-2 text-[10px] text-ink-faint uppercase tracking-wider font-body border-b border-canvas-deep">
