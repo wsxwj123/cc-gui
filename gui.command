@@ -18,9 +18,14 @@ if [ ! -d client/dist ]; then
 fi
 
 echo "[gui] starting with restart watchdog (Ctrl-C twice to fully stop)…"
+# Open the default browser to the GUI once, on first start only. The server reads
+# this flag; we flip it off after the first run so watchdog restarts don't keep
+# spawning new browser tabs.
+export CGUI_OPEN_BROWSER=1
 while true; do
   CGUI_WATCHDOG=1 NODE_ENV=production node server/index.js
   code=$?
+  export CGUI_OPEN_BROWSER=0
   # Exit code 0 = deliberate restart; anything else = crash. Relaunch either way,
   # but pause briefly so a tight crash loop (e.g. port held) doesn't spin the CPU.
   echo "[gui] server exited (code $code) — relaunching in 1s…"

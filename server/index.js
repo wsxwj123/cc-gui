@@ -1,5 +1,6 @@
 import express from 'express';
 import { createServer } from 'http';
+import { spawn } from 'child_process';
 import { WebSocketServer } from 'ws';
 import cors from 'cors';
 import { join, dirname } from 'path';
@@ -506,6 +507,17 @@ server.listen(PORT, HOST, () => {
   // Re-arm the OpenAI translation proxy if a codex/opencode provider was active
   // before this (re)start, so settings.json's proxy URL keeps resolving.
   restoreOpenAIProvider().catch(() => {});
+  // First-run convenience: pop the default browser to the local URL. The launcher
+  // (gui.command / gui.bat) sets CGUI_OPEN_BROWSER=1 for the initial start only —
+  // it flips to 0 for watchdog restarts, and Tauri spawns us without it (Tauri has
+  // its own window) — so this fires exactly once per manual launch, never twice.
+  if (process.env.CGUI_OPEN_BROWSER === '1') {
+    const url = `http://localhost:${PORT}`;
+    const [cmd, cmdArgs] = process.platform === 'darwin' ? ['open', [url]]
+      : process.platform === 'win32' ? ['cmd', ['/c', 'start', '', url]]
+      : ['xdg-open', [url]];
+    try { spawn(cmd, cmdArgs, { stdio: 'ignore', detached: true }).unref(); } catch {}
+  }
 }).on('error', (err) => {
   if (err.code === 'EADDRINUSE') {
     console.error(`\n[!] Port ${PORT} already in use. Run: npm run stop (then npm start)\n`);
