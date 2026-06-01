@@ -9,7 +9,7 @@ import { existsSync, readFileSync } from 'fs';
 import sessionRoutes from './routes/sessions.js';
 import chatRoutes from './routes/chat.js';
 import processRoutes from './routes/processes.js';
-import settingsRoutes, { restoreOpenAIProvider } from './routes/settings.js';
+import settingsRoutes, { restoreOpenAIProvider, restoreAnthropicProvider } from './routes/settings.js';
 import usageRoutes from './routes/usage.js';
 import mcpRoutes from './routes/mcp.js';
 import forkRoutes from './routes/fork.js';
@@ -507,6 +507,9 @@ server.listen(PORT, HOST, () => {
   // Re-arm the OpenAI translation proxy if a codex/opencode provider was active
   // before this (re)start, so settings.json's proxy URL keeps resolving.
   restoreOpenAIProvider().catch(() => {});
+  // Same for the Anthropic passthrough proxy (deepseek/mimo/relay providers that
+  // dodge the subscription-OAuth-token poisoning).
+  restoreAnthropicProvider().catch(() => {});
   // First-run convenience: pop the default browser to the local URL. The launcher
   // (gui.command / gui.bat) sets CGUI_OPEN_BROWSER=1 for the initial start only —
   // it flips to 0 for watchdog restarts, and Tauri spawns us without it (Tauri has

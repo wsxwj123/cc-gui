@@ -7,6 +7,7 @@ import { join, isAbsolute } from 'path';
 import { homedir } from 'os';
 import { randomUUID } from 'crypto';
 import { startOpenAIProxy, setOpenAIUpstream, getProxyPort } from '../services/openai-proxy.js';
+import { startAnthropicProxy, setAnthropicUpstream, getAnthropicProxyPort } from '../services/anthropic-proxy.js';
 
 const execFileP = promisify(execFile);
 const CC_SWITCH_DB = join(homedir(), '.cc-switch', 'cc-switch.db');
@@ -14,9 +15,27 @@ const CC_SWITCH_DB = join(homedir(), '.cc-switch', 'cc-switch.db');
 const router = Router();
 const SETTINGS_PATH = join(homedir(), '.claude', 'settings.json');
 const PROJECTS_DIR = join(homedir(), '.claude', 'projects');
+// Shared prefs (hidden-projects list lives here). Adding a project must un-hide
+// its hash SERVER-SIDE: the lossy CLI hash can collide with a previously-hidden
+// sibling, and relying on the client to un-hide fails if the client runs a stale
+// bundle or the persist races a reload — the folder then re-hides on next fetch
+// and "vanishes" again. Doing it here makes an explicit add always win.
+const PREFS_PATH = join(homedir(), '.claude-gui', 'prefs.json');
 // Remembers which OpenAI-format provider is active so the proxy upstream can be
 // re-established after a server restart (only the provider id — never the key).
 const OPENAI_ACTIVE_PATH = join(homedir(), '.claude-gui', 'openai-active.json');
+// Marks an active Anthropic-format third-party provider routed through the local
+// anthropic passthrough proxy (so the subscription OAuth token can't poison it).
+// Stores only id/name/baseURL/model — never the token (re-read on restart).
+const ANTHROPIC_ACTIVE_PATH = join(homedir(), '.claude-gui', 'anthropic-active.json');
+
+// Official Anthropic = use the CLI's own OAuth/subscription directly (no proxy).
+// Anything else with the Anthropic wire format (deepseek/mimo/relays) must go
+// through the proxy so the CLI's poisoned OAuth token is stripped + replaced.
+function isOfficialAnthropic(baseURL) {
+  if (!baseURL) return true; // empty → CLI default endpoint (api.anthropic.com)
+  try { return new URL(baseURL).hostname.endsWith('anthropic.com'); } catch { return false; }
+}
 // Remembers the LAST provider switched via the GUI (claude or openai). CC Switch's
 // own is_current flag never reflects a GUI switch (we only write settings.json,
 // not its db), so GET /providers reads this marker to mark the right row current —
@@ -182,6 +201,15 @@ router.put('/settings', async (req, res) => {
           JSON.stringify({ cwd: clean, addedAt: Date.now() }, null, 2) + '\n',
         );
       } catch { /* best-effort — sidecar is an optimization, not required */ }
+      // Un-hide server-side: an explicitly added folder MUST be visible, even if
+      // its (lossy) hash was hidden before or collides with a hidden sibling.
+      try {
+        const prefs = JSON.parse(await readFile(PREFS_PATH, 'utf-8'));
+        if (Array.isArray(prefs.hiddenProjects) && prefs.hiddenProjects.includes(addedHash)) {
+          prefs.hiddenProjects = prefs.hiddenProjects.filter((h) => h !== addedHash);
+          await writeFile(PREFS_PATH, JSON.stringify(prefs, null, 2));
+        }
+      } catch { /* no prefs file or unparseable — nothing to un-hide */ }
     }
 
     let current = {};
@@ -372,12 +400,29 @@ router.post('/provider/switch', async (req, res) => {
       return res.status(500).json({ error: 'provider 配置非法' });
     }
 
+    // Third-party Anthropic-format provider (deepseek/mimo/relay): route through
+    // the local passthrough proxy so a logged-in subscription's OAuth token can't
+    // override the provider's own key (the "every provider 401s with ...6gAA" bug).
+    // Official Anthropic stays direct so the subscription itself keeps working.
+    const snapBase = snapshot.env?.ANTHROPIC_BASE_URL || snapshot.env?.ANTHROPIC_API_URL || '';
+    const snapTok = snapshot.env?.ANTHROPIC_AUTH_TOKEN || snapshot.env?.ANTHROPIC_API_KEY || '';
+    if (!isOfficialAnthropic(snapBase) && snapTok) {
+      const snapModels = [...new Set(Object.entries(snapshot.env || {})
+        .filter(([k, v]) => /_MODEL$/.test(k) && typeof v === 'string' && v)
+        .map(([, v]) => v))];
+      return switchToAnthropicUpstream(
+        { id: hit.id, name: hit.name, baseURL: snapBase, authToken: snapTok, snapshot, models: snapModels },
+        model, res,
+      );
+    }
+
     // Back up the current settings.json (timestamped) before overwriting.
     const ts = new Date().toISOString().replace(/[:.]/g, '-');
     await copyFile(SETTINGS_PATH, `${SETTINGS_PATH}.${ts}.bak`).catch(() => {});
 
     await writeFile(SETTINGS_PATH, JSON.stringify(snapshot, null, 2));
     await writeActiveProviderId(hit.id);
+    await unlink(ANTHROPIC_ACTIVE_PATH).catch(() => {});
     // Switching to a NATIVE claude provider means we're off the OpenAI proxy.
     // Drop the openai-active marker, else restoreOpenAIProvider() on the next
     // server boot would clobber this settings.json back to the proxy — the model
@@ -438,8 +483,46 @@ async function switchToOpenAIUpstream(up, requestedModel, res) {
     await mkdir(join(homedir(), '.claude-gui'), { recursive: true });
     await writeFile(OPENAI_ACTIVE_PATH, JSON.stringify({ providerId: up.id, name: up.name, model, models }));
   } catch {}
+  await unlink(ANTHROPIC_ACTIVE_PATH).catch(() => {}); // off the anthropic proxy
   await writeActiveProviderId(up.id);
   res.json({ ok: true, name: up.name, model, via: 'openai-proxy' });
+}
+
+// Switch to an Anthropic-format third-party provider VIA the passthrough proxy.
+// Mirrors switchToOpenAIUpstream but no format translation: the proxy just swaps
+// the (poisoned) OAuth auth header for the provider's real token and forwards.
+// `up` = { id, name, baseURL, authToken, snapshot?, models? }.
+async function switchToAnthropicUpstream(up, requestedModel, res) {
+  let port = getAnthropicProxyPort();
+  if (!port) port = await startAnthropicProxy();
+  if (!port) return res.status(500).json({ error: 'anthropic 代理启动失败(端口占用)' });
+  setAnthropicUpstream({ baseURL: up.baseURL, authToken: up.authToken });
+
+  // Use the provider's own snapshot as the settings base (preserves effortLevel,
+  // enabledPlugins, model aliases) but redirect BASE_URL to the loopback proxy.
+  // AUTH_TOKEN is left as-is — the CLI's value is ignored (OAuth overrides it and
+  // the proxy strips both), the proxy injects the real token from its upstream.
+  const snapshot = (up.snapshot && typeof up.snapshot === 'object') ? up.snapshot : {};
+  const env = { ...(snapshot.env || {}) };
+  env.ANTHROPIC_BASE_URL = `http://127.0.0.1:${port}`;
+  if (requestedModel && (!up.models?.length || up.models.includes(requestedModel))) {
+    env.ANTHROPIC_MODEL = requestedModel;
+  }
+  const next = { ...snapshot, env };
+  const ts = new Date().toISOString().replace(/[:.]/g, '-');
+  await copyFile(SETTINGS_PATH, `${SETTINGS_PATH}.${ts}.bak`).catch(() => {});
+  await writeFile(SETTINGS_PATH, JSON.stringify(next, null, 2));
+  // Persist the active marker (id/name/baseURL/model/models — NEVER the token).
+  try {
+    await mkdir(join(homedir(), '.claude-gui'), { recursive: true });
+    await writeFile(ANTHROPIC_ACTIVE_PATH, JSON.stringify({
+      providerId: up.id, name: up.name, baseURL: up.baseURL,
+      model: env.ANTHROPIC_MODEL || null, models: up.models || [],
+    }));
+  } catch {}
+  await unlink(OPENAI_ACTIVE_PATH).catch(() => {}); // off the openai proxy
+  await writeActiveProviderId(up.id);
+  res.json({ ok: true, name: up.name, model: env.ANTHROPIC_MODEL || null, via: 'anthropic-proxy' });
 }
 
 // Switch to a GUI custom provider. openai → proxy (reuse upstream switch);
@@ -451,8 +534,22 @@ async function switchToCustomProvider(p, requestedModel, res) {
       requestedModel, res,
     );
   }
-  // anthropic-compatible upstream (third-party Claude relay).
+  // anthropic-compatible upstream (third-party Claude relay): route through the
+  // passthrough proxy so a logged-in subscription's OAuth token can't poison it.
   const models = p.models || [];
+  if (!isOfficialAnthropic(p.baseURL)) {
+    let cur = {};
+    try { cur = JSON.parse(await readFile(SETTINGS_PATH, 'utf-8')); } catch {}
+    const snapEnv = { ...(cur.env || {}) };
+    delete snapEnv.ANTHROPIC_DEFAULT_HAIKU_MODEL;
+    delete snapEnv.ANTHROPIC_DEFAULT_SONNET_MODEL;
+    delete snapEnv.ANTHROPIC_DEFAULT_OPUS_MODEL;
+    return switchToAnthropicUpstream(
+      { id: p.id, name: p.name, baseURL: p.baseURL, authToken: p.apiKey, snapshot: { ...cur, env: snapEnv }, models },
+      requestedModel, res,
+    );
+  }
+  // official-anthropic custom upstream (rare) — direct, uses the CLI OAuth.
   const model = (requestedModel && models.includes(requestedModel))
     ? requestedModel : (models[0] || requestedModel || '');
   let current = {};
@@ -633,6 +730,37 @@ export async function restoreOpenAIProvider() {
   if (!upstream) return;
   await startOpenAIProxy();
   setOpenAIUpstream({ baseURL: upstream.baseURL, apiKey: upstream.apiKey });
+}
+
+// Boot-time twin of restoreOpenAIProvider for the Anthropic passthrough proxy.
+// The token is never persisted, so re-read it from cc-switch.db / custom store.
+export async function restoreAnthropicProvider() {
+  let active;
+  try { active = JSON.parse(await readFile(ANTHROPIC_ACTIVE_PATH, 'utf-8')); } catch { return; }
+  if (!active?.providerId) return;
+  // Only restore if settings.json still points at the loopback proxy.
+  try {
+    const cur = JSON.parse(await readFile(SETTINGS_PATH, 'utf-8'));
+    if (!String(cur?.env?.ANTHROPIC_BASE_URL || '').includes('127.0.0.1')) return;
+  } catch { return; }
+  let baseURL = active.baseURL || '';
+  let authToken = '';
+  const rows = await ccSwitchQuery("SELECT id, settings_config FROM providers WHERE app_type='claude'");
+  const hit = rows.find((r) => r.id === active.providerId);
+  if (hit) {
+    try {
+      const snap = JSON.parse(hit.settings_config);
+      authToken = snap.env?.ANTHROPIC_AUTH_TOKEN || snap.env?.ANTHROPIC_API_KEY || '';
+      baseURL = baseURL || snap.env?.ANTHROPIC_BASE_URL || '';
+    } catch {}
+  }
+  if (!authToken) {
+    const custom = (await readCustomProviders()).find((p) => p.id === active.providerId && p.type !== 'openai');
+    if (custom) { authToken = custom.apiKey; baseURL = baseURL || custom.baseURL; }
+  }
+  if (!baseURL || !authToken) return;
+  await startAnthropicProxy();
+  setAnthropicUpstream({ baseURL, authToken });
 }
 
 export default router;

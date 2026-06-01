@@ -7,9 +7,17 @@ const CLAUDE_SETTINGS = join(homedir(), '.claude', 'settings.json');
 // Holds { providerId, name, model, models[] } so we can offer the provider's
 // full model list even though settings.json only carries the one active model.
 const OPENAI_ACTIVE = join(homedir(), '.claude-gui', 'openai-active.json');
+// Twin marker for an Anthropic-format provider routed through the passthrough
+// proxy — lets us show the real provider name instead of the loopback host.
+const ANTHROPIC_ACTIVE = join(homedir(), '.claude-gui', 'anthropic-active.json');
 
 async function readOpenAIActive() {
   try { return JSON.parse(await readFile(OPENAI_ACTIVE, 'utf-8')); }
+  catch { return null; }
+}
+
+async function readAnthropicActive() {
+  try { return JSON.parse(await readFile(ANTHROPIC_ACTIVE, 'utf-8')); }
   catch { return null; }
 }
 
@@ -126,9 +134,15 @@ export async function getAvailableModels() {
   // loopback proxy (127.0.0.1) — useless as a label. Use the real provider name
   // and surface its WHOLE model list so the ModelSelector can pick any of them.
   const oaActive = await readOpenAIActive();
-  const isProxyActive = /^https?:\/\/127\.0\.0\.1[:/]/.test(baseUrl) && oaActive;
+  const anthropicActive = await readAnthropicActive();
+  const isLoopback = /^https?:\/\/127\.0\.0\.1[:/]/.test(baseUrl);
+  const isProxyActive = isLoopback && oaActive;
+  // Anthropic passthrough proxy active → show the real provider name, not 127.0.0.1.
+  const isAnthropicProxyActive = isLoopback && !oaActive && anthropicActive;
   if (isProxyActive) {
     provider = oaActive.name || 'OpenAI';
+  } else if (isAnthropicProxyActive) {
+    provider = anthropicActive.name || 'Anthropic';
   } else if (baseUrl) {
     try {
       const host = new URL(baseUrl).hostname;
