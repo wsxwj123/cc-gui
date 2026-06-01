@@ -125,8 +125,8 @@ router.post('/chat', async (req, res) => {
   let permissionGateEnabled = false;
   if (cliMode !== 'bypassPermissions') {
     const hookScript = pathResolve(__dirname, '..', 'hooks', 'permission-bridge.js');
-    // Merge user's existing PreToolUse hooks so external observers (claude-pets,
-    // petdex etc.) keep firing alongside our permission bridge. `--settings`
+    // Merge user's existing PreToolUse hooks so any external observers the user
+    // configured keep firing alongside our permission bridge. `--settings`
     // OVERRIDES same-event arrays from user scope (not union), so without this
     // merge any tool that relies on PreToolUse silently dies under GUI spawn.
     // Our bridge runs FIRST in the array; user hooks tail along. They're

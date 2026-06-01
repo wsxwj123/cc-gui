@@ -58,7 +58,7 @@ router.post('/remote-control', async (req, res) => {
     if (cwd) {
       const real = await realpath(resolve(cwd)).catch(() => null);
       // HOME itself or a path under it. Bare startsWith(HOME) is bypassable
-      // ('/Users/wsxwj2'.startsWith('/Users/wsxwj') === true).
+      // ('/Users/alice2'.startsWith('/Users/alice') === true).
       if (!real || (real !== HOME && !real.startsWith(HOME + '/'))) throw new Error('cwd outside $HOME');
       dir = real;
     }

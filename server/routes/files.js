@@ -37,8 +37,8 @@ async function safePath(p) {
   const real = await realpath(resolve(p)).catch(() => null);
   if (!real) { const err = new Error('not found'); err.status = 404; throw err; }
   // Must be HOME itself or a path UNDER it. isPathInside uses path.relative so it
-  // handles the separator per-OS and isn't fooled by '/Users/wsxwj2'.startsWith(
-  // '/Users/wsxwj').
+  // handles the separator per-OS and isn't fooled by '/Users/alice2'.startsWith(
+  // '/Users/alice').
   if (!isPathInside(real, HOME)) {
     const err = new Error('outside $HOME'); err.status = 403; throw err;
   }

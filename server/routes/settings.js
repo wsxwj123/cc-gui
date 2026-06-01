@@ -118,8 +118,8 @@ async function resolveOpenAIUpstreamById(id) {
 // CLI hash convention: the Claude CLI replaces EVERY character that is not
 // [A-Za-z0-9] with a single `-` (one-to-one, not collapsed). So `/`, space,
 // `.`, and any Unicode char (中文 etc.) each become one dash. Verified against
-// real ~/.claude/projects dir names, e.g. `/Users/wsxwj/.claude/x` →
-// `-Users-wsxwj--claude-x` and a path with 4 CJK chars → `...----`.
+// real ~/.claude/projects dir names, e.g. `/Users/alice/.claude/x` →
+// `-Users-alice--claude-x` and a path with 4 CJK chars → `...----`.
 //
 // The previous version only replaced `/` and whitespace, leaving CJK intact —
 // so a Chinese-named project got a dir like `-…-测试` while the CLI actually

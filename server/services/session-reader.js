@@ -58,12 +58,12 @@ const SESSIONS_DIR = join(CLAUDE_DIR, 'sessions');
 
 /**
  * Decode project hash back to a readable path.
- * -Users-wsxwj-Desktop-claude → /Users/wsxwj/Desktop/claude
+ * -Users-alice-Desktop-proj → /Users/alice/Desktop/proj
  *
  * Some legacy project dirs in ~/.claude/projects/ have trailing dashes
- * (e.g. `-Users-wsxwj-Desktop-claude----`) — they were created when the CLI
+ * (e.g. `-Users-alice-Desktop-proj----`) — they were created when the CLI
  * was spawned with a cwd ending in extra slashes. Decoding them naively
- * produces `/Users/wsxwj/Desktop/claude////` which then breaks git status,
+ * produces `/Users/alice/Desktop/proj////` which then breaks git status,
  * checkpoints, and CLI resume downstream. Collapse multiple slashes here.
  */
 function decodeProjectHash(hash) {
