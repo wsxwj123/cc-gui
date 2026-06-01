@@ -362,6 +362,12 @@ router.get('/chat/:pid/stream', (req, res) => {
   let buffer = slot.earlyTail;
   slot.earlyTail = '';
 
+  // Turn-completion guards. The CLI's `result` event is the terminal signal of a
+  // -p turn; normally the process exits right after and proc.on('close') → finish().
+  // But /compact leaves the process ALIVE in -p mode, so without these the SSE
+  // stream (and the GUI "connecting" state) would hang forever. See completeTurn.
+  let turnDone = false;
+  let compactTimer = null;
   const onStdout = (chunk) => {
     buffer += chunk.toString();
     const lines = buffer.split('\n');
@@ -376,6 +382,15 @@ router.get('/chat/:pid/stream', (req, res) => {
           slot.sessionId = obj.session_id;
         }
         safeWrite('data: ' + line + '\n\n');
+        // Finish as soon as the turn's terminal signal arrives — don't wait for the
+        // process to exit (it may not, e.g. after /compact).
+        if (obj.type === 'result') {
+          completeTurn(obj.is_error ? (typeof obj.exitCode === 'number' ? obj.exitCode : 1) : 0);
+        } else if (obj.type === 'system' && obj.subtype === 'compact_boundary' && !compactTimer && !turnDone) {
+          // /compact wrote its summary. A `result` normally follows; if the process
+          // hangs instead (no result, no exit), finish anyway after a short grace.
+          compactTimer = setTimeout(() => completeTurn(0), 8000);
+        }
       } catch {
         // stream-json is one-object-per-line; a non-JSON complete line is junk.
         // Don't try to re-merge — that corrupts later chunks.
@@ -400,6 +415,17 @@ router.get('/chat/:pid/stream', (req, res) => {
     slot.exitCode = code;
     slot.finishedAt = Date.now();
     setTimeout(() => activeProcesses.delete(req.params.pid), 60_000);
+  };
+  // Finish the stream on the turn's terminal signal (runs once). Then SIGTERM the
+  // child after a short grace: a normal turn exits on its own within that window
+  // (kill = no-op), but a lingering /compact process gets reaped instead of leaking.
+  // Safe to kill here — the turn is over and its jsonl is already fully written.
+  const completeTurn = (code) => {
+    if (turnDone) return;
+    turnDone = true;
+    if (compactTimer) { clearTimeout(compactTimer); compactTimer = null; }
+    finish(code);
+    setTimeout(() => { try { if (!proc.killed) proc.kill('SIGTERM'); } catch {} }, 5000).unref();
   };
 
   proc.stdout.on('data', onStdout);
