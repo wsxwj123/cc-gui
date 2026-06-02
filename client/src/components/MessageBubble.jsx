@@ -132,17 +132,17 @@ function RollbackMenu({ message, onAction }) {
       // a narrow phone screen: right ∈ [8, innerWidth - menuW - 8].
       const menuW = 256;
       const right = Math.max(8, Math.min(window.innerWidth - r.right, window.innerWidth - menuW - 8));
-      // The menu must HUG the trigger. Decide below-vs-above with a conservative
-      // height estimate (the trigger sits just above the bottom input box, so
-      // opening downward would spill off-screen), but ANCHOR with `top` OR `bottom`
-      // so the menu's edge sits flush against the trigger regardless of the exact
-      // menu height — no gap from an inexact estimate:
-      //   • room below → top = trigger.bottom + 6  (menu hangs just under the button)
-      //   • no room    → bottom anchored to trigger.top - 6 (menu sits just above it)
-      const menuH = 250; // estimate used ONLY for the below/above choice
-      const coords = (r.bottom + 6 + menuH <= window.innerHeight - 8)
-        ? { top: r.bottom + 6, right }
-        : { bottom: Math.max(8, window.innerHeight - r.top + 6), right };
+      // Anchor the menu flush to the trigger on whichever side (below/above) has
+      // MORE room, and cap its height to exactly that room (the menu scrolls if
+      // taller). This can never spill past the top or bottom edge — even on a
+      // short/landscape phone where neither side fits the full menu height. The
+      // flush top/bottom anchor keeps it hugging the button with no gap.
+      const pad = 8, gap = 6;
+      const spaceBelow = window.innerHeight - r.bottom - gap - pad;
+      const spaceAbove = r.top - gap - pad;
+      const coords = spaceBelow >= spaceAbove
+        ? { top: r.bottom + gap, right, maxH: spaceBelow }
+        : { bottom: window.innerHeight - r.top + gap, right, maxH: spaceAbove };
       setCoords(coords);
     }
     setOpen(!open);
@@ -154,7 +154,7 @@ function RollbackMenu({ message, onAction }) {
   const menu = open && coords && (
     <div
       ref={menuRef}
-      style={{ position: 'fixed', right: coords.right, zIndex: 9999, ...(coords.top != null ? { top: coords.top } : { bottom: coords.bottom }) }}
+      style={{ position: 'fixed', right: coords.right, zIndex: 9999, maxHeight: coords.maxH, overflowY: 'auto', ...(coords.top != null ? { top: coords.top } : { bottom: coords.bottom }) }}
       className="w-64 max-w-[calc(100vw-16px)] py-1 rounded-lg shadow-xl bg-canvas border border-canvas-deep animate-glass-rise"
     >
       <div className="px-3 py-2 text-[10px] text-ink-faint uppercase tracking-wider font-body border-b border-canvas-deep">
