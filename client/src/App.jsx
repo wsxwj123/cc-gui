@@ -2302,6 +2302,9 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
           if (event.type === 'system' && event.subtype === 'init' && event.session_id) {
             const sel = getLocalSession();
             if (sel && !sel.sessionId) {
+              // Carry the draft's per-session model/permission pins to the real
+              // session id so a model picked for a brand-new chat doesn't revert.
+              useStore.getState().migrateSessionKey(`draft-${sel.projectHash || 'none'}`, event.session_id);
               setSelectedSession({
                 ...sel,
                 draft: false,
@@ -3395,19 +3398,23 @@ export function ModelSelector({ compact = false, permKey = null }) {
   const [open, setOpen] = useState(false);
   const [customInput, setCustomInput] = useState('');
   const [provider, setProvider] = useState('');
-  const [fetched, setFetched] = useState([]);
   const [fetchNote, setFetchNote] = useState('');
   const [fetching, setFetching] = useState(false);
   const [query, setQuery] = useState('');
   const wrapRef = useRef(null);
+  // Live catalogue lives in the store (keyed by provider) so it auto-loads AND
+  // survives closing/reopening the picker — instead of vanishing with this
+  // component's local state every time it unmounts.
+  const fetched = useStore((s) => s.fetchedByProvider[provider] || []);
   const doFetch = async () => {
     setFetching(true); setFetchNote('');
     try {
       const r = await fetch('/api/provider/fetch-models', { method: 'POST' });
       const d = await r.json();
       if (!r.ok) throw new Error(d.error || '拉取失败');
-      setFetched(Array.isArray(d.models) ? d.models : []);
-      setFetchNote(d.note || (d.models?.length ? `已拉取 ${d.models.length} 个` : '未返回模型'));
+      const models = Array.isArray(d.models) ? d.models : [];
+      useStore.getState().setFetchedModels(provider, models);
+      setFetchNote(d.note || (models.length ? `已拉取 ${models.length} 个` : '未返回模型'));
     } catch (e) { setFetchNote('拉取失败：' + e.message); }
     setFetching(false);
   };
@@ -3417,12 +3424,22 @@ export function ModelSelector({ compact = false, permKey = null }) {
     const load = () => {
       fetch('/api/model').then(r => r.json()).then(data => {
         if (cancelled) return;
-        setProvider(data.provider || '');
+        const prov = data.provider || '';
+        setProvider(prov);
         // Seed the GLOBAL default only (never a per-session override) — this is
         // the resolved settings.json default, used as fallback for sessions
         // without an explicit pick.
         if (data.model) useStore.setState({ currentModel: data.model });
         if (data.available) useStore.setState({ availableModels: data.available });
+        // Auto-load the live catalogue once per provider so the latest models
+        // (e.g. Opus 4.8) show up without a manual "拉取最新" click — and persist
+        // in the store so they don't disappear when the picker is reopened.
+        if (prov && !useStore.getState().fetchedByProvider[prov]) {
+          fetch('/api/provider/fetch-models', { method: 'POST' })
+            .then((r) => r.json())
+            .then((d) => { if (!cancelled) useStore.getState().setFetchedModels(prov, Array.isArray(d.models) ? d.models : []); })
+            .catch(() => {});
+        }
       }).catch(() => {});
     };
     load();

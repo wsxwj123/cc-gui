@@ -324,6 +324,34 @@ export const useStore = create((set, get) => ({
   // reference the OLD provider's models (and would otherwise mask the new
   // provider's default model + survive as invalid ids on the new backend).
   clearModelOverrides: () => { writeLs('cgui-model-by-session', {}); set({ modelBySession: {} }); },
+  // When a draft session (keyed `draft-<projectHash>`) gets its real CLI session
+  // id, carry its per-session model + permission pins over to the new key. Without
+  // this the pins orphan under the draft key, so the model the user picked for a
+  // brand-new chat silently reverts to the global default once they navigate away
+  // and back (the remount re-seeds currentModel from settings.json).
+  migrateSessionKey: (fromKey, toKey) => {
+    if (!fromKey || !toKey || fromKey === toKey) return;
+    const patch = {};
+    const mbs = get().modelBySession;
+    if (mbs[fromKey] != null && mbs[toKey] == null) {
+      const m = { ...mbs, [toKey]: mbs[fromKey] }; delete m[fromKey];
+      writeLs('cgui-model-by-session', m); patch.modelBySession = m;
+    }
+    const pms = get().permissionModeBySession;
+    if (pms[fromKey] != null && pms[toKey] == null) {
+      const p = { ...pms, [toKey]: pms[fromKey] }; delete p[fromKey];
+      writeLs('cgui-perm-mode-by-session', p); patch.permissionModeBySession = p;
+    }
+    if (Object.keys(patch).length) set(patch);
+  },
+  // Live-fetched model catalogue per provider (in-memory; re-fetched on reload).
+  // Lets the official catalogue (incl. latest Opus) show automatically and SURVIVE
+  // closing/reopening the picker instead of vanishing with the component's state.
+  fetchedByProvider: {},
+  setFetchedModels: (provider, models) => {
+    if (!provider) return;
+    set({ fetchedByProvider: { ...get().fetchedByProvider, [provider]: Array.isArray(models) ? models : [] } });
+  },
   // User-defined model ids, persisted GUI-side and merged into the model list so
   // a typed-in custom id actually SHOWS as a selectable row (the server's
   // auto-enumeration only knows models from settings.json env + the provider's
