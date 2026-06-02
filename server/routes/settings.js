@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { readFile, writeFile, mkdir, copyFile, unlink } from 'fs/promises';
 import { existsSync } from 'fs';
-import { execFile } from 'child_process';
+import { execFile, spawn } from 'child_process';
 import { promisify } from 'util';
 import { join, isAbsolute } from 'path';
 import { homedir } from 'os';
@@ -686,6 +686,48 @@ async function probeUpstreamModels(baseURL, apiKey) {
   throw new Error(`上游返回 ${lastStatus || '错误'}`);
 }
 
+// Read the local Claude Code subscription OAuth token. macOS stores it in the
+// login keychain; some setups use ~/.claude/.credentials.json. Returns the
+// accessToken or '' (non-macOS, logged out, or unreadable) so callers can fall
+// back to the tier aliases.
+async function readClaudeOAuthToken() {
+  try {
+    const { stdout } = await execFileP('security',
+      ['find-generic-password', '-s', 'Claude Code-credentials', '-w'], { timeout: 5000 });
+    const tok = JSON.parse(stdout).claudeAiOauth?.accessToken;
+    if (tok) return tok;
+  } catch { /* not macOS / not logged in — fall through */ }
+  try {
+    const raw = await readFile(join(homedir(), '.claude', '.credentials.json'), 'utf-8');
+    return JSON.parse(raw).claudeAiOauth?.accessToken || '';
+  } catch { return ''; }
+}
+
+// Fetch the official Anthropic catalogue (api.anthropic.com/v1/models) with the
+// subscription OAuth token — the SAME source the CLI's /model picker uses, so
+// the GUI lists exactly what `claude` knows (incl. the latest Opus). Runs via
+// curl so it inherits the server's https_proxy (api.anthropic.com is often only
+// reachable through one); the token is piped through curl's stdin `--config` so
+// it never lands in argv / the process list.
+function probeOfficialModels(token) {
+  return new Promise((resolve, reject) => {
+    const ch = spawn('curl',
+      ['-sS', '--max-time', '15', '--config', '-', 'https://api.anthropic.com/v1/models']);
+    let out = '', err = '';
+    ch.stdout.on('data', (d) => { out += d; });
+    ch.stderr.on('data', (d) => { err += d; });
+    ch.on('error', reject);
+    ch.on('close', (code) => {
+      if (code !== 0) return reject(new Error(err.trim() || `curl 退出码 ${code}`));
+      let data; try { data = JSON.parse(out); } catch { return reject(new Error('解析模型目录失败')); }
+      const arr = Array.isArray(data?.data) ? data.data : [];
+      resolve([...new Set(arr.map((m) => (typeof m === 'string' ? m : m?.id)).filter(Boolean))]);
+    });
+    ch.stdin.write(`header = "Authorization: Bearer ${token}"\nheader = "anthropic-version: 2023-06-01"\n`);
+    ch.stdin.end();
+  });
+}
+
 // POST /api/custom-providers/fetch-models { type, baseURL, apiKey } — used by the
 // add-provider form (client supplies the key being entered).
 router.post('/custom-providers/fetch-models', async (req, res) => {
@@ -715,7 +757,18 @@ router.post('/provider/fetch-models', async (req, res) => {
     try { env = (JSON.parse(await readFile(SETTINGS_PATH, 'utf-8')).env) || {}; } catch {}
     const base = env.ANTHROPIC_BASE_URL || '';
     const token = env.ANTHROPIC_AUTH_TOKEN || env.ANTHROPIC_API_KEY || '';
-    if (!base) return res.json({ models: [], note: '官方直连(无凭证),无法拉取;别名 opus/sonnet/haiku 即最新 tier' });
+    // Official mode (no base URL): pull the real catalogue from api.anthropic.com
+    // with the subscription OAuth token — same list the CLI's /model picker shows,
+    // including the latest Opus. Falls back to the tier aliases if not logged in.
+    if (!base) {
+      const oauth = await readClaudeOAuthToken();
+      if (!oauth) return res.json({ models: [], note: '官方模式:未检测到订阅登录,请先在终端 claude login;别名 opus/sonnet/haiku 即最新 tier' });
+      try {
+        return res.json({ models: await probeOfficialModels(oauth) });
+      } catch (e) {
+        return res.json({ models: [], note: `官方目录拉取失败:${e.message};可手输具体 id 如 claude-opus-4-8` });
+      }
+    }
     if (base.includes('127.0.0.1')) return res.json({ models: [], note: 'OpenAI 代理 provider,模型见 provider 配置' });
     res.json({ models: await probeUpstreamModels(base, token) });
   } catch (err) {
