@@ -3405,7 +3405,7 @@ export function ModelSelector({ compact = false, permKey = null }) {
   // Live catalogue lives in the store (keyed by provider) so it auto-loads AND
   // survives closing/reopening the picker — instead of vanishing with this
   // component's local state every time it unmounts.
-  const fetched = useStore((s) => s.fetchedByProvider[provider] || []);
+  const fetched = useStore((s) => s.fetchedByProvider[provider]) || EMPTY_ARRAY;
   const doFetch = async () => {
     setFetching(true); setFetchNote('');
     try {
