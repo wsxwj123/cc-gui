@@ -423,6 +423,14 @@ router.post('/provider/switch', async (req, res) => {
       }
       if (model && isClaudeModel(model)) env.ANTHROPIC_MODEL = model;
       const next = { ...snapshot, env };
+      // Preserve the user's CURRENT default model — do NOT let cc-switch's official
+      // snapshot (which carries model:haiku) overwrite it on every switch. Priority:
+      // explicit claude request > live settings.json model (if a claude id/alias) >
+      // snapshot's. This is why a user-set "sonnet" used to silently revert to haiku.
+      let curModel;
+      try { curModel = JSON.parse(await readFile(SETTINGS_PATH, 'utf-8')).model; } catch {}
+      if (model && isClaudeModel(model)) next.model = model;
+      else if (isClaudeModel(curModel)) next.model = curModel;
       const ts = new Date().toISOString().replace(/[:.]/g, '-');
       await copyFile(SETTINGS_PATH, `${SETTINGS_PATH}.${ts}.bak`).catch(() => {});
       await writeFile(SETTINGS_PATH, JSON.stringify(next, null, 2));
