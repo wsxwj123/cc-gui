@@ -191,6 +191,21 @@ router.post('/chat', async (req, res) => {
     for (const k of ['ANTHROPIC_BASE_URL', 'ANTHROPIC_API_URL', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN']) {
       delete childEnv[k];
     }
+    // Strip inherited tier-alias overrides. When this server is launched from a
+    // Claude-Desktop shell that had a third-party provider active (deepseek/mimo),
+    // it inherits ANTHROPIC_DEFAULT_{HAIKU,SONNET,OPUS}_MODEL pointing at that
+    // provider's models. These env vars OUTRANK settings.json, so picking the
+    // `opus`/`sonnet`/`haiku` alias (here or in the terminal) silently resolves to
+    // the stale third-party model instead of the official tier — e.g. `opus` →
+    // `deepseek-v4-pro`, which is why the real Opus never appears. The legitimate
+    // per-provider values live in settings.json and still apply after this strip.
+    for (const k of [
+      'ANTHROPIC_DEFAULT_HAIKU_MODEL', 'ANTHROPIC_DEFAULT_SONNET_MODEL', 'ANTHROPIC_DEFAULT_OPUS_MODEL',
+      'ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME', 'ANTHROPIC_DEFAULT_SONNET_MODEL_NAME', 'ANTHROPIC_DEFAULT_OPUS_MODEL_NAME',
+      'ANTHROPIC_REASONING_MODEL', 'ANTHROPIC_SMALL_FAST_MODEL',
+    ]) {
+      delete childEnv[k];
+    }
     // Strip permission-related env so the CLI honours our --permission-mode
     // flag instead of an inherited override that could force bypass.
     delete childEnv.ANTHROPIC_PERMISSION_MODE;
