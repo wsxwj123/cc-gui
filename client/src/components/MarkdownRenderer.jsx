@@ -2,15 +2,17 @@ import React, { useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { Copy, Check } from 'lucide-react';
+import { copyText } from '../utils/clipboard.js';
 
 function CopyButton({ text }) {
   const [copied, setCopied] = useState(false);
   return (
     <button
-      onClick={() => {
-        navigator.clipboard.writeText(text);
-        setCopied(true);
-        setTimeout(() => setCopied(false), 1500);
+      onClick={async () => {
+        if (await copyText(text)) {
+          setCopied(true);
+          setTimeout(() => setCopied(false), 1500);
+        }
       }}
       className="flex items-center gap-1 text-[10px] text-[#9a8e78] hover:text-[#cabba0] transition-colors"
     >

@@ -1,16 +1,17 @@
 import React, { useState } from 'react';
 import { Copy, Check } from 'lucide-react';
+import { copyText } from '../utils/clipboard.js';
 
 export function CodeBlock({ code, language }) {
   const [copied, setCopied] = useState(false);
 
-  const handleCopy = () => {
-    // clipboard API rejects on non-secure contexts (plain http over LAN) and
-    // when permission is denied — swallow so it doesn't surface as an unhandled
-    // rejection. Still flip to "copied" optimistically.
-    Promise.resolve(navigator.clipboard?.writeText(code)).catch(() => {});
-    setCopied(true);
-    setTimeout(() => setCopied(false), 1500);
+  const handleCopy = async () => {
+    // copyText falls back to execCommand on non-secure contexts (phone over
+    // plain-http LAN / Tailscale), where navigator.clipboard is unavailable.
+    if (await copyText(code)) {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    }
   };
 
   return (

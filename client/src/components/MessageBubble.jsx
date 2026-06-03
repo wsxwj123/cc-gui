@@ -2,6 +2,7 @@ import React, { useState, useRef, useEffect } from 'react';
 import { createPortal } from 'react-dom';
 import { User, Brain, Copy, Check, RotateCcw, Pencil, X } from 'lucide-react';
 import { computeCost, formatCost } from '../utils/pricing.js';
+import { copyText } from '../utils/clipboard.js';
 import { useStore } from '../stores/sessionStore.js';
 
 // User messages can be huge (pasted logs, long prompts). Collapse to ~10 lines
@@ -215,10 +216,11 @@ function CopyButton({ text }) {
   const [copied, setCopied] = useState(false);
   return (
     <button
-      onClick={() => {
-        navigator.clipboard.writeText(text);
-        setCopied(true);
-        setTimeout(() => setCopied(false), 1500);
+      onClick={async () => {
+        if (await copyText(text)) {
+          setCopied(true);
+          setTimeout(() => setCopied(false), 1500);
+        }
       }}
       className="opacity-0 group-hover:opacity-100 max-md:opacity-60 transition-opacity p-1 hover:bg-canvas-deep rounded"
       title="复制"

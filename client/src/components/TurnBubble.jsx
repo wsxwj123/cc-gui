@@ -14,6 +14,7 @@ import { GrepGlobCard } from './tools/GrepGlobCard.jsx';
 import { WebCard } from './tools/WebCard.jsx';
 import { SkillCard } from './tools/SkillCard.jsx';
 import { computeCost, formatCost } from '../utils/pricing.js';
+import { copyText } from '../utils/clipboard.js';
 import { useStore } from '../stores/sessionStore.js';
 
 // Tools that get their own bespoke inline card (rendered in chronological order
@@ -111,10 +112,11 @@ function CopyButton({ text }) {
   const [copied, setCopied] = useState(false);
   return (
     <button
-      onClick={() => {
-        navigator.clipboard.writeText(text);
-        setCopied(true);
-        setTimeout(() => setCopied(false), 1500);
+      onClick={async () => {
+        if (await copyText(text)) {
+          setCopied(true);
+          setTimeout(() => setCopied(false), 1500);
+        }
       }}
       className="opacity-0 group-hover:opacity-100 max-md:opacity-60 transition-opacity p-1 hover:bg-canvas-deep rounded"
       title="复制"
