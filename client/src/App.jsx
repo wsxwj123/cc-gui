@@ -2223,6 +2223,11 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
     } catch {}
     } // end if (!reattachPid)
 
+    // Did this turn actually emit assistant content? Declared out here (not in
+    // the try) so the finally can read it: gates the post-stream poll so an
+    // empty/errored turn — which never gets a jsonl twin — neither waits on one
+    // nor has its local ⚠️/❌ notice cleared.
+    let producedReply = false;
     try {
       let pid;
       if (reattachPid) {
@@ -2585,6 +2590,7 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
       }
 
       if (accumulatedText || accumulatedThinking || currentToolCalls.length > 0) {
+        producedReply = true;
         setChatMessages((prev) => [...prev, {
           uuid: 'chat-assistant-' + Date.now(), type: 'turn',
           timestamp: new Date().toISOString(), model: streamingModel,
@@ -2647,31 +2653,49 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
       setStreamingBlocks([]);
       activeProcRef.current = null;
       abortRef.current = null;
-      // After the stream ends locally, pull the persisted jsonl and let it
-      // own the displayed history. Then dedup chatMessages — anything that
-      // also exists in persisted is dropped, so the assistant turn we just
-      // pushed locally doesn't render alongside its jsonl twin.
+      // After the stream ends locally, hand the displayed history back to the
+      // persisted jsonl. The catch: jsonl flushes the user prompt BEFORE the
+      // assistant reply, and that flush races the stream's `result`. A single
+      // fetch can catch jsonl mid-round (user written, assistant not) — and
+      // because the render is a naive [...persisted, ...chatMessages] concat
+      // with no dedup, clearing the local copies then leaves a gap where the
+      // reply VANISHES until the next fetch, then REAPPEARS ("output disappears
+      // then comes back like a refresh", worse on slow disks). So when we
+      // actually produced a reply, poll briefly until the assistant turn has
+      // landed in jsonl; only THEN clear local. Empty/errored turns (no jsonl
+      // twin) skip the wait and keep their local ⚠️/❌ notice.
       const _sel = getLocalSession();
       if (_sel?.sessionId && _sel?.projectHash) {
-        try {
-          await fetchMessagesForTab(_sel.sessionId, _sel.projectHash, { silent: true });
-        } catch {}
-        setChatMessages((prev) => {
-          if (!prev.length) return prev;
+        const tkey = (m) => {
+          const t = Array.isArray(m.text) ? m.text.join('') : (m.text || '');
+          return `${m.type}|${(t || '').slice(0, 80)}`;
+        };
+        const userKey = prompt ? `user|${String(prompt).slice(0, 80)}` : null;
+        // The whole round is on disk once a `type:'turn'` (assistant) record
+        // exists AFTER our user prompt. (session-reader: user→'user', reply→'turn'.)
+        const roundLanded = (persisted) => {
+          if (!userKey) return true;
+          const idx = persisted.map(tkey).lastIndexOf(userKey);
+          return idx !== -1 && persisted.slice(idx + 1).some((m) => m.type === 'turn');
+        };
+        for (let i = 0; i < 8; i++) {
+          try { await fetchMessagesForTab(_sel.sessionId, _sel.projectHash, { silent: true }); } catch {}
           const persisted = getLocalMessages();
-          const tkey = (m) => {
-            const t = Array.isArray(m.text) ? m.text.join('') : (m.text || '');
-            return `${m.type}|${(t || '').slice(0, 80)}`;
-          };
+          if (producedReply && roundLanded(persisted)) {
+            // Full round persisted → persisted owns it; drop ALL local copies
+            // (the streamed reply rarely byte-matches the final jsonl, so a
+            // per-text filter would leave it doubled — clear instead).
+            setChatMessages([]);
+            break;
+          }
+          // Not landed yet (or empty/errored turn): drop only the local copies
+          // whose exact twin is already persisted — e.g. the user prompt — so
+          // the reply / ⚠️ stays visible with no gap and no doubled user line.
           const known = new Set(persisted.map(tkey));
-          // If this round's user prompt is already persisted, the whole round
-          // landed in jsonl — drop ALL local copies even when the assistant text
-          // didn't byte-match (streaming-accumulated vs final jsonl can differ).
-          // Fixes the "reply rendered twice" race (jsonl turn + local turn both show).
-          const lastUser = [...prev].reverse().find((m) => m.type === 'user');
-          if (lastUser && known.has(tkey(lastUser))) return [];
-          return prev.filter((m) => !known.has(tkey(m)));
-        });
+          setChatMessages((prev) => (prev.length ? prev.filter((m) => !known.has(tkey(m))) : prev));
+          if (!producedReply) break; // empty/errored turn — nothing to wait for
+          if (i < 7) await new Promise((r) => setTimeout(r, 200));
+        }
       }
       // Background refresh of sidebar session list. `silent:true` means the
       // global loading flag is NOT toggled, so SessionDetail doesn't swap to
