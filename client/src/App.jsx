@@ -2757,21 +2757,28 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
     }
   }, [backgroundPid]);
 
-  // Global ESC → interrupt streaming (matches Claude Code CLI behavior where
-  // Esc aborts the current generation). Skip when typing in an input/textarea
-  // (those have their own Escape semantics) and when a permission dialog is
-  // open (the permission card binds Esc to "deny" — let it handle).
+  // Double-ESC → interrupt streaming (matches Claude Code CLI). A SINGLE Esc
+  // keeps its local meaning (closing the slash-command menu / a popover); a
+  // SECOND Esc within 600ms aborts the current generation. Deliberately NOT
+  // gated on textarea/input focus: during a reply the cursor lives in the
+  // composer, so the old "ignore Esc from a textarea" guard meant Esc never
+  // interrupted in practice. Permission dialogs still own Esc (deny).
   useEffect(() => {
     if (!isStreaming && !backgroundPid) return;
     const hasPendingPerm = () => useStore.getState().pendingPermissions
       .some((p) => p.sessionId === selectedSession?.sessionId);
+    let lastEsc = 0;
     const onKey = (e) => {
-      if (e.key !== 'Escape') return;
-      const t = e.target;
-      if (t && (t.tagName === 'TEXTAREA' || t.tagName === 'INPUT')) return;
-      if (hasPendingPerm()) return; // permission card handles Esc
-      e.preventDefault();
-      handleStop();
+      if (e.key !== 'Escape' || e.repeat) return; // ignore held-key repeats
+      if (hasPendingPerm()) { lastEsc = 0; return; } // permission card handles Esc
+      const now = e.timeStamp || performance.now();
+      if (lastEsc && now - lastEsc <= 600) {
+        lastEsc = 0;
+        e.preventDefault();
+        handleStop();
+      } else {
+        lastEsc = now; // first press — let local Esc semantics run, arm the second
+      }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
