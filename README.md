@@ -42,29 +42,27 @@ Grab your platform from the [Releases page](https://github.com/wsxwj123/claude-g
 - [Node.js](https://nodejs.org) 20 or newer (includes npm)
 - Only needed to *package the desktop app*: Rust stable + [Tauri platform deps](https://v2.tauri.app/start/prerequisites/)
 
-**2. Clone & install**
+**2. Clone**
 
 ```bash
 git clone https://github.com/wsxwj123/claude-gui.git
 cd claude-gui
-npm install
-cd client && npm install && cd ..
 ```
 
-**3. Start it**
+**3. Start it (first run auto-installs deps & builds)**
 
-Easiest — **double-click the launcher** (close the window to stop):
+**Double-click the launcher** — the first run auto-installs dependencies, builds the frontend (a few minutes), then opens your browser at `http://localhost:6677` (close the window to stop):
 
 - **macOS**: double-click `gui.command` (if blocked, right-click → **Open** once)
 - **Windows**: double-click `gui.bat`
 
-The first run builds the frontend, then opens your browser at `http://localhost:6677`.
-
-Or from the command line:
+Or do it manually from the command line:
 
 ```bash
-npm run build   # build the frontend (first run / after updates)
-npm start       # start the server, port 6677 by default
+npm install                  # root deps
+npm --prefix client install  # frontend deps
+npm run build                # build the frontend
+npm start                    # start the server, port 6677 by default
 ```
 
 Then open **http://localhost:6677**.
@@ -97,6 +95,7 @@ Output lands in `src-tauri/target/release/bundle/` (`.dmg` on macOS, `.exe` / `.
 | Symptom | Fix |
 |---|---|
 | Port 6677 in use | `npm run stop` to free the port, or close whatever is using it |
+| Build fails with `Cannot find native binding` (vite) | Delete `client/node_modules` and re-launch (reinstalls the correct local deps); if needed `npm cache clean --force` |
 | Blank page / can't send | Confirm the `claude` CLI works and Node ≥ 20; delete `client/dist` and `npm run build` again |
 | Code changes not showing | From source you must `npm run build` again (or re-launch `gui.command` / `gui.bat`) |
 | macOS `gui.command` does nothing | Right-click → **Open** once to authorize, or `chmod +x gui.command` |

@@ -1,33 +1,33 @@
 #!/bin/bash
-# Claude GUI launcher with a restart watchdog.
-#
-# Double-click this (or run it) to start the GUI. If the server exits — whether
-# it crashed or the in-app "重启" button asked it to — this loop relaunches it.
-# The CGUI_WATCHDOG=1 flag tells the server the watchdog is present, so the
-# /api/restart endpoint is allowed to exit cleanly (it refuses otherwise, to
-# avoid stranding a phone client when started bare).
+# Claude GUI launcher (macOS). Double-click to start; close the window to stop.
+# If the server process exits for any reason, the loop below relaunches it.
 cd "$(dirname "$0")" || exit 1
 
-# Build the frontend once if it hasn't been built yet. Use build:local (NOT the
-# public build) so this private launcher keeps the machine-local *.local widgets
-# (e.g. bot controls) in client/dist. client/dist is gitignored, so they never
-# leak to the public repo — public packaging uses `npm run build` which strips them.
+# First run: install dependencies if missing (root + client). Without the client
+# deps, the build below would pull a stray vite from the npx cache whose native
+# binding can fail to load (code-signature / Team-ID mismatch on macOS).
+if [ ! -d node_modules ]; then
+  echo "[gui] installing dependencies (first run, may take a few minutes)…"
+  npm install || { echo "[gui] npm install failed"; exit 1; }
+fi
+if [ ! -d client/node_modules ]; then
+  echo "[gui] installing client dependencies…"
+  npm --prefix client install || { echo "[gui] client install failed"; exit 1; }
+fi
+
+# Build the frontend once if it hasn't been built yet.
 if [ ! -d client/dist ]; then
   echo "[gui] building frontend (first run)…"
   npm run build:local || { echo "[gui] build failed"; exit 1; }
 fi
 
-echo "[gui] starting with restart watchdog (Ctrl-C twice to fully stop)…"
-# Open the default browser to the GUI once, on first start only. The server reads
-# this flag; we flip it off after the first run so watchdog restarts don't keep
-# spawning new browser tabs.
+echo "[gui] starting (Ctrl-C twice to fully stop)…"
+# Open the default browser once on first start; flipped off for relaunches.
 export CGUI_OPEN_BROWSER=1
 while true; do
   CGUI_WATCHDOG=1 NODE_ENV=production node server/index.js
   code=$?
   export CGUI_OPEN_BROWSER=0
-  # Exit code 0 = deliberate restart; anything else = crash. Relaunch either way,
-  # but pause briefly so a tight crash loop (e.g. port held) doesn't spin the CPU.
   echo "[gui] server exited (code $code) — relaunching in 1s…"
   sleep 1
 done

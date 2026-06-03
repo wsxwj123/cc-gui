@@ -42,29 +42,27 @@ GUI 只是 `claude` CLI 的外壳，**必须先装好并登录 Claude Code**：
 - [Node.js](https://nodejs.org) 20 或更高（自带 npm）
 - 仅「打包桌面 App」才需要：Rust stable + [Tauri 各平台依赖](https://v2.tauri.app/start/prerequisites/)
 
-**2. 克隆 + 装依赖**
+**2. 克隆**
 
 ```bash
 git clone https://github.com/wsxwj123/claude-gui.git
 cd claude-gui
-npm install
-cd client && npm install && cd ..
 ```
 
-**3. 启动**
+**3. 启动（首次自动装依赖并构建）**
 
-最省事——**双击启动脚本**（关掉窗口即停止）：
+**双击启动脚本**即可——首次会自动安装依赖、构建前端（约几分钟），随后打开浏览器到 `http://localhost:6677`（关掉窗口即停止）：
 
 - **macOS**：双击 `gui.command`（首次若被拦，「右键 → 打开」一次）
 - **Windows**：双击 `gui.bat`
 
-首次启动会自动构建前端，随后自动打开浏览器到 `http://localhost:6677`。
-
-或者用命令行：
+或者用命令行手动来一遍：
 
 ```bash
-npm run build   # 构建前端（首次或更新代码后）
-npm start       # 启动服务，默认 6677 端口
+npm install                  # 根依赖
+npm --prefix client install  # 前端依赖
+npm run build                # 构建前端
+npm start                    # 启动服务，默认 6677 端口
 ```
 
 然后浏览器打开 **http://localhost:6677**。
@@ -97,6 +95,7 @@ npm run tauri:build
 | 现象 | 处理 |
 |---|---|
 | 端口 6677 被占用 | `npm run stop` 释放端口，或关掉占用它的进程 |
+| 构建报 `Cannot find native binding` 等 vite 错误 | 删掉 `client/node_modules` 后重新双击启动脚本（会重装本机正确依赖）；必要时 `npm cache clean --force` |
 | 打开白屏 / 发不了消息 | 确认 `claude` CLI 能用、Node ≥ 20；删掉 `client/dist` 后重新 `npm run build` |
 | 改了代码不生效 | 源码方式下需重新 `npm run build`（或重新双击 `gui.command` / `gui.bat`） |
 | macOS 双击 `gui.command` 没反应 | 「右键 → 打开」授权一次；或终端 `chmod +x gui.command` |
