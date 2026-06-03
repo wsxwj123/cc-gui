@@ -186,8 +186,7 @@ router.post('/chat', async (req, res) => {
     // Also drop CLAUDE_CODE_OAUTH_TOKEN: an inherited (stale) value pins the CLI to
     // an old subscription token and blocks it from refreshing the keychain OAuth on
     // its own, causing 401 once that token expires. Removing it lets the CLI read
-    // the live keychain (`Claude Code-credentials`) and auto-refresh via refreshToken
-    // — the same reason restart-bots.sh `unset`s it before nudging a refresh.
+    // the live keychain (`Claude Code-credentials`) and auto-refresh via refreshToken.
     for (const k of ['ANTHROPIC_BASE_URL', 'ANTHROPIC_API_URL', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN']) {
       delete childEnv[k];
     }
