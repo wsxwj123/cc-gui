@@ -672,11 +672,14 @@ async function probeUpstreamModels(baseURL, apiKey) {
   // double it into /v1/v1/models.
   const b = baseURL.trim().replace(/\/+$/, '');
   const url = /\/v\d+$/.test(b) ? `${b}/models` : `${b}/v1/models`;
+  // Always send a real User-Agent + Accept: Node fetch's default UA is "node",
+  // which some relays behind a WAF (e.g. Cloudflare) answer with a 403 challenge.
+  const common = { 'User-Agent': 'claude-gui', Accept: 'application/json' };
   const headerSets = [
-    { 'x-api-key': apiKey || '', 'anthropic-version': '2023-06-01' },
-    { Authorization: `Bearer ${apiKey || ''}` },
+    { ...common, 'x-api-key': apiKey || '', 'anthropic-version': '2023-06-01' },
+    { ...common, Authorization: `Bearer ${apiKey || ''}` },
   ];
-  let lastStatus = 0;
+  let lastStatus = 0, lastBody = '';
   for (const headers of headerSets) {
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), 10000);
@@ -690,8 +693,11 @@ async function probeUpstreamModels(baseURL, apiKey) {
       return [...new Set(arr.map((m) => (typeof m === 'string' ? m : m?.id)).filter(Boolean))];
     }
     lastStatus = r.status;
+    lastBody = (await r.text().catch(() => '')).replace(/\s+/g, ' ').trim().slice(0, 160);
   }
-  throw new Error(`上游返回 ${lastStatus || '错误'}`);
+  // Include the upstream's own words so a 404 (endpoint not implemented) reads
+  // differently from a 401/403 (auth/WAF) — the user can tell them apart.
+  throw new Error(`上游 ${url} 返回 ${lastStatus || '错误'}${lastBody ? `: ${lastBody}` : ''}`);
 }
 
 // Read the local Claude Code subscription OAuth token. macOS stores it in the
