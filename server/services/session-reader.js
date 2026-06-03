@@ -380,6 +380,12 @@ export async function getSessionMessages(sessionId, projectHash) {
 
   for (const record of records) {
     if (record.type === 'user') {
+      // Claude Desktop injects a synthetic user message ("Continue from where
+      // you left off.") flagged isMeta when it resumes a session. isMeta records
+      // are CLI/Desktop bookkeeping, never a real prompt — Desktop itself never
+      // renders them. Skip so they don't surface as a stray user bubble in the
+      // GUI when switching into such a session.
+      if (record.isMeta) continue;
       // After /compact the CLI stores the summary as a synthetic `user` message
       // flagged isCompactSummary. Render a collapsed "compacted" divider instead
       // of dumping the full summary as a user bubble (matches Claude Desktop /

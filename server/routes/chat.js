@@ -419,8 +419,16 @@ router.get('/chat/:pid/stream', (req, res) => {
     }
   };
   const onStderr = (chunk) => {
+    // CLI stderr is NOT inherently fatal. With --verbose it carries diagnostics,
+    // retry / rate-limit notices, /compact progress, Node deprecation warnings —
+    // forwarding each line as type:'error' flashed a ❌ bubble and aborted the
+    // turn mid-stream (the "/compact 报错后恢复" bug, plus spurious mid-turn
+    // errors). Emit type:'stderr' instead: the streaming loop ignores unknown
+    // event types, so it neither breaks nor renders. Genuine failures still
+    // surface via result.is_error, the proc 'error' handler, or the empty-turn
+    // fallback — none of which depend on stderr.
     const text = chunk.toString().trim();
-    if (text) safeWrite(`data: ${JSON.stringify({ type: 'error', error: text })}\n\n`);
+    if (text) safeWrite(`data: ${JSON.stringify({ type: 'stderr', text })}\n\n`);
   };
   const finish = (code) => {
     if (buffer.trim()) {
