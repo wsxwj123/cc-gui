@@ -4103,9 +4103,15 @@ function CustomProviderForm({ onSaved }) {
       });
       const d = await r.json();
       if (!r.ok) throw new Error(d.error || '拉取失败');
-      if (!d.models?.length) window.alert('该端点未返回模型,请手动填写');
+      if (!d.models?.length) window.alert('该端点未返回模型,请直接在下方「模型」框手填模型 ID 再保存。');
       else setModelsText(d.models.join('\n'));
-    } catch (e) { window.alert('拉取模型失败：' + e.message); }
+    } catch (e) {
+      // Many relays (MiMo / DeepSeek and other Claude-protocol middlemen) only
+      // forward /v1/messages and 404 on /v1/models — that's expected, not a
+      // misconfig. Point the user at manual entry instead of a bare error.
+      window.alert('拉取模型失败：' + e.message
+        + '\n\n很多中转(如 MiMo / DeepSeek 等 Claude 协议中转)不提供 /v1/models 接口,这很正常。直接在下方「模型」框手填模型 ID(每行一个)再保存即可。');
+    }
     setBusy('');
   };
   const save = async () => {
