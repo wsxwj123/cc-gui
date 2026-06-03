@@ -95,7 +95,7 @@ npm run tauri:build
 | 现象 | 处理 |
 |---|---|
 | 端口 6677 被占用 | `npm run stop` 释放端口，或关掉占用它的进程 |
-| 构建报 `Cannot find native binding` 等 vite 错误 | 删掉 `client/node_modules` 后重新双击启动脚本（会重装本机正确依赖）；必要时 `npm cache clean --force` |
+| 构建报 `Cannot find native binding` / `different Team IDs` | 你的 `node` 多半被某 App 自带的 node 抢了 PATH（带 macOS 库签名校验，拒绝第三方原生模块）。改用官方/Homebrew/nvm 的 node：`brew install node` 或 [nodejs.org](https://nodejs.org)，确认 `which node` 不指向某个 `.app` 内部，删掉 `node_modules` 和 `client/node_modules` 后重试 |
 | 打开白屏 / 发不了消息 | 确认 `claude` CLI 能用、Node ≥ 20；删掉 `client/dist` 后重新 `npm run build` |
 | 改了代码不生效 | 源码方式下需重新 `npm run build`（或重新双击 `gui.command` / `gui.bat`） |
 | macOS 双击 `gui.command` 没反应 | 「右键 → 打开」授权一次；或终端 `chmod +x gui.command` |

@@ -15,6 +15,10 @@ if [ ! -d client/node_modules ]; then
   npm --prefix client install || { echo "[gui] client install failed"; exit 1; }
 fi
 
+# Fail early with a clear hint if this node can't load native modules — an
+# app-bundled node with macOS library validation breaks both the build and node-pty.
+node scripts/check-node.cjs || exit 1
+
 # Build the frontend once if it hasn't been built yet.
 if [ ! -d client/dist ]; then
   echo "[gui] building frontend (first run)…"

@@ -16,6 +16,9 @@ if not exist "client\node_modules" (
   call npm --prefix client install || exit /b 1
 )
 
+REM Fail early with a clear hint if this node can't load native modules.
+node scripts/check-node.cjs || exit /b 1
+
 REM Build the frontend once if it hasn't been built yet.
 if not exist "client\dist" (
   echo [gui] building frontend ^(first run^)...
