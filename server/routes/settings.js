@@ -678,6 +678,12 @@ router.put('/custom-providers/:id', async (req, res) => {
         : (prev.models || []),
     };
     await writeCustomProviders(list);
+    // If this provider is the active one, refresh its model snapshot so the
+    // ModelSelector reflects the edit immediately (no re-switch needed).
+    await syncActiveProviderSnapshot(
+      type === 'openai' ? OPENAI_ACTIVE_PATH : ANTHROPIC_ACTIVE_PATH,
+      prev.id, list[idx].models,
+    );
     res.json({ ok: true, id: prev.id });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -826,6 +832,41 @@ router.get('/provider-models', async (_req, res) => {
   res.json({ selections: await readProviderModels() });
 });
 
+// Keep the ACTIVE provider's *-active.json snapshot in sync when its model list
+// is edited elsewhere (the multi-select OR the custom-provider edit form).
+// getAvailableModels resolves the ModelSelector from THIS snapshot — a switch-time
+// copy — so without this, editing the active provider's models would not show up
+// in the picker until a manual re-switch. `activePath` is openai-active.json or
+// anthropic-active.json. Best-effort: any failure (not the active provider /
+// unreadable) is a no-op.
+async function syncActiveProviderSnapshot(activePath, providerId, models) {
+  try {
+    const active = JSON.parse(await readFile(activePath, 'utf-8'));
+    if (active?.providerId !== providerId) return;
+    active.models = Array.isArray(models) ? models : [];
+    // If the active model was just de-selected, fall back to the first kept one
+    // and keep settings.json's ANTHROPIC_MODEL in sync (what the CLI sends).
+    if (active.models.length && !active.models.includes(active.model)) {
+      active.model = active.models[0];
+      try {
+        const cur = JSON.parse(await readFile(SETTINGS_PATH, 'utf-8'));
+        if (cur?.env) {
+          cur.env.ANTHROPIC_MODEL = active.model;
+          // The proxy subagent aliases only exist on the openai-proxy path; only
+          // rewrite them when already present (anthropic switch deletes them).
+          if (cur.env.ANTHROPIC_DEFAULT_SONNET_MODEL) {
+            cur.env.ANTHROPIC_DEFAULT_HAIKU_MODEL = active.model;
+            cur.env.ANTHROPIC_DEFAULT_SONNET_MODEL = active.model;
+            cur.env.ANTHROPIC_DEFAULT_OPUS_MODEL = active.model;
+          }
+          await writeFile(SETTINGS_PATH, JSON.stringify(cur, null, 2));
+        }
+      } catch { /* settings write failed — snapshot still updated below */ }
+    }
+    await writeFile(activePath, JSON.stringify(active));
+  } catch { /* not the active provider, or unreadable — nothing to sync */ }
+}
+
 // PUT /api/provider-models/:id { models } — set the chosen models for a provider.
 router.put('/provider-models/:id', async (req, res) => {
   try {
@@ -836,6 +877,8 @@ router.put('/provider-models/:id', async (req, res) => {
     if (models.length) map[req.params.id] = [...new Set(models)];
     else delete map[req.params.id];
     await writeProviderModels(map);
+    // Multi-select is for OpenAI-format providers (cc-switch codex/opencode).
+    await syncActiveProviderSnapshot(OPENAI_ACTIVE_PATH, req.params.id, map[req.params.id] || []);
     res.json({ ok: true, models: map[req.params.id] || [] });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });

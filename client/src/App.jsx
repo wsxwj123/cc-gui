@@ -4052,6 +4052,11 @@ function OpenAIModelManager({ provider, onSaved }) {
         method: 'PUT', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ models: [...checked] }),
       });
+      // Refresh the model picker NOW: the backend just synced this provider's
+      // openai-active.json snapshot (if it's the active one), so re-read /api/model
+      // and notify listeners — otherwise the dropdown only updates after a re-switch.
+      useStore.getState().fetchModel?.();
+      window.dispatchEvent(new CustomEvent('cgui:provider-change'));
       setOpen(false); onSaved?.();
     } catch {}
     setBusy('');
@@ -4151,6 +4156,10 @@ function CustomProviderForm({ onSaved, editing, onCancel }) {
       });
       const d = await r.json();
       if (!r.ok) throw new Error(d.error || '保存失败');
+      // If we just edited the ACTIVE provider, the backend synced its model
+      // snapshot — re-read /api/model so the picker reflects it without a re-switch.
+      useStore.getState().fetchModel?.();
+      window.dispatchEvent(new CustomEvent('cgui:provider-change'));
       reset();
       onSaved?.();
     } catch (e) { window.alert('保存失败：' + e.message); }
