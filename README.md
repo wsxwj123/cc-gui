@@ -2,14 +2,28 @@
 
 [中文文档](README.zh-CN.md)
 
-Claude GUI is a local desktop and mobile-friendly web shell for Claude Code CLI.
-It provides a Tauri desktop app, a browser UI for local use, and a phone layout
-that works well when exposed through a private network such as Tailscale and
-added to the phone home screen.
+Claude GUI is a local graphical shell for the [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI: a Tauri desktop app, a browser UI, and a mobile-friendly layout. Once running, you can browse and continue Claude Code sessions, send messages, compare panes side by side, and reach it from your phone over a private network such as Tailscale.
 
-## Download
+> Fully local — it collects no data; every session runs through the `claude` CLI on your own machine.
 
-Prebuilt installers are on the [Releases page](https://github.com/wsxwj123/claude-gui/releases/latest):
+---
+
+## 1. Prerequisites (read first)
+
+The GUI is only a shell around the `claude` CLI, so **install and sign into Claude Code first**:
+
+1. Install the [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code/setup) so the `claude` command works in your terminal.
+2. Run `claude` once and confirm it can chat (signed into a subscription, or with an API key configured).
+
+Without this the GUI opens but cannot send messages.
+
+---
+
+## 2. Install (pick one)
+
+### Option A: Download an installer (easiest)
+
+Grab your platform from the [Releases page](https://github.com/wsxwj123/claude-gui/releases/latest):
 
 | Platform | File |
 |---|---|
@@ -17,118 +31,77 @@ Prebuilt installers are on the [Releases page](https://github.com/wsxwj123/claud
 | Windows (MSI) | `Claude GUI_*_x64_en-US.msi` |
 | macOS (Apple Silicon) | `Claude GUI_*_aarch64.dmg` |
 
-> **macOS is Apple Silicon (aarch64) only.** Intel Macs are not covered yet;
-> build with the `x86_64-apple-darwin` target yourself.
->
-> **The packages are unsigned / un-notarized.** On macOS, right-click the app
-> and choose **Open** the first time to bypass Gatekeeper. On Windows, click
-> **More info → Run anyway** past the SmartScreen warning.
+> Packages are unsigned / un-notarized:
+> - **macOS**: right-click the app → **Open** the first time to bypass Gatekeeper (Apple Silicon only; for Intel Macs build with the `x86_64-apple-darwin` target yourself).
+> - **Windows**: on the SmartScreen prompt click **More info → Run anyway**.
 
-## Features
+### Option B: Run from source (latest features, recommended)
 
-- Browse and continue Claude Code project sessions from a GUI.
-- Send messages through the local Claude Code CLI workflow.
-- Manage common local GUI settings without committing machine-specific state.
-- Use a mobile-first PWA-style layout for phone access over LAN or Tailscale.
-- Build a native desktop shell with Tauri.
-- Keep local-only private extensions out of public builds.
+**1. Install tooling**
 
-## Public Build Policy
+- [Node.js](https://nodejs.org) 20 or newer (includes npm)
+- Only needed to *package the desktop app*: Rust stable + [Tauri platform deps](https://v2.tauri.app/start/prerequisites/)
 
-The repository is intended to publish only the reusable shell. Machine-private
-extensions are intentionally ignored and audited before public builds:
-
-- `AGENTS.md`
-- `.claude/`
-- `client/dist/`
-- `server/routes/*.local.js`
-- `client/src/components/*.local.jsx`
-
-Local-only modules can exist on your machine, but they are not tracked by Git
-and are excluded from public web and Tauri builds by `npm run build` and
-`npm run tauri:build`.
-
-## Requirements
-
-- Node.js LTS, tested with Node.js 20+
-- npm
-- Rust stable
-- Platform dependencies required by Tauri v2
-
-See the official Tauri prerequisites page for OS-specific setup:
-<https://v2.tauri.app/start/prerequisites/>
-
-On macOS desktop-only development, Tauri can use Xcode Command Line Tools:
-
-```bash
-xcode-select --install
-```
-
-## Installation
+**2. Clone & install**
 
 ```bash
 git clone https://github.com/wsxwj123/claude-gui.git
 cd claude-gui
 npm install
-cd client
-npm install
-cd ..
+cd client && npm install && cd ..
 ```
 
-## Development
+**3. Start it**
 
-Run the local server and Vite client together:
+Easiest — **double-click the launcher** (auto-restarts on crash; close the window to stop):
+
+- **macOS**: double-click `gui.command` (if blocked, right-click → **Open** once)
+- **Windows**: double-click `gui.bat`
+
+The first run builds the frontend, then opens your browser at `http://localhost:6677`.
+
+Or from the command line:
 
 ```bash
-npm run dev
+npm run build   # build the frontend (first run / after updates)
+npm start       # start the server, port 6677 by default
 ```
 
-The backend listens on port `6677` by default. For local production mode:
+Then open **http://localhost:6677**.
 
-```bash
-npm run build
-npm run start
-```
+---
 
-## Mobile Use Through Tailscale
+## 3. Use it from your phone
 
-1. Run the local server on your Mac or workstation.
-2. Expose the machine through Tailscale or another private network.
-3. Open the GUI URL on your phone.
-4. Add the page to the home screen.
+1. Run the GUI on your computer (Option B).
+2. Join the machine to your private network with [Tailscale](https://tailscale.com) (or similar).
+3. On your phone, open `http://<computer-tailscale-address>:6677`.
+4. Use the browser's "Add to Home Screen" for a near-native, full-screen experience.
 
-Use a private network and your own local authentication setup. Do not expose a
-Claude Code control surface directly to the public internet.
+> ⚠️ Use it **only over a private network** and set your own access password. **Never** expose a Claude Code control surface directly to the public internet.
 
-## Tauri Desktop Build
+---
 
-Build the public frontend and package the desktop app:
+## 4. Build a desktop app (optional)
 
 ```bash
 npm run tauri:build
 ```
 
-This command runs the public-build guard before Tauri packaging. The Tauri
-source lives in `src-tauri/`; generated build output under `src-tauri/target/`
-is not committed.
+Output lands in `src-tauri/target/release/bundle/` (`.dmg` on macOS, `.exe` / `.msi` on Windows). For interactive desktop development use `npm run tauri:dev`.
 
-For interactive desktop development:
+---
 
-```bash
-npm run tauri:dev
-```
+## 5. Troubleshooting
 
-## Public Audit
+| Symptom | Fix |
+|---|---|
+| Port 6677 in use | `npm run stop` to free it, then restart |
+| Blank page / can't send | Confirm the `claude` CLI works and Node ≥ 20; delete `client/dist` and `npm run build` again |
+| Code changes not showing | From source you must `npm run build` again (or re-launch `gui.command` / `gui.bat`) |
+| macOS `gui.command` does nothing | Right-click → **Open** once to authorize, or `chmod +x gui.command` |
 
-Before committing or releasing, run:
-
-```bash
-npm run audit:public
-```
-
-The audit fails if private local modules, `AGENTS.md`, `.claude/`, or generated
-client build output are tracked by Git, or if local-only bot controls appear in
-the public build output.
+---
 
 ## License
 

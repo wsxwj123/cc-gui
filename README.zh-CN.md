@@ -2,126 +2,106 @@
 
 [English](README.md)
 
-Claude GUI 是 Claude Code CLI 的本地桌面 / 移动端友好型 Web 外壳。它提供一个 Tauri
-桌面应用、用于本地访问的浏览器界面，以及在通过 Tailscale 等私有网络暴露并添加到手机主
-屏后体验良好的手机布局。
+Claude GUI 是 [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI 的本地图形外壳：一个 Tauri 桌面应用 + 浏览器界面 + 手机友好布局。跑起来后可以用图形界面浏览并继续 Claude Code 会话、发消息、分屏对比，还能通过 Tailscale 等私有网络在手机上访问。
 
-## 下载
+> 纯本地工具，不收集任何数据，所有会话都走你自己机器上的 `claude` CLI。
 
-预构建安装包见 [Releases 页面](https://github.com/wsxwj123/claude-gui/releases/latest)：
+---
+
+## 一、前置要求（必看）
+
+GUI 只是 `claude` CLI 的外壳，**必须先装好并登录 Claude Code**：
+
+1. 安装 [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code/setup)，确保终端里 `claude` 命令可用。
+2. 终端跑一次 `claude`，确认能正常对话（已登录订阅或配好 API Key）。
+
+没有这一步，GUI 打开后无法发消息。
+
+---
+
+## 二、安装使用（两种方式，任选其一）
+
+### 方式 A：下载安装包（开箱即用）
+
+到 [Releases 页面](https://github.com/wsxwj123/claude-gui/releases/latest) 下载对应平台：
 
 | 平台 | 文件 |
 |---|---|
-| Windows（安装程序） | `Claude GUI_*_x64-setup.exe` |
-| Windows（MSI） | `Claude GUI_*_x64_en-US.msi` |
+| Windows 安装程序 | `Claude GUI_*_x64-setup.exe` |
+| Windows MSI | `Claude GUI_*_x64_en-US.msi` |
 | macOS（Apple Silicon） | `Claude GUI_*_aarch64.dmg` |
 
-> **macOS 仅支持 Apple Silicon（aarch64）。** 暂不覆盖 Intel Mac，需自行用
-> `x86_64-apple-darwin` target 构建。
->
-> **安装包未签名 / 未公证。** macOS 首次打开请「右键 → 打开」绕过 Gatekeeper；
-> Windows 会弹 SmartScreen 警告，点「更多信息 → 仍要运行」。
+> 安装包未签名 / 未公证：
+> - **macOS**：首次打开「右键图标 → 打开」绕过 Gatekeeper（仅支持 Apple Silicon，Intel Mac 需自行用 `x86_64-apple-darwin` target 构建）。
+> - **Windows**：弹 SmartScreen 时点「更多信息 → 仍要运行」。
 
-## 功能
+### 方式 B：从源码运行（拿到最新功能，推荐）
 
-- 从图形界面浏览并继续 Claude Code 的项目会话。
-- 通过本地 Claude Code CLI 工作流发送消息。
-- 管理常用的本地 GUI 设置，不提交与机器相关的状态。
-- 提供移动优先的 PWA 风格布局，便于经局域网或 Tailscale 在手机访问。
-- 用 Tauri 构建原生桌面外壳。
-- 将仅限本地的私有扩展排除在公开构建之外。
+**1. 装环境**
 
-## 公开构建策略
+- [Node.js](https://nodejs.org) 20 或更高（自带 npm）
+- 仅「打包桌面 App」才需要：Rust stable + [Tauri 各平台依赖](https://v2.tauri.app/start/prerequisites/)
 
-本仓库只发布可复用的外壳。机器私有的扩展会被刻意忽略，并在公开构建前审计：
-
-- `AGENTS.md`
-- `.claude/`
-- `client/dist/`
-- `server/routes/*.local.js`
-- `client/src/components/*.local.jsx`
-
-仅限本地的模块可以存在于你的机器上，但不会被 Git 跟踪，并由 `npm run build` 和
-`npm run tauri:build` 排除在公开 Web 与 Tauri 构建之外。
-
-## 环境要求
-
-- Node.js LTS，已在 Node.js 20+ 测试
-- npm
-- Rust stable
-- Tauri v2 所需的各平台依赖
-
-各操作系统的具体配置参见 Tauri 官方先决条件页面：
-<https://v2.tauri.app/start/prerequisites/>
-
-在仅做 macOS 桌面开发时，Tauri 可使用 Xcode 命令行工具：
-
-```bash
-xcode-select --install
-```
-
-## 安装
+**2. 克隆 + 装依赖**
 
 ```bash
 git clone https://github.com/wsxwj123/claude-gui.git
 cd claude-gui
 npm install
-cd client
-npm install
-cd ..
+cd client && npm install && cd ..
 ```
 
-## 开发
+**3. 启动**
 
-同时启动本地服务器与 Vite 客户端：
+最省事——**双击启动脚本**（自带崩溃自动重启，关掉窗口即停止）：
+
+- **macOS**：双击 `gui.command`（首次若被拦，「右键 → 打开」一次）
+- **Windows**：双击 `gui.bat`
+
+首次启动会自动构建前端，随后自动打开浏览器到 `http://localhost:6677`。
+
+或者用命令行：
 
 ```bash
-npm run dev
+npm run build   # 构建前端（首次或更新代码后）
+npm start       # 启动服务，默认 6677 端口
 ```
 
-后端默认监听 `6677` 端口。本地生产模式：
+然后浏览器打开 **http://localhost:6677**。
 
-```bash
-npm run build
-npm run start
-```
+---
 
-## 通过 Tailscale 在手机使用
+## 三、在手机上使用
 
-1. 在你的 Mac 或工作站上运行本地服务器。
-2. 通过 Tailscale 或其他私有网络暴露该机器。
-3. 在手机上打开 GUI 地址。
-4. 将页面添加到主屏。
+1. 在电脑上按「方式 B」把 GUI 跑起来。
+2. 用 [Tailscale](https://tailscale.com)（或其他私有网络）把这台电脑接入你的私有网。
+3. 手机浏览器打开 `http://<电脑的Tailscale地址>:6677`。
+4. 用浏览器的「添加到主屏幕」，获得接近原生 App 的全屏体验。
 
-请使用私有网络与你自己的本地鉴权方案。**不要**将 Claude Code 控制面直接暴露到公网。
+> ⚠️ **只在私有网络里用**，并自行设置访问密码。**绝不要**把 Claude Code 控制面直接暴露到公网。
 
-## Tauri 桌面构建
+---
 
-构建公开前端并打包桌面应用：
+## 四、打包成桌面 App（可选）
 
 ```bash
 npm run tauri:build
 ```
 
-该命令会在 Tauri 打包前运行公开构建守卫。Tauri 源码位于 `src-tauri/`；`src-tauri/target/`
-下生成的构建产物不会被提交。
+产物在 `src-tauri/target/release/bundle/`（macOS 的 `.dmg` / Windows 的 `.exe`、`.msi`）。交互式桌面开发用 `npm run tauri:dev`。
 
-交互式桌面开发：
+---
 
-```bash
-npm run tauri:dev
-```
+## 五、常见问题
 
-## 公开审计
+| 现象 | 处理 |
+|---|---|
+| 端口 6677 被占用 | `npm run stop` 释放后重启，或关掉占用进程 |
+| 打开白屏 / 发不了消息 | 确认 `claude` CLI 能用、Node ≥ 20；删掉 `client/dist` 后重新 `npm run build` |
+| 改了代码不生效 | 源码方式下需重新 `npm run build`（或重新双击 `gui.command` / `gui.bat`） |
+| macOS 双击 `gui.command` 没反应 | 「右键 → 打开」授权一次；或终端 `chmod +x gui.command` |
 
-提交或发布前运行：
-
-```bash
-npm run audit:public
-```
-
-如果私有本地模块、`AGENTS.md`、`.claude/` 或生成的客户端构建产物被 Git 跟踪，或公开构建产
-物中出现仅限本地的 bot 控制代码，审计将失败。
+---
 
 ## 许可证
 
