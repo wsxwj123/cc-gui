@@ -1228,7 +1228,7 @@ body {
     padding-left: env(safe-area-inset-left);
     padding-right: env(safe-area-inset-right);
     touch-action: manipulation;
-    max-width: calc(100vw / var(--ui-zoom, 1));
+    max-width: var(--app-w, 100vw);
   }
 
   /* Mobile markdown: stop long URLs / no-space tokens / wide tables from
@@ -1260,7 +1260,7 @@ body {
     top: 0;
     bottom: 0;
     left: 0;
-    width: min(calc(86vw / var(--ui-zoom, 1)), 360px);
+    width: min(calc(var(--app-w, 100vw) * 0.86), 360px);
     padding-top: env(safe-area-inset-top);
     padding-bottom: env(safe-area-inset-bottom);
     border-top-left-radius: 0;

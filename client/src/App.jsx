@@ -4588,8 +4588,13 @@ export default function App() {
           position: 'fixed',
           left: 0,
           top: 0,
-          width: 'calc(100vw / var(--ui-zoom, 1))',
-          height: 'calc((100dvh / var(--ui-zoom, 1)) - var(--kb, 0px))',
+          // Same zoom-invariant px sizing as the desktop root (--app-w/--app-h
+          // are window.innerWidth/Height ÷ zoom). CSS calc(100vw/zoom) here
+          // DOUBLE-compensated in WKWebView (phone PWA / Safari), so scaling the
+          // font shrank the page to viewport÷zoom² — content jammed into a
+          // corner. --kb still lifts the bottom above the soft keyboard.
+          width: 'var(--app-w, 100vw)',
+          height: 'calc(var(--app-h, 100dvh) - var(--kb, 0px))',
         }}
       >
         <MobileTopBar onMenu={toggleSidebar} onNew={startMobileNewChat} title={mobileTitle} />
