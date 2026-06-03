@@ -359,6 +359,7 @@ router.get('/chat/:pid/stream', (req, res) => {
   // writes throw synchronously inside stdout/stderr listeners, and without a
   // try/catch the error bubbles up to the EventEmitter and kills the process.
   let closed = false;
+  let keepAlive = null;
   const safeWrite = (data) => {
     if (closed || !res.writable) return false;
     try { res.write(data); return true; }
@@ -367,6 +368,7 @@ router.get('/chat/:pid/stream', (req, res) => {
   const safeEnd = () => {
     if (closed) return;
     closed = true;
+    if (keepAlive) { clearInterval(keepAlive); keepAlive = null; }
     try { res.end(); } catch {}
   };
 
@@ -377,6 +379,17 @@ router.get('/chat/:pid/stream', (req, res) => {
   }
   slot.earlyLines.length = 0;
   slot.earlyErrors.length = 0;
+
+  // SSE heartbeat. Big sessions can take 20s+ before the first token (the model
+  // thinking over a multi-MB history). An idle SSE connection gets cut by the
+  // network / OS / WebView in that window → the client's reader ends with NO
+  // content → a false "provider 没有返回" warning, and the real reply only shows
+  // after the jsonl refetch. A periodic comment line keeps the pipe warm until
+  // real tokens flow. ': '-prefixed lines are ignored by the client (it only
+  // parses 'data: ' lines), so they're invisible noise that just holds the wire.
+  keepAlive = setInterval(() => {
+    if (!safeWrite(': keep-alive\n\n')) { clearInterval(keepAlive); keepAlive = null; }
+  }, 10000);
 
   // Live tail buffer continues from where early buffering stopped
   let buffer = slot.earlyTail;
@@ -488,6 +501,7 @@ router.get('/chat/:pid/stream', (req, res) => {
     // abort" so a long-running session keeps producing output while the
     // user looks at other sessions.
     closed = true;
+    if (keepAlive) { clearInterval(keepAlive); keepAlive = null; }
     // Remove the close/error listeners registered for THIS attach so repeated
     // reconnects don't pile up listeners on the long-lived child process.
     try { proc.removeListener('close', onProcClose); } catch {}
