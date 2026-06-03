@@ -417,7 +417,13 @@ export function PermissionPrompt({ sessionId = null, onExecutePlan = null }) {
     return () => ctrl.abort();
   }, []);
 
-  const mine = all.filter((p) => !selectedSid || p.sessionId === selectedSid);
+  // A request whose sessionId is null/undefined — the CLI hasn't surfaced the
+  // session id yet on a brand-new session's first tool call — would otherwise
+  // match no pane and stay invisible: the user never sees the prompt, the
+  // bridge eventually times out, and the tool looks "denied / no permission".
+  // In single-pane mode, surface such orphans under the current session. (Skip
+  // in split mode so the same orphan isn't shown in every pane at once.)
+  const mine = all.filter((p) => !selectedSid || p.sessionId === selectedSid || (paneCount === 1 && p.sessionId == null));
   if (mine.length === 0) return null;
 
   const resolve = async (req, decision, reason) => {

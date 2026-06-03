@@ -1865,6 +1865,10 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
   const [showFileChanges, setShowFileChanges] = useState(false);
   const activeProcRef = useRef(null);
   const abortRef = useRef(null);
+  // Set by "⚡ 引导": tells the aborted in-flight send's finally to skip its own
+  // queue drain so we don't double-send — handleAccelerate drains directly, which
+  // also covers reattach streams (whose finally never drains).
+  const acceleratingRef = useRef(false);
 
   // Latest TodoWrite snapshot for the composer's checklist panel. TodoWrite
   // calls REPLACE the full list each time, so the newest call wins. Search
@@ -2568,7 +2572,16 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
         }]);
       }
     } catch (err) {
-      if (err.name !== 'AbortError') {
+      // A dropped SSE connection (network blip, phone sleep/lock, wifi↔cellular
+      // handoff) surfaces as a TypeError — Safari: "Load failed", Chrome: "Failed
+      // to fetch". The CLI keeps running and writing its jsonl in the background,
+      // and backgroundPid auto-reattach resumes the live stream — so the red ❌
+      // "load failed" that only cleared on refresh was misleading noise. Stay
+      // silent for network drops (the finally pulls the persisted jsonl and
+      // reattach takes over); only render a hard error for genuine failures.
+      const isNetworkDrop = err instanceof TypeError
+        && /load failed|failed to fetch|network|connection/i.test(err.message || '');
+      if (err.name !== 'AbortError' && !isNetworkDrop) {
         console.error('Chat error:', err);
         // Render the failure as a visible turn so the user isn't left staring at
         // a frozen "connecting" with no explanation (e.g. invalid project dir).
@@ -2630,7 +2643,7 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
       // finally block will pop again. setTimeout 0 gets us out of this finally
       // first so React commits isStreaming=false before the next send starts.
       // Skip on reattach — the queue belongs to whoever did the original send.
-      if (!reattachPid) {
+      if (!reattachPid && !acceleratingRef.current) {
         const tabSel = getLocalSession();
         const queueKey = tabSel?.sessionId
           || `draft-${tabSel?.projectHash || 'none'}`;
@@ -2639,6 +2652,7 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
           setTimeout(() => handleSendRef.current?.(next.text), 50);
         }
       }
+      acceleratingRef.current = false;
     }
   }, [selectedSession, selectedProject, streamingModel, isStreaming, sessionQueueKey]);
 
@@ -2697,7 +2711,15 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
     if (activeProcRef.current) {
       fetch(`/api/chat/${activeProcRef.current}/stop`, { method: 'POST' }).catch(() => {});
     }
-    // The abort triggers handleSend's finally, which drains the queue.
+    // Drain the queue head ourselves instead of relying on the aborted send's
+    // finally: that finally SKIPS drain on a reattach stream (App enters reattach
+    // when you revisit a still-generating session), so on mobile "⚡ 引导" did
+    // nothing. Flag it so the finally doesn't also pop (double-send).
+    acceleratingRef.current = true;
+    const sel = getLocalSession();
+    const queueKey = sel?.sessionId || `draft-${sel?.projectHash || 'none'}`;
+    const next = useStore.getState().shiftMessage(queueKey);
+    if (next?.text) setTimeout(() => handleSendRef.current?.(next.text), 80);
   }, []);
 
   // Reset per-session UI state when the selectedSession object changes.
@@ -3008,6 +3030,23 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
           </div>
         </div>
       </div>}
+
+      {/* Mobile: compact stats strip (model · context · cost). The desktop title
+          block above is skipped on phones (!mobileChrome), so surface the key
+          numbers here — same data the desktop header shows beside the title. */}
+      {mobileChrome && (headerModel || contextTokens > 0 || totalCostUsd > 0) && (
+        <div className="glass-bar shrink-0 px-3 py-1.5 flex items-center gap-x-2 gap-y-1 flex-wrap text-[10px] font-mono border-b border-canvas-deep/40 relative z-30">
+          {headerModel && <ModelBadge model={headerModel} compact />}
+          {contextTokens > 0 && (
+            <span className={contextPct >= 80 ? 'text-error' : contextPct >= 60 ? 'text-amber-700' : 'text-ink-faint'}
+              title={`上下文 ${contextTokens.toLocaleString()} / ${contextWindow.toLocaleString()} tokens`}>
+              {fmtTok(contextTokens)}/{winLabel} ({contextPct}%)
+            </span>
+          )}
+          <span className="text-ink-faint">{(totalTokens.input + totalTokens.output).toLocaleString()} tok</span>
+          {totalCostUsd > 0 && <span className="text-accent/80">· {formatCost(totalCostUsd)}</span>}
+        </div>
+      )}
 
       {/* Permission-mode hint banner — moved here from ChatInput so it sits
           directly under the session title. With our PreToolUse permission
@@ -4333,6 +4372,10 @@ export default function App() {
       .catch(() => {});
   }, []);
 
+  // Pull the shared session-title map so a rename on the phone shows on the Mac
+  // (and vice-versa). Live updates arrive via the ws 'custom-titles' broadcast.
+  useEffect(() => { useStore.getState().hydrateCustomTitles(); }, []);
+
   // Optional local-only widgets (client/src/components/*.local.jsx). Fresh
   // checkouts have none; public builds temporarily move them out of the build
   // graph so personal controls do not enter client/dist or Tauri bundles.
@@ -4405,13 +4448,23 @@ export default function App() {
 
   const uiFontScale = useStore((s) => s.uiFontScale);
   useEffect(() => {
-    try {
-      const z = String(uiFontScale || 1);
-      document.documentElement.style.zoom = z;
-      // Root container uses calc(100dvh / var(--ui-zoom)) to stay exactly one
-      // physical viewport tall regardless of zoom (keeps the composer visible).
-      document.documentElement.style.setProperty('--ui-zoom', z);
-    } catch {}
+    const z = uiFontScale || 1;
+    const html = document.documentElement;
+    const apply = () => {
+      try {
+        html.style.zoom = String(z);
+        html.style.setProperty('--ui-zoom', String(z));
+        // CSS calc(100vw/--ui-zoom) is correct in Chromium but DOUBLE-compensates
+        // in macOS WKWebView (Tauri), where `vw`/`vh` are already divided by zoom
+        // → toolbar overflows the window and the page clips. window.innerWidth/
+        // Height are zoom-invariant in BOTH engines, so compute the px ourselves.
+        html.style.setProperty('--app-w', (window.innerWidth / z) + 'px');
+        html.style.setProperty('--app-h', (window.innerHeight / z) + 'px');
+      } catch {}
+    };
+    apply();
+    window.addEventListener('resize', apply);
+    return () => window.removeEventListener('resize', apply);
   }, [uiFontScale]);
 
   // Soft-keyboard awareness (#1): publish the keyboard height as `--kb` so the
@@ -4553,7 +4606,7 @@ export default function App() {
   }
 
   return (
-    <div className="flex flex-col overflow-hidden" style={{ width: 'calc(100vw / var(--ui-zoom, 1))', height: 'calc(100dvh / var(--ui-zoom, 1))' }}>
+    <div className="flex flex-col overflow-hidden" style={{ width: 'var(--app-w, 100vw)', height: 'var(--app-h, 100dvh)' }}>
       {/* Top bar — glass */}
       {/* Top bar uses min-height instead of fixed h-12 so when font scales up
           and the right cluster wraps to a second line, the bar grows with the
@@ -4580,7 +4633,7 @@ export default function App() {
             </>
           )}
         </div>
-        <div className="flex items-center gap-1 flex-wrap justify-end">
+        <div className="flex items-center gap-1 flex-wrap justify-end min-w-0">
           <ProviderSwitcher />
           <ModelSelector placement="bottom" align="right" compact permKey={permKey} />
           <EffortSelector placement="bottom" align="right" permKey={permKey} />

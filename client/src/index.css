@@ -858,7 +858,9 @@ body {
   color: var(--color-ink);
   margin: 0;
   overflow: hidden;
-  height: 100vh;
+  /* JS-computed px (--app-h) compensates the <html> zoom correctly in BOTH
+     Chromium and WKWebView; CSS calc(100vh/zoom) double-compensates in WKWebView. */
+  height: var(--app-h, 100vh);
   /* Light: warm ivory canvas with faint clay/amber corner tints (Claude). */
   background-color: var(--color-canvas);
   background-image:
@@ -876,7 +878,7 @@ body {
     radial-gradient(ellipse 50% 40% at 78% 96%, rgba(120, 140, 93, 0.07), transparent 70%);
 }
 
-#root { height: 100vh; }
+#root { height: var(--app-h, 100vh); }
 
 /* ── Scrollbars — barely there, glass-friendly ─────────────────
    Track follows --scrollbar-thumb / --scrollbar-thumb-hover so every
@@ -1132,6 +1134,10 @@ body {
   50%      { transform: scale(1.18); opacity: 0.65; }
 }
 .avatar-thinking-spin { animation: avatarThinkingPulse 1.4s ease-in-out infinite; transform-origin: center; }
+/* Safari/WKWebView renders an inline <svg> that has only a viewBox (no width/height
+   attrs) at 0×0 — Chrome auto-fills the sized parent, iOS does not. Force the
+   provider mark to fill its parent so avatars actually show on mobile. */
+.provider-mark svg { width: 100%; height: 100%; display: block; }
 
 .stagger > *:nth-child(1) { animation-delay: 0ms; }
 .stagger > *:nth-child(2) { animation-delay: 40ms; }
@@ -1225,13 +1231,21 @@ body {
     max-width: calc(100vw / var(--ui-zoom, 1));
   }
 
+  /* Mobile markdown: stop long URLs / no-space tokens / wide tables from
+     overflowing the narrow viewport (and from visually "breaking" the layout
+     when the font-scale zoom is applied). Code blocks already scroll via their
+     own overflow-x-auto; this is the inline/prose safety net. */
+  .markdown-content { overflow-wrap: anywhere; word-break: break-word; }
+  .markdown-content pre { max-width: 100%; }
+  .markdown-content table { font-size: 12px; }
+
   .mobile-topbar {
     height: 48px;
     padding-top: env(safe-area-inset-top);
     padding-left: max(8px, env(safe-area-inset-left));
     padding-right: max(8px, env(safe-area-inset-right));
     box-sizing: content-box;
-    background: rgba(250, 249, 245, 0.88);
+    background: var(--glass-bar-bg);
     backdrop-filter: blur(18px);
   }
 
@@ -1251,7 +1265,7 @@ body {
     padding-bottom: env(safe-area-inset-bottom);
     border-top-left-radius: 0;
     border-bottom-left-radius: 0;
-    background: rgba(250, 249, 245, 0.94);
+    background: var(--glass-bar-bg);
     box-shadow: 14px 0 40px -24px rgba(40, 30, 20, 0.38);
   }
 

@@ -100,7 +100,7 @@ export function ProviderAvatar({ model, size = 28, className = '', thinking = fa
       title={av.label}
     >
       <div
-        className={thinking ? 'avatar-thinking-spin' : ''}
+        className={`provider-mark ${thinking ? 'avatar-thinking-spin' : ''}`}
         style={{
           width: markSize, height: markSize,
           display: 'flex', alignItems: 'center', justifyContent: 'center',
