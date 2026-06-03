@@ -13,6 +13,17 @@ const writeLs = (key, val) => {
   try { localStorage.setItem(key, JSON.stringify(val)); } catch {}
 };
 
+// Push one session-title change to the shared server store (fire-and-forget).
+// Server merges per-key and broadcasts the full map back over ws so the other
+// device updates live. Empty title clears the override.
+const putCustomTitle = (sessionId, title) => {
+  fetch('/api/prefs/custom-titles', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sessionId, title: title || '' }),
+  }).catch(() => {});
+};
+
 // Valid `--permission-mode` values per `claude --help`.
 export const PERMISSION_MODES = ['default', 'acceptEdits', 'plan', 'bypassPermissions'];
 
@@ -424,13 +435,41 @@ export const useStore = create((set, get) => ({
   },
 
   // Rename a session. Empty/whitespace title clears the override (reverts to
-  // the auto firstPrompt). Persisted to localStorage.
+  // the auto firstPrompt). Optimistic local update (localStorage cache + state)
+  // then pushed to the shared server store so the phone/Mac stay in sync.
   setCustomTitle: (sessionId, title) => {
     if (!sessionId) return;
     const next = { ...get().customTitles };
     const trimmed = (title || '').trim();
     if (trimmed) next[sessionId] = trimmed;
     else delete next[sessionId];
+    writeLs('cgui-custom-titles', next);
+    set({ customTitles: next });
+    putCustomTitle(sessionId, trimmed);
+  },
+
+  // Load the shared title map on startup. Server is the source of truth; any
+  // legacy localStorage-only entries (from before the server move) are merged
+  // and pushed up so they're not lost and reach the other device too.
+  hydrateCustomTitles: async () => {
+    try {
+      const res = await fetch('/api/prefs/custom-titles');
+      const d = await res.json();
+      const server = (d && d.titles && typeof d.titles === 'object') ? d.titles : {};
+      const legacy = readLs('cgui-custom-titles', {}) || {};
+      const merged = { ...legacy, ...server };
+      writeLs('cgui-custom-titles', merged);
+      set({ customTitles: merged });
+      for (const sid of Object.keys(legacy)) {
+        if (!(sid in server)) putCustomTitle(sid, legacy[sid]);
+      }
+    } catch {}
+  },
+
+  // Apply a title map pushed from the server (ws 'custom-titles' broadcast).
+  // Full replace — that's how a delete on the other device propagates here.
+  applyRemoteTitles: (titles) => {
+    const next = (titles && typeof titles === 'object') ? titles : {};
     writeLs('cgui-custom-titles', next);
     set({ customTitles: next });
   },

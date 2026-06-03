@@ -92,6 +92,11 @@ export function useWebSocket() {
             case 'permission:resolved':
               useStore.getState().removePendingPermission(data.id);
               break;
+            case 'custom-titles':
+              // Another device renamed a session. Adopt the server's full map
+              // so titles converge live (no refresh needed).
+              useStore.getState().applyRemoteTitles(data.titles || {});
+              break;
           }
         } catch {}
       };

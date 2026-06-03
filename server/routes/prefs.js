@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { readFile, writeFile, mkdir } from 'fs/promises';
 import { join, dirname } from 'path';
 import { homedir } from 'os';
+import { broadcast } from '../index.js';
 
 // Server-side preferences that must be SHARED across devices (phone + Mac).
 // Today this is just the hidden-projects list: it used to live in each
@@ -66,6 +67,43 @@ router.put('/prefs/hidden-providers', async (req, res) => {
     res.json({ ok: true, hidden });
   } catch (e) {
     res.status(500).json({ error: '写入偏好失败：' + e.message });
+  }
+});
+
+// Custom session titles { [sessionId]: title }. Used to live ONLY in each
+// browser's localStorage, so a rename on the phone never reached the Mac (and
+// vice-versa). Now server-backed + ws-broadcast so every device converges.
+// GET /api/prefs/custom-titles → { titles: { [sessionId]: string } }
+router.get('/prefs/custom-titles', async (_req, res) => {
+  const prefs = await loadPrefs();
+  const titles = (prefs.customTitles && typeof prefs.customTitles === 'object') ? prefs.customTitles : {};
+  res.json({ titles });
+});
+
+// PUT /api/prefs/custom-titles { sessionId, title } → per-key MERGE (not a full
+// replace) so two devices renaming different sessions can't clobber each other.
+// Empty/whitespace title deletes the override. Broadcasts the full map so all
+// connected clients update live without a refresh.
+router.put('/prefs/custom-titles', async (req, res) => {
+  const { sessionId, title } = req.body || {};
+  if (typeof sessionId !== 'string' || !sessionId) {
+    return res.status(400).json({ error: 'sessionId 必须是非空字符串' });
+  }
+  if (title != null && typeof title !== 'string') {
+    return res.status(400).json({ error: 'title 必须是字符串' });
+  }
+  try {
+    const prefs = await loadPrefs();
+    const map = (prefs.customTitles && typeof prefs.customTitles === 'object') ? prefs.customTitles : {};
+    const trimmed = (title || '').trim();
+    if (trimmed) map[sessionId] = trimmed;
+    else delete map[sessionId];
+    prefs.customTitles = map;
+    await savePrefs(prefs);
+    broadcast({ type: 'custom-titles', titles: map });
+    res.json({ ok: true, titles: map });
+  } catch (e) {
+    res.status(500).json({ error: '写入标题失败：' + e.message });
   }
 });
 
