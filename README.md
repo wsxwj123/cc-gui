@@ -53,7 +53,7 @@ cd client && npm install && cd ..
 
 **3. Start it**
 
-Easiest — **double-click the launcher** (auto-restarts on crash; close the window to stop):
+Easiest — **double-click the launcher** (close the window to stop):
 
 - **macOS**: double-click `gui.command` (if blocked, right-click → **Open** once)
 - **Windows**: double-click `gui.bat`
@@ -96,7 +96,7 @@ Output lands in `src-tauri/target/release/bundle/` (`.dmg` on macOS, `.exe` / `.
 
 | Symptom | Fix |
 |---|---|
-| Port 6677 in use | `npm run stop` to free it, then restart |
+| Port 6677 in use | `npm run stop` to free the port, or close whatever is using it |
 | Blank page / can't send | Confirm the `claude` CLI works and Node ≥ 20; delete `client/dist` and `npm run build` again |
 | Code changes not showing | From source you must `npm run build` again (or re-launch `gui.command` / `gui.bat`) |
 | macOS `gui.command` does nothing | Right-click → **Open** once to authorize, or `chmod +x gui.command` |

@@ -53,7 +53,7 @@ cd client && npm install && cd ..
 
 **3. 启动**
 
-最省事——**双击启动脚本**（自带崩溃自动重启，关掉窗口即停止）：
+最省事——**双击启动脚本**（关掉窗口即停止）：
 
 - **macOS**：双击 `gui.command`（首次若被拦，「右键 → 打开」一次）
 - **Windows**：双击 `gui.bat`
@@ -96,7 +96,7 @@ npm run tauri:build
 
 | 现象 | 处理 |
 |---|---|
-| 端口 6677 被占用 | `npm run stop` 释放后重启，或关掉占用进程 |
+| 端口 6677 被占用 | `npm run stop` 释放端口，或关掉占用它的进程 |
 | 打开白屏 / 发不了消息 | 确认 `claude` CLI 能用、Node ≥ 20；删掉 `client/dist` 后重新 `npm run build` |
 | 改了代码不生效 | 源码方式下需重新 `npm run build`（或重新双击 `gui.command` / `gui.bat`） |
 | macOS 双击 `gui.command` 没反应 | 「右键 → 打开」授权一次；或终端 `chmod +x gui.command` |
