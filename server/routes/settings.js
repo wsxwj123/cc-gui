@@ -651,6 +651,37 @@ router.post('/custom-providers', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+// PUT /api/custom-providers/:id { name, type, baseURL, apiKey?, models } — edit one.
+// The id is preserved (keeps active-provider / provider-models links intact). The
+// apiKey is optional: omit it (or send blank) to KEEP the stored key — the client
+// never receives the key, so a blank field must not wipe it.
+router.put('/custom-providers/:id', async (req, res) => {
+  try {
+    const list = await readCustomProviders();
+    const idx = list.findIndex((p) => p.id === req.params.id);
+    if (idx === -1) return res.status(404).json({ error: 'not found' });
+    const { name, type, baseURL, apiKey, models } = req.body || {};
+    if (!name || typeof name !== 'string') return res.status(400).json({ error: 'name 必填' });
+    if (type !== 'openai' && type !== 'anthropic') return res.status(400).json({ error: 'type 必须是 openai 或 anthropic' });
+    let url; try { url = new URL(baseURL); } catch { return res.status(400).json({ error: 'baseURL 非法' }); }
+    if (!/^https?:$/.test(url.protocol)) return res.status(400).json({ error: 'baseURL 必须是 http(s)' });
+    const prev = list[idx];
+    list[idx] = {
+      ...prev,
+      id: prev.id, // never change the id
+      name: name.trim(),
+      type,
+      baseURL: baseURL.trim().replace(/\/+$/, ''),
+      apiKey: (typeof apiKey === 'string' && apiKey.trim()) ? apiKey.trim() : prev.apiKey,
+      models: Array.isArray(models)
+        ? models.filter((m) => typeof m === 'string' && m.trim()).map((m) => m.trim())
+        : (prev.models || []),
+    };
+    await writeCustomProviders(list);
+    res.json({ ok: true, id: prev.id });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 // DELETE /api/custom-providers/:id — remove one.
 router.delete('/custom-providers/:id', async (req, res) => {
   try {

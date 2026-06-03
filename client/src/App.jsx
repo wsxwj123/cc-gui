@@ -3374,6 +3374,7 @@ function ProviderSwitcher() {
     await fetch(`/api/custom-providers/${id}`, { method: 'DELETE' }).catch(() => {});
     load();
   };
+  const [editingProvider, setEditingProvider] = useState(null);
   useEffect(() => {
     load();
     const onCh = () => load();
@@ -3495,6 +3496,7 @@ function ProviderSwitcher() {
                   <span className="text-[9px] px-1 py-px bg-canvas-deep text-ink-faint rounded font-mono shrink-0">{p.type}</span>
                   {isCur(p) && <Check size={12} className="text-accent shrink-0" />}
                 </button>
+                <button onClick={() => setEditingProvider(p)} title="编辑" className="p-0.5 text-ink-faint hover:text-accent shrink-0"><Pencil size={12} /></button>
                 <button onClick={() => removeCustom(p.id, p.name)} title="删除" className="p-0.5 text-ink-faint hover:text-error shrink-0"><Trash2 size={12} /></button>
               </div>
             </div>
@@ -3508,7 +3510,11 @@ function ProviderSwitcher() {
               </button>
             ) : null;
           })()}
-          <CustomProviderForm onSaved={load} />
+          <CustomProviderForm
+            editing={editingProvider}
+            onCancel={() => setEditingProvider(null)}
+            onSaved={() => { setEditingProvider(null); load(); }}
+          />
         </div>
       )}
     </div>
@@ -4084,7 +4090,7 @@ function OpenAIModelManager({ provider, onSaved }) {
 
 // Shared add-custom-provider form. Both protocols; can live-fetch the upstream's
 // model catalogue via /v1/models. onSaved() refreshes the parent's list.
-function CustomProviderForm({ onSaved }) {
+function CustomProviderForm({ onSaved, editing, onCancel }) {
   const [open, setOpen] = useState(false);
   const [name, setName] = useState('');
   const [type, setType] = useState('openai');
@@ -4092,6 +4098,20 @@ function CustomProviderForm({ onSaved }) {
   const [apiKey, setApiKey] = useState('');
   const [modelsText, setModelsText] = useState('');
   const [busy, setBusy] = useState('');
+  const isEdit = !!editing;
+  // Entering edit mode: pre-fill from the chosen provider. The apiKey is NEVER
+  // sent to the client (only `hasKey`), so leave it blank — blank means "keep".
+  useEffect(() => {
+    if (!editing) return;
+    setName(editing.name || '');
+    setType(editing.type || 'openai');
+    setBaseURL(editing.baseURL || '');
+    setApiKey('');
+    setModelsText((editing.models || []).join('\n'));
+    setOpen(true);
+  }, [editing?.id]);
+  const reset = () => { setName(''); setType('openai'); setBaseURL(''); setApiKey(''); setModelsText(''); setOpen(false); };
+  const close = () => { reset(); onCancel?.(); };
   const parseModels = () => modelsText.split(/[\n,]+/).map((s) => s.trim()).filter(Boolean);
   const fetchModels = async () => {
     if (!baseURL.trim()) return window.alert('先填 Base URL');
@@ -4120,19 +4140,24 @@ function CustomProviderForm({ onSaved }) {
     try {
       // Store in the GUI's own custom-providers.json (no cc-switch.db dependency —
       // works on a fresh machine without CC Switch installed).
-      const r = await fetch('/api/custom-providers', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name, type, baseURL, apiKey, models: parseModels() }),
+      const body = { name, type, baseURL, models: parseModels() };
+      // Edit mode: a blank key means "keep the stored one" (the client never holds
+      // the real key), so only send apiKey when the user actually typed a new one.
+      if (!isEdit || apiKey.trim()) body.apiKey = apiKey;
+      const r = await fetch(isEdit ? `/api/custom-providers/${editing.id}` : '/api/custom-providers', {
+        method: isEdit ? 'PUT' : 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
       });
       const d = await r.json();
       if (!r.ok) throw new Error(d.error || '保存失败');
-      setName(''); setBaseURL(''); setApiKey(''); setModelsText(''); setOpen(false);
+      reset();
       onSaved?.();
     } catch (e) { window.alert('保存失败：' + e.message); }
     setBusy('');
   };
   const inputCls = 'w-full bg-canvas-warm border border-canvas-deep rounded-lg px-3 py-2 text-[13px] text-ink focus:outline-none focus:border-accent';
-  if (!open) {
+  if (!open && !isEdit) {
     return (
       <button onClick={() => setOpen(true)}
         className="w-full flex items-center gap-2 px-4 py-3 text-left text-accent hover:bg-canvas-warm transition-colors border-t border-canvas-deep/40 mt-1">
@@ -4143,8 +4168,8 @@ function CustomProviderForm({ onSaved }) {
   return (
     <div className="px-4 py-3 border-t border-canvas-deep/40 mt-1 space-y-2.5">
       <div className="flex items-center justify-between">
-        <span className="text-[13px] font-display font-semibold text-ink">新增 Provider<span className="text-[10px] font-body font-normal text-ink-faint ml-1">保存到本机</span></span>
-        <button onClick={() => setOpen(false)} className="p-1 text-ink-faint hover:text-ink"><X size={16} /></button>
+        <span className="text-[13px] font-display font-semibold text-ink">{isEdit ? '编辑 Provider' : '新增 Provider'}<span className="text-[10px] font-body font-normal text-ink-faint ml-1">保存到本机</span></span>
+        <button onClick={close} className="p-1 text-ink-faint hover:text-ink"><X size={16} /></button>
       </div>
       <MobileSegmented onChange={setType} options={[
         { value: 'openai', label: 'OpenAI 兼容', active: type === 'openai' },
@@ -4152,7 +4177,7 @@ function CustomProviderForm({ onSaved }) {
       ]} />
       <input className={inputCls} placeholder="名称(如 我的中转)" value={name} onChange={(e) => setName(e.target.value)} />
       <input className={`${inputCls} font-mono`} placeholder="Base URL (https://...)" value={baseURL} onChange={(e) => setBaseURL(e.target.value)} />
-      <input className={`${inputCls} font-mono`} type="password" placeholder="API Key" value={apiKey} onChange={(e) => setApiKey(e.target.value)} />
+      <input className={`${inputCls} font-mono`} type="password" placeholder={isEdit ? 'API Key(留空 = 不修改)' : 'API Key'} value={apiKey} onChange={(e) => setApiKey(e.target.value)} />
       <div className="flex items-center gap-2">
         <textarea className={`${inputCls} font-mono min-h-[60px]`} placeholder="模型(每行一个,或逗号分隔)" value={modelsText} onChange={(e) => setModelsText(e.target.value)} />
       </div>
@@ -4163,7 +4188,7 @@ function CustomProviderForm({ onSaved }) {
         </button>
         <button onClick={save} disabled={!!busy}
           className="flex-1 px-3 py-2 text-[12px] bg-accent text-white rounded-lg disabled:opacity-50">
-          {busy === 'save' ? '保存中…' : '保存'}
+          {busy === 'save' ? '保存中…' : (isEdit ? '更新' : '保存')}
         </button>
       </div>
     </div>
@@ -4206,6 +4231,7 @@ function MobileProviderPage() {
     await fetch(`/api/custom-providers/${id}`, { method: 'DELETE' }).catch(() => {});
     load();
   };
+  const [editingProvider, setEditingProvider] = useState(null);
   return (
     <div className="py-1">
       {providers.map((p) => (
@@ -4252,10 +4278,15 @@ function MobileProviderPage() {
               ))}
             </div>
           </div>
+          <button onClick={() => setEditingProvider(p)} title="编辑" className="p-1.5 text-ink-faint hover:text-accent shrink-0"><Pencil size={15} /></button>
           <button onClick={() => removeCustom(p.id, p.name)} title="删除" className="p-1.5 text-ink-faint hover:text-error shrink-0"><Trash2 size={15} /></button>
         </div>
       ))}
-      <CustomProviderForm onSaved={load} />
+      <CustomProviderForm
+        editing={editingProvider}
+        onCancel={() => setEditingProvider(null)}
+        onSaved={() => { setEditingProvider(null); load(); }}
+      />
     </div>
   );
 }
