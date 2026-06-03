@@ -182,26 +182,18 @@ export function ChatInput({ onSend, onStop, onAccelerate, disabled, isStreaming,
     useStore.getState().setRemoteControl(sessionId, false);
   };
 
-  // Watch for "重新编辑" rollback action — store sets composerDraft to the
-  // original message text; we lift it into our local input and clear the store.
-  const composerDraft = useStore((s) => s.composerDraft);
-  useEffect(() => {
-    if (composerDraft) {
-      setText(composerDraft);
-      useStore.setState({ composerDraft: '' });
-      setTimeout(() => textareaRef.current?.focus(), 0);
-    }
-  }, [composerDraft]);
-
-  // CustomEvent fallback fill — controlled-component, setText only. An
-  // earlier version ALSO wrote textareaRef.current.value directly which
-  // desynced React's internal value tracker: the textarea showed text but
-  // the React `text` state stayed empty, so handleSend's `text.trim()`
-  // returned '' and the send button silently no-op'd.
+  // Pane-targeted composer fill ("重新编辑" rollback + queue edit). The event
+  // carries targetKey = the originating pane's permKey; only the pane whose key
+  // matches fills its composer. Without this guard a fill triggered in ONE split
+  // pane wrote into EVERY pane's input box (the "其他会话也被填" bug). Controlled-
+  // component setText only — writing textareaRef.value directly desyncs React's
+  // value tracker so handleSend's text.trim() sees '' and silently no-ops.
   useEffect(() => {
     const onFill = (e) => {
       const t = e?.detail?.text || '';
       if (!t) return;
+      const targetKey = e?.detail?.targetKey;
+      if (targetKey && targetKey !== permKey) return;
       setText(t);
       const ta = textareaRef.current;
       if (ta) {
@@ -215,7 +207,7 @@ export function ChatInput({ onSend, onStop, onAccelerate, disabled, isStreaming,
     };
     window.addEventListener('cgui:composer-fill', onFill);
     return () => window.removeEventListener('cgui:composer-fill', onFill);
-  }, []);
+  }, [permKey]);
 
   // Read a File/Blob as a data URL.
   const fileToDataUrl = (file) => new Promise((resolve, reject) => {

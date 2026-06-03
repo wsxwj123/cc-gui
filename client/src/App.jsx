@@ -1916,6 +1916,20 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
   // turn would render twice — once from `messages` (persisted, from jsonl)
   // and once from `chatMessages` (the in-memory copy from the just-finished
   // local stream).
+  // Load THIS pane's messages on mount / session change when we don't have them
+  // yet. paneMessages is in-memory only, so after a page refresh every pane's
+  // session is restored from localStorage but its message list is empty — without
+  // this, non-active split panes showed "该会话没有可显示的消息" until clicked.
+  // Guard on empty + not-streaming so we never clobber a live turn or refetch.
+  useEffect(() => {
+    const sid = selectedSession?.sessionId;
+    const ph = selectedSession?.projectHash;
+    if (!sid || !ph || streamingRef.current) return;
+    const have = useStore.getState().paneMessages[tabIndex];
+    if (Array.isArray(have) && have.length > 0) return;
+    fetchMessagesForTab(sid, ph, { silent: true });
+  }, [selectedSession?.sessionId, selectedSession?.projectHash, tabIndex]);
+
   useEffect(() => {
     if (!selectedSession?.sessionId || !selectedSession?.projectHash) return;
     const onChange = async (e) => {
@@ -1943,6 +1957,12 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
           return `${m.type}|${(t || '').slice(0, 80)}`;
         };
         const known = new Set(persisted.map(tkey));
+        // If this round's user prompt is already persisted, the whole round
+        // landed in jsonl — drop ALL local copies even when the assistant text
+        // didn't byte-match (streaming-accumulated vs final jsonl can differ).
+        // Fixes the "reply rendered twice" race (jsonl turn + local turn both show).
+        const lastUser = [...prev].reverse().find((m) => m.type === 'user');
+        if (lastUser && known.has(tkey(lastUser))) return [];
         return prev.filter((m) => !known.has(tkey(m)));
       });
     };
@@ -2164,27 +2184,19 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
     try {
       const sid0 = selectedSession?.sessionId;
       if (sid0 && selectedSession?.projectHash) {
-        const inferProv = (m) => {
-          if (!m) return null;
-          const s = String(m).toLowerCase();
-          if (s.startsWith('claude-')) return 'anthropic';
-          if (s.startsWith('deepseek')) return 'deepseek';
-          if (s.startsWith('mimo')) return 'mimo';
-          return null;
-        };
+        // Does the on-disk history actually carry thinking blocks worth stripping?
         const persisted = getLocalMessages();
-        let histProv = null;
-        for (let i = persisted.length - 1; i >= 0; i--) {
-          const m = persisted[i];
-          const hasThinking = (Array.isArray(m.thinking) && m.thinking.length > 0)
-            || (Array.isArray(m.blocks) && m.blocks.some((b) => b?.type === 'thinking'));
-          if (m.type === 'turn' && hasThinking && m.model) {
-            histProv = inferProv(m.model);
-            break;
-          }
-        }
+        const hasAnyThinking = persisted.some((m) => m.type === 'turn' && (
+          (Array.isArray(m.thinking) && m.thinking.length > 0)
+          || (Array.isArray(m.blocks) && m.blocks.some((b) => b?.type === 'thinking'))
+        ));
+        // histProv = the provider those turns were RECORDED under (NOT inferred
+        // from the model name — mimo relays claude-* names and would be misread as
+        // 'anthropic', so a mimo→official switch silently skipped the strip and the
+        // CLI hit "400 Invalid signature in thinking block" on --resume).
+        const histProv = useStore.getState().lastProviderBySession?.[sid0] || null;
         const currProv = useStore.getState().currentProvider?.providerHint || 'anthropic';
-        if (histProv && histProv !== currProv) {
+        if (hasAnyThinking && histProv && histProv !== currProv) {
           try {
             const r = await fetch(`/api/sessions/${sid0}/strip-thinking`, {
               method: 'POST',
@@ -2304,6 +2316,13 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
           // leaves localStorage with the old draft (sessionId=null), so a
           // page refresh forgets the session even though it exists on disk.
           if (event.type === 'system' && event.subtype === 'init' && event.session_id) {
+            // Record the provider this turn ran under so a later switch can strip
+            // now-invalid thinking-block signatures. Model name can't tell a mimo
+            // relay (claude-* names) from official, so we key off the live hint.
+            useStore.getState().setLastProvider(
+              event.session_id,
+              useStore.getState().currentProvider?.providerHint || 'anthropic',
+            );
             const sel = getLocalSession();
             if (sel && !sel.sessionId) {
               // Carry the draft's per-session model/permission pins to the real
@@ -2524,6 +2543,29 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
               || event.error
               || event.subtype
               || 'CLI 报错（无消息体）';
+            // Reactive provider-switch recovery: a resumed session whose history
+            // carries thinking blocks signed by a DIFFERENT backend (e.g. an old
+            // mimo session reopened under official, with no recorded provider for
+            // the predictive strip) returns "400 Invalid signature in thinking
+            // block" here. Strip the thinking blocks and resend ONCE — the
+            // signatureRetry flag guards against an infinite loop if it persists.
+            if (/invalid signature in thinking/i.test(msg) && !opts.signatureRetry && prompt) {
+              const _s = getLocalSession();
+              if (_s?.sessionId && _s?.projectHash) {
+                try {
+                  await fetch(`/api/sessions/${_s.sessionId}/strip-thinking`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ projectHash: _s.projectHash }),
+                  });
+                  await fetchMessagesForTab(_s.sessionId, _s.projectHash, { silent: true });
+                } catch {}
+                setProviderSwitchNotice({ text: '历史思考块签名不被当前 provider 接受，已自动剥离并重发本条。' });
+                setTimeout(() => handleSendRef.current?.(prompt, { signatureRetry: true }), 80);
+                sawError = true;
+                break;
+              }
+            }
             setChatMessages((prev) => [...prev, {
               uuid: 'chat-error-' + Date.now(),
               type: 'turn',
@@ -2554,10 +2596,10 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
           usage: null,
         }]);
       } else if (!sawError) {
-        // Stream ended with NOTHING — no text, no tools, no error envelope. This
-        // is the "connecting → 空白" case, typically an OpenAI-proxy provider whose
-        // upstream rejected auth / the model doesn't exist, so the CLI produced no
-        // turn. Surface a fallback instead of a silent blank.
+        // Stream ended with NOTHING — no text, no tools, no error envelope.
+        // Long first-token latency on big sessions is handled by the server's SSE
+        // heartbeat (keeps the connection alive), so reaching here means the turn
+        // genuinely produced nothing — context full / auth / bad model.
         const msg = 'provider 没有返回任何内容。常见原因：① 会话上下文已满（看顶部 token 占比，接近/超过上限时上游会拒绝整个请求 → 用 /compact 压缩或新建会话）；② 认证失败 401 或模型不存在（检查 key 与模型，或切换其它 provider）。';
         setChatMessages((prev) => [...prev, {
           uuid: 'chat-empty-' + Date.now(),
@@ -2622,6 +2664,12 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
             return `${m.type}|${(t || '').slice(0, 80)}`;
           };
           const known = new Set(persisted.map(tkey));
+          // If this round's user prompt is already persisted, the whole round
+          // landed in jsonl — drop ALL local copies even when the assistant text
+          // didn't byte-match (streaming-accumulated vs final jsonl can differ).
+          // Fixes the "reply rendered twice" race (jsonl turn + local turn both show).
+          const lastUser = [...prev].reverse().find((m) => m.type === 'user');
+          if (lastUser && known.has(tkey(lastUser))) return [];
           return prev.filter((m) => !known.has(tkey(m)));
         });
       }
@@ -2828,8 +2876,10 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
     // primary visible signal they expect from "重新编辑".
     const originalText = msg.text || '';
     if (mode === 'edit' && originalText) {
-      useStore.setState({ composerDraft: originalText });
-      window.dispatchEvent(new CustomEvent('cgui:composer-fill', { detail: { text: originalText } }));
+      // Target THIS pane's composer only (key == its sessionQueueKey). The old
+      // untargeted store write + broadcast filled EVERY split pane's input box.
+      const targetKey = sel?.sessionId || `draft-${sel?.projectHash || 'none'}`;
+      window.dispatchEvent(new CustomEvent('cgui:composer-fill', { detail: { text: originalText, targetKey } }));
     }
 
     if (idxInChat === -1 && idxInStore === -1) return;
@@ -3168,7 +3218,7 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
           const item = messageQueue[i];
           if (!item) return;
           useStore.getState().removeFromQueue(sessionQueueKey, i);
-          window.dispatchEvent(new CustomEvent('cgui:composer-fill', { detail: { text: item.text } }));
+          window.dispatchEvent(new CustomEvent('cgui:composer-fill', { detail: { text: item.text, targetKey: sessionQueueKey } }));
         }}
         todos={currentTodos}
         permKey={sessionQueueKey}

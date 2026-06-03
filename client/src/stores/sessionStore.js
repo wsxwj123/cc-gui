@@ -168,6 +168,12 @@ export const useStore = create((set, get) => ({
   // auto firstPrompt everywhere the title shows (sidebar / header / breadcrumb).
   // We never touch the on-disk jsonl — titles live only in localStorage.
   customTitles: readLs('cgui-custom-titles', {}),
+  // The provider (providerHint) each session last sent under. A provider switch
+  // (e.g. mimo → official) invalidates the prior turns' thinking-block
+  // signatures. We can't infer the old provider from the model name — mimo is a
+  // claude-protocol relay so its turns carry claude-* names and look identical
+  // to official — so we record the REAL provider per send and compare next time.
+  lastProviderBySession: readLs('cgui-last-provider-by-session', {}),
   // Sessions currently handed off to phone remote control (sessionId → true).
   // While set, the GUI must NOT spawn `-p` turns for that session (both would
   // write the same jsonl). The composer locks and shows a reclaim banner.
@@ -234,9 +240,6 @@ export const useStore = create((set, get) => ({
     return Array.isArray(arr) ? arr[1] || null : null;
   })(),
   secondaryMessages: [],
-  // Pending text to drop into ChatInput's textarea (used by message rollback
-  // "重新编辑" action). ChatInput watches this, sets its local text, clears.
-  composerDraft: '',
 
   // In-flight subagent state keyed by the parent Task tool_use.id. Each entry:
   //   { id, name, description, status, startedAt,
@@ -472,6 +475,16 @@ export const useStore = create((set, get) => ({
     const next = (titles && typeof titles === 'object') ? titles : {};
     writeLs('cgui-custom-titles', next);
     set({ customTitles: next });
+  },
+
+  // Record which provider a session last sent under (see lastProviderBySession).
+  setLastProvider: (sessionId, providerHint) => {
+    if (!sessionId || !providerHint) return;
+    const cur = get().lastProviderBySession || {};
+    if (cur[sessionId] === providerHint) return;
+    const nextMap = { ...cur, [sessionId]: providerHint };
+    writeLs('cgui-last-provider-by-session', nextMap);
+    set({ lastProviderBySession: nextMap });
   },
 
   // ── Multi-pane actions (Phase 2) ───────────────────────────
@@ -763,12 +776,17 @@ export const useStore = create((set, get) => ({
       const res = await fetch(
         `/api/sessions/${sessionId}/messages?projectHash=${encodeURIComponent(projectHash)}`
       );
+      // A missing / just-trimmed jsonl (404) or a server error must NOT blank the
+      // pane: in split view a sibling pane showing the same reset session would
+      // also re-fetch and go empty ("该会话没有可显示的消息" everywhere). Keep
+      // whatever is there — a genuinely empty session still returns 200 + [].
+      if (!res.ok) { if (!silent) set({ loading: false }); return; }
       const data = await res.json();
       const messages = Array.isArray(data) ? data : [];
       get().setPaneMessages(tab, messages);
       if (!silent) set({ loading: false });
     } catch (err) {
-      get().setPaneMessages(tab, []);
+      // Network/parse failure — keep existing messages rather than blanking.
       if (!silent) set({ error: err.message, loading: false });
     }
   },
