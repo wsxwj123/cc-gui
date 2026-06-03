@@ -2601,11 +2601,19 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
           blocks: orderedBlocks,
           usage: null,
         }]);
-      } else if (!sawError) {
+      } else if (!sawError && !reattachPid) {
         // Stream ended with NOTHING — no text, no tools, no error envelope.
         // Long first-token latency on big sessions is handled by the server's SSE
         // heartbeat (keeps the connection alive), so reaching here means the turn
         // genuinely produced nothing — context full / auth / bad model.
+        //
+        // EXCLUDE reattaches (`reattachPid`): the background-pid poll keeps a
+        // just-finished proc flagged "stoppable" through its 60s grace window,
+        // so after a normal reply the auto-reattach can re-open that finished
+        // stream, get nothing left to replay, and land here. An empty REATTACH
+        // is "nothing left to stream" (the reply is already in jsonl), NOT
+        // "provider returned nothing" — warning there is a false positive (the
+        // ⚠️ that intermittently appeared at the end of a good reply).
         const msg = 'provider 没有返回任何内容。常见原因：① 会话上下文已满（看顶部 token 占比，接近/超过上限时上游会拒绝整个请求 → 用 /compact 压缩或新建会话）；② 认证失败 401 或模型不存在（检查 key 与模型，或切换其它 provider）。';
         setChatMessages((prev) => [...prev, {
           uuid: 'chat-empty-' + Date.now(),
