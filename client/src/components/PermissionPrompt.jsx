@@ -475,7 +475,7 @@ export function PermissionPrompt({ sessionId = null, onExecutePlan = null }) {
   };
 
   return (
-    <div className="px-6 pb-2 space-y-2 max-w-3xl mx-auto w-full">
+    <div className="px-6 pb-2 space-y-2 max-w-[var(--content-max)] mx-auto w-full">
       {mine.length > 1 && (
         <div className="text-[11px] text-ink-muted px-1">
           {mine.length} 个待处理请求 · 上面的先处理

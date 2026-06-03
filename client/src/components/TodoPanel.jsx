@@ -21,7 +21,7 @@ export function TodoPanel({ todos }) {
 
   return (
     <div className="px-6 pt-3 pb-1">
-      <div className="max-w-3xl mx-auto rounded-xl border border-canvas-deep bg-canvas-warm/60 backdrop-blur-sm overflow-hidden">
+      <div className="max-w-[var(--content-max)] mx-auto rounded-xl border border-canvas-deep bg-canvas-warm/60 backdrop-blur-sm overflow-hidden">
         {/* Header — title + progress chip + progress bar */}
         <div className="flex items-center gap-2 px-3 py-2 border-b border-canvas-deep/60">
           <span className="text-[11px] font-body font-medium text-ink">任务清单</span>

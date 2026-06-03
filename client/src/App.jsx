@@ -1635,7 +1635,7 @@ function StreamingStatusLine({ thinking, text, toolCalls }) {
   }
   return (
     <div className="px-6 pt-3 pb-1 animate-fade-in">
-      <div className="max-w-3xl mx-auto flex items-center gap-2.5 text-[14px] text-ink-soft font-body">
+      <div className="max-w-[var(--content-max)] mx-auto flex items-center gap-2.5 text-[14px] text-ink-soft font-body">
         <CliSpinner size={22} />
         <span className="font-mono truncate font-medium" style={{ color: '#D97757' }}>{label}</span>
         <span style={{ color: '#D97757' }}>…</span>
@@ -1792,7 +1792,7 @@ function GitInitBanner({ cwd }) {
 // The full summary lives in the JSONL; we deliberately don't render it.
 function CompactDivider() {
   return (
-    <div className="max-w-3xl mx-auto px-4 py-3 flex items-center gap-3">
+    <div className="max-w-[var(--content-max)] mx-auto px-4 py-3 flex items-center gap-3">
       <div className="flex-1 h-px bg-canvas-deep/60" />
       <span className="text-[10px] text-ink-faint font-body uppercase tracking-wider whitespace-nowrap">
         上下文已压缩
@@ -2958,7 +2958,7 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
         {/* Title row wraps when the pane is narrow or font is scaled up so
             the right-side stats/buttons drop to a second line instead of
             clipping the title. */}
-        <div className="max-w-3xl mx-auto flex items-center justify-between gap-y-2 flex-wrap">
+        <div className="max-w-[var(--content-max)] mx-auto flex items-center justify-between gap-y-2 flex-wrap">
           <div className="min-w-0 flex-1">
             <EditableSessionTitle session={selectedSession} />
             <div className="flex items-center gap-3 mt-0.5 flex-wrap max-md:hidden">
@@ -3076,7 +3076,7 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
 
       {showFileChanges ? (
         <div className="flex-1 overflow-y-auto relative z-10 px-6 py-4">
-          <div className="max-w-3xl mx-auto">
+          <div className="max-w-[var(--content-max)] mx-auto">
             <h3 className="text-sm font-display font-medium text-ink mb-4">文件变更记录</h3>
             <FileChangesPanel sessionId={selectedSession.sessionId} projectHash={selectedSession.projectHash} />
           </div>
@@ -3122,7 +3122,7 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
               )}
               {isStreaming && !streamingText && !streamingThinking && streamingToolCalls.length === 0 && (
                 <div className="px-6 py-3 animate-fade-in">
-                  <div className="max-w-3xl mx-auto flex items-center gap-2.5 text-[14px] font-body" style={{ color: '#D97757' }}>
+                  <div className="max-w-[var(--content-max)] mx-auto flex items-center gap-2.5 text-[14px] font-body" style={{ color: '#D97757' }}>
                     <CliSpinner size={22} />
                     <span className="font-mono font-medium">Connecting</span>
                     <span>…</span>

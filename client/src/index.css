@@ -880,6 +880,14 @@ body {
 
 #root { height: var(--app-h, 100vh); }
 
+/* Content column width — grows with the window up to a readable cap so big
+   screens stop wasting space (the "大屏留白太多" ask) while small windows stay
+   snug. Based on --app-w (zoom-invariant), and shared by EVERY centered content
+   column (messages, composer, toolbar, panels) so they stay aligned at any width.
+   Below ~1100px it pins to 768px (the old fixed width → no change on laptops);
+   past that it scales to a 1120px ceiling (long lines hurt readability). */
+html { --content-max: clamp(768px, calc(var(--app-w, 100vw) * 0.7), 1120px); }
+
 /* ── Scrollbars — barely there, glass-friendly ─────────────────
    Track follows --scrollbar-thumb / --scrollbar-thumb-hover so every
    theme preset can tune contrast. Fallback to ink-ghost which always

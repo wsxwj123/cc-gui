@@ -391,7 +391,7 @@ function TurnBubbleInner({ turn }) {
 
   return (
     <div className="group px-6 py-4 animate-fade-up" style={{ animationDuration: '0.25s' }}>
-      <div className="max-w-[720px] mx-auto flex gap-4">
+      <div className="max-w-[var(--content-max)] mx-auto flex gap-4">
         {/* Avatar — tinted by the actual provider behind the model */}
         <div className="mt-0.5">
           <ProviderAvatar model={turn.model} size={34} thinking={isLiveStream} />

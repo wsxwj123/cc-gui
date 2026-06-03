@@ -419,7 +419,7 @@ export function ChatInput({ onSend, onStop, onAccelerate, disabled, isStreaming,
       <TodoPanel todos={todos} />
       {rcLocked && (
         <div className="px-6 pt-3">
-          <div className="max-w-3xl mx-auto flex items-center justify-between gap-3 rounded-lg border border-green-200 bg-green-50 px-3 py-2 text-[12px] text-green-800 font-body">
+          <div className="max-w-[var(--content-max)] mx-auto flex items-center justify-between gap-3 rounded-lg border border-green-200 bg-green-50 px-3 py-2 text-[12px] text-green-800 font-body">
             <span className="flex items-center gap-1.5">
               <Smartphone size={14} /> 已交给手机远程控制 · 输入框已锁定以避免双写
             </span>
@@ -433,7 +433,7 @@ export function ChatInput({ onSend, onStop, onAccelerate, disabled, isStreaming,
         </div>
       )}
     <div className="chat-input-shell px-4 py-5">
-      <div className="max-w-3xl mx-auto relative">
+      <div className="max-w-[var(--content-max)] mx-auto relative">
         {/* Slash command dropdown */}
         {showCommands && (
           <div className="glass-popover absolute bottom-full left-0 right-0 mb-3 max-h-80 overflow-y-auto z-30 animate-glass-rise">

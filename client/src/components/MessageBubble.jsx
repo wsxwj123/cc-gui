@@ -281,7 +281,7 @@ export function MessageBubble({ message, onRollback }) {
   if (isUser) {
     return (
       <div className="group px-6 py-4 animate-fade-up" style={{ animationDuration: '0.25s' }}>
-        <div className="max-w-[720px] mx-auto flex flex-row-reverse gap-3">
+        <div className="max-w-[var(--content-max)] mx-auto flex flex-row-reverse gap-3">
           <div className="shrink-0 mt-0.5">
             <UserAvatar />
           </div>
@@ -303,7 +303,7 @@ export function MessageBubble({ message, onRollback }) {
 
   return (
     <div className="group px-6 py-4 animate-fade-up" style={{ animationDuration: '0.25s' }}>
-      <div className="max-w-[720px] mx-auto flex gap-3">
+      <div className="max-w-[var(--content-max)] mx-auto flex gap-3">
         <div className="mt-0.5">
           <ProviderAvatar model={message.model} size={34} />
         </div>
