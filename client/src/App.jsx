@@ -3258,7 +3258,9 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
       )}
 
       {!autoScroll && !showFileChanges && (
-        <div className="absolute bottom-24 right-6 z-20">
+        // 桌面端右下角不挡其他控件;手机端居中输入框上方 — 原来 right-6 跟
+        // ChatInput 的发送/停止按钮位置完全重合,手指点不准。
+        <div className="absolute bottom-24 right-6 z-20 max-md:right-auto max-md:left-1/2 max-md:-translate-x-1/2">
           <button onClick={() => {
               // Scroll ONLY the messages container — scrollIntoView would scroll
               // every scrollable ancestor (incl. the root flex), shoving the
