@@ -337,11 +337,12 @@ function formatPathShort(path) {
 }
 
 // ─── Right Panel (overlay) ────────────────────────────────────
-// Top-right panels. AgentsPanel (定义编辑器) is now reachable from inside
-// AgentMonitorPanel — no longer needs its own header icon.
+// Top-right panels — each key auto-wires a header icon (desktop + mobile menu)
+// and its RightPanel body. Adding a key here is all the wiring needed.
 const PANEL_MAP = {
   files: { label: '文件浏览器', icon: FolderTree, component: FileExplorerPanel },
   monitor: { label: 'Subagent 监控', icon: Bot, component: AgentMonitorPanel },
+  agents: { label: 'Subagent 定义', icon: SquarePen, component: AgentsPanel },
   usage: { label: '用量统计', icon: BarChart3, component: UsagePanel },
   processes: { label: '进程管理 / 停止', icon: Activity, component: ProcessPanel },
   mcp: { label: 'MCP 服务器', icon: Server, component: MCPPanel },
@@ -4808,7 +4809,7 @@ export default function App() {
             // Short chip label (always visible under the icon). Long `label`
             // stays as the hover tooltip for the full name.
             const SHORT = {
-              files: '文件', monitor: '监控', usage: '用量', processes: '进程',
+              files: '文件', monitor: '监控', agents: '定义', usage: '用量', processes: '进程',
               mcp: 'MCP', settings: '设置',
             };
             const short = SHORT[id] || label;
