@@ -50,19 +50,36 @@ async function readSettings() {
  * ANTHROPIC_MODEL was set when the server was launched.
  */
 export async function getDefaultModel() {
-  // 1. Settings.json env section (what `cc switch` and our PUT /api/model write)
+  // 1. The active model explicitly written to settings.json (cc switch / our
+  //    PUT /api/model / a provider switch). Authoritative.
   const settings = await readSettings();
   if (settings.env?.ANTHROPIC_MODEL) return settings.env.ANTHROPIC_MODEL;
 
-  // 2. settings.model / settings.defaultModel
+  // 2. A relay/proxy is active (loopback base) but NO explicit model. Resolve from
+  //    the relay's OWN config — and crucially do NOT fall through to the inherited
+  //    shell env (step 4) or the hardcoded Claude default (step 5), both of which
+  //    surface a misleading "sonnet"/"haiku" on a non-Claude relay. This is the
+  //    root cause of "switched a model-less relay → settings.json has only
+  //    ANTHROPIC_BASE_URL → picker/badge show claude-sonnet-4-6". Checked BEFORE
+  //    process.env because a polluted launch env must not override the active relay.
+  const base = settings.env?.ANTHROPIC_BASE_URL || '';
+  if (/^https?:\/\/127\.0\.0\.1[:/]/.test(base)) {
+    const oa = await readOpenAIActive();
+    if (oa?.models?.length) return oa.models[0];
+    const an = await readAnthropicActive();
+    if (an?.models?.length) return an.models[0];
+    return ''; // model-less relay — show "no model", never fake Claude
+  }
+
+  // 3. settings.model / settings.defaultModel
   if (settings.model) return settings.model;
   if (settings.defaultModel) return settings.defaultModel;
 
-  // 3. Process env (inherited from shell at launch — fallback only)
+  // 4. Process env (inherited from shell at launch — fallback only)
   if (process.env.ANTHROPIC_MODEL) return process.env.ANTHROPIC_MODEL;
   if (process.env.CLAUDE_MODEL) return process.env.CLAUDE_MODEL;
 
-  // 4. Hardcoded fallback
+  // 5. Official Anthropic endpoint (or no base) — the Claude default is correct here.
   return 'claude-sonnet-4-6';
 }
 
