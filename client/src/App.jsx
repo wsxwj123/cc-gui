@@ -3735,7 +3735,7 @@ export function ModelSelector({ compact = false, permKey = null }) {
             return (
               <button key={m.id} onClick={() => selectModel(m.id)}
                 className={`w-full text-left px-3 py-2 hover:bg-canvas-warm transition-colors flex items-center gap-2 ${
-                  currentModel === m.id ? 'bg-accent-subtle/50' : ''}`}>
+                  (currentModel === m.id || currentModel === `${m.id}[1m]`) ? 'bg-accent-subtle/50' : ''}`}>
                 <div className="flex-1 min-w-0">
                   <div className="text-xs font-medium text-ink font-body flex items-center gap-1.5">
                     {m.name}
@@ -3757,14 +3757,14 @@ export function ModelSelector({ compact = false, permKey = null }) {
                   </div>
                 </div>
                 <span className="text-[9px] px-1.5 py-0.5 bg-canvas-deep text-ink-faint rounded font-mono shrink-0">{m.tier}</span>
-                {currentModel === m.id && <Check size={12} className="text-accent shrink-0" />}
+                {(currentModel === m.id || currentModel === `${m.id}[1m]`) && <Check size={12} className="text-accent shrink-0" />}
               </button>
             );
           })}
           {customRows.filter((m) => match(m.id, m.name)).map((m) => (
             <div key={m.id}
               className={`w-full px-3 py-2 hover:bg-canvas-warm transition-colors flex items-center gap-2 ${
-                currentModel === m.id ? 'bg-accent-subtle/50' : ''}`}>
+                (currentModel === m.id || currentModel === `${m.id}[1m]`) ? 'bg-accent-subtle/50' : ''}`}>
               <button onClick={() => selectModel(m.id)} className="flex-1 min-w-0 text-left">
                 <div className="text-xs font-medium text-ink font-body flex items-center gap-1.5">
                   {m.name}
@@ -3773,7 +3773,7 @@ export function ModelSelector({ compact = false, permKey = null }) {
                 </div>
                 <div className="text-[10px] text-ink-faint font-mono truncate">{m.id}</div>
               </button>
-              {currentModel === m.id && <Check size={12} className="text-accent shrink-0" />}
+              {(currentModel === m.id || currentModel === `${m.id}[1m]`) && <Check size={12} className="text-accent shrink-0" />}
               <button onClick={() => useStore.getState().removeCustomModel(m.id)} title="移除自定义模型"
                 className="p-1 text-ink-faint hover:text-error shrink-0"><X size={12} /></button>
             </div>
@@ -3781,12 +3781,12 @@ export function ModelSelector({ compact = false, permKey = null }) {
           {fetchedRows.map((m) => (
             <button key={`f-${m.id}`} onClick={() => selectModel(m.id)}
               className={`w-full text-left px-3 py-2 hover:bg-canvas-warm transition-colors flex items-center gap-2 ${
-                currentModel === m.id ? 'bg-accent-subtle/50' : ''}`}>
+                (currentModel === m.id || currentModel === `${m.id}[1m]`) ? 'bg-accent-subtle/50' : ''}`}>
               <div className="flex-1 min-w-0">
                 <div className="text-xs font-medium text-ink font-body truncate">{m.name}</div>
                 <div className="text-[10px] text-ink-faint font-mono truncate">实时拉取</div>
               </div>
-              {currentModel === m.id && <Check size={12} className="text-accent shrink-0" />}
+              {(currentModel === m.id || currentModel === `${m.id}[1m]`) && <Check size={12} className="text-accent shrink-0" />}
             </button>
           ))}
           <div className="border-t border-canvas-deep mt-1 pt-1 px-3 pb-2">
