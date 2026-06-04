@@ -331,9 +331,13 @@ function classifyTool(name) {
  * `<local-command-stdout>` block. These are CLI bookkeeping, not real user
  * prompts — rendering them as user bubbles is the "斜杠命令多出两条隐藏消息"
  * bug. Detect and drop them.
+ *
+ * `<task-notification>` is the harness's "background task completed" envelope
+ * fed back to the model (task-id / output-file / status / summary). Same shape:
+ * never a real user prompt — drop so it stops appearing as 16:30 你 「...killed」.
  */
 function isLocalCommandEcho(text) {
-  return /^\s*<(local-command-(caveat|stdout|stderr)|command-(name|message|args))\b/.test(text);
+  return /^\s*<(local-command-(caveat|stdout|stderr)|command-(name|message|args)|task-notification)\b/.test(text);
 }
 
 /**
