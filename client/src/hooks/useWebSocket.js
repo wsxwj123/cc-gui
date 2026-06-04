@@ -40,7 +40,11 @@ export function useWebSocket() {
               // tell the sidebar to silent-refresh the project's session list.
               // This is what makes a newly-spawned session appear in history
               // immediately (instead of waiting for the post-chat setTimeout).
-              if (typeof data.path === 'string' && data.path.includes('/projects/') && data.path.endsWith('.jsonl')) {
+              // 兼容 Windows 反斜杠路径(chokidar 在 Windows 上发回 `\projects\`),
+              // 此前只检查 `/projects/` → Windows 端新会话出现后侧栏列表不刷新。
+              if (typeof data.path === 'string'
+                  && (data.path.includes('/projects/') || data.path.includes('\\projects\\'))
+                  && data.path.endsWith('.jsonl')) {
                 window.dispatchEvent(new CustomEvent('cgui:sessions-changed', { detail: { path: data.path } }));
               }
               break;
