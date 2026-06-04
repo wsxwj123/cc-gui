@@ -1213,6 +1213,10 @@ function SessionList() {
   const activeTabIndex = useStore((s) => s.activeTabIndex);
   const setActiveTabSession = useStore((s) => s.setActiveTabSession);
   const secondarySession = useStore((s) => s.secondarySession);
+  const paneSessions = useStore((s) => s.paneSessions);
+  // 焦点 pane 当前的 session,决定本列表里哪条强高亮。原来用 selectedSession +
+  // secondarySession 两 pane 都高亮,N-pane 下其他 pane 完全没体现,且看不出焦点。
+  const focusSession = (paneSessions && paneSessions[activeTabIndex]) || null;
   const [forking, setForking] = useState(null);
   const [showArchived, setShowArchived] = useState(false);
 
@@ -1469,10 +1473,7 @@ function SessionList() {
           <SessionItem
             key={session.sessionId}
             session={session}
-            isSelected={
-              selectedSession?.sessionId === session.sessionId
-              || (splitMode && secondarySession?.sessionId === session.sessionId)
-            }
+            isSelected={focusSession?.sessionId === session.sessionId}
             onSelect={handleSelect}
             onFork={handleFork}
             onArchive={handleArchive}
@@ -4595,6 +4596,20 @@ export default function App() {
   const customTitles = useStore((s) => s.customTitles);
   const activeSession = (paneSessions && paneSessions[activeTabIndex]) || selectedSession;
   const permKey = activeSession?.sessionId || `draft-${activeSession?.projectHash || 'none'}`;
+
+  // 分屏焦点切换 / focus pane 的 session 变化时,让左侧 selectedProject 自动跟到
+  // 对应项目,顺便 silent-refresh 该项目的 sessions 列表 — 这样用户切焦点时
+  // 左侧能直接看到当前 pane 在用的会话(并被高亮),不用手动回项目列表找。
+  const activeProjectHash = activeSession?.projectHash;
+  useEffect(() => {
+    if (!activeProjectHash) return;
+    const st = useStore.getState();
+    if (st.selectedProject?.hash === activeProjectHash) return;
+    const proj = (st.projects || []).find((p) => p.hash === activeProjectHash);
+    if (!proj) return;
+    st.setSelectedProject(proj);
+    st.fetchSessions(proj.hash, { silent: true });
+  }, [activeProjectHash]);
 
   // Apply persisted UI font scale on mount. Use document.documentElement.style
   // .zoom so even text-[12px]-style hardcoded sizes scale (not just rem).
