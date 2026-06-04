@@ -27,7 +27,7 @@ import {
   RefreshCw, Activity, Settings, Server, GitBranch, FileDiff, Check, Wrench, X,
   Sun, Moon, Monitor, Bot, Camera, History, Loader2, Shield, FolderTree,
   Archive, ArchiveRestore, Trash2, EyeOff, Columns2, Smartphone, Pencil, Type, Palette,
-  Menu, SquarePen, Gauge, Cpu,
+  Menu, SquarePen, Gauge, Cpu, CheckCircle2,
 } from 'lucide-react';
 
 // ── Per-session shadow-git checkpoints ──────────────────────────
@@ -753,8 +753,19 @@ function GlobalSearchResults({ q, onPick }) {
 }
 
 // ─── Project List ──────────────────────────────────────────────
+// 侧栏运行状态符号:正在回复=旋转环;30min 内刚跑完=圈中对勾;更久的闲置=无符号。
+const RUNNING_DONE_WINDOW_MS = 30 * 60 * 1000;
+function StatusDot({ running, lastActivity, className = '' }) {
+  if (running) return <Loader2 size={11} className={`text-accent animate-spin shrink-0 ${className}`} />;
+  const t = lastActivity ? new Date(lastActivity).getTime() : NaN;
+  if (Number.isFinite(t) && Date.now() - t < RUNNING_DONE_WINDOW_MS)
+    return <CheckCircle2 size={11} className={`text-success shrink-0 ${className}`} />;
+  return null;
+}
+
 function ProjectList() {
   const { projects, selectedProject, setSelectedProject, fetchProjects, fetchSessions, searchQuery, setSearchQuery } = useStore();
+  const runningCwds = useStore((s) => s.runningCwds);
   const isMobile = useIsMobile();
   const [addDialogOpen, setAddDialogOpen] = useState(false);
   const [addPathInput, setAddPathInput] = useState('');
@@ -975,6 +986,7 @@ function ProjectList() {
             >
               <div className="flex items-center gap-2">
                 <FolderOpen size={13} className="text-warning/70 shrink-0" />
+                <StatusDot running={runningCwds.has(project.path)} lastActivity={project.lastActivity} />
                 <span className="text-[13px] text-ink-soft truncate font-body font-medium">
                   {formatPathShort(project.path)}
                 </span>
@@ -1055,7 +1067,7 @@ function ProjectList() {
 }
 
 // ─── Session List ──────────────────────────────────────────────
-function SessionItem({ session, isSelected, onSelect, onFork, onArchive, onDelete, forking }) {
+function SessionItem({ session, isSelected, onSelect, onFork, onArchive, onDelete, forking, running }) {
   const [expanded, setExpanded] = useState(false);
   const customTitle = useStore((s) => s.customTitles[session.sessionId]);
   const setCustomTitle = useStore((s) => s.setCustomTitle);
@@ -1111,6 +1123,7 @@ function SessionItem({ session, isSelected, onSelect, onFork, onArchive, onDelet
             ) : (
               <MessageSquare size={13} className="text-accent/40 shrink-0 mt-0.5" />
             )}
+            <StatusDot running={running} lastActivity={session.lastActivity} className="mt-0.5" />
             <div className="min-w-0 flex-1">
               <div className="text-[13px] text-ink-soft line-clamp-2 font-body leading-snug pr-1">
                 {customTitle || session.firstPrompt || '(空会话)'}
@@ -1192,6 +1205,7 @@ function SessionItem({ session, isSelected, onSelect, onFork, onArchive, onDelet
 
 function SessionList() {
   const { sessions, selectedSession, setSelectedSession, fetchMessages, selectedProject } = useStore();
+  const runningSessionIds = useStore((s) => s.runningSessionIds);
   // In split mode, sidebar clicks fill the focused pane (tab 0 or 1).
   // Outside split mode the call collapses to setSelectedSession + tab-0
   // fetch — i.e. identical to the legacy single-pane behavior.
@@ -1464,6 +1478,7 @@ function SessionList() {
             onArchive={handleArchive}
             onDelete={handleDelete}
             forking={forking === session.sessionId}
+            running={runningSessionIds.has(session.sessionId)}
           />
         ))}
         {visible.length === 0 && (
@@ -4540,6 +4555,27 @@ export default function App() {
     const mods = import.meta.glob('./components/*.local.jsx');
     const entry = Object.values(mods)[0];
     if (entry) entry().then((m) => setLocalWidget(() => m.default)).catch(() => {});
+  }, []);
+
+  // 全局轮询正在运行的 chat-process → store,驱动侧栏状态符号(ProjectList /
+  // SessionItem)。与按会话的 backgroundPid 轮询相互独立。
+  useEffect(() => {
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const r = await fetch('/api/agents/active');
+        const d = await r.json();
+        if (cancelled) return;
+        const running = (d.agents || []).filter((a) => a.kind === 'chat-process' && a.stoppable === true);
+        useStore.getState().setRunningStatus(
+          new Set(running.map((a) => a.sessionId).filter(Boolean)),
+          new Set(running.map((a) => a.cwd).filter(Boolean)),
+        );
+      } catch {}
+    };
+    poll();
+    const id = setInterval(poll, 1500);
+    return () => { cancelled = true; clearInterval(id); };
   }, []);
   // Per-session permission key for the header chip + bypass auto-resolve.
   // Follows the ACTIVE pane (not always pane 0) so in split mode the top-bar

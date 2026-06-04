@@ -247,6 +247,21 @@ export const useStore = create((set, get) => ({
   // App.jsx reader populates this; AgentMonitorPanel + TaskCard render it.
   activeAgents: {},
 
+  // 侧栏状态符号数据源:有活跃 chat-process 的 sessionId(转圈)+ 它们的 cwd(让
+  // ProjectList 在任一会话运行时给项目转圈)。App 每 1.5s 轮询 /agents/active 写入;
+  // setter 在内容不变时返回 {} 保持 Set 引用稳定,避免侧栏无谓重渲染。
+  runningSessionIds: new Set(),
+  runningCwds: new Set(),
+  setRunningStatus: (ids, cwds) => set((s) => {
+    const sameIds = s.runningSessionIds.size === ids.size && [...ids].every((x) => s.runningSessionIds.has(x));
+    const sameCwds = s.runningCwds.size === cwds.size && [...cwds].every((x) => s.runningCwds.has(x));
+    if (sameIds && sameCwds) return {};
+    return {
+      runningSessionIds: sameIds ? s.runningSessionIds : ids,
+      runningCwds: sameCwds ? s.runningCwds : cwds,
+    };
+  }),
+
   // Message queue per session: { [sessionKey]: [{ text, attachments, queuedAt }] }
   // Keyed by sessionId (or 'draft' for unsent drafts). When user types during
   // streaming + clicks 入队, message goes here. handleSend pops the queue after
