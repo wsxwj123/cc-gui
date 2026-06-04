@@ -46,6 +46,15 @@ export function useWebSocket() {
               break;
             case 'permission:request': {
               const req = data.request;
+              // 诊断 Bug1(授权后工具仍不执行 / 不弹窗):打印每次收到的请求 + 命中分支。
+              // 服务端 hook 实测正常 POST,可疑点在客户端这一段。下次复现时打开
+              // 控制台过滤 [cgui-perm] 即可看出走的是哪条分支。
+              try {
+                console.log('[cgui-perm] WS request', {
+                  id: req?.id, tool: req?.toolName, sid: req?.sessionId,
+                  cwd: req?.cwd,
+                });
+              } catch {}
               // Mid-stream permission-mode override: even though chat.js
               // spawned the CLI with a fixed mode, the user can flip the
               // dropdown mid-stream and we honor it client-side. Order:
@@ -62,6 +71,7 @@ export function useWebSocket() {
               const mode = modeMap[req.sessionId] || 'default';
               const READ_CLASS = ['Read', 'Glob', 'Grep', 'LS', 'TodoWrite', 'NotebookRead', 'Skill'];
               if (mode === 'bypassPermissions') {
+                console.log('[cgui-perm] auto-allow: bypass', req.id);
                 fetch(`/api/permissions/respond/${req.id}`, {
                   method: 'POST',
                   headers: { 'Content-Type': 'application/json' },
@@ -70,6 +80,7 @@ export function useWebSocket() {
                 break;
               }
               if (mode === 'acceptEdits' && READ_CLASS.includes(req.toolName)) {
+                console.log('[cgui-perm] auto-allow: acceptEdits+readClass', req.id, req.toolName);
                 fetch(`/api/permissions/respond/${req.id}`, {
                   method: 'POST',
                   headers: { 'Content-Type': 'application/json' },
@@ -79,6 +90,7 @@ export function useWebSocket() {
               }
               const wl = JSON.parse(localStorage.getItem(`cgui-perm-wl-${req.sessionId || 'none'}`) || '[]');
               if (wl.includes(req.toolName)) {
+                console.log('[cgui-perm] auto-allow: whitelist', req.id, req.toolName);
                 fetch(`/api/permissions/respond/${req.id}`, {
                   method: 'POST',
                   headers: { 'Content-Type': 'application/json' },
@@ -86,6 +98,7 @@ export function useWebSocket() {
                 }).catch(() => {});
                 break;
               }
+              console.log('[cgui-perm] → render popup (mode=' + mode + ')', req.id, req.toolName);
               useStore.getState().addPendingPermission(req);
               break;
             }
