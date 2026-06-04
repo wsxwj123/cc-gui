@@ -11,12 +11,49 @@ const router = Router();
  * Opens the OS-native folder picker, blocks until the user chooses or cancels.
  * Returns: { path: "/abs/path" } on pick, { path: null } on cancel.
  *
- * macOS only for now — uses AppleScript. The Express server must be running
- * under a GUI session (not headless / SSH) for the dialog to appear.
+ * macOS uses AppleScript (`choose folder`). Windows uses PowerShell +
+ * System.Windows.Forms.FolderBrowserDialog. The Express server must be
+ * running under a GUI session (not headless / SSH) for the dialog to appear.
  */
 router.post('/pick-directory', async (req, res) => {
+  // Windows — PowerShell + .NET WinForms FolderBrowserDialog.
+  if (platform() === 'win32') {
+    const promptText = String(req.body?.prompt || '选择项目目录');
+    const startDirRaw = (req.body?.startDir && typeof req.body.startDir === 'string')
+      ? req.body.startDir
+      : `${homedir()}\\Desktop`;
+    // PowerShell single-quoted strings don't interpolate $vars; the only
+    // escape is doubling embedded single quotes. Drop newlines too so a
+    // crafted prompt can't break out of the literal.
+    const escPS = (s) => s.replace(/[\r\n]+/g, ' ').replace(/'/g, "''");
+    const script = [
+      // UTF-8 stdout so Chinese paths survive the round-trip (Windows
+      // PowerShell 5's default is the system code page → garbled CJK).
+      "[Console]::OutputEncoding = [Text.UTF8Encoding]::new()",
+      "Add-Type -AssemblyName System.Windows.Forms",
+      "$dlg = New-Object System.Windows.Forms.FolderBrowserDialog",
+      `$dlg.Description = '${escPS(promptText)}'`,
+      `$dlg.SelectedPath = '${escPS(startDirRaw)}'`,
+      "$dlg.ShowNewFolderButton = $true",
+      "if ($dlg.ShowDialog() -eq 'OK') { Write-Output $dlg.SelectedPath }",
+    ].join('; ');
+    try {
+      // -Sta: WinForms REQUIRES single-threaded apartment; PowerShell defaults
+      // to MTA which crashes ShowDialog with "OLE called on a thread that
+      // hasn't been initialized as STA".
+      const { stdout } = await execFileP('powershell.exe', [
+        '-NoProfile', '-Sta', '-Command', script,
+      ], { timeout: 120000, encoding: 'utf8' });
+      const dir = stdout.trim();
+      if (!dir) return res.json({ path: null });  // user cancelled
+      res.json({ path: dir });
+    } catch (err) {
+      res.status(500).json({ error: String(err.stderr || err.message || '') });
+    }
+    return;
+  }
   if (platform() !== 'darwin') {
-    return res.status(501).json({ error: 'native picker only supported on macOS — paste an absolute path instead' });
+    return res.status(501).json({ error: 'native picker only supported on macOS / Windows — paste an absolute path instead' });
   }
   try {
     const promptText = String(req.body?.prompt || '选择项目目录');
