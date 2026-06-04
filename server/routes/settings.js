@@ -678,6 +678,18 @@ router.put('/custom-providers/:id', async (req, res) => {
         : (prev.models || []),
     };
     await writeCustomProviders(list);
+    // If the TYPE changed and this provider was active on the OLD type's marker,
+    // that marker is now stale (wrong proxy/format) — clear it so GET /provider,
+    // restore-on-boot, and getAvailableModels don't read an openai snapshot for a
+    // now-anthropic provider (or vice versa). The user must re-switch to apply the
+    // new routing anyway.
+    if (prev.type !== type) {
+      const oldPath = prev.type === 'openai' ? OPENAI_ACTIVE_PATH : ANTHROPIC_ACTIVE_PATH;
+      try {
+        const oldActive = JSON.parse(await readFile(oldPath, 'utf-8'));
+        if (oldActive?.providerId === prev.id) await unlink(oldPath).catch(() => {});
+      } catch { /* no old marker — nothing to clear */ }
+    }
     // If this provider is the active one, refresh its model snapshot so the
     // ModelSelector reflects the edit immediately (no re-switch needed).
     await syncActiveProviderSnapshot(
@@ -844,20 +856,26 @@ async function syncActiveProviderSnapshot(activePath, providerId, models) {
     const active = JSON.parse(await readFile(activePath, 'utf-8'));
     if (active?.providerId !== providerId) return;
     active.models = Array.isArray(models) ? models : [];
-    // If the active model was just de-selected, fall back to the first kept one
-    // and keep settings.json's ANTHROPIC_MODEL in sync (what the CLI sends).
-    if (active.models.length && !active.models.includes(active.model)) {
-      active.model = active.models[0];
+    // If the active model is no longer in the kept list (de-selected, or the list
+    // was emptied), repoint it to the first kept model — or CLEAR it when none
+    // remain (deselect-all) — and keep settings.json's ANTHROPIC_MODEL in sync so
+    // the CLI doesn't keep sending a model the user just removed.
+    if (!active.models.includes(active.model)) {
+      active.model = active.models[0] || '';
       try {
         const cur = JSON.parse(await readFile(SETTINGS_PATH, 'utf-8'));
         if (cur?.env) {
-          cur.env.ANTHROPIC_MODEL = active.model;
-          // The proxy subagent aliases only exist on the openai-proxy path; only
-          // rewrite them when already present (anthropic switch deletes them).
-          if (cur.env.ANTHROPIC_DEFAULT_SONNET_MODEL) {
-            cur.env.ANTHROPIC_DEFAULT_HAIKU_MODEL = active.model;
-            cur.env.ANTHROPIC_DEFAULT_SONNET_MODEL = active.model;
-            cur.env.ANTHROPIC_DEFAULT_OPUS_MODEL = active.model;
+          if (active.model) {
+            cur.env.ANTHROPIC_MODEL = active.model;
+            // The proxy subagent aliases only exist on the openai-proxy path; only
+            // rewrite them when already present (anthropic switch deletes them).
+            if (cur.env.ANTHROPIC_DEFAULT_SONNET_MODEL) {
+              cur.env.ANTHROPIC_DEFAULT_HAIKU_MODEL = active.model;
+              cur.env.ANTHROPIC_DEFAULT_SONNET_MODEL = active.model;
+              cur.env.ANTHROPIC_DEFAULT_OPUS_MODEL = active.model;
+            }
+          } else {
+            delete cur.env.ANTHROPIC_MODEL; // no models left — don't pin a stale one
           }
           await writeFile(SETTINGS_PATH, JSON.stringify(cur, null, 2));
         }
