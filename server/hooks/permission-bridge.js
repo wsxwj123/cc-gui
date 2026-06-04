@@ -26,7 +26,20 @@ import http from 'node:http';
 const FAIL_OPEN_TIMEOUT_MS = 10 * 60 * 1000; // 10min — user has time to click
 
 function allow(reason) {
-  process.stdout.write(JSON.stringify({ continue: true }));
+  // Auto-approve via the CURRENT PreToolUse hook contract. {"continue":true} does
+  // NOT grant permission — it only means "don't stop the session", so the CLI then
+  // falls back to --permission-mode, which BLOCKS tools in headless `-p` default
+  // mode. The documented way to actually allow a tool is
+  // hookSpecificOutput.permissionDecision="allow" (code.claude.com/docs/en/hooks).
+  // This is why approving a tool in the GUI did nothing and only bypassPermissions
+  // (which skips the hook entirely) worked.
+  process.stdout.write(JSON.stringify({
+    hookSpecificOutput: {
+      hookEventName: 'PreToolUse',
+      permissionDecision: 'allow',
+      permissionDecisionReason: reason || 'approved via GUI',
+    },
+  }));
   if (reason) process.stderr.write(`[cgui-permission] allow: ${reason}\n`);
   process.exit(0);
 }
