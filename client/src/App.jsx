@@ -1858,7 +1858,14 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
   // order stays stable. After a session-load transition we'd otherwise add a
   // hook below the early return → React #310 → blank page.
   const currentProvider = useStore((s) => s.currentProvider);
-  const currentModel = useStore((s) => s.currentModel);
+  // 优先读本会话 modelBySession,只在没有 per-session 选择时回退到全局 currentModel。
+  // 此前直接读 currentModel:WS 收到 server 推的默认 model 会 setCurrentModel(无 [1m]
+  // 后缀)→ 顶部"x/1M" 进度条契约被破坏 → 跳回 "x/200k"。modelBySession 只在用户
+  // 在本会话主动切模型时改,不被 WS 推流覆盖,所以是更稳的真相。
+  const currentModel = useStore((s) => {
+    const k = selectedSession?.sessionId || `draft-${selectedSession?.projectHash || 'none'}`;
+    return s.modelBySession[k] || s.currentModel;
+  });
   const modelBySession = useStore((s) => s.modelBySession);
   const messagesEndRef = useRef(null);
   const containerRef = useRef(null);
