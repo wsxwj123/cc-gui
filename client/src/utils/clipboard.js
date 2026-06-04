@@ -21,8 +21,8 @@ export async function copyText(text) {
     // permission denied / not allowed — fall through to the legacy path
   }
   // Legacy fallback: works over plain http (phone on the LAN / Tailscale).
+  const ta = document.createElement('textarea');
   try {
-    const ta = document.createElement('textarea');
     ta.value = str;
     ta.setAttribute('readonly', '');
     ta.style.position = 'fixed';
@@ -34,10 +34,12 @@ export async function copyText(text) {
     ta.select();
     // iOS Safari ignores select() on a textarea — an explicit range is needed.
     ta.setSelectionRange(0, str.length);
-    const ok = document.execCommand('copy');
-    document.body.removeChild(ta);
-    return ok;
+    return document.execCommand('copy');
   } catch {
     return false;
+  } finally {
+    // Always remove the node — even if execCommand/setSelectionRange threw, so a
+    // failed copy never leaks a hidden textarea into the DOM.
+    if (ta.parentNode) ta.parentNode.removeChild(ta);
   }
 }
