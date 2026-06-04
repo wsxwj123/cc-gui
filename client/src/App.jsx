@@ -2228,6 +2228,12 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
     // empty/errored turn — which never gets a jsonl twin — neither waits on one
     // nor has its local ⚠️/❌ notice cleared.
     let producedReply = false;
+    // Count of assistant turns already in the persisted jsonl BEFORE this round.
+    // The finally uses this (not a text match on the prompt) to detect when THIS
+    // round's reply has landed: a repeated prompt (e.g. "继续") would make a
+    // text-based check match a PRIOR round's turn and clear the new reply early.
+    let turnsBefore = 0;
+    try { turnsBefore = (getLocalMessages() || []).filter((m) => m.type === 'turn').length; } catch {}
     try {
       let pid;
       if (reattachPid) {
@@ -2674,20 +2680,24 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
       // twin) skip the wait and keep their local ⚠️/❌ notice.
       const _sel = getLocalSession();
       if (_sel?.sessionId && _sel?.projectHash) {
+        const finalizeSid = _sel.sessionId;
         const tkey = (m) => {
           const t = Array.isArray(m.text) ? m.text.join('') : (m.text || '');
           return `${m.type}|${(t || '').slice(0, 80)}`;
         };
-        const userKey = prompt ? `user|${String(prompt).slice(0, 80)}` : null;
-        // The whole round is on disk once a `type:'turn'` (assistant) record
-        // exists AFTER our user prompt. (session-reader: user→'user', reply→'turn'.)
-        const roundLanded = (persisted) => {
-          if (!userKey) return true;
-          const idx = persisted.map(tkey).lastIndexOf(userKey);
-          return idx !== -1 && persisted.slice(idx + 1).some((m) => m.type === 'turn');
-        };
+        // The round has landed once the persisted jsonl carries MORE assistant
+        // turns than before this send — COUNTED, not text-matched. A repeated
+        // prompt (e.g. "继续") would make a text match hit a PRIOR round's turn and
+        // clear the new reply before its own jsonl twin exists (vanish→reappear).
+        const roundLanded = (persisted) =>
+          persisted.filter((m) => m.type === 'turn').length > turnsBefore;
         for (let i = 0; i < 8; i++) {
-          try { await fetchMessagesForTab(_sel.sessionId, _sel.projectHash, { silent: true }); } catch {}
+          // Bail if the user navigated THIS pane to another session mid-finalize:
+          // otherwise we'd fetch the old session into the now-current tab and clear
+          // the wrong session's local messages.
+          if (getLocalSession()?.sessionId !== finalizeSid) break;
+          try { await fetchMessagesForTab(finalizeSid, _sel.projectHash, { silent: true }); } catch {}
+          if (getLocalSession()?.sessionId !== finalizeSid) break;
           const persisted = getLocalMessages();
           if (producedReply && roundLanded(persisted)) {
             // Full round persisted → persisted owns it; drop ALL local copies
@@ -3371,6 +3381,9 @@ function ProviderSwitcher() {
   };
   const removeCustom = async (id, name) => {
     if (!window.confirm(`删除自定义 Provider「${name}」?`)) return;
+    // If this provider is open in the edit form, close it first — otherwise the
+    // form lingers on a now-deleted target ("更新" would 404).
+    setEditingProvider((cur) => (cur?.id === id ? null : cur));
     await fetch(`/api/custom-providers/${id}`, { method: 'DELETE' }).catch(() => {});
     load();
   };
@@ -3418,6 +3431,9 @@ function ProviderSwitcher() {
       useStore.getState().clearModelOverrides?.();
       useStore.getState().fetchProvider?.();
       useStore.getState().fetchModel?.();
+      // Notify ModelSelector et al. so their live-fetched catalogue re-keys to the
+      // new provider instead of showing the previous provider's fetched models.
+      window.dispatchEvent(new CustomEvent('cgui:provider-change'));
       setOpen(false);
     } catch (e) {
       window.alert('切换 provider 失败：' + e.message);
@@ -4232,11 +4248,15 @@ function MobileProviderPage() {
       useStore.getState().clearModelOverrides?.();
       useStore.getState().fetchProvider?.();
       useStore.getState().fetchModel?.();
+      window.dispatchEvent(new CustomEvent('cgui:provider-change'));
     } catch (e) { window.alert('切换 provider 失败：' + e.message); }
     setSwitching(false);
   };
   const removeCustom = async (id, name) => {
     if (!window.confirm(`删除自定义 Provider「${name}」?`)) return;
+    // If this provider is open in the edit form, close it first — otherwise the
+    // form lingers on a now-deleted target ("更新" would 404).
+    setEditingProvider((cur) => (cur?.id === id ? null : cur));
     await fetch(`/api/custom-providers/${id}`, { method: 'DELETE' }).catch(() => {});
     load();
   };
