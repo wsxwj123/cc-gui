@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { spawn } from 'child_process';
+import { spawn, execFileSync } from 'child_process';
 import { resolve as pathResolve, dirname, join as pathJoin, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readFileSync, statSync } from 'node:fs';
@@ -9,6 +9,19 @@ import { dropPendingForSession } from './permissions.js';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 const router = Router();
+
+// 跨平台杀进程树。Windows 不支持 POSIX signal,proc.kill('SIGTERM') 只杀直接子
+// (claude CLI 本身),它派生的 node/MCP 子进程留在系统里继续吃 CPU。Windows 必
+// 须用 `taskkill /F /T /PID` (/T = 杀整树,/F = 强制) 才能彻底清理。Bug #1。
+function killProcessTree(proc) {
+  if (!proc || proc.killed) return;
+  if (process.platform === 'win32') {
+    try { execFileSync('taskkill', ['/F', '/T', '/PID', String(proc.pid)], { stdio: 'ignore' }); } catch {}
+  } else {
+    proc.kill('SIGTERM');
+    setTimeout(() => { if (!proc.killed) proc.kill('SIGKILL'); }, 5000).unref();
+  }
+}
 
 // procId → {
 //   proc, earlyLines, earlyTail, earlyErrors, exitCode, attached,
@@ -474,7 +487,7 @@ router.get('/chat/:pid/stream', (req, res) => {
     turnDone = true;
     if (compactTimer) { clearTimeout(compactTimer); compactTimer = null; }
     finish(code);
-    setTimeout(() => { try { if (!proc.killed) proc.kill('SIGTERM'); } catch {} }, 5000).unref();
+    setTimeout(() => killProcessTree(proc), 5000).unref();
   };
 
   proc.stdout.on('data', onStdout);
@@ -543,10 +556,7 @@ router.get('/chat/:pid/stream', (req, res) => {
 router.post('/chat/:pid/stop', (req, res) => {
   const slot = activeProcesses.get(req.params.pid);
   if (!slot) return res.status(404).json({ error: 'Process not found' });
-  if (!slot.proc.killed) {
-    slot.proc.kill('SIGTERM');
-    setTimeout(() => { if (!slot.proc.killed) slot.proc.kill('SIGKILL'); }, 5000).unref();
-  }
+  killProcessTree(slot.proc);
   res.json({ ok: true });
 });
 
