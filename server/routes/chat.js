@@ -105,23 +105,28 @@ router.post('/chat', async (req, res) => {
   //   PreToolUse hook, then the hook auto-allows tools in the safe list and
   //   prompts for the rest.
   // - 'default' / 'plan' pass through unchanged.
-  // - 'bypassPermissions' skips the hook entirely.
+  // - 'bypassPermissions' REDEFINED:auto-allow all EXCEPT AskUserQuestion.
+  //   原实现走 --dangerously-skip-permissions 彻底跳过 hook → AskUserQuestion
+  //   在 -p mode 被 CLI reject(headless 禁用) → AI 直接用文本提问而不弹窗。
+  //   现在仍注入 hook,只是用 CGUI_BYPASS_ALL_EXCEPT_ASK env 让 hook 对非 ask
+  //   工具立即 auto-allow,AskUserQuestion 仍走 GUI 弹窗。(Bug #10)
   let cliMode = chosenMode;
   let autoAllowList = [];
+  let bypassExceptAsk = false;
   if (chosenMode === 'acceptEdits') {
     cliMode = 'default';
     autoAllowList = ['Read', 'Glob', 'Grep', 'LS', 'TodoWrite', 'NotebookRead', 'Skill'];
+  } else if (chosenMode === 'bypassPermissions') {
+    cliMode = 'default';
+    bypassExceptAsk = true;
   }
-  if (cliMode === 'bypassPermissions') {
-    args.push('--dangerously-skip-permissions');
-  } else {
-    args.push('--permission-mode', cliMode);
-  }
+  args.push('--permission-mode', cliMode);
   // GUI permission bridge — inject a PreToolUse hook that POSTs each tool
-  // call to our server and waits for the user's Allow/Deny click. Only when
-  // NOT bypassing (bypass means user opted out of all gating anyway). The
-  // hook is passed inline via --settings, so we never touch the user's real
+  // call to our server and waits for the user's Allow/Deny click. The hook
+  // is passed inline via --settings, so we never touch the user's real
   // settings.json — and the hook only fires for this single GUI spawn.
+  // (bypassPermissions 路径上面已 cliMode='default' + bypassExceptAsk,所以
+  //  hook 仍然注入,这里恒真,留这层 if 是为日后真"完全跳过"逃生口预留)
   let permissionGateEnabled = false;
   if (cliMode !== 'bypassPermissions') {
     const hookScript = pathResolve(__dirname, '..', 'hooks', 'permission-bridge.js');
@@ -218,6 +223,10 @@ router.post('/chat', async (req, res) => {
       childEnv.CGUI_SERVER_PORT = String(process.env.PORT || 6677);
       if (autoAllowList.length > 0) {
         childEnv.CGUI_AUTO_ALLOW_TOOLS = autoAllowList.join(',');
+      }
+      // 放任模式新语义:非 AskUserQuestion 一律 auto-allow,ask 仍走 GUI 弹窗。
+      if (bypassExceptAsk) {
+        childEnv.CGUI_BYPASS_ALL_EXCEPT_ASK = '1';
       }
       // Plan mode: Claude must be free to EXPLORE (read files, spawn Explore
       // subagents) before it can produce a plan. The CLI's own --permission-mode

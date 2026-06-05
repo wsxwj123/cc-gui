@@ -75,6 +75,14 @@ async function main() {
     allow(`auto-allow ${toolName} (read-class)`);
   }
 
+  // 放任模式(Bug #10):auto-allow 所有工具,只对 AskUserQuestion 走 GUI 弹窗。
+  // 原 bypassPermissions 走 --dangerously-skip-permissions 完全跳过 hook,导致
+  // ask 在 -p mode 被 CLI reject,AI 退化成文本提问。现在让 hook 仍跑,只是默
+  // 认 allow 一切,把 ask 例外留给 GUI picker。
+  if (process.env.CGUI_BYPASS_ALL_EXCEPT_ASK && toolName !== 'AskUserQuestion') {
+    allow(`bypass-except-ask: ${toolName}`);
+  }
+
   // Plan mode: only the GATED tools below reach the GUI; everything else passes
   // through (so exploration — Read/Grep/Bash/Agent — never freezes on a popup).
   //
