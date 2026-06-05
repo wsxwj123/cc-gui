@@ -21,6 +21,7 @@ import { FileChangesPanel } from './components/FileChangesPanel.jsx';
 import { AgentsPanel } from './components/AgentsPanel.jsx';
 import { AgentMonitorPanel } from './components/AgentMonitorPanel.jsx';
 import { CliMissingModal } from './components/CliMissingModal.jsx';
+import { BUILTIN_PROVIDERS, findBuiltin } from './utils/builtinProviders.js';
 import { computeCost, formatCost } from './utils/pricing.js';
 import {
   FolderOpen, MessageSquare, ChevronLeft, ChevronRight, ChevronDown,
@@ -4256,6 +4257,33 @@ function CustomProviderForm({ onSaved, editing, onCancel }) {
         { value: 'openai', label: 'OpenAI 兼容', active: type === 'openai' },
         { value: 'anthropic', label: 'Anthropic 兼容', active: type === 'anthropic' },
       ]} />
+      {/* 内置 provider 模板(Bug #2):一键填好 name/type/baseURL/models,
+          用户只需填 API key 然后保存。编辑模式下不显示(避免误覆盖用户已有配置)。 */}
+      {!isEdit && (
+        <div className="flex items-center gap-2">
+          <span className="text-[11px] text-ink-faint shrink-0 whitespace-nowrap">内置模板</span>
+          <select
+            defaultValue=""
+            onChange={(e) => {
+              const tpl = findBuiltin(e.target.value);
+              if (!tpl) return;
+              setName(tpl.name);
+              setType(tpl.type);
+              setBaseURL(tpl.baseURL);
+              setModelsText((tpl.models || []).join('\n'));
+              // 重置 select 自身,让用户能再次选(value 受控就不会卡)
+              e.target.value = '';
+            }}
+            className={`${inputCls} flex-1 cursor-pointer`}
+            title="选择一个内置 provider,自动填好 baseURL/默认模型;仍需自填 API key"
+          >
+            <option value="">— 选模板自动填充 —</option>
+            {BUILTIN_PROVIDERS.map((p) => (
+              <option key={p.id} value={p.id}>{p.name}（{p.type}）</option>
+            ))}
+          </select>
+        </div>
+      )}
       <input className={inputCls} placeholder="名称(如 我的中转)" value={name} onChange={(e) => setName(e.target.value)} />
       <input className={`${inputCls} font-mono`} placeholder="Base URL (https://...)" value={baseURL} onChange={(e) => setBaseURL(e.target.value)} />
       <input className={`${inputCls} font-mono`} type="password" placeholder={isEdit ? 'API Key(留空 = 不修改)' : 'API Key'} value={apiKey} onChange={(e) => setApiKey(e.target.value)} />

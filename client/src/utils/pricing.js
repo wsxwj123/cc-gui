@@ -44,6 +44,53 @@ const PRICES = {
   // MiMo — no official API for 7B/VL (open-source). V2.5 from OpenRouter as reference.
   'mimo-v2.5':                   usd(0.14, 0.28),
   'mimo-v2':                     usd(0.14, 0.28),
+
+  // Anthropic Claude — 2026-06-05 拉取 platform.claude.com 官方表
+  'claude-opus-4-8':             usd(5, 25),       // 4.8 用新 tokenizer,可能多消耗 ~35% token
+  'claude-haiku-4-5':            usd(1, 5),
+
+  // OpenAI — 2026-06-05 拉取 developers.openai.com
+  'gpt-5.5':                     usd(5, 30, 0.50),
+  'gpt-5.5-pro':                 usd(30, 180, 30),  // pro 无 cache 优惠,cacheRead = input
+  'gpt-5.4':                     usd(2.50, 15, 0.25),
+  'gpt-5.4-mini':                usd(0.75, 4.50, 0.075),
+  'gpt-5.4-nano':                usd(0.20, 1.25, 0.02),
+  'gpt-5.4-pro':                 usd(30, 180, 30),
+
+  // Google Gemini — 2026-06-05 拉取 ai.google.dev,paid tier
+  'gemini-2.5-pro':              usd(1.25, 10, 0.125),
+  'gemini-2.5-flash':            usd(0.30, 2.50, 0.03),
+  'gemini-2.5-flash-lite':       usd(0.10, 0.40, 0.01),
+  'gemini-3-flash-preview':      usd(0.50, 3.00, 0.05),
+  'gemini-3.1-flash-lite':       usd(0.25, 1.50, 0.025),
+  'gemini-3.1-pro-preview':      usd(2.00, 12.00, 0.20),
+  'gemini-3.5-flash':            usd(1.50, 9.00, 0.15),
+
+  // Moonshot Kimi — 2026-06-05 拉取 platform.kimi.com,CNY
+  'kimi-k2.6':                   cny(6.5, 27, 1.10),
+  'moonshot-v1-8k':              cny(2, 10),
+  'moonshot-v1-32k':             cny(5, 20),
+  'moonshot-v1-128k':            cny(10, 30),
+
+  // xAI Grok — 2026-06-05 拉取 docs.x.ai (无 cache 优惠披露)
+  'grok-4.3':                    usd(1.25, 2.50, 1.25),
+  'grok-4.20-0309-reasoning':    usd(1.25, 2.50, 1.25),
+  'grok-4.20-0309-non-reasoning': usd(1.25, 2.50, 1.25),
+  'grok-4.20-multi-agent-0309':  usd(1.25, 2.50, 1.25),
+  'grok-build-0.1':              usd(1.00, 2.00, 1.00),
+
+  // 智谱 GLM — ⚠️ 官网定价 JS 渲染未抓到,以下用 2026 业内常识估值,以官网为准
+  'glm-4.6':                     cny(14, 56),       // 估值
+  'glm-4.5':                     cny(8, 32),        // 估值
+  'glm-4.5-air':                 cny(1, 4),         // 估值,air 版便宜
+  'glm-4-plus':                  cny(50, 50),       // 估值
+  'glm-z1-flash':                cny(1, 4),         // 估值
+
+  // MiniMax — ⚠️ 官网文本模型定价未抓到,以下为估值,以官网为准
+  'MiniMax-M2':                  cny(8, 24),        // 估值
+  'MiniMax-M1':                  cny(8, 24),        // 估值
+  'MiniMax-Text-01':             cny(1, 8),         // 估值
+  'abab7-chat-preview':          cny(10, 30),       // 估值
 };
 
 // Common aliases the CLI may emit.
