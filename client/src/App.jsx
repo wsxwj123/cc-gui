@@ -20,6 +20,7 @@ import { MCPPanel } from './components/MCPPanel.jsx';
 import { FileChangesPanel } from './components/FileChangesPanel.jsx';
 import { AgentsPanel } from './components/AgentsPanel.jsx';
 import { AgentMonitorPanel } from './components/AgentMonitorPanel.jsx';
+import { CliMissingModal } from './components/CliMissingModal.jsx';
 import { computeCost, formatCost } from './utils/pricing.js';
 import {
   FolderOpen, MessageSquare, ChevronLeft, ChevronRight, ChevronDown,
@@ -4560,6 +4561,19 @@ export default function App() {
       .catch(() => {});
   }, []);
 
+  // Bug #11:首次启动检测 claude CLI;没装就弹模态按系统给安装指引(给小白用户)。
+  // dismissed 仅本次会话生效 — 跳过后下次启动还会再问,不本地永存(用户可能装了又卸)。
+  const [cliInstalled, setCliInstalled] = useState(true);  // 乐观:有就当装了,errored 才显示
+  const [cliCheckDismissed, setCliCheckDismissed] = useState(false);
+  const checkCli = useCallback(async () => {
+    try {
+      const r = await fetch('/api/cli-check');
+      const d = await r.json();
+      setCliInstalled(!!d.installed);
+    } catch { /* server 自己挂了就不弹,免得让用户更晕 */ }
+  }, []);
+  useEffect(() => { checkCli(); }, [checkCli]);
+
   // Pull the shared session-title map so a rename on the phone shows on the Mac
   // (and vice-versa). Live updates arrive via the ws 'custom-titles' broadcast.
   useEffect(() => { useStore.getState().hydrateCustomTitles(); }, []);
@@ -4829,6 +4843,9 @@ export default function App() {
           isMobile={isMobile}
         />
         {LocalWidget && <LocalWidget />}
+        {!cliInstalled && !cliCheckDismissed && (
+          <CliMissingModal onRecheck={checkCli} onDismiss={() => setCliCheckDismissed(true)} />
+        )}
       </div>
     );
   }
@@ -4903,6 +4920,9 @@ export default function App() {
         isMobile={isMobile}
       />
       {LocalWidget && <LocalWidget />}
+      {!cliInstalled && !cliCheckDismissed && (
+        <CliMissingModal onRecheck={checkCli} onDismiss={() => setCliCheckDismissed(true)} />
+      )}
     </div>
   );
 }

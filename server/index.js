@@ -25,6 +25,7 @@ import permissionsRoutes from './routes/permissions.js';
 import filesRoutes from './routes/files.js';
 import remoteControlRoutes from './routes/remote-control.js';
 import prefsRoutes from './routes/prefs.js';
+import cliCheckRoutes from './routes/cli-check.js';
 import {
   authMiddleware, isLocalReq, isAuthorized, parseCookies, verifyToken,
   hasPassword, setPassword, clearPassword, verifyPassword, issueToken,
@@ -167,6 +168,7 @@ app.use('/api', permissionsRoutes);
 app.use('/api', filesRoutes);
 app.use('/api', remoteControlRoutes);
 app.use('/api', prefsRoutes);
+app.use('/api', cliCheckRoutes);
 
 // Auto-load optional local-only routes (server/routes/*.local.js) — gitignored
 // personal integrations. Absent on a fresh checkout, so this is a no-op there.
