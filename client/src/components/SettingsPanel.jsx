@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { Settings, Save, RefreshCw, AlertCircle, Check, Plus, Trash2, ChevronDown, ChevronRight } from 'lucide-react';
+import { openExternalUrl } from '../utils/openExternal.js';
 import { useStore } from '../stores/sessionStore.js';
 
 const HOOK_EVENTS = [
@@ -439,14 +440,12 @@ function UpdateAvailable({ state }) {
             )}
           </button>
         )}
-        <a
-          href={state.htmlUrl}
-          target="_blank"
-          rel="noreferrer"
-          className="text-accent underline text-[12px]"
+        <button
+          onClick={(e) => { e.preventDefault(); openExternalUrl(state.htmlUrl); }}
+          className="text-accent underline text-[12px] bg-transparent border-0 cursor-pointer p-0"
         >
           手动查看 Release
-        </a>
+        </button>
       </div>
 
       {dl.status === 'done' && (

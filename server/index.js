@@ -28,6 +28,7 @@ import prefsRoutes from './routes/prefs.js';
 import cliCheckRoutes from './routes/cli-check.js';
 import versionCheckRoutes from './routes/version-check.js';
 import downloadUpdateRoutes from './routes/download-update.js';
+import openUrlRoutes from './routes/open-url.js';
 import {
   authMiddleware, isLocalReq, isAuthorized, parseCookies, verifyToken,
   hasPassword, setPassword, clearPassword, verifyPassword, issueToken,
@@ -203,6 +204,7 @@ app.use('/api', prefsRoutes);
 app.use('/api', cliCheckRoutes);
 app.use('/api', versionCheckRoutes);
 app.use('/api', downloadUpdateRoutes);
+app.use('/api', openUrlRoutes);
 
 // Auto-load optional local-only routes (server/routes/*.local.js) — gitignored
 // personal integrations. Absent on a fresh checkout, so this is a no-op there.
