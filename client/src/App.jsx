@@ -2988,6 +2988,13 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
         // try --resume on a deleted jsonl and CLI silently exits with
         // "No conversation found".
         if (trData?.sessionReset) {
+          // sessionId 失效 → 切到 draft 态。但 permissionMode / model 的 per-session
+          // pin 还在 modelBySession[oldSid] / permissionModeBySession[oldSid] 下,
+          // 下一轮 getModelFor / getPermissionModeFor(`draft-...`) 会回退到全局默认
+          // → 用户切到"接受编辑"后回滚到首条 → 模式被重置为"默认"(Bug #8)。
+          // 把 pin 迁移到 draft key,保留用户的会话级设置。
+          const draftKey = `draft-${sel.projectHash || 'none'}`;
+          useStore.getState().migrateSessionKey(sel.sessionId, draftKey);
           setSelectedSession({
             ...sel,
             sessionId: null,
