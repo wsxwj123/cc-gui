@@ -191,7 +191,12 @@ function AskQuestionCard({ req, onAnswer, processing, position }) {
     const onKey = (e) => {
       const t = e.target;
       if (t && (t.tagName === 'TEXTAREA' || t.tagName === 'INPUT')) return;
-      if (e.key === 'Enter' && allAnswered) { e.preventDefault(); submit(); }
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        // submit() 内部已有 `if (!allAnswered) return;`,未答完时无副作用。
+        // 此前外层加 `&& allAnswered` 守门,Enter 完全沉默,用户以为回车没绑。
+        submit();
+      }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
