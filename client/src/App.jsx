@@ -2337,6 +2337,19 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
       // Per-content-block scratch indexed by Anthropic SDK's block `index` field.
       // Each entry: { type: 'text'|'thinking'|'tool_use', toolId?, name?, jsonBuf?, orderIdx? }
       const blocks = {};
+      // Bug #5:CLI 在多 message 场景(调工具→AI 继续生成)下偶尔重复发同一个
+      // stream_event(原因未明,可能 CLI 内部 backpressure 或 retry),前端无保护
+      // 累加两次导致"先先更新更新"字符级双写。
+      // 用 ring buffer 缓存最近 N 个 SSE 行的内容,完全相同跳过(每条 SSE 行的
+      // JSON 至少含 ev.uuid / index / delta.text 之一,合法重复的概率为 0)。
+      const recentLines = [];
+      const RECENT_MAX = 16;
+      const isDuplicate = (line) => {
+        if (recentLines.includes(line)) return true;
+        recentLines.push(line);
+        if (recentLines.length > RECENT_MAX) recentLines.shift();
+        return false;
+      };
 
       while (true) {
         const { done, value } = await reader.read();
@@ -2346,6 +2359,14 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
         buffer = lines.pop() || '';
         for (const line of lines) {
           if (!line.startsWith('data: ')) continue;
+          // 跳过 message_start / message_stop / done / heartbeat 类不带数据的事件,
+          // 这些可能因 CLI 心跳合法重复;只 dedup 含 delta 内容的 stream_event。
+          if (line.includes('"content_block_delta"') || line.includes('"text_delta"') || line.includes('"input_json_delta"') || line.includes('"thinking_delta"')) {
+            if (isDuplicate(line)) {
+              if (typeof window !== 'undefined' && window.__cguiDebug) console.log('[cgui-dedup] skip dup', line.slice(0, 120));
+              continue;
+            }
+          }
           let event;
           try { event = JSON.parse(line.slice(6)); } catch { continue; }
 
