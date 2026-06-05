@@ -82,7 +82,7 @@ export const BUILTIN_PROVIDERS = [
     docs: 'https://platform.minimaxi.com',
   },
 
-  // ─── Anthropic 协议原生(直传给 claude CLI,不走 proxy) ───
+  // ─── Anthropic 协议(直接发 anthropic 格式给端点) ───
   {
     id: 'anthropic-official',
     name: 'Anthropic Claude 官方',
@@ -95,6 +95,15 @@ export const BUILTIN_PROVIDERS = [
     ],
     note: '原生 Anthropic API。若用订阅 OAuth 登录(claude /login),无需在此填 key。',
     docs: 'https://docs.anthropic.com/en/docs/about-claude/pricing',
+  },
+  {
+    id: 'deepseek-anthropic',
+    name: 'DeepSeek(Anthropic 协议)',
+    type: 'anthropic',
+    baseURL: 'https://api.deepseek.com/anthropic',
+    models: ['claude-opus-4-7', 'claude-sonnet-4-6', 'claude-haiku-4-5'],
+    note: 'DeepSeek 的 Anthropic 兼容端点(2026-06 确认)。模型自动映射:claude-opus→deepseek-v4-pro,claude-sonnet/haiku→deepseek-v4-flash。',
+    docs: 'https://api-docs.deepseek.com/guides/anthropic_api',
   },
 ];
 
