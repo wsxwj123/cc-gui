@@ -56,12 +56,63 @@ fn resolve_server_entry(app: &tauri::App) -> Option<PathBuf> {
     None
 }
 
+// 找 node 可执行文件。macOS Finder 启动 GUI 程序时 PATH=minimal
+// (/usr/bin:/bin:/usr/sbin:/sbin),Homebrew 装的 /opt/homebrew/bin/node 或
+// /usr/local/bin/node 不在里面 → Command::new("node") 直接 ENOENT → spawn
+// 失败 → port 永不 up → webview 加载 6677 一片空白(用户报告 v0.1.x 在
+// Mac 上空白屏的根因)。
+fn find_node() -> Option<PathBuf> {
+    // 1) 走继承的 PATH 找(开发模式 / 命令行启动时管用)
+    if let Ok(path_var) = std::env::var("PATH") {
+        let sep = if cfg!(windows) { ';' } else { ':' };
+        for dir in path_var.split(sep) {
+            if dir.is_empty() { continue; }
+            let exe = if cfg!(windows) { "node.exe" } else { "node" };
+            let candidate = PathBuf::from(dir).join(exe);
+            if candidate.exists() { return Some(candidate); }
+        }
+    }
+    // 2) fallback 已知安装路径(覆盖 Finder 启动的 minimal PATH)
+    let candidates: &[&str] = if cfg!(target_os = "macos") {
+        &[
+            "/opt/homebrew/bin/node",     // Apple Silicon Homebrew
+            "/usr/local/bin/node",        // Intel Homebrew / nvm 默认
+            "/usr/bin/node",              // 系统(罕见)
+        ]
+    } else if cfg!(target_os = "windows") {
+        &[
+            r"C:\Program Files\nodejs\node.exe",
+            r"C:\Program Files (x86)\nodejs\node.exe",
+        ]
+    } else {
+        &["/usr/bin/node", "/usr/local/bin/node"]
+    };
+    for p in candidates {
+        let pb = PathBuf::from(p);
+        if pb.exists() { return Some(pb); }
+    }
+    None
+}
+
 fn spawn_backend(app: &tauri::App) -> Option<Child> {
     let entry = resolve_server_entry(app)?;
+    let node = find_node().or_else(|| {
+        eprintln!("[tauri] cannot find node executable in PATH or known locations; user must install Node.js 20+");
+        None
+    })?;
     // cwd = the directory containing `server/` (so relative paths in the server resolve).
     let cwd = entry.parent().and_then(|p| p.parent()).map(PathBuf::from);
-    let mut cmd = Command::new("node");
+    let mut cmd = Command::new(&node);
     cmd.arg(&entry).env("PORT", "6677").env("HOST", "127.0.0.1");
+    // 把 node 所在目录 + Homebrew/Cellar 常见目录前置到子进程 PATH,
+    // 这样 server 之后 spawn `claude` / `git` / `cargo` 等也能找到。
+    let extra_dirs: Vec<String> = node.parent().map(|d| d.to_string_lossy().to_string()).into_iter()
+        .chain(["/opt/homebrew/bin", "/usr/local/bin"].iter().map(|s| s.to_string()))
+        .collect();
+    let sep = if cfg!(windows) { ';' } else { ':' };
+    let current_path = std::env::var("PATH").unwrap_or_default();
+    let merged_path = format!("{}{}{}", extra_dirs.join(&sep.to_string()), sep, current_path);
+    cmd.env("PATH", merged_path);
     if let Some(dir) = cwd {
         cmd.current_dir(dir);
     }
