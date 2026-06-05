@@ -4225,11 +4225,15 @@ function CustomProviderForm({ onSaved, editing, onCancel }) {
       if (!d.models?.length) window.alert('该端点未返回模型,请直接在下方「模型」框手填模型 ID 再保存。');
       else setModelsText(d.models.join('\n'));
     } catch (e) {
-      // Many relays (MiMo / DeepSeek and other Claude-protocol middlemen) only
-      // forward /v1/messages and 404 on /v1/models — that's expected, not a
-      // misconfig. Point the user at manual entry instead of a bare error.
-      window.alert('拉取模型失败：' + e.message
-        + '\n\n很多中转(如 MiMo / DeepSeek 等 Claude 协议中转)不提供 /v1/models 接口,这很正常。直接在下方「模型」框手填模型 ID(每行一个)再保存即可。');
+      // 文案按 type 区分:
+      // - openai 兼容:DeepSeek/OpenAI/Gemini 这些**官方端点**支持 /v1/models,
+      //   失败一般是 key 没填或填错 → 提示检查 key。
+      // - anthropic 兼容:很多 Claude 协议中转(MiMo 等)只 forward /v1/messages,
+      //   /v1/models 直接 404,属正常 → 提示手填即可。
+      const tail = type === 'openai'
+        ? '\n\nOpenAI 兼容端点通常 /v1/models 可用。常见原因:\n• 上面 API Key 没填或填错\n• 端点路径有出入(部分网关需要 /v1 后缀)\n• 网络/防火墙拦截\n也可直接在下方「模型」框手填模型 ID(每行一个)再保存。'
+        : '\n\n很多 Claude 协议中转(如 MiMo 等)不提供 /v1/models 接口,这很正常。直接在下方「模型」框手填模型 ID(每行一个)再保存即可。';
+      window.alert('拉取模型失败：' + e.message + tail);
     }
     setBusy('');
   };
@@ -4299,9 +4303,16 @@ function CustomProviderForm({ onSaved, editing, onCancel }) {
             title="选择一个内置 provider,自动填好 baseURL/默认模型;仍需自填 API key"
           >
             <option value="">— 选模板自动填充 —</option>
-            {BUILTIN_PROVIDERS.map((p) => (
-              <option key={p.id} value={p.id}>{p.name}（{p.type}）</option>
-            ))}
+            <optgroup label="OpenAI 兼容">
+              {BUILTIN_PROVIDERS.filter((p) => p.type === 'openai').map((p) => (
+                <option key={p.id} value={p.id}>{p.name}</option>
+              ))}
+            </optgroup>
+            <optgroup label="Anthropic 兼容">
+              {BUILTIN_PROVIDERS.filter((p) => p.type === 'anthropic').map((p) => (
+                <option key={p.id} value={p.id}>{p.name}</option>
+              ))}
+            </optgroup>
           </select>
         </div>
       )}

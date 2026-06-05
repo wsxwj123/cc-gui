@@ -105,6 +105,24 @@ export const BUILTIN_PROVIDERS = [
     note: 'DeepSeek 的 Anthropic 兼容端点(2026-06 确认)。模型自动映射:claude-opus→deepseek-v4-pro,claude-sonnet/haiku→deepseek-v4-flash。',
     docs: 'https://api-docs.deepseek.com/guides/anthropic_api',
   },
+  {
+    id: 'openrouter-anthropic',
+    name: 'OpenRouter(Anthropic 协议)',
+    type: 'anthropic',
+    baseURL: 'https://openrouter.ai/api/v1',
+    models: ['anthropic/claude-opus-4', 'anthropic/claude-sonnet-4', 'anthropic/claude-haiku-4'],
+    note: 'OpenRouter 聚合平台的 Anthropic 兼容端点。注意模型 ID 需带 provider 前缀(anthropic/、google/ 等)。',
+    docs: 'https://openrouter.ai/docs',
+  },
+  {
+    id: 'glm-anthropic',
+    name: '智谱 GLM(Anthropic 协议)',
+    type: 'anthropic',
+    baseURL: 'https://open.bigmodel.cn/api/anthropic',
+    models: ['claude-opus-4-7', 'claude-sonnet-4-6', 'claude-haiku-4-5'],
+    note: '⚠️ 智谱官网未公开标注 Anthropic 兼容文档,实际可用性请自行测试(社区有反馈可用)。',
+    docs: 'https://docs.bigmodel.cn/',
+  },
 ];
 
 export function findBuiltin(id) {
