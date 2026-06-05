@@ -126,11 +126,24 @@ function CopyButton({ text }) {
   );
 }
 
+// AskUserQuestion 在 -p mode 被 CLI reject(headless 禁用),hook 把用户选项以
+// `deny + reason="[用户已通过界面回答]\n..."` 反馈给模型 → CLI 写 jsonl 时
+// result.isError=true。Bug #3:气泡显示"1 错误"很误导,实际上用户已经成功答题。
+function isAskAnswered(toolCall) {
+  if (toolCall?.name !== 'AskUserQuestion') return false;
+  const content = toolCall?.result?.content;
+  const text = typeof content === 'string'
+    ? content
+    : (Array.isArray(content) ? content.map((c) => c?.text || '').join('') : '');
+  return /^\s*\[用户已通过界面回答\]/.test(text);
+}
+
 // ─── Single Tool Call Row ──────────────────────────────────────
 function ToolCallRow({ toolCall }) {
   const [expanded, setExpanded] = useState(false);
   const Icon = getToolIcon(toolCall.name);
-  const hasError = toolCall.result?.isError;
+  const askAnswered = isAskAnswered(toolCall);
+  const hasError = toolCall.result?.isError && !askAnswered;
   const preview = formatInputPreview(toolCall.input);
 
   return (
@@ -151,6 +164,8 @@ function ToolCallRow({ toolCall }) {
         {toolCall.result ? (
           hasError ? (
             <span className="text-[10px] text-error">错误</span>
+          ) : askAnswered ? (
+            <span className="text-[10px] text-success">已答</span>
           ) : (
             <span className="text-[10px] text-success">✓</span>
           )
@@ -250,7 +265,9 @@ function ToolCallsGroup({ toolCalls }) {
   }
 
   const totalCalls = toolCalls.length;
-  const errorCount = toolCalls.filter((tc) => tc.result?.isError).length;
+  // 排除已答的 AskUserQuestion:CLI 写 isError=true 是 headless reject 副作用,
+  // 用户实际通过 GUI picker 提交了答案,不算错误(Bug #3)。
+  const errorCount = toolCalls.filter((tc) => tc.result?.isError && !isAskAnswered(tc)).length;
 
   // Build summary line
   const summaryParts = [];
