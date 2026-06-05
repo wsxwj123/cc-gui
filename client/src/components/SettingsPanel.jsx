@@ -338,14 +338,20 @@ function StorageTab() {
 }
 
 // 自动选当前平台对应的安装包资产。
-// macOS Apple Silicon → .dmg; Windows → 优先 NSIS .exe(MSI 太大体验差);Linux 留空。
-function pickAssetForPlatform(assets) {
+// 优先用 serverPlatform(后端 process.platform)— Tauri WebView2/WKWebView 的
+// navigator.userAgent 在某些版本被改写过,光靠前端 UA 容易 miss。serverPlatform
+// 是 Node 报告的 'darwin' / 'win32' / 'linux',绝对可靠。
+function pickAssetForPlatform(assets, serverPlatform) {
   if (!Array.isArray(assets) || assets.length === 0) return null;
-  const ua = (navigator.userAgent || '').toLowerCase();
-  const isMac = ua.includes('mac');
-  const isWin = ua.includes('windows') || (navigator.platform || '').toLowerCase().includes('win');
-  if (isMac) return assets.find((a) => /\.dmg$/i.test(a.name)) || null;
-  if (isWin) {
+  // 优先 serverPlatform,fallback 到 UA(老 server 没传 serverPlatform 时)
+  let platform = serverPlatform;
+  if (!platform) {
+    const ua = (navigator.userAgent || '').toLowerCase();
+    if (ua.includes('mac')) platform = 'darwin';
+    else if (ua.includes('windows') || (navigator.platform || '').toLowerCase().includes('win')) platform = 'win32';
+  }
+  if (platform === 'darwin') return assets.find((a) => /\.dmg$/i.test(a.name)) || null;
+  if (platform === 'win32') {
     return assets.find((a) => /x64-setup\.exe$/i.test(a.name))
         || assets.find((a) => /\.exe$/i.test(a.name))
         || assets.find((a) => /\.msi$/i.test(a.name)) || null;
@@ -356,7 +362,7 @@ function pickAssetForPlatform(assets) {
 function UpdateAvailable({ state }) {
   // status: idle | downloading | done | err
   const [dl, setDl] = useState({ status: 'idle' });
-  const asset = pickAssetForPlatform(state.assets);
+  const asset = pickAssetForPlatform(state.assets, state.serverPlatform);
 
   const startDownload = async () => {
     if (!asset) return;
