@@ -4646,15 +4646,28 @@ export default function App() {
   // Bug #11:首次启动检测 claude CLI;没装就弹模态按系统给安装指引(给小白用户)。
   // dismissed 仅本次会话生效 — 跳过后下次启动还会再问,不本地永存(用户可能装了又卸)。
   const [cliInstalled, setCliInstalled] = useState(true);  // 乐观:有就当装了,errored 才显示
-  const [cliCheckDismissed, setCliCheckDismissed] = useState(false);
+  // 用户点"跳过"后写 localStorage 永久 dismiss(下次启动也不弹)。
+  // 但 server 检测到装了的话仍自动隐藏,无需用户操心(installed=true 优先)。
+  const [cliCheckDismissed, setCliCheckDismissed] = useState(() => {
+    try { return localStorage.getItem('cgui-cli-check-dismissed') === '1'; } catch { return false; }
+  });
   const checkCli = useCallback(async () => {
     try {
       const r = await fetch('/api/cli-check');
       const d = await r.json();
       setCliInstalled(!!d.installed);
+      // 检测到装了 → 同步清除 dismiss flag(用户之前可能误跳过,现在装好了)
+      if (d.installed) {
+        try { localStorage.removeItem('cgui-cli-check-dismissed'); } catch {}
+        setCliCheckDismissed(false);
+      }
     } catch { /* server 自己挂了就不弹,免得让用户更晕 */ }
   }, []);
   useEffect(() => { checkCli(); }, [checkCli]);
+  const dismissCliCheck = useCallback(() => {
+    try { localStorage.setItem('cgui-cli-check-dismissed', '1'); } catch {}
+    setCliCheckDismissed(true);
+  }, []);
 
   // Pull the shared session-title map so a rename on the phone shows on the Mac
   // (and vice-versa). Live updates arrive via the ws 'custom-titles' broadcast.
@@ -4926,7 +4939,7 @@ export default function App() {
         />
         {LocalWidget && <LocalWidget />}
         {!cliInstalled && !cliCheckDismissed && (
-          <CliMissingModal onRecheck={checkCli} onDismiss={() => setCliCheckDismissed(true)} />
+          <CliMissingModal onRecheck={checkCli} onDismiss={dismissCliCheck} />
         )}
       </div>
     );
@@ -5003,7 +5016,7 @@ export default function App() {
       />
       {LocalWidget && <LocalWidget />}
       {!cliInstalled && !cliCheckDismissed && (
-        <CliMissingModal onRecheck={checkCli} onDismiss={() => setCliCheckDismissed(true)} />
+        <CliMissingModal onRecheck={checkCli} onDismiss={dismissCliCheck} />
       )}
     </div>
   );
