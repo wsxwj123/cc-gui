@@ -3290,9 +3290,9 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
       )}
 
       {!autoScroll && !showFileChanges && (
-        // 桌面端右下角不挡其他控件;手机端居中输入框上方 — 原来 right-6 跟
-        // ChatInput 的发送/停止按钮位置完全重合,手指点不准。
-        <div className="absolute bottom-24 right-6 z-20 max-md:right-auto max-md:left-1/2 max-md:-translate-x-1/2">
+        // 桌面 + 手机都居中输入框上方 — 避免压在发送/停止按钮上,视觉重心
+        // 也更舒服(原来右下角桌面端虽不挡,但偏角落容易看不见)。
+        <div className="absolute bottom-24 left-1/2 -translate-x-1/2 z-20">
           <button onClick={() => {
               // Scroll ONLY the messages container — scrollIntoView would scroll
               // every scrollable ancestor (incl. the root flex), shoving the
