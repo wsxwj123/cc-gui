@@ -103,35 +103,45 @@ if (HOST === '0.0.0.0' && !hasPassword()) {
 // http://<lanIp>:PORT isn't rejected as cross-origin.
 const lanMode = HOST === '0.0.0.0';
 
+function requestHostname(req) {
+  const host = req?.headers?.host || '';
+  return host.replace(/^\[/, '').replace(/\](:\d+)?$/, '').replace(/:\d+$/, '');
+}
+
+function isAllowedBrowserOrigin(origin, req = null) {
+  if (!origin) return true;
+  try {
+    const { hostname } = new URL(origin);
+    const host = requestHostname(req);
+    if (host && hostname === host) return true;
+    if (hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1') return true;
+    if (lanMode && lanIps().includes(hostname)) return true;
+  } catch {}
+  return false;
+}
+
 const app = express();
 // Same-origin only: in prod the SPA is served from this same port; in dev Vite
 // proxies /api + /ws server-side. So the only legitimate browser origins are
 // localhost/127.0.0.1. Reject everything else to blunt drive-by cross-origin
 // requests from arbitrary web pages the user may have open.
-app.use(cors({
-  origin: (origin, cb) => {
-    // Non-browser clients (curl, same-origin fetch) send no Origin header.
-    if (!origin) return cb(null, true);
-    // LAN mode: user opted into network exposure (UI toggle + warning), so allow
-    // any origin — access control is delegated to the network layer (tailscale/LAN).
-    if (lanMode) return cb(null, true);
-    try {
-      const { hostname } = new URL(origin);
-      if (hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1') {
-        return cb(null, true);
-      }
-    } catch {}
+app.use(cors((req, cb) => ({
+  origin: (origin, originCb) => {
+    if (isAllowedBrowserOrigin(origin, req)) return originCb(null, true);
     const err = new Error('Cross-origin request blocked by Claude GUI');
     err.status = 403; // surfaced as a clean 403 by the error handler below
-    return cb(err);
+    return originCb(err);
   },
-}));
+})));
 // Bumped from default 100kb to 25mb so dragged-in screenshots fit in the JSON body.
 app.use(express.json({ limit: '25mb' }));
 
 // Password gate for external clients (no-op for 127.0.0.1 / no-password). Must
 // sit before the API routes so an unauthorized phone gets 401 on every call
 // except /login + /auth-status. The Mac (loopback) is never challenged.
+app.get('/api/health', (req, res) => {
+  res.json({ ok: true, app: 'claude-gui', port: PORT });
+});
 app.use('/api', authMiddleware);
 
 // API responses are dynamic — never cache them. Without this, iOS Safari applies
@@ -474,6 +484,7 @@ const wss = new WebSocketServer({
   server,
   path: '/ws',
   verifyClient: (info) => {
+    if (!isAllowedBrowserOrigin(info.origin || info.req?.headers?.origin, info.req)) return false;
     if (!hasPassword()) return true;
     if (isLocalReq(info.req)) return true;
     return verifyToken(parseCookies(info.req).cgui_token);

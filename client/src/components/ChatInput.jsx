@@ -83,12 +83,7 @@ export function EffortSelector({ permKey = null }) {
   // not a session property.
   const effModel = useStore((s) => ((permKey && s.modelBySession[permKey]) || s.currentModel) || '');
   const effort = useStore((s) => { const b = effModel.replace(/\[1m\]/i, ''); return b && b in s.effortByModel ? s.effortByModel[b] : s.effort; });
-  // --effort is an Anthropic-protocol flag. It IS transmitted on every
-  // claude-format upstream — official subscription AND relays (mimo/deepseek/
-  // openrouter). Only the OpenAI proxy (codex-local) can't map it, so hide
-  // there. Gate on protocol, NOT providerHint (which is 'mimo'/'deepseek' for
-  // those relays and would wrongly hide their effort control).
-  const claudeProtocol = useStore((s) => (s.currentProvider?.protocol || 'anthropic') !== 'openai');
+  const openAIProtocol = useStore((s) => (s.currentProvider?.protocol || 'anthropic') === 'openai');
   const setEffort = (id) => useStore.getState().setEffortForModel(effModel, id);
   const [open, setOpen] = useState(false);
   const wrapRef = useRef(null);
@@ -108,20 +103,22 @@ export function EffortSelector({ permKey = null }) {
     };
   }, [open]);
 
-  if (!claudeProtocol) return null;
-
   return (
     <div ref={wrapRef} className="relative">
       <button onClick={() => setOpen(!open)}
         className="flex items-center gap-1 px-2 py-1 rounded-md hover:bg-black/5 transition-colors"
-        title={`Effort: ${current.label}`}>
+        title={openAIProtocol
+          ? `Effort: ${current.label}（OpenAI 兼容模式会映射为 reasoning_effort；不支持的端点自动降级）`
+          : `Effort: ${current.label}`}>
         <Gauge size={12} className="text-ink-muted" />
         <span className="text-[11px] font-body text-ink-muted">{current.label}</span>
         <ChevronDown size={10} className="text-ink-faint" />
       </button>
       {open && (
         <div className="glass-popover absolute right-0 top-full mt-2 w-44 z-50 py-1 animate-glass-rise">
-          <div className="px-3 py-1.5 text-[10px] text-ink-faint uppercase tracking-wider font-body">推理力度 (--effort)</div>
+          <div className="px-3 py-1.5 text-[10px] text-ink-faint uppercase tracking-wider font-body">
+            {openAIProtocol ? '推理力度 (reasoning_effort)' : '推理力度 (--effort)'}
+          </div>
           {EFFORT_LEVELS.map((e) => (
             <button key={e.id || 'default'} onClick={() => { setEffort(e.id); setOpen(false); }}
               className={`w-full text-left px-3 py-1.5 hover:bg-black/5 flex items-center justify-between ${effort === e.id ? 'bg-accent/12' : ''}`}>
@@ -334,11 +331,11 @@ export function ChatInput({ onSend, onStop, onAccelerate, disabled, isStreaming,
     // Allow send if there's text OR attachments (so "just describe this image" works).
     if (!trimmed && attachments.length === 0) return;
     if (disabled || rcLocked) return;
-    // Append attachment paths to the prompt. Claude CLI can read absolute paths;
-    // images become image references, text files are explicit file references.
+    // Append attachment paths to the prompt using Claude Code's file-reference
+    // shape. It lets the CLI decide whether a path is text, image, PDF, etc.
     const attachmentRefs = attachments.length > 0
       ? '\n\n附件:\n' + attachments.map((a) => (
-        a.kind === 'image' ? `[image: ${a.path}]` : `[file: ${a.path}]`
+        `@${a.path}`
       )).join('\n')
       : '';
     onSend((trimmed || '请查看这些附件') + attachmentRefs);
@@ -540,7 +537,7 @@ export function ChatInput({ onSend, onStop, onAccelerate, disabled, isStreaming,
             ref={fileInputRef}
             type="file"
             multiple
-            accept="image/*,text/*,.txt,.md,.markdown,.csv,.tsv,.log,.json,.jsonl,.js,.jsx,.ts,.tsx,.css,.html,.xml,.yaml,.yml,.toml,.ini,.sh,.py,.sql"
+            accept="image/*,text/*,application/pdf,.pdf,.txt,.md,.markdown,.csv,.tsv,.log,.json,.jsonl,.js,.jsx,.ts,.tsx,.css,.html,.xml,.yaml,.yml,.toml,.ini,.sh,.py,.sql,.doc,.docx,.xls,.xlsx,.ppt,.pptx"
             onChange={handleFilePick}
             className="hidden"
           />
@@ -549,7 +546,7 @@ export function ChatInput({ onSend, onStop, onAccelerate, disabled, isStreaming,
             onClick={() => fileInputRef.current?.click()}
             disabled={disabled || rcLocked}
             className="shrink-0 h-9 w-9 rounded-full hover:bg-black/5 text-ink-muted hover:text-accent flex items-center justify-center transition-colors disabled:opacity-50"
-            title="添加附件（图片或文本文件）"
+            title="添加附件（图片、PDF 或文件）"
           >
             <Paperclip size={16} />
           </button>

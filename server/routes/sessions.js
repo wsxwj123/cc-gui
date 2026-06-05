@@ -53,6 +53,9 @@ router.get('/sessions/:sessionId', async (req, res) => {
     if (!projectHash) {
       return res.status(400).json({ error: 'projectHash query param required' });
     }
+    if (!safeId(projectHash) || !safeId(req.params.sessionId)) {
+      return res.status(400).json({ error: 'invalid projectHash or sessionId' });
+    }
     const meta = await getSessionMeta(req.params.sessionId, projectHash);
     res.json(meta);
   } catch (err) {
@@ -66,6 +69,9 @@ router.get('/sessions/:sessionId/messages', async (req, res) => {
     const { projectHash } = req.query;
     if (!projectHash) {
       return res.status(400).json({ error: 'projectHash query param required' });
+    }
+    if (!safeId(projectHash) || !safeId(req.params.sessionId)) {
+      return res.status(400).json({ error: 'invalid projectHash or sessionId' });
     }
     const messages = await getSessionMessages(req.params.sessionId, projectHash);
     res.json(messages);

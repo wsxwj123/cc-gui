@@ -24,7 +24,7 @@ router.post('/open-url', async (req, res) => {
     if (process.platform === 'darwin') {
       spawn('open', [url], { detached: true, stdio: 'ignore' }).unref();
     } else if (process.platform === 'win32') {
-      spawn('cmd', ['/c', 'start', '', url], { detached: true, stdio: 'ignore' }).unref();
+      spawn('explorer.exe', [url], { detached: true, stdio: 'ignore' }).unref();
     } else {
       spawn('xdg-open', [url], { detached: true, stdio: 'ignore' }).unref();
     }

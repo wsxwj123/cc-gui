@@ -10,6 +10,7 @@
 //   3. Wait until the port answers, then open the window pointing at it.
 //   4. Kill the child we spawned when the window is destroyed.
 
+use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::path::PathBuf;
 use std::process::{Child, Command};
@@ -23,10 +24,20 @@ const BACKEND_URL: &str = "http://127.0.0.1:6677";
 // Holds the backend child IFF we spawned it (None when we reused an existing one).
 struct Backend(Mutex<Option<Child>>);
 
-fn port_up() -> bool {
+fn backend_healthy() -> bool {
     if let Ok(mut addrs) = BACKEND_ADDR.to_socket_addrs() {
         if let Some(addr) = addrs.next() {
-            return TcpStream::connect_timeout(&addr, Duration::from_millis(300)).is_ok();
+            if let Ok(mut stream) = TcpStream::connect_timeout(&addr, Duration::from_millis(300)) {
+                let _ = stream.set_read_timeout(Some(Duration::from_millis(800)));
+                let req = b"GET /api/health HTTP/1.1\r\nHost: 127.0.0.1:6677\r\nConnection: close\r\n\r\n";
+                if stream.write_all(req).is_err() {
+                    return false;
+                }
+                let mut buf = String::new();
+                if stream.read_to_string(&mut buf).is_ok() {
+                    return buf.starts_with("HTTP/1.1 200") && buf.contains("\"app\":\"claude-gui\"");
+                }
+            }
         }
     }
     false
@@ -130,16 +141,19 @@ pub fn run() {
     tauri::Builder::default()
         .manage(Backend(Mutex::new(None)))
         .setup(|app| {
-            if !port_up() {
+            if !backend_healthy() {
                 if let Some(child) = spawn_backend(app) {
                     *app.state::<Backend>().0.lock().unwrap() = Some(child);
                 }
                 // Wait for readiness (≤ 20s) before showing the window so the
                 // webview never lands on a "connection refused" error page.
                 let start = Instant::now();
-                while !port_up() && start.elapsed() < Duration::from_secs(20) {
+                while !backend_healthy() && start.elapsed() < Duration::from_secs(20) {
                     std::thread::sleep(Duration::from_millis(250));
                 }
+            }
+            if !backend_healthy() {
+                return Err("Claude GUI backend did not become healthy on 127.0.0.1:6677".into());
             }
 
             WebviewWindowBuilder::new(

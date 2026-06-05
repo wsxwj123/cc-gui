@@ -18,12 +18,15 @@ function ChangeItem({ change }) {
   const revert = async (e) => {
     e.stopPropagation();
     if (!change.file) return;
-    if (!confirm(`恢复到 HEAD：\n${change.file}\n\n会丢失所有未提交修改，确定？`)) return;
+    const msg = change.type === 'write'
+      ? `恢复到 HEAD：\n${change.file}\n\n如果这是本轮新建且未被 git 跟踪的文件，会直接删除；否则会丢失该文件的未提交修改。确定？`
+      : `恢复到 HEAD：\n${change.file}\n\n会丢失所有未提交修改，确定？`;
+    if (!confirm(msg)) return;
     setBusy('revert');
     try {
       const res = await fetch('/api/file/revert', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ file: change.file }),
+        body: JSON.stringify({ file: change.file, allowDeleteUntracked: change.type === 'write' }),
       });
       const d = await res.json();
       if (res.ok) setReverted(true);

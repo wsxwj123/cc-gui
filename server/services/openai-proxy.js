@@ -67,6 +67,7 @@ function anthropicToOpenAIMessages(messages, system) {
     // Split a single Anthropic message into: text/image parts, tool_use
     // (assistant tool_calls), and tool_result (separate role:'tool' msgs).
     const textParts = [];
+    const imageParts = [];
     const toolCalls = [];
     const toolResults = [];
 
@@ -87,8 +88,17 @@ function anthropicToOpenAIMessages(messages, system) {
         else if (Array.isArray(c)) text = c.map((p) => (typeof p === 'string' ? p : p?.text || '')).join('\n');
         else text = c == null ? '' : JSON.stringify(c);
         toolResults.push({ role: 'tool', tool_call_id: block.tool_use_id, content: text });
+      } else if (block.type === 'image') {
+        const source = block.source || {};
+        if (source.type === 'base64' && source.data) {
+          imageParts.push({
+            type: 'image_url',
+            image_url: { url: `data:${source.media_type || 'image/png'};base64,${source.data}` },
+          });
+        } else if (source.type === 'url' && source.url) {
+          imageParts.push({ type: 'image_url', image_url: { url: source.url } });
+        }
       }
-      // image blocks are skipped for now (MVP: text + tool calls only)
     }
 
     if (role === 'assistant') {
@@ -105,7 +115,19 @@ function anthropicToOpenAIMessages(messages, system) {
       //   by tool messages responding to each 'tool_call_id'."
       for (const tr of toolResults) out.push(tr);
       const txt = textParts.join('');
-      if (txt) out.push({ role: 'user', content: txt });
+      if (txt || imageParts.length) {
+        if (imageParts.length) {
+          out.push({
+            role: 'user',
+            content: [
+              ...(txt ? [{ type: 'text', text: txt }] : []),
+              ...imageParts,
+            ],
+          });
+        } else {
+          out.push({ role: 'user', content: txt });
+        }
+      }
     }
   }
 
@@ -148,6 +170,28 @@ function anthropicToOpenAIMessages(messages, system) {
   return out;
 }
 
+const READ_PAGES_RE = /^(\d+|\d+\s*-\s*\d+)(\s*,\s*(\d+|\d+\s*-\s*\d+))*$/;
+function sanitizeToolInput(name, input) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return {};
+  const next = { ...input };
+  if (name === 'Read' && 'pages' in next) {
+    if (typeof next.pages !== 'string' || !READ_PAGES_RE.test(next.pages.trim())) {
+      delete next.pages;
+    } else {
+      next.pages = next.pages.trim().replace(/\s+/g, '');
+    }
+  }
+  return next;
+}
+
+function normalizeReasoningEffort(body) {
+  const raw = body?.effort || body?.reasoning_effort || body?.thinking?.effort;
+  if (typeof raw !== 'string') return null;
+  if (raw === 'max') return 'xhigh';
+  if (['low', 'medium', 'high', 'xhigh', 'minimal', 'none'].includes(raw)) return raw;
+  return null;
+}
+
 function anthropicToolsToOpenAI(tools) {
   if (!Array.isArray(tools)) return undefined;
   return tools.map((t) => ({
@@ -169,6 +213,8 @@ function buildOpenAIRequest(body) {
   if (body.max_tokens) req.max_tokens = body.max_tokens;
   if (typeof body.temperature === 'number') req.temperature = body.temperature;
   if (typeof body.top_p === 'number') req.top_p = body.top_p;
+  const reasoningEffort = normalizeReasoningEffort(body);
+  if (reasoningEffort) req.reasoning_effort = reasoningEffort;
   const tools = anthropicToolsToOpenAI(body.tools);
   if (tools && tools.length) {
     req.tools = tools;
@@ -208,7 +254,7 @@ function streamOpenAIToAnthropic(upstreamRes, clientRes, model) {
   // subsequent indices keyed by the OpenAI tool_call index.
   let textOpen = false;
   let nextIndex = 0;
-  const toolBlocks = new Map(); // openaiToolIndex → { anthropicIndex, started }
+  const toolBlocks = new Map(); // openaiToolIndex → { anthropicIndex, id, name, jsonBuf }
   let finishReason = null;
   let usage = null;
   let buf = '';
@@ -251,15 +297,21 @@ function streamOpenAIToAnthropic(upstreamRes, clientRes, model) {
         if (!entry) {
           closeTextBlock();
           const aIdx = nextIndex++;
-          entry = { anthropicIndex: aIdx };
+          entry = {
+            anthropicIndex: aIdx,
+            id: tc.id || ('toolu_' + oaIdx + '_' + msgId),
+            name: tc.function?.name || '',
+            jsonBuf: '',
+          };
           toolBlocks.set(oaIdx, entry);
           sse(clientRes, 'content_block_start', { type: 'content_block_start', index: aIdx,
-            content_block: { type: 'tool_use', id: tc.id || ('toolu_' + oaIdx + '_' + msgId), name: tc.function?.name || '', input: {} } });
+            content_block: { type: 'tool_use', id: entry.id, name: entry.name, input: {} } });
         }
+        if (tc.id && !entry.id) entry.id = tc.id;
+        if (tc.function?.name && !entry.name) entry.name = tc.function.name;
         const argFrag = tc.function?.arguments;
         if (argFrag) {
-          sse(clientRes, 'content_block_delta', { type: 'content_block_delta', index: entry.anthropicIndex,
-            delta: { type: 'input_json_delta', partial_json: argFrag } });
+          entry.jsonBuf += argFrag;
         }
       }
     }
@@ -283,6 +335,13 @@ function streamOpenAIToAnthropic(upstreamRes, clientRes, model) {
   upstreamRes.on('end', () => {
     closeTextBlock();
     for (const entry of toolBlocks.values()) {
+      let input = {};
+      try { input = JSON.parse(entry.jsonBuf || '{}'); } catch {}
+      const clean = JSON.stringify(sanitizeToolInput(entry.name, input));
+      if (clean !== '{}') {
+        sse(clientRes, 'content_block_delta', { type: 'content_block_delta', index: entry.anthropicIndex,
+          delta: { type: 'input_json_delta', partial_json: clean } });
+      }
       sse(clientRes, 'content_block_stop', { type: 'content_block_stop', index: entry.anthropicIndex });
     }
     sse(clientRes, 'message_delta', { type: 'message_delta',
@@ -304,7 +363,8 @@ function openAIToAnthropicMessage(json, model) {
   for (const tc of m.tool_calls || []) {
     let input = {};
     try { input = JSON.parse(tc.function?.arguments || '{}'); } catch {}
-    content.push({ type: 'tool_use', id: tc.id, name: tc.function?.name, input });
+    const name = tc.function?.name;
+    content.push({ type: 'tool_use', id: tc.id, name, input: sanitizeToolInput(name, input) });
   }
   return {
     id: json.id || ('msg_' + Math.random().toString(36).slice(2)),
@@ -341,13 +401,15 @@ async function handle(req, clientRes) {
   const wantStream = oaReq.stream;
   const url = upstream.baseURL + '/chat/completions';
 
-  let upstreamResp;
-  try {
-    upstreamResp = await fetch(url, {
+  const postUpstream = (payload) => fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${upstream.apiKey}` },
-      body: JSON.stringify(oaReq),
+      body: JSON.stringify(payload),
     });
+
+  let upstreamResp;
+  try {
+    upstreamResp = await postUpstream(oaReq);
   } catch (err) {
     clientRes.writeHead(502, { 'Content-Type': 'application/json' });
     clientRes.end(JSON.stringify({ type: 'error', error: { type: 'api_error', message: 'upstream fetch failed: ' + err.message } }));
@@ -355,7 +417,25 @@ async function handle(req, clientRes) {
   }
 
   if (!upstreamResp.ok) {
-    const txt = await upstreamResp.text().catch(() => '');
+    let txt = await upstreamResp.text().catch(() => '');
+    if (oaReq.reasoning_effort && /reasoning_effort|unsupported parameter|unknown parameter/i.test(txt)) {
+      const retryReq = { ...oaReq };
+      delete retryReq.reasoning_effort;
+      try {
+        upstreamResp = await postUpstream(retryReq);
+        if (upstreamResp.ok) {
+          if (wantStream) {
+            const nodeStream = streamFromWeb(upstreamResp.body);
+            return streamOpenAIToAnthropic(nodeStream, clientRes, body.model);
+          }
+          const json = await upstreamResp.json().catch(() => ({}));
+          clientRes.writeHead(200, { 'Content-Type': 'application/json' });
+          clientRes.end(JSON.stringify(openAIToAnthropicMessage(json, body.model)));
+          return;
+        }
+        txt = await upstreamResp.text().catch(() => txt);
+      } catch {}
+    }
     clientRes.writeHead(upstreamResp.status, { 'Content-Type': 'application/json' });
     clientRes.end(JSON.stringify({ type: 'error', error: { type: 'api_error', message: `upstream ${upstreamResp.status}: ${txt.slice(0, 500)}` } }));
     return;

@@ -4,7 +4,7 @@ import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { join, dirname } from 'path';
 import { homedir } from 'os';
-import { stat } from 'fs/promises';
+import { stat, unlink } from 'fs/promises';
 import { resolveUnderHome } from '../utils/safe-path.js';
 
 const execFileP = promisify(execFile);
@@ -119,6 +119,7 @@ function assertSafePath(p) {
 router.post('/file/revert', async (req, res) => {
   try {
     const file = assertSafePath(req.body?.file);
+    const allowDeleteUntracked = req.body?.allowDeleteUntracked === true;
     // Find the git root by climbing parents until `.git` appears.
     let cwd = dirname(file);
     let gitRoot = null;
@@ -132,6 +133,19 @@ router.post('/file/revert', async (req, res) => {
     if (!gitRoot) return res.status(400).json({ error: 'file is not inside a git repo' });
 
     const rel = file.slice(gitRoot.length + 1);
+    let tracked = true;
+    try {
+      await execFileP('git', ['-C', gitRoot, 'ls-files', '--error-unmatch', '--', rel], { timeout: 5000 });
+    } catch {
+      tracked = false;
+    }
+    if (!tracked) {
+      if (!allowDeleteUntracked) {
+        return res.status(409).json({ error: 'file is untracked; pass allowDeleteUntracked to delete it' });
+      }
+      await unlink(file);
+      return res.json({ ok: true, file, gitRoot, deletedUntracked: true });
+    }
     await execFileP('git', ['-C', gitRoot, 'checkout', 'HEAD', '--', rel], { timeout: 10000 });
     res.json({ ok: true, file, gitRoot });
   } catch (err) {

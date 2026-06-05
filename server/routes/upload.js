@@ -25,6 +25,13 @@ const MIME_TYPES = {
   'application/javascript': { ext: 'js', kind: 'text' },
   'application/yaml': { ext: 'yaml', kind: 'text' },
   'application/x-yaml': { ext: 'yaml', kind: 'text' },
+  'application/pdf': { ext: 'pdf', kind: 'file' },
+  'application/msword': { ext: 'doc', kind: 'file' },
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document': { ext: 'docx', kind: 'file' },
+  'application/vnd.ms-excel': { ext: 'xls', kind: 'file' },
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': { ext: 'xlsx', kind: 'file' },
+  'application/vnd.ms-powerpoint': { ext: 'ppt', kind: 'file' },
+  'application/vnd.openxmlformats-officedocument.presentationml.presentation': { ext: 'pptx', kind: 'file' },
 };
 
 const TEXT_EXTS = new Set([
@@ -34,6 +41,7 @@ const TEXT_EXTS = new Set([
   'py', 'rb', 'go', 'rs', 'java', 'c', 'cc', 'cpp', 'h', 'hpp',
   'sql',
 ]);
+const FILE_EXTS = new Set(['pdf', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx']);
 
 function resolveUploadType(mime, name) {
   const ext = extname(name || '').slice(1).toLowerCase();
@@ -47,6 +55,9 @@ function resolveUploadType(mime, name) {
   }
   if ((mime === 'application/octet-stream' || !mime) && TEXT_EXTS.has(ext)) {
     return { ext, kind: 'text' };
+  }
+  if ((mime === 'application/octet-stream' || !mime) && FILE_EXTS.has(ext)) {
+    return { ext, kind: 'file' };
   }
   return null;
 };

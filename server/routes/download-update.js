@@ -2,7 +2,10 @@ import { Router } from 'express';
 import { spawn } from 'child_process';
 import { homedir } from 'os';
 import { createWriteStream } from 'fs';
-import { join } from 'path';
+import { existsSync } from 'fs';
+import { unlink } from 'fs/promises';
+import { extname, join, basename } from 'path';
+import { Transform } from 'stream';
 import { pipeline } from 'stream/promises';
 
 const router = Router();
@@ -36,7 +39,16 @@ router.post('/download-update', async (req, res) => {
   if (!safeName) return res.status(400).json({ error: 'filename 非法' });
 
   const targetDir = join(homedir(), 'Downloads');
-  const targetPath = join(targetDir, safeName);
+  const MAX_DOWNLOAD_BYTES = 500 * 1024 * 1024;
+  const ext = extname(safeName);
+  const stem = basename(safeName, ext);
+  let targetPath = join(targetDir, safeName);
+  for (let i = 1; existsSync(targetPath) && i < 100; i++) {
+    targetPath = join(targetDir, `${stem}-${i}${ext}`);
+  }
+  if (existsSync(targetPath)) {
+    return res.status(409).json({ error: 'Downloads 中同名文件过多,请手动清理后重试' });
+  }
 
   try {
     const r = await fetch(url, {
@@ -45,8 +57,20 @@ router.post('/download-update', async (req, res) => {
     });
     if (!r.ok) return res.status(502).json({ error: `下载失败 HTTP ${r.status}` });
     if (!r.body) return res.status(502).json({ error: '上游返回空 body' });
+    const contentLength = Number(r.headers.get('content-length') || 0);
+    if (contentLength > MAX_DOWNLOAD_BYTES) {
+      return res.status(413).json({ error: '安装包过大 (>500MB)' });
+    }
 
-    await pipeline(r.body, createWriteStream(targetPath));
+    let seen = 0;
+    const limiter = new Transform({
+      transform(chunk, _enc, cb) {
+        seen += chunk.length;
+        if (seen > MAX_DOWNLOAD_BYTES) cb(new Error('安装包过大 (>500MB)'));
+        else cb(null, chunk);
+      },
+    });
+    await pipeline(r.body, limiter, createWriteStream(targetPath));
 
     // 平台分支:打开安装包
     const platform = process.platform;
@@ -59,7 +83,7 @@ router.post('/download-update', async (req, res) => {
         opened = true;
       } else if (platform === 'win32') {
         // Windows:cmd /c start "" "<path>" 让系统按关联应用打开 installer
-        spawn('cmd', ['/c', 'start', '', targetPath], { detached: true, stdio: 'ignore' }).unref();
+        spawn('explorer.exe', [targetPath], { detached: true, stdio: 'ignore' }).unref();
         opened = true;
       } else {
         // Linux:xdg-open
@@ -72,6 +96,7 @@ router.post('/download-update', async (req, res) => {
 
     res.json({ ok: true, path: targetPath, opened, platform });
   } catch (err) {
+    try { await unlink(targetPath); } catch {}
     res.status(500).json({ error: err.message || 'download failed' });
   }
 });
