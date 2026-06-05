@@ -337,6 +337,113 @@ function StorageTab() {
   );
 }
 
+// 自动选当前平台对应的安装包资产。
+// macOS Apple Silicon → .dmg; Windows → 优先 NSIS .exe(MSI 太大体验差);Linux 留空。
+function pickAssetForPlatform(assets) {
+  if (!Array.isArray(assets) || assets.length === 0) return null;
+  const ua = (navigator.userAgent || '').toLowerCase();
+  const isMac = ua.includes('mac');
+  const isWin = ua.includes('windows') || (navigator.platform || '').toLowerCase().includes('win');
+  if (isMac) return assets.find((a) => /\.dmg$/i.test(a.name)) || null;
+  if (isWin) {
+    return assets.find((a) => /x64-setup\.exe$/i.test(a.name))
+        || assets.find((a) => /\.exe$/i.test(a.name))
+        || assets.find((a) => /\.msi$/i.test(a.name)) || null;
+  }
+  return null;
+}
+
+function UpdateAvailable({ state }) {
+  // status: idle | downloading | done | err
+  const [dl, setDl] = useState({ status: 'idle' });
+  const asset = pickAssetForPlatform(state.assets);
+
+  const startDownload = async () => {
+    if (!asset) return;
+    setDl({ status: 'downloading' });
+    try {
+      const r = await fetch('/api/download-update', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url: asset.url, filename: asset.name }),
+      });
+      const d = await r.json();
+      if (!r.ok || d.error) {
+        setDl({ status: 'err', message: d.error || `HTTP ${r.status}` });
+        return;
+      }
+      setDl({ status: 'done', path: d.path, platform: d.platform });
+    } catch (e) {
+      setDl({ status: 'err', message: e.message || '网络错误' });
+    }
+  };
+
+  return (
+    <div className="text-[12px] bg-amber-50 border border-amber-200 text-amber-900 rounded p-2.5 space-y-2">
+      <div className="flex items-center gap-1.5">
+        <span>🎉 新版本可用:</span>
+        <b className="font-mono">v{state.latestVersion}</b>
+        {state.publishedAt && (
+          <span className="text-amber-700 text-[11px]">
+            ({new Date(state.publishedAt).toLocaleDateString()})
+          </span>
+        )}
+      </div>
+
+      <div className="flex items-center gap-2 flex-wrap">
+        {asset && dl.status !== 'done' && (
+          <button
+            onClick={startDownload}
+            disabled={dl.status === 'downloading'}
+            className="px-3 py-1.5 text-[12px] bg-amber-700 text-white rounded-md hover:bg-amber-800 disabled:opacity-50 flex items-center gap-1.5"
+          >
+            {dl.status === 'downloading' ? (
+              <>
+                <RefreshCw size={12} className="animate-spin" />
+                下载中… ({Math.round((asset.size || 0) / 1048576)}MB)
+              </>
+            ) : (
+              <>⬇️ 一键下载并安装({Math.round((asset.size || 0) / 1048576)}MB)</>
+            )}
+          </button>
+        )}
+        <a
+          href={state.htmlUrl}
+          target="_blank"
+          rel="noreferrer"
+          className="text-accent underline text-[12px]"
+        >
+          手动查看 Release
+        </a>
+      </div>
+
+      {dl.status === 'done' && (
+        <div className="text-[12px] text-emerald-700 bg-emerald-50 border border-emerald-200 rounded p-2 space-y-1">
+          <div>✓ 已下载并打开安装包</div>
+          <div className="text-[11px] text-emerald-700">{dl.path}</div>
+          <div className="text-[11px] text-ink-muted">
+            {dl.platform === 'darwin'
+              ? '把弹出的「Claude GUI.app」拖到「应用程序」即可。装完关闭旧版,运行新版。'
+              : dl.platform === 'win32'
+              ? 'SmartScreen 提示时点「更多信息 → 仍要运行」。装完关闭旧版,运行新版。'
+              : '装完关闭旧版,运行新版。'}
+          </div>
+        </div>
+      )}
+
+      {dl.status === 'err' && (
+        <div className="text-[12px] text-error">下载失败:{dl.message}</div>
+      )}
+
+      {!asset && (
+        <div className="text-[11px] text-amber-700">
+          ⚠️ 没找到当前平台的安装包,请点上方链接手动下载。
+        </div>
+      )}
+    </div>
+  );
+}
+
 function UpdateChecker() {
   // status: idle(只显示版本) | checking | ok(有最新版本信息) | err
   const [state, setState] = useState({ status: 'idle', currentVersion: null });
@@ -380,16 +487,7 @@ function UpdateChecker() {
       </div>
       {state.status === 'ok' && (
         state.hasUpdate ? (
-          <div className="text-[12px] bg-amber-50 border border-amber-200 text-amber-900 rounded p-2.5 space-y-1.5">
-            <div className="flex items-center gap-1.5">
-              <span>🎉 新版本可用:</span>
-              <b className="font-mono">v{state.latestVersion}</b>
-              {state.publishedAt && <span className="text-amber-700 text-[11px]">({new Date(state.publishedAt).toLocaleDateString()})</span>}
-            </div>
-            <a href={state.htmlUrl} target="_blank" rel="noreferrer" className="text-accent underline text-[12px] break-all">
-              {state.htmlUrl}
-            </a>
-          </div>
+          <UpdateAvailable state={state} />
         ) : (
           <div className="text-[12px] text-success">✓ 已是最新版本</div>
         )

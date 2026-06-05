@@ -45,12 +45,17 @@ router.get('/version-check', async (req, res) => {
     const latestRaw = String(d.tag_name || '').replace(/^v/, '');
     if (!latestRaw) return res.json({ currentVersion, error: 'GitHub 未返回 tag_name' });
     const hasUpdate = semverGt(latestRaw, currentVersion);
+    // 简化 assets 让前端按 platform 选 — 只暴露 name + browser_download_url
+    const assets = Array.isArray(d.assets)
+      ? d.assets.map((a) => ({ name: a.name, url: a.browser_download_url, size: a.size }))
+      : [];
     res.json({
       currentVersion,
       latestVersion: latestRaw,
       hasUpdate,
       htmlUrl: d.html_url || `https://github.com/wsxwj123/claude-gui/releases/tag/${d.tag_name}`,
       publishedAt: d.published_at || null,
+      assets,
     });
   } catch (err) {
     res.json({ currentVersion, error: err.message || 'fetch failed' });
