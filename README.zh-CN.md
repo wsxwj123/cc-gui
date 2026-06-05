@@ -99,6 +99,7 @@ npm run tauri:build
 | 打开白屏 / 发不了消息 | 确认 `claude` CLI 能用、Node ≥ 20；删掉 `client/dist` 后重新 `npm run build` |
 | 改了代码不生效 | 源码方式下需重新 `npm run build`（或重新双击 `gui.command` / `gui.bat`） |
 | macOS 双击 `gui.command` 没反应 | 「右键 → 打开」授权一次；或终端 `chmod +x gui.command` |
+| **macOS 提示「Claude GUI.app 已损坏，无法打开」**（且「隐私与安全性」里没有「仍要打开」按钮，macOS 15 后常见） | 这不是真损坏，是 Gatekeeper 给未签名 app 加的 quarantine 标记。终端跑一次：`sudo xattr -rd com.apple.quarantine "/Applications/Claude GUI.app"` 输入登录密码后再双击即可 |
 
 ---
 

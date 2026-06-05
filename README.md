@@ -99,6 +99,7 @@ Output lands in `src-tauri/target/release/bundle/` (`.dmg` on macOS, `.exe` / `.
 | Blank page / can't send | Confirm the `claude` CLI works and Node ≥ 20; delete `client/dist` and `npm run build` again |
 | Code changes not showing | From source you must `npm run build` again (or re-launch `gui.command` / `gui.bat`) |
 | macOS `gui.command` does nothing | Right-click → **Open** once to authorize, or `chmod +x gui.command` |
+| **macOS says "Claude GUI.app is damaged and can't be opened"** (and Privacy & Security has no **Open Anyway** button — common on macOS 15+) | Not actually damaged — Gatekeeper added a quarantine flag to the unsigned app. In Terminal: `sudo xattr -rd com.apple.quarantine "/Applications/Claude GUI.app"` then enter your login password and double-click again |
 
 ---
 
