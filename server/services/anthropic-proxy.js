@@ -51,6 +51,62 @@ function readBody(req) {
   });
 }
 
+// Bug #5+#7:Claude Code CLI 在调用 Skill / WebSearch 等"context-modifying"工具
+// 时,把 skill body / 搜索结果用 `isMeta=true` 的 user 消息塞进下一轮 system
+// context,**而不发对应的 anthropic tool_result content block**。
+// 对真正实现 anthropic spec 的端点没问题(Claude 官方/MiMo 透传),但 DeepSeek
+// 的 anthropic 兼容端点内部转 openai 时严格检查 tool_call_id 配对 → 报 400
+// "An assistant message with 'tool_calls' must be followed by tool messages
+// responding to each 'tool_call_id'".
+//
+// 修法:扫 messages,任何 assistant.tool_use 缺对应 tool_result,补一条空的
+// tool_result(content="" 或"(no result returned)"),让请求结构合法。补的内容
+// 不影响模型理解 — CLI 已经把真实 result(skill body)注入 system context,模型
+// 看得见。
+function normalizeMessagesForCompat(body) {
+  let parsed;
+  try { parsed = JSON.parse(body.toString('utf-8')); } catch { return body; }
+  if (!parsed || !Array.isArray(parsed.messages)) return body;
+
+  const msgs = parsed.messages;
+  let patched = 0;
+  for (let i = 0; i < msgs.length; i++) {
+    const m = msgs[i];
+    if (m?.role !== 'assistant') continue;
+    const toolUses = Array.isArray(m.content)
+      ? m.content.filter((c) => c?.type === 'tool_use' && c.id)
+      : [];
+    if (toolUses.length === 0) continue;
+
+    // 找下一条 user message,看它的 content 是不是包含 tool_result for 每个 id
+    const next = msgs[i + 1];
+    const nextResults = (next?.role === 'user' && Array.isArray(next.content))
+      ? new Set(next.content.filter((c) => c?.type === 'tool_result' && c.tool_use_id).map((c) => c.tool_use_id))
+      : new Set();
+    const missing = toolUses.filter((tu) => !nextResults.has(tu.id));
+    if (missing.length === 0) continue;
+
+    // 补 tool_result:就近合并到下一条 user(如果它已经是 user 的话),否则插入新 user
+    const stubs = missing.map((tu) => ({
+      type: 'tool_result',
+      tool_use_id: tu.id,
+      content: '(tool result fed via system context)',
+    }));
+    if (next?.role === 'user') {
+      next.content = Array.isArray(next.content) ? [...stubs, ...next.content] : stubs.concat([{ type: 'text', text: String(next.content || '') }]);
+    } else {
+      msgs.splice(i + 1, 0, { role: 'user', content: stubs });
+    }
+    patched += missing.length;
+  }
+
+  if (patched === 0) return body;
+  if (process.env.CGUI_PROXY_DEBUG) {
+    process.stderr.write(`[anthropic-proxy] patched ${patched} missing tool_result(s)\n`);
+  }
+  return Buffer.from(JSON.stringify(parsed));
+}
+
 async function handle(req, clientRes) {
   if (!upstream) {
     clientRes.writeHead(503, { 'Content-Type': 'application/json' });
@@ -58,9 +114,14 @@ async function handle(req, clientRes) {
     return;
   }
 
-  const body = (req.method === 'POST' || req.method === 'PUT' || req.method === 'PATCH')
+  let body = (req.method === 'POST' || req.method === 'PUT' || req.method === 'PATCH')
     ? await readBody(req)
     : undefined;
+
+  // 仅对 /v1/messages 做规范化(其他端点不动)
+  if (body && req.url && req.url.includes('/v1/messages') && req.method === 'POST') {
+    body = normalizeMessagesForCompat(body);
+  }
 
   // Build a CLEAN header set. The CLI's incoming Authorization / x-api-key carries
   // the poisoned subscription OAuth token — we DROP it and inject the real provider
