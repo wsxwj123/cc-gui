@@ -337,6 +337,70 @@ function StorageTab() {
   );
 }
 
+function UpdateChecker() {
+  // status: idle(只显示版本) | checking | ok(有最新版本信息) | err
+  const [state, setState] = useState({ status: 'idle', currentVersion: null });
+
+  // 进面板时只读当前版本(避免每次开设置都打 GitHub API);用户点按钮才真比对。
+  useEffect(() => {
+    fetch('/api/version-check').then((r) => r.json()).then((d) => {
+      setState((s) => ({ ...s, currentVersion: d.currentVersion }));
+    }).catch(() => {});
+  }, []);
+
+  const check = async () => {
+    setState((s) => ({ ...s, status: 'checking' }));
+    try {
+      const r = await fetch('/api/version-check');
+      const d = await r.json();
+      if (d.error) setState({ status: 'err', currentVersion: d.currentVersion, message: d.error });
+      else setState({ status: 'ok', ...d });
+    } catch (e) {
+      setState((s) => ({ ...s, status: 'err', message: e.message || '网络错误' }));
+    }
+  };
+
+  return (
+    <div className="bg-canvas-warm border border-canvas-deep rounded-lg p-3 space-y-2">
+      <div className="flex items-center justify-between gap-2">
+        <div className="min-w-0">
+          <div className="text-[10px] text-ink-faint font-body uppercase tracking-wider">当前版本</div>
+          <div className="text-[14px] font-mono text-ink mt-0.5">
+            {state.currentVersion ? `v${state.currentVersion}` : '加载中…'}
+          </div>
+        </div>
+        <button
+          onClick={check}
+          disabled={state.status === 'checking'}
+          className="px-3 py-1.5 text-[12px] bg-accent text-white rounded-md hover:bg-accent/90 disabled:opacity-50 flex items-center gap-1.5 shrink-0"
+        >
+          <RefreshCw size={12} className={state.status === 'checking' ? 'animate-spin' : ''} />
+          {state.status === 'checking' ? '检查中…' : '检查更新'}
+        </button>
+      </div>
+      {state.status === 'ok' && (
+        state.hasUpdate ? (
+          <div className="text-[12px] bg-amber-50 border border-amber-200 text-amber-900 rounded p-2.5 space-y-1.5">
+            <div className="flex items-center gap-1.5">
+              <span>🎉 新版本可用:</span>
+              <b className="font-mono">v{state.latestVersion}</b>
+              {state.publishedAt && <span className="text-amber-700 text-[11px]">({new Date(state.publishedAt).toLocaleDateString()})</span>}
+            </div>
+            <a href={state.htmlUrl} target="_blank" rel="noreferrer" className="text-accent underline text-[12px] break-all">
+              {state.htmlUrl}
+            </a>
+          </div>
+        ) : (
+          <div className="text-[12px] text-success">✓ 已是最新版本</div>
+        )
+      )}
+      {state.status === 'err' && (
+        <div className="text-[12px] text-error">检查失败:{state.message}</div>
+      )}
+    </div>
+  );
+}
+
 function OverviewTab({ settings }) {
   const rows = [];
   if (settings?.defaultModel || settings?.model) rows.push(['默认模型', settings.defaultModel || settings.model]);
@@ -347,15 +411,21 @@ function OverviewTab({ settings }) {
   }
   if (settings?.permissions) rows.push(['权限规则', `${Object.keys(settings.permissions).length} 条`]);
   if (settings?.plugins) rows.push(['插件', `${Object.keys(settings.plugins).length} 个`]);
-  if (!rows.length) return <p className="text-xs text-ink-faint font-body py-6 text-center">settings.json 为空</p>;
   return (
-    <div className="bg-canvas-warm border border-canvas-deep rounded-lg divide-y divide-canvas-deep">
-      {rows.map(([k, v]) => (
-        <div key={k} className="flex items-center justify-between px-3 py-2.5">
-          <span className="text-xs text-ink-muted font-body">{k}</span>
-          <span className="text-xs text-ink-soft font-mono">{v}</span>
+    <div className="space-y-3">
+      <UpdateChecker />
+      {rows.length > 0 ? (
+        <div className="bg-canvas-warm border border-canvas-deep rounded-lg divide-y divide-canvas-deep">
+          {rows.map(([k, v]) => (
+            <div key={k} className="flex items-center justify-between px-3 py-2.5">
+              <span className="text-xs text-ink-muted font-body">{k}</span>
+              <span className="text-xs text-ink-soft font-mono">{v}</span>
+            </div>
+          ))}
         </div>
-      ))}
+      ) : (
+        <p className="text-xs text-ink-faint font-body py-4 text-center">settings.json 为空</p>
+      )}
     </div>
   );
 }
