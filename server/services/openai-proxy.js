@@ -98,10 +98,17 @@ function anthropicToOpenAIMessages(messages, system) {
       if (toolCalls.length) m.tool_calls = toolCalls;
       if (m.content != null || m.tool_calls) out.push(m);
     } else {
-      // user (or tool) — emit text first, then each tool_result as a tool msg
+      // user (or tool) — emit tool_result FIRST, then text.
+      // OpenAI 协议要求 assistant.tool_calls 后必须立即跟 tool messages 配对,
+      // 任何中间 user.content 插入都会被严格端点(DeepSeek 等)拒绝:
+      //   API Error 400: "An assistant message with 'tool_calls' must be followed
+      //   by tool messages responding to each 'tool_call_id'."
+      // Anthropic 这边一条 user message 可以同时含 tool_result + text(Skill 调用
+      // 后 CLI 把 result 标 + 后续提示放在同一 user),但转 openai 时必须拆分,
+      // 且 tool messages 在前。Bug #7 真根因。
+      for (const tr of toolResults) out.push(tr);
       const txt = textParts.join('');
       if (txt) out.push({ role: 'user', content: txt });
-      for (const tr of toolResults) out.push(tr);
     }
   }
   return out;
