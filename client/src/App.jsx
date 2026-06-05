@@ -1673,13 +1673,15 @@ function StreamingStatusLine({ thinking, text, toolCalls }) {
 // The banner now just nudges users who'd prefer a faster mode, with quick
 // switches + a one-click "永久忽略" stored in localStorage.
 function PermissionModeHintBanner({ permKey }) {
-  const permissionMode = useStore((s) => (permKey ? (s.permissionModeBySession[permKey] || 'default') : s.permissionMode));
+  // 全局默认是 plan(Bug #9),banner 主要给 plan 用户解释模式特性 + 快捷切走。
+  // default/acceptEdits/bypass 模式下不打扰(用户已自己选过)。
+  const permissionMode = useStore((s) => (permKey ? (s.permissionModeBySession[permKey] || s.permissionMode) : s.permissionMode));
   const setPermissionMode = useStore((s) => s.setPermissionMode);
   const [dismissed, setDismissed] = useState(() => {
     try { return localStorage.getItem('cgui-perm-hint-dismissed') === '1'; }
     catch { return false; }
   });
-  if (permissionMode !== 'default' || dismissed) return null;
+  if (permissionMode !== 'plan' || dismissed) return null;
   const dismiss = () => {
     try { localStorage.setItem('cgui-perm-hint-dismissed', '1'); } catch {}
     setDismissed(true);
@@ -1688,23 +1690,23 @@ function PermissionModeHintBanner({ permKey }) {
     <div className="shrink-0 mx-6 mt-2 px-3 py-2 rounded-md bg-amber-50 border border-amber-200 flex items-center gap-2 gap-y-1.5 flex-wrap text-[11px] font-body animate-fade-up">
       <Shield size={13} className="text-amber-600 shrink-0" />
       <span className="text-amber-800 flex-1 min-w-[12rem]">
-        当前是<b>默认权限</b>模式：每次工具调用都会在输入框上方弹窗征求你同意。
-        想加速可切换到接受编辑或放任。
+        当前是<b>规划模式</b>(新版默认):AI 会先生成执行计划,你审批后再动手。
+        纯问答(不调工具)不会弹窗;想直接干活可切"默认"或"接受编辑"。
       </span>
+      <button
+        onClick={() => setPermissionMode('default', permKey)}
+        className="px-2 py-0.5 rounded bg-amber-100 hover:bg-amber-200 text-amber-900 text-[10px] font-medium shrink-0"
+        title="每次工具调用都弹窗征求你同意"
+      >切默认</button>
       <button
         onClick={() => setPermissionMode('acceptEdits', permKey)}
         className="px-2 py-0.5 rounded bg-amber-100 hover:bg-amber-200 text-amber-900 text-[10px] font-medium shrink-0"
-        title="自动接受 Edit/Write 工具的调用"
+        title="只读类自动允许,写入类弹窗"
       >接受编辑</button>
-      <button
-        onClick={() => setPermissionMode('bypassPermissions', permKey)}
-        className="px-2 py-0.5 rounded bg-red-100 hover:bg-red-200 text-red-900 text-[10px] font-medium shrink-0"
-        title="跳过全部权限检查（危险）"
-      >放任所有</button>
       <button
         onClick={dismiss}
         className="px-2 py-0.5 rounded hover:bg-amber-100 text-amber-700 text-[10px] shrink-0"
-        title="永久隐藏此提示（仍可通过权限模式选择器手动切换）"
+        title="永久隐藏此提示(仍可通过权限模式选择器手动切换)"
       >忽略</button>
     </div>
   );

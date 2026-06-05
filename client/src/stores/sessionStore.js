@@ -145,11 +145,11 @@ export const useStore = create((set, get) => ({
   // CLI session knobs. Persisted to localStorage so they survive reload.
   effort: (() => { try { return (typeof localStorage !== 'undefined' && localStorage.getItem('cgui-effort')) || ''; } catch { return ''; } })(),
   addDirs: readLs('cgui-add-dirs', []),
-  // Default to 'default' (each tool call asks for permission via CLI built-in flow).
-  // Users can switch to acceptEdits/bypassPermissions/plan from the header.
-  // `permissionMode` is the value for the CURRENTLY active session (a mirror
-  // kept in sync so existing `s.permissionMode` readers keep working).
-  permissionMode: readLs('cgui-permission-mode', 'default'),
+  // Default to 'plan' (Bug #9):让 AI 先生成计划再执行,新手体感更安全。
+  // 纯文本问答不调工具时 plan 模式不弹窗;调工具会弹 ExitPlanMode 让用户审批
+  // 整个执行计划。Banner 给"切回默认"快捷,体验重了的用户随时回 default。
+  // `permissionMode` 是当前活跃会话的镜像值(per-session 真值在 permissionModeBySession)。
+  permissionMode: readLs('cgui-permission-mode', 'plan'),
   // Per-session override map { [sessionKey]: mode }. Each session (or draft)
   // remembers its OWN mode so switching from session A (plan) to session B
   // (bypass) shows B's mode, not A's. Keyed by sessionId, or `draft-<hash>`
