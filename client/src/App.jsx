@@ -1069,6 +1069,31 @@ function ProjectList() {
 }
 
 // ─── Session List ──────────────────────────────────────────────
+// 二次确认删除按钮:第一次点变红显示"确认",3 秒内再点真删,3 秒后自动复位。
+// 替代 window.confirm(Tauri WebView 有时禁用 native dialog,导致删除按钮"无效")。
+function DeleteButton({ onConfirm }) {
+  const [armed, setArmed] = useState(false);
+  useEffect(() => {
+    if (!armed) return;
+    const t = setTimeout(() => setArmed(false), 3000);
+    return () => clearTimeout(t);
+  }, [armed]);
+  return (
+    <button
+      onClick={(e) => {
+        e.stopPropagation();
+        if (armed) { onConfirm(); setArmed(false); }
+        else setArmed(true);
+      }}
+      className={`p-1 rounded flex items-center gap-0.5 ${armed ? 'bg-red-100' : 'hover:bg-red-50'}`}
+      title={armed ? '再点一次确认删除(3 秒后自动取消)' : '删除本地会话历史(需二次确认)'}
+    >
+      <Trash2 size={12} className={armed ? 'text-red-700' : 'text-ink-faint hover:text-red-600'} />
+      {armed && <span className="text-[9px] text-red-700 font-bold">确认</span>}
+    </button>
+  );
+}
+
 function SessionItem({ session, isSelected, onSelect, onFork, onArchive, onDelete, forking, running }) {
   const [expanded, setExpanded] = useState(false);
   const customTitle = useStore((s) => s.customTitles[session.sessionId]);
@@ -1170,16 +1195,7 @@ function SessionItem({ session, isSelected, onSelect, onFork, onArchive, onDelet
             ? <ArchiveRestore size={12} className="text-accent" />
             : <Archive size={12} className="text-ink-faint" />}
         </button>
-        <button
-          onClick={(e) => {
-            e.stopPropagation();
-            if (confirm('永久删除该会话历史？（jsonl 文件将被删除，无法恢复）')) onDelete(session);
-          }}
-          className="p-1 hover:bg-red-50 rounded"
-          title="删除本地会话历史"
-        >
-          <Trash2 size={12} className="text-ink-faint hover:text-red-600" />
-        </button>
+        <DeleteButton onConfirm={() => onDelete(session)} />
       </div>
       )}
       {expanded && hasSubagents && (
@@ -3156,7 +3172,10 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
               {currentProvider?.providerHint && currentProvider.providerHint !== 'anthropic' && (
                 <span className="text-[10px] text-amber-700 bg-amber-50 border border-amber-200 rounded px-1.5 py-px font-mono shrink-0 whitespace-nowrap"
                   title={`cc switch 路由：${currentProvider.baseUrl}`}>
-                  {currentProvider.providerHint.charAt(0).toUpperCase() + currentProvider.providerHint.slice(1)}
+                  {currentProvider.providerHint === 'unknown'
+                    // unknown 时显示 baseUrl hostname,而非丑的 "Unknown"
+                    ? (() => { try { return new URL(currentProvider.baseUrl).hostname; } catch { return '自定义'; } })()
+                    : currentProvider.providerHint.charAt(0).toUpperCase() + currentProvider.providerHint.slice(1)}
                 </span>
               )}
               {/* Show the model the NEXT send will use (current selection),
