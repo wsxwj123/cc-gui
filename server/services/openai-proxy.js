@@ -103,14 +103,48 @@ function anthropicToOpenAIMessages(messages, system) {
       // 任何中间 user.content 插入都会被严格端点(DeepSeek 等)拒绝:
       //   API Error 400: "An assistant message with 'tool_calls' must be followed
       //   by tool messages responding to each 'tool_call_id'."
-      // Anthropic 这边一条 user message 可以同时含 tool_result + text(Skill 调用
-      // 后 CLI 把 result 标 + 后续提示放在同一 user),但转 openai 时必须拆分,
-      // 且 tool messages 在前。Bug #7 真根因。
       for (const tr of toolResults) out.push(tr);
       const txt = textParts.join('');
       if (txt) out.push({ role: 'user', content: txt });
     }
   }
+
+  // Bug #7 真根因(用户 v0.1.26 仍报错):CLI 在调 Skill 等 context-modifying 工具
+  // 时,**根本不把 tool_result 作为 anthropic content block 发上来** —— 它把
+  // skill body 用 isMeta=true 的 user.text 注入 system context,只把工具调用的
+  // assistant.tool_use 留在 messages 里。结果 openai-proxy 转换出的序列形如:
+  //   user: prompt
+  //   assistant: tool_calls=[X]
+  //   user: <skill body>   ← 缺 tool message!
+  // → DeepSeek 严格端点 400 拒绝。
+  //
+  // 修法:转换完成后扫一遍 messages,任何 assistant.tool_calls 后没立即跟够 tool
+  // 配对,补一条 stub tool message(content="(tool result fed via system context)")。
+  // 不影响模型理解 — 真 result 已在 system prompt 里,模型读得到。
+  let patched = 0;
+  for (let i = 0; i < out.length; i++) {
+    const m = out[i];
+    if (m?.role !== 'assistant' || !Array.isArray(m.tool_calls) || m.tool_calls.length === 0) continue;
+    // 收下一段连续 role:'tool' 已配对的 tool_call_id
+    const seen = new Set();
+    let j = i + 1;
+    while (j < out.length && out[j]?.role === 'tool') {
+      if (out[j].tool_call_id) seen.add(out[j].tool_call_id);
+      j++;
+    }
+    const stubs = m.tool_calls
+      .filter((tc) => tc.id && !seen.has(tc.id))
+      .map((tc) => ({ role: 'tool', tool_call_id: tc.id, content: '(tool result fed via system context)' }));
+    if (stubs.length) {
+      out.splice(j, 0, ...stubs);
+      patched += stubs.length;
+      i = j + stubs.length - 1; // 跳过新插入的
+    }
+  }
+  if (patched && process.env.CGUI_PROXY_DEBUG) {
+    process.stderr.write(`[openai-proxy] patched ${patched} missing tool message(s)\n`);
+  }
+
   return out;
 }
 
