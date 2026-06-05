@@ -1,6 +1,6 @@
 [package]
 name = "claude-gui"
-version = "0.1.15"
+version = "0.1.16"
 description = "Claude GUI — native shell"
 authors = ["wsxwj"]
 license = "MIT"
