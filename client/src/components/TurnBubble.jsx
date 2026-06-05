@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import {
   Brain, Copy, Check, ChevronDown, ChevronRight,
   Wrench, BookOpen, Pencil, Terminal, FileText, Search,
-  Globe, Edit3, Loader2, CheckSquare, Square, CircleDot, ListTodo
+  Globe, Edit3, Loader2, CheckSquare, Square, CircleDot, ListTodo, RotateCcw
 } from 'lucide-react';
 import { ModelBadge, ProviderAvatar } from './ModelBadge.jsx';
 import { MarkdownRenderer } from './MarkdownRenderer.jsx';
@@ -377,7 +377,7 @@ function UsageDisplay({ usage, model }) {
 // making the whole UI (provider & model menus included) feel laggy. `turn` comes
 // from the persisted `messages` array which is referentially stable while a NEW
 // turn streams into separate state, so memo lets the old turns skip re-render.
-function TurnBubbleInner({ turn }) {
+function TurnBubbleInner({ turn, onRetry }) {
   const [showThinking, setShowThinking] = useState(false);
 
   // Historical turns loaded from .jsonl may have these fields absent or as a
@@ -424,6 +424,19 @@ function TurnBubbleInner({ turn }) {
             {turn.model && <ModelBadge model={turn.model} compact />}
             <span className="text-[11px] text-ink-faint font-mono">{formatTime(turn.timestamp)}</span>
             <div className="flex-1" />
+            {onRetry && !isLiveStream && turn.uuid !== 'streaming' && (
+              // Bug #6:重做这一轮回复。AI 模型本身随机,重做不保证调同一组工具 —
+              // 这是"让 AI 基于同一 prompt 重新生成,可能重选工具/重选实现"的功能。
+              // 一键 = trim 到这条 turn 之前的 user message + resend 它(复用 handleRollback)。
+              <button
+                onClick={() => onRetry(turn)}
+                className="flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] text-ink-faint hover:text-accent hover:bg-canvas-warm transition-colors"
+                title="回滚到这条 AI 回复之前,让 AI 重新生成(包括重新调工具)"
+              >
+                <RotateCcw size={11} />
+                <span className="hidden md:inline">重做</span>
+              </button>
+            )}
             <CopyButton text={fullText} />
           </div>
 

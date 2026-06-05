@@ -3037,6 +3037,26 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
     }
   }, [chatMessages, messages, fetchMessagesForTab, setLocalMessages, setSelectedSession, getLocalSession]);
 
+  // Bug #6:重做一整轮 AI 回复。找 turn 之前最近的 user message,触发 handleRollback
+  // (mode: 'message') — 等于 trim 到 user 之后 + 重发同一 prompt,让 AI 重新生成
+  // (含重选/重调工具)。LLM 有随机性,不保证重做出"一模一样的工具序列",这是
+  // 设计的:用户的诉求一般是"这轮回复(含工具调用)有问题,让 AI 换条路再试"。
+  const handleRetryTurn = useCallback((turn) => {
+    if (!turn || !turn.uuid) return;
+    const all = [...messages, ...chatMessages];
+    const turnIdx = all.findIndex((m) => m.uuid === turn.uuid);
+    if (turnIdx === -1) return;
+    let userMsg = null;
+    for (let i = turnIdx - 1; i >= 0; i--) {
+      if (all[i].type === 'user') { userMsg = all[i]; break; }
+    }
+    if (!userMsg) {
+      alert('找不到该 AI 回复对应的用户消息,无法重做');
+      return;
+    }
+    handleRollback(userMsg, { mode: 'message' });
+  }, [messages, chatMessages, handleRollback]);
+
   // In split mode, tab 0's `loading` would otherwise blank out tab 1 too.
   // We only let the loading screen short-circuit the primary tab — tab 1
   // fetches with silent:true so it never sets the global flag, and tab 0
@@ -3225,14 +3245,14 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
               {messages.map((msg, i) => msg.type === 'compact'
                 ? <CompactDivider key={msg.uuid || i} />
                 : msg.type === 'turn'
-                ? <TurnBubble key={msg.uuid || i} turn={msg} />
+                ? <TurnBubble key={msg.uuid || i} turn={msg} onRetry={handleRetryTurn} />
                 : <MessageBubble key={msg.uuid || i} message={{ ...msg, role: msg.type }}
                     onRollback={msg.type === 'user' ? handleRollback : undefined} />
               )}
               {chatMessages.map((msg, i) => msg.type === 'compact'
                 ? <CompactDivider key={msg.uuid || i} />
                 : msg.type === 'turn'
-                ? <TurnBubble key={msg.uuid || i} turn={msg} />
+                ? <TurnBubble key={msg.uuid || i} turn={msg} onRetry={handleRetryTurn} />
                 : <MessageBubble key={msg.uuid || i} message={{ ...msg, role: msg.type }}
                     onRollback={msg.type === 'user' ? handleRollback : undefined} />
               )}
