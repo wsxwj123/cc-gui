@@ -359,10 +359,31 @@ function pickAssetForPlatform(assets, serverPlatform) {
   return null;
 }
 
+// 把 serverPlatform + asset 文件名翻译成人类可读的"目标系统"标签,
+// 让按钮文字明确告知用户下载的是哪个平台版本(避免 Intel Mac 用户误装 ARM 包等)。
+function describeAssetTarget(asset, serverPlatform) {
+  if (!asset) return null;
+  const name = (asset.name || '').toLowerCase();
+  if (serverPlatform === 'darwin' || /\.dmg$/.test(name)) {
+    if (name.includes('aarch64') || name.includes('arm64')) return 'Mac · Apple Silicon (M 芯片)';
+    if (name.includes('x86_64') || name.includes('x64')) return 'Mac · Intel';
+    return 'Mac';
+  }
+  if (serverPlatform === 'win32' || /\.(exe|msi)$/.test(name)) {
+    const installer = /\.msi$/.test(name) ? 'MSI 安装包' : '安装程序';
+    if (name.includes('x64')) return `Windows · x64 · ${installer}`;
+    if (name.includes('arm64')) return `Windows · ARM64 · ${installer}`;
+    return `Windows · ${installer}`;
+  }
+  if (serverPlatform === 'linux') return 'Linux';
+  return null;
+}
+
 function UpdateAvailable({ state }) {
   // status: idle | downloading | done | err
   const [dl, setDl] = useState({ status: 'idle' });
   const asset = pickAssetForPlatform(state.assets, state.serverPlatform);
+  const target = describeAssetTarget(asset, state.serverPlatform);
 
   const startDownload = async () => {
     if (!asset) return;
@@ -402,14 +423,19 @@ function UpdateAvailable({ state }) {
             onClick={startDownload}
             disabled={dl.status === 'downloading'}
             className="px-3 py-1.5 text-[12px] bg-amber-700 text-white rounded-md hover:bg-amber-800 disabled:opacity-50 flex items-center gap-1.5"
+            title={`将下载 ${asset.name} 到 ~/Downloads 并自动启动安装`}
           >
             {dl.status === 'downloading' ? (
               <>
                 <RefreshCw size={12} className="animate-spin" />
-                下载中… ({Math.round((asset.size || 0) / 1048576)}MB)
+                下载中… {target && `· ${target}`} ({Math.round((asset.size || 0) / 1048576)}MB)
               </>
             ) : (
-              <>⬇️ 一键下载并安装({Math.round((asset.size || 0) / 1048576)}MB)</>
+              <>
+                ⬇️ 一键下载并安装
+                {target && <span className="font-normal opacity-90 ml-0.5">· {target}</span>}
+                <span className="font-mono text-[11px] opacity-80">({Math.round((asset.size || 0) / 1048576)}MB)</span>
+              </>
             )}
           </button>
         )}
