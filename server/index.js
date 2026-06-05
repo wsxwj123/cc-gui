@@ -36,6 +36,36 @@ import { readdir, readFile, writeFile, mkdir } from 'fs/promises';
 import { homedir, networkInterfaces } from 'os';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+
+// Tauri 启动的 server 从 GUI 进程继承 PATH,通常缺少用户 shell 里手工加的目录。
+// curl install.sh 装的 claude 落在 ~/.claude/local/bin(macOS/Linux/Windows 一致),
+// npm i -g 装的在 ~/.local/bin 或 NPM prefix。Tauri spawn 不走 shell,这些路径
+// 都不在 → spawn('claude') ENOENT → CLI 检测误报"未装"+ chat.js 发消息直接挂。
+// 启动时把常见安装路径前置到 PATH,所有后续 spawn / execFile('claude') 一并受益。
+(function expandClaudePath() {
+  const home = homedir();
+  const dirs = [
+    join(home, '.claude', 'local', 'bin'),       // 官方 install.sh 默认
+    join(home, '.local', 'bin'),                  // pipx / 部分 npm prefix
+    '/opt/homebrew/bin',                          // mac Apple Silicon brew
+    '/usr/local/bin',                             // mac Intel brew + 通用
+  ];
+  if (process.platform === 'win32') {
+    dirs.push(
+      join(home, 'AppData', 'Local', 'AnthropicClaude'),
+      join(home, '.claude', 'local'),
+      join(process.env.APPDATA || join(home, 'AppData', 'Roaming'), 'npm'),
+    );
+  }
+  const sep = process.platform === 'win32' ? ';' : ':';
+  const existing = (process.env.PATH || '').split(sep);
+  const lower = (s) => process.platform === 'win32' ? s.toLowerCase() : s;
+  const existingLower = new Set(existing.map(lower));
+  const toAdd = dirs.filter((d) => d && !existingLower.has(lower(d)));
+  if (toAdd.length) {
+    process.env.PATH = [...toAdd, ...existing].join(sep);
+  }
+})();
 // Network binding: env > ~/.claude-gui/network.json > loopback default.
 // External clients require the GUI password; binding 0.0.0.0 without one would
 // expose $HOME-backed actions and spawned Claude sessions to the network, so it
