@@ -16,7 +16,7 @@ const router = Router();
  * 一键下载安装包(仅允许 github.com / objects.githubusercontent.com)到
  * ~/Downloads/<filename>,完成后:
  *  - macOS:先 xattr 清掉 quarantine 标记(免得装完弹"已损坏"),然后 `open` dmg
- *  - Windows:`start` exe/msi 启动 installer
+ *  - Windows:`explorer.exe` exe/msi 启动 installer
  *  - Linux:`xdg-open` 启动 系统打开
  *
  * 限制:url 必须来自 GitHub release(防止把 server 当成任意 URL 下载代理被滥用)。
@@ -82,7 +82,7 @@ router.post('/download-update', async (req, res) => {
         spawn('open', [targetPath], { detached: true, stdio: 'ignore' }).unref();
         opened = true;
       } else if (platform === 'win32') {
-        // Windows:cmd /c start "" "<path>" 让系统按关联应用打开 installer
+        // Windows:explorer.exe 让系统按关联应用打开 installer
         spawn('explorer.exe', [targetPath], { detached: true, stdio: 'ignore' }).unref();
         opened = true;
       } else {

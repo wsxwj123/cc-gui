@@ -1951,6 +1951,38 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
     return null;
   }, [streamingBlocks, chatMessages, messages]);
 
+  const currentPlan = useMemo(() => {
+    const readPlan = (toolCall) => {
+      if (toolCall?.name !== 'ExitPlanMode') return '';
+      const plan = toolCall.input?.plan ?? toolCall.input?.content ?? '';
+      return typeof plan === 'string' ? plan.trim() : '';
+    };
+    const scanToolCalls = (toolCalls) => {
+      if (!Array.isArray(toolCalls)) return '';
+      for (let j = toolCalls.length - 1; j >= 0; j--) {
+        const plan = readPlan(toolCalls[j]);
+        if (plan) return plan;
+      }
+      return '';
+    };
+    for (let i = streamingBlocks.length - 1; i >= 0; i--) {
+      const b = streamingBlocks[i];
+      if (b?.type === 'tool_use') {
+        const plan = readPlan(b.toolCall);
+        if (plan) return plan;
+      }
+    }
+    for (let i = chatMessages.length - 1; i >= 0; i--) {
+      const plan = scanToolCalls(chatMessages[i]?.toolCalls);
+      if (plan) return plan;
+    }
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const plan = scanToolCalls(messages[i]?.toolCalls);
+      if (plan) return plan;
+    }
+    return '';
+  }, [streamingBlocks, chatMessages, messages]);
+
   // When the file watcher reports a write to THIS session's jsonl (e.g. a
   // detached background stream from another tab/session is still writing),
   // silently re-pull messages so the UI catches up.
@@ -2126,6 +2158,7 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
     // rejects them ("isn't available in this environment"). Instead we launch
     // `claude --remote-control --resume <id>` in a real terminal (TTY required)
     // so the Claude mobile app can take over; the GUI keeps syncing via jsonl.
+    let checkpointPromise = Promise.resolve(null);
     if (!reattachPid) {
       const cmd = (prompt || '').trim().toLowerCase();
       if (cmd === '/remote-control' || cmd === '/rc' || cmd === 'remote-control') {
@@ -2186,16 +2219,17 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
     // checkpoint runs in parallel and back-fills `checkpointSha` on the same
     // chatMessages entry when ready (rollback menu reads it from there).
     const userMsgUuid = 'chat-user-' + Date.now();
+    const userMsgTimestamp = new Date().toISOString();
     setChatMessages((prev) => [...prev, {
       uuid: userMsgUuid, type: 'user',
-      timestamp: new Date().toISOString(), text: prompt,
+      timestamp: userMsgTimestamp, text: prompt,
       checkpointSha: null,
     }]);
 
     // Fire-and-forget git checkpoint. Failures (not a git repo etc.) are
     // silent — no checkpointSha just means the rollback menu's "files only"
     // option will be disabled for this message.
-    (async () => {
+    checkpointPromise = (async () => {
       try {
         const sel = selectedSession;
         if (!sel?.sessionId || !cwd) return;
@@ -2206,17 +2240,19 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
             sessionId: sel.sessionId,
             cwd,
             label: `before: ${prompt.slice(0, 60)}`,
+            clientMessageId: userMsgUuid,
+            messageTimestamp: userMsgTimestamp,
+            promptPreview: prompt,
           }),
         });
         if (!cr.ok) return;
-        const lr = await fetch(`/api/checkpoints/${sel.sessionId}`);
-        if (!lr.ok) return;
-        const data = await lr.json();
-        const sha = data.entries?.[0]?.sha || null;
+        const data = await cr.json().catch(() => ({}));
+        const sha = data.sha || null;
         if (!sha) return;
         setChatMessages((prev) =>
           prev.map((m) => (m.uuid === userMsgUuid ? { ...m, checkpointSha: sha } : m))
         );
+        return sha;
       } catch {}
     })();
 
@@ -2288,6 +2324,9 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
         pid = reattachPid;
         activeProcRef.current = pid;
       } else {
+      if (!reattachPid) {
+        try { await checkpointPromise; } catch {}
+      }
       const { addDirs, globalRead } = useStore.getState();
       // Permission mode / model / effort are all per-session: read THIS
       // session's stored value (keyed by sessionQueueKey) so each pane/session
@@ -2945,13 +2984,28 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
   //
   // Declared BEFORE the early returns below to keep hook order stable across
   // renders (React #310).
-  const handleRollback = useCallback(async (msg, { mode }) => {
+  const handleRollback = useCallback(async (msg, { mode, resendText = null } = {}) => {
     const sel = getLocalSession();
     const proj = useStore.getState().selectedProject;
     const cwd = proj?.path || sel?.projectPath;
     const projectHash = proj?.hash || sel?.projectHash;
     const idxInChat = chatMessages.findIndex((m) => m.uuid === msg.uuid);
     const idxInStore = messages.findIndex((m) => m.uuid === msg.uuid);
+    const resolveCheckpointSha = async () => {
+      if (msg.checkpointSha) return msg.checkpointSha;
+      if (!sel?.sessionId) return null;
+      const params = new URLSearchParams();
+      if (msg.timestamp) params.set('timestamp', msg.timestamp);
+      if (msg.text) params.set('text', msg.text);
+      try {
+        const r = await fetch(`/api/checkpoints/${sel.sessionId}/resolve?${params.toString()}`);
+        if (!r.ok) return null;
+        const d = await r.json().catch(() => ({}));
+        return d.sha || null;
+      } catch {
+        return null;
+      }
+    };
 
     const truncateUi = () => {
       if (idxInStore !== -1) {
@@ -2964,13 +3018,14 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
 
     // ── files only ────────────────────────────────────────────
     if (mode === 'files') {
-      if (!msg.checkpointSha) { alert('该消息发送时没有 git 快照，无法还原文件。'); return; }
       if (!sel?.sessionId || !cwd) { alert('缺少 sessionId 或工作目录，无法还原文件。'); return; }
+      const checkpointSha = await resolveCheckpointSha();
+      if (!checkpointSha) { alert('找不到这条消息发送前的文件快照，无法还原文件。'); return; }
       try {
         const r = await fetch(`/api/checkpoints/${sel.sessionId}/restore`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ sha: msg.checkpointSha, cwd }),
+          body: JSON.stringify({ sha: checkpointSha, cwd }),
         });
         if (!r.ok) {
           const e = await r.json().catch(() => ({}));
@@ -2999,12 +3054,13 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
     if (idxInChat === -1 && idxInStore === -1) return;
 
     // 1) git restore (best-effort — silently skip if no sha / no repo)
-    if (msg.checkpointSha && sel?.sessionId && cwd) {
+    const checkpointSha = sel?.sessionId && cwd ? await resolveCheckpointSha() : null;
+    if (checkpointSha && sel?.sessionId && cwd) {
       try {
         await fetch(`/api/checkpoints/${sel.sessionId}/restore`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ sha: msg.checkpointSha, cwd }),
+          body: JSON.stringify({ sha: checkpointSha, cwd }),
         });
       } catch {}
     }
@@ -3071,7 +3127,7 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
     if (mode === 'edit') return; // composer was filled at the top of this branch
     // mode === 'message': auto-resend.
     if (originalText && handleSendRef.current) {
-      setTimeout(() => { handleSendRef.current(originalText); }, 50);
+      setTimeout(() => { handleSendRef.current(resendText || originalText); }, 50);
     }
   }, [chatMessages, messages, fetchMessagesForTab, setLocalMessages, setSelectedSession, getLocalSession]);
 
@@ -3093,6 +3149,34 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
       return;
     }
     handleRollback(userMsg, { mode: 'message' });
+  }, [messages, chatMessages, handleRollback]);
+
+  const handleRetryTool = useCallback((turn, toolCall) => {
+    if (!turn?.uuid || !toolCall?.name) return;
+    const all = [...messages, ...chatMessages];
+    const turnIdx = all.findIndex((m) => m.uuid === turn.uuid);
+    if (turnIdx === -1) return;
+    let userMsg = null;
+    for (let i = turnIdx - 1; i >= 0; i--) {
+      if (all[i].type === 'user') { userMsg = all[i]; break; }
+    }
+    if (!userMsg) {
+      alert('找不到该工具调用对应的用户消息,无法重做');
+      return;
+    }
+    const input = JSON.stringify(toolCall.input || {}, null, 2).slice(0, 4000);
+    const retryText = [
+      userMsg.text || '',
+      '',
+      '[GUI 工具重做提示]',
+      `请在重新生成这一轮时重点重做 ${toolCall.name} 工具调用，并基于新结果继续完成原任务。`,
+      '如果原工具选择不合适，可以改用更合适的工具，但不要丢失原用户问题的上下文。',
+      '原工具输入如下：',
+      '```json',
+      input,
+      '```',
+    ].join('\n');
+    handleRollback(userMsg, { mode: 'message', resendText: retryText });
   }, [messages, chatMessages, handleRollback]);
 
   // In split mode, tab 0's `loading` would otherwise blank out tab 1 too.
@@ -3272,7 +3356,11 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
         <div className="flex-1 overflow-y-auto relative z-10 px-6 py-4">
           <div className="max-w-[var(--content-max)] mx-auto">
             <h3 className="text-sm font-display font-medium text-ink mb-4">文件变更记录</h3>
-            <FileChangesPanel sessionId={selectedSession.sessionId} projectHash={selectedSession.projectHash} />
+            <FileChangesPanel
+              sessionId={selectedSession.sessionId}
+              projectHash={selectedSession.projectHash}
+              cwd={selectedProject?.path || selectedSession?.projectPath}
+            />
           </div>
         </div>
       ) : (
@@ -3286,14 +3374,14 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
               {messages.map((msg, i) => msg.type === 'compact'
                 ? <CompactDivider key={msg.uuid || i} />
                 : msg.type === 'turn'
-                ? <TurnBubble key={msg.uuid || i} turn={msg} onRetry={handleRetryTurn} />
+                ? <TurnBubble key={msg.uuid || i} turn={msg} onRetry={handleRetryTurn} onRetryTool={(toolCall) => handleRetryTool(msg, toolCall)} />
                 : <MessageBubble key={msg.uuid || i} message={{ ...msg, role: msg.type }}
                     onRollback={msg.type === 'user' ? handleRollback : undefined} />
               )}
               {chatMessages.map((msg, i) => msg.type === 'compact'
                 ? <CompactDivider key={msg.uuid || i} />
                 : msg.type === 'turn'
-                ? <TurnBubble key={msg.uuid || i} turn={msg} onRetry={handleRetryTurn} />
+                ? <TurnBubble key={msg.uuid || i} turn={msg} onRetry={handleRetryTurn} onRetryTool={(toolCall) => handleRetryTool(msg, toolCall)} />
                 : <MessageBubble key={msg.uuid || i} message={{ ...msg, role: msg.type }}
                     onRollback={msg.type === 'user' ? handleRollback : undefined} />
               )}
@@ -3367,6 +3455,7 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
           window.dispatchEvent(new CustomEvent('cgui:composer-fill', { detail: { text: item.text, targetKey: sessionQueueKey } }));
         }}
         todos={currentTodos}
+        plan={currentPlan}
         permKey={sessionQueueKey}
         sessionId={selectedSession?.sessionId || null}
       />
@@ -4258,11 +4347,15 @@ function CustomProviderForm({ onSaved, editing, onCancel }) {
   };
   const save = async () => {
     if (!name.trim() || !baseURL.trim()) return window.alert('名称和 Base URL 必填');
+    const parsedModels = parseModels();
+    if (type === 'openai' && parsedModels.length === 0) {
+      return window.alert('OpenAI 兼容 Provider 至少需要一个模型 ID。可以先点「拉取模型」,或在「模型」框每行填一个。');
+    }
     setBusy('save');
     try {
       // Store in the GUI's own custom-providers.json (no cc-switch.db dependency —
       // works on a fresh machine without CC Switch installed).
-      const body = { name, type, baseURL, models: parseModels() };
+      const body = { name, type, baseURL, models: parsedModels };
       // Edit mode: a blank key means "keep the stored one" (the client never holds
       // the real key), so only send apiKey when the user actually typed a new one.
       if (!isEdit || apiKey.trim()) body.apiKey = apiKey;
@@ -4273,6 +4366,16 @@ function CustomProviderForm({ onSaved, editing, onCancel }) {
       });
       const d = await r.json();
       if (!r.ok) throw new Error(d.error || '保存失败');
+      if (!isEdit && d.id) {
+        const sr = await fetch('/api/provider/switch', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id: d.id }),
+        });
+        const sd = await sr.json().catch(() => ({}));
+        if (!sr.ok) throw new Error(sd.error || 'Provider 已保存,但自动切换失败');
+        useStore.getState().clearModelOverrides?.();
+      }
       // If we just edited the ACTIVE provider, the backend synced its model
       // snapshot — re-read /api/model so the picker reflects it without a re-switch.
       useStore.getState().fetchModel?.();

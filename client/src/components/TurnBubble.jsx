@@ -25,8 +25,32 @@ const INLINE_TOOL_NAMES = new Set([
   'Task', 'Grep', 'Glob', 'WebSearch', 'WebFetch', 'Skill',
 ]);
 
-function InlineToolCard({ toolCall }) {
-  return renderRichToolCard(toolCall);
+function ToolCallWithRetry({ toolCall, onRetryTool, children }) {
+  return (
+    <div className="space-y-1">
+      {children}
+      {onRetryTool && (
+        <div className="flex justify-end">
+          <button
+            onClick={() => onRetryTool(toolCall)}
+            className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] text-ink-faint hover:text-accent hover:bg-canvas-warm transition-colors"
+            title="让 AI 重做这个工具调用"
+          >
+            <RotateCcw size={10} />
+            <span>重做工具</span>
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function InlineToolCard({ toolCall, onRetryTool }) {
+  return (
+    <ToolCallWithRetry toolCall={toolCall} onRetryTool={onRetryTool}>
+      {renderRichToolCard(toolCall)}
+    </ToolCallWithRetry>
+  );
 }
 
 // Returns the rich card React element for a tool, or null when no
@@ -139,7 +163,7 @@ function isAskAnswered(toolCall) {
 }
 
 // ─── Single Tool Call Row ──────────────────────────────────────
-function ToolCallRow({ toolCall }) {
+function ToolCallRow({ toolCall, onRetryTool }) {
   const [expanded, setExpanded] = useState(false);
   const Icon = getToolIcon(toolCall.name);
   const askAnswered = isAskAnswered(toolCall);
@@ -147,56 +171,58 @@ function ToolCallRow({ toolCall }) {
   const preview = formatInputPreview(toolCall.input);
 
   return (
-    <div className={`border rounded-md overflow-hidden ${hasError ? 'border-error/30 bg-error-subtle/40' : 'border-canvas-sunken bg-canvas'}`}>
-      <button
-        onClick={() => setExpanded(!expanded)}
-        className="w-full flex items-center gap-2 px-2.5 py-1.5 hover:bg-canvas-warm/60 transition-colors text-left"
-      >
-        <Icon size={12} className="text-ink-muted shrink-0" />
-        <span className="text-[11px] font-mono text-ink-soft truncate flex-1">
-          {toolCall.name}
-        </span>
-        {preview && (
-          <span className="text-[10px] text-ink-faint font-mono truncate max-w-[200px]">
-            {preview}
+    <ToolCallWithRetry toolCall={toolCall} onRetryTool={onRetryTool}>
+      <div className={`border rounded-md overflow-hidden ${hasError ? 'border-error/30 bg-error-subtle/40' : 'border-canvas-sunken bg-canvas'}`}>
+        <button
+          onClick={() => setExpanded(!expanded)}
+          className="w-full flex items-center gap-2 px-2.5 py-1.5 hover:bg-canvas-warm/60 transition-colors text-left"
+        >
+          <Icon size={12} className="text-ink-muted shrink-0" />
+          <span className="text-[11px] font-mono text-ink-soft truncate flex-1">
+            {toolCall.name}
           </span>
-        )}
-        {toolCall.result ? (
-          hasError ? (
-            <span className="text-[10px] text-error">错误</span>
-          ) : askAnswered ? (
-            <span className="text-[10px] text-success">已答</span>
+          {preview && (
+            <span className="text-[10px] text-ink-faint font-mono truncate max-w-[200px]">
+              {preview}
+            </span>
+          )}
+          {toolCall.result ? (
+            hasError ? (
+              <span className="text-[10px] text-error">错误</span>
+            ) : askAnswered ? (
+              <span className="text-[10px] text-success">已答</span>
+            ) : (
+              <span className="text-[10px] text-success">✓</span>
+            )
           ) : (
-            <span className="text-[10px] text-success">✓</span>
-          )
-        ) : (
-          <Loader2 size={10} className="text-ink-faint animate-spin" />
-        )}
-      </button>
+            <Loader2 size={10} className="text-ink-faint animate-spin" />
+          )}
+        </button>
 
-      {expanded && (
-        <div className="border-t border-canvas-sunken p-2.5 space-y-2 animate-fade-in">
-          <div>
-            <div className="text-[9px] uppercase tracking-wider text-ink-faint mb-1">输入</div>
-            <pre className="text-[11px] bg-canvas-warm rounded p-2 overflow-x-auto max-h-32 font-mono text-ink-muted">
-              {JSON.stringify(toolCall.input, null, 2)}
-            </pre>
-          </div>
-          {toolCall.result && (
+        {expanded && (
+          <div className="border-t border-canvas-sunken p-2.5 space-y-2 animate-fade-in">
             <div>
-              <div className="text-[9px] uppercase tracking-wider text-ink-faint mb-1">
-                结果 {hasError && <span className="text-error">错误</span>}
-              </div>
-              <pre className={`text-[11px] rounded p-2 overflow-x-auto max-h-48 font-mono ${hasError ? 'bg-error-subtle text-error' : 'bg-canvas-warm text-ink-muted'}`}>
-                {typeof toolCall.result.content === 'string'
-                  ? toolCall.result.content.slice(0, 4000)
-                  : JSON.stringify(toolCall.result.content, null, 2)?.slice(0, 4000)}
+              <div className="text-[9px] uppercase tracking-wider text-ink-faint mb-1">输入</div>
+              <pre className="text-[11px] bg-canvas-warm rounded p-2 overflow-x-auto max-h-32 font-mono text-ink-muted">
+                {JSON.stringify(toolCall.input, null, 2)}
               </pre>
             </div>
-          )}
-        </div>
-      )}
-    </div>
+            {toolCall.result && (
+              <div>
+                <div className="text-[9px] uppercase tracking-wider text-ink-faint mb-1">
+                  结果 {hasError && <span className="text-error">错误</span>}
+                </div>
+                <pre className={`text-[11px] rounded p-2 overflow-x-auto max-h-48 font-mono ${hasError ? 'bg-error-subtle text-error' : 'bg-canvas-warm text-ink-muted'}`}>
+                  {typeof toolCall.result.content === 'string'
+                    ? toolCall.result.content.slice(0, 4000)
+                    : JSON.stringify(toolCall.result.content, null, 2)?.slice(0, 4000)}
+                </pre>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    </ToolCallWithRetry>
   );
 }
 
@@ -254,7 +280,7 @@ function TodoListCard({ toolCall }) {
 }
 
 // ─── Tool Calls Group (collapsed by category) ─────────────────
-function ToolCallsGroup({ toolCalls }) {
+function ToolCallsGroup({ toolCalls, onRetryTool }) {
   const [expanded, setExpanded] = useState(false);
 
   // Group by category
@@ -324,8 +350,12 @@ function ToolCallsGroup({ toolCalls }) {
                     // Falls back to generic ToolCallRow for unknown tools.
                     const rich = renderRichToolCard(tc);
                     return rich
-                      ? <div key={tc.id || i}>{rich}</div>
-                      : <ToolCallRow key={tc.id || i} toolCall={tc} />;
+                      ? (
+                        <ToolCallWithRetry key={tc.id || i} toolCall={tc} onRetryTool={onRetryTool}>
+                          {rich}
+                        </ToolCallWithRetry>
+                      )
+                      : <ToolCallRow key={tc.id || i} toolCall={tc} onRetryTool={onRetryTool} />;
                   })}
                 </div>
               </div>
@@ -377,7 +407,7 @@ function UsageDisplay({ usage, model }) {
 // making the whole UI (provider & model menus included) feel laggy. `turn` comes
 // from the persisted `messages` array which is referentially stable while a NEW
 // turn streams into separate state, so memo lets the old turns skip re-render.
-function TurnBubbleInner({ turn, onRetry }) {
+function TurnBubbleInner({ turn, onRetry, onRetryTool }) {
   const [showThinking, setShowThinking] = useState(false);
 
   // Historical turns loaded from .jsonl may have these fields absent or as a
@@ -453,7 +483,7 @@ function TurnBubbleInner({ turn, onRetry }) {
                 let bucket = [];
                 const flushBucket = (keyHint) => {
                   if (bucket.length > 0) {
-                    out.push(<ToolCallsGroup key={`bucket-${keyHint}`} toolCalls={bucket} />);
+                    out.push(<ToolCallsGroup key={`bucket-${keyHint}`} toolCalls={bucket} onRetryTool={onRetryTool} />);
                     bucket = [];
                   }
                 };
@@ -487,7 +517,11 @@ function TurnBubbleInner({ turn, onRetry }) {
                         (b2) => b2.type === 'tool_use' && b2.toolCall?.name === 'TodoWrite'
                       );
                       if (isLatestTodo) {
-                        out.push(<TodoListCard key={`b-${i}`} toolCall={b.toolCall} />);
+                        out.push(
+                          <ToolCallWithRetry key={`b-${i}`} toolCall={b.toolCall} onRetryTool={onRetryTool}>
+                            <TodoListCard toolCall={b.toolCall} />
+                          </ToolCallWithRetry>
+                        );
                       }
                       return;
                     }
@@ -523,16 +557,22 @@ function TurnBubbleInner({ turn, onRetry }) {
                 </div>
               )}
               {fullText && <MarkdownRenderer content={fullText} />}
-              {latestTodo && <div className="mt-2"><TodoListCard toolCall={latestTodo} /></div>}
+              {latestTodo && (
+                <div className="mt-2">
+                  <ToolCallWithRetry toolCall={latestTodo} onRetryTool={onRetryTool}>
+                    <TodoListCard toolCall={latestTodo} />
+                  </ToolCallWithRetry>
+                </div>
+              )}
               {hasInlineCalls && (
                 <div className="mt-2 space-y-2">
                   {inlineCalls.map((tc, i) => (
-                    <InlineToolCard key={tc.id || `inline-${i}`} toolCall={tc} />
+                    <InlineToolCard key={tc.id || `inline-${i}`} toolCall={tc} onRetryTool={onRetryTool} />
                   ))}
                 </div>
               )}
               {hasGroupedCalls && (
-                <div className="mt-2"><ToolCallsGroup toolCalls={groupedCalls} /></div>
+                <div className="mt-2"><ToolCallsGroup toolCalls={groupedCalls} onRetryTool={onRetryTool} /></div>
               )}
             </>
           )}
@@ -548,6 +588,18 @@ function TurnBubbleInner({ turn, onRetry }) {
 
           {/* Usage */}
           <UsageDisplay usage={turn.usage} model={turn.model} />
+          {onRetry && !isLiveStream && turn.uuid !== 'streaming' && (
+            <div className="flex justify-end mt-2">
+              <button
+                onClick={() => onRetry(turn)}
+                className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-[11px] text-ink-faint hover:text-accent hover:bg-canvas-warm transition-colors"
+                title="回滚到这条 AI 回复之前，让 AI 重新生成"
+              >
+                <RotateCcw size={12} />
+                <span>重做这条回复</span>
+              </button>
+            </div>
+          )}
         </div>
       </div>
     </div>

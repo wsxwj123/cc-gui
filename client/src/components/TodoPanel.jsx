@@ -1,5 +1,5 @@
 import React from 'react';
-import { Check, Circle, Loader2 } from 'lucide-react';
+import { Check, Circle, ClipboardList, Loader2 } from 'lucide-react';
 
 /**
  * Renders the latest TodoWrite snapshot from Claude as a checklist above the
@@ -13,8 +13,19 @@ import { Check, Circle, Loader2 } from 'lucide-react';
  * Hidden entirely when todos is null/empty so the composer doesn't grow a
  * useless empty block.
  */
-export function TodoPanel({ todos }) {
-  if (!Array.isArray(todos) || todos.length === 0) return null;
+export function TodoPanel({ todos, plan = '' }) {
+  const hasTodos = Array.isArray(todos) && todos.length > 0;
+  const cleanPlan = String(plan || '').trim();
+  if (!hasTodos && !cleanPlan) return null;
+  if (!hasTodos) {
+    return (
+      <div className="px-6 pt-3 pb-1">
+        <div className="max-w-[var(--content-max)] mx-auto rounded-xl border border-canvas-deep bg-canvas-warm/60 backdrop-blur-sm overflow-hidden">
+          <PlanBlock plan={cleanPlan} />
+        </div>
+      </div>
+    );
+  }
   const done = todos.filter((t) => t.status === 'completed').length;
   const total = todos.length;
   const pct = total === 0 ? 0 : Math.round((done / total) * 100);
@@ -22,6 +33,7 @@ export function TodoPanel({ todos }) {
   return (
     <div className="px-6 pt-3 pb-1">
       <div className="max-w-[var(--content-max)] mx-auto rounded-xl border border-canvas-deep bg-canvas-warm/60 backdrop-blur-sm overflow-hidden">
+        {cleanPlan && <PlanBlock plan={cleanPlan} />}
         {/* Header — title + progress chip + progress bar */}
         <div className="flex items-center gap-2 px-3 py-2 border-b border-canvas-deep/60">
           <span className="text-[11px] font-body font-medium text-ink">任务清单</span>
@@ -42,6 +54,20 @@ export function TodoPanel({ todos }) {
             <TodoRow key={i} todo={t} />
           ))}
         </div>
+      </div>
+    </div>
+  );
+}
+
+function PlanBlock({ plan }) {
+  return (
+    <div className="px-3 py-2 border-b border-canvas-deep/60">
+      <div className="flex items-center gap-2 mb-1">
+        <ClipboardList size={13} className="text-accent shrink-0" />
+        <span className="text-[11px] font-body font-medium text-ink">执行计划</span>
+      </div>
+      <div className="text-[12px] text-ink-soft font-body leading-snug whitespace-pre-wrap max-h-32 overflow-y-auto">
+        {plan}
       </div>
     </div>
   );

@@ -71,11 +71,32 @@ export function useWebSocket() {
               // auto-allowed because session A happens to be in bypass/accept
               // (the "授权串号" bug). Falls back to 'default' (prompt) when the
               // session has no stored mode.
-              const modeMap = useStore.getState().permissionModeBySession || {};
-              const mode = modeMap[req.sessionId] || 'default';
+              const mode = useStore.getState().getPermissionModeFor(req.sessionId);
               const READ_CLASS = ['Read', 'Glob', 'Grep', 'LS', 'TodoWrite', 'NotebookRead', 'Skill'];
+              const PLAN_WRITE_CLASS = ['Edit', 'MultiEdit', 'Write', 'NotebookEdit'];
               if (mode === 'bypassPermissions') {
                 console.log('[cgui-perm] auto-allow: bypass', req.id);
+                fetch(`/api/permissions/respond/${req.id}`, {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ decision: 'allow' }),
+                }).catch(() => {});
+                break;
+              }
+              if (mode === 'plan' && PLAN_WRITE_CLASS.includes(req.toolName)) {
+                console.log('[cgui-perm] deny: plan write', req.id, req.toolName);
+                fetch(`/api/permissions/respond/${req.id}`, {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({
+                    decision: 'deny',
+                    reason: '当前是规划模式：禁止修改文件。请先用 ExitPlanMode 提交计划供用户审批。',
+                  }),
+                }).catch(() => {});
+                break;
+              }
+              if (mode === 'plan' && READ_CLASS.includes(req.toolName)) {
+                console.log('[cgui-perm] auto-allow: plan+readClass', req.id, req.toolName);
                 fetch(`/api/permissions/respond/${req.id}`, {
                   method: 'POST',
                   headers: { 'Content-Type': 'application/json' },

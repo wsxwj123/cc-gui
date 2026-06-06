@@ -8,7 +8,7 @@ const router = Router();
  *
  * Tauri WebView 默认拦截 `<a target="_blank">` 跳转(没有"新窗口"概念),
  * 用户点链接没反应。所有"打开外部 URL"统一走这个端点,server 用系统命令
- * 打开默认浏览器:macOS `open`,Windows `start`,Linux `xdg-open`。
+ * 打开默认浏览器:macOS `open`,Windows `explorer.exe`,Linux `xdg-open`。
  *
  * 安全:只接 http/https,拒绝 file:// / javascript: / data: 等可能危险的协议。
  */

@@ -10,7 +10,7 @@ function formatTime(ts) {
   }
 }
 
-function ChangeItem({ change }) {
+function ChangeItem({ change, sessionId, cwd }) {
   const [expanded, setExpanded] = useState(false);
   const [busy, setBusy] = useState(null);
   const [reverted, setReverted] = useState(false);
@@ -30,7 +30,26 @@ function ChangeItem({ change }) {
       });
       const d = await res.json();
       if (res.ok) setReverted(true);
-      else alert('恢复失败：' + (d.error || res.status));
+      else if (sessionId && cwd) {
+        const params = new URLSearchParams();
+        if (change.timestamp) params.set('timestamp', change.timestamp);
+        params.set('before', 'true');
+        const rr = await fetch(`/api/checkpoints/${sessionId}/resolve?${params.toString()}`);
+        const rd = await rr.json().catch(() => ({}));
+        if (!rr.ok || !rd.sha) {
+          alert('恢复失败：' + (d.error || res.status));
+          return;
+        }
+        const cr = await fetch(`/api/checkpoints/${sessionId}/restore-file`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ sha: rd.sha, cwd, file: change.file }),
+        });
+        const cd = await cr.json().catch(() => ({}));
+        if (cr.ok) setReverted(true);
+        else alert('恢复失败：' + (cd.error || cr.status));
+      } else {
+        alert('恢复失败：' + (d.error || res.status));
+      }
     } catch (err) { alert('恢复失败：' + err.message); }
     setBusy(null);
   };
@@ -121,7 +140,7 @@ function ChangeItem({ change }) {
   );
 }
 
-export function FileChangesPanel({ sessionId, projectHash }) {
+export function FileChangesPanel({ sessionId, projectHash, cwd }) {
   const [changes, setChanges] = useState([]);
   const [loading, setLoading] = useState(true);
 
@@ -174,7 +193,7 @@ export function FileChangesPanel({ sessionId, projectHash }) {
         </button>
       </div>
       {changes.map((change, i) => (
-        <ChangeItem key={change.uuid || i} change={change} />
+        <ChangeItem key={change.uuid || i} change={change} sessionId={sessionId} cwd={cwd} />
       ))}
     </div>
   );

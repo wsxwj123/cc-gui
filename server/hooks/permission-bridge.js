@@ -95,13 +95,11 @@ async function main() {
   //    answer and continues (verified). Gating it here also stops plan mode from
   //    passing it straight through.
   //
-  // Edit/Write/NotebookEdit are intentionally NOT gated in plan mode: empirically
-  // `claude -p --permission-mode plan` HARD-BLOCKS the actual filesystem write
-  // inside the CLI regardless of the hook's decision, so a popup would ask the
-  // user to authorize an edit that can never happen — and it would appear BEFORE
-  // the plan-review card (the model emits Edit attempts before ExitPlanMode),
-  // making the flow feel backwards. The CLI's own plan enforcement is the guard.
   const PLAN_GATED = ['ExitPlanMode', 'AskUserQuestion'];
+  const PLAN_WRITE_BLOCKED = ['Edit', 'MultiEdit', 'Write', 'NotebookEdit'];
+  if (process.env.CGUI_PLAN_MODE && PLAN_WRITE_BLOCKED.includes(toolName)) {
+    deny('当前是规划模式：禁止修改文件。请先用 ExitPlanMode 提交计划供用户审批。');
+  }
   if (process.env.CGUI_PLAN_MODE && !PLAN_GATED.includes(toolName)) {
     allow(`plan-mode passthrough ${toolName}`);
   }

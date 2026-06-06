@@ -147,8 +147,9 @@ const TYPE_LABELS = {
   plugin: '插件',
 };
 
-export function ChatInput({ onSend, onStop, onAccelerate, disabled, isStreaming, backgroundWorking = false, queueLength = 0, queueItems = [], onRemoveFromQueue, onEditFromQueue, todos = null, permKey = null, sessionId = null }) {
+export function ChatInput({ onSend, onStop, onAccelerate, disabled, isStreaming, backgroundWorking = false, queueLength = 0, queueItems = [], onRemoveFromQueue, onEditFromQueue, todos = null, plan = '', permKey = null, sessionId = null }) {
   const [text, setText] = useState('');
+  const [historyCursor, setHistoryCursor] = useState(-1);
   const [showCommands, setShowCommands] = useState(false);
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [commands, setCommands] = useState([]);
@@ -159,6 +160,8 @@ export function ChatInput({ onSend, onStop, onAccelerate, disabled, isStreaming,
   const [dragging, setDragging] = useState(false);
   const textareaRef = useRef(null);
   const fileInputRef = useRef(null);
+  const draftBeforeHistoryRef = useRef('');
+  const navigatingHistoryRef = useRef(false);
   // Permission mode lives in the store, keyed per-session via permKey so each
   // conversation keeps its own mode. Fall back to the global value only when
   // no key is supplied (shouldn't happen in normal render).
@@ -178,6 +181,37 @@ export function ChatInput({ onSend, onStop, onAccelerate, disabled, isStreaming,
     } catch {}
     useStore.getState().setRemoteControl(sessionId, false);
   };
+
+  const draftKey = `cgui-draft:${permKey || 'global'}`;
+  const readHistory = () => {
+    try {
+      const parsed = JSON.parse(localStorage.getItem('cgui-input-history') || '[]');
+      return Array.isArray(parsed) ? parsed.filter((x) => typeof x === 'string' && x.trim()) : [];
+    } catch {
+      return [];
+    }
+  };
+  const saveHistoryEntry = (value) => {
+    const v = String(value || '').trim();
+    if (!v) return;
+    const list = readHistory().filter((x) => x !== v);
+    list.unshift(v);
+    try { localStorage.setItem('cgui-input-history', JSON.stringify(list.slice(0, 100))); } catch {}
+  };
+
+  useEffect(() => {
+    try { setText(localStorage.getItem(draftKey) || ''); }
+    catch { setText(''); }
+    setHistoryCursor(-1);
+    draftBeforeHistoryRef.current = '';
+  }, [draftKey]);
+
+  useEffect(() => {
+    try {
+      if (text) localStorage.setItem(draftKey, text);
+      else localStorage.removeItem(draftKey);
+    } catch {}
+  }, [draftKey, text]);
 
   // Pane-targeted composer fill ("重新编辑" rollback + queue edit). The event
   // carries targetKey = the originating pane's permKey; only the pane whose key
@@ -272,6 +306,14 @@ export function ChatInput({ onSend, onStop, onAccelerate, disabled, isStreaming,
     setAttachments((prev) => prev.filter((a) => a.path !== path));
   };
 
+  const handleTextChange = (e) => {
+    if (!navigatingHistoryRef.current) {
+      setHistoryCursor(-1);
+      draftBeforeHistoryRef.current = '';
+    }
+    setText(e.target.value);
+  };
+
   // Refresh slash commands whenever the model/provider may have changed
   // (re-fetch on focus so cc switch picks up without page reload).
   useEffect(() => {
@@ -338,10 +380,15 @@ export function ChatInput({ onSend, onStop, onAccelerate, disabled, isStreaming,
         `@${a.path}`
       )).join('\n')
       : '';
-    onSend((trimmed || '请查看这些附件') + attachmentRefs);
+    const outbound = (trimmed || '请查看这些附件') + attachmentRefs;
+    if (trimmed) saveHistoryEntry(trimmed);
+    onSend(outbound);
     setText('');
+    setHistoryCursor(-1);
+    draftBeforeHistoryRef.current = '';
     setAttachments([]);
     setShowCommands(false);
+    try { localStorage.removeItem(draftKey); } catch {}
     textareaRef.current?.focus();
   };
 
@@ -384,6 +431,41 @@ export function ChatInput({ onSend, onStop, onAccelerate, disabled, isStreaming,
       }
     }
 
+    if ((e.key === 'ArrowUp' || e.key === 'ArrowDown') && !e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey) {
+      const el = textareaRef.current;
+      const atStart = !el || el.selectionStart === 0;
+      const atEnd = !el || el.selectionStart === el.value.length;
+      const canUseHistory = !text.startsWith('/') && (text.trim() === '' || (e.key === 'ArrowUp' ? atStart : historyCursor >= 0 && atEnd));
+      if (canUseHistory) {
+        const history = readHistory();
+        if (history.length > 0 || historyCursor >= 0) {
+          e.preventDefault();
+          navigatingHistoryRef.current = true;
+          if (e.key === 'ArrowUp') {
+            const nextCursor = Math.min(historyCursor + 1, history.length - 1);
+            if (historyCursor === -1) draftBeforeHistoryRef.current = text;
+            if (nextCursor >= 0) {
+              setHistoryCursor(nextCursor);
+              setText(history[nextCursor]);
+            }
+          } else {
+            const nextCursor = historyCursor - 1;
+            setHistoryCursor(nextCursor);
+            setText(nextCursor >= 0 ? history[nextCursor] : draftBeforeHistoryRef.current);
+          }
+          setTimeout(() => {
+            const ta = textareaRef.current;
+            if (ta) {
+              const pos = ta.value.length;
+              ta.setSelectionRange(pos, pos);
+            }
+            navigatingHistoryRef.current = false;
+          }, 0);
+          return;
+        }
+      }
+    }
+
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       handleSend();
@@ -405,7 +487,7 @@ export function ChatInput({ onSend, onStop, onAccelerate, disabled, isStreaming,
       />
       {/* TODO checklist — sits between permission popup and composer, mirroring
           Claude Desktop. Auto-hides when there's no TodoWrite snapshot. */}
-      <TodoPanel todos={todos} />
+      <TodoPanel todos={todos} plan={plan} />
       {rcLocked && (
         <div className="px-6 pt-3">
           <div className="max-w-[var(--content-max)] mx-auto flex items-center justify-between gap-3 rounded-lg border border-green-200 bg-green-50 px-3 py-2 text-[12px] text-green-800 font-body">
@@ -553,10 +635,10 @@ export function ChatInput({ onSend, onStop, onAccelerate, disabled, isStreaming,
           <textarea
             ref={textareaRef}
             value={text}
-            onChange={(e) => setText(e.target.value)}
+            onChange={handleTextChange}
             onKeyDown={handleKeyDown}
             onPaste={handlePaste}
-            placeholder={rcLocked ? '已交给手机远程控制 · 点上方「收回控制」解锁' : (dragging ? '松开以添加图片或文本…' : '输入消息... (/ 打开命令)')}
+            placeholder={rcLocked ? '已交给手机远程控制 · 点上方「收回控制」解锁' : (dragging ? '松开以添加图片、PDF、Office 或文本…' : '输入消息... (/ 打开命令)')}
             disabled={disabled || rcLocked}
             rows={1}
             className="flex-1 bg-transparent text-[14px] text-ink placeholder-ink-faint resize-none focus:outline-none font-body leading-relaxed min-h-[24px] max-h-[200px]"

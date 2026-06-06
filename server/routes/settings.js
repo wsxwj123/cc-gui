@@ -44,6 +44,37 @@ function isClaudeModel(id) {
   if (!id || typeof id !== 'string') return false;
   return /claude/i.test(id) || ['sonnet', 'opus', 'haiku'].includes(id);
 }
+
+const PROVIDER_ENV_KEYS = new Set([
+  'ANTHROPIC_BASE_URL',
+  'ANTHROPIC_API_URL',
+  'ANTHROPIC_AUTH_TOKEN',
+  'ANTHROPIC_API_KEY',
+  'ANTHROPIC_MODEL',
+  'CLAUDE_MODEL',
+  'ANTHROPIC_DEFAULT_HAIKU_MODEL',
+  'ANTHROPIC_DEFAULT_SONNET_MODEL',
+  'ANTHROPIC_DEFAULT_OPUS_MODEL',
+  'ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME',
+  'ANTHROPIC_DEFAULT_SONNET_MODEL_NAME',
+  'ANTHROPIC_DEFAULT_OPUS_MODEL_NAME',
+  'ANTHROPIC_REASONING_MODEL',
+  'ANTHROPIC_SMALL_FAST_MODEL',
+]);
+
+function mergeProviderEnv(currentEnv = {}, providerEnv = {}) {
+  const env = { ...currentEnv };
+  for (const key of PROVIDER_ENV_KEYS) delete env[key];
+  for (const [key, value] of Object.entries(providerEnv || {})) {
+    if (PROVIDER_ENV_KEYS.has(key) && value != null && value !== '') env[key] = value;
+  }
+  return env;
+}
+
+async function readCurrentSettings() {
+  try { return JSON.parse(await readFile(SETTINGS_PATH, 'utf-8')); }
+  catch { return {}; }
+}
 // Remembers the LAST provider switched via the GUI (claude or openai). CC Switch's
 // own is_current flag never reflects a GUI switch (we only write settings.json,
 // not its db), so GET /providers reads this marker to mark the right row current —
@@ -416,19 +447,19 @@ router.post('/provider/switch', async (req, res) => {
     // to deepseek. So for official: strip routing/auth env (use OAuth) and any
     // NON-claude model overrides, then write directly (no proxy).
     if (hit.category === 'official') {
-      const env = { ...(snapshot.env || {}) };
+      const current = await readCurrentSettings();
+      const env = { ...(current.env || {}) };
       for (const k of ['ANTHROPIC_BASE_URL', 'ANTHROPIC_API_URL', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_API_KEY']) delete env[k];
       for (const k of Object.keys(env)) {
         if (/_MODEL$/.test(k) && !isClaudeModel(env[k])) { delete env[k]; delete env[k + '_NAME']; }
       }
       if (model && isClaudeModel(model)) env.ANTHROPIC_MODEL = model;
-      const next = { ...snapshot, env };
+      const next = { ...current, env };
       // Preserve the user's CURRENT default model — do NOT let cc-switch's official
       // snapshot (which carries model:haiku) overwrite it on every switch. Priority:
       // explicit claude request > live settings.json model (if a claude id/alias) >
       // snapshot's. This is why a user-set "sonnet" used to silently revert to haiku.
-      let curModel;
-      try { curModel = JSON.parse(await readFile(SETTINGS_PATH, 'utf-8')).model; } catch {}
+      const curModel = current.model;
       if (model && isClaudeModel(model)) next.model = model;
       else if (isClaudeModel(curModel)) next.model = curModel;
       const ts = new Date().toISOString().replace(/[:.]/g, '-');
@@ -460,7 +491,11 @@ router.post('/provider/switch', async (req, res) => {
     const ts = new Date().toISOString().replace(/[:.]/g, '-');
     await copyFile(SETTINGS_PATH, `${SETTINGS_PATH}.${ts}.bak`).catch(() => {});
 
-    await writeFile(SETTINGS_PATH, JSON.stringify(snapshot, null, 2));
+    const current = await readCurrentSettings();
+    const env = mergeProviderEnv(current.env, snapshot.env || {});
+    const next = { ...current, env };
+    if (snapshot.model) next.model = snapshot.model;
+    await writeFile(SETTINGS_PATH, JSON.stringify(next, null, 2));
     await writeActiveProviderId(hit.id);
     await unlink(ANTHROPIC_ACTIVE_PATH).catch(() => {});
     // Switching to a NATIVE claude provider means we're off the OpenAI proxy.
@@ -494,8 +529,7 @@ async function switchToOpenAIUpstream(up, requestedModel, res) {
   setOpenAIUpstream({ baseURL: up.baseURL, apiKey: up.apiKey });
 
   // Start from the live settings.json so hooks/permissions survive the switch.
-  let current = {};
-  try { current = JSON.parse(await readFile(SETTINGS_PATH, 'utf-8')); } catch {}
+  const current = await readCurrentSettings();
   const env = { ...(current.env || {}) };
   env.ANTHROPIC_BASE_URL = `http://127.0.0.1:${port}`;
   // The CLI must send *some* token; the proxy ignores it and injects the real
@@ -538,12 +572,14 @@ async function switchToAnthropicUpstream(up, requestedModel, res) {
   if (!port) return res.status(500).json({ error: 'anthropic 代理启动失败(端口占用)' });
   setAnthropicUpstream({ baseURL: up.baseURL, authToken: up.authToken });
 
-  // Use the provider's own snapshot as the settings base (preserves effortLevel,
-  // enabledPlugins, model aliases) but redirect BASE_URL to the loopback proxy.
+  // Preserve the current settings base (hooks/MCP/plugins/permissions) and only
+  // import provider env/model aliases from the provider snapshot, then redirect
+  // BASE_URL to the loopback proxy.
   // AUTH_TOKEN is left as-is — the CLI's value is ignored (OAuth overrides it and
   // the proxy strips both), the proxy injects the real token from its upstream.
   const snapshot = (up.snapshot && typeof up.snapshot === 'object') ? up.snapshot : {};
-  const env = { ...(snapshot.env || {}) };
+  const current = await readCurrentSettings();
+  const env = mergeProviderEnv(current.env, snapshot.env || {});
   env.ANTHROPIC_BASE_URL = `http://127.0.0.1:${port}`;
   // Pick the active model: explicit request (if valid) > the snapshot's existing
   // ANTHROPIC_MODEL (if it belongs to THIS provider) > the provider's first model.
@@ -554,7 +590,8 @@ async function switchToAnthropicUpstream(up, requestedModel, res) {
     ? requestedModel
     : (models.includes(env.ANTHROPIC_MODEL) ? env.ANTHROPIC_MODEL : (models[0] || env.ANTHROPIC_MODEL));
   if (chosen) env.ANTHROPIC_MODEL = chosen; else delete env.ANTHROPIC_MODEL;
-  const next = { ...snapshot, env };
+  const next = { ...current, env };
+  if (snapshot.model) next.model = snapshot.model;
   const ts = new Date().toISOString().replace(/[:.]/g, '-');
   await copyFile(SETTINGS_PATH, `${SETTINGS_PATH}.${ts}.bak`).catch(() => {});
   await writeFile(SETTINGS_PATH, JSON.stringify(next, null, 2));
@@ -584,8 +621,7 @@ async function switchToCustomProvider(p, requestedModel, res) {
   // passthrough proxy so a logged-in subscription's OAuth token can't poison it.
   const models = p.models || [];
   if (!isOfficialAnthropic(p.baseURL)) {
-    let cur = {};
-    try { cur = JSON.parse(await readFile(SETTINGS_PATH, 'utf-8')); } catch {}
+    const cur = await readCurrentSettings();
     const snapEnv = { ...(cur.env || {}) };
     delete snapEnv.ANTHROPIC_DEFAULT_HAIKU_MODEL;
     delete snapEnv.ANTHROPIC_DEFAULT_SONNET_MODEL;
@@ -598,8 +634,7 @@ async function switchToCustomProvider(p, requestedModel, res) {
   // official-anthropic custom upstream (rare) — direct, uses the CLI OAuth.
   const model = (requestedModel && models.includes(requestedModel))
     ? requestedModel : (models[0] || requestedModel || '');
-  let current = {};
-  try { current = JSON.parse(await readFile(SETTINGS_PATH, 'utf-8')); } catch {}
+  const current = await readCurrentSettings();
   const env = { ...(current.env || {}) };
   env.ANTHROPIC_BASE_URL = p.baseURL;
   env.ANTHROPIC_AUTH_TOKEN = p.apiKey;

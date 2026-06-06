@@ -3,6 +3,8 @@ client/node_modules/
 client/dist/
 *.log
 .DS_Store
+*.swp
+*.swo
 .claude/
 AGENTS.md
 .cgui-local-disabled/

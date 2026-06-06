@@ -159,7 +159,7 @@ function RollbackMenu({ message, onAction }) {
       className="w-64 max-w-[calc(100vw-16px)] py-1 rounded-lg shadow-xl bg-canvas border border-canvas-deep animate-glass-rise"
     >
       <div className="px-3 py-2 text-[10px] text-ink-faint uppercase tracking-wider font-body border-b border-canvas-deep">
-        回滚此消息{hasSha ? '' : ' · 无 git 快照'}
+        回滚此消息{hasSha ? '' : ' · 自动查找快照'}
       </div>
       <button
         onClick={() => { onAction({ mode: 'message' }); setOpen(false); }}
@@ -182,10 +182,9 @@ function RollbackMenu({ message, onAction }) {
         </div>
       </button>
       <button
-        disabled={!hasSha}
         onClick={() => { onAction({ mode: 'files' }); setOpen(false); }}
-        className={`w-full text-left px-3 py-2.5 flex items-start gap-2 ${hasSha ? 'hover:bg-canvas-warm' : 'opacity-50 cursor-not-allowed'}`}
-        title={hasSha ? '' : '没有可用的 git 快照'}
+        className="w-full text-left px-3 py-2.5 hover:bg-canvas-warm flex items-start gap-2"
+        title={hasSha ? '' : '点击后会按消息时间和文本查找对应快照'}
       >
         <X size={13} className="text-amber-600 mt-0.5 shrink-0" />
         <div>
