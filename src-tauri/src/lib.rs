@@ -156,7 +156,9 @@ fn spawn_backend(app: &tauri::App, port: u16) -> Option<Child> {
     let mut cmd = Command::new(&node);
     cmd.arg(&entry)
         .env("PORT", port.to_string())
-        .env("HOST", BACKEND_HOST);
+        .env("HOST", BACKEND_HOST)
+        .env("CGUI_TAURI", "1")
+        .env("CGUI_DISABLE_FILE_WATCHER", "1");
     // 把 node 所在目录 + Homebrew/Cellar 常见目录前置到子进程 PATH,
     // 这样 server 之后 spawn `claude` / `git` / `cargo` 等也能找到。
     let extra_dirs: Vec<String> = node.parent().map(|d| d.to_string_lossy().to_string()).into_iter()

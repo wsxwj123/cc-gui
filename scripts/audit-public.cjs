@@ -47,6 +47,7 @@ for (const target of [
 }
 
 const distDir = path.join(root, 'client', 'dist');
+const tauriBundleDir = path.join(root, 'src-tauri', 'target', 'release', 'bundle');
 const blockedDistPath = /(?:botcontrol\.local|bots\.local|\.local\.(?:js|jsx))/i;
 const blockedDistText = [
   '/api/bots/',
@@ -78,6 +79,15 @@ for (const file of walk(distDir)) {
     if (text.includes(needle)) {
       failures.push(`${relative} contains local-only marker: ${needle}`);
       break;
+    }
+  }
+}
+
+if (process.env.CGUI_AUDIT_TAURI_BUNDLE === '1') {
+  for (const file of walk(tauriBundleDir)) {
+    const relative = rel(file);
+    if (blockedDistPath.test(relative)) {
+      failures.push(`${relative} should not exist in public tauri bundle`);
     }
   }
 }

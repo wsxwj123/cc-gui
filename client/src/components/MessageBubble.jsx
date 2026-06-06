@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { createPortal } from 'react-dom';
-import { User, Brain, Copy, Check, RotateCcw, Pencil, X } from 'lucide-react';
+import { User, Brain, Copy, Check, RotateCcw, Pencil } from 'lucide-react';
 import { computeCost, formatCost } from '../utils/pricing.js';
 import { copyText } from '../utils/clipboard.js';
 import { useStore } from '../stores/sessionStore.js';
@@ -91,10 +91,10 @@ import { ToolCallCard } from './ToolCallCard.jsx';
 import { MarkdownRenderer } from './MarkdownRenderer.jsx';
 
 // Per-message rollback menu. Shows three choices on click:
-//   - rollback message + AI replies after it (chat trim)
-//   - rollback files via git checkpoint sha
-//   - both
-// onAction is invoked with { mode: 'message'|'files'|'both' } or { mode: 'edit' }.
+//   - rollback message + later replies only (chat trim)
+//   - rollback message + files, then resend
+//   - rollback message + files, then put text back in composer
+// onAction is invoked with { mode: 'message'|'both'|'edit' }.
 function RollbackMenu({ message, onAction }) {
   const [open, setOpen] = useState(false);
   const [coords, setCoords] = useState(null); // {top,right} viewport coords
@@ -167,29 +167,30 @@ function RollbackMenu({ message, onAction }) {
       >
         <RotateCcw size={13} className="text-accent mt-0.5 shrink-0" />
         <div>
-          <div className="text-[13px] font-medium text-ink font-body">回滚并重发</div>
-          <div className="text-[11px] text-ink-faint font-body">还原 {hasSha ? 'git + ' : ''}会话到发送前，再次发送本条</div>
+          <div className="text-[13px] font-medium text-ink font-body">仅回退消息</div>
+          <div className="text-[11px] text-ink-faint font-body">只裁剪会话记录，不动项目文件</div>
+        </div>
+      </button>
+      <button
+        onClick={() => { onAction({ mode: 'both' }); setOpen(false); }}
+        className="w-full text-left px-3 py-2.5 hover:bg-canvas-warm flex items-start gap-2"
+        title={hasSha ? '' : '点击后会按消息时间和文本查找对应快照'}
+      >
+        <RotateCcw size={13} className="text-amber-600 mt-0.5 shrink-0" />
+        <div>
+          <div className="text-[13px] font-medium text-ink font-body">回退消息和文件</div>
+          <div className="text-[11px] text-ink-faint font-body">还原文件快照，裁剪会话，再次发送本条</div>
         </div>
       </button>
       <button
         onClick={() => { onAction({ mode: 'edit' }); setOpen(false); }}
         className="w-full text-left px-3 py-2.5 hover:bg-canvas-warm flex items-start gap-2"
+        title={hasSha ? '' : '点击后会按消息时间和文本查找对应快照'}
       >
         <Pencil size={13} className="text-accent mt-0.5 shrink-0" />
         <div>
-          <div className="text-[13px] font-medium text-ink font-body">重新编辑</div>
-          <div className="text-[11px] text-ink-faint font-body">还原 {hasSha ? 'git + ' : ''}会话，文本回到输入框</div>
-        </div>
-      </button>
-      <button
-        onClick={() => { onAction({ mode: 'files' }); setOpen(false); }}
-        className="w-full text-left px-3 py-2.5 hover:bg-canvas-warm flex items-start gap-2"
-        title={hasSha ? '' : '点击后会按消息时间和文本查找对应快照'}
-      >
-        <X size={13} className="text-amber-600 mt-0.5 shrink-0" />
-        <div>
-          <div className="text-[13px] font-medium text-ink font-body">只还原文件</div>
-          <div className="text-[11px] text-ink-faint font-body">仅 git 还原，保留会话</div>
+          <div className="text-[13px] font-medium text-ink font-body">编辑后重发</div>
+          <div className="text-[11px] text-ink-faint font-body">自动回退文件，文本回到输入框</div>
         </div>
       </button>
     </div>

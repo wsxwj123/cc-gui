@@ -125,7 +125,7 @@ const app = express();
 // proxies /api + /ws server-side. So the only legitimate browser origins are
 // localhost/127.0.0.1. Reject everything else to blunt drive-by cross-origin
 // requests from arbitrary web pages the user may have open.
-app.use(cors((req, cb) => ({
+app.use(cors((req, cb) => cb(null, {
   origin: (origin, originCb) => {
     if (isAllowedBrowserOrigin(origin, req)) return originCb(null, true);
     const err = new Error('Cross-origin request blocked by Claude GUI');
@@ -216,19 +216,21 @@ app.use('/api', versionCheckRoutes);
 app.use('/api', downloadUpdateRoutes);
 app.use('/api', openUrlRoutes);
 
-// Auto-load optional local-only routes (server/routes/*.local.js) — gitignored
-// personal integrations. Absent on a fresh checkout, so this is a no-op there.
-// Mounted under /api AFTER authMiddleware, so they inherit the password gate.
-try {
-  const routesDir = join(__dirname, 'routes');
-  const localFiles = (await readdir(routesDir)).filter((f) => f.endsWith('.local.js'));
-  for (const f of localFiles) {
-    try {
-      const mod = await import(`./routes/${f}`);
-      if (mod.default) { app.use('/api', mod.default); console.log(`[local] mounted routes/${f}`); }
-    } catch (e) { console.warn(`[local] failed to load routes/${f}:`, e.message); }
-  }
-} catch {}
+// Auto-load optional local-only routes only when explicitly requested. These
+// files are gitignored personal integrations; packaged/public builds must not
+// activate them just because a local working tree had them during bundling.
+if (process.env.CGUI_ENABLE_LOCAL_ROUTES === '1') {
+  try {
+    const routesDir = join(__dirname, 'routes');
+    const localFiles = (await readdir(routesDir)).filter((f) => f.endsWith('.local.js'));
+    for (const f of localFiles) {
+      try {
+        const mod = await import(`./routes/${f}`);
+        if (mod.default) { app.use('/api', mod.default); console.log(`[local] mounted routes/${f}`); }
+      } catch (e) { console.warn(`[local] failed to load routes/${f}:`, e.message); }
+    }
+  } catch {}
+}
 
 // GET /api/network — current binding + LAN addresses for the Settings UI.
 function lanIps() {
@@ -521,15 +523,19 @@ function broadcast(data) {
 // connected client so ModelSelector / ProviderAvatar can refetch /api/model and
 // reflect the new provider without a page reload.
 let watcher = null;
-try {
-  watcher = setupFileWatcher((eventType, filePath) => {
-    if (filePath.endsWith('/.claude/settings.json') || filePath.endsWith('\\.claude\\settings.json')) {
-      broadcast({ type: 'provider-change', path: filePath });
-    }
-    broadcast({ type: 'file-change', eventType, path: filePath });
-  });
-} catch {
-  console.warn('File watcher failed to start (chokidar)');
+if (process.env.CGUI_DISABLE_FILE_WATCHER !== '1') {
+  try {
+    watcher = setupFileWatcher((eventType, filePath) => {
+      if (filePath.endsWith('/.claude/settings.json') || filePath.endsWith('\\.claude\\settings.json')) {
+        broadcast({ type: 'provider-change', path: filePath });
+      }
+      broadcast({ type: 'file-change', eventType, path: filePath });
+    });
+  } catch {
+    console.warn('File watcher failed to start (chokidar)');
+  }
+} else {
+  console.log('[file-watcher] disabled for packaged Tauri backend');
 }
 
 // Don't let a single bad request kill the whole dev server. Log loudly,

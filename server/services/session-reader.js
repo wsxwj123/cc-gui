@@ -337,7 +337,7 @@ function classifyTool(name) {
  * never a real user prompt — drop so it stops appearing as 16:30 你 「...killed」.
  */
 function isLocalCommandEcho(text) {
-  return /^\s*<(local-command-(caveat|stdout|stderr)|command-(name|message|args)|task-notification)\b/.test(text);
+  return /^\s*<(local-command-(caveat|stdout|stderr)|command-(name|message|args)|task-notification|cgui-tool-retry)\b/.test(text);
 }
 
 /**

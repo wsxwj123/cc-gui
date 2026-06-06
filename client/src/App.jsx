@@ -2152,14 +2152,14 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
   const messageQueue = messageQueueRaw || EMPTY_ARRAY;
 
   const handleSend = useCallback(async (prompt, opts = {}) => {
-    const { reattachPid, appendSystemPrompt } = opts;
+    const { reattachPid, appendSystemPrompt, hiddenUserMessage = false } = opts;
     // Intercept the /remote-control (alias /rc) command. It CANNOT be sent
     // through `claude -p` — slash commands are interactive-only and the CLI
     // rejects them ("isn't available in this environment"). Instead we launch
     // `claude --remote-control --resume <id>` in a real terminal (TTY required)
     // so the Claude mobile app can take over; the GUI keeps syncing via jsonl.
     let checkpointPromise = Promise.resolve(null);
-    if (!reattachPid) {
+    if (!reattachPid && !hiddenUserMessage) {
       const cmd = (prompt || '').trim().toLowerCase();
       if (cmd === '/remote-control' || cmd === '/rc' || cmd === 'remote-control') {
         const sel = getLocalSession();
@@ -2301,7 +2301,7 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
         }
       }
     } catch {}
-    } // end if (!reattachPid)
+    } // end if (!reattachPid && !hiddenUserMessage)
 
     // Did this turn actually emit assistant content? Declared out here (not in
     // the try) so the finally can read it: gates the post-stream poll so an
@@ -2972,12 +2972,11 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
     }
   }, [selectedSession]);
 
-  // Roll back a user message. Three modes:
-  //   'message' — restore git (if sha) + trim on-disk jsonl + trim UI + auto re-send
-  //                the original text. "Pretend I never sent this and try again."
-  //   'edit'    — same restore as above, but instead of auto-resend, drop the
-  //                text into the composer so the user can edit before sending.
-  //   'files'   — git restore only; conversation untouched.
+  // Roll back a user message. Modes:
+  //   'message' — trim on-disk jsonl + trim UI only. Files stay untouched.
+  //   'both'    — restore git checkpoint + trim jsonl + auto re-send original text.
+  //   'edit'    — restore git checkpoint + trim jsonl + put original text in composer.
+  //   'files'   — legacy compatibility: git restore only; conversation untouched.
   //
   // We MUST trim the on-disk jsonl too. Claude CLI resumes a session by
   // reading the jsonl; without trimming it, the next prompt sees the rolled-
@@ -3038,7 +3037,7 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
       return;
     }
 
-    // ── message / edit: full rollback ─────────────────────────
+    // ── message / both / edit ─────────────────────────────────
     // For edit mode, fill the composer FIRST — before any state lookups,
     // index checks, or awaits. Even if idx lookup fails or the message has
     // already been removed from both arrays (re-fetch raced ahead, etc.),
@@ -3054,16 +3053,29 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
 
     if (idxInChat === -1 && idxInStore === -1) return;
 
-    // 1) git restore (best-effort — silently skip if no sha / no repo)
-    const checkpointSha = sel?.sessionId && cwd ? await resolveCheckpointSha() : null;
-    if (checkpointSha && sel?.sessionId && cwd) {
+    // 1) git restore only for modes that explicitly include files.
+    const shouldRestoreFiles = mode === 'both' || mode === 'edit';
+    const checkpointSha = shouldRestoreFiles && sel?.sessionId && cwd ? await resolveCheckpointSha() : null;
+    if (shouldRestoreFiles && !checkpointSha) {
+      alert('找不到这条消息发送前的文件快照，无法还原文件。');
+      return;
+    }
+    if (shouldRestoreFiles && checkpointSha && sel?.sessionId && cwd) {
       try {
-        await fetch(`/api/checkpoints/${sel.sessionId}/restore`, {
+        const r = await fetch(`/api/checkpoints/${sel.sessionId}/restore`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ sha: checkpointSha, cwd }),
         });
-      } catch {}
+        if (!r.ok) {
+          const e = await r.json().catch(() => ({}));
+          alert('文件还原失败：' + (e.error || r.status));
+          return;
+        }
+      } catch (err) {
+        alert('文件还原失败：' + err.message);
+        return;
+      }
     }
 
     // 2) trim on-disk jsonl so the resumed CLI doesn't see stale history.
@@ -3126,7 +3138,8 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
 
     // 6) act per mode
     if (mode === 'edit') return; // composer was filled at the top of this branch
-    // mode === 'message': auto-resend.
+    if (mode === 'message') return;
+    // mode === 'both': auto-resend.
     if (originalText && handleSendRef.current) {
       setTimeout(() => {
         if (typeof resendText === 'object' && resendText) {
@@ -3155,40 +3168,65 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
       alert('找不到该 AI 回复对应的用户消息,无法重做');
       return;
     }
-    handleRollback(userMsg, { mode: 'message' });
+    handleRollback(userMsg, { mode: 'both' });
   }, [messages, chatMessages, handleRollback]);
 
   const handleRetryTool = useCallback((turn, toolCall) => {
-    if (!turn?.uuid || !toolCall?.name) return;
-    const all = [...messages, ...chatMessages];
-    const turnIdx = all.findIndex((m) => m.uuid === turn.uuid);
-    if (turnIdx === -1) return;
-    let userMsg = null;
-    for (let i = turnIdx - 1; i >= 0; i--) {
-      if (all[i].type === 'user') { userMsg = all[i]; break; }
-    }
-    if (!userMsg) {
-      alert('找不到该工具调用对应的用户消息,无法重做');
+    if (!turn?.uuid || !toolCall?.id || !toolCall?.name) {
+      alert('找不到该工具调用的 id，无法局部重做');
       return;
     }
+    const sel = getLocalSession();
+    const projectHash = sel?.projectHash || useStore.getState().selectedProject?.hash;
+    if (!sel?.sessionId || !projectHash) {
+      alert('缺少 sessionId 或 projectHash，无法局部重做工具');
+      return;
+    }
+
     const input = JSON.stringify(toolCall.input || {}, null, 2).slice(0, 4000);
     const appendSystemPrompt = [
-      '[GUI 工具重做提示]',
-      `请在重新生成这一轮时重点重做 ${toolCall.name} 工具调用，并基于新结果继续完成原任务。`,
-      '如果原工具选择不合适，可以改用更合适的工具，但不要丢失原用户问题的上下文。',
+      'GUI 已把会话裁剪到某个工具调用之前。',
+      `现在请重新执行 ${toolCall.name} 工具调用，并基于新的工具结果从当前位置继续。`,
+      '不要重复已经保留在历史里的正文或更早的工具调用。',
+      '如果原工具选择不合适，可以改用更合适的工具，但不要丢失原任务上下文。',
       '原工具输入如下：',
       '```json',
       input,
       '```',
     ].join('\n');
-    handleRollback(userMsg, {
-      mode: 'message',
-      resendText: {
-        prompt: userMsg.text || '',
-        options: { appendSystemPrompt },
-      },
-    });
-  }, [messages, chatMessages, handleRollback]);
+    (async () => {
+      try {
+        const tr = await fetch(`/api/sessions/${sel.sessionId}/trim-before-tool`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ projectHash, toolUseId: toolCall.id }),
+        });
+        const trData = await tr.json().catch(() => ({}));
+        if (!tr.ok) throw new Error(trData.error || tr.status);
+
+        if (abortRef.current) { try { abortRef.current.abort(); } catch {} }
+        if (activeProcRef.current) {
+          fetch(`/api/chat/${activeProcRef.current}/stop`, { method: 'POST' }).catch(() => {});
+          activeProcRef.current = null;
+        }
+        updateStreaming(false);
+        setStreamingText('');
+        setStreamingThinking('');
+        setStreamingToolCalls([]);
+        setStreamingBlocks([]);
+        try { await fetchMessagesForTab(sel.sessionId, projectHash, { silent: true }); } catch {}
+
+        setTimeout(() => {
+          handleSendRef.current?.(
+            `<cgui-tool-retry tool="${toolCall.name}">继续</cgui-tool-retry>`,
+            { appendSystemPrompt, hiddenUserMessage: true },
+          );
+        }, 50);
+      } catch (err) {
+        alert('工具局部重做失败：' + err.message);
+      }
+    })();
+  }, [getLocalSession, fetchMessagesForTab]);
 
   // In split mode, tab 0's `loading` would otherwise blank out tab 1 too.
   // We only let the loading screen short-circuit the primary tab — tab 1

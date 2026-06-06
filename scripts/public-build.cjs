@@ -79,4 +79,5 @@ try {
 }
 
 if (status !== 0) process.exit(status);
+if (mode === 'tauri') process.env.CGUI_AUDIT_TAURI_BUNDLE = '1';
 process.exit(run('node', ['scripts/audit-public.cjs']));

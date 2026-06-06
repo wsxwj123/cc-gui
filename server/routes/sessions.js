@@ -23,6 +23,76 @@ import {
 
 const router = Router();
 
+function sessionFile(projectHash, sessionId) {
+  return join(homedir(), '.claude', 'projects', projectHash, `${sessionId}.jsonl`);
+}
+
+function hasRealConversationLine(lines) {
+  for (const line of lines) {
+    if (!line.trim()) continue;
+    try {
+      const obj = JSON.parse(line);
+      if (obj.type === 'user' || obj.type === 'assistant') return true;
+    } catch {}
+  }
+  return false;
+}
+
+async function writeJsonlAtomic(file, text) {
+  const finalText = text.length && !text.endsWith('\n') ? text + '\n' : text;
+  const tmp = `${file}.tmp-trim`;
+  await writeFile(tmp, finalText, 'utf-8');
+  await rename(tmp, file);
+}
+
+async function deleteSessionFile(file) {
+  const { unlink } = await import('fs/promises');
+  try { await unlink(file); } catch {}
+}
+
+export function trimJsonlBeforeTool(raw, toolUseId) {
+  const lines = String(raw || '').split('\n');
+  const keptLines = [];
+  let found = false;
+  let removedFromLine = -1;
+  let keptAssistantBlocks = 0;
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (!line.trim()) {
+      if (!found) keptLines.push(line);
+      continue;
+    }
+
+    let obj;
+    try { obj = JSON.parse(line); }
+    catch {
+      if (!found) keptLines.push(line);
+      continue;
+    }
+
+    const content = Array.isArray(obj?.message?.content) ? obj.message.content : null;
+    if (obj.type === 'assistant' && content) {
+      const toolIdx = content.findIndex((block) => block?.type === 'tool_use' && block.id === toolUseId);
+      if (toolIdx !== -1) {
+        found = true;
+        removedFromLine = i;
+        const beforeBlocks = content.slice(0, toolIdx);
+        if (beforeBlocks.length > 0) {
+          obj.message = { ...obj.message, content: beforeBlocks };
+          keptAssistantBlocks = beforeBlocks.length;
+          keptLines.push(JSON.stringify(obj));
+        }
+        break;
+      }
+    }
+
+    keptLines.push(line);
+  }
+
+  return { found, keptLines, removedFromLine, totalLines: lines.length, keptAssistantBlocks };
+}
+
 // GET /api/projects — list all projects
 router.get('/projects', async (req, res) => {
   try {
@@ -143,7 +213,7 @@ router.post('/sessions/:sessionId/trim', async (req, res) => {
     if (!safeId(projectHash) || !safeId(req.params.sessionId)) {
       return res.status(400).json({ error: 'invalid projectHash or sessionId' });
     }
-    const file = join(homedir(), '.claude', 'projects', projectHash, `${req.params.sessionId}.jsonl`);
+    const file = sessionFile(projectHash, req.params.sessionId);
     let raw;
     try { raw = await readFile(file, 'utf-8'); }
     catch { return res.status(404).json({ error: 'session jsonl not found' }); }
@@ -174,19 +244,10 @@ router.post('/sessions/:sessionId/trim', async (req, res) => {
     // the jsonl entirely and tell the client to forget the sessionId so
     // the next send spawns a fresh session.
     const keptLines = lines.slice(0, cutIdx);
-    let hasRealContent = false;
-    for (const l of keptLines) {
-      if (!l.trim()) continue;
-      try {
-        const obj = JSON.parse(l);
-        if (obj.type === 'user' || obj.type === 'assistant') { hasRealContent = true; break; }
-      } catch {}
-    }
-    if (!hasRealContent) {
+    if (!hasRealConversationLine(keptLines)) {
       // Delete the jsonl outright — client returns sessionReset:true and
       // should drop sessionId so next /api/chat omits --resume.
-      const { unlink } = await import('fs/promises');
-      try { await unlink(file); } catch {}
+      await deleteSessionFile(file);
       return res.json({
         trimmed: true,
         sessionReset: true,
@@ -196,17 +257,64 @@ router.post('/sessions/:sessionId/trim', async (req, res) => {
       });
     }
 
-    const next = keptLines.join('\n');
-    const finalText = next.length && !next.endsWith('\n') ? next + '\n' : next;
     // Atomic write (#12): a plain writeFile truncates-then-writes, so the
     // polling file-watcher can read a half-written/empty jsonl mid-trim and
     // momentarily blank the conversation until the next stream. Write to a
     // same-dir temp and rename (POSIX-atomic on one filesystem) so no reader
     // ever sees a truncated file.
-    const tmp = `${file}.tmp-trim`;
-    await writeFile(tmp, finalText, 'utf-8');
-    await rename(tmp, file);
+    await writeJsonlAtomic(file, keptLines.join('\n'));
     res.json({ trimmed: true, removedFromLine: cutIdx, totalLines: lines.length });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * POST /api/sessions/:sessionId/trim-before-tool  { projectHash, toolUseId }
+ * Tool retry support: keep the conversation exactly up to the content block
+ * before the selected assistant tool_use, then remove that tool call, its
+ * tool_result, and everything after it. The next hidden continuation prompt
+ * resumes from that partial assistant turn, so earlier text / earlier tools in
+ * the same reply stay visible instead of replaying the whole turn.
+ */
+router.post('/sessions/:sessionId/trim-before-tool', async (req, res) => {
+  try {
+    const { projectHash, toolUseId } = req.body || {};
+    if (!projectHash || !toolUseId) {
+      return res.status(400).json({ error: 'projectHash + toolUseId required' });
+    }
+    if (!safeId(projectHash) || !safeId(req.params.sessionId)) {
+      return res.status(400).json({ error: 'invalid projectHash or sessionId' });
+    }
+
+    const file = sessionFile(projectHash, req.params.sessionId);
+    let raw;
+    try { raw = await readFile(file, 'utf-8'); }
+    catch { return res.status(404).json({ error: 'session jsonl not found' }); }
+
+    const { found, keptLines, removedFromLine, totalLines, keptAssistantBlocks } = trimJsonlBeforeTool(raw, toolUseId);
+    if (!found) return res.status(404).json({ error: 'tool_use not found in session' });
+    try { await writeFile(file + '.bak', raw, 'utf-8'); } catch {}
+
+    if (!hasRealConversationLine(keptLines)) {
+      await deleteSessionFile(file);
+      return res.json({
+        trimmed: true,
+        sessionReset: true,
+        reason: 'no user/assistant lines would remain — session deleted, next send creates fresh',
+        removedFromLine,
+        totalLines,
+      });
+    }
+
+    await writeJsonlAtomic(file, keptLines.join('\n'));
+    res.json({
+      trimmed: true,
+      toolUseId,
+      removedFromLine,
+      totalLines,
+      keptAssistantBlocks,
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
