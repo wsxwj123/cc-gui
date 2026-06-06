@@ -83,10 +83,11 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           cat > notes.md <<'EOF'
-          未签名安装包,首次打开需手动放行:
+          未签名安装包,首次打开需手动放行。当前安装包会调用本机 Node.js 启动内置后端,运行机器需已安装 Node.js 20+ 和 Claude Code CLI。
 
           - **macOS**:仅支持 Apple Silicon(M 系列芯片);下载 `.dmg` 拖入「应用程序」后,右键 .app →「打开」,或在「系统设置 → 隐私与安全性」点「仍要打开」。
           - **Windows**:`.exe`(NSIS)或 `.msi` 均可;SmartScreen 提示时点「更多信息 → 仍要运行」。
+          - 若双击后无窗口,查看 `~/.claude-gui/tauri-startup.log` 获取启动错误。
           EOF
           # Installer filenames contain spaces ("Claude GUI_x.y.z_…"), so read them
           # into an array (null-delimited) and pass quoted — an unquoted $FILES

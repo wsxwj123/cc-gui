@@ -10,6 +10,7 @@
 //   3. Wait until the port answers, then open the window pointing at it.
 //   4. Kill the child we spawned when the window is destroyed.
 
+use std::fs::OpenOptions;
 use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::path::PathBuf;
@@ -18,24 +19,60 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
 
-const BACKEND_ADDR: &str = "127.0.0.1:6677";
-const BACKEND_URL: &str = "http://127.0.0.1:6677";
+const BACKEND_HOST: &str = "127.0.0.1";
+const DEFAULT_BACKEND_PORT: u16 = 6677;
+const MAX_BACKEND_PORT: u16 = 6687;
 
 // Holds the backend child IFF we spawned it (None when we reused an existing one).
 struct Backend(Mutex<Option<Child>>);
 
-fn backend_healthy() -> bool {
-    if let Ok(mut addrs) = BACKEND_ADDR.to_socket_addrs() {
+fn log_startup(message: &str) {
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .unwrap_or_else(|_| ".".to_string());
+    let dir = PathBuf::from(home).join(".claude-gui");
+    let _ = std::fs::create_dir_all(&dir);
+    if let Ok(mut file) = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join("tauri-startup.log"))
+    {
+        let _ = writeln!(file, "{message}");
+    }
+}
+
+fn backend_addr(port: u16) -> String {
+    format!("{BACKEND_HOST}:{port}")
+}
+
+fn backend_url(port: u16) -> String {
+    format!("http://{BACKEND_HOST}:{port}")
+}
+
+fn port_accepts_tcp(port: u16) -> bool {
+    if let Ok(mut addrs) = backend_addr(port).to_socket_addrs() {
+        if let Some(addr) = addrs.next() {
+            return TcpStream::connect_timeout(&addr, Duration::from_millis(300)).is_ok();
+        }
+    }
+    false
+}
+
+fn backend_healthy(port: u16) -> bool {
+    if let Ok(mut addrs) = backend_addr(port).to_socket_addrs() {
         if let Some(addr) = addrs.next() {
             if let Ok(mut stream) = TcpStream::connect_timeout(&addr, Duration::from_millis(300)) {
                 let _ = stream.set_read_timeout(Some(Duration::from_millis(800)));
-                let req = b"GET /api/health HTTP/1.1\r\nHost: 127.0.0.1:6677\r\nConnection: close\r\n\r\n";
-                if stream.write_all(req).is_err() {
+                let req = format!(
+                    "GET /api/health HTTP/1.1\r\nHost: {BACKEND_HOST}:{port}\r\nConnection: close\r\n\r\n"
+                );
+                if stream.write_all(req.as_bytes()).is_err() {
                     return false;
                 }
-                let mut buf = String::new();
-                if stream.read_to_string(&mut buf).is_ok() {
-                    return buf.starts_with("HTTP/1.1 200") && buf.contains("\"app\":\"claude-gui\"");
+                let mut buf = [0_u8; 4096];
+                if let Ok(n) = stream.read(&mut buf) {
+                    let text = String::from_utf8_lossy(&buf[..n]);
+                    return text.starts_with("HTTP/1.1 200") && text.contains("\"app\":\"claude-gui\"");
                 }
             }
         }
@@ -105,16 +142,21 @@ fn find_node() -> Option<PathBuf> {
     None
 }
 
-fn spawn_backend(app: &tauri::App) -> Option<Child> {
-    let entry = resolve_server_entry(app)?;
+fn spawn_backend(app: &tauri::App, port: u16) -> Option<Child> {
+    let entry = resolve_server_entry(app).or_else(|| {
+        log_startup("[tauri] server/index.js not found in bundled resources or repo layout");
+        None
+    })?;
     let node = find_node().or_else(|| {
-        eprintln!("[tauri] cannot find node executable in PATH or known locations; user must install Node.js 20+");
+        log_startup("[tauri] cannot find node executable in PATH or known locations; install Node.js 20+");
         None
     })?;
     // cwd = the directory containing `server/` (so relative paths in the server resolve).
     let cwd = entry.parent().and_then(|p| p.parent()).map(PathBuf::from);
     let mut cmd = Command::new(&node);
-    cmd.arg(&entry).env("PORT", "6677").env("HOST", "127.0.0.1");
+    cmd.arg(&entry)
+        .env("PORT", port.to_string())
+        .env("HOST", BACKEND_HOST);
     // 把 node 所在目录 + Homebrew/Cellar 常见目录前置到子进程 PATH,
     // 这样 server 之后 spawn `claude` / `git` / `cargo` 等也能找到。
     let extra_dirs: Vec<String> = node.parent().map(|d| d.to_string_lossy().to_string()).into_iter()
@@ -130,10 +172,18 @@ fn spawn_backend(app: &tauri::App) -> Option<Child> {
     match cmd.spawn() {
         Ok(child) => Some(child),
         Err(e) => {
-            eprintln!("[tauri] failed to spawn node backend: {e}");
+            log_startup(&format!("[tauri] failed to spawn node backend: {e}"));
             None
         }
     }
+}
+
+fn wait_until_accepting(port: u16, timeout: Duration) -> bool {
+    let start = Instant::now();
+    while !port_accepts_tcp(port) && start.elapsed() < timeout {
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    port_accepts_tcp(port)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -141,25 +191,37 @@ pub fn run() {
     tauri::Builder::default()
         .manage(Backend(Mutex::new(None)))
         .setup(|app| {
-            if !backend_healthy() {
-                if let Some(child) = spawn_backend(app) {
-                    *app.state::<Backend>().0.lock().unwrap() = Some(child);
-                }
-                // Wait for readiness (≤ 20s) before showing the window so the
-                // webview never lands on a "connection refused" error page.
-                let start = Instant::now();
-                while !backend_healthy() && start.elapsed() < Duration::from_secs(20) {
-                    std::thread::sleep(Duration::from_millis(250));
+            let mut selected_port = None;
+
+            if backend_healthy(DEFAULT_BACKEND_PORT) {
+                selected_port = Some(DEFAULT_BACKEND_PORT);
+                log_startup("[tauri] reused healthy backend on port 6677");
+            } else {
+                for port in DEFAULT_BACKEND_PORT..=MAX_BACKEND_PORT {
+                    if port_accepts_tcp(port) {
+                        log_startup(&format!("[tauri] port {port} is occupied but not healthy; trying next port"));
+                        continue;
+                    }
+                    if let Some(mut child) = spawn_backend(app, port) {
+                        if wait_until_accepting(port, Duration::from_secs(20)) {
+                            *app.state::<Backend>().0.lock().unwrap() = Some(child);
+                            selected_port = Some(port);
+                            log_startup(&format!("[tauri] spawned backend on port {port}"));
+                            break;
+                        }
+                        let _ = child.kill();
+                        log_startup(&format!("[tauri] backend on port {port} did not accept connections"));
+                    } else {
+                        break;
+                    }
                 }
             }
-            if !backend_healthy() {
-                return Err("Claude GUI backend did not become healthy on 127.0.0.1:6677".into());
-            }
+            let port = selected_port.ok_or("Claude GUI backend did not become healthy on any port from 6677 to 6687")?;
 
             WebviewWindowBuilder::new(
                 app,
                 "main",
-                WebviewUrl::External(BACKEND_URL.parse().unwrap()),
+                WebviewUrl::External(backend_url(port).parse().unwrap()),
             )
             .title("Claude GUI")
             .inner_size(1320.0, 860.0)

@@ -2152,7 +2152,7 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
   const messageQueue = messageQueueRaw || EMPTY_ARRAY;
 
   const handleSend = useCallback(async (prompt, opts = {}) => {
-    const { reattachPid } = opts;
+    const { reattachPid, appendSystemPrompt } = opts;
     // Intercept the /remote-control (alias /rc) command. It CANNOT be sent
     // through `claude -p` — slash commands are interactive-only and the CLI
     // rejects them ("isn't available in this environment"). Instead we launch
@@ -2354,6 +2354,7 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
           cwd: chatCwd,
           model: currentModel,
           effort: effort || undefined,
+          appendSystemPrompt: appendSystemPrompt || undefined,
           addDirs: addDirs && addDirs.length ? addDirs : undefined,
           permissionMode: permissionMode || 'default',
           globalRead: globalRead !== false,
@@ -3127,7 +3128,13 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
     if (mode === 'edit') return; // composer was filled at the top of this branch
     // mode === 'message': auto-resend.
     if (originalText && handleSendRef.current) {
-      setTimeout(() => { handleSendRef.current(resendText || originalText); }, 50);
+      setTimeout(() => {
+        if (typeof resendText === 'object' && resendText) {
+          handleSendRef.current(resendText.prompt || originalText, resendText.options || {});
+        } else {
+          handleSendRef.current(resendText || originalText);
+        }
+      }, 50);
     }
   }, [chatMessages, messages, fetchMessagesForTab, setLocalMessages, setSelectedSession, getLocalSession]);
 
@@ -3165,9 +3172,7 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
       return;
     }
     const input = JSON.stringify(toolCall.input || {}, null, 2).slice(0, 4000);
-    const retryText = [
-      userMsg.text || '',
-      '',
+    const appendSystemPrompt = [
       '[GUI 工具重做提示]',
       `请在重新生成这一轮时重点重做 ${toolCall.name} 工具调用，并基于新结果继续完成原任务。`,
       '如果原工具选择不合适，可以改用更合适的工具，但不要丢失原用户问题的上下文。',
@@ -3176,7 +3181,13 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
       input,
       '```',
     ].join('\n');
-    handleRollback(userMsg, { mode: 'message', resendText: retryText });
+    handleRollback(userMsg, {
+      mode: 'message',
+      resendText: {
+        prompt: userMsg.text || '',
+        options: { appendSystemPrompt },
+      },
+    });
   }, [messages, chatMessages, handleRollback]);
 
   // In split mode, tab 0's `loading` would otherwise blank out tab 1 too.

@@ -60,6 +60,7 @@ router.post('/chat', async (req, res) => {
     effort, addDirs,
     permissionMode,
     globalRead,
+    appendSystemPrompt,
   } = req.body;
   if (!prompt) return res.status(400).json({ error: 'prompt is required' });
 
@@ -97,6 +98,9 @@ router.post('/chat', async (req, res) => {
     '--include-partial-messages',
     '--model', model,
   ];
+  if (typeof appendSystemPrompt === 'string' && appendSystemPrompt.trim()) {
+    args.push('--append-system-prompt', appendSystemPrompt.trim().slice(0, 8000));
+  }
   if (sessionId) args.push('--resume', sessionId);
   if (effort && VALID_EFFORTS.has(effort)) args.push('--effort', effort);
   // Permission mode: default | acceptEdits | plan | bypassPermissions.
