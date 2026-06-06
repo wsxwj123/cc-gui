@@ -106,37 +106,7 @@ router.get('/mcp', async (req, res) => {
       } catch {}
     }
 
-    // 2. Also check .mcp.json files in known locations
-    const mcpJsonPaths = [
-      join(CLAUDE_DIR, 'channels', 'telegram', '.mcp.json'),
-      join(CLAUDE_DIR, 'channels', 'bot2', '.mcp.json'),
-      join(CLAUDE_DIR, 'channels', 'bot3', '.mcp.json'),
-      join(CLAUDE_DIR, 'plugins', 'local', 'telegram', '.mcp.json'),
-    ];
-    const existingNames = new Set(result.mcpServers.map((s) => s.name));
-
-    for (const mcpPath of mcpJsonPaths) {
-      try {
-        const data = JSON.parse(await readFile(mcpPath, 'utf-8'));
-        const servers = data.mcpServers || {};
-        for (const [name, cfg] of Object.entries(servers)) {
-          if (!existingNames.has(name)) {
-            existingNames.add(name);
-            result.mcpServers.push({
-              name,
-              command: cfg.command || '',
-              args: cfg.args || [],
-              env: cfg.env ? Object.keys(cfg.env) : [],
-              transport: cfg.transport || 'stdio',
-              status: 'unknown',
-              source: mcpPath.replace(homedir(), '~'),
-            });
-          }
-        }
-      } catch {}
-    }
-
-    // 3. Installed plugins (also parse `claude plugin list` for enabled state)
+    // 2. Installed plugins (also parse `claude plugin list` for enabled state)
     let pluginEnabled = {};
     try {
       const out = await runClaude(['plugin', 'list'], { timeout: 8000 });

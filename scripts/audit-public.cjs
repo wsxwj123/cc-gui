@@ -57,6 +57,12 @@ const blockedDistText = [
   '重启 bot',
   '停止 bot',
 ];
+const blockedSourceText = [
+  "join(CLAUDE_DIR, 'channels', 'bot2'",
+  "join(CLAUDE_DIR, 'channels', 'bot3'",
+  "join(CLAUDE_DIR, 'channels', 'telegram'",
+  "join(CLAUDE_DIR, 'plugins', 'local', 'telegram'",
+];
 
 for (const file of walk(distDir)) {
   const relative = rel(file);
@@ -71,6 +77,20 @@ for (const file of walk(distDir)) {
   for (const needle of blockedDistText) {
     if (text.includes(needle)) {
       failures.push(`${relative} contains local-only marker: ${needle}`);
+      break;
+    }
+  }
+}
+
+for (const file of tracked) {
+  if (file === 'scripts/audit-public.cjs') continue;
+  if (!/\.(?:js|jsx|cjs|mjs|ts|tsx)$/.test(file)) continue;
+  const full = path.join(root, file);
+  let text = '';
+  try { text = readFileSync(full, 'utf8'); } catch { continue; }
+  for (const needle of blockedSourceText) {
+    if (text.includes(needle)) {
+      failures.push(`${file} contains local-only source marker: ${needle}`);
       break;
     }
   }
