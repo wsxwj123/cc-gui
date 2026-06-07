@@ -188,6 +188,20 @@ fn wait_until_accepting(port: u16, timeout: Duration) -> bool {
     port_accepts_tcp(port)
 }
 
+#[cfg(target_os = "macos")]
+fn activate_app() {
+    let result = Command::new("/usr/bin/osascript")
+        .arg("-e")
+        .arg("tell application id \"com.claudegui.desktop\" to activate")
+        .status();
+    if let Err(e) = result {
+        log_startup(&format!("[tauri] failed to activate macOS app: {e}"));
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn activate_app() {}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -220,7 +234,7 @@ pub fn run() {
             }
             let port = selected_port.ok_or("Claude GUI backend did not become healthy on any port from 6677 to 6687")?;
 
-            WebviewWindowBuilder::new(
+            let window = WebviewWindowBuilder::new(
                 app,
                 "main",
                 WebviewUrl::External(backend_url(port).parse().unwrap()),
@@ -229,6 +243,9 @@ pub fn run() {
             .inner_size(1320.0, 860.0)
             .min_inner_size(900.0, 600.0)
             .build()?;
+            let _ = window.show();
+            let _ = window.set_focus();
+            activate_app();
 
             Ok(())
         })
