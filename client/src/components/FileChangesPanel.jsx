@@ -17,6 +17,23 @@ function reviewKey(change) {
   return change.id || `${change.type}:${change.file || change.command}:${change.timestamp}:${change.uuid || ''}`;
 }
 
+// 按回合(turnIndex)把变更分组,保持原始顺序。同一文件在不同回合的修改会落到不同组,
+// 用户一眼就能看出"这次改动是哪轮对话、对应我哪条消息"产生的。
+function groupByTurn(changes) {
+  const groups = [];
+  const byIndex = new Map();
+  for (const c of changes) {
+    const ti = c.turnIndex ?? 0;
+    if (!byIndex.has(ti)) {
+      const g = { turnIndex: ti, turnPrompt: c.turnPrompt || '', turnTs: c.turnTs || c.timestamp, items: [] };
+      byIndex.set(ti, g);
+      groups.push(g);
+    }
+    byIndex.get(ti).items.push(c);
+  }
+  return groups;
+}
+
 function ChangeItem({ change, sessionId, cwd, reviewed, onToggleReviewed }) {
   const [expanded, setExpanded] = useState(false);
   const [busy, setBusy] = useState(null);
@@ -262,15 +279,26 @@ export function FileChangesPanel({ sessionId, projectHash, cwd }) {
           </button>
         </div>
       </div>
-      {changes.map((change, i) => (
-        <ChangeItem
-          key={reviewKey(change) || i}
-          change={change}
-          sessionId={sessionId}
-          cwd={cwd}
-          reviewed={!!reviewedMap[reviewKey(change)]}
-          onToggleReviewed={toggleReviewed}
-        />
+      {groupByTurn(changes).map((group) => (
+        <div key={group.turnIndex} className="space-y-1.5">
+          <div className="flex items-center gap-2 px-1 pt-2 pb-1 border-b border-canvas-deep/40">
+            <span className="text-[10px] font-mono text-accent shrink-0">回合 {group.turnIndex || '—'}</span>
+            <span className="text-[11px] text-ink-muted font-body truncate" title={group.turnPrompt}>
+              {group.turnPrompt || '(无对应用户消息)'}
+            </span>
+            <span className="text-[9px] text-ink-faint font-mono shrink-0 ml-auto">{formatTime(group.turnTs)}</span>
+          </div>
+          {group.items.map((change, i) => (
+            <ChangeItem
+              key={reviewKey(change) || i}
+              change={change}
+              sessionId={sessionId}
+              cwd={cwd}
+              reviewed={!!reviewedMap[reviewKey(change)]}
+              onToggleReviewed={toggleReviewed}
+            />
+          ))}
+        </div>
       ))}
     </div>
   );

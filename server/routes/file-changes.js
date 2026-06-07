@@ -24,16 +24,41 @@ function safeId(s) {
  * Extract file changes from a session's tool calls.
  * Looks for Edit, Write, and Bash commands that modify files.
  */
+// 行级 diff(LCS):只标真正变化的行,相同行作为上下文(' '前缀) —— 对齐 claude code /
+// codex 的 diff 语义。旧实现把 old 整段标删、new 整段标增(哪怕只改一行也全红全绿),
+// 既不准也没法看清改了啥。
+function lineDiff(oldStr, newStr) {
+  const a = oldStr == null ? [] : String(oldStr).split('\n');
+  const b = newStr == null ? [] : String(newStr).split('\n');
+  const m = a.length, n = b.length;
+  // LCS 长度表(自底向上)。Edit 的 old/new 通常是文件片段(几十行),m*n 很小;
+  // Write 新文件 old 为空 → 直接全部当新增,不构建大表。
+  const dp = Array.from({ length: m + 1 }, () => new Array(n + 1).fill(0));
+  for (let i = m - 1; i >= 0; i--) {
+    for (let j = n - 1; j >= 0; j--) {
+      dp[i][j] = a[i] === b[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+    }
+  }
+  const ops = [];
+  let i = 0, j = 0;
+  while (i < m && j < n) {
+    if (a[i] === b[j]) { ops.push([' ', a[i]]); i++; j++; }
+    else if (dp[i + 1][j] >= dp[i][j + 1]) { ops.push(['-', a[i]]); i++; }
+    else { ops.push(['+', b[j]]); j++; }
+  }
+  while (i < m) { ops.push(['-', a[i]]); i++; }
+  while (j < n) { ops.push(['+', b[j]]); j++; }
+  return ops;
+}
+
 function unifiedDiff(filePath, oldStr, newStr, label = 'change') {
   const file = String(filePath || label).replace(/^[/\\]+/, '');
-  const oldLines = oldStr == null ? [] : String(oldStr).split('\n');
-  const newLines = newStr == null ? [] : String(newStr).split('\n');
+  const ops = lineDiff(oldStr, newStr);
   return [
     `--- a/${file}`,
     `+++ b/${file}`,
     '@@',
-    ...oldLines.map((line) => `-${line}`),
-    ...newLines.map((line) => `+${line}`),
+    ...ops.map(([sign, line]) => `${sign}${line}`),
   ].join('\n');
 }
 
@@ -45,15 +70,38 @@ function diffStats(diff) {
   };
 }
 
+// 取一条 user 记录里真正的"用户输入文本"。CLI 会把工具结果也写成 type:'user' 记录
+// (content 里是 tool_result),那不是新回合的开始,返回空串以便跳过。
+function userInputText(record) {
+  const c = record.message?.content;
+  if (typeof c === 'string') return c.trim();
+  if (Array.isArray(c)) {
+    return c.filter((b) => b && b.type === 'text' && typeof b.text === 'string')
+      .map((b) => b.text).join('\n').trim();
+  }
+  return '';
+}
+
 export function extractFileChanges(records) {
   const changes = [];
   const seen = new Set();
+  // 回合追踪:每条"真用户输入"开启一个新回合,后续文件变更都归到这个回合 —— 让前端
+  // 能按"第几轮对话 + 你那条消息"分组,区分同一文件在不同回合里的多次修改。
+  let turnIndex = 0;
+  let turnPrompt = '';
+  let turnTs = null;
 
   for (const record of records) {
+    if (record.type === 'user') {
+      const text = userInputText(record);
+      if (text) { turnIndex += 1; turnPrompt = text.slice(0, 120); turnTs = record.timestamp; }
+      continue;
+    }
     if (record.type !== 'assistant') continue;
     const content = record.message?.content;
     if (!Array.isArray(content)) continue;
 
+    const turnMeta = { turnIndex, turnPrompt, turnTs };
     for (const block of content) {
       if (block.type !== 'tool_use') continue;
       const { name, input, id: toolUseId } = block;
@@ -65,6 +113,7 @@ export function extractFileChanges(records) {
           const diff = unifiedDiff(input.file_path, input.old_string ?? '', input.new_string ?? '');
           changes.push({
             id: key,
+            ...turnMeta,
             type: 'edit',
             toolUseId,
             file: input.file_path,
@@ -85,6 +134,7 @@ export function extractFileChanges(records) {
           const diff = unifiedDiff(input.file_path, edit.old_string ?? '', edit.new_string ?? '', `edit-${editIndex + 1}`);
           changes.push({
             id: key,
+            ...turnMeta,
             type: 'edit',
             toolName: 'MultiEdit',
             toolUseId,
@@ -106,6 +156,7 @@ export function extractFileChanges(records) {
           const diff = unifiedDiff(input.file_path, null, input.content ?? '', 'new-file');
           changes.push({
             id: key,
+            ...turnMeta,
             type: 'write',
             toolUseId,
             file: input.file_path,
@@ -126,6 +177,7 @@ export function extractFileChanges(records) {
             seen.add(key);
             changes.push({
               id: key,
+              ...turnMeta,
               type: 'bash',
               toolUseId,
               command: cmd,
