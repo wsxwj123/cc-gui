@@ -439,7 +439,11 @@ function TurnBubbleInner({ turn, onRetry, onRetryTool }) {
   const isLiveStream = turn.uuid === 'streaming';
 
   return (
-    <div className="group px-6 py-4 animate-fade-up" style={{ animationDuration: '0.25s' }}>
+    // 入场动画只给"正在流式"的临时 turn 播放。回复完成后这条会从 streaming(key=
+    // 'streaming') 切到 chatMessages(key='chat-assistant-…') 再切到 jsonl(真 uuid),
+    // 三次换 key → React 反复卸载重挂 TurnBubble。若固化后的 turn 仍带 animate-fade-up,
+    // 每次重挂都会重放淡入 → 用户看到"回复完成后闪烁一下再显示"。固化 turn 去掉动画即可。
+    <div className={`group px-6 py-4 ${isLiveStream ? 'animate-fade-up' : ''}`} style={isLiveStream ? { animationDuration: '0.25s' } : undefined}>
       <div className="max-w-[var(--content-max)] mx-auto flex gap-4">
         {/* Avatar — tinted by the actual provider behind the model */}
         <div className="mt-0.5">

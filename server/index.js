@@ -139,8 +139,15 @@ app.use(express.json({ limit: '25mb' }));
 // Password gate for external clients (no-op for 127.0.0.1 / no-password). Must
 // sit before the API routes so an unauthorized phone gets 401 on every call
 // except /login + /auth-status. The Mac (loopback) is never challenged.
+// 版本号:Tauri 壳启动时用 /api/health 的 version 校验"复用的 6677 server"是否同版本,
+// 不符就杀旧 server 起新的 —— 根治"升级 app 却复用了旧 server 进程"导致 cli-check 等
+// 旧代码误判(装了 claude 仍提示未装)的问题。
+const APP_VERSION = (() => {
+  try { return JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf-8')).version || null; }
+  catch { return null; }
+})();
 app.get('/api/health', (req, res) => {
-  res.json({ ok: true, app: 'claude-gui', port: PORT });
+  res.json({ ok: true, app: 'claude-gui', port: PORT, version: APP_VERSION });
 });
 app.use('/api', authMiddleware);
 

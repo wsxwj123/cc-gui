@@ -18,7 +18,7 @@ import { SettingsPanel } from './components/SettingsPanel.jsx';
 import { FileExplorerPanel } from './components/FileExplorerPanel.jsx';
 import { useResizable as useResizableHook, Splitter as SplitterCmp } from './hooks/useResizable.jsx';
 import { MCPPanel } from './components/MCPPanel.jsx';
-import { FileChangesPanel, FileReviewPanel } from './components/FileChangesPanel.jsx';
+import { FileReviewPanel } from './components/FileChangesPanel.jsx';
 import { AgentsPanel } from './components/AgentsPanel.jsx';
 import { AgentMonitorPanel } from './components/AgentMonitorPanel.jsx';
 import { CliMissingModal } from './components/CliMissingModal.jsx';
@@ -1908,7 +1908,6 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
   const [streamingToolCalls, setStreamingToolCalls] = useState([]);
   // Ordered blocks for in-order rendering (text → tool → text → tool → write).
   const [streamingBlocks, setStreamingBlocks] = useState([]);
-  const [showFileChanges, setShowFileChanges] = useState(false);
   const activeProcRef = useRef(null);
   const abortRef = useRef(null);
   // Set by "⚡ 引导": tells the aborted in-flight send's finally to skip its own
@@ -2965,7 +2964,6 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
         setStreamingThinking('');
         setStreamingToolCalls([]);
         setStreamingBlocks([]);
-        setShowFileChanges(false);
         // Clear reattach guard so navigating back to a session with the same
         // backgroundPid triggers a fresh reattach attempt.
         reattachedPidRef.current = null;
@@ -3336,15 +3334,6 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
               sessionId={selectedSession?.sessionId}
               cwd={selectedProject?.path || selectedSession?.projectPath}
             />
-            <button
-              onClick={() => setShowFileChanges(!showFileChanges)}
-              className={`flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[11px] font-body transition-colors ${
-                showFileChanges ? 'bg-accent/10 text-accent' : 'bg-canvas-warm text-ink-faint hover:text-ink-muted'
-              }`}
-              title="文件变更"
-            >
-              <FileDiff size={12} />变更
-            </button>
             <div className="text-right max-md:hidden">
               <div className="text-[10px] text-ink-faint font-mono flex items-center gap-1 justify-end">
                 <BarChart3 size={10} />{(totalTokens.input + totalTokens.output).toLocaleString()} tokens
@@ -3405,19 +3394,7 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
         </div>
       )}
 
-      {showFileChanges ? (
-        <div className="flex-1 overflow-y-auto relative z-10 px-6 py-4">
-          <div className="max-w-[var(--content-max)] mx-auto">
-            <h3 className="text-sm font-display font-medium text-ink mb-4">文件变更记录</h3>
-            <FileChangesPanel
-              sessionId={selectedSession.sessionId}
-              projectHash={selectedSession.projectHash}
-              cwd={selectedProject?.path || selectedSession?.projectPath}
-            />
-          </div>
-        </div>
-      ) : (
-        <div ref={containerRef} onScroll={handleScroll} className="flex-1 overflow-y-auto relative z-10">
+      <div ref={containerRef} onScroll={handleScroll} className="flex-1 overflow-y-auto relative z-10">
           {messages.length === 0 && chatMessages.length === 0 ? (
             <div className="mobile-draft-empty flex items-center justify-center h-full text-ink-muted text-sm font-body">
               {selectedSession?.draft ? '开始你的第一条消息 ↓' : '该会话没有可显示的消息'}
@@ -3468,9 +3445,8 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
           )}
           <div ref={messagesEndRef} />
         </div>
-      )}
 
-      {!autoScroll && !showFileChanges && (
+      {!autoScroll && (
         // 桌面 + 手机都居中输入框上方 — 避免压在发送/停止按钮上,视觉重心
         // 也更舒服(原来右下角桌面端虽不挡,但偏角落容易看不见)。
         <div className="absolute bottom-24 left-1/2 -translate-x-1/2 z-20">

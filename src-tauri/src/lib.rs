@@ -209,6 +209,44 @@ fn wait_until_accepting(port: u16, timeout: Duration) -> bool {
     port_accepts_tcp(port)
 }
 
+// 校验 6677 上跑的 server 版本是否与本 app 一致。根治"升级 app 却复用了旧 server
+// 进程"——旧进程跑旧代码(如旧 cli-check 检测不到 claude → 误报未装)。health 现在
+// 返回 {"version":"x.y.z"};旧版 server 不返回 version 字段 → 不匹配 → 视为 stale。
+fn backend_version_matches(port: u16) -> bool {
+    let want = format!("\"version\":\"{}\"", env!("CARGO_PKG_VERSION"));
+    http_get_contains(port, "/api/health", &want)
+}
+
+// 杀掉占用指定端口的进程(尽力而为)。只在已确认该端口是 claude-gui server(backend_healthy)
+// 但版本不符时调用,所以杀的就是那个 stale server,不会误伤别的程序。失败则降级:下面的
+// spawn 循环会跳过仍被占的 6677,改用 6678…(功能正常,只是端口变)。
+fn kill_stale_backend(port: u16) {
+    #[cfg(not(target_os = "windows"))]
+    let result = Command::new("sh")
+        .arg("-c")
+        .arg(format!("lsof -ti tcp:{port} | xargs kill -TERM"))
+        .status();
+    #[cfg(target_os = "windows")]
+    let result = Command::new("cmd")
+        .args([
+            "/C",
+            &format!("for /f \"tokens=5\" %a in ('netstat -ano ^| findstr :{port}') do taskkill /F /PID %a"),
+        ])
+        .status();
+    if let Err(e) = result {
+        log_startup(&format!("[tauri] kill_stale_backend({port}) failed: {e}"));
+    }
+}
+
+// 等端口释放(kill 后 TCP socket 不会立刻关闭)。释放成功返回 true。
+fn wait_until_free(port: u16, timeout: Duration) -> bool {
+    let start = Instant::now();
+    while port_accepts_tcp(port) && start.elapsed() < timeout {
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    !port_accepts_tcp(port)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -217,11 +255,22 @@ pub fn run() {
             let mut selected_port = None;
             let requires_local_routes = bundled_local_routes_present(app);
 
-            if backend_healthy(DEFAULT_BACKEND_PORT) && (!requires_local_routes || backend_has_local_routes(DEFAULT_BACKEND_PORT)) {
+            let healthy = backend_healthy(DEFAULT_BACKEND_PORT);
+            let version_ok = healthy && backend_version_matches(DEFAULT_BACKEND_PORT);
+            let local_ok = !requires_local_routes || backend_has_local_routes(DEFAULT_BACKEND_PORT);
+
+            if healthy && version_ok && local_ok {
                 selected_port = Some(DEFAULT_BACKEND_PORT);
-                log_startup("[tauri] reused healthy backend on port 6677");
+                log_startup("[tauri] reused healthy backend on port 6677 (version matched)");
             } else {
-                if requires_local_routes && backend_healthy(DEFAULT_BACKEND_PORT) {
+                // 6677 上是"旧版本(stale)"或"缺 local routes"的 server,不能复用。stale 是
+                // cli-check 等旧代码误判(装了 claude 仍提示未装)的根因:杀掉它、等端口释放,
+                // 下面的循环重新 spawn 当前版本到 6677。
+                if healthy && !version_ok {
+                    log_startup("[tauri] stale backend on 6677 (version mismatch) — killing it to respawn current version");
+                    kill_stale_backend(DEFAULT_BACKEND_PORT);
+                    wait_until_free(DEFAULT_BACKEND_PORT, Duration::from_secs(5));
+                } else if healthy && !local_ok {
                     log_startup("[tauri] port 6677 is healthy but lacks local routes; trying next port");
                 }
                 for port in DEFAULT_BACKEND_PORT..=MAX_BACKEND_PORT {
