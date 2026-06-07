@@ -3,6 +3,7 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { Copy, Check } from 'lucide-react';
 import { copyText } from '../utils/clipboard.js';
+import { ArtifactPreview, isPreviewable } from './ArtifactPreview.jsx';
 
 function CopyButton({ text }) {
   const [copied, setCopied] = useState(false);
@@ -91,6 +92,8 @@ const markdownComponents = {
     const lang = className?.replace('language-', '') || '';
 
     if (isBlock) {
+      // html/svg/mermaid 代码块给「代码/预览」切换;其余语言走普通代码块。
+      if (isPreviewable(lang)) return <ArtifactPreview lang={lang} code={codeStr} />;
       return <CodeBlock lang={lang} code={codeStr} />;
     }
 
