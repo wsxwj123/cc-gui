@@ -33,11 +33,11 @@ function ToolCallWithRetry({ toolCall, onRetryTool, children }) {
         <div className="flex justify-end">
           <button
             onClick={() => onRetryTool(toolCall)}
-            className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] text-ink-faint hover:text-accent hover:bg-canvas-warm transition-colors"
-            title="让 AI 重做这个工具调用"
+            className="inline-flex items-center gap-1.5 px-2 py-1 rounded-md border border-accent-muted bg-accent-subtle/40 text-[11px] font-medium text-accent hover:bg-accent-subtle hover:border-accent transition-colors font-body"
+            title="回退到这个工具调用之前，让 AI 从这一步重新执行"
           >
-            <RotateCcw size={10} />
-            <span>重做工具</span>
+            <RotateCcw size={12} />
+            <span>重做此工具</span>
           </button>
         </div>
       )}

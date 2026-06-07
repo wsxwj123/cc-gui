@@ -59,12 +59,20 @@ fn port_accepts_tcp(port: u16) -> bool {
 }
 
 fn backend_healthy(port: u16) -> bool {
+    http_get_contains(port, "/api/health", "\"app\":\"claude-gui\"")
+}
+
+fn backend_has_local_routes(port: u16) -> bool {
+    http_get_contains(port, "/api/bots/available", "\"available\"")
+}
+
+fn http_get_contains(port: u16, path: &str, needle: &str) -> bool {
     if let Ok(mut addrs) = backend_addr(port).to_socket_addrs() {
         if let Some(addr) = addrs.next() {
             if let Ok(mut stream) = TcpStream::connect_timeout(&addr, Duration::from_millis(300)) {
                 let _ = stream.set_read_timeout(Some(Duration::from_millis(800)));
                 let req = format!(
-                    "GET /api/health HTTP/1.1\r\nHost: {BACKEND_HOST}:{port}\r\nConnection: close\r\n\r\n"
+                    "GET {path} HTTP/1.1\r\nHost: {BACKEND_HOST}:{port}\r\nConnection: close\r\n\r\n"
                 );
                 if stream.write_all(req.as_bytes()).is_err() {
                     return false;
@@ -72,7 +80,7 @@ fn backend_healthy(port: u16) -> bool {
                 let mut buf = [0_u8; 4096];
                 if let Ok(n) = stream.read(&mut buf) {
                     let text = String::from_utf8_lossy(&buf[..n]);
-                    return text.starts_with("HTTP/1.1 200") && text.contains("\"app\":\"claude-gui\"");
+                    return text.starts_with("HTTP/1.1 200") && text.contains(needle);
                 }
             }
         }
@@ -102,6 +110,18 @@ fn resolve_server_entry(app: &tauri::App) -> Option<PathBuf> {
         return Some(repo);
     }
     None
+}
+
+fn bundled_local_routes_present(app: &tauri::App) -> bool {
+    if let Ok(res) = app.path().resource_dir() {
+        for prefix in ["_up_", ""] {
+            let base = if prefix.is_empty() { res.clone() } else { res.join(prefix) };
+            if base.join("server").join("routes").join("bots.local.js").exists() {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 // 找 node 可执行文件。macOS Finder 启动 GUI 程序时 PATH=minimal
@@ -158,6 +178,7 @@ fn spawn_backend(app: &tauri::App, port: u16) -> Option<Child> {
         .env("PORT", port.to_string())
         .env("HOST", BACKEND_HOST)
         .env("CGUI_TAURI", "1")
+        .env("CGUI_ENABLE_LOCAL_ROUTES", "1")
         .env("CGUI_DISABLE_FILE_WATCHER", "1");
     // 把 node 所在目录 + Homebrew/Cellar 常见目录前置到子进程 PATH,
     // 这样 server 之后 spawn `claude` / `git` / `cargo` 等也能找到。
@@ -188,31 +209,21 @@ fn wait_until_accepting(port: u16, timeout: Duration) -> bool {
     port_accepts_tcp(port)
 }
 
-#[cfg(target_os = "macos")]
-fn activate_app() {
-    let result = Command::new("/usr/bin/osascript")
-        .arg("-e")
-        .arg("tell application id \"com.claudegui.desktop\" to activate")
-        .status();
-    if let Err(e) = result {
-        log_startup(&format!("[tauri] failed to activate macOS app: {e}"));
-    }
-}
-
-#[cfg(not(target_os = "macos"))]
-fn activate_app() {}
-
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .manage(Backend(Mutex::new(None)))
         .setup(|app| {
             let mut selected_port = None;
+            let requires_local_routes = bundled_local_routes_present(app);
 
-            if backend_healthy(DEFAULT_BACKEND_PORT) {
+            if backend_healthy(DEFAULT_BACKEND_PORT) && (!requires_local_routes || backend_has_local_routes(DEFAULT_BACKEND_PORT)) {
                 selected_port = Some(DEFAULT_BACKEND_PORT);
                 log_startup("[tauri] reused healthy backend on port 6677");
             } else {
+                if requires_local_routes && backend_healthy(DEFAULT_BACKEND_PORT) {
+                    log_startup("[tauri] port 6677 is healthy but lacks local routes; trying next port");
+                }
                 for port in DEFAULT_BACKEND_PORT..=MAX_BACKEND_PORT {
                     if port_accepts_tcp(port) {
                         log_startup(&format!("[tauri] port {port} is occupied but not healthy; trying next port"));
@@ -245,7 +256,6 @@ pub fn run() {
             .build()?;
             let _ = window.show();
             let _ = window.set_focus();
-            activate_app();
 
             Ok(())
         })

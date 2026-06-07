@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { Activity, Cpu, Clock, MapPin, RefreshCw, Zap, AlertCircle, Square, Loader2 } from 'lucide-react';
+import { confirmDialog } from '../utils/confirmDialog.jsx';
 
 export function ProcessPanel() {
   const [data, setData] = useState(null);
@@ -7,7 +8,7 @@ export function ProcessPanel() {
   const [killing, setKilling] = useState(null);
 
   const killProcess = async (pid) => {
-    if (!pid || !confirm(`确定停止 PID ${pid}？claude CLI 会立即终止。`)) return;
+    if (!pid || !(await confirmDialog(`确定停止 PID ${pid}？claude CLI 会立即终止。`, { danger: true }))) return;
     setKilling(pid);
     try {
       const r = await fetch(`/api/processes/${pid}/kill`, { method: 'POST' });

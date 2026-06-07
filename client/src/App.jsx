@@ -9,6 +9,7 @@ import { useStore, THEME_FAMILIES, FONT_OPTIONS, systemPrefersDark, PERMISSION_M
 import { useWebSocket } from './hooks/useWebSocket.js';
 import { MessageBubble } from './components/MessageBubble.jsx';
 import { TurnBubble } from './components/TurnBubble.jsx';
+import { confirmDialog } from './utils/confirmDialog.jsx';
 import { ChatInput, EffortSelector, PermissionModeSelector, EFFORT_LEVELS, MODE_META } from './components/ChatInput.jsx';
 import { ModelBadge, ProviderAvatar } from './components/ModelBadge.jsx';
 import { UsagePanel } from './components/UsagePanel.jsx';
@@ -115,7 +116,7 @@ function CheckpointButton({ sessionId, cwd }) {
   };
 
   const restore = async (sha) => {
-    if (!confirm(`恢复 cwd 到该 checkpoint？\n${sha.slice(0, 7)}\n会覆盖未提交的修改。`)) return;
+    if (!(await confirmDialog(`恢复 cwd 到该 checkpoint？\n${sha.slice(0, 7)}\n会覆盖未提交的修改。`, { danger: true }))) return;
     try {
       const r = await fetch(`/api/checkpoints/${sessionId}/restore`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -2214,7 +2215,7 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
     setStreamingToolCalls([]);
     setStreamingBlocks([]);
 
-    if (!reattachPid) {
+    if (!reattachPid && !hiddenUserMessage) {
     // Push the user bubble IMMEDIATELY so multi-turn sends don't appear to
     // "swallow" the user's message while waiting on git checkpoint I/O. The
     // checkpoint runs in parallel and back-fills `checkpointSha` on the same
@@ -2985,7 +2986,7 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
   //
   // Declared BEFORE the early returns below to keep hook order stable across
   // renders (React #310).
-  const handleRollback = useCallback(async (msg, { mode, resendText = null } = {}) => {
+  const handleRollback = useCallback(async (msg, { mode, resendText = null, softFiles = false } = {}) => {
     const sel = getLocalSession();
     const proj = useStore.getState().selectedProject;
     const cwd = proj?.path || sel?.projectPath;
@@ -3057,7 +3058,7 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
     // 1) git restore only for modes that explicitly include files.
     const shouldRestoreFiles = mode === 'both' || mode === 'edit';
     const checkpointSha = shouldRestoreFiles && sel?.sessionId && cwd ? await resolveCheckpointSha() : null;
-    if (shouldRestoreFiles && !checkpointSha) {
+    if (shouldRestoreFiles && !checkpointSha && !softFiles) {
       alert('找不到这条消息发送前的文件快照，无法还原文件。');
       return;
     }
@@ -3169,7 +3170,9 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
       alert('找不到该 AI 回复对应的用户消息,无法重做');
       return;
     }
-    handleRollback(userMsg, { mode: 'both' });
+    // 重做整轮:有文件快照就还原+重做;没有(非 git 项目/旧会话)则降级为只裁剪
+    // 会话再重做,不能因为缺快照就 alert 中止(softFiles)。
+    handleRollback(userMsg, { mode: 'both', softFiles: true });
   }, [messages, chatMessages, handleRollback]);
 
   const handleRetryTool = useCallback((turn, toolCall) => {

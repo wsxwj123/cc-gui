@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { FileText, Edit3, Terminal, RefreshCw, ChevronDown, ChevronRight, ExternalLink, RotateCcw, Check, Eye, EyeOff } from 'lucide-react';
 import { useStore } from '../stores/sessionStore.js';
 import { DiffViewer } from './DiffViewer.jsx';
+import { confirmDialog } from '../utils/confirmDialog.jsx';
 
 function formatTime(ts) {
   if (!ts) return '';
@@ -27,7 +28,7 @@ function ChangeItem({ change, sessionId, cwd, reviewed, onToggleReviewed }) {
     const msg = change.type === 'write'
       ? `恢复到 HEAD：\n${change.file}\n\n如果这是本轮新建且未被 git 跟踪的文件，会直接删除；否则会丢失该文件的未提交修改。确定？`
       : `恢复到 HEAD：\n${change.file}\n\n会丢失所有未提交修改，确定？`;
-    if (!confirm(msg)) return;
+    if (!(await confirmDialog(msg, { danger: true }))) return;
     setBusy('revert');
     try {
       const res = await fetch('/api/file/revert', {

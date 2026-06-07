@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { Settings, Save, RefreshCw, AlertCircle, Check, Plus, Trash2, ChevronDown, ChevronRight } from 'lucide-react';
 import { openExternalUrl } from '../utils/openExternal.js';
+import { confirmDialog } from '../utils/confirmDialog.jsx';
 import { useStore } from '../stores/sessionStore.js';
 
 const HOOK_EVENTS = [
@@ -270,7 +271,7 @@ function StorageTab() {
   };
 
   const deleteAll = async () => {
-    if (!confirm(`确定清理全部 ${data.items.length} 个 .bak 备份？将释放 ${fmtBytes(data.totalBytes)}。`)) return;
+    if (!(await confirmDialog(`确定清理全部 ${data.items.length} 个 .bak 备份？将释放 ${fmtBytes(data.totalBytes)}。`, { danger: true }))) return;
     setBusy(true);
     try {
       await fetch('/api/bak-files', {
@@ -577,8 +578,8 @@ function HooksTab({ settings, onSave, saving, saved }) {
     onSave({ ...settings, hooks: next });
   };
 
-  const removeHook = (event, groupIdx, cmdIdx) => {
-    if (!confirm('删除这条 hook？')) return;
+  const removeHook = async (event, groupIdx, cmdIdx) => {
+    if (!(await confirmDialog('删除这条 hook？', { danger: true }))) return;
     const next = { ...hooks };
     const groups = [...(next[event] || [])];
     const group = { ...groups[groupIdx] };
