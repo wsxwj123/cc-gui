@@ -17,7 +17,7 @@ import { SettingsPanel } from './components/SettingsPanel.jsx';
 import { FileExplorerPanel } from './components/FileExplorerPanel.jsx';
 import { useResizable as useResizableHook, Splitter as SplitterCmp } from './hooks/useResizable.jsx';
 import { MCPPanel } from './components/MCPPanel.jsx';
-import { FileChangesPanel } from './components/FileChangesPanel.jsx';
+import { FileChangesPanel, FileReviewPanel } from './components/FileChangesPanel.jsx';
 import { AgentsPanel } from './components/AgentsPanel.jsx';
 import { AgentMonitorPanel } from './components/AgentMonitorPanel.jsx';
 import { CliMissingModal } from './components/CliMissingModal.jsx';
@@ -343,6 +343,7 @@ function formatPathShort(path) {
 // and its RightPanel body. Adding a key here is all the wiring needed.
 const PANEL_MAP = {
   files: { label: '文件浏览器', icon: FolderTree, component: FileExplorerPanel },
+  changes: { label: '文件审查', icon: FileDiff, component: FileReviewPanel },
   monitor: { label: 'Subagent 监控', icon: Bot, component: AgentMonitorPanel },
   agents: { label: 'Subagent 定义', icon: SquarePen, component: AgentsPanel },
   usage: { label: '用量统计', icon: BarChart3, component: UsagePanel },
@@ -5160,7 +5161,7 @@ export default function App() {
             // stays as the hover tooltip for the full name.
             const SHORT = {
               files: '文件', monitor: '监控', agents: '定义', usage: '用量', processes: '进程',
-              mcp: 'MCP', settings: '设置',
+              changes: '审查', mcp: 'MCP', settings: '设置',
             };
             const short = SHORT[id] || label;
             return (

@@ -1,6 +1,6 @@
 {
   "name": "claude-gui",
-  "version": "0.1.35",
+  "version": "0.1.36",
   "license": "MIT",
   "private": true,
   "type": "module",
@@ -14,6 +14,7 @@
     "build:tauri": "node scripts/require-public-build.cjs && npm run build:local",
     "audit:public": "node scripts/audit-public.cjs",
     "smoke:http": "node scripts/check-http-smoke.cjs",
+    "test:file-changes": "node scripts/check-file-changes.mjs",
     "test:session-trim": "node scripts/check-session-trim.mjs",
     "start": "NODE_ENV=production node server/index.js",
     "stop": "lsof -ti:6677 | xargs kill -9 2>/dev/null || true",

@@ -1,14 +1,18 @@
 import React, { useState } from 'react';
 import { FileText, ChevronDown, ChevronRight, Loader2, FilePlus2 } from 'lucide-react';
+import { DiffViewer } from '../DiffViewer.jsx';
 
-// Build [{type: '-' | '+', text}, ...] for one old→new pair.
-function hunkLines(oldStr, newStr) {
-  const oldLines = (oldStr || '').split('\n');
-  const newLines = (newStr || '').split('\n');
-  const out = [];
-  for (const l of oldLines) out.push({ type: '-', text: l });
-  for (const l of newLines) out.push({ type: '+', text: l });
-  return out;
+function unifiedDiff(filePath, oldStr, newStr, label = 'change') {
+  const file = String(filePath || label).replace(/^[/\\]+/, '');
+  const oldLines = oldStr == null ? [] : String(oldStr).split('\n');
+  const newLines = newStr == null ? [] : String(newStr).split('\n');
+  return [
+    `--- a/${file}`,
+    `+++ b/${file}`,
+    '@@',
+    ...oldLines.map((line) => `-${line}`),
+    ...newLines.map((line) => `+${line}`),
+  ].join('\n');
 }
 
 export function EditDiffCard({ toolCall }) {
@@ -22,18 +26,20 @@ export function EditDiffCard({ toolCall }) {
   let hunks = [];
   if (name === 'Edit') {
     if (toolCall.input?.old_string != null || toolCall.input?.new_string != null) {
-      hunks = [hunkLines(toolCall.input.old_string, toolCall.input.new_string)];
+      hunks = [{ diff: unifiedDiff(filePath, toolCall.input.old_string ?? '', toolCall.input.new_string ?? '') }];
     }
   } else if (name === 'MultiEdit') {
     const edits = Array.isArray(toolCall.input?.edits) ? toolCall.input.edits : [];
-    hunks = edits.map((e) => hunkLines(e.old_string, e.new_string));
+    hunks = edits.map((e, i) => ({
+      diff: unifiedDiff(filePath, e.old_string ?? '', e.new_string ?? '', `edit-${i + 1}`),
+    }));
   } else if (name === 'Write') {
     const content = toolCall.input?.content || '';
-    if (content) hunks = [content.split('\n').map((l) => ({ type: '+', text: l }))];
+    if (content) hunks = [{ diff: unifiedDiff(filePath, null, content, 'new-file') }];
   }
 
-  const adds = hunks.reduce((acc, h) => acc + h.filter((l) => l.type === '+').length, 0);
-  const dels = hunks.reduce((acc, h) => acc + h.filter((l) => l.type === '-').length, 0);
+  const adds = hunks.reduce((acc, h) => acc + h.diff.split('\n').filter((l) => l.startsWith('+') && !l.startsWith('+++')).length, 0);
+  const dels = hunks.reduce((acc, h) => acc + h.diff.split('\n').filter((l) => l.startsWith('-') && !l.startsWith('---')).length, 0);
 
   const opLabel = name === 'Write' ? '新建' : name === 'MultiEdit' ? `${hunks.length} 处改动` : '编辑';
   const FileIcon = name === 'Write' ? FilePlus2 : FileText;
@@ -66,20 +72,8 @@ export function EditDiffCard({ toolCall }) {
           {hunks.length === 0 ? (
             <div className="px-3 py-2 text-[10px] text-ink-faint font-body">参数仍在传输…</div>
           ) : hunks.map((hunk, hi) => (
-            <div key={hi} className={`text-[11px] font-mono leading-relaxed ${hi > 0 ? 'border-t border-canvas-deep' : ''}`}>
-              {hunk.map((line, li) => (
-                <div
-                  key={li}
-                  className={`px-3 py-px ${
-                    line.type === '+'
-                      ? 'bg-green-50 text-green-800'
-                      : 'bg-red-50 text-red-800'
-                  }`}
-                >
-                  <span className="select-none mr-2 text-ink-faint">{line.type}</span>
-                  {line.text || ' '}
-                </div>
-              ))}
+            <div key={hi} className={hi > 0 ? 'border-t border-canvas-deep' : ''}>
+              <DiffViewer diff={hunk.diff} maxHeight="max-h-64" />
             </div>
           ))}
           {isError && result?.content && (

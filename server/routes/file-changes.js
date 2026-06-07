@@ -24,7 +24,28 @@ function safeId(s) {
  * Extract file changes from a session's tool calls.
  * Looks for Edit, Write, and Bash commands that modify files.
  */
-function extractFileChanges(records) {
+function unifiedDiff(filePath, oldStr, newStr, label = 'change') {
+  const file = String(filePath || label).replace(/^[/\\]+/, '');
+  const oldLines = oldStr == null ? [] : String(oldStr).split('\n');
+  const newLines = newStr == null ? [] : String(newStr).split('\n');
+  return [
+    `--- a/${file}`,
+    `+++ b/${file}`,
+    '@@',
+    ...oldLines.map((line) => `-${line}`),
+    ...newLines.map((line) => `+${line}`),
+  ].join('\n');
+}
+
+function diffStats(diff) {
+  const lines = String(diff || '').split('\n');
+  return {
+    additions: lines.filter((line) => line.startsWith('+') && !line.startsWith('+++')).length,
+    deletions: lines.filter((line) => line.startsWith('-') && !line.startsWith('---')).length,
+  };
+}
+
+export function extractFileChanges(records) {
   const changes = [];
   const seen = new Set();
 
@@ -35,32 +56,64 @@ function extractFileChanges(records) {
 
     for (const block of content) {
       if (block.type !== 'tool_use') continue;
-      const { name, input } = block;
+      const { name, input, id: toolUseId } = block;
 
       if (name === 'Edit' && input?.file_path) {
-        const key = `edit:${input.file_path}:${record.timestamp}`;
+        const key = `edit:${toolUseId || record.uuid}:${input.file_path}:0`;
         if (!seen.has(key)) {
           seen.add(key);
+          const diff = unifiedDiff(input.file_path, input.old_string ?? '', input.new_string ?? '');
           changes.push({
+            id: key,
             type: 'edit',
+            toolUseId,
             file: input.file_path,
             timestamp: record.timestamp,
             model: record.message?.model,
             uuid: record.uuid,
+            diff,
+            ...diffStats(diff),
             preview: input.new_string?.slice(0, 200) || '',
             oldPreview: input.old_string?.slice(0, 200) || '',
           });
         }
-      } else if (name === 'Write' && input?.file_path) {
-        const key = `write:${input.file_path}:${record.timestamp}`;
-        if (!seen.has(key)) {
+      } else if (name === 'MultiEdit' && input?.file_path && Array.isArray(input.edits)) {
+        input.edits.forEach((edit, editIndex) => {
+          const key = `multiedit:${toolUseId || record.uuid}:${input.file_path}:${editIndex}`;
+          if (seen.has(key)) return;
           seen.add(key);
+          const diff = unifiedDiff(input.file_path, edit.old_string ?? '', edit.new_string ?? '', `edit-${editIndex + 1}`);
           changes.push({
-            type: 'write',
+            id: key,
+            type: 'edit',
+            toolName: 'MultiEdit',
+            toolUseId,
+            editIndex,
             file: input.file_path,
             timestamp: record.timestamp,
             model: record.message?.model,
             uuid: record.uuid,
+            diff,
+            ...diffStats(diff),
+            preview: edit.new_string?.slice(0, 200) || '',
+            oldPreview: edit.old_string?.slice(0, 200) || '',
+          });
+        });
+      } else if (name === 'Write' && input?.file_path) {
+        const key = `write:${toolUseId || record.uuid}:${input.file_path}:0`;
+        if (!seen.has(key)) {
+          seen.add(key);
+          const diff = unifiedDiff(input.file_path, null, input.content ?? '', 'new-file');
+          changes.push({
+            id: key,
+            type: 'write',
+            toolUseId,
+            file: input.file_path,
+            timestamp: record.timestamp,
+            model: record.message?.model,
+            uuid: record.uuid,
+            diff,
+            ...diffStats(diff),
             preview: input.content?.slice(0, 200) || '',
           });
         }
@@ -72,7 +125,9 @@ function extractFileChanges(records) {
           if (!seen.has(key)) {
             seen.add(key);
             changes.push({
+              id: key,
               type: 'bash',
+              toolUseId,
               command: cmd,
               timestamp: record.timestamp,
               model: record.message?.model,
