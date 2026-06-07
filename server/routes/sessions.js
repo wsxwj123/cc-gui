@@ -352,8 +352,12 @@ router.post('/sessions/:sessionId/strip-thinking', async (req, res) => {
         const obj = JSON.parse(line);
         if (obj.type === 'assistant' && obj.message && Array.isArray(obj.message.content)) {
           const before = obj.message.content.length;
-          obj.message.content = obj.message.content.filter((c) => c?.type !== 'thinking');
-          const removed = before - obj.message.content.length;
+          const filtered = obj.message.content.filter((c) => c?.type !== 'thinking');
+          // 纯 thinking 轮次:剥离后 content 变 [],Anthropic API 拒绝空 content 的
+          // assistant 记录(400)导致 resume 失败。这种行保留原样不剥离。
+          if (filtered.length === 0) return line;
+          obj.message.content = filtered;
+          const removed = before - filtered.length;
           if (removed > 0) {
             strippedBlocks += removed;
             touchedLines += 1;
@@ -363,9 +367,9 @@ router.post('/sessions/:sessionId/strip-thinking', async (req, res) => {
       } catch {}
       return line;
     });
-    const text = out.join('\n');
-    const finalText = text.length && !text.endsWith('\n') ? text + '\n' : text;
-    await writeFile(file, finalText, 'utf-8');
+    // 原子写(tmp+rename),和 trim 一致 —— 避免裸 writeFile 截断后、写完前被文件
+    // 监听器读到空内容,导致前端会话瞬间清空。
+    await writeJsonlAtomic(file, out.join('\n'));
     res.json({ strippedBlocks, touchedLines });
   } catch (err) {
     res.status(500).json({ error: err.message });

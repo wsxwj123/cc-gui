@@ -122,8 +122,11 @@ function CheckpointButton({ sessionId, cwd }) {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ sha, cwd }),
       });
-      const d = await r.json();
-      if (!r.ok) alert('恢复失败：' + (d.error || r.status));
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) { alert('恢复失败：' + (d.error || r.status)); return; }
+      // 成功路径必须给反馈,否则用户点了「确定」后 dropdown 没动静、以为「无反应」。
+      setOpen(false);
+      alert(`已将工作目录恢复到 checkpoint ${sha.slice(0, 7)}`);
     } catch (err) { alert('恢复失败：' + err.message); }
   };
 
@@ -3082,6 +3085,7 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
     //    Strategy: prefer uuid match (historical store messages); fall back to
     //    timestamp for freshly-sent messages whose chat-user-<ts> uuid never
     //    landed in the jsonl (the CLI persists its own uuid but keeps the ts).
+    let sessionWasReset = false;
     if (sel?.sessionId && projectHash) {
       const body = msg.uuid && !msg.uuid.startsWith('chat-')
         ? { projectHash, uuid: msg.uuid }
@@ -3098,6 +3102,7 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
         // try --resume on a deleted jsonl and CLI silently exits with
         // "No conversation found".
         if (trData?.sessionReset) {
+          sessionWasReset = true;
           // sessionId 失效 → 切到 draft 态。但 permissionMode / model 的 per-session
           // pin 还在 modelBySession[oldSid] / permissionModeBySession[oldSid] 下,
           // 下一轮 getModelFor / getPermissionModeFor(`draft-...`) 会回退到全局默认
@@ -3132,7 +3137,10 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
 
     // 5) Re-fetch the (now-trimmed) message list so the UI mirrors disk —
     //    avoids any drift between in-memory slice and what the CLI will see.
-    if (sel?.sessionId && projectHash) {
+    //    Skip when the session was reset: its jsonl is deleted, so re-fetching
+    //    the now-stale sessionId 404s and blanks the (correctly draft) pane —
+    //    that 404→empty is exactly the "回滚后所有消息消失" the user hit.
+    if (!sessionWasReset && sel?.sessionId && projectHash) {
       try { await fetchMessagesForTab(sel.sessionId, projectHash, { silent: true }); } catch {}
     }
 
@@ -3432,7 +3440,7 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
                   }} />
                 </>
               )}
-              {isStreaming && !streamingText && !streamingThinking && streamingToolCalls.length === 0 && (
+              {isStreaming && !streamingText && !streamingThinking && streamingToolCalls.length === 0 && streamingBlocks.length === 0 && (
                 <div className="px-6 py-3 animate-fade-in">
                   <div className="max-w-[var(--content-max)] mx-auto flex items-center gap-2.5 text-[14px] font-body" style={{ color: '#D97757' }}>
                     <CliSpinner size={22} />

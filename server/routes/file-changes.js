@@ -31,6 +31,9 @@ function lineDiff(oldStr, newStr) {
   const a = oldStr == null ? [] : String(oldStr).split('\n');
   const b = newStr == null ? [] : String(newStr).split('\n');
   const m = a.length, n = b.length;
+  // 大文件保护:LCS dp 表 O(m×n) 内存(2000×2000≈32MB)。超阈值降级为整段删+整段
+  // 增,避免会话里多个大文件 Edit 把 server 撑爆 OOM。
+  if (m * n > 4_000_000) return [...a.map((l) => ['-', l]), ...b.map((l) => ['+', l])];
   // LCS 长度表(自底向上)。Edit 的 old/new 通常是文件片段(几十行),m*n 很小;
   // Write 新文件 old 为空 → 直接全部当新增,不构建大表。
   const dp = Array.from({ length: m + 1 }, () => new Array(n + 1).fill(0));

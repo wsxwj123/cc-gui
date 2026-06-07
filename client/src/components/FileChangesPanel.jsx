@@ -102,16 +102,18 @@ function ChangeItem({ change, sessionId, cwd, reviewed, onToggleReviewed }) {
 
   return (
     <div className={`group border rounded-lg overflow-hidden animate-fade-up ${reviewed ? 'border-success/25 bg-success/5' : 'border-canvas-deep'}`}>
-      <button
+      <div
+        role="button"
+        tabIndex={0}
         onClick={() => setExpanded(!expanded)}
-        className="w-full flex items-center gap-2 px-3 py-2 hover:bg-canvas-warm/60 transition-colors text-left"
+        className="w-full flex items-center gap-2 px-3 py-2 hover:bg-canvas-warm/60 transition-colors text-left cursor-pointer"
       >
         {expanded ? (
           <ChevronDown size={12} className="text-ink-faint shrink-0" />
         ) : (
           <ChevronRight size={12} className="text-ink-faint shrink-0" />
         )}
-        <Icon size={12} className={change.type === 'bash' ? 'text-warning/70' : 'text-accent/60'} shrink-0 />
+        <Icon size={12} className={`shrink-0 ${change.type === 'bash' ? 'text-warning/70' : 'text-accent/60'}`} />
         <span className="text-xs text-ink-soft font-mono truncate flex-1">{label}</span>
         {change.diff && (
           <span className="flex items-center gap-1 text-[10px] font-mono shrink-0">
@@ -145,7 +147,7 @@ function ChangeItem({ change, sessionId, cwd, reviewed, onToggleReviewed }) {
         <span className="text-[10px] text-ink-faint font-mono shrink-0">
           {formatTime(change.timestamp)}
         </span>
-      </button>
+      </div>
 
       {expanded && (
         <div className="border-t border-canvas-deep p-3 space-y-2 animate-fade-in bg-canvas">

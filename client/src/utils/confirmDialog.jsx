@@ -7,9 +7,10 @@ import { createRoot } from 'react-dom/client';
 // 即可,返回 true/false。Esc/点击遮罩=取消,Enter/确定按钮=确认。
 function ConfirmModal({ message, danger, confirmText, cancelText, onResolve }) {
   useEffect(() => {
+    // 只全局监听 Escape=取消。Enter=确认交给下方按钮的 autoFocus(焦点在按钮时
+    // 浏览器原生用 Enter 激活),避免 input 聚焦场景下全局 Enter 误确认危险操作。
     const onKey = (e) => {
       if (e.key === 'Escape') onResolve(false);
-      else if (e.key === 'Enter') onResolve(true);
     };
     document.addEventListener('keydown', onKey);
     return () => document.removeEventListener('keydown', onKey);

@@ -10,6 +10,11 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 
 const router = Router();
 
+// 客户端断连后 detachedStdout 会持续把 stdout 推进 earlyLines。给它上限防止长
+// 会话+长时间断连下无界增长 OOM。超限停止缓冲 —— 重连时 fetchMessages 从 jsonl
+// 读完整历史兜底,不丢数据。
+const MAX_EARLY_LINES = 5000;
+
 // 跨平台杀进程树。Windows 不支持 POSIX signal,proc.kill('SIGTERM') 只杀直接子
 // (claude CLI 本身),它派生的 node/MCP 子进程留在系统里继续吃 CPU。Windows 必
 // 须用 `taskkill /F /T /PID` (/T = 杀整树,/F = 强制) 才能彻底清理。Bug #1。
@@ -308,7 +313,7 @@ router.post('/chat', async (req, res) => {
     slot.earlyTail = lines.pop() || '';
     for (const line of lines) {
       if (!line.trim()) continue;
-      slot.earlyLines.push(line);
+      if (slot.earlyLines.length < MAX_EARLY_LINES) slot.earlyLines.push(line);
       // Capture the runtime sessionId from the CLI's init event so the close
       // handler can clean up pending permission requests even for fresh
       // drafts (where spawn-time sessionId was null).
@@ -545,7 +550,7 @@ router.get('/chat/:pid/stream', (req, res) => {
       slot.earlyTail += chunk.toString();
       const lines = slot.earlyTail.split('\n');
       slot.earlyTail = lines.pop() || '';
-      for (const l of lines) if (l.trim()) slot.earlyLines.push(l);
+      for (const l of lines) if (l.trim() && slot.earlyLines.length < MAX_EARLY_LINES) slot.earlyLines.push(l);
     };
     slot.detachedStderr = (chunk) => {
       if (slot.attached) return;

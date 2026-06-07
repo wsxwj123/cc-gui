@@ -271,7 +271,9 @@ pub fn run() {
                     kill_stale_backend(DEFAULT_BACKEND_PORT);
                     wait_until_free(DEFAULT_BACKEND_PORT, Duration::from_secs(5));
                 } else if healthy && !local_ok {
-                    log_startup("[tauri] port 6677 is healthy but lacks local routes; trying next port");
+                    log_startup("[tauri] backend on 6677 lacks local routes — killing it to respawn the full build");
+                    kill_stale_backend(DEFAULT_BACKEND_PORT);
+                    wait_until_free(DEFAULT_BACKEND_PORT, Duration::from_secs(5));
                 }
                 for port in DEFAULT_BACKEND_PORT..=MAX_BACKEND_PORT {
                     if port_accepts_tcp(port) {
