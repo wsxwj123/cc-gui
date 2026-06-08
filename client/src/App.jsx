@@ -1692,8 +1692,8 @@ function StreamingStatusLine({ thinking, text, toolCalls }) {
 // The banner now just nudges users who'd prefer a faster mode, with quick
 // switches + a one-click "永久忽略" stored in localStorage.
 function PermissionModeHintBanner({ permKey }) {
-  // 全局默认是 plan(Bug #9),banner 主要给 plan 用户解释模式特性 + 快捷切走。
-  // default/acceptEdits/bypass 模式下不打扰(用户已自己选过)。
+  // banner 只在 plan 模式显示:解释模式特性 + 给快捷切走。默认已是 default
+  // (见 store.permissionMode),所以这条只在用户主动切到 plan 时才出现,不再误导。
   const permissionMode = useStore((s) => (permKey ? (s.permissionModeBySession[permKey] || s.permissionMode) : s.permissionMode));
   const setPermissionMode = useStore((s) => s.setPermissionMode);
   const [dismissed, setDismissed] = useState(() => {
@@ -1709,7 +1709,7 @@ function PermissionModeHintBanner({ permKey }) {
     <div className="shrink-0 mx-6 mt-2 px-3 py-2 rounded-md bg-amber-50 border border-amber-200 flex items-center gap-2 gap-y-1.5 flex-wrap text-[11px] font-body animate-fade-up">
       <Shield size={13} className="text-amber-600 shrink-0" />
       <span className="text-amber-800 flex-1 min-w-[12rem]">
-        当前是<b>规划模式</b>(新版默认):AI 会先生成执行计划,你审批后再动手。
+        当前是<b>规划模式</b>:AI 会先生成执行计划,你审批后再动手。
         纯问答(不调工具)不会弹窗;想直接干活可切"默认"或"接受编辑"。
       </span>
       <button
@@ -1910,6 +1910,11 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
   const [streamingBlocks, setStreamingBlocks] = useState([]);
   const activeProcRef = useRef(null);
   const abortRef = useRef(null);
+  // pid 集合:被用户主动「停止」过的 chat 进程。停止后进程要等 close 才设 exitCode
+  // (SIGTERM→SIGKILL 最多 5s),这期间 /agents/active 仍报 stoppable=true → backgroundPid
+  // poll 会把它误判成「后台运行中」并闪黄条,甚至触发 auto-reattach 重连。记下已停的
+  // pid,poll 与 reattach 都跳过它。
+  const stoppedPidsRef = useRef(new Set());
   // Set by "⚡ 引导": tells the aborted in-flight send's finally to skip its own
   // queue drain so we don't double-send — handleAccelerate drains directly, which
   // also covers reattach streams (whose finally never drains).
@@ -2077,6 +2082,7 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
           (a) => a.kind === 'chat-process'
             && a.sessionId === selectedSession.sessionId
             && a.stoppable === true
+            && !stoppedPidsRef.current.has(String(a.pid))
         );
         // Only show "background working" if we're NOT actively streaming
         // locally — otherwise the local stream UI is already showing it.
@@ -2897,14 +2903,19 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
   }, [backgroundPid]);
 
   const handleStop = useCallback(() => {
+    // 记下要停的 pid → poll/reattach 不再把它当「还在后台跑」(它在服务端 60s grace 内
+    // 仍 stoppable)。持 SSE 的 activeProc 与不持 SSE 的 background 两条路径都要记。
+    const pid = activeProcRef.current || backgroundPid;
+    if (pid) stoppedPidsRef.current.add(String(pid));
     abortRef.current?.abort();
     if (activeProcRef.current) {
       fetch(`/api/chat/${activeProcRef.current}/stop`, { method: 'POST' });
     } else if (backgroundPid) {
       // Background CLI proc — we're not holding the SSE but can still kill it.
       fetch(`/api/chat/${backgroundPid}/stop`, { method: 'POST' });
-      setBackgroundPid(null);
     }
+    // 两种情况都立即清掉本地「后台运行中」标记,不等下一轮 poll(那一轮还会误报)。
+    setBackgroundPid(null);
   }, [backgroundPid]);
 
   // Double-ESC → interrupt streaming (matches Claude Code CLI). A SINGLE Esc

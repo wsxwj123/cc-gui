@@ -145,11 +145,13 @@ export const useStore = create((set, get) => ({
   // CLI session knobs. Persisted to localStorage so they survive reload.
   effort: (() => { try { return (typeof localStorage !== 'undefined' && localStorage.getItem('cgui-effort')) || ''; } catch { return ''; } })(),
   addDirs: readLs('cgui-add-dirs', []),
-  // Default to 'plan' (Bug #9):让 AI 先生成计划再执行,新手体感更安全。
-  // 纯文本问答不调工具时 plan 模式不弹窗;调工具会弹 ExitPlanMode 让用户审批
-  // 整个执行计划。Banner 给"切回默认"快捷,体验重了的用户随时回 default。
-  // `permissionMode` 是当前活跃会话的镜像值(per-session 真值在 permissionModeBySession)。
-  permissionMode: readLs('cgui-permission-mode', 'plan'),
+  // 默认 'default'(每个工具调用弹窗征求同意)。曾默认 'plan'(Bug #9),但选择器
+  // 回退 'default'、而 banner/getPermissionModeFor 回退全局('plan') → 新建会话出现
+  // "选择器显示默认却实际在跑 plan + banner 报规划模式"的三方不一致(用户报告的冲突)。
+  // 统一为:三处都回退全局 permissionMode,初始即 default → 显示=实际。想要 plan 的
+  // 用户手动切一次即可,会粘到后续新会话。`permissionMode` 是活跃会话的镜像值
+  // (per-session 真值在 permissionModeBySession)。
+  permissionMode: readLs('cgui-permission-mode', 'default'),
   // Per-session override map { [sessionKey]: mode }. Each session (or draft)
   // remembers its OWN mode so switching from session A (plan) to session B
   // (bypass) shows B's mode, not A's. Keyed by sessionId, or `draft-<hash>`

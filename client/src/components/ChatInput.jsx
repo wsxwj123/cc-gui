@@ -15,7 +15,7 @@ export const MODE_META = {
 export function PermissionModeSelector({ permKey }) {
   // Read THIS session's mode (keyed). Subscribing to the map slice keeps the
   // chip in sync when the active session changes underneath us.
-  const permissionMode = useStore((s) => (permKey ? (s.permissionModeBySession[permKey] || 'default') : s.permissionMode));
+  const permissionMode = useStore((s) => (permKey ? (s.permissionModeBySession[permKey] || s.permissionMode) : s.permissionMode));
   const setPermissionMode = useStore((s) => s.setPermissionMode);
   const [open, setOpen] = useState(false);
   const wrapRef = useRef(null);
@@ -165,7 +165,7 @@ export function ChatInput({ onSend, onStop, onAccelerate, disabled, isStreaming,
   // Permission mode lives in the store, keyed per-session via permKey so each
   // conversation keeps its own mode. Fall back to the global value only when
   // no key is supplied (shouldn't happen in normal render).
-  const permissionMode = useStore((s) => (permKey ? (s.permissionModeBySession[permKey] || 'default') : s.permissionMode));
+  const permissionMode = useStore((s) => (permKey ? (s.permissionModeBySession[permKey] || s.permissionMode) : s.permissionMode));
   const setPermissionMode = useStore((s) => s.setPermissionMode);
   // While the session is handed off to phone remote control, lock the composer:
   // the hidden `--remote-control` pty owns the session file, so spawning a `-p`

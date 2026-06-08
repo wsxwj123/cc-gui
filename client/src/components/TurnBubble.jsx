@@ -251,8 +251,11 @@ function TodoListCard({ toolCall }) {
     return 'text-ink-soft';
   };
 
+  // 不自带 animate-fade-up:入场淡入由外层 turn 容器(446,仅 isLiveStream 时)统一播。
+  // 子块各自带动画会在 turn 固化(streaming→chat-…→真uuid 三次换 key)重挂时重放,
+  // 就是"回复完成后闪一下再显示"的来源。
   return (
-    <div className="border border-canvas-deep rounded-lg overflow-hidden bg-canvas animate-fade-up">
+    <div className="border border-canvas-deep rounded-lg overflow-hidden bg-canvas">
       <div className="px-3 py-2 bg-canvas-warm flex items-center gap-2 border-b border-canvas-deep">
         <ListTodo size={13} className="text-accent shrink-0" />
         <span className="text-xs text-ink-soft font-body">任务清单</span>
@@ -304,8 +307,9 @@ function ToolCallsGroup({ toolCalls, onRetryTool }) {
     }
   }
 
+  // 同 TodoListCard:不自带 fade-up,避免固化重挂时重放入场动画导致闪烁。
   return (
-    <div className="border-l-2 border-canvas-deep/40 animate-fade-up">
+    <div className="border-l-2 border-canvas-deep/40">
       {/* Header — always visible */}
       <button
         onClick={() => setExpanded(!expanded)}
