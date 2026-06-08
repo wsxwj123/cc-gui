@@ -539,7 +539,8 @@ function CcUpdater() {
 
   useEffect(() => {
     fetch('/api/claude-version-check').then((r) => r.json()).then((d) => {
-      setState({ status: 'idle', ...d });
+      // 已装但查询出错(如 npm registry 失败)时标 err 让错误可见;未装时走安装按钮分支。
+      setState({ status: (d.error && d.installed !== false) ? 'err' : 'idle', ...d });
     }).catch(() => {});
   }, []);
 

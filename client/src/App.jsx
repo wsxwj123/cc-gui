@@ -2848,6 +2848,9 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
       setStreamingBlocks([]);
       activeProcRef.current = null;
       abortRef.current = null;
+      // 重做工具的转圈指示器兜底:重跑流结束(成功/报错/零内容)一律关掉,
+      // 避免重跑没产出内容时 effect 不触发 → 指示器一直转。
+      setRetryActiveUuid(null);
       // After the stream ends locally, hand the displayed history back to the
       // persisted jsonl. The catch: jsonl flushes the user prompt BEFORE the
       // assistant reply, and that flush races the stream's `result`. A single
@@ -2898,7 +2901,10 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
           let peeked = [];
           try {
             const r = await fetch(`/api/sessions/${finalizeSid}/messages?projectHash=${encodeURIComponent(_sel.projectHash)}`);
-            if (r.ok) peeked = (await r.json()).messages || [];
+            // 该端点直接返回数组(res.json(messages)),不是 {messages:[]}。原来取 .messages
+            // 永远是 undefined→peeked 恒为 []→roundLanded 恒 false→每轮空跑满 12 次(~2.4s)
+            // 才回退,尾部落盘检测形同虚设。兼容两种形态。
+            if (r.ok) { const d = await r.json(); peeked = Array.isArray(d) ? d : (d?.messages || []); }
           } catch {}
           if (getLocalSession()?.sessionId !== finalizeSid) break;
           if (!producedReply) {
