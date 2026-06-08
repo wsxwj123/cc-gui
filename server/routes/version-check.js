@@ -184,7 +184,14 @@ function updateCmdFor(method, claudePath) {
     case 'native':
     default: {
       // update 与 upgrade 是同一命令的别名;用 upgrade(用户实测 Windows 上体验更好)。
-      const bin = claudePath ? `"${claudePath}"` : 'claude';
+      // 路径按平台正确转义:Windows .bat 用双引号;mac/linux bash 用单引号(防路径含
+      // 空格/$/反引号被 shell 解释)。
+      let bin = 'claude';
+      if (claudePath) {
+        bin = process.platform === 'win32'
+          ? `"${claudePath}"`
+          : `'${claudePath.replace(/'/g, `'\\''`)}'`;
+      }
       return `${bin} upgrade`;
     }
   }

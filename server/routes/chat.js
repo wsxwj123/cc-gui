@@ -2,8 +2,8 @@ import { Router } from 'express';
 import { spawn, execFileSync } from 'child_process';
 import { resolve as pathResolve, dirname, join as pathJoin, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { readFileSync, statSync } from 'node:fs';
-import { homedir } from 'node:os';
+import { readFileSync, statSync, writeFileSync } from 'node:fs';
+import { homedir, tmpdir } from 'node:os';
 import { getDefaultModel } from '../services/model-resolver.js';
 import { dropPendingForSession } from './permissions.js';
 
@@ -15,6 +15,43 @@ const router = Router();
 // 会话+长时间断连下无界增长 OOM。超限停止缓冲 —— 重连时 fetchMessages 从 jsonl
 // 读完整历史兜底,不丢数据。
 const MAX_EARLY_LINES = 5000;
+
+// Windows:npm 装的 claude 是 claude.cmd,Node spawn 无法直接执行(.cmd 必须经
+// cmd.exe;Node 出于安全也拒绝直接跑 .cmd)。这里解析真实路径并缓存:仅当它是
+// .cmd/.bat 时用 cmd.exe /c 包一层,并把超长的 --settings inline JSON 落临时文件
+// 传路径(避开 cmd.exe 对 JSON 引号的破坏)。非 Windows / native claude.exe 路径
+// 完全不变(仍裸 'claude' + 原 args),对现有可用环境零回归。
+let _winClaudePath; // undefined=未解析, null=失败, string=路径
+function resolveWinClaude() {
+  if (_winClaudePath !== undefined) return _winClaudePath;
+  try {
+    const out = execFileSync('where', ['claude'], { timeout: 5000 }).toString();
+    _winClaudePath = out.split(/\r?\n/).map((s) => s.trim()).filter(Boolean)[0] || null;
+  } catch { _winClaudePath = null; }
+  return _winClaudePath;
+}
+function settingsArgsToTempFile(args) {
+  const idx = args.indexOf('--settings');
+  if (idx === -1 || idx + 1 >= args.length) return args;
+  const val = args[idx + 1];
+  if (typeof val !== 'string' || !val.trim().startsWith('{')) return args; // 已是路径
+  try {
+    const f = pathJoin(tmpdir(), `cgui-settings-${process.pid}-${Math.round(process.hrtime()[1])}.json`);
+    writeFileSync(f, val, 'utf8');
+    const next = args.slice();
+    next[idx + 1] = f;
+    return next;
+  } catch { return args; }
+}
+function claudeSpawn(args, opts) {
+  if (process.platform === 'win32') {
+    const resolved = resolveWinClaude();
+    if (resolved && /\.(cmd|bat)$/i.test(resolved)) {
+      return spawn('cmd.exe', ['/c', resolved, ...settingsArgsToTempFile(args)], opts);
+    }
+  }
+  return spawn('claude', args, opts);
+}
 
 // 跨平台杀进程树。Windows 不支持 POSIX signal,proc.kill('SIGTERM') 只杀直接子
 // (claude CLI 本身),它派生的 node/MCP 子进程留在系统里继续吃 CPU。Windows 必
@@ -277,7 +314,7 @@ router.post('/chat', async (req, res) => {
       permissionMode: chosenMode,
       promptPreview: String(prompt).slice(0, 60),
     }));
-    proc = spawn('claude', args, {
+    proc = claudeSpawn(args, {
       cwd: workingDir,
       // stdin = 'ignore' is the equivalent of shell `< /dev/null`. With pipe()
       // the CLI sat waiting for stdin to close before producing stream-json,
@@ -610,7 +647,7 @@ router.post('/chat/title', async (req, res) => {
 
   let proc;
   try {
-    proc = spawn('claude', ['-p', prompt, '--permission-mode', 'plan'], {
+    proc = claudeSpawn(['-p', prompt, '--permission-mode', 'plan'], {
       cwd: typeof req.body?.cwd === 'string' && req.body.cwd ? req.body.cwd : homedir(),
       stdio: ['ignore', 'pipe', 'pipe'],
       env: childEnv,
