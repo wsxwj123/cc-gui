@@ -2,6 +2,10 @@ import { Router } from 'express';
 import { readFileSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
+import { execFile } from 'child_process';
+import { promisify } from 'util';
+
+const execFileP = promisify(execFile);
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PKG_PATH = join(__dirname, '..', '..', 'package.json');
@@ -117,6 +121,72 @@ router.get('/version-check', async (req, res) => {
     // 可能 null → 按钮不渲染只剩手动链接(用户当前的体感问题)。
     serverPlatform: process.platform,
   });
+});
+
+// ─── Claude Code CLI 版本检测 + 一键更新 ───────────────────────────────
+let ccCache = null;       // npm registry 上 @anthropic-ai/claude-code 的 latest 版本
+let ccCachedAt = 0;
+
+async function getClaudeVersion() {
+  try {
+    // `claude --version` → "2.1.160 (Claude Code)"，取首个 x.y.z
+    const { stdout } = await execFileP('claude', ['--version'], { timeout: 8000 });
+    const m = String(stdout).match(/(\d+\.\d+\.\d+)/);
+    return m ? m[1] : null;
+  } catch {
+    return null; // CLI 未安装 / 不在 PATH
+  }
+}
+
+async function fetchNpmLatest() {
+  const r = await fetch('https://registry.npmjs.org/@anthropic-ai/claude-code/latest', {
+    headers: { 'Accept': 'application/json' },
+  });
+  if (!r.ok) { const e = new Error(`npm registry ${r.status}`); e.status = r.status; throw e; }
+  const d = await r.json();
+  return String(d.version || '');
+}
+
+/**
+ * GET /api/claude-version-check
+ * 比对本地 `claude --version` 与 npm latest。失败永远返回 200(只看字段)。
+ */
+router.get('/claude-version-check', async (req, res) => {
+  const currentVersion = await getClaudeVersion();
+  if (!currentVersion) {
+    return res.json({ currentVersion: null, installed: false, error: 'Claude Code 未安装或不在 PATH' });
+  }
+  let latest = '';
+  const now = Date.now();
+  if (ccCache && now - ccCachedAt < CACHE_TTL_MS) {
+    latest = ccCache;
+  } else {
+    try { latest = await fetchNpmLatest(); ccCache = latest; ccCachedAt = now; }
+    catch (err) {
+      if (ccCache) latest = ccCache;
+      else return res.json({ currentVersion, installed: true, error: err.message || 'npm 查询失败' });
+    }
+  }
+  res.json({
+    currentVersion,
+    latestVersion: latest,
+    installed: true,
+    hasUpdate: latest ? semverGt(latest, currentVersion) : false,
+  });
+});
+
+/**
+ * POST /api/claude-update — 跑 `claude update`(官方自更新,原生/npm 安装都兼容)。
+ * 同步等待完成后返回结果。超时 5 分钟。
+ */
+router.post('/claude-update', async (req, res) => {
+  try {
+    const { stdout, stderr } = await execFileP('claude', ['update'], { timeout: 5 * 60 * 1000 });
+    const after = await getClaudeVersion();
+    res.json({ ok: true, output: (stdout || stderr || '').slice(-2000), version: after });
+  } catch (err) {
+    res.json({ ok: false, error: (err.stderr || err.message || '更新失败').slice(-2000) });
+  }
 });
 
 export default router;

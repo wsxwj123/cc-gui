@@ -4928,6 +4928,18 @@ export default function App() {
     setCliCheckDismissed(true);
   }, []);
 
+  // 每次打开 GUI 检查 GUI + Claude Code 是否有新版,有则顶部弹横幅(本次会话可关闭)。
+  // 不固定时间——只在启动时查一次。详细更新操作在 设置 → 概览。
+  const [updateNotice, setUpdateNotice] = useState(null); // { gui?: ver, cc?: ver }
+  useEffect(() => {
+    (async () => {
+      const n = {};
+      try { const d = await (await fetch('/api/version-check')).json(); if (d.hasUpdate) n.gui = d.latestVersion; } catch {}
+      try { const d = await (await fetch('/api/claude-version-check')).json(); if (d.hasUpdate) n.cc = d.latestVersion; } catch {}
+      if (n.gui || n.cc) setUpdateNotice(n);
+    })();
+  }, []);
+
   // Pull the shared session-title map so a rename on the phone shows on the Mac
   // (and vice-versa). Live updates arrive via the ws 'custom-titles' broadcast.
   useEffect(() => { useStore.getState().hydrateCustomTitles(); }, []);
@@ -5276,6 +5288,19 @@ export default function App() {
       {LocalWidget && <LocalWidget />}
       {!cliInstalled && !cliCheckDismissed && (
         <CliMissingModal onRecheck={checkCli} onDismiss={dismissCliCheck} />
+      )}
+      {updateNotice && (
+        <div className="fixed top-3 left-1/2 -translate-x-1/2 z-[100] max-w-[92vw]">
+          <div className="flex items-center gap-3 rounded-lg border border-amber-200 bg-amber-50 text-amber-900 px-4 py-2.5 shadow-lg text-[13px] font-body">
+            <span>🎉 有新版本：
+              {updateNotice.gui && <b className="font-mono"> GUI v{updateNotice.gui}</b>}
+              {updateNotice.gui && updateNotice.cc && ' ·'}
+              {updateNotice.cc && <b className="font-mono"> Claude Code v{updateNotice.cc}</b>}
+            </span>
+            <span className="text-amber-700 text-[12px]">到「设置 → 概览」更新</span>
+            <button onClick={() => setUpdateNotice(null)} className="ml-1 text-amber-700 hover:text-amber-900 text-[16px] leading-none">×</button>
+          </div>
+        </div>
       )}
     </div>
   );

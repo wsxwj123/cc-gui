@@ -531,6 +531,87 @@ function UpdateChecker() {
   );
 }
 
+function CcUpdater() {
+  // status: idle | checking | ok | err ; updating: false | true
+  const [state, setState] = useState({ status: 'idle' });
+  const [updating, setUpdating] = useState(false);
+  const [result, setResult] = useState(null);
+
+  useEffect(() => {
+    fetch('/api/claude-version-check').then((r) => r.json()).then((d) => {
+      setState({ status: 'idle', ...d });
+    }).catch(() => {});
+  }, []);
+
+  const check = async () => {
+    setState((s) => ({ ...s, status: 'checking' }));
+    try {
+      const d = await (await fetch('/api/claude-version-check')).json();
+      setState({ status: d.error ? 'err' : 'ok', ...d });
+    } catch (e) {
+      setState((s) => ({ ...s, status: 'err', error: e.message || '网络错误' }));
+    }
+  };
+
+  const doUpdate = async () => {
+    if (!window.confirm(`将运行 claude update 更新 Claude Code 到 v${state.latestVersion}。\n这会修改全局 CLI,期间请勿关闭。确定继续?`)) return;
+    setUpdating(true); setResult(null);
+    try {
+      const d = await (await fetch('/api/claude-update', { method: 'POST' })).json();
+      setResult(d);
+      if (d.ok) setState((s) => ({ ...s, status: 'ok', currentVersion: d.version || s.currentVersion, hasUpdate: false }));
+    } catch (e) {
+      setResult({ ok: false, error: e.message || '请求失败' });
+    }
+    setUpdating(false);
+  };
+
+  return (
+    <div className="bg-canvas-warm border border-canvas-deep rounded-lg p-3 space-y-2">
+      <div className="flex items-center justify-between gap-2">
+        <div className="min-w-0">
+          <div className="text-[10px] text-ink-faint font-body uppercase tracking-wider">Claude Code CLI</div>
+          <div className="text-[14px] font-mono text-ink mt-0.5">
+            {state.installed === false ? '未安装' : state.currentVersion ? `v${state.currentVersion}` : '加载中…'}
+          </div>
+        </div>
+        <button
+          onClick={check}
+          disabled={state.status === 'checking' || updating}
+          className="px-3 py-1.5 text-[12px] bg-accent text-white rounded-md hover:bg-accent/90 disabled:opacity-50 flex items-center gap-1.5 shrink-0"
+        >
+          <RefreshCw size={12} className={state.status === 'checking' ? 'animate-spin' : ''} />
+          {state.status === 'checking' ? '检查中…' : '检查更新'}
+        </button>
+      </div>
+      {state.status === 'ok' && (
+        state.hasUpdate ? (
+          <div className="text-[12px] bg-amber-50 border border-amber-200 text-amber-900 rounded p-2.5 space-y-2">
+            <div className="flex items-center gap-1.5">
+              <span>🎉 Claude Code 新版:</span><b className="font-mono">v{state.latestVersion}</b>
+            </div>
+            <button
+              onClick={doUpdate}
+              disabled={updating}
+              className="px-3 py-1.5 text-[12px] bg-amber-700 text-white rounded-md hover:bg-amber-800 disabled:opacity-50 flex items-center gap-1.5"
+            >
+              {updating ? <><RefreshCw size={12} className="animate-spin" />更新中…(claude update)</> : <>⬇️ 一键更新</>}
+            </button>
+          </div>
+        ) : (
+          <div className="text-[12px] text-success">✓ 已是最新版本</div>
+        )
+      )}
+      {state.status === 'err' && <div className="text-[12px] text-error">{state.error}</div>}
+      {result && (
+        result.ok
+          ? <div className="text-[12px] text-emerald-700 bg-emerald-50 border border-emerald-200 rounded p-2">✓ 已更新到 v{result.version}</div>
+          : <div className="text-[12px] text-error">更新失败:{result.error}</div>
+      )}
+    </div>
+  );
+}
+
 function OverviewTab({ settings }) {
   const rows = [];
   if (settings?.defaultModel || settings?.model) rows.push(['默认模型', settings.defaultModel || settings.model]);
@@ -544,6 +625,7 @@ function OverviewTab({ settings }) {
   return (
     <div className="space-y-3">
       <UpdateChecker />
+      <CcUpdater />
       {rows.length > 0 ? (
         <div className="bg-canvas-warm border border-canvas-deep rounded-lg divide-y divide-canvas-deep">
           {rows.map(([k, v]) => (
