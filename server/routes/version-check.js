@@ -148,32 +148,42 @@ async function fetchNpmLatest() {
   return String(d.version || '');
 }
 
-// 检测 claude CLI 的安装方式(决定用哪个更新命令)。解析 `claude` 的真实路径后按
-// 路径特征归类:native(官方 install.sh,~/.local/share/claude)、brew、npm。
-async function detectInstallMethod() {
-  if (process.platform === 'win32') {
-    // Windows 上 CC 主要走 npm / native installer。优先 npm(最常见)。
-    return 'npm';
-  }
+// 检测 claude CLI 的安装方式 + 解析它的绝对路径。返回 { method, path }。
+// 关键:解析 GUI 实际会用到的那个 claude(与 getClaudeVersion 的 execFile('claude')
+// 同源,都走 process.env.PATH),这样更新才打到 GUI 真正读取的那个安装。
+async function detectInstall() {
   let real = '';
+  if (process.platform === 'win32') {
+    try {
+      const { stdout } = await execFileP('where', ['claude'], { timeout: 8000 });
+      real = (stdout.split(/\r?\n/).find(Boolean) || '').trim();  // 第一个匹配 = 优先级最高
+    } catch { return { method: 'npm', path: '' }; }
+    if (/AnthropicClaude|\\\.claude\\local|\\claude\\versions\\/i.test(real)) return { method: 'native', path: real };
+    if (/npm|node_modules|nodejs/i.test(real)) return { method: 'npm', path: real };
+    return { method: 'native', path: real };  // 兜底按 native 自更新(claude update 在 Windows 亦支持)
+  }
   try {
     const { stdout } = await execFileP('bash', ['-lc', 'command -v claude'], { timeout: 8000 });
     real = stdout.trim();
     try { const r = await execFileP('readlink', ['-f', real], { timeout: 5000 }); real = r.stdout.trim(); } catch {}
-  } catch { return 'unknown'; }
-  if (/\/\.local\/(share|bin)\/claude|\/claude\/versions\//.test(real)) return 'native';
-  if (/Caskroom|Cellar|\/brew\//i.test(real)) return 'brew';
-  if (/node_modules|\/npm|\.nvm|\.npm-global|\/lib\/node/.test(real)) return 'npm';
-  return 'unknown';
+  } catch { return { method: 'unknown', path: '' }; }
+  if (/\/\.local\/(share|bin)\/claude|\/claude\/versions\//.test(real)) return { method: 'native', path: real };
+  if (/Caskroom|Cellar|\/brew\//i.test(real)) return { method: 'brew', path: real };
+  if (/node_modules|\/npm|\.nvm|\.npm-global|\/lib\/node/.test(real)) return { method: 'npm', path: real };
+  return { method: 'unknown', path: real };
 }
 
-// 按安装方式给出更新 / 安装命令(走 login shell,以加载 nvm/brew 等 PATH)。
-function updateCmdFor(method) {
+// 按安装方式给出更新命令。native 用「绝对路径 + update」自更新,避免终端里裸 `claude`
+// 解析到另一个安装(用户的 shell PATH 和 GUI 的 PATH 顺序可能不同)。
+function updateCmdFor(method, claudePath) {
   switch (method) {
     case 'brew': return 'brew upgrade --cask claude-code';
     case 'npm':  return 'npm install -g @anthropic-ai/claude-code@latest';
     case 'native':
-    default:     return 'claude update'; // 官方自更新,native 安装首选;unknown 兜底
+    default: {
+      const bin = claudePath ? `"${claudePath}"` : 'claude';
+      return `${bin} update`;
+    }
   }
 }
 function installCmdFor() {
@@ -223,7 +233,7 @@ router.get('/claude-version-check', async (req, res) => {
       error: 'Claude Code 未安装或不在 PATH',
     });
   }
-  const method = await detectInstallMethod();
+  const { method, path: claudePath } = await detectInstall();
   let latest = '';
   const now = Date.now();
   if (ccCache && now - ccCachedAt < CACHE_TTL_MS) {
@@ -240,7 +250,7 @@ router.get('/claude-version-check', async (req, res) => {
     latestVersion: latest,
     installed: true,
     method,                         // native | brew | npm | unknown
-    updateCommand: updateCmdFor(method),
+    updateCommand: updateCmdFor(method, claudePath),
     hasUpdate: latest ? semverGt(latest, currentVersion) : false,
   });
 });
@@ -250,8 +260,8 @@ router.get('/claude-version-check', async (req, res) => {
  * native→claude update,brew→brew upgrade,npm→npm i -g。超时 8 分钟。
  */
 router.post('/claude-update', async (req, res) => {
-  const method = await detectInstallMethod();
-  const cmd = updateCmdFor(method);
+  const { method, path: claudePath } = await detectInstall();
+  const cmd = updateCmdFor(method, claudePath);
   try {
     launchInTerminal(cmd, `更新 Claude Code (${method})`);
     res.json({ ok: true, launched: true, command: cmd, platform: process.platform });
