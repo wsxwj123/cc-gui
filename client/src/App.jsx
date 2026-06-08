@@ -3304,6 +3304,24 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
       return;
     }
 
+    // 乐观即时回退显示(只动显示,不动文件——按用户选择):立刻把展示内容裁到该
+    // 工具调用之前,并给该 turn 打 _retryTrimToolId 标记,让 TurnBubble 在该工具处
+    // 截断渲染 + 显示"正在重做此工具…"。随后服务端 trim + refetch 用真实裁剪结果
+    // 覆盖,重跑以流式气泡出现在同一位置 → 读起来是"该工具在原位重跑",而非新发消息。
+    {
+      const curMsgs = getLocalMessages();
+      const mi = curMsgs.findIndex((m) => m.uuid === turn.uuid);
+      if (mi >= 0) {
+        setLocalMessages([...curMsgs.slice(0, mi), { ...curMsgs[mi], _retryTrimToolId: toolCall.id }]);
+        setChatMessages([]);
+      } else {
+        setChatMessages((prev) => {
+          const ci = prev.findIndex((m) => m.uuid === turn.uuid);
+          return ci < 0 ? prev : [...prev.slice(0, ci), { ...prev[ci], _retryTrimToolId: toolCall.id }];
+        });
+      }
+    }
+
     const input = JSON.stringify(toolCall.input || {}, null, 2).slice(0, 4000);
     const appendSystemPrompt = [
       'GUI 已把会话裁剪到某个工具调用之前。',
@@ -3345,9 +3363,11 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
         }, 50);
       } catch (err) {
         alert('工具局部重做失败：' + err.message);
+        // 乐观截断已改了显示;失败则刷新回真实状态,避免停在半截视图。
+        try { await fetchMessagesForTab(sel.sessionId, projectHash, { silent: true }); } catch {}
       }
     })();
-  }, [getLocalSession, fetchMessagesForTab]);
+  }, [getLocalSession, fetchMessagesForTab, getLocalMessages, setLocalMessages]);
 
   // In split mode, tab 0's `loading` would otherwise blank out tab 1 too.
   // We only let the loading screen short-circuit the primary tab — tab 1

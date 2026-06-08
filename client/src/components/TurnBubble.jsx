@@ -495,7 +495,17 @@ function TurnBubbleInner({ turn, onRetry, onRetryTool }) {
                     bucket = [];
                   }
                 };
-                turn.blocks.forEach((b, i) => {
+                // "重做此工具"乐观回退:截断到被点工具调用之前,该工具及之后不再渲染,
+                // 并在原位显示"正在重做此工具…"。服务端 trim+refetch 后此标记消失,
+                // 真正的重跑以流式气泡出现在同一位置。
+                const trimId = turn._retryTrimToolId;
+                let renderBlocks = turn.blocks;
+                let showRetrying = false;
+                if (trimId) {
+                  const cut = turn.blocks.findIndex((b) => b.type === 'tool_use' && b.toolCall?.id === trimId);
+                  if (cut >= 0) { renderBlocks = turn.blocks.slice(0, cut); showRetrying = true; }
+                }
+                renderBlocks.forEach((b, i) => {
                   if (b.type === 'text' && b.content) {
                     flushBucket(i);
                     out.push(<MarkdownRenderer key={`b-${i}`} content={b.content} />);
@@ -521,7 +531,7 @@ function TurnBubbleInner({ turn, onRetry, onRetryTool }) {
                     // TodoWrite: only render the latest snapshot; never bucket.
                     if (b.toolCall.name === 'TodoWrite') {
                       flushBucket(i);
-                      const isLatestTodo = !turn.blocks.slice(i + 1).some(
+                      const isLatestTodo = !renderBlocks.slice(i + 1).some(
                         (b2) => b2.type === 'tool_use' && b2.toolCall?.name === 'TodoWrite'
                       );
                       if (isLatestTodo) {
@@ -541,6 +551,14 @@ function TurnBubbleInner({ turn, onRetry, onRetryTool }) {
                   }
                 });
                 flushBucket('end');
+                if (showRetrying) {
+                  out.push(
+                    <div key="retrying" className="flex items-center gap-2 text-[12px] text-accent font-body px-1 py-1.5">
+                      <RotateCcw size={12} className="animate-spin" />
+                      <span>正在重做此工具…</span>
+                    </div>
+                  );
+                }
                 return out;
               })()}
             </div>
