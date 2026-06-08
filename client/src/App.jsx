@@ -4037,7 +4037,7 @@ export function ModelSelector({ compact = false, permKey = null }) {
               <div className="text-[10px] text-ink-faint font-body leading-snug">
                 {is1mCapable
                   ? <>给当前模型追加 <code className="font-mono">[1m]</code> 后缀（1M tokens 上下文 beta）</>
-                  : <>仅官方 Anthropic 支持；{provider || '第三方'} 模型不可用</>}
+                  : <><code className="font-mono">[1m]</code> 是 Anthropic 专属后缀；{provider || '第三方'} 的 1M 请直接选其对应模型 id（用上方"拉取最新"查看）</>}
               </div>
             </div>
             <span className={`text-[9px] px-1.5 py-0.5 rounded font-mono shrink-0 ${
@@ -4279,7 +4279,7 @@ function MobileModelPage({ permKey }) {
       <button onClick={toggle1m} disabled={!is1mCapable}
         className={`w-full flex items-center gap-3 px-4 py-3 text-left transition-colors border-b border-canvas-deep/40 ${
           is1mCapable ? 'hover:bg-canvas-warm' : 'opacity-50 cursor-not-allowed'}`}>
-        <span className="flex-1 text-[14px] font-body text-ink">1M 上下文{!is1mCapable && <span className="text-[11px] text-ink-faint">（仅官方 Anthropic）</span>}</span>
+        <span className="flex-1 text-[14px] font-body text-ink">1M 上下文{!is1mCapable && <span className="text-[11px] text-ink-faint">（[1m] 仅官方；第三方选对应模型）</span>}</span>
         <span className={`text-[10px] px-2 py-0.5 rounded font-mono ${has1m ? 'bg-accent text-white' : 'bg-canvas-deep text-ink-faint'}`}>
           {has1m ? '已开启' : '关闭'}
         </span>
