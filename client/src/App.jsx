@@ -3493,9 +3493,9 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
           dismissible per-user (localStorage). */}
       <PermissionModeHintBanner permKey={sessionQueueKey} />
 
-      {/* Non-blocking git-init prompt — replaces the old native confirm() that
-          got auto-suppressed by browsers and silently froze sends. */}
-      <GitInitBanner cwd={selectedProject?.path || selectedSession?.projectPath} />
+      {/* git-init 提示只在「项目头部」(侧栏)渲染一处(见 GitInitBanner @ 项目面板),
+          这里不再重复挂载——两处同时显示同一提示且状态不同步(忽略/init 后只更新
+          自己那份),造成重复+脱节。项目头部那处触发更早(选中项目即检测,空状态也覆盖)。 */}
 
       {/* Provider-switch notice — fades after 5s. Tells the user we just
           stripped thinking blocks from on-disk jsonl so cc switch's new
