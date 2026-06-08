@@ -128,10 +128,12 @@ router.get('/version-check', async (req, res) => {
 let ccCache = null;       // npm registry 上 @anthropic-ai/claude-code 的 latest 版本
 let ccCachedAt = 0;
 
-async function getClaudeVersion() {
+async function getClaudeVersion(claudePath) {
   try {
+    // 优先用 detectInstall 解析到的绝对路径,确保"报告的版本"与"要更新的那个 claude"
+    // 是同一个(否则 mac 上 login-shell PATH 与 Node 进程 PATH 顺序不同可能取到不同安装)。
     // `claude --version` → "2.1.160 (Claude Code)"，取首个 x.y.z
-    const { stdout } = await execFileP('claude', ['--version'], { timeout: 8000 });
+    const { stdout } = await execFileP(claudePath || 'claude', ['--version'], { timeout: 8000 });
     const m = String(stdout).match(/(\d+\.\d+\.\d+)/);
     return m ? m[1] : null;
   } catch {
@@ -216,7 +218,7 @@ function launchInTerminal(cmd, title) {
     writeFileSync(file, `#!/bin/bash\necho "▶ ${title}"\n${cmd}\necho\nread -p "完成,回车关闭…"\n`, { mode: 0o755 });
     // 常见终端模拟器逐个尝试(best-effort)
     const term = process.env.TERMINAL || 'x-terminal-emulator';
-    spawn(term, ['-e', `bash ${file}`], { detached: true, stdio: 'ignore' }).unref();
+    spawn(term, ['-e', `bash "${file}"`], { detached: true, stdio: 'ignore' }).unref();
   }
 }
 
@@ -226,7 +228,8 @@ function launchInTerminal(cmd, title) {
  * 失败永远返回 200(只看字段)。
  */
 router.get('/claude-version-check', async (req, res) => {
-  const currentVersion = await getClaudeVersion();
+  const { method, path: claudePath } = await detectInstall();
+  const currentVersion = await getClaudeVersion(claudePath);
   if (!currentVersion) {
     return res.json({
       currentVersion: null, installed: false,
@@ -234,7 +237,6 @@ router.get('/claude-version-check', async (req, res) => {
       error: 'Claude Code 未安装或不在 PATH',
     });
   }
-  const { method, path: claudePath } = await detectInstall();
   let latest = '';
   const now = Date.now();
   if (ccCache && now - ccCachedAt < CACHE_TTL_MS) {
