@@ -2,6 +2,7 @@ import React, { useEffect, useState, useCallback, useMemo, useRef } from 'react'
 import { Folder, FolderOpen, File, RefreshCw, AlertCircle, ChevronRight, ChevronDown, FileText, Image as ImageIcon, ArrowLeft, ExternalLink, Film, Pencil, Save, Undo2, Redo2, X, Check } from 'lucide-react';
 import { useStore } from '../stores/sessionStore.js';
 import { MarkdownRenderer } from './MarkdownRenderer.jsx';
+import { ArtifactPreview } from './ArtifactPreview.jsx';
 import { useResizable, Splitter } from '../hooks/useResizable.jsx';
 
 const IMAGE_EXT = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'ico']);
@@ -233,6 +234,8 @@ function PreviewBody({ preview }) {
   // 256KB and silently destroy the tail.
   const editable = !isMedia && !preview.binary && !preview.truncated && !preview.loading && !preview.error;
   const isMarkdown = e === 'md' || e === 'markdown';
+  // html 默认渲染预览(带 预览/代码 切换,沙箱 iframe)。svg 已走 isImage 当图片渲染。
+  const isHtml = e === 'html' || e === 'htm';
 
   const [editing, setEditing] = useState(false);
   // Undo/redo history of the textarea value. Bursts within 400ms collapse into
@@ -395,6 +398,10 @@ function PreviewBody({ preview }) {
         ) : isMarkdown ? (
           <div className="px-3 py-2">
             <MarkdownRenderer content={preview.content || ''} />
+          </div>
+        ) : isHtml ? (
+          <div className="px-3 py-2">
+            <ArtifactPreview lang="html" code={preview.content || ''} />
           </div>
         ) : (
           (() => {

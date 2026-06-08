@@ -45,11 +45,6 @@ async function writeJsonlAtomic(file, text) {
   await rename(tmp, file);
 }
 
-async function deleteSessionFile(file) {
-  const { unlink } = await import('fs/promises');
-  try { await unlink(file); } catch {}
-}
-
 export function trimJsonlBeforeTool(raw, toolUseId) {
   const lines = String(raw || '').split('\n');
   const keptLines = [];
@@ -300,11 +295,14 @@ router.post('/sessions/:sessionId/trim-before-tool', async (req, res) => {
     try { await writeFile(file + '.bak', raw, 'utf-8'); } catch {}
 
     if (!hasRealConversationLine(keptLines)) {
-      await deleteSessionFile(file);
+      // 和 /trim 一致:不再物理删 jsonl(删后若前端没干净转 draft,下次仍 --resume
+      // 旧 sessionId → "No conversation found" 僵尸会话)。保留裁剪后的内容,回
+      // sessionReset 让前端转 draft、下次发消息新建会话。
+      await writeJsonlAtomic(file, keptLines.join('\n'));
       return res.json({
         trimmed: true,
         sessionReset: true,
-        reason: 'no user/assistant lines would remain — session deleted, next send creates fresh',
+        reason: 'no user/assistant lines would remain — kept meta, client starts fresh',
         removedFromLine,
         totalLines,
       });
@@ -358,6 +356,8 @@ router.post('/sessions/:sessionId/strip-thinking', async (req, res) => {
           const filtered = obj.message.content.filter((c) => c?.type !== 'thinking');
           // 纯 thinking 轮次:剥离后 content 变 [],Anthropic API 拒绝空 content 的
           // assistant 记录(400)导致 resume 失败。这种行保留原样不剥离。
+          // (实测:独立的 thinking-only 行不会被上游做签名校验——只有与 tool_use/text
+          //  同处一条 message 的 thinking 才校验,那种情况 filter 后仍非空、正常剥离。)
           if (filtered.length === 0) return line;
           obj.message.content = filtered;
           const removed = before - filtered.length;

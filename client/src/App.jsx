@@ -2658,6 +2658,10 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
           if (event.type === 'error' || (event.type === 'result' && event.is_error)) {
             const msg = (event.errors && event.errors.join('; '))
               || event.error
+              // API 错误(如签名失效)经 result 事件返回:subtype 是误导性的 "success",
+              // 真正的报错文案在 event.result(伴随 is_error:true / api_error_status:400)。
+              // 必须纳入提取,否则下面的签名/会话自愈永远匹配不到(只会拿到 "success")。
+              || (typeof event.result === 'string' ? event.result : '')
               || event.subtype
               || 'CLI 报错（无消息体）';
             // Reactive provider-switch recovery: a resumed session whose history
@@ -2678,7 +2682,13 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
                   await fetchMessagesForTab(_s.sessionId, _s.projectHash, { silent: true });
                 } catch {}
                 setProviderSwitchNotice({ text: '历史思考块签名不被当前 provider 接受，已自动剥离并重发本条。' });
-                setTimeout(() => handleSendRef.current?.(prompt, { signatureRetry: true }), 80);
+                // 透传原 opts(工具重做带的 appendSystemPrompt/hiddenUserMessage 必须保留),
+                // 只追加守卫位防无限重试。
+                setTimeout(() => handleSendRef.current?.(prompt, { ...opts, signatureRetry: true }), 80);
+                // 本次失败的产物正是 "API Error: ...Invalid signature..." 文案,它也作为
+                // assistant text 落进了 accumulatedText。清空,否则循环结束后会被当成正常
+                // 回复气泡再插一条,用户就会看到那条报错(即用户报告的现象)。
+                accumulatedText = ''; accumulatedThinking = ''; currentToolCalls = [];
                 sawError = true;
                 break;
               }
@@ -2694,7 +2704,8 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
                 setSelectedSession({ ..._s, sessionId: null, draft: true });
               }
               setProviderSwitchNotice({ text: '原会话历史已失效，已自动新建会话并重发本条。' });
-              setTimeout(() => handleSendRef.current?.(prompt, { freshRetry: true }), 80);
+              setTimeout(() => handleSendRef.current?.(prompt, { ...opts, freshRetry: true }), 80);
+              accumulatedText = ''; accumulatedThinking = ''; currentToolCalls = [];
               sawError = true;
               break;
             }
@@ -3072,8 +3083,10 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
     const shouldRestoreFiles = mode === 'both' || mode === 'edit';
     const checkpointSha = shouldRestoreFiles && sel?.sessionId && cwd ? await resolveCheckpointSha() : null;
     if (shouldRestoreFiles && !checkpointSha && !softFiles) {
-      alert('找不到这条消息发送前的文件快照，无法还原文件。');
-      return;
+      // 没有文件快照(非 git 项目 / 旧消息 / 快照丢失)不该让整个回退"没反应"——以前这里
+      // alert + return,既不裁剪也不重发,用户关掉弹窗后什么都没发生。降级处理:跳过文件
+      // 还原,继续裁剪会话并按 mode 重发 / 回填输入框,只用一条提示告知文件未动。
+      setProviderSwitchNotice({ text: '未找到该消息的文件快照，已仅回退会话记录（项目文件未改动）。' });
     }
     if (shouldRestoreFiles && checkpointSha && sel?.sessionId && cwd) {
       try {
@@ -3158,7 +3171,21 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
 
     // 6) act per mode
     if (mode === 'edit') return; // composer was filled at the top of this branch
-    if (mode === 'message') return;
+    if (mode === 'message') {
+      // "仅回退消息"以前只裁剪、零反馈 → 用户感觉"消息凭空消失、点了没反应"。把原文回填到
+      // 输入框:既是明确反馈,又让用户能直接改/重发(文件不动,符合该模式语义)。
+      if (originalText) {
+        const fillKey = sessionWasReset
+          ? `draft-${projectHash || 'none'}`
+          : (sel?.sessionId || `draft-${sel?.projectHash || 'none'}`);
+        // 延后一拍:回退到首条会触发 sessionReset→draft 的状态切换,立即派发可能被仍以
+        // 旧 key 渲染的 ChatInput 漏接。
+        setTimeout(() => {
+          window.dispatchEvent(new CustomEvent('cgui:composer-fill', { detail: { text: originalText, targetKey: fillKey } }));
+        }, 60);
+      }
+      return;
+    }
     // mode === 'both': auto-resend.
     if (originalText && handleSendRef.current) {
       setTimeout(() => {
