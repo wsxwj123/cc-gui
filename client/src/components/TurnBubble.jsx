@@ -427,7 +427,14 @@ function TurnBubbleInner({ turn, onRetry, onRetryTool, retryActive }) {
 
   // Legacy bucket path (kept for historical messages loaded from .jsonl which
   // don't have a blocks array — they get the old grouped-by-type layout).
-  const toolCalls = Array.isArray(turn.toolCalls) ? turn.toolCalls : [];
+  let toolCalls = Array.isArray(turn.toolCalls) ? turn.toolCalls : [];
+  // "重做此工具"乐观截断在无 blocks 的旧 turn 上也要生效:把 toolCalls 裁到被点
+  // 工具之前(persisted turn 一般都有 blocks 走上面的路径,这里是兜底)。
+  let legacyShowRetrying = false;
+  if (turn._retryTrimToolId && !hasOrderedBlocks) {
+    const ci = toolCalls.findIndex((tc) => tc.id === turn._retryTrimToolId);
+    if (ci >= 0) { toolCalls = toolCalls.slice(0, ci); legacyShowRetrying = true; }
+  }
   const todoCalls = toolCalls.filter((tc) => tc.name === 'TodoWrite');
   const latestTodo = todoCalls.length > 0 ? todoCalls[todoCalls.length - 1] : null;
   const inlineCalls = toolCalls.filter((tc) => INLINE_TOOL_NAMES.has(tc.name));
@@ -599,6 +606,12 @@ function TurnBubbleInner({ turn, onRetry, onRetryTool, retryActive }) {
               )}
               {hasGroupedCalls && (
                 <div className="mt-2"><ToolCallsGroup toolCalls={groupedCalls} onRetryTool={onRetryTool} /></div>
+              )}
+              {legacyShowRetrying && retryActive && (
+                <div className="flex items-center gap-2 text-[12px] text-accent font-body px-1 py-1.5">
+                  <Loader2 size={12} className="animate-spin" />
+                  <span>正在重做此工具…</span>
+                </div>
               )}
             </>
           )}
