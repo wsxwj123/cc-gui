@@ -998,6 +998,10 @@ function ProjectList() {
                   {formatPathShort(project.path)}
                 </span>
               </div>
+              {/* 路径小字放名字下方:同名最终文件夹靠完整路径区分 */}
+              <div className="text-[10px] text-ink-faint font-mono truncate ml-[21px] mt-0.5" title={formatPath(project.path)}>
+                {formatPath(project.path)}
+              </div>
               <div className="flex items-center gap-3 mt-0.5 ml-[21px]">
                 <span className="text-[10px] text-ink-faint font-mono">
                   {project.sessionCount} 会话
@@ -1465,7 +1469,7 @@ function SessionList() {
             <Plus size={11} />新建
           </button>
         </div>
-        <p className="text-xs text-ink-muted font-body truncate ml-6">{formatPath(selectedProject?.path)}</p>
+        <p className="text-xs text-ink-muted font-body truncate ml-6" title={formatPath(selectedProject?.path)}>{formatPathShort(selectedProject?.path)}</p>
         {/* Git status check at project level — fires immediately on project
             selection, doesn't wait for a session to be opened. This was the
             missing piece behind "新建项目文件夹不再自动检测 git 仓库"; the banner
