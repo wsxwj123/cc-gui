@@ -198,7 +198,14 @@ function resolveImageSrc(src, basePath) {
   if (/^(https?:|data:|blob:)/i.test(s)) return s;
   if (!basePath) return s;
   const baseDir = String(basePath).replace(/\\/g, '/').replace(/\/[^/]*$/, '');
-  const rel = s.replace(/\\/g, '/');
+  let rel = s.replace(/\\/g, '/');
+  // react-markdown 会把 URL 里的空格等编码成 %20。先解码回字面路径,末尾再 encodeURIComponent
+  // 单次编码,否则 `%20` 会被二次编码成 `%2520` → 文件名对不上 → 404。
+  try { rel = decodeURIComponent(rel); } catch {}
+  // AI 常把绝对路径误拼成 ./ ../ // 开头的畸形相对路径(如 `..//Users/...`)。
+  // 剥掉开头的 ./ ../ / 后若紧跟一个绝对路径(/Users、/home 或盘符 C:/),按绝对处理。
+  const embedded = rel.match(/^[./]*((?:\/(?:Users|home)\/|[A-Za-z]:\/).*)$/);
+  if (embedded) rel = embedded[1];
   const isAbs = rel.startsWith('/') || /^[A-Za-z]:\//.test(rel);
   const joined = isAbs ? rel : `${baseDir}/${rel}`;
   // 折叠 ./ 与 ../,保留路径前缀(POSIX 的 `/` 或 Windows 的 `C:/`)
@@ -211,6 +218,18 @@ function resolveImageSrc(src, basePath) {
     else out.push(seg);
   }
   return `/api/files/read?path=${encodeURIComponent(prefix + out.join('/'))}&raw=1`;
+}
+
+// AI 生成的 ![alt](路径含空格) 不符合 CommonMark:URL 含空格必须用 <> 包裹或编码,
+// 否则解析器在第一个空格处断开 → 整条不被识别为图片,渲染成纯文本(用户截图就是这样)。
+// 给"含空格、未包裹、非外链、无标题"的图片 URL 套上 <>,让它能被解析成 <img>。
+function wrapSpacedImageUrls(md) {
+  if (!md) return md;
+  return md.replace(/(!\[[^\]]*\]\()([^)]+)(\))/g, (full, pre, url, post) => {
+    const u = url.trim();
+    if (u.startsWith('<') || u.includes('"') || /^(https?:|data:|blob:)/i.test(u) || !u.includes(' ')) return full;
+    return `${pre}<${u}>${post}`;
+  });
 }
 
 export function MarkdownRenderer({ content, basePath }) {
@@ -227,13 +246,21 @@ export function MarkdownRenderer({ content, basePath }) {
       />
     ),
   }), [basePath]);
+  // 仅文件预览(有 basePath)才预处理空格图片 URL,聊天气泡保持原文不动。
+  const text = useMemo(() => (basePath ? wrapSpacedImageUrls(content) : content), [content, basePath]);
   return (
     <div className="markdown-content text-[15px] font-reading leading-relaxed">
       {/* remarkGfm: GitHub-flavored markdown — tables, strikethrough, task
           lists, autolinks. Without it Claude's `| col | col |` tables come
           out as a single run-on text line (which is what was happening). */}
-      <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>
-        {content}
+      {/* urlTransform 恒等(仅文件预览):默认会把 Windows 绝对路径 C:\ 当协议删掉,
+          这里关掉过滤让本地路径原样进 img 组件;链接安全由 a 组件的 href 白名单兜底。 */}
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
+        components={components}
+        urlTransform={basePath ? ((u) => u) : undefined}
+      >
+        {text}
       </ReactMarkdown>
     </div>
   );
