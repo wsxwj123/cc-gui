@@ -640,20 +640,32 @@ function CcUpdater() {
 }
 
 function OverviewTab({ settings }) {
+  const [showEnv, setShowEnv] = useState(false);
+  const [showHooks, setShowHooks] = useState(false);
+  const [revealed, setRevealed] = useState({});
+
+  const env = settings?.env || {};
+  const envKeys = Object.keys(env);
+  const hooks = settings?.hooks || {};
+  const hookEvents = Object.keys(hooks);
+  const hookTotal = Object.values(hooks).reduce((n, arr) => n + (Array.isArray(arr) ? arr.length : 0), 0);
+
+  // 敏感值默认打码(KEY/TOKEN/SECRET/PASSWORD),点"显示"可看明文。
+  const isSecret = (k) => /KEY|TOKEN|SECRET|PASSWORD|PWD|CREDENTIAL/i.test(k);
+  const mask = (v) => { const s = String(v); return s.length <= 8 ? '••••••' : '••••' + s.slice(-4); };
+
   const rows = [];
   if (settings?.defaultModel || settings?.model) rows.push(['默认模型', settings.defaultModel || settings.model]);
-  if (settings?.env) rows.push(['环境变量', `${Object.keys(settings.env).length} 个`]);
-  if (settings?.hooks) {
-    const total = Object.values(settings.hooks).reduce((n, arr) => n + (Array.isArray(arr) ? arr.length : 0), 0);
-    rows.push(['Hooks', `${Object.keys(settings.hooks).length} 事件 · ${total} 条`]);
-  }
   if (settings?.permissions) rows.push(['权限规则', `${Object.keys(settings.permissions).length} 条`]);
   if (settings?.plugins) rows.push(['插件', `${Object.keys(settings.plugins).length} 个`]);
+
+  const isEmpty = rows.length === 0 && envKeys.length === 0 && hookEvents.length === 0;
+
   return (
     <div className="space-y-3">
       <UpdateChecker />
       <CcUpdater />
-      {rows.length > 0 ? (
+      {rows.length > 0 && (
         <div className="bg-canvas-warm border border-canvas-deep rounded-lg divide-y divide-canvas-deep">
           {rows.map(([k, v]) => (
             <div key={k} className="flex items-center justify-between px-3 py-2.5">
@@ -662,9 +674,68 @@ function OverviewTab({ settings }) {
             </div>
           ))}
         </div>
-      ) : (
-        <p className="text-xs text-ink-faint font-body py-4 text-center">settings.json 为空</p>
       )}
+
+      {/* 环境变量 — 默认折叠,展开显示 key=value(敏感值打码,可逐条显示明文) */}
+      {envKeys.length > 0 && (
+        <div className="border border-canvas-deep rounded-lg overflow-hidden">
+          <button onClick={() => setShowEnv((v) => !v)}
+            className="w-full flex items-center gap-2 px-3 py-2.5 hover:bg-canvas-warm/60 text-left">
+            {showEnv ? <ChevronDown size={12} className="text-ink-faint" /> : <ChevronRight size={12} className="text-ink-faint" />}
+            <span className="text-xs text-ink-muted font-body flex-1">环境变量</span>
+            <span className="text-xs text-ink-soft font-mono">{envKeys.length} 个</span>
+          </button>
+          {showEnv && (
+            <div className="border-t border-canvas-deep divide-y divide-canvas-deep/60">
+              {envKeys.map((k) => (
+                <div key={k} className="px-3 py-2 flex items-start gap-2">
+                  <span className="text-[11px] font-mono text-ink-soft shrink-0 max-w-[45%] break-all">{k}</span>
+                  <span className="text-[11px] font-mono text-ink-faint flex-1 break-all text-right">
+                    {isSecret(k) && !revealed[k] ? mask(env[k]) : String(env[k])}
+                  </span>
+                  {isSecret(k) && (
+                    <button onClick={() => setRevealed((r) => ({ ...r, [k]: !r[k] }))}
+                      className="text-[10px] text-accent hover:underline shrink-0">
+                      {revealed[k] ? '隐藏' : '显示'}
+                    </button>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Hooks — 默认折叠,展开显示每个事件下的命令(只读概览,编辑见 Hooks 标签页) */}
+      {hookEvents.length > 0 && (
+        <div className="border border-canvas-deep rounded-lg overflow-hidden">
+          <button onClick={() => setShowHooks((v) => !v)}
+            className="w-full flex items-center gap-2 px-3 py-2.5 hover:bg-canvas-warm/60 text-left">
+            {showHooks ? <ChevronDown size={12} className="text-ink-faint" /> : <ChevronRight size={12} className="text-ink-faint" />}
+            <span className="text-xs text-ink-muted font-body flex-1">Hooks</span>
+            <span className="text-xs text-ink-soft font-mono">{hookEvents.length} 事件 · {hookTotal} 条</span>
+          </button>
+          {showHooks && (
+            <div className="border-t border-canvas-deep divide-y divide-canvas-deep/60">
+              {hookEvents.map((ev) => (
+                <div key={ev} className="px-3 py-2 space-y-1">
+                  <div className="text-[11px] font-mono text-ink-soft">{ev}</div>
+                  {(hooks[ev] || []).flatMap((g, gi) =>
+                    (g.hooks || []).map((h, hi) => (
+                      <div key={`${gi}-${hi}`} className="text-[10.5px] font-mono text-ink-faint pl-3 break-all">
+                        • {h.command || h.type || JSON.stringify(h)}
+                        {g.matcher ? <span className="text-ink-ghost">  (matcher: {g.matcher})</span> : null}
+                      </div>
+                    ))
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {isEmpty && <p className="text-xs text-ink-faint font-body py-4 text-center">settings.json 为空</p>}
     </div>
   );
 }
