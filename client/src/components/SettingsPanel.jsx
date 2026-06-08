@@ -554,7 +554,8 @@ function CcUpdater() {
   };
 
   const doUpdate = async () => {
-    if (!window.confirm(`将运行 claude update 更新 Claude Code 到 v${state.latestVersion}。\n这会修改全局 CLI,期间请勿关闭。确定继续?`)) return;
+    const cmd = state.updateCommand || 'claude update';
+    if (!window.confirm(`将运行【${cmd}】更新 Claude Code 到 v${state.latestVersion}（检测到安装方式：${state.method || '未知'}）。\n这会修改全局 CLI,期间请勿关闭。确定继续?`)) return;
     setUpdating(true); setResult(null);
     try {
       const d = await (await fetch('/api/claude-update', { method: 'POST' })).json();
@@ -566,23 +567,49 @@ function CcUpdater() {
     setUpdating(false);
   };
 
+  const doInstall = async () => {
+    const cmd = state.installCommand || 'curl -fsSL https://claude.ai/install.sh | bash';
+    if (!window.confirm(`将运行【${cmd}】安装 Claude Code。\n确定继续?`)) return;
+    setUpdating(true); setResult(null);
+    try {
+      const d = await (await fetch('/api/claude-install', { method: 'POST' })).json();
+      setResult(d);
+      if (d.ok) setState({ status: 'idle', installed: true, currentVersion: d.version });
+    } catch (e) {
+      setResult({ ok: false, error: e.message || '请求失败' });
+    }
+    setUpdating(false);
+  };
+
   return (
     <div className="bg-canvas-warm border border-canvas-deep rounded-lg p-3 space-y-2">
       <div className="flex items-center justify-between gap-2">
         <div className="min-w-0">
-          <div className="text-[10px] text-ink-faint font-body uppercase tracking-wider">Claude Code CLI</div>
+          <div className="text-[10px] text-ink-faint font-body uppercase tracking-wider">
+            Claude Code CLI{state.method && state.installed !== false ? ` · ${state.method}` : ''}
+          </div>
           <div className="text-[14px] font-mono text-ink mt-0.5">
             {state.installed === false ? '未安装' : state.currentVersion ? `v${state.currentVersion}` : '加载中…'}
           </div>
         </div>
-        <button
-          onClick={check}
-          disabled={state.status === 'checking' || updating}
-          className="px-3 py-1.5 text-[12px] bg-accent text-white rounded-md hover:bg-accent/90 disabled:opacity-50 flex items-center gap-1.5 shrink-0"
-        >
-          <RefreshCw size={12} className={state.status === 'checking' ? 'animate-spin' : ''} />
-          {state.status === 'checking' ? '检查中…' : '检查更新'}
-        </button>
+        {state.installed === false ? (
+          <button
+            onClick={doInstall}
+            disabled={updating}
+            className="px-3 py-1.5 text-[12px] bg-amber-700 text-white rounded-md hover:bg-amber-800 disabled:opacity-50 flex items-center gap-1.5 shrink-0"
+          >
+            {updating ? <><RefreshCw size={12} className="animate-spin" />安装中…</> : <>⬇️ 一键安装</>}
+          </button>
+        ) : (
+          <button
+            onClick={check}
+            disabled={state.status === 'checking' || updating}
+            className="px-3 py-1.5 text-[12px] bg-accent text-white rounded-md hover:bg-accent/90 disabled:opacity-50 flex items-center gap-1.5 shrink-0"
+          >
+            <RefreshCw size={12} className={state.status === 'checking' ? 'animate-spin' : ''} />
+            {state.status === 'checking' ? '检查中…' : '检查更新'}
+          </button>
+        )}
       </div>
       {state.status === 'ok' && (
         state.hasUpdate ? (

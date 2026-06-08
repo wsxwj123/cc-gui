@@ -147,15 +147,68 @@ async function fetchNpmLatest() {
   return String(d.version || '');
 }
 
+// 检测 claude CLI 的安装方式(决定用哪个更新命令)。解析 `claude` 的真实路径后按
+// 路径特征归类:native(官方 install.sh,~/.local/share/claude)、brew、npm。
+async function detectInstallMethod() {
+  if (process.platform === 'win32') {
+    // Windows 上 CC 主要走 npm / native installer。优先 npm(最常见)。
+    return 'npm';
+  }
+  let real = '';
+  try {
+    const { stdout } = await execFileP('bash', ['-lc', 'command -v claude'], { timeout: 8000 });
+    real = stdout.trim();
+    try { const r = await execFileP('readlink', ['-f', real], { timeout: 5000 }); real = r.stdout.trim(); } catch {}
+  } catch { return 'unknown'; }
+  if (/\/\.local\/(share|bin)\/claude|\/claude\/versions\//.test(real)) return 'native';
+  if (/Caskroom|Cellar|\/brew\//i.test(real)) return 'brew';
+  if (/node_modules|\/npm|\.nvm|\.npm-global|\/lib\/node/.test(real)) return 'npm';
+  return 'unknown';
+}
+
+// 按安装方式给出更新 / 安装命令(走 login shell,以加载 nvm/brew 等 PATH)。
+function updateCmdFor(method) {
+  switch (method) {
+    case 'brew': return 'brew upgrade --cask claude-code';
+    case 'npm':  return 'npm install -g @anthropic-ai/claude-code@latest';
+    case 'native':
+    default:     return 'claude update'; // 官方自更新,native 安装首选;unknown 兜底
+  }
+}
+function installCmdFor() {
+  // 未安装时的一键安装命令(按平台)。
+  if (process.platform === 'win32') return 'npm install -g @anthropic-ai/claude-code';
+  return 'curl -fsSL https://claude.ai/install.sh | bash'; // mac/linux 官方一键安装
+}
+
+async function runShell(cmd, res, label) {
+  try {
+    // 用 login shell 跑,确保 nvm/brew/native 的 PATH 都在;Windows 用 cmd。
+    const { stdout, stderr } = process.platform === 'win32'
+      ? await execFileP('cmd', ['/c', cmd], { timeout: 8 * 60 * 1000 })
+      : await execFileP('bash', ['-lc', cmd], { timeout: 8 * 60 * 1000 });
+    const after = await getClaudeVersion();
+    res.json({ ok: true, output: (stdout || stderr || '').slice(-2000), version: after, command: cmd });
+  } catch (err) {
+    res.json({ ok: false, error: (err.stderr || err.message || `${label}失败`).slice(-2000), command: cmd });
+  }
+}
+
 /**
  * GET /api/claude-version-check
- * 比对本地 `claude --version` 与 npm latest。失败永远返回 200(只看字段)。
+ * 比对本地 `claude --version` 与 npm latest,并返回安装方式 + 对应更新命令。
+ * 失败永远返回 200(只看字段)。
  */
 router.get('/claude-version-check', async (req, res) => {
   const currentVersion = await getClaudeVersion();
   if (!currentVersion) {
-    return res.json({ currentVersion: null, installed: false, error: 'Claude Code 未安装或不在 PATH' });
+    return res.json({
+      currentVersion: null, installed: false,
+      installCommand: installCmdFor(),
+      error: 'Claude Code 未安装或不在 PATH',
+    });
   }
+  const method = await detectInstallMethod();
   let latest = '';
   const now = Date.now();
   if (ccCache && now - ccCachedAt < CACHE_TTL_MS) {
@@ -164,29 +217,33 @@ router.get('/claude-version-check', async (req, res) => {
     try { latest = await fetchNpmLatest(); ccCache = latest; ccCachedAt = now; }
     catch (err) {
       if (ccCache) latest = ccCache;
-      else return res.json({ currentVersion, installed: true, error: err.message || 'npm 查询失败' });
+      else return res.json({ currentVersion, installed: true, method, error: err.message || 'npm 查询失败' });
     }
   }
   res.json({
     currentVersion,
     latestVersion: latest,
     installed: true,
+    method,                         // native | brew | npm | unknown
+    updateCommand: updateCmdFor(method),
     hasUpdate: latest ? semverGt(latest, currentVersion) : false,
   });
 });
 
 /**
- * POST /api/claude-update — 跑 `claude update`(官方自更新,原生/npm 安装都兼容)。
- * 同步等待完成后返回结果。超时 5 分钟。
+ * POST /api/claude-update — 按检测到的安装方式运行匹配的更新命令。
+ * native→claude update,brew→brew upgrade,npm→npm i -g。超时 8 分钟。
  */
 router.post('/claude-update', async (req, res) => {
-  try {
-    const { stdout, stderr } = await execFileP('claude', ['update'], { timeout: 5 * 60 * 1000 });
-    const after = await getClaudeVersion();
-    res.json({ ok: true, output: (stdout || stderr || '').slice(-2000), version: after });
-  } catch (err) {
-    res.json({ ok: false, error: (err.stderr || err.message || '更新失败').slice(-2000) });
-  }
+  const method = await detectInstallMethod();
+  await runShell(updateCmdFor(method), res, '更新');
+});
+
+/**
+ * POST /api/claude-install — 未安装时一键安装(mac/linux: 官方 install.sh;win: npm)。
+ */
+router.post('/claude-install', async (req, res) => {
+  await runShell(installCmdFor(), res, '安装');
 });
 
 export default router;
