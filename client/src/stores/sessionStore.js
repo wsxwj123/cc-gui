@@ -161,11 +161,11 @@ export const useStore = create((set, get) => ({
   // as the GLOBAL default (resolved from settings.json / WS); these maps hold
   // each session's explicit override. A session with no entry uses the default.
   modelBySession: readLs('cgui-model-by-session', {}),
-  // Reasoning effort is a MODEL capability (Opus 4.8 supports xhigh, Sonnet 4.6
-  // doesn't, non-reasoning models ignore it) — NOT a session/provider property.
-  // So it's keyed by model id, not by session. A model with no entry uses the
-  // global `effort` default.
-  effortByModel: readLs('cgui-effort-by-model', {}),
+  // Per-SESSION reasoning effort (cgui-effort-by-session)。与 model/permission 一致:
+  // 按会话隔离 + 持久化,同一模型在不同会话可设不同力度、互不影响。无 entry 的会话
+  // 回落全局 `effort`(最终 settings.json env)。切模型时若该档不被新模型支持,CLI 自动
+  // 降级到 ≤该档的最高支持档,不报错。
+  effortBySession: readLs('cgui-effort-by-session', {}),
   // User-defined session titles { [sessionId]: title }. When set, overrides the
   // auto firstPrompt everywhere the title shows (sidebar / header / breadcrumb).
   // We never touch the on-disk jsonl — titles live only in localStorage.
@@ -373,6 +373,12 @@ export const useStore = create((set, get) => ({
       const p = { ...pms, [toKey]: pms[fromKey] }; delete p[fromKey];
       writeLs('cgui-perm-mode-by-session', p); patch.permissionModeBySession = p;
     }
+    // effort 也按会话隔离,draft→真 sessionId 时一并迁移,否则草稿里设的力度会丢。
+    const ebs = get().effortBySession;
+    if (ebs[fromKey] != null && ebs[toKey] == null) {
+      const e2 = { ...ebs, [toKey]: ebs[fromKey] }; delete e2[fromKey];
+      writeLs('cgui-effort-by-session', e2); patch.effortBySession = e2;
+    }
     if (Object.keys(patch).length) set(patch);
   },
   // Live-fetched model catalogue per provider (in-memory; re-fetched on reload).
@@ -408,30 +414,22 @@ export const useStore = create((set, get) => ({
     if (on) map[sessionId] = true; else delete map[sessionId];
     set({ remoteControlled: map });
   },
-  // Per-MODEL effort. '' is a valid value (CLI default). The [1m] suffix is
-  // stripped so a model and its 1M variant share one effort setting.
-  setEffortForModel: (modelId, e) => {
-    const base = (modelId || '').replace(/\[1m\]/i, '');
-    if (base) {
-      // ONLY the per-model entry — never the global `effort` default, else a
-      // model-specific pick would leak into the fallback for every other model.
-      const map = { ...get().effortByModel, [base]: e };
-      writeLs('cgui-effort-by-model', map);
-      set({ effortByModel: map });
+  // Per-SESSION effort。'' 是合法值(CLI 默认)。key 为 sessionId 或 draft-<hash>。
+  // 无 key 时写全局兜底 `effort`。与 setModelFor/setPermissionMode 同构,实现会话隔离。
+  setEffortFor: (key, e) => {
+    if (key) {
+      const map = { ...get().effortBySession, [key]: e };
+      writeLs('cgui-effort-by-session', map);
+      set({ effortBySession: map });
     } else {
       set({ effort: e });
       try { localStorage.setItem('cgui-effort', e); } catch {}
     }
   },
-  getEffortForModel: (modelId) => {
-    const base = (modelId || '').replace(/\[1m\]/i, '');
-    const map = get().effortByModel || {};
-    return base && base in map ? map[base] : get().effort;
+  getEffortFor: (key) => {
+    const map = get().effortBySession || {};
+    return key && key in map ? map[key] : get().effort;
   },
-  // Session-keyed wrappers: resolve the session's CURRENT model, then key effort
-  // by that model. Call sites still pass a session/draft key.
-  setEffortFor: (key, e) => get().setEffortForModel(get().getModelFor(key), e),
-  getEffortFor: (key) => get().getEffortForModel(get().getModelFor(key)),
   setGlobalRead: (v) => {
     set({ globalRead: !!v });
     writeLs('cgui-global-read', !!v);

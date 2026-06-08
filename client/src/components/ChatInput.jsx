@@ -78,13 +78,11 @@ export const EFFORT_LEVELS = [
 
 // Dropdown anchored to the trigger button (lightweight, no full-screen blur).
 export function EffortSelector({ permKey = null }) {
-  // Per-MODEL effort: show/select the level for THIS session's current model,
-  // falling back to the global default. Reasoning effort is a model capability,
-  // not a session property.
-  const effModel = useStore((s) => ((permKey && s.modelBySession[permKey]) || s.currentModel) || '');
-  const effort = useStore((s) => { const b = effModel.replace(/\[1m\]/i, ''); return b && b in s.effortByModel ? s.effortByModel[b] : s.effort; });
+  // Per-SESSION effort:这条会话自己的力度,无 entry 回落全局默认。和模型/权限一样按
+  // 会话隔离持久化,改它不影响其他会话。
+  const effort = useStore((s) => (permKey && permKey in (s.effortBySession || {})) ? s.effortBySession[permKey] : s.effort);
   const openAIProtocol = useStore((s) => (s.currentProvider?.protocol || 'anthropic') === 'openai');
-  const setEffort = (id) => useStore.getState().setEffortForModel(effModel, id);
+  const setEffort = (id) => useStore.getState().setEffortFor(permKey, id);
   const [open, setOpen] = useState(false);
   const wrapRef = useRef(null);
   const current = EFFORT_LEVELS.find((e) => e.id === effort) || EFFORT_LEVELS[0];

@@ -4270,13 +4270,12 @@ function MobileModelPage({ permKey }) {
 }
 
 function MobileEffortPage({ permKey }) {
-  const effModel = useStore((s) => ((permKey && s.modelBySession[permKey]) || s.currentModel) || '');
-  const effort = useStore((s) => { const b = effModel.replace(/\[1m\]/i, ''); return b && b in s.effortByModel ? s.effortByModel[b] : s.effort; });
+  const effort = useStore((s) => (permKey && permKey in (s.effortBySession || {})) ? s.effortBySession[permKey] : s.effort);
   return (
     <div className="py-1">
-      <div className="px-4 pt-2 pb-1 text-[11px] text-ink-faint font-body">作用于当前模型 <span className="font-mono text-ink-soft">{effModel.replace(/\[1m\]/i, '') || '默认'}</span>(推理力度按模型记忆)</div>
+      <div className="px-4 pt-2 pb-1 text-[11px] text-ink-faint font-body">作用于当前会话(每个会话独立记忆、互不影响)</div>
       {EFFORT_LEVELS.map((e) => (
-        <button key={e.id || 'default'} onClick={() => useStore.getState().setEffortForModel(effModel, e.id)}
+        <button key={e.id || 'default'} onClick={() => useStore.getState().setEffortFor(permKey, e.id)}
           className="w-full flex items-center gap-3 px-4 py-3 text-left hover:bg-canvas-warm transition-colors">
           <div className="flex-1 min-w-0">
             <div className="text-[14px] font-body text-ink">{e.label}</div>
@@ -4736,7 +4735,7 @@ function MobileMenu({ setRightPanel, onClose }) {
   const permKey = activeSession?.sessionId || `draft-${activeSession?.projectHash || 'none'}`;
 
   const currentModel = useStore((s) => s.modelBySession[permKey] || s.currentModel);
-  const effort = useStore((s) => { const b = (currentModel || '').replace(/\[1m\]/i, ''); return b && b in s.effortByModel ? s.effortByModel[b] : s.effort; });
+  const effort = useStore((s) => (permKey && permKey in (s.effortBySession || {})) ? s.effortBySession[permKey] : s.effort);
   const permissionMode = useStore((s) => s.permissionModeBySession[permKey] || 'default');
   // --effort works on every claude-format upstream (official + mimo/deepseek/
   // openrouter relays); only the OpenAI proxy (codex-local) can't map it. Gate
