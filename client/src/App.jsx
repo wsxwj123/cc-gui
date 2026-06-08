@@ -2837,34 +2837,59 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
           const t = Array.isArray(m.text) ? m.text.join('') : (m.text || '');
           return `${m.type}|${(t || '').slice(0, 80)}`;
         };
-        // The round has landed once the persisted jsonl carries MORE assistant
-        // turns than before this send — COUNTED, not text-matched. A repeated
-        // prompt (e.g. "继续") would make a text match hit a PRIOR round's turn and
-        // clear the new reply before its own jsonl twin exists (vanish→reappear).
-        const roundLanded = (persisted) =>
-          persisted.filter((m) => m.type === 'turn').length > turnsBefore;
-        for (let i = 0; i < 8; i++) {
+        // 一轮回复可能跨多条 assistant 消息(text → 工具 → text):jsonl 先写
+        // assistant[text+tool],turn COUNT 此刻就 +1,但工具之后的尾部文本是更晚的
+        // 另一条 assistant 消息。只按 count 判定会在尾部文本落盘前就判"已落盘"→ 清掉
+        // 本地完整副本(含尾部文本)→ 持久化版此刻只有 text+tool → 末条消息永久丢失。
+        // 所以除了 count,还要求持久化末轮文本包含我们流式输出的结尾(tail),确认整轮
+        // (含尾部)落盘后再清。等待足够久后(尾部可能因 provider 文本规整化对不上)回退
+        // 到纯 count 判定,避免极端情况下本地副本永不清除导致重复渲染。
+        // 重复 prompt 仍安全:count 必须先增长,tail 取本轮流式文本结尾,不会误匹配旧轮。
+        const tail = (accumulatedText || '').replace(/\s+/g, ' ').trim().slice(-50);
+        const roundLanded = (persisted, attempt) => {
+          if (persisted.filter((m) => m.type === 'turn').length <= turnsBefore) return false;
+          if (!tail || attempt >= 9) return true; // 纯工具轮 / 已等够久 → count 足矣
+          const lastTurn = [...persisted].reverse().find((m) => m.type === 'turn');
+          const ptext = lastTurn
+            ? (Array.isArray(lastTurn.text) ? lastTurn.text.join(' ') : (lastTurn.text || '')).replace(/\s+/g, ' ')
+            : '';
+          return ptext.includes(tail);
+        };
+        for (let i = 0; i < 12; i++) {
           // Bail if the user navigated THIS pane to another session mid-finalize:
           // otherwise we'd fetch the old session into the now-current tab and clear
           // the wrong session's local messages.
           if (getLocalSession()?.sessionId !== finalizeSid) break;
-          try { await fetchMessagesForTab(finalizeSid, _sel.projectHash, { silent: true }); } catch {}
+          // PEEK persisted WITHOUT committing to the store. A mid-round jsonl
+          // (text+tool written, trailing text C not yet) must NEVER render — if we
+          // committed it, the naive [...persisted, ...local] concat + coarse tkey
+          // dedup would show the partial turn and drop the complete local copy →
+          // the trailing message C vanishes. So we only commit once the FULL round
+          // (incl trailing text) has landed.
+          let peeked = [];
+          try {
+            const r = await fetch(`/api/sessions/${finalizeSid}/messages?projectHash=${encodeURIComponent(_sel.projectHash)}`);
+            if (r.ok) peeked = (await r.json()).messages || [];
+          } catch {}
           if (getLocalSession()?.sessionId !== finalizeSid) break;
-          const persisted = getLocalMessages();
-          if (producedReply && roundLanded(persisted)) {
-            // Full round persisted → persisted owns it; drop ALL local copies
-            // (the streamed reply rarely byte-matches the final jsonl, so a
-            // per-text filter would leave it doubled — clear instead).
+          if (!producedReply) {
+            // Empty/errored turn — no jsonl twin to wait for. Commit persisted and
+            // drop matched NON-turn locals (the user prompt); keep the local ⚠️/❌
+            // turn visible.
+            try { await fetchMessagesForTab(finalizeSid, _sel.projectHash, { silent: true }); } catch {}
+            const known = new Set(getLocalMessages().map(tkey));
+            setChatMessages((prev) => (prev.length ? prev.filter((m) => m.type === 'turn' || !known.has(tkey(m))) : prev));
+            break;
+          }
+          if (roundLanded(peeked, i)) {
+            // Full round (incl trailing text) persisted → commit it to the store,
+            // then drop ALL local copies (streamed text rarely byte-matches final
+            // jsonl, so clearing avoids a doubled turn).
+            try { await fetchMessagesForTab(finalizeSid, _sel.projectHash, { silent: true }); } catch {}
             setChatMessages([]);
             break;
           }
-          // Not landed yet (or empty/errored turn): drop only the local copies
-          // whose exact twin is already persisted — e.g. the user prompt — so
-          // the reply / ⚠️ stays visible with no gap and no doubled user line.
-          const known = new Set(persisted.map(tkey));
-          setChatMessages((prev) => (prev.length ? prev.filter((m) => !known.has(tkey(m))) : prev));
-          if (!producedReply) break; // empty/errored turn — nothing to wait for
-          if (i < 7) await new Promise((r) => setTimeout(r, 200));
+          if (i < 11) await new Promise((r) => setTimeout(r, 200));
         }
       }
       // Background refresh of sidebar session list. `silent:true` means the
