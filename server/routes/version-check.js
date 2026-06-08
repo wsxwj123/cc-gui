@@ -181,8 +181,9 @@ function updateCmdFor(method, claudePath) {
     case 'npm':  return 'npm install -g @anthropic-ai/claude-code@latest';
     case 'native':
     default: {
+      // update 与 upgrade 是同一命令的别名;用 upgrade(用户实测 Windows 上体验更好)。
       const bin = claudePath ? `"${claudePath}"` : 'claude';
-      return `${bin} update`;
+      return `${bin} upgrade`;
     }
   }
 }

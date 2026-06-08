@@ -554,7 +554,7 @@ function CcUpdater() {
   };
 
   const doUpdate = async () => {
-    const cmd = state.updateCommand || 'claude update';
+    const cmd = state.updateCommand || 'claude upgrade';
     if (!window.confirm(`将打开终端运行【${cmd}】更新 Claude Code 到 v${state.latestVersion}（安装方式：${state.method || '未知'}）。\n请在弹出的终端里查看进度,完成后回来点"检查更新"。确定继续?`)) return;
     setUpdating(true); setResult(null);
     try {
@@ -620,7 +620,7 @@ function CcUpdater() {
               disabled={updating}
               className="px-3 py-1.5 text-[12px] bg-amber-700 text-white rounded-md hover:bg-amber-800 disabled:opacity-50 flex items-center gap-1.5"
             >
-              {updating ? <><RefreshCw size={12} className="animate-spin" />更新中…(claude update)</> : <>⬇️ 一键更新</>}
+              {updating ? <><RefreshCw size={12} className="animate-spin" />更新中…(claude upgrade)</> : <>⬇️ 一键更新</>}
             </button>
           </div>
         ) : (
