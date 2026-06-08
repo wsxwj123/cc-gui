@@ -5,6 +5,8 @@ import { createPortal } from 'react-dom';
 // #185 (Maximum update depth exceeded) caused by returning fresh `[]` on
 // every selector call. Any selector with `|| []` fallback must point here.
 const EMPTY_ARRAY = Object.freeze([]);
+// 已尝试过自动生成标题的 sessionId(无论成功失败),防止失败时每轮重复 spawn 标题进程。
+const titleAttempted = new Set();
 import { useStore, THEME_FAMILIES, FONT_OPTIONS, systemPrefersDark, PERMISSION_MODES } from './stores/sessionStore.js';
 import { useWebSocket } from './hooks/useWebSocket.js';
 import { MessageBubble } from './components/MessageBubble.jsx';
@@ -2884,7 +2886,9 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
       try {
         const titleSid = getLocalSession()?.sessionId;
         const st = useStore.getState();
-        if (titleSid && !st.customTitles[titleSid] && !st.autoTitles[titleSid] && prompt) {
+        if (titleSid && !titleAttempted.has(titleSid) && !st.customTitles[titleSid] && !st.autoTitles[titleSid] && prompt) {
+          // 标记"已尝试"——无论成功失败都不再重试,避免 provider 失败时每轮 spawn。
+          titleAttempted.add(titleSid);
           fetch('/api/chat/title', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
