@@ -168,7 +168,7 @@ function RollbackMenu({ message, onAction }) {
         <RotateCcw size={13} className="text-accent mt-0.5 shrink-0" />
         <div>
           <div className="text-[13px] font-medium text-ink font-body">仅回退消息</div>
-          <div className="text-[11px] text-ink-faint font-body">只裁剪会话记录，不动项目文件</div>
+          <div className="text-[11px] text-ink-faint font-body">裁剪会话后自动重发，不动项目文件</div>
         </div>
       </button>
       <button

@@ -3182,22 +3182,8 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
 
     // 6) act per mode
     if (mode === 'edit') return; // composer was filled at the top of this branch
-    if (mode === 'message') {
-      // "仅回退消息"以前只裁剪、零反馈 → 用户感觉"消息凭空消失、点了没反应"。把原文回填到
-      // 输入框:既是明确反馈,又让用户能直接改/重发(文件不动,符合该模式语义)。
-      if (originalText) {
-        const fillKey = sessionWasReset
-          ? `draft-${projectHash || 'none'}`
-          : (sel?.sessionId || `draft-${sel?.projectHash || 'none'}`);
-        // 延后一拍:回退到首条会触发 sessionReset→draft 的状态切换,立即派发可能被仍以
-        // 旧 key 渲染的 ChatInput 漏接。
-        setTimeout(() => {
-          window.dispatchEvent(new CustomEvent('cgui:composer-fill', { detail: { text: originalText, targetKey: fillKey } }));
-        }, 60);
-      }
-      return;
-    }
-    // mode === 'both': auto-resend.
+    // mode === 'message' | 'both': 直接重发原文,等价于"重做本轮"。只有"编辑后重发"(edit)
+    // 才回输入框等用户手改。两者区别仅在文件:'both' 已在上面还原快照,'message' 不动文件。
     if (originalText && handleSendRef.current) {
       setTimeout(() => {
         if (typeof resendText === 'object' && resendText) {
@@ -4289,7 +4275,7 @@ function MobileEffortPage({ permKey }) {
 }
 
 function MobilePermissionPage({ permKey }) {
-  const permissionMode = useStore((s) => (permKey ? (s.permissionModeBySession[permKey] || 'default') : s.permissionMode));
+  const permissionMode = useStore((s) => (permKey ? (s.permissionModeBySession[permKey] || s.permissionMode) : s.permissionMode));
   return (
     <div className="py-1">
       {PERMISSION_MODES.map((m) => {
