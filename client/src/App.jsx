@@ -3930,19 +3930,32 @@ export function ModelSelector({ compact = false, permKey = null }) {
   // the model id (same thing the CLI's /model picker writes). Toggling just
   // adds/removes the suffix on whatever model is current.
   const has1m = /\[1m\]/i.test(currentModel || '');
+  // `[1m]` 是 Anthropic 官方 1M-context beta 专属后缀。给第三方 provider(MiMo/
+  // DeepSeek 等)的模型加 `[1m]` 会得到端点不认识的 id(如 mimo-v2.5-pro[1m])→
+  // 报"model may not exist"。所以 1M 仅在官方 Anthropic 时可用。
+  const is1mCapable = provider === 'Anthropic';
   const toggle1m = () => {
     const base = (currentModel || '').replace(/\[1m\]/i, '');
     if (!base) return;
-    setModel(has1m ? base : `${base}[1m]`);
+    // 非官方:始终去掉 [1m];官方:正常切换。
+    setModel(!has1m && is1mCapable ? `${base}[1m]` : base);
   };
-  // Switching models PRESERVES the current 1M flag, so picking a different model
-  // doesn't silently drop your 1M-context choice (#4). Removing 1M is explicit
-  // via the toggle above.
+  // Switching models PRESERVES the current 1M flag (官方间切换不丢 1M 选择,#4),
+  // 但切到不支持 1M 的第三方 provider 时必须丢掉 [1m],否则模型 id 非法。
   const selectModel = (id) => {
     const base = id.replace(/\[1m\]/i, '');
-    setModel(has1m ? `${base}[1m]` : base);
+    setModel(has1m && is1mCapable ? `${base}[1m]` : base);
     setOpen(false);
   };
+  // 自动纠正:已处于第三方 provider 却带着 [1m](例如从官方切过来时被保留),
+  // 立刻剥掉,免得每次请求都因非法 model id 报错。has1m 变 false 后不再重入。
+  // 必须等 provider 真正加载(非空)再判,否则初始化空串会误删官方模型的合法 [1m]。
+  useEffect(() => {
+    if (provider && provider !== 'Anthropic' && has1m) {
+      const base = (currentModel || '').replace(/\[1m\]/i, '');
+      if (base) setModel(base);
+    }
+  }, [provider, has1m, currentModel]);
 
   if (!currentModel) return null;
 
@@ -3984,13 +3997,18 @@ export function ModelSelector({ compact = false, permKey = null }) {
             </div>
             {fetchNote && <div className="text-[10px] text-ink-faint font-body mt-1">{fetchNote}</div>}
           </div>
-          {/* 1M context toggle — appends [1m] to the active model id */}
-          <button onClick={toggle1m}
-            className="w-full text-left px-3 py-2 hover:bg-canvas-warm transition-colors flex items-center gap-2 border-b border-canvas-deep">
+          {/* 1M context toggle — appends [1m] to the active model id.
+              仅官方 Anthropic 支持该 beta;第三方 provider 加 [1m] 会得到非法 model id
+              (mimo-v2.5-pro[1m])→ "model may not exist",故此处禁用。 */}
+          <button onClick={toggle1m} disabled={!is1mCapable}
+            className={`w-full text-left px-3 py-2 transition-colors flex items-center gap-2 border-b border-canvas-deep ${
+              is1mCapable ? 'hover:bg-canvas-warm' : 'opacity-50 cursor-not-allowed'}`}>
             <div className="flex-1 min-w-0">
               <div className="text-xs font-medium text-ink font-body">1M 上下文</div>
               <div className="text-[10px] text-ink-faint font-body leading-snug">
-                给当前模型追加 <code className="font-mono">[1m]</code> 后缀（1M tokens 上下文 beta）
+                {is1mCapable
+                  ? <>给当前模型追加 <code className="font-mono">[1m]</code> 后缀（1M tokens 上下文 beta）</>
+                  : <>仅官方 Anthropic 支持；{provider || '第三方'} 模型不可用</>}
               </div>
             </div>
             <span className={`text-[9px] px-1.5 py-0.5 rounded font-mono shrink-0 ${
@@ -4166,24 +4184,35 @@ function MobileModelPage({ permKey }) {
   const [fetchNote, setFetchNote] = useState('');
   const [fetching, setFetching] = useState(false);
   const [query, setQuery] = useState('');
+  const [provider, setProvider] = useState('');
   // The desktop ModelSelector normally fetches the model catalogue; it isn't
   // mounted on phones, so populate the global default + available list here.
   useEffect(() => {
     fetch('/api/model').then((r) => r.json()).then((d) => {
       if (d.model) useStore.setState({ currentModel: d.model });
       if (d.available) useStore.setState({ availableModels: d.available });
+      if (d.provider) setProvider(d.provider);
     }).catch(() => {});
   }, []);
   const has1m = /\[1m\]/i.test(currentModel || '');
+  // [1m] 仅官方 Anthropic 支持(见 ModelSelector 同名说明)。
+  const is1mCapable = provider === 'Anthropic';
   const pick = (id) => {
     const base = id.replace(/\[1m\]/i, '');
-    useStore.getState().setModelFor(permKey, has1m ? `${base}[1m]` : base);
+    useStore.getState().setModelFor(permKey, has1m && is1mCapable ? `${base}[1m]` : base);
   };
   const toggle1m = () => {
     const base = (currentModel || '').replace(/\[1m\]/i, '');
     if (!base) return;
-    useStore.getState().setModelFor(permKey, has1m ? base : `${base}[1m]`);
+    useStore.getState().setModelFor(permKey, !has1m && is1mCapable ? `${base}[1m]` : base);
   };
+  // 自动纠正:非官方 provider 上带 [1m] 立即剥掉(等 provider 加载后再判)。
+  useEffect(() => {
+    if (provider && provider !== 'Anthropic' && has1m) {
+      const base = (currentModel || '').replace(/\[1m\]/i, '');
+      if (base) useStore.getState().setModelFor(permKey, base);
+    }
+  }, [provider, has1m, currentModel, permKey]);
   const addCustom = (v) => { useStore.getState().addCustomModel(v); pick(v); };
   const doFetch = async () => {
     setFetching(true); setFetchNote('');
@@ -4218,9 +4247,10 @@ function MobileModelPage({ permKey }) {
         </div>
         {fetchNote && <div className="text-[11px] text-ink-faint font-body">{fetchNote}</div>}
       </div>
-      <button onClick={toggle1m}
-        className="w-full flex items-center gap-3 px-4 py-3 text-left hover:bg-canvas-warm transition-colors border-b border-canvas-deep/40">
-        <span className="flex-1 text-[14px] font-body text-ink">1M 上下文</span>
+      <button onClick={toggle1m} disabled={!is1mCapable}
+        className={`w-full flex items-center gap-3 px-4 py-3 text-left transition-colors border-b border-canvas-deep/40 ${
+          is1mCapable ? 'hover:bg-canvas-warm' : 'opacity-50 cursor-not-allowed'}`}>
+        <span className="flex-1 text-[14px] font-body text-ink">1M 上下文{!is1mCapable && <span className="text-[11px] text-ink-faint">（仅官方 Anthropic）</span>}</span>
         <span className={`text-[10px] px-2 py-0.5 rounded font-mono ${has1m ? 'bg-accent text-white' : 'bg-canvas-deep text-ink-faint'}`}>
           {has1m ? '已开启' : '关闭'}
         </span>
