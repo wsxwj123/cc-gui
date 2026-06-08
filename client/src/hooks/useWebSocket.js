@@ -74,7 +74,11 @@ export function useWebSocket() {
               const mode = useStore.getState().getPermissionModeFor(req.sessionId);
               const READ_CLASS = ['Read', 'Glob', 'Grep', 'LS', 'TodoWrite', 'NotebookRead', 'Skill'];
               const PLAN_WRITE_CLASS = ['Edit', 'MultiEdit', 'Write', 'NotebookEdit'];
-              if (mode === 'bypassPermissions') {
+              // 放任模式排除 AskUserQuestion:它必须弹 GUI picker 让用户选,
+              // 否则被 auto-allow → CLI headless 无法运行该工具 → AI 退化成正
+              // 文提问(用户报告的"放任下 ask 不弹窗")。与服务端 hook 的
+              // CGUI_BYPASS_ALL_EXCEPT_ASK 语义对齐。
+              if (mode === 'bypassPermissions' && req.toolName !== 'AskUserQuestion') {
                 console.log('[cgui-perm] auto-allow: bypass', req.id);
                 fetch(`/api/permissions/respond/${req.id}`, {
                   method: 'POST',

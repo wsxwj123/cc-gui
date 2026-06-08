@@ -351,6 +351,22 @@ function formatPathShort(path) {
   return parts[parts.length - 1] || path;
 }
 
+// 模型的"原生上下文窗口"——用于顶部 x/窗口 徽章。
+// 优先级:① [1m] 后缀(用户显式开启 1M)→ 1M;② id 里自带窗口标注
+// (moonshot-v1-128k 等)→ 取该数;③ 原生 1M+ 的 provider 模型(Gemini /
+// GPT-5.x / DeepSeek-V4 / MiMo / MiniMax / Grok-4)→ 1M;④ Kimi 原生 256K;
+// ⑤ 其余(GLM=200K、Anthropic 未开 [1m]=200K 等)→ 200K 兜底。
+// 依据:用户核对官方文档 — GLM-5.1=200K、Kimi K2.6=256K,均非 1M。
+function nativeContextWindow(model) {
+  const id = (model || '').toLowerCase();
+  if (/\[1m\]/i.test(id)) return 1_000_000;
+  const byName = id.match(/(\d+)k(?![a-z0-9])/);     // 如 moonshot-v1-128k
+  if (byName) return parseInt(byName[1], 10) * 1000;
+  if (/gemini|gpt-5|deepseek-v4|deepseek-chat|deepseek-reasoner|mimo|minimax|grok-4/.test(id)) return 1_000_000;
+  if (/kimi/.test(id)) return 262_144;               // Kimi K2.6 原生 256K
+  return 200_000;
+}
+
 // ─── Right Panel (overlay) ────────────────────────────────────
 // Top-right panels — each key auto-wires a header icon (desktop + mobile menu)
 // and its RightPanel body. Adding a key here is all the wiring needed.
@@ -3376,10 +3392,10 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
   const contextTokens = lastUsage
     ? (lastUsage.input_tokens || 0) + (lastUsage.cache_read_input_tokens || 0) + (lastUsage.cache_creation_input_tokens || 0)
     : 0;
-  const contextWindow = /\[1m\]/i.test(currentModel || '') ? 1_000_000 : 200_000;
+  const contextWindow = nativeContextWindow(currentModel);
   const contextPct = contextTokens > 0 ? Math.min(100, Math.round((contextTokens / contextWindow) * 100)) : 0;
   const fmtTok = (n) => (n >= 1000 ? Math.round(n / 1000) + 'k' : String(n));
-  const winLabel = contextWindow >= 1_000_000 ? '1M' : '200k';
+  const winLabel = contextWindow >= 1_000_000 ? '1M' : `${Math.round(contextWindow / 1000)}k`;
 
   return (
     <div className="flex-1 flex flex-col min-h-0 glass-base relative">
@@ -5123,7 +5139,9 @@ export default function App() {
     const sid = activeSession?.sessionId;
     if (!sid) return;
     const pending = useStore.getState().pendingPermissions;
-    pending.filter((p) => p.sessionId === sid).forEach((p) => {
+    // AskUserQuestion 例外:切到放任也要保留它的 picker,不能批量放行
+    // (放行=CLI headless 跑不了该工具=AI 退化文本提问)。
+    pending.filter((p) => p.sessionId === sid && p.toolName !== 'AskUserQuestion').forEach((p) => {
       fetch(`/api/permissions/respond/${p.id}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
