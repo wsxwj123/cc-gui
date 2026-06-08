@@ -333,12 +333,18 @@ function formatDate(iso) {
 
 function formatPath(path) {
   if (!path) return '';
-  return path.replace(/^\/Users\/[^/]+/, '~');
+  // 家目录缩写为 ~:同时处理 macOS(/Users/x)、Linux(/home/x)、Windows(C:\Users\x)
+  return path
+    .replace(/^\/Users\/[^/]+/, '~')
+    .replace(/^\/home\/[^/]+/, '~')
+    .replace(/^[A-Za-z]:[\\/]Users[\\/][^\\/]+/i, '~');
 }
 
 function formatPathShort(path) {
   if (!path) return '';
-  const parts = formatPath(path).split('/').filter(Boolean);
+  // 取最后一段文件夹名。必须同时按 / 和 \ 切分——Windows 路径用反斜杠,
+  // 只按 / 切会切不开,整条路径被当成"最后一段"返回(Win 上显示全路径的根因)。
+  const parts = String(path).split(/[/\\]+/).filter(Boolean);
   return parts[parts.length - 1] || path;
 }
 
@@ -1346,7 +1352,7 @@ function SessionList() {
       sessionId: null,
       projectHash: selectedProject.hash,
       projectPath: tree.path,
-      firstPrompt: `新会话 · ${tree.branch || tree.path.split('/').pop()}`,
+      firstPrompt: `新会话 · ${tree.branch || formatPathShort(tree.path)}`,
     };
     if (splitMode) {
       setActiveTabSession(draft);
@@ -1662,7 +1668,7 @@ function StreamingStatusLine({ thinking, text, toolCalls }) {
   if (pendingTool) {
     const preview =
       pendingTool.input?.command ||
-      pendingTool.input?.file_path?.split('/').pop() ||
+      pendingTool.input?.file_path?.split(/[/\\]+/).pop() ||
       pendingTool.input?.pattern ||
       pendingTool.input?.query || '';
     const previewStr = String(preview).slice(0, 60);
