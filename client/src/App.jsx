@@ -3958,33 +3958,21 @@ export function ModelSelector({ compact = false, permKey = null }) {
   // 1M-context toggle: Claude Code enables the 1M beta via a `[1m]` suffix on
   // the model id (same thing the CLI's /model picker writes). Toggling just
   // adds/removes the suffix on whatever model is current.
+  // `[1m]` 是 Claude Code 启用 1M 上下文的通用后缀约定。Anthropic(Opus 4.8/4.7/4.6、
+  // Sonnet 4.6)和 MiMo(mimo-v2.5-pro[1m],见官方文档)等兼容 provider 都用它启用 1M。
+  // 因此对所有模型开放——provider 若不支持会自行报错,由用户决定关掉。
   const has1m = /\[1m\]/i.test(currentModel || '');
-  // `[1m]` 是 Anthropic 官方 1M-context beta 专属后缀。给第三方 provider(MiMo/
-  // DeepSeek 等)的模型加 `[1m]` 会得到端点不认识的 id(如 mimo-v2.5-pro[1m])→
-  // 报"model may not exist"。所以 1M 仅在官方 Anthropic 时可用。
-  const is1mCapable = provider === 'Anthropic';
   const toggle1m = () => {
     const base = (currentModel || '').replace(/\[1m\]/i, '');
     if (!base) return;
-    // 非官方:始终去掉 [1m];官方:正常切换。
-    setModel(!has1m && is1mCapable ? `${base}[1m]` : base);
+    setModel(has1m ? base : `${base}[1m]`);
   };
-  // Switching models PRESERVES the current 1M flag (官方间切换不丢 1M 选择,#4),
-  // 但切到不支持 1M 的第三方 provider 时必须丢掉 [1m],否则模型 id 非法。
+  // 切换模型时保留当前 1M 标记,避免换模型静默丢掉 1M 选择。
   const selectModel = (id) => {
     const base = id.replace(/\[1m\]/i, '');
-    setModel(has1m && is1mCapable ? `${base}[1m]` : base);
+    setModel(has1m ? `${base}[1m]` : base);
     setOpen(false);
   };
-  // 自动纠正:已处于第三方 provider 却带着 [1m](例如从官方切过来时被保留),
-  // 立刻剥掉,免得每次请求都因非法 model id 报错。has1m 变 false 后不再重入。
-  // 必须等 provider 真正加载(非空)再判,否则初始化空串会误删官方模型的合法 [1m]。
-  useEffect(() => {
-    if (provider && provider !== 'Anthropic' && has1m) {
-      const base = (currentModel || '').replace(/\[1m\]/i, '');
-      if (base) setModel(base);
-    }
-  }, [provider, has1m, currentModel]);
 
   if (!currentModel) return null;
 
@@ -4002,7 +3990,7 @@ export function ModelSelector({ compact = false, permKey = null }) {
         <ChevronDown size={10} className="text-ink-faint" />
       </button>
       {open && (
-        <div className="glass-popover absolute right-0 top-full mt-2 w-80 z-50 py-1 animate-glass-rise max-h-[70vh] overflow-y-auto max-md:fixed max-md:left-3 max-md:right-3 max-md:top-16 max-md:w-auto max-md:mt-0">
+        <div className="glass-popover absolute left-0 top-full mt-2 w-80 max-w-[calc(100vw-1.5rem)] z-50 py-1 animate-glass-rise max-h-[70vh] overflow-y-auto max-md:fixed max-md:left-3 max-md:right-3 max-md:w-auto max-md:top-16 max-md:mt-0">
           <div className="px-3 py-2 sticky top-0 bg-canvas border-b border-canvas-deep">
             <div className="text-[10px] text-ink-faint uppercase tracking-wider font-body flex items-center justify-between">
               <span>选择模型</span>
@@ -4027,17 +4015,13 @@ export function ModelSelector({ compact = false, permKey = null }) {
             {fetchNote && <div className="text-[10px] text-ink-faint font-body mt-1">{fetchNote}</div>}
           </div>
           {/* 1M context toggle — appends [1m] to the active model id.
-              仅官方 Anthropic 支持该 beta;第三方 provider 加 [1m] 会得到非法 model id
-              (mimo-v2.5-pro[1m])→ "model may not exist",故此处禁用。 */}
-          <button onClick={toggle1m} disabled={!is1mCapable}
-            className={`w-full text-left px-3 py-2 transition-colors flex items-center gap-2 border-b border-canvas-deep ${
-              is1mCapable ? 'hover:bg-canvas-warm' : 'opacity-50 cursor-not-allowed'}`}>
+              Claude Code 通用约定:Anthropic / MiMo 等兼容 provider 都用 [1m] 启用 1M。 */}
+          <button onClick={toggle1m}
+            className="w-full text-left px-3 py-2 hover:bg-canvas-warm transition-colors flex items-center gap-2 border-b border-canvas-deep">
             <div className="flex-1 min-w-0">
               <div className="text-xs font-medium text-ink font-body">1M 上下文</div>
               <div className="text-[10px] text-ink-faint font-body leading-snug">
-                {is1mCapable
-                  ? <>给当前模型追加 <code className="font-mono">[1m]</code> 后缀（1M tokens 上下文 beta）</>
-                  : <><code className="font-mono">[1m]</code> 是 Anthropic 专属后缀；{provider || '第三方'} 的 1M 请直接选其对应模型 id（用上方"拉取最新"查看）</>}
+                给当前模型追加 <code className="font-mono">[1m]</code> 后缀（1M tokens 上下文，需 provider 支持）
               </div>
             </div>
             <span className={`text-[9px] px-1.5 py-0.5 rounded font-mono shrink-0 ${
@@ -4213,35 +4197,24 @@ function MobileModelPage({ permKey }) {
   const [fetchNote, setFetchNote] = useState('');
   const [fetching, setFetching] = useState(false);
   const [query, setQuery] = useState('');
-  const [provider, setProvider] = useState('');
   // The desktop ModelSelector normally fetches the model catalogue; it isn't
   // mounted on phones, so populate the global default + available list here.
   useEffect(() => {
     fetch('/api/model').then((r) => r.json()).then((d) => {
       if (d.model) useStore.setState({ currentModel: d.model });
       if (d.available) useStore.setState({ availableModels: d.available });
-      if (d.provider) setProvider(d.provider);
     }).catch(() => {});
   }, []);
   const has1m = /\[1m\]/i.test(currentModel || '');
-  // [1m] 仅官方 Anthropic 支持(见 ModelSelector 同名说明)。
-  const is1mCapable = provider === 'Anthropic';
   const pick = (id) => {
     const base = id.replace(/\[1m\]/i, '');
-    useStore.getState().setModelFor(permKey, has1m && is1mCapable ? `${base}[1m]` : base);
+    useStore.getState().setModelFor(permKey, has1m ? `${base}[1m]` : base);
   };
   const toggle1m = () => {
     const base = (currentModel || '').replace(/\[1m\]/i, '');
     if (!base) return;
-    useStore.getState().setModelFor(permKey, !has1m && is1mCapable ? `${base}[1m]` : base);
+    useStore.getState().setModelFor(permKey, has1m ? base : `${base}[1m]`);
   };
-  // 自动纠正:非官方 provider 上带 [1m] 立即剥掉(等 provider 加载后再判)。
-  useEffect(() => {
-    if (provider && provider !== 'Anthropic' && has1m) {
-      const base = (currentModel || '').replace(/\[1m\]/i, '');
-      if (base) useStore.getState().setModelFor(permKey, base);
-    }
-  }, [provider, has1m, currentModel, permKey]);
   const addCustom = (v) => { useStore.getState().addCustomModel(v); pick(v); };
   const doFetch = async () => {
     setFetching(true); setFetchNote('');
@@ -4276,10 +4249,9 @@ function MobileModelPage({ permKey }) {
         </div>
         {fetchNote && <div className="text-[11px] text-ink-faint font-body">{fetchNote}</div>}
       </div>
-      <button onClick={toggle1m} disabled={!is1mCapable}
-        className={`w-full flex items-center gap-3 px-4 py-3 text-left transition-colors border-b border-canvas-deep/40 ${
-          is1mCapable ? 'hover:bg-canvas-warm' : 'opacity-50 cursor-not-allowed'}`}>
-        <span className="flex-1 text-[14px] font-body text-ink">1M 上下文{!is1mCapable && <span className="text-[11px] text-ink-faint">（[1m] 仅官方；第三方选对应模型）</span>}</span>
+      <button onClick={toggle1m}
+        className="w-full flex items-center gap-3 px-4 py-3 text-left hover:bg-canvas-warm transition-colors border-b border-canvas-deep/40">
+        <span className="flex-1 text-[14px] font-body text-ink">1M 上下文</span>
         <span className={`text-[10px] px-2 py-0.5 rounded font-mono ${has1m ? 'bg-accent text-white' : 'bg-canvas-deep text-ink-faint'}`}>
           {has1m ? '已开启' : '关闭'}
         </span>
