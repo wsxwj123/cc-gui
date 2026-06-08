@@ -170,6 +170,9 @@ export const useStore = create((set, get) => ({
   // auto firstPrompt everywhere the title shows (sidebar / header / breadcrumb).
   // We never touch the on-disk jsonl — titles live only in localStorage.
   customTitles: readLs('cgui-custom-titles', {}),
+  // AI 自动生成的会话标题 { [sessionId]: title }(首轮对话后由 /api/chat/title 生成)。
+  // 优先级低于用户自定义 customTitles、高于 firstPrompt。仅存 localStorage。
+  autoTitles: readLs('cgui-auto-titles', {}),
   // The provider (providerHint) each session last sent under. A provider switch
   // (e.g. mimo → official) invalidates the prior turns' thinking-block
   // signatures. We can't infer the old provider from the model name — mimo is a
@@ -464,6 +467,15 @@ export const useStore = create((set, get) => ({
     writeLs('cgui-custom-titles', next);
     set({ customTitles: next });
     putCustomTitle(sessionId, trimmed);
+  },
+
+  // 写入 AI 自动标题。仅当该会话还没有自定义标题时生效(自定义优先)。
+  setAutoTitle: (sessionId, title) => {
+    const t = (title || '').trim();
+    if (!sessionId || !t) return;
+    const next = { ...get().autoTitles, [sessionId]: t };
+    writeLs('cgui-auto-titles', next);
+    set({ autoTitles: next });
   },
 
   // Load the shared title map on startup. Server is the source of truth; any

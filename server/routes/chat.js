@@ -3,6 +3,7 @@ import { spawn, execFileSync } from 'child_process';
 import { resolve as pathResolve, dirname, join as pathJoin, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readFileSync, statSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { getDefaultModel } from '../services/model-resolver.js';
 import { dropPendingForSession } from './permissions.js';
 
@@ -567,6 +568,65 @@ router.post('/chat/:pid/stop', (req, res) => {
   if (!slot) return res.status(404).json({ error: 'Process not found' });
   killProcessTree(slot.proc);
   res.json({ ok: true });
+});
+
+// POST /api/chat/title  { firstUser, firstAssistant?, cwd? }
+// One-shot, isolated `claude -p` call that summarizes the opening exchange into a
+// short session title. Does NOT --resume any session (writes no session jsonl) and
+// injects no permission hook. Env is stripped the same way as the main chat spawn so
+// the user's configured provider (settings.json) is honoured, not inherited official
+// ANTHROPIC_* vars. Best-effort: any failure → 200 with empty title so the client
+// silently falls back to the first message.
+router.post('/chat/title', async (req, res) => {
+  const firstUser = String(req.body?.firstUser || '').slice(0, 2000).trim();
+  const firstAssistant = String(req.body?.firstAssistant || '').slice(0, 1500).trim();
+  if (!firstUser) return res.json({ title: '' });
+
+  const prompt = `给下面这段对话起一个不超过 12 个字的简短中文标题,只输出标题本身,不要引号、不要标点结尾、不要解释。\n\n用户: ${firstUser}\n${firstAssistant ? `助手: ${firstAssistant}\n` : ''}`;
+
+  const childEnv = { ...process.env };
+  delete childEnv.ANTHROPIC_MODEL;
+  delete childEnv.CLAUDE_MODEL;
+  for (const k of ['ANTHROPIC_BASE_URL', 'ANTHROPIC_API_URL', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN',
+    'ANTHROPIC_DEFAULT_HAIKU_MODEL', 'ANTHROPIC_DEFAULT_SONNET_MODEL', 'ANTHROPIC_DEFAULT_OPUS_MODEL',
+    'ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME', 'ANTHROPIC_DEFAULT_SONNET_MODEL_NAME', 'ANTHROPIC_DEFAULT_OPUS_MODEL_NAME',
+    'ANTHROPIC_REASONING_MODEL', 'ANTHROPIC_SMALL_FAST_MODEL',
+    'ANTHROPIC_PERMISSION_MODE', 'CLAUDE_PERMISSION_MODE', 'CLAUDE_DANGEROUSLY_SKIP_PERMISSIONS']) {
+    delete childEnv[k];
+  }
+
+  let proc;
+  try {
+    proc = spawn('claude', ['-p', prompt, '--permission-mode', 'plan'], {
+      cwd: typeof req.body?.cwd === 'string' && req.body.cwd ? req.body.cwd : homedir(),
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: childEnv,
+    });
+  } catch {
+    return res.json({ title: '' });
+  }
+  if (!proc.pid) return res.json({ title: '' });
+
+  let out = '';
+  let done = false;
+  const finish = (title) => {
+    if (done) return;
+    done = true;
+    clearTimeout(timer);
+    try { killProcessTree(proc); } catch {}
+    // 清洗:去引号/换行/常见前缀,截断到 ~20 字
+    const clean = String(title || '')
+      .replace(/[\r\n]+/g, ' ')
+      .replace(/^["'「『]+|["'」』]+$/g, '')
+      .replace(/^(标题|title)\s*[:：]\s*/i, '')
+      .trim()
+      .slice(0, 24);
+    res.json({ title: clean });
+  };
+  const timer = setTimeout(() => finish(out), 30000);
+  proc.stdout.on('data', (c) => { out += c.toString(); });
+  proc.on('close', () => finish(out));
+  proc.on('error', () => finish(''));
 });
 
 export default router;

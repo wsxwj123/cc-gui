@@ -39,10 +39,11 @@ import {
 // sessionId yet) can't be renamed — the pencil is hidden until the first send.
 function EditableSessionTitle({ session }) {
   const customTitles = useStore((s) => s.customTitles);
+  const autoTitles = useStore((s) => s.autoTitles);
   const setCustomTitle = useStore((s) => s.setCustomTitle);
   const sid = session?.sessionId;
   const auto = session?.firstPrompt?.slice(0, 80) || '会话详情';
-  const display = (sid && customTitles[sid]) || auto;
+  const display = (sid && (customTitles[sid] || autoTitles[sid])) || auto;
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState('');
   const inputRef = useRef(null);
@@ -50,7 +51,7 @@ function EditableSessionTitle({ session }) {
 
   const start = () => {
     if (!sid) return;
-    setDraft((customTitles[sid] || session.firstPrompt || '').slice(0, 200));
+    setDraft((customTitles[sid] || autoTitles[sid] || session.firstPrompt || '').slice(0, 200));
     setEditing(true);
   };
   const save = () => { setCustomTitle(sid, draft); setEditing(false); };
@@ -1109,6 +1110,7 @@ function DeleteButton({ onConfirm }) {
 function SessionItem({ session, isSelected, onSelect, onFork, onArchive, onDelete, forking, running }) {
   const [expanded, setExpanded] = useState(false);
   const customTitle = useStore((s) => s.customTitles[session.sessionId]);
+  const autoTitle = useStore((s) => s.autoTitles[session.sessionId]);
   const setCustomTitle = useStore((s) => s.setCustomTitle);
   const [renaming, setRenaming] = useState(false);
   const [draft, setDraft] = useState('');
@@ -1119,7 +1121,7 @@ function SessionItem({ session, isSelected, onSelect, onFork, onArchive, onDelet
   const startRename = (e) => {
     e?.stopPropagation();
     if (isDraft) return;
-    setDraft((customTitle || session.firstPrompt || '').slice(0, 200));
+    setDraft((customTitle || autoTitle || session.firstPrompt || '').slice(0, 200));
     setRenaming(true);
   };
   const saveRename = () => { setCustomTitle(session.sessionId, draft); setRenaming(false); };
@@ -1165,7 +1167,7 @@ function SessionItem({ session, isSelected, onSelect, onFork, onArchive, onDelet
             <StatusDot running={running} lastActivity={session.lastActivity} className="mt-0.5" />
             <div className="min-w-0 flex-1">
               <div className="text-[13px] text-ink-soft line-clamp-2 font-body leading-snug pr-1">
-                {customTitle || session.firstPrompt || '(空会话)'}
+                {customTitle || autoTitle || session.firstPrompt || '(空会话)'}
               </div>
               {/* Bottom row leaves space on the right for the hover action bar. */}
               <div className="flex items-center gap-2 gap-y-1 flex-wrap mt-1.5 pr-20">
@@ -2875,6 +2877,24 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
       }
       // Notify panels (UsagePanel) to refresh their stats.
       window.dispatchEvent(new CustomEvent('cgui:chat-done'));
+
+      // 首轮后自动生成会话标题(B):一次性隔离 claude 调用,best-effort、不阻塞。
+      // 仅当会话已有真实 sessionId、且既无自定义标题也无已生成的自动标题时触发,
+      // 所以每个会话最多生成一次。失败/空标题静默回退到第一条消息。
+      try {
+        const titleSid = getLocalSession()?.sessionId;
+        const st = useStore.getState();
+        if (titleSid && !st.customTitles[titleSid] && !st.autoTitles[titleSid] && prompt) {
+          fetch('/api/chat/title', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ firstUser: prompt, firstAssistant: accumulatedText || '', cwd }),
+          })
+            .then((r) => r.json())
+            .then((d) => { if (d?.title) useStore.getState().setAutoTitle(titleSid, d.title); })
+            .catch(() => {});
+        }
+      } catch {}
 
       // After the chat fully finishes, drain the queue: pop the head and send
       // it. This runs once per chat — if more were queued, the next send's
