@@ -77,6 +77,29 @@ export function trimJsonlBeforeTool(raw, toolUseId) {
           obj.message = { ...obj.message, content: beforeBlocks };
           keptAssistantBlocks = beforeBlocks.length;
           keptLines.push(JSON.stringify(obj));
+          // 若 beforeBlocks 里仍有 tool_use(同一条 assistant 消息里、被裁工具之前的
+          // 其它工具),它们的 tool_result 在紧跟的 user 行里。必须保留这些配对的
+          // tool_result,否则留下孤儿 tool_use → resume 时 Anthropic API 400
+          // (每个 tool_use 必须有对应 tool_result)。只过滤掉被裁工具的 result。
+          const keptToolIds = new Set(
+            beforeBlocks.filter((b) => b?.type === 'tool_use' && b.id).map((b) => b.id)
+          );
+          if (keptToolIds.size > 0) {
+            for (let j = i + 1; j < lines.length; j++) {
+              if (!lines[j].trim()) continue;
+              let next;
+              try { next = JSON.parse(lines[j]); } catch { break; }
+              const nc = Array.isArray(next?.message?.content) ? next.message.content : null;
+              if (next.type === 'user' && nc && nc.some((b) => b?.type === 'tool_result')) {
+                const filtered = nc.filter((b) => b?.type !== 'tool_result' || keptToolIds.has(b.tool_use_id));
+                if (filtered.length > 0) {
+                  next.message = { ...next.message, content: filtered };
+                  keptLines.push(JSON.stringify(next));
+                }
+              }
+              break; // 只处理紧跟的那条
+            }
+          }
         }
         break;
       }

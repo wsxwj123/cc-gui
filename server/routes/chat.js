@@ -482,7 +482,12 @@ router.get('/chat/:pid/stream', (req, res) => {
     const text = chunk.toString().trim();
     if (text) safeWrite(`data: ${JSON.stringify({ type: 'stderr', text })}\n\n`);
   };
+  let streamFinished = false;
   const finish = (code) => {
+    // 幂等:result 事件(completeTurn)和进程 close(onProcClose)都会调到这里,
+    // 没有守卫会重复调度 setTimeout(activeProcesses.delete) → 多余 timer/闭包泄漏。
+    if (streamFinished) return;
+    streamFinished = true;
     if (buffer.trim()) {
       try { JSON.parse(buffer); safeWrite(`data: ${buffer}\n\n`); } catch {}
       buffer = '';
