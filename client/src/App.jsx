@@ -1938,6 +1938,10 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
   const [streamingToolCalls, setStreamingToolCalls] = useState([]);
   // Ordered blocks for in-order rendering (text → tool → text → tool → write).
   const [streamingBlocks, setStreamingBlocks] = useState([]);
+  // "重做此工具"进行中的 turn uuid——只控制转圈指示器的显示。截断由 turn 上的
+  // _retryTrimToolId 标记负责(回退状态需一直保持),指示器在重跑流式内容出现后清掉,
+  // 否则会一直转(用户报告:AI 回复完成后仍显示"正在重做")。
+  const [retryActiveUuid, setRetryActiveUuid] = useState(null);
   const activeProcRef = useRef(null);
   const abortRef = useRef(null);
   // pid 集合:被用户主动「停止」过的 chat 进程。停止后进程要等 close 才设 exitCode
@@ -2136,6 +2140,15 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
     });
     return () => cancelAnimationFrame(id);
   }, [messages, chatMessages, streamingText, streamingThinking, streamingToolCalls, autoScroll]);
+
+  // 重做工具的转圈指示器:一旦重跑的流式内容(文本/思考/工具)出现,就关掉指示器
+  // ——此时重跑已就地以流式气泡呈现,指示器再转就是多余且会"完成后仍在转"。
+  useEffect(() => {
+    if (!retryActiveUuid) return;
+    const hasContent = !!(streamingText || streamingThinking || streamingToolCalls.length > 0
+      || streamingBlocks.some((b) => (b?.content?.length > 0) || b?.toolCall));
+    if (hasContent) setRetryActiveUuid(null);
+  }, [retryActiveUuid, streamingText, streamingThinking, streamingToolCalls, streamingBlocks]);
 
   // Persist scroll position per session so refresh keeps the user where they
   // were (not at top, not at bottom — wherever they were reading).
@@ -3320,6 +3333,7 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
           return ci < 0 ? prev : [...prev.slice(0, ci), { ...prev[ci], _retryTrimToolId: toolCall.id }];
         });
       }
+      setRetryActiveUuid(turn.uuid);  // 转圈指示器开;重跑内容一出现就清(下方 effect)
     }
 
     const input = JSON.stringify(toolCall.input || {}, null, 2).slice(0, 4000);
@@ -3363,6 +3377,7 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
         }, 50);
       } catch (err) {
         alert('工具局部重做失败：' + err.message);
+        setRetryActiveUuid(null);  // 关指示器,避免失败后一直转
         // 乐观截断已改了显示;失败则刷新回真实状态,避免停在半截视图。
         try { await fetchMessagesForTab(sel.sessionId, projectHash, { silent: true }); } catch {}
       }
@@ -3543,14 +3558,14 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
               {messages.map((msg, i) => msg.type === 'compact'
                 ? <CompactDivider key={msg.uuid || i} />
                 : msg.type === 'turn'
-                ? <TurnBubble key={msg.uuid || i} turn={msg} onRetry={handleRetryTurn} onRetryTool={(toolCall) => handleRetryTool(msg, toolCall)} />
+                ? <TurnBubble key={msg.uuid || i} turn={msg} onRetry={handleRetryTurn} onRetryTool={(toolCall) => handleRetryTool(msg, toolCall)} retryActive={retryActiveUuid === msg.uuid} />
                 : <MessageBubble key={msg.uuid || i} message={{ ...msg, role: msg.type }}
                     onRollback={msg.type === 'user' ? handleRollback : undefined} />
               )}
               {chatMessages.map((msg, i) => msg.type === 'compact'
                 ? <CompactDivider key={msg.uuid || i} />
                 : msg.type === 'turn'
-                ? <TurnBubble key={msg.uuid || i} turn={msg} onRetry={handleRetryTurn} onRetryTool={(toolCall) => handleRetryTool(msg, toolCall)} />
+                ? <TurnBubble key={msg.uuid || i} turn={msg} onRetry={handleRetryTurn} onRetryTool={(toolCall) => handleRetryTool(msg, toolCall)} retryActive={retryActiveUuid === msg.uuid} />
                 : <MessageBubble key={msg.uuid || i} message={{ ...msg, role: msg.type }}
                     onRollback={msg.type === 'user' ? handleRollback : undefined} />
               )}

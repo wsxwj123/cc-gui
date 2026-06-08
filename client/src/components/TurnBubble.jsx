@@ -411,7 +411,7 @@ function UsageDisplay({ usage, model }) {
 // making the whole UI (provider & model menus included) feel laggy. `turn` comes
 // from the persisted `messages` array which is referentially stable while a NEW
 // turn streams into separate state, so memo lets the old turns skip re-render.
-function TurnBubbleInner({ turn, onRetry, onRetryTool }) {
+function TurnBubbleInner({ turn, onRetry, onRetryTool, retryActive }) {
   const [showThinking, setShowThinking] = useState(false);
 
   // Historical turns loaded from .jsonl may have these fields absent or as a
@@ -551,10 +551,10 @@ function TurnBubbleInner({ turn, onRetry, onRetryTool }) {
                   }
                 });
                 flushBucket('end');
-                if (showRetrying) {
+                if (showRetrying && retryActive) {
                   out.push(
                     <div key="retrying" className="flex items-center gap-2 text-[12px] text-accent font-body px-1 py-1.5">
-                      <RotateCcw size={12} className="animate-spin" />
+                      <Loader2 size={12} className="animate-spin" />
                       <span>正在重做此工具…</span>
                     </div>
                   );
