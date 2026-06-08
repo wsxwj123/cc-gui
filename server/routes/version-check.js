@@ -1,8 +1,9 @@
 import { Router } from 'express';
-import { readFileSync } from 'fs';
+import { readFileSync, writeFileSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
-import { execFile } from 'child_process';
+import { tmpdir } from 'os';
+import { execFile, spawn } from 'child_process';
 import { promisify } from 'util';
 
 const execFileP = promisify(execFile);
@@ -181,16 +182,30 @@ function installCmdFor() {
   return 'curl -fsSL https://claude.ai/install.sh | bash'; // mac/linux 官方一键安装
 }
 
-async function runShell(cmd, res, label) {
-  try {
-    // 用 login shell 跑,确保 nvm/brew/native 的 PATH 都在;Windows 用 cmd。
-    const { stdout, stderr } = process.platform === 'win32'
-      ? await execFileP('cmd', ['/c', cmd], { timeout: 8 * 60 * 1000 })
-      : await execFileP('bash', ['-lc', cmd], { timeout: 8 * 60 * 1000 });
-    const after = await getClaudeVersion();
-    res.json({ ok: true, output: (stdout || stderr || '').slice(-2000), version: after, command: cmd });
-  } catch (err) {
-    res.json({ ok: false, error: (err.stderr || err.message || `${label}失败`).slice(-2000), command: cmd });
+// 打开一个「可见终端」运行命令,而不是 headless execFile。原因:
+//  ① `claude update` / install.sh 是交互式自更新/安装器,无 TTY 时可能挂起或
+//     无反馈(用户报告"点了没反应")。
+//  ② 终端里跑能让官方安装器自己把 CLI 目录写进 shell profile 的 PATH。
+//  ③ 用户能直观看到进度 / 出错信息,无需在 GUI 里盲等。
+// 做法:写一个临时脚本,用 `open`(mac)/`start`(win)/终端模拟器(linux)启动。
+// fire-and-forget——终端是独立进程,server 不捕获结果,UI 引导用户完成后点"检查更新"。
+function launchInTerminal(cmd, title) {
+  const stamp = `cgui-cc-${process.pid}-${Math.round(process.hrtime()[1])}`;
+  if (process.platform === 'darwin') {
+    const file = join(tmpdir(), `${stamp}.command`);
+    writeFileSync(file, `#!/bin/bash\necho "▶ ${title}"\n${cmd}\nstatus=$?\necho\nif [ $status -eq 0 ]; then echo "✅ 完成,可关闭本窗口"; else echo "❌ 失败(退出码 $status)"; fi\n`, { mode: 0o755 });
+    spawn('open', [file], { detached: true, stdio: 'ignore' }).unref();
+  } else if (process.platform === 'win32') {
+    const file = join(tmpdir(), `${stamp}.bat`);
+    writeFileSync(file, `@echo off\r\necho ▶ ${title}\r\n${cmd}\r\necho.\r\necho ===== 完成,按任意键关闭 =====\r\npause >nul\r\n`);
+    // start '' <file> — 空标题占位,避免把文件路径当成窗口标题
+    spawn('cmd', ['/c', 'start', '', file], { detached: true, stdio: 'ignore', windowsHide: false }).unref();
+  } else {
+    const file = join(tmpdir(), `${stamp}.sh`);
+    writeFileSync(file, `#!/bin/bash\necho "▶ ${title}"\n${cmd}\necho\nread -p "完成,回车关闭…"\n`, { mode: 0o755 });
+    // 常见终端模拟器逐个尝试(best-effort)
+    const term = process.env.TERMINAL || 'x-terminal-emulator';
+    spawn(term, ['-e', `bash ${file}`], { detached: true, stdio: 'ignore' }).unref();
   }
 }
 
@@ -236,14 +251,27 @@ router.get('/claude-version-check', async (req, res) => {
  */
 router.post('/claude-update', async (req, res) => {
   const method = await detectInstallMethod();
-  await runShell(updateCmdFor(method), res, '更新');
+  const cmd = updateCmdFor(method);
+  try {
+    launchInTerminal(cmd, `更新 Claude Code (${method})`);
+    res.json({ ok: true, launched: true, command: cmd, platform: process.platform });
+  } catch (err) {
+    res.json({ ok: false, error: err.message || '启动终端失败', command: cmd });
+  }
 });
 
 /**
  * POST /api/claude-install — 未安装时一键安装(mac/linux: 官方 install.sh;win: npm)。
+ * 在可见终端运行,让官方安装器自行把 CLI 目录写入系统 PATH。
  */
 router.post('/claude-install', async (req, res) => {
-  await runShell(installCmdFor(), res, '安装');
+  const cmd = installCmdFor();
+  try {
+    launchInTerminal(cmd, '安装 Claude Code');
+    res.json({ ok: true, launched: true, command: cmd, platform: process.platform });
+  } catch (err) {
+    res.json({ ok: false, error: err.message || '启动终端失败', command: cmd });
+  }
 });
 
 export default router;

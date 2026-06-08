@@ -555,12 +555,11 @@ function CcUpdater() {
 
   const doUpdate = async () => {
     const cmd = state.updateCommand || 'claude update';
-    if (!window.confirm(`将运行【${cmd}】更新 Claude Code 到 v${state.latestVersion}（检测到安装方式：${state.method || '未知'}）。\n这会修改全局 CLI,期间请勿关闭。确定继续?`)) return;
+    if (!window.confirm(`将打开终端运行【${cmd}】更新 Claude Code 到 v${state.latestVersion}（安装方式：${state.method || '未知'}）。\n请在弹出的终端里查看进度,完成后回来点"检查更新"。确定继续?`)) return;
     setUpdating(true); setResult(null);
     try {
       const d = await (await fetch('/api/claude-update', { method: 'POST' })).json();
       setResult(d);
-      if (d.ok) setState((s) => ({ ...s, status: 'ok', currentVersion: d.version || s.currentVersion, hasUpdate: false }));
     } catch (e) {
       setResult({ ok: false, error: e.message || '请求失败' });
     }
@@ -569,12 +568,11 @@ function CcUpdater() {
 
   const doInstall = async () => {
     const cmd = state.installCommand || 'curl -fsSL https://claude.ai/install.sh | bash';
-    if (!window.confirm(`将运行【${cmd}】安装 Claude Code。\n确定继续?`)) return;
+    if (!window.confirm(`将打开终端运行【${cmd}】安装 Claude Code。\n请在弹出的终端里查看进度,完成后回来点"检查更新"。确定继续?`)) return;
     setUpdating(true); setResult(null);
     try {
       const d = await (await fetch('/api/claude-install', { method: 'POST' })).json();
       setResult(d);
-      if (d.ok) setState({ status: 'idle', installed: true, currentVersion: d.version });
     } catch (e) {
       setResult({ ok: false, error: e.message || '请求失败' });
     }
@@ -632,8 +630,10 @@ function CcUpdater() {
       {state.status === 'err' && <div className="text-[12px] text-error">{state.error}</div>}
       {result && (
         result.ok
-          ? <div className="text-[12px] text-emerald-700 bg-emerald-50 border border-emerald-200 rounded p-2">✓ 已更新到 v{result.version}</div>
-          : <div className="text-[12px] text-error">更新失败:{result.error}</div>
+          ? <div className="text-[12px] text-emerald-700 bg-emerald-50 border border-emerald-200 rounded p-2">
+              ✓ 已在终端启动 <code className="font-mono">{result.command}</code>。完成后点上方"检查更新"确认新版本。
+            </div>
+          : <div className="text-[12px] text-error">启动失败:{result.error}</div>
       )}
     </div>
   );

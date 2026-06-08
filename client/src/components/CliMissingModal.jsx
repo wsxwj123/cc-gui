@@ -31,6 +31,7 @@ export function CliMissingModal({ onRecheck, onDismiss }) {
   const [rechecking, setRechecking] = useState(false);
   const [installing, setInstalling] = useState(false);
   const [installErr, setInstallErr] = useState('');
+  const [launched, setLaunched] = useState(false);
   const platform = detectPlatform();
 
   const handleRecheck = async () => {
@@ -38,18 +39,19 @@ export function CliMissingModal({ onRecheck, onDismiss }) {
     try { await onRecheck(); } finally { setRechecking(false); }
   };
 
-  // 一键安装:POST /api/claude-install → 成功后自动重新检测。失败把 stderr
-  // 显示出来(多半是没开代理 → 拉不到 install.sh / npm 包,提示用户开代理重试)。
+  // 一键安装:POST /api/claude-install → 服务端打开一个终端运行安装命令(可见进度 +
+  // 让安装器写 PATH)。终端是独立异步进程,这里只负责"启动",装完由用户点"重新检测"。
   const handleInstall = async () => {
     setInstalling(true);
     setInstallErr('');
+    setLaunched(false);
     try {
       const r = await fetch('/api/claude-install', { method: 'POST' });
       const d = await r.json();
-      if (d.ok && d.version) {
-        await onRecheck();              // 装好 → 校验 → 模态自行消失
+      if (d.ok) {
+        setLaunched(true);              // 提示用户去终端看进度,完成后点重新检测
       } else {
-        setInstallErr(d.error || '安装未完成,请确认已开启代理后重试,或用下方命令手动安装。');
+        setInstallErr(d.error || '启动终端失败,请确认已开启代理后重试,或用下方命令手动安装。');
       }
     } catch (e) {
       setInstallErr(e.message || '安装请求失败');
@@ -98,8 +100,13 @@ export function CliMissingModal({ onRecheck, onDismiss }) {
               className="w-full flex items-center justify-center gap-1.5 px-3 py-2 text-[13px] text-white bg-accent hover:bg-accent/90 rounded-md transition-colors disabled:opacity-50"
             >
               <Download size={14} className={installing ? 'animate-pulse' : ''} />
-              {installing ? '安装中…(可能需要 1-2 分钟)' : '一键安装 Claude Code'}
+              {installing ? '启动安装中…' : '一键安装 Claude Code'}
             </button>
+            {launched && (
+              <div className="text-[11px] text-emerald-700 bg-emerald-50 border border-emerald-200 rounded px-2 py-1.5">
+                ✅ 已打开终端运行安装,请在终端里查看进度。装完回来点下方"我装好了,重新检测"。
+              </div>
+            )}
             {installErr && (
               <div className="text-[11px] text-error font-mono whitespace-pre-wrap break-all max-h-24 overflow-y-auto">
                 {installErr}
