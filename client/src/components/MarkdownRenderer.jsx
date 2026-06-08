@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { Copy, Check } from 'lucide-react';
@@ -189,13 +189,50 @@ const markdownComponents = {
   ),
 };
 
-export function MarkdownRenderer({ content }) {
+// 把 markdown 图片 src 解析成 webview 能加载的地址。相对/绝对文件系统路径
+// 改写到 raw 文件端点(相对 md 文件自身目录解析);http(s)/data/blob 原样保留。
+// 没有 basePath(如聊天气泡)则不改写,保持原行为。
+function resolveImageSrc(src, basePath) {
+  if (!src) return src;
+  const s = String(src).trim();
+  if (/^(https?:|data:|blob:)/i.test(s)) return s;
+  if (!basePath) return s;
+  const baseDir = String(basePath).replace(/\\/g, '/').replace(/\/[^/]*$/, '');
+  const rel = s.replace(/\\/g, '/');
+  const isAbs = rel.startsWith('/') || /^[A-Za-z]:\//.test(rel);
+  const joined = isAbs ? rel : `${baseDir}/${rel}`;
+  // 折叠 ./ 与 ../,保留路径前缀(POSIX 的 `/` 或 Windows 的 `C:/`)
+  const m = joined.match(/^([A-Za-z]:\/|\/)/);
+  const prefix = m ? m[0] : '/';
+  const out = [];
+  for (const seg of joined.slice(prefix.length).split('/')) {
+    if (seg === '' || seg === '.') continue;
+    if (seg === '..') out.pop();
+    else out.push(seg);
+  }
+  return `/api/files/read?path=${encodeURIComponent(prefix + out.join('/'))}&raw=1`;
+}
+
+export function MarkdownRenderer({ content, basePath }) {
+  // basePath 变化时才重建 components,避免每次渲染都生成新 img 组件。
+  const components = useMemo(() => ({
+    ...markdownComponents,
+    img: ({ src, alt, title }) => (
+      <img
+        src={resolveImageSrc(src, basePath)}
+        alt={alt || ''}
+        title={title}
+        loading="lazy"
+        className="max-w-full h-auto my-3 rounded border border-canvas-deep"
+      />
+    ),
+  }), [basePath]);
   return (
     <div className="markdown-content text-[15px] font-reading leading-relaxed">
       {/* remarkGfm: GitHub-flavored markdown — tables, strikethrough, task
           lists, autolinks. Without it Claude's `| col | col |` tables come
           out as a single run-on text line (which is what was happening). */}
-      <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
+      <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>
         {content}
       </ReactMarkdown>
     </div>

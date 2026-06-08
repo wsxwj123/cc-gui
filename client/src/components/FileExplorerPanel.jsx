@@ -397,7 +397,7 @@ function PreviewBody({ preview }) {
           </div>
         ) : isMarkdown ? (
           <div className="px-3 py-2">
-            <MarkdownRenderer content={preview.content || ''} />
+            <MarkdownRenderer content={preview.content || ''} basePath={preview.path} />
           </div>
         ) : isHtml ? (
           <div className="px-3 py-2">
