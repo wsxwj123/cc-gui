@@ -153,6 +153,14 @@ router.post('/chat', async (req, res) => {
   let permissionGateEnabled = false;
   if (cliMode !== 'bypassPermissions') {
     const hookScript = pathResolve(__dirname, '..', 'hooks', 'permission-bridge.js');
+    // Hook 命令:用 server 自身的 node 绝对路径 + 正斜杠构造,避免两个 Windows 坑:
+    //  ① 裸 `node` 依赖 PATH — claude 子进程(native claude.exe)的 PATH 里未必有
+    //     node,hook 起不来 → 工具调用报错(用户报告的 Windows exit code 49)。
+    //  ② `JSON.stringify(winPath)` 会把反斜杠转义成 `\\`,叠加 --settings 外层 JSON
+    //     再转义 → 传到 node 的路径含双反斜杠。node 在 Windows 也接受正斜杠,改用
+    //     正斜杠 + 简单引号最稳。Mac 上 execPath 无反斜杠,正斜杠替换是 no-op。
+    const nodeBin = (process.execPath || 'node').replace(/\\/g, '/');
+    const hookCommand = `"${nodeBin}" "${hookScript.replace(/\\/g, '/')}"`;
     // Merge user's existing PreToolUse hooks so any external observers the user
     // configured keep firing alongside our permission bridge. `--settings`
     // OVERRIDES same-event arrays from user scope (not union), so without this
@@ -171,7 +179,7 @@ router.post('/chat', async (req, res) => {
     const inlineSettings = {
       hooks: {
         PreToolUse: [
-          { hooks: [{ type: 'command', command: `node ${JSON.stringify(hookScript)}` }] },
+          { hooks: [{ type: 'command', command: hookCommand }] },
           ...userPreToolUse,
         ],
       },
