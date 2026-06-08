@@ -245,13 +245,16 @@ router.post('/sessions/:sessionId/trim', async (req, res) => {
     // the next send spawns a fresh session.
     const keptLines = lines.slice(0, cutIdx);
     if (!hasRealConversationLine(keptLines)) {
-      // Delete the jsonl outright — client returns sessionReset:true and
-      // should drop sessionId so next /api/chat omits --resume.
-      await deleteSessionFile(file);
+      // 不再物理删 jsonl。回退一条消息却把整个会话文件删掉(且 .bak 也常丢)是
+      // "回退后所有消息消失、会话变僵尸"的根因:删后前端若没干净转 draft,下次仍
+      // 拿旧 sessionId --resume → CLI 报 "No conversation found"。改为保留裁剪后
+      // 的内容(可能只剩 meta),前端收到 sessionReset 转 draft、下次发消息新建会话。
+      // 数据不丢、可在文件树找回,旧会话仍可手动删。
+      await writeJsonlAtomic(file, keptLines.join('\n'));
       return res.json({
         trimmed: true,
         sessionReset: true,
-        reason: 'no user/assistant lines would remain — session deleted, next send creates fresh',
+        reason: 'no user/assistant lines would remain — kept meta, client starts fresh',
         removedFromLine: cutIdx,
         totalLines: lines.length,
       });

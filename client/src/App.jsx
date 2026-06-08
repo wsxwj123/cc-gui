@@ -1077,24 +1077,21 @@ function ProjectList() {
 // 二次确认删除按钮:第一次点变红显示"确认",3 秒内再点真删,3 秒后自动复位。
 // 替代 window.confirm(Tauri WebView 有时禁用 native dialog,导致删除按钮"无效")。
 function DeleteButton({ onConfirm }) {
-  const [armed, setArmed] = useState(false);
-  useEffect(() => {
-    if (!armed) return;
-    const t = setTimeout(() => setArmed(false), 3000);
-    return () => clearTimeout(t);
-  }, [armed]);
+  // 改用 confirmDialog 弹窗替代原 inline 二次点击:二次确认按钮处在会话项的
+  // group-hover opacity 区,armed 后鼠标一移开按钮就消失、点不到第二次,表现为
+  // "删除没反应"。弹窗挂在 body、不受 hover/opacity 影响,一次点击即可确认。
   return (
     <button
-      onClick={(e) => {
+      onClick={async (e) => {
         e.stopPropagation();
-        if (armed) { onConfirm(); setArmed(false); }
-        else setArmed(true);
+        if (await confirmDialog('删除这个会话的本地历史记录？此操作不可撤销。', { danger: true, confirmText: '删除' })) {
+          onConfirm();
+        }
       }}
-      className={`p-1 rounded flex items-center gap-0.5 ${armed ? 'bg-red-100' : 'hover:bg-red-50'}`}
-      title={armed ? '再点一次确认删除(3 秒后自动取消)' : '删除本地会话历史(需二次确认)'}
+      className="p-1 rounded hover:bg-red-50"
+      title="删除本地会话历史"
     >
-      <Trash2 size={12} className={armed ? 'text-red-700' : 'text-ink-faint hover:text-red-600'} />
-      {armed && <span className="text-[9px] text-red-700 font-bold">确认</span>}
+      <Trash2 size={12} className="text-ink-faint hover:text-red-600" />
     </button>
   );
 }
@@ -2686,6 +2683,21 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
                 break;
               }
             }
+            // 会话 jsonl 已失效/被删(回退清空、外部删除等)→ CLI 报 "No conversation
+            // found"。自动转 draft + 重发本条:下次不带 --resume = 在同项目新建会话,
+            // 用户不必手动处理僵尸会话。freshRetry 守卫防无限循环。
+            if (/No conversation found/i.test(msg) && !opts.freshRetry && prompt) {
+              const _s = getLocalSession();
+              if (_s?.sessionId) {
+                const draftKey = `draft-${_s.projectHash || 'none'}`;
+                useStore.getState().migrateSessionKey?.(_s.sessionId, draftKey);
+                setSelectedSession({ ..._s, sessionId: null, draft: true });
+              }
+              setProviderSwitchNotice({ text: '原会话历史已失效，已自动新建会话并重发本条。' });
+              setTimeout(() => handleSendRef.current?.(prompt, { freshRetry: true }), 80);
+              sawError = true;
+              break;
+            }
             setChatMessages((prev) => [...prev, {
               uuid: 'chat-error-' + Date.now(),
               type: 'turn',
@@ -3423,7 +3435,7 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
                 : <MessageBubble key={msg.uuid || i} message={{ ...msg, role: msg.type }}
                     onRollback={msg.type === 'user' ? handleRollback : undefined} />
               )}
-              {isStreaming && (streamingText || streamingThinking || streamingToolCalls.length > 0 || streamingBlocks.length > 0) && (
+              {isStreaming && (streamingText || streamingThinking || streamingToolCalls.length > 0 || streamingBlocks.some((b) => (b?.content?.length > 0) || b?.toolCall)) && (
                 <>
                   <StreamingStatusLine
                     thinking={streamingThinking}
@@ -3440,7 +3452,11 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
                   }} />
                 </>
               )}
-              {isStreaming && !streamingText && !streamingThinking && streamingToolCalls.length === 0 && streamingBlocks.length === 0 && (
+              {/* Connecting 占位:仅在「没有任何可见内容」时显示(空占位 block 不算)。
+                  之前误用 streamingBlocks.length===0,而 content_block_start 一开始就
+                  push 空 block→占位符消失但内容又没来→空白无动画(回归)。改用 .some
+                  判断真正有内容的 block,和上面的回复气泡严格互斥,不再跳位也不再空白。*/}
+              {isStreaming && !streamingText && !streamingThinking && streamingToolCalls.length === 0 && !streamingBlocks.some((b) => (b?.content?.length > 0) || b?.toolCall) && (
                 <div className="px-6 py-3 animate-fade-in">
                   <div className="max-w-[var(--content-max)] mx-auto flex items-center gap-2.5 text-[14px] font-body" style={{ color: '#D97757' }}>
                     <CliSpinner size={22} />
