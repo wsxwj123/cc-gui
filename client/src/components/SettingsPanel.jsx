@@ -556,7 +556,7 @@ function CcUpdater() {
 
   const doUpdate = async () => {
     const cmd = state.updateCommand || 'claude upgrade';
-    if (!window.confirm(`将打开终端运行【${cmd}】更新 Claude Code 到 v${state.latestVersion}（安装方式：${state.method || '未知'}）。\n请在弹出的终端里查看进度,完成后回来点"检查更新"。确定继续?`)) return;
+    if (!(await confirmDialog(`将打开终端运行【${cmd}】更新 Claude Code 到 v${state.latestVersion}（安装方式：${state.method || '未知'}）。\n请在弹出的终端里查看进度,完成后回来点"检查更新"。确定继续?`))) return;
     setUpdating(true); setResult(null);
     try {
       const d = await (await fetch('/api/claude-update', { method: 'POST' })).json();
@@ -569,7 +569,7 @@ function CcUpdater() {
 
   const doInstall = async () => {
     const cmd = state.installCommand || 'curl -fsSL https://claude.ai/install.sh | bash';
-    if (!window.confirm(`将打开终端运行【${cmd}】安装 Claude Code。\n请在弹出的终端里查看进度,完成后回来点"检查更新"。确定继续?`)) return;
+    if (!(await confirmDialog(`将打开终端运行【${cmd}】安装 Claude Code。\n请在弹出的终端里查看进度,完成后回来点"检查更新"。确定继续?`))) return;
     setUpdating(true); setResult(null);
     try {
       const d = await (await fetch('/api/claude-install', { method: 'POST' })).json();

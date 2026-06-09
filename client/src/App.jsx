@@ -362,6 +362,8 @@ function nativeContextWindow(model) {
   if (/\[1m\]/i.test(id)) return 1_000_000;
   const byName = id.match(/(\d+)k(?![a-z0-9])/);     // 如 moonshot-v1-128k
   if (byName) return parseInt(byName[1], 10) * 1000;
+  // GPT-5.x:mini / nano 是 400K,5.4/5.5/pro 是 ~1.05M(查 OpenAI 官方文档 2026-06)。
+  if (/gpt-5.*(mini|nano)/.test(id)) return 400_000;
   if (/gemini|gpt-5|deepseek-v4|deepseek-chat|deepseek-reasoner|mimo|minimax|grok-4/.test(id)) return 1_000_000;
   if (/kimi/.test(id)) return 262_144;               // Kimi K2.6 原生 256K
   return 200_000;
@@ -865,7 +867,7 @@ function ProjectList() {
       if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
       // Folder doesn't exist → ask whether to create it. Decline = close dialog.
       if (data.needsCreate) {
-        const ok = window.confirm(`文件夹不存在：\n${data.addedPath}\n\n是否新建该文件夹并作为项目？`);
+        const ok = await confirmDialog(`文件夹不存在：\n${data.addedPath}\n\n是否新建该文件夹并作为项目？`);
         if (!ok) { setAddDialogOpen(false); setAddPathInput(''); return; }
         r = await fetch('/api/settings', {
           method: 'PUT',
@@ -3759,7 +3761,7 @@ function ProviderSwitcher() {
     });
   };
   const removeCustom = async (id, name) => {
-    if (!window.confirm(`删除自定义 Provider「${name}」?`)) return;
+    if (!(await confirmDialog(`删除自定义 Provider「${name}」?`, { danger: true, confirmText: '删除' }))) return;
     // If this provider is open in the edit form, close it first — otherwise the
     // form lingers on a now-deleted target ("更新" would 404).
     setEditingProvider((cur) => (cur?.id === id ? null : cur));
@@ -4685,7 +4687,7 @@ function MobileProviderPage() {
     setSwitching(false);
   };
   const removeCustom = async (id, name) => {
-    if (!window.confirm(`删除自定义 Provider「${name}」?`)) return;
+    if (!(await confirmDialog(`删除自定义 Provider「${name}」?`, { danger: true, confirmText: '删除' }))) return;
     // If this provider is open in the edit form, close it first — otherwise the
     // form lingers on a now-deleted target ("更新" would 404).
     setEditingProvider((cur) => (cur?.id === id ? null : cur));
