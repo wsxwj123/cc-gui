@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { readdir, stat, readFile, writeFile, rename, open } from 'fs/promises';
+import { readdir, stat, readFile, writeFile, rename, open, mkdir } from 'fs/promises';
 import { join } from 'path';
 import { homedir } from 'os';
 
@@ -19,7 +19,11 @@ import {
   getSessionMessages,
   getSessionMeta,
   getActiveSessions,
+  attachmentTextHash,
 } from '../services/session-reader.js';
+
+// L4: 附件元数据 sidecar — 写入位置与 session-reader 一致。
+const ATTACHMENTS_DIR = join(homedir(), '.claude-gui', 'attachments');
 
 const router = Router();
 
@@ -222,6 +226,32 @@ router.get('/recent-session', async (req, res) => {
  *
  * Writes a backup copy at `<sid>.jsonl.bak` before rewriting (best-effort).
  */
+// L4: POST /sessions/:sessionId/attachments { text, attachments, displayText }
+// 把附件卡片元数据写入 sidecar(按 textHash 索引,session-reader 重读消息时 merge)。
+router.post('/sessions/:sessionId/attachments', async (req, res) => {
+  try {
+    const sid = req.params.sessionId;
+    if (!safeId(sid)) return res.status(400).json({ error: 'bad sessionId' });
+    const { text, attachments, displayText } = req.body || {};
+    if (typeof text !== 'string' || !Array.isArray(attachments)) {
+      return res.status(400).json({ error: 'text + attachments[] required' });
+    }
+    await mkdir(ATTACHMENTS_DIR, { recursive: true });
+    const p = join(ATTACHMENTS_DIR, `${sid}.json`);
+    let cur = {};
+    try { cur = JSON.parse(await readFile(p, 'utf-8')) || {}; } catch {}
+    const key = attachmentTextHash(text);
+    cur[key] = {
+      attachments: attachments.map((a) => ({
+        kind: a.kind, name: a.name, path: a.path, preview: a.preview, bytes: a.bytes,
+      })),
+      displayText: typeof displayText === 'string' ? displayText : '',
+    };
+    await writeFile(p, JSON.stringify(cur, null, 2));
+    res.json({ ok: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 router.post('/sessions/:sessionId/trim', async (req, res) => {
   try {
     const { projectHash, uuid, fromTimestamp } = req.body || {};

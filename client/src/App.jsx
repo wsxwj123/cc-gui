@@ -2013,6 +2013,8 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
   // (handleSend 定义早于 handleRollback,且需避免闭包读到旧值)。
   const [pendingEditRollback, setPendingEditRollbackState] = useState(null);
   const pendingEditRef = useRef(null);
+  // L4: 当 handleSend 时还是 draft(没真 sessionId),先把待写 sidecar 暂存,init 拿到 sid 后落盘。
+  const pendingAttachmentRef = useRef(null);
   const setPendingEditRollback = useCallback((v) => { pendingEditRef.current = v; setPendingEditRollbackState(v); }, []);
   const handleRollbackRef = useRef(null);
   const activeProcRef = useRef(null);
@@ -2357,6 +2359,20 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
       attachments: meta?.attachments,
       displayText: meta?.displayText,
     }]);
+    // L4: 持久化 attachments 到 sidecar (按 textHash 索引)。已有真 sid 立即写;
+    // draft 状态暂存到 ref,init 事件拿到 sid 后由那里 flush。
+    if (meta?.attachments?.length > 0) {
+      const payload = { text: prompt, attachments: meta.attachments, displayText: meta.displayText || '' };
+      const sid = selectedSession?.sessionId;
+      if (sid) {
+        fetch(`/api/sessions/${sid}/attachments`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        }).catch(() => {});
+      } else {
+        pendingAttachmentRef.current = payload;
+      }
+    }
 
     // Fire-and-forget git checkpoint. Failures (not a git repo etc.) are
     // silent — no checkpointSha just means the rollback menu's "files only"
@@ -2599,6 +2615,15 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
                 draft: false,
                 sessionId: event.session_id,
               });
+              // L4: draft 期间暂存的 attachments 元数据现在能写到正确 sessionId 的 sidecar
+              if (pendingAttachmentRef.current) {
+                const payload = pendingAttachmentRef.current;
+                pendingAttachmentRef.current = null;
+                fetch(`/api/sessions/${event.session_id}/attachments`, {
+                  method: 'POST', headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify(payload),
+                }).catch(() => {});
+              }
               const hash = sel.projectHash;
               // Retry triple — jsonl write timing varies. First attempt may
               // hit the brief window before the CLI flushes; later ones catch

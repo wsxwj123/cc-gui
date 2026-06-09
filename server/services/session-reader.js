@@ -2,7 +2,25 @@ import { readdir, stat, readFile } from 'fs/promises';
 import { existsSync } from 'fs';
 import { join, basename } from 'path';
 import { homedir } from 'os';
+import { createHash } from 'crypto';
 import { parseJsonl, readJsonlEdges } from '../utils/jsonl-parser.js';
+
+// L4: 附件元数据 sidecar。cc CLI 的 jsonl 由 CLI 写,GUI 无法注入 attachments 字段,
+// 改用旁路文件按 textHash 索引,session-reader 读历史消息时 merge 回来。
+const ATTACHMENTS_DIR = join(homedir(), '.claude-gui', 'attachments');
+function attachmentsSidecarPath(sessionId) {
+  return join(ATTACHMENTS_DIR, `${sessionId}.json`);
+}
+export function attachmentTextHash(text) {
+  return createHash('sha1').update(String(text || '')).digest('hex').slice(0, 16);
+}
+async function readAttachmentsSidecar(sessionId) {
+  try {
+    const buf = await readFile(attachmentsSidecarPath(sessionId), 'utf-8');
+    const d = JSON.parse(buf);
+    return (d && typeof d === 'object' && !Array.isArray(d)) ? d : {};
+  } catch { return {}; }
+}
 
 const HOME = homedir();
 
@@ -359,6 +377,8 @@ function isLocalCommandEcho(text) {
 export async function getSessionMessages(sessionId, projectHash) {
   const filePath = join(PROJECTS_DIR, projectHash, `${sessionId}.jsonl`);
   const records = await parseJsonl(filePath);
+  // L4: 加载附件 sidecar,在 user 消息 push 时按 textHash 注入 attachments/displayText
+  const attachmentsByHash = await readAttachmentsSidecar(sessionId);
 
   // Collect all tool results first, keyed by tool_use_id
   const toolResultMap = new Map();
@@ -410,6 +430,7 @@ export async function getSessionMessages(sessionId, projectHash) {
         if (text && !isLocalCommandEcho(text)) {
           // This is a real user prompt — flush previous turn and start new user message
           flushTurn();
+          const meta = attachmentsByHash[attachmentTextHash(text)];
           messages.push({
             type: 'user',
             uuid: record.uuid,
@@ -417,6 +438,8 @@ export async function getSessionMessages(sessionId, projectHash) {
             timestamp: record.timestamp,
             sessionId: record.sessionId,
             permissionMode: record.permissionMode,
+            ...(meta?.attachments ? { attachments: meta.attachments } : {}),
+            ...(meta?.displayText !== undefined ? { displayText: meta.displayText } : {}),
           });
         }
         // tool_result-only messages are silently merged via toolResultMap
