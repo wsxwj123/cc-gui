@@ -363,22 +363,25 @@ export const useStore = create((set, get) => ({
   // this the pins orphan under the draft key, so the model the user picked for a
   // brand-new chat silently reverts to the global default once they navigate away
   // and back (the remount re-seeds currentModel from settings.json).
-  migrateSessionKey: (fromKey, toKey) => {
+  // force=true:目标 key 已有值也覆盖。回滚首条消息(真 sid → draft)时,当前会话的
+  // 显式模型/模式/力度选择必须赢过 draft-<项目> 里上一次草稿的残留值,否则迁移被
+  // `toKey==null` 守卫跳过 → 回滚后恢复成残留/默认模型(#5)。
+  migrateSessionKey: (fromKey, toKey, force = false) => {
     if (!fromKey || !toKey || fromKey === toKey) return;
     const patch = {};
     const mbs = get().modelBySession;
-    if (mbs[fromKey] != null && mbs[toKey] == null) {
+    if (mbs[fromKey] != null && (force || mbs[toKey] == null)) {
       const m = { ...mbs, [toKey]: mbs[fromKey] }; delete m[fromKey];
       writeLs('cgui-model-by-session', m); patch.modelBySession = m;
     }
     const pms = get().permissionModeBySession;
-    if (pms[fromKey] != null && pms[toKey] == null) {
+    if (pms[fromKey] != null && (force || pms[toKey] == null)) {
       const p = { ...pms, [toKey]: pms[fromKey] }; delete p[fromKey];
       writeLs('cgui-perm-mode-by-session', p); patch.permissionModeBySession = p;
     }
     // effort 也按会话隔离,draft→真 sessionId 时一并迁移,否则草稿里设的力度会丢。
     const ebs = get().effortBySession;
-    if (ebs[fromKey] != null && ebs[toKey] == null) {
+    if (ebs[fromKey] != null && (force || ebs[toKey] == null)) {
       const e2 = { ...ebs, [toKey]: ebs[fromKey] }; delete e2[fromKey];
       writeLs('cgui-effort-by-session', e2); patch.effortBySession = e2;
     }

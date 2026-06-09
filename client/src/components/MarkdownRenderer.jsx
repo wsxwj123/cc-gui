@@ -3,6 +3,7 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { Copy, Check } from 'lucide-react';
 import { copyText } from '../utils/clipboard.js';
+import { openExternalUrl } from '../utils/openExternal.js';
 import { ArtifactPreview, isPreviewable } from './ArtifactPreview.jsx';
 
 function CopyButton({ text }) {
@@ -173,6 +174,10 @@ const markdownComponents = {
         href={safe ? href : undefined}
         target="_blank"
         rel="noopener noreferrer"
+        // Tauri 壳(WKWebView/WebView2)拦截 target=_blank 跳转 → 点击无反应(#10)。
+        // 改为走 openExternalUrl(经 /api/open-url 用 OS shell 开默认浏览器);浏览器
+        // 模式下该 helper 自动 fallback 到 window.open,两端都能正常打开。
+        onClick={safe ? (e) => { e.preventDefault(); openExternalUrl(href.trim()); } : undefined}
         className="text-accent hover:text-accent-hover underline underline-offset-2 decoration-accent-muted hover:decoration-accent transition-colors"
       >
         {children}

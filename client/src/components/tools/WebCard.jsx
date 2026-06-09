@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { Globe, ChevronDown, ChevronRight, Loader2, ExternalLink } from 'lucide-react';
 import { MarkdownRenderer } from '../MarkdownRenderer.jsx';
+import { openExternalUrl } from '../../utils/openExternal.js';
 
 // WebSearch input: { query, allowed_domains?, blocked_domains? }
 // WebFetch input: { url, prompt }
@@ -32,7 +33,7 @@ export function WebCard({ toolCall }) {
           // HTML (browsers hoist it unpredictably). Open via window.open instead.
           <span
             role="link"
-            onClick={(e) => { e.stopPropagation(); window.open(queryOrUrl, '_blank', 'noopener,noreferrer'); }}
+            onClick={(e) => { e.stopPropagation(); openExternalUrl(queryOrUrl); }}
             className="text-sky-600 hover:text-sky-800 shrink-0 cursor-pointer"
             title="在浏览器打开"
           >

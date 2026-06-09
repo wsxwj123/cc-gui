@@ -115,16 +115,18 @@ export function ProviderAvatar({ model, size = 28, className = '', thinking = fa
 }
 
 function getModelStyle(model) {
-  if (!model) return { bg: '#F3F4F6', fg: '#6B7280', border: '#E5E7EB', label: '?', provider: 'system' };
+  if (!model) return { bg: '#F3F4F6', fg: '#6B7280', border: '#E5E7EB', label: '?', provider: 'system', full: '' };
   const lower = model.toLowerCase();
+  // 显示具体模型 id 而非 Opus/Sonnet/MiMo 缩写(#7):去掉 [1m] 后缀与结尾 8 位日期,
+  // 其余原样。颜色仍按 provider 关键字匹配。
+  const clean = (model.replace(/\[.*?\]/g, '').replace(/-\d{8}$/, '').trim()) || model;
+  const label = clean.length > 24 ? clean.slice(0, 22) + '…' : clean;
   for (const [key, style] of Object.entries(MODEL_STYLES)) {
-    if (lower.includes(key)) return style;
+    if (lower.includes(key)) return { ...style, label, full: clean };
   }
-  // Clean up version suffixes for display
-  const clean = model.replace(/\[.*\]/, '').replace(/-\d{8}$/, '');
   return {
     bg: '#F3F4F6', fg: '#6B7280', border: '#E5E7EB', provider: 'system',
-    label: clean.length > 15 ? clean.slice(0, 13) + '...' : clean
+    label, full: clean,
   };
 }
 
@@ -141,8 +143,9 @@ export function ModelBadge({ model, compact = false }) {
   if (compact) {
     return (
       <span
-        className="inline-flex items-center px-1.5 py-px text-[10px] font-medium rounded font-body"
+        className="inline-flex items-center px-1.5 py-px text-[10px] font-medium rounded font-body max-w-[200px] truncate"
         style={{ background: style.bg, color: style.fg, border: `1px solid ${style.border}` }}
+        title={style.full || style.label}
       >
         {style.label}
       </span>
@@ -151,11 +154,12 @@ export function ModelBadge({ model, compact = false }) {
 
   return (
     <span
-      className="inline-flex items-center gap-1 px-2 py-0.5 text-[11px] font-medium rounded-md font-body"
+      className="inline-flex items-center gap-1 px-2 py-0.5 text-[11px] font-medium rounded-md font-body max-w-[240px]"
       style={{ background: style.bg, color: style.fg, border: `1px solid ${style.border}` }}
+      title={style.full || style.label}
     >
-      <span className="w-1.5 h-1.5 rounded-full" style={{ background: style.fg, opacity: 0.6 }} />
-      {style.label}
+      <span className="w-1.5 h-1.5 rounded-full shrink-0" style={{ background: style.fg, opacity: 0.6 }} />
+      <span className="truncate">{style.label}</span>
     </span>
   );
 }

@@ -3316,7 +3316,9 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
           // → 用户切到"接受编辑"后回滚到首条 → 模式被重置为"默认"(Bug #8)。
           // 把 pin 迁移到 draft key,保留用户的会话级设置。
           const draftKey = `draft-${sel.projectHash || 'none'}`;
-          useStore.getState().migrateSessionKey(sel.sessionId, draftKey);
+          // force=true:当前会话的模型/模式选择必须覆盖 draft 残留,否则回滚首条后
+          // 模型被重置(#5)。
+          useStore.getState().migrateSessionKey(sel.sessionId, draftKey, true);
           setSelectedSession({
             ...sel,
             sessionId: null,

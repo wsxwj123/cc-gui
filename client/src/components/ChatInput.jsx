@@ -279,15 +279,18 @@ export function ChatInput({ onSend, onStop, onAccelerate, disabled, isStreaming,
   const handlePaste = (e) => {
     const items = e.clipboardData?.items;
     if (!items) return;
+    // 处理所有文件类型(不只图片):以前只接 image/*,粘贴 PDF/Word/代码等文件时被忽略
+    // → OS 退化成把文件路径当纯文本贴进输入框(用户报告的"自动转成路径文本" #3)。
+    // 现在所有 kind==='file' 的项都上传为附件,在输入框上方显示缩略图/文件名;普通文本
+    // 粘贴(kind==='string')不受影响。
+    let handledFile = false;
     for (const item of items) {
-      if (item.kind === 'file' && item.type.startsWith('image/')) {
+      if (item.kind === 'file') {
         const f = item.getAsFile();
-        if (f) {
-          e.preventDefault();
-          uploadAttachment(f);
-        }
+        if (f) { uploadAttachment(f); handledFile = true; }
       }
     }
+    if (handledFile) e.preventDefault();
   };
 
   const handleDrop = (e) => {
@@ -480,6 +483,16 @@ export function ChatInput({ onSend, onStop, onAccelerate, disabled, isStreaming,
           return;
         }
       }
+    }
+
+    // Cmd+Enter(mac)/ Ctrl+Enter(win) 始终发送输入框文本——即使此刻有 plan/权限卡片
+    // 在 window 级监听 Enter(那个 Enter 会被它吃掉去"批准计划",导致用户改完计划按
+    // 回车发不出去 #1/#2)。stopPropagation 阻止 native 事件冒泡到 window 上的卡片监听。
+    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+      e.preventDefault();
+      e.stopPropagation();
+      handleSend();
+      return;
     }
 
     if (e.key === 'Enter' && !e.shiftKey) {
