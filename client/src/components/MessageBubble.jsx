@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useLayoutEffect } from 'react';
 import { createPortal } from 'react-dom';
 import { User, Brain, Copy, Check, RotateCcw, Pencil } from 'lucide-react';
 import { computeCost, formatCost } from '../utils/pricing.js';
@@ -157,6 +157,25 @@ function RollbackMenu({ message, onAction }) {
     }
     setOpen(!open);
   };
+
+  // 渲染后兜底钳制:坐标计算在 zoom/平台下可能有边缘误差,这里直接量【实际渲染矩形】
+  // (getBoundingClientRect 与 window.innerWidth/Height 同为"视觉px"空间,zoom 无关),
+  // 任何方向越界就把 fixed left/top 拉回(视觉超出量 ÷ z 换算成布局px)。收敛 1~2 帧。
+  // 这是横向/纵向溢出的最终保险:无论计算对错,渲染出来一定在视口内。
+  useLayoutEffect(() => {
+    if (!open || !menuRef.current || !coords) return;
+    const z = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--ui-zoom')) || 1;
+    const m = menuRef.current.getBoundingClientRect();
+    const pad = 8;
+    let nl = coords.left, nt = coords.top;
+    if (m.right > window.innerWidth - pad) nl -= (m.right - (window.innerWidth - pad)) / z;
+    if (m.left < pad) nl += (pad - m.left) / z;
+    if (m.bottom > window.innerHeight - pad) nt -= (m.bottom - (window.innerHeight - pad)) / z;
+    if (m.top < pad) nt += (pad - m.top) / z;
+    if (Math.abs(nl - coords.left) > 0.5 || Math.abs(nt - coords.top) > 0.5) {
+      setCoords((c) => ({ ...c, left: nl, top: nt }));
+    }
+  }, [open, coords]);
 
   // Render the menu in a portal at body level so it doesn't get clipped by
   // any ancestor's overflow / transform / opacity. z-index now actually means

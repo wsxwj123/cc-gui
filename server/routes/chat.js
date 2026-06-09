@@ -177,10 +177,18 @@ router.post('/chat', async (req, res) => {
     cliMode = 'default';
     autoAllowList = ['Read', 'Glob', 'Grep', 'LS', 'TodoWrite', 'NotebookRead', 'Skill'];
   } else if (chosenMode === 'bypassPermissions') {
-    cliMode = 'default';
-    bypassExceptAsk = true;
+    // 放任模式 = cc 原生 --dangerously-skip-permissions:彻底跳过 hook + 文件沙箱,
+    // 用户电脑上任何文件都能读/写、任何命令都放行(用户明确要求,纯壳子行为)。
+    // 代价:AskUserQuestion 在 -p headless 下被 CLI 禁用 → AI 退化成文本提问(可接受)。
+    // 之前为保 ask 弹窗改成 default+hook,反而让 cc 文件沙箱重新生效、Downloads 等
+    // cwd 外文件读不了(用户报告 #8 回归)。放任就该无沙箱,这里恢复真 skip。
+    cliMode = 'bypassPermissions';
   }
-  args.push('--permission-mode', cliMode);
+  if (cliMode === 'bypassPermissions') {
+    args.push('--dangerously-skip-permissions');
+  } else {
+    args.push('--permission-mode', cliMode);
+  }
   // GUI permission bridge — inject a PreToolUse hook that POSTs each tool
   // call to our server and waits for the user's Allow/Deny click. The hook
   // is passed inline via --settings, so we never touch the user's real

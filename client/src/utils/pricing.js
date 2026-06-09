@@ -41,9 +41,8 @@ const PRICES = {
   'deepseek-v3.1':               cny(1, 2, 0.02),
   'deepseek-v3.2-exp':           cny(1, 2, 0.02),
 
-  // MiMo — no official API for 7B/VL (open-source). V2.5 from OpenRouter as reference.
+  // MiMo — 现仅 mimo-v2.5-pro。价格按 v2.5 系列参考(OpenRouter)。
   'mimo-v2.5':                   usd(0.14, 0.28),
-  'mimo-v2':                     usd(0.14, 0.28),
 
   // Anthropic Claude — 2026-06-05 拉取 platform.claude.com 官方表
   'claude-opus-4-8':             usd(5, 25),       // 4.8 用新 tokenizer,可能多消耗 ~35% token

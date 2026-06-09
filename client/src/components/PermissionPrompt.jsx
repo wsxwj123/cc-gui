@@ -85,7 +85,7 @@ function PlanReviewCard({ req, onResolve, onApprove, processing, position }) {
   };
 
   return (
-    <div className="rounded-xl bg-white border border-canvas-deep shadow-lg overflow-hidden animate-fade-up relative">
+    <div className="flex flex-col max-h-[68vh] rounded-xl bg-white border border-canvas-deep shadow-lg overflow-hidden animate-fade-up relative">
       <div className="px-4 py-2.5 flex items-center gap-2 border-b border-canvas-deep bg-blue-50/60">
         <div className="w-6 h-6 rounded-md bg-blue-100 flex items-center justify-center shrink-0">
           <ClipboardList size={13} className="text-blue-700" />
@@ -99,7 +99,7 @@ function PlanReviewCard({ req, onResolve, onApprove, processing, position }) {
           </div>
         )}
       </div>
-      <div className="px-4 py-3 max-h-[42vh] overflow-y-auto bg-canvas-warm/40">
+      <div className="px-4 py-3 flex-1 min-h-0 overflow-y-auto bg-canvas-warm/40">
         <MarkdownRenderer content={plan || '(空计划)'} />
       </div>
       {showRefine && (
@@ -203,14 +203,14 @@ function AskQuestionCard({ req, onAnswer, processing, position }) {
   }, [position, allAnswered, picks, customs]);
 
   return (
-    <div className="rounded-xl bg-white border border-canvas-deep shadow-lg overflow-hidden animate-fade-up relative">
+    <div className="flex flex-col max-h-[68vh] rounded-xl bg-white border border-canvas-deep shadow-lg overflow-hidden animate-fade-up relative">
       <div className="px-4 py-2.5 flex items-center gap-2 border-b border-canvas-deep bg-violet-50/60">
         <div className="w-6 h-6 rounded-md bg-violet-100 flex items-center justify-center shrink-0">
           <AlertCircle size={13} className="text-violet-700" />
         </div>
         <div className="text-[13px] font-medium text-ink flex-1">Claude 需要你的选择</div>
       </div>
-      <div className="px-4 py-3 max-h-[46vh] overflow-y-auto space-y-4">
+      <div className="px-4 py-3 flex-1 min-h-0 overflow-y-auto space-y-4">
         {questions.map((q, qi) => {
           const multi = !!q.multiSelect;
           const opts = Array.isArray(q.options) ? q.options : [];
@@ -292,7 +292,7 @@ function PermissionCard({ req, onResolve, onWhitelistAndAllow, onResolveSame, sa
   }, [position, req, remember, onResolve, onWhitelistAndAllow]);
 
   return (
-    <div className="rounded-xl bg-white border border-canvas-deep shadow-lg overflow-hidden animate-fade-up relative">
+    <div className="flex flex-col max-h-[68vh] rounded-xl bg-white border border-canvas-deep shadow-lg overflow-hidden animate-fade-up relative">
       <div className="px-4 py-2.5 flex items-center gap-2 border-b border-canvas-deep bg-amber-50/60">
         <div className="w-6 h-6 rounded-md bg-amber-100 flex items-center justify-center shrink-0">
           <AlertCircle size={13} className="text-amber-700" />
@@ -309,7 +309,7 @@ function PermissionCard({ req, onResolve, onWhitelistAndAllow, onResolveSame, sa
           </div>
         )}
       </div>
-      <div className="px-4 py-3">{renderInput(req.toolName, req.toolInput)}</div>
+      <div className="px-4 py-3 flex-1 min-h-0 overflow-y-auto">{renderInput(req.toolName, req.toolInput)}</div>
       {sameCount > 0 && (
         <div className="px-4 pb-2 -mt-1">
           <button
