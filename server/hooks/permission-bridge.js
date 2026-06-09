@@ -116,7 +116,9 @@ async function main() {
   // 原 bypassPermissions 走 --dangerously-skip-permissions 完全跳过 hook,导致
   // ask 在 -p mode 被 CLI reject,AI 退化成文本提问。现在让 hook 仍跑,只是默
   // 认 allow 一切,把 ask 例外留给 GUI picker。
-  if (process.env.CGUI_BYPASS_ALL_EXCEPT_ASK && toolName !== 'AskUserQuestion' && !isDangerous) {
+  // 放任模式:放行一切(含 rm/install 等危险命令),只 AskUserQuestion 仍走 GUI picker。
+  // 危险命令拦截只作用于 default/acceptEdits(见客户端),放任就是要无脑放行(用户明确要求)。
+  if (process.env.CGUI_BYPASS_ALL_EXCEPT_ASK && toolName !== 'AskUserQuestion') {
     allow(`bypass-except-ask: ${toolName}`);
   }
 

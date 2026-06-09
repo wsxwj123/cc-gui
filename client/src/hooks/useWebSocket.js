@@ -82,10 +82,10 @@ export function useWebSocket() {
               const mode = useStore.getState().getPermissionModeFor(req.sessionId);
               const READ_CLASS = ['Read', 'Glob', 'Grep', 'LS', 'TodoWrite', 'NotebookRead', 'Skill'];
               const PLAN_WRITE_CLASS = ['Edit', 'MultiEdit', 'Write', 'NotebookEdit'];
-              // G3:危险命令(删除/网络装包/sudo)即使在 acceptEdits/放任模式、或已"永远允许 Bash"
-              // 时,也必须弹窗确认 —— 跳过下面所有自动放行分支,强制渲染。服务端 bridge 有对应
-              // 拦截(放任模式它本会 server 端直接 allow,需 bridge 同样豁免危险命令)。
-              if (isDangerousCommand(req)) {
+              // G3:危险命令(删除/网络装包/sudo)在 default / acceptEdits 下、或已"永远允许 Bash"
+              // 时,也强制弹窗确认 —— 跳过下面的自动放行分支。但【放任模式】例外:用户明确要求
+              // 放任就是无脑放行一切(含 rm/install),所以放任下不拦。
+              if (isDangerousCommand(req) && mode !== 'bypassPermissions') {
                 console.log('[cgui-perm] → force prompt (dangerous)', req.id, req.toolName);
                 useStore.getState().addPendingPermission(req);
                 break;

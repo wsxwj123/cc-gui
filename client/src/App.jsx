@@ -3596,16 +3596,21 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
     if (allMessages[i]?.type === 'compact') { lastCompactIdx = i; break; }
   }
   const ctxScope = lastCompactIdx >= 0 ? allMessages.slice(lastCompactIdx + 1) : allMessages;
-  const lastUsage = [...ctxScope].reverse().find(
+  const lastUsageMsg = [...ctxScope].reverse().find(
     (m) => m.usage && ((m.usage.input_tokens || 0) + (m.usage.cache_read_input_tokens || 0)) > 0,
-  )?.usage;
+  );
+  const lastUsage = lastUsageMsg?.usage;
   // 优先用流式 result 的即时 usage(本轮刚结束就有,不等 jsonl refetch);没有则回退到
   // jsonl 解析出的最近一条 usage(加载历史会话时走这条)。(#5)
   const effectiveUsage = liveContextUsage || lastUsage;
   const contextTokens = effectiveUsage
     ? (effectiveUsage.input_tokens || 0) + (effectiveUsage.cache_read_input_tokens || 0) + (effectiveUsage.cache_creation_input_tokens || 0)
     : 0;
-  const contextWindow = nativeContextWindow(currentModel);
+  // 窗口分母必须用「产生这次 usage 的那条消息的模型」,而不是全局 currentModel —— 否则
+  // 全局默认是 haiku(200k) 时,mimo(1M) 会话会显示成 900k/200k(用户报告 #3/#6)。
+  // 流式中用 streamingModel;历史用该消息记录的 model;都没有才回退 currentModel。
+  const windowModel = (liveContextUsage ? streamingModel : lastUsageMsg?.model) || lastUsageMsg?.model || currentModel;
+  const contextWindow = nativeContextWindow(windowModel);
   const contextPct = contextTokens > 0 ? Math.min(100, Math.round((contextTokens / contextWindow) * 100)) : 0;
   const fmtTok = (n) => (n >= 1000 ? Math.round(n / 1000) + 'k' : String(n));
   const winLabel = contextWindow >= 1_000_000 ? '1M' : `${Math.round(contextWindow / 1000)}k`;
@@ -4200,8 +4205,11 @@ function ContextBreakdownButton({ contextTokens, contextWindow, contextPct, fmtT
       const gap = 6;
       const z = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--ui-zoom')) || 1;
       const visH = window.innerHeight / z;
-      const openBelow = (visH - r.bottom) >= r.top;
-      setCoords({ left: r.left, top: openBelow ? r.bottom + gap : r.top - gap, ty: openBelow ? '0' : '-100%' });
+      // getBoundingClientRect 是视觉px(×z),fixed 的 left/top 是布局px → r.* 需除以 z 折算
+      // (与回滚菜单同一 zoom 坐标系修复)。否则 z>1 时弹层位置偏移/溢出。
+      const rLeft = r.left / z, rTop = r.top / z, rBottom = r.bottom / z;
+      const openBelow = (visH - rBottom) >= rTop;
+      setCoords({ left: rLeft, top: openBelow ? rBottom + gap : rTop - gap, ty: openBelow ? '0' : '-100%' });
       load();
     }
     setOpen(!open);

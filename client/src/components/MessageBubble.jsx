@@ -139,16 +139,18 @@ function RollbackMenu({ message, onAction }) {
       const z = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--ui-zoom')) || 1;
       const visH = window.innerHeight / z;
       const visW = window.innerWidth / z;
-      const openBelow = (visH - r.bottom) >= r.top;
-      // 菜单右对齐(translateX -100%)到按钮右缘。关键:窗口被拖到比菜单(256)还窄时,
-      // 写死的 MENU_W 会让"左边界≥8"的钳制反把右边界顶出视口 → 仍溢出(用户报告 #1
-      // 之前没生效的原因)。改为菜单宽度随窗口动态收窄: menuW = min(256, visW-16),
-      // 这样 right≤visW-8 且 left≥8 永远同时成立。
+      // 实测根因(z>1 时溢出):getBoundingClientRect 返回【视觉px=布局px×z】,而 position:fixed
+      // 的 left/top 按【布局px】解释(渲染时再×z)。原代码把视觉px 的 r.right 直接和布局px 的
+      // visW/left 混用 → 钳制按错误尺度算 → 菜单横向冲出边界。统一把 r.* 除以 z 折算到布局px。
+      const rRight = r.right / z, rTop = r.top / z, rBottom = r.bottom / z;
+      const openBelow = (visH - rBottom) >= rTop;
+      // 菜单右对齐(translateX -100%)到按钮右缘;窗口比菜单(256)还窄时菜单动态收窄,
+      // 保证 right≤visW-8 且 left≥8 同时成立。全部用布局px。
       const menuW = Math.min(256, Math.max(160, visW - 16));
-      const left = Math.max(menuW + 8, Math.min(r.right, visW - 8));
+      const left = Math.max(menuW + 8, Math.min(rRight, visW - 8));
       setCoords({
         left,
-        top: openBelow ? r.bottom + gap : r.top - gap,
+        top: openBelow ? rBottom + gap : rTop - gap,
         ty: openBelow ? '0' : '-100%',
         w: menuW,
       });
