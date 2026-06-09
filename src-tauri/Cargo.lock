@@ -323,7 +323,7 @@ dependencies = [
 
 [[package]]
 name = "claude-gui"
-version = "0.1.63"
+version = "0.1.64"
 dependencies = [
  "tauri",
  "tauri-build",
