@@ -31,6 +31,9 @@
       "../client/dist",
       "../node_modules",
       "../package.json"
-    ]
+    ],
+    "windows": {
+      "webviewInstallMode": { "type": "embedBootstrapper" }
+    }
   }
 }
