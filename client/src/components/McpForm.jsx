@@ -122,12 +122,12 @@ export function McpForm({ editing, onClose, onSaved }) {
             <div className="grid grid-cols-2 gap-3">
               <div className="space-y-1.5">
                 <div className={labelCls}>名称</div>
-                <div className={hintCls}>帮助你识别工具(可选)</div>
+                <div className={`${hintCls} truncate`}>便于识别 · 可选</div>
                 <input value={label} onChange={(e) => setLabel(e.target.value)} className={inputCls} placeholder="例如 文件管理" />
               </div>
               <div className="space-y-1.5">
                 <div className={labelCls}>ID</div>
-                <div className={hintCls}>用于模型识别的 ID, 不可重复</div>
+                <div className={`${hintCls} truncate`} title="模型识别用的唯一 ID, 不可重复">模型识别用 · 唯一</div>
                 <input value={name} onChange={(e) => setName(e.target.value)} className={`${inputCls} font-mono`} placeholder="my-mcp-server" />
               </div>
             </div>

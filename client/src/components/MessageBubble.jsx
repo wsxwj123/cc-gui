@@ -138,9 +138,14 @@ function RollbackMenu({ message, onAction }) {
       // 菜单超出屏幕底部。
       const z = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--ui-zoom')) || 1;
       const visH = window.innerHeight / z;
+      const visW = window.innerWidth / z;
       const openBelow = (visH - r.bottom) >= r.top;
+      // 菜单右对齐(translateX -100%)到按钮右缘。小窗口下钳制:右边不超出视口(left ≤
+      // visW-8),左边(left - 菜单宽 256)不小于 8,避免菜单溢出视口边界被裁(#3)。
+      const MENU_W = 256; // w-64
+      const left = Math.max(MENU_W + 8, Math.min(r.right, visW - 8));
       setCoords({
-        left: r.right,
+        left,
         top: openBelow ? r.bottom + gap : r.top - gap,
         ty: openBelow ? '0' : '-100%',
       });

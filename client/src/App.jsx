@@ -1945,6 +1945,9 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
   // 否则会一直转(用户报告:AI 回复完成后仍显示"正在重做")。
   const [retryActiveUuid, setRetryActiveUuid] = useState(null);
   const [compacting, setCompacting] = useState(false); // /compact 进行中 → 显示压缩动画
+  // 流式 result 事件携带本轮真实 usage(input+cache)。直接据此即时更新上下文徽章,
+  // 不必等 jsonl refetch——修复"压缩后/每轮要等几轮才更新"的延迟(#5)。切换会话时清空。
+  const [liveContextUsage, setLiveContextUsage] = useState(null);
   // 编辑重发待回滚(#4):点击「重新编辑并发送」时只回填输入框、记录目标消息,不做
   // 任何破坏性操作;真正发送时才回退,ESC 取消则原样保留。ref 供 handleSend 读取
   // (handleSend 定义早于 handleRollback,且需避免闭包读到旧值)。
@@ -2280,6 +2283,7 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
     // (User can still run git init manually anytime.)
 
     const isCompact = /^\/compact\b/.test(String(prompt || '').trim());
+    const isClear = /^\/clear\b/.test(String(prompt || '').trim());
     updateStreaming(true);
     setCompacting(isCompact);
     setStreamingText('');
@@ -2388,6 +2392,12 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
     // text-based check match a PRIOR round's turn and clear the new reply early.
     let turnsBefore = 0;
     try { turnsBefore = (getLocalMessages() || []).filter((m) => m.type === 'turn').length; } catch {}
+    // 提升到 try 外:用户中途按停止(AbortError)时,catch 需要读到已流式累积的内容
+    // 才能把它保留成气泡,而不是连同用户消息一起丢弃(#6)。
+    let accumulatedText = '';
+    let accumulatedThinking = '';
+    let currentToolCalls = [];
+    let orderedBlocks = [];  // [{ type, blockIndex, content?, toolCall? }, ...]
     try {
       let pid;
       if (reattachPid) {
@@ -2454,16 +2464,12 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
       const decoder = new TextDecoder();
       let buffer = '';
       // Aggregated per-message turn state (matches what gets pushed to chatMessages on done).
-      let accumulatedText = '';
-      let accumulatedThinking = '';
-      let currentToolCalls = [];
-      // **ORDERED** blocks list — preserves the chronological sequence of
-      // text/thinking/tool_use content blocks so the UI can render them in the
-      // exact order the model emitted them (which is what Claude Desktop / the
-      // CLI terminal do). Without this, all text would group at the top and
-      // tool calls dump at the bottom — losing the "tool → think → tool → write"
-      // narrative.
-      let orderedBlocks = [];  // [{ type, blockIndex, content?, toolCall? }, ...]
+      // 声明已提升到 try 外(见上),这里仅复位。**ORDERED** orderedBlocks 保留 text/
+      // thinking/tool_use 内容块的时间顺序,让 UI 按模型输出的真实顺序渲染。
+      accumulatedText = '';
+      accumulatedThinking = '';
+      currentToolCalls = [];
+      orderedBlocks = [];  // [{ type, blockIndex, content?, toolCall? }, ...]
       // Did we already render a visible error turn? Guards the empty-output
       // fallback below so we don't double-report.
       let sawError = false;
@@ -2799,6 +2805,11 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
             sawError = true;
             break;
           }
+          // 即时上下文用量(#5):result 事件带本轮 usage,直接据此刷新徽章。
+          if (event.type === 'result' && event.usage
+            && ((event.usage.input_tokens || 0) + (event.usage.cache_read_input_tokens || 0) + (event.usage.cache_creation_input_tokens || 0)) > 0) {
+            setLiveContextUsage(event.usage);
+          }
           if (event.type === 'done') break;
         }
       }
@@ -2813,6 +2824,22 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
           toolCalls: currentToolCalls.map((tc) => ({ ...tc, category: tc.category || 'call' })),
           // The canonical ordered view used by TurnBubble for in-order rendering.
           blocks: orderedBlocks,
+          usage: null,
+        }]);
+      } else if (isClear && !sawError && !reattachPid) {
+        // /clear 在 headless 下返回空 result(无 assistant 文本),不是错误。给出明确的
+        // "会话已清空" 提示,而不是误报 "provider 没有返回任何内容"(#4)。
+        producedReply = true;
+        setLiveContextUsage(null);
+        setChatMessages((prev) => [...prev, {
+          uuid: 'chat-cleared-' + Date.now(),
+          type: 'turn',
+          timestamp: new Date().toISOString(),
+          model: streamingModel,
+          text: ['✅ 会话已清空，请发送新的消息。'],
+          thinking: [],
+          toolCalls: [],
+          blocks: [{ type: 'text', content: '✅ 会话已清空，请发送新的消息。' }],
           usage: null,
         }]);
       } else if (!sawError && !reattachPid) {
@@ -2851,7 +2878,25 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
       // reattach takes over); only render a hard error for genuine failures.
       const isNetworkDrop = err instanceof TypeError
         && /load failed|failed to fetch|network|connection/i.test(err.message || '');
-      if (err.name !== 'AbortError' && !isNetworkDrop) {
+      if (err.name === 'AbortError') {
+        // 用户主动「停止」:把已经流式显示的文本/思考/工具调用保留成一条气泡(标记
+        // 已停止),而不是连同用户消息一起丢弃——以前这里静默清空,用户辛苦看到的半截
+        // 回复+工具调用全没了,只剩刚发的消息(#6)。producedReply=true 让 finally 的
+        // 落盘轮询把它当正常产出处理(jsonl 若已写入半截会 refetch 覆盖,否则保留本地副本)。
+        if (accumulatedText || accumulatedThinking || currentToolCalls.length > 0) {
+          producedReply = true;
+          setChatMessages((prev) => [...prev, {
+            uuid: 'chat-stopped-' + Date.now(), type: 'turn',
+            timestamp: new Date().toISOString(), model: streamingModel,
+            text: accumulatedText ? [accumulatedText] : [],
+            thinking: accumulatedThinking ? [accumulatedThinking] : [],
+            toolCalls: currentToolCalls.map((tc) => ({ ...tc, category: tc.category || 'call' })),
+            blocks: orderedBlocks,
+            usage: null,
+            interrupted: true,
+          }]);
+        }
+      } else if (!isNetworkDrop) {
         console.error('Chat error:', err);
         // Render the failure as a visible turn so the user isn't left staring at
         // a frozen "connecting" with no explanation (e.g. invalid project dir).
@@ -3321,8 +3366,8 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
     }
   }, [chatMessages, messages, fetchMessagesForTab, setLocalMessages, setSelectedSession, getLocalSession]);
   useEffect(() => { handleRollbackRef.current = handleRollback; }, [handleRollback]);
-  // 切换会话时清掉待回滚,避免 A 会话的待回滚泄漏到 B 会话的下一次发送。
-  useEffect(() => { setPendingEditRollback(null); }, [selectedSession?.sessionId, setPendingEditRollback]);
+  // 切换会话时清掉待回滚 + 即时上下文用量,避免泄漏到另一会话。
+  useEffect(() => { setPendingEditRollback(null); setLiveContextUsage(null); }, [selectedSession?.sessionId, setPendingEditRollback]);
 
   // 编辑重发取消(#4):ChatInput 里按 Esc → 撤销待回滚(历史本就没动,纯清状态)。
   useEffect(() => {
@@ -3487,8 +3532,11 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
   const lastUsage = [...ctxScope].reverse().find(
     (m) => m.usage && ((m.usage.input_tokens || 0) + (m.usage.cache_read_input_tokens || 0)) > 0,
   )?.usage;
-  const contextTokens = lastUsage
-    ? (lastUsage.input_tokens || 0) + (lastUsage.cache_read_input_tokens || 0) + (lastUsage.cache_creation_input_tokens || 0)
+  // 优先用流式 result 的即时 usage(本轮刚结束就有,不等 jsonl refetch);没有则回退到
+  // jsonl 解析出的最近一条 usage(加载历史会话时走这条)。(#5)
+  const effectiveUsage = liveContextUsage || lastUsage;
+  const contextTokens = effectiveUsage
+    ? (effectiveUsage.input_tokens || 0) + (effectiveUsage.cache_read_input_tokens || 0) + (effectiveUsage.cache_creation_input_tokens || 0)
     : 0;
   const contextWindow = nativeContextWindow(currentModel);
   const contextPct = contextTokens > 0 ? Math.min(100, Math.round((contextTokens / contextWindow) * 100)) : 0;

@@ -41,7 +41,7 @@ function Toggle({ enabled, onToggle, loading }) {
     <button
       onClick={onToggle}
       disabled={loading}
-      className={`relative w-9 h-5 rounded-full transition-colors shrink-0 ${
+      className={`relative w-9 h-5 rounded-full transition-colors shrink-0 overflow-hidden ${
         enabled ? 'bg-success' : 'bg-canvas-sunken'
       } ${loading ? 'opacity-50' : ''}`}
     >
@@ -200,45 +200,51 @@ export function MCPPanel() {
                   }`}
                 >
                   <div className="flex items-center gap-2 mb-1">
-                    <Plug
-                      size={12}
-                      className={disabled ? 'text-ink-ghost' : srv.status === 'connected' ? 'text-success' : 'text-ink-faint'}
-                      aria-label="服务器图标"
-                    />
-                    <span className={`text-xs font-medium font-body ${disabled ? 'text-ink-faint line-through' : 'text-ink'}`}
-                      title={srv.label ? `ID: ${srv.name}` : (srv.source || '')}>
-                      {srv.label || srv.name}
-                    </span>
-                    <span className="text-[10px] px-1.5 py-0.5 bg-canvas-deep text-ink-faint rounded font-mono"
-                      title="传输协议 (stdio = 子进程, http = HTTP MCP)">
-                      {srv.transport}
-                    </span>
-                    {srv.autoApprove && (
-                      <span className="text-[10px] px-1.5 py-0.5 bg-amber-50 text-amber-700 rounded font-body flex items-center gap-0.5"
-                        title="自动执行工具:该服务器的工具调用免确认直接放行">
-                        <Zap size={9} />免确认
+                    {/* 左侧:图标+名称+徽章。min-w-0 让长名称截断而不是把右侧操作组挤出
+                        卡片边界(toggle 溢出的根因 #1)。 */}
+                    <div className="flex items-center gap-1.5 min-w-0 flex-1">
+                      <Plug
+                        size={12}
+                        className={`shrink-0 ${disabled ? 'text-ink-ghost' : srv.status === 'connected' ? 'text-success' : 'text-ink-faint'}`}
+                        aria-label="服务器图标"
+                      />
+                      <span className={`text-xs font-medium font-body truncate ${disabled ? 'text-ink-faint line-through' : 'text-ink'}`}
+                        title={srv.label ? `ID: ${srv.name}` : (srv.source || srv.name)}>
+                        {srv.label || srv.name}
                       </span>
-                    )}
-                    <div className="flex-1" />
-                    {!disabled && srv.status === 'connected' && (
-                      <span className="text-[10px] text-success" title="已连接（claude mcp list 显示 connected）">✓</span>
-                    )}
-                    {!disabled && srv.status === 'disconnected' && (
-                      <span className="text-[10px] text-error" title="未连接">✗</span>
-                    )}
-                    {disabled && (
-                      <span className="text-[10px] text-ink-ghost" title="已禁用（CLI 不会启动此 MCP）">已禁用</span>
-                    )}
-                    <PingButton name={srv.name} />
-                    <button onClick={() => setForm({ name: srv.name })} title="编辑"
-                      className="p-1 rounded text-ink-faint hover:text-accent hover:bg-canvas-warm transition-colors"><Pencil size={11} /></button>
-                    <button onClick={() => handleDelete(srv)} title="删除"
-                      className="p-1 rounded text-ink-faint hover:text-error hover:bg-canvas-warm transition-colors"><Trash2 size={11} /></button>
-                    <Toggle
-                      enabled={!disabled}
-                      loading={toggling === srv.name}
-                      onToggle={() => handleToggle(srv)}
-                    />
+                      <span className="shrink-0 text-[10px] px-1.5 py-0.5 bg-canvas-deep text-ink-faint rounded font-mono"
+                        title="传输协议 (stdio = 子进程, http = HTTP MCP)">
+                        {srv.transport}
+                      </span>
+                      {srv.autoApprove && (
+                        <span className="shrink-0 text-[10px] px-1.5 py-0.5 bg-amber-50 text-amber-700 rounded font-body flex items-center gap-0.5"
+                          title="自动执行工具:该服务器的工具调用免确认直接放行">
+                          <Zap size={9} />免确认
+                        </span>
+                      )}
+                    </div>
+                    {/* 右侧操作组:shrink-0 永不被挤出,确保 toggle 始终在卡片内。 */}
+                    <div className="flex items-center gap-1 shrink-0">
+                      {!disabled && srv.status === 'connected' && (
+                        <span className="text-[10px] text-success" title="已连接（claude mcp list 显示 connected）">✓</span>
+                      )}
+                      {!disabled && srv.status === 'disconnected' && (
+                        <span className="text-[10px] text-error" title="未连接">✗</span>
+                      )}
+                      {disabled && (
+                        <span className="text-[10px] text-ink-ghost" title="已禁用（CLI 不会启动此 MCP）">已禁用</span>
+                      )}
+                      <PingButton name={srv.name} />
+                      <button onClick={() => setForm({ name: srv.name })} title="编辑"
+                        className="p-1 rounded text-ink-faint hover:text-accent hover:bg-canvas-warm transition-colors"><Pencil size={11} /></button>
+                      <button onClick={() => handleDelete(srv)} title="删除"
+                        className="p-1 rounded text-ink-faint hover:text-error hover:bg-canvas-warm transition-colors"><Trash2 size={11} /></button>
+                      <Toggle
+                        enabled={!disabled}
+                        loading={toggling === srv.name}
+                        onToggle={() => handleToggle(srv)}
+                      />
+                    </div>
                   </div>
                   <div className="text-[11px] text-ink-muted font-mono truncate">
                     {srv.command}{srv.args?.length > 0 ? ' ' + srv.args.join(' ') : ''}
