@@ -511,7 +511,9 @@ export function ChatInput({ onSend, onStop, onAccelerate, disabled, isStreaming,
           // Plan approved → switch THIS session to acceptEdits and resume so the
           // CLI actually executes (headless plan mode can't execute in-process).
           setPermissionMode('acceptEdits', permKey);
-          onSend('请严格按照刚才批准的计划开始执行，不要重新规划或再次询问。');
+          // headless plan 无法在原进程内续跑,壳子必须另起一回合执行。但这条续跑指令
+          // 不该作为可见用户气泡(用户反馈"画蛇添足"),用 hiddenUserMessage 隐藏发送。(#5)
+          onSend('请严格按照刚才批准的计划开始执行，不要重新规划或再次询问。', { hiddenUserMessage: true });
         }}
       />
       {/* TODO checklist — sits between permission popup and composer, mirroring
@@ -753,6 +755,7 @@ export function ChatInput({ onSend, onStop, onAccelerate, disabled, isStreaming,
             </div>
             <ul className="divide-y divide-accent/10">
               {queueItems.map((q, i) => (
+                q.hidden ? null : // 隐藏续跑消息(如计划执行)不在队列里显示(#5);保留索引对齐 store
                 <li key={`${q.queuedAt}-${i}`} className="px-3 py-1.5 flex items-start gap-2 group hover:bg-accent/5">
                   <span className="text-[10px] text-ink-faint font-mono shrink-0 mt-0.5">#{i + 1}</span>
                   <span className="text-ink-soft flex-1 line-clamp-2 leading-snug" title={q.text}>{q.text}</span>

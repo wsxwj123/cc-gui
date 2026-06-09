@@ -1906,6 +1906,9 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
   const paneMessages = useStore((s) => s.paneMessages);
   const selectedSession = (paneSessions && paneSessions[tabIndex]) || null;
   const messages = (paneMessages && paneMessages[tabIndex]) || [];
+  // 本会话的队列/pin/owner key(草稿用 draft-<hash>)。必须在所有引用它的 effect 之前声明,
+  // 否则 effect 依赖数组在渲染期先求值会命中 TDZ(Cannot access before initialization)。
+  const sessionQueueKey = selectedSession?.sessionId || `draft-${selectedSession?.projectHash || 'none'}`;
   const setSelectedSession = useCallback((s) => {
     useStore.getState().setPaneSession(tabIndex, s);
   }, [tabIndex]);
@@ -1985,6 +1988,13 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
   // 流式 result 事件携带本轮真实 usage(input+cache)。直接据此即时更新上下文徽章,
   // 不必等 jsonl refetch——修复"压缩后/每轮要等几轮才更新"的延迟(#5)。切换会话时清空。
   const [liveContextUsage, setLiveContextUsage] = useState(null);
+  // I4 会话隔离:流式缓冲(chatMessages/streaming*)属于"发起这次流的会话",不属于窗格。
+  // 记录归属会话 key;切到别的会话时这些缓冲在渲染层隐藏(流继续在服务端跑,回来 reattach),
+  // 不再串到当前查看的会话。streamOwnerKeyRef 供异步闭包读最新值。
+  const [streamOwnerKey, setStreamOwnerKey] = useState(null);
+  const streamOwnerKeyRef = useRef(null);
+  const setStreamOwner = useCallback((k) => { streamOwnerKeyRef.current = k; setStreamOwnerKey(k); }, []);
+  const loadedSidRef = useRef(null); // I4:本窗格已加载历史的 sessionId,切会话时据此强制重载
   // 编辑重发待回滚(#4):点击「重新编辑并发送」时只回填输入框、记录目标消息,不做
   // 任何破坏性操作;真正发送时才回退,ESC 取消则原样保留。ref 供 handleSend 读取
   // (handleSend 定义早于 handleRollback,且需避免闭包读到旧值)。
@@ -2062,11 +2072,24 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
   useEffect(() => {
     const sid = selectedSession?.sessionId;
     const ph = selectedSession?.projectHash;
-    if (!sid || !ph || streamingRef.current) return;
-    const have = useStore.getState().paneMessages[tabIndex];
-    if (Array.isArray(have) && have.length > 0) return;
+    if (!sid || !ph) return;
+    // 流正在跑且就是当前会话 → 本地流是真相源,别用磁盘 clobber。
+    if (streamingRef.current && streamOwnerKeyRef.current === sessionQueueKey) return;
+    // I4:切到了和上次加载不同的会话(可能是从一个正在流式的会话切走)→ 强制重载该会话历史,
+    // 否则 paneMessages 仍是上个会话的、加上被隐藏的流式缓冲 → 新会话空白或串旧内容。
+    if (loadedSidRef.current === sid) {
+      const have = useStore.getState().paneMessages[tabIndex];
+      if (Array.isArray(have) && have.length > 0) return;
+    }
+    loadedSidRef.current = sid;
     fetchMessagesForTab(sid, ph, { silent: true });
-  }, [selectedSession?.sessionId, selectedSession?.projectHash, tabIndex]);
+  }, [selectedSession?.sessionId, selectedSession?.projectHash, tabIndex, sessionQueueKey]);
+
+  // I4/#6:切到【非当前流】的会话时,清掉上个会话遗留的即时上下文 usage,让上下文徽章
+  // 立刻反映本会话(由本会话 jsonl 的 lastUsage 计算),不再闪烁/显示上个会话的数字。
+  useEffect(() => {
+    if (streamOwnerKeyRef.current !== sessionQueueKey) setLiveContextUsage(null);
+  }, [sessionQueueKey]);
 
   useEffect(() => {
     if (!selectedSession?.sessionId || !selectedSession?.projectHash) return;
@@ -2220,7 +2243,7 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
   // CRITICAL: never use `|| []` inside a zustand selector — that returns a
   // fresh array reference on every render and triggers React error #185
   // "Maximum update depth exceeded" (which blanks the whole page).
-  const sessionQueueKey = selectedSession?.sessionId || `draft-${selectedSession?.projectHash || 'none'}`;
+  // (sessionQueueKey 已上移到组件顶部声明,避免 effect 依赖数组 TDZ)
   // Model shown in THIS pane's header — the session's own pick, else default.
   const headerModel = modelBySession[sessionQueueKey] || currentModel;
   const messageQueueRaw = useStore((s) => s.messageQueue[sessionQueueKey]);
@@ -2283,7 +2306,7 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
     // over the stream, so skip the gate and the prep work (no user bubble,
     // no checkpoint, no provider-mismatch strip, no POST /api/chat).
     if (!reattachPid && streamingRef.current) {
-      useStore.getState().enqueueMessage(sessionQueueKey, { text: prompt, queuedAt: Date.now() });
+      useStore.getState().enqueueMessage(sessionQueueKey, { text: prompt, queuedAt: Date.now(), hidden: !!hiddenUserMessage, opts });
       return;
     }
 
@@ -2297,6 +2320,8 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
     const isCompact = /^\/compact\b/.test(String(prompt || '').trim());
     const isClear = /^\/clear\b/.test(String(prompt || '').trim());
     updateStreaming(true);
+    // I4:本次流的归属会话(draft 时是 draft-key,init 收到真 id 后会在下面升级)。
+    setStreamOwner(sessionQueueKey);
     setCompacting(isCompact);
     setStreamingText('');
     setStreamingThinking('');
@@ -2547,6 +2572,11 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
               // Carry the draft's per-session model/permission pins to the real
               // session id so a model picked for a brand-new chat doesn't revert.
               useStore.getState().migrateSessionKey(`draft-${sel.projectHash || 'none'}`, event.session_id);
+              // I4:草稿流拿到真 sessionId,把流归属 key 一并升级,否则 setSelectedSession
+              // 把当前会话 key 变成真 id 后,渲染层会判定"流不属于当前会话"而误隐藏本条流。
+              if (streamOwnerKeyRef.current === `draft-${sel.projectHash || 'none'}`) {
+                setStreamOwner(event.session_id);
+              }
               setSelectedSession({
                 ...sel,
                 draft: false,
@@ -3073,24 +3103,31 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
       // 仅当会话已有真实 sessionId、且既无自定义标题也无已生成的自动标题时触发,
       // 所以每个会话最多生成一次。失败/空标题静默回退到第一条消息。
       try {
-        const titleSid = getLocalSession()?.sessionId;
+        // I4 标题串扰修复:标题必须归属【发起这次流的会话】,而不是当前查看的会话。
+        // 用户在 AI 回复时切到别的会话,getLocalSession() 会返回新会话 → 旧对话的内容
+        // 被用来给新会话生成标题(用户报告:其他会话标题被改)。改用流归属 key(真 sid)。
+        const _ownerKey = streamOwnerKeyRef.current;
+        const titleSid = (_ownerKey && !_ownerKey.startsWith('draft-')) ? _ownerKey : getLocalSession()?.sessionId;
         const st = useStore.getState();
         if (titleSid && !titleAttempted.has(titleSid) && !st.customTitles[titleSid] && !st.autoTitles[titleSid] && prompt) {
           // 标记"已尝试"——无论成功失败都不再重试,避免 provider 失败时每轮 spawn。
           titleAttempted.add(titleSid);
-          // 标题用与正文同一模型(pin → 历史 → 全局)。currentModel 定义在 try 块内、
-          // 此处是 finally 不可见,故就地按 titleSid 重新解析。
-          const titleModel = st.modelBySession[titleSid]
-            || (() => { const ms = getLocalMessages() || []; for (let i = ms.length - 1; i >= 0; i--) if (ms[i]?.model) return ms[i].model; return null; })()
-            || st.currentModel;
+          // 标题用【当前 provider 有效】的模型:本会话 pin 或当前选中模型,去掉 [1m]。
+          // 不要用 jsonl 历史模型回退 —— 老会话历史里可能是别的 provider 的模型(如官方
+          // provider 下读到旧 mimo-v2.5-pro),传给 --model 会"模型不存在"→标题永远生成不出来
+          // (用户报告 #2)。pin/currentModel 在切 provider 时会被清,始终对应当前 provider。
+          const titleModel = String(st.modelBySession[titleSid] || st.currentModel || '').replace(/\[1m\]/i, '');
           fetch('/api/chat/title', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ firstUser: prompt, firstAssistant: accumulatedText || '', cwd, model: titleModel }),
           })
             .then((r) => r.json())
-            .then((d) => { if (d?.title) useStore.getState().setAutoTitle(titleSid, d.title); })
-            .catch(() => {});
+            .then((d) => {
+              if (d?.title) useStore.getState().setAutoTitle(titleSid, d.title);
+              else titleAttempted.delete(titleSid); // 空标题(失败)→ 允许下一轮重试,不要永久放弃
+            })
+            .catch(() => { titleAttempted.delete(titleSid); });
         }
       } catch {}
 
@@ -3105,7 +3142,9 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
           || `draft-${tabSel?.projectHash || 'none'}`;
         const next = useStore.getState().shiftMessage(queueKey);
         if (next?.text) {
-          setTimeout(() => handleSendRef.current?.(next.text), 50);
+          // 透传入队时的 opts(尤其 hiddenUserMessage)——否则计划执行这种隐藏续跑消息
+          // 出队重发时会变成可见的用户气泡(#5)。
+          setTimeout(() => handleSendRef.current?.(next.text, next.opts || (next.hidden ? { hiddenUserMessage: true } : {})), 50);
         }
       }
       acceleratingRef.current = false;
@@ -3187,7 +3226,7 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
     const sel = getLocalSession();
     const queueKey = sel?.sessionId || `draft-${sel?.projectHash || 'none'}`;
     const next = useStore.getState().shiftMessage(queueKey);
-    if (next?.text) setTimeout(() => handleSendRef.current?.(next.text), 80);
+    if (next?.text) setTimeout(() => handleSendRef.current?.(next.text, next.opts || (next.hidden ? { hiddenUserMessage: true } : {})), 80);
   }, []);
 
   // Reset per-session UI state when the selectedSession object changes.
@@ -3611,6 +3650,9 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
   // 流式中用 streamingModel;历史用该消息记录的 model;都没有才回退 currentModel。
   const windowModel = (liveContextUsage ? streamingModel : lastUsageMsg?.model) || lastUsageMsg?.model || currentModel;
   const contextWindow = nativeContextWindow(windowModel);
+  // I4:流式缓冲(chatMessages/streaming 气泡)只在它归属当前会话时显示。切到别的会话时
+  // 隐藏(流仍在服务端跑,回到原会话或刷新后由 jsonl/reattach 呈现),不串到当前视图。
+  const liveVisible = streamOwnerKey == null || streamOwnerKey === sessionQueueKey;
   const contextPct = contextTokens > 0 ? Math.min(100, Math.round((contextTokens / contextWindow) * 100)) : 0;
   const fmtTok = (n) => (n >= 1000 ? Math.round(n / 1000) + 'k' : String(n));
   const winLabel = contextWindow >= 1_000_000 ? '1M' : `${Math.round(contextWindow / 1000)}k`;
@@ -3789,7 +3831,7 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
       )}
 
       <div ref={containerRef} onScroll={handleScroll} className="flex-1 overflow-y-auto relative z-10">
-          {messages.length === 0 && chatMessages.length === 0 ? (
+          {messages.length === 0 && (liveVisible ? chatMessages.length : 0) === 0 ? (
             <div className="mobile-draft-empty flex items-center justify-center h-full text-ink-muted text-sm font-body">
               {selectedSession?.draft ? '开始你的第一条消息 ↓' : '该会话没有可显示的消息'}
             </div>
@@ -3802,14 +3844,14 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
                 : <MessageBubble key={msg.uuid || i} message={{ ...msg, role: msg.type }}
                     onRollback={msg.type === 'user' ? handleRollback : undefined} />
               )}
-              {chatMessages.map((msg, i) => msg.type === 'compact'
+              {liveVisible && chatMessages.map((msg, i) => msg.type === 'compact'
                 ? <CompactDivider key={msg.uuid || i} />
                 : msg.type === 'turn'
                 ? <TurnBubble key={msg.uuid || i} turn={msg} onRetry={handleRetryTurn} onRetryTool={(toolCall) => handleRetryTool(msg, toolCall)} retryActive={retryActiveUuid === msg.uuid} />
                 : <MessageBubble key={msg.uuid || i} message={{ ...msg, role: msg.type }}
                     onRollback={msg.type === 'user' ? handleRollback : undefined} />
               )}
-              {isStreaming && (streamingText || streamingThinking || streamingToolCalls.length > 0 || streamingBlocks.some((b) => (b?.content?.length > 0) || b?.toolCall)) && (
+              {liveVisible && isStreaming && (streamingText || streamingThinking || streamingToolCalls.length > 0 || streamingBlocks.some((b) => (b?.content?.length > 0) || b?.toolCall)) && (
                 <>
                   <StreamingStatusLine
                     thinking={streamingThinking}
@@ -3830,7 +3872,7 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
                   之前误用 streamingBlocks.length===0,而 content_block_start 一开始就
                   push 空 block→占位符消失但内容又没来→空白无动画(回归)。改用 .some
                   判断真正有内容的 block,和上面的回复气泡严格互斥,不再跳位也不再空白。*/}
-              {isStreaming && !streamingText && !streamingThinking && streamingToolCalls.length === 0 && !streamingBlocks.some((b) => (b?.content?.length > 0) || b?.toolCall) && (
+              {liveVisible && isStreaming && !streamingText && !streamingThinking && streamingToolCalls.length === 0 && !streamingBlocks.some((b) => (b?.content?.length > 0) || b?.toolCall) && (
                 <div className="px-6 py-3 animate-fade-in">
                   <div className="max-w-[var(--content-max)] mx-auto">
                     <div className="flex items-center gap-2.5 text-[14px] font-body" style={{ color: '#D97757' }}>
