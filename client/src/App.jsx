@@ -2041,37 +2041,9 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
     return null;
   }, [streamingBlocks, chatMessages, messages]);
 
-  const currentPlan = useMemo(() => {
-    const readPlan = (toolCall) => {
-      if (toolCall?.name !== 'ExitPlanMode') return '';
-      const plan = toolCall.input?.plan ?? toolCall.input?.content ?? '';
-      return typeof plan === 'string' ? plan.trim() : '';
-    };
-    const scanToolCalls = (toolCalls) => {
-      if (!Array.isArray(toolCalls)) return '';
-      for (let j = toolCalls.length - 1; j >= 0; j--) {
-        const plan = readPlan(toolCalls[j]);
-        if (plan) return plan;
-      }
-      return '';
-    };
-    for (let i = streamingBlocks.length - 1; i >= 0; i--) {
-      const b = streamingBlocks[i];
-      if (b?.type === 'tool_use') {
-        const plan = readPlan(b.toolCall);
-        if (plan) return plan;
-      }
-    }
-    for (let i = chatMessages.length - 1; i >= 0; i--) {
-      const plan = scanToolCalls(chatMessages[i]?.toolCalls);
-      if (plan) return plan;
-    }
-    for (let i = messages.length - 1; i >= 0; i--) {
-      const plan = scanToolCalls(messages[i]?.toolCalls);
-      if (plan) return plan;
-    }
-    return '';
-  }, [streamingBlocks, chatMessages, messages]);
+  // G1/G2:输入框上方只显 TodoWrite 的待办清单(cc 原生),不再贴整份 ExitPlanMode 计划。
+  // 计划全文只在规划模式的审批弹窗(PlanReviewCard)出现——和 claude code 原生一致。
+  // (原 currentPlan 已移除:plan 展示位置统一收口到弹窗)
 
   // When the file watcher reports a write to THIS session's jsonl (e.g. a
   // detached background stream from another tab/session is still writing),
@@ -2150,6 +2122,9 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
     const id = setTimeout(() => setProviderSwitchNotice(null), 5000);
     return () => clearTimeout(id);
   }, [providerSwitchNotice]);
+  // G4:上下文超模型窗口时 /compact 失败(整段发上去做摘要→请求体也超限→413)。
+  // 这种错不能自动重试,弹一个带操作按钮的横幅引导用户:切 1M / 新建 / 回滚裁剪。
+  const [ctxOverflow, setCtxOverflow] = useState(null);
   useEffect(() => {
     if (!selectedSession?.sessionId) { setBackgroundPid(null); return; }
     let cancelled = false;
@@ -2860,6 +2835,14 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
               }
               setProviderSwitchNotice({ text: '原会话历史已失效，已自动新建会话并重发本条。' });
               setTimeout(() => handleSendRef.current?.(prompt, { ...opts, freshRetry: true }), 80);
+              accumulatedText = ''; accumulatedThinking = ''; currentToolCalls = [];
+              sawError = true;
+              break;
+            }
+            // G4:上下文超窗 → 413 / prompt too long。/compact 也会因此失败(摘要请求本身超限)。
+            // 不自动重试,弹引导横幅让用户选恢复方式。
+            if (/\b413\b|payload too large|prompt is too long|too many tokens|input (?:is )?too long|exceed[a-z ]*context|context[a-z ]*exceed|maximum context/i.test(msg)) {
+              setCtxOverflow({ has1m: /\[1m\]/i.test(currentModel || ''), wasCompact: isCompact });
               accumulatedText = ''; accumulatedThinking = ''; currentToolCalls = [];
               sawError = true;
               break;
@@ -3760,6 +3743,46 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
         </div>
       )}
 
+      {/* G4:上下文超窗 / compact 失败(413) 的恢复引导。带操作按钮,不自动重试。 */}
+      {ctxOverflow && (
+        <div className="shrink-0 mx-6 mt-2 px-3 py-2.5 rounded-md bg-red-50 border border-red-200 animate-fade-up">
+          <div className="text-red-700 text-[12px] font-body leading-snug mb-2">
+            ⚠️ {ctxOverflow.wasCompact ? '/compact 失败' : '上下文超出模型窗口'}：当前对话已超过模型上下文上限，
+            {ctxOverflow.wasCompact ? '压缩需要把整段对话发给模型做摘要，请求本身也超限（HTTP 413），所以压缩无法执行。' : '上游拒绝了整个请求（HTTP 413）。'}
+            选择下面任一方式恢复：
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            {!ctxOverflow.has1m && (
+              <button
+                onClick={() => {
+                  const base = String(currentModel || '').replace(/\[1m\]/i, '');
+                  if (base) useStore.getState().setModelFor(sessionQueueKey, base + '[1m]');
+                  setCtxOverflow(null);
+                  setProviderSwitchNotice({ text: '已切到 1M 上下文模型，可继续对话或重试 /compact。' });
+                }}
+                className="px-2.5 py-1 rounded text-[12px] font-medium text-white bg-red-600 hover:bg-red-700"
+                title="给当前模型加 [1m] 后缀，窗口扩到 1M（需 provider 支持）"
+              >切 1M 上下文模型</button>
+            )}
+            <button
+              onClick={() => {
+                const _s = getLocalSession();
+                if (_s) {
+                  useStore.getState().migrateSessionKey?.(_s.sessionId || '', `draft-${_s.projectHash || 'none'}`);
+                  setSelectedSession({ ..._s, sessionId: null, draft: true });
+                }
+                setChatMessages([]);
+                setCtxOverflow(null);
+              }}
+              className="px-2.5 py-1 rounded text-[12px] font-medium text-red-700 border border-red-300 hover:bg-red-100"
+              title="在同项目新建一个空会话"
+            >新建会话</button>
+            <span className="text-[11px] text-red-600/80">或：把鼠标悬停到较早的消息上 → 回滚，删除最旧的对话轮次后再继续。</span>
+            <button onClick={() => setCtxOverflow(null)} className="ml-auto text-red-500 hover:text-red-700 text-[14px] leading-none px-1" title="关闭">×</button>
+          </div>
+        </div>
+      )}
+
       <div ref={containerRef} onScroll={handleScroll} className="flex-1 overflow-y-auto relative z-10">
           {messages.length === 0 && chatMessages.length === 0 ? (
             <div className="mobile-draft-empty flex items-center justify-center h-full text-ink-muted text-sm font-body">
@@ -3861,7 +3884,6 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
           window.dispatchEvent(new CustomEvent('cgui:composer-fill', { detail: { text: item.text, targetKey: sessionQueueKey } }));
         }}
         todos={currentTodos}
-        plan={currentPlan}
         permKey={sessionQueueKey}
         sessionId={selectedSession?.sessionId || null}
       />

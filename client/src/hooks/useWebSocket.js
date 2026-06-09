@@ -1,6 +1,14 @@
 import { useEffect, useRef } from 'react';
 import { useStore } from '../stores/sessionStore.js';
 
+// G3:危险命令启发式 —— 删除类 + 网络/装包 + sudo。命中即强制弹窗,不被任何自动放行豁免。
+// 与 server/hooks/permission-bridge.js 的 DANGEROUS_BASH 保持一致(两端各一份,改一处记得同步)。
+const DANGEROUS_BASH = /\brm\s+-[a-z]*[rf]|\bgit\s+clean\s+-[a-z]*f|\bgit\s+push\b[^\n]*(--force|\s-f\b)|\bgit\s+reset\s+--hard\b|\bdrop\s+(table|database)\b|\btruncate\b|\bmkfs\b|\bdd\s+if=[^\n]*of=\/dev|[|]\s*(sudo\s+)?(ba)?sh\b|\bnpm\s+(i|install|add)\b|\bpnpm\s+(i|install|add)\b|\byarn\s+(add|install)\b|\bpip[23]?\s+install\b|\bbrew\s+install\b|\bsudo\b/i;
+function isDangerousCommand(req) {
+  if (req?.toolName !== 'Bash') return false;
+  return DANGEROUS_BASH.test(String(req?.toolInput?.command || ''));
+}
+
 export function useWebSocket() {
   const wsRef = useRef(null);
   const reconnectRef = useRef(null);
@@ -74,6 +82,14 @@ export function useWebSocket() {
               const mode = useStore.getState().getPermissionModeFor(req.sessionId);
               const READ_CLASS = ['Read', 'Glob', 'Grep', 'LS', 'TodoWrite', 'NotebookRead', 'Skill'];
               const PLAN_WRITE_CLASS = ['Edit', 'MultiEdit', 'Write', 'NotebookEdit'];
+              // G3:危险命令(删除/网络装包/sudo)即使在 acceptEdits/放任模式、或已"永远允许 Bash"
+              // 时,也必须弹窗确认 —— 跳过下面所有自动放行分支,强制渲染。服务端 bridge 有对应
+              // 拦截(放任模式它本会 server 端直接 allow,需 bridge 同样豁免危险命令)。
+              if (isDangerousCommand(req)) {
+                console.log('[cgui-perm] → force prompt (dangerous)', req.id, req.toolName);
+                useStore.getState().addPendingPermission(req);
+                break;
+              }
               // 放任模式排除 AskUserQuestion:它必须弹 GUI picker 让用户选,
               // 否则被 auto-allow → CLI headless 无法运行该工具 → AI 退化成正
               // 文提问(用户报告的"放任下 ask 不弹窗")。与服务端 hook 的

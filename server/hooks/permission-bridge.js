@@ -81,7 +81,15 @@ async function main() {
   const autoAllowList = (process.env.CGUI_AUTO_ALLOW_TOOLS || '')
     .split(',').map((s) => s.trim()).filter(Boolean);
   const toolName = payload.tool_name || payload.toolName || '';
-  if (autoAllowList.length > 0 && autoAllowList.includes(toolName)) {
+
+  // G3:危险命令(删除/网络装包/sudo)无条件走弹窗 —— 即使放任模式/已自动放行/已白名单。
+  // 放在所有 allow 分支之前:放任模式本会在下面 server 端直接 allow,这里先豁免让其 POST
+  // 到 GUI 弹窗。与 client/src/hooks/useWebSocket.js 的 DANGEROUS_BASH 保持一致。
+  const DANGEROUS_BASH = /\brm\s+-[a-z]*[rf]|\bgit\s+clean\s+-[a-z]*f|\bgit\s+push\b[^\n]*(--force|\s-f\b)|\bgit\s+reset\s+--hard\b|\bdrop\s+(table|database)\b|\btruncate\b|\bmkfs\b|\bdd\s+if=[^\n]*of=\/dev|[|]\s*(sudo\s+)?(ba)?sh\b|\bnpm\s+(i|install|add)\b|\bpnpm\s+(i|install|add)\b|\byarn\s+(add|install)\b|\bpip[23]?\s+install\b|\bbrew\s+install\b|\bsudo\b/i;
+  const _ti = payload.tool_input || payload.toolInput || {};
+  const isDangerous = toolName === 'Bash' && DANGEROUS_BASH.test(String(_ti.command || ''));
+
+  if (!isDangerous && autoAllowList.length > 0 && autoAllowList.includes(toolName)) {
     allow(`auto-allow ${toolName} (read-class)`);
   }
 
@@ -108,7 +116,7 @@ async function main() {
   // 原 bypassPermissions 走 --dangerously-skip-permissions 完全跳过 hook,导致
   // ask 在 -p mode 被 CLI reject,AI 退化成文本提问。现在让 hook 仍跑,只是默
   // 认 allow 一切,把 ask 例外留给 GUI picker。
-  if (process.env.CGUI_BYPASS_ALL_EXCEPT_ASK && toolName !== 'AskUserQuestion') {
+  if (process.env.CGUI_BYPASS_ALL_EXCEPT_ASK && toolName !== 'AskUserQuestion' && !isDangerous) {
     allow(`bypass-except-ask: ${toolName}`);
   }
 
@@ -137,7 +145,7 @@ async function main() {
     }
     // 计划类 → 落到下面 plan-mode passthrough 放行
   }
-  if (process.env.CGUI_PLAN_MODE && !PLAN_GATED.includes(toolName)) {
+  if (process.env.CGUI_PLAN_MODE && !PLAN_GATED.includes(toolName) && !isDangerous) {
     allow(`plan-mode passthrough ${toolName}`);
   }
 
