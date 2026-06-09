@@ -4040,15 +4040,29 @@ function ProviderSwitcher() {
   const wrapRef = useRef(null);
   const currentProvider = useStore((s) => s.currentProvider);
 
+  const [importStatus, setImportStatus] = useState({ imported: true, ccSwitchAvailable: false, ccSwitchCount: 0 });
+  const [importing, setImporting] = useState(false);
   const load = () => {
     fetch('/api/providers').then((r) => r.json()).then((d) => {
       setProviders(Array.isArray(d.providers) ? d.providers : []);
       setOpenaiProviders(Array.isArray(d.openaiProviders) ? d.openaiProviders : []);
       setCustomProviders(Array.isArray(d.customProviders) ? d.customProviders : []);
     }).catch(() => {});
+    fetch('/api/providers/import-status').then((r) => r.json())
+      .then((d) => setImportStatus(d || {})).catch(() => {});
     fetch('/api/prefs/hidden-providers').then((r) => r.json())
       .then((d) => setHiddenProviders(new Set(Array.isArray(d.hidden) ? d.hidden : [])))
       .catch(() => {});
+  };
+  const importFromCCSwitch = async () => {
+    setImporting(true);
+    try {
+      const r = await fetch('/api/providers/import-from-ccswitch', { method: 'POST' });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || '导入失败');
+      load();
+    } catch (e) { alert(`导入失败: ${e.message}`); }
+    finally { setImporting(false); }
   };
   const persistHiddenProviders = (set) => {
     fetch('/api/prefs/hidden-providers', {
@@ -4211,6 +4225,18 @@ function ProviderSwitcher() {
               </button>
             ) : null;
           })()}
+          {importStatus.ccSwitchAvailable && (
+            <div className="px-3 py-2 border-t border-canvas-deep">
+              <button onClick={importFromCCSwitch} disabled={importing}
+                className="w-full text-[11px] px-2 py-1.5 rounded border border-canvas-deep hover:bg-canvas-warm text-ink-muted font-body disabled:opacity-50">
+                {importing
+                  ? '导入中…'
+                  : importStatus.imported
+                    ? `再次导入 cc-switch (${importStatus.ccSwitchCount} 项,去重补差)`
+                    : `从 cc-switch 一次性导入 (${importStatus.ccSwitchCount} 项)`}
+              </button>
+            </div>
+          )}
           <CustomProviderForm
             editing={editingProvider}
             onCancel={() => setEditingProvider(null)}

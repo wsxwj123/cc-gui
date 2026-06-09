@@ -113,6 +113,17 @@ async function writeCustomProviders(list) {
   await writeFile(CUSTOM_PROVIDERS_PATH, JSON.stringify(list, null, 2));
 }
 
+// K4: 一次性导入 cc-switch 后,GUI 不再读 cc-switch.db。该 flag 文件存在 = 已导入,
+// GET /providers 仅返回 customProviders;再次"重新导入"会按 ccSwitchSource id 去重补差。
+const CCSWITCH_IMPORTED_FLAG = join(homedir(), '.claude-gui', 'ccswitch-imported.flag');
+async function isCCSwitchImported() {
+  try { await readFile(CCSWITCH_IMPORTED_FLAG, 'utf-8'); return true; } catch { return false; }
+}
+async function markCCSwitchImported() {
+  await mkdir(join(homedir(), '.claude-gui'), { recursive: true });
+  await writeFile(CCSWITCH_IMPORTED_FLAG, new Date().toISOString());
+}
+
 // Per-provider chosen model lists (the user's multi-select out of an OpenAI
 // provider's auto-fetched catalogue). Shape: { [providerId]: [modelId, ...] }.
 const PROVIDER_MODELS_PATH = join(homedir(), '.claude-gui', 'provider-models.json');
@@ -364,10 +375,12 @@ function parseOpenAIProvider(settingsConfig) {
 // app_type) are OpenAI-compatible and routed through the embedded translation
 // proxy on switch. NEVER returns settings_config / API keys.
 router.get('/providers', async (_req, res) => {
-  const rows = await ccSwitchQuery(
+  // K4: 一次性导入后停止读 cc-switch.db,GUI 自己管 customProviders 即可。
+  const imported = await isCCSwitchImported();
+  const rows = imported ? [] : await ccSwitchQuery(
     "SELECT id, name, is_current FROM providers WHERE app_type='claude' ORDER BY sort_index"
   );
-  const oaRows = await ccSwitchQuery(
+  const oaRows = imported ? [] : await ccSwitchQuery(
     "SELECT id, name, app_type, settings_config FROM providers WHERE app_type IN ('codex','opencode') ORDER BY sort_index"
   );
   // A GUI switch is authoritative over the db's stale is_current; fall back to
@@ -651,6 +664,72 @@ async function switchToCustomProvider(p, requestedModel, res) {
   await writeActiveProviderId(p.id);
   res.json({ ok: true, name: p.name, model: model || null });
 }
+
+// GET /api/providers/import-status — { imported, ccSwitchAvailable, ccSwitchCount }
+router.get('/providers/import-status', async (_req, res) => {
+  const imported = await isCCSwitchImported();
+  const rows = await ccSwitchQuery("SELECT id FROM providers WHERE app_type IN ('claude','codex','opencode')");
+  res.json({ imported, ccSwitchAvailable: rows.length > 0, ccSwitchCount: rows.length });
+});
+
+// POST /api/providers/import-from-ccswitch — 一次性把 cc-switch.db 全部 provider 导入到
+// custom-providers.json(含 key,server 侧从不返回 key 给前端)。之后 GET /providers 不再
+// 读 cc-switch.db。重复触发时按 ccSwitchSource 去重,仅补差,不覆盖已编辑的条目。
+router.post('/providers/import-from-ccswitch', async (_req, res) => {
+  try {
+    const claudeRows = await ccSwitchQuery(
+      "SELECT id, name, category, settings_config FROM providers WHERE app_type='claude'"
+    );
+    const oaRows = await ccSwitchQuery(
+      "SELECT id, name, settings_config FROM providers WHERE app_type IN ('codex','opencode')"
+    );
+    const list = await readCustomProviders();
+    const seen = new Set(list.map((p) => p.ccSwitchSource).filter(Boolean));
+    let added = 0;
+    // claude-format providers(第三方 anthropic 兼容):env.ANTHROPIC_BASE_URL/TOKEN + _MODEL 列表
+    for (const r of claudeRows) {
+      if (seen.has(r.id)) continue;
+      if (r.category === 'official') continue; // OAuth 订阅不需要 key,不导入
+      let snap; try { snap = JSON.parse(r.settings_config); } catch { continue; }
+      const env = snap?.env || {};
+      const baseURL = env.ANTHROPIC_BASE_URL || env.ANTHROPIC_API_URL;
+      const apiKey = env.ANTHROPIC_AUTH_TOKEN || env.ANTHROPIC_API_KEY;
+      if (!baseURL || !apiKey) continue;
+      const models = [...new Set(Object.entries(env)
+        .filter(([k, v]) => /_MODEL$/.test(k) && typeof v === 'string' && v)
+        .map(([, v]) => v))];
+      list.push({
+        id: randomUUID(),
+        name: r.name,
+        type: 'anthropic',
+        baseURL: String(baseURL).replace(/\/+$/, ''),
+        apiKey: String(apiKey),
+        models,
+        ccSwitchSource: r.id,
+      });
+      added++;
+    }
+    // openai-format(codex/opencode)providers
+    for (const r of oaRows) {
+      if (seen.has(r.id)) continue;
+      const p = parseOpenAIProvider(r.settings_config);
+      if (!p) continue;
+      list.push({
+        id: randomUUID(),
+        name: r.name,
+        type: 'openai',
+        baseURL: String(p.baseURL).replace(/\/+$/, ''),
+        apiKey: String(p.apiKey),
+        models: p.models || [],
+        ccSwitchSource: r.id,
+      });
+      added++;
+    }
+    await writeCustomProviders(list);
+    await markCCSwitchImported();
+    res.json({ ok: true, added, total: list.length });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
 
 // GET /api/custom-providers — list custom providers (never returns apiKey).
 router.get('/custom-providers', async (_req, res) => {
