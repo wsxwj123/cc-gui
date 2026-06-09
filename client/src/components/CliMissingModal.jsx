@@ -62,7 +62,7 @@ export function CliMissingModal({ onRecheck, onDismiss }) {
 
   return (
     <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/40 backdrop-blur-sm animate-fade-in">
-      <div className="glass-popover w-[520px] max-w-[calc(100vw-1.5rem)] max-h-[88vh] overflow-y-auto rounded-2xl shadow-2xl animate-glass-rise">
+      <div className="glass-popover w-[520px] max-w-[calc(var(--app-w,100vw)-1.5rem)] max-h-[88vh] overflow-y-auto rounded-2xl shadow-2xl animate-glass-rise">
         <div className="px-5 py-4 border-b border-canvas-deep flex items-center gap-3">
           <div className="w-9 h-9 rounded-lg bg-amber-100 flex items-center justify-center shrink-0">
             <AlertTriangle size={18} className="text-amber-700" />

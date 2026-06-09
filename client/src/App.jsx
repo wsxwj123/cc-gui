@@ -91,7 +91,7 @@ function EditableSessionTitle({ session }) {
   );
 }
 
-function CheckpointButton({ sessionId, cwd }) {
+function CheckpointButton({ sessionId, cwd, projectHash, onRestored }) {
   const [open, setOpen] = useState(false);
   const [entries, setEntries] = useState([]);
   const [busy, setBusy] = useState(false);
@@ -119,8 +119,10 @@ function CheckpointButton({ sessionId, cwd }) {
     setBusy(false);
   };
 
-  const restore = async (sha) => {
-    if (!(await confirmDialog(`恢复 cwd 到该 checkpoint？\n${sha.slice(0, 7)}\n会覆盖未提交的修改。`, { danger: true }))) return;
+  const restore = async (entry) => {
+    const sha = typeof entry === 'string' ? entry : entry.sha;
+    const ts = typeof entry === 'string' ? null : entry.ts;
+    if (!(await confirmDialog(`回到该 checkpoint？\n${sha.slice(0, 7)}\n· 工作目录文件还原到此快照(覆盖未提交修改)\n· 会话消息回退到该时刻之后的内容会被裁掉`, { danger: true }))) return;
     try {
       const r = await fetch(`/api/checkpoints/${sessionId}/restore`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -128,9 +130,19 @@ function CheckpointButton({ sessionId, cwd }) {
       });
       const d = await r.json().catch(() => ({}));
       if (!r.ok) { alert('恢复失败：' + (d.error || r.status)); return; }
-      // 成功路径必须给反馈,否则用户点了「确定」后 dropdown 没动静、以为「无反应」。
+      // #1:checkpoint 只是 git 文件快照,不含对话锚点。用快照时间戳把会话裁剪到该时刻,
+      // 消息页随之回退(否则用户点了恢复但消息页一动不动,以为"无反应")。best-effort。
+      if (projectHash && ts) {
+        try {
+          await fetch(`/api/sessions/${sessionId}/trim`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ projectHash, fromTimestamp: new Date(ts).toISOString() }),
+          });
+        } catch {}
+      }
       setOpen(false);
-      alert(`已将工作目录恢复到 checkpoint ${sha.slice(0, 7)}`);
+      onRestored?.();
+      alert(`已回到 checkpoint ${sha.slice(0, 7)}：文件已还原，会话已裁剪到该时刻`);
     } catch (err) { alert('恢复失败：' + err.message); }
   };
 
@@ -173,7 +185,7 @@ function CheckpointButton({ sessionId, cwd }) {
               {entries.length === 0 ? (
                 <p className="px-3 py-4 text-[11px] text-ink-faint text-center font-body">还没有 checkpoint</p>
               ) : entries.map((e) => (
-                <button key={e.sha} onClick={() => restore(e.sha)}
+                <button key={e.sha} onClick={() => restore(e)}
                   className="w-full text-left px-3 py-2 hover:bg-black/5 border-b border-white/5">
                   <div className="text-[11px] font-mono text-ink-soft truncate">{e.label}</div>
                   <div className="text-[9px] text-ink-faint font-mono mt-0.5">
@@ -1566,7 +1578,7 @@ function SessionList() {
           onClick={() => setWorktreeOpen(false)}
         >
           <div
-            className="glass-popover w-[480px] max-w-[calc(100vw-1.5rem)] max-h-[80vh] flex flex-col py-1 animate-glass-rise"
+            className="glass-popover w-[480px] max-w-[calc(var(--app-w,100vw)-1.5rem)] max-h-[80vh] flex flex-col py-1 animate-glass-rise"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="px-4 py-2.5 text-[11px] text-ink-faint uppercase tracking-wider font-body flex items-center justify-between border-b border-canvas-deep shrink-0">
@@ -2644,6 +2656,12 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
             // Main turn — top-level model output
             if (ev.type === 'message_start' && ev.message?.model) {
               setStreamingModel(ev.message.model);
+              // #3:message_start 已携带输入侧 usage(input + cache_read/creation = 当前上下文占用),
+              // 立刻据此更新上下文徽章 —— 不必等回合结束的 result 事件,显示/更新都更快。
+              const u = ev.message.usage;
+              if (u && ((u.input_tokens || 0) + (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0)) > 0) {
+                setLiveContextUsage(u);
+              }
             } else if (ev.type === 'content_block_start') {
               const cb = ev.content_block || {};
               if (cb.type === 'text') {
@@ -3723,6 +3741,12 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
             <CheckpointButton
               sessionId={selectedSession?.sessionId}
               cwd={selectedSession?.projectPath || selectedProject?.path}
+              projectHash={selectedSession?.projectHash}
+              onRestored={() => {
+                // #1:恢复 checkpoint 后重载本会话消息,让消息页跟着回到该时刻(裁剪在 restore 内做)。
+                const s = getLocalSession();
+                if (s?.sessionId && s?.projectHash) fetchMessagesForTab(s.sessionId, s.projectHash, { silent: true });
+              }}
             />
             <div className="text-right max-md:hidden">
               <div className="text-[10px] text-ink-faint font-mono flex items-center gap-1 justify-end">
@@ -4268,7 +4292,7 @@ function ContextBreakdownButton({ contextTokens, contextWindow, contextPct, fmtT
     <div
       ref={menuRef}
       style={{ position: 'fixed', left: coords.left, top: coords.top, transform: `translate(0, ${coords.ty})`, zIndex: 9999 }}
-      className="glass-popover w-[340px] max-w-[calc(100vw-1.5rem)] max-h-[80vh] overflow-y-auto py-2 animate-glass-rise"
+      className="glass-popover w-[340px] max-w-[calc(var(--app-w,100vw)-1.5rem)] max-h-[80vh] overflow-y-auto py-2 animate-glass-rise"
     >
       <div className="px-3 pb-2 flex items-center justify-between border-b border-black/5">
         <span className="text-xs font-medium text-ink font-body">上下文用量</span>
@@ -4475,7 +4499,7 @@ export function ModelSelector({ compact = false, permKey = null }) {
         <ChevronDown size={10} className="text-ink-faint" />
       </button>
       {open && (
-        <div className="glass-popover absolute left-0 top-full mt-2 w-80 max-w-[calc(100vw-1.5rem)] z-50 py-1 animate-glass-rise max-h-[70vh] overflow-y-auto max-md:fixed max-md:left-3 max-md:right-3 max-md:w-auto max-md:top-16 max-md:mt-0">
+        <div className="glass-popover absolute left-0 top-full mt-2 w-80 max-w-[calc(var(--app-w,100vw)-1.5rem)] z-50 py-1 animate-glass-rise max-h-[70vh] overflow-y-auto max-md:fixed max-md:left-3 max-md:right-3 max-md:w-auto max-md:top-16 max-md:mt-0">
           <div className="px-3 py-2 sticky top-0 bg-canvas border-b border-canvas-deep">
             <div className="text-[10px] text-ink-faint uppercase tracking-wider font-body flex items-center justify-between">
               <span>选择模型</span>
@@ -5778,7 +5802,7 @@ export default function App() {
       )}
       {updateNotice && (
         <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/40 backdrop-blur-sm animate-fade-in" onClick={() => setUpdateNotice(null)}>
-          <div className="glass-popover w-[420px] max-w-[calc(100vw-1.5rem)] rounded-2xl shadow-2xl animate-glass-rise overflow-hidden" onClick={(e) => e.stopPropagation()}>
+          <div className="glass-popover w-[420px] max-w-[calc(var(--app-w,100vw)-1.5rem)] rounded-2xl shadow-2xl animate-glass-rise overflow-hidden" onClick={(e) => e.stopPropagation()}>
             <div className="px-5 py-4 flex items-start gap-3">
               <div className="w-9 h-9 rounded-lg bg-amber-100 flex items-center justify-center shrink-0 text-[18px]">🎉</div>
               <div className="flex-1 min-w-0">

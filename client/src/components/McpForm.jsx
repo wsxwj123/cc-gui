@@ -110,7 +110,7 @@ export function McpForm({ editing, onClose, onSaved }) {
 
   return (
     <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/40 backdrop-blur-sm animate-fade-in" onClick={onClose}>
-      <div className="glass-popover w-[560px] max-w-[calc(100vw-1.5rem)] max-h-[90vh] overflow-y-auto rounded-2xl shadow-2xl animate-glass-rise"
+      <div className="glass-popover w-[560px] max-w-[calc(var(--app-w,100vw)-1.5rem)] max-h-[90vh] overflow-y-auto rounded-2xl shadow-2xl animate-glass-rise"
         onClick={(e) => e.stopPropagation()}>
         <div className="px-5 py-4 border-b border-canvas-deep flex items-center gap-3 sticky top-0 bg-canvas z-10">
           <div className="flex-1 text-[14px] font-medium text-ink font-body">{isEdit ? '编辑 MCP 服务器' : '添加 MCP 服务器'}</div>
