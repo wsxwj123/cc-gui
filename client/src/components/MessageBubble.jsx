@@ -127,24 +127,23 @@ function RollbackMenu({ message, onAction }) {
     e.stopPropagation();
     if (!open && wrapRef.current) {
       const r = wrapRef.current.getBoundingClientRect();
-      // Place menu just below trigger, right-aligned. Viewport-relative
-      // (position: fixed) so it floats above every parent's stacking ctx.
-      // Clamp `right` so the 256px (w-64) menu never spills past either edge on
-      // a narrow phone screen: right ∈ [8, innerWidth - menuW - 8].
-      const menuW = 256;
-      const right = Math.max(8, Math.min(window.innerWidth - r.right, window.innerWidth - menuW - 8));
-      // Anchor the menu flush to the trigger on whichever side (below/above) has
-      // MORE room, and cap its height to exactly that room (the menu scrolls if
-      // taller). This can never spill past the top or bottom edge — even on a
-      // short/landscape phone where neither side fits the full menu height. The
-      // flush top/bottom anchor keeps it hugging the button with no gap.
-      const pad = 8, gap = 6;
-      const spaceBelow = window.innerHeight - r.bottom - gap - pad;
-      const spaceAbove = r.top - gap - pad;
-      const coords = spaceBelow >= spaceAbove
-        ? { top: r.bottom + gap, right, maxH: spaceBelow }
-        : { bottom: window.innerHeight - r.top + gap, right, maxH: spaceAbove };
-      setCoords(coords);
+      const gap = 6;
+      // 关键:<html> 用了 CSS zoom(字号缩放)。window.innerWidth/Height 是 zoom 不变的,
+      // 但 getBoundingClientRect 在 zoom 下是另一套坐标 → 二者相减(原 right=innerWidth-
+      // r.right)会按 zoom 倍数错位,菜单飞到一边(用户报告)。改为完全不用 innerWidth/Height
+      // 定位:left 放到按钮右缘 + translateX(-100%) 右对齐;上/下用 translateY 翻转。
+      // 全部基于 rect + 自身百分比,与 zoom 无关。
+      // innerHeight 是 zoom 不变的,r 是 zoom 后视觉坐标 → 需按 --ui-zoom 折算到同一空间
+      // (与 App 里 --app-h = innerHeight/z 的约定一致),否则缩放>1 时会误判向下开导致
+      // 菜单超出屏幕底部。
+      const z = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--ui-zoom')) || 1;
+      const visH = window.innerHeight / z;
+      const openBelow = (visH - r.bottom) >= r.top;
+      setCoords({
+        left: r.right,
+        top: openBelow ? r.bottom + gap : r.top - gap,
+        ty: openBelow ? '0' : '-100%',
+      });
     }
     setOpen(!open);
   };
@@ -155,8 +154,8 @@ function RollbackMenu({ message, onAction }) {
   const menu = open && coords && (
     <div
       ref={menuRef}
-      style={{ position: 'fixed', right: coords.right, zIndex: 9999, maxHeight: coords.maxH, overflowY: 'auto', ...(coords.top != null ? { top: coords.top } : { bottom: coords.bottom }) }}
-      className="w-64 max-w-[calc(100vw-16px)] py-1 rounded-lg shadow-xl bg-canvas border border-canvas-deep animate-glass-rise"
+      style={{ position: 'fixed', left: coords.left, top: coords.top, transform: `translate(-100%, ${coords.ty})`, zIndex: 9999 }}
+      className="w-64 max-w-[calc(100vw-16px)] max-h-[80vh] overflow-y-auto py-1 rounded-lg shadow-xl bg-canvas border border-canvas-deep animate-glass-rise"
     >
       <div className="px-3 py-2 text-[10px] text-ink-faint uppercase tracking-wider font-body border-b border-canvas-deep">
         回滚此消息{hasSha ? '' : ' · 自动查找快照'}
