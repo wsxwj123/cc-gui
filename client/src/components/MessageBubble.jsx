@@ -140,14 +140,17 @@ function RollbackMenu({ message, onAction }) {
       const visH = window.innerHeight / z;
       const visW = window.innerWidth / z;
       const openBelow = (visH - r.bottom) >= r.top;
-      // 菜单右对齐(translateX -100%)到按钮右缘。小窗口下钳制:右边不超出视口(left ≤
-      // visW-8),左边(left - 菜单宽 256)不小于 8,避免菜单溢出视口边界被裁(#3)。
-      const MENU_W = 256; // w-64
-      const left = Math.max(MENU_W + 8, Math.min(r.right, visW - 8));
+      // 菜单右对齐(translateX -100%)到按钮右缘。关键:窗口被拖到比菜单(256)还窄时,
+      // 写死的 MENU_W 会让"左边界≥8"的钳制反把右边界顶出视口 → 仍溢出(用户报告 #1
+      // 之前没生效的原因)。改为菜单宽度随窗口动态收窄: menuW = min(256, visW-16),
+      // 这样 right≤visW-8 且 left≥8 永远同时成立。
+      const menuW = Math.min(256, Math.max(160, visW - 16));
+      const left = Math.max(menuW + 8, Math.min(r.right, visW - 8));
       setCoords({
         left,
         top: openBelow ? r.bottom + gap : r.top - gap,
         ty: openBelow ? '0' : '-100%',
+        w: menuW,
       });
     }
     setOpen(!open);
@@ -159,8 +162,8 @@ function RollbackMenu({ message, onAction }) {
   const menu = open && coords && (
     <div
       ref={menuRef}
-      style={{ position: 'fixed', left: coords.left, top: coords.top, transform: `translate(-100%, ${coords.ty})`, zIndex: 9999 }}
-      className="w-64 max-w-[calc(100vw-16px)] max-h-[80vh] overflow-y-auto py-1 rounded-lg shadow-xl bg-canvas border border-canvas-deep animate-glass-rise"
+      style={{ position: 'fixed', left: coords.left, top: coords.top, width: coords.w || 256, transform: `translate(-100%, ${coords.ty})`, zIndex: 9999 }}
+      className="max-w-[calc(100vw-16px)] max-h-[80vh] overflow-y-auto py-1 rounded-lg shadow-xl bg-canvas border border-canvas-deep animate-glass-rise"
     >
       <div className="px-3 py-2 text-[10px] text-ink-faint uppercase tracking-wider font-body border-b border-canvas-deep">
         回滚此消息{hasSha ? '' : ' · 自动查找快照'}

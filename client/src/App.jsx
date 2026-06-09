@@ -377,7 +377,7 @@ const PANEL_MAP = {
   files: { label: '文件浏览器', icon: FolderTree, component: FileExplorerPanel },
   changes: { label: '文件审查', icon: FileDiff, component: FileReviewPanel },
   monitor: { label: 'Subagent 监控', icon: Bot, component: AgentMonitorPanel },
-  agents: { label: 'Subagent 定义', icon: SquarePen, component: AgentsPanel },
+  agents: { label: '自定义 Agent（写入 ~/.claude/agents）', icon: SquarePen, component: AgentsPanel },
   usage: { label: '用量统计', icon: BarChart3, component: UsagePanel },
   processes: { label: '进程管理 / 停止', icon: Activity, component: ProcessPanel },
   mcp: { label: 'MCP 服务器', icon: Server, component: MCPPanel },
@@ -1106,22 +1106,36 @@ function ProjectList() {
 }
 
 // ─── Session List ──────────────────────────────────────────────
-// 二次确认删除按钮:第一次点变红显示"确认",3 秒内再点真删,3 秒后自动复位。
-// 替代 window.confirm(Tauri WebView 有时禁用 native dialog,导致删除按钮"无效")。
-function DeleteButton({ onConfirm }) {
-  // 改用 confirmDialog 弹窗替代原 inline 二次点击:二次确认按钮处在会话项的
-  // group-hover opacity 区,armed 后鼠标一移开按钮就消失、点不到第二次,表现为
-  // "删除没反应"。弹窗挂在 body、不受 hover/opacity 影响,一次点击即可确认。
+// 二次确认删除按钮(内联,无弹窗):第一次点 🗑 → 原地morph 成红色"确认"按钮,
+// 同一位置再点即删,3 秒内不点自动复位。比弹窗省一次"鼠标换位置点确认"。
+// armed 时通过 onArmedChange 让父级把整组操作按钮强制保持可见(opacity-100),
+// 避免鼠标移出 group-hover 区后"确认"按钮消失点不到(以前 inline 失败的根因)。
+function DeleteButton({ onConfirm, onArmedChange }) {
+  const [armed, setArmed] = useState(false);
+  const timerRef = useRef(null);
+  useEffect(() => () => { if (timerRef.current) clearTimeout(timerRef.current); }, []);
+  const disarm = () => {
+    if (timerRef.current) { clearTimeout(timerRef.current); timerRef.current = null; }
+    setArmed(false); onArmedChange?.(false);
+  };
+  if (armed) {
+    return (
+      <button
+        onClick={(e) => { e.stopPropagation(); disarm(); onConfirm(); }}
+        className="px-1.5 py-1 rounded bg-red-600 text-white text-[10px] font-body leading-none hover:bg-red-700"
+        title="再次点击确认删除"
+      >确认</button>
+    );
+  }
   return (
     <button
-      onClick={async (e) => {
+      onClick={(e) => {
         e.stopPropagation();
-        if (await confirmDialog('删除这个会话的本地历史记录？此操作不可撤销。', { danger: true, confirmText: '删除' })) {
-          onConfirm();
-        }
+        setArmed(true); onArmedChange?.(true);
+        timerRef.current = setTimeout(() => { setArmed(false); onArmedChange?.(false); timerRef.current = null; }, 3000);
       }}
       className="p-1 rounded hover:bg-red-50"
-      title="删除本地会话历史"
+      title="删除本地会话历史（点击后再点确认）"
     >
       <Trash2 size={12} className="text-ink-faint hover:text-red-600" />
     </button>
@@ -1135,6 +1149,7 @@ function SessionItem({ session, isSelected, onSelect, onFork, onArchive, onDelet
   const setCustomTitle = useStore((s) => s.setCustomTitle);
   const [renaming, setRenaming] = useState(false);
   const [draft, setDraft] = useState('');
+  const [deleteArmed, setDeleteArmed] = useState(false); // #2 删除二次确认中 → 强制操作组可见
   const hasSubagents = session.subagents?.length > 0;
   const isArchived = !!session.archived;
   const isDraft = !!session.draft || !session.sessionId;
@@ -1204,7 +1219,7 @@ function SessionItem({ session, isSelected, onSelect, onFork, onArchive, onDelet
         </div>
       )}
       {!renaming && (
-      <div className="absolute bottom-1.5 right-1.5 opacity-100 md:opacity-0 md:group-hover:opacity-100 transition-opacity flex items-center gap-0.5">
+      <div className={`absolute bottom-1.5 right-1.5 transition-opacity flex items-center gap-0.5 ${deleteArmed ? 'opacity-100' : 'opacity-100 md:opacity-0 md:group-hover:opacity-100'}`}>
         <button
           onClick={startRename}
           disabled={isDraft}
@@ -1230,7 +1245,7 @@ function SessionItem({ session, isSelected, onSelect, onFork, onArchive, onDelet
             ? <ArchiveRestore size={12} className="text-accent" />
             : <Archive size={12} className="text-ink-faint" />}
         </button>
-        <DeleteButton onConfirm={() => onDelete(session)} />
+        <DeleteButton onConfirm={() => onDelete(session)} onArmedChange={setDeleteArmed} />
       </div>
       )}
       {expanded && hasSubagents && (
@@ -1921,14 +1936,24 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
   const paneCountForAgent = useStore((s) => s.paneCount);
   const showAgentView = !!viewingAgentId && !!viewingAgent
     && (paneCountForAgent === 1 || viewingAgent.sessionId === selectedSession?.sessionId);
-  // 优先读本会话 modelBySession,只在没有 per-session 选择时回退到全局 currentModel。
-  // 此前直接读 currentModel:WS 收到 server 推的默认 model 会 setCurrentModel(无 [1m]
-  // 后缀)→ 顶部"x/1M" 进度条契约被破坏 → 跳回 "x/200k"。modelBySession 只在用户
-  // 在本会话主动切模型时改,不被 WS 推流覆盖,所以是更稳的真相。
-  const currentModel = useStore((s) => {
+  // 模型解析优先级(#8 修复模型总回退到默认):
+  //   1. 本会话显式 pin(modelBySession[key]) —— 用户主动切的,最权威
+  //   2. 本会话历史里最近一条带 model 的消息 —— 让会话"记住"自己用过的模型,
+  //      避免全局 currentModel 被 WS 'model' 事件重置成 settings.json 默认(haiku)后,
+  //      没 pin 的会话(含回滚后新建的)统统掉回默认
+  //   3. 全局 currentModel —— 最后兜底(草稿、全新会话)
+  const pinnedModel = useStore((s) => {
     const k = selectedSession?.sessionId || `draft-${selectedSession?.projectHash || 'none'}`;
-    return s.modelBySession[k] || s.currentModel;
+    return s.modelBySession[k] || null;
   });
+  const globalModel = useStore((s) => s.currentModel);
+  const historyModel = useMemo(() => {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (messages[i]?.model) return messages[i].model;
+    }
+    return null;
+  }, [messages]);
+  const currentModel = pinnedModel || historyModel || globalModel;
   const modelBySession = useStore((s) => s.modelBySession);
   const messagesEndRef = useRef(null);
   const containerRef = useRef(null);
@@ -2424,7 +2449,15 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
       // session's stored value (keyed by sessionQueueKey) so each pane/session
       // sends with its own settings, not whatever was last globally selected.
       const permissionMode = useStore.getState().getPermissionModeFor(sessionQueueKey);
-      const currentModel = useStore.getState().getModelFor(sessionQueueKey);
+      // 模型解析与徽章一致(#8):pin → 历史模型 → 全局默认。否则发送时只读 pin||全局,
+      // 全局被 WS 重置成默认后,没 pin 的会话(尤其回滚后)会用默认模型发出,与徽章不符。
+      const _pin = useStore.getState().modelBySession[sessionQueueKey];
+      const _hist = (() => {
+        const ms = getLocalMessages() || [];
+        for (let i = ms.length - 1; i >= 0; i--) if (ms[i]?.model) return ms[i].model;
+        return null;
+      })();
+      const currentModel = _pin || _hist || useStore.getState().currentModel;
       const effort = useStore.getState().getEffortFor(sessionQueueKey);
       // When resuming an existing session, cwd MUST be the EXACT string the
       // CLI was launched with — including Unicode chars (e.g. `/foo/肠骨轴`).
@@ -5622,7 +5655,7 @@ export default function App() {
             // Short chip label (always visible under the icon). Long `label`
             // stays as the hover tooltip for the full name.
             const SHORT = {
-              files: '文件', monitor: '监控', agents: '定义', usage: '用量', processes: '进程',
+              files: '文件', monitor: '监控', agents: 'Agent', usage: '用量', processes: '进程',
               changes: '审查', mcp: 'MCP', settings: '设置',
             };
             const short = SHORT[id] || label;

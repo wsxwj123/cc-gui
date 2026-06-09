@@ -647,7 +647,9 @@ router.post('/chat/title', async (req, res) => {
 
   let proc;
   try {
-    proc = claudeSpawn(['-p', prompt, '--permission-mode', 'plan'], {
+    // --no-session-persistence:标题生成是一次性调用,绝不能落盘成会话 jsonl,否则项目
+    // 会话列表里会冒出"给下面这段对话起标题…"的空白会话(刷新后可见,用户报告 #5)。
+    proc = claudeSpawn(['-p', prompt, '--permission-mode', 'plan', '--no-session-persistence'], {
       cwd: typeof req.body?.cwd === 'string' && req.body.cwd ? req.body.cwd : homedir(),
       stdio: ['ignore', 'pipe', 'pipe'],
       env: childEnv,
@@ -751,6 +753,8 @@ router.get('/context/:sessionId', (req, res) => {
     '--verbose',
     '--resume', sessionId,
     '--fork-session',
+    // 不落盘:/context 只是读当前上下文,fork 副本不该留在磁盘(否则也会冒出空白会话)。
+    '--no-session-persistence',
   ];
   let proc;
   try {

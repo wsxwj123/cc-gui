@@ -351,12 +351,21 @@ router.put('/mcp/:name/enable', async (req, res) => {
     const config = disabled[name];
     if (!config) return res.status(404).json({ error: 'Server not found in disabled list' });
 
+    const isHttp = config.transport === 'http' || config.transport === 'sse';
+    const httpUrl = config.url || config.command;
+    // 旧版禁用的 http/sse 服务器可能没存 URL(命令为空)→ 无法重建连接。给出可操作的
+    // 错误而不是让 claude mcp add 报晦涩错误后开关弹回。用户删掉它重新添加即可(#3)。
+    if (isHttp && (!httpUrl || !String(httpUrl).trim())) {
+      return res.status(400).json({
+        error: `无法启用「${name}」：该 ${config.transport} 服务器的连接地址(URL)未保存(早期版本禁用 http MCP 时丢了 URL)。请点删除后用「添加」重新填写 URL 即可。`,
+      });
+    }
     const args = ['mcp', 'add'];
-    if (config.transport === 'http') args.push('--transport', 'http');
+    if (isHttp) args.push('--transport', config.transport);
     if (config.scope) args.push('-s', String(config.scope));
     args.push(name);
-    if (config.transport === 'http') {
-      args.push(String(config.command));
+    if (isHttp) {
+      args.push(String(httpUrl).trim());
     } else {
       args.push('--', String(config.command), ...((config.args || []).map(String)));
     }
@@ -389,13 +398,23 @@ router.put('/mcp/:name/disable', async (req, res) => {
     const config = { name };
     const cmdMatch = details.match(/Command:\s*(.+)/);
     const argsMatch = details.match(/Args:\s*(.+)/);
+    const urlMatch = details.match(/URL:\s*(.+)/);
     const typeMatch = details.match(/Type:\s*(\S+)/);
     const scopeMatch = details.match(/Scope:\s*(.+?)(?:\s*\(|$)/m);
 
-    config.transport = typeMatch ? typeMatch[1] : 'stdio';
-    config.command = cmdMatch ? cmdMatch[1].trim() : '';
-    config.args = argsMatch ? argsMatch[1].trim().split(/\s+/) : [];
+    config.transport = (typeMatch ? typeMatch[1] : 'stdio').toLowerCase();
     config.scope = scopeMatch ? scopeMatch[1].trim().toLowerCase().split(' ')[0] : 'user';
+    if (config.transport === 'http' || config.transport === 'sse') {
+      // http/sse 的连接地址在 `URL:` 字段,不是 `Command:`。以前只读 Command → http MCP
+      // 被禁用后 url 丢失(存成空),再启用因缺 URL 失败、开关弹回(用户报告的 xiaohongshu #3)。
+      const u = urlMatch ? urlMatch[1].trim() : (cmdMatch ? cmdMatch[1].trim() : '');
+      config.url = u;
+      config.command = u; // 兼容旧 enable 逻辑(它对 http 读 config.command 当 URL)
+      config.args = [];
+    } else {
+      config.command = cmdMatch ? cmdMatch[1].trim() : '';
+      config.args = argsMatch ? argsMatch[1].trim().split(/\s+/) : [];
+    }
 
     const disabled = await readDisabled();
     disabled[name] = config;
