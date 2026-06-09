@@ -22,7 +22,8 @@ import { useStore } from '../stores/sessionStore.js';
 // the generic category-grouped collapsible.
 const INLINE_TOOL_NAMES = new Set([
   'Bash', 'Edit', 'MultiEdit', 'Write', 'Read',
-  'Task', 'Grep', 'Glob', 'WebSearch', 'WebFetch', 'Skill',
+  // 'Agent' 与 'Task' 都是子代理派发工具(不同 provider/CLI 命名不同),都走 TaskCard。
+  'Task', 'Agent', 'Grep', 'Glob', 'WebSearch', 'WebFetch', 'Skill',
 ]);
 
 function ToolCallWithRetry({ toolCall, onRetryTool, children }) {
@@ -62,7 +63,8 @@ function renderRichToolCard(toolCall) {
     case 'MultiEdit':
     case 'Write': return <EditDiffCard toolCall={toolCall} />;
     case 'Read': return <ReadCard toolCall={toolCall} />;
-    case 'Task': return <TaskCard toolCall={toolCall} />;
+    case 'Task':
+    case 'Agent': return <TaskCard toolCall={toolCall} />;
     case 'Grep':
     case 'Glob': return <GrepGlobCard toolCall={toolCall} />;
     case 'WebSearch':

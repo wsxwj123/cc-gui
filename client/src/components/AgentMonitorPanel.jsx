@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Bot, Loader2, Square, Clock, RefreshCw, Terminal, ChevronDown, ChevronRight } from 'lucide-react';
+import { Bot, Loader2, Square, Clock, RefreshCw, Terminal, ChevronDown, ChevronRight, Maximize2 } from 'lucide-react';
 import { useStore } from '../stores/sessionStore.js';
 import { MarkdownRenderer } from './MarkdownRenderer.jsx';
 
@@ -100,6 +100,7 @@ function AgentBucket({ title, titleColor, defaultOpen, agents }) {
 // Single agent card — click to expand and see thinking / tool calls / final result.
 function AgentCard({ agent }) {
   const [expanded, setExpanded] = useState(false);
+  const setViewingAgent = useStore((s) => s.setViewingAgent);
   const text = agent.text ? agent.text.join('') : '';
   const thinking = agent.thinking ? agent.thinking.join('') : '';
   const tools = agent.toolCalls || [];
@@ -115,7 +116,19 @@ function AgentCard({ agent }) {
           {hasDetail && (expanded ? <ChevronDown size={11} className="text-violet-600 shrink-0" /> : <ChevronRight size={11} className="text-violet-600 shrink-0" />)}
           <Bot size={11} className="text-violet-600 shrink-0" />
           <span className="text-xs font-medium text-ink font-mono truncate">{agent.name || 'Task'}</span>
-          <div className="ml-auto"><StatusBadge status={agent.status} /></div>
+          <div className="ml-auto flex items-center gap-1.5">
+            <StatusBadge status={agent.status} />
+            {/* #9 进入子代理会话窗口 */}
+            <span
+              role="button"
+              tabIndex={0}
+              onClick={(e) => { e.stopPropagation(); if (agent.id) setViewingAgent(agent.id); }}
+              className="p-0.5 rounded text-violet-500 hover:text-violet-800 hover:bg-violet-100 cursor-pointer"
+              title="在子代理会话窗口打开"
+            >
+              <Maximize2 size={11} />
+            </span>
+          </div>
         </div>
         {agent.description && (
           <div className="text-[10.5px] text-ink-muted font-body truncate pl-5">{agent.description}</div>
@@ -280,7 +293,9 @@ export function AgentMonitorPanel() {
                     key={key}
                     title={BUCKET_META[key].label}
                     titleColor={BUCKET_META[key].color}
-                    defaultOpen={BUCKET_META[key].defaultOpen}
+                    // 本地子代理一律默认展开:跑完进 done 桶被折叠是"看不见子代理活动"
+                    // 的主因之一,这里全部展开,确保捕获到的子代理都直接可见。
+                    defaultOpen
                     agents={agents}
                   />
                 );

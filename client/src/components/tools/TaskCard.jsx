@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Bot, ChevronDown, ChevronRight, Loader2 } from 'lucide-react';
+import { Bot, ChevronDown, ChevronRight, Loader2, Maximize2 } from 'lucide-react';
 import { useStore } from '../../stores/sessionStore.js';
 import { MarkdownRenderer } from '../MarkdownRenderer.jsx';
 
@@ -12,6 +12,7 @@ import { MarkdownRenderer } from '../MarkdownRenderer.jsx';
 export function TaskCard({ toolCall }) {
   const [expanded, setExpanded] = useState(false);
   const agent = useStore((s) => s.activeAgents[toolCall.id]);
+  const setViewingAgent = useStore((s) => s.setViewingAgent);
 
   const subagentType = toolCall.input?.subagent_type || agent?.name || 'Task';
   const description = toolCall.input?.description || agent?.description || '';
@@ -50,6 +51,16 @@ export function TaskCard({ toolCall }) {
             </div>
           )}
         </div>
+        {/* #9 进入子代理会话窗口 */}
+        <span
+          role="button"
+          tabIndex={0}
+          onClick={(e) => { e.stopPropagation(); setViewingAgent(toolCall.id); }}
+          className="shrink-0 p-1 rounded text-violet-500 hover:text-violet-800 hover:bg-violet-100 transition-colors cursor-pointer"
+          title="在子代理会话窗口打开"
+        >
+          <Maximize2 size={12} />
+        </span>
       </button>
 
       {expanded && (

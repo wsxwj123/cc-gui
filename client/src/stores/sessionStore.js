@@ -251,6 +251,7 @@ export const useStore = create((set, get) => ({
   //     text: [], thinking: [], toolCalls: [], result }
   // App.jsx reader populates this; AgentMonitorPanel + TaskCard render it.
   activeAgents: {},
+  viewingAgentId: null,  // #9:当前在主区打开的子代理 id
 
   // 侧栏状态符号数据源:有活跃 chat-process 的 sessionId(转圈)+ 它们的 cwd(让
   // ProjectList 在任一会话运行时给项目转圈)。App 每 1.5s 轮询 /agents/active 写入;
@@ -721,6 +722,8 @@ export const useStore = create((set, get) => ({
     } } };
   }),
   clearAgents: () => set({ activeAgents: {} }),
+  // #9 子代理会话窗口:当前在主区打开查看的子代理 id(null = 看正常会话)。
+  setViewingAgent: (id) => set({ viewingAgentId: id || null }),
 
   // ── Message queue helpers (#3) ──────────────────────────────
   enqueueMessage: (sessionKey, msg) => set((s) => {

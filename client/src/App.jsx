@@ -23,6 +23,7 @@ import { MCPPanel } from './components/MCPPanel.jsx';
 import { FileReviewPanel } from './components/FileChangesPanel.jsx';
 import { AgentsPanel } from './components/AgentsPanel.jsx';
 import { AgentMonitorPanel } from './components/AgentMonitorPanel.jsx';
+import { SubagentView } from './components/SubagentView.jsx';
 import { CliMissingModal } from './components/CliMissingModal.jsx';
 import { BUILTIN_PROVIDERS, findBuiltin } from './utils/builtinProviders.js';
 import { computeCost, formatCost } from './utils/pricing.js';
@@ -1913,6 +1914,13 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
   // order stays stable. After a session-load transition we'd otherwise add a
   // hook below the early return → React #310 → blank page.
   const currentProvider = useStore((s) => s.currentProvider);
+  // #9 子代理会话窗口:本 pane 是否要把主区换成某子代理的对话视图。单屏恒在 pane0
+  // 展示;分屏按 agent 归属会话匹配对应 pane。
+  const viewingAgentId = useStore((s) => s.viewingAgentId);
+  const viewingAgent = useStore((s) => (s.viewingAgentId ? s.activeAgents[s.viewingAgentId] : null));
+  const paneCountForAgent = useStore((s) => s.paneCount);
+  const showAgentView = !!viewingAgentId && !!viewingAgent
+    && (paneCountForAgent === 1 || viewingAgent.sessionId === selectedSession?.sessionId);
   // 优先读本会话 modelBySession,只在没有 per-session 选择时回退到全局 currentModel。
   // 此前直接读 currentModel:WS 收到 server 推的默认 model 会 setCurrentModel(无 [1m]
   // 后缀)→ 顶部"x/1M" 进度条契约被破坏 → 跳回 "x/200k"。modelBySession 只在用户
@@ -2604,12 +2612,13 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
                 currentToolCalls.push(newTc);
                 setStreamingToolCalls([...currentToolCalls]);
                 setStreamingBlocks([...orderedBlocks]);
-                if (cb.name === 'Task') {
+                if (cb.name === 'Task' || cb.name === 'Agent') {
                   store.upsertAgent(cb.id, {
-                    name: 'Task',
+                    name: cb.name,
                     description: '',
                     status: 'starting',
                     startedAt: Date.now(),
+                    sessionId: getLocalSession()?.sessionId || null,  // #9 归属会话
                   });
                 }
               }
@@ -2653,11 +2662,13 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
                     };
                     setStreamingBlocks([...orderedBlocks]);
                   }
-                  if (block.name === 'Task' && parsed) {
+                  if ((block.name === 'Task' || block.name === 'Agent') && parsed) {
                     store.upsertAgent(block.toolId, {
-                      name: parsed.subagent_type || parsed.agent || 'Task',
+                      name: parsed.subagent_type || parsed.agent || block.name,
                       description: parsed.description || parsed.prompt?.slice(0, 80) || '',
                       status: 'working',
+                      prompt: parsed.prompt || '',  // #9 子代理派发 prompt
+                      sessionId: getLocalSession()?.sessionId || null,
                     });
                   }
                 } catch {}
@@ -2694,6 +2705,21 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
                   currentToolCalls[idx] = { ...currentToolCalls[idx], input: block.input };
                 }
                 setStreamingToolCalls([...currentToolCalls]);
+                // 子代理捕获(关键修复):有些 provider(mimo 等)不发 partial stream_event,
+                // Task 工具只以整条 assistant 消息到达,于是 stream_event 路径里的 upsertAgent
+                // 永不触发 → activeAgents 为空 → 监控里"看不见子代理活动"。这里在整条消息
+                // 路径也为 Task 注册子代理,subagent 的最终输出由后面的 tool_result 补上。
+                if (block.name === 'Task' || block.name === 'Agent') {
+                  const inp = block.input || {};
+                  useStore.getState().upsertAgent(block.id, {
+                    name: inp.subagent_type || inp.agent || block.name,
+                    description: inp.description || (inp.prompt ? String(inp.prompt).slice(0, 80) : ''),
+                    prompt: inp.prompt || '',
+                    status: 'working',
+                    startedAt: Date.now(),
+                    sessionId: getLocalSession()?.sessionId || null,
+                  });
+                }
               }
             }
             if (event.message.model) setStreamingModel(event.message.model);
@@ -3368,8 +3394,12 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
     }
   }, [chatMessages, messages, fetchMessagesForTab, setLocalMessages, setSelectedSession, getLocalSession]);
   useEffect(() => { handleRollbackRef.current = handleRollback; }, [handleRollback]);
-  // 切换会话时清掉待回滚 + 即时上下文用量,避免泄漏到另一会话。
-  useEffect(() => { setPendingEditRollback(null); setLiveContextUsage(null); }, [selectedSession?.sessionId, setPendingEditRollback]);
+  // 切换会话时清掉待回滚 + 即时上下文用量 + 打开的子代理视图,避免泄漏到另一会话。
+  useEffect(() => {
+    setPendingEditRollback(null);
+    setLiveContextUsage(null);
+    useStore.getState().setViewingAgent(null);
+  }, [selectedSession?.sessionId, setPendingEditRollback]);
 
   // 编辑重发取消(#4):ChatInput 里按 Esc → 撤销待回滚(历史本就没动,纯清状态)。
   useEffect(() => {
@@ -3547,6 +3577,16 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
 
   return (
     <div className="flex-1 flex flex-col min-h-0 glass-base relative">
+      {/* #9 子代理对话视图:覆盖在本 pane 之上,顶部面包屑可返回母会话。 */}
+      {showAgentView && (
+        <div className="absolute inset-0 z-40 flex flex-col glass-base">
+          <SubagentView
+            agentId={viewingAgentId}
+            parentTitle={selectedSession?.customTitle || selectedSession?.firstPrompt || '母会话'}
+            onBack={() => useStore.getState().setViewingAgent(null)}
+          />
+        </div>
+      )}
       {!mobileChrome && <div className="glass-bar shrink-0 px-6 py-3 relative z-30">
         {/* Title row wraps when the pane is narrow or font is scaled up so
             the right-side stats/buttons drop to a second line instead of
