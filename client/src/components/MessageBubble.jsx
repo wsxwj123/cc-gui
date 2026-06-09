@@ -323,7 +323,27 @@ export function MessageBubble({ message, onRollback }) {
               <span className="text-[13px] font-medium text-ink font-body">你</span>
             </div>
             <div className="max-w-[85%] bg-canvas-warm border border-canvas-deep rounded-2xl px-4 py-2.5">
-              <CollapsibleUserText text={message.text} />
+              {/* L3: 有附件时优先用 displayText(去 "@附件" 标签的纯文本);CLI 收的仍是带 @path 的完整 outbound */}
+              <CollapsibleUserText text={(message.attachments?.length && message.displayText !== undefined) ? message.displayText : message.text} />
+              {Array.isArray(message.attachments) && message.attachments.length > 0 && (
+                <div className="mt-2 flex flex-wrap gap-2">
+                  {message.attachments.map((a, i) => (
+                    <div key={i} className="flex items-center gap-2 px-2 py-1 bg-canvas border border-canvas-deep rounded-lg max-w-[260px]" title={a.path}>
+                      {a.kind === 'image' && a.preview ? (
+                        <img src={a.preview} alt={a.name} className="w-10 h-10 rounded object-cover shrink-0" />
+                      ) : (
+                        <div className="w-10 h-10 rounded bg-accent/10 flex items-center justify-center shrink-0">
+                          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-accent"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+                        </div>
+                      )}
+                      <div className="min-w-0">
+                        <div className="text-[12px] text-ink font-body truncate">{a.name}</div>
+                        {a.bytes ? <div className="text-[10px] text-ink-faint font-mono">{(a.bytes/1024).toFixed(1)} KB</div> : null}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           </div>
         </div>

@@ -388,7 +388,12 @@ export function ChatInput({ onSend, onStop, onAccelerate, disabled, isStreaming,
       : '';
     const outbound = (trimmed || '请查看这些附件') + attachmentRefs;
     if (trimmed) saveHistoryEntry(trimmed);
-    onSend(outbound);
+    // L3: 气泡显示 trimmed(纯文本)+ 附件卡片;CLI 收 outbound(带 @path)。
+    // attachments 经 meta 传到消息记录,MessageBubble 据此渲染缩略图/文件名。
+    const meta = attachments.length > 0
+      ? { attachments: attachments.map((a) => ({ kind: a.kind, name: a.name, path: a.path, preview: a.preview, bytes: a.bytes })), displayText: trimmed }
+      : undefined;
+    onSend(outbound, meta ? { meta } : undefined);
     setText('');
     setEditingResend(false);
     setHistoryCursor(-1);

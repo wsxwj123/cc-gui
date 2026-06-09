@@ -250,6 +250,15 @@ fn wait_until_free(port: u16, timeout: Duration) -> bool {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        // L1: 单例插件 — 双击 app 时不开新进程,把已有窗口前置聚焦,避免每次都开新窗口
+        // 且不踩坏 6677 上活着的 server(浏览器 session 不掉)。
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            if let Some(w) = app.get_webview_window("main") {
+                let _ = w.unminimize();
+                let _ = w.show();
+                let _ = w.set_focus();
+            }
+        }))
         .manage(Backend(Mutex::new(None)))
         .setup(|app| {
             let mut selected_port = None;

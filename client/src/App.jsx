@@ -25,6 +25,7 @@ import { AgentsPanel } from './components/AgentsPanel.jsx';
 import { AgentMonitorPanel } from './components/AgentMonitorPanel.jsx';
 import { SubagentView } from './components/SubagentView.jsx';
 import { CliMissingModal } from './components/CliMissingModal.jsx';
+import { FullDiskAccessModal } from './components/FullDiskAccessModal.jsx';
 import { BUILTIN_PROVIDERS, findBuiltin } from './utils/builtinProviders.js';
 import { computeCost, formatCost } from './utils/pricing.js';
 import {
@@ -2262,7 +2263,7 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
   const messageQueue = messageQueueRaw || EMPTY_ARRAY;
 
   const handleSend = useCallback(async (prompt, opts = {}) => {
-    const { reattachPid, appendSystemPrompt, hiddenUserMessage = false } = opts;
+    const { reattachPid, appendSystemPrompt, hiddenUserMessage = false, meta } = opts;
     // Intercept the /remote-control (alias /rc) command. It CANNOT be sent
     // through `claude -p` — slash commands are interactive-only and the CLI
     // rejects them ("isn't available in this environment"). Instead we launch
@@ -2351,6 +2352,10 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
       uuid: userMsgUuid, type: 'user',
       timestamp: userMsgTimestamp, text: prompt,
       checkpointSha: null,
+      // L3: 附件卡片渲染数据。displayText 是去附件标签后的纯文本(气泡显示用),
+      // attachments 用于渲染缩略图/文件名卡片。prompt(text)仍是给 CLI 的完整 outbound。
+      attachments: meta?.attachments,
+      displayText: meta?.displayText,
     }]);
 
     // Fire-and-forget git checkpoint. Failures (not a git repo etc.) are
@@ -5463,6 +5468,30 @@ export default function App() {
     setCliCheckDismissed(true);
   }, []);
 
+  // L2: macOS 首次启动权限引导。本机 dismissed flag 落盘到 ~/.claude-gui/(避免 localStorage 跨壳不一致)。
+  const [needsFDA, setNeedsFDA] = useState(false);
+  const [fdaDismissed, setFdaDismissed] = useState(false);
+  useEffect(() => {
+    (async () => {
+      try {
+        const [s, d] = await Promise.all([
+          fetch('/api/system/permission-status').then((r) => r.json()),
+          fetch('/api/system/permission-guide-dismissed').then((r) => r.json()),
+        ]);
+        setNeedsFDA(!!s.needsFullDiskAccess);
+        setFdaDismissed(!!d.dismissed);
+      } catch {}
+    })();
+  }, []);
+  const dismissFDA = useCallback(async () => {
+    setFdaDismissed(true);
+    try { await fetch('/api/system/permission-guide-dismissed', { method: 'POST' }); } catch {}
+  }, []);
+  const openFDASettings = useCallback(async () => {
+    try { await fetch('/api/system/open-fda-settings', { method: 'POST' }); } catch {}
+    dismissFDA();
+  }, [dismissFDA]);
+
   // 每次打开 GUI 检查 GUI + Claude Code 是否有新版,有则顶部弹横幅(本次会话可关闭)。
   // 不固定时间——只在启动时查一次。详细更新操作在 设置 → 概览。
   const [updateNotice, setUpdateNotice] = useState(null); // { gui?: ver, cc?: ver }
@@ -5825,6 +5854,9 @@ export default function App() {
       {LocalWidget && <LocalWidget />}
       {!cliInstalled && !cliCheckDismissed && (
         <CliMissingModal onRecheck={checkCli} onDismiss={dismissCliCheck} />
+      )}
+      {needsFDA && !fdaDismissed && (
+        <FullDiskAccessModal onOpenSettings={openFDASettings} onDismiss={dismissFDA} />
       )}
       {updateNotice && (
         <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/40 backdrop-blur-sm animate-fade-in" onClick={() => setUpdateNotice(null)}>
