@@ -48,6 +48,16 @@ function deny(reason) {
   process.exit(0);
 }
 
+// 计划类文档判定:规划模式下放行这些写入(#4)。markdown/纯文本/rst 文档,或文件名
+// 含 plan/todo/notes/计划/draft 的文件。源代码(.js/.py/.ts...)不在此列,仍被拦。
+function isPlanClassPath(p) {
+  if (!p) return false;
+  const lower = String(p).toLowerCase();
+  if (/\.(md|markdown|txt|rst|mdx)$/.test(lower)) return true;
+  const base = lower.split(/[\\/]/).pop() || '';
+  return /(plan|todo|notes?|draft|计划|待办)/.test(base);
+}
+
 // 1. Read all of stdin
 let raw = '';
 process.stdin.setEncoding('utf-8');
@@ -117,7 +127,15 @@ async function main() {
   const PLAN_GATED = ['ExitPlanMode', 'AskUserQuestion'];
   const PLAN_WRITE_BLOCKED = ['Edit', 'MultiEdit', 'Write', 'NotebookEdit'];
   if (process.env.CGUI_PLAN_MODE && PLAN_WRITE_BLOCKED.includes(toolName)) {
-    deny('当前是规划模式：禁止修改文件。请先用 ExitPlanMode 提交计划供用户审批。');
+    // 规划模式允许写"计划类文档"(.md/.markdown/.txt/.rst,或文件名含 plan/todo/
+    // notes/计划/draft),只拦源代码文件(#4)。让 AI 能把计划落成文档,而不是只能
+    // 走 ExitPlanMode。非计划类文件仍拒绝。
+    const ti = payload.tool_input || payload.toolInput || {};
+    const p = String(ti.file_path || ti.path || ti.notebook_path || '');
+    if (!isPlanClassPath(p)) {
+      deny('当前是规划模式：禁止修改源文件。可写计划类文档(.md/.txt 或文件名含 plan/todo)，或用 ExitPlanMode 提交计划供用户审批。');
+    }
+    // 计划类 → 落到下面 plan-mode passthrough 放行
   }
   if (process.env.CGUI_PLAN_MODE && !PLAN_GATED.includes(toolName)) {
     allow(`plan-mode passthrough ${toolName}`);

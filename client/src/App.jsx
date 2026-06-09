@@ -2226,7 +2226,7 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
       const cmd = (prompt || '').trim().toLowerCase();
       if (cmd === '/remote-control' || cmd === '/rc' || cmd === 'remote-control') {
         const sel = getLocalSession();
-        const rcCwd = selectedProject?.path || sel?.projectPath;
+        const rcCwd = sel?.projectPath || selectedProject?.path;
         if (!sel?.sessionId) {
           window.alert('请先发送至少一条消息以创建会话，然后再输入 /remote-control 开启手机远程控制。');
           return;
@@ -2275,7 +2275,7 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
       return;
     }
 
-    const cwd = selectedProject?.path || selectedSession?.projectPath;
+    const cwd = selectedSession?.projectPath || selectedProject?.path;
     // Note: previously this function had a blocking `confirm()` for git preflight.
     // That dialog could appear behind other modals or get auto-suppressed by
     // browsers, leaving sends silently stuck. Git preflight is now opportunistic
@@ -2427,7 +2427,7 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
       const sid = selectedSession?.sessionId;
       const chatCwd = (sid && selectedSession?.projectPath)
         ? selectedSession.projectPath
-        : (selectedProject?.path || selectedSession?.projectPath);
+        : (selectedSession?.projectPath || selectedProject?.path);
       const res = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -3600,7 +3600,7 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
           <div className="flex items-center gap-2 min-w-0 flex-wrap justify-end">
             <CheckpointButton
               sessionId={selectedSession?.sessionId}
-              cwd={selectedProject?.path || selectedSession?.projectPath}
+              cwd={selectedSession?.projectPath || selectedProject?.path}
             />
             <div className="text-right max-md:hidden">
               <div className="text-[10px] text-ink-faint font-mono flex items-center gap-1 justify-end">

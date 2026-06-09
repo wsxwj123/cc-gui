@@ -88,16 +88,25 @@ export function useWebSocket() {
                 break;
               }
               if (mode === 'plan' && PLAN_WRITE_CLASS.includes(req.toolName)) {
-                console.log('[cgui-perm] deny: plan write', req.id, req.toolName);
-                fetch(`/api/permissions/respond/${req.id}`, {
-                  method: 'POST',
-                  headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({
-                    decision: 'deny',
-                    reason: '当前是规划模式：禁止修改文件。请先用 ExitPlanMode 提交计划供用户审批。',
-                  }),
-                }).catch(() => {});
-                break;
+                // 规划模式放行计划类文档(.md/.txt/.rst 或名含 plan/todo/计划),只拦源
+                // 代码文件(#4)。与服务端 permission-bridge 的 isPlanClassPath 对齐。
+                const ti = req.toolInput || {};
+                const fp = String(ti.file_path || ti.path || ti.notebook_path || '').toLowerCase();
+                const base = fp.split(/[\\/]/).pop() || '';
+                const planClass = /\.(md|markdown|txt|rst|mdx)$/.test(fp) || /(plan|todo|notes?|draft|计划|待办)/.test(base);
+                if (!planClass) {
+                  console.log('[cgui-perm] deny: plan write', req.id, req.toolName);
+                  fetch(`/api/permissions/respond/${req.id}`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                      decision: 'deny',
+                      reason: '当前是规划模式：禁止修改源文件。可写计划类文档(.md/.txt 或名含 plan/todo)，或用 ExitPlanMode 提交计划供用户审批。',
+                    }),
+                  }).catch(() => {});
+                  break;
+                }
+                // 计划类文档 → 不在此拦截,继续往下(默认弹窗/或其他模式处理)
               }
               if (mode === 'plan' && READ_CLASS.includes(req.toolName)) {
                 console.log('[cgui-perm] auto-allow: plan+readClass', req.id, req.toolName);
