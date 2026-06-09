@@ -166,17 +166,33 @@ router.get('/mcp', async (req, res) => {
       }
     } catch {}
 
-    // 5. Merge disabled state
+    // 5. Merge disabled state。claude mcp list 是权威来源:出现在 live 列表里 = 已注册
+    // 启用。若某服务器既在 live 列表又在 disabled.json,那是过期残留(被外部重新 add
+    // 过)→ 视为启用并清理残留;否则 GUI 会显示"已禁用",点开 enable 又因"已存在"
+    // 报错 → 开关闪一下回滚(用户报告的 desktop-commander 现象)。disabled.json 里
+    // 不在 live 列表的才是真正禁用的,补成禁用行供用户重新启用(原来这类服务器根本不显示)。
     try {
       const disabled = JSON.parse(await readFile(DISABLED_FILE, 'utf-8'));
+      const liveNames = new Set(result.mcpServers.map((s) => s.name));
+      let stale = false;
       for (const srv of result.mcpServers) {
-        if (disabled[srv.name]) {
-          srv.enabled = false;
-          srv.disabledConfig = disabled[srv.name];
-        } else {
-          srv.enabled = true;
-        }
+        srv.enabled = true;
+        if (disabled[srv.name]) { delete disabled[srv.name]; stale = true; } // 残留,清理
       }
+      for (const [name, cfg] of Object.entries(disabled)) {
+        if (liveNames.has(name)) continue;
+        result.mcpServers.push({
+          name,
+          command: cfg.command || '',
+          args: cfg.args || [],
+          env: [],
+          transport: cfg.transport || 'stdio',
+          status: 'disconnected',
+          enabled: false,
+          disabledConfig: cfg,
+        });
+      }
+      if (stale) { try { await writeDisabled(disabled); } catch {} }
     } catch {
       for (const srv of result.mcpServers) {
         srv.enabled = true;
@@ -300,7 +316,13 @@ router.put('/mcp/:name/enable', async (req, res) => {
       args.push('--', String(config.command), ...((config.args || []).map(String)));
     }
 
-    await runClaude(args, { timeout: 15000 });
+    try {
+      await runClaude(args, { timeout: 15000 });
+    } catch (e) {
+      // "already exists" = 它其实已在 claude 注册(disabled.json 是残留)→ 当作启用
+      // 成功,清理残留即可,不再把这当失败回滚开关。
+      if (!/already exists/i.test(e.message || '') && !/already configured/i.test(e.message || '')) throw e;
+    }
 
     delete disabled[name];
     await writeDisabled(disabled);
