@@ -75,6 +75,25 @@ async function main() {
     allow(`auto-allow ${toolName} (read-class)`);
   }
 
+  // MCP 自动放行:在 GUI 里勾了"自动执行工具"的 server,其工具(命名 mcp__<server>__<tool>)
+  // 直接放行,不弹窗。列表来自 ~/.claude/gui/mcp-autoapprove.json(GUI 写)。每次工具调用
+  // 读一次文件(很便宜),保证 GUI 里改了即时生效。
+  if (/^mcp__/.test(toolName)) {
+    try {
+      const fs = await import('node:fs');
+      const os = await import('node:os');
+      const raw = fs.readFileSync(`${os.homedir()}/.claude/gui/mcp-autoapprove.json`, 'utf-8');
+      const list = JSON.parse(raw);
+      if (Array.isArray(list) && list.length) {
+        const seg = toolName.replace(/^mcp__/, '').split('__')[0];
+        const norm = (s) => String(s).replace(/[^a-z0-9]/gi, '_').toLowerCase();
+        if (list.some((n) => n === seg || norm(n) === norm(seg))) {
+          allow(`mcp auto-approve: ${toolName}`);
+        }
+      }
+    } catch { /* 无文件/解析失败 → 不自动放行,走正常弹窗 */ }
+  }
+
   // 放任模式(Bug #10):auto-allow 所有工具,只对 AskUserQuestion 走 GUI 弹窗。
   // 原 bypassPermissions 走 --dangerously-skip-permissions 完全跳过 hook,导致
   // ask 在 -p mode 被 CLI reject,AI 退化成文本提问。现在让 hook 仍跑,只是默

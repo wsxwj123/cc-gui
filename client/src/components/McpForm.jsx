@@ -1,0 +1,198 @@
+import React, { useEffect, useState } from 'react';
+import { X, Plus, Trash2, RefreshCw } from 'lucide-react';
+
+// MCP 服务器 添加/编辑 表单(模态)。
+//  - editing=null → 新增;editing={name} → 编辑(挂载时拉 /config 回填)。
+//  - 命令行按 claude code 官方配置拆成 command + args[](后端 parseCommandLine)。
+//  - http/sse 类型时"命令"变为 URL。
+//  - 自动执行工具 = 该 server 工具自动放行(写入 mcp-autoapprove.json)。
+const TRANSPORTS = [
+  { v: 'stdio', label: '命令行 (stdio)' },
+  { v: 'http', label: 'HTTP 请求 (http)' },
+  { v: 'sse', label: 'SSE 请求 (sse, 不推荐)' },
+];
+const SCOPES = [
+  { v: 'user', label: 'user · 所有项目可用' },
+  { v: 'project', label: 'project · 仅当前项目(.mcp.json)' },
+  { v: 'local', label: 'local · 仅本机当前项目' },
+];
+
+export function McpForm({ editing, onClose, onSaved }) {
+  const isEdit = !!editing;
+  const [loading, setLoading] = useState(isEdit);
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState('');
+
+  const [name, setName] = useState(editing?.name || '');
+  const [label, setLabel] = useState('');
+  const [transport, setTransport] = useState('stdio');
+  const [commandLine, setCommandLine] = useState('');
+  const [url, setUrl] = useState('');
+  const [scope, setScope] = useState('user');
+  const [autoApprove, setAutoApprove] = useState(false);
+  const [envRows, setEnvRows] = useState([]); // [{k,v}]
+
+  // 编辑:拉结构化配置回填
+  useEffect(() => {
+    if (!isEdit) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const r = await fetch(`/api/mcp/${encodeURIComponent(editing.name)}/config`);
+        const d = await r.json();
+        if (cancelled) return;
+        if (!r.ok) throw new Error(d.error || '读取配置失败');
+        setName(d.name || editing.name);
+        setLabel(d.label || '');
+        setTransport(d.transport || 'stdio');
+        setCommandLine(d.commandLine || '');
+        setUrl(d.url || '');
+        setScope(d.scope || 'user');
+        setAutoApprove(!!d.autoApprove);
+        setEnvRows(Object.entries(d.env || {}).map(([k, v]) => ({ k, v: String(v) })));
+      } catch (e) {
+        if (!cancelled) setErr(e.message);
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [isEdit, editing]);
+
+  const setEnv = (i, key, val) => setEnvRows((rows) => rows.map((r, idx) => idx === i ? { ...r, [key]: val } : r));
+  const addEnv = () => setEnvRows((rows) => [...rows, { k: '', v: '' }]);
+  const delEnv = (i) => setEnvRows((rows) => rows.filter((_, idx) => idx !== i));
+
+  const isStdio = transport === 'stdio';
+
+  const save = async () => {
+    setErr('');
+    if (!name.trim()) { setErr('ID 不能为空'); return; }
+    if (isStdio && !commandLine.trim()) { setErr('命令不能为空'); return; }
+    if (!isStdio && !url.trim()) { setErr('URL 不能为空'); return; }
+    const env = {};
+    for (const { k, v } of envRows) { if (k.trim()) env[k.trim()] = v; }
+    const body = { name: name.trim(), transport, commandLine, url, scope, autoApprove, label, env };
+    setSaving(true);
+    try {
+      const r = isEdit
+        ? await fetch(`/api/mcp/${encodeURIComponent(editing.name)}/config`, {
+            method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+          })
+        : await fetch('/api/mcp', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+          });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || '保存失败');
+      onSaved?.();
+      onClose?.();
+    } catch (e) {
+      setErr(e.message);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const inputCls = 'w-full bg-canvas-warm border border-canvas-deep rounded-lg px-3 py-2 text-[13px] text-ink font-body focus:outline-none focus:border-accent/50';
+  const labelCls = 'text-[12px] font-medium text-ink font-body';
+  const hintCls = 'text-[11px] text-ink-faint font-body';
+
+  return (
+    <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/40 backdrop-blur-sm animate-fade-in" onClick={onClose}>
+      <div className="glass-popover w-[560px] max-w-[calc(100vw-1.5rem)] max-h-[90vh] overflow-y-auto rounded-2xl shadow-2xl animate-glass-rise"
+        onClick={(e) => e.stopPropagation()}>
+        <div className="px-5 py-4 border-b border-canvas-deep flex items-center gap-3 sticky top-0 bg-canvas z-10">
+          <div className="flex-1 text-[14px] font-medium text-ink font-body">{isEdit ? '编辑 MCP 服务器' : '添加 MCP 服务器'}</div>
+          <button onClick={onClose} className="p-1.5 hover:bg-canvas-warm rounded transition-colors"><X size={14} className="text-ink-faint" /></button>
+        </div>
+
+        {loading ? (
+          <div className="flex items-center justify-center py-16"><RefreshCw size={16} className="animate-spin text-ink-faint" /></div>
+        ) : (
+          <div className="px-5 py-4 space-y-4">
+            {/* 类型 */}
+            <div className="space-y-1.5">
+              <div className={labelCls}>类型</div>
+              <select value={transport} onChange={(e) => setTransport(e.target.value)} className={inputCls}>
+                {TRANSPORTS.map((t) => <option key={t.v} value={t.v}>{t.label}</option>)}
+              </select>
+            </div>
+
+            {/* 名称 + ID */}
+            <div className="grid grid-cols-2 gap-3">
+              <div className="space-y-1.5">
+                <div className={labelCls}>名称</div>
+                <div className={hintCls}>帮助你识别工具(可选)</div>
+                <input value={label} onChange={(e) => setLabel(e.target.value)} className={inputCls} placeholder="例如 文件管理" />
+              </div>
+              <div className="space-y-1.5">
+                <div className={labelCls}>ID</div>
+                <div className={hintCls}>用于模型识别的 ID, 不可重复</div>
+                <input value={name} onChange={(e) => setName(e.target.value)} className={`${inputCls} font-mono`} placeholder="my-mcp-server" />
+              </div>
+            </div>
+
+            {/* 命令 / URL */}
+            <div className="space-y-1.5">
+              <div className={labelCls}>{isStdio ? '命令' : 'URL'}</div>
+              {isStdio ? (
+                <>
+                  <textarea value={commandLine} onChange={(e) => setCommandLine(e.target.value)} rows={2}
+                    className={`${inputCls} font-mono resize-y`} placeholder="npx -y mcp-server-xxx --arg1 value1" />
+                  <div className={hintCls}>整行命令会按空格(尊重引号)拆成 command + 参数，等价 claude code 的 <code className="font-mono">command</code> / <code className="font-mono">args</code>。</div>
+                </>
+              ) : (
+                <input value={url} onChange={(e) => setUrl(e.target.value)} className={`${inputCls} font-mono`} placeholder="https://example.com/mcp" />
+              )}
+            </div>
+
+            {/* scope + 自动执行 */}
+            <div className="grid grid-cols-2 gap-3 items-start">
+              <div className="space-y-1.5">
+                <div className={labelCls}>作用域 (scope)</div>
+                <select value={scope} onChange={(e) => setScope(e.target.value)} className={inputCls}>
+                  {SCOPES.map((s) => <option key={s.v} value={s.v}>{s.label}</option>)}
+                </select>
+              </div>
+              <label className="flex items-center gap-2 pt-7 cursor-pointer select-none">
+                <input type="checkbox" checked={autoApprove} onChange={(e) => setAutoApprove(e.target.checked)} className="accent-accent" />
+                <span className="text-[13px] text-ink font-body">自动执行工具</span>
+                <span className={hintCls} title="勾选后该服务器的工具调用不再弹权限确认，直接放行">(免确认)</span>
+              </label>
+            </div>
+
+            {/* 环境变量 */}
+            <div className="space-y-1.5">
+              <div className="flex items-center gap-2">
+                <span className={labelCls}>环境变量</span>
+                <button onClick={addEnv} className="p-0.5 rounded hover:bg-canvas-warm text-ink-faint hover:text-accent"><Plus size={13} /></button>
+              </div>
+              {envRows.length === 0 && <div className={hintCls}>无。点 + 添加 KEY=VALUE。</div>}
+              {envRows.map((row, i) => (
+                <div key={i} className="flex items-center gap-2">
+                  <input value={row.k} onChange={(e) => setEnv(i, 'k', e.target.value)} placeholder="KEY"
+                    className={`${inputCls} font-mono flex-1`} />
+                  <span className="text-ink-faint">=</span>
+                  <input value={row.v} onChange={(e) => setEnv(i, 'v', e.target.value)} placeholder="value"
+                    className={`${inputCls} font-mono flex-1`} />
+                  <button onClick={() => delEnv(i)} className="p-1 text-ink-faint hover:text-error shrink-0"><Trash2 size={13} /></button>
+                </div>
+              ))}
+            </div>
+
+            {err && <div className="text-[12px] text-error bg-error/10 border border-error/20 rounded px-3 py-2 whitespace-pre-wrap break-all">{err}</div>}
+          </div>
+        )}
+
+        <div className="px-5 py-3 border-t border-canvas-deep flex items-center justify-end gap-2 bg-canvas-warm/40 sticky bottom-0">
+          <button onClick={onClose} className="px-3 py-1.5 text-[12px] text-ink-muted hover:text-ink rounded-md hover:bg-canvas-warm transition-colors">取消</button>
+          <button onClick={save} disabled={saving || loading}
+            className="flex items-center gap-1.5 px-3 py-1.5 text-[12px] text-white bg-accent hover:bg-accent/90 rounded-md transition-colors disabled:opacity-50">
+            {saving && <RefreshCw size={12} className="animate-spin" />}
+            {isEdit ? '保存' : '添加'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}

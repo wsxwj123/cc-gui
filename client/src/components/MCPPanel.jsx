@@ -1,5 +1,7 @@
 import React, { useEffect, useState, useRef } from 'react';
-import { Server, Package, FolderOpen, RefreshCw, Plug, Activity, Check, X } from 'lucide-react';
+import { Server, Package, FolderOpen, RefreshCw, Plug, Activity, Check, X, Plus, Pencil, Trash2, Zap } from 'lucide-react';
+import { McpForm } from './McpForm.jsx';
+import { confirmDialog } from '../utils/confirmDialog.jsx';
 
 function PingButton({ name }) {
   const [state, setState] = useState(null); // null | 'busy' | 'ok' | 'err'
@@ -59,6 +61,7 @@ export function MCPPanel() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [toggling, setToggling] = useState(null);
+  const [form, setForm] = useState(null); // null | { add:true } | { name } (编辑)
   const mounted = useRef(true);
 
   const fetchData = async () => {
@@ -130,6 +133,18 @@ export function MCPPanel() {
       .finally(() => setToggling(null));
   };
 
+  const handleDelete = async (srv) => {
+    if (!(await confirmDialog(`删除 MCP 服务器「${srv.label || srv.name}」?\n会执行 claude mcp remove,不可撤销。`, { danger: true, confirmText: '删除' }))) return;
+    setServers((prev) => prev.filter((s) => s.name !== srv.name));
+    try {
+      const r = await fetch(`/api/mcp/${encodeURIComponent(srv.name)}`, { method: 'DELETE' });
+      if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error(e.error || r.status); }
+    } catch (err) {
+      console.error('MCP delete failed:', err);
+      fetchData(); // 失败回拉真实状态
+    }
+  };
+
   // Enabled first, disabled last; stable within each group (Array.sort is
   // stable). Re-sorts automatically when a toggle flips `enabled` in state.
   const byEnabled = (a, b) => (a.enabled === false ? 1 : 0) - (b.enabled === false ? 1 : 0);
@@ -167,6 +182,11 @@ export function MCPPanel() {
         <h3 className="text-[10px] font-medium uppercase tracking-widest text-ink-faint font-body mb-3 flex items-center gap-1.5">
           <Server size={11} />
           MCP 服务器
+          <div className="flex-1" />
+          <button onClick={() => setForm({ add: true })}
+            className="flex items-center gap-1 px-2 py-1 rounded-md bg-accent text-white text-[10px] font-medium hover:bg-accent/90 transition-colors normal-case tracking-normal">
+            <Plus size={11} />添加
+          </button>
         </h3>
         {servers.length > 0 ? (
           <div className="space-y-2">
@@ -186,13 +206,19 @@ export function MCPPanel() {
                       aria-label="服务器图标"
                     />
                     <span className={`text-xs font-medium font-body ${disabled ? 'text-ink-faint line-through' : 'text-ink'}`}
-                      title={srv.source || ''}>
-                      {srv.name}
+                      title={srv.label ? `ID: ${srv.name}` : (srv.source || '')}>
+                      {srv.label || srv.name}
                     </span>
                     <span className="text-[10px] px-1.5 py-0.5 bg-canvas-deep text-ink-faint rounded font-mono"
                       title="传输协议 (stdio = 子进程, http = HTTP MCP)">
                       {srv.transport}
                     </span>
+                    {srv.autoApprove && (
+                      <span className="text-[10px] px-1.5 py-0.5 bg-amber-50 text-amber-700 rounded font-body flex items-center gap-0.5"
+                        title="自动执行工具:该服务器的工具调用免确认直接放行">
+                        <Zap size={9} />免确认
+                      </span>
+                    )}
                     <div className="flex-1" />
                     {!disabled && srv.status === 'connected' && (
                       <span className="text-[10px] text-success" title="已连接（claude mcp list 显示 connected）">✓</span>
@@ -204,6 +230,10 @@ export function MCPPanel() {
                       <span className="text-[10px] text-ink-ghost" title="已禁用（CLI 不会启动此 MCP）">已禁用</span>
                     )}
                     <PingButton name={srv.name} />
+                    <button onClick={() => setForm({ name: srv.name })} title="编辑"
+                      className="p-1 rounded text-ink-faint hover:text-accent hover:bg-canvas-warm transition-colors"><Pencil size={11} /></button>
+                    <button onClick={() => handleDelete(srv)} title="删除"
+                      className="p-1 rounded text-ink-faint hover:text-error hover:bg-canvas-warm transition-colors"><Trash2 size={11} /></button>
                     <Toggle
                       enabled={!disabled}
                       loading={toggling === srv.name}
@@ -314,6 +344,14 @@ export function MCPPanel() {
         <RefreshCw size={12} />
         刷新
       </button>
+
+      {form && (
+        <McpForm
+          editing={form.name ? { name: form.name } : null}
+          onClose={() => setForm(null)}
+          onSaved={fetchData}
+        />
+      )}
     </div>
   );
 }

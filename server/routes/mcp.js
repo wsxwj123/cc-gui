@@ -31,6 +31,41 @@ const router = Router();
 const CLAUDE_DIR = join(homedir(), '.claude');
 const GUI_DIR = join(CLAUDE_DIR, 'gui');
 const DISABLED_FILE = join(GUI_DIR, 'disabled-mcp.json');
+const AUTOAPPROVE_FILE = join(GUI_DIR, 'mcp-autoapprove.json'); // ["serverName", ...]
+const META_FILE = join(GUI_DIR, 'mcp-meta.json');               // { name: { label } }
+
+// 把单行命令拆成 command + args[](尊重引号),对齐 claude code 官方配置的
+// { command, args } 结构。例:`npx -y @scope/pkg --flag "a b"` → {command:'npx',
+// args:['-y','@scope/pkg','--flag','a b']}。
+function parseCommandLine(str) {
+  const tokens = [];
+  const re = /"([^"]*)"|'([^']*)'|(\S+)/g;
+  let m;
+  while ((m = re.exec(String(str || ''))) !== null) {
+    tokens.push(m[1] !== undefined ? m[1] : m[2] !== undefined ? m[2] : m[3]);
+  }
+  return { command: tokens[0] || '', args: tokens.slice(1) };
+}
+
+async function readJsonFile(path, fallback) {
+  try { return JSON.parse(await readFile(path, 'utf-8')); } catch { return fallback; }
+}
+async function writeJsonFile(path, data) {
+  await mkdir(GUI_DIR, { recursive: true });
+  await writeFile(path, JSON.stringify(data, null, 2) + '\n');
+}
+async function setAutoApprove(name, on) {
+  const list = await readJsonFile(AUTOAPPROVE_FILE, []);
+  const set = new Set(Array.isArray(list) ? list : []);
+  if (on) set.add(name); else set.delete(name);
+  await writeJsonFile(AUTOAPPROVE_FILE, [...set]);
+}
+async function setMeta(name, label) {
+  const meta = await readJsonFile(META_FILE, {});
+  if (label && label.trim()) meta[name] = { label: label.trim() };
+  else delete meta[name];
+  await writeJsonFile(META_FILE, meta);
+}
 
 /**
  * Parse `claude mcp list` output into structured data.
@@ -199,6 +234,16 @@ router.get('/mcp', async (req, res) => {
       }
     }
 
+    // 6. 附加 GUI 元数据:自动放行(autoApprove)+ 显示名(label)。
+    try {
+      const auto = new Set(await readJsonFile(AUTOAPPROVE_FILE, []));
+      const meta = await readJsonFile(META_FILE, {});
+      for (const srv of result.mcpServers) {
+        srv.autoApprove = auto.has(srv.name);
+        srv.label = meta[srv.name]?.label || '';
+      }
+    } catch {}
+
     mcpCache = result;
     mcpCacheAt = Date.now();
     res.json(result);
@@ -362,6 +407,155 @@ router.put('/mcp/:name/disable', async (req, res) => {
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
+});
+
+// 组装 `claude mcp add` 参数(新增/编辑共用)。stdio:命令行拆成 cmd+args 跟在 -- 后;
+// http/sse:直接给 URL。env 用可重复的 -e KEY=VAL。scope 用 -s。
+function buildAddArgs({ name, transport, commandLine, url, env, scope }) {
+  const args = ['mcp', 'add'];
+  if (transport === 'http' || transport === 'sse') args.push('-t', transport);
+  args.push('-s', scope || 'user');
+  // 名称必须在 -e 之前:`-e` 是变长参数(<env...>),若放名称前会把名称也当成 env 吞掉
+  // ("Invalid environment variable format: <name>")。
+  args.push(name);
+  const envFlags = [];
+  for (const [k, v] of Object.entries(env || {})) {
+    if (k && k.trim()) envFlags.push('-e', `${k.trim()}=${v ?? ''}`);
+  }
+  if (transport === 'http' || transport === 'sse') {
+    if (!url || !url.trim()) throw new Error('URL 不能为空');
+    // url 在前,-e 放末尾(变长参数在结尾不会吞掉其它位置参数)。
+    args.push(url.trim(), ...envFlags);
+  } else {
+    const { command, args: cargs } = parseCommandLine(commandLine);
+    if (!command) throw new Error('命令不能为空');
+    // -e 在 -- 之前;-- 之后是子进程命令,会终止 -e 的变长吞噬。
+    args.push(...envFlags, '--', command, ...cargs);
+  }
+  return args;
+}
+
+// POST /api/mcp — 新增一个 MCP 服务器。
+// body: { name, transport, commandLine?, url?, env?, scope?, autoApprove?, label? }
+router.post('/mcp', async (req, res) => {
+  try {
+    const b = req.body || {};
+    assertSafeName(b.name);
+    const scope = ['user', 'project', 'local'].includes(b.scope) ? b.scope : 'user';
+    const transport = ['stdio', 'http', 'sse'].includes(b.transport) ? b.transport : 'stdio';
+    const args = buildAddArgs({ ...b, transport, scope });
+    await runClaude(args, { timeout: 20000 });
+    await setAutoApprove(b.name, !!b.autoApprove);
+    await setMeta(b.name, b.label);
+    // 新增即启用:清掉可能存在的同名禁用残留
+    try { const dis = await readDisabled(); if (dis[b.name]) { delete dis[b.name]; await writeDisabled(dis); } } catch {}
+    invalidateMcpCache();
+    res.json({ ok: true, name: b.name });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// PUT /api/mcp/:name/config — 编辑:先 remove 再按新配置 add(claude 无 in-place 编辑)。
+router.put('/mcp/:name/config', async (req, res) => {
+  try {
+    const { name } = req.params;
+    assertSafeName(name);
+    const b = req.body || {};
+    assertSafeName(b.name || name);
+    const newName = b.name || name;
+    const scope = ['user', 'project', 'local'].includes(b.scope) ? b.scope : 'user';
+    const transport = ['stdio', 'http', 'sse'].includes(b.transport) ? b.transport : 'stdio';
+    const addArgs = buildAddArgs({ ...b, name: newName, transport, scope });
+    // 先移除旧的(各 scope 尽力删,忽略不存在错误),再加新的。
+    for (const s of ['user', 'project', 'local']) {
+      try { await runClaude(['mcp', 'remove', name, '-s', s]); } catch {}
+    }
+    try { const dis = await readDisabled(); if (dis[name]) { delete dis[name]; await writeDisabled(dis); } } catch {}
+    await runClaude(addArgs, { timeout: 20000 });
+    // 改名时迁移 autoapprove / meta
+    if (newName !== name) { await setAutoApprove(name, false); await setMeta(name, ''); }
+    await setAutoApprove(newName, !!b.autoApprove);
+    await setMeta(newName, b.label);
+    invalidateMcpCache();
+    res.json({ ok: true, name: newName });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// DELETE /api/mcp/:name — 彻底删除(不进禁用列表):各 scope remove + 清理 GUI 元数据。
+router.delete('/mcp/:name', async (req, res) => {
+  try {
+    const { name } = req.params;
+    assertSafeName(name);
+    for (const s of ['user', 'project', 'local']) {
+      try { await runClaude(['mcp', 'remove', name, '-s', s]); } catch {}
+    }
+    try { const dis = await readDisabled(); if (dis[name]) { delete dis[name]; await writeDisabled(dis); } } catch {}
+    await setAutoApprove(name, false);
+    await setMeta(name, '');
+    invalidateMcpCache();
+    res.json({ ok: true, name });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// GET /api/mcp/:name/config — 取结构化配置供编辑表单回填(live 用 claude mcp get,
+// 禁用态读 disabled.json)。返回 { name, transport, commandLine, url, env, scope, autoApprove, label }。
+router.get('/mcp/:name/config', async (req, res) => {
+  try {
+    const { name } = req.params;
+    assertSafeName(name);
+    const autoApprove = (await readJsonFile(AUTOAPPROVE_FILE, [])).includes?.(name) || false;
+    const label = (await readJsonFile(META_FILE, {}))[name]?.label || '';
+    // 优先禁用态配置(结构化),否则解析 claude mcp get。
+    const dis = await readDisabled();
+    if (dis[name]) {
+      const c = dis[name];
+      const transport = c.transport || 'stdio';
+      return res.json({
+        name, transport, scope: c.scope || 'user', autoApprove, label,
+        commandLine: transport === 'stdio' ? [c.command, ...(c.args || [])].filter(Boolean).join(' ') : '',
+        url: transport !== 'stdio' ? (c.command || '') : '',
+        env: c.env || {},
+      });
+    }
+    const details = await getServerDetails(name);
+    if (!details) return res.status(404).json({ error: 'Server not found' });
+    const typeMatch = details.match(/Type:\s*(\S+)/);
+    const cmdMatch = details.match(/Command:\s*(.+)/);
+    const argsMatch = details.match(/Args:\s*(.+)/);
+    const urlMatch = details.match(/URL:\s*(.+)/);
+    const scopeMatch = details.match(/Scope:\s*(\S+)/);
+    const transport = typeMatch ? typeMatch[1] : 'stdio';
+    const cmd = cmdMatch ? cmdMatch[1].trim() : '';
+    const cargs = argsMatch && argsMatch[1].trim() ? argsMatch[1].trim() : '';
+    // 解析 Environment: 段(缩进的 KEY=value),否则编辑时会丢失已有 env。
+    const env = {};
+    const envSection = details.split(/Environment:/)[1];
+    if (envSection) {
+      for (const line of envSection.split('\n')) {
+        if (/^To remove/.test(line.trim())) break;
+        const em = line.match(/^\s+([A-Za-z_][A-Za-z0-9_]*)=(.*)$/);
+        if (em) env[em[1]] = em[2];
+      }
+    }
+    res.json({
+      name, transport,
+      scope: scopeMatch ? scopeMatch[1].trim().toLowerCase() : 'user',
+      autoApprove, label,
+      commandLine: transport === 'stdio' ? [cmd, cargs].filter(Boolean).join(' ') : '',
+      url: transport !== 'stdio' ? (urlMatch ? urlMatch[1].trim() : cmd) : '',
+      env,
+    });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// PUT /api/mcp/:name/autoapprove { on } — 单独切换"自动执行工具"。
+router.put('/mcp/:name/autoapprove', async (req, res) => {
+  try {
+    const { name } = req.params;
+    assertSafeName(name);
+    await setAutoApprove(name, !!(req.body || {}).on);
+    invalidateMcpCache();
+    res.json({ ok: true, name, autoApprove: !!(req.body || {}).on });
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 // Plugin enable/disable — delegates to `claude plugin {enable|disable} <name>`.
