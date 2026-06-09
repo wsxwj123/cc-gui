@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { spawn, execFileSync } from 'child_process';
 import { resolve as pathResolve, dirname, join as pathJoin, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { readFileSync, statSync, writeFileSync } from 'node:fs';
+import { readFileSync, statSync, writeFileSync, unlinkSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { getDefaultModel } from '../services/model-resolver.js';
 import { dropPendingForSession } from './permissions.js';
@@ -677,6 +677,126 @@ router.post('/chat/title', async (req, res) => {
   proc.stdout.on('data', (c) => { out += c.toString(); });
   proc.on('close', () => finish(out));
   proc.on('error', () => finish(''));
+});
+
+// ── Context breakdown (#1) ────────────────────────────────────────────────
+// Run the CLI's `/context` slash command against a FORKED copy of the session
+// (--fork-session → new session id, original jsonl untouched) and parse the
+// markdown table it emits. /context is a local command (no model call), so it
+// returns in ~3s. We delete the forked jsonl afterwards so it doesn't litter.
+function cleanChildEnv() {
+  const env = { ...process.env };
+  for (const k of [
+    'ANTHROPIC_MODEL', 'CLAUDE_MODEL',
+    'ANTHROPIC_BASE_URL', 'ANTHROPIC_API_URL', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN',
+    'ANTHROPIC_DEFAULT_HAIKU_MODEL', 'ANTHROPIC_DEFAULT_SONNET_MODEL', 'ANTHROPIC_DEFAULT_OPUS_MODEL',
+    'ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME', 'ANTHROPIC_DEFAULT_SONNET_MODEL_NAME', 'ANTHROPIC_DEFAULT_OPUS_MODEL_NAME',
+    'ANTHROPIC_REASONING_MODEL', 'ANTHROPIC_SMALL_FAST_MODEL',
+    'ANTHROPIC_PERMISSION_MODE', 'CLAUDE_PERMISSION_MODE', 'CLAUDE_DANGEROUSLY_SKIP_PERMISSIONS',
+  ]) delete env[k];
+  return env;
+}
+
+function parseTokNum(s) {
+  s = String(s).trim().replace(/,/g, '');
+  const m = s.match(/^([\d.]+)\s*([kKmM]?)/);
+  if (!m) return 0;
+  let n = parseFloat(m[1]);
+  if (/k/i.test(m[2])) n *= 1000;
+  else if (/m/i.test(m[2])) n *= 1_000_000;
+  return Math.round(n);
+}
+
+function parseContextMarkdown(md) {
+  const out = { model: null, totalTokens: 0, windowTokens: 0, pct: 0, categories: [], mcpServers: [] };
+  const mm = md.match(/\*\*Model:\*\*\s*(.+)/);
+  if (mm) out.model = mm[1].trim();
+  const tk = md.match(/\*\*Tokens:\*\*\s*([\d.,kKmM]+)\s*\/\s*([\d.,kKmM]+)\s*\((\d+)%\)/);
+  if (tk) { out.totalTokens = parseTokNum(tk[1]); out.windowTokens = parseTokNum(tk[2]); out.pct = parseInt(tk[3], 10); }
+  // Category table is everything before the "### MCP Tools" per-tool section.
+  const [catSection, mcpSection = ''] = md.split(/###\s*MCP Tools/i);
+  for (const line of catSection.split('\n')) {
+    const m = line.match(/^\|\s*([^|]+?)\s*\|\s*([\d.,kKmM]+)\s*\|\s*([\d.]+)%\s*\|/);
+    if (!m) continue;
+    const name = m[1].trim();
+    if (/^category$/i.test(name) || /^-+$/.test(name)) continue;
+    out.categories.push({ name, tokens: parseTokNum(m[2]), pct: parseFloat(m[3]) });
+  }
+  // Aggregate per-tool MCP rows into per-server totals.
+  const byServer = {};
+  for (const line of mcpSection.split('\n')) {
+    const m = line.match(/^\|\s*([^|]+?)\s*\|\s*([^|]+?)\s*\|\s*([\d.,kKmM]+)\s*\|/);
+    if (!m) continue;
+    const tool = m[1].trim();
+    const server = m[2].trim();
+    if (/^tool$/i.test(tool) || /^-+$/.test(tool)) continue;
+    byServer[server] = (byServer[server] || 0) + parseTokNum(m[3]);
+  }
+  out.mcpServers = Object.entries(byServer)
+    .map(([server, tokens]) => ({ server, tokens }))
+    .sort((a, b) => b.tokens - a.tokens);
+  return out;
+}
+
+router.get('/context/:sessionId', (req, res) => {
+  const { sessionId } = req.params;
+  const cwd = req.query.cwd || process.env.HOME;
+  const projectHash = req.query.projectHash || '';
+  try { if (!statSync(cwd).isDirectory()) throw new Error('nd'); }
+  catch { return res.status(400).json({ error: '工作目录无效' }); }
+
+  const args = [
+    '-p', '/context',
+    '--output-format', 'stream-json',
+    '--verbose',
+    '--resume', sessionId,
+    '--fork-session',
+  ];
+  let proc;
+  try {
+    proc = claudeSpawn(args, { cwd, stdio: ['ignore', 'pipe', 'pipe'], env: cleanChildEnv() });
+  } catch (e) { return res.status(500).json({ error: 'spawn claude failed: ' + e.message }); }
+  if (!proc.pid) { proc.on('error', () => {}); return res.status(500).json({ error: 'claude CLI not found' }); }
+
+  let out = '';
+  let forkedSid = null;
+  let done = false;
+  const cleanupFork = () => {
+    if (forkedSid && projectHash && forkedSid !== sessionId) {
+      try { unlinkSync(pathJoin(homedir(), '.claude', 'projects', projectHash, `${forkedSid}.jsonl`)); } catch {}
+    }
+  };
+  const finish = (payload, code = 200) => {
+    if (done) return; done = true;
+    clearTimeout(timer);
+    try { killProcessTree(proc); } catch {}
+    cleanupFork();
+    if (!res.headersSent) res.status(code).json(payload);
+  };
+  const timer = setTimeout(() => finish({ error: '/context 超时' }, 504), 30000);
+
+  proc.stdout.on('data', (c) => {
+    out += c.toString();
+    if (!forkedSid) {
+      for (const ln of out.split('\n')) {
+        if (!ln.trim()) continue;
+        try { const o = JSON.parse(ln); if (o.type === 'system' && o.subtype === 'init' && o.session_id) { forkedSid = o.session_id; break; } } catch {}
+      }
+    }
+  });
+  proc.on('close', () => {
+    let md = '';
+    for (const ln of out.split('\n')) {
+      if (!ln.trim()) continue;
+      try {
+        const o = JSON.parse(ln);
+        if (o.type === 'result' && typeof o.result === 'string' && o.result.includes('Context Usage')) md = o.result;
+      } catch {}
+    }
+    if (!md) return finish({ error: '未获取到 /context 输出' }, 502);
+    finish({ raw: md, ...parseContextMarkdown(md) });
+  });
+  proc.on('error', (e) => finish({ error: e.message }, 500));
 });
 
 export default router;

@@ -147,6 +147,9 @@ const TYPE_LABELS = {
 
 export function ChatInput({ onSend, onStop, onAccelerate, disabled, isStreaming, backgroundWorking = false, queueLength = 0, queueItems = [], onRemoveFromQueue, onEditFromQueue, todos = null, plan = '', permKey = null, sessionId = null }) {
   const [text, setText] = useState('');
+  // 编辑重发态(#4):点击「重新编辑并发送」后进入。此时历史消息尚未被破坏,
+  // 按 Esc 可整条取消(清空输入+通知上层撤销待回滚),给用户反悔余地。
+  const [editingResend, setEditingResend] = useState(false);
   const [historyCursor, setHistoryCursor] = useState(-1);
   const [showCommands, setShowCommands] = useState(false);
   const [selectedIndex, setSelectedIndex] = useState(0);
@@ -201,6 +204,7 @@ export function ChatInput({ onSend, onStop, onAccelerate, disabled, isStreaming,
     try { setText(localStorage.getItem(draftKey) || ''); }
     catch { setText(''); }
     setHistoryCursor(-1);
+    setEditingResend(false);
     draftBeforeHistoryRef.current = '';
   }, [draftKey]);
 
@@ -224,6 +228,7 @@ export function ChatInput({ onSend, onStop, onAccelerate, disabled, isStreaming,
       const targetKey = e?.detail?.targetKey;
       if (targetKey && targetKey !== permKey) return;
       setText(t);
+      if (e?.detail?.editMode) setEditingResend(true);
       const ta = textareaRef.current;
       if (ta) {
         // Visual flash so the user can't miss the fill.
@@ -382,6 +387,7 @@ export function ChatInput({ onSend, onStop, onAccelerate, disabled, isStreaming,
     if (trimmed) saveHistoryEntry(trimmed);
     onSend(outbound);
     setText('');
+    setEditingResend(false);
     setHistoryCursor(-1);
     draftBeforeHistoryRef.current = '';
     setAttachments([]);
@@ -427,6 +433,18 @@ export function ChatInput({ onSend, onStop, onAccelerate, disabled, isStreaming,
         setShowCommands(false);
         return;
       }
+    }
+
+    // 编辑重发态下按 Esc:取消本次编辑重发,清空输入并通知上层撤销待回滚(历史
+    // 尚未被破坏,所以纯属"反悔",不会丢任何消息)。
+    if (e.key === 'Escape' && editingResend) {
+      e.preventDefault();
+      setText('');
+      setEditingResend(false);
+      try { localStorage.removeItem(draftKey); } catch {}
+      window.dispatchEvent(new CustomEvent('cgui:composer-cancel-edit', { detail: { targetKey: permKey } }));
+      textareaRef.current?.blur();
+      return;
     }
 
     if ((e.key === 'ArrowUp' || e.key === 'ArrowDown') && !e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey) {
@@ -486,6 +504,16 @@ export function ChatInput({ onSend, onStop, onAccelerate, disabled, isStreaming,
       {/* TODO checklist — sits between permission popup and composer, mirroring
           Claude Desktop. Auto-hides when there's no TodoWrite snapshot. */}
       <TodoPanel todos={todos} plan={plan} />
+      {editingResend && (
+        <div className="px-6 pt-3">
+          <div className="max-w-[var(--content-max)] mx-auto flex items-center justify-between gap-3 rounded-lg border border-accent/30 bg-accent/8 px-3 py-2 text-[12px] text-accent font-body">
+            <span className="flex items-center gap-1.5">
+              <Pencil size={13} /> 正在编辑重发 · 发送后才会回退到此处，历史尚未改动
+            </span>
+            <span className="shrink-0 text-[11px] text-ink-faint">按 Esc 取消</span>
+          </div>
+        </div>
+      )}
       {rcLocked && (
         <div className="px-6 pt-3">
           <div className="max-w-[var(--content-max)] mx-auto flex items-center justify-between gap-3 rounded-lg border border-green-200 bg-green-50 px-3 py-2 text-[12px] text-green-800 font-body">

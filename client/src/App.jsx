@@ -1945,6 +1945,13 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
   // 否则会一直转(用户报告:AI 回复完成后仍显示"正在重做")。
   const [retryActiveUuid, setRetryActiveUuid] = useState(null);
   const [compacting, setCompacting] = useState(false); // /compact 进行中 → 显示压缩动画
+  // 编辑重发待回滚(#4):点击「重新编辑并发送」时只回填输入框、记录目标消息,不做
+  // 任何破坏性操作;真正发送时才回退,ESC 取消则原样保留。ref 供 handleSend 读取
+  // (handleSend 定义早于 handleRollback,且需避免闭包读到旧值)。
+  const [pendingEditRollback, setPendingEditRollbackState] = useState(null);
+  const pendingEditRef = useRef(null);
+  const setPendingEditRollback = useCallback((v) => { pendingEditRef.current = v; setPendingEditRollbackState(v); }, []);
+  const handleRollbackRef = useRef(null);
   const activeProcRef = useRef(null);
   const abortRef = useRef(null);
   // pid 集合:被用户主动「停止」过的 chat 进程。停止后进程要等 close 才设 exitCode
@@ -2244,6 +2251,18 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
         return;
       }
     }
+    // 编辑重发(#4):若存在待回滚目标,此刻才执行破坏性回退——还原文件 + 裁剪历史,
+    // 然后把(可能已编辑过的)文本作为新一轮发出。复用 handleRollback('both') 的成熟
+    // 路径(trim/文件还原/重发),避免重复逻辑。必须先清待回滚再调用,防止重发递归。
+    if (!reattachPid && !hiddenUserMessage && pendingEditRef.current && handleRollbackRef.current) {
+      const pending = pendingEditRef.current;
+      setPendingEditRollback(null);
+      handleRollbackRef.current(pending.msg, { mode: 'both', resendText: { prompt, options: opts } });
+      return;
+    }
+    // handleRollbackRef 尚未就绪(极短的首渲窗口):清掉待回滚,继续走正常发送兜底,
+    // 避免静默吞掉这次发送。
+    if (pendingEditRef.current && !handleRollbackRef.current) setPendingEditRollback(null);
     // On a normal send, gate against duplicate streams and enqueue overflow.
     // On reattach, the caller is the backgroundPid effect — we WANT it to take
     // over the stream, so skip the gate and the prep work (no user bubble,
@@ -3188,7 +3207,11 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
       // Target THIS pane's composer only (key == its sessionQueueKey). The old
       // untargeted store write + broadcast filled EVERY split pane's input box.
       const targetKey = sel?.sessionId || `draft-${sel?.projectHash || 'none'}`;
-      window.dispatchEvent(new CustomEvent('cgui:composer-fill', { detail: { text: originalText, targetKey } }));
+      window.dispatchEvent(new CustomEvent('cgui:composer-fill', { detail: { text: originalText, targetKey, editMode: true } }));
+      // 非破坏式(#4):只回填输入框 + 记录待回滚目标,绝不在此刻 trim/截断/还原文件。
+      // 等用户真正点发送时(handleSend 拦截)才回退;按 Esc 取消则历史毫发无损。
+      setPendingEditRollback({ msg, targetKey });
+      return;
     }
 
     if (idxInChat === -1 && idxInStore === -1) return;
@@ -3297,6 +3320,21 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
       }, 50);
     }
   }, [chatMessages, messages, fetchMessagesForTab, setLocalMessages, setSelectedSession, getLocalSession]);
+  useEffect(() => { handleRollbackRef.current = handleRollback; }, [handleRollback]);
+  // 切换会话时清掉待回滚,避免 A 会话的待回滚泄漏到 B 会话的下一次发送。
+  useEffect(() => { setPendingEditRollback(null); }, [selectedSession?.sessionId, setPendingEditRollback]);
+
+  // 编辑重发取消(#4):ChatInput 里按 Esc → 撤销待回滚(历史本就没动,纯清状态)。
+  useEffect(() => {
+    const onCancel = (e) => {
+      const targetKey = e?.detail?.targetKey;
+      const myKey = selectedSession?.sessionId || `draft-${selectedSession?.projectHash || 'none'}`;
+      if (targetKey && targetKey !== myKey) return;
+      setPendingEditRollback(null);
+    };
+    window.addEventListener('cgui:composer-cancel-edit', onCancel);
+    return () => window.removeEventListener('cgui:composer-cancel-edit', onCancel);
+  }, [selectedSession?.sessionId, selectedSession?.projectHash, setPendingEditRollback]);
 
   // Bug #6:重做一整轮 AI 回复。找 turn 之前最近的 user message,触发 handleRollback
   // (mode: 'message') — 等于 trim 到 user 之后 + 重发同一 prompt,让 AI 重新生成
@@ -3436,7 +3474,17 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
   // you can see how full the context is and when to /compact (#13). The prompt
   // size = input + cache_read + cache_creation of the most recent message that
   // has usage. Window is 1M when the active model has the [1m] beta suffix.
-  const lastUsage = [...allMessages].reverse().find(
+  // After /compact the jsonl keeps the PRE-compact turns (with their large
+  // usage) — only their context is dropped on the next --resume. So scope the
+  // "current context" lookup to messages AFTER the last compact divider;
+  // otherwise reverse().find keeps returning the stale pre-compact usage for
+  // several turns until enough new turns push it out (#2 的延迟根因).
+  let lastCompactIdx = -1;
+  for (let i = allMessages.length - 1; i >= 0; i--) {
+    if (allMessages[i]?.type === 'compact') { lastCompactIdx = i; break; }
+  }
+  const ctxScope = lastCompactIdx >= 0 ? allMessages.slice(lastCompactIdx + 1) : allMessages;
+  const lastUsage = [...ctxScope].reverse().find(
     (m) => m.usage && ((m.usage.input_tokens || 0) + (m.usage.cache_read_input_tokens || 0)) > 0,
   )?.usage;
   const contextTokens = lastUsage
@@ -3462,15 +3510,16 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
               </span>
               <span className="text-[10px] text-ink-faint font-mono shrink-0 whitespace-nowrap">{messages.length + chatMessages.length} 条消息</span>
               {contextTokens > 0 && (
-                <span
-                  className={`text-[10px] font-mono shrink-0 whitespace-nowrap px-1.5 py-px rounded ${
-                    contextPct >= 80 ? 'text-error bg-error-subtle'
-                      : contextPct >= 60 ? 'text-amber-700 bg-amber-50'
-                      : 'text-ink-faint'}`}
-                  title={`上下文 ${contextTokens.toLocaleString()} / ${contextWindow.toLocaleString()} tokens${contextPct >= 80 ? ' — 接近上限，建议 /compact' : ''}`}
-                >
-                  {fmtTok(contextTokens)}/{winLabel} ({contextPct}%)
-                </span>
+                <ContextBreakdownButton
+                  contextTokens={contextTokens}
+                  contextWindow={contextWindow}
+                  contextPct={contextPct}
+                  fmtTok={fmtTok}
+                  winLabel={winLabel}
+                  sessionId={selectedSession.sessionId}
+                  projectHash={selectedSession.projectHash}
+                  cwd={selectedSession.projectPath}
+                />
               )}
               {toolCallCount > 0 && <span className="text-[10px] text-ink-faint font-mono shrink-0 whitespace-nowrap">{toolCallCount} 工具调用</span>}
               {currentProvider?.providerHint && currentProvider.providerHint !== 'anthropic' && (
@@ -3527,10 +3576,16 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
         <div className="glass-bar shrink-0 px-3 py-1.5 flex items-center gap-x-2 gap-y-1 flex-wrap text-[10px] font-mono border-b border-canvas-deep/40 relative z-30">
           {headerModel && <ModelBadge model={headerModel} compact />}
           {contextTokens > 0 && (
-            <span className={contextPct >= 80 ? 'text-error' : contextPct >= 60 ? 'text-amber-700' : 'text-ink-faint'}
-              title={`上下文 ${contextTokens.toLocaleString()} / ${contextWindow.toLocaleString()} tokens`}>
-              {fmtTok(contextTokens)}/{winLabel} ({contextPct}%)
-            </span>
+            <ContextBreakdownButton
+              contextTokens={contextTokens}
+              contextWindow={contextWindow}
+              contextPct={contextPct}
+              fmtTok={fmtTok}
+              winLabel={winLabel}
+              sessionId={selectedSession.sessionId}
+              projectHash={selectedSession.projectHash}
+              cwd={selectedSession.projectPath}
+            />
           )}
           <span className="text-ink-faint">{(totalTokens.input + totalTokens.output).toLocaleString()} tok</span>
           {totalCostUsd > 0 && <span className="text-accent/80">· {formatCost(totalCostUsd)}</span>}
@@ -3929,6 +3984,149 @@ function ProviderSwitcher() {
         </div>
       )}
     </div>
+  );
+}
+
+// 上下文用量徽章 → 可点击,弹出 /context 风格的分项明细(#1)。数据来自后端
+// `/api/context/:sessionId`(对会话 fork 副本跑 /context 后解析,原会话不受影响)。
+const CTX_COLORS = ['#6366f1', '#0ea5e9', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899', '#14b8a6', '#a3a3a3'];
+function ContextBreakdownButton({ contextTokens, contextWindow, contextPct, fmtTok, winLabel, sessionId, projectHash, cwd }) {
+  const [open, setOpen] = useState(false);
+  const [coords, setCoords] = useState(null);
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [err, setErr] = useState('');
+  const [showMcp, setShowMcp] = useState(false);
+  const wrapRef = useRef(null);
+  const menuRef = useRef(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDocClick = (e) => {
+      if (wrapRef.current?.contains(e.target)) return;
+      if (menuRef.current?.contains(e.target)) return;
+      setOpen(false);
+    };
+    const onEsc = (e) => { if (e.key === 'Escape') setOpen(false); };
+    document.addEventListener('click', onDocClick);
+    document.addEventListener('keydown', onEsc);
+    return () => {
+      document.removeEventListener('click', onDocClick);
+      document.removeEventListener('keydown', onEsc);
+    };
+  }, [open]);
+
+  const load = async () => {
+    if (!sessionId) { setErr('发送一条消息后才能查看明细'); setData(null); return; }
+    setLoading(true); setErr('');
+    try {
+      const qs = new URLSearchParams({ cwd: cwd || '', projectHash: projectHash || '' });
+      const r = await fetch(`/api/context/${sessionId}?${qs.toString()}`);
+      const d = await r.json();
+      if (!r.ok || d.error) throw new Error(d.error || '获取失败');
+      setData(d);
+    } catch (e) { setErr(e.message); setData(null); }
+    setLoading(false);
+  };
+
+  const toggle = (e) => {
+    e.stopPropagation();
+    if (!open && wrapRef.current) {
+      const r = wrapRef.current.getBoundingClientRect();
+      const gap = 6;
+      const z = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--ui-zoom')) || 1;
+      const visH = window.innerHeight / z;
+      const openBelow = (visH - r.bottom) >= r.top;
+      setCoords({ left: r.left, top: openBelow ? r.bottom + gap : r.top - gap, ty: openBelow ? '0' : '-100%' });
+      load();
+    }
+    setOpen(!open);
+  };
+
+  const tone = contextPct >= 80 ? 'text-error bg-error-subtle'
+    : contextPct >= 60 ? 'text-amber-700 bg-amber-50'
+    : 'text-ink-faint hover:bg-black/5';
+
+  const cats = data?.categories || [];
+  const totalForBar = data?.windowTokens || contextWindow || 1;
+
+  const menu = open && coords && (
+    <div
+      ref={menuRef}
+      style={{ position: 'fixed', left: coords.left, top: coords.top, transform: `translate(0, ${coords.ty})`, zIndex: 9999 }}
+      className="glass-popover w-[340px] max-w-[calc(100vw-1.5rem)] max-h-[80vh] overflow-y-auto py-2 animate-glass-rise"
+    >
+      <div className="px-3 pb-2 flex items-center justify-between border-b border-black/5">
+        <span className="text-xs font-medium text-ink font-body">上下文用量</span>
+        {data?.model && <span className="text-[10px] text-ink-faint font-mono truncate max-w-[160px]" title={data.model}>{data.model}</span>}
+      </div>
+
+      {loading && <div className="px-3 py-6 text-center text-xs text-ink-faint">正在计算 /context…</div>}
+      {err && !loading && <div className="px-3 py-4 text-xs text-amber-700">{err}</div>}
+
+      {!loading && !err && data && (
+        <div className="px-3 pt-2">
+          <div className="flex items-baseline justify-between mb-1">
+            <span className="text-[11px] text-ink-muted font-mono">
+              {fmtTok(data.totalTokens)} / {data.windowTokens >= 1_000_000 ? '1M' : Math.round(data.windowTokens / 1000) + 'k'}
+            </span>
+            <span className="text-[11px] font-mono text-ink-muted">{data.pct}%</span>
+          </div>
+          {/* 分段进度条 */}
+          <div className="h-2 w-full rounded-full bg-black/10 overflow-hidden flex mb-3">
+            {cats.filter((c) => !/free space/i.test(c.name)).map((c, i) => (
+              <div key={c.name} title={`${c.name}: ${fmtTok(c.tokens)}`}
+                style={{ width: `${(c.tokens / totalForBar) * 100}%`, background: CTX_COLORS[i % CTX_COLORS.length] }} />
+            ))}
+          </div>
+          <div className="space-y-1.5">
+            {cats.map((c, i) => {
+              const free = /free space/i.test(c.name);
+              return (
+                <div key={c.name} className="flex items-center gap-2 text-[11px] font-body">
+                  <span className="w-2 h-2 rounded-sm shrink-0" style={{ background: free ? 'transparent' : CTX_COLORS[i % CTX_COLORS.length], border: free ? '1px solid var(--color-ink-faint,#bbb)' : 'none' }} />
+                  <span className={`flex-1 truncate ${free ? 'text-ink-faint' : 'text-ink'}`}>{c.name}</span>
+                  <span className="font-mono text-ink-muted tabular-nums">{fmtTok(c.tokens)}</span>
+                  <span className="font-mono text-ink-faint tabular-nums w-10 text-right">{c.pct}%</span>
+                </div>
+              );
+            })}
+          </div>
+
+          {data.mcpServers?.length > 0 && (
+            <div className="mt-3 pt-2 border-t border-black/5">
+              <button onClick={() => setShowMcp((v) => !v)} className="w-full flex items-center justify-between text-[11px] text-ink-muted hover:text-ink font-body">
+                <span>MCP 各服务 ({data.mcpServers.length})</span>
+                <span className="font-mono">{showMcp ? '收起' : '展开'}</span>
+              </button>
+              {showMcp && (
+                <div className="mt-1.5 space-y-1">
+                  {data.mcpServers.map((s) => (
+                    <div key={s.server} className="flex items-center gap-2 text-[11px] font-body">
+                      <span className="flex-1 truncate text-ink-muted">{s.server}</span>
+                      <span className="font-mono text-ink-faint tabular-nums">{fmtTok(s.tokens)}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+
+  return (
+    <span ref={wrapRef} className="inline-flex shrink-0">
+      <button
+        onClick={toggle}
+        className={`text-[10px] font-mono whitespace-nowrap px-1.5 py-px rounded transition-colors cursor-pointer ${tone}`}
+        title="点击查看上下文分项明细（/context）"
+      >
+        {fmtTok(contextTokens)}/{winLabel} ({contextPct}%)
+      </button>
+      {createPortal(menu, document.body)}
+    </span>
   );
 }
 
