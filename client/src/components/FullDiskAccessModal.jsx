@@ -29,12 +29,15 @@ export function FullDiskAccessModal({ onOpenSettings, onDismiss }) {
           </div>
           <p className="text-[11px] text-ink-faint">每次 build app(adhoc 签名),按 bundle ID 持久化的"完全磁盘访问"会保留;按 cdhash 的"Downloads 单目录"则会失效——所以选完全磁盘访问。</p>
         </div>
-        <div className="px-5 py-3 border-t border-canvas-deep flex items-center justify-end gap-2 bg-canvas-warm/40">
-          <button onClick={onDismiss} className="px-3 py-1.5 text-[12px] text-ink-muted hover:text-ink rounded-md hover:bg-canvas-warm transition-colors">以后再说</button>
-          <button onClick={onOpenSettings}
-            className="flex items-center gap-1.5 px-3 py-1.5 text-[12px] text-white bg-accent hover:bg-accent/90 rounded-md transition-colors">
-            <ExternalLink size={12} /> 打开系统设置
-          </button>
+        <div className="px-5 py-3 border-t border-canvas-deep flex items-center justify-between gap-2 bg-canvas-warm/40">
+          <button onClick={onDismiss} className="px-3 py-1.5 text-[12px] text-ink-muted hover:text-ink rounded-md hover:bg-canvas-warm transition-colors">我已授权,不再提醒</button>
+          <div className="flex items-center gap-2">
+            <button onClick={onDismiss} className="px-3 py-1.5 text-[12px] text-ink-muted hover:text-ink rounded-md hover:bg-canvas-warm transition-colors">以后再说</button>
+            <button onClick={onOpenSettings}
+              className="flex items-center gap-1.5 px-3 py-1.5 text-[12px] text-white bg-accent hover:bg-accent/90 rounded-md transition-colors">
+              <ExternalLink size={12} /> 打开系统设置
+            </button>
+          </div>
         </div>
       </div>
     </div>

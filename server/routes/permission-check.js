@@ -7,20 +7,29 @@ import { spawn } from 'child_process';
 
 const router = Router();
 
-// L2: macOS adhoc 签名每次 build cdhash 都变,TCC 旧授权失效。完全磁盘访问按
-// bundle ID 持久化,需用户手动加。本端点探测当前是否能读 ~/Downloads,前端据此
-// 决定首次启动是否弹引导。Windows/Linux 无 TCC,直接返回 false。
-router.get('/system/permission-status', async (_req, res) => {
+// L2+L5: macOS adhoc 签名每次 build cdhash 都变,TCC 旧授权失效。完全磁盘访问按
+// bundle ID 持久化,需用户手动加。**不再用 readdir 主动探测**(那会触发 macOS 原生
+// "想访问 Downloads"小弹窗,短路本引导)。改为 macOS 上始终建议授权,用户点 dismiss
+// 后落 flag 永久不弹;`?probe=1` 选项允许设置面板里强制探测一次。
+router.get('/system/permission-status', async (req, res) => {
   const plat = platform();
   if (plat !== 'darwin') {
     return res.json({ platform: plat, needsFullDiskAccess: false, canReadDownloads: true });
   }
-  let canRead = false;
-  try {
-    await readdir(join(homedir(), 'Downloads'));
-    canRead = true;
-  } catch { canRead = false; }
-  res.json({ platform: plat, needsFullDiskAccess: !canRead, canReadDownloads: canRead });
+  // 默认不探测 — 直接看 dismissed flag。
+  let dismissed = false;
+  try { await readFile(PERMISSION_GUIDE_SHOWN, 'utf-8'); dismissed = true; } catch {}
+  let canRead = null;
+  if (req.query?.probe === '1') {
+    try { await readdir(join(homedir(), 'Downloads')); canRead = true; }
+    catch { canRead = false; }
+  }
+  res.json({
+    platform: plat,
+    needsFullDiskAccess: !dismissed,
+    canReadDownloads: canRead,
+    dismissed,
+  });
 });
 
 // 引导弹窗"我已授权"按钮调:记录用户已经看过一次引导,即使再次返回 false
@@ -36,6 +45,12 @@ router.post('/system/permission-guide-dismissed', async (_req, res) => {
 router.get('/system/permission-guide-dismissed', async (_req, res) => {
   try { await readFile(PERMISSION_GUIDE_SHOWN, 'utf-8'); res.json({ dismissed: true }); }
   catch { res.json({ dismissed: false }); }
+});
+
+// L5: 设置面板用 — 让用户重新触发引导(例:换了机器/重 build 后想重新提醒)
+router.post('/system/permission-guide-reset', async (_req, res) => {
+  try { (await import('fs/promises')).unlink(PERMISSION_GUIDE_SHOWN).catch(() => {}); res.json({ ok: true }); }
+  catch { res.json({ ok: true }); }
 });
 
 // POST /api/system/open-fda-settings — 打开 macOS 完全磁盘访问设置面板
