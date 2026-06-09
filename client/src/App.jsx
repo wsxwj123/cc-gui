@@ -1944,6 +1944,7 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
   // _retryTrimToolId 标记负责(回退状态需一直保持),指示器在重跑流式内容出现后清掉,
   // 否则会一直转(用户报告:AI 回复完成后仍显示"正在重做")。
   const [retryActiveUuid, setRetryActiveUuid] = useState(null);
+  const [compacting, setCompacting] = useState(false); // /compact 进行中 → 显示压缩动画
   const activeProcRef = useRef(null);
   const abortRef = useRef(null);
   // pid 集合:被用户主动「停止」过的 chat 进程。停止后进程要等 close 才设 exitCode
@@ -2259,7 +2260,9 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
     // and non-blocking — kicked off in the background, never gates the send.
     // (User can still run git init manually anytime.)
 
+    const isCompact = /^\/compact\b/.test(String(prompt || '').trim());
     updateStreaming(true);
+    setCompacting(isCompact);
     setStreamingText('');
     setStreamingThinking('');
     setStreamingToolCalls([]);
@@ -2404,7 +2407,10 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
           // Omit sessionId for a draft so the CLI creates a fresh session.
           sessionId: sid || undefined,
           cwd: chatCwd,
-          model: currentModel,
+          // /compact 用标准上下文压缩:剥掉 [1m]。否则 Anthropic 上压缩会用 1M 上下文,
+          // 触发 "Usage credits required for 1M context" 报错(用户报告)。压缩只是摘要,
+          // 不需要 1M 窗口;对原生 1M 的 provider 去掉也无害。
+          model: isCompact ? String(currentModel || '').replace(/\[1m\]/i, '') : currentModel,
           effort: effort || undefined,
           appendSystemPrompt: appendSystemPrompt || undefined,
           addDirs: addDirs && addDirs.length ? addDirs : undefined,
@@ -2853,6 +2859,7 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
       // 重做工具的转圈指示器兜底:重跑流结束(成功/报错/零内容)一律关掉,
       // 避免重跑没产出内容时 effect 不触发 → 指示器一直转。
       setRetryActiveUuid(null);
+      setCompacting(false);
       // After the stream ends locally, hand the displayed history back to the
       // persisted jsonl. The catch: jsonl flushes the user prompt BEFORE the
       // assistant reply, and that flush races the stream's `result`. A single
@@ -3600,10 +3607,17 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
                   判断真正有内容的 block,和上面的回复气泡严格互斥,不再跳位也不再空白。*/}
               {isStreaming && !streamingText && !streamingThinking && streamingToolCalls.length === 0 && !streamingBlocks.some((b) => (b?.content?.length > 0) || b?.toolCall) && (
                 <div className="px-6 py-3 animate-fade-in">
-                  <div className="max-w-[var(--content-max)] mx-auto flex items-center gap-2.5 text-[14px] font-body" style={{ color: '#D97757' }}>
-                    <CliSpinner size={22} />
-                    <span className="font-mono font-medium">Connecting</span>
-                    <span>…</span>
+                  <div className="max-w-[var(--content-max)] mx-auto">
+                    <div className="flex items-center gap-2.5 text-[14px] font-body" style={{ color: '#D97757' }}>
+                      <CliSpinner size={22} />
+                      <span className="font-mono font-medium">{compacting ? 'Compacting' : 'Connecting'}</span>
+                      <span>…</span>
+                    </div>
+                    {contextTokens > 100_000 && (
+                      <div className="text-[11px] text-ink-faint font-body mt-1 pl-[30px]">
+                        上下文较大({Math.round(contextTokens / 1000)}k)，首字可能较慢；若长时间无响应,可点停止后 <code className="font-mono">/compact</code> 压缩或换 provider。
+                      </div>
+                    )}
                   </div>
                 </div>
               )}
@@ -5351,15 +5365,24 @@ export default function App() {
         <CliMissingModal onRecheck={checkCli} onDismiss={dismissCliCheck} />
       )}
       {updateNotice && (
-        <div className="fixed top-3 left-1/2 -translate-x-1/2 z-[100] max-w-[92vw]">
-          <div className="flex items-center gap-3 rounded-lg border border-amber-200 bg-amber-50 text-amber-900 px-4 py-2.5 shadow-lg text-[13px] font-body">
-            <span>🎉 有新版本：
-              {updateNotice.gui && <b className="font-mono"> GUI v{updateNotice.gui}</b>}
-              {updateNotice.gui && updateNotice.cc && ' ·'}
-              {updateNotice.cc && <b className="font-mono"> Claude Code v{updateNotice.cc}</b>}
-            </span>
-            <span className="text-amber-700 text-[12px]">到「设置 → 概览」更新</span>
-            <button onClick={() => setUpdateNotice(null)} className="ml-1 text-amber-700 hover:text-amber-900 text-[16px] leading-none">×</button>
+        <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/40 backdrop-blur-sm animate-fade-in" onClick={() => setUpdateNotice(null)}>
+          <div className="glass-popover w-[420px] max-w-[calc(100vw-1.5rem)] rounded-2xl shadow-2xl animate-glass-rise overflow-hidden" onClick={(e) => e.stopPropagation()}>
+            <div className="px-5 py-4 flex items-start gap-3">
+              <div className="w-9 h-9 rounded-lg bg-amber-100 flex items-center justify-center shrink-0 text-[18px]">🎉</div>
+              <div className="flex-1 min-w-0">
+                <div className="text-[14px] font-medium text-ink font-body">发现新版本</div>
+                <div className="text-[12px] text-ink-soft font-body mt-1 space-y-0.5">
+                  {updateNotice.gui && <div>Claude GUI → <b className="font-mono text-accent">v{updateNotice.gui}</b></div>}
+                  {updateNotice.cc && <div>Claude Code → <b className="font-mono text-accent">v{updateNotice.cc}</b></div>}
+                </div>
+              </div>
+            </div>
+            <div className="px-5 py-3 border-t border-canvas-deep flex items-center justify-end gap-2 bg-canvas-warm/40">
+              <button onClick={() => setUpdateNotice(null)}
+                className="px-3 py-1.5 text-[12px] text-ink-muted hover:text-ink rounded-md hover:bg-canvas-warm transition-colors">稍后</button>
+              <button onClick={() => { setRightPanel('settings'); setUpdateNotice(null); }}
+                className="px-3 py-1.5 text-[12px] text-white bg-accent hover:bg-accent/90 rounded-md transition-colors">前往更新</button>
+            </div>
           </div>
         </div>
       )}
