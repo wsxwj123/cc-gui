@@ -107,7 +107,7 @@ let mcpCacheAt = 0;
 // Mutations (enable/disable) invalidate explicitly via invalidateMcpCache().
 // Pass `?fresh=1` to force a refresh.
 const MCP_CACHE_TTL_MS = 5 * 60_000;
-function invalidateMcpCache() { mcpCache = null; mcpCacheAt = 0; }
+function invalidateMcpCache() { mcpCache = null; mcpCacheAt = 0; try { invalidateDetailsCache(); } catch {} }
 
 // GET /api/mcp — list all MCP servers and plugins
 router.get('/mcp', async (req, res) => {
@@ -266,10 +266,20 @@ async function writeDisabled(data) {
   await writeFile(DISABLED_FILE, JSON.stringify(data, null, 2) + '\n');
 }
 
+// `claude mcp get` 冷启动 ~3s。编辑表单回填会打这个端点,缓存住让二次编辑秒开。
+// 任何增删改(invalidateMcpCache)一并清空,避免回填到旧配置。
+const detailsCache = new Map(); // name -> { at, out }
+const DETAILS_TTL_MS = 5 * 60_000;
+function invalidateDetailsCache() { detailsCache.clear(); }
+
 async function getServerDetails(name) {
   try {
     assertSafeName(name);
-    return await runClaude(['mcp', 'get', name]);
+    const hit = detailsCache.get(name);
+    if (hit && (Date.now() - hit.at) < DETAILS_TTL_MS) return hit.out;
+    const out = await runClaude(['mcp', 'get', name]);
+    detailsCache.set(name, { at: Date.now(), out });
+    return out;
   } catch {
     return null;
   }

@@ -221,6 +221,11 @@ export async function listSessions(projectHash) {
         }
       }
 
+      // 防御:标题生成是一次性隔离调用(POST /api/chat/title),正常带
+      // --no-session-persistence 不落盘;万一某版本/某 provider 仍写了 jsonl,
+      // 它会以"给下面这段对话起一个标题…"开头污染列表。无论如何都不显示。
+      if (/^给下面这段对话起一个/.test(firstPrompt)) continue;
+
       // Skip ONLY truly empty sessions. A brand-new session (just one prompt +
       // reply) is ~3-8 lines, which we want to show. The old `< 20 && !meaningful`
       // filter swallowed every new chat whose prompt didn't pass isMeaningfulPrompt

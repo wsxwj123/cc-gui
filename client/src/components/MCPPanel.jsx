@@ -61,7 +61,8 @@ export function MCPPanel() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [toggling, setToggling] = useState(null);
-  const [form, setForm] = useState(null); // null | { add:true } | { name } (编辑)
+  const [form, setForm] = useState(null); // null | { add:true } | srv对象 (编辑)
+  const [restartHint, setRestartHint] = useState(false); // 增删改后提示需重启生效
   const mounted = useRef(true);
 
   const fetchData = async () => {
@@ -177,6 +178,12 @@ export function MCPPanel() {
 
   return (
     <div className="px-4 py-4 space-y-5 overflow-y-auto h-full">
+      {restartHint && (
+        <div className="flex items-start gap-2 text-[11px] text-amber-700 bg-amber-500/10 border border-amber-500/30 rounded-lg px-3 py-2">
+          <span className="flex-1">配置已保存到 claude code。MCP 改动需<b>重启正在运行的会话</b>(或新建会话)才会被 claude 加载生效。</span>
+          <button onClick={() => setRestartHint(false)} className="text-amber-700/70 hover:text-amber-700">✕</button>
+        </div>
+      )}
       {/* MCP Servers */}
       <div>
         <h3 className="text-[10px] font-medium uppercase tracking-widest text-ink-faint font-body mb-3 flex items-center gap-1.5">
@@ -235,7 +242,7 @@ export function MCPPanel() {
                         <span className="text-[10px] text-ink-ghost" title="已禁用（CLI 不会启动此 MCP）">已禁用</span>
                       )}
                       <PingButton name={srv.name} />
-                      <button onClick={() => setForm({ name: srv.name })} title="编辑"
+                      <button onClick={() => setForm(srv)} title="编辑"
                         className="p-1 rounded text-ink-faint hover:text-accent hover:bg-canvas-warm transition-colors"><Pencil size={11} /></button>
                       <button onClick={() => handleDelete(srv)} title="删除"
                         className="p-1 rounded text-ink-faint hover:text-error hover:bg-canvas-warm transition-colors"><Trash2 size={11} /></button>
@@ -353,9 +360,9 @@ export function MCPPanel() {
 
       {form && (
         <McpForm
-          editing={form.name ? { name: form.name } : null}
+          editing={form.add ? null : form}
           onClose={() => setForm(null)}
-          onSaved={fetchData}
+          onSaved={() => { fetchData(); setRestartHint(true); }}
         />
       )}
     </div>

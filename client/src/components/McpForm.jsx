@@ -19,20 +19,28 @@ const SCOPES = [
 
 export function McpForm({ editing, onClose, onSaved }) {
   const isEdit = !!editing;
-  const [loading, setLoading] = useState(isEdit);
+  // 不再用全屏 spinner 阻塞:编辑时立即用列表已有的 command/transport 回填,表单秒开可编辑。
+  // env/scope/autoApprove/label 这些列表里没有的字段后台拉 /config 补齐(claude mcp get 冷启动 ~3s)。
+  const seedTransport = editing?.transport || 'stdio';
+  const seedCmd = editing?.command
+    ? (editing.command + (editing.args?.length ? ' ' + editing.args.join(' ') : ''))
+    : '';
+  const [refining, setRefining] = useState(isEdit); // 后台补全中
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState('');
 
   const [name, setName] = useState(editing?.name || '');
   const [label, setLabel] = useState('');
-  const [transport, setTransport] = useState('stdio');
-  const [commandLine, setCommandLine] = useState('');
-  const [url, setUrl] = useState('');
+  const [transport, setTransport] = useState(seedTransport);
+  const [commandLine, setCommandLine] = useState(seedTransport === 'stdio' ? seedCmd : '');
+  const [url, setUrl] = useState(seedTransport !== 'stdio' ? seedCmd : '');
   const [scope, setScope] = useState('user');
   const [autoApprove, setAutoApprove] = useState(false);
   const [envRows, setEnvRows] = useState([]); // [{k,v}]
+  // 用户一旦改过命令/URL,后台补全就不再覆盖这两个字段,避免边输入边被刷掉。
+  const dirtyRef = React.useRef(false);
 
-  // 编辑:拉结构化配置回填
+  // 编辑:后台拉结构化配置补全(env/scope 等),不阻塞已可编辑的表单。
   useEffect(() => {
     if (!isEdit) return;
     let cancelled = false;
@@ -44,16 +52,19 @@ export function McpForm({ editing, onClose, onSaved }) {
         if (!r.ok) throw new Error(d.error || '读取配置失败');
         setName(d.name || editing.name);
         setLabel(d.label || '');
-        setTransport(d.transport || 'stdio');
-        setCommandLine(d.commandLine || '');
-        setUrl(d.url || '');
         setScope(d.scope || 'user');
         setAutoApprove(!!d.autoApprove);
         setEnvRows(Object.entries(d.env || {}).map(([k, v]) => ({ k, v: String(v) })));
+        // 命令/URL/类型:仅当用户尚未编辑时用权威值校正(列表里的种子通常已正确)。
+        if (!dirtyRef.current) {
+          setTransport(d.transport || 'stdio');
+          setCommandLine(d.commandLine || '');
+          setUrl(d.url || '');
+        }
       } catch (e) {
         if (!cancelled) setErr(e.message);
       } finally {
-        if (!cancelled) setLoading(false);
+        if (!cancelled) setRefining(false);
       }
     })();
     return () => { cancelled = true; };
@@ -106,10 +117,13 @@ export function McpForm({ editing, onClose, onSaved }) {
           <button onClick={onClose} className="p-1.5 hover:bg-canvas-warm rounded transition-colors"><X size={14} className="text-ink-faint" /></button>
         </div>
 
-        {loading ? (
-          <div className="flex items-center justify-center py-16"><RefreshCw size={16} className="animate-spin text-ink-faint" /></div>
-        ) : (
+        {(
           <div className="px-5 py-4 space-y-4">
+            {isEdit && refining && (
+              <div className="flex items-center gap-2 text-[11px] text-ink-faint">
+                <RefreshCw size={11} className="animate-spin" /> 正在载入完整配置(环境变量等)…
+              </div>
+            )}
             {/* 类型 */}
             <div className="space-y-1.5">
               <div className={labelCls}>类型</div>
@@ -137,12 +151,12 @@ export function McpForm({ editing, onClose, onSaved }) {
               <div className={labelCls}>{isStdio ? '命令' : 'URL'}</div>
               {isStdio ? (
                 <>
-                  <textarea value={commandLine} onChange={(e) => setCommandLine(e.target.value)} rows={2}
+                  <textarea value={commandLine} onChange={(e) => { dirtyRef.current = true; setCommandLine(e.target.value); }} rows={2}
                     className={`${inputCls} font-mono resize-y`} placeholder="npx -y mcp-server-xxx --arg1 value1" />
                   <div className={hintCls}>整行命令会按空格(尊重引号)拆成 command + 参数，等价 claude code 的 <code className="font-mono">command</code> / <code className="font-mono">args</code>。</div>
                 </>
               ) : (
-                <input value={url} onChange={(e) => setUrl(e.target.value)} className={`${inputCls} font-mono`} placeholder="https://example.com/mcp" />
+                <input value={url} onChange={(e) => { dirtyRef.current = true; setUrl(e.target.value); }} className={`${inputCls} font-mono`} placeholder="https://example.com/mcp" />
               )}
             </div>
 
@@ -186,7 +200,7 @@ export function McpForm({ editing, onClose, onSaved }) {
 
         <div className="px-5 py-3 border-t border-canvas-deep flex items-center justify-end gap-2 bg-canvas-warm/40 sticky bottom-0">
           <button onClick={onClose} className="px-3 py-1.5 text-[12px] text-ink-muted hover:text-ink rounded-md hover:bg-canvas-warm transition-colors">取消</button>
-          <button onClick={save} disabled={saving || loading}
+          <button onClick={save} disabled={saving}
             className="flex items-center gap-1.5 px-3 py-1.5 text-[12px] text-white bg-accent hover:bg-accent/90 rounded-md transition-colors disabled:opacity-50">
             {saving && <RefreshCw size={12} className="animate-spin" />}
             {isEdit ? '保存' : '添加'}

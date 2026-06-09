@@ -630,6 +630,9 @@ router.post('/chat/:pid/stop', (req, res) => {
 router.post('/chat/title', async (req, res) => {
   const firstUser = String(req.body?.firstUser || '').slice(0, 2000).trim();
   const firstAssistant = String(req.body?.firstAssistant || '').slice(0, 1500).trim();
+  // 会话当前模型:标题必须用和正文同一个 provider+模型,否则落到 settings.json 的
+  // small/fast 默认(如不存在的 mimo-v2.5)→ 标题永远失败(用户报告)。剥掉 [1m] 后缀。
+  const model = String(req.body?.model || '').replace(/\[1m\]/i, '').trim();
   if (!firstUser) return res.json({ title: '' });
 
   const prompt = `给下面这段对话起一个不超过 12 个字的简短中文标题,只输出标题本身,不要引号、不要标点结尾、不要解释。\n\n用户: ${firstUser}\n${firstAssistant ? `助手: ${firstAssistant}\n` : ''}`;
@@ -649,7 +652,9 @@ router.post('/chat/title', async (req, res) => {
   try {
     // --no-session-persistence:标题生成是一次性调用,绝不能落盘成会话 jsonl,否则项目
     // 会话列表里会冒出"给下面这段对话起标题…"的空白会话(刷新后可见,用户报告 #5)。
-    proc = claudeSpawn(['-p', prompt, '--permission-mode', 'plan', '--no-session-persistence'], {
+    const titleArgs = ['-p', prompt, '--permission-mode', 'plan', '--no-session-persistence'];
+    if (model) titleArgs.push('--model', model);
+    proc = claudeSpawn(titleArgs, {
       cwd: typeof req.body?.cwd === 'string' && req.body.cwd ? req.body.cwd : homedir(),
       stdio: ['ignore', 'pipe', 'pipe'],
       env: childEnv,

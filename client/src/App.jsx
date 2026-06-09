@@ -1947,12 +1947,16 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
     return s.modelBySession[k] || null;
   });
   const globalModel = useStore((s) => s.currentModel);
+  // 历史模型:优先用侧栏会话元数据里的 model(切入会话时立即可用、稳定),只有它缺失
+  // 时才扫 messages。否则 messages 异步加载前为空 → 先显示全局默认、加载后跳到历史模型,
+  // 造成"切走切回模型闪变"(用户报告 #3)。selectedSession.model 在选中瞬间就有值。
   const historyModel = useMemo(() => {
+    if (selectedSession?.model) return selectedSession.model;
     for (let i = messages.length - 1; i >= 0; i--) {
       if (messages[i]?.model) return messages[i].model;
     }
     return null;
-  }, [messages]);
+  }, [selectedSession?.model, messages]);
   const currentModel = pinnedModel || historyModel || globalModel;
   const modelBySession = useStore((s) => s.modelBySession);
   const messagesEndRef = useRef(null);
@@ -2585,6 +2589,16 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
             }
           }
 
+          // 压缩边界(原生 auto-compact 或手动 /compact 都会发):立即插一条压缩分隔,
+          // 用户当场看到上下文被压缩,不必等回合结束 refetch。回合结束 chatMessages 被清空,
+          // 换成 jsonl 里的 isCompactSummary divider(同一条),不会重复。(#5)
+          if (event.type === 'system' && event.subtype === 'compact_boundary') {
+            setChatMessages((prev) => {
+              if (prev.some((m) => m.type === 'compact' && m._live)) return prev;
+              return [...prev, { type: 'compact', uuid: 'live-compact', _live: true }];
+            });
+          }
+
           // Token-level deltas (--include-partial-messages). This is the path that
           // makes the GUI feel like the CLI terminal: text appears as it's generated.
           if (event.type === 'stream_event' && event.event) {
@@ -3081,10 +3095,15 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
         if (titleSid && !titleAttempted.has(titleSid) && !st.customTitles[titleSid] && !st.autoTitles[titleSid] && prompt) {
           // 标记"已尝试"——无论成功失败都不再重试,避免 provider 失败时每轮 spawn。
           titleAttempted.add(titleSid);
+          // 标题用与正文同一模型(pin → 历史 → 全局)。currentModel 定义在 try 块内、
+          // 此处是 finally 不可见,故就地按 titleSid 重新解析。
+          const titleModel = st.modelBySession[titleSid]
+            || (() => { const ms = getLocalMessages() || []; for (let i = ms.length - 1; i >= 0; i--) if (ms[i]?.model) return ms[i].model; return null; })()
+            || st.currentModel;
           fetch('/api/chat/title', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ firstUser: prompt, firstAssistant: accumulatedText || '', cwd }),
+            body: JSON.stringify({ firstUser: prompt, firstAssistant: accumulatedText || '', cwd, model: titleModel }),
           })
             .then((r) => r.json())
             .then((d) => { if (d?.title) useStore.getState().setAutoTitle(titleSid, d.title); })

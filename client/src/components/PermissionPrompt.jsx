@@ -428,7 +428,14 @@ export function PermissionPrompt({ sessionId = null, onExecutePlan = null }) {
   // bridge eventually times out, and the tool looks "denied / no permission".
   // In single-pane mode, surface such orphans under the current session. (Skip
   // in split mode so the same orphan isn't shown in every pane at once.)
-  const mine = all.filter((p) => !selectedSid || p.sessionId === selectedSid || (paneCount === 1 && p.sessionId == null));
+  // 单窗格:只有一个会话在驱动工具调用,任何 in-flight 请求都属于它 —— 无条件显示。
+  // 这修复了"计划/权限弹窗不出现"(#2):plan 回合常给出与 GUI 选中会话不一致的新
+  // sessionId(或 null),旧逻辑只放行 sessionId==null,带新 id 的 ExitPlanMode 被
+  // 过滤掉 → 计划只剩输入框上方的 PlanBlock、没有审批卡片。
+  // 多窗格:保持按 pane 的 sessionId 严格匹配,避免同一请求在每个窗格重复弹。
+  const mine = paneCount === 1
+    ? all
+    : all.filter((p) => !selectedSid || p.sessionId === selectedSid);
   if (mine.length === 0) return null;
 
   const resolve = async (req, decision, reason) => {
