@@ -323,10 +323,9 @@ export function MessageBubble({ message, onRollback }) {
               <span className="text-[13px] font-medium text-ink font-body">你</span>
             </div>
             <div className="max-w-[85%] bg-canvas-warm border border-canvas-deep rounded-2xl px-4 py-2.5">
-              {/* L3: 有附件时优先用 displayText(去 "@附件" 标签的纯文本);CLI 收的仍是带 @path 的完整 outbound */}
-              <CollapsibleUserText text={(message.attachments?.length && message.displayText !== undefined) ? message.displayText : message.text} />
+              {/* L3: 附件在文本上方,符合"附件→说明"的自然阅读顺序;CLI 仍收带 @path 的完整 outbound */}
               {Array.isArray(message.attachments) && message.attachments.length > 0 && (
-                <div className="mt-2 flex flex-wrap gap-2">
+                <div className="mb-2 flex flex-wrap gap-2">
                   {message.attachments.map((a, i) => (
                     <div key={i} className="flex items-center gap-2 px-2 py-1 bg-canvas border border-canvas-deep rounded-lg max-w-[260px]" title={a.path}>
                       {a.kind === 'image' && a.preview ? (
@@ -344,6 +343,7 @@ export function MessageBubble({ message, onRollback }) {
                   ))}
                 </div>
               )}
+              <CollapsibleUserText text={(message.attachments?.length && message.displayText !== undefined) ? message.displayText : message.text} />
             </div>
           </div>
         </div>

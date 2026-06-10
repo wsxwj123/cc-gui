@@ -475,6 +475,13 @@ router.post('/provider/switch', async (req, res) => {
       const curModel = current.model;
       if (model && isClaudeModel(model)) next.model = model;
       else if (isClaudeModel(curModel)) next.model = curModel;
+      // 🐛 修复:cc CLI 的 settings.json `model` 字段实际是 subagent default(haiku
+      // 给 Task 用),不影响主 chat;主 chat 用 env.ANTHROPIC_MODEL,未设则 fallback
+      // sonnet。之前 GUI 显示 model=haiku 但实际跑 sonnet 的根因。同步两个字段,
+      // 让 GUI 显示和 CLI 实际跑的一致。
+      if (next.model && isClaudeModel(next.model) && !env.ANTHROPIC_MODEL) {
+        env.ANTHROPIC_MODEL = next.model;
+      }
       const ts = new Date().toISOString().replace(/[:.]/g, '-');
       await copyFile(SETTINGS_PATH, `${SETTINGS_PATH}.${ts}.bak`).catch(() => {});
       await writeFile(SETTINGS_PATH, JSON.stringify(next, null, 2));
