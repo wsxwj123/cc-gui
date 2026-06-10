@@ -378,7 +378,9 @@ function nativeContextWindow(model) {
   if (byName) return parseInt(byName[1], 10) * 1000;
   // GPT-5.x:mini / nano 是 400K,5.4/5.5/pro 是 ~1.05M(查 OpenAI 官方文档 2026-06)。
   if (/gpt-5.*(mini|nano)/.test(id)) return 400_000;
-  if (/gemini|gpt-5|deepseek-v4|deepseek-chat|deepseek-reasoner|mimo|minimax|grok-4/.test(id)) return 1_000_000;
+  // U3:deepseek/mimo 从 1M 名单移除 —— CLI /context 实测均为 200k 档(用户 Windows
+  // 上 deepseek 徽章 1M、点开实测 200k 的矛盾根因)。1M 须显式 [1m] 后缀或实测覆盖。
+  if (/gemini|gpt-5|minimax|grok-4/.test(id)) return 1_000_000;
   if (/kimi/.test(id)) return 262_144;               // Kimi K2.6 原生 256K
   return 200_000;
 }
@@ -1987,13 +1989,20 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
   // 历史模型:优先用侧栏会话元数据里的 model(切入会话时立即可用、稳定),只有它缺失
   // 时才扫 messages。否则 messages 异步加载前为空 → 先显示全局默认、加载后跳到历史模型,
   // 造成"切走切回模型闪变"(用户报告 #3)。selectedSession.model 在选中瞬间就有值。
+  // U1/U4:provider 切换(providerEpoch)之前的历史模型不再信任 —— 否则切走 provider
+  // 后,老会话徽章/发送都沿用旧 provider 的模型 id,上游报"无可用渠道/para error"。
+  // 显示与发送解析保持一致(同样的 epoch 门控)。
+  const providerEpoch = useStore((s) => s.providerEpoch);
+  const measuredCtxWindow = useStore((s) => (selectedSession?.sessionId && s.ctxWindowBySession[selectedSession.sessionId]) || null);
   const historyModel = useMemo(() => {
-    if (selectedSession?.model) return selectedSession.model;
+    const fresh = (m) => !providerEpoch || (m?.timestamp && Date.parse(m.timestamp) > providerEpoch);
     for (let i = messages.length - 1; i >= 0; i--) {
-      if (messages[i]?.model) return messages[i].model;
+      if (messages[i]?.model) return fresh(messages[i]) ? messages[i].model : null;
     }
+    // 会话元数据 model 无时间戳:仅在从未切换过 provider 时可信。
+    if (selectedSession?.model && !providerEpoch) return selectedSession.model;
     return null;
-  }, [selectedSession?.model, messages]);
+  }, [selectedSession?.model, messages, providerEpoch]);
   const currentModel = pinnedModel || historyModel || globalModel;
   const modelBySession = useStore((s) => s.modelBySession);
   const messagesEndRef = useRef(null);
@@ -2542,9 +2551,17 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
       // 模型解析与徽章一致(#8):pin → 历史模型 → 全局默认。否则发送时只读 pin||全局,
       // 全局被 WS 重置成默认后,没 pin 的会话(尤其回滚后)会用默认模型发出,与徽章不符。
       const _pin = useStore.getState().modelBySession[sessionQueueKey];
+      // U1/U4:历史模型回退只信任【最近一次 provider 切换之后】产生的消息。
+      // 否则切到新 provider 后,老会话的 _hist 仍是旧 provider 的模型 id
+      // (如 mimo-v2.5-pro),发给 maoshu/官方 → "无可用渠道 / para error"。
+      const _epoch = useStore.getState().providerEpoch || 0;
       const _hist = (() => {
         const ms = getLocalMessages() || [];
-        for (let i = ms.length - 1; i >= 0; i--) if (ms[i]?.model) return ms[i].model;
+        for (let i = ms.length - 1; i >= 0; i--) {
+          if (!ms[i]?.model) continue;
+          if (_epoch && (!ms[i].timestamp || Date.parse(ms[i].timestamp) <= _epoch)) return null;
+          return ms[i].model;
+        }
         return null;
       })();
       const currentModel = _pin || _hist || useStore.getState().currentModel;
@@ -2714,6 +2731,9 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
               if (prev.some((m) => m.type === 'compact' && m._live)) return prev;
               return [...prev, { type: 'compact', uuid: 'live-compact', _live: true }];
             });
+            // U8:压缩边界后,压缩前写入的即时 usage 已是旧值,清掉 —— 否则它优先级
+            // 高于 jsonl 的 lastUsage,徽章在压缩后纹丝不动(用户报告)。
+            setLiveContextUsage(null);
           }
 
           // Token-level deltas (--include-partial-messages). This is the path that
@@ -2913,6 +2933,24 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
             if (event.message.model) setStreamingModel(event.message.model);
           }
           if (event.type === 'user' && event.message?.content) {
+            // U7:带 parent_tool_use_id 的 user 事件是【子代理内部工具】的 tool_result。
+            // 之前这条分支不存在 → 子工具的 result 永远是 null → TaskCard/SubagentView
+            // 里的子工具永远转圈(即使监控显示子代理已完成)。路由到 agent store 配对。
+            if (event.parent_tool_use_id) {
+              const aStore = useStore.getState();
+              for (const block of event.message.content) {
+                if (block.type === 'tool_result') {
+                  aStore.updateAgentTool(event.parent_tool_use_id, block.tool_use_id, {
+                    result: {
+                      toolUseId: block.tool_use_id,
+                      content: typeof block.content === 'string' ? block.content : JSON.stringify(block.content),
+                      isError: block.is_error || false,
+                    },
+                  });
+                }
+              }
+              continue;
+            }
             for (const block of event.message.content) {
               if (block.type === 'tool_result') {
                 // If this result closes a Task tool_use, mark the subagent done.
@@ -2922,6 +2960,16 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
                     status: block.is_error ? 'error' : 'done',
                     result: typeof block.content === 'string' ? block.content : JSON.stringify(block.content),
                   });
+                  // U7 兜底:有些 CLI/provider 不往父流发子代理内部事件的 tool_result,
+                  // Task 已收尾时把仍 pending 的子工具统一标记完成,不再转圈。
+                  const ag = store.activeAgents[block.tool_use_id];
+                  if (ag?.toolCalls?.some((tc) => !tc.result)) {
+                    store.upsertAgent(block.tool_use_id, {
+                      toolCalls: ag.toolCalls.map((tc) => tc.result
+                        ? tc
+                        : { ...tc, result: { content: '', isError: false, synthetic: true } }),
+                    });
+                  }
                 }
                 // Also patch the ordered blocks list so the in-place card shows result.
                 const resultPayload = {
@@ -3028,7 +3076,9 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
             break;
           }
           // 即时上下文用量(#5):result 事件带本轮 usage,直接据此刷新徽章。
-          if (event.type === 'result' && event.usage
+          // U8:/compact 回合除外 —— 它的 usage 是"整段历史发去做摘要"的旧大上下文,
+          // 写进徽章会把刚压缩完的占比又顶回压缩前。
+          if (event.type === 'result' && !isCompact && event.usage
             && ((event.usage.input_tokens || 0) + (event.usage.cache_read_input_tokens || 0) + (event.usage.cache_creation_input_tokens || 0)) > 0) {
             setLiveContextUsage(event.usage);
           }
@@ -3051,20 +3101,22 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
         // M3(Q9)→T2 重构:完成悬浮提醒改由服务端 WS 'turn-complete' 广播驱动
         // (见 useWebSocket)。这里的流闭包在用户切走会话时会被切会话 effect
         // abort,完成代码根本执行不到 —— 挂在这里的 toast 从未生效过。
-      } else if (isClear && !sawError && !reattachPid) {
-        // /clear 在 headless 下返回空 result(无 assistant 文本),不是错误。给出明确的
-        // "会话已清空" 提示,而不是误报 "provider 没有返回任何内容"(#4)。
+      } else if ((isClear || isCompact) && !sawError && !reattachPid) {
+        // /clear 与 /compact 在 headless 下都返回空 result(无 assistant 文本),不是
+        // 错误:/clear 清空、/compact 只发 compact_boundary。给出明确提示,而不是误报
+        // "provider 没有返回任何内容"(#4 / U8)。
         producedReply = true;
         setLiveContextUsage(null);
+        const okText = isClear ? '✅ 会话已清空，请发送新的消息。' : '✅ 上下文已压缩，可继续对话。';
         setChatMessages((prev) => [...prev, {
           uuid: 'chat-cleared-' + Date.now(),
           type: 'turn',
           timestamp: new Date().toISOString(),
           model: streamingModel,
-          text: ['✅ 会话已清空，请发送新的消息。'],
+          text: [okText],
           thinking: [],
           toolCalls: [],
-          blocks: [{ type: 'text', content: '✅ 会话已清空，请发送新的消息。' }],
+          blocks: [{ type: 'text', content: okText }],
           usage: null,
         }]);
       } else if (!sawError && !reattachPid) {
@@ -3610,7 +3662,10 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
   // 切换会话时清掉待回滚 + 即时上下文用量 + 打开的子代理视图,避免泄漏到另一会话。
   useEffect(() => {
     setPendingEditRollback(null);
-    setLiveContextUsage(null);
+    // U2:draft→真 sessionId 的同会话升级也会触发本 effect(sessionId null→真 id),
+    // 且 init/message_start 常在同一批 setState 里到达 —— 无守卫会把新会话首轮刚写入
+    // 的 usage 又清掉(新会话徽章不显示的根因)。流归属仍是本会话时不清。
+    if (streamOwnerKeyRef.current !== sessionQueueKey) setLiveContextUsage(null);
     useStore.getState().setViewingAgent(null);
   }, [selectedSession?.sessionId, setPendingEditRollback]);
 
@@ -3784,11 +3839,14 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
   const contextTokens = effectiveUsage
     ? (effectiveUsage.input_tokens || 0) + (effectiveUsage.cache_read_input_tokens || 0) + (effectiveUsage.cache_creation_input_tokens || 0)
     : 0;
-  // 窗口分母必须用「产生这次 usage 的那条消息的模型」,而不是全局 currentModel —— 否则
-  // 全局默认是 haiku(200k) 时,mimo(1M) 会话会显示成 900k/200k(用户报告 #3/#6)。
-  // 流式中用 streamingModel;历史用该消息记录的 model;都没有才回退 currentModel。
-  const windowModel = (liveContextUsage ? streamingModel : lastUsageMsg?.model) || lastUsageMsg?.model || currentModel;
-  const contextWindow = nativeContextWindow(windowModel);
+  // U3:分母 = 下一次发送将使用的模型(currentModel = pin → 代际戳之后的历史 → 全局,
+  // 与发送解析完全一致)。[1m] 开关写入 pin,因此切换立即反映到徽章;
+  // /context 实测过的窗口(ctxWindowBySession)是权威值,优先于按模型名猜测 ——
+  // 之前"徽章显示 1M、点开 /context 却是 200k"的矛盾根因就是两套来源各算各的。
+  // 显式 [1m] 后缀 > /context 实测缓存(实测可能是开 1m 之前测的) > 按名猜测。
+  const contextWindow = /\[1m\]/i.test(currentModel || '')
+    ? 1_000_000
+    : (measuredCtxWindow || nativeContextWindow(currentModel));
   // I4:流式缓冲(chatMessages/streaming 气泡)只在它归属当前会话时显示。切到别的会话时
   // 隐藏(流仍在服务端跑,回到原会话或刷新后由 jsonl/reattach 呈现),不串到当前视图。
   const liveVisible = streamOwnerKey == null || streamOwnerKey === sessionQueueKey;
@@ -3803,7 +3861,10 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
         <div className="absolute inset-0 z-40 flex flex-col bg-canvas">
           <SubagentView
             agentId={viewingAgentId}
-            parentTitle={selectedSession?.customTitle || selectedSession?.firstPrompt || '母会话'}
+            parentTitle={(selectedSession?.sessionId
+              && (useStore.getState().customTitles[selectedSession.sessionId]
+                || useStore.getState().autoTitles[selectedSession.sessionId]))
+              || selectedSession?.firstPrompt || '母会话'}
             onBack={() => useStore.getState().setViewingAgent(null)}
           />
         </div>
@@ -4407,6 +4468,8 @@ function ContextBreakdownButton({ contextTokens, contextWindow, contextPct, fmtT
       const d = await r.json();
       if (!r.ok || d.error) throw new Error(d.error || '获取失败');
       setData(d);
+      // U3:把 CLI 实测的窗口回写为本会话徽章的权威分母,徽章与明细从此一致。
+      if (d?.windowTokens > 0) useStore.getState().setCtxWindow(sessionId, d.windowTokens);
     } catch (e) { setErr(e.message); setData(null); }
     setLoading(false);
   };
@@ -5725,6 +5788,9 @@ export default function App() {
   const activeTabIndex = useStore((s) => s.activeTabIndex);
   const paneSessions = useStore((s) => s.paneSessions);
   const customTitles = useStore((s) => s.customTitles);
+  // U6:顶栏"项目/会话标题"也要跟随 AI 自动标题(custom > auto > firstPrompt),
+  // 之前只读 customTitles → 自动标题生成后顶栏仍显示首条消息。
+  const autoTitles = useStore((s) => s.autoTitles);
   const activeSession = (paneSessions && paneSessions[activeTabIndex]) || selectedSession;
   const permKey = activeSession?.sessionId || `draft-${activeSession?.projectHash || 'none'}`;
 
@@ -5790,7 +5856,7 @@ export default function App() {
     st.setPaneMessages(0, []);
   };
   const mobileTitle = mobileSelSession
-    ? (customTitles[mobileSelSession.sessionId] || mobileSelSession.firstPrompt?.slice(0, 24) || '新会话')
+    ? (customTitles[mobileSelSession.sessionId] || autoTitles[mobileSelSession.sessionId] || mobileSelSession.firstPrompt?.slice(0, 24) || '新会话')
     : 'Claude Code';
 
   const uiFontScale = useStore((s) => s.uiFontScale);
@@ -5985,7 +6051,7 @@ export default function App() {
             <>
               <span className="text-ink-ghost shrink-0">/</span>
               <span className="text-[11px] text-ink-muted font-body truncate min-w-0 max-w-[220px]">
-                {customTitles[selectedSession.sessionId] || selectedSession.firstPrompt?.slice(0, 36) || selectedSession.sessionId?.slice(0, 8) || '新会话'}
+                {customTitles[selectedSession.sessionId] || autoTitles[selectedSession.sessionId] || selectedSession.firstPrompt?.slice(0, 36) || selectedSession.sessionId?.slice(0, 8) || '新会话'}
               </span>
             </>
           )}

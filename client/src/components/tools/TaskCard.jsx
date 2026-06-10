@@ -138,6 +138,9 @@ export function TaskCard({ toolCall }) {
                     tc.result.isError
                       ? <span className="text-error">✗</span>
                       : <span className="text-success">✓</span>
+                  ) : isDone ? (
+                    // U7:Task 整体已收尾,内部工具必然结束 —— 不再转圈。
+                    <span className="text-success">✓</span>
                   ) : (
                     <Loader2 size={10} className="text-ink-faint animate-spin" />
                   )}

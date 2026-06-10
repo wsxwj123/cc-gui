@@ -179,6 +179,14 @@ export const useStore = create((set, get) => ({
   // claude-protocol relay so its turns carry claude-* names and look identical
   // to official — so we record the REAL provider per send and compare next time.
   lastProviderBySession: readLs('cgui-last-provider-by-session', {}),
+  // U1/U4:最近一次 provider 切换的时间戳。发送路径的"历史模型回退"(_hist)只信任
+  // 晚于该时刻的消息 —— 否则切走 provider 后,老会话历史里的旧 provider 模型 id
+  // (如 mimo-v2.5-pro)会继续被发给新 provider,上游报"模型无可用渠道/para error"。
+  providerEpoch: readLs('cgui-provider-epoch', 0),
+  // U3:/context 实测得到的各会话上下文窗口 { [sessionId]: windowTokens }。
+  // 这是权威分母 —— 前端按模型名猜窗口(nativeContextWindow)与 CLI 实测不一致时,
+  // 以实测为准,徽章与点开的明细才不会打架。仅内存态,不持久化(模型可能换)。
+  ctxWindowBySession: {},
   // Sessions currently handed off to phone remote control (sessionId → true).
   // While set, the GUI must NOT spawn `-p` turns for that session (both would
   // write the same jsonl). The composer locks and shows a reclaim banner.
@@ -367,7 +375,19 @@ export const useStore = create((set, get) => ({
   // Drop every per-session model pin. Called on a provider switch: those pins
   // reference the OLD provider's models (and would otherwise mask the new
   // provider's default model + survive as invalid ids on the new backend).
-  clearModelOverrides: () => { writeLs('cgui-model-by-session', {}); set({ modelBySession: {} }); },
+  clearModelOverrides: () => {
+    writeLs('cgui-model-by-session', {});
+    // U1/U4:清 pin 的同时推进 provider 代际戳,使发送路径不再信任此前的历史模型。
+    const now = Date.now();
+    writeLs('cgui-provider-epoch', now);
+    set({ modelBySession: {}, providerEpoch: now });
+  },
+  // U3:记录 /context 实测窗口,徽章分母优先采用。
+  setCtxWindow: (sessionId, windowTokens) => set((s) => (
+    sessionId && windowTokens > 0
+      ? { ctxWindowBySession: { ...s.ctxWindowBySession, [sessionId]: windowTokens } }
+      : s
+  )),
   // When a draft session (keyed `draft-<projectHash>`) gets its real CLI session
   // id, carry its per-session model + permission pins over to the new key. Without
   // this the pins orphan under the draft key, so the model the user picked for a

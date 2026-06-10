@@ -125,6 +125,9 @@ export function SubagentView({ agentId, parentTitle, onBack }) {
                           tc.result.isError
                             ? <span className="text-error shrink-0">✗</span>
                             : <span className="text-success shrink-0">✓</span>
+                        ) : !working ? (
+                          // U7:子代理整体已结束,内部工具必然结束 —— 不再转圈。
+                          <span className="text-success shrink-0">✓</span>
                         ) : (
                           <Loader2 size={11} className="text-ink-faint animate-spin shrink-0" />
                         )}

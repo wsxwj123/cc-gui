@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import {
   Brain, Copy, Check, ChevronDown, ChevronRight,
   Wrench, BookOpen, Pencil, Terminal, FileText, Search,
-  Globe, Edit3, Loader2, CheckSquare, Square, CircleDot, ListTodo, RotateCcw
+  Globe, Edit3, Loader2, CheckSquare, Square, CircleDot, ListTodo, RotateCcw, Bot
 } from 'lucide-react';
 import { ModelBadge, ProviderAvatar } from './ModelBadge.jsx';
 import { MarkdownRenderer } from './MarkdownRenderer.jsx';
@@ -76,6 +76,15 @@ function renderRichToolCard(toolCall) {
 
 // ─── Tool category config ──────────────────────────────────────
 const CATEGORY_CONFIG = {
+  // U9a:子代理派发(Task/Agent)是特殊调用,折叠条里单列紫色分组 + 头部徽章,
+  // 不再与普通工具混在 "调用" 里无从分辨。
+  agent: {
+    label: '子代理',
+    icon: Bot,
+    color: 'text-violet-600',
+    bg: 'bg-violet-50',
+    border: 'border-violet-200',
+  },
   skill: {
     label: '读取',
     icon: BookOpen,
@@ -302,10 +311,11 @@ function TodoListCard({ toolCall }) {
 function ToolCallsGroup({ toolCalls, onRetryTool }) {
   const [expanded, setExpanded] = useState(false);
 
-  // Group by category
-  const groups = { skill: [], write: [], call: [] };
+  // Group by category. U9a:Task/Agent 按名字强制归入 agent 组(其 category
+  // 兜底是 'call',单看 category 分不出子代理)。
+  const groups = { agent: [], skill: [], write: [], call: [] };
   for (const tc of toolCalls) {
-    const cat = tc.category || 'call';
+    const cat = (tc.name === 'Task' || tc.name === 'Agent') ? 'agent' : (tc.category || 'call');
     (groups[cat] || (groups.call)).push(tc);
   }
 
@@ -343,6 +353,11 @@ function ToolCallsGroup({ toolCalls, onRetryTool }) {
         <span className="text-[10px] text-ink-faint font-mono">
           ({summaryParts.join(', ')})
         </span>
+        {groups.agent.length > 0 && (
+          <span className="text-[10px] text-violet-700 bg-violet-50 border border-violet-200 rounded px-1.5 py-px font-mono flex items-center gap-1 shrink-0">
+            <Bot size={10} /> 含 {groups.agent.length} 个子代理调用
+          </span>
+        )}
         {errorCount > 0 && (
           <span className="text-[10px] text-error ml-auto">{errorCount} 错误</span>
         )}

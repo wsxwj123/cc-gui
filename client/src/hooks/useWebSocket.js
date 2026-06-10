@@ -80,6 +80,22 @@ export function useWebSocket() {
               // (the "授权串号" bug). Falls back to 'default' (prompt) when the
               // session has no stored mode.
               const mode = useStore.getState().getPermissionModeFor(req.sessionId);
+              // U5:CLI 以 --permission-mode plan 固定 spawn,整个回合锁在规划模式;
+              // 用户中途切出 plan 后,旧实现仍渲染规划卡片 → "一直给我规划卡片"。
+              // 现在:已切出 plan 时收到 ExitPlanMode,直接 deny 收尾本回合,提示模型
+              // 结束规划(进程级模式无法中途改变,新模式从下一条消息开始生效)。
+              if (req.toolName === 'ExitPlanMode' && mode !== 'plan') {
+                console.log('[cgui-perm] auto-finish: ExitPlanMode while mode=' + mode, req.id);
+                fetch(`/api/permissions/respond/${req.id}`, {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({
+                    decision: 'deny',
+                    reason: '用户已切出规划模式（当前 ' + mode + '）。请勿继续规划或再次调用 ExitPlanMode，直接简要总结并结束本回合；用户将以新模式重新发起请求。',
+                  }),
+                }).catch(() => {});
+                break;
+              }
               const READ_CLASS = ['Read', 'Glob', 'Grep', 'LS', 'TodoWrite', 'NotebookRead', 'Skill'];
               const PLAN_WRITE_CLASS = ['Edit', 'MultiEdit', 'Write', 'NotebookEdit'];
               // G3:危险命令(删除/网络装包/sudo)在 default / acceptEdits 下、或已"永远允许 Bash"
