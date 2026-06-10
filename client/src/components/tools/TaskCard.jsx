@@ -13,6 +13,18 @@ export function TaskCard({ toolCall }) {
   const [expanded, setExpanded] = useState(false);
   const agent = useStore((s) => s.activeAgents[toolCall.id]);
   const setViewingAgent = useStore((s) => s.setViewingAgent);
+  // R1: 某些 CLI 版本不往父流发 parent_tool_use_id 事件,activeAgents 永远没有
+  // model。兜底:会话对象的 subagents(server 从 subagents/*.meta.json + jsonl
+  // 提取)按 toolUseId(全局唯一)对回本卡片。优先查实时刷新的 sessions 列表,
+  // 再退到选中态快照。选择器只返回既有引用,find 在外面做(防 #185)。
+  const sessionsList = useStore((s) => s.sessions);
+  const paneSession = useStore((s) => s.paneSessions[s.activeTabIndex] || s.selectedSession);
+  let metaAgent;
+  for (const sess of [...(Array.isArray(sessionsList) ? sessionsList : []), paneSession]) {
+    metaAgent = sess?.subagents?.find?.((a) => a.toolUseId === toolCall.id);
+    if (metaAgent) break;
+  }
+  const agentModel = agent?.model || metaAgent?.model || null;
 
   const subagentType = toolCall.input?.subagent_type || agent?.name || 'Task';
   const description = toolCall.input?.description || agent?.description || '';
@@ -33,6 +45,7 @@ export function TaskCard({ toolCall }) {
         name: subagentType,
         description,
         prompt,
+        model: agentModel,
         status: isDone ? (isError ? 'error' : 'done') : 'working',
         startedAt: Date.now(),
         sessionId: st.paneSessions[st.activeTabIndex]?.sessionId || st.selectedSession?.sessionId || null,
@@ -61,9 +74,9 @@ export function TaskCard({ toolCall }) {
             <span className="text-xs font-medium text-violet-900 font-mono truncate">
               {subagentType}
             </span>
-            {agent?.model && (
+            {agentModel && (
               <span className="text-[9px] px-1 py-px bg-violet-100 text-violet-700 rounded font-mono shrink-0" title="该子代理实际使用的模型">
-                {agent.model}
+                {agentModel}
               </span>
             )}
             {isWorking && <Loader2 size={11} className="text-violet-500 animate-spin shrink-0" />}

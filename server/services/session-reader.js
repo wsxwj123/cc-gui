@@ -280,6 +280,13 @@ export async function listSessions(projectHash) {
               }
             }
             const as = await stat(agentPath);
+            // R1: sibling meta.json 带 toolUseId(=父会话 Task tool_use 的 id)。某些
+            // CLI 版本不往父流发 parent_tool_use_id 事件,前端内存态拿不到子代理模型,
+            // 全靠这里的 toolUseId 把 jsonl 里的 model 对回具体 Task 卡片。
+            let agentMeta = {};
+            try {
+              agentMeta = JSON.parse(await readFile(join(subagentDir, af.replace('.jsonl', '.meta.json')), 'utf-8'));
+            } catch {}
             subagents.push({
               sessionId: af.replace('.jsonl', ''),
               projectHash,
@@ -288,6 +295,8 @@ export async function listSessions(projectHash) {
               messageCount: agentEdges.totalLines,
               lastActivity: agentEdges.tail[agentEdges.tail.length - 1]?.timestamp || new Date(as.mtimeMs).toISOString(),
               model: agentEdges.head.find((r) => r.type === 'assistant')?.message?.model || null,
+              toolUseId: agentMeta.toolUseId || null,
+              agentType: agentMeta.agentType || null,
               isSubagent: true,
             });
           } catch {}
