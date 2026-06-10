@@ -1806,9 +1806,30 @@ function GitInitBanner({ cwd }) {
     setStatus('unknown');
     fetch(`/api/git/status?cwd=${encodeURIComponent(cwd)}`)
       .then((r) => r.json())
-      .then((s) => setStatus(s?.isRepo === false ? 'norepo' : 'repo'))
+      // T3: permissionDenied = macOS 没给本 app 磁盘权限(git 在 Desktop 等目录
+      // 被 TCC 拒)。此时既不是 repo 也不该引导 init —— 显示权限引导横幅。
+      .then((s) => setStatus(s?.permissionDenied ? 'tcc' : (s?.isRepo === false ? 'norepo' : 'repo')))
       .catch(() => setStatus('repo'));  // network err → silent
   }, [cwd, kick]);
+
+  if (status === 'tcc') {
+    return (
+      <div className="bg-amber-50 border-b border-amber-200 px-4 py-2 text-[12px] font-body text-amber-900 flex items-center gap-2 flex-wrap">
+        <Shield size={13} className="text-amber-600 shrink-0" />
+        <span className="flex-1 min-w-[12rem]">
+          macOS 拒绝了对该文件夹的访问(重装/升级后授权会失效)。请到 系统设置 → 隐私与安全性 → <b>完全磁盘访问</b>,将 Claude GUI 的开关<b>关掉再打开</b>(或重新添加),然后重启 GUI。
+        </span>
+        <button
+          onClick={() => { fetch('/api/system/open-fda-settings', { method: 'POST' }).catch(() => {}); }}
+          className="px-2 py-0.5 rounded bg-amber-100 hover:bg-amber-200 text-amber-900 text-[10px] font-medium shrink-0"
+        >打开系统设置</button>
+        <button
+          onClick={() => setKick((k) => k + 1)}
+          className="px-2 py-0.5 rounded hover:bg-amber-100 text-amber-700 text-[10px] shrink-0"
+        >重新检测</button>
+      </div>
+    );
+  }
 
   if (status !== 'norepo' && status !== 'busy' && status !== 'done' && status !== 'partial') return null;
 

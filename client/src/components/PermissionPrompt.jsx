@@ -428,13 +428,25 @@ export function PermissionPrompt({ sessionId = null, onExecutePlan = null }) {
   // bridge eventually times out, and the tool looks "denied / no permission".
   // In single-pane mode, surface such orphans under the current session. (Skip
   // in split mode so the same orphan isn't shown in every pane at once.)
-  // 单窗格:只有一个会话在驱动工具调用,任何 in-flight 请求都属于它 —— 无条件显示。
-  // 这修复了"计划/权限弹窗不出现"(#2):plan 回合常给出与 GUI 选中会话不一致的新
-  // sessionId(或 null),旧逻辑只放行 sessionId==null,带新 id 的 ExitPlanMode 被
-  // 过滤掉 → 计划只剩输入框上方的 PlanBlock、没有审批卡片。
+  // T1: 单窗格此前无条件显示全部 in-flight 请求(为修 #2"plan 回合带新/空
+  // sessionId 时审批卡不出现") —— 副作用是会话 A 等回复时切到 B,A 的权限/
+  // 计划卡片串显在 B 里。改为按归属精准过滤:
+  //   ① sessionId 命中当前会话 → 显示;
+  //   ② sessionId 为空(新会话首个工具调用,CLI 还没给 id) → 显示;
+  //   ③ sessionId 属于其他已知会话(在会话列表里) → 不显示(这就是串显);
+  //   ④ sessionId 未知(plan 回合 spawn 的新 id,#2 场景) → 仅当请求 cwd 落在
+  //      当前项目路径下才显示,跨项目一律不串。
   // 多窗格:保持按 pane 的 sessionId 严格匹配,避免同一请求在每个窗格重复弹。
+  const sessionsList = useStore((s) => s.sessions);
+  const projectPath = useStore((s) => s.selectedProject?.path);
+  const knownSids = new Set((Array.isArray(sessionsList) ? sessionsList : []).map((x) => x.sessionId));
   const mine = paneCount === 1
-    ? all
+    ? all.filter((p) => {
+        if (!p.sessionId) return true;                       // ②
+        if (p.sessionId === selectedSid) return true;        // ①
+        if (knownSids.has(p.sessionId)) return false;        // ③
+        return !projectPath || !p.cwd || String(p.cwd).startsWith(projectPath); // ④
+      })
     : all.filter((p) => !selectedSid || p.sessionId === selectedSid);
   if (mine.length === 0) return null;
 

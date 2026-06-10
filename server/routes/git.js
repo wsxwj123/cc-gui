@@ -32,7 +32,14 @@ router.get('/git/status', async (req, res) => {
         hasChanges = s.stdout.trim().length > 0;
       } catch {}
       res.json({ isRepo: true, root, branch, hasChanges });
-    } catch {
+    } catch (e) {
+      // T3: macOS TCC 拒绝(Desktop/Documents 等受保护目录)时 git 报 "Operation
+      // not permitted"(getcwd 失败) —— 这不是"不是 repo"。误报成 norepo 会引导
+      // 用户去 init(同样会因权限失败)。区分开,前端显示权限引导而非初始化横幅。
+      const msg = String(e?.stderr || e?.message || '');
+      if (/operation not permitted|eperm/i.test(msg)) {
+        return res.json({ isRepo: null, permissionDenied: true });
+      }
       res.json({ isRepo: false });
     }
   } catch (err) {
