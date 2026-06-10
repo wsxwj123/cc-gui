@@ -3048,24 +3048,9 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
           blocks: orderedBlocks,
           usage: null,
         }]);
-        // M3(Q9): 完成的会话不是用户当前聚焦窗格正在看的 → 顶部悬浮提醒(标题+摘要,5s)。
-        try {
-          const st = useStore.getState();
-          const doneSid = (streamOwnerKeyRef.current && !String(streamOwnerKeyRef.current).startsWith('draft-'))
-            ? streamOwnerKeyRef.current : getLocalSession()?.sessionId;
-          const focusedSid = st.paneSessions[st.activeTabIndex]?.sessionId;
-          if (doneSid && doneSid !== focusedSid && accumulatedText) {
-            const summary = accumulatedText.replace(/[#*`>\-\s]+/g, ' ').trim().split(/(?<=[。!?.！？])/).slice(0, 2).join('').slice(0, 120);
-            st.pushCompletionToast({
-              sessionId: doneSid,
-              projectHash: getLocalSession()?.projectHash || selectedSession?.projectHash,
-              session: { ...(getLocalSession() || selectedSession || {}), sessionId: doneSid, draft: false },
-              title: st.autoTitles?.[doneSid] || st.customTitles?.[doneSid] || '会话',
-              summary,
-              ts: Date.now(),
-            });
-          }
-        } catch {}
+        // M3(Q9)→T2 重构:完成悬浮提醒改由服务端 WS 'turn-complete' 广播驱动
+        // (见 useWebSocket)。这里的流闭包在用户切走会话时会被切会话 effect
+        // abort,完成代码根本执行不到 —— 挂在这里的 toast 从未生效过。
       } else if (isClear && !sawError && !reattachPid) {
         // /clear 在 headless 下返回空 result(无 assistant 文本),不是错误。给出明确的
         // "会话已清空" 提示,而不是误报 "provider 没有返回任何内容"(#4)。

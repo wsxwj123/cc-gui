@@ -164,6 +164,26 @@ export function useWebSocket() {
               // so titles converge live (no refresh needed).
               useStore.getState().applyRemoteTitles(data.titles || {});
               break;
+            case 'turn-complete': {
+              // T2: 非聚焦会话回合完成 → 顶部悬浮提醒(标题+摘要,5s,点击跳转)。
+              // 由服务端广播驱动 —— 切走会话时前端的 SSE fetch 已被切会话 effect
+              // abort,流闭包末尾的完成代码永远到不了,只能依赖服务端信号。
+              const st = useStore.getState();
+              const sid = data.sessionId;
+              if (!sid) break;
+              const focused = st.paneSessions[st.activeTabIndex]?.sessionId;
+              if (sid === focused) break; // 正在看的会话,回复就在眼前,不打扰
+              const sess = (Array.isArray(st.sessions) ? st.sessions : []).find((x) => x.sessionId === sid);
+              st.pushCompletionToast({
+                sessionId: sid,
+                projectHash: data.projectHash || sess?.projectHash || null,
+                session: sess || { sessionId: sid, projectHash: data.projectHash || null, draft: false },
+                title: st.customTitles?.[sid] || st.autoTitles?.[sid] || sess?.firstPrompt?.slice(0, 24) || '会话',
+                summary: data.summary || '',
+                ts: Date.now(),
+              });
+              break;
+            }
           }
         } catch {}
       };

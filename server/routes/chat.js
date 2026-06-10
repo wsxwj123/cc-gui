@@ -6,6 +6,31 @@ import { readFileSync, statSync, writeFileSync, unlinkSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { getDefaultModel } from '../services/model-resolver.js';
 import { dropPendingForSession } from './permissions.js';
+import { broadcast } from '../index.js';
+
+// T2: 回合完成 WS 通知。前端切走会话时 SSE fetch 已被 abort(I4 渲染隔离的
+// 切会话 effect),完成信号唯一可靠的来源是服务端。每个进程只广播一次;三条
+// stdout 路径(spawn 早期缓冲 / attached 实时 / detached 缓冲)都喂到这里。
+// 客户端(useWebSocket)收到后:非当前聚焦会话 → 顶部悬浮提醒。
+function maybeBroadcastTurnComplete(slot, line) {
+  if (slot.completeNotified) return;
+  let obj;
+  try { obj = JSON.parse(line); } catch { return; }
+  if (obj.type !== 'result') return;
+  slot.completeNotified = true;
+  const text = typeof obj.result === 'string' ? obj.result : '';
+  const cwd = String(slot.cwd || '');
+  try {
+    broadcast({
+      type: 'turn-complete',
+      sessionId: obj.session_id || slot.sessionId || null,
+      // cc 的 projectHash 编码:路径中所有非字母数字字符(/ . 空格等)→ '-'
+      projectHash: cwd ? cwd.replace(/[^A-Za-z0-9]/g, '-') : null,
+      isError: !!obj.is_error,
+      summary: text.replace(/[#*`>\s]+/g, ' ').trim().slice(0, 160),
+    });
+  } catch {}
+}
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -379,6 +404,7 @@ router.post('/chat', async (req, res) => {
           }
         } catch {}
       }
+      maybeBroadcastTurnComplete(slot, line);
     }
   });
   proc.stderr.on('data', (chunk) => {
@@ -502,6 +528,7 @@ router.get('/chat/:pid/stream', (req, res) => {
         // Finish as soon as the turn's terminal signal arrives — don't wait for the
         // process to exit (it may not, e.g. after /compact).
         if (obj.type === 'result') {
+          maybeBroadcastTurnComplete(slot, line);
           completeTurn(obj.is_error ? (typeof obj.exitCode === 'number' ? obj.exitCode : 1) : 0);
         } else if (obj.type === 'system' && obj.subtype === 'compact_boundary' && !compactTimer && !turnDone) {
           // /compact wrote its summary. A `result` normally follows; if the process
@@ -609,7 +636,12 @@ router.get('/chat/:pid/stream', (req, res) => {
       slot.earlyTail += chunk.toString();
       const lines = slot.earlyTail.split('\n');
       slot.earlyTail = lines.pop() || '';
-      for (const l of lines) if (l.trim() && slot.earlyLines.length < MAX_EARLY_LINES) slot.earlyLines.push(l);
+      for (const l of lines) {
+        if (!l.trim()) continue;
+        if (slot.earlyLines.length < MAX_EARLY_LINES) slot.earlyLines.push(l);
+        // T2: detached(用户在看别的会话)期间到达 result —— 正是悬浮提醒的主场景。
+        maybeBroadcastTurnComplete(slot, l);
+      }
     };
     slot.detachedStderr = (chunk) => {
       if (slot.attached) return;
