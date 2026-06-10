@@ -6028,7 +6028,10 @@ export default function App() {
       {LocalWidget && <LocalWidget />}
       {bundleMismatch && (
         <div className="fixed top-0 inset-x-0 z-[300] bg-red-600 text-white text-[12px] font-body px-4 py-2 flex items-center justify-center gap-3 shadow-lg">
-          <span>⚠️ 界面版本 v{bundleMismatch.bundle} 与服务端 v{bundleMismatch.server} 不一致——自动刷新未能修复，安装包内可能打包了旧前端，请重新安装该版本</span>
+          <span>⚠️ 界面 v{bundleMismatch.bundle} 与服务端 v{bundleMismatch.server} 不一致。请依次尝试：① 完全退出 GUI 再打开（会自动换用新版服务并绕过缓存）② 仍出现则说明安装包内是旧前端，请重新下载安装</span>
+          <button
+            onClick={() => { sessionStorage.removeItem('cgui-ver-busted'); window.location.replace('/?r=' + bundleMismatch.server); }}
+            className="px-2 py-0.5 rounded bg-white text-red-600 font-medium hover:bg-white/90 transition-colors shrink-0">重试</button>
           <button onClick={() => setBundleMismatch(null)} className="px-2 py-0.5 rounded bg-white/20 hover:bg-white/30 transition-colors shrink-0">知道了</button>
         </div>
       )}
