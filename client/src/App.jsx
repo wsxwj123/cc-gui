@@ -5654,6 +5654,30 @@ export default function App() {
     })();
   }, []);
 
+  // Q1: bundle↔server 版本握手。__BUILD_VERSION__ 由 vite 烤进 bundle;server 版本
+  // 走 /api/health(no-store,永远新鲜)。不一致说明本页面是旧 bundle(WebView 缓存/
+  // 代理/打包塞了旧 dist),先带 ?v= 强制换缓存键重载一次自愈;重载后仍不一致则是
+  // dist 本身是旧的(重载救不了),挂红色横幅报警——旧版界面从此不可能"伪装"成新版。
+  const [bundleMismatch, setBundleMismatch] = useState(null); // { bundle, server }
+  useEffect(() => {
+    (async () => {
+      try {
+        const h = await (await fetch('/api/health')).json();
+        if (!h.version || typeof __BUILD_VERSION__ === 'undefined') return;
+        if (h.version === __BUILD_VERSION__) {
+          sessionStorage.removeItem('cgui-ver-busted');
+          return;
+        }
+        if (sessionStorage.getItem('cgui-ver-busted') !== h.version) {
+          sessionStorage.setItem('cgui-ver-busted', h.version);
+          window.location.replace('/?v=' + encodeURIComponent(h.version));
+          return;
+        }
+        setBundleMismatch({ bundle: __BUILD_VERSION__, server: h.version });
+      } catch {}
+    })();
+  }, []);
+
   // Pull the shared session-title map so a rename on the phone shows on the Mac
   // (and vice-versa). Live updates arrive via the ws 'custom-titles' broadcast.
   useEffect(() => { useStore.getState().hydrateCustomTitles(); }, []);
@@ -6002,6 +6026,12 @@ export default function App() {
         isMobile={isMobile}
       />
       {LocalWidget && <LocalWidget />}
+      {bundleMismatch && (
+        <div className="fixed top-0 inset-x-0 z-[300] bg-red-600 text-white text-[12px] font-body px-4 py-2 flex items-center justify-center gap-3 shadow-lg">
+          <span>⚠️ 界面版本 v{bundleMismatch.bundle} 与服务端 v{bundleMismatch.server} 不一致——自动刷新未能修复，安装包内可能打包了旧前端，请重新安装该版本</span>
+          <button onClick={() => setBundleMismatch(null)} className="px-2 py-0.5 rounded bg-white/20 hover:bg-white/30 transition-colors shrink-0">知道了</button>
+        </div>
+      )}
       <CompletionToasts />
       {!cliInstalled && !cliCheckDismissed && (
         <CliMissingModal onRecheck={checkCli} onDismiss={dismissCliCheck} />

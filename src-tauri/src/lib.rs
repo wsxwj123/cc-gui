@@ -344,10 +344,18 @@ pub fn run() {
             }
             let port = selected_port.ok_or("Claude GUI backend did not become healthy on any port from 6677 to 6687")?;
 
+            // Q2: 顶层文档 URL 带每次启动不同的 ?b= 时间戳 —— 让 WKWebView/代理等任何
+            // 按 URL 作 key 的缓存全部 miss,根治"壳里端出旧 index.html"的整类问题。
+            // SPA 不读 query,?b= 无副作用;hash 资源仍按文件名长缓存不受影响。
+            let boot_nonce = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or(0);
+            let load_url = format!("{}/?b={}", backend_url(port), boot_nonce);
             let window = WebviewWindowBuilder::new(
                 app,
                 "main",
-                WebviewUrl::External(backend_url(port).parse().unwrap()),
+                WebviewUrl::External(load_url.parse().unwrap()),
             )
             .title("Claude GUI")
             // 默认窗口放大,让顶部会话行与所有按钮在「中」字号下完整一行显示,不再

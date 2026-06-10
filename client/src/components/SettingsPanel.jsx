@@ -507,6 +507,13 @@ function UpdateChecker() {
           <div className="text-[14px] font-mono text-ink mt-0.5">
             {state.currentVersion ? `v${state.currentVersion}` : '加载中…'}
           </div>
+          {/* Q1: 界面 bundle 版本(构建时烤入)。与服务端不一致 = 当前页面是旧前端,标红示警 */}
+          {typeof __BUILD_VERSION__ !== 'undefined' && (
+            <div className={`text-[11px] font-mono mt-0.5 ${state.currentVersion && state.currentVersion !== __BUILD_VERSION__ ? 'text-error font-bold' : 'text-ink-faint'}`}>
+              界面 v{__BUILD_VERSION__}
+              {state.currentVersion && state.currentVersion !== __BUILD_VERSION__ && ' ⚠️ 与服务端不一致'}
+            </div>
+          )}
         </div>
         <button
           onClick={check}
