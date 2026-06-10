@@ -33,14 +33,19 @@ router.get('/git/status', async (req, res) => {
       } catch {}
       res.json({ isRepo: true, root, branch, hasChanges });
     } catch (e) {
-      // T3: macOS TCC 拒绝(Desktop/Documents 等受保护目录)时 git 报 "Operation
-      // not permitted"(getcwd 失败) —— 这不是"不是 repo"。误报成 norepo 会引导
-      // 用户去 init(同样会因权限失败)。区分开,前端显示权限引导而非初始化横幅。
+      // T3: 只有 git 明确说 "not a git repository" 才算 norepo。其他失败形态
+      // (macOS TCC 拒 Desktop 等受保护目录:有时 stderr 带 "Operation not
+      // permitted",有时进程被直接掐死 stderr 全空)一律不能误报成"不是 repo"——
+      // 那会引导用户去 init(同因失败,且对已是 repo 的目录是误导)。
       const msg = String(e?.stderr || e?.message || '');
-      if (/operation not permitted|eperm/i.test(msg)) {
-        return res.json({ isRepo: null, permissionDenied: true });
+      if (/not a git repository|不是.*git\s*仓库/i.test(msg)) {
+        return res.json({ isRepo: false });
       }
-      res.json({ isRepo: false });
+      if (e?.code === 'ENOENT' || e?.killed) {
+        // git 不存在 / 超时:信息不足,静默(前端不挂任何横幅)。
+        return res.json({ isRepo: null });
+      }
+      res.json({ isRepo: null, permissionDenied: true });
     }
   } catch (err) {
     res.status(400).json({ error: err.message });
