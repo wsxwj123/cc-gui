@@ -61,7 +61,7 @@ export function SettingsPanel() {
   return (
     <div className="px-4 py-4 space-y-4 overflow-y-auto h-full">
       <div className="flex items-center gap-1 border-b border-canvas-deep -mx-4 px-4 pb-2">
-        {[['overview', '概览'], ['hooks', 'Hooks'], ['json', 'JSON'], ['storage', '存储'], ['network', '网络']].map(([id, label]) => (
+        {[['overview', '概览'], ['hooks', 'Hooks'], ['json', '原始配置'], ['storage', '存储'], ['network', '网络']].map(([id, label]) => (
           <button key={id} onClick={() => setTab(id)}
             className={`text-[11px] px-2.5 py-1 rounded font-body transition-colors ${tab === id ? 'bg-accent/15 text-accent' : 'text-ink-muted hover:text-ink'}`}>
             {label}
@@ -853,9 +853,13 @@ function HooksTab({ settings, onSave, saving, saved }) {
 function JsonTab({ rawJson, setRawJson, onSave, onReset, saving, saved }) {
   return (
     <div className="space-y-3">
+      <div className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded-lg p-2.5 font-body leading-snug space-y-1">
+        <div>⚠️ 这是 <code className="font-mono">~/.claude/settings.json</code> 全文。保存=覆盖此处显示的所有字段;你<b>没看到/不小心删掉</b>的 hooks/mcpServers/enabledPlugins 也会丢。</div>
+        <div>编辑前先点右上角刷新,避免和「切 provider」/模型选择器的写入冲突(会用旧值覆盖新值)。一般场景建议用 概览/Hooks 等专用 tab,不直接动这里。</div>
+      </div>
       <textarea value={rawJson} onChange={(e) => setRawJson(e.target.value)}
         spellCheck={false}
-        className="w-full h-[60vh] bg-canvas-warm border border-canvas-deep rounded-lg p-3 text-xs font-mono text-ink-soft resize-none focus:outline-none focus:border-accent/40 leading-relaxed" />
+        className="w-full h-[55vh] bg-canvas-warm border border-canvas-deep rounded-lg p-3 text-xs font-mono text-ink-soft resize-none focus:outline-none focus:border-accent/40 leading-relaxed" />
       <div className="flex gap-2">
         <button onClick={onSave} disabled={saving}
           className="btn-accent flex items-center gap-1.5 px-3 py-1.5 text-xs">
