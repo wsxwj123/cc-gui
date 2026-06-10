@@ -386,6 +386,18 @@ export const useStore = create((set, get) => ({
       const e2 = { ...ebs, [toKey]: ebs[fromKey] }; delete e2[fromKey];
       writeLs('cgui-effort-by-session', e2); patch.effortBySession = e2;
     }
+    // Q2 修复:messageQueue 也按会话隔离,draft 期间排队的消息要随 init 后的真 sid 迁移。
+    // 否则:用户在新会话连续发 A/B,A 时还是 draft → 进 messageQueue[draft-xxx];
+    // init 拿到真 sid 后 sessionQueueKey 变,B 进 messageQueue[真sid];
+    // UI 只渲染当前 key 的队列 → A 看起来"消失"了。
+    const mq = get().messageQueue;
+    if (Array.isArray(mq[fromKey]) && mq[fromKey].length) {
+      const next = { ...mq };
+      const merged = force ? mq[fromKey] : [...(mq[fromKey] || []), ...(mq[toKey] || [])];
+      next[toKey] = merged;
+      delete next[fromKey];
+      patch.messageQueue = next;
+    }
     if (Object.keys(patch).length) set(patch);
   },
   // Live-fetched model catalogue per provider (in-memory; re-fetched on reload).

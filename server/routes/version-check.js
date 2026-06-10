@@ -180,7 +180,11 @@ async function detectInstall() {
 function updateCmdFor(method, claudePath) {
   switch (method) {
     case 'brew': return 'brew upgrade --cask claude-code';
-    case 'npm':  return 'npm install -g @anthropic-ai/claude-code@latest';
+    // Windows 用淘宝镜像兜底 — registry.npmjs.org 常被墙,且 cmd 子终端不继承
+    // PowerShell/系统代理变量,默认会 ETIMEDOUT。npmmirror 同步 @anthropic-ai/claude-code。
+    case 'npm':  return process.platform === 'win32'
+      ? 'npm install -g @anthropic-ai/claude-code@latest --registry=https://registry.npmmirror.com'
+      : 'npm install -g @anthropic-ai/claude-code@latest';
     case 'native':
     default: {
       // update 与 upgrade 是同一命令的别名;用 upgrade(用户实测 Windows 上体验更好)。
@@ -198,7 +202,10 @@ function updateCmdFor(method, claudePath) {
 }
 function installCmdFor() {
   // 未安装时的一键安装命令(按平台)。
-  if (process.platform === 'win32') return 'npm install -g @anthropic-ai/claude-code';
+  if (process.platform === 'win32') {
+    // 同上,Windows 用淘宝镜像兜底。
+    return 'npm install -g @anthropic-ai/claude-code --registry=https://registry.npmmirror.com';
+  }
   return 'curl -fsSL https://claude.ai/install.sh | bash'; // mac/linux 官方一键安装
 }
 
