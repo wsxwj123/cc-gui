@@ -164,12 +164,24 @@ function isAskAnswered(toolCall) {
   return /^\s*\[用户已通过界面回答\]/.test(text);
 }
 
+// O1: ExitPlanMode 在 headless 下被 hook deny 收尾(批准计划的正常机制),
+// isError=true 是机制副作用而非失败。识别批准 reason → 渲染"✅ 计划已批准"。
+function isPlanApproved(toolCall) {
+  if (toolCall?.name !== 'ExitPlanMode') return false;
+  const content = toolCall?.result?.content;
+  const text = typeof content === 'string'
+    ? content
+    : (Array.isArray(content) ? content.map((c) => c?.text || '').join('') : '');
+  return /用户已批准此计划/.test(text);
+}
+
 // ─── Single Tool Call Row ──────────────────────────────────────
 function ToolCallRow({ toolCall, onRetryTool }) {
   const [expanded, setExpanded] = useState(false);
   const Icon = getToolIcon(toolCall.name);
   const askAnswered = isAskAnswered(toolCall);
-  const hasError = toolCall.result?.isError && !askAnswered;
+  const planApproved = isPlanApproved(toolCall);
+  const hasError = toolCall.result?.isError && !askAnswered && !planApproved;
   const preview = formatInputPreview(toolCall.input);
 
   return (
@@ -191,6 +203,8 @@ function ToolCallRow({ toolCall, onRetryTool }) {
           {toolCall.result ? (
             hasError ? (
               <span className="text-[10px] text-error">错误</span>
+            ) : planApproved ? (
+              <span className="text-[10px] text-success">✅ 计划已批准</span>
             ) : askAnswered ? (
               <span className="text-[10px] text-success">已答</span>
             ) : (
@@ -298,7 +312,7 @@ function ToolCallsGroup({ toolCalls, onRetryTool }) {
   const totalCalls = toolCalls.length;
   // 排除已答的 AskUserQuestion:CLI 写 isError=true 是 headless reject 副作用,
   // 用户实际通过 GUI picker 提交了答案,不算错误(Bug #3)。
-  const errorCount = toolCalls.filter((tc) => tc.result?.isError && !isAskAnswered(tc)).length;
+  const errorCount = toolCalls.filter((tc) => tc.result?.isError && !isAskAnswered(tc) && !isPlanApproved(tc)).length;
 
   // Build summary line
   const summaryParts = [];

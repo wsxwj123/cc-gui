@@ -2063,6 +2063,38 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
       const found = scanToolCalls(m.toolCalls);
       if (found) return found;
     }
+    // O3(用户从未见过 todolist 的根因): cc 2.1.x 把 TodoWrite 换成了 TaskCreate/
+    // TaskUpdate 任务系统(实测近期 jsonl: TaskCreate 42 次 / TaskUpdate 81 次 /
+    // TodoWrite 仅 2 次)。从这两个工具的调用序列重建任务列表(老→新顺序回放):
+    // TaskCreate 建项(id 从 result "Task #N created" 解析,失败用自增),TaskUpdate
+    // 按 taskId 改 status/subject,status=deleted 移除。
+    const tasks = new Map();
+    let autoId = 0;
+    const replay = (toolCalls) => {
+      if (!Array.isArray(toolCalls)) return;
+      for (const tc of toolCalls) {
+        if (tc?.name === 'TaskCreate' && tc.input?.subject) {
+          const rid = typeof tc.result === 'string' ? (tc.result.match(/Task #(\d+)/)?.[1]) : null;
+          const id = rid || `auto-${++autoId}`;
+          tasks.set(String(id), { content: tc.input.subject, status: 'pending', activeForm: tc.input.activeForm || '' });
+        } else if (tc?.name === 'TaskUpdate' && tc.input?.taskId != null) {
+          const key = String(tc.input.taskId);
+          const cur = tasks.get(key);
+          if (tc.input.status === 'deleted') { tasks.delete(key); continue; }
+          const next = { ...(cur || { content: '', status: 'pending', activeForm: '' }) };
+          if (tc.input.status) next.status = tc.input.status;
+          if (tc.input.subject) next.content = tc.input.subject;
+          if (tc.input.activeForm) next.activeForm = tc.input.activeForm;
+          if (next.content) tasks.set(key, next);
+        }
+      }
+    };
+    for (const m of messages) { if (m?.type === 'turn') replay(m.toolCalls); }
+    for (const m of chatMessages) { if (m?.type === 'turn') replay(m.toolCalls); }
+    for (const b of streamingBlocks) {
+      if (b?.type === 'tool_use' && b.toolCall) replay([b.toolCall]);
+    }
+    if (tasks.size > 0) return [...tasks.values()];
     return null;
   }, [streamingBlocks, chatMessages, messages]);
 
@@ -3748,7 +3780,7 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
     <div className="flex-1 flex flex-col min-h-0 glass-base relative">
       {/* #9 子代理对话视图:覆盖在本 pane 之上,顶部面包屑可返回母会话。 */}
       {showAgentView && (
-        <div className="absolute inset-0 z-40 flex flex-col glass-base">
+        <div className="absolute inset-0 z-40 flex flex-col bg-canvas">
           <SubagentView
             agentId={viewingAgentId}
             parentTitle={selectedSession?.customTitle || selectedSession?.firstPrompt || '母会话'}

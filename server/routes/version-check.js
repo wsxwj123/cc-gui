@@ -180,8 +180,8 @@ async function detectInstall() {
 function updateCmdFor(method, claudePath) {
   switch (method) {
     case 'brew': return 'brew upgrade --cask claude-code';
-    // Windows 用淘宝镜像兜底 — registry.npmjs.org 常被墙,且 cmd 子终端不继承
-    // PowerShell/系统代理变量,默认会 ETIMEDOUT。npmmirror 同步 @anthropic-ai/claude-code。
+    // Windows npm 安装的更新仍走 npm(装在哪就用哪更新),用淘宝镜像兜底 —
+    // registry.npmjs.org 常被墙,且 cmd 子终端不继承系统代理。
     case 'npm':  return process.platform === 'win32'
       ? 'npm install -g @anthropic-ai/claude-code@latest --registry=https://registry.npmmirror.com'
       : 'npm install -g @anthropic-ai/claude-code@latest';
@@ -203,8 +203,9 @@ function updateCmdFor(method, claudePath) {
 function installCmdFor() {
   // 未安装时的一键安装命令(按平台)。
   if (process.platform === 'win32') {
-    // 同上,Windows 用淘宝镜像兜底。
-    return 'npm install -g @anthropic-ai/claude-code --registry=https://registry.npmmirror.com';
+    // O2: Windows 也有官方原生安装器(独立二进制,不需要 Node/npm,自动写 PATH)。
+    // PowerShell 默认策略可能拦脚本,先放开 CurrentUser 再装。
+    return 'powershell -Command "Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser -Force; irm https://claude.ai/install.ps1 | iex"';
   }
   return 'curl -fsSL https://claude.ai/install.sh | bash'; // mac/linux 官方一键安装
 }

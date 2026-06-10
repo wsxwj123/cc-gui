@@ -1,17 +1,17 @@
 import React from 'react';
-import { Bot, ChevronLeft, Loader2 } from 'lucide-react';
+import { Bot, Loader2, User } from 'lucide-react';
 import { useStore } from '../stores/sessionStore.js';
 import { MarkdownRenderer } from './MarkdownRenderer.jsx';
 
-// #9 子代理会话窗口:点击某个子代理后,主区切换成该子代理的"对话视图"。
+// #9/O4 子代理会话窗口:样式对齐正常会话(用户气泡在右、回复在左、思考/工具折叠),
+// 标题处「母会话标题 / 子代理名」层级面包屑,点母会话标题返回。
 // 数据来自 store.activeAgents[agentId](流式累积的 text/thinking/toolCalls)。
-// 顶部面包屑可点「母会话标题」返回。本质是 TaskCard 展开内容的全窗口版。
 export function SubagentView({ agentId, parentTitle, onBack }) {
   const agent = useStore((s) => s.activeAgents[agentId]);
 
   if (!agent) {
     return (
-      <div className="flex-1 flex flex-col items-center justify-center gap-3 text-ink-faint">
+      <div className="flex-1 flex flex-col items-center justify-center gap-3 text-ink-faint bg-canvas">
         <Bot size={28} className="opacity-40" />
         <div className="text-sm font-body">该子代理数据已不可用</div>
         <button onClick={onBack} className="text-accent text-xs underline">返回母会话</button>
@@ -37,105 +37,117 @@ export function SubagentView({ agentId, parentTitle, onBack }) {
   }[status] || { label: status, cls: 'text-ink-muted' };
 
   return (
-    <div className="flex-1 flex flex-col min-h-0">
-      {/* 面包屑 */}
+    // bg-canvas 不透明 — 杜绝下层母会话内容透视(玻璃效果导致"下方显示母会话信息")
+    <div className="flex-1 flex flex-col min-h-0 bg-canvas">
+      {/* 标题栏 — 与正常会话 header 同样式,层级:母会话 / 子代理 */}
       <div className="glass-bar shrink-0 px-6 py-3 border-b border-canvas-deep">
-        <div className="max-w-[var(--content-max)] mx-auto flex items-center gap-2 text-[13px] font-body min-w-0">
-          <button
-            onClick={onBack}
-            className="flex items-center gap-1 text-ink-muted hover:text-accent transition-colors shrink-0"
-            title="返回母会话"
-          >
-            <ChevronLeft size={15} />
-            <span className="truncate max-w-[40vw]">{parentTitle || '母会话'}</span>
-          </button>
-          <span className="text-ink-faint shrink-0">›</span>
-          <Bot size={14} className="text-violet-600 shrink-0" />
-          <span className="font-mono text-violet-900 truncate">{name}</span>
-          {agent.model && (
-            <span className="text-[10px] px-1.5 py-px bg-violet-100 text-violet-700 rounded font-mono shrink-0" title="该子代理实际使用的模型">
-              {agent.model}
+        <div className="max-w-[var(--content-max)] mx-auto min-w-0">
+          <div className="flex items-center gap-2 text-[15px] font-display font-semibold min-w-0">
+            <button
+              onClick={onBack}
+              className="text-ink-muted hover:text-accent transition-colors truncate max-w-[40%] shrink-0"
+              title="点击返回母会话"
+            >
+              {parentTitle || '母会话'}
+            </button>
+            <span className="text-ink-faint shrink-0 font-normal">/</span>
+            <Bot size={15} className="text-violet-600 shrink-0" />
+            <span className="text-ink truncate">{name}</span>
+          </div>
+          <div className="flex items-center gap-2 mt-0.5 text-[11px] font-mono text-ink-faint">
+            {agent.model && (
+              <span className="px-1.5 py-px bg-violet-100 text-violet-700 rounded" title="该子代理实际使用的模型">
+                {agent.model}
+              </span>
+            )}
+            <span className={`${statusMeta.cls} flex items-center gap-1 font-body`}>
+              {working && <Loader2 size={10} className="animate-spin" />}
+              {statusMeta.label}
             </span>
-          )}
-          <span className={`text-[11px] shrink-0 ${statusMeta.cls} flex items-center gap-1`}>
-            {working && <Loader2 size={11} className="animate-spin" />}
-            {statusMeta.label}
-          </span>
+            {description && <span className="truncate font-body">{description}</span>}
+          </div>
         </div>
       </div>
 
-      {/* 子代理对话内容 */}
-      <div className="flex-1 overflow-y-auto px-6 py-5">
-        <div className="max-w-[var(--content-max)] mx-auto space-y-4">
-          {description && (
-            <div className="text-sm text-ink-muted font-body">{description}</div>
-          )}
-
-          {prompt && (
-            <details className="rounded-lg border border-canvas-deep bg-canvas-warm/50 overflow-hidden" open>
-              <summary className="cursor-pointer px-3 py-2 text-[11px] text-ink-faint uppercase tracking-wider font-body">
-                派发 Prompt
-              </summary>
-              <div className="px-3 pb-3 text-[12px] text-ink-muted font-body whitespace-pre-wrap max-h-60 overflow-y-auto">
-                {prompt}
+      {/* 消息流 — 正常会话气泡样式 */}
+      <div className="flex-1 overflow-y-auto">
+        {/* 派发 prompt = 用户气泡(右侧) */}
+        {prompt && (
+          <div className="group px-6 py-4">
+            <div className="max-w-[var(--content-max)] mx-auto flex flex-row-reverse gap-3">
+              <div className="shrink-0 mt-0.5 w-[34px] h-[34px] rounded-full bg-accent/15 flex items-center justify-center">
+                <User size={16} className="text-accent" />
               </div>
-            </details>
-          )}
-
-          {thinkingOut && (
-            <details className="rounded-lg border border-canvas-deep bg-canvas overflow-hidden">
-              <summary className="cursor-pointer px-3 py-2 text-[11px] text-ink-faint uppercase tracking-wider font-body">
-                子代理思考
-              </summary>
-              <div className="px-3 pb-3 text-[12px] text-ink-soft font-body whitespace-pre-wrap max-h-80 overflow-y-auto">
-                {thinkingOut}
+              <div className="flex-1 min-w-0 flex flex-col items-end">
+                <div className="text-[13px] font-medium text-ink font-body mb-1.5">派发任务</div>
+                <div className="max-w-[85%] bg-canvas-warm border border-canvas-deep rounded-2xl px-4 py-2.5">
+                  <div className="text-[13.5px] text-ink font-body whitespace-pre-wrap max-h-[40vh] overflow-y-auto">{prompt}</div>
+                </div>
               </div>
-            </details>
-          )}
+            </div>
+          </div>
+        )}
 
-          {tools.length > 0 && (
-            <div className="rounded-lg border border-canvas-deep bg-canvas p-3">
-              <div className="text-[11px] text-ink-faint uppercase tracking-wider font-body mb-2">
-                调用工具 ({tools.length})
+        {/* 子代理回复 = Claude 气泡(左侧):思考折叠 + 工具列表 + 正文 */}
+        <div className="group px-6 py-4">
+          <div className="max-w-[var(--content-max)] mx-auto flex gap-3">
+            <div className="mt-0.5 w-[34px] h-[34px] rounded-full bg-violet-100 flex items-center justify-center shrink-0">
+              <Bot size={17} className="text-violet-600" />
+            </div>
+            <div className="flex-1 min-w-0">
+              <div className="flex items-center gap-2 mb-1.5">
+                <span className="text-[13px] font-medium text-ink font-body">{name}</span>
+                {agent.model && (
+                  <span className="text-[10px] px-1.5 py-px bg-violet-100 text-violet-700 rounded font-mono">{agent.model}</span>
+                )}
               </div>
-              <div className="space-y-1.5">
-                {tools.map((tc, i) => (
-                  <div key={tc.id || i} className="text-[12px] font-mono text-ink-soft flex items-center gap-2">
-                    <span className="w-1.5 h-1.5 rounded-full bg-violet-400 shrink-0" />
-                    <span className="truncate flex-1">{tc.name}</span>
-                    {tc.result ? (
-                      tc.result.isError
-                        ? <span className="text-error shrink-0">✗</span>
-                        : <span className="text-success shrink-0">✓</span>
-                    ) : (
-                      <Loader2 size={11} className="text-ink-faint animate-spin shrink-0" />
-                    )}
+
+              {thinkingOut && (
+                <details className="mb-2 rounded-lg border border-canvas-deep bg-canvas-warm/40 overflow-hidden">
+                  <summary className="cursor-pointer px-3 py-1.5 text-[11px] text-ink-faint font-body">🧠 思考过程</summary>
+                  <div className="px-3 pb-2.5 text-[12px] text-ink-soft font-body whitespace-pre-wrap max-h-72 overflow-y-auto">
+                    {thinkingOut}
                   </div>
-                ))}
-              </div>
-            </div>
-          )}
+                </details>
+              )}
 
-          {textOut ? (
-            <div className="rounded-lg border border-canvas-deep bg-canvas px-4 py-3">
-              <div className="text-[11px] text-ink-faint uppercase tracking-wider font-body mb-2">子代理回复</div>
-              <div className="text-[13px] text-ink font-body"><MarkdownRenderer content={textOut} /></div>
-            </div>
-          ) : working ? (
-            <div className="flex items-center gap-2 text-ink-faint text-sm">
-              <Loader2 size={14} className="animate-spin" /> 子代理运行中…
-            </div>
-          ) : null}
+              {tools.length > 0 && (
+                <details className="mb-2 rounded-lg border border-canvas-deep bg-canvas overflow-hidden">
+                  <summary className="cursor-pointer px-3 py-1.5 text-[11px] text-ink-faint font-body">
+                    🔧 {tools.length} 次工具调用
+                  </summary>
+                  <div className="px-3 pb-2.5 space-y-1.5">
+                    {tools.map((tc, i) => (
+                      <div key={tc.id || i} className="text-[12px] font-mono text-ink-soft flex items-center gap-2">
+                        <span className="w-1.5 h-1.5 rounded-full bg-violet-400 shrink-0" />
+                        <span className="truncate flex-1">{tc.name}</span>
+                        {tc.result ? (
+                          tc.result.isError
+                            ? <span className="text-error shrink-0">✗</span>
+                            : <span className="text-success shrink-0">✓</span>
+                        ) : (
+                          <Loader2 size={11} className="text-ink-faint animate-spin shrink-0" />
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </details>
+              )}
 
-          {/* 有些 provider 不流式子代理内部内容,子代理输出在 tool_result 里。 */}
-          {agent.result && !textOut && (
-            <div className="rounded-lg border border-canvas-deep bg-canvas px-4 py-3">
-              <div className="text-[11px] text-ink-faint uppercase tracking-wider font-body mb-2">子代理输出</div>
-              <div className="text-[13px] text-ink font-body">
-                <MarkdownRenderer content={typeof agent.result === 'string' ? agent.result : JSON.stringify(agent.result)} />
-              </div>
+              {textOut ? (
+                <div className="text-[13.5px] text-ink font-body"><MarkdownRenderer content={textOut} /></div>
+              ) : agent.result ? (
+                // 有些 provider 不流式子代理内部内容,输出在 tool_result 里。
+                <div className="text-[13.5px] text-ink font-body">
+                  <MarkdownRenderer content={typeof agent.result === 'string' ? agent.result : JSON.stringify(agent.result)} />
+                </div>
+              ) : working ? (
+                <div className="flex items-center gap-2 text-ink-faint text-sm font-body">
+                  <Loader2 size={14} className="animate-spin" /> 子代理运行中…
+                </div>
+              ) : null}
             </div>
-          )}
+          </div>
         </div>
       </div>
     </div>
