@@ -448,6 +448,19 @@ pub fn run() {
                 _ => {}
             }
         })
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        // S1: Destroyed 只覆盖"点关闭按钮"路径;Cmd+Q / AppleScript quit / 系统注销
+        // 不经过它(实测退出后 6677 仍在监听)。RunEvent::Exit 是所有退出路径的必经
+        // 点,在这里统一杀 —— 与 Destroyed 重复执行无害(杀进程幂等)。
+        .run(|app_handle, event| {
+            if let tauri::RunEvent::Exit = event {
+                if let Some(mut child) = app_handle.state::<Backend>().0.lock().unwrap().take() {
+                    kill_backend_tree(&mut child);
+                }
+                if let Some(port) = *app_handle.state::<BackendPort>().0.lock().unwrap() {
+                    kill_port_tree(port);
+                }
+            }
+        });
 }
