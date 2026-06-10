@@ -25,6 +25,9 @@ const MAX_BACKEND_PORT: u16 = 6687;
 
 // Holds the backend child IFF we spawned it (None when we reused an existing one).
 struct Backend(Mutex<Option<Child>>);
+// S1: 实际使用的后端端口。退出时按端口补杀 —— 复用的 server(非本实例 spawn,
+// Backend state 为空)此前退出时无人杀,是 Windows"完全退出后 cmd 仍在"的根因。
+struct BackendPort(Mutex<Option<u16>>);
 
 // P1: 关闭行为配置。~/.claude-gui/close-behavior.json {"behavior":"ask|minimize|quit"}
 // GUI 设置页通过 server 端点写同一文件;Rust 侧每次 CloseRequested 时现读(无缓存,改完即生效)。
@@ -277,6 +280,31 @@ fn kill_stale_backend(port: u16) {
     }
 }
 
+// S1: 退出时按端口杀后端整棵树。与 kill_stale_backend 的区别:只匹配 LISTENING
+// 行(不误伤恰好连着该端口的客户端进程,如浏览器),Windows 加 /T 杀树 +
+// CREATE_NO_WINDOW(退出瞬间不闪 cmd 窗)。
+fn kill_port_tree(port: u16) {
+    #[cfg(not(target_os = "windows"))]
+    let result = Command::new("sh")
+        .arg("-c")
+        .arg(format!("lsof -ti tcp:{port} -sTCP:LISTEN | xargs kill -9"))
+        .status();
+    #[cfg(target_os = "windows")]
+    let result = {
+        use std::os::windows::process::CommandExt;
+        let mut c = Command::new("cmd");
+        c.args([
+            "/C",
+            &format!("for /f \"tokens=5\" %a in ('netstat -ano ^| findstr :{port} ^| findstr LISTENING') do taskkill /F /T /PID %a"),
+        ]);
+        c.creation_flags(0x08000000); // CREATE_NO_WINDOW
+        c.status()
+    };
+    if let Err(e) = result {
+        log_startup(&format!("[tauri] kill_port_tree({port}) failed: {e}"));
+    }
+}
+
 // 等端口释放(kill 后 TCP socket 不会立刻关闭)。释放成功返回 true。
 fn wait_until_free(port: u16, timeout: Duration) -> bool {
     let start = Instant::now();
@@ -299,6 +327,7 @@ pub fn run() {
             }
         }))
         .manage(Backend(Mutex::new(None)))
+        .manage(BackendPort(Mutex::new(None)))
         .setup(|app| {
             let mut selected_port = None;
             let requires_local_routes = bundled_local_routes_present(app);
@@ -343,6 +372,7 @@ pub fn run() {
                 }
             }
             let port = selected_port.ok_or("Claude GUI backend did not become healthy on any port from 6677 to 6687")?;
+            *app.state::<BackendPort>().0.lock().unwrap() = Some(port);
 
             // Q2: 顶层文档 URL 带每次启动不同的 ?b= 时间戳 —— 让 WKWebView/代理等任何
             // 按 URL 作 key 的缓存全部 miss,根治"壳里端出旧 index.html"的整类问题。
@@ -408,6 +438,11 @@ pub fn run() {
                         .take()
                     {
                         kill_backend_tree(&mut child);
+                    }
+                    // S1: 复用的 server(本实例没 spawn,上面 take 不到)按端口补杀,
+                    // 否则 Windows 选"完全退出"后旧 server 的 cmd 仍留着。
+                    if let Some(port) = *window.app_handle().state::<BackendPort>().0.lock().unwrap() {
+                        kill_port_tree(port);
                     }
                 }
                 _ => {}
