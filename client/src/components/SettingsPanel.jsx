@@ -640,6 +640,38 @@ function CcUpdater() {
   );
 }
 
+// P1: 关闭行为 — 点窗口关闭按钮时 询问/最小化/退出。写 ~/.claude-gui/close-behavior.json,
+// Tauri Rust 在 CloseRequested 时读同一文件,保存即生效(无需重启)。仅桌面壳有意义,
+// 浏览器(6677 页)关标签页不受此控制,但选项保留显示无妨。
+function CloseBehaviorPicker() {
+  const [behavior, setBehavior] = useState('ask');
+  useEffect(() => {
+    fetch('/api/prefs/close-behavior').then((r) => r.json())
+      .then((d) => setBehavior(d.behavior || 'ask')).catch(() => {});
+  }, []);
+  const save = (b) => {
+    setBehavior(b);
+    fetch('/api/prefs/close-behavior', {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ behavior: b }),
+    }).catch(() => {});
+  };
+  return (
+    <div className="rounded-lg border border-canvas-deep bg-canvas-warm/40 p-3">
+      <div className="text-[12px] font-medium text-ink font-body mb-1.5">关闭窗口时(桌面版)</div>
+      <div className="flex items-center gap-2">
+        {[['ask', '每次询问'], ['minimize', '最小化'], ['quit', '完全退出']].map(([v, label]) => (
+          <button key={v} onClick={() => save(v)}
+            className={`px-2.5 py-1 text-[11px] rounded-md font-body transition-colors ${behavior === v ? 'bg-accent text-white' : 'bg-canvas-warm text-ink-muted hover:text-ink border border-canvas-deep'}`}>
+            {label}
+          </button>
+        ))}
+      </div>
+      <div className="text-[10.5px] text-ink-faint font-body mt-1.5">完全退出会结束后台服务(6677)及其全部子进程;最小化保持后台运行</div>
+    </div>
+  );
+}
+
 function OverviewTab({ settings }) {
   const [showEnv, setShowEnv] = useState(false);
   const [showHooks, setShowHooks] = useState(false);
@@ -666,6 +698,7 @@ function OverviewTab({ settings }) {
     <div className="space-y-3">
       <UpdateChecker />
       <CcUpdater />
+      <CloseBehaviorPicker />
       {rows.length > 0 && (
         <div className="bg-canvas-warm border border-canvas-deep rounded-lg divide-y divide-canvas-deep">
           {rows.map(([k, v]) => (

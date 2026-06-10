@@ -2835,6 +2835,20 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
           // `assistant` message after the deltas. Use it to backfill anything
           // we might have missed (e.g. tool_use input that didn't stream cleanly).
           if (event.type === 'assistant' && event.message?.content) {
+            // P2: 子代理的整条 assistant 消息(parent_tool_use_id 标记)分流到 activeAgents,
+            // 不进主回合气泡。顺带记录该子代理实际使用的模型(message.model)——之前这条
+            // 路径完全没分流,model 徽章在"整条消息到达"的 provider 下永远不显示。
+            if (event.parent_tool_use_id) {
+              const aStore = useStore.getState();
+              const aid = event.parent_tool_use_id;
+              if (event.message.model) aStore.upsertAgent(aid, { model: event.message.model });
+              for (const block of event.message.content) {
+                if (block.type === 'text' && block.text) aStore.appendAgentText(aid, block.text);
+                else if (block.type === 'thinking' && block.thinking) aStore.appendAgentThinking(aid, block.thinking);
+                else if (block.type === 'tool_use') aStore.appendAgentTool(aid, { id: block.id, name: block.name, input: block.input || {}, result: null });
+              }
+              continue;
+            }
             for (const block of event.message.content) {
               if (block.type === 'text') {
                 // Only replace if we haven't been streaming this block already.

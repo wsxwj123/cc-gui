@@ -54,6 +54,27 @@ router.get('/prefs/hidden-providers', async (_req, res) => {
   res.json({ hidden: Array.isArray(prefs.hiddenProviders) ? prefs.hiddenProviders : [] });
 });
 
+// P1: 关闭行为(ask|minimize|quit)。独立文件 ~/.claude-gui/close-behavior.json —
+// Tauri Rust 侧在 CloseRequested 时直接读同一文件,不经 server。
+const CLOSE_BEHAVIOR_PATH = join(homedir(), '.claude-gui', 'close-behavior.json');
+router.get('/prefs/close-behavior', async (_req, res) => {
+  try {
+    const d = JSON.parse(await readFile(CLOSE_BEHAVIOR_PATH, 'utf-8'));
+    res.json({ behavior: ['ask', 'minimize', 'quit'].includes(d.behavior) ? d.behavior : 'ask' });
+  } catch { res.json({ behavior: 'ask' }); }
+});
+router.put('/prefs/close-behavior', async (req, res) => {
+  const { behavior } = req.body || {};
+  if (!['ask', 'minimize', 'quit'].includes(behavior)) {
+    return res.status(400).json({ error: 'behavior 必须是 ask/minimize/quit' });
+  }
+  try {
+    await mkdir(join(homedir(), '.claude-gui'), { recursive: true });
+    await writeFile(CLOSE_BEHAVIOR_PATH, JSON.stringify({ behavior }, null, 2));
+    res.json({ ok: true, behavior });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // PUT /api/prefs/hidden-providers { hidden: string[] }
 router.put('/prefs/hidden-providers', async (req, res) => {
   const { hidden } = req.body || {};

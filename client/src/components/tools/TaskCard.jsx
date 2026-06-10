@@ -22,6 +22,26 @@ export function TaskCard({ toolCall }) {
   const isDone = !!toolCall.result;
   const isWorking = !isDone;
 
+  // P2: 历史会话重载后 activeAgents(内存态)是空的,点放大查不到数据 → 之前没反应。
+  // 兜底:打开前若 store 无此 agent,先从 toolCall 的 input/result 注册一份,再进入。
+  const openAgentView = (e) => {
+    e.stopPropagation();
+    const st = useStore.getState();
+    if (!st.activeAgents[toolCall.id]) {
+      const resContent = toolCall.result?.content;
+      st.upsertAgent(toolCall.id, {
+        name: subagentType,
+        description,
+        prompt,
+        status: isDone ? (isError ? 'error' : 'done') : 'working',
+        startedAt: Date.now(),
+        sessionId: st.paneSessions[st.activeTabIndex]?.sessionId || st.selectedSession?.sessionId || null,
+        result: typeof resContent === 'string' ? resContent : (resContent ? JSON.stringify(resContent) : null),
+      });
+    }
+    st.setViewingAgent(toolCall.id);
+  };
+
   const textOut = agent ? agent.text.join('') : '';
   const thinkingOut = agent ? agent.thinking.join('') : '';
   const childTools = agent?.toolCalls || [];
@@ -60,7 +80,7 @@ export function TaskCard({ toolCall }) {
         <span
           role="button"
           tabIndex={0}
-          onClick={(e) => { e.stopPropagation(); setViewingAgent(toolCall.id); }}
+          onClick={openAgentView}
           className="shrink-0 p-1 rounded text-violet-500 hover:text-violet-800 hover:bg-violet-100 transition-colors cursor-pointer"
           title="在子代理会话窗口打开"
         >

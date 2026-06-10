@@ -26,6 +26,38 @@ const MAX_BACKEND_PORT: u16 = 6687;
 // Holds the backend child IFF we spawned it (None when we reused an existing one).
 struct Backend(Mutex<Option<Child>>);
 
+// P1: 关闭行为配置。~/.claude-gui/close-behavior.json {"behavior":"ask|minimize|quit"}
+// GUI 设置页通过 server 端点写同一文件;Rust 侧每次 CloseRequested 时现读(无缓存,改完即生效)。
+fn read_close_behavior() -> String {
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .unwrap_or_default();
+    let p = PathBuf::from(home).join(".claude-gui").join("close-behavior.json");
+    if let Ok(s) = std::fs::read_to_string(&p) {
+        for key in ["\"minimize\"", "\"quit\"", "\"ask\""] {
+            if s.contains(&format!("\"behavior\": {key}")) || s.contains(&format!("\"behavior\":{key}")) {
+                return key.trim_matches('"').to_string();
+            }
+        }
+    }
+    "ask".to_string()
+}
+
+// P1: 退出时杀整棵后端进程树。child.kill() 只杀 node 本身,node 再 spawn 的
+// claude / 终端(Windows cmd)会变孤儿 —— 用户报告"退出 GUI 后 cmd 还开着"。
+// Windows 用 taskkill /T 杀树;unix 上 node 死后 claude 子进程会因管道断开退出,
+// 再补杀监听端口的残留进程兜底。
+fn kill_backend_tree(child: &mut Child) {
+    #[cfg(target_os = "windows")]
+    {
+        let pid = child.id();
+        let _ = Command::new("taskkill")
+            .args(["/F", "/T", "/PID", &pid.to_string()])
+            .status();
+    }
+    let _ = child.kill();
+}
+
 fn log_startup(message: &str) {
     let home = std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
@@ -192,6 +224,13 @@ fn spawn_backend(app: &tauri::App, port: u16) -> Option<Child> {
     if let Some(dir) = cwd {
         cmd.current_dir(dir);
     }
+    // P1: Windows 上 node 是 console 程序,不加 CREATE_NO_WINDOW 会弹一个常驻 cmd
+    // 窗口(用户报告"退出 GUI 后 cmd 还开着"的来源之一)。
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    }
     match cmd.spawn() {
         Ok(child) => Some(child),
         Err(e) => {
@@ -322,17 +361,48 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
-            if let tauri::WindowEvent::Destroyed = event {
-                if let Some(mut child) = window
-                    .app_handle()
-                    .state::<Backend>()
-                    .0
-                    .lock()
-                    .unwrap()
-                    .take()
-                {
-                    let _ = child.kill();
+            match event {
+                // P1: 点关闭按钮 → 按配置决定 最小化/退出/询问。
+                tauri::WindowEvent::CloseRequested { api, .. } => {
+                    let behavior = read_close_behavior();
+                    match behavior.as_str() {
+                        "minimize" => {
+                            api.prevent_close();
+                            let _ = window.minimize();
+                        }
+                        "quit" => { /* 放行,Destroyed 里杀后端树 */ }
+                        _ => {
+                            // ask(默认):原生三按钮对话框。"是"=退出,"否"=最小化,"取消"=不动。
+                            // 固定选择(不再询问)在 设置→概览→关闭行为 里改。
+                            let choice = rfd::MessageDialog::new()
+                                .set_title("关闭 Claude GUI")
+                                .set_description("退出会结束后台服务(6677)及其子进程。\n\n「是」退出 · 「否」最小化\n\n要固定选择不再询问:设置 → 概览 → 关闭行为")
+                                .set_buttons(rfd::MessageButtons::YesNoCancel)
+                                .show();
+                            match choice {
+                                rfd::MessageDialogResult::Yes => { /* 放行退出 */ }
+                                rfd::MessageDialogResult::No => {
+                                    api.prevent_close();
+                                    let _ = window.minimize();
+                                }
+                                _ => { api.prevent_close(); }
+                            }
+                        }
+                    }
                 }
+                tauri::WindowEvent::Destroyed => {
+                    if let Some(mut child) = window
+                        .app_handle()
+                        .state::<Backend>()
+                        .0
+                        .lock()
+                        .unwrap()
+                        .take()
+                    {
+                        kill_backend_tree(&mut child);
+                    }
+                }
+                _ => {}
             }
         })
         .run(tauri::generate_context!())
