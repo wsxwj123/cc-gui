@@ -740,13 +740,15 @@ export function ChatInput({ onSend, onStop, onAccelerate, disabled, isStreaming,
           </div>
         )}
 
-        {/* Queue indicator + per-item preview + edit/delete + accelerate */}
-        {queueLength > 0 && (
+        {/* Queue indicator + per-item preview + edit/delete + accelerate.
+            Q5: 计数排除 hidden 项(计划执行等系统续跑消息)——全是 hidden 时整个指示器不渲染,
+            体验对齐 Claude Desktop(批准计划后看不到任何"排队提示")。 */}
+        {queueItems.filter((q) => !q.hidden).length > 0 && (
           <div className="mt-2 rounded-lg bg-accent/8 border border-accent/20 text-[11px] font-body overflow-hidden">
             <div className="px-3 py-1.5 flex items-center gap-2 border-b border-accent/15">
               <Send size={11} className="text-accent shrink-0" />
               <span className="text-ink-soft flex-1">
-                <b>{queueLength}</b> 条消息已排队 · 当前回复完成后自动发出
+                <b>{queueItems.filter((q) => !q.hidden).length}</b> 条消息已排队 · 当前回复完成后自动发出
               </span>
               {onAccelerate && (
                 <button

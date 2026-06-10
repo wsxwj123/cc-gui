@@ -2624,6 +2624,23 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
                   body: JSON.stringify(payload),
                 }).catch(() => {});
               }
+              // Q3 标题提速:新会话拿到真 sid 就立刻并行生成标题(只用首条用户消息,
+              // 不等回复完成)。失败时 result 后的兜底逻辑(带 firstAssistant)会重试。
+              try {
+                const _sid = event.session_id;
+                const _st = useStore.getState();
+                if (!titleAttempted.has(_sid) && !_st.customTitles[_sid] && !_st.autoTitles[_sid] && prompt && !hiddenUserMessage) {
+                  titleAttempted.add(_sid);
+                  const _m = String(_st.modelBySession[_sid] || _st.currentModel || '').replace(/\[1m\]/i, '');
+                  fetch('/api/chat/title', {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ firstUser: prompt, firstAssistant: '', cwd, model: _m }),
+                  }).then((r) => r.json()).then((d) => {
+                    if (d?.title) useStore.getState().setAutoTitle(_sid, d.title);
+                    else titleAttempted.delete(_sid);
+                  }).catch(() => { titleAttempted.delete(_sid); });
+                }
+              } catch {}
               const hash = sel.projectHash;
               // Retry triple — jsonl write timing varies. First attempt may
               // hit the brief window before the CLI flushes; later ones catch
