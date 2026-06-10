@@ -2657,6 +2657,10 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
             const parentToolUseId = event.parent_tool_use_id || null;
             const store = useStore.getState();
             if (parentToolUseId) {
+              // M2(Q6): 子代理回合的 message_start 携带其实际模型 id,记到卡片上显示。
+              if (ev.type === 'message_start' && ev.message?.model) {
+                store.upsertAgent(parentToolUseId, { model: ev.message.model });
+              }
               if (ev.type === 'content_block_start') {
                 const cb = ev.content_block || {};
                 if (cb.type === 'tool_use') {
@@ -2960,6 +2964,24 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
           blocks: orderedBlocks,
           usage: null,
         }]);
+        // M3(Q9): 完成的会话不是用户当前聚焦窗格正在看的 → 顶部悬浮提醒(标题+摘要,5s)。
+        try {
+          const st = useStore.getState();
+          const doneSid = (streamOwnerKeyRef.current && !String(streamOwnerKeyRef.current).startsWith('draft-'))
+            ? streamOwnerKeyRef.current : getLocalSession()?.sessionId;
+          const focusedSid = st.paneSessions[st.activeTabIndex]?.sessionId;
+          if (doneSid && doneSid !== focusedSid && accumulatedText) {
+            const summary = accumulatedText.replace(/[#*`>\-\s]+/g, ' ').trim().split(/(?<=[。!?.！？])/).slice(0, 2).join('').slice(0, 120);
+            st.pushCompletionToast({
+              sessionId: doneSid,
+              projectHash: getLocalSession()?.projectHash || selectedSession?.projectHash,
+              session: { ...(getLocalSession() || selectedSession || {}), sessionId: doneSid, draft: false },
+              title: st.autoTitles?.[doneSid] || st.customTitles?.[doneSid] || '会话',
+              summary,
+              ts: Date.now(),
+            });
+          }
+        } catch {}
       } else if (isClear && !sawError && !reattachPid) {
         // /clear 在 headless 下返回空 result(无 assistant 文本),不是错误。给出明确的
         // "会话已清空" 提示,而不是误报 "provider 没有返回任何内容"(#4)。
@@ -5453,6 +5475,46 @@ function MobileTopBar({ onMenu, onNew, title }) {
   );
 }
 
+// M3(Q9): 非聚焦会话完成回复的悬浮提醒。固定在顶部标题栏下方,5s 自动消失;
+// 点击跳转:会话已在某个分屏窗格 → 聚焦该窗格;否则替换当前聚焦窗格的会话。
+function CompletionToasts() {
+  const toasts = useStore((s) => s.completionToasts);
+  const removeToast = useStore((s) => s.removeCompletionToast);
+  useEffect(() => {
+    if (!toasts.length) return;
+    const timers = toasts.map((t) => setTimeout(() => removeToast(t.id), 5000));
+    return () => timers.forEach(clearTimeout);
+  }, [toasts, removeToast]);
+  if (!toasts.length) return null;
+  const jump = (t) => {
+    const st = useStore.getState();
+    const idx = st.paneSessions.slice(0, st.paneCount).findIndex((p) => p?.sessionId === t.sessionId);
+    if (idx >= 0) {
+      st.setActiveTabIndex(idx);
+    } else if (t.session?.sessionId) {
+      // 不在任何窗格:替换当前聚焦窗格的会话
+      if (st.activeTabIndex === 0) st.setSelectedSession(t.session);
+      else st.setPaneSession(st.activeTabIndex, t.session);
+    }
+    removeToast(t.id);
+  };
+  return (
+    <div className="fixed top-[60px] left-1/2 -translate-x-1/2 z-[150] flex flex-col gap-2 items-center pointer-events-none">
+      {toasts.map((t) => (
+        <button key={t.id} onClick={() => jump(t)}
+          className="pointer-events-auto glass-popover max-w-[calc(var(--app-w,100vw)-2rem)] w-[440px] rounded-xl shadow-lg px-4 py-2.5 text-left animate-glass-rise hover:ring-2 hover:ring-accent/40 transition-shadow">
+          <div className="flex items-center gap-2">
+            <span className="w-2 h-2 rounded-full bg-success shrink-0" />
+            <span className="text-[12px] font-medium text-ink font-body truncate flex-1">{t.title} · 回复完成</span>
+            <X size={12} className="text-ink-faint shrink-0 hover:text-ink" onClick={(e) => { e.stopPropagation(); removeToast(t.id); }} />
+          </div>
+          {t.summary && <div className="mt-1 text-[11px] text-ink-muted font-body line-clamp-2">{t.summary}</div>}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 // ─── Main App ──────────────────────────────────────────────────
 export default function App() {
   useWebSocket();
@@ -5877,6 +5939,7 @@ export default function App() {
         isMobile={isMobile}
       />
       {LocalWidget && <LocalWidget />}
+      <CompletionToasts />
       {!cliInstalled && !cliCheckDismissed && (
         <CliMissingModal onRecheck={checkCli} onDismiss={dismissCliCheck} />
       )}

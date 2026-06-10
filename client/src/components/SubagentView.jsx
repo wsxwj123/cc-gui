@@ -52,6 +52,11 @@ export function SubagentView({ agentId, parentTitle, onBack }) {
           <span className="text-ink-faint shrink-0">›</span>
           <Bot size={14} className="text-violet-600 shrink-0" />
           <span className="font-mono text-violet-900 truncate">{name}</span>
+          {agent.model && (
+            <span className="text-[10px] px-1.5 py-px bg-violet-100 text-violet-700 rounded font-mono shrink-0" title="该子代理实际使用的模型">
+              {agent.model}
+            </span>
+          )}
           <span className={`text-[11px] shrink-0 ${statusMeta.cls} flex items-center gap-1`}>
             {working && <Loader2 size={11} className="animate-spin" />}
             {statusMeta.label}

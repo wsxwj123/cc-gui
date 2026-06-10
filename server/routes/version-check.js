@@ -216,15 +216,37 @@ function installCmdFor() {
 //  ③ 用户能直观看到进度 / 出错信息,无需在 GUI 里盲等。
 // 做法:写一个临时脚本,用 `open`(mac)/`start`(win)/终端模拟器(linux)启动。
 // fire-and-forget——终端是独立进程,server 不捕获结果,UI 引导用户完成后点"检查更新"。
-function launchInTerminal(cmd, title) {
+// M1: 探测本机 HTTP 代理端口(Clash/v2ray 等常用端口)。Windows 终端子进程不继承
+// PowerShell/系统代理设置,claude update / install.sh 直连 claude.ai 或 npm 经常
+// ETIMEDOUT。找到在听的端口就在更新/安装命令前 export,找不到返回 null(直连)。
+const COMMON_PROXY_PORTS = [7890, 7897, 1087, 8889, 8118, 10809];
+async function detectLocalProxy() {
+  // 用户已显式配置的优先(server 进程自己的 env)。
+  const envProxy = process.env.HTTPS_PROXY || process.env.https_proxy || process.env.HTTP_PROXY || process.env.http_proxy;
+  if (envProxy) return envProxy;
+  const { createConnection } = await import('net');
+  const probe = (port) => new Promise((resolve) => {
+    const sock = createConnection({ host: '127.0.0.1', port, timeout: 300 });
+    sock.on('connect', () => { sock.destroy(); resolve(port); });
+    sock.on('error', () => resolve(null));
+    sock.on('timeout', () => { sock.destroy(); resolve(null); });
+  });
+  const hits = await Promise.all(COMMON_PROXY_PORTS.map(probe));
+  const port = hits.find(Boolean);
+  return port ? `http://127.0.0.1:${port}` : null;
+}
+
+function launchInTerminal(cmd, title, proxyUrl = null) {
   const stamp = `cgui-cc-${process.pid}-${Math.round(process.hrtime()[1])}`;
   if (process.platform === 'darwin') {
     const file = join(tmpdir(), `${stamp}.command`);
-    writeFileSync(file, `#!/bin/bash\necho "▶ ${title}"\n${cmd}\nstatus=$?\necho\nif [ $status -eq 0 ]; then echo "✅ 完成,可关闭本窗口"; else echo "❌ 失败(退出码 $status)"; fi\n`, { mode: 0o755 });
+    const proxyLine = proxyUrl ? `export HTTP_PROXY='${proxyUrl}' HTTPS_PROXY='${proxyUrl}' http_proxy='${proxyUrl}' https_proxy='${proxyUrl}'\necho "(代理: ${proxyUrl})"\n` : '';
+    writeFileSync(file, `#!/bin/bash\necho "▶ ${title}"\n${proxyLine}${cmd}\nstatus=$?\necho\nif [ $status -eq 0 ]; then echo "✅ 完成,可关闭本窗口"; else echo "❌ 失败(退出码 $status)"; fi\n`, { mode: 0o755 });
     spawn('open', [file], { detached: true, stdio: 'ignore' }).unref();
   } else if (process.platform === 'win32') {
     const file = join(tmpdir(), `${stamp}.bat`);
-    writeFileSync(file, `@echo off\r\necho ▶ ${title}\r\n${cmd}\r\necho.\r\necho ===== 完成,按任意键关闭 =====\r\npause >nul\r\n`);
+    const proxyLine = proxyUrl ? `set HTTP_PROXY=${proxyUrl}\r\nset HTTPS_PROXY=${proxyUrl}\r\necho (代理: ${proxyUrl})\r\n` : '';
+    writeFileSync(file, `@echo off\r\necho ▶ ${title}\r\n${proxyLine}${cmd}\r\necho.\r\necho ===== 完成,按任意键关闭 =====\r\npause >nul\r\n`);
     // start '' <file> — 空标题占位,避免把文件路径当成窗口标题
     spawn('cmd', ['/c', 'start', '', file], { detached: true, stdio: 'ignore', windowsHide: false }).unref();
   } else {
@@ -279,9 +301,11 @@ router.get('/claude-version-check', async (req, res) => {
 router.post('/claude-update', async (req, res) => {
   const { method, path: claudePath } = await detectInstall();
   const cmd = updateCmdFor(method, claudePath);
+  // M1: native 自更新直连 claude.ai 下载,墙内必须带代理;npm/brew 同样受益。
+  const proxyUrl = await detectLocalProxy().catch(() => null);
   try {
-    launchInTerminal(cmd, `更新 Claude Code (${method})`);
-    res.json({ ok: true, launched: true, command: cmd, platform: process.platform });
+    launchInTerminal(cmd, `更新 Claude Code (${method})`, proxyUrl);
+    res.json({ ok: true, launched: true, command: cmd, platform: process.platform, proxy: proxyUrl });
   } catch (err) {
     res.json({ ok: false, error: err.message || '启动终端失败', command: cmd });
   }
@@ -293,9 +317,10 @@ router.post('/claude-update', async (req, res) => {
  */
 router.post('/claude-install', async (req, res) => {
   const cmd = installCmdFor();
+  const proxyUrl = await detectLocalProxy().catch(() => null);
   try {
-    launchInTerminal(cmd, '安装 Claude Code');
-    res.json({ ok: true, launched: true, command: cmd, platform: process.platform });
+    launchInTerminal(cmd, '安装 Claude Code', proxyUrl);
+    res.json({ ok: true, launched: true, command: cmd, platform: process.platform, proxy: proxyUrl });
   } catch (err) {
     res.json({ ok: false, error: err.message || '启动终端失败', command: cmd });
   }

@@ -41,6 +41,11 @@ export function TaskCard({ toolCall }) {
             <span className="text-xs font-medium text-violet-900 font-mono truncate">
               {subagentType}
             </span>
+            {agent?.model && (
+              <span className="text-[9px] px-1 py-px bg-violet-100 text-violet-700 rounded font-mono shrink-0" title="该子代理实际使用的模型">
+                {agent.model}
+              </span>
+            )}
             {isWorking && <Loader2 size={11} className="text-violet-500 animate-spin shrink-0" />}
             {isDone && !isError && <span className="text-[10px] text-success shrink-0">完成</span>}
             {isError && <span className="text-[10px] text-error shrink-0">错误</span>}

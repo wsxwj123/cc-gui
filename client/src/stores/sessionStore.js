@@ -231,6 +231,15 @@ export const useStore = create((set, get) => ({
   //   { [sessionId]: pid }
   backgroundSessions: {},
 
+  // M3(Q9): 非聚焦会话完成回复时的悬浮提醒。[{id, sessionId, projectHash, title, summary, ts}]
+  completionToasts: [],
+  pushCompletionToast: (t) => set((s) => ({
+    completionToasts: [...s.completionToasts.filter((x) => x.sessionId !== t.sessionId), { ...t, id: `${t.sessionId}-${Date.now()}` }],
+  })),
+  removeCompletionToast: (id) => set((s) => ({
+    completionToasts: s.completionToasts.filter((x) => x.id !== id),
+  })),
+
   // ── Legacy aliases for Phase 1 callers (kept for back-compat) ──
   // splitMode is `paneCount > 1`; secondarySession/Messages mirror pane 1.
   // These fields are also mutated by the new pane actions below so reads
