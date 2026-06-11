@@ -2,7 +2,9 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { useStore } from '../stores/sessionStore.js';
 import { Save, RefreshCw, Check, Lock } from 'lucide-react';
 
-// CLAUDE.md 记忆编辑器。层级与官方文档一致(code.claude.com/docs/en/memory):
+// CLAUDE.md 指令编辑器。注意:CLAUDE.md 是用户写的"指令",不是"记忆"——官方语境里
+// "记忆/memory"特指 Claude 自写的 auto memory(~/.claude/projects/<p>/memory/),二者
+// 不同。层级与官方文档一致(code.claude.com/docs/en/memory):
 // 全局(user)/项目(project)/本地(local) 可编辑,组织(managed,IT 下发)只读。
 const LEVELS = [
   { key: 'user', label: '全局', hint: '~/.claude/CLAUDE.md · 对所有项目生效,仅你' },

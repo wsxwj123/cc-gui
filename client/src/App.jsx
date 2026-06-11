@@ -397,7 +397,7 @@ const PANEL_MAP = {
   usage: { label: '用量统计', icon: BarChart3, component: UsagePanel },
   processes: { label: '进程管理 / 停止', icon: Activity, component: ProcessPanel },
   mcp: { label: 'MCP 服务器', icon: Server, component: MCPPanel },
-  memory: { label: '记忆 (CLAUDE.md)', icon: BookText, component: MemoryPanel },
+  memory: { label: 'CLAUDE.md 指令', icon: BookText, component: MemoryPanel },
   settings: { label: '设置', icon: Settings, component: SettingsPanel },
 };
 
@@ -6189,7 +6189,7 @@ export default function App() {
             // stays as the hover tooltip for the full name.
             const SHORT = {
               files: '文件', monitor: '监控', agents: 'Agent', usage: '用量', processes: '进程',
-              changes: '审查', mcp: 'MCP', memory: '记忆', settings: '设置',
+              changes: '审查', mcp: 'MCP', memory: '指令', settings: '设置',
             };
             const short = SHORT[id] || label;
             return (
