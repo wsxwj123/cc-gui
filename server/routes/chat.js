@@ -777,8 +777,10 @@ router.post('/chat/title', async (req, res) => {
 // ── Context breakdown (#1) ────────────────────────────────────────────────
 // Run the CLI's `/context` slash command against a FORKED copy of the session
 // (--fork-session → new session id, original jsonl untouched) and parse the
-// markdown table it emits. /context is a local command (no model call), so it
-// returns in ~3s. We delete the forked jsonl afterwards so it doesn't litter.
+// markdown table it emits. /context 不走主对话模型,但对每个分类(系统提示/工具/
+// MCP/agents/memory/skills/messages)各打一次 count_tokens(免费但有网络往返,回退还
+// 会真调 haiku) + CLI 冷启动,合计 5~30s —— 不是"纯本地",慢的根因在此。GUI 侧已
+// 改为后台探测一次即缓存明细,弹层秒读缓存(AA1)。afterwards 删除 forked jsonl。
 // X2(深层):剥离【宿主 Claude Code 会话】的标识变量。当 GUI app 从一个正在运行的
 // claude 会话里被启动(macOS `open -a` 会透传调用方环境)时,server 继承了
 // CLAUDECODE=1 / CLAUDE_CODE_SESSION_ID / CLAUDE_CODE_ENTRYPOINT / SDK 握手标志等

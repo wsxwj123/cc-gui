@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Settings, Save, RefreshCw, AlertCircle, Check, Plus, Trash2, ChevronDown, ChevronRight } from 'lucide-react';
+import { Settings, Save, RefreshCw, AlertCircle, Check, Plus, Trash2, ChevronDown, ChevronRight, ShieldCheck, ShieldAlert, ExternalLink } from 'lucide-react';
 import { openExternalUrl } from '../utils/openExternal.js';
 import { confirmDialog } from '../utils/confirmDialog.jsx';
 import { useStore } from '../stores/sessionStore.js';
@@ -679,6 +679,62 @@ function CloseBehaviorPicker() {
   );
 }
 
+// macOS 完全磁盘访问(FDA)状态卡。仅 macOS 渲染(端点返回 platform 判断)。
+// 主动 probe(readdir ~/Downloads)拿真实授权态:能读=已授权,读不了=未授权→红色
+// 提示 + 一键打开系统设置。持久自签后授权跨 build 存活,但首次/异常仍需用户操作。
+function FullDiskAccessCard() {
+  const [status, setStatus] = useState(null); // { platform, canReadDownloads }
+  const [checking, setChecking] = useState(true);
+
+  const check = async () => {
+    setChecking(true);
+    try {
+      const r = await fetch('/api/system/permission-status?probe=1');
+      setStatus(await r.json());
+    } catch { setStatus({ platform: 'unknown' }); }
+    setChecking(false);
+  };
+  useEffect(() => { check(); }, []);
+
+  const openSettings = () => { fetch('/api/system/open-fda-settings', { method: 'POST' }).catch(() => {}); };
+
+  // 非 macOS 不显示(Windows/Linux 无 TCC)。加载中也不显示,避免闪烁。
+  if (!status || status.platform !== 'darwin') return null;
+  const granted = status.canReadDownloads === true;
+
+  return (
+    <div className={`border rounded-lg overflow-hidden ${granted ? 'border-canvas-deep' : 'border-amber-300/60'}`}>
+      <div className={`flex items-center gap-2.5 px-3 py-2.5 ${granted ? 'bg-canvas-warm' : 'bg-amber-50'}`}>
+        <div className={`w-7 h-7 rounded-lg flex items-center justify-center shrink-0 ${granted ? 'bg-emerald-100' : 'bg-amber-100'}`}>
+          {granted ? <ShieldCheck size={15} className="text-emerald-600" /> : <ShieldAlert size={15} className="text-amber-700" />}
+        </div>
+        <div className="flex-1 min-w-0">
+          <div className="text-xs font-medium text-ink font-body">完全磁盘访问 (FDA)</div>
+          <div className="text-[11px] text-ink-faint font-body">
+            {checking ? '检测中…' : granted ? '已授权,Claude 可读取受保护目录' : '未授权,Claude 读取 Desktop/Documents/Downloads 会失败'}
+          </div>
+        </div>
+        <button onClick={check} disabled={checking} className="p-1 text-ink-faint hover:text-ink shrink-0" title="重新检测">
+          <RefreshCw size={12} className={checking ? 'animate-spin' : ''} />
+        </button>
+      </div>
+      {!granted && !checking && (
+        <div className="border-t border-amber-200/60 px-3 py-2.5 space-y-2 bg-amber-50/40">
+          <ol className="list-decimal list-inside space-y-0.5 text-[11px] text-ink-muted font-body">
+            <li>点下方按钮打开 系统设置 → 完全磁盘访问</li>
+            <li>点 <span className="px-1 rounded bg-canvas-deep font-mono text-[10px]">+</span> 选 <span className="font-mono text-[10px]">/Applications/Claude GUI.app</span></li>
+            <li>打开开关,完全退出本 app 后重新打开</li>
+          </ol>
+          <button onClick={openSettings}
+            className="flex items-center gap-1.5 px-3 py-1.5 text-[12px] text-white bg-accent hover:bg-accent/90 rounded-md transition-colors">
+            <ExternalLink size={12} /> 打开系统设置
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function OverviewTab({ settings }) {
   const [showEnv, setShowEnv] = useState(false);
   const [showHooks, setShowHooks] = useState(false);
@@ -705,6 +761,7 @@ function OverviewTab({ settings }) {
     <div className="space-y-3">
       <UpdateChecker />
       <CcUpdater />
+      <FullDiskAccessCard />
       <CloseBehaviorPicker />
       {rows.length > 0 && (
         <div className="bg-canvas-warm border border-canvas-deep rounded-lg divide-y divide-canvas-deep">

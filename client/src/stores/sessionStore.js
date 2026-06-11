@@ -187,6 +187,11 @@ export const useStore = create((set, get) => ({
   // 这是权威来源 —— 徽章的分子/分母与按事件 usage/模型名猜测不一致时,以实测为准
   // (回合结束后台自动探测一次 + 点徽章手动探测都会回写)。仅内存态,不持久化。
   ctxMeasuredBySession: {},
+  // AA1:缓存 /context 的完整分项明细 { [sessionId]: { categories, mcpServers, model,
+  // totalTokens, windowTokens, pct, ts } }。后台探测(开会话/回合后)拿到的 d 整体存进
+  // 来,点徽章弹层直接读缓存秒开 —— 不必再 spawn `claude -p /context`(冷启动+多次
+  // count_tokens 网络往返,5~30s)。仅内存态。
+  ctxBreakdownBySession: {},
   // Sessions currently handed off to phone remote control (sessionId → true).
   // While set, the GUI must NOT spawn `-p` turns for that session (both would
   // write the same jsonl). The composer locks and shows a reclaim banner.
@@ -396,6 +401,12 @@ export const useStore = create((set, get) => ({
   setCtxMeasured: (sessionId, payload) => set((s) => (
     sessionId && payload?.windowTokens > 0
       ? { ctxMeasuredBySession: { ...s.ctxMeasuredBySession, [sessionId]: { ...payload, ts: payload.ts || Date.now() } } }
+      : s
+  )),
+  // AA1:存 /context 完整明细供弹层秒开。要求有 categories(否则无明细可显)。
+  setCtxBreakdown: (sessionId, data) => set((s) => (
+    sessionId && Array.isArray(data?.categories) && data.categories.length > 0
+      ? { ctxBreakdownBySession: { ...s.ctxBreakdownBySession, [sessionId]: { ...data, ts: Date.now() } } }
       : s
   )),
   // When a draft session (keyed `draft-<projectHash>`) gets its real CLI session

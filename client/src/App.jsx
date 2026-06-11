@@ -2183,8 +2183,9 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
 
   // X2/I6:打开会话时后台对齐一次 /context(每会话每次运行只测一次)。覆盖两类
   // 徽章空窗:①重启后内存实测为空;②会话以 /compact 收尾,compact 之后没有任何
-  // 带 usage 的回合(jsonl 路径无值可取,用户截图场景)。/context 是本地命令,
-  // 不调模型不耗额度;回写后徽章与点开明细一致。
+  // 带 usage 的回合(jsonl 路径无值可取,用户截图场景)。/context 不走主对话模型,
+  // 但会打多次 count_tokens(免费、有网络往返);回写后徽章与点开明细一致,且明细
+  // 缓存进 store 供弹层秒开(AA1)。
   useEffect(() => {
     const sid = selectedSession?.sessionId;
     if (!sid || streamingRef.current) return;
@@ -2204,6 +2205,7 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
         if (d?.totalTokens > 0 && d?.windowTokens > 0) {
           useStore.getState().setCtxMeasured(sid, { totalTokens: d.totalTokens, windowTokens: d.windowTokens });
         }
+        useStore.getState().setCtxBreakdown(sid, d); // AA1:缓存明细供弹层秒开
       })
       .catch(() => {});
   }, [selectedSession?.sessionId]);
@@ -3369,6 +3371,7 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
               if (d?.totalTokens > 0 && d?.windowTokens > 0) {
                 useStore.getState().setCtxMeasured(probeSid, { totalTokens: d.totalTokens, windowTokens: d.windowTokens });
               }
+              useStore.getState().setCtxBreakdown(probeSid, d); // AA1:缓存明细供弹层秒开
             })
             .catch(() => {})
             .finally(() => { delete window.__cguiCtxProbe[probeSid]; });
@@ -4542,6 +4545,8 @@ function ContextBreakdownButton({ contextTokens, contextWindow, contextPct, fmtT
   const [showMcp, setShowMcp] = useState(false);
   const wrapRef = useRef(null);
   const menuRef = useRef(null);
+  // AA1:后台探测(开会话/回合后)缓存的完整明细 —— 点开优先读它,秒显,不 spawn。
+  const cachedBreakdown = useStore((s) => s.ctxBreakdownBySession[sessionId]);
 
   useEffect(() => {
     if (!open) return;
@@ -4572,6 +4577,7 @@ function ContextBreakdownButton({ contextTokens, contextWindow, contextPct, fmtT
       setData(d);
       // U3/V1:把 CLI 实测的分子+分母回写为本会话徽章的权威值,徽章与明细从此一致。
       if (d?.windowTokens > 0) useStore.getState().setCtxMeasured(sessionId, { totalTokens: d.totalTokens || 0, windowTokens: d.windowTokens });
+      useStore.getState().setCtxBreakdown(sessionId, d); // AA1:刷新缓存
     } catch (e) { setErr(e.message); setData(null); }
     setLoading(false);
   };
@@ -4588,7 +4594,9 @@ function ContextBreakdownButton({ contextTokens, contextWindow, contextPct, fmtT
       const rLeft = r.left / z, rTop = r.top / z, rBottom = r.bottom / z;
       const openBelow = (visH - rBottom) >= rTop;
       setCoords({ left: rLeft, top: openBelow ? rBottom + gap : rTop - gap, ty: openBelow ? '0' : '-100%' });
-      load();
+      // AA1:有后台缓存的明细就秒显,不再每次 spawn /context(5~30s)。无缓存才现算。
+      if (cachedBreakdown?.categories?.length > 0) { setData(cachedBreakdown); setErr(''); }
+      else load();
     }
     setOpen(!open);
   };
@@ -4606,15 +4614,19 @@ function ContextBreakdownButton({ contextTokens, contextWindow, contextPct, fmtT
       style={{ position: 'fixed', left: coords.left, top: coords.top, transform: `translate(0, ${coords.ty})`, zIndex: 9999 }}
       className="glass-popover w-[340px] max-w-[calc(var(--app-w,100vw)-1.5rem)] max-h-[80vh] overflow-y-auto py-2 animate-glass-rise"
     >
-      <div className="px-3 pb-2 flex items-center justify-between border-b border-black/5">
+      <div className="px-3 pb-2 flex items-center gap-2 border-b border-black/5">
         <span className="text-xs font-medium text-ink font-body">上下文用量</span>
-        {data?.model && <span className="text-[10px] text-ink-faint font-mono truncate max-w-[160px]" title={data.model}>{data.model}</span>}
+        {data?.model && <span className="text-[10px] text-ink-faint font-mono truncate max-w-[130px]" title={data.model}>{data.model}</span>}
+        <button onClick={(e) => { e.stopPropagation(); load(); }} disabled={loading}
+          className="ml-auto p-0.5 text-ink-faint hover:text-ink shrink-0" title="重新精确计算 /context（稍慢）">
+          <RefreshCw size={11} className={loading ? 'animate-spin' : ''} />
+        </button>
       </div>
 
-      {loading && <div className="px-3 py-6 text-center text-xs text-ink-faint">正在计算 /context…</div>}
-      {err && !loading && <div className="px-3 py-4 text-xs text-amber-700">{err}</div>}
+      {loading && !data && <div className="px-3 py-6 text-center text-xs text-ink-faint">正在计算 /context…</div>}
+      {err && !data && <div className="px-3 py-4 text-xs text-amber-700">{err}</div>}
 
-      {!loading && !err && data && (
+      {data && (
         <div className="px-3 pt-2">
           <div className="flex items-baseline justify-between mb-1">
             <span className="text-[11px] text-ink-muted font-mono">
