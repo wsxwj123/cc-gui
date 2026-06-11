@@ -7,10 +7,10 @@ import { Save, RefreshCw, Check, Lock } from 'lucide-react';
 // 不同。层级与官方文档一致(code.claude.com/docs/en/memory):
 // 全局(user)/项目(project)/本地(local) 可编辑,组织(managed,IT 下发)只读。
 const LEVELS = [
-  { key: 'user', label: '全局', hint: '~/.claude/CLAUDE.md · 对所有项目生效,仅你' },
-  { key: 'project', label: '项目', hint: '<项目>/CLAUDE.md · 团队共享(随 git 提交)' },
-  { key: 'local', label: '本地', hint: '<项目>/CLAUDE.local.md · 仅你,当前项目(应 gitignore)' },
-  { key: 'managed', label: '组织', hint: '系统级,IT 下发 · 只读' },
+  { key: 'user', label: '全局', hint: '~/.claude/CLAUDE.md — 对你这台电脑上所有项目都生效(你的个人通用规则)' },
+  { key: 'project', label: '项目', hint: '<项目>/CLAUDE.md — 只对当前项目生效,会随 git 提交、和团队共享' },
+  { key: 'local', label: '项目·私人', hint: '<项目>/CLAUDE.local.md — 也只对当前项目,但不提交 git、只留在你这台机器(放个人测试路径等不想共享的内容)' },
+  { key: 'managed', label: '组织', hint: '公司 IT 统一下发到所有员工电脑的强制规则,只读;个人用户通常没有这个文件' },
 ];
 
 export function MemoryPanel() {

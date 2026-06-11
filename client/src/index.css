@@ -24,11 +24,11 @@
   --color-ink-faint: #9A9AA0;
   --color-ink-ghost: #C8C8CE;
 
-  /* ── Accent — 清爽蓝(系统感,区别于 Claude 陶土) ───────────── */
-  --color-accent: #2563EB;
-  --color-accent-hover: #1D4ED8;
-  --color-accent-subtle: rgba(37, 99, 235, 0.10);
-  --color-accent-muted: rgba(37, 99, 235, 0.24);
+  /* ── Accent — 纯黑(真·白底黑字,无彩色;不是蓝) ───────────── */
+  --color-accent: #1A1A1A;
+  --color-accent-hover: #000000;
+  --color-accent-subtle: rgba(0, 0, 0, 0.06);
+  --color-accent-muted: rgba(0, 0, 0, 0.16);
 
   /* ── Semantic — 中性 ──────────────────────────────────────── */
   --color-success: #16A34A;
@@ -80,10 +80,11 @@
   --color-ink-faint: #6E6E74;
   --color-ink-ghost: #45454A;
 
-  --color-accent: #3B82F6;
-  --color-accent-hover: #60A5FA;
-  --color-accent-subtle: rgba(59, 130, 246, 0.16);
-  --color-accent-muted: rgba(59, 130, 246, 0.32);
+  /* 深色默认 accent:中性深灰(配按钮写死的白字仍可读,无彩色)。 */
+  --color-accent: #52525B;
+  --color-accent-hover: #6B6B72;
+  --color-accent-subtle: rgba(255, 255, 255, 0.10);
+  --color-accent-muted: rgba(255, 255, 255, 0.20);
 
   --color-success: #22C55E;
   --color-error: #EF4444;
@@ -389,32 +390,32 @@
   --scrollbar-thumb-hover: rgba(220, 215, 186, 0.26);
 }
 
-/* Everforest Dark — soft sage on forest. */
+/* Everforest Dark — 用户定制:深森林底 + 绿字(白底绿字的深色对应)。 */
 :root[data-cgui-theme="everforest-dark"] {
-  --color-canvas: #2D353B;
-  --color-canvas-warm: #374145;
-  --color-canvas-deep: #475258;
-  --color-canvas-sunken: #232A2E;
-  --color-ink: #D3C6AA;
-  --color-ink-soft: #C2B295;
-  --color-ink-muted: #9DA9A0;
-  --color-ink-faint: #7A8478;
-  --color-ink-ghost: #555F5C;
-  --color-accent: #A7C080;
-  --color-accent-hover: #BCD299;
-  --color-accent-subtle: rgba(167, 192, 128, 0.16);
-  --color-accent-muted: rgba(167, 192, 128, 0.32);
-  --glass-base-bg: rgba(45, 53, 59, 0.30);
-  --glass-thick-bg: rgba(45, 53, 59, 0.88);
-  --glass-thin-bg: rgba(55, 65, 69, 0.58);
-  --glass-bar-bg: rgba(35, 42, 46, 0.82);
+  --color-canvas: #1A211C;
+  --color-canvas-warm: #232E26;
+  --color-canvas-deep: #2E3B30;
+  --color-canvas-sunken: #131A15;
+  --color-ink: #A8D5A2;
+  --color-ink-soft: #93C48D;
+  --color-ink-muted: #7AA876;
+  --color-ink-faint: #5C7A58;
+  --color-ink-ghost: #3E5240;
+  --color-accent: #7FC06E;
+  --color-accent-hover: #95D183;
+  --color-accent-subtle: rgba(127, 192, 110, 0.16);
+  --color-accent-muted: rgba(127, 192, 110, 0.32);
+  --glass-base-bg: rgba(26, 33, 28, 0.30);
+  --glass-thick-bg: rgba(26, 33, 28, 0.88);
+  --glass-thin-bg: rgba(35, 46, 38, 0.58);
+  --glass-bar-bg: rgba(19, 26, 21, 0.82);
   --glass-specular: rgba(255, 255, 255, 0.06);
   --glass-shade: rgba(0, 0, 0, 0.32);
-  --glass-edge: rgba(167, 192, 128, 0.14);
+  --glass-edge: rgba(127, 192, 110, 0.14);
   --glass-edge-outer: rgba(0, 0, 0, 0.5);
   --glass-shadow: 0 1px 1px rgba(0, 0, 0, 0.42), 0 14px 40px -16px rgba(0, 0, 0, 0.6);
-  --scrollbar-thumb: rgba(211, 198, 170, 0.14);
-  --scrollbar-thumb-hover: rgba(211, 198, 170, 0.26);
+  --scrollbar-thumb: rgba(168, 213, 162, 0.14);
+  --scrollbar-thumb-hover: rgba(168, 213, 162, 0.26);
 }
 
 /* ════════════════════════════════════════════════════════════════
@@ -535,32 +536,32 @@
   --scrollbar-thumb-hover: rgba(36, 41, 47, 0.36);
 }
 
-/* Everforest Light — 淡草绿 + 森林深绿，护眼。 */
+/* Everforest Light — 用户定制:纯白底 + 森林绿字。 */
 :root[data-cgui-theme="everforest-light"] {
-  --color-canvas: #FDF6E3;
-  --color-canvas-warm: #F4F0D9;
-  --color-canvas-deep: #BDC3AF;
-  --color-canvas-sunken: #EFEBD4;
-  --color-ink: #5C6A72;
-  --color-ink-soft: #708089;
-  --color-ink-muted: #829181;
-  --color-ink-faint: #939F91;
-  --color-ink-ghost: #A6B0A0;
-  --color-accent: #8DA101;
-  --color-accent-hover: #35A77C;
-  --color-accent-subtle: rgba(141, 161, 1, 0.12);
-  --color-accent-muted: rgba(141, 161, 1, 0.28);
-  --glass-base-bg: rgba(253, 246, 227, 0.18);
-  --glass-thick-bg: rgba(253, 246, 227, 0.82);
-  --glass-thin-bg: rgba(253, 246, 227, 0.48);
-  --glass-bar-bg: rgba(253, 246, 227, 0.68);
-  --glass-specular: rgba(255, 255, 255, 0.7);
-  --glass-shade: rgba(92, 106, 114, 0.05);
-  --glass-edge: rgba(141, 161, 1, 0.18);
-  --glass-edge-outer: rgba(92, 106, 114, 0.06);
-  --glass-shadow: 0 1px 1px rgba(92, 106, 114, 0.04), 0 14px 40px -16px rgba(92, 106, 114, 0.18);
-  --scrollbar-thumb: rgba(92, 106, 114, 0.22);
-  --scrollbar-thumb-hover: rgba(92, 106, 114, 0.36);
+  --color-canvas: #FFFFFF;
+  --color-canvas-warm: #F2F7EE;
+  --color-canvas-deep: #DCE8D4;
+  --color-canvas-sunken: #EAF1E4;
+  --color-ink: #2C4A33;
+  --color-ink-soft: #3C5A42;
+  --color-ink-muted: #5E7A63;
+  --color-ink-faint: #8AA88E;
+  --color-ink-ghost: #B8CDB9;
+  --color-accent: #4B8B3B;
+  --color-accent-hover: #3A7A2E;
+  --color-accent-subtle: rgba(75, 139, 59, 0.12);
+  --color-accent-muted: rgba(75, 139, 59, 0.28);
+  --glass-base-bg: rgba(255, 255, 255, 0.18);
+  --glass-thick-bg: rgba(255, 255, 255, 0.82);
+  --glass-thin-bg: rgba(255, 255, 255, 0.48);
+  --glass-bar-bg: rgba(255, 255, 255, 0.68);
+  --glass-specular: rgba(255, 255, 255, 0.8);
+  --glass-shade: rgba(44, 74, 51, 0.05);
+  --glass-edge: rgba(75, 139, 59, 0.18);
+  --glass-edge-outer: rgba(44, 74, 51, 0.06);
+  --glass-shadow: 0 1px 1px rgba(44, 74, 51, 0.04), 0 14px 40px -16px rgba(44, 74, 51, 0.18);
+  --scrollbar-thumb: rgba(44, 74, 51, 0.20);
+  --scrollbar-thumb-hover: rgba(44, 74, 51, 0.34);
 }
 
 /* Tokyonight Day — 灰蓝白 + 电蓝，现代编辑器感。 */

@@ -33,8 +33,8 @@ export const PERMISSION_MODES = ['default', 'acceptEdits', 'plan', 'bypassPermis
 // bg/bg2/fg/accent are preview swatch colors for the theme popover cards.
 export const THEME_FAMILIES = [
   { id: 'default', name: '默认',
-    light: { id: '', bg: '#FFFFFF', bg2: '#ECECEE', fg: '#1A1A1A', accent: '#2563EB' },
-    dark:  { id: '', bg: '#1A1A1B', bg2: '#121213', fg: '#F5F5F6', accent: '#3B82F6' } },
+    light: { id: '', bg: '#FFFFFF', bg2: '#ECECEE', fg: '#1A1A1A', accent: '#1A1A1A' },
+    dark:  { id: '', bg: '#1A1A1B', bg2: '#121213', fg: '#F5F5F6', accent: '#A0A0A6' } },
   { id: 'claude', name: 'Claude',
     light: { id: 'claude-warm', bg: '#F2EDE3', bg2: '#E2DBCC', fg: '#1A1A1A', accent: '#D97757' },
     dark:  { id: 'claude-dark', bg: '#29251F', bg2: '#161412', fg: '#F5F0E8', accent: '#D97757' } },
@@ -63,8 +63,8 @@ export const THEME_FAMILIES = [
     light: { id: 'kanagawa-lotus', bg: '#EAE4D7', bg2: '#E3DCD2', fg: '#54433A', accent: '#2D4F67' },
     dark:  { id: 'kanagawa',       bg: '#2A2A37', bg2: '#16161D', fg: '#DCD7BA', accent: '#7E9CD8' } },
   { id: 'everforest', name: 'Everforest',
-    light: { id: 'everforest-light', bg: '#F4F0D9', bg2: '#EFEBD4', fg: '#5C6A72', accent: '#8DA101' },
-    dark:  { id: 'everforest-dark',  bg: '#374145', bg2: '#232A2E', fg: '#D3C6AA', accent: '#A7C080' } },
+    light: { id: 'everforest-light', bg: '#FFFFFF', bg2: '#EAF1E4', fg: '#2C4A33', accent: '#4B8B3B' },
+    dark:  { id: 'everforest-dark',  bg: '#1A211C', bg2: '#131A15', fg: '#A8D5A2', accent: '#7FC06E' } },
   { id: 'solarized', name: 'Solarized',
     light: { id: 'solarized-light', bg: '#F5EFD6', bg2: '#EEE8D5', fg: '#586E75', accent: '#268BD2' },
     dark:  { id: 'solarized-dark',  bg: '#073642', bg2: '#00212B', fg: '#93A1A1', accent: '#268BD2' } },
