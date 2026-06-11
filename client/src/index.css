@@ -11,43 +11,43 @@
   --font-reading: 'Newsreader', Georgia, 'Times New Roman', serif;
   --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, monospace;
 
-  /* ── Canvas — Claude Desktop warm ivory (default look) ─────── */
-  --color-canvas: #FAF9F5;
-  --color-canvas-warm: #F3F1E9;
-  --color-canvas-deep: #ECE8DD;
-  --color-canvas-sunken: #E4DFD2;
+  /* ── Canvas — 默认主题:纯净中性白(区别于 Claude 暖 ivory) ─── */
+  --color-canvas: #FFFFFF;
+  --color-canvas-warm: #F6F6F7;
+  --color-canvas-deep: #ECECEE;
+  --color-canvas-sunken: #E2E2E5;
 
-  /* ── Ink — warm charcoal neutrals ──────────────────────────── */
-  --color-ink: #141413;
-  --color-ink-soft: #3D3A35;
-  --color-ink-muted: #6B6960;
-  --color-ink-faint: #9B988C;
-  --color-ink-ghost: #CBC5B8;
+  /* ── Ink — 中性黑灰 ────────────────────────────────────────── */
+  --color-ink: #1A1A1A;
+  --color-ink-soft: #3A3A3A;
+  --color-ink-muted: #6A6A6E;
+  --color-ink-faint: #9A9AA0;
+  --color-ink-ghost: #C8C8CE;
 
-  /* ── Accent — Claude clay/terracotta ──────────────────────── */
-  --color-accent: #D97757;
-  --color-accent-hover: #C15F3C;
-  --color-accent-subtle: rgba(217, 119, 87, 0.12);
-  --color-accent-muted: rgba(217, 119, 87, 0.28);
+  /* ── Accent — 清爽蓝(系统感,区别于 Claude 陶土) ───────────── */
+  --color-accent: #2563EB;
+  --color-accent-hover: #1D4ED8;
+  --color-accent-subtle: rgba(37, 99, 235, 0.10);
+  --color-accent-muted: rgba(37, 99, 235, 0.24);
 
-  /* ── Semantic — warm-tuned ────────────────────────────────── */
-  --color-success: #788C5D;
-  --color-error: #C0492F;
-  --color-error-subtle: #F7E2DB;
-  --color-warning: #C97B27;
+  /* ── Semantic — 中性 ──────────────────────────────────────── */
+  --color-success: #16A34A;
+  --color-error: #DC2626;
+  --color-error-subtle: #FEE2E2;
+  --color-warning: #D97706;
 
-  /* ── Glass surface ingredients (warm whites) ──────────────── */
-  --glass-base-bg: rgba(250, 249, 245, 0.16);
-  --glass-thick-bg: rgba(250, 249, 245, 0.80);
-  --glass-thin-bg: rgba(250, 249, 245, 0.42);
-  --glass-bar-bg: rgba(250, 249, 245, 0.68);
-  --glass-specular: rgba(255, 255, 255, 0.7);
-  --glass-shade: rgba(90, 70, 50, 0.04);
-  --glass-edge: rgba(217, 119, 87, 0.18);
-  --glass-edge-outer: rgba(90, 70, 50, 0.07);
-  --glass-shadow: 0 1px 1px rgba(90, 70, 50, 0.04), 0 14px 40px -16px rgba(120, 90, 60, 0.18);
-  --scrollbar-thumb: rgba(120, 100, 80, 0.20);
-  --scrollbar-thumb-hover: rgba(120, 100, 80, 0.34);
+  /* ── Glass surface ingredients (中性白) ───────────────────── */
+  --glass-base-bg: rgba(255, 255, 255, 0.16);
+  --glass-thick-bg: rgba(255, 255, 255, 0.82);
+  --glass-thin-bg: rgba(255, 255, 255, 0.44);
+  --glass-bar-bg: rgba(255, 255, 255, 0.70);
+  --glass-specular: rgba(255, 255, 255, 0.8);
+  --glass-shade: rgba(0, 0, 0, 0.04);
+  --glass-edge: rgba(0, 0, 0, 0.08);
+  --glass-edge-outer: rgba(0, 0, 0, 0.06);
+  --glass-shadow: 0 1px 1px rgba(0, 0, 0, 0.04), 0 14px 40px -16px rgba(0, 0, 0, 0.14);
+  --scrollbar-thumb: rgba(0, 0, 0, 0.20);
+  --scrollbar-thumb-hover: rgba(0, 0, 0, 0.34);
 
   /* ── Spacing ──────────────────────────────────────────────── */
   --spacing-sidebar: 268px;
@@ -68,39 +68,39 @@
  * if data-theme="auto" + system-dark. */
 :root[data-theme="dark"],
 :root[data-theme="auto"]:where([data-theme-system="dark"]) {
-  /* Claude Desktop dark — warm charcoal + clay (mirrors claude-dark). */
-  --color-canvas: #1F1D1A;
-  --color-canvas-warm: #29251F;
-  --color-canvas-deep: #332E27;
-  --color-canvas-sunken: #161412;
+  /* 默认主题深色 — 中性深灰黑底 + 白字 + 亮蓝 accent(非暖色)。 */
+  --color-canvas: #1A1A1B;
+  --color-canvas-warm: #242426;
+  --color-canvas-deep: #2E2E31;
+  --color-canvas-sunken: #121213;
 
-  --color-ink: #F5F0E8;
-  --color-ink-soft: #DDD6CA;
-  --color-ink-muted: #A69E92;
-  --color-ink-faint: #756E64;
-  --color-ink-ghost: #4A453E;
+  --color-ink: #F5F5F6;
+  --color-ink-soft: #D6D6D8;
+  --color-ink-muted: #A0A0A6;
+  --color-ink-faint: #6E6E74;
+  --color-ink-ghost: #45454A;
 
-  --color-accent: #E08A6B;
-  --color-accent-hover: #ECA084;
-  --color-accent-subtle: rgba(224, 138, 107, 0.16);
-  --color-accent-muted: rgba(224, 138, 107, 0.32);
+  --color-accent: #3B82F6;
+  --color-accent-hover: #60A5FA;
+  --color-accent-subtle: rgba(59, 130, 246, 0.16);
+  --color-accent-muted: rgba(59, 130, 246, 0.32);
 
-  --color-success: #A7C080;
-  --color-error: #E07A5F;
-  --color-error-subtle: rgba(224, 122, 95, 0.18);
-  --color-warning: #E0A458;
+  --color-success: #22C55E;
+  --color-error: #EF4444;
+  --color-error-subtle: rgba(239, 68, 68, 0.18);
+  --color-warning: #F59E0B;
 
-  --glass-base-bg: rgba(41, 37, 31, 0.22);
-  --glass-thick-bg: rgba(41, 37, 31, 0.88);
-  --glass-thin-bg: rgba(51, 46, 39, 0.56);
-  --glass-bar-bg: rgba(31, 29, 26, 0.82);
-  --glass-specular: rgba(255, 240, 220, 0.06);
+  --glass-base-bg: rgba(36, 36, 38, 0.22);
+  --glass-thick-bg: rgba(36, 36, 38, 0.88);
+  --glass-thin-bg: rgba(46, 46, 49, 0.56);
+  --glass-bar-bg: rgba(26, 26, 27, 0.82);
+  --glass-specular: rgba(255, 255, 255, 0.06);
   --glass-shade: rgba(0, 0, 0, 0.28);
-  --glass-edge: rgba(224, 138, 107, 0.14);
+  --glass-edge: rgba(255, 255, 255, 0.08);
   --glass-edge-outer: rgba(0, 0, 0, 0.5);
   --glass-shadow: 0 1px 1px rgba(0, 0, 0, 0.4), 0 14px 40px -16px rgba(0, 0, 0, 0.55);
-  --scrollbar-thumb: rgba(245, 240, 232, 0.14);
-  --scrollbar-thumb-hover: rgba(245, 240, 232, 0.26);
+  --scrollbar-thumb: rgba(255, 255, 255, 0.14);
+  --scrollbar-thumb-hover: rgba(255, 255, 255, 0.26);
 }
 
 /* ════════════════════════════════════════════════════════════════

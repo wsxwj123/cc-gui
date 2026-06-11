@@ -54,6 +54,29 @@ jobs:
         env:
           CGUI_PUBLIC_BUILD: '1'
 
+      # macOS dmg 里塞一个「双击去 quarantine」脚本,与 app 并列。用户拖 app 到
+      # 应用程序后双击它即可解除 Gatekeeper 隔离,无需手敲 xattr 命令。
+      - name: Inject quarantine-fix script into dmg
+        if: runner.os == 'macOS'
+        run: |
+          export LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
+          DMG=$(find src-tauri/target/release/bundle/dmg -name '*.dmg' | head -1)
+          if [ -z "$DMG" ]; then echo "no dmg found, skipping"; exit 0; fi
+          NAME='复制GUI后请双击此脚本去除quarantine.command'
+          chmod +x scripts/dmg-fix-quarantine.command
+          hdiutil convert "$DMG" -format UDRW -o /tmp/rw.dmg
+          hdiutil resize -size 300m /tmp/rw.dmg || true
+          DEV=$(hdiutil attach /tmp/rw.dmg -nobrowse -noverify | grep '/Volumes/')
+          MOUNT=$(echo "$DEV" | sed -E 's|.*(/Volumes/.*)$|\1|')
+          DISK=$(echo "$DEV" | awk '{print $1}')
+          cp scripts/dmg-fix-quarantine.command "$MOUNT/$NAME"
+          chmod +x "$MOUNT/$NAME"
+          hdiutil detach "$DISK"
+          rm -f "$DMG"
+          hdiutil convert /tmp/rw.dmg -format UDZO -o "$DMG"
+          rm -f /tmp/rw.dmg
+          echo "injected quarantine-fix script into $DMG"
+
       - name: Upload installers
         uses: actions/upload-artifact@v7
         with:
@@ -85,7 +108,7 @@ jobs:
           cat > notes.md <<'EOF'
           未签名安装包,首次打开需手动放行。当前安装包会调用本机 Node.js 启动内置后端,运行机器需已安装 Node.js 20+ 和 Claude Code CLI。
 
-          - **macOS**:仅支持 Apple Silicon(M 系列芯片)。拖 `.dmg` 入「应用程序」后若提示「已损坏」或「无法验证开发者」,打开「终端」运行一行(**无需 sudo**):`xattr -dr com.apple.quarantine '/Applications/Claude GUI.app'`,之后双击即可正常打开。原因:本 app 未做 Apple 付费公证(notarization),macOS 给所有下载的未公证 app 加了隔离属性(com.apple.quarantine),该命令仅移除这个标记。也可右键 .app →「打开」或「系统设置 → 隐私与安全性 → 仍要打开」。
+          - **macOS**:仅支持 Apple Silicon(M 系列芯片)。打开 `.dmg` 后里面有两个东西:把 **Claude GUI** 拖进「应用程序」,然后**双击 dmg 里的「复制GUI后请双击此脚本去除quarantine.command」脚本**(无需 sudo),即可正常双击打开 app。原因:本 app 未做 Apple 付费公证(notarization),macOS 给下载的未公证 app 加了隔离属性,脚本只是移除这个标记。也可改用终端 `xattr -dr com.apple.quarantine '/Applications/Claude GUI.app'`,或右键 .app →「打开」。
           - **Windows**:`.exe`(NSIS)或 `.msi` 均可;SmartScreen 提示时点「更多信息 → 仍要运行」。
           - 若双击后无窗口,查看 `~/.claude-gui/tauri-startup.log` 获取启动错误。
           EOF

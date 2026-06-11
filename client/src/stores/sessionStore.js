@@ -33,8 +33,8 @@ export const PERMISSION_MODES = ['default', 'acceptEdits', 'plan', 'bypassPermis
 // bg/bg2/fg/accent are preview swatch colors for the theme popover cards.
 export const THEME_FAMILIES = [
   { id: 'default', name: '默认',
-    light: { id: '', bg: '#FAF9F5', bg2: '#ECE8DD', fg: '#141413', accent: '#D97757' },
-    dark:  { id: '', bg: '#1F1D1A', bg2: '#161412', fg: '#F5F0E8', accent: '#E08A6B' } },
+    light: { id: '', bg: '#FFFFFF', bg2: '#ECECEE', fg: '#1A1A1A', accent: '#2563EB' },
+    dark:  { id: '', bg: '#1A1A1B', bg2: '#121213', fg: '#F5F5F6', accent: '#3B82F6' } },
   { id: 'claude', name: 'Claude',
     light: { id: 'claude-warm', bg: '#F2EDE3', bg2: '#E2DBCC', fg: '#1A1A1A', accent: '#D97757' },
     dark:  { id: 'claude-dark', bg: '#29251F', bg2: '#161412', fg: '#F5F0E8', accent: '#D97757' } },

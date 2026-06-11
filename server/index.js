@@ -36,7 +36,7 @@ import downloadUpdateRoutes from './routes/download-update.js';
 import openUrlRoutes from './routes/open-url.js';
 import {
   authMiddleware, isLocalReq, isAuthorized, parseCookies, verifyToken,
-  hasPassword, setPassword, clearPassword, verifyPassword, issueToken,
+  hasPassword, setPassword, clearPassword, verifyPassword, issueToken, updateConfig, loadConfig,
 } from './services/auth.js';
 import { setupFileWatcher } from './services/file-watcher.js';
 import { getDefaultModel, getAvailableModels, setDefaultModel } from './services/model-resolver.js';
@@ -115,6 +115,13 @@ function loadNetworkConfig() {
       }
       return { host, port };
     }
+    // 首次无配置:默认走局域网(用户要求开箱即用,手机/局域网设备直接连)。HARD
+    // SAFETY 要求 0.0.0.0 必须有密码,故同时写入默认密码 123456。⚠️ 弱密码 + 裸
+    // 局域网 HTTP 明文传输,首次启动后应立即在 设置→网络 改密码,勿暴露公共 WiFi
+    // /公网(优先 Tailscale)。defaultPassword 标记驱动前端首次提示改密码。
+    if (!hasPassword()) setPassword('123456');
+    updateConfig({ host: '0.0.0.0', port: 6677, defaultPassword: true });
+    return { host: '0.0.0.0', port: 6677 };
   } catch {}
   return { host: '127.0.0.1', port: 6677 };
 }
@@ -126,8 +133,9 @@ if (HOST === '0.0.0.0' && !hasPassword()) {
   HOST = '127.0.0.1';
 }
 // LAN mode = bound to all interfaces. Loosens CORS (below) so a phone hitting
-// http://<lanIp>:PORT isn't rejected as cross-origin.
-const lanMode = HOST === '0.0.0.0';
+// http://<lanIp>:PORT isn't rejected as cross-origin. `let` because relisten()
+// can flip the binding at runtime (设置→网络 的局域网开关,无需重启进程)。
+let lanMode = HOST === '0.0.0.0';
 
 function requestHostname(req) {
   const host = req?.headers?.host || '';
@@ -214,14 +222,27 @@ app.get('/api/auth-status', (req, res) => {
 // so a bare `node server/index.js` isn't silently killed (which would strand a
 // phone client with no way to bring it back).
 app.post('/api/restart', (req, res) => {
-  if (process.env.CGUI_WATCHDOG !== '1') {
-    return res.status(409).json({
-      error: '当前不是通过守护脚本启动，无法自动重启。请用 gui.command 启动 GUI。',
-      watchdog: false,
-    });
+  // watchdog(gui.command)启动:clean-exit,守护脚本拉起新进程读新配置。
+  if (process.env.CGUI_WATCHDOG === '1') {
+    res.json({ ok: true, restarting: true });
+    setTimeout(() => process.exit(0), 250);
+    return;
   }
-  res.json({ ok: true, restarting: true });
-  setTimeout(() => process.exit(0), 250);
+  // Tauri 双击启动:无 watchdog,但能运行时 relisten 切换 host(局域网开关),不重启
+  // 进程。port 变更不支持(webview 连固定端口)——只切 host。先发响应再延迟 relisten,
+  // 否则 closeAllConnections 会断掉当前这个请求的连接,res 发不出去。
+  if (process.env.CGUI_TAURI === '1') {
+    const target = loadNetworkConfig().host; // 已过 HARD SAFETY 回落
+    res.json({ ok: true, relistening: true, host: target });
+    setTimeout(() => { relisten(target).catch((e) => console.error('[network] relisten failed:', e.message)); }, 250);
+    return;
+  }
+  // 纯命令行(node server/index.js)既非 watchdog 也非 Tauri:拒绝,避免掐死 server
+  // 把手机端晾在没法恢复的状态。
+  return res.status(409).json({
+    error: '当前不是通过守护脚本或 GUI 启动，无法自动重启。请用 gui.command 启动 GUI。',
+    watchdog: false,
+  });
 });
 
 // API routes
@@ -281,11 +302,16 @@ function lanIps() {
   return out;
 }
 app.get('/api/network', (req, res) => {
+  const watchdog = process.env.CGUI_WATCHDOG === '1';
   res.json({
     host: HOST, port: PORT, lanMode, lanIps: lanIps(),
     configPath: NETWORK_CONFIG_PATH,
     hasPassword: hasPassword(),
-    watchdog: process.env.CGUI_WATCHDOG === '1',
+    watchdog,
+    // Tauri 双击启动虽无 watchdog,但能运行时 relisten 切 host → 重启按钮可用。
+    canRestart: watchdog || process.env.CGUI_TAURI === '1',
+    // 首次默认密码(123456)未改 → 前端横幅强提示改密码。
+    defaultPassword: loadConfig().defaultPassword === true,
   });
 });
 // POST /api/network — persist binding to ~/.claude-gui/network.json. Takes effect
@@ -306,9 +332,8 @@ app.post('/api/network', async (req, res) => {
     return res.status(400).json({ error: '开启局域网访问必须先设置访问密码（至少 4 位）', needPassword: true });
   }
   try {
-    if (typeof password === 'string' && password.length >= 4) setPassword(password);
+    if (typeof password === 'string' && password.length >= 4) { setPassword(password); updateConfig({ defaultPassword: false }); }
     // updateConfig merges so passwordHash / tokenSecret aren't clobbered.
-    const { updateConfig } = await import('./services/auth.js');
     updateConfig({ host, port: p });
     res.json({ ok: true, host, port: p, restartRequired: true, watchdog: process.env.CGUI_WATCHDOG === '1' });
   } catch (e) {
@@ -595,6 +620,39 @@ process.on('uncaughtException', (err) => {
 process.on('unhandledRejection', (reason) => {
   console.error('[unhandledRejection]', reason);
 });
+
+// 运行时切换监听地址(局域网开关),不重启进程。Tauri 双击启动没有 watchdog,靠它
+// 让"重启 server"按钮也能生效。WS 长连接会卡住 server.close 的回调,必须先 terminate;
+// 前端会自动重连/reload。webview 始终连 127.0.0.1,而 0.0.0.0 含 loopback,故切到
+// 局域网后 webview 仍可访问。
+async function relisten(newHost) {
+  for (const c of wss.clients) { try { c.terminate(); } catch {} }
+  await new Promise((resolve) => {
+    let done = false;
+    const fin = () => { if (!done) { done = true; resolve(); } };
+    try { server.close(fin); } catch { fin(); }
+    server.closeAllConnections?.();
+    setTimeout(fin, 1000); // 兜底:close 回调若因残留连接未触发也继续
+  });
+  const oldHost = HOST;
+  HOST = newHost;
+  lanMode = (newHost === '0.0.0.0');
+  try {
+    await new Promise((resolve, reject) => {
+      const onErr = (e) => { server.removeListener('error', onErr); reject(e); };
+      server.once('error', onErr);
+      server.listen(PORT, newHost, () => { server.removeListener('error', onErr); resolve(); });
+    });
+    console.log(`[network] relistened on ${newHost}:${PORT}`);
+  } catch (e) {
+    // 监听新地址失败(如端口在 close→listen 间隙被抢):回退旧地址,避免 server 既不听
+    // 新也不听旧的死状态(webview 白屏 / 手机端断线无法自恢复)。
+    console.error(`[network] relisten to ${newHost} failed: ${e.message} — reverting to ${oldHost}`);
+    HOST = oldHost;
+    lanMode = (oldHost === '0.0.0.0');
+    await new Promise((resolve) => { server.listen(PORT, oldHost, resolve); });
+  }
+}
 
 server.listen(PORT, HOST, () => {
   const exposure = HOST === '127.0.0.1'

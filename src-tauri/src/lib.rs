@@ -211,7 +211,8 @@ fn spawn_backend(app: &tauri::App, port: u16) -> Option<Child> {
     let mut cmd = Command::new(&node);
     cmd.arg(&entry)
         .env("PORT", port.to_string())
-        .env("HOST", BACKEND_HOST)
+        // 不强制 HOST:让 server 读 ~/.claude-gui/network.json 决定绑定(支持默认局域网
+        // 及设置页的局域网开关)。health 探测仍连 127.0.0.1,而 0.0.0.0 含 loopback 故可达。
         .env("CGUI_TAURI", "1")
         .env("CGUI_ENABLE_LOCAL_ROUTES", "1")
         .env("CGUI_DISABLE_FILE_WATCHER", "1");

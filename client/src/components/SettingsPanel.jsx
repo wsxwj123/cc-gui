@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Settings, Save, RefreshCw, AlertCircle, Check, Plus, Trash2, ChevronDown, ChevronRight, ShieldCheck, ShieldAlert, ExternalLink } from 'lucide-react';
+import { Settings, Save, RefreshCw, AlertCircle, Check, Plus, Trash2, ChevronDown, ChevronRight, ShieldCheck, ShieldAlert, ExternalLink, Eye, EyeOff } from 'lucide-react';
 import { openExternalUrl } from '../utils/openExternal.js';
 import { confirmDialog } from '../utils/confirmDialog.jsx';
 import { useStore } from '../stores/sessionStore.js';
@@ -102,6 +102,7 @@ function NetworkTab() {
   const [lanOn, setLanOn] = useState(false);
   const [port, setPort] = useState(6677);
   const [password, setPassword] = useState('');
+  const [showPwd, setShowPwd] = useState(false);
   const [saving, setSaving] = useState(false);
   const [restarting, setRestarting] = useState(false);
   const [msg, setMsg] = useState(null);
@@ -163,6 +164,12 @@ function NetworkTab() {
 
   return (
     <div className="space-y-4">
+      {cfg.defaultPassword && (
+        <div className="flex items-start gap-2 text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded-lg p-2.5 font-body leading-relaxed">
+          <AlertCircle size={14} className="mt-0.5 shrink-0 text-amber-600" />
+          <span>当前用的是<b>默认密码 123456</b>（为开箱即用的局域网访问预设）。这是弱密码，同一局域网内任何人都可能用它访问并控制你的 Claude——<b>请立刻在下方改成强密码</b>。若只在本机用，可取消下方「局域网访问」勾选并重启回到仅本机。</span>
+        </div>
+      )}
       <div className="text-[11px] text-ink-muted font-body">
         当前绑定：<span className="font-mono text-ink">{cfg.host}:{cfg.port}</span>
         <span className="ml-2">{cfg.lanMode ? '（局域网可访问）' : '（仅本机）'}</span>
@@ -182,9 +189,16 @@ function NetworkTab() {
           <div className="text-[12px] text-ink-soft font-body">
             访问密码 {cfg.hasPassword ? <span className="text-ink-faint">（已设置，留空＝不修改）</span> : <span className="text-error">（必填，至少 4 位）</span>}
           </div>
-          <input type="password" value={password} onChange={(e) => setPassword(e.target.value)}
-            placeholder={cfg.hasPassword ? '••••（留空保持原密码）' : '设置访问密码'}
-            className="w-full px-3 py-2 text-[13px] font-body border border-canvas-deep rounded-lg bg-canvas text-ink focus:outline-none focus:border-accent" />
+          <div className="relative">
+            <input type={showPwd ? 'text' : 'password'} value={password} onChange={(e) => setPassword(e.target.value)}
+              placeholder={cfg.hasPassword ? '••••（留空保持原密码）' : '设置访问密码'}
+              className="w-full px-3 py-2 pr-10 text-[13px] font-body border border-canvas-deep rounded-lg bg-canvas text-ink focus:outline-none focus:border-accent" />
+            <button type="button" onClick={() => setShowPwd((v) => !v)}
+              className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-ink-faint hover:text-ink"
+              title={showPwd ? '隐藏密码' : '显示密码'}>
+              {showPwd ? <EyeOff size={14} /> : <Eye size={14} />}
+            </button>
+          </div>
         </div>
       )}
 
@@ -213,16 +227,18 @@ function NetworkTab() {
           className="btn-accent flex items-center gap-1.5 px-3 py-1.5 text-[12px] font-body disabled:opacity-50">
           <Save size={12} />{saving ? '保存中…' : '保存'}
         </button>
-        <button onClick={restart} disabled={restarting}
+        <button onClick={restart} disabled={restarting || !cfg.canRestart}
           className="flex items-center gap-1.5 px-3 py-1.5 text-[12px] font-body rounded-lg border border-canvas-deep text-ink-soft hover:bg-canvas-warm disabled:opacity-50">
-          <RefreshCw size={12} className={restarting ? 'animate-spin' : ''} />{restarting ? '重启中…' : '重启 server'}
+          <RefreshCw size={12} className={restarting ? 'animate-spin' : ''} />{restarting ? '重启中…' : '重启 / 应用绑定'}
         </button>
         {msg && <span className="text-[11px] text-success font-body">{msg}</span>}
         {err && <span className="text-[11px] text-error font-body">{err}</span>}
       </div>
       <p className="text-[10.5px] text-ink-faint font-body">
-        配置写入 <span className="font-mono">~/.claude-gui/network.json</span>，重启后生效。
-        {cfg.watchdog ? '“重启 server”按钮可直接生效。' : '当前未用守护脚本启动，“重启”按钮不可用——请用项目根目录的 '}{!cfg.watchdog && <span className="font-mono">gui.command</span>}{!cfg.watchdog && ' 启动 GUI。'}
+        配置写入 <span className="font-mono">~/.claude-gui/network.json</span>。
+        {cfg.canRestart
+          ? '点「重启 / 应用绑定」即可生效：GUI 双击启动走运行时切换（不重启进程，页面会自动刷新重连），命令行守护脚本走整进程重启。注：GUI 双击启动下改「端口」需重装应用才生效（只切换局域网开关可即时生效）。'
+          : '当前未用守护脚本或 GUI 启动，「重启」不可用——请用项目根目录的 gui.command 启动 GUI。'}
       </p>
     </div>
   );
