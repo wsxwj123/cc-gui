@@ -511,7 +511,7 @@ dependencies = [
 
 [[package]]
 name = "claude-gui"
-version = "0.1.91"
+version = "0.1.94"
 dependencies = [
  "rfd",
  "tauri",
