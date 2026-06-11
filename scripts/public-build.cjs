@@ -42,11 +42,24 @@ function restoreLocalFiles(moved) {
   }
 }
 
+// macOS 本地构建:若钥匙串里有持久自签证书 LocalCodeSign,用它替代 adhoc 签名。
+// adhoc 的 cdhash 每次构建都变,TCC/FDA 授权随之失效;证书签名的 Designated
+// Requirement 锚定证书本身,重建后授权存活。CI runner 无此证书 → 自动回落 adhoc。
+function localSignEnv() {
+  if (process.platform !== 'darwin' || process.env.APPLE_SIGNING_IDENTITY) return {};
+  const probe = spawnSync('security', ['find-identity', '-v', '-p', 'codesigning'], { encoding: 'utf8' });
+  if (probe.status === 0 && /"LocalCodeSign"/.test(probe.stdout || '')) {
+    console.log('[public-build] 使用持久自签证书 LocalCodeSign 签名(FDA 授权跨 build 存活)');
+    return { APPLE_SIGNING_IDENTITY: 'LocalCodeSign' };
+  }
+  return {};
+}
+
 function run(command, args) {
   const result = spawnSync(command, args, {
     cwd: root,
     stdio: 'inherit',
-    env: { ...process.env, CGUI_PUBLIC_BUILD: '1' },
+    env: { ...process.env, CGUI_PUBLIC_BUILD: '1', ...(args[1] === 'build' && command === 'cargo' ? localSignEnv() : {}) },
   });
   if (result.error) throw result.error;
   if (result.signal) return 1;

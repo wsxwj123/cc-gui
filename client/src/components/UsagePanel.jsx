@@ -6,8 +6,8 @@ import { computeCost, formatCost } from '../utils/pricing.js';
 // Differentiated billing for the usage panel:
 //   Anthropic models (Max subscription) → no per-token charge ("订阅内")
 //   third-party (deepseek / mimo via cc switch) → real per-token cost
-// The server aggregates byModel as { input, output, cacheRead, calls }; we
-// adapt that into the usage shape computeCost expects (cacheWrite unknown → 0).
+// The server aggregates byModel as { input, output, cacheRead, cacheWrite, calls };
+// adapt that into the usage shape computeCost expects.
 function modelCost(model, m) {
   const lower = (model || '').toLowerCase();
   if (/claude|opus|sonnet|haiku/.test(lower)) return { subscription: true };
@@ -17,7 +17,7 @@ function modelCost(model, m) {
   if (!provider) return { unknown: true };
   const c = computeCost(model, {
     input_tokens: m.input, output_tokens: m.output,
-    cache_read_input_tokens: m.cacheRead, cache_creation_input_tokens: 0,
+    cache_read_input_tokens: m.cacheRead, cache_creation_input_tokens: m.cacheWrite || 0,
   }, provider);
   return c ? { usd: c.totalUsd } : { unknown: true };
 }
@@ -47,10 +47,10 @@ function decodeProjectHash(hash) {
 }
 
 function downloadCSV(stats) {
-  const lines = ['section,key,input_tokens,output_tokens,cache_read,calls'];
-  for (const m of stats.byModel) lines.push(`model,${m.model},${m.input},${m.output},${m.cacheRead},${m.calls}`);
-  for (const p of stats.byProject) lines.push(`project,${decodeProjectHash(p.hash)},${p.input},${p.output},${p.cacheRead},${p.calls}`);
-  for (const d of stats.byDay) lines.push(`day,${d.day},${d.input},${d.output},${d.cacheRead},${d.calls}`);
+  const lines = ['section,key,input_tokens,output_tokens,cache_read,cache_write,calls'];
+  for (const m of stats.byModel) lines.push(`model,${m.model},${m.input},${m.output},${m.cacheRead},${m.cacheWrite || 0},${m.calls}`);
+  for (const p of stats.byProject) lines.push(`project,${decodeProjectHash(p.hash)},${p.input},${p.output},${p.cacheRead},${p.cacheWrite || 0},${p.calls}`);
+  for (const d of stats.byDay) lines.push(`day,${d.day},${d.input},${d.output},${d.cacheRead},${d.cacheWrite || 0},${d.calls}`);
   const blob = new Blob([lines.join('\n')], { type: 'text/csv' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
@@ -207,6 +207,10 @@ export function UsagePanel() {
           <div className="bg-canvas-warm border border-canvas-deep rounded-lg p-3">
             <div className="text-[10px] text-ink-faint font-body mb-0.5">缓存命中</div>
             <div className="text-lg font-mono font-medium text-ink">{formatNum(stats.total.cacheRead)}</div>
+          </div>
+          <div className="bg-canvas-warm border border-canvas-deep rounded-lg p-3">
+            <div className="text-[10px] text-ink-faint font-body mb-0.5">缓存写入</div>
+            <div className="text-lg font-mono font-medium text-ink">{formatNum(stats.total.cacheWrite || 0)}</div>
           </div>
           <div className="bg-canvas-warm border border-canvas-deep rounded-lg p-3">
             <div className="text-[10px] text-ink-faint font-body mb-0.5">会话数</div>

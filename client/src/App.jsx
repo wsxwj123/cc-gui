@@ -2570,6 +2570,8 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
     let accumulatedThinking = '';
     let currentToolCalls = [];
     let orderedBlocks = [];  // [{ type, blockIndex, content?, toolCall? }, ...]
+    let resultUsage = null;      // result 事件携带的本轮 usage(CLI 聚合口径)
+    let resultCostUsd = null;    // result 事件携带的 total_cost_usd(CLI 权威成本)
     try {
       let pid;
       if (reattachPid) {
@@ -3131,6 +3133,12 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
           if (event.type === 'result' && !isCompact && event.usage
             && ((event.usage.input_tokens || 0) + (event.usage.cache_read_input_tokens || 0) + (event.usage.cache_creation_input_tokens || 0)) > 0) {
             setLiveContextUsage({ ...event.usage, _ts: Date.now() });
+            resultUsage = event.usage;
+          }
+          // Z1:CLI 在 result 事件上报本轮实际成本 total_cost_usd,比单价表估算
+          // 权威。compact 回合除外(其成本属压缩开销,且 usage 是压缩前旧上下文)。
+          if (event.type === 'result' && !isCompact && typeof event.total_cost_usd === 'number' && event.total_cost_usd > 0) {
+            resultCostUsd = event.total_cost_usd;
           }
           if (event.type === 'done') break;
         }
@@ -3146,7 +3154,8 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
           toolCalls: currentToolCalls.map((tc) => ({ ...tc, category: tc.category || 'call' })),
           // The canonical ordered view used by TurnBubble for in-order rendering.
           blocks: orderedBlocks,
-          usage: null,
+          usage: resultUsage,
+          costUsd: resultCostUsd,
         }]);
         // M3(Q9)→T2 重构:完成悬浮提醒改由服务端 WS 'turn-complete' 广播驱动
         // (见 useWebSocket)。这里的流闭包在用户切走会话时会被切会话 effect

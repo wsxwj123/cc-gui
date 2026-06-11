@@ -403,7 +403,7 @@ function ToolCallsGroup({ toolCalls, onRetryTool }) {
 }
 
 // ─── Usage Display ─────────────────────────────────────────────
-function UsageDisplay({ usage, model }) {
+function UsageDisplay({ usage, model, costUsd }) {
   if (!usage) return null;
   const input = usage.input_tokens || 0;
   const output = usage.output_tokens || 0;
@@ -411,6 +411,10 @@ function UsageDisplay({ usage, model }) {
   const cacheWrite = usage.cache_creation_input_tokens || 0;
   const provider = useStore((s) => s.currentProvider);
   const cost = computeCost(model, usage, provider);
+  // Z1:CLI result 事件的 total_cost_usd 是官方计费口径的权威成本,优先于单价表
+  // 估算。第三方 provider 下 CLI 仍按 Claude 价目计算(模型名是伪装的),不可信。
+  const official = !provider || (provider.providerHint || 'anthropic') === 'anthropic';
+  const authoritative = official && typeof costUsd === 'number' && costUsd > 0;
   return (
     <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[10px] text-ink-faint mt-2 pt-2 border-t border-canvas-deep/50">
       <span title="input_tokens — 仅指未命中缓存的新 token(Anthropic 计费口径),不是全部输入">输入 {input.toLocaleString()}</span>
@@ -422,18 +426,20 @@ function UsageDisplay({ usage, model }) {
           实际输入 {(input + cacheRead + cacheWrite).toLocaleString()}
         </span>
       )}
-      {cost && (
+      {(authoritative || cost) && (
         <span
           className="ml-auto text-accent/80 font-mono"
           title={
-            `本条估算（${cost.currency === 'CNY' ? '原价 CNY，已按 1 USD ≈ 7.2 CNY 换算' : 'USD'}）\n` +
-            `input ${formatCost(cost.breakdown.input)}\n` +
-            `output ${formatCost(cost.breakdown.output)}\n` +
-            `cache read ${formatCost(cost.breakdown.cacheRead)}\n` +
-            `cache write ${formatCost(cost.breakdown.cacheWrite)}`
+            authoritative
+              ? 'CLI 上报的本轮实际成本（total_cost_usd，官方计费口径）'
+              : `本条估算（${cost.currency === 'CNY' ? '原价 CNY，已按 1 USD ≈ 7.2 CNY 换算' : 'USD'}）\n` +
+                `input ${formatCost(cost.breakdown.input)}\n` +
+                `output ${formatCost(cost.breakdown.output)}\n` +
+                `cache read ${formatCost(cost.breakdown.cacheRead)}\n` +
+                `cache write ${formatCost(cost.breakdown.cacheWrite)}`
           }
         >
-          {formatCost(cost.totalUsd)}
+          {formatCost(authoritative ? costUsd : cost.totalUsd)}
         </span>
       )}
     </div>
@@ -662,7 +668,7 @@ function TurnBubbleInner({ turn, onRetry, onRetryTool, retryActive }) {
           )}
 
           {/* Usage */}
-          <UsageDisplay usage={turn.usage} model={turn.model} />
+          <UsageDisplay usage={turn.usage} model={turn.model} costUsd={turn.costUsd} />
           {onRetry && !isLiveStream && turn.uuid !== 'streaming' && (
             <div className="flex justify-end mt-2">
               <button

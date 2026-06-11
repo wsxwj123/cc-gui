@@ -17,6 +17,7 @@ export async function getUsageStats() {
   let totalInput = 0;
   let totalOutput = 0;
   let totalCacheRead = 0;
+  let totalCacheWrite = 0;
   let sessionCount = 0;
 
   for (const dir of projectDirs) {
@@ -52,31 +53,36 @@ export async function getUsageStats() {
           const input = usage.input_tokens || 0;
           const output = usage.output_tokens || 0;
           const cacheRead = usage.cache_read_input_tokens || 0;
+          const cacheWrite = usage.cache_creation_input_tokens || 0;
           const day = record.timestamp ? record.timestamp.slice(0, 10) : 'unknown';
 
           totalInput += input;
           totalOutput += output;
           totalCacheRead += cacheRead;
+          totalCacheWrite += cacheWrite;
 
           // By model
-          if (!byModel[model]) byModel[model] = { input: 0, output: 0, cacheRead: 0, calls: 0 };
+          if (!byModel[model]) byModel[model] = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, calls: 0 };
           byModel[model].input += input;
           byModel[model].output += output;
           byModel[model].cacheRead += cacheRead;
+          byModel[model].cacheWrite += cacheWrite;
           byModel[model].calls++;
 
           // By project
-          if (!byProject[dir.name]) byProject[dir.name] = { input: 0, output: 0, cacheRead: 0, calls: 0 };
+          if (!byProject[dir.name]) byProject[dir.name] = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, calls: 0 };
           byProject[dir.name].input += input;
           byProject[dir.name].output += output;
           byProject[dir.name].cacheRead += cacheRead;
+          byProject[dir.name].cacheWrite += cacheWrite;
           byProject[dir.name].calls++;
 
           // By day
-          if (!byDay[day]) byDay[day] = { input: 0, output: 0, cacheRead: 0, calls: 0 };
+          if (!byDay[day]) byDay[day] = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, calls: 0 };
           byDay[day].input += input;
           byDay[day].output += output;
           byDay[day].cacheRead += cacheRead;
+          byDay[day].cacheWrite += cacheWrite;
           byDay[day].calls++;
         }
       } catch {
@@ -86,7 +92,7 @@ export async function getUsageStats() {
   }
 
   return {
-    total: { input: totalInput, output: totalOutput, cacheRead: totalCacheRead, sessionCount },
+    total: { input: totalInput, output: totalOutput, cacheRead: totalCacheRead, cacheWrite: totalCacheWrite, sessionCount },
     byModel: Object.entries(byModel)
       .map(([model, stats]) => ({ model, ...stats }))
       .sort((a, b) => (b.input + b.output) - (a.input + a.output)),

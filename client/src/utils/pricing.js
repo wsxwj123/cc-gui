@@ -92,6 +92,35 @@ const PRICES = {
   'abab7-chat-preview':          cny(10, 30),       // 估值
 };
 
+// ── Z2: LiteLLM 远端单价表 ──────────────────────────────────────
+// server /api/pricing 下发(USD/1M,已含 cacheRead/cacheWrite),比上面的手抄表
+// 新且权威,查价时优先。localStorage 缓存使后续加载同步可用;启动后异步刷新。
+let REMOTE = {};
+try { REMOTE = JSON.parse(localStorage.getItem('cgui-litellm-prices') || 'null') || {}; } catch {}
+
+async function hydrateRemotePrices() {
+  try {
+    const r = await fetch('/api/pricing');
+    const j = await r.json();
+    if (j && j.prices && Object.keys(j.prices).length) {
+      REMOTE = j.prices;
+      try { localStorage.setItem('cgui-litellm-prices', JSON.stringify(j.prices)); } catch {}
+    }
+  } catch { /* 离线/失败 → 沿用缓存或内置表 */ }
+}
+if (typeof window !== 'undefined') setTimeout(hydrateRemotePrices, 3000);
+
+function remoteLookup(model) {
+  if (!model || !REMOTE) return null;
+  let e = REMOTE[model];
+  if (!e) e = REMOTE[model.replace(/-\d{8}$/, '')];
+  if (!e) {
+    const k = Object.keys(REMOTE).find((k) => model.startsWith(k));
+    e = k ? REMOTE[k] : null;
+  }
+  return e ? { ...e, currency: 'USD' } : null;
+}
+
 // Common aliases the CLI may emit.
 const ALIASES = {
   'sonnet': 'claude-sonnet-4-6',
@@ -112,6 +141,8 @@ function lookupPrice(model, provider) {
 
   if (hint === 'deepseek') {
     // Prefer env-set upstream model name; fall back to deepseek-chat default.
+    const remote = remoteLookup(provider.model);
+    if (remote) return remote;
     const target = (provider.model && PRICES[provider.model])
       ? provider.model
       : (PRICES['deepseek-' + (provider.model || '')] ? 'deepseek-' + provider.model : 'deepseek-chat');
@@ -121,6 +152,9 @@ function lookupPrice(model, provider) {
     return PRICES['mimo-v2.5'] || null;
   }
   // anthropic / bedrock / vertex / unknown → use claude name as displayed
+  // LiteLLM 表优先(覆盖广、随上游更新),内置手抄表兜底。
+  const remote = remoteLookup(model) || (ALIASES[model] && remoteLookup(ALIASES[model]));
+  if (remote) return remote;
   if (PRICES[model]) return PRICES[model];
   if (ALIASES[model] && PRICES[ALIASES[model]]) return PRICES[ALIASES[model]];
   const stripped = model && model.replace(/-\d{8}$/, '');
