@@ -1,8 +1,8 @@
 import { Router } from 'express';
-import { readFileSync, writeFileSync } from 'fs';
+import { readFileSync, writeFileSync, existsSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
-import { tmpdir } from 'os';
+import { tmpdir, homedir } from 'os';
 import { execFile, spawn } from 'child_process';
 import { promisify } from 'util';
 
@@ -153,14 +153,58 @@ async function fetchNpmLatest() {
 // 检测 claude CLI 的安装方式 + 解析它的绝对路径。返回 { method, path }。
 // 关键:解析 GUI 实际会用到的那个 claude(与 getClaudeVersion 的 execFile('claude')
 // 同源,都走 process.env.PATH),这样更新才打到 GUI 真正读取的那个安装。
+// Y1:PATH 解析失败时的兜底 —— 直接探测各安装方式的已知落点。npm i -g 在 prefix
+// 不在 PATH 时(用户报告:装成功但 GUI 检测不到)`where/command -v` 都找不到;
+// 这里先问 npm 自己的全局 prefix,再扫常见目录,扫到即按绝对路径使用。
+async function probeKnownClaude() {
+  const home = homedir();
+  const candidates = [];
+  try {
+    const { stdout } = await execFileP(
+      process.platform === 'win32' ? 'npm.cmd' : 'npm',
+      ['prefix', '-g'], { timeout: 6000 },
+    );
+    const prefix = stdout.trim();
+    if (prefix) {
+      candidates.push(process.platform === 'win32'
+        ? join(prefix, 'claude.cmd')
+        : join(prefix, 'bin', 'claude'));
+    }
+  } catch {}
+  if (process.platform === 'win32') {
+    const appData = process.env.APPDATA || join(home, 'AppData', 'Roaming');
+    candidates.push(
+      join(home, '.local', 'bin', 'claude.exe'),
+      join(home, '.claude', 'local', 'claude.exe'),
+      join(appData, 'npm', 'claude.cmd'),
+      join(process.env.ProgramFiles || 'C:\\Program Files', 'nodejs', 'claude.cmd'),
+    );
+  } else {
+    candidates.push(
+      join(home, '.local', 'bin', 'claude'),
+      join(home, '.claude', 'local', 'bin', 'claude'),
+      join(home, '.npm-global', 'bin', 'claude'),
+      '/opt/homebrew/bin/claude',
+      '/usr/local/bin/claude',
+    );
+  }
+  for (const p of candidates) {
+    try { if (existsSync(p)) return p; } catch {}
+  }
+  return '';
+}
+
 async function detectInstall() {
   let real = '';
   if (process.platform === 'win32') {
     try {
       const { stdout } = await execFileP('where', ['claude'], { timeout: 8000 });
       real = (stdout.split(/\r?\n/).find(Boolean) || '').trim();  // 第一个匹配 = 优先级最高
-    } catch { return { method: 'npm', path: '' }; }
-    if (/AnthropicClaude|\\\.claude\\local|\\claude\\versions\\/i.test(real)) return { method: 'native', path: real };
+    } catch {
+      real = await probeKnownClaude();
+      if (!real) return { method: 'npm', path: '' };
+    }
+    if (/AnthropicClaude|\\\.claude\\local|\\\.local\\bin|\\claude\\versions\\/i.test(real)) return { method: 'native', path: real };
     if (/npm|node_modules|nodejs/i.test(real)) return { method: 'npm', path: real };
     return { method: 'native', path: real };  // 兜底按 native 自更新(claude update 在 Windows 亦支持)
   }
@@ -168,7 +212,10 @@ async function detectInstall() {
     const { stdout } = await execFileP('bash', ['-lc', 'command -v claude'], { timeout: 8000 });
     real = stdout.trim();
     try { const r = await execFileP('readlink', ['-f', real], { timeout: 5000 }); real = r.stdout.trim(); } catch {}
-  } catch { return { method: 'unknown', path: '' }; }
+  } catch {
+    real = await probeKnownClaude();
+    if (!real) return { method: 'unknown', path: '' };
+  }
   if (/\/\.local\/(share|bin)\/claude|\/claude\/versions\//.test(real)) return { method: 'native', path: real };
   if (/Caskroom|Cellar|\/brew\//i.test(real)) return { method: 'brew', path: real };
   if (/node_modules|\/npm|\.nvm|\.npm-global|\/lib\/node/.test(real)) return { method: 'npm', path: real };
@@ -179,7 +226,10 @@ async function detectInstall() {
 // 解析到另一个安装(用户的 shell PATH 和 GUI 的 PATH 顺序可能不同)。
 function updateCmdFor(method, claudePath) {
   switch (method) {
-    case 'brew': return 'brew upgrade --cask claude-code';
+    // Y1:brew 渠道由社区维护、版本严重滞后(用户实测 latest 仅 1.5x,官方已 2.1.x),
+    // `brew upgrade` 等于没更新。改为直接运行官方原生安装器:装到 ~/.local/bin,
+    // GUI 的 PATH 前置使其优先于 brew 旧版,此后由 claude 自更新接管。
+    case 'brew': return installCmdFor();
     // Windows npm 安装的更新仍走 npm(装在哪就用哪更新),用淘宝镜像兜底 —
     // registry.npmjs.org 常被墙,且 cmd 子终端不继承系统代理。
     case 'npm':  return process.platform === 'win32'

@@ -53,6 +53,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
   const dirs = [
     join(home, '.claude', 'local', 'bin'),       // 官方 install.sh 默认
     join(home, '.local', 'bin'),                  // pipx / 部分 npm prefix
+    join(home, '.npm-global', 'bin'),             // Y1: 常见自定义 npm prefix(npm 不写 PATH 的根治之一)
     '/opt/homebrew/bin',                          // mac Apple Silicon brew
     '/usr/local/bin',                             // mac Intel brew + 通用
   ];
@@ -71,6 +72,26 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
   if (toAdd.length) {
     process.env.PATH = [...toAdd, ...existing].join(sep);
   }
+  // Y1:再问 npm 自己的全局 prefix(用户可能 `npm config set prefix` 到任意目录,
+  // npm 不会替用户写 shell PATH → "装成功但 GUI 检测不到"的根因)。异步补挂,
+  // 不阻塞启动;后续 spawn 读 process.env.PATH 时已生效。
+  (async () => {
+    try {
+      const { execFile } = await import('child_process');
+      const { promisify } = await import('util');
+      const { stdout } = await promisify(execFile)(
+        process.platform === 'win32' ? 'npm.cmd' : 'npm', ['prefix', '-g'], { timeout: 8000 },
+      );
+      const prefix = stdout.trim();
+      if (!prefix) return;
+      const binDir = process.platform === 'win32' ? prefix : join(prefix, 'bin');
+      const cur = (process.env.PATH || '').split(sep);
+      if (!cur.map(lower).includes(lower(binDir))) {
+        process.env.PATH = [binDir, ...cur].join(sep);
+        console.log('[path] appended npm global bin:', binDir);
+      }
+    } catch {}
+  })();
 })();
 // Network binding: env > ~/.claude-gui/network.json > loopback default.
 // External clients require the GUI password; binding 0.0.0.0 without one would
