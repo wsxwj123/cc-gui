@@ -21,6 +21,7 @@ import { FileExplorerPanel } from './components/FileExplorerPanel.jsx';
 import { useResizable as useResizableHook, Splitter as SplitterCmp } from './hooks/useResizable.jsx';
 import { MCPPanel } from './components/MCPPanel.jsx';
 import { FileReviewPanel } from './components/FileChangesPanel.jsx';
+import { MemoryPanel } from './components/MemoryPanel.jsx';
 import { AgentsPanel } from './components/AgentsPanel.jsx';
 import { AgentMonitorPanel } from './components/AgentMonitorPanel.jsx';
 import { SubagentView } from './components/SubagentView.jsx';
@@ -34,7 +35,7 @@ import {
   RefreshCw, Activity, Settings, Server, GitBranch, FileDiff, Check, Wrench, X,
   Sun, Moon, Monitor, Bot, Camera, History, Loader2, Shield, FolderTree,
   Archive, ArchiveRestore, Trash2, EyeOff, Columns2, Smartphone, Pencil, Type, Palette,
-  Menu, SquarePen, Gauge, Cpu, CheckCircle2,
+  Menu, SquarePen, Gauge, Cpu, CheckCircle2, BookText,
 } from 'lucide-react';
 
 // ── Per-session shadow-git checkpoints ──────────────────────────
@@ -396,6 +397,7 @@ const PANEL_MAP = {
   usage: { label: '用量统计', icon: BarChart3, component: UsagePanel },
   processes: { label: '进程管理 / 停止', icon: Activity, component: ProcessPanel },
   mcp: { label: 'MCP 服务器', icon: Server, component: MCPPanel },
+  memory: { label: '记忆 (CLAUDE.md)', icon: BookText, component: MemoryPanel },
   settings: { label: '设置', icon: Settings, component: SettingsPanel },
 };
 
@@ -6187,7 +6189,7 @@ export default function App() {
             // stays as the hover tooltip for the full name.
             const SHORT = {
               files: '文件', monitor: '监控', agents: 'Agent', usage: '用量', processes: '进程',
-              changes: '审查', mcp: 'MCP', settings: '设置',
+              changes: '审查', mcp: 'MCP', memory: '记忆', settings: '设置',
             };
             const short = SHORT[id] || label;
             return (

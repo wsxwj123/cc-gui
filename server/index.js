@@ -14,6 +14,7 @@ import settingsRoutes, { restoreOpenAIProvider, restoreAnthropicProvider } from 
 import usageRoutes from './routes/usage.js';
 import subscriptionUsageRoutes from './routes/subscription-usage.js';
 import pricingRoutes from './routes/pricing.js';
+import memoryRoutes from './routes/memory.js';
 import mcpRoutes from './routes/mcp.js';
 import forkRoutes from './routes/fork.js';
 import fileChangesRoutes from './routes/file-changes.js';
@@ -231,6 +232,7 @@ app.use('/api', settingsRoutes);
 app.use('/api', usageRoutes);
 app.use('/api', subscriptionUsageRoutes);
 app.use('/api', pricingRoutes);
+app.use('/api', memoryRoutes);
 app.use('/api', mcpRoutes);
 app.use('/api', forkRoutes);
 app.use('/api', fileChangesRoutes);
