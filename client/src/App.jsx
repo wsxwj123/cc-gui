@@ -2106,8 +2106,13 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
       if (!Array.isArray(toolCalls)) return;
       for (const tc of toolCalls) {
         if (tc?.name === 'TaskCreate' && tc.input?.subject) {
-          const rid = typeof tc.result === 'string' ? (tc.result.match(/Task #(\d+)/)?.[1]) : null;
-          const id = rid || `auto-${++autoId}`;
+          // X1(洞A):result 在两条数据源里都是 {toolUseId,content,isError} 对象,
+          // 旧代码只认字符串 → "Task #N" 永远解析失败 → 全部落 auto-키,
+          // TaskUpdate 的 taskId("1")对不上 → 更新被静默丢弃,清单永不勾选。
+          // 兜底 id 也改成纯数字自增(cc 任务 id 就是从 1 起的顺序数字)。
+          const raw = typeof tc.result === 'string' ? tc.result : (tc.result?.content || '');
+          const rid = String(raw).match(/Task #(\d+)/)?.[1];
+          const id = rid || String(++autoId);
           tasks.set(String(id), { content: tc.input.subject, status: 'pending', activeForm: tc.input.activeForm || '' });
         } else if (tc?.name === 'TaskUpdate' && tc.input?.taskId != null) {
           const key = String(tc.input.taskId);
@@ -2126,9 +2131,15 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
     for (const b of streamingBlocks) {
       if (b?.type === 'tool_use' && b.toolCall) replay([b.toolCall]);
     }
-    if (tasks.size > 0) return [...tasks.values()];
+    if (tasks.size > 0) {
+      const list = [...tasks.values()];
+      // X1(洞B):回合已结束且没有任何一项动过(全 pending)= AI 建完任务没再回写
+      // (磁盘任务状态也是 pending)。不再让这种"僵尸清单"永久吸在输入框上方。
+      if (!isStreaming && list.every((t) => t.status === 'pending')) return null;
+      return list;
+    }
     return null;
-  }, [streamingBlocks, chatMessages, messages]);
+  }, [streamingBlocks, chatMessages, messages, isStreaming]);
 
   // G1/G2:输入框上方只显 TodoWrite 的待办清单(cc 原生),不再贴整份 ExitPlanMode 计划。
   // 计划全文只在规划模式的审批弹窗(PlanReviewCard)出现——和 claude code 原生一致。
@@ -2169,6 +2180,33 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
   useEffect(() => {
     if (streamOwnerKeyRef.current !== sessionQueueKey) setLiveContextUsage(null);
   }, [sessionQueueKey]);
+
+  // X2/I6:打开会话时后台对齐一次 /context(每会话每次运行只测一次)。覆盖两类
+  // 徽章空窗:①重启后内存实测为空;②会话以 /compact 收尾,compact 之后没有任何
+  // 带 usage 的回合(jsonl 路径无值可取,用户截图场景)。/context 是本地命令,
+  // 不调模型不耗额度;回写后徽章与点开明细一致。
+  useEffect(() => {
+    const sid = selectedSession?.sessionId;
+    if (!sid || streamingRef.current) return;
+    const st = useStore.getState();
+    if (st.ctxMeasuredBySession[sid]) return;
+    const once = (window.__cguiCtxProbeOnce ||= new Set());
+    if (once.has(sid)) return;
+    once.add(sid);
+    const qs = new URLSearchParams({
+      cwd: selectedSession.projectPath || '',
+      projectHash: selectedSession.projectHash || '',
+      model: st.modelBySession[sid] || st.currentModel || '',
+    });
+    fetch(`/api/context/${sid}?${qs.toString()}`)
+      .then((r) => r.json())
+      .then((d) => {
+        if (d?.totalTokens > 0 && d?.windowTokens > 0) {
+          useStore.getState().setCtxMeasured(sid, { totalTokens: d.totalTokens, windowTokens: d.windowTokens });
+        }
+      })
+      .catch(() => {});
+  }, [selectedSession?.sessionId]);
 
   useEffect(() => {
     if (!selectedSession?.sessionId || !selectedSession?.projectHash) return;
@@ -3870,11 +3908,12 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
   // W8:server 现在区分两个口径 —— m.usage 是整轮累加(消耗口径,气泡用),
   // m.ctxUsage 是末次 API 调用的原始 usage(上下文口径,徽章必须用这个,
   // 否则 N 次调用的 cache_read 被累加 N 遍,徽章爆表)。
-  const lastUsageMsg = [...ctxScope].reverse().find((m) => {
-    const u = m.ctxUsage || m.usage;
-    return u && ((u.input_tokens || 0) + (u.cache_read_input_tokens || 0)) > 0;
-  });
-  const lastUsage = lastUsageMsg?.ctxUsage || lastUsageMsg?.usage;
+  // X2:ctxUsage 可能是【全零对象】(truthy!)——`ctxUsage || usage` 会被它短路,
+  // 徽章恒 0。改为"ctxUsage 有效(非全零)才用,否则回退 usage",且有效性判断
+  // 把 cache_creation 也计入(新会话首轮 usage 常常只有缓存写入)。
+  const _usableCtx = (u) => u && ((u.input_tokens || 0) + (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0)) > 0;
+  const lastUsageMsg = [...ctxScope].reverse().find((m) => _usableCtx(m.ctxUsage) || _usableCtx(m.usage));
+  const lastUsage = lastUsageMsg ? (_usableCtx(lastUsageMsg.ctxUsage) ? lastUsageMsg.ctxUsage : lastUsageMsg.usage) : null;
   // 优先用流式 result 的即时 usage(本轮刚结束就有,不等 jsonl refetch);没有则回退到
   // jsonl 解析出的最近一条 usage(加载历史会话时走这条)。(#5)
   const effectiveUsage = liveContextUsage || lastUsage;

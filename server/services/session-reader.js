@@ -529,9 +529,17 @@ export async function getSessionMessages(sessionId, projectHash) {
       // W8:usage 按 message.id 去重收集(同一调用的流式分片只记一次),flush 时聚合。
       // 排除 sidechain / 子代理记录(parentToolUseId)——它们的 usage 不属于主回合。
       if (record.message?.usage && !record.isSidechain && !record.parentToolUseId) {
-        if (!currentTurn._usageById) currentTurn._usageById = new Map();
-        const mid = record.message?.id || record.uuid || String(currentTurn._usageById.size);
-        if (!currentTurn._usageById.has(mid)) currentTurn._usageById.set(mid, record.message.usage);
+        // X2:排除全零 usage —— CLI 在 "Continue from where you left off" meta 后
+        // 写入的 synthetic stop_sequence 记录 usage 全零,且因 meta 不触发 flush
+        // 被并进上一回合、恰好是 Map 里最后一条 → ctxUsage 全零中毒,徽章恒 0。
+        const u0 = record.message.usage;
+        const nonZero = (u0.input_tokens || 0) + (u0.output_tokens || 0)
+          + (u0.cache_read_input_tokens || 0) + (u0.cache_creation_input_tokens || 0) > 0;
+        if (nonZero) {
+          if (!currentTurn._usageById) currentTurn._usageById = new Map();
+          const mid = record.message?.id || record.uuid || String(currentTurn._usageById.size);
+          if (!currentTurn._usageById.has(mid)) currentTurn._usageById.set(mid, u0);
+        }
       }
       if (record.timestamp) currentTurn.timestamp = record.timestamp;
     }

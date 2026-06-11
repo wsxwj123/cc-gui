@@ -320,6 +320,7 @@ router.post('/chat', async (req, res) => {
     ]) {
       delete childEnv[k];
     }
+    stripHostClaudeEnv(childEnv);
     // Strip permission-related env so the CLI honours our --permission-mode
     // flag instead of an inherited override that could force bypass.
     delete childEnv.ANTHROPIC_PERMISSION_MODE;
@@ -733,6 +734,7 @@ router.post('/chat/title', async (req, res) => {
     'ANTHROPIC_PERMISSION_MODE', 'CLAUDE_PERMISSION_MODE', 'CLAUDE_DANGEROUSLY_SKIP_PERMISSIONS']) {
     delete childEnv[k];
   }
+  stripHostClaudeEnv(childEnv);
 
   let proc;
   try {
@@ -777,6 +779,23 @@ router.post('/chat/title', async (req, res) => {
 // (--fork-session → new session id, original jsonl untouched) and parse the
 // markdown table it emits. /context is a local command (no model call), so it
 // returns in ~3s. We delete the forked jsonl afterwards so it doesn't litter.
+// X2(深层):剥离【宿主 Claude Code 会话】的标识变量。当 GUI app 从一个正在运行的
+// claude 会话里被启动(macOS `open -a` 会透传调用方环境)时,server 继承了
+// CLAUDECODE=1 / CLAUDE_CODE_SESSION_ID / CLAUDE_CODE_ENTRYPOINT / SDK 握手标志等
+// 整套宿主变量并透传给子 CLI —— 子进程自认嵌套在宿主里,启动即挂死(/context 全部
+// 30s 超时的根因;dev server 同代码因 env 干净而正常,A/B 实锤)。这些变量只属于
+// 宿主会话,GUI 的任何子 CLI 都不该见到。
+export function stripHostClaudeEnv(env) {
+  for (const k of Object.keys(env)) {
+    if (/^CLAUDE_CODE_/.test(k) || /^CLAUDE_AGENT_/.test(k)) delete env[k];
+  }
+  for (const k of ['CLAUDECODE', 'AI_AGENT', 'CLAUDE_EFFORT', 'API_TIMEOUT_MS',
+    'ENABLE_TOOL_SEARCH', 'MCP_CONNECTION_NONBLOCKING', 'DISABLE_MICROCOMPACT', 'DISABLE_AUTOUPDATER']) {
+    delete env[k];
+  }
+  return env;
+}
+
 export function cleanChildEnv() {
   const env = { ...process.env };
   for (const k of [
@@ -787,7 +806,7 @@ export function cleanChildEnv() {
     'ANTHROPIC_REASONING_MODEL', 'ANTHROPIC_SMALL_FAST_MODEL',
     'ANTHROPIC_PERMISSION_MODE', 'CLAUDE_PERMISSION_MODE', 'CLAUDE_DANGEROUSLY_SKIP_PERMISSIONS',
   ]) delete env[k];
-  return env;
+  return stripHostClaudeEnv(env);
 }
 
 function parseTokNum(s) {
@@ -872,7 +891,11 @@ router.get('/context/:sessionId', (req, res) => {
     cleanupFork();
     if (!res.headersSent) res.status(code).json(payload);
   };
-  const timer = setTimeout(() => finish({ error: '/context 超时' }, 504), 30000);
+  const timer = setTimeout(() => finish({
+    // X2:实测超时的常见根因不是 CLI 慢,而是 macOS TCC —— 重装/升级 GUI 后
+    // cdhash 变化,完全磁盘访问的旧授权"显示勾选实为失效",子进程 open() 被挂起。
+    error: '/context 超时。若反复出现：系统设置→隐私与安全性→完全磁盘访问 里把 Claude GUI 关掉再打开，然后重启应用（重装后旧授权会失效）。',
+  }, 504), 30000);
 
   proc.stdout.on('data', (c) => {
     out += c.toString();
