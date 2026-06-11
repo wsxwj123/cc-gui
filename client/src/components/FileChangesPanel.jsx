@@ -17,21 +17,19 @@ function reviewKey(change) {
   return change.id || `${change.type}:${change.file || change.command}:${change.timestamp}:${change.uuid || ''}`;
 }
 
-// 按回合(turnIndex)把变更分组,保持原始顺序。同一文件在不同回合的修改会落到不同组,
-// 用户一眼就能看出"这次改动是哪轮对话、对应我哪条消息"产生的。
+// 按回合(turnIndex)把变更分组。同一文件在不同回合的修改会落到不同组,用户一眼就能看出
+// "这次改动是哪轮对话、对应我哪条消息"产生的。组间按 turnIndex **倒序**(最新回合在最
+// 上),方便从最新变更开始往回滚;组内保持原始顺序。
 function groupByTurn(changes) {
-  const groups = [];
   const byIndex = new Map();
   for (const c of changes) {
     const ti = c.turnIndex ?? 0;
     if (!byIndex.has(ti)) {
-      const g = { turnIndex: ti, turnPrompt: c.turnPrompt || '', turnTs: c.turnTs || c.timestamp, items: [] };
-      byIndex.set(ti, g);
-      groups.push(g);
+      byIndex.set(ti, { turnIndex: ti, turnPrompt: c.turnPrompt || '', turnTs: c.turnTs || c.timestamp, items: [] });
     }
     byIndex.get(ti).items.push(c);
   }
-  return groups;
+  return [...byIndex.values()].sort((a, b) => b.turnIndex - a.turnIndex);
 }
 
 function ChangeItem({ change, sessionId, cwd, reviewed, onToggleReviewed }) {

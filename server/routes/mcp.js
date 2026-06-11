@@ -109,13 +109,9 @@ let mcpCacheAt = 0;
 const MCP_CACHE_TTL_MS = 5 * 60_000;
 function invalidateMcpCache() { mcpCache = null; mcpCacheAt = 0; try { invalidateDetailsCache(); } catch {} }
 
-// GET /api/mcp — list all MCP servers and plugins
-router.get('/mcp', async (req, res) => {
-  const now = Date.now();
-  if (req.query.fresh !== '1' && mcpCache && (now - mcpCacheAt) < MCP_CACHE_TTL_MS) {
-    return res.json(mcpCache);
-  }
-  try {
+// 构建 MCP 列表(spawn `claude mcp list` + `plugin list`,含约 5s 健康检查)。抽成
+// 函数供端点同步调用 + 后台刷新 + 启动预热复用。
+async function buildMcpList() {
     const result = { mcpServers: [], plugins: [], external: [] };
 
     // 1. MCP servers from `claude mcp list` (the authoritative source)
@@ -244,6 +240,31 @@ router.get('/mcp', async (req, res) => {
       }
     } catch {}
 
+    return result;
+}
+
+let mcpRefreshing = false;
+function refreshMcpCache() {
+  if (mcpRefreshing) return;
+  mcpRefreshing = true;
+  buildMcpList()
+    .then((r) => { mcpCache = r; mcpCacheAt = Date.now(); })
+    .catch(() => {})
+    .finally(() => { mcpRefreshing = false; });
+}
+
+// GET /api/mcp — stale-while-revalidate:有缓存(即使过期)立即秒回,过期再后台刷新;
+// 仅完全无缓存时同步构建(首次,~5s)。?fresh=1 强制同步重建。彻底消除"每次进面板都
+// 等 claude mcp list 健康检查 5s"。
+router.get('/mcp', async (req, res) => {
+  const fresh = req.query.fresh === '1';
+  if (!fresh && mcpCache) {
+    res.json(mcpCache);
+    if (Date.now() - mcpCacheAt >= MCP_CACHE_TTL_MS) refreshMcpCache();
+    return;
+  }
+  try {
+    const result = await buildMcpList();
     mcpCache = result;
     mcpCacheAt = Date.now();
     res.json(result);
@@ -251,6 +272,10 @@ router.get('/mcp', async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
+// 启动预热:延迟后台构建一次缓存,使用户首次进 MCP 面板即秒回(把健康检查 ~5s 挪到
+// 启动后台,不阻塞启动)。
+setTimeout(() => refreshMcpCache(), 8000);
 
 // Helper: read disabled MCP configs
 async function readDisabled() {

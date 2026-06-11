@@ -5,12 +5,61 @@ import { parseJsonl } from '../utils/jsonl-parser.js';
 
 const PROJECTS_DIR = join(homedir(), '.claude', 'projects');
 
+// 全盘 parse 所有 jsonl 很慢(数百文件 × 5000 行 ≈ 9s)。stale-while-revalidate:有缓存
+// 就立即返回(秒回),后台用 mtime 签名(文件数+mtimeMs 之和)判断是否有新写入,有才重
+// parse 刷新。注意:**纯 sig 缓存不够** —— 用户常有活跃会话 jsonl 在写,mtime 每秒
+// 都变会让 sig 永远 miss;所以必须"先返旧值再后台更新",而不是同步等 sig 命中。
+// 用量统计非实时数据,差一个刷新周期(几秒)完全可接受。
+let _cache = { sig: null, data: null };
+let _refreshing = false;
+
+// 快速遍历:只 stat 不读内容,返回 [{ path, projectName, mtimeMs }] + 签名。
+async function listJsonl() {
+  let projectDirs;
+  try { projectDirs = await readdir(PROJECTS_DIR, { withFileTypes: true }); }
+  catch { return { files: [], sig: 'none' }; }
+  const files = [];
+  for (const dir of projectDirs) {
+    if (!dir.isDirectory()) continue;
+    const projectPath = join(PROJECTS_DIR, dir.name);
+    let names;
+    try { names = (await readdir(projectPath)).filter((f) => f.endsWith('.jsonl')); }
+    catch { continue; }
+    for (const name of names) {
+      try {
+        const st = await stat(join(projectPath, name));
+        files.push({ path: join(projectPath, name), projectName: dir.name, mtimeMs: st.mtimeMs });
+      } catch {}
+    }
+  }
+  const sig = files.length + ':' + files.reduce((s, f) => s + f.mtimeMs, 0);
+  return { files, sig };
+}
+
 /**
  * Aggregate usage stats across all sessions.
  * Returns per-model, per-project, and per-day breakdowns.
  */
 export async function getUsageStats() {
-  const projectDirs = await readdir(PROJECTS_DIR, { withFileTypes: true });
+  // 有缓存:立即返回 + 后台按 sig 判断是否刷新(避免活跃会话 mtime 抖动导致永远重算)。
+  if (_cache.data) {
+    if (!_refreshing) {
+      _refreshing = true;
+      (async () => {
+        try {
+          const { files, sig } = await listJsonl();
+          if (sig !== _cache.sig) await recompute(files, sig);
+        } catch {} finally { _refreshing = false; }
+      })();
+    }
+    return _cache.data;
+  }
+  // 首次无缓存:同步全盘聚合。
+  const { files, sig } = await listJsonl();
+  return recompute(files, sig);
+}
+
+async function recompute(jsonlFiles, sig) {
   const byModel = {};
   const byProject = {};
   const byDay = {};
@@ -20,19 +69,11 @@ export async function getUsageStats() {
   let totalCacheWrite = 0;
   let sessionCount = 0;
 
-  for (const dir of projectDirs) {
-    if (!dir.isDirectory()) continue;
-    const projectPath = join(PROJECTS_DIR, dir.name);
-    let files;
-    try {
-      files = (await readdir(projectPath)).filter((f) => f.endsWith('.jsonl'));
-    } catch {
-      continue;
-    }
-
-    for (const file of files) {
+  {
+    for (const fileInfo of jsonlFiles) {
+      const dir = { name: fileInfo.projectName };
       try {
-        const records = await parseJsonl(join(projectPath, file), { limit: 5000 });
+        const records = await parseJsonl(fileInfo.path, { limit: 5000 });
         sessionCount++;
 
         // W8:按 message.id 去重 —— 同一 API 调用的流式分片在 jsonl 里可能落多条
@@ -91,7 +132,7 @@ export async function getUsageStats() {
     }
   }
 
-  return {
+  const result = {
     total: { input: totalInput, output: totalOutput, cacheRead: totalCacheRead, cacheWrite: totalCacheWrite, sessionCount },
     byModel: Object.entries(byModel)
       .map(([model, stats]) => ({ model, ...stats }))
@@ -105,4 +146,10 @@ export async function getUsageStats() {
       .sort((a, b) => b.day.localeCompare(a.day))
       .slice(0, 30),
   };
+  _cache = { sig, data: result };
+  return result;
 }
+
+// 启动预热:延迟后台跑一次全盘聚合,填充 mtime 缓存,使用户首次进用量面板即秒回
+// (否则首次要全盘 parse ≈9s)。不阻塞启动。
+setTimeout(() => { getUsageStats().catch(() => {}); }, 10000);
