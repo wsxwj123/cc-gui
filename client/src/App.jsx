@@ -1993,11 +1993,13 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
   // 后,老会话徽章/发送都沿用旧 provider 的模型 id,上游报"无可用渠道/para error"。
   // 显示与发送解析保持一致(同样的 epoch 门控)。
   const providerEpoch = useStore((s) => s.providerEpoch);
-  const measuredCtxWindow = useStore((s) => (selectedSession?.sessionId && s.ctxWindowBySession[selectedSession.sessionId]) || null);
+  const measuredCtx = useStore((s) => (selectedSession?.sessionId && s.ctxMeasuredBySession[selectedSession.sessionId]) || null);
   const historyModel = useMemo(() => {
     const fresh = (m) => !providerEpoch || (m?.timestamp && Date.parse(m.timestamp) > providerEpoch);
     for (let i = messages.length - 1; i >= 0; i--) {
-      if (messages[i]?.model) return fresh(messages[i]) ? messages[i].model : null;
+      if (!messages[i]?.model) continue;
+      if (/^</.test(messages[i].model)) continue; // 跳过 <synthetic> 等伪模型 id
+      return fresh(messages[i]) ? messages[i].model : null;
     }
     // 会话元数据 model 无时间戳:仅在从未切换过 provider 时可信。
     if (selectedSession?.model && !providerEpoch) return selectedSession.model;
@@ -2559,6 +2561,10 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
         const ms = getLocalMessages() || [];
         for (let i = ms.length - 1; i >= 0; i--) {
           if (!ms[i]?.model) continue;
+          // CLI 给 /compact 摘要、错误占位等写的是 `<synthetic>` 之类伪模型 id —— 真实
+          // 模型 id 不以 `<` 开头。盲目回退会把 <synthetic> 当模型发出 → "模型不存在"
+          // (实测:/compact 之后再发消息必现)。跳过这类伪 id 继续往前找。
+          if (/^</.test(ms[i].model)) continue;
           if (_epoch && (!ms[i].timestamp || Date.parse(ms[i].timestamp) <= _epoch)) return null;
           return ms[i].model;
         }
@@ -2784,8 +2790,14 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
               // 立刻据此更新上下文徽章 —— 不必等回合结束的 result 事件,显示/更新都更快。
               const u = ev.message.usage;
               if (u && ((u.input_tokens || 0) + (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0)) > 0) {
-                setLiveContextUsage(u);
+                // V1:带时间戳,供徽章与 /context 实测结果比新鲜度。
+                setLiveContextUsage({ ...u, _ts: Date.now() });
               }
+            } else if (ev.type === 'message_delta' && ev.usage
+              && ((ev.usage.input_tokens || 0) + (ev.usage.cache_read_input_tokens || 0) + (ev.usage.cache_creation_input_tokens || 0)) > 0) {
+              // W6:message_delta 携带该次 API 调用的最终 usage(官方 statusline 同款
+              // 时机)。工具循环的每次调用结束即刷新徽章,不必等整轮 result。
+              setLiveContextUsage({ ...ev.usage, _ts: Date.now() });
             } else if (ev.type === 'content_block_start') {
               const cb = ev.content_block || {};
               if (cb.type === 'text') {
@@ -3080,7 +3092,7 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
           // 写进徽章会把刚压缩完的占比又顶回压缩前。
           if (event.type === 'result' && !isCompact && event.usage
             && ((event.usage.input_tokens || 0) + (event.usage.cache_read_input_tokens || 0) + (event.usage.cache_creation_input_tokens || 0)) > 0) {
-            setLiveContextUsage(event.usage);
+            setLiveContextUsage({ ...event.usage, _ts: Date.now() });
           }
           if (event.type === 'done') break;
         }
@@ -3289,6 +3301,32 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
       }
       // Notify panels (UsagePanel) to refresh their stats.
       window.dispatchEvent(new CustomEvent('cgui:chat-done'));
+
+      // V1:回合结束后台自动跑一次 /context(fork 不落盘、纯本地计算),把实测的
+      // 分子/分母回写徽章 —— usage 事件只反映"上次 API 调用收到的输入",与 /context
+      // 的"下次发送的真实上下文"存在系统性差值(用户实测 117k vs 138k)。实测对齐后
+      // 徽章与点开的明细一致。best-effort、不阻塞;同会话并发探测去重。
+      try {
+        const _ok2 = streamOwnerKeyRef.current;
+        const probeSid = (_ok2 && !String(_ok2).startsWith('draft-')) ? _ok2 : getLocalSession()?.sessionId;
+        if (probeSid && (producedReply || isCompact) && !isClear && !window.__cguiCtxProbe?.[probeSid]) {
+          (window.__cguiCtxProbe ||= {})[probeSid] = true;
+          const _st3 = useStore.getState();
+          const probeModel = _st3.modelBySession[probeSid] || _st3.currentModel || '';
+          const probePh = getLocalSession()?.projectHash || selectedSession?.projectHash || '';
+          const probeCwd = selectedSession?.projectPath || selectedProject?.path || '';
+          const qs2 = new URLSearchParams({ cwd: probeCwd, projectHash: probePh, model: probeModel });
+          fetch(`/api/context/${probeSid}?${qs2.toString()}`)
+            .then((r) => r.json())
+            .then((d) => {
+              if (d?.totalTokens > 0 && d?.windowTokens > 0) {
+                useStore.getState().setCtxMeasured(probeSid, { totalTokens: d.totalTokens, windowTokens: d.windowTokens });
+              }
+            })
+            .catch(() => {})
+            .finally(() => { delete window.__cguiCtxProbe[probeSid]; });
+        }
+      } catch {}
 
       // 首轮后自动生成会话标题(B):一次性隔离 claude 调用,best-effort、不阻塞。
       // 仅当会话已有真实 sessionId、且既无自定义标题也无已生成的自动标题时触发,
@@ -3829,16 +3867,28 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
     if (allMessages[i]?.type === 'compact') { lastCompactIdx = i; break; }
   }
   const ctxScope = lastCompactIdx >= 0 ? allMessages.slice(lastCompactIdx + 1) : allMessages;
-  const lastUsageMsg = [...ctxScope].reverse().find(
-    (m) => m.usage && ((m.usage.input_tokens || 0) + (m.usage.cache_read_input_tokens || 0)) > 0,
-  );
-  const lastUsage = lastUsageMsg?.usage;
+  // W8:server 现在区分两个口径 —— m.usage 是整轮累加(消耗口径,气泡用),
+  // m.ctxUsage 是末次 API 调用的原始 usage(上下文口径,徽章必须用这个,
+  // 否则 N 次调用的 cache_read 被累加 N 遍,徽章爆表)。
+  const lastUsageMsg = [...ctxScope].reverse().find((m) => {
+    const u = m.ctxUsage || m.usage;
+    return u && ((u.input_tokens || 0) + (u.cache_read_input_tokens || 0)) > 0;
+  });
+  const lastUsage = lastUsageMsg?.ctxUsage || lastUsageMsg?.usage;
   // 优先用流式 result 的即时 usage(本轮刚结束就有,不等 jsonl refetch);没有则回退到
   // jsonl 解析出的最近一条 usage(加载历史会话时走这条)。(#5)
   const effectiveUsage = liveContextUsage || lastUsage;
-  const contextTokens = effectiveUsage
-    ? (effectiveUsage.input_tokens || 0) + (effectiveUsage.cache_read_input_tokens || 0) + (effectiveUsage.cache_creation_input_tokens || 0)
-    : 0;
+  // V1:/context 实测值是权威分子 —— usage 是"上一次 API 调用收到的输入",会系统性
+  // 低于"下一次发送的真实上下文"(工具结果/系统区增量等)。回合结束后台自动探测一次,
+  // 实测比 live/jsonl 都新时直接用实测;之后有更新的流式 usage(新回合)再让位。
+  const _liveTs = liveContextUsage?._ts || 0;
+  const _jsonlTs = lastUsageMsg?.timestamp ? (Date.parse(lastUsageMsg.timestamp) || 0) : 0;
+  const measuredFresh = measuredCtx && measuredCtx.totalTokens > 0 && measuredCtx.ts >= Math.max(_liveTs, _jsonlTs);
+  const contextTokens = measuredFresh
+    ? measuredCtx.totalTokens
+    : (effectiveUsage
+      ? (effectiveUsage.input_tokens || 0) + (effectiveUsage.cache_read_input_tokens || 0) + (effectiveUsage.cache_creation_input_tokens || 0)
+      : 0);
   // U3:分母 = 下一次发送将使用的模型(currentModel = pin → 代际戳之后的历史 → 全局,
   // 与发送解析完全一致)。[1m] 开关写入 pin,因此切换立即反映到徽章;
   // /context 实测过的窗口(ctxWindowBySession)是权威值,优先于按模型名猜测 ——
@@ -3846,7 +3896,7 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
   // 显式 [1m] 后缀 > /context 实测缓存(实测可能是开 1m 之前测的) > 按名猜测。
   const contextWindow = /\[1m\]/i.test(currentModel || '')
     ? 1_000_000
-    : (measuredCtxWindow || nativeContextWindow(currentModel));
+    : (measuredCtx?.windowTokens || nativeContextWindow(currentModel));
   // I4:流式缓冲(chatMessages/streaming 气泡)只在它归属当前会话时显示。切到别的会话时
   // 隐藏(流仍在服务端跑,回到原会话或刷新后由 jsonl/reattach 呈现),不串到当前视图。
   const liveVisible = streamOwnerKey == null || streamOwnerKey === sessionQueueKey;
@@ -3891,6 +3941,7 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
                   sessionId={selectedSession.sessionId}
                   projectHash={selectedSession.projectHash}
                   cwd={selectedSession.projectPath}
+                  model={currentModel}
                 />
               )}
               {toolCallCount > 0 && <span className="text-[10px] text-ink-faint font-mono shrink-0 whitespace-nowrap">{toolCallCount} 工具调用</span>}
@@ -3963,6 +4014,7 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
               sessionId={selectedSession.sessionId}
               projectHash={selectedSession.projectHash}
               cwd={selectedSession.projectPath}
+              model={currentModel}
             />
           )}
           <span className="text-ink-faint">{(totalTokens.input + totalTokens.output).toLocaleString()} tok</span>
@@ -4433,7 +4485,7 @@ function ProviderSwitcher() {
 // 上下文用量徽章 → 可点击,弹出 /context 风格的分项明细(#1)。数据来自后端
 // `/api/context/:sessionId`(对会话 fork 副本跑 /context 后解析,原会话不受影响)。
 const CTX_COLORS = ['#6366f1', '#0ea5e9', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899', '#14b8a6', '#a3a3a3'];
-function ContextBreakdownButton({ contextTokens, contextWindow, contextPct, fmtTok, winLabel, sessionId, projectHash, cwd }) {
+function ContextBreakdownButton({ contextTokens, contextWindow, contextPct, fmtTok, winLabel, sessionId, projectHash, cwd, model }) {
   const [open, setOpen] = useState(false);
   const [coords, setCoords] = useState(null);
   const [data, setData] = useState(null);
@@ -4463,13 +4515,15 @@ function ContextBreakdownButton({ contextTokens, contextWindow, contextPct, fmtT
     if (!sessionId) { setErr('发送一条消息后才能查看明细'); setData(null); return; }
     setLoading(true); setErr('');
     try {
-      const qs = new URLSearchParams({ cwd: cwd || '', projectHash: projectHash || '' });
+      // V2:把会话当前模型传给 /context —— 否则 CLI 按 settings.json 默认模型
+      // (如 haiku)计算窗口并显示,与会话实际模型不符。
+      const qs = new URLSearchParams({ cwd: cwd || '', projectHash: projectHash || '', model: model || '' });
       const r = await fetch(`/api/context/${sessionId}?${qs.toString()}`);
       const d = await r.json();
       if (!r.ok || d.error) throw new Error(d.error || '获取失败');
       setData(d);
-      // U3:把 CLI 实测的窗口回写为本会话徽章的权威分母,徽章与明细从此一致。
-      if (d?.windowTokens > 0) useStore.getState().setCtxWindow(sessionId, d.windowTokens);
+      // U3/V1:把 CLI 实测的分子+分母回写为本会话徽章的权威值,徽章与明细从此一致。
+      if (d?.windowTokens > 0) useStore.getState().setCtxMeasured(sessionId, { totalTokens: d.totalTokens || 0, windowTokens: d.windowTokens });
     } catch (e) { setErr(e.message); setData(null); }
     setLoading(false);
   };
@@ -5607,14 +5661,15 @@ function MobileTopBar({ onMenu, onNew, title }) {
   );
 }
 
-// M3(Q9): 非聚焦会话完成回复的悬浮提醒。固定在顶部标题栏下方,5s 自动消失;
-// 点击跳转:会话已在某个分屏窗格 → 聚焦该窗格;否则替换当前聚焦窗格的会话。
+// M3(Q9): 非聚焦会话完成回复的悬浮提醒。固定在顶部标题栏下方,10s 自动消失
+// (W2:用户反馈 5s 偏短);点击跳转:会话已在某个分屏窗格 → 聚焦该窗格;
+// 否则替换当前聚焦窗格的会话。
 function CompletionToasts() {
   const toasts = useStore((s) => s.completionToasts);
   const removeToast = useStore((s) => s.removeCompletionToast);
   useEffect(() => {
     if (!toasts.length) return;
-    const timers = toasts.map((t) => setTimeout(() => removeToast(t.id), 5000));
+    const timers = toasts.map((t) => setTimeout(() => removeToast(t.id), 10000));
     return () => timers.forEach(clearTimeout);
   }, [toasts, removeToast]);
   if (!toasts.length) return null;
@@ -5749,7 +5804,7 @@ export default function App() {
 
   // Pull the shared session-title map so a rename on the phone shows on the Mac
   // (and vice-versa). Live updates arrive via the ws 'custom-titles' broadcast.
-  useEffect(() => { useStore.getState().hydrateCustomTitles(); }, []);
+  useEffect(() => { useStore.getState().hydrateCustomTitles(); useStore.getState().hydrateAutoTitles(); }, []);
 
   // Optional local-only widgets (client/src/components/*.local.jsx). Fresh
   // checkouts have none; public builds temporarily move them out of the build

@@ -183,10 +183,10 @@ export const useStore = create((set, get) => ({
   // 晚于该时刻的消息 —— 否则切走 provider 后,老会话历史里的旧 provider 模型 id
   // (如 mimo-v2.5-pro)会继续被发给新 provider,上游报"模型无可用渠道/para error"。
   providerEpoch: readLs('cgui-provider-epoch', 0),
-  // U3:/context 实测得到的各会话上下文窗口 { [sessionId]: windowTokens }。
-  // 这是权威分母 —— 前端按模型名猜窗口(nativeContextWindow)与 CLI 实测不一致时,
-  // 以实测为准,徽章与点开的明细才不会打架。仅内存态,不持久化(模型可能换)。
-  ctxWindowBySession: {},
+  // U3/V1:/context 实测结果 { [sessionId]: { totalTokens, windowTokens, ts } }。
+  // 这是权威来源 —— 徽章的分子/分母与按事件 usage/模型名猜测不一致时,以实测为准
+  // (回合结束后台自动探测一次 + 点徽章手动探测都会回写)。仅内存态,不持久化。
+  ctxMeasuredBySession: {},
   // Sessions currently handed off to phone remote control (sessionId → true).
   // While set, the GUI must NOT spawn `-p` turns for that session (both would
   // write the same jsonl). The composer locks and shows a reclaim banner.
@@ -348,6 +348,16 @@ export const useStore = create((set, get) => ({
       set({ permissionMode: mode });
       writeLs('cgui-permission-mode', mode);
     }
+    // W3②:该会话有正在运行的 CLI 回合时,经 server 向其 stdin 发
+    // set_permission_mode control 消息 —— 模式切换对【当前回合】立即生效
+    // (plan 模式切出当场停止规划)。draft key 无运行进程,server 找不到即 no-op。
+    if (key && !String(key).startsWith('draft-')) {
+      fetch('/api/chat/permission-mode', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sessionId: key, mode }),
+      }).catch(() => {});
+    }
   },
   // Resolve the effective mode for a session key. An explicit per-session pick
   // wins; otherwise fall back to the last-used global mode (persisted to
@@ -382,10 +392,10 @@ export const useStore = create((set, get) => ({
     writeLs('cgui-provider-epoch', now);
     set({ modelBySession: {}, providerEpoch: now });
   },
-  // U3:记录 /context 实测窗口,徽章分母优先采用。
-  setCtxWindow: (sessionId, windowTokens) => set((s) => (
-    sessionId && windowTokens > 0
-      ? { ctxWindowBySession: { ...s.ctxWindowBySession, [sessionId]: windowTokens } }
+  // U3/V1:记录 /context 实测结果(分子+分母),徽章优先采用。
+  setCtxMeasured: (sessionId, payload) => set((s) => (
+    sessionId && payload?.windowTokens > 0
+      ? { ctxMeasuredBySession: { ...s.ctxMeasuredBySession, [sessionId]: { ...payload, ts: payload.ts || Date.now() } } }
       : s
   )),
   // When a draft session (keyed `draft-<projectHash>`) gets its real CLI session
@@ -515,10 +525,45 @@ export const useStore = create((set, get) => ({
   },
 
   // 写入 AI 自动标题。仅当该会话还没有自定义标题时生效(自定义优先)。
+  // W4:同时推送服务端共享并广播 —— 否则标题只存生成端浏览器,其他端永远看不到。
   setAutoTitle: (sessionId, title) => {
     const t = (title || '').trim();
     if (!sessionId || !t) return;
     const next = { ...get().autoTitles, [sessionId]: t };
+    writeLs('cgui-auto-titles', next);
+    set({ autoTitles: next });
+    fetch('/api/prefs/auto-titles', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sessionId, title: t }),
+    }).catch(() => {});
+  },
+
+  // W4:启动时从服务端水合自动标题;本地多出的旧条目合并并回推。
+  hydrateAutoTitles: async () => {
+    try {
+      const res = await fetch('/api/prefs/auto-titles');
+      const d = await res.json();
+      const server = (d && d.titles && typeof d.titles === 'object') ? d.titles : {};
+      const legacy = readLs('cgui-auto-titles', {}) || {};
+      const merged = { ...legacy, ...server };
+      writeLs('cgui-auto-titles', merged);
+      set({ autoTitles: merged });
+      for (const sid of Object.keys(legacy)) {
+        if (!(sid in server)) {
+          fetch('/api/prefs/auto-titles', {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ sessionId: sid, title: legacy[sid] }),
+          }).catch(() => {});
+        }
+      }
+    } catch {}
+  },
+
+  // W4:应用服务端广播的自动标题全量 map。
+  applyRemoteAutoTitles: (titles) => {
+    const next = (titles && typeof titles === 'object') ? titles : {};
     writeLs('cgui-auto-titles', next);
     set({ autoTitles: next });
   },

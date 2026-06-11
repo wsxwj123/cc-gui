@@ -6,11 +6,13 @@ import cors from 'cors';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { existsSync, readFileSync } from 'fs';
+import { createHash } from 'crypto';
 import sessionRoutes from './routes/sessions.js';
 import chatRoutes from './routes/chat.js';
 import processRoutes from './routes/processes.js';
 import settingsRoutes, { restoreOpenAIProvider, restoreAnthropicProvider } from './routes/settings.js';
 import usageRoutes from './routes/usage.js';
+import subscriptionUsageRoutes from './routes/subscription-usage.js';
 import mcpRoutes from './routes/mcp.js';
 import forkRoutes from './routes/fork.js';
 import fileChangesRoutes from './routes/file-changes.js';
@@ -205,6 +207,7 @@ app.use('/api', chatRoutes);
 app.use('/api', processRoutes);
 app.use('/api', settingsRoutes);
 app.use('/api', usageRoutes);
+app.use('/api', subscriptionUsageRoutes);
 app.use('/api', mcpRoutes);
 app.use('/api', forkRoutes);
 app.use('/api', fileChangesRoutes);
@@ -536,7 +539,19 @@ if (process.env.CGUI_DISABLE_FILE_WATCHER !== '1') {
   try {
     watcher = setupFileWatcher((eventType, filePath) => {
       if (filePath.endsWith('/.claude/settings.json') || filePath.endsWith('\\.claude\\settings.json')) {
-        broadcast({ type: 'provider-change', path: filePath });
+        // W3①:广播携带 provider 指纹(BASE_URL + 凭证哈希前 12 位)。客户端据此判断
+        // "是真的换了 provider(终端 cc switch)还是 settings.json 的其他改动",
+        // 只有指纹变化才清会话模型钉选 + 推进 providerEpoch —— effort 等无关改动
+        // 不能过度失效历史模型。
+        let providerFp = null;
+        try {
+          const raw = JSON.parse(readFileSync(filePath, 'utf8'));
+          const env = raw?.env || {};
+          const base = String(env.ANTHROPIC_BASE_URL || 'official');
+          const cred = String(env.ANTHROPIC_AUTH_TOKEN || env.ANTHROPIC_API_KEY || '');
+          providerFp = base + '|' + createHash('sha256').update(cred).digest('hex').slice(0, 12);
+        } catch {}
+        broadcast({ type: 'provider-change', path: filePath, providerFp });
       }
       broadcast({ type: 'file-change', eventType, path: filePath });
     });

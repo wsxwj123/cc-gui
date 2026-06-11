@@ -411,6 +411,26 @@ export async function getSessionMessages(sessionId, projectHash) {
 
   function flushTurn() {
     if (currentTurn && (currentTurn.text.length > 0 || currentTurn.thinking.length > 0 || currentTurn.toolCalls.length > 0)) {
+      // W8(R1/R2):一轮可含 N 次 API 调用(工具循环),usage 此前 last-one-wins →
+      // output 系统性少算(只剩最后一次调用的)。改为按 message.id 去重后四字段分别
+      // 累加 → `usage`(消耗口径,供气泡输入/输出/缓存与成本)。
+      // 同时保留最后一次调用的原始 usage → `ctxUsage`(上下文口径,供顶部徽章:
+      // input+cache_read+cache_creation=当前上下文占用;若用累加值,N 次调用的
+      // cache_read 会被加 N 遍,徽章直接爆表)。
+      if (currentTurn._usageById && currentTurn._usageById.size > 0) {
+        const agg = { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 };
+        let last = null;
+        for (const u of currentTurn._usageById.values()) {
+          agg.input_tokens += u.input_tokens || 0;
+          agg.output_tokens += u.output_tokens || 0;
+          agg.cache_read_input_tokens += u.cache_read_input_tokens || 0;
+          agg.cache_creation_input_tokens += u.cache_creation_input_tokens || 0;
+          last = u;
+        }
+        currentTurn.usage = agg;
+        currentTurn.ctxUsage = last;
+      }
+      delete currentTurn._usageById;
       messages.push(currentTurn);
     }
     currentTurn = null;
@@ -502,9 +522,17 @@ export async function getSessionMessages(sessionId, projectHash) {
         }
       }
 
-      // Update model and usage (last one wins)
-      if (record.message?.model) currentTurn.model = record.message.model;
-      if (record.message?.usage) currentTurn.usage = record.message.usage;
+      // Update model (last one wins)。跳过 `<synthetic>` 等伪模型 id —— CLI 给
+      // /compact 摘要、错误占位写的不是真实模型,污染 turn.model 会被前端的
+      // 历史模型回退当成可发送的模型(U1 家族 bug 的源头之一)。
+      if (record.message?.model && !/^</.test(record.message.model)) currentTurn.model = record.message.model;
+      // W8:usage 按 message.id 去重收集(同一调用的流式分片只记一次),flush 时聚合。
+      // 排除 sidechain / 子代理记录(parentToolUseId)——它们的 usage 不属于主回合。
+      if (record.message?.usage && !record.isSidechain && !record.parentToolUseId) {
+        if (!currentTurn._usageById) currentTurn._usageById = new Map();
+        const mid = record.message?.id || record.uuid || String(currentTurn._usageById.size);
+        if (!currentTurn._usageById.has(mid)) currentTurn._usageById.set(mid, record.message.usage);
+      }
       if (record.timestamp) currentTurn.timestamp = record.timestamp;
     }
     // Skip attachment, queue-operation, last-prompt, permission-mode, etc.

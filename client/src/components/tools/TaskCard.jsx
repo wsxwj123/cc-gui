@@ -30,8 +30,11 @@ export function TaskCard({ toolCall }) {
   const description = toolCall.input?.description || agent?.description || '';
   const prompt = toolCall.input?.prompt || '';
 
-  const isError = toolCall.result?.isError;
-  const isDone = !!toolCall.result;
+  // W1:完成判定与 Subagent 监控同源(activeAgents.status)。只看 toolCall.result 时,
+  // 切走会话期间 tool_result 没写进本地流式副本 → 监控显示"完成"而卡片永远转圈。
+  const agentDone = agent?.status === 'done' || agent?.status === 'error';
+  const isError = toolCall.result?.isError || agent?.status === 'error';
+  const isDone = !!toolCall.result || agentDone;
   const isWorking = !isDone;
 
   // P2: 历史会话重载后 activeAgents(内存态)是空的,点放大查不到数据 → 之前没反应。

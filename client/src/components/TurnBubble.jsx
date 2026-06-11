@@ -413,10 +413,15 @@ function UsageDisplay({ usage, model }) {
   const cost = computeCost(model, usage, provider);
   return (
     <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[10px] text-ink-faint mt-2 pt-2 border-t border-canvas-deep/50">
-      <span>输入 {input.toLocaleString()}</span>
+      <span title="input_tokens — 仅指未命中缓存的新 token(Anthropic 计费口径),不是全部输入">输入 {input.toLocaleString()}</span>
       <span>输出 {output.toLocaleString()}</span>
       {cacheRead > 0 && <span title="cache_read_input_tokens">缓存命中 {cacheRead.toLocaleString()}</span>}
       {cacheWrite > 0 && <span title="cache_creation_input_tokens">缓存写入 {cacheWrite.toLocaleString()}</span>}
+      {(cacheRead > 0 || cacheWrite > 0) && (
+        <span title="实际送入模型处理的输入总量 = 输入 + 缓存命中 + 缓存写入(整轮所有 API 调用累计)">
+          实际输入 {(input + cacheRead + cacheWrite).toLocaleString()}
+        </span>
+      )}
       {cost && (
         <span
           className="ml-auto text-accent/80 font-mono"

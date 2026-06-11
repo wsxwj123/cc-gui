@@ -128,4 +128,36 @@ router.put('/prefs/custom-titles', async (req, res) => {
   }
 });
 
+// W4:AI 自动标题同 custom-titles 一样服务端共享。此前只存生成端浏览器的
+// localStorage —— 标题在 A 端(如另一台设备/另一个浏览器)生成后,B 端永远只能
+// 看到首条消息。GET 启动时水合,PUT 按 key 合并并广播。
+router.get('/prefs/auto-titles', async (_req, res) => {
+  const prefs = await loadPrefs();
+  const titles = (prefs.autoTitles && typeof prefs.autoTitles === 'object') ? prefs.autoTitles : {};
+  res.json({ titles });
+});
+
+router.put('/prefs/auto-titles', async (req, res) => {
+  const { sessionId, title } = req.body || {};
+  if (typeof sessionId !== 'string' || !sessionId) {
+    return res.status(400).json({ error: 'sessionId 必须是非空字符串' });
+  }
+  if (title != null && typeof title !== 'string') {
+    return res.status(400).json({ error: 'title 必须是字符串' });
+  }
+  try {
+    const prefs = await loadPrefs();
+    const map = (prefs.autoTitles && typeof prefs.autoTitles === 'object') ? prefs.autoTitles : {};
+    const trimmed = (title || '').trim();
+    if (trimmed) map[sessionId] = trimmed;
+    else delete map[sessionId];
+    prefs.autoTitles = map;
+    await savePrefs(prefs);
+    broadcast({ type: 'auto-titles', titles: map });
+    res.json({ ok: true, titles: map });
+  } catch (e) {
+    res.status(500).json({ error: '写入自动标题失败：' + e.message });
+  }
+});
+
 export default router;

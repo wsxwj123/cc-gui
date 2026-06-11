@@ -85,6 +85,59 @@ function BarRow({ label, value, max, color = 'var(--color-accent)' }) {
   );
 }
 
+// W7:官方订阅额度卡片(claude-usage-monitor 整合 P0)。数据来自
+// GET /api/subscription-usage(server spawn `claude -p /usage` 提取官方百分比,
+// 60s 缓存)。非官方 provider 返回 official:false → 整卡不渲染。
+function SubscriptionUsageCard() {
+  const [data, setData] = useState(null);
+  const load = () => fetch('/api/subscription-usage').then((r) => r.json()).then(setData).catch(() => {});
+  useEffect(() => {
+    load();
+    const onChatDone = () => load();
+    window.addEventListener('cgui:chat-done', onChatDone);
+    const id = setInterval(load, 120_000);
+    return () => { window.removeEventListener('cgui:chat-done', onChatDone); clearInterval(id); };
+  }, []);
+  if (!data || data.official === false) return null;
+  if (data.error) {
+    return (
+      <div>
+        <h3 className="text-[10px] font-medium uppercase tracking-widest text-ink-faint font-body mb-3">订阅额度</h3>
+        <div className="text-[11px] text-ink-faint font-body bg-canvas-warm border border-canvas-deep rounded-lg p-3">{data.error}</div>
+      </div>
+    );
+  }
+  const rows = [
+    { label: '5 小时窗口', seg: data.session },
+    { label: '本周 · 全模型', seg: data.weekAll },
+    { label: '本周 · Sonnet', seg: data.weekSonnet },
+  ].filter((r) => r.seg);
+  if (!rows.length) return null;
+  const tone = (p) => (p >= 90 ? 'var(--color-error,#dc2626)' : p >= 70 ? '#d97706' : 'var(--color-accent)');
+  return (
+    <div>
+      <h3 className="text-[10px] font-medium uppercase tracking-widest text-ink-faint font-body mb-3">
+        订阅额度（官方 /usage）
+      </h3>
+      <div className="bg-canvas-warm border border-canvas-deep rounded-lg p-3 space-y-2">
+        {rows.map((r) => (
+          <div key={r.label}>
+            <div className="flex items-baseline justify-between mb-1">
+              <span className="text-xs text-ink-muted font-body">{r.label}</span>
+              <span className="text-xs font-mono text-ink">{r.seg.percent}%</span>
+            </div>
+            <div className="h-2 w-full rounded-full bg-canvas-deep overflow-hidden">
+              <div className="h-full rounded-full transition-all duration-500"
+                style={{ width: `${Math.min(100, Math.max(r.seg.percent, 1))}%`, background: tone(r.seg.percent) }} />
+            </div>
+            <div className="text-[10px] text-ink-faint font-body mt-0.5">重置：{r.seg.resetText}</div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 export function UsagePanel() {
   const [stats, setStats] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -135,6 +188,8 @@ export function UsagePanel() {
 
   return (
     <div className="px-4 py-4 space-y-5 overflow-y-auto h-full">
+      {/* W7:官方订阅额度(非官方 provider 自动隐藏) */}
+      <SubscriptionUsageCard />
       {/* Total summary */}
       <div>
         <h3 className="text-[10px] font-medium uppercase tracking-widest text-ink-faint font-body mb-3">

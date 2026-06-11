@@ -18,6 +18,10 @@ function maybeBroadcastTurnComplete(slot, line) {
   try { obj = JSON.parse(line); } catch { return; }
   if (obj.type !== 'result') return;
   slot.completeNotified = true;
+  // W3②:stream-json 输入模式下 CLI 等 stdin 关闭才退出 —— 回合 result 一到就
+  // 关闭 stdin,进程随即正常退出(实测 EXIT 0)。三条 stdout 路径都汇到这里,
+  // 不会漏;万一漏了还有进程面板手动停止 + 应用退出杀树兜底。
+  try { slot.proc?.stdin?.end(); } catch {}
   const text = typeof obj.result === 'string' ? obj.result : '';
   const cwd = String(slot.cwd || '');
   try {
@@ -68,7 +72,7 @@ function settingsArgsToTempFile(args) {
     return next;
   } catch { return args; }
 }
-function claudeSpawn(args, opts) {
+export function claudeSpawn(args, opts) {
   if (process.platform === 'win32') {
     const resolved = resolveWinClaude();
     if (resolved && /\.(cmd|bat)$/i.test(resolved)) {
@@ -159,8 +163,13 @@ router.post('/chat', async (req, res) => {
   // `--include-partial-messages` switches the CLI from per-message snapshots to
   // token-level `stream_event` deltas (content_block_delta etc.), letting the GUI
   // render text/thinking/tool input as it streams in, matching the CLI terminal UX.
+  // W3②:prompt 不再走 -p 位置参数,改 stream-json 从 stdin 写入 —— stdin 保持
+  // 打开作为 control 通道,支持回合中途 set_permission_mode(进程内即时切模式,
+  // plan 模式切出立即生效)。CLI 2.1.170 实测:协议返回 control_response success,
+  // /compact 等斜杠命令经 stdin 消息同样生效,result 后 stdin.end() 进程干净退出。
   const args = [
-    '-p', prompt,
+    '-p',
+    '--input-format', 'stream-json',
     '--output-format', 'stream-json',
     '--verbose',
     '--include-partial-messages',
@@ -349,12 +358,19 @@ router.post('/chat', async (req, res) => {
     }));
     proc = claudeSpawn(args, {
       cwd: workingDir,
-      // stdin = 'ignore' is the equivalent of shell `< /dev/null`. With pipe()
-      // the CLI sat waiting for stdin to close before producing stream-json,
-      // which made the GUI look frozen on the very first tool-using prompt.
-      stdio: ['ignore', 'pipe', 'pipe'],
+      // W3②:stdin 改 pipe —— stream-json 输入模式下 CLI 等的是"消息行",不是
+      // stdin 关闭(旧注释里"pipe 导致 CLI 卡等"是 -p <prompt> 位置参数时代的行为)。
+      // spawn 后立刻写入 user 消息,之后 stdin 留作 control 通道。
+      stdio: ['pipe', 'pipe', 'pipe'],
       env: childEnv,
     });
+    // 立刻写入本回合的用户消息。失败(EPIPE 等)由 proc 'error'/'close' 兜底。
+    try {
+      proc.stdin.write(JSON.stringify({
+        type: 'user',
+        message: { role: 'user', content: [{ type: 'text', text: prompt }] },
+      }) + '\n');
+    } catch {}
   } catch (err) {
     console.log('[chat] spawn FAILED', err.message);
     return res.status(500).json({ error: 'spawn claude failed: ' + err.message });
@@ -442,6 +458,36 @@ router.post('/chat', async (req, res) => {
   });
 
   res.json({ pid: procId, model });
+});
+
+// W3②:回合进行中切换权限模式 —— 向该会话所有存活 CLI 进程的 stdin 写
+// control_request set_permission_mode,进程内立即生效(plan 模式切出后模型
+// 当场停止规划行为)。GUI 模式语义映射:acceptEdits 在 GUI 里被重定义为
+// "default + hook 分级放行",对 CLI 仍是 default;其余直传。best-effort:
+// 老版本 CLI 不响应也无害(客户端还有 ExitPlanMode deny 止血双保险)。
+router.post('/chat/permission-mode', (req, res) => {
+  const { sessionId, mode } = req.body || {};
+  if (!sessionId || !mode || !VALID_PERMISSION_MODES.has(mode)) {
+    return res.status(400).json({ error: 'sessionId 与合法 mode 必填' });
+  }
+  const cliMode = mode === 'acceptEdits' ? 'default' : mode;
+  let delivered = 0;
+  for (const slot of activeProcesses.values()) {
+    if (slot.sessionId !== sessionId) continue;
+    if (slot.exitCode !== null) continue;
+    try {
+      if (slot.proc?.stdin?.writable) {
+        slot.proc.stdin.write(JSON.stringify({
+          type: 'control_request',
+          request_id: 'cgui-mode-' + Date.now(),
+          request: { subtype: 'set_permission_mode', mode: cliMode },
+        }) + '\n');
+        slot.permissionMode = mode;
+        delivered++;
+      }
+    } catch {}
+  }
+  res.json({ ok: true, delivered });
 });
 
 router.get('/chat/:pid/stream', (req, res) => {
@@ -731,7 +777,7 @@ router.post('/chat/title', async (req, res) => {
 // (--fork-session → new session id, original jsonl untouched) and parse the
 // markdown table it emits. /context is a local command (no model call), so it
 // returns in ~3s. We delete the forked jsonl afterwards so it doesn't litter.
-function cleanChildEnv() {
+export function cleanChildEnv() {
   const env = { ...process.env };
   for (const k of [
     'ANTHROPIC_MODEL', 'CLAUDE_MODEL',
@@ -789,6 +835,9 @@ router.get('/context/:sessionId', (req, res) => {
   const { sessionId } = req.params;
   const cwd = req.query.cwd || process.env.HOME;
   const projectHash = req.query.projectHash || '';
+  // V2:不带 --model 时 CLI 按 settings.json 默认模型(如 haiku)计算窗口与显示,
+  // 与会话实际模型不符(用户报告:点徽章显示 haiku)。前端把会话当前模型传进来。
+  const model = String(req.query.model || '').trim();
   try { if (!statSync(cwd).isDirectory()) throw new Error('nd'); }
   catch { return res.status(400).json({ error: '工作目录无效' }); }
 
@@ -801,6 +850,7 @@ router.get('/context/:sessionId', (req, res) => {
     // 不落盘:/context 只是读当前上下文,fork 副本不该留在磁盘(否则也会冒出空白会话)。
     '--no-session-persistence',
   ];
+  if (model) args.push('--model', model);
   let proc;
   try {
     proc = claudeSpawn(args, { cwd, stdio: ['ignore', 'pipe', 'pipe'], env: cleanChildEnv() });

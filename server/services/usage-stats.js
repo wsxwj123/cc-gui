@@ -34,10 +34,19 @@ export async function getUsageStats() {
         const records = await parseJsonl(join(projectPath, file), { limit: 5000 });
         sessionCount++;
 
+        // W8:按 message.id 去重 —— 同一 API 调用的流式分片在 jsonl 里可能落多条
+        // assistant 记录(usage 相同),不去重会成倍虚算。sidechain(子代理)同理排除。
+        const seenIds = new Set();
         for (const record of records) {
           if (record.type !== 'assistant') continue;
+          if (record.isSidechain || record.parentToolUseId) continue;
           const usage = record.message?.usage;
           if (!usage) continue;
+          const mid = record.message?.id;
+          if (mid) {
+            if (seenIds.has(mid)) continue;
+            seenIds.add(mid);
+          }
 
           const model = record.message?.model || 'unknown';
           const input = usage.input_tokens || 0;

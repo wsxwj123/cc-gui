@@ -277,7 +277,16 @@ function streamOpenAIToAnthropic(upstreamRes, clientRes, model) {
 
   const handleChunk = (json) => {
     if (json.usage) {
-      usage = { input_tokens: json.usage.prompt_tokens || 0, output_tokens: json.usage.completion_tokens || 0 };
+      // W8(R4):OpenAI 的 prompt_tokens 是【含缓存】的总输入,其中命中缓存的部分在
+      // prompt_tokens_details.cached_tokens。此前直接整段当 input_tokens → 经本网关
+      // 的 provider 永远不显示缓存命中、且 input 虚高。拆开对齐 Anthropic 语义
+      // (input_tokens = 未命中缓存的新 token)。OpenAI 无 cache write 概念,留空。
+      const cached = json.usage.prompt_tokens_details?.cached_tokens || 0;
+      usage = {
+        input_tokens: Math.max(0, (json.usage.prompt_tokens || 0) - cached),
+        cache_read_input_tokens: cached,
+        output_tokens: json.usage.completion_tokens || 0,
+      };
     }
     const choice = (json.choices || [])[0];
     if (!choice) return;
@@ -370,7 +379,15 @@ function openAIToAnthropicMessage(json, model) {
     id: json.id || ('msg_' + Math.random().toString(36).slice(2)),
     type: 'message', role: 'assistant', model, content,
     stop_reason: STOP_MAP[choice.finish_reason] || 'end_turn', stop_sequence: null,
-    usage: { input_tokens: json.usage?.prompt_tokens || 0, output_tokens: json.usage?.completion_tokens || 0 },
+    // W8(R4):同流式路径 —— 拆出 cached_tokens 对齐 Anthropic 缓存语义。
+    usage: (() => {
+      const cached = json.usage?.prompt_tokens_details?.cached_tokens || 0;
+      return {
+        input_tokens: Math.max(0, (json.usage?.prompt_tokens || 0) - cached),
+        cache_read_input_tokens: cached,
+        output_tokens: json.usage?.completion_tokens || 0,
+      };
+    })(),
   };
 }
 

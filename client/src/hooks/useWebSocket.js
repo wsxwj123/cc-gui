@@ -41,6 +41,17 @@ export function useWebSocket() {
               // ~/.claude/settings.json changed (e.g. `cc switch`). Tell any
               // component that cares to refetch — handled via a window event so
               // we don't have to thread refetch callbacks through state.
+              // W3①:server 带 provider 指纹时,与上次比较 —— 指纹真的变了(终端
+              // cc switch 等 GUI 之外的切换)才清模型钉选 + 推进 providerEpoch,
+              // 与 GUI 内切换的失效语义对齐;首次见到指纹只记录不清(避免误伤)。
+              try {
+                const fp = data.providerFp;
+                if (fp) {
+                  const prev = localStorage.getItem('cgui-provider-fp');
+                  if (prev && prev !== fp) useStore.getState().clearModelOverrides?.();
+                  localStorage.setItem('cgui-provider-fp', fp);
+                }
+              } catch {}
               window.dispatchEvent(new CustomEvent('cgui:provider-change'));
               break;
             case 'file-change':
@@ -179,6 +190,10 @@ export function useWebSocket() {
               // Another device renamed a session. Adopt the server's full map
               // so titles converge live (no refresh needed).
               useStore.getState().applyRemoteTitles(data.titles || {});
+              break;
+            case 'auto-titles':
+              // W4:AI 自动标题在任一端生成后,所有端实时收敛。
+              useStore.getState().applyRemoteAutoTitles(data.titles || {});
               break;
             case 'turn-complete': {
               // T2: 非聚焦会话回合完成 → 顶部悬浮提醒(标题+摘要,5s,点击跳转)。
