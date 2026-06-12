@@ -194,6 +194,36 @@ fn find_node() -> Option<PathBuf> {
         let pb = PathBuf::from(p);
         if pb.exists() { return Some(pb); }
     }
+    // 3) Windows 兜底:从 Explorer 双击启动的 app 继承的 PATH 可能是"装 node 之前"的
+    // 旧值(PATH 改动要重登/重启 Explorer 才传播到已运行的 shell),且官方 node 未必装在
+    // C:\Program Files\nodejs(自定义目录/按用户安装/nvm/scoop 等)。这里读注册表里的
+    // **实时** PATH(Machine+User,不受进程旧 PATH 影响)逐目录找,再退而用 `where node`。
+    // 这是"shell 里 node -v 有版本、app 却报找不到 node"(用户报告)的根治。
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(out) = std::process::Command::new("powershell")
+            .args([
+                "-NoProfile", "-NonInteractive", "-Command",
+                "[Environment]::GetEnvironmentVariable('Path','Machine')+';'+[Environment]::GetEnvironmentVariable('Path','User')",
+            ])
+            .output()
+        {
+            let path_now = String::from_utf8_lossy(&out.stdout);
+            for dir in path_now.split(';') {
+                let dir = dir.trim();
+                if dir.is_empty() { continue; }
+                let candidate = PathBuf::from(dir).join("node.exe");
+                if candidate.exists() { return Some(candidate); }
+            }
+        }
+        if let Ok(out) = std::process::Command::new("cmd").args(["/c", "where", "node"]).output() {
+            let where_out = String::from_utf8_lossy(&out.stdout);
+            if let Some(line) = where_out.lines().next() {
+                let pb = PathBuf::from(line.trim());
+                if pb.exists() { return Some(pb); }
+            }
+        }
+    }
     None
 }
 
@@ -372,7 +402,27 @@ pub fn run() {
                     }
                 }
             }
-            let port = selected_port.ok_or("Claude GUI backend did not become healthy on any port from 6677 to 6687")?;
+            // 后端没起来:以前直接 `?` 报错退出 → 窗口在后端就绪后才创建,于是变成
+            // "进程在跑但永远不弹窗"的隐形僵尸(用户报告:双击没反应、还占着单实例锁)。
+            // 改为先弹原生报错框,让失败可见、可定位,再退出。
+            let port = match selected_port {
+                Some(p) => p,
+                None => {
+                    log_startup("[tauri] backend did not become healthy on any port 6677-6687; showing error dialog");
+                    rfd::MessageDialog::new()
+                        .set_title("Claude GUI 无法启动")
+                        .set_description(
+                            "后台服务(端口 6677)未能启动,窗口无法加载。\n\n\
+                             最常见原因:未找到 Node.js。\n\
+                             • 请安装 Node.js 20+ (https://nodejs.org) 后重新打开\n\
+                             • 若已安装却仍报此错:重启电脑让 PATH 生效,或确认 node 在系统 PATH 中\n\n\
+                             详细日志:%USERPROFILE%\\.claude-gui\\tauri-startup.log (Windows) / ~/.claude-gui/tauri-startup.log (macOS)",
+                        )
+                        .set_buttons(rfd::MessageButtons::Ok)
+                        .show();
+                    return Err("Claude GUI backend did not become healthy on any port from 6677 to 6687".into());
+                }
+            };
             *app.state::<BackendPort>().0.lock().unwrap() = Some(port);
 
             // Q2: 顶层文档 URL 带每次启动不同的 ?b= 时间戳 —— 让 WKWebView/代理等任何
