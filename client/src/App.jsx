@@ -1437,6 +1437,27 @@ function SessionList() {
     }
   };
 
+  const deleteWorktree = async (tree, e) => {
+    e?.stopPropagation();
+    if (!tree?.path || !selectedProject || tree.isMain) return;
+    const dirty = tree.dirtyFileCount > 0;
+    const msg = dirty
+      ? `删除这个 worktree 会丢失 ${tree.dirtyFileCount} 个未提交修改：\n${tree.path}\n\n分支 ${tree.branch || ''} 本身保留。确定强制删除？`
+      : `删除 worktree：\n${tree.path}\n\n只删这个工作树文件夹，分支 ${tree.branch || ''} 保留。确定？`;
+    if (!(await confirmDialog(msg, { danger: true }))) return;
+    try {
+      const r = await fetch('/api/worktree', {
+        method: 'DELETE', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cwd: selectedProject.path, path: tree.path, force: dirty }),
+      });
+      const d = await r.json();
+      if (!r.ok) return alert('删除失败：' + (d.error || ''));
+      openWorktreePicker(); // 刷新列表
+    } catch (err) {
+      alert('删除失败：' + err.message);
+    }
+  };
+
   // Back-compat: keep handleNewWorktree name pointing at the new picker.
   const handleNewWorktree = openWorktreePicker;
 
@@ -1599,35 +1620,45 @@ function SessionList() {
                 <div className="text-[11px] text-ink-faint py-6 text-center font-body">没有现有 worktree</div>
               ) : (
                 worktreeList.map((t) => (
-                  <button
-                    key={t.path}
-                    onClick={() => enterWorktree(t)}
-                    className="w-full text-left px-3 py-2 mb-1 rounded-lg hover:bg-canvas-warm border border-canvas-deep transition-colors group"
-                  >
-                    <div className="flex items-center gap-2 mb-0.5 min-w-0">
-                      <GitBranch size={12} className="text-accent shrink-0" />
-                      <span className="text-xs font-medium font-mono text-ink truncate min-w-0">
-                        {t.branch || '(detached)'}
-                      </span>
-                      {t.isMain && (
-                        <span className="text-[9px] px-1.5 py-0.5 bg-canvas-deep text-ink-faint rounded font-mono">主</span>
-                      )}
-                      {t.dirtyFileCount > 0 && (
-                        <span className="text-[9px] px-1.5 py-0.5 bg-amber-50 text-amber-700 rounded font-mono">
-                          {t.dirtyFileCount} 未提交
+                  <div key={t.path} className="flex items-stretch gap-1 mb-1">
+                    <button
+                      onClick={() => enterWorktree(t)}
+                      className="flex-1 min-w-0 text-left px-3 py-2 rounded-lg hover:bg-canvas-warm border border-canvas-deep transition-colors group"
+                    >
+                      <div className="flex items-center gap-2 mb-0.5 min-w-0">
+                        <GitBranch size={12} className="text-accent shrink-0" />
+                        <span className="text-xs font-medium font-mono text-ink truncate min-w-0">
+                          {t.branch || '(detached)'}
                         </span>
-                      )}
-                    </div>
-                    <div className="text-[10.5px] text-ink-faint font-mono truncate">{t.path}</div>
-                    {t.lastCommit?.subject && (
-                      <div className="text-[10.5px] text-ink-muted font-body truncate mt-0.5">
-                        {t.lastCommit.subject}
-                        <span className="text-ink-ghost ml-2 font-mono">
-                          {t.lastCommit.ts ? new Date(t.lastCommit.ts).toLocaleDateString('zh-CN') : ''}
-                        </span>
+                        {t.isMain && (
+                          <span className="text-[9px] px-1.5 py-0.5 bg-canvas-deep text-ink-faint rounded font-mono">主</span>
+                        )}
+                        {t.dirtyFileCount > 0 && (
+                          <span className="text-[9px] px-1.5 py-0.5 bg-amber-50 text-amber-700 rounded font-mono">
+                            {t.dirtyFileCount} 未提交
+                          </span>
+                        )}
                       </div>
+                      <div className="text-[10.5px] text-ink-faint font-mono truncate">{t.path}</div>
+                      {t.lastCommit?.subject && (
+                        <div className="text-[10.5px] text-ink-muted font-body truncate mt-0.5">
+                          {t.lastCommit.subject}
+                          <span className="text-ink-ghost ml-2 font-mono">
+                            {t.lastCommit.ts ? new Date(t.lastCommit.ts).toLocaleDateString('zh-CN') : ''}
+                          </span>
+                        </div>
+                      )}
+                    </button>
+                    {!t.isMain && (
+                      <button
+                        onClick={(e) => deleteWorktree(t, e)}
+                        title="删除此 worktree（分支保留）"
+                        className="shrink-0 px-2 rounded-lg border border-canvas-deep text-ink-faint hover:text-error hover:border-error/40 hover:bg-error-subtle transition-colors flex items-center"
+                      >
+                        <Trash2 size={13} />
+                      </button>
                     )}
-                  </button>
+                  </div>
                 ))
               )}
             </div>

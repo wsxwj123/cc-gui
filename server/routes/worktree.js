@@ -97,7 +97,9 @@ router.delete('/worktree', async (req, res) => {
     const root = await findGitRoot(cwd);
     if (!root) return res.status(400).json({ error: 'not inside a git repo' });
     if (wtPath === root) return res.status(400).json({ error: 'refusing to remove main worktree' });
-    await execFileP('git', ['-C', root, 'worktree', 'remove', wtPath], { timeout: 15000 });
+    const args = ['-C', root, 'worktree', 'remove', wtPath];
+    if (req.body?.force === true) args.push('--force'); // 删带未提交修改/未跟踪文件的工作树
+    await execFileP('git', args, { timeout: 15000 });
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
