@@ -357,7 +357,16 @@ app.post('/api/network/password', (req, res) => {
 app.get('/api/model', async (req, res) => {
   try {
     const data = await getAvailableModels();
-    res.json({ model: data.current, available: data.models, provider: data.provider });
+    // settings.json 的默认思考强度(env.CLAUDE_CODE_EFFORT_LEVEL)。前端 effort 选择器
+    // 原本只读 localStorage,会出现"settings 设了 high 却显示默认"(实际 CLI 不传
+    // --effort 时读 settings 用 high,只是显示没反映)。返回它供前端在 localStorage 为空
+    // 时显示,让显示与实际一致。
+    let defaultEffort = '';
+    try {
+      const s = JSON.parse(readFileSync(join(homedir(), '.claude', 'settings.json'), 'utf-8'));
+      defaultEffort = s.env?.CLAUDE_CODE_EFFORT_LEVEL || '';
+    } catch {}
+    res.json({ model: data.current, available: data.models, provider: data.provider, defaultEffort });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

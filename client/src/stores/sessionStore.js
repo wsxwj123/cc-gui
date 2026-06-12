@@ -927,6 +927,12 @@ export const useStore = create((set, get) => ({
       const res = await fetch('/api/model');
       const data = await res.json();
       set({ currentModel: data.model, availableModels: data.available || [] });
+      // effort 显示:用户没在 GUI 显式选过(localStorage 空)时,用 settings.json 的默认
+      // 思考强度(CLAUDE_CODE_EFFORT_LEVEL)显示,免得"settings 设了 high 却显示默认"。
+      // 用户在 GUI 选过则尊重其选择(localStorage 有值,不覆盖)。
+      try {
+        if (!localStorage.getItem('cgui-effort') && data.defaultEffort) set({ effort: data.defaultEffort });
+      } catch {}
     } catch {}
   },
 

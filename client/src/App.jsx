@@ -4769,6 +4769,12 @@ export function ModelSelector({ compact = false, permKey = null }) {
         // without an explicit pick.
         if (data.model) useStore.setState({ currentModel: data.model });
         if (data.available) useStore.setState({ availableModels: data.available });
+        // effort 显示:用户没在 GUI 显式选过(localStorage 空)时,用 settings.json 的默认
+        // 思考强度(CLAUDE_CODE_EFFORT_LEVEL)显示,免得"settings 设了 high 却显示默认"
+        // (实际对话已是 high:GUI 不传 --effort → CLI 读 settings;这里只让显示一致)。
+        try {
+          if (!localStorage.getItem('cgui-effort') && data.defaultEffort) useStore.setState({ effort: data.defaultEffort });
+        } catch {}
         // Auto-load the live catalogue once per provider so the latest models
         // (e.g. Opus 4.8) show up without a manual "拉取最新" click — and persist
         // in the store so they don't disappear when the picker is reopened.
@@ -5069,6 +5075,9 @@ function MobileModelPage({ permKey }) {
     fetch('/api/model').then((r) => r.json()).then((d) => {
       if (d.model) useStore.setState({ currentModel: d.model });
       if (d.available) useStore.setState({ availableModels: d.available });
+      try {
+        if (!localStorage.getItem('cgui-effort') && d.defaultEffort) useStore.setState({ effort: d.defaultEffort });
+      } catch {}
     }).catch(() => {});
   }, []);
   const has1m = /\[1m\]/i.test(currentModel || '');
