@@ -404,11 +404,18 @@ export const useStore = create((set, get) => ({
       : s
   )),
   // AA1:存 /context 完整明细供弹层秒开。要求有 categories(否则无明细可显)。
-  setCtxBreakdown: (sessionId, data) => set((s) => (
-    sessionId && Array.isArray(data?.categories) && data.categories.length > 0
-      ? { ctxBreakdownBySession: { ...s.ctxBreakdownBySession, [sessionId]: { ...data, ts: Date.now() } } }
-      : s
-  )),
+  // 择优缓存:/context 是新 fork 出来的临时进程跑的,MCP 服务有时还没连上就快照(竞态),
+  // 偶尔会拿到"类别更少"的退化结果(如缺 MCP、或第三方下塌成只剩 Skills+Messages)。
+  // 后台探测多次,只要其中一次完整,就让它留住——退化结果不覆盖更完整的缓存。
+  // (用户显式点刷新走 load() 的 setData,直接显示那次结果,不受此影响。)
+  setCtxBreakdown: (sessionId, data) => set((s) => {
+    if (!sessionId || !Array.isArray(data?.categories) || data.categories.length === 0) return s;
+    const realCats = (cats) => cats.filter((c) => !/free space/i.test(c.name)).length;
+    const prev = s.ctxBreakdownBySession[sessionId];
+    // 仅当新结果类别数 >= 旧缓存时才覆盖;更少则视为退化快照,保留旧的更完整版本。
+    if (prev?.categories && realCats(data.categories) < realCats(prev.categories)) return s;
+    return { ctxBreakdownBySession: { ...s.ctxBreakdownBySession, [sessionId]: { ...data, ts: Date.now() } } };
+  }),
   // When a draft session (keyed `draft-<projectHash>`) gets its real CLI session
   // id, carry its per-session model + permission pins over to the new key. Without
   // this the pins orphan under the draft key, so the model the user picked for a
