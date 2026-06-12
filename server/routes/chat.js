@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { spawn, execFileSync } from 'child_process';
 import { resolve as pathResolve, dirname, join as pathJoin, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { readFileSync, statSync, writeFileSync, unlinkSync } from 'node:fs';
+import { readFileSync, statSync, writeFileSync, unlinkSync, readdirSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { getDefaultModel } from '../services/model-resolver.js';
 import { dropPendingForSession } from './permissions.js';
@@ -80,6 +80,22 @@ export function claudeSpawn(args, opts) {
     }
   }
   return spawn('claude', args, opts);
+}
+
+// Windows 残留 NUL 文件清扫。模型跑 shell 命令时常加 cmd 风格 `>NUL`/`2>NUL`,而
+// GUI 在 Windows 上经 Git Bash 执行 —— `NUL` 不是空设备而是普通文件名,会在 cwd 留下
+// 一个名为 NUL 的垃圾文件(用户报告:跑 teacher-paper/fetch-everything 等技能后出现)。
+// 回合结束扫 cwd 顶层删之。仅匹配保留名 NUL(任何大小写),零误删风险。删除保留名文件
+// 必须用 \\?\ 扩展长度前缀,否则 fs 会把 NUL 当设备而非文件。仅 Windows 生效。
+function sweepWinNulFiles(dir) {
+  if (process.platform !== 'win32' || !dir) return;
+  try {
+    for (const name of readdirSync(dir)) {
+      if (/^nul$/i.test(name)) {
+        try { unlinkSync('\\\\?\\' + pathJoin(dir, name)); } catch {}
+      }
+    }
+  } catch {}
 }
 
 // 跨平台杀进程树。Windows 不支持 POSIX signal,proc.kill('SIGTERM') 只杀直接子
@@ -433,6 +449,7 @@ router.post('/chat', async (req, res) => {
   proc.on('close', (code) => {
     slot.exitCode = code;
     slot.finishedAt = Date.now();
+    sweepWinNulFiles(workingDir); // Windows:清掉本回合命令误产生的 NUL 垃圾文件
     const dur = Date.now() - slot.startedAt;
     // Drop any pending permission requests for this session — otherwise the
     // hook bridge process stays blocked forever waiting on the held HTTP
