@@ -468,7 +468,7 @@ function UpdateAvailable({ state }) {
       {dl.status === 'done' && (
         <div className="text-[12px] text-emerald-700 bg-emerald-50 border border-emerald-200 rounded p-2 space-y-1">
           <div>✓ 已下载并打开安装包</div>
-          <div className="text-[11px] text-emerald-700">{dl.path}</div>
+          <div className="text-[11px] text-emerald-700 break-all">{dl.path}</div>
           <div className="text-[11px] text-ink-muted">
             {dl.platform === 'darwin'
               ? '把弹出的「Claude GUI.app」拖到「应用程序」即可。装完关闭旧版,运行新版。'
@@ -654,8 +654,8 @@ function CcUpdater() {
       {state.status === 'err' && <div className="text-[12px] text-error">{state.error}</div>}
       {result && (
         result.ok
-          ? <div className="text-[12px] text-emerald-700 bg-emerald-50 border border-emerald-200 rounded p-2">
-              ✓ 已在终端启动 <code className="font-mono">{result.command}</code>。完成后点上方"检查更新"确认新版本。
+          ? <div className="text-[12px] text-emerald-700 bg-emerald-50 border border-emerald-200 rounded p-2 break-words">
+              ✓ 已在终端启动 <code className="font-mono break-all">{result.command}</code>。完成后点上方"检查更新"确认新版本。
             </div>
           : <div className="text-[12px] text-error">启动失败:{result.error}</div>
       )}
