@@ -2728,7 +2728,12 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
           // /compact 用标准上下文压缩:剥掉 [1m]。否则 Anthropic 上压缩会用 1M 上下文,
           // 触发 "Usage credits required for 1M context" 报错(用户报告)。压缩只是摘要,
           // 不需要 1M 窗口;对原生 1M 的 provider 去掉也无害。
-          model: isCompact ? String(currentModel || '').replace(/\[1m\]/i, '') : currentModel,
+          // 含图片附件时同样剥 [1m]:部分 provider(实测 mimo-v2.5-pro[1m])的 1M beta 端点
+          // 不接受 vision 内容块,带图发送会报 "model ...[1m] may not exist"。图片不需要 1M
+          // 窗口,用基座模型(200k)发即可;文本/文件附件不走 vision,不受影响。
+          model: (isCompact || meta?.attachments?.some((a) => a.kind === 'image'))
+            ? String(currentModel || '').replace(/\[1m\]/i, '')
+            : currentModel,
           effort: effort || undefined,
           appendSystemPrompt: appendSystemPrompt || undefined,
           addDirs: addDirs && addDirs.length ? addDirs : undefined,
@@ -4032,7 +4037,9 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
     ? measuredCtx.totalTokens
     : (effectiveUsage
       ? (effectiveUsage.input_tokens || 0) + (effectiveUsage.cache_read_input_tokens || 0) + (effectiveUsage.cache_creation_input_tokens || 0)
-      : 0);
+      // compact 收尾后本回合无 usage、后台 /context 探测又要 5~30s,这段空窗里若取 0 会
+      // 让徽章整个消失(用户报告 #3)。回退到上次实测值(哪怕略旧),探测完成即被刷新。
+      : (measuredCtx?.totalTokens || 0));
   // U3:分母 = 下一次发送将使用的模型(currentModel = pin → 代际戳之后的历史 → 全局,
   // 与发送解析完全一致)。[1m] 开关写入 pin,因此切换立即反映到徽章;
   // /context 实测过的窗口(ctxWindowBySession)是权威值,优先于按模型名猜测 ——

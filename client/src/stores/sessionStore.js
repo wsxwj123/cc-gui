@@ -347,8 +347,8 @@ export const useStore = create((set, get) => ({
     if (key) {
       const map = { ...get().permissionModeBySession, [key]: mode };
       writeLs('cgui-perm-mode-by-session', map);
-      writeLs('cgui-permission-mode', mode);
-      set({ permissionModeBySession: map, permissionMode: mode });
+      // 同 setModelFor:keyed 时不动全局,避免分屏跨窗格污染(显示靠 permissionModeBySession[key])。
+      set({ permissionModeBySession: map });
     } else {
       set({ permissionMode: mode });
       writeLs('cgui-permission-mode', mode);
@@ -381,7 +381,11 @@ export const useStore = create((set, get) => ({
     if (key) {
       const map = { ...get().modelBySession, [key]: model };
       writeLs('cgui-model-by-session', map);
-      set({ modelBySession: map, currentModel: model });
+      // 只写本会话的钉选,不动全局 currentModel —— 否则分屏下在 A 窗格选模型会污染
+      // 全局,未钉选的 B/C 窗格(尤其切过 provider、historyModel 被 epoch 门控失效后)
+      // 回退到这个被改过的全局值 → 看起来"所有窗格共用模型"。单窗格显示靠 pinnedModel
+      // (= modelBySession[key]) 已即时反映,无需写全局。与 setEffortFor 同构。
+      set({ modelBySession: map });
     } else {
       set({ currentModel: model });
     }
@@ -410,6 +414,9 @@ export const useStore = create((set, get) => ({
   // (用户显式点刷新走 load() 的 setData,直接显示那次结果,不受此影响。)
   setCtxBreakdown: (sessionId, data) => set((s) => {
     if (!sessionId || !Array.isArray(data?.categories) || data.categories.length === 0) return s;
+    // 拒绝不一致/空结果:/context 对刚压缩或瞬态会话偶尔返回 totalTokens=0 但 pct>0,
+    // 缓存后弹层会显示"0 / 200k (25%)"这种自相矛盾的头部(用户报告 #1)。丢弃不缓存。
+    if (!(data.totalTokens > 0)) return s;
     const realCats = (cats) => cats.filter((c) => !/free space/i.test(c.name)).length;
     const prev = s.ctxBreakdownBySession[sessionId];
     // 仅当新结果类别数 >= 旧缓存时才覆盖;更少则视为退化快照,保留旧的更完整版本。
