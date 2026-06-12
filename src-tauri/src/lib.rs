@@ -265,6 +265,24 @@ fn spawn_backend(app: &tauri::App, port: u16) -> Option<Child> {
         use std::os::windows::process::CommandExt;
         cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
     }
+    // 关键(Windows 根因):Tauri 是 GUI 子系统进程、无 console,加上 CREATE_NO_WINDOW,
+    // 默认继承给 node 的 stdout/stderr 是无效句柄。node 启动写 banner(console.log)时对无效
+    // 句柄 WriteFile 会失败/阻塞 → server 起不来("did not accept connections",但单独用
+    // node 跑完全正常)。把子进程 stdout 丢 null、stderr 重定向到 ~/.claude-gui/server.log:
+    // 句柄有效、写文件不会像管道那样填满阻塞,server 正常启动;且 server 的崩溃/报错留档可查。
+    // macOS GUI app 的 stdio 本就连到有效目标,这里改动等价无害,顺带也给 Mac 留 server 日志。
+    {
+        cmd.stdout(std::process::Stdio::null());
+        let home = std::env::var("HOME")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .unwrap_or_else(|_| ".".to_string());
+        let log_dir = PathBuf::from(home).join(".claude-gui");
+        let _ = std::fs::create_dir_all(&log_dir);
+        match OpenOptions::new().create(true).append(true).open(log_dir.join("server.log")) {
+            Ok(f) => { cmd.stderr(std::process::Stdio::from(f)); }
+            Err(_) => { cmd.stderr(std::process::Stdio::null()); }
+        }
+    }
     match cmd.spawn() {
         Ok(child) => Some(child),
         Err(e) => {
