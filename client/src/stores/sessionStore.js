@@ -306,10 +306,10 @@ export const useStore = create((set, get) => ({
   // Use zoom (not html font-size) so px-hardcoded Tailwind classes also scale.
   uiFontScale: (() => {
     try {
-      const v = parseFloat(localStorage.getItem('cgui-ui-font-scale') || '1');
+      const v = parseFloat(localStorage.getItem('cgui-ui-font-scale') || '');
       if (Number.isFinite(v) && v >= 0.6 && v <= 2) return v;
     } catch {}
-    return 1;
+    return 1.2; // 默认"大"(用户偏好);仅当用户从未手动选过才生效
   })(),
 
   // Theme as a (family, tone) pair. `cguiTheme` is the derived data-cgui-theme

@@ -1958,6 +1958,66 @@ function CompactDivider() {
   );
 }
 
+// 上下文达到此占比(%)时，GUI 侧主动提示并倒计时自动 /compact。
+// 第一方(anthropic)由 CLI 原生 auto-compact 负责(约 92%)；第三方 provider 不支持
+// count_tokens、上下文窗口被 CLI 当兜底源 → 原生 auto-compact 不可靠/不触发，由本组件兜底。
+const AUTO_COMPACT_THRESHOLD = 80;
+
+// GUI 侧自动压缩看门狗(仅第三方 provider 启用)。idle 且占比越过阈值时弹出倒计时，
+// 倒计时结束自动发 /compact；"取消"则本"轮次"内不再提示(占比降回阈值下才重新武装)。
+// 作为 SessionDetail 的子组件接收 contextPct —— 占比在父组件渲染末尾才算出、其后已无
+// hook 位，放子组件可避免 hook 顺序问题。按 sessionId key，切会话自动重置内部状态。
+function AutoCompactBanner({ contextPct, idle, enabled, onCompact, COUNTDOWN = 10 }) {
+  const [armed, setArmed] = useState(false);
+  const [secs, setSecs] = useState(COUNTDOWN);
+  const dismissedRef = useRef(false);
+  const onCompactRef = useRef(onCompact);
+  onCompactRef.current = onCompact;        // 固定引用，倒计时 effect 不随父组件重渲染重置
+
+  useEffect(() => {
+    if (!enabled || contextPct < AUTO_COMPACT_THRESHOLD) {
+      dismissedRef.current = false;        // 降回阈值下 → 重新武装下次
+      if (armed) setArmed(false);
+      return;
+    }
+    if (!idle || dismissedRef.current || armed) return;
+    setSecs(COUNTDOWN);
+    setArmed(true);
+  }, [enabled, contextPct, idle, armed, COUNTDOWN]);
+
+  useEffect(() => {
+    if (!armed || !idle) return;           // 用户手动发消息(非 idle)时暂停倒计时
+    if (secs <= 0) {
+      setArmed(false);
+      dismissedRef.current = true;         // 防止压缩流跑起来前重复触发
+      onCompactRef.current();
+      return;
+    }
+    const t = setTimeout(() => setSecs((s) => s - 1), 1000);
+    return () => clearTimeout(t);
+  }, [armed, idle, secs]);
+
+  if (!armed) return null;
+  return (
+    <div className="shrink-0 mx-6 mt-2 px-3 py-2.5 rounded-md bg-amber-50 border border-amber-200 animate-fade-up">
+      <div className="flex items-center gap-2 flex-wrap">
+        <span className="text-amber-800 text-[12px] font-body leading-snug">
+          上下文已达 <b>{contextPct}%</b>，当前 provider 不会自动压缩 —— 将在 <b>{secs}s</b> 后自动 /compact。
+        </span>
+        <button
+          onClick={() => { setArmed(false); dismissedRef.current = true; onCompact(); }}
+          className="px-2.5 py-1 rounded text-[12px] font-medium text-white bg-amber-600 hover:bg-amber-700"
+        >立即压缩</button>
+        <button
+          onClick={() => { setArmed(false); dismissedRef.current = true; }}
+          className="px-2.5 py-1 rounded text-[12px] font-medium text-amber-800 border border-amber-300 hover:bg-amber-100"
+          title="本轮不再提示，上下文占比降回阈值下后才会重新提醒"
+        >取消</button>
+      </div>
+    </div>
+  );
+}
+
 // ─── Session Detail ────────────────────────────────────────────
 function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
   // Split-mode tab routing: when tabIndex===1 we render the SECOND pane and
@@ -4131,6 +4191,15 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
           >×</button>
         </div>
       )}
+
+      {/* 第三方 provider 上下文达阈值时的 GUI 侧自动压缩看门狗(原生 auto-compact 对第三方不可靠)。 */}
+      <AutoCompactBanner
+        key={selectedSession.sessionId || 'draft'}
+        contextPct={contextPct}
+        idle={!isStreaming && !compacting}
+        enabled={!!(currentProvider?.providerHint && currentProvider.providerHint !== 'anthropic') && !!selectedSession.sessionId}
+        onCompact={() => handleSend('/compact')}
+      />
 
       {/* G4:上下文超窗 / compact 失败(413) 的恢复引导。带操作按钮,不自动重试。 */}
       {ctxOverflow && (
