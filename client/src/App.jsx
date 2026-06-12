@@ -2728,12 +2728,7 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
           // /compact 用标准上下文压缩:剥掉 [1m]。否则 Anthropic 上压缩会用 1M 上下文,
           // 触发 "Usage credits required for 1M context" 报错(用户报告)。压缩只是摘要,
           // 不需要 1M 窗口;对原生 1M 的 provider 去掉也无害。
-          // 含图片附件时同样剥 [1m]:部分 provider(实测 mimo-v2.5-pro[1m])的 1M beta 端点
-          // 不接受 vision 内容块,带图发送会报 "model ...[1m] may not exist"。图片不需要 1M
-          // 窗口,用基座模型(200k)发即可;文本/文件附件不走 vision,不受影响。
-          model: (isCompact || meta?.attachments?.some((a) => a.kind === 'image'))
-            ? String(currentModel || '').replace(/\[1m\]/i, '')
-            : currentModel,
+          model: isCompact ? String(currentModel || '').replace(/\[1m\]/i, '') : currentModel,
           effort: effort || undefined,
           appendSystemPrompt: appendSystemPrompt || undefined,
           addDirs: addDirs && addDirs.length ? addDirs : undefined,
