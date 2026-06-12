@@ -271,6 +271,18 @@ router.put('/settings', async (req, res) => {
     // Also scrub any pre-existing `_addProject` pollution from earlier bug.
     delete current._addProject;
     const updated = { ...current, ...body };
+    // 原始配置里 model 字段与 env.ANTHROPIC_MODEL 表达同一意图(默认模型),但 env 在
+    // model-resolver 里优先级更高。用户只在 JSON 改 model、不改 env 时,env 会覆盖
+    // model → "改默认模型看起来没生效"(改 sonnet 顶栏仍 haiku)。官方端点下两者不一致
+    // 时以 model 为准对齐 env(与顶栏选模型同时写两者的行为一致)。第三方 provider
+    // (base_url 非官方)下 env.ANTHROPIC_MODEL 是上游真实模型,不动。
+    {
+      const base = String(updated.env?.ANTHROPIC_BASE_URL || '');
+      const official = !base || /\/\/api\.anthropic\.com/.test(base);
+      if (official && updated.model && updated.env?.ANTHROPIC_MODEL && updated.env.ANTHROPIC_MODEL !== updated.model) {
+        updated.env.ANTHROPIC_MODEL = updated.model;
+      }
+    }
     await writeFile(SETTINGS_PATH, JSON.stringify(updated, null, 2) + '\n');
     res.json({ ...updated, ...(addedHash ? { addedHash, addedPath } : {}) });
   } catch (err) {
