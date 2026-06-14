@@ -2038,6 +2038,9 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
   // 本会话的队列/pin/owner key(草稿用 draft-<hash>)。必须在所有引用它的 effect 之前声明,
   // 否则 effect 依赖数组在渲染期先求值会命中 TDZ(Cannot access before initialization)。
   const sessionQueueKey = selectedSession?.sessionId || `draft-${selectedSession?.projectHash || 'none'}`;
+  // C2:用于把 AutoCompactBanner 限定在「当前聚焦的 pane」——分屏下非聚焦 pane 不应
+  // 在你没看着时静默 /compact 改写历史。单窗格时 activeTabIndex 恒为 0 = 本 pane。
+  const paneIsActive = useStore((s) => s.activeTabIndex) === tabIndex;
   const setSelectedSession = useCallback((s) => {
     useStore.getState().setPaneSession(tabIndex, s);
   }, [tabIndex]);
@@ -2300,7 +2303,10 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
         }
         useStore.getState().setCtxBreakdown(sid, d); // AA1:缓存明细供弹层秒开
       })
-      .catch(() => {});
+      // C3:失败要把 sid 从 once 集合删掉,否则首次探测失败(网络/500)后永不重试,
+      // "无 usage 回合 + compact 收尾"场景徽章永久空窗到刷新。与 __cguiCtxProbe 的
+      // finally 清理对齐。
+      .catch(() => { once.delete(sid); });
   }, [selectedSession?.sessionId]);
 
   useEffect(() => {
@@ -3978,7 +3984,12 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
     </div>
   );
 
-  const allMessages = [...messages, ...chatMessages];
+  // C1:流式缓冲(chatMessages)只在它归属当前查看的会话时才计入统计 —— 否则流归属
+  // 会话 A、用户切到会话 B 的那一帧(setChatMessages([]) 异步未提交前),A 的流式 turn
+  // 的 usage/cost 会被算进 B 的徽章/成本(切会话当帧串值闪现)。与渲染层(下面 liveVisible
+  // 隐藏流式气泡)同源,统计也走同一门控。
+  const liveVisible = streamOwnerKey == null || streamOwnerKey === sessionQueueKey;
+  const allMessages = [...messages, ...(liveVisible ? chatMessages : [])];
   const totalTokens = allMessages.reduce((acc, m) => {
     if (m.usage) { acc.input += m.usage.input_tokens || 0; acc.output += m.usage.output_tokens || 0; acc.cacheRead += m.usage.cache_read_input_tokens || 0; }
     return acc;
@@ -4045,7 +4056,7 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
     : (measuredCtx?.windowTokens || nativeContextWindow(currentModel));
   // I4:流式缓冲(chatMessages/streaming 气泡)只在它归属当前会话时显示。切到别的会话时
   // 隐藏(流仍在服务端跑,回到原会话或刷新后由 jsonl/reattach 呈现),不串到当前视图。
-  const liveVisible = streamOwnerKey == null || streamOwnerKey === sessionQueueKey;
+  // (liveVisible 已在上方 allMessages 处定义,统计与渲染同源,这里不再重复。)
   const contextPct = contextTokens > 0 ? Math.min(100, Math.round((contextTokens / contextWindow) * 100)) : 0;
   const fmtTok = (n) => (n >= 1000 ? Math.round(n / 1000) + 'k' : String(n));
   const winLabel = contextWindow >= 1_000_000 ? '1M' : `${Math.round(contextWindow / 1000)}k`;
@@ -4199,7 +4210,7 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
         key={selectedSession.sessionId || 'draft'}
         contextPct={contextPct}
         idle={!isStreaming && !compacting}
-        enabled={!!(currentProvider?.providerHint && currentProvider.providerHint !== 'anthropic') && !!selectedSession.sessionId}
+        enabled={paneIsActive && !!(currentProvider?.providerHint && currentProvider.providerHint !== 'anthropic') && !!selectedSession.sessionId}
         onCompact={() => handleSend('/compact')}
       />
 

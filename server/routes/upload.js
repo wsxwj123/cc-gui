@@ -1,10 +1,27 @@
 import { Router } from 'express';
-import { writeFile, mkdir } from 'fs/promises';
+import { writeFile, mkdir, readdir, stat, unlink } from 'fs/promises';
 import { extname, join } from 'path';
 import { tmpdir } from 'os';
 import { randomUUID } from 'crypto';
 
 const router = Router();
+
+// C5:上传附件落 tmp/cgui-attachments 后从无清理,长期反复拖图会无限堆积。
+// 定期清掉 7 天前的旧附件(够久,不会误删当前会话仍在引用的缩略图),启动跑一次 + 每 6h。
+const UPLOAD_TTL_MS = 7 * 24 * 3600 * 1000;
+async function sweepOldUploads() {
+  try {
+    const dir = join(tmpdir(), 'cgui-attachments');
+    const files = await readdir(dir);
+    const now = Date.now();
+    for (const f of files) {
+      const p = join(dir, f);
+      try { const s = await stat(p); if (now - s.mtimeMs > UPLOAD_TTL_MS) await unlink(p); } catch {}
+    }
+  } catch {}
+}
+sweepOldUploads();
+setInterval(sweepOldUploads, 6 * 3600 * 1000).unref();
 
 const MIME_TYPES = {
   'image/png': { ext: 'png', kind: 'image' },

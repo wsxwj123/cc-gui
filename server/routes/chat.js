@@ -61,22 +61,27 @@ function resolveWinClaude() {
 }
 function settingsArgsToTempFile(args) {
   const idx = args.indexOf('--settings');
-  if (idx === -1 || idx + 1 >= args.length) return args;
+  if (idx === -1 || idx + 1 >= args.length) return { args, tempFile: null };
   const val = args[idx + 1];
-  if (typeof val !== 'string' || !val.trim().startsWith('{')) return args; // 已是路径
+  if (typeof val !== 'string' || !val.trim().startsWith('{')) return { args, tempFile: null }; // 已是路径
   try {
     const f = pathJoin(tmpdir(), `cgui-settings-${process.pid}-${Math.round(process.hrtime()[1])}.json`);
     writeFileSync(f, val, 'utf8');
     const next = args.slice();
     next[idx + 1] = f;
-    return next;
-  } catch { return args; }
+    return { args: next, tempFile: f };
+  } catch { return { args, tempFile: null }; }
 }
 export function claudeSpawn(args, opts) {
   if (process.platform === 'win32') {
     const resolved = resolveWinClaude();
     if (resolved && /\.(cmd|bat)$/i.test(resolved)) {
-      return spawn('cmd.exe', ['/c', resolved, ...settingsArgsToTempFile(args)], opts);
+      const { args: finalArgs, tempFile } = settingsArgsToTempFile(args);
+      const proc = spawn('cmd.exe', ['/c', resolved, ...finalArgs], opts);
+      // C5:CLI 启动即读取 --settings 文件,进程退出后删掉,避免每回合一个 cgui-settings-*.json
+      // 在 Windows tmp 里持续堆积(用户报告)。
+      if (tempFile) proc.on('close', () => { try { unlinkSync(tempFile); } catch {} });
+      return proc;
     }
   }
   return spawn('claude', args, opts);

@@ -196,11 +196,35 @@ app.use('/api', (req, res, next) => {
   next();
 });
 
+// S2:登录失败限速。无此限制时,配合局域网绑定,在线爆破密码可行(scrypt 只防离线)。
+// 按来源 IP 计失败数,≥5 次起指数退避锁定(封顶 5 分钟),成功即清零。纯内存、进程级。
+const _loginFails = new Map(); // ip -> { count, until }
+function _loginIp(req) { return req.socket?.remoteAddress || req.ip || 'unknown'; }
+function _loginBlockedMs(ip) {
+  const r = _loginFails.get(ip);
+  return r && r.until > Date.now() ? r.until - Date.now() : 0;
+}
+function _loginRecordFail(ip) {
+  const r = _loginFails.get(ip) || { count: 0, until: 0 };
+  r.count += 1;
+  if (r.count >= 5) r.until = Date.now() + Math.min(5 * 60_000, 1000 * 2 ** (r.count - 5));
+  _loginFails.set(ip, r);
+}
+
 // POST /api/login { password } — verify and hand back an HMAC cookie token.
 app.post('/api/login', (req, res) => {
   if (!hasPassword()) return res.json({ ok: true, required: false });
+  const ip = _loginIp(req);
+  const blockedMs = _loginBlockedMs(ip);
+  if (blockedMs > 0) {
+    return res.status(429).json({ error: `尝试过多，请 ${Math.ceil(blockedMs / 1000)} 秒后再试` });
+  }
   const { password } = req.body || {};
-  if (!verifyPassword(password)) return res.status(401).json({ error: '密码错误' });
+  if (!verifyPassword(password)) {
+    _loginRecordFail(ip);
+    return res.status(401).json({ error: '密码错误' });
+  }
+  _loginFails.delete(ip); // 成功登录清零
   res.setHeader(
     'Set-Cookie',
     `cgui_token=${issueToken()}; HttpOnly; Path=/; SameSite=Lax; Max-Age=${30 * 24 * 3600}`,

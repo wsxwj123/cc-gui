@@ -201,11 +201,14 @@ fn find_node() -> Option<PathBuf> {
     // 这是"shell 里 node -v 有版本、app 却报找不到 node"(用户报告)的根治。
     #[cfg(target_os = "windows")]
     {
+        use std::os::windows::process::CommandExt;
+        const NO_WINDOW: u32 = 0x08000000; // CREATE_NO_WINDOW:GUI 进程下不闪黑窗
         if let Ok(out) = std::process::Command::new("powershell")
             .args([
                 "-NoProfile", "-NonInteractive", "-Command",
                 "[Environment]::GetEnvironmentVariable('Path','Machine')+';'+[Environment]::GetEnvironmentVariable('Path','User')",
             ])
+            .creation_flags(NO_WINDOW)
             .output()
         {
             let path_now = String::from_utf8_lossy(&out.stdout);
@@ -216,7 +219,7 @@ fn find_node() -> Option<PathBuf> {
                 if candidate.exists() { return Some(candidate); }
             }
         }
-        if let Ok(out) = std::process::Command::new("cmd").args(["/c", "where", "node"]).output() {
+        if let Ok(out) = std::process::Command::new("cmd").args(["/c", "where", "node"]).creation_flags(NO_WINDOW).output() {
             let where_out = String::from_utf8_lossy(&out.stdout);
             if let Some(line) = where_out.lines().next() {
                 let pb = PathBuf::from(line.trim());
@@ -312,10 +315,12 @@ fn backend_version_matches(port: u16) -> bool {
 // 但版本不符时调用,所以杀的就是那个 stale server,不会误伤别的程序。失败则降级:下面的
 // spawn 循环会跳过仍被占的 6677,改用 6678…(功能正常,只是端口变)。
 fn kill_stale_backend(port: u16) {
+    // C6:加 -sTCP:LISTEN —— 不加会列出所有「连着」该端口的进程(含浏览器/curl 等客户端),
+    // stale kill 时可能误杀正连着调试的客户端进程。只杀真正 LISTEN 在该端口的 server。
     #[cfg(not(target_os = "windows"))]
     let result = Command::new("sh")
         .arg("-c")
-        .arg(format!("lsof -ti tcp:{port} | xargs kill -TERM"))
+        .arg(format!("lsof -ti tcp:{port} -sTCP:LISTEN | xargs kill -TERM"))
         .status();
     #[cfg(target_os = "windows")]
     let result = Command::new("cmd")
@@ -392,14 +397,21 @@ pub fn run() {
                 // 6677 上是"旧版本(stale)"或"缺 local routes"的 server,不能复用。stale 是
                 // cli-check 等旧代码误判(装了 claude 仍提示未装)的根因:杀掉它、等端口释放,
                 // 下面的循环重新 spawn 当前版本到 6677。
-                if healthy && !version_ok {
-                    log_startup("[tauri] stale backend on 6677 (version mismatch) — killing it to respawn current version");
+                if (healthy && !version_ok) || (healthy && !local_ok) {
+                    log_startup(if !version_ok {
+                        "[tauri] stale backend on 6677 (version mismatch) — killing it to respawn current version"
+                    } else {
+                        "[tauri] backend on 6677 lacks local routes — killing it to respawn the full build"
+                    });
                     kill_stale_backend(DEFAULT_BACKEND_PORT);
-                    wait_until_free(DEFAULT_BACKEND_PORT, Duration::from_secs(5));
-                } else if healthy && !local_ok {
-                    log_startup("[tauri] backend on 6677 lacks local routes — killing it to respawn the full build");
-                    kill_stale_backend(DEFAULT_BACKEND_PORT);
-                    wait_until_free(DEFAULT_BACKEND_PORT, Duration::from_secs(5));
+                    // C6:wait_until_free 返回值要用。若 5s 内没释放,直接换端口会把旧 stale 留在
+                    // 6677 当孤儿(BackendPort 记新端口,退出只杀新端口 → 6677 永久残留)。
+                    // 没释放就升级到 kill_port_tree(SIGKILL + LISTEN 过滤)再等一次。
+                    if !wait_until_free(DEFAULT_BACKEND_PORT, Duration::from_secs(5)) {
+                        log_startup("[tauri] 6677 still occupied after TERM — escalating to force kill");
+                        kill_port_tree(DEFAULT_BACKEND_PORT);
+                        wait_until_free(DEFAULT_BACKEND_PORT, Duration::from_secs(3));
+                    }
                 }
                 for port in DEFAULT_BACKEND_PORT..=MAX_BACKEND_PORT {
                     if port_accepts_tcp(port) {
