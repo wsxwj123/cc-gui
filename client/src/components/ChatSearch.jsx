@@ -108,7 +108,7 @@ export default function ChatSearch({ containerRef, onClose }) {
   return (
     <div
       data-cgui-search-ui
-      className="absolute top-3 right-8 z-50 flex items-center gap-1.5 glass-popover rounded-lg pl-3 pr-1.5 py-1.5 shadow-lg animate-fade-in"
+      className="absolute top-3 right-8 left-3 md:left-auto z-50 flex items-center gap-1.5 glass-popover rounded-lg pl-3 pr-1.5 py-1.5 shadow-lg animate-fade-in max-w-[calc(var(--app-w,100vw)-2.75rem)]"
     >
       <input
         ref={inputRef}
@@ -116,7 +116,7 @@ export default function ChatSearch({ containerRef, onClose }) {
         onChange={(e) => setQuery(e.target.value)}
         onKeyDown={onKeyDown}
         placeholder="窗内检索…"
-        className="bg-transparent outline-none text-[13px] text-ink font-body w-44 placeholder:text-ink-ghost"
+        className="bg-transparent outline-none text-[13px] text-ink font-body w-44 min-w-0 flex-1 md:flex-none placeholder:text-ink-ghost"
       />
       <span className="text-[11px] text-ink-faint font-mono tabular-nums min-w-[42px] text-right">
         {count ? `${active}/${count}` : (query.trim() ? '0' : '')}

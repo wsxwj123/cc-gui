@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState, useCallback, useMemo } from 'react';
+import React, { useEffect, useLayoutEffect, useRef, useState, useCallback, useMemo } from 'react';
 import { createPortal } from 'react-dom';
 
 // Stable empty array reference for zustand selectors — prevents React error
@@ -159,10 +159,15 @@ function CheckpointButton({ sessionId, cwd, projectHash, onRestored }) {
     if (open) { setOpen(false); return; }
     const r = btnRef.current?.getBoundingClientRect();
     if (r) {
+      // getBoundingClientRect 返回视觉px(×zoom),而 fixed 的 top/left 按布局px 解释。
+      // 原代码把视觉px 的 r.right 和布局px 的 innerWidth 混用 → zoom>1 时钳制按错误尺度算,
+      // 浮层横向偏移/溢出(与回滚菜单同根因)。统一除以 z 折算到布局px。
+      const z = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--ui-zoom')) || 1;
+      const visW = window.innerWidth / z;
       const W = 288; // w-72
-      let left = r.right - W;
-      left = Math.max(8, Math.min(left, window.innerWidth - 8 - W));
-      setPos({ top: r.bottom + 8, left });
+      let left = r.right / z - W;
+      left = Math.max(8, Math.min(left, visW - 8 - W));
+      setPos({ top: r.bottom / z + 8, left });
     }
     setOpen(true);
   };
@@ -177,7 +182,7 @@ function CheckpointButton({ sessionId, cwd, projectHash, onRestored }) {
       {open && pos && createPortal(
         <>
           <div className="fixed inset-0 z-[55]" onClick={() => setOpen(false)} />
-          <div className="glass-popover fixed w-72 z-[56] py-1 animate-glass-rise"
+          <div className="glass-popover fixed w-72 max-w-[calc(var(--app-w,100vw)-1rem)] z-[56] py-1 animate-glass-rise"
             style={{ top: pos.top, left: pos.left }}>
             <div className="px-3 py-2 flex items-center justify-between border-b border-white/10">
               <span className="text-[10px] uppercase tracking-wider text-ink-muted font-body">Checkpoints</span>
@@ -4581,7 +4586,7 @@ function ProviderSwitcher() {
         <ChevronDown size={10} className="text-ink-faint" />
       </button>
       {open && (
-        <div className="glass-popover absolute left-0 top-full mt-2 w-60 z-50 py-1 animate-glass-rise max-h-[70vh] overflow-y-auto">
+        <div className="glass-popover absolute left-0 top-full mt-2 w-60 max-w-[calc(var(--app-w,100vw)-1.5rem)] z-50 py-1 animate-glass-rise max-h-[70vh] overflow-y-auto max-md:fixed max-md:left-3 max-md:right-3 max-md:w-auto max-md:top-16 max-md:mt-0">
           <div className="px-3 py-2 sticky top-0 bg-canvas border-b border-canvas-deep">
             <div className="text-[10px] text-ink-faint uppercase tracking-wider font-body">切换 Provider</div>
             <p className="text-[10px] text-ink-faint font-body mt-1 leading-snug">
@@ -4710,6 +4715,24 @@ function ContextBreakdownButton({ contextTokens, contextWindow, contextPct, fmtT
       document.removeEventListener('keydown', onEsc);
     };
   }, [open]);
+
+  // 渲染后兜底钳制(回滚菜单同款):left=rLeft 是左对齐到按钮,而徽章位于右上统计区,
+  // 340px 浮层易冲出右缘;窄屏/zoom 下 max-w 只收宽不挪 left,仍可能右溢。量真实矩形,
+  // 任意方向越界就把 fixed left/top 拉回视口(视觉超出量 ÷ z 换算成布局px)。
+  useLayoutEffect(() => {
+    if (!open || !menuRef.current || !coords) return;
+    const z = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--ui-zoom')) || 1;
+    const m = menuRef.current.getBoundingClientRect();
+    const pad = 8;
+    let nl = coords.left, nt = coords.top;
+    if (m.right > window.innerWidth - pad) nl -= (m.right - (window.innerWidth - pad)) / z;
+    if (m.left < pad) nl += (pad - m.left) / z;
+    if (m.bottom > window.innerHeight - pad) nt -= (m.bottom - (window.innerHeight - pad)) / z;
+    if (m.top < pad) nt += (pad - m.top) / z;
+    if (Math.abs(nl - coords.left) > 0.5 || Math.abs(nt - coords.top) > 0.5) {
+      setCoords((c) => ({ ...c, left: nl, top: nt }));
+    }
+  }, [open, coords, data]);
 
   const load = async () => {
     if (!sessionId) { setErr('发送一条消息后才能查看明细'); setData(null); return; }
