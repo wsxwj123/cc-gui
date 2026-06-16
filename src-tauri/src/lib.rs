@@ -164,6 +164,24 @@ fn bundled_local_routes_present(app: &tauri::App) -> bool {
 // /usr/local/bin/node 不在里面 → Command::new("node") 直接 ENOENT → spawn
 // 失败 → port 永不 up → webview 加载 6677 一片空白(用户报告 v0.1.x 在
 // Mac 上空白屏的根因)。
+// macOS/Linux:用用户的登录 shell 解析 node —— 这等价于"用户在终端里 `which node`
+// 看到的那个",一举覆盖 nvm/fnm/asdf/volta/n 等所有把 node 挂进 shell 初始化的版本
+// 管理器(Finder 启动的 app 拿不到这些 shim,固定路径列表也覆盖不全)。这是"终端里
+// node -v 有版本、app 却扫不到"在 macOS 上的根治。
+#[cfg(unix)]
+fn node_from_login_shell() -> Option<PathBuf> {
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+    let out = std::process::Command::new(&shell)
+        .args(["-lic", "command -v node 2>/dev/null"])
+        .output()
+        .ok()?;
+    let line = String::from_utf8_lossy(&out.stdout);
+    let p = line.lines().next().map(|s| s.trim()).unwrap_or("");
+    if p.is_empty() { return None; }
+    let pb = PathBuf::from(p);
+    if pb.exists() { Some(pb) } else { None }
+}
+
 fn find_node() -> Option<PathBuf> {
     // 1) 走继承的 PATH 找(开发模式 / 命令行启动时管用)
     if let Ok(path_var) = std::env::var("PATH") {
@@ -175,22 +193,39 @@ fn find_node() -> Option<PathBuf> {
             if candidate.exists() { return Some(candidate); }
         }
     }
-    // 2) fallback 已知安装路径(覆盖 Finder 启动的 minimal PATH)
-    let candidates: &[&str] = if cfg!(target_os = "macos") {
-        &[
-            "/opt/homebrew/bin/node",     // Apple Silicon Homebrew
-            "/usr/local/bin/node",        // Intel Homebrew / nvm 默认
-            "/usr/bin/node",              // 系统(罕见)
+    // 1.5) macOS/Linux:登录 shell 解析(覆盖 nvm/fnm/asdf/volta 等版本管理器)
+    #[cfg(unix)]
+    { if let Some(p) = node_from_login_shell() { return Some(p); } }
+    // 2) fallback 已知安装路径(覆盖 Finder 启动的 minimal PATH)。含常见版本管理器固定路径。
+    let home = std::env::var("HOME").unwrap_or_default();
+    let candidates: Vec<String> = if cfg!(target_os = "macos") {
+        vec![
+            "/opt/homebrew/bin/node".into(),     // Apple Silicon Homebrew
+            "/usr/local/bin/node".into(),        // Intel Homebrew / nvm 默认
+            "/usr/bin/node".into(),              // 系统(罕见)
+            format!("{home}/.volta/bin/node"),   // Volta
+            format!("{home}/.asdf/shims/node"),  // asdf
+            format!("{home}/n/bin/node"),        // n
         ]
     } else if cfg!(target_os = "windows") {
-        &[
-            r"C:\Program Files\nodejs\node.exe",
-            r"C:\Program Files (x86)\nodejs\node.exe",
+        let appdata = std::env::var("APPDATA").unwrap_or_default();
+        let localapp = std::env::var("LOCALAPPDATA").unwrap_or_default();
+        let userprofile = std::env::var("USERPROFILE").unwrap_or_default();
+        vec![
+            r"C:\Program Files\nodejs\node.exe".into(),
+            r"C:\Program Files (x86)\nodejs\node.exe".into(),
+            format!(r"{localapp}\Volta\bin\node.exe"),       // Volta
+            format!(r"{userprofile}\scoop\shims\node.exe"),  // scoop
+            r"C:\ProgramData\chocolatey\bin\node.exe".into(),// chocolatey
+            format!(r"{appdata}\nvm\node.exe"),              // nvm-windows(symlink 到当前版本)
         ]
     } else {
-        &["/usr/bin/node", "/usr/local/bin/node"]
+        vec![
+            "/usr/bin/node".into(), "/usr/local/bin/node".into(),
+            format!("{home}/.volta/bin/node"), format!("{home}/.asdf/shims/node"),
+        ]
     };
-    for p in candidates {
+    for p in &candidates {
         let pb = PathBuf::from(p);
         if pb.exists() { return Some(pb); }
     }
@@ -440,18 +475,42 @@ pub fn run() {
             let port = match selected_port {
                 Some(p) => p,
                 None => {
-                    log_startup("[tauri] backend did not become healthy on any port 6677-6687; showing error dialog");
-                    rfd::MessageDialog::new()
+                    // 区分两种失败:① 根本没找到 node(给"打开下载页"按钮直达安装)
+                    // ② node 找到了但 server 没起来(引导看日志,别误导用户去装 node)。
+                    let node_missing = find_node().is_none();
+                    log_startup(&format!(
+                        "[tauri] backend did not become healthy on any port 6677-6687; node_missing={node_missing}; showing error dialog"
+                    ));
+                    let desc = if node_missing {
+                        "后台服务未能启动:未找到 Node.js。\n\n\
+                         Claude GUI 需要 Node.js 20+ 运行。点「确定」打开官方下载页,\
+                         安装后重新打开本应用即可。\n\n\
+                         (若你确信已装 node:重启电脑让 PATH 生效;版本管理器装的 node \
+                         请确保已在终端配置好。日志:~/.claude-gui/tauri-startup.log)"
+                    } else {
+                        "后台服务(端口 6677)未能启动,窗口无法加载。\n\n\
+                         Node.js 已找到,但 server 未能启动(非缺 node)。\n\
+                         请查看日志定位:~/.claude-gui/tauri-startup.log\
+                         (Windows:%USERPROFILE%\\.claude-gui\\tauri-startup.log)"
+                    };
+                    let res = rfd::MessageDialog::new()
                         .set_title("Claude GUI 无法启动")
-                        .set_description(
-                            "后台服务(端口 6677)未能启动,窗口无法加载。\n\n\
-                             最常见原因:未找到 Node.js。\n\
-                             • 请安装 Node.js 20+ (https://nodejs.org) 后重新打开\n\
-                             • 若已安装却仍报此错:重启电脑让 PATH 生效,或确认 node 在系统 PATH 中\n\n\
-                             详细日志:%USERPROFILE%\\.claude-gui\\tauri-startup.log (Windows) / ~/.claude-gui/tauri-startup.log (macOS)",
-                        )
-                        .set_buttons(rfd::MessageButtons::Ok)
+                        .set_description(desc)
+                        .set_buttons(if node_missing { rfd::MessageButtons::OkCancel } else { rfd::MessageButtons::Ok })
                         .show();
+                    if node_missing && res == rfd::MessageDialogResult::Ok {
+                        let url = "https://nodejs.org/en/download";
+                        #[cfg(target_os = "macos")]
+                        { let _ = std::process::Command::new("open").arg(url).spawn(); }
+                        #[cfg(target_os = "windows")]
+                        {
+                            use std::os::windows::process::CommandExt;
+                            let _ = std::process::Command::new("cmd")
+                                .args(["/c", "start", "", url]).creation_flags(0x08000000).spawn();
+                        }
+                        #[cfg(all(unix, not(target_os = "macos")))]
+                        { let _ = std::process::Command::new("xdg-open").arg(url).spawn(); }
+                    }
                     return Err("Claude GUI backend did not become healthy on any port from 6677 to 6687".into());
                 }
             };
