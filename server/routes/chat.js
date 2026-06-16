@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { spawn, execFileSync } from 'child_process';
 import { resolve as pathResolve, dirname, join as pathJoin, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { readFileSync, statSync, writeFileSync, unlinkSync, readdirSync } from 'node:fs';
+import { readFileSync, statSync, writeFileSync, unlinkSync, readdirSync, watch } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { getDefaultModel } from '../services/model-resolver.js';
 import { dropPendingForSession } from './permissions.js';
@@ -101,6 +101,23 @@ function sweepWinNulFiles(dir) {
       }
     }
   } catch {}
+}
+
+// Windows:回合期间实时监听整棵 cwd,NUL 文件一出现立刻删 —— 比"回合结束才扫顶层"更稳:
+// ① 覆盖子目录(技能可能在子目录建 NUL);② 抢在 OneDrive 检测到非法名(NUL 是保留名)
+// 弹"重命名"前删掉。递归 watch 仅 Windows 原生支持且高效;回调只对 basename=NUL 动手。
+// 返回 watcher(调用方在回合结束 close 它);非 Windows / 失败返回 null。
+function startWinNulWatcher(dir) {
+  if (process.platform !== 'win32' || !dir) return null;
+  try {
+    return watch(dir, { recursive: true }, (_evt, name) => {
+      if (!name) return;
+      const base = String(name).split(/[\\/]/).pop();
+      if (/^nul$/i.test(base)) {
+        try { unlinkSync('\\\\?\\' + pathJoin(dir, name)); } catch {}
+      }
+    });
+  } catch { return null; }
 }
 
 // 跨平台杀进程树。Windows 不支持 POSIX signal,proc.kill('SIGTERM') 只杀直接子
@@ -421,6 +438,10 @@ router.post('/chat', async (req, res) => {
   };
   activeProcesses.set(procId, slot);
 
+  // Windows:本回合期间实时清 NUL 垃圾文件(技能里 cmd 风格 `>NUL` 经 Git Bash 当普通
+  // 文件名落盘),抢在 OneDrive 报错前删掉;回合结束在 close 里关掉。
+  slot.nulWatcher = startWinNulWatcher(workingDir);
+
   // Buffer stdout/stderr from the moment of spawn so the first chunk isn't lost
   // if the client races between POST and GET /stream.
   proc.stdout.on('data', (chunk) => {
@@ -454,7 +475,8 @@ router.post('/chat', async (req, res) => {
   proc.on('close', (code) => {
     slot.exitCode = code;
     slot.finishedAt = Date.now();
-    sweepWinNulFiles(workingDir); // Windows:清掉本回合命令误产生的 NUL 垃圾文件
+    try { slot.nulWatcher?.close(); } catch {} // 关实时 NUL 监听
+    sweepWinNulFiles(workingDir); // 顶层兜底:补扫 watcher 可能漏掉的(事件丢失等)
     const dur = Date.now() - slot.startedAt;
     // Drop any pending permission requests for this session — otherwise the
     // hook bridge process stays blocked forever waiting on the held HTTP
