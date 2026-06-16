@@ -544,7 +544,6 @@ function MainLayout({ sidebarCollapsed, selectedProject, rightPanel, setRightPan
   const [rightPanelWidth, onRightDrag] = useResizable({
     initial: 340, min: 280, max: 600, axis: 'x', invert: true, storageKey: 'cgui-right-panel-width',
   });
-  const splitMode = useStore((s) => s.splitMode);
   const activeTabIndex = useStore((s) => s.activeTabIndex);
   const setActiveTabIndex = useStore((s) => s.setActiveTabIndex);
   const toggleSidebar = useStore((s) => s.toggleSidebar);
@@ -594,16 +593,13 @@ function MainLayout({ sidebarCollapsed, selectedProject, rightPanel, setRightPan
           <Splitter onMouseDown={onSidebarDrag} axis="x" />
         </>
       )}
-      {splitMode ? (
-        <SplitMain
-          activeTabIndex={activeTabIndex}
-          setActiveTabIndex={setActiveTabIndex}
-        />
-      ) : (
-        <main className="flex-1 flex flex-col relative m-3 rounded-2xl overflow-hidden min-w-0" style={{ minWidth: '26em' }}>
-          <SessionDetail tabIndex={0} />
-        </main>
-      )}
+      {/* 始终走 SplitMain(单屏=paneCount 1,内部渲成无分屏头的单栏)。这样切换
+          1↔分屏不会在 SplitMain 与单独 <SessionDetail> 两套树之间 unmount/remount
+          那棵 2 万节点的会话树——配合 React.memo(SessionDetail),分屏切换不再卡。 */}
+      <SplitMain
+        activeTabIndex={activeTabIndex}
+        setActiveTabIndex={setActiveTabIndex}
+      />
       {rightPanel && (
         <>
           <Splitter onMouseDown={onRightDrag} axis="x" />
@@ -703,29 +699,38 @@ function SplitMain({ activeTabIndex, setActiveTabIndex }) {
         return (
           <React.Fragment key={paneKey}>
             <div
-              onMouseDown={() => setActiveTabIndex(i)}
-              style={i === paneCount - 1
-                // 最后一个窗格 flex 填满剩余宽度:行永远正好占满,不会有手柄贴 GUI 右边界,
-                // 也不留空白。前面的窗格固定宽 + 右缘手柄调整,最后一个吸收余量。
-                ? { flexGrow: 1, flexShrink: 1, flexBasis: 0, minWidth: '26em' }
-                : { width: widths[i] ?? 480, flexShrink: 0, flexGrow: 0 }}
-              className={`flex flex-col relative my-3 mx-1.5 rounded-2xl overflow-hidden transition-shadow ${
-                focused ? 'ring-2 ring-accent/40 shadow-lg' : 'ring-1 ring-canvas-deep/40'
-              }`}
+              onMouseDown={paneCount > 1 ? () => setActiveTabIndex(i) : undefined}
+              style={paneCount === 1
+                // 单屏:填满,无需固定宽
+                ? { flexGrow: 1, flexShrink: 1, minWidth: '26em' }
+                : i === paneCount - 1
+                  // 最后一个窗格 flex 填满剩余宽度:行永远正好占满,不会有手柄贴 GUI 右边界,
+                  // 也不留空白。前面的窗格固定宽 + 右缘手柄调整,最后一个吸收余量。
+                  ? { flexGrow: 1, flexShrink: 1, flexBasis: 0, minWidth: '26em' }
+                  : { width: widths[i] ?? 480, flexShrink: 0, flexGrow: 0 }}
+              className={paneCount === 1
+                // 单屏:无分屏头/边框,样式同旧单栏(始终走 SplitMain 以避免 1↔分屏切换
+                // 时整棵会话树 unmount/remount 卡顿)。
+                ? 'flex-1 flex flex-col relative m-3 rounded-2xl overflow-hidden min-w-0'
+                : `flex flex-col relative my-3 mx-1.5 rounded-2xl overflow-hidden transition-shadow ${
+                    focused ? 'ring-2 ring-accent/40 shadow-lg' : 'ring-1 ring-canvas-deep/40'
+                  }`}
             >
-              <div className="flex items-center justify-between px-2.5 py-1 bg-canvas-warm/70 border-b border-canvas-deep shrink-0 z-20">
-                <span className={`text-[10px] font-mono ${focused ? 'text-accent' : 'text-ink-faint'}`}>
-                  分屏 {i + 1}{focused ? ' · 当前' : ''}
-                </span>
-                <button
-                  onClick={(e) => { e.stopPropagation(); closePane(i); }}
-                  className="w-5 h-5 rounded flex items-center justify-center text-ink-faint hover:text-ink hover:bg-canvas-deep transition-colors"
-                  title="关闭此分屏（不结束会话 / 不杀进程）"
-                >
-                  <X size={12} />
-                </button>
-              </div>
-              {hasSession ? (
+              {paneCount > 1 && (
+                <div className="flex items-center justify-between px-2.5 py-1 bg-canvas-warm/70 border-b border-canvas-deep shrink-0 z-20">
+                  <span className={`text-[10px] font-mono ${focused ? 'text-accent' : 'text-ink-faint'}`}>
+                    分屏 {i + 1}{focused ? ' · 当前' : ''}
+                  </span>
+                  <button
+                    onClick={(e) => { e.stopPropagation(); closePane(i); }}
+                    className="w-5 h-5 rounded flex items-center justify-center text-ink-faint hover:text-ink hover:bg-canvas-deep transition-colors"
+                    title="关闭此分屏（不结束会话 / 不杀进程）"
+                  >
+                    <X size={12} />
+                  </button>
+                </div>
+              )}
+              {(paneCount === 1 || hasSession) ? (
                 <SessionDetail tabIndex={i} />
               ) : (
                 <div className="flex-1 flex items-center justify-center glass-base">
@@ -2031,7 +2036,11 @@ function AutoCompactBanner({ contextPct, idle, enabled, onCompact, COUNTDOWN = 1
 }
 
 // ─── Session Detail ────────────────────────────────────────────
-function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
+// React.memo:props 只有 tabIndex/mobileChrome(基元,稳定)。App 级状态变化(开面板、
+// 分屏数变化等)导致父组件重渲染时,同 props 直接跳过,不再 reconcile 这棵巨大的消息树
+// (重会话可达 2 万+ DOM 节点)——这是"点功能按钮卡、分屏更卡"的根因。组件内部 useStore
+// 订阅的数据变化仍会正常重渲染,不影响功能。
+const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
   // Split-mode tab routing: when tabIndex===1 we render the SECOND pane and
   // read from secondary{Session,Messages} + write back via setSecondarySession
   // / setSecondaryMessages. tabIndex===0 keeps the legacy globals untouched
@@ -4406,7 +4415,7 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
       />
     </div>
   );
-}
+});
 
 // ─── Model Selector ────────────────────────────────────────────
 // Dropdown anchored to the trigger button (lightweight: no full-screen blur).
