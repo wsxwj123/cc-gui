@@ -84,10 +84,27 @@ for (const file of walk(distDir)) {
 }
 
 if (process.env.CGUI_AUDIT_TAURI_BUNDLE === '1') {
+  // 内容标记:文件名查不到、但把本地逻辑写进非 .local 命名文件时靠内容拦(opus AR8)。
+  const bundleNeedles = [...blockedDistText, ...blockedSourceText];
   for (const file of walk(tauriBundleDir)) {
     const relative = rel(file);
     if (blockedDistPath.test(relative)) {
       failures.push(`${relative} should not exist in public tauri bundle`);
+      continue;
+    }
+    // 只对打包进来的【源文件】做内容扫描(跳过 node_modules 第三方 + 体积/二进制),
+    // 既覆盖 _up_/server 等本应纯净的目录,又不至于全量扫 node_modules 拖慢。
+    if (relative.includes('/node_modules/')) continue;
+    if (!/\.(?:js|jsx|cjs|mjs|ts|tsx|json|md|sh|command)$/i.test(relative)) continue;
+    const st = statSync(file);
+    if (st.size > 5 * 1024 * 1024) continue;
+    let text = '';
+    try { text = readFileSync(file, 'utf8'); } catch { continue; }
+    for (const needle of bundleNeedles) {
+      if (text.includes(needle)) {
+        failures.push(`${relative} contains local-only marker in bundle: ${needle}`);
+        break;
+      }
     }
   }
 }

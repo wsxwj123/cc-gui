@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-const { spawnSync } = require('child_process');
+const { spawnSync, execFileSync } = require('child_process');
 const { existsSync, mkdirSync, readdirSync, renameSync, rmSync, statSync } = require('fs');
 const path = require('path');
 
@@ -17,12 +17,29 @@ function walk(dir, matcher, out = []) {
   return out;
 }
 
+// 列出 server/ 与 client/src/ 下被 git 忽略的源文件(= 不进公开仓库的本地代码,
+// 含 *.local.js/jsx 及任何其它 gitignored 源)。一旦被打进 bundle 就是泄漏。
+// 不靠 .local 命名约定:凡 git 忽略的都 stash,根治"换个名字就漏"(opus AR8)。
+function gitignoredSourceFiles() {
+  try {
+    const out = execFileSync('git',
+      ['ls-files', '--others', '--ignored', '--exclude-standard', '--', 'server', 'client/src'],
+      { cwd: root, encoding: 'utf8' });
+    return out.split('\n').filter(Boolean).map((p) => path.join(root, p));
+  } catch {
+    return [];
+  }
+}
+
 function moveLocalFilesOut(moved) {
-  const files = [
+  // git 忽略清单(根治)∪ 命名约定兜底(git 不可用时仍拦 .local)
+  const set = new Set([
+    ...gitignoredSourceFiles(),
     ...walk(path.join(root, 'server', 'routes'), /\.local\.js$/),
     ...walk(path.join(root, 'client', 'src'), /\.local\.jsx$/),
-  ];
-  for (const file of files) {
+  ]);
+  for (const file of set) {
+    if (!existsSync(file)) continue;
     const relative = path.relative(root, file);
     const dest = path.join(stashRoot, relative);
     if (existsSync(dest)) {
@@ -35,10 +52,21 @@ function moveLocalFilesOut(moved) {
 }
 
 function restoreLocalFiles(moved) {
+  // 逐个 try/catch:某个还原失败不应中断其余文件还原(否则工作区一半文件还躺在
+  // .cgui-local-disabled、一半已还原且无提示)。失败聚合后统一报,提示手动恢复。
+  const failed = [];
   for (const [from, to] of moved.reverse()) {
-    if (!existsSync(from)) continue;
-    mkdirSync(path.dirname(to), { recursive: true });
-    renameSync(from, to);
+    try {
+      if (!existsSync(from)) continue;
+      mkdirSync(path.dirname(to), { recursive: true });
+      renameSync(from, to);
+    } catch (e) {
+      failed.push(`${path.relative(root, from)} → ${path.relative(root, to)}: ${e.message}`);
+    }
+  }
+  if (failed.length) {
+    console.error('[public-build] ⚠️ 以下本地文件未能自动还原,请手动从 .cgui-local-disabled/ 移回:');
+    for (const f of failed) console.error(`  - ${f}`);
   }
 }
 
