@@ -115,13 +115,11 @@ function loadNetworkConfig() {
       }
       return { host, port };
     }
-    // 首次无配置:默认走局域网(用户要求开箱即用,手机/局域网设备直接连)。HARD
-    // SAFETY 要求 0.0.0.0 必须有密码,故同时写入默认密码 123456。⚠️ 弱密码 + 裸
-    // 局域网 HTTP 明文传输,首次启动后应立即在 设置→网络 改密码,勿暴露公共 WiFi
-    // /公网(优先 Tailscale)。defaultPassword 标记驱动前端首次提示改密码。
-    if (!hasPassword()) setPassword('123456');
-    updateConfig({ host: '0.0.0.0', port: 6677, defaultPassword: true });
-    return { host: '0.0.0.0', port: 6677 };
+    // 首次无配置:默认**仅回环 127.0.0.1**,不开局域网、不写弱默认密码。
+    // 之前默认 0.0.0.0+123456 会让任何下载公开版的用户开箱即把 $HOME 操作与 Claude
+    // 会话暴露给同网段(弱密码 + 明文 HTTP)。改为安全默认:局域网访问由用户在
+    // 设置→网络 显式开启,届时强制设密码(下方 relisten/HARD SAFETY 保证无密码不放 0.0.0.0)。
+    return { host: '127.0.0.1', port: 6677 };
   } catch {}
   return { host: '127.0.0.1', port: 6677 };
 }

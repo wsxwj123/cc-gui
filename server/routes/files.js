@@ -9,6 +9,14 @@ import { isPathInside } from '../utils/safe-path.js';
 const router = Router();
 
 const HOME = homedir();
+// 安全:这些文件存鉴权/provider 凭据,各有专用安全端点(/api/settings、设置→网络),
+// 绝不允许经通用文件写端点覆盖 —— 否则已认证的局域网客户端可改写鉴权配置/把 provider
+// 指向自己的中转截获 token,把"可写 $HOME"升级为持久化控制(opus 审计 P0)。
+const PROTECTED_WRITE_RELPATHS = new Set([
+  join('.claude-gui', 'network.json'),
+  join('.claude', 'settings.json'),
+  join('.claude', 'settings.local.json'),
+]);
 const MAX_PREVIEW_BYTES = 256 * 1024; // 256KB cap for the read endpoint
 
 // Extension → MIME for the raw byte endpoint (image/video/audio/pdf preview).
@@ -186,6 +194,9 @@ router.put('/files/write', async (req, res) => {
       return res.status(413).json({ error: 'file too large to save (>5MB)' });
     }
     const real = await safePath(p);
+    if (PROTECTED_WRITE_RELPATHS.has(relative(HOME, real))) {
+      return res.status(403).json({ error: '该文件受保护,请通过对应的设置界面修改(不可经通用文件写覆盖)' });
+    }
     const st = await stat(real);
     if (st.isDirectory()) return res.status(400).json({ error: 'not a file' });
     await writeFile(real, content, 'utf-8');

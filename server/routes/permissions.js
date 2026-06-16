@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { randomUUID } from 'node:crypto';
 import { broadcast } from '../index.js';
+import { isLocalReq } from '../services/auth.js';
 
 const router = Router();
 
@@ -34,6 +35,12 @@ setInterval(() => {
  * client, OR until the matching CLI process exits (cleanup).
  */
 router.post('/permissions/request', (req, res) => {
+  // 安全:此端点只给本机 hook bridge 用(走 loopback)。拒绝非本机来源,否则已认证的
+  // 局域网客户端/同机恶意进程可伪造任意 toolName/toolInput 的授权弹窗诱导用户点"允许"
+  // (opus 审计 P2)。hook 永远命中 127.0.0.1,本限制不影响正常流程。
+  if (!isLocalReq(req)) {
+    return res.status(403).json({ error: 'permission requests must originate locally' });
+  }
   const id = randomUUID();
   const request = {
     id,
