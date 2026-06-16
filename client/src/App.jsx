@@ -704,7 +704,11 @@ function SplitMain({ activeTabIndex, setActiveTabIndex }) {
           <React.Fragment key={paneKey}>
             <div
               onMouseDown={() => setActiveTabIndex(i)}
-              style={{ width: widths[i] ?? 480, flexShrink: 0, flexGrow: 0 }}
+              style={i === paneCount - 1
+                // 最后一个窗格 flex 填满剩余宽度:行永远正好占满,不会有手柄贴 GUI 右边界,
+                // 也不留空白。前面的窗格固定宽 + 右缘手柄调整,最后一个吸收余量。
+                ? { flexGrow: 1, flexShrink: 1, flexBasis: 0, minWidth: '26em' }
+                : { width: widths[i] ?? 480, flexShrink: 0, flexGrow: 0 }}
               className={`flex flex-col relative my-3 mx-1.5 rounded-2xl overflow-hidden transition-shadow ${
                 focused ? 'ring-2 ring-accent/40 shadow-lg' : 'ring-1 ring-canvas-deep/40'
               }`}
@@ -735,8 +739,9 @@ function SplitMain({ activeTabIndex, setActiveTabIndex }) {
                 </div>
               )}
             </div>
-            {/* Draggable right edge — resizes THIS pane (every pane, last included) */}
-            <SplitterCmp onMouseDown={startResize(i)} axis="x" />
+            {/* 手柄只放在窗格【之间】(最后一个窗格右缘不放,否则会贴 GUI 右边界难抓)。
+                拖第 i 个手柄=调整第 i 个窗格宽,最后一个窗格 flex 吸收余量。 */}
+            {i < paneCount - 1 && <SplitterCmp onMouseDown={startResize(i)} axis="x" />}
           </React.Fragment>
         );
       })}
