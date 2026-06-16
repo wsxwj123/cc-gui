@@ -108,7 +108,10 @@ function normalizeMessagesForCompat(body) {
 }
 
 async function handle(req, clientRes) {
-  if (!upstream) {
+  // 快照 upstream:整个请求生命周期只用这一份。否则回合在途(await fetch 前后)时
+  // 用户切 provider 改了模块级 upstream → 同一请求可能被发到新 baseURL / 注入新 token。
+  const up = upstream;
+  if (!up) {
     clientRes.writeHead(503, { 'Content-Type': 'application/json' });
     clientRes.end(JSON.stringify({ type: 'error', error: { type: 'api_error', message: 'anthropic upstream not configured' } }));
     return;
@@ -129,14 +132,14 @@ async function handle(req, clientRes) {
   // send both (a server checks one and ignores the other).
   const headers = {
     'content-type': req.headers['content-type'] || 'application/json',
-    'x-api-key': upstream.authToken,
-    'authorization': `Bearer ${upstream.authToken}`,
+    'x-api-key': up.authToken,
+    'authorization': `Bearer ${up.authToken}`,
     'anthropic-version': req.headers['anthropic-version'] || '2023-06-01',
   };
   if (req.headers['anthropic-beta']) headers['anthropic-beta'] = req.headers['anthropic-beta'];
   if (req.headers['accept']) headers['accept'] = req.headers['accept'];
 
-  const url = upstream.baseURL + req.url;
+  const url = up.baseURL + req.url;
 
   let upstreamResp;
   try {

@@ -15,6 +15,7 @@ export default function ChatSearch({ containerRef, onClose }) {
   const [query, setQuery] = useState('');
   const [count, setCount] = useState(0);
   const [active, setActive] = useState(0); // 1-based;0 = 无
+  const activeRef = useRef(0);              // 与 active 同步,供 go() 计算下一项(不在 setState updater 里做副作用)
   const inputRef = useRef(null);
   const rangesRef = useRef([]);
 
@@ -81,6 +82,7 @@ export default function ChatSearch({ containerRef, onClose }) {
     rangesRef.current = ranges;
     setCount(ranges.length);
     const first = ranges.length ? 1 : 0;
+    activeRef.current = first;
     setActive(first);
     paintActive(ranges, first);
   }, [query, buildRanges, paintActive, clearHighlights]);
@@ -88,11 +90,10 @@ export default function ChatSearch({ containerRef, onClose }) {
   const go = useCallback((dir) => {
     const n = rangesRef.current.length;
     if (!n) return;
-    setActive((prev) => {
-      const next = ((prev - 1 + dir + n) % n) + 1;
-      paintActive(rangesRef.current, next);
-      return next;
-    });
+    const next = ((activeRef.current - 1 + dir + n) % n) + 1;
+    activeRef.current = next;
+    setActive(next);
+    paintActive(rangesRef.current, next);
   }, [paintActive]);
 
   useEffect(() => {

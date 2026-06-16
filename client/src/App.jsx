@@ -4011,9 +4011,14 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
   const liveVisible = streamOwnerKey == null || streamOwnerKey === sessionQueueKey;
   const allMessages = [...messages, ...(liveVisible ? chatMessages : [])];
   // 右侧回合进度条数据:每个用户回合一个点(摘要取去附件后的显示文本)。
-  const userTurns = allMessages
-    .filter((m) => m.type === 'user' && m.uuid)
-    .map((m) => ({ uuid: m.uuid, text: m.displayText || m.text || '', ts: m.timestamp }));
+  // useMemo 避免每帧(尤其流式每 token)新建数组 → 否则 TurnScrubber 的 measure
+  // 身份每帧变,ResizeObserver 被反复拆建。
+  const userTurns = useMemo(
+    () => [...messages, ...(liveVisible ? chatMessages : [])]
+      .filter((m) => m.type === 'user' && m.uuid)
+      .map((m) => ({ uuid: m.uuid, text: m.displayText || m.text || '', ts: m.timestamp })),
+    [messages, chatMessages, liveVisible],
+  );
   const totalTokens = allMessages.reduce((acc, m) => {
     if (m.usage) { acc.input += m.usage.input_tokens || 0; acc.output += m.usage.output_tokens || 0; acc.cacheRead += m.usage.cache_read_input_tokens || 0; }
     return acc;

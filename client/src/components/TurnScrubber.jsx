@@ -22,20 +22,24 @@ export default function TurnScrubber({ containerRef, turns }) {
   const [tipIdx, setTipIdx] = useState(null);
   const showTimer = useRef(0);
   const hideTimer = useRef(0);
+  // turns 经 ref 读取,使 measure 身份稳定 → ResizeObserver 不会每帧(流式每 token)重建。
+  const turnsRef = useRef(turns);
+  turnsRef.current = turns;
 
   const measure = useCallback(() => {
     const el = containerRef.current;
     if (!el) return;
     setBox({ top: el.offsetTop, height: el.offsetHeight });
     const total = el.scrollHeight || 1;
-    setPositions(turns.map((t) => {
+    setPositions(turnsRef.current.map((t) => {
       const node = el.querySelector(`[data-turn-uuid="${t.uuid}"]`);
       if (!node) return null;
       return Math.max(0, Math.min(1, node.offsetTop / total));
     }));
-  }, [containerRef, turns]);
+  }, [containerRef]);
 
-  useLayoutEffect(() => { measure(); }, [measure]);
+  // turns 变化(新增/裁剪回合)时重测一次;measure 本身稳定,不触发 observer 重建。
+  useLayoutEffect(() => { measure(); }, [measure, turns]);
 
   useEffect(() => {
     const el = containerRef.current;
@@ -91,11 +95,16 @@ export default function TurnScrubber({ containerRef, turns }) {
       style={{ position: 'absolute', right: 4, top: box.top, height: box.height, width: 18, zIndex: 45 }}
       className="max-md:hidden pointer-events-auto"
     >
-      {positions.map((n, i) => n == null ? null : (
+      {positions.map((n, i) => {
+        const t = turns[i];
+        // positions 比 turns 晚一帧更新:切到更短会话/回滚裁剪那一帧 positions 仍是旧的
+        // 长数组,turns[i] 可能 undefined → 必须守卫,否则 .uuid 抛错整页白屏。
+        if (n == null || !t) return null;
+        return (
         <button
-          key={turns[i].uuid || i}
+          key={t.uuid || i}
           onMouseEnter={() => enterDot(i)}
-          onClick={() => scrollToTurn(turns[i].uuid)}
+          onClick={() => scrollToTurn(t.uuid)}
           style={{
             position: 'absolute', top: `${n * 100}%`, left: '50%',
             transform: `translate(-50%, -50%) scale(${magnify(hoverIdx == null ? 9 : Math.abs(i - hoverIdx))})`,
@@ -104,7 +113,8 @@ export default function TurnScrubber({ containerRef, turns }) {
           className="w-[6px] h-[6px] rounded-full bg-ink-faint/50 hover:bg-accent cursor-pointer"
           aria-label={`跳到第 ${i + 1} 个回合`}
         />
-      ))}
+        );
+      })}
       {tipIdx != null && positions[tipIdx] != null && turns[tipIdx] && (
         <div
           style={{ position: 'absolute', top: `${positions[tipIdx] * 100}%`, right: '100%', marginRight: 8, transform: 'translateY(-50%)', maxWidth: 260, width: 'max-content' }}

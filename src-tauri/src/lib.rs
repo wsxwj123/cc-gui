@@ -426,6 +426,8 @@ pub fn run() {
                             break;
                         }
                         let _ = child.kill();
+                        let _ = child.wait(); // 回收子进程,避免 unix 僵尸(<defunct>);并确保端口释放
+                        wait_until_free(port, Duration::from_secs(3));
                         log_startup(&format!("[tauri] backend on port {port} did not accept connections"));
                     } else {
                         break;

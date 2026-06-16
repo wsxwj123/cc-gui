@@ -405,7 +405,9 @@ async function handle(req, clientRes) {
   if (req.method !== 'POST' || !req.url.includes('/v1/messages')) {
     clientRes.writeHead(404); clientRes.end('not found'); return;
   }
-  if (!upstream) {
+  // 快照 upstream:整个请求(含重试)只用这一份,避免在途切 provider 把请求/key 发错。
+  const up = upstream;
+  if (!up) {
     clientRes.writeHead(503, { 'Content-Type': 'application/json' });
     clientRes.end(JSON.stringify({ type: 'error', error: { type: 'api_error', message: 'OpenAI upstream not configured' } }));
     return;
@@ -416,11 +418,11 @@ async function handle(req, clientRes) {
 
   const oaReq = buildOpenAIRequest(body);
   const wantStream = oaReq.stream;
-  const url = upstream.baseURL + '/chat/completions';
+  const url = up.baseURL + '/chat/completions';
 
   const postUpstream = (payload) => fetch(url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${upstream.apiKey}` },
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${up.apiKey}` },
       body: JSON.stringify(payload),
     });
 
