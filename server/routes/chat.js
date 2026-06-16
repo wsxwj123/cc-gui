@@ -213,8 +213,24 @@ router.post('/chat', async (req, res) => {
     '--include-partial-messages',
     '--model', model,
   ];
+  // 系统提示拼装。Windows 上额外注入一句:Bash 命令别用 cmd 风格 `>NUL` 重定向 ——
+  // 这是 NUL 垃圾文件的【根因】:模型出于 Windows 习惯写 `>NUL`/`2>NUL`,而 claude 的
+  // Bash 工具走 Git Bash,NUL 被当普通文件名落盘(再被 OneDrive 当非法名报错)。这里从
+  // 源头减少模型这么写;仍写漏的由 chat 的实时 watcher 兜底删除(治本+兜底两层)。
+  const sysPromptParts = [];
+  if (process.platform === 'win32') {
+    sysPromptParts.push(
+      '【Windows 环境·重要】运行 Bash 工具命令时,丢弃输出一律用 POSIX 语法 `/dev/null`'
+      + '(如 `cmd 2>/dev/null`、`cmd >/dev/null 2>&1`),**绝不要**用 cmd 风格的 `>NUL` / '
+      + '`2>NUL` / `>nul 2>&1` —— 命令经 Git Bash 执行,`NUL` 会被当成文件名在工作目录里'
+      + '生成一个名为 NUL 的垃圾文件,并触发 OneDrive 报错。',
+    );
+  }
   if (typeof appendSystemPrompt === 'string' && appendSystemPrompt.trim()) {
-    args.push('--append-system-prompt', appendSystemPrompt.trim().slice(0, 8000));
+    sysPromptParts.push(appendSystemPrompt.trim());
+  }
+  if (sysPromptParts.length) {
+    args.push('--append-system-prompt', sysPromptParts.join('\n\n').slice(0, 8000));
   }
   if (sessionId) args.push('--resume', sessionId);
   if (effort && VALID_EFFORTS.has(effort)) args.push('--effort', effort);
