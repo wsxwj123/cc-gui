@@ -1346,3 +1346,14 @@ html { --content-max: clamp(768px, calc(var(--app-w, 100vw) * 0.7), 1120px); }
     min-width: 38px;
   }
 }
+
+/* 窗内检索高亮(CSS Custom Highlight API,零 DOM 改动)。
+   非当前命中:淡黄底;当前命中:强调色底。 */
+::highlight(cgui-search) {
+  background-color: rgba(250, 204, 21, 0.4);
+  color: inherit;
+}
+::highlight(cgui-search-active) {
+  background-color: var(--color-accent, #D97757);
+  color: #fff;
+}

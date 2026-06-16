@@ -11,6 +11,8 @@ import { useStore, THEME_FAMILIES, FONT_OPTIONS, systemPrefersDark, PERMISSION_M
 import { useWebSocket } from './hooks/useWebSocket.js';
 import { MessageBubble } from './components/MessageBubble.jsx';
 import { TurnBubble } from './components/TurnBubble.jsx';
+import TurnScrubber from './components/TurnScrubber.jsx';
+import ChatSearch from './components/ChatSearch.jsx';
 import { confirmDialog } from './utils/confirmDialog.jsx';
 import { ChatInput, EffortSelector, PermissionModeSelector, EFFORT_LEVELS, MODE_META } from './components/ChatInput.jsx';
 import { ModelBadge, ProviderAvatar } from './components/ModelBadge.jsx';
@@ -2041,6 +2043,19 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
   // C2:用于把 AutoCompactBanner 限定在「当前聚焦的 pane」——分屏下非聚焦 pane 不应
   // 在你没看着时静默 /compact 改写历史。单窗格时 activeTabIndex 恒为 0 = 本 pane。
   const paneIsActive = useStore((s) => s.activeTabIndex) === tabIndex;
+  // 窗内检索(Cmd/Ctrl+F)开关 —— 仅当前聚焦 pane 响应。
+  const [searchOpen, setSearchOpen] = useState(false);
+  useEffect(() => {
+    if (!paneIsActive) return;
+    const onKey = (e) => {
+      if ((e.metaKey || e.ctrlKey) && (e.key === 'f' || e.key === 'F')) {
+        e.preventDefault();
+        setSearchOpen(true);
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [paneIsActive]);
   const setSelectedSession = useCallback((s) => {
     useStore.getState().setPaneSession(tabIndex, s);
   }, [tabIndex]);
@@ -3990,6 +4005,10 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
   // 隐藏流式气泡)同源,统计也走同一门控。
   const liveVisible = streamOwnerKey == null || streamOwnerKey === sessionQueueKey;
   const allMessages = [...messages, ...(liveVisible ? chatMessages : [])];
+  // 右侧回合进度条数据:每个用户回合一个点(摘要取去附件后的显示文本)。
+  const userTurns = allMessages
+    .filter((m) => m.type === 'user' && m.uuid)
+    .map((m) => ({ uuid: m.uuid, text: m.displayText || m.text || '', ts: m.timestamp }));
   const totalTokens = allMessages.reduce((acc, m) => {
     if (m.usage) { acc.input += m.usage.input_tokens || 0; acc.output += m.usage.output_tokens || 0; acc.cacheRead += m.usage.cache_read_input_tokens || 0; }
     return acc;
@@ -4075,6 +4094,13 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
             onBack={() => useStore.getState().setViewingAgent(null)}
           />
         </div>
+      )}
+      {/* 窗内检索浮层(Cmd/Ctrl+F)+ 右侧回合进度条(子代理视图打开时不显示)。 */}
+      {!showAgentView && searchOpen && (
+        <ChatSearch containerRef={containerRef} onClose={() => setSearchOpen(false)} />
+      )}
+      {!showAgentView && (
+        <TurnScrubber containerRef={containerRef} turns={userTurns} />
       )}
       {!mobileChrome && <div className="glass-bar shrink-0 px-6 py-3 relative z-30">
         {/* Title row wraps when the pane is narrow or font is scaled up so
@@ -4261,20 +4287,26 @@ function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
             </div>
           ) : (
             <>
-              {messages.map((msg, i) => msg.type === 'compact'
-                ? <CompactDivider key={msg.uuid || i} />
-                : msg.type === 'turn'
-                ? <TurnBubble key={msg.uuid || i} turn={msg} onRetry={handleRetryTurn} onRetryTool={(toolCall) => handleRetryTool(msg, toolCall)} retryActive={retryActiveUuid === msg.uuid} />
-                : <MessageBubble key={msg.uuid || i} message={{ ...msg, role: msg.type }}
-                    onRollback={msg.type === 'user' ? handleRollback : undefined} />
-              )}
-              {liveVisible && chatMessages.map((msg, i) => msg.type === 'compact'
-                ? <CompactDivider key={msg.uuid || i} />
-                : msg.type === 'turn'
-                ? <TurnBubble key={msg.uuid || i} turn={msg} onRetry={handleRetryTurn} onRetryTool={(toolCall) => handleRetryTool(msg, toolCall)} retryActive={retryActiveUuid === msg.uuid} />
-                : <MessageBubble key={msg.uuid || i} message={{ ...msg, role: msg.type }}
-                    onRollback={msg.type === 'user' ? handleRollback : undefined} />
-              )}
+              {messages.map((msg, i) => (
+                <div key={msg.uuid || i} data-turn-uuid={msg.uuid} data-turn-role={msg.type}>
+                  {msg.type === 'compact'
+                    ? <CompactDivider />
+                    : msg.type === 'turn'
+                    ? <TurnBubble turn={msg} onRetry={handleRetryTurn} onRetryTool={(toolCall) => handleRetryTool(msg, toolCall)} retryActive={retryActiveUuid === msg.uuid} />
+                    : <MessageBubble message={{ ...msg, role: msg.type }}
+                        onRollback={msg.type === 'user' ? handleRollback : undefined} />}
+                </div>
+              ))}
+              {liveVisible && chatMessages.map((msg, i) => (
+                <div key={msg.uuid || i} data-turn-uuid={msg.uuid} data-turn-role={msg.type}>
+                  {msg.type === 'compact'
+                    ? <CompactDivider />
+                    : msg.type === 'turn'
+                    ? <TurnBubble turn={msg} onRetry={handleRetryTurn} onRetryTool={(toolCall) => handleRetryTool(msg, toolCall)} retryActive={retryActiveUuid === msg.uuid} />
+                    : <MessageBubble message={{ ...msg, role: msg.type }}
+                        onRollback={msg.type === 'user' ? handleRollback : undefined} />}
+                </div>
+              ))}
               {liveVisible && isStreaming && (streamingText || streamingThinking || streamingToolCalls.length > 0 || streamingBlocks.some((b) => (b?.content?.length > 0) || b?.toolCall)) && (
                 <>
                   <StreamingStatusLine
