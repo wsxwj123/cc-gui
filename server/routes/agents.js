@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
-import { readFile, readdir, writeFile, mkdir, stat } from 'fs/promises';
+import { readFile, readdir, writeFile, mkdir, stat, open } from 'fs/promises';
 import { join } from 'path';
 import { homedir } from 'os';
 import { getActiveChatProcesses } from './chat.js';
@@ -174,6 +174,35 @@ router.put('/agents/:name', async (req, res) => {
     res.json({ ok: true, path });
   } catch (err) {
     res.status(400).json({ error: err.message });
+  }
+});
+
+// GET /api/bgtask/output?path=<abs>&offset=N
+// tail 后台任务的输出文件(claude run_in_background 的 stdout 落盘文件)。按 offset 增量返回。
+// 安全:仅允许 /tmp/claude-<uid>/.../tasks/<id>.output 形态的路径,禁 ..(防越权读任意文件)。
+router.get('/bgtask/output', async (req, res) => {
+  try {
+    const p = String(req.query.path || '');
+    const offset = Math.max(0, parseInt(req.query.offset, 10) || 0);
+    if (p.includes('..') || !/(?:^|\/)(?:private\/)?tmp\/claude-\d+\/.+\/tasks\/[A-Za-z0-9_-]+\.output$/.test(p)) {
+      return res.status(400).json({ error: 'invalid bgtask output path' });
+    }
+    let st;
+    try { st = await stat(p); } catch { return res.json({ exists: false }); }
+    const size = st.size;
+    let content = '';
+    if (size > offset) {
+      const fh = await open(p, 'r');
+      try {
+        const len = Math.min(size - offset, 256 * 1024); // 单次最多 256KB,防超大输出撑爆
+        const buf = Buffer.alloc(len);
+        await fh.read(buf, 0, len, offset);
+        content = buf.toString('utf8');
+      } finally { await fh.close(); }
+    }
+    res.json({ exists: true, size, mtimeMs: st.mtimeMs, content });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 

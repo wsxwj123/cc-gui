@@ -1,5 +1,5 @@
-import React, { useEffect, useState } from 'react';
-import { Bot, Loader2, Square, Clock, RefreshCw, Terminal, ChevronDown, ChevronRight, Maximize2 } from 'lucide-react';
+import React, { useEffect, useState, useRef } from 'react';
+import { Bot, Loader2, Square, Clock, RefreshCw, Terminal, ChevronDown, ChevronRight, Maximize2, PlayCircle } from 'lucide-react';
 import { useStore } from '../stores/sessionStore.js';
 import { MarkdownRenderer } from './MarkdownRenderer.jsx';
 
@@ -193,6 +193,79 @@ function StatusBadge({ status }) {
   );
 }
 
+// 后台任务卡片(claude `Bash run_in_background:true`)。实时输出不进 stream-json,
+// 而是持续写入磁盘 .output 文件 —— 这里按 offset 增量轮询 /api/bgtask/output 做 tail。
+// 状态启发式:文件大小连续若干次不增长 → 视为"完成"(无显式退出码事件)。
+function BgTaskCard({ task }) {
+  const [expanded, setExpanded] = useState(true);
+  const [output, setOutput] = useState('');
+  const [running, setRunning] = useState(true);
+  const offsetRef = useRef(0);
+  const staleRef = useRef(0);
+  const preRef = useRef(null);
+
+  useEffect(() => {
+    if (!task.outputPath) return;
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const r = await fetch(`/api/bgtask/output?path=${encodeURIComponent(task.outputPath)}&offset=${offsetRef.current}`);
+        const d = await r.json();
+        if (cancelled || !d.exists) return;
+        if (d.content) {
+          setOutput((prev) => (prev + d.content).slice(-40000)); // 只留尾部 40KB,防超长撑爆
+          offsetRef.current = d.size;
+          staleRef.current = 0;
+          setRunning(true);
+        } else {
+          staleRef.current += 1;
+          if (staleRef.current >= 4) setRunning(false); // ~6s 无增长 → 认为已完成
+        }
+      } catch {}
+    };
+    poll();
+    const id = setInterval(poll, 1500);
+    return () => { cancelled = true; clearInterval(id); };
+  }, [task.outputPath]);
+
+  // 输出增长时自动滚到底部
+  useEffect(() => {
+    if (expanded && preRef.current) preRef.current.scrollTop = preRef.current.scrollHeight;
+  }, [output, expanded]);
+
+  const elapsed = task.startedAt ? Date.now() - task.startedAt : 0;
+  return (
+    <div className="bg-canvas-warm border border-amber-200 rounded-lg overflow-hidden">
+      <button onClick={() => setExpanded(!expanded)} className="w-full p-2.5 text-left">
+        <div className="flex items-center gap-2 mb-1">
+          {expanded ? <ChevronDown size={11} className="text-amber-600 shrink-0" /> : <ChevronRight size={11} className="text-amber-600 shrink-0" />}
+          <PlayCircle size={11} className="text-amber-600 shrink-0" />
+          <span className="text-xs font-medium text-ink font-mono truncate" title={task.command}>
+            {task.description || task.command || '后台命令'}
+          </span>
+          <div className="ml-auto"><StatusBadge status={running ? 'streaming' : 'done'} /></div>
+        </div>
+        {task.command && (
+          <div className="text-[10.5px] text-ink-muted font-mono truncate pl-5" title={task.command}>$ {task.command}</div>
+        )}
+        <div className="flex items-center gap-3 mt-1.5 pl-5 text-[10px] text-ink-faint font-mono">
+          {task.startedAt && <span className="flex items-center gap-1"><Clock size={9} />{fmtElapsed(elapsed)}</span>}
+          {task.shellId && <span className="truncate opacity-70" title={task.shellId}>{task.shellId}</span>}
+        </div>
+      </button>
+      {expanded && (
+        <div className="border-t border-amber-200 bg-canvas">
+          {output ? (
+            <pre ref={preRef} className="m-0 px-3 py-2 font-mono text-[10.5px] leading-snug whitespace-pre-wrap break-words text-ink-muted max-h-56 overflow-y-auto">{output}</pre>
+          ) : (
+            <div className="px-3 py-3 text-[10.5px] text-ink-faint font-body text-center">{task.outputPath ? '等待输出…' : '无输出文件路径'}</div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 /**
  * Right-side panel showing live subagent / chat-process state. Polls
  * /api/agents/active every 1.5s while mounted. Also merges in the
@@ -204,6 +277,7 @@ export function AgentMonitorPanel() {
   const [loading, setLoading] = useState(true);
   const [stoppingPid, setStoppingPid] = useState(null);
   const localAgents = useStore((s) => s.activeAgents);
+  const bgTasks = useStore((s) => s.bgTasks);
 
   const fetchActive = async (silent = false) => {
     if (!silent) setLoading(true);
@@ -246,6 +320,11 @@ export function AgentMonitorPanel() {
   // Merge local + remote — local agents come from current stream's Task
   // tool_uses; remote includes our chat-process metadata and CLI's view.
   const localList = Object.values(localAgents);
+  // 后台任务:只显示本 stream 捕获到、且已拿到输出文件路径的(以 A 通道为准,
+  // 避免列出 tasks 目录里的历史幽灵 .output)。最新启动的排在最前。
+  const bgList = Object.values(bgTasks || {})
+    .filter((t) => t.outputPath)
+    .sort((a, b) => (b.startedAt || 0) - (a.startedAt || 0));
 
   // Bucket by status. 'working'/'starting' default expanded, the rest folded.
   const buckets = {
@@ -300,6 +379,18 @@ export function AgentMonitorPanel() {
                   />
                 );
               })}
+            </div>
+          </section>
+        )}
+
+        {/* 后台任务(Bash run_in_background / python 后台)— 实时 tail .output 文件 */}
+        {bgList.length > 0 && (
+          <section>
+            <h3 className="text-[10px] uppercase tracking-widest text-ink-faint font-body mb-2 flex items-center gap-1.5">
+              <PlayCircle size={10} />后台任务 ({bgList.length})
+            </h3>
+            <div className="space-y-2">
+              {bgList.map((t) => <BgTaskCard key={t.id} task={t} />)}
             </div>
           </section>
         )}

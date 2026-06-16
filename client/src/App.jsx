@@ -3115,6 +3115,17 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                     sessionId: getLocalSession()?.sessionId || null,
                   });
                 }
+                // 后台任务:Bash run_in_background:true(python 等长进程也归此类)。实时输出
+                // 不进 stream,落盘到 outputPath(由后续 tool_result 文本给出 shellId+路径)。
+                if (block.name === 'Bash' && block.input?.run_in_background === true) {
+                  useStore.getState().upsertBgTask(block.id, {
+                    command: block.input.command || '',
+                    description: block.input.description || '',
+                    status: 'running',
+                    startedAt: Date.now(),
+                    sessionId: getLocalSession()?.sessionId || null,
+                  });
+                }
               }
             }
             if (event.message.model) setStreamingModel(event.message.model);
@@ -3157,6 +3168,17 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                         : { ...tc, result: { content: '', isError: false, synthetic: true } }),
                     });
                   }
+                }
+                // 后台任务:result 文本含 "ID: <shellId>" 和 "written to: <path>.output"。
+                // 提取后供 AgentMonitorPanel 直接 tail 那个文件(优先用返回的绝对路径原文)。
+                if (store.bgTasks[block.tool_use_id]) {
+                  const txt = typeof block.content === 'string' ? block.content : JSON.stringify(block.content);
+                  const idm = txt.match(/ID:\s*([A-Za-z0-9_-]+)/);
+                  const pm = txt.match(/written to:\s*(\S+?\.output)/);
+                  store.upsertBgTask(block.tool_use_id, {
+                    ...(idm ? { shellId: idm[1] } : {}),
+                    ...(pm ? { outputPath: pm[1] } : {}),
+                  });
                 }
                 // Also patch the ordered blocks list so the in-place card shows result.
                 const resultPayload = {

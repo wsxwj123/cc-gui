@@ -832,6 +832,14 @@ export const useStore = create((set, get) => ({
       toolCalls: cur.toolCalls.map((tc) => tc.id === toolId ? { ...tc, ...patch } : tc),
     } } };
   }),
+
+  // ── 后台任务(Bash run_in_background)──────────────────────────
+  // keyed by tool_use id(创建时);result 到达后补 shellId + outputPath(供 tail)。
+  // 后台 bash 的实时输出不进 stream,落盘到 outputPath,由 AgentMonitorPanel 轮询 tail。
+  bgTasks: {},
+  upsertBgTask: (id, patch) => set((s) => ({
+    bgTasks: { ...s.bgTasks, [id]: { ...(s.bgTasks[id] || { id }), ...patch } },
+  })),
   clearAgents: () => set({ activeAgents: {} }),
   // #9 子代理会话窗口:当前在主区打开查看的子代理 id(null = 看正常会话)。
   setViewingAgent: (id) => set({ viewingAgentId: id || null }),
