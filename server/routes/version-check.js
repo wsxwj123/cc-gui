@@ -377,4 +377,83 @@ router.post('/claude-install', async (req, res) => {
   }
 });
 
+// ─── 统一环境检查(node / claude / python)──────────────────────────────
+// node:app 能跑 = node 必在,直接报 process.version。claude:复用 detectInstall +
+// getClaudeVersion。python:可选(部分技能 生图/出题/bot 需要),多策略检测。
+async function detectPython() {
+  const tryRun = async (bin, args = ['--version']) => {
+    try {
+      const { stdout, stderr } = await execFileP(bin, args, { timeout: 5000 });
+      const out = (stdout || stderr || '').trim(); // 老版本 python 把版本打到 stderr
+      const m = out.match(/(\d+\.\d+\.\d+)/);
+      if (m) return { version: m[1], path: bin };
+    } catch {}
+    return null;
+  };
+  for (const bin of ['python3', 'python']) {
+    const hit = await tryRun(bin);
+    if (hit) return { installed: true, ...hit };
+  }
+  if (process.platform !== 'win32') {
+    try {
+      const { stdout } = await execFileP('sh', ['-lc', 'command -v python3 || command -v python'], { timeout: 5000 });
+      const p = stdout.trim();
+      if (p) { const hit = await tryRun(p); if (hit) return { installed: true, ...hit, via: 'login-shell' }; }
+    } catch {}
+  }
+  const home = homedir();
+  const cands = process.platform === 'win32'
+    ? []
+    : ['/opt/homebrew/bin/python3', '/usr/local/bin/python3', '/usr/bin/python3', join(home, '.asdf/shims/python3')];
+  for (const p of cands) {
+    if (!existsSync(p)) continue;
+    const hit = await tryRun(p);
+    if (hit) return { installed: true, ...hit, via: 'fallback' };
+  }
+  return { installed: false };
+}
+
+function envInstallCmd(target) {
+  const win = process.platform === 'win32';
+  const mac = process.platform === 'darwin';
+  if (target === 'claude') return installCmdFor();
+  if (target === 'node') {
+    if (win) return 'winget install -e --id OpenJS.NodeJS.LTS';
+    if (mac) return 'brew install node || echo "未检测到 Homebrew,请到 https://nodejs.org 下载安装"';
+    return 'sudo apt-get update && sudo apt-get install -y nodejs npm || echo "请用你的发行版包管理器安装 node"';
+  }
+  if (target === 'python') {
+    if (win) return 'winget install -e --id Python.Python.3.12';
+    if (mac) return 'brew install python || echo "未检测到 Homebrew,请到 https://www.python.org/downloads 下载安装"';
+    return 'sudo apt-get update && sudo apt-get install -y python3 python3-pip || echo "请用你的发行版包管理器安装 python3"';
+  }
+  return null;
+}
+
+router.get('/env-check', async (req, res) => {
+  const { method, path: claudePath } = await detectInstall();
+  const claudeVersion = await getClaudeVersion(claudePath);
+  const python = await detectPython();
+  res.json({
+    node: { installed: true, version: process.version, required: true },
+    claude: { installed: !!claudeVersion, version: claudeVersion || null, method, required: true },
+    python: { installed: python.installed, version: python.version || null, required: false },
+    platform: process.platform === 'darwin' ? 'mac' : process.platform === 'win32' ? 'windows' : 'linux',
+  });
+});
+
+router.post('/env-check/install', async (req, res) => {
+  const target = String(req.body?.target || '');
+  const cmd = envInstallCmd(target);
+  if (!cmd) return res.status(400).json({ ok: false, error: 'unknown target: ' + target });
+  try {
+    const proxyUrl = await detectLocalProxy();
+    const titles = { claude: '安装 Claude Code', node: '安装 Node.js', python: '安装 Python' };
+    launchInTerminal(cmd, titles[target] || '安装', proxyUrl);
+    res.json({ ok: true, launched: true, command: cmd, platform: process.platform, proxy: proxyUrl });
+  } catch (err) {
+    res.json({ ok: false, error: err.message || '启动终端失败', command: cmd });
+  }
+});
+
 export default router;

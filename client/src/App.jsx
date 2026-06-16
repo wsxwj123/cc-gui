@@ -27,7 +27,7 @@ import { MemoryPanel } from './components/MemoryPanel.jsx';
 import { AgentsPanel } from './components/AgentsPanel.jsx';
 import { AgentMonitorPanel } from './components/AgentMonitorPanel.jsx';
 import { SubagentView } from './components/SubagentView.jsx';
-import { CliMissingModal } from './components/CliMissingModal.jsx';
+import EnvCheckPanel from './components/EnvCheckPanel.jsx';
 import { FullDiskAccessModal } from './components/FullDiskAccessModal.jsx';
 import { BUILTIN_PROVIDERS, findBuiltin } from './utils/builtinProviders.js';
 import { computeCost, formatCost } from './utils/pricing.js';
@@ -6326,7 +6326,7 @@ export default function App() {
         />
         {LocalWidget && <LocalWidget />}
         {!cliInstalled && !cliCheckDismissed && (
-          <CliMissingModal onRecheck={checkCli} onDismiss={dismissCliCheck} />
+          <EnvCheckPanel onRecheck={checkCli} onDismiss={dismissCliCheck} />
         )}
       </div>
     );
@@ -6413,7 +6413,7 @@ export default function App() {
       )}
       <CompletionToasts />
       {!cliInstalled && !cliCheckDismissed && (
-        <CliMissingModal onRecheck={checkCli} onDismiss={dismissCliCheck} />
+        <EnvCheckPanel onRecheck={checkCli} onDismiss={dismissCliCheck} />
       )}
       {needsFDA && !fdaDismissed && (
         <FullDiskAccessModal onOpenSettings={openFDASettings} onDismiss={dismissFDA} />

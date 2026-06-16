@@ -3,6 +3,7 @@ import { Settings, Save, RefreshCw, AlertCircle, Check, Plus, Trash2, ChevronDow
 import { openExternalUrl } from '../utils/openExternal.js';
 import { confirmDialog } from '../utils/confirmDialog.jsx';
 import { useStore } from '../stores/sessionStore.js';
+import EnvCheckPanel from './EnvCheckPanel.jsx';
 
 const HOOK_EVENTS = [
   'UserPromptSubmit', 'SessionStart', 'SessionEnd', 'PreToolUse', 'PostToolUse',
@@ -61,7 +62,7 @@ export function SettingsPanel() {
   return (
     <div className="px-4 py-4 space-y-4 overflow-y-auto h-full">
       <div className="flex items-center gap-1 border-b border-canvas-deep -mx-4 px-4 pb-2">
-        {[['overview', '概览'], ['hooks', 'Hooks'], ['json', '原始配置'], ['storage', '存储'], ['network', '网络']].map(([id, label]) => (
+        {[['overview', '概览'], ['env', '环境'], ['hooks', 'Hooks'], ['json', '原始配置'], ['storage', '存储'], ['network', '网络']].map(([id, label]) => (
           <button key={id} onClick={() => setTab(id)}
             className={`text-[11px] px-2.5 py-1 rounded font-body transition-colors ${tab === id ? 'bg-accent/15 text-accent' : 'text-ink-muted hover:text-ink'}`}>
             {label}
@@ -79,6 +80,7 @@ export function SettingsPanel() {
       )}
 
       {tab === 'overview' && <OverviewTab settings={settings} />}
+      {tab === 'env' && <EnvCheckPanel asModal={false} />}
       {tab === 'hooks' && (
         <HooksTab settings={settings} onSave={save} saving={saving} saved={saved} />
       )}
