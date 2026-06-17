@@ -177,6 +177,18 @@ router.put('/agents/:name', async (req, res) => {
   }
 });
 
+// 后台任务 .output 路径白名单(防越权读/越权杀任意进程)。规范化分隔符后兼容两种
+// claude 后台输出落盘形态:
+//  · macOS/Linux: /tmp/claude-<uid>/<projectHash>/<sid>/tasks/<id>.output(也含 /private/tmp)
+//  · Windows:     <盘>:\Users\..\AppData\Local\Temp\claude\<projectHash>\<sid>\tasks\<id>.output
+// 安全锚点:必须以 /tasks/<安全id>.output 结尾 + 禁 ..(中间段任意,末段文件名受限字符集)。
+function isValidBgOutputPath(p) {
+  if (!p || p.includes('..')) return false;
+  const norm = String(p).replace(/\\/g, '/');
+  return /(?:^|\/)(?:private\/)?tmp\/claude-\d+\/.+\/tasks\/[A-Za-z0-9_-]+\.output$/.test(norm)   // POSIX
+    || /(?:^|\/)temp\/claude\/.+\/tasks\/[A-Za-z0-9_-]+\.output$/i.test(norm);                    // Windows
+}
+
 // GET /api/bgtask/output?path=<abs>&offset=N
 // tail 后台任务的输出文件(claude run_in_background 的 stdout 落盘文件)。按 offset 增量返回。
 // 安全:仅允许 /tmp/claude-<uid>/.../tasks/<id>.output 形态的路径,禁 ..(防越权读任意文件)。
@@ -184,7 +196,7 @@ router.get('/bgtask/output', async (req, res) => {
   try {
     const p = String(req.query.path || '');
     const offset = Math.max(0, parseInt(req.query.offset, 10) || 0);
-    if (p.includes('..') || !/(?:^|\/)(?:private\/)?tmp\/claude-\d+\/.+\/tasks\/[A-Za-z0-9_-]+\.output$/.test(p)) {
+    if (!isValidBgOutputPath(p)) {
       return res.status(400).json({ error: 'invalid bgtask output path' });
     }
     let st;
@@ -201,6 +213,49 @@ router.get('/bgtask/output', async (req, res) => {
       } finally { await fh.close(); }
     }
     res.json({ exists: true, size, mtimeMs: st.mtimeMs, content });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/bgtask/kill  { path: <.output 绝对路径> }
+// 手动中断仍在跑的后台任务(用户怕它损坏文件时随时停)。**安全第一**:只杀文件句柄/
+// 命令行精确引用「那个 .output 路径或其唯一 shellId」的进程,定位不到就如实返回
+// located:false(前端提示手动结束),绝不按命令名等宽匹配乱杀。
+router.post('/bgtask/kill', async (req, res) => {
+  try {
+    const p = String(req.body?.path || '');
+    if (!isValidBgOutputPath(p)) return res.status(400).json({ error: 'invalid bgtask output path' });
+    const norm = p.replace(/\\/g, '/');
+    const shellId = norm.split('/').pop().replace(/\.output$/i, ''); // 受限字符集,可安全内插
+
+    let pids = [];
+    if (process.platform === 'win32') {
+      // 无 lsof。查命令行里引用了该 .output 路径或唯一 shellId 的进程(后台 shell 及其子树)。
+      // shellId 仅 [A-Za-z0-9_-],无注入风险。CIM 失败回落 wmic。
+      const ps = `Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*${shellId}*' } | Select-Object -ExpandProperty ProcessId`;
+      try {
+        const { stdout } = await execFileP('powershell', ['-NoProfile', '-Command', ps], { timeout: 8000 });
+        pids = stdout.split(/\s+/).map((s) => parseInt(s, 10)).filter(Boolean);
+      } catch {
+        try {
+          const { stdout } = await execFileP('wmic', ['process', 'where', `CommandLine like '%${shellId}%'`, 'get', 'ProcessId'], { timeout: 8000 });
+          pids = stdout.split(/\s+/).map((s) => parseInt(s, 10)).filter(Boolean);
+        } catch {}
+      }
+      pids = [...new Set(pids)].filter((pid) => pid !== process.pid);
+      for (const pid of pids) { try { await execFileP('taskkill', ['/F', '/T', '/PID', String(pid)], { timeout: 6000 }); } catch {} }
+    } else {
+      // 持有该输出文件的进程(后台 shell 把 stdout 重定向到它,运行期间一直持有句柄)→ 最精确。
+      try {
+        const { stdout } = await execFileP('lsof', ['-t', '--', p], { timeout: 6000 });
+        pids = stdout.split(/\s+/).map((s) => parseInt(s, 10)).filter(Boolean);
+      } catch {}
+      pids = [...new Set(pids)].filter((pid) => pid !== process.pid);
+      for (const pid of pids) { try { process.kill(pid, 'SIGTERM'); } catch {} }
+      setTimeout(() => { for (const pid of pids) { try { process.kill(pid, 'SIGKILL'); } catch {} } }, 2000).unref();
+    }
+    res.json({ ok: true, located: pids.length > 0, killed: pids });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

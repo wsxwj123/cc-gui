@@ -183,6 +183,7 @@ function StatusBadge({ status }) {
     working:     { label: '工作中',  bg: 'bg-blue-50',  fg: 'text-blue-700',   border: 'border-blue-200' },
     done:        { label: '完成',    bg: 'bg-green-50', fg: 'text-green-700',  border: 'border-green-200' },
     idle:        { label: '空闲',    bg: 'bg-amber-50', fg: 'text-amber-700',  border: 'border-amber-200' },
+    stopped:     { label: '已停止',  bg: 'bg-red-50',   fg: 'text-red-700',    border: 'border-red-200' },
     error:       { label: '错误',    bg: 'bg-red-50',   fg: 'text-red-700',    border: 'border-red-200' },
     needs_input: { label: '待输入',  bg: 'bg-violet-50', fg: 'text-violet-700', border: 'border-violet-200' },
   };
@@ -202,20 +203,24 @@ function BgTaskCard({ task }) {
   const [output, setOutput] = useState('');
   // 'running'=输出在增长;'idle'=一段时间无新输出(**无法确知是否已结束**,故不谎称"完成")。
   // 没有显式退出码事件,只能据"输出是否增长"启发式判断,所以最多到"空闲",不到"完成"。
-  const [phase, setPhase] = useState('running');
+  const [phase, setPhase] = useState('running'); // running | idle | stopped
   const [now, setNow] = useState(() => Date.now());
+  const [stopping, setStopping] = useState(false);
+  const [stopNote, setStopNote] = useState('');
   const offsetRef = useRef(0);
   const staleRef = useRef(0);
+  const stoppedRef = useRef(false);
   const preRef = useRef(null);
 
   useEffect(() => {
     if (!task.outputPath) return;
     let cancelled = false;
     const poll = async () => {
+      if (stoppedRef.current) return; // 已手动停止 → 不再轮询
       try {
         const r = await fetch(`/api/bgtask/output?path=${encodeURIComponent(task.outputPath)}&offset=${offsetRef.current}`);
         const d = await r.json();
-        if (cancelled || !d.exists) return;
+        if (cancelled || stoppedRef.current || !d.exists) return;
         if (d.content) {
           setOutput((prev) => (prev + d.content).slice(-40000)); // 只留尾部 40KB,防超长撑爆
           offsetRef.current = d.size;
@@ -244,6 +249,25 @@ function BgTaskCard({ task }) {
     if (expanded && preRef.current) preRef.current.scrollTop = preRef.current.scrollHeight;
   }, [output, expanded]);
 
+  // 手动中断后台任务(用户怕它损坏文件时随时停)。服务端按 .output 句柄/命令行精确
+  // 定位进程再杀;定位不到(可能已结束)如实提示,不乱杀。
+  const onStop = async (e) => {
+    e.stopPropagation();
+    if (stopping || phase === 'stopped' || !task.outputPath) return;
+    setStopping(true); setStopNote('');
+    try {
+      const r = await fetch('/api/bgtask/kill', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: task.outputPath }),
+      });
+      const d = await r.json();
+      if (d.ok && d.located) { stoppedRef.current = true; setPhase('stopped'); }
+      else setStopNote('未定位到进程(可能已结束)。若仍在运行,请在系统任务管理器手动结束');
+    } catch { setStopNote('停止失败,请重试或手动结束'); }
+    setStopping(false);
+  };
+
   const elapsed = task.startedAt ? now - task.startedAt : 0;
   return (
     <div className="bg-canvas-warm border border-amber-200 rounded-lg overflow-hidden">
@@ -254,7 +278,20 @@ function BgTaskCard({ task }) {
           <span className="text-xs font-medium text-ink font-mono truncate" title={task.command}>
             {task.description || task.command || '后台命令'}
           </span>
-          <div className="ml-auto"><StatusBadge status={phase === 'running' ? 'streaming' : 'idle'} /></div>
+          <div className="ml-auto flex items-center gap-1.5">
+            <StatusBadge status={phase === 'stopped' ? 'stopped' : (phase === 'running' ? 'streaming' : 'idle')} />
+            {phase !== 'stopped' && task.outputPath && (
+              <span
+                role="button"
+                tabIndex={0}
+                onClick={onStop}
+                className="flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded bg-red-50 hover:bg-red-100 text-red-700 border border-red-200 cursor-pointer disabled:opacity-50"
+                title="中断这个后台任务(杀掉其进程)"
+              >
+                {stopping ? <Loader2 size={10} className="animate-spin" /> : <Square size={10} />}停止
+              </span>
+            )}
+          </div>
         </div>
         {task.command && (
           <div className="text-[10.5px] text-ink-muted font-mono truncate pl-5" title={task.command}>$ {task.command}</div>
@@ -263,6 +300,7 @@ function BgTaskCard({ task }) {
           {task.startedAt && <span className="flex items-center gap-1"><Clock size={9} />{fmtElapsed(elapsed)}</span>}
           {task.shellId && <span className="truncate opacity-70" title={task.shellId}>{task.shellId}</span>}
         </div>
+        {stopNote && <div className="mt-1.5 pl-5 text-[10px] text-amber-700 font-body leading-snug">{stopNote}</div>}
       </button>
       {expanded && (
         <div className="border-t border-amber-200 bg-canvas">
