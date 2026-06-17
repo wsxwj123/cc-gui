@@ -3284,12 +3284,12 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             sawError = true;
             break;
           }
-          // 即时上下文用量(#5):result 事件带本轮 usage,直接据此刷新徽章。
-          // U8:/compact 回合除外 —— 它的 usage 是"整段历史发去做摘要"的旧大上下文,
-          // 写进徽章会把刚压缩完的占比又顶回压缩前。
-          if (event.type === 'result' && !isCompact && event.usage
-            && ((event.usage.input_tokens || 0) + (event.usage.cache_read_input_tokens || 0) + (event.usage.cache_creation_input_tokens || 0)) > 0) {
-            setLiveContextUsage({ ...event.usage, _ts: Date.now() });
+          // 成本/落库用本轮 result.usage,但**不写徽章 live usage**:result.usage 是
+          // CLI「整轮 N 次底层 API 调用」的累加口径(cache_read 被加 N 遍),写进徽章会让
+          // 占用瞬间虚高爆表(实测第三方可冲到 500k/200k)→ 误触发 auto-compact。徽章的
+          // 「当前上下文占用」应取单次调用口径,已由 message_start/message_delta(2962-2975)
+          // 实时提供(末次调用 = 当前真实上下文)。compact 回合的 usage 也是旧大上下文,同样不取。
+          if (event.type === 'result' && !isCompact && event.usage) {
             resultUsage = event.usage;
           }
           // Z1:CLI 在 result 事件上报本轮实际成本 total_cost_usd,比单价表估算
@@ -4102,22 +4102,30 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // 实测比 live/jsonl 都新时直接用实测;之后有更新的流式 usage(新回合)再让位。
   const _liveTs = liveContextUsage?._ts || 0;
   const _jsonlTs = lastUsageMsg?.timestamp ? (Date.parse(lastUsageMsg.timestamp) || 0) : 0;
-  const measuredFresh = measuredCtx && measuredCtx.totalTokens > 0 && measuredCtx.ts >= Math.max(_liveTs, _jsonlTs);
-  const contextTokens = measuredFresh
-    ? measuredCtx.totalTokens
-    : (effectiveUsage
-      ? (effectiveUsage.input_tokens || 0) + (effectiveUsage.cache_read_input_tokens || 0) + (effectiveUsage.cache_creation_input_tokens || 0)
-      // compact 收尾后本回合无 usage、后台 /context 探测又要 5~30s,这段空窗里若取 0 会
-      // 让徽章整个消失(用户报告 #3)。回退到上次实测值(哪怕略旧),探测完成即被刷新。
-      : (measuredCtx?.totalTokens || 0));
   // U3:分母 = 下一次发送将使用的模型(currentModel = pin → 代际戳之后的历史 → 全局,
   // 与发送解析完全一致)。[1m] 开关写入 pin,因此切换立即反映到徽章;
   // /context 实测过的窗口(ctxWindowBySession)是权威值,优先于按模型名猜测 ——
   // 之前"徽章显示 1M、点开 /context 却是 200k"的矛盾根因就是两套来源各算各的。
   // 显式 [1m] 后缀 > /context 实测缓存(实测可能是开 1m 之前测的) > 按名猜测。
+  // (上移到分子之前,供下面的"usage 超窗 = 异常"健全性判断复用。)
   const contextWindow = /\[1m\]/i.test(currentModel || '')
     ? 1_000_000
     : (measuredCtx?.windowTokens || nativeContextWindow(currentModel));
+  const measuredFresh = measuredCtx && measuredCtx.totalTokens > 0 && measuredCtx.ts >= Math.max(_liveTs, _jsonlTs);
+  // 单次调用的输入侧上下文(input+cache_read+cache_creation)物理上不可能超过上下文窗口
+  // (一次能发的就是这么多)。若 usage 之和超窗,说明这条 usage 是异常累加/口径错误(实测
+  // 部分第三方 provider 会冲到 200k 窗口的 2.5 倍)→ 判为不可信,不让它进徽章/触发 compact。
+  const _usageSum = effectiveUsage
+    ? (effectiveUsage.input_tokens || 0) + (effectiveUsage.cache_read_input_tokens || 0) + (effectiveUsage.cache_creation_input_tokens || 0)
+    : 0;
+  const _usageSane = _usageSum > 0 && _usageSum <= contextWindow * 1.05;
+  const contextTokens = measuredFresh
+    ? measuredCtx.totalTokens
+    : (_usageSane
+      ? _usageSum
+      // usage 不可信或缺失(含 compact 收尾后本回合无 usage、后台 /context 探测要 5~30s 的空窗):
+      // 回退到上次实测值(哪怕略旧),避免徽章爆表或整条消失(用户报告 #3),探测完成即刷新。
+      : (measuredCtx?.totalTokens || 0));
   // I4:流式缓冲(chatMessages/streaming 气泡)只在它归属当前会话时显示。切到别的会话时
   // 隐藏(流仍在服务端跑,回到原会话或刷新后由 jsonl/reattach 呈现),不串到当前视图。
   // (liveVisible 已在上方 allMessages 处定义,统计与渲染同源,这里不再重复。)
