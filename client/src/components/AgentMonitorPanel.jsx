@@ -182,6 +182,7 @@ function StatusBadge({ status }) {
     starting:    { label: '启动中',  bg: 'bg-amber-50', fg: 'text-amber-700',  border: 'border-amber-200' },
     working:     { label: '工作中',  bg: 'bg-blue-50',  fg: 'text-blue-700',   border: 'border-blue-200' },
     done:        { label: '完成',    bg: 'bg-green-50', fg: 'text-green-700',  border: 'border-green-200' },
+    idle:        { label: '空闲',    bg: 'bg-amber-50', fg: 'text-amber-700',  border: 'border-amber-200' },
     error:       { label: '错误',    bg: 'bg-red-50',   fg: 'text-red-700',    border: 'border-red-200' },
     needs_input: { label: '待输入',  bg: 'bg-violet-50', fg: 'text-violet-700', border: 'border-violet-200' },
   };
@@ -199,7 +200,10 @@ function StatusBadge({ status }) {
 function BgTaskCard({ task }) {
   const [expanded, setExpanded] = useState(true);
   const [output, setOutput] = useState('');
-  const [running, setRunning] = useState(true);
+  // 'running'=输出在增长;'idle'=一段时间无新输出(**无法确知是否已结束**,故不谎称"完成")。
+  // 没有显式退出码事件,只能据"输出是否增长"启发式判断,所以最多到"空闲",不到"完成"。
+  const [phase, setPhase] = useState('running');
+  const [now, setNow] = useState(() => Date.now());
   const offsetRef = useRef(0);
   const staleRef = useRef(0);
   const preRef = useRef(null);
@@ -216,10 +220,10 @@ function BgTaskCard({ task }) {
           setOutput((prev) => (prev + d.content).slice(-40000)); // 只留尾部 40KB,防超长撑爆
           offsetRef.current = d.size;
           staleRef.current = 0;
-          setRunning(true);
+          setPhase('running');
         } else {
           staleRef.current += 1;
-          if (staleRef.current >= 4) setRunning(false); // ~6s 无增长 → 认为已完成
+          if (staleRef.current >= 6) setPhase('idle'); // ~9s 无增长 → 标"空闲"(不等于"完成")
         }
       } catch {}
     };
@@ -228,12 +232,19 @@ function BgTaskCard({ task }) {
     return () => { cancelled = true; clearInterval(id); };
   }, [task.outputPath]);
 
+  // 1s tick 驱动"已运行时长"跳动(只在运行中跳;空闲后停更省渲染)
+  useEffect(() => {
+    if (phase !== 'running') return;
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [phase]);
+
   // 输出增长时自动滚到底部
   useEffect(() => {
     if (expanded && preRef.current) preRef.current.scrollTop = preRef.current.scrollHeight;
   }, [output, expanded]);
 
-  const elapsed = task.startedAt ? Date.now() - task.startedAt : 0;
+  const elapsed = task.startedAt ? now - task.startedAt : 0;
   return (
     <div className="bg-canvas-warm border border-amber-200 rounded-lg overflow-hidden">
       <button onClick={() => setExpanded(!expanded)} className="w-full p-2.5 text-left">
@@ -243,7 +254,7 @@ function BgTaskCard({ task }) {
           <span className="text-xs font-medium text-ink font-mono truncate" title={task.command}>
             {task.description || task.command || '后台命令'}
           </span>
-          <div className="ml-auto"><StatusBadge status={running ? 'streaming' : 'done'} /></div>
+          <div className="ml-auto"><StatusBadge status={phase === 'running' ? 'streaming' : 'idle'} /></div>
         </div>
         {task.command && (
           <div className="text-[10.5px] text-ink-muted font-mono truncate pl-5" title={task.command}>$ {task.command}</div>
@@ -278,6 +289,7 @@ export function AgentMonitorPanel() {
   const [stoppingPid, setStoppingPid] = useState(null);
   const localAgents = useStore((s) => s.activeAgents);
   const bgTasks = useStore((s) => s.bgTasks);
+  const paneSessions = useStore((s) => s.paneSessions);
 
   const fetchActive = async (silent = false) => {
     if (!silent) setLoading(true);
@@ -321,9 +333,12 @@ export function AgentMonitorPanel() {
   // tool_uses; remote includes our chat-process metadata and CLI's view.
   const localList = Object.values(localAgents);
   // 后台任务:只显示本 stream 捕获到、且已拿到输出文件路径的(以 A 通道为准,
-  // 避免列出 tasks 目录里的历史幽灵 .output)。最新启动的排在最前。
+  // 避免列出 tasks 目录里的历史幽灵 .output)。并且**只显示当前打开的会话**的后台任务
+  // (按所有分屏窗格的 sessionId 过滤)—— 否则切会话后旧卡片会永久堆积且持续轮询。
+  // sessionId 为空的(draft 阶段启动、无法归属)也显示,避免误藏。最新启动的排在最前。
+  const openSessionIds = new Set((paneSessions || []).filter(Boolean).map((s) => s.sessionId).filter(Boolean));
   const bgList = Object.values(bgTasks || {})
-    .filter((t) => t.outputPath)
+    .filter((t) => t.outputPath && (!t.sessionId || openSessionIds.has(t.sessionId)))
     .sort((a, b) => (b.startedAt || 0) - (a.startedAt || 0));
 
   // Bucket by status. 'working'/'starting' default expanded, the rest folded.
