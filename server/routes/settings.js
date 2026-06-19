@@ -60,6 +60,10 @@ const PROVIDER_ENV_KEYS = new Set([
   'ANTHROPIC_DEFAULT_OPUS_MODEL_NAME',
   'ANTHROPIC_REASONING_MODEL',
   'ANTHROPIC_SMALL_FAST_MODEL',
+  // A(#50085): only the third-party switch paths re-set this to '0'. Listing it
+  // here means every switch first strips it, so switching back to official/native
+  // claude never leaves a stale CLAUDE_CODE_ATTRIBUTION_HEADER=0 behind.
+  'CLAUDE_CODE_ATTRIBUTION_HEADER',
 ]);
 
 function mergeProviderEnv(currentEnv = {}, providerEnv = {}) {
@@ -111,6 +115,20 @@ async function readCustomProviders() {
 async function writeCustomProviders(list) {
   await mkdir(join(homedir(), '.claude-gui'), { recursive: true });
   await writeFile(CUSTOM_PROVIDERS_PATH, JSON.stringify(list, null, 2));
+}
+
+// BB6: validate a tierModels input against the provider's model list. Returns a
+// cleaned { haiku?, sonnet?, opus? } keeping only ids present in `models`, or null
+// when nothing valid remains (caller then omits the field → switch回退 chosen).
+function sanitizeTierModels(input, models) {
+  if (!input || typeof input !== 'object') return null;
+  const allowed = new Set(models || []);
+  const out = {};
+  for (const tier of ['haiku', 'sonnet', 'opus']) {
+    const v = input[tier];
+    if (typeof v === 'string' && allowed.has(v.trim())) out[tier] = v.trim();
+  }
+  return Object.keys(out).length ? out : null;
 }
 
 // K4: 一次性导入 cc-switch 后,GUI 不再读 cc-switch.db。该 flag 文件存在 = 已导入,
@@ -409,7 +427,8 @@ router.get('/providers', async (_req, res) => {
   // GUI custom providers (never expose apiKey — only whether one is stored).
   const customProviders = (await readCustomProviders()).map((p) => ({
     id: p.id, name: p.name, type: p.type, baseURL: p.baseURL,
-    models: p.models || [], hasKey: !!p.apiKey, isCustom: true, isCurrent: isCur(p.id, false),
+    models: p.models || [], defaultModel: p.defaultModel || '', tierModels: p.tierModels || null,
+    hasKey: !!p.apiKey, isCustom: true, isCurrent: isCur(p.id, false),
   }));
   res.json({
     available: rows.length > 0 || openai.length > 0 || customProviders.length > 0,
@@ -474,7 +493,7 @@ router.post('/provider/switch', async (req, res) => {
     if (hit.category === 'official') {
       const current = await readCurrentSettings();
       const env = { ...(current.env || {}) };
-      for (const k of ['ANTHROPIC_BASE_URL', 'ANTHROPIC_API_URL', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_API_KEY']) delete env[k];
+      for (const k of ['ANTHROPIC_BASE_URL', 'ANTHROPIC_API_URL', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_API_KEY', 'CLAUDE_CODE_ATTRIBUTION_HEADER']) delete env[k];
       for (const k of Object.keys(env)) {
         if (/_MODEL$/.test(k) && !isClaudeModel(env[k])) { delete env[k]; delete env[k + '_NAME']; }
       }
@@ -541,6 +560,19 @@ router.post('/provider/switch', async (req, res) => {
   }
 });
 
+// BB6: per-provider 档位映射。把子代理/标题/compact 用的 tier alias(haiku/sonnet/
+// opus)分别映射到该 provider 的三个真实模型(简单任务用便宜的,难的用强的)。
+// tierModels = { haiku?, sonnet?, opus? }(每值须 ∈ provider models[],写入时已校验)。
+// 缺档回退到 chosen → 维持现 BA1 行为(三档全=选中模型),向后兼容。
+function resolveTierModels(tierModels, chosen) {
+  const tm = (tierModels && typeof tierModels === 'object') ? tierModels : {};
+  return {
+    haiku:  tm.haiku  || chosen,
+    sonnet: tm.sonnet || chosen,
+    opus:   tm.opus   || chosen,
+  };
+}
+
 // Switch to an OpenAI-compatible provider. Unlike claude providers (whose
 // settings_config IS a settings.json), these need the embedded proxy: we point
 // the CLI's ANTHROPIC_BASE_URL at the loopback proxy and feed it the real
@@ -569,13 +601,22 @@ async function switchToOpenAIUpstream(up, requestedModel, res) {
   // beyond what cc-switch already stores.
   env.ANTHROPIC_AUTH_TOKEN = 'sk-openai-proxy';
   env.ANTHROPIC_MODEL = model;
-  // Route subagent aliases (haiku/sonnet/opus) to the same model so Task
-  // subagents work under the OpenAI backend too.
-  env.ANTHROPIC_DEFAULT_HAIKU_MODEL = model;
-  env.ANTHROPIC_DEFAULT_SONNET_MODEL = model;
-  env.ANTHROPIC_DEFAULT_OPUS_MODEL = model;
+  // Route subagent aliases (haiku/sonnet/opus) to the provider's tier models so
+  // Task subagents work under the OpenAI backend too. BB6: per-tier mapping when
+  // configured, else all three = model (current BA1 behavior).
+  {
+    const t = resolveTierModels(up.tierModels, model);
+    env.ANTHROPIC_DEFAULT_HAIKU_MODEL = t.haiku;
+    env.ANTHROPIC_DEFAULT_SONNET_MODEL = t.sonnet;
+    env.ANTHROPIC_DEFAULT_OPUS_MODEL = t.opus;
+  }
   delete env.ANTHROPIC_DEFAULT_OPUS_MODEL_NAME;
   delete env.ANTHROPIC_DEFAULT_SONNET_MODEL_NAME;
+  // A(#50085/#68900): third-party gateways keyed on the full request body get 0%
+  // cache hits because CC prepends a per-request `cch=` nonce to the system prompt.
+  // api.anthropic.com strips it; relays don't → set =0 to omit it. OpenAI proxy is
+  // always a third-party path, so always set it here.
+  env.CLAUDE_CODE_ATTRIBUTION_HEADER = '0';
 
   const next = { ...current, env };
   const ts = new Date().toISOString().replace(/[:.]/g, '-');
@@ -633,14 +674,20 @@ async function switchToAnthropicUpstream(up, requestedModel, res) {
   // 重定向到第三方真实模型(与 switchToOpenAIUpstream 同构)。chosen 缺失时清掉,避免
   // 沿用上一个 provider 的陈旧值。仅 anthropic 第三方路径受影响,官方/openai 不动。
   if (chosen) {
-    env.ANTHROPIC_DEFAULT_HAIKU_MODEL = chosen;
-    env.ANTHROPIC_DEFAULT_SONNET_MODEL = chosen;
-    env.ANTHROPIC_DEFAULT_OPUS_MODEL = chosen;
+    // BB6: per-tier mapping when configured, else all three = chosen (BA1 behavior).
+    const t = resolveTierModels(up.tierModels, chosen);
+    env.ANTHROPIC_DEFAULT_HAIKU_MODEL = t.haiku;
+    env.ANTHROPIC_DEFAULT_SONNET_MODEL = t.sonnet;
+    env.ANTHROPIC_DEFAULT_OPUS_MODEL = t.opus;
   } else {
     delete env.ANTHROPIC_DEFAULT_HAIKU_MODEL;
     delete env.ANTHROPIC_DEFAULT_SONNET_MODEL;
     delete env.ANTHROPIC_DEFAULT_OPUS_MODEL;
   }
+  // A(#50085/#68900): this path is always a third-party anthropic relay (routed
+  // through the loopback passthrough proxy), never api.anthropic.com — so strip the
+  // per-request `cch=` nonce that otherwise breaks gateway prompt caching.
+  env.CLAUDE_CODE_ATTRIBUTION_HEADER = '0';
   const next = { ...current, env };
   if (snapshot.model) next.model = snapshot.model;
   const ts = new Date().toISOString().replace(/[:.]/g, '-');
@@ -672,7 +719,7 @@ async function switchToCustomProvider(p, requestedModel, res) {
   const effModel = requestedModel || defModel || undefined;
   if (p.type === 'openai') {
     return switchToOpenAIUpstream(
-      { id: p.id, name: p.name, baseURL: p.baseURL, apiKey: p.apiKey, models: p.models || [], defaultModel: defModel },
+      { id: p.id, name: p.name, baseURL: p.baseURL, apiKey: p.apiKey, models: p.models || [], defaultModel: defModel, tierModels: p.tierModels },
       effModel, res,
     );
   }
@@ -686,7 +733,7 @@ async function switchToCustomProvider(p, requestedModel, res) {
     delete snapEnv.ANTHROPIC_DEFAULT_SONNET_MODEL;
     delete snapEnv.ANTHROPIC_DEFAULT_OPUS_MODEL;
     return switchToAnthropicUpstream(
-      { id: p.id, name: p.name, baseURL: p.baseURL, authToken: p.apiKey, snapshot: { ...cur, env: snapEnv }, models, defaultModel: defModel },
+      { id: p.id, name: p.name, baseURL: p.baseURL, authToken: p.apiKey, snapshot: { ...cur, env: snapEnv }, models, defaultModel: defModel, tierModels: p.tierModels },
       effModel, res,
     );
   }
@@ -702,6 +749,9 @@ async function switchToCustomProvider(p, requestedModel, res) {
   delete env.ANTHROPIC_DEFAULT_HAIKU_MODEL;
   delete env.ANTHROPIC_DEFAULT_SONNET_MODEL;
   delete env.ANTHROPIC_DEFAULT_OPUS_MODEL;
+  // Official-anthropic direct (uses CLI OAuth) → the API strips the nonce itself,
+  // so drop any stale attribution-header override left by a prior third-party switch.
+  delete env.CLAUDE_CODE_ATTRIBUTION_HEADER;
   const next = { ...current, env };
   const ts = new Date().toISOString().replace(/[:.]/g, '-');
   await copyFile(SETTINGS_PATH, `${SETTINGS_PATH}.${ts}.bak`).catch(() => {});
@@ -783,7 +833,8 @@ router.get('/custom-providers', async (_req, res) => {
   res.json({
     providers: list.map((p) => ({
       id: p.id, name: p.name, type: p.type, baseURL: p.baseURL,
-      models: p.models || [], defaultModel: p.defaultModel || '', hasKey: !!p.apiKey,
+      models: p.models || [], defaultModel: p.defaultModel || '',
+      tierModels: p.tierModels || null, hasKey: !!p.apiKey,
     })),
   });
 });
@@ -810,6 +861,11 @@ router.post('/custom-providers', async (req, res) => {
     if (typeof defaultModel === 'string' && cleanModels.includes(defaultModel.trim())) {
       entry.defaultModel = defaultModel.trim();
     }
+    // BB6: 可选 tierModels。每档只接受属于 models[] 的 id;非法/缺省不写(回退 chosen)。
+    {
+      const tm = sanitizeTierModels(req.body?.tierModels, cleanModels);
+      if (tm) entry.tierModels = tm;
+    }
     const list = await readCustomProviders();
     list.push(entry);
     await writeCustomProviders(list);
@@ -826,7 +882,7 @@ router.put('/custom-providers/:id', async (req, res) => {
     const list = await readCustomProviders();
     const idx = list.findIndex((p) => p.id === req.params.id);
     if (idx === -1) return res.status(404).json({ error: 'not found' });
-    const { name, type, baseURL, apiKey, models, defaultModel } = req.body || {};
+    const { name, type, baseURL, apiKey, models, defaultModel, tierModels } = req.body || {};
     if (!name || typeof name !== 'string') return res.status(400).json({ error: 'name 必填' });
     if (type !== 'openai' && type !== 'anthropic') return res.status(400).json({ error: 'type 必须是 openai 或 anthropic' });
     let url; try { url = new URL(baseURL); } catch { return res.status(400).json({ error: 'baseURL 非法' }); }
@@ -852,6 +908,17 @@ router.put('/custom-providers/:id', async (req, res) => {
       list[idx].defaultModel = defaultModel.trim();
     } else if (list[idx].defaultModel && !nextModels.includes(list[idx].defaultModel)) {
       delete list[idx].defaultModel;
+    }
+    // BB6: tierModels。显式传入则按 nextModels 校验覆盖(传 null/空对象 = 清除);不传则保留
+    // 旧值,但清理其中已不在 nextModels 的档(避免切换写出指向被删模型的 id → 子代理 404)。
+    if (tierModels !== undefined) {
+      const tm = sanitizeTierModels(tierModels, nextModels);
+      if (tm) list[idx].tierModels = tm; else delete list[idx].tierModels;
+    } else if (list[idx].tierModels) {
+      for (const tier of Object.keys(list[idx].tierModels)) {
+        if (!nextModels.includes(list[idx].tierModels[tier])) delete list[idx].tierModels[tier];
+      }
+      if (!Object.keys(list[idx].tierModels).length) delete list[idx].tierModels;
     }
     await writeCustomProviders(list);
     // If the TYPE changed and this provider was active on the OLD type's marker,

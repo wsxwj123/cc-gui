@@ -5571,6 +5571,9 @@ function CustomProviderForm({ onSaved, editing, onCancel }) {
   const [apiKey, setApiKey] = useState('');
   const [modelsText, setModelsText] = useState('');
   const [defaultModel, setDefaultModel] = useState('');  // AZ8:该 provider 默认模型(空=用列表第一个)
+  // BB6:档位映射 —— 子代理/标题/compact 用的 haiku/sonnet/opus alias 各自映射到该
+  // provider 的真实模型(空=回退默认模型/选中模型,即维持 BA1 行为)。
+  const [tierModels, setTierModels] = useState({ haiku: '', sonnet: '', opus: '' });
   const [busy, setBusy] = useState('');
   const isEdit = !!editing;
   // Entering edit mode: pre-fill from the chosen provider. The apiKey is NEVER
@@ -5583,9 +5586,10 @@ function CustomProviderForm({ onSaved, editing, onCancel }) {
     setApiKey('');
     setModelsText((editing.models || []).join('\n'));
     setDefaultModel(editing.defaultModel || '');
+    setTierModels({ haiku: editing.tierModels?.haiku || '', sonnet: editing.tierModels?.sonnet || '', opus: editing.tierModels?.opus || '' });
     setOpen(true);
   }, [editing?.id]);
-  const reset = () => { setName(''); setType('openai'); setBaseURL(''); setApiKey(''); setModelsText(''); setDefaultModel(''); setOpen(false); };
+  const reset = () => { setName(''); setType('openai'); setBaseURL(''); setApiKey(''); setModelsText(''); setDefaultModel(''); setTierModels({ haiku: '', sonnet: '', opus: '' }); setOpen(false); };
   const close = () => { reset(); onCancel?.(); };
   const parseModels = () => modelsText.split(/[\n,]+/).map((s) => s.trim()).filter(Boolean);
   const fetchModels = async () => {
@@ -5626,6 +5630,12 @@ function CustomProviderForm({ onSaved, editing, onCancel }) {
       const body = { name, type, baseURL, models: parsedModels };
       // AZ8:默认模型(后端校验须在 models 内,否则忽略)。空 = 不指定,回退列表第一个。
       body.defaultModel = defaultModel && parsedModels.includes(defaultModel) ? defaultModel : null;
+      // BB6:档位映射。只收在 parsedModels 内的;后端再校验一遍。空档省略 = 回退选中模型。
+      body.tierModels = {
+        haiku:  parsedModels.includes(tierModels.haiku)  ? tierModels.haiku  : '',
+        sonnet: parsedModels.includes(tierModels.sonnet) ? tierModels.sonnet : '',
+        opus:   parsedModels.includes(tierModels.opus)   ? tierModels.opus   : '',
+      };
       // Edit mode: a blank key means "keep the stored one" (the client never holds
       // the real key), so only send apiKey when the user actually typed a new one.
       if (!isEdit || apiKey.trim()) body.apiKey = apiKey;
@@ -5724,6 +5734,22 @@ function CustomProviderForm({ onSaved, editing, onCancel }) {
           <option value="">— 列表第一个(不指定)—</option>
           {parseModels().map((m) => (<option key={m} value={m}>{m}</option>))}
         </select>
+      </div>
+      {/* BB6:档位映射 —— 子代理/标题/compact 走 haiku/sonnet/opus 别名,分别映射到该
+          provider 的真实模型(简单任务用便宜的、难的用强的)。留空 = 回退默认模型/选中模型。
+          要生效:agent .md 写别名(model: haiku)而非具体 id(具体 id 优先级更高,绕过映射)。 */}
+      <div className="space-y-1.5 pt-0.5">
+        <div className="text-[11px] text-ink-faint">档位映射 <span className="text-ink-faint/70">子代理/标题/compact 走便宜档,主对话走强档;留空 = 用默认模型</span></div>
+        {[['haiku', 'Haiku 档(子代理/标题/便宜)'], ['sonnet', 'Sonnet 档(常规)'], ['opus', 'Opus 档(最强)']].map(([tier, label]) => (
+          <div key={tier} className="flex items-center gap-2">
+            <span className="text-[11px] text-ink-faint shrink-0 w-14 whitespace-nowrap">{tier}</span>
+            <select value={tierModels[tier]} onChange={(e) => setTierModels((s) => ({ ...s, [tier]: e.target.value }))}
+              className={`${inputCls} flex-1 cursor-pointer font-mono`} title={label}>
+              <option value="">— 回退默认模型 —</option>
+              {parseModels().map((m) => (<option key={m} value={m}>{m}</option>))}
+            </select>
+          </div>
+        ))}
       </div>
       <div className="flex gap-2">
         <button onClick={fetchModels} disabled={!!busy}
