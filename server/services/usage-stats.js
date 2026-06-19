@@ -1,7 +1,7 @@
 import { readdir, stat } from 'fs/promises';
 import { join } from 'path';
 import { homedir } from 'os';
-import { parseJsonl } from '../utils/jsonl-parser.js';
+import { streamJsonl } from '../utils/jsonl-parser.js';
 
 const PROJECTS_DIR = join(homedir(), '.claude', 'projects');
 
@@ -73,20 +73,18 @@ async function recompute(jsonlFiles, sig) {
     for (const fileInfo of jsonlFiles) {
       const dir = { name: fileInfo.projectName };
       try {
-        const records = await parseJsonl(fileInfo.path, { limit: 5000 });
-        sessionCount++;
-
+        // 流式逐行聚合,不全量驻留(长会话 jsonl 可达数万行,旧版 limit:5000 截断会漏计)。
         // W8:按 message.id 去重 —— 同一 API 调用的流式分片在 jsonl 里可能落多条
         // assistant 记录(usage 相同),不去重会成倍虚算。sidechain(子代理)同理排除。
         const seenIds = new Set();
-        for (const record of records) {
-          if (record.type !== 'assistant') continue;
-          if (record.isSidechain || record.parentToolUseId) continue;
+        await streamJsonl(fileInfo.path, (record) => {
+          if (record.type !== 'assistant') return;
+          if (record.isSidechain || record.parentToolUseId) return;
           const usage = record.message?.usage;
-          if (!usage) continue;
+          if (!usage) return;
           const mid = record.message?.id;
           if (mid) {
-            if (seenIds.has(mid)) continue;
+            if (seenIds.has(mid)) return;
             seenIds.add(mid);
           }
 
@@ -125,7 +123,8 @@ async function recompute(jsonlFiles, sig) {
           byDay[day].cacheRead += cacheRead;
           byDay[day].cacheWrite += cacheWrite;
           byDay[day].calls++;
-        }
+        });
+        sessionCount++;
       } catch {
         // skip unreadable files
       }

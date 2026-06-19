@@ -19,9 +19,43 @@ function isProcessAlive(pid) {
   }
 }
 
+// 解析 wmic CSV 输出为 {COL: value} 行数组。wmic /format:csv 首列恒为 Node(主机名)。
+function parseWmicCsv(output) {
+  const lines = output.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  const headerIdx = lines.findIndex((l) => /,/.test(l) && /Node/i.test(l));
+  if (headerIdx < 0) return [];
+  const headers = lines[headerIdx].split(',');
+  return lines.slice(headerIdx + 1).map((line) => {
+    const cols = line.split(',');
+    const row = {};
+    headers.forEach((h, i) => { row[h.trim()] = (cols[i] || '').trim(); });
+    return row;
+  });
+}
+
 function getProcessInfo(pid) {
   const n = Number(pid);
   if (!Number.isInteger(n) || n <= 0) return null;
+  if (process.platform === 'win32') {
+    // Windows 无 ps。wmic 取 ppid/命令行/启动时间;cpu/mem 不便取→给 null 不崩。
+    try {
+      const output = execFileSync('wmic', ['process', 'where', `ProcessId=${n}`, 'get', 'ProcessId,ParentProcessId,CommandLine,CreationDate', '/format:csv'], { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] });
+      const rows = parseWmicCsv(output);
+      if (!rows.length) return null;
+      const r = rows[0];
+      return {
+        pid: parseInt(r.ProcessId) || n,
+        ppid: r.ParentProcessId ? parseInt(r.ParentProcessId) : null,
+        cpu: null,
+        mem: null,
+        elapsed: null,
+        startedAt: r.CreationDate || null,  // WMI 形如 20260619141700.000000+480
+        command: r.CommandLine || null,
+      };
+    } catch {
+      return null;
+    }
+  }
   try {
     const output = execFileSync('ps', ['-p', String(n), '-o', 'pid,ppid,%cpu,%mem,etime,command'], { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] });
     const lines = output.trim().split('\n');
@@ -83,24 +117,41 @@ router.get('/processes', async (req, res) => {
       } catch {}
     }
 
-    // Also find claude processes via ps — no shell, filter in JS to avoid a
-    // shell pipe (`ps aux | grep`) spawning /bin/sh on every poll.
+    // Also find claude processes — no shell, filter in JS to avoid a shell pipe
+    // (`ps aux | grep`) spawning /bin/sh on every poll.
     let claudeProcesses = [];
-    try {
-      const psOutput = execFileSync('ps', ['aux'], { encoding: 'utf-8', maxBuffer: 8 * 1024 * 1024 });
-      claudeProcesses = psOutput.trim().split('\n').filter((line) => {
-        return /\bclaude\b/.test(line) && !/claude-gui/.test(line) && !/\bgrep\b/.test(line);
-      }).map((line) => {
-        const parts = line.trim().split(/\s+/);
-        return {
-          pid: parseInt(parts[1]),
-          cpu: parts[2],
-          mem: parts[3],
-          elapsed: parts[9],
-          command: parts.slice(10).join(' '),
-        };
-      });
-    } catch {}
+    if (process.platform === 'win32') {
+      // Windows 无 ps。wmic 取全量进程的命令行,按命令行匹配 claude;cpu/mem 不便取→null。
+      try {
+        const wmicOut = execFileSync('wmic', ['process', 'get', 'ProcessId,CommandLine,CreationDate', '/format:csv'], { encoding: 'utf-8', maxBuffer: 16 * 1024 * 1024, stdio: ['ignore', 'pipe', 'ignore'] });
+        claudeProcesses = parseWmicCsv(wmicOut)
+          .filter((r) => r.CommandLine && /\bclaude\b/i.test(r.CommandLine) && !/claude-gui/i.test(r.CommandLine))
+          .map((r) => ({
+            pid: parseInt(r.ProcessId) || null,
+            cpu: null,
+            mem: null,
+            elapsed: null,
+            startedAt: r.CreationDate || null,
+            command: r.CommandLine,
+          }));
+      } catch {}
+    } else {
+      try {
+        const psOutput = execFileSync('ps', ['aux'], { encoding: 'utf-8', maxBuffer: 8 * 1024 * 1024 });
+        claudeProcesses = psOutput.trim().split('\n').filter((line) => {
+          return /\bclaude\b/.test(line) && !/claude-gui/.test(line) && !/\bgrep\b/.test(line);
+        }).map((line) => {
+          const parts = line.trim().split(/\s+/);
+          return {
+            pid: parseInt(parts[1]),
+            cpu: parts[2],
+            mem: parts[3],
+            elapsed: parts[9],
+            command: parts.slice(10).join(' '),
+          };
+        });
+      } catch {}
+    }
 
     res.json({ sessionProcesses: processes, claudeProcesses });
   } catch (err) {

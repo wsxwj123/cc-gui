@@ -213,7 +213,8 @@ router.post('/checkpoints/:sessionId/restore', async (req, res) => {
     for (const rel of headFiles) {
       if (!targetSet.has(rel)) await removeWorktreePath(workTree, rel);
     }
-    await gitShadow(['clean', '-fd', '--', '.'], req.params.sessionId, workTree);
+    // 不再 `git clean -fd`:未跟踪文件(用户手工建的 notes.txt 等)不属 shadow git 管辖,
+    // 清掉会丢用户数据。已跟踪文件的删除由上面的 removeWorktreePath 循环处理。
     res.json({ ok: true, removedSinceCheckpoint: headFiles.filter((rel) => !targetSet.has(rel)).length });
   } catch (err) {
     res.status(400).json({ error: err.message });
