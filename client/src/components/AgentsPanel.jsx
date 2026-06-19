@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Bot, RefreshCw, Save, Check, Plus, FileText } from 'lucide-react';
+import { Bot, RefreshCw, Save, Check, Plus, FileText, Download, Package } from 'lucide-react';
 
 export function AgentsPanel() {
   const [agents, setAgents] = useState([]);
@@ -14,6 +14,29 @@ export function AgentsPanel() {
   const [defaultModel, setDefaultModel] = useState('sonnet');
   const [modelOptions, setModelOptions] = useState([]);
   const [newModel, setNewModel] = useState('sonnet');
+  // BG5:内置预设(随 GUI 分发,移植自 oh-my-opencode-slim)。按需安装到 ~/.claude/agents。
+  const [showBuiltin, setShowBuiltin] = useState(false);
+  const [builtin, setBuiltin] = useState([]);
+  const [installing, setInstalling] = useState('');
+
+  const fetchBuiltin = async () => {
+    try {
+      const d = await (await fetch('/api/agents/builtin')).json();
+      setBuiltin(Array.isArray(d?.agents) ? d.agents : []);
+    } catch {}
+  };
+  const installBuiltin = async (names, overwrite) => {
+    setInstalling(names ? names[0] : '__all__');
+    try {
+      await fetch('/api/agents/builtin/install', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ names, overwrite }),
+      });
+      await fetchBuiltin();
+      await fetchAgents();
+    } catch {}
+    setInstalling('');
+  };
 
   const fetchAgents = async () => {
     setLoading(true);
@@ -83,6 +106,8 @@ export function AgentsPanel() {
             <Bot size={11} />Subagents · {agents.length}
           </span>
           <div className="flex gap-1">
+            <button onClick={() => { const n = !showBuiltin; setShowBuiltin(n); if (n) fetchBuiltin(); }}
+              className={`p-1 hover:text-accent ${showBuiltin ? 'text-accent' : 'text-ink-faint'}`} title="安装内置 Agent 预设（explorer/oracle/orchestrator 等）"><Package size={12} /></button>
             <button onClick={() => setCreating(!creating)} className="p-1 text-ink-faint hover:text-accent" title="新建 subagent 定义"><Plus size={12} /></button>
             <button onClick={fetchAgents} className="p-1 text-ink-faint hover:text-ink-muted" title="刷新列表"><RefreshCw size={11} /></button>
           </div>
@@ -107,6 +132,36 @@ export function AgentsPanel() {
           </div>
           <p className="text-[10px] text-ink-faint font-body leading-snug">
             默认填当前 provider 的默认模型（<code className="text-ink-muted">{defaultModel}</code>）。.md 里的 <code className="text-ink-muted">model</code> 会决定该子代理实际使用的模型，可与主会话不同；别名（sonnet/opus/haiku）在各 provider 下由 CLI 自动路由。
+          </p>
+        </div>
+      )}
+
+      {showBuiltin && (
+        <div className="px-4 py-2 border-b border-canvas-deep bg-canvas-warm/40">
+          <div className="flex items-center justify-between mb-1.5">
+            <span className="text-[10px] uppercase tracking-wider text-ink-faint font-body">内置预设 · 移植自 oh-my-opencode-slim</span>
+            <button onClick={() => installBuiltin(null, false)} disabled={!!installing}
+              className="btn-accent text-[10px] px-2 py-0.5 flex items-center gap-1"><Download size={10} />全部安装</button>
+          </div>
+          <div className="space-y-1">
+            {builtin.map((a) => (
+              <div key={a.name} className="flex items-center gap-2 text-[11px] font-body">
+                <span className="font-mono text-ink-soft w-[88px] shrink-0 truncate">{a.name}</span>
+                <span className="text-ink-faint font-mono shrink-0">{a.model || '继承'}</span>
+                <span className="flex-1 text-ink-faint truncate">{a.description}</span>
+                {a.installed ? (
+                  <button onClick={() => installBuiltin([a.name], true)} disabled={!!installing}
+                    className="text-[10px] px-1.5 py-0.5 rounded text-ink-faint hover:text-accent shrink-0" title="覆盖重装">已装·覆盖</button>
+                ) : (
+                  <button onClick={() => installBuiltin([a.name], false)} disabled={!!installing}
+                    className="text-[10px] px-1.5 py-0.5 rounded bg-accent/15 text-accent hover:bg-accent/25 shrink-0">安装</button>
+                )}
+              </div>
+            ))}
+            {builtin.length === 0 && <p className="text-[10px] text-ink-faint">加载中…</p>}
+          </div>
+          <p className="text-[10px] text-ink-faint mt-1.5 font-body leading-snug">
+            装好后即普通可编辑的自定义 agent。<code className="text-ink-muted">orchestrator</code> 可在输入框旁的「模式」开关里选作主控，自动委派 explorer/oracle/fixer 等。
           </p>
         </div>
       )}

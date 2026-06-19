@@ -237,6 +237,11 @@ export async function listSessions(projectHash) {
           const textContent = raw.find((c) => c.type === 'text');
           firstPrompt = textContent?.text?.slice(0, 200) || '';
         }
+        // Same root cause as the message view: a skill/slash-started session's first
+        // record is a `<command-name>/<command-args>` blob. Show the reconstructed
+        // `/name args` as the list preview instead of leaking raw XML tags.
+        const cmdPreview = reconstructCommandPrompt(firstPrompt);
+        if (cmdPreview) firstPrompt = cmdPreview.slice(0, 200);
       }
 
       // 防御:标题生成是一次性隔离调用(POST /api/chat/title),正常带
@@ -373,6 +378,27 @@ function isLocalCommandEcho(text) {
 }
 
 /**
+ * A slash-command invocation (e.g. `/general-sci-writing 看看进度`) is stored as a
+ * `user` record whose text bundles `<command-message>` + `<command-name>` +
+ * (optionally) `<command-args>`. The args ARE the user's real opening prompt.
+ * Dropping the whole record (isLocalCommandEcho) made skill-started sessions lose
+ * their first message — the user scrolls to the top and their original request is
+ * gone ("看不见最开始的消息"). Reconstruct a single `/name args` user bubble (matches
+ * Claude Desktop). Returns the prompt string, or null when there are no args — a
+ * bare control command (/clear, /compact, /context) stays hidden so we don't
+ * reintroduce the old "斜杠命令多出两条隐藏消息" noise.
+ */
+function reconstructCommandPrompt(text) {
+  const nameM = text.match(/<command-name>\s*([^<]*?)\s*<\/command-name>/);
+  if (!nameM) return null;
+  const argsM = text.match(/<command-args>\s*([\s\S]*?)\s*<\/command-args>/);
+  const args = argsM ? argsM[1].trim() : '';
+  if (!args) return null;
+  const name = nameM[1].trim();
+  return name ? `${name} ${args}` : args;
+}
+
+/**
  * Build turn-based message groups from a session's JSONL records.
  *
  * A "turn" = one user prompt + all assistant responses (thinking, text, tool calls)
@@ -456,14 +482,16 @@ export async function getSessionMessages(sessionId, projectHash) {
         const textParts = content.filter((c) => c.type === 'text');
         const text = textParts.map((c) => c.text).join('\n').trim();
 
-        if (text && !isLocalCommandEcho(text)) {
+        const cmdPrompt = reconstructCommandPrompt(text);
+        const shownText = cmdPrompt || text;
+        if (shownText && (cmdPrompt || !isLocalCommandEcho(text))) {
           // This is a real user prompt — flush previous turn and start new user message
           flushTurn();
           const meta = attachmentsByHash[attachmentTextHash(text)];
           messages.push({
             type: 'user',
             uuid: record.uuid,
-            text,
+            text: shownText,
             timestamp: record.timestamp,
             sessionId: record.sessionId,
             permissionMode: record.permissionMode,

@@ -171,6 +171,7 @@ router.post('/chat', async (req, res) => {
     permissionMode,
     globalRead,
     appendSystemPrompt,
+    agent,
   } = req.body;
   if (!prompt) return res.status(400).json({ error: 'prompt is required' });
 
@@ -218,6 +219,12 @@ router.post('/chat', async (req, res) => {
   // (NUL 垃圾文件不靠系统提示防,改由 chat 的实时 watcher 兜底删除,见 startWinNulWatcher。)
   if (typeof appendSystemPrompt === 'string' && appendSystemPrompt.trim()) {
     args.push('--append-system-prompt', appendSystemPrompt.trim().slice(0, 8000));
+  }
+  // 活跃 Agent / 模式开关(BG5):把会话切到某个 ~/.claude/agents/<name> 当主控
+  // (CLI --agent),主控可经 Task 委派子代理 —— 复刻 opencode 的 orchestrator 模式。
+  // 仅在新会话(无 sessionId)首轮注入:--agent 是会话级设定,resume 时再传 CLI 会拒绝。
+  if (typeof agent === 'string' && /^[a-z0-9][a-z0-9-]{0,63}$/.test(agent) && !sessionId) {
+    args.push('--agent', agent);
   }
   if (sessionId) args.push('--resume', sessionId);
   if (effort && VALID_EFFORTS.has(effort)) args.push('--effort', effort);

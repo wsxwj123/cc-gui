@@ -14,7 +14,7 @@ import { TurnBubble } from './components/TurnBubble.jsx';
 import TurnScrubber from './components/TurnScrubber.jsx';
 import ChatSearch from './components/ChatSearch.jsx';
 import { confirmDialog } from './utils/confirmDialog.jsx';
-import { ChatInput, EffortSelector, PermissionModeSelector, EFFORT_LEVELS, MODE_META } from './components/ChatInput.jsx';
+import { ChatInput, EffortSelector, PermissionModeSelector, AgentModeSelector, EFFORT_LEVELS, MODE_META } from './components/ChatInput.jsx';
 import { ModelBadge, ProviderAvatar } from './components/ModelBadge.jsx';
 import { UsagePanel } from './components/UsagePanel.jsx';
 import { ProcessPanel } from './components/ProcessPanel.jsx';
@@ -2795,6 +2795,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       })();
       const currentModel = _pin || _hist || useStore.getState().currentModel;
       const effort = useStore.getState().getEffortFor(sessionQueueKey);
+      // BG5:活跃 Agent / 模式 —— 仅新会话(无 sid)注入 --agent(server 也只在无 sessionId 时传)。
+      const activeAgent = !sid ? useStore.getState().getActiveAgentFor(sessionQueueKey) : '';
       // When resuming an existing session, cwd MUST be the EXACT string the
       // CLI was launched with — including Unicode chars (e.g. `/foo/肠骨轴`).
       // Reconstructing from the hash dir name is lossy: CLI maps every non-
@@ -2822,6 +2824,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           addDirs: addDirs && addDirs.length ? addDirs : undefined,
           permissionMode: permissionMode || 'default',
           globalRead: globalRead !== false,
+          agent: activeAgent || undefined,
         }),
       });
       const respJson = await res.json();
@@ -4200,7 +4203,11 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // I4:流式缓冲(chatMessages/streaming 气泡)只在它归属当前会话时显示。切到别的会话时
   // 隐藏(流仍在服务端跑,回到原会话或刷新后由 jsonl/reattach 呈现),不串到当前视图。
   // (liveVisible 已在上方 allMessages 处定义,统计与渲染同源,这里不再重复。)
-  const contextPct = contextTokens > 0 ? Math.min(100, Math.round((contextTokens / contextWindow) * 100)) : 0;
+  // BG2:不再把百分比截断到 100。第三方端点(模型名透传成 claude-* 但不强制该名义窗口)
+  // 会让上下文真涨到 200k 窗口的 1.5~2.5 倍,CLI 自己的 /context 也照实报(如 386.7k/200k=193%)。
+  // 截断成 100% 会和分子分母(387k/200k)自相矛盾、误导用户;直接显示真实占比更诚实,>100%
+  // 即"已超出该模型名义窗口"的明确信号。tone(≥80 红)与 AutoCompactBanner(≥阈值)行为不变。
+  const contextPct = contextTokens > 0 ? Math.round((contextTokens / contextWindow) * 100) : 0;
   const fmtTok = (n) => (n >= 1000 ? Math.round(n / 1000) + 'k' : String(n));
   const winLabel = contextWindow >= 1_000_000 ? '1M' : `${Math.round(contextWindow / 1000)}k`;
 
@@ -4927,6 +4934,12 @@ function ContextBreakdownButton({ contextTokens, contextWindow, contextPct, fmtT
             </span>
             <span className="text-[11px] font-mono text-ink-muted">{data.pct}%</span>
           </div>
+          {/* BG2:超出名义窗口时给提示 —— 第三方端点常放宽 claude-* 模型名的窗口限制。 */}
+          {data.totalTokens > data.windowTokens && (
+            <div className="text-[10px] text-amber-700 font-body mb-2 leading-snug">
+              已超出该模型名义窗口({data.windowTokens >= 1_000_000 ? '1M' : Math.round(data.windowTokens / 1000) + 'k'})。若用第三方端点,其实际可接受的上下文可能更大;否则建议 /compact 或换 provider。
+            </div>
+          )}
           {/* 分段进度条 */}
           <div className="h-2 w-full rounded-full bg-black/10 overflow-hidden flex mb-3">
             {cats.filter((c) => !/free space/i.test(c.name)).map((c, i) => (
@@ -6614,6 +6627,7 @@ export default function App() {
           <ModelSelector placement="bottom" align="right" compact permKey={permKey} />
           <EffortSelector placement="bottom" align="right" permKey={permKey} />
           <PermissionModeSelector permKey={permKey} />
+          <AgentModeSelector permKey={permKey} sessionStarted={!!activeSession?.sessionId} />
           <RemoteControlButton session={activeSession} />
           <div className="w-px h-4 bg-ink-ghost/30 mx-1" />
           {/* Split-screen toggle. Activates the right pane (initially empty

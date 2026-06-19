@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Send, Loader2, Square, Terminal, Puzzle, Wrench, Gauge, ChevronDown, X, FileText, Paperclip, Shield, ShieldOff, ClipboardList, Check, Pencil, Smartphone } from 'lucide-react';
+import { Send, Loader2, Square, Terminal, Puzzle, Wrench, Gauge, ChevronDown, X, FileText, Paperclip, Shield, ShieldOff, ClipboardList, Check, Pencil, Smartphone, Workflow } from 'lucide-react';
 import { useStore, PERMISSION_MODES } from '../stores/sessionStore.js';
 import { PermissionPrompt } from './PermissionPrompt.jsx';
 import { TodoPanel } from './TodoPanel.jsx';
@@ -61,6 +61,74 @@ export function PermissionModeSelector({ permKey }) {
               </button>
             );
           })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// BG5:活跃 Agent / 模式开关。选一个 ~/.claude/agents 里的 agent 作会话主控
+// (CLI --agent),它可经 Task 委派子代理 —— 复刻 opencode 的 orchestrator 模式。
+// 仅新建会话生效(CLI 不接受 --resume 时改 agent),所以已开始的会话这里只读地显示。
+export function AgentModeSelector({ permKey = null, sessionStarted = false }) {
+  const active = useStore((s) => (permKey ? (s.activeAgentBySession || {})[permKey] || '' : ''));
+  const [open, setOpen] = useState(false);
+  const [agents, setAgents] = useState([]);
+  const wrapRef = useRef(null);
+
+  useEffect(() => {
+    if (!open) return;
+    fetch('/api/agents').then((r) => r.json()).then((d) => {
+      setAgents(Array.isArray(d?.agents) ? d.agents : []);
+    }).catch(() => {});
+    const onDocClick = (e) => { if (!wrapRef.current?.contains(e.target)) setOpen(false); };
+    const onEsc = (e) => { if (e.key === 'Escape') setOpen(false); };
+    document.addEventListener('mousedown', onDocClick);
+    document.addEventListener('keydown', onEsc);
+    return () => {
+      document.removeEventListener('mousedown', onDocClick);
+      document.removeEventListener('keydown', onEsc);
+    };
+  }, [open]);
+
+  const pick = (name) => { useStore.getState().setActiveAgentFor(permKey, name); setOpen(false); };
+  const label = active || '普通模式';
+
+  return (
+    <div ref={wrapRef} className="relative">
+      <button onClick={() => setOpen(!open)}
+        className="flex items-center gap-1 px-2 py-1 rounded-md hover:bg-black/5 transition-colors"
+        title={`活跃 Agent / 模式${sessionStarted ? '（已开始的会话不可更改，仅新建会话生效）' : '：选一个 agent 作主控，可自动委派子代理（新建会话生效）'}`}>
+        <Workflow size={12} className={active ? 'text-accent' : 'text-ink-faint'} />
+        <span className={`text-[11px] font-body ${active ? 'text-accent' : 'text-ink-muted'}`}>{label}</span>
+        <ChevronDown size={10} className="text-ink-faint" />
+      </button>
+      {open && (
+        <div className="glass-popover absolute right-0 top-full mt-2 w-64 z-50 py-1 animate-glass-rise max-h-[60vh] overflow-y-auto">
+          <div className="px-3 py-1.5 text-[10px] text-ink-faint uppercase tracking-wider font-body">活跃 Agent / 模式 (--agent)</div>
+          {sessionStarted && (
+            <div className="px-3 pb-1.5 text-[10px] text-amber-700 font-body leading-snug">已开始的会话不可更改主控；此选择在新建会话时生效。</div>
+          )}
+          <button onClick={() => pick('')}
+            className={`w-full text-left px-3 py-2 hover:bg-black/5 flex items-center gap-2 ${!active ? 'bg-accent/12' : ''}`}>
+            <span className="flex-1 text-xs font-medium text-ink font-body">普通模式</span>
+            {!active && <div className="w-1.5 h-1.5 rounded-full bg-accent shrink-0" />}
+          </button>
+          {agents.map((a) => (
+            <button key={a.name} onClick={() => pick(a.name)}
+              className={`w-full text-left px-3 py-2 hover:bg-black/5 flex items-start gap-2 ${active === a.name ? 'bg-accent/12' : ''}`}>
+              <div className="flex-1 min-w-0">
+                <div className="text-xs font-medium text-ink font-body truncate">
+                  {a.name}{a.name === 'orchestrator' && <span className="text-[9px] text-accent ml-1">可编排主控</span>}
+                </div>
+                {a.description && <div className="text-[10px] text-ink-faint font-body truncate">{a.description}</div>}
+              </div>
+              {active === a.name && <div className="w-1.5 h-1.5 rounded-full bg-accent mt-1.5 shrink-0" />}
+            </button>
+          ))}
+          {agents.length === 0 && (
+            <div className="px-3 py-2 text-[11px] text-ink-faint font-body">无自定义 agent。可在「Agent」面板安装内置预设。</div>
+          )}
         </div>
       )}
     </div>

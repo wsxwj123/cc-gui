@@ -166,6 +166,11 @@ export const useStore = create((set, get) => ({
   // 回落全局 `effort`(最终 settings.json env)。切模型时若该档不被新模型支持,CLI 自动
   // 降级到 ≤该档的最高支持档,不报错。
   effortBySession: readLs('cgui-effort-by-session', {}),
+  // Per-session "active agent / mode" (BG5). When set, the session is started
+  // with `--agent <name>` so that agent (e.g. orchestrator) becomes the primary
+  // controller and delegates to subagents. Empty = 普通模式 (no --agent). Only
+  // applied on NEW sessions (CLI rejects --agent on --resume).
+  activeAgentBySession: readLs('cgui-agent-by-session', {}),
   // User-defined session titles { [sessionId]: title }. When set, overrides the
   // auto firstPrompt everywhere the title shows (sidebar / header / breadcrumb).
   // We never touch the on-disk jsonl — titles live only in localStorage.
@@ -373,6 +378,19 @@ export const useStore = create((set, get) => ({
     const map = get().permissionModeBySession || {};
     return map[key] || get().permissionMode || 'default';
   },
+  // Per-session active agent / mode (BG5). Keyed like model/permission.
+  setActiveAgentFor: (key, name) => {
+    if (!key) return;
+    const map = { ...get().activeAgentBySession };
+    if (name) map[key] = name; else delete map[key];
+    writeLs('cgui-agent-by-session', map);
+    set({ activeAgentBySession: map });
+  },
+  getActiveAgentFor: (key) => {
+    if (!key) return '';
+    return (get().activeAgentBySession || {})[key] || '';
+  },
+
   // Per-session model. No entry → global currentModel (the resolved default).
   // Does NOT write settings.json — a per-session pick must not change the CLI's
   // global default (which terminal use + cc switch rely on).
@@ -449,6 +467,12 @@ export const useStore = create((set, get) => ({
     if (ebs[fromKey] != null && (force || ebs[toKey] == null)) {
       const e2 = { ...ebs, [toKey]: ebs[fromKey] }; delete e2[fromKey];
       writeLs('cgui-effort-by-session', e2); patch.effortBySession = e2;
+    }
+    // BG5:活跃 Agent / 模式也按会话隔离,draft→真 sid 一并迁移,否则发送后模式开关回落"普通模式"。
+    const abs = get().activeAgentBySession;
+    if (abs[fromKey] != null && (force || abs[toKey] == null)) {
+      const a = { ...abs, [toKey]: abs[fromKey] }; delete a[fromKey];
+      writeLs('cgui-agent-by-session', a); patch.activeAgentBySession = a;
     }
     // Q2 修复:messageQueue 也按会话隔离,draft 期间排队的消息要随 init 后的真 sid 迁移。
     // 否则:用户在新会话连续发 A/B,A 时还是 draft → 进 messageQueue[draft-xxx];

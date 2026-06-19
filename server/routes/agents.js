@@ -2,13 +2,16 @@ import { Router } from 'express';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { readFile, readdir, writeFile, mkdir, stat, open } from 'fs/promises';
-import { join } from 'path';
+import { join, dirname } from 'path';
+import { fileURLToPath } from 'url';
 import { homedir } from 'os';
 import { getActiveChatProcesses } from './chat.js';
 
 const execFileP = promisify(execFile);
 const router = Router();
 const AGENTS_DIR = join(homedir(), '.claude', 'agents');
+// Bundled agent presets shipped with the GUI (ported from oh-my-opencode-slim).
+const BUILTIN_AGENTS_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', 'assets', 'builtin-agents');
 
 const NAME_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
 function assertName(name) {
@@ -143,6 +146,76 @@ router.get('/agents/active', async (req, res) => {
       cliSessions: out.filter((a) => a.kind === 'cli-session').length,
     },
   });
+});
+
+// ── Bundled (built-in) agent presets ─────────────────────────────────────
+// The GUI ships agent .md presets (explorer/librarian/oracle/designer/fixer +
+// orchestrator, ported from oh-my-opencode-slim). They are NOT auto-installed —
+// the user installs on demand, after which they live in ~/.claude/agents/ as
+// ordinary, fully-editable custom agents.
+// NOTE: these routes MUST be registered before `/agents/:name`, otherwise
+// Express matches `:name = "builtin"` and returns "agent not found".
+
+async function readBuiltinAgents() {
+  const out = [];
+  let files = [];
+  try { files = await readdir(BUILTIN_AGENTS_DIR); } catch { return out; }
+  for (const f of files) {
+    if (!f.endsWith('.md')) continue;
+    const name = f.replace(/\.md$/, '');
+    let content = '';
+    try { content = await readFile(join(BUILTIN_AGENTS_DIR, f), 'utf-8'); } catch { continue; }
+    let description = '';
+    const m = content.match(/^---[\s\S]*?description:\s*(.+?)[\n\r]/);
+    if (m) description = m[1].trim();
+    let model = '';
+    const mm = content.match(/^---[\s\S]*?\bmodel:\s*(.+?)[\n\r]/);
+    if (mm) model = mm[1].trim();
+    let installed = false;
+    try { await stat(join(AGENTS_DIR, f)); installed = true; } catch {}
+    out.push({ name, description, model, installed, content });
+  }
+  return out;
+}
+
+/** GET /api/agents/builtin — list bundled presets + whether each is installed. */
+router.get('/agents/builtin', async (_req, res) => {
+  try {
+    const agents = (await readBuiltinAgents()).map(({ content, ...rest }) => rest);
+    res.json({ agents });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * POST /api/agents/builtin/install  { names?: string[], overwrite?: boolean }
+ * Copies bundled presets into ~/.claude/agents/. Without `names`, installs all.
+ * Skips already-present files unless `overwrite` is true. Never deletes anything.
+ */
+router.post('/agents/builtin/install', async (req, res) => {
+  try {
+    const { names, overwrite } = req.body || {};
+    const builtin = await readBuiltinAgents();
+    const wanted = Array.isArray(names) && names.length
+      ? builtin.filter((a) => names.includes(a.name))
+      : builtin;
+    if (!wanted.length) return res.status(400).json({ error: '没有匹配的内置 agent' });
+    await mkdir(AGENTS_DIR, { recursive: true });
+    const installed = [];
+    const skipped = [];
+    for (const a of wanted) {
+      const dest = join(AGENTS_DIR, `${a.name}.md`);
+      let exists = false;
+      try { await stat(dest); exists = true; } catch {}
+      if (exists && !overwrite) { skipped.push(a.name); continue; }
+      await writeFile(dest, a.content, 'utf-8');
+      installed.push(a.name);
+    }
+    res.json({ ok: true, installed, skipped });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 /** GET /api/agents/:name — raw file content (md or json) */

@@ -424,8 +424,13 @@ const BUILTIN_COMMANDS = [
   { name: '/add-dir',         desc: '添加工作目录',        type: 'builtin' },
   { name: '/export',          desc: '导出会话',            type: 'builtin' },
   { name: '/todos',           desc: '查看任务列表',        type: 'builtin' },
+  { name: '/context',         desc: '上下文用量明细',      type: 'builtin', note: 'GUI 顶部徽章已原生展示，点击徽章看分类明细' },
+  { name: '/usage',           desc: '订阅用量',            type: 'builtin', requiresAnthropic: 'partial', note: 'GUI 用量面板已原生展示' },
 
   // -p 模式 CLI 拒绝（交互式专属）
+  { name: '/rewind',         desc: '回退会话/代码',   type: 'builtin', interactiveOnly: true, note: 'GUI 用消息上的回滚/checkpoint 菜单实现' },
+  { name: '/rename',         desc: '重命名会话',     type: 'builtin', interactiveOnly: true, note: 'GUI 直接点会话标题即可编辑' },
+  { name: '/bashes',         desc: '后台 shell 列表', type: 'builtin', interactiveOnly: true, note: 'GUI 进程面板已原生展示' },
   { name: '/help',           desc: '帮助',           type: 'builtin', interactiveOnly: true },
   { name: '/status',         desc: '会话状态',       type: 'builtin', interactiveOnly: true },
   { name: '/doctor',         desc: '健康检查',       type: 'builtin', interactiveOnly: true },
