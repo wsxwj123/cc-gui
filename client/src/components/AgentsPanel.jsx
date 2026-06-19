@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Bot, RefreshCw, Save, Check, Plus, FileText, Download, Package } from 'lucide-react';
+import { Bot, RefreshCw, Save, Check, Plus, FileText, Download, Package, Trash2 } from 'lucide-react';
 
 export function AgentsPanel() {
   const [agents, setAgents] = useState([]);
@@ -89,6 +89,16 @@ export function AgentsPanel() {
     setSaving(false);
   };
 
+  const del = async (name) => {
+    if (!window.confirm(`删除 agent「${name}」？\n将删除 ~/.claude/agents/${name}.md，不可恢复。`)) return;
+    try {
+      await fetch(`/api/agents/${encodeURIComponent(name)}`, { method: 'DELETE' });
+      if (selected === name) { setSelected(null); setContent(''); }
+      fetchAgents();
+      if (showBuiltin) fetchBuiltin();
+    } catch {}
+  };
+
   const createNew = async () => {
     if (!/^[a-z0-9-]{1,64}$/.test(newName)) return alert('名字只能小写字母、数字、-');
     setSelected(newName);
@@ -170,11 +180,19 @@ export function AgentsPanel() {
         <div className="w-[140px] border-r border-canvas-deep overflow-y-auto shrink-0">
           {agents.length === 0 && <p className="text-[11px] text-ink-faint p-3 text-center font-body">无 agent</p>}
           {agents.map((a) => (
-            <button key={a.name} onClick={() => open(a.name)}
-              className={`sidebar-item w-full text-left px-3 py-2 text-xs font-body truncate ${selected === a.name ? 'active text-accent' : 'text-ink-soft'}`}
-              title={a.description}>
-              <FileText size={10} className="inline mr-1 text-ink-faint" />{a.name}
-            </button>
+            <div key={a.name} className="group relative flex items-center">
+              <button onClick={() => open(a.name)}
+                className={`flex-1 min-w-0 sidebar-item text-left px-3 py-2 text-xs font-body truncate ${selected === a.name ? 'active text-accent' : 'text-ink-soft'}`}
+                title={a.description}>
+                <FileText size={10} className="inline mr-1 text-ink-faint" />{a.name}
+              </button>
+              {a.format !== 'cli' && (
+                <button onClick={() => del(a.name)} title="删除该 agent"
+                  className="absolute right-1 opacity-0 group-hover:opacity-100 p-1 rounded text-ink-faint hover:text-red-500 hover:bg-black/5 transition-opacity">
+                  <Trash2 size={11} />
+                </button>
+              )}
+            </div>
           ))}
         </div>
 

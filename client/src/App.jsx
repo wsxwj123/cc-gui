@@ -6442,8 +6442,18 @@ export default function App() {
       } catch {}
     };
     apply();
+    // Tauri 启动首屏:WKWebView 第一帧上报的 window.innerWidth 常常偏小/未定型,
+    // apply() 拿到窄宽 → --app-w 偏小 → 顶部工具栏按窄宽 flex-wrap 换行,直到用户
+    // 拖拽窗口(触发 resize)才回正(用户报告"每次打开菜单栏分行,拖宽才同行")。
+    // 窗口定型后再补几次 apply,无需用户手动 resize。
+    const raf = requestAnimationFrame(apply);
+    const timers = [60, 200, 500, 1000].map((ms) => setTimeout(apply, ms));
     window.addEventListener('resize', apply);
-    return () => window.removeEventListener('resize', apply);
+    return () => {
+      window.removeEventListener('resize', apply);
+      cancelAnimationFrame(raf);
+      timers.forEach(clearTimeout);
+    };
   }, [uiFontScale]);
 
   // Soft-keyboard awareness (#1): publish the keyboard height as `--kb` so the

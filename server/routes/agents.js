@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
-import { readFile, readdir, writeFile, mkdir, stat, open } from 'fs/promises';
+import { readFile, readdir, writeFile, mkdir, stat, open, unlink } from 'fs/promises';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { homedir } from 'os';
@@ -245,6 +245,21 @@ router.put('/agents/:name', async (req, res) => {
     const path = join(AGENTS_DIR, req.params.name + '.md');
     await writeFile(path, content);
     res.json({ ok: true, path });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+/** DELETE /api/agents/:name — remove the agent .md/.json from ~/.claude/agents. */
+router.delete('/agents/:name', async (req, res) => {
+  try {
+    assertName(req.params.name);
+    let removed = false;
+    for (const ext of ['.md', '.json']) {
+      try { await unlink(join(AGENTS_DIR, req.params.name + ext)); removed = true; } catch {}
+    }
+    if (!removed) return res.status(404).json({ error: 'agent not found' });
+    res.json({ ok: true });
   } catch (err) {
     res.status(400).json({ error: err.message });
   }
