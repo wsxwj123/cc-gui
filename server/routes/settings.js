@@ -158,6 +158,40 @@ async function writeProviderModels(map) {
   await writeFile(PROVIDER_MODELS_PATH, JSON.stringify(map, null, 2));
 }
 
+// B 方案: per-provider「默认模型 + 档位映射」覆盖层,对【所有】provider 生效
+// (含 cc-switch 只读组 / openai marker 组),它们不在 custom-providers.json 里够不着
+// CustomProviderForm。Shape: { [providerId]: { defaultModel?, tierModels?{haiku,sonnet,opus} } }。
+// 无文件 / 无该 id 条目 = 行为完全不变(向后兼容硬要求)。从不写 cc-switch.db。
+const PROVIDER_OVERRIDES_PATH = join(homedir(), '.claude-gui', 'provider-overrides.json');
+
+async function readProviderOverrides() {
+  try {
+    const d = JSON.parse(await readFile(PROVIDER_OVERRIDES_PATH, 'utf-8'));
+    return d && typeof d === 'object' && !Array.isArray(d) ? d : {};
+  } catch { return {}; }
+}
+
+async function writeProviderOverrides(map) {
+  await mkdir(join(homedir(), '.claude-gui'), { recursive: true });
+  await writeFile(PROVIDER_OVERRIDES_PATH, JSON.stringify(map, null, 2));
+}
+
+// 把某 provider 的 override 合并进将传给 upstream 切换函数的 `up` 对象:
+// override.defaultModel / override.tierModels 优先于 provider 自带值(custom-providers.json
+// 里的同名字段),override 缺省该字段则保留 provider 自带。两者都按 models[] 校验。
+async function applyProviderOverride(up) {
+  const ov = (await readProviderOverrides())[up.id];
+  if (!ov || typeof ov !== 'object') return up;
+  const models = up.models || [];
+  const out = { ...up };
+  if (typeof ov.defaultModel === 'string' && models.includes(ov.defaultModel)) {
+    out.defaultModel = ov.defaultModel;
+  }
+  const tm = sanitizeTierModels(ov.tierModels, models);
+  if (tm) out.tierModels = tm;
+  return out;
+}
+
 // Resolve an OpenAI-format provider's REAL upstream {baseURL, apiKey} by id —
 // from cc-switch (codex/opencode) or the GUI custom store. Used to fetch its
 // /v1/models directly (NOT through the loopback proxy).
@@ -408,7 +442,7 @@ router.get('/providers', async (_req, res) => {
   // K4: 一次性导入后停止读 cc-switch.db,GUI 自己管 customProviders 即可。
   const imported = await isCCSwitchImported();
   const rows = imported ? [] : await ccSwitchQuery(
-    "SELECT id, name, is_current FROM providers WHERE app_type='claude' ORDER BY sort_index"
+    "SELECT id, name, category, is_current, settings_config FROM providers WHERE app_type='claude' ORDER BY sort_index"
   );
   const oaRows = imported ? [] : await ccSwitchQuery(
     "SELECT id, name, app_type, settings_config FROM providers WHERE app_type IN ('codex','opencode') ORDER BY sort_index"
@@ -430,11 +464,31 @@ router.get('/providers', async (_req, res) => {
     models: p.models || [], defaultModel: p.defaultModel || '', tierModels: p.tierModels || null,
     hasKey: !!p.apiKey, isCustom: true, isCurrent: isCur(p.id, false),
   }));
+  // B 方案: claude 只读组的 models[] 从其 snapshot.env 的 _MODEL 值提取(切换/导入路径
+  // 同口径),否则档位下拉无选项。official 不给 models(它有真三档,不走 override)。
+  const claudeProviders = rows.map((r) => {
+    let models = [];
+    if (r.category !== 'official') {
+      try {
+        const env = JSON.parse(r.settings_config)?.env || {};
+        models = [...new Set(Object.entries(env)
+          .filter(([k, v]) => /_MODEL$/.test(k) && typeof v === 'string' && v)
+          .map(([, v]) => v))];
+      } catch {}
+    }
+    return {
+      id: r.id, name: r.name, appType: 'claude', format: 'claude',
+      category: r.category || null, models,
+      isCurrent: isCur(r.id, r.is_current === 1),
+    };
+  });
   res.json({
     available: rows.length > 0 || openai.length > 0 || customProviders.length > 0,
-    providers: rows.map((r) => ({ id: r.id, name: r.name, appType: 'claude', format: 'claude', isCurrent: isCur(r.id, r.is_current === 1) })),
+    providers: claudeProviders,
     openaiProviders: openai,
     customProviders,
+    // 回显所有 override(前端编辑器初始化用);无文件 = {}。
+    overrides: await readProviderOverrides(),
   });
 });
 
@@ -467,7 +521,8 @@ router.post('/provider/switch', async (req, res) => {
         // precedence GET /providers uses — so ModelSelector offers all of them.
         const sel = await readProviderModels();
         const models = sel[oaHit.id]?.length ? sel[oaHit.id] : parsed.models;
-        return switchToOpenAIUpstream({ id: oaHit.id, name: oaHit.name, baseURL: parsed.baseURL, apiKey: parsed.apiKey, models }, model, res);
+        const up = await applyProviderOverride({ id: oaHit.id, name: oaHit.name, baseURL: parsed.baseURL, apiKey: parsed.apiKey, models });
+        return switchToOpenAIUpstream(up, model, res);
       }
       // GUI custom providers (stored outside cc-switch).
       const custom = (await readCustomProviders()).find((p) => p.id === id);
@@ -532,10 +587,10 @@ router.post('/provider/switch', async (req, res) => {
       const snapModels = [...new Set(Object.entries(snapshot.env || {})
         .filter(([k, v]) => /_MODEL$/.test(k) && typeof v === 'string' && v)
         .map(([, v]) => v))];
-      return switchToAnthropicUpstream(
+      const up = await applyProviderOverride(
         { id: hit.id, name: hit.name, baseURL: snapBase, authToken: snapTok, snapshot, models: snapModels },
-        model, res,
       );
+      return switchToAnthropicUpstream(up, model, res);
     }
 
     // Back up the current settings.json (timestamped) before overwriting.
@@ -711,6 +766,15 @@ async function switchToAnthropicUpstream(up, requestedModel, res) {
 // Switch to a GUI custom provider. openai → proxy (reuse upstream switch);
 // anthropic → point the CLI straight at the upstream, no proxy.
 async function switchToCustomProvider(p, requestedModel, res) {
+  // B 方案: provider-overrides.json 优先于 custom-providers.json 自带的 defaultModel/
+  // tierModels(统一规则:override ≥ provider 自带)。无 override 条目 = 用 p 原值,行为不变。
+  const ov = (await readProviderOverrides())[p.id];
+  if (ov && typeof ov === 'object') {
+    const models = p.models || [];
+    if (typeof ov.defaultModel === 'string' && models.includes(ov.defaultModel)) p = { ...p, defaultModel: ov.defaultModel };
+    const tm = sanitizeTierModels(ov.tierModels, models);
+    if (tm) p = { ...p, tierModels: tm };
+  }
   // AZ8: GUI 主动切 provider 且未显式带 model 时,优先用该 provider 的 defaultModel
   // (仍须在 models[] 内才生效),否则下游回退 models[0]。defaultModel 一并透传给
   // marker 文件,供 model-resolver 兜底用 oa.defaultModel || oa.models[0]。
@@ -952,6 +1016,75 @@ router.delete('/custom-providers/:id', async (req, res) => {
     await writeCustomProviders(next);
     if ((await readActiveProviderId()) === req.params.id) await unlink(ACTIVE_PROVIDER_PATH).catch(() => {});
     res.json({ ok: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// B 方案: 按 provider id 解析其 models[](与 GET /providers 同口径),供
+// PUT /provider-overrides/:id 校验 defaultModel/tierModels。覆盖三组:
+// cc-switch claude(snapshot.env 的 _MODEL)/ openai(multi-select 优先,否则 parsed)
+// / custom(custom-providers.json)。找不到返回 null。
+async function resolveProviderModelsById(id) {
+  const imported = await isCCSwitchImported();
+  if (!imported) {
+    const claudeRows = await ccSwitchQuery(
+      "SELECT id, category, settings_config FROM providers WHERE app_type='claude'"
+    );
+    const c = claudeRows.find((r) => r.id === id);
+    if (c) {
+      if (c.category === 'official') return [];
+      try {
+        const env = JSON.parse(c.settings_config)?.env || {};
+        return [...new Set(Object.entries(env)
+          .filter(([k, v]) => /_MODEL$/.test(k) && typeof v === 'string' && v)
+          .map(([, v]) => v))];
+      } catch { return []; }
+    }
+    const oaRows = await ccSwitchQuery(
+      "SELECT id, settings_config FROM providers WHERE app_type IN ('codex','opencode')"
+    );
+    const o = oaRows.find((r) => r.id === id);
+    if (o) {
+      const sel = await readProviderModels();
+      if (sel[id]?.length) return sel[id];
+      const p = parseOpenAIProvider(o.settings_config);
+      return p ? p.models : [];
+    }
+  }
+  const custom = (await readCustomProviders()).find((p) => p.id === id);
+  if (custom) {
+    const sel = await readProviderModels();
+    if (custom.type === 'openai' && sel[id]?.length) return sel[id];
+    return custom.models || [];
+  }
+  return null;
+}
+
+// GET /api/provider-overrides — 回显全部 override(无文件 = {})。
+router.get('/provider-overrides', async (_req, res) => {
+  res.json(await readProviderOverrides());
+});
+
+// PUT /api/provider-overrides/:id { defaultModel?, tierModels? } — 写该 provider 的
+// override。defaultModel/tierModels 均按其 models[] 校验;两者皆空 = 删除该条目。
+// 从不写 cc-switch.db。
+router.put('/provider-overrides/:id', async (req, res) => {
+  try {
+    const id = req.params.id;
+    const models = await resolveProviderModelsById(id);
+    if (models == null) return res.status(404).json({ error: 'provider 不存在' });
+    const { defaultModel, tierModels } = req.body || {};
+    const entry = {};
+    if (typeof defaultModel === 'string' && models.includes(defaultModel)) {
+      entry.defaultModel = defaultModel;
+    }
+    const tm = sanitizeTierModels(tierModels, models);
+    if (tm) entry.tierModels = tm;
+
+    const map = await readProviderOverrides();
+    if (Object.keys(entry).length) map[id] = entry;
+    else delete map[id]; // 空 = 清除,恢复无 override 的原始行为
+    await writeProviderOverrides(map);
+    res.json({ ok: true, id, override: map[id] || null });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 

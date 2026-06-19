@@ -4581,6 +4581,7 @@ function ProviderSwitcher() {
   // Anthropic↔OpenAI proxy on switch so the claude CLI can use them.
   const [openaiProviders, setOpenaiProviders] = useState([]);
   const [customProviders, setCustomProviders] = useState([]);
+  const [overrides, setOverrides] = useState({});
   const [open, setOpen] = useState(false);
   const [switching, setSwitching] = useState(false);
   // Optimistic current id: the CC Switch db's is_current isn't updated by us
@@ -4601,6 +4602,7 @@ function ProviderSwitcher() {
       setProviders(Array.isArray(d.providers) ? d.providers : []);
       setOpenaiProviders(Array.isArray(d.openaiProviders) ? d.openaiProviders : []);
       setCustomProviders(Array.isArray(d.customProviders) ? d.customProviders : []);
+      setOverrides(d.overrides && typeof d.overrides === 'object' ? d.overrides : {});
     }).catch(() => {});
     fetch('/api/providers/import-status').then((r) => r.json())
       .then((d) => setImportStatus(d || {})).catch(() => {});
@@ -4711,15 +4713,18 @@ function ProviderSwitcher() {
             </p>
           </div>
           {providers.filter((p) => showHidden || !hiddenProviders.has(p.id)).map((p) => (
-            <div key={p.id} className={`w-full flex items-center gap-0.5 pr-2 hover:bg-canvas-warm transition-colors ${isCur(p) ? 'bg-accent-subtle' : ''} ${hiddenProviders.has(p.id) ? 'opacity-50' : ''}`}>
-              <button disabled={switching} onClick={() => switchTo(p.id)}
-                className={`flex-1 min-w-0 text-left px-3 py-2 flex items-center gap-2 ${switching ? 'opacity-50' : ''}`}>
-                <span className={`flex-1 text-xs font-body truncate ${isCur(p) ? 'text-accent font-medium' : 'text-ink'}`}>{p.name}</span>
-                {isCur(p) && <Check size={12} className="text-accent shrink-0" />}
-              </button>
-              <button onClick={() => toggleHideProvider(p.id)} title={hiddenProviders.has(p.id) ? '取消隐藏' : '从列表隐藏'} className="p-1 text-ink-faint hover:text-ink-muted shrink-0">
-                {hiddenProviders.has(p.id) ? <ArchiveRestore size={12} /> : <EyeOff size={12} />}
-              </button>
+            <div key={p.id} className={`px-3 py-1 ${isCur(p) ? 'bg-accent-subtle' : ''} ${hiddenProviders.has(p.id) ? 'opacity-50' : ''}`}>
+              <div className="flex items-center gap-0.5 -mx-3 pr-2 pl-3 hover:bg-canvas-warm transition-colors">
+                <button disabled={switching} onClick={() => switchTo(p.id)}
+                  className={`flex-1 min-w-0 text-left py-1 flex items-center gap-2 ${switching ? 'opacity-50' : ''}`}>
+                  <span className={`flex-1 text-xs font-body truncate ${isCur(p) ? 'text-accent font-medium' : 'text-ink'}`}>{p.name}</span>
+                  {isCur(p) && <Check size={12} className="text-accent shrink-0" />}
+                </button>
+                <button onClick={() => toggleHideProvider(p.id)} title={hiddenProviders.has(p.id) ? '取消隐藏' : '从列表隐藏'} className="p-1 text-ink-faint hover:text-ink-muted shrink-0">
+                  {hiddenProviders.has(p.id) ? <ArchiveRestore size={12} /> : <EyeOff size={12} />}
+                </button>
+              </div>
+              {p.category !== 'official' && <ProviderOverrideEditor provider={p} override={overrides[p.id]} onSaved={load} />}
             </div>
           ))}
           {openaiProviders.length > 0 && (
@@ -4745,6 +4750,7 @@ function ProviderSwitcher() {
                 </button>
               </div>
               <OpenAIModelManager provider={p} onSaved={load} />
+              <ProviderOverrideEditor provider={p} override={overrides[p.id]} onSaved={load} />
             </div>
           ))}
           {customProviders.length > 0 && (
@@ -5487,6 +5493,78 @@ function MobilePermissionPage({ permKey }) {
   );
 }
 
+// B 方案: 对【任意】provider(含 cc-switch 只读 / openai marker 组)设「默认模型 +
+// 档位映射(haiku/sonnet/opus)」。options 来自该 provider 的 models[];不暴露 baseURL/key。
+// 保存写 ~/.claude-gui/provider-overrides.json(PUT /api/provider-overrides/:id),不碰
+// cc-switch.db。空选项 = 清除该档(回退选中模型),全空 = 删除该 provider 的 override。
+// 模块级:避免在 ProviderOverrideEditor 渲染内联定义(否则每次 setState 重定义组件类型
+// → 3 个 select 每次 remount)。
+function OverrideSelect({ label, value, onChange, models }) {
+  return (
+    <label className="flex items-center gap-2">
+      <span className="text-[10px] text-ink-faint font-body w-14 shrink-0">{label}</span>
+      <select value={value} onChange={(e) => onChange(e.target.value)}
+        className="flex-1 min-w-0 text-[11px] font-mono px-1.5 py-1 rounded border border-canvas-deep bg-canvas text-ink">
+        <option value="">（选中模型）</option>
+        {/* 防御:万一某 provider 的 models 是对象数组(如 /api/model 那样),取 .id 转字符串,
+            绝不把对象当 React child 渲染(否则整页白屏,见 api-model 那次)。 */}
+        {models.map((m) => { const s = typeof m === 'string' ? m : (m && m.id) || String(m); return <option key={s} value={s}>{s}</option>; })}
+      </select>
+    </label>
+  );
+}
+
+function ProviderOverrideEditor({ provider, override, onSaved }) {
+  const [open, setOpen] = useState(false);
+  const models = provider.models || [];
+  const ov = override || {};
+  const [def, setDef] = useState(ov.defaultModel || '');
+  const [tier, setTier] = useState({
+    haiku: ov.tierModels?.haiku || '',
+    sonnet: ov.tierModels?.sonnet || '',
+    opus: ov.tierModels?.opus || '',
+  });
+  const [busy, setBusy] = useState(false);
+  const save = async () => {
+    setBusy(true);
+    try {
+      const tierModels = {};
+      for (const t of ['haiku', 'sonnet', 'opus']) if (tier[t]) tierModels[t] = tier[t];
+      await fetch(`/api/provider-overrides/${provider.id}`, {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          defaultModel: def || undefined,
+          tierModels: Object.keys(tierModels).length ? tierModels : null,
+        }),
+      });
+      setOpen(false); onSaved?.();
+    } catch {}
+    setBusy(false);
+  };
+  if (models.length === 0) return null; // 无可选模型 → 不显示(官方/无 _MODEL 列表)
+  return (
+    <div className="mt-1.5">
+      <button onClick={() => setOpen((v) => !v)} className="text-[11px] text-accent font-body flex items-center gap-1">
+        <Settings size={12} /> 默认模型·档位映射{open ? ' ▴' : ' ▾'}
+      </button>
+      {open && (
+        <div className="mt-1.5 rounded-lg border border-canvas-deep p-2 space-y-1.5">
+          <OverrideSelect models={models} label="默认模型" value={def} onChange={setDef} />
+          <div className="border-t border-canvas-deep/40 pt-1.5 space-y-1.5">
+            <OverrideSelect models={models} label="haiku" value={tier.haiku} onChange={(v) => setTier((s) => ({ ...s, haiku: v }))} />
+            <OverrideSelect models={models} label="sonnet" value={tier.sonnet} onChange={(v) => setTier((s) => ({ ...s, sonnet: v }))} />
+            <OverrideSelect models={models} label="opus" value={tier.opus} onChange={(v) => setTier((s) => ({ ...s, opus: v }))} />
+          </div>
+          <button onClick={save} disabled={busy}
+            className="w-full px-3 py-1.5 text-[12px] bg-accent text-white rounded-lg disabled:opacity-50">
+            {busy ? '保存中…' : '保存（下次切换生效）'}
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // Per-OpenAI-provider model manager: live-fetch the upstream's /v1/models and
 // let the user multi-select which to show as switch targets. Selection persists
 // server-side (~/.claude-gui/provider-models.json). `provider.models` is the
@@ -5769,6 +5847,7 @@ function MobileProviderPage() {
   const [providers, setProviders] = useState([]);
   const [openaiProviders, setOpenaiProviders] = useState([]);
   const [customProviders, setCustomProviders] = useState([]);
+  const [overrides, setOverrides] = useState({});
   const [switching, setSwitching] = useState(false);
   const [activeId, setActiveId] = useState(null);
   const load = () => {
@@ -5776,6 +5855,7 @@ function MobileProviderPage() {
       setProviders(Array.isArray(d.providers) ? d.providers : []);
       setOpenaiProviders(Array.isArray(d.openaiProviders) ? d.openaiProviders : []);
       setCustomProviders(Array.isArray(d.customProviders) ? d.customProviders : []);
+      setOverrides(d.overrides && typeof d.overrides === 'object' ? d.overrides : {});
     }).catch(() => {});
   };
   useEffect(load, []);
@@ -5809,12 +5889,17 @@ function MobileProviderPage() {
   return (
     <div className="py-1">
       {providers.map((p) => (
-        <div key={p.id} className={`w-full flex items-center gap-1 pr-3 hover:bg-canvas-warm transition-colors ${isCur(p) ? 'bg-accent-subtle' : ''}`}>
-          <button disabled={switching} onClick={() => switchTo(p.id)}
-            className={`flex-1 min-w-0 flex items-center gap-3 px-4 py-3 text-left ${switching ? 'opacity-50' : ''}`}>
-            <span className={`flex-1 text-[14px] font-body truncate ${isCur(p) ? 'text-accent font-medium' : 'text-ink'}`}>{p.name}</span>
-            {isCur(p) && <Check size={16} className="text-accent shrink-0" />}
-          </button>
+        <div key={p.id} className={`${isCur(p) ? 'bg-accent-subtle' : ''}`}>
+          <div className="w-full flex items-center gap-1 pr-3 hover:bg-canvas-warm transition-colors">
+            <button disabled={switching} onClick={() => switchTo(p.id)}
+              className={`flex-1 min-w-0 flex items-center gap-3 px-4 py-3 text-left ${switching ? 'opacity-50' : ''}`}>
+              <span className={`flex-1 text-[14px] font-body truncate ${isCur(p) ? 'text-accent font-medium' : 'text-ink'}`}>{p.name}</span>
+              {isCur(p) && <Check size={16} className="text-accent shrink-0" />}
+            </button>
+          </div>
+          {p.category !== 'official' && (
+            <div className="px-4 pb-2"><ProviderOverrideEditor provider={p} override={overrides[p.id]} onSaved={load} /></div>
+          )}
         </div>
       ))}
       {openaiProviders.length > 0 && (
@@ -5832,6 +5917,7 @@ function MobileProviderPage() {
             ))}
           </div>
           <OpenAIModelManager provider={p} onSaved={load} />
+          <ProviderOverrideEditor provider={p} override={overrides[p.id]} onSaved={load} />
         </div>
       ))}
       {customProviders.length > 0 && (
