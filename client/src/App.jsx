@@ -2795,8 +2795,6 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       })();
       const currentModel = _pin || _hist || useStore.getState().currentModel;
       const effort = useStore.getState().getEffortFor(sessionQueueKey);
-      // BG5:活跃 Agent / 模式 —— 仅新会话(无 sid)注入 --agent(server 也只在无 sessionId 时传)。
-      const activeAgent = !sid ? useStore.getState().getActiveAgentFor(sessionQueueKey) : '';
       // When resuming an existing session, cwd MUST be the EXACT string the
       // CLI was launched with — including Unicode chars (e.g. `/foo/肠骨轴`).
       // Reconstructing from the hash dir name is lossy: CLI maps every non-
@@ -2804,6 +2802,10 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       // reads the real cwd out of the jsonl's first system record and ships
       // it as `projectPath` on the session object — always trust that first.
       const sid = selectedSession?.sessionId;
+      // BG5:活跃 Agent / 模式 —— 仅新会话(无 sid)注入 --agent(server 也只在无 sessionId 时传)。
+      // 必须放在 `sid` 声明之后:之前放在前面引用了 TDZ 中的 const sid → WebKit 报
+      // "Cannot access uninitialized variable.",每次发送都炸(普通/agent 模式皆然)。
+      const activeAgent = !sid ? useStore.getState().getActiveAgentFor(sessionQueueKey) : '';
       const chatCwd = (sid && selectedSession?.projectPath)
         ? selectedSession.projectPath
         : (selectedSession?.projectPath || selectedProject?.path);
