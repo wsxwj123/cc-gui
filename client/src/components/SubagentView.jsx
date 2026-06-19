@@ -2,6 +2,7 @@ import React from 'react';
 import { Bot, Loader2, User } from 'lucide-react';
 import { useStore } from '../stores/sessionStore.js';
 import { MarkdownRenderer } from './MarkdownRenderer.jsx';
+import { renderRichToolCard } from './TurnBubble.jsx';
 
 // #9/O4 子代理会话窗口:样式对齐正常会话(用户气泡在右、回复在左、思考/工具折叠),
 // 标题处「母会话标题 / 子代理名」层级面包屑,点母会话标题返回。
@@ -123,27 +124,34 @@ export function SubagentView({ agentId, parentTitle, onBack }) {
               )}
 
               {tools.length > 0 && (
-                <details className="mb-2 rounded-lg border border-canvas-deep bg-canvas overflow-hidden">
+                <details className="mb-2 rounded-lg border border-canvas-deep bg-canvas overflow-hidden" open>
                   <summary className="cursor-pointer px-3 py-1.5 text-[11px] text-ink-faint font-body">
                     🔧 {tools.length} 次工具调用
                   </summary>
-                  <div className="px-3 pb-2.5 space-y-1.5">
-                    {tools.map((tc, i) => (
-                      <div key={tc.id || i} className="text-[12px] font-mono text-ink-soft flex items-center gap-2">
-                        <span className="w-1.5 h-1.5 rounded-full bg-violet-400 shrink-0" />
-                        <span className="truncate flex-1">{tc.name}</span>
-                        {tc.result ? (
-                          tc.result.isError
-                            ? <span className="text-error shrink-0">✗</span>
-                            : <span className="text-success shrink-0">✓</span>
-                        ) : !working ? (
-                          // U7:子代理整体已结束,内部工具必然结束 —— 不再转圈。
-                          <span className="text-success shrink-0">✓</span>
-                        ) : (
-                          <Loader2 size={11} className="text-ink-faint animate-spin shrink-0" />
-                        )}
-                      </div>
-                    ))}
+                  <div className="px-3 pb-2.5 space-y-2">
+                    {tools.map((tc, i) => {
+                      // BG9-3:与母会话同样式的富卡片(Bash/Edit/Read/Grep/Web/Skill/Task 各自专属渲染),
+                      // 兜底仍显示一行 name + ✓/✗(原来子代理只显示这一行,看不到具体调用是什么)。
+                      const rich = renderRichToolCard(tc);
+                      if (rich) {
+                        return <div key={tc.id || i}>{rich}</div>;
+                      }
+                      return (
+                        <div key={tc.id || i} className="text-[12px] font-mono text-ink-soft flex items-center gap-2">
+                          <span className="w-1.5 h-1.5 rounded-full bg-violet-400 shrink-0" />
+                          <span className="truncate flex-1">{tc.name}</span>
+                          {tc.result ? (
+                            tc.result.isError
+                              ? <span className="text-error shrink-0">✗</span>
+                              : <span className="text-success shrink-0">✓</span>
+                          ) : !working ? (
+                            <span className="text-success shrink-0">✓</span>
+                          ) : (
+                            <Loader2 size={11} className="text-ink-faint animate-spin shrink-0" />
+                          )}
+                        </div>
+                      );
+                    })}
                   </div>
                 </details>
               )}

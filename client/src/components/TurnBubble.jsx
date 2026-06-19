@@ -54,6 +54,9 @@ function InlineToolCard({ toolCall, onRetryTool }) {
   );
 }
 
+// 给 SubagentView 复用:子代理工具调用本应与母会话同样式(用户报告)。
+export { InlineToolCard, renderRichToolCard };
+
 // Returns the rich card React element for a tool, or null when no
 // specialty renderer exists for that tool name.
 function renderRichToolCard(toolCall) {

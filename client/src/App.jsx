@@ -1375,8 +1375,26 @@ function SessionList() {
     };
   }, [selectedProject?.hash]);
 
+  // 新建会话时继承「上一个活跃会话」的 model / 思考强度 / agent 模式(免得每次重选),
+  // 但权限模式恒为 default(用户要求:新会话别带上一次的宽松权限)。draft key = `draft-<hash>`
+  // (与 sessionQueueKey 对齐);migrateSessionKey 在 init 后会把这些随真 sid 迁移,所以链条
+  // 能一直顺延:下一次新建读到的「上一个会话」就是刚发的那个真会话。
+  const seedNewSessionDefaults = (draftProjectHash) => {
+    const st = useStore.getState();
+    const prev = splitMode ? st.paneSessions?.[activeTabIndex] : st.selectedSession;
+    const prevKey = prev ? (prev.sessionId || `draft-${prev.projectHash || 'none'}`) : null;
+    const draftKey = `draft-${draftProjectHash || 'none'}`;
+    if (prevKey && prevKey !== draftKey) {
+      st.setModelFor(draftKey, st.getModelFor(prevKey));
+      st.setEffortFor(draftKey, st.getEffortFor(prevKey));
+      st.setActiveAgentFor(draftKey, st.getActiveAgentFor(prevKey));
+    }
+    st.setPermissionMode('default', draftKey);
+  };
+
   const handleNew = () => {
     if (!selectedProject) return;
+    seedNewSessionDefaults(selectedProject.hash);
     // A "draft" session has no sessionId yet; the real one is captured from the
     // first stream-json system/init event and patched into the active session
     // slot (split or single).
@@ -1420,6 +1438,7 @@ function SessionList() {
 
   const enterWorktree = (tree) => {
     if (!tree?.path || !selectedProject) return;
+    seedNewSessionDefaults(selectedProject.hash);
     const draft = {
       draft: true,
       sessionId: null,
