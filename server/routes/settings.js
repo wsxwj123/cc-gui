@@ -1084,7 +1084,34 @@ router.put('/provider-overrides/:id', async (req, res) => {
     if (Object.keys(entry).length) map[id] = entry;
     else delete map[id]; // 空 = 清除,恢复无 override 的原始行为
     await writeProviderOverrides(map);
-    res.json({ ok: true, id, override: map[id] || null });
+    // BG9:overrides 写入 .claude-gui/provider-overrides.json,但 CLI 只读 settings.json
+    // 的 env(ANTHROPIC_DEFAULT_*_MODEL)。所以**用户在 GUI 改完档位映射,仍要去重新点
+    // 一次 provider 切换才生效**——很反直觉(用户问"是不是要重启 GUI")。这里若该 provider
+    // 正是当前激活的,自动透明重跑一次 switch 把新的 tierModels 注入 settings.json,
+    // 让映射立刻生效。若不是激活的就只持久化,等下次切到它再生效。reapplied 字段告诉
+    // 前端是否已重写 settings,以提示"立刻生效"或"切回该 provider 后生效"。
+    let reapplied = false;
+    try {
+      const activeId = await readActiveProviderId();
+      if (activeId === id && Object.keys(entry).length) {
+        const headers = { 'Content-Type': 'application/json' };
+        const fakeRes = {
+          _status: 200, _body: null,
+          status(s) { this._status = s; return this; },
+          json(b) { this._body = b; return this; },
+        };
+        const fakeReq = { body: { id }, headers };
+        // 复用本路由的 switch 实现:它已正确处理 anthropic/openai/custom 三类。
+        await new Promise((resolve) => {
+          const layer = router.stack.find((l) => l.route && l.route.path === '/provider/switch');
+          if (!layer) return resolve();
+          const handler = layer.route.stack[0].handle;
+          Promise.resolve(handler(fakeReq, fakeRes, () => {})).then(resolve).catch(() => resolve());
+        });
+        reapplied = fakeRes._status === 200;
+      }
+    } catch {}
+    res.json({ ok: true, id, override: map[id] || null, reapplied });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 

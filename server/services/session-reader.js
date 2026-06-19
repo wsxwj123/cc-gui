@@ -249,6 +249,12 @@ export async function listSessions(projectHash) {
       // 它会以"给下面这段对话起一个标题…"开头污染列表。无论如何都不显示。
       if (/^给下面这段对话起一个/.test(firstPrompt)) continue;
 
+      // BG9:某些外部 agent-teams/orchestration 工具会在项目目录写出名字像 sessionId
+      // 的辅助 jsonl,内容是 agent-setting/queue-operation/ai-title 等非对话 type,
+      // 没有任何 user/assistant 记录。session-reader 此前不识别 → 当成真实会话列出 →
+      // 用户点进去是空白。**没有 user 类型 = 不是 Claude Code 会话,跳过**。
+      if (!firstUser) continue;
+
       // Skip ONLY truly empty sessions. A brand-new session (just one prompt +
       // reply) is ~3-8 lines, which we want to show. The old `< 20 && !meaningful`
       // filter swallowed every new chat whose prompt didn't pass isMeaningfulPrompt

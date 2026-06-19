@@ -5559,20 +5559,25 @@ function ProviderOverrideEditor({ provider, override, onSaved }) {
     opus: ov.tierModels?.opus || '',
   });
   const [busy, setBusy] = useState(false);
+  const [saveMsg, setSaveMsg] = useState('');
   const save = async () => {
-    setBusy(true);
+    setBusy(true); setSaveMsg('');
     try {
       const tierModels = {};
       for (const t of ['haiku', 'sonnet', 'opus']) if (tier[t]) tierModels[t] = tier[t];
-      await fetch(`/api/provider-overrides/${provider.id}`, {
+      const r = await fetch(`/api/provider-overrides/${provider.id}`, {
         method: 'PUT', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           defaultModel: def || undefined,
           tierModels: Object.keys(tierModels).length ? tierModels : null,
         }),
       });
-      setOpen(false); onSaved?.();
-    } catch {}
+      const d = await r.json().catch(() => ({}));
+      // BG9:服务端若识别这是当前激活 provider,会自动重写 settings.json env(reapplied=true)
+      // → 新会话立刻生效。否则提示用户:切回该 provider 时才生效。
+      setSaveMsg(d?.reapplied ? '✓ 已保存并应用到当前 provider，新会话生效' : '✓ 已保存（切回该 provider 时生效）');
+      setTimeout(() => { setSaveMsg(''); setOpen(false); onSaved?.(); }, 1500);
+    } catch { setSaveMsg('保存失败'); }
     setBusy(false);
   };
   if (models.length === 0) return null; // 无可选模型 → 不显示(官方/无 _MODEL 列表)
@@ -5591,8 +5596,11 @@ function ProviderOverrideEditor({ provider, override, onSaved }) {
           </div>
           <button onClick={save} disabled={busy}
             className="w-full px-3 py-1.5 text-[12px] bg-accent text-white rounded-lg disabled:opacity-50">
-            {busy ? '保存中…' : '保存（下次切换生效）'}
+            {busy ? '保存中…' : '保存'}
           </button>
+          {saveMsg && (
+            <div className="text-[11px] font-body text-success mt-1 text-center">{saveMsg}</div>
+          )}
         </div>
       )}
     </div>
