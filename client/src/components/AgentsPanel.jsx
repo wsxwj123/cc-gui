@@ -32,7 +32,12 @@ export function AgentsPanel() {
       const cur = d.model || 'sonnet';
       // 别名 + 当前 provider 的具体模型 id 一起作为下拉选项(去重)。别名在
       // 任意 provider 下都被 CLI 路由到对应模型,具体 id 适合钉死某个模型。
-      const opts = Array.from(new Set(['sonnet', 'opus', 'haiku', cur, ...(Array.isArray(d.available) ? d.available : [])])).filter(Boolean);
+      // ⚠️/api/model 的 available 是【对象数组】{id,name,tier,...}(model-resolver),
+      // 必须取 .id 转成字符串——否则 <option>{对象}</option> 渲染对象 → React
+      // "Objects are not valid as a React child" → 生产白屏(dev 因 available 为空掩盖)。
+      const ids = (Array.isArray(d.available) ? d.available : [])
+        .map((x) => (typeof x === 'string' ? x : x && x.id)).filter(Boolean);
+      const opts = Array.from(new Set(['sonnet', 'opus', 'haiku', cur, ...ids])).filter(Boolean);
       setDefaultModel(cur);
       setModelOptions(opts);
       setNewModel(cur);
