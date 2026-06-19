@@ -64,7 +64,7 @@ export function AgentsPanel() {
   const createNew = async () => {
     if (!/^[a-z0-9-]{1,64}$/.test(newName)) return alert('名字只能小写字母、数字、-');
     setSelected(newName);
-    setContent(`---\nname: ${newName}\ndescription: \nmodel: ${newModel || defaultModel}\n---\n\n你是 ${newName}。\n`);
+    setContent(`---\nname: ${newName}\ndescription: 何时调用我——写清触发场景,主对话据此自动决定是否把任务派给我\nmodel: ${newModel || defaultModel}\n---\n\n你是 ${newName}。\n\n职责:用自然语言描述专长、做事方式和输出要求(本正文即该子代理的 system prompt)。\n`);
     setCreating(false); setNewName('');
   };
 

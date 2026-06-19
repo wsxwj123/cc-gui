@@ -101,7 +101,7 @@ function ChangeItem({ change, sessionId, cwd, reviewed, onToggleReviewed }) {
   const Icon = icon;
   const label = change.type === 'bash'
     ? change.command?.slice(0, 80)
-    : `${change.file?.split('/').pop()}${change.editIndex != null ? ` #${change.editIndex + 1}` : ''}`;
+    : `${change.file?.split(/[/\\]/).pop()}${change.editIndex != null ? ` #${change.editIndex + 1}` : ''}`;
   const detail = change.type === 'bash'
     ? change.command
     : change.file;

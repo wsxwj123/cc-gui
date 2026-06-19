@@ -385,12 +385,16 @@ export function AgentMonitorPanel() {
 
   // Merge local + remote — local agents come from current stream's Task
   // tool_uses; remote includes our chat-process metadata and CLI's view.
-  const localList = Object.values(localAgents);
+  // P1-3:activeAgents 是全局 map(不分会话),不过滤会把 A 会话的子代理显示在 B 面板,
+  // 且完成的不消失、跨会话无限堆积。按当前打开会话过滤(同 bgList);sessionId 为空的
+  // (旧条目/draft 阶段)保留显示避免误藏。
+  const openSessionIds = new Set((paneSessions || []).filter(Boolean).map((s) => s.sessionId).filter(Boolean));
+  const localList = Object.values(localAgents)
+    .filter((a) => !a.sessionId || openSessionIds.has(a.sessionId));
   // 后台任务:只显示本 stream 捕获到、且已拿到输出文件路径的(以 A 通道为准,
   // 避免列出 tasks 目录里的历史幽灵 .output)。并且**只显示当前打开的会话**的后台任务
   // (按所有分屏窗格的 sessionId 过滤)—— 否则切会话后旧卡片会永久堆积且持续轮询。
   // sessionId 为空的(draft 阶段启动、无法归属)也显示,避免误藏。最新启动的排在最前。
-  const openSessionIds = new Set((paneSessions || []).filter(Boolean).map((s) => s.sessionId).filter(Boolean));
   const bgList = Object.values(bgTasks || {})
     .filter((t) => t.outputPath && (!t.sessionId || openSessionIds.has(t.sessionId)))
     .sort((a, b) => (b.startedAt || 0) - (a.startedAt || 0));

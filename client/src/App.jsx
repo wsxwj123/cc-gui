@@ -1520,7 +1520,9 @@ function SessionList() {
       // 即拷 1m。keyed setter 只写各自 map、不动全局(已修过分屏污染),拷贝安全。
       const srcKey = session.sessionId;
       const dstKey = data.newSessionId;
-      st.setModelFor(dstKey, st.getModelFor(srcKey));
+      // 模型优先级:源会话显式 pin > 侧栏元数据 model(=源历史最近在用的)> 全局兜底。
+      // 之前只用 getModelFor(=pin||全局),源会话没手动 pin 时会拿全局而非它实际在用的模型。
+      st.setModelFor(dstKey, st.modelBySession[srcKey] || session.model || st.getModelFor(srcKey));
       st.setEffortFor(dstKey, st.getEffortFor(srcKey));
       st.setPermissionMode(st.getPermissionModeFor(srcKey), dstKey);
       if (selectedProject) st.fetchSessions(selectedProject.hash, { silent: true });
@@ -3116,14 +3118,14 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
               const aStore = useStore.getState();
               const aid = event.parent_tool_use_id;
               if (event.message.model) aStore.upsertAgent(aid, { model: event.message.model });
-              for (const block of event.message.content) {
+              for (const block of (Array.isArray(event.message.content) ? event.message.content : [])) {
                 if (block.type === 'text' && block.text) aStore.appendAgentText(aid, block.text);
                 else if (block.type === 'thinking' && block.thinking) aStore.appendAgentThinking(aid, block.thinking);
                 else if (block.type === 'tool_use') aStore.appendAgentTool(aid, { id: block.id, name: block.name, input: block.input || {}, result: null });
               }
               continue;
             }
-            for (const block of event.message.content) {
+            for (const block of (Array.isArray(event.message.content) ? event.message.content : [])) {
               if (block.type === 'text') {
                 // Only replace if we haven't been streaming this block already.
                 if (!accumulatedText) {
@@ -3182,7 +3184,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             // 里的子工具永远转圈(即使监控显示子代理已完成)。路由到 agent store 配对。
             if (event.parent_tool_use_id) {
               const aStore = useStore.getState();
-              for (const block of event.message.content) {
+              for (const block of (Array.isArray(event.message.content) ? event.message.content : [])) {
                 if (block.type === 'tool_result') {
                   aStore.updateAgentTool(event.parent_tool_use_id, block.tool_use_id, {
                     result: {
@@ -3195,7 +3197,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
               }
               continue;
             }
-            for (const block of event.message.content) {
+            for (const block of (Array.isArray(event.message.content) ? event.message.content : [])) {
               if (block.type === 'tool_result') {
                 // If this result closes a Task tool_use, mark the subagent done.
                 const store = useStore.getState();
@@ -3255,6 +3257,10 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           //   - type:"result" with is_error:true (CLI's own error envelope,
           //     e.g. "No conversation found with session ID: ...")
           if (event.type === 'error' || (event.type === 'result' && event.is_error)) {
+            // P1-1:服务端把 CLI stdout 里任意非 JSON 行(banner/调试/ANSI 噪声)包成
+            // {type:'error',error:'bad-line'}。这类是良性噪声,绝不能当致命错误弹❌+break
+            // 中止整轮(否则后续有效事件含 result 全丢,进程其实还在跑)。直接跳过。
+            if (event.error === 'bad-line') continue;
             const msg = (event.errors && event.errors.join('; '))
               || event.error
               // API 错误(如签名失效)经 result 事件返回:subtype 是误导性的 "success",
@@ -6032,11 +6038,26 @@ function MobileTopBar({ onMenu, onNew, title }) {
 function CompletionToasts() {
   const toasts = useStore((s) => s.completionToasts);
   const removeToast = useStore((s) => s.removeCompletionToast);
+  // P1-4:每条 toast 独立计时。原实现把所有 toast 的 timer 放一个数组,toasts 数组一变
+  // (新 toast push/旧的 remove → 新引用)effect 重跑、cleanup clearTimeout 全部 → 旧 toast
+  // 计时从 0 重来,持续有新通知时旧的永不自动消失。改为 ref 记每条 timer,只给新出现的起
+  // 计时,不动已存在的;被移除的清掉残留;卸载时全清。
+  const timersRef = useRef({});
   useEffect(() => {
-    if (!toasts.length) return;
-    const timers = toasts.map((t) => setTimeout(() => removeToast(t.id), 10000));
-    return () => timers.forEach(clearTimeout);
+    const ids = new Set(toasts.map((t) => String(t.id)));
+    toasts.forEach((t) => {
+      if (!timersRef.current[t.id]) {
+        timersRef.current[t.id] = setTimeout(() => {
+          delete timersRef.current[t.id];
+          removeToast(t.id);
+        }, 10000);
+      }
+    });
+    Object.keys(timersRef.current).forEach((id) => {
+      if (!ids.has(id)) { clearTimeout(timersRef.current[id]); delete timersRef.current[id]; }
+    });
   }, [toasts, removeToast]);
+  useEffect(() => () => { Object.values(timersRef.current).forEach(clearTimeout); }, []);
   if (!toasts.length) return null;
   const jump = (t) => {
     const st = useStore.getState();

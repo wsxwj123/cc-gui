@@ -33,13 +33,15 @@ const PRICES = {
   'claude-haiku-4-5-20251001':   usd(1, 5),
   'claude-3-5-haiku-20241022':   usd(0.80, 4),
 
-  // DeepSeek — CNY/MTok (off-peak tier removed in current pricing)
-  'deepseek-chat':               cny(1, 2, 0.02),       // v4-flash non-thinking
-  'deepseek-reasoner':           cny(1, 2, 0.02),       // v4-flash thinking
-  'deepseek-v4-flash':           cny(1, 2, 0.02),
-  'deepseek-v4-pro':             cny(3, 6, 0.025),      // promo until 2026-05-31
-  'deepseek-v3.1':               cny(1, 2, 0.02),
-  'deepseek-v3.2-exp':           cny(1, 2, 0.02),
+  // DeepSeek — USD/MTok, 2026-06-19 拉取 api-docs.deepseek.com/quick_start/pricing
+  // (官方页以 USD 计价)。cacheWrite=input:DeepSeek 不收 cache 写入费,cache miss 即标准 input 价。
+  // deepseek-chat/reasoner 是 v4-flash 的 non-thinking/thinking 别名(2026-07-24 弃用,价格同)。
+  'deepseek-chat':               usd(0.14, 0.28, 0.0028, 0.14),    // v4-flash non-thinking
+  'deepseek-reasoner':           usd(0.14, 0.28, 0.0028, 0.14),    // v4-flash thinking
+  'deepseek-v4-flash':           usd(0.14, 0.28, 0.0028, 0.14),
+  'deepseek-v4-pro':             usd(0.435, 0.87, 0.003625, 0.435),
+  'deepseek-v3.1':               usd(0.14, 0.28, 0.0028, 0.14),    // 旧版,官方现表无单列→按 v4-flash 兜底
+  'deepseek-v3.2-exp':           usd(0.14, 0.28, 0.0028, 0.14),    // 同上
 
   // MiMo — 现仅 mimo-v2.5-pro。价格按 v2.5 系列参考(OpenRouter)。
   'mimo-v2.5':                   usd(0.14, 0.28),
