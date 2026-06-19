@@ -587,7 +587,11 @@ async function switchToOpenAIUpstream(up, requestedModel, res) {
   // sends whichever model the user picks and the proxy forwards it upstream.
   try {
     await mkdir(join(homedir(), '.claude-gui'), { recursive: true });
-    await writeFile(OPENAI_ACTIVE_PATH, JSON.stringify({ providerId: up.id, name: up.name, model, models }));
+    // defaultModel(若有)写入 marker,供 model-resolver 在 model-less relay 兜底时
+    // 用它而非 models[0]。
+    const marker = { providerId: up.id, name: up.name, model, models };
+    if (up.defaultModel && models.includes(up.defaultModel)) marker.defaultModel = up.defaultModel;
+    await writeFile(OPENAI_ACTIVE_PATH, JSON.stringify(marker));
   } catch {}
   await unlink(ANTHROPIC_ACTIVE_PATH).catch(() => {}); // off the anthropic proxy
   await writeActiveProviderId(up.id);
@@ -622,6 +626,21 @@ async function switchToAnthropicUpstream(up, requestedModel, res) {
     ? requestedModel
     : (models.includes(env.ANTHROPIC_MODEL) ? env.ANTHROPIC_MODEL : (models[0] || env.ANTHROPIC_MODEL));
   if (chosen) env.ANTHROPIC_MODEL = chosen; else delete env.ANTHROPIC_MODEL;
+  // BA1:子代理/标题/compact 等内部调用走 tier alias(sonnet/opus/haiku),claude CLI
+  // 会把 alias 本地展开成【官方 id】(如 claude-sonnet-4-6)再发给上游;第三方 anthropic
+  // 中转没有该 id → 报 "<model> is not a model ... may not exist or no access",还连带
+  // 让 bot 的 --resume 失败丢上下文。把三个 DEFAULT_*_MODEL 指向真实选中模型,alias 即
+  // 重定向到第三方真实模型(与 switchToOpenAIUpstream 同构)。chosen 缺失时清掉,避免
+  // 沿用上一个 provider 的陈旧值。仅 anthropic 第三方路径受影响,官方/openai 不动。
+  if (chosen) {
+    env.ANTHROPIC_DEFAULT_HAIKU_MODEL = chosen;
+    env.ANTHROPIC_DEFAULT_SONNET_MODEL = chosen;
+    env.ANTHROPIC_DEFAULT_OPUS_MODEL = chosen;
+  } else {
+    delete env.ANTHROPIC_DEFAULT_HAIKU_MODEL;
+    delete env.ANTHROPIC_DEFAULT_SONNET_MODEL;
+    delete env.ANTHROPIC_DEFAULT_OPUS_MODEL;
+  }
   const next = { ...current, env };
   if (snapshot.model) next.model = snapshot.model;
   const ts = new Date().toISOString().replace(/[:.]/g, '-');
@@ -630,10 +649,12 @@ async function switchToAnthropicUpstream(up, requestedModel, res) {
   // Persist the active marker (id/name/baseURL/model/models — NEVER the token).
   try {
     await mkdir(join(homedir(), '.claude-gui'), { recursive: true });
-    await writeFile(ANTHROPIC_ACTIVE_PATH, JSON.stringify({
+    const marker = {
       providerId: up.id, name: up.name, baseURL: up.baseURL,
       model: env.ANTHROPIC_MODEL || null, models: up.models || [],
-    }));
+    };
+    if (up.defaultModel && (up.models || []).includes(up.defaultModel)) marker.defaultModel = up.defaultModel;
+    await writeFile(ANTHROPIC_ACTIVE_PATH, JSON.stringify(marker));
   } catch {}
   await unlink(OPENAI_ACTIVE_PATH).catch(() => {}); // off the openai proxy
   await writeActiveProviderId(up.id);
@@ -643,10 +664,16 @@ async function switchToAnthropicUpstream(up, requestedModel, res) {
 // Switch to a GUI custom provider. openai → proxy (reuse upstream switch);
 // anthropic → point the CLI straight at the upstream, no proxy.
 async function switchToCustomProvider(p, requestedModel, res) {
+  // AZ8: GUI 主动切 provider 且未显式带 model 时,优先用该 provider 的 defaultModel
+  // (仍须在 models[] 内才生效),否则下游回退 models[0]。defaultModel 一并透传给
+  // marker 文件,供 model-resolver 兜底用 oa.defaultModel || oa.models[0]。
+  const defModel = (typeof p.defaultModel === 'string' && (p.models || []).includes(p.defaultModel))
+    ? p.defaultModel : '';
+  const effModel = requestedModel || defModel || undefined;
   if (p.type === 'openai') {
     return switchToOpenAIUpstream(
-      { id: p.id, name: p.name, baseURL: p.baseURL, apiKey: p.apiKey, models: p.models || [] },
-      requestedModel, res,
+      { id: p.id, name: p.name, baseURL: p.baseURL, apiKey: p.apiKey, models: p.models || [], defaultModel: defModel },
+      effModel, res,
     );
   }
   // anthropic-compatible upstream (third-party Claude relay): route through the
@@ -659,13 +686,13 @@ async function switchToCustomProvider(p, requestedModel, res) {
     delete snapEnv.ANTHROPIC_DEFAULT_SONNET_MODEL;
     delete snapEnv.ANTHROPIC_DEFAULT_OPUS_MODEL;
     return switchToAnthropicUpstream(
-      { id: p.id, name: p.name, baseURL: p.baseURL, authToken: p.apiKey, snapshot: { ...cur, env: snapEnv }, models },
-      requestedModel, res,
+      { id: p.id, name: p.name, baseURL: p.baseURL, authToken: p.apiKey, snapshot: { ...cur, env: snapEnv }, models, defaultModel: defModel },
+      effModel, res,
     );
   }
   // official-anthropic custom upstream (rare) — direct, uses the CLI OAuth.
-  const model = (requestedModel && models.includes(requestedModel))
-    ? requestedModel : (models[0] || requestedModel || '');
+  const model = (effModel && models.includes(effModel))
+    ? effModel : (defModel || models[0] || effModel || '');
   const current = await readCurrentSettings();
   const env = { ...(current.env || {}) };
   env.ANTHROPIC_BASE_URL = p.baseURL;
@@ -756,7 +783,7 @@ router.get('/custom-providers', async (_req, res) => {
   res.json({
     providers: list.map((p) => ({
       id: p.id, name: p.name, type: p.type, baseURL: p.baseURL,
-      models: p.models || [], hasKey: !!p.apiKey,
+      models: p.models || [], defaultModel: p.defaultModel || '', hasKey: !!p.apiKey,
     })),
   });
 });
@@ -764,19 +791,25 @@ router.get('/custom-providers', async (_req, res) => {
 // POST /api/custom-providers { name, type, baseURL, apiKey, models } — add one.
 router.post('/custom-providers', async (req, res) => {
   try {
-    const { name, type, baseURL, apiKey, models } = req.body || {};
+    const { name, type, baseURL, apiKey, models, defaultModel } = req.body || {};
     if (!name || typeof name !== 'string') return res.status(400).json({ error: 'name 必填' });
     if (type !== 'openai' && type !== 'anthropic') return res.status(400).json({ error: 'type 必须是 openai 或 anthropic' });
     let url; try { url = new URL(baseURL); } catch { return res.status(400).json({ error: 'baseURL 非法' }); }
     if (!/^https?:$/.test(url.protocol)) return res.status(400).json({ error: 'baseURL 必须是 http(s)' });
+    const cleanModels = Array.isArray(models) ? models.filter((m) => typeof m === 'string' && m.trim()).map((m) => m.trim()) : [];
     const entry = {
       id: randomUUID(),
       name: name.trim(),
       type,
       baseURL: baseURL.trim().replace(/\/+$/, ''),
       apiKey: typeof apiKey === 'string' ? apiKey.trim() : '',
-      models: Array.isArray(models) ? models.filter((m) => typeof m === 'string' && m.trim()).map((m) => m.trim()) : [],
+      models: cleanModels,
     };
+    // AZ8: 可选的 per-provider 默认模型。只接受属于该 provider models[] 的 id;非法/不在
+    // 列表内则不写(向后兼容:无此字段时切换/解析回退 models[0])。
+    if (typeof defaultModel === 'string' && cleanModels.includes(defaultModel.trim())) {
+      entry.defaultModel = defaultModel.trim();
+    }
     const list = await readCustomProviders();
     list.push(entry);
     await writeCustomProviders(list);
@@ -793,12 +826,15 @@ router.put('/custom-providers/:id', async (req, res) => {
     const list = await readCustomProviders();
     const idx = list.findIndex((p) => p.id === req.params.id);
     if (idx === -1) return res.status(404).json({ error: 'not found' });
-    const { name, type, baseURL, apiKey, models } = req.body || {};
+    const { name, type, baseURL, apiKey, models, defaultModel } = req.body || {};
     if (!name || typeof name !== 'string') return res.status(400).json({ error: 'name 必填' });
     if (type !== 'openai' && type !== 'anthropic') return res.status(400).json({ error: 'type 必须是 openai 或 anthropic' });
     let url; try { url = new URL(baseURL); } catch { return res.status(400).json({ error: 'baseURL 非法' }); }
     if (!/^https?:$/.test(url.protocol)) return res.status(400).json({ error: 'baseURL 必须是 http(s)' });
     const prev = list[idx];
+    const nextModels = Array.isArray(models)
+      ? models.filter((m) => typeof m === 'string' && m.trim()).map((m) => m.trim())
+      : (prev.models || []);
     list[idx] = {
       ...prev,
       id: prev.id, // never change the id
@@ -806,10 +842,17 @@ router.put('/custom-providers/:id', async (req, res) => {
       type,
       baseURL: baseURL.trim().replace(/\/+$/, ''),
       apiKey: (typeof apiKey === 'string' && apiKey.trim()) ? apiKey.trim() : prev.apiKey,
-      models: Array.isArray(models)
-        ? models.filter((m) => typeof m === 'string' && m.trim()).map((m) => m.trim())
-        : (prev.models || []),
+      models: nextModels,
     };
+    // AZ8: 默认模型。显式传入(且在 models[] 内)则更新;传 null/'' 则清除;不传则保留旧值。
+    // 同时校验:旧 defaultModel 若已不在新 models[] 内,自动清除(避免指向被删模型)。
+    if (defaultModel === null || defaultModel === '') {
+      delete list[idx].defaultModel;
+    } else if (typeof defaultModel === 'string' && nextModels.includes(defaultModel.trim())) {
+      list[idx].defaultModel = defaultModel.trim();
+    } else if (list[idx].defaultModel && !nextModels.includes(list[idx].defaultModel)) {
+      delete list[idx].defaultModel;
+    }
     await writeCustomProviders(list);
     // If the TYPE changed and this provider was active on the OLD type's marker,
     // that marker is now stale (wrong proxy/format) — clear it so GET /provider,
@@ -827,7 +870,7 @@ router.put('/custom-providers/:id', async (req, res) => {
     // ModelSelector reflects the edit immediately (no re-switch needed).
     await syncActiveProviderSnapshot(
       type === 'openai' ? OPENAI_ACTIVE_PATH : ANTHROPIC_ACTIVE_PATH,
-      prev.id, list[idx].models,
+      prev.id, list[idx].models, list[idx].defaultModel,
     );
     res.json({ ok: true, id: prev.id });
   } catch (err) { res.status(500).json({ error: err.message }); }
@@ -984,11 +1027,15 @@ router.get('/provider-models', async (_req, res) => {
 // in the picker until a manual re-switch. `activePath` is openai-active.json or
 // anthropic-active.json. Best-effort: any failure (not the active provider /
 // unreadable) is a no-op.
-async function syncActiveProviderSnapshot(activePath, providerId, models) {
+async function syncActiveProviderSnapshot(activePath, providerId, models, defaultModel) {
   try {
     const active = JSON.parse(await readFile(activePath, 'utf-8'));
     if (active?.providerId !== providerId) return;
     active.models = Array.isArray(models) ? models : [];
+    // AZ8: 同步 marker 的 defaultModel(仅当仍在 models[] 内);否则清除,避免兜底解析
+    // 指向被删除的模型。
+    if (defaultModel && active.models.includes(defaultModel)) active.defaultModel = defaultModel;
+    else delete active.defaultModel;
     // If the active model is no longer in the kept list (de-selected, or the list
     // was emptied), repoint it to the first kept model — or CLEAR it when none
     // remain (deselect-all) — and keep settings.json's ANTHROPIC_MODEL in sync so

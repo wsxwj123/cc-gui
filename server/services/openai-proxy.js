@@ -281,7 +281,10 @@ function streamOpenAIToAnthropic(upstreamRes, clientRes, model) {
       // prompt_tokens_details.cached_tokens。此前直接整段当 input_tokens → 经本网关
       // 的 provider 永远不显示缓存命中、且 input 虚高。拆开对齐 Anthropic 语义
       // (input_tokens = 未命中缓存的新 token)。OpenAI 无 cache write 概念,留空。
-      const cached = json.usage.prompt_tokens_details?.cached_tokens || 0;
+      // BB4:DeepSeek 不返 prompt_tokens_details.cached_tokens,而是顶层
+      // prompt_cache_hit_tokens → 不回退就让 deepseek 缓存命中恒 0、input 虚高。
+      const cached = json.usage.prompt_tokens_details?.cached_tokens
+        ?? json.usage.prompt_cache_hit_tokens ?? 0;
       usage = {
         input_tokens: Math.max(0, (json.usage.prompt_tokens || 0) - cached),
         cache_read_input_tokens: cached,
@@ -381,7 +384,9 @@ function openAIToAnthropicMessage(json, model) {
     stop_reason: STOP_MAP[choice.finish_reason] || 'end_turn', stop_sequence: null,
     // W8(R4):同流式路径 —— 拆出 cached_tokens 对齐 Anthropic 缓存语义。
     usage: (() => {
-      const cached = json.usage?.prompt_tokens_details?.cached_tokens || 0;
+      // BB4:DeepSeek 用顶层 prompt_cache_hit_tokens(无 cached_tokens)→ 回退兼容。
+      const cached = json.usage?.prompt_tokens_details?.cached_tokens
+        ?? json.usage?.prompt_cache_hit_tokens ?? 0;
       return {
         input_tokens: Math.max(0, (json.usage?.prompt_tokens || 0) - cached),
         cache_read_input_tokens: cached,

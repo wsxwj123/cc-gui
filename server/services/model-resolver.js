@@ -65,9 +65,9 @@ export async function getDefaultModel() {
   const base = settings.env?.ANTHROPIC_BASE_URL || '';
   if (/^https?:\/\/127\.0\.0\.1[:/]/.test(base)) {
     const oa = await readOpenAIActive();
-    if (oa?.models?.length) return oa.models[0];
+    if (oa?.models?.length) return oa.defaultModel || oa.models[0];
     const an = await readAnthropicActive();
-    if (an?.models?.length) return an.models[0];
+    if (an?.models?.length) return an.defaultModel || an.models[0];
     return ''; // model-less relay — show "no model", never fake Claude
   }
 
