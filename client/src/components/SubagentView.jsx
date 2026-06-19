@@ -8,6 +8,14 @@ import { MarkdownRenderer } from './MarkdownRenderer.jsx';
 // 数据来自 store.activeAgents[agentId](流式累积的 text/thinking/toolCalls)。
 export function SubagentView({ agentId, parentTitle, onBack }) {
   const agent = useStore((s) => s.activeAgents[agentId]);
+  // 兜底:store 拿不到具体名/model 时(provider 不发子代理流),从 server 提取的
+  // sessions.subagents 按 toolUseId(= agentId)对回 agentType / model。
+  const sessionsList = useStore((s) => s.sessions);
+  let metaAgent;
+  for (const sess of (Array.isArray(sessionsList) ? sessionsList : [])) {
+    metaAgent = sess?.subagents?.find?.((a) => a.toolUseId === agentId);
+    if (metaAgent) break;
+  }
 
   if (!agent) {
     return (
@@ -19,7 +27,10 @@ export function SubagentView({ agentId, parentTitle, onBack }) {
     );
   }
 
-  const name = agent.name || 'Task';
+  const rawName = agent.name || null;
+  const isGeneric = !rawName || rawName === 'Task' || rawName === 'Agent';
+  const name = (isGeneric && metaAgent?.agentType) ? metaAgent.agentType : (rawName || '子代理');
+  const agentModel = agent.model || metaAgent?.model || null;
   const description = agent.description || '';
   const prompt = agent.prompt || '';
   const thinkingOut = (agent.thinking || []).join('');
@@ -55,9 +66,9 @@ export function SubagentView({ agentId, parentTitle, onBack }) {
             <span className="text-ink truncate">{name}</span>
           </div>
           <div className="flex items-center gap-2 mt-0.5 text-[11px] font-mono text-ink-faint">
-            {agent.model && (
+            {agentModel && (
               <span className="px-1.5 py-px bg-violet-100 text-violet-700 rounded" title="该子代理实际使用的模型">
-                {agent.model}
+                {agentModel}
               </span>
             )}
             <span className={`${statusMeta.cls} flex items-center gap-1 font-body`}>
@@ -97,8 +108,8 @@ export function SubagentView({ agentId, parentTitle, onBack }) {
             <div className="flex-1 min-w-0">
               <div className="flex items-center gap-2 mb-1.5">
                 <span className="text-[13px] font-medium text-ink font-body">{name}</span>
-                {agent.model && (
-                  <span className="text-[10px] px-1.5 py-px bg-violet-100 text-violet-700 rounded font-mono">{agent.model}</span>
+                {agentModel && (
+                  <span className="text-[10px] px-1.5 py-px bg-violet-100 text-violet-700 rounded font-mono">{agentModel}</span>
                 )}
               </div>
 

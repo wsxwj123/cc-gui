@@ -10,6 +10,10 @@ export function AgentsPanel() {
   const [saved, setSaved] = useState(false);
   const [creating, setCreating] = useState(false);
   const [newName, setNewName] = useState('');
+  // 当前 provider 的默认模型 + 可选模型,供新建 agent 时预填 model 字段。
+  const [defaultModel, setDefaultModel] = useState('sonnet');
+  const [modelOptions, setModelOptions] = useState([]);
+  const [newModel, setNewModel] = useState('sonnet');
 
   const fetchAgents = async () => {
     setLoading(true);
@@ -21,6 +25,19 @@ export function AgentsPanel() {
     setLoading(false);
   };
   useEffect(() => { fetchAgents(); }, []);
+
+  // 取当前 provider 的默认模型与可用模型(同 /api/model,ModelSelector 用的同一源)。
+  useEffect(() => {
+    fetch('/api/model').then((r) => r.json()).then((d) => {
+      const cur = d.model || 'sonnet';
+      // 别名 + 当前 provider 的具体模型 id 一起作为下拉选项(去重)。别名在
+      // 任意 provider 下都被 CLI 路由到对应模型,具体 id 适合钉死某个模型。
+      const opts = Array.from(new Set(['sonnet', 'opus', 'haiku', cur, ...(Array.isArray(d.available) ? d.available : [])])).filter(Boolean);
+      setDefaultModel(cur);
+      setModelOptions(opts);
+      setNewModel(cur);
+    }).catch(() => {});
+  }, []);
 
   const open = async (name) => {
     setSelected(name);
@@ -47,7 +64,7 @@ export function AgentsPanel() {
   const createNew = async () => {
     if (!/^[a-z0-9-]{1,64}$/.test(newName)) return alert('名字只能小写字母、数字、-');
     setSelected(newName);
-    setContent(`---\nname: ${newName}\ndescription: \nmodel: sonnet\n---\n\n你是 ${newName}。\n`);
+    setContent(`---\nname: ${newName}\ndescription: \nmodel: ${newModel || defaultModel}\n---\n\n你是 ${newName}。\n`);
     setCreating(false); setNewName('');
   };
 
@@ -71,11 +88,21 @@ export function AgentsPanel() {
       </div>
 
       {creating && (
-        <div className="px-4 py-2 border-b border-canvas-deep flex gap-1.5 items-center bg-canvas-warm/40">
-          <input value={newName} onChange={(e) => setNewName(e.target.value)}
-            placeholder="agent-name"
-            className="flex-1 bg-canvas border border-canvas-deep rounded px-2 py-1 text-xs font-mono" />
-          <button onClick={createNew} className="btn-accent text-[11px] px-2 py-1">创建</button>
+        <div className="px-4 py-2 border-b border-canvas-deep bg-canvas-warm/40 space-y-1.5">
+          <div className="flex gap-1.5 items-center">
+            <input value={newName} onChange={(e) => setNewName(e.target.value)}
+              placeholder="agent-name"
+              className="flex-1 bg-canvas border border-canvas-deep rounded px-2 py-1 text-xs font-mono" />
+            <select value={newModel} onChange={(e) => setNewModel(e.target.value)}
+              title="子代理默认模型(写入 .md 的 model 字段)"
+              className="bg-canvas border border-canvas-deep rounded px-1.5 py-1 text-xs font-mono max-w-[140px]">
+              {modelOptions.map((m) => <option key={m} value={m}>{m}</option>)}
+            </select>
+            <button onClick={createNew} className="btn-accent text-[11px] px-2 py-1">创建</button>
+          </div>
+          <p className="text-[10px] text-ink-faint font-body leading-snug">
+            默认填当前 provider 的默认模型（<code className="text-ink-muted">{defaultModel}</code>）。.md 里的 <code className="text-ink-muted">model</code> 会决定该子代理实际使用的模型，可与主会话不同；别名（sonnet/opus/haiku）在各 provider 下由 CLI 自动路由。
+          </p>
         </div>
       )}
 

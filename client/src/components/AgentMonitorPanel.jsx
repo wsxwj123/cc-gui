@@ -101,6 +101,17 @@ function AgentBucket({ title, titleColor, defaultOpen, agents }) {
 function AgentCard({ agent }) {
   const [expanded, setExpanded] = useState(false);
   const setViewingAgent = useStore((s) => s.setViewingAgent);
+  // 兜底:很多 provider 不往父流发 parent_tool_use_id 子代理事件,activeAgents 里
+  // 拿不到 model/具体 agentType。从 server 提取的 sessions.subagents(按 toolUseId
+  // 对回,= activeAgents 的 key = agent.id)补 model 与 agentType。
+  const sessionsList = useStore((s) => s.sessions);
+  let metaAgent;
+  for (const sess of (Array.isArray(sessionsList) ? sessionsList : [])) {
+    metaAgent = sess?.subagents?.find?.((a) => a.toolUseId === agent.id);
+    if (metaAgent) break;
+  }
+  const displayName = agent.name || metaAgent?.agentType || '子代理';
+  const displayModel = agent.model || metaAgent?.model || null;
   const text = agent.text ? agent.text.join('') : '';
   const thinking = agent.thinking ? agent.thinking.join('') : '';
   const tools = agent.toolCalls || [];
@@ -115,14 +126,19 @@ function AgentCard({ agent }) {
         <div className="flex items-center gap-2 mb-1">
           {hasDetail && (expanded ? <ChevronDown size={11} className="text-violet-600 shrink-0" /> : <ChevronRight size={11} className="text-violet-600 shrink-0" />)}
           <Bot size={11} className="text-violet-600 shrink-0" />
-          <span className="text-xs font-medium text-ink font-mono truncate">{agent.name || 'Task'}</span>
+          <span className="text-xs font-semibold text-violet-900 font-mono truncate">{displayName}</span>
+          {displayModel && (
+            <span className="text-[9px] px-1 py-px bg-violet-100 text-violet-700 rounded font-mono shrink-0" title="该子代理实际使用的模型">
+              {displayModel}
+            </span>
+          )}
           <div className="ml-auto flex items-center gap-1.5">
             <StatusBadge status={agent.status} />
             {/* #9 进入子代理会话窗口 */}
             <span
               role="button"
               tabIndex={0}
-              onClick={(e) => { e.stopPropagation(); if (agent.id) setViewingAgent(agent.id); }}
+              onClick={(e) => { e.stopPropagation(); if (agent.id) setViewingAgent(useStore.getState().activeTabIndex, agent.id); }}
               className="p-0.5 rounded text-violet-500 hover:text-violet-800 hover:bg-violet-100 cursor-pointer"
               title="在子代理会话窗口打开"
             >

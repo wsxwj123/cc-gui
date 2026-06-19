@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { Bot, ChevronDown, ChevronRight, Loader2, Maximize2 } from 'lucide-react';
 import { useStore } from '../../stores/sessionStore.js';
 import { MarkdownRenderer } from '../MarkdownRenderer.jsx';
+import { extractToolResultText } from '../../utils/toolResult.js';
 
 // Subagent card — Task tool calls. Pulls the live agent state (text/thinking/
 // tool calls accumulated from stream_events with parent_tool_use_id) out of
@@ -26,7 +27,13 @@ export function TaskCard({ toolCall }) {
   }
   const agentModel = agent?.model || metaAgent?.model || null;
 
-  const subagentType = toolCall.input?.subagent_type || agent?.name || 'Task';
+  // 名称优先级:input.subagent_type(实测 = web-search-agent 等具体名)→ store 里的
+  // agent.name → server 提取的 metaAgent.agentType。最后才回退泛化文案。store 里的
+  // agent.name 在某些 provider 下会停留在字面 'Agent'/'Task'(input 未解析成功时),
+  // 这种情况下优先用 metaAgent.agentType 还原具体名。
+  const rawName = toolCall.input?.subagent_type || agent?.name || null;
+  const isGeneric = !rawName || rawName === 'Task' || rawName === 'Agent';
+  const subagentType = (isGeneric && metaAgent?.agentType) ? metaAgent.agentType : (rawName || '子代理');
   const description = toolCall.input?.description || agent?.description || '';
   const prompt = toolCall.input?.prompt || '';
 
@@ -52,10 +59,10 @@ export function TaskCard({ toolCall }) {
         status: isDone ? (isError ? 'error' : 'done') : 'working',
         startedAt: Date.now(),
         sessionId: st.paneSessions[st.activeTabIndex]?.sessionId || st.selectedSession?.sessionId || null,
-        result: typeof resContent === 'string' ? resContent : (resContent ? JSON.stringify(resContent) : null),
+        result: resContent != null ? extractToolResultText(resContent) : null,
       });
     }
-    st.setViewingAgent(toolCall.id);
+    st.setViewingAgent(st.activeTabIndex, toolCall.id);  // AZ6:渲染所在/焦点 pane
   };
 
   const textOut = agent ? agent.text.join('') : '';
@@ -74,7 +81,10 @@ export function TaskCard({ toolCall }) {
         <Bot size={14} className="text-violet-600 shrink-0 mt-0.5" />
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2">
-            <span className="text-xs font-medium text-violet-900 font-mono truncate">
+            <span className="text-[9px] px-1 py-px bg-violet-200 text-violet-800 rounded font-body shrink-0 uppercase tracking-wide">
+              子代理
+            </span>
+            <span className="text-xs font-semibold text-violet-900 font-mono truncate" title={`子代理: ${subagentType}`}>
               {subagentType}
             </span>
             {agentModel && (
