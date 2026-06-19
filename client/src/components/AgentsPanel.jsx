@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { Bot, RefreshCw, Save, Check, Plus, FileText, Download, Package, Trash2 } from 'lucide-react';
+import { confirmDialog } from '../utils/confirmDialog.jsx';
 
 export function AgentsPanel() {
   const [agents, setAgents] = useState([]);
@@ -90,7 +91,9 @@ export function AgentsPanel() {
   };
 
   const del = async (name) => {
-    if (!window.confirm(`删除 agent「${name}」？\n将删除 ~/.claude/agents/${name}.md，不可恢复。`)) return;
+    // window.confirm 在 Tauri WKWebView 里被屏蔽(返回 falsy)→ 删除按钮"点了没反应"。
+    // 用项目自带的 confirmDialog(应用内弹层,异步返回 boolean)。
+    if (!(await confirmDialog(`删除 agent「${name}」？\n将删除 ~/.claude/agents/${name}.md，不可恢复。`, { danger: true }))) return;
     try {
       await fetch(`/api/agents/${encodeURIComponent(name)}`, { method: 'DELETE' });
       if (selected === name) { setSelected(null); setContent(''); }
