@@ -532,7 +532,7 @@ pub fn run() {
             .title("Claude GUI")
             // 默认窗口放大,让顶部会话行与所有按钮在「中」字号下完整一行显示,不再
             // 挤成多行(#8)。仍可手动缩小到 min。
-            .inner_size(1480.0, 940.0)
+            .inner_size(1560.0, 960.0)
             .min_inner_size(900.0, 600.0)
             .build()?;
             let _ = window.show();

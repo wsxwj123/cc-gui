@@ -100,8 +100,7 @@ export function AgentModeSelector({ permKey = null, sessionStarted = false }) {
         className="flex items-center gap-1 px-2 py-1 rounded-md hover:bg-black/5 transition-colors"
         title={`活跃 Agent / 模式${sessionStarted ? '（已开始的会话不可更改，仅新建会话生效）' : '：选一个 agent 作主控，可自动委派子代理（新建会话生效）'}`}>
         <Workflow size={12} className={active ? 'text-accent' : 'text-ink-faint'} />
-        {/* 默认(普通模式)只显图标省工具栏宽度;选了 agent 才显名字。避免工具栏在默认窗宽换行。 */}
-        {active && <span className="text-[11px] font-body text-accent max-w-[110px] truncate">{label}</span>}
+        <span className={`text-[11px] font-body max-w-[110px] truncate ${active ? 'text-accent' : 'text-ink-muted'}`}>{label}</span>
         <ChevronDown size={10} className="text-ink-faint" />
       </button>
       {open && (
