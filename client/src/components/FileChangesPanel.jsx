@@ -36,6 +36,14 @@ function ChangeItem({ change, sessionId, cwd, reviewed, onToggleReviewed }) {
   const [expanded, setExpanded] = useState(false);
   const [busy, setBusy] = useState(null);
   const [reverted, setReverted] = useState(false);
+  // AZ13:回滚成功原本只把 hover-only 图标变勾,鼠标移开就看不见 → 用户感知不到成功。
+  // 加一条短暂常显的成功文案。
+  const [flash, setFlash] = useState(false);
+  const markReverted = () => {
+    setReverted(true);
+    setFlash(true);
+    setTimeout(() => setFlash(false), 2600);
+  };
 
   const revert = async (e) => {
     e.stopPropagation();
@@ -51,7 +59,7 @@ function ChangeItem({ change, sessionId, cwd, reviewed, onToggleReviewed }) {
         body: JSON.stringify({ file: change.file, allowDeleteUntracked: change.type === 'write' }),
       });
       const d = await res.json();
-      if (res.ok) setReverted(true);
+      if (res.ok) markReverted();
       else if (sessionId && cwd) {
         const params = new URLSearchParams();
         if (change.timestamp) params.set('timestamp', change.timestamp);
@@ -67,7 +75,7 @@ function ChangeItem({ change, sessionId, cwd, reviewed, onToggleReviewed }) {
           body: JSON.stringify({ sha: rd.sha, cwd, file: change.file }),
         });
         const cd = await cr.json().catch(() => ({}));
-        if (cr.ok) setReverted(true);
+        if (cr.ok) markReverted();
         else alert('恢复失败：' + (cd.error || cr.status));
       } else {
         alert('恢复失败：' + (d.error || res.status));
@@ -117,6 +125,11 @@ function ChangeItem({ change, sessionId, cwd, reviewed, onToggleReviewed }) {
           <span className="flex items-center gap-1 text-[10px] font-mono shrink-0">
             {change.deletions > 0 && <span className="text-red-500">-{change.deletions}</span>}
             {change.additions > 0 && <span className="text-green-600">+{change.additions}</span>}
+          </span>
+        )}
+        {flash && (
+          <span className="flex items-center gap-0.5 text-[10px] text-success shrink-0 animate-fade-up">
+            <Check size={10} /> 已恢复
           </span>
         )}
         <span className="flex items-center gap-1 shrink-0">

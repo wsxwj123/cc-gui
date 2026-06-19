@@ -31,6 +31,7 @@ import EnvCheckPanel from './components/EnvCheckPanel.jsx';
 import { FullDiskAccessModal } from './components/FullDiskAccessModal.jsx';
 import { BUILTIN_PROVIDERS, findBuiltin } from './utils/builtinProviders.js';
 import { computeCost, formatCost } from './utils/pricing.js';
+import { extractToolResultText } from './utils/toolResult.js';
 import {
   FolderOpen, MessageSquare, ChevronLeft, ChevronRight, ChevronDown,
   Search, Hash, Layers, BarChart3, ArrowLeft, Plus,
@@ -1514,6 +1515,14 @@ function SessionList() {
         if (m) maxN = Math.max(maxN, parseInt(m[1], 10));
       }
       st.setCustomTitle(data.newSessionId, `${baseTitle}分支${maxN + 1}`);
+      // AZ7:分支继承源会话的 per-session 配置(否则全回退默认)。用解析后的有效值,
+      // 即使源会话靠历史/全局兜底也能定住。model 的 [1m] 后缀编码了 1m 开关,拷 model
+      // 即拷 1m。keyed setter 只写各自 map、不动全局(已修过分屏污染),拷贝安全。
+      const srcKey = session.sessionId;
+      const dstKey = data.newSessionId;
+      st.setModelFor(dstKey, st.getModelFor(srcKey));
+      st.setEffortFor(dstKey, st.getEffortFor(srcKey));
+      st.setPermissionMode(st.getPermissionModeFor(srcKey), dstKey);
       if (selectedProject) st.fetchSessions(selectedProject.hash, { silent: true });
       if (st.splitMode) {
         const idx = st.activeTabIndex;
@@ -1975,6 +1984,23 @@ function CompactDivider() {
   );
 }
 
+// AZ11/AZ2 性能根治:历史消息列表抽成 memo 子组件。流式只更新 chatMessages/
+// streamingText(不动 messages),memo 命中 → 2万节点的历史列表在每个 token 不再
+// 重渲染;点功能按钮使 SessionDetail 重渲时同样跳过(根治"流式时/点按钮全局卡、
+// 分屏等 A 回复时 B 卡")。前提:传入回调必须引用稳定(见 stableRetry*/stableRollback)。
+const MessageList = React.memo(function MessageList({ messages, onRetryTurn, onRetryTool, onRollback, retryActiveUuid }) {
+  return messages.map((msg, i) => (
+    <div key={msg.uuid || i} data-turn-uuid={msg.uuid} data-turn-role={msg.type}>
+      {msg.type === 'compact'
+        ? <CompactDivider />
+        : msg.type === 'turn'
+        ? <TurnBubble turn={msg} onRetry={onRetryTurn} onRetryTool={(toolCall) => onRetryTool(msg, toolCall)} retryActive={retryActiveUuid === msg.uuid} />
+        : <MessageBubble message={{ ...msg, role: msg.type }}
+            onRollback={msg.type === 'user' ? onRollback : undefined} />}
+    </div>
+  ));
+});
+
 // 上下文达到此占比(%)时，GUI 侧主动提示并倒计时自动 /compact。
 // 第一方(anthropic)由 CLI 原生 auto-compact 负责(约 92%)；第三方 provider 不支持
 // count_tokens、上下文窗口被 CLI 当兜底源 → 原生 auto-compact 不可靠/不触发，由本组件兜底。
@@ -2098,13 +2124,15 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // order stays stable. After a session-load transition we'd otherwise add a
   // hook below the early return → React #310 → blank page.
   const currentProvider = useStore((s) => s.currentProvider);
-  // #9 子代理会话窗口:本 pane 是否要把主区换成某子代理的对话视图。单屏恒在 pane0
-  // 展示;分屏按 agent 归属会话匹配对应 pane。
-  const viewingAgentId = useStore((s) => s.viewingAgentId);
-  const viewingAgent = useStore((s) => (s.viewingAgentId ? s.activeAgents[s.viewingAgentId] : null));
-  const paneCountForAgent = useStore((s) => s.paneCount);
-  const showAgentView = !!viewingAgentId && !!viewingAgent
-    && (paneCountForAgent === 1 || viewingAgent.sessionId === selectedSession?.sessionId);
+  // #9/AZ6 子代理会话窗口:每个 pane 读自己 tab 的 viewing id(原 viewingAgentId 是
+  // 全局单值 → 分屏下 A 的子代理会同时显示在 B 窗格)。per-tab 天然隔离,不再按
+  // sessionId 匹配。点 A 的子代理只替换 A 窗格,点 A 母会话标题(返回)恢复 A 会话。
+  const viewingAgentId = useStore((s) => s.viewingAgentByTab[tabIndex] || null);
+  const viewingAgent = useStore((s) => {
+    const id = s.viewingAgentByTab[tabIndex];
+    return id ? s.activeAgents[id] : null;
+  });
+  const showAgentView = !!viewingAgentId && !!viewingAgent;
   // 模型解析优先级(#8 修复模型总回退到默认):
   //   1. 本会话显式 pin(modelBySession[key]) —— 用户主动切的,最权威
   //   2. 本会话历史里最近一条带 model 的消息 —— 让会话"记住"自己用过的模型,
@@ -2140,6 +2168,13 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   const messagesEndRef = useRef(null);
   const containerRef = useRef(null);
   const [autoScroll, setAutoScroll] = useState(true);
+  // AZ3:用户是否主动滚离底部(自动吸底的权威闸门)。原本吸底只看几何阈值 → 流式
+  // 内容增长 + setAutoScroll 异步,导致"刚上滚就被弹回 + 边界抖动闪烁"。改用 ref
+  // 意图锁(不触发渲染),带迟滞;autoScroll state 仅留给「回到底部」按钮显隐。
+  const userScrolledAwayRef = useRef(false);
+  // 区分"程序触发的吸底写入"与"用户手势":吸底自己写 scrollTop 会触发 scroll 事件,
+  // 不打这个标记就会被 handleScroll 误判成用户滚动。
+  const programmaticScrollRef = useRef(false);
   const [chatMessages, setChatMessages] = useState([]);
   const [isStreaming, setIsStreaming] = useState(false);
   // Mirror of isStreaming in a ref. Used by handleSend's gate instead of the
@@ -2262,11 +2297,11 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       if (b?.type === 'tool_use' && b.toolCall) replay([b.toolCall]);
     }
     if (tasks.size > 0) {
-      const list = [...tasks.values()];
-      // X1(洞B):回合已结束且没有任何一项动过(全 pending)= AI 建完任务没再回写
-      // (磁盘任务状态也是 pending)。不再让这种"僵尸清单"永久吸在输入框上方。
-      if (!isStreaming && list.every((t) => t.status === 'pending')) return null;
-      return list;
+      // BA4:原 X1(洞B)在"回合已结束且全 pending"时返回 null 以藏僵尸清单,但会
+      // 误杀"AI 建完任务、跨回合才开工"的合法清单(TodoWrite 路径本就不过滤,行为
+      // 不一致 → 用户报 todo 不显示)。改为只要有任务就显示,与 TodoWrite 一致;
+      // 代价=偶发僵尸清单短暂多显到下回合更新,可接受。
+      return [...tasks.values()];
     }
     return null;
   }, [streamingBlocks, chatMessages, messages, isStreaming]);
@@ -2433,13 +2468,13 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // token. Use direct scrollTop write (cheaper than scrollIntoView + smooth,
   // which forces synchronous layout and animation engine each call).
   useEffect(() => {
-    if (!autoScroll) return;
+    if (userScrolledAwayRef.current) return;  // AZ3:用户在看历史时不抢滚
     const id = requestAnimationFrame(() => {
       const el = containerRef.current;
-      if (el) el.scrollTop = el.scrollHeight;
+      if (el) { programmaticScrollRef.current = true; el.scrollTop = el.scrollHeight; }
     });
     return () => cancelAnimationFrame(id);
-  }, [messages, chatMessages, streamingText, streamingThinking, streamingToolCalls, autoScroll]);
+  }, [messages, chatMessages, streamingText, streamingThinking, streamingToolCalls]);
 
   // 重做工具的转圈指示器:一旦重跑的流式内容(文本/思考/工具)出现,就关掉指示器
   // ——此时重跑已就地以流式气泡呈现,指示器再转就是多余且会"完成后仍在转"。
@@ -2458,8 +2493,14 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
 
   const handleScroll = () => {
     if (!containerRef.current) return;
+    // AZ3:程序触发的吸底写入会回弹一个 scroll 事件 → 跳过判定,别误判成用户滚动。
+    if (programmaticScrollRef.current) { programmaticScrollRef.current = false; return; }
     const { scrollTop, scrollHeight, clientHeight } = containerRef.current;
-    setAutoScroll(scrollHeight - scrollTop - clientHeight < 120);
+    const distFromBottom = scrollHeight - scrollTop - clientHeight;
+    // 迟滞:滚离 >200 上锁(暂停自动吸底),滚回贴底 <40 解锁;两阈值拉开消除边界抖动。
+    if (distFromBottom > 200) userScrolledAwayRef.current = true;
+    else if (distFromBottom < 40) userScrolledAwayRef.current = false;
+    setAutoScroll(distFromBottom < 120);  // 仅驱动「回到底部」按钮显隐
     if (scrollPersistKey) {
       try { localStorage.setItem(scrollPersistKey, String(scrollTop)); } catch {}
     }
@@ -2481,8 +2522,11 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       // Defer to next frame so DOM is laid out
       requestAnimationFrame(() => {
         if (el) {
+          programmaticScrollRef.current = true;
           el.scrollTop = top;
-          setAutoScroll(el.scrollHeight - el.scrollTop - el.clientHeight < 120);
+          const away = el.scrollHeight - el.scrollTop - el.clientHeight >= 120;
+          userScrolledAwayRef.current = away;  // AZ3:恢复的位置若不在底部则保持暂停吸底
+          setAutoScroll(!away);
         }
       });
     }
@@ -2503,6 +2547,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
 
   const handleSend = useCallback(async (prompt, opts = {}) => {
     const { reattachPid, appendSystemPrompt, hiddenUserMessage = false, meta } = opts;
+    // AZ3:真实发送(非 reattach)恢复自动吸底——满足"回车发送后无手动滚动则吸底到最新"。
+    if (!reattachPid) userScrolledAwayRef.current = false;
     // Intercept the /remote-control (alias /rc) command. It CANNOT be sent
     // through `claude -p` — slash commands are interactive-only and the CLI
     // rejects them ("isn't available in this environment"). Instead we launch
@@ -3141,7 +3187,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                   aStore.updateAgentTool(event.parent_tool_use_id, block.tool_use_id, {
                     result: {
                       toolUseId: block.tool_use_id,
-                      content: typeof block.content === 'string' ? block.content : JSON.stringify(block.content),
+                      content: extractToolResultText(block.content),
                       isError: block.is_error || false,
                     },
                   });
@@ -3156,7 +3202,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                 if (store.activeAgents[block.tool_use_id]) {
                   store.upsertAgent(block.tool_use_id, {
                     status: block.is_error ? 'error' : 'done',
-                    result: typeof block.content === 'string' ? block.content : JSON.stringify(block.content),
+                    result: extractToolResultText(block.content),
                   });
                   // U7 兜底:有些 CLI/provider 不往父流发子代理内部事件的 tool_result,
                   // Task 已收尾时把仍 pending 的子工具统一标记完成,不再转圈。
@@ -3569,8 +3615,12 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       // it. This runs once per chat — if more were queued, the next send's
       // finally block will pop again. setTimeout 0 gets us out of this finally
       // first so React commits isStreaming=false before the next send starts.
-      // Skip on reattach — the queue belongs to whoever did the original send.
-      if (!reattachPid && !acceleratingRef.current) {
+      // AZ10:reattach 流结束也要排空。原本 skip-on-reattach 导致:分屏非焦点 pane 的
+      // 本地流被 detach 后由 backgroundPid 轮询接管成 reattach 流,结束时跳过排空 →
+      // 排队消息永不自动发出(分屏几乎必现)。排空用本 pane 当前会话 key,reattach
+      // 回来时正是该会话;shiftMessage 原子 pop + reattach 串行(reattachedPidRef
+      // 守卫)→ 不会与原 finally 双发。仍与 ⚡引导(acceleratingRef)互斥。
+      if (!acceleratingRef.current) {
         const tabSel = getLocalSession();
         const queueKey = tabSel?.sessionId
           || `draft-${tabSel?.projectHash || 'none'}`;
@@ -3626,6 +3676,10 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // composer, so the old "ignore Esc from a textarea" guard meant Esc never
   // interrupted in practice. Permission dialogs still own Esc (deny).
   useEffect(() => {
+    // AZ1:分屏下 esc 双击中断只作用于【焦点窗格】。effect 挂 window 级,每个流式
+    // pane 各注册一个 listener;不加这道守卫则一次 esc 广播到所有 pane → 中断全部会话。
+    // 与上方 Cmd+F effect 的 paneIsActive 守卫同构。单屏 activeTabIndex 恒 0,无回归。
+    if (!paneIsActive) return;
     if (!isStreaming && !backgroundPid) return;
     const hasPendingPerm = () => useStore.getState().pendingPermissions
       .some((p) => p.sessionId === selectedSession?.sessionId);
@@ -3644,7 +3698,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [isStreaming, backgroundPid, handleStop, selectedSession?.sessionId]);
+  }, [paneIsActive, isStreaming, backgroundPid, handleStop, selectedSession?.sessionId]);
 
   // "⚡ 引导" — abort the in-flight chat and immediately fire the queued message.
   const handleAccelerate = useCallback(() => {
@@ -3909,8 +3963,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     // 且 init/message_start 常在同一批 setState 里到达 —— 无守卫会把新会话首轮刚写入
     // 的 usage 又清掉(新会话徽章不显示的根因)。流归属仍是本会话时不清。
     if (streamOwnerKeyRef.current !== sessionQueueKey) setLiveContextUsage(null);
-    useStore.getState().setViewingAgent(null);
-  }, [selectedSession?.sessionId, setPendingEditRollback]);
+    useStore.getState().setViewingAgent(tabIndex, null);  // AZ6:只清本 tab,不动其它 pane
+  }, [selectedSession?.sessionId, setPendingEditRollback, tabIndex]);
 
   // 编辑重发取消(#4):ChatInput 里按 Esc → 撤销待回滚(历史本就没动,纯清状态)。
   useEffect(() => {
@@ -4024,6 +4078,17 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       }
     })();
   }, [getLocalSession, fetchMessagesForTab, getLocalMessages, setLocalMessages]);
+
+  // AZ11:给 memo 的 MessageList 传【引用稳定】的回调。原始 handleRollback/handleRetryTurn
+  // 的 deps 含 messages/chatMessages → 流式中每 token 都会换新身份 → 直接传会让 memo
+  // 每帧失效(=没 memo)。用 ref 包一层:身份恒定,内部调最新实现。
+  const handleRetryTurnRef = useRef(null);
+  useEffect(() => { handleRetryTurnRef.current = handleRetryTurn; }, [handleRetryTurn]);
+  const handleRetryToolRef = useRef(null);
+  useEffect(() => { handleRetryToolRef.current = handleRetryTool; }, [handleRetryTool]);
+  const stableRetryTurn = useCallback((turn) => handleRetryTurnRef.current?.(turn), []);
+  const stableRetryTool = useCallback((turn, toolCall) => handleRetryToolRef.current?.(turn, toolCall), []);
+  const stableRollback = useCallback((msg, opts) => handleRollbackRef.current?.(msg, opts), []);
 
   // In split mode, tab 0's `loading` would otherwise blank out tab 1 too.
   // We only let the loading screen short-circuit the primary tab — tab 1
@@ -4144,7 +4209,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
               && (useStore.getState().customTitles[selectedSession.sessionId]
                 || useStore.getState().autoTitles[selectedSession.sessionId]))
               || selectedSession?.firstPrompt || '母会话'}
-            onBack={() => useStore.getState().setViewingAgent(null)}
+            onBack={() => useStore.getState().setViewingAgent(tabIndex, null)}
           />
         </div>
       )}
@@ -4340,16 +4405,13 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             </div>
           ) : (
             <>
-              {messages.map((msg, i) => (
-                <div key={msg.uuid || i} data-turn-uuid={msg.uuid} data-turn-role={msg.type}>
-                  {msg.type === 'compact'
-                    ? <CompactDivider />
-                    : msg.type === 'turn'
-                    ? <TurnBubble turn={msg} onRetry={handleRetryTurn} onRetryTool={(toolCall) => handleRetryTool(msg, toolCall)} retryActive={retryActiveUuid === msg.uuid} />
-                    : <MessageBubble message={{ ...msg, role: msg.type }}
-                        onRollback={msg.type === 'user' ? handleRollback : undefined} />}
-                </div>
-              ))}
+              <MessageList
+                messages={messages}
+                onRetryTurn={stableRetryTurn}
+                onRetryTool={stableRetryTool}
+                onRollback={stableRollback}
+                retryActiveUuid={retryActiveUuid}
+              />
               {liveVisible && chatMessages.map((msg, i) => (
                 <div key={msg.uuid || i} data-turn-uuid={msg.uuid} data-turn-role={msg.type}>
                   {msg.type === 'compact'
@@ -4411,7 +4473,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
               // every scrollable ancestor (incl. the root flex), shoving the
               // header off-screen and leaving a blank gap at the bottom (#16).
               const el = containerRef.current;
-              if (el) el.scrollTop = el.scrollHeight;
+              if (el) { programmaticScrollRef.current = true; el.scrollTop = el.scrollHeight; }
+              userScrolledAwayRef.current = false;  // AZ3:显式回到底部 → 恢复跟随
               setAutoScroll(true);
             }}
             className="bg-canvas border border-canvas-deep hover:bg-canvas-warm rounded-full p-2 shadow-sm transition-colors">
@@ -5501,6 +5564,7 @@ function CustomProviderForm({ onSaved, editing, onCancel }) {
   const [baseURL, setBaseURL] = useState('');
   const [apiKey, setApiKey] = useState('');
   const [modelsText, setModelsText] = useState('');
+  const [defaultModel, setDefaultModel] = useState('');  // AZ8:该 provider 默认模型(空=用列表第一个)
   const [busy, setBusy] = useState('');
   const isEdit = !!editing;
   // Entering edit mode: pre-fill from the chosen provider. The apiKey is NEVER
@@ -5512,9 +5576,10 @@ function CustomProviderForm({ onSaved, editing, onCancel }) {
     setBaseURL(editing.baseURL || '');
     setApiKey('');
     setModelsText((editing.models || []).join('\n'));
+    setDefaultModel(editing.defaultModel || '');
     setOpen(true);
   }, [editing?.id]);
-  const reset = () => { setName(''); setType('openai'); setBaseURL(''); setApiKey(''); setModelsText(''); setOpen(false); };
+  const reset = () => { setName(''); setType('openai'); setBaseURL(''); setApiKey(''); setModelsText(''); setDefaultModel(''); setOpen(false); };
   const close = () => { reset(); onCancel?.(); };
   const parseModels = () => modelsText.split(/[\n,]+/).map((s) => s.trim()).filter(Boolean);
   const fetchModels = async () => {
@@ -5553,6 +5618,8 @@ function CustomProviderForm({ onSaved, editing, onCancel }) {
       // Store in the GUI's own custom-providers.json (no cc-switch.db dependency —
       // works on a fresh machine without CC Switch installed).
       const body = { name, type, baseURL, models: parsedModels };
+      // AZ8:默认模型(后端校验须在 models 内,否则忽略)。空 = 不指定,回退列表第一个。
+      body.defaultModel = defaultModel && parsedModels.includes(defaultModel) ? defaultModel : null;
       // Edit mode: a blank key means "keep the stored one" (the client never holds
       // the real key), so only send apiKey when the user actually typed a new one.
       if (!isEdit || apiKey.trim()) body.apiKey = apiKey;
@@ -5640,6 +5707,17 @@ function CustomProviderForm({ onSaved, editing, onCancel }) {
       <input className={`${inputCls} font-mono`} type="password" placeholder={isEdit ? 'API Key(留空 = 不修改)' : 'API Key'} value={apiKey} onChange={(e) => setApiKey(e.target.value)} />
       <div className="flex items-center gap-2">
         <textarea className={`${inputCls} font-mono min-h-[60px]`} placeholder="模型(每行一个,或逗号分隔)" value={modelsText} onChange={(e) => setModelsText(e.target.value)} />
+      </div>
+      {/* AZ8:默认模型 —— 切到此 provider 且未指定模型时用它(否则永远用列表第一个),
+          子代理 model-less 解析也回退到它。选项来自上方「模型」框。 */}
+      <div className="flex items-center gap-2">
+        <span className="text-[11px] text-ink-faint shrink-0 whitespace-nowrap">默认模型</span>
+        <select value={defaultModel} onChange={(e) => setDefaultModel(e.target.value)}
+          className={`${inputCls} flex-1 cursor-pointer font-mono`}
+          title="切到此 provider 时的默认模型;留空则用模型列表第一个">
+          <option value="">— 列表第一个(不指定)—</option>
+          {parseModels().map((m) => (<option key={m} value={m}>{m}</option>))}
+        </select>
       </div>
       <div className="flex gap-2">
         <button onClick={fetchModels} disabled={!!busy}

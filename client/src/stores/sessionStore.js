@@ -273,7 +273,7 @@ export const useStore = create((set, get) => ({
   //     text: [], thinking: [], toolCalls: [], result }
   // App.jsx reader populates this; AgentMonitorPanel + TaskCard render it.
   activeAgents: {},
-  viewingAgentId: null,  // #9:当前在主区打开的子代理 id
+  viewingAgentByTab: {},  // #9/AZ6:per-tab 在主区打开的子代理 id(分屏隔离,原全局单值会让 A 的子代理占用 B 窗格)
 
   // 侧栏状态符号数据源:有活跃 chat-process 的 sessionId(转圈)+ 它们的 cwd(让
   // ProjectList 在任一会话运行时给项目转圈)。App 每 1.5s 轮询 /agents/active 写入;
@@ -841,8 +841,10 @@ export const useStore = create((set, get) => ({
     bgTasks: { ...s.bgTasks, [id]: { ...(s.bgTasks[id] || { id }), ...patch } },
   })),
   clearAgents: () => set({ activeAgents: {} }),
-  // #9 子代理会话窗口:当前在主区打开查看的子代理 id(null = 看正常会话)。
-  setViewingAgent: (id) => set({ viewingAgentId: id || null }),
+  // #9/AZ6 子代理会话窗口:按 tab 记录在主区打开查看的子代理 id(null = 看正常会话)。
+  setViewingAgent: (tab, id) => set((s) => ({
+    viewingAgentByTab: { ...s.viewingAgentByTab, [tab]: id || null },
+  })),
 
   // ── Message queue helpers (#3) ──────────────────────────────
   enqueueMessage: (sessionKey, msg) => set((s) => {
