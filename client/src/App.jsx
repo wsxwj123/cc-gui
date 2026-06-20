@@ -33,6 +33,7 @@ import { FullDiskAccessModal } from './components/FullDiskAccessModal.jsx';
 import { BUILTIN_PROVIDERS, findBuiltin } from './utils/builtinProviders.js';
 import { computeCost, formatCost } from './utils/pricing.js';
 import { extractToolResultText } from './utils/toolResult.js';
+import { rebuildTodosFromTaskCalls } from './utils/todos.js';
 import {
   FolderOpen, MessageSquare, ChevronLeft, ChevronRight, ChevronDown,
   Search, Hash, Layers, BarChart3, ArrowLeft, Plus,
@@ -2036,12 +2037,29 @@ function CompactDivider() {
 // 重渲染;点功能按钮使 SessionDetail 重渲时同样跳过(根治"流式时/点按钮全局卡、
 // 分屏等 A 回复时 B 卡")。前提:传入回调必须引用稳定(见 stableRetry*/stableRollback)。
 const MessageList = React.memo(function MessageList({ messages, onRetryTurn, onRetryTool, onRollback, retryActiveUuid }) {
+  // BK-6:此前每行内联 `(toolCall) => onRetryTool(msg, toolCall)` 每次渲染新建箭头
+  // 函数 → TurnBubble(自身 React.memo)的 onRetryTool prop 身份每次变 → memo 失效,
+  // retryActiveUuid 一变(进/出"重做"态)就整表 2万节点重渲。改为按 msg.uuid 记忆化:
+  // 每个 uuid 复用同一个包装函数(缓存在 ref 的 Map),包装内部走 onRetryToolRef 读
+  // 最新父回调 → 身份恒定且 deps 不含 messages(遵循 long-session-memo-stable-callbacks)。
+  const onRetryToolRef = useRef(onRetryTool);
+  onRetryToolRef.current = onRetryTool;
+  const toolCbCacheRef = useRef(new Map());
+  const getToolCb = (msg) => {
+    const cache = toolCbCacheRef.current;
+    let cb = cache.get(msg.uuid);
+    if (!cb) {
+      cb = (toolCall) => onRetryToolRef.current?.(msg, toolCall);
+      cache.set(msg.uuid, cb);
+    }
+    return cb;
+  };
   return messages.map((msg, i) => (
     <div key={msg.uuid || i} data-turn-uuid={msg.uuid} data-turn-role={msg.type}>
       {msg.type === 'compact'
         ? <CompactDivider />
         : msg.type === 'turn'
-        ? <TurnBubble turn={msg} onRetry={onRetryTurn} onRetryTool={(toolCall) => onRetryTool(msg, toolCall)} retryActive={retryActiveUuid === msg.uuid} />
+        ? <TurnBubble turn={msg} onRetry={onRetryTurn} onRetryTool={getToolCb(msg)} retryActive={retryActiveUuid === msg.uuid} />
         : <MessageBubble message={{ ...msg, role: msg.type }}
             onRollback={msg.type === 'user' ? onRollback : undefined} />}
     </div>
@@ -2279,79 +2297,19 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // DECLARED HERE (above any conditional early return) so hook order stays
   // stable when selectedSession flips from null → set → null (React #310).
   const currentTodos = useMemo(() => {
-    const scanToolCalls = (toolCalls) => {
-      if (!Array.isArray(toolCalls)) return null;
-      for (let j = toolCalls.length - 1; j >= 0; j--) {
-        const tc = toolCalls[j];
-        if (tc?.name === 'TodoWrite' && Array.isArray(tc.input?.todos)) {
-          return tc.input.todos;
-        }
-      }
-      return null;
-    };
-    for (let i = streamingBlocks.length - 1; i >= 0; i--) {
-      const b = streamingBlocks[i];
-      if (b?.type === 'tool_use' && b.toolCall?.name === 'TodoWrite' && Array.isArray(b.toolCall.input?.todos)) {
-        return b.toolCall.input.todos;
-      }
-    }
-    for (let i = chatMessages.length - 1; i >= 0; i--) {
-      const m = chatMessages[i];
-      if (m?.type !== 'turn') continue;
-      const found = scanToolCalls(m.toolCalls);
-      if (found) return found;
-    }
-    for (let i = messages.length - 1; i >= 0; i--) {
-      const m = messages[i];
-      if (m?.type !== 'turn') continue;
-      const found = scanToolCalls(m.toolCalls);
-      if (found) return found;
-    }
-    // O3(用户从未见过 todolist 的根因): cc 2.1.x 把 TodoWrite 换成了 TaskCreate/
-    // TaskUpdate 任务系统(实测近期 jsonl: TaskCreate 42 次 / TaskUpdate 81 次 /
-    // TodoWrite 仅 2 次)。从这两个工具的调用序列重建任务列表(老→新顺序回放):
-    // TaskCreate 建项(id 从 result "Task #N created" 解析,失败用自增),TaskUpdate
-    // 按 taskId 改 status/subject,status=deleted 移除。
-    const tasks = new Map();
-    let autoId = 0;
-    const replay = (toolCalls) => {
-      if (!Array.isArray(toolCalls)) return;
-      for (const tc of toolCalls) {
-        if (tc?.name === 'TaskCreate' && tc.input?.subject) {
-          // X1(洞A):result 在两条数据源里都是 {toolUseId,content,isError} 对象,
-          // 旧代码只认字符串 → "Task #N" 永远解析失败 → 全部落 auto-키,
-          // TaskUpdate 的 taskId("1")对不上 → 更新被静默丢弃,清单永不勾选。
-          // 兜底 id 也改成纯数字自增(cc 任务 id 就是从 1 起的顺序数字)。
-          const raw = typeof tc.result === 'string' ? tc.result : (tc.result?.content || '');
-          const rid = String(raw).match(/Task #(\d+)/)?.[1];
-          const id = rid || String(++autoId);
-          tasks.set(String(id), { content: tc.input.subject, status: 'pending', activeForm: tc.input.activeForm || '' });
-        } else if (tc?.name === 'TaskUpdate' && tc.input?.taskId != null) {
-          const key = String(tc.input.taskId);
-          const cur = tasks.get(key);
-          if (tc.input.status === 'deleted') { tasks.delete(key); continue; }
-          const next = { ...(cur || { content: '', status: 'pending', activeForm: '' }) };
-          if (tc.input.status) next.status = tc.input.status;
-          if (tc.input.subject) next.content = tc.input.subject;
-          if (tc.input.activeForm) next.activeForm = tc.input.activeForm;
-          if (next.content) tasks.set(key, next);
-        }
-      }
-    };
-    for (const m of messages) { if (m?.type === 'turn') replay(m.toolCalls); }
-    for (const m of chatMessages) { if (m?.type === 'turn') replay(m.toolCalls); }
+    // BK-8a:输入框上方清单与气泡内清单(TurnBubble)共用同一份重建算法
+    // (../utils/todos.js),消除两处口径差异。这里负责把全局所有 turn 的 toolCalls
+    // 按"老→新"摊平成单数组(messages → chatMessages → streamingBlocks),交给共享
+    // 函数;TurnBubble 传单 turn 的 toolCalls。算法内部:最新 TodoWrite 快照优先
+    // (摊平末尾的 streaming 最新),否则回放 TaskCreate/TaskUpdate 序列。
+    const flat = [];
+    for (const m of messages) { if (m?.type === 'turn' && Array.isArray(m.toolCalls)) flat.push(...m.toolCalls); }
+    for (const m of chatMessages) { if (m?.type === 'turn' && Array.isArray(m.toolCalls)) flat.push(...m.toolCalls); }
     for (const b of streamingBlocks) {
-      if (b?.type === 'tool_use' && b.toolCall) replay([b.toolCall]);
+      if (b?.type === 'tool_use' && b.toolCall) flat.push(b.toolCall);
     }
-    if (tasks.size > 0) {
-      // BA4:原 X1(洞B)在"回合已结束且全 pending"时返回 null 以藏僵尸清单,但会
-      // 误杀"AI 建完任务、跨回合才开工"的合法清单(TodoWrite 路径本就不过滤,行为
-      // 不一致 → 用户报 todo 不显示)。改为只要有任务就显示,与 TodoWrite 一致;
-      // 代价=偶发僵尸清单短暂多显到下回合更新,可接受。
-      return [...tasks.values()];
-    }
-    return null;
-  }, [streamingBlocks, chatMessages, messages, isStreaming]);
+    return rebuildTodosFromTaskCalls(flat);
+  }, [streamingBlocks, chatMessages, messages]);
 
   // G1/G2:输入框上方只显 TodoWrite 的待办清单(cc 原生),不再贴整份 ExitPlanMode 计划。
   // 计划全文只在规划模式的审批弹窗(PlanReviewCard)出现——和 claude code 原生一致。

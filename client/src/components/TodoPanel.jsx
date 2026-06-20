@@ -64,7 +64,7 @@ function TodoChecklist({ todos, cleanPlan }) {
         ) : (
           <div className="max-h-[40vh] overflow-y-auto py-1.5">
             {todos.map((t, i) => (
-              <TodoRow key={i} todo={t} />
+              <TodoRow key={t.id ?? t.taskId ?? t.content ?? i} todo={t} />
             ))}
           </div>
         )}
