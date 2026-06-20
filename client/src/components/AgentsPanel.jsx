@@ -126,7 +126,7 @@ export function AgentsPanel() {
           </div>
         </div>
         <p className="text-[10px] text-ink-faint mt-1 font-body leading-snug">
-          这是 <code className="text-ink-muted">~/.claude/agents/*.md</code> 里的 subagent <b>定义</b>（不是运行实时状态）。在主对话里调用 <code className="text-ink-muted">Task</code> 工具时由 Claude 派给这些代理。
+          此处为本机 <code className="text-ink-muted">~/.claude/agents</code> 中保存的 agent 定义。对话过程中 Claude 会按需调用这些 agent 执行子任务。
         </p>
       </div>
 
@@ -137,14 +137,14 @@ export function AgentsPanel() {
               placeholder="agent-name"
               className="flex-1 bg-canvas border border-canvas-deep rounded px-2 py-1 text-xs font-mono" />
             <select value={newModel} onChange={(e) => setNewModel(e.target.value)}
-              title="子代理默认模型(写入 .md 的 model 字段)"
+              title="这个助手默认用哪个模型"
               className="bg-canvas border border-canvas-deep rounded px-1.5 py-1 text-xs font-mono max-w-[140px]">
               {modelOptions.map((m) => <option key={m} value={m}>{m}</option>)}
             </select>
             <button onClick={createNew} className="btn-accent text-[11px] px-2 py-1">创建</button>
           </div>
           <p className="text-[10px] text-ink-faint font-body leading-snug">
-            默认填当前 provider 的默认模型（<code className="text-ink-muted">{defaultModel}</code>）。.md 里的 <code className="text-ink-muted">model</code> 会决定该子代理实际使用的模型，可与主会话不同；别名（sonnet/opus/haiku）在各 provider 下由 CLI 自动路由。
+            默认使用当前服务商的默认模型（<code className="text-ink-muted">{defaultModel}</code>）。可单独为该 agent 指定模型，与主对话不同。
           </p>
         </div>
       )}
@@ -152,7 +152,7 @@ export function AgentsPanel() {
       {showBuiltin && (
         <div className="px-4 py-2 border-b border-canvas-deep bg-canvas-warm/40">
           <div className="flex items-center justify-between mb-1.5">
-            <span className="text-[10px] uppercase tracking-wider text-ink-faint font-body">内置预设 · 移植自 oh-my-opencode-slim</span>
+            <span className="text-[10px] uppercase tracking-wider text-ink-faint font-body">内置 agent 预设 · 来自 oh-my-opencode-slim</span>
             <button onClick={() => installBuiltin(null, false)} disabled={!!installing}
               className="btn-accent text-[10px] px-2 py-0.5 flex items-center gap-1"><Download size={10} />全部安装</button>
           </div>
@@ -174,7 +174,7 @@ export function AgentsPanel() {
             {builtin.length === 0 && <p className="text-[10px] text-ink-faint">加载中…</p>}
           </div>
           <p className="text-[10px] text-ink-faint mt-1.5 font-body leading-snug">
-            装好后即普通可编辑的自定义 agent。<code className="text-ink-muted">orchestrator</code> 可在输入框旁的「模式」开关里选作主控，自动委派 explorer/oracle/fixer 等。
+            安装后即为可编辑的普通 agent。<code className="text-ink-muted">orchestrator</code> 可在输入框旁的 agent 开关中选为主导,自动分配 explorer/oracle/fixer 等执行子任务。
           </p>
         </div>
       )}
@@ -212,7 +212,7 @@ export function AgentsPanel() {
               <textarea value={content} onChange={(e) => setContent(e.target.value)} spellCheck={false}
                 className="flex-1 bg-canvas-warm border-0 p-3 text-[11px] font-mono text-ink-soft resize-none focus:outline-none leading-relaxed" />
               <div className="px-3 py-2 border-t border-canvas-deep bg-canvas-warm/40 text-[10px] text-ink-faint font-body leading-snug shrink-0">
-                <b className="text-ink-muted">让该 agent 能用 MCP</b>:<code className="text-ink-muted">tools:</code> 是白名单——不写就没有。要放行某个 MCP 服务器,在 <code className="text-ink-muted">tools:</code> 行追加 <code className="text-ink-muted">mcp__服务器名__*</code>(整个服务器)或 <code className="text-ink-muted">mcp__服务器名__工具名</code>(单个工具)。服务器名见你的 MCP 设置(如 <code className="text-ink-muted">mcp__tavily__*</code>)。不加的话,即使 MCP 已连接,该 agent 及其子代理也会报"工具不存在"。
+                若需让该 agent 使用某个 MCP,必须在上方 <code className="text-ink-muted">tools</code> 字段中填入该 MCP 的完整名称:<code className="text-ink-muted">mcp__服务器名__*</code> 放行该服务器的全部工具,<code className="text-ink-muted">mcp__服务器名__工具名</code> 仅放行单个工具。未填入时,即使该 MCP 已连接,本 agent 及其子代理也无法调用。服务器名见 MCP 设置面板,例如 <code className="text-ink-muted">mcp__tavily__*</code>。
               </div>
             </>
           ) : (

@@ -59,7 +59,7 @@ export function PermissionModeSelector({ permKey }) {
                   if (m === 'plan') useStore.getState().setActiveAgentFor(permKey, '');
                   setOpen(false);
                 }}
-                title={planDisabled ? 'agent 模式用 todolist 规划，不支持计划卡' : undefined}
+                title={planDisabled ? '已选择 agent 时不可使用规划模式（二者互斥）' : undefined}
                 className={`w-full text-left px-3 py-2 flex items-start gap-2 ${permissionMode === m ? 'bg-accent/12' : ''} ${planDisabled ? 'opacity-40 cursor-not-allowed' : 'hover:bg-black/5'}`}>
                 <MIcon size={13} className={`${meta.tone} mt-0.5 shrink-0`} />
                 <div className="flex-1 min-w-0">
@@ -112,19 +112,19 @@ export function AgentModeSelector({ permKey = null, sessionStarted = false }) {
     <div ref={wrapRef} className="relative">
       <button onClick={() => setOpen(!open)}
         className="flex items-center gap-1 px-2 py-1 rounded-md hover:bg-black/5 transition-colors"
-        title={`活跃 Agent / 模式${sessionStarted ? '（已开始的会话不可更改，仅新建会话生效）' : '：选一个 agent 作主控，可自动委派子代理（新建会话生效）'}`}>
+        title={sessionStarted ? '会话已开始，无法更改 agent；仅新建会话可选' : '选择主导本次对话的 agent，可自动分配其它 agent 协助（仅新建会话生效）'}>
         <Workflow size={12} className={active ? 'text-accent' : 'text-ink-faint'} />
         <span className={`text-[11px] font-body max-w-[110px] truncate ${active ? 'text-accent' : 'text-ink-muted'}`}>{label}</span>
         <ChevronDown size={10} className="text-ink-faint" />
       </button>
       {open && (
         <div className="glass-popover absolute right-0 top-full mt-2 w-64 z-50 py-1 animate-glass-rise max-h-[60vh] overflow-y-auto">
-          <div className="px-3 py-1.5 text-[10px] text-ink-faint uppercase tracking-wider font-body">活跃 Agent / 模式 (--agent)</div>
+          <div className="px-3 py-1.5 text-[10px] text-ink-faint uppercase tracking-wider font-body">选择主导本次对话的 agent</div>
           {inPlan && (
-            <div className="px-3 pb-1.5 text-[10px] text-blue-600 font-body leading-snug">当前为规划模式，选择 agent 将退出规划模式。</div>
+            <div className="px-3 pb-1.5 text-[10px] text-blue-600 font-body leading-snug">当前为规划模式；选择 agent 将自动退出规划模式。</div>
           )}
           {sessionStarted && (
-            <div className="px-3 pb-1.5 text-[10px] text-amber-700 font-body leading-snug">已开始的会话不可更改主控；此选择在新建会话时生效。</div>
+            <div className="px-3 pb-1.5 text-[10px] text-amber-700 font-body leading-snug">会话已开始，无法更改；此选择在新建会话时生效。</div>
           )}
           <button onClick={() => pick('')}
             className={`w-full text-left px-3 py-2 hover:bg-black/5 flex items-center gap-2 ${!active ? 'bg-accent/12' : ''}`}>
@@ -136,7 +136,7 @@ export function AgentModeSelector({ permKey = null, sessionStarted = false }) {
               className={`w-full text-left px-3 py-2 hover:bg-black/5 flex items-start gap-2 ${active === a.name ? 'bg-accent/12' : ''}`}>
               <div className="flex-1 min-w-0">
                 <div className="text-xs font-medium text-ink font-body truncate">
-                  {a.name}{a.name === 'orchestrator' && <span className="text-[9px] text-accent ml-1">可编排主控</span>}
+                  {a.name}{a.name === 'orchestrator' && <span className="text-[9px] text-accent ml-1">可分配其它 agent</span>}
                 </div>
                 {a.description && <div className="text-[10px] text-ink-faint font-body truncate">{a.description}</div>}
               </div>
@@ -144,7 +144,7 @@ export function AgentModeSelector({ permKey = null, sessionStarted = false }) {
             </button>
           ))}
           {agents.length === 0 && (
-            <div className="px-3 py-2 text-[11px] text-ink-faint font-body">无自定义 agent。可在「Agent」面板安装内置预设。</div>
+            <div className="px-3 py-2 text-[11px] text-ink-faint font-body">暂无 agent。可在「Agent」面板安装内置预设。</div>
           )}
         </div>
       )}
