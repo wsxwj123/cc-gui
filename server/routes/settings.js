@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { readFile, writeFile, mkdir, copyFile, unlink } from 'fs/promises';
+import { readFile, writeFile, mkdir, copyFile, unlink, readdir } from 'fs/promises';
 import { existsSync } from 'fs';
 import { execFile, spawn } from 'child_process';
 import { promisify } from 'util';
@@ -14,6 +14,22 @@ const CC_SWITCH_DB = join(homedir(), '.cc-switch', 'cc-switch.db');
 
 const router = Router();
 const SETTINGS_PATH = join(homedir(), '.claude', 'settings.json');
+
+// BK-8:每次 provider 切换都会备份 settings.json 到 .${ts}.bak。备份后清理旧的,
+// 只保留最近 KEEP 个,避免频繁切 provider 在 ~/.claude/ 无限堆积 .bak 文件。
+const SETTINGS_BAK_KEEP = 5;
+async function backupSettings(ts) {
+  await copyFile(SETTINGS_PATH, `${SETTINGS_PATH}.${ts}.bak`).catch(() => {});
+  try {
+    const dir = join(homedir(), '.claude');
+    const baks = (await readdir(dir))
+      .filter((f) => f.startsWith('settings.json.') && f.endsWith('.bak'))
+      .sort(); // 时间戳前缀字典序 = 时间序
+    for (const old of baks.slice(0, Math.max(0, baks.length - SETTINGS_BAK_KEEP))) {
+      await unlink(join(dir, old)).catch(() => {});
+    }
+  } catch {}
+}
 const PROJECTS_DIR = join(homedir(), '.claude', 'projects');
 // Shared prefs (hidden-projects list lives here). Adding a project must un-hide
 // its hash SERVER-SIDE: the lossy CLI hash can collide with a previously-hidden
@@ -569,7 +585,7 @@ router.post('/provider/switch', async (req, res) => {
         env.ANTHROPIC_MODEL = next.model;
       }
       const ts = new Date().toISOString().replace(/[:.]/g, '-');
-      await copyFile(SETTINGS_PATH, `${SETTINGS_PATH}.${ts}.bak`).catch(() => {});
+      await backupSettings(ts);
       await writeFile(SETTINGS_PATH, JSON.stringify(next, null, 2));
       await writeActiveProviderId(hit.id);
       await unlink(OPENAI_ACTIVE_PATH).catch(() => {});
@@ -595,7 +611,7 @@ router.post('/provider/switch', async (req, res) => {
 
     // Back up the current settings.json (timestamped) before overwriting.
     const ts = new Date().toISOString().replace(/[:.]/g, '-');
-    await copyFile(SETTINGS_PATH, `${SETTINGS_PATH}.${ts}.bak`).catch(() => {});
+    await backupSettings(ts);
 
     const current = await readCurrentSettings();
     const env = mergeProviderEnv(current.env, snapshot.env || {});
@@ -675,7 +691,7 @@ async function switchToOpenAIUpstream(up, requestedModel, res) {
 
   const next = { ...current, env };
   const ts = new Date().toISOString().replace(/[:.]/g, '-');
-  await copyFile(SETTINGS_PATH, `${SETTINGS_PATH}.${ts}.bak`).catch(() => {});
+  await backupSettings(ts);
   await writeFile(SETTINGS_PATH, JSON.stringify(next, null, 2));
   // Remember the active provider id (not the key) for restart recovery. Also
   // persist the provider's FULL model list + name so model-resolver can offer
@@ -746,7 +762,7 @@ async function switchToAnthropicUpstream(up, requestedModel, res) {
   const next = { ...current, env };
   if (snapshot.model) next.model = snapshot.model;
   const ts = new Date().toISOString().replace(/[:.]/g, '-');
-  await copyFile(SETTINGS_PATH, `${SETTINGS_PATH}.${ts}.bak`).catch(() => {});
+  await backupSettings(ts);
   await writeFile(SETTINGS_PATH, JSON.stringify(next, null, 2));
   // Persist the active marker (id/name/baseURL/model/models — NEVER the token).
   try {
@@ -818,7 +834,7 @@ async function switchToCustomProvider(p, requestedModel, res) {
   delete env.CLAUDE_CODE_ATTRIBUTION_HEADER;
   const next = { ...current, env };
   const ts = new Date().toISOString().replace(/[:.]/g, '-');
-  await copyFile(SETTINGS_PATH, `${SETTINGS_PATH}.${ts}.bak`).catch(() => {});
+  await backupSettings(ts);
   await writeFile(SETTINGS_PATH, JSON.stringify(next, null, 2));
   await unlink(OPENAI_ACTIVE_PATH).catch(() => {}); // off the proxy
   await writeActiveProviderId(p.id);
