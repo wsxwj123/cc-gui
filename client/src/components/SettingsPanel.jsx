@@ -428,7 +428,7 @@ function UpdateAvailable({ state }) {
   return (
     <div className="text-[12px] bg-amber-50 border border-amber-200 text-amber-900 rounded p-2.5 space-y-2">
       <div className="flex items-center gap-1.5">
-        <span>🎉 新版本可用:</span>
+        <span>新版本可用:</span>
         <b className="font-mono">v{state.latestVersion}</b>
         {state.publishedAt && (
           <span className="text-amber-700 text-[11px]">
@@ -641,7 +641,7 @@ function CcUpdater() {
         state.hasUpdate ? (
           <div className="text-[12px] bg-amber-50 border border-amber-200 text-amber-900 rounded p-2.5 space-y-2">
             <div className="flex items-center gap-1.5">
-              <span>🎉 Claude Code 新版:</span><b className="font-mono">v{state.latestVersion}</b>
+              <span>Claude Code 新版:</span><b className="font-mono">v{state.latestVersion}</b>
             </div>
             <button
               onClick={doUpdate}

@@ -105,7 +105,7 @@ export function AgentsPanel() {
   const createNew = async () => {
     if (!/^[a-z0-9-]{1,64}$/.test(newName)) return alert('名字只能小写字母、数字、-');
     setSelected(newName);
-    setContent(`---\nname: ${newName}\ndescription: 何时调用我——写清触发场景,主对话据此自动决定是否把任务派给我\nmodel: ${newModel || defaultModel}\n---\n\n你是 ${newName}。\n\n职责:用自然语言描述专长、做事方式和输出要求(本正文即该子代理的 system prompt)。\n`);
+    setContent(`---\nname: ${newName}\ndescription: 此处填写该 agent 的功能概览,主对话据此判断何时调用它\nmodel: ${newModel || defaultModel}\ntools: Read, Glob, Grep, Edit, Write, Bash, TaskCreate, TaskUpdate, TaskList\n---\n\n此处填写该 agent 的系统提示词:说明其职责、处理方式与输出要求。\n`);
     setCreating(false); setNewName('');
   };
 
@@ -116,12 +116,12 @@ export function AgentsPanel() {
       <div className="px-4 py-3 border-b border-canvas-deep shrink-0">
         <div className="flex items-center justify-between">
           <span className="text-[10px] uppercase tracking-widest text-ink-faint font-body flex items-center gap-1.5">
-            <Bot size={11} />Subagents · {agents.length}
+            <Bot size={11} />Agents · {agents.length}
           </span>
           <div className="flex gap-1">
             <button onClick={() => { const n = !showBuiltin; setShowBuiltin(n); if (n) fetchBuiltin(); }}
               className={`p-1 hover:text-accent ${showBuiltin ? 'text-accent' : 'text-ink-faint'}`} title="安装内置 Agent 预设（explorer/oracle/orchestrator 等）"><Package size={12} /></button>
-            <button onClick={() => setCreating(!creating)} className="p-1 text-ink-faint hover:text-accent" title="新建 subagent 定义"><Plus size={12} /></button>
+            <button onClick={() => setCreating(!creating)} className="p-1 text-ink-faint hover:text-accent" title="新建 agent"><Plus size={12} /></button>
             <button onClick={fetchAgents} className="p-1 text-ink-faint hover:text-ink-muted" title="刷新列表"><RefreshCw size={11} /></button>
           </div>
         </div>
