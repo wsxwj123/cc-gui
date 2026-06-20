@@ -4259,6 +4259,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         <div className="absolute inset-0 z-40 flex flex-col bg-canvas">
           <SubagentView
             agentId={viewingAgentId}
+            parentSessionId={selectedSession?.sessionId || null}
             parentTitle={(selectedSession?.sessionId
               && (useStore.getState().customTitles[selectedSession.sessionId]
                 || useStore.getState().autoTitles[selectedSession.sessionId]))

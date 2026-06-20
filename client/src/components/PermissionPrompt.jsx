@@ -376,7 +376,10 @@ function PendingPill({ req, position }) {
 // cleanly; the caller then re-spawns an acceptEdits turn to execute.
 const PLAN_APPROVED_REASON = '用户已批准此计划。请立即结束本回合，不要再调用任何工具或输出确认请求；系统会自动以执行模式重新开始执行计划。';
 
-export function PermissionPrompt({ sessionId = null, onExecutePlan = null }) {
+// hydrate:挂载时是否从 /api/permissions/pending 拉取并自动放行白名单项。同一会话
+// 同时挂多个 PermissionPrompt(如 ChatInput 与子代理视图)时,只让其中一个 hydrate,
+// 避免对同一 id 重复 respond。两个实例共享 store,审批/驳回按 id 幂等。
+export function PermissionPrompt({ sessionId = null, onExecutePlan = null, hydrate = true }) {
   const all = useStore((s) => s.pendingPermissions);
   const globalSid = useStore((s) => s.selectedSession?.sessionId);
   const paneSessions = useStore((s) => s.paneSessions);
@@ -397,6 +400,7 @@ export function PermissionPrompt({ sessionId = null, onExecutePlan = null }) {
   // user having opted in. Auto-resolve those here (per-request sessionId
   // whitelist only — no cross-session reach).
   useEffect(() => {
+    if (!hydrate) return;
     const ctrl = new AbortController();
     fetch('/api/permissions/pending', { signal: ctrl.signal })
       .then((r) => (r.ok ? r.json() : { items: [] }))

@@ -3,11 +3,12 @@ import { Bot, Loader2, User } from 'lucide-react';
 import { useStore } from '../stores/sessionStore.js';
 import { MarkdownRenderer } from './MarkdownRenderer.jsx';
 import { renderRichToolCard } from './TurnBubble.jsx';
+import { PermissionPrompt } from './PermissionPrompt.jsx';
 
 // #9/O4 子代理会话窗口:样式对齐正常会话(用户气泡在右、回复在左、思考/工具折叠),
 // 标题处「母会话标题 / 子代理名」层级面包屑,点母会话标题返回。
 // 数据来自 store.activeAgents[agentId](流式累积的 text/thinking/toolCalls)。
-export function SubagentView({ agentId, parentTitle, onBack }) {
+export function SubagentView({ agentId, parentTitle, parentSessionId = null, onBack }) {
   const agent = useStore((s) => s.activeAgents[agentId]);
   // 兜底:store 拿不到具体名/model 时(provider 不发子代理流),从 server 提取的
   // sessions.subagents 按 toolUseId(= agentId)对回 agentType / model。
@@ -170,6 +171,14 @@ export function SubagentView({ agentId, parentTitle, onBack }) {
               ) : null}
             </div>
           </div>
+        </div>
+      </div>
+
+      {/* 子代理的权限申请也在此显示,使在子代理视图内同样可审批(母会话视图同一张卡;
+          二者共享 store,按 id 幂等;hydrate 交给母会话那张避免重复 respond)。 */}
+      <div className="shrink-0 px-6">
+        <div className="max-w-[var(--content-max)] mx-auto">
+          <PermissionPrompt sessionId={parentSessionId} hydrate={false} />
         </div>
       </div>
     </div>
