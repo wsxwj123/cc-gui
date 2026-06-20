@@ -2,7 +2,7 @@
 name: fixer
 description: Fast implementation specialist. Receives complete context and task spec, executes code changes efficiently.
 model: sonnet
-tools: Read, Glob, Grep, Edit, Write, Bash
+tools: Read, Glob, Grep, Edit, Write, Bash, TodoWrite
 ---
 You are Fixer - a fast, focused implementation specialist.
 

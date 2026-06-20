@@ -17,6 +17,7 @@ export function PermissionModeSelector({ permKey }) {
   // chip in sync when the active session changes underneath us.
   const permissionMode = useStore((s) => (permKey ? (s.permissionModeBySession[permKey] || s.permissionMode) : s.permissionMode));
   const setPermissionMode = useStore((s) => s.setPermissionMode);
+  const agentActive = useStore((s) => (permKey ? !!(s.activeAgentBySession || {})[permKey] : false));
   const [open, setOpen] = useState(false);
   const wrapRef = useRef(null);
   const current = MODE_META[permissionMode] || MODE_META.default;
@@ -49,9 +50,17 @@ export function PermissionModeSelector({ permKey }) {
           {PERMISSION_MODES.map((m) => {
             const meta = MODE_META[m];
             const MIcon = meta.icon;
+            const planDisabled = m === 'plan' && agentActive;
             return (
-              <button key={m} onClick={() => { setPermissionMode(m, permKey); setOpen(false); }}
-                className={`w-full text-left px-3 py-2 hover:bg-black/5 flex items-start gap-2 ${permissionMode === m ? 'bg-accent/12' : ''}`}>
+              <button key={m} disabled={planDisabled}
+                onClick={() => {
+                  if (planDisabled) return;
+                  setPermissionMode(m, permKey);
+                  if (m === 'plan') useStore.getState().setActiveAgentFor(permKey, '');
+                  setOpen(false);
+                }}
+                title={planDisabled ? 'agent 模式用 todolist 规划，不支持计划卡' : undefined}
+                className={`w-full text-left px-3 py-2 flex items-start gap-2 ${permissionMode === m ? 'bg-accent/12' : ''} ${planDisabled ? 'opacity-40 cursor-not-allowed' : 'hover:bg-black/5'}`}>
                 <MIcon size={13} className={`${meta.tone} mt-0.5 shrink-0`} />
                 <div className="flex-1 min-w-0">
                   <div className="text-xs font-medium text-ink font-body">{meta.label}</div>
@@ -72,6 +81,7 @@ export function PermissionModeSelector({ permKey }) {
 // 仅新建会话生效(CLI 不接受 --resume 时改 agent),所以已开始的会话这里只读地显示。
 export function AgentModeSelector({ permKey = null, sessionStarted = false }) {
   const active = useStore((s) => (permKey ? (s.activeAgentBySession || {})[permKey] || '' : ''));
+  const inPlan = useStore((s) => (permKey ? (s.permissionModeBySession[permKey] || s.permissionMode) : s.permissionMode) === 'plan');
   const [open, setOpen] = useState(false);
   const [agents, setAgents] = useState([]);
   const wrapRef = useRef(null);
@@ -91,7 +101,11 @@ export function AgentModeSelector({ permKey = null, sessionStarted = false }) {
     };
   }, [open]);
 
-  const pick = (name) => { useStore.getState().setActiveAgentFor(permKey, name); setOpen(false); };
+  const pick = (name) => {
+    useStore.getState().setActiveAgentFor(permKey, name);
+    if (name) useStore.getState().setPermissionMode('default', permKey);
+    setOpen(false);
+  };
   const label = active || '普通模式';
 
   return (
@@ -106,6 +120,9 @@ export function AgentModeSelector({ permKey = null, sessionStarted = false }) {
       {open && (
         <div className="glass-popover absolute right-0 top-full mt-2 w-64 z-50 py-1 animate-glass-rise max-h-[60vh] overflow-y-auto">
           <div className="px-3 py-1.5 text-[10px] text-ink-faint uppercase tracking-wider font-body">活跃 Agent / 模式 (--agent)</div>
+          {inPlan && (
+            <div className="px-3 pb-1.5 text-[10px] text-blue-600 font-body leading-snug">当前为规划模式，选择 agent 将退出规划模式。</div>
+          )}
           {sessionStarted && (
             <div className="px-3 pb-1.5 text-[10px] text-amber-700 font-body leading-snug">已开始的会话不可更改主控；此选择在新建会话时生效。</div>
           )}

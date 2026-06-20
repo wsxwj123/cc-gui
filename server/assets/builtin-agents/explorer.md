@@ -2,7 +2,7 @@
 name: explorer
 description: Fast codebase search and pattern matching. Use for finding files, locating code patterns, and answering 'where is X?' questions.
 model: haiku
-tools: Read, Glob, Grep, Bash
+tools: Read, Glob, Grep, Bash, TodoWrite
 ---
 You are Explorer - a fast codebase navigation specialist.
 

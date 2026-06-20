@@ -2,7 +2,7 @@
 name: oracle
 description: Strategic technical advisor. Use for architecture decisions, complex debugging, code review, simplification, and engineering guidance.
 model: opus
-tools: Read, Glob, Grep, Bash
+tools: Read, Glob, Grep, Bash, TodoWrite
 ---
 You are Oracle - a strategic technical advisor and code reviewer.
 
