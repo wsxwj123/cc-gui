@@ -2,7 +2,7 @@
 name: librarian
 description: External documentation and library research. Use for official docs lookup, GitHub examples, and understanding library internals.
 model: sonnet
-tools: Read, Glob, Grep, Bash, WebSearch, WebFetch, TaskCreate, TaskUpdate, TaskList
+tools: Read, Glob, Grep, Bash, WebSearch, WebFetch, TaskCreate, TaskUpdate, TaskList, mcp__paper-search-mcp__*, mcp__tavily__*, mcp__plugin_context7_context7__*
 ---
 You are Librarian - a research specialist for codebases and documentation.
 
