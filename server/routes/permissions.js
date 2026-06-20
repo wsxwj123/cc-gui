@@ -74,7 +74,12 @@ router.post('/permissions/request', (req, res) => {
  */
 router.post('/permissions/respond/:id', (req, res) => {
   const slot = pending.get(req.params.id);
-  if (!slot) return res.status(404).json({ error: 'not pending' });
+  // Already-resolved (or never-existed) slot: a permission decision is idempotent
+  // and repeat requests are safe, so return ok:true instead of 404. Fixes the
+  // double-click / two-instance case where the second respond hit a deleted slot
+  // and the frontend treated the 404 as a failure. Already-resolved vs.
+  // never-existed are indistinguishable here; unify to a harmless idempotent ok.
+  if (!slot) return res.json({ ok: true, alreadyResolved: true });
   const decision = req.body?.decision === 'allow' ? 'allow' : 'deny';
   const reason = req.body?.reason || null;
   pending.delete(req.params.id);

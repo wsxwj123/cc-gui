@@ -882,7 +882,12 @@ function parseContextMarkdown(md) {
   const tk = md.match(/\*\*Tokens:\*\*\s*([\d.,kKmM]+)\s*\/\s*([\d.,kKmM]+)\s*\((\d+)%\)/);
   if (tk) { out.totalTokens = parseTokNum(tk[1]); out.windowTokens = parseTokNum(tk[2]); out.pct = parseInt(tk[3], 10); }
   // Category table is everything before the "### MCP Tools" per-tool section.
-  const [catSection, mcpSection = ''] = md.split(/###\s*MCP Tools/i);
+  // BK-9:/context 在 ### MCP Tools 之后还有 ### Custom Agents / ### Memory Files /
+  // ### Skills 等小节(行格式同为 `| 名称 | 来源 | tokens |`)。只取 MCP Tools 到下一个
+  // ### 标题之间,否则后面那些小节的"来源"列(User/Built-in/CLAUDE.md 路径等)会被
+  // 误聚合成 MCP 服务器(用户报"MCP 里冒出 User/CLAUDE.md")。
+  const [catSection, mcpRest = ''] = md.split(/###\s*MCP Tools/i);
+  const mcpSection = mcpRest.split(/\n###\s/)[0];
   for (const line of catSection.split('\n')) {
     const m = line.match(/^\|\s*([^|]+?)\s*\|\s*([\d.,kKmM]+)\s*\|\s*([\d.]+)%\s*\|/);
     if (!m) continue;

@@ -178,6 +178,42 @@ export async function listProjects() {
 }
 
 /**
+ * Find the first user record that carries a REAL prompt — same criteria the
+ * message view (getSessionMessages) uses to decide what counts as a user bubble.
+ * A real session opens with metadata stacking (custom-title / mode /
+ * permission-mode / queue-operation×N / system / attachment×N), so the textual
+ * user record is often pushed past index 0; and isMeta records (e.g. "Continue
+ * from where you left off.") or pure tool_result records are CLI/Desktop
+ * bookkeeping, never a prompt. Skipping them prevents both the "会话凭空消失"
+ * (real user pushed out of a too-small head) and "firstPrompt 取到空/伪内容" bugs.
+ * Returns the record AND the resolved display text (so callers don't re-parse).
+ */
+function findFirstRealUser(head) {
+  let compactRecord = null;
+  for (const r of head) {
+    if (r.type !== 'user') continue;
+    // A /compact-continued session's head can contain NO fresh textual user
+    // (the real prompt sits beyond head): its first user is the compact summary,
+    // followed by assistant + tool_result records. Such sessions are real long
+    // conversations and must NOT be dropped. Remember the compact record as a
+    // fallback keep-signal, but keep scanning — a real prompt later in head wins.
+    if (r.isCompactSummary) { compactRecord = compactRecord || r; continue; }
+    if (r.isMeta) continue;
+    const content = normalizeContent(r.message?.content);
+    const text = content.filter((c) => c.type === 'text').map((c) => c.text).join('\n').trim();
+    const cmdPrompt = reconstructCommandPrompt(text);
+    // Real prompt = a reconstructable /command, OR plain text that isn't a local
+    // command echo. tool_result-only / empty-text records fall through.
+    if (cmdPrompt) return { record: r, text: cmdPrompt };
+    if (text && !isLocalCommandEcho(text)) return { record: r, text };
+  }
+  // No real prompt in head, but a compact summary means this is a continued
+  // conversation — keep it with a clean label instead of the verbose preamble.
+  if (compactRecord) return { record: compactRecord, text: '（接续之前的对话）' };
+  return null;
+}
+
+/**
  * Check if a first prompt is meaningful (not just "ok", "你好", "?" etc.)
  */
 function isMeaningfulPrompt(prompt) {
@@ -211,10 +247,17 @@ export async function listSessions(projectHash) {
     const sessionId = file.replace('.jsonl', '');
 
     try {
-      const { head, tail, totalLines } = await readJsonlEdges(filePath, 10);
+      // edgeSize 40 (was 10): real sessions stack custom-title / mode /
+      // permission-mode / queue-operation×N / system / attachment×N before the
+      // first textual user record (observed at index 27). A 10-line head pushed
+      // that user out → the whole session vanished from the list. 40 covers the
+      // metadata pile; the cost is reading a few dozen extra lines per file.
+      const { head, tail, totalLines } = await readJsonlEdges(filePath, 40);
 
-      // Extract metadata from first user message
-      const firstUser = head.find((r) => r.type === 'user');
+      // Extract metadata from first REAL user message (skips isMeta / pure
+      // tool_result / local-command-echo records, aligned with getSessionMessages).
+      const firstRealUser = findFirstRealUser(head);
+      const firstUser = firstRealUser?.record || null;
       const lastRecord = tail[tail.length - 1];
       // The session jsonl records carry the EXACT cwd (including any Unicode
       // characters) the CLI was launched with. We must pass this exact string
@@ -228,21 +271,10 @@ export async function listSessions(projectHash) {
       // ours than a sibling's.
       if (sidecarCwd && realCwd && realCwd !== sidecarCwd) continue;
 
-      let firstPrompt = '';
-      if (firstUser?.message?.content) {
-        const raw = firstUser.message.content;
-        if (typeof raw === 'string') {
-          firstPrompt = raw.slice(0, 200);
-        } else if (Array.isArray(raw)) {
-          const textContent = raw.find((c) => c.type === 'text');
-          firstPrompt = textContent?.text?.slice(0, 200) || '';
-        }
-        // Same root cause as the message view: a skill/slash-started session's first
-        // record is a `<command-name>/<command-args>` blob. Show the reconstructed
-        // `/name args` as the list preview instead of leaking raw XML tags.
-        const cmdPreview = reconstructCommandPrompt(firstPrompt);
-        if (cmdPreview) firstPrompt = cmdPreview.slice(0, 200);
-      }
+      // findFirstRealUser already resolved the display text (plain prompt or a
+      // reconstructed `/name args` for skill/slash-started sessions), so we just
+      // slice it — no re-parsing of raw content / command blobs needed.
+      let firstPrompt = firstRealUser?.text?.slice(0, 200) || '';
 
       // 防御:标题生成是一次性隔离调用(POST /api/chat/title),正常带
       // --no-session-persistence 不落盘;万一某版本/某 provider 仍写了 jsonl,
