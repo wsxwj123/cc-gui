@@ -64,11 +64,16 @@ function renderInput(toolName, input) {
 // acceptEdits turn to actually execute the approved plan.
 // Refine → CLI sees a `deny` with the feedback as `reason`, AI revises the
 // plan and re-emits ExitPlanMode. Cancel → plain deny.
-function PlanReviewCard({ req, onResolve, onApprove, processing, position }) {
+function PlanReviewCard({ req, onResolve, onApprove, processing, position, hydrate }) {
   const plan = String(req.toolInput?.plan || '').trim();
   const [feedback, setFeedback] = useState('');
   const [showRefine, setShowRefine] = useState(false);
   useEffect(() => {
+    // BK-1:同一会话可同时挂多个 PermissionPrompt(母会话 ChatInput + 子代理视图
+    // SubagentView)。两个实例都绑 window keydown → 按一次键 respond 两次(Enter
+    // 重复 onExecutePlan 更危险)。键盘只在主实例(hydrate=true)绑;子代理那张
+    // hydrate=false 只能点按钮,共享 store 单次解析。
+    if (!hydrate) return;
     if (position !== 0) return;
     const onKey = (e) => {
       const t = e.target;
@@ -78,7 +83,7 @@ function PlanReviewCard({ req, onResolve, onApprove, processing, position }) {
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [position, req, onResolve, onApprove]);
+  }, [hydrate, position, req, onResolve, onApprove]);
 
   const submitRefine = () => {
     onResolve(req, 'deny', feedback.trim() || '请修改计划');
@@ -158,7 +163,7 @@ function PlanReviewCard({ req, onResolve, onApprove, processing, position }) {
 // GUI collects the choice and feeds it back via onAnswer (a deny whose reason is
 // the answer). toolInput.questions = [{ question, header, options:[{label,
 // description}], multiSelect? }].
-function AskQuestionCard({ req, onAnswer, processing, position }) {
+function AskQuestionCard({ req, onAnswer, processing, position, hydrate }) {
   const questions = Array.isArray(req.toolInput?.questions) ? req.toolInput.questions : [];
   const [picks, setPicks] = useState({});    // qi -> string | string[]
   const [customs, setCustoms] = useState({}); // qi -> free text
@@ -187,6 +192,7 @@ function AskQuestionCard({ req, onAnswer, processing, position }) {
   };
 
   useEffect(() => {
+    if (!hydrate) return; // BK-1:键盘只在主实例绑,避免子代理视图重复 respond
     if (position !== 0) return;
     const onKey = (e) => {
       const t = e.target;
@@ -200,7 +206,7 @@ function AskQuestionCard({ req, onAnswer, processing, position }) {
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [position, allAnswered, picks, customs]);
+  }, [hydrate, position, allAnswered, picks, customs]);
 
   return (
     <div className="flex flex-col max-h-[68vh] rounded-xl bg-white border border-canvas-deep shadow-lg overflow-hidden animate-fade-up relative">
@@ -270,10 +276,11 @@ function AskQuestionCard({ req, onAnswer, processing, position }) {
   );
 }
 
-function PermissionCard({ req, onResolve, onWhitelistAndAllow, onResolveSame, sameCount, processing, position }) {
+function PermissionCard({ req, onResolve, onWhitelistAndAllow, onResolveSame, sameCount, processing, position, hydrate }) {
   const [remember, setRemember] = useState(false);
   // Enter = allow, Esc = deny — only when this is the top card.
   useEffect(() => {
+    if (!hydrate) return; // BK-1:键盘只在主实例绑,避免子代理视图重复 respond
     if (position !== 0) return;
     const onKey = (e) => {
       // ignore if user is typing in textarea/input
@@ -289,7 +296,7 @@ function PermissionCard({ req, onResolve, onWhitelistAndAllow, onResolveSame, sa
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [position, req, remember, onResolve, onWhitelistAndAllow]);
+  }, [hydrate, position, req, remember, onResolve, onWhitelistAndAllow]);
 
   return (
     <div className="flex flex-col max-h-[68vh] rounded-xl bg-white border border-canvas-deep shadow-lg overflow-hidden animate-fade-up relative">
@@ -406,21 +413,24 @@ export function PermissionPrompt({ sessionId = null, onExecutePlan = null, hydra
       .then((r) => (r.ok ? r.json() : { items: [] }))
       .then((d) => {
         const items = Array.isArray(d?.items) ? d.items : [];
-        const keep = [];
+        // BK-2:不能整表 setPendingPermissions(keep) —— fetch 飞行期 WS 来的新请求
+        // (addPendingPermission)会被旧快照覆盖 → "授权弹窗不出现"。改为逐条
+        // addPendingPermission(内部按 id 去重),即"合并"而非"替换",不丢飞行期新增。
+        const add = useStore.getState().addPendingPermission;
         for (const it of items) {
           let wl = [];
           try { wl = JSON.parse(localStorage.getItem(`cgui-perm-wl-${it.sessionId || 'none'}`) || '[]'); } catch {}
           if (wl.includes(it.toolName)) {
+            // 白名单命中:放行但不入表。
             fetch(`/api/permissions/respond/${it.id}`, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ decision: 'allow' }),
             }).catch(() => {});
           } else {
-            keep.push(it);
+            add(it);
           }
         }
-        useStore.getState().setPendingPermissions(keep);
       })
       .catch(() => {});
     return () => ctrl.abort();
@@ -522,6 +532,7 @@ export function PermissionPrompt({ sessionId = null, onExecutePlan = null, hydra
           onApprove={approvePlan}
           processing={busyId === mine[0].id}
           position={0}
+          hydrate={hydrate}
         />
       ) : mine[0].toolName === 'AskUserQuestion' ? (
         <AskQuestionCard
@@ -529,6 +540,7 @@ export function PermissionPrompt({ sessionId = null, onExecutePlan = null, hydra
           onAnswer={answerQuestion}
           processing={busyId === mine[0].id}
           position={0}
+          hydrate={hydrate}
         />
       ) : (
         <PermissionCard
@@ -539,6 +551,7 @@ export function PermissionPrompt({ sessionId = null, onExecutePlan = null, hydra
           sameCount={matchesAcrossPanes(mine[0]).length}
           processing={busyId === mine[0].id}
           position={0}
+          hydrate={hydrate}
         />
       )}
       {mine.slice(1).map((req, i) => (

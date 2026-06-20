@@ -699,8 +699,14 @@ function SplitMain({ activeTabIndex, setActiveTabIndex }) {
 
   // BH-1b: dock 打开且分屏时,只渲染聚焦窗格(纯渲染层过滤,绝不改 paneCount/paneSessions)。
   // 关闭 dock 后 panes 恢复全量。
+  // BK-4:门控必须用 dock 打开时锁定的窗格 artifactDock.tabIndex,而非实时 activeTabIndex。
+  // 否则开 dock 后切聚焦,单显窗格变了 → artifact 配错会话。tabIndex 可能越界(锁定
+  // 的窗格已被关闭),做 Math.min 兜底到末窗格。
+  const dockPane = (artifactDock && Number.isInteger(artifactDock.tabIndex))
+    ? Math.min(paneCount - 1, Math.max(0, artifactDock.tabIndex))
+    : activeTabIndex;
   const panes = (artifactDock && paneCount > 1)
-    ? [activeTabIndex]
+    ? [dockPane]
     : Array.from({ length: paneCount }, (_, i) => i);
   // 唯一窗格时(单屏 或 dock 单显聚焦窗格)用单屏那套填满样式 + 不渲分屏头/手柄。
   const soloPane = panes.length === 1;
@@ -2832,7 +2838,35 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         }
         return null;
       })();
-      const currentModel = _pin || _hist || useStore.getState().currentModel;
+      // BK-0:切 provider 后,_pin/_hist 可能残留旧 provider 的模型 id(如老会话
+      // 全程 mimo-v2.5-pro,切到官方后仍把 mimo 发出 → "模型不存在")。在用于请求
+      // 体之前做一层"属于当前 provider 才用"的校验。
+      //   白名单 = availableModels(.id,/api/model 返回) ∪ customModels(用户手填)。
+      //   custom 纳入白名单避免误杀用户为当前 provider 手填的自定义 id。
+      //   比对时去掉 [1m] 后缀按裸 id 匹配(别破坏 1M 逻辑)。
+      //   列表为空/未加载时不校验(拿不到就维持原 _pin||_hist||全局,绝不误杀)。
+      const _bare = (m) => String(m || '').replace(/\[1m\]/i, '');
+      const _validModel = (() => {
+        const st = useStore.getState();
+        const avail = Array.isArray(st.availableModels) ? st.availableModels : [];
+        const custom = Array.isArray(st.customModels) ? st.customModels : [];
+        if (avail.length === 0 && custom.length === 0) {
+          // 拿不到任何列表 → 维持原行为,不误杀。
+          return _pin || _hist || st.currentModel;
+        }
+        const ok = new Set([
+          ...avail.map((m) => _bare(m?.id)),
+          ...custom.map((m) => _bare(m)),
+        ].filter(Boolean));
+        const inProvider = (m) => m && ok.has(_bare(m));
+        if (inProvider(_pin)) return _pin;
+        if (inProvider(_hist)) return _hist;
+        const global = st.currentModel;
+        if (inProvider(global)) return global;
+        // 连全局都不在列表 → 不传 --model,让 CLI 用 settings.json 默认。
+        return null;
+      })();
+      const currentModel = _validModel;
       const effort = useStore.getState().getEffortFor(sessionQueueKey);
       // When resuming an existing session, cwd MUST be the EXACT string the
       // CLI was launched with — including Unicode chars (e.g. `/foo/肠骨轴`).

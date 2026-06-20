@@ -73,7 +73,7 @@ export function useWebSocket() {
               // 服务端 hook 实测正常 POST,可疑点在客户端这一段。下次复现时打开
               // 控制台过滤 [cgui-perm] 即可看出走的是哪条分支。
               try {
-                console.log('[cgui-perm] WS request', {
+                if (import.meta.env?.DEV) console.log('[cgui-perm] WS request', {
                   id: req?.id, tool: req?.toolName, sid: req?.sessionId,
                   cwd: req?.cwd,
                 });
@@ -96,7 +96,7 @@ export function useWebSocket() {
               // 现在:已切出 plan 时收到 ExitPlanMode,直接 deny 收尾本回合,提示模型
               // 结束规划(进程级模式无法中途改变,新模式从下一条消息开始生效)。
               if (req.toolName === 'ExitPlanMode' && mode !== 'plan') {
-                console.log('[cgui-perm] auto-finish: ExitPlanMode while mode=' + mode, req.id);
+                if (import.meta.env?.DEV) console.log('[cgui-perm] auto-finish: ExitPlanMode while mode=' + mode, req.id);
                 fetch(`/api/permissions/respond/${req.id}`, {
                   method: 'POST',
                   headers: { 'Content-Type': 'application/json' },
@@ -113,7 +113,7 @@ export function useWebSocket() {
               // 时,也强制弹窗确认 —— 跳过下面的自动放行分支。但【放任模式】例外:用户明确要求
               // 放任就是无脑放行一切(含 rm/install),所以放任下不拦。
               if (isDangerousCommand(req) && mode !== 'bypassPermissions') {
-                console.log('[cgui-perm] → force prompt (dangerous)', req.id, req.toolName);
+                if (import.meta.env?.DEV) console.log('[cgui-perm] → force prompt (dangerous)', req.id, req.toolName);
                 useStore.getState().addPendingPermission(req);
                 break;
               }
@@ -122,7 +122,7 @@ export function useWebSocket() {
               // 文提问(用户报告的"放任下 ask 不弹窗")。与服务端 hook 的
               // CGUI_BYPASS_ALL_EXCEPT_ASK 语义对齐。
               if (mode === 'bypassPermissions' && req.toolName !== 'AskUserQuestion') {
-                console.log('[cgui-perm] auto-allow: bypass', req.id);
+                if (import.meta.env?.DEV) console.log('[cgui-perm] auto-allow: bypass', req.id);
                 fetch(`/api/permissions/respond/${req.id}`, {
                   method: 'POST',
                   headers: { 'Content-Type': 'application/json' },
@@ -138,7 +138,7 @@ export function useWebSocket() {
                 const base = fp.split(/[\\/]/).pop() || '';
                 const planClass = /\.(md|markdown|txt|rst|mdx)$/.test(fp) || /(plan|todo|notes?|draft|计划|待办)/.test(base);
                 if (!planClass) {
-                  console.log('[cgui-perm] deny: plan write', req.id, req.toolName);
+                  if (import.meta.env?.DEV) console.log('[cgui-perm] deny: plan write', req.id, req.toolName);
                   fetch(`/api/permissions/respond/${req.id}`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
@@ -152,7 +152,7 @@ export function useWebSocket() {
                 // 计划类文档 → 不在此拦截,继续往下(默认弹窗/或其他模式处理)
               }
               if (mode === 'plan' && READ_CLASS.includes(req.toolName)) {
-                console.log('[cgui-perm] auto-allow: plan+readClass', req.id, req.toolName);
+                if (import.meta.env?.DEV) console.log('[cgui-perm] auto-allow: plan+readClass', req.id, req.toolName);
                 fetch(`/api/permissions/respond/${req.id}`, {
                   method: 'POST',
                   headers: { 'Content-Type': 'application/json' },
@@ -161,7 +161,7 @@ export function useWebSocket() {
                 break;
               }
               if (mode === 'acceptEdits' && READ_CLASS.includes(req.toolName)) {
-                console.log('[cgui-perm] auto-allow: acceptEdits+readClass', req.id, req.toolName);
+                if (import.meta.env?.DEV) console.log('[cgui-perm] auto-allow: acceptEdits+readClass', req.id, req.toolName);
                 fetch(`/api/permissions/respond/${req.id}`, {
                   method: 'POST',
                   headers: { 'Content-Type': 'application/json' },
@@ -171,7 +171,7 @@ export function useWebSocket() {
               }
               const wl = JSON.parse(localStorage.getItem(`cgui-perm-wl-${req.sessionId || 'none'}`) || '[]');
               if (wl.includes(req.toolName)) {
-                console.log('[cgui-perm] auto-allow: whitelist', req.id, req.toolName);
+                if (import.meta.env?.DEV) console.log('[cgui-perm] auto-allow: whitelist', req.id, req.toolName);
                 fetch(`/api/permissions/respond/${req.id}`, {
                   method: 'POST',
                   headers: { 'Content-Type': 'application/json' },
@@ -179,7 +179,7 @@ export function useWebSocket() {
                 }).catch(() => {});
                 break;
               }
-              console.log('[cgui-perm] → render popup (mode=' + mode + ')', req.id, req.toolName);
+              if (import.meta.env?.DEV) console.log('[cgui-perm] → render popup (mode=' + mode + ')', req.id, req.toolName);
               useStore.getState().addPendingPermission(req);
               break;
             }
