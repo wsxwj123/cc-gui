@@ -107,7 +107,7 @@ export function useWebSocket() {
                 }).catch(() => {});
                 break;
               }
-              const READ_CLASS = ['Read', 'Glob', 'Grep', 'LS', 'TodoWrite', 'NotebookRead', 'Skill'];
+              const READ_CLASS = ['Read', 'Glob', 'Grep', 'LS', 'TodoWrite', 'TaskCreate', 'TaskUpdate', 'TaskList', 'NotebookRead', 'Skill'];
               const PLAN_WRITE_CLASS = ['Edit', 'MultiEdit', 'Write', 'NotebookEdit'];
               // G3:危险命令(删除/网络装包/sudo)在 default / acceptEdits 下、或已"永远允许 Bash"
               // 时,也强制弹窗确认 —— 跳过下面的自动放行分支。但【放任模式】例外:用户明确要求

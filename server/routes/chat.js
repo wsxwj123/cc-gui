@@ -257,7 +257,7 @@ router.post('/chat', async (req, res) => {
   let bypassExceptAsk = false;
   if (chosenMode === 'acceptEdits') {
     cliMode = 'default';
-    autoAllowList = ['Read', 'Glob', 'Grep', 'LS', 'TodoWrite', 'NotebookRead', 'Skill'];
+    autoAllowList = ['Read', 'Glob', 'Grep', 'LS', 'TodoWrite', 'TaskCreate', 'TaskUpdate', 'TaskList', 'NotebookRead', 'Skill'];
   } else if (chosenMode === 'bypassPermissions') {
     // 放任模式 = cc 原生 --dangerously-skip-permissions:彻底跳过 hook + 文件沙箱,
     // 用户电脑上任何文件都能读/写、任何命令都放行(用户明确要求,纯壳子行为)。

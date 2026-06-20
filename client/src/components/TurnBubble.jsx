@@ -254,12 +254,61 @@ function ToolCallRow({ toolCall, onRetryTool }) {
   );
 }
 
+// cc 2.1.x 把 TodoWrite 换成了 TaskCreate/TaskUpdate/TaskList 任务系统。
+// 气泡内清单渲染要同时认这两套:这两个工具名归为"任务工具",在排序/legacy
+// 两条路径里都像 TodoWrite 一样"不冒独立卡片、聚合成一份清单"。
+const TASK_TOOL_NAMES = new Set(['TodoWrite', 'TaskCreate', 'TaskUpdate', 'TaskList']);
+
+// 从一串 tool_use 调用里重建任务清单(算法与 App.jsx currentTodos 对齐):
+// 优先用 TodoWrite 的整份快照(最新一份覆盖式);否则回放 TaskCreate/TaskUpdate
+// 序列 —— TaskCreate 建项(id 从 result "Task #N created" 解析,失败用自增),
+// TaskUpdate 按 taskId 改 status/subject,status=deleted 移除。
+// 返回 null 表示这批调用里没有任何任务清单。
+function rebuildTodosFromTaskCalls(toolCalls) {
+  if (!Array.isArray(toolCalls) || toolCalls.length === 0) return null;
+  // TodoWrite 是覆盖式快照,最新一份即全部 → 末尾向前找第一份即可。
+  for (let i = toolCalls.length - 1; i >= 0; i--) {
+    const tc = toolCalls[i];
+    if (tc?.name === 'TodoWrite' && Array.isArray(tc.input?.todos)) {
+      return tc.input.todos;
+    }
+  }
+  const tasks = new Map();
+  let autoId = 0;
+  let sawTask = false;
+  for (const tc of toolCalls) {
+    if (tc?.name === 'TaskCreate' && tc.input?.subject) {
+      sawTask = true;
+      const raw = typeof tc.result === 'string' ? tc.result : (tc.result?.content || '');
+      const rid = String(raw).match(/Task #(\d+)/)?.[1];
+      const id = rid || String(++autoId);
+      tasks.set(String(id), { content: tc.input.subject, status: 'pending', activeForm: tc.input.activeForm || '' });
+    } else if (tc?.name === 'TaskUpdate' && tc.input?.taskId != null) {
+      sawTask = true;
+      const key = String(tc.input.taskId);
+      const cur = tasks.get(key);
+      if (tc.input.status === 'deleted') { tasks.delete(key); continue; }
+      const next = { ...(cur || { content: '', status: 'pending', activeForm: '' }) };
+      if (tc.input.status) next.status = tc.input.status;
+      if (tc.input.subject) next.content = tc.input.subject;
+      if (tc.input.activeForm) next.activeForm = tc.input.activeForm;
+      if (next.content) tasks.set(key, next);
+    }
+  }
+  if (sawTask && tasks.size > 0) return [...tasks.values()];
+  return null;
+}
+
 // ─── TodoWrite renderer ───────────────────────────────────────
 // The TodoWrite tool's input is `{ todos: [{ content, status, activeForm }] }`.
 // CLI renders it as a checkbox list with status markers; we mirror that here so
 // users see the plan rather than a raw JSON dump.
-function TodoListCard({ toolCall }) {
-  const todos = Array.isArray(toolCall.input?.todos) ? toolCall.input.todos : [];
+// `todos` 直接传重建好的数组(TaskCreate/TaskUpdate 路径);兼容旧调用方传 toolCall
+// (TodoWrite 路径,从 toolCall.input.todos 取)。
+function TodoListCard({ toolCall, todos: todosProp }) {
+  const todos = Array.isArray(todosProp)
+    ? todosProp
+    : (Array.isArray(toolCall?.input?.todos) ? toolCall.input.todos : []);
   if (todos.length === 0) return null;
 
   // Status counts for the header badge.
@@ -480,11 +529,14 @@ function TurnBubbleInner({ turn, onRetry, onRetryTool, retryActive }) {
     const ci = toolCalls.findIndex((tc) => tc.id === turn._retryTrimToolId);
     if (ci >= 0) { toolCalls = toolCalls.slice(0, ci); legacyShowRetrying = true; }
   }
-  const todoCalls = toolCalls.filter((tc) => tc.name === 'TodoWrite');
-  const latestTodo = todoCalls.length > 0 ? todoCalls[todoCalls.length - 1] : null;
+  // 任务清单(TodoWrite 或 TaskCreate/TaskUpdate)聚合成一份,挂在最后一个任务工具上。
+  const taskCalls = toolCalls.filter((tc) => TASK_TOOL_NAMES.has(tc.name));
+  const rebuiltTodos = rebuildTodosFromTaskCalls(taskCalls);
+  const latestTaskCall = taskCalls.length > 0 ? taskCalls[taskCalls.length - 1] : null;
+  const latestTodo = rebuiltTodos && rebuiltTodos.length > 0 ? rebuiltTodos : null;
   const inlineCalls = toolCalls.filter((tc) => INLINE_TOOL_NAMES.has(tc.name));
   const groupedCalls = toolCalls.filter(
-    (tc) => tc.name !== 'TodoWrite' && !INLINE_TOOL_NAMES.has(tc.name)
+    (tc) => !TASK_TOOL_NAMES.has(tc.name) && !INLINE_TOOL_NAMES.has(tc.name)
   );
   const hasInlineCalls = inlineCalls.length > 0;
   const hasGroupedCalls = groupedCalls.length > 0;
@@ -580,18 +632,26 @@ function TurnBubbleInner({ turn, onRetry, onRetryTool, retryActive }) {
                     return;
                   }
                   if (b.type === 'tool_use' && b.toolCall) {
-                    // TodoWrite: only render the latest snapshot; never bucket.
-                    if (b.toolCall.name === 'TodoWrite') {
+                    // 任务清单(TodoWrite 或 TaskCreate/TaskUpdate/TaskList):聚合成一份,
+                    // 只在最后一个任务工具处渲染,never bucket → 不会每个 TaskCreate 各冒一张卡。
+                    if (TASK_TOOL_NAMES.has(b.toolCall.name)) {
                       flushBucket(i);
-                      const isLatestTodo = !renderBlocks.slice(i + 1).some(
-                        (b2) => b2.type === 'tool_use' && b2.toolCall?.name === 'TodoWrite'
+                      const isLastTaskTool = !renderBlocks.slice(i + 1).some(
+                        (b2) => b2.type === 'tool_use' && TASK_TOOL_NAMES.has(b2.toolCall?.name)
                       );
-                      if (isLatestTodo) {
-                        out.push(
-                          <ToolCallWithRetry key={`b-${i}`} toolCall={b.toolCall} onRetryTool={onRetryTool}>
-                            <TodoListCard toolCall={b.toolCall} />
-                          </ToolCallWithRetry>
-                        );
+                      if (isLastTaskTool) {
+                        // 用本 turn 内所有任务工具调用重建完整清单(老→新回放)。
+                        const taskCallsInTurn = renderBlocks
+                          .filter((b2) => b2.type === 'tool_use' && TASK_TOOL_NAMES.has(b2.toolCall?.name))
+                          .map((b2) => b2.toolCall);
+                        const todos = rebuildTodosFromTaskCalls(taskCallsInTurn);
+                        if (todos && todos.length > 0) {
+                          out.push(
+                            <ToolCallWithRetry key={`b-${i}`} toolCall={b.toolCall} onRetryTool={onRetryTool}>
+                              <TodoListCard toolCall={b.toolCall} todos={todos} />
+                            </ToolCallWithRetry>
+                          );
+                        }
                       }
                       return;
                     }
@@ -637,8 +697,8 @@ function TurnBubbleInner({ turn, onRetry, onRetryTool, retryActive }) {
               {fullText && <MarkdownRenderer content={fullText} />}
               {latestTodo && (
                 <div className="mt-2">
-                  <ToolCallWithRetry toolCall={latestTodo} onRetryTool={onRetryTool}>
-                    <TodoListCard toolCall={latestTodo} />
+                  <ToolCallWithRetry toolCall={latestTaskCall} onRetryTool={onRetryTool}>
+                    <TodoListCard toolCall={latestTaskCall} todos={latestTodo} />
                   </ToolCallWithRetry>
                 </div>
               )}
