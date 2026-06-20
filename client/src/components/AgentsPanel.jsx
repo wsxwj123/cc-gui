@@ -211,6 +211,9 @@ export function AgentsPanel() {
               </div>
               <textarea value={content} onChange={(e) => setContent(e.target.value)} spellCheck={false}
                 className="flex-1 bg-canvas-warm border-0 p-3 text-[11px] font-mono text-ink-soft resize-none focus:outline-none leading-relaxed" />
+              <div className="px-3 py-2 border-t border-canvas-deep bg-canvas-warm/40 text-[10px] text-ink-faint font-body leading-snug shrink-0">
+                <b className="text-ink-muted">让该 agent 能用 MCP</b>:<code className="text-ink-muted">tools:</code> 是白名单——不写就没有。要放行某个 MCP 服务器,在 <code className="text-ink-muted">tools:</code> 行追加 <code className="text-ink-muted">mcp__服务器名__*</code>(整个服务器)或 <code className="text-ink-muted">mcp__服务器名__工具名</code>(单个工具)。服务器名见你的 MCP 设置(如 <code className="text-ink-muted">mcp__tavily__*</code>)。不加的话,即使 MCP 已连接,该 agent 及其子代理也会报"工具不存在"。
+              </div>
             </>
           ) : (
             <p className="text-[11px] text-ink-faint p-6 text-center font-body">选择左侧 agent 编辑</p>
