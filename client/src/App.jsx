@@ -28,6 +28,7 @@ import { AgentsPanel } from './components/AgentsPanel.jsx';
 import { AgentMonitorPanel } from './components/AgentMonitorPanel.jsx';
 import { SubagentView } from './components/SubagentView.jsx';
 import EnvCheckPanel from './components/EnvCheckPanel.jsx';
+import { ArtifactDock } from './components/ArtifactPreview.jsx';
 import { FullDiskAccessModal } from './components/FullDiskAccessModal.jsx';
 import { BUILTIN_PROVIDERS, findBuiltin } from './utils/builtinProviders.js';
 import { computeCost, formatCost } from './utils/pricing.js';
@@ -548,6 +549,14 @@ function MainLayout({ sidebarCollapsed, selectedProject, rightPanel, setRightPan
   const activeTabIndex = useStore((s) => s.activeTabIndex);
   const setActiveTabIndex = useStore((s) => s.setActiveTabIndex);
   const toggleSidebar = useStore((s) => s.toggleSidebar);
+  // BH-1b: dock 态。桌面端 dock 优先占右栏(rightPanel 让位);移动端不渲 dock(走全屏遮罩)。
+  const artifactDock = useStore((s) => s.artifactDock);
+  const closeArtifactDock = useStore((s) => s.closeArtifactDock);
+  const paneSessions = useStore((s) => s.paneSessions);
+  const selectedSession = useStore((s) => s.selectedSession);
+  // 聚焦窗格的会话 id 变化 → 旧 artifact 不再相关,自动关 dock(首挂载也触发一次,无害)。
+  const focusedSessionId = (paneSessions?.[activeTabIndex]?.sessionId) || selectedSession?.sessionId || null;
+  useEffect(() => { closeArtifactDock(); }, [focusedSessionId, closeArtifactDock]);
 
   // ── Mobile: single column; sidebar + right panel are tap-away overlays ──
   if (isMobile) {
@@ -601,7 +610,11 @@ function MainLayout({ sidebarCollapsed, selectedProject, rightPanel, setRightPan
         activeTabIndex={activeTabIndex}
         setActiveTabIndex={setActiveTabIndex}
       />
-      {rightPanel && (
+      {/* BH-1b: dock 打开时占右栏(优先于 RightPanel,后者状态保留只是暂时让位)。
+          ArtifactDock 自带左缘 Splitter,故此处不再额外包一个。 */}
+      {artifactDock ? (
+        <ArtifactDock />
+      ) : rightPanel && (
         <>
           <Splitter onMouseDown={onRightDrag} axis="x" />
           <RightPanel panelId={rightPanel} onClose={() => setRightPanel(null)} width={rightPanelWidth} />
@@ -624,6 +637,7 @@ function SplitMain({ activeTabIndex, setActiveTabIndex }) {
   const paneSessions = useStore((s) => s.paneSessions);
   const paneIds = useStore((s) => s.paneIds);
   const closePane = useStore((s) => s.closePane);
+  const artifactDock = useStore((s) => s.artifactDock);
   const rowRef = useRef(null);
   const MIN_PANE_PX = 280;
   // Per-pane width in px. Each pane keeps its own fixed width; the row scrolls
@@ -683,7 +697,13 @@ function SplitMain({ activeTabIndex, setActiveTabIndex }) {
     document.body.style.userSelect = 'none';
   };
 
-  const panes = Array.from({ length: paneCount }, (_, i) => i);
+  // BH-1b: dock 打开且分屏时,只渲染聚焦窗格(纯渲染层过滤,绝不改 paneCount/paneSessions)。
+  // 关闭 dock 后 panes 恢复全量。
+  const panes = (artifactDock && paneCount > 1)
+    ? [activeTabIndex]
+    : Array.from({ length: paneCount }, (_, i) => i);
+  // 唯一窗格时(单屏 或 dock 单显聚焦窗格)用单屏那套填满样式 + 不渲分屏头/手柄。
+  const soloPane = panes.length === 1;
   return (
     <div ref={rowRef} className="flex-1 flex min-w-0 overflow-x-auto">
       {panes.map((i) => {
@@ -700,24 +720,24 @@ function SplitMain({ activeTabIndex, setActiveTabIndex }) {
         return (
           <React.Fragment key={paneKey}>
             <div
-              onMouseDown={paneCount > 1 ? () => setActiveTabIndex(i) : undefined}
-              style={paneCount === 1
-                // 单屏:填满,无需固定宽
+              onMouseDown={!soloPane ? () => setActiveTabIndex(i) : undefined}
+              style={soloPane
+                // 唯一窗格:填满,无需固定宽
                 ? { flexGrow: 1, flexShrink: 1, minWidth: '26em' }
                 : i === paneCount - 1
                   // 最后一个窗格 flex 填满剩余宽度:行永远正好占满,不会有手柄贴 GUI 右边界,
                   // 也不留空白。前面的窗格固定宽 + 右缘手柄调整,最后一个吸收余量。
                   ? { flexGrow: 1, flexShrink: 1, flexBasis: 0, minWidth: '26em' }
                   : { width: widths[i] ?? 480, flexShrink: 0, flexGrow: 0 }}
-              className={paneCount === 1
-                // 单屏:无分屏头/边框,样式同旧单栏(始终走 SplitMain 以避免 1↔分屏切换
+              className={soloPane
+                // 唯一窗格:无分屏头/边框,样式同旧单栏(始终走 SplitMain 以避免 1↔分屏切换
                 // 时整棵会话树 unmount/remount 卡顿)。
                 ? 'flex-1 flex flex-col relative m-3 rounded-2xl overflow-hidden min-w-0'
                 : `flex flex-col relative my-3 mx-1.5 rounded-2xl overflow-hidden transition-shadow ${
                     focused ? 'ring-2 ring-accent/40 shadow-lg' : 'ring-1 ring-canvas-deep/40'
                   }`}
             >
-              {paneCount > 1 && (
+              {!soloPane && (
                 <div className="flex items-center justify-between px-2.5 py-1 bg-canvas-warm/70 border-b border-canvas-deep shrink-0 z-20">
                   <span className={`text-[10px] font-mono ${focused ? 'text-accent' : 'text-ink-faint'}`}>
                     分屏 {i + 1}{focused ? ' · 当前' : ''}
@@ -731,7 +751,7 @@ function SplitMain({ activeTabIndex, setActiveTabIndex }) {
                   </button>
                 </div>
               )}
-              {(paneCount === 1 || hasSession) ? (
+              {(soloPane || hasSession) ? (
                 <SessionDetail tabIndex={i} />
               ) : (
                 <div className="flex-1 flex items-center justify-center glass-base">
@@ -747,7 +767,7 @@ function SplitMain({ activeTabIndex, setActiveTabIndex }) {
             </div>
             {/* 手柄只放在窗格【之间】(最后一个窗格右缘不放,否则会贴 GUI 右边界难抓)。
                 拖第 i 个手柄=调整第 i 个窗格宽,最后一个窗格 flex 吸收余量。 */}
-            {i < paneCount - 1 && <SplitterCmp onMouseDown={startResize(i)} axis="x" />}
+            {!soloPane && i < paneCount - 1 && <SplitterCmp onMouseDown={startResize(i)} axis="x" />}
           </React.Fragment>
         );
       })}

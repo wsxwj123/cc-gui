@@ -653,6 +653,12 @@ export const useStore = create((set, get) => ({
     set({ lastProviderBySession: nextMap });
   },
 
+  // BH-1b: ChatWise 式右侧停靠面板。全局单 dock(同一时刻只一个),纯内存不持久化。
+  // { lang, code, tabIndex } | null。打开时分屏只渲聚焦窗格 + 右栏让位给 dock。
+  artifactDock: null,
+  openArtifactDock: (payload) => set({ artifactDock: payload }),
+  closeArtifactDock: () => set({ artifactDock: null }),
+
   // ── Multi-pane actions (Phase 2) ───────────────────────────
   // Set how many panes are visible (1..6). Snaps activeTabIndex if it ends
   // up out of range. Persists so refresh restores the layout.

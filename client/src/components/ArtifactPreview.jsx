@@ -1,7 +1,15 @@
 import React, { useState, useEffect, useId } from 'react';
 import { createPortal } from 'react-dom';
-import { Copy, Check, Code2, Eye, AlertTriangle, Maximize2, X } from 'lucide-react';
+import { Copy, Check, Code2, Eye, AlertTriangle, Maximize2, X, PanelRight, RefreshCw } from 'lucide-react';
 import { copyText } from '../utils/clipboard.js';
+import { useStore } from '../stores/sessionStore.js';
+import { useResizable, Splitter } from '../hooks/useResizable.jsx';
+
+// BH-1b: 桌面端把"全屏"升级成右侧 dock,移动端无横向空间仍走全屏遮罩。
+function isMobileViewport() {
+  try { return window.matchMedia('(max-width: 767px)').matches; }
+  catch { return typeof window !== 'undefined' && window.innerWidth < 768; }
+}
 
 // 可内联预览的围栏代码语言。html/svg 走沙箱 iframe(原始内容、可能含脚本,必须隔离);
 // mermaid 走库渲染成已净化的 svg。其余语言仍走普通代码块。
@@ -68,7 +76,7 @@ function useDebounced(value, delay) {
   return v;
 }
 
-function CopyButton({ text }) {
+export function CopyButton({ text }) {
   const [copied, setCopied] = useState(false);
   return (
     <button
@@ -81,7 +89,7 @@ function CopyButton({ text }) {
   );
 }
 
-function MermaidView({ code }) {
+export function MermaidView({ code }) {
   const [svg, setSvg] = useState('');
   const [err, setErr] = useState('');
   const rawId = useId();
@@ -115,7 +123,7 @@ function MermaidView({ code }) {
 }
 
 // 渲染预览主体(代码/mermaid/html-iframe)。fullscreen 时 iframe 撑满高度,内联时固定 400px。
-function PreviewBody({ language, mode, code, debounced, fullscreen }) {
+export function PreviewBody({ language, mode, code, debounced, fullscreen, iframeKey }) {
   if (mode === 'code') {
     return (
       <pre className={`bg-[#211e19] p-4 overflow-auto text-[13px] leading-relaxed font-mono text-[#e8e2d6] ${fullscreen ? 'h-full' : 'max-h-96'}`}>
@@ -126,6 +134,8 @@ function PreviewBody({ language, mode, code, debounced, fullscreen }) {
   if (language === 'mermaid') return <MermaidView code={debounced} />;
   return (
     <iframe
+      // iframeKey 自增 → 重新挂载 iframe 实现 dock 的"刷新"。
+      key={iframeKey}
       title="预览"
       sandbox={SANDBOX_FLAGS}
       srcDoc={withShim(debounced)}
@@ -139,6 +149,12 @@ export function ArtifactPreview({ lang, code }) {
   const [mode, setMode] = useState('preview');
   const [fullscreen, setFullscreen] = useState(false);
   const debounced = useDebounced(code, 300);
+
+  // BH-1b: 桌面端点"停靠"开右侧 dock(全局单 dock);移动端无横向空间走全屏遮罩。
+  const openDock = () => {
+    const st = useStore.getState();
+    st.openArtifactDock({ lang: language, code, tabIndex: st.activeTabIndex });
+  };
 
   // 全屏时按 Esc 关闭 + 锁 body 滚动。
   useEffect(() => {
@@ -168,14 +184,31 @@ export function ArtifactPreview({ lang, code }) {
           </button>
         </div>
         <CopyButton text={code} />
-        <button
-          onClick={() => setFullscreen(!inModal)}
-          title={inModal ? '退出全屏 (Esc)' : '全屏预览'}
-          className="flex items-center gap-1 text-[10px] text-[#9a8e78] hover:text-[#cabba0] transition-colors"
-        >
-          {inModal ? <X size={12} /> : <Maximize2 size={11} />}
-          {inModal ? '关闭' : '全屏'}
-        </button>
+        {inModal ? (
+          <button
+            onClick={() => setFullscreen(false)}
+            title="退出全屏 (Esc)"
+            className="flex items-center gap-1 text-[10px] text-[#9a8e78] hover:text-[#cabba0] transition-colors"
+          >
+            <X size={12} /> 关闭
+          </button>
+        ) : isMobileViewport() ? (
+          <button
+            onClick={() => setFullscreen(true)}
+            title="全屏预览"
+            className="flex items-center gap-1 text-[10px] text-[#9a8e78] hover:text-[#cabba0] transition-colors"
+          >
+            <Maximize2 size={11} /> 全屏
+          </button>
+        ) : (
+          <button
+            onClick={openDock}
+            title="停靠到右侧"
+            className="flex items-center gap-1 text-[10px] text-[#9a8e78] hover:text-[#cabba0] transition-colors"
+          >
+            <PanelRight size={11} /> 停靠
+          </button>
+        )}
       </div>
     </div>
   );
@@ -199,6 +232,113 @@ export function ArtifactPreview({ lang, code }) {
             {toolbar(true)}
             <div className="flex-1 min-h-0 bg-[#1a1714]">
               <PreviewBody language={language} mode={mode} code={code} debounced={debounced} fullscreen={true} />
+            </div>
+          </div>
+        </div>,
+        document.body,
+      )}
+    </>
+  );
+}
+
+// BH-1b: ChatWise 式右侧停靠面板。读 store 的 artifactDock,占右栏(优先于 RightPanel)。
+// 自身宽度可拖拽,左缘放 Splitter。复用 PreviewBody/withShim/沙箱逻辑。
+export function ArtifactDock() {
+  const artifactDock = useStore((s) => s.artifactDock);
+  const closeArtifactDock = useStore((s) => s.closeArtifactDock);
+  const [mode, setMode] = useState('preview');
+  const [fullscreen, setFullscreen] = useState(false);
+  const [iframeKey, setIframeKey] = useState(0);
+  const [width, onDrag] = useResizable({
+    initial: 480, min: 360, max: 900, axis: 'x', invert: true, storageKey: 'cgui-artifact-dock-width',
+  });
+  const code = artifactDock?.code || '';
+  const language = normLang(artifactDock?.lang);
+  const debounced = useDebounced(code, 300);
+
+  // 全屏时按 Esc 关闭 + 锁 body 滚动(与 ArtifactPreview 全屏一致)。
+  useEffect(() => {
+    if (!fullscreen) return;
+    const onKey = (e) => { if (e.key === 'Escape') setFullscreen(false); };
+    window.addEventListener('keydown', onKey);
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => { window.removeEventListener('keydown', onKey); document.body.style.overflow = prev; };
+  }, [fullscreen]);
+
+  if (!artifactDock) return null;
+
+  const tabBtn = (active) =>
+    `flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-mono transition-colors ${
+      active ? 'bg-[#3a342b] text-[#e8e2d6]' : 'text-[#9a8e78] hover:text-[#cabba0]'
+    }`;
+
+  const toolbar = (inModal) => (
+    <div className="flex items-center justify-between px-3.5 py-1.5 bg-[#2b2722] border-b border-[#3a342b] shrink-0">
+      <span className="text-[11px] font-mono text-[#9a8e78]">{language}</span>
+      <div className="flex items-center gap-2">
+        <div className="flex items-center gap-0.5 rounded-md bg-[#211e19] border border-[#3a342b] p-0.5">
+          <button onClick={() => setMode('preview')} className={tabBtn(mode === 'preview')}>
+            <Eye size={10} /> 预览
+          </button>
+          <button onClick={() => setMode('code')} className={tabBtn(mode === 'code')}>
+            <Code2 size={10} /> 代码
+          </button>
+        </div>
+        <CopyButton text={code} />
+        <button
+          onClick={() => setIframeKey((k) => k + 1)}
+          title="刷新预览"
+          className="flex items-center gap-1 text-[10px] text-[#9a8e78] hover:text-[#cabba0] transition-colors"
+        >
+          <RefreshCw size={11} /> 刷新
+        </button>
+        <button
+          onClick={() => setFullscreen(!inModal)}
+          title={inModal ? '退出全屏 (Esc)' : '全屏预览'}
+          className="flex items-center gap-1 text-[10px] text-[#9a8e78] hover:text-[#cabba0] transition-colors"
+        >
+          {inModal ? <X size={12} /> : <Maximize2 size={11} />}
+          {inModal ? '退出' : '全屏'}
+        </button>
+        {!inModal && (
+          <button
+            onClick={closeArtifactDock}
+            title="关闭停靠面板"
+            className="flex items-center gap-1 text-[10px] text-[#9a8e78] hover:text-[#cabba0] transition-colors"
+          >
+            <X size={12} /> 关闭
+          </button>
+        )}
+      </div>
+    </div>
+  );
+
+  return (
+    <>
+      <Splitter onMouseDown={onDrag} axis="x" />
+      <div
+        style={{ width }}
+        className="shrink-0 flex flex-col m-3 ml-0 rounded-2xl overflow-hidden border border-[#3a342b] bg-[#1a1714] animate-glass-rise"
+      >
+        {toolbar(false)}
+        <div className="flex-1 min-h-0 bg-[#1a1714]">
+          <PreviewBody language={language} mode={mode} code={code} debounced={debounced} fullscreen iframeKey={iframeKey} />
+        </div>
+      </div>
+
+      {fullscreen && createPortal(
+        <div
+          className="fixed inset-0 z-[200] flex items-center justify-center bg-black/70 p-4"
+          onClick={() => setFullscreen(false)}
+        >
+          <div
+            className="flex flex-col w-[92vw] h-[92vh] rounded-lg border border-[#3a342b] overflow-hidden shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {toolbar(true)}
+            <div className="flex-1 min-h-0 bg-[#1a1714]">
+              <PreviewBody language={language} mode={mode} code={code} debounced={debounced} fullscreen iframeKey={iframeKey} />
             </div>
           </div>
         </div>,
