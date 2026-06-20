@@ -1,5 +1,5 @@
-import React from 'react';
-import { Check, Circle, ClipboardList, Loader2 } from 'lucide-react';
+import React, { useState } from 'react';
+import { Check, Circle, ClipboardList, Loader2, ChevronDown, ChevronRight } from 'lucide-react';
 
 /**
  * Renders the latest TodoWrite snapshot from Claude as a checklist above the
@@ -26,34 +26,48 @@ export function TodoPanel({ todos, plan = '' }) {
       </div>
     );
   }
+  return <TodoChecklist todos={todos} cleanPlan={cleanPlan} />;
+}
+
+// BI-1: 默认折叠,只显"下一条要做"(优先 in_progress,否则首个 pending,全完成则末项);
+// 点头部展开看完整清单。折叠态仍保留进度条作总览。
+function TodoChecklist({ todos, cleanPlan }) {
+  const [collapsed, setCollapsed] = useState(true);
   const done = todos.filter((t) => t.status === 'completed').length;
   const total = todos.length;
   const pct = total === 0 ? 0 : Math.round((done / total) * 100);
+  const nextTodo = todos.find((t) => t.status === 'in_progress')
+    || todos.find((t) => t.status === 'pending')
+    || todos[todos.length - 1];
 
   return (
     <div className="px-6 pt-3 pb-1">
       <div className="max-w-[var(--content-max)] mx-auto rounded-xl border border-canvas-deep bg-canvas-warm/60 backdrop-blur-sm overflow-hidden">
         {cleanPlan && <PlanBlock plan={cleanPlan} />}
-        {/* Header — title + progress chip + progress bar */}
-        <div className="flex items-center gap-2 px-3 py-2 border-b border-canvas-deep/60">
-          <span className="text-[11px] font-body font-medium text-ink">任务清单</span>
-          <span className="text-[10px] font-mono text-ink-faint">{done}/{total}</span>
+        {/* Header — 整行可点切换折叠;含折叠箭头 + 标题 + 进度 + 进度条 */}
+        <button
+          onClick={() => setCollapsed((c) => !c)}
+          title={collapsed ? '展开任务清单' : '折叠(只显下一条)'}
+          className="w-full flex items-center gap-2 px-3 py-2 border-b border-canvas-deep/60 hover:bg-canvas-deep/30 transition-colors text-left"
+        >
+          {collapsed ? <ChevronRight size={13} className="text-ink-faint shrink-0" /> : <ChevronDown size={13} className="text-ink-faint shrink-0" />}
+          <span className="text-[11px] font-body font-medium text-ink shrink-0">任务清单</span>
+          <span className="text-[10px] font-mono text-ink-faint shrink-0">{done}/{total}</span>
           <div className="flex-1 h-1 rounded-full bg-canvas-deep overflow-hidden">
-            <div
-              className="h-full bg-accent transition-all duration-300"
-              style={{ width: `${pct}%` }}
-            />
+            <div className="h-full bg-accent transition-all duration-300" style={{ width: `${pct}%` }} />
           </div>
           <span className="text-[10px] font-mono text-ink-faint shrink-0">{pct}%</span>
-        </div>
-        {/* List — keeps full list visible; user wanted "勾选" behavior, not
-            collapse. Capped to ~50vh via overflow so the composer always has
-            room when there are 30+ items. */}
-        <div className="max-h-[40vh] overflow-y-auto py-1.5">
-          {todos.map((t, i) => (
-            <TodoRow key={i} todo={t} />
-          ))}
-        </div>
+        </button>
+        {/* 折叠态:只显下一条;展开态:完整清单(上限 40vh 滚动,给输入框留空间) */}
+        {collapsed ? (
+          <div className="py-1.5">{nextTodo && <TodoRow todo={nextTodo} />}</div>
+        ) : (
+          <div className="max-h-[40vh] overflow-y-auto py-1.5">
+            {todos.map((t, i) => (
+              <TodoRow key={i} todo={t} />
+            ))}
+          </div>
+        )}
       </div>
     </div>
   );

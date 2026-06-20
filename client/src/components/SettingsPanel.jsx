@@ -565,7 +565,9 @@ function CcUpdater() {
   useEffect(() => {
     fetch('/api/claude-version-check').then((r) => r.json()).then((d) => {
       // 已装但查询出错(如 npm registry 失败)时标 err 让错误可见;未装时走安装按钮分支。
-      setState({ status: (d.error && d.installed !== false) ? 'err' : 'idle', ...d });
+      // BI-3: 挂载时已拿到 hasUpdate/latestVersion,直接置 ok 让"一键更新"按钮立即显示,
+      // 不再要求用户先点"检查更新"(更新弹窗"前往更新"落到设置页即见一键更新)。
+      setState({ status: d.installed === false ? 'idle' : (d.error ? 'err' : 'ok'), ...d });
     }).catch(() => {});
   }, []);
 
