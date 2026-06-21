@@ -38,8 +38,11 @@ async function shadowDir(sessionId) {
 
 async function gitShadow(args, sessionId, workTree, opts = {}) {
   const gitDir = await shadowDir(sessionId);
+  // cwd 必须是 workTree:`checkout <sha> -- .` 的 `.` pathspec 相对 git 进程 cwd 解析,
+  // 不设就落在 server 自己的目录(work-tree 之外)→ "pathspec '.' did not match"
+  // (用户在无文件改动的消息上回滚时的还原失败根因)。
   return execFileP('git', ['--git-dir', gitDir, '--work-tree', workTree, ...args],
-    { timeout: 30000, ...opts });
+    { timeout: 30000, cwd: workTree, ...opts });
 }
 
 async function loadMeta(sessionId) {

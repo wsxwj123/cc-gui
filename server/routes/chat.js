@@ -50,12 +50,17 @@ const MAX_EARLY_LINES = 5000;
 // .cmd/.bat 时用 cmd.exe /c 包一层,并把超长的 --settings inline JSON 落临时文件
 // 传路径(避开 cmd.exe 对 JSON 引号的破坏)。非 Windows / native claude.exe 路径
 // 完全不变(仍裸 'claude' + 原 args),对现有可用环境零回归。
-let _winClaudePath; // undefined=未解析, null=失败, string=路径
+let _winClaudePath; // undefined/null=未解析或失败(下次重试), string=路径
 function resolveWinClaude() {
-  if (_winClaudePath !== undefined) return _winClaudePath;
+  if (_winClaudePath) return _winClaudePath; // 只缓存成功,失败下次重试(PATH 可能稍后才就绪)
   try {
     const out = execFileSync('where', ['claude'], { timeout: 5000 }).toString();
-    _winClaudePath = out.split(/\r?\n/).map((s) => s.trim()).filter(Boolean)[0] || null;
+    const lines = out.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+    // npm 同时生成无扩展名 `claude`(bash 脚本,Win 跑不了)、`claude.cmd`、`claude.ps1`。
+    // 优先 .exe(直接 spawn)> .cmd/.bat(经 cmd.exe);别盲取 [0] 拿到跑不了的那个。
+    _winClaudePath = lines.find((p) => /\.exe$/i.test(p))
+      || lines.find((p) => /\.(cmd|bat)$/i.test(p))
+      || lines[0] || null;
   } catch { _winClaudePath = null; }
   return _winClaudePath;
 }
@@ -83,6 +88,9 @@ export function claudeSpawn(args, opts) {
       if (tempFile) proc.on('close', () => { try { unlinkSync(tempFile); } catch {} });
       return proc;
     }
+    // 解析到 .exe(或其他可直接执行路径)→ 直接 spawn 该路径,比裸 'claude' 更可靠
+    // (裸名在只有 .cmd/无 .exe 的 PATH 下会 ENOENT)。
+    if (resolved) return spawn(resolved, args, opts);
   }
   return spawn('claude', args, opts);
 }

@@ -1412,7 +1412,11 @@ function SessionList() {
     const prevKey = prev ? (prev.sessionId || `draft-${prev.projectHash || 'none'}`) : null;
     const draftKey = `draft-${draftProjectHash || 'none'}`;
     if (prevKey && prevKey !== draftKey) {
-      st.setModelFor(draftKey, st.getModelFor(prevKey));
+      // model 不继承上一个会话:新会话应跟随当前 provider 的默认模型(currentModel,
+      // 由 provider 切换/默认模型设置决定)。继承旧会话 model 会盖掉用户刚设的 provider
+      // 默认(且跨 provider 时会串到旧 provider 的模型 id)。effort/agent 是工作流偏好,
+      // 与 provider 无关,继续继承。  // ponytail: model 跟 provider 默认,不跟上条会话
+      st.setModelFor(draftKey, ''); // 清掉 draftKey 可能残留的旧 pin → getModelFor 回落 currentModel
       st.setEffortFor(draftKey, st.getEffortFor(prevKey));
       st.setActiveAgentFor(draftKey, st.getActiveAgentFor(prevKey));
     }
@@ -5755,6 +5759,14 @@ function CustomProviderForm({ onSaved, editing, onCancel }) {
     const parsedModels = parseModels();
     if (type === 'openai' && parsedModels.length === 0) {
       return window.alert('OpenAI 兼容 Provider 至少需要一个模型 ID。可以先点「拉取模型」,或在「模型」框每行填一个。');
+    }
+    // 提醒设默认模型:不设的话新会话/未指定模型的调用回退到列表第一个。多模型时才提醒。
+    const hasDefault = defaultModel && parsedModels.includes(defaultModel);
+    if (!hasDefault && parsedModels.length > 1) {
+      const ok = await confirmDialog(
+        `未设置默认模型。新会话及未指定模型的调用将使用列表第一个:${parsedModels[0]}。\n建议在下方设置默认模型,以及 haiku / sonnet / opus 三档对应的模型 id。\n\n仍以「${parsedModels[0]}」作默认保存?`,
+      );
+      if (!ok) return; // 用户返回去设置默认模型 / 档位映射
     }
     setBusy('save');
     try {

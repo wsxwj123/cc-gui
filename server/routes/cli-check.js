@@ -23,9 +23,13 @@ const router = Router();
  * 或 { installed: false, error: '...' }。永远返回 200。
  */
 router.get('/cli-check', async (req, res) => {
-  // 策略 1:走 PATH 直接执行
+  // 策略 1:走 PATH 直接执行。Windows 上 npm 装的是 claude.cmd/.ps1(没 .exe),
+  // Node execFile 不解析 .cmd → 必须经 cmd.exe(按 PATHEXT 解析 .cmd/.exe/.ps1,
+  // 覆盖 nvm4w / 任意 npm prefix 等所有在 PATH 里的位置)。
   try {
-    const { stdout } = await execFileP('claude', ['--version'], { timeout: 5000 });
+    const { stdout } = process.platform === 'win32'
+      ? await execFileP('cmd.exe', ['/c', 'claude', '--version'], { timeout: 5000 })
+      : await execFileP('claude', ['--version'], { timeout: 5000 });
     return res.json({ installed: true, version: stdout.trim(), via: 'PATH' });
   } catch {}
 
