@@ -3905,20 +3905,20 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       setProviderSwitchNotice({ text: '未找到该消息的文件快照，已仅回退会话记录（项目文件未改动）。' });
     }
     if (shouldRestoreFiles && checkpointSha && sel?.sessionId && cwd) {
+      // 还原失败最常见的就是这条消息发送前后没有任何被跟踪文件改动:shadow 仓库里
+      // 那个 commit 是空树,`git checkout <sha> -- .` 报 pathspec 不匹配。这属于"本来
+      // 就没文件要还原"而非真错,不该 alert+return 中断整个回退。降级:跳过文件还原,
+      // 继续裁剪会话/重发,只用一条提示告知项目文件未动。
+      const softDegrade = () => setProviderSwitchNotice({ text: '未找到该消息的文件快照，已仅回退会话记录（项目文件未改动）。' });
       try {
         const r = await fetch(`/api/checkpoints/${sel.sessionId}/restore`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ sha: checkpointSha, cwd }),
         });
-        if (!r.ok) {
-          const e = await r.json().catch(() => ({}));
-          alert('文件还原失败：' + (e.error || r.status));
-          return;
-        }
-      } catch (err) {
-        alert('文件还原失败：' + err.message);
-        return;
+        if (!r.ok) softDegrade();
+      } catch {
+        softDegrade();
       }
     }
 

@@ -2,7 +2,7 @@
 name: designer
 description: UI/UX design, review, and implementation. Use for styling, responsive design, component architecture and visual polish.
 model: sonnet
-tools: Read, Glob, Grep, Edit, Write, Bash, TaskCreate, TaskUpdate, TaskList
+tools: Read, Edit, Write, Bash, TaskCreate, TaskUpdate, TaskList, AskUserQuestion, ExitPlanMode
 ---
 You are a Designer - a frontend UI/UX specialist who creates and reviews intentional, polished experiences.
 

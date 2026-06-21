@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import {
   Brain, Copy, Check, ChevronDown, ChevronRight,
   Wrench, BookOpen, Pencil, Terminal, FileText, Search,
-  Globe, Edit3, Loader2, CheckSquare, Square, CircleDot, ListTodo, RotateCcw, Bot
+  Globe, Edit3, Loader2, RotateCcw, Bot
 } from 'lucide-react';
 import { ModelBadge, ProviderAvatar } from './ModelBadge.jsx';
 import { MarkdownRenderer } from './MarkdownRenderer.jsx';
@@ -258,65 +258,8 @@ function ToolCallRow({ toolCall, onRetryTool }) {
 // TASK_TOOL_NAMES / rebuildTodosFromTaskCalls 已抽到 ../utils/todos.js,
 // 与 App.jsx 的 currentTodos 共用同一份重建算法(BK-8a)。
 
-// ─── TodoWrite renderer ───────────────────────────────────────
-// The TodoWrite tool's input is `{ todos: [{ content, status, activeForm }] }`.
-// CLI renders it as a checkbox list with status markers; we mirror that here so
-// users see the plan rather than a raw JSON dump.
-// `todos` 直接传重建好的数组(TaskCreate/TaskUpdate 路径);兼容旧调用方传 toolCall
-// (TodoWrite 路径,从 toolCall.input.todos 取)。
-function TodoListCard({ toolCall, todos: todosProp }) {
-  const todos = Array.isArray(todosProp)
-    ? todosProp
-    : (Array.isArray(toolCall?.input?.todos) ? toolCall.input.todos : []);
-  if (todos.length === 0) return null;
-
-  // Status counts for the header badge.
-  const completed = todos.filter((t) => t.status === 'completed').length;
-  const active = todos.filter((t) => t.status === 'in_progress').length;
-  const pending = todos.filter((t) => t.status === 'pending').length;
-
-  const statusIcon = (status) => {
-    if (status === 'completed') return <CheckSquare size={13} className="text-success shrink-0" />;
-    if (status === 'in_progress') return <CircleDot size={13} className="text-accent shrink-0 animate-pulse" />;
-    return <Square size={13} className="text-ink-faint shrink-0" />;
-  };
-
-  const rowClass = (status) => {
-    if (status === 'completed') return 'text-ink-faint line-through';
-    if (status === 'in_progress') return 'text-ink font-medium';
-    return 'text-ink-soft';
-  };
-
-  // 不自带 animate-fade-up:入场淡入由外层 turn 容器(446,仅 isLiveStream 时)统一播。
-  // 子块各自带动画会在 turn 固化(streaming→chat-…→真uuid 三次换 key)重挂时重放,
-  // 就是"回复完成后闪一下再显示"的来源。
-  return (
-    <div className="border border-canvas-deep rounded-lg overflow-hidden bg-canvas">
-      <div className="px-3 py-2 bg-canvas-warm flex items-center gap-2 border-b border-canvas-deep">
-        <ListTodo size={13} className="text-accent shrink-0" />
-        <span className="text-xs text-ink-soft font-body">任务清单</span>
-        <span className="text-[10px] text-ink-faint font-mono">
-          {completed}/{todos.length} 完成{active > 0 && ` · ${active} 进行中`}{pending > 0 && ` · ${pending} 待办`}
-        </span>
-        {!toolCall.result && (
-          <Loader2 size={11} className="text-ink-faint animate-spin ml-auto" />
-        )}
-      </div>
-      <ul className="py-1.5">
-        {todos.map((todo, i) => {
-          // Show activeForm for in_progress items (matches CLI behavior — verb form for the active task)
-          const text = todo.status === 'in_progress' && todo.activeForm ? todo.activeForm : todo.content;
-          return (
-            <li key={todo.id ?? todo.taskId ?? todo.content ?? i} className="px-3 py-1 flex items-start gap-2 text-[12px] font-body leading-snug">
-              {statusIcon(todo.status)}
-              <span className={rowClass(todo.status)}>{text}</span>
-            </li>
-          );
-        })}
-      </ul>
-    </div>
-  );
-}
+// 任务清单渲染器(TodoListCard)已移除:清单统一只在输入框上方的常驻面板
+// (App.jsx currentTodos → TodoPanel)显示,对话流内不再内联,避免一份清单两处重复。
 
 // ─── Tool Calls Group (collapsed by category) ─────────────────
 function ToolCallsGroup({ toolCalls, onRetryTool }) {
@@ -491,7 +434,7 @@ function TurnBubbleInner({ turn, onRetry, onRetryTool, retryActive }) {
   // 任务清单(TodoWrite 或 TaskCreate/TaskUpdate)聚合成一份,挂在最后一个任务工具上。
   const taskCalls = toolCalls.filter((tc) => TASK_TOOL_NAMES.has(tc.name));
   const rebuiltTodos = rebuildTodosFromTaskCalls(taskCalls);
-  const latestTaskCall = taskCalls.length > 0 ? taskCalls[taskCalls.length - 1] : null;
+  // latestTodo 现仅用于 isStreaming 判定(本 turn 是否已有任务清单内容),不再内联渲染。
   const latestTodo = rebuiltTodos && rebuiltTodos.length > 0 ? rebuiltTodos : null;
   const inlineCalls = toolCalls.filter((tc) => INLINE_TOOL_NAMES.has(tc.name));
   const groupedCalls = toolCalls.filter(
@@ -591,27 +534,12 @@ function TurnBubbleInner({ turn, onRetry, onRetryTool, retryActive }) {
                     return;
                   }
                   if (b.type === 'tool_use' && b.toolCall) {
-                    // 任务清单(TodoWrite 或 TaskCreate/TaskUpdate/TaskList):聚合成一份,
-                    // 只在最后一个任务工具处渲染,never bucket → 不会每个 TaskCreate 各冒一张卡。
+                    // 任务清单(TodoWrite/TaskCreate/TaskUpdate/TaskList)只在输入框上方的
+                    // 常驻面板(App.jsx currentTodos → TodoPanel)显示;对话流里不再内联渲染,
+                    // 否则同一份清单会同时出现在两处(用户选定:只留吸附面板)。flushBucket 保留
+                    // 原有的工具轮边界语义,只是不再 push 清单卡片。
                     if (TASK_TOOL_NAMES.has(b.toolCall.name)) {
                       flushBucket(i);
-                      const isLastTaskTool = !renderBlocks.slice(i + 1).some(
-                        (b2) => b2.type === 'tool_use' && TASK_TOOL_NAMES.has(b2.toolCall?.name)
-                      );
-                      if (isLastTaskTool) {
-                        // 用本 turn 内所有任务工具调用重建完整清单(老→新回放)。
-                        const taskCallsInTurn = renderBlocks
-                          .filter((b2) => b2.type === 'tool_use' && TASK_TOOL_NAMES.has(b2.toolCall?.name))
-                          .map((b2) => b2.toolCall);
-                        const todos = rebuildTodosFromTaskCalls(taskCallsInTurn);
-                        if (todos && todos.length > 0) {
-                          out.push(
-                            <ToolCallWithRetry key={`b-${i}`} toolCall={b.toolCall} onRetryTool={onRetryTool}>
-                              <TodoListCard toolCall={b.toolCall} todos={todos} />
-                            </ToolCallWithRetry>
-                          );
-                        }
-                      }
                       return;
                     }
                     // Every other tool — Bash/Read/Edit/Grep/Web/Skill/Task/etc.
@@ -654,13 +582,7 @@ function TurnBubbleInner({ turn, onRetry, onRetryTool, retryActive }) {
                 </div>
               )}
               {fullText && <MarkdownRenderer content={fullText} />}
-              {latestTodo && (
-                <div className="mt-2">
-                  <ToolCallWithRetry toolCall={latestTaskCall} onRetryTool={onRetryTool}>
-                    <TodoListCard toolCall={latestTaskCall} todos={latestTodo} />
-                  </ToolCallWithRetry>
-                </div>
-              )}
+              {/* 任务清单只走输入框上方常驻面板,legacy 路径同样不再内联渲染(见上)。 */}
               {hasInlineCalls && (
                 <div className="mt-2 space-y-2">
                   {inlineCalls.map((tc, i) => (
