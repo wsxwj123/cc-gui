@@ -767,7 +767,10 @@ export function ChatInput({ onSend, onStop, onAccelerate, disabled, isStreaming,
             placeholder={rcLocked ? '已交给手机远程控制 · 点上方「收回控制」解锁' : (dragging ? '松开以添加图片、PDF、Office 或文本…' : '输入消息... (/ 打开命令)')}
             disabled={disabled || rcLocked}
             rows={1}
-            className="flex-1 bg-transparent text-[14px] text-ink placeholder-ink-faint resize-none focus:outline-none font-body leading-relaxed min-h-[24px] max-h-[200px]"
+            // 单行高度对齐左右按钮(h-9=36px):min-h-[36px]+py-1.5 让单行文字在 36px 行内
+            // 垂直居中,与 paperclip / 发送按钮(都 h-9 居中)对齐;多行时随内容增高、items-end
+            // 仍让按钮贴底。box-border(Tailwind preflight)下 min-h 含 padding。
+            className="flex-1 bg-transparent text-[14px] text-ink placeholder-ink-faint resize-none focus:outline-none font-body leading-relaxed py-1.5 min-h-[36px] max-h-[200px]"
           />
 
           {isStreaming ? (
