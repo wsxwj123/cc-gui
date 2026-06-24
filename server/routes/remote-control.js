@@ -2,7 +2,23 @@ import { Router } from 'express';
 import { realpath } from 'fs/promises';
 import { resolve } from 'path';
 import { homedir } from 'os';
-import * as pty from 'node-pty';
+
+// node-pty 是本 server 唯一的原生模块,其 .node 二进制按「构建时的 Node ABI」编译。
+// 打包发布时(CI Node 20)编译进 bundle,但 app 运行时 spawn 的是用户机器上「任意版本」
+// 的系统 node;大版本不一致时 require 会抛 NODE_MODULE_VERSION 不匹配。它只服务「手机
+// 远程控制」这一个可选功能,绝不该让整个后端在启动(顶层静态 import)就被它带崩——这正是
+// 「另一台 Windows 上后端起不来 / did not accept connections」的根因。改惰性加载:首次用到
+// 才 import,失败只让本功能返回错误,server 照常启动。
+let _ptyPromise;
+function loadPty() {
+  if (!_ptyPromise) {
+    _ptyPromise = import('node-pty').then((m) => m.default?.spawn ? m.default : m).catch((e) => {
+      _ptyPromise = undefined; // 不缓存失败,允许后续重试
+      throw new Error(`node-pty 加载失败,手机远程控制不可用(其余功能正常):${e.message}`);
+    });
+  }
+  return _ptyPromise;
+}
 
 const router = Router();
 const HOME = homedir();
@@ -78,6 +94,7 @@ router.post('/remote-control', async (req, res) => {
     for (const k of ['ANTHROPIC_BASE_URL', 'ANTHROPIC_API_URL', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_API_KEY']) {
       delete rcEnv[k];
     }
+    const pty = await loadPty();
     const term = pty.spawn(shell, ['-lc', `claude --remote-control --resume ${sessionId}`], {
       name: 'xterm-color',
       cols: 100,
