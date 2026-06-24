@@ -147,24 +147,50 @@ fn resolve_server_entry(app: &tauri::App) -> Option<PathBuf> {
     None
 }
 
-// Tauri v2 在 Windows 上 resource_dir() 常返回扩展长度路径(verbatim 前缀 `\\?\D:\...`)。
-// 把这种路径作为入口脚本传给 node,node 解析主模块(resolveMainPath)时处理不了 `\\?\`
-// 前缀 → 退化成对裸驱动器 `D:` 做 lstat → `EISDIR: illegal operation on a directory, lstat 'D:'`
-// → 后端在进入 server 代码之前就崩,逐端口 "did not accept connections"。把 app 装在非 C: 盘
-// (如 D:)的机器必现,装 C: 盘或 dev 模式不复现。去掉前缀还原成普通 `D:\...` 路径即可。
-#[cfg(windows)]
+// Tauri v2 在 Windows 上 resource_dir() 常返回扩展长度路径(verbatim 前缀 `\\?\<盘符>:\…`,
+// 网络盘是 `\\?\UNC\server\share\…`)。把这种路径作为入口脚本传给 node,node 解析主模块
+// (resolveMainPath)处理不了 `\\?\` 前缀 → 退化成对裸盘符(如 `D:`)做 lstat →
+// `EISDIR: illegal operation on a directory, lstat 'D:'` → 后端在进入 server 代码前就崩,
+// 逐端口 "did not accept connections"。**装在任意非 C: 盘(D/E/F/G、外接 U 盘/硬盘)都会中招**
+// (C: 盘和 dev 模式恰好不复现)。去掉前缀还原成普通 `X:\…` / `\\server\share\…` 即可。
+//
+// 纯字符串实现、不按平台 cfg:Mac/Linux 的 POSIX 路径(以 `/` 开头)永远不匹配 `\\?\`,
+// 原样返回——所以同一份逻辑在 Windows 修 verbatim、在 Mac 是无害直通(外接盘 /Volumes/… 照常)。
+// 这样还能在任意平台 `cargo test` 验证(见下方 tests),不必只在 Windows 上才能测。
 fn strip_verbatim_prefix(p: PathBuf) -> PathBuf {
-    let s = p.to_string_lossy();
+    PathBuf::from(strip_verbatim_str(&p.to_string_lossy()))
+}
+
+fn strip_verbatim_str(s: &str) -> String {
     if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
-        return PathBuf::from(format!(r"\\{}", rest));
+        return format!(r"\\{rest}");
     }
     if let Some(rest) = s.strip_prefix(r"\\?\") {
-        return PathBuf::from(rest);
+        return rest.to_string();
     }
-    p
+    s.to_string()
 }
-#[cfg(not(windows))]
-fn strip_verbatim_prefix(p: PathBuf) -> PathBuf { p }
+
+#[cfg(test)]
+mod path_tests {
+    use super::strip_verbatim_str;
+    #[test]
+    fn strips_any_drive_and_unc_keeps_others() {
+        // 任意盘符(含外接盘映射成的盘符)都剥成普通绝对路径
+        assert_eq!(strip_verbatim_str(r"\\?\C:\a\server\index.js"), r"C:\a\server\index.js");
+        assert_eq!(strip_verbatim_str(r"\\?\D:\x"), r"D:\x");
+        assert_eq!(strip_verbatim_str(r"\\?\E:\Claude GUI\server\index.js"), r"E:\Claude GUI\server\index.js");
+        assert_eq!(strip_verbatim_str(r"\\?\G:\u\v"), r"G:\u\v");
+        // 网络盘(UNC)还原成 \\server\share\…
+        assert_eq!(strip_verbatim_str(r"\\?\UNC\srv\share\server\index.js"), r"\\srv\share\server\index.js");
+        // 已是普通路径 / Mac POSIX 路径 / 外接盘 /Volumes:原样不动
+        assert_eq!(strip_verbatim_str(r"D:\already\clean"), r"D:\already\clean");
+        assert_eq!(strip_verbatim_str("/Applications/Claude GUI.app/Contents/Resources/_up_/server/index.js"),
+                   "/Applications/Claude GUI.app/Contents/Resources/_up_/server/index.js");
+        assert_eq!(strip_verbatim_str("/Volumes/USB DISK/Claude GUI.app/server/index.js"),
+                   "/Volumes/USB DISK/Claude GUI.app/server/index.js");
+    }
+}
 
 fn bundled_local_routes_present(app: &tauri::App) -> bool {
     if let Ok(res) = app.path().resource_dir() {
