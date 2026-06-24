@@ -5899,7 +5899,7 @@ function CustomProviderForm({ onSaved, editing, onCancel }) {
       <div className="flex gap-2">
         <button onClick={fetchModels} disabled={!!busy}
           className="flex-1 px-3 py-2 text-[12px] border border-accent text-accent rounded-lg disabled:opacity-50">
-          {busy === 'fetch' ? '拉取中…' : '从 /v1/models 拉取'}
+          {busy === 'fetch' ? '获取中…' : '获取模型'}
         </button>
         <button onClick={save} disabled={!!busy}
           className="flex-1 px-3 py-2 text-[12px] bg-accent text-white rounded-lg disabled:opacity-50">

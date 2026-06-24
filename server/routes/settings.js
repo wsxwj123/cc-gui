@@ -1135,11 +1135,9 @@ router.put('/provider-overrides/:id', async (req, res) => {
 // Anthropic header style first (x-api-key) then OpenAI (Bearer) — some relays
 // accept only one. Returns deduped model ids. Single-user local tool, so an
 // arbitrary baseURL is the user's own choice (no SSRF guard).
-async function probeUpstreamModels(baseURL, apiKey) {
-  // Some bases already end in /v1 (OpenAI-style: http://host:8317/v1) — don't
-  // double it into /v1/v1/models.
-  const b = baseURL.trim().replace(/\/+$/, '');
-  const url = /\/v\d+$/.test(b) ? `${b}/models` : `${b}/v1/models`;
+// 对单个 models URL 发请求,轮询两组 header(anthropic x-api-key / openai Bearer)。
+// 返回 { ids } (200,可能空数组) 或 { status, body }(非 200);超时抛错。
+async function tryFetchModels(url, apiKey) {
   // Always send a real User-Agent + Accept: Node fetch's default UA is "node",
   // which some relays behind a WAF (e.g. Cloudflare) answer with a 403 challenge.
   const common = { 'User-Agent': 'claude-gui', Accept: 'application/json' };
@@ -1158,14 +1156,43 @@ async function probeUpstreamModels(baseURL, apiKey) {
     if (r.ok) {
       const data = await r.json().catch(() => null);
       const arr = Array.isArray(data?.data) ? data.data : (Array.isArray(data?.models) ? data.models : []);
-      return [...new Set(arr.map((m) => (typeof m === 'string' ? m : m?.id)).filter(Boolean))];
+      return { ids: [...new Set(arr.map((m) => (typeof m === 'string' ? m : m?.id)).filter(Boolean))] };
     }
     lastStatus = r.status;
     lastBody = (await r.text().catch(() => '')).replace(/\s+/g, ' ').trim().slice(0, 160);
   }
-  // Include the upstream's own words so a 404 (endpoint not implemented) reads
-  // differently from a 401/403 (auth/WAF) — the user can tell them apart.
-  throw new Error(`上游 ${url} 返回 ${lastStatus || '错误'}${lastBody ? `: ${lastBody}` : ''}`);
+  return { status: lastStatus, body: lastBody };
+}
+
+async function probeUpstreamModels(baseURL, apiKey) {
+  const b = baseURL.trim().replace(/\/+$/, '');
+  // 候选 URL,按命中率排序。多数 provider 走第一个就够;anthropic 中转(只 forward
+  // /v1/messages、不实现 /v1/models)回退到「同源 OpenAI 端点」拉(BR-3 调研:DeepSeek
+  // 的 https://api.deepseek.com/v1/models 是标准的;anthropic 端点 .../anthropic 没有
+  // models 接口)。OpenRouter 的 models 在 /api/v1/models(免 key)。
+  const candidates = [];
+  candidates.push(/\/v\d+$/.test(b) ? `${b}/models` : `${b}/v1/models`);
+  const anthropicRelay = b.match(/^(https?:\/\/.+?)\/anthropic$/);
+  if (anthropicRelay) candidates.push(`${anthropicRelay[1]}/v1/models`);
+  try {
+    if (/(^|\.)openrouter\.ai$/i.test(new URL(b).host)) candidates.push('https://openrouter.ai/api/v1/models');
+  } catch {}
+
+  let lastStatus = 0, lastBody = '', lastUrl = '';
+  for (const url of [...new Set(candidates)]) {
+    const res = await tryFetchModels(url, apiKey); // 超时直接向上抛
+    if (res.ids) return res.ids;                   // 200(空数组也算成功,由前端提示手填)
+    lastStatus = res.status; lastBody = res.body; lastUrl = url;
+  }
+  // 区分鉴权失败 vs 没有 models 接口,后者明确引导手填(anthropic 中转常见)。
+  if (lastStatus === 401 || lastStatus === 403) {
+    throw new Error(`上游 ${lastUrl} 返回 ${lastStatus}(鉴权失败):请检查 API Key${lastBody ? `。${lastBody}` : ''}`);
+  }
+  throw new Error(
+    `该 provider 未提供模型列表接口(${lastUrl} 返回 ${lastStatus || '错误'})。`
+    + `很多 Anthropic 协议中转只支持 /v1/messages、没有模型列表,这是正常的 —— 请在「模型」框手动填模型名`
+    + `(如 opus/sonnet/haiku、deepseek-v4-pro、glm-5.2 等)再保存。${lastBody ? `\n上游:${lastBody}` : ''}`,
+  );
 }
 
 // Read the local Claude Code subscription OAuth token. macOS stores it in the

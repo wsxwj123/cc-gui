@@ -731,8 +731,9 @@ export function ChatInput({ onSend, onStop, onAccelerate, disabled, isStreaming,
         )}
 
         {/* 任务清单 — 紧贴输入框上方(同一列内),作为输入框的附着条而非独立悬浮面板。
-            折叠/隐藏/全完成自动折叠见 TodoPanel。 */}
-        <TodoPanel todos={todos} plan={plan} />
+            折叠/隐藏/全完成自动折叠见 TodoPanel。key=permKey:折叠/隐藏是组件本地态,按会话
+            重挂以免跨会话串扰(每个会话独立的折叠/隐藏状态)。 */}
+        <TodoPanel key={permKey || 'global'} todos={todos} plan={plan} />
 
         <div
           className={`chat-composer glass-capsule flex items-end gap-2 px-5 py-3.5 ${dragging ? 'ring-2 ring-accent/60' : ''}`}
