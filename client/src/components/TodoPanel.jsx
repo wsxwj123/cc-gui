@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Check, Circle, ClipboardList, Loader2, ChevronDown, ChevronRight, EyeOff } from 'lucide-react';
 
 /**
@@ -37,11 +37,16 @@ function TodoChecklist({ todos, cleanPlan }) {
     || todos.find((t) => t.status === 'pending')
     || todos[todos.length - 1];
 
-  // 全部完成 → 自动折叠(只在"变为全完成"这一刻触发;此后用户手动展开不再被强制折叠,因为
-  // allComplete 维持 true、effect 不再重跑)。挂载时若已全完成也会折叠(历史完成清单默认收起)。
+  // 全部完成 → 自动折叠,但每份"全完成快照"只折一次:ref 记已为哪个签名折叠过。这样用户
+  // 手动展开后,AI 把某项重开再完成(签名回到同一个全完成态)不会再次强制折叠打断;只有真正
+  // 换成内容不同的新清单完成时(签名不同)才再自动折叠。挂载时若已全完成也折叠一次。
+  const collapsedForSigRef = useRef(null);
   useEffect(() => {
-    if (allComplete) setCollapsed(true);
-  }, [allComplete]);
+    if (allComplete && collapsedForSigRef.current !== sig) {
+      collapsedForSigRef.current = sig;
+      setCollapsed(true);
+    }
+  }, [allComplete, sig]);
 
   // 已隐藏:整块不渲染,直到 sig 变化(下次任务清单更新)自动恢复。
   if (hiddenSig === sig) return null;
