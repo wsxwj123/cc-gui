@@ -89,7 +89,11 @@ const markdownComponents = {
   // ── Code ──────────────────────────────────────────────────────
   code: ({ children, className, ...props }) => {
     const codeStr = String(children).replace(/\n$/, '');
-    const isBlock = className?.includes('language-');
+    // 块级判定:有 language-xxx 类名(带语言的围栏),或内容含换行。
+    // 行内代码按 markdown 定义恒为单行,故"含换行"必是围栏代码块 —— 这一条专门兜住
+    // **没标语言的围栏块**(纯 ``` ),否则它无 language- 类名会被误当行内,多行被压成
+    // 一段"段落式"橙色等宽文字(用户截图的根因)。
+    const isBlock = className?.includes('language-') || codeStr.includes('\n');
     const lang = className?.replace('language-', '') || '';
 
     if (isBlock) {
