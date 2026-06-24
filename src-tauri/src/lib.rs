@@ -147,6 +147,25 @@ fn resolve_server_entry(app: &tauri::App) -> Option<PathBuf> {
     None
 }
 
+// Tauri v2 在 Windows 上 resource_dir() 常返回扩展长度路径(verbatim 前缀 `\\?\D:\...`)。
+// 把这种路径作为入口脚本传给 node,node 解析主模块(resolveMainPath)时处理不了 `\\?\`
+// 前缀 → 退化成对裸驱动器 `D:` 做 lstat → `EISDIR: illegal operation on a directory, lstat 'D:'`
+// → 后端在进入 server 代码之前就崩,逐端口 "did not accept connections"。把 app 装在非 C: 盘
+// (如 D:)的机器必现,装 C: 盘或 dev 模式不复现。去掉前缀还原成普通 `D:\...` 路径即可。
+#[cfg(windows)]
+fn strip_verbatim_prefix(p: PathBuf) -> PathBuf {
+    let s = p.to_string_lossy();
+    if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+        return PathBuf::from(format!(r"\\{}", rest));
+    }
+    if let Some(rest) = s.strip_prefix(r"\\?\") {
+        return PathBuf::from(rest);
+    }
+    p
+}
+#[cfg(not(windows))]
+fn strip_verbatim_prefix(p: PathBuf) -> PathBuf { p }
+
 fn bundled_local_routes_present(app: &tauri::App) -> bool {
     if let Ok(res) = app.path().resource_dir() {
         for prefix in ["_up_", ""] {
@@ -270,10 +289,13 @@ fn spawn_backend(app: &tauri::App, port: u16) -> Option<Child> {
         log_startup("[tauri] server/index.js not found in bundled resources or repo layout");
         None
     })?;
+    // 去掉 Windows verbatim 前缀(\\?\),否则 node 解析入口脚本即崩(见 strip_verbatim_prefix)。
+    let entry = strip_verbatim_prefix(entry);
     let node = find_node().or_else(|| {
         log_startup("[tauri] cannot find node executable in PATH or known locations; install Node.js 20+");
         None
     })?;
+    log_startup(&format!("[tauri] spawn_backend node={} entry={}", node.display(), entry.display()));
     // cwd = the directory containing `server/` (so relative paths in the server resolve).
     let cwd = entry.parent().and_then(|p| p.parent()).map(PathBuf::from);
     let mut cmd = Command::new(&node);
