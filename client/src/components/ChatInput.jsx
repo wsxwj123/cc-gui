@@ -599,9 +599,6 @@ export function ChatInput({ onSend, onStop, onAccelerate, disabled, isStreaming,
           onSend('请严格按照刚才批准的计划开始执行，不要重新规划或再次询问。', { hiddenUserMessage: true });
         }}
       />
-      {/* TODO checklist — sits between permission popup and composer, mirroring
-          Claude Desktop. Auto-hides when there's no TodoWrite snapshot. */}
-      <TodoPanel todos={todos} plan={plan} />
       {editingResend && (
         <div className="px-6 pt-3">
           <div className="max-w-[var(--content-max)] mx-auto flex items-center justify-between gap-3 rounded-lg border border-accent/30 bg-accent/8 px-3 py-2 text-[12px] text-accent font-body">
@@ -732,6 +729,10 @@ export function ChatInput({ onSend, onStop, onAccelerate, disabled, isStreaming,
             ))}
           </div>
         )}
+
+        {/* 任务清单 — 紧贴输入框上方(同一列内),作为输入框的附着条而非独立悬浮面板。
+            折叠/隐藏/全完成自动折叠见 TodoPanel。 */}
+        <TodoPanel todos={todos} plan={plan} />
 
         <div
           className={`chat-composer glass-capsule flex items-end gap-2 px-5 py-3.5 ${dragging ? 'ring-2 ring-accent/60' : ''}`}
