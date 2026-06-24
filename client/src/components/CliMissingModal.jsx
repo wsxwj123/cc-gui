@@ -41,12 +41,16 @@ export function CliMissingModal({ onRecheck, onDismiss }) {
 
   // 一键安装:POST /api/claude-install → 服务端打开一个终端运行安装命令(可见进度 +
   // 让安装器写 PATH)。终端是独立异步进程,这里只负责"启动",装完由用户点"重新检测"。
-  const handleInstall = async () => {
-    setInstalling(true);
+  const handleInstall = async (installMethod) => {
+    setInstalling(installMethod);
     setInstallErr('');
     setLaunched(false);
     try {
-      const r = await fetch('/api/claude-install', { method: 'POST' });
+      const r = await fetch('/api/claude-install', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ method: installMethod }),
+      });
       const d = await r.json();
       if (d.ok) {
         setLaunched(true);              // 提示用户去终端看进度,完成后点重新检测
@@ -86,22 +90,32 @@ export function CliMissingModal({ onRecheck, onDismiss }) {
             </div>
           </div>
 
-          {/* 一键安装 — 按检测到的系统在 server 端执行匹配命令 */}
+          {/* 一键安装 — 两种方式,在 server 端打开终端执行 */}
           <div className="rounded-lg border border-accent/30 bg-accent-subtle/30 px-3 py-3 space-y-2">
             <div className="text-[12px] text-ink font-body">
-              检测到系统:<b>{platform === 'mac' ? 'macOS' : platform === 'windows' ? 'Windows' : 'Linux'}</b>
-              {platform === 'windows'
-                ? '(将用 npm 安装,需已装 Node ≥ 20)'
-                : '(将用官方 install.sh 一键安装)'}
+              检测到系统:<b>{platform === 'mac' ? 'macOS' : platform === 'windows' ? 'Windows' : 'Linux'}</b>。选一种安装方式:
             </div>
-            <button
-              onClick={handleInstall}
-              disabled={installing || rechecking}
-              className="w-full flex items-center justify-center gap-1.5 px-3 py-2 text-[13px] text-white bg-accent hover:bg-accent/90 rounded-md transition-colors disabled:opacity-50"
-            >
-              <Download size={14} className={installing ? 'animate-pulse' : ''} />
-              {installing ? '启动安装中…' : '一键安装 Claude Code'}
-            </button>
+            <div className="flex gap-2">
+              <button
+                onClick={() => handleInstall('npm')}
+                disabled={!!installing || rechecking}
+                className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 text-[13px] text-white bg-accent hover:bg-accent/90 rounded-md transition-colors disabled:opacity-50"
+              >
+                <Download size={14} className={installing === 'npm' ? 'animate-pulse' : ''} />
+                {installing === 'npm' ? '启动中…' : 'npm 安装(可见进度)'}
+              </button>
+              <button
+                onClick={() => handleInstall('native')}
+                disabled={!!installing || rechecking}
+                className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 text-[13px] text-accent border border-accent/40 hover:bg-accent-subtle/50 rounded-md transition-colors disabled:opacity-50"
+              >
+                <Download size={14} className={installing === 'native' ? 'animate-pulse' : ''} />
+                {installing === 'native' ? '启动中…' : '官方安装器'}
+              </button>
+            </div>
+            <div className="text-[11px] text-ink-faint leading-snug">
+              <b>npm</b>:走 npm 源,代理(HTTP_PROXY)真生效、终端有下载进度,需本机有 Node(此 GUI 已在用 Node,故必有)。<b>官方安装器</b>:自包含二进制、不依赖 Node,但从 claude.ai 拉、进度由官方脚本决定可能看不到。
+            </div>
             {launched && (
               <div className="text-[11px] text-emerald-700 bg-emerald-50 border border-emerald-200 rounded px-2 py-1.5">
                 ✅ 已打开终端运行安装,请在终端里查看进度。装完回来点下方"我装好了,重新检测"。

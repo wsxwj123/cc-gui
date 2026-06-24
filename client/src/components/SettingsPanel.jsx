@@ -595,11 +595,16 @@ function CcUpdater() {
   };
 
   const doInstall = async () => {
-    const cmd = state.installCommand || 'curl -fsSL https://claude.ai/install.sh | bash';
-    if (!(await confirmDialog(`将打开终端运行【${cmd}】安装 Claude Code。\n请在弹出的终端里查看进度,完成后回来点"检查更新"。确定继续?`))) return;
+    // 默认走 npm:本机必有 node(此 GUI 后端就是 node 跑的),npm 认 HTTP_PROXY 代理、
+    // 终端有下载进度。官方安装器(自包含、不依赖 node)的完整二选一在首次启动的安装弹窗里。
+    if (!(await confirmDialog('将打开终端运行【npm install -g @anthropic-ai/claude-code】安装 Claude Code。\n请在弹出的终端里查看进度,完成后回来点"检查更新"。确定继续?'))) return;
     setUpdating(true); setResult(null);
     try {
-      const d = await (await fetch('/api/claude-install', { method: 'POST' })).json();
+      const d = await (await fetch('/api/claude-install', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ method: 'npm' }),
+      })).json();
       setResult(d);
     } catch (e) {
       setResult({ ok: false, error: e.message || '请求失败' });

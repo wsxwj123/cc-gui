@@ -250,12 +250,26 @@ function updateCmdFor(method, claudePath) {
     }
   }
 }
-function installCmdFor() {
-  // 未安装时的一键安装命令(按平台)。
+function installCmdFor(proxyUrl = null, method = 'native') {
+  // 未安装时的一键安装命令。method:'npm' | 'native'。
+  // npm:读 HTTP_PROXY 环境变量(由 launchInTerminal 在脚本里 set/export),且自带
+  // 下载/安装进度输出 —— 想"看得见进度"选它;前提是本机有 node(GUI 后端本就靠 node 跑,
+  // 所以 GUI 能开 = node 在)。
+  if (method === 'npm') {
+    return 'npm install -g @anthropic-ai/claude-code';
+  }
   if (process.platform === 'win32') {
-    // O2: Windows 也有官方原生安装器(独立二进制,不需要 Node/npm,自动写 PATH)。
-    // PowerShell 默认策略可能拦脚本,先放开 CurrentUser 再装。
-    return 'powershell -Command "Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser -Force; irm https://claude.ai/install.ps1 | iex"';
+    // O2: Windows 官方原生安装器(独立二进制,不需要 Node/npm,自动写 PATH)。
+    // 关键(墙内卡死根因):Windows PowerShell 5.1 的 irm/Invoke-WebRequest **不读
+    // HTTP_PROXY 环境变量**(只认 WinINET 系统代理),所以外层 .bat 的 `set HTTP_PROXY`
+    // 对 irm 无效 → 直连被屏蔽的 claude.ai → 卡死/极慢/无输出(用户报告:只显示代理
+    // 端口后再无动静)。检测到本机代理时,在 PowerShell 进程内显式设 .NET DefaultWebProxy
+    // + $env,让脚本本体及其下载的二进制都走代理(同进程 iex,代理设置进程级生效)。
+    const setup = proxyUrl
+      ? `$p='${proxyUrl}'; [System.Net.WebRequest]::DefaultWebProxy=New-Object System.Net.WebProxy($p); $env:HTTP_PROXY=$p; $env:HTTPS_PROXY=$p; Write-Host ('(proxy: '+$p+')'); `
+      : '';
+    const inner = `${setup}$ProgressPreference='Continue'; Write-Host 'Installing Claude Code CLI (downloading from claude.ai)...'; irm https://claude.ai/install.ps1 | iex`;
+    return `powershell -NoProfile -ExecutionPolicy Bypass -Command "${inner}"`;
   }
   return 'curl -fsSL https://claude.ai/install.sh | bash'; // mac/linux 官方一键安装
 }
@@ -367,11 +381,17 @@ router.post('/claude-update', async (req, res) => {
  * 在可见终端运行,让官方安装器自行把 CLI 目录写入系统 PATH。
  */
 router.post('/claude-install', async (req, res) => {
-  const cmd = installCmdFor();
+  const method = req.body?.method === 'npm' ? 'npm' : 'native';
   const proxyUrl = await detectLocalProxy().catch(() => null);
+  const cmd = installCmdFor(proxyUrl, method);
+  // 代理注入位置按 method 分:
+  //  · npm / 任意平台的 curl:进程读 HTTP_PROXY 环境变量 → 交给 launchInTerminal 在脚本里 set/export。
+  //  · native + Windows:PowerShell 的 irm 不读 env,代理已在命令内注入 → 不再让 .bat 重复 set。
+  const termProxy = (method === 'npm' || process.platform !== 'win32') ? proxyUrl : null;
+  const title = method === 'npm' ? '安装 Claude Code (npm)' : '安装 Claude Code (官方安装器)';
   try {
-    launchInTerminal(cmd, '安装 Claude Code', proxyUrl);
-    res.json({ ok: true, launched: true, command: cmd, platform: process.platform, proxy: proxyUrl });
+    launchInTerminal(cmd, title, termProxy);
+    res.json({ ok: true, launched: true, command: cmd, method, platform: process.platform, proxy: proxyUrl });
   } catch (err) {
     res.json({ ok: false, error: err.message || '启动终端失败', command: cmd });
   }
