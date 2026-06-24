@@ -594,16 +594,19 @@ function CcUpdater() {
     setUpdating(false);
   };
 
-  const doInstall = async () => {
-    // 默认走 npm:本机必有 node(此 GUI 后端就是 node 跑的),npm 认 HTTP_PROXY 代理、
-    // 终端有下载进度。官方安装器(自包含、不依赖 node)的完整二选一在首次启动的安装弹窗里。
-    if (!(await confirmDialog('将打开终端运行【npm install -g @anthropic-ai/claude-code】安装 Claude Code。\n请在弹出的终端里查看进度,完成后回来点"检查更新"。确定继续?'))) return;
+  const doInstall = async (method = 'npm') => {
+    // npm:需 Node ≥ 20(此 GUI 后端就是 node 跑的,故本机必有),认 HTTP_PROXY 代理、终端有进度。
+    // native:官方安装器,自包含不依赖 node,从 claude.ai 拉。
+    const label = method === 'npm'
+      ? 'npm install -g @anthropic-ai/claude-code(需 Node ≥ 20)'
+      : '官方安装器(irm claude.ai/install.ps1 | iex / curl claude.ai/install.sh | bash)';
+    if (!(await confirmDialog(`将打开终端运行【${label}】安装 Claude Code。\n安装需联网访问 npm / claude.ai —— 墙内请先开代理(Clash 等开启系统代理)。\n请在弹出的终端里查看进度,完成后回来点"检查更新"。确定继续?`))) return;
     setUpdating(true); setResult(null);
     try {
       const d = await (await fetch('/api/claude-install', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ method: 'npm' }),
+        body: JSON.stringify({ method }),
       })).json();
       setResult(d);
     } catch (e) {
@@ -624,13 +627,22 @@ function CcUpdater() {
           </div>
         </div>
         {state.installed === false ? (
-          <button
-            onClick={doInstall}
-            disabled={updating}
-            className="px-3 py-1.5 text-[12px] bg-amber-700 text-white rounded-md hover:bg-amber-800 disabled:opacity-50 flex items-center gap-1.5 shrink-0"
-          >
-            {updating ? <><RefreshCw size={12} className="animate-spin" />安装中…</> : <>⬇️ 一键安装</>}
-          </button>
+          <div className="flex gap-1.5 shrink-0">
+            <button
+              onClick={() => doInstall('npm')}
+              disabled={updating}
+              className="px-3 py-1.5 text-[12px] bg-amber-700 text-white rounded-md hover:bg-amber-800 disabled:opacity-50 flex items-center gap-1.5"
+            >
+              {updating ? <RefreshCw size={12} className="animate-spin" /> : '⬇️'} npm 安装
+            </button>
+            <button
+              onClick={() => doInstall('native')}
+              disabled={updating}
+              className="px-3 py-1.5 text-[12px] border border-amber-700/50 text-amber-800 rounded-md hover:bg-amber-50 disabled:opacity-50 flex items-center gap-1.5"
+            >
+              官方安装器
+            </button>
+          </div>
         ) : (
           <button
             onClick={check}
@@ -642,6 +654,12 @@ function CcUpdater() {
           </button>
         )}
       </div>
+      {state.installed === false && (
+        <div className="text-[11px] text-ink-faint leading-snug">
+          <b>npm</b>:走 npm 源、终端有下载进度,需 Node ≥ 20(此 GUI 已在用 Node,故必有)。
+          <b>官方安装器</b>:自包含二进制、不依赖 Node。两者都需联网,墙内请先开代理(Clash 等<b>开启系统代理</b>)。
+        </div>
+      )}
       {state.status === 'ok' && (
         state.hasUpdate ? (
           <div className="text-[12px] bg-amber-50 border border-amber-200 text-amber-900 rounded p-2.5 space-y-2">

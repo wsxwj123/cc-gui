@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { spawn, execFileSync } from 'child_process';
 import { resolve as pathResolve, dirname, join as pathJoin, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { readFileSync, statSync, writeFileSync, unlinkSync, readdirSync, watch } from 'node:fs';
+import { readFileSync, statSync, writeFileSync, unlinkSync, readdirSync, watch, existsSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { getDefaultModel } from '../services/model-resolver.js';
 import { dropPendingForSession } from './permissions.js';
@@ -62,6 +62,19 @@ function resolveWinClaude() {
       || lines.find((p) => /\.(cmd|bat)$/i.test(p))
       || lines[0] || null;
   } catch { _winClaudePath = null; }
+  // `where` 落空 = claude 不在后端进程 PATH(GUI 启动时 npm 全局前缀没进 PATH / 自定义
+  // prefix / nvm4w)。但 cmd 里 claude -v 能跑 → 前缀其实存在。用 `npm config get prefix`
+  // 兜底定位(npm 本体在 Node 目录恒在 PATH),与 cli-check 检测同源,避免"检测到却 spawn 不到"。
+  if (!_winClaudePath) {
+    try {
+      const prefix = execFileSync('cmd.exe', ['/c', 'npm', 'config', 'get', 'prefix'], { timeout: 6000 }).toString().trim();
+      if (prefix && !/^undefined$/i.test(prefix)) {
+        for (const cand of [pathJoin(prefix, 'claude.exe'), pathJoin(prefix, 'claude.cmd')]) {
+          if (existsSync(cand)) { _winClaudePath = cand; break; }
+        }
+      }
+    } catch {}
+  }
   return _winClaudePath;
 }
 function settingsArgsToTempFile(args) {
