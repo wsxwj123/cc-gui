@@ -1,6 +1,6 @@
 {
   "name": "claude-gui",
-  "version": "0.2.70",
+  "version": "0.2.71",
   "license": "MIT",
   "private": true,
   "type": "module",

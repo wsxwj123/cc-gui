@@ -1285,9 +1285,15 @@ router.post('/custom-providers/test', async (req, res) => {
   try {
     const b = req.body || {};
     let baseURL = b.baseURL, apiKey = b.apiKey, type = b.type;
-    if ((!apiKey || !apiKey.trim()) && b.id) {
+    if (b.id) {
+      // 编辑态:缺哪项就用存储值兜底(各维度独立 —— 之前只在 apiKey 空时才读 type/baseURL,
+      // 若前端只回传了 apiKey 会让 type/baseURL undefined → URL 拼错/走错协议)。
       const stored = (await readCustomProviders()).find((p) => p.id === b.id);
-      if (stored) { apiKey = stored.apiKey; baseURL = baseURL || stored.baseURL; type = type || stored.type; }
+      if (stored) {
+        if (!apiKey || !apiKey.trim()) apiKey = stored.apiKey;
+        baseURL = baseURL || stored.baseURL;
+        type = type || stored.type;
+      }
     }
     if (!baseURL) return res.status(400).json({ ok: false, error: '缺少 Base URL' });
     if (!b.model) return res.status(400).json({ ok: false, error: '请先在「模型」框填一个模型 ID 再测试' });

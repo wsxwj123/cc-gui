@@ -21,16 +21,29 @@ async function readRawMcpConfig(name) {
 function probeStdioStderr(cfg, timeoutMs = 6000) {
   return new Promise((resolve) => {
     if (!cfg || !cfg.command) return resolve('');
-    let stderr = '', done = false, child;
+    const isWin = process.platform === 'win32';
+    let stderr = '', done = false, child, timer;
+    const killTree = () => {
+      if (!child || child.pid == null) return;
+      try {
+        if (isWin) spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], { stdio: 'ignore' });
+        else process.kill(-child.pid, 'SIGKILL'); // detached → 负 pid 杀整个进程组(连 npx/uvx fork 的子进程)
+      } catch { try { child.kill('SIGKILL'); } catch {} }
+    };
     const finish = (suffix = '') => {
       if (done) return; done = true;
-      try { child && child.kill('SIGKILL'); } catch {}
+      clearTimeout(timer);
+      killTree();
       resolve((stderr.trim() + suffix).trim().slice(0, 1200));
     };
     try {
       child = spawn(cfg.command, Array.isArray(cfg.args) ? cfg.args : [], {
         env: { ...process.env, ...(cfg.env || {}) },
         stdio: ['ignore', 'ignore', 'pipe'],
+        // Windows:npx/uvx/uv 实为 .cmd,不经 shell spawn 会 ENOENT 误报"命令未找到"。
+        shell: isWin,
+        // 非 Win:独立进程组,便于负 pid 杀掉命令 fork 出的真实 server 子进程,不留孤儿。
+        detached: !isWin,
       });
     } catch (e) { return resolve(`spawn 失败: ${e.message}`); }
     child.stderr?.on('data', (d) => { stderr += d.toString(); });
@@ -38,7 +51,7 @@ function probeStdioStderr(cfg, timeoutMs = 6000) {
       ? `\n命令未找到: ${cfg.command}(不在 PATH 中 —— 该命令需要的运行时可能没装,或装了但 GUI 启动环境的 PATH 没包含它)`
       : `\n${e.message}`));
     child.on('exit', (code) => finish(code ? `\n(子进程退出码 ${code})` : ''));
-    setTimeout(() => finish(), timeoutMs);
+    timer = setTimeout(() => finish(), timeoutMs);
   });
 }
 

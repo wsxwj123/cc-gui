@@ -5729,6 +5729,8 @@ function CustomProviderForm({ onSaved, editing, onCancel, onDirtyChange }) {
     setModelsText((editing.models || []).join('\n'));
     setDefaultModel(editing.defaultModel || '');
     setTierModels({ haiku: editing.tierModels?.haiku || '', sonnet: editing.tierModels?.sonnet || '', opus: editing.tierModels?.opus || '' });
+    setTestResult(null); // 切到另一个 provider 编辑时清掉上一个的测试结果横幅(否则误导)
+    setBusy('');
     setOpen(true);
   }, [editing?.id]);
   const reset = () => { setName(''); setType('openai'); setBaseURL(''); setApiKey(''); setModelsText(''); setDefaultModel(''); setTierModels({ haiku: '', sonnet: '', opus: '' }); setTestResult(null); setOpen(false); };
