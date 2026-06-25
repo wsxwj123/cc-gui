@@ -120,7 +120,9 @@ export const BUILTIN_MCP_SERVERS = [
     id: 'paper-search-mcp',
     name: 'Paper Search',
     transport: 'stdio',
-    commandLine: 'uvx paper-search-mcp',
+    // 该 PyPI 包不提供同名可执行入口,`uvx paper-search-mcp` 会报 "does not provide any
+    // executables" → 连不上。正确启动方式是跑模块 paper_search_mcp.server。
+    commandLine: 'uvx --from paper-search-mcp python -m paper_search_mcp.server',
     env: [],
     note: '检索/下载学术论文(arXiv/PubMed/bioRxiv 等)。Python 版,需先装 uv。核心源免 key;部分源(Unpaywall/IEEE/ACM 等)需各自 PAPER_SEARCH_MCP_* env,见 README。',
     repo: 'openags/paper-search-mcp',

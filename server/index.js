@@ -56,6 +56,8 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
     join(home, '.claude', 'local', 'bin'),       // 官方 install.sh 默认
     join(home, '.local', 'bin'),                  // pipx / 部分 npm prefix
     join(home, '.npm-global', 'bin'),             // Y1: 常见自定义 npm prefix(npm 不写 PATH 的根治之一)
+    join(home, '.pyenv', 'shims'),                // pyenv 垫片(uv/uvx 常落这;MCP 走 uvx 需要)
+    join(home, '.cargo', 'bin'),                  // cargo 装的 uv/uvx
     '/opt/homebrew/bin',                          // mac Apple Silicon brew
     '/usr/local/bin',                             // mac Intel brew + 通用
   ];

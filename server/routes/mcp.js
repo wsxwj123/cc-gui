@@ -2,10 +2,45 @@ import { Router } from 'express';
 import { readFile, readdir, stat, writeFile, mkdir } from 'fs/promises';
 import { join } from 'path';
 import { homedir } from 'os';
-import { execFile } from 'child_process';
+import { execFile, spawn } from 'child_process';
 import { promisify } from 'util';
 
 const execFileP = promisify(execFile);
+
+// 读 ~/.claude.json 里某个 MCP 的原始配置(含 env 值,用于 spawn 探测)。
+async function readRawMcpConfig(name) {
+  try {
+    const j = JSON.parse(await readFile(join(homedir(), '.claude.json'), 'utf-8'));
+    return j.mcpServers?.[name] || null;
+  } catch { return null; }
+}
+
+// 直接 spawn stdio MCP 的命令抓早期 stderr —— `claude mcp get` 只报 "Failed to connect",
+// 不吐子进程真因(命令未找到 / 包无可执行入口 / 缺依赖 / realpath 缺失等)。最多等 timeoutMs:
+// stdio MCP 正常启动会静默等 stdin(无 stderr、不退出)→ 视为无早期错误;快速退出 + stderr = 真错误。
+function probeStdioStderr(cfg, timeoutMs = 6000) {
+  return new Promise((resolve) => {
+    if (!cfg || !cfg.command) return resolve('');
+    let stderr = '', done = false, child;
+    const finish = (suffix = '') => {
+      if (done) return; done = true;
+      try { child && child.kill('SIGKILL'); } catch {}
+      resolve((stderr.trim() + suffix).trim().slice(0, 1200));
+    };
+    try {
+      child = spawn(cfg.command, Array.isArray(cfg.args) ? cfg.args : [], {
+        env: { ...process.env, ...(cfg.env || {}) },
+        stdio: ['ignore', 'ignore', 'pipe'],
+      });
+    } catch (e) { return resolve(`spawn 失败: ${e.message}`); }
+    child.stderr?.on('data', (d) => { stderr += d.toString(); });
+    child.on('error', (e) => finish(e.code === 'ENOENT'
+      ? `\n命令未找到: ${cfg.command}(不在 PATH 中 —— 该命令需要的运行时可能没装,或装了但 GUI 启动环境的 PATH 没包含它)`
+      : `\n${e.message}`));
+    child.on('exit', (code) => finish(code ? `\n(子进程退出码 ${code})` : ''));
+    setTimeout(() => finish(), timeoutMs);
+  });
+}
 
 // All `claude ...` invocations go through execFile with an args array — no shell, no injection.
 // Async (not execFileSync) so a slow CLI cold start doesn't freeze the whole event loop —
@@ -398,12 +433,20 @@ router.get('/mcp/:name/ping', async (req, res) => {
         }
       }
     }
+    // stdio 失败:claude mcp get 只说 "Failed to connect",不吐真因。自己 spawn 该命令
+    // 抓早期 stderr,给用户看到具体原因(命令未找到 / 包无可执行入口 / 缺依赖等)。
+    let stderr = '';
+    if (status === 'error' && !urlMatch) {
+      const cfg = await readRawMcpConfig(name);
+      if (cfg) stderr = await probeStdioStderr(cfg);
+    }
     res.json({
       name, status,
       ms: Date.now() - start,
       httpStatus,
       output: (output || '').slice(0, 1500),
       detail,
+      stderr, // 真实子进程报错(stdio 失败时),前端展示
     });
   } catch (err) {
     res.status(400).json({ error: err.message });

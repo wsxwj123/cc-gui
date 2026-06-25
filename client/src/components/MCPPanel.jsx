@@ -8,31 +8,47 @@ function PingButton({ name }) {
   const [detail, setDetail] = useState('');
   const ping = async (e) => {
     e?.stopPropagation();
-    setState('busy');
+    setState('busy'); setDetail('');
     try {
       const r = await fetch(`/api/mcp/${encodeURIComponent(name)}/ping`);
       const d = await r.json();
-      setState(d.status === 'ok' ? 'ok' : 'err');
-      setDetail(`${d.ms}ms${d.httpStatus ? ` · HTTP ${d.httpStatus}` : ''}${d.detail ? '\n' + d.detail : ''}`);
-      setTimeout(() => setState(null), 3000);
+      const ok = d.status === 'ok';
+      const head = `${d.ms}ms${d.httpStatus ? ` · HTTP ${d.httpStatus}` : ''}${d.detail ? ' · ' + d.detail : ''}`;
+      // 失败时优先展示真实子进程 stderr(后端 spawn 抓的),这才是用户要看的"为什么连不上"。
+      setDetail(ok ? head : `${head}${d.stderr ? '\n\n' + d.stderr : '\n(未捕获到子进程报错;可能是命令静默挂起或网络超时)'}`);
+      setState(ok ? 'ok' : 'err');
+      if (ok) setTimeout(() => setState(null), 3000); // 成功才自动消失;失败保留让用户看清原因
     } catch (err) {
       setState('err'); setDetail(err.message);
     }
   };
   return (
-    <button onClick={ping}
-      title={detail ? `健康检查\n${detail}` : '点击测试 MCP 服务器连通性 (ping)'}
-      className={`p-1 rounded transition-colors ${
-        state === 'ok' ? 'text-success' :
-        state === 'err' ? 'text-error' :
-        state === 'busy' ? 'text-ink-muted' :
-        'text-ink-faint hover:text-ink-muted'
-      }`}>
-      {state === 'busy' ? <Activity size={11} className="animate-pulse" />
-        : state === 'ok' ? <Check size={11} />
-        : state === 'err' ? <X size={11} />
-        : <Activity size={11} />}
-    </button>
+    <span className="relative inline-flex">
+      <button onClick={ping}
+        title={state === 'err' ? '连接失败 —— 见下方原因' : '点击测试 MCP 服务器连通性 (ping)'}
+        className={`p-1 rounded transition-colors ${
+          state === 'ok' ? 'text-success' :
+          state === 'err' ? 'text-error' :
+          state === 'busy' ? 'text-ink-muted' :
+          'text-ink-faint hover:text-ink-muted'
+        }`}>
+        {state === 'busy' ? <Activity size={11} className="animate-pulse" />
+          : state === 'ok' ? <Check size={11} />
+          : state === 'err' ? <X size={11} />
+          : <Activity size={11} />}
+      </button>
+      {/* 失败原因浮层:可见、可滚、手动关闭(不自动消失)—— 修"看不见报错" */}
+      {state === 'err' && detail && (
+        <div className="absolute right-0 top-full mt-1 z-[60] w-80 max-w-[78vw] max-h-56 overflow-auto rounded-lg border border-error/30 bg-canvas shadow-2xl p-2.5"
+          onClick={(e) => e.stopPropagation()}>
+          <div className="flex items-center justify-between mb-1.5">
+            <span className="text-[11px] text-error font-body font-medium">连接失败原因</span>
+            <button onClick={(e) => { e.stopPropagation(); setState(null); }} className="text-ink-faint hover:text-ink"><X size={11} /></button>
+          </div>
+          <pre className="text-[10px] text-ink-soft font-mono whitespace-pre-wrap break-all leading-snug">{detail}</pre>
+        </div>
+      )}
+    </span>
   );
 }
 
