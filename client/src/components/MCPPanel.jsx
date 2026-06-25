@@ -1,5 +1,6 @@
 import React, { useEffect, useState, useRef } from 'react';
-import { Server, Package, FolderOpen, RefreshCw, Plug, Activity, Check, X, Plus, Pencil, Trash2, Zap } from 'lucide-react';
+import { Server, Package, FolderOpen, RefreshCw, Plug, Activity, Check, X, Plus, Pencil, Trash2, Zap, Download } from 'lucide-react';
+import { BUILTIN_PLUGINS } from '../utils/builtinPlugins.js';
 import { McpForm } from './McpForm.jsx';
 import { confirmDialog } from '../utils/confirmDialog.jsx';
 
@@ -172,6 +173,24 @@ export function MCPPanel() {
   const sortedServers = [...servers].sort(byEnabled);
   const sortedPlugins = [...plugins].sort(byEnabled);
 
+  // 官方插件一键安装:已装名(去掉 @marketplace 后缀)用于标"已安装";安装中态 + 错误。
+  const installedPluginIds = new Set(plugins.map((p) => String(p.name).split('@')[0]));
+  const [installingPlugin, setInstallingPlugin] = useState(null);
+  const [pluginErr, setPluginErr] = useState('');
+  const installPlugin = async (id) => {
+    setInstallingPlugin(id); setPluginErr('');
+    try {
+      const r = await fetch('/api/plugins/install', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: id }),
+      });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || '安装失败');
+      await fetchData(); // 刷新已安装列表
+    } catch (e) { setPluginErr(`${id}: ${e.message}`); }
+    setInstallingPlugin(null);
+  };
+
   if (loading && servers.length === 0) {
     return (
       <div className="flex items-center justify-center py-12">
@@ -340,6 +359,44 @@ export function MCPPanel() {
             没有已安装的插件
           </div>
         )}
+      </div>
+
+      {/* 官方插件一键安装(Anthropic 自维护精选,claude-plugins-official) */}
+      <div>
+        <h3 className="text-[10px] font-medium uppercase tracking-widest text-ink-faint font-body mb-1 flex items-center gap-1.5">
+          <Download size={11} />
+          官方插件 · 一键安装
+        </h3>
+        <div className="text-[10px] text-ink-faint font-body mb-3 leading-snug">
+          Anthropic 官方精选,装了即用(0 配置)。装完新会话生效。带 MCP 的(Playwright/Context7)走插件安装即自动配好,无需再到上方手填。
+        </div>
+        {pluginErr && <div className="text-[11px] text-error bg-error/10 border border-error/20 rounded px-2 py-1.5 mb-2 break-all">{pluginErr}</div>}
+        <div className="space-y-2">
+          {BUILTIN_PLUGINS.map((p) => {
+            const installed = installedPluginIds.has(p.id);
+            const busy = installingPlugin === p.id;
+            return (
+              <div key={p.id} className="bg-canvas-warm border border-canvas-deep rounded-lg p-3 flex items-center gap-3">
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs font-medium text-ink font-body">{p.name}</span>
+                    {p.mcp && <span className="text-[9px] px-1 py-px bg-canvas-deep text-ink-faint rounded">MCP</span>}
+                  </div>
+                  <div className="text-[10px] text-ink-faint font-body truncate mt-0.5">{p.desc}</div>
+                </div>
+                {installed ? (
+                  <span className="shrink-0 flex items-center gap-1 text-[11px] text-success font-body"><Check size={12} />已安装</span>
+                ) : (
+                  <button onClick={() => installPlugin(p.id)} disabled={!!installingPlugin}
+                    className="shrink-0 flex items-center gap-1 px-2.5 py-1 rounded text-[12px] font-medium text-white bg-accent hover:bg-accent-hover disabled:opacity-50">
+                    {busy ? <RefreshCw size={12} className="animate-spin" /> : <Download size={12} />}
+                    {busy ? '安装中…' : '安装'}
+                  </button>
+                )}
+              </div>
+            );
+          })}
+        </div>
       </div>
 
       {/* External */}

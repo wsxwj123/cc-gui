@@ -768,4 +768,27 @@ router.put('/plugins/:name/disable', async (req, res) => {
   }
 });
 
+// 官方插件一键安装。marketplace 通常已内置;首次 best-effort add 一次(幂等,已存在会报错→忽略)。
+const OFFICIAL_MARKETPLACE = 'claude-plugins-official';
+let marketplaceEnsured = false;
+async function ensureOfficialMarketplace() {
+  if (marketplaceEnsured) return;
+  marketplaceEnsured = true;
+  try { await runClaude(['plugin', 'marketplace', 'add', 'anthropics/claude-plugins-official'], { timeout: 30000 }); } catch {}
+}
+
+// POST /api/plugins/install { name } — `claude plugin install <name>@claude-plugins-official`(非交互)。
+router.post('/plugins/install', async (req, res) => {
+  try {
+    const name = String(req.body?.name || '');
+    if (!/^[A-Za-z0-9._-]{1,80}$/.test(name)) throw new Error('invalid plugin name');
+    await ensureOfficialMarketplace();
+    await runClaude(['plugin', 'install', `${name}@${OFFICIAL_MARKETPLACE}`], { timeout: 90000 });
+    invalidateMcpCache();
+    res.json({ ok: true, name });
+  } catch (err) {
+    res.status(500).json({ error: (err.stderr?.toString() || err.message || '').trim() || '安装失败' });
+  }
+});
+
 export default router;

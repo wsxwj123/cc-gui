@@ -42,26 +42,8 @@ export const BUILTIN_MCP_SERVERS = [
     repo: 'github/github-mcp-server',
     docs: 'https://github.com/github/github-mcp-server',
   },
-  {
-    id: 'context7',
-    name: 'Context7',
-    transport: 'http',
-    url: 'https://mcp.context7.com/mcp',
-    env: [],
-    note: '实时拉取库/框架官方文档。官方远程端点,免 key 即可用。',
-    repo: 'upstash/context7',
-    docs: 'https://github.com/upstash/context7',
-  },
-  {
-    id: 'playwright',
-    name: 'Playwright',
-    transport: 'stdio',
-    commandLine: 'npx -y @playwright/mcp@latest',
-    env: [],
-    note: '微软官方浏览器自动化(click/fill/截图等)。',
-    repo: 'microsoft/playwright-mcp',
-    docs: 'https://github.com/microsoft/playwright-mcp',
-  },
+  // 注:Context7 / Playwright 已移到「官方插件」精选(builtinPlugins.js)——它们本体就是
+  // 一条 MCP,走 `claude plugin install` 更省事(自动配 + 版本管理),此处去重不再重复列出。
   {
     id: 'sequential-thinking',
     name: 'Sequential Thinking',
