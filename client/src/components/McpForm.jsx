@@ -40,6 +40,27 @@ export function McpForm({ editing, onClose, onSaved }) {
   const [autoApprove, setAutoApprove] = useState(false);
   const [envRows, setEnvRows] = useState([]); // [{k,v}]
   const [tplMeta, setTplMeta] = useState(null); // 选模板后的提示:{ note, needsArg, repo, docs }
+  // uvx 型模板(Fetch / Paper Search)需要本机有 uv。选中时实时检测,缺失则内联引导安装。
+  const [uvStatus, setUvStatus] = useState('idle'); // idle|checking|ok|missing|launched
+
+  const checkUv = async () => {
+    setUvStatus('checking');
+    try {
+      const r = await fetch('/api/env-check', { cache: 'no-store' });
+      const d = await r.json();
+      setUvStatus(d?.uv?.installed ? 'ok' : 'missing');
+    } catch { setUvStatus('idle'); } // server 异常不阻断,按未知处理
+  };
+  const installUv = async () => {
+    try {
+      const r = await fetch('/api/env-check/install', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ target: 'uv' }),
+      });
+      const d = await r.json();
+      if (d.ok) setUvStatus('launched');
+    } catch {}
+  };
   // 用户一旦改过命令/URL,后台补全就不再覆盖这两个字段,避免边输入边被刷掉。
   const dirtyRef = React.useRef(false);
 
@@ -54,6 +75,8 @@ export function McpForm({ editing, onClose, onSaved }) {
     else { setUrl(t.url || ''); setCommandLine(''); }
     setEnvRows((t.env || []).map((e) => ({ k: e.k, v: '' })));
     setTplMeta({ note: t.note, needsArg: t.needsArg, repo: t.repo, docs: t.docs });
+    // uvx/uv 开头的命令需要 uv;选中即检测,其余模板清掉 uv 提示。
+    if (/^uvx?\s/.test(t.commandLine || '')) checkUv(); else setUvStatus('idle');
     dirtyRef.current = true;
     setErr('');
   };
@@ -164,6 +187,20 @@ export function McpForm({ editing, onClose, onSaved }) {
                         title="在浏览器打开该 MCP 的 GitHub 项目"
                         className="text-accent hover:underline inline-flex items-center gap-0.5 cursor-pointer ml-1 align-baseline"
                       >{tplMeta.repo}<ExternalLink size={10} /></a>
+                    )}
+                  </div>
+                )}
+                {/* uvx 型模板缺 uv 时的内联引导(全平台扫描见后端 detectUv) */}
+                {(uvStatus === 'missing' || uvStatus === 'launched') && (
+                  <div className="rounded-lg bg-amber-500/10 border border-amber-500/25 px-3 py-2 text-[11px] text-ink-soft font-body leading-snug">
+                    {uvStatus === 'launched' ? (
+                      <span className="text-success">已在终端启动 uv 安装,装完回来重选该模板即可。</span>
+                    ) : (
+                      <div className="flex items-center gap-2">
+                        <span className="flex-1">此 MCP 用 <code className="font-mono">uvx</code> 运行,本机未检测到 <code className="font-mono">uv</code>。装上后即可使用(uv 会自动备好 Python)。</span>
+                        <button onClick={installUv}
+                          className="shrink-0 px-2.5 py-1 rounded text-white bg-accent hover:bg-accent-hover text-[11px] font-medium">安装 uv</button>
+                      </div>
                     )}
                   </div>
                 )}

@@ -433,10 +433,71 @@ async function detectPython() {
   return { installed: false };
 }
 
-function envInstallCmd(target) {
+// uv 检测(uvx 命令随 uv 一起装)。部分 MCP(fetch / paper-search 等)走 uvx 拉起,
+// 别人机器上不一定有 uv;uvx 需要时会自动下载托管 Python,所以只需检测/安装 uv。
+// 策略同 detectPython:PATH → login-shell → 全平台已知安装目录(astral/cargo/brew/
+// scoop/winget/pipx/rye 等),避免「PATH 没刷新/版本管理器装的」误报未装。
+async function detectUv() {
+  const tryRun = async (bin) => {
+    try {
+      const { stdout } = await execFileP(bin, ['--version'], { timeout: 5000 });
+      const m = String(stdout).match(/(\d+\.\d+\.\d+)/);
+      if (m) return { version: m[1], path: bin };
+    } catch {}
+    return null;
+  };
+  const hit1 = await tryRun('uv');
+  if (hit1) return { installed: true, ...hit1, via: 'PATH' };
+  if (process.platform !== 'win32') {
+    try {
+      const { stdout } = await execFileP('sh', ['-lc', 'command -v uv'], { timeout: 5000 });
+      const p = stdout.trim();
+      if (p) { const hit = await tryRun(p); if (hit) return { installed: true, ...hit, via: 'login-shell' }; }
+    } catch {}
+  }
+  const home = homedir();
+  const cands = process.platform === 'win32'
+    ? [
+        join(home, '.local', 'bin', 'uv.exe'),                                                          // astral 官方安装器
+        join(home, '.cargo', 'bin', 'uv.exe'),                                                          // cargo install
+        join(home, 'scoop', 'shims', 'uv.exe'),                                                         // scoop
+        join(process.env.LOCALAPPDATA || join(home, 'AppData', 'Local'), 'Microsoft', 'WinGet', 'Links', 'uv.exe'), // winget(非 Store 包落 WinGet\Links,非 WindowsApps)
+        join(process.env.APPDATA || join(home, 'AppData', 'Roaming'), 'Python', 'Scripts', 'uv.exe'),   // pip --user
+      ]
+    : [
+        join(home, '.local', 'bin', 'uv'),   // astral 安装器 / pipx
+        join(home, '.cargo', 'bin', 'uv'),   // cargo
+        '/opt/homebrew/bin/uv',              // brew (Apple Silicon)
+        '/usr/local/bin/uv',                 // brew (Intel) / 手动
+        '/usr/bin/uv',                       // 系统包
+        '/opt/local/bin/uv',                 // MacPorts
+        join(home, '.rye', 'shims', 'uv'),   // rye 自带 uv
+        join(home, '.pyenv', 'shims', 'uv'), // pyenv 垫片(pip/pyenv 装的 uv)
+      ];
+  for (const p of cands) {
+    if (!existsSync(p)) continue;
+    const hit = await tryRun(p);
+    if (hit) return { installed: true, ...hit, via: 'fallback' };
+  }
+  return { installed: false };
+}
+
+function envInstallCmd(target, proxyUrl = null) {
   const win = process.platform === 'win32';
   const mac = process.platform === 'darwin';
   if (target === 'claude') return installCmdFor();
+  if (target === 'uv') {
+    // Windows 同 claude native:PowerShell 5.1 的 irm 不读 HTTP_PROXY 环境变量,
+    // 必须在进程内注入 .NET DefaultWebProxy,否则墙内卡死(见 installCmdFor 注释)。
+    if (win) {
+      const setup = proxyUrl
+        ? `$p='${proxyUrl}'; [System.Net.WebRequest]::DefaultWebProxy=New-Object System.Net.WebProxy($p); $env:HTTP_PROXY=$p; $env:HTTPS_PROXY=$p; Write-Host ('(proxy: '+$p+')'); `
+        : '';
+      const inner = `${setup}$ProgressPreference='Continue'; Write-Host 'Installing uv (astral.sh)...'; irm https://astral.sh/uv/install.ps1 | iex`;
+      return `powershell -NoProfile -ExecutionPolicy Bypass -Command "${inner}"`;
+    }
+    return 'curl -LsSf https://astral.sh/uv/install.sh | sh'; // mac + linux 官方安装器
+  }
   if (target === 'node') {
     if (win) return 'winget install -e --id OpenJS.NodeJS.LTS';
     if (mac) return 'brew install node || echo "未检测到 Homebrew,请到 https://nodejs.org 下载安装"';
@@ -454,25 +515,30 @@ router.get('/env-check', async (req, res) => {
   const { method, path: claudePath } = await detectInstall();
   const claudeVersion = await getClaudeVersion(claudePath);
   const python = await detectPython();
+  const uv = await detectUv();
   res.json({
     node: { installed: true, version: process.version, required: true },
     claude: { installed: !!claudeVersion, version: claudeVersion || null, method, required: true },
     python: { installed: python.installed, version: python.version || null, required: false },
+    uv: { installed: uv.installed, version: uv.version || null, required: false },
     platform: process.platform === 'darwin' ? 'mac' : process.platform === 'win32' ? 'windows' : 'linux',
   });
 });
 
 router.post('/env-check/install', async (req, res) => {
   const target = String(req.body?.target || '');
-  const cmd = envInstallCmd(target);
-  if (!cmd) return res.status(400).json({ ok: false, error: 'unknown target: ' + target });
   try {
-    const proxyUrl = await detectLocalProxy();
-    const titles = { claude: '安装 Claude Code', node: '安装 Node.js', python: '安装 Python' };
-    launchInTerminal(cmd, titles[target] || '安装', proxyUrl);
+    const proxyUrl = await detectLocalProxy().catch(() => null);
+    const cmd = envInstallCmd(target, proxyUrl);
+    if (!cmd) return res.status(400).json({ ok: false, error: 'unknown target: ' + target });
+    // win + uv:代理已注入 PS 命令内,不让 .bat 再 set(对 irm 无效且重复)。其余照旧由
+    // launchInTerminal 在脚本里 export/set HTTP_PROXY。
+    const termProxy = (target === 'uv' && process.platform === 'win32') ? null : proxyUrl;
+    const titles = { claude: '安装 Claude Code', node: '安装 Node.js', python: '安装 Python', uv: '安装 uv' };
+    launchInTerminal(cmd, titles[target] || '安装', termProxy);
     res.json({ ok: true, launched: true, command: cmd, platform: process.platform, proxy: proxyUrl });
   } catch (err) {
-    res.json({ ok: false, error: err.message || '启动终端失败', command: cmd });
+    res.json({ ok: false, error: err.message || '启动终端失败' });
   }
 });
 
