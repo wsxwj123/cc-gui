@@ -4,6 +4,7 @@ import { join } from 'path';
 import { homedir } from 'os';
 import { execFile, spawn } from 'child_process';
 import { promisify } from 'util';
+import { syncMcpToAgents } from './agents.js';
 
 const execFileP = promisify(execFile);
 
@@ -357,6 +358,16 @@ router.get('/mcp', async (req, res) => {
 // 启动后台,不阻塞启动)。
 setTimeout(() => refreshMcpCache(), 8000);
 
+// 启动回填:把当前所有已配置 MCP 同步进所有 agent(覆盖升级前就存在的 MCP、GUI 关闭期间
+// 外部加的)。add-only 幂等——已含则 rewrite 返回 null 不写盘,无副作用。符合用户选择的
+// "所有 agent 都能用所有 MCP"。删除 MCP 由 DELETE 端点同步移除,故此处只 add 当前集不会复活已删的。
+setTimeout(async () => {
+  try {
+    const names = (await readUserMcpServers()).map((s) => s.name);
+    if (names.length) await syncMcpToAgents({ add: names });
+  } catch {}
+}, 9000);
+
 // Helper: read disabled MCP configs
 async function readDisabled() {
   try {
@@ -613,6 +624,7 @@ router.post('/mcp', async (req, res) => {
     await setMeta(b.name, b.label);
     // 新增即启用:清掉可能存在的同名禁用残留
     try { const dis = await readDisabled(); if (dis[b.name]) { delete dis[b.name]; await writeDisabled(dis); } } catch {}
+    try { await syncMcpToAgents({ add: [b.name] }); } catch {} // 自动让所有 agent 能用这个 MCP
     invalidateMcpCache();
     res.json({ ok: true, name: b.name });
   } catch (err) { res.status(err.status || 500).json({ error: err.message }); }
@@ -644,6 +656,8 @@ router.put('/mcp/:name/config', async (req, res) => {
     if (newName !== name) { await setAutoApprove(name, false); await setMeta(name, ''); }
     await setAutoApprove(newName, !!b.autoApprove);
     await setMeta(newName, b.label);
+    // 改名:同步各 agent 的工具引用(旧名移除、新名加入);同名编辑无需动。
+    if (newName !== name) { try { await syncMcpToAgents({ add: [newName], remove: [name] }); } catch {} }
     invalidateMcpCache();
     res.json({ ok: true, name: newName });
   } catch (err) { res.status(err.status || 500).json({ error: err.message }); }
@@ -660,6 +674,7 @@ router.delete('/mcp/:name', async (req, res) => {
     try { const dis = await readDisabled(); if (dis[name]) { delete dis[name]; await writeDisabled(dis); } } catch {}
     await setAutoApprove(name, false);
     await setMeta(name, '');
+    try { await syncMcpToAgents({ remove: [name] }); } catch {} // 删 MCP 同步移除各 agent 的 mcp__name__*
     invalidateMcpCache();
     res.json({ ok: true, name });
   } catch (err) { res.status(500).json({ error: err.message }); }

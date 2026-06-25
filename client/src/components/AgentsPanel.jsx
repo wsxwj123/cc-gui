@@ -212,7 +212,7 @@ export function AgentsPanel() {
               <textarea value={content} onChange={(e) => setContent(e.target.value)} spellCheck={false}
                 className="flex-1 bg-canvas-warm border-0 p-3 text-[11px] font-mono text-ink-soft resize-none focus:outline-none leading-relaxed" />
               <div className="px-3 py-2 border-t border-canvas-deep bg-canvas-warm/40 text-[10px] text-ink-faint font-body leading-snug shrink-0">
-                若需让该 agent 使用某个 MCP,必须在上方 <code className="text-ink-muted">tools</code> 字段中填入该 MCP 的完整名称:<code className="text-ink-muted">mcp__服务器名__*</code> 放行该服务器的全部工具,<code className="text-ink-muted">mcp__服务器名__工具名</code> 仅放行单个工具。未填入时,即使该 MCP 已连接,本 agent 及其子代理也无法调用。服务器名见 MCP 设置面板,例如 <code className="text-ink-muted">mcp__tavily__*</code>。
+在 MCP 面板添加/删除 MCP 时,会自动把 <code className="text-ink-muted">mcp__服务器名__*</code> 同步进所有 agent 的 <code className="text-ink-muted">tools</code>,无需手动维护。如需精确控制(只放行单个工具或从某 agent 移除),可在上方手改:<code className="text-ink-muted">mcp__服务器名__*</code> 放行该服务器全部工具,<code className="text-ink-muted">mcp__服务器名__工具名</code> 仅放行单个;删掉对应条目即禁用。<code className="text-ink-muted">tools</code> 字段整行删除则继承全部工具(含所有 MCP)。
               </div>
             </>
           ) : (

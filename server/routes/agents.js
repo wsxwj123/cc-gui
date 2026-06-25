@@ -18,6 +18,58 @@ function assertName(name) {
   if (!NAME_RE.test(String(name || ''))) throw new Error('invalid agent name (lowercase letters/digits/dash)');
 }
 
+// ─── MCP 工具 → agent tools 自动同步 ───────────────────────────────────
+// 子代理的 tools 是白名单,MCP 工具必须显式写 `mcp__<server>__*`,且官方不支持 mcp__*
+// 全通配。所以用户加/删 MCP 时,自动把对应 `mcp__<server>__*` 同步进各 agent 的 tools,
+// 免去手动逐个改(用户选择:同步到所有 agent)。
+// server 名转义:冒号→下划线(plugin:context7:context7 → plugin_context7_context7),
+// 连字符保留(paper-search-mcp 不变)——与 Claude Code 的工具命名一致。
+function escapeMcpName(n) { return String(n).replace(/:/g, '_'); }
+
+// 改一个 .md 的 frontmatter `tools:` 行:add 追加缺失的 mcp__x__*,remove 删掉该 server 的
+// 所有 mcp__x__ 条目。无 tools 字段的 agent(继承全部工具,本就含 MCP)直接跳过。
+// 返回新内容,无变化/不适用返回 null。仅按行操作,不碰其它 frontmatter/正文。
+function rewriteAgentMcpTools(content, { add = [], remove = [] }) {
+  const lines = content.split('\n');
+  if (lines[0]?.trim() !== '---') return null;
+  let end = -1;
+  for (let i = 1; i < lines.length; i++) { if (lines[i].trim() === '---') { end = i; break; } }
+  if (end === -1) return null;
+  let ti = -1;
+  for (let i = 1; i < end; i++) { if (/^tools:/.test(lines[i])) { ti = i; break; } }
+  if (ti === -1) return null; // 无 tools 字段 → 继承全部,不动
+  let tokens = lines[ti].replace(/^tools:\s*/, '').split(',').map((s) => s.trim()).filter(Boolean);
+  const matches = (t, esc) => t === `mcp__${esc}__*` || t === `mcp__${esc}` || t.startsWith(`mcp__${esc}__`);
+  for (const r of remove) { const esc = escapeMcpName(r); tokens = tokens.filter((t) => !matches(t, esc)); }
+  for (const a of add) { const esc = escapeMcpName(a); if (!tokens.some((t) => matches(t, esc))) tokens.push(`mcp__${esc}__*`); }
+  const newLine = `tools: ${tokens.join(', ')}`;
+  if (newLine === lines[ti]) return null;
+  lines[ti] = newLine;
+  return lines.join('\n');
+}
+
+// 对 ~/.claude/agents/ 下的 .md agent 批量同步。files 省略=全部 agent。
+export async function syncMcpToAgents({ add = [], remove = [], files = null } = {}) {
+  if (!add.length && !remove.length) return;
+  let names = files;
+  if (!names) {
+    try { names = (await readdir(AGENTS_DIR)).filter((f) => f.endsWith('.md')); } catch { return; }
+  }
+  for (const f of names) {
+    const full = join(AGENTS_DIR, f);
+    let content; try { content = await readFile(full, 'utf-8'); } catch { continue; }
+    const updated = rewriteAgentMcpTools(content, { add, remove });
+    if (updated && updated !== content) { try { await writeFile(full, updated); } catch {} }
+  }
+}
+
+export async function currentUserMcpNames() {
+  try {
+    const j = JSON.parse(await readFile(join(homedir(), '.claude.json'), 'utf-8'));
+    return Object.keys(j.mcpServers || {});
+  } catch { return []; }
+}
+
 /**
  * GET /api/agents
  * Lists agent presets from ~/.claude/agents/<name>.{md,json}. Falls back to
@@ -243,7 +295,14 @@ router.put('/agents/:name', async (req, res) => {
     if (typeof content !== 'string') throw new Error('content must be a string');
     await mkdir(AGENTS_DIR, { recursive: true });
     const path = join(AGENTS_DIR, req.params.name + '.md');
+    // 区分新建 vs 编辑:新建时把当前所有 MCP 同步进这个新 agent(让它一创建就能用全部 MCP);
+    // 编辑时不动(尊重用户手动增删的 MCP,避免把他刚删的又加回来)。
+    let isNew = false;
+    try { await stat(path); } catch { isNew = true; }
     await writeFile(path, content);
+    if (isNew) {
+      try { await syncMcpToAgents({ add: await currentUserMcpNames(), files: [req.params.name + '.md'] }); } catch {}
+    }
     res.json({ ok: true, path });
   } catch (err) {
     res.status(400).json({ error: err.message });

@@ -241,6 +241,21 @@ export function ChatInput({ onSend, onStop, onAccelerate, disabled, isStreaming,
   const fileInputRef = useRef(null);
   const draftBeforeHistoryRef = useRef('');
   const navigatingHistoryRef = useRef(false);
+
+  // 双击 Esc 停止生成(对齐 claude CLI):流式中(含子代理运行)600ms 内连按两次 Esc → onStop。
+  // 用捕获阶段确保计数不被 textarea 的 Esc 处理吞掉;单次 Esc 仍走原有用途(关命令面板/取消编辑)。
+  const lastEscRef = useRef(0);
+  useEffect(() => {
+    if (!isStreaming) return;
+    const onEsc = (e) => {
+      if (e.key !== 'Escape') return;
+      const now = Date.now();
+      if (now - lastEscRef.current < 600) { lastEscRef.current = 0; onStop?.(); }
+      else lastEscRef.current = now;
+    };
+    document.addEventListener('keydown', onEsc, true);
+    return () => document.removeEventListener('keydown', onEsc, true);
+  }, [isStreaming, onStop]);
   // Permission mode lives in the store, keyed per-session via permKey so each
   // conversation keeps its own mode. Fall back to the global value only when
   // no key is supplied (shouldn't happen in normal render).
