@@ -137,7 +137,10 @@ async function readUserMcpServers() {
 }
 
 // 构建 MCP 列表。抽成函数供端点同步调用 + 后台刷新 + 启动预热复用。
-async function buildMcpList() {
+// liveStatus=false:跳过 `claude mcp list` 健康检查(3~33s 剧烈波动、卡哪个服务器都拖慢),
+//   只用配置文件 + 快文件读,~300ms 秒回 —— 冷加载首屏用它,避免"每次进面板都卡几十秒"。
+// liveStatus=true:补做健康检查,覆盖在线状态 + 发现 plugin/project 提供的 MCP —— 后台刷新用它。
+async function buildMcpList({ liveStatus = true } = {}) {
     const result = { mcpServers: [], plugins: [], external: [] };
 
     // 1a. 先从 ~/.claude.json 直接读已配置的 user-scope MCP —— 秒回、不依赖健康检查。
@@ -150,16 +153,19 @@ async function buildMcpList() {
       byName.set(s.name, s);
     }
 
-    // 1b. 再 TRY `claude mcp list`(健康检查慢,给 60s)覆盖 live 状态 + 补 plugin/project
-    //     提供的 MCP。失败/超时也无妨:上面已从配置文件给出列表,不致空。
-    try {
-      const output = await runClaude(['mcp', 'list'], { timeout: 60000 });
-      for (const ls of parseMcpList(output)) {
-        const ex = byName.get(ls.name);
-        if (ex) ex.status = ls.status;           // 已有(配置文件)→ 仅覆盖 live 状态
-        else { result.mcpServers.push(ls); byName.set(ls.name, ls); } // plugin/project 提供的
-      }
-    } catch {}
+    // 1b. (仅 liveStatus)TRY `claude mcp list`(健康检查慢且波动大,给 60s)覆盖在线状态 +
+    //     补 plugin/project 提供的 MCP。失败/超时也无妨:上面已从配置文件给出列表,不致空。
+    //     冷加载不做这步(liveStatus=false),把几十秒的健康检查甩到后台,首屏只等文件读。
+    if (liveStatus) {
+      try {
+        const output = await runClaude(['mcp', 'list'], { timeout: 60000 });
+        for (const ls of parseMcpList(output)) {
+          const ex = byName.get(ls.name);
+          if (ex) ex.status = ls.status;           // 已有(配置文件)→ 仅覆盖 live 状态
+          else { result.mcpServers.push(ls); byName.set(ls.name, ls); } // plugin/project 提供的
+        }
+      } catch {}
+    }
 
     // 2. Installed plugins (also parse `claude plugin list` for enabled state)
     let pluginEnabled = {};
@@ -277,9 +283,9 @@ function refreshMcpCache() {
     .finally(() => { mcpRefreshing = false; });
 }
 
-// GET /api/mcp — stale-while-revalidate:有缓存(即使过期)立即秒回,过期再后台刷新;
-// 仅完全无缓存时同步构建(首次,~5s)。?fresh=1 强制同步重建。彻底消除"每次进面板都
-// 等 claude mcp list 健康检查 5s"。
+// GET /api/mcp — stale-while-revalidate:有缓存(即使过期)立即秒回,过期再后台刷新。
+// 冷加载(无缓存)走"快路径"(不做健康检查,~300ms 秒回),在线状态由后台补——彻底消除
+// "每次进面板都卡几十秒等 claude mcp list 健康检查"。?fresh=1 强制阻塞做完整健康检查。
 router.get('/mcp', async (req, res) => {
   const fresh = req.query.fresh === '1';
   if (!fresh && mcpCache) {
@@ -288,10 +294,12 @@ router.get('/mcp', async (req, res) => {
     return;
   }
   try {
-    const result = await buildMcpList();
+    // fresh=1:阻塞做完整(含健康检查)。冷加载:只做快路径秒回,随后后台补在线状态。
+    const result = await buildMcpList({ liveStatus: fresh });
     mcpCache = result;
     mcpCacheAt = Date.now();
     res.json(result);
+    if (!fresh) refreshMcpCache(); // 后台 liveStatus:true 覆盖在线状态 + 补 plugin/project MCP
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

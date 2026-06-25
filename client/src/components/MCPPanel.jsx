@@ -65,8 +65,9 @@ export function MCPPanel() {
   const [restartHint, setRestartHint] = useState(false); // 增删改后提示需重启生效
   const mounted = useRef(true);
 
-  const fetchData = async () => {
-    setLoading(true);
+  // silent=true:不显示加载态,用于后台静默刷新(拉取后端补好的在线状态)。
+  const fetchData = async (silent = false) => {
+    if (!silent) setLoading(true);
     setError(null);
     try {
       const res = await fetch('/api/mcp');
@@ -77,15 +78,18 @@ export function MCPPanel() {
       setPlugins(data.plugins || []);
       setExternal(data.external || []);
     } catch (err) {
-      if (mounted.current) setError(err.message);
+      if (mounted.current && !silent) setError(err.message);
     }
-    if (mounted.current) setLoading(false);
+    if (mounted.current && !silent) setLoading(false);
   };
 
   useEffect(() => {
     mounted.current = true;
     fetchData();
-    return () => { mounted.current = false; };
+    // 冷加载首屏秒回但在线状态(连接/断开)由后端后台健康检查补;5s 后静默再拉一次
+    // 把状态点更新过来,无需用户手动刷新(慢机器仍可点刷新按钮)。
+    const t = setTimeout(() => { if (mounted.current) fetchData(true); }, 5000);
+    return () => { mounted.current = false; clearTimeout(t); };
   }, []);
 
   // Toggle by name (not array index): the rendered list is sorted enabled-first,
