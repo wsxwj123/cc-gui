@@ -79,17 +79,22 @@ function parseMcpList(output) {
     // Skip header/empty lines
     if (!line.trim() || line.includes('Checking MCP') || line.includes('health')) continue;
 
-    const match = line.match(/^(\S+):\s+(.+?)(?:\s+-\s+(✓|✗)\s+(Connected|Disconnected|Error))?$/);
+    // 状态图标:CLI 实际用 ✔/✘(U+2714/2718),早期匹配的 ✓/✗(U+2713/2717)对不上 →
+    // 状态恒 unknown + 命令尾巴被 " - ✔ Connected" 污染。这里两套都收,外加 ! 需认证。
+    const match = line.match(/^(\S+):\s+(.+?)(?:\s+-\s+([✓✔✗✘!])\s+(.+))?$/);
     if (match) {
-      const [, name, command, statusIcon, statusText] = match;
+      const [, name, command, statusIcon] = match;
       const isHttp = command.includes('(HTTP)') || command.startsWith('http');
       const cleanCommand = command.replace(/\s*\(HTTP\)\s*$/, '').trim();
+      const status = (statusIcon === '✓' || statusIcon === '✔') ? 'connected'
+        : (statusIcon === '✗' || statusIcon === '✘') ? 'disconnected'
+        : 'unknown'; // ! = 需认证 / 无图标 = 未知
 
       servers.push({
         name,
         command: cleanCommand,
         transport: isHttp ? 'http' : 'stdio',
-        status: statusIcon === '✓' ? 'connected' : statusIcon === '✗' ? 'disconnected' : 'unknown',
+        status,
         source: 'claude mcp',
       });
     }
@@ -109,33 +114,52 @@ let mcpCacheAt = 0;
 const MCP_CACHE_TTL_MS = 5 * 60_000;
 function invalidateMcpCache() { mcpCache = null; mcpCacheAt = 0; try { invalidateDetailsCache(); } catch {} }
 
-// 构建 MCP 列表(spawn `claude mcp list` + `plugin list`,含约 5s 健康检查)。抽成
-// 函数供端点同步调用 + 后台刷新 + 启动预热复用。
+// 直接读 ~/.claude.json 顶层 mcpServers(`claude mcp add -s user` 的真实落点)。
+// 秒回、不做健康检查 —— 保证用户加的 MCP 一定显示,即便 `claude mcp list` 的健康检查
+// 超时。(注:CLI 配置在 home 下的 .claude.json 文件,不是 .claude/settings.json。)
+async function readUserMcpServers() {
+  try {
+    const j = JSON.parse(await readFile(join(homedir(), '.claude.json'), 'utf-8'));
+    const servers = j.mcpServers || {};
+    return Object.entries(servers).map(([name, cfg]) => {
+      const isHttp = cfg.type === 'http' || cfg.type === 'sse' || (!cfg.command && !!cfg.url);
+      return {
+        name,
+        command: isHttp ? (cfg.url || '') : [cfg.command || '', ...(cfg.args || [])].join(' ').trim(),
+        args: cfg.args || [],
+        env: cfg.env ? Object.keys(cfg.env) : [],
+        transport: isHttp ? (cfg.type || 'http') : 'stdio',
+        status: 'unknown',
+        source: 'config',
+      };
+    });
+  } catch { return []; }
+}
+
+// 构建 MCP 列表。抽成函数供端点同步调用 + 后台刷新 + 启动预热复用。
 async function buildMcpList() {
     const result = { mcpServers: [], plugins: [], external: [] };
 
-    // 1. MCP servers from `claude mcp list` (the authoritative source)
-    try {
-      const output = await runClaude(['mcp', 'list']);
-      result.mcpServers = parseMcpList(output);
-    } catch (err) {
-      // Fallback: try reading from settings.json
-      try {
-        const settings = JSON.parse(await readFile(join(CLAUDE_DIR, 'settings.json'), 'utf-8'));
-        const servers = settings.mcpServers || {};
-        for (const [name, cfg] of Object.entries(servers)) {
-          result.mcpServers.push({
-            name,
-            command: cfg.command || '',
-            args: cfg.args || [],
-            env: cfg.env ? Object.keys(cfg.env) : [],
-            transport: cfg.transport || 'stdio',
-            status: 'unknown',
-            source: 'settings.json',
-          });
-        }
-      } catch {}
+    // 1a. 先从 ~/.claude.json 直接读已配置的 user-scope MCP —— 秒回、不依赖健康检查。
+    //     根治"加了不显示":`claude mcp list` 会对每个服务器做健康检查,服务器一多即 >10s,
+    //     旧版 runClaude 默认 10s 超时 → 抛错 → 落回 settings.json(没有 CLI 加的服务器)
+    //     → 整列表丢失(用户多机复现、重启无效的根因)。
+    const byName = new Map();
+    for (const s of await readUserMcpServers()) {
+      result.mcpServers.push(s);
+      byName.set(s.name, s);
     }
+
+    // 1b. 再 TRY `claude mcp list`(健康检查慢,给 60s)覆盖 live 状态 + 补 plugin/project
+    //     提供的 MCP。失败/超时也无妨:上面已从配置文件给出列表,不致空。
+    try {
+      const output = await runClaude(['mcp', 'list'], { timeout: 60000 });
+      for (const ls of parseMcpList(output)) {
+        const ex = byName.get(ls.name);
+        if (ex) ex.status = ls.status;           // 已有(配置文件)→ 仅覆盖 live 状态
+        else { result.mcpServers.push(ls); byName.set(ls.name, ls); } // plugin/project 提供的
+      }
+    } catch {}
 
     // 2. Installed plugins (also parse `claude plugin list` for enabled state)
     let pluginEnabled = {};
