@@ -1250,6 +1250,55 @@ router.post('/custom-providers/fetch-models', async (req, res) => {
   }
 });
 
+// 给指定 model 发一个最小请求,验证 provider「鉴权 + 该模型可达」。openai 兼容打
+// /chat/completions、anthropic 兼容打 /v1/messages,max_tokens:1 把成本/耗时压到最低。
+async function testProviderConnection({ type, baseURL, apiKey, model }) {
+  const b = String(baseURL).trim().replace(/\/+$/, '');
+  const hasVer = /\/v\d+$/.test(b);
+  let url, headers, body;
+  if (type === 'anthropic') {
+    url = hasVer ? `${b}/messages` : `${b}/v1/messages`;
+    headers = { 'content-type': 'application/json', 'x-api-key': apiKey || '', 'anthropic-version': '2023-06-01', 'User-Agent': 'claude-gui' };
+    body = { model, max_tokens: 1, messages: [{ role: 'user', content: 'ping' }] };
+  } else {
+    url = hasVer ? `${b}/chat/completions` : `${b}/v1/chat/completions`;
+    headers = { 'content-type': 'application/json', Authorization: `Bearer ${apiKey || ''}`, 'User-Agent': 'claude-gui' };
+    body = { model, max_tokens: 1, messages: [{ role: 'user', content: 'ping' }] };
+  }
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 20000);
+  try {
+    const r = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body), signal: ctrl.signal });
+    clearTimeout(timer);
+    if (r.ok) return { ok: true, status: r.status };
+    const text = (await r.text().catch(() => '')).replace(/\s+/g, ' ').trim().slice(0, 300);
+    return { ok: false, status: r.status, error: text || `HTTP ${r.status}` };
+  } catch (e) {
+    clearTimeout(timer);
+    return { ok: false, error: e.name === 'AbortError' ? '请求超时(20s,可能是网络/代理或端点不可达)' : e.message };
+  }
+}
+
+// POST /api/custom-providers/test { type, baseURL, apiKey, model, id? }
+// 编辑态前端不持有 key(apiKey 留空)→ 带 id 时按 id 读存储 key/baseURL 兜底。
+router.post('/custom-providers/test', async (req, res) => {
+  try {
+    const b = req.body || {};
+    let baseURL = b.baseURL, apiKey = b.apiKey, type = b.type;
+    if ((!apiKey || !apiKey.trim()) && b.id) {
+      const stored = (await readCustomProviders()).find((p) => p.id === b.id);
+      if (stored) { apiKey = stored.apiKey; baseURL = baseURL || stored.baseURL; type = type || stored.type; }
+    }
+    if (!baseURL) return res.status(400).json({ ok: false, error: '缺少 Base URL' });
+    if (!b.model) return res.status(400).json({ ok: false, error: '请先在「模型」框填一个模型 ID 再测试' });
+    try { const u = new URL(baseURL); if (!/^https?:$/.test(u.protocol)) throw 0; }
+    catch { return res.status(400).json({ ok: false, error: 'Base URL 必须是 http(s)' }); }
+    res.json(await testProviderConnection({ type, baseURL, apiKey, model: b.model }));
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 // POST /api/provider/fetch-models { id? } — live-fetch a provider's /v1/models.
 // With `id`: fetch that OpenAI provider's REAL upstream (key read server-side).
 // Without `id`: fetch the CURRENTLY active provider from settings.json. Official

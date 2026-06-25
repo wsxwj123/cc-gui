@@ -4688,6 +4688,9 @@ function ProviderSwitcher() {
     load();
   };
   const [editingProvider, setEditingProvider] = useState(null);
+  // BZ-2:加/编辑 provider 表单有未保存内容时,外部点击/Esc 不关闭下拉(否则卸载表单
+  // → 已输入的 url/key/model 全丢)。表单经 onDirtyChange 上报,这里用 ref 读最新值。
+  const formDirtyRef = useRef(false);
   useEffect(() => {
     load();
     const onCh = () => load();
@@ -4697,8 +4700,8 @@ function ProviderSwitcher() {
 
   useEffect(() => {
     if (!open) return;
-    const onDocClick = (e) => { if (!wrapRef.current?.contains(e.target)) setOpen(false); };
-    const onEsc = (e) => { if (e.key === 'Escape') setOpen(false); };
+    const onDocClick = (e) => { if (formDirtyRef.current) return; if (!wrapRef.current?.contains(e.target)) setOpen(false); };
+    const onEsc = (e) => { if (e.key === 'Escape') { if (formDirtyRef.current) return; setOpen(false); } };
     document.addEventListener('mousedown', onDocClick);
     document.addEventListener('keydown', onEsc);
     return () => {
@@ -4846,6 +4849,7 @@ function ProviderSwitcher() {
             editing={editingProvider}
             onCancel={() => setEditingProvider(null)}
             onSaved={() => { setEditingProvider(null); load(); }}
+            onDirtyChange={(d) => { formDirtyRef.current = d; }}
           />
         </div>
       )}
@@ -5700,13 +5704,14 @@ function OpenAIModelManager({ provider, onSaved }) {
 
 // Shared add-custom-provider form. Both protocols; can live-fetch the upstream's
 // model catalogue via /v1/models. onSaved() refreshes the parent's list.
-function CustomProviderForm({ onSaved, editing, onCancel }) {
+function CustomProviderForm({ onSaved, editing, onCancel, onDirtyChange }) {
   const [open, setOpen] = useState(false);
   const [name, setName] = useState('');
   const [type, setType] = useState('openai');
   const [baseURL, setBaseURL] = useState('');
   const [apiKey, setApiKey] = useState('');
   const [modelsText, setModelsText] = useState('');
+  const [testResult, setTestResult] = useState(null); // BZ-1:{ ok, error } | null
   const [defaultModel, setDefaultModel] = useState('');  // AZ8:该 provider 默认模型(空=用列表第一个)
   // BB6:档位映射 —— 子代理/标题/compact 用的 haiku/sonnet/opus alias 各自映射到该
   // provider 的真实模型(空=回退默认模型/选中模型,即维持 BA1 行为)。
@@ -5726,9 +5731,29 @@ function CustomProviderForm({ onSaved, editing, onCancel }) {
     setTierModels({ haiku: editing.tierModels?.haiku || '', sonnet: editing.tierModels?.sonnet || '', opus: editing.tierModels?.opus || '' });
     setOpen(true);
   }, [editing?.id]);
-  const reset = () => { setName(''); setType('openai'); setBaseURL(''); setApiKey(''); setModelsText(''); setDefaultModel(''); setTierModels({ haiku: '', sonnet: '', opus: '' }); setOpen(false); };
+  const reset = () => { setName(''); setType('openai'); setBaseURL(''); setApiKey(''); setModelsText(''); setDefaultModel(''); setTierModels({ haiku: '', sonnet: '', opus: '' }); setTestResult(null); setOpen(false); };
   const close = () => { reset(); onCancel?.(); };
   const parseModels = () => modelsText.split(/[\n,]+/).map((s) => s.trim()).filter(Boolean);
+  // BZ-2:有未保存内容时上报 dirty,父级据此阻止外部点击/Esc 关闭下拉(避免丢输入)。
+  const dirty = (open || isEdit) && !!(name.trim() || baseURL.trim() || apiKey.trim() || modelsText.trim());
+  useEffect(() => { onDirtyChange?.(dirty); }, [dirty]);
+  useEffect(() => () => onDirtyChange?.(false), []); // 卸载时清掉,避免残留 dirty 卡住关闭
+  // BZ-1:测试连接 —— 给默认模型/列表第一个发最小请求,验证鉴权 + 模型可达。
+  const testConnection = async () => {
+    const model = (defaultModel && parseModels().includes(defaultModel)) ? defaultModel : parseModels()[0];
+    if (!baseURL.trim()) return setTestResult({ ok: false, error: '先填 Base URL' });
+    if (!model) return setTestResult({ ok: false, error: '先填一个模型 ID 再测试' });
+    setBusy('test'); setTestResult(null);
+    try {
+      const r = await fetch('/api/custom-providers/test', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ type, baseURL, apiKey, model, id: editing?.id }),
+      });
+      const d = await r.json();
+      setTestResult(d.ok ? { ok: true, model } : { ok: false, error: d.error || `HTTP ${d.status || '错误'}` });
+    } catch (e) { setTestResult({ ok: false, error: e.message }); }
+    setBusy('');
+  };
   const fetchModels = async () => {
     if (!baseURL.trim()) return window.alert('先填 Base URL');
     setBusy('fetch');
@@ -5901,11 +5926,26 @@ function CustomProviderForm({ onSaved, editing, onCancel }) {
           className="flex-1 px-3 py-2 text-[12px] border border-accent text-accent rounded-lg disabled:opacity-50">
           {busy === 'fetch' ? '获取中…' : '获取模型'}
         </button>
+        <button onClick={testConnection} disabled={!!busy}
+          title="给默认模型(或列表第一个)发一个最小请求,验证鉴权 + 模型是否可达"
+          className="flex-1 px-3 py-2 text-[12px] border border-canvas-deep text-ink-muted hover:text-ink rounded-lg disabled:opacity-50">
+          {busy === 'test' ? '测试中…' : '测试连接'}
+        </button>
         <button onClick={save} disabled={!!busy}
           className="flex-1 px-3 py-2 text-[12px] bg-accent text-white rounded-lg disabled:opacity-50">
           {busy === 'save' ? '保存中…' : (isEdit ? '更新' : '保存')}
         </button>
       </div>
+      {/* BZ-1:连接测试结果(成功/失败原因,可见且不自动消失) */}
+      {testResult && (
+        <div className={`text-[11px] font-body rounded-lg px-3 py-2 border ${testResult.ok
+          ? 'text-success border-success/30 bg-success/10'
+          : 'text-error border-error/30 bg-error/10'}`}>
+          {testResult.ok
+            ? `✓ 连接成功 —— 模型「${testResult.model}」可正常响应`
+            : <span className="break-all whitespace-pre-wrap">✗ 连接失败:{testResult.error}</span>}
+        </div>
+      )}
     </div>
   );
 }
