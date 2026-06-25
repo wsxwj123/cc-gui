@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
-import { X, Plus, Trash2, RefreshCw } from 'lucide-react';
+import { X, Plus, Trash2, RefreshCw, ExternalLink } from 'lucide-react';
 import { BUILTIN_MCP_SERVERS, findBuiltinMcp } from '../utils/builtinMcpServers.js';
+import { openExternalUrl } from '../utils/openExternal.js';
 
 // MCP 服务器 添加/编辑 表单(模态)。
 //  - editing=null → 新增;editing={name} → 编辑(挂载时拉 /config 回填)。
@@ -38,7 +39,7 @@ export function McpForm({ editing, onClose, onSaved }) {
   const [scope, setScope] = useState('user');
   const [autoApprove, setAutoApprove] = useState(false);
   const [envRows, setEnvRows] = useState([]); // [{k,v}]
-  const [tplTip, setTplTip] = useState(''); // 选模板后的一行提示(note + needsArg)
+  const [tplMeta, setTplMeta] = useState(null); // 选模板后的提示:{ note, needsArg, repo, docs }
   // 用户一旦改过命令/URL,后台补全就不再覆盖这两个字段,避免边输入边被刷掉。
   const dirtyRef = React.useRef(false);
 
@@ -52,7 +53,7 @@ export function McpForm({ editing, onClose, onSaved }) {
     if (t.transport === 'stdio') { setCommandLine(t.commandLine || ''); setUrl(''); }
     else { setUrl(t.url || ''); setCommandLine(''); }
     setEnvRows((t.env || []).map((e) => ({ k: e.k, v: '' })));
-    setTplTip([t.note, t.needsArg].filter(Boolean).join(' '));
+    setTplMeta({ note: t.note, needsArg: t.needsArg, repo: t.repo, docs: t.docs });
     dirtyRef.current = true;
     setErr('');
   };
@@ -149,7 +150,18 @@ export function McpForm({ editing, onClose, onSaved }) {
                   <option value="">— 选常用 MCP 自动填写 —</option>
                   {BUILTIN_MCP_SERVERS.map((m) => <option key={m.id} value={m.id}>{m.name}</option>)}
                 </select>
-                {tplTip && <div className={hintCls}>{tplTip}</div>}
+                {tplMeta && (
+                  <div className={hintCls}>
+                    {[tplMeta.note, tplMeta.needsArg].filter(Boolean).join(' ')}
+                    {tplMeta.repo && (
+                      <a
+                        onClick={(e) => { e.preventDefault(); openExternalUrl(tplMeta.docs); }}
+                        title="在浏览器打开该 MCP 的 GitHub 项目"
+                        className="text-accent hover:underline inline-flex items-center gap-0.5 cursor-pointer ml-1 align-baseline"
+                      >{tplMeta.repo}<ExternalLink size={10} /></a>
+                    )}
+                  </div>
+                )}
               </div>
             )}
 
