@@ -577,6 +577,28 @@ function buildAddArgs({ name, transport, commandLine, url, env, scope }) {
   return args;
 }
 
+// 跑 `claude mcp add`。坑:同名已存在时它把 "already exists" 打到 **stderr** 且**退出码 0**
+// (既不覆盖也不报错)→ runClaude 只取 stdout、execFileP 不 reject → 会"假成功"(GUI 显示
+// 添加成功但其实没加上/没改)。这里捕获 stderr 显式检测,变成明确的 409 错误。
+async function runMcpAdd(args, name) {
+  const exists = () => {
+    const err = new Error(`MCP 服务器「${name}」已存在,未做修改。请先删除它,或改用「编辑」修改配置。`);
+    err.status = 409;
+    return err;
+  };
+  let res;
+  try {
+    res = await execFileP('claude', args, { encoding: 'utf-8', timeout: 20000, env: { ...process.env }, maxBuffer: 8 * 1024 * 1024 });
+  } catch (e) {
+    // 同名已存在时 claude mcp add **退出码非零** 且把 "already exists" 打到 stderr → 走这里。
+    const stderr = (e.stderr?.toString() || e.message || '').trim();
+    if (/already exists/i.test(stderr)) throw exists();
+    throw new Error(stderr || '添加失败'); // 其它硬失败:抛上游 stderr,比 "Command failed" 有用
+  }
+  // 防御:万一某版本退出 0 仍把 already exists 打 stderr(此分支在 try 外,不会被上面 catch 吞)。
+  if (/already exists/i.test(res.stderr || '')) throw exists();
+}
+
 // POST /api/mcp — 新增一个 MCP 服务器。
 // body: { name, transport, commandLine?, url?, env?, scope?, autoApprove?, label? }
 router.post('/mcp', async (req, res) => {
@@ -586,14 +608,14 @@ router.post('/mcp', async (req, res) => {
     const scope = ['user', 'project', 'local'].includes(b.scope) ? b.scope : 'user';
     const transport = ['stdio', 'http', 'sse'].includes(b.transport) ? b.transport : 'stdio';
     const args = buildAddArgs({ ...b, transport, scope });
-    await runClaude(args, { timeout: 20000 });
+    await runMcpAdd(args, b.name); // 检测"already exists"假成功
     await setAutoApprove(b.name, !!b.autoApprove);
     await setMeta(b.name, b.label);
     // 新增即启用:清掉可能存在的同名禁用残留
     try { const dis = await readDisabled(); if (dis[b.name]) { delete dis[b.name]; await writeDisabled(dis); } } catch {}
     invalidateMcpCache();
     res.json({ ok: true, name: b.name });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) { res.status(err.status || 500).json({ error: err.message }); }
 });
 
 // PUT /api/mcp/:name/config — 编辑:先 remove 再按新配置 add(claude 无 in-place 编辑)。
@@ -607,19 +629,24 @@ router.put('/mcp/:name/config', async (req, res) => {
     const scope = ['user', 'project', 'local'].includes(b.scope) ? b.scope : 'user';
     const transport = ['stdio', 'http', 'sse'].includes(b.transport) ? b.transport : 'stdio';
     const addArgs = buildAddArgs({ ...b, name: newName, transport, scope });
+    // 改名场景:若目标名已被另一个服务器占用,必须在删除旧的之前拦下 —— 否则先 remove 旧的、
+    // 再 add 撞 "already exists" 静默失败 → 旧服务器没了、新的没加上 = 数据丢失。
+    if (newName !== name && await getServerDetails(newName)) {
+      return res.status(409).json({ error: `目标名「${newName}」已被另一个 MCP 占用,换个名字或先删除它。` });
+    }
     // 先移除旧的(各 scope 尽力删,忽略不存在错误),再加新的。
     for (const s of ['user', 'project', 'local']) {
       try { await runClaude(['mcp', 'remove', name, '-s', s]); } catch {}
     }
     try { const dis = await readDisabled(); if (dis[name]) { delete dis[name]; await writeDisabled(dis); } } catch {}
-    await runClaude(addArgs, { timeout: 20000 });
+    await runMcpAdd(addArgs, newName);
     // 改名时迁移 autoapprove / meta
     if (newName !== name) { await setAutoApprove(name, false); await setMeta(name, ''); }
     await setAutoApprove(newName, !!b.autoApprove);
     await setMeta(newName, b.label);
     invalidateMcpCache();
     res.json({ ok: true, name: newName });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) { res.status(err.status || 500).json({ error: err.message }); }
 });
 
 // DELETE /api/mcp/:name — 彻底删除(不进禁用列表):各 scope remove + 清理 GUI 元数据。
