@@ -11,6 +11,8 @@
 //   url          http 用的端点
 //   env          需密钥时预置的占位行 [{ k, hint }];回填到表单 env 区(value 留空,用户补)
 //   needsArg     positional 参数提示(目前仅 filesystem);展示为一行提示,不自动填
+//   needsSetup   true=选了不能立刻用(要 key/目录/登录),下拉里归入「需配置」组
+//   setupTag     需配置项在下拉选项名后的小尾巴(如「要 key」「填目录」),一眼看清
 //   repo         GitHub 作者/项目(owner/repo),展示为可点击小字,点开跳 docs
 //   note/docs    说明 + 官方文档(repo 链接即指向 docs)
 
@@ -22,6 +24,8 @@ export const BUILTIN_MCP_SERVERS = [
     commandLine: 'npx -y @modelcontextprotocol/server-filesystem',
     env: [],
     needsArg: '命令末尾补一个或多个「允许访问的目录绝对路径」,如 /Users/you/project',
+    needsSetup: true,
+    setupTag: '填目录',
     note: '读写指定目录下的文件。必须在命令末尾追加允许访问的目录,否则起不来。',
     repo: 'modelcontextprotocol/servers',
     docs: 'https://github.com/modelcontextprotocol/servers/tree/main/src/filesystem',
@@ -32,6 +36,8 @@ export const BUILTIN_MCP_SERVERS = [
     transport: 'http',
     url: 'https://api.githubcopilot.com/mcp/',
     env: [],
+    needsSetup: true,
+    setupTag: '首次登录',
     note: 'GitHub 官方远程 MCP(npm 版已废弃)。首次使用会走 OAuth 授权登录,无需在此填 token。',
     repo: 'github/github-mcp-server',
     docs: 'https://github.com/github/github-mcp-server',
@@ -92,6 +98,8 @@ export const BUILTIN_MCP_SERVERS = [
     transport: 'stdio',
     commandLine: 'npx -y tavily-mcp@latest',
     env: [{ k: 'TAVILY_API_KEY', hint: 'Tavily API key,在 tavily.com 申请' }],
+    needsSetup: true,
+    setupTag: '要 key',
     note: '联网搜索与内容提取。需填 TAVILY_API_KEY。',
     repo: 'tavily-ai/tavily-mcp',
     docs: 'https://github.com/tavily-ai/tavily-mcp',
@@ -102,6 +110,8 @@ export const BUILTIN_MCP_SERVERS = [
     transport: 'stdio',
     commandLine: 'npx -y @brave/brave-search-mcp-server --transport stdio',
     env: [{ k: 'BRAVE_API_KEY', hint: 'Brave Search API key' }],
+    needsSetup: true,
+    setupTag: '要 key',
     note: '隐私搜索引擎。需填 BRAVE_API_KEY。(包名已从 @modelcontextprotocol 搬到 @brave)',
     repo: 'brave/brave-search-mcp-server',
     docs: 'https://github.com/brave/brave-search-mcp-server',

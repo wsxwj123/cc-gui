@@ -148,7 +148,12 @@ export function McpForm({ editing, onClose, onSaved }) {
                 <div className={labelCls}>快速模板 · 可选</div>
                 <select defaultValue="" onChange={(e) => { applyTemplate(e.target.value); e.target.value = ''; }} className={inputCls}>
                   <option value="">— 选常用 MCP 自动填写 —</option>
-                  {BUILTIN_MCP_SERVERS.map((m) => <option key={m.id} value={m.id}>{m.name}</option>)}
+                  <optgroup label="选了即用(无需配置)">
+                    {BUILTIN_MCP_SERVERS.filter((m) => !m.needsSetup).map((m) => <option key={m.id} value={m.id}>{m.name}</option>)}
+                  </optgroup>
+                  <optgroup label="需配置后才能用">
+                    {BUILTIN_MCP_SERVERS.filter((m) => m.needsSetup).map((m) => <option key={m.id} value={m.id}>{m.name}{m.setupTag ? ` · ${m.setupTag}` : ''}</option>)}
+                  </optgroup>
                 </select>
                 {tplMeta && (
                   <div className={hintCls}>
