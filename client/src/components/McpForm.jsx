@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { X, Plus, Trash2, RefreshCw } from 'lucide-react';
+import { BUILTIN_MCP_SERVERS, findBuiltinMcp } from '../utils/builtinMcpServers.js';
 
 // MCP 服务器 添加/编辑 表单(模态)。
 //  - editing=null → 新增;editing={name} → 编辑(挂载时拉 /config 回填)。
@@ -37,8 +38,24 @@ export function McpForm({ editing, onClose, onSaved }) {
   const [scope, setScope] = useState('user');
   const [autoApprove, setAutoApprove] = useState(false);
   const [envRows, setEnvRows] = useState([]); // [{k,v}]
+  const [tplTip, setTplTip] = useState(''); // 选模板后的一行提示(note + needsArg)
   // 用户一旦改过命令/URL,后台补全就不再覆盖这两个字段,避免边输入边被刷掉。
   const dirtyRef = React.useRef(false);
+
+  // 选内置模板自动回填字段;需密钥的把 env 占位 key 填好(value 留空,用户补)。
+  const applyTemplate = (id) => {
+    const t = findBuiltinMcp(id);
+    if (!t) return;
+    setName(t.id);
+    setLabel(t.name);
+    setTransport(t.transport);
+    if (t.transport === 'stdio') { setCommandLine(t.commandLine || ''); setUrl(''); }
+    else { setUrl(t.url || ''); setCommandLine(''); }
+    setEnvRows((t.env || []).map((e) => ({ k: e.k, v: '' })));
+    setTplTip([t.note, t.needsArg].filter(Boolean).join(' '));
+    dirtyRef.current = true;
+    setErr('');
+  };
 
   // 编辑:后台拉结构化配置补全(env/scope 等),不阻塞已可编辑的表单。
   useEffect(() => {
@@ -124,6 +141,18 @@ export function McpForm({ editing, onClose, onSaved }) {
                 <RefreshCw size={11} className="animate-spin" /> 正在载入完整配置(环境变量等)…
               </div>
             )}
+            {/* 快速模板(仅新增态):选常用 MCP 自动回填字段 */}
+            {!isEdit && (
+              <div className="space-y-1.5">
+                <div className={labelCls}>快速模板 · 可选</div>
+                <select defaultValue="" onChange={(e) => { applyTemplate(e.target.value); e.target.value = ''; }} className={inputCls}>
+                  <option value="">— 选常用 MCP 自动填写 —</option>
+                  {BUILTIN_MCP_SERVERS.map((m) => <option key={m.id} value={m.id}>{m.name}</option>)}
+                </select>
+                {tplTip && <div className={hintCls}>{tplTip}</div>}
+              </div>
+            )}
+
             {/* 类型 */}
             <div className="space-y-1.5">
               <div className={labelCls}>类型</div>
