@@ -58,10 +58,28 @@ function buildFallbackAssets(version) {
   ];
 }
 
+const GH_HEADERS = { 'User-Agent': 'claude-gui-version-check', 'Accept': 'application/vnd.github+json' };
+
+// 退路:`releases/latest` 在"还没有已发布 release"时返回 404 —— CI 正在构建(~9min)、
+// 或刚删了旧 release 的空窗,都会让它 404 → 检测彻底失效(用户报告的"显示最新/404")。
+// 而 git **tag 一推上去就立刻存在**(不依赖 CI),所以退回看最大 semver tag,检测照常工作;
+// 下载链接用 tag 直链兜底(buildFallbackAssets),CI 发布 DMG 后即可下。
+async function fetchLatestTagSnap() {
+  const r = await fetch('https://api.github.com/repos/wsxwj123/claude-gui/tags?per_page=100', { headers: GH_HEADERS });
+  if (!r.ok) { const err = new Error(`GitHub API ${r.status}`); err.status = r.status; throw err; }
+  const arr = await r.json();
+  const names = (Array.isArray(arr) ? arr : [])
+    .map((t) => String(t.name || ''))
+    .filter((n) => /^v?\d+\.\d+\.\d+$/.test(n));
+  if (!names.length) throw new Error('GitHub 仓库没有符合 semver 的 tag');
+  names.sort((a, b) => (semverGt(a.replace(/^v/, ''), b.replace(/^v/, '')) ? -1 : 1));
+  const raw = names[0].replace(/^v/, '');
+  return { tagName: `v${raw}`, htmlUrl: `https://github.com/wsxwj123/claude-gui/releases/tag/v${raw}`, publishedAt: null, assets: [] };
+}
+
 async function fetchGitHubLatest() {
-  const r = await fetch('https://api.github.com/repos/wsxwj123/claude-gui/releases/latest', {
-    headers: { 'User-Agent': 'claude-gui-version-check', 'Accept': 'application/vnd.github+json' },
-  });
+  const r = await fetch('https://api.github.com/repos/wsxwj123/claude-gui/releases/latest', { headers: GH_HEADERS });
+  if (r.status === 404) return await fetchLatestTagSnap(); // 无已发布 release → 退回看最新 tag
   if (!r.ok) {
     const err = new Error(`GitHub API ${r.status}`);
     err.status = r.status;
