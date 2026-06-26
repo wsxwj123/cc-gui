@@ -787,13 +787,13 @@ router.put('/plugins/:name/disable', async (req, res) => {
   }
 });
 
-// 官方插件一键安装。marketplace 通常已内置;首次 best-effort add 一次(幂等,已存在会报错→忽略)。
+// 官方插件一键安装。CM-5:marketplace 不仅要 add,还要 **update** 刷新本地缓存——否则
+// 缓存停在旧 commit(没有后加入的插件如 code-review)→ install 报 "not found / 本地副本过期"
+// (Windows 上常见,Mac 缓存恰新所以能装)。add 幂等(已存在忽略),update 是 git pull 较快。
 const OFFICIAL_MARKETPLACE = 'claude-plugins-official';
-let marketplaceEnsured = false;
 async function ensureOfficialMarketplace() {
-  if (marketplaceEnsured) return;
-  marketplaceEnsured = true;
   try { await runClaude(['plugin', 'marketplace', 'add', 'anthropics/claude-plugins-official'], { timeout: 30000 }); } catch {}
+  try { await runClaude(['plugin', 'marketplace', 'update', OFFICIAL_MARKETPLACE], { timeout: 30000 }); } catch {}
 }
 
 // POST /api/plugins/install { name } — `claude plugin install <name>@claude-plugins-official`(非交互)。
@@ -802,7 +802,16 @@ router.post('/plugins/install', async (req, res) => {
     const name = String(req.body?.name || '');
     if (!/^[A-Za-z0-9._-]{1,80}$/.test(name)) throw new Error('invalid plugin name');
     await ensureOfficialMarketplace();
-    await runClaude(['plugin', 'install', `${name}@${OFFICIAL_MARKETPLACE}`], { timeout: 90000 });
+    try {
+      await runClaude(['plugin', 'install', `${name}@${OFFICIAL_MARKETPLACE}`], { timeout: 90000 });
+    } catch (e) {
+      // 仍失败且像"缓存过期/找不到"→ 强制再 update 一次后重试(兜底)。
+      const msg = (e.stderr?.toString() || e.message || '');
+      if (/out of date|not found|marketplace update|本地副本/i.test(msg)) {
+        try { await runClaude(['plugin', 'marketplace', 'update', OFFICIAL_MARKETPLACE], { timeout: 30000 }); } catch {}
+        await runClaude(['plugin', 'install', `${name}@${OFFICIAL_MARKETPLACE}`], { timeout: 90000 });
+      } else throw e;
+    }
     invalidateMcpCache();
     res.json({ ok: true, name });
   } catch (err) {

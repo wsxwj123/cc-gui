@@ -202,6 +202,10 @@ export function useWebSocket() {
               const st = useStore.getState();
               const sid = data.sessionId;
               if (!sid) break;
+              // CM-3:任何回合完成都刷新侧栏会话列表 —— 新会话的首个回合在此被广播到**所有**
+              // 连接的客户端(手机/电脑),于是另一端无需"退出再进项目"就能看到新会话。
+              // 原来只靠文件 watcher 轮询(2.5s、大目录易漏/滞后),跨设备常不刷新(用户报告)。
+              window.dispatchEvent(new CustomEvent('cgui:sessions-changed', { detail: { projectHash: data.projectHash || null } }));
               const focused = st.paneSessions[st.activeTabIndex]?.sessionId;
               if (sid === focused) break; // 正在看的会话,回复就在眼前,不打扰
               const sess = (Array.isArray(st.sessions) ? st.sessions : []).find((x) => x.sessionId === sid);

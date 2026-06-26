@@ -1,12 +1,27 @@
 // CK-4: Skill 市场。两个选项卡 —— 「本机」展示 ~/.claude/skills 已装;「导入」从多个
 // 源仓库(Anthropic / Superpowers / 开源社区 / 科研)拉取并导入,重名内联横幅选跳过/覆盖。
-import { useState, useEffect, useCallback } from 'react';
-import { Sparkles, Download, Check, Loader2, RefreshCw, AlertTriangle, CloudDownload, ExternalLink } from 'lucide-react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
+import { Download, Check, Loader2, RefreshCw, AlertTriangle, CloudDownload, ExternalLink, Copy, Search } from 'lucide-react';
+import { copyText } from '../utils/clipboard.js';
+
+// CM-1:复制技能名(用 /<name> 经 slash 命令加载)。图标按钮,复制后短暂打勾。
+function SkillCopyBtn({ name }) {
+  const [done, setDone] = useState(false);
+  return (
+    <button
+      onClick={async (e) => { e.stopPropagation(); if (await copyText(name)) { setDone(true); setTimeout(() => setDone(false), 1200); } }}
+      title={`复制技能名「${name}」—— 输入框里用 /${name} 加载`}
+      className="shrink-0 p-1 rounded text-ink-faint hover:text-ink hover:bg-canvas-deep transition-colors">
+      {done ? <Check size={12} className="text-success" /> : <Copy size={12} />}
+    </button>
+  );
+}
 
 export function SkillsPanel() {
   const [tab, setTab] = useState('local');            // 'local' | 'import'
   const [local, setLocal] = useState([]);
   const [loadingLocal, setLoadingLocal] = useState(true);
+  const [query, setQuery] = useState('');             // CM-1 本机 skill 搜索(名称+描述)
 
   const [sources, setSources] = useState([]);
   const [source, setSource] = useState('anthropic');
@@ -69,6 +84,12 @@ export function SkillsPanel() {
   };
 
   const notInstalled = official.filter((s) => !s.installed);
+  // CM-1:本机 skill 按关键词过滤(名称 + 描述,大小写不敏感)
+  const filteredLocal = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return local;
+    return local.filter((s) => `${s.id} ${s.name} ${s.description}`.toLowerCase().includes(q));
+  }, [local, query]);
   const tabBtn = (id, label, count) => (
     <button onClick={() => setTab(id)}
       className={`flex items-center gap-1.5 px-3 py-1.5 text-[12px] font-body rounded-lg transition-colors ${
@@ -89,20 +110,33 @@ export function SkillsPanel() {
       </div>
 
       {tab === 'local' ? (
-        local.length > 0 ? (
-          <div className="space-y-2">
-            {local.map((s) => (
-              <div key={s.id} className="bg-canvas-warm border border-canvas-deep rounded-lg p-3">
-                <span className="text-xs font-medium font-body text-ink truncate" title={s.id}>{s.name}</span>
-                {s.description && <div className="text-[11px] text-ink-muted font-body mt-1 line-clamp-2">{s.description}</div>}
-              </div>
-            ))}
+        <>
+          {/* CM-1 搜索框:按名称 + 描述检索 */}
+          <div className="relative">
+            <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-ghost" />
+            <input
+              type="text" value={query} onChange={(e) => setQuery(e.target.value)}
+              placeholder="搜索技能（名称 / 描述）..."
+              className="w-full bg-canvas border border-canvas-deep rounded-lg pl-8 pr-3 py-1.5 text-xs text-ink placeholder-ink-ghost focus:outline-none focus:border-accent/40 font-body" />
           </div>
-        ) : (
-          <div className="text-xs text-ink-faint font-body py-6 text-center bg-canvas-warm border border-canvas-deep rounded-lg">
-            {loadingLocal ? '加载中…' : '~/.claude/skills 下没有 skill'}
-          </div>
-        )
+          {filteredLocal.length > 0 ? (
+            <div className="space-y-2">
+              {filteredLocal.map((s) => (
+                <div key={s.id} className="bg-canvas-warm border border-canvas-deep rounded-lg p-3">
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs font-medium font-body text-ink truncate flex-1" title={s.id}>{s.name}</span>
+                    <SkillCopyBtn name={s.id} />
+                  </div>
+                  {s.description && <div className="text-[11px] text-ink-muted font-body mt-1 line-clamp-2">{s.description}</div>}
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="text-xs text-ink-faint font-body py-6 text-center bg-canvas-warm border border-canvas-deep rounded-lg">
+              {loadingLocal ? '加载中…' : query.trim() ? `没有匹配「${query.trim()}」的技能` : '~/.claude/skills 下没有 skill'}
+            </div>
+          )}
+        </>
       ) : (
         <>
           {/* 源选择 */}
@@ -160,6 +194,7 @@ export function SkillsPanel() {
                 <div key={s.id} className="bg-canvas-warm border border-canvas-deep rounded-lg p-3">
                   <div className="flex items-center gap-2">
                     <span className="text-xs font-medium font-body text-ink truncate flex-1" title={s.id}>{s.name}</span>
+                    <SkillCopyBtn name={s.id} />
                     {s.installed ? (
                       <button onClick={() => runImport([s.id], true, s.id)} disabled={busy === s.id}
                         className="shrink-0 text-[10px] px-2 py-0.5 rounded border border-canvas-deep text-ink-faint hover:text-ink hover:bg-canvas-deep flex items-center gap-1 disabled:opacity-50" title="已安装 — 点击覆盖">
