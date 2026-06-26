@@ -6,8 +6,8 @@ import { TodoPanel } from './TodoPanel.jsx';
 
 // Permission mode metadata — mirrors `claude --permission-mode <choice>`.
 export const MODE_META = {
-  default:           { label: '默认', desc: '每次工具调用前都弹窗询问', icon: Shield,        tone: 'text-ink-muted' },
-  acceptEdits:       { label: '接受编辑', desc: '读取/列举/查看类工具自动放行；写入/编辑/删除仍弹窗', icon: Check,         tone: 'text-amber-600' },
+  default:           { label: '默认', desc: '改文件 / 执行命令 / MCP 调用前都弹窗；只读与安全命令（Read/echo 等）自动放行', icon: Shield,        tone: 'text-ink-muted' },
+  acceptEdits:       { label: '接受编辑', desc: '改文件（写入/编辑）自动放行；执行命令（Bash）/ MCP 仍弹窗', icon: Check,         tone: 'text-amber-600' },
   plan:              { label: '规划', desc: '只规划，不执行任何工具', icon: ClipboardList, tone: 'text-blue-600' },
   bypassPermissions: { label: '放任', desc: '跳过全部权限（危险）', icon: ShieldOff,     tone: 'text-red-500' },
 };
@@ -261,6 +261,12 @@ export function ChatInput({ onSend, onStop, onAccelerate, disabled, isStreaming,
   // no key is supplied (shouldn't happen in normal render).
   const permissionMode = useStore((s) => (permKey ? (s.permissionModeBySession[permKey] || s.permissionMode) : s.permissionMode));
   const setPermissionMode = useStore((s) => s.setPermissionMode);
+  // CI-4:当前 provider 是否无视觉(deepseek 等)。发图会被上游 400(`unknown variant 'image_url'`),
+  // 这里提前提示用户;后端 openai-proxy 也会把图剥成文本占位兜底。
+  const noVision = useStore((s) => {
+    const p = s.currentProvider || {};
+    return /deepseek/i.test(p.providerHint || '') || /deepseek/i.test(p.baseUrl || '');
+  });
   // While the session is handed off to phone remote control, lock the composer:
   // the hidden `--remote-control` pty owns the session file, so spawning a `-p`
   // turn here would double-write the same jsonl. Reclaim to unlock.
@@ -583,18 +589,13 @@ export function ChatInput({ onSend, onStop, onAccelerate, disabled, isStreaming,
       }
     }
 
-    // Cmd+Enter(mac)/ Ctrl+Enter(win) 始终发送输入框文本——即使此刻有 plan/权限卡片
-    // 在 window 级监听 Enter(那个 Enter 会被它吃掉去"批准计划",导致用户改完计划按
-    // 回车发不出去 #1/#2)。stopPropagation 阻止 native 事件冒泡到 window 上的卡片监听。
+    // 发送统一为 Cmd+Enter(mac)/ Ctrl+Enter(win),与"规划模式 revise 计划"提交一致(用户要求,
+    // 跨平台统一)。裸 Enter 一律换行(让 textarea 默认行为插入换行),不再发送——避免多行输入时
+    // 误触发送。stopPropagation 阻止冒泡到 window 上的 plan/权限卡片 Enter 监听(否则那个 Enter
+    // 会被吃掉去"批准计划",改完计划按回车发不出去 #1/#2)。
     if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
       e.preventDefault();
       e.stopPropagation();
-      handleSend();
-      return;
-    }
-
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
       handleSend();
     }
   };
@@ -606,12 +607,10 @@ export function ChatInput({ onSend, onStop, onAccelerate, disabled, isStreaming,
       <PermissionPrompt
         sessionId={sessionId}
         onExecutePlan={() => {
-          // Plan approved → switch THIS session to acceptEdits and resume so the
-          // CLI actually executes (headless plan mode can't execute in-process).
+          // 批准计划 → 只同步本会话 GUI 档位为 acceptEdits。SDK 引擎下模型在同一回合内
+          // 继续执行(approvePlan 已 allow ExitPlanMode + 切活跃 query 档位),无需另起回合。
+          // (旧裸 CLI 因 headless plan 无法原进程内续跑才 respawn,迁 SDK 后去掉。)
           setPermissionMode('acceptEdits', permKey);
-          // headless plan 无法在原进程内续跑,壳子必须另起一回合执行。但这条续跑指令
-          // 不该作为可见用户气泡(用户反馈"画蛇添足"),用 hiddenUserMessage 隐藏发送。(#5)
-          onSend('请严格按照刚才批准的计划开始执行，不要重新规划或再次询问。', { hiddenUserMessage: true });
         }}
       />
       {editingResend && (
@@ -708,6 +707,12 @@ export function ChatInput({ onSend, onStop, onAccelerate, disabled, isStreaming,
         )}
 
 
+        {/* CI-4:无视觉 provider 下挂了图片 → 提前提示(后端会剥图,不至于 400,但用户该知道) */}
+        {noVision && attachments.some((a) => a.kind === 'image') && (
+          <div className="mb-2 px-2 text-[11px] text-amber-700 font-body leading-snug">
+            ⚠️ 当前 provider 不支持图片(无视觉能力),发送时图片会被忽略、只发文本/文件；需要看图请切换到支持视觉的 provider。
+          </div>
+        )}
         {/* Attachments — sit above the composer when present */}
         {attachments.length > 0 && (
           <div className="flex flex-wrap gap-2 mb-2 px-2">

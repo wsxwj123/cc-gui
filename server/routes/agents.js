@@ -131,6 +131,10 @@ router.get('/agents', async (req, res) => {
 router.get('/agents/active', async (req, res) => {
   const out = [];
   const seenPids = new Set();
+  // CG-5:SDK 引擎下 chat-process 的 pid 是合成 'sdk-N',Number() 后 NaN,按 pid 去重失效
+  // → 同一会话既出 chat-process 卡又出 cli-session 卡(双显 + 元数据丢)。改按 sessionId
+  // 去重为主,pid 去重保留作旧路径兜底;无 sessionId(draft)退回 pid。
+  const seenSessionIds = new Set();
 
   // 1. Live chat children — always available, richest metadata.
   // Finished turns linger for a 60s grace window (chat.js) so they show as
@@ -156,6 +160,7 @@ router.get('/agents/active', async (req, res) => {
       stoppable: !finished,
     });
     seenPids.add(Number(p.pid));
+    if (p.sessionId) seenSessionIds.add(p.sessionId);
   }
 
   // 2. CLI's own active session registry
@@ -167,7 +172,9 @@ router.get('/agents/active', async (req, res) => {
     try {
       const raw = await readFile(`${SESSIONS_DIR}/${f}`, 'utf-8');
       const s = JSON.parse(raw);
-      if (!s.pid || seenPids.has(Number(s.pid))) continue;
+      if (!s.pid) continue;
+      // 已被 chat-process 收录的会话(按 sessionId 或 pid)不重复显示。
+      if ((s.sessionId && seenSessionIds.has(s.sessionId)) || seenPids.has(Number(s.pid))) continue;
       // Check the process is still alive — claude often leaves stale files.
       let alive = false;
       try { process.kill(Number(s.pid), 0); alive = true; } catch {}

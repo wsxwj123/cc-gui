@@ -7,9 +7,40 @@ const router = Router();
 
 /**
  * In-memory registry of pending permission requests.
- * id → { resolve, request: {toolName, toolInput, sessionId, cwd}, createdAt }
+ * 两类 slot 共用一张表,区别只在"怎么把决定送回去":
+ *   - res-backed     { request, res }      旧 hook bridge 走 HTTP,挂起 res 直到 respond
+ *   - resolve-backed { request, resolve }  SDK canUseTool 进程内 await 一个 Promise
+ * respond / dropPendingForSession / TTL 三处都两类都处理。
  */
 const pending = new Map();
+
+// 把决定送回等待方(HTTP res 或进程内 resolve 皆可),并从表里移除。
+function settle(slot, payload) {
+  if (slot.res) { try { slot.res.json(payload); } catch {} }
+  else if (slot.resolve) { try { slot.resolve(payload); } catch {} }
+}
+
+/**
+ * 进程内权限请求(SDK canUseTool 用)。建 pending 项 + 广播弹窗,返回一个 Promise,
+ * 用户在界面点击后由 /respond 端点 resolve。
+ * resolve 值: { decision:'allow'|'deny', reason?, updatedInput? }
+ */
+export function requestPermission({ toolName, toolInput, sessionId, cwd }) {
+  return new Promise((resolve) => {
+    const id = randomUUID();
+    const request = {
+      id,
+      toolName: toolName || 'unknown',
+      toolInput: toolInput || {},
+      sessionId: sessionId || null,
+      cwd: cwd || null,
+      hookEvent: 'canUseTool',
+      createdAt: Date.now(),
+    };
+    pending.set(id, { request, resolve });
+    broadcast({ type: 'permission:request', request });
+  });
+}
 
 // Safety-net sweep: a held request whose socket never fires 'close' (CLI wedged
 // without exiting) would otherwise pin its entry — and its held HTTP socket —
@@ -20,7 +51,7 @@ setInterval(() => {
   for (const [id, slot] of pending.entries()) {
     if (now - slot.request.createdAt > PENDING_TTL_MS) {
       pending.delete(id);
-      try { slot.res.json({ decision: 'deny', reason: '权限请求超时（15 分钟未响应）' }); } catch {}
+      settle(slot, { decision: 'deny', reason: '权限请求超时（15 分钟未响应）' });
       broadcast({ type: 'permission:resolved', id, decision: 'timeout' });
     }
   }
@@ -69,8 +100,10 @@ router.post('/permissions/request', (req, res) => {
 
 /**
  * POST /api/permissions/respond/:id
- * Body: { decision: 'allow'|'deny', reason? }
- * Resolves the held request, which lets the hook bridge return to CLI.
+ * Body: { decision: 'allow'|'deny', reason?, updatedInput? }
+ * 把用户的决定送回等待方:旧 hook 走 HTTP res,SDK canUseTool 走进程内 resolve。
+ * updatedInput:AskUserQuestion 的 {questions, answers}、或被用户改过的工具入参,
+ * canUseTool 据此返回 {behavior:'allow', updatedInput}。
  */
 router.post('/permissions/respond/:id', (req, res) => {
   const slot = pending.get(req.params.id);
@@ -82,8 +115,9 @@ router.post('/permissions/respond/:id', (req, res) => {
   if (!slot) return res.json({ ok: true, alreadyResolved: true });
   const decision = req.body?.decision === 'allow' ? 'allow' : 'deny';
   const reason = req.body?.reason || null;
+  const updatedInput = req.body?.updatedInput;
   pending.delete(req.params.id);
-  try { slot.res.json({ decision, reason }); } catch {}
+  settle(slot, { decision, reason, updatedInput });
   broadcast({ type: 'permission:resolved', id: req.params.id, decision });
   res.json({ ok: true });
 });
@@ -107,7 +141,7 @@ export function dropPendingForSession(sessionId) {
   for (const [id, slot] of pending.entries()) {
     if (slot.request.sessionId === sessionId) {
       pending.delete(id);
-      try { slot.res.json({ decision: 'deny', reason: 'CLI 进程已退出' }); } catch {}
+      settle(slot, { decision: 'deny', reason: 'CLI 进程已退出' });
       broadcast({ type: 'permission:resolved', id, decision: 'deny' });
     }
   }

@@ -201,7 +201,8 @@ function findFirstRealUser(head) {
     if (r.isMeta) continue;
     const content = normalizeContent(r.message?.content);
     const text = content.filter((c) => c.type === 'text').map((c) => c.text).join('\n').trim();
-    const cmdPrompt = reconstructCommandPrompt(text);
+    // CI-5:列表/标题判定用 bareToName —— 纯 `/skillname`(无 args)也算"真实首条",会话才进列表。
+    const cmdPrompt = reconstructCommandPrompt(text, { bareToName: true });
     // Real prompt = a reconstructable /command, OR plain text that isn't a local
     // command echo. tool_result-only / empty-text records fall through.
     if (cmdPrompt) return { record: r, text: cmdPrompt };
@@ -426,13 +427,21 @@ function isLocalCommandEcho(text) {
  * bare control command (/clear, /compact, /context) stays hidden so we don't
  * reintroduce the old "斜杠命令多出两条隐藏消息" noise.
  */
-function reconstructCommandPrompt(text) {
+function reconstructCommandPrompt(text, { bareToName = false } = {}) {
   const nameM = text.match(/<command-name>\s*([^<]*?)\s*<\/command-name>/);
   if (!nameM) return null;
   const argsM = text.match(/<command-args>\s*([\s\S]*?)\s*<\/command-args>/);
   const args = argsM ? argsM[1].trim() : '';
-  if (!args) return null;
   const name = nameM[1].trim();
+  if (!args) {
+    // CI-5:无 args 的纯命令(如首条只发 `/skillname`)。
+    //  - 渲染路径(默认 bareToName=false)仍返回 null —— 保持控制命令(/clear /compact /context)
+    //    不冒充用户气泡的既有行为。
+    //  - 列表路径(bareToName=true,findFirstRealUser)返回命令名,让纯 `/skillname` 起的会话
+    //    也能进左侧列表(否则 findFirstRealUser→null→listSessions `if(!firstUser)continue` 整条
+    //    丢弃,用户报告"首条只发斜杠命令的会话不出现在列表")。
+    return bareToName ? (name || null) : null;
+  }
   return name ? `${name} ${args}` : args;
 }
 

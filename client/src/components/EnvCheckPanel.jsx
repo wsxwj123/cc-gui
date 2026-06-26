@@ -30,11 +30,12 @@ export default function EnvCheckPanel({ onDismiss, onRecheck, asModal = true }) 
   }, [onRecheck]);
   useEffect(() => { check(); }, [check]);
 
-  const install = async (key) => {
+  // method:仅 claude 用 'npm' | 'native';其余 target 不传(后端按 target 自带命令)。
+  const install = async (key, method) => {
     try {
       const r = await fetch('/api/env-check/install', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ target: key }),
+        body: JSON.stringify({ target: key, ...(method ? { method } : {}) }),
       });
       const d = await r.json();
       if (d.ok) setLaunched((p) => ({ ...p, [key]: true }));
@@ -71,10 +72,25 @@ export default function EnvCheckPanel({ onDismiss, onRecheck, asModal = true }) 
               {!ok && row.key !== 'node' && (
                 launched[row.key]
                   ? <span className="text-[11px] text-success font-body shrink-0">已开终端,装完点重新检测</span>
-                  : <button onClick={() => install(row.key)}
-                      className="shrink-0 flex items-center gap-1 px-2.5 py-1 rounded text-[12px] font-medium text-white bg-accent hover:bg-accent-hover">
-                      <Download size={12} />安装
-                    </button>
+                  : row.key === 'claude'
+                    // CI-2:claude 给 npm / native 两个选项(原来只有 native=官方安装器,Win 上
+                    // claude.ai 常被墙;npm 走 node、看得见进度、墙内更稳)。
+                    ? <div className="shrink-0 flex items-center gap-1.5">
+                        <button onClick={() => install('claude', 'npm')}
+                          title="npm install -g @anthropic-ai/claude-code(走 node,看得见进度;墙内更稳)"
+                          className="flex items-center gap-1 px-2.5 py-1 rounded text-[12px] font-medium text-white bg-accent hover:bg-accent-hover">
+                          <Download size={12} />npm 安装
+                        </button>
+                        <button onClick={() => install('claude', 'native')}
+                          title="官方安装器(claude.ai/install;墙内可能连不上)"
+                          className="px-2.5 py-1 rounded text-[12px] font-medium text-ink border border-canvas-deep hover:bg-canvas-deep/40">
+                          官方安装器
+                        </button>
+                      </div>
+                    : <button onClick={() => install(row.key)}
+                        className="shrink-0 flex items-center gap-1 px-2.5 py-1 rounded text-[12px] font-medium text-white bg-accent hover:bg-accent-hover">
+                        <Download size={12} />安装
+                      </button>
               )}
               {!ok && row.key === 'node' && (
                 <span className="text-[11px] text-error font-body shrink-0">缺失(请重装 node 后重开)</span>

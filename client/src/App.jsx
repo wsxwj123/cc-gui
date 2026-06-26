@@ -2427,6 +2427,29 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     return () => window.removeEventListener('cgui:sessions-changed', onChange);
   }, [selectedSession?.sessionId, selectedSession?.projectHash]);
 
+  // 兜底去重(图1「频繁切换会话时同一条回复渲染两次」根治):每当本会话持久化 messages 变化
+  // (挂载加载 / 列表刷新 / 文件监听 / finally 提交),只要当前没有正在跑的本会话流,就把已落盘
+  // 的回合从 chatMessages 里清掉。根因:快速切走切回时,handleSend 的 finally 因 nav-away 提前
+  // break(getLocalSession 不再等于 finalizeSid),setChatMessages([]) 被跳过 → messages 与
+  // chatMessages 同时含该回合 → 渲染两遍。上面那条 reconcile 只在"文件事件命中当前会话"时触发,
+  // 切走切回会漏;这条以 messages 为依赖,覆盖所有提交路径。流式中(本会话)跳过——此时流式
+  // 缓冲才是真相源。判定复用同一套 tkey:整轮(末条用户消息)已落盘 → 清空全部本地副本。
+  useEffect(() => {
+    if (streamingRef.current && streamOwnerKeyRef.current === sessionQueueKey) return;
+    setChatMessages((prev) => {
+      if (!prev.length) return prev;
+      const tkey = (m) => {
+        const t = Array.isArray(m.text) ? m.text.join('') : (m.text || '');
+        return `${m.type}|${(t || '').slice(0, 80)}`;
+      };
+      const known = new Set(messages.map(tkey));
+      const lastUser = [...prev].reverse().find((m) => m.type === 'user');
+      if (lastUser && known.has(tkey(lastUser))) return [];
+      const next = prev.filter((m) => !known.has(tkey(m)));
+      return next.length === prev.length ? prev : next;
+    });
+  }, [messages, sessionQueueKey]);
+
   // Detect "this session has a background CLI proc still running" — happens
   // when the user navigated away while it was streaming. We poll the active-
   // agents endpoint and look for a chat-process with our sessionId. If found,
@@ -2760,6 +2783,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     let accumulatedThinking = '';
     let currentToolCalls = [];
     let orderedBlocks = [];  // [{ type, blockIndex, content?, toolCall? }, ...]
+    let streamClosedNoticed = false; // CG-2:子代理打穿 canUseTool 通道的兜底提示,每轮只提示一次
     let resultUsage = null;      // result 事件携带的本轮 usage(CLI 聚合口径)
     let resultCostUsd = null;    // result 事件携带的 total_cost_usd(CLI 权威成本)
     try {
@@ -3239,6 +3263,17 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             }
             for (const block of (Array.isArray(event.message.content) ? event.message.content : [])) {
               if (block.type === 'tool_result') {
+                // CG-2 兜底:本回合先委派了子代理 → SDK 的 canUseTool 通道被打穿 → 之后的
+                // ExitPlanMode/AskUserQuestion/授权请求会报 "Tool permission request failed:
+                // Stream closed"(卡片弹不出)。给一条清晰温和提示,免得用户对着正文里
+                // 一串报错发懵。每轮只提示一次。
+                if (block.is_error && !streamClosedNoticed) {
+                  const _et = typeof block.content === 'string' ? block.content : JSON.stringify(block.content || '');
+                  if (/permission request failed[\s\S]*stream closed/i.test(_et)) {
+                    streamClosedNoticed = true;
+                    setProviderSwitchNotice({ text: '本回合先委派了子代理,SDK 的授权弹窗通道被打断(已知限制),计划/提问卡片这次弹不出。新开一条消息重做该操作即可正常。' });
+                  }
+                }
                 // If this result closes a Task tool_use, mark the subagent done.
                 const store = useStore.getState();
                 if (store.activeAgents[block.tool_use_id]) {

@@ -151,7 +151,16 @@ async function getClaudeVersion(claudePath) {
     // 优先用 detectInstall 解析到的绝对路径,确保"报告的版本"与"要更新的那个 claude"
     // 是同一个(否则 mac 上 login-shell PATH 与 Node 进程 PATH 顺序不同可能取到不同安装)。
     // `claude --version` → "2.1.160 (Claude Code)"，取首个 x.y.z
-    const { stdout } = await execFileP(claudePath || 'claude', ['--version'], { timeout: 8000 });
+    // CI-1:Windows 上 npm 装的是 claude.cmd/.ps1 或 `where claude` 给的是无扩展名裸路径
+    // (如 ...\npm\claude)——Node execFile **不能直接执行**它们(.cmd 抛 EINVAL、无扩展名抛
+    // ENOENT),必须经 cmd.exe /c(cmd 会按 PATHEXT 把裸路径解析成 .cmd)。否则版本检测/环境
+    // tab 永远 installed:false(用户报告:npm 装好仍扫不到)。与 cli-check.js 同款修法。
+    let stdout;
+    if (process.platform === 'win32') {
+      ({ stdout } = await execFileP('cmd.exe', ['/c', claudePath || 'claude', '--version'], { timeout: 8000 }));
+    } else {
+      ({ stdout } = await execFileP(claudePath || 'claude', ['--version'], { timeout: 8000 }));
+    }
     const m = String(stdout).match(/(\d+\.\d+\.\d+)/);
     return m ? m[1] : null;
   } catch {
@@ -500,10 +509,12 @@ async function detectUv() {
   return { installed: false };
 }
 
-function envInstallCmd(target, proxyUrl = null) {
+function envInstallCmd(target, proxyUrl = null, method = null) {
   const win = process.platform === 'win32';
   const mac = process.platform === 'darwin';
-  if (target === 'claude') return installCmdFor();
+  // CI-2:claude 支持选 npm / native。原来恒 native(`irm claude.ai/install.ps1`),Windows 上
+  // claude.ai 常被墙;npm 走 `npm install -g @anthropic-ai/claude-code`(GUI 能开=node 在)。
+  if (target === 'claude') return installCmdFor(proxyUrl, method === 'npm' ? 'npm' : 'native');
   if (target === 'uv') {
     // Windows 同 claude native:PowerShell 5.1 的 irm 不读 HTTP_PROXY 环境变量,
     // 必须在进程内注入 .NET DefaultWebProxy,否则墙内卡死(见 installCmdFor 注释)。
@@ -545,9 +556,10 @@ router.get('/env-check', async (req, res) => {
 
 router.post('/env-check/install', async (req, res) => {
   const target = String(req.body?.target || '');
+  const method = req.body?.method === 'npm' ? 'npm' : null; // CI-2:claude 可选 npm 安装
   try {
     const proxyUrl = await detectLocalProxy().catch(() => null);
-    const cmd = envInstallCmd(target, proxyUrl);
+    const cmd = envInstallCmd(target, proxyUrl, method);
     if (!cmd) return res.status(400).json({ ok: false, error: 'unknown target: ' + target });
     // win + uv:代理已注入 PS 命令内,不让 .bat 再 set(对 irm 无效且重复)。其余照旧由
     // launchInTerminal 在脚本里 export/set HTTP_PROXY。

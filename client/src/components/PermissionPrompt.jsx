@@ -112,7 +112,16 @@ function PlanReviewCard({ req, onResolve, onApprove, processing, position, hydra
           <textarea
             value={feedback}
             onChange={(e) => setFeedback(e.target.value)}
-            placeholder="告诉 Claude 该如何修改这份计划..."
+            onKeyDown={(e) => {
+              // 与输入框一致:Cmd/Ctrl+Enter 提交修改意见,裸 Enter 换行。stopPropagation
+              // 防冒泡到卡片 window 级 Enter 监听(那个会触发"按计划执行")。
+              if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+                e.preventDefault();
+                e.stopPropagation();
+                if (feedback.trim() && !processing) submitRefine();
+              }
+            }}
+            placeholder="告诉 Claude 该如何修改这份计划...（⌘/Ctrl+Enter 提交）"
             rows={3}
             autoFocus
             className="w-full text-[12px] font-body px-2.5 py-2 rounded border border-canvas-deep bg-white text-ink resize-none"
@@ -188,7 +197,11 @@ function AskQuestionCard({ req, onAnswer, processing, position, hydrate }) {
     const text = questions
       .map((q, qi) => `【${q.header || '问题' + (qi + 1)}】${q.question}\n→ ${answerOf(qi)}`)
       .join('\n\n');
-    onAnswer(req, text);
+    // 结构化 answers:key=问题原文,value=所选 label(多选用"、"拼)。SDK canUseTool 据此
+    // 返回 {behavior:'allow', updatedInput:{questions, answers}},模型干净收到。
+    const answers = {};
+    questions.forEach((q, qi) => { answers[q.question] = answerOf(qi); });
+    onAnswer(req, text, { questions, answers });
   };
 
   useEffect(() => {
@@ -378,11 +391,6 @@ function PendingPill({ req, position }) {
  * currently-selected session — other sessions' requests stay in the store
  * but don't render here.
  */
-// Reason fed back to the CLI when the user approves a plan. Denying ExitPlanMode
-// with this (rather than allowing it) ends the one-shot headless planning turn
-// cleanly; the caller then re-spawns an acceptEdits turn to execute.
-const PLAN_APPROVED_REASON = '用户已批准此计划。请立即结束本回合，不要再调用任何工具或输出确认请求；系统会自动以执行模式重新开始执行计划。';
-
 // hydrate:挂载时是否从 /api/permissions/pending 拉取并自动放行白名单项。同一会话
 // 同时挂多个 PermissionPrompt(如 ChatInput 与子代理视图)时,只让其中一个 hydrate,
 // 避免对同一 id 重复 respond。两个实例共享 store,审批/驳回按 id 幂等。
@@ -464,13 +472,15 @@ export function PermissionPrompt({ sessionId = null, onExecutePlan = null, hydra
     : all.filter((p) => !selectedSid || p.sessionId === selectedSid);
   if (mine.length === 0) return null;
 
-  const resolve = async (req, decision, reason) => {
+  const resolve = async (req, decision, reason, updatedInput) => {
     setBusyId(req.id);
     try {
       await fetch(`/api/permissions/respond/${req.id}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ decision, reason }),
+        // updatedInput:SDK canUseTool 用 —— AskUserQuestion 的 {questions, answers}
+        // 或被用户改过的工具入参。仅在提供时附带,保持旧 deny 路径不变。
+        body: JSON.stringify({ decision, reason, ...(updatedInput !== undefined ? { updatedInput } : {}) }),
       });
     } catch {}
     removePendingPermission(req.id);
@@ -488,17 +498,29 @@ export function PermissionPrompt({ sessionId = null, onExecutePlan = null, hydra
     await Promise.all([req, ...sameTool].map((r) => resolve(r, 'allow')));
   };
 
-  // Plan approved: end the planning turn (deny w/ approved-reason), then ask the
-  // parent to re-spawn an acceptEdits turn that actually executes the plan.
+  // Plan approved (SDK 引擎):allow ExitPlanMode → 模型退出 plan、在同一回合继续执行
+  // (不再 deny+另起回合)。再把活跃 query 切到 acceptEdits,使后续写从"plan 硬拦"
+  // 变为"经 canUseTool 弹窗"。onExecutePlan 仅用于同步 GUI 档位状态(已去掉 respawn)。
   const approvePlan = async (req) => {
-    await resolve(req, 'deny', PLAN_APPROVED_REASON);
+    await resolve(req, 'allow');
+    try {
+      await fetch('/api/chat/permission-mode', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sessionId: req.sessionId, mode: 'acceptEdits' }),
+      });
+    } catch {}
     onExecutePlan?.();
   };
 
-  // AskUserQuestion answered: deny the tool (CLI can't run it headless) but pass
-  // the user's choice as the reason — the model reads it and continues.
-  const answerQuestion = async (req, answerText) => {
-    await resolve(req, 'deny', `[用户已通过界面回答]\n${answerText}\n请直接据此继续，不要再次调用 AskUserQuestion。`);
+  // AskUserQuestion answered (SDK 引擎):allow + 结构化 answers,模型干净收到答案
+  // (tool 视为成功)。跳过(无结构化答案)回退 deny + 备注,模型读文本继续。
+  const answerQuestion = async (req, answerText, structured) => {
+    if (structured && structured.answers) {
+      await resolve(req, 'allow', null, { questions: structured.questions, answers: structured.answers });
+    } else {
+      await resolve(req, 'deny', `[用户已通过界面回答]\n${answerText}\n请直接据此继续，不要再次调用 AskUserQuestion。`);
+    }
   };
 
   // Opt-in batch: resolve the SAME request (same tool + identical input) in the

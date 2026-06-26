@@ -414,12 +414,24 @@ router.get('/mcp/:name/ping', async (req, res) => {
     assertSafeName(name);
     const start = Date.now();
     let output, status = 'ok', detail = '';
+    // CI-3:`claude mcp get` 不是纯读配置——它会真去 spawn+连接 MCP server 验证。stdio server
+    // 经 uvx/npx 冷启动首次可能 >10s(用户报 16s 即 Command failed)。① 超时给足 40s;② 冷启
+    // 暖机失败(超时/Failed to connect)等 1.5s 重试一次(第二次缓存已暖,常成功)。
+    const getOnce = (t) => runClaude(['mcp', 'get', name], { timeout: t });
+    const looksTransient = (e) => /timed out|ETIMEDOUT|Failed to connect|not connected|disconnected/i
+      .test((e?.stderr?.toString() || '') + ' ' + (e?.message || ''));
     try {
-      output = await runClaude(['mcp', 'get', name]);
+      output = await getOnce(40000);
     } catch (err) {
-      output = err.stderr?.toString() || err.message;
-      status = 'error';
-      detail = err.message;
+      if (looksTransient(err)) {
+        await new Promise((r) => setTimeout(r, 1500));
+        try { output = await getOnce(40000); }
+        catch (err2) { output = err2.stderr?.toString() || err2.message; status = 'error'; detail = err2.message; }
+      } else {
+        output = err.stderr?.toString() || err.message;
+        status = 'error';
+        detail = err.message;
+      }
     }
     // Parse the actual connection status from CLI output (not just exit code):
     //   "Status: ✓ Connected" → ok
@@ -463,6 +475,13 @@ router.get('/mcp/:name/ping', async (req, res) => {
     if (status === 'error' && !urlMatch) {
       const cfg = await readRawMcpConfig(name);
       if (cfg) stderr = await probeStdioStderr(cfg);
+    }
+    // CI-3:npx/uvx 缓存损坏(常见 Windows:_npx 下半截依赖丢失)报 ERR_MODULE_NOT_FOUND /
+    // Cannot find package —— 这是用户机环境问题,给可操作修复提示,别只甩原始堆栈。
+    if (stderr && /ERR_MODULE_NOT_FOUND|Cannot find (package|module)/i.test(stderr)) {
+      stderr = '⚠️ npx/uvx 缓存损坏(常见于 Windows)。修复:终端运行 `npm cache clean --force`,'
+        + '或删除「用户目录\\AppData\\Local\\npm-cache\\_npx」后重试;uvx 则运行 `uv cache clean`。\n\n原始报错:\n'
+        + stderr;
     }
     res.json({
       name, status,

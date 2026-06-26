@@ -49,8 +49,16 @@ function systemToText(system) {
   return '';
 }
 
+// CI-4:已知无 vision 的 OpenAI 兼容上游(对 image_url 报 400 "unknown variant 'image_url'")。
+// 按 baseURL 命中,后续可扩展。命中时把 image block 剥成文本占位,避免整个请求 400 失败。
+const NO_VISION_HOSTS = /deepseek/i;
+function upstreamNoVision() {
+  return !!(upstream?.baseURL && NO_VISION_HOSTS.test(upstream.baseURL));
+}
+
 function anthropicToOpenAIMessages(messages, system) {
   const out = [];
+  const noVision = upstreamNoVision();
   const sys = systemToText(system);
   if (sys) out.push({ role: 'system', content: sys });
 
@@ -89,14 +97,20 @@ function anthropicToOpenAIMessages(messages, system) {
         else text = c == null ? '' : JSON.stringify(c);
         toolResults.push({ role: 'tool', tool_call_id: block.tool_use_id, content: text });
       } else if (block.type === 'image') {
-        const source = block.source || {};
-        if (source.type === 'base64' && source.data) {
-          imageParts.push({
-            type: 'image_url',
-            image_url: { url: `data:${source.media_type || 'image/png'};base64,${source.data}` },
-          });
-        } else if (source.type === 'url' && source.url) {
-          imageParts.push({ type: 'image_url', image_url: { url: source.url } });
+        if (noVision) {
+          // CI-4:deepseek 等无 vision 上游不认 image_url → 剥成文本占位,模型据此说明
+          // "看不到图片",整个请求不再 400(前端也会提前提示,这里是兜底)。
+          textParts.push('[图片已忽略:当前 provider 不支持视觉输入]');
+        } else {
+          const source = block.source || {};
+          if (source.type === 'base64' && source.data) {
+            imageParts.push({
+              type: 'image_url',
+              image_url: { url: `data:${source.media_type || 'image/png'};base64,${source.data}` },
+            });
+          } else if (source.type === 'url' && source.url) {
+            imageParts.push({ type: 'image_url', image_url: { url: source.url } });
+          }
         }
       }
     }

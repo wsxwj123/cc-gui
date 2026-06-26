@@ -4,8 +4,9 @@ import { resolve as pathResolve, dirname, join as pathJoin, isAbsolute } from 'n
 import { fileURLToPath } from 'node:url';
 import { readFileSync, statSync, writeFileSync, unlinkSync, readdirSync, watch, existsSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
+import { query } from '@anthropic-ai/claude-agent-sdk';
 import { getDefaultModel } from '../services/model-resolver.js';
-import { dropPendingForSession } from './permissions.js';
+import { dropPendingForSession, requestPermission } from './permissions.js';
 import { broadcast } from '../index.js';
 
 // T2: 回合完成 WS 通知。前端切走会话时 SSE fetch 已被 abort(I4 渲染隔离的
@@ -184,6 +185,150 @@ export function getActiveChatProcesses() {
 const VALID_EFFORTS = new Set(['low', 'medium', 'high', 'xhigh', 'max']);
 const VALID_PERMISSION_MODES = new Set(['default', 'acceptEdits', 'plan', 'bypassPermissions']);
 
+// ── SDK 引擎(@anthropic-ai/claude-agent-sdk)进程内辅助 ──────────────────────
+// canUseTool 回调能拿到 ExitPlanMode / AskUserQuestion(裸 CLI -p 不注册这俩工具),
+// 从而恢复"规划确认卡片"和"问题选择弹窗"。query() 吐的消息与裸 stream-json 同构
+// (assistant/user/result/system/stream_event),逐条 JSON.stringify 即可按原契约喂 SSE。
+
+// 读类工具:GUI acceptEdits/plan 档位下自动放行(不弹窗),写/Bash 等仍弹窗。
+const READ_CLASS = new Set([
+  'Read', 'Glob', 'Grep', 'LS', 'TodoWrite', 'TaskCreate', 'TaskUpdate', 'TaskList',
+  'TaskGet', 'TaskOutput', 'NotebookRead', 'Skill', 'WebFetch', 'WebSearch',
+]);
+// 写类工具:acceptEdits(接受编辑)下自动放行 —— 名副其实"改文件不弹窗"(对齐官方 acceptEdits);
+// plan 下永远拦(只读探索)。Bash/执行类与 MCP 不在此列,接受编辑下仍弹窗。
+const WRITE_CLASS = new Set(['Edit', 'MultiEdit', 'Write', 'NotebookEdit']);
+
+let sdkCounter = 0;
+
+// 动态解析用户已装 claude(路径绝不写死,便于公开版在别人机器上跑)。解析到则让 SDK
+// 指向它(避免其自带 ~237M 二进制);解析不到返回 null,SDK 回落自带二进制。PATH 已在
+// index.js 的 expandClaudePath() 启动时补全(含 ~/.local/bin 等)。
+let _userClaudePath; // undefined=未解析, string=路径, null=失败
+function resolveUserClaude() {
+  if (_userClaudePath !== undefined) return _userClaudePath;
+  _userClaudePath = null;
+  try {
+    if (process.platform === 'win32') {
+      const w = resolveWinClaude();
+      if (w && /\.exe$/i.test(w)) _userClaudePath = w; // SDK 要可执行;.cmd 驱动不了,回落自带
+    } else {
+      const out = execFileSync('which', ['claude'], { timeout: 5000 }).toString().trim();
+      if (out) _userClaudePath = out.split(/\r?\n/)[0];
+    }
+  } catch {}
+  return _userClaudePath;
+}
+
+// 可控异步输入流:首条用户消息推进去后保持打开作 control 通道(setPermissionMode /
+// interrupt 仅 streaming-input 模式可用),回合 result 到达再 close,session 干净收尾。
+function makeInputQueue() {
+  const q = [];
+  let waiting = null;
+  let closed = false;
+  return {
+    push(msg) {
+      if (closed) return;
+      if (waiting) { const w = waiting; waiting = null; w({ value: msg, done: false }); }
+      else q.push(msg);
+    },
+    close() {
+      closed = true;
+      if (waiting) { const w = waiting; waiting = null; w({ value: undefined, done: true }); }
+    },
+    iterable: {
+      [Symbol.asyncIterator]() { return this; },
+      next() {
+        if (q.length) return Promise.resolve({ value: q.shift(), done: false });
+        if (closed) return Promise.resolve({ value: undefined, done: true });
+        return new Promise((resolve) => { waiting = resolve; });
+      },
+      return() { closed = true; return Promise.resolve({ value: undefined, done: true }); },
+    },
+  };
+}
+
+// 把一行消息送给 SSE:有活跃监听(已 attach)→ 实时写;否则回落 earlyLines 缓冲,
+// 供下次 /stream 重连回放(detach-don't-abort)。
+function deliverLine(slot, line) {
+  if (slot.listeners.size) { for (const fn of slot.listeners) { try { fn(line); } catch {} } }
+  else if (slot.earlyLines.length < MAX_EARLY_LINES) slot.earlyLines.push(line);
+}
+
+// 消息泵结束(result 后 generator 自然结束 / 出错 / 中断)收尾一次。
+function finishSlot(slot, procId) {
+  if (slot.pumpEnded) return;
+  slot.pumpEnded = true;
+  if (slot.exitCode === null) slot.exitCode = 0;
+  slot.finishedAt = Date.now();
+  try { slot.nulWatcher?.close(); } catch {}
+  sweepWinNulFiles(slot.cwd);
+  if (slot.sessionId) { try { dropPendingForSession(slot.sessionId); } catch {} }
+  // done:client 据此结束 SSE 读取。attach 中直接发;否则缓冲,等 attach 回放后收尾。
+  deliverLine(slot, JSON.stringify({ type: 'done', exitCode: slot.exitCode }));
+  setTimeout(() => activeProcesses.delete(procId), 60_000);
+}
+
+// 统一权限回调:复刻旧 hook 的集中分级。AskUserQuestion / ExitPlanMode 必弹卡;普通工具
+// 按 slot.guiMode(可被 /chat/permission-mode 中途改)放行或弹窗。
+// MCP 自动放行:GUI 里勾了"自动执行"的 server,其工具(mcp__<server>__*)直接放行不弹窗。
+// 列表 ~/.claude/gui/mcp-autoapprove.json(GUI 写)。旧版在 permission-bridge hook 里读,
+// 迁 SDK 后那个 hook 不再被调,必须在 canUseTool 里补回(否则勾了自动执行仍每次弹窗)。
+function mcpAutoApproved(toolName) {
+  if (!/^mcp__/.test(toolName)) return false;
+  try {
+    const list = JSON.parse(readFileSync(pathJoin(homedir(), '.claude', 'gui', 'mcp-autoapprove.json'), 'utf8'));
+    if (!Array.isArray(list) || !list.length) return false;
+    const seg = toolName.replace(/^mcp__/, '').split('__')[0];
+    const norm = (s) => String(s).replace(/[^a-z0-9]/gi, '_').toLowerCase();
+    return list.some((n) => n === seg || norm(n) === norm(seg));
+  } catch { return false; }
+}
+
+function makeCanUseTool(slot) {
+  return async (toolName, input) => {
+    const ask = () => requestPermission({ toolName, toolInput: input, sessionId: slot.sessionId, cwd: slot.cwd });
+    if (toolName === 'AskUserQuestion') {
+      const r = await ask();
+      if (r.decision === 'allow') {
+        const ui = (r.updatedInput && typeof r.updatedInput === 'object')
+          ? r.updatedInput : { questions: input.questions || [], answers: {} };
+        return { behavior: 'allow', updatedInput: ui };
+      }
+      return { behavior: 'deny', message: r.reason || '用户取消了提问' };
+    }
+    if (toolName === 'ExitPlanMode') {
+      const r = await ask();
+      if (r.decision === 'allow') {
+        // 批准计划 → 切到执行档(写仍弹窗)。SDK 模式切换由前端额外 POST /chat/permission-mode
+        // 完成;这里更新 guiMode 供本回合后续 canUseTool 判定。
+        slot.guiMode = 'acceptEdits';
+        return { behavior: 'allow', updatedInput: input };
+      }
+      return { behavior: 'deny', message: r.reason || '用户要求修改计划' };
+    }
+    const mode = slot.guiMode;
+    if (mode === 'bypassPermissions') return { behavior: 'allow', updatedInput: input };
+    // 接受编辑:只读类 + 文件写入/编辑类自动放行(名副其实=改文件不弹窗,对齐官方 acceptEdits);
+    // Bash/执行类与 MCP 仍走下面的弹窗。这才和"默认"拉开区别(默认下改文件也要弹窗)。
+    if (mode === 'acceptEdits' && (READ_CLASS.has(toolName) || WRITE_CLASS.has(toolName))) {
+      return { behavior: 'allow', updatedInput: input };
+    }
+    // plan = 只读探索:除写类(SDK plan 模式本就拦)外,探索工具(Bash/Read/Grep 等)一律自动
+    // 放行,复刻旧 permission-bridge 的 plan 行为。ExitPlanMode/AskUserQuestion 已在上面单独处理。
+    if (mode === 'plan') {
+      if (!WRITE_CLASS.has(toolName)) return { behavior: 'allow', updatedInput: input };
+    }
+    if (mcpAutoApproved(toolName)) return { behavior: 'allow', updatedInput: input };
+    const r = await ask();
+    if (r.decision === 'allow') {
+      const ui = (r.updatedInput && typeof r.updatedInput === 'object') ? r.updatedInput : input;
+      return { behavior: 'allow', updatedInput: ui };
+    }
+    return { behavior: 'deny', message: r.reason || '用户拒绝执行该工具' };
+  };
+}
+
 router.post('/chat', async (req, res) => {
   const {
     prompt, sessionId, cwd,
@@ -218,366 +363,184 @@ router.post('/chat', async (req, res) => {
     });
   }
 
-  // `--print` + `--output-format=stream-json` requires `--verbose` on recent CLI versions,
-  // otherwise the CLI refuses to start and exits with code 1 before any stream data.
-  // `--include-partial-messages` switches the CLI from per-message snapshots to
-  // token-level `stream_event` deltas (content_block_delta etc.), letting the GUI
-  // render text/thinking/tool input as it streams in, matching the CLI terminal UX.
-  // W3②:prompt 不再走 -p 位置参数,改 stream-json 从 stdin 写入 —— stdin 保持
-  // 打开作为 control 通道,支持回合中途 set_permission_mode(进程内即时切模式,
-  // plan 模式切出立即生效)。CLI 2.1.170 实测:协议返回 control_response success,
-  // /compact 等斜杠命令经 stdin 消息同样生效,result 后 stdin.end() 进程干净退出。
-  const args = [
-    '-p',
-    '--input-format', 'stream-json',
-    '--output-format', 'stream-json',
-    '--verbose',
-    '--include-partial-messages',
-    '--model', model,
-  ];
-  // 仅在客户端显式传入时注入(目前只有「重做此工具」功能用)。GUI 不自作主张往系统
-  // 提示里塞东西 —— CLAUDE.md 各层级与内置系统提示由 claude code 启动时自动加载,与 GUI 无关。
-  // (NUL 垃圾文件不靠系统提示防,改由 chat 的实时 watcher 兜底删除,见 startWinNulWatcher。)
-  if (typeof appendSystemPrompt === 'string' && appendSystemPrompt.trim()) {
-    args.push('--append-system-prompt', appendSystemPrompt.trim().slice(0, 8000));
-  }
-  // 活跃 Agent / 模式开关(BG5):把会话切到某个 ~/.claude/agents/<name> 当主控
-  // (CLI --agent),主控可经 Task 委派子代理 —— 复刻 opencode 的 orchestrator 模式。
-  // 仅在新会话(无 sessionId)首轮注入:--agent 是会话级设定,resume 时再传 CLI 会拒绝。
-  if (typeof agent === 'string' && /^[a-z0-9][a-z0-9-]{0,63}$/.test(agent) && !sessionId) {
-    args.push('--agent', agent);
-  }
-  if (sessionId) args.push('--resume', sessionId);
-  if (effort && VALID_EFFORTS.has(effort)) args.push('--effort', effort);
-  // Permission mode: default | acceptEdits | plan | bypassPermissions.
-  // bypassPermissions needs the `--dangerously-skip-permissions` flag instead
-  // (CLI rejects `--permission-mode bypassPermissions` directly without it).
-  //
-  // IMPORTANT: we always pass --permission-mode explicitly (including 'default')
-  // so that any settings.json default (`skipDangerousModePermissionPrompt: true`,
-  // a saved permissionMode, etc.) does NOT silently win. Previously, picking
-  // 'default' in the GUI sent no flag, and the CLI fell back to the user's
-  // settings, which is why every mode "felt like bypass".
   const chosenMode = (permissionMode && VALID_PERMISSION_MODES.has(permissionMode))
-    ? permissionMode
-    : 'default';
-  // GUI semantics override:
-  // - GUI's "acceptEdits" is REDEFINED to mean "read-class auto, write-class
-  //   prompt" (CLI's own acceptEdits is the opposite: writes auto). We pass
-  //   --permission-mode default to the CLI so everything routes through our
-  //   PreToolUse hook, then the hook auto-allows tools in the safe list and
-  //   prompts for the rest.
-  // - 'default' / 'plan' pass through unchanged.
-  // - 'bypassPermissions' REDEFINED:auto-allow all EXCEPT AskUserQuestion.
-  //   原实现走 --dangerously-skip-permissions 彻底跳过 hook → AskUserQuestion
-  //   在 -p mode 被 CLI reject(headless 禁用) → AI 直接用文本提问而不弹窗。
-  //   现在仍注入 hook,只是用 CGUI_BYPASS_ALL_EXCEPT_ASK env 让 hook 对非 ask
-  //   工具立即 auto-allow,AskUserQuestion 仍走 GUI 弹窗。(Bug #10)
-  let cliMode = chosenMode;
-  let autoAllowList = [];
-  let bypassExceptAsk = false;
-  if (chosenMode === 'acceptEdits') {
-    cliMode = 'default';
-    autoAllowList = ['Read', 'Glob', 'Grep', 'LS', 'TodoWrite', 'TaskCreate', 'TaskUpdate', 'TaskList', 'NotebookRead', 'Skill'];
-  } else if (chosenMode === 'bypassPermissions') {
-    // 放任模式 = cc 原生 --dangerously-skip-permissions:彻底跳过 hook + 文件沙箱,
-    // 用户电脑上任何文件都能读/写、任何命令都放行(用户明确要求,纯壳子行为)。
-    // 代价:AskUserQuestion 在 -p headless 下被 CLI 禁用 → AI 退化成文本提问(可接受)。
-    // 之前为保 ask 弹窗改成 default+hook,反而让 cc 文件沙箱重新生效、Downloads 等
-    // cwd 外文件读不了(用户报告 #8 回归)。放任就该无沙箱,这里恢复真 skip。
-    cliMode = 'bypassPermissions';
-  }
-  if (cliMode === 'bypassPermissions') {
-    args.push('--dangerously-skip-permissions');
-  } else {
-    args.push('--permission-mode', cliMode);
-  }
-  // GUI permission bridge — inject a PreToolUse hook that POSTs each tool
-  // call to our server and waits for the user's Allow/Deny click. The hook
-  // is passed inline via --settings, so we never touch the user's real
-  // settings.json — and the hook only fires for this single GUI spawn.
-  // (bypassPermissions 路径上面已 cliMode='default' + bypassExceptAsk,所以
-  //  hook 仍然注入,这里恒真,留这层 if 是为日后真"完全跳过"逃生口预留)
-  let permissionGateEnabled = false;
-  if (cliMode !== 'bypassPermissions') {
-    const hookScript = pathResolve(__dirname, '..', 'hooks', 'permission-bridge.js');
-    // Hook 命令:用 server 自身的 node 绝对路径 + 正斜杠构造,避免两个 Windows 坑:
-    //  ① 裸 `node` 依赖 PATH — claude 子进程(native claude.exe)的 PATH 里未必有
-    //     node,hook 起不来 → 工具调用报错(用户报告的 Windows exit code 49)。
-    //  ② `JSON.stringify(winPath)` 会把反斜杠转义成 `\\`,叠加 --settings 外层 JSON
-    //     再转义 → 传到 node 的路径含双反斜杠。node 在 Windows 也接受正斜杠,改用
-    //     正斜杠 + 简单引号最稳。Mac 上 execPath 无反斜杠,正斜杠替换是 no-op。
-    const nodeBin = (process.execPath || 'node').replace(/\\/g, '/');
-    const hookCommand = `"${nodeBin}" "${hookScript.replace(/\\/g, '/')}"`;
-    // Merge user's existing PreToolUse hooks so any external observers the user
-    // configured keep firing alongside our permission bridge. `--settings`
-    // OVERRIDES same-event arrays from user scope (not union), so without this
-    // merge any tool that relies on PreToolUse silently dies under GUI spawn.
-    // Our bridge runs FIRST in the array; user hooks tail along. They're
-    // expected to be best-effort (`|| true`) anyway.
-    let userPreToolUse = [];
-    try {
-      const userSettingsPath = pathJoin(process.env.HOME || '', '.claude', 'settings.json');
-      const userSettings = JSON.parse(readFileSync(userSettingsPath, 'utf8'));
-      if (Array.isArray(userSettings?.hooks?.PreToolUse)) {
-        userPreToolUse = userSettings.hooks.PreToolUse;
-      }
-    } catch { /* no user settings or unparseable — skip */ }
+    ? permissionMode : 'default';
+  // SDK permissionMode:仅 plan 用 'plan'(让模型产出计划并经 canUseTool 弹 ExitPlanMode);
+  // GUI 的 default/acceptEdits/bypassPermissions 一律用 SDK 'default',放行/弹窗由 canUseTool
+  // 按 slot.guiMode 决定(集中分级,复刻旧 hook 的语义)。
+  const sdkPermMode = chosenMode === 'plan' ? 'plan' : 'default';
 
-    const inlineSettings = {
-      hooks: {
-        PreToolUse: [
-          { hooks: [{ type: 'command', command: hookCommand }] },
-          ...userPreToolUse,
-        ],
-      },
-    };
-    args.push('--settings', JSON.stringify(inlineSettings));
-    permissionGateEnabled = true;
-  }
-  // "Global read" — let Claude reach any file under $HOME by default. Writes
-  // and edits still go through the normal permission flow (unless the user
-  // picked acceptEdits / bypassPermissions). De-duped against explicit addDirs.
+  // additionalDirectories:globalRead → 整个 $HOME 可读;另加显式 addDirs(去重)。
   const dirSet = new Set();
   if (globalRead && process.env.HOME) dirSet.add(process.env.HOME);
   if (Array.isArray(addDirs)) {
-    for (const dir of addDirs) {
-      if (typeof dir === 'string' && isAbsolute(dir)) dirSet.add(dir);
-    }
+    for (const d of addDirs) if (typeof d === 'string' && isAbsolute(d)) dirSet.add(d);
   }
-  for (const d of dirSet) args.push('--add-dir', d);
 
-  let proc;
-  try {
-    // Strip ANTHROPIC_MODEL / CLAUDE_MODEL from the child env so they don't
-    // override the explicit `--model` arg the user just picked in the GUI.
-    // (settings.json is the source of truth; env was overriding it.)
-    const childEnv = { ...process.env };
-    delete childEnv.ANTHROPIC_MODEL;
-    delete childEnv.CLAUDE_MODEL;
-    // Provider ROUTING + AUTH must come solely from settings.json (cc switch and
-    // the GUI rewrite it on every provider switch) or the local OAuth login —
-    // NOT from inherited process env. This server is typically launched from a
-    // Claude-Desktop shell that injects official ANTHROPIC_BASE_URL +
-    // ANTHROPIC_API_KEY + ANTHROPIC_AUTH_TOKEN. Those inherited vars take
-    // precedence in the CLI, so they silently override the mimo/deepseek/proxy
-    // provider the user just switched to: the CLI hits the OFFICIAL endpoint with
-    // a third-party model id and dies with "model may not exist" (and would bill
-    // an official subscription to API credits). Drop all inherited routing/auth
-    // vars so settings.json (or OAuth) wins. Failure mode: a user who relied on a
-    // pure-shell ANTHROPIC_API_KEY with no settings.json provider now gets 401 —
-    // they must configure the provider in the GUI, which is the intended source.
-    // Also drop CLAUDE_CODE_OAUTH_TOKEN: an inherited (stale) value pins the CLI to
-    // an old subscription token and blocks it from refreshing the keychain OAuth on
-    // its own, causing 401 once that token expires. Removing it lets the CLI read
-    // the live keychain (`Claude Code-credentials`) and auto-refresh via refreshToken.
-    for (const k of ['ANTHROPIC_BASE_URL', 'ANTHROPIC_API_URL', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN']) {
-      delete childEnv[k];
-    }
-    // Strip inherited tier-alias overrides. When this server is launched from a
-    // Claude-Desktop shell that had a third-party provider active (deepseek/mimo),
-    // it inherits ANTHROPIC_DEFAULT_{HAIKU,SONNET,OPUS}_MODEL pointing at that
-    // provider's models. These env vars OUTRANK settings.json, so picking the
-    // `opus`/`sonnet`/`haiku` alias (here or in the terminal) silently resolves to
-    // the stale third-party model instead of the official tier — e.g. `opus` →
-    // `deepseek-v4-pro`, which is why the real Opus never appears. The legitimate
-    // per-provider values live in settings.json and still apply after this strip.
-    for (const k of [
-      'ANTHROPIC_DEFAULT_HAIKU_MODEL', 'ANTHROPIC_DEFAULT_SONNET_MODEL', 'ANTHROPIC_DEFAULT_OPUS_MODEL',
-      'ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME', 'ANTHROPIC_DEFAULT_SONNET_MODEL_NAME', 'ANTHROPIC_DEFAULT_OPUS_MODEL_NAME',
-      'ANTHROPIC_REASONING_MODEL', 'ANTHROPIC_SMALL_FAST_MODEL',
-    ]) {
-      delete childEnv[k];
-    }
-    stripHostClaudeEnv(childEnv);
-    // Strip permission-related env so the CLI honours our --permission-mode
-    // flag instead of an inherited override that could force bypass.
-    delete childEnv.ANTHROPIC_PERMISSION_MODE;
-    delete childEnv.CLAUDE_PERMISSION_MODE;
-    delete childEnv.CLAUDE_DANGEROUSLY_SKIP_PERMISSIONS;
-    // Tell the bridge script it's running for a GUI-spawned CLI. Without
-    // this, the script silently allows everything (defensive fallback in
-    // case the hook leaks into user's global settings.json somehow).
-    if (permissionGateEnabled) {
-      childEnv.CGUI_PERMISSION_GATE = '1';
-      childEnv.CGUI_SERVER_PORT = String(process.env.PORT || 6677);
-      if (autoAllowList.length > 0) {
-        childEnv.CGUI_AUTO_ALLOW_TOOLS = autoAllowList.join(',');
-      }
-      // 放任模式新语义:非 AskUserQuestion 一律 auto-allow,ask 仍走 GUI 弹窗。
-      if (bypassExceptAsk) {
-        childEnv.CGUI_BYPASS_ALL_EXCEPT_ASK = '1';
-      }
-      // Plan mode: Claude must be free to EXPLORE (read files, spawn Explore
-      // subagents) before it can produce a plan. The CLI's own --permission-mode
-      // plan already blocks writes and emits ExitPlanMode at the end, so the
-      // bridge should pass everything EXCEPT ExitPlanMode straight through —
-      // otherwise the very first exploration tool (often an `Agent` spawn) sits
-      // gated forever and the turn looks frozen. Only ExitPlanMode pops the
-      // plan-review card.
-      if (chosenMode === 'plan') {
-        childEnv.CGUI_PLAN_MODE = '1';
-      }
-    }
-    console.log('[chat] spawn', JSON.stringify({
-      cwd: workingDir,
-      sessionId: sessionId || null,
-      model,
-      permissionMode: chosenMode,
-      promptPreview: String(prompt).slice(0, 60),
-    }));
-    proc = claudeSpawn(args, {
-      cwd: workingDir,
-      // W3②:stdin 改 pipe —— stream-json 输入模式下 CLI 等的是"消息行",不是
-      // stdin 关闭(旧注释里"pipe 导致 CLI 卡等"是 -p <prompt> 位置参数时代的行为)。
-      // spawn 后立刻写入 user 消息,之后 stdin 留作 control 通道。
-      stdio: ['pipe', 'pipe', 'pipe'],
-      env: childEnv,
-    });
-    // 立刻写入本回合的用户消息。失败(EPIPE 等)由 proc 'error'/'close' 兜底。
-    try {
-      proc.stdin.write(JSON.stringify({
-        type: 'user',
-        message: { role: 'user', content: [{ type: 'text', text: prompt }] },
-      }) + '\n');
-    } catch {}
-  } catch (err) {
-    console.log('[chat] spawn FAILED', err.message);
-    return res.status(500).json({ error: 'spawn claude failed: ' + err.message });
-  }
-  // spawn() with ENOENT returns a ChildProcess with no pid and fires 'error'
-  // asynchronously. Without a pid we have no slot key — surface it now.
-  if (!proc.pid) {
-    proc.on('error', () => {});
-    return res.status(500).json({ error: 'claude CLI not found in PATH (or failed to spawn)' });
-  }
-  const procId = proc.pid.toString();
+  // env:剥掉继承的 ANTHROPIC_* 路由/鉴权 + 宿主 CLAUDE_CODE_* 标识,provider 由
+  // settings.json(或 OAuth 钥匙串)决定。SDK 的 env 选项是"整体替换",传剥好的全量。
+  const childEnv = cleanChildEnv();
+
+  const procId = 'sdk-' + (++sdkCounter);
+  const abort = new AbortController();
+  const input = makeInputQueue();
   const slot = {
-    proc,
-    earlyLines: [],   // JSON-parsed complete lines buffered before /stream attaches
-    earlyTail: '',    // incomplete trailing line not yet terminated by \n
+    proc: null,           // SDK 自管子进程,无直接 proc 句柄(stop 走 interrupt/abort)
+    query: null,
+    input,
+    abort,
+    earlyLines: [],
     earlyErrors: [],
+    listeners: new Set(), // 活跃 SSE 写函数(attach 加,断连删)
     exitCode: null,
+    pumpEnded: false,
     attached: false,
-    // Metadata for the agent monitor panel
     sessionId: sessionId || null,
     cwd: workingDir,
     model,
     promptPreview: String(prompt).slice(0, 80),
     permissionMode: permissionMode || 'default',
+    guiMode: chosenMode,
     startedAt: Date.now(),
   };
   activeProcesses.set(procId, slot);
-
-  // Windows:本回合期间实时清 NUL 垃圾文件(技能里 cmd 风格 `>NUL` 经 Git Bash 当普通
-  // 文件名落盘),抢在 OneDrive 报错前删掉;回合结束在 close 里关掉。
   slot.nulWatcher = startWinNulWatcher(workingDir);
 
-  // Buffer stdout/stderr from the moment of spawn so the first chunk isn't lost
-  // if the client races between POST and GET /stream.
-  proc.stdout.on('data', (chunk) => {
-    if (slot.attached) return; // live handler takes over once attached
-    slot.earlyTail += chunk.toString();
-    const lines = slot.earlyTail.split('\n');
-    slot.earlyTail = lines.pop() || '';
-    for (const line of lines) {
-      if (!line.trim()) continue;
-      if (slot.earlyLines.length < MAX_EARLY_LINES) slot.earlyLines.push(line);
-      // Capture the runtime sessionId from the CLI's init event so the close
-      // handler can clean up pending permission requests even for fresh
-      // drafts (where spawn-time sessionId was null).
-      if (!slot.sessionId) {
-        try {
-          const obj = JSON.parse(line);
-          if (obj.type === 'system' && obj.subtype === 'init' && obj.session_id) {
-            slot.sessionId = obj.session_id;
-          }
-        } catch {}
-      }
-      maybeBroadcastTurnComplete(slot, line);
-    }
-  });
-  proc.stderr.on('data', (chunk) => {
-    if (slot.attached) return;
-    const t = chunk.toString().trim();
-    if (t) slot.earlyErrors.push(t);
-  });
+  // 首条用户消息(streaming-input);保持 input 打开作 control 通道。
+  input.push({ type: 'user', message: { role: 'user', content: String(prompt) } });
 
-  proc.on('close', (code) => {
-    slot.exitCode = code;
-    slot.finishedAt = Date.now();
-    try { slot.nulWatcher?.close(); } catch {} // 关实时 NUL 监听
-    sweepWinNulFiles(workingDir); // 顶层兜底:补扫 watcher 可能漏掉的(事件丢失等)
-    const dur = Date.now() - slot.startedAt;
-    // Drop any pending permission requests for this session — otherwise the
-    // hook bridge process stays blocked forever waiting on the held HTTP
-    // response. We resolve them as denied so the bridge exits cleanly.
-    const effectiveSid = slot.sessionId || sessionId;
-    if (effectiveSid) {
-      try { dropPendingForSession(effectiveSid); } catch {}
+  const options = {
+    model,
+    // 默认 SDK 不带 Claude Code 系统提示 → 必须显式 preset 才复刻 CLI 行为(工具集/CLAUDE.md 等)。
+    systemPrompt: (typeof appendSystemPrompt === 'string' && appendSystemPrompt.trim())
+      ? { type: 'preset', preset: 'claude_code', append: appendSystemPrompt.trim().slice(0, 8000) }
+      : { type: 'preset', preset: 'claude_code' },
+    // 必须含 user/project/local 才加载 settings.json(=第三方 provider 配置)与 CLAUDE.md。
+    settingSources: ['user', 'project', 'local'],
+    includePartialMessages: true,
+    permissionMode: sdkPermMode,
+    canUseTool: makeCanUseTool(slot),
+    // 返回 {continue:true} 的 no-op PreToolUse hook。注:曾以为它修 "Stream closed",经 opus
+    // 实证那是误判(真因是子代理打穿 canUseTool 通道,见 disallowedTools 那段);此 hook 对
+    // TS 无实质作用(官方那条"需 dummy hook"只针对 Python)。保留作无害保险(保持流活性)。
+    hooks: {
+      PreToolUse: [{ hooks: [async () => ({ continue: true })] }],
+    },
+    cwd: workingDir,
+    env: childEnv,
+    additionalDirectories: [...dirSet],
+    abortController: abort,
+    stderr: (d) => { const t = String(d).trim(); if (t) deliverLine(slot, JSON.stringify({ type: 'stderr', text: t })); },
+  };
+  if (effort && VALID_EFFORTS.has(effort)) options.effort = effort;
+  // --agent 仅新会话首轮(会话级设定,resume 时传会被拒)。
+  if (typeof agent === 'string' && /^[a-z0-9][a-z0-9-]{0,63}$/.test(agent) && !sessionId) options.agent = agent;
+  if (sessionId) options.resume = sessionId;
+  const claudePath = resolveUserClaude();
+  if (claudePath) options.pathToClaudeCodeExecutable = claudePath;
+
+  console.log('[chat] sdk', JSON.stringify({
+    procId, cwd: workingDir, sessionId: sessionId || null, model,
+    permissionMode: chosenMode, claudePath: claudePath || '(bundled)',
+    promptPreview: String(prompt).slice(0, 60),
+  }));
+
+  let q;
+  try {
+    q = query({ prompt: input.iterable, options });
+    slot.query = q;
+  } catch (err) {
+    activeProcesses.delete(procId);
+    return res.status(500).json({ error: 'query() failed: ' + err.message });
+  }
+
+  // 消息泵:迭代 SDK 生成器,逐条转 stream-json 行喂 SSE。
+  //
+  // 关闭 input(=stdin)的时机是关键 —— stdin 同时是 control 通道,canUseTool 的响应经它回写。
+  // 过早关(在"中间 result"上关)会让后续回合的 control 请求写不进去 → CLI 等不到响应 →
+  // "Stream closed"、计划/提问卡片弹不出。这是规划模式起子代理后卡片弹不出的真根因(实证:
+  // 子代理跑完先吐一个 result、父进程随后再开一回合调 ExitPlanMode/AskUserQuestion;旧代码在
+  // 那个中间 result 上就 input.close() 关了 stdin)。而 result 事件没有任何字段能区分"中间/最终"
+  // (session_id/subtype/num_turns 实测全一样),唯一可靠信号是时序:最终 result 之后再无事件。
+  // 解法:只有"本回合起过子代理"时才对 result 去抖关闭(随后任何事件即取消=还有回合,最终
+  // result 后 4s 静默到点才真正关);没起子代理的普通回合只有一个 result,立即关——零延迟、零回归。
+  // 同时修好 CG-2(非规划模式"子代理后再要授权"也是同一根因)。
+  let subagentSeen = false;
+  let closeTimer = null;
+  let lastResultLine = null;
+  const cancelClose = () => { if (closeTimer) { clearTimeout(closeTimer); closeTimer = null; } };
+  const finalize = () => {
+    cancelClose();
+    if (lastResultLine) maybeBroadcastTurnComplete(slot, lastResultLine); // 回合完成 WS 只在最终 result 播
+    try { input.close(); } catch {}
+  };
+  (async () => {
+    try {
+      for await (const m of q) {
+        const line = JSON.stringify(m);
+        if (!slot.sessionId && m.type === 'system' && m.subtype === 'init' && m.session_id) {
+          slot.sessionId = m.session_id;
+        }
+        if (m.type === 'assistant' && Array.isArray(m.message?.content)) {
+          for (const b of m.message.content) {
+            if (b?.type === 'tool_use' && (b.name === 'Task' || b.name === 'Agent')) subagentSeen = true;
+          }
+        }
+        deliverLine(slot, line);
+        if (m.type === 'result') {
+          lastResultLine = line;
+          if (subagentSeen) { cancelClose(); closeTimer = setTimeout(finalize, 4000); } // 可能是中间 result,延迟关
+          else finalize();
+        } else if (closeTimer) {
+          cancelClose(); // result 之后又来事件 → 那个 result 不是最终的,取消关闭等下一个
+        }
+      }
+    } catch (e) {
+      if (e?.name !== 'AbortError') {
+        deliverLine(slot, JSON.stringify({ type: 'error', error: e?.message || String(e) }));
+      }
+    } finally {
+      cancelClose();
+      if (lastResultLine) maybeBroadcastTurnComplete(slot, lastResultLine);
+      input.close();
+      finishSlot(slot, procId);
     }
-    console.log(`[chat] proc ${procId} exit code=${code} after ${dur}ms attached=${slot.attached} stdoutLines=${slot.earlyLines.length} stderrLines=${slot.earlyErrors.length}`);
-    if (slot.earlyErrors.length > 0) {
-      console.log(`[chat] proc ${procId} stderr:`, slot.earlyErrors.join(' | ').slice(0, 500));
-    }
-    // Only drop the slot once the client has consumed it (or after 60s grace)
-    if (slot.attached) {
-      // live handler decides when to delete
-    } else {
-      setTimeout(() => activeProcesses.delete(procId), 60_000);
-    }
-  });
-  proc.on('error', (err) => {
-    slot.earlyErrors.push(err.message);
-    slot.exitCode = -1;
-    if (!slot.attached) setTimeout(() => activeProcesses.delete(procId), 60_000);
-  });
+  })();
 
   res.json({ pid: procId, model });
 });
 
-// W3②:回合进行中切换权限模式 —— 向该会话所有存活 CLI 进程的 stdin 写
-// control_request set_permission_mode,进程内立即生效(plan 模式切出后模型
-// 当场停止规划行为)。GUI 模式语义映射:acceptEdits 在 GUI 里被重定义为
-// "default + hook 分级放行",对 CLI 仍是 default;其余直传。best-effort:
-// 老版本 CLI 不响应也无害(客户端还有 ExitPlanMode deny 止血双保险)。
-router.post('/chat/permission-mode', (req, res) => {
+
+// 回合进行中切权限模式 —— SDK setPermissionMode(streaming-input 模式即时生效)。
+// GUI 档位映射:plan→SDK 'plan';其余→SDK 'default'(放行/弹窗由 canUseTool 按 guiMode 判)。
+// 批准计划后"执行"也走这里(前端把档位切到 acceptEdits)。已结束/无 query 的 slot 跳过。
+router.post('/chat/permission-mode', async (req, res) => {
   const { sessionId, mode } = req.body || {};
   if (!sessionId || !mode || !VALID_PERMISSION_MODES.has(mode)) {
     return res.status(400).json({ error: 'sessionId 与合法 mode 必填' });
   }
-  const cliMode = mode === 'acceptEdits' ? 'default' : mode;
+  const sdkMode = mode === 'plan' ? 'plan' : 'default';
   let delivered = 0;
   for (const slot of activeProcesses.values()) {
-    if (slot.sessionId !== sessionId) continue;
-    if (slot.exitCode !== null) continue;
+    if (slot.sessionId !== sessionId || slot.exitCode !== null || !slot.query) continue;
     try {
-      if (slot.proc?.stdin?.writable) {
-        slot.proc.stdin.write(JSON.stringify({
-          type: 'control_request',
-          request_id: 'cgui-mode-' + Date.now(),
-          request: { subtype: 'set_permission_mode', mode: cliMode },
-        }) + '\n');
-        slot.permissionMode = mode;
-        delivered++;
-      }
+      await slot.query.setPermissionMode(sdkMode);
+      slot.guiMode = mode;
+      slot.permissionMode = mode;
+      delivered++;
     } catch {}
   }
   res.json({ ok: true, delivered });
 });
 
+
+// SSE attach。SDK 引擎下消息由 slot.listeners 实时推送(deliverLine),不再监听 proc.stdout。
+// 断连不杀 query(detach-don't-abort):移除监听后续消息回落 earlyLines,重连回放。
 router.get('/chat/:pid/stream', (req, res) => {
   const slot = activeProcesses.get(req.params.pid);
   if (!slot) return res.status(404).json({ error: 'Process not found' });
   if (slot.attached) return res.status(409).json({ error: 'Stream already attached' });
   slot.attached = true;
-  const { proc } = slot;
-
-  // Remove the detached re-buffer listeners left by a previous disconnect.
-  // Without this, every disconnect→reattach cycle leaks a stdout/stderr pair
-  // (they're inert while attached but accumulate → MaxListenersExceededWarning).
-  if (slot.detachedStdout) { try { proc.stdout.removeListener('data', slot.detachedStdout); } catch {} slot.detachedStdout = null; }
-  if (slot.detachedStderr) { try { proc.stderr.removeListener('data', slot.detachedStderr); } catch {} slot.detachedStderr = null; }
 
   res.writeHead(200, {
     'Content-Type': 'text/event-stream',
@@ -586,16 +549,12 @@ router.get('/chat/:pid/stream', (req, res) => {
     'X-Accel-Buffering': 'no',
   });
 
-  // Safe write — never let a write-after-end EPIPE crash the server.
-  // If the client disconnects mid-stream, res becomes !writable; subsequent
-  // writes throw synchronously inside stdout/stderr listeners, and without a
-  // try/catch the error bubbles up to the EventEmitter and kills the process.
+  // Safe write — 客户端中途断连后 res 不可写,写入会同步抛 EPIPE;吞掉避免崩进程。
   let closed = false;
   let keepAlive = null;
   const safeWrite = (data) => {
     if (closed || !res.writable) return false;
-    try { res.write(data); return true; }
-    catch { closed = true; return false; }
+    try { res.write(data); return true; } catch { closed = true; return false; }
   };
   const safeEnd = () => {
     if (closed) return;
@@ -604,181 +563,47 @@ router.get('/chat/:pid/stream', (req, res) => {
     try { res.end(); } catch {}
   };
 
-  // Flush early buffer first (lines that arrived before client attached)
-  for (const line of slot.earlyLines) safeWrite('data: ' + line + '\n\n');
-  for (const err of slot.earlyErrors) {
-    safeWrite(`data: ${JSON.stringify({ type: 'error', error: err })}\n\n`);
-  }
+  // 每一行消息:写给 client;若是 done 事件则收尾 SSE。
+  const onLine = (line) => {
+    if (!safeWrite('data: ' + line + '\n\n')) return;
+    if (line.indexOf('"type":"done"') !== -1) {
+      try { if (JSON.parse(line).type === 'done') safeEnd(); } catch {}
+    }
+  };
+
+  // 回放断连/未 attach 期间缓冲的行(可能含已缓冲的 done → onLine 里收尾)。
+  for (const l of slot.earlyLines) { if (!closed) onLine(l); }
+  for (const e of slot.earlyErrors) safeWrite(`data: ${JSON.stringify({ type: 'error', error: e })}\n\n`);
   slot.earlyLines.length = 0;
   slot.earlyErrors.length = 0;
 
-  // SSE heartbeat. Big sessions can take 20s+ before the first token (the model
-  // thinking over a multi-MB history). An idle SSE connection gets cut by the
-  // network / OS / WebView in that window → the client's reader ends with NO
-  // content → a false "provider 没有返回" warning, and the real reply only shows
-  // after the jsonl refetch. A periodic comment line keeps the pipe warm until
-  // real tokens flow. ': '-prefixed lines are ignored by the client (it only
-  // parses 'data: ' lines), so they're invisible noise that just holds the wire.
-  keepAlive = setInterval(() => {
-    if (!safeWrite(': keep-alive\n\n')) { clearInterval(keepAlive); keepAlive = null; }
-  }, 10000);
+  // 泵已结束但 done 没缓冲到(竞态兜底):补发一个。
+  if (!closed && slot.pumpEnded) onLine(JSON.stringify({ type: 'done', exitCode: slot.exitCode ?? 0 }));
 
-  // Live tail buffer continues from where early buffering stopped
-  let buffer = slot.earlyTail;
-  slot.earlyTail = '';
-
-  // Turn-completion guards. The CLI's `result` event is the terminal signal of a
-  // -p turn; normally the process exits right after and proc.on('close') → finish().
-  // But /compact leaves the process ALIVE in -p mode, so without these the SSE
-  // stream (and the GUI "connecting" state) would hang forever. See completeTurn.
-  let turnDone = false;
-  let compactTimer = null;
-  const onStdout = (chunk) => {
-    buffer += chunk.toString();
-    const lines = buffer.split('\n');
-    buffer = lines.pop() || '';
-    for (const line of lines) {
-      if (!line.trim()) continue;
-      try {
-        const obj = JSON.parse(line); // validate
-        // Capture runtime sessionId for close-handler cleanup (same as the
-        // early-buffer path — needed when init arrives AFTER /stream attaches).
-        if (!slot.sessionId && obj.type === 'system' && obj.subtype === 'init' && obj.session_id) {
-          slot.sessionId = obj.session_id;
-        }
-        safeWrite('data: ' + line + '\n\n');
-        // Finish as soon as the turn's terminal signal arrives — don't wait for the
-        // process to exit (it may not, e.g. after /compact).
-        if (obj.type === 'result') {
-          maybeBroadcastTurnComplete(slot, line);
-          completeTurn(obj.is_error ? (typeof obj.exitCode === 'number' ? obj.exitCode : 1) : 0);
-        } else if (obj.type === 'system' && obj.subtype === 'compact_boundary' && !compactTimer && !turnDone) {
-          // /compact wrote its summary. A `result` normally follows; if the process
-          // hangs instead (no result, no exit), finish anyway after a short grace.
-          compactTimer = setTimeout(() => completeTurn(0), 8000);
-        }
-      } catch {
-        // stream-json is one-object-per-line; a non-JSON complete line is junk.
-        // Don't try to re-merge — that corrupts later chunks.
-        safeWrite(`data: ${JSON.stringify({ type: 'error', error: 'bad-line', raw: line.slice(0, 200) })}\n\n`);
-      }
-    }
-  };
-  const onStderr = (chunk) => {
-    // CLI stderr is NOT inherently fatal. With --verbose it carries diagnostics,
-    // retry / rate-limit notices, /compact progress, Node deprecation warnings —
-    // forwarding each line as type:'error' flashed a ❌ bubble and aborted the
-    // turn mid-stream (the "/compact 报错后恢复" bug, plus spurious mid-turn
-    // errors). Emit type:'stderr' instead: the streaming loop ignores unknown
-    // event types, so it neither breaks nor renders. Genuine failures still
-    // surface via result.is_error, the proc 'error' handler, or the empty-turn
-    // fallback — none of which depend on stderr.
-    const text = chunk.toString().trim();
-    if (text) safeWrite(`data: ${JSON.stringify({ type: 'stderr', text })}\n\n`);
-  };
-  let streamFinished = false;
-  const finish = (code) => {
-    // 幂等:result 事件(completeTurn)和进程 close(onProcClose)都会调到这里,
-    // 没有守卫会重复调度 setTimeout(activeProcesses.delete) → 多余 timer/闭包泄漏。
-    if (streamFinished) return;
-    streamFinished = true;
-    if (buffer.trim()) {
-      try { JSON.parse(buffer); safeWrite(`data: ${buffer}\n\n`); } catch {}
-      buffer = '';
-    }
-    safeWrite(`data: ${JSON.stringify({ type: 'done', exitCode: code })}\n\n`);
-    safeEnd();
-    // Keep the finished slot around for a grace window so the subagent monitor
-    // can show recently-completed turns (状态 已完成/错误 = 会话在等待用户回复),
-    // instead of the slot vanishing the instant the stream ends.
-    slot.exitCode = code;
-    slot.finishedAt = Date.now();
-    setTimeout(() => activeProcesses.delete(req.params.pid), 60_000);
-  };
-  // Finish the stream on the turn's terminal signal (runs once). Then SIGTERM the
-  // child after a short grace: a normal turn exits on its own within that window
-  // (kill = no-op), but a lingering /compact process gets reaped instead of leaking.
-  // Safe to kill here — the turn is over and its jsonl is already fully written.
-  const completeTurn = (code) => {
-    if (turnDone) return;
-    turnDone = true;
-    if (compactTimer) { clearTimeout(compactTimer); compactTimer = null; }
-    finish(code);
-    setTimeout(() => killProcessTree(proc), 5000).unref();
-  };
-
-  proc.stdout.on('data', onStdout);
-  proc.stderr.on('data', onStderr);
-  // Attach error listeners on the child streams themselves — without these,
-  // a stream error (e.g. pipe broken after SIGTERM) becomes uncaught.
-  proc.stdout.on('error', () => {});
-  proc.stderr.on('error', () => {});
-
-  // If process already exited before client attached, emit done immediately after flushing.
-  if (slot.exitCode !== null) {
-    return finish(slot.exitCode);
+  if (!closed) {
+    // SSE 心跳:大会话首 token 前可能 20s+,空闲连接会被网络/WebView 掐断造成假"无返回"。
+    // ': ' 前缀行被客户端忽略,只为保活。
+    keepAlive = setInterval(() => {
+      if (!safeWrite(': keep-alive\n\n')) { clearInterval(keepAlive); keepAlive = null; }
+    }, 10000);
+    slot.listeners.add(onLine);
   }
 
-  // Named (not anonymous) so req.on('close') can remove them on detach — a
-  // session reconnected N times would otherwise accumulate N close/error
-  // listeners (MaxListenersExceededWarning past 10 + retained closures).
-  const onProcClose = (code) => finish(code);
-  const onProcError = (err) => {
-    safeWrite(`data: ${JSON.stringify({ type: 'error', error: err.message })}\n\n`);
-    safeEnd();
-    activeProcesses.delete(req.params.pid);
-  };
-  proc.on('close', onProcClose);
-  proc.on('error', onProcError);
-
   req.on('close', () => {
-    // Client disconnected — STOP WRITING to the SSE response but DO NOT kill
-    // the child process. The CLI keeps streaming to its jsonl independently;
-    // when the user navigates back to this session, fetchMessages will read
-    // whatever has been persisted so far. This implements "detach, don't
-    // abort" so a long-running session keeps producing output while the
-    // user looks at other sessions.
     closed = true;
     if (keepAlive) { clearInterval(keepAlive); keepAlive = null; }
-    // Remove the close/error listeners registered for THIS attach so repeated
-    // reconnects don't pile up listeners on the long-lived child process.
-    try { proc.removeListener('close', onProcClose); } catch {}
-    try { proc.removeListener('error', onProcError); } catch {}
-    // Detach our stdout/stderr listeners so the proc isn't blocked on a
-    // backpressured stream and so a future re-attach gets fresh listeners.
-    try { proc.stdout.removeListener('data', onStdout); } catch {}
-    try { proc.stderr.removeListener('data', onStderr); } catch {}
-    // Re-buffer subsequent stdout into earlyLines so a future /stream
-    // re-attach can replay anything that arrived while detached.
-    slot.attached = false;
-    // Name these listeners and stash them on the slot so the next /stream
-    // re-attach can remove them (see top of GET /stream) — otherwise they leak.
-    slot.detachedStdout = (chunk) => {
-      if (slot.attached) return;
-      slot.earlyTail += chunk.toString();
-      const lines = slot.earlyTail.split('\n');
-      slot.earlyTail = lines.pop() || '';
-      for (const l of lines) {
-        if (!l.trim()) continue;
-        if (slot.earlyLines.length < MAX_EARLY_LINES) slot.earlyLines.push(l);
-        // T2: detached(用户在看别的会话)期间到达 result —— 正是悬浮提醒的主场景。
-        maybeBroadcastTurnComplete(slot, l);
-      }
-    };
-    slot.detachedStderr = (chunk) => {
-      if (slot.attached) return;
-      const t = chunk.toString().trim();
-      if (t) slot.earlyErrors.push(t);
-    };
-    proc.stdout.on('data', slot.detachedStdout);
-    proc.stderr.on('data', slot.detachedStderr);
+    slot.listeners.delete(onLine);
+    slot.attached = false; // 后续消息回落 earlyLines,等重连回放
   });
 });
 
-router.post('/chat/:pid/stop', (req, res) => {
+router.post('/chat/:pid/stop', async (req, res) => {
   const slot = activeProcesses.get(req.params.pid);
   if (!slot) return res.status(404).json({ error: 'Process not found' });
-  killProcessTree(slot.proc);
+  // SDK:interrupt 让当前回合优雅停;abort 兜底强停;close input 让 generator 收尾。
+  try { await slot.query?.interrupt?.(); } catch {}
+  try { slot.abort?.abort(); } catch {}
+  try { slot.input?.close(); } catch {}
   res.json({ ok: true });
 });
 

@@ -82,11 +82,15 @@ router.get('/processes', async (req, res) => {
       sessionFiles = (await readdir(SESSIONS_DIR)).filter((f) => f.endsWith('.json'));
     } catch {}
 
-    // Index chat.js's in-memory map by pid so we can attach the actual prompt
-    // / model / mode the GUI launched the process with.
+    // Index chat.js's in-memory map so we can attach the actual prompt / model /
+    // mode the GUI launched the process with. CG-5:SDK 引擎下 chat.pid 是合成 'sdk-N',
+    // 与 session 的真实 OS pid 对不上 → 按 pid 查永远 null → GUI 元数据丢。改按 sessionId
+    // 索引为主,pid 索引保留作旧路径兜底。
     const chatByPid = {};
+    const chatBySession = {};
     for (const c of getActiveChatProcesses()) {
       chatByPid[String(c.pid)] = c;
+      if (c.sessionId) chatBySession[c.sessionId] = c;
     }
 
     const processes = [];
@@ -97,7 +101,8 @@ router.get('/processes', async (req, res) => {
         const pid = session.pid;
         const alive = pid ? isProcessAlive(pid) : false;
         const psInfo = alive ? getProcessInfo(pid) : null;
-        const chat = chatByPid[String(pid)] || null;
+        const sid = session.sessionId || file.replace('.json', '');
+        const chat = (sid && chatBySession[sid]) || chatByPid[String(pid)] || null;
 
         processes.push({
           sessionId: session.sessionId || file.replace('.json', ''),
