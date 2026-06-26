@@ -1,6 +1,9 @@
 import React, { useState, useMemo } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import remarkMath from 'remark-math';
+import rehypeKatex from 'rehype-katex';
+import 'katex/dist/katex.min.css'; // CJ-3:KaTeX 样式(katex 本体经 mermaid 已在依赖里)
 import { Copy, Check } from 'lucide-react';
 import { copyText } from '../utils/clipboard.js';
 import { openExternalUrl } from '../utils/openExternal.js';
@@ -264,8 +267,12 @@ export function MarkdownRenderer({ content, basePath }) {
           out as a single run-on text line (which is what was happening). */}
       {/* urlTransform 恒等(仅文件预览):默认会把 Windows 绝对路径 C:\ 当协议删掉,
           这里关掉过滤让本地路径原样进 img 组件;链接安全由 a 组件的 href 白名单兜底。 */}
+      {/* CJ-3:remarkMath 解析 $...$ / $$...$$,rehypeKatex 渲染成公式。rehype-katex 默认
+          throwOnError:false → 错误公式标红不崩。注:不处理 \(..\) / \[..\](Claude 多用 $),
+          如需可后续加预处理转换。 */}
       <ReactMarkdown
-        remarkPlugins={[remarkGfm]}
+        remarkPlugins={[remarkGfm, remarkMath]}
+        rehypePlugins={[rehypeKatex]}
         components={components}
         urlTransform={basePath ? ((u) => u) : undefined}
       >

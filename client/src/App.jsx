@@ -1824,7 +1824,21 @@ function useCyclingVerb() {
 // Inline status that mirrors the CLI's "✻ Frolicking…" prompt — spinner
 // char + verb + optional tool/phase detail. Updates live as the model
 // moves through phases inside one turn.
-function StreamingStatusLine({ thinking, text, toolCalls }) {
+// CJ-4:流式/思考/connecting 时的实时耗时计数,每秒跳一次。startedAt=本回合发起时间戳。
+function ElapsedTime({ startedAt, className = '' }) {
+  const [, tick] = useState(0);
+  useEffect(() => {
+    if (!startedAt) return;
+    const id = setInterval(() => tick((n) => n + 1), 1000);
+    return () => clearInterval(id);
+  }, [startedAt]);
+  if (!startedAt) return null;
+  const s = Math.max(0, Math.floor((Date.now() - startedAt) / 1000));
+  const txt = s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${s % 60}s`;
+  return <span className={`font-mono text-[12px] text-ink-faint tabular-nums shrink-0 ${className}`}>{txt}</span>;
+}
+
+function StreamingStatusLine({ thinking, text, toolCalls, streamStart }) {
   const verb = useCyclingVerb();
   let label = null;
   // Latest unresolved tool call (no result yet) → "Bash(ls)"
@@ -1850,6 +1864,7 @@ function StreamingStatusLine({ thinking, text, toolCalls }) {
         <CliSpinner size={22} />
         <span className="font-mono truncate font-medium" style={{ color: '#D97757' }}>{label}</span>
         <span style={{ color: '#D97757' }}>…</span>
+        <ElapsedTime startedAt={streamStart} className="ml-1" />
       </div>
     </div>
   );
@@ -2259,6 +2274,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   const [streamingToolCalls, setStreamingToolCalls] = useState([]);
   // Ordered blocks for in-order rendering (text → tool → text → tool → write).
   const [streamingBlocks, setStreamingBlocks] = useState([]);
+  // CJ-4:本回合发起时间戳,驱动流式/connecting 的实时耗时计数(ElapsedTime)。
+  const streamStartRef = useRef(null);
   // "重做此工具"进行中的 turn uuid——只控制转圈指示器的显示。截断由 turn 上的
   // _retryTrimToolId 标记负责(回退状态需一直保持),指示器在重跑流式内容出现后清掉,
   // 否则会一直转(用户报告:AI 回复完成后仍显示"正在重做")。
@@ -2649,6 +2666,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
 
     const isCompact = /^\/compact\b/.test(String(prompt || '').trim());
     const isClear = /^\/clear\b/.test(String(prompt || '').trim());
+    streamStartRef.current = Date.now(); // CJ-4:本回合计时起点
     updateStreaming(true);
     // I4:本次流的归属会话(draft 时是 draft-key,init 收到真 id 后会在下面升级)。
     setStreamOwner(sessionQueueKey);
@@ -4514,6 +4532,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                     thinking={streamingThinking}
                     text={streamingText}
                     toolCalls={streamingToolCalls}
+                    streamStart={streamStartRef.current}
                   />
                   <TurnBubble turn={{
                     uuid: 'streaming', type: 'turn', timestamp: new Date().toISOString(), model: streamingModel,
@@ -4536,6 +4555,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                       <CliSpinner size={22} />
                       <span className="font-mono font-medium">{compacting ? 'Compacting' : 'Connecting'}</span>
                       <span>…</span>
+                      <ElapsedTime startedAt={streamStartRef.current} className="ml-1" />
                     </div>
                     {contextTokens > 100_000 && (
                       <div className="text-[11px] text-ink-faint font-body mt-1 pl-[30px]">
@@ -6411,6 +6431,15 @@ export default function App() {
   // 每次打开 GUI 检查 GUI + Claude Code 是否有新版,有则顶部弹横幅(本次会话可关闭)。
   // 不固定时间——只在启动时查一次。详细更新操作在 设置 → 概览。
   const [updateNotice, setUpdateNotice] = useState(null); // { gui?: ver, cc?: ver }
+  // CJ-2:弹窗"稍后"只关弹窗、不清 updateNotice —— 顶栏「更新」按钮据此长期提醒(没点更新就一直在)。
+  const [updateModalDismissed, setUpdateModalDismissed] = useState(false);
+  // 跳设置→更新区并定位 gui/cc 段。window 事件 + window.__cguiSettingsJump(SettingsPanel 挂载晚于事件时兜底读)。
+  const jumpToUpdate = useCallback((section) => {
+    setRightPanel('settings');
+    setUpdateModalDismissed(true);
+    window.__cguiSettingsJump = section;
+    window.dispatchEvent(new CustomEvent('cgui:settings-jump', { detail: { section } }));
+  }, []);
   useEffect(() => {
     (async () => {
       const n = {};
@@ -6792,6 +6821,16 @@ export default function App() {
               </button>
             );
           })}
+          {/* CJ-2:有可用更新时常驻提醒按钮(没在弹窗里点更新也长期显示);点击跳设置→更新区。 */}
+          {updateNotice && (
+            <button
+              onClick={() => jumpToUpdate(updateNotice.gui ? 'gui-update' : 'cc-update')}
+              title={`有可用更新${updateNotice.gui ? ` · GUI v${updateNotice.gui}` : ''}${updateNotice.cc ? ` · Claude Code v${updateNotice.cc}` : ''} — 点击前往更新`}
+              className="flex items-center gap-1 px-1.5 py-1 rounded-lg text-red-500 hover:bg-red-500/10 transition-colors animate-pulse">
+              <RefreshCw size={15} />
+              <span className="text-[11px] leading-none font-body">更新</span>
+            </button>
+          )}
           <div className="w-px h-4 bg-ink-ghost/30 mx-1" />
           <ThemeToggle />
         </div>
@@ -6822,8 +6861,8 @@ export default function App() {
       {needsFDA && !fdaDismissed && (
         <FullDiskAccessModal onOpenSettings={openFDASettings} onDismiss={dismissFDA} />
       )}
-      {updateNotice && (
-        <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/40 backdrop-blur-sm animate-fade-in" onClick={() => setUpdateNotice(null)}>
+      {updateNotice && !updateModalDismissed && (
+        <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/40 backdrop-blur-sm animate-fade-in" onClick={() => setUpdateModalDismissed(true)}>
           <div className="glass-popover w-[420px] max-w-[calc(var(--app-w,100vw)-1.5rem)] rounded-2xl shadow-2xl animate-glass-rise overflow-hidden" onClick={(e) => e.stopPropagation()}>
             <div className="px-5 py-4 flex items-start gap-3">
               <div className="w-9 h-9 rounded-lg bg-amber-100 flex items-center justify-center shrink-0 text-[18px]">🎉</div>
@@ -6836,9 +6875,9 @@ export default function App() {
               </div>
             </div>
             <div className="px-5 py-3 border-t border-canvas-deep flex items-center justify-end gap-2 bg-canvas-warm/40">
-              <button onClick={() => setUpdateNotice(null)}
+              <button onClick={() => setUpdateModalDismissed(true)}
                 className="px-3 py-1.5 text-[12px] text-ink-muted hover:text-ink rounded-md hover:bg-canvas-warm transition-colors">稍后</button>
-              <button onClick={() => { setRightPanel('settings'); setUpdateNotice(null); }}
+              <button onClick={() => jumpToUpdate(updateNotice.gui ? 'gui-update' : 'cc-update')}
                 className="px-3 py-1.5 text-[12px] text-white bg-accent hover:bg-accent/90 rounded-md transition-colors">前往更新</button>
             </div>
           </div>

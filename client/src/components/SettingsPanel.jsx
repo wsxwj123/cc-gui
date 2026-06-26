@@ -33,6 +33,26 @@ export function SettingsPanel() {
 
   useEffect(() => { fetchSettings(); }, []);
 
+  // CJ-2:从顶栏「更新」按钮 / 弹窗"前往更新"跳转过来 → 切到 overview 并滚动高亮对应更新区
+  // (gui-update / cc-update)。window.__cguiSettingsJump 兜底:点击早于本面板挂载时从这读。
+  useEffect(() => {
+    const go = (section) => {
+      if (!section) return;
+      setTab('overview');
+      setTimeout(() => {
+        const el = document.getElementById(section);
+        if (!el) return;
+        el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        el.classList.add('ring-2', 'ring-accent', 'ring-offset-2', 'rounded-lg');
+        setTimeout(() => el.classList.remove('ring-2', 'ring-accent', 'ring-offset-2'), 2000);
+      }, 80);
+    };
+    if (window.__cguiSettingsJump) { const s = window.__cguiSettingsJump; window.__cguiSettingsJump = null; go(s); }
+    const onJump = (e) => { window.__cguiSettingsJump = null; go(e?.detail?.section); };
+    window.addEventListener('cgui:settings-jump', onJump);
+    return () => window.removeEventListener('cgui:settings-jump', onJump);
+  }, []);
+
   // Persist either an arbitrary object (Hooks tab) or the raw JSON (JSON tab).
   const save = async (next) => {
     setSaving(true); setError(null);
@@ -407,19 +427,40 @@ function UpdateAvailable({ state }) {
 
   const startDownload = async () => {
     if (!asset) return;
-    setDl({ status: 'downloading' });
+    setDl({ status: 'downloading', percent: 0, received: 0, total: asset.size || 0 });
     try {
       const r = await fetch('/api/download-update', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ url: asset.url, filename: asset.name }),
       });
-      const d = await r.json();
-      if (!r.ok || d.error) {
+      // CJ-1:成功路径是 NDJSON 流(逐行 progress/done/error);早期校验失败仍是普通 JSON。
+      const ct = r.headers.get('content-type') || '';
+      if (!r.ok || !ct.includes('ndjson')) {
+        const d = await r.json().catch(() => ({}));
         setDl({ status: 'err', message: d.error || `HTTP ${r.status}` });
         return;
       }
-      setDl({ status: 'done', path: d.path, platform: d.platform });
+      const reader = r.body.getReader();
+      const dec = new TextDecoder();
+      let buf = '', final = null;
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buf += dec.decode(value, { stream: true });
+        let nl;
+        while ((nl = buf.indexOf('\n')) >= 0) {
+          const line = buf.slice(0, nl).trim(); buf = buf.slice(nl + 1);
+          if (!line) continue;
+          let ev; try { ev = JSON.parse(line); } catch { continue; }
+          if (ev.type === 'progress') {
+            const pct = ev.total > 0 ? Math.min(100, Math.round((ev.received / ev.total) * 100)) : 0;
+            setDl({ status: 'downloading', percent: pct, received: ev.received, total: ev.total });
+          } else if (ev.type === 'done') final = { status: 'done', path: ev.path, platform: ev.platform };
+          else if (ev.type === 'error') final = { status: 'err', message: ev.error };
+        }
+      }
+      setDl(final || { status: 'err', message: '下载中断' });
     } catch (e) {
       setDl({ status: 'err', message: e.message || '网络错误' });
     }
@@ -448,7 +489,7 @@ function UpdateAvailable({ state }) {
             {dl.status === 'downloading' ? (
               <>
                 <RefreshCw size={12} className="animate-spin" />
-                下载中… {target && `· ${target}`} ({Math.round((asset.size || 0) / 1048576)}MB)
+                下载中… {dl.percent || 0}%
               </>
             ) : (
               <>
@@ -466,6 +507,18 @@ function UpdateAvailable({ state }) {
           手动查看 Release
         </button>
       </div>
+
+      {/* CJ-1:下载进度条 */}
+      {dl.status === 'downloading' && (
+        <div className="space-y-1">
+          <div className="h-2 w-full rounded-full bg-amber-200 overflow-hidden">
+            <div className="h-full bg-amber-600 transition-all duration-150" style={{ width: `${dl.percent || 0}%` }} />
+          </div>
+          <div className="text-[11px] text-amber-700 font-mono">
+            {dl.percent || 0}% · {Math.round((dl.received || 0) / 1048576)}/{Math.round((dl.total || 0) / 1048576)}MB
+          </div>
+        </div>
+      )}
 
       {dl.status === 'done' && (
         <div className="text-[12px] text-emerald-700 bg-emerald-50 border border-emerald-200 rounded p-2 space-y-1">
@@ -802,8 +855,8 @@ function OverviewTab({ settings }) {
 
   return (
     <div className="space-y-3">
-      <UpdateChecker />
-      <CcUpdater />
+      <div id="gui-update"><UpdateChecker /></div>
+      <div id="cc-update"><CcUpdater /></div>
       <FullDiskAccessCard />
       <CloseBehaviorPicker />
       {rows.length > 0 && (
