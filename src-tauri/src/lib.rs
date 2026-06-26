@@ -390,7 +390,9 @@ fn wait_until_accepting(port: u16, timeout: Duration) -> bool {
 // 进程"——旧进程跑旧代码(如旧 cli-check 检测不到 claude → 误报未装)。health 现在
 // 返回 {"version":"x.y.z"};旧版 server 不返回 version 字段 → 不匹配 → 视为 stale。
 fn backend_version_matches(port: u16) -> bool {
-    let want = format!("\"version\":\"{}\"", env!("CARGO_PKG_VERSION"));
+    // APP_VERSION 由 build.rs 从 package.json 读取(单一真源),避免 Cargo.toml 漂移导致
+    // 版本握手拿错版本、把旧 server 误判匹配而复用(Windows 重装爆红根因)。
+    let want = format!("\"version\":\"{}\"", env!("APP_VERSION"));
     http_get_contains(port, "/api/health", &want)
 }
 
