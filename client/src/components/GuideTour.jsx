@@ -1,7 +1,7 @@
 // CK-3: 使用指引。逐个高亮界面功能按钮,下方浮出说明文字。
 // 目标元素通过 data-tour="<id>" 定位;找不到的步骤自动跳过(如分屏/远程在某些态不渲染)。
 // 左栏是会话列表还是项目列表 → 动态裁剪对应步骤(避免在项目列表讲会话、反之亦然)。
-import { useState, useEffect, useLayoutEffect, useMemo } from 'react';
+import { useState, useEffect, useLayoutEffect, useMemo, useRef } from 'react';
 import { X, ArrowRight, ArrowLeft } from 'lucide-react';
 
 // 顶栏功能面板按钮(与 PANEL_MAP 同序)。逐个圈。
@@ -54,8 +54,11 @@ export function GuideTour({ open, onClose, hasProject }) {
   const steps = useMemo(() => buildSteps(hasProject), [hasProject]);
   const [i, setI] = useState(0);
   const [rect, setRect] = useState(null);
+  const [pos, setPos] = useState(null);     // 说明卡定位 {top,left},经实测夹取后才显
+  const overlayRef = useRef(null);
+  const tipRef = useRef(null);
 
-  useEffect(() => { if (open) { setI(0); setRect(null); } }, [open]);
+  useEffect(() => { if (open) { setI(0); setRect(null); setPos(null); } }, [open]);
 
   // 定位当前步骤目标;找不到就顺延到下一个有效步骤,全部找不到则结束。
   useLayoutEffect(() => {
@@ -75,26 +78,41 @@ export function GuideTour({ open, onClose, hasProject }) {
     return () => window.removeEventListener('resize', update);
   }, [open, i, steps, onClose]);
 
+  // 说明卡定位。关键:<html> 有 font-scale `zoom`(如 1.2),getBoundingClientRect 返回
+  // 的是缩放后的实际像素,而写进 style 的 top/left 会被浏览器再 ×zoom 渲染 —— 直接拿
+  // rect 值当 style 用会二次放大、大坐标处溢出。所以:先在「实际像素」空间夹取(目标下方/
+  // 上方/贴边),最后把结果 ÷zoom 还原成 style 值。测完才显(避免闪现)。
+  useLayoutEffect(() => {
+    if (!open || !rect || !overlayRef.current || !tipRef.current) return;
+    const vp = overlayRef.current.getBoundingClientRect(); // 视口(实际像素)
+    const zoom = vp.width / (overlayRef.current.offsetWidth || vp.width) || 1;
+    const tip = tipRef.current.getBoundingClientRect();    // 卡片实际尺寸
+    const M = 10;
+    const left = Math.max(vp.left + M, Math.min(rect.left, vp.right - tip.width - M));
+    let top;
+    if (rect.bottom + M + tip.height <= vp.bottom - M) top = rect.bottom + M;
+    else if (rect.top - M - tip.height >= vp.top + M) top = rect.top - M - tip.height;
+    else top = Math.max(vp.top + M, vp.bottom - tip.height - M);
+    setPos({ top: top / zoom, left: left / zoom, zoom });
+  }, [open, rect, i]);
+
   if (!open || !rect) return null;
   const step = steps[i];
   const last = i === steps.length - 1;
   const pad = 6;
-  const spot = { top: rect.top - pad, left: rect.left - pad, width: rect.width + pad * 2, height: rect.height + pad * 2 };
-  const placeAbove = rect.bottom + 170 > window.innerHeight;
-  const left = Math.min(Math.max(12, rect.left), window.innerWidth - TIP_W - 12);
-  const tipStyle = placeAbove
-    ? { bottom: window.innerHeight - rect.top + 12, left }
-    : { top: rect.bottom + 12, left };
+  // 高亮框同样要 ÷zoom(style 值会被 ×zoom 渲染),否则下方/右侧元素的圈会整体偏移。
+  const z = pos?.zoom || 1;
+  const spot = { top: (rect.top - pad) / z, left: (rect.left - pad) / z, width: (rect.width + pad * 2) / z, height: (rect.height + pad * 2) / z };
 
   return (
-    <div className="fixed inset-0 z-[400]">
+    <div ref={overlayRef} className="fixed inset-0 z-[400]">
       {/* 高亮框 + 四周压暗(box-shadow 撑满屏) */}
       <div style={{ position: 'fixed', ...spot, borderRadius: 10, boxShadow: '0 0 0 9999px rgba(0,0,0,0.55)', transition: 'top .15s, left .15s, width .15s, height .15s' }}
         className="ring-2 ring-accent pointer-events-none" />
       {/* 点暗区跳过 */}
       <div className="absolute inset-0" onClick={onClose} />
       {/* 说明卡 */}
-      <div style={{ position: 'fixed', width: TIP_W, ...tipStyle }}
+      <div ref={tipRef} style={{ position: 'fixed', width: TIP_W, top: pos?.top ?? 0, left: pos?.left ?? 0, visibility: pos ? 'visible' : 'hidden' }}
         className="bg-canvas border border-canvas-deep rounded-xl shadow-2xl p-4 animate-glass-rise">
         <div className="flex items-center gap-2 mb-1.5">
           <span className="text-[13px] font-display font-semibold text-ink flex-1">{step.title}</span>
