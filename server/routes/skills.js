@@ -20,7 +20,6 @@ const SOURCES = [
   { id: 'anthropic', name: 'Anthropic 官方', repo: 'anthropics/skills', url: 'https://github.com/anthropics/skills' },
   { id: 'superpowers', name: 'Superpowers', repo: 'obra/superpowers', url: 'https://github.com/obra/superpowers' },
   { id: 'composio', name: '开源社区 (Composio)', repo: 'ComposioHQ/awesome-claude-skills', url: 'https://github.com/ComposioHQ/awesome-claude-skills' },
-  { id: 'skillforge', name: '科研 (SkillForge)', repo: 'Yuna-Nexus/skillforge', url: 'https://github.com/Yuna-Nexus/skillforge' },
 ];
 
 function parseFrontmatter(content) {
