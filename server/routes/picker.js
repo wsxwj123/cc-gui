@@ -31,11 +31,21 @@ router.post('/pick-directory', async (req, res) => {
       // PowerShell 5's default is the system code page → garbled CJK).
       "[Console]::OutputEncoding = [Text.UTF8Encoding]::new()",
       "Add-Type -AssemblyName System.Windows.Forms",
+      // CP-1:FolderBrowserDialog 由独立 powershell 进程开,不属于 GUI 窗口、拿不到前台焦点 →
+      // 被 GUI 窗口盖在后面(用户报"被置顶的 GUI 盖住")。给它一个 TopMost 的隐藏 owner 窗口,
+      // ShowDialog($owner) 让对话框继承置顶、强制显示在最前。
+      "$owner = New-Object System.Windows.Forms.Form",
+      "$owner.TopMost = $true",
+      "$owner.ShowInTaskbar = $false",
+      "$owner.Opacity = 0",
+      "[void]$owner.Show(); [void]$owner.Activate()",
       "$dlg = New-Object System.Windows.Forms.FolderBrowserDialog",
       `$dlg.Description = '${escPS(promptText)}'`,
       `$dlg.SelectedPath = '${escPS(startDirRaw)}'`,
       "$dlg.ShowNewFolderButton = $true",
-      "if ($dlg.ShowDialog() -eq 'OK') { Write-Output $dlg.SelectedPath }",
+      "$r = $dlg.ShowDialog($owner)",
+      "$owner.Close()",
+      "if ($r -eq 'OK') { Write-Output $dlg.SelectedPath }",
     ].join('; ');
     try {
       // -Sta: WinForms REQUIRES single-threaded apartment; PowerShell defaults

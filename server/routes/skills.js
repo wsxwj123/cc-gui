@@ -42,20 +42,34 @@ async function readSkillMd(dir) {
 }
 
 // ── 本机已安装 ────────────────────────────────────────────────────
+// CN-1:每次扫 readdir + 逐个读 SKILL.md(上百个技能=上百次文件读),频繁打开面板偏慢。
+// 加缓存:按 skills 目录 mtime(增删技能会变)+ 60s TTL(兜底 SKILL.md 内容编辑)。命中即秒返。
+let localCache = null; // { mtimeMs, at, skills }
+const LOCAL_TTL = 60 * 1000;
+async function scanLocalSkills() {
+  let entries;
+  try { entries = await readdir(SKILLS_DIR, { withFileTypes: true }); } catch { return []; }
+  const dirs = entries.filter((e) => e.isDirectory() && !e.name.startsWith('.'));
+  const skills = await Promise.all(dirs.map(async (e) => {
+    const md = await readSkillMd(join(SKILLS_DIR, e.name));
+    const fm = md ? parseFrontmatter(md) : {};
+    return { id: e.name, name: fm.name || e.name, description: fm.description || '' };
+  }));
+  skills.sort((a, b) => a.id.localeCompare(b.id));
+  return skills;
+}
 router.get('/skills', async (req, res) => {
   try {
-    // CL-1: 与 /api/slash-commands 一致地枚举(列所有子目录),否则"slash 能用、市场扫不到"
-    // ——之前要求每个目录必须有 SKILL.md 才算 skill,把没有顶层 SKILL.md 的技能漏掉了。
-    // 现在所有非隐藏目录都列出,有 SKILL.md 就读名称/描述,没有则用目录名。
-    let entries;
-    try { entries = await readdir(SKILLS_DIR, { withFileTypes: true }); } catch { return res.json({ skills: [] }); }
-    const dirs = entries.filter((e) => e.isDirectory() && !e.name.startsWith('.'));
-    const skills = await Promise.all(dirs.map(async (e) => {
-      const md = await readSkillMd(join(SKILLS_DIR, e.name));
-      const fm = md ? parseFrontmatter(md) : {};
-      return { id: e.name, name: fm.name || e.name, description: fm.description || '' };
-    }));
-    skills.sort((a, b) => a.id.localeCompare(b.id));
+    // CL-1: 与 /api/slash-commands 一致地枚举(列所有子目录,有 SKILL.md 读描述、没有用目录名),
+    // 否则"slash 能用、市场扫不到"。
+    let mtimeMs = 0;
+    try { mtimeMs = (await stat(SKILLS_DIR)).mtimeMs; } catch { return res.json({ skills: [] }); }
+    const now = Date.now();
+    if (localCache && localCache.mtimeMs === mtimeMs && now - localCache.at < LOCAL_TTL) {
+      return res.json({ skills: localCache.skills, cached: true });
+    }
+    const skills = await scanLocalSkills();
+    localCache = { mtimeMs, at: now, skills };
     res.json({ skills });
   } catch (e) {
     res.json({ skills: [], error: e.message });

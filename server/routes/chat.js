@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { spawn, execFileSync } from 'child_process';
-import { resolve as pathResolve, dirname, join as pathJoin, isAbsolute } from 'node:path';
+import { resolve as pathResolve, dirname, join as pathJoin, isAbsolute, parse as pathParse } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readFileSync, statSync, writeFileSync, unlinkSync, readdirSync, watch, existsSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
@@ -349,7 +349,7 @@ router.post('/chat', async (req, res) => {
   // CLI computes a different hash and resume fails with "No conversation
   // found with session ID". The client sends the cwd that matches each
   // session's original storage; we trust it as-is for CLI spawn.
-  const workingDir = cwd || process.env.HOME;
+  const workingDir = cwd || homedir(); // CO-1:Windows 上 process.env.HOME 为空,用 homedir()
 
   // Validate the working dir exists and is a directory. A session whose project
   // folder was deleted or moved (e.g. a stale cwd like /Desktop/gui) otherwise
@@ -370,9 +370,22 @@ router.post('/chat', async (req, res) => {
   // 按 slot.guiMode 决定(集中分级,复刻旧 hook 的语义)。
   const sdkPermMode = chosenMode === 'plan' ? 'plan' : 'default';
 
-  // additionalDirectories:globalRead → 整个 $HOME 可读;另加显式 addDirs(去重)。
+  // additionalDirectories = SDK 的文件访问沙箱边界(越界读会在 FS 层被挡、**不经 canUseTool**,
+  // 故无授权卡可弹——用户报"沙箱限制读不了本地文件却不弹卡片"的根因)。
+  // CO-1:① 用 homedir() 而非 process.env.HOME——Windows 上 HOME 为空(它用 USERPROFILE),
+  //   原写法导致 Windows 家目录都没加进可读范围,读任何本地文件都被挡。
+  //   ② globalRead 时直接放开整盘"读"(posix 加 '/';win 加 cwd/home 所在盘根)——这是本地单用户
+  //   工具,用户明确要读本机文件;写入仍走 canUseTool(默认模式弹卡),故只放宽读、不放宽写,安全。
   const dirSet = new Set();
-  if (globalRead && process.env.HOME) dirSet.add(process.env.HOME);
+  if (globalRead) {
+    dirSet.add(homedir());
+    if (process.platform === 'win32') {
+      try { const r = pathParse(workingDir).root; if (r) dirSet.add(r); } catch {}
+      try { const r = pathParse(homedir()).root; if (r) dirSet.add(r); } catch {}
+    } else {
+      dirSet.add('/');
+    }
+  }
   if (Array.isArray(addDirs)) {
     for (const d of addDirs) if (typeof d === 'string' && isAbsolute(d)) dirSet.add(d);
   }
@@ -759,7 +772,7 @@ function parseContextMarkdown(md) {
 
 router.get('/context/:sessionId', (req, res) => {
   const { sessionId } = req.params;
-  const cwd = req.query.cwd || process.env.HOME;
+  const cwd = req.query.cwd || homedir(); // CO-1:Windows HOME 为空 → homedir()
   const projectHash = req.query.projectHash || '';
   // V2:不带 --model 时 CLI 按 settings.json 默认模型(如 haiku)计算窗口与显示,
   // 与会话实际模型不符(用户报告:点徽章显示 haiku)。前端把会话当前模型传进来。

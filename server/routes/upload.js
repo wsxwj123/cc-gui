@@ -1,5 +1,7 @@
 import { Router } from 'express';
 import { writeFile, mkdir, readdir, stat, unlink } from 'fs/promises';
+import { createWriteStream } from 'fs';
+import { pipeline } from 'stream/promises';
 import { extname, join } from 'path';
 import { tmpdir } from 'os';
 import { randomUUID } from 'crypto';
@@ -90,7 +92,34 @@ const UPLOAD_DIR = join(tmpdir(), 'cgui-attachments');
  *
  * Express's default JSON limit is 100kb — bumped to 25mb on the route below.
  */
+// CN-3:大文件上传报 "entity too large" 根因——前端把文件转 base64 dataUrl 塞进 JSON,
+// base64 膨胀 ~33%,撞上全局 `express.json({limit:'25mb'})`(且全量进内存)。修:非 JSON 请求
+// 走**原始字节流式上传**——前端直接把 File 当 body 发(Content-Type 非 json),express.json 不解析、
+// 不受 25mb 限,这里流式写盘(低内存),仅设一个宽松硬上限防撑爆磁盘。JSON dataUrl 老路保留兼容粘贴。
+const RAW_MAX = 500 * 1024 * 1024; // 500MB 硬上限
 router.post('/upload', async (req, res) => {
+  const ct = String(req.headers['content-type'] || '').toLowerCase();
+  if (!ct.includes('application/json')) {
+    try {
+      const name = decodeURIComponent(String(req.headers['x-upload-name'] || 'file'));
+      const mime = (ct.split(';')[0] || '').trim() || 'application/octet-stream';
+      const uploadType = resolveUploadType(mime, name);
+      if (!uploadType) return res.status(415).json({ error: `unsupported mime: ${mime || '(none)'}` });
+      await mkdir(UPLOAD_DIR, { recursive: true });
+      const filename = `${randomUUID()}.${uploadType.ext}`;
+      const fullPath = join(UPLOAD_DIR, filename);
+      let bytes = 0, aborted = false;
+      req.on('data', (c) => {
+        bytes += c.length;
+        if (bytes > RAW_MAX && !aborted) { aborted = true; req.destroy(new Error('file too large (>500MB)')); }
+      });
+      await pipeline(req, createWriteStream(fullPath));
+      return res.json({ path: fullPath, url: fullPath, bytes, mime, kind: uploadType.kind });
+    } catch (err) {
+      const tooBig = /too large/i.test(err.message || '');
+      return res.status(tooBig ? 413 : 500).json({ error: err.message || '上传失败' });
+    }
+  }
   try {
     const dataUrl = req.body?.dataUrl;
     if (typeof dataUrl !== 'string' || !dataUrl.startsWith('data:')) {

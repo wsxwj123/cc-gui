@@ -404,6 +404,37 @@ router.post('/claude-update', async (req, res) => {
 });
 
 /**
+ * POST /api/claude-update/stream — CN-2:在 GUI 内显示更新进度。headless spawn 更新命令
+ * (npm/native),把 stdout+stderr 以 NDJSON 逐行推给前端实时展示,不用开外部终端。
+ * 注:npm -g 在个别 Unix 需 sudo 会 headless 挂起 —— 前端保留"改用终端"兜底。
+ */
+router.post('/claude-update/stream', async (req, res) => {
+  const { method, path: claudePath } = await detectInstall();
+  const cmd = updateCmdFor(method, claudePath);
+  const proxyUrl = await detectLocalProxy().catch(() => null);
+  const env = { ...process.env };
+  if (proxyUrl) { env.HTTP_PROXY = env.HTTPS_PROXY = env.http_proxy = env.https_proxy = proxyUrl; }
+  res.writeHead(200, { 'Content-Type': 'application/x-ndjson', 'Cache-Control': 'no-store' });
+  res.write(JSON.stringify({ type: 'start', command: cmd, method, proxy: proxyUrl }) + '\n');
+  let child;
+  try {
+    child = spawn(cmd, { shell: true, env });
+  } catch (e) {
+    res.write(JSON.stringify({ type: 'error', error: e.message }) + '\n'); return res.end();
+  }
+  const pump = (chunk) => {
+    String(chunk).split(/\r?\n/).forEach((line) => {
+      if (line.trim()) { try { res.write(JSON.stringify({ type: 'log', line }) + '\n'); } catch {} }
+    });
+  };
+  child.stdout?.on('data', pump);
+  child.stderr?.on('data', pump);
+  child.on('error', (e) => { try { res.write(JSON.stringify({ type: 'error', error: e.message }) + '\n'); res.end(); } catch {} });
+  child.on('close', (code) => { try { res.write(JSON.stringify({ type: 'done', code }) + '\n'); res.end(); } catch {} });
+  req.on('close', () => { try { child.kill(); } catch {} });
+});
+
+/**
  * POST /api/claude-install — 未安装时一键安装(mac/linux: 官方 install.sh;win: npm)。
  * 在可见终端运行,让官方安装器自行把 CLI 目录写入系统 PATH。
  */

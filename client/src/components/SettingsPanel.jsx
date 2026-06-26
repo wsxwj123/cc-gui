@@ -614,6 +614,7 @@ function CcUpdater() {
   const [state, setState] = useState({ status: 'idle' });
   const [updating, setUpdating] = useState(false);
   const [result, setResult] = useState(null);
+  const [logLines, setLogLines] = useState([]);   // CN-2 更新实时日志
 
   useEffect(() => {
     fetch('/api/claude-version-check').then((r) => r.json()).then((d) => {
@@ -634,16 +635,44 @@ function CcUpdater() {
     }
   };
 
+  // CN-2:在 GUI 内更新并实时显示进度(流式 NDJSON),不用开外部终端。
   const doUpdate = async () => {
     const cmd = state.updateCommand || 'claude upgrade';
-    if (!(await confirmDialog(`将打开终端运行【${cmd}】更新 Claude Code 到 v${state.latestVersion}（安装方式：${state.method || '未知'}）。\n请在弹出的终端里查看进度,完成后回来点"检查更新"。确定继续?`))) return;
-    setUpdating(true); setResult(null);
+    if (!(await confirmDialog(`将在应用内运行【${cmd}】更新 Claude Code 到 v${state.latestVersion}（安装方式：${state.method || '未知'}），进度实时显示在下方。\n（墙内需已开系统代理;若卡住可点"改用终端"。）确定继续?`))) return;
+    setUpdating(true); setResult(null); setLogLines([]);
     try {
-      const d = await (await fetch('/api/claude-update', { method: 'POST' })).json();
-      setResult(d);
+      const r = await fetch('/api/claude-update/stream', { method: 'POST' });
+      if (!r.ok || !r.body) throw new Error('HTTP ' + r.status);
+      const reader = r.body.getReader();
+      const dec = new TextDecoder();
+      let buf = '';
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += dec.decode(value, { stream: true });
+        const lines = buf.split('\n'); buf = lines.pop() || '';
+        for (const ln of lines) {
+          if (!ln.trim()) continue;
+          let ev; try { ev = JSON.parse(ln); } catch { continue; }
+          if (ev.type === 'log') setLogLines((p) => [...p.slice(-200), ev.line]);
+          else if (ev.type === 'start') setLogLines((p) => [...p, `$ ${ev.command}`]);
+          else if (ev.type === 'error') setResult({ ok: false, error: ev.error });
+          else if (ev.type === 'done') setResult(ev.code === 0
+            ? { ok: true, done: true }
+            : { ok: false, error: `命令退出码 ${ev.code}（见下方日志)` });
+        }
+      }
     } catch (e) {
       setResult({ ok: false, error: e.message || '请求失败' });
     }
+    setUpdating(false);
+  };
+
+  // 兜底:headless 卡住(如 npm -g 需 sudo)时改用外部终端。
+  const doUpdateTerminal = async () => {
+    setUpdating(true); setResult(null);
+    try { setResult(await (await fetch('/api/claude-update', { method: 'POST' })).json()); }
+    catch (e) { setResult({ ok: false, error: e.message || '请求失败' }); }
     setUpdating(false);
   };
 
@@ -719,25 +748,38 @@ function CcUpdater() {
             <div className="flex items-center gap-1.5">
               <span>Claude Code 新版:</span><b className="font-mono">v{state.latestVersion}</b>
             </div>
-            <button
-              onClick={doUpdate}
-              disabled={updating}
-              className="px-3 py-1.5 text-[12px] bg-amber-700 text-white rounded-md hover:bg-amber-800 disabled:opacity-50 flex items-center gap-1.5"
-            >
-              {updating ? <><RefreshCw size={12} className="animate-spin" />更新中…(claude upgrade)</> : <>⬇️ 一键更新</>}
-            </button>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={doUpdate}
+                disabled={updating}
+                className="px-3 py-1.5 text-[12px] bg-amber-700 text-white rounded-md hover:bg-amber-800 disabled:opacity-50 flex items-center gap-1.5"
+              >
+                {updating ? <><RefreshCw size={12} className="animate-spin" />更新中…</> : <>⬇️ 一键更新</>}
+              </button>
+              <button onClick={doUpdateTerminal} disabled={updating}
+                className="text-[11px] text-amber-800/80 hover:text-amber-900 underline disabled:opacity-50"
+                title="若应用内更新卡住(如 npm 需 sudo),改用外部终端">改用终端</button>
+            </div>
           </div>
         ) : (
           <div className="text-[12px] text-success">✓ 已是最新版本</div>
         )
       )}
       {state.status === 'err' && <div className="text-[12px] text-error">{state.error}</div>}
+      {/* CN-2 实时进度日志 */}
+      {(updating || logLines.length > 0) && (
+        <pre className="text-[10px] leading-snug font-mono text-ink-soft bg-canvas border border-canvas-deep rounded p-2 max-h-40 overflow-auto whitespace-pre-wrap break-all">
+          {logLines.length ? logLines.join('\n') : '启动中…'}{updating && <span className="animate-pulse"> ▌</span>}
+        </pre>
+      )}
       {result && (
         result.ok
           ? <div className="text-[12px] text-emerald-700 bg-emerald-50 border border-emerald-200 rounded p-2 break-words">
-              ✓ 已在终端启动 <code className="font-mono break-all">{result.command}</code>。完成后点上方"检查更新"确认新版本。
+              {result.done
+                ? <>✓ 更新完成。点上方"检查更新"确认新版本。</>
+                : <>✓ 已在终端启动 <code className="font-mono break-all">{result.command}</code>。完成后点上方"检查更新"确认。</>}
             </div>
-          : <div className="text-[12px] text-error">启动失败:{result.error}</div>
+          : <div className="text-[12px] text-error">更新失败:{result.error}</div>
       )}
     </div>
   );

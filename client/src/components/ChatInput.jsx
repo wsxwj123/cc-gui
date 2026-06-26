@@ -352,21 +352,29 @@ export function ChatInput({ onSend, onStop, onAccelerate, disabled, isStreaming,
 
   const uploadAttachment = async (file) => {
     try {
-      const dataUrl = await fileToDataUrl(file);
+      // CN-3:把 File 当原始 body 直接发(流式,不经 base64/JSON)——避开 25mb 限制 + 内存膨胀,
+      // 大文件也能传。mime 走 Content-Type、文件名走 X-Upload-Name 头。
       const res = await fetch('/api/upload', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ dataUrl, name: file.name }),
+        headers: {
+          'Content-Type': file.type || 'application/octet-stream',
+          'X-Upload-Name': encodeURIComponent(file.name || 'file'),
+        },
+        body: file,
       });
       const data = await res.json();
       if (!res.ok) {
         alert('上传失败: ' + (data.error || res.status));
         return;
       }
+      // 仅图片生成缩略预览(小);大文件/非图片不读 dataUrl,免内存膨胀。
+      const isImage = data.kind === 'image' || file.type.startsWith('image/');
+      let preview = null;
+      if (isImage) { try { preview = await fileToDataUrl(file); } catch {} }
       setAttachments((prev) => [...prev, {
-        kind: data.kind || (file.type.startsWith('image/') ? 'image' : 'text'),
+        kind: data.kind || (isImage ? 'image' : 'text'),
         path: data.path,
-        preview: data.kind === 'image' || file.type.startsWith('image/') ? dataUrl : null,
+        preview,
         name: file.name || data.path.split('/').pop(),
         bytes: data.bytes,
       }]);
