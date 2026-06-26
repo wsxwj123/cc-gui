@@ -20,6 +20,7 @@ import { UsagePanel } from './components/UsagePanel.jsx';
 import { ProcessPanel } from './components/ProcessPanel.jsx';
 import { SettingsPanel } from './components/SettingsPanel.jsx';
 import { FileExplorerPanel } from './components/FileExplorerPanel.jsx';
+import { SkillsPanel } from './components/SkillsPanel.jsx';
 import { useResizable as useResizableHook, Splitter as SplitterCmp } from './hooks/useResizable.jsx';
 import { MCPPanel } from './components/MCPPanel.jsx';
 import { FileReviewPanel } from './components/FileChangesPanel.jsx';
@@ -40,7 +41,7 @@ import {
   RefreshCw, Activity, Settings, Server, GitBranch, FileDiff, Check, Wrench, X,
   Sun, Moon, Monitor, Bot, Camera, History, Loader2, Shield, FolderTree,
   Archive, ArchiveRestore, Trash2, EyeOff, Columns2, Smartphone, Pencil, Type, Palette,
-  Menu, SquarePen, Gauge, Cpu, CheckCircle2, BookText,
+  Menu, SquarePen, Gauge, Cpu, CheckCircle2, BookText, Sparkles,
 } from 'lucide-react';
 
 // ── Per-session shadow-git checkpoints ──────────────────────────
@@ -407,6 +408,7 @@ const PANEL_MAP = {
   usage: { label: '用量统计', icon: BarChart3, component: UsagePanel },
   processes: { label: '进程管理 / 停止', icon: Activity, component: ProcessPanel },
   mcp: { label: 'MCP 服务器', icon: Server, component: MCPPanel },
+  skills: { label: 'Skill 市场（导入官方技能）', icon: Sparkles, component: SkillsPanel },
   memory: { label: 'CLAUDE.md 指令', icon: BookText, component: MemoryPanel },
   settings: { label: '设置', icon: Settings, component: SettingsPanel },
 };
@@ -1608,26 +1610,30 @@ function SessionList() {
   return (
     <div className="flex flex-col h-full">
       <div className="px-4 pt-4 pb-3 border-b border-canvas-deep">
-        <div className="flex items-center gap-2 mb-1">
-          <button onClick={() => useStore.getState().setSelectedProject(null)} className="p-0.5 hover:bg-canvas-deep rounded transition-colors">
+        <div className="flex items-center gap-2 mb-1 flex-wrap">
+          <button onClick={() => useStore.getState().setSelectedProject(null)} className="p-0.5 hover:bg-canvas-deep rounded transition-colors shrink-0">
             <ArrowLeft size={14} className="text-ink-faint" />
           </button>
           <h2 className="text-[11px] font-medium uppercase tracking-widest text-ink-faint font-body shrink-0">会话</h2>
           <span className="text-[10px] text-ink-ghost font-mono shrink-0">{sessions.length}</span>
-          <button
-            onClick={handleNewWorktree}
-            className="ml-auto btn-glass flex items-center gap-1 px-2 py-1 text-[11px] font-body text-ink-soft shrink-0 whitespace-nowrap"
-            title="在新 git worktree 中开会话（隔离）"
-          >
-            <GitBranch size={11} />worktree
-          </button>
-          <button
-            onClick={handleNew}
-            className="btn-accent flex items-center gap-1 px-2 py-1 text-[11px] font-body shrink-0 whitespace-nowrap"
-            title="新建会话"
-          >
-            <Plus size={11} />新建
-          </button>
+          {/* 两个动作钮成组 + 父行 flex-wrap：侧栏窄到放不下时整组掉到第二行，
+              不再被 aside 的 overflow-hidden 横向裁掉（CK-1）。 */}
+          <div className="ml-auto flex items-center gap-2 shrink-0">
+            <button
+              onClick={handleNewWorktree}
+              className="btn-glass flex items-center gap-1 px-2 py-1 text-[11px] font-body text-ink-soft whitespace-nowrap"
+              title="在新 git worktree 中开会话（隔离）"
+            >
+              <GitBranch size={11} />worktree
+            </button>
+            <button
+              onClick={handleNew}
+              className="btn-accent flex items-center gap-1 px-2 py-1 text-[11px] font-body whitespace-nowrap"
+              title="新建会话"
+            >
+              <Plus size={11} />新建
+            </button>
+          </div>
         </div>
         <p className="text-xs text-ink-muted font-body truncate ml-6" title={formatPath(selectedProject?.path)}>{formatPathShort(selectedProject?.path)}</p>
         {/* Git status check at project level — fires immediately on project
@@ -6378,6 +6384,26 @@ export default function App() {
       .catch(() => {});
   }, []);
 
+  // CK-6: Cmd/Ctrl+N 在「当前聚焦窗格的会话所属项目」下新建草稿会话(Mac+Win 通用)。
+  // 复用 startNew 的草稿逻辑;写 activeTabIndex 对应窗格,不打扰分屏里其它窗格。
+  // 没有项目上下文(还停在项目列表)就不动。
+  useEffect(() => {
+    const onKey = (e) => {
+      if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && (e.key === 'n' || e.key === 'N')) {
+        const st = useStore.getState();
+        const idx = st.activeTabIndex || 0;
+        const sel = (st.paneSessions && st.paneSessions[idx]) || st.selectedSession;
+        const proj = st.selectedProject || (sel?.projectHash ? { hash: sel.projectHash, path: sel.projectPath } : null);
+        if (!proj) return; // 没有项目 → 交给浏览器默认(本地无害)
+        e.preventDefault();
+        st.setPaneSession(idx, { draft: true, sessionId: null, projectHash: proj.hash, projectPath: proj.path, firstPrompt: '新会话' });
+        st.setPaneMessages(idx, []);
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+
   // Bug #11:首次启动检测 claude CLI;没装就弹模态按系统给安装指引(给小白用户)。
   // dismissed 仅本次会话生效 — 跳过后下次启动还会再问,不本地永存(用户可能装了又卸)。
   const [cliInstalled, setCliInstalled] = useState(true);  // 乐观:有就当装了,errored 才显示
@@ -6809,7 +6835,7 @@ export default function App() {
             // stays as the hover tooltip for the full name.
             const SHORT = {
               files: '文件', monitor: '监控', agents: 'Agent', usage: '用量', processes: '进程',
-              changes: '审查', mcp: 'MCP', memory: '指令', settings: '设置',
+              changes: '审查', mcp: 'MCP', skills: '技能', memory: '指令', settings: '设置',
             };
             const short = SHORT[id] || label;
             return (

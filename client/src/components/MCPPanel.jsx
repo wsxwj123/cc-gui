@@ -40,7 +40,7 @@ function PingButton({ name }) {
       </button>
       {/* 失败原因浮层:可见、可滚、手动关闭(不自动消失)—— 修"看不见报错" */}
       {state === 'err' && detail && (
-        <div className="absolute right-0 top-full mt-1 z-[60] w-80 max-w-[78vw] max-h-56 overflow-auto rounded-lg border border-error/30 bg-canvas shadow-2xl p-2.5"
+        <div className="absolute right-0 top-full mt-1 z-[60] w-64 max-w-[calc(100vw-1.5rem)] max-h-56 overflow-auto rounded-lg border border-error/30 bg-canvas shadow-2xl p-2.5"
           onClick={(e) => e.stopPropagation()}>
           <div className="flex items-center justify-between mb-1.5">
             <span className="text-[11px] text-error font-body font-medium">连接失败原因</span>

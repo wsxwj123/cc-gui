@@ -34,6 +34,7 @@ import permissionCheckRoutes from './routes/permission-check.js';
 import versionCheckRoutes from './routes/version-check.js';
 import downloadUpdateRoutes from './routes/download-update.js';
 import openUrlRoutes from './routes/open-url.js';
+import skillsRoutes from './routes/skills.js';
 import {
   authMiddleware, isLocalReq, isAuthorized, parseCookies, verifyToken,
   hasPassword, setPassword, clearPassword, verifyPassword, issueToken, updateConfig, loadConfig,
@@ -297,6 +298,7 @@ app.use('/api', permissionCheckRoutes);
 app.use('/api', versionCheckRoutes);
 app.use('/api', downloadUpdateRoutes);
 app.use('/api', openUrlRoutes);
+app.use('/api', skillsRoutes);
 
 // Auto-load optional local-only routes only when explicitly requested. These
 // files are gitignored personal integrations; packaged/public builds must not
