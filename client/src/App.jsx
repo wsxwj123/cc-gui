@@ -6505,7 +6505,10 @@ export default function App() {
         }
         if (sessionStorage.getItem('cgui-ver-busted') !== h.version) {
           sessionStorage.setItem('cgui-ver-busted', h.version);
-          window.location.replace('/?v=' + encodeURIComponent(h.version));
+          // CL-3:重载目标带 ?v=版本 + &t=时间戳。固定的 /?v=X 在 Windows WebView2 上可能被
+          // 当成可缓存条目重新端出旧 bundle(用户报"重装后爆红、设置版本却一致");加每次不同的
+          // &t= 让它永远 cache-miss、强制取新 index.html(→新 hash 资源)。SPA 不读 query 无副作用。
+          window.location.replace('/?v=' + encodeURIComponent(h.version) + '&t=' + Date.now());
           return;
         }
         setBundleMismatch({ bundle: __BUILD_VERSION__, server: h.version });

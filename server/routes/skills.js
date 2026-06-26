@@ -44,18 +44,17 @@ async function readSkillMd(dir) {
 // ── 本机已安装 ────────────────────────────────────────────────────
 router.get('/skills', async (req, res) => {
   try {
-    let names;
-    try { names = await readdir(SKILLS_DIR); } catch { return res.json({ skills: [] }); }
-    const skills = [];
-    for (const id of names) {
-      if (id.startsWith('.')) continue;
-      const dir = join(SKILLS_DIR, id);
-      try { if (!(await stat(dir)).isDirectory()) continue; } catch { continue; }
-      const md = await readSkillMd(dir);
-      if (!md) continue;
-      const fm = parseFrontmatter(md);
-      skills.push({ id, name: fm.name || id, description: fm.description || '' });
-    }
+    // CL-1: 与 /api/slash-commands 一致地枚举(列所有子目录),否则"slash 能用、市场扫不到"
+    // ——之前要求每个目录必须有 SKILL.md 才算 skill,把没有顶层 SKILL.md 的技能漏掉了。
+    // 现在所有非隐藏目录都列出,有 SKILL.md 就读名称/描述,没有则用目录名。
+    let entries;
+    try { entries = await readdir(SKILLS_DIR, { withFileTypes: true }); } catch { return res.json({ skills: [] }); }
+    const dirs = entries.filter((e) => e.isDirectory() && !e.name.startsWith('.'));
+    const skills = await Promise.all(dirs.map(async (e) => {
+      const md = await readSkillMd(join(SKILLS_DIR, e.name));
+      const fm = md ? parseFrontmatter(md) : {};
+      return { id: e.name, name: fm.name || e.name, description: fm.description || '' };
+    }));
     skills.sort((a, b) => a.id.localeCompare(b.id));
     res.json({ skills });
   } catch (e) {
@@ -71,10 +70,23 @@ router.get('/skills/sources', (req, res) => {
 const repoCache = new Map(); // repo -> { skills, files, branch, at }
 const TTL = 60 * 60 * 1000;
 
-async function ghDefaultBranch(repo) {
-  const r = await fetch(`https://api.github.com/repos/${repo}`, { headers: GH_HEADERS });
+// CL-1: 取 GitHub JSON 的健壮封装。Windows 网络受限/被拦截时 GitHub 可能返回 HTML
+// 拦截页,直接 r.json() 会抛 "Unexpected token '<'... not valid JSON"(用户报告)。
+// 这里先验 r.ok + content-type,非 JSON 给可读错误而非裸 parse 报错。
+async function ghJson(url) {
+  let r;
+  try { r = await fetch(url, { headers: GH_HEADERS }); }
+  catch (e) { const err = new Error(`无法连接 GitHub(网络受限?可尝试代理):${e.message}`); err.status = 0; throw err; }
   if (!r.ok) { const e = new Error(`GitHub API ${r.status}`); e.status = r.status; throw e; }
-  return (await r.json()).default_branch || 'main';
+  const ct = r.headers.get('content-type') || '';
+  if (!ct.includes('json')) {
+    const e = new Error('GitHub 未返回 JSON(可能被网络拦截或需代理)'); e.status = 502; throw e;
+  }
+  return r.json();
+}
+
+async function ghDefaultBranch(repo) {
+  return (await ghJson(`https://api.github.com/repos/${repo}`)).default_branch || 'main';
 }
 
 // 从 tree 路径抽 skill。返回 [{ id, root }],root = SKILL.md 父目录的仓库内路径。
@@ -98,9 +110,7 @@ async function loadRepo(repo) {
   const c = repoCache.get(repo);
   if (c && now - c.at < TTL) return c;
   const branch = await ghDefaultBranch(repo);
-  const tr = await fetch(`https://api.github.com/repos/${repo}/git/trees/${branch}?recursive=1`, { headers: GH_HEADERS });
-  if (!tr.ok) { const e = new Error(`GitHub API ${tr.status}`); e.status = tr.status; throw e; }
-  const tree = (await tr.json()).tree || [];
+  const tree = (await ghJson(`https://api.github.com/repos/${repo}/git/trees/${branch}?recursive=1`)).tree || [];
   const located = locateSkills(tree);
   located.sort((a, b) => a.id.localeCompare(b.id));
   // 仅小仓库逐个抓描述,大仓只列名

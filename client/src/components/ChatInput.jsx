@@ -589,11 +589,10 @@ export function ChatInput({ onSend, onStop, onAccelerate, disabled, isStreaming,
       }
     }
 
-    // 发送统一为 Cmd+Enter(mac)/ Ctrl+Enter(win),与"规划模式 revise 计划"提交一致(用户要求,
-    // 跨平台统一)。裸 Enter 一律换行(让 textarea 默认行为插入换行),不再发送——避免多行输入时
-    // 误触发送。stopPropagation 阻止冒泡到 window 上的 plan/权限卡片 Enter 监听(否则那个 Enter
-    // 会被吃掉去"批准计划",改完计划按回车发不出去 #1/#2)。
-    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+    // 发送:裸 Enter 发送,Shift+Enter 换行(用户要求,标准聊天习惯;Cmd/Ctrl+Enter 仍兼容)。
+    // IME 合成期已在本函数顶部 return,中文候选回车不会误发。stopPropagation 阻止冒泡到 window
+    // 上的 plan/权限卡片 Enter 监听(否则那个 Enter 会被吃掉去"批准计划")。
+    if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       e.stopPropagation();
       handleSend();
