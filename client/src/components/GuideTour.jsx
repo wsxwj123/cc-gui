@@ -58,7 +58,13 @@ export function GuideTour({ open, onClose, hasProject }) {
   const overlayRef = useRef(null);
   const tipRef = useRef(null);
 
-  useEffect(() => { if (open) { setI(0); setRect(null); setPos(null); } }, [open]);
+  // 开:回到第 1 步(rect 由下面的定位 effect 设)。关:清残留 rect/pos —— 否则下次重开
+  // 的首帧会用到上一轮的旧 i/rect,而 steps 长度随 hasProject 变(有项目 22 步 / 无项目 21 步),
+  // 旧 i 越界 → steps[i] 为 undefined → 渲染抛错整页白屏(用户报:返回初始界面再点指引白屏)。
+  useEffect(() => {
+    if (open) setI(0);
+    else { setRect(null); setPos(null); }
+  }, [open]);
 
   // 定位当前步骤目标;找不到就顺延到下一个有效步骤,全部找不到则结束。
   useLayoutEffect(() => {
@@ -96,8 +102,9 @@ export function GuideTour({ open, onClose, hasProject }) {
     setPos({ top: top / zoom, left: left / zoom, zoom });
   }, [open, rect, i]);
 
-  if (!open || !rect) return null;
   const step = steps[i];
+  // !step 兜底:tour 开着时 hasProject 变化使 steps 变短、i 越界 → 不渲染(定位 effect 会纠正 i)。
+  if (!open || !rect || !step) return null;
   const last = i === steps.length - 1;
   const pad = 6;
   // 高亮框同样要 ÷zoom(style 值会被 ×zoom 渲染),否则下方/右侧元素的圈会整体偏移。
