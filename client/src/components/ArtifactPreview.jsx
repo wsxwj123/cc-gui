@@ -144,16 +144,18 @@ export function PreviewBody({ language, mode, code, debounced, fullscreen, ifram
   );
 }
 
-export function ArtifactPreview({ lang, code }) {
+export function ArtifactPreview({ lang, code, coexist = false }) {
   const language = normLang(lang);
   const [mode, setMode] = useState('preview');
   const [fullscreen, setFullscreen] = useState(false);
   const debounced = useDebounced(code, 300);
 
   // BH-1b: 桌面端点"停靠"开右侧 dock(全局单 dock);移动端无横向空间走全屏遮罩。
+  // CK-5: coexist=true(从文件浏览器停靠)时,dock 作为独立最右列与文件浏览器并存,
+  // 不替换右栏 —— 让用户一边看文件树一边大图预览 html/svg。
   const openDock = () => {
     const st = useStore.getState();
-    st.openArtifactDock({ lang: language, code, tabIndex: st.activeTabIndex });
+    st.openArtifactDock({ lang: language, code, tabIndex: st.activeTabIndex, coexist });
   };
 
   // 全屏时按 Esc 关闭 + 锁 body 滚动。

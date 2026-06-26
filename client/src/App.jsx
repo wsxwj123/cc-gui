@@ -21,6 +21,7 @@ import { ProcessPanel } from './components/ProcessPanel.jsx';
 import { SettingsPanel } from './components/SettingsPanel.jsx';
 import { FileExplorerPanel } from './components/FileExplorerPanel.jsx';
 import { SkillsPanel } from './components/SkillsPanel.jsx';
+import { GuideTour } from './components/GuideTour.jsx';
 import { useResizable as useResizableHook, Splitter as SplitterCmp } from './hooks/useResizable.jsx';
 import { MCPPanel } from './components/MCPPanel.jsx';
 import { FileReviewPanel } from './components/FileChangesPanel.jsx';
@@ -41,7 +42,7 @@ import {
   RefreshCw, Activity, Settings, Server, GitBranch, FileDiff, Check, Wrench, X,
   Sun, Moon, Monitor, Bot, Camera, History, Loader2, Shield, FolderTree,
   Archive, ArchiveRestore, Trash2, EyeOff, Columns2, Smartphone, Pencil, Type, Palette,
-  Menu, SquarePen, Gauge, Cpu, CheckCircle2, BookText, Sparkles,
+  Menu, SquarePen, Gauge, Cpu, CheckCircle2, BookText, Sparkles, HelpCircle,
 } from 'lucide-react';
 
 // ── Per-session shadow-git checkpoints ──────────────────────────
@@ -614,8 +615,16 @@ function MainLayout({ sidebarCollapsed, selectedProject, rightPanel, setRightPan
         setActiveTabIndex={setActiveTabIndex}
       />
       {/* BH-1b: dock 打开时占右栏(优先于 RightPanel,后者状态保留只是暂时让位)。
-          ArtifactDock 自带左缘 Splitter,故此处不再额外包一个。 */}
-      {artifactDock ? (
+          ArtifactDock 自带左缘 Splitter,故此处不再额外包一个。
+          CK-5: coexist(从文件浏览器停靠 html/svg)时,文件浏览器右栏 + dock 并存为
+          两列,dock 在最右,不遮挡文件树。 */}
+      {artifactDock?.coexist && rightPanel ? (
+        <>
+          <Splitter onMouseDown={onRightDrag} axis="x" />
+          <RightPanel panelId={rightPanel} onClose={() => setRightPanel(null)} width={rightPanelWidth} />
+          <ArtifactDock />
+        </>
+      ) : artifactDock ? (
         <ArtifactDock />
       ) : rightPanel && (
         <>
@@ -708,7 +717,8 @@ function SplitMain({ activeTabIndex, setActiveTabIndex }) {
   const dockPane = (artifactDock && Number.isInteger(artifactDock.tabIndex))
     ? Math.min(paneCount - 1, Math.max(0, artifactDock.tabIndex))
     : activeTabIndex;
-  const panes = (artifactDock && paneCount > 1)
+  // CK-5: coexist dock(文件浏览器侧停靠)是独立侧列,不替换焦点,故不折叠分屏。
+  const panes = (artifactDock && !artifactDock.coexist && paneCount > 1)
     ? [dockPane]
     : Array.from({ length: paneCount }, (_, i) => i);
   // 唯一窗格时(单屏 或 dock 单显聚焦窗格)用单屏那套填满样式 + 不渲分屏头/手柄。
@@ -1049,6 +1059,7 @@ function ProjectList() {
               }
               await registerProjectPath(path);
             }}
+            data-tour="add-project"
             className="p-1 hover:bg-canvas-warm rounded transition-colors"
             title="添加项目（系统文件选择器）"
           >
@@ -1066,7 +1077,7 @@ function ProjectList() {
           />
         </div>
       </div>
-      <div className="flex-1 overflow-y-auto px-2 stagger">
+      <div data-tour="sidebar-list" className="flex-1 overflow-y-auto px-2 stagger">
         {searchQuery.length >= 2 && (
           <GlobalSearchResults q={searchQuery} onPick={handlePickHit} />
         )}
@@ -1620,6 +1631,7 @@ function SessionList() {
               不再被 aside 的 overflow-hidden 横向裁掉（CK-1）。 */}
           <div className="ml-auto flex items-center gap-2 shrink-0">
             <button
+              data-tour="new-worktree"
               onClick={handleNewWorktree}
               className="btn-glass flex items-center gap-1 px-2 py-1 text-[11px] font-body text-ink-soft whitespace-nowrap"
               title="在新 git worktree 中开会话（隔离）"
@@ -1627,6 +1639,7 @@ function SessionList() {
               <GitBranch size={11} />worktree
             </button>
             <button
+              data-tour="new-session"
               onClick={handleNew}
               className="btn-accent flex items-center gap-1 px-2 py-1 text-[11px] font-body whitespace-nowrap"
               title="新建会话"
@@ -1658,7 +1671,7 @@ function SessionList() {
           >已归档 <span className="font-mono opacity-70">{archivedCount}</span></button>
         </div>
       </div>
-      <div className="flex-1 overflow-y-auto px-2 stagger">
+      <div data-tour="sidebar-list" className="flex-1 overflow-y-auto px-2 stagger">
         {visible.map((session) => (
           <SessionItem
             key={session.sessionId}
@@ -6375,6 +6388,7 @@ export default function App() {
   useWebSocket();
   const { sidebarCollapsed, toggleSidebar, selectedProject, selectedSession } = useStore();
   const [rightPanel, setRightPanel] = useState(null);
+  const [tourOpen, setTourOpen] = useState(false); // CK-3 使用指引浮层
   // Auth gate: external clients with a password set must log in first. Loopback
   // (Mac) always reports authed, so this is a no-op locally.
   const [authLocked, setAuthLocked] = useState(false);
@@ -6799,7 +6813,7 @@ export default function App() {
           horizontally overflowing on narrow viewports. */}
       <header className="glass-bar min-h-12 px-4 py-1 flex items-center justify-between gap-y-1 flex-wrap shrink-0 relative z-40">
         <div className="flex items-center gap-2 min-w-0">
-          <button onClick={toggleSidebar} className="btn-glass p-1.5 transition-colors shrink-0" title={sidebarCollapsed ? '展开' : '收起'}>
+          <button data-tour="sidebar-toggle" onClick={toggleSidebar} className="btn-glass p-1.5 transition-colors shrink-0" title={sidebarCollapsed ? '展开' : '收起'}>
             {sidebarCollapsed ? <ChevronRight size={15} className="text-ink-muted" /> : <ChevronLeft size={15} className="text-ink-muted" />}
           </button>
           <span className="text-accent text-[15px] leading-none shrink-0 select-none font-mono">✻</span>
@@ -6819,17 +6833,17 @@ export default function App() {
           )}
         </div>
         <div className="flex items-center gap-1 flex-wrap justify-end min-w-0">
-          <ProviderSwitcher />
-          <ModelSelector placement="bottom" align="right" compact permKey={permKey} />
-          <EffortSelector placement="bottom" align="right" permKey={permKey} />
-          <PermissionModeSelector permKey={permKey} />
-          <AgentModeSelector permKey={permKey} sessionStarted={!!activeSession?.sessionId} />
-          <RemoteControlButton session={activeSession} />
+          <span data-tour="provider-switcher" className="inline-flex"><ProviderSwitcher /></span>
+          <span data-tour="model-selector" className="inline-flex"><ModelSelector placement="bottom" align="right" compact permKey={permKey} /></span>
+          <span data-tour="effort-selector" className="inline-flex"><EffortSelector placement="bottom" align="right" permKey={permKey} /></span>
+          <span data-tour="permission-selector" className="inline-flex"><PermissionModeSelector permKey={permKey} /></span>
+          <span data-tour="agent-selector" className="inline-flex"><AgentModeSelector permKey={permKey} sessionStarted={!!activeSession?.sessionId} /></span>
+          <span data-tour="remote-control" className="inline-flex"><RemoteControlButton session={activeSession} /></span>
           <div className="w-px h-4 bg-ink-ghost/30 mx-1" />
           {/* Split-screen toggle. Activates the right pane (initially empty
               until user clicks a session in the sidebar). Click again to
               collapse back to a single SessionDetail. */}
-          <PaneCountPicker />
+          <span data-tour="pane-count" className="inline-flex"><PaneCountPicker /></span>
           {Object.entries(PANEL_MAP).map(([id, { icon: Icon, label }]) => {
             // Short chip label (always visible under the icon). Long `label`
             // stays as the hover tooltip for the full name.
@@ -6839,7 +6853,7 @@ export default function App() {
             };
             const short = SHORT[id] || label;
             return (
-              <button key={id} onClick={() => setRightPanel(rightPanel === id ? null : id)}
+              <button key={id} data-tour={`panel-${id}`} onClick={() => setRightPanel(rightPanel === id ? null : id)}
                 className={`px-1.5 py-1 rounded-lg transition-all flex flex-col items-center gap-0.5 ${rightPanel === id ? 'bg-accent-subtle text-accent' : 'text-ink-muted hover:text-ink hover:bg-black/5'}`}
                 title={label}>
                 <Icon size={15} />
@@ -6857,6 +6871,10 @@ export default function App() {
               <span className="text-[11px] leading-none font-body">更新</span>
             </button>
           )}
+          <button onClick={() => setTourOpen(true)} title="使用指引 — 逐个介绍界面功能"
+            className="flex items-center justify-center p-1.5 rounded-lg text-ink-muted hover:text-ink hover:bg-black/5 transition-colors">
+            <HelpCircle size={15} />
+          </button>
           <div className="w-px h-4 bg-ink-ghost/30 mx-1" />
           <ThemeToggle />
         </div>
@@ -6871,6 +6889,7 @@ export default function App() {
         isMobile={isMobile}
       />
       {LocalWidget && <LocalWidget />}
+      <GuideTour open={tourOpen} onClose={() => setTourOpen(false)} hasProject={!!selectedProject} />
       {bundleMismatch && (
         <div className="fixed top-0 inset-x-0 z-[300] bg-red-600 text-white text-[12px] font-body px-4 py-2 flex items-center justify-center gap-3 shadow-lg">
           <span>⚠️ 界面 v{bundleMismatch.bundle} 与服务端 v{bundleMismatch.server} 不一致。请依次尝试：① 完全退出 GUI 再打开（会自动换用新版服务并绕过缓存）② 仍出现则说明安装包内是旧前端，请重新下载安装</span>

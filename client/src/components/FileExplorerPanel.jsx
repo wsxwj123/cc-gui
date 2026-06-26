@@ -401,7 +401,7 @@ function PreviewBody({ preview }) {
           </div>
         ) : isHtml ? (
           <div className="px-3 py-2">
-            <ArtifactPreview lang="html" code={preview.content || ''} />
+            <ArtifactPreview lang="html" code={preview.content || ''} coexist />
           </div>
         ) : (
           (() => {

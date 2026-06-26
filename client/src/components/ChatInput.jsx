@@ -779,6 +779,7 @@ export function ChatInput({ onSend, onStop, onAccelerate, disabled, isStreaming,
             <Paperclip size={16} />
           </button>
           <textarea
+            data-tour="composer"
             ref={textareaRef}
             value={text}
             onChange={handleTextChange}
