@@ -29,6 +29,9 @@ export function SkillsPanel() {
   const [officialMeta, setOfficialMeta] = useState({});
   const [loadingOff, setLoadingOff] = useState(false);
   const [offErr, setOffErr] = useState('');
+  // CQ批次4:粘贴任意 GitHub 仓库导入。customRepo=输入框,activeRepo=已加载的自定义仓库(null=用内置源)。
+  const [customRepo, setCustomRepo] = useState('');
+  const [activeRepo, setActiveRepo] = useState(null);
 
   const [busy, setBusy] = useState(null);             // null | 'all' | <skillId>
   const [conflicts, setConflicts] = useState(null);
@@ -41,10 +44,13 @@ export function SkillsPanel() {
     setLoadingLocal(false);
   }, []);
 
-  const loadOfficial = useCallback(async (srcId) => {
+  const loadOfficial = useCallback(async (srcId, repo) => {
     setLoadingOff(true); setOffErr(''); setConflicts(null);
     try {
-      const d = await (await fetch(`/api/skills/official?source=${encodeURIComponent(srcId)}`)).json();
+      const url = repo
+        ? `/api/skills/official?repo=${encodeURIComponent(repo)}`
+        : `/api/skills/official?source=${encodeURIComponent(srcId)}`;
+      const d = await (await fetch(url)).json();
       setOfficial(d.skills || []);
       setOfficialMeta({ count: d.count, repo: d.repo, truncatedDesc: d.truncatedDesc });
       if (d.error) setOffErr(d.error);
@@ -52,11 +58,20 @@ export function SkillsPanel() {
     setLoadingOff(false);
   }, []);
 
+  // 解析 owner/repo 或 GitHub 地址 → 加载该仓库的 skill 列表。
+  const loadCustomRepo = useCallback(() => {
+    const m = customRepo.trim().match(/(?:github\.com\/)?([\w.-]+\/[\w.-]+?)(?:\.git|\/.*)?$/i);
+    if (!m) { setOffErr('请输入 owner/repo 或 GitHub 仓库地址'); return; }
+    const repo = m[1];
+    setActiveRepo(repo);
+    loadOfficial(null, repo);
+  }, [customRepo, loadOfficial]);
+
   useEffect(() => { loadLocal(); }, [loadLocal]);
   useEffect(() => {
     fetch('/api/skills/sources').then((r) => r.json()).then((d) => setSources(d.sources || [])).catch(() => {});
   }, []);
-  useEffect(() => { if (tab === 'import') loadOfficial(source); }, [tab, source, loadOfficial]);
+  useEffect(() => { if (tab === 'import' && !activeRepo) loadOfficial(source); }, [tab, source, activeRepo, loadOfficial]);
 
   const runImport = async (ids, overwrite, tag) => {
     if (!ids.length) return;
@@ -64,7 +79,7 @@ export function SkillsPanel() {
     try {
       const r = await fetch('/api/skills/import', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ source, ids, overwrite }),
+        body: JSON.stringify(activeRepo ? { repo: activeRepo, ids, overwrite } : { source, ids, overwrite }),
       });
       const d = await r.json();
       if (!r.ok) throw new Error(d.error || '导入失败');
@@ -78,7 +93,7 @@ export function SkillsPanel() {
         setNotice(parts.join(' · ') || '完成');
         setConflicts(null);
       }
-      await Promise.all([loadOfficial(source), loadLocal()]);
+      await Promise.all([activeRepo ? loadOfficial(null, activeRepo) : loadOfficial(source), loadLocal()]);
     } catch (e) { setNotice('错误: ' + e.message); }
     setBusy(null);
   };
@@ -103,7 +118,7 @@ export function SkillsPanel() {
       <div className="flex items-center gap-1.5">
         {tabBtn('local', '本机 Skill', local.length)}
         {tabBtn('import', '导入', null)}
-        <button onClick={tab === 'local' ? loadLocal : () => loadOfficial(source)} disabled={loadingLocal || loadingOff}
+        <button onClick={tab === 'local' ? loadLocal : () => (activeRepo ? loadOfficial(null, activeRepo) : loadOfficial(source))} disabled={loadingLocal || loadingOff}
           className="ml-auto p-1.5 text-ink-faint hover:text-ink rounded disabled:opacity-40" title="刷新">
           <RefreshCw size={13} className={(loadingLocal || loadingOff) ? 'animate-spin' : ''} />
         </button>
@@ -139,17 +154,35 @@ export function SkillsPanel() {
         </>
       ) : (
         <>
-          {/* 源选择 */}
+          {/* 源选择(内置源点了即清掉自定义仓库,回到内置源模式) */}
           <div className="flex flex-wrap gap-1.5">
             {sources.map((s) => (
-              <button key={s.id} onClick={() => setSource(s.id)}
+              <button key={s.id} onClick={() => { setActiveRepo(null); setCustomRepo(''); setSource(s.id); }}
                 className={`px-2.5 py-1 text-[11px] font-body rounded-md border transition-colors ${
-                  source === s.id ? 'border-accent text-accent bg-accent/10' : 'border-canvas-deep text-ink-muted hover:text-ink'}`}>
+                  !activeRepo && source === s.id ? 'border-accent text-accent bg-accent/10' : 'border-canvas-deep text-ink-muted hover:text-ink'}`}>
                 {s.name}
               </button>
             ))}
           </div>
-          {sources.find((s) => s.id === source)?.url && (
+          {/* CQ批次4:粘贴任意 GitHub 仓库一键导入其全部 skill */}
+          <div className="flex gap-1.5">
+            <input
+              type="text" value={customRepo}
+              onChange={(e) => setCustomRepo(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); loadCustomRepo(); } }}
+              placeholder="GitHub 仓库:owner/repo 或完整地址"
+              className="flex-1 min-w-0 bg-canvas border border-canvas-deep rounded-md px-2 py-1 text-[11px] text-ink placeholder-ink-ghost focus:outline-none focus:border-accent/40 font-mono" />
+            <button onClick={loadCustomRepo} disabled={loadingOff || !customRepo.trim()}
+              className="shrink-0 px-2.5 py-1 rounded-md bg-accent text-white text-[11px] font-body hover:bg-accent-hover disabled:opacity-50">
+              拉取仓库
+            </button>
+          </div>
+          {activeRepo ? (
+            <div className="flex items-center gap-2 text-[10px] text-ink-faint font-mono">
+              <span className="text-accent">仓库:{activeRepo}</span>
+              <button onClick={() => { setActiveRepo(null); setCustomRepo(''); }} className="text-ink-faint hover:text-ink underline">返回内置源</button>
+            </div>
+          ) : sources.find((s) => s.id === source)?.url && (
             <a href={sources.find((s) => s.id === source).url} target="_blank" rel="noreferrer"
               className="inline-flex items-center gap-1 text-[10px] text-ink-faint hover:text-accent font-mono">
               <ExternalLink size={10} />{officialMeta.repo || sources.find((s) => s.id === source).url}

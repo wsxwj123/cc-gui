@@ -179,12 +179,14 @@ export function MCPPanel() {
   const installedPluginIds = new Set(plugins.map((p) => String(p.name).split('@')[0]));
   const [installingPlugin, setInstallingPlugin] = useState(null);
   const [pluginErr, setPluginErr] = useState('');
-  const installPlugin = async (id) => {
+  const installPlugin = async (plugin) => {
+    const id = plugin.id;
     setInstallingPlugin(id); setPluginErr('');
     try {
       const r = await fetch('/api/plugins/install', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: id }),
+        // 非官方源插件(带 repo/marketplace)让后端先 marketplace add 再装。
+        body: JSON.stringify({ name: id, ...(plugin.repo ? { repo: plugin.repo, marketplace: plugin.marketplace } : {}) }),
       });
       const d = await r.json();
       if (!r.ok) throw new Error(d.error || '安装失败');
@@ -219,6 +221,14 @@ export function MCPPanel() {
 
   return (
     <div className="px-4 py-4 space-y-5 overflow-y-auto h-full">
+      {/* CQ批次4:刷新按钮移到顶部(原来在最底部要滚到底才点得到)。强制 ?fresh=1 重读 ~/.claude.json。 */}
+      <div className="flex items-center justify-between -mb-1">
+        <h2 className="text-[11px] font-medium uppercase tracking-widest text-ink-faint font-body">MCP / 插件</h2>
+        <button onClick={() => fetchData(false, true)} title="刷新(重读配置，看到刚用 claude mcp add / plugin install 添加的项)"
+          className="flex items-center gap-1 px-2 py-1 rounded-md text-[11px] text-ink-faint hover:text-ink-muted hover:bg-canvas-warm font-body transition-colors">
+          <RefreshCw size={12} className={loading ? 'animate-spin' : ''} />刷新
+        </button>
+      </div>
       {restartHint && (
         <div className="flex items-start gap-2 text-[11px] text-amber-700 bg-amber-500/10 border border-amber-500/30 rounded-lg px-3 py-2">
           <span className="flex-1">配置已保存到 claude code。MCP 改动需<b>重启正在运行的会话</b>(或新建会话)才会被 claude 加载生效。</span>
@@ -389,7 +399,7 @@ export function MCPPanel() {
                 {installed ? (
                   <span className="shrink-0 flex items-center gap-1 text-[11px] text-success font-body"><Check size={12} />已安装</span>
                 ) : (
-                  <button onClick={() => installPlugin(p.id)} disabled={!!installingPlugin}
+                  <button onClick={() => installPlugin(p)} disabled={!!installingPlugin}
                     className="shrink-0 flex items-center gap-1 px-2.5 py-1 rounded text-[12px] font-medium text-white bg-accent hover:bg-accent-hover disabled:opacity-50">
                     {busy ? <RefreshCw size={12} className="animate-spin" /> : <Download size={12} />}
                     {busy ? '安装中…' : '安装'}
@@ -428,14 +438,6 @@ export function MCPPanel() {
           </div>
         </div>
       )}
-
-      <button
-        onClick={() => fetchData(false, true)}
-        className="w-full flex items-center justify-center gap-1.5 py-2 text-xs text-ink-faint hover:text-ink-muted font-body transition-colors"
-      >
-        <RefreshCw size={12} className={loading ? 'animate-spin' : ''} />
-        刷新
-      </button>
 
       {form && (
         <McpForm

@@ -17,7 +17,8 @@ const SETTINGS_PATH = join(homedir(), '.claude', 'settings.json');
 
 // BK-8:每次 provider 切换都会备份 settings.json 到 .${ts}.bak。备份后清理旧的,
 // 只保留最近 KEEP 个,避免频繁切 provider 在 ~/.claude/ 无限堆积 .bak 文件。
-const SETTINGS_BAK_KEEP = 5;
+// CQ批次4:用户反馈 5 个还是太多(切换频繁),降到 3 个——回退基本只会用到最近一两份。
+const SETTINGS_BAK_KEEP = 3;
 async function backupSettings(ts) {
   await copyFile(SETTINGS_PATH, `${SETTINGS_PATH}.${ts}.bak`).catch(() => {});
   try {

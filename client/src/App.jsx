@@ -4948,6 +4948,9 @@ function ProviderSwitcher() {
             <p className="text-[10px] text-ink-faint font-body mt-1 leading-snug">
               来自 CC Switch。切换会改写 <code className="font-mono">~/.claude/settings.json</code>（自动备份），<b>对新发的消息生效</b>。
             </p>
+            <p className="text-[10px] text-ink-faint font-body mt-1 leading-snug border-t border-canvas-deep/40 pt-1">
+              <b>原理(协议路由)</b>：和 cc-switch 一样把 Claude 模型名映射到第三方。OpenAI 格式经本地代理 <code className="font-mono">8788</code> 做协议翻译、Anthropic 格式经 <code className="font-mono">8789</code> 透传换 token —— 都是<b>本机中转</b>，非直连官方。
+            </p>
           </div>
           {providers.filter((p) => showHidden || !hiddenProviders.has(p.id)).map((p) => (
             <div key={p.id} className={`px-3 py-1 ${isCur(p) ? 'bg-accent-subtle' : ''} ${hiddenProviders.has(p.id) ? 'opacity-50' : ''}`}>

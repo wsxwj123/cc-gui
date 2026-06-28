@@ -20,4 +20,6 @@ export const BUILTIN_PLUGINS = [
   { id: 'claude-code-setup',    name: 'Claude Code Setup',   desc: '扫码库推荐该配的 hooks / skills / MCP / subagents' },
   { id: 'playwright',           name: 'Playwright',          desc: '浏览器自动化(内含 MCP,自动 npx 拉起)', mcp: true },
   { id: 'context7',             name: 'Context7',            desc: '实时官方文档检索(内含 MCP,免 key)', mcp: true },
+  // 非官方源插件:带 repo/marketplace,安装端点会先 `marketplace add <repo>` 再装。
+  { id: 'ponytail',             name: 'Ponytail',            desc: '懒惰资深开发风格:能不写的代码就不写,优先 stdlib/原生(第三方源)', repo: 'DietrichGebert/ponytail', marketplace: 'ponytail' },
 ];

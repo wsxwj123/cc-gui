@@ -146,14 +146,20 @@ async function loadRepo(repo) {
   return entry;
 }
 
+// CQ批次4:除内置 SOURCES 外,支持 ?repo=owner/repo 一键拉任意 GitHub 仓库的 skill 列表。
+const REPO_RE = /^[\w.-]+\/[\w.-]+$/;
 router.get('/skills/official', async (req, res) => {
+  const repoParam = typeof req.query.repo === 'string' ? req.query.repo.trim() : '';
+  const useCustom = REPO_RE.test(repoParam);
   const src = SOURCES.find((s) => s.id === req.query.source) || SOURCES[0];
+  const repo = useCustom ? repoParam : src.repo;
+  if (repoParam && !useCustom) return res.json({ skills: [], error: 'repo 格式应为 owner/repo' });
   try {
-    const { skills, branch } = await loadRepo(src.repo);
+    const { skills, branch } = await loadRepo(repo);
     let installed = new Set();
     try { installed = new Set(await readdir(SKILLS_DIR)); } catch { /* 无目录 */ }
     res.json({
-      source: src.id, repo: src.repo, branch, count: skills.length,
+      source: useCustom ? repo : src.id, repo, branch, count: skills.length,
       truncatedDesc: skills.length > DESC_CAP,
       skills: skills.map((s) => ({ id: s.id, name: s.name, description: s.description, installed: installed.has(s.id) })),
     });
@@ -164,12 +170,16 @@ router.get('/skills/official', async (req, res) => {
 
 // ── 导入 ──────────────────────────────────────────────────────────
 router.post('/skills/import', async (req, res) => {
+  const repoParam = typeof req.body?.repo === 'string' ? req.body.repo.trim() : '';
+  const useCustom = REPO_RE.test(repoParam);
   const src = SOURCES.find((s) => s.id === req.body?.source) || SOURCES[0];
+  const repo = useCustom ? repoParam : src.repo;
+  if (repoParam && !useCustom) return res.status(400).json({ error: 'repo 格式应为 owner/repo' });
   const ids = Array.isArray(req.body?.ids) ? req.body.ids.filter((s) => /^[a-zA-Z0-9._-]+$/.test(s)) : [];
   const overwrite = !!req.body?.overwrite;
   if (!ids.length) return res.status(400).json({ error: 'ids 为空' });
   try {
-    const { skills, files, branch } = await loadRepo(src.repo);
+    const { skills, files, branch } = await loadRepo(repo);
     const byId = new Map(skills.map((s) => [s.id, s]));
     const imported = [], conflicts = [], failed = [];
     for (const id of ids) {
@@ -186,7 +196,7 @@ router.post('/skills/import', async (req, res) => {
           const rel = f.path.slice(meta.root.length + 1); // 相对 skill 根
           const target = join(SKILLS_DIR, id, rel);
           await mkdir(join(target, '..'), { recursive: true });
-          const raw = await fetch(`https://raw.githubusercontent.com/${src.repo}/${branch}/${f.path}`);
+          const raw = await fetch(`https://raw.githubusercontent.com/${repo}/${branch}/${f.path}`);
           if (!raw.ok) throw new Error(`下载 ${rel} HTTP ${raw.status}`);
           await writeFile(target, Buffer.from(await raw.arrayBuffer()));
         }

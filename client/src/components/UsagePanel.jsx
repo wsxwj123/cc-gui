@@ -227,6 +227,20 @@ export function UsagePanel() {
           按 Provider · 模型
         </h3>
         <div className="bg-canvas-warm border border-canvas-deep rounded-lg p-3 space-y-3">
+          {/* CQ批次4:provider 级用量柱状图(沿用 BarRow,零依赖)。付费=主色,订阅/免费=灰。 */}
+          {(() => {
+            const groups = groupByProvider(stats.byModel);
+            if (groups.length < 2) return null;
+            const maxTok = Math.max(...groups.map((g) => g.tokens), 1);
+            return (
+              <div className="pb-2 mb-1 border-b border-canvas-deep">
+                {groups.map((g) => (
+                  <BarRow key={`bar-${g.key}`} label={g.label} value={g.tokens} max={maxTok}
+                    color={g.usd > 0 ? 'var(--color-accent)' : 'color-mix(in srgb, var(--color-ink-faint) 60%, transparent)'} />
+                ))}
+              </div>
+            );
+          })()}
           {groupByProvider(stats.byModel).map((g) => (
             <div key={g.key}>
               {/* Provider header — name + total cost (订阅内 / $x / —). */}

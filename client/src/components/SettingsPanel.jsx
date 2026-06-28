@@ -329,7 +329,8 @@ function StorageTab() {
   return (
     <div className="space-y-3">
       <div className="text-[11px] text-ink-faint font-body leading-relaxed bg-canvas-warm border border-canvas-deep rounded-lg p-2.5">
-        每次"回滚 / 切换模型剥离思考块"前会写一份 <code className="font-mono">&lt;sid&gt;.jsonl.bak</code> 备份。删除会话不会自动删 .bak，长期积累在此手动清理。<strong className="text-amber-700">删除后不可恢复。</strong>
+        <b>这是什么：</b>当你"回滚一条对话"、或"切换模型时去掉历史里的思考块"时，系统会先把这条会话的原始记录存一份备份（<code className="font-mono">.jsonl.bak</code>），万一改坏了能恢复。
+        <br /><b>删了有什么影响：</b>只会让你<b>没法再撤销那一次回滚/去思考块</b>，<b>不影响正常聊天</b>，也不会丢当前对话——纯粹是清磁盘空间。删了不可恢复，但绝大多数情况用不上，可放心清理。
       </div>
 
       <div className="flex items-center justify-between">

@@ -796,20 +796,35 @@ async function ensureOfficialMarketplace() {
   try { await runClaude(['plugin', 'marketplace', 'update', OFFICIAL_MARKETPLACE], { timeout: 30000 }); } catch {}
 }
 
-// POST /api/plugins/install { name } — `claude plugin install <name>@claude-plugins-official`(非交互)。
+// POST /api/plugins/install { name, repo?, marketplace? }
+//   官方插件:`claude plugin install <name>@claude-plugins-official`(非交互)。
+//   CQ批次4:支持非官方源(如 ponytail)——传 repo(owner/repo) + marketplace,先
+//   `marketplace add <repo>` + `marketplace update <marketplace>` 再装 `<name>@<marketplace>`。
 router.post('/plugins/install', async (req, res) => {
   try {
     const name = String(req.body?.name || '');
     if (!/^[A-Za-z0-9._-]{1,80}$/.test(name)) throw new Error('invalid plugin name');
-    await ensureOfficialMarketplace();
+    const repo = req.body?.repo ? String(req.body.repo) : '';
+    const marketplace = req.body?.marketplace ? String(req.body.marketplace) : OFFICIAL_MARKETPLACE;
+    if (!/^[A-Za-z0-9._-]{1,80}$/.test(marketplace)) throw new Error('invalid marketplace');
+    const isCustom = !!repo && marketplace !== OFFICIAL_MARKETPLACE;
+    if (isCustom && !/^[A-Za-z0-9._\/-]{1,100}$/.test(repo)) throw new Error('invalid repo');
+
+    if (isCustom) {
+      // 非官方源:先注册其 marketplace(幂等)+ update 刷新缓存。
+      try { await runClaude(['plugin', 'marketplace', 'add', repo], { timeout: 30000 }); } catch {}
+      try { await runClaude(['plugin', 'marketplace', 'update', marketplace], { timeout: 30000 }); } catch {}
+    } else {
+      await ensureOfficialMarketplace();
+    }
     try {
-      await runClaude(['plugin', 'install', `${name}@${OFFICIAL_MARKETPLACE}`], { timeout: 90000 });
+      await runClaude(['plugin', 'install', `${name}@${marketplace}`], { timeout: 90000 });
     } catch (e) {
       // 仍失败且像"缓存过期/找不到"→ 强制再 update 一次后重试(兜底)。
       const msg = (e.stderr?.toString() || e.message || '');
       if (/out of date|not found|marketplace update|本地副本/i.test(msg)) {
-        try { await runClaude(['plugin', 'marketplace', 'update', OFFICIAL_MARKETPLACE], { timeout: 30000 }); } catch {}
-        await runClaude(['plugin', 'install', `${name}@${OFFICIAL_MARKETPLACE}`], { timeout: 90000 });
+        try { await runClaude(['plugin', 'marketplace', 'update', marketplace], { timeout: 30000 }); } catch {}
+        await runClaude(['plugin', 'install', `${name}@${marketplace}`], { timeout: 90000 });
       } else throw e;
     }
     invalidateMcpCache();
