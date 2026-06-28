@@ -63,6 +63,54 @@ export const BUILTIN_PROVIDERS = [
     note: 'OpenAI 兼容。',
     docs: 'https://platform.minimaxi.com',
   },
+  {
+    id: 'qwen-dashscope',
+    name: '通义千问 Qwen(百炼)',
+    type: 'openai',
+    baseURL: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+    note: '阿里云百炼 DashScope，OpenAI 兼容。模型如 qwen-max/qwen-plus/qwen-turbo，用「获取模型」拉取。',
+    docs: 'https://bailian.console.aliyun.com/',
+  },
+  {
+    id: 'doubao-volc',
+    name: '豆包 Doubao(火山方舟)',
+    type: 'openai',
+    baseURL: 'https://ark.cn-beijing.volces.com/api/v3',
+    note: 'OpenAI 兼容。注意：模型 id 需带版本后缀(如 doubao-seed-2-0-pro-260215)，或在火山控制台创建 Endpoint(ep-xxx)后用 ep-id 调用。',
+    docs: 'https://console.volcengine.com',
+  },
+  {
+    id: 'ernie-qianfan',
+    name: '百度文心 ERNIE(千帆)',
+    type: 'openai',
+    baseURL: 'https://qianfan.baidubce.com/v2',
+    note: '百度智能云千帆 ModelBuilder V2，OpenAI 兼容。模型如 ernie-4.0-turbo-8k。',
+    docs: 'https://console.bce.baidu.com/iam/#/iam/apikey/list',
+  },
+  {
+    id: 'hunyuan',
+    name: '腾讯混元 Hunyuan',
+    type: 'openai',
+    baseURL: 'https://api.hunyuan.cloud.tencent.com/v1',
+    note: 'OpenAI 兼容。模型如 hunyuan-turbos-latest/hunyuan-t1-latest。',
+    docs: 'https://console.cloud.tencent.com/hunyuan',
+  },
+  {
+    id: 'stepfun',
+    name: '阶跃 StepFun',
+    type: 'openai',
+    baseURL: 'https://api.stepfun.com/v1',
+    note: 'OpenAI 兼容。模型如 step-3.5-flash/step-3.7-flash。该厂也有 Anthropic 端点(见下)。',
+    docs: 'https://platform.stepfun.com/interface-key',
+  },
+  {
+    id: 'siliconflow',
+    name: '硅基流动 SiliconFlow(聚合)',
+    type: 'openai',
+    baseURL: 'https://api.siliconflow.cn/v1',
+    note: 'OpenAI 兼容聚合平台。模型 id 带前缀，如 deepseek-ai/DeepSeek-V3.2、zai-org/GLM-5.1、Kimi-K2.6。',
+    docs: 'https://cloud.siliconflow.cn/',
+  },
 
   // ─── Anthropic 协议(直接发 anthropic 格式给端点) ───
   {
@@ -94,8 +142,16 @@ export const BUILTIN_PROVIDERS = [
     name: '智谱 GLM(Anthropic 协议)',
     type: 'anthropic',
     baseURL: 'https://open.bigmodel.cn/api/anthropic',
-    note: '⚠️ 智谱官网未公开标注 Anthropic 兼容文档,实际可用性请自行测试(社区有反馈可用)。',
+    note: '智谱的 Anthropic 兼容端点(官方文档已标注)。模型如 glm-4.7/glm-5。',
     docs: 'https://docs.bigmodel.cn/',
+  },
+  {
+    id: 'stepfun-anthropic',
+    name: '阶跃 StepFun(Anthropic 协议)',
+    type: 'anthropic',
+    baseURL: 'https://api.stepfun.com',
+    note: '阶跃的 Anthropic 兼容端点(CLI 会拼 /v1/messages)。支持 step-3.5-flash/step-3.7-flash。',
+    docs: 'https://platform.stepfun.com/interface-key',
   },
 ];
 

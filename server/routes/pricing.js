@@ -18,6 +18,8 @@ const TTL_MS = 24 * 60 * 60 * 1000;
 const KEEP_PROVIDERS = new Set([
   'anthropic', 'openai', 'gemini', 'deepseek', 'moonshot', 'xai',
   'vertex_ai-anthropic_models', 'minimax', 'zhipuai',
+  // CQ批次3:扩国产 provider 覆盖(LiteLLM 有则下发,无则不匹配=零副作用)。
+  'dashscope', 'volcengine', 'hunyuan', 'stepfun', 'siliconflow', 'baidu', 'fireworks_ai',
 ]);
 
 let mem = null;        // { fetchedAt, prices }

@@ -193,7 +193,7 @@ const VALID_PERMISSION_MODES = new Set(['default', 'acceptEdits', 'plan', 'bypas
 // 读类工具:GUI acceptEdits/plan 档位下自动放行(不弹窗),写/Bash 等仍弹窗。
 const READ_CLASS = new Set([
   'Read', 'Glob', 'Grep', 'LS', 'TodoWrite', 'TaskCreate', 'TaskUpdate', 'TaskList',
-  'TaskGet', 'TaskOutput', 'NotebookRead', 'Skill', 'WebFetch', 'WebSearch',
+  'TaskGet', 'TaskOutput', 'TaskStop', 'NotebookRead', 'Skill', 'WebFetch', 'WebSearch',
 ]);
 // 写类工具:acceptEdits(接受编辑)下自动放行 —— 名副其实"改文件不弹窗"(对齐官方 acceptEdits);
 // plan 下永远拦(只读探索)。Bash/执行类与 MCP 不在此列,接受编辑下仍弹窗。
