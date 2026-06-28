@@ -16,5 +16,8 @@ AGENTS.md
 *.local.js
 *.local.jsx
 
-# 本地问题追踪(不进公开版)
+# 本地问题追踪 / 经验 / 项目内部文档(含 bot 细节、签名口令等,不进公开版)
 ISSUES_TRACKING.local.md
+LEARNINGS.md
+PROJECT.md
+*.local.md
