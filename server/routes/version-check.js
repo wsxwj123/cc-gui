@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { readFileSync, writeFileSync, existsSync } from 'fs';
+import { readFileSync, writeFileSync, existsSync, readdirSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import { tmpdir, homedir } from 'os';
@@ -198,13 +198,33 @@ async function probeKnownClaude() {
         : join(prefix, 'bin', 'claude'));
     }
   } catch {}
+  // 第二次兜底:npm config get prefix(有些环境 `npm prefix -g` 与 config 不一致)。
+  try {
+    const { stdout } = await execFileP(
+      process.platform === 'win32' ? 'npm.cmd' : 'npm',
+      ['config', 'get', 'prefix'], { timeout: 6000 },
+    );
+    const prefix = stdout.trim();
+    if (prefix && prefix !== 'undefined') {
+      candidates.push(process.platform === 'win32'
+        ? join(prefix, 'claude.cmd')
+        : join(prefix, 'bin', 'claude'));
+    }
+  } catch {}
   if (process.platform === 'win32') {
     const appData = process.env.APPDATA || join(home, 'AppData', 'Roaming');
+    const localApp = process.env.LOCALAPPDATA || join(home, 'AppData', 'Local');
     candidates.push(
       join(home, '.local', 'bin', 'claude.exe'),
       join(home, '.claude', 'local', 'claude.exe'),
       join(appData, 'npm', 'claude.cmd'),
       join(process.env.ProgramFiles || 'C:\\Program Files', 'nodejs', 'claude.cmd'),
+      // 版本管理器 / 第三方包管理器(用户报告 npm 全局装却扫不到的高发场景):
+      join(home, 'scoop', 'shims', 'claude.cmd'),                 // scoop
+      join(localApp, 'Volta', 'bin', 'claude.exe'),               // volta
+      join(localApp, 'pnpm', 'claude.cmd'),                       // pnpm global
+      join(localApp, 'fnm_multishells'),                          // fnm(下方动态扫)
+      ...nvmWinCandidates(appData),                               // nvm-windows
     );
   } else {
     candidates.push(
@@ -213,12 +233,45 @@ async function probeKnownClaude() {
       join(home, '.npm-global', 'bin', 'claude'),
       '/opt/homebrew/bin/claude',
       '/usr/local/bin/claude',
+      // 版本管理器 / 第三方包管理器:
+      join(home, '.volta', 'bin', 'claude'),                                  // volta
+      join(home, 'Library', 'pnpm', 'claude'),                                // pnpm(mac)
+      join(home, '.local', 'share', 'pnpm', 'claude'),                        // pnpm(linux)
+      join(home, '.config', 'yarn', 'global', 'node_modules', '.bin', 'claude'), // yarn global
+      ...nvmNixCandidates(home),                                              // nvm / fnm(动态扫版本目录)
     );
   }
   for (const p of candidates) {
     try { if (existsSync(p)) return p; } catch {}
   }
   return '';
+}
+
+// nvm(mac/linux)与 fnm 把每个 node 版本装在独立目录,全局 bin 在 <ver>/bin。扫所有版本
+// 目录找 claude(npm prefix -g 仅当 GUI 的 PATH 里恰好是该 nvm 的 npm 才命中,故需直扫)。
+function nvmNixCandidates(home) {
+  const out = [];
+  for (const base of [
+    join(home, '.nvm', 'versions', 'node'),
+    join(home, '.local', 'state', 'fnm_multishells'),
+    join(home, '.fnm', 'node-versions'),
+  ]) {
+    try {
+      for (const v of readdirSync(base)) {
+        out.push(join(base, v, 'bin', 'claude'));
+        out.push(join(base, v, 'installation', 'bin', 'claude')); // fnm 布局
+      }
+    } catch {}
+  }
+  return out;
+}
+function nvmWinCandidates(appData) {
+  const out = [];
+  const base = join(appData, 'nvm');
+  try {
+    for (const v of readdirSync(base)) out.push(join(base, v, 'claude.cmd'));
+  } catch {}
+  return out;
 }
 
 async function detectInstall() {
