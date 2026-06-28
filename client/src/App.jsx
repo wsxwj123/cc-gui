@@ -7,6 +7,11 @@ import { createPortal } from 'react-dom';
 const EMPTY_ARRAY = Object.freeze([]);
 // 已尝试过自动生成标题的 sessionId(无论成功失败),防止失败时每轮重复 spawn 标题进程。
 const titleAttempted = new Set();
+// CQ-15:被用户停止的 chat 进程 pid,跨所有 SessionDetail 实例(分屏多 pane)共享。
+// 原来是每个 pane 私有的 useRef(new Set()),pane A 停的 pid,pane B 的 backgroundPid 轮询
+// 感知不到 → 可能把 B 自己仍在跑的进程当成「需要 reattach」,reattach 的 finally 又清空 B
+// 的流式状态,外观上像「停一个把两个都停了」。改成模块级共享集合即可让停止全局可见。
+const stoppedChatPids = new Set();
 import { useStore, THEME_FAMILIES, FONT_OPTIONS, systemPrefersDark, PERMISSION_MODES } from './stores/sessionStore.js';
 import { useWebSocket } from './hooks/useWebSocket.js';
 import { MessageBubble } from './components/MessageBubble.jsx';
@@ -2419,8 +2424,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // pid 集合:被用户主动「停止」过的 chat 进程。停止后进程要等 close 才设 exitCode
   // (SIGTERM→SIGKILL 最多 5s),这期间 /agents/active 仍报 stoppable=true → backgroundPid
   // poll 会把它误判成「后台运行中」并闪黄条,甚至触发 auto-reattach 重连。记下已停的
-  // pid,poll 与 reattach 都跳过它。
-  const stoppedPidsRef = useRef(new Set());
+  // pid,poll 与 reattach 都跳过它。CQ-15:指向模块级共享集合,使分屏各 pane 互相感知停止。
+  const stoppedPidsRef = useRef(stoppedChatPids);
   // Set by "⚡ 引导": tells the aborted in-flight send's finally to skip its own
   // queue drain so we don't double-send — handleAccelerate drains directly, which
   // also covers reattach streams (whose finally never drains).
@@ -3881,6 +3886,14 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     // 两种情况都立即清掉本地「后台运行中」标记,不等下一轮 poll(那一轮还会误报)。
     setBackgroundPid(null);
   }, [backgroundPid]);
+  // CQ-15:把 handleStop / backgroundPid 包成 ref,供 ESC 监听读最新值而不必进 effect deps。
+  // 原来 ESC effect 依赖 [isStreaming, backgroundPid, handleStop],而 backgroundPid 每 1.5s
+  // poll 抖动、handleStop 随之重建 → effect 频繁 cleanup+register,切焦点同帧有「两个 pane
+  // 都短暂挂着 listener」的竞态(双击 ESC 误停其它 pane 的根因之一)。
+  const handleStopRef = useRef(handleStop);
+  useEffect(() => { handleStopRef.current = handleStop; }, [handleStop]);
+  const backgroundPidRef = useRef(backgroundPid);
+  useEffect(() => { backgroundPidRef.current = backgroundPid; }, [backgroundPid]);
 
   // Double-ESC → interrupt streaming (matches Claude Code CLI). A SINGLE Esc
   // keeps its local meaning (closing the slash-command menu / a popover); a
@@ -3893,25 +3906,27 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     // pane 各注册一个 listener;不加这道守卫则一次 esc 广播到所有 pane → 中断全部会话。
     // 与上方 Cmd+F effect 的 paneIsActive 守卫同构。单屏 activeTabIndex 恒 0,无回归。
     if (!paneIsActive) return;
-    if (!isStreaming && !backgroundPid) return;
+    // 只在「焦点 pane」注册一次(deps 仅 paneIsActive)。是否有可停的流改为在按键时用 ref
+    // 实时判断,不再让 isStreaming/backgroundPid 抖动驱动 effect 反复重注册(CQ-15 竞态根因)。
     const hasPendingPerm = () => useStore.getState().pendingPermissions
-      .some((p) => p.sessionId === selectedSession?.sessionId);
+      .some((p) => p.sessionId === getLocalSession()?.sessionId);
     let lastEsc = 0;
     const onKey = (e) => {
       if (e.key !== 'Escape' || e.repeat) return; // ignore held-key repeats
+      if (!streamingRef.current && !backgroundPidRef.current) return; // 本 pane 没有在跑的流,不拦截
       if (hasPendingPerm()) { lastEsc = 0; return; } // permission card handles Esc
       const now = e.timeStamp || performance.now();
       if (lastEsc && now - lastEsc <= 600) {
         lastEsc = 0;
         e.preventDefault();
-        handleStop();
+        handleStopRef.current?.();
       } else {
         lastEsc = now; // first press — let local Esc semantics run, arm the second
       }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [paneIsActive, isStreaming, backgroundPid, handleStop, selectedSession?.sessionId]);
+  }, [paneIsActive]);
 
   // "⚡ 引导" — abort the in-flight chat and immediately fire the queued message.
   const handleAccelerate = useCallback(() => {
@@ -4322,7 +4337,12 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // 会话 A、用户切到会话 B 的那一帧(setChatMessages([]) 异步未提交前),A 的流式 turn
   // 的 usage/cost 会被算进 B 的徽章/成本(切会话当帧串值闪现)。与渲染层(下面 liveVisible
   // 隐藏流式气泡)同源,统计也走同一门控。
-  const liveVisible = streamOwnerKey == null || streamOwnerKey === sessionQueueKey;
+  // CQ-5:原有 `streamOwnerKey == null ||` 子句是「串内容/重复渲染」根因——pane 初次挂载或
+  // 刚 setChatMessages([]) 未提交时 owner=null 会让 liveVisible 恒 true,把上个会话残留的
+  // chatMessages 显示到当前会话(切走切回就好=第二次 owner 已非 null)。handleSend 在写入
+  // 用户气泡前已 setStreamOwner(sessionQueueKey)(含 reattach),所以凡是该显示的本地缓冲
+  // owner 必等于 sessionQueueKey;去掉 null 子句即根治泄漏,且与上面 C1 注释本意一致。
+  const liveVisible = streamOwnerKey === sessionQueueKey;
   const allMessages = [...messages, ...(liveVisible ? chatMessages : [])];
   // 右侧回合进度条数据:每个用户回合一个点(摘要取去附件后的显示文本)。
   // 注意:必须是普通计算,不能用 useMemo —— 这里在 SessionDetail 的早返回

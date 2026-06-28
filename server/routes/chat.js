@@ -305,7 +305,10 @@ function makeCanUseTool(slot) {
         slot.guiMode = 'acceptEdits';
         return { behavior: 'allow', updatedInput: input };
       }
-      return { behavior: 'deny', message: r.reason || '用户要求修改计划' };
+      // CQ-6:用户点"修改"= deny。强化回写文案,明确要求模型【修订后再次调用 ExitPlanMode
+      // 重新提交计划】,不要直接开始执行——否则模型常把 deny 当"放行去做"而在规划模式下直接动手。
+      const refineReason = r.reason || '用户要求修改计划';
+      return { behavior: 'deny', message: `${refineReason}\n\n请根据以上反馈修订计划,然后再次调用 ExitPlanMode 重新提交修订后的计划等待用户确认。在计划获批前不要开始执行实际改动。` };
     }
     const mode = slot.guiMode;
     if (mode === 'bypassPermissions') return { behavior: 'allow', updatedInput: input };
@@ -422,12 +425,24 @@ router.post('/chat', async (req, res) => {
   // 首条用户消息(streaming-input);保持 input 打开作 control 通道。
   input.push({ type: 'user', message: { role: 'user', content: String(prompt) } });
 
+  // CQ:规划模式下追加(而非替换)行为引导——修第 10/11 项并强化第 6 项。不用 SDK 的
+  // planModeInstructions(它会整段替换默认计划工作流 body,丢失原生规划逻辑),改成 append
+  // 叠加在 claude_code preset 上,additive、低风险:① 提问走 AskUserQuestion 工具而非写进
+  // 计划正文(第10);② 计划批准后用 TaskCreate 拆任务清单跟踪(第11);③ 被要求"修改"时
+  // 修订后再次 ExitPlanMode 重新提交、不要直接开始执行(第6,与下方 deny 文案双保险)。
+  let appendText = (typeof appendSystemPrompt === 'string') ? appendSystemPrompt.trim() : '';
+  if (sdkPermMode === 'plan') {
+    const planGuide = '【规划模式补充指引】1) 若需要向用户提问以澄清需求,必须调用 AskUserQuestion 工具,不要把问题直接写进 ExitPlanMode 的计划正文里。2) 计划被用户批准、进入执行后,请用 TaskCreate 把计划拆成任务清单并逐项更新状态,让用户能看到进度。3) 若用户对计划反馈"需要修改",请据此修订计划后【再次调用 ExitPlanMode】重新提交、等待确认,不要直接开始执行。';
+    appendText = appendText ? `${appendText}\n\n${planGuide}` : planGuide;
+  }
+  const systemPrompt = appendText
+    ? { type: 'preset', preset: 'claude_code', append: appendText.slice(0, 8000) }
+    : { type: 'preset', preset: 'claude_code' };
+
   const options = {
     model,
     // 默认 SDK 不带 Claude Code 系统提示 → 必须显式 preset 才复刻 CLI 行为(工具集/CLAUDE.md 等)。
-    systemPrompt: (typeof appendSystemPrompt === 'string' && appendSystemPrompt.trim())
-      ? { type: 'preset', preset: 'claude_code', append: appendSystemPrompt.trim().slice(0, 8000) }
-      : { type: 'preset', preset: 'claude_code' },
+    systemPrompt,
     // 必须含 user/project/local 才加载 settings.json(=第三方 provider 配置)与 CLAUDE.md。
     settingSources: ['user', 'project', 'local'],
     includePartialMessages: true,
