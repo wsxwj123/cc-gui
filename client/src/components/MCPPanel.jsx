@@ -83,11 +83,13 @@ export function MCPPanel() {
   const mounted = useRef(true);
 
   // silent=true:不显示加载态,用于后台静默刷新(拉取后端补好的在线状态)。
-  const fetchData = async (silent = false) => {
+  // force=true:?fresh=1 绕过后端 5min 缓存,手动「刷新」按钮用 —— 否则刚 `claude mcp add`
+  // 的服务器要等缓存过期才出现(用户报「刷新看不到新加的 MCP」根因)。
+  const fetchData = async (silent = false, force = false) => {
     if (!silent) setLoading(true);
     setError(null);
     try {
-      const res = await fetch('/api/mcp');
+      const res = await fetch(force ? '/api/mcp?fresh=1' : '/api/mcp');
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
       if (!mounted.current) return;
@@ -428,10 +430,10 @@ export function MCPPanel() {
       )}
 
       <button
-        onClick={fetchData}
+        onClick={() => fetchData(false, true)}
         className="w-full flex items-center justify-center gap-1.5 py-2 text-xs text-ink-faint hover:text-ink-muted font-body transition-colors"
       >
-        <RefreshCw size={12} />
+        <RefreshCw size={12} className={loading ? 'animate-spin' : ''} />
         刷新
       </button>
 

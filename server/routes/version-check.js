@@ -568,7 +568,41 @@ function envInstallCmd(target, proxyUrl = null, method = null) {
     if (mac) return 'brew install python || echo "未检测到 Homebrew,请到 https://www.python.org/downloads 下载安装"';
     return 'sudo apt-get update && sudo apt-get install -y python3 python3-pip || echo "请用你的发行版包管理器安装 python3"';
   }
+  if (target === 'git') {
+    if (win) return 'winget install -e --id Git.Git';
+    if (mac) return 'xcode-select --install || brew install git || echo "请到 https://git-scm.com/download/mac 下载安装"';
+    return 'sudo apt-get update && sudo apt-get install -y git || echo "请用你的发行版包管理器安装 git"';
+  }
   return null;
+}
+
+// git 检测。GUI 的 git init / 回滚 / worktree 都依赖它,且子代理的 using-git-worktrees
+// skill 在无 git 时会报错。策略同 detectPython:PATH → 全平台已知安装目录。
+async function detectGit() {
+  const tryRun = async (bin) => {
+    try {
+      const { stdout } = await execFileP(bin, ['--version'], { timeout: 5000 });
+      const m = String(stdout).match(/(\d+\.\d+\.\d+)/);
+      if (m) return { version: m[1], path: bin };
+    } catch {}
+    return null;
+  };
+  const onPath = await tryRun('git');
+  if (onPath) return { installed: true, ...onPath };
+  const home = homedir();
+  const cands = process.platform === 'win32'
+    ? [
+        join(process.env.ProgramFiles || 'C:\\Program Files', 'Git', 'cmd', 'git.exe'),
+        join(process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)', 'Git', 'cmd', 'git.exe'),
+        join(process.env.LOCALAPPDATA || join(home, 'AppData', 'Local'), 'Programs', 'Git', 'cmd', 'git.exe'),
+      ]
+    : ['/opt/homebrew/bin/git', '/usr/local/bin/git', '/usr/bin/git'];
+  for (const p of cands) {
+    if (!existsSync(p)) continue;
+    const hit = await tryRun(p);
+    if (hit) return { installed: true, ...hit, via: 'fallback' };
+  }
+  return { installed: false };
 }
 
 router.get('/env-check', async (req, res) => {
@@ -576,9 +610,11 @@ router.get('/env-check', async (req, res) => {
   const claudeVersion = await getClaudeVersion(claudePath);
   const python = await detectPython();
   const uv = await detectUv();
+  const git = await detectGit();
   res.json({
     node: { installed: true, version: process.version, required: true },
     claude: { installed: !!claudeVersion, version: claudeVersion || null, method, required: true },
+    git: { installed: git.installed, version: git.version || null, required: false },
     python: { installed: python.installed, version: python.version || null, required: false },
     uv: { installed: uv.installed, version: uv.version || null, required: false },
     platform: process.platform === 'darwin' ? 'mac' : process.platform === 'win32' ? 'windows' : 'linux',
@@ -595,7 +631,7 @@ router.post('/env-check/install', async (req, res) => {
     // win + uv:代理已注入 PS 命令内,不让 .bat 再 set(对 irm 无效且重复)。其余照旧由
     // launchInTerminal 在脚本里 export/set HTTP_PROXY。
     const termProxy = (target === 'uv' && process.platform === 'win32') ? null : proxyUrl;
-    const titles = { claude: '安装 Claude Code', node: '安装 Node.js', python: '安装 Python', uv: '安装 uv' };
+    const titles = { claude: '安装 Claude Code', node: '安装 Node.js', python: '安装 Python', uv: '安装 uv', git: '安装 Git' };
     launchInTerminal(cmd, titles[target] || '安装', termProxy);
     res.json({ ok: true, launched: true, command: cmd, platform: process.platform, proxy: proxyUrl });
   } catch (err) {

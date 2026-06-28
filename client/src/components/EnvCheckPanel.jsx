@@ -9,6 +9,7 @@ import { RefreshCw, Check, X, Download, Terminal } from 'lucide-react';
 const ROWS = [
   { key: 'node', label: 'Node.js', desc: '运行 GUI 后台服务(必需)', required: true },
   { key: 'claude', label: 'Claude Code CLI', desc: '对话核心,GUI 调用 claude(必需)', required: true },
+  { key: 'git', label: 'Git', desc: '项目初始化 / 回滚 AI 改动 / worktree(可选但强烈建议)', required: false },
   { key: 'python', label: 'Python 3', desc: '部分技能需要:生图 / 出题 / bot 等(可选)', required: false },
   { key: 'uv', label: 'uv', desc: '部分 MCP 用 uvx 运行:Fetch / Paper Search 等(可选)', required: false },
 ];

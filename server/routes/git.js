@@ -41,8 +41,13 @@ router.get('/git/status', async (req, res) => {
       if (/not a git repository|不是.*git\s*仓库/i.test(msg)) {
         return res.json({ isRepo: false });
       }
-      if (e?.code === 'ENOENT' || e?.killed) {
-        // git 不存在 / 超时:信息不足,静默(前端不挂任何横幅)。
+      if (e?.code === 'ENOENT') {
+        // git 没装:之前静默(前端不挂横幅)→ 用户报"没装 git 时看不到任何 git 初始化提示"。
+        // 改成显式上报 gitMissing,前端弹引导横幅(装了才能 init / 回滚)。
+        return res.json({ isRepo: null, gitMissing: true });
+      }
+      if (e?.killed) {
+        // 超时:信息不足,静默。
         return res.json({ isRepo: null });
       }
       res.json({ isRepo: null, permissionDenied: true });

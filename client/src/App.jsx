@@ -42,7 +42,7 @@ import {
   RefreshCw, Activity, Settings, Server, GitBranch, FileDiff, Check, Wrench, X,
   Sun, Moon, Monitor, Bot, Camera, History, Loader2, Shield, FolderTree,
   Archive, ArchiveRestore, Trash2, EyeOff, Columns2, Smartphone, Pencil, Type, Palette,
-  Menu, SquarePen, Gauge, Cpu, CheckCircle2, BookText, Sparkles, HelpCircle,
+  Menu, SquarePen, Gauge, Cpu, CheckCircle2, BookText, Sparkles, HelpCircle, Pin,
 } from 'lucide-react';
 
 // ── Per-session shadow-git checkpoints ──────────────────────────
@@ -885,6 +885,20 @@ function ProjectList() {
   // phone showed every project the user had hidden on the Mac. Hidden projects
   // vanish from this sidebar but stay on disk — restore via the + button.
   const [hidden, setHidden] = useState(new Set());
+  // 置顶项目(服务端共享)。置顶项排到列表最前。
+  const [pinned, setPinned] = useState(new Set());
+  const togglePin = (hash) => {
+    setPinned((prev) => {
+      const next = new Set(prev);
+      const willPin = !next.has(hash);
+      if (willPin) next.add(hash); else next.delete(hash);
+      fetch('/api/prefs/pinned', {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ kind: 'project', id: hash, pinned: willPin }),
+      }).catch(() => {});
+      return next;
+    });
+  };
   const persistHidden = (set) => {
     fetch('/api/prefs/hidden-projects', {
       method: 'PUT',
@@ -902,6 +916,11 @@ function ProjectList() {
   };
 
   useEffect(() => { fetchProjects(); }, []);
+  useEffect(() => {
+    fetch('/api/prefs/pinned').then((r) => r.json())
+      .then((d) => setPinned(new Set(Array.isArray(d.projects) ? d.projects : [])))
+      .catch(() => {});
+  }, []);
   // Load the shared hidden list; one-time migration of any legacy localStorage
   // entries so the user doesn't lose hides from before the server move.
   useEffect(() => {
@@ -926,6 +945,8 @@ function ProjectList() {
     !hidden.has(p.hash) && p.path.toLowerCase().includes(searchQuery.toLowerCase())
   );
   const hiddenOnly = projects.length > 0 && filtered.length === 0 && searchQuery.length === 0 && hidden.size > 0;
+  // 置顶项排最前(稳定排序保各组内原顺序)。
+  const sortedProjects = [...filtered].sort((a, b) => (pinned.has(b.hash) ? 1 : 0) - (pinned.has(a.hash) ? 1 : 0));
 
   const registerProjectPath = async (rawPath) => {
     const path = String(rawPath || '').trim();
@@ -1081,7 +1102,7 @@ function ProjectList() {
         {searchQuery.length >= 2 && (
           <GlobalSearchResults q={searchQuery} onPick={handlePickHit} />
         )}
-        {filtered.map((project) => (
+        {sortedProjects.map((project) => (
           <div key={project.hash} className="relative group">
             <button
               onClick={() => {
@@ -1114,13 +1135,22 @@ function ProjectList() {
                 </span>
               </div>
             </button>
-            <button
-              onClick={(e) => { e.stopPropagation(); toggleHidden(project.hash); }}
-              className="absolute top-1.5 right-1.5 opacity-100 md:opacity-0 md:group-hover:opacity-100 transition-opacity p-1 hover:bg-canvas-deep rounded"
-              title="从侧栏隐藏（不删除本地文件，下次按 + 重新添加同路径即可恢复）"
-            >
-              <EyeOff size={12} className="text-ink-faint" />
-            </button>
+            <div className="absolute top-1.5 right-1.5 flex items-center gap-0.5">
+              <button
+                onClick={(e) => { e.stopPropagation(); togglePin(project.hash); }}
+                className={`transition-opacity p-1 hover:bg-canvas-deep rounded ${pinned.has(project.hash) ? 'opacity-100' : 'opacity-100 md:opacity-0 md:group-hover:opacity-100'}`}
+                title={pinned.has(project.hash) ? '取消置顶' : '置顶到列表最前'}
+              >
+                <Pin size={12} className={pinned.has(project.hash) ? 'text-accent fill-accent' : 'text-ink-faint'} />
+              </button>
+              <button
+                onClick={(e) => { e.stopPropagation(); toggleHidden(project.hash); }}
+                className="opacity-100 md:opacity-0 md:group-hover:opacity-100 transition-opacity p-1 hover:bg-canvas-deep rounded"
+                title="从侧栏隐藏（不删除本地文件，下次按 + 重新添加同路径即可恢复）"
+              >
+                <EyeOff size={12} className="text-ink-faint" />
+              </button>
+            </div>
           </div>
         ))}
         {filtered.length === 0 && (
@@ -1217,7 +1247,7 @@ function DeleteButton({ onConfirm, onArmedChange }) {
   );
 }
 
-function SessionItem({ session, isSelected, onSelect, onFork, onArchive, onDelete, forking, running }) {
+function SessionItem({ session, isSelected, onSelect, onFork, onArchive, onDelete, forking, running, pinned, onTogglePin }) {
   const [expanded, setExpanded] = useState(false);
   const customTitle = useStore((s) => s.customTitles[session.sessionId]);
   const autoTitle = useStore((s) => s.autoTitles[session.sessionId]);
@@ -1282,6 +1312,7 @@ function SessionItem({ session, isSelected, onSelect, onFork, onArchive, onDelet
               </div>
               {/* Bottom row leaves space on the right for the hover action bar. */}
               <div className="flex items-center gap-2 gap-y-1 flex-wrap mt-1.5 pr-20">
+                {pinned && <Pin size={9} className="text-accent fill-accent shrink-0" />}
                 {session.model && <ModelBadge model={session.model} compact />}
                 <span className="text-[10px] text-ink-faint font-mono shrink-0 whitespace-nowrap">{session.messageCount}</span>
                 {hasSubagents && (
@@ -1295,6 +1326,14 @@ function SessionItem({ session, isSelected, onSelect, onFork, onArchive, onDelet
       )}
       {!renaming && (
       <div className={`absolute bottom-1.5 right-1.5 transition-opacity flex items-center gap-0.5 ${deleteArmed ? 'opacity-100' : 'opacity-100 md:opacity-0 md:group-hover:opacity-100'}`}>
+        <button
+          onClick={(e) => { e.stopPropagation(); onTogglePin?.(session.sessionId); }}
+          disabled={isDraft}
+          className="p-1 hover:bg-canvas-deep rounded disabled:opacity-30"
+          title={pinned ? '取消置顶' : '置顶到列表最前'}
+        >
+          <Pin size={12} className={pinned ? 'text-accent fill-accent' : 'text-ink-faint'} />
+        </button>
         <button
           onClick={startRename}
           disabled={isDraft}
@@ -1362,8 +1401,37 @@ function SessionList() {
   const focusSession = (paneSessions && paneSessions[activeTabIndex]) || null;
   const [forking, setForking] = useState(null);
   const [showArchived, setShowArchived] = useState(false);
+  const [query, setQuery] = useState('');
+  // 置顶会话(服务端共享),置顶项排最前。
+  const [pinnedSessions, setPinnedSessions] = useState(new Set());
+  const customTitles = useStore((s) => s.customTitles);
+  const autoTitles = useStore((s) => s.autoTitles);
+  const togglePinSession = (sid) => {
+    if (!sid) return;
+    setPinnedSessions((prev) => {
+      const next = new Set(prev);
+      const willPin = !next.has(sid);
+      if (willPin) next.add(sid); else next.delete(sid);
+      fetch('/api/prefs/pinned', {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ kind: 'session', id: sid, pinned: willPin }),
+      }).catch(() => {});
+      return next;
+    });
+  };
+  useEffect(() => {
+    fetch('/api/prefs/pinned').then((r) => r.json())
+      .then((d) => setPinnedSessions(new Set(Array.isArray(d.sessions) ? d.sessions : [])))
+      .catch(() => {});
+  }, []);
 
-  const visible = sessions.filter((s) => !!s.archived === showArchived);
+  // 标题取值与 SessionItem 渲染一致:自定义 > 自动 > 首条消息。搜索按它过滤。
+  const titleOf = (s) => (customTitles[s.sessionId] || autoTitles[s.sessionId] || s.firstPrompt || '');
+  const q = query.trim().toLowerCase();
+  const visible = sessions
+    .filter((s) => !!s.archived === showArchived)
+    .filter((s) => q === '' || titleOf(s).toLowerCase().includes(q))
+    .sort((a, b) => (pinnedSessions.has(b.sessionId) ? 1 : 0) - (pinnedSessions.has(a.sessionId) ? 1 : 0));
   const activeCount = sessions.filter((s) => !s.archived).length;
   const archivedCount = sessions.filter((s) => !!s.archived).length;
 
@@ -1656,6 +1724,16 @@ function SessionList() {
         <div className="-mx-4 mt-2">
           <GitInitBanner cwd={selectedProject?.path} />
         </div>
+        <div className="relative mt-2">
+          <Search size={12} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-ghost" />
+          <input
+            type="text"
+            placeholder="搜索会话标题…"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            className="w-full bg-canvas border border-canvas-sunken rounded-lg pl-7 pr-3 py-1 text-[11px] text-ink placeholder-ink-ghost focus:outline-none focus:border-accent/40 font-body"
+          />
+        </div>
         <div className="flex items-center gap-1 mt-2 -mb-1">
           <button
             onClick={() => setShowArchived(false)}
@@ -1683,12 +1761,14 @@ function SessionList() {
             onDelete={handleDelete}
             forking={forking === session.sessionId}
             running={runningSessionIds.has(session.sessionId)}
+            pinned={pinnedSessions.has(session.sessionId)}
+            onTogglePin={togglePinSession}
           />
         ))}
         {visible.length === 0 && (
           <div className="px-4 py-8 text-center">
             <p className="text-xs text-ink-faint font-body">
-              {showArchived ? '没有已归档的会话' : '该项目没有活跃会话'}
+              {q ? '没有匹配的会话' : showArchived ? '没有已归档的会话' : '该项目没有活跃会话'}
             </p>
           </div>
         )}
@@ -1955,7 +2035,7 @@ function GitInitBanner({ cwd }) {
       .then((r) => r.json())
       // T3: permissionDenied = macOS 没给本 app 磁盘权限(git 在 Desktop 等目录
       // 被 TCC 拒)。此时既不是 repo 也不该引导 init —— 显示权限引导横幅。
-      .then((s) => setStatus(s?.permissionDenied ? 'tcc' : (s?.isRepo === false ? 'norepo' : 'repo')))
+      .then((s) => setStatus(s?.gitMissing ? 'nogit' : (s?.permissionDenied ? 'tcc' : (s?.isRepo === false ? 'norepo' : 'repo'))))
       .catch(() => setStatus('repo'));  // network err → silent
   }, [cwd, kick]);
 
@@ -1970,6 +2050,21 @@ function GitInitBanner({ cwd }) {
           onClick={() => { fetch('/api/system/open-fda-settings', { method: 'POST' }).catch(() => {}); }}
           className="px-2 py-0.5 rounded bg-amber-100 hover:bg-amber-200 text-amber-900 text-[10px] font-medium shrink-0"
         >打开系统设置</button>
+        <button
+          onClick={() => setKick((k) => k + 1)}
+          className="px-2 py-0.5 rounded hover:bg-amber-100 text-amber-700 text-[10px] shrink-0"
+        >重新检测</button>
+      </div>
+    );
+  }
+
+  if (status === 'nogit') {
+    return (
+      <div className="bg-amber-50 border-b border-amber-200 px-4 py-2 text-[12px] font-body text-amber-900 flex items-center gap-2 flex-wrap">
+        <GitBranch size={13} className="text-amber-600 shrink-0" />
+        <span className="flex-1 min-w-[12rem]">
+          未检测到 <b>git</b>。装上 git 才能初始化仓库 / 回滚 AI 的修改。可在 设置 → 环境 里安装，或到 <b>git-scm.com</b> 下载。
+        </span>
         <button
           onClick={() => setKick((k) => k + 1)}
           className="px-2 py-0.5 rounded hover:bg-amber-100 text-amber-700 text-[10px] shrink-0"

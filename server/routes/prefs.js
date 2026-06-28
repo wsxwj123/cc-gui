@@ -160,4 +160,40 @@ router.put('/prefs/auto-titles', async (req, res) => {
   }
 });
 
+// 置顶(pin):项目 + 会话各一份 id 列表,服务端共享(同 hidden-projects 跨设备一致)。
+// 按 kind 单键合并,避免「置顶项目」的 PUT 覆盖掉「置顶会话」列表(反之亦然)。
+router.get('/prefs/pinned', async (_req, res) => {
+  const prefs = await loadPrefs();
+  const p = (prefs.pinned && typeof prefs.pinned === 'object') ? prefs.pinned : {};
+  res.json({
+    projects: Array.isArray(p.projects) ? p.projects : [],
+    sessions: Array.isArray(p.sessions) ? p.sessions : [],
+  });
+});
+
+// PUT /api/prefs/pinned { kind:'project'|'session', id, pinned:bool }
+router.put('/prefs/pinned', async (req, res) => {
+  const { kind, id, pinned } = req.body || {};
+  if (!['project', 'session'].includes(kind) || typeof id !== 'string' || !id) {
+    return res.status(400).json({ error: 'kind 必须是 project/session,id 必须非空字符串' });
+  }
+  try {
+    const prefs = await loadPrefs();
+    const p = (prefs.pinned && typeof prefs.pinned === 'object') ? prefs.pinned : {};
+    const key = kind === 'project' ? 'projects' : 'sessions';
+    const list = new Set(Array.isArray(p[key]) ? p[key] : []);
+    if (pinned) list.add(id); else list.delete(id);
+    p[key] = [...list];
+    prefs.pinned = p;
+    await savePrefs(prefs);
+    res.json({
+      ok: true,
+      projects: Array.isArray(p.projects) ? p.projects : [],
+      sessions: Array.isArray(p.sessions) ? p.sessions : [],
+    });
+  } catch (e) {
+    res.status(500).json({ error: '写入置顶失败：' + e.message });
+  }
+});
+
 export default router;
