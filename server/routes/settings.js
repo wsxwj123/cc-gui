@@ -569,22 +569,20 @@ router.post('/provider/switch', async (req, res) => {
       for (const k of Object.keys(env)) {
         if (/_MODEL$/.test(k) && !isClaudeModel(env[k])) { delete env[k]; delete env[k + '_NAME']; }
       }
-      if (model && isClaudeModel(model)) env.ANTHROPIC_MODEL = model;
+      // 主对话模型 env.ANTHROPIC_MODEL:显式 claude 选择优先;否则**官方默认 sonnet**。
+      // CQ-fix(用户报"官方默认变 haiku"):绝不拿 settings.json 的 `model` 字段兜底——那个
+      // 字段是 *子代理默认档*(cc CLI 写成 haiku 给 Task 用),把它当主对话模型 = 官方主 chat
+      // 变 haiku 的根因。已钉的 opus/sonnet 保留;未设 / 非 claude / 被钉成 haiku → 一律回 sonnet。
+      if (model && isClaudeModel(model)) {
+        env.ANTHROPIC_MODEL = model;
+      } else if (!isClaudeModel(env.ANTHROPIC_MODEL) || /haiku/i.test(env.ANTHROPIC_MODEL || '')) {
+        env.ANTHROPIC_MODEL = 'claude-sonnet-4-6';
+      }
       const next = { ...current, env };
-      // Preserve the user's CURRENT default model — do NOT let cc-switch's official
-      // snapshot (which carries model:haiku) overwrite it on every switch. Priority:
-      // explicit claude request > live settings.json model (if a claude id/alias) >
-      // snapshot's. This is why a user-set "sonnet" used to silently revert to haiku.
+      // `next.model`(子代理默认档,官方下 cc 用 haiku)保持原样,不影响主 chat。
       const curModel = current.model;
       if (model && isClaudeModel(model)) next.model = model;
       else if (isClaudeModel(curModel)) next.model = curModel;
-      // 🐛 修复:cc CLI 的 settings.json `model` 字段实际是 subagent default(haiku
-      // 给 Task 用),不影响主 chat;主 chat 用 env.ANTHROPIC_MODEL,未设则 fallback
-      // sonnet。之前 GUI 显示 model=haiku 但实际跑 sonnet 的根因。同步两个字段,
-      // 让 GUI 显示和 CLI 实际跑的一致。
-      if (next.model && isClaudeModel(next.model) && !env.ANTHROPIC_MODEL) {
-        env.ANTHROPIC_MODEL = next.model;
-      }
       const ts = new Date().toISOString().replace(/[:.]/g, '-');
       await backupSettings(ts);
       await writeFile(SETTINGS_PATH, JSON.stringify(next, null, 2));

@@ -68,7 +68,6 @@ export default function EnvCheckPanel({ onDismiss, onRecheck, asModal = true }) 
                   {!row.required && <span className="text-[10px] text-ink-faint border border-canvas-deep rounded px-1">可选</span>}
                   {ok && ver && <span className="text-[10px] text-ink-faint font-mono">{ver}</span>}
                 </div>
-                <div className="text-[11px] text-ink-faint font-body truncate">{row.desc}</div>
               </div>
               {!ok && row.key !== 'node' && (
                 launched[row.key]
