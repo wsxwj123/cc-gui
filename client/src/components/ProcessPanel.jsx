@@ -14,12 +14,12 @@ export function ProcessPanel() {
       const r = await fetch(`/api/processes/${pid}/kill`, { method: 'POST' });
       if (!r.ok) {
         const e = await r.json().catch(() => ({}));
-        alert('停止失败：' + (e.error || r.status));
+        confirmDialog('停止失败：' + (e.error || r.status));
       }
       await new Promise((r) => setTimeout(r, 500));
       await fetchProcesses();
     } catch (err) {
-      alert('停止失败：' + err.message);
+      confirmDialog('停止失败：' + err.message);
     }
     setKilling(null);
   };

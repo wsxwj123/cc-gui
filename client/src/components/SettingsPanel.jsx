@@ -99,7 +99,7 @@ export function SettingsPanel() {
         </div>
       )}
 
-      {tab === 'overview' && <OverviewTab settings={settings} />}
+      {tab === 'overview' && <OverviewTab settings={settings} onSave={save} saving={saving} />}
       {tab === 'env' && <EnvCheckPanel asModal={false} />}
       {tab === 'hooks' && (
         <HooksTab settings={settings} onSave={save} saving={saving} saved={saved} />
@@ -874,20 +874,89 @@ function FullDiskAccessCard() {
   );
 }
 
-function OverviewTab({ settings }) {
+// 环境变量行内编辑:每项可改值/删除,底部可新增。改完(失焦/回车/删除/新增)即把
+// 整个 env 对象 PUT 回 settings.json(浅合并整体替换 env,删除项自然消失)。父组件
+// 保存后回传新 settings → env 身份变化 → 重置草稿。敏感值默认密文,点眼睛看明文再改。
+function EnvEditor({ env, onSave, saving }) {
+  const isSecret = (k) => /KEY|TOKEN|SECRET|PASSWORD|PWD|CREDENTIAL/i.test(k);
+  const [draft, setDraft] = useState(env);
+  const [revealed, setRevealed] = useState({});
+  const [newKey, setNewKey] = useState('');
+  const [newVal, setNewVal] = useState('');
+  const [err, setErr] = useState('');
+
+  useEffect(() => { setDraft(env); }, [env]);
+
+  const commit = (nextEnv) => { setErr(''); onSave?.({ env: nextEnv }); };
+  const saveValue = (k) => { if (draft[k] !== env[k]) commit({ ...env, [k]: draft[k] }); };
+  const removeKey = async (k) => {
+    if (!(await confirmDialog(`删除环境变量 ${k}?`, { danger: true }))) return;
+    const next = { ...env }; delete next[k]; commit(next);
+  };
+  const addKey = () => {
+    const k = newKey.trim();
+    if (!k) return;
+    if (k in env) { setErr(`${k} 已存在`); return; }
+    commit({ ...env, [k]: newVal }); setNewKey(''); setNewVal('');
+  };
+
+  return (
+    <div className="border-t border-canvas-deep">
+      {Object.keys(draft).length === 0 && (
+        <div className="px-3 py-2.5 text-[11px] text-ink-faint font-body">暂无环境变量,可在下方新增。</div>
+      )}
+      <div className="divide-y divide-canvas-deep/60">
+        {Object.keys(draft).map((k) => (
+          <div key={k} className="px-3 py-2 flex items-center gap-2">
+            <span className="text-[11px] font-mono text-ink-soft shrink-0 max-w-[42%] break-all">{k}</span>
+            <input
+              type={isSecret(k) && !revealed[k] ? 'password' : 'text'}
+              value={draft[k] ?? ''}
+              onChange={(e) => setDraft((d) => ({ ...d, [k]: e.target.value }))}
+              onBlur={() => saveValue(k)}
+              onKeyDown={(e) => { if (e.key === 'Enter') e.currentTarget.blur(); }}
+              disabled={saving}
+              className="flex-1 min-w-0 text-[11px] font-mono bg-canvas-warm border border-canvas-deep rounded px-2 py-1 text-ink focus:border-accent outline-none" />
+            {isSecret(k) && (
+              <button onClick={() => setRevealed((r) => ({ ...r, [k]: !r[k] }))}
+                className="text-ink-faint hover:text-ink shrink-0" title={revealed[k] ? '隐藏' : '显示'}>
+                {revealed[k] ? <EyeOff size={13} /> : <Eye size={13} />}
+              </button>
+            )}
+            <button onClick={() => removeKey(k)} disabled={saving}
+              className="text-ink-faint hover:text-error shrink-0" title="删除">
+              <Trash2 size={13} />
+            </button>
+          </div>
+        ))}
+      </div>
+      <div className="px-3 py-2 flex items-center gap-2 border-t border-canvas-deep/60">
+        <input value={newKey} onChange={(e) => setNewKey(e.target.value.toUpperCase())}
+          placeholder="新变量名" disabled={saving}
+          className="w-[42%] text-[11px] font-mono bg-canvas-warm border border-canvas-deep rounded px-2 py-1 text-ink focus:border-accent outline-none" />
+        <input value={newVal} onChange={(e) => setNewVal(e.target.value)}
+          onKeyDown={(e) => { if (e.key === 'Enter') addKey(); }}
+          placeholder="值" disabled={saving}
+          className="flex-1 min-w-0 text-[11px] font-mono bg-canvas-warm border border-canvas-deep rounded px-2 py-1 text-ink focus:border-accent outline-none" />
+        <button onClick={addKey} disabled={saving || !newKey.trim()}
+          className="text-accent hover:text-accent/80 disabled:opacity-40 shrink-0" title="新增">
+          <Plus size={14} />
+        </button>
+      </div>
+      {err && <div className="px-3 pb-2 text-[11px] text-error font-body">{err}</div>}
+    </div>
+  );
+}
+
+function OverviewTab({ settings, onSave, saving }) {
   const [showEnv, setShowEnv] = useState(false);
   const [showHooks, setShowHooks] = useState(false);
-  const [revealed, setRevealed] = useState({});
 
   const env = settings?.env || {};
   const envKeys = Object.keys(env);
   const hooks = settings?.hooks || {};
   const hookEvents = Object.keys(hooks);
   const hookTotal = Object.values(hooks).reduce((n, arr) => n + (Array.isArray(arr) ? arr.length : 0), 0);
-
-  // 敏感值默认打码(KEY/TOKEN/SECRET/PASSWORD),点"显示"可看明文。
-  const isSecret = (k) => /KEY|TOKEN|SECRET|PASSWORD|PWD|CREDENTIAL/i.test(k);
-  const mask = (v) => { const s = String(v); return s.length <= 8 ? '••••••' : '••••' + s.slice(-4); };
 
   const rows = [];
   if (settings?.defaultModel || settings?.model) rows.push(['默认模型', settings.defaultModel || settings.model]);
@@ -913,35 +982,16 @@ function OverviewTab({ settings }) {
         </div>
       )}
 
-      {/* 环境变量 — 默认折叠,展开显示 key=value(敏感值打码,可逐条显示明文) */}
-      {envKeys.length > 0 && (
-        <div className="border border-canvas-deep rounded-lg overflow-hidden">
-          <button onClick={() => setShowEnv((v) => !v)}
-            className="w-full flex items-center gap-2 px-3 py-2.5 hover:bg-canvas-warm/60 text-left">
-            {showEnv ? <ChevronDown size={12} className="text-ink-faint" /> : <ChevronRight size={12} className="text-ink-faint" />}
-            <span className="text-xs text-ink-muted font-body flex-1">环境变量</span>
-            <span className="text-xs text-ink-soft font-mono">{envKeys.length} 个</span>
-          </button>
-          {showEnv && (
-            <div className="border-t border-canvas-deep divide-y divide-canvas-deep/60">
-              {envKeys.map((k) => (
-                <div key={k} className="px-3 py-2 flex items-start gap-2">
-                  <span className="text-[11px] font-mono text-ink-soft shrink-0 max-w-[45%] break-all">{k}</span>
-                  <span className="text-[11px] font-mono text-ink-faint flex-1 break-all text-right">
-                    {isSecret(k) && !revealed[k] ? mask(env[k]) : String(env[k])}
-                  </span>
-                  {isSecret(k) && (
-                    <button onClick={() => setRevealed((r) => ({ ...r, [k]: !r[k] }))}
-                      className="text-[10px] text-accent hover:underline shrink-0">
-                      {revealed[k] ? '隐藏' : '显示'}
-                    </button>
-                  )}
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-      )}
+      {/* 环境变量 — 默认折叠;展开后每项可改值/删除,底部可新增。改完即写回 settings.json 的 env */}
+      <div className="border border-canvas-deep rounded-lg overflow-hidden">
+        <button onClick={() => setShowEnv((v) => !v)}
+          className="w-full flex items-center gap-2 px-3 py-2.5 hover:bg-canvas-warm/60 text-left">
+          {showEnv ? <ChevronDown size={12} className="text-ink-faint" /> : <ChevronRight size={12} className="text-ink-faint" />}
+          <span className="text-xs text-ink-muted font-body flex-1">环境变量</span>
+          <span className="text-xs text-ink-soft font-mono">{envKeys.length} 个</span>
+        </button>
+        {showEnv && <EnvEditor env={env} onSave={onSave} saving={saving} />}
+      </div>
 
       {/* Hooks — 默认折叠,展开显示每个事件下的命令(只读概览,编辑见 Hooks 标签页) */}
       {hookEvents.length > 0 && (

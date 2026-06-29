@@ -34,7 +34,7 @@ function RemoteAgentCard({ agent, stoppingPid, onStop }) {
       <div className="flex items-center gap-3 mt-1.5 text-[10px] text-ink-faint font-mono">
         {agent.startedAt && <span className="flex items-center gap-1"><Clock size={9} />{fmtElapsed(agent.elapsedMs ?? (Date.now() - agent.startedAt))}</span>}
         {agent.model && <span className="truncate">{agent.model}</span>}
-        {agent.cwd && <span className="truncate opacity-70" title={agent.cwd}>{agent.cwd.split('/').pop()}</span>}
+        {agent.cwd && <span className="truncate opacity-70" title={agent.cwd}>{agent.cwd.split(/[/\\]+/).pop()}</span>}
       </div>
       {agent.pid && agent.stoppable !== false && (
         <div className="mt-2 flex justify-end">

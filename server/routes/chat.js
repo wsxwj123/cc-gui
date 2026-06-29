@@ -679,6 +679,9 @@ router.post('/chat/title', async (req, res) => {
     return res.json({ title: '' });
   }
   if (!proc.pid) return res.json({ title: '' });
+  // stderr 设了 pipe 但下面只读 stdout —— 不排空的话 CLI 往 stderr 写超 ~64KB(TCC/MCP 警告等)
+  // 会撑爆管道缓冲区 → 子进程阻塞 → close 永不触发 → 卡到超时。drain 掉即可(标题生成用不到 stderr)。
+  proc.stderr?.resume();
 
   let out = '';
   let done = false;
@@ -810,6 +813,8 @@ router.get('/context/:sessionId', (req, res) => {
     proc = claudeSpawn(args, { cwd, stdio: ['ignore', 'pipe', 'pipe'], env: cleanChildEnv() });
   } catch (e) { return res.status(500).json({ error: 'spawn claude failed: ' + e.message }); }
   if (!proc.pid) { proc.on('error', () => {}); return res.status(500).json({ error: 'claude CLI not found' }); }
+  // 同 /chat/title:stderr 是 pipe 但只读 stdout,必须排空,否则 stderr 超 ~64KB 子进程挂死到超时。
+  proc.stderr?.resume();
 
   let out = '';
   let forkedSid = null;

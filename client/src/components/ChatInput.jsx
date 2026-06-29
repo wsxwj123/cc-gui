@@ -3,6 +3,7 @@ import { Send, Loader2, Square, Terminal, Puzzle, Wrench, Gauge, ChevronDown, X,
 import { useStore, PERMISSION_MODES } from '../stores/sessionStore.js';
 import { PermissionPrompt } from './PermissionPrompt.jsx';
 import { TodoPanel } from './TodoPanel.jsx';
+import { confirmDialog } from '../utils/confirmDialog.jsx';
 
 // Permission mode metadata — mirrors `claude --permission-mode <choice>`.
 export const MODE_META = {
@@ -364,7 +365,7 @@ export function ChatInput({ onSend, onStop, onAccelerate, disabled, isStreaming,
       });
       const data = await res.json();
       if (!res.ok) {
-        alert('上传失败: ' + (data.error || res.status));
+        confirmDialog('上传失败: ' + (data.error || res.status));
         return;
       }
       // 仅图片生成缩略预览(小);大文件/非图片不读 dataUrl,免内存膨胀。
@@ -375,11 +376,11 @@ export function ChatInput({ onSend, onStop, onAccelerate, disabled, isStreaming,
         kind: data.kind || (isImage ? 'image' : 'text'),
         path: data.path,
         preview,
-        name: file.name || data.path.split('/').pop(),
+        name: file.name || data.path.split(/[/\\]+/).pop(),
         bytes: data.bytes,
       }]);
     } catch (err) {
-      alert('上传失败: ' + err.message);
+      confirmDialog('上传失败: ' + err.message);
     }
   };
 

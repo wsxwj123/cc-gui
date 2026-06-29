@@ -7,7 +7,7 @@ const MAX_EXPANDED_LINES = 400;
 export function ReadCard({ toolCall }) {
   const [expanded, setExpanded] = useState(false);
   const filePath = toolCall.input?.file_path || '';
-  const fileName = filePath.split('/').pop() || filePath;
+  const fileName = filePath.split(/[/\\]+/).pop() || filePath;
   const offset = toolCall.input?.offset;
   const limit = toolCall.input?.limit;
   const result = toolCall.result;

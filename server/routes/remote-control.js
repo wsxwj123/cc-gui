@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { realpath } from 'fs/promises';
 import { resolve } from 'path';
 import { homedir } from 'os';
+import { isPathInside } from '../utils/safe-path.js';
 
 // node-pty 是本 server 唯一的原生模块,其 .node 二进制按「构建时的 Node ABI」编译。
 // 打包发布时(CI Node 20)编译进 bundle,但 app 运行时 spawn 的是用户机器上「任意版本」
@@ -73,9 +74,10 @@ router.post('/remote-control', async (req, res) => {
     let dir = HOME;
     if (cwd) {
       const real = await realpath(resolve(cwd)).catch(() => null);
-      // HOME itself or a path under it. Bare startsWith(HOME) is bypassable
-      // ('/Users/alice2'.startsWith('/Users/alice') === true).
-      if (!real || (real !== HOME && !real.startsWith(HOME + '/'))) throw new Error('cwd outside $HOME');
+      // HOME itself or a path under it. isPathInside 平台无关(用 path.relative),既挡掉
+      // startsWith 的旁路('/Users/alice2' 伪装 '/Users/alice'),又修好 Windows 反斜杠路径
+      // 永远匹配不上 `HOME + '/'` → 合法 cwd 也被拒的问题。
+      if (!real || !isPathInside(real, HOME)) throw new Error('cwd outside $HOME');
       dir = real;
     }
 

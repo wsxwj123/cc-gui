@@ -33,8 +33,12 @@ function isNonProjectPath(p) {
   if (!existsSync(p)) return true;                                       // deleted / moved (stale cwd)
   if (p === '/') return true;                                            // filesystem root
   if (p === '/tmp' || p.startsWith('/tmp/') || p.startsWith('/private/tmp')) return true;
-  if (p === `${HOME}/.claude` || p.startsWith(`${HOME}/.claude/`)) return true;       // ~/.claude/* internals
-  if (p === `${HOME}/.claude-mem` || p.startsWith(`${HOME}/.claude-mem/`)) return true; // claude-mem state
+  // 反斜杠归一后再比:Windows 上 cwd 是 C:\Users\X\.claude\... 形态,直接拿 `${HOME}/.claude`
+  // (含正斜杠)永远匹配不上 → 内部目录混进项目列表。归一为正斜杠统一判断。
+  const n = p.replace(/\\/g, '/');
+  const h = HOME.replace(/\\/g, '/');
+  if (n === `${h}/.claude` || n.startsWith(`${h}/.claude/`)) return true;       // ~/.claude/* internals
+  if (n === `${h}/.claude-mem` || n.startsWith(`${h}/.claude-mem/`)) return true; // claude-mem state
   return false;
 }
 

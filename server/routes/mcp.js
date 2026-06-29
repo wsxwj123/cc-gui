@@ -60,7 +60,13 @@ function probeStdioStderr(cfg, timeoutMs = 6000) {
 // Async (not execFileSync) so a slow CLI cold start doesn't freeze the whole event loop —
 // and with it every other client's live SSE stream — for up to `timeout` ms.
 async function runClaude(args, { timeout = 10000 } = {}) {
-  const { stdout } = await execFileP('claude', args, {
+  // Windows:npm 装的 claude 是 claude.cmd,execFile 不能直接跑 .cmd(必须经 cmd.exe,
+  // 否则 ENOENT)。不修则 Win 上所有 MCP 增删改查/list 全失败。与 version-check.js
+  // 的 getClaudeVersion 同款:cmd.exe /c claude ...,由 PATHEXT 解析到 .cmd。
+  const isWin = process.platform === 'win32';
+  const file = isWin ? 'cmd.exe' : 'claude';
+  const fullArgs = isWin ? ['/c', 'claude', ...args] : args;
+  const { stdout } = await execFileP(file, fullArgs, {
     encoding: 'utf-8',
     timeout,
     env: { ...process.env },

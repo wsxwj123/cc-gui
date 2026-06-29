@@ -306,7 +306,7 @@ export function UsagePanel() {
               const maxP = Math.max(...stats.byProject.map((p) => p.input + p.output), 1);
               return stats.byProject.slice(0, 10).map((p) => {
                 const path = decodeProjectHash(p.hash);
-                const name = path.split('/').filter(Boolean).slice(-2).join('/');
+                const name = path.split(/[/\\]+/).filter(Boolean).slice(-2).join('/');
                 return (
                   <BarRow key={p.hash} label={name || p.hash} value={p.input + p.output}
                     max={maxP} color="var(--color-accent)" />

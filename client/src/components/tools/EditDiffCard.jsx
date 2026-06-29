@@ -19,7 +19,7 @@ export function EditDiffCard({ toolCall }) {
   const [expanded, setExpanded] = useState(false);
   const name = toolCall.name;
   const filePath = toolCall.input?.file_path || '';
-  const fileName = filePath.split('/').pop() || filePath;
+  const fileName = filePath.split(/[/\\]+/).pop() || filePath;
   const result = toolCall.result;
   const isError = result?.isError;
 

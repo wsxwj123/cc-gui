@@ -67,7 +67,7 @@ function ChangeItem({ change, sessionId, cwd, reviewed, onToggleReviewed }) {
         const rr = await fetch(`/api/checkpoints/${sessionId}/resolve?${params.toString()}`);
         const rd = await rr.json().catch(() => ({}));
         if (!rr.ok || !rd.sha) {
-          alert('恢复失败：' + (d.error || res.status));
+          confirmDialog('恢复失败：' + (d.error || res.status));
           return;
         }
         const cr = await fetch(`/api/checkpoints/${sessionId}/restore-file`, {
@@ -76,11 +76,11 @@ function ChangeItem({ change, sessionId, cwd, reviewed, onToggleReviewed }) {
         });
         const cd = await cr.json().catch(() => ({}));
         if (cr.ok) markReverted();
-        else alert('恢复失败：' + (cd.error || cr.status));
+        else confirmDialog('恢复失败：' + (cd.error || cr.status));
       } else {
-        alert('恢复失败：' + (d.error || res.status));
+        confirmDialog('恢复失败：' + (d.error || res.status));
       }
-    } catch (err) { alert('恢复失败：' + err.message); }
+    } catch (err) { confirmDialog('恢复失败：' + err.message); }
     setBusy(null);
   };
 

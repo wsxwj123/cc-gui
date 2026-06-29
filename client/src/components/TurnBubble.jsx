@@ -131,7 +131,7 @@ function formatInputPreview(input) {
   if (!input) return '';
   if (typeof input === 'string') return input;
   if (input.command) return input.command;
-  if (input.file_path) return input.file_path.split('/').pop();
+  if (input.file_path) return input.file_path.split(/[/\\]+/).pop();
   if (input.pattern) return input.pattern;
   if (input.query) return input.query;
   return '';

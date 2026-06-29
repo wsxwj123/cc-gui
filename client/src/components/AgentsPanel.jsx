@@ -103,7 +103,7 @@ export function AgentsPanel() {
   };
 
   const createNew = async () => {
-    if (!/^[a-z0-9-]{1,64}$/.test(newName)) return alert('名字只能小写字母、数字、-');
+    if (!/^[a-z0-9-]{1,64}$/.test(newName)) return confirmDialog('名字只能小写字母、数字、-');
     setSelected(newName);
     setContent(`---\nname: ${newName}\ndescription: 此处填写该 agent 的功能概览,主对话据此判断何时调用它\nmodel: ${newModel || defaultModel}\ntools: Read, Edit, Write, Bash, TaskCreate, TaskUpdate, TaskList, AskUserQuestion, ExitPlanMode\n---\n\n此处填写该 agent 的系统提示词:说明其职责、处理方式与输出要求。\n`);
     setCreating(false); setNewName('');

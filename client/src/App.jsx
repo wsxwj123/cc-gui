@@ -129,7 +129,7 @@ function CheckpointButton({ sessionId, cwd, projectHash, onRestored }) {
         body: JSON.stringify({ sessionId, cwd, label: `checkpoint ${new Date().toLocaleTimeString()}` }),
       });
       await load();
-    } catch (err) { alert('快照失败：' + err.message); }
+    } catch (err) { confirmDialog('快照失败：' + err.message); }
     setBusy(false);
   };
 
@@ -143,7 +143,7 @@ function CheckpointButton({ sessionId, cwd, projectHash, onRestored }) {
         body: JSON.stringify({ sha, cwd }),
       });
       const d = await r.json().catch(() => ({}));
-      if (!r.ok) { alert('恢复失败：' + (d.error || r.status)); return; }
+      if (!r.ok) { confirmDialog('恢复失败：' + (d.error || r.status)); return; }
       // #1:checkpoint 只是 git 文件快照,不含对话锚点。用快照时间戳把会话裁剪到该时刻,
       // 消息页随之回退(否则用户点了恢复但消息页一动不动,以为"无反应")。best-effort。
       if (projectHash && ts) {
@@ -156,8 +156,8 @@ function CheckpointButton({ sessionId, cwd, projectHash, onRestored }) {
       }
       setOpen(false);
       onRestored?.();
-      alert(`已回到 checkpoint ${sha.slice(0, 7)}：文件已还原，会话已裁剪到该时刻`);
-    } catch (err) { alert('恢复失败：' + err.message); }
+      confirmDialog(`已回到 checkpoint ${sha.slice(0, 7)}：文件已还原，会话已裁剪到该时刻`);
+    } catch (err) { confirmDialog('恢复失败：' + err.message); }
   };
 
   // Anchor the dropdown to the button but render it in a body portal with fixed
@@ -1449,7 +1449,7 @@ function SessionList() {
       });
       useStore.getState().fetchSessions(selectedProject.hash, { silent: true });
     } catch (err) {
-      alert('归档失败：' + err.message);
+      confirmDialog('归档失败：' + err.message);
     }
   };
 
@@ -1459,11 +1459,11 @@ function SessionList() {
         `/api/sessions/${session.sessionId}?projectHash=${encodeURIComponent(session.projectHash)}`,
         { method: 'DELETE' }
       );
-      if (!r.ok) { const e = await r.json().catch(() => ({})); alert('删除失败：' + (e.error || r.status)); return; }
+      if (!r.ok) { const e = await r.json().catch(() => ({})); confirmDialog('删除失败：' + (e.error || r.status)); return; }
       if (selectedSession?.sessionId === session.sessionId) setSelectedSession(null);
       useStore.getState().fetchSessions(selectedProject.hash, { silent: true });
     } catch (err) {
-      alert('删除失败：' + err.message);
+      confirmDialog('删除失败：' + err.message);
     }
   };
 
@@ -1583,11 +1583,11 @@ function SessionList() {
         body: JSON.stringify({ cwd: selectedProject.path, name }),
       });
       const d = await r.json();
-      if (!r.ok) return alert('创建 worktree 失败：' + d.error);
+      if (!r.ok) return confirmDialog('创建 worktree 失败：' + d.error);
       enterWorktree({ path: d.path, branch: d.branch });
       setNewWorktreeName('');
     } catch (err) {
-      alert('创建 worktree 失败：' + err.message);
+      confirmDialog('创建 worktree 失败：' + err.message);
     }
   };
 
@@ -1605,10 +1605,10 @@ function SessionList() {
         body: JSON.stringify({ cwd: selectedProject.path, path: tree.path, force: dirty }),
       });
       const d = await r.json();
-      if (!r.ok) return alert('删除失败：' + (d.error || ''));
+      if (!r.ok) return confirmDialog('删除失败：' + (d.error || ''));
       openWorktreePicker(); // 刷新列表
     } catch (err) {
-      alert('删除失败：' + err.message);
+      confirmDialog('删除失败：' + err.message);
     }
   };
 
@@ -1625,7 +1625,7 @@ function SessionList() {
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok || !data.newSessionId) {
-        alert('分支失败：' + (data.error || res.status));
+        confirmDialog('分支失败：' + (data.error || res.status));
         return;
       }
       // The fork is a full-context copy under a new id. Open it: no split → add
@@ -1673,7 +1673,7 @@ function SessionList() {
         st.fetchMessages(fork.sessionId, fork.projectHash, { tab: 1 });
       }
     } catch (err) {
-      alert('分支失败：' + err.message);
+      confirmDialog('分支失败：' + err.message);
     } finally {
       setForking(null);
     }
@@ -2099,10 +2099,10 @@ function GitInitBanner({ cwd }) {
           setStatus('done');
         }
       } else {
-        alert('git init 失败：' + (data.error || r.status));
+        confirmDialog('git init 失败：' + (data.error || r.status));
         setStatus('norepo');
       }
-    } catch (err) { alert('git init 失败：' + err.message); setStatus('norepo'); }
+    } catch (err) { confirmDialog('git init 失败：' + err.message); setStatus('norepo'); }
   };
 
   const dismiss = () => {
@@ -2729,7 +2729,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         const sel = getLocalSession();
         const rcCwd = sel?.projectPath || selectedProject?.path;
         if (!sel?.sessionId) {
-          window.alert('请先发送至少一条消息以创建会话，然后再输入 /remote-control 开启手机远程控制。');
+          confirmDialog('请先发送至少一条消息以创建会话，然后再输入 /remote-control 开启手机远程控制。');
           return;
         }
         try {
@@ -2740,9 +2740,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           const d = await r.json();
           if (!r.ok) throw new Error(d.error || r.status);
           useStore.getState().setRemoteControl(sel.sessionId, true);
-          window.alert('远程控制已激活（后台运行，无终端窗口）。\n手机用 Claude App 接管此会话；电脑端 GUI 会自动同步消息。\n输入框已锁定，避免双写——点顶部「已激活」可收回控制。\n（需 Claude 账号登录，且当前未切到 deepseek/mimo 等三方模型）');
+          confirmDialog('远程控制已激活（后台运行，无终端窗口）。\n手机用 Claude App 接管此会话；电脑端 GUI 会自动同步消息。\n输入框已锁定，避免双写——点顶部「已激活」可收回控制。\n（需 Claude 账号登录，且当前未切到 deepseek/mimo 等三方模型）');
         } catch (e) {
-          window.alert('开启远程控制失败：' + e.message);
+          confirmDialog('开启远程控制失败：' + e.message);
         }
         return;
       }
@@ -2751,7 +2751,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       // A new `-p` turn here would double-write the RC pty's session jsonl.
       const lockedSid = getLocalSession()?.sessionId;
       if (lockedSid && useStore.getState().remoteControlled[lockedSid]) {
-        window.alert('此会话已交给手机远程控制，输入框已锁定。点顶部「已激活」收回控制后再发送。');
+        confirmDialog('此会话已交给手机远程控制，输入框已锁定。点顶部「已激活」收回控制后再发送。');
         return;
       }
     }
@@ -3434,7 +3434,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                 if (store.bgTasks[block.tool_use_id]) {
                   const txt = typeof block.content === 'string' ? block.content : JSON.stringify(block.content);
                   const idm = txt.match(/ID:\s*([A-Za-z0-9_-]+)/);
-                  const pm = txt.match(/written to:\s*(\S+?\.output)/);
+                  // \S+? 遇第一个空格即停 → Windows 含空格用户名(C:\Users\John Doe\...)路径被截断 →
+                  // 拿不到 outputPath → 后台任务卡"运行中"。改非贪婪匹配到首个 .output,允许路径含空格。
+                  const pm = txt.match(/written to:\s*(.+?\.output)/);
                   store.upsertBgTask(block.tool_use_id, {
                     ...(idm ? { shellId: idm[1] } : {}),
                     ...(pm ? { outputPath: pm[1] } : {}),
@@ -4038,9 +4040,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
 
     // ── files only ────────────────────────────────────────────
     if (mode === 'files') {
-      if (!sel?.sessionId || !cwd) { alert('缺少 sessionId 或工作目录，无法还原文件。'); return; }
+      if (!sel?.sessionId || !cwd) { confirmDialog('缺少 sessionId 或工作目录，无法还原文件。'); return; }
       const checkpointSha = await resolveCheckpointSha();
-      if (!checkpointSha) { alert('找不到这条消息发送前的文件快照，无法还原文件。'); return; }
+      if (!checkpointSha) { confirmDialog('找不到这条消息发送前的文件快照，无法还原文件。'); return; }
       try {
         const r = await fetch(`/api/checkpoints/${sel.sessionId}/restore`, {
           method: 'POST',
@@ -4049,10 +4051,10 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         });
         if (!r.ok) {
           const e = await r.json().catch(() => ({}));
-          alert('文件还原失败：' + (e.error || r.status));
+          confirmDialog('文件还原失败：' + (e.error || r.status));
         }
       } catch (err) {
-        alert('文件还原失败：' + err.message);
+        confirmDialog('文件还原失败：' + err.message);
       }
       return;
     }
@@ -4220,7 +4222,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       if (all[i].type === 'user') { userMsg = all[i]; break; }
     }
     if (!userMsg) {
-      alert('找不到该 AI 回复对应的用户消息,无法重做');
+      confirmDialog('找不到该 AI 回复对应的用户消息,无法重做');
       return;
     }
     // 重做整轮:有文件快照就还原+重做;没有(非 git 项目/旧会话)则降级为只裁剪
@@ -4230,13 +4232,13 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
 
   const handleRetryTool = useCallback((turn, toolCall) => {
     if (!turn?.uuid || !toolCall?.id || !toolCall?.name) {
-      alert('找不到该工具调用的 id，无法局部重做');
+      confirmDialog('找不到该工具调用的 id，无法局部重做');
       return;
     }
     const sel = getLocalSession();
     const projectHash = sel?.projectHash || useStore.getState().selectedProject?.hash;
     if (!sel?.sessionId || !projectHash) {
-      alert('缺少 sessionId 或 projectHash，无法局部重做工具');
+      confirmDialog('缺少 sessionId 或 projectHash，无法局部重做工具');
       return;
     }
 
@@ -4299,7 +4301,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           );
         }, 50);
       } catch (err) {
-        alert('工具局部重做失败：' + err.message);
+        confirmDialog('工具局部重做失败：' + err.message);
         setRetryActiveUuid(null);  // 关指示器,避免失败后一直转
         // 乐观截断已改了显示;失败则刷新回真实状态,避免停在半截视图。
         try { await fetchMessagesForTab(sel.sessionId, projectHash, { silent: true }); } catch {}
@@ -4780,7 +4782,7 @@ function RemoteControlButton({ session }) {
       if (!r.ok) throw new Error(d.error || r.status);
       useStore.getState().setRemoteControl(sid, !active);
     } catch (e) {
-      window.alert((active ? '收回远程控制失败：' : '开启远程控制失败：') + e.message);
+      confirmDialog((active ? '收回远程控制失败：' : '开启远程控制失败：') + e.message);
     }
     setBusy(false);
   };
@@ -4851,7 +4853,7 @@ function ProviderSwitcher() {
       const d = await r.json();
       if (!r.ok) throw new Error(d.error || '导入失败');
       load();
-    } catch (e) { alert(`导入失败: ${e.message}`); }
+    } catch (e) { confirmDialog(`导入失败: ${e.message}`); }
     finally { setImporting(false); }
   };
   const persistHiddenProviders = (set) => {
@@ -4928,7 +4930,7 @@ function ProviderSwitcher() {
       window.dispatchEvent(new CustomEvent('cgui:provider-change'));
       setOpen(false);
     } catch (e) {
-      window.alert('切换 provider 失败：' + e.message);
+      confirmDialog('切换 provider 失败：' + e.message);
     }
     setSwitching(false);
   };
@@ -5949,7 +5951,7 @@ function CustomProviderForm({ onSaved, editing, onCancel, onDirtyChange }) {
     setBusy('');
   };
   const fetchModels = async () => {
-    if (!baseURL.trim()) return window.alert('先填 Base URL');
+    if (!baseURL.trim()) return confirmDialog('先填 Base URL');
     setBusy('fetch');
     try {
       const r = await fetch('/api/custom-providers/fetch-models', {
@@ -5958,7 +5960,7 @@ function CustomProviderForm({ onSaved, editing, onCancel, onDirtyChange }) {
       });
       const d = await r.json();
       if (!r.ok) throw new Error(d.error || '拉取失败');
-      if (!d.models?.length) window.alert('该端点未返回模型,请直接在下方「模型」框手填模型 ID 再保存。');
+      if (!d.models?.length) confirmDialog('该端点未返回模型,请直接在下方「模型」框手填模型 ID 再保存。');
       else setModelsText(d.models.join('\n'));
     } catch (e) {
       // 文案按 type 区分:
@@ -5969,15 +5971,15 @@ function CustomProviderForm({ onSaved, editing, onCancel, onDirtyChange }) {
       const tail = type === 'openai'
         ? '\n\nOpenAI 兼容端点通常 /v1/models 可用。常见原因:\n• 上面 API Key 没填或填错\n• 端点路径有出入(部分网关需要 /v1 后缀)\n• 网络/防火墙拦截\n也可直接在下方「模型」框手填模型 ID(每行一个)再保存。'
         : '\n\n很多 Claude 协议中转(如 MiMo 等)不提供 /v1/models 接口,这很正常。直接在下方「模型」框手填模型 ID(每行一个)再保存即可。';
-      window.alert('拉取模型失败：' + e.message + tail);
+      confirmDialog('拉取模型失败：' + e.message + tail);
     }
     setBusy('');
   };
   const save = async () => {
-    if (!name.trim() || !baseURL.trim()) return window.alert('名称和 Base URL 必填');
+    if (!name.trim() || !baseURL.trim()) return confirmDialog('名称和 Base URL 必填');
     const parsedModels = parseModels();
     if (type === 'openai' && parsedModels.length === 0) {
-      return window.alert('OpenAI 兼容 Provider 至少需要一个模型 ID。可以先点「拉取模型」,或在「模型」框每行填一个。');
+      return confirmDialog('OpenAI 兼容 Provider 至少需要一个模型 ID。可以先点「拉取模型」,或在「模型」框每行填一个。');
     }
     // 提醒设默认模型:不设的话新会话/未指定模型的调用回退到列表第一个。多模型时才提醒。
     const hasDefault = defaultModel && parsedModels.includes(defaultModel);
@@ -6026,7 +6028,7 @@ function CustomProviderForm({ onSaved, editing, onCancel, onDirtyChange }) {
       window.dispatchEvent(new CustomEvent('cgui:provider-change'));
       reset();
       onSaved?.();
-    } catch (e) { window.alert('保存失败：' + e.message); }
+    } catch (e) { confirmDialog('保存失败：' + e.message); }
     setBusy('');
   };
   const inputCls = 'w-full bg-canvas-warm border border-canvas-deep rounded-lg px-3 py-2 text-[13px] text-ink focus:outline-none focus:border-accent';
@@ -6175,7 +6177,7 @@ function MobileProviderPage() {
       useStore.getState().fetchProvider?.();
       useStore.getState().fetchModel?.();
       window.dispatchEvent(new CustomEvent('cgui:provider-change'));
-    } catch (e) { window.alert('切换 provider 失败：' + e.message); }
+    } catch (e) { confirmDialog('切换 provider 失败：' + e.message); }
     setSwitching(false);
   };
   const removeCustom = async (id, name) => {

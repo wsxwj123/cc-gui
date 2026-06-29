@@ -126,7 +126,7 @@ export function FileExplorerPanel() {
       <div style={{ height: treeHeight }} className="shrink-0 overflow-y-auto px-1 py-2 border-b border-canvas-deep">
         <div className="flex items-center justify-between px-3 mb-2">
           <span className="text-[10px] text-ink-faint font-mono truncate" title={rootPath}>
-            {rootPath.split('/').slice(-2).join('/')}
+            {rootPath.split(/[/\\]+/).slice(-2).join('/')}
           </span>
           <button
             onClick={() => fetchDir(rootPath)}
@@ -136,7 +136,7 @@ export function FileExplorerPanel() {
         </div>
         <TreeNode
           path={rootPath}
-          name={rootPath.split('/').slice(-1)[0] || '/'}
+          name={rootPath.split(/[/\\]+/).slice(-1)[0] || '/'}
           depth={0}
           isDir
           isRoot
