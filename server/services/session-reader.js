@@ -75,7 +75,6 @@ function cwdFromHead(head) {
 
 const CLAUDE_DIR = join(homedir(), '.claude');
 const PROJECTS_DIR = join(CLAUDE_DIR, 'projects');
-const TRANSCRIPTS_DIR = join(CLAUDE_DIR, 'transcripts');
 const SESSIONS_DIR = join(CLAUDE_DIR, 'sessions');
 
 /**
@@ -216,18 +215,6 @@ function findFirstRealUser(head) {
   // conversation — keep it with a clean label instead of the verbose preamble.
   if (compactRecord) return { record: compactRecord, text: '（接续之前的对话）' };
   return null;
-}
-
-/**
- * Check if a first prompt is meaningful (not just "ok", "你好", "?" etc.)
- */
-function isMeaningfulPrompt(prompt) {
-  if (!prompt) return false;
-  const clean = prompt.replace(/<[^>]+>/g, '').trim(); // strip HTML-like tags
-  if (clean.length < 10) return false;
-  const trivial = ['ok', 'okay', 'hello', 'hi', '你好', '嗨', '?', '？', 'test', '测试',
-    'say ok', 'say hello', 'say hi', 'config', '/help', '/clear'];
-  return !trivial.includes(clean.toLowerCase());
 }
 
 /**
@@ -677,9 +664,8 @@ export async function getActiveSessions() {
           sessions.push(sessionData);
         }
       } catch {
-        // try reading as regular JSON
+        // try reading as regular JSON(readFile 已在文件顶部静态导入,无需动态 import)
         try {
-          const { readFile } = await import('fs/promises');
           const raw = await readFile(join(SESSIONS_DIR, file), 'utf-8');
           sessions.push(JSON.parse(raw));
         } catch {}

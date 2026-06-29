@@ -2,9 +2,11 @@ import { Router } from 'express';
 import { readdir, readFile } from 'fs/promises';
 import { join } from 'path';
 import { homedir } from 'os';
-import { execFileSync } from 'child_process';
+import { execFile } from 'child_process';
+import { promisify } from 'util';
 import { getActiveChatProcesses } from './chat.js';
 
+const execFileP = promisify(execFile);
 const router = Router();
 const SESSIONS_DIR = join(homedir(), '.claude', 'sessions');
 
@@ -33,13 +35,13 @@ function parseWmicCsv(output) {
   });
 }
 
-function getProcessInfo(pid) {
+async function getProcessInfo(pid) {
   const n = Number(pid);
   if (!Number.isInteger(n) || n <= 0) return null;
   if (process.platform === 'win32') {
     // Windows 无 ps。wmic 取 ppid/命令行/启动时间;cpu/mem 不便取→给 null 不崩。
     try {
-      const output = execFileSync('wmic', ['process', 'where', `ProcessId=${n}`, 'get', 'ProcessId,ParentProcessId,CommandLine,CreationDate', '/format:csv'], { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] });
+      const { stdout: output } = await execFileP('wmic', ['process', 'where', `ProcessId=${n}`, 'get', 'ProcessId,ParentProcessId,CommandLine,CreationDate', '/format:csv'], { encoding: 'utf-8' });
       const rows = parseWmicCsv(output);
       if (!rows.length) return null;
       const r = rows[0];
@@ -57,7 +59,7 @@ function getProcessInfo(pid) {
     }
   }
   try {
-    const output = execFileSync('ps', ['-p', String(n), '-o', 'pid,ppid,%cpu,%mem,etime,command'], { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] });
+    const { stdout: output } = await execFileP('ps', ['-p', String(n), '-o', 'pid,ppid,%cpu,%mem,etime,command'], { encoding: 'utf-8' });
     const lines = output.trim().split('\n');
     if (lines.length < 2) return null;
     const parts = lines[1].trim().split(/\s+/);
@@ -100,7 +102,7 @@ router.get('/processes', async (req, res) => {
         const session = JSON.parse(raw);
         const pid = session.pid;
         const alive = pid ? isProcessAlive(pid) : false;
-        const psInfo = alive ? getProcessInfo(pid) : null;
+        const psInfo = alive ? await getProcessInfo(pid) : null;
         const sid = session.sessionId || file.replace('.json', '');
         const chat = (sid && chatBySession[sid]) || chatByPid[String(pid)] || null;
 
@@ -128,7 +130,7 @@ router.get('/processes', async (req, res) => {
     if (process.platform === 'win32') {
       // Windows 无 ps。wmic 取全量进程的命令行,按命令行匹配 claude;cpu/mem 不便取→null。
       try {
-        const wmicOut = execFileSync('wmic', ['process', 'get', 'ProcessId,CommandLine,CreationDate', '/format:csv'], { encoding: 'utf-8', maxBuffer: 16 * 1024 * 1024, stdio: ['ignore', 'pipe', 'ignore'] });
+        const { stdout: wmicOut } = await execFileP('wmic', ['process', 'get', 'ProcessId,CommandLine,CreationDate', '/format:csv'], { encoding: 'utf-8', maxBuffer: 16 * 1024 * 1024 });
         claudeProcesses = parseWmicCsv(wmicOut)
           .filter((r) => r.CommandLine && /\bclaude\b/i.test(r.CommandLine) && !/claude-gui/i.test(r.CommandLine))
           .map((r) => ({
@@ -142,7 +144,7 @@ router.get('/processes', async (req, res) => {
       } catch {}
     } else {
       try {
-        const psOutput = execFileSync('ps', ['aux'], { encoding: 'utf-8', maxBuffer: 8 * 1024 * 1024 });
+        const { stdout: psOutput } = await execFileP('ps', ['aux'], { encoding: 'utf-8', maxBuffer: 8 * 1024 * 1024 });
         claudeProcesses = psOutput.trim().split('\n').filter((line) => {
           return /\bclaude\b/.test(line) && !/claude-gui/.test(line) && !/\bgrep\b/.test(line);
         }).map((line) => {

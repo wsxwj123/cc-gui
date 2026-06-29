@@ -20,7 +20,7 @@ import TurnScrubber from './components/TurnScrubber.jsx';
 import ChatSearch from './components/ChatSearch.jsx';
 import { confirmDialog } from './utils/confirmDialog.jsx';
 import { ChatInput, EffortSelector, PermissionModeSelector, AgentModeSelector, EFFORT_LEVELS, MODE_META } from './components/ChatInput.jsx';
-import { ModelBadge, ProviderAvatar } from './components/ModelBadge.jsx';
+import { ModelBadge } from './components/ModelBadge.jsx';
 import { UsagePanel } from './components/UsagePanel.jsx';
 import { ProcessPanel } from './components/ProcessPanel.jsx';
 import { SettingsPanel } from './components/SettingsPanel.jsx';
@@ -423,55 +423,6 @@ const PANEL_MAP = {
 // the in-file callsites below.
 const useResizable = useResizableHook;
 const Splitter = SplitterCmp;
-
-function _RESIZABLE_DEAD_({ initial, min, max, axis = 'x', storageKey, invert = false }) {
-  const [size, setSize] = useState(() => {
-    if (storageKey) {
-      try {
-        const v = parseFloat(localStorage.getItem(storageKey));
-        if (Number.isFinite(v)) return Math.max(min, Math.min(max, v));
-      } catch {}
-    }
-    return initial;
-  });
-  useEffect(() => {
-    if (!storageKey) return;
-    try { localStorage.setItem(storageKey, String(size)); } catch {}
-  }, [size, storageKey]);
-  const onMouseDown = useCallback((e) => {
-    e.preventDefault();
-    const startCoord = axis === 'x' ? e.clientX : e.clientY;
-    const startSize = size;
-    document.body.style.cursor = axis === 'x' ? 'col-resize' : 'row-resize';
-    document.body.style.userSelect = 'none';
-    const onMove = (ev) => {
-      const delta = (axis === 'x' ? ev.clientX : ev.clientY) - startCoord;
-      const next = Math.max(min, Math.min(max, startSize + (invert ? -delta : delta)));
-      setSize(next);
-    };
-    const onUp = () => {
-      document.removeEventListener('mousemove', onMove);
-      document.removeEventListener('mouseup', onUp);
-      document.body.style.cursor = '';
-      document.body.style.userSelect = '';
-    };
-    document.addEventListener('mousemove', onMove);
-    document.addEventListener('mouseup', onUp);
-  }, [size, axis, min, max, invert]);
-  return [size, onMouseDown];
-}
-
-// (dead — replaced by import from hooks/useResizable.js)
-function _SplitterDead({ onMouseDown, axis = 'x' }) {
-  const isVert = axis === 'x';
-  return (
-    <div
-      onMouseDown={onMouseDown}
-      className={`shrink-0 ${isVert ? 'w-1 cursor-col-resize hover:w-1.5' : 'h-1 cursor-row-resize hover:h-1.5'} bg-transparent hover:bg-accent/30 transition-all relative z-10`}
-      title={isVert ? '拖动调节宽度' : '拖动调节高度'}
-    />
-  );
-}
 
 // Three-column resizable layout. Sidebar | main | optional right panel.
 // Widths persist to localStorage. Main has a min-width floor to stop the
@@ -2284,7 +2235,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   const paneSessions = useStore((s) => s.paneSessions);
   const paneMessages = useStore((s) => s.paneMessages);
   const selectedSession = (paneSessions && paneSessions[tabIndex]) || null;
-  const messages = (paneMessages && paneMessages[tabIndex]) || [];
+  // 空窗格时 paneMessages[tabIndex] 为 undefined,`|| []` 每次渲染造新数组 → 进下方多个
+  // useMemo/useEffect deps 致每帧重跑。复用模块级冻结空数组保持引用稳定。
+  const messages = (paneMessages && paneMessages[tabIndex]) || EMPTY_ARRAY;
   // 本会话的队列/pin/owner key(草稿用 draft-<hash>)。必须在所有引用它的 effect 之前声明,
   // 否则 effect 依赖数组在渲染期先求值会命中 TDZ(Cannot access before initialization)。
   const sessionQueueKey = selectedSession?.sessionId || `draft-${selectedSession?.projectHash || 'none'}`;

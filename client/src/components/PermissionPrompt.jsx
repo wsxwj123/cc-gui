@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { AlertCircle, Loader2, ClipboardList } from 'lucide-react';
 import { useStore } from '../stores/sessionStore.js';
 import { MarkdownRenderer } from './MarkdownRenderer.jsx';
+import { confirmDialog } from '../utils/confirmDialog.jsx';
 
 // Color per tool family so the user's eye locks onto the risk class quickly.
 function toolBadgeClass(name) {
@@ -475,15 +476,20 @@ export function PermissionPrompt({ sessionId = null, onExecutePlan = null, hydra
   const resolve = async (req, decision, reason, updatedInput) => {
     setBusyId(req.id);
     try {
-      await fetch(`/api/permissions/respond/${req.id}`, {
+      const res = await fetch(`/api/permissions/respond/${req.id}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         // updatedInput:SDK canUseTool 用 —— AskUserQuestion 的 {questions, answers}
         // 或被用户改过的工具入参。仅在提供时附带,保持旧 deny 路径不变。
         body: JSON.stringify({ decision, reason, ...(updatedInput !== undefined ? { updatedInput } : {}) }),
       });
-    } catch {}
-    removePendingPermission(req.id);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      // 只有确实送达后才撤卡片。原来无论成败都 remove → 网络失败时 CLI 端永久挂起等响应、
+      // 而 GUI 已把卡撤掉无法重试 → 会话卡死。失败保留卡片并提示重试。
+      removePendingPermission(req.id);
+    } catch (e) {
+      confirmDialog('提交授权响应失败,请重试:' + (e?.message || e));
+    }
     setBusyId(null);
   };
 

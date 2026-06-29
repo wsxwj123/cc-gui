@@ -100,6 +100,14 @@ function AgentBucket({ title, titleColor, defaultOpen, agents }) {
 // Single agent card — click to expand and see thinking / tool calls / final result.
 function AgentCard({ agent }) {
   const [expanded, setExpanded] = useState(false);
+  // 1s tick 让"已运行时长"跳动。原来 fmtElapsed(Date.now()-startedAt) 只在渲染时算一次,
+  // 无驱动 → 时长冻结在挂载时刻(与 BgTaskCard 的 tick 对齐)。卡片在 agent 结束时卸载,
+  // 故无需按 phase 门控。
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, []);
   const setViewingAgent = useStore((s) => s.setViewingAgent);
   // 兜底:很多 provider 不往父流发 parent_tool_use_id 子代理事件,activeAgents 里
   // 拿不到 model/具体 agentType。从 server 提取的 sessions.subagents(按 toolUseId
@@ -150,7 +158,7 @@ function AgentCard({ agent }) {
           <div className="text-[10.5px] text-ink-muted font-body truncate pl-5">{agent.description}</div>
         )}
         <div className="flex items-center gap-3 mt-1.5 pl-5 text-[10px] text-ink-faint font-mono">
-          {agent.startedAt && <span className="flex items-center gap-1"><Clock size={9} />{fmtElapsed(Date.now() - agent.startedAt)}</span>}
+          {agent.startedAt && <span className="flex items-center gap-1"><Clock size={9} />{fmtElapsed(now - agent.startedAt)}</span>}
           {tools.length > 0 && <span>{tools.length} 工具</span>}
         </div>
       </button>
@@ -345,23 +353,28 @@ export function AgentMonitorPanel() {
   const bgTasks = useStore((s) => s.bgTasks);
   const paneSessions = useStore((s) => s.paneSessions);
 
+  const mountedRef = useRef(true);
   const fetchActive = async (silent = false) => {
     if (!silent) setLoading(true);
     try {
       const r = await fetch('/api/agents/active');
       const data = await r.json();
+      // 卸载守卫:1.5s 轮询的在途请求可能在组件卸载后才 resolve → 原来无条件 setRemote
+      // 会对已卸载组件 setState(React 告警 + 可能用旧数据覆盖)。卸载后直接丢弃结果。
+      if (!mountedRef.current) return;
       setRemote({
         agents: Array.isArray(data.agents) ? data.agents : [],
         sources: data.sources || { chatProcesses: 0, cliSessions: 0 },
       });
     } catch {}
-    if (!silent) setLoading(false);
+    if (!silent && mountedRef.current) setLoading(false);
   };
 
   useEffect(() => {
+    mountedRef.current = true;
     fetchActive();
     const id = setInterval(() => fetchActive(true), 1500);
-    return () => clearInterval(id);
+    return () => { mountedRef.current = false; clearInterval(id); };
   }, []);
 
   // Stop a child process. Two endpoints exist:

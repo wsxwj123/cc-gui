@@ -480,7 +480,9 @@ export function ChatInput({ onSend, onStop, onAccelerate, disabled, isStreaming,
   useEffect(() => {
     setShowCommands(filteredCommands.length > 0 && text.startsWith('/') && text.length > 0);
     setSelectedIndex(0);
-  }, [text]);
+    // 含 filteredCommands.length:commands 异步拉取完成时 text 未变,只靠 [text] 不会重跑 →
+    // 已输入 / 的情况下列表永远空。count 由 commands/isAnthropic 派生,变化即触发更新。
+  }, [text, filteredCommands.length]);
 
   const handleSend = () => {
     const trimmed = text.trim();

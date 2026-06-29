@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { spawn, execFileSync } from 'child_process';
-import { resolve as pathResolve, dirname, join as pathJoin, isAbsolute, parse as pathParse } from 'node:path';
+import { dirname, join as pathJoin, isAbsolute, parse as pathParse } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readFileSync, statSync, writeFileSync, unlinkSync, readdirSync, watch, existsSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
@@ -19,10 +19,8 @@ function maybeBroadcastTurnComplete(slot, line) {
   try { obj = JSON.parse(line); } catch { return; }
   if (obj.type !== 'result') return;
   slot.completeNotified = true;
-  // W3②:stream-json 输入模式下 CLI 等 stdin 关闭才退出 —— 回合 result 一到就
-  // 关闭 stdin,进程随即正常退出(实测 EXIT 0)。三条 stdout 路径都汇到这里,
-  // 不会漏;万一漏了还有进程面板手动停止 + 应用退出杀树兜底。
-  try { slot.proc?.stdin?.end(); } catch {}
+  // SDK 引擎自管子进程,slot.proc 恒为 null —— 真正关 stdin 由消息泵的 input.close() 完成。
+  // (旧裸 spawn 模型遗留的 slot.proc.stdin.end() 已删,它在 SDK 路径恒为 no-op。)
   const text = typeof obj.result === 'string' ? obj.result : '';
   const cwd = String(slot.cwd || '');
   try {
@@ -467,11 +465,15 @@ router.post('/chat', async (req, res) => {
   const claudePath = resolveUserClaude();
   if (claudePath) options.pathToClaudeCodeExecutable = claudePath;
 
-  console.log('[chat] sdk', JSON.stringify({
-    procId, cwd: workingDir, sessionId: sessionId || null, model,
-    permissionMode: chosenMode, claudePath: claudePath || '(bundled)',
-    promptPreview: String(prompt).slice(0, 60),
-  }));
+  // 每条消息都打完整结构体(含 cwd/提示词片段)——默认噪声且日志转发时算轻微信息泄漏。
+  // 仅 DEBUG 下打印。
+  if (process.env.DEBUG || process.env.CGUI_DEBUG) {
+    console.log('[chat] sdk', JSON.stringify({
+      procId, cwd: workingDir, sessionId: sessionId || null, model,
+      permissionMode: chosenMode, claudePath: claudePath || '(bundled)',
+      promptPreview: String(prompt).slice(0, 60),
+    }));
+  }
 
   let q;
   try {
