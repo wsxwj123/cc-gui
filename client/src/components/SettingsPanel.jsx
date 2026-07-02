@@ -874,7 +874,21 @@ function FullDiskAccessCard() {
   );
 }
 
-// 环境变量行内编辑:每项可改值/删除,底部可新增。改完(失焦/回车/删除/新增)即把
+// 取值可枚举的已知变量 → 下拉选项(当前值不在列表时并入,防止自定义值被吞)。
+// 布尔类 CLI 惯例 0/1;ENABLE_TOOL_SEARCH 官方用 true/false;effort 档位与 ChatInput
+// 的 EFFORT_LEVELS 对齐。不在表里的(如 ANTHROPIC_MODEL 自由模型 id)仍是文本框。
+const ENV_VALUE_OPTIONS = {
+  CLAUDE_CODE_EFFORT_LEVEL: ['low', 'medium', 'high', 'xhigh', 'max'],
+  CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: ['1', '0'],
+  DISABLE_AUTOUPDATER: ['1', '0'],
+  DISABLE_TELEMETRY: ['1', '0'],
+  DISABLE_ERROR_REPORTING: ['1', '0'],
+  DISABLE_NON_ESSENTIAL_MODEL_CALLS: ['1', '0'],
+  CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: ['1', '0'],
+  ENABLE_TOOL_SEARCH: ['true', 'false'],
+};
+
+// 环境变量行内编辑:每项可改值/删除,底部可新增。改完(失焦/回车/选下拉/删除/新增)即把
 // 整个 env 对象 PUT 回 settings.json(浅合并整体替换 env,删除项自然消失)。父组件
 // 保存后回传新 settings → env 身份变化 → 重置草稿。敏感值默认密文,点眼睛看明文再改。
 function EnvEditor({ env, onSave, saving }) {
@@ -909,6 +923,18 @@ function EnvEditor({ env, onSave, saving }) {
         {Object.keys(draft).map((k) => (
           <div key={k} className="px-3 py-2 flex items-center gap-2">
             <span className="text-[11px] font-mono text-ink-soft shrink-0 max-w-[42%] break-all">{k}</span>
+            {ENV_VALUE_OPTIONS[k] ? (
+              <select
+                value={draft[k] ?? ''}
+                onChange={(e) => { const v = e.target.value; setDraft((d) => ({ ...d, [k]: v })); commit({ ...env, [k]: v }); }}
+                disabled={saving}
+                className="flex-1 min-w-0 text-[11px] font-mono bg-canvas-warm border border-canvas-deep rounded px-2 py-1 text-ink focus:border-accent outline-none">
+                {/* 当前值不在预设列表时并入,避免自定义值被吞 */}
+                {(ENV_VALUE_OPTIONS[k].includes(draft[k]) ? ENV_VALUE_OPTIONS[k] : [draft[k], ...ENV_VALUE_OPTIONS[k]]).map((opt) => (
+                  <option key={opt} value={opt}>{opt}</option>
+                ))}
+              </select>
+            ) : (
             <input
               type={isSecret(k) && !revealed[k] ? 'password' : 'text'}
               value={draft[k] ?? ''}
@@ -917,6 +943,7 @@ function EnvEditor({ env, onSave, saving }) {
               onKeyDown={(e) => { if (e.key === 'Enter') e.currentTarget.blur(); }}
               disabled={saving}
               className="flex-1 min-w-0 text-[11px] font-mono bg-canvas-warm border border-canvas-deep rounded px-2 py-1 text-ink focus:border-accent outline-none" />
+            )}
             {isSecret(k) && (
               <button onClick={() => setRevealed((r) => ({ ...r, [k]: !r[k] }))}
                 className="text-ink-faint hover:text-ink shrink-0" title={revealed[k] ? '隐藏' : '显示'}>
