@@ -126,7 +126,7 @@ export function MermaidView({ code }) {
 export function PreviewBody({ language, mode, code, debounced, fullscreen, iframeKey }) {
   if (mode === 'code') {
     return (
-      <pre className={`bg-[#211e19] p-4 overflow-auto text-[13px] leading-relaxed font-mono text-[#e8e2d6] ${fullscreen ? 'h-full' : 'max-h-96'}`}>
+      <pre className={`cgui-dark-select bg-[#211e19] p-4 overflow-auto text-[13px] leading-relaxed font-mono text-[#e8e2d6] ${fullscreen ? 'h-full' : 'max-h-96'}`}>
         <code>{code}</code>
       </pre>
     );

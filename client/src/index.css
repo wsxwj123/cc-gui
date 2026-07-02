@@ -1036,6 +1036,24 @@ html { --content-max: clamp(768px, calc(var(--app-w, 100vw) * 0.7), 1120px); }
 @media (prefers-color-scheme: dark) {
   ::selection { background: var(--color-accent-muted); color: var(--color-ink); }
 }
+/* 深色代码/终端块背景恒为深色(#211e19 / #1e1e1e 等,不随主题翻转)。全局 ::selection 的
+   文字色在浅色模式下是深色 → 选中时深字撞深底看不清。对这类块强制高对比:半透明白高亮 +
+   白字,两个模式都清晰。.markdown-content pre 是聊天代码块;.cgui-dark-select 供其它深底
+   块(Artifact 代码预览、Bash 输出等)复用加类即可。*/
+.markdown-content pre::selection,
+.markdown-content pre *::selection,
+.cgui-dark-select::selection,
+.cgui-dark-select *::selection {
+  background: rgba(255, 255, 255, 0.30);
+  color: #ffffff;
+}
+.markdown-content pre::-moz-selection,
+.markdown-content pre *::-moz-selection,
+.cgui-dark-select::-moz-selection,
+.cgui-dark-select *::-moz-selection {
+  background: rgba(255, 255, 255, 0.30);
+  color: #ffffff;
+}
 
 /* ── Focus rings ────────────────────────────────────────────── */
 :focus-visible {
