@@ -91,9 +91,15 @@ router.post('/pick-directory', async (req, res) => {
     const escAS = (s) => s.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/[\r\n]+/g, ' ');
     const safeStart = escAS(startDirRaw);
     const safePrompt = escAS(promptText);
+    // CP-1 的 mac 对称修复:对话框由独立 osascript 进程弹出,它不是前台 app → 框开在
+    // GUI 窗口后面(用户报"GUI 挡住导入窗口",实为框沉底,GUI 窗口 layer 实测=0 并非置顶)。
+    // 先 `tell me to activate` 把 osascript 自己提为前台,choose folder 即出现在最上层。
     const { stdout } = await execFileP(
       'osascript',
-      ['-e', `POSIX path of (choose folder with prompt "${safePrompt}" default location POSIX file "${safeStart}")`],
+      [
+        '-e', 'tell me to activate',
+        '-e', `POSIX path of (choose folder with prompt "${safePrompt}" default location POSIX file "${safeStart}")`,
+      ],
       { timeout: 120000 },
     );
     let dir = stdout.trim();
