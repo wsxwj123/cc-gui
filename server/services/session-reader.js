@@ -454,7 +454,20 @@ function reconstructCommandPrompt(text, { bareToName = false } = {}) {
  */
 export async function getSessionMessages(sessionId, projectHash) {
   const filePath = join(PROJECTS_DIR, projectHash, `${sessionId}.jsonl`);
-  const records = await parseJsonl(filePath);
+  const rawRecords = await parseJsonl(filePath);
+  // CJ-1:CLI 在某些 resume/排队场景会把一段历史记录【原样重放】追加进同一 jsonl
+  // (实测用户会话:1157/1848 条记录与前文 uuid 完全相同,内容逐字节一致,重放段
+  // 从旧 compact_boundary 开始)。线性解析不去重 → 同一段 AI 回复连同其工具调用组
+  // 渲染两遍(用户截图实报)。按记录 uuid 去重、保留首次出现;无 uuid 的记录
+  // (queue-operation 等)不参与去重。
+  const seenRecordUuids = new Set();
+  const records = rawRecords.filter((r) => {
+    const u = r?.uuid;
+    if (!u) return true;
+    if (seenRecordUuids.has(u)) return false;
+    seenRecordUuids.add(u);
+    return true;
+  });
   // L4: 加载附件 sidecar,在 user 消息 push 时按 textHash 注入 attachments/displayText
   const attachmentsByHash = await readAttachmentsSidecar(sessionId);
 
@@ -477,6 +490,8 @@ export async function getSessionMessages(sessionId, projectHash) {
 
   const messages = [];
   let currentTurn = null;
+  // CI-6:是否已渲染过真实用户消息。用于放开"开场 bare 斜杠命令"的重建(见下)。
+  let sawRealUser = false;
 
   function flushTurn() {
     if (currentTurn && (currentTurn.text.length > 0 || currentTurn.thinking.length > 0 || currentTurn.toolCalls.length > 0)) {
@@ -525,11 +540,18 @@ export async function getSessionMessages(sessionId, projectHash) {
         const textParts = content.filter((c) => c.type === 'text');
         const text = textParts.map((c) => c.text).join('\n').trim();
 
-        const cmdPrompt = reconstructCommandPrompt(text);
+        // CI-6:开场 bare 斜杠命令(首条只发 `/skillname`,无 args)也要渲染成用户气泡。
+        // 渲染路径此前恒 bareToName=false → 无 args 命令重建为 null → 整条被
+        // isLocalCommandEcho 吞掉 → 刷新后首条 /xxx 消失、且"重做"因找不到对应用户
+        // 消息而报错(用户实报)。只对"会话尚未出现任何真实用户消息"的开场记录放开
+        // bareToName(与列表路径 findFirstRealUser 的口径一致),会话中途的 /clear
+        // /compact 等控制命令保持隐藏,不回归"斜杠命令多出隐藏消息"旧 bug。
+        const cmdPrompt = reconstructCommandPrompt(text, { bareToName: !sawRealUser });
         const shownText = cmdPrompt || text;
         if (shownText && (cmdPrompt || !isLocalCommandEcho(text))) {
           // This is a real user prompt — flush previous turn and start new user message
           flushTurn();
+          sawRealUser = true;
           const meta = attachmentsByHash[attachmentTextHash(text)];
           messages.push({
             type: 'user',

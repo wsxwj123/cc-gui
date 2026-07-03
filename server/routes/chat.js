@@ -669,7 +669,26 @@ router.post('/chat/title', async (req, res) => {
   const model = String(req.body?.model || '').replace(/\[1m\]/i, '').trim();
   if (!firstUser) return res.json({ title: '' });
 
-  const prompt = `给下面这段对话起一个不超过 12 个字的简短中文标题,只输出标题本身,不要引号、不要标点结尾、不要解释。\n\n用户: ${firstUser}\n${firstAssistant ? `助手: ${firstAssistant}\n` : ''}`;
+  // CI-6:斜杠命令开场的标题。首条是 `/xxx`(或 jsonl 里的 <command-name> 包裹形态)时,
+  // 直接把它喂给模型会得到"没有看到需要起标题的对话内容,请把对话粘贴过来"这类反问
+  // (用户实报)。剥掉包裹取实义(命令的 args 才是用户真实诉求);剥完为空(纯命令无
+  // 参数)则直接用命令本身当标题,不调模型。
+  let titleSource = firstUser;
+  const cmdNameM = firstUser.match(/<command-name>\s*([^<]*?)\s*<\/command-name>/);
+  if (cmdNameM) {
+    const cmdArgsM = firstUser.match(/<command-args>\s*([\s\S]*?)\s*<\/command-args>/);
+    const cmdArgs = cmdArgsM ? cmdArgsM[1].trim() : '';
+    if (!cmdArgs) return res.json({ title: cmdNameM[1].trim().slice(0, 24) });
+    titleSource = cmdArgs;
+  } else if (/^\/\S/.test(firstUser)) {
+    // GUI 直发的纯斜杠形态:`/name` 或 `/name args`
+    const slashM = firstUser.match(/^(\/\S+)\s*([\s\S]*)$/);
+    const cmdArgs = (slashM?.[2] || '').trim();
+    if (!cmdArgs) return res.json({ title: firstUser.slice(0, 24) });
+    titleSource = cmdArgs;
+  }
+
+  const prompt = `给下面这段对话起一个不超过 12 个字的简短中文标题,只输出标题本身,不要引号、不要标点结尾、不要解释。\n\n用户: ${titleSource}\n${firstAssistant ? `助手: ${firstAssistant}\n` : ''}`;
 
   const childEnv = { ...process.env };
   delete childEnv.ANTHROPIC_MODEL;
