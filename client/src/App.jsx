@@ -348,8 +348,39 @@ function ThemeToggle() {
               })}
             </div>
           </div>
+
+          {/* ── Loading 动画样式(仅弹窗打开时渲染,30 个动画不常驻) ── */}
+          <LoadingStylePicker />
         </div>
       )}
+    </div>
+  );
+}
+
+// 加载动画选择网格:每格实时跑对应动画,点击即选(存 store.loadingStyle)。
+// 独立组件而非内联,避免主题弹窗其它交互(选色)时重渲整片动画网格。
+function LoadingStylePicker() {
+  const loadingStyle = useStore((s) => s.loadingStyle) || 'cli';
+  const setLoadingStyle = useStore((s) => s.setLoadingStyle);
+  return (
+    <div className="space-y-1.5">
+      <div className="flex items-center gap-2">
+        <Loader2 size={12} className="text-ink-muted" />
+        <span className="text-[11px] text-ink font-body font-medium">加载动画</span>
+        <span className="ml-auto text-[9px] text-ink-faint font-body">AI 思考时的指示样式</span>
+      </div>
+      <div className="grid grid-cols-4 gap-1.5 max-h-[220px] overflow-y-auto pr-0.5">
+        {LOADING_OPTIONS.map((opt) => {
+          const active = loadingStyle === opt.id;
+          return (
+            <button key={opt.id} onClick={() => setLoadingStyle(opt.id)} title={opt.label}
+              className={`flex flex-col items-center gap-1 px-1 py-2 rounded-lg border transition-all hover:bg-canvas-warm ${active ? 'border-accent ring-1 ring-accent/40 bg-accent/8' : 'border-canvas-deep'}`}>
+              <span className="h-6 flex items-center justify-center"><LoadingMark size={20} variant={opt.id} /></span>
+              <span className="text-[8.5px] text-ink-faint font-body leading-none truncate max-w-full">{opt.label}</span>
+            </button>
+          );
+        })}
+      </div>
     </div>
   );
 }
@@ -1866,6 +1897,40 @@ function CliSpinner({ size = 20 }) {
     </span>
   );
 }
+
+// Loading 动画样式库(选项 id 对应 index.css 的 .loading-<id>,移植自 clawd-station)。
+// 'cli' = 原 ASCII spinner,保持默认外观不变。主题弹窗里选,存 store.loadingStyle。
+export const LOADING_OPTIONS = [
+  { id: 'cli', label: 'CLI(默认)' },
+  { id: 'ring', label: 'Ring' }, { id: 'ring-dual', label: 'Dual Ring' },
+  { id: 'ring-dash', label: 'Dash Ring' }, { id: 'ring-thin', label: 'Thin Ring' },
+  { id: 'ring-bold', label: 'Bold Ring' }, { id: 'ring-reverse', label: 'Reverse' },
+  { id: 'orbit', label: 'Orbit' }, { id: 'orbit-double', label: 'Double Orbit' },
+  { id: 'orbit-slow', label: 'Slow Orbit' }, { id: 'orbit-fast', label: 'Fast Orbit' },
+  { id: 'pulse', label: 'Pulse' }, { id: 'pulse-soft', label: 'Soft Pulse' },
+  { id: 'pulse-ring', label: 'Pulse Ring' }, { id: 'dots', label: 'Dots' },
+  { id: 'dots-wave', label: 'Dot Wave' }, { id: 'dots-chase', label: 'Dot Chase' },
+  { id: 'bars', label: 'Bars' }, { id: 'bars-wave', label: 'Bar Wave' },
+  { id: 'bars-rise', label: 'Bar Rise' }, { id: 'square', label: 'Square' },
+  { id: 'square-flip', label: 'Flip' }, { id: 'diamond', label: 'Diamond' },
+  { id: 'typing', label: 'Typing' }, { id: 'scan', label: 'Scan' },
+  { id: 'radar', label: 'Radar' }, { id: 'breath', label: 'Breath' },
+  { id: 'spark', label: 'Spark' }, { id: 'flower', label: 'Flower' },
+  { id: 'clock', label: 'Clock' }, { id: 'pinwheel', label: 'Pinwheel' },
+];
+
+// 统一加载指示:按用户选的样式渲染;variant 传入时强制该样式(预览网格用)。
+function LoadingMark({ size = 20, variant = null }) {
+  const chosen = useStore((s) => s.loadingStyle) || 'cli';
+  const style = variant || chosen;
+  if (style === 'cli') return <CliSpinner size={size} />;
+  return (
+    <span
+      className={`loading-mark loading-${style}`}
+      style={{ width: size, height: size }}
+    ><span /></span>
+  );
+}
 function useCyclingVerb() {
   const [i, setI] = useState(() => Math.floor(Math.random() * THINKING_VERBS.length));
   useEffect(() => {
@@ -1916,7 +1981,7 @@ function StreamingStatusLine({ thinking, text, toolCalls, streamStart }) {
   return (
     <div className="px-6 pt-3 pb-1 animate-fade-in">
       <div className="max-w-[var(--content-max)] mx-auto flex items-center gap-2.5 text-[14px] text-ink-soft font-body">
-        <CliSpinner size={22} />
+        <LoadingMark size={22} />
         <span className="font-mono truncate font-medium" style={{ color: '#D97757' }}>{label}</span>
         <span style={{ color: '#D97757' }}>…</span>
         <ElapsedTime startedAt={streamStart} className="ml-1" />
@@ -4641,7 +4706,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                 <div className="px-6 py-3 animate-fade-in">
                   <div className="max-w-[var(--content-max)] mx-auto">
                     <div className="flex items-center gap-2.5 text-[14px] font-body" style={{ color: '#D97757' }}>
-                      <CliSpinner size={22} />
+                      <LoadingMark size={22} />
                       <span className="font-mono font-medium">{compacting ? 'Compacting' : 'Connecting'}</span>
                       <span>…</span>
                       <ElapsedTime startedAt={streamStartRef.current} className="ml-1" />

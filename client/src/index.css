@@ -1375,3 +1375,415 @@ html { --content-max: clamp(768px, calc(var(--app-w, 100vw) * 0.7), 1120px); }
   background-color: var(--color-accent, #D97757);
   color: #fff;
 }
+
+/* ── Loading 动画样式库(移植自 clawd-station,MIT;颜色换用本项目 accent 变量) ──
+   用法:<span class="loading-mark loading-<id>"><span/></span>;选中样式存 store.loadingStyle */
+.loading-mark {
+  position: relative;
+  display: inline-grid;
+  width: 1.45rem;
+  height: 1.45rem;
+  place-items: center;
+  color: var(--color-accent);
+}
+
+.loading-mark::before,
+.loading-mark::after {
+  position: absolute;
+  content: "";
+}
+
+.loading-ring,
+.loading-ring-dual,
+.loading-ring-dash,
+.loading-ring-thin,
+.loading-ring-bold,
+.loading-ring-reverse {
+  border: 2px solid var(--color-accent-muted);
+  border-top-color: var(--color-accent);
+  border-radius: 999px;
+  animation: cgui-spin 860ms linear infinite;
+}
+
+.loading-ring span,
+.loading-ring-dual span,
+.loading-ring-dash span,
+.loading-ring-thin span,
+.loading-ring-bold span,
+.loading-ring-reverse span {
+  display: none;
+}
+
+.loading-ring-dual::after {
+  inset: 0.28rem;
+  border: 1.5px solid color-mix(in srgb, var(--color-accent) 18%, transparent);
+  border-bottom-color: var(--color-accent);
+  border-radius: 999px;
+  animation: cgui-spin 620ms linear infinite reverse;
+}
+
+.loading-ring-dash {
+  border-style: dashed;
+}
+
+.loading-ring-thin {
+  border-width: 1px;
+  animation-duration: 1200ms;
+}
+
+.loading-ring-bold {
+  border-width: 3px;
+  animation-duration: 720ms;
+}
+
+.loading-ring-reverse {
+  animation-direction: reverse;
+}
+
+.loading-orbit,
+.loading-orbit-double,
+.loading-orbit-slow,
+.loading-orbit-fast,
+.loading-clock,
+.loading-pinwheel {
+  border: 1px solid color-mix(in srgb, var(--color-accent) 24%, transparent);
+  border-radius: 999px;
+  animation: cgui-spin 980ms linear infinite;
+}
+
+.loading-orbit span,
+.loading-orbit-double span,
+.loading-orbit-slow span,
+.loading-orbit-fast span,
+.loading-clock span,
+.loading-pinwheel span {
+  width: 0.38rem;
+  height: 0.38rem;
+  margin-top: -0.95rem;
+  background: var(--color-accent);
+  border-radius: 999px;
+  box-shadow: 0 0 0 0.18rem color-mix(in srgb, var(--color-accent) 18%, transparent);
+}
+
+.loading-orbit-double::after {
+  width: 0.32rem;
+  height: 0.32rem;
+  margin-bottom: -0.95rem;
+  background: var(--color-accent);
+  border-radius: 999px;
+}
+
+.loading-orbit-slow {
+  animation-duration: 1450ms;
+}
+
+.loading-orbit-fast {
+  animation-duration: 560ms;
+}
+
+.loading-clock span {
+  width: 0.16rem;
+  height: 0.66rem;
+  margin-top: 0;
+  transform-origin: 50% 100%;
+  border-radius: 999px;
+  box-shadow: none;
+}
+
+.loading-pinwheel {
+  border: 0;
+}
+
+.loading-pinwheel::before,
+.loading-pinwheel::after {
+  width: 0.36rem;
+  height: 1.2rem;
+  background: color-mix(in srgb, var(--color-accent) 72%, transparent);
+  border-radius: 999px;
+}
+
+.loading-pinwheel::after {
+  transform: rotate(90deg);
+}
+
+.loading-pulse span,
+.loading-pulse-soft span,
+.loading-breath span {
+  width: 0.86rem;
+  height: 0.86rem;
+  background: var(--color-accent);
+  border-radius: 999px;
+  animation: loading-pulse 900ms var(--ease-out) infinite;
+}
+
+.loading-pulse-soft span {
+  opacity: 0.64;
+  animation-duration: 1250ms;
+}
+
+.loading-pulse-ring {
+  border: 2px solid var(--color-accent);
+  border-radius: 999px;
+  animation: loading-pulse 1000ms var(--ease-out) infinite;
+}
+
+.loading-pulse-ring span {
+  display: none;
+}
+
+.loading-breath span {
+  border-radius: 0.38rem;
+  animation-duration: 1400ms;
+}
+
+.loading-dots,
+.loading-dots-wave,
+.loading-dots-chase,
+.loading-typing {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.17rem;
+}
+
+.loading-dots span,
+.loading-dots::before,
+.loading-dots::after,
+.loading-dots-wave span,
+.loading-dots-wave::before,
+.loading-dots-wave::after,
+.loading-dots-chase span,
+.loading-dots-chase::before,
+.loading-dots-chase::after,
+.loading-typing span,
+.loading-typing::before,
+.loading-typing::after {
+  position: static;
+  width: 0.28rem;
+  height: 0.28rem;
+  background: var(--color-accent);
+  border-radius: 999px;
+  animation: loading-pulse 820ms var(--ease-out) infinite;
+}
+
+.loading-dots::before,
+.loading-dots-wave::before,
+.loading-dots-chase::before,
+.loading-typing::before {
+  animation-delay: -160ms;
+}
+
+.loading-dots::after,
+.loading-dots-wave::after,
+.loading-dots-chase::after,
+.loading-typing::after {
+  animation-delay: 160ms;
+}
+
+.loading-dots-wave span {
+  animation-name: loading-rise;
+}
+
+.loading-dots-wave::before,
+.loading-dots-wave::after {
+  animation-name: loading-rise;
+}
+
+.loading-dots-chase {
+  animation: cgui-spin 900ms linear infinite;
+}
+
+.loading-typing span,
+.loading-typing::before,
+.loading-typing::after {
+  width: 0.24rem;
+  height: 0.24rem;
+}
+
+.loading-bars,
+.loading-bars-wave,
+.loading-bars-rise {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.16rem;
+}
+
+.loading-bars span,
+.loading-bars::before,
+.loading-bars::after,
+.loading-bars-wave span,
+.loading-bars-wave::before,
+.loading-bars-wave::after,
+.loading-bars-rise span,
+.loading-bars-rise::before,
+.loading-bars-rise::after {
+  position: static;
+  width: 0.22rem;
+  height: 0.9rem;
+  background: var(--color-accent);
+  border-radius: 999px;
+  animation: loading-stretch 780ms var(--ease-out) infinite;
+}
+
+.loading-bars::before,
+.loading-bars-wave::before,
+.loading-bars-rise::before {
+  animation-delay: -160ms;
+}
+
+.loading-bars::after,
+.loading-bars-wave::after,
+.loading-bars-rise::after {
+  animation-delay: 160ms;
+}
+
+.loading-bars-wave span,
+.loading-bars-wave::before,
+.loading-bars-wave::after {
+  animation-name: loading-rise;
+}
+
+.loading-bars-rise span,
+.loading-bars-rise::before,
+.loading-bars-rise::after {
+  height: 0.62rem;
+}
+
+.loading-square span,
+.loading-square-flip span,
+.loading-diamond span,
+.loading-spark span,
+.loading-flower span {
+  width: 0.86rem;
+  height: 0.86rem;
+  background: var(--color-accent);
+  border-radius: 0.22rem;
+  animation: loading-flip 900ms var(--ease-out) infinite;
+}
+
+.loading-square span {
+  animation: cgui-spin 1100ms linear infinite;
+}
+
+.loading-diamond span {
+  transform: rotate(45deg);
+  animation: loading-diamond 980ms var(--ease-out) infinite;
+}
+
+.loading-spark span,
+.loading-flower span {
+  width: 1.1rem;
+  height: 1.1rem;
+  background: conic-gradient(from 0deg, var(--color-accent), color-mix(in srgb, var(--color-accent) 12%, transparent), var(--color-accent));
+  clip-path: polygon(50% 0, 58% 34%, 100% 50%, 58% 66%, 50% 100%, 42% 66%, 0 50%, 42% 34%);
+  animation: cgui-spin 950ms linear infinite;
+}
+
+.loading-flower span {
+  border-radius: 999px;
+  clip-path: polygon(50% 0, 64% 26%, 94% 20%, 78% 50%, 94% 80%, 64% 74%, 50% 100%, 36% 74%, 6% 80%, 22% 50%, 6% 20%, 36% 26%);
+  animation-duration: 1280ms;
+}
+
+.loading-scan span,
+.loading-radar span {
+  display: none;
+}
+
+.loading-scan {
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--color-accent) 28%, transparent);
+  border-radius: 0.35rem;
+}
+
+.loading-scan::before {
+  inset: 0.2rem 0;
+  height: 0.16rem;
+  margin: auto 0;
+  background: var(--color-accent);
+  border-radius: 999px;
+  animation: loading-scan 900ms var(--ease-out) infinite;
+}
+
+@keyframes cgui-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes loading-pulse {
+  0%,
+  100% {
+    opacity: 0.52;
+    transform: scale(0.68);
+  }
+
+  50% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes loading-rise {
+  0%,
+  100% {
+    transform: translateY(0.18rem) scale(0.72);
+  }
+
+  50% {
+    transform: translateY(-0.18rem) scale(1);
+  }
+}
+
+@keyframes loading-stretch {
+  0%,
+  100% {
+    transform: scaleY(0.48);
+  }
+
+  50% {
+    transform: scaleY(1);
+  }
+}
+
+@keyframes loading-flip {
+  0% {
+    transform: perspective(5rem) rotateX(0) rotateY(0);
+  }
+
+  50% {
+    transform: perspective(5rem) rotateX(180deg) rotateY(0);
+  }
+
+  100% {
+    transform: perspective(5rem) rotateX(180deg) rotateY(180deg);
+  }
+}
+
+@keyframes loading-diamond {
+  0%,
+  100% {
+    transform: rotate(45deg) scale(0.72);
+  }
+
+  50% {
+    transform: rotate(225deg) scale(1);
+  }
+}
+
+@keyframes loading-scan {
+  0%,
+  100% {
+    transform: translateY(-0.46rem);
+  }
+
+  50% {
+    transform: translateY(0.46rem);
+  }
+}
+
+
+@media (prefers-reduced-motion: reduce) {
+  .loading-mark, .loading-mark::before, .loading-mark::after, .loading-mark span { animation-duration: 4s !important; }
+}

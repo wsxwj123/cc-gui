@@ -317,6 +317,12 @@ export const useStore = create((set, get) => ({
     return 1.2; // 默认"大"(用户偏好);仅当用户从未手动选过才生效
   })(),
 
+  // "AI 思考中"加载动画样式(主题弹窗可选)。'cli' = 原 ASCII 帧 spinner(默认);
+  // 其余对应 index.css 的 .loading-<id> 纯 CSS 动画(移植自 clawd-station)。
+  loadingStyle: (() => {
+    try { return localStorage.getItem('cgui-loading-style') || 'cli'; } catch { return 'cli'; }
+  })(),
+
   // Theme as a (family, tone) pair. `cguiTheme` is the derived data-cgui-theme
   // variant id ('' = default Apple-system palette). themeTone drives data-theme.
   themeFamily: initThemeFamily(),
@@ -786,6 +792,12 @@ export const useStore = create((set, get) => ({
   // "本会话内永远允许 X" — write to localStorage so future incoming requests
   // for `toolName` under `sessionId` auto-resolve in useWebSocket without
   // popping the dialog.
+  setLoadingStyle: (id) => {
+    const v = String(id || 'cli');
+    set({ loadingStyle: v });
+    try { localStorage.setItem('cgui-loading-style', v); } catch {}
+  },
+
   setUiFontScale: (v) => {
     const n = Math.max(0.6, Math.min(2, Number(v) || 1));
     set({ uiFontScale: n });
