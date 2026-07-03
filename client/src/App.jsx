@@ -1931,6 +1931,32 @@ function LoadingMark({ size = 20, variant = null }) {
     ><span /></span>
   );
 }
+// ③ 对话区自定义背景层(设置→概览→对话区背景)。绝对定位铺满 pane,-z-10 置于
+// 内容之下(SessionDetail 根节点在启用背景时加 isolate 建立独立层叠上下文)。
+// 遮罩 = 主题底色(--color-canvas)按 maskOpacity 比例盖在背景上,深浅主题下都保证文字可读。
+// 未设置背景时返回 null,渲染结果与改动前完全一致。
+function ChatBackgroundLayer() {
+  const bg = useStore((s) => s.chatBackground);
+  if (!bg || !bg.kind) return null;
+  const mask = Math.min(100, Math.max(0, Number(bg.maskOpacity ?? 40)));
+  const veil = `color-mix(in srgb, var(--color-canvas) ${mask}%, transparent)`;
+  const src = bg.file ? `/api/backgrounds/${encodeURIComponent(bg.file)}` : '';
+  return (
+    <div className="absolute inset-0 -z-10 pointer-events-none overflow-hidden" aria-hidden="true">
+      {bg.kind === 'color' && (
+        <div className="absolute inset-0" style={{ backgroundColor: bg.color || 'transparent' }} />
+      )}
+      {bg.kind === 'image' && src && (
+        <div className="absolute inset-0 bg-cover bg-center" style={{ backgroundImage: `url("${src}")` }} />
+      )}
+      {bg.kind === 'video' && src && (
+        <video className="absolute inset-0 w-full h-full object-cover" src={src} autoPlay loop muted playsInline />
+      )}
+      <div className="absolute inset-0" style={{ background: veil }} />
+    </div>
+  );
+}
+
 function useCyclingVerb() {
   const [i, setI] = useState(() => Math.floor(Math.random() * THINKING_VERBS.length));
   useEffect(() => {
@@ -2293,6 +2319,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // reference reads the local alias below, so the rest of this 700-line
   // component is unchanged.
   const { selectedProject, loading } = useStore();
+  // ③ 是否启用了对话区自定义背景(布尔原始值选择器,引用稳定)。启用时根节点加 isolate。
+  const hasChatBg = useStore((s) => !!(s.chatBackground && s.chatBackground.kind));
   // Pane routing generalized to N panes (0..5). Each SessionDetail reads/writes
   // its own slot in paneSessions/paneMessages. setPaneSession/setPaneMessages
   // keep the legacy selectedSession/messages (pane 0) + secondary* (pane 1)
@@ -4466,7 +4494,10 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   const winLabel = contextWindow >= 1_000_000 ? '1M' : `${Math.round(contextWindow / 1000)}k`;
 
   return (
-    <div className="flex-1 flex flex-col min-h-0 glass-base relative">
+    <div className={`flex-1 flex flex-col min-h-0 glass-base relative ${hasChatBg ? 'isolate' : ''}`}>
+      {/* ③ 对话区自定义背景(未设置时 null,外观与之前完全一致)。isolate 仅在启用
+          背景时加:让 -z-10 背景层限定在本 pane 的层叠上下文内、垫在所有内容之下。 */}
+      <ChatBackgroundLayer />
       {/* #9 子代理对话视图:覆盖在本 pane 之上,顶部面包屑可返回母会话。 */}
       {showAgentView && (
         <div className="absolute inset-0 z-40 flex flex-col bg-canvas">
