@@ -904,6 +904,28 @@ function ProjectList() {
     });
   };
 
+  // 危险操作:调用 CLI `claude project purge` 删除该项目在 Claude 的全部本地状态
+  // (会话历史 / 记忆 / 文件历史等),不影响项目源码。成功后刷新列表。
+  const purgeProject = async (project) => {
+    const ok = await confirmDialog(
+      `彻底清理该项目的 Claude 本地状态？\n\n${project.path}\n\n将删除该项目的全部会话历史、记忆、文件历史等 Claude 本地状态。不影响项目代码，操作不可恢复。`,
+      { danger: true },
+    );
+    if (!ok) return;
+    try {
+      const r = await fetch('/api/project/purge', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cwd: project.path }),
+      });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok || !data.ok) throw new Error(data.error || data.stderr || `HTTP ${r.status}`);
+      if (selectedProject?.hash === project.hash) setSelectedProject(null);
+      fetchProjects();
+    } catch (e) {
+      await confirmDialog(`清理失败：${e.message}`, { danger: false });
+    }
+  };
+
   useEffect(() => { fetchProjects(); }, []);
   useEffect(() => {
     fetch('/api/prefs/pinned').then((r) => r.json())
@@ -1138,6 +1160,13 @@ function ProjectList() {
                 title="从侧栏隐藏（不删除本地文件，下次按 + 重新添加同路径即可恢复）"
               >
                 <EyeOff size={12} className="text-ink-faint" />
+              </button>
+              <button
+                onClick={(e) => { e.stopPropagation(); purgeProject(project); }}
+                className="opacity-100 md:opacity-0 md:group-hover:opacity-100 transition-opacity p-1 hover:bg-red-50 rounded"
+                title="彻底清理该项目的 Claude 本地状态（会话历史/记忆等，不影响项目代码，不可恢复）"
+              >
+                <Trash2 size={12} className="text-ink-faint hover:text-red-600" />
               </button>
             </div>
           </div>
