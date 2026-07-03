@@ -2345,6 +2345,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // order stays stable. After a session-load transition we'd otherwise add a
   // hook below the early return → React #310 → blank page.
   const currentProvider = useStore((s) => s.currentProvider);
+  // 整会话用量聚合(服务端随 /messages 端点算好,keyed by sessionId)。取到则顶部
+  // 用量条不再对全量历史消息逐帧 reduce。map 里的对象引用稳定,null 兜底不造新引用。
+  const serverUsageTotals = useStore((s) => (selectedSession?.sessionId && s.usageTotalsBySession[selectedSession.sessionId]) || null);
   // #9/AZ6 子代理会话窗口:每个 pane 读自己 tab 的 viewing id(原 viewingAgentId 是
   // 全局单值 → 分屏下 A 的子代理会同时显示在 B 窗格)。per-tab 天然隔离,不再按
   // sessionId 匹配。点 A 的子代理只替换 A 窗格,点 A 母会话标题(返回)恢复 A 会话。
@@ -4383,10 +4386,35 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   const userTurns = allMessages
     .filter((m) => m.type === 'user' && m.uuid)
     .map((m) => ({ uuid: m.uuid, text: m.displayText || m.text || '', ts: m.timestamp }));
-  const totalTokens = allMessages.reduce((acc, m) => {
-    if (m.usage) { acc.input += m.usage.input_tokens || 0; acc.output += m.usage.output_tokens || 0; acc.cacheRead += m.usage.cache_read_input_tokens || 0; }
+  // 用量汇总:优先取服务端聚合(usageTotals,jsonl 全文件按 message.id 去重逐条求和的
+  // 地面真值口径),前端只叠加尚未落盘的流式回合(chatMessages,条数很小)——避免几千条
+  // 历史消息每帧全量 reduce。无服务端聚合时(端点旧形态/加载失败)回退全量 reduce。
+  // 注意:流式回合的 m.usage 来自 result 事件(整轮消耗累加口径),对"累计消耗"求和是
+  // 对的口径;回合落盘 refetch 后即被服务端聚合替换。上下文徽章仍走单次调用口径,别混。
+  const totalTokens = (() => {
+    const acc = serverUsageTotals
+      ? { ...serverUsageTotals }
+      : messages.reduce((a, m) => {
+          if (m.usage) {
+            a.input += m.usage.input_tokens || 0; a.output += m.usage.output_tokens || 0;
+            a.cacheRead += m.usage.cache_read_input_tokens || 0; a.cacheCreation += m.usage.cache_creation_input_tokens || 0;
+          }
+          return a;
+        }, { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 });
+    for (const m of (liveVisible ? chatMessages : [])) {
+      if (m.usage) {
+        acc.input += m.usage.input_tokens || 0; acc.output += m.usage.output_tokens || 0;
+        acc.cacheRead += m.usage.cache_read_input_tokens || 0; acc.cacheCreation += m.usage.cache_creation_input_tokens || 0;
+      }
+    }
     return acc;
-  }, { input: 0, output: 0, cacheRead: 0 });
+  })();
+  // 总 token = 四字段之和;命中率 = 缓存命中 / 提示侧总量(输入+缓存命中+缓存写入)。
+  const totalAllTokens = totalTokens.input + totalTokens.output + totalTokens.cacheRead + (totalTokens.cacheCreation || 0);
+  const promptSideTokens = totalTokens.input + totalTokens.cacheRead + (totalTokens.cacheCreation || 0);
+  const cacheHitPct = promptSideTokens > 0 ? (totalTokens.cacheRead / promptSideTokens) * 100 : 0;
+  const usageDetailTitle = `输入 ${totalTokens.input.toLocaleString()} · 输出 ${totalTokens.output.toLocaleString()} · 缓存命中 ${totalTokens.cacheRead.toLocaleString()} · 缓存写入 ${(totalTokens.cacheCreation || 0).toLocaleString()}
+总 token = 四项之和;命中率 = 缓存命中 / (输入 + 缓存命中 + 缓存写入)`;
   // Sum per-message cost. Skipping models we don't have prices for. Uses
   // currentProvider (subscribed above, before early returns) so cc switch
   // redirects (Claude → DeepSeek/MiMo) get the right backend price table.
@@ -4551,9 +4579,10 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                 if (s?.sessionId && s?.projectHash) fetchMessagesForTab(s.sessionId, s.projectHash, { silent: true });
               }}
             />
-            <div className="text-right max-md:hidden">
+            {/* 悬停显示四项明细(输入/输出/缓存命中/缓存写入)与口径说明。 */}
+            <div className="text-right max-md:hidden" title={usageDetailTitle}>
               <div className="text-[10px] text-ink-faint font-mono flex items-center gap-1 justify-end">
-                <BarChart3 size={10} />{(totalTokens.input + totalTokens.output).toLocaleString()} tokens
+                <BarChart3 size={10} />{totalAllTokens.toLocaleString()} tokens
                 {totalCostUsd > 0 && (
                   <span className="text-accent/80 ml-1.5" title="按当前各模型官网价估算的累计费用（CNY 模型按 1 USD ≈ 7.2 CNY 换算）">
                     · {formatCost(totalCostUsd)}
@@ -4561,7 +4590,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                 )}
               </div>
               {totalTokens.cacheRead > 0 && (
-                <div className="text-[10px] text-ink-ghost font-mono">缓存命中 {totalTokens.cacheRead.toLocaleString()}</div>
+                <div className="text-[10px] text-ink-ghost font-mono">
+                  缓存命中 {totalTokens.cacheRead.toLocaleString()} · 命中率 {cacheHitPct.toFixed(1)}%
+                </div>
               )}
             </div>
           </div>
@@ -4587,7 +4618,10 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
               model={currentModel}
             />
           )}
-          <span className="text-ink-faint">{(totalTokens.input + totalTokens.output).toLocaleString()} tok</span>
+          <span className="text-ink-faint" title={usageDetailTitle}>{totalAllTokens.toLocaleString()} tok</span>
+          {totalTokens.cacheRead > 0 && (
+            <span className="text-ink-ghost" title={usageDetailTitle}>命中率 {cacheHitPct.toFixed(1)}%</span>
+          )}
           {totalCostUsd > 0 && <span className="text-accent/80">· {formatCost(totalCostUsd)}</span>}
         </div>
       )}

@@ -448,9 +448,12 @@ function reconstructCommandPrompt(text, { bareToName = false } = {}) {
  * until the next user prompt. Tool result-only messages are merged into the
  * preceding assistant turn.
  *
- * Returns array of:
- *   { type: 'user', uuid, text, timestamp }
- *   { type: 'turn', uuid, thinking: [], text: [], toolCalls: [], model, usage, timestamp }
+ * Returns { messages, usageTotals }:
+ *   messages — array of
+ *     { type: 'user', uuid, text, timestamp }
+ *     { type: 'turn', uuid, thinking: [], text: [], toolCalls: [], model, usage, timestamp }
+ *   usageTotals — 整会话用量聚合(见下方 sessionUsageById 注释)
+ *     { input, output, cacheRead, cacheCreation, apiCalls }
  */
 export async function getSessionMessages(sessionId, projectHash) {
   const filePath = join(PROJECTS_DIR, projectHash, `${sessionId}.jsonl`);
@@ -492,6 +495,12 @@ export async function getSessionMessages(sessionId, projectHash) {
   let currentTurn = null;
   // CI-6:是否已渲染过真实用户消息。用于放开"开场 bare 斜杠命令"的重建(见下)。
   let sawRealUser = false;
+  // 会话级用量汇总(地面真值口径):对全文件 assistant 记录的 message.usage 按
+  // message.id 去重后逐条求和 —— 每个 id 对应一次真实底层 API 调用,同一调用的
+  // 多条流式分片只记一次。含 sidechain/子代理记录(它们也是本会话的真实消耗;
+  // 与上面 per-turn 的 usage 口径不同,后者只归集主回合)。绝不能用 result 事件
+  // 的整轮累加 usage 替代(cache_read 会被加 N 遍)。
+  const sessionUsageById = new Map();
 
   function flushTurn() {
     if (currentTurn && (currentTurn.text.length > 0 || currentTurn.thinking.length > 0 || currentTurn.toolCalls.length > 0)) {
@@ -568,6 +577,12 @@ export async function getSessionMessages(sessionId, projectHash) {
       }
 
     } else if (record.type === 'assistant') {
+      // 会话级用量收集(供 usageTotals)。跳过 `<synthetic>` 伪模型记录(错误占位/
+      // compact 摘要,不是真实 API 调用)。首见即记,与 per-turn 去重规则一致。
+      if (record.message?.usage && !/^</.test(record.message?.model || '')) {
+        const sid = record.message?.id || record.uuid;
+        if (sid && !sessionUsageById.has(sid)) sessionUsageById.set(sid, record.message.usage);
+      }
       const content = normalizeContent(record.message?.content);
       const textParts = content.filter((c) => c.type === 'text');
       const thinkingParts = content.filter((c) => c.type === 'thinking');
@@ -640,7 +655,15 @@ export async function getSessionMessages(sessionId, projectHash) {
   }
 
   flushTurn();
-  return messages;
+  // 聚合四字段。apiCalls = 去重后的底层 API 调用次数,供前端明细展示/排查。
+  const usageTotals = { input: 0, output: 0, cacheRead: 0, cacheCreation: 0, apiCalls: sessionUsageById.size };
+  for (const u of sessionUsageById.values()) {
+    usageTotals.input += u.input_tokens || 0;
+    usageTotals.output += u.output_tokens || 0;
+    usageTotals.cacheRead += u.cache_read_input_tokens || 0;
+    usageTotals.cacheCreation += u.cache_creation_input_tokens || 0;
+  }
+  return { messages, usageTotals };
 }
 
 /**
