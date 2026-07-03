@@ -688,7 +688,9 @@ router.post('/chat/title', async (req, res) => {
     titleSource = cmdArgs;
   }
 
-  const prompt = `给下面这段对话起一个不超过 12 个字的简短中文标题,只输出标题本身,不要引号、不要标点结尾、不要解释。\n\n用户: ${titleSource}\n${firstAssistant ? `助手: ${firstAssistant}\n` : ''}`;
+  // 提示词硬化:模型对超短输入(如 "hi")常输出"当前会话内容比较简单…"这类元话术解释
+  // 而非标题(用户实报)。明确"无论多简单都必须给标题、禁止解释",配合下方 finish 的兜底双保险。
+  const prompt = `给下面这段对话起一个简短中文标题。要求:只输出标题本身,不超过 16 个字,不加引号、不加标点、不加任何解释;无论对话内容多简单(哪怕只是一句问候),都必须给出一个描述性标题,禁止输出"内容比较简单""请提供更多信息"之类的说明文字。\n\n用户: ${titleSource}\n${firstAssistant ? `助手: ${firstAssistant}\n` : ''}`;
 
   const childEnv = { ...process.env };
   delete childEnv.ANTHROPIC_MODEL;
@@ -728,14 +730,23 @@ router.post('/chat/title', async (req, res) => {
     done = true;
     clearTimeout(timer);
     try { killProcessTree(proc); } catch {}
-    // 清洗:去引号/换行/常见前缀,截断到 ~20 字
+    // 清洗:去引号/换行/常见前缀(先不截断,元话术判定要看原始长度)
     const clean = String(title || '')
       .replace(/[\r\n]+/g, ' ')
       .replace(/^["'「『]+|["'」』]+$/g, '')
       .replace(/^(标题|title)\s*[:：]\s*/i, '')
-      .trim()
-      .slice(0, 24);
-    res.json({ title: clean });
+      .trim();
+    // 元话术兜底:提示词硬化后模型仍可能输出"当前会话内容比较简单…"这类解释当标题。
+    // 命中特征(超长 / 整句以句号结尾 / 元话术关键词且偏长)一律丢弃,回退用户消息截断。
+    const isMeta =
+      clean.length > 30 ||
+      /[。.]\s*$/.test(clean) ||
+      /比较简单|请提供|无法生成|没有(看到|提供)/.test(clean) ||
+      (clean.length > 20 && /会话|对话|内容|无法/.test(clean));
+    const finalTitle = (!clean || isMeta)
+      ? titleSource.replace(/\s+/g, ' ').trim().slice(0, 24)
+      : clean.slice(0, 24);
+    res.json({ title: finalTitle });
   };
   const timer = setTimeout(() => finish(out), 30000);
   proc.stdout.on('data', (c) => { out += c.toString(); });
