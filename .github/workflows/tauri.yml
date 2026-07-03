@@ -54,28 +54,41 @@ jobs:
         env:
           CGUI_PUBLIC_BUILD: '1'
 
-      # macOS dmg 里塞一个「双击去 quarantine」脚本,与 app 并列。用户拖 app 到
-      # 应用程序后双击它即可解除 Gatekeeper 隔离,无需手敲 xattr 命令。
-      - name: Inject quarantine-fix script into dmg
+      # macOS dmg 里塞一个「使用说明.txt」,与 app 并列。此前塞的是 .command 脚本,
+      # 但未公证脚本在 macOS 15(Sequoia)连右键打开都不放行(用户实测报
+      # "Apple 无法验证…是否包含恶意软件"),双击必被 Gatekeeper 拦。文本文件
+      # 不受 Gatekeeper 限制,内容给出需在终端执行的 xattr 命令。
+      - name: Inject quarantine instructions into dmg
         if: runner.os == 'macOS'
         run: |
           export LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
           DMG=$(find src-tauri/target/release/bundle/dmg -name '*.dmg' | head -1)
           if [ -z "$DMG" ]; then echo "no dmg found, skipping"; exit 0; fi
-          NAME='复制GUI后请双击此脚本去除quarantine.command'
-          chmod +x scripts/dmg-fix-quarantine.command
+          NAME='使用说明:先拖入应用程序,再执行此文件中的命令.txt'
+          cat > /tmp/quarantine-readme.txt <<'TXT'
+          Claude GUI 安装步骤
+
+          1. 把 Claude GUI 拖进「应用程序」文件夹。
+          2. 打开「终端」(启动台搜索 Terminal),粘贴执行下面这行命令(无需 sudo):
+
+          xattr -dr com.apple.quarantine "/Applications/Claude GUI.app"
+
+          3. 之后即可正常双击打开 Claude GUI。
+
+          说明:本 app 未做 Apple 付费公证(notarization),macOS 会给下载的
+          未公证 app 加隔离标记并阻止打开。上述命令仅移除该标记,不修改 app 本身。
+          TXT
           hdiutil convert "$DMG" -format UDRW -o /tmp/rw.dmg
           hdiutil resize -size 300m /tmp/rw.dmg || true
           DEV=$(hdiutil attach /tmp/rw.dmg -nobrowse -noverify | grep '/Volumes/')
           MOUNT=$(echo "$DEV" | sed -E 's|.*(/Volumes/.*)$|\1|')
           DISK=$(echo "$DEV" | awk '{print $1}')
-          cp scripts/dmg-fix-quarantine.command "$MOUNT/$NAME"
-          chmod +x "$MOUNT/$NAME"
+          cp /tmp/quarantine-readme.txt "$MOUNT/$NAME"
           hdiutil detach "$DISK"
           rm -f "$DMG"
           hdiutil convert /tmp/rw.dmg -format UDZO -o "$DMG"
           rm -f /tmp/rw.dmg
-          echo "injected quarantine-fix script into $DMG"
+          echo "injected quarantine readme into $DMG"
 
       - name: Upload installers
         uses: actions/upload-artifact@v7
@@ -108,7 +121,13 @@ jobs:
           cat > notes.md <<'EOF'
           未签名安装包,首次打开需手动放行。当前安装包会调用本机 Node.js 启动内置后端,运行机器需已安装 Node.js 20+ 和 Claude Code CLI。
 
-          - **macOS**:仅支持 Apple Silicon(M 系列芯片)。打开 `.dmg` 后里面有两个东西:把 **Claude GUI** 拖进「应用程序」,然后**双击 dmg 里的「复制GUI后请双击此脚本去除quarantine.command」脚本**(无需 sudo),即可正常双击打开 app。原因:本 app 未做 Apple 付费公证(notarization),macOS 给下载的未公证 app 加了隔离属性,脚本只是移除这个标记。也可改用终端 `xattr -dr com.apple.quarantine '/Applications/Claude GUI.app'`,或右键 .app →「打开」。
+          - **macOS**:仅支持 Apple Silicon(M 系列芯片)。打开 `.dmg`,把 **Claude GUI** 拖进「应用程序」,然后在「终端」执行下面这行命令(无需 sudo),之后即可正常双击打开 app:
+
+            ```
+            xattr -dr com.apple.quarantine "/Applications/Claude GUI.app"
+            ```
+
+            原因:本 app 未做 Apple 付费公证(notarization),macOS 给下载的未公证 app 加了隔离标记并阻止打开;该命令仅移除此标记。dmg 内附「使用说明」文本可随时查看此命令(macOS 15 起未公证脚本连右键打开都不放行,故不再提供双击脚本)。
           - **Windows**:`.exe`(NSIS)或 `.msi` 均可;SmartScreen 提示时点「更多信息 → 仍要运行」。
           - 若双击后无窗口,查看 `~/.claude-gui/tauri-startup.log` 获取启动错误。
           EOF
