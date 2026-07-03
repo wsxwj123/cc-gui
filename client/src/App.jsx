@@ -6679,6 +6679,23 @@ export default function App() {
     })();
   }, []);
 
+  // 更新完成后的安装包清理:GUI 一键更新把安装包下到 ~/Downloads 并记录路径;
+  // 以新版本首次启动时(后端比对版本判定更新已完成)提示删除。同意才删;
+  // 选择保留则清除记录,之后不再提示。
+  useEffect(() => {
+    (async () => {
+      try {
+        const d = await (await fetch('/api/update-cleanup')).json();
+        if (!d?.pending) return;
+        const ok = await confirmDialog(
+          `更新已完成。是否删除更新时下载的安装包?\n\n${d.name}(${d.sizeMB}MB)\n${d.path}`,
+          { danger: true, confirmText: '删除', cancelText: '保留' },
+        );
+        await fetch(ok ? '/api/update-cleanup/delete' : '/api/update-cleanup/dismiss', { method: 'POST' });
+      } catch { /* 查询/删除失败静默,不影响启动 */ }
+    })();
+  }, []);
+
   // Pull the shared session-title map so a rename on the phone shows on the Mac
   // (and vice-versa). Live updates arrive via the ws 'custom-titles' broadcast.
   useEffect(() => { useStore.getState().hydrateCustomTitles(); useStore.getState().hydrateAutoTitles(); }, []);
