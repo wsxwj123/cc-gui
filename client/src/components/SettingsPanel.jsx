@@ -999,6 +999,26 @@ function PromptSuggestionsToggle() {
   );
 }
 
+// 缓存优化开关(CLI --exclude-dynamic-system-prompt-sections)。作用:把每轮变化的动态段
+// (工作目录 / auto-memory / git 状态)移出系统提示、改注入首条用户消息,使系统提示保持静态。
+function ExcludeDynamicPromptToggle() {
+  const on = useStore((s) => s.excludeDynamicSystemPrompt);
+  const setOn = useStore((s) => s.setExcludeDynamicSystemPrompt);
+  return (
+    <div className="bg-canvas-warm border border-canvas-deep rounded-lg px-3 py-2.5 flex items-center gap-3">
+      <div className="min-w-0 flex-1">
+        <div className="text-xs text-ink font-body font-medium">缓存优化</div>
+        <div className="text-[10.5px] text-ink-faint font-body">把每轮变化的动态段(工作目录、auto-memory、git 状态)移出系统提示、改注入首条用户消息,使系统提示保持静态,提升第三方 provider 的前缀缓存命中、降低费用。官方渠道无需开启</div>
+      </div>
+      <button onClick={() => setOn(!on)}
+        className={`shrink-0 w-9 h-5 rounded-full transition-colors relative ${on ? 'bg-accent' : 'bg-ink-faint/30'}`}
+        title={on ? '已开启' : '已关闭'}>
+        <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-all ${on ? 'left-[18px]' : 'left-0.5'}`} />
+      </button>
+    </div>
+  );
+}
+
 function OverviewTab({ settings, onSave, saving }) {
   const [showEnv, setShowEnv] = useState(false);
   const [showHooks, setShowHooks] = useState(false);
@@ -1023,6 +1043,7 @@ function OverviewTab({ settings, onSave, saving }) {
       <FullDiskAccessCard />
       <CloseBehaviorPicker />
       <PromptSuggestionsToggle />
+      <ExcludeDynamicPromptToggle />
       {rows.length > 0 && (
         <div className="bg-canvas-warm border border-canvas-deep rounded-lg divide-y divide-canvas-deep">
           {rows.map(([k, v]) => (

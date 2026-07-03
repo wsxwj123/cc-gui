@@ -329,6 +329,13 @@ export const useStore = create((set, get) => ({
     try { return localStorage.getItem('cgui-prompt-suggestions') === '1'; } catch { return false; }
   })(),
 
+  // 缓存优化(CLI --exclude-dynamic-system-prompt-sections / SDK systemPrompt.excludeDynamicSections):
+  // 把每轮变化的动态段(工作目录 / auto-memory / git 状态)移出系统提示、改注入首条用户消息,
+  // 使系统提示保持静态、提升第三方 provider 的前缀缓存命中。默认关(官方渠道无需开启)。
+  excludeDynamicSystemPrompt: (() => {
+    try { return localStorage.getItem('cgui-exclude-dynamic-prompt') === '1'; } catch { return false; }
+  })(),
+
   // Theme as a (family, tone) pair. `cguiTheme` is the derived data-cgui-theme
   // variant id ('' = default Apple-system palette). themeTone drives data-theme.
   themeFamily: initThemeFamily(),
@@ -807,6 +814,11 @@ export const useStore = create((set, get) => ({
   setPromptSuggestions: (on) => {
     set({ promptSuggestions: !!on });
     try { localStorage.setItem('cgui-prompt-suggestions', on ? '1' : '0'); } catch {}
+  },
+
+  setExcludeDynamicSystemPrompt: (on) => {
+    set({ excludeDynamicSystemPrompt: !!on });
+    try { localStorage.setItem('cgui-exclude-dynamic-prompt', on ? '1' : '0'); } catch {}
   },
 
   setUiFontScale: (v) => {
