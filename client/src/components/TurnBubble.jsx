@@ -27,12 +27,14 @@ const INLINE_TOOL_NAMES = new Set([
   'Task', 'Agent', 'Grep', 'Glob', 'WebSearch', 'WebFetch', 'Skill',
 ]);
 
-function ToolCallWithRetry({ toolCall, onRetryTool, children }) {
+// hoverOnly:Skill 横幅 / 子代理卡片直接铺在回复流里,重做按钮常显会破坏版面 —
+// 悬停(移动端弱化常显)才浮现,功能与折叠组内一致。
+function ToolCallWithRetry({ toolCall, onRetryTool, hoverOnly = false, children }) {
   return (
-    <div className="space-y-1">
+    <div className={`space-y-1 ${hoverOnly ? 'group/tcretry' : ''}`}>
       {children}
       {onRetryTool && (
-        <div className="flex justify-end">
+        <div className={`flex justify-end ${hoverOnly ? 'opacity-0 group-hover/tcretry:opacity-100 max-md:opacity-60 transition-opacity' : ''}`}>
           <button
             onClick={() => onRetryTool(toolCall)}
             className="inline-flex items-center gap-1.5 px-2 py-1 rounded-md border border-accent-muted bg-accent-subtle/40 text-[11px] font-medium text-accent hover:bg-accent-subtle hover:border-accent transition-colors font-body"
@@ -542,9 +544,31 @@ function TurnBubbleInner({ turn, onRetry, onRetryTool, retryActive }) {
                       flushBucket(i);
                       return;
                     }
-                    // Every other tool — Bash/Read/Edit/Grep/Web/Skill/Task/etc.
-                    // accumulates into the current round bucket regardless of
-                    // whether it was previously rendered as an inline card.
+                    // Skill 调用:不并入折叠工具组,在回复流原位渲染居中横幅
+                    // (章节分隔样式,流光动画,见 SkillCard)。
+                    if (b.toolCall.name === 'Skill') {
+                      flushBucket(i);
+                      out.push(
+                        <ToolCallWithRetry key={`b-${i}`} toolCall={b.toolCall} onRetryTool={onRetryTool} hoverOnly>
+                          <SkillCard toolCall={b.toolCall} />
+                        </ToolCallWithRetry>
+                      );
+                      return;
+                    }
+                    // 子代理派发(Task/Agent):独立卡片纵向排列,与普通工具折叠行
+                    // 明显区分;点开/放大交互仍由 TaskCard 自身承载。
+                    if (b.toolCall.name === 'Task' || b.toolCall.name === 'Agent') {
+                      flushBucket(i);
+                      out.push(
+                        <ToolCallWithRetry key={`b-${i}`} toolCall={b.toolCall} onRetryTool={onRetryTool} hoverOnly>
+                          <TaskCard toolCall={b.toolCall} />
+                        </ToolCallWithRetry>
+                      );
+                      return;
+                    }
+                    // Every other tool — Bash/Read/Edit/Grep/Web/etc. accumulates
+                    // into the current round bucket regardless of whether it was
+                    // previously rendered as an inline card.
                     bucket.push(b.toolCall);
                     return;
                   }
