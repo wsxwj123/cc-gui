@@ -279,6 +279,11 @@ export async function listSessions(projectHash) {
       // 用户点进去是空白。**没有 user 类型 = 不是 Claude Code 会话,跳过**。
       if (!firstUser) continue;
 
+      // 保险:sidechain(子代理)transcript 不进主列表。当前 Desktop/CLI 都把子代理
+      // 写在 <sessionId>/subagents/ 子目录(顶层扫不到),但形态若变(写到顶层),
+      // 记录里的 isSidechain:true 仍是可靠标记——头部任一记录带真值即跳过。
+      if (head.some((r) => r?.isSidechain === true)) continue;
+
       // Skip ONLY truly empty sessions. A brand-new session (just one prompt +
       // reply) is ~3-8 lines, which we want to show. The old `< 20 && !meaningful`
       // filter swallowed every new chat whose prompt didn't pass isMeaningfulPrompt
