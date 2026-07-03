@@ -4,10 +4,11 @@
 //   local(本地)   <cwd>/CLAUDE.local.md          当前项目,仅你(应 gitignore)
 //   managed(组织) 平台固定路径                    只读(IT 下发,GUI 不可改)
 import { Router } from 'express';
-import { readFile, writeFile, mkdir, stat } from 'fs/promises';
+import { readFile, writeFile, mkdir, stat, readdir, unlink } from 'fs/promises';
 import { existsSync } from 'fs';
 import { homedir, platform } from 'os';
 import { join, dirname, resolve } from 'path';
+import { isPathInside } from '../utils/safe-path.js';
 
 const router = Router();
 const HOME = homedir();
@@ -68,6 +69,115 @@ router.put('/memory', async (req, res) => {
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
+});
+
+// ── auto-memory(CLI 自动记忆)────────────────────────────────────────────
+// CLI 把跨会话记忆写在 ~/.claude/projects/<hash>/memory/:MEMORY.md 是索引
+// (每条一行 `- [标题](file.md) — 描述`),每条记忆一个 kebab-case .md(frontmatter
+// name/description)。GUI 提供 查/改/删;MEMORY.md 本身只读展示,删除条目时联动
+// 删掉它的索引行。hash 编码与 CLI 一致:非字母数字全部 → '-'。
+
+function memoryDirFor(cwd) {
+  const hash = String(cwd).replace(/[^A-Za-z0-9]/g, '-');
+  return join(HOME, '.claude', 'projects', hash, 'memory');
+}
+
+// 文件名白名单 + isPathInside 双保险(safe-path)。MEMORY.md 索引不许直接写/删。
+function safeEntryPath(dir, file) {
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]*\.md$/.test(file) || file === 'MEMORY.md') return null;
+  const p = join(dir, file);
+  return isPathInside(p, dir) ? p : null;
+}
+
+function parseEntryMeta(content) {
+  const meta = { name: '', description: '' };
+  const fm = content.match(/^---\n([\s\S]*?)\n---/);
+  if (fm) {
+    const n = fm[1].match(/^name:\s*(.+)$/m);
+    const d = fm[1].match(/^description:\s*(.+)$/m);
+    if (n) meta.name = n[1].trim();
+    if (d) meta.description = d[1].trim();
+  }
+  return meta;
+}
+
+// GET /api/memory/entries?cwd= — 列出该项目全部自动记忆 + 索引原文
+router.get('/memory/entries', async (req, res) => {
+  const cwd = String(req.query.cwd || '');
+  if (!cwd) return res.status(400).json({ error: 'cwd 必填' });
+  const dir = memoryDirFor(cwd);
+  const entries = [];
+  let index = '';
+  try {
+    for (const f of await readdir(dir)) {
+      if (!f.endsWith('.md')) continue;
+      if (f === 'MEMORY.md') {
+        try { index = await readFile(join(dir, f), 'utf-8'); } catch {}
+        continue;
+      }
+      const p = safeEntryPath(dir, f);
+      if (!p) continue;
+      try {
+        const content = await readFile(p, 'utf-8');
+        const st = await stat(p);
+        entries.push({ file: f, ...parseEntryMeta(content), mtime: st.mtimeMs });
+      } catch {}
+    }
+  } catch { /* 目录不存在 = 该项目还没有自动记忆 */ }
+  entries.sort((a, b) => b.mtime - a.mtime);
+  res.json({ dir, index, entries });
+});
+
+// GET /api/memory/entries/:file?cwd=
+router.get('/memory/entries/:file', async (req, res) => {
+  const dir = memoryDirFor(String(req.query.cwd || ''));
+  const p = safeEntryPath(dir, req.params.file);
+  if (!p) return res.status(400).json({ error: 'invalid file' });
+  try {
+    const content = await readFile(p, 'utf-8');
+    const st = await stat(p);
+    res.json({ file: req.params.file, content, mtime: st.mtimeMs });
+  } catch { res.status(404).json({ error: 'not found' }); }
+});
+
+// PUT /api/memory/entries/:file { cwd, content, baseMtime? }
+// baseMtime 乐观检查:CLI 可能在会话运行中并发重写记忆,磁盘比编辑基线新则拒绝,防静默覆盖。
+router.put('/memory/entries/:file', async (req, res) => {
+  const { cwd = '', content = '', baseMtime = null } = req.body || {};
+  const dir = memoryDirFor(String(cwd));
+  const p = safeEntryPath(dir, req.params.file);
+  if (!p) return res.status(400).json({ error: 'invalid file' });
+  try {
+    if (baseMtime != null) {
+      try {
+        const st = await stat(p);
+        if (st.mtimeMs > Number(baseMtime) + 1) {
+          return res.status(409).json({ error: '该记忆在你编辑期间被 CLI 更新过,请刷新后重改' });
+        }
+      } catch { /* 文件不存在 = 新建,放行 */ }
+    }
+    await mkdir(dir, { recursive: true });
+    await writeFile(p, String(content), 'utf-8');
+    const st = await stat(p);
+    res.json({ ok: true, mtime: st.mtimeMs });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// DELETE /api/memory/entries/:file?cwd= — 删条目 + 联动删 MEMORY.md 里它的索引行
+router.delete('/memory/entries/:file', async (req, res) => {
+  const dir = memoryDirFor(String(req.query.cwd || ''));
+  const p = safeEntryPath(dir, req.params.file);
+  if (!p) return res.status(400).json({ error: 'invalid file' });
+  try {
+    await unlink(p);
+    const idxPath = join(dir, 'MEMORY.md');
+    try {
+      const idx = await readFile(idxPath, 'utf-8');
+      const next = idx.split('\n').filter((l) => !l.includes(`](${req.params.file})`)).join('\n');
+      if (next !== idx) await writeFile(idxPath, next, 'utf-8');
+    } catch { /* 无索引文件,忽略 */ }
+    res.json({ ok: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 export default router;
