@@ -340,6 +340,7 @@ router.post('/chat', async (req, res) => {
     appendSystemPrompt,
     agent,
     promptSuggestions,
+    excludeDynamicSystemPrompt,
   } = req.body;
   if (!prompt) return res.status(400).json({ error: 'prompt is required' });
 
@@ -437,6 +438,10 @@ router.post('/chat', async (req, res) => {
   const systemPrompt = appendText
     ? { type: 'preset', preset: 'claude_code', append: appendText.slice(0, 8000) }
     : { type: 'preset', preset: 'claude_code' };
+  // 缓存优化(对应 CLI --exclude-dynamic-system-prompt-sections):把工作目录 / auto-memory /
+  // git 状态等每轮变化的动态段移出系统提示、由 SDK 改注入首条用户消息,使系统提示静态可缓存,
+  // 提升第三方 provider 前缀缓存命中。仅加系统提示选项,不影响消息泵/关流时序。
+  if (excludeDynamicSystemPrompt === true) systemPrompt.excludeDynamicSections = true;
 
   const options = {
     model,

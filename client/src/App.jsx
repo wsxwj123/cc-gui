@@ -3046,6 +3046,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           globalRead: globalRead !== false,
           agent: activeAgent || undefined,
           promptSuggestions: useStore.getState().promptSuggestions || undefined,
+          excludeDynamicSystemPrompt: useStore.getState().excludeDynamicSystemPrompt || undefined,
         }),
       });
       const respJson = await res.json();
