@@ -1172,6 +1172,30 @@ html { --content-max: clamp(768px, calc(var(--app-w, 100vw) * 0.7), 1120px); }
    provider mark to fill its parent so avatars actually show on mobile. */
 .provider-mark svg { width: 100%; height: 100%; display: block; }
 
+/* ── 子代理卡片(TaskCard):运行中图标位的三点脉冲 ──
+   颜色取 currentColor(卡片上是 accent),幅度克制;reduced-motion 静止半透明 */
+.tc-agent-dots {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+.tc-agent-dots span {
+  width: 3.5px;
+  height: 3.5px;
+  border-radius: 999px;
+  background: currentColor;
+  animation: tcAgentDot 1.2s ease-in-out infinite;
+}
+.tc-agent-dots span:nth-child(2) { animation-delay: 0.18s; }
+.tc-agent-dots span:nth-child(3) { animation-delay: 0.36s; }
+@keyframes tcAgentDot {
+  0%, 100% { opacity: 0.25; transform: scale(0.8); }
+  40%      { opacity: 1;    transform: scale(1);   }
+}
+@media (prefers-reduced-motion: reduce) {
+  .tc-agent-dots span { animation: none; opacity: 0.6; }
+}
+
 /* ── Skill 调用横幅 ──────────────────────────────────────────────
    Skill 名居中大字显示,运行期间带流光:渐变经 background-clip:text 上色,
    背景位移让一道高光(--color-ink 亮带,底色 --color-ink-faint)从左到右循环

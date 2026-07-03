@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Bot, ChevronDown, ChevronRight, Loader2, Maximize2 } from 'lucide-react';
+import { ChevronDown, ChevronRight, Loader2, Maximize2 } from 'lucide-react';
 import { useStore } from '../../stores/sessionStore.js';
 import { MarkdownRenderer } from '../MarkdownRenderer.jsx';
 import { extractToolResultText } from '../../utils/toolResult.js';
@@ -69,56 +69,71 @@ export function TaskCard({ toolCall }) {
   const thinkingOut = agent ? agent.thinking.join('') : '';
   const childTools = agent?.toolCalls || [];
 
-  // 独立卡片:主题 accent 描边 + 左侧 accent 竖条 + accent 代理类型标签,
-  // 与折叠工具组的灰色边框行明显区分;颜色全走主题变量,深浅主题自适应
-  // (替换原 violet-* 硬编码浅色系,深色主题下不再突兀)。
+  // 重设计(用户反馈原 accent 描边 + 实色标签太丑):生产级克制 —— 极细中性
+  // 边框卡,去大色块;左侧图标位 = 运行中三点脉冲(accent)/ 结束后几何 agent
+  // 图标 + 状态角点(绿/红);代理类型用小号大写字距标签(ink-muted),任务描述
+  // 正文色;展开箭头与子代理窗口入口悬停浮现(展开态与触屏常显)。
+  // 命名 group/tc:TurnBubble 外层已有 group,避免嵌套 group 互相触发。
   return (
-    <div className="border border-accent-muted border-l-[3px] border-l-accent rounded-lg overflow-hidden bg-canvas animate-fade-up">
+    <div className="group/tc border border-canvas-deep rounded-lg overflow-hidden bg-canvas animate-fade-up">
       <button
         onClick={() => setExpanded(!expanded)}
-        className="w-full px-3 py-2 flex items-start gap-2 bg-accent-subtle/60 hover:bg-accent-subtle transition-colors text-left"
+        className="w-full pl-3 pr-2 py-2 flex items-center gap-2.5 hover:bg-canvas-warm transition-colors text-left"
       >
-        {expanded
-          ? <ChevronDown size={12} className="text-accent shrink-0 mt-0.5" />
-          : <ChevronRight size={12} className="text-accent shrink-0 mt-0.5" />}
-        <Bot size={14} className="text-accent shrink-0 mt-0.5" />
+        {/* 图标位:动画只在运行中出现,与状态点互斥 */}
+        <span className="relative shrink-0 w-5 h-5 flex items-center justify-center text-ink-muted">
+          {isWorking ? (
+            <span className="tc-agent-dots text-accent" aria-label="运行中"><span /><span /><span /></span>
+          ) : (
+            <>
+              {/* 几何 agent 图标:菱形轮廓 + 中心点 */}
+              <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.2" aria-hidden="true">
+                <path d="M7 1.7 12.3 7 7 12.3 1.7 7Z" strokeLinejoin="round" />
+                <circle cx="7" cy="7" r="1.3" fill="currentColor" stroke="none" />
+              </svg>
+              <span
+                className={`absolute -right-px -bottom-px w-1.5 h-1.5 rounded-full ring-2 ring-canvas ${isError ? 'bg-error' : 'bg-success'}`}
+                title={isError ? '子代理出错' : '子代理完成'}
+              />
+            </>
+          )}
+        </span>
         <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-2">
-            <span className="text-[9px] px-1.5 py-px bg-accent text-canvas rounded font-body shrink-0 uppercase tracking-wide">
-              子代理
-            </span>
-            <span className="text-xs font-semibold text-ink font-mono truncate" title={`子代理: ${subagentType}`}>
+          <div className="flex items-baseline gap-2 min-w-0">
+            <span className="text-[10px] uppercase tracking-[0.12em] text-ink-muted font-body shrink-0" title={`子代理: ${subagentType}`}>
               {subagentType}
             </span>
             {agentModel && (
-              <span className="text-[9px] px-1 py-px bg-accent-subtle text-accent rounded font-mono shrink-0" title="该子代理实际使用的模型">
+              <span className="text-[9px] font-mono text-ink-faint truncate" title="该子代理实际使用的模型">
                 {agentModel}
               </span>
             )}
-            {isWorking && <Loader2 size={11} className="text-accent animate-spin shrink-0" />}
-            {isDone && !isError && <span className="text-[10px] text-success shrink-0">完成</span>}
-            {isError && <span className="text-[10px] text-error shrink-0">错误</span>}
           </div>
           {description && (
-            <div className="text-[10.5px] text-ink-muted font-body truncate mt-0.5">
+            <div className="text-[12px] text-ink font-body truncate mt-0.5">
               {description}
             </div>
           )}
         </div>
-        {/* #9 进入子代理会话窗口 */}
-        <span
-          role="button"
-          tabIndex={0}
-          onClick={openAgentView}
-          className="shrink-0 p-1 rounded text-accent/70 hover:text-accent hover:bg-accent-subtle transition-colors cursor-pointer"
-          title="在子代理会话窗口打开"
-        >
-          <Maximize2 size={12} />
+        {/* 悬停浮现:子代理窗口入口(#9) + 展开箭头;触屏无 hover,常显淡态 */}
+        <span className={`shrink-0 flex items-center gap-0.5 transition-opacity ${expanded ? 'opacity-100' : 'opacity-0 group-hover/tc:opacity-100 max-md:opacity-60'}`}>
+          <span
+            role="button"
+            tabIndex={0}
+            onClick={openAgentView}
+            className="p-1 rounded text-ink-faint hover:text-accent hover:bg-accent-subtle transition-colors cursor-pointer"
+            title="在子代理会话窗口打开"
+          >
+            <Maximize2 size={12} />
+          </span>
+          {expanded
+            ? <ChevronDown size={13} className="text-ink-faint" />
+            : <ChevronRight size={13} className="text-ink-faint" />}
         </span>
       </button>
 
       {expanded && (
-        <div className="border-t border-accent-muted pl-3 ml-4 border-l-2 border-accent-muted bg-canvas">
+        <div className="border-t border-canvas-deep pl-3 ml-[21px] border-l border-l-canvas-deep bg-canvas">
           {prompt && (
             <details className="px-3 py-2 border-b border-canvas-deep">
               <summary className="cursor-pointer text-[10px] text-ink-faint uppercase tracking-wider font-body">
