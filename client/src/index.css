@@ -1411,87 +1411,51 @@ html { --content-max: clamp(768px, calc(var(--app-w, 100vw) * 0.7), 1120px); }
   color: #fff;
 }
 
-/* ── 顶栏品牌 logo:星标呼吸旋转 + 字标流光扫过 + 终端方块光标闪烁 ──
-   颜色全部取主题变量,深浅主题均协调;prefers-reduced-motion 时全部静止 */
+/* ── 顶栏品牌 logo:Claude 官方风格 ──
+   accent 八瓣星芒(缓慢呼吸,幅度克制)+ 大号衬线字标 "Claude"。
+   字标固定衬线栈(Newsreader 已随 index.html 加载),不跟随阅读字体选择器;
+   颜色全取主题变量,深浅主题均协调;prefers-reduced-motion 时静止。 */
 .cgui-brand {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: 7px;
   line-height: 1;
 }
 
 .cgui-brand-spark {
-  font-size: 15px;
-  line-height: 1;
-  animation: cgui-brand-spark 3.6s ease-in-out infinite;
+  width: 19px;
+  height: 19px;
+  color: var(--color-accent);
+  transform-origin: center;
+  animation: cgui-brand-breath 4.5s ease-in-out infinite;
 }
 
 .cgui-brand-name {
-  font-size: 15px;
+  font-family: 'Newsreader', Georgia, 'Times New Roman', serif;
+  font-optical-sizing: auto;
+  font-size: 19px;
+  font-weight: 500;
+  letter-spacing: 0.005em;
   color: var(--color-ink);
+  /* 衬线基线偏低,微调与星芒的光学居中 */
+  transform: translateY(-1px);
 }
 
-/* 流光:仅在支持 background-clip:text 的引擎启用(不支持时保持纯色回退) */
-@supports ((-webkit-background-clip: text) or (background-clip: text)) {
-  .cgui-brand-name {
-    background-image: linear-gradient(
-      110deg,
-      var(--color-ink) 0%,
-      var(--color-ink) 42%,
-      var(--color-ink-faint) 50%,
-      var(--color-ink) 58%,
-      var(--color-ink) 100%
-    );
-    background-size: 300% 100%;
-    background-position: 100% 0;
-    -webkit-background-clip: text;
-    background-clip: text;
-    -webkit-text-fill-color: transparent;
-    animation: cgui-brand-sheen 6s linear infinite;
-  }
-}
-
-.cgui-brand-caret {
-  width: 6px;
-  height: 13px;
-  border-radius: 1.5px;
-  background: var(--color-accent);
-  animation: cgui-brand-blink 1.1s steps(1, end) infinite;
-}
-
-@keyframes cgui-brand-spark {
+@keyframes cgui-brand-breath {
   0%,
   100% {
-    transform: rotate(0deg) scale(1);
-    opacity: 0.85;
+    transform: scale(1);
+    opacity: 0.92;
   }
 
   50% {
-    transform: rotate(90deg) scale(1.15);
+    transform: scale(1.08);
     opacity: 1;
   }
 }
 
-@keyframes cgui-brand-sheen {
-  from {
-    background-position: 100% 0;
-  }
-
-  to {
-    background-position: 0% 0;
-  }
-}
-
-@keyframes cgui-brand-blink {
-  50% {
-    opacity: 0;
-  }
-}
-
 @media (prefers-reduced-motion: reduce) {
-  .cgui-brand-spark,
-  .cgui-brand-name,
-  .cgui-brand-caret {
+  .cgui-brand-spark {
     animation: none;
   }
 }

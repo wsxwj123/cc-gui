@@ -7201,11 +7201,20 @@ export default function App() {
           <button data-tour="sidebar-toggle" onClick={toggleSidebar} className="btn-glass p-1.5 transition-colors shrink-0" title={sidebarCollapsed ? '展开' : '收起'}>
             {sidebarCollapsed ? <ChevronRight size={15} className="text-ink-muted" /> : <ChevronLeft size={15} className="text-ink-muted" />}
           </button>
-          {/* 顶栏品牌 logo:星标呼吸旋转 + 字标流光 + 终端光标闪烁(样式在 index.css .cgui-brand) */}
-          <span className="cgui-brand shrink-0 select-none">
-            <span className="cgui-brand-spark text-accent font-mono" aria-hidden="true">✻</span>
-            <span className="cgui-brand-name font-display font-semibold tracking-tight">Claude Code</span>
-            <span className="cgui-brand-caret" aria-hidden="true" />
+          {/* 顶栏品牌 logo:Claude 官方风格 —— accent 八瓣星芒(内联 SVG,缓慢呼吸)
+              + 大号衬线字标 "Claude"(样式在 index.css .cgui-brand) */}
+          <span className="cgui-brand shrink-0 select-none" aria-label="Claude">
+            <svg className="cgui-brand-spark" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+              {/* 八瓣细长花瓣:单瓣纺锤形路径,绕中心每 45° 复制一份 */}
+              {[0, 45, 90, 135, 180, 225, 270, 315].map((deg) => (
+                <path
+                  key={deg}
+                  transform={`rotate(${deg} 12 12)`}
+                  d="M12 12C11.52 10.02 11.32 7.62 11.56 4.6C11.73 3.03 11.87 2.2 12 1.55C12.13 2.2 12.27 3.03 12.44 4.6C12.68 7.62 12.48 10.02 12 12Z"
+                />
+              ))}
+            </svg>
+            <span className="cgui-brand-name">Claude</span>
           </span>
           {selectedProject && (
             <span className="chip font-mono truncate min-w-0 max-w-[160px]">
