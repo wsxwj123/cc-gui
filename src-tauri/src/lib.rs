@@ -253,6 +253,35 @@ mod path_tests {
     }
 }
 
+#[cfg(test)]
+mod node_probe_tests {
+    use super::{best_nvm_version_dir, nvm_settings_symlink};
+
+    #[test]
+    fn picks_highest_nvm_version_numerically() {
+        let names: Vec<String> = ["v18.19.1", "v20.9.0", "v20.11.0", "temp", "elevation"]
+            .iter().map(|s| s.to_string()).collect();
+        // 数字逐段比较:v20.11.0 > v20.9.0(按字符串比较会选错)
+        assert_eq!(best_nvm_version_dir(&names).as_deref(), Some("v20.11.0"));
+        // 无版本目录 / 空列表 → None
+        assert_eq!(best_nvm_version_dir(&["temp".to_string()]), None);
+        assert_eq!(best_nvm_version_dir(&[]), None);
+        // 非 v 前缀或非数字段不参与
+        let mixed: Vec<String> = ["v8", "version-x", "v10.0.0"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(best_nvm_version_dir(&mixed).as_deref(), Some("v10.0.0"));
+    }
+
+    #[test]
+    fn parses_nvm_settings_symlink_path() {
+        // nvm-windows settings.txt 实际格式(CRLF,root/path/arch/proxy 各一行)
+        let s = "root: C:\\Users\\a\\AppData\\Roaming\\nvm\r\npath: C:\\Program Files\\nodejs\r\narch: 64\r\nproxy: none\r\n";
+        assert_eq!(nvm_settings_symlink(s).as_deref(), Some(r"C:\Program Files\nodejs"));
+        // 没有 path 行 / path 为空 → None
+        assert_eq!(nvm_settings_symlink("root: C:\\x\r\narch: 64\r\n"), None);
+        assert_eq!(nvm_settings_symlink("path:\n"), None);
+    }
+}
+
 fn bundled_local_routes_present(app: &tauri::AppHandle) -> bool {
     if let Ok(res) = app.path().resource_dir() {
         for prefix in ["_up_", ""] {
@@ -288,6 +317,96 @@ fn node_from_login_shell() -> Option<PathBuf> {
     if pb.exists() { Some(pb) } else { None }
 }
 
+// nvm-windows 的版本目录名形如 "v20.11.0";按数字逐段比较挑最高版本。
+// 纯函数(不碰文件系统),任意平台可单测;字符串比较会把 v20.9.0 排在 v20.11.0 后,必须数字比。
+fn best_nvm_version_dir(names: &[String]) -> Option<String> {
+    fn ver_key(name: &str) -> Option<Vec<u64>> {
+        let parts: Option<Vec<u64>> = name
+            .strip_prefix('v')?
+            .split('.')
+            .map(|p| p.parse::<u64>().ok())
+            .collect();
+        parts.filter(|v| !v.is_empty())
+    }
+    names
+        .iter()
+        .filter_map(|n| ver_key(n).map(|k| (k, n.clone())))
+        .max_by(|a, b| a.0.cmp(&b.0))
+        .map(|(_, n)| n)
+}
+
+// 解析 nvm-windows settings.txt 的 `path:` 行 —— 那是"当前启用版本"的符号链接目录
+// (默认 C:\Program Files\nodejs,可自定义),node.exe 就在它下面。纯函数,可单测。
+fn nvm_settings_symlink(settings: &str) -> Option<String> {
+    for line in settings.lines() {
+        if let Some(rest) = line.trim().strip_prefix("path:") {
+            let p = rest.trim();
+            if !p.is_empty() {
+                return Some(p.to_string());
+            }
+        }
+    }
+    None
+}
+
+// Windows 常见 node 安装位候选(含各包管理器),返回 (路径, 来源说明) 供探测/日志/报错框共用。
+// 背景:Explorer 双击启动的 GUI 进程继承的 PATH 是登录时的快照 —— 用户装完 node 没重启
+// (或 node 只写进了用户 PATH 而进程读的是旧值)时 PATH 探测必失败,必须按安装位兜底。
+// 用 cfg!() 运行时判断而非 #[cfg] 条件编译,让这段 Windows 逻辑在 mac 上也参与编译与单测。
+fn windows_node_candidates() -> Vec<(PathBuf, &'static str)> {
+    let env_or = |key: &str, default: &str| std::env::var(key).unwrap_or_else(|_| default.to_string());
+    // 用环境变量而非硬编码 C:\ —— 系统盘不是 C: 的机器(或重定向的 Program Files)也能中。
+    let program_files = env_or("ProgramFiles", r"C:\Program Files");
+    let program_files_x86 = env_or("ProgramFiles(x86)", r"C:\Program Files (x86)");
+    let localapp = std::env::var("LOCALAPPDATA").unwrap_or_default();
+    let appdata = std::env::var("APPDATA").unwrap_or_default();
+    let userprofile = std::env::var("USERPROFILE").unwrap_or_default();
+    let mut out: Vec<(PathBuf, &'static str)> = vec![
+        (PathBuf::from(format!(r"{program_files}\nodejs\node.exe")), "官方安装(所有用户)"),
+        (PathBuf::from(format!(r"{program_files_x86}\nodejs\node.exe")), "官方安装(x86)"),
+    ];
+    if !localapp.is_empty() {
+        // 官方安装器选"仅为当前用户安装"时落在 %LOCALAPPDATA%\Programs\nodejs
+        out.push((PathBuf::from(format!(r"{localapp}\Programs\nodejs\node.exe")), "官方安装(仅当前用户)"));
+        out.push((PathBuf::from(format!(r"{localapp}\Volta\bin\node.exe")), "Volta"));
+    }
+    // nvm-windows:node.exe 不在 %APPDATA%\nvm 根目录(此前候选写的是根目录,永远探不到)。
+    // 先取 settings.txt 里 path: 指向的"当前版本"符号链接,再兜底扫 v* 版本目录取最高版。
+    if !appdata.is_empty() {
+        let nvm_root = format!(r"{appdata}\nvm");
+        if let Ok(settings) = std::fs::read_to_string(format!(r"{nvm_root}\settings.txt")) {
+            if let Some(link) = nvm_settings_symlink(&settings) {
+                out.push((PathBuf::from(format!(r"{link}\node.exe")), "nvm-windows(当前版本)"));
+            }
+        }
+        if let Ok(entries) = std::fs::read_dir(&nvm_root) {
+            let names: Vec<String> = entries
+                .filter_map(|e| e.ok())
+                .filter(|e| e.path().is_dir())
+                .filter_map(|e| e.file_name().into_string().ok())
+                .collect();
+            if let Some(best) = best_nvm_version_dir(&names) {
+                out.push((PathBuf::from(format!(r"{nvm_root}\{best}\node.exe")), "nvm-windows(最高版本)"));
+            }
+        }
+    }
+    if !userprofile.is_empty() {
+        out.push((PathBuf::from(format!(r"{userprofile}\scoop\shims\node.exe")), "scoop(shim)"));
+        // scoop 真身:apps\nodejs*\current\node.exe(nodejs / nodejs-lts 两种包名)
+        if let Ok(entries) = std::fs::read_dir(format!(r"{userprofile}\scoop\apps")) {
+            for e in entries.filter_map(|e| e.ok()) {
+                if let Ok(name) = e.file_name().into_string() {
+                    if name.to_ascii_lowercase().starts_with("nodejs") {
+                        out.push((PathBuf::from(format!(r"{}\current\node.exe", e.path().display())), "scoop(app)"));
+                    }
+                }
+            }
+        }
+    }
+    out.push((PathBuf::from(r"C:\ProgramData\chocolatey\bin\node.exe"), "chocolatey"));
+    out
+}
+
 fn find_node() -> Option<PathBuf> {
     // 1) 走继承的 PATH 找(开发模式 / 命令行启动时管用)
     if let Ok(path_var) = std::env::var("PATH") {
@@ -302,38 +421,36 @@ fn find_node() -> Option<PathBuf> {
     // 1.5) macOS/Linux:登录 shell 解析(覆盖 nvm/fnm/asdf/volta 等版本管理器)
     #[cfg(unix)]
     { if let Some(p) = node_from_login_shell() { return Some(p); } }
-    // 2) fallback 已知安装路径(覆盖 Finder 启动的 minimal PATH)。含常见版本管理器固定路径。
+    // 2) fallback 已知安装路径(覆盖 Finder 启动的 minimal PATH / Explorer 的旧 PATH 快照)。
     let home = std::env::var("HOME").unwrap_or_default();
-    let candidates: Vec<String> = if cfg!(target_os = "macos") {
-        vec![
-            "/opt/homebrew/bin/node".into(),     // Apple Silicon Homebrew
-            "/usr/local/bin/node".into(),        // Intel Homebrew / nvm 默认
-            "/usr/bin/node".into(),              // 系统(罕见)
-            format!("{home}/.volta/bin/node"),   // Volta
-            format!("{home}/.asdf/shims/node"),  // asdf
-            format!("{home}/n/bin/node"),        // n
-        ]
-    } else if cfg!(target_os = "windows") {
-        let appdata = std::env::var("APPDATA").unwrap_or_default();
-        let localapp = std::env::var("LOCALAPPDATA").unwrap_or_default();
-        let userprofile = std::env::var("USERPROFILE").unwrap_or_default();
-        vec![
-            r"C:\Program Files\nodejs\node.exe".into(),
-            r"C:\Program Files (x86)\nodejs\node.exe".into(),
-            format!(r"{localapp}\Volta\bin\node.exe"),       // Volta
-            format!(r"{userprofile}\scoop\shims\node.exe"),  // scoop
-            r"C:\ProgramData\chocolatey\bin\node.exe".into(),// chocolatey
-            format!(r"{appdata}\nvm\node.exe"),              // nvm-windows(symlink 到当前版本)
-        ]
+    if cfg!(target_os = "windows") {
+        for (pb, src) in windows_node_candidates() {
+            if pb.exists() {
+                // 命中固定安装位=PATH 探测失败的兜底成功,记来源便于诊断
+                log_startup(&format!("[tauri] find_node: hit fixed candidate [{src}] {}", pb.display()));
+                return Some(pb);
+            }
+        }
     } else {
-        vec![
-            "/usr/bin/node".into(), "/usr/local/bin/node".into(),
-            format!("{home}/.volta/bin/node"), format!("{home}/.asdf/shims/node"),
-        ]
-    };
-    for p in &candidates {
-        let pb = PathBuf::from(p);
-        if pb.exists() { return Some(pb); }
+        let candidates: Vec<String> = if cfg!(target_os = "macos") {
+            vec![
+                "/opt/homebrew/bin/node".into(),     // Apple Silicon Homebrew
+                "/usr/local/bin/node".into(),        // Intel Homebrew / nvm 默认
+                "/usr/bin/node".into(),              // 系统(罕见)
+                format!("{home}/.volta/bin/node"),   // Volta
+                format!("{home}/.asdf/shims/node"),  // asdf
+                format!("{home}/n/bin/node"),        // n
+            ]
+        } else {
+            vec![
+                "/usr/bin/node".into(), "/usr/local/bin/node".into(),
+                format!("{home}/.volta/bin/node"), format!("{home}/.asdf/shims/node"),
+            ]
+        };
+        for p in &candidates {
+            let pb = PathBuf::from(p);
+            if pb.exists() { return Some(pb); }
+        }
     }
     // 3) Windows 兜底:从 Explorer 双击启动的 app 继承的 PATH 可能是"装 node 之前"的
     // 旧值(PATH 改动要重登/重启 Explorer 才传播到已运行的 shell),且官方 node 未必装在
@@ -357,16 +474,33 @@ fn find_node() -> Option<PathBuf> {
                 let dir = dir.trim();
                 if dir.is_empty() { continue; }
                 let candidate = PathBuf::from(dir).join("node.exe");
-                if candidate.exists() { return Some(candidate); }
+                if candidate.exists() {
+                    log_startup(&format!("[tauri] find_node: hit via registry live PATH {}", candidate.display()));
+                    return Some(candidate);
+                }
             }
         }
         if let Ok(out) = std::process::Command::new("cmd").args(["/c", "where", "node"]).creation_flags(NO_WINDOW).output() {
             let where_out = String::from_utf8_lossy(&out.stdout);
             if let Some(line) = where_out.lines().next() {
                 let pb = PathBuf::from(line.trim());
-                if pb.exists() { return Some(pb); }
+                if pb.exists() {
+                    log_startup(&format!("[tauri] find_node: hit via `where node` {}", pb.display()));
+                    return Some(pb);
+                }
             }
         }
+    }
+    // 全部落空:把实际探测过的固定安装位落盘,用户回传日志即可看出差在哪一环。
+    if cfg!(target_os = "windows") {
+        let probed: Vec<String> = windows_node_candidates()
+            .iter()
+            .map(|(p, src)| format!("[{src}] {}", p.display()))
+            .collect();
+        log_startup(&format!(
+            "[tauri] find_node: MISS — inherited PATH / registry PATH / where node all failed; fixed candidates probed: {}",
+            probed.join(" ; ")
+        ));
     }
     None
 }
