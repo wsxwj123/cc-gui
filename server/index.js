@@ -422,6 +422,8 @@ const BUILTIN_COMMANDS = [
   { name: '/init',            desc: '生成项目 CLAUDE.md',  type: 'builtin' },
   { name: '/resume',          desc: '恢复会话',            type: 'builtin' },
   { name: '/review',          desc: '代码审查',            type: 'builtin' },
+  { name: '/goal',            desc: '设定目标，Claude 停止前会检查是否达成（参数：<condition> | clear）', type: 'builtin' },
+  { name: '/code-review',     desc: '评审当前分支或指定 PR 的代码改动（由 code-review 插件提供，未安装时不可用）', type: 'builtin' },
   { name: '/pr-comments',     desc: '查看 PR 评论',        type: 'builtin' },
   { name: '/security-review', desc: '安全审查',            type: 'builtin' },
   { name: '/bug',             desc: '报告 Bug',            type: 'builtin', requiresAnthropic: 'partial', note: '上报到 Anthropic' },
