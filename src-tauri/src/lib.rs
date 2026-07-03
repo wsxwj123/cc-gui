@@ -219,6 +219,20 @@ fn strip_verbatim_str(s: &str) -> String {
 }
 
 #[cfg(test)]
+mod splash_tests {
+    use super::splash_url;
+    // setup 里对 splash_url().parse() 用了 unwrap:若编码不合法是"启动即崩",
+    // 这里锁死 data: URL 必须可被 Url 解析(含中文文案的 percent-encode)。
+    #[test]
+    fn splash_data_url_parses() {
+        let u = splash_url();
+        assert!(u.starts_with("data:text/html;charset=utf-8,"));
+        let parsed: tauri::Url = u.parse().expect("splash data url must parse");
+        assert_eq!(parsed.scheme(), "data");
+    }
+}
+
+#[cfg(test)]
 mod path_tests {
     use super::strip_verbatim_str;
     #[test]
