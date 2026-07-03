@@ -215,8 +215,35 @@ router.get('/agents/active', async (req, res) => {
 
 // ── 后台代理(claude --bg / claude agents)────────────────────────────────
 // CLI 原生能力包一层:`claude agents --json [--all]` 直接吐 JSON 数组
-// {pid,cwd,kind,startedAt,sessionId,name}(实测 2.1.198,非 TTY 可用)。停止复用
-// 现有 /api/processes/:pid/kill(白名单=同一 ~/.claude/sessions 注册表)。
+// {pid,cwd,kind,startedAt,sessionId,name}(实测 2.1.198,非 TTY 可用);后台会话
+// 另有 {id,state}(实测 2.1.200,--all 时已结束的 state 为 done/failed/killed 等,
+// 无 pid)。停止复用现有 /api/processes/:pid/kill(白名单=同一 ~/.claude/sessions
+// 注册表)。
+
+// cwd → ~/.claude/projects 目录名(与 CLI 同算法:非字母数字逐个替换为 -,
+// 同 settings.js 的 pathToHash)。前端拿它 + sessionId 即可打开该会话的转写。
+function cwdToProjectHash(p) {
+  return String(p || '').replace(/[^A-Za-z0-9]/g, '-');
+}
+
+// --json 输出没有结束时间/结果摘要;CLI 把后台会话的落盘状态写在
+// ~/.claude/jobs/<id>/state.json({state,detail,output.result,updatedAt,...},
+// 实测 2.1.200)。这里尽力而为地补读,读不到不影响列表本身。
+async function readBgJobState(id) {
+  if (!/^[A-Za-z0-9_-]{1,64}$/.test(String(id || ''))) return null;
+  try {
+    const raw = await readFile(join(homedir(), '.claude', 'jobs', String(id), 'state.json'), 'utf-8');
+    const s = JSON.parse(raw);
+    return {
+      endedAt: s.updatedAt ? Date.parse(s.updatedAt) || null : null,
+      detail: typeof s.detail === 'string' ? s.detail.slice(0, 300) : '',
+      resultPreview: typeof s.output?.result === 'string' ? s.output.result.slice(0, 500) : '',
+    };
+  } catch { return null; }
+}
+
+// 后台会话的终态(结束不再变化)。running/working 等一律视为进行中。
+const BG_TERMINAL_STATES = new Set(['done', 'failed', 'killed', 'stopped', 'error']);
 
 // GET /api/agents/background?all=1 — 列出后台代理(--all 含已结束)
 router.get('/agents/background', async (req, res) => {
@@ -235,10 +262,23 @@ router.get('/agents/background', async (req, res) => {
         try { resolve(JSON.parse(out)); } catch { reject(new Error('claude agents 输出不是 JSON')); }
       });
     });
-    const agents = (Array.isArray(list) ? list : []).map((a) => ({
-      pid: a.pid, cwd: a.cwd || null, kind: a.kind || '', name: a.name || '',
-      sessionId: a.sessionId || null, startedAt: a.startedAt || null,
-      elapsedMs: a.startedAt ? Date.now() - a.startedAt : null,
+    const agents = await Promise.all((Array.isArray(list) ? list : []).map(async (a) => {
+      const base = {
+        pid: a.pid, cwd: a.cwd || null, kind: a.kind || '', name: a.name || '',
+        sessionId: a.sessionId || null, startedAt: a.startedAt || null,
+        elapsedMs: a.startedAt ? Date.now() - a.startedAt : null,
+        id: a.id || null,
+        state: a.state || null,
+        projectHash: a.cwd ? cwdToProjectHash(a.cwd) : null,
+        endedAt: null, detail: '', resultPreview: '',
+      };
+      // 终态的后台会话补结束时间与结果摘要(jobs/<id>/state.json,best-effort)
+      if (a.kind === 'background' && BG_TERMINAL_STATES.has(a.state)) {
+        const jobId = a.id || (a.sessionId ? String(a.sessionId).slice(0, 8) : null);
+        const extra = await readBgJobState(jobId);
+        if (extra) Object.assign(base, extra);
+      }
+      return base;
     }));
     res.json({ agents });
   } catch (err) {
