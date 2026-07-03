@@ -648,6 +648,21 @@ fn wait_until_free(port: u16, timeout: Duration) -> bool {
     !port_accepts_tcp(port)
 }
 
+// 报错框用:列出本机实际探测过的 node 位置,用户可逐项核对(装在别处/确实没装一眼可辨)。
+// Windows 列具体固定安装位(与 find_node 用同一份 windows_node_candidates,不会漂移);
+// mac/Linux 探测方式是 PATH+登录 shell+固定列表,概括一行即可。
+fn node_probe_report() -> String {
+    if cfg!(target_os = "windows") {
+        let mut lines = vec!["· 当前进程 PATH、注册表实时 PATH(系统+用户)、where node".to_string()];
+        for (p, src) in windows_node_candidates() {
+            lines.push(format!("· {}({src})", p.display()));
+        }
+        lines.join("\n")
+    } else {
+        "· PATH、登录 shell(command -v node)、Homebrew/Volta/asdf/n 常见安装位".to_string()
+    }
+}
+
 // 报错框/日志展示用:启动日志的完整绝对路径(Windows 用户不认识 ~,给全路径可直接粘进资源管理器)。
 fn gui_log_path_display(file_name: &str) -> String {
     let home = std::env::var("HOME")
@@ -821,16 +836,25 @@ pub fn run() {
                     let h2 = handle.clone();
                     let _ = handle.run_on_main_thread(move || {
                         let desc = if node_missing {
-                            "后台服务未能启动:未找到 Node.js。\n\n\
-                             Claude GUI 需要 Node.js 20+ 运行。点「确定」打开官方下载页,\
-                             安装后重新打开本应用即可。\n\n\
-                             (若你确信已装 node:重启电脑让 PATH 生效;版本管理器装的 node \
-                             请确保已在终端配置好。日志:~/.claude-gui/tauri-startup.log)"
+                            format!(
+                                "后台服务未能启动:未找到 Node.js。\n\n\
+                                 Claude GUI 需要 Node.js 20+ 运行。点「确定」打开官方下载页,\
+                                 安装后重新打开本应用即可。\n\n\
+                                 若已安装 node:请重启系统后再试 —— 安装时写入的 PATH \
+                                 不会即时刷新到桌面启动的程序里。\n\n\
+                                 已探测过的位置(均未找到 node):\n{}\n\n\
+                                 启动日志(反馈问题请附上此文件):\n{}",
+                                node_probe_report(),
+                                gui_log_path_display("tauri-startup.log")
+                            )
                         } else {
-                            "后台服务(端口 6677)未能启动,窗口无法加载。\n\n\
-                             Node.js 已找到,但 server 未能启动(非缺 node)。\n\
-                             请查看日志定位:~/.claude-gui/tauri-startup.log\
-                             (Windows:%USERPROFILE%\\.claude-gui\\tauri-startup.log)"
+                            format!(
+                                "后台服务(端口 6677)未能启动,窗口无法加载。\n\n\
+                                 Node.js 已找到,但 server 未能启动(非缺 node,无需重装)。\n\n\
+                                 请查看以下日志定位(反馈问题请附上两份文件):\n{}\n{}",
+                                gui_log_path_display("tauri-startup.log"),
+                                gui_log_path_display("server.log")
+                            )
                         };
                         let res = rfd::MessageDialog::new()
                             .set_title("Claude GUI 无法启动")
