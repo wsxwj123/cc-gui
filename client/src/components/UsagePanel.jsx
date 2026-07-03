@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
-import { BarChart3, Cpu, Database, Calendar, ArrowLeft, RefreshCw, FolderOpen, Download } from 'lucide-react';
+import { BarChart3, Cpu, Database, Calendar, ArrowLeft, RefreshCw, FolderOpen, Download, FileText } from 'lucide-react';
 import { ModelBadge, modelProvider } from './ModelBadge.jsx';
+import { ArtifactPreview } from './ArtifactPreview.jsx';
 import { computeCost, formatCost } from '../utils/pricing.js';
 
 // Differentiated billing for the usage panel:
@@ -138,6 +139,51 @@ function SubscriptionUsageCard() {
   );
 }
 
+// 使用报告(/insights)。点击后 server spawn `claude -p /insights` 生成 HTML 报告,
+// 返回内容用 ArtifactPreview(沙箱 iframe)内联预览,可停靠/全屏。生成较慢(数十秒)。
+function InsightsReportCard() {
+  const [loading, setLoading] = useState(false);
+  const [html, setHtml] = useState('');
+  const [error, setError] = useState('');
+
+  const generate = async () => {
+    setLoading(true);
+    setError('');
+    try {
+      const res = await fetch('/api/insights-report', { method: 'POST' });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+      setHtml(data.html || '');
+    } catch (e) {
+      setError(e.message || '生成失败');
+    }
+    setLoading(false);
+  };
+
+  return (
+    <div>
+      <h3 className="text-[10px] font-medium uppercase tracking-widest text-ink-faint font-body mb-3 flex items-center gap-1.5">
+        <FileText size={11} />使用报告
+      </h3>
+      <div className="bg-canvas-warm border border-canvas-deep rounded-lg p-3">
+        <p className="text-[11px] text-ink-faint font-body leading-snug mb-2.5">
+          调用 CLI 的 /insights 分析本机 Claude Code 会话，生成一份 HTML 使用报告。生成需数十秒。
+        </p>
+        <button
+          onClick={generate}
+          disabled={loading}
+          className="w-full flex items-center justify-center gap-1.5 py-2 text-xs text-ink-muted hover:text-ink font-body transition-colors bg-canvas border border-canvas-deep rounded-lg disabled:opacity-50"
+        >
+          {loading ? <RefreshCw size={12} className="animate-spin" /> : <FileText size={12} />}
+          {loading ? '生成中…（请稍候）' : '生成使用报告'}
+        </button>
+        {error && <div className="mt-2 text-[11px] text-error font-body">{error}</div>}
+        {html && <ArtifactPreview lang="html" code={html} />}
+      </div>
+    </div>
+  );
+}
+
 export function UsagePanel() {
   const [stats, setStats] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -190,6 +236,8 @@ export function UsagePanel() {
     <div className="px-4 py-4 space-y-5 overflow-y-auto h-full">
       {/* W7:官方订阅额度(非官方 provider 自动隐藏) */}
       <SubscriptionUsageCard />
+      {/* 使用报告(/insights)——按需生成 HTML 报告 */}
+      <InsightsReportCard />
       {/* Total summary */}
       <div>
         <h3 className="text-[10px] font-medium uppercase tracking-widest text-ink-faint font-body mb-3">

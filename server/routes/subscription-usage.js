@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { readFileSync } from 'fs';
+import { readFile } from 'fs/promises';
 import { homedir } from 'os';
 import { join } from 'path';
 import { claudeSpawn, cleanChildEnv } from './chat.js';
@@ -70,6 +71,47 @@ router.get('/subscription-usage', async (_req, res) => {
     finish(data);
   });
   proc.on('error', (e) => finish({ official: true, error: e.message }));
+});
+
+// 使用报告(/insights)。CLI 内置 slash 命令 /insights 在 -p 模式下可直接执行:
+// 它先把一份 HTML 报告写到 ~/.claude/usage-data/report-<时间戳>.html(同时刷新
+// report.html),再输出一段带 file:// 路径的总结。这里 spawn `claude -p /insights`,
+// 从 stdout 解析出 file:// 路径读回 HTML 内容返回前端(前端用 ArtifactPreview 预览)。
+// env 走 cleanChildEnv;--dangerously-skip-permissions 让只读的会话分析在无 TTY 下
+// 不被权限询问挂住(报告本身不触碰项目代码)。生成耗时较长,超时给 120s。
+router.post('/insights-report', async (_req, res) => {
+  let proc;
+  try {
+    proc = claudeSpawn(['-p', '/insights', '--dangerously-skip-permissions'], {
+      cwd: homedir(), stdio: ['ignore', 'pipe', 'pipe'], env: cleanChildEnv(),
+    });
+  } catch (e) { return res.status(500).json({ error: 'spawn failed: ' + e.message }); }
+  if (!proc.pid) { proc.on('error', () => {}); return res.status(500).json({ error: 'claude CLI not found' }); }
+  // stderr 必须排空 —— 不读满 ~64KB 会挂死子进程(与 /usage 同坑)。
+  proc.stderr?.resume();
+  let out = '';
+  let done = false;
+  const finish = (status, data) => {
+    if (done) return; done = true;
+    clearTimeout(timer);
+    try { proc.kill('SIGKILL'); } catch {}
+    res.status(status).json(data);
+  };
+  const timer = setTimeout(() => finish(504, { error: '/insights 生成超时（120s）' }), 120_000);
+  proc.stdout.on('data', (c) => { out += c.toString(); });
+  proc.on('close', async () => {
+    if (done) return;
+    // 从输出里抓 file:///…report…​.html。抓不到则回退到稳定路径 report.html。
+    const m = out.match(/file:\/\/(\/[^\s"'`]+\.html)/i);
+    const htmlPath = m ? decodeURIComponent(m[1]) : join(homedir(), '.claude', 'usage-data', 'report.html');
+    try {
+      const html = await readFile(htmlPath, 'utf8');
+      finish(200, { html, path: htmlPath });
+    } catch (e) {
+      finish(500, { error: '未找到生成的报告文件：' + e.message });
+    }
+  });
+  proc.on('error', (e) => finish(500, { error: e.message }));
 });
 
 export default router;
