@@ -6985,8 +6985,12 @@ export default function App() {
           <button data-tour="sidebar-toggle" onClick={toggleSidebar} className="btn-glass p-1.5 transition-colors shrink-0" title={sidebarCollapsed ? '展开' : '收起'}>
             {sidebarCollapsed ? <ChevronRight size={15} className="text-ink-muted" /> : <ChevronLeft size={15} className="text-ink-muted" />}
           </button>
-          <span className="text-accent text-[15px] leading-none shrink-0 select-none font-mono">✻</span>
-          <span className="text-[15px] font-display font-semibold text-ink tracking-tight shrink-0">Claude Code</span>
+          {/* 顶栏品牌 logo:星标呼吸旋转 + 字标流光 + 终端光标闪烁(样式在 index.css .cgui-brand) */}
+          <span className="cgui-brand shrink-0 select-none">
+            <span className="cgui-brand-spark text-accent font-mono" aria-hidden="true">✻</span>
+            <span className="cgui-brand-name font-display font-semibold tracking-tight">Claude Code</span>
+            <span className="cgui-brand-caret" aria-hidden="true" />
+          </span>
           {selectedProject && (
             <span className="chip font-mono truncate min-w-0 max-w-[160px]">
               {formatPathShort(selectedProject.path)}
