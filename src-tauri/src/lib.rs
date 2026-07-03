@@ -648,8 +648,33 @@ fn wait_until_free(port: u16, timeout: Duration) -> bool {
     !port_accepts_tcp(port)
 }
 
+// 报错框/日志展示用:启动日志的完整绝对路径(Windows 用户不认识 ~,给全路径可直接粘进资源管理器)。
+fn gui_log_path_display(file_name: &str) -> String {
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .unwrap_or_else(|_| ".".to_string());
+    let sep = if cfg!(windows) { '\\' } else { '/' };
+    format!("{home}{sep}.claude-gui{sep}{file_name}")
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // 诊断①:进程一进来先落一行日志。此前首条日志在窗口创建之后 —— 若窗口创建前就
+    // panic/失败,日志文件里什么都没有,真机取证无从下手。现在只要双击过,日志必有此行。
+    log_startup(&format!(
+        "[tauri] ===== launch v{} ({} {}) =====",
+        env!("APP_VERSION"),
+        std::env::consts::OS,
+        std::env::consts::ARCH
+    ));
+    // 诊断②:panic 落盘。GUI 子系统进程的 panic 只写 stderr,双击启动时无人可见
+    // (v0.2.98 缺 webview-data-url feature 的启动 panic 就是这样静默闪退、零痕迹)。
+    // 钩子写完日志仍调用默认钩子,dev 模式下终端里的 panic 输出不受影响。
+    let default_panic_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        log_startup(&format!("[tauri] PANIC: {info}"));
+        default_panic_hook(info);
+    }));
     tauri::Builder::default()
         // L1: 单例插件 — 双击 app 时不开新进程,把已有窗口前置聚焦,避免每次都开新窗口
         // 且不踩坏 6677 上活着的 server(浏览器 session 不掉)。
@@ -681,7 +706,10 @@ pub fn run() {
                 }
                 _ => (1560.0, 960.0),
             };
-            let window = WebviewWindowBuilder::new(
+            // 诊断③:窗口创建失败不再经 `?` 静默上抛(最终 expect panic,双击的用户什么都
+            // 看不到)。先落日志、再弹原生框说清最可能的原因(Windows 上多为 WebView2
+            // Runtime 缺失/损坏),setup 在主线程跑,rfd 同步对话框可直接弹。
+            let window = match WebviewWindowBuilder::new(
                 app,
                 "main",
                 WebviewUrl::External(splash_url().parse().unwrap()),
@@ -690,7 +718,24 @@ pub fn run() {
             .inner_size(win_w, win_h)
             .min_inner_size(900.0, 600.0)
             .center()
-            .build()?;
+            .build()
+            {
+                Ok(w) => w,
+                Err(e) => {
+                    log_startup(&format!("[tauri] FATAL: webview window creation failed: {e}"));
+                    rfd::MessageDialog::new()
+                        .set_title("Claude GUI 无法启动")
+                        .set_description(format!(
+                            "窗口创建失败:{e}\n\n\
+                             Windows 上常见原因是 WebView2 Runtime 缺失或损坏,\
+                             可在微软官网搜索「Evergreen WebView2 Runtime」重新安装后再试。\n\n\
+                             启动日志(反馈问题请附上):\n{}",
+                            gui_log_path_display("tauri-startup.log")
+                        ))
+                        .show();
+                    return Err(e.into());
+                }
+            };
             let _ = window.show();
             let _ = window.set_focus();
             log_startup("[tauri] window shown on splash page");
