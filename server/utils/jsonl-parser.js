@@ -66,8 +66,10 @@ export async function streamJsonl(filePath, callback) {
 
 /**
  * Read just the first and last N lines of a JSONL file for preview.
+ * 本函数为拿 tail/totalLines 本就逐行解析整个文件;onRecord 让调用方顺路收集
+ * 中部记录(如 compact_boundary),不必再读一遍文件。
  */
-export async function readJsonlEdges(filePath, edgeSize = 3) {
+export async function readJsonlEdges(filePath, edgeSize = 3, onRecord) {
   const head = [];
   let totalLines = 0;
   const tail = [];
@@ -89,6 +91,7 @@ export async function readJsonlEdges(filePath, edgeSize = 3) {
         // Keep a rotating buffer for tail
         tail.push(parsed);
         if (tail.length > edgeSize) tail.shift();
+        if (onRecord) onRecord(parsed);
       } catch {}
     });
 
