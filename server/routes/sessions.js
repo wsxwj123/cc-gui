@@ -165,8 +165,11 @@ router.get('/sessions/:sessionId/messages', async (req, res) => {
     if (!safeId(projectHash) || !safeId(req.params.sessionId)) {
       return res.status(400).json({ error: 'invalid projectHash or sessionId' });
     }
-    const messages = await getSessionMessages(req.params.sessionId, projectHash);
-    res.json(messages);
+    // 响应形态 { messages, usageTotals }:usageTotals 是服务端解析 jsonl 时顺带算好的
+    // 整会话用量聚合(按 message.id 去重逐条求和),前端直接取用,免去几千条消息的
+    // 每帧全量 reduce。客户端(sessionStore.fetchMessages / App.jsx peek)已兼容两种形态。
+    const { messages, usageTotals } = await getSessionMessages(req.params.sessionId, projectHash);
+    res.json({ messages, usageTotals });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
