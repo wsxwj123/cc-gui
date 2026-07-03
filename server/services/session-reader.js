@@ -454,7 +454,20 @@ function reconstructCommandPrompt(text, { bareToName = false } = {}) {
  */
 export async function getSessionMessages(sessionId, projectHash) {
   const filePath = join(PROJECTS_DIR, projectHash, `${sessionId}.jsonl`);
-  const records = await parseJsonl(filePath);
+  const rawRecords = await parseJsonl(filePath);
+  // CJ-1:CLI 在某些 resume/排队场景会把一段历史记录【原样重放】追加进同一 jsonl
+  // (实测用户会话:1157/1848 条记录与前文 uuid 完全相同,内容逐字节一致,重放段
+  // 从旧 compact_boundary 开始)。线性解析不去重 → 同一段 AI 回复连同其工具调用组
+  // 渲染两遍(用户截图实报)。按记录 uuid 去重、保留首次出现;无 uuid 的记录
+  // (queue-operation 等)不参与去重。
+  const seenRecordUuids = new Set();
+  const records = rawRecords.filter((r) => {
+    const u = r?.uuid;
+    if (!u) return true;
+    if (seenRecordUuids.has(u)) return false;
+    seenRecordUuids.add(u);
+    return true;
+  });
   // L4: 加载附件 sidecar,在 user 消息 push 时按 textHash 注入 attachments/displayText
   const attachmentsByHash = await readAttachmentsSidecar(sessionId);
 
