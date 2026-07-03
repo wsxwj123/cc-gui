@@ -166,6 +166,14 @@ function BackgroundAgentsSection({ stoppingPid, onStop }) {
                   <Bot size={11} className="text-ink-faint" />
                   <span className="text-[11px] text-ink font-body truncate flex-1" title={a.name}>{a.name || a.id || '后台代理'}</span>
                   <StatusBadge status={a.state} />
+                  {/* 结束后进程仍常驻(可 attach);有 pid 时保留停止按钮以释放它 */}
+                  {a.pid != null && (
+                    <button onClick={() => onStop(String(a.pid))} disabled={stoppingPid === String(a.pid)}
+                      title="会话已结束但进程仍常驻,点击结束进程"
+                      className="shrink-0 flex items-center gap-1 text-[10px] px-2 py-1 rounded bg-red-50 hover:bg-red-100 text-red-700 border border-red-200 transition-colors disabled:opacity-50">
+                      {stoppingPid === String(a.pid) ? <Loader2 size={10} className="animate-spin" /> : <Square size={10} />}停止
+                    </button>
+                  )}
                 </div>
                 {(a.detail || a.resultPreview) && (
                   <div className="text-[10.5px] text-ink-muted font-body line-clamp-2 mt-1" title={a.detail || a.resultPreview}>
