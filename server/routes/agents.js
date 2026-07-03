@@ -5,7 +5,8 @@ import { readFile, readdir, writeFile, mkdir, stat, open, unlink } from 'fs/prom
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { homedir } from 'os';
-import { getActiveChatProcesses } from './chat.js';
+import { getActiveChatProcesses, claudeSpawn, cleanChildEnv } from './chat.js';
+import { resolveUnderHome } from '../utils/safe-path.js';
 
 const execFileP = promisify(execFile);
 const router = Router();
@@ -183,6 +184,9 @@ router.get('/agents/active', async (req, res) => {
       if (!alive) continue;
       out.push({
         kind: 'cli-session',
+        // 注册表自己的 kind(interactive/background 等)独立返回,前端据此分区
+        // (后台代理面板 filter cliKind==='background');原来塞在 promptPreview 里没法区分。
+        cliKind: s.kind || null,
         pid: String(s.pid),
         sessionId: s.sessionId || f.replace('.json', ''),
         cwd: s.cwd || null,
@@ -207,6 +211,75 @@ router.get('/agents/active', async (req, res) => {
       cliSessions: out.filter((a) => a.kind === 'cli-session').length,
     },
   });
+});
+
+// ── 后台代理(claude --bg / claude agents)────────────────────────────────
+// CLI 原生能力包一层:`claude agents --json [--all]` 直接吐 JSON 数组
+// {pid,cwd,kind,startedAt,sessionId,name}(实测 2.1.198,非 TTY 可用)。停止复用
+// 现有 /api/processes/:pid/kill(白名单=同一 ~/.claude/sessions 注册表)。
+
+// GET /api/agents/background?all=1 — 列出后台代理(--all 含已结束)
+router.get('/agents/background', async (req, res) => {
+  const args = ['agents', '--json'];
+  if (req.query.all === '1') args.push('--all');
+  try {
+    const list = await new Promise((resolve, reject) => {
+      const proc = claudeSpawn(args, { stdio: ['ignore', 'pipe', 'pipe'], env: cleanChildEnv() });
+      proc.stderr?.resume(); // 只读 stdout,排空 stderr 防 64KB 挂死(v0.2.93 教训)
+      let out = '';
+      const timer = setTimeout(() => { try { proc.kill(); } catch {} reject(new Error('claude agents 超时')); }, 15000);
+      proc.stdout.on('data', (d) => { out += d; });
+      proc.on('error', (e) => { clearTimeout(timer); reject(e); });
+      proc.on('close', () => {
+        clearTimeout(timer);
+        try { resolve(JSON.parse(out)); } catch { reject(new Error('claude agents 输出不是 JSON')); }
+      });
+    });
+    const agents = (Array.isArray(list) ? list : []).map((a) => ({
+      pid: a.pid, cwd: a.cwd || null, kind: a.kind || '', name: a.name || '',
+      sessionId: a.sessionId || null, startedAt: a.startedAt || null,
+      elapsedMs: a.startedAt ? Date.now() - a.startedAt : null,
+    }));
+    res.json({ agents });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/agents/background/dispatch { cwd, prompt, model? }
+// `claude --bg -p <prompt>`:派后台代理立即返回。默认 --permission-mode acceptEdits ——
+// 后台无人值守,default 会卡在授权等待(canUseTool 通道不在场);绝不静默 bypass。
+router.post('/agents/background/dispatch', async (req, res) => {
+  const { cwd, prompt, model } = req.body || {};
+  if (typeof prompt !== 'string' || !prompt.trim()) return res.status(400).json({ error: 'prompt 必填' });
+  let dir;
+  try { dir = resolveUnderHome(String(cwd || ''), { label: 'cwd' }); }
+  catch (e) { return res.status(400).json({ error: e.message }); }
+  // 实测:--bg 与 -p 冲突(-p 不起 interactive 会话,agents 无法 attach)——prompt 必须
+  // 走位置参数:`claude --bg '<task>'`。
+  const args = ['--bg', prompt.trim(), '--permission-mode', 'acceptEdits'];
+  if (typeof model === 'string' && model.trim()) args.push('--model', model.trim());
+  try {
+    const proc = claudeSpawn(args, { cwd: dir, stdio: ['ignore', 'pipe', 'pipe'], env: cleanChildEnv() });
+    let out = '';
+    let errOut = '';
+    proc.stdout.on('data', (d) => { out += d; });
+    proc.stderr.on('data', (d) => { if (errOut.length < 4000) errOut += d; });
+    // --bg 打印派发信息后立即退出;等它退出把 stdout 返回(含 agent 名/说明供前端展示)。
+    const done = await new Promise((resolve) => {
+      const timer = setTimeout(() => resolve({ timedOut: true }), 20000);
+      proc.on('close', (code) => { clearTimeout(timer); resolve({ code }); });
+      proc.on('error', (e) => { clearTimeout(timer); resolve({ error: e.message }); });
+    });
+    if (done.error) return res.status(500).json({ error: done.error });
+    // 退出码非 0 = 派发失败(如 flag 冲突/额度),必须如实报错,不能装 ok。
+    if (!done.timedOut && done.code !== 0) {
+      return res.status(500).json({ error: (errOut || out || `claude --bg 退出码 ${done.code}`).trim().slice(0, 1000) });
+    }
+    res.json({ ok: true, output: out.trim().slice(0, 2000), ...(done.timedOut ? { note: '派发进程未在 20s 内退出,代理可能仍已启动' } : {}) });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // ── Bundled (built-in) agent presets ─────────────────────────────────────

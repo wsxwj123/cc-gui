@@ -13,6 +13,91 @@ function fmtElapsed(ms) {
   return `${h}h${m % 60}m`;
 }
 
+// 后台代理(claude --bg):CLI 原生的"派后台会话"能力包一层。列表来自
+// /api/agents/background(claude agents --json);会话答完仍常驻可 attach,
+// 所以必须给停止按钮(走 /api/processes/:pid/kill 白名单)。5s 轮询(比子代理
+// 1.5s 慢:每次轮询要 spawn 一次 claude agents,别太频)。
+function BackgroundAgentsSection({ stoppingPid, onStop }) {
+  const selectedProject = useStore((s) => s.selectedProject);
+  const [agents, setAgents] = useState([]);
+  const [prompt, setPrompt] = useState('');
+  const [dispatching, setDispatching] = useState(false);
+  const [note, setNote] = useState('');
+  const mountedRef = useRef(true);
+
+  const load = async () => {
+    try {
+      const r = await fetch('/api/agents/background');
+      const d = await r.json();
+      if (!mountedRef.current) return;
+      if (Array.isArray(d.agents)) setAgents(d.agents.filter((a) => a.kind === 'background'));
+    } catch {}
+  };
+  useEffect(() => {
+    mountedRef.current = true;
+    load();
+    const id = setInterval(load, 5000);
+    return () => { mountedRef.current = false; clearInterval(id); };
+  }, []);
+
+  const dispatch = async () => {
+    const p = prompt.trim();
+    const cwd = selectedProject?.path;
+    if (!p || !cwd || dispatching) return;
+    setDispatching(true); setNote('');
+    try {
+      const r = await fetch('/api/agents/background/dispatch', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cwd, prompt: p }),
+      });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || '派发失败');
+      setPrompt('');
+      setNote(d.output?.split('\n')[0] || '已派发');
+      setTimeout(load, 1500);
+    } catch (e) { setNote(String(e.message || e)); }
+    setDispatching(false);
+  };
+
+  return (
+    <section>
+      <h3 className="text-[10px] uppercase tracking-widest text-ink-faint font-body mb-2 flex items-center gap-1.5">
+        <Bot size={10} />后台代理 (claude --bg) ({agents.length})
+      </h3>
+      <div className="flex items-center gap-1.5 mb-2">
+        <input value={prompt} onChange={(e) => setPrompt(e.target.value)}
+          onKeyDown={(e) => { if (e.key === 'Enter') dispatch(); }}
+          placeholder={selectedProject ? `派一个后台任务到 ${selectedProject.name || '当前项目'}(接受编辑模式)` : '先在左侧选择项目'}
+          disabled={!selectedProject || dispatching}
+          className="flex-1 min-w-0 text-[11px] font-body bg-canvas-warm border border-canvas-deep rounded px-2 py-1.5 text-ink focus:border-accent outline-none" />
+        <button onClick={dispatch} disabled={!prompt.trim() || !selectedProject || dispatching}
+          className="shrink-0 flex items-center gap-1 px-2.5 py-1.5 rounded text-[11px] font-medium text-white bg-accent hover:bg-accent/90 disabled:opacity-40">
+          {dispatching ? <Loader2 size={11} className="animate-spin" /> : <PlayCircle size={11} />}派发
+        </button>
+      </div>
+      {note && <div className="text-[10px] text-ink-faint font-mono mb-2 truncate" title={note}>{note}</div>}
+      {agents.length > 0 && (
+        <div className="space-y-2">
+          {agents.map((a) => (
+            <div key={a.pid} className="bg-canvas-warm border border-canvas-deep rounded-lg p-2.5">
+              <div className="flex items-center gap-2">
+                <Bot size={11} className="text-accent" />
+                <span className="text-[11px] text-ink font-body truncate flex-1" title={a.name}>{a.name || `bg #${a.pid}`}</span>
+                <span className="text-[10px] text-ink-faint font-mono shrink-0">{fmtElapsed(a.elapsedMs)}</span>
+                <button onClick={() => onStop(String(a.pid))} disabled={stoppingPid === String(a.pid)}
+                  className="shrink-0 flex items-center gap-1 text-[10px] px-2 py-1 rounded bg-red-50 hover:bg-red-100 text-red-700 border border-red-200 transition-colors disabled:opacity-50">
+                  {stoppingPid === String(a.pid) ? <Loader2 size={10} className="animate-spin" /> : <Square size={10} />}停止
+                </button>
+              </div>
+              {a.cwd && <div className="text-[10px] text-ink-faint font-mono truncate mt-1" title={a.cwd}>{a.cwd.split(/[/\\]+/).pop()}</div>}
+            </div>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
 // Card for a single server-side agent (chat-process or cli-session). Shows
 // the prompt preview, elapsed time, model, and a stop button that the parent
 // has wired with a fallback path for cli-session pids.
@@ -480,6 +565,9 @@ export function AgentMonitorPanel() {
             </div>
           </section>
         )}
+
+        {/* 后台代理(claude --bg)— CLI 原生后台会话:派发/列表/停止 */}
+        <BackgroundAgentsSection stoppingPid={stoppingPid} onStop={stop} />
 
         {/* Server-side chat children + CLI agents — bucketed by status so the
             "working" ones default open and finished/errored ones fold away. */}
