@@ -21,6 +21,8 @@ import {
   getActiveSessions,
   attachmentTextHash,
 } from '../services/session-reader.js';
+import { claudeSpawn, cleanChildEnv } from './chat.js';
+import { resolveUnderHome } from '../utils/safe-path.js';
 
 // L4: 附件元数据 sidecar — 写入位置与 session-reader 一致。
 const ATTACHMENTS_DIR = join(homedir(), '.claude-gui', 'attachments');
@@ -625,6 +627,39 @@ router.delete('/bak-files', async (req, res) => {
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
+});
+
+// POST /api/project/purge { cwd } — 彻底清理某项目的 Claude 本地状态。
+// 危险操作:调用 CLI `claude project purge -y <path>`,删除 ~/.claude/projects/<hash>
+// 下的会话记录(.jsonl)与 memory/ 等 Claude 状态,不触碰项目源码(实测:-y 非交互,
+// 退出码 0,源目录文件保留)。cwd 经 resolveUnderHome 校验(必须在 $HOME 内、拒绝 .. 段)。
+router.post('/project/purge', async (req, res) => {
+  let dir;
+  try { dir = resolveUnderHome(String(req.body?.cwd || ''), { label: 'cwd', requireCanonical: true }); }
+  catch (e) { return res.status(400).json({ error: e.message }); }
+
+  let proc;
+  try {
+    proc = claudeSpawn(['project', 'purge', '-y', dir], {
+      cwd: homedir(), stdio: ['ignore', 'pipe', 'pipe'], env: cleanChildEnv(),
+    });
+  } catch (e) { return res.status(500).json({ error: 'spawn failed: ' + e.message }); }
+  if (!proc.pid) { proc.on('error', () => {}); return res.status(500).json({ error: 'claude CLI not found' }); }
+
+  let out = '', err = '', done = false;
+  const finish = (status, data) => {
+    if (done) return; done = true;
+    clearTimeout(timer);
+    try { proc.kill('SIGKILL'); } catch {}
+    res.status(status).json(data);
+  };
+  const timer = setTimeout(() => finish(504, { error: 'purge 超时' }), 30_000);
+  proc.stdout.on('data', (c) => { out += c.toString(); });
+  proc.stderr.on('data', (c) => { err += c.toString(); });
+  proc.on('close', (code) => {
+    finish(code === 0 ? 200 : 500, { ok: code === 0, code, stdout: out.trim(), stderr: err.trim() });
+  });
+  proc.on('error', (e) => finish(500, { error: e.message }));
 });
 
 // GET /api/active-sessions — currently running Claude processes

@@ -48,7 +48,9 @@ import {
   Sun, Moon, Monitor, Bot, Camera, History, Loader2, Shield, FolderTree,
   Archive, ArchiveRestore, Trash2, EyeOff, Columns2, Smartphone, Pencil, Type, Palette,
   Menu, SquarePen, Gauge, Cpu, CheckCircle2, BookText, Sparkles, HelpCircle, Pin,
+  Download, ClipboardCopy,
 } from 'lucide-react';
+import { copyText } from './utils/clipboard.js';
 
 // ── Per-session shadow-git checkpoints ──────────────────────────
 // Session title with inline rename (click pencil → edit → Enter/blur saves,
@@ -902,6 +904,28 @@ function ProjectList() {
     });
   };
 
+  // 危险操作:调用 CLI `claude project purge` 删除该项目在 Claude 的全部本地状态
+  // (会话历史 / 记忆 / 文件历史等),不影响项目源码。成功后刷新列表。
+  const purgeProject = async (project) => {
+    const ok = await confirmDialog(
+      `彻底清理该项目的 Claude 本地状态？\n\n${project.path}\n\n将删除该项目的全部会话历史、记忆、文件历史等 Claude 本地状态。不影响项目代码，操作不可恢复。`,
+      { danger: true },
+    );
+    if (!ok) return;
+    try {
+      const r = await fetch('/api/project/purge', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cwd: project.path }),
+      });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok || !data.ok) throw new Error(data.error || data.stderr || `HTTP ${r.status}`);
+      if (selectedProject?.hash === project.hash) setSelectedProject(null);
+      fetchProjects();
+    } catch (e) {
+      await confirmDialog(`清理失败：${e.message}`, { danger: false });
+    }
+  };
+
   useEffect(() => { fetchProjects(); }, []);
   useEffect(() => {
     fetch('/api/prefs/pinned').then((r) => r.json())
@@ -1136,6 +1160,13 @@ function ProjectList() {
                 title="从侧栏隐藏（不删除本地文件，下次按 + 重新添加同路径即可恢复）"
               >
                 <EyeOff size={12} className="text-ink-faint" />
+              </button>
+              <button
+                onClick={(e) => { e.stopPropagation(); purgeProject(project); }}
+                className="opacity-100 md:opacity-0 md:group-hover:opacity-100 transition-opacity p-1 hover:bg-red-50 rounded"
+                title="彻底清理该项目的 Claude 本地状态（会话历史/记忆等，不影响项目代码，不可恢复）"
+              >
+                <Trash2 size={12} className="text-ink-faint hover:text-red-600" />
               </button>
             </div>
           </div>
@@ -2276,6 +2307,101 @@ function AutoCompactBanner({ contextPct, idle, enabled, onCompact, COUNTDOWN = 1
           title="本轮不再提示，上下文占比降回阈值下后才会重新提醒"
         >取消</button>
       </div>
+    </div>
+  );
+}
+
+// ─── 会话导出 Markdown ──────────────────────────────────────────
+// 纯前端:把已加载的消息(persisted messages + 本轮 chatMessages)转成 Markdown。
+// 用户/助手正文原样;工具调用压成一行 `> 工具:名称(参数摘要)`;compact 分隔等噪音跳过。
+function toolArgSummary(input) {
+  if (!input || typeof input !== 'object') return '';
+  const v = input.command || input.file_path || input.path || input.pattern
+    || input.query || input.url || input.prompt || input.description || '';
+  const s = String(v).replace(/\s+/g, ' ').trim();
+  return s.length > 80 ? s.slice(0, 80) + '…' : s;
+}
+
+function buildSessionMarkdown(msgs, title) {
+  const lines = [`# ${title || '会话'}`, ''];
+  for (const m of msgs) {
+    if (!m || m.type === 'compact') continue;
+    if (m.type === 'user') {
+      const text = String(m.text || '').trim();
+      if (!text) continue;
+      lines.push('## 你', '', text, '');
+    } else if (m.type === 'turn') {
+      const text = (Array.isArray(m.text) ? m.text.join('\n') : (m.text || '')).trim();
+      const tools = Array.isArray(m.toolCalls) ? m.toolCalls : [];
+      if (!text && tools.length === 0) continue;
+      lines.push('## Claude', '');
+      if (text) lines.push(text, '');
+      for (const tc of tools) {
+        const arg = toolArgSummary(tc.input);
+        lines.push(`> 工具:${tc.name || '未知'}${arg ? `(${arg})` : ''}`);
+      }
+      if (tools.length) lines.push('');
+    }
+  }
+  return lines.join('\n').replace(/\n{3,}/g, '\n\n').trim() + '\n';
+}
+
+// 导出入口:一个按钮展开两个动作(下载 .md / 复制剪贴板)。照现有 header 按钮样式。
+function ExportSessionButton({ messages, title }) {
+  const [open, setOpen] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const ref = useRef(null);
+  useEffect(() => {
+    if (!open) return;
+    const onDoc = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
+    document.addEventListener('mousedown', onDoc);
+    return () => document.removeEventListener('mousedown', onDoc);
+  }, [open]);
+
+  const disabled = !messages || messages.length === 0;
+  const safeTitle = (title || '会话').replace(/[\\/:*?"<>|\n]+/g, ' ').trim().slice(0, 40) || '会话';
+  const fileName = `${safeTitle}-${new Date().toISOString().slice(0, 10)}.md`;
+
+  const download = () => {
+    const md = buildSessionMarkdown(messages, title);
+    const blob = new Blob([md], { type: 'text/markdown' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = fileName; a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 0);
+    setOpen(false);
+  };
+  const copy = async () => {
+    const md = buildSessionMarkdown(messages, title);
+    const ok = await copyText(md);
+    if (ok) { setCopied(true); setTimeout(() => setCopied(false), 1500); }
+    else { await confirmDialog('复制失败:浏览器拒绝了剪贴板访问，请改用"下载 Markdown"。', { danger: false }); }
+    setOpen(false);
+  };
+
+  return (
+    <div className="relative" ref={ref}>
+      <button
+        onClick={() => !disabled && setOpen((v) => !v)}
+        disabled={disabled}
+        title="导出当前会话为 Markdown"
+        className="flex items-center gap-1 px-2 py-1 rounded-lg text-[11px] text-ink-muted hover:text-ink hover:bg-canvas-warm font-body transition-colors disabled:opacity-40"
+      >
+        {copied ? <Check size={12} className="text-success" /> : <Download size={12} />}
+        导出
+      </button>
+      {open && (
+        <div className="absolute right-0 top-full mt-1 z-50 w-40 rounded-lg bg-canvas border border-canvas-deep shadow-xl overflow-hidden">
+          <button onClick={download}
+            className="w-full flex items-center gap-2 px-3 py-2 text-[12px] text-ink-soft hover:bg-canvas-warm font-body text-left">
+            <Download size={12} />下载 Markdown
+          </button>
+          <button onClick={copy}
+            className="w-full flex items-center gap-2 px-3 py-2 text-[12px] text-ink-soft hover:bg-canvas-warm font-body text-left">
+            <ClipboardCopy size={12} />复制到剪贴板
+          </button>
+        </div>
+      )}
     </div>
   );
 }
@@ -4569,6 +4695,13 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             </div>
           </div>
           <div className="flex items-center gap-2 min-w-0 flex-wrap justify-end">
+            <ExportSessionButton
+              messages={[...messages, ...chatMessages]}
+              title={(selectedSession?.sessionId
+                && (useStore.getState().customTitles[selectedSession.sessionId]
+                  || useStore.getState().autoTitles[selectedSession.sessionId]))
+                || selectedSession?.firstPrompt || '会话'}
+            />
             <CheckpointButton
               sessionId={selectedSession?.sessionId}
               cwd={selectedSession?.projectPath || selectedProject?.path}
