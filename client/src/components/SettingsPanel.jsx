@@ -1055,6 +1055,114 @@ function AutoCompactWindowSelect({ settings, onSave, saving }) {
   );
 }
 
+// 对话区背景设置(③):纯色 / 本地图片 / 本地视频,附遮罩不透明度滑杆。
+// 状态存 store.chatBackground(localStorage 全局持久化);文件经 POST /api/backgrounds
+// 上传到 ~/.claude-gui/backgrounds/,客户端只持有服务端生成的文件名。
+function ChatBackgroundCard() {
+  const bg = useStore((s) => s.chatBackground);
+  const setBg = useStore((s) => s.setChatBackground);
+  const [uploading, setUploading] = useState(false);
+  const [err, setErr] = useState('');
+
+  const mask = Math.min(100, Math.max(0, Number(bg?.maskOpacity ?? 40)));
+
+  // 换背景/恢复默认前删除服务端旧文件,避免孤儿文件堆积。
+  const deleteFile = async (file) => {
+    if (!file) return;
+    try { await fetch(`/api/backgrounds/${encodeURIComponent(file)}`, { method: 'DELETE' }); } catch {}
+  };
+
+  const pickFile = async (e) => {
+    const f = e.target.files?.[0];
+    e.target.value = ''; // 允许重复选同一文件
+    if (!f) return;
+    setErr('');
+    if (f.size > 50 * 1024 * 1024) { setErr('文件超过 50MB 上限'); return; }
+    setUploading(true);
+    try {
+      const res = await fetch('/api/backgrounds', {
+        method: 'POST',
+        headers: {
+          'Content-Type': f.type || 'application/octet-stream',
+          'X-Upload-Name': encodeURIComponent(f.name),
+        },
+        body: f,
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || `上传失败(HTTP ${res.status})`);
+      const old = bg?.file;
+      setBg({ kind: data.kind, file: data.file, color: bg?.color || '', maskOpacity: mask });
+      await deleteFile(old);
+    } catch (e2) {
+      setErr(e2.message || '上传失败');
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  const setColor = (color) => {
+    // 选择纯色即切换到纯色模式;已有媒体文件时先删除。
+    const old = bg?.file;
+    setBg({ kind: 'color', color, file: '', maskOpacity: mask });
+    if (old) deleteFile(old);
+  };
+
+  const reset = async () => {
+    if (!(await confirmDialog('恢复默认背景？已上传的背景文件将被删除。', { danger: true }))) return;
+    const old = bg?.file;
+    setBg(null);
+    setErr('');
+    await deleteFile(old);
+  };
+
+  const KIND_LABEL = { color: '纯色', image: '图片', video: '视频' };
+
+  return (
+    <div className="bg-canvas-warm border border-canvas-deep rounded-lg px-3 py-2.5 space-y-2.5">
+      <div>
+        <div className="text-xs text-ink font-body font-medium">对话区背景</div>
+        <div className="text-[10.5px] text-ink-faint font-body">
+          设置对话消息区的背景:纯色、本地图片(png/jpg/gif/webp)或本地视频(mp4/webm),文件不超过 50MB。
+          遮罩不透明度控制主题底色覆盖在背景上的比例,数值越高文字越易读。默认状态不修改现有外观。
+        </div>
+      </div>
+      <div className="flex items-center gap-2 flex-wrap">
+        <span className="text-[11px] text-ink-muted font-body">当前:{bg?.kind ? KIND_LABEL[bg.kind] || bg.kind : '默认'}</span>
+        <label className="inline-flex items-center gap-1.5 text-[11px] text-ink-muted font-body cursor-pointer">
+          纯色
+          <input
+            type="color"
+            value={bg?.color || '#f0ebe0'}
+            onChange={(e) => setColor(e.target.value)}
+            className="w-6 h-6 p-0 border border-canvas-deep rounded cursor-pointer bg-transparent"
+          />
+        </label>
+        <label className={`text-[11px] px-2 py-1 rounded border border-canvas-deep font-body cursor-pointer hover:border-accent ${uploading ? 'opacity-50 pointer-events-none' : 'text-ink-muted'}`}>
+          {uploading ? '上传中…' : '选择图片/视频'}
+          <input type="file" accept=".png,.jpg,.jpeg,.gif,.webp,.mp4,.webm" className="hidden" onChange={pickFile} disabled={uploading} />
+        </label>
+        {bg?.kind && (
+          <button onClick={reset} className="text-[11px] px-2 py-1 rounded border border-canvas-deep text-ink-muted font-body hover:text-error hover:border-error/50">
+            恢复默认
+          </button>
+        )}
+      </div>
+      {bg?.kind && (
+        <div className="flex items-center gap-2">
+          <span className="text-[11px] text-ink-muted font-body shrink-0">遮罩不透明度</span>
+          <input
+            type="range" min="0" max="100" step="5" value={mask}
+            onChange={(e) => setBg({ ...bg, maskOpacity: Number(e.target.value) })}
+            className="flex-1 accent-[var(--color-accent)]"
+          />
+          <span className="text-[11px] text-ink-soft font-mono w-9 text-right">{mask}%</span>
+        </div>
+      )}
+      {err && <div className="text-[11px] text-error font-body">{err}</div>}
+    </div>
+  );
+}
+
 function OverviewTab({ settings, onSave, saving }) {
   const [showEnv, setShowEnv] = useState(false);
   const [showHooks, setShowHooks] = useState(false);
@@ -1081,6 +1189,7 @@ function OverviewTab({ settings, onSave, saving }) {
       <PromptSuggestionsToggle />
       <ExcludeDynamicPromptToggle />
       <AutoCompactWindowSelect settings={settings} onSave={onSave} saving={saving} />
+      <ChatBackgroundCard />
       {rows.length > 0 && (
         <div className="bg-canvas-warm border border-canvas-deep rounded-lg divide-y divide-canvas-deep">
           {rows.map(([k, v]) => (

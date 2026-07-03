@@ -326,6 +326,11 @@ export const useStore = create((set, get) => ({
     try { return localStorage.getItem('cgui-loading-style') || 'cli'; } catch { return 'cli'; }
   })(),
 
+  // 对话区自定义背景(全局,localStorage 持久化)。null = 默认外观(完全维持现状)。
+  // 形如 { kind:'color'|'image'|'video', color:'#RRGGBB', file:'uuid.png', maskOpacity:0-100 }。
+  // maskOpacity = 遮罩不透明度:主题底色(--color-canvas)以该比例盖在背景上,保证文字可读。
+  chatBackground: readLs('cgui-chat-background', null),
+
   // 输入预测(CLI --prompt-suggestions):回合结束后预测下一句,输入框灰字 + Tab 采纳。
   // 默认关(多一次轻量模型调用;蹭缓存几乎免费但仍属可选行为),设置→概览里开。
   promptSuggestions: (() => {
@@ -822,6 +827,13 @@ export const useStore = create((set, get) => ({
   setExcludeDynamicSystemPrompt: (on) => {
     set({ excludeDynamicSystemPrompt: !!on });
     try { localStorage.setItem('cgui-exclude-dynamic-prompt', on ? '1' : '0'); } catch {}
+  },
+
+  // 对话区自定义背景。传 null 恢复默认;对象整体替换(引用变更触发订阅组件重渲)。
+  setChatBackground: (bg) => {
+    const v = bg && bg.kind ? bg : null;
+    set({ chatBackground: v });
+    writeLs('cgui-chat-background', v);
   },
 
   setUiFontScale: (v) => {

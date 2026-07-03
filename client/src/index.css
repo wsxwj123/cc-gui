@@ -1411,7 +1411,94 @@ html { --content-max: clamp(768px, calc(var(--app-w, 100vw) * 0.7), 1120px); }
   color: #fff;
 }
 
-/* ── Loading 动画样式库(移植自 clawd-station,MIT;颜色换用本项目 accent 变量) ──
+/* ── 顶栏品牌 logo:星标呼吸旋转 + 字标流光扫过 + 终端方块光标闪烁 ──
+   颜色全部取主题变量,深浅主题均协调;prefers-reduced-motion 时全部静止 */
+.cgui-brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  line-height: 1;
+}
+
+.cgui-brand-spark {
+  font-size: 15px;
+  line-height: 1;
+  animation: cgui-brand-spark 3.6s ease-in-out infinite;
+}
+
+.cgui-brand-name {
+  font-size: 15px;
+  color: var(--color-ink);
+}
+
+/* 流光:仅在支持 background-clip:text 的引擎启用(不支持时保持纯色回退) */
+@supports ((-webkit-background-clip: text) or (background-clip: text)) {
+  .cgui-brand-name {
+    background-image: linear-gradient(
+      110deg,
+      var(--color-ink) 0%,
+      var(--color-ink) 42%,
+      var(--color-ink-faint) 50%,
+      var(--color-ink) 58%,
+      var(--color-ink) 100%
+    );
+    background-size: 300% 100%;
+    background-position: 100% 0;
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+    animation: cgui-brand-sheen 6s linear infinite;
+  }
+}
+
+.cgui-brand-caret {
+  width: 6px;
+  height: 13px;
+  border-radius: 1.5px;
+  background: var(--color-accent);
+  animation: cgui-brand-blink 1.1s steps(1, end) infinite;
+}
+
+@keyframes cgui-brand-spark {
+  0%,
+  100% {
+    transform: rotate(0deg) scale(1);
+    opacity: 0.85;
+  }
+
+  50% {
+    transform: rotate(90deg) scale(1.15);
+    opacity: 1;
+  }
+}
+
+@keyframes cgui-brand-sheen {
+  from {
+    background-position: 100% 0;
+  }
+
+  to {
+    background-position: 0% 0;
+  }
+}
+
+@keyframes cgui-brand-blink {
+  50% {
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cgui-brand-spark,
+  .cgui-brand-name,
+  .cgui-brand-caret {
+    animation: none;
+  }
+}
+
+/* ── Loading 动画样式库(移植自 clawd-station,MIT)──
+   颜色/尺寸/时长/缓动与原版一致(原版写死 #E8632A / cubic-bezier(0.22,1,0.36,1));
+   仅两处适配:keyframes spin→cgui-spin(避撞 Tailwind)、末尾 prefers-reduced-motion 降速。
    用法:<span class="loading-mark loading-<id>"><span/></span>;选中样式存 store.loadingStyle */
 .loading-mark {
   position: relative;
@@ -1419,7 +1506,7 @@ html { --content-max: clamp(768px, calc(var(--app-w, 100vw) * 0.7), 1120px); }
   width: 1.45rem;
   height: 1.45rem;
   place-items: center;
-  color: var(--color-accent);
+  color: #E8632A;
 }
 
 .loading-mark::before,
@@ -1434,8 +1521,8 @@ html { --content-max: clamp(768px, calc(var(--app-w, 100vw) * 0.7), 1120px); }
 .loading-ring-thin,
 .loading-ring-bold,
 .loading-ring-reverse {
-  border: 2px solid var(--color-accent-muted);
-  border-top-color: var(--color-accent);
+  border: 2px solid color-mix(in srgb, #E8632A 20%, transparent);
+  border-top-color: #E8632A;
   border-radius: 999px;
   animation: cgui-spin 860ms linear infinite;
 }
@@ -1451,8 +1538,8 @@ html { --content-max: clamp(768px, calc(var(--app-w, 100vw) * 0.7), 1120px); }
 
 .loading-ring-dual::after {
   inset: 0.28rem;
-  border: 1.5px solid color-mix(in srgb, var(--color-accent) 18%, transparent);
-  border-bottom-color: var(--color-accent);
+  border: 1.5px solid color-mix(in srgb, #E8632A 18%, transparent);
+  border-bottom-color: #E8632A;
   border-radius: 999px;
   animation: cgui-spin 620ms linear infinite reverse;
 }
@@ -1481,7 +1568,7 @@ html { --content-max: clamp(768px, calc(var(--app-w, 100vw) * 0.7), 1120px); }
 .loading-orbit-fast,
 .loading-clock,
 .loading-pinwheel {
-  border: 1px solid color-mix(in srgb, var(--color-accent) 24%, transparent);
+  border: 1px solid color-mix(in srgb, #E8632A 24%, transparent);
   border-radius: 999px;
   animation: cgui-spin 980ms linear infinite;
 }
@@ -1495,16 +1582,16 @@ html { --content-max: clamp(768px, calc(var(--app-w, 100vw) * 0.7), 1120px); }
   width: 0.38rem;
   height: 0.38rem;
   margin-top: -0.95rem;
-  background: var(--color-accent);
+  background: #E8632A;
   border-radius: 999px;
-  box-shadow: 0 0 0 0.18rem color-mix(in srgb, var(--color-accent) 18%, transparent);
+  box-shadow: 0 0 0 0.18rem color-mix(in srgb, #E8632A 18%, transparent);
 }
 
 .loading-orbit-double::after {
   width: 0.32rem;
   height: 0.32rem;
   margin-bottom: -0.95rem;
-  background: var(--color-accent);
+  background: #E8632A;
   border-radius: 999px;
 }
 
@@ -1533,7 +1620,7 @@ html { --content-max: clamp(768px, calc(var(--app-w, 100vw) * 0.7), 1120px); }
 .loading-pinwheel::after {
   width: 0.36rem;
   height: 1.2rem;
-  background: color-mix(in srgb, var(--color-accent) 72%, transparent);
+  background: color-mix(in srgb, #E8632A 72%, transparent);
   border-radius: 999px;
 }
 
@@ -1546,9 +1633,9 @@ html { --content-max: clamp(768px, calc(var(--app-w, 100vw) * 0.7), 1120px); }
 .loading-breath span {
   width: 0.86rem;
   height: 0.86rem;
-  background: var(--color-accent);
+  background: #E8632A;
   border-radius: 999px;
-  animation: loading-pulse 900ms var(--ease-out) infinite;
+  animation: loading-pulse 900ms cubic-bezier(0.22, 1, 0.36, 1) infinite;
 }
 
 .loading-pulse-soft span {
@@ -1557,9 +1644,9 @@ html { --content-max: clamp(768px, calc(var(--app-w, 100vw) * 0.7), 1120px); }
 }
 
 .loading-pulse-ring {
-  border: 2px solid var(--color-accent);
+  border: 2px solid #E8632A;
   border-radius: 999px;
-  animation: loading-pulse 1000ms var(--ease-out) infinite;
+  animation: loading-pulse 1000ms cubic-bezier(0.22, 1, 0.36, 1) infinite;
 }
 
 .loading-pulse-ring span {
@@ -1596,9 +1683,9 @@ html { --content-max: clamp(768px, calc(var(--app-w, 100vw) * 0.7), 1120px); }
   position: static;
   width: 0.28rem;
   height: 0.28rem;
-  background: var(--color-accent);
+  background: #E8632A;
   border-radius: 999px;
-  animation: loading-pulse 820ms var(--ease-out) infinite;
+  animation: loading-pulse 820ms cubic-bezier(0.22, 1, 0.36, 1) infinite;
 }
 
 .loading-dots::before,
@@ -1656,9 +1743,9 @@ html { --content-max: clamp(768px, calc(var(--app-w, 100vw) * 0.7), 1120px); }
   position: static;
   width: 0.22rem;
   height: 0.9rem;
-  background: var(--color-accent);
+  background: #E8632A;
   border-radius: 999px;
-  animation: loading-stretch 780ms var(--ease-out) infinite;
+  animation: loading-stretch 780ms cubic-bezier(0.22, 1, 0.36, 1) infinite;
 }
 
 .loading-bars::before,
@@ -1692,9 +1779,9 @@ html { --content-max: clamp(768px, calc(var(--app-w, 100vw) * 0.7), 1120px); }
 .loading-flower span {
   width: 0.86rem;
   height: 0.86rem;
-  background: var(--color-accent);
+  background: #E8632A;
   border-radius: 0.22rem;
-  animation: loading-flip 900ms var(--ease-out) infinite;
+  animation: loading-flip 900ms cubic-bezier(0.22, 1, 0.36, 1) infinite;
 }
 
 .loading-square span {
@@ -1703,14 +1790,14 @@ html { --content-max: clamp(768px, calc(var(--app-w, 100vw) * 0.7), 1120px); }
 
 .loading-diamond span {
   transform: rotate(45deg);
-  animation: loading-diamond 980ms var(--ease-out) infinite;
+  animation: loading-diamond 980ms cubic-bezier(0.22, 1, 0.36, 1) infinite;
 }
 
 .loading-spark span,
 .loading-flower span {
   width: 1.1rem;
   height: 1.1rem;
-  background: conic-gradient(from 0deg, var(--color-accent), color-mix(in srgb, var(--color-accent) 12%, transparent), var(--color-accent));
+  background: conic-gradient(from 0deg, #E8632A, color-mix(in srgb, #E8632A 12%, transparent), #E8632A);
   clip-path: polygon(50% 0, 58% 34%, 100% 50%, 58% 66%, 50% 100%, 42% 66%, 0 50%, 42% 34%);
   animation: cgui-spin 950ms linear infinite;
 }
@@ -1728,7 +1815,7 @@ html { --content-max: clamp(768px, calc(var(--app-w, 100vw) * 0.7), 1120px); }
 
 .loading-scan {
   overflow: hidden;
-  border: 1px solid color-mix(in srgb, var(--color-accent) 28%, transparent);
+  border: 1px solid color-mix(in srgb, #E8632A 28%, transparent);
   border-radius: 0.35rem;
 }
 
@@ -1736,9 +1823,24 @@ html { --content-max: clamp(768px, calc(var(--app-w, 100vw) * 0.7), 1120px); }
   inset: 0.2rem 0;
   height: 0.16rem;
   margin: auto 0;
-  background: var(--color-accent);
+  background: #E8632A;
   border-radius: 999px;
-  animation: loading-scan 900ms var(--ease-out) infinite;
+  animation: loading-scan 900ms cubic-bezier(0.22, 1, 0.36, 1) infinite;
+}
+
+.loading-radar {
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, #E8632A 28%, transparent);
+  border-radius: 999px;
+}
+
+.loading-radar::before {
+  inset: 50% auto auto 50%;
+  width: 50%;
+  height: 50%;
+  background: color-mix(in srgb, #E8632A 42%, transparent);
+  transform-origin: 0 0;
+  animation: cgui-spin 1100ms linear infinite;
 }
 
 @keyframes cgui-spin {
@@ -1817,7 +1919,6 @@ html { --content-max: clamp(768px, calc(var(--app-w, 100vw) * 0.7), 1120px); }
     transform: translateY(0.46rem);
   }
 }
-
 
 @media (prefers-reduced-motion: reduce) {
   .loading-mark, .loading-mark::before, .loading-mark::after, .loading-mark span { animation-duration: 4s !important; }
