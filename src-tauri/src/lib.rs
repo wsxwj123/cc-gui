@@ -574,16 +574,28 @@ pub fn run() {
                 .map(|d| d.as_millis())
                 .unwrap_or(0);
             let load_url = format!("{}/?b={}", backend_url(port), boot_nonce);
+            // 默认尺寸自适应主屏(用户报告:1560 固定宽在大字号 zoom≥1.15 时标题栏必换两行)。
+            // 标题栏一行需 ~1210 逻辑宽;1860 = 1210 × 1.25(大字号)+ 余量,覆盖常用档位。
+            // 小屏(13" MBP 1440/1512 逻辑点)取屏宽 94%,已是该屏最优;monitor.size 是物理
+            // 像素,除 scale_factor 得逻辑点。拿不到 monitor 就回落旧值 1560×960。
+            let (win_w, win_h) = match app.primary_monitor() {
+                Ok(Some(m)) => {
+                    let sf = m.scale_factor().max(0.5);
+                    let sw = m.size().width as f64 / sf;
+                    let sh = m.size().height as f64 / sf;
+                    (1860.0_f64.min(sw * 0.94), 1040.0_f64.min(sh * 0.90))
+                }
+                _ => (1560.0, 960.0),
+            };
             let window = WebviewWindowBuilder::new(
                 app,
                 "main",
                 WebviewUrl::External(load_url.parse().unwrap()),
             )
             .title("Claude GUI")
-            // 默认窗口放大,让顶部会话行与所有按钮在「中」字号下完整一行显示,不再
-            // 挤成多行(#8)。仍可手动缩小到 min。
-            .inner_size(1560.0, 960.0)
+            .inner_size(win_w, win_h)
             .min_inner_size(900.0, 600.0)
+            .center()
             .build()?;
             let _ = window.show();
             let _ = window.set_focus();
