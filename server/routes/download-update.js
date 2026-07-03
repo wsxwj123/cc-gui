@@ -1,12 +1,74 @@
 import { Router } from 'express';
 import { spawn } from 'child_process';
 import { homedir } from 'os';
-import { createWriteStream } from 'fs';
-import { existsSync } from 'fs';
-import { unlink } from 'fs/promises';
-import { extname, join, basename } from 'path';
+import { createWriteStream, existsSync, readFileSync } from 'fs';
+import { unlink, readFile, writeFile, mkdir, stat } from 'fs/promises';
+import { extname, join, basename, dirname } from 'path';
+import { fileURLToPath } from 'url';
+import { isPathInside } from '../utils/safe-path.js';
 
 const router = Router();
+
+// ── 更新完成后的安装包清理 ────────────────────────────────────────────
+// 下载成功后把安装包路径 + 下载时的 app 版本记到 ~/.claude-gui/pending-update-cleanup.json;
+// 新版本首次启动时前端查询 GET /update-cleanup,经用户确认后 POST /update-cleanup/delete 删除。
+const CLEANUP_RECORD_PATH = join(homedir(), '.claude-gui', 'pending-update-cleanup.json');
+const PKG_PATH = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'package.json');
+// 删除白名单:文件名必须是 Claude GUI 安装包(下载时 sanitize 后空格变 _,GitHub
+// 资产名用 .;重名追加 -N 后缀),且位于 ~/Downloads 内 —— 防止记录文件被篡改后
+// 该端点删除任意文件。
+const INSTALLER_NAME_RE = /^Claude[ ._]GUI[ ._-].*\.(dmg|exe|msi)$/i;
+
+function currentAppVersion() {
+  try { return JSON.parse(readFileSync(PKG_PATH, 'utf-8')).version || ''; } catch { return ''; }
+}
+async function readCleanupRecord() {
+  try { return JSON.parse(await readFile(CLEANUP_RECORD_PATH, 'utf-8')); } catch { return null; }
+}
+async function clearCleanupRecord() {
+  try { await unlink(CLEANUP_RECORD_PATH); } catch {}
+}
+
+/**
+ * GET /api/update-cleanup
+ * 有待清理的安装包且更新已完成(当前版本 ≠ 下载时版本)→ { pending:true, path, name, sizeMB }。
+ * 其余情况一律 { pending:false }:无记录 / 更新尚未完成(记录保留,下次再查) /
+ * 文件已被手动删除(顺带清记录)。
+ */
+router.get('/update-cleanup', async (_req, res) => {
+  const rec = await readCleanupRecord();
+  if (!rec || typeof rec.path !== 'string') return res.json({ pending: false });
+  const cur = currentAppVersion();
+  if (!cur || cur === rec.appVersionAtDownload) return res.json({ pending: false });
+  let size = 0;
+  try { size = (await stat(rec.path)).size; } catch {
+    await clearCleanupRecord();
+    return res.json({ pending: false });
+  }
+  res.json({ pending: true, path: rec.path, name: basename(rec.path), sizeMB: Math.round(size / 1048576) });
+});
+
+/** POST /api/update-cleanup/delete — 删除记录的安装包(仅限 ~/Downloads 下的 Claude GUI 安装包)。 */
+router.post('/update-cleanup/delete', async (_req, res) => {
+  const rec = await readCleanupRecord();
+  if (!rec || typeof rec.path !== 'string') return res.status(404).json({ error: '没有待清理的安装包记录' });
+  const downloads = join(homedir(), 'Downloads');
+  if (!isPathInside(rec.path, downloads) || !INSTALLER_NAME_RE.test(basename(rec.path))) {
+    await clearCleanupRecord();
+    return res.status(400).json({ error: '记录的路径不符合白名单(~/Downloads 下的 Claude GUI 安装包),已忽略该记录' });
+  }
+  try { await unlink(rec.path); } catch (e) {
+    if (e.code !== 'ENOENT') return res.status(500).json({ error: e.message });
+  }
+  await clearCleanupRecord();
+  res.json({ ok: true, deleted: rec.path });
+});
+
+/** POST /api/update-cleanup/dismiss — 用户选择保留:清记录,之后不再提示。 */
+router.post('/update-cleanup/dismiss', async (_req, res) => {
+  await clearCleanupRecord();
+  res.json({ ok: true });
+});
 
 /**
  * POST /api/download-update { url, filename }
@@ -103,6 +165,16 @@ router.post('/download-update', async (req, res) => {
     } catch (e) {
       // 打开失败不算下载失败 — 文件已经在 Downloads 里,用户能手动打开
     }
+
+    // 记录下载的安装包路径:新版本首次启动时提示删除(见上方 /update-cleanup 端点)。
+    try {
+      await mkdir(dirname(CLEANUP_RECORD_PATH), { recursive: true });
+      await writeFile(CLEANUP_RECORD_PATH, JSON.stringify({
+        path: targetPath,
+        downloadedAt: Date.now(),
+        appVersionAtDownload: currentAppVersion(),
+      }, null, 2));
+    } catch { /* 记录失败不影响下载结果 */ }
 
     res.write(JSON.stringify({ type: 'done', ok: true, path: targetPath, opened, platform }) + '\n');
     res.end();

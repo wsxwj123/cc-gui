@@ -175,10 +175,12 @@ export function MCPPanel() {
   const sortedServers = [...servers].sort(byEnabled);
   const sortedPlugins = [...plugins].sort(byEnabled);
 
-  // 官方插件一键安装:已装名(去掉 @marketplace 后缀)用于标"已安装";安装中态 + 错误。
+  // 官方插件一键安装:已装名(去掉 @marketplace 后缀)用于过滤"添加插件"弹层的推荐项。
   const installedPluginIds = new Set(plugins.map((p) => String(p.name).split('@')[0]));
   const [installingPlugin, setInstallingPlugin] = useState(null);
   const [pluginErr, setPluginErr] = useState('');
+  // 对齐 MCP 的交互:推荐插件收进"添加"按钮打开的弹层,列表只展示已安装项。
+  const [pluginAddOpen, setPluginAddOpen] = useState(false);
   const installPlugin = async (plugin) => {
     const id = plugin.id;
     setInstallingPlugin(id); setPluginErr('');
@@ -328,6 +330,12 @@ export function MCPPanel() {
         <h3 className="text-[10px] font-medium uppercase tracking-widest text-ink-faint font-body mb-3 flex items-center gap-1.5">
           <Package size={11} />
           已安装插件
+          <div className="flex-1" />
+          {/* 对齐 MCP 服务器的交互:推荐安装项收进"添加"弹层,不再平铺在面板上 */}
+          <button onClick={() => { setPluginErr(''); setPluginAddOpen(true); }}
+            className="flex items-center gap-1 px-2 py-1 rounded-md bg-accent text-white text-[10px] font-medium hover:bg-accent/90 transition-colors normal-case tracking-normal">
+            <Plus size={11} />添加
+          </button>
         </h3>
         {plugins.length > 0 ? (
           <div className="space-y-2">
@@ -373,44 +381,6 @@ export function MCPPanel() {
         )}
       </div>
 
-      {/* 官方插件一键安装(Anthropic 自维护精选,claude-plugins-official) */}
-      <div>
-        <h3 className="text-[10px] font-medium uppercase tracking-widest text-ink-faint font-body mb-1 flex items-center gap-1.5">
-          <Download size={11} />
-          官方插件 · 一键安装
-        </h3>
-        <div className="text-[10px] text-ink-faint font-body mb-3 leading-snug">
-          Anthropic 官方精选,装了即用(0 配置)。装完新会话生效。带 MCP 的(Playwright/Context7)走插件安装即自动配好,无需再到上方手填。
-        </div>
-        {pluginErr && <div className="text-[11px] text-error bg-error/10 border border-error/20 rounded px-2 py-1.5 mb-2 break-all">{pluginErr}</div>}
-        <div className="space-y-2">
-          {BUILTIN_PLUGINS.map((p) => {
-            const installed = installedPluginIds.has(p.id);
-            const busy = installingPlugin === p.id;
-            return (
-              <div key={p.id} className="bg-canvas-warm border border-canvas-deep rounded-lg p-3 flex items-center gap-3">
-                <div className="min-w-0 flex-1">
-                  <div className="flex items-center gap-2">
-                    <span className="text-xs font-medium text-ink font-body">{p.name}</span>
-                    {p.mcp && <span className="text-[9px] px-1 py-px bg-canvas-deep text-ink-faint rounded">MCP</span>}
-                  </div>
-                  <div className="text-[10px] text-ink-faint font-body truncate mt-0.5">{p.desc}</div>
-                </div>
-                {installed ? (
-                  <span className="shrink-0 flex items-center gap-1 text-[11px] text-success font-body"><Check size={12} />已安装</span>
-                ) : (
-                  <button onClick={() => installPlugin(p)} disabled={!!installingPlugin}
-                    className="shrink-0 flex items-center gap-1 px-2.5 py-1 rounded text-[12px] font-medium text-white bg-accent hover:bg-accent-hover disabled:opacity-50">
-                    {busy ? <RefreshCw size={12} className="animate-spin" /> : <Download size={12} />}
-                    {busy ? '安装中…' : '安装'}
-                  </button>
-                )}
-              </div>
-            );
-          })}
-        </div>
-      </div>
-
       {/* External */}
       {external.length > 0 && (
         <div>
@@ -445,6 +415,53 @@ export function MCPPanel() {
           onClose={() => setForm(null)}
           onSaved={() => { fetchData(); setRestartHint(true); }}
         />
+      )}
+
+      {/* 添加插件弹层:官方推荐里尚未安装的项(Anthropic 自维护精选,claude-plugins-official)。
+          交互对齐 McpForm 模态;安装逻辑复用 installPlugin,未改动。 */}
+      {pluginAddOpen && (
+        <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/40 backdrop-blur-sm animate-fade-in" onClick={() => setPluginAddOpen(false)}>
+          <div className="glass-popover w-[560px] max-w-[calc(var(--app-w,100vw)-1.5rem)] max-h-[90vh] overflow-y-auto rounded-2xl shadow-2xl animate-glass-rise"
+            onClick={(e) => e.stopPropagation()}>
+            <div className="px-5 py-4 border-b border-canvas-deep flex items-center gap-3 sticky top-0 bg-canvas z-10">
+              <div className="flex-1 text-[14px] font-medium text-ink font-body">添加插件</div>
+              <button onClick={() => setPluginAddOpen(false)} className="p-1.5 hover:bg-canvas-warm rounded transition-colors"><X size={14} className="text-ink-faint" /></button>
+            </div>
+            <div className="px-5 py-4 space-y-3">
+              <div className="text-[11px] text-ink-faint font-body leading-snug">
+                Anthropic 官方精选,安装后无需配置,新会话生效。带 MCP 标记的插件安装时自动配好对应 MCP,无需再手填。
+              </div>
+              {pluginErr && <div className="text-[11px] text-error bg-error/10 border border-error/20 rounded px-2 py-1.5 break-all">{pluginErr}</div>}
+              {BUILTIN_PLUGINS.filter((p) => !installedPluginIds.has(p.id)).length === 0 ? (
+                <div className="text-xs text-ink-faint font-body py-3 text-center bg-canvas-warm border border-canvas-deep rounded-lg">
+                  推荐插件均已安装
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  {BUILTIN_PLUGINS.filter((p) => !installedPluginIds.has(p.id)).map((p) => {
+                    const busy = installingPlugin === p.id;
+                    return (
+                      <div key={p.id} className="bg-canvas-warm border border-canvas-deep rounded-lg p-3 flex items-center gap-3">
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center gap-2">
+                            <span className="text-xs font-medium text-ink font-body">{p.name}</span>
+                            {p.mcp && <span className="text-[9px] px-1 py-px bg-canvas-deep text-ink-faint rounded">MCP</span>}
+                          </div>
+                          <div className="text-[10px] text-ink-faint font-body truncate mt-0.5">{p.desc}</div>
+                        </div>
+                        <button onClick={() => installPlugin(p)} disabled={!!installingPlugin}
+                          className="shrink-0 flex items-center gap-1 px-2.5 py-1 rounded text-[12px] font-medium text-white bg-accent hover:bg-accent-hover disabled:opacity-50">
+                          {busy ? <RefreshCw size={12} className="animate-spin" /> : <Download size={12} />}
+                          {busy ? '安装中…' : '安装'}
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

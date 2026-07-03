@@ -2,12 +2,15 @@
 //
 // The web app needs the Express backend (port 6677) alive: it spawns `claude`,
 // reads ~/.claude, watches files. So on launch we:
-//   1. Check whether 6677 is already up (e.g. `cargo tauri dev` started it via
-//      beforeDevCommand, or the user ran `npm start` already) — if so, reuse it.
-//   2. Otherwise spawn `node server/index.js` (system node, per the chosen
-//      architecture), resolving the script from bundled resources (packaged
+//   1. Create and show the window IMMEDIATELY on a built-in splash page (data:
+//      URL, no backend needed) — backend init used to block window creation
+//      (up to 20s), which users saw as "double-click, nothing happens".
+//   2. On a background thread: check whether 6677 is already up (e.g. `cargo
+//      tauri dev` started it via beforeDevCommand, or the user ran `npm start`
+//      already) — if so, reuse it. Otherwise spawn `node server/index.js`
+//      (system node), resolving the script from bundled resources (packaged
 //      .app) or the repo layout (cargo run / dev).
-//   3. Wait until the port answers, then open the window pointing at it.
+//   3. Wait until the port answers, then navigate the window to it.
 //   4. Kill the child we spawned when the window is destroyed.
 
 use std::fs::OpenOptions;
@@ -72,8 +75,51 @@ fn log_startup(message: &str) {
         .append(true)
         .open(dir.join("tauri-startup.log"))
     {
-        let _ = writeln!(file, "{message}");
+        // 带 unix 毫秒时间戳:历史日志无时间戳,无法量化"双击→窗口可见"各阶段耗时。
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let _ = writeln!(file, "[{ts}] {message}");
     }
+}
+
+// ── 启动页(splash) ─────────────────────────────────────────────────────
+// data: URL 内容里只保留 RFC3986 unreserved 字符,其余按 UTF-8 percent-encode,
+// 保证 Url::parse 与各平台 WebView 都能无歧义解析(含中文文案/空格/引号)。
+fn percent_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() * 3);
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+// 内置极简启动页:打包进二进制的 data: URL,不依赖后端与磁盘文件。窗口创建即有
+// 内容可见;后端就绪后 navigate 到真实 UI 时整页替换。
+fn splash_url() -> String {
+    let html = r##"<!doctype html><html><head><meta charset="utf-8"><title>Claude GUI</title><style>
+html,body{height:100%;margin:0}
+body{display:flex;align-items:center;justify-content:center;background:#faf9f5;color:#3d3929;font:14px -apple-system,"Segoe UI","Microsoft YaHei",sans-serif}
+@media (prefers-color-scheme:dark){body{background:#262624;color:#c2c0b6}}
+.box{text-align:center}
+.spin{width:28px;height:28px;margin:0 auto 14px;border:3px solid rgba(125,125,125,.25);border-top-color:#d97757;border-radius:50%;animation:r .9s linear infinite}
+@keyframes r{to{transform:rotate(360deg)}}
+</style></head><body><div class="box"><div class="spin"></div><div id="st">正在启动后台服务…</div></div></body></html>"##;
+    format!("data:text/html;charset=utf-8,{}", percent_encode(html))
+}
+
+// 更新启动页状态文案(WebviewWindow::eval 注入固定常量 JS,非执行外部数据)。
+// text 为本文件内的常量中文,不含引号/换行,直接拼接安全。
+fn set_splash_status(win: &tauri::WebviewWindow, text: &str) {
+    let _ = win.eval(format!(
+        "(function(){{var e=document.getElementById('st');if(e)e.textContent='{text}';}})()"
+    ));
 }
 
 fn backend_addr(port: u16) -> String {
@@ -125,7 +171,8 @@ fn http_get_contains(port: u16, path: &str, needle: &str) -> bool {
 
 // Resolve server/index.js: prefer the bundled resource dir, fall back to the
 // repo layout used during `cargo run`/`cargo tauri dev`.
-fn resolve_server_entry(app: &tauri::App) -> Option<PathBuf> {
+// 参数改为 AppHandle:后端初始化已移到后台线程,&App 不能跨线程,AppHandle 可。
+fn resolve_server_entry(app: &tauri::AppHandle) -> Option<PathBuf> {
     if let Ok(res) = app.path().resource_dir() {
         // tauri packs the `../server` resource under an `_up_` subdir; try that
         // first, then the un-prefixed layout as a fallback.
@@ -172,6 +219,20 @@ fn strip_verbatim_str(s: &str) -> String {
 }
 
 #[cfg(test)]
+mod splash_tests {
+    use super::splash_url;
+    // setup 里对 splash_url().parse() 用了 unwrap:若编码不合法是"启动即崩",
+    // 这里锁死 data: URL 必须可被 Url 解析(含中文文案的 percent-encode)。
+    #[test]
+    fn splash_data_url_parses() {
+        let u = splash_url();
+        assert!(u.starts_with("data:text/html;charset=utf-8,"));
+        let parsed: tauri::Url = u.parse().expect("splash data url must parse");
+        assert_eq!(parsed.scheme(), "data");
+    }
+}
+
+#[cfg(test)]
 mod path_tests {
     use super::strip_verbatim_str;
     #[test]
@@ -192,7 +253,7 @@ mod path_tests {
     }
 }
 
-fn bundled_local_routes_present(app: &tauri::App) -> bool {
+fn bundled_local_routes_present(app: &tauri::AppHandle) -> bool {
     if let Ok(res) = app.path().resource_dir() {
         for prefix in ["_up_", ""] {
             let base = if prefix.is_empty() { res.clone() } else { res.join(prefix) };
@@ -310,7 +371,7 @@ fn find_node() -> Option<PathBuf> {
     None
 }
 
-fn spawn_backend(app: &tauri::App, port: u16) -> Option<Child> {
+fn spawn_backend(app: &tauri::AppHandle, port: u16) -> Option<Child> {
     let entry = resolve_server_entry(app).or_else(|| {
         log_startup("[tauri] server/index.js not found in bundled resources or repo layout");
         None
@@ -468,8 +529,54 @@ pub fn run() {
         .manage(Backend(Mutex::new(None)))
         .manage(BackendPort(Mutex::new(None)))
         .setup(|app| {
+            // ① 启动加速:窗口带内置启动页立即创建并显示。后端初始化(健康检查/杀旧
+            // 进程/spawn node + 等端口就绪,常规 1~3s,杀旧/重试路径可达 20s+)以前全部
+            // 阻塞在窗口创建之前 —— 用户双击后长时间看不到任何窗口(Mac/Win 同一根因)。
+            // 现改为后台线程初始化,就绪后 navigate 到真实 UI;启动语义(复用健康后端、
+            // 版本不符先杀旧、逐端口 spawn)不变。
+            // 默认尺寸自适应主屏(用户报告:1560 固定宽在大字号 zoom≥1.15 时标题栏必换两行)。
+            // 标题栏一行需 ~1210 逻辑宽;1860 = 1210 × 1.25(大字号)+ 余量,覆盖常用档位。
+            // 小屏(13" MBP 1440/1512 逻辑点)取屏宽 94%,已是该屏最优;monitor.size 是物理
+            // 像素,除 scale_factor 得逻辑点。拿不到 monitor 就回落旧值 1560×960。
+            let (win_w, win_h) = match app.primary_monitor() {
+                Ok(Some(m)) => {
+                    let sf = m.scale_factor().max(0.5);
+                    let sw = m.size().width as f64 / sf;
+                    let sh = m.size().height as f64 / sf;
+                    (1860.0_f64.min(sw * 0.94), 1040.0_f64.min(sh * 0.90))
+                }
+                _ => (1560.0, 960.0),
+            };
+            let window = WebviewWindowBuilder::new(
+                app,
+                "main",
+                WebviewUrl::External(splash_url().parse().unwrap()),
+            )
+            .title("Claude GUI")
+            .inner_size(win_w, win_h)
+            .min_inner_size(900.0, 600.0)
+            .center()
+            .build()?;
+            let _ = window.show();
+            let _ = window.set_focus();
+            log_startup("[tauri] window shown on splash page");
+            // 层级修复①:窗口可能晚于 app 激活。若用户启动瞬间点了别的 app,窗口首次
+            // 显示会落在其它窗口后面。延迟 600ms 再 set_focus 一次,赢下启动激活竞态;
+            // 间隔足够短,不算抢焦点。
+            {
+                let w2 = window.clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(Duration::from_millis(600));
+                    let _ = w2.unminimize();
+                    let _ = w2.set_focus();
+                });
+            }
+
+            let handle = app.handle().clone();
+            let win = window.clone();
+            std::thread::spawn(move || {
             let mut selected_port = None;
-            let requires_local_routes = bundled_local_routes_present(app);
+            let requires_local_routes = bundled_local_routes_present(&handle);
 
             let healthy = backend_healthy(DEFAULT_BACKEND_PORT);
             let version_ok = healthy && backend_version_matches(DEFAULT_BACKEND_PORT);
@@ -488,6 +595,8 @@ pub fn run() {
                     } else {
                         "[tauri] backend on 6677 lacks local routes — killing it to respawn the full build"
                     });
+                    // 杀旧重启耗时可达数秒,启动页上给出可见反馈。
+                    set_splash_status(&win, "检测到旧版本后台服务,正在替换…");
                     kill_stale_backend(DEFAULT_BACKEND_PORT);
                     // C6:wait_until_free 返回值要用。若 5s 内没释放,直接换端口会把旧 stale 留在
                     // 6677 当孤儿(BackendPort 记新端口,退出只杀新端口 → 6677 永久残留)。
@@ -503,9 +612,9 @@ pub fn run() {
                         log_startup(&format!("[tauri] port {port} is occupied but not healthy; trying next port"));
                         continue;
                     }
-                    if let Some(mut child) = spawn_backend(app, port) {
+                    if let Some(mut child) = spawn_backend(&handle, port) {
                         if wait_until_accepting(port, Duration::from_secs(20)) {
-                            *app.state::<Backend>().0.lock().unwrap() = Some(child);
+                            *handle.state::<Backend>().0.lock().unwrap() = Some(child);
                             selected_port = Some(port);
                             log_startup(&format!("[tauri] spawned backend on port {port}"));
                             break;
@@ -519,9 +628,8 @@ pub fn run() {
                     }
                 }
             }
-            // 后端没起来:以前直接 `?` 报错退出 → 窗口在后端就绪后才创建,于是变成
-            // "进程在跑但永远不弹窗"的隐形僵尸(用户报告:双击没反应、还占着单实例锁)。
-            // 改为先弹原生报错框,让失败可见、可定位,再退出。
+            // 后端没起来:弹原生报错框,让失败可见、可定位,再退出。
+            // (rfd 同步对话框必须在主线程弹 —— 本段跑在后台线程,经 run_on_main_thread 调度。)
             let port = match selected_port {
                 Some(p) => p,
                 None => {
@@ -531,40 +639,44 @@ pub fn run() {
                     log_startup(&format!(
                         "[tauri] backend did not become healthy on any port 6677-6687; node_missing={node_missing}; showing error dialog"
                     ));
-                    let desc = if node_missing {
-                        "后台服务未能启动:未找到 Node.js。\n\n\
-                         Claude GUI 需要 Node.js 20+ 运行。点「确定」打开官方下载页,\
-                         安装后重新打开本应用即可。\n\n\
-                         (若你确信已装 node:重启电脑让 PATH 生效;版本管理器装的 node \
-                         请确保已在终端配置好。日志:~/.claude-gui/tauri-startup.log)"
-                    } else {
-                        "后台服务(端口 6677)未能启动,窗口无法加载。\n\n\
-                         Node.js 已找到,但 server 未能启动(非缺 node)。\n\
-                         请查看日志定位:~/.claude-gui/tauri-startup.log\
-                         (Windows:%USERPROFILE%\\.claude-gui\\tauri-startup.log)"
-                    };
-                    let res = rfd::MessageDialog::new()
-                        .set_title("Claude GUI 无法启动")
-                        .set_description(desc)
-                        .set_buttons(if node_missing { rfd::MessageButtons::OkCancel } else { rfd::MessageButtons::Ok })
-                        .show();
-                    if node_missing && res == rfd::MessageDialogResult::Ok {
-                        let url = "https://nodejs.org/en/download";
-                        #[cfg(target_os = "macos")]
-                        { let _ = std::process::Command::new("open").arg(url).spawn(); }
-                        #[cfg(target_os = "windows")]
-                        {
-                            use std::os::windows::process::CommandExt;
-                            let _ = std::process::Command::new("cmd")
-                                .args(["/c", "start", "", url]).creation_flags(0x08000000).spawn();
+                    let h2 = handle.clone();
+                    let _ = handle.run_on_main_thread(move || {
+                        let desc = if node_missing {
+                            "后台服务未能启动:未找到 Node.js。\n\n\
+                             Claude GUI 需要 Node.js 20+ 运行。点「确定」打开官方下载页,\
+                             安装后重新打开本应用即可。\n\n\
+                             (若你确信已装 node:重启电脑让 PATH 生效;版本管理器装的 node \
+                             请确保已在终端配置好。日志:~/.claude-gui/tauri-startup.log)"
+                        } else {
+                            "后台服务(端口 6677)未能启动,窗口无法加载。\n\n\
+                             Node.js 已找到,但 server 未能启动(非缺 node)。\n\
+                             请查看日志定位:~/.claude-gui/tauri-startup.log\
+                             (Windows:%USERPROFILE%\\.claude-gui\\tauri-startup.log)"
+                        };
+                        let res = rfd::MessageDialog::new()
+                            .set_title("Claude GUI 无法启动")
+                            .set_description(desc)
+                            .set_buttons(if node_missing { rfd::MessageButtons::OkCancel } else { rfd::MessageButtons::Ok })
+                            .show();
+                        if node_missing && res == rfd::MessageDialogResult::Ok {
+                            let url = "https://nodejs.org/en/download";
+                            #[cfg(target_os = "macos")]
+                            { let _ = std::process::Command::new("open").arg(url).spawn(); }
+                            #[cfg(target_os = "windows")]
+                            {
+                                use std::os::windows::process::CommandExt;
+                                let _ = std::process::Command::new("cmd")
+                                    .args(["/c", "start", "", url]).creation_flags(0x08000000).spawn();
+                            }
+                            #[cfg(all(unix, not(target_os = "macos")))]
+                            { let _ = std::process::Command::new("xdg-open").arg(url).spawn(); }
                         }
-                        #[cfg(all(unix, not(target_os = "macos")))]
-                        { let _ = std::process::Command::new("xdg-open").arg(url).spawn(); }
-                    }
-                    return Err("Claude GUI backend did not become healthy on any port from 6677 to 6687".into());
+                        h2.exit(1);
+                    });
+                    return;
                 }
             };
-            *app.state::<BackendPort>().0.lock().unwrap() = Some(port);
+            *handle.state::<BackendPort>().0.lock().unwrap() = Some(port);
 
             // Q2: 顶层文档 URL 带每次启动不同的 ?b= 时间戳 —— 让 WKWebView/代理等任何
             // 按 URL 作 key 的缓存全部 miss,根治"壳里端出旧 index.html"的整类问题。
@@ -574,42 +686,14 @@ pub fn run() {
                 .map(|d| d.as_millis())
                 .unwrap_or(0);
             let load_url = format!("{}/?b={}", backend_url(port), boot_nonce);
-            // 默认尺寸自适应主屏(用户报告:1560 固定宽在大字号 zoom≥1.15 时标题栏必换两行)。
-            // 标题栏一行需 ~1210 逻辑宽;1860 = 1210 × 1.25(大字号)+ 余量,覆盖常用档位。
-            // 小屏(13" MBP 1440/1512 逻辑点)取屏宽 94%,已是该屏最优;monitor.size 是物理
-            // 像素,除 scale_factor 得逻辑点。拿不到 monitor 就回落旧值 1560×960。
-            let (win_w, win_h) = match app.primary_monitor() {
-                Ok(Some(m)) => {
-                    let sf = m.scale_factor().max(0.5);
-                    let sw = m.size().width as f64 / sf;
-                    let sh = m.size().height as f64 / sf;
-                    (1860.0_f64.min(sw * 0.94), 1040.0_f64.min(sh * 0.90))
+            match load_url.parse() {
+                Ok(u) => {
+                    let _ = win.navigate(u);
+                    log_startup(&format!("[tauri] navigated window to backend on port {port}"));
                 }
-                _ => (1560.0, 960.0),
-            };
-            let window = WebviewWindowBuilder::new(
-                app,
-                "main",
-                WebviewUrl::External(load_url.parse().unwrap()),
-            )
-            .title("Claude GUI")
-            .inner_size(win_w, win_h)
-            .min_inner_size(900.0, 600.0)
-            .center()
-            .build()?;
-            let _ = window.show();
-            let _ = window.set_focus();
-            // 层级修复①:窗口在 setup 里创建,可能晚于 app 激活(等后端就绪最长 20s)。
-            // 若用户此间点了别的 app,窗口首次显示会落在其它窗口后面(看着"开在最底层")。
-            // 延迟 600ms 再 set_focus 一次,赢下启动激活竞态;间隔足够短,不算抢焦点。
-            {
-                let w2 = window.clone();
-                std::thread::spawn(move || {
-                    std::thread::sleep(Duration::from_millis(600));
-                    let _ = w2.unminimize();
-                    let _ = w2.set_focus();
-                });
+                Err(e) => log_startup(&format!("[tauri] invalid backend url {load_url}: {e}")),
             }
+            });
 
             Ok(())
         })

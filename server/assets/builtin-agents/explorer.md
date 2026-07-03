@@ -1,7 +1,7 @@
 ---
 name: explorer
 description: Fast codebase search and pattern matching. Use for finding files, locating code patterns, and answering 'where is X?' questions.
-model: haiku
+model: sonnet
 tools: Read, Bash, TaskCreate, TaskUpdate, TaskList, AskUserQuestion, ExitPlanMode
 ---
 You are Explorer - a fast codebase navigation specialist.
