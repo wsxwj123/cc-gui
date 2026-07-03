@@ -1153,14 +1153,20 @@ html { --content-max: clamp(768px, calc(var(--app-w, 100vw) * 0.7), 1120px); }
 .animate-slide-in { animation: slideIn 0.28s cubic-bezier(0.2, 0.8, 0.2, 1) both; }
 .animate-glass-rise { animation: glassRise 0.32s cubic-bezier(0.2, 0.8, 0.2, 1) both; }
 
-/* Thinking pulse — mimics CLI's spinner glyph cycling. Pulse (scale+opacity)
- * instead of full rotation: easier on the eye and closer to the CLI's
- * "breathing star" feel than a 360° spin. */
+/* Thinking pulse — 回复头像位 ✻ 的"活着"动效(呼吸,非旋转)。
+ * 幅度刻意收小(scale ≤1.08):流式结束时 streaming 气泡会被固化气泡整体替换
+ * (React key 变化 → 重挂,无法跨元素 transition),动画始终围绕静止姿态小幅
+ * 摆动 + .provider-mark 上的 transition 兜底,任意相位切到静态都不产生跳变。 */
 @keyframes avatarThinkingPulse {
-  0%, 100% { transform: scale(1);    opacity: 1;   }
-  50%      { transform: scale(1.18); opacity: 0.65; }
+  0%, 100% { transform: scale(1);    opacity: 1;    }
+  50%      { transform: scale(1.08); opacity: 0.72; }
 }
-.avatar-thinking-spin { animation: avatarThinkingPulse 1.4s ease-in-out infinite; transform-origin: center; }
+.avatar-thinking-spin { animation: avatarThinkingPulse 2s ease-in-out infinite; transform-origin: center; }
+/* 动→静的平滑收尾:类被移除(或重挂为静态)时,残余的 transform/opacity 缓动归位 */
+.provider-mark { transition: transform 0.35s ease-out, opacity 0.35s ease-out; }
+@media (prefers-reduced-motion: reduce) {
+  .avatar-thinking-spin { animation: none; }
+}
 /* Safari/WKWebView renders an inline <svg> that has only a viewBox (no width/height
    attrs) at 0×0 — Chrome auto-fills the sized parent, iOS does not. Force the
    provider mark to fill its parent so avatars actually show on mobile. */

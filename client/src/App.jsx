@@ -20,7 +20,7 @@ import TurnScrubber from './components/TurnScrubber.jsx';
 import ChatSearch from './components/ChatSearch.jsx';
 import { confirmDialog } from './utils/confirmDialog.jsx';
 import { ChatInput, EffortSelector, PermissionModeSelector, AgentModeSelector, EFFORT_LEVELS, MODE_META } from './components/ChatInput.jsx';
-import { ModelBadge } from './components/ModelBadge.jsx';
+import { ModelBadge, ProviderAvatar } from './components/ModelBadge.jsx';
 import { UsagePanel } from './components/UsagePanel.jsx';
 import { ProcessPanel } from './components/ProcessPanel.jsx';
 import { SettingsPanel } from './components/SettingsPanel.jsx';
@@ -2035,10 +2035,12 @@ function StreamingStatusLine({ thinking, text, toolCalls, streamStart }) {
   } else {
     return null;
   }
+  // 统一动效(用户反馈"跳动动画→静态头像"割裂):动画载体收敛到回复气泡的
+  // ✻ 头像位(TurnBubble 的 ProviderAvatar thinking 态),状态行只保留纯文字,
+  // 缩进 50px(34px 头像 + 16px gap)与气泡正文列对齐,渲染在气泡下方。
   return (
-    <div className="px-6 pt-3 pb-1 animate-fade-in">
-      <div className="max-w-[var(--content-max)] mx-auto flex items-center gap-2.5 text-[14px] text-ink-soft font-body">
-        <LoadingMark size={22} />
+    <div className="px-6 -mt-2 pb-3 animate-fade-in">
+      <div className="max-w-[var(--content-max)] mx-auto flex items-center gap-2 pl-[50px] text-[13px] text-ink-soft font-body">
         <span className="font-mono truncate font-medium" style={{ color: '#D97757' }}>{label}</span>
         <span style={{ color: '#D97757' }}>…</span>
         <ElapsedTime startedAt={streamStart} className="ml-1" />
@@ -4891,12 +4893,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
               ))}
               {liveVisible && isStreaming && (streamingText || streamingThinking || streamingToolCalls.length > 0 || streamingBlocks.some((b) => (b?.content?.length > 0) || b?.toolCall)) && (
                 <>
-                  <StreamingStatusLine
-                    thinking={streamingThinking}
-                    text={streamingText}
-                    toolCalls={streamingToolCalls}
-                    streamStart={streamStartRef.current}
-                  />
+                  {/* 动效统一:气泡在前(头像 ✻ 呼吸),状态文字行随内容之后,
+                      不再让独立的 LoadingMark 与完成后的静态头像形成两套视觉物 */}
                   <TurnBubble turn={{
                     uuid: 'streaming', type: 'turn', timestamp: new Date().toISOString(), model: streamingModel,
                     text: streamingText ? [streamingText] : [],
@@ -4905,6 +4903,12 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                     blocks: streamingBlocks,
                     usage: null,
                   }} />
+                  <StreamingStatusLine
+                    thinking={streamingThinking}
+                    text={streamingText}
+                    toolCalls={streamingToolCalls}
+                    streamStart={streamStartRef.current}
+                  />
                 </>
               )}
               {/* Connecting 占位:仅在「没有任何可见内容」时显示(空占位 block 不算)。
@@ -4912,19 +4916,26 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                   push 空 block→占位符消失但内容又没来→空白无动画(回归)。改用 .some
                   判断真正有内容的 block,和上面的回复气泡严格互斥,不再跳位也不再空白。*/}
               {liveVisible && isStreaming && !streamingText && !streamingThinking && streamingToolCalls.length === 0 && !streamingBlocks.some((b) => (b?.content?.length > 0) || b?.toolCall) && (
-                <div className="px-6 py-3 animate-fade-in">
-                  <div className="max-w-[var(--content-max)] mx-auto">
-                    <div className="flex items-center gap-2.5 text-[14px] font-body" style={{ color: '#D97757' }}>
-                      <LoadingMark size={22} />
-                      <span className="font-mono font-medium">{compacting ? 'Compacting' : 'Connecting'}</span>
-                      <span>…</span>
-                      <ElapsedTime startedAt={streamStartRef.current} className="ml-1" />
+                // 头像位提前入场:Connecting 阶段就用回复气泡同款布局(34px ✻ 头像
+                // + thinking 呼吸),后续流式气泡在同一位置接棒,完成后动画停到静态,
+                // 全程是"同一个视觉物从动到静",不再是 LoadingMark → 头像的跳变。
+                <div className="px-6 py-4 animate-fade-in">
+                  <div className="max-w-[var(--content-max)] mx-auto flex gap-4">
+                    <div className="mt-0.5">
+                      <ProviderAvatar model={streamingModel} size={34} thinking />
                     </div>
-                    {contextTokens > 100_000 && (
-                      <div className="text-[11px] text-ink-faint font-body mt-1 pl-[30px]">
-                        上下文较大({Math.round(contextTokens / 1000)}k)，首字可能较慢；若长时间无响应,可点停止后 <code className="font-mono">/compact</code> 压缩或换 provider。
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2.5 min-h-[34px] text-[13px] font-body" style={{ color: '#D97757' }}>
+                        <span className="font-mono font-medium">{compacting ? 'Compacting' : 'Connecting'}</span>
+                        <span>…</span>
+                        <ElapsedTime startedAt={streamStartRef.current} className="ml-1" />
                       </div>
-                    )}
+                      {contextTokens > 100_000 && (
+                        <div className="text-[11px] text-ink-faint font-body mt-1">
+                          上下文较大({Math.round(contextTokens / 1000)}k)，首字可能较慢；若长时间无响应,可点停止后 <code className="font-mono">/compact</code> 压缩或换 provider。
+                        </div>
+                      )}
+                    </div>
                   </div>
                 </div>
               )}
