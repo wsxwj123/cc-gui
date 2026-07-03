@@ -658,9 +658,13 @@ function CcUpdater() {
           if (ev.type === 'log') setLogLines((p) => [...p.slice(-200), ev.line]);
           else if (ev.type === 'start') setLogLines((p) => [...p, `$ ${ev.command}`]);
           else if (ev.type === 'error') setResult({ ok: false, error: ev.error });
-          else if (ev.type === 'done') setResult(ev.code === 0
-            ? { ok: true, done: true }
-            : { ok: false, error: `命令退出码 ${ev.code}（见下方日志)` });
+          else if (ev.type === 'done') {
+            setResult(ev.code === 0
+              ? { ok: true, done: true }
+              : { ok: false, error: `命令退出码 ${ev.code}（见下方日志)` });
+            // 更新成功后让顶栏红色「更新」按钮立刻重查并熄灭(原来要重启 GUI 才消)。
+            if (ev.code === 0) window.dispatchEvent(new CustomEvent('cgui:recheck-updates'));
+          }
         }
       }
     } catch (e) {

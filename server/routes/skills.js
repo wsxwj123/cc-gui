@@ -20,6 +20,12 @@ const SOURCES = [
   { id: 'anthropic', name: 'Anthropic 官方', repo: 'anthropics/skills', url: 'https://github.com/anthropics/skills' },
   { id: 'superpowers', name: 'Superpowers', repo: 'obra/superpowers', url: 'https://github.com/obra/superpowers' },
   { id: 'composio', name: '开源社区 (Composio)', repo: 'ComposioHQ/awesome-claude-skills', url: 'https://github.com/ComposioHQ/awesome-claude-skills' },
+  // 调研新增(2026-07):vercel/garden 为标准 skills/<id>/ 布局;hermes 的 optional-skills
+  // 是两层嵌套,靠 locateSkills 放宽后的任意深度匹配吃到全量。OpenClaw/ClawHub 的市场
+  // 是运行时注册表 API 非 GitHub raw,与 loadRepo 模型不符,不接。
+  { id: 'vercel', name: 'Vercel (skills.sh)', repo: 'vercel-labs/agent-skills', url: 'https://github.com/vercel-labs/agent-skills' },
+  { id: 'hermes', name: 'Hermes (Nous)', repo: 'NousResearch/hermes-agent', url: 'https://github.com/NousResearch/hermes-agent' },
+  { id: 'garden', name: 'Garden Skills', repo: 'ConardLi/garden-skills', url: 'https://github.com/ConardLi/garden-skills' },
 ];
 
 function parseFrontmatter(content) {
@@ -104,14 +110,19 @@ async function ghDefaultBranch(repo) {
 }
 
 // 从 tree 路径抽 skill。返回 [{ id, root }],root = SKILL.md 父目录的仓库内路径。
+// 匹配任意深度(原来只认根层/skills 单层,吃不到 hermes 的 optional-skills/分类/<id>/
+// 与 buildwithclaude 的 plugins/*/skills/<id>/ 这类嵌套布局);id = 父目录名,同名冲突
+// 先见先得(浅层路径在 git tree 里先出现,官方 skills/ 优先于深层同名)。
 function locateSkills(tree) {
   const seen = new Set();
   const out = [];
   for (const t of tree) {
     if (t.type !== 'blob') continue;
-    const m = t.path.match(/^(?:(?:skills|my-skills)\/)?([^/]+)\/SKILL\.md$/i);
+    const m = t.path.match(/^(?:(.*)\/)?([^/]+)\/SKILL\.md$/i);
     if (!m) continue;
-    const id = m[1];
+    // node_modules / 隐藏目录(.agents 等站点自用)不算市场内容
+    if (m[1] && /(^|\/)(node_modules|\.[^/]+)(\/|$)/.test(m[1])) continue;
+    const id = m[2];
     if (seen.has(id)) continue;
     seen.add(id);
     out.push({ id, root: t.path.replace(/\/SKILL\.md$/i, '') });

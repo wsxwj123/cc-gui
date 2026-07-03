@@ -42,6 +42,8 @@ router.get('/subscription-usage', async (_req, res) => {
     });
   } catch (e) { return res.json({ official: true, error: 'spawn failed: ' + e.message }); }
   if (!proc.pid) { proc.on('error', () => {}); return res.json({ official: true, error: 'claude CLI not found' }); }
+  // stderr 是 pipe 但只读 stdout —— 不排空则 stderr 超 ~64KB 子进程挂死到 20s 超时(v0.2.93 同类漏网)。
+  proc.stderr?.resume();
   let out = '';
   let done = false;
   const finish = (data) => {

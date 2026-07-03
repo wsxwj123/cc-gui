@@ -164,7 +164,9 @@ router.get('/agents/active', async (req, res) => {
   }
 
   // 2. CLI's own active session registry
-  const SESSIONS_DIR = `${process.env.HOME}/.claude/sessions`;
+  // homedir() 而非 process.env.HOME:Windows 上 HOME 为空(CO-1 同款教训)→ 原来读
+  // `undefined/.claude/sessions` 恒失败被吞 → Win 上 cli-session 卡片永远不出现。
+  const SESSIONS_DIR = join(homedir(), '.claude', 'sessions');
   let entries = [];
   try { entries = await readdir(SESSIONS_DIR); } catch {}
   for (const f of entries) {

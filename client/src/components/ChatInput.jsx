@@ -565,6 +565,19 @@ export function ChatInput({ onSend, onStop, onAccelerate, disabled, isStreaming,
       return;
     }
 
+    // 上键召回排队消息(对齐 Claude Desktop):输入框为空且本会话有排队中的消息时,
+    // ArrowUp 把最近入队的一条放回输入框并从队列移除(复用 onEditFromQueue 的出队+回填)。
+    // 优先于历史导航——先召回队列,队列空了再翻历史。
+    if (e.key === 'ArrowUp' && !e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey && text.trim() === '') {
+      let lastIdx = -1;
+      for (let i = queueItems.length - 1; i >= 0; i--) { if (!queueItems[i]?.hidden) { lastIdx = i; break; } }
+      if (lastIdx >= 0 && onEditFromQueue) {
+        e.preventDefault();
+        onEditFromQueue(lastIdx);
+        return;
+      }
+    }
+
     if ((e.key === 'ArrowUp' || e.key === 'ArrowDown') && !e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey) {
       const el = textareaRef.current;
       const atStart = !el || el.selectionStart === 0;

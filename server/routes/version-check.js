@@ -143,7 +143,8 @@ router.get('/version-check', async (req, res) => {
 });
 
 // ─── Claude Code CLI 版本检测 + 一键更新 ───────────────────────────────
-let ccCache = null;       // npm registry 上 @anthropic-ai/claude-code 的 latest 版本
+let ccCache = null;       // claude-code 最新版本(native 渠道或 npm,按 ccCacheSrc 区分)
+let ccCacheSrc = '';      // 'native' | 'npm' — 缓存来自哪个真源,防止跨源错用
 let ccCachedAt = 0;
 
 async function getClaudeVersion(claudePath) {
@@ -175,6 +176,17 @@ async function fetchNpmLatest() {
   if (!r.ok) { const e = new Error(`npm registry ${r.status}`); e.status = r.status; throw e; }
   const d = await r.json();
   return String(d.version || '');
+}
+
+// 原生安装(claude update)的真源是官方下载渠道清单,不是 npm。两渠道发布有时间差
+// (实测窗口期:本机原生 2.1.198 = 当时渠道最新,npm 已 2.1.199)→ 原生用户按 npm 比
+// 会"永远差一版",红色更新按钮点了更新也不灭。native 按本渠道比;失败回落 npm。
+async function fetchNativeLatest() {
+  const r = await fetch('https://downloads.claude.ai/claude-code-releases/latest');
+  if (!r.ok) { const e = new Error(`downloads.claude.ai ${r.status}`); e.status = r.status; throw e; }
+  const v = String(await r.text()).trim();
+  if (!/^\d+\.\d+\.\d+/.test(v)) throw new Error('原生渠道返回的版本号格式异常');
+  return v;
 }
 
 // 检测 claude CLI 的安装方式 + 解析它的绝对路径。返回 { method, path }。
@@ -420,13 +432,20 @@ router.get('/claude-version-check', async (req, res) => {
   }
   let latest = '';
   const now = Date.now();
-  if (ccCache && now - ccCachedAt < CACHE_TTL_MS) {
+  // 缓存按"真源"分键:native 渠道与 npm 的版本可能不同,混用一个缓存会把 npm 的
+  // 版本号错发给原生安装(正是"永远差一版"的放大器)。
+  const srcKey = method === 'native' ? 'native' : 'npm';
+  if (ccCache && ccCacheSrc === srcKey && now - ccCachedAt < CACHE_TTL_MS) {
     latest = ccCache;
   } else {
-    try { latest = await fetchNpmLatest(); ccCache = latest; ccCachedAt = now; }
-    catch (err) {
-      if (ccCache) latest = ccCache;
-      else return res.json({ currentVersion, installed: true, method, error: err.message || 'npm 查询失败' });
+    try {
+      latest = method === 'native'
+        ? await fetchNativeLatest().catch(() => fetchNpmLatest())
+        : await fetchNpmLatest();
+      ccCache = latest; ccCacheSrc = srcKey; ccCachedAt = now;
+    } catch (err) {
+      if (ccCache && ccCacheSrc === srcKey) latest = ccCache;
+      else return res.json({ currentVersion, installed: true, method, error: err.message || '版本查询失败' });
     }
   }
   res.json({

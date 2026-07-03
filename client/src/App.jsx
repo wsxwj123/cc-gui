@@ -413,7 +413,7 @@ const PANEL_MAP = {
   agents: { label: '自定义 Agent（写入 ~/.claude/agents）', icon: SquarePen, component: AgentsPanel },
   usage: { label: '用量统计', icon: BarChart3, component: UsagePanel },
   processes: { label: '进程管理 / 停止', icon: Activity, component: ProcessPanel },
-  mcp: { label: 'MCP 服务器', icon: Server, component: MCPPanel },
+  mcp: { label: '工具（MCP 服务器 · 插件）', icon: Server, component: MCPPanel },
   skills: { label: 'Skill 市场（导入官方技能）', icon: Sparkles, component: SkillsPanel },
   memory: { label: 'CLAUDE.md 指令', icon: BookText, component: MemoryPanel },
   settings: { label: '设置', icon: Settings, component: SettingsPanel },
@@ -6554,12 +6554,26 @@ export default function App() {
     window.dispatchEvent(new CustomEvent('cgui:settings-jump', { detail: { section } }));
   }, []);
   useEffect(() => {
-    (async () => {
+    // 原实现只在启动查一次且只置不清 → 用户随后把 CLI/GUI 更到最新,红色「更新」按钮
+    // 仍常亮到重启(用户报告)。改为可重跑 + 无更新即清:启动 / 每 30 分钟 / 窗口重获
+    // 焦点(限 5 分钟一次,覆盖"在终端更完 CLI 切回来")/ 设置页更新完成事件,都重查。
+    let lastRun = 0;
+    const checkUpdates = async (force = false) => {
+      const now = Date.now();
+      if (!force && now - lastRun < 5 * 60_000) return;
+      lastRun = now;
       const n = {};
       try { const d = await (await fetch('/api/version-check')).json(); if (d.hasUpdate) n.gui = d.latestVersion; } catch {}
       try { const d = await (await fetch('/api/claude-version-check')).json(); if (d.hasUpdate) n.cc = d.latestVersion; } catch {}
-      if (n.gui || n.cc) setUpdateNotice(n);
-    })();
+      setUpdateNotice((n.gui || n.cc) ? n : null);
+    };
+    checkUpdates(true);
+    const timer = setInterval(() => checkUpdates(true), 30 * 60_000);
+    const onFocus = () => checkUpdates(false);
+    const onRecheck = () => checkUpdates(true);
+    window.addEventListener('focus', onFocus);
+    window.addEventListener('cgui:recheck-updates', onRecheck);
+    return () => { clearInterval(timer); window.removeEventListener('focus', onFocus); window.removeEventListener('cgui:recheck-updates', onRecheck); };
   }, []);
 
   // Q1: bundle↔server 版本握手。__BUILD_VERSION__ 由 vite 烤进 bundle;server 版本
@@ -6887,28 +6901,31 @@ export default function App() {
           and the right cluster wraps to a second line, the bar grows with the
           content instead of clipping. flex-wrap on both sides keeps it from
           horizontally overflowing on narrow viewports. */}
-      <header className="glass-bar min-h-12 px-4 py-1 flex items-center justify-between gap-y-1 flex-wrap shrink-0 relative z-40">
-        <div className="flex items-center gap-2 min-w-0">
+      {/* 排版规则(用户要求):所有内容放得下就一行;放不下时左簇(项目/标题)先截断
+          让位(flex-1 min-w-0 + truncate),仍不够右簇整体换行且行内右对齐(justify-end)。
+          原来左簇不收缩,默认窗宽+中字号就把右簇挤下去 → 打开必两行。 */}
+      <header className="glass-bar min-h-12 px-4 py-1 flex items-center gap-y-1 flex-wrap shrink-0 relative z-40">
+        <div className="flex items-center gap-2 min-w-0 flex-1 basis-64">
           <button data-tour="sidebar-toggle" onClick={toggleSidebar} className="btn-glass p-1.5 transition-colors shrink-0" title={sidebarCollapsed ? '展开' : '收起'}>
             {sidebarCollapsed ? <ChevronRight size={15} className="text-ink-muted" /> : <ChevronLeft size={15} className="text-ink-muted" />}
           </button>
           <span className="text-accent text-[15px] leading-none shrink-0 select-none font-mono">✻</span>
           <span className="text-[15px] font-display font-semibold text-ink tracking-tight shrink-0">Claude Code</span>
           {selectedProject && (
-            <span className="chip font-mono truncate min-w-0 max-w-[200px]">
+            <span className="chip font-mono truncate min-w-0 max-w-[160px]">
               {formatPathShort(selectedProject.path)}
             </span>
           )}
           {selectedSession && (
             <>
               <span className="text-ink-ghost shrink-0">/</span>
-              <span className="text-[11px] text-ink-muted font-body truncate min-w-0 max-w-[220px]">
+              <span className="text-[11px] text-ink-muted font-body truncate min-w-0 max-w-[180px]">
                 {customTitles[selectedSession.sessionId] || autoTitles[selectedSession.sessionId] || selectedSession.firstPrompt?.slice(0, 36) || selectedSession.sessionId?.slice(0, 8) || '新会话'}
               </span>
             </>
           )}
         </div>
-        <div className="flex items-center gap-1 flex-wrap justify-end min-w-0">
+        <div className="flex items-center gap-1 flex-wrap justify-end min-w-0 ml-auto">
           <span data-tour="provider-switcher" className="inline-flex"><ProviderSwitcher /></span>
           <span data-tour="model-selector" className="inline-flex"><ModelSelector placement="bottom" align="right" compact permKey={permKey} /></span>
           <span data-tour="effort-selector" className="inline-flex"><EffortSelector placement="bottom" align="right" permKey={permKey} /></span>
@@ -6925,7 +6942,7 @@ export default function App() {
             // stays as the hover tooltip for the full name.
             const SHORT = {
               files: '文件', monitor: '监控', agents: 'Agent', usage: '用量', processes: '进程',
-              changes: '审查', mcp: 'MCP', skills: '技能', memory: '指令', settings: '设置',
+              changes: '审查', mcp: '工具', skills: '技能', memory: '指令', settings: '设置',
             };
             const short = SHORT[id] || label;
             return (

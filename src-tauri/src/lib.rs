@@ -587,6 +587,17 @@ pub fn run() {
             .build()?;
             let _ = window.show();
             let _ = window.set_focus();
+            // 层级修复①:窗口在 setup 里创建,可能晚于 app 激活(等后端就绪最长 20s)。
+            // 若用户此间点了别的 app,窗口首次显示会落在其它窗口后面(看着"开在最底层")。
+            // 延迟 600ms 再 set_focus 一次,赢下启动激活竞态;间隔足够短,不算抢焦点。
+            {
+                let w2 = window.clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(Duration::from_millis(600));
+                    let _ = w2.unminimize();
+                    let _ = w2.set_focus();
+                });
+            }
 
             Ok(())
         })
@@ -646,13 +657,27 @@ pub fn run() {
         // 不经过它(实测退出后 6677 仍在监听)。RunEvent::Exit 是所有退出路径的必经
         // 点,在这里统一杀 —— 与 Destroyed 重复执行无害(杀进程幂等)。
         .run(|app_handle, event| {
-            if let tauri::RunEvent::Exit = event {
-                if let Some(mut child) = app_handle.state::<Backend>().0.lock().unwrap().take() {
-                    kill_backend_tree(&mut child);
+            match event {
+                tauri::RunEvent::Exit => {
+                    if let Some(mut child) = app_handle.state::<Backend>().0.lock().unwrap().take() {
+                        kill_backend_tree(&mut child);
+                    }
+                    if let Some(port) = *app_handle.state::<BackendPort>().0.lock().unwrap() {
+                        kill_port_tree(port);
+                    }
                 }
-                if let Some(port) = *app_handle.state::<BackendPort>().0.lock().unwrap() {
-                    kill_port_tree(port);
+                // 层级修复②(macOS):点 Dock 图标重开 —— 原来完全没处理,窗口被别的窗口
+                // 盖住/最小化时点图标毫无反应,用户感知为"GUI 一直沉在最底层"。标准做法:
+                // Reopen 时 unminimize + show + set_focus 把主窗带回最前(普通软件的行为)。
+                #[cfg(target_os = "macos")]
+                tauri::RunEvent::Reopen { .. } => {
+                    if let Some(w) = app_handle.get_webview_window("main") {
+                        let _ = w.unminimize();
+                        let _ = w.show();
+                        let _ = w.set_focus();
+                    }
                 }
+                _ => {}
             }
         });
 }
