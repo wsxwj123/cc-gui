@@ -218,6 +218,30 @@ function findFirstRealUser(head) {
 }
 
 /**
+ * 续段回退标题:compact 链的根文件缺失(被清理)时,从续段回放区取第一条真实
+ * 用户消息当标题。与 findFirstRealUser 的差异:额外跳过每个续段头部固定出现的
+ * "This session is being continued" 接续说明、/compact 命令回声、中断占位——
+ * 它们都不是用户的原始请求,正是列表里一排 "/compact" 标题的来源。
+ */
+function findContinuationPrompt(head) {
+  for (const r of head) {
+    if (r.type !== 'user' || r.isMeta || r.isCompactSummary) continue;
+    const content = normalizeContent(r.message?.content);
+    const text = content.filter((c) => c.type === 'text').map((c) => c.text).join('\n').trim();
+    if (!text) continue;
+    if (/^This session is being continued/.test(text)) continue;
+    if (/^\[Request interrupted/.test(text)) continue;
+    const cmdPrompt = reconstructCommandPrompt(text, { bareToName: true });
+    if (cmdPrompt) {
+      if (/^\/compact\b/.test(cmdPrompt)) continue;
+      return cmdPrompt;
+    }
+    if (!isLocalCommandEcho(text)) return text;
+  }
+  return null;
+}
+
+/**
  * List sessions for a project hash.
  * Filters out trivial sessions and groups subagent sessions under parents.
  */
@@ -234,6 +258,11 @@ export async function listSessions(projectHash) {
   const sidecarCwd = await readSidecarCwd(projectPath);
 
   const sessions = [];
+  // compact/resume 链折叠的侧表:sessionId → { boundaryUuids, isContinuation, fallbackPrompt }。
+  // 不进响应体,只在循环后做链分组用。
+  const chainMeta = new Map();
+  const isBoundaryRecord = (r) =>
+    r?.type === 'system' && r?.subtype === 'compact_boundary' && typeof r.uuid === 'string';
   for (const file of jsonlFiles) {
     const filePath = join(projectPath, file);
     const sessionId = file.replace('.jsonl', '');
@@ -244,7 +273,16 @@ export async function listSessions(projectHash) {
       // first textual user record (observed at index 27). A 10-line head pushed
       // that user out → the whole session vanished from the list. 40 covers the
       // metadata pile; the cost is reading a few dozen extra lines per file.
-      const { head, tail, totalLines } = await readJsonlEdges(filePath, 40);
+      //
+      // 顺路收集全文件的 compact_boundary uuid(readJsonlEdges 本就逐行解析整个
+      // 文件,零额外 I/O)。注意 boundary 不止在头部:/compact 是先写进原文件继续
+      // 对话,--resume 才新开文件并把 boundary 起的历史(uuid 原样)回放进新文件,
+      // 所以"共享任一 boundary uuid"= 同一条对话链,这是唯一可靠的跨文件链接信号
+      // (实测 logicalParentUuid 指向的记录在父文件中部而非尾部,尾部映射法 0 命中)。
+      const boundaryUuids = [];
+      const { head, tail, totalLines } = await readJsonlEdges(filePath, 40, (r) => {
+        if (isBoundaryRecord(r)) boundaryUuids.push(r.uuid);
+      });
 
       // Extract metadata from first REAL user message (skips isMeta / pure
       // tool_result / local-command-echo records, aligned with getSessionMessages).
@@ -343,6 +381,15 @@ export async function listSessions(projectHash) {
         }
       } catch {}
 
+      // 续段 = 头部带 compact_boundary(resume 回放写在最前面几条杂项之后,40 行
+      // head 必然覆盖)。回退标题只对续段有意义,顺手在这里算好。
+      const isContinuation = head.some(isBoundaryRecord);
+      chainMeta.set(sessionId, {
+        boundaryUuids,
+        isContinuation,
+        fallbackPrompt: isContinuation ? findContinuationPrompt(head) : null,
+      });
+
       sessions.push({
         sessionId,
         projectHash,
@@ -362,8 +409,84 @@ export async function listSessions(projectHash) {
     }
   }
 
-  sessions.sort((a, b) => b.lastActivity.localeCompare(a.lastActivity));
-  return sessions;
+  // —— compact/resume 链折叠 ——
+  // 每次 /compact 后 --resume 都会新开一个 jsonl 续写同一场对话,列表里同一场
+  // 对话被拆成 N 行、续段标题常是 "/compact"。按共享 boundary uuid 并查集分组,
+  // 每链只留 lastActivity 最新的续段(sessionId 用它的,--resume 才接得上),
+  // 标题继承链首;计数/时间保持该续段自身的,不跨链累加。
+  const visible = collapseCompactChains(sessions, chainMeta);
+
+  visible.sort((a, b) => b.lastActivity.localeCompare(a.lastActivity));
+  return visible;
+}
+
+/**
+ * 按共享 compact_boundary uuid 把会话分组成链,每链折叠为最新续段一条。
+ * 同一 compact 事件的 boundary 记录会被 resume 原样(同 uuid)回放进所有后代
+ * 文件,而 boundary uuid 全局唯一,不可能把两条无关对话并到一起。
+ */
+function collapseCompactChains(sessions, chainMeta) {
+  if (!sessions.some((s) => chainMeta.get(s.sessionId)?.isContinuation)) return sessions;
+
+  // 并查集(路径减半)
+  const parent = new Map(sessions.map((s) => [s.sessionId, s.sessionId]));
+  const find = (x) => {
+    while (parent.get(x) !== x) {
+      parent.set(x, parent.get(parent.get(x)));
+      x = parent.get(x);
+    }
+    return x;
+  };
+  const byBoundary = new Map(); // boundaryUuid → 首个见到的 sessionId
+  for (const s of sessions) {
+    for (const u of chainMeta.get(s.sessionId)?.boundaryUuids || []) {
+      const first = byBoundary.get(u);
+      if (first === undefined) byBoundary.set(u, s.sessionId);
+      else {
+        const ra = find(first);
+        const rb = find(s.sessionId);
+        if (ra !== rb) parent.set(ra, rb);
+      }
+    }
+  }
+
+  const groups = new Map(); // 根 sessionId → members
+  for (const s of sessions) {
+    const r = find(s.sessionId);
+    if (!groups.has(r)) groups.set(r, []);
+    groups.get(r).push(s);
+  }
+
+  const visible = [];
+  for (const members of groups.values()) {
+    if (members.length === 1) {
+      const s = members[0];
+      const m = chainMeta.get(s.sessionId);
+      // 孤儿续段(父文件已被清理,链上只剩自己):标题同样不能是 "/compact",
+      // 用回退标题顶上。
+      if (m?.isContinuation && m.fallbackPrompt) s.firstPrompt = m.fallbackPrompt.slice(0, 200);
+      visible.push(s);
+      continue;
+    }
+    // 链内取最新续段展示;标题沿链向根走——链首(头部无 boundary 的原始文件)的
+    // 正常标题优先;原始文件缺失时退到最早成员的回退标题(离对话起点最近)。
+    let leaf = members[0];
+    let earliest = members[0];
+    let root = null;
+    for (const s of members) {
+      if (s.lastActivity > leaf.lastActivity) leaf = s;
+      if (s.startTime < earliest.startTime) earliest = s;
+      const cont = chainMeta.get(s.sessionId)?.isContinuation;
+      if (!cont && (!root || s.startTime < root.startTime)) root = s;
+    }
+    const inherited = root
+      ? root.firstPrompt
+      : (chainMeta.get(earliest.sessionId)?.fallbackPrompt
+         || chainMeta.get(leaf.sessionId)?.fallbackPrompt);
+    if (inherited) leaf.firstPrompt = inherited.slice(0, 200);
+    visible.push(leaf);
+  }
+  return visible;
 }
 
 /**
