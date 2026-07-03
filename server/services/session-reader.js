@@ -477,6 +477,8 @@ export async function getSessionMessages(sessionId, projectHash) {
 
   const messages = [];
   let currentTurn = null;
+  // CI-6:是否已渲染过真实用户消息。用于放开"开场 bare 斜杠命令"的重建(见下)。
+  let sawRealUser = false;
 
   function flushTurn() {
     if (currentTurn && (currentTurn.text.length > 0 || currentTurn.thinking.length > 0 || currentTurn.toolCalls.length > 0)) {
@@ -525,11 +527,18 @@ export async function getSessionMessages(sessionId, projectHash) {
         const textParts = content.filter((c) => c.type === 'text');
         const text = textParts.map((c) => c.text).join('\n').trim();
 
-        const cmdPrompt = reconstructCommandPrompt(text);
+        // CI-6:开场 bare 斜杠命令(首条只发 `/skillname`,无 args)也要渲染成用户气泡。
+        // 渲染路径此前恒 bareToName=false → 无 args 命令重建为 null → 整条被
+        // isLocalCommandEcho 吞掉 → 刷新后首条 /xxx 消失、且"重做"因找不到对应用户
+        // 消息而报错(用户实报)。只对"会话尚未出现任何真实用户消息"的开场记录放开
+        // bareToName(与列表路径 findFirstRealUser 的口径一致),会话中途的 /clear
+        // /compact 等控制命令保持隐藏,不回归"斜杠命令多出隐藏消息"旧 bug。
+        const cmdPrompt = reconstructCommandPrompt(text, { bareToName: !sawRealUser });
         const shownText = cmdPrompt || text;
         if (shownText && (cmdPrompt || !isLocalCommandEcho(text))) {
           // This is a real user prompt — flush previous turn and start new user message
           flushTurn();
+          sawRealUser = true;
           const meta = attachmentsByHash[attachmentTextHash(text)];
           messages.push({
             type: 'user',
