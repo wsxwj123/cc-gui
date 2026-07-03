@@ -235,6 +235,9 @@ export const useStore = create((set, get) => ({
   // paneMessages is in-memory only (re-fetched on session load). Persisting
   // it would bloat localStorage and the on-disk jsonl is the source of truth.
   paneMessages: [[], [], [], [], [], []],
+  // 整会话用量聚合(keyed by sessionId,服务端随 /messages 端点返回)。按 sessionId
+  // 而非 pane 索引存放 —— 分屏关窗/换绑不需要 splice 同步,同会话多窗格天然共享。
+  usageTotalsBySession: {},
   // Stable per-pane identity tokens. SplitMain keys each SessionDetail by these
   // (not by position), so closePane's left-shift keeps every surviving pane's
   // React instance — and its live streaming state — paired with its session.
@@ -989,8 +992,14 @@ export const useStore = create((set, get) => ({
       // whatever is there — a genuinely empty session still returns 200 + [].
       if (!res.ok) { if (!silent) set({ loading: false }); return; }
       const data = await res.json();
-      const messages = Array.isArray(data) ? data : [];
+      // 端点现返回 { messages, usageTotals };兼容旧的裸数组形态(升级过渡期)。
+      const messages = Array.isArray(data) ? data : (Array.isArray(data?.messages) ? data.messages : []);
       get().setPaneMessages(tab, messages);
+      // 服务端算好的整会话用量聚合,SessionDetail 顶部用量条直接取用,
+      // 避免前端对几千条历史消息每帧全量 reduce。
+      if (data && !Array.isArray(data) && data.usageTotals) {
+        set((s) => ({ usageTotalsBySession: { ...s.usageTotalsBySession, [sessionId]: data.usageTotals } }));
+      }
       if (!silent) set({ loading: false });
     } catch (err) {
       // Network/parse failure — keep existing messages rather than blanking.
