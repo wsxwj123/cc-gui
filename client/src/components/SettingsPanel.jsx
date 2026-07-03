@@ -979,6 +979,26 @@ function EnvEditor({ env, onSave, saving }) {
   );
 }
 
+// 输入预测开关(CLI --prompt-suggestions):回合结束后预测下一句,输入框灰字 + Tab 采纳。
+// 每回合多一次轻量调用(蹭父回合缓存,官方称几乎免费),默认关。
+function PromptSuggestionsToggle() {
+  const on = useStore((s) => s.promptSuggestions);
+  const setOn = useStore((s) => s.setPromptSuggestions);
+  return (
+    <div className="bg-canvas-warm border border-canvas-deep rounded-lg px-3 py-2.5 flex items-center gap-3">
+      <div className="min-w-0 flex-1">
+        <div className="text-xs text-ink font-body font-medium">输入预测 <span className="text-[9px] text-amber-600 border border-amber-300 rounded px-1">实验</span></div>
+        <div className="text-[10.5px] text-ink-faint font-body">每轮回复结束后预测你下一句想说什么,输入框灰字显示,按 Tab 采纳(几乎不额外计费)。依赖 Claude Code 上游放量:当前版本可能收不到预测,届时开着也无效果、仅回合末多等约 3 秒</div>
+      </div>
+      <button onClick={() => setOn(!on)}
+        className={`shrink-0 w-9 h-5 rounded-full transition-colors relative ${on ? 'bg-accent' : 'bg-ink-faint/30'}`}
+        title={on ? '已开启' : '已关闭'}>
+        <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-all ${on ? 'left-[18px]' : 'left-0.5'}`} />
+      </button>
+    </div>
+  );
+}
+
 function OverviewTab({ settings, onSave, saving }) {
   const [showEnv, setShowEnv] = useState(false);
   const [showHooks, setShowHooks] = useState(false);
@@ -1002,6 +1022,7 @@ function OverviewTab({ settings, onSave, saving }) {
       <div id="cc-update"><CcUpdater /></div>
       <FullDiskAccessCard />
       <CloseBehaviorPicker />
+      <PromptSuggestionsToggle />
       {rows.length > 0 && (
         <div className="bg-canvas-warm border border-canvas-deep rounded-lg divide-y divide-canvas-deep">
           {rows.map(([k, v]) => (

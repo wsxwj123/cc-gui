@@ -323,6 +323,12 @@ export const useStore = create((set, get) => ({
     try { return localStorage.getItem('cgui-loading-style') || 'cli'; } catch { return 'cli'; }
   })(),
 
+  // 输入预测(CLI --prompt-suggestions):回合结束后预测下一句,输入框灰字 + Tab 采纳。
+  // 默认关(多一次轻量模型调用;蹭缓存几乎免费但仍属可选行为),设置→概览里开。
+  promptSuggestions: (() => {
+    try { return localStorage.getItem('cgui-prompt-suggestions') === '1'; } catch { return false; }
+  })(),
+
   // Theme as a (family, tone) pair. `cguiTheme` is the derived data-cgui-theme
   // variant id ('' = default Apple-system palette). themeTone drives data-theme.
   themeFamily: initThemeFamily(),
@@ -796,6 +802,11 @@ export const useStore = create((set, get) => ({
     const v = String(id || 'cli');
     set({ loadingStyle: v });
     try { localStorage.setItem('cgui-loading-style', v); } catch {}
+  },
+
+  setPromptSuggestions: (on) => {
+    set({ promptSuggestions: !!on });
+    try { localStorage.setItem('cgui-prompt-suggestions', on ? '1' : '0'); } catch {}
   },
 
   setUiFontScale: (v) => {

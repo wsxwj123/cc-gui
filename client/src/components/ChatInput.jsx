@@ -224,7 +224,7 @@ const TYPE_LABELS = {
   plugin: '插件',
 };
 
-export function ChatInput({ onSend, onStop, onAccelerate, disabled, isStreaming, backgroundWorking = false, queueLength = 0, queueItems = [], onRemoveFromQueue, onEditFromQueue, todos = null, plan = '', permKey = null, sessionId = null }) {
+export function ChatInput({ onSend, onStop, onAccelerate, disabled, isStreaming, backgroundWorking = false, queueLength = 0, queueItems = [], onRemoveFromQueue, onEditFromQueue, todos = null, plan = '', permKey = null, sessionId = null, promptSuggestion = '' }) {
   const [text, setText] = useState('');
   // 编辑重发态(#4):点击「重新编辑并发送」后进入。此时历史消息尚未被破坏,
   // 按 Esc 可整条取消(清空输入+通知上层撤销待回滚),给用户反悔余地。
@@ -565,6 +565,14 @@ export function ChatInput({ onSend, onStop, onAccelerate, disabled, isStreaming,
       return;
     }
 
+    // Tab 采纳输入预测(--prompt-suggestions 的灰字):输入框为空且有预测时,Tab 填入。
+    // 放在命令面板 Tab(text 以 / 开头才触发)之前互不冲突;text 非空时 Tab 走默认行为。
+    if (e.key === 'Tab' && !e.shiftKey && text === '' && promptSuggestion) {
+      e.preventDefault();
+      setText(promptSuggestion);
+      return;
+    }
+
     // 上键召回排队消息(对齐 Claude Desktop):输入框为空且本会话有排队中的消息时,
     // ArrowUp 把最近入队的一条放回输入框并从队列移除(复用 onEditFromQueue 的出队+回填)。
     // 优先于历史导航——先召回队列,队列空了再翻历史。
@@ -808,7 +816,8 @@ export function ChatInput({ onSend, onStop, onAccelerate, disabled, isStreaming,
             onChange={handleTextChange}
             onKeyDown={handleKeyDown}
             onPaste={handlePaste}
-            placeholder={rcLocked ? '已交给手机远程控制 · 点上方「收回控制」解锁' : (dragging ? '松开以添加图片、PDF、Office 或文本…' : '输入消息... (/ 打开命令)')}
+            // 输入预测灰字:复用原生 placeholder(位置/配色天然对,零布局风险),Tab 采纳。
+            placeholder={rcLocked ? '已交给手机远程控制 · 点上方「收回控制」解锁' : (dragging ? '松开以添加图片、PDF、Office 或文本…' : (promptSuggestion ? `${promptSuggestion}  ⇥ Tab 采纳` : '输入消息... (/ 打开命令)'))}
             disabled={disabled || rcLocked}
             rows={1}
             // 单行高度对齐左右按钮(h-9=36px):min-h-[36px]+py-1.5 让单行文字在 36px 行内

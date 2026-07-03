@@ -339,6 +339,7 @@ router.post('/chat', async (req, res) => {
     globalRead,
     appendSystemPrompt,
     agent,
+    promptSuggestions,
   } = req.body;
   if (!prompt) return res.status(400).json({ error: 'prompt is required' });
 
@@ -459,6 +460,10 @@ router.post('/chat', async (req, res) => {
     stderr: (d) => { const t = String(d).trim(); if (t) deliverLine(slot, JSON.stringify({ type: 'stderr', text: t })); },
   };
   if (effort && VALID_EFFORTS.has(effort)) options.effort = effort;
+  // 输入预测:每回合末 SDK 发一条 prompt_suggestion(在 result 之后,蹭父回合缓存
+  // 几乎免费;首轮/plan 模式/API 错误后 SDK 自己不发)。开启时消息泵的关流时序对应放宽。
+  const suggestOn = promptSuggestions === true;
+  if (suggestOn) options.promptSuggestions = true;
   // --agent 仅新会话首轮(会话级设定,resume 时传会被拒)。
   if (typeof agent === 'string' && /^[a-z0-9][a-z0-9-]{0,63}$/.test(agent) && !sessionId) options.agent = agent;
   if (sessionId) options.resume = sessionId;
@@ -519,8 +524,15 @@ router.post('/chat', async (req, res) => {
         deliverLine(slot, line);
         if (m.type === 'result') {
           lastResultLine = line;
-          if (subagentSeen) { cancelClose(); closeTimer = setTimeout(finalize, 4000); } // 可能是中间 result,延迟关
+          // 关流延迟:子代理回合沿用 4s 去抖;开了输入预测时 suggestion 在 result 之后
+          // 才到,必须给等待窗(3s;SDK 不发时到点正常收尾)。都没有则立即关,零延迟。
+          const delay = subagentSeen ? 4000 : (suggestOn ? 3000 : 0);
+          if (delay) { cancelClose(); closeTimer = setTimeout(finalize, delay); }
           else finalize();
+        } else if (m.type === 'prompt_suggestion') {
+          // 建议是本回合最后一条消息:result 已到(closeTimer 在挂)就立即收尾,
+          // 不能走下面的 cancelClose 分支——那会把关闭取消掉、进程挂死等不到下一条。
+          if (closeTimer) finalize();
         } else if (closeTimer) {
           cancelClose(); // result 之后又来事件 → 那个 result 不是最终的,取消关闭等下一个
         }
