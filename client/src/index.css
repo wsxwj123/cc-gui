@@ -1166,6 +1166,41 @@ html { --content-max: clamp(768px, calc(var(--app-w, 100vw) * 0.7), 1120px); }
    provider mark to fill its parent so avatars actually show on mobile. */
 .provider-mark svg { width: 100%; height: 100%; display: block; }
 
+/* ── Skill 调用横幅 ──────────────────────────────────────────────
+   Skill 名居中大字显示,运行期间带流光:渐变经 background-clip:text 上色,
+   背景位移让一道高光(--color-ink 亮带,底色 --color-ink-faint)从左到右循环
+   扫过,纯 CSS。基色/亮带均取主题 ink 变量,深浅主题自动协调。
+   调用结束加 .skill-banner-name-done / -error:动画停,恢复静态实色。 */
+.skill-banner-name {
+  background-image: linear-gradient(100deg,
+    var(--color-ink-faint) 0%, var(--color-ink-faint) 40%,
+    var(--color-ink) 50%,
+    var(--color-ink-faint) 60%, var(--color-ink-faint) 100%);
+  background-size: 250% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  color: transparent;
+  animation: shimmer 2.4s linear infinite;
+}
+.skill-banner-name-done,
+.skill-banner-name-error {
+  animation: none;
+  background-image: none;
+  -webkit-text-fill-color: currentColor;
+}
+.skill-banner-name-done { color: var(--color-ink); }
+.skill-banner-name-error { color: var(--color-error); }
+/* 静止降级:不播流光,直接静态实色显示 */
+@media (prefers-reduced-motion: reduce) {
+  .skill-banner-name {
+    animation: none;
+    background-image: none;
+    -webkit-text-fill-color: currentColor;
+    color: var(--color-ink);
+  }
+}
+
 .stagger > *:nth-child(1) { animation-delay: 0ms; }
 .stagger > *:nth-child(2) { animation-delay: 40ms; }
 .stagger > *:nth-child(3) { animation-delay: 80ms; }

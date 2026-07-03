@@ -1,47 +1,56 @@
 import React, { useState } from 'react';
-import { Wrench, ChevronDown, ChevronRight, Loader2 } from 'lucide-react';
+import { Loader2 } from 'lucide-react';
 import { MarkdownRenderer } from '../MarkdownRenderer.jsx';
 
-// Skill tool — input shape varies per skill, but typically has at least
-// `skill` or the model calls a skill by name. Render generic key/value.
+// Skill 调用横幅 — 参考 opencode 的章节分隔样式:skill 名单独一行居中大字,
+// 运行期间带流光动画(.skill-banner-name,见 index.css),下方一行小字给
+// 调用状态与参数摘要。点击横幅展开输入参数/结果详情(信息不丢)。
+// input 形态通常为 { skill, args },不同 skill 可能有额外字段,摘要按通用键值拼。
 export function SkillCard({ toolCall }) {
   const [expanded, setExpanded] = useState(false);
   const skillName = toolCall.input?.skill || toolCall.input?.name || toolCall.name;
   const result = toolCall.result;
   const isError = result?.isError;
+  const running = !result;
   const content = typeof result?.content === 'string' ? result.content : '';
 
+  // 参数摘要:除 skill/name 外的入参拼成一行(横幅下的小字),超长截断。
   const inputEntries = Object.entries(toolCall.input || {}).filter(([k]) => k !== 'skill' && k !== 'name');
   const inputPreview = inputEntries.length > 0
-    ? inputEntries.map(([k, v]) => `${k}=${typeof v === 'string' ? v.slice(0, 30) : JSON.stringify(v).slice(0, 30)}`).join(', ')
+    ? inputEntries.map(([k, v]) => `${k}: ${typeof v === 'string' ? v : JSON.stringify(v)}`).join(' · ').slice(0, 120)
     : '';
+  const statusLabel = running ? '运行中' : (isError ? '调用失败' : '调用完成');
 
   return (
-    <div className="border border-canvas-deep rounded-lg overflow-hidden bg-canvas animate-fade-up">
+    <div className="my-2">
+      {/* 居中横幅:两侧分隔线 + skill 名 + 状态小字。点击切换详情展开 */}
       <button
         onClick={() => setExpanded(!expanded)}
-        className="w-full px-3 py-2 flex items-center gap-2 bg-amber-50 hover:bg-amber-100 transition-colors text-left"
+        className="w-full flex items-center gap-3 py-1.5 text-left cursor-pointer"
+        title={expanded ? '收起 Skill 调用详情' : '展开 Skill 调用详情'}
       >
-        {expanded
-          ? <ChevronDown size={12} className="text-amber-700 shrink-0" />
-          : <ChevronRight size={12} className="text-amber-700 shrink-0" />}
-        <Wrench size={12} className="text-amber-600 shrink-0" />
-        <span className="text-xs font-mono text-amber-900 shrink-0">Skill</span>
-        <span className="text-[11px] font-mono text-ink truncate flex-1">{skillName}</span>
-        {!result && <Loader2 size={11} className="text-amber-500 animate-spin shrink-0" />}
-        {result && (isError
-          ? <span className="text-error text-[10px] shrink-0">错误</span>
-          : <span className="text-success text-[10px] shrink-0">✓</span>)}
+        <span className="flex-1 h-px bg-canvas-deep/70" />
+        <span className="flex flex-col items-center min-w-0 max-w-[70%] px-1">
+          <span
+            className={`skill-banner-name text-[17px] font-semibold font-body leading-tight truncate max-w-full ${
+              running ? '' : (isError ? 'skill-banner-name-error' : 'skill-banner-name-done')
+            }`}
+          >
+            {skillName}
+          </span>
+          <span className="text-[10.5px] text-ink-faint font-body mt-0.5 flex items-center gap-1.5 min-w-0 max-w-full">
+            {running && <Loader2 size={10} className="animate-spin shrink-0" />}
+            <span className="truncate">
+              Skill {statusLabel}{inputPreview ? ` · ${inputPreview}` : ''}
+            </span>
+          </span>
+        </span>
+        <span className="flex-1 h-px bg-canvas-deep/70" />
       </button>
 
-      {inputPreview && (
-        <div className="px-3 py-1 text-[10px] text-ink-faint font-mono border-b border-canvas-deep truncate">
-          {inputPreview}
-        </div>
-      )}
-
+      {/* 展开详情:输入参数 + 结果(与其他工具卡片同风格) */}
       {expanded && (
-        <>
+        <div className="border border-canvas-deep rounded-lg overflow-hidden bg-canvas animate-fade-in">
           <details className="px-3 py-2 border-b border-canvas-deep" open>
             <summary className="cursor-pointer text-[10px] text-ink-faint uppercase tracking-wider font-body">
               输入参数
@@ -62,7 +71,7 @@ export function SkillCard({ toolCall }) {
               }
             </div>
           )}
-        </>
+        </div>
       )}
     </div>
   );

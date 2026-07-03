@@ -69,30 +69,33 @@ export function TaskCard({ toolCall }) {
   const thinkingOut = agent ? agent.thinking.join('') : '';
   const childTools = agent?.toolCalls || [];
 
+  // 独立卡片:主题 accent 描边 + 左侧 accent 竖条 + accent 代理类型标签,
+  // 与折叠工具组的灰色边框行明显区分;颜色全走主题变量,深浅主题自适应
+  // (替换原 violet-* 硬编码浅色系,深色主题下不再突兀)。
   return (
-    <div className="border border-canvas-deep rounded-lg overflow-hidden bg-canvas animate-fade-up">
+    <div className="border border-accent-muted border-l-[3px] border-l-accent rounded-lg overflow-hidden bg-canvas animate-fade-up">
       <button
         onClick={() => setExpanded(!expanded)}
-        className="w-full px-3 py-2 flex items-start gap-2 bg-violet-50 hover:bg-violet-100 transition-colors text-left"
+        className="w-full px-3 py-2 flex items-start gap-2 bg-accent-subtle/60 hover:bg-accent-subtle transition-colors text-left"
       >
         {expanded
-          ? <ChevronDown size={12} className="text-violet-600 shrink-0 mt-0.5" />
-          : <ChevronRight size={12} className="text-violet-600 shrink-0 mt-0.5" />}
-        <Bot size={14} className="text-violet-600 shrink-0 mt-0.5" />
+          ? <ChevronDown size={12} className="text-accent shrink-0 mt-0.5" />
+          : <ChevronRight size={12} className="text-accent shrink-0 mt-0.5" />}
+        <Bot size={14} className="text-accent shrink-0 mt-0.5" />
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2">
-            <span className="text-[9px] px-1 py-px bg-violet-200 text-violet-800 rounded font-body shrink-0 uppercase tracking-wide">
+            <span className="text-[9px] px-1.5 py-px bg-accent text-canvas rounded font-body shrink-0 uppercase tracking-wide">
               子代理
             </span>
-            <span className="text-xs font-semibold text-violet-900 font-mono truncate" title={`子代理: ${subagentType}`}>
+            <span className="text-xs font-semibold text-ink font-mono truncate" title={`子代理: ${subagentType}`}>
               {subagentType}
             </span>
             {agentModel && (
-              <span className="text-[9px] px-1 py-px bg-violet-100 text-violet-700 rounded font-mono shrink-0" title="该子代理实际使用的模型">
+              <span className="text-[9px] px-1 py-px bg-accent-subtle text-accent rounded font-mono shrink-0" title="该子代理实际使用的模型">
                 {agentModel}
               </span>
             )}
-            {isWorking && <Loader2 size={11} className="text-violet-500 animate-spin shrink-0" />}
+            {isWorking && <Loader2 size={11} className="text-accent animate-spin shrink-0" />}
             {isDone && !isError && <span className="text-[10px] text-success shrink-0">完成</span>}
             {isError && <span className="text-[10px] text-error shrink-0">错误</span>}
           </div>
@@ -107,7 +110,7 @@ export function TaskCard({ toolCall }) {
           role="button"
           tabIndex={0}
           onClick={openAgentView}
-          className="shrink-0 p-1 rounded text-violet-500 hover:text-violet-800 hover:bg-violet-100 transition-colors cursor-pointer"
+          className="shrink-0 p-1 rounded text-accent/70 hover:text-accent hover:bg-accent-subtle transition-colors cursor-pointer"
           title="在子代理会话窗口打开"
         >
           <Maximize2 size={12} />
@@ -115,7 +118,7 @@ export function TaskCard({ toolCall }) {
       </button>
 
       {expanded && (
-        <div className="border-t border-violet-200 pl-3 ml-4 border-l-2 border-violet-300 bg-canvas">
+        <div className="border-t border-accent-muted pl-3 ml-4 border-l-2 border-accent-muted bg-canvas">
           {prompt && (
             <details className="px-3 py-2 border-b border-canvas-deep">
               <summary className="cursor-pointer text-[10px] text-ink-faint uppercase tracking-wider font-body">
@@ -145,7 +148,7 @@ export function TaskCard({ toolCall }) {
               </div>
               {childTools.map((tc, i) => (
                 <div key={tc.id || i} className="text-[11px] font-mono text-ink-soft flex items-center gap-1.5">
-                  <span className="w-1 h-1 rounded-full bg-violet-400" />
+                  <span className="w-1 h-1 rounded-full bg-accent/60" />
                   <span>{tc.name}</span>
                   {tc.result ? (
                     tc.result.isError
