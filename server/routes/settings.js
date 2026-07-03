@@ -340,6 +340,9 @@ router.put('/settings', async (req, res) => {
     // Also scrub any pre-existing `_addProject` pollution from earlier bug.
     delete current._addProject;
     const updated = { ...current, ...body };
+    // 约定:body 中显式为 null 的顶层键 = 删除该配置项。浅合并无法删除键,故显式处理。
+    // 用于 GUI 把配置项恢复为 CLI 默认(如 autoCompactWindow 置空 = 按模型自动决定窗口)。
+    for (const k of Object.keys(body)) { if (body[k] === null) delete updated[k]; }
     // 原始配置里 model 字段与 env.ANTHROPIC_MODEL 表达同一意图(默认模型),但 env 在
     // model-resolver 里优先级更高。用户只在 JSON 改 model、不改 env 时,env 会覆盖
     // model → "改默认模型看起来没生效"(改 sonnet 顶栏仍 haiku)。官方端点下两者不一致

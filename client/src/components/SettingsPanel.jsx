@@ -1019,6 +1019,42 @@ function ExcludeDynamicPromptToggle() {
   );
 }
 
+// 自动压缩窗口(settings.json 的 autoCompactWindow,单位 token;官方配置项,CLI 范围
+// 100000–1000000)。上下文占用逼近该窗口时 CLI 自动压缩历史。置空 = 恢复 CLI 默认
+// (按模型自动决定)。注:环境变量 CLAUDE_CODE_AUTO_COMPACT_WINDOW 若已设置会覆盖此项。
+const AUTO_COMPACT_OPTIONS = [
+  { value: '',        label: '默认(按模型自动)' },
+  { value: '100000',  label: '100K token' },
+  { value: '150000',  label: '150K token' },
+  { value: '200000',  label: '200K token' },
+  { value: '300000',  label: '300K token' },
+  { value: '500000',  label: '500K token' },
+  { value: '1000000', label: '1M token' },
+];
+function AutoCompactWindowSelect({ settings, onSave, saving }) {
+  const raw = settings?.autoCompactWindow;
+  const current = (typeof raw === 'number' && Number.isFinite(raw)) ? String(raw) : '';
+  // 当前值不在预设内(用户手改过 JSON)时并入,避免下拉把它吞掉。
+  const opts = AUTO_COMPACT_OPTIONS.some((o) => o.value === current)
+    ? AUTO_COMPACT_OPTIONS
+    : [{ value: current, label: `${current} token(自定义)` }, ...AUTO_COMPACT_OPTIONS];
+  return (
+    <div className="bg-canvas-warm border border-canvas-deep rounded-lg px-3 py-2.5 flex items-center gap-3">
+      <div className="min-w-0 flex-1">
+        <div className="text-xs text-ink font-body font-medium">自动压缩窗口</div>
+        <div className="text-[10.5px] text-ink-faint font-body">上下文占用逼近该 token 窗口时,CLI 自动压缩会话历史。调大则更晚触发、保留更多上下文,调小则更早压缩。置为默认时按模型自动决定。若环境变量 CLAUDE_CODE_AUTO_COMPACT_WINDOW 已设置,则以环境变量为准</div>
+      </div>
+      <select
+        value={current}
+        onChange={(e) => { const v = e.target.value; onSave?.({ autoCompactWindow: v ? Number(v) : null }); }}
+        disabled={saving}
+        className="shrink-0 text-[11px] font-mono bg-canvas-base border border-canvas-deep rounded px-2 py-1 text-ink focus:border-accent outline-none">
+        {opts.map((o) => (<option key={o.value} value={o.value}>{o.label}</option>))}
+      </select>
+    </div>
+  );
+}
+
 function OverviewTab({ settings, onSave, saving }) {
   const [showEnv, setShowEnv] = useState(false);
   const [showHooks, setShowHooks] = useState(false);
@@ -1044,6 +1080,7 @@ function OverviewTab({ settings, onSave, saving }) {
       <CloseBehaviorPicker />
       <PromptSuggestionsToggle />
       <ExcludeDynamicPromptToggle />
+      <AutoCompactWindowSelect settings={settings} onSave={onSave} saving={saving} />
       {rows.length > 0 && (
         <div className="bg-canvas-warm border border-canvas-deep rounded-lg divide-y divide-canvas-deep">
           {rows.map(([k, v]) => (
