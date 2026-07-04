@@ -1,7 +1,8 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { useStore } from '../stores/sessionStore.js';
-import { Save, RefreshCw, Check, Lock, Trash2, ChevronLeft, Brain, BookText } from 'lucide-react';
+import { Save, RefreshCw, Check, Lock, Trash2, ChevronLeft, Brain, BookText, Sparkles, Copy, ChevronDown, ChevronRight, Search } from 'lucide-react';
 import { confirmDialog } from '../utils/confirmDialog.jsx';
+import { copyText } from '../utils/clipboard.js';
 
 // CLAUDE.md 指令编辑器。注意:CLAUDE.md 是用户写的"指令",不是"记忆"——官方语境里
 // "记忆/memory"特指 Claude 自写的 auto memory(~/.claude/projects/<p>/memory/),二者
@@ -28,14 +29,14 @@ export function MemoryPanel() {
   return (
     <div className="h-full flex flex-col">
       <div className="flex items-center gap-1 px-3 pt-2 shrink-0">
-        {[['claude-md', '指令 (CLAUDE.md)', BookText], ['auto', '自动记忆', Brain]].map(([id, label, Icon]) => (
+        {[['claude-md', '指令 (CLAUDE.md)', BookText], ['auto', '自动记忆', Brain], ['prompts', '提示词库', Sparkles]].map(([id, label, Icon]) => (
           <button key={id} onClick={() => setMode(id)}
             className={`flex items-center gap-1 text-[11px] px-2.5 py-1 rounded-t font-body transition-colors border-b-2 ${mode === id ? 'border-accent text-accent' : 'border-transparent text-ink-muted hover:text-ink'}`}>
             <Icon size={11} />{label}
           </button>
         ))}
       </div>
-      {mode === 'claude-md' ? <ClaudeMdEditor cwd={cwd} /> : <AutoMemoryTab cwd={cwd} />}
+      {mode === 'claude-md' ? <ClaudeMdEditor cwd={cwd} /> : mode === 'auto' ? <AutoMemoryTab cwd={cwd} /> : <PromptLibraryTab />}
     </div>
   );
 }
@@ -252,6 +253,93 @@ function AutoMemoryTab({ cwd }) {
             </button>
           </div>
         ))}
+      </div>
+    </div>
+  );
+}
+
+// 提示词库:内置 780 条(Cherry Studio 开源助手预设),按分类折叠浏览,复制 prompt
+// 到剪贴板(可粘贴到输入框或项目级/会话级 CLAUDE.md)。分类全部保留、各有名字。
+function PromptLibraryTab() {
+  const [templates, setTemplates] = useState(null);
+  const [openGroups, setOpenGroups] = useState({});
+  const [copiedId, setCopiedId] = useState('');
+  const [query, setQuery] = useState('');
+
+  useEffect(() => {
+    fetch('/api/prompt-templates')
+      .then((r) => r.json())
+      .then((d) => setTemplates(Array.isArray(d.templates) ? d.templates : []))
+      .catch(() => setTemplates([]));
+  }, []);
+
+  // 按第一个 group 归类(一个模板只出现在一处,避免重复);搜索过滤标题+描述。
+  const byGroup = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    const m = new Map();
+    for (const t of templates || []) {
+      if (q && !`${t.name || ''}${t.description || ''}`.toLowerCase().includes(q)) continue;
+      const g = (Array.isArray(t.group) && t.group[0]) || '未分类';
+      if (!m.has(g)) m.set(g, []);
+      m.get(g).push(t);
+    }
+    // 按数量降序,分类名各自保留
+    return [...m.entries()].sort((a, b) => b[1].length - a[1].length);
+  }, [templates, query]);
+
+  const copy = async (t) => {
+    const ok = await copyText(t.prompt || '');
+    if (ok) { setCopiedId(t.id); setTimeout(() => setCopiedId(''), 1500); }
+    else await confirmDialog('复制失败:剪贴板不可用', { danger: false });
+  };
+
+  if (templates === null) {
+    return <div className="flex-1 flex items-center justify-center text-ink-faint text-sm font-body">加载中…</div>;
+  }
+
+  return (
+    <div className="flex-1 min-h-0 flex flex-col px-3 pb-3">
+      <div className="text-[10.5px] text-ink-faint font-body py-2 leading-relaxed shrink-0">
+        内置 {templates.length} 条提示词预设。点「复制」后可粘贴到输入框直接用,或粘到项目级 /
+        会话级 CLAUDE.md 里作为长期指令。
+      </div>
+      <div className="relative shrink-0 mb-2">
+        <Search size={12} className="absolute left-2 top-1/2 -translate-y-1/2 text-ink-faint" />
+        <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="搜索提示词…"
+          className="w-full text-[11px] font-body bg-canvas-warm border border-canvas-deep rounded pl-7 pr-2 py-1.5 text-ink focus:border-accent outline-none" />
+      </div>
+      <div className="flex-1 min-h-0 overflow-y-auto space-y-1">
+        {byGroup.map(([group, items]) => {
+          const open = openGroups[group];
+          return (
+            <div key={group} className="border border-canvas-deep rounded-lg overflow-hidden">
+              <button onClick={() => setOpenGroups((s) => ({ ...s, [group]: !s[group] }))}
+                className="w-full flex items-center gap-1.5 px-2.5 py-1.5 text-[11px] font-body text-ink hover:bg-canvas-warm transition-colors">
+                {open ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+                <span className="font-medium">{group}</span>
+                <span className="text-ink-faint">({items.length})</span>
+              </button>
+              {open && (
+                <div className="divide-y divide-canvas-deep/60">
+                  {items.map((t) => (
+                    <div key={t.id} className="px-2.5 py-2 flex items-start gap-2 hover:bg-canvas-warm/50">
+                      <span className="text-[15px] leading-none shrink-0 mt-0.5">{t.emoji || '📝'}</span>
+                      <div className="flex-1 min-w-0">
+                        <div className="text-[11.5px] text-ink font-body font-medium truncate">{t.name}</div>
+                        {t.description && <div className="text-[10px] text-ink-faint font-body line-clamp-2">{t.description}</div>}
+                      </div>
+                      <button onClick={() => copy(t)} title="复制提示词到剪贴板"
+                        className="shrink-0 flex items-center gap-1 text-[10px] px-2 py-1 rounded border border-canvas-deep text-ink-soft hover:text-accent hover:border-accent transition-colors">
+                        {copiedId === t.id ? <><Check size={10} className="text-success" />已复制</> : <><Copy size={10} />复制</>}
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          );
+        })}
+        {byGroup.length === 0 && <div className="text-center text-ink-faint text-[11px] font-body py-8">没有匹配的提示词</div>}
       </div>
     </div>
   );
