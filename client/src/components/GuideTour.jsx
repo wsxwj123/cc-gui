@@ -1,8 +1,8 @@
-// 使用指引:点问号后半透明遮罩压暗全屏、【挖空所有功能按钮让它们亮起来】(spotlight
-// 高亮),鼠标悬停任一高亮按钮即在它旁边显示该按钮的二级菜单与说明(一次一个气泡,紧贴
-// 按钮,不用连线不铺满)。左栏是会话/项目列表 → 动态裁剪对应说明。
-import { useMemo, useState, useLayoutEffect } from 'react';
-import { X } from 'lucide-react';
+// 使用指引(逐步式,可靠):点问号后逐个高亮界面按钮 —— 用 box-shadow 把当前按钮周围
+// 压暗、按钮本身透出(spotlight),旁边直接显示它的注解(含二级菜单),下方「下一步/上一步」
+// 逐个浏览。zoom 直读 <html>.style.zoom 做坐标还原。左栏会话/项目列表动态裁剪说明。
+import { useMemo, useState, useEffect, useLayoutEffect } from 'react';
+import { X, ArrowLeft, ArrowRight } from 'lucide-react';
 
 const PANEL_STEPS = [
   ['panel-files', '文件', '· 浏览项目文件树、点开预览\n· html/svg 可侧边停靠放大查看\n· 图片/PDF/Office 直接预览'],
@@ -50,89 +50,79 @@ function buildSteps(hasProject) {
 
 export function GuideTour({ open, onClose, hasProject }) {
   const steps = useMemo(() => buildSteps(hasProject), [hasProject]);
-  const [items, setItems] = useState([]);
+  const [i, setI] = useState(0);
+  const [box, setBox] = useState(null);              // 当前步骤元素位置(逻辑 px)
   const [dims, setDims] = useState({ vw: 1280, vh: 800 });
-  const [hover, setHover] = useState(null);
 
-  // 测量所有 data-tour 元素(逻辑 px:CSS zoom 下 getBoundingClientRect 是视觉坐标,
-  // fixed/SVG 在 zoom 上下文会被再 ×zoom,故 ÷zoom 还原;zoom 直读 <html>.style.zoom)。
+  // 打开时回到第 1 步;关闭清空(避免下次首帧用旧 i 越界)。
+  useEffect(() => { if (open) setI(0); else setBox(null); }, [open]);
+
+  // 定位当前步骤;找不到的步骤(某态不渲染)自动顺延,全找不到则结束。
   useLayoutEffect(() => {
-    if (!open) { setItems([]); setHover(null); return; }
-    const measure = () => {
-      const zoom = parseFloat(document.documentElement.style.zoom) || 1;
-      setDims({ vw: window.innerWidth / zoom, vh: window.innerHeight / zoom });
-      const out = [];
-      for (const s of steps) {
-        const el = document.querySelector(`[data-tour="${s.sel}"]`);
-        if (!el) continue;
-        const r = el.getBoundingClientRect();
-        if (r.width <= 0 || r.height <= 0) continue;
-        out.push({ ...s, box: { top: r.top / zoom, left: r.left / zoom, width: r.width / zoom, height: r.height / zoom } });
-      }
-      setItems(out);
+    if (!open) return;
+    const zoom = parseFloat(document.documentElement.style.zoom) || 1;
+    setDims({ vw: window.innerWidth / zoom, vh: window.innerHeight / zoom });
+    let idx = i, el = null;
+    while (idx < steps.length) {
+      el = document.querySelector(`[data-tour="${steps[idx].sel}"]`);
+      if (el && el.getBoundingClientRect().width > 0) break;
+      el = null; idx++;
+    }
+    if (!el) { onClose(); return; }
+    if (idx !== i) { setI(idx); return; }
+    el.scrollIntoView({ block: 'nearest' });
+    const update = () => {
+      const z = parseFloat(document.documentElement.style.zoom) || 1;
+      const r = el.getBoundingClientRect();
+      setBox({ top: r.top / z, left: r.left / z, width: r.width / z, height: r.height / z });
     };
-    measure();
-    window.addEventListener('resize', measure);
-    return () => window.removeEventListener('resize', measure);
-  }, [open, steps]);
+    update();
+    window.addEventListener('resize', update);
+    return () => window.removeEventListener('resize', update);
+  }, [open, i, steps, onClose]);
 
-  if (!open) return null;
+  if (!open || !box) return null;
+  const step = steps[i];
   const { vw, vh } = dims;
+  const last = i === steps.length - 1;
 
-  // 悬停项的说明气泡:紧贴按钮,下方优先/放不下翻上方,水平夹进视口。
-  const PW = 260;
-  const bub = (() => {
-    if (hover == null || !items[hover]) return null;
-    const it = items[hover], b = it.box;
-    const estH = 40 + it.desc.split('\n').length * 17;
-    let top = b.top + b.height + 10;
-    if (top + estH > vh - 8) top = Math.max(8, b.top - estH - 10);
-    let left = Math.max(8, Math.min(b.left + b.width / 2 - PW / 2, vw - PW - 8));
-    return { it, top, left };
-  })();
+  // 注解卡定位:当前按钮下方优先,放不下翻上方;水平夹进视口。
+  const TW = 290;
+  const estH = 92 + step.desc.split('\n').length * 17;
+  let cardTop = box.top + box.height + 12;
+  if (cardTop + estH > vh - 8) cardTop = Math.max(8, box.top - estH - 12);
+  const cardLeft = Math.max(8, Math.min(box.left, vw - TW - 8));
 
   return (
     <div className="fixed inset-0 z-[400]">
-      {/* 底层:点空白关闭。必须单独一层——spotlight 的 SVG 若带 onClick 会以全屏
-          pointer-events 盖住按钮上的悬停捕获层,导致 mouseenter 永不触发、悬停无注解
-          (用户实报)。故 SVG 设 pointer-events:none 纯视觉,关闭交给这个底层。 */}
+      {/* 高亮框:box-shadow 撑满 9999px 把四周压暗,框内透出当前按钮(spotlight)。
+          框本身 pointer-events:none 不挡;点四周暗区关闭(底层 div)。 */}
       <div className="absolute inset-0" onClick={onClose} />
-      {/* spotlight:暗遮罩 + 挖空所有按钮(露出真实按钮 → 亮起)。纯视觉,不挡鼠标。 */}
-      <svg width={vw} height={vh} style={{ position: 'fixed', top: 0, left: 0, pointerEvents: 'none' }}>
-        <defs>
-          <mask id="cgui-spotlight">
-            <rect x="0" y="0" width={vw} height={vh} fill="white" />
-            {items.map((it) => (
-              <rect key={it.sel} x={it.box.left - 3} y={it.box.top - 3} width={it.box.width + 6} height={it.box.height + 6} rx="9" fill="black" />
-            ))}
-          </mask>
-        </defs>
-        <rect x="0" y="0" width={vw} height={vh} fill="rgba(0,0,0,0.55)" mask="url(#cgui-spotlight)" />
-      </svg>
+      <div style={{ position: 'fixed', top: box.top - 4, left: box.left - 4, width: box.width + 8, height: box.height + 8, borderRadius: 10, boxShadow: '0 0 0 9999px rgba(0,0,0,0.55)', pointerEvents: 'none', transition: 'top .15s, left .15s, width .15s, height .15s' }}
+        className="ring-2 ring-accent" />
 
-      {/* 每个按钮上盖一层透明捕获区:悬停显示说明、加深描边 */}
-      {items.map((it, i) => (
-        <div key={it.sel}
-          onMouseEnter={() => setHover(i)} onMouseLeave={() => setHover((h) => (h === i ? null : h))}
-          style={{ position: 'fixed', top: it.box.top - 3, left: it.box.left - 3, width: it.box.width + 6, height: it.box.height + 6, zIndex: hover === i ? 3 : 1 }}
-          className={`rounded-lg pointer-events-auto cursor-help transition-colors ${hover === i ? 'ring-2 ring-accent' : 'ring-[1.5px] ring-accent/55'}`}
-        />
-      ))}
-
-      {/* 悬停说明气泡(含二级菜单),一次只显示一个 */}
-      {bub && (
-        <div style={{ position: 'fixed', top: bub.top, left: bub.left, width: PW, zIndex: 6 }}
-          className="bg-canvas border border-canvas-deep rounded-xl shadow-2xl p-3 pointer-events-none animate-fade-in">
-          <div className="text-[12.5px] font-body font-semibold text-accent mb-1">{bub.it.title}</div>
-          <div className="text-[11px] text-ink-muted font-body leading-relaxed whitespace-pre-line">{bub.it.desc}</div>
+      {/* 注解卡:标题 + 二级菜单说明 + 进度 + 上一步/下一步 */}
+      <div style={{ position: 'fixed', top: cardTop, left: cardLeft, width: TW, zIndex: 5 }}
+        className="bg-canvas border border-canvas-deep rounded-xl shadow-2xl p-4 pointer-events-auto animate-fade-in">
+        <div className="flex items-center gap-2 mb-1.5">
+          <span className="text-[13px] font-body font-semibold text-ink flex-1">{step.title}</span>
+          <span className="text-[10px] text-ink-faint font-mono">{i + 1}/{steps.length}</span>
+          <button onClick={onClose} className="text-ink-faint hover:text-ink" title="关闭"><X size={14} /></button>
         </div>
-      )}
-
-      {/* 顶部标题条 + 关闭 */}
-      <div className="fixed top-3 left-1/2 -translate-x-1/2 flex items-center gap-2 px-3 py-1.5 rounded-full bg-canvas border border-canvas-deep shadow-lg pointer-events-auto z-10">
-        <span className="text-[12px] font-body font-medium text-ink">功能导引</span>
-        <span className="text-[10px] text-ink-faint font-body">{hasProject ? '会话列表视图' : '项目列表视图'} · 悬停任意高亮按钮看它的说明</span>
-        <button onClick={onClose} className="text-ink-faint hover:text-ink" title="关闭"><X size={13} /></button>
+        <div className="text-[11.5px] text-ink-muted font-body leading-relaxed whitespace-pre-line mb-3">{step.desc}</div>
+        <div className="flex items-center gap-2">
+          <button onClick={onClose} className="text-[11px] text-ink-faint hover:text-ink mr-auto font-body">跳过</button>
+          {i > 0 && (
+            <button onClick={() => setI(i - 1)}
+              className="px-2 py-1 text-[11px] rounded border border-canvas-deep text-ink-soft hover:bg-canvas-warm flex items-center gap-1 font-body">
+              <ArrowLeft size={11} />上一步
+            </button>
+          )}
+          <button onClick={() => (last ? onClose() : setI(i + 1))}
+            className="px-2.5 py-1 text-[11px] rounded bg-accent text-white hover:bg-accent/90 flex items-center gap-1 font-body">
+            {last ? '完成' : <>下一步<ArrowRight size={11} /></>}
+          </button>
+        </div>
       </div>
     </div>
   );
