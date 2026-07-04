@@ -2240,23 +2240,35 @@ function GitInitBanner({ cwd }) {
 // The full summary lives in the JSONL; we deliberately don't render it.
 // 旁问气泡(/btw):独立于主对话流的问答卡片。仅存在于本地 chatMessages
 // (不写会话 jsonl),刷新/切会话即消失 —— 与 CLI /btw"不进历史"的语义一致。
-function BtwBubble({ msg }) {
+function BtwBubble({ msg, onHide }) {
+  const [collapsed, setCollapsed] = useState(false);
   return (
     <div className="px-6 py-3 animate-fade-up" style={{ animationDuration: '0.25s' }}>
       <div className="max-w-[var(--content-max)] mx-auto">
         <div className="border border-dashed border-canvas-deep rounded-2xl px-4 py-3 bg-canvas-warm/50">
           <div className="flex items-center gap-2 mb-1.5">
-            <span className="text-[10px] font-body uppercase tracking-wider text-ink-faint border border-canvas-deep rounded px-1.5 py-0.5">旁问</span>
-            <span className="text-[12px] text-ink-muted font-body truncate">{msg.question}</span>
+            <span className="text-[10px] font-body uppercase tracking-wider text-ink-faint border border-canvas-deep rounded px-1.5 py-0.5 shrink-0">旁问</span>
+            <span className="text-[12px] text-ink-muted font-body truncate flex-1">{msg.question}</span>
+            {/* 折叠:只留问题行收起答案;隐藏:从本地视图移除(旁问本就不入历史) */}
+            <button onClick={() => setCollapsed((c) => !c)} title={collapsed ? '展开答案' : '折叠'}
+              className="shrink-0 text-ink-faint hover:text-ink">
+              <ChevronDown size={13} className={`transition-transform ${collapsed ? '-rotate-90' : ''}`} />
+            </button>
+            <button onClick={() => onHide?.(msg.uuid)} title="隐藏这条旁问"
+              className="shrink-0 text-ink-faint hover:text-ink">
+              <EyeOff size={12} />
+            </button>
           </div>
-          {msg.pending
-            ? <div className="text-[13px] text-ink-faint font-body animate-pulse">思考中…</div>
-            : msg.error
-            ? <div className="text-[13px] text-red-600/90 font-body">{msg.text}</div>
-            : <MarkdownRenderer content={msg.text} />}
-          {!msg.pending && !msg.error && (
-            <div className="mt-1.5 text-[10px] text-ink-faint font-body">旁问不写入会话历史，刷新后消失</div>
-          )}
+          {!collapsed && (<>
+            {msg.pending
+              ? <div className="text-[13px] text-ink-faint font-body animate-pulse">思考中…</div>
+              : msg.error
+              ? <div className="text-[13px] text-red-600/90 font-body">{msg.text}</div>
+              : <MarkdownRenderer content={msg.text} />}
+            {!msg.pending && !msg.error && (
+              <div className="mt-1.5 text-[10px] text-ink-faint font-body">旁问不写入会话历史，刷新后消失</div>
+            )}
+          </>)}
         </div>
       </div>
     </div>
@@ -5006,7 +5018,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                   {msg.type === 'compact'
                     ? <CompactDivider />
                     : msg.type === 'btw'
-                    ? <BtwBubble msg={msg} />
+                    ? <BtwBubble msg={msg} onHide={(uuid) => setChatMessages((prev) => prev.filter((m) => m.uuid !== uuid))} />
                     : msg.type === 'turn'
                     ? <TurnBubble turn={msg} onRetry={handleRetryTurn} onRetryTool={(toolCall) => handleRetryTool(msg, toolCall)} retryActive={retryActiveUuid === msg.uuid} />
                     : <MessageBubble message={{ ...msg, role: msg.type }}
@@ -5038,13 +5050,13 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                   push 空 block→占位符消失但内容又没来→空白无动画(回归)。改用 .some
                   判断真正有内容的 block,和上面的回复气泡严格互斥,不再跳位也不再空白。*/}
               {liveVisible && isStreaming && !streamingText && !streamingThinking && streamingToolCalls.length === 0 && !streamingBlocks.some((b) => (b?.content?.length > 0) || b?.toolCall) && (
-                // 头像位提前入场:Connecting 阶段就用回复气泡同款布局(34px ✻ 头像
-                // + thinking 呼吸),后续流式气泡在同一位置接棒,完成后动画停到静态,
-                // 全程是"同一个视觉物从动到静",不再是 LoadingMark → 头像的跳变。
+                // 头像位在「等待首字」阶段显示用户在主题里选的加载动画(LoadingMark),
+                // 让"加载动画样式"的选择真正生效;有内容后 TurnBubble 接棒、完成后是
+                // 静态官方 logo。加载动画→内容气泡用 animate-fade-in 淡入过渡,不生硬。
                 <div className="px-6 py-4 animate-fade-in">
                   <div className="max-w-[var(--content-max)] mx-auto flex gap-4">
-                    <div className="mt-0.5">
-                      <ProviderAvatar model={streamingModel} size={34} thinking />
+                    <div className="mt-0.5 w-[34px] h-[34px] flex items-center justify-center text-accent">
+                      <LoadingMark size={30} />
                     </div>
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center gap-2.5 min-h-[34px] text-[13px] font-body" style={{ color: '#D97757' }}>
@@ -7338,15 +7350,10 @@ export default function App() {
           {/* 顶栏品牌 logo:Claude 官方风格 —— accent 八瓣星芒(内联 SVG,缓慢呼吸)
               + 大号衬线字标 "Claude"(样式在 index.css .cgui-brand) */}
           <span className="cgui-brand shrink-0 select-none" aria-label="Claude">
-            <svg className="cgui-brand-spark" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-              {/* 八瓣细长花瓣:单瓣纺锤形路径,绕中心每 45° 复制一份 */}
-              {[0, 45, 90, 135, 180, 225, 270, 315].map((deg) => (
-                <path
-                  key={deg}
-                  transform={`rotate(${deg} 12 12)`}
-                  d="M12 12C11.52 10.02 11.32 7.62 11.56 4.6C11.73 3.03 11.87 2.2 12 1.55C12.13 2.2 12.27 3.03 12.44 4.6C12.68 7.62 12.48 10.02 12 12Z"
-                />
-              ))}
+            {/* 官方 Claude spark(与气泡头像 ProviderAvatar 同一份 path,取自
+                anthropics/anthropic-sdk-typescript)。此前是自制 8 瓣星芒,用户嫌不像官方。 */}
+            <svg className="cgui-brand-spark" viewBox="0 0 248 248" fill="currentColor" aria-hidden="true">
+              <path d="M52.4285 162.873L98.7844 136.879L99.5485 134.602L98.7844 133.334H96.4921L88.7237 132.862L62.2346 132.153L39.3113 131.207L17.0249 130.026L11.4214 128.844L6.2 121.873L6.7094 118.447L11.4214 115.257L18.171 115.847L33.0711 116.911L55.485 118.447L71.6586 119.392L95.728 121.873H99.5485L100.058 120.337L98.7844 119.392L97.7656 118.447L74.5877 102.732L49.4995 86.1905L36.3823 76.62L29.3779 71.7757L25.8121 67.2858L24.2839 57.3608L30.6515 50.2716L39.3113 50.8623L41.4763 51.4531L50.2636 58.1879L68.9842 72.7209L93.4357 90.6804L97.0015 93.6343L98.4374 92.6652L98.6571 91.9801L97.0015 89.2625L83.757 65.2772L69.621 40.8192L63.2534 30.6579L61.5978 24.632C60.9565 22.1032 60.579 20.0111 60.579 17.4246L67.8381 7.49965L71.9133 6.19995L81.7193 7.49965L85.7946 11.0443L91.9074 24.9865L101.714 46.8451L116.996 76.62L121.453 85.4816L123.873 93.6343L124.764 96.1155H126.292V94.6976L127.566 77.9197L129.858 57.3608L132.15 30.8942L132.915 23.4505L136.608 14.4708L143.994 9.62643L149.725 12.344L154.437 19.0788L153.8 23.4505L150.998 41.6463L145.522 70.1215L141.957 89.2625H143.994L146.414 86.7813L156.093 74.0206L172.266 53.698L179.398 45.6635L187.803 36.802L193.152 32.5484H203.34L210.726 43.6549L207.415 55.1159L196.972 68.3492L188.312 79.5739L175.896 96.2095L168.191 109.585L168.882 110.689L170.738 110.53L198.755 104.504L213.91 101.787L231.994 98.7149L240.144 102.496L241.036 106.395L237.852 114.311L218.495 119.037L195.826 123.645L162.07 131.592L161.696 131.893L162.137 132.547L177.36 133.925L183.855 134.279H199.774L229.447 136.524L237.215 141.605L241.8 147.867L241.036 152.711L229.065 158.737L213.019 154.956L175.45 145.977L162.587 142.787H160.805V143.85L171.502 154.366L191.242 172.089L215.82 195.011L217.094 200.682L213.91 205.172L210.599 204.699L188.949 188.394L180.544 181.069L161.696 165.118H160.422V166.772L164.752 173.152L187.803 207.771L188.949 218.405L187.294 221.832L181.308 223.959L174.813 222.777L161.187 203.754L147.305 182.486L136.098 163.345L134.745 164.2L128.075 235.42L125.019 239.082L117.887 241.8L111.902 237.31L108.718 229.984L111.902 215.452L115.722 196.547L118.779 181.541L121.58 162.873L123.291 156.636L123.14 156.219L121.773 156.449L107.699 175.752L86.304 204.699L69.3663 222.777L65.291 224.431L58.2867 220.768L58.9235 214.27L62.8713 208.48L86.304 178.705L100.44 160.155L109.551 149.507L109.462 147.967L108.959 147.924L46.6977 188.512L35.6182 189.93L30.7788 185.44L31.4156 178.115L33.7079 175.752L52.4285 162.873Z" />
             </svg>
             <span className="cgui-brand-name">Claude</span>
           </span>
