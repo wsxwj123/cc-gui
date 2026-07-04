@@ -498,20 +498,61 @@ app.get('/api/slash-commands', async (req, res) => {
       });
     } catch {}
 
+    // 插件命令按 CLI 真实形态枚举成 /插件名:命令名(如 /superpowers:brainstorming)。
+    // 旧实现只塞一个凭空造的 /插件名 占位(CLI 里并不存在该命令)→ 用户装了
+    // superpowers 等插件后在 GUI 输入框敲 "/" 完全看不到插件提供的命令(实际
+    // 会话里 CLI 已加载,只是补全列表无感知)。枚举口径对照 CLI init 事件的
+    // slash_commands 实测对齐:
+    //   <installPath>/commands/*.md|*.toml  → 命令名 = 文件名(去扩展名)
+    //   <installPath>/skills/<dir>/SKILL.md → 命令名 = 目录名
+    // 仅列 settings.json enabledPlugins 显式为 true 的插件(CLI 同口径:装了但
+    // 停用的不加载);描述取 frontmatter/toml 的 description。
     try {
       const pluginsData = JSON.parse(
         await readFile(join(homedir(), '.claude', 'plugins', 'installed_plugins.json'), 'utf-8')
       );
+      let enabledPlugins = {};
+      try {
+        const settings = JSON.parse(await readFile(join(homedir(), '.claude', 'settings.json'), 'utf-8'));
+        enabledPlugins = settings.enabledPlugins || {};
+      } catch {}
       const plugins = pluginsData.plugins || {};
-      for (const [name] of Object.entries(plugins)) {
-        const pluginName = name.split('@')[0];
-        if (commands.some(c => c.name === `/${pluginName}`)) continue;
-        commands.push({
-          name: `/${pluginName}`,
-          desc: `Plugin: ${pluginName}`,
-          type: 'plugin',
-          requiresAnthropic: SUBSCRIPTION_ONLY_NAMES.has(pluginName) ? 'full' : false,
-        });
+      for (const [fullName, installs] of Object.entries(plugins)) {
+        if (enabledPlugins[fullName] !== true) continue;
+        const pluginName = fullName.split('@')[0];
+        const installPath = Array.isArray(installs) ? installs[0]?.installPath : installs?.installPath;
+        if (!installPath) continue;
+        const requiresAnthropic = SUBSCRIPTION_ONLY_NAMES.has(pluginName) ? 'full' : false;
+        const seen = new Set(); // 同名 command 与 skill 只列一次
+        // commands/*.md|*.toml
+        try {
+          const files = await readdir(join(installPath, 'commands'), { withFileTypes: true });
+          for (const f of files) {
+            const m = f.isFile() && f.name.match(/^(.+)\.(md|toml)$/);
+            if (!m || seen.has(m[1])) continue;
+            seen.add(m[1]);
+            let desc = `Plugin: ${pluginName}`;
+            try {
+              const content = await readFile(join(installPath, 'commands', f.name), 'utf-8');
+              const dm = content.match(/^\s*description\s*[:=]\s*(.+)$/m);
+              if (dm) {
+                desc = dm[1].trim().replace(/^["']|["',]+$/g, '');
+                if (desc.length > 100) desc = desc.slice(0, 100) + '...';
+              }
+            } catch {}
+            commands.push({ name: `/${pluginName}:${m[1]}`, desc, type: 'plugin', requiresAnthropic });
+          }
+        } catch {}
+        // skills/<dir>/SKILL.md
+        try {
+          const dirs = await readdir(join(installPath, 'skills'), { withFileTypes: true });
+          for (const d of dirs) {
+            if (!d.isDirectory() || d.name.startsWith('.') || seen.has(d.name)) continue;
+            seen.add(d.name);
+            const desc = await getSkillDescription(join(installPath, 'skills'), d.name);
+            commands.push({ name: `/${pluginName}:${d.name}`, desc, type: 'plugin', requiresAnthropic });
+          }
+        } catch {}
       }
     } catch {}
 
