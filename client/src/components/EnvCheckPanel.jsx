@@ -68,6 +68,12 @@ export default function EnvCheckPanel({ onDismiss, onRecheck, asModal = true }) 
                   {!row.required && <span className="text-[10px] text-ink-faint border border-canvas-deep rounded px-1">可选</span>}
                   {ok && ver && <span className="text-[10px] text-ink-faint font-mono">{ver}</span>}
                 </div>
+                {/* claude 显示实际解析到的二进制路径(env-check 返回 resolvedPath) */}
+                {ok && item?.resolvedPath && (
+                  <div className="text-[10px] text-ink-faint font-mono truncate" title={item.resolvedPath}>
+                    {item.resolvedPath}
+                  </div>
+                )}
               </div>
               {!ok && row.key !== 'node' && (
                 launched[row.key]
