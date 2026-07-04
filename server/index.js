@@ -434,6 +434,9 @@ const BUILTIN_COMMANDS = [
   { name: '/todos',           desc: '查看任务列表',        type: 'builtin' },
   { name: '/context',         desc: '上下文用量明细',      type: 'builtin', note: 'GUI 顶部徽章已原生展示，点击徽章看分类明细' },
   { name: '/usage',           desc: '订阅用量',            type: 'builtin', requiresAnthropic: 'partial', note: 'GUI 用量面板已原生展示' },
+  // CLI 的 /btw 是交互式专属(stream-json 里发送被拒),GUI 前端拦截后走 /api/chat/btw
+  // (headless fork,不污染主会话),故对用户可用,不标 interactiveOnly。
+  { name: '/btw',             desc: '旁问一个问题（参数：<question>），不打断当前工作、不写入会话历史', type: 'builtin' },
 
   // -p 模式 CLI 拒绝（交互式专属）
   { name: '/rewind',         desc: '回退会话/代码',   type: 'builtin', interactiveOnly: true, note: 'GUI 用消息上的回滚/checkpoint 菜单实现' },

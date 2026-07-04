@@ -656,7 +656,9 @@ router.post('/chat/title', async (req, res) => {
     titleSource = cmdArgs;
   }
 
-  const prompt = `给下面这段对话起一个不超过 12 个字的简短中文标题,只输出标题本身,不要引号、不要标点结尾、不要解释。\n\n用户: ${titleSource}\n${firstAssistant ? `助手: ${firstAssistant}\n` : ''}`;
+  // 提示词硬化:模型对超短输入(如 "hi")常输出"当前会话内容比较简单…"这类元话术解释
+  // 而非标题(用户实报)。明确"无论多简单都必须给标题、禁止解释",配合下方 finish 的兜底双保险。
+  const prompt = `给下面这段对话起一个简短中文标题。要求:只输出标题本身,不超过 16 个字,不加引号、不加标点、不加任何解释;无论对话内容多简单(哪怕只是一句问候),都必须给出一个描述性标题,禁止输出"内容比较简单""请提供更多信息"之类的说明文字。\n\n用户: ${titleSource}\n${firstAssistant ? `助手: ${firstAssistant}\n` : ''}`;
 
   const childEnv = { ...process.env };
   delete childEnv.ANTHROPIC_MODEL;
@@ -696,19 +698,76 @@ router.post('/chat/title', async (req, res) => {
     done = true;
     clearTimeout(timer);
     try { killProcessTree(proc); } catch {}
-    // 清洗:去引号/换行/常见前缀,截断到 ~20 字
+    // 清洗:去引号/换行/常见前缀(先不截断,元话术判定要看原始长度)
     const clean = String(title || '')
       .replace(/[\r\n]+/g, ' ')
       .replace(/^["'「『]+|["'」』]+$/g, '')
       .replace(/^(标题|title)\s*[:：]\s*/i, '')
-      .trim()
-      .slice(0, 24);
-    res.json({ title: clean });
+      .trim();
+    // 元话术兜底:提示词硬化后模型仍可能输出"当前会话内容比较简单…"这类解释当标题。
+    // 命中特征(超长 / 整句以句号结尾 / 元话术关键词且偏长)一律丢弃,回退用户消息截断。
+    const isMeta =
+      clean.length > 30 ||
+      /[。.]\s*$/.test(clean) ||
+      /比较简单|请提供|无法生成|没有(看到|提供)/.test(clean) ||
+      (clean.length > 20 && /会话|对话|内容|无法/.test(clean));
+    const finalTitle = (!clean || isMeta)
+      ? titleSource.replace(/\s+/g, ' ').trim().slice(0, 24)
+      : clean.slice(0, 24);
+    res.json({ title: finalTitle });
   };
   const timer = setTimeout(() => finish(out), 30000);
   proc.stdout.on('data', (c) => { out += c.toString(); });
   proc.on('close', () => finish(out));
   proc.on('error', () => finish(''));
+});
+
+// POST /api/chat/btw  { question, sessionId?, cwd?, model? }
+// 旁问(对齐 CLI 交互式 /btw 的语义):不打断当前工作、不写入会话历史地问一个问题。
+// CLI 的 /btw 是 local-jsx 交互式专属命令 —— stream-json 通道里发送实测被回
+// "isn't available in this environment",故 GUI 用 headless fork 复刻:
+//   --resume + --fork-session   → 在主会话的【fork 副本】上提问,回答带完整上下文;
+//   --no-session-persistence    → fork 不落盘(实测:主会话 jsonl md5 不变、无新 jsonl)。
+// 无 sessionId(草稿会话)时退化为无上下文的一次性提问。
+// --permission-mode plan:旁问只答不改,写类工具在 FS 层被挡,读类照常。
+router.post('/chat/btw', async (req, res) => {
+  const question = String(req.body?.question || '').slice(0, 8000).trim();
+  if (!question) return res.status(400).json({ error: 'question is required' });
+  const sessionId = (typeof req.body?.sessionId === 'string') ? req.body.sessionId.trim() : '';
+  const model = String(req.body?.model || '').replace(/\[1m\]/i, '').trim();
+  const cwd = (typeof req.body?.cwd === 'string' && req.body.cwd) ? req.body.cwd : homedir();
+  try { if (!statSync(cwd).isDirectory()) throw new Error('nd'); }
+  catch { return res.status(400).json({ error: '工作目录无效' }); }
+
+  const args = ['-p', question, '--permission-mode', 'plan'];
+  if (sessionId) args.push('--resume', sessionId, '--fork-session');
+  args.push('--no-session-persistence');
+  if (model) args.push('--model', model);
+
+  let proc;
+  try {
+    proc = claudeSpawn(args, { cwd, stdio: ['ignore', 'pipe', 'pipe'], env: cleanChildEnv() });
+  } catch (e) { return res.status(500).json({ error: 'spawn claude failed: ' + e.message }); }
+  if (!proc.pid) { proc.on('error', () => {}); return res.status(500).json({ error: 'claude CLI not found' }); }
+  // 同 /chat/title:stderr 是 pipe 但只读 stdout,必须排空,否则超 ~64KB 子进程挂死到超时。
+  proc.stderr?.resume();
+
+  let out = '';
+  let done = false;
+  const finish = () => {
+    if (done) return;
+    done = true;
+    clearTimeout(timer);
+    try { killProcessTree(proc); } catch {}
+    const answer = out.trim();
+    if (!answer) return res.status(500).json({ error: '旁问失败:超时或模型无回答' });
+    res.json({ answer });
+  };
+  // 大会话 resume + 冷启动可能较慢,给 120s;超时若已有部分输出仍返回。
+  const timer = setTimeout(finish, 120000);
+  proc.stdout.on('data', (c) => { out += c.toString(); });
+  proc.on('close', finish);
+  proc.on('error', finish);
 });
 
 // ── Context breakdown (#1) ────────────────────────────────────────────────

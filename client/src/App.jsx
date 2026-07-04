@@ -15,6 +15,7 @@ const stoppedChatPids = new Set();
 import { useStore, THEME_FAMILIES, FONT_OPTIONS, systemPrefersDark, PERMISSION_MODES } from './stores/sessionStore.js';
 import { useWebSocket } from './hooks/useWebSocket.js';
 import { MessageBubble } from './components/MessageBubble.jsx';
+import { MarkdownRenderer } from './components/MarkdownRenderer.jsx';
 import { TurnBubble } from './components/TurnBubble.jsx';
 import TurnScrubber from './components/TurnScrubber.jsx';
 import ChatSearch from './components/ChatSearch.jsx';
@@ -2236,6 +2237,31 @@ function GitInitBanner({ cwd }) {
 
 // Collapsed marker shown where the CLI compacted the conversation (/compact).
 // The full summary lives in the JSONL; we deliberately don't render it.
+// 旁问气泡(/btw):独立于主对话流的问答卡片。仅存在于本地 chatMessages
+// (不写会话 jsonl),刷新/切会话即消失 —— 与 CLI /btw"不进历史"的语义一致。
+function BtwBubble({ msg }) {
+  return (
+    <div className="px-6 py-3 animate-fade-up" style={{ animationDuration: '0.25s' }}>
+      <div className="max-w-[var(--content-max)] mx-auto">
+        <div className="border border-dashed border-canvas-deep rounded-2xl px-4 py-3 bg-canvas-warm/50">
+          <div className="flex items-center gap-2 mb-1.5">
+            <span className="text-[10px] font-body uppercase tracking-wider text-ink-faint border border-canvas-deep rounded px-1.5 py-0.5">旁问</span>
+            <span className="text-[12px] text-ink-muted font-body truncate">{msg.question}</span>
+          </div>
+          {msg.pending
+            ? <div className="text-[13px] text-ink-faint font-body animate-pulse">思考中…</div>
+            : msg.error
+            ? <div className="text-[13px] text-red-600/90 font-body">{msg.text}</div>
+            : <MarkdownRenderer content={msg.text} />}
+          {!msg.pending && !msg.error && (
+            <div className="mt-1.5 text-[10px] text-ink-faint font-body">旁问不写入会话历史，刷新后消失</div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function CompactDivider() {
   return (
     <div className="max-w-[var(--content-max)] mx-auto px-4 py-3 flex items-center gap-3">
@@ -2958,6 +2984,45 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         } catch (e) {
           confirmDialog('开启远程控制失败：' + e.message);
         }
+        return;
+      }
+      // /btw 旁问:CLI 的 /btw 是交互式专属(stream-json 通道实测被回 "isn't
+      // available in this environment")。GUI 拦截后走 /api/chat/btw(headless
+      // fork:--resume+--fork-session+--no-session-persistence),回答带会话上下文
+      // 但零污染主会话。答案以"旁问"气泡插入本地视图,不进历史;不占用主流式通道,
+      // 主回合进行中也可旁问(这正是 /btw 的用途)。
+      if (cmd === '/btw' || cmd.startsWith('/btw ')) {
+        const q = String(prompt || '').trim().replace(/^\/btw\s*/i, '');
+        if (!q) {
+          confirmDialog('用法：/btw <问题>\n旁问一个问题——不打断当前工作、不写入会话历史。');
+          return;
+        }
+        const sel = getLocalSession();
+        const btwSid = sel?.sessionId || null;
+        const btwCwd = sel?.projectPath || selectedProject?.path;
+        const st = useStore.getState();
+        const btwModel = String((btwSid && st.modelBySession[btwSid]) || st.currentModel || '').replace(/\[1m\]/i, '');
+        const btwUuid = 'btw-' + Date.now();
+        // liveVisible 门控:chatMessages 只在 streamOwnerKey===sessionQueueKey 时渲染。
+        // 空闲态(刚进会话没发过消息)owner 为 null → 旁问气泡会被藏掉,需认领 owner。
+        // 流式进行中不动 owner(已有归属,乱改会影响 finalize/reattach 读 ownerRef 的逻辑)。
+        if (!streamingRef.current) setStreamOwner(sessionQueueKey);
+        setChatMessages((prev) => [...prev, {
+          uuid: btwUuid, type: 'btw', question: q, text: '', pending: true,
+          timestamp: new Date().toISOString(),
+        }]);
+        fetch('/api/chat/btw', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ question: q, sessionId: btwSid || undefined, cwd: btwCwd, model: btwModel || undefined }),
+        }).then(async (r) => {
+          const d = await r.json().catch(() => ({}));
+          if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+          setChatMessages((prev) => prev.map((m) => m.uuid === btwUuid
+            ? { ...m, text: d.answer || '(无回答)', pending: false } : m));
+        }).catch((e) => {
+          setChatMessages((prev) => prev.map((m) => m.uuid === btwUuid
+            ? { ...m, text: '旁问失败：' + e.message, pending: false, error: true } : m));
+        });
         return;
       }
       // Defense-in-depth: ChatInput already locks the composer when the session
@@ -3983,8 +4048,10 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             // Full round (incl trailing text) persisted → commit it to the store,
             // then drop ALL local copies (streamed text rarely byte-matches final
             // jsonl, so clearing avoids a doubled turn).
+            // 例外:type==='btw' 旁问气泡只活在本地(永远没有 jsonl 孪生),整清会让它
+            // 在回合结束时凭空消失;保留,切会话/刷新时自然清掉。
             try { await fetchMessagesForTab(finalizeSid, _sel.projectHash, { silent: true }); } catch {}
-            setChatMessages([]);
+            setChatMessages((prev) => (prev.some((m) => m.type === 'btw') ? prev.filter((m) => m.type === 'btw') : []));
             break;
           }
           if (i < 11) await new Promise((r) => setTimeout(r, 200));
@@ -4937,6 +5004,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                 <div key={msg.uuid || i} data-turn-uuid={msg.uuid} data-turn-role={msg.type}>
                   {msg.type === 'compact'
                     ? <CompactDivider />
+                    : msg.type === 'btw'
+                    ? <BtwBubble msg={msg} />
                     : msg.type === 'turn'
                     ? <TurnBubble turn={msg} onRetry={handleRetryTurn} onRetryTool={(toolCall) => handleRetryTool(msg, toolCall)} retryActive={retryActiveUuid === msg.uuid} />
                     : <MessageBubble message={{ ...msg, role: msg.type }}
