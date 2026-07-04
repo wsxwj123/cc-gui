@@ -5,6 +5,7 @@ import { homedir } from 'os';
 import { execFile, spawn } from 'child_process';
 import { promisify } from 'util';
 import { syncMcpToAgents } from './agents.js';
+import { claudeCommand } from '../utils/claude-resolver.js';
 
 const execFileP = promisify(execFile);
 
@@ -60,12 +61,9 @@ function probeStdioStderr(cfg, timeoutMs = 6000) {
 // Async (not execFileSync) so a slow CLI cold start doesn't freeze the whole event loop —
 // and with it every other client's live SSE stream — for up to `timeout` ms.
 async function runClaude(args, { timeout = 10000 } = {}) {
-  // Windows:npm 装的 claude 是 claude.cmd,execFile 不能直接跑 .cmd(必须经 cmd.exe,
-  // 否则 ENOENT)。不修则 Win 上所有 MCP 增删改查/list 全失败。与 version-check.js
-  // 的 getClaudeVersion 同款:cmd.exe /c claude ...,由 PATHEXT 解析到 .cmd。
-  const isWin = process.platform === 'win32';
-  const file = isWin ? 'cmd.exe' : 'claude';
-  const fullArgs = isWin ? ['/c', 'claude', ...args] : args;
+  // 路径解析统一走 claude-resolver(与检测面板/聊天链路同源,PATH 外安装位也可用);
+  // Windows 的 .cmd/.bat 不是真正可执行文件,claudeCommand 已包好 cmd.exe /c。
+  const { file, args: fullArgs } = claudeCommand(args);
   const { stdout } = await execFileP(file, fullArgs, {
     encoding: 'utf-8',
     timeout,
@@ -624,7 +622,8 @@ async function runMcpAdd(args, name) {
   };
   let res;
   try {
-    res = await execFileP('claude', args, { encoding: 'utf-8', timeout: 20000, env: { ...process.env }, maxBuffer: 8 * 1024 * 1024 });
+    const { file, args: fullArgs } = claudeCommand(args);
+    res = await execFileP(file, fullArgs, { encoding: 'utf-8', timeout: 20000, env: { ...process.env }, maxBuffer: 8 * 1024 * 1024 });
   } catch (e) {
     // 同名已存在时 claude mcp add **退出码非零** 且把 "already exists" 打到 stderr → 走这里。
     const stderr = (e.stderr?.toString() || e.message || '').trim();
