@@ -7,6 +7,7 @@ import { homedir, tmpdir } from 'node:os';
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import { getDefaultModel } from '../services/model-resolver.js';
 import { dropPendingForSession, requestPermission } from './permissions.js';
+import { resolveClaude } from '../utils/claude-resolver.js';
 import { broadcast } from '../index.js';
 
 // T2: 回合完成 WS 通知。前端切走会话时 SSE fetch 已被 abort(I4 渲染隔离的
@@ -44,38 +45,6 @@ const router = Router();
 // 读完整历史兜底,不丢数据。
 const MAX_EARLY_LINES = 5000;
 
-// Windows:npm 装的 claude 是 claude.cmd,Node spawn 无法直接执行(.cmd 必须经
-// cmd.exe;Node 出于安全也拒绝直接跑 .cmd)。这里解析真实路径并缓存:仅当它是
-// .cmd/.bat 时用 cmd.exe /c 包一层,并把超长的 --settings inline JSON 落临时文件
-// 传路径(避开 cmd.exe 对 JSON 引号的破坏)。非 Windows / native claude.exe 路径
-// 完全不变(仍裸 'claude' + 原 args),对现有可用环境零回归。
-let _winClaudePath; // undefined/null=未解析或失败(下次重试), string=路径
-function resolveWinClaude() {
-  if (_winClaudePath) return _winClaudePath; // 只缓存成功,失败下次重试(PATH 可能稍后才就绪)
-  try {
-    const out = execFileSync('where', ['claude'], { timeout: 5000 }).toString();
-    const lines = out.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
-    // npm 同时生成无扩展名 `claude`(bash 脚本,Win 跑不了)、`claude.cmd`、`claude.ps1`。
-    // 优先 .exe(直接 spawn)> .cmd/.bat(经 cmd.exe);别盲取 [0] 拿到跑不了的那个。
-    _winClaudePath = lines.find((p) => /\.exe$/i.test(p))
-      || lines.find((p) => /\.(cmd|bat)$/i.test(p))
-      || lines[0] || null;
-  } catch { _winClaudePath = null; }
-  // `where` 落空 = claude 不在后端进程 PATH(GUI 启动时 npm 全局前缀没进 PATH / 自定义
-  // prefix / nvm4w)。但 cmd 里 claude -v 能跑 → 前缀其实存在。用 `npm config get prefix`
-  // 兜底定位(npm 本体在 Node 目录恒在 PATH),与 cli-check 检测同源,避免"检测到却 spawn 不到"。
-  if (!_winClaudePath) {
-    try {
-      const prefix = execFileSync('cmd.exe', ['/c', 'npm', 'config', 'get', 'prefix'], { timeout: 6000 }).toString().trim();
-      if (prefix && !/^undefined$/i.test(prefix)) {
-        for (const cand of [pathJoin(prefix, 'claude.exe'), pathJoin(prefix, 'claude.cmd')]) {
-          if (existsSync(cand)) { _winClaudePath = cand; break; }
-        }
-      }
-    } catch {}
-  }
-  return _winClaudePath;
-}
 function settingsArgsToTempFile(args) {
   const idx = args.indexOf('--settings');
   if (idx === -1 || idx + 1 >= args.length) return { args, tempFile: null };
@@ -89,9 +58,14 @@ function settingsArgsToTempFile(args) {
     return { args: next, tempFile: f };
   } catch { return { args, tempFile: null }; }
 }
+// spawn claude 的统一入口:路径解析交给 claude-resolver(PATH → login shell →
+// npm prefix → 固定候选),此处只处理平台执行形态。
+// Windows:npm 装的 claude 是 claude.cmd,Node spawn 无法直接执行(.cmd 必须经
+// cmd.exe;Node 出于安全也拒绝直接跑 .cmd)→ cmd.exe /c 包一层,并把超长的
+// --settings inline JSON 落临时文件传路径(避开 cmd.exe 对 JSON 引号的破坏)。
 export function claudeSpawn(args, opts) {
+  const resolved = resolveClaude()?.path || null;
   if (process.platform === 'win32') {
-    const resolved = resolveWinClaude();
     if (resolved && /\.(cmd|bat)$/i.test(resolved)) {
       const { args: finalArgs, tempFile } = settingsArgsToTempFile(args);
       const proc = spawn('cmd.exe', ['/c', resolved, ...finalArgs], opts);
@@ -104,7 +78,8 @@ export function claudeSpawn(args, opts) {
     // (裸名在只有 .cmd/无 .exe 的 PATH 下会 ENOENT)。
     if (resolved) return spawn(resolved, args, opts);
   }
-  return spawn('claude', args, opts);
+  // 非 Windows:解析到绝对路径就用它(PATH 外安装位也能 spawn);落空回落裸 'claude'。
+  return spawn(resolved || 'claude', args, opts);
 }
 
 // Windows 残留 NUL 文件清扫。模型跑 shell 命令时常加 cmd 风格 `>NUL`/`2>NUL`,而
@@ -200,22 +175,15 @@ const WRITE_CLASS = new Set(['Edit', 'MultiEdit', 'Write', 'NotebookEdit']);
 let sdkCounter = 0;
 
 // 动态解析用户已装 claude(路径绝不写死,便于公开版在别人机器上跑)。解析到则让 SDK
-// 指向它(避免其自带 ~237M 二进制);解析不到返回 null,SDK 回落自带二进制。PATH 已在
-// index.js 的 expandClaudePath() 启动时补全(含 ~/.local/bin 等)。
-let _userClaudePath; // undefined=未解析, string=路径, null=失败
+// 指向它(避免其自带 ~237M 二进制);解析不到返回 null,SDK 回落自带二进制。
+// 解析走统一 claude-resolver(PATH → login shell → npm prefix → 固定候选,带缓存
+// 失效),后端启动后才装 claude 也能被发现,无需重启。
 function resolveUserClaude() {
-  if (_userClaudePath !== undefined) return _userClaudePath;
-  _userClaudePath = null;
-  try {
-    if (process.platform === 'win32') {
-      const w = resolveWinClaude();
-      if (w && /\.exe$/i.test(w)) _userClaudePath = w; // SDK 要可执行;.cmd 驱动不了,回落自带
-    } else {
-      const out = execFileSync('which', ['claude'], { timeout: 5000 }).toString().trim();
-      if (out) _userClaudePath = out.split(/\r?\n/)[0];
-    }
-  } catch {}
-  return _userClaudePath;
+  const hit = resolveClaude();
+  if (!hit) return null;
+  // SDK 要真正可执行的文件;Windows 的 .cmd/.bat/.ps1 驱动不了,回落自带二进制。
+  if (process.platform === 'win32' && !/\.exe$/i.test(hit.path)) return null;
+  return hit.path;
 }
 
 // 可控异步输入流:首条用户消息推进去后保持打开作 control 通道(setPermissionMode /
