@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { randomUUID } from 'node:crypto';
-import { broadcast } from '../index.js';
+import { broadcast } from '../broadcast.js';
 import { isLocalReq } from '../services/auth.js';
 
 const router = Router();

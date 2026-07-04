@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { readFile, writeFile, mkdir } from 'fs/promises';
 import { join, dirname } from 'path';
 import { homedir } from 'os';
-import { broadcast } from '../index.js';
+import { broadcast } from '../broadcast.js';
 
 // Server-side preferences that must be SHARED across devices (phone + Mac).
 // Today this is just the hidden-projects list: it used to live in each

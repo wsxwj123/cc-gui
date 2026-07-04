@@ -42,6 +42,7 @@ import {
   hasPassword, setPassword, clearPassword, verifyPassword, issueToken, updateConfig, loadConfig,
 } from './services/auth.js';
 import { setupFileWatcher } from './services/file-watcher.js';
+import { clients, broadcast } from './broadcast.js';
 import { getDefaultModel, getAvailableModels, setDefaultModel } from './services/model-resolver.js';
 import { readdir, readFile, writeFile, mkdir } from 'fs/promises';
 import { homedir, networkInterfaces } from 'os';
@@ -646,9 +647,7 @@ const wss = new WebSocketServer({
   },
 });
 
-// Track connected clients
-const clients = new Set();
-
+// Track connected clients（clients/broadcast 抽到 ./broadcast.js,避免 route 反向 import 本文件成环）
 wss.on('connection', (ws) => {
   clients.add(ws);
   ws.on('close', () => clients.delete(ws));
@@ -660,16 +659,6 @@ wss.on('connection', (ws) => {
     })
     .catch((err) => console.warn('getDefaultModel on WS connect failed:', err.message));
 });
-
-// Broadcast to all connected clients
-function broadcast(data) {
-  const msg = JSON.stringify(data);
-  for (const client of clients) {
-    if (client.readyState === 1) {
-      client.send(msg);
-    }
-  }
-}
 
 // File watcher → WebSocket broadcast.
 // settings.json is the file `cc switch` rewrites — when it changes, tell every
@@ -781,5 +770,3 @@ server.listen(PORT, HOST, () => {
   }
   throw err;
 });
-
-export { broadcast };

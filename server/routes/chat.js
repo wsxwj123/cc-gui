@@ -8,7 +8,7 @@ import { query } from '@anthropic-ai/claude-agent-sdk';
 import { getDefaultModel } from '../services/model-resolver.js';
 import { dropPendingForSession, requestPermission } from './permissions.js';
 import { resolveClaude } from '../utils/claude-resolver.js';
-import { broadcast } from '../index.js';
+import { broadcast } from '../broadcast.js';
 
 // T2: 回合完成 WS 通知。前端切走会话时 SSE fetch 已被 abort(I4 渲染隔离的
 // 切会话 effect),完成信号唯一可靠的来源是服务端。每个进程只广播一次;三条
