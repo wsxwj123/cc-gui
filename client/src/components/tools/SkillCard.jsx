@@ -6,9 +6,11 @@ import { MarkdownRenderer } from '../MarkdownRenderer.jsx';
 // 运行期间带流光动画(.skill-banner-name,见 index.css),下方一行小字给
 // 调用状态与参数摘要。点击横幅展开输入参数/结果详情(信息不丢)。
 // input 形态通常为 { skill, args },不同 skill 可能有额外字段,摘要按通用键值拼。
-export function SkillCard({ toolCall }) {
+// nameOverride/subLabel:供"读取类工具直读 SKILL.md"复用(TurnBubble 分流),
+// 横幅名取路径解析出的 skill 名,小字注明"读取技能文档"。
+export function SkillCard({ toolCall, nameOverride, subLabel }) {
   const [expanded, setExpanded] = useState(false);
-  const skillName = toolCall.input?.skill || toolCall.input?.name || toolCall.name;
+  const skillName = nameOverride || toolCall.input?.skill || toolCall.input?.name || toolCall.name;
   const result = toolCall.result;
   const isError = result?.isError;
   const running = !result;
@@ -19,7 +21,11 @@ export function SkillCard({ toolCall }) {
   const inputPreview = inputEntries.length > 0
     ? inputEntries.map(([k, v]) => `${k}: ${typeof v === 'string' ? v : JSON.stringify(v)}`).join(' · ').slice(0, 120)
     : '';
-  const statusLabel = running ? '运行中' : (isError ? '调用失败' : '调用完成');
+  const statusLabel = running ? '调用中' : (isError ? '调用失败' : '调用完成');
+  // 状态小字:硬编码英文 "Skill " 前缀已去掉(用户实报:名字后多出杂乱的"S"字样)。
+  // 运行中只显状态不拼参数摘要;摘要在完成/失败态给,原始入参展开详情里始终有。
+  const statusText = [subLabel, statusLabel].filter(Boolean).join(' · ')
+    + (!running && !subLabel && inputPreview ? ` · ${inputPreview}` : '');
 
   return (
     <div className="my-2">
@@ -40,9 +46,7 @@ export function SkillCard({ toolCall }) {
           </span>
           <span className="text-[10.5px] text-ink-faint font-body mt-0.5 flex items-center gap-1.5 min-w-0 max-w-full">
             {running && <Loader2 size={10} className="animate-spin shrink-0" />}
-            <span className="truncate">
-              Skill {statusLabel}{inputPreview ? ` · ${inputPreview}` : ''}
-            </span>
+            <span className="truncate">{statusText}</span>
           </span>
         </span>
         <span className="flex-1 h-px bg-canvas-deep/70" />
