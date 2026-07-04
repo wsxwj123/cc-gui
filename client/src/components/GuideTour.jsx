@@ -49,16 +49,6 @@ function buildSteps(hasProject) {
   return steps.map(([sel, title, desc]) => ({ sel, title, desc }));
 }
 
-// data-tour sel → { title, desc } 映射,供常驻悬停 tooltip(GlobalTooltip)复用同一套
-// 详细文案。合并会话/项目两种视图的步骤(会话视图优先,再补项目独有的 add-project)。
-export const STEP_INFO = (() => {
-  const m = new Map();
-  for (const hp of [true, false]) {
-    for (const s of buildSteps(hp)) if (!m.has(s.sel)) m.set(s.sel, { title: s.title, desc: s.desc });
-  }
-  return m;
-})();
-
 const TIP_W = 300;
 
 export function GuideTour({ open, onClose, hasProject }) {
@@ -68,8 +58,7 @@ export function GuideTour({ open, onClose, hasProject }) {
   const [pos, setPos] = useState(null);     // 说明卡定位 {top,left},经实测夹取后才显
   const overlayRef = useRef(null);
   const tipRef = useRef(null);
-  // 问号导引 = 纯逐步(下一步/上一步),高亮【不随鼠标动】。任意状态的悬停注解由
-  // 独立的 GlobalTooltip 负责,两者分工:导引=逐步引导,悬停=随手查单个按钮。
+  // 问号导引 = 纯逐步(下一步/上一步),高亮【不随鼠标动】,逐个介绍界面功能。
 
   // 开:回到第 1 步(rect 由下面的定位 effect 设)。关:清残留 rect/pos —— 否则下次重开
   // 的首帧会用到上一轮的旧 i/rect,而 steps 长度随 hasProject 变(有项目 22 步 / 无项目 21 步),

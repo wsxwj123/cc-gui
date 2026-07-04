@@ -610,6 +610,9 @@ function UpdateChecker() {
   );
 }
 
+// 安装方式中文标签(检测结果 method → 展示名)。brew 版本滞后,不作为切换目标。
+const METHOD_LABEL = { npm: 'npm', native: '官方安装器', brew: 'Homebrew(版本滞后)', unknown: '未知' };
+
 function CcUpdater() {
   // status: idle | checking | ok | err ; updating: false | true
   const [state, setState] = useState({ status: 'idle' });
@@ -681,13 +684,17 @@ function CcUpdater() {
     setUpdating(false);
   };
 
-  const doInstall = async (method = 'npm') => {
+  const doInstall = async (method = 'npm', isSwitch = false) => {
     // npm:需 Node ≥ 20(此 GUI 后端就是 node 跑的,故本机必有),认 HTTP_PROXY 代理、终端有进度。
     // native:官方安装器,自包含不依赖 node,从 claude.ai 拉。
+    // isSwitch:已装状态下换一种安装方式(复用同一安装端点,以目标方式重装、接管 claude 命令)。
     const label = method === 'npm'
       ? 'npm install -g @anthropic-ai/claude-code(需 Node ≥ 20)'
       : '官方安装器(irm claude.ai/install.ps1 | iex / curl claude.ai/install.sh | bash)';
-    if (!(await confirmDialog(`将打开终端运行【${label}】安装 Claude Code。\n安装需联网访问 npm / claude.ai —— 墙内请先开代理(Clash 等开启系统代理)。\n请在弹出的终端里查看进度,完成后回来点"检查更新"。确定继续?`))) return;
+    const msg = isSwitch
+      ? `将打开终端以【${label}】重新安装 Claude Code,把安装方式从「${METHOD_LABEL[state.method] || state.method || '未知'}」切换为「${METHOD_LABEL[method]}」。\n安装需联网访问 npm / claude.ai —— 墙内请先开代理(Clash 等开启系统代理)。\n完成后回来点"检查更新"重新识别;若仍显示旧方式,是 PATH 里旧安装更靠前所致(旧的不会被自动删除)。确定继续?`
+      : `将打开终端运行【${label}】安装 Claude Code。\n安装需联网访问 npm / claude.ai —— 墙内请先开代理(Clash 等开启系统代理)。\n请在弹出的终端里查看进度,完成后回来点"检查更新"。确定继续?`;
+    if (!(await confirmDialog(msg))) return;
     setUpdating(true); setResult(null);
     try {
       const d = await (await fetch('/api/claude-install', {
@@ -771,6 +778,29 @@ function CcUpdater() {
         )
       )}
       {state.status === 'err' && <div className="text-[12px] text-error">{state.error}</div>}
+      {/* 安装方式切换:已装状态下换一种方式重装(如 native→npm,之后 npm 更新更方便)。
+          复用一键安装端点,打开终端以目标方式重装。 */}
+      {state.installed !== false && state.currentVersion && (
+        <div className="border-t border-canvas-deep/60 pt-2 space-y-1.5">
+          <div className="text-[11px] text-ink-muted font-body">
+            安装方式 <span className="text-ink-faint">(当前:{METHOD_LABEL[state.method] || state.method || '未知'})</span>
+          </div>
+          <div className="flex items-center gap-1.5">
+            {[['npm', 'npm'], ['native', '官方安装器']].map(([m, label]) => {
+              const isCur = state.method === m;
+              return (
+                <button key={m} disabled={updating || isCur} onClick={() => doInstall(m, true)}
+                  className={`px-2.5 py-1 text-[11px] rounded-md font-body border transition-colors ${isCur ? 'bg-accent/10 border-accent/40 text-accent cursor-default' : 'bg-canvas-warm border-canvas-deep text-ink-muted hover:text-ink disabled:opacity-50'}`}>
+                  {label}{isCur ? ' · 当前' : '(切换)'}
+                </button>
+              );
+            })}
+          </div>
+          <div className="text-[10.5px] text-ink-faint font-body leading-snug">
+            换一种方式会打开终端重装 Claude Code。<b>npm</b> 更新方便(<code>npm install -g</code>),需 Node ≥ 20;<b>官方安装器</b> 自包含、不依赖 Node、可 <code>claude upgrade</code> 自更新。装好后点上方"检查更新"重新识别;若仍显示旧方式,是 PATH 里旧安装更靠前(旧的不会被自动删除)。
+          </div>
+        </div>
+      )}
       {/* CN-2 实时进度日志 */}
       {(updating || logLines.length > 0) && (
         <pre className="text-[10px] leading-snug font-mono text-ink-soft bg-canvas border border-canvas-deep rounded p-2 max-h-40 overflow-auto whitespace-pre-wrap break-all">

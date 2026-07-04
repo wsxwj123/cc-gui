@@ -29,7 +29,6 @@ import { SettingsPanel } from './components/SettingsPanel.jsx';
 import { FileExplorerPanel } from './components/FileExplorerPanel.jsx';
 import { SkillsPanel } from './components/SkillsPanel.jsx';
 import { GuideTour } from './components/GuideTour.jsx';
-import { GlobalTooltip } from './components/GlobalTooltip.jsx';
 import { useResizable as useResizableHook, Splitter as SplitterCmp } from './hooks/useResizable.jsx';
 import { MCPPanel } from './components/MCPPanel.jsx';
 import { FileReviewPanel } from './components/FileChangesPanel.jsx';
@@ -7468,7 +7467,6 @@ export default function App() {
       />
       {LocalWidget && <LocalWidget />}
       <GuideTour open={tourOpen} onClose={() => setTourOpen(false)} hasProject={!!selectedProject} />
-      <GlobalTooltip />
       {bundleMismatch && (
         <div className="fixed top-0 inset-x-0 z-[300] bg-red-600 text-white text-[12px] font-body px-4 py-2 flex items-center justify-center gap-3 shadow-lg">
           <span>⚠️ 界面 v{bundleMismatch.bundle} 与服务端 v{bundleMismatch.server} 不一致。请依次尝试：① 完全退出 GUI 再打开（会自动换用新版服务并绕过缓存）② 仍出现则说明安装包内是旧前端，请重新下载安装</span>
