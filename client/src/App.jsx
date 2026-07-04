@@ -18,6 +18,7 @@ import { MessageBubble } from './components/MessageBubble.jsx';
 import { MarkdownRenderer } from './components/MarkdownRenderer.jsx';
 import { TurnBubble } from './components/TurnBubble.jsx';
 import TurnScrubber from './components/TurnScrubber.jsx';
+import { pickDirectory, isTauri } from './utils/pickDirectory.js';
 import ChatSearch from './components/ChatSearch.jsx';
 import { confirmDialog } from './utils/confirmDialog.jsx';
 import { ChatInput, EffortSelector, PermissionModeSelector, AgentModeSelector, EFFORT_LEVELS, MODE_META } from './components/ChatInput.jsx';
@@ -1072,19 +1073,15 @@ function ProjectList() {
               // fetch hangs, so the "+" looks dead. Only use it when the browser is
               // on the same machine as the server; remote/phone falls through to the
               // path prompt below.
+              // Tauri 环境走 pickDirectory(官方 dialog 插件,进程内 NSOpenPanel,秒开);
+              // 本地浏览器回退后端 picker;远程/手机不弹本地选择器(会开在服务器屏幕、
+              // 客户端 hang),落到下方路径输入框。
               const isLocalHost = ['localhost', '127.0.0.1', '::1'].includes(window.location.hostname);
-              if (isLocalHost && !isMobile) {
+              if (isTauri() || (isLocalHost && !isMobile)) {
                 try {
-                  const r = await fetch('/api/pick-directory', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ prompt: '选择项目目录', startDir: lastStart || undefined }),
-                  });
-                  if (r.ok) {
-                    const data = await r.json();
-                    if (data.path === null) return;  // user cancelled
-                    path = data.path;
-                  }
+                  const data = await pickDirectory({ prompt: '选择项目目录', startDir: lastStart || undefined });
+                  if (data.path === null) return;  // user cancelled
+                  path = data.path;
                 } catch {
                   setAddDialogOpen(true);
                   return;

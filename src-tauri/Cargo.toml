@@ -16,6 +16,10 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 tauri = { version = "2", features = ["webview-data-url"] }
 tauri-plugin-single-instance = "2"
+# 官方对话框插件:文件夹选择走进程内 NSOpenPanel/IFileDialog(秒开、天然置前),
+# 替代后端 osascript(mac 单 activate 就 2.1s)。前端主路径经它,失败自动回退
+# 后端 picker(client/src/utils/pickDirectory.js),不劣化。
+tauri-plugin-dialog = "2"
 rfd = "0.15"
 
 [profile.release]
