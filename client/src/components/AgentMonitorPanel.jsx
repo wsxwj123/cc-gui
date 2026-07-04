@@ -48,6 +48,7 @@ function BackgroundAgentsSection({ stoppingPid, onStop }) {
   const [prompt, setPrompt] = useState('');
   const [dispatching, setDispatching] = useState(false);
   const [note, setNote] = useState('');
+  const [stoppingId, setStoppingId] = useState('');
   const mountedRef = useRef(true);
   // sessionId → 是否已达终态(上次轮询)。null = 尚未完成首次轮询,首轮只记录
   // 不提醒(避免面板一打开就把历史已完成的全部弹一遍)。
@@ -110,6 +111,24 @@ function BackgroundAgentsSection({ stoppingPid, onStop }) {
     setDispatching(false);
   };
 
+  // 停后台代理:走官方 `claude stop <id>`(见后端注释),按【各自的 id】停,不再 pid kill。
+  // 修:pid 挂同一 supervisor → 旧版停一个连坐全停、停不动、已停仍显示运行中。
+  const stopBg = async (a) => {
+    const id = a.id || a.sessionId;
+    if (!id || stoppingId) return;
+    setStoppingId(id); setNote('');
+    try {
+      const r = await fetch('/api/agents/background/stop', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id }),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(d.error || '停止失败');
+      await load(); // 立即刷新:真停后本轮 state→stopped,卡片移入已结束区
+    } catch (e) { setNote(String(e.message || e)); }
+    setStoppingId('');
+  };
+
   // 运行中 = 未达终态(state 缺失但有活 pid 的旧版 CLI 输出也归运行中)
   const running = agents.filter((a) => !BG_TERMINAL.has(a.state));
   // 已完成的按结束时间(缺失退回开始时间)倒序,只显示最近 10 条防列表无限膨胀
@@ -143,10 +162,10 @@ function BackgroundAgentsSection({ stoppingPid, onStop }) {
                 <span className="text-[11px] text-ink font-body truncate flex-1" title={a.name}>{a.name || `bg #${a.pid}`}</span>
                 {a.state && <StatusBadge status={a.state} />}
                 <span className="text-[10px] text-ink-faint font-mono shrink-0">{fmtElapsed(a.elapsedMs)}</span>
-                {a.pid != null && (
-                  <button onClick={() => onStop(String(a.pid))} disabled={stoppingPid === String(a.pid)}
+                {(a.id || a.sessionId) && (
+                  <button onClick={() => stopBg(a)} disabled={stoppingId === (a.id || a.sessionId)}
                     className="shrink-0 flex items-center gap-1 text-[10px] px-2 py-1 rounded bg-red-50 hover:bg-red-100 text-red-700 border border-red-200 transition-colors disabled:opacity-50">
-                    {stoppingPid === String(a.pid) ? <Loader2 size={10} className="animate-spin" /> : <Square size={10} />}停止
+                    {stoppingId === (a.id || a.sessionId) ? <Loader2 size={10} className="animate-spin" /> : <Square size={10} />}停止
                   </button>
                 )}
               </div>
@@ -166,14 +185,7 @@ function BackgroundAgentsSection({ stoppingPid, onStop }) {
                   <Bot size={11} className="text-ink-faint" />
                   <span className="text-[11px] text-ink font-body truncate flex-1" title={a.name}>{a.name || a.id || '后台代理'}</span>
                   <StatusBadge status={a.state} />
-                  {/* 结束后进程仍常驻(可 attach);有 pid 时保留停止按钮以释放它 */}
-                  {a.pid != null && (
-                    <button onClick={() => onStop(String(a.pid))} disabled={stoppingPid === String(a.pid)}
-                      title="会话已结束但进程仍常驻,点击结束进程"
-                      className="shrink-0 flex items-center gap-1 text-[10px] px-2 py-1 rounded bg-red-50 hover:bg-red-100 text-red-700 border border-red-200 transition-colors disabled:opacity-50">
-                      {stoppingPid === String(a.pid) ? <Loader2 size={10} className="animate-spin" /> : <Square size={10} />}停止
-                    </button>
-                  )}
+                  {/* 已终态无需停止按钮(claude stop 已把它移入此区);查看结果见下方 */}
                 </div>
                 {(a.detail || a.resultPreview) && (
                   <div className="text-[10.5px] text-ink-muted font-body line-clamp-2 mt-1" title={a.detail || a.resultPreview}>

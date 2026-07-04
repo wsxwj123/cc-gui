@@ -325,6 +325,36 @@ router.post('/agents/background/dispatch', async (req, res) => {
   }
 });
 
+// POST /api/agents/background/stop { id }
+// 停后台代理的【官方】方式:`claude stop <id>`(停会话、保留可 attach)。
+// 绝不用 pid kill —— `claude agents --json` 里多个后台代理的 pid 都指向同一个
+// CLI supervisor 进程,按 pid kill 会【连坐全停】且常无效(用户实报:停一个全停、
+// 停止没反应、已停的仍显示运行中)。用各自的 id 逐个停才正确。
+router.post('/agents/background/stop', async (req, res) => {
+  const id = String(req.body?.id || '').trim();
+  // CLI 的会话 id / sessionId:字母数字加连字符/下划线,不含路径分隔符。
+  if (!id || !/^[A-Za-z0-9_-]+$/.test(id)) {
+    return res.status(400).json({ error: 'id 必填且需为合法会话标识' });
+  }
+  try {
+    const proc = claudeSpawn(['stop', id], { stdio: ['ignore', 'pipe', 'pipe'], env: cleanChildEnv() });
+    let out = '', errOut = '';
+    proc.stdout.on('data', (d) => { out += d; });
+    proc.stderr.on('data', (d) => { if (errOut.length < 2000) errOut += d; });
+    const code = await new Promise((resolve) => {
+      const timer = setTimeout(() => { try { proc.kill(); } catch {} resolve(-1); }, 10000);
+      proc.on('close', (c) => { clearTimeout(timer); resolve(c); });
+      proc.on('error', () => { clearTimeout(timer); resolve(-2); });
+    });
+    if (code !== 0) {
+      return res.status(500).json({ error: (errOut || out || `claude stop 退出码 ${code}`).trim().slice(0, 500) });
+    }
+    res.json({ ok: true });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
 // ── Bundled (built-in) agent presets ─────────────────────────────────────
 // The GUI ships agent .md presets (explorer/librarian/oracle/designer/fixer +
 // orchestrator, ported from oh-my-opencode-slim). They are NOT auto-installed —
