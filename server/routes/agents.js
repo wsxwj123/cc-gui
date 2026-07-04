@@ -7,6 +7,7 @@ import { fileURLToPath } from 'url';
 import { homedir } from 'os';
 import { getActiveChatProcesses, claudeSpawn, cleanChildEnv } from './chat.js';
 import { resolveUnderHome } from '../utils/safe-path.js';
+import { claudeCommand } from '../utils/claude-resolver.js';
 
 const execFileP = promisify(execFile);
 const router = Router();
@@ -98,7 +99,9 @@ router.get('/agents', async (req, res) => {
     // Always try the CLI as a secondary source — some installs register agents
     // elsewhere. If both succeed we merge by name.
     try {
-      const out = await execFileP('claude', ['agents', 'list'], { timeout: 6000 });
+      // 路径解析统一走 claude-resolver(PATH 外安装位也可用;Win .cmd 经 cmd.exe)。
+      const { file, args: fullArgs } = claudeCommand(['agents', 'list']);
+      const out = await execFileP(file, fullArgs, { timeout: 6000 });
       const lines = out.stdout.split('\n').map((l) => l.trim()).filter(Boolean);
       for (const line of lines) {
         const m = line.match(/^([a-z0-9-]+)\b/);
