@@ -62,16 +62,18 @@ export function GuideTour({ open, onClose, hasProject }) {
   useLayoutEffect(() => {
     if (!open) { setItems([]); setHover(null); return; }
     const measure = () => {
-      const ov = overlayRef.current;
-      if (!ov) return;
-      const vp = ov.getBoundingClientRect();
-      const zoom = vp.width / (ov.offsetWidth || vp.width) || 1;
+      // zoom 直接读 <html> 的 style.zoom(uiFontScale 设的确切值,如 1.2),不再靠
+      // overlay 的 rect/offset 估算——那个在 overlay 刚挂载、布局未稳时会算成 ~1,
+      // 导致 fixed 定位在 zoom 上下文里被二次放大、越往右下偏移越大(高亮框全错位)。
+      const zoom = parseFloat(document.documentElement.style.zoom) || 1;
       const out = [];
       for (const s of steps) {
         const el = document.querySelector(`[data-tour="${s.sel}"]`);
         if (!el) continue;
         const r = el.getBoundingClientRect();
         if (r.width <= 0 || r.height <= 0) continue;
+        // getBoundingClientRect 在 CSS zoom 下返回视觉坐标;fixed 定位会被 ×zoom 渲染,
+        // 故 ÷zoom 还原,渲染后正好落回视觉位置。
         out.push({ ...s, box: { top: r.top / zoom, left: r.left / zoom, width: r.width / zoom, height: r.height / zoom } });
       }
       setItems(out);
@@ -87,7 +89,9 @@ export function GuideTour({ open, onClose, hasProject }) {
   const bubble = (() => {
     if (hover == null || !items[hover]) return null;
     const it = items[hover];
-    const vw = window.innerWidth, vh = window.innerHeight;
+    // 视口边界换算到与 it.box 相同的逻辑坐标系(÷zoom),否则大字号下气箭夹取会偏。
+    const zoom = parseFloat(document.documentElement.style.zoom) || 1;
+    const vw = window.innerWidth / zoom, vh = window.innerHeight / zoom;
     const b = it.box;
     // 估算气泡高度(说明多行);实际由内容撑开,这里只做定位择向。
     const estH = 44 + (it.desc.split('\n').length * 18);
