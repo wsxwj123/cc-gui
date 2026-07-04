@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { ChevronDown, ChevronRight, Loader2, Maximize2 } from 'lucide-react';
+import { ChevronDown, ChevronRight, Loader2, Maximize2, CheckCircle2, XCircle } from 'lucide-react';
 import { useStore } from '../../stores/sessionStore.js';
 import { MarkdownRenderer } from '../MarkdownRenderer.jsx';
 import { extractToolResultText } from '../../utils/toolResult.js';
@@ -80,22 +80,14 @@ export function TaskCard({ toolCall }) {
         onClick={() => setExpanded(!expanded)}
         className="w-full pl-3 pr-2 py-2 flex items-center gap-2.5 hover:bg-canvas-warm transition-colors text-left"
       >
-        {/* 图标位:动画只在运行中出现,与状态点互斥 */}
+        {/* 图标位:运行中=三点脉冲;完成=绿色圆圈√(同会话完成标志);出错=红色圆圈× */}
         <span className="relative shrink-0 w-5 h-5 flex items-center justify-center text-ink-muted">
           {isWorking ? (
             <span className="tc-agent-dots text-accent" aria-label="运行中"><span /><span /><span /></span>
+          ) : isError ? (
+            <XCircle size={16} className="text-error" aria-label="子代理出错" />
           ) : (
-            <>
-              {/* 几何 agent 图标:菱形轮廓 + 中心点 */}
-              <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.2" aria-hidden="true">
-                <path d="M7 1.7 12.3 7 7 12.3 1.7 7Z" strokeLinejoin="round" />
-                <circle cx="7" cy="7" r="1.3" fill="currentColor" stroke="none" />
-              </svg>
-              <span
-                className={`absolute -right-px -bottom-px w-1.5 h-1.5 rounded-full ring-2 ring-canvas ${isError ? 'bg-error' : 'bg-success'}`}
-                title={isError ? '子代理出错' : '子代理完成'}
-              />
-            </>
+            <CheckCircle2 size={16} className="text-success" aria-label="子代理完成" />
           )}
         </span>
         <div className="flex-1 min-w-0">
