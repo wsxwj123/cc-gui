@@ -1153,18 +1153,48 @@ html { --content-max: clamp(768px, calc(var(--app-w, 100vw) * 0.7), 1120px); }
 .animate-slide-in { animation: slideIn 0.28s cubic-bezier(0.2, 0.8, 0.2, 1) both; }
 .animate-glass-rise { animation: glassRise 0.32s cubic-bezier(0.2, 0.8, 0.2, 1) both; }
 
-/* Thinking pulse — mimics CLI's spinner glyph cycling. Pulse (scale+opacity)
- * instead of full rotation: easier on the eye and closer to the CLI's
- * "breathing star" feel than a 360° spin. */
+/* Thinking pulse — 回复头像位 ✻ 的"活着"动效(呼吸,非旋转)。
+ * 幅度刻意收小(scale ≤1.08):流式结束时 streaming 气泡会被固化气泡整体替换
+ * (React key 变化 → 重挂,无法跨元素 transition),动画始终围绕静止姿态小幅
+ * 摆动 + .provider-mark 上的 transition 兜底,任意相位切到静态都不产生跳变。 */
 @keyframes avatarThinkingPulse {
-  0%, 100% { transform: scale(1);    opacity: 1;   }
-  50%      { transform: scale(1.18); opacity: 0.65; }
+  0%, 100% { transform: scale(1);    opacity: 1;    }
+  50%      { transform: scale(1.08); opacity: 0.72; }
 }
-.avatar-thinking-spin { animation: avatarThinkingPulse 1.4s ease-in-out infinite; transform-origin: center; }
+.avatar-thinking-spin { animation: avatarThinkingPulse 2s ease-in-out infinite; transform-origin: center; }
+/* 动→静的平滑收尾:类被移除(或重挂为静态)时,残余的 transform/opacity 缓动归位 */
+.provider-mark { transition: transform 0.35s ease-out, opacity 0.35s ease-out; }
+@media (prefers-reduced-motion: reduce) {
+  .avatar-thinking-spin { animation: none; }
+}
 /* Safari/WKWebView renders an inline <svg> that has only a viewBox (no width/height
    attrs) at 0×0 — Chrome auto-fills the sized parent, iOS does not. Force the
    provider mark to fill its parent so avatars actually show on mobile. */
 .provider-mark svg { width: 100%; height: 100%; display: block; }
+
+/* ── 子代理卡片(TaskCard):运行中图标位的三点脉冲 ──
+   颜色取 currentColor(卡片上是 accent),幅度克制;reduced-motion 静止半透明 */
+.tc-agent-dots {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+.tc-agent-dots span {
+  width: 3.5px;
+  height: 3.5px;
+  border-radius: 999px;
+  background: currentColor;
+  animation: tcAgentDot 1.2s ease-in-out infinite;
+}
+.tc-agent-dots span:nth-child(2) { animation-delay: 0.18s; }
+.tc-agent-dots span:nth-child(3) { animation-delay: 0.36s; }
+@keyframes tcAgentDot {
+  0%, 100% { opacity: 0.25; transform: scale(0.8); }
+  40%      { opacity: 1;    transform: scale(1);   }
+}
+@media (prefers-reduced-motion: reduce) {
+  .tc-agent-dots span { animation: none; opacity: 0.6; }
+}
 
 /* ── Skill 调用横幅 ──────────────────────────────────────────────
    Skill 名居中大字显示,运行期间带流光:渐变经 background-clip:text 上色,
@@ -1411,87 +1441,53 @@ html { --content-max: clamp(768px, calc(var(--app-w, 100vw) * 0.7), 1120px); }
   color: #fff;
 }
 
-/* ── 顶栏品牌 logo:星标呼吸旋转 + 字标流光扫过 + 终端方块光标闪烁 ──
-   颜色全部取主题变量,深浅主题均协调;prefers-reduced-motion 时全部静止 */
+/* ── 顶栏品牌 logo:Claude 官方风格 ──
+   品牌橙八瓣星芒(缓慢呼吸,幅度克制)+ 大号衬线字标 "Claude"。
+   字标固定衬线栈(Newsreader 已随 index.html 加载),不跟随阅读字体选择器;
+   字标取主题 ink,深浅主题均协调;prefers-reduced-motion 时静止。 */
 .cgui-brand {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: 7px;
   line-height: 1;
 }
 
 .cgui-brand-spark {
-  font-size: 15px;
-  line-height: 1;
-  animation: cgui-brand-spark 3.6s ease-in-out infinite;
+  width: 19px;
+  height: 19px;
+  /* 品牌橙固定值(同 ProviderAvatar 的 #D97757):默认中性主题 accent 是纯黑,
+     跟随 accent 星芒会发黑,与回复头像 ✻ 及官方参考不一致;深浅底上均可读 */
+  color: #D97757;
+  transform-origin: center;
+  animation: cgui-brand-breath 4.5s ease-in-out infinite;
 }
 
 .cgui-brand-name {
-  font-size: 15px;
+  font-family: 'Newsreader', Georgia, 'Times New Roman', serif;
+  font-optical-sizing: auto;
+  font-size: 19px;
+  font-weight: 500;
+  letter-spacing: 0.005em;
   color: var(--color-ink);
+  /* 衬线基线偏低,微调与星芒的光学居中 */
+  transform: translateY(-1px);
 }
 
-/* 流光:仅在支持 background-clip:text 的引擎启用(不支持时保持纯色回退) */
-@supports ((-webkit-background-clip: text) or (background-clip: text)) {
-  .cgui-brand-name {
-    background-image: linear-gradient(
-      110deg,
-      var(--color-ink) 0%,
-      var(--color-ink) 42%,
-      var(--color-ink-faint) 50%,
-      var(--color-ink) 58%,
-      var(--color-ink) 100%
-    );
-    background-size: 300% 100%;
-    background-position: 100% 0;
-    -webkit-background-clip: text;
-    background-clip: text;
-    -webkit-text-fill-color: transparent;
-    animation: cgui-brand-sheen 6s linear infinite;
-  }
-}
-
-.cgui-brand-caret {
-  width: 6px;
-  height: 13px;
-  border-radius: 1.5px;
-  background: var(--color-accent);
-  animation: cgui-brand-blink 1.1s steps(1, end) infinite;
-}
-
-@keyframes cgui-brand-spark {
+@keyframes cgui-brand-breath {
   0%,
   100% {
-    transform: rotate(0deg) scale(1);
-    opacity: 0.85;
+    transform: scale(1);
+    opacity: 0.92;
   }
 
   50% {
-    transform: rotate(90deg) scale(1.15);
+    transform: scale(1.08);
     opacity: 1;
   }
 }
 
-@keyframes cgui-brand-sheen {
-  from {
-    background-position: 100% 0;
-  }
-
-  to {
-    background-position: 0% 0;
-  }
-}
-
-@keyframes cgui-brand-blink {
-  50% {
-    opacity: 0;
-  }
-}
-
 @media (prefers-reduced-motion: reduce) {
-  .cgui-brand-spark,
-  .cgui-brand-name,
-  .cgui-brand-caret {
+  .cgui-brand-spark {
     animation: none;
   }
 }
