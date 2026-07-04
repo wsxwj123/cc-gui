@@ -1,7 +1,7 @@
-// 使用指引。点问号一次性列出【全部】按钮的说明(含各面板的二级菜单),不再逐步高亮
-// 逐个点(用户反馈:想看设置得点很多下太麻烦)。左栏是会话列表还是项目列表 → 动态
-// 裁剪对应说明(避免在项目列表讲会话、反之亦然)。
-import { useMemo } from 'react';
+// 使用指引。点问号后【一次性高亮所有功能按钮】(不逐步、不罗列清单),鼠标悬停任一
+// 高亮按钮即显示它的说明气泡(含二级菜单),说明与按钮直接视觉关联。左栏是会话列表
+// 还是项目列表 → 动态裁剪对应说明。
+import { useMemo, useState, useLayoutEffect, useRef } from 'react';
 import { X } from 'lucide-react';
 
 // 顶栏功能面板按钮的说明(含二级菜单)。
@@ -49,33 +49,89 @@ function buildSteps(hasProject) {
   return steps.map(([sel, title, desc]) => ({ sel, title, desc }));
 }
 
+const BUBBLE_W = 280;
+
 export function GuideTour({ open, onClose, hasProject }) {
   const steps = useMemo(() => buildSteps(hasProject), [hasProject]);
+  const [items, setItems] = useState([]);   // [{sel,title,desc,box:{top,left,width,height}}] 逻辑 px
+  const [hover, setHover] = useState(null);  // index
+  const overlayRef = useRef(null);
+
+  // 测量所有 data-tour 元素位置。<html> 有 font-scale zoom → getBoundingClientRect
+  // 返回缩放后实际像素,写进 style 会被再 ×zoom,故统一 ÷zoom 还原成逻辑 px。
+  useLayoutEffect(() => {
+    if (!open) { setItems([]); setHover(null); return; }
+    const measure = () => {
+      const ov = overlayRef.current;
+      if (!ov) return;
+      const vp = ov.getBoundingClientRect();
+      const zoom = vp.width / (ov.offsetWidth || vp.width) || 1;
+      const out = [];
+      for (const s of steps) {
+        const el = document.querySelector(`[data-tour="${s.sel}"]`);
+        if (!el) continue;
+        const r = el.getBoundingClientRect();
+        if (r.width <= 0 || r.height <= 0) continue;
+        out.push({ ...s, box: { top: r.top / zoom, left: r.left / zoom, width: r.width / zoom, height: r.height / zoom } });
+      }
+      setItems(out);
+    };
+    measure();
+    window.addEventListener('resize', measure);
+    return () => window.removeEventListener('resize', measure);
+  }, [open, steps]);
+
   if (!open) return null;
+
+  // 悬停项的说明气泡定位:优先按钮正下方,放不下翻到上方,再夹到视口内。
+  const bubble = (() => {
+    if (hover == null || !items[hover]) return null;
+    const it = items[hover];
+    const vw = window.innerWidth, vh = window.innerHeight;
+    const b = it.box;
+    // 估算气泡高度(说明多行);实际由内容撑开,这里只做定位择向。
+    const estH = 44 + (it.desc.split('\n').length * 18);
+    let top = b.top + b.height + 8;
+    if (top + estH > vh - 8) top = Math.max(8, b.top - estH - 8); // 下方放不下→上方
+    let left = b.left + b.width / 2 - BUBBLE_W / 2;               // 水平居中于按钮
+    left = Math.max(8, Math.min(left, vw - BUBBLE_W - 8));        // 夹进视口
+    // 引线:从按钮中心到气泡顶部中心(仅在气泡不紧贴时画,简单竖线足够示意归属)
+    return { it, top, left, anchorX: b.left + b.width / 2, anchorY: b.top + b.height };
+  })();
+
   return (
-    <div className="fixed inset-0 z-[400] flex items-center justify-center p-4">
+    <div ref={overlayRef} className="fixed inset-0 z-[400]">
+      {/* 半透明遮罩,点空白关闭 */}
       <div className="absolute inset-0 bg-black/45" onClick={onClose} />
-      <div className="relative w-full max-w-2xl max-h-[86dvh] flex flex-col bg-canvas border border-canvas-deep rounded-2xl shadow-2xl animate-glass-rise">
-        <div className="flex items-center gap-2 px-5 py-3 border-b border-canvas-deep shrink-0">
-          <span className="text-[14px] font-display font-semibold text-ink flex-1">功能导引 · 一览</span>
-          <span className="text-[10.5px] text-ink-faint font-body px-2 py-0.5 rounded bg-canvas-warm">
-            {hasProject ? '会话列表视图' : '项目列表视图'}
-          </span>
-          <button onClick={onClose} className="text-ink-faint hover:text-ink shrink-0" title="关闭"><X size={16} /></button>
-        </div>
-        <div className="flex-1 overflow-y-auto px-4 py-3 grid grid-cols-1 sm:grid-cols-2 gap-2">
-          {steps.map((s) => (
-            <div key={s.sel} className="border border-canvas-deep/60 rounded-lg px-3 py-2.5 bg-canvas-warm/30">
-              <div className="text-[12px] font-body font-semibold text-ink mb-1">{s.title}</div>
-              <div className="text-[11px] text-ink-muted font-body leading-relaxed whitespace-pre-line">{s.desc}</div>
-            </div>
-          ))}
-        </div>
-        <div className="px-5 py-2.5 border-t border-canvas-deep shrink-0 flex items-center gap-2">
-          <span className="text-[10.5px] text-ink-faint font-body flex-1">此页一次列出全部按钮说明,无需逐步点击。</span>
-          <button onClick={onClose} className="px-3 py-1.5 text-[12px] rounded-md bg-accent text-white hover:bg-accent/90 font-body">知道了</button>
-        </div>
+
+      {/* 顶部标题条 + 关闭 */}
+      <div className="fixed top-3 left-1/2 -translate-x-1/2 flex items-center gap-2 px-3 py-1.5 rounded-full bg-canvas border border-canvas-deep shadow-lg pointer-events-auto">
+        <span className="text-[12px] font-body font-medium text-ink">功能导引</span>
+        <span className="text-[10px] text-ink-faint font-body">{hasProject ? '会话列表视图' : '项目列表视图'} · 悬停任意高亮按钮看说明</span>
+        <button onClick={onClose} className="text-ink-faint hover:text-ink" title="关闭"><X size={13} /></button>
       </div>
+
+      {/* 所有按钮同时高亮描边;悬停项加深并高于其它 */}
+      {items.map((it, i) => (
+        <div key={it.sel}
+          onMouseEnter={() => setHover(i)} onMouseLeave={() => setHover((h) => (h === i ? null : h))}
+          style={{ position: 'fixed', top: it.box.top - 3, left: it.box.left - 3, width: it.box.width + 6, height: it.box.height + 6, zIndex: hover === i ? 3 : 1 }}
+          className={`rounded-lg pointer-events-auto cursor-help transition-colors ${hover === i ? 'ring-2 ring-accent bg-accent/10' : 'ring-2 ring-accent/45'}`}
+        />
+      ))}
+
+      {/* 悬停说明气泡 + 一条竖向引线示意归属 */}
+      {bubble && (
+        <>
+          <div style={{ position: 'fixed', left: bubble.anchorX - 0.5, top: Math.min(bubble.anchorY, bubble.top), width: 1, height: Math.abs(bubble.top - bubble.anchorY), zIndex: 4 }}
+            className="bg-accent/50 pointer-events-none" />
+          <div style={{ position: 'fixed', top: bubble.top, left: bubble.left, width: BUBBLE_W, zIndex: 5 }}
+            className="bg-canvas border border-canvas-deep rounded-xl shadow-2xl p-3 pointer-events-none animate-fade-in">
+            <div className="text-[12.5px] font-body font-semibold text-ink mb-1">{bubble.it.title}</div>
+            <div className="text-[11px] text-ink-muted font-body leading-relaxed whitespace-pre-line">{bubble.it.desc}</div>
+          </div>
+        </>
+      )}
     </div>
   );
 }
