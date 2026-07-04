@@ -259,6 +259,7 @@ function ThemeToggle() {
   return (
     <div ref={wrapRef} className="relative">
       <button onClick={() => setOpen((v) => !v)}
+        data-tour="theme-toggle"
         className="px-1.5 py-1 rounded-lg text-ink-muted hover:text-ink hover:bg-black/5 transition-colors flex flex-col items-center gap-0.5"
         title="主题与外观">
         <ToneIcon size={15} />
