@@ -706,11 +706,16 @@ router.post('/chat/title', async (req, res) => {
       .trim();
     // 元话术兜底:提示词硬化后模型仍可能输出"当前会话内容比较简单…"这类解释当标题。
     // 命中特征(超长 / 整句以句号结尾 / 元话术关键词且偏长)一律丢弃,回退用户消息截断。
+    // CLI/provider 调用失败时(未登录、鉴权失败、限流、第三方报错)stdout 可能是一段
+    // 英文错误文本(如 "Not logged in · Please run …")而非标题 → 也要拦截回退,
+    // 否则错误提示被当成会话标题(实测临时环境未登录复现)。
+    const isErr = /not logged in|please run|invalid|api key|unauthor|rate limit|quota|exceeded|forbidden|error:|failed|usage:/i.test(clean);
     const isMeta =
       clean.length > 30 ||
       /[。.]\s*$/.test(clean) ||
       /比较简单|请提供|无法生成|没有(看到|提供)/.test(clean) ||
-      (clean.length > 20 && /会话|对话|内容|无法/.test(clean));
+      (clean.length > 20 && /会话|对话|内容|无法/.test(clean)) ||
+      isErr;
     const finalTitle = (!clean || isMeta)
       ? titleSource.replace(/\s+/g, ' ').trim().slice(0, 24)
       : clean.slice(0, 24);
