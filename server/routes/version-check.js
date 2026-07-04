@@ -1,5 +1,6 @@
 import { Router } from 'express';
-import { readFileSync, writeFileSync, existsSync, readdirSync } from 'fs';
+import { readFileSync, writeFileSync, existsSync } from 'fs';
+import { resolveClaude } from '../utils/claude-resolver.js';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import { tmpdir, homedir } from 'os';
@@ -189,129 +190,27 @@ async function fetchNativeLatest() {
   return v;
 }
 
-// 检测 claude CLI 的安装方式 + 解析它的绝对路径。返回 { method, path }。
-// 关键:解析 GUI 实际会用到的那个 claude(与 getClaudeVersion 的 execFile('claude')
-// 同源,都走 process.env.PATH),这样更新才打到 GUI 真正读取的那个安装。
-// Y1:PATH 解析失败时的兜底 —— 直接探测各安装方式的已知落点。npm i -g 在 prefix
-// 不在 PATH 时(用户报告:装成功但 GUI 检测不到)`where/command -v` 都找不到;
-// 这里先问 npm 自己的全局 prefix,再扫常见目录,扫到即按绝对路径使用。
-async function probeKnownClaude() {
-  const home = homedir();
-  const candidates = [];
-  try {
-    const { stdout } = await execFileP(
-      process.platform === 'win32' ? 'npm.cmd' : 'npm',
-      ['prefix', '-g'], { timeout: 6000 },
-    );
-    const prefix = stdout.trim();
-    if (prefix) {
-      candidates.push(process.platform === 'win32'
-        ? join(prefix, 'claude.cmd')
-        : join(prefix, 'bin', 'claude'));
-    }
-  } catch {}
-  // 第二次兜底:npm config get prefix(有些环境 `npm prefix -g` 与 config 不一致)。
-  try {
-    const { stdout } = await execFileP(
-      process.platform === 'win32' ? 'npm.cmd' : 'npm',
-      ['config', 'get', 'prefix'], { timeout: 6000 },
-    );
-    const prefix = stdout.trim();
-    if (prefix && prefix !== 'undefined') {
-      candidates.push(process.platform === 'win32'
-        ? join(prefix, 'claude.cmd')
-        : join(prefix, 'bin', 'claude'));
-    }
-  } catch {}
-  if (process.platform === 'win32') {
-    const appData = process.env.APPDATA || join(home, 'AppData', 'Roaming');
-    const localApp = process.env.LOCALAPPDATA || join(home, 'AppData', 'Local');
-    candidates.push(
-      join(home, '.local', 'bin', 'claude.exe'),
-      join(home, '.claude', 'local', 'claude.exe'),
-      join(appData, 'npm', 'claude.cmd'),
-      join(process.env.ProgramFiles || 'C:\\Program Files', 'nodejs', 'claude.cmd'),
-      // 版本管理器 / 第三方包管理器(用户报告 npm 全局装却扫不到的高发场景):
-      join(home, 'scoop', 'shims', 'claude.cmd'),                 // scoop
-      join(localApp, 'Volta', 'bin', 'claude.exe'),               // volta
-      join(localApp, 'pnpm', 'claude.cmd'),                       // pnpm global
-      join(localApp, 'fnm_multishells'),                          // fnm(下方动态扫)
-      ...nvmWinCandidates(appData),                               // nvm-windows
-    );
-  } else {
-    candidates.push(
-      join(home, '.local', 'bin', 'claude'),
-      join(home, '.claude', 'local', 'bin', 'claude'),
-      join(home, '.npm-global', 'bin', 'claude'),
-      '/opt/homebrew/bin/claude',
-      '/usr/local/bin/claude',
-      // 版本管理器 / 第三方包管理器:
-      join(home, '.volta', 'bin', 'claude'),                                  // volta
-      join(home, 'Library', 'pnpm', 'claude'),                                // pnpm(mac)
-      join(home, '.local', 'share', 'pnpm', 'claude'),                        // pnpm(linux)
-      join(home, '.config', 'yarn', 'global', 'node_modules', '.bin', 'claude'), // yarn global
-      ...nvmNixCandidates(home),                                              // nvm / fnm(动态扫版本目录)
-    );
-  }
-  for (const p of candidates) {
-    try { if (existsSync(p)) return p; } catch {}
-  }
-  return '';
-}
-
-// nvm(mac/linux)与 fnm 把每个 node 版本装在独立目录,全局 bin 在 <ver>/bin。扫所有版本
-// 目录找 claude(npm prefix -g 仅当 GUI 的 PATH 里恰好是该 nvm 的 npm 才命中,故需直扫)。
-function nvmNixCandidates(home) {
-  const out = [];
-  for (const base of [
-    join(home, '.nvm', 'versions', 'node'),
-    join(home, '.local', 'state', 'fnm_multishells'),
-    join(home, '.fnm', 'node-versions'),
-  ]) {
-    try {
-      for (const v of readdirSync(base)) {
-        out.push(join(base, v, 'bin', 'claude'));
-        out.push(join(base, v, 'installation', 'bin', 'claude')); // fnm 布局
-      }
-    } catch {}
-  }
-  return out;
-}
-function nvmWinCandidates(appData) {
-  const out = [];
-  const base = join(appData, 'nvm');
-  try {
-    for (const v of readdirSync(base)) out.push(join(base, v, 'claude.cmd'));
-  } catch {}
-  return out;
-}
-
+// 检测 claude CLI 的安装方式 + 解析它的绝对路径。返回 { method, path, via }。
+// 路径解析统一走 claude-resolver(PATH → login shell → npm 全局前缀 → 已知安装
+// 路径),与 claudeSpawn / SDK / cli-check 同源 —— 报告版本、执行更新的都是 GUI
+// 实际会用的那个安装。此处只负责按路径特征分类安装方式(native/brew/npm)。
 async function detectInstall() {
-  let real = '';
+  const hit = resolveClaude();
+  if (!hit) return { method: 'unknown', path: '', via: null };
+  let real = hit.path;
   if (process.platform === 'win32') {
-    try {
-      const { stdout } = await execFileP('where', ['claude'], { timeout: 8000 });
-      real = (stdout.split(/\r?\n/).find(Boolean) || '').trim();  // 第一个匹配 = 优先级最高
-    } catch {
-      real = await probeKnownClaude();
-      if (!real) return { method: 'npm', path: '' };
-    }
-    if (/AnthropicClaude|\\\.claude\\local|\\\.local\\bin|\\claude\\versions\\/i.test(real)) return { method: 'native', path: real };
-    if (/npm|node_modules|nodejs/i.test(real)) return { method: 'npm', path: real };
-    return { method: 'native', path: real };  // 兜底按 native 自更新(claude update 在 Windows 亦支持)
+    if (/AnthropicClaude|\\\.claude\\local|\\\.local\\bin|\\claude\\versions\\/i.test(real)) return { method: 'native', path: real, via: hit.via };
+    if (/npm|node_modules|nodejs/i.test(real)) return { method: 'npm', path: real, via: hit.via };
+    return { method: 'native', path: real, via: hit.via };  // 兜底按 native 自更新(claude update 在 Windows 亦支持)
   }
-  try {
-    const { stdout } = await execFileP('bash', ['-lc', 'command -v claude'], { timeout: 8000 });
-    real = stdout.trim();
-    try { const r = await execFileP('readlink', ['-f', real], { timeout: 5000 }); real = r.stdout.trim(); } catch {}
-  } catch {
-    real = await probeKnownClaude();
-    if (!real) return { method: 'unknown', path: '' };
-  }
-  if (/\/\.local\/(share|bin)\/claude|\/claude\/versions\//.test(real)) return { method: 'native', path: real };
-  if (/Caskroom|Cellar|\/brew\//i.test(real)) return { method: 'brew', path: real };
-  if (/node_modules|\/npm|\.nvm|\.npm-global|\/lib\/node/.test(real)) return { method: 'npm', path: real };
-  return { method: 'unknown', path: real };
+  // 解析软链(~/.local/bin/claude → ~/.local/share/claude/versions/x.y.z)以便按
+  // 真实落点分类;分类用 real,返回的 path 保留解析到的入口路径(可直接执行)。
+  let target = real;
+  try { const r = await execFileP('readlink', ['-f', real], { timeout: 5000 }); target = r.stdout.trim() || real; } catch {}
+  if (/\/\.local\/(share|bin)\/claude|\/claude\/versions\//.test(target)) return { method: 'native', path: real, via: hit.via };
+  if (/Caskroom|Cellar|\/brew\//i.test(target)) return { method: 'brew', path: real, via: hit.via };
+  if (/node_modules|\/npm|\.nvm|\.npm-global|\/lib\/node/.test(target)) return { method: 'npm', path: real, via: hit.via };
+  return { method: 'unknown', path: real, via: hit.via };
 }
 
 // 按安装方式给出更新命令。native 用「绝对路径 + update」自更新,避免终端里裸 `claude`
@@ -678,14 +577,19 @@ async function detectGit() {
 }
 
 router.get('/env-check', async (req, res) => {
-  const { method, path: claudePath } = await detectInstall();
+  const { method, path: claudePath, via } = await detectInstall();
   const claudeVersion = await getClaudeVersion(claudePath);
   const python = await detectPython();
   const uv = await detectUv();
   const git = await detectGit();
   res.json({
     node: { installed: true, version: process.version, required: true },
-    claude: { installed: !!claudeVersion, version: claudeVersion || null, method, required: true },
+    // resolvedPath/via:实际解析到的二进制位置与命中策略(PATH / login-shell /
+    // npm-prefix / known-path),检测面板据此展示"从哪找到的"。
+    claude: {
+      installed: !!claudeVersion, version: claudeVersion || null, method, required: true,
+      resolvedPath: claudePath || null, via: via || null,
+    },
     git: { installed: git.installed, version: git.version || null, required: false },
     python: { installed: python.installed, version: python.version || null, required: false },
     uv: { installed: uv.installed, version: uv.version || null, required: false },
