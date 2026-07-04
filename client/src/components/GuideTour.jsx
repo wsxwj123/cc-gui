@@ -6,16 +6,16 @@ import { X, ArrowRight, ArrowLeft } from 'lucide-react';
 
 // 顶栏功能面板按钮(与 PANEL_MAP 同序)。逐个圈。
 const PANEL_STEPS = [
-  ['panel-files', '文件', '· 浏览项目文件树、点开预览\n· html/svg 可侧边停靠放大查看\n· 图片/PDF/Office 直接预览'],
-  ['panel-changes', '审查', '· 按 AI 回合查看改了哪些文件\n· 逐个文件看改动 diff\n· 可按回合回滚改动'],
-  ['panel-monitor', '监控', '· 实时看子代理(Task)状态树\n· 后台代理:一句话派发、查看、停止\n· 可逐个停止'],
-  ['panel-agents', 'Agent', '· 增删改 ~/.claude/agents 的子代理定义\n· 一键安装内置预设(explorer/oracle/fixer 等)'],
-  ['panel-usage', '用量', '· 按模型/项目/日期看 token 与费用\n· 总量、缓存命中率\n· 一键生成使用报告、导出 CSV'],
-  ['panel-processes', '进程', '· 查看正在运行的 claude 子进程\n· 逐个停止'],
-  ['panel-mcp', '工具', '· 增删 MCP 服务器、测连通性\n· 安装插件(未装的推荐项收进「添加」)'],
-  ['panel-skills', '技能', '· 查看本机已装 skill\n· 一键导入 Anthropic 官方与社区 skill 市场'],
-  ['panel-memory', '指令', '· 编辑全局/项目/本地三级 CLAUDE.md\n· 查看/编辑 AI 的自动记忆'],
-  ['panel-settings', '设置', '· 环境检查(node / claude / python)\n· Provider 切换与密钥、端口、局域网开关\n· 更新检查、存储清理、彻底清理项目状态\n· 对话区背景(纯色 / 图片 / 视频 + 遮罩)\n· 缓存优化开关、自动压缩窗口\n· 环境变量、Hooks'],
+  ['panel-files', '文件', '浏览当前项目的文件树,点开任意文件预览。\n· 图片 / PDF / Word / Excel / PPT / 文本都能直接看\n· html / svg / mermaid 可内联渲染,也可侧边停靠放大\n· 不改文件,纯查看'],
+  ['panel-changes', '审查', '按 AI 的每个回合查看它改动了哪些文件。\n· 列出每回合新增/修改/删除的文件\n· 逐个文件看具体改动 diff(增删了哪些行)\n· 可回滚到某个回合改动之前的状态'],
+  ['panel-monitor', '监控', '看 AI 派出去的代理在干什么。\n· 上半:子代理(Task)实时状态树,每个在跑什么、可逐个停止\n· 下半「后台代理」:一句话派一个无人值守的后台任务,查看它在等什么/进度/结果,一键停止(走官方 claude stop,只停目标不连坐)'],
+  ['panel-agents', 'Agent', '管理自定义子代理(存在 ~/.claude/agents 的 .md,定义名称/模型/可用工具/系统提示词)。\n· 新建 / 编辑 / 删除子代理\n· 一键安装内置预设:explorer(探索)、oracle(架构顾问)、orchestrator(编排)、designer、fixer 等'],
+  ['panel-usage', '用量', '统计 token 消耗与费用。\n· 按模型 / 项目 / 日期分组\n· 显示总 token、缓存命中 token、命中率\n· 一键生成官方 /insights 使用报告(内联预览)\n· 导出 CSV;官方订阅额度(非第三方)也在这看'],
+  ['panel-processes', '进程', '查看并管理正在运行的 claude 子进程。\n· 列出每个进程的 PID / 所属会话 / 已运行时长 / 模型\n· 可逐个停止(按进程精准杀,不误伤其它)'],
+  ['panel-mcp', '工具', '管理 MCP 服务器和插件。\n· 增删 MCP 服务器(stdio / SSE / Streamable HTTP)、测连通性\n· 选快速模板自动回填常用 MCP 字段\n· 插件:已装的列表展示,官方推荐但未装的收进「添加」按钮弹层一键安装'],
+  ['panel-skills', '技能', '管理本机技能(skill)。\n· 查看 ~/.claude/skills 下已装的 skill\n· 一键从 Anthropic 官方及社区(vercel / hermes / garden 等)skill 市场导入'],
+  ['panel-memory', '指令', '三个标签页:\n· 指令(CLAUDE.md):编辑 全局 / 项目 / 项目·私人 / 组织 四级指令(项目级随 git 与团队共享,项目·私人只留本机不提交)\n· 自动记忆:查看/编辑 AI 自己写的跨会话记忆\n· 提示词库:780 条内置预设,按 33 个分类折叠浏览 + 搜索,一键复制到输入框或 CLAUDE.md'],
+  ['panel-settings', '设置', '多个标签页:\n· 概览:检查/安装更新、缓存优化开关、自动压缩窗口(token)、对话区背景(纯色/图片/视频 + 遮罩不透明度)\n· 环境:检查 node / claude / python 是否就绪,缺失可装\n· Hooks:配置钩子脚本\n· 原始配置:直接编辑 settings.json\n· 存储:清理缓存、彻底清理某项目的全部 Claude 状态\n· 网络:开局域网访问后配合内网穿透(如 Tailscale),手机浏览器可访问整个 GUI —— 与顶栏「远程」不同,那个是手机 App 只接管单条会话'],
 ];
 
 function buildSteps(hasProject) {
@@ -24,29 +24,27 @@ function buildSteps(hasProject) {
   ];
   if (hasProject) {
     steps.push(
-      ['sidebar-list', '会话列表', '当前项目下的所有会话,点任一条进入。上方可切「活跃 / 已归档」。'],
-      ['new-session', '新建会话', '在当前项目下开新会话(也可按 Cmd/Ctrl+N)。'],
-      ['new-worktree', 'worktree 隔离会话', '在新的 git worktree 里开会话,改动与主工作区隔离。'],
+      ['sidebar-list', '会话列表', '当前项目下的所有会话,点任一条进入。\n· 顶部切「活跃 / 已归档」、搜索会话标题\n· 每条会话可 pin 置顶、归档、删除、分叉(fork 出一条新线)\n· 点标题即可重命名'],
+      ['new-session', '新建会话', '在当前项目下开一个新会话(也可按 Cmd/Ctrl+N)。\n· 自动继承上一个会话的模型 / 推理力度 / 子代理模式,免得每次重选'],
+      ['new-worktree', 'worktree 隔离会话', '在新建的 git worktree 里开会话,改动与主工作区隔离 —— 适合让 AI 大改代码而不污染当前分支。\n· 可选已有 worktree,或填名字新建'],
     );
   } else {
     steps.push(
-      ['sidebar-list', '项目文件夹列表', '你的项目文件夹。点任一项进入该项目的会话列表。'],
-      ['add-project', '添加项目文件夹', '把一个本地文件夹加进来作为新项目。'],
+      ['sidebar-list', '项目文件夹列表', '你添加的所有项目文件夹,点任一项进入其会话列表。\n· 每项可 pin 置顶、隐藏、彻底清理该项目的 Claude 状态\n· 顶部可搜索项目 / 会话'],
+      ['add-project', '添加项目文件夹', '把一个本地文件夹加进来作为新项目。\n· 点这里弹系统文件夹选择器,或手动粘贴绝对路径'],
     );
   }
   steps.push(
-    ['provider-switcher', '切换 Provider', '在官方 Anthropic 与第三方中转(DeepSeek/MiMo 等)间一键切换。'],
-    ['model-selector', '模型', '选当前会话使用的模型。'],
-    ['effort-selector', '推理力度', '调思考强度(低→高),越高越细但越慢/越贵。'],
-    ['permission-selector', '权限模式', '默认 / 接受编辑 / 规划 / 放行,控制工具调用是否需你确认。'],
-    ['agent-selector', '子代理模式', '让主控把任务派给子代理执行。'],
-    ['remote-control', '手机远程控制', '用手机 Claude App 同账号接管此会话(需登录、非三方 provider)。'],
-    ['pane-count', '分屏', '把界面分成 1–6 格,并排看多个会话。'],
+    ['provider-switcher', '切换 Provider', '在官方 Anthropic 与第三方中转之间一键切换。\n· 点「添加」选内置预设:官方 OpenAI / Anthropic / Google Gemini、DeepSeek、Kimi、通义千问、豆包、智谱 GLM 等\n· 填 API key,点「获取模型」拉取该渠道可用模型即可用\n· 支持 openai 兼容与 anthropic 兼容两种协议(Gemini 走官方 OpenAI 兼容端点)'],
+    ['model-selector', '模型', '选当前会话使用的具体模型。\n· 分屏时每个窗格可各自独立选\n· 切到第三方 provider 会显示它自己的模型列表'],
+    ['effort-selector', '推理力度', '调 AI 的思考强度:低 / 中 / 高 / 最高。\n· 越高思考越深入、结果越细致,但越慢、越费 token\n· 官方模型区别明显,部分第三方可能无效'],
+    ['permission-selector', '权限模式', '控制 AI 调用工具时是否需要你逐个确认:\n· 默认:每个工具调用都弹卡片让你批准\n· 接受编辑:自动批准文件编辑,其它工具仍问\n· 规划:只读不改,先给出计划让你确认\n· 放行:全自动执行、完全不问(慎用)'],
+    ['agent-selector', '子代理模式', '让主控 AI 把任务拆给子代理并行执行。\n· 可选普通模式或 orchestrator(编排)模式\n· 子代理跑完结果汇总回主对话;进度在「监控」面板看'],
+    ['remote-control', '手机远程控制', '用手机上的 Claude App 同账号接管当前这一条会话继续对话。\n· 需已登录官方账号、且当前非第三方 provider\n· 与「设置·网络 + Tailscale」不同:那个是手机浏览器访问整个 GUI 界面,这个只接管单条会话'],
+    ['pane-count', '分屏', '把界面分成 1–6 个窗格,并排同时看和操作多个会话。\n· 每个窗格的模型 / 权限模式相互独立'],
     ...PANEL_STEPS,
-    // 主题按钮在顶栏排在设置(PANEL_STEPS 末项)之后,导引顺序对齐实际排版。
-    // 注:对话区背景在「设置」里,不在此弹窗。
-    ['theme-toggle', '主题与外观', '· 配色主题(多套深浅色)\n· 界面与正文字号\n· AI 思考时的加载动画样式'],
-    ['composer', '输入框', 'Cmd/Ctrl+Enter 发送、Enter 换行;输入 / 打开命令;可拖入图片/PDF;Cmd/Ctrl+Z 撤销输入。'],
+    ['theme-toggle', '主题与外观', '外观相关设置:\n· 配色主题(多套深浅色可选)\n· 界面字号、对话正文字号\n· AI 思考时的加载动画样式(30 种可选)'],
+    ['composer', '输入框', '· Cmd/Ctrl+Enter 发送、Enter 换行\n· 输入 / 打开命令面板(含 /branch 分叉、/goal 目标、插件命令等)\n· 可【拖入】图片 / PDF / Word / Excel / PPT 等文件\n· Cmd/Ctrl+Z 撤销输入\n· AI 回复中再输入会入队;输入框为空时按 ↑ 键召回最近入队的消息'],
   );
   return steps.map(([sel, title, desc]) => ({ sel, title, desc }));
 }
