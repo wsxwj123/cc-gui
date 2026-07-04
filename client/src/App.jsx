@@ -1053,7 +1053,7 @@ function ProjectList() {
   };
 
   return (
-    <div className="flex flex-col h-full">
+    <div data-tour="sidebar-list" className="flex flex-col h-full">
       <div className="px-4 pt-4 pb-3">
         <div className="flex items-center justify-between mb-3">
           <h2 className="text-[11px] font-medium uppercase tracking-widest text-ink-faint font-body">
@@ -1111,7 +1111,7 @@ function ProjectList() {
           />
         </div>
       </div>
-      <div data-tour="sidebar-list" className="flex-1 overflow-y-auto px-2 stagger">
+      <div className="flex-1 overflow-y-auto px-2 stagger">
         {searchQuery.length >= 2 && (
           <GlobalSearchResults q={searchQuery} onPick={handlePickHit} />
         )}
@@ -1707,7 +1707,7 @@ function SessionList() {
   };
 
   return (
-    <div className="flex flex-col h-full">
+    <div data-tour="sidebar-list" className="flex flex-col h-full">
       <div className="px-4 pt-4 pb-3 border-b border-canvas-deep">
         <div className="flex items-center gap-2 mb-1 flex-wrap">
           <button onClick={() => useStore.getState().setSelectedProject(null)} className="p-0.5 hover:bg-canvas-deep rounded transition-colors shrink-0">
@@ -1769,7 +1769,7 @@ function SessionList() {
           >已归档 <span className="font-mono opacity-70">{archivedCount}</span></button>
         </div>
       </div>
-      <div data-tour="sidebar-list" className="flex-1 overflow-y-auto px-2 stagger">
+      <div className="flex-1 overflow-y-auto px-2 stagger">
         {visible.map((session) => (
           <SessionItem
             key={session.sessionId}

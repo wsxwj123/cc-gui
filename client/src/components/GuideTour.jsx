@@ -6,7 +6,7 @@ import { X, ArrowRight, ArrowLeft } from 'lucide-react';
 
 // 顶栏功能面板按钮(与 PANEL_MAP 同序)。逐个圈。
 const PANEL_STEPS = [
-  ['panel-files', '文件', '浏览当前项目的文件树,点开任意文件预览。\n· 图片 / PDF / Word / Excel / PPT / 文本都能直接看\n· html / svg / mermaid 可内联渲染,也可侧边停靠放大\n· 不改文件,纯查看'],
+  ['panel-files', '文件', '浏览当前项目的文件树,点开任意文件查看或编辑。\n· 图片 / PDF / Word / Excel / PPT / 文本都能直接看\n· html / svg / mermaid 可内联渲染,也可侧边停靠放大\n· 文本类文件可直接编辑并保存(带撤销/重做)'],
   ['panel-changes', '审查', '按 AI 的每个回合查看它改动了哪些文件。\n· 列出每回合新增/修改/删除的文件\n· 逐个文件看具体改动 diff(增删了哪些行)\n· 可回滚到某个回合改动之前的状态'],
   ['panel-monitor', '监控', '看 AI 派出去的代理在干什么。\n· 上半:子代理(Task)实时状态树,每个在跑什么、可逐个停止\n· 下半「后台代理」:一句话派一个无人值守的后台任务,查看它在等什么/进度/结果,一键停止(走官方 claude stop,只停目标不连坐)'],
   ['panel-agents', 'Agent', '管理自定义子代理(存在 ~/.claude/agents 的 .md,定义名称/模型/可用工具/系统提示词)。\n· 新建 / 编辑 / 删除子代理\n· 一键安装内置预设:explorer(探索)、oracle(架构顾问)、orchestrator(编排)、designer、fixer 等'],
@@ -39,7 +39,7 @@ function buildSteps(hasProject) {
     ['model-selector', '模型', '选当前会话使用的具体模型。\n· 分屏时每个窗格可各自独立选\n· 切到第三方 provider 会显示它自己的模型列表'],
     ['effort-selector', '推理力度', '调 AI 的思考强度:低 / 中 / 高 / 最高。\n· 越高思考越深入、结果越细致,但越慢、越费 token\n· 官方模型区别明显,部分第三方可能无效'],
     ['permission-selector', '权限模式', '控制 AI 调用工具时是否需要你逐个确认:\n· 默认:每个工具调用都弹卡片让你批准\n· 接受编辑:自动批准文件编辑,其它工具仍问\n· 规划:只读不改,先给出计划让你确认\n· 放行:全自动执行、完全不问(慎用)'],
-    ['agent-selector', '子代理模式', '让主控 AI 把任务拆给子代理并行执行。\n· 可选普通模式或 orchestrator(编排)模式\n· 子代理跑完结果汇总回主对话;进度在「监控」面板看'],
+    ['agent-selector', '子代理模式', '选一个已安装的子代理作会话主控,它可经 Task 把任务委派给其它子代理并行执行。\n· 默认只有「普通模式」;orchestrator(编排)、explorer、oracle、designer、fixer 等预设需先在「Agent」面板点安装,才会出现在这里可选\n· 子代理跑完结果汇总回主对话;进度在「监控」面板看'],
     ['remote-control', '手机远程控制', '用手机上的 Claude App 同账号接管当前这一条会话继续对话。\n· 需已登录官方账号、且当前非第三方 provider\n· 与「设置·网络 + Tailscale」不同:那个是手机浏览器访问整个 GUI 界面,这个只接管单条会话'],
     ['pane-count', '分屏', '把界面分成 1–6 个窗格,并排同时看和操作多个会话。\n· 每个窗格的模型 / 权限模式相互独立'],
     ...PANEL_STEPS,
