@@ -504,9 +504,9 @@ function TurnBubbleInner({ turn, onRetry, onRetryTool, onFork, retryActive }) {
             <CopyButton text={fullText} />
             {onFork && (
               <button
-                onClick={onFork}
+                onClick={() => onFork(turn.uuid)}
                 className="flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] text-ink-faint hover:text-accent hover:bg-canvas-warm transition-colors"
-                title="从当前会话分叉出一条新线(全上下文复制到新会话,原会话不动)"
+                title="从这条回复分叉出一条新线(只保留到此为止的上下文,丢弃其后对话,原会话不动)"
               >
                 <GitBranch size={11} />
                 <span className="hidden md:inline">分叉</span>

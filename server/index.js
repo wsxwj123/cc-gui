@@ -441,7 +441,7 @@ const BUILTIN_COMMANDS = [
   { name: '/btw',             desc: '旁问一个问题（参数：<question>），不打断当前工作、不写入会话历史', type: 'builtin' },
 
   // -p 模式 CLI 拒绝（交互式专属）
-  { name: '/branch',         desc: '从当前对话分叉出一条新线，在不影响原会话的前提下试另一种方向（fork）', type: 'builtin', interactiveOnly: true, note: 'GUI 从指定回合分叉的可视化入口开发中；当前经终端会话可用' },
+  { name: '/branch',         desc: '从当前对话分叉出一条新线，在不影响原会话的前提下试另一种方向（fork）', type: 'builtin', interactiveOnly: true, note: 'GUI 已原生实现：每条消息/回复的「分叉」按钮从该处精确分叉（只保留到此的上下文），在最后一条分叉等价于整会话' },
   { name: '/rewind',         desc: '回退会话/代码',   type: 'builtin', interactiveOnly: true, note: 'GUI 用消息上的回滚/checkpoint 菜单实现' },
   { name: '/rename',         desc: '重命名会话',     type: 'builtin', interactiveOnly: true, note: 'GUI 直接点会话标题即可编辑' },
   { name: '/bashes',         desc: '后台 shell 列表', type: 'builtin', interactiveOnly: true, note: 'GUI 进程面板已原生展示' },

@@ -319,7 +319,7 @@ export function MessageBubble({ message, onRollback, onFork }) {
             <div className="flex items-center gap-2 mb-1.5">
               {onRollback && <RollbackMenu message={message} onAction={(a) => onRollback(message, a)} />}
               {onFork && (
-                <button onClick={onFork} title="从当前会话分叉出一条新线(全上下文复制到新会话,原会话不动)"
+                <button onClick={() => onFork(message.uuid)} title="从这条消息分叉出一条新线(只保留到此为止的上下文,丢弃其后对话,原会话不动)"
                   className="flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] text-ink-faint hover:text-accent hover:bg-canvas-warm transition-colors">
                   <GitBranch size={11} /><span className="hidden md:inline">分叉</span>
                 </button>

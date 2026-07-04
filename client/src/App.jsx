@@ -4643,16 +4643,19 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   useEffect(() => { handleRetryToolRef.current = handleRetryTool; }, [handleRetryTool]);
   const stableRetryTurn = useCallback((turn) => handleRetryTurnRef.current?.(turn), []);
 
-  // /branch 分叉:从当前会话 fork 出一条新线(全上下文复制到新 sid,原会话不动),
-  // 打开到本窗格。每条消息末尾的「分叉」按钮都调它(fork 的是整个会话,非单条消息)。
-  const forkCurrentSession = useCallback(async () => {
+  // /branch 分叉:从当前会话 fork 出一条新线,打开到本窗格,原会话不动。
+  // 传 upToUuid(某条消息的 jsonl uuid)则【精确分叉】——新会话只保留到该消息所在回合
+  // 为止的上下文,丢弃其后的对话,便于从中途换个方向重试。不传则整会话复制(在最后一条
+  // 分叉即等价)。live/流式气泡的 uuid(streaming / chat-*)不在 jsonl 里,一律当整会话分叉。
+  const forkCurrentSession = useCallback(async (upToUuid) => {
     const st = useStore.getState();
     const sess = st.paneSessions?.[tabIndex];
     if (!sess?.sessionId) { await confirmDialog('草稿会话尚未开始,无法分叉'); return; }
+    const anchor = (typeof upToUuid === 'string' && !upToUuid.startsWith('chat-') && upToUuid !== 'streaming') ? upToUuid : null;
     try {
       const res = await fetch('/api/fork', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sessionId: sess.sessionId, projectHash: sess.projectHash }),
+        body: JSON.stringify({ sessionId: sess.sessionId, projectHash: sess.projectHash, ...(anchor ? { upToUuid: anchor } : {}) }),
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok || !data.newSessionId) { await confirmDialog('分叉失败：' + (data.error || res.status)); return; }
@@ -4794,7 +4797,13 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   const _usageSum = effectiveUsage
     ? (effectiveUsage.input_tokens || 0) + (effectiveUsage.cache_read_input_tokens || 0) + (effectiveUsage.cache_creation_input_tokens || 0)
     : 0;
-  const _usageSane = _usageSum > 0 && _usageSum <= contextWindow * 1.05;
+  // Z1:官方端点单次调用物理上装不下超过名义窗口 → 超窗即累加错误,严守 1.05 天花板回退。
+  // 第三方中转(providerHint≠anthropic)把模型名透传成 claude-* 但真实窗口更大(实测名义
+  // 200k 可收 386k+),单次 ctxUsage 超名义窗口是【真·超窗】非 bug → 放宽到 ~1.2M 绝对上限
+  // (覆盖所有真实窗口,仍挡得住整轮累加的爆表值),让徽章诚实显示 193% 而非回退到旧值。
+  const _isThirdParty = !!(currentProvider?.providerHint && currentProvider.providerHint !== 'anthropic');
+  const _saneCeil = _isThirdParty ? Math.max(contextWindow, 1_200_000) : contextWindow * 1.05;
+  const _usageSane = _usageSum > 0 && _usageSum <= _saneCeil;
   const contextTokens = measuredFresh
     ? measuredCtx.totalTokens
     : (_usageSane

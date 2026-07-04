@@ -68,28 +68,8 @@ export function GuideTour({ open, onClose, hasProject }) {
   const [pos, setPos] = useState(null);     // 说明卡定位 {top,left},经实测夹取后才显
   const overlayRef = useRef(null);
   const tipRef = useRef(null);
-  const [allBoxes, setAllBoxes] = useState([]); // 所有按钮位置,给悬停层用
-
-  // 测量所有 data-tour 元素位置(给悬停层)。悬停某按钮 → setI 跳到它 → 复用下面
-  // 已验证稳定的 measure+pos 定位逻辑高亮它并显示注解,不另造定位(避免又错位)。
-  useLayoutEffect(() => {
-    if (!open) { setAllBoxes([]); return; }
-    const measure = () => {
-      const zoom = parseFloat(document.documentElement.style.zoom) || 1;
-      const out = [];
-      steps.forEach((s, idx) => {
-        const el = document.querySelector(`[data-tour="${s.sel}"]`);
-        if (!el) return;
-        const r = el.getBoundingClientRect();
-        if (r.width <= 0 || r.height <= 0) return;
-        out.push({ idx, box: { top: r.top / zoom, left: r.left / zoom, width: r.width / zoom, height: r.height / zoom } });
-      });
-      setAllBoxes(out);
-    };
-    measure();
-    window.addEventListener('resize', measure);
-    return () => window.removeEventListener('resize', measure);
-  }, [open, steps]);
+  // 问号导引 = 纯逐步(下一步/上一步),高亮【不随鼠标动】。任意状态的悬停注解由
+  // 独立的 GlobalTooltip 负责,两者分工:导引=逐步引导,悬停=随手查单个按钮。
 
   // 开:回到第 1 步(rect 由下面的定位 effect 设)。关:清残留 rect/pos —— 否则下次重开
   // 的首帧会用到上一轮的旧 i/rect,而 steps 长度随 hasProject 变(有项目 22 步 / 无项目 21 步),
@@ -151,13 +131,6 @@ export function GuideTour({ open, onClose, hasProject }) {
         className="ring-2 ring-accent pointer-events-none" />
       {/* 点暗区跳过 */}
       <div className="absolute inset-0" onClick={onClose} />
-      {/* 悬停层:盖在每个按钮上,悬停即跳到该步(setI)→ 高亮它并显示注解 */}
-      {allBoxes.map((a) => (
-        <div key={a.idx}
-          onMouseEnter={() => setI(a.idx)}
-          style={{ position: 'fixed', top: a.box.top - 4, left: a.box.left - 4, width: a.box.width + 8, height: a.box.height + 8, zIndex: 2 }}
-          className="pointer-events-auto cursor-help" />
-      ))}
       {/* 说明卡 */}
       <div ref={tipRef} style={{ position: 'fixed', width: TIP_W, top: pos?.top ?? 0, left: pos?.left ?? 0, visibility: pos ? 'visible' : 'hidden', zIndex: 5 }}
         className="bg-canvas border border-canvas-deep rounded-xl shadow-2xl p-4 animate-glass-rise">

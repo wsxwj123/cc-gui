@@ -1036,6 +1036,38 @@ function AutoCompactWindowSelect({ settings, onSave, saving }) {
   );
 }
 
+// 轻量快速模型(env.ANTHROPIC_SMALL_FAST_MODEL):CLI 用它跑非核心小任务 —— 生成会话
+// 标题、后台压缩摘要等。默认与主模型同族的小号(如 haiku),设成更便宜/更快的模型可省钱提速,
+// 不影响正式对话质量。置空 = 交回 CLI 默认。写法同 EnvEditor:整块替换 env,空值删除该键。
+function SmallFastModelInput({ env, onSave, saving }) {
+  const current = env?.ANTHROPIC_SMALL_FAST_MODEL || '';
+  const [draft, setDraft] = useState(current);
+  useEffect(() => { setDraft(current); }, [current]);
+  const commit = () => {
+    const v = draft.trim();
+    if (v === current) return;
+    const next = { ...env };
+    if (v) next.ANTHROPIC_SMALL_FAST_MODEL = v; else delete next.ANTHROPIC_SMALL_FAST_MODEL;
+    onSave?.({ env: next });
+  };
+  return (
+    <div className="bg-canvas-warm border border-canvas-deep rounded-lg px-3 py-2.5 flex items-center gap-3">
+      <div className="min-w-0 flex-1">
+        <div className="text-xs text-ink font-body font-medium">轻量快速模型</div>
+        <div className="text-[10.5px] text-ink-faint font-body">CLI 用它跑非核心小任务(生成会话标题、后台压缩摘要等),不影响正式对话。设成更便宜或更快的模型可省钱提速。置空恢复 CLI 默认。第三方 provider 需填该中转支持的模型 id。</div>
+      </div>
+      <input
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={commit}
+        onKeyDown={(e) => { if (e.key === 'Enter') e.currentTarget.blur(); }}
+        disabled={saving}
+        placeholder="默认"
+        className="shrink-0 w-44 text-[11px] font-mono bg-canvas-base border border-canvas-deep rounded px-2 py-1 text-ink focus:border-accent outline-none" />
+    </div>
+  );
+}
+
 // 对话区背景设置(③):纯色 / 本地图片 / 本地视频,附遮罩不透明度滑杆。
 // 状态存 store.chatBackground(localStorage 全局持久化);文件经 POST /api/backgrounds
 // 上传到 ~/.claude-gui/backgrounds/,客户端只持有服务端生成的文件名。
@@ -1146,13 +1178,11 @@ function ChatBackgroundCard() {
 
 function OverviewTab({ settings, onSave, saving }) {
   const [showEnv, setShowEnv] = useState(false);
-  const [showHooks, setShowHooks] = useState(false);
 
   const env = settings?.env || {};
   const envKeys = Object.keys(env);
-  const hooks = settings?.hooks || {};
-  const hookEvents = Object.keys(hooks);
-  const hookTotal = Object.values(hooks).reduce((n, arr) => n + (Array.isArray(arr) ? arr.length : 0), 0);
+  // hooks 的查看/编辑在独立的 Hooks 标签页,概览不再重复展示;这里只用事件数判断概览是否为空。
+  const hookEvents = Object.keys(settings?.hooks || {});
 
   const rows = [];
   if (settings?.defaultModel || settings?.model) rows.push(['默认模型', settings.defaultModel || settings.model]);
@@ -1169,6 +1199,7 @@ function OverviewTab({ settings, onSave, saving }) {
       <CloseBehaviorPicker />
       <ExcludeDynamicPromptToggle />
       <AutoCompactWindowSelect settings={settings} onSave={onSave} saving={saving} />
+      <SmallFastModelInput env={env} onSave={onSave} saving={saving} />
       <ChatBackgroundCard />
       {rows.length > 0 && (
         <div className="bg-canvas-warm border border-canvas-deep rounded-lg divide-y divide-canvas-deep">
@@ -1191,35 +1222,6 @@ function OverviewTab({ settings, onSave, saving }) {
         </button>
         {showEnv && <EnvEditor env={env} onSave={onSave} saving={saving} />}
       </div>
-
-      {/* Hooks — 默认折叠,展开显示每个事件下的命令(只读概览,编辑见 Hooks 标签页) */}
-      {hookEvents.length > 0 && (
-        <div className="border border-canvas-deep rounded-lg overflow-hidden">
-          <button onClick={() => setShowHooks((v) => !v)}
-            className="w-full flex items-center gap-2 px-3 py-2.5 hover:bg-canvas-warm/60 text-left">
-            {showHooks ? <ChevronDown size={12} className="text-ink-faint" /> : <ChevronRight size={12} className="text-ink-faint" />}
-            <span className="text-xs text-ink-muted font-body flex-1">Hooks</span>
-            <span className="text-xs text-ink-soft font-mono">{hookEvents.length} 事件 · {hookTotal} 条</span>
-          </button>
-          {showHooks && (
-            <div className="border-t border-canvas-deep divide-y divide-canvas-deep/60">
-              {hookEvents.map((ev) => (
-                <div key={ev} className="px-3 py-2 space-y-1">
-                  <div className="text-[11px] font-mono text-ink-soft">{ev}</div>
-                  {(hooks[ev] || []).flatMap((g, gi) =>
-                    (g.hooks || []).map((h, hi) => (
-                      <div key={`${gi}-${hi}`} className="text-[10.5px] font-mono text-ink-faint pl-3 break-all">
-                        • {h.command || h.type || JSON.stringify(h)}
-                        {g.matcher ? <span className="text-ink-ghost">  (matcher: {g.matcher})</span> : null}
-                      </div>
-                    ))
-                  )}
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-      )}
 
       {isEmpty && <p className="text-xs text-ink-faint font-body py-4 text-center">settings.json 为空</p>}
     </div>
