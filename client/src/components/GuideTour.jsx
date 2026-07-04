@@ -93,8 +93,12 @@ export function GuideTour({ open, onClose, hasProject }) {
 
   return (
     <div className="fixed inset-0 z-[400]">
-      {/* spotlight:暗遮罩 + 挖空所有按钮(露出真实按钮 → 亮起)。点空白关闭。 */}
-      <svg width={vw} height={vh} style={{ position: 'fixed', top: 0, left: 0 }} onClick={onClose}>
+      {/* 底层:点空白关闭。必须单独一层——spotlight 的 SVG 若带 onClick 会以全屏
+          pointer-events 盖住按钮上的悬停捕获层,导致 mouseenter 永不触发、悬停无注解
+          (用户实报)。故 SVG 设 pointer-events:none 纯视觉,关闭交给这个底层。 */}
+      <div className="absolute inset-0" onClick={onClose} />
+      {/* spotlight:暗遮罩 + 挖空所有按钮(露出真实按钮 → 亮起)。纯视觉,不挡鼠标。 */}
+      <svg width={vw} height={vh} style={{ position: 'fixed', top: 0, left: 0, pointerEvents: 'none' }}>
         <defs>
           <mask id="cgui-spotlight">
             <rect x="0" y="0" width={vw} height={vh} fill="white" />
