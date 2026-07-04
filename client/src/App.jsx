@@ -5050,16 +5050,15 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                   push 空 block→占位符消失但内容又没来→空白无动画(回归)。改用 .some
                   判断真正有内容的 block,和上面的回复气泡严格互斥,不再跳位也不再空白。*/}
               {liveVisible && isStreaming && !streamingText && !streamingThinking && streamingToolCalls.length === 0 && !streamingBlocks.some((b) => (b?.content?.length > 0) || b?.toolCall) && (
-                // 头像位在「等待首字」阶段显示用户在主题里选的加载动画(LoadingMark),
-                // 让"加载动画样式"的选择真正生效;有内容后 TurnBubble 接棒、完成后是
-                // 静态官方 logo。加载动画→内容气泡用 animate-fade-in 淡入过渡,不生硬。
+                // 头像位统一用官方 Claude logo(ProviderAvatar,与完成后气泡头像同一视觉物),
+                // 加载时 thinking 呼吸、完成静止 —— 一致不割裂(用户明确"用左上角 logo 做头像")。
+                // 主题里选的加载动画作为状态行的小指示器(下面 Connecting 前),选择仍可见。
                 <div className="px-6 py-4 animate-fade-in">
-                  <div className="max-w-[var(--content-max)] mx-auto flex gap-4">
-                    <div className="mt-0.5 w-[34px] h-[34px] flex items-center justify-center text-accent">
-                      <LoadingMark size={30} />
-                    </div>
+                  <div className="max-w-[var(--content-max)] mx-auto flex items-start gap-4">
+                    <ProviderAvatar model={streamingModel} size={34} thinking />
                     <div className="flex-1 min-w-0">
-                      <div className="flex items-center gap-2.5 min-h-[34px] text-[13px] font-body" style={{ color: '#D97757' }}>
+                      <div className="flex items-center gap-2 min-h-[34px] text-[13px] font-body" style={{ color: '#D97757' }}>
+                        <LoadingMark size={15} />
                         <span className="font-mono font-medium">{compacting ? 'Compacting' : 'Connecting'}</span>
                         <span>…</span>
                         <ElapsedTime startedAt={streamStartRef.current} className="ml-1" />

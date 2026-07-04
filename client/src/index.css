@@ -1469,8 +1469,7 @@ html { --content-max: clamp(768px, calc(var(--app-w, 100vw) * 0.7), 1120px); }
   font-weight: 500;
   letter-spacing: 0.005em;
   color: var(--color-ink);
-  /* 衬线基线偏低,微调与星芒的光学居中 */
-  transform: translateY(-1px);
+  line-height: 1;
 }
 
 @keyframes cgui-brand-breath {

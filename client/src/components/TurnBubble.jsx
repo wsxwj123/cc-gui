@@ -474,16 +474,16 @@ function TurnBubbleInner({ turn, onRetry, onRetryTool, retryActive }) {
     // 三次换 key → React 反复卸载重挂 TurnBubble。若固化后的 turn 仍带 animate-fade-up,
     // 每次重挂都会重放淡入 → 用户看到"回复完成后闪烁一下再显示"。固化 turn 去掉动画即可。
     <div className={`group px-6 py-4 ${isLiveStream ? 'animate-fade-up' : ''}`} style={isLiveStream ? { animationDuration: '0.25s' } : undefined}>
-      <div className="max-w-[var(--content-max)] mx-auto flex gap-4">
-        {/* Avatar — tinted by the actual provider behind the model */}
-        <div className="mt-0.5">
-          <ProviderAvatar model={turn.model} size={34} thinking={isLiveStream} />
-        </div>
+      <div className="max-w-[var(--content-max)] mx-auto flex items-start gap-4">
+        {/* Avatar — tinted by the actual provider behind the model.
+            无 mt + 标题行 min-h-[34px] items-center → 头像与「Claude …」标题行等高、
+            垂直中线对齐(与流式 Connecting 头像位一致),不再偏下(用户报图4错位)。 */}
+        <ProviderAvatar model={turn.model} size={34} thinking={isLiveStream} />
 
         {/* Content */}
         <div className="flex-1 min-w-0">
           {/* Header */}
-          <div className="flex items-center gap-2 mb-1.5">
+          <div className="flex items-center gap-2 mb-1.5 min-h-[34px]">
             <span className="text-[13px] font-medium text-ink font-body">Claude</span>
             {turn.model && <ModelBadge model={turn.model} compact />}
             <span className="text-[11px] text-ink-faint font-mono">{formatTime(turn.timestamp)}</span>

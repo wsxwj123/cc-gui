@@ -162,6 +162,14 @@ function BackgroundAgentsSection({ stoppingPid, onStop }) {
                 <span className="text-[11px] text-ink font-body truncate flex-1" title={a.name}>{a.name || `bg #${a.pid}`}</span>
                 {a.state && <StatusBadge status={a.state} />}
                 <span className="text-[10px] text-ink-faint font-mono shrink-0">{fmtElapsed(a.elapsedMs)}</span>
+                {/* 运行中(含 blocked=等待授权/额度)也能直接查看会话,不必先停止 —— 修用户报
+                    "受阻状态点停止后才能查看结果" */}
+                {a.sessionId && a.projectHash && (
+                  <button onClick={() => openBgAgentSession(a)} title="查看该代理会话(看它在等什么/进度)"
+                    className="shrink-0 flex items-center gap-1 text-[10px] px-2 py-1 rounded bg-canvas hover:bg-canvas-deep text-ink-soft border border-canvas-deep transition-colors">
+                    <Maximize2 size={10} />查看
+                  </button>
+                )}
                 {(a.id || a.sessionId) && (
                   <button onClick={() => stopBg(a)} disabled={stoppingId === (a.id || a.sessionId)}
                     className="shrink-0 flex items-center gap-1 text-[10px] px-2 py-1 rounded bg-red-50 hover:bg-red-100 text-red-700 border border-red-200 transition-colors disabled:opacity-50">
