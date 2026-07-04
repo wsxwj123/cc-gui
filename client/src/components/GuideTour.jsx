@@ -1,9 +1,10 @@
-// 使用指引(逐步式,可靠):点问号后逐个高亮界面按钮 —— 用 box-shadow 把当前按钮周围
-// 压暗、按钮本身透出(spotlight),旁边直接显示它的注解(含二级菜单),下方「下一步/上一步」
-// 逐个浏览。zoom 直读 <html>.style.zoom 做坐标还原。左栏会话/项目列表动态裁剪说明。
-import { useMemo, useState, useEffect, useLayoutEffect } from 'react';
-import { X, ArrowLeft, ArrowRight } from 'lucide-react';
+// CK-3: 使用指引。逐个高亮界面功能按钮,下方浮出说明文字。
+// 目标元素通过 data-tour="<id>" 定位;找不到的步骤自动跳过(如分屏/远程在某些态不渲染)。
+// 左栏是会话列表还是项目列表 → 动态裁剪对应步骤(避免在项目列表讲会话、反之亦然)。
+import { useState, useEffect, useLayoutEffect, useMemo, useRef } from 'react';
+import { X, ArrowRight, ArrowLeft } from 'lucide-react';
 
+// 顶栏功能面板按钮(与 PANEL_MAP 同序)。逐个圈。
 const PANEL_STEPS = [
   ['panel-files', '文件', '· 浏览项目文件树、点开预览\n· html/svg 可侧边停靠放大查看\n· 图片/PDF/Office 直接预览'],
   ['panel-changes', '审查', '· 按 AI 回合查看改了哪些文件\n· 逐个文件看改动 diff\n· 可按回合回滚改动'],
@@ -13,8 +14,8 @@ const PANEL_STEPS = [
   ['panel-processes', '进程', '· 查看正在运行的 claude 子进程\n· 逐个停止'],
   ['panel-mcp', '工具', '· 增删 MCP 服务器、测连通性\n· 安装插件(未装的推荐项收进「添加」)'],
   ['panel-skills', '技能', '· 查看本机已装 skill\n· 一键导入 Anthropic 官方与社区 skill 市场'],
-  ['panel-memory', '指令', '· 指令(CLAUDE.md):编辑全局 / 项目 / 项目·私人 / 组织 四级指令\n· 自动记忆:查看/编辑 AI 自写的跨会话记忆\n· 提示词库:780 条内置预设,按 33 个分类折叠浏览+搜索,一键复制到输入框或 CLAUDE.md'],
-  ['panel-settings', '设置', '· 概览:更新检查、缓存优化开关、自动压缩窗口、对话区背景(纯色/图片/视频+遮罩)、输入预测\n· 环境:检查 node / claude / python 是否就绪\n· Hooks:钩子脚本\n· 原始配置:直接编辑 settings.json\n· 存储:清理缓存、彻底清理某项目的全部 Claude 状态\n· 网络:开启局域网访问后,配合内网穿透工具(如 Tailscale)可用手机浏览器打开本 GUI 远程操作 —— 这和顶栏「远程」按钮不同:「远程」是手机 Claude App 接管单条会话,「网络+Tailscale」是手机直接访问整个 GUI 界面'],
+  ['panel-memory', '指令', '· 编辑全局/项目/本地三级 CLAUDE.md\n· 查看/编辑 AI 的自动记忆'],
+  ['panel-settings', '设置', '· 环境检查(node / claude / python)\n· Provider 切换与密钥、端口、局域网开关\n· 更新检查、存储清理、彻底清理项目状态\n· 对话区背景(纯色 / 图片 / 视频 + 遮罩)\n· 缓存优化开关、自动压缩窗口\n· 环境变量、Hooks'],
 ];
 
 function buildSteps(hasProject) {
@@ -34,34 +35,43 @@ function buildSteps(hasProject) {
     );
   }
   steps.push(
-    ['provider-switcher', '切换 Provider', '在官方 Anthropic 与第三方中转(DeepSeek/MiMo/Gemini 等)间一键切换。添加时可选内置预设(官方 OpenAI / Anthropic / Gemini 等),填 key 即用。'],
+    ['provider-switcher', '切换 Provider', '在官方 Anthropic 与第三方中转(DeepSeek/MiMo 等)间一键切换。'],
     ['model-selector', '模型', '选当前会话使用的模型。'],
     ['effort-selector', '推理力度', '调思考强度(低→高),越高越细但越慢/越贵。'],
     ['permission-selector', '权限模式', '默认 / 接受编辑 / 规划 / 放行,控制工具调用是否需你确认。'],
     ['agent-selector', '子代理模式', '让主控把任务派给子代理执行。'],
-    ['remote-control', '手机远程控制', '用手机 Claude App 同账号接管此会话(需登录、非三方 provider)。与「设置·网络+Tailscale」不同:后者是手机直接访问整个 GUI 界面。'],
+    ['remote-control', '手机远程控制', '用手机 Claude App 同账号接管此会话(需登录、非三方 provider)。'],
     ['pane-count', '分屏', '把界面分成 1–6 格,并排看多个会话。'],
     ...PANEL_STEPS,
+    // 主题按钮在顶栏排在设置(PANEL_STEPS 末项)之后,导引顺序对齐实际排版。
+    // 注:对话区背景在「设置」里,不在此弹窗。
     ['theme-toggle', '主题与外观', '· 配色主题(多套深浅色)\n· 界面与正文字号\n· AI 思考时的加载动画样式'],
-    ['composer', '输入框', 'Cmd/Ctrl+Enter 发送、Enter 换行;输入 / 打开命令;可【拖入】图片/PDF/Word/Excel/PPT 等文件;Cmd/Ctrl+Z 撤销输入。'],
+    ['composer', '输入框', 'Cmd/Ctrl+Enter 发送、Enter 换行;输入 / 打开命令;可拖入图片/PDF;Cmd/Ctrl+Z 撤销输入。'],
   );
   return steps.map(([sel, title, desc]) => ({ sel, title, desc }));
 }
 
+const TIP_W = 300;
+
 export function GuideTour({ open, onClose, hasProject }) {
   const steps = useMemo(() => buildSteps(hasProject), [hasProject]);
   const [i, setI] = useState(0);
-  const [box, setBox] = useState(null);              // 当前步骤元素位置(逻辑 px)
-  const [dims, setDims] = useState({ vw: 1280, vh: 800 });
+  const [rect, setRect] = useState(null);
+  const [pos, setPos] = useState(null);     // 说明卡定位 {top,left},经实测夹取后才显
+  const overlayRef = useRef(null);
+  const tipRef = useRef(null);
 
-  // 打开时回到第 1 步;关闭清空(避免下次首帧用旧 i 越界)。
-  useEffect(() => { if (open) setI(0); else setBox(null); }, [open]);
+  // 开:回到第 1 步(rect 由下面的定位 effect 设)。关:清残留 rect/pos —— 否则下次重开
+  // 的首帧会用到上一轮的旧 i/rect,而 steps 长度随 hasProject 变(有项目 22 步 / 无项目 21 步),
+  // 旧 i 越界 → steps[i] 为 undefined → 渲染抛错整页白屏(用户报:返回初始界面再点指引白屏)。
+  useEffect(() => {
+    if (open) setI(0);
+    else { setRect(null); setPos(null); }
+  }, [open]);
 
-  // 定位当前步骤;找不到的步骤(某态不渲染)自动顺延,全找不到则结束。
+  // 定位当前步骤目标;找不到就顺延到下一个有效步骤,全部找不到则结束。
   useLayoutEffect(() => {
     if (!open) return;
-    const zoom = parseFloat(document.documentElement.style.zoom) || 1;
-    setDims({ vw: window.innerWidth / zoom, vh: window.innerHeight / zoom });
     let idx = i, el = null;
     while (idx < steps.length) {
       el = document.querySelector(`[data-tour="${steps[idx].sel}"]`);
@@ -71,55 +81,65 @@ export function GuideTour({ open, onClose, hasProject }) {
     if (!el) { onClose(); return; }
     if (idx !== i) { setI(idx); return; }
     el.scrollIntoView({ block: 'nearest' });
-    const update = () => {
-      const z = parseFloat(document.documentElement.style.zoom) || 1;
-      const r = el.getBoundingClientRect();
-      setBox({ top: r.top / z, left: r.left / z, width: r.width / z, height: r.height / z });
-    };
+    const update = () => setRect(el.getBoundingClientRect());
     update();
     window.addEventListener('resize', update);
     return () => window.removeEventListener('resize', update);
   }, [open, i, steps, onClose]);
 
-  if (!open || !box) return null;
-  const step = steps[i];
-  const { vw, vh } = dims;
-  const last = i === steps.length - 1;
+  // 说明卡定位。关键:<html> 有 font-scale `zoom`(如 1.2),getBoundingClientRect 返回
+  // 的是缩放后的实际像素,而写进 style 的 top/left 会被浏览器再 ×zoom 渲染 —— 直接拿
+  // rect 值当 style 用会二次放大、大坐标处溢出。所以:先在「实际像素」空间夹取(目标下方/
+  // 上方/贴边),最后把结果 ÷zoom 还原成 style 值。测完才显(避免闪现)。
+  useLayoutEffect(() => {
+    if (!open || !rect || !overlayRef.current || !tipRef.current) return;
+    const vp = overlayRef.current.getBoundingClientRect(); // 视口(实际像素)
+    const zoom = vp.width / (overlayRef.current.offsetWidth || vp.width) || 1;
+    const tip = tipRef.current.getBoundingClientRect();    // 卡片实际尺寸
+    const M = 10;
+    const left = Math.max(vp.left + M, Math.min(rect.left, vp.right - tip.width - M));
+    let top;
+    if (rect.bottom + M + tip.height <= vp.bottom - M) top = rect.bottom + M;
+    else if (rect.top - M - tip.height >= vp.top + M) top = rect.top - M - tip.height;
+    else top = Math.max(vp.top + M, vp.bottom - tip.height - M);
+    setPos({ top: top / zoom, left: left / zoom, zoom });
+  }, [open, rect, i]);
 
-  // 注解卡定位:当前按钮下方优先,放不下翻上方;水平夹进视口。
-  const TW = 290;
-  const estH = 92 + step.desc.split('\n').length * 17;
-  let cardTop = box.top + box.height + 12;
-  if (cardTop + estH > vh - 8) cardTop = Math.max(8, box.top - estH - 12);
-  const cardLeft = Math.max(8, Math.min(box.left, vw - TW - 8));
+  const step = steps[i];
+  // !step 兜底:tour 开着时 hasProject 变化使 steps 变短、i 越界 → 不渲染(定位 effect 会纠正 i)。
+  if (!open || !rect || !step) return null;
+  const last = i === steps.length - 1;
+  const pad = 6;
+  // 高亮框同样要 ÷zoom(style 值会被 ×zoom 渲染),否则下方/右侧元素的圈会整体偏移。
+  const z = pos?.zoom || 1;
+  const spot = { top: (rect.top - pad) / z, left: (rect.left - pad) / z, width: (rect.width + pad * 2) / z, height: (rect.height + pad * 2) / z };
 
   return (
-    <div className="fixed inset-0 z-[400]">
-      {/* 高亮框:box-shadow 撑满 9999px 把四周压暗,框内透出当前按钮(spotlight)。
-          框本身 pointer-events:none 不挡;点四周暗区关闭(底层 div)。 */}
+    <div ref={overlayRef} className="fixed inset-0 z-[400]">
+      {/* 高亮框 + 四周压暗(box-shadow 撑满屏) */}
+      <div style={{ position: 'fixed', ...spot, borderRadius: 10, boxShadow: '0 0 0 9999px rgba(0,0,0,0.55)', transition: 'top .15s, left .15s, width .15s, height .15s' }}
+        className="ring-2 ring-accent pointer-events-none" />
+      {/* 点暗区跳过 */}
       <div className="absolute inset-0" onClick={onClose} />
-      <div style={{ position: 'fixed', top: box.top - 4, left: box.left - 4, width: box.width + 8, height: box.height + 8, borderRadius: 10, boxShadow: '0 0 0 9999px rgba(0,0,0,0.55)', pointerEvents: 'none', transition: 'top .15s, left .15s, width .15s, height .15s' }}
-        className="ring-2 ring-accent" />
-
-      {/* 注解卡:标题 + 二级菜单说明 + 进度 + 上一步/下一步 */}
-      <div style={{ position: 'fixed', top: cardTop, left: cardLeft, width: TW, zIndex: 5 }}
-        className="bg-canvas border border-canvas-deep rounded-xl shadow-2xl p-4 pointer-events-auto animate-fade-in">
+      {/* 说明卡 */}
+      <div ref={tipRef} style={{ position: 'fixed', width: TIP_W, top: pos?.top ?? 0, left: pos?.left ?? 0, visibility: pos ? 'visible' : 'hidden' }}
+        className="bg-canvas border border-canvas-deep rounded-xl shadow-2xl p-4 animate-glass-rise">
         <div className="flex items-center gap-2 mb-1.5">
-          <span className="text-[13px] font-body font-semibold text-ink flex-1">{step.title}</span>
-          <span className="text-[10px] text-ink-faint font-mono">{i + 1}/{steps.length}</span>
-          <button onClick={onClose} className="text-ink-faint hover:text-ink" title="关闭"><X size={14} /></button>
+          <span className="text-[13px] font-display font-semibold text-ink flex-1">{step.title}</span>
+          <span className="text-[10px] text-ink-faint font-mono shrink-0">{i + 1}/{steps.length}</span>
+          <button onClick={onClose} className="text-ink-faint hover:text-ink shrink-0" title="关闭指引"><X size={14} /></button>
         </div>
-        <div className="text-[11.5px] text-ink-muted font-body leading-relaxed whitespace-pre-line mb-3">{step.desc}</div>
+        <div className="text-[12px] text-ink-muted font-body leading-relaxed mb-3 whitespace-pre-line">{step.desc}</div>
         <div className="flex items-center gap-2">
-          <button onClick={onClose} className="text-[11px] text-ink-faint hover:text-ink mr-auto font-body">跳过</button>
+          <button onClick={onClose} className="text-[11px] text-ink-faint hover:text-ink mr-auto">跳过</button>
           {i > 0 && (
             <button onClick={() => setI(i - 1)}
-              className="px-2 py-1 text-[11px] rounded border border-canvas-deep text-ink-soft hover:bg-canvas-warm flex items-center gap-1 font-body">
+              className="px-2 py-1 text-[11px] rounded border border-canvas-deep text-ink-soft hover:bg-canvas-deep flex items-center gap-1">
               <ArrowLeft size={11} />上一步
             </button>
           )}
           <button onClick={() => (last ? onClose() : setI(i + 1))}
-            className="px-2.5 py-1 text-[11px] rounded bg-accent text-white hover:bg-accent/90 flex items-center gap-1 font-body">
+            className="px-2.5 py-1 text-[11px] rounded bg-accent text-white hover:bg-accent/90 flex items-center gap-1">
             {last ? '完成' : <>下一步<ArrowRight size={11} /></>}
           </button>
         </div>
