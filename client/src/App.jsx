@@ -2430,13 +2430,28 @@ function ExportSessionButton({ messages, title }) {
   const safeTitle = (title || '会话').replace(/[\\/:*?"<>|\n]+/g, ' ').trim().slice(0, 40) || '会话';
   const fileName = `${safeTitle}-${new Date().toISOString().slice(0, 10)}.md`;
 
-  const download = () => {
+  const download = async () => {
     const md = buildSessionMarkdown(messages, title);
-    const blob = new Blob([md], { type: 'text/markdown' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url; a.download = fileName; a.click();
-    setTimeout(() => URL.revokeObjectURL(url), 0);
+    // Tauri WKWebView 拦 blob 下载(点了没反应)→ 走后端落盘到 Downloads;浏览器用 blob。
+    if (isTauri()) {
+      try {
+        const r = await fetch('/api/export-session', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ md, fileName }),
+        });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(d.error || r.status);
+        await confirmDialog('已导出到:\n' + d.path, { danger: false });
+      } catch (e) {
+        await confirmDialog('导出失败:' + String(e.message || e));
+      }
+    } else {
+      const blob = new Blob([md], { type: 'text/markdown' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = fileName; a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 0);
+    }
     setOpen(false);
   };
   const copy = async () => {
