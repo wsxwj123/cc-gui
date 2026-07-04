@@ -14,9 +14,34 @@ function fmtElapsed(ms) {
 }
 
 // 后台代理(claude --bg):CLI 原生的"派后台会话"能力包一层。列表来自
-// /api/agents/background(claude agents --json);会话答完仍常驻可 attach,
-// 所以必须给停止按钮(走 /api/processes/:pid/kill 白名单)。5s 轮询(比子代理
-// 1.5s 慢:每次轮询要 spawn 一次 claude agents,别太频)。
+// /api/agents/background?all=1(claude agents --json --all,含已结束);会话答完
+// 仍常驻可 attach,所以必须给停止按钮(走 /api/processes/:pid/kill 白名单)。
+// 5s 轮询(比子代理 1.5s 慢:每次轮询要 spawn 一次 claude agents,别太频)。
+// 运行中 → 终态迁移时推应用内提醒(复用 CompletionToasts);已完成的显示结束
+// 时间/最终状态/结果摘要,并提供"查看结果"打开该会话的转写。
+
+// 终态集合(与 server/routes/agents.js 的 BG_TERMINAL_STATES 对齐)
+const BG_TERMINAL = new Set(['done', 'failed', 'killed', 'stopped', 'error']);
+
+function fmtWhen(ms) {
+  if (!ms) return '';
+  try {
+    return new Date(ms).toLocaleString('zh-CN', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+  } catch { return ''; }
+}
+
+// 打开后台代理的会话转写:会话已在某分屏窗格 → 聚焦;否则替换当前聚焦窗格
+// (与 CompletionToasts 的跳转逻辑一致,{sessionId, projectHash} 即可加载消息)。
+function openBgAgentSession(a) {
+  if (!a?.sessionId || !a?.projectHash) return;
+  const st = useStore.getState();
+  const idx = (st.paneSessions || []).slice(0, st.paneCount).findIndex((p) => p?.sessionId === a.sessionId);
+  if (idx >= 0) { st.setActiveTabIndex(idx); return; }
+  const sess = { sessionId: a.sessionId, projectHash: a.projectHash, draft: false };
+  if (st.activeTabIndex === 0) st.setSelectedSession(sess);
+  else st.setPaneSession(st.activeTabIndex, sess);
+}
+
 function BackgroundAgentsSection({ stoppingPid, onStop }) {
   const selectedProject = useStore((s) => s.selectedProject);
   const [agents, setAgents] = useState([]);
@@ -24,13 +49,39 @@ function BackgroundAgentsSection({ stoppingPid, onStop }) {
   const [dispatching, setDispatching] = useState(false);
   const [note, setNote] = useState('');
   const mountedRef = useRef(true);
+  // sessionId → 是否已达终态(上次轮询)。null = 尚未完成首次轮询,首轮只记录
+  // 不提醒(避免面板一打开就把历史已完成的全部弹一遍)。
+  const prevTerminalRef = useRef(null);
 
   const load = async () => {
     try {
-      const r = await fetch('/api/agents/background');
+      const r = await fetch('/api/agents/background?all=1');
       const d = await r.json();
       if (!mountedRef.current) return;
-      if (Array.isArray(d.agents)) setAgents(d.agents.filter((a) => a.kind === 'background'));
+      if (!Array.isArray(d.agents)) return;
+      const bg = d.agents.filter((a) => a.kind === 'background');
+      // 运行中 → 终态迁移检测:上一轮见过且未终态、这一轮终态 → 应用内提醒
+      const prev = prevTerminalRef.current;
+      const next = {};
+      for (const a of bg) {
+        const key = a.sessionId || a.id;
+        if (!key) continue;
+        const terminal = BG_TERMINAL.has(a.state);
+        next[key] = terminal;
+        if (prev && prev[key] === false && terminal) {
+          useStore.getState().pushCompletionToast({
+            sessionId: a.sessionId,
+            projectHash: a.projectHash || null,
+            session: a.sessionId && a.projectHash ? { sessionId: a.sessionId, projectHash: a.projectHash, draft: false } : null,
+            title: a.name || '后台代理',
+            suffix: `后台代理结束(${a.state})`,
+            summary: a.detail || a.resultPreview || '',
+            ts: Date.now(),
+          });
+        }
+      }
+      prevTerminalRef.current = next;
+      setAgents(bg);
     } catch {}
   };
   useEffect(() => {
@@ -59,10 +110,17 @@ function BackgroundAgentsSection({ stoppingPid, onStop }) {
     setDispatching(false);
   };
 
+  // 运行中 = 未达终态(state 缺失但有活 pid 的旧版 CLI 输出也归运行中)
+  const running = agents.filter((a) => !BG_TERMINAL.has(a.state));
+  // 已完成的按结束时间(缺失退回开始时间)倒序,只显示最近 10 条防列表无限膨胀
+  const finished = agents.filter((a) => BG_TERMINAL.has(a.state))
+    .sort((a, b) => (b.endedAt || b.startedAt || 0) - (a.endedAt || a.startedAt || 0))
+    .slice(0, 10);
+
   return (
     <section>
       <h3 className="text-[10px] uppercase tracking-widest text-ink-faint font-body mb-2 flex items-center gap-1.5">
-        <Bot size={10} />后台代理 (claude --bg) ({agents.length})
+        <Bot size={10} />后台代理 (claude --bg) ({running.length})
       </h3>
       <div className="flex items-center gap-1.5 mb-2">
         <input value={prompt} onChange={(e) => setPrompt(e.target.value)}
@@ -76,22 +134,65 @@ function BackgroundAgentsSection({ stoppingPid, onStop }) {
         </button>
       </div>
       {note && <div className="text-[10px] text-ink-faint font-mono mb-2 truncate" title={note}>{note}</div>}
-      {agents.length > 0 && (
+      {running.length > 0 && (
         <div className="space-y-2">
-          {agents.map((a) => (
-            <div key={a.pid} className="bg-canvas-warm border border-canvas-deep rounded-lg p-2.5">
+          {running.map((a) => (
+            <div key={a.sessionId || a.pid} className="bg-canvas-warm border border-canvas-deep rounded-lg p-2.5">
               <div className="flex items-center gap-2">
                 <Bot size={11} className="text-accent" />
                 <span className="text-[11px] text-ink font-body truncate flex-1" title={a.name}>{a.name || `bg #${a.pid}`}</span>
+                {a.state && <StatusBadge status={a.state} />}
                 <span className="text-[10px] text-ink-faint font-mono shrink-0">{fmtElapsed(a.elapsedMs)}</span>
-                <button onClick={() => onStop(String(a.pid))} disabled={stoppingPid === String(a.pid)}
-                  className="shrink-0 flex items-center gap-1 text-[10px] px-2 py-1 rounded bg-red-50 hover:bg-red-100 text-red-700 border border-red-200 transition-colors disabled:opacity-50">
-                  {stoppingPid === String(a.pid) ? <Loader2 size={10} className="animate-spin" /> : <Square size={10} />}停止
-                </button>
+                {a.pid != null && (
+                  <button onClick={() => onStop(String(a.pid))} disabled={stoppingPid === String(a.pid)}
+                    className="shrink-0 flex items-center gap-1 text-[10px] px-2 py-1 rounded bg-red-50 hover:bg-red-100 text-red-700 border border-red-200 transition-colors disabled:opacity-50">
+                    {stoppingPid === String(a.pid) ? <Loader2 size={10} className="animate-spin" /> : <Square size={10} />}停止
+                  </button>
+                )}
               </div>
               {a.cwd && <div className="text-[10px] text-ink-faint font-mono truncate mt-1" title={a.cwd}>{a.cwd.split(/[/\\]+/).pop()}</div>}
             </div>
           ))}
+        </div>
+      )}
+      {/* 已结束的后台代理:结束时间 + 最终状态 + 结果摘要 + 查看结果(打开会话转写) */}
+      {finished.length > 0 && (
+        <div className="mt-2">
+          <div className="text-[10px] uppercase tracking-wider text-ink-faint font-body mb-1.5">已结束 ({finished.length})</div>
+          <div className="space-y-2">
+            {finished.map((a) => (
+              <div key={a.sessionId || a.id} className="bg-canvas-warm border border-canvas-deep rounded-lg p-2.5">
+                <div className="flex items-center gap-2">
+                  <Bot size={11} className="text-ink-faint" />
+                  <span className="text-[11px] text-ink font-body truncate flex-1" title={a.name}>{a.name || a.id || '后台代理'}</span>
+                  <StatusBadge status={a.state} />
+                  {/* 结束后进程仍常驻(可 attach);有 pid 时保留停止按钮以释放它 */}
+                  {a.pid != null && (
+                    <button onClick={() => onStop(String(a.pid))} disabled={stoppingPid === String(a.pid)}
+                      title="会话已结束但进程仍常驻,点击结束进程"
+                      className="shrink-0 flex items-center gap-1 text-[10px] px-2 py-1 rounded bg-red-50 hover:bg-red-100 text-red-700 border border-red-200 transition-colors disabled:opacity-50">
+                      {stoppingPid === String(a.pid) ? <Loader2 size={10} className="animate-spin" /> : <Square size={10} />}停止
+                    </button>
+                  )}
+                </div>
+                {(a.detail || a.resultPreview) && (
+                  <div className="text-[10.5px] text-ink-muted font-body line-clamp-2 mt-1" title={a.detail || a.resultPreview}>
+                    {a.detail || a.resultPreview}
+                  </div>
+                )}
+                <div className="flex items-center gap-3 mt-1.5 text-[10px] text-ink-faint font-mono">
+                  {a.endedAt && <span className="flex items-center gap-1"><Clock size={9} />结束于 {fmtWhen(a.endedAt)}</span>}
+                  {a.cwd && <span className="truncate opacity-70" title={a.cwd}>{a.cwd.split(/[/\\]+/).pop()}</span>}
+                  {a.sessionId && a.projectHash && (
+                    <button onClick={() => openBgAgentSession(a)}
+                      className="ml-auto shrink-0 flex items-center gap-1 text-[10px] px-2 py-1 rounded bg-canvas hover:bg-canvas-deep text-ink-soft border border-canvas-deep transition-colors">
+                      <Maximize2 size={10} />查看结果
+                    </button>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
         </div>
       )}
     </section>
@@ -295,6 +396,11 @@ function StatusBadge({ status }) {
     stopped:     { label: '已停止',  bg: 'bg-red-50',   fg: 'text-red-700',    border: 'border-red-200' },
     error:       { label: '错误',    bg: 'bg-red-50',   fg: 'text-red-700',    border: 'border-red-200' },
     needs_input: { label: '待输入',  bg: 'bg-violet-50', fg: 'text-violet-700', border: 'border-violet-200' },
+    // 后台代理(claude agents --json)的 state 取值(实测 2.1.200:working/blocked/done 等)
+    running:     { label: '运行中',  bg: 'bg-blue-50',  fg: 'text-blue-700',   border: 'border-blue-200' },
+    failed:      { label: '失败',    bg: 'bg-red-50',   fg: 'text-red-700',    border: 'border-red-200' },
+    killed:      { label: '已终止',  bg: 'bg-red-50',   fg: 'text-red-700',    border: 'border-red-200' },
+    blocked:     { label: '受阻',    bg: 'bg-amber-50', fg: 'text-amber-700',  border: 'border-amber-200' },
   };
   const m = map[status] || { label: status || '—', bg: 'bg-canvas-warm', fg: 'text-ink-muted', border: 'border-canvas-deep' };
   return (

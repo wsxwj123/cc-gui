@@ -6721,7 +6721,8 @@ function CompletionToasts() {
           className="pointer-events-auto glass-popover max-w-[calc(var(--app-w,100vw)-2rem)] w-[440px] rounded-xl shadow-lg px-4 py-2.5 text-left animate-glass-rise hover:ring-2 hover:ring-accent/40 transition-shadow">
           <div className="flex items-center gap-2">
             <span className="w-2 h-2 rounded-full bg-success shrink-0" />
-            <span className="text-[12px] font-medium text-ink font-body truncate flex-1">{t.title} · 回复完成</span>
+            {/* suffix 可覆盖默认文案(后台代理结束提醒复用同一浮条) */}
+            <span className="text-[12px] font-medium text-ink font-body truncate flex-1">{t.title} · {t.suffix || '回复完成'}</span>
             <X size={12} className="text-ink-faint shrink-0 hover:text-ink" onClick={(e) => { e.stopPropagation(); removeToast(t.id); }} />
           </div>
           {t.summary && <div className="mt-1 text-[11px] text-ink-muted font-body line-clamp-2">{t.summary}</div>}
