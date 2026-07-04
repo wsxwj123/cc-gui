@@ -6,16 +6,16 @@ import { X, ArrowRight, ArrowLeft } from 'lucide-react';
 
 // 顶栏功能面板按钮(与 PANEL_MAP 同序)。逐个圈。
 const PANEL_STEPS = [
-  ['panel-files', '文件浏览器', '浏览项目文件;html/svg 可侧边停靠放大查看。'],
-  ['panel-changes', '文件审查', '按回合查看 AI 改了哪些文件,可逐个回滚。'],
-  ['panel-monitor', 'Subagent 监控', '实时看子代理(Task)的状态树,可逐个停止。'],
-  ['panel-agents', '自定义 Agent', '在 GUI 内增删改 ~/.claude/agents 下的子代理定义。'],
-  ['panel-usage', '用量统计', '按模型/项目/日期看 token 与费用,可导出 CSV。'],
-  ['panel-processes', '进程管理', '查看并停止正在运行的 claude 子进程。'],
-  ['panel-mcp', 'MCP 服务器', '增删 MCP、测连通性、一键装官方插件。'],
-  ['panel-skills', 'Skill 市场', '看本机已装 skill,一键导入 Anthropic 官方 skill。'],
-  ['panel-memory', 'CLAUDE.md 指令', '编辑全局/项目/本地三级 CLAUDE.md 指令。'],
-  ['panel-settings', '设置', '网络/密码/端口/存储/更新/Hooks 等。'],
+  ['panel-files', '文件', '· 浏览项目文件树、点开预览\n· html/svg 可侧边停靠放大查看\n· 图片/PDF/Office 直接预览'],
+  ['panel-changes', '审查', '· 按 AI 回合查看改了哪些文件\n· 逐个文件看改动 diff\n· 可按回合回滚改动'],
+  ['panel-monitor', '监控', '· 实时看子代理(Task)状态树\n· 后台代理:一句话派发、查看、停止\n· 可逐个停止'],
+  ['panel-agents', 'Agent', '· 增删改 ~/.claude/agents 的子代理定义\n· 一键安装内置预设(explorer/oracle/fixer 等)'],
+  ['panel-usage', '用量', '· 按模型/项目/日期看 token 与费用\n· 总量、缓存命中率\n· 一键生成使用报告、导出 CSV'],
+  ['panel-processes', '进程', '· 查看正在运行的 claude 子进程\n· 逐个停止'],
+  ['panel-mcp', '工具', '· 增删 MCP 服务器、测连通性\n· 安装插件(未装的推荐项收进「添加」)'],
+  ['panel-skills', '技能', '· 查看本机已装 skill\n· 一键导入 Anthropic 官方与社区 skill 市场'],
+  ['panel-memory', '指令', '· 编辑全局/项目/本地三级 CLAUDE.md\n· 查看/编辑 AI 的自动记忆'],
+  ['panel-settings', '设置', '· 环境检查(node / claude / python)\n· Provider 切换与密钥、端口、局域网开关\n· 更新检查、存储清理、彻底清理项目状态\n· 对话区背景(纯色 / 图片 / 视频 + 遮罩)\n· 缓存优化开关、自动压缩窗口\n· 环境变量、Hooks'],
 ];
 
 function buildSteps(hasProject) {
@@ -44,7 +44,8 @@ function buildSteps(hasProject) {
     ['pane-count', '分屏', '把界面分成 1–6 格,并排看多个会话。'],
     ...PANEL_STEPS,
     // 主题按钮在顶栏排在设置(PANEL_STEPS 末项)之后,导引顺序对齐实际排版。
-    ['theme-toggle', '主题与外观', '切换配色主题(多套深浅色)、界面与正文字号、加载动画样式、对话区背景。'],
+    // 注:对话区背景在「设置」里,不在此弹窗。
+    ['theme-toggle', '主题与外观', '· 配色主题(多套深浅色)\n· 界面与正文字号\n· AI 思考时的加载动画样式'],
     ['composer', '输入框', 'Cmd/Ctrl+Enter 发送、Enter 换行;输入 / 打开命令;可拖入图片/PDF;Cmd/Ctrl+Z 撤销输入。'],
   );
   return steps.map(([sel, title, desc]) => ({ sel, title, desc }));
@@ -128,7 +129,7 @@ export function GuideTour({ open, onClose, hasProject }) {
           <span className="text-[10px] text-ink-faint font-mono shrink-0">{i + 1}/{steps.length}</span>
           <button onClick={onClose} className="text-ink-faint hover:text-ink shrink-0" title="关闭指引"><X size={14} /></button>
         </div>
-        <div className="text-[12px] text-ink-muted font-body leading-relaxed mb-3">{step.desc}</div>
+        <div className="text-[12px] text-ink-muted font-body leading-relaxed mb-3 whitespace-pre-line">{step.desc}</div>
         <div className="flex items-center gap-2">
           <button onClick={onClose} className="text-[11px] text-ink-faint hover:text-ink mr-auto">跳过</button>
           {i > 0 && (

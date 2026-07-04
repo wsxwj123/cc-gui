@@ -979,25 +979,6 @@ function EnvEditor({ env, onSave, saving }) {
   );
 }
 
-// 输入预测开关(CLI --prompt-suggestions):回合结束后预测下一句,输入框灰字 + Tab 采纳。
-// 每回合多一次轻量调用(蹭父回合缓存,官方称几乎免费),默认关。
-function PromptSuggestionsToggle() {
-  const on = useStore((s) => s.promptSuggestions);
-  const setOn = useStore((s) => s.setPromptSuggestions);
-  return (
-    <div className="bg-canvas-warm border border-canvas-deep rounded-lg px-3 py-2.5 flex items-center gap-3">
-      <div className="min-w-0 flex-1">
-        <div className="text-xs text-ink font-body font-medium">输入预测 <span className="text-[9px] text-amber-600 border border-amber-300 rounded px-1">实验</span></div>
-        <div className="text-[10.5px] text-ink-faint font-body">每轮回复结束后预测你下一句想说什么,输入框灰字显示,按 Tab 采纳(几乎不额外计费)。依赖 Claude Code 上游放量:当前版本可能收不到预测,届时开着也无效果、仅回合末多等约 3 秒</div>
-      </div>
-      <button onClick={() => setOn(!on)}
-        className={`shrink-0 w-9 h-5 rounded-full transition-colors relative ${on ? 'bg-accent' : 'bg-ink-faint/30'}`}
-        title={on ? '已开启' : '已关闭'}>
-        <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-all ${on ? 'left-[18px]' : 'left-0.5'}`} />
-      </button>
-    </div>
-  );
-}
 
 // 缓存优化开关(CLI --exclude-dynamic-system-prompt-sections)。作用:把每轮变化的动态段
 // (工作目录 / auto-memory / git 状态)移出系统提示、改注入首条用户消息,使系统提示保持静态。
@@ -1042,7 +1023,7 @@ function AutoCompactWindowSelect({ settings, onSave, saving }) {
     <div className="bg-canvas-warm border border-canvas-deep rounded-lg px-3 py-2.5 flex items-center gap-3">
       <div className="min-w-0 flex-1">
         <div className="text-xs text-ink font-body font-medium">自动压缩窗口</div>
-        <div className="text-[10.5px] text-ink-faint font-body">上下文占用逼近该 token 窗口时,CLI 自动压缩会话历史。调大则更晚触发、保留更多上下文,调小则更早压缩。置为默认时按模型自动决定。若环境变量 CLAUDE_CODE_AUTO_COMPACT_WINDOW 已设置,则以环境变量为准</div>
+        <div className="text-[10.5px] text-ink-faint font-body">上下文占用逼近该 token 窗口时,CLI 自动压缩会话历史。调大则更晚触发、保留更多上下文,调小则更早压缩。置为默认时按模型自动决定。若环境变量 CLAUDE_CODE_AUTO_COMPACT_WINDOW 已设置,则以环境变量为准。<span className="text-ink-muted">参考:200K 窗口模型选 150K–180K、1M 窗口模型选 800K–900K,给压缩留出余量</span></div>
       </div>
       <select
         value={current}
@@ -1186,7 +1167,6 @@ function OverviewTab({ settings, onSave, saving }) {
       <div id="cc-update"><CcUpdater /></div>
       <FullDiskAccessCard />
       <CloseBehaviorPicker />
-      <PromptSuggestionsToggle />
       <ExcludeDynamicPromptToggle />
       <AutoCompactWindowSelect settings={settings} onSave={onSave} saving={saving} />
       <ChatBackgroundCard />

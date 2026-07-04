@@ -331,12 +331,6 @@ export const useStore = create((set, get) => ({
   // maskOpacity = 遮罩不透明度:主题底色(--color-canvas)以该比例盖在背景上,保证文字可读。
   chatBackground: readLs('cgui-chat-background', null),
 
-  // 输入预测(CLI --prompt-suggestions):回合结束后预测下一句,输入框灰字 + Tab 采纳。
-  // 默认关(多一次轻量模型调用;蹭缓存几乎免费但仍属可选行为),设置→概览里开。
-  promptSuggestions: (() => {
-    try { return localStorage.getItem('cgui-prompt-suggestions') === '1'; } catch { return false; }
-  })(),
-
   // 缓存优化(CLI --exclude-dynamic-system-prompt-sections / SDK systemPrompt.excludeDynamicSections):
   // 把每轮变化的动态段(工作目录 / auto-memory / git 状态)移出系统提示、改注入首条用户消息,
   // 使系统提示保持静态、提升第三方 provider 的前缀缓存命中。默认关(官方渠道无需开启)。
@@ -819,10 +813,6 @@ export const useStore = create((set, get) => ({
     try { localStorage.setItem('cgui-loading-style', v); } catch {}
   },
 
-  setPromptSuggestions: (on) => {
-    set({ promptSuggestions: !!on });
-    try { localStorage.setItem('cgui-prompt-suggestions', on ? '1' : '0'); } catch {}
-  },
 
   setExcludeDynamicSystemPrompt: (on) => {
     set({ excludeDynamicSystemPrompt: !!on });

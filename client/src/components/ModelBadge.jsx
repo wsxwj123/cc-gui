@@ -83,29 +83,18 @@ export function providerAvatar(model) {
 // progress glyph (✻ rotating) so users see Claude is "alive" mid-stream.
 export function ProviderAvatar({ model, size = 28, className = '', thinking = false }) {
   const av = providerAvatar(model);
-  // Anthropic mark needs slightly more room to breathe — official logo is dense.
-  const isAnthropic = av.label === 'Anthropic';
-  const markSize = Math.round(size * (isAnthropic ? 0.72 : 0.62));
+  // 去掉圆形背景圈,只裸放官方 Claude spark(用户嫌圆头像别扭)。头像恒为官方 logo
+  // (providerAvatar 统一返回 anthropic),spark 用品牌橙,与顶栏 logo 一致。
   return (
     <div
-      className={`shrink-0 rounded-full flex items-center justify-center font-semibold ${className}`}
-      style={{
-        width: size, height: size,
-        background: av.gradient,
-        color: av.markColor || '#fff',
-        boxShadow: isAnthropic
-          ? 'inset 0 0 0 1px rgba(217,119,87,0.18), 0 1px 2px rgba(0,0,0,0.06)'
-          : 'inset 0 1px 0 rgba(255,255,255,0.25), 0 1px 2px rgba(0,0,0,0.12)',
-      }}
+      className={`shrink-0 flex items-center justify-center provider-mark ${thinking ? 'avatar-thinking-spin' : ''} ${className}`}
+      style={{ width: size, height: size, color: av.markColor || '#D97757' }}
       title={av.label}
     >
       <div
-        className={`provider-mark ${thinking ? 'avatar-thinking-spin' : ''}`}
         style={{
-          width: markSize, height: markSize,
+          width: Math.round(size * 0.92), height: Math.round(size * 0.92),
           display: 'flex', alignItems: 'center', justifyContent: 'center',
-          fontSize: Math.round(size * 0.48),
-          filter: isAnthropic ? 'none' : 'drop-shadow(0 1px 1px rgba(0,0,0,0.15))',
         }}
       >
         {av.mark}

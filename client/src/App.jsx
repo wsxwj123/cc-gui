@@ -2595,9 +2595,6 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // 不打这个标记就会被 handleScroll 误判成用户滚动。
   const programmaticScrollRef = useRef(false);
   const [chatMessages, setChatMessages] = useState([]);
-  // 输入预测(--prompt-suggestions):回合末 SDK 预测的"下一句",ChatInput 灰字展示,
-  // Tab 采纳。发送新消息/切会话时清空(旧建议不跨回合)。
-  const [promptSuggestion, setPromptSuggestion] = useState('');
   const [isStreaming, setIsStreaming] = useState(false);
   // Mirror of isStreaming in a ref. Used by handleSend's gate instead of the
   // closure'd state — closures lag one render behind, so a rapid rollback →
@@ -2966,7 +2963,6 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     const { reattachPid, appendSystemPrompt, hiddenUserMessage = false, meta } = opts;
     // AZ3:真实发送(非 reattach)恢复自动吸底——满足"回车发送后无手动滚动则吸底到最新"。
     if (!reattachPid) userScrolledAwayRef.current = false;
-    if (!reattachPid) setPromptSuggestion(''); // 旧预测不跨回合
     // Intercept the /remote-control (alias /rc) command. It CANNOT be sent
     // through `claude -p` — slash commands are interactive-only and the CLI
     // rejects them ("isn't available in this environment"). Instead we launch
@@ -3326,7 +3322,6 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           permissionMode: permissionMode || 'default',
           globalRead: globalRead !== false,
           agent: activeAgent || undefined,
-          promptSuggestions: useStore.getState().promptSuggestions || undefined,
           excludeDynamicSystemPrompt: useStore.getState().excludeDynamicSystemPrompt || undefined,
         }),
       });
@@ -3868,10 +3863,6 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           if (event.type === 'result' && !isCompact && typeof event.total_cost_usd === 'number' && event.total_cost_usd > 0) {
             resultCostUsd = event.total_cost_usd;
           }
-          if (event.type === 'prompt_suggestion' && typeof event.suggestion === 'string') {
-            setPromptSuggestion(event.suggestion);
-          }
-
           if (event.type === 'done') break;
         }
       }
@@ -4297,7 +4288,6 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         activeProcRef.current = null;
         updateStreaming(false);
         setChatMessages([]);
-        setPromptSuggestion('');
         setStreamingText('');
         setStreamingThinking('');
         setStreamingToolCalls([]);
@@ -5120,7 +5110,6 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           useStore.getState().removeFromQueue(sessionQueueKey, i);
           window.dispatchEvent(new CustomEvent('cgui:composer-fill', { detail: { text: item.text, targetKey: sessionQueueKey } }));
         }}
-        promptSuggestion={promptSuggestion}
         todos={currentTodos}
         permKey={sessionQueueKey}
         sessionId={selectedSession?.sessionId || null}
