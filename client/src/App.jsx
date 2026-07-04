@@ -3165,7 +3165,15 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           ...avail.map((m) => _bare(m?.id)),
           ...custom.map((m) => _bare(m)),
         ].filter(Boolean));
-        const inProvider = (m) => m && ok.has(_bare(m));
+        // 官方 Anthropic 端点的 availableModels 只是 settings env + 别名的枚举,并非
+        // 完整模型目录(claude-sonnet-4-6 等完全合法的 id 不在其中)。BK-0 的本意是拦
+        // "跨 provider 残留 id",不能把官方合法 id 也误杀——否则用户 pin 了 claude-sonnet-4-6、
+        // 徽章显示 sonnet,发送时却被静默回退到全局默认(如 haiku),徽章与实际调用不一致
+        // (用户实证:选 sonnet-4-6 实际全程 haiku)。官方下任何 claude-* id 一律放行,
+        // 交给 API 校验;第三方/中转(providerHint≠anthropic)仍走白名单不变。
+        const _officialAnthropic = (st.currentProvider?.providerHint || 'anthropic') === 'anthropic';
+        const _isClaudeId = (m) => /^claude-[a-z0-9.-]+(\[1m\])?$/i.test(String(m || ''));
+        const inProvider = (m) => m && (ok.has(_bare(m)) || (_officialAnthropic && _isClaudeId(m)));
         if (inProvider(_pin)) return _pin;
         if (inProvider(_hist)) return _hist;
         const global = st.currentModel;
