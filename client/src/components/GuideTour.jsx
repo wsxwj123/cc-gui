@@ -49,6 +49,16 @@ function buildSteps(hasProject) {
   return steps.map(([sel, title, desc]) => ({ sel, title, desc }));
 }
 
+// data-tour sel → { title, desc } 映射,供常驻悬停 tooltip(GlobalTooltip)复用同一套
+// 详细文案。合并会话/项目两种视图的步骤(会话视图优先,再补项目独有的 add-project)。
+export const STEP_INFO = (() => {
+  const m = new Map();
+  for (const hp of [true, false]) {
+    for (const s of buildSteps(hp)) if (!m.has(s.sel)) m.set(s.sel, { title: s.title, desc: s.desc });
+  }
+  return m;
+})();
+
 const TIP_W = 300;
 
 export function GuideTour({ open, onClose, hasProject }) {
