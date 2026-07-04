@@ -1470,17 +1470,18 @@ html { --content-max: clamp(768px, calc(var(--app-w, 100vw) * 0.7), 1120px); }
   letter-spacing: 0.005em;
   color: var(--color-ink);
   line-height: 1;
+  /* 衬线大写字形在 line-box 里视觉中心偏上约 1px(descender 空间空着),
+     align-items:center 后文字比 spark 偏高 → 微调下移对齐 spark 光学中心。 */
+  transform: translateY(1px);
 }
 
 @keyframes cgui-brand-breath {
   0%,
   100% {
-    transform: scale(1);
-    opacity: 0.92;
+    opacity: 0.82;
   }
 
   50% {
-    transform: scale(1.08);
     opacity: 1;
   }
 }

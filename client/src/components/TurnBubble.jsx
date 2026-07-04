@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import {
   Brain, Copy, Check, ChevronDown, ChevronRight,
   Wrench, BookOpen, Pencil, Terminal, FileText, Search,
-  Globe, Edit3, Loader2, RotateCcw, Bot
+  Globe, Edit3, Loader2, RotateCcw, Bot, GitBranch
 } from 'lucide-react';
 import { ModelBadge, ProviderAvatar } from './ModelBadge.jsx';
 import { MarkdownRenderer } from './MarkdownRenderer.jsx';
@@ -427,7 +427,7 @@ function UsageDisplay({ usage, model, costUsd }) {
 // making the whole UI (provider & model menus included) feel laggy. `turn` comes
 // from the persisted `messages` array which is referentially stable while a NEW
 // turn streams into separate state, so memo lets the old turns skip re-render.
-function TurnBubbleInner({ turn, onRetry, onRetryTool, retryActive }) {
+function TurnBubbleInner({ turn, onRetry, onRetryTool, onFork, retryActive }) {
   const [showThinking, setShowThinking] = useState(false);
 
   // Historical turns loaded from .jsonl may have these fields absent or as a
@@ -502,6 +502,16 @@ function TurnBubbleInner({ turn, onRetry, onRetryTool, retryActive }) {
               </button>
             )}
             <CopyButton text={fullText} />
+            {onFork && (
+              <button
+                onClick={onFork}
+                className="flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] text-ink-faint hover:text-accent hover:bg-canvas-warm transition-colors"
+                title="从当前会话分叉出一条新线(全上下文复制到新会话,原会话不动)"
+              >
+                <GitBranch size={11} />
+                <span className="hidden md:inline">分叉</span>
+              </button>
+            )}
           </div>
 
           {/* Primary render path — preserves chronological order.

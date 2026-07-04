@@ -2288,7 +2288,7 @@ function CompactDivider() {
 // streamingText(不动 messages),memo 命中 → 2万节点的历史列表在每个 token 不再
 // 重渲染;点功能按钮使 SessionDetail 重渲时同样跳过(根治"流式时/点按钮全局卡、
 // 分屏等 A 回复时 B 卡")。前提:传入回调必须引用稳定(见 stableRetry*/stableRollback)。
-const MessageList = React.memo(function MessageList({ messages, onRetryTurn, onRetryTool, onRollback, retryActiveUuid }) {
+const MessageList = React.memo(function MessageList({ messages, onRetryTurn, onRetryTool, onRollback, onFork, retryActiveUuid }) {
   // BK-6:此前每行内联 `(toolCall) => onRetryTool(msg, toolCall)` 每次渲染新建箭头
   // 函数 → TurnBubble(自身 React.memo)的 onRetryTool prop 身份每次变 → memo 失效,
   // retryActiveUuid 一变(进/出"重做"态)就整表 2万节点重渲。改为按 msg.uuid 记忆化:
@@ -2311,9 +2311,10 @@ const MessageList = React.memo(function MessageList({ messages, onRetryTurn, onR
       {msg.type === 'compact'
         ? <CompactDivider />
         : msg.type === 'turn'
-        ? <TurnBubble turn={msg} onRetry={onRetryTurn} onRetryTool={getToolCb(msg)} retryActive={retryActiveUuid === msg.uuid} />
+        ? <TurnBubble turn={msg} onRetry={onRetryTurn} onRetryTool={getToolCb(msg)} onFork={onFork} retryActive={retryActiveUuid === msg.uuid} />
         : <MessageBubble message={{ ...msg, role: msg.type }}
-            onRollback={msg.type === 'user' ? onRollback : undefined} />}
+            onRollback={msg.type === 'user' ? onRollback : undefined}
+            onFork={msg.type === 'user' ? onFork : undefined} />}
     </div>
   ));
 });
@@ -4625,6 +4626,25 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   const handleRetryToolRef = useRef(null);
   useEffect(() => { handleRetryToolRef.current = handleRetryTool; }, [handleRetryTool]);
   const stableRetryTurn = useCallback((turn) => handleRetryTurnRef.current?.(turn), []);
+
+  // /branch 分叉:从当前会话 fork 出一条新线(全上下文复制到新 sid,原会话不动),
+  // 打开到本窗格。每条消息末尾的「分叉」按钮都调它(fork 的是整个会话,非单条消息)。
+  const forkCurrentSession = useCallback(async () => {
+    const st = useStore.getState();
+    const sess = st.paneSessions?.[tabIndex];
+    if (!sess?.sessionId) { await confirmDialog('草稿会话尚未开始,无法分叉'); return; }
+    try {
+      const res = await fetch('/api/fork', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sessionId: sess.sessionId, projectHash: sess.projectHash }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.newSessionId) { await confirmDialog('分叉失败：' + (data.error || res.status)); return; }
+      const fork = { sessionId: data.newSessionId, projectHash: sess.projectHash, projectPath: sess.projectPath, firstPrompt: sess.firstPrompt, model: sess.model };
+      if (tabIndex === 0 && st.paneCount === 1) st.setSelectedSession(fork);
+      else st.setPaneSession(tabIndex, fork);
+    } catch (e) { await confirmDialog('分叉失败：' + String(e.message || e)); }
+  }, [tabIndex]);
   const stableRetryTool = useCallback((turn, toolCall) => handleRetryToolRef.current?.(turn, toolCall), []);
   const stableRollback = useCallback((msg, opts) => handleRollbackRef.current?.(msg, opts), []);
 
@@ -5006,6 +5026,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                 onRetryTurn={stableRetryTurn}
                 onRetryTool={stableRetryTool}
                 onRollback={stableRollback}
+                onFork={forkCurrentSession}
                 retryActiveUuid={retryActiveUuid}
               />
               {liveVisible && chatMessages.map((msg, i) => (

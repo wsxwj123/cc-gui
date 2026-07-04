@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect, useLayoutEffect } from 'react';
 import { createPortal } from 'react-dom';
-import { User, Brain, Copy, Check, RotateCcw, Pencil } from 'lucide-react';
+import { User, Brain, Copy, Check, RotateCcw, Pencil, GitBranch } from 'lucide-react';
 import { computeCost, formatCost } from '../utils/pricing.js';
 import { copyText } from '../utils/clipboard.js';
 import { useStore } from '../stores/sessionStore.js';
@@ -304,7 +304,7 @@ function UsageDisplay({ usage, model }) {
   );
 }
 
-export function MessageBubble({ message, onRollback }) {
+export function MessageBubble({ message, onRollback, onFork }) {
   const isUser = message.role === 'user';
   const [showThinking, setShowThinking] = useState(false);
 
@@ -318,6 +318,12 @@ export function MessageBubble({ message, onRollback }) {
           <div className="flex-1 min-w-0 flex flex-col items-end">
             <div className="flex items-center gap-2 mb-1.5">
               {onRollback && <RollbackMenu message={message} onAction={(a) => onRollback(message, a)} />}
+              {onFork && (
+                <button onClick={onFork} title="从当前会话分叉出一条新线(全上下文复制到新会话,原会话不动)"
+                  className="flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] text-ink-faint hover:text-accent hover:bg-canvas-warm transition-colors">
+                  <GitBranch size={11} /><span className="hidden md:inline">分叉</span>
+                </button>
+              )}
               <CopyButton text={message.text} />
               <span className="text-[11px] text-ink-faint font-mono">{formatTime(message.timestamp)}</span>
               <span className="text-[13px] font-medium text-ink font-body">你</span>
