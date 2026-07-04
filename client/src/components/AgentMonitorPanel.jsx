@@ -396,10 +396,11 @@ function StatusBadge({ status }) {
     stopped:     { label: '已停止',  bg: 'bg-red-50',   fg: 'text-red-700',    border: 'border-red-200' },
     error:       { label: '错误',    bg: 'bg-red-50',   fg: 'text-red-700',    border: 'border-red-200' },
     needs_input: { label: '待输入',  bg: 'bg-violet-50', fg: 'text-violet-700', border: 'border-violet-200' },
-    // 后台代理(claude agents --json)的 state 取值
+    // 后台代理(claude agents --json)的 state 取值(实测 2.1.200:working/blocked/done 等)
     running:     { label: '运行中',  bg: 'bg-blue-50',  fg: 'text-blue-700',   border: 'border-blue-200' },
     failed:      { label: '失败',    bg: 'bg-red-50',   fg: 'text-red-700',    border: 'border-red-200' },
     killed:      { label: '已终止',  bg: 'bg-red-50',   fg: 'text-red-700',    border: 'border-red-200' },
+    blocked:     { label: '受阻',    bg: 'bg-amber-50', fg: 'text-amber-700',  border: 'border-amber-200' },
   };
   const m = map[status] || { label: status || '—', bg: 'bg-canvas-warm', fg: 'text-ink-muted', border: 'border-canvas-deep' };
   return (
