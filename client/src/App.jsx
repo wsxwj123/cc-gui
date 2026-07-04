@@ -265,7 +265,10 @@ function ThemeToggle() {
       </button>
 
       {open && (
-        <div className="absolute right-0 top-full mt-2 z-[60] w-[300px] glass-popover rounded-2xl border border-canvas-deep shadow-xl p-3 space-y-3 max-md:fixed max-md:left-3 max-md:right-3 max-md:top-16 max-md:w-auto max-md:mt-0 max-md:max-h-[78dvh] max-md:overflow-y-auto">
+        {/* CJ-2:桌面端也要限高+整体滚动。此前只有移动端有 max-h,桌面端弹窗内容
+            (配色网格+动画网格)在大字号 zoom 下总高超过视口,动画网格的内部滚动窗口
+            有一截伸到屏幕外 → 用户把内部滚动条拖到底也看不全(实报)。 */}
+        <div className="absolute right-0 top-full mt-2 z-[60] w-[300px] glass-popover rounded-2xl border border-canvas-deep shadow-xl p-3 space-y-3 max-h-[min(78dvh,calc(100dvh-6rem))] overflow-y-auto max-md:fixed max-md:left-3 max-md:right-3 max-md:top-16 max-md:w-auto max-md:mt-0 max-md:max-h-[78dvh]">
           {/* ── Tone (light / dark / follow-system) ───────────── */}
           <div className="flex items-center gap-1 p-1 rounded-xl bg-black/5">
             {TONES.map(({ id, label, Icon }) => (
