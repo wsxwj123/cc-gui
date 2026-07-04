@@ -735,6 +735,10 @@ pub fn run() {
             .title("Claude GUI")
             .inner_size(win_w, win_h)
             .min_inner_size(900.0, 600.0)
+            // 关闭 Tauri 原生文件拖放:默认启用会在 OS 层吃掉拖放事件,webview 的
+            // HTML5 ondrop 永远收不到文件(用户报"输入框拖不进 PDF/图片")。关掉后
+            // 交给前端 ChatInput 的 handleDrop(HTML5 drag-drop)处理。
+            .disable_drag_drop_handler()
             .center()
             .build()
             {
