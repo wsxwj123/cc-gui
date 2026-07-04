@@ -7,9 +7,18 @@
 
 !macro NSIS_HOOK_POSTINSTALL
   Push $0
-  ; 1) 标准安装目录(官方安装器默认写这里,最常见)
+  ; 安装器是【提权进程】,PATH 是管理员的,`where node` 看不到当前登录用户 PATH 里的
+  ; node(用户报:安装时说没装、装完运行时又检测到)。所以先按固定位逐个查——与运行时
+  ; lib.rs 的 windows_node_candidates 同一份清单,覆盖 per-user / nvm / scoop / volta。
+  ; 1) 官方安装器(所有用户)
   IfFileExists "$PROGRAMFILES64\nodejs\node.exe" cgui_node_ok 0
   IfFileExists "$PROGRAMFILES32\nodejs\node.exe" cgui_node_ok 0
+  ; 1b) 官方安装器「仅为我安装」→ per-user 目录(提权 where node 的最大盲区,最常见)
+  IfFileExists "$LOCALAPPDATA\Programs\nodejs\node.exe" cgui_node_ok 0
+  ; 1c) volta / scoop 常见真身位
+  IfFileExists "$LOCALAPPDATA\Volta\bin\node.exe" cgui_node_ok 0
+  IfFileExists "$PROFILE\scoop\apps\nodejs\current\node.exe" cgui_node_ok 0
+  IfFileExists "$PROFILE\scoop\apps\nodejs-lts\current\node.exe" cgui_node_ok 0
   ; 2) where node(系统 PATH);nsExec::Exec 只压退出码,不留输出在栈上
   nsExec::Exec 'cmd /c where node'
   Pop $0

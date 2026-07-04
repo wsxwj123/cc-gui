@@ -42,8 +42,9 @@ function buildSteps(hasProject) {
     ['agent-selector', '子代理模式', '让主控把任务派给子代理执行。'],
     ['remote-control', '手机远程控制', '用手机 Claude App 同账号接管此会话(需登录、非三方 provider)。'],
     ['pane-count', '分屏', '把界面分成 1–6 格,并排看多个会话。'],
-    ['theme-toggle', '主题与外观', '切换配色主题(多套深浅色)、界面与正文字号、加载动画样式、对话区背景。'],
     ...PANEL_STEPS,
+    // 主题按钮在顶栏排在设置(PANEL_STEPS 末项)之后,导引顺序对齐实际排版。
+    ['theme-toggle', '主题与外观', '切换配色主题(多套深浅色)、界面与正文字号、加载动画样式、对话区背景。'],
     ['composer', '输入框', 'Cmd/Ctrl+Enter 发送、Enter 换行;输入 / 打开命令;可拖入图片/PDF;Cmd/Ctrl+Z 撤销输入。'],
   );
   return steps.map(([sel, title, desc]) => ({ sel, title, desc }));
