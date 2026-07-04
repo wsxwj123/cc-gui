@@ -3017,8 +3017,11 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         // 空闲态(刚进会话没发过消息)owner 为 null → 旁问气泡会被藏掉,需认领 owner。
         // 流式进行中不动 owner(已有归属,乱改会影响 finalize/reattach 读 ownerRef 的逻辑)。
         if (!streamingRef.current) setStreamOwner(sessionQueueKey);
+        // 记录旁问归属的回合(发起时最后一个已渲染的用户回合)→ 右侧 TurnScrubber
+        // 在该回合点标记"含旁问",悬浮可见。空会话无回合则 null(不关联任何点)。
+        const atTurnUuid = [...messages].reverse().find((m) => m.type === 'user' && m.uuid)?.uuid || null;
         setChatMessages((prev) => [...prev, {
-          uuid: btwUuid, type: 'btw', question: q, text: '', pending: true,
+          uuid: btwUuid, type: 'btw', question: q, text: '', pending: true, atTurnUuid,
           timestamp: new Date().toISOString(),
         }]);
         fetch('/api/chat/btw', {
@@ -4671,6 +4674,11 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   const userTurns = allMessages
     .filter((m) => m.type === 'user' && m.uuid)
     .map((m) => ({ uuid: m.uuid, text: m.displayText || m.text || '', ts: m.timestamp }));
+  // 哪些回合发起过旁问(atTurnUuid)→ TurnScrubber 在这些点标记"含旁问"。旁问本地态,
+  // 数量极小,每帧新建 Set 无性能顾虑(与 userTurns 同理)。
+  const btwTurnUuids = new Set(
+    chatMessages.filter((m) => m.type === 'btw' && m.atTurnUuid).map((m) => m.atTurnUuid)
+  );
   // 用量汇总:优先取服务端聚合(usageTotals,jsonl 全文件按 message.id 去重逐条求和的
   // 地面真值口径),前端只叠加尚未落盘的流式回合(chatMessages,条数很小)——避免几千条
   // 历史消息每帧全量 reduce。无服务端聚合时(端点旧形态/加载失败)回退全量 reduce。
@@ -4803,7 +4811,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         <ChatSearch containerRef={containerRef} onClose={() => setSearchOpen(false)} />
       )}
       {!showAgentView && (
-        <TurnScrubber containerRef={containerRef} turns={userTurns} />
+        <TurnScrubber containerRef={containerRef} turns={userTurns} btwTurnUuids={btwTurnUuids} />
       )}
       {!mobileChrome && <div className="glass-bar shrink-0 px-6 py-3 relative z-30">
         {/* Title row wraps when the pane is narrow or font is scaled up so
