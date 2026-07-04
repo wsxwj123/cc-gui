@@ -2592,6 +2592,15 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   const [streamOwnerKey, setStreamOwnerKey] = useState(null);
   const streamOwnerKeyRef = useRef(null);
   const setStreamOwner = useCallback((k) => { streamOwnerKeyRef.current = k; setStreamOwnerKey(k); }, []);
+  // BF-1:流式期间的历史截断点。CLI 边流边写 jsonl,流式中途任何历史重拉(侧栏 handleSelect
+  // 切走切回 / 刷新后 rehydrate+reattach / 搜索跳转)都会把本回合的【半成品】拉进 messages,
+  // 与流式气泡同屏 → 同一回合渲染两遍(用户截图:上块 jsonl 半成品带 usage,下块 Writing… 流式)。
+  // 现有 tkey 去重只清 chatMessages,管不到 messages 侧。据此在渲染层把历史截断到本回合起点之前:
+  //   { sinceTs }        正常发送:丢弃 timestamp ≥ 流起点的历史条目(本地已有用户气泡副本)
+  //   { afterLastUser }  reattach:真实起点未知,但进程还活着 ⇒ jsonl 末条用户消息就是本回合
+  //                      的 prompt(本地无副本,保留它),丢弃其后的条目。
+  // finalize 提交整轮落盘 + 清空本地副本时同步清空,历史交还 jsonl。
+  const [streamHistCutoff, setStreamHistCutoff] = useState(null);
   const loadedSidRef = useRef(null); // I4:本窗格已加载历史的 sessionId,切会话时据此强制重载
   // 编辑重发待回滚(#4):点击「重新编辑并发送」时只回填输入框、记录目标消息,不做
   // 任何破坏性操作;真正发送时才回退,ESC 取消则原样保留。ref 供 handleSend 读取
@@ -2768,6 +2777,27 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       return next.length === prev.length ? prev : next;
     });
   }, [messages, sessionQueueKey]);
+
+  // BF-1:渲染用的历史列表。活跃流归属本会话且截断点存在时,过滤掉本回合的半成品条目;
+  // 其余情况原样返回 messages(同一引用,不打穿 MessageList 的 memo)。useMemo 依赖里
+  // 没有每 token 变化的值,流式期间只有 messages 真被重拉时才重算。
+  const visibleMessages = useMemo(() => {
+    const cut = streamHistCutoff;
+    if (!cut || streamOwnerKey !== sessionQueueKey) return messages;
+    if (cut.afterLastUser) {
+      let lastUserIdx = -1;
+      for (let i = messages.length - 1; i >= 0; i--) {
+        if (messages[i]?.type === 'user') { lastUserIdx = i; break; }
+      }
+      // 没有用户消息 / 用户消息就是末条(回合内容还没落盘)→ 无需截断。
+      if (lastUserIdx === -1 || lastUserIdx === messages.length - 1) return messages;
+      return messages.slice(0, lastUserIdx + 1);
+    }
+    // 正常发送:jsonl 里本回合所有条目(含用户消息回显)时间戳都晚于客户端发送时刻
+    // (同机时钟,CLI 在 POST 之后才写盘)。无时间戳的条目一律保留,绝不误杀。
+    const next = messages.filter((m) => !m?.timestamp || Date.parse(m.timestamp) < cut.sinceTs);
+    return next.length === messages.length ? messages : next;
+  }, [messages, streamHistCutoff, streamOwnerKey, sessionQueueKey]);
 
   // Detect "this session has a background CLI proc still running" — happens
   // when the user navigated away while it was streaming. We poll the active-
@@ -2973,6 +3003,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     updateStreaming(true);
     // I4:本次流的归属会话(draft 时是 draft-key,init 收到真 id 后会在下面升级)。
     setStreamOwner(sessionQueueKey);
+    // BF-1:记录历史截断点 —— 流式期间任何历史重拉都会拉到本回合半成品,渲染层据此丢弃。
+    // reattach 时流起点早于现在(进程已跑了一阵),改用"末条用户消息之后"的形态截断。
+    setStreamHistCutoff(reattachPid ? { afterLastUser: true } : { sinceTs: Date.now() });
     setCompacting(isCompact);
     setStreamingText('');
     setStreamingThinking('');
@@ -3957,6 +3990,10 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           if (i < 11) await new Promise((r) => setTimeout(r, 200));
         }
       }
+      // BF-1:回合收尾清历史截断,历史渲染交还 jsonl。放在 finalize 循环之后:break 与
+      // 此处同一同步续体,React 合批 —— 与循环内 setChatMessages([]) 同帧提交,不会闪现
+      // "本地已清、截断还在 → 该回合一帧不可见"。nav-away 提前 break / 无 sid 路径也覆盖。
+      setStreamHistCutoff(null);
       // Background refresh of sidebar session list. `silent:true` means the
       // global loading flag is NOT toggled, so SessionDetail doesn't swap to
       // a loading screen and wipe out the user's scroll position.
@@ -4357,6 +4394,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     setStreamingThinking('');
     setStreamingToolCalls([]);
     setStreamingBlocks([]);
+    setStreamHistCutoff(null); // BF-1:流已中止,截断随之作废(重发会设新的)
 
     // 4) trim UI
     truncateUi();
@@ -4491,6 +4529,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         setStreamingThinking('');
         setStreamingToolCalls([]);
         setStreamingBlocks([]);
+        setStreamHistCutoff(null); // BF-1:同上,截断随中止的流作废
         try { await fetchMessagesForTab(sel.sessionId, projectHash, { silent: true }); } catch {}
 
         setTimeout(() => {
@@ -4544,7 +4583,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // 用户气泡前已 setStreamOwner(sessionQueueKey)(含 reattach),所以凡是该显示的本地缓冲
   // owner 必等于 sessionQueueKey;去掉 null 子句即根治泄漏,且与上面 C1 注释本意一致。
   const liveVisible = streamOwnerKey === sessionQueueKey;
-  const allMessages = [...messages, ...(liveVisible ? chatMessages : [])];
+  // BF-1:展示口径统一走 visibleMessages(活跃流期间剔除本回合半成品),回合进度条/
+  // 成本等派生统计与消息列表同源,不再出现"进度条多一个重复回合点"。
+  const allMessages = [...visibleMessages, ...(liveVisible ? chatMessages : [])];
   // 右侧回合进度条数据:每个用户回合一个点(摘要取去附件后的显示文本)。
   // 注意:必须是普通计算,不能用 useMemo —— 这里在 SessionDetail 的早返回
   // (if loading && tabIndex===0 return)之后,加 hook 会导致切换会话(loading 切换)时
@@ -4879,14 +4920,14 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       )}
 
       <div ref={containerRef} onScroll={handleScroll} className="flex-1 overflow-y-auto relative z-10">
-          {messages.length === 0 && (liveVisible ? chatMessages.length : 0) === 0 ? (
+          {visibleMessages.length === 0 && (liveVisible ? chatMessages.length : 0) === 0 ? (
             <div className="mobile-draft-empty flex items-center justify-center h-full text-ink-muted text-sm font-body">
               {selectedSession?.draft ? '开始你的第一条消息 ↓' : '该会话没有可显示的消息'}
             </div>
           ) : (
             <>
               <MessageList
-                messages={messages}
+                messages={visibleMessages}
                 onRetryTurn={stableRetryTurn}
                 onRetryTool={stableRetryTool}
                 onRollback={stableRollback}
