@@ -1442,9 +1442,9 @@ html { --content-max: clamp(768px, calc(var(--app-w, 100vw) * 0.7), 1120px); }
 }
 
 /* ── 顶栏品牌 logo:Claude 官方风格 ──
-   accent 八瓣星芒(缓慢呼吸,幅度克制)+ 大号衬线字标 "Claude"。
+   品牌橙八瓣星芒(缓慢呼吸,幅度克制)+ 大号衬线字标 "Claude"。
    字标固定衬线栈(Newsreader 已随 index.html 加载),不跟随阅读字体选择器;
-   颜色全取主题变量,深浅主题均协调;prefers-reduced-motion 时静止。 */
+   字标取主题 ink,深浅主题均协调;prefers-reduced-motion 时静止。 */
 .cgui-brand {
   display: inline-flex;
   align-items: center;
@@ -1455,7 +1455,9 @@ html { --content-max: clamp(768px, calc(var(--app-w, 100vw) * 0.7), 1120px); }
 .cgui-brand-spark {
   width: 19px;
   height: 19px;
-  color: var(--color-accent);
+  /* 品牌橙固定值(同 ProviderAvatar 的 #D97757):默认中性主题 accent 是纯黑,
+     跟随 accent 星芒会发黑,与回复头像 ✻ 及官方参考不一致;深浅底上均可读 */
+  color: #D97757;
   transform-origin: center;
   animation: cgui-brand-breath 4.5s ease-in-out infinite;
 }
