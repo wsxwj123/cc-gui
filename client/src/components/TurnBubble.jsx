@@ -27,6 +27,24 @@ const INLINE_TOOL_NAMES = new Set([
   'Task', 'Agent', 'Grep', 'Glob', 'WebSearch', 'WebFetch', 'Skill',
 ]);
 
+// AI 有时不走 Skill 工具,而是直接用读取类工具读 <skill>/SKILL.md 加载技能 —
+// 这种调用也按 skill 横幅渲染(否则用户只看到一行普通 Read,不知道技能被加载)。
+// 只认读取类工具(Read / mcp 各家 read_file);Edit/Write 碰 SKILL.md 是在开发
+// 技能,不算加载。路径须含 skills/<name>/SKILL.md(兼容 Windows 反斜杠),
+// skill 名取 SKILL.md 的上一级目录名;命中返回名字,否则 null。
+const SKILL_DOC_PATH_RE = /[/\\]skills[/\\]([^/\\]+)[/\\]SKILL\.md$/i;
+function getSkillDocReadName(toolCall) {
+  const name = toolCall?.name || '';
+  // Read 原生工具,或 mcp 工具名末段形如 read_file / readfile(desktop-commander 等)
+  const tail = name.split('__').pop() || '';
+  const isReader = name === 'Read' || /^read_?file$/i.test(tail);
+  if (!isReader) return null;
+  const p = toolCall.input?.file_path || toolCall.input?.path;
+  if (typeof p !== 'string') return null;
+  const m = SKILL_DOC_PATH_RE.exec(p);
+  return m ? m[1] : null;
+}
+
 // hoverOnly:Skill 横幅 / 子代理卡片直接铺在回复流里,重做按钮常显会破坏版面 —
 // 悬停(移动端弱化常显)才浮现,功能与折叠组内一致。
 function ToolCallWithRetry({ toolCall, onRetryTool, hoverOnly = false, children }) {
@@ -554,6 +572,21 @@ function TurnBubbleInner({ turn, onRetry, onRetryTool, retryActive }) {
                         </ToolCallWithRetry>
                       );
                       return;
+                    }
+                    // 读取类工具直读 skills/<name>/SKILL.md:AI 绕过 Skill 工具手动
+                    // 加载技能,同样按 skill 横幅渲染(小字注明"读取技能文档",
+                    // 展开可看原始调用入参/结果)。
+                    {
+                      const skillDocName = getSkillDocReadName(b.toolCall);
+                      if (skillDocName) {
+                        flushBucket(i);
+                        out.push(
+                          <ToolCallWithRetry key={`b-${i}`} toolCall={b.toolCall} onRetryTool={onRetryTool} hoverOnly>
+                            <SkillCard toolCall={b.toolCall} nameOverride={skillDocName} subLabel="读取技能文档" />
+                          </ToolCallWithRetry>
+                        );
+                        return;
+                      }
                     }
                     // 子代理派发(Task/Agent):独立卡片纵向排列,与普通工具折叠行
                     // 明显区分;点开/放大交互仍由 TaskCard 自身承载。
