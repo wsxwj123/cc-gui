@@ -6694,6 +6694,8 @@ function MobileAppearancePage({ push }) {
   const uiFontScale = useStore((s) => s.uiFontScale);
   const setUiFontScale = useStore((s) => s.setUiFontScale);
   const readingFont = useStore((s) => s.readingFont);
+  const chatMode = useStore((s) => s.chatMode);
+  const setChatMode = useStore((s) => s.setChatMode);
   const famName = THEME_FAMILIES.find((f) => f.id === themeFamily)?.name || themeFamily;
   const fontName = FONT_OPTIONS.find((f) => f.id === readingFont)?.name || readingFont;
   return (
@@ -6711,6 +6713,9 @@ function MobileAppearancePage({ push }) {
             .map((o) => ({ ...o, active: Math.abs(uiFontScale - o.value) < 0.03 }))} />
       </div>
       <MobileMenuRow icon={Type} label="对话正文字体" value={fontName} onClick={() => push('readingfont')} />
+      <div className="px-4 pt-2 pb-2 text-[11px] text-ink-faint font-body">对话显示</div>
+      <MobileMenuRow icon={MessageSquare} label="聊天模式" value={chatMode ? '开' : '关'} chevron={false} onClick={() => setChatMode(!chatMode)} />
+      <div className="px-4 pt-1 text-[10px] text-ink-faint font-body leading-snug">开启后折叠思考/工具/子代理/技能,只看对话文本,配「微信」配色最像微信</div>
     </div>
   );
 }
