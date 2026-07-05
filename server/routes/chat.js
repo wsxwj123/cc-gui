@@ -658,7 +658,10 @@ router.post('/chat/title', async (req, res) => {
 
   // 提示词硬化:模型对超短输入(如 "hi")常输出"当前会话内容比较简单…"这类元话术解释
   // 而非标题(用户实报)。明确"无论多简单都必须给标题、禁止解释",配合下方 finish 的兜底双保险。
-  const prompt = `给下面这段对话起一个简短中文标题。要求:只输出标题本身,不超过 16 个字,不加引号、不加标点、不加任何解释;无论对话内容多简单(哪怕只是一句问候),都必须给出一个描述性标题,禁止输出"内容比较简单""请提供更多信息"之类的说明文字。\n\n用户: ${titleSource}\n${firstAssistant ? `助手: ${firstAssistant}\n` : ''}`;
+  // 另一类失败(用户实报"对话标题命名规则说明"):弱模型把"起标题"这条指令本身当成要概括
+  // 的对话 → 给指令起了标题。修法:把真实对话包进 <对话> 标签,明确只概括标签内内容,并禁止
+  // 对指令本身起标题。配合下方 isMeta 对自指标题(含"标题"+命名/规则等)的兜底拦截。
+  const prompt = `为一段对话生成简短中文标题。真实对话内容在下面的 <对话></对话> 标签之间,只概括标签内用户真正在聊的主题。\n要求:只输出标题本身,不超过 16 个字,不加引号、不加标点、不加任何解释;无论对话内容多简单(哪怕只是一句问候),都必须给出一个描述性标题,禁止输出"内容比较简单""请提供更多信息"之类的说明文字;禁止给这条指令本身起标题(不要出现"命名规则""如何起标题""标题生成"等字样)。\n\n<对话>\n用户: ${titleSource}\n${firstAssistant ? `助手: ${firstAssistant}\n` : ''}</对话>`;
 
   const childEnv = { ...process.env };
   delete childEnv.ANTHROPIC_MODEL;
@@ -710,11 +713,15 @@ router.post('/chat/title', async (req, res) => {
     // 英文错误文本(如 "Not logged in · Please run …")而非标题 → 也要拦截回退,
     // 否则错误提示被当成会话标题(实测临时环境未登录复现)。
     const isErr = /not logged in|please run|invalid|api key|unauthor|rate limit|quota|exceeded|forbidden|error:|failed|usage:/i.test(clean);
+    // 自指标题:模型给"起标题"指令本身起了标题(实报"对话标题命名规则说明")。
+    // 正常概括对话几乎不会出现"标题"二字,故"标题"+命名/规则/生成/说明 组合即判为元话术。
+    const isSelfRef = /标题/.test(clean) && /(命名|规则|生成|说明|起名)/.test(clean);
     const isMeta =
       clean.length > 30 ||
       /[。.]\s*$/.test(clean) ||
       /比较简单|请提供|无法生成|没有(看到|提供)/.test(clean) ||
       (clean.length > 20 && /会话|对话|内容|无法/.test(clean)) ||
+      isSelfRef ||
       isErr;
     const finalTitle = (!clean || isMeta)
       ? titleSource.replace(/\s+/g, ' ').trim().slice(0, 24)
