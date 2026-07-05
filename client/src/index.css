@@ -138,6 +138,75 @@
   --scrollbar-thumb-hover: rgba(120, 80, 50, 0.36);
 }
 
+/* WeChat Light — 微信绿 on 浅灰聊天背景;配合「聊天模式」最像微信对话。 */
+:root[data-cgui-theme="wechat-light"] {
+  --color-canvas: #EDEDED;
+  --color-canvas-warm: #FFFFFF;
+  --color-canvas-deep: #E3E3E3;
+  --color-canvas-sunken: #D6D6D6;
+  --color-ink: #1A1A1A;
+  --color-ink-soft: #2A2A2A;
+  --color-ink-muted: #6B6B6B;
+  --color-ink-faint: #999999;
+  --color-ink-ghost: #C4C4C4;
+  --color-accent: #07C160;
+  --color-accent-hover: #06AD56;
+  --color-accent-subtle: rgba(7, 193, 96, 0.12);
+  --color-accent-muted: rgba(7, 193, 96, 0.28);
+  --glass-base-bg: rgba(237, 237, 237, 0.20);
+  --glass-thick-bg: rgba(255, 255, 255, 0.82);
+  --glass-thin-bg: rgba(245, 245, 245, 0.46);
+  --glass-bar-bg: rgba(245, 245, 245, 0.70);
+  --glass-specular: rgba(255, 255, 255, 0.7);
+  --glass-shade: rgba(0, 0, 0, 0.04);
+  --glass-edge: rgba(7, 193, 96, 0.22);
+  --glass-edge-outer: rgba(0, 0, 0, 0.06);
+  --glass-shadow: 0 1px 1px rgba(0, 0, 0, 0.04), 0 14px 40px -16px rgba(0, 0, 0, 0.16);
+  --scrollbar-thumb: rgba(0, 0, 0, 0.18);
+  --scrollbar-thumb-hover: rgba(0, 0, 0, 0.30);
+}
+
+/* WeChat Dark — 微信深色模式,绿点缀 on 近黑。 */
+:root[data-cgui-theme="wechat-dark"] {
+  --color-canvas: #111111;
+  --color-canvas-warm: #1E1E1E;
+  --color-canvas-deep: #2A2A2A;
+  --color-canvas-sunken: #0A0A0A;
+  --color-ink: #EDEDED;
+  --color-ink-soft: #D0D0D0;
+  --color-ink-muted: #909090;
+  --color-ink-faint: #6B6B6B;
+  --color-ink-ghost: #4A4A4A;
+  --color-accent: #07C160;
+  --color-accent-hover: #38D07F;
+  --color-accent-subtle: rgba(7, 193, 96, 0.16);
+  --color-accent-muted: rgba(7, 193, 96, 0.32);
+  --glass-base-bg: rgba(30, 30, 30, 0.30);
+  --glass-thick-bg: rgba(30, 30, 30, 0.88);
+  --glass-thin-bg: rgba(40, 40, 40, 0.58);
+  --glass-bar-bg: rgba(17, 17, 17, 0.82);
+  --glass-specular: rgba(255, 255, 255, 0.04);
+  --glass-shade: rgba(0, 0, 0, 0.40);
+  --glass-edge: rgba(7, 193, 96, 0.14);
+  --glass-edge-outer: rgba(0, 0, 0, 0.6);
+  --glass-shadow: 0 1px 1px rgba(0, 0, 0, 0.5), 0 14px 40px -16px rgba(0, 0, 0, 0.7);
+  --scrollbar-thumb: rgba(255, 255, 255, 0.12);
+  --scrollbar-thumb-hover: rgba(255, 255, 255, 0.22);
+}
+
+/* 微信主题下:用户消息气泡染成微信绿(右侧「自己」),与 AI 白/深灰气泡(左侧「对方」)区分。
+   仅在微信主题作用域生效,不影响其它主题下用户气泡的 bg-canvas-warm 外观。 */
+:root[data-cgui-theme="wechat-light"] .chat-user-bubble {
+  background: #95EC69 !important;
+  border-color: transparent !important;
+  color: #0A0A0A;
+}
+:root[data-cgui-theme="wechat-dark"] .chat-user-bubble {
+  background: #3EB575 !important;
+  border-color: transparent !important;
+  color: #FFFFFF;
+}
+
 /* OpenCode Dark — opencode default dark, peach primary on charcoal. */
 :root[data-cgui-theme="opencode-dark"] {
   --color-canvas: #0A0A0A;

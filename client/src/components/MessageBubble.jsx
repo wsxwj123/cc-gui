@@ -328,7 +328,7 @@ export function MessageBubble({ message, onRollback, onFork }) {
               <span className="text-[11px] text-ink-faint font-mono">{formatTime(message.timestamp)}</span>
               <span className="text-[13px] font-medium text-ink font-body">你</span>
             </div>
-            <div className="max-w-[85%] bg-canvas-warm border border-canvas-deep rounded-lg px-4 py-2.5">
+            <div className="chat-user-bubble max-w-[85%] bg-canvas-warm border border-canvas-deep rounded-lg px-4 py-2.5">
               {/* L3: 附件在文本上方,符合"附件→说明"的自然阅读顺序;CLI 仍收带 @path 的完整 outbound */}
               {Array.isArray(message.attachments) && message.attachments.length > 0 && (
                 <div className="mb-2 flex flex-wrap gap-2">

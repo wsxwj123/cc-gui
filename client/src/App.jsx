@@ -357,11 +357,33 @@ function ThemeToggle() {
             </div>
           </div>
 
+          {/* 聊天模式:折叠思考/工具/子代理/技能,消息流只留对话文本 */}
+          <ChatModeToggle />
+
           {/* ── Loading 动画样式(仅弹窗打开时渲染,30 个动画不常驻) ── */}
           <LoadingStylePicker />
         </div>
       )}
     </div>
+  );
+}
+
+// 聊天模式开关:折叠 AI 的思考/工具/子代理/技能调用,消息流只留对话文本,像微信聊天。
+// 全局 store.chatMode,配合「微信」主题最像微信对话。
+function ChatModeToggle() {
+  const chatMode = useStore((s) => s.chatMode);
+  const setChatMode = useStore((s) => s.setChatMode);
+  return (
+    <button onClick={() => setChatMode(!chatMode)} className="w-full flex items-center gap-2 py-1 text-left">
+      <MessageSquare size={12} className="text-ink-muted shrink-0" />
+      <div className="min-w-0 flex-1">
+        <div className="text-[11px] text-ink font-body font-medium">聊天模式</div>
+        <div className="text-[9px] text-ink-faint font-body leading-tight">折叠思考/工具/子代理/技能,只看对话文本</div>
+      </div>
+      <span className={`shrink-0 w-8 h-[18px] rounded-full transition-colors relative ${chatMode ? 'bg-accent' : 'bg-canvas-sunken'}`}>
+        <span className={`absolute top-[2px] w-[14px] h-[14px] rounded-full bg-white shadow transition-all ${chatMode ? 'left-[16px]' : 'left-[2px]'}`} />
+      </span>
+    </button>
   );
 }
 

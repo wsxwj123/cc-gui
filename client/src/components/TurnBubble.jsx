@@ -429,6 +429,22 @@ function UsageDisplay({ usage, model, costUsd }) {
 // turn streams into separate state, so memo lets the old turns skip re-render.
 function TurnBubbleInner({ turn, onRetry, onRetryTool, onFork, retryActive }) {
   const [showThinking, setShowThinking] = useState(false);
+  const chatMode = useStore((s) => s.chatMode);
+  const [chatExpanded, setChatExpanded] = useState(false);
+  // 聊天模式:未展开时把思考/工具/子代理/skill 折叠成一行"思考并执行了 N 步操作 ›",
+  // 点开还原完整过程;展开后给一行"收起过程"。两条在有序 blocks 与 legacy 路径共用。
+  const chatFoldBar = (label) => (
+    <button key="chat-fold" onClick={() => setChatExpanded(true)}
+      className="flex items-center gap-1.5 text-[11px] text-ink-faint hover:text-ink-muted cursor-pointer font-body mt-1">
+      <ChevronRight size={11} /><span>{label}</span>
+    </button>
+  );
+  const chatUnfoldBar = (
+    <button key="chat-unfold" onClick={() => setChatExpanded(false)}
+      className="flex items-center gap-1.5 text-[11px] text-ink-faint hover:text-ink-muted cursor-pointer font-body mt-1">
+      <ChevronDown size={11} /><span>收起过程</span>
+    </button>
+  );
 
   // Historical turns loaded from .jsonl may have these fields absent or as a
   // bare string instead of an array — guard so .join() never throws.
@@ -525,6 +541,8 @@ function TurnBubbleInner({ turn, onRetry, onRetryTool, onFork, retryActive }) {
               {(() => {
                 const out = [];
                 let bucket = [];
+                let hiddenThinking = false;  // 聊天模式:是否折叠了思考
+                let hiddenTools = 0;         // 聊天模式:折叠的工具/子代理/skill 步数(清单不计)
                 const flushBucket = (keyHint) => {
                   if (bucket.length > 0) {
                     out.push(<ToolCallsGroup key={`bucket-${keyHint}`} toolCalls={bucket} onRetryTool={onRetryTool} />);
@@ -545,6 +563,15 @@ function TurnBubbleInner({ turn, onRetry, onRetryTool, onFork, retryActive }) {
                   if (b.type === 'text' && b.content) {
                     flushBucket(i);
                     out.push(<MarkdownRenderer key={`b-${i}`} content={b.content} />);
+                    return;
+                  }
+                  // 聊天模式(未展开):思考/工具/子代理/skill 一律收起,只统计,末尾出可点开条。
+                  if (chatMode && !chatExpanded) {
+                    if (b.type === 'thinking' && b.content) { hiddenThinking = true; return; }
+                    if (b.type === 'tool_use' && b.toolCall) {
+                      if (!TASK_TOOL_NAMES.has(b.toolCall.name)) hiddenTools++;
+                      return;
+                    }
                     return;
                   }
                   if (b.type === 'thinking' && b.content) {
@@ -617,6 +644,15 @@ function TurnBubbleInner({ turn, onRetry, onRetryTool, onFork, retryActive }) {
                   }
                 });
                 flushBucket('end');
+                if (chatMode && !chatExpanded && (hiddenThinking || hiddenTools > 0)) {
+                  const label = hiddenThinking && hiddenTools > 0
+                    ? `思考并执行了 ${hiddenTools} 步操作`
+                    : hiddenTools > 0 ? `执行了 ${hiddenTools} 步操作` : '思考过程';
+                  out.push(chatFoldBar(label));
+                }
+                if (chatMode && chatExpanded && renderBlocks.some((b) => (b.type === 'thinking' && b.content) || (b.type === 'tool_use' && b.toolCall && !TASK_TOOL_NAMES.has(b.toolCall.name)))) {
+                  out.push(chatUnfoldBar);
+                }
                 if (showRetrying && retryActive) {
                   out.push(
                     <div key="retrying" className="flex items-center gap-2 text-[12px] text-accent font-body px-1 py-1.5">
@@ -631,7 +667,7 @@ function TurnBubbleInner({ turn, onRetry, onRetryTool, onFork, retryActive }) {
           ) : (
             <>
               {/* Legacy path for historical messages (no blocks array) */}
-              {fullThinking && (
+              {fullThinking && !(chatMode && !chatExpanded) && (
                 <div className="mb-3">
                   <button
                     onClick={() => setShowThinking(!showThinking)}
@@ -650,16 +686,23 @@ function TurnBubbleInner({ turn, onRetry, onRetryTool, onFork, retryActive }) {
               )}
               {fullText && <MarkdownRenderer content={fullText} />}
               {/* 任务清单只走输入框上方常驻面板,legacy 路径同样不再内联渲染(见上)。 */}
-              {hasInlineCalls && (
+              {!(chatMode && !chatExpanded) && hasInlineCalls && (
                 <div className="mt-2 space-y-2">
                   {inlineCalls.map((tc, i) => (
                     <InlineToolCard key={tc.id || `inline-${i}`} toolCall={tc} onRetryTool={onRetryTool} />
                   ))}
                 </div>
               )}
-              {hasGroupedCalls && (
+              {!(chatMode && !chatExpanded) && hasGroupedCalls && (
                 <div className="mt-2"><ToolCallsGroup toolCalls={groupedCalls} onRetryTool={onRetryTool} /></div>
               )}
+              {/* 聊天模式折叠/收起(legacy 路径) */}
+              {chatMode && !chatExpanded && (fullThinking || hasInlineCalls || hasGroupedCalls) &&
+                chatFoldBar((() => {
+                  const n = inlineCalls.length + groupedCalls.length;
+                  return fullThinking && n > 0 ? `思考并执行了 ${n} 步操作` : n > 0 ? `执行了 ${n} 步操作` : '思考过程';
+                })())}
+              {chatMode && chatExpanded && (fullThinking || hasInlineCalls || hasGroupedCalls) && chatUnfoldBar}
               {legacyShowRetrying && retryActive && (
                 <div className="flex items-center gap-2 text-[12px] text-accent font-body px-1 py-1.5">
                   <Loader2 size={12} className="animate-spin" />

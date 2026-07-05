@@ -74,6 +74,9 @@ export const THEME_FAMILIES = [
   { id: 'flexoki', name: 'Flexoki',
     light: { id: 'flexoki-light', bg: '#F2F0E5', bg2: '#E6E4D9', fg: '#100F0F', accent: '#205EA6' },
     dark:  { id: 'flexoki-dark',  bg: '#1C1B1A', bg2: '#0A0908', fg: '#CECDC3', accent: '#4385BE' } },
+  { id: 'wechat', name: '微信',
+    light: { id: 'wechat-light', bg: '#EDEDED', bg2: '#E3E3E3', fg: '#1A1A1A', accent: '#07C160' },
+    dark:  { id: 'wechat-dark',  bg: '#1A1A1A', bg2: '#0D0D0D', fg: '#EDEDED', accent: '#07C160' } },
 ];
 
 export function systemPrefersDark() {
@@ -336,6 +339,12 @@ export const useStore = create((set, get) => ({
   // 使系统提示保持静态、提升第三方 provider 的前缀缓存命中。默认关(官方渠道无需开启)。
   excludeDynamicSystemPrompt: (() => {
     try { return localStorage.getItem('cgui-exclude-dynamic-prompt') === '1'; } catch { return false; }
+  })(),
+
+  // 聊天模式(全局,localStorage):开启后消息流只显示 AI 最终文本 + 用户消息,把
+  // thinking / 工具 / 子代理 / skill 折叠成一行可点开的标记,像微信聊天。默认关。
+  chatMode: (() => {
+    try { return localStorage.getItem('cgui-chat-mode') === '1'; } catch { return false; }
   })(),
 
   // Theme as a (family, tone) pair. `cguiTheme` is the derived data-cgui-theme
@@ -817,6 +826,11 @@ export const useStore = create((set, get) => ({
   setExcludeDynamicSystemPrompt: (on) => {
     set({ excludeDynamicSystemPrompt: !!on });
     try { localStorage.setItem('cgui-exclude-dynamic-prompt', on ? '1' : '0'); } catch {}
+  },
+
+  setChatMode: (on) => {
+    set({ chatMode: !!on });
+    try { localStorage.setItem('cgui-chat-mode', on ? '1' : '0'); } catch {}
   },
 
   // 对话区自定义背景。传 null 恢复默认;对象整体替换(引用变更触发订阅组件重渲)。
