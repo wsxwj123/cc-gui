@@ -619,6 +619,12 @@ function CcUpdater() {
   const [updating, setUpdating] = useState(false);
   const [result, setResult] = useState(null);
   const [logLines, setLogLines] = useState([]);   // CN-2 更新实时日志
+  const [installs, setInstalls] = useState(null); // 机器上检测到的所有 claude 安装(null=未加载)
+
+  const loadInstalls = async () => {
+    try { setInstalls((await (await fetch('/api/claude-installs')).json()).installs || []); }
+    catch { setInstalls([]); }
+  };
 
   useEffect(() => {
     fetch('/api/claude-version-check').then((r) => r.json()).then((d) => {
@@ -626,8 +632,25 @@ function CcUpdater() {
       // BI-3: 挂载时已拿到 hasUpdate/latestVersion,直接置 ok 让"一键更新"按钮立即显示,
       // 不再要求用户先点"检查更新"(更新弹窗"前往更新"落到设置页即见一键更新)。
       setState({ status: d.installed === false ? 'idle' : (d.error ? 'err' : 'ok'), ...d });
+      if (d.installed !== false) loadInstalls();
     }).catch(() => {});
   }, []);
+
+  // 切换 GUI 用哪个 claude(不重装)。path 空串=回到自动优先级。切完重刷列表 + 版本徽章。
+  const switchActive = async (path) => {
+    setUpdating(true);
+    try {
+      const r = await fetch('/api/claude-active', {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path }),
+      });
+      if (!r.ok) { const d = await r.json().catch(() => ({})); throw new Error(d.error || 'HTTP ' + r.status); }
+      await loadInstalls();
+      await check();
+    } catch (e) {
+      setResult({ ok: false, error: e.message || '切换失败' });
+    }
+    setUpdating(false);
+  };
 
   const check = async () => {
     setState((s) => ({ ...s, status: 'checking' }));
@@ -778,26 +801,43 @@ function CcUpdater() {
         )
       )}
       {state.status === 'err' && <div className="text-[12px] text-error">{state.error}</div>}
-      {/* 安装方式切换:已装状态下换一种方式重装(如 native→npm,之后 npm 更新更方便)。
-          复用一键安装端点,打开终端以目标方式重装。 */}
-      {state.installed !== false && state.currentVersion && (
+      {/* 切换使用哪个 claude:机器上多处装了 claude 时(npm 版 + 原生版并存),GUI 默认按
+          优先级自动选第一个命中的。这里列出检测到的全部安装,让用户手动钉死用哪个(不重装)。
+          选"自动"清除钉死回优先级。切完 resolver 立即用新的,聊天/agent/MCP 无需重启。 */}
+      {state.installed !== false && Array.isArray(installs) && installs.length > 0 && (
         <div className="border-t border-canvas-deep/60 pt-2 space-y-1.5">
           <div className="text-[11px] text-ink-muted font-body">
-            安装方式 <span className="text-ink-faint">(当前:{METHOD_LABEL[state.method] || state.method || '未知'})</span>
+            使用哪个 Claude <span className="text-ink-faint">(检测到 {installs.length} 处安装)</span>
           </div>
-          <div className="flex items-center gap-1.5">
-            {[['npm', 'npm'], ['native', '官方安装器']].map(([m, label]) => {
-              const isCur = state.method === m;
+          <div className="space-y-1">
+            {installs.map((it) => {
+              const label = METHOD_LABEL[it.method] || it.method || '未知';
               return (
-                <button key={m} disabled={updating || isCur} onClick={() => doInstall(m, true)}
-                  className={`px-2.5 py-1 text-[11px] rounded-md font-body border transition-colors ${isCur ? 'bg-accent/10 border-accent/40 text-accent cursor-default' : 'bg-canvas-warm border-canvas-deep text-ink-muted hover:text-ink disabled:opacity-50'}`}>
-                  {label}{isCur ? ' · 当前' : '(切换)'}
+                <button key={it.path} disabled={updating || it.active} onClick={() => switchActive(it.path)}
+                  className={`w-full flex items-center gap-2 px-2.5 py-1.5 text-left rounded-md border transition-colors ${it.active ? 'bg-accent/10 border-accent/40 cursor-default' : 'bg-canvas-warm border-canvas-deep hover:border-accent/40 disabled:opacity-50'}`}>
+                  <span className={`shrink-0 w-3.5 h-3.5 rounded-full border grid place-items-center ${it.active ? 'border-accent' : 'border-ink-faint'}`}>
+                    {it.active && <span className="w-2 h-2 rounded-full bg-accent" />}
+                  </span>
+                  <span className="min-w-0 flex-1">
+                    <span className="text-[11.5px] font-body text-ink">{label}{it.version ? ` · v${it.version}` : ''}{it.active ? ' · 当前' : ''}</span>
+                    <span className="block text-[10px] font-mono text-ink-faint truncate">{it.path}</span>
+                  </span>
+                  {!it.active && <span className="shrink-0 text-[10.5px] text-accent font-body">切换</span>}
                 </button>
               );
             })}
           </div>
           <div className="text-[10.5px] text-ink-faint font-body leading-snug">
-            换一种方式会打开终端重装 Claude Code。<b>npm</b> 更新方便(<code>npm install -g</code>),需 Node ≥ 20;<b>官方安装器</b> 自包含、不依赖 Node、可 <code>claude upgrade</code> 自更新。装好后点上方"检查更新"重新识别;若仍显示旧方式,是 PATH 里旧安装更靠前(旧的不会被自动删除)。
+            切换只是让 GUI 改用另一处已装的 claude(<b>不重装、不下载</b>),立即对聊天/子代理/MCP 生效。
+            想装一种当前没有的方式,用下面的按钮打开终端安装。
+          </div>
+          <div className="flex items-center gap-1.5 pt-0.5">
+            {[['npm', 'npm 版'], ['native', '官方安装器版']].map(([m, label]) => (
+              <button key={m} disabled={updating} onClick={() => doInstall(m, true)}
+                className="px-2.5 py-1 text-[11px] rounded-md font-body border bg-canvas-warm border-canvas-deep text-ink-muted hover:text-ink disabled:opacity-50">
+                安装{label}
+              </button>
+            ))}
           </div>
         </div>
       )}

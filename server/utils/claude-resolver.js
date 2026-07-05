@@ -11,15 +11,26 @@
 // (原生安装/homebrew/npm 自定义 prefix/volta/pnpm/yarn/nvm/fnm/scoop 等)。
 // 命中即缓存(按 mtime + 存在性失效);未命中短 TTL 负缓存,装好后无需重启即可生效。
 import { execFileSync } from 'child_process';
-import { existsSync, statSync, readdirSync } from 'fs';
+import { existsSync, statSync, readdirSync, readFileSync, writeFileSync, mkdirSync, realpathSync } from 'fs';
 import { homedir } from 'os';
-import { join } from 'path';
+import { join, dirname } from 'path';
 
 const isWin = process.platform === 'win32';
 
 let _cache = null;   // { path, via, mtimeMs } | null
 let _missAt = 0;     // 上次全部策略落空的时间戳(负缓存)
 const MISS_TTL_MS = 15_000;
+
+// 用户手动指定用哪个 claude(设置→更新页"切换")。多个安装并存时,自动优先级
+// (PATH→login-shell→npm-prefix→已知路径)会选中第一个命中的,用户可能想用另一个。
+// 存独立 JSON 文件、同步可读 —— resolver 在同步请求路径上,不能依赖异步 prefs 路由。
+const OVERRIDE_FILE = join(homedir(), '.claude-gui', 'claude-bin.json');
+function readOverride() {
+  try {
+    const p = JSON.parse(readFileSync(OVERRIDE_FILE, 'utf-8'))?.path;
+    return (typeof p === 'string' && p) ? p : '';
+  } catch { return ''; }
+}
 
 function safeExec(file, args, timeout = 5000) {
   try { return execFileSync(file, args, { timeout }).toString().trim(); } catch { return ''; }
@@ -130,6 +141,8 @@ function fixedCandidates() {
 }
 
 function doResolve() {
+  const ov = readOverride();
+  if (ov && existsSync(ov)) return { path: ov, via: 'override' };
   const p1 = fromPath();
   if (p1 && existsSync(p1)) return { path: p1, via: 'PATH' };
   const p2 = fromLoginShell();
@@ -178,4 +191,41 @@ export function claudeCommand(args = []) {
     return { file: 'cmd.exe', args: ['/c', bin, ...args] };
   }
   return { file: bin, args };
+}
+
+/**
+ * 列出机器上所有能找到的 claude 安装(跑全部解析策略,不止第一个命中)。
+ * 按真实路径(解 symlink)去重 —— PATH 命中的 ~/.local/bin/claude 与已知候选
+ * 里的同一个软链会指向同一 real,只算一个;npm 版和原生版 real 不同,各算一个。
+ * 返回 [{ path, real }],path 是首次发现的入口路径(可直接执行)。
+ */
+export function listClaudeInstalls() {
+  const seen = new Set();
+  const out = [];
+  const add = (p) => {
+    if (!p || !existsSync(p)) return;
+    let real = p;
+    try { real = realpathSync(p); } catch { return; }
+    if (seen.has(real)) return;
+    seen.add(real);
+    out.push({ path: p, real });
+  };
+  add(fromPath());
+  add(fromLoginShell());
+  for (const p of fromNpmPrefix()) add(p);
+  for (const p of fixedCandidates()) add(p);
+  return out;
+}
+
+/** 读当前覆盖路径('' = 未设,走自动优先级)。 */
+export function getClaudeOverride() {
+  return readOverride();
+}
+
+/** 钉死用哪个 claude;传空串清除回自动。写完清缓存,下次解析立即生效。 */
+export function setClaudeOverride(path) {
+  mkdirSync(dirname(OVERRIDE_FILE), { recursive: true });
+  writeFileSync(OVERRIDE_FILE, JSON.stringify({ path: path || '' }, null, 2));
+  _cache = null;
+  _missAt = 0;
 }

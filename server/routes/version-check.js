@@ -1,6 +1,6 @@
 import { Router } from 'express';
-import { readFileSync, writeFileSync, existsSync } from 'fs';
-import { resolveClaude } from '../utils/claude-resolver.js';
+import { readFileSync, writeFileSync, existsSync, realpathSync } from 'fs';
+import { resolveClaude, listClaudeInstalls, getClaudeOverride, setClaudeOverride } from '../utils/claude-resolver.js';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import { tmpdir, homedir } from 'os';
@@ -194,23 +194,31 @@ async function fetchNativeLatest() {
 // 路径解析统一走 claude-resolver(PATH → login shell → npm 全局前缀 → 已知安装
 // 路径),与 claudeSpawn / SDK / cli-check 同源 —— 报告版本、执行更新的都是 GUI
 // 实际会用的那个安装。此处只负责按路径特征分类安装方式(native/brew/npm)。
+// 按真实落点(解 symlink 后)把 claude 安装分类成 native/npm/brew。Windows 无软链概念,
+// 直接用入口路径匹配;mac/linux 传 readlink -f 解析后的 target。
+function classifyClaudePath(real) {
+  if (process.platform === 'win32') {
+    if (/AnthropicClaude|\\\.claude\\local|\\\.local\\bin|\\claude\\versions\\/i.test(real)) return 'native';
+    if (/npm|node_modules|nodejs/i.test(real)) return 'npm';
+    return 'native';  // 兜底按 native 自更新(claude update 在 Windows 亦支持)
+  }
+  if (/\/\.local\/(share|bin)\/claude|\/claude\/versions\//.test(real)) return 'native';
+  if (/Caskroom|Cellar|\/brew\//i.test(real)) return 'brew';
+  if (/node_modules|\/npm|\.nvm|\.npm-global|\/lib\/node/.test(real)) return 'npm';
+  return 'unknown';
+}
+
 async function detectInstall() {
   const hit = resolveClaude();
   if (!hit) return { method: 'unknown', path: '', via: null };
-  let real = hit.path;
-  if (process.platform === 'win32') {
-    if (/AnthropicClaude|\\\.claude\\local|\\\.local\\bin|\\claude\\versions\\/i.test(real)) return { method: 'native', path: real, via: hit.via };
-    if (/npm|node_modules|nodejs/i.test(real)) return { method: 'npm', path: real, via: hit.via };
-    return { method: 'native', path: real, via: hit.via };  // 兜底按 native 自更新(claude update 在 Windows 亦支持)
-  }
+  const real = hit.path;
   // 解析软链(~/.local/bin/claude → ~/.local/share/claude/versions/x.y.z)以便按
-  // 真实落点分类;分类用 real,返回的 path 保留解析到的入口路径(可直接执行)。
+  // 真实落点分类;分类用 target,返回的 path 保留解析到的入口路径(可直接执行)。
   let target = real;
-  try { const r = await execFileP('readlink', ['-f', real], { timeout: 5000 }); target = r.stdout.trim() || real; } catch {}
-  if (/\/\.local\/(share|bin)\/claude|\/claude\/versions\//.test(target)) return { method: 'native', path: real, via: hit.via };
-  if (/Caskroom|Cellar|\/brew\//i.test(target)) return { method: 'brew', path: real, via: hit.via };
-  if (/node_modules|\/npm|\.nvm|\.npm-global|\/lib\/node/.test(target)) return { method: 'npm', path: real, via: hit.via };
-  return { method: 'unknown', path: real, via: hit.via };
+  if (process.platform !== 'win32') {
+    try { const r = await execFileP('readlink', ['-f', real], { timeout: 5000 }); target = r.stdout.trim() || real; } catch {}
+  }
+  return { method: classifyClaudePath(target), path: real, via: hit.via };
 }
 
 // 按安装方式给出更新命令。native 用「绝对路径 + update」自更新,避免终端里裸 `claude`
@@ -423,6 +431,39 @@ router.post('/claude-install', async (req, res) => {
     res.json({ ok: true, launched: true, command: cmd, method, platform: process.platform, proxy: proxyUrl });
   } catch (err) {
     res.json({ ok: false, error: err.message || '启动终端失败', command: cmd });
+  }
+});
+
+// GET /api/claude-installs
+// 列出机器上所有 claude 安装(不止当前用的那个)+ 各自版本 + 分类,并标出当前
+// 实际激活的是哪个(供设置页"切换用哪个 claude")。overridden = 用户是否已手动钉死。
+router.get('/claude-installs', async (_req, res) => {
+  const list = listClaudeInstalls();
+  const override = getClaudeOverride();
+  const active = resolveClaude();  // 含 override,当前 spawn/SDK 实际会用的那个
+  let activeReal = '';
+  if (active) { try { activeReal = realpathSync(active.path); } catch { activeReal = active.path; } }
+  const installs = await Promise.all(list.map(async (it) => ({
+    path: it.path,
+    method: classifyClaudePath(it.real),
+    version: await getClaudeVersion(it.path),   // 失败为 null,best-effort
+    active: it.real === activeReal,
+  })));
+  res.json({ installs, overridden: !!override, override, activeVia: active?.via || null });
+});
+
+// PUT /api/claude-active { path }
+// 钉死 GUI 用哪个 claude;path 传空串 → 清除,回到自动优先级。写覆盖文件并强制
+// resolver 重解析,下次聊天/agent/MCP spawn 立即用新的(无需重启)。
+router.put('/claude-active', (req, res) => {
+  const p = typeof req.body?.path === 'string' ? req.body.path.trim() : '';
+  if (p && !existsSync(p)) return res.status(400).json({ error: '该路径不存在或已失效' });
+  try {
+    setClaudeOverride(p);
+    const active = resolveClaude({ refresh: true });
+    res.json({ ok: true, active: active?.path || '', via: active?.via || null });
+  } catch (e) {
+    res.status(500).json({ error: e.message || '写入失败' });
   }
 });
 
