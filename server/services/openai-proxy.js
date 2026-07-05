@@ -31,10 +31,6 @@ export function setOpenAIUpstream(next) {
   return upstream;
 }
 
-export function getOpenAIUpstream() {
-  return upstream;
-}
-
 export function getProxyPort() {
   return boundPort;
 }
@@ -531,8 +527,4 @@ export function startOpenAIProxy(port = PROXY_PORT) {
       resolve(boundPort);
     });
   });
-}
-
-export function stopOpenAIProxy() {
-  if (server) { try { server.close(); } catch {} server = null; boundPort = 0; }
 }

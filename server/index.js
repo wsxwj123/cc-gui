@@ -44,7 +44,7 @@ import {
 import { setupFileWatcher } from './services/file-watcher.js';
 import { clients, broadcast } from './broadcast.js';
 import { getDefaultModel, getAvailableModels, setDefaultModel } from './services/model-resolver.js';
-import { readdir, readFile, writeFile, mkdir } from 'fs/promises';
+import { readdir, readFile } from 'fs/promises';
 import { homedir, networkInterfaces } from 'os';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));

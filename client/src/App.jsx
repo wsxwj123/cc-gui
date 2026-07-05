@@ -1436,10 +1436,8 @@ function SessionList() {
   const splitMode = useStore((s) => s.splitMode);
   const activeTabIndex = useStore((s) => s.activeTabIndex);
   const setActiveTabSession = useStore((s) => s.setActiveTabSession);
-  const secondarySession = useStore((s) => s.secondarySession);
   const paneSessions = useStore((s) => s.paneSessions);
-  // 焦点 pane 当前的 session,决定本列表里哪条强高亮。原来用 selectedSession +
-  // secondarySession 两 pane 都高亮,N-pane 下其他 pane 完全没体现,且看不出焦点。
+  // 焦点 pane 当前的 session,决定本列表里哪条强高亮(按当前活跃 tab 取,N-pane 下只高亮焦点)。
   const focusSession = (paneSessions && paneSessions[activeTabIndex]) || null;
   const [forking, setForking] = useState(null);
   const [showArchived, setShowArchived] = useState(false);
@@ -2622,7 +2620,6 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   }, [selectedSession?.model, messages, providerEpoch]);
   const currentModel = pinnedModel || historyModel || globalModel;
   const modelBySession = useStore((s) => s.modelBySession);
-  const messagesEndRef = useRef(null);
   const containerRef = useRef(null);
   const [autoScroll, setAutoScroll] = useState(true);
   // AZ3:用户是否主动滚离底部(自动吸底的权威闸门)。原本吸底只看几何阈值 → 流式
@@ -5136,7 +5133,6 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
               )}
             </>
           )}
-          <div ref={messagesEndRef} />
         </div>
 
       {!autoScroll && (
@@ -7438,8 +7434,8 @@ export default function App() {
         </div>
         <div className="flex items-center gap-1 flex-wrap justify-end min-w-0 ml-auto">
           <span data-tour="provider-switcher" className="inline-flex"><ProviderSwitcher /></span>
-          <span data-tour="model-selector" className="inline-flex"><ModelSelector placement="bottom" align="right" compact permKey={permKey} /></span>
-          <span data-tour="effort-selector" className="inline-flex"><EffortSelector placement="bottom" align="right" permKey={permKey} /></span>
+          <span data-tour="model-selector" className="inline-flex"><ModelSelector compact permKey={permKey} /></span>
+          <span data-tour="effort-selector" className="inline-flex"><EffortSelector permKey={permKey} /></span>
           <span data-tour="permission-selector" className="inline-flex"><PermissionModeSelector permKey={permKey} /></span>
           <span data-tour="agent-selector" className="inline-flex"><AgentModeSelector permKey={permKey} sessionStarted={!!activeSession?.sessionId} /></span>
           <span data-tour="remote-control" className="inline-flex"><RemoteControlButton session={activeSession} /></span>

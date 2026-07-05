@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { BarChart3, Cpu, Database, Calendar, ArrowLeft, RefreshCw, FolderOpen, Download, FileText } from 'lucide-react';
+import { Cpu, Calendar, RefreshCw, FolderOpen, Download, FileText } from 'lucide-react';
 import { ModelBadge, modelProvider } from './ModelBadge.jsx';
 import { ArtifactPreview } from './ArtifactPreview.jsx';
 import { computeCost, formatCost } from '../utils/pricing.js';

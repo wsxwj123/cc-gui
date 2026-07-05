@@ -264,20 +264,11 @@ export const useStore = create((set, get) => ({
     completionToasts: s.completionToasts.filter((x) => x.id !== id),
   })),
 
-  // ── Legacy aliases for Phase 1 callers (kept for back-compat) ──
-  // splitMode is `paneCount > 1`; secondarySession/Messages mirror pane 1.
-  // These fields are also mutated by the new pane actions below so reads
-  // stay in sync. Eventually App.jsx + components will be refactored to use
-  // pane APIs directly and these can be dropped.
+  // splitMode = 派生自 `paneCount > 1`,导出给按 `if (splitMode)` 分支的调用方(App.jsx 多处)。
   splitMode: (() => {
     const n = parseInt(readLs('cgui-pane-count', 1), 10);
     return Number.isFinite(n) && n > 1;
   })(),
-  secondarySession: (() => {
-    const arr = readLs('cgui-pane-sessions', null);
-    return Array.isArray(arr) ? arr[1] || null : null;
-  })(),
-  secondaryMessages: [],
 
   // In-flight subagent state keyed by the parent Task tool_use.id. Each entry:
   //   { id, name, description, status, startedAt,
@@ -769,8 +760,6 @@ export const useStore = create((set, get) => ({
       patch.selectedSession = session;
       writeLs('cgui-selected-session', session);
     }
-    // Mirror to legacy `secondarySession` (pane 1) so Phase-1-era reads work.
-    if (idx === 1) patch.secondarySession = session;
     set(patch);
   },
   setPaneMessages: (i, messages) => {
@@ -779,16 +768,8 @@ export const useStore = create((set, get) => ({
     arr[idx] = Array.isArray(messages) ? messages : [];
     const patch = { paneMessages: arr };
     if (idx === 0) patch.messages = arr[0];
-    if (idx === 1) patch.secondaryMessages = arr[1];
     set(patch);
   },
-  // ── Legacy Phase-1 aliases ─────────────────────────────────
-  toggleSplitMode: () => {
-    const cur = get();
-    get().setPaneCount(cur.paneCount > 1 ? 1 : 2);
-  },
-  setSecondarySession: (session) => get().setPaneSession(1, session),
-  setSecondaryMessages: (messages) => get().setPaneMessages(1, messages),
   // Writes a session into whichever pane is active. Used by SessionList click.
   setActiveTabSession: (session) => {
     const idx = get().activeTabIndex;
@@ -1000,11 +981,11 @@ export const useStore = create((set, get) => ({
 
   // Fetch messages for a session.
   //   opts.silent  → don't toggle global loading (used by background refresh)
-  //   opts.tab=1   → write into secondaryMessages instead of messages
-  //                  (tab=1 always forces silent so tab 0 doesn't flash loader)
+  //   opts.tab=N   → write into pane N (paneMessages[N]) instead of pane 0
+  //                  (tab≠0 always forces silent so tab 0 doesn't flash loader)
   fetchMessages: async (sessionId, projectHash, opts = {}) => {
-    // tab 0..5 → write into paneMessages[tab] via setPaneMessages (which also
-    // mirrors the legacy messages/secondaryMessages slots). Only tab 0 drives
+    // tab 0..5 → write into paneMessages[tab] via setPaneMessages (tab 0 also
+    // mirrors the legacy `messages` slot). Only tab 0 drives
     // the global loading flag; other panes load silently so they don't flash
     // the whole-screen loader.
     const tab = Number.isInteger(opts.tab) && opts.tab >= 0 && opts.tab <= 5 ? opts.tab : 0;

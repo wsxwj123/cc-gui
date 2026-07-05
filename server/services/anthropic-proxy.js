@@ -34,10 +34,6 @@ export function setAnthropicUpstream(next) {
   return upstream;
 }
 
-export function getAnthropicUpstream() {
-  return upstream;
-}
-
 export function getAnthropicProxyPort() {
   return boundPort;
 }
@@ -187,8 +183,4 @@ export function startAnthropicProxy(port = ANTHROPIC_PROXY_PORT) {
       resolve(boundPort);
     });
   });
-}
-
-export function stopAnthropicProxy() {
-  if (server) { try { server.close(); } catch {} server = null; boundPort = 0; }
 }

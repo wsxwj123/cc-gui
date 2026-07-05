@@ -22,7 +22,7 @@ export function loadConfig() {
   } catch {}
   return {};
 }
-export function saveConfig(obj) {
+function saveConfig(obj) {
   mkdirSync(dirname(CONFIG_PATH), { recursive: true });
   writeFileSync(CONFIG_PATH, JSON.stringify(obj, null, 2));
 }
