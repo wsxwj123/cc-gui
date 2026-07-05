@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { spawn, execFileSync } from 'child_process';
 import { dirname, join as pathJoin, isAbsolute, parse as pathParse } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { readFileSync, statSync, writeFileSync, unlinkSync, readdirSync, watch, existsSync } from 'node:fs';
+import { readFileSync, statSync, writeFileSync, unlinkSync, readdirSync, watch, existsSync, mkdirSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import { getDefaultModel } from '../services/model-resolver.js';
@@ -681,8 +681,14 @@ router.post('/chat/title', async (req, res) => {
     // 会话列表里会冒出"给下面这段对话起标题…"的空白会话(刷新后可见,用户报告 #5)。
     const titleArgs = ['-p', prompt, '--permission-mode', 'plan', '--no-session-persistence'];
     if (model) titleArgs.push('--model', model);
+    // cwd 物理隔离(用户二报:标题 prompt 仍以会话形态冒头)。标题 prompt 自包含,根本
+    // 不需要项目上下文;此前 cwd 用会话项目目录,CLI 任何落盘/索引行为(版本差异、超时
+    // 被杀、错误路径)都会把"标题会话"挂进【用户项目】的会话列表。固定到专用 tmp 目录后,
+    // 即便上游行为再变,残留也只会出现在无人查看的 tmp hash 下,与用户项目彻底绝缘。
+    const titleCwd = pathJoin(tmpdir(), 'cgui-title');
+    try { mkdirSync(titleCwd, { recursive: true }); } catch {}
     proc = claudeSpawn(titleArgs, {
-      cwd: typeof req.body?.cwd === 'string' && req.body.cwd ? req.body.cwd : homedir(),
+      cwd: titleCwd,
       stdio: ['ignore', 'pipe', 'pipe'],
       env: childEnv,
     });
