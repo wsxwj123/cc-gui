@@ -7,6 +7,12 @@ import { createPortal } from 'react-dom';
 const EMPTY_ARRAY = Object.freeze([]);
 // 已尝试过自动生成标题的 sessionId(无论成功失败),防止失败时每轮重复 spawn 标题进程。
 const titleAttempted = new Set();
+// Draft 会话唯一标识。draft key(`draft-<projectHash>`)按项目生成,同项目先后两个 draft
+// 完全同构无法区分 → 会话A(draft)流式中 init 在途时用户新建 draft B,init 到达会把 A 的
+// session_id 绑到 B 的 pane(getLocalSession() 只判"是 draft"),B 首条消息就 --resume 进
+// 会话A(用户实报串扰)。每个 draft 发一个 nonce,init 绑定前比对"发起流的 draft"===当前。
+let _draftSeq = 0;
+const newDraftId = () => `d${Date.now()}-${++_draftSeq}`;
 // CQ-15:被用户停止的 chat 进程 pid,跨所有 SessionDetail 实例(分屏多 pane)共享。
 // 原来是每个 pane 私有的 useRef(new Set()),pane A 停的 pid,pane B 的 backgroundPid 轮询
 // 感知不到 → 可能把 B 自己仍在跑的进程当成「需要 reattach」,reattach 的 finally 又清空 B
@@ -1552,6 +1558,7 @@ function SessionList() {
     // slot (split or single).
     const draft = {
       draft: true,
+      draftId: newDraftId(),
       sessionId: null,
       projectHash: selectedProject.hash,
       projectPath: selectedProject.path,
@@ -1593,6 +1600,7 @@ function SessionList() {
     seedNewSessionDefaults(selectedProject.hash);
     const draft = {
       draft: true,
+      draftId: newDraftId(),
       sessionId: null,
       projectHash: selectedProject.hash,
       projectPath: tree.path,
@@ -3249,6 +3257,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     let streamClosedNoticed = false; // CG-2:子代理打穿 canUseTool 通道的兜底提示,每轮只提示一次
     let resultUsage = null;      // result 事件携带的本轮 usage(CLI 聚合口径)
     let resultCostUsd = null;    // result 事件携带的 total_cost_usd(CLI 权威成本)
+    // 本次流真正归属的 sessionId:发起于真会话=闭包 sid;发起于 draft=init 事件里的新 sid。
+    // result 后的标题兜底等"归属敏感"逻辑一律用它,绝不摸 getLocalSession()(用户可能已切走)。
+    let streamSid = selectedSession?.sessionId || null;
     try {
       let pid;
       if (reattachPid) {
@@ -3428,6 +3439,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           // leaves localStorage with the old draft (sessionId=null), so a
           // page refresh forgets the session even though it exists on disk.
           if (event.type === 'system' && event.subtype === 'init' && event.session_id) {
+            streamSid = event.session_id; // 本次流归属的真 sid(draft 发起时在此确定)
             // Record the provider this turn ran under so a later switch can strip
             // now-invalid thinking-block signatures. Model name can't tell a mimo
             // relay (claude-* names) from official, so we key off the live hint.
@@ -3436,7 +3448,17 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
               useStore.getState().currentProvider?.providerHint || 'anthropic',
             );
             const sel = getLocalSession();
-            if (sel && !sel.sessionId) {
+            // 归属校验(用户实报串扰:会话A运行时新建会话B,B 首条消息 --resume 进了A):
+            // init 到达时当前选中可能已不是发起这次流的会话——只判"sel 是 draft"会把 A 的
+            // session_id 抢绑到无辜的新 draft B 上,B 的下一条消息就串进 A。两个泄漏路径都堵:
+            //  ① 发起于真会话(resume):startedAsDraft=false → 永不绑当前 draft;
+            //  ② 发起于 draft A、init 在途时新建 draft B:draftId 不同 → 不绑。
+            // 两边都无 draftId(升级前 localStorage 残留的旧 draft)才回退旧行为。
+            const startedAsDraft = !selectedSession?.sessionId;
+            const startDraftId = selectedSession?.draftId || null;
+            const selIsOrigin = startedAsDraft && sel && !sel.sessionId
+              && (!startDraftId || !sel.draftId || sel.draftId === startDraftId);
+            if (selIsOrigin) {
               // Carry the draft's per-session model/permission pins to the real
               // session id so a model picked for a brand-new chat doesn't revert.
               useStore.getState().migrateSessionKey(`draft-${sel.projectHash || 'none'}`, event.session_id);
@@ -3459,6 +3481,11 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                   body: JSON.stringify(payload),
                 }).catch(() => {});
               }
+            }
+            // 以下两件事是"会话 A 已真实诞生"的事实处理,与"当前选中是谁"无关——用户已切走
+            // (selIsOrigin=false)时也照做:标题该生成、列表该出现 A。数据全取发起时闭包
+            // (prompt/cwd/selectedSession),不碰 getLocalSession()。
+            if (startedAsDraft) {
               // Q3 标题提速:新会话拿到真 sid 就立刻并行生成标题(只用首条用户消息,
               // 不等回复完成)。失败时 result 后的兜底逻辑(带 firstAssistant)会重试。
               try {
@@ -3476,7 +3503,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                   }).catch(() => { titleAttempted.delete(_sid); });
                 }
               } catch {}
-              const hash = sel.projectHash;
+              const hash = selectedSession?.projectHash;
               // Retry triple — jsonl write timing varies. First attempt may
               // hit the brief window before the CLI flushes; later ones catch
               // up. silent so loading flag doesn't flicker.
@@ -3855,7 +3882,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
               if (_s?.sessionId) {
                 const draftKey = `draft-${_s.projectHash || 'none'}`;
                 useStore.getState().migrateSessionKey?.(_s.sessionId, draftKey);
-                setSelectedSession({ ..._s, sessionId: null, draft: true });
+                setSelectedSession({ ..._s, sessionId: null, draft: true, draftId: newDraftId() });
               }
               setProviderSwitchNotice({ text: '原会话历史已失效，已自动新建会话并重发本条。' });
               setTimeout(() => handleSendRef.current?.(prompt, { ...opts, freshRetry: true }), 80);
@@ -4146,9 +4173,11 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       try {
         // I4 标题串扰修复:标题必须归属【发起这次流的会话】,而不是当前查看的会话。
         // 用户在 AI 回复时切到别的会话,getLocalSession() 会返回新会话 → 旧对话的内容
-        // 被用来给新会话生成标题(用户报告:其他会话标题被改)。改用流归属 key(真 sid)。
+        // 被用来给新会话生成标题(用户报告:其他会话标题被改)。首选本次流的 streamSid
+        // (发起时闭包 sid 或 init 记下的新 sid);owner key 兜底;绝不回落 getLocalSession()
+        // ——用户已切到会话 C 时那会拿 A 的内容给 C 起标题(串扰第二现场)。
         const _ownerKey = streamOwnerKeyRef.current;
-        const titleSid = (_ownerKey && !_ownerKey.startsWith('draft-')) ? _ownerKey : getLocalSession()?.sessionId;
+        const titleSid = streamSid || ((_ownerKey && !_ownerKey.startsWith('draft-')) ? _ownerKey : null);
         const st = useStore.getState();
         if (titleSid && !titleAttempted.has(titleSid) && !st.customTitles[titleSid] && !st.autoTitles[titleSid] && prompt) {
           // 标记"已尝试"——无论成功失败都不再重试,避免 provider 失败时每轮 spawn。
@@ -4482,6 +4511,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             ...sel,
             sessionId: null,
             draft: true,
+            draftId: newDraftId(),
           });
         }
       } catch {}
@@ -5043,7 +5073,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                 const _s = getLocalSession();
                 if (_s) {
                   useStore.getState().migrateSessionKey?.(_s.sessionId || '', `draft-${_s.projectHash || 'none'}`);
-                  setSelectedSession({ ..._s, sessionId: null, draft: true });
+                  setSelectedSession({ ..._s, sessionId: null, draft: true, draftId: newDraftId() });
                 }
                 setChatMessages([]);
                 setCtxOverflow(null);
@@ -6792,7 +6822,7 @@ function MobileMenu({ setRightPanel, onClose }) {
     const sel = st.selectedSession;
     const proj = st.selectedProject || (sel?.projectHash ? { hash: sel.projectHash, path: sel.projectPath } : null);
     if (!proj) { push('history'); return; }
-    st.setSelectedSession({ draft: true, sessionId: null, projectHash: proj.hash, projectPath: proj.path, firstPrompt: '新会话' });
+    st.setSelectedSession({ draft: true, draftId: newDraftId(), sessionId: null, projectHash: proj.hash, projectPath: proj.path, firstPrompt: '新会话' });
     useStore.setState({ messages: [] });
     st.setPaneMessages(0, []);
     onClose();
