@@ -544,8 +544,7 @@ function TurnBubbleInner({ turn, onRetry, onRetryTool, onFork, retryActive }) {
               {(() => {
                 const out = [];
                 let bucket = [];
-                let hiddenThinking = false;  // 聊天模式:是否折叠了思考
-                let hiddenTools = 0;         // 聊天模式:折叠的工具/子代理/skill 步数(清单不计)
+                let hiddenTools = 0;         // 聊天模式:折叠的工具/子代理/skill 步数(思考照常显示,清单不计)
                 const flushBucket = (keyHint) => {
                   if (bucket.length > 0) {
                     out.push(<ToolCallsGroup key={`bucket-${keyHint}`} toolCalls={bucket} onRetryTool={onRetryTool} />);
@@ -568,13 +567,9 @@ function TurnBubbleInner({ turn, onRetry, onRetryTool, onFork, retryActive }) {
                     out.push(<MarkdownRenderer key={`b-${i}`} content={b.content} />);
                     return;
                   }
-                  // 聊天模式(未展开):思考/工具/子代理/skill 一律收起,只统计,末尾出可点开条。
-                  if (chatMode && !chatExpanded) {
-                    if (b.type === 'thinking' && b.content) { hiddenThinking = true; return; }
-                    if (b.type === 'tool_use' && b.toolCall) {
-                      if (!TASK_TOOL_NAMES.has(b.toolCall.name)) hiddenTools++;
-                      return;
-                    }
+                  // 聊天模式(未展开):只收起工具/子代理/skill,思考过程照常走下面的折叠块渲染。
+                  if (chatMode && !chatExpanded && b.type === 'tool_use' && b.toolCall) {
+                    if (!TASK_TOOL_NAMES.has(b.toolCall.name)) hiddenTools++;
                     return;
                   }
                   if (b.type === 'thinking' && b.content) {
@@ -647,13 +642,10 @@ function TurnBubbleInner({ turn, onRetry, onRetryTool, onFork, retryActive }) {
                   }
                 });
                 flushBucket('end');
-                if (chatMode && !chatExpanded && (hiddenThinking || hiddenTools > 0)) {
-                  const label = hiddenThinking && hiddenTools > 0
-                    ? `思考并执行了 ${hiddenTools} 步操作`
-                    : hiddenTools > 0 ? `执行了 ${hiddenTools} 步操作` : '思考过程';
-                  out.push(chatFoldBar(label));
+                if (chatMode && !chatExpanded && hiddenTools > 0) {
+                  out.push(chatFoldBar(`执行了 ${hiddenTools} 步操作`));
                 }
-                if (chatMode && chatExpanded && renderBlocks.some((b) => (b.type === 'thinking' && b.content) || (b.type === 'tool_use' && b.toolCall && !TASK_TOOL_NAMES.has(b.toolCall.name)))) {
+                if (chatMode && chatExpanded && renderBlocks.some((b) => b.type === 'tool_use' && b.toolCall && !TASK_TOOL_NAMES.has(b.toolCall.name))) {
                   out.push(chatUnfoldBar);
                 }
                 if (showRetrying && retryActive) {
@@ -670,7 +662,7 @@ function TurnBubbleInner({ turn, onRetry, onRetryTool, onFork, retryActive }) {
           ) : (
             <>
               {/* Legacy path for historical messages (no blocks array) */}
-              {fullThinking && !(chatMode && !chatExpanded) && (
+              {fullThinking && (
                 <div className="mb-3">
                   <button
                     onClick={() => setShowThinking(!showThinking)}
@@ -699,13 +691,10 @@ function TurnBubbleInner({ turn, onRetry, onRetryTool, onFork, retryActive }) {
               {!(chatMode && !chatExpanded) && hasGroupedCalls && (
                 <div className="mt-2"><ToolCallsGroup toolCalls={groupedCalls} onRetryTool={onRetryTool} /></div>
               )}
-              {/* 聊天模式折叠/收起(legacy 路径) */}
-              {chatMode && !chatExpanded && (fullThinking || hasInlineCalls || hasGroupedCalls) &&
-                chatFoldBar((() => {
-                  const n = inlineCalls.length + groupedCalls.length;
-                  return fullThinking && n > 0 ? `思考并执行了 ${n} 步操作` : n > 0 ? `执行了 ${n} 步操作` : '思考过程';
-                })())}
-              {chatMode && chatExpanded && (fullThinking || hasInlineCalls || hasGroupedCalls) && chatUnfoldBar}
+              {/* 聊天模式折叠/收起(legacy 路径,只折工具,思考照常显示) */}
+              {chatMode && !chatExpanded && (hasInlineCalls || hasGroupedCalls) &&
+                chatFoldBar(`执行了 ${inlineCalls.length + groupedCalls.length} 步操作`)}
+              {chatMode && chatExpanded && (hasInlineCalls || hasGroupedCalls) && chatUnfoldBar}
               {legacyShowRetrying && retryActive && (
                 <div className="flex items-center gap-2 text-[12px] text-accent font-body px-1 py-1.5">
                   <Loader2 size={12} className="animate-spin" />
