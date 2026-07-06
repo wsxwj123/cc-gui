@@ -1,6 +1,6 @@
 {
   "name": "claude-gui",
-  "version": "0.2.131",
+  "version": "0.2.132",
   "license": "MIT",
   "private": true,
   "type": "module",
@@ -17,6 +17,7 @@
     "test:file-changes": "node scripts/check-file-changes.mjs",
     "test:session-trim": "node scripts/check-session-trim.mjs",
     "test:fork": "node scripts/check-fork.mjs",
+    "test:routing": "node scripts/check-routing.mjs",
     "start": "NODE_ENV=production node server/index.js",
     "stop": "lsof -ti:6677 | xargs kill -9 2>/dev/null || true",
     "restart": "npm run stop && npm start",

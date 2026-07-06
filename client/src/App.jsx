@@ -49,6 +49,7 @@ import { BUILTIN_PROVIDERS, findBuiltin } from './utils/builtinProviders.js';
 import { computeCost, formatCost } from './utils/pricing.js';
 import { extractToolResultText } from './utils/toolResult.js';
 import { rebuildTodosFromTaskCalls } from './utils/todos.js';
+import { isInitBindingOrigin, migrateDraftQueue, resolveHistModel, resolveSendModel } from './utils/routing.js';
 import {
   FolderOpen, MessageSquare, ChevronLeft, ChevronRight, ChevronDown,
   Search, Hash, Layers, BarChart3, ArrowLeft, Plus,
@@ -2893,7 +2894,12 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // 这种错不能自动重试,弹一个带操作按钮的横幅引导用户:切 1M / 新建 / 回滚裁剪。
   const [ctxOverflow, setCtxOverflow] = useState(null);
   useEffect(() => {
-    if (!selectedSession?.sessionId) { setBackgroundPid(null); return; }
+    const pollSid = selectedSession?.sessionId;
+    // 僵尸 draft 修复(fable 审计第5项):draft 发出后 init 前切走再切回,原来这里因无
+    // sid 直接 return → 永不 reattach,pane 卡成僵尸。现在 draft 按 draftId 匹配后台
+    // 进程(POST /chat 已把它存进 slot),reattach 回放 earlyLines 里的 init 完成绑定。
+    const pollDraftId = !pollSid ? selectedSession?.draftId : null;
+    if (!pollSid && !pollDraftId) { setBackgroundPid(null); return; }
     let cancelled = false;
     const poll = async () => {
       try {
@@ -2906,7 +2912,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         // window) flagged as "still working" → the stop→banner→stop infinite loop.
         const hit = (d.agents || []).find(
           (a) => a.kind === 'chat-process'
-            && a.sessionId === selectedSession.sessionId
+            && (pollSid ? a.sessionId === pollSid : (a.draftId && a.draftId === pollDraftId))
             && a.stoppable === true
             && !stoppedPidsRef.current.has(String(a.pid))
         );
@@ -2918,7 +2924,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     poll();
     const id = setInterval(poll, 1500);
     return () => { cancelled = true; clearInterval(id); };
-  }, [selectedSession?.sessionId]);
+  }, [selectedSession?.sessionId, selectedSession?.draftId]);
 
   // Auto-scroll: coalesce frequent stream deltas into a single rAF tick so the
   // page doesn't visibly "flicker" with smooth-scroll animations on every
@@ -3280,61 +3286,19 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       const permissionMode = useStore.getState().getPermissionModeFor(sessionQueueKey);
       // 模型解析与徽章一致(#8):pin → 历史模型 → 全局默认。否则发送时只读 pin||全局,
       // 全局被 WS 重置成默认后,没 pin 的会话(尤其回滚后)会用默认模型发出,与徽章不符。
+      // 模型解析(#8/U1/U4/BK-0 四轮 bug 聚集地)→ 纯逻辑抽到 utils/routing.js,
+      // 语义不变,详细注释与测试见那里(npm run test:routing)。
       const _pin = useStore.getState().modelBySession[sessionQueueKey];
-      // U1/U4:历史模型回退只信任【最近一次 provider 切换之后】产生的消息。
-      // 否则切到新 provider 后,老会话的 _hist 仍是旧 provider 的模型 id
-      // (如 mimo-v2.5-pro),发给 maoshu/官方 → "无可用渠道 / para error"。
-      const _epoch = useStore.getState().providerEpoch || 0;
-      const _hist = (() => {
-        const ms = getLocalMessages() || [];
-        for (let i = ms.length - 1; i >= 0; i--) {
-          if (!ms[i]?.model) continue;
-          // CLI 给 /compact 摘要、错误占位等写的是 `<synthetic>` 之类伪模型 id —— 真实
-          // 模型 id 不以 `<` 开头。盲目回退会把 <synthetic> 当模型发出 → "模型不存在"
-          // (实测:/compact 之后再发消息必现)。跳过这类伪 id 继续往前找。
-          if (/^</.test(ms[i].model)) continue;
-          if (_epoch && (!ms[i].timestamp || Date.parse(ms[i].timestamp) <= _epoch)) return null;
-          return ms[i].model;
-        }
-        return null;
-      })();
-      // BK-0:切 provider 后,_pin/_hist 可能残留旧 provider 的模型 id(如老会话
-      // 全程 mimo-v2.5-pro,切到官方后仍把 mimo 发出 → "模型不存在")。在用于请求
-      // 体之前做一层"属于当前 provider 才用"的校验。
-      //   白名单 = availableModels(.id,/api/model 返回) ∪ customModels(用户手填)。
-      //   custom 纳入白名单避免误杀用户为当前 provider 手填的自定义 id。
-      //   比对时去掉 [1m] 后缀按裸 id 匹配(别破坏 1M 逻辑)。
-      //   列表为空/未加载时不校验(拿不到就维持原 _pin||_hist||全局,绝不误杀)。
-      const _bare = (m) => String(m || '').replace(/\[1m\]/i, '');
-      const _validModel = (() => {
-        const st = useStore.getState();
-        const avail = Array.isArray(st.availableModels) ? st.availableModels : [];
-        const custom = Array.isArray(st.customModels) ? st.customModels : [];
-        if (avail.length === 0 && custom.length === 0) {
-          // 拿不到任何列表 → 维持原行为,不误杀。
-          return _pin || _hist || st.currentModel;
-        }
-        const ok = new Set([
-          ...avail.map((m) => _bare(m?.id)),
-          ...custom.map((m) => _bare(m)),
-        ].filter(Boolean));
-        // 官方 Anthropic 端点的 availableModels 只是 settings env + 别名的枚举,并非
-        // 完整模型目录(claude-sonnet-4-6 等完全合法的 id 不在其中)。BK-0 的本意是拦
-        // "跨 provider 残留 id",不能把官方合法 id 也误杀——否则用户 pin 了 claude-sonnet-4-6、
-        // 徽章显示 sonnet,发送时却被静默回退到全局默认(如 haiku),徽章与实际调用不一致
-        // (用户实证:选 sonnet-4-6 实际全程 haiku)。官方下任何 claude-* id 一律放行,
-        // 交给 API 校验;第三方/中转(providerHint≠anthropic)仍走白名单不变。
-        const _officialAnthropic = (st.currentProvider?.providerHint || 'anthropic') === 'anthropic';
-        const _isClaudeId = (m) => /^claude-[a-z0-9.-]+(\[1m\])?$/i.test(String(m || ''));
-        const inProvider = (m) => m && (ok.has(_bare(m)) || (_officialAnthropic && _isClaudeId(m)));
-        if (inProvider(_pin)) return _pin;
-        if (inProvider(_hist)) return _hist;
-        const global = st.currentModel;
-        if (inProvider(global)) return global;
-        // 连全局都不在列表 → 不传 --model,让 CLI 用 settings.json 默认。
-        return null;
-      })();
-      const currentModel = _validModel;
+      const _hist = resolveHistModel(getLocalMessages(), useStore.getState().providerEpoch || 0);
+      const _stM = useStore.getState();
+      const currentModel = resolveSendModel({
+        pin: _pin,
+        hist: _hist,
+        globalModel: _stM.currentModel,
+        availableModels: _stM.availableModels,
+        customModels: _stM.customModels,
+        officialAnthropic: (_stM.currentProvider?.providerHint || 'anthropic') === 'anthropic',
+      });
       const effort = useStore.getState().getEffortFor(sessionQueueKey);
       // When resuming an existing session, cwd MUST be the EXACT string the
       // CLI was launched with — including Unicode chars (e.g. `/foo/肠骨轴`).
@@ -3357,6 +3321,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           prompt,
           // Omit sessionId for a draft so the CLI creates a fresh session.
           sessionId: sid || undefined,
+          // draft 流带 draftId(存进 server slot):init 前切走再切回时轮询按它找回
+          // 本进程 reattach,earlyLines 回放的 init 经归属校验正确绑定(僵尸 draft 修复)。
+          draftId: (!sid && selectedSession?.draftId) ? selectedSession.draftId : undefined,
           cwd: chatCwd,
           // /compact 用标准上下文压缩:剥掉 [1m]。否则 Anthropic 上压缩会用 1M 上下文,
           // 触发 "Usage credits required for 1M context" 报错(用户报告)。压缩只是摘要,
@@ -3451,15 +3418,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             // 归属校验(用户实报串扰:会话A运行时新建会话B,B 首条消息 --resume 进了A):
             // init 到达时当前选中可能已不是发起这次流的会话——只判"sel 是 draft"会把 A 的
             // session_id 抢绑到无辜的新 draft B 上,B 的下一条消息就串进 A。两个泄漏路径都堵:
-            //  ① 发起于真会话(resume):startedAsDraft=false → 永不绑当前 draft;
-            //  ② 发起于 draft A、init 在途时新建 draft B:draftId 不同 → 不绑。
-            // 严格相等:两边都 undefined(升级前 localStorage 残留的旧 draft)相等回退旧行为;
-            // 一边有一边无=不同 draft,拒绝——任何漏加 draftId 的创建点都不会重新打开串扰洞
-            // (fable 审计:曾有"任一边无即回退"的宽松版,配合漏加点直接复活串扰)。
+            // 判定逻辑在 utils/routing.js(纯函数,test:routing 覆盖串扰家族全部场景)。
             const startedAsDraft = !selectedSession?.sessionId;
-            const startDraftId = selectedSession?.draftId;
-            const selIsOrigin = startedAsDraft && sel && !sel.sessionId
-              && sel.draftId === startDraftId;
+            const selIsOrigin = isInitBindingOrigin(startedAsDraft, selectedSession?.draftId, sel);
             if (selIsOrigin) {
               // Carry the draft's per-session model/permission pins to the real
               // session id so a model picked for a brand-new chat doesn't revert.
@@ -3488,23 +3449,13 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             // (selIsOrigin=false)时也照做:标题该生成、列表该出现 A。数据全取发起时闭包
             // (prompt/cwd/selectedSession),不碰 getLocalSession()。
             if (startedAsDraft) {
-              // 队列迁移(fable 审计):A 流式期间排进 messageQueue[draft-P] 的消息只可能
-              // 属于 A(其他 draft 没有流,消息直接发不入队),必须迁到真 sid 下——否则
-              // selIsOrigin=false(用户已切走)时 migrateSessionKey 不执行,残留队列会被
-              // 下一个同项目 draft(key 同为 draft-P)继承串发。selIsOrigin=true 时
-              // migrateSessionKey 已迁空,此处 no-op。pin 不在此迁:draft key 可能已被
-              // 新 draft 的 seedNewSessionDefaults 覆盖,整体迁移会偷走新 draft 的设置。
+              // 队列迁移(fable 审计,逻辑在 utils/routing.js):selIsOrigin=false 时
+              // migrateSessionKey 不执行,残留队列会被下一个同项目 draft 继承串发;
+              // selIsOrigin=true 时已迁空,此处 no-op。pin 不迁(见 routing.js 注释)。
               try {
                 const _dk = `draft-${selectedSession?.projectHash || 'none'}`;
-                const _mq = useStore.getState().messageQueue;
-                if (Array.isArray(_mq[_dk]) && _mq[_dk].length) {
-                  useStore.setState((s) => {
-                    const next = { ...s.messageQueue };
-                    next[event.session_id] = [...(next[event.session_id] || []), ...(next[_dk] || [])];
-                    delete next[_dk];
-                    return { messageQueue: next };
-                  });
-                }
+                const _next = migrateDraftQueue(useStore.getState().messageQueue, _dk, event.session_id);
+                if (_next) useStore.setState({ messageQueue: _next });
               } catch {}
               // Q3 标题提速:新会话拿到真 sid 就立刻并行生成标题(只用首条用户消息,
               // 不等回复完成)。失败时 result 后的兜底逻辑(带 firstAssistant)会重试。

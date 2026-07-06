@@ -142,6 +142,7 @@ export function getActiveChatProcesses() {
     out.push({
       pid: procId,
       sessionId: slot.sessionId || null,
+      draftId: slot.draftId || null,
       cwd: slot.cwd || null,
       model: slot.model || null,
       promptPreview: slot.promptPreview || '',
@@ -380,6 +381,9 @@ router.post('/chat', async (req, res) => {
     pumpEnded: false,
     attached: false,
     sessionId: sessionId || null,
+    // draft 发起的流带客户端 draftId:init 前用户切走再切回时,轮询按它找回本进程
+    // reattach(僵尸 draft 修复,fable 审计第5项)。init 后 sessionId 就位,它只是冗余。
+    draftId: (!sessionId && typeof req.body?.draftId === 'string' && req.body.draftId) ? req.body.draftId : null,
     cwd: workingDir,
     model,
     promptPreview: String(prompt).slice(0, 80),

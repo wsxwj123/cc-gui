@@ -152,6 +152,7 @@ router.get('/agents/active', async (req, res) => {
       kind: 'chat-process',
       pid: p.pid,
       sessionId: p.sessionId,
+      draftId: p.draftId || null,
       cwd: p.cwd,
       model: p.model,
       promptPreview: p.promptPreview,

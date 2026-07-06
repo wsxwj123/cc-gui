@@ -15,6 +15,7 @@ AGENTS.md
 # client/src/components/*.local.jsx via import.meta.glob (absent → no-op).
 *.local.js
 *.local.jsx
+*.local.sh
 
 # 本地问题追踪 / 经验 / 项目内部文档(含 bot 细节、签名口令等,不进公开版)
 ISSUES_TRACKING.local.md
