@@ -1495,19 +1495,79 @@ function SessionList() {
     }
   };
 
-  const handleDelete = async (session) => {
+  // 删除撤销窗:确认删除后先从列表隐藏 + 清掉所有显示该会话的 pane(不止 pane0
+  // mirror——分屏聚焦被删会话时窗口残留的根因),5 秒倒计时到点才真删 jsonl;
+  // 点撤销则恢复列表并把会话塞回原 pane。倒计时内文件没动过,失败方向 = 没删成
+  // (关 app 会话回来),不会误删。一次只挂一条:新删除到来先立即落实上一条。
+  const [pendingDelete, setPendingDelete] = useState(null); // { session, panes, timer, deadline, secondsLeft }
+  const pendingDeleteRef = useRef(null);
+  pendingDeleteRef.current = pendingDelete;
+
+  const reallyDelete = async (session) => {
     try {
       const r = await fetch(
         `/api/sessions/${session.sessionId}?projectHash=${encodeURIComponent(session.projectHash)}`,
         { method: 'DELETE' }
       );
       if (!r.ok) { const e = await r.json().catch(() => ({})); confirmDialog('删除失败：' + (e.error || r.status)); return; }
-      if (selectedSession?.sessionId === session.sessionId) setSelectedSession(null);
       useStore.getState().fetchSessions(selectedProject.hash, { silent: true });
     } catch (err) {
       confirmDialog('删除失败：' + err.message);
     }
   };
+
+  const handleDelete = (session) => {
+    // 上一条还在倒计时 → 立即落实,保持单条 pending
+    const prev = pendingDeleteRef.current;
+    if (prev) { clearInterval(prev.timer); setPendingDelete(null); reallyDelete(prev.session); }
+    const st = useStore.getState();
+    const panes = [];
+    (st.paneSessions || []).forEach((p, i) => {
+      if (p?.sessionId && p.sessionId === session.sessionId) {
+        panes.push(i);
+        st.setPaneSession(i, null);
+        st.setPaneMessages(i, []);
+      }
+    });
+    const deadline = Date.now() + 5000;
+    const timer = setInterval(() => {
+      const cur = pendingDeleteRef.current;
+      if (!cur || cur.session.sessionId !== session.sessionId) { clearInterval(timer); return; }
+      const left = Math.ceil((cur.deadline - Date.now()) / 1000);
+      if (left <= 0) {
+        clearInterval(timer);
+        setPendingDelete(null);
+        reallyDelete(cur.session);
+      } else if (left !== cur.secondsLeft) {
+        setPendingDelete({ ...cur, secondsLeft: left });
+      }
+    }, 200);
+    setPendingDelete({ session, panes, timer, deadline, secondsLeft: 5 });
+  };
+
+  const undoDelete = () => {
+    const p = pendingDeleteRef.current;
+    if (!p) return;
+    clearInterval(p.timer);
+    setPendingDelete(null);
+    // 文件从未动过:列表恢复 = 去掉过滤;原 pane 塞回会话并重拉消息
+    const st = useStore.getState();
+    p.panes.forEach((i) => {
+      st.setPaneSession(i, p.session);
+      st.fetchMessages(p.session.sessionId, p.session.projectHash, { tab: i, silent: true });
+    });
+  };
+
+  // 卸载(切项目/返回)时立即落实 pending,防止倒计时僵尸化导致"看着删了其实没删"
+  useEffect(() => () => {
+    const p = pendingDeleteRef.current;
+    if (!p) return;
+    clearInterval(p.timer);
+    fetch(
+      `/api/sessions/${p.session.sessionId}?projectHash=${encodeURIComponent(p.session.projectHash)}`,
+      { method: 'DELETE', keepalive: true }
+    ).catch(() => {});
+  }, []);
 
   // Auto-refresh the session list when any .jsonl in ~/.claude/projects/
   // changes (file watcher dispatches via useWebSocket). Debounced so a busy
@@ -1735,8 +1795,13 @@ function SessionList() {
     }
   };
 
+  // 倒计时期间从列表隐藏待删会话(文件还在,refetch 也会带回来,靠 sessionId 过滤)
+  const shown = pendingDelete
+    ? visible.filter((s) => s.sessionId !== pendingDelete.session.sessionId)
+    : visible;
+
   return (
-    <div data-tour="sidebar-list" className="flex flex-col h-full">
+    <div data-tour="sidebar-list" className="relative flex flex-col h-full">
       <div className="px-4 pt-4 pb-3 border-b border-canvas-deep">
         <div className="flex items-center gap-2 mb-1 flex-wrap">
           <button onClick={() => useStore.getState().setSelectedProject(null)} className="p-0.5 hover:bg-canvas-deep rounded transition-colors shrink-0">
@@ -1799,7 +1864,7 @@ function SessionList() {
         </div>
       </div>
       <div className="flex-1 overflow-y-auto px-2 stagger">
-        {visible.map((session) => (
+        {shown.map((session) => (
           <SessionItem
             key={session.sessionId}
             session={session}
@@ -1814,7 +1879,7 @@ function SessionList() {
             onTogglePin={togglePinSession}
           />
         ))}
-        {visible.length === 0 && (
+        {shown.length === 0 && (
           <div className="px-4 py-8 text-center">
             <p className="text-xs text-ink-faint font-body">
               {q ? '没有匹配的会话' : showArchived ? '没有已归档的会话' : '该项目没有活跃会话'}
@@ -1822,6 +1887,21 @@ function SessionList() {
           </div>
         )}
       </div>
+
+      {/* 删除撤销条:倒计时结束前点撤销可原样恢复(列表 + 原分屏窗格) */}
+      {pendingDelete && (
+        <div className="absolute bottom-3 left-3 right-3 z-20 glass-popover px-3 py-2 flex items-center gap-2 animate-fade-in">
+          <Trash2 size={13} className="text-red-400 shrink-0" />
+          <span className="text-[11.5px] text-ink-soft font-body truncate flex-1">
+            已删除「{titleOf(pendingDelete.session).slice(0, 18) || '(空会话)'}」
+          </span>
+          <span className="text-[11px] text-ink-faint font-mono shrink-0">{pendingDelete.secondsLeft}s</span>
+          <button
+            onClick={undoDelete}
+            className="shrink-0 px-2 py-0.5 text-[11px] rounded font-body bg-accent/15 text-accent hover:bg-accent/25 transition-colors"
+          >撤销</button>
+        </div>
+      )}
 
       {/* Worktree picker modal */}
       {worktreeOpen && createPortal((
