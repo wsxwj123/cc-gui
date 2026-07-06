@@ -243,20 +243,11 @@ export function ChatInput({ onSend, onStop, onAccelerate, disabled, isStreaming,
   const draftBeforeHistoryRef = useRef('');
   const navigatingHistoryRef = useRef(false);
 
-  // 双击 Esc 停止生成(对齐 claude CLI):流式中(含子代理运行)600ms 内连按两次 Esc → onStop。
-  // 用捕获阶段确保计数不被 textarea 的 Esc 处理吞掉;单次 Esc 仍走原有用途(关命令面板/取消编辑)。
-  const lastEscRef = useRef(0);
-  useEffect(() => {
-    if (!isStreaming) return;
-    const onEsc = (e) => {
-      if (e.key !== 'Escape') return;
-      const now = Date.now();
-      if (now - lastEscRef.current < 600) { lastEscRef.current = 0; onStop?.(); }
-      else lastEscRef.current = now;
-    };
-    document.addEventListener('keydown', onEsc, true);
-    return () => document.removeEventListener('keydown', onEsc, true);
-  }, [isStreaming, onStop]);
+  // 双击 Esc 停止生成:唯一实现在 App.jsx 的 window 级 effect(带 paneIsActive 守卫
+  // + permission 让行 + backgroundPid 支持)。这里曾有第二份 document 捕获实现(CD-2),
+  // 无 pane 守卫且捕获阶段先于守卫版执行 → 分屏多窗格流式时一次双击全停(用户实报,
+  // AZ1 只守卫了 App.jsx 那份漏了这份)——已删,禁止在此重加。textarea 的 Esc 只
+  // preventDefault 不 stopPropagation,事件照常冒泡到 window,守卫版收得到。
   // Permission mode lives in the store, keyed per-session via permKey so each
   // conversation keeps its own mode. Fall back to the global value only when
   // no key is supplied (shouldn't happen in normal render).
