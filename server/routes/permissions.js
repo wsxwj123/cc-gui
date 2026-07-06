@@ -45,10 +45,15 @@ export function requestPermission({ toolName, toolInput, sessionId, cwd }) {
 // Safety-net sweep: a held request whose socket never fires 'close' (CLI wedged
 // without exiting) would otherwise pin its entry — and its held HTTP socket —
 // forever. Drop anything older than 15 min. Normal requests resolve in seconds.
+// 例外:AskUserQuestion(提问卡)/ExitPlanMode(计划确认卡)是"等人回来做决定"的
+// 卡片,永不超时(用户明确要求:等到点提交为止)。挂着只是进程内 Promise,无 socket
+// 泄漏;所属进程结束时 dropPendingForSession 会清,不会永久悬挂。
+const NO_TTL_TOOLS = new Set(['AskUserQuestion', 'ExitPlanMode']);
 const PENDING_TTL_MS = 15 * 60 * 1000;
 setInterval(() => {
   const now = Date.now();
   for (const [id, slot] of pending.entries()) {
+    if (NO_TTL_TOOLS.has(slot.request.toolName)) continue;
     if (now - slot.request.createdAt > PENDING_TTL_MS) {
       pending.delete(id);
       settle(slot, { decision: 'deny', reason: '权限请求超时（15 分钟未响应）' });
