@@ -39,7 +39,7 @@ export function TaskCard({ toolCall }) {
 
   // W1:完成判定与 Subagent 监控同源(activeAgents.status)。只看 toolCall.result 时,
   // 切走会话期间 tool_result 没写进本地流式副本 → 监控显示"完成"而卡片永远转圈。
-  const agentDone = agent?.status === 'done' || agent?.status === 'error';
+  const agentDone = agent?.status === 'done' || agent?.status === 'error' || agent?.status === 'stopped';
   const isError = toolCall.result?.isError || agent?.status === 'error';
   const isDone = !!toolCall.result || agentDone;
   const isWorking = !isDone;

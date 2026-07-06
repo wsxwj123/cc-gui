@@ -497,6 +497,7 @@ router.post('/chat', async (req, res) => {
         deliverLine(slot, line);
         if (m.type === 'result') {
           lastResultLine = line;
+          slot.lastResultAt = Date.now(); // stop 端点优雅窗判据(见 /stop 注释)
           // 关流延迟:子代理回合沿用 4s 去抖;开了输入预测时 suggestion 在 result 之后
           // 才到,必须给等待窗(3s;SDK 不发时到点正常收尾)。都没有则立即关,零延迟。
           const delay = subagentSeen ? 4000 : (suggestOn ? 3000 : 0);
@@ -616,9 +617,24 @@ router.post('/chat/:pid/stop', async (req, res) => {
   const slot = activeProcesses.get(req.params.pid);
   if (!slot) return res.status(404).json({ error: 'Process not found' });
   // SDK:interrupt 让当前回合优雅停;abort 兜底强停;close input 让 generator 收尾。
-  try { await slot.query?.interrupt?.(); } catch {}
-  try { slot.abort?.abort(); } catch {}
-  try { slot.input?.close(); } catch {}
+  // **不能 await interrupt**(用户实报"按停止后子代理继续跑到完"的根因):回合正在跑
+  // 子代理时,CLI 对 interrupt 控制请求的响应可能等到子代理收尾才回,await 会把下面的
+  // abort 兜底永远挡住 → 停止形同虚设。改 fire-and-forget + 2s 优雅窗:窗内消息泵
+  // 正常收尾(pumpEnded,interrupt 生效、jsonl 完整)就不硬杀;超窗则 abort 杀整个 CLI
+  // 进程(子代理是 CLI 进程内循环,进程死即全停)。input.close 同步延后——它与 interrupt
+  // 共用 stdin 通道,立即关会把刚发的 interrupt 请求截断。
+  const stopAt = Date.now();
+  try { slot.query?.interrupt?.()?.catch?.(() => {}); } catch {}
+  setTimeout(() => {
+    // 优雅收尾判据:pumpEnded(泵已收尾)或【stop 之后】到达过 result(interrupt 生效,
+    // 回合已以 interrupted result 停住)。两个坑都躲开(fable 审计):① 不能只看
+    // pumpEnded——子代理回合 result 后有 4s 关流去抖(suggestion 3s),2s 窗内恒 false,
+    // interrupt 成功也被硬杀;② 不能看"到过任何 result"——子代理回合的中间 result 在
+    // stop 前早已出现,会误判已停而放跑还在继续的回合。
+    if (slot.pumpEnded || (slot.lastResultAt && slot.lastResultAt >= stopAt)) return;
+    try { slot.abort?.abort(); } catch {}
+    try { slot.input?.close(); } catch {}
+  }, 2000);
   res.json({ ok: true });
 });
 

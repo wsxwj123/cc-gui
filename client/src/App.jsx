@@ -3453,11 +3453,13 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             // session_id 抢绑到无辜的新 draft B 上,B 的下一条消息就串进 A。两个泄漏路径都堵:
             //  ① 发起于真会话(resume):startedAsDraft=false → 永不绑当前 draft;
             //  ② 发起于 draft A、init 在途时新建 draft B:draftId 不同 → 不绑。
-            // 两边都无 draftId(升级前 localStorage 残留的旧 draft)才回退旧行为。
+            // 严格相等:两边都 undefined(升级前 localStorage 残留的旧 draft)相等回退旧行为;
+            // 一边有一边无=不同 draft,拒绝——任何漏加 draftId 的创建点都不会重新打开串扰洞
+            // (fable 审计:曾有"任一边无即回退"的宽松版,配合漏加点直接复活串扰)。
             const startedAsDraft = !selectedSession?.sessionId;
-            const startDraftId = selectedSession?.draftId || null;
+            const startDraftId = selectedSession?.draftId;
             const selIsOrigin = startedAsDraft && sel && !sel.sessionId
-              && (!startDraftId || !sel.draftId || sel.draftId === startDraftId);
+              && sel.draftId === startDraftId;
             if (selIsOrigin) {
               // Carry the draft's per-session model/permission pins to the real
               // session id so a model picked for a brand-new chat doesn't revert.
@@ -3486,6 +3488,24 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             // (selIsOrigin=false)时也照做:标题该生成、列表该出现 A。数据全取发起时闭包
             // (prompt/cwd/selectedSession),不碰 getLocalSession()。
             if (startedAsDraft) {
+              // 队列迁移(fable 审计):A 流式期间排进 messageQueue[draft-P] 的消息只可能
+              // 属于 A(其他 draft 没有流,消息直接发不入队),必须迁到真 sid 下——否则
+              // selIsOrigin=false(用户已切走)时 migrateSessionKey 不执行,残留队列会被
+              // 下一个同项目 draft(key 同为 draft-P)继承串发。selIsOrigin=true 时
+              // migrateSessionKey 已迁空,此处 no-op。pin 不在此迁:draft key 可能已被
+              // 新 draft 的 seedNewSessionDefaults 覆盖,整体迁移会偷走新 draft 的设置。
+              try {
+                const _dk = `draft-${selectedSession?.projectHash || 'none'}`;
+                const _mq = useStore.getState().messageQueue;
+                if (Array.isArray(_mq[_dk]) && _mq[_dk].length) {
+                  useStore.setState((s) => {
+                    const next = { ...s.messageQueue };
+                    next[event.session_id] = [...(next[event.session_id] || []), ...(next[_dk] || [])];
+                    delete next[_dk];
+                    return { messageQueue: next };
+                  });
+                }
+              } catch {}
               // Q3 标题提速:新会话拿到真 sid 就立刻并行生成标题(只用首条用户消息,
               // 不等回复完成)。失败时 result 后的兜底逻辑(带 firstAssistant)会重试。
               try {
@@ -4034,6 +4054,24 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         }]);
       }
     } finally {
+      // 停止/断流兜底:本回合派出的子代理若仍在运行态(中断后 tool_result 永不到达,
+      // 状态没人更新),统一标 stopped —— 否则卡片/监控永远转圈"运行中"(用户实报
+      // "停止后子代理还在跑"的 UI 侧成因;进程侧由 stop 端点的 abort 兜底真杀)。
+      // 扫 currentToolCalls 而非 orderedBlocks(fable 审计):不发 partial stream_event
+      // 的 provider(mimo 等)Task 只走整条 assistant 消息路径、reattach 后 orderedBlocks
+      // 也拿不到断连前的 Task —— currentToolCalls 是两路径的并集。只动本流出现过的
+      // Task/Agent id,不误伤其他 pane;正常完成路径已被 tool_result 标 done,此处 no-op。
+      try {
+        const _st = useStore.getState();
+        for (const tc of currentToolCalls) {
+          if (tc && (tc.name === 'Task' || tc.name === 'Agent')) {
+            const _ag = _st.activeAgents[tc.id];
+            if (_ag && (_ag.status === 'running' || _ag.status === 'working' || _ag.status === 'starting')) {
+              _st.upsertAgent(tc.id, { status: 'stopped' });
+            }
+          }
+        }
+      } catch {}
       updateStreaming(false);
       setStreamingText('');
       setStreamingThinking('');
@@ -6995,7 +7033,7 @@ export default function App() {
         const proj = st.selectedProject || (sel?.projectHash ? { hash: sel.projectHash, path: sel.projectPath } : null);
         if (!proj) return; // 没有项目 → 交给浏览器默认(本地无害)
         e.preventDefault();
-        st.setPaneSession(idx, { draft: true, sessionId: null, projectHash: proj.hash, projectPath: proj.path, firstPrompt: '新会话' });
+        st.setPaneSession(idx, { draft: true, draftId: newDraftId(), sessionId: null, projectHash: proj.hash, projectPath: proj.path, firstPrompt: '新会话' });
         st.setPaneMessages(idx, []);
       }
     };
@@ -7234,7 +7272,7 @@ export default function App() {
       || (sel && sel.projectHash ? { hash: sel.projectHash, path: sel.projectPath } : null);
     if (!proj) { if (st.sidebarCollapsed) st.toggleSidebar(); return; }
     st.setSelectedSession({
-      draft: true, sessionId: null, projectHash: proj.hash,
+      draft: true, draftId: newDraftId(), sessionId: null, projectHash: proj.hash,
       projectPath: proj.path, firstPrompt: '新会话',
     });
     useStore.setState({ messages: [] });

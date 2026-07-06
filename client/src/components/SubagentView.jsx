@@ -47,6 +47,7 @@ export function SubagentView({ agentId, parentTitle, parentSessionId = null, onB
     needs_input: { label: '等待输入', cls: 'text-violet-600' },
     done:     { label: '已完成', cls: 'text-green-600' },
     error:    { label: '错误', cls: 'text-red-600' },
+    stopped:  { label: '已停止', cls: 'text-ink-muted' },
   }[status] || { label: status, cls: 'text-ink-muted' };
 
   return (
