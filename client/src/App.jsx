@@ -1498,10 +1498,11 @@ function SessionList() {
   // 删除撤销窗:确认删除后先从列表隐藏 + 清掉所有显示该会话的 pane(不止 pane0
   // mirror——分屏聚焦被删会话时窗口残留的根因),5 秒倒计时到点才真删 jsonl;
   // 点撤销则恢复列表并把会话塞回原 pane。倒计时内文件没动过,失败方向 = 没删成
-  // (关 app 会话回来),不会误删。一次只挂一条:新删除到来先立即落实上一条。
-  const [pendingDelete, setPendingDelete] = useState(null); // { session, panes, timer, deadline, secondsLeft }
-  const pendingDeleteRef = useRef(null);
-  pendingDeleteRef.current = pendingDelete;
+  // (关 app 会话回来),不会误删。多条叠加(同 CompletionToasts):每条独立倒计时
+  // 独立撤销,互不覆盖——单条版删多个会话时只能撤销最后一个(用户实报)。
+  const [pendingDeletes, setPendingDeletes] = useState([]); // [{ session, panes, timer, deadline, secondsLeft }]
+  const pendingDeletesRef = useRef([]);
+  pendingDeletesRef.current = pendingDeletes;
 
   const reallyDelete = async (session) => {
     try {
@@ -1517,13 +1518,12 @@ function SessionList() {
   };
 
   const handleDelete = (session) => {
-    // 上一条还在倒计时 → 立即落实,保持单条 pending
-    const prev = pendingDeleteRef.current;
-    if (prev) { clearInterval(prev.timer); setPendingDelete(null); reallyDelete(prev.session); }
+    const sid = session.sessionId;
+    if (pendingDeletesRef.current.some((p) => p.session.sessionId === sid)) return; // 已在倒计时
     const st = useStore.getState();
     const panes = [];
     (st.paneSessions || []).forEach((p, i) => {
-      if (p?.sessionId && p.sessionId === session.sessionId) {
+      if (p?.sessionId && p.sessionId === sid) {
         panes.push(i);
         st.setPaneSession(i, null);
         st.setPaneMessages(i, []);
@@ -1531,25 +1531,25 @@ function SessionList() {
     });
     const deadline = Date.now() + 5000;
     const timer = setInterval(() => {
-      const cur = pendingDeleteRef.current;
-      if (!cur || cur.session.sessionId !== session.sessionId) { clearInterval(timer); return; }
+      const cur = pendingDeletesRef.current.find((p) => p.session.sessionId === sid);
+      if (!cur) { clearInterval(timer); return; }
       const left = Math.ceil((cur.deadline - Date.now()) / 1000);
       if (left <= 0) {
         clearInterval(timer);
-        setPendingDelete(null);
+        setPendingDeletes((arr) => arr.filter((p) => p.session.sessionId !== sid));
         reallyDelete(cur.session);
       } else if (left !== cur.secondsLeft) {
-        setPendingDelete({ ...cur, secondsLeft: left });
+        setPendingDeletes((arr) => arr.map((p) => (p.session.sessionId === sid ? { ...p, secondsLeft: left } : p)));
       }
     }, 200);
-    setPendingDelete({ session, panes, timer, deadline, secondsLeft: 5 });
+    setPendingDeletes((arr) => [...arr, { session, panes, timer, deadline, secondsLeft: 5 }]);
   };
 
-  const undoDelete = () => {
-    const p = pendingDeleteRef.current;
+  const undoDelete = (sid) => {
+    const p = pendingDeletesRef.current.find((x) => x.session.sessionId === sid);
     if (!p) return;
     clearInterval(p.timer);
-    setPendingDelete(null);
+    setPendingDeletes((arr) => arr.filter((x) => x.session.sessionId !== sid));
     // 文件从未动过:列表恢复 = 去掉过滤;原 pane 塞回会话并重拉消息
     const st = useStore.getState();
     p.panes.forEach((i) => {
@@ -1558,15 +1558,15 @@ function SessionList() {
     });
   };
 
-  // 卸载(切项目/返回)时立即落实 pending,防止倒计时僵尸化导致"看着删了其实没删"
+  // 卸载(切项目/返回)时立即落实全部 pending,防止倒计时僵尸化导致"看着删了其实没删"
   useEffect(() => () => {
-    const p = pendingDeleteRef.current;
-    if (!p) return;
-    clearInterval(p.timer);
-    fetch(
-      `/api/sessions/${p.session.sessionId}?projectHash=${encodeURIComponent(p.session.projectHash)}`,
-      { method: 'DELETE', keepalive: true }
-    ).catch(() => {});
+    pendingDeletesRef.current.forEach((p) => {
+      clearInterval(p.timer);
+      fetch(
+        `/api/sessions/${p.session.sessionId}?projectHash=${encodeURIComponent(p.session.projectHash)}`,
+        { method: 'DELETE', keepalive: true }
+      ).catch(() => {});
+    });
   }, []);
 
   // Auto-refresh the session list when any .jsonl in ~/.claude/projects/
@@ -1796,9 +1796,8 @@ function SessionList() {
   };
 
   // 倒计时期间从列表隐藏待删会话(文件还在,refetch 也会带回来,靠 sessionId 过滤)
-  const shown = pendingDelete
-    ? visible.filter((s) => s.sessionId !== pendingDelete.session.sessionId)
-    : visible;
+  const pendingIds = new Set(pendingDeletes.map((p) => p.session.sessionId));
+  const shown = pendingIds.size ? visible.filter((s) => !pendingIds.has(s.sessionId)) : visible;
 
   return (
     <div data-tour="sidebar-list" className="relative flex flex-col h-full">
@@ -1888,18 +1887,23 @@ function SessionList() {
         )}
       </div>
 
-      {/* 删除撤销条:倒计时结束前点撤销可原样恢复(列表 + 原分屏窗格) */}
-      {pendingDelete && (
-        <div className="absolute bottom-3 left-3 right-3 z-20 glass-popover px-3 py-2 flex items-center gap-2 animate-fade-in">
-          <Trash2 size={13} className="text-red-400 shrink-0" />
-          <span className="text-[11.5px] text-ink-soft font-body truncate flex-1">
-            已删除「{titleOf(pendingDelete.session).slice(0, 18) || '(空会话)'}」
-          </span>
-          <span className="text-[11px] text-ink-faint font-mono shrink-0">{pendingDelete.secondsLeft}s</span>
-          <button
-            onClick={undoDelete}
-            className="shrink-0 px-2 py-0.5 text-[11px] rounded font-body bg-accent/15 text-accent hover:bg-accent/25 transition-colors"
-          >撤销</button>
+      {/* 删除撤销条:多条叠加,每条独立倒计时;倒计时结束前点撤销原样恢复(列表 +
+          原分屏窗格)。max-h+滚动防批量删除时堆出侧栏边界。 */}
+      {pendingDeletes.length > 0 && (
+        <div className="absolute bottom-3 left-3 right-3 z-20 flex flex-col gap-1.5 max-h-[45%] overflow-y-auto">
+          {pendingDeletes.map((p) => (
+            <div key={p.session.sessionId} className="glass-popover px-3 py-2 flex items-center gap-2 animate-fade-in min-w-0">
+              <Trash2 size={13} className="text-red-400 shrink-0" />
+              <span className="text-[11.5px] text-ink-soft font-body truncate flex-1 min-w-0">
+                已删除「{titleOf(p.session).slice(0, 18) || '(空会话)'}」
+              </span>
+              <span className="text-[11px] text-ink-faint font-mono shrink-0">{p.secondsLeft}s</span>
+              <button
+                onClick={() => undoDelete(p.session.sessionId)}
+                className="shrink-0 px-2 py-0.5 text-[11px] rounded font-body bg-accent/15 text-accent hover:bg-accent/25 transition-colors"
+              >撤销</button>
+            </div>
+          ))}
         </div>
       )}
 
