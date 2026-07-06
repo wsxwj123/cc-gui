@@ -177,7 +177,7 @@ function CopyButton({ text }) {
           setTimeout(() => setCopied(false), 1500);
         }
       }}
-      className="opacity-0 group-hover:opacity-100 max-md:opacity-60 transition-opacity p-1 hover:bg-canvas-deep rounded"
+      className="p-1 hover:bg-canvas-deep rounded"
       title="复制"
     >
       {copied ? <Check size={12} className="text-success" /> : <Copy size={12} className="text-ink-faint" />}
@@ -599,11 +599,20 @@ function TurnBubbleInner({ turn, onRetry, onRetryTool, onFork, retryActive }) {
                     }
                     // Skill 调用:不并入折叠工具组,在回复流原位渲染居中横幅
                     // (章节分隔样式,流光动画,见 SkillCard)。
+                    // 连续调用同一 skill 合并成一张横幅(带次数),不再一条条刷屏
+                    // (用户实报:多个"xxx 已调用"重复没必要)。中间隔了文本/思考/
+                    // 其他工具则不算连续,照常另起横幅。
                     if (b.toolCall.name === 'Skill') {
+                      const skillOf = (tc) => tc?.input?.skill || tc?.input?.name || tc?.name;
+                      const sameSkill = (blk) => blk?.type === 'tool_use' && blk.toolCall?.name === 'Skill' && skillOf(blk.toolCall) === skillOf(b.toolCall);
+                      if (sameSkill(renderBlocks[i - 1])) return; // 已并入本连续段的首个横幅
+                      const calls = [b.toolCall];
+                      for (let j = i + 1; j < renderBlocks.length && sameSkill(renderBlocks[j]); j++) calls.push(renderBlocks[j].toolCall);
                       flushBucket(i);
+                      const latest = calls[calls.length - 1];
                       out.push(
-                        <ToolCallWithRetry key={`b-${i}`} toolCall={b.toolCall} onRetryTool={onRetryTool} hoverOnly>
-                          <SkillCard toolCall={b.toolCall} />
+                        <ToolCallWithRetry key={`b-${i}`} toolCall={latest} onRetryTool={onRetryTool} hoverOnly>
+                          <SkillCard toolCall={latest} calls={calls} />
                         </ToolCallWithRetry>
                       );
                       return;

@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { ChevronDown, ChevronRight, Loader2, Maximize2, CheckCircle2, XCircle } from 'lucide-react';
+import { ChevronDown, ChevronRight, Loader2, Maximize2, CheckCircle2, XCircle, CircleSlash } from 'lucide-react';
 import { useStore } from '../../stores/sessionStore.js';
 import { MarkdownRenderer } from '../MarkdownRenderer.jsx';
 import { extractToolResultText } from '../../utils/toolResult.js';
@@ -40,8 +40,14 @@ export function TaskCard({ toolCall }) {
   // W1:完成判定与 Subagent 监控同源(activeAgents.status)。只看 toolCall.result 时,
   // 切走会话期间 tool_result 没写进本地流式副本 → 监控显示"完成"而卡片永远转圈。
   const agentDone = agent?.status === 'done' || agent?.status === 'error' || agent?.status === 'stopped';
+  // 中断残骸:内存无此 agent(活着的 Task 必有 activeAgents 条目)且无 tool_result。
+  // fork 复制来的"运行中"子代理、app 重启后打开的被中断会话都落在这里——不能再当
+  // 运行中转圈(之前永远三点脉冲),按已停止显示。
+  const isInterrupted = !agent && !toolCall.result;
   const isError = toolCall.result?.isError || agent?.status === 'error';
-  const isDone = !!toolCall.result || agentDone;
+  // 已停止:主会话被停(stopped)或中断残骸。显示灰色断环,不再冒充绿勾"完成"。
+  const isStopped = !isError && (agent?.status === 'stopped' || isInterrupted);
+  const isDone = !!toolCall.result || agentDone || isInterrupted;
   const isWorking = !isDone;
 
   // P2: 历史会话重载后 activeAgents(内存态)是空的,点放大查不到数据 → 之前没反应。
@@ -56,7 +62,8 @@ export function TaskCard({ toolCall }) {
         description,
         prompt,
         model: agentModel,
-        status: isDone ? (isError ? 'error' : 'done') : 'working',
+        // 中断残骸注册为 stopped 而非 working:否则放大视图对早已死掉的 Task 永远转圈
+        status: isError ? 'error' : (isStopped ? 'stopped' : (toolCall.result ? 'done' : 'working')),
         startedAt: Date.now(),
         sessionId: st.paneSessions[st.activeTabIndex]?.sessionId || st.selectedSession?.sessionId || null,
         result: resContent != null ? extractToolResultText(resContent) : null,
@@ -80,12 +87,14 @@ export function TaskCard({ toolCall }) {
         onClick={() => setExpanded(!expanded)}
         className="w-full pl-3 pr-2 py-2 flex items-center gap-2.5 hover:bg-canvas-warm transition-colors text-left"
       >
-        {/* 图标位:运行中=三点脉冲;完成=绿色圆圈√(同会话完成标志);出错=红色圆圈× */}
+        {/* 图标位:运行中=三点脉冲;完成=绿色圆圈√;出错=红色圆圈×;已停止/中断=灰色断环 */}
         <span className="relative shrink-0 w-5 h-5 flex items-center justify-center text-ink-muted">
           {isWorking ? (
             <span className="tc-agent-dots text-accent" aria-label="运行中"><span /><span /><span /></span>
           ) : isError ? (
             <XCircle size={16} className="text-error" aria-label="子代理出错" />
+          ) : isStopped ? (
+            <CircleSlash size={16} className="text-ink-faint" aria-label="子代理已停止" />
           ) : (
             <CheckCircle2 size={16} className="text-success" aria-label="子代理完成" />
           )}
@@ -161,6 +170,9 @@ export function TaskCard({ toolCall }) {
                     tc.result.isError
                       ? <span className="text-error">✗</span>
                       : <span className="text-success">✓</span>
+                  ) : isStopped ? (
+                    // 已停止:没结果的内部工具是被掐断的,给灰色短横不能冒充成功
+                    <span className="text-ink-faint">–</span>
                   ) : isDone ? (
                     // U7:Task 整体已收尾,内部工具必然结束 —— 不再转圈。
                     <span className="text-success">✓</span>

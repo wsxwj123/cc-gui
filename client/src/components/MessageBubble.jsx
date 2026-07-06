@@ -250,7 +250,7 @@ function CopyButton({ text }) {
           setTimeout(() => setCopied(false), 1500);
         }
       }}
-      className="opacity-0 group-hover:opacity-100 max-md:opacity-60 transition-opacity p-1 hover:bg-canvas-deep rounded"
+      className="p-1 hover:bg-canvas-deep rounded"
       title="复制"
     >
       {copied ? (

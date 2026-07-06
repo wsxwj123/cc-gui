@@ -1434,6 +1434,25 @@ function SessionItem({ session, isSelected, onSelect, onFork, onArchive, onDelet
   );
 }
 
+// fork 命名+配置继承(侧栏分支按钮与消息级分叉共用)。标题「<源标题>分支N」:
+// 洗掉已有分支后缀使分支的分支同族;N=现有自定义标题中同族最大+1。配置继承(AZ7):
+// 源会话显式 pin > 侧栏元数据 model > 全局兜底;effort/权限模式照搬。
+function adoptFork(st, srcSession, newSessionId) {
+  const srcId = srcSession.sessionId;
+  const baseTitle = (st.customTitles[srcId] || st.autoTitles?.[srcId] || srcSession.firstPrompt || '会话')
+    .slice(0, 60).trim().replace(/分支\d+$/, '').trim();
+  const reBranch = new RegExp('^' + baseTitle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '分支(\\d+)$');
+  let maxN = 0;
+  for (const t of Object.values(st.customTitles)) {
+    const m = reBranch.exec(t);
+    if (m) maxN = Math.max(maxN, parseInt(m[1], 10));
+  }
+  st.setCustomTitle(newSessionId, `${baseTitle}分支${maxN + 1}`);
+  st.setModelFor(newSessionId, st.modelBySession[srcId] || srcSession.model || st.getModelFor(srcId));
+  st.setEffortFor(newSessionId, st.getEffortFor(srcId));
+  st.setPermissionMode(st.getPermissionModeFor(srcId), newSessionId);
+}
+
 function SessionList() {
   const { sessions, selectedSession, setSelectedSession, fetchMessages, selectedProject } = useStore();
   const runningSessionIds = useStore((s) => s.runningSessionIds);
@@ -1504,8 +1523,28 @@ function SessionList() {
   const pendingDeletesRef = useRef([]);
   pendingDeletesRef.current = pendingDeletes;
 
+  // 真删前先停掉该会话的活跃 CLI 进程(服务端停止链路会连带杀子代理,v0.2.131),
+  // 并等进程退净——不等就删 jsonl,进程残余落盘写入会把刚删的文件"复活"成半截会话。
+  // 倒计时期间进程全程没动:点撤销回来看到的仍是运行中的会话(含子代理),符合预期。
+  const stopSessionProcs = async (sessionId) => {
+    try {
+      const list = async () => {
+        const d = await fetch('/api/agents/active').then((r) => r.json());
+        return (d.agents || []).filter((a) => a.kind === 'chat-process' && a.sessionId === sessionId && a.stoppable === true);
+      };
+      const procs = await list();
+      if (!procs.length) return;
+      await Promise.allSettled(procs.map((a) => fetch(`/api/chat/${a.pid}/stop`, { method: 'POST' })));
+      for (let i = 0; i < 12; i++) { // 最多 ~6s:stop 有 2s 优雅窗 + SIGTERM→KILL 兜底
+        await new Promise((r) => setTimeout(r, 500));
+        if ((await list().catch(() => [])).length === 0) break;
+      }
+    } catch {}
+  };
+
   const reallyDelete = async (session) => {
     try {
+      await stopSessionProcs(session.sessionId);
       const r = await fetch(
         `/api/sessions/${session.sessionId}?projectHash=${encodeURIComponent(session.projectHash)}`,
         { method: 'DELETE' }
@@ -1558,14 +1597,15 @@ function SessionList() {
     });
   };
 
-  // 卸载(切项目/返回)时立即落实全部 pending,防止倒计时僵尸化导致"看着删了其实没删"
+  // 卸载(切项目/返回)时立即落实全部 pending,防止倒计时僵尸化导致"看着删了其实没删"。
+  // 同样先停进程再删(页面还活着,异步链能跑完;真正关 app 的场景进程随后端一起退)。
   useEffect(() => () => {
     pendingDeletesRef.current.forEach((p) => {
       clearInterval(p.timer);
-      fetch(
+      stopSessionProcs(p.session.sessionId).then(() => fetch(
         `/api/sessions/${p.session.sessionId}?projectHash=${encodeURIComponent(p.session.projectHash)}`,
         { method: 'DELETE', keepalive: true }
-      ).catch(() => {});
+      )).catch(() => {});
     });
   }, []);
 
@@ -1743,28 +1783,7 @@ function SessionList() {
         messageCount: session.messageCount,
       };
       const st = useStore.getState();
-      // Name the fork after its source: "<source title>分支N". Strip an existing
-      // 分支N suffix so branching a branch stays in the same family (会话A分支1 →
-      // 会话A分支2, not 会话A分支1分支1). N = max existing +1 across custom titles.
-      const baseTitle = (st.customTitles[session.sessionId] || session.firstPrompt || '会话')
-        .slice(0, 60).trim().replace(/分支\d+$/, '').trim();
-      const reBranch = new RegExp('^' + baseTitle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '分支(\\d+)$');
-      let maxN = 0;
-      for (const t of Object.values(st.customTitles)) {
-        const m = reBranch.exec(t);
-        if (m) maxN = Math.max(maxN, parseInt(m[1], 10));
-      }
-      st.setCustomTitle(data.newSessionId, `${baseTitle}分支${maxN + 1}`);
-      // AZ7:分支继承源会话的 per-session 配置(否则全回退默认)。用解析后的有效值,
-      // 即使源会话靠历史/全局兜底也能定住。model 的 [1m] 后缀编码了 1m 开关,拷 model
-      // 即拷 1m。keyed setter 只写各自 map、不动全局(已修过分屏污染),拷贝安全。
-      const srcKey = session.sessionId;
-      const dstKey = data.newSessionId;
-      // 模型优先级:源会话显式 pin > 侧栏元数据 model(=源历史最近在用的)> 全局兜底。
-      // 之前只用 getModelFor(=pin||全局),源会话没手动 pin 时会拿全局而非它实际在用的模型。
-      st.setModelFor(dstKey, st.modelBySession[srcKey] || session.model || st.getModelFor(srcKey));
-      st.setEffortFor(dstKey, st.getEffortFor(srcKey));
-      st.setPermissionMode(st.getPermissionModeFor(srcKey), dstKey);
+      adoptFork(st, session, data.newSessionId); // 命名「分支N」+ 继承 model/effort/权限(AZ7)
       if (selectedProject) st.fetchSessions(selectedProject.hash, { silent: true });
       if (st.splitMode) {
         const idx = st.activeTabIndex;
@@ -4781,8 +4800,15 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       const data = await res.json().catch(() => ({}));
       if (!res.ok || !data.newSessionId) { await confirmDialog('分叉失败：' + (data.error || res.status)); return; }
       const fork = { sessionId: data.newSessionId, projectHash: sess.projectHash, projectPath: sess.projectPath, firstPrompt: sess.firstPrompt, model: sess.model };
+      // 与侧栏分支按钮同待遇:标题「分支N」标识 + 继承 model/effort/权限。之前这里
+      // 三样全缺 → 用户分不清窗口里是不是 fork(标题一模一样),列表也迟迟不出现。
+      adoptFork(st, sess, data.newSessionId);
       if (tabIndex === 0 && st.paneCount === 1) st.setSelectedSession(fork);
       else st.setPaneSession(tabIndex, fork);
+      // 锚点分叉的历史被截断,必须重拉;不拉的话窗格还挂着源会话的完整消息列表
+      st.fetchMessages(data.newSessionId, sess.projectHash, { tab: tabIndex, silent: true });
+      // 列表立刻可见:打包版禁用了文件 watcher,新 jsonl 不会自动触发侧栏刷新
+      if (st.selectedProject?.hash === sess.projectHash) st.fetchSessions(sess.projectHash, { silent: true });
     } catch (e) { await confirmDialog('分叉失败：' + String(e.message || e)); }
   }, [tabIndex]);
   const stableRetryTool = useCallback((turn, toolCall) => handleRetryToolRef.current?.(turn, toolCall), []);

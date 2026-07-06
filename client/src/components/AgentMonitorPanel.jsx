@@ -624,16 +624,20 @@ export function AgentMonitorPanel() {
     .sort((a, b) => (b.startedAt || 0) - (a.startedAt || 0));
 
   // Bucket by status. 'working'/'starting' default expanded, the rest folded.
+  // stopped 桶:主会话停止时被掐掉的子代理。之前没有这个桶 → stopped 条目不落
+  // 任何桶直接消失,但区块标题计数又算上它("Task (3)"却只有 2 张卡)。
   const buckets = {
     working:    localList.filter((a) => a.status === 'working' || a.status === 'starting' || !a.status),
     waiting:    localList.filter((a) => a.status === 'needs_input'),
     done:       localList.filter((a) => a.status === 'done'),
+    stopped:    localList.filter((a) => a.status === 'stopped'),
     error:      localList.filter((a) => a.status === 'error'),
   };
   const BUCKET_META = {
     working: { label: '工作中', defaultOpen: true,  color: 'text-blue-600' },
     waiting: { label: '等待输入', defaultOpen: true, color: 'text-violet-600' },
     done:    { label: '已完成', defaultOpen: false, color: 'text-green-600' },
+    stopped: { label: '已停止', defaultOpen: false, color: 'text-ink-muted' },
     error:   { label: '错误',   defaultOpen: false, color: 'text-red-600' },
   };
 

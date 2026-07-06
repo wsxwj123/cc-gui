@@ -8,13 +8,15 @@ import { MarkdownRenderer } from '../MarkdownRenderer.jsx';
 // input 形态通常为 { skill, args },不同 skill 可能有额外字段,摘要按通用键值拼。
 // nameOverride/subLabel:供"读取类工具直读 SKILL.md"复用(TurnBubble 分流),
 // 横幅名取路径解析出的 skill 名,小字注明"读取技能文档"。
-export function SkillCard({ toolCall, nameOverride, subLabel }) {
+// calls:连续调用同一 skill 的合并组(TurnBubble 收集,首个横幅代表全组);
+// toolCall 恒为组内最新一次,横幅状态跟它走,展开详情逐次列出。单次调用不传。
+export function SkillCard({ toolCall, nameOverride, subLabel, calls }) {
   const [expanded, setExpanded] = useState(false);
   const skillName = nameOverride || toolCall.input?.skill || toolCall.input?.name || toolCall.name;
   const result = toolCall.result;
   const isError = result?.isError;
   const running = !result;
-  const content = typeof result?.content === 'string' ? result.content : '';
+  const callCount = Array.isArray(calls) && calls.length > 1 ? calls.length : 0;
 
   // 参数摘要:除 skill/name 外的入参拼成一行(横幅下的小字),超长截断。
   const inputEntries = Object.entries(toolCall.input || {}).filter(([k]) => k !== 'skill' && k !== 'name');
@@ -24,7 +26,7 @@ export function SkillCard({ toolCall, nameOverride, subLabel }) {
   const statusLabel = running ? '调用中' : (isError ? '调用失败' : '调用完成');
   // 状态小字:硬编码英文 "Skill " 前缀已去掉(用户实报:名字后多出杂乱的"S"字样)。
   // 运行中只显状态不拼参数摘要;摘要在完成/失败态给,原始入参展开详情里始终有。
-  const statusText = [subLabel, statusLabel].filter(Boolean).join(' · ')
+  const statusText = [subLabel, callCount ? `连续调用 ${callCount} 次` : null, statusLabel].filter(Boolean).join(' · ')
     + (!running && !subLabel && inputPreview ? ` · ${inputPreview}` : '');
 
   return (
@@ -52,29 +54,37 @@ export function SkillCard({ toolCall, nameOverride, subLabel }) {
         <span className="flex-1 h-px bg-canvas-deep/70" />
       </button>
 
-      {/* 展开详情:输入参数 + 结果(与其他工具卡片同风格) */}
+      {/* 展开详情:输入参数 + 结果(与其他工具卡片同风格)。合并组逐次列出,信息不丢 */}
       {expanded && (
         <div className="border border-canvas-deep rounded-lg overflow-hidden bg-canvas animate-fade-in">
-          <details className="px-3 py-2 border-b border-canvas-deep" open>
-            <summary className="cursor-pointer text-[10px] text-ink-faint uppercase tracking-wider font-body">
-              输入参数
-            </summary>
-            <pre className="text-[11px] bg-canvas-warm rounded p-2 mt-1 overflow-x-auto max-h-32 font-mono text-ink-muted">
-              {JSON.stringify(toolCall.input, null, 2)}
-            </pre>
-          </details>
-
-          {result && (
-            <div className={`px-3 py-2 text-[11px] max-h-[600px] overflow-y-auto ${
-              isError ? 'bg-red-50 text-red-700' : 'bg-canvas-warm/40 text-ink-muted'
-            }`}>
-              <div className="text-[10px] text-ink-faint uppercase tracking-wider font-body mb-1">结果</div>
-              {isError
-                ? <pre className="font-mono whitespace-pre-wrap">{content}</pre>
-                : <MarkdownRenderer content={content} />
-              }
-            </div>
-          )}
+          {(callCount ? calls : [toolCall]).map((tc, idx) => {
+            const tcResult = tc.result;
+            const tcErr = tcResult?.isError;
+            const tcContent = typeof tcResult?.content === 'string' ? tcResult.content : '';
+            return (
+              <div key={tc.id || idx} className={idx > 0 ? 'border-t-2 border-canvas-deep' : ''}>
+                <details className="px-3 py-2 border-b border-canvas-deep" open={!callCount || idx === (calls.length - 1)}>
+                  <summary className="cursor-pointer text-[10px] text-ink-faint uppercase tracking-wider font-body">
+                    输入参数{callCount ? `（第 ${idx + 1} 次）` : ''}
+                  </summary>
+                  <pre className="text-[11px] bg-canvas-warm rounded p-2 mt-1 overflow-x-auto max-h-32 font-mono text-ink-muted">
+                    {JSON.stringify(tc.input, null, 2)}
+                  </pre>
+                </details>
+                {tcResult && (
+                  <div className={`px-3 py-2 text-[11px] max-h-[600px] overflow-y-auto ${
+                    tcErr ? 'bg-red-50 text-red-700' : 'bg-canvas-warm/40 text-ink-muted'
+                  }`}>
+                    <div className="text-[10px] text-ink-faint uppercase tracking-wider font-body mb-1">结果{callCount ? `（第 ${idx + 1} 次）` : ''}</div>
+                    {tcErr
+                      ? <pre className="font-mono whitespace-pre-wrap">{tcContent}</pre>
+                      : <MarkdownRenderer content={tcContent} />
+                    }
+                  </div>
+                )}
+              </div>
+            );
+          })}
         </div>
       )}
     </div>
