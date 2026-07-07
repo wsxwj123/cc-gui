@@ -306,6 +306,16 @@ function makeCanUseTool(slot) {
   };
 }
 
+// 缓存优化三态解析:true/false=用户显式;'auto'/未传=按 provider 决定——settings.json env
+// 带 ANTHROPIC_BASE_URL 即第三方(默认开,前缀缓存对费用/首字延迟影响巨大),官方 OAuth 关。
+// 导出仅为可单测(HOME 指到假目录直接验)。
+export function resolveExcludeDyn(v) {
+  if (v === true || v === false) return v;
+  try {
+    return !!JSON.parse(readFileSync(pathJoin(homedir(), '.claude', 'settings.json'), 'utf8'))?.env?.ANTHROPIC_BASE_URL;
+  } catch { return false; }
+}
+
 // #26 会话常驻:同会话回合间保活的复用兼容键。**完全一致才复用**,任何差异都关旧开新
 // (回落到与逐回合冷启相同的行为,零语义变化)。settings.json 的 mtime 计入键 ——
 // 切 provider / 改任何全局配置(无论经 GUI 还是终端 cc-switch)都会使旧进程不再被
@@ -503,15 +513,7 @@ router.post('/chat', async (req, res) => {
   // 缓存优化(对应 CLI --exclude-dynamic-system-prompt-sections):把工作目录 / auto-memory /
   // git 状态等每轮变化的动态段移出系统提示、由 SDK 改注入首条用户消息,使系统提示静态可缓存,
   // 提升第三方 provider 前缀缓存命中。仅加系统提示选项,不影响消息泵/关流时序。
-  // 三态:true/false=用户显式;'auto'/未传=按 provider 决定——settings.json env 带
-  // ANTHROPIC_BASE_URL 即第三方(默认开,前缀缓存对费用/首字延迟影响巨大),官方 OAuth 关。
-  let excludeDyn = excludeDynamicSystemPrompt;
-  if (excludeDyn !== true && excludeDyn !== false) {
-    try {
-      excludeDyn = !!JSON.parse(readFileSync(pathJoin(homedir(), '.claude', 'settings.json'), 'utf8'))?.env?.ANTHROPIC_BASE_URL;
-    } catch { excludeDyn = false; }
-  }
-  if (excludeDyn === true) systemPrompt.excludeDynamicSections = true;
+  if (resolveExcludeDyn(excludeDynamicSystemPrompt) === true) systemPrompt.excludeDynamicSections = true;
 
   const options = {
     model,
@@ -962,20 +964,22 @@ export function cleanChildEnv() {
     'ANTHROPIC_REASONING_MODEL', 'ANTHROPIC_SMALL_FAST_MODEL',
     'ANTHROPIC_PERMISSION_MODE', 'CLAUDE_PERMISSION_MODE', 'CLAUDE_DANGEROUSLY_SKIP_PERMISSIONS',
   ]) delete env[k];
+  const out = stripHostClaudeEnv(env);
   // A(#50085) 兜底:第三方 provider(settings.json env 带 ANTHROPIC_BASE_URL)时强制关掉
   // CLI 每条消息都变的归因头 cch 哈希(x-anthropic-billing-header)——它把上游/中转的
   // 前缀缓存键每轮打穿,3.5 万 token 级系统前缀每轮全价重算(deepseek 首字慢+费用爆根因)。
   // GUI 切换路径已写 =0 进 settings.json;这里兜住终端 cc-switch 切的/旧版 GUI 切的存量
   // 配置。用户在 settings.json 显式设置过(任意值)则尊重。进程 env 独立于 CLI 版本与
   // 切换路径,升级 claude 不失效。官方 OAuth 渠道(无 BASE_URL)不注入。
+  // **必须在 stripHostClaudeEnv 之后注入**:strip 会把所有 CLAUDE_CODE_* 整类删掉,
+  // 先注后 strip = 注了个寂寞(实测抓到的真 bug,别再挪回去)。
   try {
     const se = JSON.parse(readFileSync(pathJoin(homedir(), '.claude', 'settings.json'), 'utf8'))?.env || {};
-    if (se.ANTHROPIC_BASE_URL && se.CLAUDE_CODE_ATTRIBUTION_HEADER === undefined
-        && env.CLAUDE_CODE_ATTRIBUTION_HEADER === undefined) {
-      env.CLAUDE_CODE_ATTRIBUTION_HEADER = '0';
+    if (se.ANTHROPIC_BASE_URL && se.CLAUDE_CODE_ATTRIBUTION_HEADER === undefined) {
+      out.CLAUDE_CODE_ATTRIBUTION_HEADER = '0';
     }
   } catch {}
-  return stripHostClaudeEnv(env);
+  return out;
 }
 
 function parseTokNum(s) {

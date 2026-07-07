@@ -259,7 +259,7 @@ function updateCmdFor(method, claudePath) {
     }
   }
 }
-function installCmdFor(proxyUrl = null, method = 'native') {
+export function installCmdFor(proxyUrl = null, method = 'native') { // export 仅为可单测
   // 未安装时的一键安装命令。method:'npm' | 'native'。
   // npm:读 HTTP_PROXY 环境变量(由 launchInTerminal 在脚本里 set/export),且自带
   // 下载/安装进度输出 —— 想"看得见进度"选它;前提是本机有 node(GUI 后端本就靠 node 跑,
