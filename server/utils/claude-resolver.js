@@ -36,6 +36,14 @@ function safeExec(file, args, timeout = 5000) {
   try { return execFileSync(file, args, { timeout }).toString().trim(); } catch { return ''; }
 }
 
+// 同 safeExec,但**非零退出也救回已捕获的 stdout**。交互登录 shell(`$SHELL -ilc`)常因
+// rc 文件末尾命令非零退出而整体非零 → execFileSync 抛错,普通 safeExec 会连带丢掉
+// `command -v claude` 已经打到 stdout 的正确结果。这里从 error.stdout 里捞回来。
+function safeExecStdout(file, args, timeout = 5000) {
+  try { return execFileSync(file, args, { timeout }).toString().trim(); }
+  catch (e) { try { return (e.stdout || '').toString().trim(); } catch { return ''; } }
+}
+
 function mtimeOf(p) {
   try { return statSync(p).mtimeMs; } catch { return null; }
 }
@@ -59,11 +67,26 @@ function fromPath() {
   return safeExec('which', ['claude']).split(/\r?\n/)[0] || '';
 }
 
-// 策略 2(非 Win):login shell 加载用户 profile —— nvm/mise/asdf 改写的 PATH 只在
-// 这里可见。
+// 策略 2(非 Win):用【用户真实 $SHELL】的【交互+登录】模式解析 —— 与用户终端里
+// 敲 `claude` 完全同款,终端能找到 GUI 就一定能找到。
+// 为什么必须交互(-i):mac 默认 shell 是 zsh,claude/homebrew 的 PATH 常只写进
+// **~/.zshrc**(交互配置),而登录配置(.zprofile/.zlogin/.profile)里没有。原实现用
+// `sh -lc` —— sh 登录模式只读 .profile/bash_profile,**读不到 .zshrc** → 用户"终端能用、
+// GUI 检测不到"的最常见根因。改用 `$SHELL -ilc` 让 zsh source .zshrc。
+// 稳健处理:① </dev/null 防 rc 里的 read 挂起;② 超时兜底(safeExec 5s);③ rc 可能往
+// stdout 打欢迎语 → 逐行找"绝对路径 + basename 是 claude*"的那行(command -v 的真结果),
+// 找不到再回落首行。④ 交互 shell 可能非零退出(rc 里有 return/报错),safeExec 已吞错。
 function fromLoginShell() {
   if (isWin) return '';
-  return safeExec('sh', ['-lc', 'command -v claude']);
+  const shell = process.env.SHELL || 'sh';
+  // -i 有小概率因怪异 rc 卡住/报错;safeExec 的 execFileSync 默认 stdin 即 EOF(rc 里的
+  // read 立刻返回)+ 超时兜底。失败则回落原来的 `sh -lc`(至少覆盖 .profile)。
+  let out = safeExecStdout(shell, ['-ilc', 'command -v claude'], 6000);
+  if (!out) out = safeExecStdout('sh', ['-lc', 'command -v claude']);
+  const lines = String(out).split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+  // 优先取"看起来是 claude 可执行文件的绝对路径"那行,滤掉 rc 往 stdout 打印的欢迎语噪声。
+  const hit = [...lines].reverse().find((l) => l.startsWith('/') && /\/claude$/.test(l) && existsSync(l));
+  return hit || lines[lines.length - 1] || '';
 }
 
 // 策略 3:问 npm 自己的全局 prefix(用户 `npm config set prefix` 到任意目录时,
@@ -111,6 +134,26 @@ function nvmWinCandidates(appData) {
   return out;
 }
 
+// 策略 3.5(仅 Win):读【注册表实时 PATH】(Machine+User)再逐目录找 claude。
+// 经典 Windows 根因:安装器把 claude 目录写进注册表 HKCU\Environment\Path,但**已在运行
+// 的 Explorer/GUI 进程持有的是安装前的旧 PATH 快照**(PATH 改动要重开进程/重登才传播)→
+// `where claude` 和 process.env.PATH 都看不到,用户"装了却检测不到、要重启才行"。直接问
+// 注册表拿最新 PATH,无需重启即可发现。与 Tauri find_node 的 Windows live-PATH 同思路。
+function fromWinLivePath() {
+  if (!isWin) return [];
+  // 用户域 + 机器域 PATH 合并;PowerShell 读注册表(GetEnvironmentVariable 的 User/Machine
+  // 目标就是注册表,不受当前进程旧 PATH 影响)。逐行输出目录,Node 侧拼 claude.exe/.cmd。
+  const ps = "[Environment]::GetEnvironmentVariable('Path','User') + ';' + [Environment]::GetEnvironmentVariable('Path','Machine')";
+  const out = safeExec('powershell', ['-NoProfile', '-NonInteractive', '-Command', ps], 8000);
+  if (!out) return [];
+  const dirs = out.split(';').map((s) => s.trim()).filter(Boolean);
+  const cands = [];
+  for (const d of dirs) {
+    cands.push(join(d, 'claude.exe'), join(d, 'claude.cmd'));
+  }
+  return cands;
+}
+
 // 策略 4:固定候选 —— 各安装方式的已知落点。
 function fixedCandidates() {
   const home = homedir();
@@ -155,6 +198,9 @@ function doResolve() {
   if (p2 && existsSync(p2)) return { path: p2, via: 'login-shell' };
   for (const p of fromNpmPrefix()) {
     if (existsSync(p)) return { path: p, via: 'npm-prefix' };
+  }
+  for (const p of fromWinLivePath()) {
+    try { if (existsSync(p)) return { path: p, via: 'win-live-path' }; } catch {}
   }
   for (const p of fixedCandidates()) {
     try { if (existsSync(p)) return { path: p, via: 'known-path' }; } catch {}
@@ -219,6 +265,7 @@ export function listClaudeInstalls() {
   add(fromPath());
   add(fromLoginShell());
   for (const p of fromNpmPrefix()) add(p);
+  for (const p of fromWinLivePath()) add(p);
   for (const p of fixedCandidates()) add(p);
   return out;
 }
