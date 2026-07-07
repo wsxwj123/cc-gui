@@ -1211,6 +1211,9 @@ html { --content-max: clamp(768px, calc(var(--app-w, 100vw) * 0.7), 1120px); }
 @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
 @keyframes slideIn { from { opacity: 0; transform: translateX(-10px); } to { opacity: 1; transform: translateX(0); } }
 @keyframes shimmer { 0% { background-position: -200% 0; } 100% { background-position: 200% 0; } }
+/* 压缩进度条:不确定态往复扫光(SDK 无真实百分比,视觉对齐终端) */
+@keyframes cguiCompactSweep { 0% { left: -35%; } 100% { left: 100%; } }
+.cgui-compact-sweep { animation: cguiCompactSweep 1.1s ease-in-out infinite; }
 @keyframes breathe { 0%, 100% { opacity: 0.35; } 50% { opacity: 1; } }
 @keyframes glassRise {
   from { opacity: 0; transform: translateY(12px) scale(0.97); }

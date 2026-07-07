@@ -2131,6 +2131,20 @@ function useCyclingVerb() {
   return THINKING_VERBS[i];
 }
 
+// ─── 压缩进度条 ────────────────────────────────────────────────
+// SDK 不流式发压缩百分比(只在完成后给 compact_boundary 的 pre/post_tokens),终端里
+// 那个 % 是 CLI 自画的估算动画。GUI 拿不到真实进度 → 做不确定态动画条(视觉对齐终端),
+// 诚实表达"进行中"而不假装精确百分比。
+function CompactProgressBar() {
+  return (
+    <div className="mt-2 w-full max-w-[280px]">
+      <div className="h-1.5 rounded-full bg-canvas-deep/50 overflow-hidden relative">
+        <div className="cgui-compact-sweep absolute inset-y-0 w-1/3 rounded-full" style={{ background: '#D97757' }} />
+      </div>
+    </div>
+  );
+}
+
 // ─── Streaming status line ─────────────────────────────────────
 // Inline status that mirrors the CLI's "✻ Frolicking…" prompt — spinner
 // char + verb + optional tool/phase detail. Updates live as the model
@@ -5269,6 +5283,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                         <span>…</span>
                         <ElapsedTime startedAt={streamStartRef.current} className="ml-1" />
                       </div>
+                      {/* 压缩进行中:不确定态动画条(SDK 无真实百分比)。 */}
+                      {compacting && <CompactProgressBar />}
                       {contextTokens > 100_000 && (
                         <div className="text-[11px] text-ink-faint font-body mt-1">
                           上下文较大({Math.round(contextTokens / 1000)}k)，首字可能较慢；若长时间无响应,可点停止后 <code className="font-mono">/compact</code> 压缩或换 provider。
