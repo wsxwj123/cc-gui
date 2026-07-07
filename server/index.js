@@ -87,9 +87,12 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
     try {
       const { execFile } = await import('child_process');
       const { promisify } = await import('util');
-      const { stdout } = await promisify(execFile)(
-        process.platform === 'win32' ? 'npm.cmd' : 'npm', ['prefix', '-g'], { timeout: 8000 },
-      );
+      // CI-1 同款坑:现代 Node execFile 直跑 .cmd 抛 EINVAL → 此前 Windows 上这段
+      // 静默失败,npm prefix 从未补进 PATH("npm 装完检测不到"的根因之一)。经 cmd.exe /c,
+      // 并改用 `npm config get prefix`(`npm prefix -g` 在部分 npm 版本打印的是 cwd)。
+      const { stdout } = process.platform === 'win32'
+        ? await promisify(execFile)('cmd.exe', ['/c', 'npm', 'config', 'get', 'prefix'], { timeout: 8000 })
+        : await promisify(execFile)('npm', ['prefix', '-g'], { timeout: 8000 });
       const prefix = stdout.trim();
       if (!prefix) return;
       const binDir = process.platform === 'win32' ? prefix : join(prefix, 'bin');

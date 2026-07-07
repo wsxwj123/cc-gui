@@ -173,35 +173,45 @@ function PlanReviewCard({ req, onResolve, onApprove, processing, position, hydra
 // GUI collects the choice and feeds it back via onAnswer (a deny whose reason is
 // the answer). toolInput.questions = [{ question, header, options:[{label,
 // description}], multiSelect? }].
+// 逐题显示(Claude Desktop 风格):一次只渲染一个问题,单选点中即自动跳下一题;
+// back/next 可前后查看修改;末题答完提交。此前全部问题一次性堆叠,卡片高达 68vh
+// 盖住 AI 回复正文(用户报告"看不见正文")。
 function AskQuestionCard({ req, onAnswer, processing, position, hydrate }) {
   const questions = Array.isArray(req.toolInput?.questions) ? req.toolInput.questions : [];
   const [picks, setPicks] = useState({});    // qi -> string | string[]
   const [customs, setCustoms] = useState({}); // qi -> free text
+  const [qi, setQi] = useState(0);           // 当前显示第几题
+  const total = questions.length;
+  const isLast = qi >= total - 1;
 
-  const choose = (qi, label, multi) => {
+  const choose = (label, multi) => {
+    const wasSelected = !multi && picks[qi] === label;
     setPicks((prev) => {
       if (!multi) return { ...prev, [qi]: prev[qi] === label ? undefined : label };
       const cur = Array.isArray(prev[qi]) ? prev[qi] : [];
       return { ...prev, [qi]: cur.includes(label) ? cur.filter((x) => x !== label) : [...cur, label] };
     });
+    // 单选选中即跳下一题(取消选中/多选/末题不跳),稍延迟让选中态可见
+    if (!multi && !wasSelected && !isLast) setTimeout(() => setQi((i) => Math.min(i + 1, total - 1)), 150);
   };
-  const answerOf = (qi) => {
-    const c = (customs[qi] || '').trim();
-    const p = picks[qi];
+  const answerOf = (i) => {
+    const c = (customs[i] || '').trim();
+    const p = picks[i];
     const sel = Array.isArray(p) ? p.join('、') : (p || '');
     return [sel, c].filter(Boolean).join('；');
   };
-  const allAnswered = questions.length > 0 && questions.every((_, qi) => answerOf(qi));
+  const allAnswered = total > 0 && questions.every((_, i) => answerOf(i));
+  const firstUnanswered = questions.findIndex((_, i) => !answerOf(i));
 
   const submit = () => {
-    if (!allAnswered) return;
+    if (!allAnswered) { if (firstUnanswered >= 0) setQi(firstUnanswered); return; }
     const text = questions
-      .map((q, qi) => `【${q.header || '问题' + (qi + 1)}】${q.question}\n→ ${answerOf(qi)}`)
+      .map((q, i) => `【${q.header || '问题' + (i + 1)}】${q.question}\n→ ${answerOf(i)}`)
       .join('\n\n');
     // 结构化 answers:key=问题原文,value=所选 label(多选用"、"拼)。SDK canUseTool 据此
     // 返回 {behavior:'allow', updatedInput:{questions, answers}},模型干净收到。
     const answers = {};
-    questions.forEach((q, qi) => { answers[q.question] = answerOf(qi); });
+    questions.forEach((q, i) => { answers[q.question] = answerOf(i); });
     onAnswer(req, text, { questions, answers });
   };
 
@@ -213,62 +223,69 @@ function AskQuestionCard({ req, onAnswer, processing, position, hydrate }) {
       if (t && (t.tagName === 'TEXTAREA' || t.tagName === 'INPUT')) return;
       if (e.key === 'Enter') {
         e.preventDefault();
-        // submit() 内部已有 `if (!allAnswered) return;`,未答完时无副作用。
-        // 此前外层加 `&& allAnswered` 守门,Enter 完全沉默,用户以为回车没绑。
-        submit();
-      }
+        // 非末题:当前题已答 → 下一题;末题:全答完 → 提交(submit 内部自带守门,
+        // 未答完会跳到第一个未答题,Enter 永不沉默)。
+        if (!isLast && answerOf(qi)) setQi((i) => i + 1);
+        else if (isLast) submit();
+      } else if (e.key === 'ArrowLeft' && qi > 0) { e.preventDefault(); setQi((i) => i - 1); }
+      else if (e.key === 'ArrowRight' && !isLast) { e.preventDefault(); setQi((i) => i + 1); }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [hydrate, position, allAnswered, picks, customs]);
+  }, [hydrate, position, qi, isLast, allAnswered, picks, customs]);
+
+  const q = questions[qi] || {};
+  const multi = !!q.multiSelect;
+  const opts = Array.isArray(q.options) ? q.options : [];
 
   return (
-    <div className="flex flex-col max-h-[68vh] rounded-xl bg-white border border-canvas-deep shadow-lg overflow-hidden animate-fade-up relative">
+    <div className="flex flex-col max-h-[48vh] rounded-xl bg-white border border-canvas-deep shadow-lg overflow-hidden animate-fade-up relative">
       <div className="px-4 py-2.5 flex items-center gap-2 border-b border-canvas-deep bg-violet-50/60">
         <div className="w-6 h-6 rounded-md bg-violet-100 flex items-center justify-center shrink-0">
           <AlertCircle size={13} className="text-violet-700" />
         </div>
         <div className="text-[13px] font-medium text-ink flex-1">Claude 需要你的选择</div>
+        {total > 1 && (
+          <div className="flex items-center gap-1" title="已回答的题为实心点">
+            {questions.map((_, i) => (
+              <button key={i} onClick={() => setQi(i)}
+                className={`w-1.5 h-1.5 rounded-full transition-colors ${i === qi ? 'bg-violet-600' : answerOf(i) ? 'bg-violet-300' : 'bg-canvas-deep'}`}
+                aria-label={`第 ${i + 1} 题`} />
+            ))}
+          </div>
+        )}
       </div>
-      <div className="px-4 py-3 flex-1 min-h-0 overflow-y-auto space-y-4">
-        {questions.map((q, qi) => {
-          const multi = !!q.multiSelect;
-          const opts = Array.isArray(q.options) ? q.options : [];
-          return (
-            <div key={qi} className="space-y-2">
-              {q.header && <div className="text-[10.5px] uppercase tracking-wide text-ink-faint">{q.header}</div>}
-              <div className="text-[13px] text-ink font-medium">{q.question}{multi && <span className="text-ink-faint font-normal">（可多选）</span>}</div>
-              <div className="grid gap-1.5">
-                {opts.map((o, oi) => {
-                  const label = typeof o === 'string' ? o : (o?.label ?? '');
-                  const desc = typeof o === 'object' ? o?.description : null;
-                  const p = picks[qi];
-                  const sel = multi ? (Array.isArray(p) && p.includes(label)) : p === label;
-                  return (
-                    <button
-                      key={oi}
-                      disabled={processing}
-                      onClick={() => choose(qi, label, multi)}
-                      className={`text-left px-3 py-2 rounded-lg border text-[12.5px] transition-colors disabled:opacity-50 ${
-                        sel ? 'border-violet-400 bg-violet-50 text-ink' : 'border-canvas-deep bg-canvas-warm/40 text-ink-soft hover:bg-canvas-deep'
-                      }`}
-                    >
-                      <span className="font-medium">{label}</span>
-                      {desc && <span className="block text-[11px] text-ink-faint mt-0.5">{desc}</span>}
-                    </button>
-                  );
-                })}
-                <input
-                  type="text"
-                  value={customs[qi] || ''}
-                  onChange={(e) => setCustoms((prev) => ({ ...prev, [qi]: e.target.value }))}
-                  placeholder="或自定义回答…"
-                  className="mt-0.5 text-[12px] font-body px-2.5 py-1.5 rounded-md border border-canvas-deep bg-white text-ink"
-                />
-              </div>
-            </div>
-          );
-        })}
+      <div className="px-4 py-3 flex-1 min-h-0 overflow-y-auto space-y-2">
+        {q.header && <div className="text-[10.5px] uppercase tracking-wide text-ink-faint">{q.header}</div>}
+        <div className="text-[13px] text-ink font-medium">{q.question}{multi && <span className="text-ink-faint font-normal">（可多选）</span>}</div>
+        <div className="grid gap-1.5">
+          {opts.map((o, oi) => {
+            const label = typeof o === 'string' ? o : (o?.label ?? '');
+            const desc = typeof o === 'object' ? o?.description : null;
+            const p = picks[qi];
+            const sel = multi ? (Array.isArray(p) && p.includes(label)) : p === label;
+            return (
+              <button
+                key={oi}
+                disabled={processing}
+                onClick={() => choose(label, multi)}
+                className={`text-left px-3 py-2 rounded-lg border text-[12.5px] transition-colors disabled:opacity-50 ${
+                  sel ? 'border-violet-400 bg-violet-50 text-ink' : 'border-canvas-deep bg-canvas-warm/40 text-ink-soft hover:bg-canvas-deep'
+                }`}
+              >
+                <span className="font-medium">{label}</span>
+                {desc && <span className="block text-[11px] text-ink-faint mt-0.5">{desc}</span>}
+              </button>
+            );
+          })}
+          <input
+            type="text"
+            value={customs[qi] || ''}
+            onChange={(e) => setCustoms((prev) => ({ ...prev, [qi]: e.target.value }))}
+            placeholder="或自定义回答…"
+            className="mt-0.5 text-[12px] font-body px-2.5 py-1.5 rounded-md border border-canvas-deep bg-white text-ink"
+          />
+        </div>
       </div>
       <div className="px-4 py-2.5 flex items-center gap-2 bg-canvas-warm/60 border-t border-canvas-deep">
         <button
@@ -276,15 +293,35 @@ function AskQuestionCard({ req, onAnswer, processing, position, hydrate }) {
           onClick={() => onAnswer(req, '[用户跳过了此问题，请自行用合理默认值继续]')}
           className="px-3 py-1.5 rounded-md text-[12px] font-medium text-ink-muted hover:bg-canvas-deep disabled:opacity-50"
         >跳过</button>
-        <button
-          disabled={processing || !allAnswered}
-          onClick={submit}
-          className="ml-auto px-3 py-1.5 rounded-md text-[12px] font-medium text-white bg-violet-600 hover:bg-violet-700 disabled:opacity-50 inline-flex items-center gap-1.5"
-          title="Enter"
-        >
-          {processing && <Loader2 size={11} className="animate-spin" />}
-          提交 ↵
-        </button>
+        {total > 1 && (
+          <>
+            <span className="ml-auto text-[11px] text-ink-faint font-body">{qi + 1} / {total}</span>
+            <button
+              disabled={processing || qi === 0}
+              onClick={() => setQi((i) => i - 1)}
+              className="px-2.5 py-1.5 rounded-md text-[12px] font-medium text-ink-muted hover:bg-canvas-deep disabled:opacity-40"
+              title="上一题（←）"
+            >← 上一题</button>
+          </>
+        )}
+        {!isLast ? (
+          <button
+            disabled={processing}
+            onClick={() => setQi((i) => i + 1)}
+            className="px-3 py-1.5 rounded-md text-[12px] font-medium text-white bg-violet-600 hover:bg-violet-700 disabled:opacity-50"
+            title="下一题（→ / Enter）"
+          >下一题 →</button>
+        ) : (
+          <button
+            disabled={processing || !allAnswered}
+            onClick={submit}
+            className={`${total > 1 ? '' : 'ml-auto '}px-3 py-1.5 rounded-md text-[12px] font-medium text-white bg-violet-600 hover:bg-violet-700 disabled:opacity-50 inline-flex items-center gap-1.5`}
+            title={allAnswered ? 'Enter' : `第 ${firstUnanswered + 1} 题还未回答`}
+          >
+            {processing && <Loader2 size={11} className="animate-spin" />}
+            提交 ↵
+          </button>
+        )}
       </div>
     </div>
   );

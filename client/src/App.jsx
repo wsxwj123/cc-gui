@@ -2652,6 +2652,13 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // C2:用于把 AutoCompactBanner 限定在「当前聚焦的 pane」——分屏下非聚焦 pane 不应
   // 在你没看着时静默 /compact 改写历史。单窗格时 activeTabIndex 恒为 0 = 本 pane。
   const paneIsActive = useStore((s) => s.activeTabIndex) === tabIndex;
+  // 交互工具(AskUserQuestion/授权/计划审查)挂起时,徽章旁给"等待你回应"提示。
+  // 实测(opus 调研):挂起前该次调用的 usage 已全部送达、徽章数据没漏;静止是因为
+  // 你的答案要到模型下一次 API 调用的 message_start 才计入 —— 提示替代静止的误解。
+  // 严格按本 pane 会话 id 门控(per-pane 纪律),布尔原始值选择器引用稳定。
+  const _pendingSid = (paneSessions && paneSessions[tabIndex])?.sessionId || null;
+  const hasPendingInteraction = useStore((s) =>
+    !!_pendingSid && s.pendingPermissions.some((p) => p.sessionId === _pendingSid));
   // 窗内检索(Cmd/Ctrl+F)开关 —— 仅当前聚焦 pane 响应。
   const [searchOpen, setSearchOpen] = useState(false);
   useEffect(() => {
@@ -5020,6 +5027,12 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                   cwd={selectedSession.projectPath}
                   model={currentModel}
                 />
+              )}
+              {hasPendingInteraction && (
+                <span className="text-[10px] text-violet-600 font-body shrink-0 whitespace-nowrap animate-pulse"
+                  title="存在等待你回应的选择/授权。token 已实时计入;你的答复将在模型下一次调用时计入上下文占用">
+                  等待回应 · 答复后占用刷新
+                </span>
               )}
               {toolCallCount > 0 && <span className="text-[10px] text-ink-faint font-mono shrink-0 whitespace-nowrap">{toolCallCount} 工具调用</span>}
               {currentProvider?.providerHint && currentProvider.providerHint !== 'anthropic' && (

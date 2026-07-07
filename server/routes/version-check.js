@@ -170,22 +170,32 @@ async function getClaudeVersion(claudePath) {
   }
 }
 
+// 带代理回退的 GET:node fetch 不读系统代理,墙内直连 downloads.claude.ai 必失败
+// → 探测本机代理端口后经 curl 重试(mac 自带、Win10+ 自带 curl.exe)。
+async function httpGetText(url, headers = {}) {
+  try {
+    const r = await fetch(url, { headers, signal: AbortSignal.timeout(8000) });
+    if (!r.ok) { const e = new Error(`HTTP ${r.status} (${new URL(url).host})`); e.status = r.status; throw e; }
+    return await r.text();
+  } catch (err) {
+    const proxy = await detectLocalProxy().catch(() => null);
+    if (!proxy) throw err;
+    const { stdout } = await execFileP('curl', ['-fsSL', '--max-time', '15', '-x', proxy, url], { timeout: 20000 });
+    return stdout;
+  }
+}
+
 async function fetchNpmLatest() {
-  const r = await fetch('https://registry.npmjs.org/@anthropic-ai/claude-code/latest', {
-    headers: { 'Accept': 'application/json' },
-  });
-  if (!r.ok) { const e = new Error(`npm registry ${r.status}`); e.status = r.status; throw e; }
-  const d = await r.json();
-  return String(d.version || '');
+  const text = await httpGetText('https://registry.npmjs.org/@anthropic-ai/claude-code/latest', { 'Accept': 'application/json' });
+  return String(JSON.parse(text).version || '');
 }
 
 // 原生安装(claude update)的真源是官方下载渠道清单,不是 npm。两渠道发布有时间差
 // (实测窗口期:本机原生 2.1.198 = 当时渠道最新,npm 已 2.1.199)→ 原生用户按 npm 比
-// 会"永远差一版",红色更新按钮点了更新也不灭。native 按本渠道比;失败回落 npm。
+// 会"永远差一版",红色更新按钮点了更新也不灭。native 只按本渠道比,失败就报错,
+// **不回落 npm**(跨渠道比对必然造出"已是渠道最新却仍提示更新"的假阳性)。
 async function fetchNativeLatest() {
-  const r = await fetch('https://downloads.claude.ai/claude-code-releases/latest');
-  if (!r.ok) { const e = new Error(`downloads.claude.ai ${r.status}`); e.status = r.status; throw e; }
-  const v = String(await r.text()).trim();
+  const v = String(await httpGetText('https://downloads.claude.ai/claude-code-releases/latest')).trim();
   if (!/^\d+\.\d+\.\d+/.test(v)) throw new Error('原生渠道返回的版本号格式异常');
   return v;
 }
@@ -347,7 +357,7 @@ router.get('/claude-version-check', async (req, res) => {
   } else {
     try {
       latest = method === 'native'
-        ? await fetchNativeLatest().catch(() => fetchNpmLatest())
+        ? await fetchNativeLatest()
         : await fetchNpmLatest();
       ccCache = latest; ccCacheSrc = srcKey; ccCachedAt = now;
     } catch (err) {

@@ -632,8 +632,9 @@ function CcUpdater() {
       // BI-3: 挂载时已拿到 hasUpdate/latestVersion,直接置 ok 让"一键更新"按钮立即显示,
       // 不再要求用户先点"检查更新"(更新弹窗"前往更新"落到设置页即见一键更新)。
       setState({ status: d.installed === false ? 'idle' : (d.error ? 'err' : 'ok'), ...d });
-      if (d.installed !== false) loadInstalls();
     }).catch(() => {});
+    // 不论是否检测到安装都拉安装列表:原生/npm 切换按钮常驻,未装态也要能显示"未安装"。
+    loadInstalls();
   }, []);
 
   // 切换 GUI 用哪个 claude(不重装)。path 空串=回到自动优先级。切完重刷列表 + 版本徽章。
@@ -660,6 +661,23 @@ function CcUpdater() {
     } catch (e) {
       setState((s) => ({ ...s, status: 'err', error: e.message || '网络错误' }));
     }
+    // 检查更新同时重扫安装列表(此前只在挂载时扫一次 → 终端里刚装完 npm 版,
+    // 点"检查更新"版本变了但切换区不出现,用户报告的"没有切换按钮"根因)。
+    loadInstalls();
+  };
+
+  // 常驻的「原生版/npm 版」按钮:点击时先重扫安装列表(覆盖刚在终端装完、挂载时
+  // 快照还没有它的场景),该方式已装→直接切换;未装→走安装流程(确认后开终端)。
+  const clickMethod = async (m) => {
+    setUpdating(true);
+    let fresh = Array.isArray(installs) ? installs : [];
+    try { fresh = (await (await fetch('/api/claude-installs')).json()).installs || []; } catch {}
+    setInstalls(fresh);
+    setUpdating(false);
+    const list = fresh.filter((i) => i.method === m);
+    if (list.find((i) => i.active)) return;                    // 已是当前使用
+    if (list.length > 0) { await switchActive(list[0].path); return; }
+    await doInstall(m, state.installed !== false);
   };
 
   // CN-2:在 GUI 内更新并实时显示进度(流式 NDJSON),不用开外部终端。
@@ -801,14 +819,34 @@ function CcUpdater() {
         )
       )}
       {state.status === 'err' && <div className="text-[12px] text-error">{state.error}</div>}
-      {/* 切换使用哪个 claude:机器上多处装了 claude 时(npm 版 + 原生版并存),GUI 默认按
-          优先级自动选第一个命中的。这里列出检测到的全部安装,让用户手动钉死用哪个(不重装)。
-          选"自动"清除钉死回优先级。切完 resolver 立即用新的,聊天/agent/MCP 无需重启。 */}
-      {state.installed !== false && Array.isArray(installs) && installs.length > 0 && (
-        <div className="border-t border-canvas-deep/60 pt-2 space-y-1.5">
-          <div className="text-[11px] text-ink-muted font-body">
-            使用哪个 Claude <span className="text-ink-faint">(检测到 {installs.length} 处安装)</span>
-          </div>
+      {/* 使用哪个 Claude:原生版/npm 版两个按钮常驻(不论是否安装)。点击时先重扫一遍
+          安装列表(覆盖"刚在终端装完回来点"的场景):该方式已装→直接切换;未装→确认后打开
+          终端安装。下方仍列出检测到的全部安装(brew/多处并存时可精确钉选某一处)。 */}
+      <div className="border-t border-canvas-deep/60 pt-2 space-y-1.5">
+        <div className="text-[11px] text-ink-muted font-body">
+          使用哪个 Claude{Array.isArray(installs) && installs.length > 0 && (
+            <span className="text-ink-faint">(检测到 {installs.length} 处安装)</span>
+          )}
+        </div>
+        <div className="grid grid-cols-2 gap-1.5">
+          {[['native', '原生版(官方安装器)'], ['npm', 'npm 版']].map(([m, label]) => {
+            const list = Array.isArray(installs) ? installs.filter((i) => i.method === m) : [];
+            const it = list.find((i) => i.active) || list[0] || null;
+            const isActive = !!(it && it.active);
+            return (
+              <button key={m} disabled={updating} onClick={() => clickMethod(m)}
+                className={`px-2.5 py-2 text-left rounded-md border transition-colors disabled:opacity-50 ${isActive ? 'bg-accent/10 border-accent/40 cursor-default' : 'bg-canvas-warm border-canvas-deep hover:border-accent/40'}`}>
+                <span className="block text-[11.5px] font-body text-ink">{label}</span>
+                <span className={`block text-[10px] font-body mt-0.5 ${isActive ? 'text-accent' : it ? 'text-ink-muted' : 'text-ink-faint'}`}>
+                  {isActive ? `当前使用${it.version ? ` · v${it.version}` : ''}`
+                    : it ? `已安装${it.version ? ` v${it.version}` : ''} · 点击切换`
+                    : '未安装 · 点击安装'}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+        {Array.isArray(installs) && installs.length > 0 && (
           <div className="space-y-1">
             {installs.map((it) => {
               const label = METHOD_LABEL[it.method] || it.method || '未知';
@@ -827,20 +865,12 @@ function CcUpdater() {
               );
             })}
           </div>
-          <div className="text-[10.5px] text-ink-faint font-body leading-snug">
-            切换只是让 GUI 改用另一处已装的 claude(<b>不重装、不下载</b>),立即对聊天/子代理/MCP 生效。
-            想装一种当前没有的方式,用下面的按钮打开终端安装。
-          </div>
-          <div className="flex items-center gap-1.5 pt-0.5">
-            {[['npm', 'npm 版'], ['native', '官方安装器版']].map(([m, label]) => (
-              <button key={m} disabled={updating} onClick={() => doInstall(m, true)}
-                className="px-2.5 py-1 text-[11px] rounded-md font-body border bg-canvas-warm border-canvas-deep text-ink-muted hover:text-ink disabled:opacity-50">
-                安装{label}
-              </button>
-            ))}
-          </div>
+        )}
+        <div className="text-[10.5px] text-ink-faint font-body leading-snug">
+          切换只是让 GUI 改用另一处已装的 claude(<b>不重装、不下载</b>),立即对聊天/子代理/MCP 生效。
+          更新提示只针对当前使用的版本;另一版本过时不提示。
         </div>
-      )}
+      </div>
       {/* CN-2 实时进度日志 */}
       {(updating || logLines.length > 0) && (
         <pre className="text-[10px] leading-snug font-mono text-ink-soft bg-canvas border border-canvas-deep rounded p-2 max-h-40 overflow-auto whitespace-pre-wrap break-all">
