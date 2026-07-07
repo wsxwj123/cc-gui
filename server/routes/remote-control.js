@@ -3,6 +3,7 @@ import { realpath } from 'fs/promises';
 import { resolve } from 'path';
 import { homedir } from 'os';
 import { isPathInside, isKnownClaudeWorkspace } from '../utils/safe-path.js';
+import { claudeCommand } from '../utils/claude-resolver.js';
 
 // node-pty 是本 server 唯一的原生模块,其 .node 二进制按「构建时的 Node ABI」编译。
 // 打包发布时(CI Node 20)编译进 bundle,但 app 运行时 spawn 的是用户机器上「任意版本」
@@ -84,29 +85,32 @@ router.post('/remote-control', async (req, res) => {
       dir = real;
     }
 
-    // Run through a login shell so `claude` resolves via the user's full PATH
-    // (Homebrew shim, version-manager shims, etc.) — spawning the bare name with
-    // node-pty fails ("posix_spawnp failed") when the server's inherited PATH is
-    // narrower than the login shell's. sessionId is UUID-validated, so it is
-    // safe to interpolate; cwd is passed via the pty option (no interpolation).
-    const shell = process.env.SHELL || '/bin/bash';
     // Same provider-routing hygiene as the chat spawn (see chat.js): strip
     // inherited official ANTHROPIC_* so the resumed session talks to the
-    // provider in settings.json, not a Claude-Desktop-injected official
-    // base/token. The login shell (-lc) won't re-add them — the user's profile
-    // doesn't export them.
+    // provider in settings.json, not a Claude-Desktop-injected official base/token.
     const rcEnv = { ...process.env };
     for (const k of ['ANTHROPIC_BASE_URL', 'ANTHROPIC_API_URL', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_API_KEY']) {
       delete rcEnv[k];
     }
     const pty = await loadPty();
-    const term = pty.spawn(shell, ['-lc', `claude --remote-control --resume ${sessionId}`], {
-      name: 'xterm-color',
-      cols: 100,
-      rows: 30,
-      cwd: dir,
-      env: rcEnv,
-    });
+    // 平台分支:此前恒用 `process.env.SHELL || '/bin/bash'` + `-lc`,Windows 上 SHELL 为空
+    // → 落到不存在的 /bin/bash,pty.spawn 直接抛(ENOENT),手机远程控制在 Windows 主机上
+    // 必坏(用户双端 dogfood 场景)。
+    //  · POSIX:保持 login shell(-lc)——server 继承的 PATH 比登录 shell 窄,裸 spawn `claude`
+    //    会 posix_spawnp 失败;login shell 补齐 Homebrew/版本管理器 shim。
+    //  · Windows:无 login shell 概念。用 resolver 找到的 claude 绝对路径直接 spawn(ConPTY
+    //    不靠 login shell 补 PATH);.cmd/.bat 经 cmd.exe /c(claudeCommand 已封装)。
+    let term;
+    if (process.platform === 'win32') {
+      const { file, args } = claudeCommand(['--remote-control', '--resume', sessionId]);
+      term = pty.spawn(file, args, { name: 'xterm-color', cols: 100, rows: 30, cwd: dir, env: rcEnv });
+    } else {
+      const shell = process.env.SHELL || '/bin/bash';
+      // sessionId 已 UUID 校验,插值安全;cwd 走 pty option(不插值)。
+      term = pty.spawn(shell, ['-lc', `claude --remote-control --resume ${sessionId}`], {
+        name: 'xterm-color', cols: 100, rows: 30, cwd: dir, env: rcEnv,
+      });
+    }
 
     const entry = { term, startedAt: Date.now(), cwd: dir };
     active.set(sessionId, entry);

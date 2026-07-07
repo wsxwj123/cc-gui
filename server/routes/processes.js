@@ -22,6 +22,8 @@ function isProcessAlive(pid) {
 }
 
 // 解析 wmic CSV 输出为 {COL: value} 行数组。wmic /format:csv 首列恒为 Node(主机名)。
+// 注:naive split(',') 对 CommandLine 含逗号会错位 —— 已由下面 CIM(JSON)主路径规避,
+// 此函数仅作 wmic 回落路径的解析,老系统上凑合用。
 function parseWmicCsv(output) {
   const lines = output.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
   const headerIdx = lines.findIndex((l) => /,/.test(l) && /Node/i.test(l));
@@ -35,14 +37,48 @@ function parseWmicCsv(output) {
   });
 }
 
+// Windows 进程查询:PowerShell CIM 为主 + wmic 回落。
+// 根因:wmic 自 Win 10 21H1 起弃用,**Win 11 24H2 已作为"按需功能"从默认镜像移除**,
+// 新机器可能整个没有 wmic.exe → 纯 wmic 的进程面板/claude 进程列表在新 Windows 上全坏。
+// CIM(Get-CimInstance)在 PowerShell 3+(Win 8+)恒可用,是官方替代。顺带用 JSON 输出
+// 规避 parseWmicCsv 的逗号错位 bug。filter:null=全量,数字=按 ProcessId。
+// 返回统一形状 [{ProcessId, ParentProcessId, CommandLine, CreationDate(yyyyMMddHHmmss)}]。
+async function winQueryProcesses(filter = null) {
+  const where = filter != null ? `-Filter "ProcessId=${Number(filter)}"` : '';
+  // CreationDate 是 CIM DateTime,ConvertTo-Json 会序列化成 /Date(...)/;显式转成
+  // 与 wmic 同款的 yyyyMMddHHmmss 字符串,下游 startedAt 消费方无需分平台。
+  const ps = `Get-CimInstance Win32_Process ${where} | Select-Object ProcessId,ParentProcessId,CommandLine,@{N='CreationDate';E={ if($_.CreationDate){$_.CreationDate.ToString('yyyyMMddHHmmss')}else{''} }} | ConvertTo-Json -Compress`;
+  try {
+    const { stdout } = await execFileP('powershell', ['-NoProfile', '-NonInteractive', '-Command', ps],
+      { encoding: 'utf-8', maxBuffer: 32 * 1024 * 1024, timeout: 15000 });
+    const t = stdout.trim();
+    if (!t) return [];
+    const parsed = JSON.parse(t);
+    return (Array.isArray(parsed) ? parsed : [parsed]).map((r) => ({
+      ProcessId: r.ProcessId != null ? String(r.ProcessId) : '',
+      ParentProcessId: r.ParentProcessId != null ? String(r.ParentProcessId) : '',
+      CommandLine: r.CommandLine || '',
+      CreationDate: r.CreationDate || '',
+    }));
+  } catch {
+    // 回落 wmic(老系统上 CIM 不在或被策略禁 → 仍有 wmic)。
+    try {
+      const args = filter != null
+        ? ['process', 'where', `ProcessId=${Number(filter)}`, 'get', 'ProcessId,ParentProcessId,CommandLine,CreationDate', '/format:csv']
+        : ['process', 'get', 'ProcessId,ParentProcessId,CommandLine,CreationDate', '/format:csv'];
+      const { stdout } = await execFileP('wmic', args, { encoding: 'utf-8', maxBuffer: 32 * 1024 * 1024, timeout: 15000 });
+      return parseWmicCsv(stdout);
+    } catch { return []; }
+  }
+}
+
 async function getProcessInfo(pid) {
   const n = Number(pid);
   if (!Number.isInteger(n) || n <= 0) return null;
   if (process.platform === 'win32') {
-    // Windows 无 ps。wmic 取 ppid/命令行/启动时间;cpu/mem 不便取→给 null 不崩。
+    // Windows 无 ps。CIM(wmic 回落)取 ppid/命令行/启动时间;cpu/mem 不便取→给 null 不崩。
     try {
-      const { stdout: output } = await execFileP('wmic', ['process', 'where', `ProcessId=${n}`, 'get', 'ProcessId,ParentProcessId,CommandLine,CreationDate', '/format:csv'], { encoding: 'utf-8' });
-      const rows = parseWmicCsv(output);
+      const rows = await winQueryProcesses(n);
       if (!rows.length) return null;
       const r = rows[0];
       return {
@@ -128,10 +164,9 @@ router.get('/processes', async (req, res) => {
     // (`ps aux | grep`) spawning /bin/sh on every poll.
     let claudeProcesses = [];
     if (process.platform === 'win32') {
-      // Windows 无 ps。wmic 取全量进程的命令行,按命令行匹配 claude;cpu/mem 不便取→null。
+      // Windows 无 ps。CIM(wmic 回落)取全量进程命令行,按命令行匹配 claude;cpu/mem→null。
       try {
-        const { stdout: wmicOut } = await execFileP('wmic', ['process', 'get', 'ProcessId,CommandLine,CreationDate', '/format:csv'], { encoding: 'utf-8', maxBuffer: 16 * 1024 * 1024 });
-        claudeProcesses = parseWmicCsv(wmicOut)
+        claudeProcesses = (await winQueryProcesses())
           .filter((r) => r.CommandLine && /\bclaude\b/i.test(r.CommandLine) && !/claude-gui/i.test(r.CommandLine))
           .map((r) => ({
             pid: parseInt(r.ProcessId) || null,
