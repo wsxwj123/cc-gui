@@ -637,7 +637,10 @@ function CcUpdater() {
     loadInstalls();
   }, []);
 
+  const [manualPath, setManualPath] = useState('');
   // 切换 GUI 用哪个 claude(不重装)。path 空串=回到自动优先级。切完重刷列表 + 版本徽章。
+  // 复用于手动指定路径:PUT /api/claude-active 已校验 existsSync(不存在返回 400),
+  // 写入 override 后 resolver 立即改用它 → 检测转"已安装"。检测够不到的安装位的唯一出口。
   const switchActive = async (path) => {
     setUpdating(true);
     try {
@@ -811,10 +814,32 @@ function CcUpdater() {
         )}
       </div>
       {state.installed === false && (
-        <div className="text-[11px] text-ink-faint leading-snug">
-          <b>npm</b>:走 npm 源、终端有下载进度,需 Node ≥ 20(此 GUI 已在用 Node,故必有)。
-          <b>官方安装器</b>:自包含二进制、不依赖 Node。两者都需联网,墙内请先开代理(Clash 等<b>开启系统代理</b>)。
-        </div>
+        <>
+          <div className="text-[11px] text-ink-faint leading-snug">
+            <b>npm</b>:走 npm 源、终端有下载进度,需 Node ≥ 20(此 GUI 已在用 Node,故必有)。
+            <b>官方安装器</b>:自包含二进制、不依赖 Node。两者都需联网,墙内请先开代理(Clash 等<b>开启系统代理</b>)。
+          </div>
+          {/* 检测够不到的安装位的手动出口:claude 明明装了却显示"未安装"时,在终端跑
+              which claude(mac/linux)/ where claude(win)拿到路径填这里。GUI 绝不删 claude,
+              显示未安装=解析没找到,不是被删。 */}
+          <div className="border-t border-amber-700/20 pt-2 mt-1 space-y-1.5">
+            <div className="text-[11px] text-ink-muted font-body">
+              已经装了却检测不到?手动指定 claude 路径
+              <span className="block text-[10px] text-ink-faint mt-0.5">
+                终端运行 <code className="font-mono">which claude</code>(mac/linux)或 <code className="font-mono">where claude</code>(Windows)拿到完整路径填入
+              </span>
+            </div>
+            <div className="flex items-center gap-1.5">
+              <input value={manualPath} onChange={(e) => setManualPath(e.target.value)}
+                placeholder="claude 可执行文件的完整路径"
+                className="flex-1 min-w-0 text-[11px] font-mono bg-canvas-warm border border-canvas-deep rounded px-2 py-1.5 text-ink focus:border-accent outline-none" />
+              <button disabled={updating || !manualPath.trim()} onClick={() => switchActive(manualPath.trim())}
+                className="shrink-0 px-2.5 py-1.5 text-[11px] rounded-md bg-accent text-white hover:bg-accent/90 disabled:opacity-50">
+                使用此路径
+              </button>
+            </div>
+          </div>
+        </>
       )}
       {state.status === 'ok' && (
         state.hasUpdate ? (
