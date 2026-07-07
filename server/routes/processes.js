@@ -44,7 +44,10 @@ function parseWmicCsv(output) {
 // 规避 parseWmicCsv 的逗号错位 bug。filter:null=全量,数字=按 ProcessId。
 // 返回统一形状 [{ProcessId, ParentProcessId, CommandLine, CreationDate(yyyyMMddHHmmss)}]。
 async function winQueryProcesses(filter = null) {
-  const where = filter != null ? `-Filter "ProcessId=${Number(filter)}"` : '';
+  // -Filter 用【单引号】:整个 -Command 串因此不含任何双引号,Node 在 Windows 上把它当
+  // 单个 argv 传给 powershell 时无需转义内嵌双引号(execFile 的 Windows 引号处理对内嵌
+  // 双引号很脆)。ProcessId 是 Number() 过的纯数字,单引号内无注入风险。
+  const where = filter != null ? `-Filter 'ProcessId=${Number(filter)}'` : '';
   // CreationDate 是 CIM DateTime,ConvertTo-Json 会序列化成 /Date(...)/;显式转成
   // 与 wmic 同款的 yyyyMMddHHmmss 字符串,下游 startedAt 消费方无需分平台。
   const ps = `Get-CimInstance Win32_Process ${where} | Select-Object ProcessId,ParentProcessId,CommandLine,@{N='CreationDate';E={ if($_.CreationDate){$_.CreationDate.ToString('yyyyMMddHHmmss')}else{''} }} | ConvertTo-Json -Compress`;
