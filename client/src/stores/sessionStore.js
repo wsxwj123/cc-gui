@@ -327,9 +327,20 @@ export const useStore = create((set, get) => ({
 
   // 缓存优化(CLI --exclude-dynamic-system-prompt-sections / SDK systemPrompt.excludeDynamicSections):
   // 把每轮变化的动态段(工作目录 / auto-memory / git 状态)移出系统提示、改注入首条用户消息,
-  // 使系统提示保持静态、提升第三方 provider 的前缀缓存命中。默认关(官方渠道无需开启)。
+  // 使系统提示保持静态、提升第三方 provider 的前缀缓存命中。三态:'auto'(默认,server 按
+  // provider 定——第三方开/官方关)| true | false(用户显式)。旧值 '1'/'0' 原样迁移。
   excludeDynamicSystemPrompt: (() => {
-    try { return localStorage.getItem('cgui-exclude-dynamic-prompt') === '1'; } catch { return false; }
+    try {
+      const v = localStorage.getItem('cgui-exclude-dynamic-prompt');
+      return v === '1' ? true : v === '0' ? false : 'auto';
+    } catch { return 'auto'; }
+  })(),
+
+  // 会话常驻进程(#26):回合结束后 CLI 进程保活,同会话下一条消息复用 —— 免掉每回合
+  // 冷启动(二进制+settings+全部 MCP server,实测 ~5s)。默认开;出问题可在设置关掉
+  // 回到逐回合冷启。
+  persistentChat: (() => {
+    try { return localStorage.getItem('cgui-persistent-chat') !== '0'; } catch { return true; }
   })(),
 
   // 聊天模式(全局,localStorage):开启后消息流只显示 AI 最终文本 + 用户消息,把
@@ -804,9 +815,19 @@ export const useStore = create((set, get) => ({
   },
 
 
-  setExcludeDynamicSystemPrompt: (on) => {
-    set({ excludeDynamicSystemPrompt: !!on });
-    try { localStorage.setItem('cgui-exclude-dynamic-prompt', on ? '1' : '0'); } catch {}
+  setPersistentChat: (on) => {
+    set({ persistentChat: !!on });
+    try { localStorage.setItem('cgui-persistent-chat', on ? '1' : '0'); } catch {}
+  },
+
+  setExcludeDynamicSystemPrompt: (v) => {
+    // v: 'auto' | true | false('auto' = server 按 provider 决定:第三方开/官方关)
+    set({ excludeDynamicSystemPrompt: v === true ? true : v === false ? false : 'auto' });
+    try {
+      if (v === true) localStorage.setItem('cgui-exclude-dynamic-prompt', '1');
+      else if (v === false) localStorage.setItem('cgui-exclude-dynamic-prompt', '0');
+      else localStorage.removeItem('cgui-exclude-dynamic-prompt');
+    } catch {}
   },
 
   setChatMode: (on) => {

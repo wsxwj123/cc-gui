@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { readdir, stat, readFile, writeFile, rename, open, mkdir } from 'fs/promises';
 import { join } from 'path';
 import { homedir } from 'os';
+import { closePersistentForSession } from './chat.js';
 
 // Guard against path traversal: projectHash / sessionId arrive from request
 // bodies and queries, then get concatenated into fs paths. A crafted value
@@ -266,6 +267,8 @@ router.post('/sessions/:sessionId/trim', async (req, res) => {
     if (!safeId(projectHash) || !safeId(req.params.sessionId)) {
       return res.status(400).json({ error: 'invalid projectHash or sessionId' });
     }
+    // #26:改写历史前关掉常驻进程 —— 它的内存上下文与截断后的 jsonl 已分叉,复用会答非所问。
+    closePersistentForSession(req.params.sessionId);
     const file = sessionFile(projectHash, req.params.sessionId);
     let raw;
     try { raw = await readFile(file, 'utf-8'); }
@@ -342,6 +345,7 @@ router.post('/sessions/:sessionId/trim-before-tool', async (req, res) => {
     if (!safeId(projectHash) || !safeId(req.params.sessionId)) {
       return res.status(400).json({ error: 'invalid projectHash or sessionId' });
     }
+    closePersistentForSession(req.params.sessionId); // #26:改写历史前关常驻进程(同 trim)
 
     const file = sessionFile(projectHash, req.params.sessionId);
     let raw;
@@ -395,6 +399,7 @@ router.post('/sessions/:sessionId/strip-thinking', async (req, res) => {
     if (!safeId(projectHash) || !safeId(req.params.sessionId)) {
       return res.status(400).json({ error: 'invalid projectHash or sessionId' });
     }
+    closePersistentForSession(req.params.sessionId); // #26:改写历史前关常驻进程(同 trim)
     const file = join(homedir(), '.claude', 'projects', projectHash, `${req.params.sessionId}.jsonl`);
     let raw;
     try { raw = await readFile(file, 'utf-8'); }
@@ -449,6 +454,9 @@ router.delete('/sessions/:sessionId', async (req, res) => {
       return res.status(400).json({ error: 'invalid projectHash or sessionId' });
     }
     const file = join(homedir(), '.claude', 'projects', projectHash, `${req.params.sessionId}.jsonl`);
+    // #26:删除前关掉该会话的常驻/在跑进程 —— 残余进程可能把刚删的 jsonl 写"复活"。
+    // 客户端删除链路已先调 /stop,这里是服务端兜底(直连 API 删除也安全)。
+    closePersistentForSession(req.params.sessionId);
     const { unlink } = await import('fs/promises');
     let deletedJsonl = false;
     try {

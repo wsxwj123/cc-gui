@@ -264,8 +264,17 @@ function installCmdFor(proxyUrl = null, method = 'native') {
   // npm:读 HTTP_PROXY 环境变量(由 launchInTerminal 在脚本里 set/export),且自带
   // 下载/安装进度输出 —— 想"看得见进度"选它;前提是本机有 node(GUI 后端本就靠 node 跑,
   // 所以 GUI 能开 = node 在)。
+  // 装完自动把 npm 全局 bin 写入用户 PATH(npm 自己从不写 → "装成功但终端/检测都找不到"
+  // 的根因):Win 用 PowerShell 追加 HKCU\Environment\Path(不用 setx——超 1024 字符会
+  // 截断毁 PATH;SetEnvironmentVariable 会广播 WM_SETTINGCHANGE,新开终端即生效);
+  // mac/linux 追加 export 行到 ~/.zshrc(darwin)/~/.bashrc。已包含则跳过,不重复写。
   if (method === 'npm') {
-    return 'npm install -g @anthropic-ai/claude-code';
+    if (process.platform === 'win32') {
+      const psAppend = `$p=(npm config get prefix).Trim(); $u=[Environment]::GetEnvironmentVariable('Path','User'); if(@(($u -split ';') | Where-Object {$_ -eq $p}).Count -eq 0){[Environment]::SetEnvironmentVariable('Path', ($u.TrimEnd(';')+';'+$p), 'User'); Write-Host ('npm bin dir written to user PATH: '+$p)} else {Write-Host 'user PATH already contains npm bin dir'}`;
+      return `npm install -g @anthropic-ai/claude-code && powershell -NoProfile -Command "${psAppend}"`;
+    }
+    const rc = process.platform === 'darwin' ? '$HOME/.zshrc' : '$HOME/.bashrc';
+    return `npm install -g @anthropic-ai/claude-code && NPMBIN="$(npm prefix -g)/bin" && { case ":$PATH:" in *":$NPMBIN:"*) echo "PATH 已包含 $NPMBIN";; *) echo "export PATH=\\"$NPMBIN:\\$PATH\\"" >> ${rc} && echo "已把 $NPMBIN 写入 ${rc}(新开终端生效)";; esac; }`;
   }
   if (process.platform === 'win32') {
     // O2: Windows 官方原生安装器(独立二进制,不需要 Node/npm,自动写 PATH)。

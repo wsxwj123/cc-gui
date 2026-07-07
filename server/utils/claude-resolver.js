@@ -68,15 +68,21 @@ function fromLoginShell() {
 
 // 策略 3:问 npm 自己的全局 prefix(用户 `npm config set prefix` 到任意目录时,
 // npm 不写 shell PATH → "装成功但检测不到"的经典因;npm 本体随 node 恒可达)。
+// 除 bin shim 外,再直扫包内真实二进制:npm 版 claude-code 是 wrapper 包,postinstall
+// 把原生二进制放在 <全局 node_modules>/@anthropic-ai/claude-code/bin/claude.exe
+// (全平台都叫 .exe,mac 上实为 Mach-O,可直接执行)。shim 缺失/软链断(--ignore-scripts、
+// 杀毒隔离 shim 等)时这条仍能命中——探测彻底与 PATH 无关。
 function fromNpmPrefix() {
   const out = isWin
     ? safeExec('cmd.exe', ['/c', 'npm', 'config', 'get', 'prefix'], 6000)
     : safeExec('npm', ['prefix', '-g'], 6000);
   const prefix = out.trim();
   if (!prefix || /^undefined$/i.test(prefix)) return [];
+  const nodeModules = isWin ? join(prefix, 'node_modules') : join(prefix, 'lib', 'node_modules');
+  const pkgBin = join(nodeModules, '@anthropic-ai', 'claude-code', 'bin', 'claude.exe');
   return isWin
-    ? [join(prefix, 'claude.exe'), join(prefix, 'claude.cmd')]
-    : [join(prefix, 'bin', 'claude')];
+    ? [join(prefix, 'claude.exe'), join(prefix, 'claude.cmd'), pkgBin]
+    : [join(prefix, 'bin', 'claude'), pkgBin];
 }
 
 // nvm(mac/linux)/fnm 把每个 node 版本装在独立目录,全局 bin 在 <ver>/bin,

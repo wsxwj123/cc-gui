@@ -151,6 +151,7 @@ export function getActiveChatProcesses() {
       finishedAt: slot.finishedAt || null,
       exitCode: slot.exitCode,
       attached: slot.attached,
+      idle: !!slot.idle, // #26:回合间保活(非"正在跑"),agents/active 据此报 status idle
     });
   }
   return out;
@@ -174,6 +175,10 @@ const READ_CLASS = new Set([
 const WRITE_CLASS = new Set(['Edit', 'MultiEdit', 'Write', 'NotebookEdit']);
 
 let sdkCounter = 0;
+
+// #26 会话常驻:回合结束后进程保活等待下一条消息的空闲上限。到点关闭回收 ——
+// 常驻收益(免冷启/免 MCP 重启/前缀稳定)集中在活跃对话内,挂太久只是白占内存。
+const KEEPALIVE_IDLE_MS = 15 * 60 * 1000;
 
 // 动态解析用户已装 claude(路径绝不写死,便于公开版在别人机器上跑)。解析到则让 SDK
 // 指向它(避免其自带 ~237M 二进制);解析不到返回 null,SDK 回落自带二进制。
@@ -226,6 +231,8 @@ function deliverLine(slot, line) {
 function finishSlot(slot, procId) {
   if (slot.pumpEnded) return;
   slot.pumpEnded = true;
+  slot.idle = false;
+  if (slot.idleTimer) { clearTimeout(slot.idleTimer); slot.idleTimer = null; }
   if (slot.exitCode === null) slot.exitCode = 0;
   slot.finishedAt = Date.now();
   try { slot.nulWatcher?.close(); } catch {}
@@ -299,6 +306,34 @@ function makeCanUseTool(slot) {
   };
 }
 
+// #26 会话常驻:同会话回合间保活的复用兼容键。**完全一致才复用**,任何差异都关旧开新
+// (回落到与逐回合冷启相同的行为,零语义变化)。settings.json 的 mtime 计入键 ——
+// 切 provider / 改任何全局配置(无论经 GUI 还是终端 cc-switch)都会使旧进程不再被
+// 复用,规避"常驻进程拿着旧 provider/旧配置继续跑"的整类失败模式。
+function chatCompatKey({ workingDir, model, effort, appendSystemPrompt, promptSuggestions, excludeDynamicSystemPrompt, globalRead, dirs }) {
+  let settingsMtime = 0;
+  try { settingsMtime = statSync(pathJoin(homedir(), '.claude', 'settings.json')).mtimeMs; } catch {}
+  return JSON.stringify({
+    cwd: workingDir, model, effort: effort || null,
+    append: (typeof appendSystemPrompt === 'string' ? appendSystemPrompt.trim() : ''),
+    suggest: promptSuggestions === true,
+    xdyn: excludeDynamicSystemPrompt === true ? 1 : excludeDynamicSystemPrompt === false ? 0 : 'auto',
+    gr: globalRead !== false, dirs, settingsMtime,
+  });
+}
+
+// 关掉某会话的常驻/在跑进程(回滚截断、删除会话前必须调:常驻进程的内存上下文与
+// 改写后的 jsonl 已分叉,复用会答非所问;删除后残余进程可能复活刚删的文件)。
+export function closePersistentForSession(sessionId) {
+  if (!sessionId) return;
+  for (const slot of activeProcesses.values()) {
+    if (slot.sessionId !== sessionId || slot.exitCode !== null) continue;
+    slot.closing = true;
+    try { slot.input?.close(); } catch {}
+    if (!slot.idle) { try { slot.abort?.abort(); } catch {} }
+  }
+}
+
 router.post('/chat', async (req, res) => {
   const {
     prompt, sessionId, cwd,
@@ -310,6 +345,7 @@ router.post('/chat', async (req, res) => {
     agent,
     promptSuggestions,
     excludeDynamicSystemPrompt,
+    keepAlive,
   } = req.body;
   if (!prompt) return res.status(400).json({ error: 'prompt is required' });
 
@@ -366,6 +402,52 @@ router.post('/chat', async (req, res) => {
   // settings.json(或 OAuth 钥匙串)决定。SDK 的 env 选项是"整体替换",传剥好的全量。
   const childEnv = cleanChildEnv();
 
+  // ── #26 会话常驻复用:同会话上一回合的进程还挂着(idle)且配置键完全一致 → 新消息
+  // 直接推进它的 input,免掉整套冷启动(bun 二进制 + settings + 全部 MCP server,实测
+  // ~5s)且上游看到稳定连接/前缀(第三方缓存友好)。plan 档位差异经 setPermissionMode
+  // 热切(与 /chat/permission-mode 同机制);其余任何差异 → 关旧进程走全新冷启,行为
+  // 与逐回合冷启完全一致。keepAlive===false(GUI 开关关掉)时同样只关不复用。
+  const wantKeepAlive = keepAlive !== false;
+  const reuseKey = chatCompatKey({
+    workingDir, model, effort, appendSystemPrompt, promptSuggestions,
+    excludeDynamicSystemPrompt, globalRead, dirs: [...dirSet].sort(),
+  });
+  if (sessionId) {
+    for (const [alivePid, s] of activeProcesses) {
+      if (!s.idle || s.closing || s.pumpEnded || s.exitCode !== null || s.sessionId !== sessionId) continue;
+      if (!wantKeepAlive || s.compatKey !== reuseKey) {
+        s.closing = true;
+        try { s.input.close(); } catch {}
+        continue;
+      }
+      if (s.idleTimer) { clearTimeout(s.idleTimer); s.idleTimer = null; }
+      const wantPlanMode = (chosenMode === 'plan');
+      if (wantPlanMode !== (s.sdkMode === 'plan')) {
+        try {
+          await s.query.setPermissionMode(wantPlanMode ? 'plan' : 'default');
+          s.sdkMode = wantPlanMode ? 'plan' : 'default';
+        } catch {
+          // 热切失败 → 放弃复用,关旧开新
+          s.closing = true;
+          try { s.input.close(); } catch {}
+          break;
+        }
+      }
+      // 重置回合级状态(新回合从干净缓冲开始;上一回合内容客户端已消费或以 jsonl 为准)
+      s.idle = false;
+      s.earlyLines = [];
+      s.completeNotified = false;
+      s.turnSubagentSeen = false;
+      s.startedAt = Date.now();
+      s.finishedAt = null;
+      s.promptPreview = String(prompt).slice(0, 80);
+      s.guiMode = chosenMode;
+      s.permissionMode = chosenMode;
+      s.input.push({ type: 'user', message: { role: 'user', content: String(prompt) } });
+      return res.json({ pid: alivePid, model: s.model, reused: true });
+    }
+  }
+
   const procId = 'sdk-' + (++sdkCounter);
   const abort = new AbortController();
   const input = makeInputQueue();
@@ -390,6 +472,14 @@ router.post('/chat', async (req, res) => {
     permissionMode: permissionMode || 'default',
     guiMode: chosenMode,
     startedAt: Date.now(),
+    // #26 会话常驻状态
+    idle: false,             // 回合间保活等待下一条消息
+    closing: false,          // 收尾中(stop/删除/配置变化),finalize 不得转 idle
+    sdkMode: sdkPermMode,    // SDK 层权限模式(plan 热切时同步)
+    compatKey: reuseKey,     // 复用兼容键(含 settings.json mtime)
+    keepAlive: wantKeepAlive,
+    turnSubagentSeen: false, // 本回合是否起过子代理(关流去抖判据,回合级重置)
+    idleTimer: null,
   };
   activeProcesses.set(procId, slot);
   slot.nulWatcher = startWinNulWatcher(workingDir);
@@ -413,7 +503,15 @@ router.post('/chat', async (req, res) => {
   // 缓存优化(对应 CLI --exclude-dynamic-system-prompt-sections):把工作目录 / auto-memory /
   // git 状态等每轮变化的动态段移出系统提示、由 SDK 改注入首条用户消息,使系统提示静态可缓存,
   // 提升第三方 provider 前缀缓存命中。仅加系统提示选项,不影响消息泵/关流时序。
-  if (excludeDynamicSystemPrompt === true) systemPrompt.excludeDynamicSections = true;
+  // 三态:true/false=用户显式;'auto'/未传=按 provider 决定——settings.json env 带
+  // ANTHROPIC_BASE_URL 即第三方(默认开,前缀缓存对费用/首字延迟影响巨大),官方 OAuth 关。
+  let excludeDyn = excludeDynamicSystemPrompt;
+  if (excludeDyn !== true && excludeDyn !== false) {
+    try {
+      excludeDyn = !!JSON.parse(readFileSync(pathJoin(homedir(), '.claude', 'settings.json'), 'utf8'))?.env?.ANTHROPIC_BASE_URL;
+    } catch { excludeDyn = false; }
+  }
+  if (excludeDyn === true) systemPrompt.excludeDynamicSections = true;
 
   const options = {
     model,
@@ -477,14 +575,28 @@ router.post('/chat', async (req, res) => {
   // 解法:只有"本回合起过子代理"时才对 result 去抖关闭(随后任何事件即取消=还有回合,最终
   // result 后 4s 静默到点才真正关);没起子代理的普通回合只有一个 result,立即关——零延迟、零回归。
   // 同时修好 CG-2(非规划模式"子代理后再要授权"也是同一根因)。
-  let subagentSeen = false;
   let closeTimer = null;
   let lastResultLine = null;
   const cancelClose = () => { if (closeTimer) { clearTimeout(closeTimer); closeTimer = null; } };
   const finalize = () => {
     cancelClose();
-    if (lastResultLine) maybeBroadcastTurnComplete(slot, lastResultLine); // 回合完成 WS 只在最终 result 播
-    try { input.close(); } catch {}
+    if (lastResultLine) { maybeBroadcastTurnComplete(slot, lastResultLine); lastResultLine = null; } // 回合完成 WS 只在最终 result 播
+    // #26 会话常驻:回合收尾但进程不关。客户端照常收 done 结束本回合 SSE;slot 转 idle
+    // 等同会话下一条消息复用(POST /chat 的复用块)。空闲超时回收防进程堆积。
+    // 不保活的情形照旧关 input 让 generator 收尾:关关开关/draft 没拿到 sessionId/
+    // 正在 closing(stop、删除、配置变化)。
+    if (slot.keepAlive && slot.sessionId && !slot.closing && !slot.pumpEnded) {
+      slot.idle = true;
+      slot.finishedAt = Date.now();
+      deliverLine(slot, JSON.stringify({ type: 'done', exitCode: 0 }));
+      if (slot.idleTimer) clearTimeout(slot.idleTimer);
+      slot.idleTimer = setTimeout(() => {
+        slot.closing = true;
+        try { input.close(); } catch {}
+      }, KEEPALIVE_IDLE_MS);
+    } else {
+      try { input.close(); } catch {}
+    }
   };
   (async () => {
     try {
@@ -495,7 +607,7 @@ router.post('/chat', async (req, res) => {
         }
         if (m.type === 'assistant' && Array.isArray(m.message?.content)) {
           for (const b of m.message.content) {
-            if (b?.type === 'tool_use' && (b.name === 'Task' || b.name === 'Agent')) subagentSeen = true;
+            if (b?.type === 'tool_use' && (b.name === 'Task' || b.name === 'Agent')) slot.turnSubagentSeen = true;
           }
         }
         deliverLine(slot, line);
@@ -504,7 +616,7 @@ router.post('/chat', async (req, res) => {
           slot.lastResultAt = Date.now(); // stop 端点优雅窗判据(见 /stop 注释)
           // 关流延迟:子代理回合沿用 4s 去抖;开了输入预测时 suggestion 在 result 之后
           // 才到,必须给等待窗(3s;SDK 不发时到点正常收尾)。都没有则立即关,零延迟。
-          const delay = subagentSeen ? 4000 : (suggestOn ? 3000 : 0);
+          const delay = slot.turnSubagentSeen ? 4000 : (suggestOn ? 3000 : 0);
           if (delay) { cancelClose(); closeTimer = setTimeout(finalize, delay); }
           else finalize();
         } else if (m.type === 'prompt_suggestion') {
@@ -547,6 +659,7 @@ router.post('/chat/permission-mode', async (req, res) => {
       await slot.query.setPermissionMode(sdkMode);
       slot.guiMode = mode;
       slot.permissionMode = mode;
+      slot.sdkMode = sdkMode; // #26:常驻复用的 plan 热切判据与此保持同步
       delivered++;
     } catch {}
   }
@@ -628,6 +741,13 @@ router.post('/chat/:pid/stop', async (req, res) => {
   // 进程(子代理是 CLI 进程内循环,进程死即全停)。input.close 同步延后——它与 interrupt
   // 共用 stdin 通道,立即关会把刚发的 interrupt 请求截断。
   const stopAt = Date.now();
+  // #26:stop 一律走"彻底关闭"不转 idle —— 删除会话的先停后删链路靠"进程退净"判据,
+  // 留个 idle 常驻进程会拖住轮询/事后复活刚删的 jsonl。空闲 slot 直接关流即退。
+  slot.closing = true;
+  if (slot.idle) {
+    try { slot.input?.close(); } catch {}
+    return res.json({ ok: true });
+  }
   try { slot.query?.interrupt?.()?.catch?.(() => {}); } catch {}
   setTimeout(() => {
     // 优雅收尾判据:pumpEnded(泵已收尾)或【stop 之后】到达过 result(interrupt 生效,
@@ -842,6 +962,19 @@ export function cleanChildEnv() {
     'ANTHROPIC_REASONING_MODEL', 'ANTHROPIC_SMALL_FAST_MODEL',
     'ANTHROPIC_PERMISSION_MODE', 'CLAUDE_PERMISSION_MODE', 'CLAUDE_DANGEROUSLY_SKIP_PERMISSIONS',
   ]) delete env[k];
+  // A(#50085) 兜底:第三方 provider(settings.json env 带 ANTHROPIC_BASE_URL)时强制关掉
+  // CLI 每条消息都变的归因头 cch 哈希(x-anthropic-billing-header)——它把上游/中转的
+  // 前缀缓存键每轮打穿,3.5 万 token 级系统前缀每轮全价重算(deepseek 首字慢+费用爆根因)。
+  // GUI 切换路径已写 =0 进 settings.json;这里兜住终端 cc-switch 切的/旧版 GUI 切的存量
+  // 配置。用户在 settings.json 显式设置过(任意值)则尊重。进程 env 独立于 CLI 版本与
+  // 切换路径,升级 claude 不失效。官方 OAuth 渠道(无 BASE_URL)不注入。
+  try {
+    const se = JSON.parse(readFileSync(pathJoin(homedir(), '.claude', 'settings.json'), 'utf8'))?.env || {};
+    if (se.ANTHROPIC_BASE_URL && se.CLAUDE_CODE_ATTRIBUTION_HEADER === undefined
+        && env.CLAUDE_CODE_ATTRIBUTION_HEADER === undefined) {
+      env.CLAUDE_CODE_ATTRIBUTION_HEADER = '0';
+    }
+  } catch {}
   return stripHostClaudeEnv(env);
 }
 

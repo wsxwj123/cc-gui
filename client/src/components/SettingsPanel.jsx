@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useRef } from 'react';
 import { Settings, Save, RefreshCw, AlertCircle, Check, Plus, Trash2, ChevronDown, ChevronRight, ShieldCheck, ShieldAlert, ExternalLink, Eye, EyeOff } from 'lucide-react';
 import { openExternalUrl } from '../utils/openExternal.js';
 import { confirmDialog } from '../utils/confirmDialog.jsx';
@@ -725,6 +725,26 @@ function CcUpdater() {
     setUpdating(false);
   };
 
+  // 装后自动重扫:安装在外部终端跑,GUI 不知道何时完成 → 每 5s 重扫安装列表(最长 3 分钟),
+  // 一旦目标方式出现就自动切换过去 + 刷新版本徽章,用户装完回来"已经好了"。
+  const pollRef = useRef(null);
+  useEffect(() => () => { if (pollRef.current) clearInterval(pollRef.current); }, []);
+  const pollForInstall = (method) => {
+    if (pollRef.current) clearInterval(pollRef.current);
+    let tries = 0;
+    pollRef.current = setInterval(async () => {
+      if (++tries > 36) { clearInterval(pollRef.current); pollRef.current = null; return; }
+      let list = [];
+      try { list = (await (await fetch('/api/claude-installs')).json()).installs || []; } catch { return; }
+      const hit = list.find((i) => i.method === method);
+      if (!hit) return;
+      clearInterval(pollRef.current); pollRef.current = null;
+      setInstalls(list);
+      if (!hit.active) await switchActive(hit.path); else await check();
+      setResult({ ok: true, installedMethod: method });
+    }, 5000);
+  };
+
   const doInstall = async (method = 'npm', isSwitch = false) => {
     // npm:需 Node ≥ 20(此 GUI 后端就是 node 跑的,故本机必有),认 HTTP_PROXY 代理、终端有进度。
     // native:官方安装器,自包含不依赖 node,从 claude.ai 拉。
@@ -744,6 +764,7 @@ function CcUpdater() {
         body: JSON.stringify({ method }),
       })).json();
       setResult(d);
+      if (d.ok) pollForInstall(method); // 装完自动检测到并切换,不用手点"检查更新"
     } catch (e) {
       setResult({ ok: false, error: e.message || '请求失败' });
     }
@@ -880,9 +901,11 @@ function CcUpdater() {
       {result && (
         result.ok
           ? <div className="text-[12px] text-emerald-700 bg-emerald-50 border border-emerald-200 rounded p-2 break-words">
-              {result.done
+              {result.installedMethod
+                ? <>✓ 检测到 {result.installedMethod === 'npm' ? 'npm 版' : '原生版'}安装完成,已自动切换使用。</>
+                : result.done
                 ? <>✓ 更新完成。点上方"检查更新"确认新版本。</>
-                : <>✓ 已在终端启动 <code className="font-mono break-all">{result.command}</code>。完成后点上方"检查更新"确认。</>}
+                : <>✓ 已在终端启动 <code className="font-mono break-all">{result.command}</code>。安装完成后会自动检测并切换(约 5 秒内)。</>}
             </div>
           : <div className="text-[12px] text-error">更新失败:{result.error}</div>
       )}
@@ -1082,20 +1105,44 @@ function EnvEditor({ env, onSave, saving }) {
 
 // 缓存优化开关(CLI --exclude-dynamic-system-prompt-sections)。作用:把每轮变化的动态段
 // (工作目录 / auto-memory / git 状态)移出系统提示、改注入首条用户消息,使系统提示保持静态。
-function ExcludeDynamicPromptToggle() {
-  const on = useStore((s) => s.excludeDynamicSystemPrompt);
-  const setOn = useStore((s) => s.setExcludeDynamicSystemPrompt);
+// 会话常驻进程(#26):回合结束后 CLI 进程保活,同会话下一条消息直接复用 —— 免掉每回合
+// 冷启动(claude 二进制 + 配置 + 全部 MCP server,实测约 5 秒)。模型/思考强度/provider
+// 等任何配置变化都会自动重开新进程,行为与关闭时一致。
+function PersistentChatToggle() {
+  const on = useStore((s) => s.persistentChat);
+  const setOn = useStore((s) => s.setPersistentChat);
   return (
     <div className="bg-canvas-warm border border-canvas-deep rounded-lg px-3 py-2.5 flex items-center gap-3">
       <div className="min-w-0 flex-1">
-        <div className="text-xs text-ink font-body font-medium">缓存优化</div>
-        <div className="text-[10.5px] text-ink-faint font-body">把每轮变化的动态段(工作目录、auto-memory、git 状态)移出系统提示、改注入首条用户消息,使系统提示保持静态,提升第三方 provider 的前缀缓存命中、降低费用。官方渠道无需开启</div>
+        <div className="text-xs text-ink font-body font-medium">会话常驻进程</div>
+        <div className="text-[10.5px] text-ink-faint font-body">回合结束后保留 CLI 进程,同一会话的下一条消息直接复用,省掉每回合的进程冷启动与 MCP 重启(约 5 秒),响应更快、第三方缓存更稳。切换模型/思考强度/provider 时自动重开进程。空闲 15 分钟自动回收</div>
       </div>
       <button onClick={() => setOn(!on)}
         className={`shrink-0 w-9 h-5 rounded-full transition-colors relative ${on ? 'bg-accent' : 'bg-ink-faint/30'}`}
         title={on ? '已开启' : '已关闭'}>
         <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-all ${on ? 'left-[18px]' : 'left-0.5'}`} />
       </button>
+    </div>
+  );
+}
+
+function ExcludeDynamicPromptToggle() {
+  const val = useStore((s) => s.excludeDynamicSystemPrompt); // 'auto' | true | false
+  const setVal = useStore((s) => s.setExcludeDynamicSystemPrompt);
+  return (
+    <div className="bg-canvas-warm border border-canvas-deep rounded-lg px-3 py-2.5 flex items-center gap-3">
+      <div className="min-w-0 flex-1">
+        <div className="text-xs text-ink font-body font-medium">缓存优化</div>
+        <div className="text-[10.5px] text-ink-faint font-body">把每轮变化的动态段(工作目录、auto-memory、git 状态)移出系统提示、改注入首条用户消息,使系统提示保持静态,提升第三方 provider 的前缀缓存命中、降低费用。「自动」= 第三方 provider 开启、官方渠道关闭(官方无需开启)</div>
+      </div>
+      <div className="shrink-0 flex items-center gap-1">
+        {[['auto', '自动'], [true, '开'], [false, '关']].map(([v, label]) => (
+          <button key={String(v)} onClick={() => setVal(v)}
+            className={`px-2 py-1 text-[11px] rounded-md font-body transition-colors ${val === v ? 'bg-accent text-white' : 'bg-canvas-warm text-ink-muted hover:text-ink border border-canvas-deep'}`}>
+            {label}
+          </button>
+        ))}
+      </div>
     </div>
   );
 }
@@ -1297,6 +1344,7 @@ function OverviewTab({ settings, onSave, saving }) {
       <div id="cc-update"><CcUpdater /></div>
       <FullDiskAccessCard />
       <CloseBehaviorPicker />
+      <PersistentChatToggle />
       <ExcludeDynamicPromptToggle />
       <AutoCompactWindowSelect settings={settings} onSave={onSave} saving={saving} />
       <SmallFastModelInput env={env} onSave={onSave} saving={saving} />

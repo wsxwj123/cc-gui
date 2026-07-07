@@ -145,9 +145,11 @@ router.get('/agents/active', async (req, res) => {
   // 已完成/错误 (= 会话等待用户回复) instead of vanishing the instant they end.
   for (const p of getActiveChatProcesses()) {
     const finished = p.exitCode !== null;
+    // #26:idle = 会话常驻进程在回合间保活等下一条消息 —— 不是"正在跑"。客户端的
+    // 运行中判定(侧栏绿点/后台横幅)都要排除 idle;stoppable 保持 true,删除链路照杀。
     const status = finished
       ? (p.exitCode === 0 ? 'done' : 'error')
-      : (p.attached ? 'streaming' : 'starting');
+      : (p.idle ? 'idle' : (p.attached ? 'streaming' : 'starting'));
     out.push({
       kind: 'chat-process',
       pid: p.pid,

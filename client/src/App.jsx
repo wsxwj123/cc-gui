@@ -3024,6 +3024,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           (a) => a.kind === 'chat-process'
             && (pollSid ? a.sessionId === pollSid : (a.draftId && a.draftId === pollDraftId))
             && a.stoppable === true
+            && a.status !== 'idle' // #26:常驻进程回合间保活 ≠ 后台在跑,不出横幅
             && !stoppedPidsRef.current.has(String(a.pid))
         );
         // Only show "background working" if we're NOT actively streaming
@@ -3445,7 +3446,10 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           permissionMode: permissionMode || 'default',
           globalRead: globalRead !== false,
           agent: activeAgent || undefined,
-          excludeDynamicSystemPrompt: useStore.getState().excludeDynamicSystemPrompt || undefined,
+          // 三态原样传:true/false=用户显式;'auto'=server 按 provider 决定(第三方开/官方关)
+          excludeDynamicSystemPrompt: useStore.getState().excludeDynamicSystemPrompt,
+          // #26 会话常驻:false 时 server 回合结束即关进程(逐回合冷启,旧行为)
+          keepAlive: useStore.getState().persistentChat !== false,
         }),
       });
       const respJson = await res.json();
@@ -7268,7 +7272,8 @@ export default function App() {
         const r = await fetch('/api/agents/active');
         const d = await r.json();
         if (cancelled) return;
-        const running = (d.agents || []).filter((a) => a.kind === 'chat-process' && a.stoppable === true);
+        // #26:排除 idle(常驻保活)——它不是"正在跑",否则会话绿点永远亮着
+        const running = (d.agents || []).filter((a) => a.kind === 'chat-process' && a.stoppable === true && a.status !== 'idle');
         useStore.getState().setRunningStatus(
           new Set(running.map((a) => a.sessionId).filter(Boolean)),
           new Set(running.map((a) => a.cwd).filter(Boolean)),

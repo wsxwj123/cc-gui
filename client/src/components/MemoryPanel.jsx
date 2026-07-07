@@ -273,12 +273,14 @@ function PromptLibraryTab() {
       .catch(() => setTemplates([]));
   }, []);
 
-  // 按第一个 group 归类(一个模板只出现在一处,避免重复);搜索过滤标题+描述。
+  // 按第一个 group 归类(一个模板只出现在一处,避免重复);检索匹配标题+描述+提示词
+  // 正文(此前只搜标题描述,按用途关键词如"周报"搜不到正文里才出现的词)。
+  const searching = query.trim().length > 0;
   const byGroup = useMemo(() => {
     const q = query.trim().toLowerCase();
     const m = new Map();
     for (const t of templates || []) {
-      if (q && !`${t.name || ''}${t.description || ''}`.toLowerCase().includes(q)) continue;
+      if (q && !`${t.name || ''}\n${t.description || ''}\n${t.prompt || ''}`.toLowerCase().includes(q)) continue;
       const g = (Array.isArray(t.group) && t.group[0]) || '未分类';
       if (!m.has(g)) m.set(g, []);
       m.get(g).push(t);
@@ -286,6 +288,7 @@ function PromptLibraryTab() {
     // 按数量降序,分类名各自保留
     return [...m.entries()].sort((a, b) => b[1].length - a[1].length);
   }, [templates, query]);
+  const matchCount = useMemo(() => byGroup.reduce((n, [, items]) => n + items.length, 0), [byGroup]);
 
   const copy = async (t) => {
     const ok = await copyText(t.prompt || '');
@@ -305,12 +308,17 @@ function PromptLibraryTab() {
       </div>
       <div className="relative shrink-0 mb-2">
         <Search size={12} className="absolute left-2 top-1/2 -translate-y-1/2 text-ink-faint" />
-        <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="搜索提示词…"
+        <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="搜索提示词（标题 / 描述 / 正文）…"
           className="w-full text-[11px] font-body bg-canvas-warm border border-canvas-deep rounded pl-7 pr-2 py-1.5 text-ink focus:border-accent outline-none" />
       </div>
+      {searching && (
+        <div className="text-[10px] text-ink-faint font-body mb-1 shrink-0">找到 {matchCount} 条匹配</div>
+      )}
       <div className="flex-1 min-h-0 overflow-y-auto space-y-1">
         {byGroup.map(([group, items]) => {
-          const open = openGroups[group];
+          // 检索时默认展开各分类(否则只见分类头看不到命中条目,等于没搜);
+          // 用户手动折叠仍尊重(??);清空检索恢复原折叠状态。
+          const open = searching ? (openGroups[group] ?? true) : openGroups[group];
           return (
             <div key={group} className="border border-canvas-deep rounded-lg overflow-hidden">
               <button onClick={() => setOpenGroups((s) => ({ ...s, [group]: !s[group] }))}
