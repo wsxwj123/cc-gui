@@ -4,7 +4,7 @@ import { createReadStream } from 'fs';
 import { join, resolve, relative, extname, isAbsolute } from 'path';
 import { homedir, platform } from 'os';
 import { execFile } from 'child_process';
-import { isPathInside } from '../utils/safe-path.js';
+import { isPathInside, isKnownClaudeWorkspace } from '../utils/safe-path.js';
 
 const router = Router();
 
@@ -47,8 +47,11 @@ async function safePath(p) {
   // Must be HOME itself or a path UNDER it. isPathInside uses path.relative so it
   // handles the separator per-OS and isn't fooled by '/Users/alice2'.startsWith(
   // '/Users/alice').
-  if (!isPathInside(real, HOME)) {
-    const err = new Error('outside $HOME'); err.status = 403; throw err;
+  // 例外:claude 用过的工作区(~/.claude/projects 有 hash 目录)及其子路径放行 ——
+  // Windows 项目常在 $HOME 之外(D:\ 等其他盘),纯 $HOME 门禁把合法项目整片 403
+  // (用户实报)。realpath 前后两种形态都试,防 junction/OneDrive 改写路径致 hash 对不上。
+  if (!isPathInside(real, HOME) && !isKnownClaudeWorkspace(real, resolve(p))) {
+    const err = new Error('路径不在家目录、也不在任何打开过的项目目录内'); err.status = 403; throw err;
   }
   return real;
 }
