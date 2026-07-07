@@ -306,15 +306,22 @@ function AgentBucket({ title, titleColor, defaultOpen, agents }) {
 // Single agent card — click to expand and see thinking / tool calls / final result.
 function AgentCard({ agent }) {
   const [expanded, setExpanded] = useState(false);
-  // 1s tick 让"已运行时长"跳动。原来 fmtElapsed(Date.now()-startedAt) 只在渲染时算一次,
-  // 无驱动 → 时长冻结在挂载时刻(与 BgTaskCard 的 tick 对齐)。卡片在 agent 结束时卸载,
-  // 故无需按 phase 门控。
+  // 终态(done/error/stopped)冻结时长:显示 finishedAt−startedAt 并停 tick。
+  // 原注释"卡片在 agent 结束时卸载"是错的——done 桶照样渲染,无门控则完成后的
+  // "已运行时长"永远往上跳(显示撒谎)。
+  const terminal = agent.status === 'done' || agent.status === 'error' || agent.status === 'stopped';
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
+    if (terminal) return;
     const id = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(id);
-  }, []);
+  }, [terminal]);
   const setViewingAgent = useStore((s) => s.setViewingAgent);
+  // 后台会话判定:子代理归属的会话不在任何打开的窗格 → 标注 + 点击归位跳转。
+  const paneSessions = useStore((s) => s.paneSessions);
+  const paneCount = useStore((s) => s.paneCount);
+  const inOpenPane = !agent.sessionId
+    || (paneSessions || []).slice(0, paneCount).some((p) => p?.sessionId === agent.sessionId);
   // 兜底:很多 provider 不往父流发 parent_tool_use_id 子代理事件,activeAgents 里
   // 拿不到 model/具体 agentType。从 server 提取的 sessions.subagents(按 toolUseId
   // 对回,= activeAgents 的 key = agent.id)补 model 与 agentType。
@@ -347,12 +354,38 @@ function AgentCard({ agent }) {
             </span>
           )}
           <div className="ml-auto flex items-center gap-1.5">
+            {!inOpenPane && (
+              <span className="text-[9px] px-1 py-px bg-canvas-deep text-ink-muted rounded font-body shrink-0" title="该子代理归属的会话未打开在任何窗格,点放大自动跳转">
+                后台会话
+              </span>
+            )}
             <StatusBadge status={agent.status} />
-            {/* #9 进入子代理会话窗口 */}
+            {/* #9 进入子代理会话窗口。放大视图盖在焦点窗格上 —— 先归位:该子代理
+                所属会话已开在某窗格 → 聚焦它;否则载入当前焦点窗格。不归位则
+                面包屑母标题/权限弹窗都会挂到别的会话名下(fable 场景17)。 */}
             <span
               role="button"
               tabIndex={0}
-              onClick={(e) => { e.stopPropagation(); if (agent.id) setViewingAgent(useStore.getState().activeTabIndex, agent.id); }}
+              onClick={(e) => {
+                e.stopPropagation();
+                if (!agent.id) return;
+                const st = useStore.getState();
+                let tab = st.activeTabIndex;
+                if (agent.sessionId) {
+                  const idx = (st.paneSessions || []).slice(0, st.paneCount).findIndex((p) => p?.sessionId === agent.sessionId);
+                  if (idx >= 0) {
+                    st.setActiveTabIndex(idx);
+                    tab = idx;
+                  } else {
+                    const sess = (st.sessions || []).find((s) => s.sessionId === agent.sessionId);
+                    if (sess) {
+                      if (tab === 0) st.setSelectedSession(sess); else st.setPaneSession(tab, sess);
+                      st.fetchMessages(sess.sessionId, sess.projectHash, { tab, silent: true });
+                    }
+                  }
+                }
+                setViewingAgent(tab, agent.id);
+              }}
               className="p-0.5 rounded text-violet-500 hover:text-violet-800 hover:bg-violet-100 cursor-pointer"
               title="在子代理会话窗口打开"
             >
@@ -364,7 +397,12 @@ function AgentCard({ agent }) {
           <div className="text-[10.5px] text-ink-muted font-body truncate pl-5">{agent.description}</div>
         )}
         <div className="flex items-center gap-3 mt-1.5 pl-5 text-[10px] text-ink-faint font-mono">
-          {agent.startedAt && <span className="flex items-center gap-1"><Clock size={9} />{fmtElapsed(now - agent.startedAt)}</span>}
+          {agent.startedAt && (
+            <span className="flex items-center gap-1">
+              <Clock size={9} />
+              {fmtElapsed((terminal ? (agent.finishedAt || now) : now) - agent.startedAt)}
+            </span>
+          )}
           {tools.length > 0 && <span>{tools.length} 工具</span>}
         </div>
       </button>
@@ -613,8 +651,12 @@ export function AgentMonitorPanel() {
   // 且完成的不消失、跨会话无限堆积。按当前打开会话过滤(同 bgList);sessionId 为空的
   // (旧条目/draft 阶段)保留显示避免误藏。
   const openSessionIds = new Set((paneSessions || []).filter(Boolean).map((s) => s.sessionId).filter(Boolean));
+  // 运行中的子代理即使归属后台会话(不在任何窗格)也放行显示(卡片标"后台会话",
+  // 点放大自动归位跳转)——否则切走会话后还在跑的子代理在监控里隐身,"看不见活动"。
+  // done/error/stopped 仍按打开会话过滤,防跨会话无限堆积。
   const localList = Object.values(localAgents)
-    .filter((a) => !a.sessionId || openSessionIds.has(a.sessionId));
+    .filter((a) => !a.sessionId || openSessionIds.has(a.sessionId)
+      || a.status === 'working' || a.status === 'starting');
   // 后台任务:只显示本 stream 捕获到、且已拿到输出文件路径的(以 A 通道为准,
   // 避免列出 tasks 目录里的历史幽灵 .output)。并且**只显示当前打开的会话**的后台任务
   // (按所有分屏窗格的 sessionId 过滤)—— 否则切会话后旧卡片会永久堆积且持续轮询。

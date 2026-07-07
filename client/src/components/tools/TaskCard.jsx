@@ -68,6 +68,30 @@ export function TaskCard({ toolCall }) {
         sessionId: st.paneSessions[st.activeTabIndex]?.sessionId || st.selectedSession?.sessionId || null,
         result: resContent != null ? extractToolResultText(resContent) : null,
       });
+      // 水合完整转写:历史子代理的思考/工具/正文躺在 subagents/agent-*.jsonl,
+      // 此前没人读 → 放大只有 prompt+最终结果("过程假丢失")。metaAgent 带子代理
+      // sessionId,消息端点已支持回退扫 subagents 目录,异步读回填充。
+      const agentSid = metaAgent?.sessionId;
+      const hash = metaAgent?.projectHash || paneSession?.projectHash;
+      if (agentSid && hash) {
+        fetch(`/api/sessions/${encodeURIComponent(agentSid)}/messages?projectHash=${encodeURIComponent(hash)}`)
+          .then((r) => (r.ok ? r.json() : null))
+          .then((d) => {
+            const msgs = Array.isArray(d) ? d : (d?.messages || []);
+            if (!msgs.length) return;
+            const text = [], thinking = [], toolCalls = [];
+            for (const m of msgs) {
+              if (m.type !== 'turn') continue;
+              if (Array.isArray(m.thinking)) thinking.push(...m.thinking);
+              if (Array.isArray(m.text)) text.push(...m.text);
+              if (Array.isArray(m.toolCalls)) toolCalls.push(...m.toolCalls);
+            }
+            if (text.length || thinking.length || toolCalls.length) {
+              useStore.getState().upsertAgent(toolCall.id, { text, thinking, toolCalls });
+            }
+          })
+          .catch(() => {});
+      }
     }
     st.setViewingAgent(st.activeTabIndex, toolCall.id);  // AZ6:渲染所在/焦点 pane
   };

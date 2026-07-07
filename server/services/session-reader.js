@@ -579,7 +579,20 @@ function reconstructCommandPrompt(text, { bareToName = false } = {}) {
  *     { input, output, cacheRead, cacheCreation, apiCalls }
  */
 export async function getSessionMessages(sessionId, projectHash) {
-  const filePath = join(PROJECTS_DIR, projectHash, `${sessionId}.jsonl`);
+  let filePath = join(PROJECTS_DIR, projectHash, `${sessionId}.jsonl`);
+  if (!existsSync(filePath)) {
+    // 子代理转写不在 <hash>/<sid>.jsonl,真身在 <hash>/<父sid>/subagents/<sid>.jsonl。
+    // 侧栏"+N 子任务"点开与放大视图水合都走本端点,此前直接 ENOENT 500(用户看到
+    // 标题换了正文还是旧会话)。回退扫一层父会话目录找到真身。
+    try {
+      const entries = await readdir(join(PROJECTS_DIR, projectHash), { withFileTypes: true });
+      for (const e of entries) {
+        if (!e.isDirectory()) continue;
+        const cand = join(PROJECTS_DIR, projectHash, e.name, 'subagents', `${sessionId}.jsonl`);
+        if (existsSync(cand)) { filePath = cand; break; }
+      }
+    } catch {}
+  }
   const rawRecords = await parseJsonl(filePath);
   // CJ-1:CLI 在某些 resume/排队场景会把一段历史记录【原样重放】追加进同一 jsonl
   // (实测用户会话:1157/1848 条记录与前文 uuid 完全相同,内容逐字节一致,重放段

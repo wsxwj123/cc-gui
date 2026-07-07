@@ -3852,6 +3852,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                 if (store.activeAgents[block.tool_use_id]) {
                   store.upsertAgent(block.tool_use_id, {
                     status: block.is_error ? 'error' : 'done',
+                    finishedAt: Date.now(), // 终态冻结时长:监控卡片据此停 tick
                     result: extractToolResultText(block.content),
                   });
                   // U7 兜底:有些 CLI/provider 不往父流发子代理内部事件的 tool_result,
@@ -4121,7 +4122,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           if (tc && (tc.name === 'Task' || tc.name === 'Agent')) {
             const _ag = _st.activeAgents[tc.id];
             if (_ag && (_ag.status === 'running' || _ag.status === 'working' || _ag.status === 'starting')) {
-              _st.upsertAgent(tc.id, { status: 'stopped' });
+              _st.upsertAgent(tc.id, { status: 'stopped', finishedAt: Date.now() });
             }
           }
         }
