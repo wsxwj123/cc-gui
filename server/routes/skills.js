@@ -7,12 +7,15 @@
 // 通用 SKILL.md 定位:任意仓库里 `<id>/SKILL.md`、`skills/<id>/SKILL.md`、
 // `my-skills/<id>/SKILL.md` 都算一个 skill(id = SKILL.md 的父目录),兼容四个源。
 import { Router } from 'express';
-import { readdir, readFile, mkdir, writeFile, stat } from 'fs/promises';
+import { readdir, readFile, mkdir, writeFile, stat, rm, rename } from 'fs/promises';
 import { join } from 'path';
 import { homedir } from 'os';
 
 const router = Router();
 const SKILLS_DIR = join(homedir(), '.claude', 'skills');
+// 归档区:与 skills 同父目录(claude 不扫这里→技能停用)。归档=移进来,恢复=移回去。
+const ARCHIVE_DIR = join(homedir(), '.claude', 'skills-archive');
+const ID_RE = /^[a-zA-Z0-9._-]+$/;
 const GH_HEADERS = { 'User-Agent': 'claude-gui-skills', 'Accept': 'application/vnd.github+json' };
 const DESC_CAP = 30; // skill 数 ≤ 此值才逐个抓描述(大仓如 Composio 只列名,免打爆网络)
 
@@ -80,6 +83,61 @@ router.get('/skills', async (req, res) => {
   } catch (e) {
     res.json({ skills: [], error: e.message });
   }
+});
+
+// ── 已归档技能(移出 skills 目录=停用,可恢复)────────────────────
+router.get('/skills/archived', async (req, res) => {
+  try {
+    let entries;
+    try { entries = await readdir(ARCHIVE_DIR, { withFileTypes: true }); } catch { return res.json({ skills: [] }); }
+    const dirs = entries.filter((e) => e.isDirectory() && !e.name.startsWith('.'));
+    const skills = await Promise.all(dirs.map(async (e) => {
+      const fm = parseFrontmatter(await readSkillMd(join(ARCHIVE_DIR, e.name)) || '');
+      return { id: e.name, name: fm.name || e.name, description: fm.description || '' };
+    }));
+    skills.sort((a, b) => a.id.localeCompare(b.id));
+    res.json({ skills });
+  } catch (e) { res.json({ skills: [], error: e.message }); }
+});
+
+// 删除(永久,需重新下载才能恢复)。本机与归档区同名一并清除。
+router.post('/skills/delete', async (req, res) => {
+  const id = String(req.body?.id || '');
+  if (!ID_RE.test(id)) return res.status(400).json({ error: '非法 skill id' });
+  try {
+    await rm(join(SKILLS_DIR, id), { recursive: true, force: true });
+    await rm(join(ARCHIVE_DIR, id), { recursive: true, force: true });
+    localCache = null;
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// 归档(移到 skills-archive,claude 不再加载,可恢复)
+router.post('/skills/archive', async (req, res) => {
+  const id = String(req.body?.id || '');
+  if (!ID_RE.test(id)) return res.status(400).json({ error: '非法 skill id' });
+  try {
+    await mkdir(ARCHIVE_DIR, { recursive: true });
+    const dest = join(ARCHIVE_DIR, id);
+    try { await rm(dest, { recursive: true, force: true }); } catch { /* 覆盖旧同名归档 */ }
+    await rename(join(SKILLS_DIR, id), dest);
+    localCache = null;
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// 恢复(从归档移回 skills)。本机已有同名则拒绝,避免覆盖用户当前版本。
+router.post('/skills/restore', async (req, res) => {
+  const id = String(req.body?.id || '');
+  if (!ID_RE.test(id)) return res.status(400).json({ error: '非法 skill id' });
+  try {
+    const dest = join(SKILLS_DIR, id);
+    try { if ((await stat(dest)).isDirectory()) return res.status(409).json({ error: '本机已存在同名 skill,请先处理' }); } catch { /* 不存在=可恢复 */ }
+    await mkdir(SKILLS_DIR, { recursive: true });
+    await rename(join(ARCHIVE_DIR, id), dest);
+    localCache = null;
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 router.get('/skills/sources', (req, res) => {

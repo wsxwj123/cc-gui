@@ -1,8 +1,9 @@
 // CK-4: Skill 市场。两个选项卡 —— 「本机」展示 ~/.claude/skills 已装;「导入」从多个
 // 源仓库(Anthropic / Superpowers / 开源社区 / 科研)拉取并导入,重名内联横幅选跳过/覆盖。
 import { useState, useEffect, useCallback, useMemo } from 'react';
-import { Download, Check, Loader2, RefreshCw, AlertTriangle, CloudDownload, ExternalLink, Copy, Search } from 'lucide-react';
+import { Download, Check, Loader2, RefreshCw, AlertTriangle, CloudDownload, ExternalLink, Copy, Search, Archive, Trash2, RotateCcw } from 'lucide-react';
 import { copyText } from '../utils/clipboard.js';
+import { confirmDialog } from '../utils/confirmDialog.jsx';
 
 // CM-1:复制技能名(用 /<name> 经 slash 命令加载)。图标按钮,复制后短暂打勾。
 function SkillCopyBtn({ name }) {
@@ -18,9 +19,11 @@ function SkillCopyBtn({ name }) {
 }
 
 export function SkillsPanel() {
-  const [tab, setTab] = useState('local');            // 'local' | 'import'
+  const [tab, setTab] = useState('local');            // 'local' | 'import' | 'archived'
   const [local, setLocal] = useState([]);
   const [loadingLocal, setLoadingLocal] = useState(true);
+  const [archived, setArchived] = useState([]);
+  const [manageBusy, setManageBusy] = useState(null); // 归档/删除/恢复进行中的 skill id
   const [query, setQuery] = useState('');             // CM-1 本机 skill 搜索(名称+描述)
 
   const [sources, setSources] = useState([]);
@@ -43,6 +46,30 @@ export function SkillsPanel() {
     catch { /* 忽略 */ }
     setLoadingLocal(false);
   }, []);
+
+  const loadArchived = useCallback(async () => {
+    try { const d = await (await fetch('/api/skills/archived')).json(); setArchived(d.skills || []); }
+    catch { /* 忽略 */ }
+  }, []);
+
+  // 归档 / 删除 / 恢复。删除需二次确认(不可逆,需重新下载)。
+  const manageSkill = useCallback(async (action, id) => {
+    if (action === 'delete') {
+      const ok = await confirmDialog(`删除技能「${id}」?\n\n将永久移除 ~/.claude/skills/${id},需重新下载才能恢复。`, { danger: true, confirmText: '删除' });
+      if (!ok) return;
+    }
+    setManageBusy(id); setNotice('');
+    try {
+      const r = await fetch(`/api/skills/${action}`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id }),
+      });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || '操作失败');
+      setNotice({ archive: `已归档「${id}」`, delete: `已删除「${id}」`, restore: `已恢复「${id}」` }[action]);
+      await Promise.all([loadLocal(), loadArchived()]);
+    } catch (e) { setNotice('错误: ' + e.message); }
+    setManageBusy(null);
+  }, [loadLocal, loadArchived]);
 
   const loadOfficial = useCallback(async (srcId, repo) => {
     setLoadingOff(true); setOffErr(''); setConflicts(null);
@@ -67,7 +94,7 @@ export function SkillsPanel() {
     loadOfficial(null, repo);
   }, [customRepo, loadOfficial]);
 
-  useEffect(() => { loadLocal(); }, [loadLocal]);
+  useEffect(() => { loadLocal(); loadArchived(); }, [loadLocal, loadArchived]);
   useEffect(() => {
     fetch('/api/skills/sources').then((r) => r.json()).then((d) => setSources(d.sources || [])).catch(() => {});
   }, []);
@@ -118,7 +145,8 @@ export function SkillsPanel() {
       <div className="flex items-center gap-1.5">
         {tabBtn('local', '本机 Skill', local.length)}
         {tabBtn('import', '导入', null)}
-        <button onClick={tab === 'local' ? loadLocal : () => (activeRepo ? loadOfficial(null, activeRepo) : loadOfficial(source))} disabled={loadingLocal || loadingOff}
+        {tabBtn('archived', '已归档', archived.length)}
+        <button onClick={tab === 'local' ? loadLocal : tab === 'archived' ? loadArchived : () => (activeRepo ? loadOfficial(null, activeRepo) : loadOfficial(source))} disabled={loadingLocal || loadingOff}
           className="ml-auto p-1.5 text-ink-faint hover:text-ink rounded disabled:opacity-40" title="刷新">
           <RefreshCw size={13} className={(loadingLocal || loadingOff) ? 'animate-spin' : ''} />
         </button>
@@ -134,6 +162,7 @@ export function SkillsPanel() {
               placeholder="搜索技能（名称 / 描述）..."
               className="w-full bg-canvas border border-canvas-deep rounded-lg pl-8 pr-3 py-1.5 text-xs text-ink placeholder-ink-ghost focus:outline-none focus:border-accent/40 font-body" />
           </div>
+          {notice && <div className="text-[11px] text-ink-soft bg-canvas-deep/60 border border-canvas-deep rounded px-2 py-1.5">{notice}</div>}
           {filteredLocal.length > 0 ? (
             <div className="space-y-2">
               {filteredLocal.map((s) => (
@@ -141,6 +170,16 @@ export function SkillsPanel() {
                   <div className="flex items-center gap-2">
                     <span className="text-xs font-medium font-body text-ink truncate flex-1" title={s.id}>{s.name}</span>
                     <SkillCopyBtn name={s.id} />
+                    <button onClick={() => manageSkill('archive', s.id)} disabled={manageBusy === s.id}
+                      title="归档 —— 移出加载目录停用,可在「已归档」恢复"
+                      className="shrink-0 p-1 rounded text-ink-faint hover:text-ink hover:bg-canvas-deep disabled:opacity-50">
+                      {manageBusy === s.id ? <Loader2 size={12} className="animate-spin" /> : <Archive size={12} />}
+                    </button>
+                    <button onClick={() => manageSkill('delete', s.id)} disabled={manageBusy === s.id}
+                      title="删除 —— 永久移除,需重新下载"
+                      className="shrink-0 p-1 rounded text-ink-faint hover:text-error hover:bg-error/10 disabled:opacity-50">
+                      <Trash2 size={12} />
+                    </button>
                   </div>
                   {s.description && <div className="text-[11px] text-ink-muted font-body mt-1 line-clamp-2">{s.description}</div>}
                 </div>
@@ -150,6 +189,34 @@ export function SkillsPanel() {
             <div className="text-xs text-ink-faint font-body py-6 text-center bg-canvas-warm border border-canvas-deep rounded-lg">
               {loadingLocal ? '加载中…' : query.trim() ? `没有匹配「${query.trim()}」的技能` : '~/.claude/skills 下没有 skill'}
             </div>
+          )}
+        </>
+      ) : tab === 'archived' ? (
+        <>
+          {notice && <div className="text-[11px] text-ink-soft bg-canvas-deep/60 border border-canvas-deep rounded px-2 py-1.5">{notice}</div>}
+          <div className="text-[10px] text-ink-faint font-body">归档的技能已移出加载目录,claude 不再使用;恢复后重新生效。</div>
+          {archived.length > 0 ? (
+            <div className="space-y-2">
+              {archived.map((s) => (
+                <div key={s.id} className="bg-canvas-warm border border-canvas-deep rounded-lg p-3">
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs font-medium font-body text-ink-muted truncate flex-1" title={s.id}>{s.name}</span>
+                    <button onClick={() => manageSkill('restore', s.id)} disabled={manageBusy === s.id}
+                      className="shrink-0 text-[10px] px-2 py-0.5 rounded bg-accent/10 text-accent hover:bg-accent/20 flex items-center gap-1 disabled:opacity-50">
+                      {manageBusy === s.id ? <Loader2 size={10} className="animate-spin" /> : <RotateCcw size={10} />}恢复
+                    </button>
+                    <button onClick={() => manageSkill('delete', s.id)} disabled={manageBusy === s.id}
+                      title="彻底删除归档"
+                      className="shrink-0 p-1 rounded text-ink-faint hover:text-error hover:bg-error/10 disabled:opacity-50">
+                      <Trash2 size={12} />
+                    </button>
+                  </div>
+                  {s.description && <div className="text-[11px] text-ink-muted font-body mt-1 line-clamp-2">{s.description}</div>}
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="text-xs text-ink-faint font-body py-6 text-center bg-canvas-warm border border-canvas-deep rounded-lg">没有已归档的技能</div>
           )}
         </>
       ) : (
