@@ -435,11 +435,19 @@ async function handle(req, clientRes) {
   const wantStream = oaReq.stream;
   const url = up.baseURL + '/chat/completions';
 
-  const postUpstream = (payload) => fetch(url, {
+  // 连接超时:上游 TCP 连上却迟迟不吐响应头(错 baseURL/geo 卡/上游挂)时,无超时的
+  // fetch 会无限挂 → CLI 永久 "connecting" 无反馈(用户实报)。90s 到点 abort → 转 502 报错。
+  // 收到响应头(fetch settle)即 clearTimeout,故正文流式不受影响(长回复不会被切断)。
+  const postUpstream = (payload) => {
+    const ac = new AbortController();
+    const t = setTimeout(() => ac.abort(), 90000);
+    return fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${up.apiKey}` },
       body: JSON.stringify(payload),
-    });
+      signal: ac.signal,
+    }).finally(() => clearTimeout(t));
+  };
 
   let upstreamResp;
   try {

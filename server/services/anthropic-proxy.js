@@ -138,12 +138,19 @@ async function handle(req, clientRes) {
   const url = up.baseURL + req.url;
 
   let upstreamResp;
+  // 连接超时:上游 TCP 连上却迟迟不吐响应头(错 baseURL/geo 卡/上游挂)时,无超时的 fetch
+  // 会无限挂 → CLI 永久 "connecting" 无反馈(用户实报)。90s 到点 abort → 转 502。收到响应头
+  // (fetch settle)即 clearTimeout,故正文流式不受影响(长回复不被切断)。
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), 90000);
   try {
-    upstreamResp = await fetch(url, { method: req.method, headers, body });
+    upstreamResp = await fetch(url, { method: req.method, headers, body, signal: ac.signal });
   } catch (err) {
     clientRes.writeHead(502, { 'Content-Type': 'application/json' });
     clientRes.end(JSON.stringify({ type: 'error', error: { type: 'api_error', message: 'upstream fetch failed: ' + err.message } }));
     return;
+  } finally {
+    clearTimeout(timer);
   }
 
   // Mirror upstream status + content-type. Deliberately DON'T copy content-encoding:
