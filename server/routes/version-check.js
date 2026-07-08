@@ -242,7 +242,7 @@ function updateCmdFor(method, claudePath) {
     // Windows npm 安装的更新仍走 npm(装在哪就用哪更新),用淘宝镜像兜底 —
     // registry.npmjs.org 常被墙,且 cmd 子终端不继承系统代理。
     case 'npm':  return process.platform === 'win32'
-      ? 'npm install -g @anthropic-ai/claude-code@latest --registry=https://registry.npmmirror.com'
+      ? 'call npm install -g @anthropic-ai/claude-code@latest --registry=https://registry.npmmirror.com'  // call:npm.cmd 在 .bat 里需 call 才返回,否则后续 pause 被跳过窗口闪退
       : 'npm install -g @anthropic-ai/claude-code@latest';
     case 'native':
     default: {
@@ -271,7 +271,10 @@ export function installCmdFor(proxyUrl = null, method = 'native') { // export �
   if (method === 'npm') {
     if (process.platform === 'win32') {
       const psAppend = `$p=(npm config get prefix).Trim(); $u=[Environment]::GetEnvironmentVariable('Path','User'); if(@(($u -split ';') | Where-Object {$_ -eq $p}).Count -eq 0){[Environment]::SetEnvironmentVariable('Path', ($u.TrimEnd(';')+';'+$p), 'User'); Write-Host ('npm bin dir written to user PATH: '+$p)} else {Write-Host 'user PATH already contains npm bin dir'}`;
-      return `npm install -g @anthropic-ai/claude-code && powershell -NoProfile -Command "${psAppend}"`;
+      // 关键:`call npm`——npm 是 npm.cmd(批处理),在 .bat 里不加 call 直调另一个 .cmd
+      // 控制权不返回 → npm 装完后 `&& powershell`(写 PATH)、后续 pause 全被跳过,PATH
+      // 写入根本没跑 → "装成功但检测不到"。加 call 让 npm.cmd 返回,链条才完整执行。
+      return `call npm install -g @anthropic-ai/claude-code && powershell -NoProfile -Command "${psAppend}"`;
     }
     const rc = process.platform === 'darwin' ? '$HOME/.zshrc' : '$HOME/.bashrc';
     return `npm install -g @anthropic-ai/claude-code && NPMBIN="$(npm prefix -g)/bin" && { case ":$PATH:" in *":$NPMBIN:"*) echo "PATH 已包含 $NPMBIN";; *) echo "export PATH=\\"$NPMBIN:\\$PATH\\"" >> ${rc} && echo "已把 $NPMBIN 写入 ${rc}(新开终端生效)";; esac; }`;

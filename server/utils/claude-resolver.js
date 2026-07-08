@@ -254,12 +254,22 @@ export function claudeCommand(args = []) {
 export function listClaudeInstalls() {
   const seen = new Set();
   const out = [];
+  // 按【逻辑安装身份】去重,而非裸真实路径。Windows npm 版会同时命中 shim(`<prefix>\claude.cmd`,
+  // 非软链)和包内二进制(`<prefix>\node_modules\@anthropic-ai\claude-code\bin\claude.exe`)——两者
+  // realpath 各是自己→旧逻辑列成两条重复项(用户实测)。key 把包内二进制映射回 npm 前缀、shim 用其
+  // 所在目录,同一 prefix 即合并成一条;原生版/不同 prefix 的 key 不同,仍各算一个。
+  const keyOf = (real) => {
+    const low = real.replace(/\\/g, '/').toLowerCase();
+    const m = low.match(/^(.*)\/node_modules\/@anthropic-ai\/claude-code\//);
+    return m ? m[1] : low.replace(/\/[^/]*$/, ''); // 包内二进制→前缀;否则→所在目录
+  };
   const add = (p) => {
     if (!p || !existsSync(p)) return;
     let real = p;
     try { real = realpathSync(p); } catch { return; }
-    if (seen.has(real)) return;
-    seen.add(real);
+    const key = keyOf(real);
+    if (seen.has(key)) return;
+    seen.add(key);
     out.push({ path: p, real });
   };
   add(fromPath());
