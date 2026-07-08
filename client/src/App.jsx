@@ -6661,16 +6661,13 @@ function CustomProviderForm({ onSaved, editing, onCancel, onDirtyChange }) {
               e.target.value = '';
             }}
             className={`${inputCls} flex-1 cursor-pointer`}
-            title="选择一个内置 provider,自动填好 baseURL/默认模型;仍需自填 API key"
+            title="只列与上方所选协议匹配的内置 provider;切换协议后此列表随之变化"
           >
             <option value="">— 选模板自动填充 —</option>
-            <optgroup label="OpenAI 兼容">
-              {BUILTIN_PROVIDERS.filter((p) => p.type === 'openai').map((p) => (
-                <option key={p.id} value={p.id}>{p.name}</option>
-              ))}
-            </optgroup>
-            <optgroup label="Anthropic 兼容">
-              {BUILTIN_PROVIDERS.filter((p) => p.type === 'anthropic').map((p) => (
+            {/* 只显示与当前所选协议(type)匹配的模板,避免"选了 Anthropic 兼容却点到
+                OpenAI 型 deepseek"这类协议错配(用户实报)。切 segmented 即换这组。 */}
+            <optgroup label={type === 'anthropic' ? 'Anthropic 兼容' : 'OpenAI 兼容'}>
+              {BUILTIN_PROVIDERS.filter((p) => p.type === type).map((p) => (
                 <option key={p.id} value={p.id}>{p.name}</option>
               ))}
             </optgroup>
