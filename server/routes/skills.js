@@ -188,12 +188,15 @@ function locateSkills(tree) {
   return out;
 }
 
-async function loadRepo(repo) {
+async function loadRepo(repo, branchArg) {
+  // branchArg 指定分支(用户在导入页给了 owner/repo/tree/<branch> 或 owner/repo@branch);
+  // 不给则用默认分支。缓存键含分支,否则同仓不同分支互相污染(用户实报:只拉到 main)。
+  const branch = (branchArg && String(branchArg).trim()) || await ghDefaultBranch(repo);
+  const cacheKey = `${repo}@${branch}`;
   const now = Date.now();
-  const c = repoCache.get(repo);
+  const c = repoCache.get(cacheKey);
   if (c && now - c.at < TTL) return c;
-  const branch = await ghDefaultBranch(repo);
-  const tree = (await ghJson(`https://api.github.com/repos/${repo}/git/trees/${branch}?recursive=1`)).tree || [];
+  const tree = (await ghJson(`https://api.github.com/repos/${repo}/git/trees/${encodeURIComponent(branch)}?recursive=1`)).tree || [];
   const located = locateSkills(tree);
   located.sort((a, b) => a.id.localeCompare(b.id));
   // 仅小仓库逐个抓描述,大仓只列名
@@ -211,8 +214,53 @@ async function loadRepo(repo) {
     skills = located.map((s) => ({ id: s.id, name: s.id, description: '', root: s.root }));
   }
   const entry = { skills, files: tree.filter((t) => t.type === 'blob'), branch, at: now, repo };
-  repoCache.set(repo, entry);
+  repoCache.set(cacheKey, entry);
   return entry;
+}
+
+// ── skill 来源记录(供"更新")──────────────────────────────────────
+// 导入时记 { [id]: { repo, branch, root } },更新按钮据此从原仓库重拉覆盖。
+const SOURCES_FILE = join(homedir(), '.claude-gui', 'skill-sources.json');
+const BRANCH_RE = /^[\w.\/-]{1,120}$/;
+async function readSources() {
+  try { return JSON.parse(await readFile(SOURCES_FILE, 'utf-8')) || {}; } catch { return {}; }
+}
+async function writeSources(map) {
+  await mkdir(join(SOURCES_FILE, '..'), { recursive: true });
+  await writeFile(SOURCES_FILE, JSON.stringify(map, null, 2));
+}
+
+// 共享导入逻辑(/import 与 /update 复用):下载 ids 对应 skill 覆盖到本机,并记来源。
+async function doImport(repo, branchArg, ids, overwrite) {
+  const { skills, files, branch } = await loadRepo(repo, branchArg);
+  const byId = new Map(skills.map((s) => [s.id, s]));
+  const imported = [], conflicts = [], failed = [];
+  const sources = await readSources();
+  for (const id of ids) {
+    const meta = byId.get(id);
+    if (!meta) { failed.push({ id, error: '源仓库无此 skill' }); continue; }
+    const dest = join(SKILLS_DIR, id);
+    let exists = false;
+    try { exists = (await stat(dest)).isDirectory(); } catch { /* 无 */ }
+    if (exists && !overwrite) { conflicts.push(id); continue; }
+    const blobs = files.filter((f) => f.path === `${meta.root}/SKILL.md` || f.path.startsWith(`${meta.root}/`));
+    if (!blobs.length) { failed.push({ id, error: '无文件' }); continue; }
+    try {
+      for (const f of blobs) {
+        const rel = f.path.slice(meta.root.length + 1); // 相对 skill 根
+        const target = join(SKILLS_DIR, id, rel);
+        await mkdir(join(target, '..'), { recursive: true });
+        const raw = await fetch(`https://raw.githubusercontent.com/${repo}/${branch}/${f.path}`);
+        if (!raw.ok) throw new Error(`下载 ${rel} HTTP ${raw.status}`);
+        await writeFile(target, Buffer.from(await raw.arrayBuffer()));
+      }
+      imported.push(id);
+      sources[id] = { repo, branch, root: meta.root }; // 记来源供"更新"
+    } catch (e) { failed.push({ id, error: e.message }); }
+  }
+  if (imported.length) { try { await writeSources(sources); } catch { /* 记录失败不影响导入结果 */ } }
+  localCache = null; // 装了新 skill,本机列表缓存失效
+  return { imported, conflicts, failed };
 }
 
 // CQ批次4:除内置 SOURCES 外,支持 ?repo=owner/repo 一键拉任意 GitHub 仓库的 skill 列表。
@@ -223,8 +271,9 @@ router.get('/skills/official', async (req, res) => {
   const src = SOURCES.find((s) => s.id === req.query.source) || SOURCES[0];
   const repo = useCustom ? repoParam : src.repo;
   if (repoParam && !useCustom) return res.json({ skills: [], error: 'repo 格式应为 owner/repo' });
+  const branchParam = typeof req.query.branch === 'string' && BRANCH_RE.test(req.query.branch.trim()) ? req.query.branch.trim() : '';
   try {
-    const { skills, branch } = await loadRepo(repo);
+    const { skills, branch } = await loadRepo(repo, branchParam);
     let installed = new Set();
     try { installed = new Set(await readdir(SKILLS_DIR)); } catch { /* 无目录 */ }
     res.json({
@@ -244,35 +293,33 @@ router.post('/skills/import', async (req, res) => {
   const src = SOURCES.find((s) => s.id === req.body?.source) || SOURCES[0];
   const repo = useCustom ? repoParam : src.repo;
   if (repoParam && !useCustom) return res.status(400).json({ error: 'repo 格式应为 owner/repo' });
+  const branchParam = typeof req.body?.branch === 'string' && BRANCH_RE.test(req.body.branch.trim()) ? req.body.branch.trim() : '';
   const ids = Array.isArray(req.body?.ids) ? req.body.ids.filter((s) => /^[a-zA-Z0-9._-]+$/.test(s)) : [];
   const overwrite = !!req.body?.overwrite;
   if (!ids.length) return res.status(400).json({ error: 'ids 为空' });
   try {
-    const { skills, files, branch } = await loadRepo(repo);
-    const byId = new Map(skills.map((s) => [s.id, s]));
-    const imported = [], conflicts = [], failed = [];
-    for (const id of ids) {
-      const meta = byId.get(id);
-      if (!meta) { failed.push({ id, error: '源仓库无此 skill' }); continue; }
-      const dest = join(SKILLS_DIR, id);
-      let exists = false;
-      try { exists = (await stat(dest)).isDirectory(); } catch { /* 无 */ }
-      if (exists && !overwrite) { conflicts.push(id); continue; }
-      const blobs = files.filter((f) => f.path === `${meta.root}/SKILL.md` || f.path.startsWith(`${meta.root}/`));
-      if (!blobs.length) { failed.push({ id, error: '无文件' }); continue; }
-      try {
-        for (const f of blobs) {
-          const rel = f.path.slice(meta.root.length + 1); // 相对 skill 根
-          const target = join(SKILLS_DIR, id, rel);
-          await mkdir(join(target, '..'), { recursive: true });
-          const raw = await fetch(`https://raw.githubusercontent.com/${repo}/${branch}/${f.path}`);
-          if (!raw.ok) throw new Error(`下载 ${rel} HTTP ${raw.status}`);
-          await writeFile(target, Buffer.from(await raw.arrayBuffer()));
-        }
-        imported.push(id);
-      } catch (e) { failed.push({ id, error: e.message }); }
-    }
-    res.json({ imported, conflicts, failed });
+    res.json(await doImport(repo, branchParam, ids, overwrite));
+  } catch (e) {
+    res.status(e.status === 403 ? 429 : 500).json({ error: e.status === 403 ? 'GitHub API 限流,请稍后重试' : e.message });
+  }
+});
+
+// 已装 skill 的来源映射 { id: {repo, branch, root} } —— 前端据此对有来源的本机 skill 显示"更新"。
+router.get('/skills/sources-map', async (req, res) => {
+  res.json({ sources: await readSources() });
+});
+
+// 更新单个 skill:按来源记录从原仓库+分支重拉,覆盖本机旧版本。
+router.post('/skills/update', async (req, res) => {
+  const id = String(req.body?.id || '');
+  if (!/^[a-zA-Z0-9._-]+$/.test(id)) return res.status(400).json({ error: '非法 skill id' });
+  const sources = await readSources();
+  const src = sources[id];
+  if (!src?.repo) return res.status(400).json({ error: '该 skill 无来源记录(非从 GitHub 仓库导入,无法自动更新)' });
+  try {
+    const r = await doImport(src.repo, src.branch, [id], true);
+    if (r.imported.includes(id)) return res.json({ ok: true, repo: src.repo, branch: src.branch });
+    return res.status(500).json({ error: r.failed[0]?.error || '更新失败' });
   } catch (e) {
     res.status(e.status === 403 ? 429 : 500).json({ error: e.status === 403 ? 'GitHub API 限流,请稍后重试' : e.message });
   }

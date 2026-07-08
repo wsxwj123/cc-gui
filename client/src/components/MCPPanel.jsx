@@ -433,33 +433,36 @@ export function MCPPanel() {
                 Anthropic 官方精选,安装后无需配置,新会话生效。带 MCP 标记的插件安装时自动配好对应 MCP,无需再手填。
               </div>
               {pluginErr && <div className="text-[11px] text-error bg-error/10 border border-error/20 rounded px-2 py-1.5 break-all">{pluginErr}</div>}
-              {BUILTIN_PLUGINS.filter((p) => !installedPluginIds.has(p.id)).length === 0 ? (
-                <div className="text-xs text-ink-faint font-body py-3 text-center bg-canvas-warm border border-canvas-deep rounded-lg">
-                  推荐插件均已安装
-                </div>
-              ) : (
-                <div className="space-y-2">
-                  {BUILTIN_PLUGINS.filter((p) => !installedPluginIds.has(p.id)).map((p) => {
-                    const busy = installingPlugin === p.id;
-                    return (
-                      <div key={p.id} className="bg-canvas-warm border border-canvas-deep rounded-lg p-3 flex items-center gap-3">
-                        <div className="min-w-0 flex-1">
-                          <div className="flex items-center gap-2">
-                            <span className="text-xs font-medium text-ink font-body">{p.name}</span>
-                            {p.mcp && <span className="text-[9px] px-1 py-px bg-canvas-deep text-ink-faint rounded">MCP</span>}
-                          </div>
-                          <div className="text-[10px] text-ink-faint font-body truncate mt-0.5">{p.desc}</div>
+              {/* 全部内置插件都列出,已装的标「已安装」而非整条隐藏 —— 否则用户装过的插件
+                  (如 superpowers)从列表消失,以为"缺失"(用户实报)。 */}
+              <div className="space-y-2">
+                {BUILTIN_PLUGINS.map((p) => {
+                  const busy = installingPlugin === p.id;
+                  const installed = installedPluginIds.has(p.id);
+                  return (
+                    <div key={p.id} className="bg-canvas-warm border border-canvas-deep rounded-lg p-3 flex items-center gap-3">
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-2">
+                          <span className="text-xs font-medium text-ink font-body">{p.name}</span>
+                          {p.mcp && <span className="text-[9px] px-1 py-px bg-canvas-deep text-ink-faint rounded">MCP</span>}
                         </div>
+                        <div className="text-[10px] text-ink-faint font-body truncate mt-0.5">{p.desc}</div>
+                      </div>
+                      {installed ? (
+                        <span className="shrink-0 flex items-center gap-1 px-2.5 py-1 text-[12px] font-medium text-success">
+                          <Check size={12} />已安装
+                        </span>
+                      ) : (
                         <button onClick={() => installPlugin(p)} disabled={!!installingPlugin}
                           className="shrink-0 flex items-center gap-1 px-2.5 py-1 rounded text-[12px] font-medium text-white bg-accent hover:bg-accent-hover disabled:opacity-50">
                           {busy ? <RefreshCw size={12} className="animate-spin" /> : <Download size={12} />}
                           {busy ? '安装中…' : '安装'}
                         </button>
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
             </div>
           </div>
         </div>

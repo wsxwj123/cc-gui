@@ -35,6 +35,8 @@ export function SkillsPanel() {
   // CQ批次4:粘贴任意 GitHub 仓库导入。customRepo=输入框,activeRepo=已加载的自定义仓库(null=用内置源)。
   const [customRepo, setCustomRepo] = useState('');
   const [activeRepo, setActiveRepo] = useState(null);
+  const [activeBranch, setActiveBranch] = useState('');   // #2 自定义仓库的指定分支('' = 默认分支)
+  const [sourcesMap, setSourcesMap] = useState({});       // #3 已装 skill 的来源 { id: {repo, branch} }
 
   const [busy, setBusy] = useState(null);             // null | 'all' | <skillId>
   const [conflicts, setConflicts] = useState(null);
@@ -44,8 +46,26 @@ export function SkillsPanel() {
     setLoadingLocal(true);
     try { const d = await (await fetch('/api/skills')).json(); setLocal(d.skills || []); }
     catch { /* 忽略 */ }
+    // #3 同时拉来源映射(哪些本机 skill 是从 GitHub 仓库导入的 → 显示"更新")
+    try { const s = await (await fetch('/api/skills/sources-map')).json(); setSourcesMap(s.sources || {}); }
+    catch { /* 忽略 */ }
     setLoadingLocal(false);
   }, []);
+
+  // #3 更新单个 skill:从记录的来源仓库+分支重拉覆盖。
+  const updateSkill = useCallback(async (id) => {
+    setManageBusy(id); setNotice('');
+    try {
+      const r = await fetch('/api/skills/update', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id }),
+      });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || '更新失败');
+      setNotice(`已更新「${id}」(${d.repo}${d.branch ? '@' + d.branch : ''})`);
+      await loadLocal();
+    } catch (e) { setNotice('错误: ' + e.message); }
+    setManageBusy(null);
+  }, [loadLocal]);
 
   const loadArchived = useCallback(async () => {
     try { const d = await (await fetch('/api/skills/archived')).json(); setArchived(d.skills || []); }
@@ -71,27 +91,32 @@ export function SkillsPanel() {
     setManageBusy(null);
   }, [loadLocal, loadArchived]);
 
-  const loadOfficial = useCallback(async (srcId, repo) => {
+  const loadOfficial = useCallback(async (srcId, repo, branch) => {
     setLoadingOff(true); setOffErr(''); setConflicts(null);
     try {
       const url = repo
-        ? `/api/skills/official?repo=${encodeURIComponent(repo)}`
+        ? `/api/skills/official?repo=${encodeURIComponent(repo)}${branch ? `&branch=${encodeURIComponent(branch)}` : ''}`
         : `/api/skills/official?source=${encodeURIComponent(srcId)}`;
       const d = await (await fetch(url)).json();
       setOfficial(d.skills || []);
-      setOfficialMeta({ count: d.count, repo: d.repo, truncatedDesc: d.truncatedDesc });
+      setOfficialMeta({ count: d.count, repo: d.repo, branch: d.branch, truncatedDesc: d.truncatedDesc });
       if (d.error) setOffErr(d.error);
     } catch (e) { setOffErr(e.message); }
     setLoadingOff(false);
   }, []);
 
-  // 解析 owner/repo 或 GitHub 地址 → 加载该仓库的 skill 列表。
+  // 解析 owner/repo、owner/repo@branch、或 GitHub 地址(含 /tree/<branch>)→ 加载该仓库/分支的 skill。
   const loadCustomRepo = useCallback(() => {
-    const m = customRepo.trim().match(/(?:github\.com\/)?([\w.-]+\/[\w.-]+?)(?:\.git|\/.*)?$/i);
-    if (!m) { setOffErr('请输入 owner/repo 或 GitHub 仓库地址'); return; }
-    const repo = m[1];
+    const raw = customRepo.trim();
+    let repo = '', branch = '';
+    let m = raw.match(/github\.com\/([\w.-]+\/[\w.-]+?)(?:\.git)?\/tree\/([\w.\/-]+?)\/?$/i); // …/tree/<branch>
+    if (m) { repo = m[1]; branch = m[2]; }
+    else if ((m = raw.match(/^([\w.-]+\/[\w.-]+?)@([\w.\/-]+)$/))) { repo = m[1]; branch = m[2]; } // owner/repo@branch
+    else if ((m = raw.match(/(?:github\.com\/)?([\w.-]+\/[\w.-]+?)(?:\.git|\/.*)?$/i))) { repo = m[1]; }
+    if (!repo) { setOffErr('请输入 owner/repo、owner/repo@分支 或 GitHub 仓库地址(可含 /tree/分支)'); return; }
     setActiveRepo(repo);
-    loadOfficial(null, repo);
+    setActiveBranch(branch);
+    loadOfficial(null, repo, branch);
   }, [customRepo, loadOfficial]);
 
   useEffect(() => { loadLocal(); loadArchived(); }, [loadLocal, loadArchived]);
@@ -106,7 +131,7 @@ export function SkillsPanel() {
     try {
       const r = await fetch('/api/skills/import', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(activeRepo ? { repo: activeRepo, ids, overwrite } : { source, ids, overwrite }),
+        body: JSON.stringify(activeRepo ? { repo: activeRepo, branch: activeBranch, ids, overwrite } : { source, ids, overwrite }),
       });
       const d = await r.json();
       if (!r.ok) throw new Error(d.error || '导入失败');
@@ -120,7 +145,7 @@ export function SkillsPanel() {
         setNotice(parts.join(' · ') || '完成');
         setConflicts(null);
       }
-      await Promise.all([activeRepo ? loadOfficial(null, activeRepo) : loadOfficial(source), loadLocal()]);
+      await Promise.all([activeRepo ? loadOfficial(null, activeRepo, activeBranch) : loadOfficial(source), loadLocal()]);
     } catch (e) { setNotice('错误: ' + e.message); }
     setBusy(null);
   };
@@ -146,7 +171,7 @@ export function SkillsPanel() {
         {tabBtn('local', '本机 Skill', local.length)}
         {tabBtn('import', '导入', null)}
         {tabBtn('archived', '已归档', archived.length)}
-        <button onClick={tab === 'local' ? loadLocal : tab === 'archived' ? loadArchived : () => (activeRepo ? loadOfficial(null, activeRepo) : loadOfficial(source))} disabled={loadingLocal || loadingOff}
+        <button onClick={tab === 'local' ? loadLocal : tab === 'archived' ? loadArchived : () => (activeRepo ? loadOfficial(null, activeRepo, activeBranch) : loadOfficial(source))} disabled={loadingLocal || loadingOff}
           className="ml-auto p-1.5 text-ink-faint hover:text-ink rounded disabled:opacity-40" title="刷新">
           <RefreshCw size={13} className={(loadingLocal || loadingOff) ? 'animate-spin' : ''} />
         </button>
@@ -170,6 +195,13 @@ export function SkillsPanel() {
                   <div className="flex items-center gap-2">
                     <span className="text-xs font-medium font-body text-ink truncate flex-1" title={s.id}>{s.name}</span>
                     <SkillCopyBtn name={s.id} />
+                    {sourcesMap[s.id]?.repo && (
+                      <button onClick={() => updateSkill(s.id)} disabled={manageBusy === s.id}
+                        title={`从来源更新 —— ${sourcesMap[s.id].repo}${sourcesMap[s.id].branch ? '@' + sourcesMap[s.id].branch : ''},覆盖本机旧版本`}
+                        className="shrink-0 p-1 rounded text-ink-faint hover:text-accent hover:bg-accent/10 disabled:opacity-50">
+                        {manageBusy === s.id ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />}
+                      </button>
+                    )}
                     <button onClick={() => manageSkill('archive', s.id)} disabled={manageBusy === s.id}
                       title="归档 —— 移出加载目录停用,可在「已归档」恢复"
                       className="shrink-0 p-1 rounded text-ink-faint hover:text-ink hover:bg-canvas-deep disabled:opacity-50">
@@ -224,7 +256,7 @@ export function SkillsPanel() {
           {/* 源选择(内置源点了即清掉自定义仓库,回到内置源模式) */}
           <div className="flex flex-wrap gap-1.5">
             {sources.map((s) => (
-              <button key={s.id} onClick={() => { setActiveRepo(null); setCustomRepo(''); setSource(s.id); }}
+              <button key={s.id} onClick={() => { setActiveRepo(null); setActiveBranch(''); setCustomRepo(''); setSource(s.id); }}
                 className={`px-2.5 py-1 text-[11px] font-body rounded-md border transition-colors ${
                   !activeRepo && source === s.id ? 'border-accent text-accent bg-accent/10' : 'border-canvas-deep text-ink-muted hover:text-ink'}`}>
                 {s.name}
@@ -237,7 +269,7 @@ export function SkillsPanel() {
               type="text" value={customRepo}
               onChange={(e) => setCustomRepo(e.target.value)}
               onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); loadCustomRepo(); } }}
-              placeholder="GitHub 仓库:owner/repo 或完整地址"
+              placeholder="owner/repo、owner/repo@分支、或含 /tree/分支 的地址"
               className="flex-1 min-w-0 bg-canvas border border-canvas-deep rounded-md px-2 py-1 text-[11px] text-ink placeholder-ink-ghost focus:outline-none focus:border-accent/40 font-mono" />
             <button onClick={loadCustomRepo} disabled={loadingOff || !customRepo.trim()}
               className="shrink-0 px-2.5 py-1 rounded-md bg-accent text-white text-[11px] font-body hover:bg-accent-hover disabled:opacity-50">
@@ -246,8 +278,8 @@ export function SkillsPanel() {
           </div>
           {activeRepo ? (
             <div className="flex items-center gap-2 text-[10px] text-ink-faint font-mono">
-              <span className="text-accent">仓库:{activeRepo}</span>
-              <button onClick={() => { setActiveRepo(null); setCustomRepo(''); }} className="text-ink-faint hover:text-ink underline">返回内置源</button>
+              <span className="text-accent">仓库:{activeRepo}{(officialMeta.branch || activeBranch) ? `@${officialMeta.branch || activeBranch}` : ''}</span>
+              <button onClick={() => { setActiveRepo(null); setActiveBranch(''); setCustomRepo(''); }} className="text-ink-faint hover:text-ink underline">返回内置源</button>
             </div>
           ) : sources.find((s) => s.id === source)?.url && (
             <a href={sources.find((s) => s.id === source).url} target="_blank" rel="noreferrer"

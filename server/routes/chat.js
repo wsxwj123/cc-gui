@@ -821,7 +821,11 @@ router.post('/chat/title', async (req, res) => {
   try {
     // --no-session-persistence:标题生成是一次性调用,绝不能落盘成会话 jsonl,否则项目
     // 会话列表里会冒出"给下面这段对话起标题…"的空白会话(刷新后可见,用户报告 #5)。
-    const titleArgs = ['-p', prompt, '--permission-mode', 'plan', '--no-session-persistence'];
+    // prompt 走 stdin,不作 -p 的参数 —— Windows 上 `cmd.exe /c claude.cmd -p "<prompt>"`
+    // 会被 prompt 里的换行(cmd 逐行解析截断)、`<对话>` 的 <>(重定向符)、双引号 三重
+    // cmd 元字符破坏 → prompt 残缺 → 标题在 Windows 恒失败(用户实报,mac 正常)。stdin 不经
+    // cmd 参数解析,跨平台稳。实测 `claude -p`(无 prompt 参数)从 stdin 读 prompt 正常。
+    const titleArgs = ['-p', '--permission-mode', 'plan', '--no-session-persistence'];
     if (model) titleArgs.push('--model', model);
     // cwd 物理隔离(用户二报:标题 prompt 仍以会话形态冒头)。标题 prompt 自包含,根本
     // 不需要项目上下文;此前 cwd 用会话项目目录,CLI 任何落盘/索引行为(版本差异、超时
@@ -831,9 +835,11 @@ router.post('/chat/title', async (req, res) => {
     try { mkdirSync(titleCwd, { recursive: true }); } catch {}
     proc = claudeSpawn(titleArgs, {
       cwd: titleCwd,
-      stdio: ['ignore', 'pipe', 'pipe'],
+      stdio: ['pipe', 'pipe', 'pipe'],
       env: childEnv,
     });
+    // prompt 经 stdin 喂入(见上方注释:绕开 Windows cmd 参数解析)。写完即关,让 -p 一次性执行。
+    try { proc.stdin.write(prompt); proc.stdin.end(); } catch {}
   } catch {
     return res.json({ title: '' });
   }
