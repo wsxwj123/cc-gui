@@ -176,6 +176,8 @@ function PlanReviewCard({ req, onResolve, onApprove, processing, position, hydra
 // 逐题显示(Claude Desktop 风格):一次只渲染一个问题,单选点中即自动跳下一题;
 // back/next 可前后查看修改;末题答完提交。此前全部问题一次性堆叠,卡片高达 68vh
 // 盖住 AI 回复正文(用户报告"看不见正文")。
+// 高度:分屏为左右并排(窗格全高),故 vh=窗格高。卡片上限 42vh,加下方输入框≈窗格下半,
+// 正文保留上半(用户要求"只占会话窗口下二分之一",不论是否分屏)。卡片内部超出则自身滚动。
 function AskQuestionCard({ req, onAnswer, processing, position, hydrate }) {
   const questions = Array.isArray(req.toolInput?.questions) ? req.toolInput.questions : [];
   const [picks, setPicks] = useState({});    // qi -> string | string[]
@@ -239,7 +241,7 @@ function AskQuestionCard({ req, onAnswer, processing, position, hydrate }) {
   const opts = Array.isArray(q.options) ? q.options : [];
 
   return (
-    <div className="flex flex-col max-h-[48vh] rounded-xl bg-white border border-canvas-deep shadow-lg overflow-hidden animate-fade-up relative">
+    <div className="flex flex-col max-h-[42vh] rounded-xl bg-white border border-canvas-deep shadow-lg overflow-hidden animate-fade-up relative">
       <div className="px-4 py-2.5 flex items-center gap-2 border-b border-canvas-deep bg-violet-50/60">
         <div className="w-6 h-6 rounded-md bg-violet-100 flex items-center justify-center shrink-0">
           <AlertCircle size={13} className="text-violet-700" />
