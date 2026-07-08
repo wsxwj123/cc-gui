@@ -792,6 +792,35 @@ router.put('/plugins/:name/disable', async (req, res) => {
   }
 });
 
+// 更新插件到最新版:`claude plugin update <name@marketplace>`(官方说明:需重启会话生效)。
+// 先 marketplace update 刷新目录再 plugin update,确保拉到真最新(与安装同一保险)。
+router.post('/plugins/:name/update', async (req, res) => {
+  try {
+    const { name } = req.params;
+    if (!/^[A-Za-z0-9._@\-/]{1,100}$/.test(name)) throw new Error('invalid plugin name');
+    const mk = name.includes('@') ? name.split('@')[1] : '';
+    if (mk) { try { await runClaude(['plugin', 'marketplace', 'update', mk], { timeout: 30000 }); } catch {} }
+    await runClaude(['plugin', 'update', name], { timeout: 90000 });
+    invalidateMcpCache();
+    res.json({ ok: true, name, note: '已更新,新会话生效' });
+  } catch (err) {
+    res.status(500).json({ error: (err.stderr?.toString() || err.message || '').trim() || '更新失败' });
+  }
+});
+
+// 卸载插件:`claude plugin uninstall <name@marketplace>`。卸载后它在「添加插件」列表回到未安装态。
+router.delete('/plugins/:name', async (req, res) => {
+  try {
+    const { name } = req.params;
+    if (!/^[A-Za-z0-9._@\-/]{1,100}$/.test(name)) throw new Error('invalid plugin name');
+    await runClaude(['plugin', 'uninstall', name], { timeout: 30000 });
+    invalidateMcpCache();
+    res.json({ ok: true, name });
+  } catch (err) {
+    res.status(500).json({ error: (err.stderr?.toString() || err.message || '').trim() || '卸载失败' });
+  }
+});
+
 // 官方插件一键安装。CM-5:marketplace 不仅要 add,还要 **update** 刷新本地缓存——否则
 // 缓存停在旧 commit(没有后加入的插件如 code-review)→ install 报 "not found / 本地副本过期"
 // (Windows 上常见,Mac 缓存恰新所以能装)。add 幂等(已存在忽略),update 是 git pull 较快。

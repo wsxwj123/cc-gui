@@ -78,6 +78,7 @@ export function MCPPanel() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [toggling, setToggling] = useState(null);
+  const [pluginActioning, setPluginActioning] = useState(null); // 更新/卸载进行中的 plugin.name
   const [form, setForm] = useState(null); // null | { add:true } | srv对象 (编辑)
   const [restartHint, setRestartHint] = useState(false); // 增删改后提示需重启生效
   const mounted = useRef(true);
@@ -195,6 +196,33 @@ export function MCPPanel() {
       await fetchData(); // 刷新已安装列表
     } catch (e) { setPluginErr(`${id}: ${e.message}`); }
     setInstallingPlugin(null);
+  };
+
+  // 更新插件到最新版(claude plugin update,需新会话生效)。
+  const handleUpdatePlugin = async (plugin) => {
+    setPluginActioning(plugin.name); setPluginErr('');
+    try {
+      const r = await fetch(`/api/plugins/${encodeURIComponent(plugin.name)}/update`, { method: 'POST' });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || '更新失败');
+      setRestartHint(true);
+      await fetchData();
+    } catch (e) { setPluginErr(`${plugin.name}: ${e.message}`); }
+    setPluginActioning(null);
+  };
+
+  // 卸载插件(claude plugin uninstall);卸载后在「添加」列表回到未安装态可重装。
+  const handleDeletePlugin = async (plugin) => {
+    const ok = await confirmDialog(`卸载插件「${plugin.name}」?\n\n将执行 claude plugin uninstall。卸载后可在「添加」里重新安装。`, { danger: true, confirmText: '卸载' });
+    if (!ok) return;
+    setPluginActioning(plugin.name); setPluginErr('');
+    try {
+      const r = await fetch(`/api/plugins/${encodeURIComponent(plugin.name)}`, { method: 'DELETE' });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || '卸载失败');
+      await fetchData();
+    } catch (e) { setPluginErr(`${plugin.name}: ${e.message}`); }
+    setPluginActioning(null);
   };
 
   if (loading && servers.length === 0) {
@@ -337,6 +365,7 @@ export function MCPPanel() {
             <Plus size={11} />添加
           </button>
         </h3>
+        {!pluginAddOpen && pluginErr && <div className="text-[11px] text-error bg-error/10 border border-error/20 rounded px-2 py-1.5 break-all mb-2 normal-case tracking-normal">{pluginErr}</div>}
         {plugins.length > 0 ? (
           <div className="space-y-2">
             {sortedPlugins.map((plugin) => {
@@ -356,7 +385,17 @@ export function MCPPanel() {
                     <span className="text-[10px] px-1.5 py-0.5 bg-canvas-deep text-ink-faint rounded font-mono">
                       v{plugin.version}
                     </span>
-                    <div className="ml-auto">
+                    <div className="ml-auto flex items-center gap-1">
+                      <button onClick={() => handleUpdatePlugin(plugin)} disabled={pluginActioning === plugin.name}
+                        title="更新到最新版(claude plugin update,新会话生效)"
+                        className="p-1 rounded text-ink-faint hover:text-accent hover:bg-accent/10 disabled:opacity-50">
+                        {pluginActioning === plugin.name ? <RefreshCw size={12} className="animate-spin" /> : <RefreshCw size={12} />}
+                      </button>
+                      <button onClick={() => handleDeletePlugin(plugin)} disabled={pluginActioning === plugin.name}
+                        title="卸载(claude plugin uninstall,卸载后可在「添加」重装)"
+                        className="p-1 rounded text-ink-faint hover:text-error hover:bg-error/10 disabled:opacity-50">
+                        <Trash2 size={12} />
+                      </button>
                       <Toggle
                         enabled={!disabled}
                         loading={toggling === plugin.name}
