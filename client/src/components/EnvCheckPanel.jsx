@@ -24,6 +24,9 @@ export default function EnvCheckPanel({ onDismiss, onRecheck, asModal = true }) 
     try {
       const r = await fetch('/api/env-check', { cache: 'no-store' });
       setData(await r.json());
+      // 重新检测=以最新结果为准,清掉"已开终端"的过渡态:安装失败(仍未装)时安装按钮
+      // 得重新出现让用户重试,否则一直卡在"已开终端,装完点重新检测"再也点不了安装。
+      setLaunched({});
     } catch { /* server 挂了不弹,免得更晕 */ }
     setChecking(false);
     // 同步父组件触发态(claude 装好后父级 cliInstalled=true → 自动关弹窗)
