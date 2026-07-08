@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { X, Plus, Trash2, RefreshCw, ExternalLink } from 'lucide-react';
+import { X, Plus, Trash2, RefreshCw, ExternalLink, ArrowLeft } from 'lucide-react';
 import { BUILTIN_MCP_SERVERS, findBuiltinMcp } from '../utils/builtinMcpServers.js';
 import { openExternalUrl } from '../utils/openExternal.js';
 
@@ -151,15 +151,19 @@ export function McpForm({ editing, onClose, onSaved }) {
 
   return (
     <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/40 backdrop-blur-sm animate-fade-in" onClick={onClose}>
-      <div className="glass-popover w-[560px] max-w-[calc(var(--app-w,100vw)-1.5rem)] max-h-[90vh] overflow-y-auto rounded-2xl shadow-2xl animate-glass-rise"
+      <div className="glass-popover w-[560px] max-w-[calc(var(--app-w,100vw)-1.5rem)] max-h-[90vh] flex flex-col overflow-hidden rounded-2xl shadow-2xl animate-glass-rise"
         onClick={(e) => e.stopPropagation()}>
-        <div className="px-5 py-4 border-b border-canvas-deep flex items-center gap-3 sticky top-0 bg-canvas z-10">
+        {/* flex 列布局:头/底 shrink-0 固定,中间主体独立滚动。原来是「整卡滚动 + sticky footer」,
+            但 glassRise 动画以 scale(1)+fill:both 收尾使卡片永久带 transform,WKWebView/WebView2 里
+            transform 滚动容器内的 sticky bottom-0 失效 → 长表单滚不到底、看不到「添加」按钮。 */}
+        <div className="px-5 py-4 border-b border-canvas-deep flex items-center gap-3 shrink-0 bg-canvas">
+          <button onClick={onClose} className="p-1 -ml-1 text-ink-faint hover:text-ink rounded transition-colors" title="返回"><ArrowLeft size={16} /></button>
           <div className="flex-1 text-[14px] font-medium text-ink font-body">{isEdit ? '编辑 MCP 服务器' : '添加 MCP 服务器'}</div>
           <button onClick={onClose} className="p-1.5 hover:bg-canvas-warm rounded transition-colors"><X size={14} className="text-ink-faint" /></button>
         </div>
 
         {(
-          <div className="px-5 py-4 space-y-4">
+          <div className="px-5 py-4 space-y-4 flex-1 overflow-y-auto min-h-0">
             {isEdit && refining && (
               <div className="flex items-center gap-2 text-[11px] text-ink-faint">
                 <RefreshCw size={11} className="animate-spin" /> 正在载入完整配置(环境变量等)…
@@ -281,7 +285,7 @@ export function McpForm({ editing, onClose, onSaved }) {
           </div>
         )}
 
-        <div className="px-5 py-3 border-t border-canvas-deep flex items-center justify-end gap-2 bg-canvas-warm/40 sticky bottom-0">
+        <div className="px-5 py-3 border-t border-canvas-deep flex items-center justify-end gap-2 bg-canvas-warm/40 shrink-0">
           <button onClick={onClose} className="px-3 py-1.5 text-[12px] text-ink-muted hover:text-ink rounded-md hover:bg-canvas-warm transition-colors">取消</button>
           <button onClick={save} disabled={saving}
             className="flex items-center gap-1.5 px-3 py-1.5 text-[12px] text-white bg-accent hover:bg-accent/90 rounded-md transition-colors disabled:opacity-50">

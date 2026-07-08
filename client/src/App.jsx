@@ -6634,8 +6634,9 @@ function CustomProviderForm({ onSaved, editing, onCancel, onDirtyChange }) {
   }
   return (
     <div className="px-4 py-3 border-t border-canvas-deep/40 mt-1 space-y-2.5">
-      <div className="flex items-center justify-between">
-        <span className="text-[13px] font-display font-semibold text-ink">{isEdit ? '编辑 Provider' : '新增 Provider'}<span className="text-[10px] font-body font-normal text-ink-faint ml-1">保存到本机</span></span>
+      <div className="flex items-center gap-2">
+        <button onClick={close} className="p-1 -ml-1 text-ink-faint hover:text-ink" title="返回"><ArrowLeft size={16} /></button>
+        <span className="flex-1 text-[13px] font-display font-semibold text-ink">{isEdit ? '编辑 Provider' : '新增 Provider'}<span className="text-[10px] font-body font-normal text-ink-faint ml-1">保存到本机</span></span>
         <button onClick={close} className="p-1 text-ink-faint hover:text-ink"><X size={16} /></button>
       </div>
       <MobileSegmented onChange={setType} options={[

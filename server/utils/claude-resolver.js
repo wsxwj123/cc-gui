@@ -139,18 +139,20 @@ function nvmWinCandidates(appData) {
 // 的 Explorer/GUI 进程持有的是安装前的旧 PATH 快照**(PATH 改动要重开进程/重登才传播)→
 // `where claude` 和 process.env.PATH 都看不到,用户"装了却检测不到、要重启才行"。直接问
 // 注册表拿最新 PATH,无需重启即可发现。与 Tauri find_node 的 Windows live-PATH 同思路。
-function fromWinLivePath() {
+// 读【注册表实时 PATH】(User+Machine)返回目录列表;仅 Win,非 Win 返回 []。导出复用:
+// claude 用它找 claude.exe,env-check 用它找 python/git/uv(同一"进程持旧 PATH 快照、装了
+// 检测不到、要重启才行"的根因 —— 直接问注册表拿最新,无需重启)。
+export function winLivePathDirs() {
   if (!isWin) return [];
-  // 用户域 + 机器域 PATH 合并;PowerShell 读注册表(GetEnvironmentVariable 的 User/Machine
-  // 目标就是注册表,不受当前进程旧 PATH 影响)。逐行输出目录,Node 侧拼 claude.exe/.cmd。
   const ps = "[Environment]::GetEnvironmentVariable('Path','User') + ';' + [Environment]::GetEnvironmentVariable('Path','Machine')";
   const out = safeExec('powershell', ['-NoProfile', '-NonInteractive', '-Command', ps], 8000);
   if (!out) return [];
-  const dirs = out.split(';').map((s) => s.trim()).filter(Boolean);
+  return out.split(';').map((s) => s.trim()).filter(Boolean);
+}
+
+function fromWinLivePath() {
   const cands = [];
-  for (const d of dirs) {
-    cands.push(join(d, 'claude.exe'), join(d, 'claude.cmd'));
-  }
+  for (const d of winLivePathDirs()) cands.push(join(d, 'claude.exe'), join(d, 'claude.cmd'));
   return cands;
 }
 

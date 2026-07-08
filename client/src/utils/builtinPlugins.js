@@ -22,4 +22,5 @@ export const BUILTIN_PLUGINS = [
   { id: 'context7',             name: 'Context7',            desc: '实时官方文档检索(内含 MCP,免 key)', mcp: true },
   // 非官方源插件:带 repo/marketplace,安装端点会先 `marketplace add <repo>` 再装。
   { id: 'ponytail',             name: 'Ponytail',            desc: '懒惰资深开发风格:能不写的代码就不写,优先 stdlib/原生(第三方源)', repo: 'DietrichGebert/ponytail', marketplace: 'ponytail' },
+  { id: 'superpowers',          name: 'Superpowers',         desc: 'obra 出品工作流技能合集:头脑风暴/写计划/TDD/系统调试等(第三方源;skill 随插件装到 ~/.claude/plugins,以 superpowers:xxx 命名,不进 ~/.claude/skills)', repo: 'obra/superpowers-marketplace', marketplace: 'superpowers-marketplace' },
 ];

@@ -1,6 +1,6 @@
 import { Router } from 'express';
-import { readFileSync, writeFileSync, existsSync, realpathSync } from 'fs';
-import { resolveClaude, listClaudeInstalls, getClaudeOverride, setClaudeOverride } from '../utils/claude-resolver.js';
+import { readFileSync, writeFileSync, existsSync, realpathSync, readdirSync } from 'fs';
+import { resolveClaude, listClaudeInstalls, getClaudeOverride, setClaudeOverride, winLivePathDirs } from '../utils/claude-resolver.js';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import { tmpdir, homedir } from 'os';
@@ -490,8 +490,32 @@ router.put('/claude-active', (req, res) => {
 });
 
 // ─── 统一环境检查(node / claude / python)──────────────────────────────
-// node:app 能跑 = node 必在,直接报 process.version。claude:复用 detectInstall +
-// getClaudeVersion。python:可选(部分技能 生图/出题/bot 需要),多策略检测。
+// Windows 通用兜底:手动装完 python/git/uv 后仍检测不到的根因 = 正在运行的 GUI 进程持有
+// 安装前的旧 PATH 快照(安装器只把新目录写进注册表,不重启读不到)。用注册表实时 PATH
+// 逐目录拼 exe 名 —— 与 claude-resolver 的 fromWinLivePath 同思路,装了无需重启即可发现。
+function winLiveCandidates(exeNames) {
+  if (process.platform !== 'win32') return [];
+  const out = [];
+  for (const d of winLivePathDirs()) for (const n of exeNames) out.push(join(d, n));
+  return out;
+}
+// python.org / Store 安装器的固定落点(用户没勾"Add to PATH"时注册表也没有 → 直扫)。
+// 目录名带版本(Python312 等),扫父目录下 /^Python\d/ 子目录。
+function pythonWinFixed() {
+  const home = homedir();
+  const local = process.env.LOCALAPPDATA || join(home, 'AppData', 'Local');
+  const out = [];
+  for (const base of [
+    join(local, 'Programs', 'Python'),                                 // python.org 仅当前用户(默认)
+    process.env.ProgramFiles || 'C:\\Program Files',                   // python.org 所有用户
+    process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)',
+  ]) {
+    try { for (const d of readdirSync(base)) if (/^Python\d/i.test(d)) out.push(join(base, d, 'python.exe')); } catch {}
+  }
+  out.push(join(local, 'Microsoft', 'WindowsApps', 'python.exe'));     // Microsoft Store 版垫片
+  return out;
+}
+
 async function detectPython() {
   const tryRun = async (bin, args = ['--version']) => {
     try {
@@ -515,7 +539,7 @@ async function detectPython() {
   }
   const home = homedir();
   const cands = process.platform === 'win32'
-    ? []
+    ? [...winLiveCandidates(['python3.exe', 'python.exe']), ...pythonWinFixed()]  // 注册表实时 PATH + python.org/Store 固定落点
     : ['/opt/homebrew/bin/python3', '/usr/local/bin/python3', '/usr/bin/python3', join(home, '.asdf/shims/python3')];
   for (const p of cands) {
     if (!existsSync(p)) continue;
@@ -550,6 +574,7 @@ async function detectUv() {
   const home = homedir();
   const cands = process.platform === 'win32'
     ? [
+        ...winLiveCandidates(['uv.exe']),                                                                // 注册表实时 PATH(装完不重启即认)
         join(home, '.local', 'bin', 'uv.exe'),                                                          // astral 官方安装器
         join(home, '.cargo', 'bin', 'uv.exe'),                                                          // cargo install
         join(home, 'scoop', 'shims', 'uv.exe'),                                                         // scoop
@@ -631,6 +656,7 @@ async function detectGit() {
   const home = homedir();
   const cands = process.platform === 'win32'
     ? [
+        ...winLiveCandidates(['git.exe']),  // 注册表实时 PATH(Git for Windows 装完写 Machine PATH,进程旧快照读不到)
         join(process.env.ProgramFiles || 'C:\\Program Files', 'Git', 'cmd', 'git.exe'),
         join(process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)', 'Git', 'cmd', 'git.exe'),
         join(process.env.LOCALAPPDATA || join(home, 'AppData', 'Local'), 'Programs', 'Git', 'cmd', 'git.exe'),

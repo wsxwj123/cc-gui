@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useRef } from 'react';
-import { Server, Package, FolderOpen, RefreshCw, Plug, Activity, Check, X, Plus, Pencil, Trash2, Zap, Download } from 'lucide-react';
+import { Server, Package, FolderOpen, RefreshCw, Plug, Activity, Check, X, Plus, Pencil, Trash2, Zap, Download, ArrowLeft } from 'lucide-react';
 import { BUILTIN_PLUGINS } from '../utils/builtinPlugins.js';
 import { McpForm } from './McpForm.jsx';
 import { confirmDialog } from '../utils/confirmDialog.jsx';
@@ -424,6 +424,7 @@ export function MCPPanel() {
           <div className="glass-popover w-[560px] max-w-[calc(var(--app-w,100vw)-1.5rem)] max-h-[90vh] overflow-y-auto rounded-2xl shadow-2xl animate-glass-rise"
             onClick={(e) => e.stopPropagation()}>
             <div className="px-5 py-4 border-b border-canvas-deep flex items-center gap-3 sticky top-0 bg-canvas z-10">
+              <button onClick={() => setPluginAddOpen(false)} className="p-1 -ml-1 text-ink-faint hover:text-ink rounded transition-colors" title="返回"><ArrowLeft size={16} /></button>
               <div className="flex-1 text-[14px] font-medium text-ink font-body">添加插件</div>
               <button onClick={() => setPluginAddOpen(false)} className="p-1.5 hover:bg-canvas-warm rounded transition-colors"><X size={14} className="text-ink-faint" /></button>
             </div>
