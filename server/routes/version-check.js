@@ -589,18 +589,23 @@ function envInstallCmd(target, proxyUrl = null, method = null) {
     }
     return 'curl -LsSf https://astral.sh/uv/install.sh | sh'; // mac + linux 官方安装器
   }
+  // Windows winget 兜底:winget(App Installer)在 LTSC/Server/未更新旧 Win10/企业锁机上
+  // 可能缺失 → 裸 `winget install` 会报"不是内部命令"卡死。批处理里先 `where winget` 探测,
+  // 没有就 `start` 打开官方下载页(默认浏览器)。`if errorlevel 1`= where 未找到(errorlevel≥1)。
+  const wingetOr = (id, url) =>
+    `where winget >nul 2>nul & if errorlevel 1 ( echo winget 不可用,正在打开官方下载页... & start "" "${url}" ) else ( winget install -e --id ${id} )`;
   if (target === 'node') {
-    if (win) return 'winget install -e --id OpenJS.NodeJS.LTS';
+    if (win) return wingetOr('OpenJS.NodeJS.LTS', 'https://nodejs.org/en/download/');
     if (mac) return 'brew install node || echo "未检测到 Homebrew,请到 https://nodejs.org 下载安装"';
     return 'sudo apt-get update && sudo apt-get install -y nodejs npm || echo "请用你的发行版包管理器安装 node"';
   }
   if (target === 'python') {
-    if (win) return 'winget install -e --id Python.Python.3.12';
+    if (win) return wingetOr('Python.Python.3.12', 'https://www.python.org/downloads/windows/');
     if (mac) return 'brew install python || echo "未检测到 Homebrew,请到 https://www.python.org/downloads 下载安装"';
     return 'sudo apt-get update && sudo apt-get install -y python3 python3-pip || echo "请用你的发行版包管理器安装 python3"';
   }
   if (target === 'git') {
-    if (win) return 'winget install -e --id Git.Git';
+    if (win) return wingetOr('Git.Git', 'https://git-scm.com/download/win');
     if (mac) return 'xcode-select --install || brew install git || echo "请到 https://git-scm.com/download/mac 下载安装"';
     return 'sudo apt-get update && sudo apt-get install -y git || echo "请用你的发行版包管理器安装 git"';
   }
