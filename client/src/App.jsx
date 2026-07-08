@@ -3252,8 +3252,16 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     // I4:本次流的归属会话(draft 时是 draft-key,init 收到真 id 后会在下面升级)。
     setStreamOwner(sessionQueueKey);
     // BF-1:记录历史截断点 —— 流式期间任何历史重拉都会拉到本回合半成品,渲染层据此丢弃。
-    // reattach 时流起点早于现在(进程已跑了一阵),改用"末条用户消息之后"的形态截断。
-    setStreamHistCutoff(reattachPid ? { afterLastUser: true } : { sinceTs: Date.now() });
+    // #4 修:reattach 若有本会话 detach 时刻,用 { sinceTs: detachTs } —— 只藏 detach 之后落盘
+    // (会被 earlyLines 重放)的内容;detach 之前已产出的助手回复照常从历史显示(原 afterLastUser
+    // 会把"最后一条用户消息之后"的全部内容切掉,含离开前已完成的回复 → 凭空消失,停止/完成才重现)。
+    // 无 detach 时刻(刷新后 rehydrate reattach,不知起点)则回落 afterLastUser,保持原行为不回归。
+    const reattachDts = reattachPid && selectedSession?.sessionId ? detachTsBySidRef.current[selectedSession.sessionId] : null;
+    setStreamHistCutoff(
+      reattachPid
+        ? (reattachDts ? { sinceTs: reattachDts } : { afterLastUser: true })
+        : { sinceTs: Date.now() },
+    );
     setCompacting(isCompact);
     setStreamingText('');
     setStreamingThinking('');
@@ -4445,6 +4453,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // real sessionId mid-stream via the system/init event. We don't want to wipe
   // the user's just-sent message in that case.
   const prevSessionRef = useRef(selectedSession);
+  const detachTsBySidRef = useRef({}); // #4:{ [sessionId]: detach时刻 } —— reattach 截断口径
   useEffect(() => {
     const prev = prevSessionRef.current;
     const curr = selectedSession;
@@ -4468,6 +4477,10 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         // Do NOT POST /api/chat/:pid/stop here — that would kill the proc.
         // Just forget the ref so we don't accidentally stop it later.
         activeProcRef.current = null;
+        // #4:记录本会话 detach 时刻(按 sessionId 键,不跨会话共享)。切回后 reattach 用它做
+        // sinceTs 截断,只藏"detach 之后落盘、且会被 earlyLines 重放"的内容;detach 之前已产出
+        // 的助手回复(在 jsonl、不在 earlyLines 回放里)照常从历史显示,不再凭空消失。
+        if (prev?.sessionId) detachTsBySidRef.current[prev.sessionId] = Date.now();
         updateStreaming(false);
         setChatMessages([]);
         setStreamingText('');
