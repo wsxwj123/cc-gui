@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { readFileSync, writeFileSync, existsSync, realpathSync, readdirSync } from 'fs';
-import { resolveClaude, listClaudeInstalls, getClaudeOverride, setClaudeOverride, winLivePathDirs } from '../utils/claude-resolver.js';
+import { resolveClaude, listClaudeInstallsAsync, getClaudeOverride, setClaudeOverride, winLivePathDirs } from '../utils/claude-resolver.js';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import { tmpdir, homedir } from 'os';
@@ -460,7 +460,7 @@ router.post('/claude-install', async (req, res) => {
 // 列出机器上所有 claude 安装(不止当前用的那个)+ 各自版本 + 分类,并标出当前
 // 实际激活的是哪个(供设置页"切换用哪个 claude")。overridden = 用户是否已手动钉死。
 router.get('/claude-installs', async (_req, res) => {
-  const list = listClaudeInstalls();
+  const list = await listClaudeInstallsAsync();
   const override = getClaudeOverride();
   const active = resolveClaude();  // 含 override,当前 spawn/SDK 实际会用的那个
   let activeReal = '';

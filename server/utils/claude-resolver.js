@@ -10,7 +10,16 @@
 // 解析顺序:PATH(which/where)→ login shell(非 Win)→ npm 全局 prefix → 固定候选
 // (原生安装/homebrew/npm 自定义 prefix/volta/pnpm/yarn/nvm/fnm/scoop 等)。
 // 命中即缓存(按 mtime + 存在性失效);未命中短 TTL 负缓存,装好后无需重启即可生效。
-import { execFileSync } from 'child_process';
+import { execFileSync, execFile } from 'child_process';
+import { promisify } from 'util';
+const execFileP = promisify(execFile);
+// 同 safeExec 但**异步**(不阻塞事件循环)。非零退出也救回已捕获的 stdout(同 safeExecStdout)。
+// 仅用于 listClaudeInstallsAsync ——那是唯一"每次全量扫所有策略"的重活,同步版会在 Windows
+// 上以 cmd/PowerShell 冷启动几秒卡死整个单线程 Express(chat/provider 全冻,用户报"到处 connecting")。
+async function safeExecAsync(file, args, timeout = 5000) {
+  try { const { stdout } = await execFileP(file, args, { timeout }); return String(stdout).trim(); }
+  catch (e) { return e?.stdout ? String(e.stdout).trim() : ''; }
+}
 import { existsSync, statSync, readdirSync, readFileSync, writeFileSync, mkdirSync, realpathSync } from 'fs';
 import { homedir } from 'os';
 import { join, dirname } from 'path';
@@ -83,10 +92,21 @@ function fromLoginShell() {
   // read 立刻返回)+ 超时兜底。失败则回落原来的 `sh -lc`(至少覆盖 .profile)。
   let out = safeExecStdout(shell, ['-ilc', 'command -v claude'], 6000);
   if (!out) out = safeExecStdout('sh', ['-lc', 'command -v claude']);
+  return pickLoginShellLine(out);
+}
+// 从 login-shell 输出里挑 claude 路径(sync/async 共用)。
+function pickLoginShellLine(out) {
   const lines = String(out).split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
   // 优先取"看起来是 claude 可执行文件的绝对路径"那行,滤掉 rc 往 stdout 打印的欢迎语噪声。
   const hit = [...lines].reverse().find((l) => l.startsWith('/') && /\/claude$/.test(l) && existsSync(l));
   return hit || lines[lines.length - 1] || '';
+}
+async function fromLoginShellAsync() {
+  if (isWin) return '';
+  const shell = process.env.SHELL || 'sh';
+  let out = await safeExecAsync(shell, ['-ilc', 'command -v claude'], 6000);
+  if (!out) out = await safeExecAsync('sh', ['-lc', 'command -v claude']);
+  return pickLoginShellLine(out);
 }
 
 // 策略 3:问 npm 自己的全局 prefix(用户 `npm config set prefix` 到任意目录时,
@@ -95,17 +115,36 @@ function fromLoginShell() {
 // 把原生二进制放在 <全局 node_modules>/@anthropic-ai/claude-code/bin/claude.exe
 // (全平台都叫 .exe,mac 上实为 Mach-O,可直接执行)。shim 缺失/软链断(--ignore-scripts、
 // 杀毒隔离 shim 等)时这条仍能命中——探测彻底与 PATH 无关。
-function fromNpmPrefix() {
-  const out = isWin
-    ? safeExec('cmd.exe', ['/c', 'npm', 'config', 'get', 'prefix'], 6000)
-    : safeExec('npm', ['prefix', '-g'], 6000);
-  const prefix = out.trim();
+// npm 全局 prefix → claude 候选路径(sync/async 共用,避免重复逻辑)。
+function npmPrefixCandidates(prefix) {
   if (!prefix || /^undefined$/i.test(prefix)) return [];
   const nodeModules = isWin ? join(prefix, 'node_modules') : join(prefix, 'lib', 'node_modules');
   const pkgBin = join(nodeModules, '@anthropic-ai', 'claude-code', 'bin', 'claude.exe');
   return isWin
     ? [join(prefix, 'claude.exe'), join(prefix, 'claude.cmd'), pkgBin]
     : [join(prefix, 'bin', 'claude'), pkgBin];
+}
+const NPM_PREFIX_ARGS = isWin ? ['cmd.exe', ['/c', 'npm', 'config', 'get', 'prefix'], 6000]
+                              : ['npm', ['prefix', '-g'], 6000];
+const WIN_LIVE_PATH_PS = "[Environment]::GetEnvironmentVariable('Path','User') + ';' + [Environment]::GetEnvironmentVariable('Path','Machine')";
+
+function fromNpmPrefix() {
+  return npmPrefixCandidates(safeExec(NPM_PREFIX_ARGS[0], NPM_PREFIX_ARGS[1], NPM_PREFIX_ARGS[2]).trim());
+}
+// 异步版策略(仅 listClaudeInstallsAsync 用,不阻塞事件循环)。
+async function fromPathAsync() {
+  if (isWin) return pickWinLine((await safeExecAsync('where', ['claude'])).split(/\r?\n/).map((s) => s.trim()).filter(Boolean));
+  return (await safeExecAsync('which', ['claude'])).split(/\r?\n/)[0] || '';
+}
+async function fromNpmPrefixAsync() {
+  return npmPrefixCandidates((await safeExecAsync(NPM_PREFIX_ARGS[0], NPM_PREFIX_ARGS[1], NPM_PREFIX_ARGS[2])).trim());
+}
+async function fromWinLivePathAsync() {
+  if (!isWin) return [];
+  const out = await safeExecAsync('powershell', ['-NoProfile', '-NonInteractive', '-Command', WIN_LIVE_PATH_PS], 8000);
+  const cands = [];
+  for (const d of out.split(';').map((s) => s.trim()).filter(Boolean)) cands.push(join(d, 'claude.exe'), join(d, 'claude.cmd'));
+  return cands;
 }
 
 // nvm(mac/linux)/fnm 把每个 node 版本装在独立目录,全局 bin 在 <ver>/bin,
@@ -253,33 +292,47 @@ export function claudeCommand(args = []) {
  * 里的同一个软链会指向同一 real,只算一个;npm 版和原生版 real 不同,各算一个。
  * 返回 [{ path, real }],path 是首次发现的入口路径(可直接执行)。
  */
-export function listClaudeInstalls() {
+// 候选路径列表 → 去重后的 [{path, real}]。按【逻辑安装身份】去重,而非裸真实路径:
+// Windows npm 版会同时命中 shim(`<prefix>\claude.cmd`,非软链)和包内二进制
+// (`<prefix>\node_modules\@anthropic-ai\claude-code\bin\claude.exe`)——两者 realpath 各是自己
+// →旧逻辑列成两条重复项(用户实测)。key 把包内二进制映射回 npm 前缀、shim 用其所在目录,
+// 同一 prefix 即合并成一条;原生版/不同 prefix 的 key 不同,仍各算一个。
+function buildInstalls(paths) {
   const seen = new Set();
   const out = [];
-  // 按【逻辑安装身份】去重,而非裸真实路径。Windows npm 版会同时命中 shim(`<prefix>\claude.cmd`,
-  // 非软链)和包内二进制(`<prefix>\node_modules\@anthropic-ai\claude-code\bin\claude.exe`)——两者
-  // realpath 各是自己→旧逻辑列成两条重复项(用户实测)。key 把包内二进制映射回 npm 前缀、shim 用其
-  // 所在目录,同一 prefix 即合并成一条;原生版/不同 prefix 的 key 不同,仍各算一个。
   const keyOf = (real) => {
     const low = real.replace(/\\/g, '/').toLowerCase();
     const m = low.match(/^(.*)\/node_modules\/@anthropic-ai\/claude-code\//);
     return m ? m[1] : low.replace(/\/[^/]*$/, ''); // 包内二进制→前缀;否则→所在目录
   };
-  const add = (p) => {
-    if (!p || !existsSync(p)) return;
+  for (const p of paths) {
+    if (!p || !existsSync(p)) continue;
     let real = p;
-    try { real = realpathSync(p); } catch { return; }
+    try { real = realpathSync(p); } catch { continue; }
     const key = keyOf(real);
-    if (seen.has(key)) return;
+    if (seen.has(key)) continue;
     seen.add(key);
     out.push({ path: p, real });
-  };
-  add(fromPath());
-  add(fromLoginShell());
-  for (const p of fromNpmPrefix()) add(p);
-  for (const p of fromWinLivePath()) add(p);
-  for (const p of fixedCandidates()) add(p);
+  }
   return out;
+}
+
+export function listClaudeInstalls() {
+  return buildInstalls([fromPath(), fromLoginShell(), ...fromNpmPrefix(), ...fromWinLivePath(), ...fixedCandidates()]);
+}
+
+// ⚡ 异步版:唯一"每次全量扫所有策略"的重活。同步版在 Windows 上以 cmd/PowerShell 冷启动
+// 几秒 execFileSync **阻塞单线程 Express 事件循环**(chat/provider/health 全冻→用户报"到处
+// connecting、设置页一直加载中")。异步 spawn 让循环空转、其他请求照常。带 8s TTL 缓存,免
+// 设置页 mount + clickMethod + switchActive + check 反复全扫;setClaudeOverride 时清缓存。
+let _installsCache = null; // { at, list }
+const INSTALLS_TTL_MS = 8_000;
+export async function listClaudeInstallsAsync() {
+  if (_installsCache && Date.now() - _installsCache.at < INSTALLS_TTL_MS) return _installsCache.list;
+  const [p1, login, npm, live] = await Promise.all([fromPathAsync(), fromLoginShellAsync(), fromNpmPrefixAsync(), fromWinLivePathAsync()]);
+  const list = buildInstalls([p1, login, ...npm, ...live, ...fixedCandidates()]);
+  _installsCache = { at: Date.now(), list };
+  return list;
 }
 
 /** 读当前覆盖路径('' = 未设,走自动优先级)。 */
@@ -293,4 +346,5 @@ export function setClaudeOverride(path) {
   writeFileSync(OVERRIDE_FILE, JSON.stringify({ path: path || '' }, null, 2));
   _cache = null;
   _missAt = 0;
+  _installsCache = null; // 切换/手动指定后立即反映到安装列表(active 归属会变)
 }

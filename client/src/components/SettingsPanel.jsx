@@ -627,12 +627,15 @@ function CcUpdater() {
   };
 
   useEffect(() => {
-    fetch('/api/claude-version-check').then((r) => r.json()).then((d) => {
+    // 30s 超时兜底:后端已异步化不阻塞,但 claude-version-check 仍会 await npm registry 拉最新版
+    // (墙内慢/无代理可能久等)。原来 `.catch(()=>{})` 吞掉失败 → state 停在初始 idle → 永久"加载中"
+    // 且无报错(用户实报)。超时/失败置 loadError,渲染出"点重试",不再静默卡死。
+    fetch('/api/claude-version-check', { signal: AbortSignal.timeout(30000) }).then((r) => r.json()).then((d) => {
       // 已装但查询出错(如 npm registry 失败)时标 err 让错误可见;未装时走安装按钮分支。
       // BI-3: 挂载时已拿到 hasUpdate/latestVersion,直接置 ok 让"一键更新"按钮立即显示,
       // 不再要求用户先点"检查更新"(更新弹窗"前往更新"落到设置页即见一键更新)。
       setState({ status: d.installed === false ? 'idle' : (d.error ? 'err' : 'ok'), ...d });
-    }).catch(() => {});
+    }).catch(() => setState((s) => ({ ...s, loadError: true })));
     // 不论是否检测到安装都拉安装列表:原生/npm 切换按钮常驻,未装态也要能显示"未安装"。
     loadInstalls();
   }, []);
@@ -782,7 +785,11 @@ function CcUpdater() {
             Claude Code CLI{state.method && state.installed !== false ? ` · ${state.method}` : ''}
           </div>
           <div className="text-[14px] font-mono text-ink mt-0.5">
-            {state.installed === false ? '未安装' : state.currentVersion ? `v${state.currentVersion}` : '加载中…'}
+            {state.installed === false ? '未安装'
+              : state.currentVersion ? `v${state.currentVersion}`
+              : state.loadError
+                ? <button onClick={check} className="text-[12px] text-error hover:underline font-body">检测超时,点重试</button>
+                : '加载中…'}
           </div>
         </div>
         {state.installed === false ? (
