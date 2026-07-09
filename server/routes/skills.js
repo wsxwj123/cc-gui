@@ -245,18 +245,28 @@ async function doImport(repo, branchArg, ids, overwrite) {
     if (exists && !overwrite) { conflicts.push(id); continue; }
     const blobs = files.filter((f) => f.path === `${meta.root}/SKILL.md` || f.path.startsWith(`${meta.root}/`));
     if (!blobs.length) { failed.push({ id, error: '无文件' }); continue; }
+    // 下载到临时目录 → 成功后原子替换。解决两问题:①更新时上游已删的文件不再残留(纯 fetch 只做
+    // 增/改、漏"删",git pull 的唯一优势点,靠整目录替换补上);②下载中途失败只丢临时目录、旧 skill
+    // 原封不动(避免"更新失败反把能用的删了")。`.` 前缀避开 scanLocalSkills 的列举(不在本机列表闪现)。
+    // 全新导入(dest 不存在)同样受益:半截失败不留残缺目录。同 SKILLS_DIR 下 rename 原子。
+    const tmp = join(SKILLS_DIR, `.${id}.tmp-${Date.now()}`);
     try {
       for (const f of blobs) {
         const rel = f.path.slice(meta.root.length + 1); // 相对 skill 根
-        const target = join(SKILLS_DIR, id, rel);
+        const target = join(tmp, rel);
         await mkdir(join(target, '..'), { recursive: true });
         const raw = await fetch(`https://raw.githubusercontent.com/${repo}/${branch}/${f.path}`);
         if (!raw.ok) throw new Error(`下载 ${rel} HTTP ${raw.status}`);
         await writeFile(target, Buffer.from(await raw.arrayBuffer()));
       }
+      await rm(dest, { recursive: true, force: true }); // 清旧版本(含上游已删文件);不存在则 no-op
+      await rename(tmp, dest);
       imported.push(id);
       sources[id] = { repo, branch, root: meta.root }; // 记来源供"更新"
-    } catch (e) { failed.push({ id, error: e.message }); }
+    } catch (e) {
+      await rm(tmp, { recursive: true, force: true }).catch(() => {}); // 清半成品,旧 skill 不动
+      failed.push({ id, error: e.message });
+    }
   }
   if (imported.length) { try { await writeSources(sources); } catch { /* 记录失败不影响导入结果 */ } }
   localCache = null; // 装了新 skill,本机列表缓存失效
