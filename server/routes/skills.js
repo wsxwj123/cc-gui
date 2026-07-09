@@ -15,6 +15,11 @@ const router = Router();
 const SKILLS_DIR = join(homedir(), '.claude', 'skills');
 // 归档区:与 skills 同父目录(claude 不扫这里→技能停用)。归档=移进来,恢复=移回去。
 const ARCHIVE_DIR = join(homedir(), '.claude', 'skills-archive');
+// 导入下载的临时目录:放在 ~/.claude 下但**不在 skills/ 内**——claude CLI 只扫 ~/.claude/skills,
+// 之前放 skills 内(`.<id>.tmp`)虽躲过 GUI 的 scanLocalSkills,但下载那几秒 claude 本体会把
+// 临时目录当成 skill 加载(用户会话冒出 `.xxx.tmp-...` 假 skill)。移出 skills/ 根治;仍在
+// ~/.claude 同一文件系统,rename 到 skills/<id> 保持原子。
+const IMPORT_TMP_DIR = join(homedir(), '.claude', '.cgui-skill-tmp');
 const ID_RE = /^[a-zA-Z0-9._-]+$/;
 const GH_HEADERS = { 'User-Agent': 'claude-gui-skills', 'Accept': 'application/vnd.github+json' };
 const DESC_CAP = 30; // skill 数 ≤ 此值才逐个抓描述(大仓如 Composio 只列名,免打爆网络)
@@ -265,10 +270,11 @@ async function doImport(repo, branchArg, ids, overwrite) {
     if (!blobs.length) { failed.push({ id, error: '无文件' }); continue; }
     // 下载到临时目录 → 成功后原子替换。解决两问题:①更新时上游已删的文件不再残留(纯 fetch 只做
     // 增/改、漏"删",git pull 的唯一优势点,靠整目录替换补上);②下载中途失败只丢临时目录、旧 skill
-    // 原封不动(避免"更新失败反把能用的删了")。`.` 前缀避开 scanLocalSkills 的列举(不在本机列表闪现)。
-    // 全新导入(dest 不存在)同样受益:半截失败不留残缺目录。同 SKILLS_DIR 下 rename 原子。
-    const tmp = join(SKILLS_DIR, `.${id}.tmp-${Date.now()}`);
+    // 原封不动(避免"更新失败反把能用的删了")。临时目录在 IMPORT_TMP_DIR(skills/ 之外,claude 不扫
+    // → 下载期间不会被当成假 skill 加载);仍在 ~/.claude 同一 FS,rename 原子。全新导入半截失败也不留残缺。
+    const tmp = join(IMPORT_TMP_DIR, `${id}-${Date.now()}`);
     try {
+      await mkdir(IMPORT_TMP_DIR, { recursive: true });
       for (const f of blobs) {
         const rel = f.path.slice(meta.root.length + 1); // 相对 skill 根
         const target = join(tmp, rel);
