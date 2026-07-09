@@ -8,14 +8,14 @@ import { X, ArrowRight, ArrowLeft } from 'lucide-react';
 const PANEL_STEPS = [
   ['panel-files', '文件', '浏览当前项目的文件树,点开任意文件查看或编辑。\n· 图片 / PDF / Word / Excel / PPT / 文本都能直接看\n· html / svg / mermaid 可内联渲染,也可侧边停靠放大\n· 文本类文件可直接编辑并保存(带撤销/重做)'],
   ['panel-changes', '审查', '按 AI 的每个回合查看它改动了哪些文件。\n· 列出每回合新增/修改/删除的文件\n· 逐个文件看具体改动 diff(增删了哪些行)\n· 可回滚到某个回合改动之前的状态'],
-  ['panel-monitor', '监控', '看 AI 派出去的代理在干什么。\n· 上半:子代理(Task)实时状态树,每个在跑什么、可逐个停止\n· 下半「后台代理」:一句话派一个无人值守的后台任务,查看它在等什么/进度/结果,一键停止(走官方 claude stop,只停目标不连坐)'],
+  ['panel-monitor', '监控', '看 AI 派出去的代理在干什么。\n· 上半:子代理(Task)实时状态树,每个在跑什么、可逐个停止\n· 下半「后台代理」:一句话派一个无人值守的后台任务,查看它在等什么/进度/结果,一键停止(走官方 claude stop,只停目标不连坐)\n· 各区块均可折叠/展开;结束超过 30 天的后台代理自动不再显示'],
   ['panel-agents', 'Agent', '管理自定义子代理(存在 ~/.claude/agents 的 .md,定义名称/模型/可用工具/系统提示词)。\n· 新建 / 编辑 / 删除子代理\n· 一键安装内置预设:explorer(探索)、oracle(架构顾问)、orchestrator(编排)、designer、fixer 等'],
   ['panel-usage', '用量', '统计 token 消耗与费用。\n· 按模型 / 项目 / 日期分组\n· 显示总 token、缓存命中 token、命中率\n· 一键生成官方 /insights 使用报告(内联预览)\n· 导出 CSV;官方订阅额度(非第三方)也在这看'],
   ['panel-processes', '进程', '查看并管理正在运行的 claude 子进程。\n· 列出每个进程的 PID / 所属会话 / 已运行时长 / 模型\n· 可逐个停止(按进程精准杀,不误伤其它)'],
-  ['panel-mcp', '工具', '管理 MCP 服务器和插件。\n· 增删 MCP 服务器(stdio / SSE / Streamable HTTP)、测连通性\n· 选快速模板自动回填常用 MCP 字段\n· 插件:已装的列表展示,官方推荐但未装的收进「添加」按钮弹层一键安装'],
-  ['panel-skills', '技能', '管理本机技能(skill)。\n· 查看 ~/.claude/skills 下已装的 skill\n· 一键从 Anthropic 官方及社区(vercel / hermes / garden 等)skill 市场导入'],
+  ['panel-mcp', '工具', '管理 MCP 服务器和插件。\n· 增删 MCP 服务器(stdio / SSE / Streamable HTTP)、测连通性\n· 选快速模板自动回填常用 MCP 字段\n· 插件:内置推荐(含 superpowers)在「添加」弹层一键安装;已装的可更新到最新版或卸载,卸载后回到添加页可重装'],
+  ['panel-skills', '技能', '管理本机技能(skill)。\n· 查看 ~/.claude/skills 下已装的 skill;点任一条展开完整简介;SKILL.md 若声明 version 则显示版本号\n· 已装的可归档(停用、可随时恢复)或删除(需重新下载)\n· 一键从 Anthropic 官方及社区(vercel / hermes / garden 等)skill 市场导入\n· 也可粘贴任意 GitHub 仓库地址导入(支持 /tree/分支);导入过的仓库自动常驻列表可再次拉取或移除\n· 从市场/仓库装的技能带「更新」按钮,一键覆盖到上游最新'],
   ['panel-memory', '指令', '三个标签页:\n· 指令(CLAUDE.md):编辑 全局 / 项目 / 项目·私人 / 组织 四级指令(项目级随 git 与团队共享,项目·私人只留本机不提交)\n· 自动记忆:查看/编辑 AI 自己写的跨会话记忆\n· 提示词库:780 条内置预设,按 33 个分类折叠浏览 + 搜索,一键复制到输入框或 CLAUDE.md'],
-  ['panel-settings', '设置', '多个标签页:\n· 概览:检查/安装更新、缓存优化开关、自动压缩窗口(token)、对话区背景(纯色/图片/视频 + 遮罩不透明度)\n· 环境:检查 node / claude / python 是否就绪,缺失可装\n· Hooks:配置钩子脚本\n· 原始配置:直接编辑 settings.json\n· 存储:清理缓存、彻底清理某项目的全部 Claude 状态\n· 网络:开局域网访问后配合内网穿透(如 Tailscale),手机浏览器可访问整个 GUI —— 与顶栏「远程」不同,那个是手机 App 只接管单条会话'],
+  ['panel-settings', '设置', '多个标签页:\n· 概览:检查/安装更新、缓存优化开关、自动压缩窗口(token)、对话区背景(纯色/图片/视频 + 遮罩不透明度)\n· 环境:检查 node / claude / python / git / uv 是否就绪,缺失可装;安装失败后重新检测会恢复「安装」按钮\n· Hooks:配置钩子脚本\n· 原始配置:直接编辑 settings.json\n· 存储:清理缓存、彻底清理某项目的全部 Claude 状态\n· 网络:开局域网访问后配合内网穿透(如 Tailscale),手机浏览器可访问整个 GUI —— 与顶栏「远程」不同,那个是手机 App 只接管单条会话'],
 ];
 
 function buildSteps(hasProject) {
@@ -35,7 +35,7 @@ function buildSteps(hasProject) {
     );
   }
   steps.push(
-    ['provider-switcher', '切换 Provider', '在官方 Anthropic 与第三方中转之间一键切换。\n· 点「添加」选内置预设:官方 OpenAI / Anthropic / Google Gemini、DeepSeek、Kimi、通义千问、豆包、智谱 GLM 等\n· 填 API key,点「获取模型」拉取该渠道可用模型即可用\n· 支持 openai 兼容与 anthropic 兼容两种协议(Gemini 走官方 OpenAI 兼容端点)'],
+    ['provider-switcher', '切换 Provider', '在官方 Anthropic 与第三方中转之间一键切换。\n· 点「添加」选内置预设:官方 OpenAI / Anthropic / Google Gemini、DeepSeek、Kimi、通义千问、豆包、智谱 GLM 等\n· 填 API key,点「获取模型」拉取该渠道可用模型即可用\n· 支持 openai 兼容与 anthropic 兼容两种协议(Gemini 走官方 OpenAI 兼容端点);选定协议后模板列表只显示该协议的预设,避免选错'],
     ['model-selector', '模型', '选当前会话使用的具体模型。\n· 分屏时每个窗格可各自独立选\n· 切到第三方 provider 会显示它自己的模型列表'],
     ['effort-selector', '推理力度', '调 AI 的思考强度:低 / 中 / 高 / 最高。\n· 越高思考越深入、结果越细致,但越慢、越费 token\n· 官方模型区别明显,部分第三方可能无效'],
     ['permission-selector', '权限模式', '控制 AI 调用工具时是否需要你逐个确认:\n· 默认:每个工具调用都弹卡片让你批准\n· 接受编辑:自动批准文件编辑,其它工具仍问\n· 规划:只读不改,先给出计划让你确认\n· 放行:全自动执行、完全不问(慎用)'],

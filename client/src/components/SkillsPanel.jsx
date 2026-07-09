@@ -380,7 +380,7 @@ export function SkillsPanel() {
                     {s.installed ? (
                       <button onClick={(e) => { e.stopPropagation(); runImport([s.id], true, s.id); }} disabled={busy === s.id}
                         className="shrink-0 text-[10px] px-2 py-0.5 rounded border border-canvas-deep text-ink-faint hover:text-ink hover:bg-canvas-deep flex items-center gap-1 disabled:opacity-50" title="已安装 — 点击用该源最新版本覆盖">
-                        {busy === s.id ? <Loader2 size={10} className="animate-spin" /> : <Check size={10} className="text-success" />}已装·更新覆盖
+                        {busy === s.id ? <Loader2 size={10} className="animate-spin" /> : <Check size={10} className="text-success" />}已装·可更新覆盖
                       </button>
                     ) : (
                       <button onClick={(e) => { e.stopPropagation(); runImport([s.id], false, s.id); }} disabled={busy === s.id}

@@ -43,7 +43,12 @@ function parseFrontmatter(content) {
   if (end === -1) return out;
   for (const line of content.slice(3, end).split('\n')) {
     const m = line.match(/^(name|description|version):\s*(.*)$/);
-    if (m) out[m[1]] = m[2].replace(/^["']|["']$/g, '').trim();
+    if (m) { out[m[1]] = m[2].replace(/^["']|["']$/g, '').trim(); continue; }
+    // Anthropic 官方 skill 格式把版本嵌在 metadata: 下(缩进的 version:),顶格没有时兜底取之
+    if (!out.version) {
+      const mv = line.match(/^\s+version:\s*(.*)$/);
+      if (mv) out.version = mv[1].replace(/^["']|["']$/g, '').trim();
+    }
   }
   return out;
 }
