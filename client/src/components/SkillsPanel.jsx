@@ -1,7 +1,7 @@
 // CK-4: Skill 市场。两个选项卡 —— 「本机」展示 ~/.claude/skills 已装;「导入」从多个
 // 源仓库(Anthropic / Superpowers / 开源社区 / 科研)拉取并导入,重名内联横幅选跳过/覆盖。
 import { useState, useEffect, useCallback, useMemo } from 'react';
-import { Download, Check, Loader2, RefreshCw, AlertTriangle, CloudDownload, ExternalLink, Copy, Search, Archive, Trash2, RotateCcw } from 'lucide-react';
+import { Download, Check, Loader2, RefreshCw, AlertTriangle, CloudDownload, ExternalLink, Copy, Search, Archive, Trash2, RotateCcw, X } from 'lucide-react';
 import { copyText } from '../utils/clipboard.js';
 import { confirmDialog } from '../utils/confirmDialog.jsx';
 
@@ -27,6 +27,7 @@ export function SkillsPanel() {
   const [query, setQuery] = useState('');             // CM-1 本机 skill 搜索(名称+描述)
 
   const [sources, setSources] = useState([]);
+  const [savedRepos, setSavedRepos] = useState([]);   // 用户导入过的自定义仓库(持久化,可点重进/删除)
   const [source, setSource] = useState('anthropic');
   const [official, setOfficial] = useState([]);
   const [officialMeta, setOfficialMeta] = useState({});
@@ -105,6 +106,24 @@ export function SkillsPanel() {
     setLoadingOff(false);
   }, []);
 
+  // 持久化仓库列表:加载、打开、删除。(声明在 loadCustomRepo 之前,避免依赖数组 TDZ)
+  const loadSavedRepos = useCallback(async () => {
+    try { const d = await (await fetch('/api/skills/repos')).json(); setSavedRepos(d.repos || []); } catch { /* 忽略 */ }
+  }, []);
+  const openSavedRepo = useCallback((r) => {
+    setActiveRepo(r.repo); setActiveBranch(r.branch || ''); setCustomRepo(''); setSource('');
+    loadOfficial(null, r.repo, r.branch || '');
+  }, [loadOfficial]);
+  const deleteSavedRepo = useCallback(async (r) => {
+    try {
+      await fetch('/api/skills/repos', {
+        method: 'DELETE', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ repo: r.repo, branch: r.branch || '' }),
+      });
+    } catch { /* 忽略 */ }
+    await loadSavedRepos();
+  }, [loadSavedRepos]);
+
   // 解析 owner/repo、owner/repo@branch、或 GitHub 地址(含 /tree/<branch>)→ 加载该仓库/分支的 skill。
   const loadCustomRepo = useCallback(() => {
     const raw = customRepo.trim();
@@ -116,13 +135,14 @@ export function SkillsPanel() {
     if (!repo) { setOffErr('请输入 owner/repo、owner/repo@分支 或 GitHub 仓库地址(可含 /tree/分支)'); return; }
     setActiveRepo(repo);
     setActiveBranch(branch);
-    loadOfficial(null, repo, branch);
-  }, [customRepo, loadOfficial]);
+    loadOfficial(null, repo, branch).then(() => loadSavedRepos()); // 拉取成功后端已记住,刷新常驻列表
+  }, [customRepo, loadOfficial, loadSavedRepos]);
 
   useEffect(() => { loadLocal(); loadArchived(); }, [loadLocal, loadArchived]);
   useEffect(() => {
     fetch('/api/skills/sources').then((r) => r.json()).then((d) => setSources(d.sources || [])).catch(() => {});
-  }, []);
+    loadSavedRepos();
+  }, [loadSavedRepos]);
   useEffect(() => { if (tab === 'import' && !activeRepo) loadOfficial(source); }, [tab, source, activeRepo, loadOfficial]);
 
   const runImport = async (ids, overwrite, tag) => {
@@ -276,6 +296,24 @@ export function SkillsPanel() {
               拉取仓库
             </button>
           </div>
+          {/* 导入过的仓库常驻列表(持久化):点仓库名重进,× 从列表删除(不影响已装 skill) */}
+          {savedRepos.length > 0 && (
+            <div className="flex flex-wrap gap-1.5">
+              {savedRepos.map((r) => {
+                const label = `${r.repo}${r.branch ? '@' + r.branch : ''}`;
+                const active = activeRepo === r.repo && (activeBranch || '') === (r.branch || '');
+                return (
+                  <span key={label}
+                    className={`inline-flex items-center gap-1 pl-2 pr-1 py-1 text-[11px] font-mono rounded-md border transition-colors ${
+                      active ? 'border-accent text-accent bg-accent/10' : 'border-canvas-deep text-ink-muted'}`}>
+                    <button onClick={() => openSavedRepo(r)} className="hover:text-accent max-w-[180px] truncate" title={`打开 ${label}`}>{label}</button>
+                    <button onClick={() => deleteSavedRepo(r)} title="从列表删除(不删已装 skill)"
+                      className="p-0.5 rounded text-ink-faint hover:text-error hover:bg-error/10"><X size={11} /></button>
+                  </span>
+                );
+              })}
+            </div>
+          )}
           {activeRepo ? (
             <div className="flex items-center gap-2 text-[10px] text-ink-faint font-mono">
               <span className="text-accent">仓库:{activeRepo}{(officialMeta.branch || activeBranch) ? `@${officialMeta.branch || activeBranch}` : ''}</span>

@@ -230,6 +230,24 @@ async function writeSources(map) {
   await writeFile(SOURCES_FILE, JSON.stringify(map, null, 2));
 }
 
+// ── 用户导入过的 GitHub 仓库列表(持久化,导入页常驻可选/可删)────────
+// 拉取成功即记住,下次打开面板直接点仓库名重进,不用再粘贴地址。
+const REPOS_FILE = join(homedir(), '.claude-gui', 'skill-repos.json');
+async function readRepos() {
+  try { const a = JSON.parse(await readFile(REPOS_FILE, 'utf-8')); return Array.isArray(a) ? a : []; } catch { return []; }
+}
+async function writeRepos(list) {
+  await mkdir(join(REPOS_FILE, '..'), { recursive: true });
+  await writeFile(REPOS_FILE, JSON.stringify(list, null, 2));
+}
+async function rememberRepo(repo, branch) {
+  const b = branch || '';
+  const list = await readRepos();
+  if (list.some((r) => r.repo === repo && (r.branch || '') === b)) return;
+  list.push({ repo, branch: b });
+  await writeRepos(list);
+}
+
 // 共享导入逻辑(/import 与 /update 复用):下载 ids 对应 skill 覆盖到本机,并记来源。
 async function doImport(repo, branchArg, ids, overwrite) {
   const { skills, files, branch } = await loadRepo(repo, branchArg);
@@ -286,6 +304,7 @@ router.get('/skills/official', async (req, res) => {
     const { skills, branch } = await loadRepo(repo, branchParam);
     let installed = new Set();
     try { installed = new Set(await readdir(SKILLS_DIR)); } catch { /* 无目录 */ }
+    if (useCustom) { try { await rememberRepo(repo, branchParam); } catch { /* 记住失败不影响拉取 */ } }
     res.json({
       source: useCustom ? repo : src.id, repo, branch, count: skills.length,
       truncatedDesc: skills.length > DESC_CAP,
@@ -294,6 +313,19 @@ router.get('/skills/official', async (req, res) => {
   } catch (e) {
     res.json({ skills: [], error: e.status === 403 ? 'GitHub API 限流(60次/小时/IP),请稍后重试或挂代理' : e.message });
   }
+});
+
+// 用户导入过的自定义仓库列表(持久化,导入页常驻)。
+router.get('/skills/repos', async (req, res) => {
+  res.json({ repos: await readRepos() });
+});
+// 从列表删除一个仓库(不影响已装的 skill,只是不再在导入页常驻)。
+router.delete('/skills/repos', async (req, res) => {
+  const repo = String(req.body?.repo || '');
+  const branch = String(req.body?.branch || '');
+  const list = (await readRepos()).filter((r) => !(r.repo === repo && (r.branch || '') === branch));
+  try { await writeRepos(list); res.json({ ok: true }); }
+  catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // ── 导入 ──────────────────────────────────────────────────────────
