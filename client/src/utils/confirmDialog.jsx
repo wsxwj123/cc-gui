@@ -48,7 +48,17 @@ function ConfirmModal({ message, danger, confirmText, cancelText, onResolve }) {
   );
 }
 
-export function confirmDialog(message, { danger = false, confirmText = '确定', cancelText = '取消' } = {}) {
+// 并发弹窗队列化:多处同时 confirmDialog(如多个技能同时更新完成)时,若各自独立挂载
+// 会完全同位重叠只见最上一个,且每个都监听 document Esc → 按一次全关、底下的通知丢失。
+// 用模块级 promise 链排队:同一时刻只显示一个,确认后下一个自动弹出。
+let _dialogQueue = Promise.resolve();
+export function confirmDialog(message, opts) {
+  const p = _dialogQueue.then(() => showConfirmDialog(message, opts));
+  _dialogQueue = p.catch(() => {});
+  return p;
+}
+
+function showConfirmDialog(message, { danger = false, confirmText = '确定', cancelText = '取消' } = {}) {
   return new Promise((resolve) => {
     const host = document.createElement('div');
     document.body.appendChild(host);

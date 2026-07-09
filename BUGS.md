@@ -1,5 +1,7 @@
 # Bug Triage
 
+> **Archived snapshot** — one-time security/bug audit dated 2026-06-05; every item below is fixed. Not an active todo list. Current project status lives in `PROJECT.md` (local, gitignored).
+
 Date: 2026-06-05
 
 Scope: bug triage and fixes for public-build safety, OpenAI-compatible provider behavior, attachments, and runtime hardening.
