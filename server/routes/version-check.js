@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { readFileSync, writeFileSync, existsSync, realpathSync, readdirSync } from 'fs';
-import { resolveClaude, listClaudeInstallsAsync, getClaudeOverride, setClaudeOverride, winLivePathDirs } from '../utils/claude-resolver.js';
+import { resolveClaude, listClaudeInstallsAsync, getClaudeOverride, setClaudeOverride, winLivePathDirsAsync } from '../utils/claude-resolver.js';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import { tmpdir, homedir } from 'os';
@@ -219,7 +219,11 @@ function classifyClaudePath(real) {
 }
 
 async function detectInstall() {
-  const hit = resolveClaude();
+  // refresh:true 绕过 15s 负缓存 —— 本函数只被【用户显式检查】的端点调用(版本检查/env-check/
+  // 安装列表)。GUI 更新/claude 重装期间二进制正被替换,一次解析落空就负缓存 15s,期间打开设置
+  // 页会误显"未安装或不在 PATH"(用户实报:更新中断/完成后偶发未安装)。显式检查永远现场重解析;
+  // 聊天 spawn 热路径仍走带缓存的 resolveClaude() 不受影响。
+  const hit = resolveClaude({ refresh: true });
   if (!hit) return { method: 'unknown', path: '', via: null };
   const real = hit.path;
   // 解析软链(~/.local/bin/claude → ~/.local/share/claude/versions/x.y.z)以便按
@@ -462,14 +466,19 @@ router.post('/claude-install', async (req, res) => {
 router.get('/claude-installs', async (_req, res) => {
   const list = await listClaudeInstallsAsync();
   const override = getClaudeOverride();
-  const active = resolveClaude();  // 含 override,当前 spawn/SDK 实际会用的那个
+  // refresh:true 同 detectInstall:显式检查不吃 15s 负缓存(更新中断后误显未安装/无选中)。
+  const active = resolveClaude({ refresh: true });  // 含 override,当前 spawn/SDK 实际会用的那个
   let activeReal = '';
   if (active) { try { activeReal = realpathSync(active.path); } catch { activeReal = active.path; } }
+  // Windows 路径大小写不敏感(盘符 C:\ vs c:\、目录大小写)而 === 敏感 → active 比对落空,
+  // 设置页没有任何安装被标"当前"(首开不选中的根因之一)。归一化后再比。
+  const norm = (p) => process.platform === 'win32' ? String(p).replace(/\//g, '\\').toLowerCase() : String(p);
+  const activeKey = norm(activeReal);
   const installs = await Promise.all(list.map(async (it) => ({
     path: it.path,
     method: classifyClaudePath(it.real),
     version: await getClaudeVersion(it.path),   // 失败为 null,best-effort
-    active: it.real === activeReal,
+    active: !!activeKey && norm(it.real) === activeKey,
   })));
   res.json({ installs, overridden: !!override, override, activeVia: active?.via || null });
 });
@@ -493,10 +502,12 @@ router.put('/claude-active', (req, res) => {
 // Windows 通用兜底:手动装完 python/git/uv 后仍检测不到的根因 = 正在运行的 GUI 进程持有
 // 安装前的旧 PATH 快照(安装器只把新目录写进注册表,不重启读不到)。用注册表实时 PATH
 // 逐目录拼 exe 名 —— 与 claude-resolver 的 fromWinLivePath 同思路,装了无需重启即可发现。
-function winLiveCandidates(exeNames) {
+// 异步(opus 审计):同步版在 PATH 未命中的 Windows 上每次 env-check 同步 spawn PowerShell
+// 1-3s 阻塞事件循环;异步版 + resolver 侧 30s 缓存,一次 env-check 三个工具只 spawn 一次。
+async function winLiveCandidates(exeNames) {
   if (process.platform !== 'win32') return [];
   const out = [];
-  for (const d of winLivePathDirs()) for (const n of exeNames) out.push(join(d, n));
+  for (const d of await winLivePathDirsAsync()) for (const n of exeNames) out.push(join(d, n));
   return out;
 }
 // python.org / Store 安装器的固定落点(用户没勾"Add to PATH"时注册表也没有 → 直扫)。
@@ -539,7 +550,7 @@ async function detectPython() {
   }
   const home = homedir();
   const cands = process.platform === 'win32'
-    ? [...winLiveCandidates(['python3.exe', 'python.exe']), ...pythonWinFixed()]  // 注册表实时 PATH + python.org/Store 固定落点
+    ? [...(await winLiveCandidates(['python3.exe', 'python.exe'])), ...pythonWinFixed()]  // 注册表实时 PATH + python.org/Store 固定落点
     : ['/opt/homebrew/bin/python3', '/usr/local/bin/python3', '/usr/bin/python3', join(home, '.asdf/shims/python3')];
   for (const p of cands) {
     if (!existsSync(p)) continue;
@@ -574,7 +585,7 @@ async function detectUv() {
   const home = homedir();
   const cands = process.platform === 'win32'
     ? [
-        ...winLiveCandidates(['uv.exe']),                                                                // 注册表实时 PATH(装完不重启即认)
+        ...(await winLiveCandidates(['uv.exe'])),                                                                // 注册表实时 PATH(装完不重启即认)
         join(home, '.local', 'bin', 'uv.exe'),                                                          // astral 官方安装器
         join(home, '.cargo', 'bin', 'uv.exe'),                                                          // cargo install
         join(home, 'scoop', 'shims', 'uv.exe'),                                                         // scoop
@@ -656,7 +667,7 @@ async function detectGit() {
   const home = homedir();
   const cands = process.platform === 'win32'
     ? [
-        ...winLiveCandidates(['git.exe']),  // 注册表实时 PATH(Git for Windows 装完写 Machine PATH,进程旧快照读不到)
+        ...(await winLiveCandidates(['git.exe'])),  // 注册表实时 PATH(Git for Windows 装完写 Machine PATH,进程旧快照读不到)
         join(process.env.ProgramFiles || 'C:\\Program Files', 'Git', 'cmd', 'git.exe'),
         join(process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)', 'Git', 'cmd', 'git.exe'),
         join(process.env.LOCALAPPDATA || join(home, 'AppData', 'Local'), 'Programs', 'Git', 'cmd', 'git.exe'),

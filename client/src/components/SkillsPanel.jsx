@@ -42,6 +42,7 @@ export function SkillsPanel() {
   const [busy, setBusy] = useState(null);             // null | 'all' | <skillId>
   const [conflicts, setConflicts] = useState(null);
   const [notice, setNotice] = useState('');
+  const [expanded, setExpanded] = useState(null);     // 展开完整简介的行:'local:<id>' | 'off:<id>' | 'arch:<id>'
 
   const loadLocal = useCallback(async () => {
     setLoadingLocal(true);
@@ -62,8 +63,14 @@ export function SkillsPanel() {
       });
       const d = await r.json();
       if (!r.ok) throw new Error(d.error || '更新失败');
-      setNotice(`已更新「${id}」(${d.repo}${d.branch ? '@' + d.branch : ''})`);
       await loadLocal();
+      // #7 更新完成弹窗:有 frontmatter version 则显示"已更新为 vX",无则报来源。
+      await confirmDialog(
+        d.version
+          ? `「${id}」已更新为 v${d.version}\n(来源 ${d.repo}${d.branch ? '@' + d.branch : ''})`
+          : `「${id}」已更新到最新\n(来源 ${d.repo}${d.branch ? '@' + d.branch : ''};该 skill 未声明版本号)`,
+        { confirmText: '知道了' },
+      );
     } catch (e) { setNotice('错误: ' + e.message); }
     setManageBusy(null);
   }, [loadLocal]);
@@ -211,29 +218,31 @@ export function SkillsPanel() {
           {filteredLocal.length > 0 ? (
             <div className="space-y-2">
               {filteredLocal.map((s) => (
-                <div key={s.id} className="bg-canvas-warm border border-canvas-deep rounded-lg p-3">
+                <div key={s.id} onClick={() => setExpanded((p) => p === `local:${s.id}` ? null : `local:${s.id}`)}
+                  className="bg-canvas-warm border border-canvas-deep rounded-lg p-3 cursor-pointer" title="点击展开/收起完整简介">
                   <div className="flex items-center gap-2">
                     <span className="text-xs font-medium font-body text-ink truncate flex-1" title={s.id}>{s.name}</span>
+                    {s.version && <span className="shrink-0 text-[10px] px-1 py-px bg-canvas-deep text-ink-faint rounded font-mono">v{s.version}</span>}
                     <SkillCopyBtn name={s.id} />
                     {sourcesMap[s.id]?.repo && (
-                      <button onClick={() => updateSkill(s.id)} disabled={manageBusy === s.id}
+                      <button onClick={(e) => { e.stopPropagation(); updateSkill(s.id); }} disabled={manageBusy === s.id}
                         title={`从来源更新 —— ${sourcesMap[s.id].repo}${sourcesMap[s.id].branch ? '@' + sourcesMap[s.id].branch : ''},覆盖本机旧版本`}
                         className="shrink-0 p-1 rounded text-ink-faint hover:text-accent hover:bg-accent/10 disabled:opacity-50">
                         {manageBusy === s.id ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />}
                       </button>
                     )}
-                    <button onClick={() => manageSkill('archive', s.id)} disabled={manageBusy === s.id}
+                    <button onClick={(e) => { e.stopPropagation(); manageSkill('archive', s.id); }} disabled={manageBusy === s.id}
                       title="归档 —— 移出加载目录停用,可在「已归档」恢复"
                       className="shrink-0 p-1 rounded text-ink-faint hover:text-ink hover:bg-canvas-deep disabled:opacity-50">
                       {manageBusy === s.id ? <Loader2 size={12} className="animate-spin" /> : <Archive size={12} />}
                     </button>
-                    <button onClick={() => manageSkill('delete', s.id)} disabled={manageBusy === s.id}
+                    <button onClick={(e) => { e.stopPropagation(); manageSkill('delete', s.id); }} disabled={manageBusy === s.id}
                       title="删除 —— 永久移除,需重新下载"
                       className="shrink-0 p-1 rounded text-ink-faint hover:text-error hover:bg-error/10 disabled:opacity-50">
                       <Trash2 size={12} />
                     </button>
                   </div>
-                  {s.description && <div className="text-[11px] text-ink-muted font-body mt-1 line-clamp-2">{s.description}</div>}
+                  {s.description && <div className={`text-[11px] text-ink-muted font-body mt-1 ${expanded === `local:${s.id}` ? 'whitespace-pre-wrap' : 'line-clamp-2'}`}>{s.description}</div>}
                 </div>
               ))}
             </div>
@@ -250,20 +259,21 @@ export function SkillsPanel() {
           {archived.length > 0 ? (
             <div className="space-y-2">
               {archived.map((s) => (
-                <div key={s.id} className="bg-canvas-warm border border-canvas-deep rounded-lg p-3">
+                <div key={s.id} onClick={() => setExpanded((p) => p === `arch:${s.id}` ? null : `arch:${s.id}`)}
+                  className="bg-canvas-warm border border-canvas-deep rounded-lg p-3 cursor-pointer" title="点击展开/收起完整简介">
                   <div className="flex items-center gap-2">
                     <span className="text-xs font-medium font-body text-ink-muted truncate flex-1" title={s.id}>{s.name}</span>
-                    <button onClick={() => manageSkill('restore', s.id)} disabled={manageBusy === s.id}
+                    <button onClick={(e) => { e.stopPropagation(); manageSkill('restore', s.id); }} disabled={manageBusy === s.id}
                       className="shrink-0 text-[10px] px-2 py-0.5 rounded bg-accent/10 text-accent hover:bg-accent/20 flex items-center gap-1 disabled:opacity-50">
                       {manageBusy === s.id ? <Loader2 size={10} className="animate-spin" /> : <RotateCcw size={10} />}恢复
                     </button>
-                    <button onClick={() => manageSkill('delete', s.id)} disabled={manageBusy === s.id}
+                    <button onClick={(e) => { e.stopPropagation(); manageSkill('delete', s.id); }} disabled={manageBusy === s.id}
                       title="彻底删除归档"
                       className="shrink-0 p-1 rounded text-ink-faint hover:text-error hover:bg-error/10 disabled:opacity-50">
                       <Trash2 size={12} />
                     </button>
                   </div>
-                  {s.description && <div className="text-[11px] text-ink-muted font-body mt-1 line-clamp-2">{s.description}</div>}
+                  {s.description && <div className={`text-[11px] text-ink-muted font-body mt-1 ${expanded === `arch:${s.id}` ? 'whitespace-pre-wrap' : 'line-clamp-2'}`}>{s.description}</div>}
                 </div>
               ))}
             </div>
@@ -361,23 +371,25 @@ export function SkillsPanel() {
           ) : (
             <div className="space-y-2">
               {official.map((s) => (
-                <div key={s.id} className="bg-canvas-warm border border-canvas-deep rounded-lg p-3">
+                <div key={s.id} onClick={() => setExpanded((p) => p === `off:${s.id}` ? null : `off:${s.id}`)}
+                  className="bg-canvas-warm border border-canvas-deep rounded-lg p-3 cursor-pointer" title="点击展开/收起完整简介">
                   <div className="flex items-center gap-2">
                     <span className="text-xs font-medium font-body text-ink truncate flex-1" title={s.id}>{s.name}</span>
+                    {s.version && <span className="shrink-0 text-[10px] px-1 py-px bg-canvas-deep text-ink-faint rounded font-mono">v{s.version}</span>}
                     <SkillCopyBtn name={s.id} />
                     {s.installed ? (
-                      <button onClick={() => runImport([s.id], true, s.id)} disabled={busy === s.id}
-                        className="shrink-0 text-[10px] px-2 py-0.5 rounded border border-canvas-deep text-ink-faint hover:text-ink hover:bg-canvas-deep flex items-center gap-1 disabled:opacity-50" title="已安装 — 点击覆盖">
-                        {busy === s.id ? <Loader2 size={10} className="animate-spin" /> : <Check size={10} className="text-success" />}已装·覆盖
+                      <button onClick={(e) => { e.stopPropagation(); runImport([s.id], true, s.id); }} disabled={busy === s.id}
+                        className="shrink-0 text-[10px] px-2 py-0.5 rounded border border-canvas-deep text-ink-faint hover:text-ink hover:bg-canvas-deep flex items-center gap-1 disabled:opacity-50" title="已安装 — 点击用该源最新版本覆盖">
+                        {busy === s.id ? <Loader2 size={10} className="animate-spin" /> : <Check size={10} className="text-success" />}已装·更新覆盖
                       </button>
                     ) : (
-                      <button onClick={() => runImport([s.id], false, s.id)} disabled={busy === s.id}
+                      <button onClick={(e) => { e.stopPropagation(); runImport([s.id], false, s.id); }} disabled={busy === s.id}
                         className="shrink-0 text-[10px] px-2 py-0.5 rounded bg-accent/10 text-accent hover:bg-accent/20 flex items-center gap-1 disabled:opacity-50">
                         {busy === s.id ? <Loader2 size={10} className="animate-spin" /> : <Download size={10} />}导入
                       </button>
                     )}
                   </div>
-                  {s.description && <div className="text-[11px] text-ink-muted font-body mt-1 line-clamp-2">{s.description}</div>}
+                  {s.description && <div className={`text-[11px] text-ink-muted font-body mt-1 ${expanded === `off:${s.id}` ? 'whitespace-pre-wrap' : 'line-clamp-2'}`}>{s.description}</div>}
                 </div>
               ))}
             </div>

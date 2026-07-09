@@ -188,6 +188,18 @@ export function winLivePathDirs() {
   if (!out) return [];
   return out.split(';').map((s) => s.trim()).filter(Boolean);
 }
+// 异步版(opus 审计:env-check 的 py/git/uv 检测原用同步版,PATH 未命中的 Windows 机器上
+// 每次 env-check 同步 spawn PowerShell 1-3s 阻塞事件循环)。带 30s 短缓存:一次 env-check
+// 会连查三个工具,别 spawn 三遍。
+let _liveDirsCache = null; // { at, dirs }
+export async function winLivePathDirsAsync() {
+  if (!isWin) return [];
+  if (_liveDirsCache && Date.now() - _liveDirsCache.at < 30_000) return _liveDirsCache.dirs;
+  const out = await safeExecAsync('powershell', ['-NoProfile', '-NonInteractive', '-Command', WIN_LIVE_PATH_PS], 8000);
+  const dirs = out ? out.split(';').map((s) => s.trim()).filter(Boolean) : [];
+  _liveDirsCache = { at: Date.now(), dirs };
+  return dirs;
+}
 
 function fromWinLivePath() {
   const cands = [];

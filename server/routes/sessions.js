@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { readdir, stat, readFile, writeFile, rename, open, mkdir } from 'fs/promises';
-import { join } from 'path';
+import { join, dirname } from 'path';
 import { homedir } from 'os';
 import { closePersistentForSession } from './chat.js';
 
@@ -680,23 +680,36 @@ router.get('/active-sessions', async (req, res) => {
   }
 });
 
-// POST /api/export-session { md, fileName } — 把会话 Markdown 写到 ~/Downloads。
+// POST /api/export-session { md, fileName?, targetPath? } — 把会话 Markdown 落盘。
 // Tauri WKWebView 拦 blob URL 的 a[download](静默失败,用户报"导出点击没反应"),
 // 所以 Tauri 环境改走这里落盘;浏览器环境仍用前端 blob 下载。
+// targetPath:前端经系统"保存"对话框(@tauri-apps/plugin-dialog save)选的绝对路径,
+// 用户明确指定保存位置(用户要求);不传则回落旧行为写 ~/Downloads/<fileName>。
 router.post('/export-session', async (req, res) => {
   const md = String(req.body?.md || '');
   if (!md) return res.status(400).json({ error: 'md 必填' });
-  // 文件名白名单:去路径分隔符与危险字符,只留中英文数字点横杠空格,强制 .md
-  let fileName = String(req.body?.fileName || '会话.md')
-    .replace(/[/\\]/g, '_')
-    .replace(/[^\w一-龥.\-\s]/g, '')
-    .trim()
-    .slice(0, 120) || '会话.md';
-  if (!fileName.toLowerCase().endsWith('.md')) fileName += '.md';
   try {
-    const dir = join(homedir(), 'Downloads');
-    await mkdir(dir, { recursive: true });
-    const target = join(dir, fileName);
+    let target;
+    const tp = typeof req.body?.targetPath === 'string' ? req.body.targetPath.trim() : '';
+    if (tp) {
+      // 绝对路径(mac /… 或 win C:\…);强制 .md 后缀,防 NUL 注入。
+      if (!(/^\//.test(tp) || /^[A-Za-z]:[\\/]/.test(tp)) || tp.includes('\0')) {
+        return res.status(400).json({ error: 'targetPath 必须是绝对路径' });
+      }
+      target = tp.toLowerCase().endsWith('.md') ? tp : tp + '.md';
+      await mkdir(dirname(target), { recursive: true });
+    } else {
+      // 文件名白名单:去路径分隔符与危险字符,只留中英文数字点横杠空格,强制 .md
+      let fileName = String(req.body?.fileName || '会话.md')
+        .replace(/[/\\]/g, '_')
+        .replace(/[^\w一-龥.\-\s]/g, '')
+        .trim()
+        .slice(0, 120) || '会话.md';
+      if (!fileName.toLowerCase().endsWith('.md')) fileName += '.md';
+      const dir = join(homedir(), 'Downloads');
+      await mkdir(dir, { recursive: true });
+      target = join(dir, fileName);
+    }
     await writeFile(target, md, 'utf-8');
     res.json({ ok: true, path: target });
   } catch (err) {

@@ -207,6 +207,13 @@ export function MCPPanel() {
       if (!r.ok) throw new Error(d.error || '更新失败');
       setRestartHint(true);
       await fetchData();
+      // #7 更新完成弹窗显示新版本(后端读 installed_plugins.json 回传)
+      await confirmDialog(
+        d.version
+          ? `插件「${plugin.name.split('@')[0]}」已更新为 v${d.version}\n(新会话生效)`
+          : `插件「${plugin.name.split('@')[0]}」已更新到最新(新会话生效)`,
+        { confirmText: '知道了' },
+      );
     } catch (e) { setPluginErr(`${plugin.name}: ${e.message}`); }
     setPluginActioning(null);
   };

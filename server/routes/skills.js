@@ -37,12 +37,12 @@ const SOURCES = [
 ];
 
 function parseFrontmatter(content) {
-  const out = { name: null, description: null };
+  const out = { name: null, description: null, version: null };
   if (!content || content.slice(0, 3) !== '---') return out;
   const end = content.indexOf('\n---', 3);
   if (end === -1) return out;
   for (const line of content.slice(3, end).split('\n')) {
-    const m = line.match(/^(name|description):\s*(.*)$/);
+    const m = line.match(/^(name|description|version):\s*(.*)$/);
     if (m) out[m[1]] = m[2].replace(/^["']|["']$/g, '').trim();
   }
   return out;
@@ -67,7 +67,7 @@ async function scanLocalSkills() {
   const skills = await Promise.all(dirs.map(async (e) => {
     const md = await readSkillMd(join(SKILLS_DIR, e.name));
     const fm = md ? parseFrontmatter(md) : {};
-    return { id: e.name, name: fm.name || e.name, description: fm.description || '' };
+    return { id: e.name, name: fm.name || e.name, description: fm.description || '', version: fm.version || null };
   }));
   skills.sort((a, b) => a.id.localeCompare(b.id));
   return skills;
@@ -208,15 +208,15 @@ async function loadRepo(repo, branchArg) {
   let skills;
   if (located.length <= DESC_CAP) {
     skills = await Promise.all(located.map(async (s) => {
-      let name = s.id, description = '';
+      let name = s.id, description = '', version = null;
       try {
         const raw = await fetch(`https://raw.githubusercontent.com/${repo}/${branch}/${s.root}/SKILL.md`);
-        if (raw.ok) { const fm = parseFrontmatter(await raw.text()); name = fm.name || s.id; description = fm.description || ''; }
+        if (raw.ok) { const fm = parseFrontmatter(await raw.text()); name = fm.name || s.id; description = fm.description || ''; version = fm.version || null; }
       } catch { /* 留空 */ }
-      return { id: s.id, name, description, root: s.root };
+      return { id: s.id, name, description, version, root: s.root };
     }));
   } else {
-    skills = located.map((s) => ({ id: s.id, name: s.id, description: '', root: s.root }));
+    skills = located.map((s) => ({ id: s.id, name: s.id, description: '', version: null, root: s.root }));
   }
   const entry = { skills, files: tree.filter((t) => t.type === 'blob'), branch, at: now, repo };
   repoCache.set(cacheKey, entry);
@@ -227,12 +227,29 @@ async function loadRepo(repo, branchArg) {
 // 导入时记 { [id]: { repo, branch, root } },更新按钮据此从原仓库重拉覆盖。
 const SOURCES_FILE = join(homedir(), '.claude-gui', 'skill-sources.json');
 const BRANCH_RE = /^[\w.\/-]{1,120}$/;
+// 写入串行链(opus 审计):sources/repos 都是"整读→改→整写",并发导入/更新各读旧快照、
+// 后写覆盖先写 → 来源记录丢失(该 skill 更新按钮消失)。所有 read-modify-write 排进同一条
+// promise 链,天然串行;链上错误吞掉不阻塞后续(单次写失败已在各调用点容错)。
+let _fileChain = Promise.resolve();
+function serialized(fn) {
+  const p = _fileChain.then(fn, fn);
+  _fileChain = p.catch(() => {});
+  return p;
+}
 async function readSources() {
   try { return JSON.parse(await readFile(SOURCES_FILE, 'utf-8')) || {}; } catch { return {}; }
 }
 async function writeSources(map) {
   await mkdir(join(SOURCES_FILE, '..'), { recursive: true });
   await writeFile(SOURCES_FILE, JSON.stringify(map, null, 2));
+}
+// 串行化的"合并写入":读最新→合并 patch→写回,避免调用方各持旧快照互相覆盖。
+function mergeSources(patch) {
+  return serialized(async () => {
+    const cur = await readSources();
+    Object.assign(cur, patch);
+    await writeSources(cur);
+  });
 }
 
 // ── 用户导入过的 GitHub 仓库列表(持久化,导入页常驻可选/可删)────────
@@ -247,10 +264,12 @@ async function writeRepos(list) {
 }
 async function rememberRepo(repo, branch) {
   const b = branch || '';
-  const list = await readRepos();
-  if (list.some((r) => r.repo === repo && (r.branch || '') === b)) return;
-  list.push({ repo, branch: b });
-  await writeRepos(list);
+  return serialized(async () => {
+    const list = await readRepos();
+    if (list.some((r) => r.repo === repo && (r.branch || '') === b)) return;
+    list.push({ repo, branch: b });
+    await writeRepos(list);
+  });
 }
 
 // 共享导入逻辑(/import 与 /update 复用):下载 ids 对应 skill 覆盖到本机,并记来源。
@@ -258,7 +277,7 @@ async function doImport(repo, branchArg, ids, overwrite) {
   const { skills, files, branch } = await loadRepo(repo, branchArg);
   const byId = new Map(skills.map((s) => [s.id, s]));
   const imported = [], conflicts = [], failed = [];
-  const sources = await readSources();
+  const sourcesPatch = {}; // 只累积本次新增的来源,收尾 mergeSources 串行合并(防并发覆盖丢记录)
   for (const id of ids) {
     const meta = byId.get(id);
     if (!meta) { failed.push({ id, error: '源仓库无此 skill' }); continue; }
@@ -286,13 +305,13 @@ async function doImport(repo, branchArg, ids, overwrite) {
       await rm(dest, { recursive: true, force: true }); // 清旧版本(含上游已删文件);不存在则 no-op
       await rename(tmp, dest);
       imported.push(id);
-      sources[id] = { repo, branch, root: meta.root }; // 记来源供"更新"
+      sourcesPatch[id] = { repo, branch, root: meta.root }; // 记来源供"更新"
     } catch (e) {
       await rm(tmp, { recursive: true, force: true }).catch(() => {}); // 清半成品,旧 skill 不动
       failed.push({ id, error: e.message });
     }
   }
-  if (imported.length) { try { await writeSources(sources); } catch { /* 记录失败不影响导入结果 */ } }
+  if (imported.length) { try { await mergeSources(sourcesPatch); } catch { /* 记录失败不影响导入结果 */ } }
   localCache = null; // 装了新 skill,本机列表缓存失效
   return { imported, conflicts, failed };
 }
@@ -314,7 +333,7 @@ router.get('/skills/official', async (req, res) => {
     res.json({
       source: useCustom ? repo : src.id, repo, branch, count: skills.length,
       truncatedDesc: skills.length > DESC_CAP,
-      skills: skills.map((s) => ({ id: s.id, name: s.name, description: s.description, installed: installed.has(s.id) })),
+      skills: skills.map((s) => ({ id: s.id, name: s.name, description: s.description, version: s.version || null, installed: installed.has(s.id) })),
     });
   } catch (e) {
     res.json({ skills: [], error: e.status === 403 ? 'GitHub API 限流(60次/小时/IP),请稍后重试或挂代理' : e.message });
@@ -329,9 +348,13 @@ router.get('/skills/repos', async (req, res) => {
 router.delete('/skills/repos', async (req, res) => {
   const repo = String(req.body?.repo || '');
   const branch = String(req.body?.branch || '');
-  const list = (await readRepos()).filter((r) => !(r.repo === repo && (r.branch || '') === branch));
-  try { await writeRepos(list); res.json({ ok: true }); }
-  catch (e) { res.status(500).json({ error: e.message }); }
+  try {
+    await serialized(async () => {
+      const list = (await readRepos()).filter((r) => !(r.repo === repo && (r.branch || '') === branch));
+      await writeRepos(list);
+    });
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // ── 导入 ──────────────────────────────────────────────────────────
@@ -366,7 +389,11 @@ router.post('/skills/update', async (req, res) => {
   if (!src?.repo) return res.status(400).json({ error: '该 skill 无来源记录(非从 GitHub 仓库导入,无法自动更新)' });
   try {
     const r = await doImport(src.repo, src.branch, [id], true);
-    if (r.imported.includes(id)) return res.json({ ok: true, repo: src.repo, branch: src.branch });
+    if (r.imported.includes(id)) {
+      // 读更新后的 frontmatter version(有则回传,前端弹窗"已更新为 vX")
+      const fm = parseFrontmatter(await readSkillMd(join(SKILLS_DIR, id)) || '');
+      return res.json({ ok: true, repo: src.repo, branch: src.branch, version: fm.version || null });
+    }
     return res.status(500).json({ error: r.failed[0]?.error || '更新失败' });
   } catch (e) {
     res.status(e.status === 403 ? 429 : 500).json({ error: e.status === 403 ? 'GitHub API 限流,请稍后重试' : e.message });

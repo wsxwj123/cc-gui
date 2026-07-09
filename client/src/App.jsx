@@ -2578,12 +2578,23 @@ function ExportSessionButton({ messages, title }) {
 
   const download = async () => {
     const md = buildSessionMarkdown(messages, title);
-    // Tauri WKWebView 拦 blob 下载(点了没反应)→ 走后端落盘到 Downloads;浏览器用 blob。
+    // Tauri WKWebView 拦 blob 下载(点了没反应)→ 系统"保存"对话框选路径(用户要求),
+    // 后端写到所选位置;对话框异常时回落旧行为(写 ~/Downloads)。浏览器用 blob。
     if (isTauri()) {
       try {
+        let targetPath = null;
+        try {
+          const { save } = await import('@tauri-apps/plugin-dialog');
+          targetPath = await save({
+            title: '导出会话 Markdown',
+            defaultPath: fileName,
+            filters: [{ name: 'Markdown', extensions: ['md'] }],
+          });
+          if (targetPath === null) { setOpen(false); return; } // 用户取消,不导出
+        } catch { /* 对话框不可用(capability 漂移)→ targetPath 留 null 回落 Downloads */ }
         const r = await fetch('/api/export-session', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ md, fileName }),
+          body: JSON.stringify({ md, fileName, ...(targetPath ? { targetPath } : {}) }),
         });
         const d = await r.json().catch(() => ({}));
         if (!r.ok) throw new Error(d.error || r.status);
@@ -6561,7 +6572,8 @@ function CustomProviderForm({ onSaved, editing, onCancel, onDirtyChange }) {
     try {
       const r = await fetch('/api/custom-providers/fetch-models', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ type, baseURL, apiKey }),
+        // 编辑态带 id:key 框留空(=不修改)时后端按 id 读存储 key 兜底,不再空 key 打上游报 401。
+        body: JSON.stringify({ type, baseURL, apiKey, ...(editing?.id ? { id: editing.id } : {}) }),
       });
       const d = await r.json();
       if (!r.ok) throw new Error(d.error || '拉取失败');

@@ -1239,11 +1239,21 @@ function probeOfficialModels(token) {
   });
 }
 
-// POST /api/custom-providers/fetch-models { type, baseURL, apiKey } — used by the
+// POST /api/custom-providers/fetch-models { type, baseURL, apiKey, id? } — used by the
 // add-provider form (client supplies the key being entered).
+// 带 id(编辑态)时 apiKey 空则读存储 key 兜底 —— 编辑表单的 key 框留空=「不修改」(GET 从不回传
+// 明文 key),此前这里没有 test 端点那样的兜底 → 空 key 直发上游 → 401"API key 有问题",而测试
+// 连接(有兜底)却正常(用户实报的矛盾现象根因)。baseURL 同步兜底。
 router.post('/custom-providers/fetch-models', async (req, res) => {
   try {
-    const { baseURL, apiKey } = req.body || {};
+    let { baseURL, apiKey } = req.body || {};
+    if (req.body?.id) {
+      const stored = (await readCustomProviders()).find((p) => p.id === req.body.id);
+      if (stored) {
+        if (!apiKey || !String(apiKey).trim()) apiKey = stored.apiKey;
+        baseURL = baseURL || stored.baseURL;
+      }
+    }
     let base; try { base = new URL(baseURL); } catch { return res.status(400).json({ error: 'baseURL 非法' }); }
     if (!/^https?:$/.test(base.protocol)) return res.status(400).json({ error: 'baseURL 必须是 http(s)' });
     res.json({ models: await probeUpstreamModels(baseURL, apiKey) });

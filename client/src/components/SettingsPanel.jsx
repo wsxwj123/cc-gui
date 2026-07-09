@@ -899,7 +899,13 @@ function CcUpdater() {
             );
           })}
         </div>
-        {Array.isArray(installs) && installs.length > 0 && (
+        {/* 明细列表只在方式卡覆盖不了时显示:brew/未知方式、或同一方式有多处安装(需精确钉选)。
+            常规"1 原生 + 1 npm"场景方式卡已够,再列一遍=重复的切换按钮(用户反馈)。 */}
+        {Array.isArray(installs) && (
+          installs.some((i) => i.method !== 'native' && i.method !== 'npm')
+          || installs.filter((i) => i.method === 'native').length > 1
+          || installs.filter((i) => i.method === 'npm').length > 1
+        ) && (
           <div className="space-y-1">
             {installs.map((it) => {
               const label = METHOD_LABEL[it.method] || it.method || '未知';

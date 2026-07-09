@@ -802,7 +802,13 @@ router.post('/plugins/:name/update', async (req, res) => {
     if (mk) { try { await runClaude(['plugin', 'marketplace', 'update', mk], { timeout: 30000 }); } catch {} }
     await runClaude(['plugin', 'update', name], { timeout: 90000 });
     invalidateMcpCache();
-    res.json({ ok: true, name, note: '已更新,新会话生效' });
+    // 读更新后的版本回传(前端弹窗"已更新为 vX")。installed_plugins.json 键=name@marketplace。
+    let version = null;
+    try {
+      const reg = JSON.parse(await readFile(join(CLAUDE_DIR, 'plugins', 'installed_plugins.json'), 'utf-8'));
+      version = reg?.plugins?.[name]?.[0]?.version || null;
+    } catch {}
+    res.json({ ok: true, name, version, note: '已更新,新会话生效' });
   } catch (err) {
     res.status(500).json({ error: (err.stderr?.toString() || err.message || '').trim() || '更新失败' });
   }

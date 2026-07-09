@@ -18,5 +18,5 @@
       "http://127.0.0.1:6687"
     ]
   },
-  "permissions": ["core:default", "dialog:allow-open"]
+  "permissions": ["core:default", "dialog:allow-open", "dialog:allow-save"]
 }

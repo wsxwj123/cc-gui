@@ -13,6 +13,23 @@ function fmtElapsed(ms) {
   return `${h}h${m % 60}m`;
 }
 
+// 监控面板顶层区块的统一可折叠外壳(用户要求:所有选项都能折叠/展开)。
+// 标题行整行可点;默认展开,折叠态只留标题。内部 bucket(AgentBucket 等)本就可折叠,
+// 这层管的是「当前对话内 Task / 后台任务 / 后台代理 / Claude 子进程」四个大区。
+function FoldableSection({ icon, title, defaultOpen = true, children }) {
+  const [open, setOpen] = useState(defaultOpen);
+  return (
+    <section>
+      <button onClick={() => setOpen((v) => !v)}
+        className="w-full text-left text-[10px] uppercase tracking-widest text-ink-faint font-body mb-2 flex items-center gap-1.5 hover:text-ink-muted transition-colors">
+        {open ? <ChevronDown size={10} className="shrink-0" /> : <ChevronRight size={10} className="shrink-0" />}
+        {icon}{title}
+      </button>
+      {open && children}
+    </section>
+  );
+}
+
 // 后台代理(claude --bg):CLI 原生的"派后台会话"能力包一层。列表来自
 // /api/agents/background?all=1(claude agents --json --all,含已结束);会话答完
 // 仍常驻可 attach,所以必须给停止按钮(走 /api/processes/:pid/kill 白名单)。
@@ -131,16 +148,17 @@ function BackgroundAgentsSection({ stoppingPid, onStop }) {
 
   // 运行中 = 未达终态(state 缺失但有活 pid 的旧版 CLI 输出也归运行中)
   const running = agents.filter((a) => !BG_TERMINAL.has(a.state));
-  // 已完成的按结束时间(缺失退回开始时间)倒序,只显示最近 10 条防列表无限膨胀
+  // 已完成的按结束时间(缺失退回开始时间)倒序,只显示最近 10 条防列表无限膨胀;
+  // 超过 30 天的结束态自动不再显示(用户要求"自动清除"——CLI 侧数据不动,仅从监控隐藏)。
+  const THIRTY_D = 30 * 24 * 3600 * 1000;
+  const now = Date.now();
   const finished = agents.filter((a) => BG_TERMINAL.has(a.state))
+    .filter((a) => now - (a.endedAt || a.startedAt || now) < THIRTY_D)
     .sort((a, b) => (b.endedAt || b.startedAt || 0) - (a.endedAt || a.startedAt || 0))
     .slice(0, 10);
 
   return (
-    <section>
-      <h3 className="text-[10px] uppercase tracking-widest text-ink-faint font-body mb-2 flex items-center gap-1.5">
-        <Bot size={10} />后台代理 (claude --bg) ({running.length})
-      </h3>
+    <FoldableSection icon={<Bot size={10} />} title={`后台代理 (claude --bg) (${running.length})`}>
       <div className="flex items-center gap-1.5 mb-2">
         <input value={prompt} onChange={(e) => setPrompt(e.target.value)}
           onKeyDown={(e) => { if (e.key === 'Enter') dispatch(); }}
@@ -215,7 +233,7 @@ function BackgroundAgentsSection({ stoppingPid, onStop }) {
           </div>
         </div>
       )}
-    </section>
+    </FoldableSection>
   );
 }
 
@@ -703,10 +721,7 @@ export function AgentMonitorPanel() {
       <div className="flex-1 overflow-y-auto p-3 space-y-3">
         {/* Local Task tool subagents (from current stream) — grouped by status */}
         {localList.length > 0 && (
-          <section>
-            <h3 className="text-[10px] uppercase tracking-widest text-ink-faint font-body mb-2 flex items-center gap-1.5">
-              <Bot size={10} />当前对话内 Task ({localList.length})
-            </h3>
+          <FoldableSection icon={<Bot size={10} />} title={`当前对话内 Task (${localList.length})`}>
             <div className="space-y-3">
               {Object.entries(buckets).map(([key, agents]) => {
                 if (agents.length === 0) return null;
@@ -723,19 +738,16 @@ export function AgentMonitorPanel() {
                 );
               })}
             </div>
-          </section>
+          </FoldableSection>
         )}
 
         {/* 后台任务(Bash run_in_background / python 后台)— 实时 tail .output 文件 */}
         {bgList.length > 0 && (
-          <section>
-            <h3 className="text-[10px] uppercase tracking-widest text-ink-faint font-body mb-2 flex items-center gap-1.5">
-              <PlayCircle size={10} />后台任务 ({bgList.length})
-            </h3>
+          <FoldableSection icon={<PlayCircle size={10} />} title={`后台任务 (${bgList.length})`}>
             <div className="space-y-2">
               {bgList.map((t) => <BgTaskCard key={t.id} task={t} />)}
             </div>
-          </section>
+          </FoldableSection>
         )}
 
         {/* 后台代理(claude --bg)— CLI 原生后台会话:派发/列表/停止 */}
@@ -743,10 +755,7 @@ export function AgentMonitorPanel() {
 
         {/* Server-side chat children + CLI agents — bucketed by status so the
             "working" ones default open and finished/errored ones fold away. */}
-        <section>
-          <h3 className="text-[10px] uppercase tracking-widest text-ink-faint font-body mb-2 flex items-center gap-1.5">
-            <Terminal size={10} />Claude 子进程 ({remote.agents.length})
-          </h3>
+        <FoldableSection icon={<Terminal size={10} />} title={`Claude 子进程 (${remote.agents.length})`}>
           {remote.agents.length > 0 ? (
             (() => {
               const isWorking = (a) => ['streaming', 'starting', 'running', 'working'].includes(a.status);
@@ -773,7 +782,7 @@ export function AgentMonitorPanel() {
               {loading ? '加载中…' : '没有活跃的 subagent'}
             </div>
           )}
-        </section>
+        </FoldableSection>
       </div>
     </div>
   );
