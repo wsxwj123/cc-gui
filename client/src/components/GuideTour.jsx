@@ -44,7 +44,7 @@ function buildSteps(hasProject) {
     ['pane-count', '分屏', '把界面分成 1–6 个窗格,并排同时看和操作多个会话。\n· 每个窗格的模型 / 权限模式相互独立'],
     ...PANEL_STEPS,
     ['theme-toggle', '主题与外观', '外观相关设置:\n· 配色主题(多套深浅色可选)\n· 界面字号、对话正文字号\n· AI 思考时的加载动画样式(30 种可选)'],
-    ['composer', '输入框', '· Cmd/Ctrl+Enter 发送、Enter 换行\n· 输入 / 打开命令面板(含 /branch 分叉、/goal 目标、插件命令等)\n· 可【拖入】图片 / PDF / Word / Excel / PPT 等文件\n· Cmd/Ctrl+Z 撤销输入\n· AI 回复中再输入会入队;输入框为空时按 ↑ 键召回最近入队的消息'],
+    ['composer', '输入框', '· Cmd/Ctrl+Enter 发送、Enter 换行\n· 输入 / 打开命令面板(含 /branch 分叉、/goal 目标、插件命令等)\n· 输入 @ 打开引用选择器:引用项目文件,或把本项目其它会话的内容注入当前对话(Tab 切换文件/会话)\n· 可【拖入】图片 / PDF / Word / Excel / PPT 等文件\n· Cmd/Ctrl+Z 撤销输入\n· AI 回复中再输入会入队;输入框为空时按 ↑ 键召回最近入队的消息'],
   );
   return steps.map(([sel, title, desc]) => ({ sel, title, desc }));
 }

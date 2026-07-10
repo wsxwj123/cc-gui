@@ -680,6 +680,40 @@ router.get('/active-sessions', async (req, res) => {
   }
 });
 
+// POST /api/session-ref { sessionId, projectHash } — @ 引用会话:把指定会话渲染成
+// 精简 Markdown(用户/Claude 文本 + 工具调用一行摘要)写入 ~/.claude-gui/session-refs/<sid>.md,
+// 返回绝对路径。前端把 `@<path>` 插进输入框,CLI 原生 @ 语法读文件即获得该会话上下文
+// ——比直接塞 jsonl 省 token 且可读。超长会话保留最近 200KB(最近内容最相关)。
+const SESSION_REFS_DIR = join(homedir(), '.claude-gui', 'session-refs');
+router.post('/session-ref', async (req, res) => {
+  const sessionId = String(req.body?.sessionId || '');
+  const projectHash = String(req.body?.projectHash || '');
+  if (!safeId(sessionId) || !safeId(projectHash)) return res.status(400).json({ error: 'invalid id' });
+  try {
+    const { messages } = await getSessionMessages(sessionId, projectHash);
+    const parts = [];
+    for (const m of messages) {
+      if (m.type === 'user' && m.text) parts.push(`## 用户\n\n${m.displayText || m.text}`);
+      else if (m.type === 'turn') {
+        const body = (m.text || []).join('\n\n');
+        const tools = (m.toolCalls || []).length ? `\n\n> 工具调用 ×${m.toolCalls.length}:${[...new Set(m.toolCalls.map((t) => t.name))].join(', ')}` : '';
+        if (body || tools) parts.push(`## Claude\n\n${body}${tools}`);
+      }
+    }
+    if (!parts.length) return res.status(400).json({ error: '该会话没有可引用的内容' });
+    let md = `# 引用会话 ${sessionId}\n\n${parts.join('\n\n---\n\n')}\n`;
+    const CAP = 200 * 1024;
+    if (Buffer.byteLength(md) > CAP) {
+      const buf = Buffer.from(md);
+      md = `# 引用会话 ${sessionId}(超长,仅保留最近内容)\n\n…\n${buf.slice(buf.length - CAP).toString().replace(/^[^\n]*\n/, '')}`;
+    }
+    await mkdir(SESSION_REFS_DIR, { recursive: true });
+    const target = join(SESSION_REFS_DIR, `${sessionId}.md`);
+    await writeFile(target, md);
+    res.json({ path: target });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // POST /api/export-session { md, fileName?, targetPath? } — 把会话 Markdown 落盘。
 // Tauri WKWebView 拦 blob URL 的 a[download](静默失败,用户报"导出点击没反应"),
 // 所以 Tauri 环境改走这里落盘;浏览器环境仍用前端 blob 下载。

@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Send, Loader2, Square, Terminal, Puzzle, Wrench, Gauge, ChevronDown, X, FileText, Paperclip, Shield, ShieldOff, ClipboardList, Check, Pencil, Smartphone, Workflow } from 'lucide-react';
+import { Send, Loader2, Square, Terminal, Puzzle, Wrench, Gauge, ChevronDown, X, FileText, Paperclip, Shield, ShieldOff, ClipboardList, Check, Pencil, Smartphone, Workflow, AtSign, MessagesSquare } from 'lucide-react';
 import { useStore, PERMISSION_MODES } from '../stores/sessionStore.js';
 import { PermissionPrompt } from './PermissionPrompt.jsx';
 import { TodoPanel } from './TodoPanel.jsx';
@@ -238,6 +238,15 @@ export function ChatInput({ onSend, onStop, onAccelerate, disabled, isStreaming,
   // Pending attachments: { kind, path, preview?, name, bytes }
   const [attachments, setAttachments] = useState([]);
   const [dragging, setDragging] = useState(false);
+  // @ 引用选择器(Tutti 式上下文引用):光标前出现 `@xxx` 时弹出,文件 tab 插入
+  // `@相对路径`(CLI 原生 @ 语法读文件),会话 tab 把该会话导出为精简 md 后插入 `@绝对路径`。
+  const [atState, setAtState] = useState(null); // null | { query, start } start = '@' 在 text 中的下标
+  const [atTab, setAtTab] = useState('files');  // 'files' | 'sessions'
+  const [atFiles, setAtFiles] = useState([]);
+  const [atIndex, setAtIndex] = useState(0);
+  const [atBusy, setAtBusy] = useState(false);  // 会话引用生成中
+  const atCtxRef = useRef({ cwd: '', projectHash: '' }); // 打开面板时快照,避免 selector 新引用重渲
+  const sessions = useStore((s) => s.sessions);
   const textareaRef = useRef(null);
   const fileInputRef = useRef(null);
   const draftBeforeHistoryRef = useRef('');
@@ -417,6 +426,24 @@ export function ChatInput({ onSend, onStop, onAccelerate, disabled, isStreaming,
       draftBeforeHistoryRef.current = '';
     }
     setText(e.target.value);
+    // @ 引用检测:光标前是 `@词`(@ 在行首或空白后)时打开面板;/ 命令面板优先不冲突。
+    const caret = e.target.selectionStart ?? e.target.value.length;
+    const before = e.target.value.slice(0, caret);
+    const m = !e.target.value.startsWith('/') && before.match(/(^|[\s\n])@([^\s@]*)$/);
+    if (m) {
+      if (!atState) {
+        // 打开瞬间快照上下文(cwd/projectHash):优先本窗格会话,回落全局选中项目
+        const st = useStore.getState();
+        const pane = (st.paneSessions || []).find((x) => x?.sessionId && x.sessionId === sessionId);
+        const sess = pane || st.selectedSession;
+        atCtxRef.current = {
+          cwd: sess?.projectPath || st.selectedProject?.path || '',
+          projectHash: sess?.projectHash || st.selectedProject?.hash || '',
+        };
+        setAtTab('files'); setAtIndex(0);
+      }
+      setAtState({ query: m[2], start: caret - m[2].length - 1 });
+    } else if (atState) setAtState(null);
   };
 
   // Refresh slash commands whenever the model/provider may have changed
@@ -501,6 +528,7 @@ export function ChatInput({ onSend, onStop, onAccelerate, disabled, isStreaming,
     draftBeforeHistoryRef.current = '';
     setAttachments([]);
     setShowCommands(false);
+    setAtState(null);
     try { localStorage.removeItem(draftKey); } catch {}
     textareaRef.current?.focus();
   };
@@ -514,6 +542,63 @@ export function ChatInput({ onSend, onStop, onAccelerate, disabled, isStreaming,
       setText(cmd + ' ');
     }
     setShowCommands(false);
+    textareaRef.current?.focus();
+  };
+
+  // ── @ 引用选择器 ──────────────────────────────────────────────
+  // 文件 tab:debounce 后打 /api/files/search(git ls-files / 递归,后端 15s 缓存)。
+  useEffect(() => {
+    if (!atState || atTab !== 'files') return;
+    const cwd = atCtxRef.current.cwd;
+    if (!cwd) { setAtFiles([]); return; }
+    const t = setTimeout(() => {
+      fetch(`/api/files/search?cwd=${encodeURIComponent(cwd)}&q=${encodeURIComponent(atState.query)}`)
+        .then((r) => r.json())
+        .then((d) => setAtFiles(d.files || []))
+        .catch(() => setAtFiles([]));
+    }, 180);
+    return () => clearTimeout(t);
+  }, [atState?.query, atTab, !!atState]);
+
+  // 会话 tab:store 里当前项目的会话列表,按首条提示词过滤,排除当前会话自己。
+  const atSessions = (() => {
+    if (!atState || atTab !== 'sessions') return [];
+    const q = atState.query.toLowerCase();
+    return sessions
+      .filter((s) => s.sessionId !== sessionId && !s.archived)
+      .filter((s) => !q || (s.firstPrompt || '').toLowerCase().includes(q) || s.sessionId.startsWith(q))
+      .slice(0, 20);
+  })();
+  const atItems = atTab === 'files' ? atFiles : atSessions;
+  useEffect(() => { setAtIndex(0); }, [atTab, atState?.query]);
+
+  // 选中:文件插 `@相对路径 `;会话先调 /api/session-ref 生成精简 md 再插 `@绝对路径 `。
+  const pickAtItem = async (item) => {
+    let insert = '';
+    if (atTab === 'files') insert = item;
+    else {
+      setAtBusy(true);
+      try {
+        const r = await fetch('/api/session-ref', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ sessionId: item.sessionId, projectHash: item.projectHash || atCtxRef.current.projectHash }),
+        });
+        const d = await r.json();
+        if (!r.ok) throw new Error(d.error || '生成会话引用失败');
+        insert = d.path;
+      } catch (e) {
+        setAtBusy(false); setAtState(null);
+        const { confirmDialog } = await import('../utils/confirmDialog.jsx');
+        await confirmDialog('引用会话失败:' + e.message, { confirmText: '知道了' });
+        return;
+      }
+      setAtBusy(false);
+    }
+    const cur = text;
+    const beforeAt = cur.slice(0, atState.start);
+    const afterQuery = cur.slice(atState.start + 1 + atState.query.length);
+    setText(`${beforeAt}@${insert} ${afterQuery}`);
+    setAtState(null);
     textareaRef.current?.focus();
   };
 
@@ -542,6 +627,15 @@ export function ChatInput({ onSend, onStop, onAccelerate, disabled, isStreaming,
         setShowCommands(false);
         return;
       }
+    }
+
+    // @ 引用面板:上下选、Enter 选中、Tab 切文件/会话、Esc 关。
+    if (atState) {
+      if (e.key === 'ArrowDown') { e.preventDefault(); setAtIndex((i) => Math.min(i + 1, Math.max(atItems.length - 1, 0))); return; }
+      if (e.key === 'ArrowUp') { e.preventDefault(); setAtIndex((i) => Math.max(i - 1, 0)); return; }
+      if (e.key === 'Tab') { e.preventDefault(); setAtTab((t) => (t === 'files' ? 'sessions' : 'files')); return; }
+      if (e.key === 'Enter' && !e.shiftKey && atItems.length > 0) { e.preventDefault(); if (!atBusy) pickAtItem(atItems[atIndex]); return; }
+      if (e.key === 'Escape') { e.preventDefault(); setAtState(null); return; }
     }
 
     // 编辑重发态下按 Esc:取消本次编辑重发,清空输入并通知上层撤销待回滚(历史
@@ -718,6 +812,52 @@ export function ChatInput({ onSend, onStop, onAccelerate, disabled, isStreaming,
                 还有 {filteredCommands.length - 50} 个命令...
               </div>
             )}
+          </div>
+        )}
+
+        {/* @ 引用选择器:文件 / 会话 两个 tab(Tab 键切换),把选中项作为上下文引用插入输入框 */}
+        {atState && (
+          <div className="glass-popover absolute bottom-full left-0 right-0 mb-3 max-h-80 overflow-y-auto z-30 animate-glass-rise">
+            <div className="px-3 py-2 border-b border-white/20 flex items-center gap-2">
+              <AtSign size={11} className="text-accent shrink-0" />
+              <button onClick={() => setAtTab('files')}
+                className={`text-[11px] px-2 py-0.5 rounded font-body ${atTab === 'files' ? 'bg-accent/15 text-accent' : 'text-ink-faint hover:text-ink'}`}>
+                文件
+              </button>
+              <button onClick={() => setAtTab('sessions')}
+                className={`text-[11px] px-2 py-0.5 rounded font-body ${atTab === 'sessions' ? 'bg-accent/15 text-accent' : 'text-ink-faint hover:text-ink'}`}>
+                会话
+              </button>
+              <span className="ml-auto text-[10px] text-ink-ghost font-body">Tab 切换 · Enter 选择</span>
+            </div>
+            {atBusy && (
+              <div className="px-3 py-3 text-[11px] text-ink-faint font-body flex items-center gap-2">
+                <Loader2 size={12} className="animate-spin" />正在生成会话引用...
+              </div>
+            )}
+            {!atBusy && atItems.length === 0 && (
+              <div className="px-3 py-3 text-[11px] text-ink-faint font-body">
+                {atTab === 'files'
+                  ? (atCtxRef.current.cwd ? '没有匹配的文件' : '当前会话无项目目录')
+                  : '本项目没有其它可引用的会话'}
+              </div>
+            )}
+            {!atBusy && atTab === 'files' && atFiles.map((f, i) => (
+              <button key={f} onClick={() => pickAtItem(f)}
+                className={`w-full text-left px-3 py-2 flex items-center gap-2 transition-colors ${i === atIndex ? 'bg-accent/12' : 'hover:bg-black/5'}`}>
+                <FileText size={12} className="text-accent shrink-0" />
+                <span className="text-[11px] font-mono text-ink-soft truncate">{f}</span>
+              </button>
+            ))}
+            {!atBusy && atTab === 'sessions' && atSessions.map((s, i) => (
+              <button key={s.sessionId} onClick={() => pickAtItem(s)}
+                title="将该会话内容(精简 Markdown)作为上下文引用"
+                className={`w-full text-left px-3 py-2 flex items-center gap-2 transition-colors ${i === atIndex ? 'bg-accent/12' : 'hover:bg-black/5'}`}>
+                <MessagesSquare size={12} className="text-accent shrink-0" />
+                <span className="text-[11px] font-body text-ink-soft truncate flex-1">{s.firstPrompt || s.sessionId}</span>
+                <span className="text-[9px] text-ink-ghost font-mono shrink-0">{(s.lastActivity || '').slice(5, 16).replace('T', ' ')}</span>
+              </button>
+            ))}
           </div>
         )}
 

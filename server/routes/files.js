@@ -57,6 +57,56 @@ async function safePath(p) {
 }
 
 /**
+ * GET /api/files/search?cwd=<absolute-dir>&q=<query>
+ * @ 引用选择器的文件搜索:返回 cwd 下匹配 q 的文件相对路径(最多 50 条)。
+ * 有 git 时用 `git ls-files`(快且天然尊重 .gitignore);否则递归 readdir(限深/限量,
+ * 应用 SKIP_DIRS)。全量清单按 cwd 缓存 15s,免得每敲一个字符扫一遍盘。
+ */
+const _fileSearchCache = new Map(); // cwd -> { at, list }
+async function listProjectFiles(cwd) {
+  const c = _fileSearchCache.get(cwd);
+  if (c && Date.now() - c.at < 15_000) return c.list;
+  let list = null;
+  try {
+    list = await new Promise((res, rej) => {
+      execFile('git', ['ls-files', '--cached', '--others', '--exclude-standard'], { cwd, timeout: 8000, maxBuffer: 16 * 1024 * 1024 }, (e, out) => {
+        if (e) return rej(e);
+        res(String(out).split('\n').map((s) => s.trim()).filter(Boolean));
+      });
+    });
+  } catch { /* 非 git 项目走递归 */ }
+  if (!list) {
+    list = [];
+    const walk = async (dir, rel, depth) => {
+      if (depth > 6 || list.length >= 5000) return;
+      let entries;
+      try { entries = await readdir(dir, { withFileTypes: true }); } catch { return; }
+      for (const e of entries) {
+        if (list.length >= 5000) return;
+        if (SKIP_EXACT.has(e.name) || (e.isDirectory() && (SKIP_DIRS.has(e.name) || e.name.startsWith('.')))) continue;
+        const r = rel ? `${rel}/${e.name}` : e.name;
+        if (e.isDirectory()) await walk(join(dir, e.name), r, depth + 1);
+        else list.push(r);
+      }
+    };
+    await walk(cwd, '', 0);
+  }
+  _fileSearchCache.set(cwd, { at: Date.now(), list });
+  return list;
+}
+router.get('/files/search', async (req, res) => {
+  try {
+    const cwd = await safePath(req.query.cwd);
+    const q = String(req.query.q || '').toLowerCase();
+    const all = await listProjectFiles(cwd);
+    const hits = (q ? all.filter((p) => p.toLowerCase().includes(q)) : all).slice(0, 50);
+    res.json({ files: hits });
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
+/**
  * GET /api/files/list?path=<absolute-dir>
  * Returns immediate-children entries with stat info. Directories first,
  * then files alphabetically. Skip-list applied.
