@@ -85,6 +85,13 @@ async function removeWorktreePath(workTree, rel) {
   const root = resolvePath(workTree);
   const abs = resolvePath(root, rel);
   if (abs !== root && !abs.startsWith(root + sep)) return;
+  // 嵌套 git 仓库保护:shadow 快照里 gitlink 无内容,rm 掉整个子仓库(含未推送
+  // 提交)后无法从快照重建 —— 原生 git checkout 会拒删嵌套 .git,这里对齐。
+  try {
+    await stat(join(abs, '.git'));
+    console.warn('[checkpoints] skip removing embedded git repo:', abs);
+    return;
+  } catch { /* 无 .git → 正常删除 */ }
   await rm(abs, { force: true, recursive: true });
 }
 
@@ -92,7 +99,9 @@ function relativeToWorkTree(workTree, file) {
   const root = resolvePath(workTree);
   const abs = resolvePath(file);
   if (abs === root || !abs.startsWith(root + sep)) throw new Error('file outside cwd');
-  return abs.slice(root.length + 1);
+  // 统一正斜杠:git ls-tree 输出恒为 `/` 分隔,Windows 上 resolve 产出 `\` —— 直接
+  // 比较 targetFiles.includes(rel) 必 false,会把要还原的文件误判为"快照中没有"。
+  return abs.slice(root.length + 1).split(sep).join('/');
 }
 
 async function fileExists(file) {
@@ -211,6 +220,15 @@ router.post('/checkpoints/:sessionId/restore', async (req, res) => {
     const { sha, cwd } = req.body || {};
     if (!/^[a-f0-9]{7,40}$/.test(String(sha || ''))) throw new Error('invalid sha');
     const workTree = safe(cwd);
+    // pre-restore 快照:shadow HEAD 停留在"发消息前"的 checkpoint,AI 之后新建的
+    // 文件从未进过 shadow → 不在 headFiles 差集里,回滚后会残留。先把当前真实状态
+    // commit 进 shadow(顺带留下一份可 redo 的快照),再算差集。失败不阻断主流程。
+    try {
+      await gitShadow(['add', '-A'], req.params.sessionId, workTree);
+      await gitShadow(['commit', '--allow-empty', '-q', '-m', `pre-restore ${new Date().toISOString()}`],
+        req.params.sessionId, workTree,
+        { env: { ...process.env, GIT_AUTHOR_NAME: 'claude-gui', GIT_AUTHOR_EMAIL: 'gui@claude', GIT_COMMITTER_NAME: 'claude-gui', GIT_COMMITTER_EMAIL: 'gui@claude' } });
+    } catch { /* 快照失败(嵌入式仓库等)→ 退回旧行为:新增文件可能残留 */ }
     const headFiles = await listTreeFiles(req.params.sessionId, workTree, 'HEAD').catch(() => []);
     const targetFiles = await listTreeFiles(req.params.sessionId, workTree, sha);
     const targetSet = new Set(targetFiles);
@@ -226,17 +244,24 @@ router.post('/checkpoints/:sessionId/restore', async (req, res) => {
   }
 });
 
-/** POST /api/checkpoints/:sessionId/restore-file  { sha, cwd, file } */
+/** POST /api/checkpoints/:sessionId/restore-file  { sha, cwd, file, allowDelete } */
 router.post('/checkpoints/:sessionId/restore-file', async (req, res) => {
   try {
     assertSession(req.params.sessionId);
-    const { sha, cwd, file } = req.body || {};
+    const { sha, cwd, file, allowDelete } = req.body || {};
     if (!/^[a-f0-9]{7,40}$/.test(String(sha || ''))) throw new Error('invalid sha');
     const workTree = safe(cwd);
     const absFile = safe(file);
     const rel = relativeToWorkTree(workTree, absFile);
     const targetFiles = await listTreeFiles(req.params.sessionId, workTree, sha);
     if (!targetFiles.includes(rel)) {
+      // "快照里没有此文件"≠"该删除":shadow git 的 add -A 尊重 .gitignore,被
+      // ignore 的文件(CLAUDE.local.md 等)永远不进快照——无条件删除等于把一次
+      // "恢复"变成销毁(且 UI 报成功)。只有调用方显式声明(write 类=本轮新建)
+      // 才允许走删除分支,否则 404 让前端如实报"快照中无此文件"。
+      if (allowDelete !== true) {
+        return res.status(404).json({ error: '该文件不在此快照中(可能被 .gitignore 排除),已保持原样' });
+      }
       if (await fileExists(absFile)) await removeWorktreePath(workTree, rel);
       return res.json({ ok: true, deleted: true });
     }

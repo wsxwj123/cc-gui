@@ -4,7 +4,7 @@ import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { join, dirname } from 'path';
 import { homedir } from 'os';
-import { stat, unlink } from 'fs/promises';
+import { stat, unlink, readdir } from 'fs/promises';
 import { resolveWorkspacePath } from '../utils/safe-path.js';
 
 const execFileP = promisify(execFile);
@@ -210,6 +210,41 @@ router.get('/sessions/:sessionId/file-changes', async (req, res) => {
     const filePath = join(PROJECTS_DIR, projectHash, `${req.params.sessionId}.jsonl`);
     const records = await parseJsonl(filePath);
     const changes = extractFileChanges(records);
+    // 子代理(Task)的改动落在 <sid>/subagents/agent-*.jsonl,不在主 jsonl —— 漏掉
+    // 它们=派发出去的文件修改在审查面板完全隐身。每个子代理单独提取(忽略其内部
+    // 回合划分),按时间戳归入主时间线的对应回合,带 subagent 字段标来源。
+    try {
+      const subDir = join(PROJECTS_DIR, projectHash, req.params.sessionId, 'subagents');
+      const files = (await readdir(subDir)).filter((f) => f.endsWith('.jsonl'));
+      if (files.length) {
+        const turns = [];
+        for (const c of changes) {
+          if (!turns.length || turns[turns.length - 1].turnIndex !== c.turnIndex) {
+            turns.push({ turnIndex: c.turnIndex, turnPrompt: c.turnPrompt, turnTs: c.turnTs });
+          }
+        }
+        for (const f of files) {
+          const subRecords = await parseJsonl(join(subDir, f)).catch(() => []);
+          for (const c of extractFileChanges(subRecords)) {
+            const t = Date.parse(c.timestamp || '') || 0;
+            let owner = null;
+            for (const turn of turns) {
+              const ts = Date.parse(turn.turnTs || '') || 0;
+              if (ts && ts <= t) owner = turn;
+              else if (ts > t) break;
+            }
+            changes.push({
+              ...c,
+              turnIndex: owner ? owner.turnIndex : 0,
+              turnPrompt: owner ? owner.turnPrompt : '',
+              turnTs: owner ? owner.turnTs : c.turnTs,
+              subagent: f.replace(/^agent-|\.jsonl$/g, ''),
+              id: `${f}:${c.id}`,
+            });
+          }
+        }
+      }
+    } catch { /* 无 subagents 目录 = 常态 */ }
     res.json(changes);
   } catch (err) {
     res.status(500).json({ error: err.message });

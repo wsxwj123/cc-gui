@@ -54,9 +54,12 @@ function ChangeItem({ change, sessionId, cwd, reviewed, onToggleReviewed }) {
     if (!(await confirmDialog(msg, { danger: true }))) return;
     setBusy('revert');
     try {
+      // 链路1:git checkout HEAD。不再传 allowDeleteUntracked——untracked 文件直接
+      // unlink 会绕过 checkpoint 里保存的"覆写前内容"(用户手工文件被 Write 覆盖的
+      // 场景),一律 409 落到链路2,由快照决定"恢复原内容"还是"确属本轮新建才删"。
       const res = await fetch('/api/file/revert', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ file: change.file, allowDeleteUntracked: change.type === 'write' }),
+        body: JSON.stringify({ file: change.file }),
       });
       const d = await res.json();
       if (res.ok) markReverted();
@@ -70,9 +73,11 @@ function ChangeItem({ change, sessionId, cwd, reviewed, onToggleReviewed }) {
           confirmDialog('恢复失败：' + (d.error || res.status));
           return;
         }
+        // allowDelete 只对 write(本轮新建语义)授权:快照里没有该文件时才删;
+        // edit 类文件不在快照(gitignored 等)→ 后端 404 如实报,绝不误删。
         const cr = await fetch(`/api/checkpoints/${sessionId}/restore-file`, {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ sha: rd.sha, cwd, file: change.file }),
+          body: JSON.stringify({ sha: rd.sha, cwd, file: change.file, allowDelete: change.type === 'write' }),
         });
         const cd = await cr.json().catch(() => ({}));
         if (cr.ok) markReverted();
@@ -81,7 +86,7 @@ function ChangeItem({ change, sessionId, cwd, reviewed, onToggleReviewed }) {
         confirmDialog('恢复失败：' + (d.error || res.status));
       }
     } catch (err) { confirmDialog('恢复失败：' + err.message); }
-    setBusy(null);
+    finally { setBusy(null); }
   };
 
   const open = async (e) => {
@@ -121,6 +126,9 @@ function ChangeItem({ change, sessionId, cwd, reviewed, onToggleReviewed }) {
         )}
         <Icon size={12} className={`shrink-0 ${change.type === 'bash' ? 'text-warning/70' : 'text-accent/60'}`} />
         <span className="text-xs text-ink-soft font-mono truncate flex-1">{label}</span>
+        {change.subagent && (
+          <span className="text-[9px] px-1 py-px rounded bg-canvas-deep text-ink-faint shrink-0" title={`来自子代理 ${change.subagent}`}>子代理</span>
+        )}
         {change.diff && (
           <span className="flex items-center gap-1 text-[10px] font-mono shrink-0">
             {change.deletions > 0 && <span className="text-red-500">-{change.deletions}</span>}
@@ -339,7 +347,9 @@ export function FileReviewPanel() {
       <FileChangesPanel
         sessionId={activeSession.sessionId}
         projectHash={activeSession.projectHash}
-        cwd={selectedProject?.path || activeSession.projectPath}
+        // 活跃 pane 的项目路径优先:分屏打开另一项目的会话时,selectedProject 还停
+        // 在全局选中项目,优先它会把错误的 workTree 传给 checkpoint 恢复链路。
+        cwd={activeSession.projectPath || selectedProject?.path}
       />
     </div>
   );

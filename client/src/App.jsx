@@ -1703,7 +1703,10 @@ function SessionList() {
       draft: true,
       draftId: newDraftId(),
       sessionId: null,
-      projectHash: selectedProject.hash,
+      // projectHash 必须按 worktree 自己的 cwd 编码(CLI 同款 dash 规则):CLI 按
+      // 进程 cwd 落盘 jsonl,若沿用主项目 hash,重进后 fetchMessages/回滚/checkpoints
+      // 全部对错目录(会话显示空白、只以独立 worktrees 项目冒出)。
+      projectHash: tree.path.replace(/[^A-Za-z0-9]/g, '-'),
       projectPath: tree.path,
       firstPrompt: `新会话 · ${tree.branch || formatPathShort(tree.path)}`,
     };
@@ -3668,6 +3671,28 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                   setTimeout(() => useStore.getState().fetchSessions(hash, { silent: true }), ms)
                 );
               }
+              // 首条消息补拍 checkpoint:handleSend 的 checkpointPromise 在 draft 态
+              // (无 sessionId)直接 return → 首轮 AI 改动无回滚锚点(resolve 还可能
+              // 错选之后的快照)。此处 sid 刚诞生,数据全取发起时闭包(cwd/prompt/
+              // userMsgUuid),归属安全。快照内容=AI 动手前的工作区(AI 还没开始改)。
+              if (cwd) {
+                fetch('/api/checkpoints', {
+                  method: 'POST', headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({
+                    sessionId: event.session_id,
+                    cwd,
+                    label: `before: ${prompt.slice(0, 60)}`,
+                    clientMessageId: userMsgUuid,
+                    messageTimestamp: userMsgTimestamp,
+                    promptPreview: prompt,
+                  }),
+                }).then((r) => (r.ok ? r.json() : null)).then((d) => {
+                  if (d?.sha) {
+                    setChatMessages((prev) =>
+                      prev.map((m) => (m.uuid === userMsgUuid ? { ...m, checkpointSha: d.sha } : m)));
+                  }
+                }).catch(() => {});
+              }
             }
           }
 
@@ -4569,6 +4594,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       const params = new URLSearchParams();
       if (msg.timestamp) params.set('timestamp', msg.timestamp);
       if (msg.text) params.set('text', msg.text);
+      // before=true:回滚语义是"回到这条消息之前",最近邻(Math.abs)在该消息自己的
+      // checkpoint 缺失时会选到之后的快照 → 文件没回退 UI 却报成功。
+      params.set('before', 'true');
       try {
         const r = await fetch(`/api/checkpoints/${sel.sessionId}/resolve?${params.toString()}`);
         if (!r.ok) return null;

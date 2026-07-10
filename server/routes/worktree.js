@@ -5,13 +5,15 @@ import { join, dirname, basename, resolve as pathResolve } from 'path';
 import { mkdir } from 'fs/promises';
 import { homedir } from 'os';
 import { stat } from 'fs/promises';
-import { isPathInside, resolveUnderHome } from '../utils/safe-path.js';
+import { isPathInside, resolveWorkspacePath } from '../utils/safe-path.js';
 
 const execFileP = promisify(execFile);
 const router = Router();
 
 function safe(p) {
-  return resolveUnderHome(p, { requireCanonical: true });
+  // resolveWorkspacePath = $HOME 门禁 + 已知 claude 工作区例外(Windows 项目常在
+  // D:\ 等其他盘,纯 $HOME 门禁让 worktree 功能在这类项目上整体不可用);../. 段仍拒。
+  return resolveWorkspacePath(p, { requireCanonical: true });
 }
 
 async function findGitRoot(start) {
@@ -36,9 +38,9 @@ router.post('/worktree', async (req, res) => {
     // when the repo sat directly under it). e.g. repo `/a/b/myrepo` →
     // worktree `/a/b/myrepo-worktrees/<name>`.
     const container = pathResolve(root, '..', `${basename(root)}-worktrees`);
-    // Guard: never create the container outside $HOME (e.g. if root sits
-    // directly under /Users, its parent escapes HOME).
-    if (!isPathInside(container, homedir())) {
+    // Guard: HOME 内项目仍要求容器在 $HOME 内(防 repo 直接在 /Users 下时 parent
+    // 逃出 HOME);HOME 外项目(已凭工作区例外过门禁,如 D:\proj)容器随项目走。
+    if (isPathInside(root, homedir()) && !isPathInside(container, homedir())) {
       return res.status(400).json({ error: 'worktree container would fall outside $HOME' });
     }
     await mkdir(container, { recursive: true });
