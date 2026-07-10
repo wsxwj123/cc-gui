@@ -207,6 +207,7 @@ export function MCPPanel() {
       if (!r.ok) throw new Error(d.error || '更新失败');
       setRestartHint(true);
       await fetchData();
+      setPluginActioning(null); // 更新已完成,先停 spinner 再弹窗
       // #7 更新完成弹窗显示新版本(后端读 installed_plugins.json 回传)
       await confirmDialog(
         d.version
@@ -247,7 +248,7 @@ export function MCPPanel() {
         <p className="text-xs text-ink-faint font-body">加载 MCP 信息失败</p>
         <p className="text-[10px] text-ink-ghost font-mono">{error}</p>
         <button
-          onClick={fetchData}
+          onClick={() => fetchData()}
           className="text-xs text-accent hover:text-accent-hover font-body transition-colors"
         >
           重试

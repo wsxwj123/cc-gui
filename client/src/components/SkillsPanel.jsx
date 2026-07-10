@@ -64,6 +64,7 @@ export function SkillsPanel() {
       const d = await r.json();
       if (!r.ok) throw new Error(d.error || '更新失败');
       await loadLocal();
+      setManageBusy(null); // 更新已完成,先停 spinner 再弹窗(否则用户不点弹窗则按钮无限转)
       // #7 更新完成弹窗:有 frontmatter version 则显示"已更新为 vX",无则报来源。
       await confirmDialog(
         d.version
@@ -118,7 +119,7 @@ export function SkillsPanel() {
     try { const d = await (await fetch('/api/skills/repos')).json(); setSavedRepos(d.repos || []); } catch { /* 忽略 */ }
   }, []);
   const openSavedRepo = useCallback((r) => {
-    setActiveRepo(r.repo); setActiveBranch(r.branch || ''); setCustomRepo(''); setSource('');
+    setActiveRepo(r.repo); setActiveBranch(r.branch || ''); setCustomRepo('');
     loadOfficial(null, r.repo, r.branch || '');
   }, [loadOfficial]);
   const deleteSavedRepo = useCallback(async (r) => {

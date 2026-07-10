@@ -29,14 +29,17 @@ function ConfirmModal({ message, danger, confirmText, cancelText, onResolve }) {
           {message}
         </div>
         <div className="flex justify-end gap-2">
+          {/* danger 时焦点给取消键:队列化后弹窗一个接一个弹,若确认键 autoFocus,上一个通知弹窗
+              按 Enter 关闭后下一个 danger 删除弹窗立即挂载并聚焦红键,Enter 连击/长按会未经阅读误删。 */}
           <button
+            autoFocus={danger}
             onClick={() => onResolve(false)}
             className="px-3 py-1.5 rounded-md text-[12px] text-ink-muted hover:bg-canvas-warm font-body transition-colors"
           >
             {cancelText}
           </button>
           <button
-            autoFocus
+            autoFocus={!danger}
             onClick={() => onResolve(true)}
             className={`px-3 py-1.5 rounded-md text-[12px] text-white font-body transition-colors ${danger ? 'bg-red-600 hover:bg-red-500' : 'bg-accent hover:bg-accent/90'}`}
           >

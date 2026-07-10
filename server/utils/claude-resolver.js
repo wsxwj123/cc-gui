@@ -284,6 +284,47 @@ export function resolveClaude({ refresh = false } = {}) {
   return null;
 }
 
+// doResolve 的异步版:策略逐个 await(非零并发,保持"命中即返回"的短路语义),全程不阻塞事件循环。
+async function doResolveAsync() {
+  const ov = readOverride();
+  if (ov && existsSync(ov)) return { path: ov, via: 'override' };
+  const p1 = await fromPathAsync();
+  if (p1 && existsSync(p1)) return { path: p1, via: 'PATH' };
+  const p2 = await fromLoginShellAsync();
+  if (p2 && existsSync(p2)) return { path: p2, via: 'login-shell' };
+  for (const p of await fromNpmPrefixAsync()) {
+    if (existsSync(p)) return { path: p, via: 'npm-prefix' };
+  }
+  for (const p of await fromWinLivePathAsync()) {
+    try { if (existsSync(p)) return { path: p, via: 'win-live-path' }; } catch {}
+  }
+  for (const p of fixedCandidates()) {
+    try { if (existsSync(p)) return { path: p, via: 'known-path' }; } catch {}
+  }
+  return null;
+}
+
+/**
+ * resolveClaude 的异步版,与同步版共用 _cache/_missAt。显式检查端点(detectInstall 等,由前端
+ * 窗口焦点/定时高频触发)必须走这个 —— 否则 refresh:true 会跑同步级联(where+npm+powershell 冷启动
+ * 数秒)阻塞单线程 Express,复发"到处 connecting"。同步 resolveClaude 只留给 spawn 热路径(缓存基本恒命中)。
+ */
+export async function resolveClaudeAsync({ refresh = false } = {}) {
+  if (!refresh) {
+    if (_cache && mtimeOf(_cache.path) === _cache.mtimeMs) return { path: _cache.path, via: _cache.via };
+    if (!_cache && _missAt && Date.now() - _missAt < MISS_TTL_MS) return null;
+  }
+  const hit = await doResolveAsync();
+  if (hit) {
+    _cache = { ...hit, mtimeMs: mtimeOf(hit.path) };
+    _missAt = 0;
+    return hit;
+  }
+  _cache = null;
+  _missAt = Date.now();
+  return null;
+}
+
 /**
  * 组装可直接交给 execFile/spawn 的 { file, args }。
  * Windows 上 .cmd/.bat 不是真正可执行文件,必须经 cmd.exe /c;解析失败时回落裸

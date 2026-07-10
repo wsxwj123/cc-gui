@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { readFileSync, writeFileSync, existsSync, realpathSync, readdirSync } from 'fs';
-import { resolveClaude, listClaudeInstallsAsync, getClaudeOverride, setClaudeOverride, winLivePathDirsAsync } from '../utils/claude-resolver.js';
+import { resolveClaudeAsync, listClaudeInstallsAsync, getClaudeOverride, setClaudeOverride, winLivePathDirsAsync } from '../utils/claude-resolver.js';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import { tmpdir, homedir } from 'os';
@@ -223,7 +223,7 @@ async function detectInstall() {
   // 安装列表)。GUI 更新/claude 重装期间二进制正被替换,一次解析落空就负缓存 15s,期间打开设置
   // 页会误显"未安装或不在 PATH"(用户实报:更新中断/完成后偶发未安装)。显式检查永远现场重解析;
   // 聊天 spawn 热路径仍走带缓存的 resolveClaude() 不受影响。
-  const hit = resolveClaude({ refresh: true });
+  const hit = await resolveClaudeAsync({ refresh: true });
   if (!hit) return { method: 'unknown', path: '', via: null };
   const real = hit.path;
   // 解析软链(~/.local/bin/claude → ~/.local/share/claude/versions/x.y.z)以便按
@@ -467,7 +467,7 @@ router.get('/claude-installs', async (_req, res) => {
   const list = await listClaudeInstallsAsync();
   const override = getClaudeOverride();
   // refresh:true 同 detectInstall:显式检查不吃 15s 负缓存(更新中断后误显未安装/无选中)。
-  const active = resolveClaude({ refresh: true });  // 含 override,当前 spawn/SDK 实际会用的那个
+  const active = await resolveClaudeAsync({ refresh: true });  // 含 override,当前 spawn/SDK 实际会用的那个
   let activeReal = '';
   if (active) { try { activeReal = realpathSync(active.path); } catch { activeReal = active.path; } }
   // Windows 路径大小写不敏感(盘符 C:\ vs c:\、目录大小写)而 === 敏感 → active 比对落空,
@@ -486,12 +486,12 @@ router.get('/claude-installs', async (_req, res) => {
 // PUT /api/claude-active { path }
 // 钉死 GUI 用哪个 claude;path 传空串 → 清除,回到自动优先级。写覆盖文件并强制
 // resolver 重解析,下次聊天/agent/MCP spawn 立即用新的(无需重启)。
-router.put('/claude-active', (req, res) => {
+router.put('/claude-active', async (req, res) => {
   const p = typeof req.body?.path === 'string' ? req.body.path.trim() : '';
   if (p && !existsSync(p)) return res.status(400).json({ error: '该路径不存在或已失效' });
   try {
     setClaudeOverride(p);
-    const active = resolveClaude({ refresh: true });
+    const active = await resolveClaudeAsync({ refresh: true });
     res.json({ ok: true, active: active?.path || '', via: active?.via || null });
   } catch (e) {
     res.status(500).json({ error: e.message || '写入失败' });

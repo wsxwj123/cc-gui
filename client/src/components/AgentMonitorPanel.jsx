@@ -153,7 +153,9 @@ function BackgroundAgentsSection({ stoppingPid, onStop }) {
   const THIRTY_D = 30 * 24 * 3600 * 1000;
   const now = Date.now();
   const finished = agents.filter((a) => BG_TERMINAL.has(a.state))
-    .filter((a) => now - (a.endedAt || a.startedAt || now) < THIRTY_D)
+    // 按结束时间判 30 天;endedAt 缺失时退回 now(视为刚结束、保留显示)——不能退回 startedAt,
+    // 否则一个月前启动、刚结束的长任务会被立即隐藏(结束时间未知就不该按启动时间当已过期)。
+    .filter((a) => now - (a.endedAt || now) < THIRTY_D)
     .sort((a, b) => (b.endedAt || b.startedAt || 0) - (a.endedAt || a.startedAt || 0))
     .slice(0, 10);
 
@@ -161,7 +163,7 @@ function BackgroundAgentsSection({ stoppingPid, onStop }) {
     <FoldableSection icon={<Bot size={10} />} title={`后台代理 (claude --bg) (${running.length})`}>
       <div className="flex items-center gap-1.5 mb-2">
         <input value={prompt} onChange={(e) => setPrompt(e.target.value)}
-          onKeyDown={(e) => { if (e.key === 'Enter') dispatch(); }}
+          onKeyDown={(e) => { if (e.key === 'Enter' && !e.nativeEvent?.isComposing && e.keyCode !== 229) dispatch(); }}
           placeholder={selectedProject ? `派一个后台任务到 ${selectedProject.name || '当前项目'}(接受编辑模式)` : '先在左侧选择项目'}
           disabled={!selectedProject || dispatching}
           className="flex-1 min-w-0 text-[11px] font-body bg-canvas-warm border border-canvas-deep rounded px-2 py-1.5 text-ink focus:border-accent outline-none" />
@@ -174,7 +176,7 @@ function BackgroundAgentsSection({ stoppingPid, onStop }) {
       {running.length > 0 && (
         <div className="space-y-2">
           {running.map((a) => (
-            <div key={a.sessionId || a.pid} className="bg-canvas-warm border border-canvas-deep rounded-lg p-2.5">
+            <div key={a.sessionId || a.pid || a.id} className="bg-canvas-warm border border-canvas-deep rounded-lg p-2.5">
               <div className="flex items-center gap-2">
                 <Bot size={11} className="text-accent" />
                 <span className="text-[11px] text-ink font-body truncate flex-1" title={a.name}>{a.name || `bg #${a.pid}`}</span>

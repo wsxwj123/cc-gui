@@ -20,7 +20,8 @@ const ARCHIVE_DIR = join(homedir(), '.claude', 'skills-archive');
 // 临时目录当成 skill 加载(用户会话冒出 `.xxx.tmp-...` 假 skill)。移出 skills/ 根治;仍在
 // ~/.claude 同一文件系统,rename 到 skills/<id> 保持原子。
 const IMPORT_TMP_DIR = join(homedir(), '.claude', '.cgui-skill-tmp');
-const ID_RE = /^[a-zA-Z0-9._-]+$/;
+// 排除纯点名(`.`/`..`):否则 join(SKILLS_DIR, '..') = ~/.claude,delete/archive 端点会 rm 掉整个配置目录。
+const ID_RE = /^(?!\.+$)[a-zA-Z0-9._-]+$/;
 const GH_HEADERS = { 'User-Agent': 'claude-gui-skills', 'Accept': 'application/vnd.github+json' };
 const DESC_CAP = 30; // skill 数 ≤ 此值才逐个抓描述(大仓如 Composio 只列名,免打爆网络)
 
@@ -36,18 +37,26 @@ const SOURCES = [
   { id: 'garden', name: 'Garden Skills', repo: 'ConardLi/garden-skills', url: 'https://github.com/ConardLi/garden-skills' },
 ];
 
+// 先 trim 再剥引号:CRLF 文件行尾是 `"1.0"\r`,若先剥引号则 `["']$` 因 \r 在末尾不命中、只剥前引号。
+const cleanVal = (s) => s.trim().replace(/^["']|["']$/g, '');
 function parseFrontmatter(content) {
   const out = { name: null, description: null, version: null };
   if (!content || content.slice(0, 3) !== '---') return out;
   const end = content.indexOf('\n---', 3);
   if (end === -1) return out;
-  for (const line of content.slice(3, end).split('\n')) {
+  let inMetadata = false; // 仅 metadata: 块内的缩进 version 才算版本(见下)
+  // 先去掉所有 \r 再切:CRLF 文件行尾 \r 会让 `.` 不匹配、`$` 不在 \r 前命中 → 顶层 name/version
+  // 全解析不到;且闭合围栏 \r\n--- 的 \r 会残留在最后一行末尾(单纯 /\r?\n/ 切不掉它)。
+  for (const line of content.slice(3, end).replace(/\r/g, '').split('\n')) {
     const m = line.match(/^(name|description|version):\s*(.*)$/);
-    if (m) { out[m[1]] = m[2].replace(/^["']|["']$/g, '').trim(); continue; }
-    // Anthropic 官方 skill 格式把版本嵌在 metadata: 下(缩进的 version:),顶格没有时兜底取之
-    if (!out.version) {
+    if (m) { out[m[1]] = cleanVal(m[2]); inMetadata = false; continue; }
+    const topKey = line.match(/^([A-Za-z_][\w-]*):\s*/); // 顶格 key = 退出 metadata 块
+    if (topKey) { inMetadata = topKey[1] === 'metadata'; continue; }
+    // Anthropic 官方 skill 把版本嵌在 metadata: 下的缩进 version:;限定块内匹配,
+    // 否则 description 折行文本/dependencies 块里的 "version:" 会被误当版本号。
+    if (inMetadata && !out.version) {
       const mv = line.match(/^\s+version:\s*(.*)$/);
-      if (mv) out.version = mv[1].replace(/^["']|["']$/g, '').trim();
+      if (mv) out.version = cleanVal(mv[1]);
     }
   }
   return out;
@@ -117,6 +126,7 @@ router.post('/skills/delete', async (req, res) => {
   try {
     await rm(join(SKILLS_DIR, id), { recursive: true, force: true });
     await rm(join(ARCHIVE_DIR, id), { recursive: true, force: true });
+    await forgetSource(id).catch(() => {}); // 清来源:删掉后若用户手写同名技能,不该再被"更新"覆盖
     localCache = null;
     res.json({ ok: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -198,14 +208,16 @@ function locateSkills(tree) {
   return out;
 }
 
-async function loadRepo(repo, branchArg) {
+async function loadRepo(repo, branchArg, force = false) {
   // branchArg 指定分支(用户在导入页给了 owner/repo/tree/<branch> 或 owner/repo@branch);
   // 不给则用默认分支。缓存键含分支,否则同仓不同分支互相污染(用户实报:只拉到 main)。
   const branch = (branchArg && String(branchArg).trim()) || await ghDefaultBranch(repo);
   const cacheKey = `${repo}@${branch}`;
   const now = Date.now();
   const c = repoCache.get(cacheKey);
-  if (c && now - c.at < TTL) return c;
+  // force 时绕过缓存:更新按钮必须拿最新 tree,否则 1 小时缓存窗口内清单是旧快照——上游新增的文件
+  // 不在清单里(装出残缺技能),上游已删的文件 raw 404(整个更新失败)。清单与 raw 内容必须同快照。
+  if (!force && c && now - c.at < TTL) return c;
   const tree = (await ghJson(`https://api.github.com/repos/${repo}/git/trees/${encodeURIComponent(branch)}?recursive=1`)).tree || [];
   const located = locateSkills(tree);
   located.sort((a, b) => a.id.localeCompare(b.id));
@@ -246,13 +258,26 @@ async function readSources() {
 }
 async function writeSources(map) {
   await mkdir(join(SOURCES_FILE, '..'), { recursive: true });
-  await writeFile(SOURCES_FILE, JSON.stringify(map, null, 2));
+  // 原子写:tmp+rename,避免写到一半崩溃 → JSON 截断 → readSources 静默返 {} → 全部来源记录丢失。
+  const tmp = `${SOURCES_FILE}.tmp-${Date.now()}`;
+  await writeFile(tmp, JSON.stringify(map, null, 2));
+  await rename(tmp, SOURCES_FILE);
 }
 // 串行化的"合并写入":读最新→合并 patch→写回,避免调用方各持旧快照互相覆盖。
 function mergeSources(patch) {
   return serialized(async () => {
     const cur = await readSources();
     Object.assign(cur, patch);
+    await writeSources(cur);
+  });
+}
+// 删除某 id 的来源记录(删除技能时调):否则用户之后手写同名技能,前端仍显示"更新"、
+// 一点就用旧仓库内容整目录覆盖掉手写版(静默毁掉用户创作)。
+function forgetSource(id) {
+  return serialized(async () => {
+    const cur = await readSources();
+    if (!(id in cur)) return;
+    delete cur[id];
     await writeSources(cur);
   });
 }
@@ -265,7 +290,9 @@ async function readRepos() {
 }
 async function writeRepos(list) {
   await mkdir(join(REPOS_FILE, '..'), { recursive: true });
-  await writeFile(REPOS_FILE, JSON.stringify(list, null, 2));
+  const tmp = `${REPOS_FILE}.tmp-${Date.now()}`;
+  await writeFile(tmp, JSON.stringify(list, null, 2));
+  await rename(tmp, REPOS_FILE);
 }
 async function rememberRepo(repo, branch) {
   const b = branch || '';
@@ -278,8 +305,8 @@ async function rememberRepo(repo, branch) {
 }
 
 // 共享导入逻辑(/import 与 /update 复用):下载 ids 对应 skill 覆盖到本机,并记来源。
-async function doImport(repo, branchArg, ids, overwrite) {
-  const { skills, files, branch } = await loadRepo(repo, branchArg);
+async function doImport(repo, branchArg, ids, overwrite, force = false) {
+  const { skills, files, branch } = await loadRepo(repo, branchArg, force);
   const byId = new Map(skills.map((s) => [s.id, s]));
   const imported = [], conflicts = [], failed = [];
   const sourcesPatch = {}; // 只累积本次新增的来源,收尾 mergeSources 串行合并(防并发覆盖丢记录)
@@ -297,7 +324,9 @@ async function doImport(repo, branchArg, ids, overwrite) {
     // 原封不动(避免"更新失败反把能用的删了")。临时目录在 IMPORT_TMP_DIR(skills/ 之外,claude 不扫
     // → 下载期间不会被当成假 skill 加载);仍在 ~/.claude 同一 FS,rename 原子。全新导入半截失败也不留残缺。
     const tmp = join(IMPORT_TMP_DIR, `${id}-${Date.now()}`);
+    let dstashed = null; // 旧版本暂存路径(替换失败时回滚)
     try {
+      await mkdir(SKILLS_DIR, { recursive: true });   // 新机首次导入 skills/ 可能不存在,否则 rename ENOENT
       await mkdir(IMPORT_TMP_DIR, { recursive: true });
       for (const f of blobs) {
         const rel = f.path.slice(meta.root.length + 1); // 相对 skill 根
@@ -307,12 +336,22 @@ async function doImport(repo, branchArg, ids, overwrite) {
         if (!raw.ok) throw new Error(`下载 ${rel} HTTP ${raw.status}`);
         await writeFile(target, Buffer.from(await raw.arrayBuffer()));
       }
-      await rm(dest, { recursive: true, force: true }); // 清旧版本(含上游已删文件);不存在则 no-op
-      await rename(tmp, dest);
+      // 原子替换:先把旧版本 rename 到暂存(而非直接 rm),再 rename 新版本就位。
+      // 若第二步失败(Win 杀毒/索引器锁目录致 EPERM),回滚旧版本 —— 避免"旧的删了新的没进=技能凭空消失"。
+      const existed = await stat(dest).then(() => true).catch(() => false);
+      if (existed) { dstashed = `${dest}.old-${Date.now()}`; await rename(dest, dstashed); }
+      try {
+        await rename(tmp, dest);
+      } catch (e) {
+        if (dstashed) { await rename(dstashed, dest).catch(() => {}); dstashed = null; } // 回滚,旧 skill 复位
+        throw e;
+      }
+      if (dstashed) { await rm(dstashed, { recursive: true, force: true }).catch(() => {}); dstashed = null; }
       imported.push(id);
       sourcesPatch[id] = { repo, branch, root: meta.root }; // 记来源供"更新"
     } catch (e) {
-      await rm(tmp, { recursive: true, force: true }).catch(() => {}); // 清半成品,旧 skill 不动
+      await rm(tmp, { recursive: true, force: true }).catch(() => {}); // 清半成品
+      if (dstashed) { await rename(dstashed, dest).catch(() => {}); } // 兜底:任何异常都让旧版本复位
       failed.push({ id, error: e.message });
     }
   }
@@ -393,7 +432,7 @@ router.post('/skills/update', async (req, res) => {
   const src = sources[id];
   if (!src?.repo) return res.status(400).json({ error: '该 skill 无来源记录(非从 GitHub 仓库导入,无法自动更新)' });
   try {
-    const r = await doImport(src.repo, src.branch, [id], true);
+    const r = await doImport(src.repo, src.branch, [id], true, true); // force:绕过 repoCache 拿最新 tree
     if (r.imported.includes(id)) {
       // 读更新后的 frontmatter version(有则回传,前端弹窗"已更新为 vX")
       const fm = parseFrontmatter(await readSkillMd(join(SKILLS_DIR, id)) || '');
