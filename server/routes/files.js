@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { readdir, stat, readFile, realpath, writeFile } from 'fs/promises';
+import { readdir, stat, readFile, realpath, writeFile, rm } from 'fs/promises';
 import { createReadStream } from 'fs';
 import { join, resolve, relative, extname, isAbsolute } from 'path';
 import { homedir, platform } from 'os';
@@ -255,6 +255,31 @@ router.put('/files/write', async (req, res) => {
     await writeFile(real, content, 'utf-8');
     const after = await stat(real);
     res.json({ ok: true, path: real, size: after.size });
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
+/**
+ * POST /api/files/delete  { path }
+ * Delete a file or directory (recursive). safePath() enforces $HOME / known-
+ * workspace containment and requires the path to exist. Protected config
+ * files (auth/provider) are refused, same as the write endpoint. The 10s
+ * undo window lives in the CLIENT (delayed submit) — by the time this
+ * endpoint is hit the deletion is final.
+ */
+router.post('/files/delete', async (req, res) => {
+  try {
+    const real = await safePath(req.body?.path);
+    if (PROTECTED_WRITE_RELPATHS.has(relative(HOME, real))) {
+      return res.status(403).json({ error: '该文件受保护,不可删除' });
+    }
+    // 拒绝删除 HOME 本身/已知工作区根:误触根节点的兜底(树 UI 不给根出删除项,双保险)。
+    if (real === HOME || real === resolve(req.body?.rootPath || '')) {
+      return res.status(400).json({ error: '不允许删除根目录' });
+    }
+    await rm(real, { recursive: true, force: false });
+    res.json({ ok: true, path: real });
   } catch (err) {
     res.status(err.status || 500).json({ error: err.message });
   }

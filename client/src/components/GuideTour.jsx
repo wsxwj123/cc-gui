@@ -6,7 +6,7 @@ import { X, ArrowRight, ArrowLeft } from 'lucide-react';
 
 // 顶栏功能面板按钮(与 PANEL_MAP 同序)。逐个圈。
 const PANEL_STEPS = [
-  ['panel-files', '文件', '浏览当前项目的文件树,点开任意文件查看或编辑。\n· 图片 / PDF / Word / Excel / PPT / 文本都能直接看\n· html / svg / mermaid 可内联渲染,也可侧边停靠放大\n· 文本类文件可直接编辑并保存(带撤销/重做)'],
+  ['panel-files', '文件', '浏览当前项目的文件树,点开任意文件查看或编辑。\n· 图片 / PDF / Word / Excel / PPT / 文本都能直接看\n· html / svg / mermaid 可内联渲染,也可侧边停靠放大\n· 文本类文件可直接编辑并保存(带撤销/重做)\n· 右键文件/文件夹:添加到上下文(输入框自动 @ 该文件)、用默认 App 打开、删除(10 秒内可撤销)'],
   ['panel-changes', '审查', '按 AI 的每个回合查看它改动了哪些文件。\n· 列出每回合新增/修改/删除的文件\n· 逐个文件看具体改动 diff(增删了哪些行)\n· 可回滚到某个回合改动之前的状态'],
   ['panel-monitor', '监控', '看 AI 派出去的代理在干什么。\n· 上半:子代理(Task)实时状态树,每个在跑什么、可逐个停止\n· 下半「后台代理」:一句话派一个无人值守的后台任务,查看它在等什么/进度/结果,一键停止(走官方 claude stop,只停目标不连坐)\n· 各区块均可折叠/展开;结束超过 30 天的后台代理自动不再显示'],
   ['panel-agents', 'Agent', '管理自定义子代理(存在 ~/.claude/agents 的 .md,定义名称/模型/可用工具/系统提示词)。\n· 新建 / 编辑 / 删除子代理\n· 一键安装内置预设:explorer(探索)、oracle(架构顾问)、orchestrator(编排)、designer、fixer 等'],
@@ -44,7 +44,7 @@ function buildSteps(hasProject) {
     ['pane-count', '分屏', '把界面分成 1–6 个窗格,并排同时看和操作多个会话。\n· 每个窗格的模型 / 权限模式相互独立'],
     ...PANEL_STEPS,
     ['theme-toggle', '主题与外观', '外观相关设置:\n· 配色主题(多套深浅色可选)\n· 界面字号、对话正文字号\n· AI 思考时的加载动画样式(30 种可选)'],
-    ['composer', '输入框', '· Cmd/Ctrl+Enter 发送、Enter 换行\n· 输入 / 打开命令面板(含 /branch 分叉、/goal 目标、插件命令等)\n· 输入 @ 打开引用选择器:引用项目文件,或把本项目其它会话的内容注入当前对话(Tab 切换文件/会话)\n· 可【拖入】图片 / PDF / Word / Excel / PPT 等文件\n· Cmd/Ctrl+Z 撤销输入\n· AI 回复中再输入会入队;输入框为空时按 ↑ 键召回最近入队的消息'],
+    ['composer', '输入框', '· Cmd/Ctrl+Enter 发送、Enter 换行\n· 输入 / 打开命令面板(含 /branch 分叉、/goal 目标、插件命令等)\n· 输入 @ 打开引用选择器:按目录层级浏览项目文件(点文件夹进入、「返回上级」回退),输入关键词则全局搜索;Tab 切到会话页可把本项目其它会话的内容注入当前对话\n· 可【拖入】图片 / PDF / Word / Excel / PPT 等文件\n· Cmd/Ctrl+Z 撤销输入\n· AI 回复中再输入会入队;输入框为空时按 ↑ 键召回最近入队的消息'],
   );
   return steps.map(([sel, title, desc]) => ({ sel, title, desc }));
 }

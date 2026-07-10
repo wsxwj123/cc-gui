@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Send, Loader2, Square, Terminal, Puzzle, Wrench, Gauge, ChevronDown, X, FileText, Paperclip, Shield, ShieldOff, ClipboardList, Check, Pencil, Smartphone, Workflow, AtSign, MessagesSquare } from 'lucide-react';
+import { Send, Loader2, Square, Terminal, Puzzle, Wrench, Gauge, ChevronDown, X, FileText, Paperclip, Shield, ShieldOff, ClipboardList, Check, Pencil, Smartphone, Workflow, AtSign, MessagesSquare, Folder, CornerLeftUp } from 'lucide-react';
 import { useStore, PERMISSION_MODES } from '../stores/sessionStore.js';
 import { PermissionPrompt } from './PermissionPrompt.jsx';
 import { TodoPanel } from './TodoPanel.jsx';
@@ -242,7 +242,8 @@ export function ChatInput({ onSend, onStop, onAccelerate, disabled, isStreaming,
   // `@相对路径`(CLI 原生 @ 语法读文件),会话 tab 把该会话导出为精简 md 后插入 `@绝对路径`。
   const [atState, setAtState] = useState(null); // null | { query, start } start = '@' 在 text 中的下标
   const [atTab, setAtTab] = useState('files');  // 'files' | 'sessions'
-  const [atFiles, setAtFiles] = useState([]);
+  const [atFiles, setAtFiles] = useState([]);   // [{ kind:'up'|'dir'|'file', name, rel }]
+  const [atDir, setAtDir] = useState('');       // 层级浏览中的当前相对目录('' = 项目根)
   const [atIndex, setAtIndex] = useState(0);
   const [atBusy, setAtBusy] = useState(false);  // 会话引用生成中
   const atCtxRef = useRef({ cwd: '', projectHash: '' }); // 打开面板时快照,避免 selector 新引用重渲
@@ -327,7 +328,9 @@ export function ChatInput({ onSend, onStop, onAccelerate, disabled, isStreaming,
       if (!t) return;
       const targetKey = e?.detail?.targetKey;
       if (targetKey && targetKey !== permKey) return;
-      setText(t);
+      // append 模式(文件浏览器右键"添加到上下文"):在现有草稿末尾追加,不覆盖。
+      if (e?.detail?.append) setText((prev) => (prev && !/\s$/.test(prev) ? prev + ' ' : prev) + t);
+      else setText(t);
       if (e?.detail?.editMode) setEditingResend(true);
       const ta = textareaRef.current;
       if (ta) {
@@ -440,7 +443,7 @@ export function ChatInput({ onSend, onStop, onAccelerate, disabled, isStreaming,
           cwd: sess?.projectPath || st.selectedProject?.path || '',
           projectHash: sess?.projectHash || st.selectedProject?.hash || '',
         };
-        setAtTab('files'); setAtIndex(0);
+        setAtTab('files'); setAtIndex(0); setAtDir('');
       }
       setAtState({ query: m[2], start: caret - m[2].length - 1 });
     } else if (atState) setAtState(null);
@@ -546,19 +549,40 @@ export function ChatInput({ onSend, onStop, onAccelerate, disabled, isStreaming,
   };
 
   // ── @ 引用选择器 ──────────────────────────────────────────────
-  // 文件 tab:debounce 后打 /api/files/search(git ls-files / 递归,后端 15s 缓存)。
+  // 文件 tab 两种模式:
+  //  · 无查询 → 按文件浏览器的层级浏览(/api/files/list 列当前层,目录在前;点目录下钻,
+  //    「..」返回上级)——全部平铺在大项目里太混乱(用户反馈)。
+  //  · 有查询 → 全局模糊搜索(/api/files/search,git ls-files / 递归,后端 15s 缓存)。
   useEffect(() => {
     if (!atState || atTab !== 'files') return;
     const cwd = atCtxRef.current.cwd;
     if (!cwd) { setAtFiles([]); return; }
-    const t = setTimeout(() => {
-      fetch(`/api/files/search?cwd=${encodeURIComponent(cwd)}&q=${encodeURIComponent(atState.query)}`)
+    const q = atState.query;
+    if (!q) {
+      let cancelled = false;
+      const dirAbs = atDir ? `${cwd}/${atDir}` : cwd;
+      fetch(`/api/files/list?path=${encodeURIComponent(dirAbs)}`)
         .then((r) => r.json())
-        .then((d) => setAtFiles(d.files || []))
+        .then((d) => {
+          if (cancelled) return;
+          const items = (d.entries || []).map((e) => ({
+            kind: e.isDir ? 'dir' : 'file',
+            name: e.name,
+            rel: atDir ? `${atDir}/${e.name}` : e.name,
+          }));
+          setAtFiles(atDir ? [{ kind: 'up', name: '..', rel: '' }, ...items] : items);
+        })
+        .catch(() => { if (!cancelled) setAtFiles([]); });
+      return () => { cancelled = true; };
+    }
+    const t = setTimeout(() => {
+      fetch(`/api/files/search?cwd=${encodeURIComponent(cwd)}&q=${encodeURIComponent(q)}`)
+        .then((r) => r.json())
+        .then((d) => setAtFiles((d.files || []).map((f) => ({ kind: 'file', name: f, rel: f }))))
         .catch(() => setAtFiles([]));
     }, 180);
     return () => clearTimeout(t);
-  }, [atState?.query, atTab, !!atState]);
+  }, [atState?.query, atTab, !!atState, atDir]);
 
   // 会话 tab:store 里当前项目的会话列表,按首条提示词过滤,排除当前会话自己。
   const atSessions = (() => {
@@ -570,13 +594,17 @@ export function ChatInput({ onSend, onStop, onAccelerate, disabled, isStreaming,
       .slice(0, 20);
   })();
   const atItems = atTab === 'files' ? atFiles : atSessions;
-  useEffect(() => { setAtIndex(0); }, [atTab, atState?.query]);
+  useEffect(() => { setAtIndex(0); }, [atTab, atState?.query, atDir]);
 
-  // 选中:文件插 `@相对路径 `;会话先调 /api/session-ref 生成精简 md 再插 `@绝对路径 `。
+  // 选中:目录下钻/「..」返回上级(面板不关);文件插 `@相对路径 `;
+  // 会话先调 /api/session-ref 生成精简 md 再插 `@绝对路径 `。
   const pickAtItem = async (item) => {
     let insert = '';
-    if (atTab === 'files') insert = item;
-    else {
+    if (atTab === 'files') {
+      if (item.kind === 'up') { setAtDir((d) => d.split('/').slice(0, -1).join('/')); return; }
+      if (item.kind === 'dir') { setAtDir(item.rel); return; }
+      insert = item.rel;
+    } else {
       setAtBusy(true);
       try {
         const r = await fetch('/api/session-ref', {
@@ -828,8 +856,14 @@ export function ChatInput({ onSend, onStop, onAccelerate, disabled, isStreaming,
                 className={`text-[11px] px-2 py-0.5 rounded font-body ${atTab === 'sessions' ? 'bg-accent/15 text-accent' : 'text-ink-faint hover:text-ink'}`}>
                 会话
               </button>
-              <span className="ml-auto text-[10px] text-ink-ghost font-body">Tab 切换 · Enter 选择</span>
+              <span className="ml-auto text-[10px] text-ink-ghost font-body">Tab 切换 · Enter 选择/进入</span>
             </div>
+            {/* 层级浏览时显示当前所在目录(面包屑) */}
+            {atTab === 'files' && !atState.query && atDir && (
+              <div className="px-3 py-1 border-b border-white/10 text-[10px] font-mono text-ink-faint truncate">
+                {atDir}/
+              </div>
+            )}
             {atBusy && (
               <div className="px-3 py-3 text-[11px] text-ink-faint font-body flex items-center gap-2">
                 <Loader2 size={12} className="animate-spin" />正在生成会话引用...
@@ -843,10 +877,14 @@ export function ChatInput({ onSend, onStop, onAccelerate, disabled, isStreaming,
               </div>
             )}
             {!atBusy && atTab === 'files' && atFiles.map((f, i) => (
-              <button key={f} onClick={() => pickAtItem(f)}
+              <button key={f.kind === 'up' ? '..' : f.rel} onClick={() => pickAtItem(f)}
                 className={`w-full text-left px-3 py-2 flex items-center gap-2 transition-colors ${i === atIndex ? 'bg-accent/12' : 'hover:bg-black/5'}`}>
-                <FileText size={12} className="text-accent shrink-0" />
-                <span className="text-[11px] font-mono text-ink-soft truncate">{f}</span>
+                {f.kind === 'up' ? <CornerLeftUp size={12} className="text-ink-faint shrink-0" />
+                  : f.kind === 'dir' ? <Folder size={12} className="text-amber-600 shrink-0" />
+                  : <FileText size={12} className="text-accent shrink-0" />}
+                <span className="text-[11px] font-mono text-ink-soft truncate">
+                  {f.kind === 'up' ? '返回上级' : atState.query ? f.rel : f.name}{f.kind === 'dir' ? '/' : ''}
+                </span>
               </button>
             ))}
             {!atBusy && atTab === 'sessions' && atSessions.map((s, i) => (

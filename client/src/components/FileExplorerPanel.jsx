@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react';
-import { Folder, FolderOpen, File, RefreshCw, AlertCircle, ChevronRight, ChevronDown, FileText, Image as ImageIcon, ExternalLink, Film, Pencil, Save, Undo2, Redo2, X, Check } from 'lucide-react';
+import { Folder, FolderOpen, File, RefreshCw, AlertCircle, ChevronRight, ChevronDown, FileText, Image as ImageIcon, ExternalLink, Film, Pencil, Save, Undo2, Redo2, X, Check, Trash2, AtSign } from 'lucide-react';
 import { useStore } from '../stores/sessionStore.js';
 import { MarkdownRenderer } from './MarkdownRenderer.jsx';
 import { ArtifactPreview } from './ArtifactPreview.jsx';
@@ -112,6 +112,71 @@ export function FileExplorerPanel() {
     }
   }, []);
 
+  // ── 右键菜单 + 删除(10s 可撤销) ──────────────────────────────
+  // 删除 = 前端延迟提交:点删除后条目立即从树里隐藏、出可撤销横条倒计时,10 秒后才真调
+  // 后端删除;撤销 = 取消定时器恢复显示。失败方向安全:10s 内退出 app 文件"没删成"而非误删。
+  const [ctxMenu, setCtxMenu] = useState(null); // { x, y, entry:{path,name,isDir,isRoot,parentPath} }
+  const [pending, setPending] = useState({});   // path -> { name, deadline, parentPath }
+  const [nowTick, setNowTick] = useState(Date.now());
+  const timersRef = useRef({});
+  const pendingCount = Object.keys(pending).length;
+  useEffect(() => {
+    if (!pendingCount) return;
+    const id = setInterval(() => setNowTick(Date.now()), 500);
+    return () => clearInterval(id);
+  }, [pendingCount]);
+
+  const onCtx = useCallback((e, entry) => {
+    e.preventDefault();
+    e.stopPropagation();
+    // 贴边防溢出:菜单约 190x120,离视口边缘留余量
+    const x = Math.min(e.clientX, window.innerWidth - 200);
+    const y = Math.min(e.clientY, window.innerHeight - 150);
+    setCtxMenu({ x, y, entry });
+  }, []);
+
+  const addToContext = () => {
+    const { path } = ctxMenu.entry;
+    let rel = rootPath && path.startsWith(rootPath) ? path.slice(rootPath.length).replace(/^[/\\]+/, '') : path;
+    rel = rel.replace(/\\/g, '/');
+    // targetKey 与 SessionDetail 的 sessionQueueKey 同构,分屏时只填活跃 pane 的输入框
+    const targetKey = activeSession?.sessionId || `draft-${activeSession?.projectHash || 'none'}`;
+    window.dispatchEvent(new CustomEvent('cgui:composer-fill', { detail: { text: `@${rel} `, append: true, targetKey } }));
+    setCtxMenu(null);
+  };
+
+  const startDelete = () => {
+    const { path, name, parentPath } = ctxMenu.entry;
+    setCtxMenu(null);
+    // 删除的是当前预览的文件(或其所在目录)→ 立即清预览
+    setPreview((p) => (p && (p.path === path || p.path.startsWith(path + '/')) ? null : p));
+    setSelectedFile((sf) => (sf && (sf === path || sf.startsWith(path + '/')) ? null : sf));
+    timersRef.current[path] = setTimeout(async () => {
+      delete timersRef.current[path];
+      try {
+        const r = await fetch('/api/files/delete', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ path, rootPath }),
+        });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(d.error || `${r.status}`);
+      } catch (err) {
+        const { confirmDialog } = await import('../utils/confirmDialog.jsx');
+        confirmDialog(`删除失败:${err.message}`, { confirmText: '知道了' });
+      }
+      setPending((prev) => { const n = { ...prev }; delete n[path]; return n; });
+      if (parentPath) fetchDir(parentPath);
+    }, 10_000);
+    setNowTick(Date.now()); // 初显就用当前时刻,避免陈旧 tick 让倒计时首帧显示错误秒数
+    setPending((prev) => ({ ...prev, [path]: { name, deadline: Date.now() + 10_000, parentPath } }));
+  };
+
+  const undoDelete = (path) => {
+    clearTimeout(timersRef.current[path]);
+    delete timersRef.current[path];
+    setPending((prev) => { const n = { ...prev }; delete n[path]; return n; });
+  };
+
   if (!rootPath) {
     return (
       <div className="px-4 py-8 text-center text-[12px] text-ink-faint font-body">
@@ -134,19 +199,60 @@ export function FileExplorerPanel() {
             title="刷新"
           ><RefreshCw size={11} /></button>
         </div>
+        {/* 待删除横条:每项独立 10s 倒计时,点撤销恢复 */}
+        {Object.entries(pending).map(([p, info]) => (
+          <div key={p} className="mx-2 mb-1 px-2 py-1.5 rounded-lg bg-red-500/10 border border-red-500/20 flex items-center gap-2">
+            <Trash2 size={11} className="text-red-600 shrink-0" />
+            <span className="text-[11px] font-mono text-ink truncate flex-1" title={p}>{info.name}</span>
+            <span className="text-[10px] text-ink-faint font-mono shrink-0">
+              {Math.max(0, Math.ceil((info.deadline - nowTick) / 1000))}s
+            </span>
+            <button onClick={() => undoDelete(p)}
+              className="text-[11px] text-accent hover:underline shrink-0 font-body">撤销</button>
+          </div>
+        ))}
         <TreeNode
           path={rootPath}
           name={rootPath.split(/[/\\]+/).slice(-1)[0] || '/'}
           depth={0}
           isDir
           isRoot
+          parentPath={null}
           expanded={expanded}
           dirs={dirs}
           toggle={toggle}
           openFile={openFile}
           selectedFile={selectedFile}
+          onCtx={onCtx}
+          hidden={pending}
         />
       </div>
+
+      {/* 自建右键菜单(Tauri webview 无原生右键):遮罩点击即关 */}
+      {ctxMenu && (
+        <div className="fixed inset-0 z-40"
+          onMouseDown={() => setCtxMenu(null)}
+          onContextMenu={(e) => { e.preventDefault(); setCtxMenu(null); }}>
+          <div className="absolute glass-popover py-1 min-w-[180px] shadow-lg"
+            style={{ left: ctxMenu.x, top: ctxMenu.y }}
+            onMouseDown={(e) => e.stopPropagation()}>
+            <button onClick={addToContext}
+              className="w-full text-left px-3 py-1.5 text-[12px] font-body text-ink hover:bg-accent/10 flex items-center gap-2">
+              <AtSign size={12} className="text-accent shrink-0" />添加到上下文
+            </button>
+            <button onClick={() => { openWithDefaultApp(ctxMenu.entry.path); setCtxMenu(null); }}
+              className="w-full text-left px-3 py-1.5 text-[12px] font-body text-ink hover:bg-accent/10 flex items-center gap-2">
+              <ExternalLink size={12} className="text-ink-faint shrink-0" />用默认 App 打开
+            </button>
+            {!ctxMenu.entry.isRoot && (
+              <button onClick={startDelete}
+                className="w-full text-left px-3 py-1.5 text-[12px] font-body text-red-600 hover:bg-red-500/10 flex items-center gap-2">
+                <Trash2 size={12} className="shrink-0" />删除(10 秒内可撤销)
+              </button>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* Draggable splitter */}
       <Splitter onMouseDown={onSplitDrag} axis="y" />
@@ -165,7 +271,7 @@ export function FileExplorerPanel() {
   );
 }
 
-function TreeNode({ path, name, depth, isDir, isRoot, expanded, dirs, toggle, openFile, selectedFile }) {
+function TreeNode({ path, name, depth, isDir, isRoot, parentPath, expanded, dirs, toggle, openFile, selectedFile, onCtx, hidden }) {
   const isOpen = expanded.has(path);
   const dir = dirs[path];
   const isSelected = selectedFile === path;
@@ -173,6 +279,7 @@ function TreeNode({ path, name, depth, isDir, isRoot, expanded, dirs, toggle, op
     <div>
       <div
         onClick={() => isDir ? toggle(path, true) : openFile({ path, name, size: 0 })}
+        onContextMenu={(e) => onCtx && onCtx(e, { path, name, isDir, isRoot: !!isRoot, parentPath })}
         className={`flex items-center gap-1 px-2 py-0.5 rounded cursor-pointer text-[12px] font-body select-none ${
           isSelected ? 'bg-accent/15 text-accent' : 'hover:bg-canvas-warm text-ink'
         }`}
@@ -204,18 +311,21 @@ function TreeNode({ path, name, depth, isDir, isRoot, expanded, dirs, toggle, op
               <AlertCircle size={10} />{dir.error}
             </div>
           )}
-          {dir.entries?.map((e) => (
+          {dir.entries?.filter((e) => !hidden || !hidden[e.path]).map((e) => (
             <TreeNode
               key={e.path}
               path={e.path}
               name={e.name}
               depth={depth + 1}
               isDir={e.isDir}
+              parentPath={path}
               expanded={expanded}
               dirs={dirs}
               toggle={toggle}
               openFile={openFile}
               selectedFile={selectedFile}
+              onCtx={onCtx}
+              hidden={hidden}
             />
           ))}
         </>
