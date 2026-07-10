@@ -20,6 +20,9 @@ const ARCHIVE_DIR = join(homedir(), '.claude', 'skills-archive');
 // 临时目录当成 skill 加载(用户会话冒出 `.xxx.tmp-...` 假 skill)。移出 skills/ 根治;仍在
 // ~/.claude 同一文件系统,rename 到 skills/<id> 保持原子。
 const IMPORT_TMP_DIR = join(homedir(), '.claude', '.cgui-skill-tmp');
+// 启动时清空导入临时目录:它定义上只在单次导入期间存在,进程崩溃/被杀会遗留半成品目录,
+// 无其它清理时机 → 长期堆垃圾。fire-and-forget,失败无所谓(下次导入照常)。
+rm(IMPORT_TMP_DIR, { recursive: true, force: true }).catch(() => {});
 // 排除纯点名(`.`/`..`):否则 join(SKILLS_DIR, '..') = ~/.claude,delete/archive 端点会 rm 掉整个配置目录。
 const ID_RE = /^(?!\.+$)[a-zA-Z0-9._-]+$/;
 const GH_HEADERS = { 'User-Agent': 'claude-gui-skills', 'Accept': 'application/vnd.github+json' };

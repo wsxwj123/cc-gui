@@ -135,6 +135,11 @@ export function SkillsPanel() {
   // 解析 owner/repo、owner/repo@branch、或 GitHub 地址(含 /tree/<branch>)→ 加载该仓库/分支的 skill。
   const loadCustomRepo = useCallback(() => {
     const raw = customRepo.trim();
+    // 明确的非 GitHub 完整 URL(gitlab/gitee 等)直接拒:否则兜底 regex 会把 `gitlab.com/owner`
+    // 误当成 owner/repo 拿去请求 GitHub API 得到误导性 404。
+    if (/^https?:\/\//i.test(raw) && !/(^|\/\/|\.)github\.com\//i.test(raw)) {
+      setOffErr('仅支持 GitHub 仓库(github.com)'); return;
+    }
     let repo = '', branch = '';
     let m = raw.match(/github\.com\/([\w.-]+\/[\w.-]+?)(?:\.git)?\/tree\/([\w.\/-]+?)\/?$/i); // …/tree/<branch>
     if (m) { repo = m[1]; branch = m[2]; }
@@ -226,18 +231,18 @@ export function SkillsPanel() {
                     {s.version && <span className="shrink-0 text-[10px] px-1 py-px bg-canvas-deep text-ink-faint rounded font-mono">v{s.version}</span>}
                     <SkillCopyBtn name={s.id} />
                     {sourcesMap[s.id]?.repo && (
-                      <button onClick={(e) => { e.stopPropagation(); updateSkill(s.id); }} disabled={manageBusy === s.id}
+                      <button onClick={(e) => { e.stopPropagation(); updateSkill(s.id); }} disabled={!!manageBusy}
                         title={`从来源更新 —— ${sourcesMap[s.id].repo}${sourcesMap[s.id].branch ? '@' + sourcesMap[s.id].branch : ''},覆盖本机旧版本`}
                         className="shrink-0 p-1 rounded text-ink-faint hover:text-accent hover:bg-accent/10 disabled:opacity-50">
                         {manageBusy === s.id ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />}
                       </button>
                     )}
-                    <button onClick={(e) => { e.stopPropagation(); manageSkill('archive', s.id); }} disabled={manageBusy === s.id}
+                    <button onClick={(e) => { e.stopPropagation(); manageSkill('archive', s.id); }} disabled={!!manageBusy}
                       title="归档 —— 移出加载目录停用,可在「已归档」恢复"
                       className="shrink-0 p-1 rounded text-ink-faint hover:text-ink hover:bg-canvas-deep disabled:opacity-50">
                       {manageBusy === s.id ? <Loader2 size={12} className="animate-spin" /> : <Archive size={12} />}
                     </button>
-                    <button onClick={(e) => { e.stopPropagation(); manageSkill('delete', s.id); }} disabled={manageBusy === s.id}
+                    <button onClick={(e) => { e.stopPropagation(); manageSkill('delete', s.id); }} disabled={!!manageBusy}
                       title="删除 —— 永久移除,需重新下载"
                       className="shrink-0 p-1 rounded text-ink-faint hover:text-error hover:bg-error/10 disabled:opacity-50">
                       <Trash2 size={12} />
@@ -264,11 +269,11 @@ export function SkillsPanel() {
                   className="bg-canvas-warm border border-canvas-deep rounded-lg p-3 cursor-pointer" title="点击展开/收起完整简介">
                   <div className="flex items-center gap-2">
                     <span className="text-xs font-medium font-body text-ink-muted truncate flex-1" title={s.id}>{s.name}</span>
-                    <button onClick={(e) => { e.stopPropagation(); manageSkill('restore', s.id); }} disabled={manageBusy === s.id}
+                    <button onClick={(e) => { e.stopPropagation(); manageSkill('restore', s.id); }} disabled={!!manageBusy}
                       className="shrink-0 text-[10px] px-2 py-0.5 rounded bg-accent/10 text-accent hover:bg-accent/20 flex items-center gap-1 disabled:opacity-50">
                       {manageBusy === s.id ? <Loader2 size={10} className="animate-spin" /> : <RotateCcw size={10} />}恢复
                     </button>
-                    <button onClick={(e) => { e.stopPropagation(); manageSkill('delete', s.id); }} disabled={manageBusy === s.id}
+                    <button onClick={(e) => { e.stopPropagation(); manageSkill('delete', s.id); }} disabled={!!manageBusy}
                       title="彻底删除归档"
                       className="shrink-0 p-1 rounded text-ink-faint hover:text-error hover:bg-error/10 disabled:opacity-50">
                       <Trash2 size={12} />
@@ -299,7 +304,7 @@ export function SkillsPanel() {
             <input
               type="text" value={customRepo}
               onChange={(e) => setCustomRepo(e.target.value)}
-              onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); loadCustomRepo(); } }}
+              onKeyDown={(e) => { if (e.key === 'Enter' && !e.nativeEvent?.isComposing && e.keyCode !== 229) { e.preventDefault(); loadCustomRepo(); } }}
               placeholder="owner/repo、owner/repo@分支、或含 /tree/分支 的地址"
               className="flex-1 min-w-0 bg-canvas border border-canvas-deep rounded-md px-2 py-1 text-[11px] text-ink placeholder-ink-ghost focus:outline-none focus:border-accent/40 font-mono" />
             <button onClick={loadCustomRepo} disabled={loadingOff || !customRepo.trim()}
@@ -379,12 +384,12 @@ export function SkillsPanel() {
                     {s.version && <span className="shrink-0 text-[10px] px-1 py-px bg-canvas-deep text-ink-faint rounded font-mono">v{s.version}</span>}
                     <SkillCopyBtn name={s.id} />
                     {s.installed ? (
-                      <button onClick={(e) => { e.stopPropagation(); runImport([s.id], true, s.id); }} disabled={busy === s.id}
+                      <button onClick={(e) => { e.stopPropagation(); runImport([s.id], true, s.id); }} disabled={!!busy}
                         className="shrink-0 text-[10px] px-2 py-0.5 rounded border border-canvas-deep text-ink-faint hover:text-ink hover:bg-canvas-deep flex items-center gap-1 disabled:opacity-50" title="已安装 — 点击用该源最新版本覆盖">
                         {busy === s.id ? <Loader2 size={10} className="animate-spin" /> : <Check size={10} className="text-success" />}已装·可更新覆盖
                       </button>
                     ) : (
-                      <button onClick={(e) => { e.stopPropagation(); runImport([s.id], false, s.id); }} disabled={busy === s.id}
+                      <button onClick={(e) => { e.stopPropagation(); runImport([s.id], false, s.id); }} disabled={!!busy}
                         className="shrink-0 text-[10px] px-2 py-0.5 rounded bg-accent/10 text-accent hover:bg-accent/20 flex items-center gap-1 disabled:opacity-50">
                         {busy === s.id ? <Loader2 size={10} className="animate-spin" /> : <Download size={10} />}导入
                       </button>

@@ -357,6 +357,14 @@ router.get('/claude-version-check', async (req, res) => {
   const { method, path: claudePath } = await detectInstall();
   const currentVersion = await getClaudeVersion(claudePath);
   if (!currentVersion) {
+    // 区分两种落空:①完全没解析到二进制 = 真未安装;②解析到路径但 --version 超时/异常
+    // (杀毒实时扫描、npm shim 里 node 冷启动 >8s)= 已装但探测失败,别误报"未安装"诱导重装。
+    if (claudePath) {
+      return res.json({
+        currentVersion: null, installed: true, method,
+        error: '已检测到 Claude 但读取版本超时(可能被杀毒扫描拦截),稍后重试',
+      });
+    }
     return res.json({
       currentVersion: null, installed: false,
       installCommand: installCmdFor(),
@@ -692,8 +700,10 @@ router.get('/env-check', async (req, res) => {
     // resolvedPath/via:实际解析到的二进制位置与命中策略(PATH / login-shell /
     // npm-prefix / known-path),检测面板据此展示"从哪找到的"。
     claude: {
-      installed: !!claudeVersion, version: claudeVersion || null, method, required: true,
+      // 解析到路径即算已装(即便 --version 超时未取到版本号),避免"已装但探测慢"被误报未安装。
+      installed: !!claudePath, version: claudeVersion || null, method, required: true,
       resolvedPath: claudePath || null, via: via || null,
+      versionProbeFailed: !!claudePath && !claudeVersion,
     },
     git: { installed: git.installed, version: git.version || null, required: false },
     python: { installed: python.installed, version: python.version || null, required: false },

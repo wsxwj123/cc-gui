@@ -141,9 +141,11 @@ async function fromNpmPrefixAsync() {
 }
 async function fromWinLivePathAsync() {
   if (!isWin) return [];
-  const out = await safeExecAsync('powershell', ['-NoProfile', '-NonInteractive', '-Command', WIN_LIVE_PATH_PS], 8000);
+  // 复用 winLivePathDirsAsync 的 30s 缓存,而非自己再 spawn 一个 powershell —— env-check 刚把
+  // live PATH 缓存热了,claude-installs 不该再冷启动一个 powershell(白白多一次几秒开销)。
+  const dirs = await winLivePathDirsAsync();
   const cands = [];
-  for (const d of out.split(';').map((s) => s.trim()).filter(Boolean)) cands.push(join(d, 'claude.exe'), join(d, 'claude.cmd'));
+  for (const d of dirs) cands.push(join(d, 'claude.exe'), join(d, 'claude.cmd'));
   return cands;
 }
 
@@ -280,7 +282,9 @@ export function resolveClaude({ refresh = false } = {}) {
     return hit;
   }
   _cache = null;
-  _missAt = Date.now();
+  // refresh(显式检查)落空不武装 15s 负缓存:更新空窗内前端焦点触发的检查若续期负缓存,
+  // 紧接着聊天 spawn 走 resolveClaude() 会吃到负缓存返回 null → 回落裸 'claude'。显式检查只读真相。
+  if (!refresh) _missAt = Date.now();
   return null;
 }
 
@@ -321,19 +325,21 @@ export async function resolveClaudeAsync({ refresh = false } = {}) {
     return hit;
   }
   _cache = null;
-  _missAt = Date.now();
+  if (!refresh) _missAt = Date.now(); // 同步版注释:显式检查落空不武装负缓存
   return null;
 }
 
 /**
  * 组装可直接交给 execFile/spawn 的 { file, args }。
- * Windows 上 .cmd/.bat 不是真正可执行文件,必须经 cmd.exe /c;解析失败时回落裸
- * 'claude'(Win 也经 cmd.exe 让 PATHEXT 兜底),保持旧行为。
+ * Windows 上除 .exe 外(.cmd/.bat/裸 'claude'/`where` 给的无扩展名 shim 路径如 ...\npm\claude)
+ * 都不是 Node 能直接执行的真可执行文件,必须经 cmd.exe /c(cmd 按 PATHEXT 兜底解析)。
+ * 此前只匹配 .cmd/.bat/.ps1/裸 'claude',漏了无扩展名解析路径 → execFile 直接跑抛 ENOENT,
+ * 出现"版本检测正常(getClaudeVersion 对所有 Win 路径都经 cmd.exe)但 MCP/agents 全挂"的割裂。
  */
 export function claudeCommand(args = []) {
   const hit = resolveClaude();
   const bin = hit ? hit.path : 'claude';
-  if (isWin && (bin === 'claude' || /\.(cmd|bat|ps1)$/i.test(bin))) {
+  if (isWin && !/\.exe$/i.test(bin)) {
     return { file: 'cmd.exe', args: ['/c', bin, ...args] };
   }
   return { file: bin, args };
@@ -379,13 +385,21 @@ export function listClaudeInstalls() {
 // connecting、设置页一直加载中")。异步 spawn 让循环空转、其他请求照常。带 8s TTL 缓存,免
 // 设置页 mount + clickMethod + switchActive + check 反复全扫;setClaudeOverride 时清缓存。
 let _installsCache = null; // { at, list }
+let _installsInflight = null; // 进行中的解析 promise(并发去重)
 const INSTALLS_TTL_MS = 8_000;
 export async function listClaudeInstallsAsync() {
   if (_installsCache && Date.now() - _installsCache.at < INSTALLS_TTL_MS) return _installsCache.list;
-  const [p1, login, npm, live] = await Promise.all([fromPathAsync(), fromLoginShellAsync(), fromNpmPrefixAsync(), fromWinLivePathAsync()]);
-  const list = buildInstalls([p1, login, ...npm, ...live, ...fixedCandidates()]);
-  _installsCache = { at: Date.now(), list };
-  return list;
+  // in-flight 去重:设置页 mount 常同时发 /claude-installs 与 /env-check,两边并发 miss 会各跑
+  // 一整套 where/login-shell/npm/powershell 冷启动。第一个存 promise,后续并发直接 await 它。
+  if (_installsInflight) return _installsInflight;
+  _installsInflight = (async () => {
+    const [p1, login, npm, live] = await Promise.all([fromPathAsync(), fromLoginShellAsync(), fromNpmPrefixAsync(), fromWinLivePathAsync()]);
+    const list = buildInstalls([p1, login, ...npm, ...live, ...fixedCandidates()]);
+    _installsCache = { at: Date.now(), list };
+    return list;
+  })();
+  try { return await _installsInflight; }
+  finally { _installsInflight = null; }
 }
 
 /** 读当前覆盖路径('' = 未设,走自动优先级)。 */

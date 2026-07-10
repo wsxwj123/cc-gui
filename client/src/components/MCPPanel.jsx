@@ -394,12 +394,12 @@ export function MCPPanel() {
                       v{plugin.version}
                     </span>
                     <div className="ml-auto flex items-center gap-1">
-                      <button onClick={() => handleUpdatePlugin(plugin)} disabled={pluginActioning === plugin.name}
+                      <button onClick={() => handleUpdatePlugin(plugin)} disabled={!!pluginActioning}
                         title="更新到最新版(claude plugin update,新会话生效)"
                         className="p-1 rounded text-ink-faint hover:text-accent hover:bg-accent/10 disabled:opacity-50">
                         {pluginActioning === plugin.name ? <RefreshCw size={12} className="animate-spin" /> : <RefreshCw size={12} />}
                       </button>
-                      <button onClick={() => handleDeletePlugin(plugin)} disabled={pluginActioning === plugin.name}
+                      <button onClick={() => handleDeletePlugin(plugin)} disabled={!!pluginActioning}
                         title="卸载(claude plugin uninstall,卸载后可在「添加」重装)"
                         className="p-1 rounded text-ink-faint hover:text-error hover:bg-error/10 disabled:opacity-50">
                         <Trash2 size={12} />
@@ -468,14 +468,16 @@ export function MCPPanel() {
           交互对齐 McpForm 模态;安装逻辑复用 installPlugin,未改动。 */}
       {pluginAddOpen && (
         <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/40 backdrop-blur-sm animate-fade-in" onClick={() => setPluginAddOpen(false)}>
-          <div className="glass-popover w-[560px] max-w-[calc(var(--app-w,100vw)-1.5rem)] max-h-[90vh] overflow-y-auto rounded-2xl shadow-2xl animate-glass-rise"
+          <div className="glass-popover w-[560px] max-w-[calc(var(--app-w,100vw)-1.5rem)] max-h-[90vh] flex flex-col overflow-hidden rounded-2xl shadow-2xl animate-glass-rise"
             onClick={(e) => e.stopPropagation()}>
-            <div className="px-5 py-4 border-b border-canvas-deep flex items-center gap-3 sticky top-0 bg-canvas z-10">
+            {/* flex 列三段:animate-glass-rise 收尾留 transform,其内 sticky 头在 WKWebView 失效
+                (长列表滚动时头部含关闭按钮会跟着滚走)→ 头/尾 shrink-0 + 正文 flex-1 滚动。 */}
+            <div className="shrink-0 px-5 py-4 border-b border-canvas-deep flex items-center gap-3 bg-canvas">
               <button onClick={() => setPluginAddOpen(false)} className="p-1 -ml-1 text-ink-faint hover:text-ink rounded transition-colors" title="返回"><ArrowLeft size={16} /></button>
               <div className="flex-1 text-[14px] font-medium text-ink font-body">添加插件</div>
               <button onClick={() => setPluginAddOpen(false)} className="p-1.5 hover:bg-canvas-warm rounded transition-colors"><X size={14} className="text-ink-faint" /></button>
             </div>
-            <div className="px-5 py-4 space-y-3">
+            <div className="flex-1 overflow-y-auto min-h-0 px-5 py-4 space-y-3">
               <div className="text-[11px] text-ink-faint font-body leading-snug">
                 Anthropic 官方精选,安装后无需配置,新会话生效。带 MCP 标记的插件安装时自动配好对应 MCP,无需再手填。
               </div>
