@@ -37,6 +37,7 @@ export function SkillsPanel() {
   const [customRepo, setCustomRepo] = useState('');
   const [activeRepo, setActiveRepo] = useState(null);
   const [activeBranch, setActiveBranch] = useState('');   // #2 自定义仓库的指定分支('' = 默认分支)
+  const [activeHost, setActiveHost] = useState('github'); // 自定义仓库所在 host:github | gitee
   const [sourcesMap, setSourcesMap] = useState({});       // #3 已装 skill 的来源 { id: {repo, branch} }
 
   const [busy, setBusy] = useState(null);             // null | 'all' | <skillId>
@@ -100,11 +101,11 @@ export function SkillsPanel() {
     setManageBusy(null);
   }, [loadLocal, loadArchived]);
 
-  const loadOfficial = useCallback(async (srcId, repo, branch) => {
+  const loadOfficial = useCallback(async (srcId, repo, branch, host) => {
     setLoadingOff(true); setOffErr(''); setConflicts(null);
     try {
       const url = repo
-        ? `/api/skills/official?repo=${encodeURIComponent(repo)}${branch ? `&branch=${encodeURIComponent(branch)}` : ''}`
+        ? `/api/skills/official?repo=${encodeURIComponent(repo)}${branch ? `&branch=${encodeURIComponent(branch)}` : ''}${host && host !== 'github' ? `&host=${host}` : ''}`
         : `/api/skills/official?source=${encodeURIComponent(srcId)}`;
       const d = await (await fetch(url)).json();
       setOfficial(d.skills || []);
@@ -119,36 +120,41 @@ export function SkillsPanel() {
     try { const d = await (await fetch('/api/skills/repos')).json(); setSavedRepos(d.repos || []); } catch { /* 忽略 */ }
   }, []);
   const openSavedRepo = useCallback((r) => {
-    setActiveRepo(r.repo); setActiveBranch(r.branch || ''); setCustomRepo('');
-    loadOfficial(null, r.repo, r.branch || '');
+    const host = r.host || 'github';
+    setActiveRepo(r.repo); setActiveBranch(r.branch || ''); setActiveHost(host); setCustomRepo('');
+    loadOfficial(null, r.repo, r.branch || '', host);
   }, [loadOfficial]);
   const deleteSavedRepo = useCallback(async (r) => {
     try {
       await fetch('/api/skills/repos', {
         method: 'DELETE', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ repo: r.repo, branch: r.branch || '' }),
+        body: JSON.stringify({ repo: r.repo, branch: r.branch || '', host: r.host || 'github' }),
       });
     } catch { /* 忽略 */ }
     await loadSavedRepos();
   }, [loadSavedRepos]);
 
-  // 解析 owner/repo、owner/repo@branch、或 GitHub 地址(含 /tree/<branch>)→ 加载该仓库/分支的 skill。
+  // 解析 owner/repo、owner/repo@branch、或 GitHub/Gitee 地址(含 /tree/<branch>)→ 加载该仓库/分支的 skill。
   const loadCustomRepo = useCallback(() => {
     const raw = customRepo.trim();
-    // 明确的非 GitHub 完整 URL(gitlab/gitee 等)直接拒:否则兜底 regex 会把 `gitlab.com/owner`
-    // 误当成 owner/repo 拿去请求 GitHub API 得到误导性 404。
-    if (/^https?:\/\//i.test(raw) && !/(^|\/\/|\.)github\.com\//i.test(raw)) {
-      setOffErr('仅支持 GitHub 仓库(github.com)'); return;
+    // 识别 host:gitee.com → gitee,github.com 或裸 owner/repo → github。其它完整 URL(gitlab 等)明确拒,
+    // 否则兜底 regex 会把 `xxx.com/owner` 误当 owner/repo 拿去请求得到误导性 404。
+    let host = 'github';
+    if (/(^|\/\/|\.)gitee\.com\//i.test(raw)) host = 'gitee';
+    else if (/^https?:\/\//i.test(raw) && !/(^|\/\/|\.)github\.com\//i.test(raw)) {
+      setOffErr('仅支持 GitHub 与 Gitee 仓库'); return;
     }
+    const domain = host === 'gitee' ? 'gitee\\.com' : 'github\\.com';
     let repo = '', branch = '';
-    let m = raw.match(/github\.com\/([\w.-]+\/[\w.-]+?)(?:\.git)?\/tree\/([\w.\/-]+?)\/?$/i); // …/tree/<branch>
+    let m = raw.match(new RegExp(`${domain}\\/([\\w.-]+\\/[\\w.-]+?)(?:\\.git)?\\/tree\\/([\\w./-]+?)\\/?$`, 'i')); // …/tree/<branch>
     if (m) { repo = m[1]; branch = m[2]; }
     else if ((m = raw.match(/^([\w.-]+\/[\w.-]+?)@([\w.\/-]+)$/))) { repo = m[1]; branch = m[2]; } // owner/repo@branch
-    else if ((m = raw.match(/(?:github\.com\/)?([\w.-]+\/[\w.-]+?)(?:\.git|\/.*)?$/i))) { repo = m[1]; }
-    if (!repo) { setOffErr('请输入 owner/repo、owner/repo@分支 或 GitHub 仓库地址(可含 /tree/分支)'); return; }
+    else if ((m = raw.match(new RegExp(`(?:${domain}\\/)?([\\w.-]+\\/[\\w.-]+?)(?:\\.git|\\/.*)?$`, 'i')))) { repo = m[1]; }
+    if (!repo) { setOffErr('请输入 owner/repo、owner/repo@分支 或 GitHub/Gitee 仓库地址(可含 /tree/分支)'); return; }
     setActiveRepo(repo);
     setActiveBranch(branch);
-    loadOfficial(null, repo, branch).then(() => loadSavedRepos()); // 拉取成功后端已记住,刷新常驻列表
+    setActiveHost(host);
+    loadOfficial(null, repo, branch, host).then(() => loadSavedRepos()); // 拉取成功后端已记住,刷新常驻列表
   }, [customRepo, loadOfficial, loadSavedRepos]);
 
   useEffect(() => { loadLocal(); loadArchived(); }, [loadLocal, loadArchived]);
@@ -164,7 +170,7 @@ export function SkillsPanel() {
     try {
       const r = await fetch('/api/skills/import', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(activeRepo ? { repo: activeRepo, branch: activeBranch, ids, overwrite } : { source, ids, overwrite }),
+        body: JSON.stringify(activeRepo ? { repo: activeRepo, branch: activeBranch, host: activeHost, ids, overwrite } : { source, ids, overwrite }),
       });
       const d = await r.json();
       if (!r.ok) throw new Error(d.error || '导入失败');
@@ -178,7 +184,7 @@ export function SkillsPanel() {
         setNotice(parts.join(' · ') || '完成');
         setConflicts(null);
       }
-      await Promise.all([activeRepo ? loadOfficial(null, activeRepo, activeBranch) : loadOfficial(source), loadLocal()]);
+      await Promise.all([activeRepo ? loadOfficial(null, activeRepo, activeBranch, activeHost) : loadOfficial(source), loadLocal()]);
     } catch (e) { setNotice('错误: ' + e.message); }
     setBusy(null);
   };
@@ -204,7 +210,7 @@ export function SkillsPanel() {
         {tabBtn('local', '本机 Skill', local.length)}
         {tabBtn('import', '导入', null)}
         {tabBtn('archived', '已归档', archived.length)}
-        <button onClick={tab === 'local' ? loadLocal : tab === 'archived' ? loadArchived : () => (activeRepo ? loadOfficial(null, activeRepo, activeBranch) : loadOfficial(source))} disabled={loadingLocal || loadingOff}
+        <button onClick={tab === 'local' ? loadLocal : tab === 'archived' ? loadArchived : () => (activeRepo ? loadOfficial(null, activeRepo, activeBranch, activeHost) : loadOfficial(source))} disabled={loadingLocal || loadingOff}
           className="ml-auto p-1.5 text-ink-faint hover:text-ink rounded disabled:opacity-40" title="刷新">
           <RefreshCw size={13} className={(loadingLocal || loadingOff) ? 'animate-spin' : ''} />
         </button>
@@ -305,7 +311,7 @@ export function SkillsPanel() {
               type="text" value={customRepo}
               onChange={(e) => setCustomRepo(e.target.value)}
               onKeyDown={(e) => { if (e.key === 'Enter' && !e.nativeEvent?.isComposing && e.keyCode !== 229) { e.preventDefault(); loadCustomRepo(); } }}
-              placeholder="owner/repo、owner/repo@分支、或含 /tree/分支 的地址"
+              placeholder="owner/repo、@分支、或 GitHub/Gitee 仓库地址(含 /tree/分支)"
               className="flex-1 min-w-0 bg-canvas border border-canvas-deep rounded-md px-2 py-1 text-[11px] text-ink placeholder-ink-ghost focus:outline-none focus:border-accent/40 font-mono" />
             <button onClick={loadCustomRepo} disabled={loadingOff || !customRepo.trim()}
               className="shrink-0 px-2.5 py-1 rounded-md bg-accent text-white text-[11px] font-body hover:bg-accent-hover disabled:opacity-50">
@@ -316,13 +322,15 @@ export function SkillsPanel() {
           {savedRepos.length > 0 && (
             <div className="flex flex-wrap gap-1.5">
               {savedRepos.map((r) => {
+                const rhost = r.host || 'github';
                 const label = `${r.repo}${r.branch ? '@' + r.branch : ''}`;
-                const active = activeRepo === r.repo && (activeBranch || '') === (r.branch || '');
+                const active = activeRepo === r.repo && (activeBranch || '') === (r.branch || '') && activeHost === rhost;
                 return (
-                  <span key={label}
+                  <span key={`${rhost}:${label}`}
                     className={`inline-flex items-center gap-1 pl-2 pr-1 py-1 text-[11px] font-mono rounded-md border transition-colors ${
                       active ? 'border-accent text-accent bg-accent/10' : 'border-canvas-deep text-ink-muted'}`}>
-                    <button onClick={() => openSavedRepo(r)} className="hover:text-accent max-w-[180px] truncate" title={`打开 ${label}`}>{label}</button>
+                    {rhost === 'gitee' && <span className="text-[9px] px-1 rounded bg-red-500/15 text-red-500 shrink-0">Gitee</span>}
+                    <button onClick={() => openSavedRepo(r)} className="hover:text-accent max-w-[180px] truncate" title={`打开 ${rhost === 'gitee' ? 'Gitee: ' : ''}${label}`}>{label}</button>
                     <button onClick={() => deleteSavedRepo(r)} title="从列表删除(不删已装 skill)"
                       className="p-0.5 rounded text-ink-faint hover:text-error hover:bg-error/10"><X size={11} /></button>
                   </span>
@@ -332,8 +340,8 @@ export function SkillsPanel() {
           )}
           {activeRepo ? (
             <div className="flex items-center gap-2 text-[10px] text-ink-faint font-mono">
-              <span className="text-accent">仓库:{activeRepo}{(officialMeta.branch || activeBranch) ? `@${officialMeta.branch || activeBranch}` : ''}</span>
-              <button onClick={() => { setActiveRepo(null); setActiveBranch(''); setCustomRepo(''); }} className="text-ink-faint hover:text-ink underline">返回内置源</button>
+              <span className="text-accent">{activeHost === 'gitee' ? 'Gitee ' : ''}仓库:{activeRepo}{(officialMeta.branch || activeBranch) ? `@${officialMeta.branch || activeBranch}` : ''}</span>
+              <button onClick={() => { setActiveRepo(null); setActiveBranch(''); setActiveHost('github'); setCustomRepo(''); }} className="text-ink-faint hover:text-ink underline">返回内置源</button>
             </div>
           ) : sources.find((s) => s.id === source)?.url && (
             <a href={sources.find((s) => s.id === source).url} target="_blank" rel="noreferrer"

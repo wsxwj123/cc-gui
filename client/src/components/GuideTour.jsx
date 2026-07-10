@@ -13,7 +13,7 @@ const PANEL_STEPS = [
   ['panel-usage', '用量', '统计 token 消耗与费用。\n· 按模型 / 项目 / 日期分组\n· 显示总 token、缓存命中 token、命中率\n· 一键生成官方 /insights 使用报告(内联预览)\n· 导出 CSV;官方订阅额度(非第三方)也在这看'],
   ['panel-processes', '进程', '查看并管理正在运行的 claude 子进程。\n· 列出每个进程的 PID / 所属会话 / 已运行时长 / 模型\n· 可逐个停止(按进程精准杀,不误伤其它)'],
   ['panel-mcp', '工具', '管理 MCP 服务器和插件。\n· 增删 MCP 服务器(stdio / SSE / Streamable HTTP)、测连通性\n· 选快速模板自动回填常用 MCP 字段\n· 插件:内置推荐(含 superpowers)在「添加」弹层一键安装;已装的可更新到最新版或卸载,卸载后回到添加页可重装'],
-  ['panel-skills', '技能', '管理本机技能(skill)。\n· 查看 ~/.claude/skills 下已装的 skill;点任一条展开完整简介;SKILL.md 若声明 version 则显示版本号\n· 已装的可归档(停用、可随时恢复)或删除(需重新下载)\n· 一键从 Anthropic 官方及社区(vercel / hermes / garden 等)skill 市场导入\n· 也可粘贴任意 GitHub 仓库地址导入(支持 /tree/分支);导入过的仓库自动常驻列表可再次拉取或移除\n· 从市场/仓库装的技能带「更新」按钮,一键覆盖到上游最新'],
+  ['panel-skills', '技能', '管理本机技能(skill)。\n· 查看 ~/.claude/skills 下已装的 skill;点任一条展开完整简介;SKILL.md 若声明 version 则显示版本号\n· 已装的可归档(停用、可随时恢复)或删除(需重新下载)\n· 一键从 Anthropic 官方及社区(vercel / hermes / garden 等)skill 市场导入\n· 也可粘贴 GitHub 或 Gitee 仓库地址导入(支持 /tree/分支、owner/repo@分支);导入过的仓库自动常驻列表可再次拉取或移除\n· 从市场/仓库装的技能带「更新」按钮,一键覆盖到上游最新'],
   ['panel-memory', '指令', '三个标签页:\n· 指令(CLAUDE.md):编辑 全局 / 项目 / 项目·私人 / 组织 四级指令(项目级随 git 与团队共享,项目·私人只留本机不提交)\n· 自动记忆:查看/编辑 AI 自己写的跨会话记忆\n· 提示词库:780 条内置预设,按 33 个分类折叠浏览 + 搜索,一键复制到输入框或 CLAUDE.md'],
   ['panel-settings', '设置', '多个标签页:\n· 概览:检查/安装更新、缓存优化开关、自动压缩窗口(token)、对话区背景(纯色/图片/视频 + 遮罩不透明度)\n· 环境:检查 node / claude / python / git / uv 是否就绪,缺失可装;安装失败后重新检测会恢复「安装」按钮\n· Hooks:配置钩子脚本\n· 原始配置:直接编辑 settings.json\n· 存储:清理缓存、彻底清理某项目的全部 Claude 状态\n· 网络:开局域网访问后配合内网穿透(如 Tailscale),手机浏览器可访问整个 GUI —— 与顶栏「远程」不同,那个是手机 App 只接管单条会话'],
 ];

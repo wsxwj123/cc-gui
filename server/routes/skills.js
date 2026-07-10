@@ -171,23 +171,43 @@ router.get('/skills/sources', (req, res) => {
 const repoCache = new Map(); // repo -> { skills, files, branch, at }
 const TTL = 60 * 60 * 1000;
 
-// CL-1: 取 GitHub JSON 的健壮封装。Windows 网络受限/被拦截时 GitHub 可能返回 HTML
-// 拦截页,直接 r.json() 会抛 "Unexpected token '<'... not valid JSON"(用户报告)。
-// 这里先验 r.ok + content-type,非 JSON 给可读错误而非裸 parse 报错。
-async function ghJson(url) {
+// 多 host 适配。Gitee 的 git/trees recursive API 与 GitHub 同构(返回 { tree:[{path,type}] }),
+// 只是 base URL 与 raw URL 不同;GitLab 的 tree 分页、shape 不同,暂不支持。host 缺省 github(向后兼容)。
+const HOSTS = {
+  github: {
+    label: 'GitHub', domain: 'github.com',
+    api: (repo) => `https://api.github.com/repos/${repo}`,
+    tree: (repo, branch) => `https://api.github.com/repos/${repo}/git/trees/${encodeURIComponent(branch)}?recursive=1`,
+    raw: (repo, branch, path) => `https://raw.githubusercontent.com/${repo}/${branch}/${path}`,
+    rateHint: 'GitHub API 限流(60次/小时/IP),请稍后重试或挂代理',
+  },
+  gitee: {
+    label: 'Gitee', domain: 'gitee.com',
+    api: (repo) => `https://gitee.com/api/v5/repos/${repo}`,
+    tree: (repo, branch) => `https://gitee.com/api/v5/repos/${repo}/git/trees/${encodeURIComponent(branch)}?recursive=1`,
+    raw: (repo, branch, path) => `https://gitee.com/${repo}/raw/${branch}/${path}`,
+    rateHint: 'Gitee API 限流,请稍后重试',
+  },
+};
+const hostOf = (h) => HOSTS[h] || HOSTS.github;
+
+// CL-1: 取 host JSON 的健壮封装。网络受限/被拦截时可能返回 HTML 拦截页,直接 r.json() 会抛
+// "Unexpected token '<'"(用户报告)。先验 r.ok + content-type,非 JSON 给可读错误而非裸 parse 报错。
+async function ghJson(url, hostLabel = 'GitHub') {
   let r;
   try { r = await fetch(url, { headers: GH_HEADERS }); }
-  catch (e) { const err = new Error(`无法连接 GitHub(网络受限?可尝试代理):${e.message}`); err.status = 0; throw err; }
-  if (!r.ok) { const e = new Error(`GitHub API ${r.status}`); e.status = r.status; throw e; }
+  catch (e) { const err = new Error(`无法连接 ${hostLabel}(网络受限?可尝试代理):${e.message}`); err.status = 0; throw err; }
+  if (!r.ok) { const e = new Error(`${hostLabel} API ${r.status}`); e.status = r.status; throw e; }
   const ct = r.headers.get('content-type') || '';
   if (!ct.includes('json')) {
-    const e = new Error('GitHub 未返回 JSON(可能被网络拦截或需代理)'); e.status = 502; throw e;
+    const e = new Error(`${hostLabel} 未返回 JSON(可能被网络拦截或需代理)`); e.status = 502; throw e;
   }
   return r.json();
 }
 
-async function ghDefaultBranch(repo) {
-  return (await ghJson(`https://api.github.com/repos/${repo}`)).default_branch || 'main';
+async function ghDefaultBranch(repo, host = 'github') {
+  const h = hostOf(host);
+  return (await ghJson(h.api(repo), h.label)).default_branch || 'main';
 }
 
 // 从 tree 路径抽 skill。返回 [{ id, root }],root = SKILL.md 父目录的仓库内路径。
@@ -211,17 +231,18 @@ function locateSkills(tree) {
   return out;
 }
 
-async function loadRepo(repo, branchArg, force = false) {
+async function loadRepo(repo, branchArg, force = false, host = 'github') {
   // branchArg 指定分支(用户在导入页给了 owner/repo/tree/<branch> 或 owner/repo@branch);
-  // 不给则用默认分支。缓存键含分支,否则同仓不同分支互相污染(用户实报:只拉到 main)。
-  const branch = (branchArg && String(branchArg).trim()) || await ghDefaultBranch(repo);
-  const cacheKey = `${repo}@${branch}`;
+  // 不给则用默认分支。缓存键含 host+分支,否则同仓不同分支/不同 host 互相污染(用户实报:只拉到 main)。
+  const h = hostOf(host);
+  const branch = (branchArg && String(branchArg).trim()) || await ghDefaultBranch(repo, host);
+  const cacheKey = `${host}:${repo}@${branch}`;
   const now = Date.now();
   const c = repoCache.get(cacheKey);
   // force 时绕过缓存:更新按钮必须拿最新 tree,否则 1 小时缓存窗口内清单是旧快照——上游新增的文件
   // 不在清单里(装出残缺技能),上游已删的文件 raw 404(整个更新失败)。清单与 raw 内容必须同快照。
   if (!force && c && now - c.at < TTL) return c;
-  const tree = (await ghJson(`https://api.github.com/repos/${repo}/git/trees/${encodeURIComponent(branch)}?recursive=1`)).tree || [];
+  const tree = (await ghJson(h.tree(repo, branch), h.label)).tree || [];
   const located = locateSkills(tree);
   located.sort((a, b) => a.id.localeCompare(b.id));
   // 仅小仓库逐个抓描述,大仓只列名
@@ -230,7 +251,7 @@ async function loadRepo(repo, branchArg, force = false) {
     skills = await Promise.all(located.map(async (s) => {
       let name = s.id, description = '', version = null;
       try {
-        const raw = await fetch(`https://raw.githubusercontent.com/${repo}/${branch}/${s.root}/SKILL.md`);
+        const raw = await fetch(h.raw(repo, branch, `${s.root}/SKILL.md`));
         if (raw.ok) { const fm = parseFrontmatter(await raw.text()); name = fm.name || s.id; description = fm.description || ''; version = fm.version || null; }
       } catch { /* 留空 */ }
       return { id: s.id, name, description, version, root: s.root };
@@ -238,7 +259,7 @@ async function loadRepo(repo, branchArg, force = false) {
   } else {
     skills = located.map((s) => ({ id: s.id, name: s.id, description: '', version: null, root: s.root }));
   }
-  const entry = { skills, files: tree.filter((t) => t.type === 'blob'), branch, at: now, repo };
+  const entry = { skills, files: tree.filter((t) => t.type === 'blob'), branch, at: now, repo, host };
   repoCache.set(cacheKey, entry);
   return entry;
 }
@@ -297,19 +318,20 @@ async function writeRepos(list) {
   await writeFile(tmp, JSON.stringify(list, null, 2));
   await rename(tmp, REPOS_FILE);
 }
-async function rememberRepo(repo, branch) {
+async function rememberRepo(repo, branch, host = 'github') {
   const b = branch || '';
   return serialized(async () => {
     const list = await readRepos();
-    if (list.some((r) => r.repo === repo && (r.branch || '') === b)) return;
-    list.push({ repo, branch: b });
+    if (list.some((r) => r.repo === repo && (r.branch || '') === b && (r.host || 'github') === host)) return;
+    list.push({ repo, branch: b, host });
     await writeRepos(list);
   });
 }
 
 // 共享导入逻辑(/import 与 /update 复用):下载 ids 对应 skill 覆盖到本机,并记来源。
-async function doImport(repo, branchArg, ids, overwrite, force = false) {
-  const { skills, files, branch } = await loadRepo(repo, branchArg, force);
+async function doImport(repo, branchArg, ids, overwrite, force = false, host = 'github') {
+  const h = hostOf(host);
+  const { skills, files, branch } = await loadRepo(repo, branchArg, force, host);
   const byId = new Map(skills.map((s) => [s.id, s]));
   const imported = [], conflicts = [], failed = [];
   const sourcesPatch = {}; // 只累积本次新增的来源,收尾 mergeSources 串行合并(防并发覆盖丢记录)
@@ -335,7 +357,7 @@ async function doImport(repo, branchArg, ids, overwrite, force = false) {
         const rel = f.path.slice(meta.root.length + 1); // 相对 skill 根
         const target = join(tmp, rel);
         await mkdir(join(target, '..'), { recursive: true });
-        const raw = await fetch(`https://raw.githubusercontent.com/${repo}/${branch}/${f.path}`);
+        const raw = await fetch(h.raw(repo, branch, f.path));
         if (!raw.ok) throw new Error(`下载 ${rel} HTTP ${raw.status}`);
         await writeFile(target, Buffer.from(await raw.arrayBuffer()));
       }
@@ -351,7 +373,7 @@ async function doImport(repo, branchArg, ids, overwrite, force = false) {
       }
       if (dstashed) { await rm(dstashed, { recursive: true, force: true }).catch(() => {}); dstashed = null; }
       imported.push(id);
-      sourcesPatch[id] = { repo, branch, root: meta.root }; // 记来源供"更新"
+      sourcesPatch[id] = { repo, branch, root: meta.root, host }; // 记来源供"更新"(含 host)
     } catch (e) {
       await rm(tmp, { recursive: true, force: true }).catch(() => {}); // 清半成品
       if (dstashed) { await rename(dstashed, dest).catch(() => {}); } // 兜底:任何异常都让旧版本复位
@@ -365,25 +387,27 @@ async function doImport(repo, branchArg, ids, overwrite, force = false) {
 
 // CQ批次4:除内置 SOURCES 外,支持 ?repo=owner/repo 一键拉任意 GitHub 仓库的 skill 列表。
 const REPO_RE = /^[\w.-]+\/[\w.-]+$/;
+const HOST_RE = /^(github|gitee)$/;
 router.get('/skills/official', async (req, res) => {
   const repoParam = typeof req.query.repo === 'string' ? req.query.repo.trim() : '';
   const useCustom = REPO_RE.test(repoParam);
   const src = SOURCES.find((s) => s.id === req.query.source) || SOURCES[0];
   const repo = useCustom ? repoParam : src.repo;
+  const host = useCustom && HOST_RE.test(String(req.query.host || '')) ? req.query.host : 'github';
   if (repoParam && !useCustom) return res.json({ skills: [], error: 'repo 格式应为 owner/repo' });
   const branchParam = typeof req.query.branch === 'string' && BRANCH_RE.test(req.query.branch.trim()) ? req.query.branch.trim() : '';
   try {
-    const { skills, branch } = await loadRepo(repo, branchParam);
+    const { skills, branch } = await loadRepo(repo, branchParam, false, host);
     let installed = new Set();
     try { installed = new Set(await readdir(SKILLS_DIR)); } catch { /* 无目录 */ }
-    if (useCustom) { try { await rememberRepo(repo, branchParam); } catch { /* 记住失败不影响拉取 */ } }
+    if (useCustom) { try { await rememberRepo(repo, branchParam, host); } catch { /* 记住失败不影响拉取 */ } }
     res.json({
-      source: useCustom ? repo : src.id, repo, branch, count: skills.length,
+      source: useCustom ? repo : src.id, repo, branch, host, count: skills.length,
       truncatedDesc: skills.length > DESC_CAP,
       skills: skills.map((s) => ({ id: s.id, name: s.name, description: s.description, version: s.version || null, installed: installed.has(s.id) })),
     });
   } catch (e) {
-    res.json({ skills: [], error: e.status === 403 ? 'GitHub API 限流(60次/小时/IP),请稍后重试或挂代理' : e.message });
+    res.json({ skills: [], error: e.status === 403 ? `${hostOf(host).label} API 限流,请稍后重试或挂代理` : e.message });
   }
 });
 
@@ -395,9 +419,10 @@ router.get('/skills/repos', async (req, res) => {
 router.delete('/skills/repos', async (req, res) => {
   const repo = String(req.body?.repo || '');
   const branch = String(req.body?.branch || '');
+  const host = String(req.body?.host || 'github');
   try {
     await serialized(async () => {
-      const list = (await readRepos()).filter((r) => !(r.repo === repo && (r.branch || '') === branch));
+      const list = (await readRepos()).filter((r) => !(r.repo === repo && (r.branch || '') === branch && (r.host || 'github') === host));
       await writeRepos(list);
     });
     res.json({ ok: true });
@@ -410,15 +435,16 @@ router.post('/skills/import', async (req, res) => {
   const useCustom = REPO_RE.test(repoParam);
   const src = SOURCES.find((s) => s.id === req.body?.source) || SOURCES[0];
   const repo = useCustom ? repoParam : src.repo;
+  const host = useCustom && HOST_RE.test(String(req.body?.host || '')) ? req.body.host : 'github';
   if (repoParam && !useCustom) return res.status(400).json({ error: 'repo 格式应为 owner/repo' });
   const branchParam = typeof req.body?.branch === 'string' && BRANCH_RE.test(req.body.branch.trim()) ? req.body.branch.trim() : '';
   const ids = Array.isArray(req.body?.ids) ? req.body.ids.filter((s) => /^[a-zA-Z0-9._-]+$/.test(s)) : [];
   const overwrite = !!req.body?.overwrite;
   if (!ids.length) return res.status(400).json({ error: 'ids 为空' });
   try {
-    res.json(await doImport(repo, branchParam, ids, overwrite));
+    res.json(await doImport(repo, branchParam, ids, overwrite, false, host));
   } catch (e) {
-    res.status(e.status === 403 ? 429 : 500).json({ error: e.status === 403 ? 'GitHub API 限流,请稍后重试' : e.message });
+    res.status(e.status === 403 ? 429 : 500).json({ error: e.status === 403 ? `${hostOf(host).label} API 限流,请稍后重试` : e.message });
   }
 });
 
@@ -433,13 +459,13 @@ router.post('/skills/update', async (req, res) => {
   if (!/^[a-zA-Z0-9._-]+$/.test(id)) return res.status(400).json({ error: '非法 skill id' });
   const sources = await readSources();
   const src = sources[id];
-  if (!src?.repo) return res.status(400).json({ error: '该 skill 无来源记录(非从 GitHub 仓库导入,无法自动更新)' });
+  if (!src?.repo) return res.status(400).json({ error: '该 skill 无来源记录(非从 GitHub/Gitee 仓库导入,无法自动更新)' });
   try {
-    const r = await doImport(src.repo, src.branch, [id], true, true); // force:绕过 repoCache 拿最新 tree
+    const r = await doImport(src.repo, src.branch, [id], true, true, src.host || 'github'); // force:绕过 repoCache 拿最新 tree
     if (r.imported.includes(id)) {
       // 读更新后的 frontmatter version(有则回传,前端弹窗"已更新为 vX")
       const fm = parseFrontmatter(await readSkillMd(join(SKILLS_DIR, id)) || '');
-      return res.json({ ok: true, repo: src.repo, branch: src.branch, version: fm.version || null });
+      return res.json({ ok: true, repo: src.repo, branch: src.branch, host: src.host || 'github', version: fm.version || null });
     }
     return res.status(500).json({ error: r.failed[0]?.error || '更新失败' });
   } catch (e) {
