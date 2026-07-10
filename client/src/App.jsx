@@ -2855,9 +2855,47 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     return rebuildTodosFromTaskCalls(flat);
   }, [streamingBlocks, chatMessages, messages]);
 
-  // G1/G2:输入框上方只显 TodoWrite 的待办清单(cc 原生),不再贴整份 ExitPlanMode 计划。
-  // 计划全文只在规划模式的审批弹窗(PlanReviewCard)出现——和 claude code 原生一致。
-  // (原 currentPlan 已移除:plan 展示位置统一收口到弹窗)
+  // 最近一份【已批准】的 ExitPlanMode 计划全文,常驻在任务清单条顶部(默认折叠一行,
+  // 展开可随时回看批准了什么)。与 G1/G2 收口不冲突:未批准/被拒的计划仍只在审批弹窗
+  // (PlanReviewCard)出现,这里只认批准信号——SDK 引擎批准=allow → result 非错误;
+  // 旧 hook 路径批准=deny 收尾但 result 文案含"用户已批准此计划"(同 TurnBubble O1)。
+  const currentPlan = useMemo(() => {
+    const readApprovedPlan = (toolCall) => {
+      if (toolCall?.name !== 'ExitPlanMode') return '';
+      const r = toolCall.result;
+      if (!r) return '';
+      const text = typeof r.content === 'string'
+        ? r.content
+        : (Array.isArray(r.content) ? r.content.map((c) => c?.text || '').join('') : '');
+      if (r.isError && !/用户已批准此计划/.test(text)) return '';
+      const plan = toolCall.input?.plan ?? toolCall.input?.content ?? '';
+      return typeof plan === 'string' ? plan.trim() : '';
+    };
+    const scanToolCalls = (toolCalls) => {
+      if (!Array.isArray(toolCalls)) return '';
+      for (let j = toolCalls.length - 1; j >= 0; j--) {
+        const plan = readApprovedPlan(toolCalls[j]);
+        if (plan) return plan;
+      }
+      return '';
+    };
+    for (let i = streamingBlocks.length - 1; i >= 0; i--) {
+      const b = streamingBlocks[i];
+      if (b?.type === 'tool_use') {
+        const plan = readApprovedPlan(b.toolCall);
+        if (plan) return plan;
+      }
+    }
+    for (let i = chatMessages.length - 1; i >= 0; i--) {
+      const plan = scanToolCalls(chatMessages[i]?.toolCalls);
+      if (plan) return plan;
+    }
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const plan = scanToolCalls(messages[i]?.toolCalls);
+      if (plan) return plan;
+    }
+    return '';
+  }, [streamingBlocks, chatMessages, messages]);
 
   // When the file watcher reports a write to THIS session's jsonl (e.g. a
   // detached background stream from another tab/session is still writing),
@@ -5361,6 +5399,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           window.dispatchEvent(new CustomEvent('cgui:composer-fill', { detail: { text: item.text, targetKey: sessionQueueKey } }));
         }}
         todos={currentTodos}
+        plan={currentPlan}
         permKey={sessionQueueKey}
         sessionId={selectedSession?.sessionId || null}
       />

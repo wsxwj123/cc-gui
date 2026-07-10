@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Check, Circle, ClipboardList, Loader2, ChevronDown, ChevronRight, EyeOff } from 'lucide-react';
+import { MarkdownRenderer } from './MarkdownRenderer.jsx';
 
 /**
  * 任务清单条,渲染在 composer 同一列内、紧贴输入框上方(作为输入框的"附着条",而非独立
@@ -13,13 +14,9 @@ export function TodoPanel({ todos, plan = '' }) {
   const hasTodos = Array.isArray(todos) && todos.length > 0;
   const cleanPlan = String(plan || '').trim();
   if (!hasTodos && !cleanPlan) return null;
-  if (!hasTodos) {
-    return (
-      <div className="mb-2 rounded-xl border border-canvas-deep bg-canvas-warm/60 backdrop-blur-sm overflow-hidden">
-        <PlanBlock plan={cleanPlan} />
-      </div>
-    );
-  }
+  // 计划单独存在(批准后还没拆任务清单):外壳容器由 PlanBlock 自己带,
+  // 这样"隐藏计划"后不会留下空边框壳。
+  if (!hasTodos) return <PlanBlock plan={cleanPlan} standalone />;
   return <TodoChecklist todos={todos} cleanPlan={cleanPlan} />;
 }
 
@@ -92,16 +89,51 @@ function TodoChecklist({ todos, cleanPlan }) {
   );
 }
 
-function PlanBlock({ plan }) {
+/**
+ * 已批准计划的常驻块:默认折叠成一行标题(不挤输入区),展开后 markdown 渲染全文
+ * (上限 40vh 滚动)。隐藏按钮按"计划全文"记忆——同一份计划隐藏后不再出现,
+ * 下次批准新计划(文本不同)自动恢复,与 TodoChecklist 的 hiddenSig 同一套语义。
+ * markdown 只在展开时渲染,避免长计划在折叠态也参与输入区的高频重渲。
+ */
+function PlanBlock({ plan, standalone = false }) {
+  const [open, setOpen] = useState(false);
+  const [hiddenPlan, setHiddenPlan] = useState(null);
+  if (hiddenPlan === plan) return null;
+  const shell = standalone
+    ? 'mb-2 rounded-xl border border-canvas-deep bg-canvas-warm/60 backdrop-blur-sm overflow-hidden'
+    : 'border-b border-canvas-deep/60';
   return (
-    <div className="px-3 py-2 border-b border-canvas-deep/60">
-      <div className="flex items-center gap-2 mb-1">
-        <ClipboardList size={13} className="text-accent shrink-0" />
-        <span className="text-[11px] font-body font-medium text-ink">执行计划</span>
+    <div className={shell}>
+      <div className="w-full flex items-center gap-2 px-3 py-2">
+        <button
+          onClick={() => setOpen((o) => !o)}
+          title={open ? '收起计划全文' : '展开查看已批准的计划全文'}
+          className="flex items-center gap-2 flex-1 min-w-0 text-left hover:opacity-80 transition-opacity"
+        >
+          {open ? <ChevronDown size={13} className="text-ink-faint shrink-0" /> : <ChevronRight size={13} className="text-ink-faint shrink-0" />}
+          <ClipboardList size={13} className="text-accent shrink-0" />
+          <span className="text-[11px] font-body font-medium text-ink shrink-0">已批准的计划</span>
+          {!open && (
+            <span className="text-[10px] text-ink-faint truncate">
+              {plan.split('\n')[0].replace(/^#+\s*/, '')}
+            </span>
+          )}
+        </button>
+        <button
+          onClick={() => setHiddenPlan(plan)}
+          title="隐藏计划(批准新计划时自动再现)"
+          className="shrink-0 p-1 rounded hover:bg-canvas-deep/40 text-ink-faint hover:text-ink-muted transition-colors"
+        >
+          <EyeOff size={13} />
+        </button>
       </div>
-      <div className="text-[12px] text-ink-soft font-body leading-snug whitespace-pre-wrap max-h-32 overflow-y-auto">
-        {plan}
-      </div>
+      {open && (
+        // MarkdownRenderer 顶层自带 text-[15px] 基准(标题用 em 相对字号),这里是输入框
+        // 上方的小面板,用后代选择器把基准压到 12.5px,整套排版等比缩小。
+        <div className="px-3 pb-2.5 max-h-[40vh] overflow-y-auto [&_.markdown-content]:text-[12.5px]">
+          <MarkdownRenderer content={plan} />
+        </div>
+      )}
     </div>
   );
 }

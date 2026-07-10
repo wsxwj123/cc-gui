@@ -38,7 +38,7 @@ function buildSteps(hasProject) {
     ['provider-switcher', '切换 Provider', '在官方 Anthropic 与第三方中转之间一键切换。\n· 点「添加」选内置预设:官方 OpenAI / Anthropic / Google Gemini、DeepSeek、Kimi、通义千问、豆包、智谱 GLM 等\n· 填 API key,点「获取模型」拉取该渠道可用模型即可用\n· 支持 openai 兼容与 anthropic 兼容两种协议(Gemini 走官方 OpenAI 兼容端点);选定协议后模板列表只显示该协议的预设,避免选错'],
     ['model-selector', '模型', '选当前会话使用的具体模型。\n· 分屏时每个窗格可各自独立选\n· 切到第三方 provider 会显示它自己的模型列表'],
     ['effort-selector', '推理力度', '调 AI 的思考强度:低 / 中 / 高 / 最高。\n· 越高思考越深入、结果越细致,但越慢、越费 token\n· 官方模型区别明显,部分第三方可能无效'],
-    ['permission-selector', '权限模式', '控制 AI 调用工具时是否需要你逐个确认:\n· 默认:每个工具调用都弹卡片让你批准\n· 接受编辑:自动批准文件编辑,其它工具仍问\n· 规划:只读不改,先给出计划让你确认\n· 放行:全自动执行、完全不问(慎用)'],
+    ['permission-selector', '权限模式', '控制 AI 调用工具时是否需要你逐个确认:\n· 默认:每个工具调用都弹卡片让你批准\n· 接受编辑:自动批准文件编辑,其它工具仍问\n· 规划:只读不改,先给出计划让你确认;计划批准后全文常驻在输入框上方(默认折叠一行,可展开回看或隐藏)\n· 放行:全自动执行、完全不问(慎用)'],
     ['agent-selector', '子代理模式', '选一个已安装的子代理作会话主控,它可经 Task 把任务委派给其它子代理并行执行。\n· 默认只有「普通模式」;orchestrator(编排)、explorer、oracle、designer、fixer 等预设需先在「Agent」面板点安装,才会出现在这里可选\n· 子代理跑完结果汇总回主对话;进度在「监控」面板看'],
     ['remote-control', '手机远程控制', '用手机上的 Claude App 同账号接管当前这一条会话继续对话。\n· 需已登录官方账号、且当前非第三方 provider\n· 与「设置·网络 + Tailscale」不同:那个是手机浏览器访问整个 GUI 界面,这个只接管单条会话'],
     ['pane-count', '分屏', '把界面分成 1–6 个窗格,并排同时看和操作多个会话。\n· 每个窗格的模型 / 权限模式相互独立'],
