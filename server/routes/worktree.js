@@ -29,7 +29,10 @@ async function findGitRoot(start) {
 router.post('/worktree', async (req, res) => {
   try {
     const cwd = safe(req.body?.cwd || '');
-    const name = String(req.body?.name || `session-${Date.now()}`).replace(/[^a-zA-Z0-9_-]/g, '-');
+    let name = String(req.body?.name || `session-${Date.now()}`).replace(/[^a-zA-Z0-9_-]/g, '-');
+    // 全非 ASCII 名(如中文)会整体塌缩成 '---':与输入毫无关联,且第二个中文名
+    // 撞车"分支已存在"。净化后不含任何字母数字 → 回落时间戳名。
+    if (!/[a-zA-Z0-9]/.test(name)) name = `session-${Date.now()}`;
     const root = await findGitRoot(cwd);
     if (!root) return res.status(400).json({ error: 'not inside a git repo' });
 
@@ -46,8 +49,18 @@ router.post('/worktree', async (req, res) => {
     await mkdir(container, { recursive: true });
     const target = join(container, name);
     const branch = `gui/${name}`;
-    await execFileP('git', ['-C', root, 'worktree', 'add', '-b', branch, target], { timeout: 30000 });
-    res.json({ ok: true, path: target, branch, root });
+    // 分支可能已存在(删除 worktree 时明确承诺"分支保留",同名重建是常规操作):
+    // 存在则检出已有分支,不存在才 -b 新建 —— 否则 git 报"分支已存在"500。
+    let branchExists = false;
+    try {
+      await execFileP('git', ['-C', root, 'rev-parse', '--verify', '--quiet', `refs/heads/${branch}`], { timeout: 5000 });
+      branchExists = true;
+    } catch {}
+    const addArgs = branchExists
+      ? ['-C', root, 'worktree', 'add', target, branch]
+      : ['-C', root, 'worktree', 'add', '-b', branch, target];
+    await execFileP('git', addArgs, { timeout: 30000 });
+    res.json({ ok: true, path: target, branch, root, reusedBranch: branchExists });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -68,6 +81,9 @@ router.get('/worktree', async (req, res) => {
         cur = { path: line.slice(9), branch: null, head: null };
       } else if (cur && line.startsWith('HEAD ')) cur.head = line.slice(5);
       else if (cur && line.startsWith('branch ')) cur.branch = line.slice(7).replace(/^refs\/heads\//, '');
+      // 目录已被手动删除的"幽灵"worktree:git 标 prunable,选中进去开会话 spawn 必失败,
+      // 前端据此标灰/只留删除。
+      else if (cur && line.startsWith('prunable')) cur.prunable = true;
     }
     if (cur) trees.push(cur);
 
@@ -82,7 +98,9 @@ router.get('/worktree', async (req, res) => {
         const status = await execFileP('git', ['-C', t.path, 'status', '--porcelain'], { timeout: 4000 });
         t.dirtyFileCount = status.stdout.trim().split('\n').filter(Boolean).length;
       } catch { t.dirtyFileCount = 0; }
-      t.isMain = t.path === root;
+      // resolve 归一后再比:Windows 上 git porcelain 输出正斜杠(C:/Users/…)而 root
+      // 是 Node 反斜杠路径,字符串直比恒 false → 主工作区丢"主"标签、误出删除按钮。
+      t.isMain = pathResolve(t.path) === pathResolve(root);
     }
 
     res.json({ root, trees });

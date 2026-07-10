@@ -88,7 +88,16 @@ export function resolveWorkspacePath(input, opts = {}) {
         cur = parent;
       }
     }
-    if (isKnownClaudeWorkspace(real, resolved)) return real;
+    if (isKnownClaudeWorkspace(real, resolved)) {
+      // symlink 逃逸防护:realpath 改写过路径(如 /tmp/evil-link → /etc)时,实际
+      // 落点必须自身可信(在 $HOME 内或自己命中工作区),否则共享目录(/tmp)里
+      // 预埋的 symlink 能把"工作区例外"引到任意外部路径。mac 正常场景不受影响:
+      // /tmp/x → /private/tmp/x,real 自身命中 -private-tmp。
+      if (real !== resolved && !isPathInside(real, homedir()) && !isKnownClaudeWorkspace(real)) {
+        throw e;
+      }
+      return real;
+    }
     throw e;
   }
 }

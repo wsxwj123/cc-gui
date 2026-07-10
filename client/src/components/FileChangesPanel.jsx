@@ -38,10 +38,12 @@ function ChangeItem({ change, sessionId, cwd, reviewed, onToggleReviewed }) {
   const [reverted, setReverted] = useState(false);
   // AZ13:回滚成功原本只把 hover-only 图标变勾,鼠标移开就看不见 → 用户感知不到成功。
   // 加一条短暂常显的成功文案。
-  const [flash, setFlash] = useState(false);
-  const markReverted = () => {
+  const [flash, setFlash] = useState(false); // false | 'head' | 'checkpoint'
+  // 两条链路语义不同:HEAD=丢弃全部未提交修改;checkpoint=回到该轮对话前的快照
+  // (可能仍含更早回合的未提交改动)。文案如实区分,别都说"已恢复"。
+  const markReverted = (via = 'head') => {
     setReverted(true);
-    setFlash(true);
+    setFlash(via);
     setTimeout(() => setFlash(false), 2600);
   };
 
@@ -80,7 +82,7 @@ function ChangeItem({ change, sessionId, cwd, reviewed, onToggleReviewed }) {
           body: JSON.stringify({ sha: rd.sha, cwd, file: change.file, allowDelete: change.type === 'write' }),
         });
         const cd = await cr.json().catch(() => ({}));
-        if (cr.ok) markReverted();
+        if (cr.ok) markReverted('checkpoint');
         else confirmDialog('恢复失败：' + (cd.error || cr.status));
       } else {
         confirmDialog('恢复失败：' + (d.error || res.status));
@@ -137,7 +139,7 @@ function ChangeItem({ change, sessionId, cwd, reviewed, onToggleReviewed }) {
         )}
         {flash && (
           <span className="flex items-center gap-0.5 text-[10px] text-success shrink-0 animate-fade-up">
-            <Check size={10} /> 已恢复
+            <Check size={10} /> {flash === 'checkpoint' ? '已恢复到该轮对话前的快照' : '已恢复到 git HEAD'}
           </span>
         )}
         <span className="flex items-center gap-1 shrink-0">
@@ -212,6 +214,7 @@ function ChangeItem({ change, sessionId, cwd, reviewed, onToggleReviewed }) {
 export function FileChangesPanel({ sessionId, projectHash, cwd }) {
   const [changes, setChanges] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(null);
   const [reviewedMap, setReviewedMap] = useState({});
   const storageKey = sessionId ? `cgui-file-review-${sessionId}` : null;
 
@@ -242,16 +245,26 @@ export function FileChangesPanel({ sessionId, projectHash, cwd }) {
   const fetchChanges = async () => {
     if (!sessionId || !projectHash) return;
     setLoading(true);
+    setLoadError(null);
     try {
       const res = await fetch(
         `/api/sessions/${sessionId}/file-changes?projectHash=${encodeURIComponent(projectHash)}`
       );
       // Server may return a 5xx HTML error page; .json() would throw and a
       // non-array body would crash the .map() below. Coerce to [] defensively.
-      const data = res.ok ? await res.json().catch(() => []) : [];
-      setChanges(Array.isArray(data) ? data : []);
+      // 5xx 时置 error 态而非空列表——"该会话没有文件变更记录"会让用户误以为
+      // AI 没改任何文件。
+      if (!res.ok) {
+        const d = await res.json().catch(() => ({}));
+        setLoadError(d.error || `${res.status}`);
+        setChanges([]);
+      } else {
+        const data = await res.json().catch(() => []);
+        setChanges(Array.isArray(data) ? data : []);
+      }
     } catch (err) {
       console.error('Failed to fetch file changes:', err);
+      setLoadError(err.message);
     }
     setLoading(false);
   };
@@ -262,6 +275,15 @@ export function FileChangesPanel({ sessionId, projectHash, cwd }) {
     return (
       <div className="flex items-center justify-center py-8">
         <RefreshCw size={14} className="text-ink-faint animate-spin" />
+      </div>
+    );
+  }
+
+  if (loadError) {
+    return (
+      <div className="text-xs text-red-600 font-body py-6 text-center px-4">
+        变更记录加载失败：{loadError}
+        <button onClick={() => fetchChanges()} className="block mx-auto mt-2 text-accent hover:underline">重试</button>
       </div>
     );
   }

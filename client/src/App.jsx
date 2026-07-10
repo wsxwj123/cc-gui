@@ -154,20 +154,42 @@ function CheckpointButton({ sessionId, cwd, projectHash, onRestored }) {
         body: JSON.stringify({ sha, cwd }),
       });
       const d = await r.json().catch(() => ({}));
-      if (!r.ok) { confirmDialog('恢复失败：' + (d.error || r.status)); return; }
+      if (!r.ok) {
+        confirmDialog(d.code === 'restore_failed'
+          ? `还原过程出错，工作区可能已部分还原，请检查改动：${d.error || r.status}`
+          : '恢复失败：' + (d.error || r.status));
+        return;
+      }
       // #1:checkpoint 只是 git 文件快照,不含对话锚点。用快照时间戳把会话裁剪到该时刻,
-      // 消息页随之回退(否则用户点了恢复但消息页一动不动,以为"无反应")。best-effort。
+      // 消息页随之回退(否则用户点了恢复但消息页一动不动,以为"无反应")。
+      // trim 结果必须检查:失败时文件已还原会话没裁,不能谎报"已裁剪";sessionReset
+      // (裁空整个会话)必须切 draft,否则旧 sessionId 变僵尸、下次发送 CLI 报
+      // "No conversation found" 静默失败(对齐 handleRollback 的处理)。
+      let trimOk = false;
       if (projectHash && ts) {
         try {
-          await fetch(`/api/sessions/${sessionId}/trim`, {
+          const tr = await fetch(`/api/sessions/${sessionId}/trim`, {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ projectHash, fromTimestamp: new Date(ts).toISOString() }),
           });
+          const trData = await tr.json().catch(() => ({}));
+          trimOk = tr.ok;
+          if (trData?.sessionReset) {
+            const st = useStore.getState();
+            const cur = st.selectedSession;
+            if (cur?.sessionId === sessionId) {
+              const draftKey = `draft-${cur.projectHash || 'none'}`;
+              st.migrateSessionKey(sessionId, draftKey, true);
+              st.setSelectedSession({ ...cur, sessionId: null, draft: true, draftId: newDraftId() });
+            }
+          }
         } catch {}
       }
       setOpen(false);
       onRestored?.();
-      confirmDialog(`已回到 checkpoint ${sha.slice(0, 7)}：文件已还原，会话已裁剪到该时刻`);
+      confirmDialog(trimOk
+        ? `已回到 checkpoint ${sha.slice(0, 7)}：文件已还原，会话已裁剪到该时刻`
+        : `已回到 checkpoint ${sha.slice(0, 7)}：文件已还原，但会话消息未能裁剪（记录保持原样）`);
     } catch (err) { confirmDialog('恢复失败：' + err.message); }
   };
 
@@ -1689,10 +1711,12 @@ function SessionList() {
     try {
       const r = await fetch(`/api/worktree?cwd=${encodeURIComponent(selectedProject.path)}`);
       const d = await r.json();
+      // 错误如实显示(非 git 仓库/门禁拒绝等):吞成空列表会显示"没有现有 worktree"
+      // 并把用户引去新建,新建才报真实错误。
       if (r.ok) setWorktreeList(d.trees || []);
-      else setWorktreeList([]);
-    } catch {
-      setWorktreeList([]);
+      else setWorktreeList({ error: d.error || `${r.status}` });
+    } catch (e) {
+      setWorktreeList({ error: e.message });
     }
   };
 
@@ -1948,14 +1972,17 @@ function SessionList() {
             <div className="flex-1 overflow-y-auto p-2">
               {worktreeList === null ? (
                 <div className="text-[11px] text-ink-faint py-6 text-center font-body">加载中…</div>
+              ) : worktreeList.error ? (
+                <div className="text-[11px] text-red-600 py-6 text-center font-body px-4">{worktreeList.error}</div>
               ) : worktreeList.length === 0 ? (
                 <div className="text-[11px] text-ink-faint py-6 text-center font-body">没有现有 worktree</div>
               ) : (
                 worktreeList.map((t) => (
                   <div key={t.path} className="flex items-stretch gap-1 mb-1">
                     <button
-                      onClick={() => enterWorktree(t)}
-                      className="flex-1 min-w-0 text-left px-3 py-2 rounded-lg hover:bg-canvas-warm border border-canvas-deep transition-colors group"
+                      onClick={() => { if (!t.prunable) enterWorktree(t); }}
+                      title={t.prunable ? '目录已丢失(被手动删除),只能删除此记录' : undefined}
+                      className={`flex-1 min-w-0 text-left px-3 py-2 rounded-lg border border-canvas-deep transition-colors group ${t.prunable ? 'opacity-50 cursor-not-allowed' : 'hover:bg-canvas-warm'}`}
                     >
                       <div className="flex items-center gap-2 mb-0.5 min-w-0">
                         <GitBranch size={12} className="text-accent shrink-0" />
@@ -1964,6 +1991,9 @@ function SessionList() {
                         </span>
                         {t.isMain && (
                           <span className="text-[9px] px-1.5 py-0.5 bg-canvas-deep text-ink-faint rounded font-mono">主</span>
+                        )}
+                        {t.prunable && (
+                          <span className="text-[9px] px-1.5 py-0.5 bg-red-50 text-red-600 rounded font-mono">目录已丢失</span>
                         )}
                         {t.dirtyFileCount > 0 && (
                           <span className="text-[9px] px-1.5 py-0.5 bg-amber-50 text-amber-700 rounded font-mono">
@@ -4678,7 +4708,14 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ sha: checkpointSha, cwd }),
         });
-        if (!r.ok) softDegrade();
+        if (!r.ok) {
+          // empty_checkpoint(快照本来就没文件)才说"文件未改动";restore_failed
+          // (超时把 checkout 杀在半路等)可能已部分还原,如实提示别撒谎。
+          const d = await r.json().catch(() => ({}));
+          if (d.code === 'restore_failed') {
+            setProviderSwitchNotice({ text: '文件还原过程出错，工作区可能已部分还原，请检查改动（会话已回退）。' });
+          } else softDegrade();
+        }
       } catch {
         softDegrade();
       }

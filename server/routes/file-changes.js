@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { parseJsonl } from '../utils/jsonl-parser.js';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
-import { join, dirname } from 'path';
+import { join, dirname, relative, sep } from 'path';
 import { homedir } from 'os';
 import { stat, unlink, readdir } from 'fs/promises';
 import { resolveWorkspacePath } from '../utils/safe-path.js';
@@ -66,11 +66,16 @@ function unifiedDiff(filePath, oldStr, newStr, label = 'change') {
 }
 
 function diffStats(diff) {
+  // 只有前两行是 ---/+++ 文件头;正文里以 `--`/`++` 开头的内容行(SQL 注释等)拼上
+  // diff 符号后也会变成 ---/+++ 前缀,按前缀全局排除会少计。
   const lines = String(diff || '').split('\n');
-  return {
-    additions: lines.filter((line) => line.startsWith('+') && !line.startsWith('+++')).length,
-    deletions: lines.filter((line) => line.startsWith('-') && !line.startsWith('---')).length,
-  };
+  let additions = 0, deletions = 0;
+  lines.forEach((line, i) => {
+    if (i < 2 && (line.startsWith('+++') || line.startsWith('---'))) return;
+    if (line.startsWith('+')) additions += 1;
+    else if (line.startsWith('-')) deletions += 1;
+  });
+  return { additions, deletions };
 }
 
 // 取一条 user 记录里真正的"用户输入文本"。CLI 会把工具结果也写成 type:'user' 记录
@@ -97,7 +102,13 @@ export function extractFileChanges(records) {
   for (const record of records) {
     if (record.type === 'user') {
       const text = userInputText(record);
-      if (text) { turnIndex += 1; turnPrompt = text.slice(0, 120); turnTs = record.timestamp; }
+      // CLI 元记录不是新回合:isMeta(caveat 等)、slash 回显(<command-name>)、
+      // 本地命令输出(<local-command-*)、compact 续传摘要 —— 当回合会让变更归到
+      // "回合 N:<local-command-stdout>Compacted" 这类假 prompt 下。
+      const isMetaRecord = record.isMeta === true
+        || /^(<command-name>|<local-command-|<system-reminder)/.test(text)
+        || text.startsWith('This session is being continued from a previous conversation');
+      if (text && !isMetaRecord) { turnIndex += 1; turnPrompt = text.slice(0, 120); turnTs = record.timestamp; }
       continue;
     }
     if (record.type !== 'assistant') continue;
@@ -169,6 +180,29 @@ export function extractFileChanges(records) {
             diff,
             ...diffStats(diff),
             preview: input.content?.slice(0, 200) || '',
+          });
+        }
+      } else if (name === 'NotebookEdit' && input?.notebook_path) {
+        // .ipynb 单元格编辑:old 内容不在 input 里拿不到,diff 只展示新内容(insert/
+        // replace)或标记删除;重点是别让 notebook 改动在审查面板整体隐身。
+        const key = `nbedit:${toolUseId || record.uuid}:${input.notebook_path}:${input.cell_id || '0'}`;
+        if (!seen.has(key)) {
+          seen.add(key);
+          const newSrc = input.edit_mode === 'delete' ? '' : (input.new_source ?? '');
+          const diff = unifiedDiff(input.notebook_path, input.edit_mode === 'delete' ? '(已删除单元格)' : null, newSrc, 'notebook-cell');
+          changes.push({
+            id: key,
+            ...turnMeta,
+            type: 'edit',
+            toolName: 'NotebookEdit',
+            toolUseId,
+            file: input.notebook_path,
+            timestamp: record.timestamp,
+            model: record.message?.model,
+            uuid: record.uuid,
+            diff,
+            ...diffStats(diff),
+            preview: newSrc.slice(0, 200),
           });
         }
       } else if (name === 'Bash' && input?.command) {
@@ -268,18 +302,23 @@ router.post('/file/revert', async (req, res) => {
     const file = assertSafePath(req.body?.file);
     const allowDeleteUntracked = req.body?.allowDeleteUntracked === true;
     // Find the git root by climbing parents until `.git` appears.
+    // 终止条件用 dirname(cwd)===cwd(平台无关的文件系统根):Windows 上根是 `C:\`
+    // 而非 `/`,原 `cwd !== '/'` 恒真只靠 24 次上限退出(空转);盘符根本身是仓库时
+    // gitRoot='C:\' 带尾分隔符,slice(length+1) 会把 rel 切错一位。
     let cwd = dirname(file);
     let gitRoot = null;
-    for (let i = 0; i < 24 && cwd !== '/'; i++) {
+    for (let i = 0; i < 24; i++) {
       try {
         const st = await stat(join(cwd, '.git'));
         if (st) { gitRoot = cwd; break; }
       } catch {}
-      cwd = dirname(cwd);
+      const parent = dirname(cwd);
+      if (parent === cwd) break;
+      cwd = parent;
     }
     if (!gitRoot) return res.status(400).json({ error: 'file is not inside a git repo' });
 
-    const rel = file.slice(gitRoot.length + 1);
+    const rel = relative(gitRoot, file).split(sep).join('/');
     let tracked = true;
     try {
       await execFileP('git', ['-C', gitRoot, 'ls-files', '--error-unmatch', '--', rel], { timeout: 5000 });

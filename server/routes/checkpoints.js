@@ -43,8 +43,10 @@ async function gitShadow(args, sessionId, workTree, opts = {}) {
   // cwd 必须是 workTree:`checkout <sha> -- .` 的 `.` pathspec 相对 git 进程 cwd 解析,
   // 不设就落在 server 自己的目录(work-tree 之外)→ "pathspec '.' did not match"
   // (用户在无文件改动的消息上回滚时的还原失败根因)。
+  // maxBuffer 32MB:默认 1MB 会让大仓库(2 万+ 文件)的 ls-tree/首次 commit 输出超限
+  // 抛错 —— commit 实际已完成但请求报 500,meta 与 git log 漂移。timeout 60s 同理。
   return execFileP('git', ['--git-dir', gitDir, '--work-tree', workTree, ...args],
-    { timeout: 30000, cwd: workTree, ...opts });
+    { timeout: 60000, cwd: workTree, maxBuffer: 32 * 1024 * 1024, ...opts });
 }
 
 async function loadMeta(sessionId) {
@@ -73,6 +75,12 @@ function parseMs(value) {
 
 function textPrefix(value) {
   return String(value || '').slice(0, 60);
+}
+
+// commit message 用的 label:换行塌成空格 —— git log %s 只取首行,多行 label 会让
+// resolve 的 git-log 回落路径文本匹配失效(退化成纯时间窗)。
+function oneLineLabel(value) {
+  return String(value || '').replace(/\s+/g, ' ').trim();
 }
 
 async function listTreeFiles(sessionId, workTree, sha) {
@@ -118,7 +126,7 @@ router.post('/checkpoints', async (req, res) => {
     await gitShadow(['add', '-A'], sessionId, workTree);
     try {
       await gitShadow(
-        ['commit', '--allow-empty', '-m', label || `checkpoint ${new Date().toISOString()}`],
+        ['commit', '--allow-empty', '-q', '-m', oneLineLabel(label) || `checkpoint ${new Date().toISOString()}`],
         sessionId, workTree,
         { env: { ...process.env, GIT_AUTHOR_NAME: 'claude-gui', GIT_AUTHOR_EMAIL: 'gui@claude', GIT_COMMITTER_NAME: 'claude-gui', GIT_COMMITTER_EMAIL: 'gui@claude' } },
       );
@@ -148,6 +156,17 @@ router.post('/checkpoints', async (req, res) => {
 router.get('/checkpoints/:sessionId', async (req, res) => {
   try {
     assertSession(req.params.sessionId);
+    // meta.json 优先:messageTimestamp 是消息落盘口径,与会话裁剪(trim fromTimestamp)
+    // 同源;git commit ct 是"add -A 完成后"的秒级时间,大仓下晚数秒 → 面板 restore 按
+    // ct 裁剪会少裁一段(或竞态反向把触发消息裁掉)。meta 为空才回落 git log。
+    const meta = await loadMeta(req.params.sessionId);
+    if (meta.length) {
+      const entries = meta
+        .filter((e) => e.sha)
+        .map((e) => ({ sha: e.sha, ts: e.messageTimestamp || e.ts, label: e.label || e.promptPreview || '' }))
+        .reverse();
+      return res.json({ entries });
+    }
     const gitDir = await shadowDir(req.params.sessionId);
     try {
       const out = await execFileP('git', ['--git-dir', gitDir, 'log', '--format=%H%x09%ct%x09%s'],
@@ -240,7 +259,10 @@ router.post('/checkpoints/:sessionId/restore', async (req, res) => {
     // 清掉会丢用户数据。已跟踪文件的删除由上面的 removeWorktreePath 循环处理。
     res.json({ ok: true, removedSinceCheckpoint: headFiles.filter((rel) => !targetSet.has(rel)).length });
   } catch (err) {
-    res.status(400).json({ error: err.message });
+    // 区分"快照本身没文件"(pathspec 不匹配,工作区确实未动)与其他失败(超时把
+    // checkout 杀在半路=可能部分还原)—— 客户端据 code 决定文案,不能一律说"文件未改动"。
+    const empty = /pathspec .* did not match/.test(err.message || '');
+    res.status(400).json({ error: err.message, code: empty ? 'empty_checkpoint' : 'restore_failed' });
   }
 });
 

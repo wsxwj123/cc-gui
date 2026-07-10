@@ -1,8 +1,10 @@
 import React from 'react';
 
 export function parseDiffLines(diffText) {
-  return String(diffText || '').split('\n').map((text) => {
-    if (text.startsWith('+++') || text.startsWith('---')) return { type: 'file', text };
+  // ---/+++ 文件头只在前两行:正文里被删/增的行本身以 `--`/`++` 开头(SQL 注释等)
+  // 拼上 diff 符号后同为 ---/+++ 前缀,全局按前缀判会把它渲染成灰色文件头。
+  return String(diffText || '').split('\n').map((text, i) => {
+    if (i < 2 && (text.startsWith('+++') || text.startsWith('---'))) return { type: 'file', text };
     if (text.startsWith('@@')) return { type: 'hunk', text };
     if (text.startsWith('+')) return { type: 'add', text };
     if (text.startsWith('-')) return { type: 'del', text };
