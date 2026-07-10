@@ -1034,10 +1034,26 @@ function parseContextMarkdown(md) {
   return out;
 }
 
+// 从会话 jsonl 读原始 cwd:`claude --resume <sid>` 要求进程 cwd 哈希到会话所在 project,
+// 否则 CLI 报 "No conversation found" → /context 落空("未获取到 /context 输出",用户报"当前无法获取")。
+// 前端传的 cwd(来自 session.projectPath)对某些会话为空 → 旧代码回落 homedir() 必然 mismatch。
+// jsonl 的消息行带权威 cwd,直接读它最可靠(与 provider 无关,官方/第三方同理)。
+function cwdFromSessionFile(projectHash, sessionId) {
+  if (!/^[A-Za-z0-9._-]+$/.test(projectHash) || !/^[A-Za-z0-9._-]+$/.test(sessionId)) return '';
+  try {
+    const txt = readFileSync(pathJoin(homedir(), '.claude', 'projects', projectHash, `${sessionId}.jsonl`), 'utf8');
+    const m = txt.match(/"cwd":"((?:[^"\\]|\\.)*)"/); // 首个带 cwd 的行
+    if (m) return JSON.parse(`"${m[1]}"`); // 反转义 JSON 字符串(路径含反斜杠时)
+  } catch {}
+  return '';
+}
+
 router.get('/context/:sessionId', (req, res) => {
   const { sessionId } = req.params;
-  const cwd = req.query.cwd || homedir(); // CO-1:Windows HOME 为空 → homedir()
   const projectHash = req.query.projectHash || '';
+  // cwd 优先级:会话 jsonl 里的权威 cwd > 前端传的 > homedir 兜底。前端有时传空 cwd(session
+  // 无 projectPath),回落 homedir 会让 --resume 找不到会话 → /context 失败。jsonl cwd 保证匹配。
+  const cwd = cwdFromSessionFile(projectHash, sessionId) || req.query.cwd || homedir();
   // V2:不带 --model 时 CLI 按 settings.json 默认模型(如 haiku)计算窗口与显示,
   // 与会话实际模型不符(用户报告:点徽章显示 haiku)。前端把会话当前模型传进来。
   const model = String(req.query.model || '').trim();
