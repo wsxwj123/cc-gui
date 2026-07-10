@@ -5280,7 +5280,10 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         </div>
       )}
 
-      <div ref={containerRef} onScroll={handleScroll} className="flex-1 overflow-y-auto relative z-10">
+      {/* wrapper:让"回到底部"按钮锚定消息区底部(而非猜输入框高度的 bottom-24)——
+          输入框高度可变(多行/任务清单/附件),固定偏移总有挡住输入框的时候 */}
+      <div className="flex-1 min-h-0 relative">
+      <div ref={containerRef} onScroll={handleScroll} className="h-full overflow-y-auto relative z-10">
           {visibleMessages.length === 0 && (liveVisible ? chatMessages.length : 0) === 0 ? (
             <div className="mobile-draft-empty flex items-center justify-center h-full text-ink-muted text-sm font-body">
               {selectedSession?.draft ? '开始你的第一条消息 ↓' : '该会话没有可显示的消息'}
@@ -5361,9 +5364,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         </div>
 
       {!autoScroll && (
-        // 桌面 + 手机都居中输入框上方 — 避免压在发送/停止按钮上,视觉重心
-        // 也更舒服(原来右下角桌面端虽不挡,但偏角落容易看不见)。
-        <div className="absolute bottom-24 left-1/2 -translate-x-1/2 z-20">
+        // 居中悬在消息区底沿 = 输入框正上方,由 wrapper 锚定,不再依赖输入框高度猜测
+        <div className="absolute bottom-3 left-1/2 -translate-x-1/2 z-20">
           <button onClick={() => {
               // Scroll ONLY the messages container — scrollIntoView would scroll
               // every scrollable ancestor (incl. the root flex), shoving the
@@ -5378,6 +5380,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           </button>
         </div>
       )}
+      </div>
 
       <ChatInput
         onSend={handleSend}
