@@ -5,7 +5,7 @@ import { promisify } from 'util';
 import { join, dirname } from 'path';
 import { homedir } from 'os';
 import { stat, unlink } from 'fs/promises';
-import { resolveUnderHome } from '../utils/safe-path.js';
+import { resolveWorkspacePath } from '../utils/safe-path.js';
 
 const execFileP = promisify(execFile);
 
@@ -218,7 +218,9 @@ router.get('/sessions/:sessionId/file-changes', async (req, res) => {
 
 // Make sure callers can't reach outside the user's home with a crafted path.
 function assertSafePath(p) {
-  return resolveUnderHome(p, { requireCanonical: true });
+  // resolveWorkspacePath = $HOME 门禁 + 已知 claude 工作区例外(HOME 外项目/tmp 会话
+  // 文件回滚曾报 "path outside $HOME",用户实报);.. / . 段仍一律拒绝。
+  return resolveWorkspacePath(p, { requireCanonical: true });
 }
 
 /**

@@ -1,6 +1,6 @@
 import { homedir } from 'os';
-import { isAbsolute, relative, resolve, join, dirname } from 'path';
-import { readdirSync } from 'fs';
+import { isAbsolute, relative, resolve, join, dirname, basename } from 'path';
+import { readdirSync, realpathSync } from 'fs';
 
 export function isPathInside(child, parent) {
   const base = resolve(parent);
@@ -55,4 +55,40 @@ export function resolveUnderHome(input, { label = 'path', requireCanonical = fal
     throw new Error(`${label} outside $HOME`);
   }
   return resolved;
+}
+
+/**
+ * resolveUnderHome + "已知 claude 工作区"例外:$HOME 外但属于用户显式用过 claude 的
+ * 项目目录(或其子路径)时放行——Windows 项目常在 D:\ 等其他盘、mac 会话可能改过
+ * /tmp 下文件,纯 $HOME 门禁会让审查回滚/恢复整片报 "path outside $HOME"(用户实报)。
+ * requireCanonical 语义保留:含 ./.. 段无论在哪都拒。realpath 前后两种形态都试
+ * (mac /tmp → /private/tmp symlink、Windows junction 会让 hash 对不上)。
+ */
+export function resolveWorkspacePath(input, opts = {}) {
+  try {
+    return resolveUnderHome(input, opts);
+  } catch (e) {
+    if (typeof input !== 'string' || !isAbsolute(input)) throw e;
+    if (opts.requireCanonical) {
+      const segs = input.split(/[\\/]+/);
+      if (segs.some((s) => s === '.' || s === '..')) throw e;
+    }
+    const resolved = resolve(input);
+    // realpath best-effort:目标可能不存在(恢复"已被删除的文件"),往上找最近
+    // 存在的祖先做 realpath 再把剩余段拼回(mac /tmp→/private/tmp 靠这步解开)。
+    let real = resolved;
+    {
+      let cur = resolved; const tail = [];
+      for (;;) {
+        try { real = tail.length ? join(realpathSync(cur), ...tail) : realpathSync(cur); break; }
+        catch {}
+        const parent = dirname(cur);
+        if (parent === cur) break;
+        tail.unshift(basename(cur));
+        cur = parent;
+      }
+    }
+    if (isKnownClaudeWorkspace(real, resolved)) return real;
+    throw e;
+  }
 }

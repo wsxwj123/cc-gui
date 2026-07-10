@@ -4,7 +4,7 @@ import { promisify } from 'util';
 import { join, resolve as resolvePath, sep } from 'path';
 import { homedir } from 'os';
 import { stat, mkdir, readFile, writeFile, rm, access } from 'fs/promises';
-import { resolveUnderHome } from '../utils/safe-path.js';
+import { resolveWorkspacePath } from '../utils/safe-path.js';
 
 const execFileP = promisify(execFile);
 const router = Router();
@@ -18,7 +18,9 @@ const CHECKPOINTS_ROOT = join(homedir(), '.claude', 'gui', 'checkpoints');
 function safe(p) {
   // Canonicalize `//+` and trailing `/` rather than reject — legacy project
   // dirs decode to non-canonical paths but are still valid.
-  return resolveUnderHome(p);
+  // resolveWorkspacePath = $HOME 门禁 + 已知 claude 工作区例外(Windows 项目在
+  // D:\ 等其他盘、mac /tmp 下的会话文件,纯 $HOME 门禁让回滚报 outside $HOME)。
+  return resolveWorkspacePath(p);
 }
 
 const SESSION_RE = /^[A-Za-z0-9_-]{1,80}$/;
