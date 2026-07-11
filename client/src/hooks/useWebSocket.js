@@ -6,7 +6,8 @@ import { useStore } from '../stores/sessionStore.js';
 // 客户端离线/多设备状态异常也兜得住);这里保留一份仅用于把这类请求渲染成红色警示卡+
 // 越过客户端自身的白名单/auto-allow。两处正则应保持同步。
 const DANGEROUS_BASH = /\brm\s+-[a-z]*[rf]|\brm\s+--(recursive|force)|\bgit\s+clean\s+-[a-z]*f|\bgit\s+push\b[^\n]*(--force|\s-f\b)|\bgit\s+reset\s+--hard\b|\bgit\s+branch\s+-D\b|\bfind\b[^\n]*-delete\b|\bshred\b|\bdrop\s+(table|database)\b|\btruncate\b|\bmkfs\b|\bdd\s+if=[^\n]*of=\/dev|>\s*\/dev\/sd|[|]\s*(sudo\s+)?(ba)?sh\b|\bnpm\s+(i|install|add)\b|\bpnpm\s+(i|install|add)\b|\byarn\s+(add|install)\b|\bpip[23]?\s+install\b|\bbrew\s+install\b|\bsudo\b/i;
-function isDangerousCommand(req) {
+// 导出供 PermissionPrompt 复用(危险命令卡隐藏"始终允许"选项,与服务端 allowAlways:false 对齐)。
+export function isDangerousCommand(req) {
   if (req?.toolName !== 'Bash') return false;
   return DANGEROUS_BASH.test(String(req?.toolInput?.command || ''));
 }
@@ -128,7 +129,8 @@ export function useWebSocket() {
                 fetch(`/api/permissions/respond/${req.id}`, {
                   method: 'POST',
                   headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({ decision: 'allow' }),
+                  // 越界请求附带 session 级目录授权,否则 allow 后仍被 FS 沙箱层挡回。
+                  body: JSON.stringify({ decision: 'allow', ...(req.blockedPath ? { authorizeDir: 'session' } : {}) }),
                 }).catch(() => {});
                 break;
               }
@@ -153,7 +155,9 @@ export function useWebSocket() {
                 }
                 // 计划类文档 → 不在此拦截,继续往下(默认弹窗/或其他模式处理)
               }
-              if (mode === 'plan' && READ_CLASS.includes(req.toolName)) {
+              // 越界访问(blockedPath):读类/白名单自动放行一律不适用 → 强制弹越界卡
+              // (与服务端 makeCanUseTool 的 boundary 判定对齐,沙箱边界不静默扩权)。
+              if (mode === 'plan' && READ_CLASS.includes(req.toolName) && !req.blockedPath) {
                 if (import.meta.env?.DEV) console.log('[cgui-perm] auto-allow: plan+readClass', req.id, req.toolName);
                 fetch(`/api/permissions/respond/${req.id}`, {
                   method: 'POST',
@@ -162,7 +166,7 @@ export function useWebSocket() {
                 }).catch(() => {});
                 break;
               }
-              if (mode === 'acceptEdits' && READ_CLASS.includes(req.toolName)) {
+              if (mode === 'acceptEdits' && READ_CLASS.includes(req.toolName) && !req.blockedPath) {
                 if (import.meta.env?.DEV) console.log('[cgui-perm] auto-allow: acceptEdits+readClass', req.id, req.toolName);
                 fetch(`/api/permissions/respond/${req.id}`, {
                   method: 'POST',
@@ -172,7 +176,7 @@ export function useWebSocket() {
                 break;
               }
               const wl = JSON.parse(localStorage.getItem(`cgui-perm-wl-${req.sessionId || 'none'}`) || '[]');
-              if (wl.includes(req.toolName)) {
+              if (wl.includes(req.toolName) && !req.blockedPath) {
                 if (import.meta.env?.DEV) console.log('[cgui-perm] auto-allow: whitelist', req.id, req.toolName);
                 fetch(`/api/permissions/respond/${req.id}`, {
                   method: 'POST',

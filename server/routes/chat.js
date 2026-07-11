@@ -7,6 +7,7 @@ import { homedir, tmpdir } from 'node:os';
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import { getDefaultModel } from '../services/model-resolver.js';
 import { dropPendingForSession, requestPermission } from './permissions.js';
+import { buildAlwaysAllowUpdates, buildDirAuthUpdates } from '../utils/permission-rules.js';
 import { resolveClaude } from '../utils/claude-resolver.js';
 import { broadcast } from '../broadcast.js';
 
@@ -268,8 +269,35 @@ function mcpAutoApproved(toolName) {
 }
 
 function makeCanUseTool(slot) {
-  return async (toolName, input) => {
-    const ask = () => requestPermission({ toolName, toolInput: input, sessionId: slot.sessionId, cwd: slot.cwd });
+  // 第三参 opts(sdk.d.ts CanUseTool):blockedPath=触发本次请求的沙箱越界路径;
+  // suggestions=CLI 生成的"始终允许"规则建议(整组返回即官方 always-allow 语义);
+  // decisionReason/toolUseID 透传给前端展示/去重。
+  return async (toolName, input, opts = {}) => {
+    const boundary = typeof opts.blockedPath === 'string' && opts.blockedPath ? opts.blockedPath : null;
+    const ask = () => requestPermission({
+      toolName, toolInput: input, sessionId: slot.sessionId, cwd: slot.cwd,
+      blockedPath: boundary, decisionReason: opts.decisionReason || null, toolUseID: opts.toolUseID || null,
+    });
+    // 统一 allow 构造:updatedInput 沿用旧语义;r.always=用户点"始终允许"→ 经
+    // updatedPermissions 写 settings.json 的 permissions.allow(CLI 落盘,终端同享);
+    // r.authorizeDir=越界卡"授权此目录"→ addDirectories(session 或永久)。
+    // allowAlways=false 的调用点(危险 Bash)忽略 always —— 若给 rm -rf 之类写下
+    // allow 规则,后续 CLI 在规则层直接放行、canUseTool 不再被调,G3 强拦即失效。
+    const allowResult = (r, { allowAlways = true } = {}) => {
+      const out = { behavior: 'allow', updatedInput: (r.updatedInput && typeof r.updatedInput === 'object') ? r.updatedInput : input };
+      const updates = [];
+      if (allowAlways && r.always) {
+        updates.push(...buildAlwaysAllowUpdates(toolName, input, opts.suggestions));
+        out.decisionClassification = 'user_permanent';
+      }
+      if (boundary && r.authorizeDir) {
+        let isDir = null;
+        try { isDir = statSync(boundary).isDirectory(); } catch {}
+        updates.push(...buildDirAuthUpdates(boundary, { permanent: r.authorizeDir === 'permanent', isDir }));
+      }
+      if (updates.length) out.updatedPermissions = updates;
+      return out;
+    };
     if (toolName === 'AskUserQuestion') {
       const r = await ask();
       if (r.decision === 'allow') {
@@ -306,9 +334,10 @@ function makeCanUseTool(slot) {
         if (!planClass) {
           return { behavior: 'deny', message: '规划模式禁止修改源文件。可写计划类文档(.md/.txt 或名含 plan/todo),或用 ExitPlanMode 提交计划等待用户批准,获批后再改源码。' };
         }
-        // 计划类文档 → 弹卡由用户决定(保留 #4 特性,不硬拒)。
+        // 计划类文档 → 弹卡由用户决定(保留 #4 特性,不硬拒)。plan 下忽略 always
+        // (不写持久规则,规划期不留跨会话授权)。
         const r = await ask();
-        if (r.decision === 'allow') return { behavior: 'allow', updatedInput: (r.updatedInput && typeof r.updatedInput === 'object') ? r.updatedInput : input };
+        if (r.decision === 'allow') return allowResult(r, { allowAlways: false });
         return { behavior: 'deny', message: r.reason || '规划模式下该写入被拒绝' };
       }
       // Bash 在 plan 下【一律弹卡】,不自动放行:危险命令黑名单枚举不全(`> file` 清空、
@@ -316,33 +345,35 @@ function makeCanUseTool(slot) {
       // Bash = 信任违背。读类探索工具(Read/Grep/Glob/LS)仍自动放行,不影响规划体验。
       if (toolName === 'Bash') {
         const r = await ask();
-        if (r.decision === 'allow') return { behavior: 'allow', updatedInput: (r.updatedInput && typeof r.updatedInput === 'object') ? r.updatedInput : input };
+        if (r.decision === 'allow') return allowResult(r, { allowAlways: false });
         return { behavior: 'deny', message: r.reason || '规划模式下该命令被拒绝' };
       }
-      if (!/^mcp__/.test(toolName)) return { behavior: 'allow', updatedInput: input };
+      // 越界访问(boundary)不随读类自动放行 → 落到下面弹越界卡。
+      if (!/^mcp__/.test(toolName) && !boundary) return { behavior: 'allow', updatedInput: input };
       // MCP 工具可能有写副作用,plan 下不无条件放行,落到下面按 autoapprove/弹卡处理。
     }
-    if (mode === 'bypassPermissions') return { behavior: 'allow', updatedInput: input };
+    // 放任模式:一切放行;越界时附带 session 级目录授权,否则 allow 也会在 FS 层再被挡。
+    if (mode === 'bypassPermissions') {
+      return allowResult(boundary ? { authorizeDir: 'session' } : {}, { allowAlways: false });
+    }
     // 危险 Bash 走弹卡,放在 acceptEdits 自动放行【之前】:确保未来若 acceptEdits 扩大到
     // 放行 Bash,危险命令仍先弹卡。当前 default/acceptEdits 下 Bash 本就落到下面 ask(),
     // 故此块目前对裁决是等效前置(不改变结果);真正的"永久授权/自动放行"裁决在客户端
     // respond 侧,客户端 G3(useWebSocket)对危险命令强制弹卡,两端正则逐字一致。
     if (isDangerousBash(toolName, input)) {
       const r = await ask();
-      if (r.decision === 'allow') return { behavior: 'allow', updatedInput: (r.updatedInput && typeof r.updatedInput === 'object') ? r.updatedInput : input };
+      if (r.decision === 'allow') return allowResult(r, { allowAlways: false });
       return { behavior: 'deny', message: r.reason || '用户拒绝执行该命令' };
     }
     // 接受编辑:只读类 + 文件写入/编辑类自动放行(名副其实=改文件不弹窗,对齐官方 acceptEdits);
     // Bash/执行类与 MCP 仍走下面的弹窗。这才和"默认"拉开区别(默认下改文件也要弹窗)。
-    if (mode === 'acceptEdits' && (READ_CLASS.has(toolName) || WRITE_CLASS.has(toolName))) {
+    // 越界访问例外:沙箱边界外的路径不随档位静默扩权,一律弹越界卡。
+    if (mode === 'acceptEdits' && (READ_CLASS.has(toolName) || WRITE_CLASS.has(toolName)) && !boundary) {
       return { behavior: 'allow', updatedInput: input };
     }
-    if (mcpAutoApproved(toolName)) return { behavior: 'allow', updatedInput: input };
+    if (mcpAutoApproved(toolName) && !boundary) return { behavior: 'allow', updatedInput: input };
     const r = await ask();
-    if (r.decision === 'allow') {
-      const ui = (r.updatedInput && typeof r.updatedInput === 'object') ? r.updatedInput : input;
-      return { behavior: 'allow', updatedInput: ui };
-    }
+    if (r.decision === 'allow') return allowResult(r);
     return { behavior: 'deny', message: r.reason || '用户拒绝执行该工具' };
   };
 }
@@ -429,8 +460,9 @@ router.post('/chat', async (req, res) => {
   // 按 slot.guiMode 决定(集中分级,复刻旧 hook 的语义)。
   const sdkPermMode = chosenMode === 'plan' ? 'plan' : 'default';
 
-  // additionalDirectories = SDK 的文件访问沙箱边界(越界读会在 FS 层被挡、**不经 canUseTool**,
-  // 故无授权卡可弹——用户报"沙箱限制读不了本地文件却不弹卡片"的根因)。
+  // additionalDirectories = SDK 的文件访问沙箱边界。越界访问现经 canUseTool 第三参的
+  // blockedPath 透出 → makeCanUseTool 弹"越界访问"卡,用户可仅本次放行或授权目录
+  // (addDirectories 经 updatedPermissions 回传,session 级或永久写 settings.json)。
   // CO-1:① 用 homedir() 而非 process.env.HOME——Windows 上 HOME 为空(它用 USERPROFILE),
   //   原写法导致 Windows 家目录都没加进可读范围,读任何本地文件都被挡。
   //   ② globalRead 时直接放开整盘"读"(posix 加 '/';win 加 cwd/home 所在盘根)——这是本地单用户
