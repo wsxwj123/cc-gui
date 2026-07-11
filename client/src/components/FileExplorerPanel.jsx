@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react';
-import { Folder, FolderOpen, File, RefreshCw, AlertCircle, ChevronRight, ChevronDown, FileText, Image as ImageIcon, ExternalLink, Film, Pencil, Save, Undo2, Redo2, X, Check, Trash2, AtSign } from 'lucide-react';
+import { Folder, FolderOpen, File, RefreshCw, AlertCircle, ChevronRight, ChevronDown, FileText, Image as ImageIcon, ExternalLink, Film, Pencil, Save, Undo2, Redo2, X, Check, Trash2, AtSign, MoreVertical } from 'lucide-react';
 import { useStore } from '../stores/sessionStore.js';
 import { MarkdownRenderer } from './MarkdownRenderer.jsx';
 import { ArtifactPreview } from './ArtifactPreview.jsx';
@@ -297,7 +297,7 @@ function TreeNode({ path, name, depth, isDir, isRoot, parentPath, expanded, dirs
         // macOS WKWebView 对 user-select:none 元素不派发 contextmenu(Chromium 会),右键在真 app 里
         // 静默失效 → 补右键 mousedown(button===2,鼠标事件不受 user-select 影响,任何 webview 都发)兜底。
         onMouseDown={(e) => { if (e.button === 2 && onCtx) onCtx(e, { path, name, isDir, isRoot: !!isRoot, parentPath }); }}
-        className={`flex items-center gap-1 px-2 py-0.5 rounded cursor-pointer text-[12px] font-body select-none ${
+        className={`group flex items-center gap-1 px-2 py-0.5 rounded cursor-pointer text-[12px] font-body select-none ${
           isSelected ? 'bg-accent/15 text-accent' : 'hover:bg-canvas-warm text-ink'
         }`}
         style={{ paddingLeft: `${0.5 + depth * 0.9}rem` }}
@@ -315,6 +315,15 @@ function TreeNode({ path, name, depth, isDir, isRoot, parentPath, expanded, dirs
           </>
         )}
         <span className="truncate flex-1">{name}</span>
+        {/* ⋮ 菜单入口:右键在 WKWebView 上不稳(见上),左键点 ⋮ 任何 webview 都 100% 工作,
+            打开同一菜单(添加到上下文/默认App打开/删除)。hover 显示,stopPropagation 防触发行的打开/展开。 */}
+        <button
+          onClick={(e) => { e.stopPropagation(); onCtx && onCtx(e, { path, name, isDir, isRoot: !!isRoot, parentPath }); }}
+          className="opacity-0 group-hover:opacity-100 shrink-0 p-0.5 rounded hover:bg-black/10 text-ink-faint"
+          title="更多操作"
+        >
+          <MoreVertical size={12} />
+        </button>
       </div>
       {isDir && isOpen && dir && (
         <>
@@ -356,7 +365,8 @@ function PreviewBody({ preview }) {
   const isImage = IMAGE_EXT.has(e);
   const isVideo = VIDEO_EXT.has(e);
   const isAudio = AUDIO_EXT.has(e);
-  const isMedia = isImage || isVideo || isAudio;
+  const isPdf = e === 'pdf'; // WKWebView/WebView2 原生渲 PDF,直接 iframe 塞 raw 字节即可
+  const isMedia = isImage || isVideo || isAudio || isPdf;
   // Truncated files can't be edited — saving would write back only the first
   // 256KB and silently destroy the tail.
   const editable = !isMedia && !preview.binary && !preview.truncated && !preview.loading && !preview.error;
@@ -518,9 +528,15 @@ function PreviewBody({ preview }) {
           <div className="p-3">
             <audio src={rawUrl(preview.path)} controls className="w-full" />
           </div>
+        ) : isPdf ? (
+          <iframe
+            src={rawUrl(preview.path)}
+            title={preview.name}
+            className="w-full h-full min-h-[400px] border-0 bg-white"
+          />
         ) : preview.binary ? (
           <div className="px-3 py-4 text-[11px] text-ink-faint">
-            二进制文件 · 不渲染预览（用默认App打开查看）
+            二进制文件 · 不渲染预览（可右键或 ⋮ 用默认 App 打开）
           </div>
         ) : isMarkdown ? (
           <div className="px-3 py-2">
