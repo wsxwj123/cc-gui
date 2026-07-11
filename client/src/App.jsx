@@ -4345,21 +4345,21 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       // reattach takes over); only render a hard error for genuine failures.
       const isNetworkDrop = err instanceof TypeError
         && /load failed|failed to fetch|network|connection/i.test(err.message || '');
-      // fable ②:切走后迟到的 catch 别把这条回合 push 进 chatMessages——它属于 streamSid 那条
-      // 会话,当前 pane 已切到别的会话,push 会成孤儿并在下次开流(owner 重合)时串进新会话。
-      // 判据同 finalize 的 getLocalSession()!==sid:仅当已切到「另一条真实会话」才跳过;草稿态/
-      // init 前(streamSid 或当前 sid 为空)照常显示,不误伤"停止但不切走"这个正当场景。
-      const stillHere = !streamSid || !getLocalSession()?.sessionId
-        || getLocalSession().sessionId === streamSid;
+      // 迟到的 catch 照常保留半截回复/错误气泡,但打 ownerKey(归属发起时的会话),渲染层
+      // visibleChat 按 ownerKey 门控——孤儿只在它归属的会话显示。此前 v0.2.190 用 stillHere
+      // 抑制 push 修 fable ② 是方向错了:切走场景不 push=半截回复(思考/工具调用,未落盘)
+      // 永久丢失,切回 A 只剩 connecting 等新 delta(用户实报);且草稿豁免仍让 A 的孤儿在
+      // 新建草稿 C 里串显。归属标记既保数据又断串扰,与 btw 的 ownerKey 同一机制。
       if (err.name === 'AbortError') {
         // 用户主动「停止」:把已经流式显示的文本/思考/工具调用保留成一条气泡(标记
         // 已停止),而不是连同用户消息一起丢弃——以前这里静默清空,用户辛苦看到的半截
         // 回复+工具调用全没了,只剩刚发的消息(#6)。producedReply=true 让 finally 的
         // 落盘轮询把它当正常产出处理(jsonl 若已写入半截会 refetch 覆盖,否则保留本地副本)。
-        if (stillHere && (accumulatedText || accumulatedThinking || currentToolCalls.length > 0)) {
+        if (accumulatedText || accumulatedThinking || currentToolCalls.length > 0) {
           producedReply = true;
           setChatMessages((prev) => [...prev, {
             uuid: 'chat-stopped-' + Date.now(), type: 'turn',
+            ownerKey: streamSid || sessionQueueKey,
             timestamp: new Date().toISOString(), model: streamingModel,
             text: accumulatedText ? [accumulatedText] : [],
             thinking: accumulatedThinking ? [accumulatedThinking] : [],
@@ -4369,13 +4369,14 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             interrupted: true,
           }]);
         }
-      } else if (stillHere && !isNetworkDrop) {
+      } else if (!isNetworkDrop) {
         console.error('Chat error:', err);
         // Render the failure as a visible turn so the user isn't left staring at
         // a frozen "connecting" with no explanation (e.g. invalid project dir).
         setChatMessages((prev) => [...prev, {
           uuid: 'chat-error-' + Date.now(),
           type: 'turn',
+          ownerKey: streamSid || sessionQueueKey,
           timestamp: new Date().toISOString(),
           model: null,
           text: [`❌ ${err.message || '发送失败'}`],
@@ -5222,12 +5223,17 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // ownerKey)就渲染,与流归属无关 —— 修"/btw 能发但没气泡":空闲态 owner 未认领/后台别的
   // 会话在流/draft→init 窗口时 streamOwnerKey≠sessionQueueKey 会把气泡整块吞掉。ownerKey
   // 守卫保证不泄漏到别的会话,且不偷后台流的归属(不动 streamOwnerKey)。
+  // v0.2.192 泛化:凡带 ownerKey 的本地条目(btw 旁问、AbortError 半截回复、error turn)
+  // 一律按归属门控——属于当前会话就显示、不属于就藏,与 liveVisible(流归属)解耦。既修
+  // "切走再切回半截回复消失只剩 connecting"(孤儿被 liveVisible=false 藏住/被 stillHere 不
+  // push 丢掉),也修"A 的孤儿在新开流(owner 重合)时串进会话 C"(fable ② 诈尸)。无
+  // ownerKey 的条目(流式 turn/user 回显/compact)维持 liveVisible 门控不变。
   const visibleChat = chatMessages.filter(
-    (m) => liveVisible || (m.type === 'btw' && m.ownerKey === sessionQueueKey)
+    (m) => (m.ownerKey ? m.ownerKey === sessionQueueKey : liveVisible)
   );
   // BF-1:展示口径统一走 visibleMessages(活跃流期间剔除本回合半成品),回合进度条/
   // 成本等派生统计与消息列表同源,不再出现"进度条多一个重复回合点"。
-  const allMessages = [...visibleMessages, ...(liveVisible ? chatMessages : [])];
+  const allMessages = [...visibleMessages, ...visibleChat];
   // 右侧回合进度条数据:每个用户回合一个点(摘要取去附件后的显示文本)。
   // 注意:必须是普通计算,不能用 useMemo —— 这里在 SessionDetail 的早返回
   // (if loading && tabIndex===0 return)之后,加 hook 会导致切换会话(loading 切换)时
