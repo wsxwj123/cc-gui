@@ -24,7 +24,8 @@ import {
   getActiveSessions,
   attachmentTextHash,
 } from '../services/session-reader.js';
-import { claudeSpawn, cleanChildEnv } from './chat.js';
+import { claudeSpawn, cleanChildEnv, safeModelArg } from './chat.js';
+import { mkdirSync } from 'fs';
 import { resolveUnderHome } from '../utils/safe-path.js';
 
 // L4: 附件元数据 sidecar — 写入位置与 session-reader 一致。
@@ -536,7 +537,7 @@ router.post('/sessions/:sessionId/compact-segment', async (req, res) => {
 
     // 摘要生成:与 /chat/title 同形态(stdin 喂 prompt 绕开 Windows cmd 元字符;
     // plan 模式只读;--no-session-persistence 不落盘;隔离 tmp cwd 不污染项目)。
-    const model = String(req.body?.model || '').replace(/\[1m\]/i, '').trim();
+    const model = safeModelArg(String(req.body?.model || '').replace(/\[1m\]/i, ''));
     const prompt = `请把下面 <对话></对话> 标签内的一段开发对话压缩成一份信息保全的中文摘要。要求:\n- 保留:任务目标、关键决策与理由、涉及的文件路径与函数名、已完成/未完成事项、重要结论与数据、用户明确的要求与偏好。\n- 省略:寒暄、重复内容、工具调用的过程细节。\n- 用条目式陈述,直接输出摘要本身,不加任何前言或解释。\n\n<对话>\n${transcript}\n</对话>`;
     const summaryText = await new Promise((resolve) => {
       let proc;
@@ -544,7 +545,9 @@ router.post('/sessions/:sessionId/compact-segment', async (req, res) => {
         const args = ['-p', '--permission-mode', 'plan', '--no-session-persistence'];
         if (model) args.push('--model', model);
         const compactCwd = join(tmpdir(), 'cgui-compact');
-        mkdir(compactCwd, { recursive: true }).catch(() => {});
+        // 必须同步建目录:异步 mkdir 未 await 就 spawn(cwd:compactCwd),首次目录不存在
+        // → spawn cwd 无效直接失败,用户首次用定向压缩必得 502(第二次才成)。同 title 用 mkdirSync。
+        try { mkdirSync(compactCwd, { recursive: true }); } catch {}
         proc = claudeSpawn(args, { cwd: compactCwd, stdio: ['pipe', 'pipe', 'pipe'], env: cleanChildEnv() });
         proc.stdin.write(prompt); proc.stdin.end();
       } catch { return resolve(''); }

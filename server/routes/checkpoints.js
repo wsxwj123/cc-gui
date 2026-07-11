@@ -47,7 +47,10 @@ async function gitShadow(args, sessionId, workTree, opts = {}) {
   // 抛错 —— commit 实际已完成但请求报 500,meta 与 git log 漂移。timeout 60s 同理。
   // LC_ALL=C 固定英文错误输出:错误分类靠 regex 匹配英文串(pathspec did not match
   // 等),中文/其它 locale 下 git 输出本地化会让匹配全失效 → 空快照误判 restore_failed。
-  return execFileP('git', ['--git-dir', gitDir, '--work-tree', workTree, ...args],
+  // core.quotepath=off:否则 ls-tree --name-only 把中文/非 ASCII 名输出成 "\346\226..."
+  // 转义带引号形态 → restore-file 的 targetFiles.includes(rel)(rel 是真 UTF-8)恒 false
+  // → 中文名文件一律"不在快照中"404;差集删除也因 garbled 路径不存在而静默 no-op(残留)。
+  return execFileP('git', ['--git-dir', gitDir, '--work-tree', workTree, '-c', 'core.quotepath=off', ...args],
     { timeout: 60000, cwd: workTree, maxBuffer: 32 * 1024 * 1024, ...opts,
       env: { ...process.env, LC_ALL: 'C', ...(opts.env || {}) } });
 }

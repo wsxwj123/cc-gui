@@ -100,7 +100,10 @@ router.get('/worktree', async (req, res) => {
       } catch { t.dirtyFileCount = 0; }
       // resolve 归一后再比:Windows 上 git porcelain 输出正斜杠(C:/Users/…)而 root
       // 是 Node 反斜杠路径,字符串直比恒 false → 主工作区丢"主"标签、误出删除按钮。
-      t.isMain = pathResolve(t.path) === pathResolve(root);
+      // pathResolve 不归一盘符大小写:CLI cwd 常以小写盘符记录(d:\proj),仍会 false →
+      // 该修复要防的原症状换个形态复发;故 win32 下再 toLowerCase 比较。
+      const a = pathResolve(t.path), b = pathResolve(root);
+      t.isMain = process.platform === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b;
     }
 
     res.json({ root, trees });

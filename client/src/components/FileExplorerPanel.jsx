@@ -148,9 +148,11 @@ export function FileExplorerPanel() {
   const startDelete = () => {
     const { path, name, parentPath } = ctxMenu.entry;
     setCtxMenu(null);
-    // 删除的是当前预览的文件(或其所在目录)→ 立即清预览
-    setPreview((p) => (p && (p.path === path || p.path.startsWith(path + '/')) ? null : p));
-    setSelectedFile((sf) => (sf && (sf === path || sf.startsWith(path + '/')) ? null : sf));
+    // 删除的是当前预览的文件(或其所在目录)→ 立即清预览。子路径判定要同时认 / 和 \\ —
+    // Windows 的 /api/files/list 返回反斜杠路径,只判 '/' 会让删目录后其内预览/选中态残留。
+    const underPath = (x) => x === path || x.startsWith(path + '/') || x.startsWith(path + '\\');
+    setPreview((p) => (p && underPath(p.path) ? null : p));
+    setSelectedFile((sf) => (sf && underPath(sf) ? null : sf));
     timersRef.current[path] = setTimeout(async () => {
       delete timersRef.current[path];
       // 进入真删前先标 deleting:大目录删除要数秒,这期间横条不能再显示"可撤销"
@@ -292,6 +294,9 @@ function TreeNode({ path, name, depth, isDir, isRoot, parentPath, expanded, dirs
       <div
         onClick={() => isDir ? toggle(path, true) : openFile({ path, name, size: 0 })}
         onContextMenu={(e) => onCtx && onCtx(e, { path, name, isDir, isRoot: !!isRoot, parentPath })}
+        // macOS WKWebView 对 user-select:none 元素不派发 contextmenu(Chromium 会),右键在真 app 里
+        // 静默失效 → 补右键 mousedown(button===2,鼠标事件不受 user-select 影响,任何 webview 都发)兜底。
+        onMouseDown={(e) => { if (e.button === 2 && onCtx) onCtx(e, { path, name, isDir, isRoot: !!isRoot, parentPath }); }}
         className={`flex items-center gap-1 px-2 py-0.5 rounded cursor-pointer text-[12px] font-body select-none ${
           isSelected ? 'bg-accent/15 text-accent' : 'hover:bg-canvas-warm text-ink'
         }`}

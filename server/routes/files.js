@@ -278,10 +278,15 @@ router.post('/files/delete', async (req, res) => {
       return res.status(403).json({ error: '该文件受保护,不可删除' });
     }
     // 拒绝删除 HOME 本身/已知工作区根:误触根节点的兜底(树 UI 不给根出删除项,双保险)。
-    if (real === HOME || real === resolve(req.body?.rootPath || '')) {
+    // Windows 大小写不敏感文件系统 + CLI cwd 常以小写盘符记录(d:\proj)→ real(realpath
+    // 已规范盘符/大小写)与 resolve(客户端原串)直接 === 可不匹配,第二道保险悄悄失效;
+    // 故 win32 下不分大小写比较。
+    const sameFsPath = (a, b) => process.platform === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b;
+    if (sameFsPath(real, HOME) || sameFsPath(real, resolve(req.body?.rootPath || ''))) {
       return res.status(400).json({ error: '不允许删除根目录' });
     }
-    await rm(real, { recursive: true, force: false });
+    // maxRetries:Windows 上文件被占用(刚"用默认 App 打开"又删)EBUSY/EPERM 概率高,直接报错。
+    await rm(real, { recursive: true, force: false, maxRetries: 3, retryDelay: 100 });
     res.json({ ok: true, path: real });
   } catch (err) {
     res.status(err.status || 500).json({ error: err.message });

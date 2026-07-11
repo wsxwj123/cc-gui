@@ -64,13 +64,36 @@ async function runClaude(args, { timeout = 10000 } = {}) {
   // 路径解析统一走 claude-resolver(与检测面板/聊天链路同源,PATH 外安装位也可用);
   // Windows 的 .cmd/.bat 不是真正可执行文件,claudeCommand 已包好 cmd.exe /c。
   const { file, args: fullArgs } = claudeCommand(args);
-  const { stdout } = await execFileP(file, fullArgs, {
+  const isWin = process.platform === 'win32';
+  // Windows:直接子进程是 cmd.exe,execFile 内建超时只 TerminateProcess 掉 cmd.exe,真正的
+  // claude(mcp login 时内含 OAuth 回调 HTTP server)成孤儿占死端口 → 重试登录一直失败。
+  // 故 Win 关掉内建超时、自管定时器 taskkill /T 杀整棵树(cmd 存活时杀它会连带 claude)。
+  // 非 Win claude 是直接子进程,内建超时直接杀它无孤儿。
+  const p = execFileP(file, fullArgs, {
     encoding: 'utf-8',
-    timeout,
+    timeout: isWin ? 0 : timeout,
     env: { ...process.env },
     maxBuffer: 8 * 1024 * 1024,
   });
-  return stdout;
+  let timedOut = false, timer = null;
+  if (isWin && timeout > 0) {
+    const child = p.child;
+    timer = setTimeout(() => {
+      timedOut = true;
+      if (child?.pid != null) {
+        try { spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], { stdio: 'ignore' }); } catch {}
+      }
+    }, timeout);
+  }
+  try {
+    const { stdout } = await p;
+    return stdout;
+  } catch (err) {
+    if (timedOut) err.killed = true; // 与非 Win execFile 内建超时同语义:login 端点靠 err.killed 判超时
+    throw err;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 // 允许空格:claude.ai connector 的服务器名带空格(如 "claude.ai Google Drive")。

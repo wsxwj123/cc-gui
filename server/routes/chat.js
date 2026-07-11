@@ -59,6 +59,16 @@ function settingsArgsToTempFile(args) {
     return { args: next, tempFile: f };
   } catch { return { args, tempFile: null }; }
 }
+// 模型名白名单:一次性 spawn(title/context/compact)把 model 当 `--model <v>` 参数传,
+// Windows 走 cmd.exe /c,libuv 不给不含空格的参数加引号 → `x&calc` 里的 `&` 被 cmd 当命令
+// 分隔符执行,绕过整个权限体系(局域网模式=密码后 RCE)。合法模型名只含 [\w.:\-\[\]/],
+// 不匹配就不传该参数(回落默认模型)—— 拒绝注入而非放行。主 /chat 走 SDK 不经 cmd,无此面。
+export const MODEL_ARG_RE = /^[\w.:\-\[\]/]{1,128}$/;
+export function safeModelArg(m) {
+  const s = String(m || '').trim();
+  return MODEL_ARG_RE.test(s) ? s : '';
+}
+
 // spawn claude 的统一入口:路径解析交给 claude-resolver(PATH → login shell →
 // npm prefix → 固定候选),此处只处理平台执行形态。
 // Windows:npm 装的 claude 是 claude.cmd,Node spawn 无法直接执行(.cmd 必须经
@@ -178,7 +188,7 @@ const WRITE_CLASS = new Set(['Edit', 'MultiEdit', 'Write', 'NotebookEdit']);
 // 危险 Bash 命令服务端权威判定(原只在 client/useWebSocket.js 一份,注释指向的
 // server/hooks/permission-bridge.js 早已删除 → G3 完全单端化:客户端离线/多设备
 // 状态异常时危险命令无人拦。挪到服务端 canUseTool = 权威兜底,客户端那份只做红卡渲染)。
-const DANGEROUS_BASH = /\brm\s+-[a-z]*[rf]|\brm\s+--(recursive|force)|\bgit\s+clean\s+-[a-z]*f|\bgit\s+push\b[^\n]*(--force|\s-f\b)|\bgit\s+reset\s+--hard\b|\bgit\s+branch\s+-D\b|\bfind\b[^\n]*-delete\b|\bshred\b|\bdrop\s+(table|database)\b|\btruncate\b|\bmkfs\b|\bdd\s+if=[^\n]*of=\/dev|>\s*\/dev\/sd|[|]\s*(sudo\s+)?(ba)?sh\b|\bnpm\s+(i|install|add)\b|\bpnpm\s+(i|install|add)\b|\byarn\s+(add|install)\b|\bpip[23]?\s+install\b|\bbrew\s+install\b|\bsudo\b/i;
+const DANGEROUS_BASH = /\brm\s+-[a-z]*[rf]|\brm\s+--(recursive|force)|\bgit\s+clean\s+-[a-z]*f|\bgit\s+push\b[^\n]*(--force|\s-f\b)|\bgit\s+reset\s+--hard\b|\bgit\s+branch\s+-D\b|\bfind\b[^\n]*-delete\b|\bshred\b|\bdrop\s+(table|database)\b|\btruncate\b|\bmkfs\b|\bdd\s+if=[^\n]*of=\/dev|>\s*\/dev\/sd|[|]\s*(sudo\s+)?(ba)?sh\b|\bnpm\s+(i|install|add)\b|\bpnpm\s+(i|install|add)\b|\byarn\s+(add|install)\b|\bpip[23]?\s+install\b|\bbrew\s+install\b|\bsudo\b|\b(del|erase)\b[^\n]*\/[sq]|\brd\b[^\n]*\/s|\brmdir\b[^\n]*\/s|\bremove-item\b[^\n]*-(recurse|force)|\bformat\s+[a-z]:/i;
 function isDangerousBash(toolName, input) {
   return toolName === 'Bash' && DANGEROUS_BASH.test(String(input?.command || ''));
 }
@@ -910,7 +920,8 @@ router.post('/chat/title', async (req, res) => {
     // cmd 元字符破坏 → prompt 残缺 → 标题在 Windows 恒失败(用户实报,mac 正常)。stdin 不经
     // cmd 参数解析,跨平台稳。实测 `claude -p`(无 prompt 参数)从 stdin 读 prompt 正常。
     const titleArgs = ['-p', '--permission-mode', 'plan', '--no-session-persistence'];
-    if (model) titleArgs.push('--model', model);
+    const safeModel = safeModelArg(model);
+    if (safeModel) titleArgs.push('--model', safeModel);
     // cwd 物理隔离(用户二报:标题 prompt 仍以会话形态冒头)。标题 prompt 自包含,根本
     // 不需要项目上下文;此前 cwd 用会话项目目录,CLI 任何落盘/索引行为(版本差异、超时
     // 被杀、错误路径)都会把"标题会话"挂进【用户项目】的会话列表。固定到专用 tmp 目录后,
@@ -1175,7 +1186,9 @@ router.get('/context/:sessionId', async (req, res) => {
     try {
       const usage = await Promise.race([
         slot.query.getContextUsage(),
-        new Promise((_, rej) => setTimeout(() => rej(new Error('getContextUsage 超时')), 5000)),
+        // 8s(实测 warm ~1.5-3s,大上下文近满窗时 count_tokens 往返可超 5s):超时太短会白等
+        // 后再回落到更慢的 spawn(5-30s),反而更慢;放宽到 8s 让绝大多数大会话仍走快路。
+        new Promise((_, rej) => setTimeout(() => rej(new Error('getContextUsage 超时')), 8000)),
       ]);
       if (usage?.totalTokens > 0 && (usage?.maxTokens > 0 || usage?.rawMaxTokens > 0)) {
         return res.json(mapSdkContextUsage(usage));
@@ -1188,7 +1201,7 @@ router.get('/context/:sessionId', async (req, res) => {
   const cwd = cwdFromSessionFile(projectHash, sessionId) || req.query.cwd || homedir();
   // V2:不带 --model 时 CLI 按 settings.json 默认模型(如 haiku)计算窗口与显示,
   // 与会话实际模型不符(用户报告:点徽章显示 haiku)。前端把会话当前模型传进来。
-  const model = String(req.query.model || '').trim();
+  const model = safeModelArg(req.query.model);
   try { if (!statSync(cwd).isDirectory()) throw new Error('nd'); }
   catch { return res.status(400).json({ error: '工作目录无效' }); }
 
