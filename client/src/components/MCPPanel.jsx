@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useRef } from 'react';
-import { Server, Package, FolderOpen, RefreshCw, Plug, Activity, Check, X, Plus, Pencil, Trash2, Zap, Download, ArrowLeft } from 'lucide-react';
+import { Server, Package, FolderOpen, RefreshCw, Plug, Activity, Check, X, Plus, Pencil, Trash2, Zap, Download, ArrowLeft, LogIn } from 'lucide-react';
 import { BUILTIN_PLUGINS } from '../utils/builtinPlugins.js';
 import { McpForm } from './McpForm.jsx';
 import { confirmDialog } from '../utils/confirmDialog.jsx';
@@ -156,6 +156,22 @@ export function MCPPanel() {
         setServers(prev => prev.map((s) => s.name === name ? { ...s, enabled: !newEnabled } : s));
       })
       .finally(() => setToggling(null));
+  };
+
+  // OAuth 登录:执行 claude mcp login,会打开系统浏览器完成授权;进行中按钮转 spinner,
+  // 完成后 ?fresh=1 重拉列表刷新状态(needs-auth → connected)。
+  const [loggingIn, setLoggingIn] = useState(null);
+  const handleLogin = async (srv) => {
+    setLoggingIn(srv.name);
+    try {
+      const r = await fetch(`/api/mcp/${encodeURIComponent(srv.name)}/login`, { method: 'POST' });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+      await fetchData(false, true);
+    } catch (err) {
+      await confirmDialog(`登录「${srv.label || srv.name}」失败:\n${err.message}`, { confirmText: '知道了' });
+    }
+    setLoggingIn(null);
   };
 
   const handleDelete = async (srv) => {
@@ -329,6 +345,14 @@ export function MCPPanel() {
                       )}
                       {disabled && (
                         <span className="text-[10px] text-ink-ghost" title="已禁用（CLI 不会启动此 MCP）">已禁用</span>
+                      )}
+                      {!disabled && srv.status === 'needs-auth' && (
+                        <button onClick={() => handleLogin(srv)} disabled={loggingIn === srv.name}
+                          title="该服务器需要 OAuth 授权。点击执行 claude mcp login，会打开系统浏览器完成授权。"
+                          className="flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] font-body bg-amber-50 text-amber-700 hover:bg-amber-500/20 transition-colors disabled:opacity-60">
+                          {loggingIn === srv.name ? <RefreshCw size={10} className="animate-spin" /> : <LogIn size={10} />}
+                          {loggingIn === srv.name ? '等待授权…' : '登录'}
+                        </button>
                       )}
                       <PingButton name={srv.name} />
                       <button onClick={() => setForm(srv)} title="编辑"
