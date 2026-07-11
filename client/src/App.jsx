@@ -3055,7 +3055,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         // didn't byte-match (streaming-accumulated vs final jsonl can differ).
         // Fixes the "reply rendered twice" race (jsonl turn + local turn both show).
         const lastUser = [...prev].reverse().find((m) => m.type === 'user');
-        if (lastUser && known.has(tkey(lastUser))) return [];
+        // 保留旁问气泡:btw 无 jsonl 孪生,整清会让它凭空消失(同 finalize 4470)。
+        if (lastUser && known.has(tkey(lastUser))) return prev.some((m) => m.type === 'btw') ? prev.filter((m) => m.type === 'btw') : [];
         return prev.filter((m) => !known.has(tkey(m)));
       });
     };
@@ -3080,7 +3081,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       };
       const known = new Set(messages.map(tkey));
       const lastUser = [...prev].reverse().find((m) => m.type === 'user');
-      if (lastUser && known.has(tkey(lastUser))) return [];
+      // 保留旁问气泡(同 finalize 4470 / 上面的 reconcile):btw 无 jsonl 孪生,整清即消失。
+      if (lastUser && known.has(tkey(lastUser))) return prev.some((m) => m.type === 'btw') ? prev.filter((m) => m.type === 'btw') : [];
       const next = prev.filter((m) => !known.has(tkey(m)));
       return next.length === prev.length ? prev : next;
     });
@@ -3313,6 +3315,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         const atTurnUuid = [...messages].reverse().find((m) => m.type === 'user' && m.uuid)?.uuid || null;
         setChatMessages((prev) => [...prev, {
           uuid: btwUuid, type: 'btw', question: q, text: '', pending: true, atTurnUuid,
+          // 打上创建时的会话键:旁问气泡是本会话本地注记,渲染只认这个 key、不受
+          // liveVisible(流式防串门控)影响 —— 否则空闲/后台流/draft→init 窗口下气泡被吞。
+          ownerKey: sessionQueueKey,
           timestamp: new Date().toISOString(),
         }]);
         fetch('/api/chat/btw', {
@@ -4327,12 +4332,18 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       // reattach takes over); only render a hard error for genuine failures.
       const isNetworkDrop = err instanceof TypeError
         && /load failed|failed to fetch|network|connection/i.test(err.message || '');
+      // fable ②:切走后迟到的 catch 别把这条回合 push 进 chatMessages——它属于 streamSid 那条
+      // 会话,当前 pane 已切到别的会话,push 会成孤儿并在下次开流(owner 重合)时串进新会话。
+      // 判据同 finalize 的 getLocalSession()!==sid:仅当已切到「另一条真实会话」才跳过;草稿态/
+      // init 前(streamSid 或当前 sid 为空)照常显示,不误伤"停止但不切走"这个正当场景。
+      const stillHere = !streamSid || !getLocalSession()?.sessionId
+        || getLocalSession().sessionId === streamSid;
       if (err.name === 'AbortError') {
         // 用户主动「停止」:把已经流式显示的文本/思考/工具调用保留成一条气泡(标记
         // 已停止),而不是连同用户消息一起丢弃——以前这里静默清空,用户辛苦看到的半截
         // 回复+工具调用全没了,只剩刚发的消息(#6)。producedReply=true 让 finally 的
         // 落盘轮询把它当正常产出处理(jsonl 若已写入半截会 refetch 覆盖,否则保留本地副本)。
-        if (accumulatedText || accumulatedThinking || currentToolCalls.length > 0) {
+        if (stillHere && (accumulatedText || accumulatedThinking || currentToolCalls.length > 0)) {
           producedReply = true;
           setChatMessages((prev) => [...prev, {
             uuid: 'chat-stopped-' + Date.now(), type: 'turn',
@@ -4345,7 +4356,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             interrupted: true,
           }]);
         }
-      } else if (!isNetworkDrop) {
+      } else if (stillHere && !isNetworkDrop) {
         console.error('Chat error:', err);
         // Render the failure as a visible turn so the user isn't left staring at
         // a frozen "connecting" with no explanation (e.g. invalid project dir).
@@ -4792,7 +4803,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     const truncateUi = () => {
       if (idxInStore !== -1) {
         setLocalMessages(messages.slice(0, idxInStore));
-        setChatMessages([]);
+        setChatMessages((prev) => prev.filter((m) => m.type === 'btw')); // 保留旁问气泡(本地注记)
       } else if (idxInChat !== -1) {
         setChatMessages((prev) => prev.slice(0, idxInChat));
       }
@@ -4821,7 +4832,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         });
         const d = await r.json().catch(() => ({}));
         if (!r.ok) { setProviderSwitchNotice({ text: '压缩失败:' + (d.error || r.status) + '(会话未改动)' }); return; }
-        if (direction === 'after') setChatMessages([]); // 尾段已被移除,清掉本地未落盘气泡
+        if (direction === 'after') setChatMessages((prev) => prev.filter((m) => m.type === 'btw')); // 尾段已被移除,清掉本地未落盘气泡(旁问除外)
         try { await fetchMessagesForTab(sel.sessionId, projectHash, { silent: true }); } catch {}
         setProviderSwitchNotice({ text: direction === 'before' ? '已把此前对话压缩为摘要,上下文占用已降低。' : '已回退并把后续对话保留为摘要。' });
       } catch (e) {
@@ -5069,7 +5080,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       const mi = curMsgs.findIndex((m) => m.uuid === turn.uuid);
       if (mi >= 0) {
         setLocalMessages([...curMsgs.slice(0, mi), { ...curMsgs[mi], _retryTrimToolId: toolCall.id }]);
-        setChatMessages([]);
+        setChatMessages((prev) => prev.filter((m) => m.type === 'btw')); // 保留旁问气泡(本地注记)
       } else {
         setChatMessages((prev) => {
           const ci = prev.findIndex((m) => m.uuid === turn.uuid);
@@ -5193,6 +5204,14 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // 用户气泡前已 setStreamOwner(sessionQueueKey)(含 reattach),所以凡是该显示的本地缓冲
   // owner 必等于 sessionQueueKey;去掉 null 子句即根治泄漏,且与上面 C1 注释本意一致。
   const liveVisible = streamOwnerKey === sessionQueueKey;
+  // 旁问气泡是本窗格会话的本地注记(非流式内容,永不写 jsonl、切会话/刷新即清),不该受
+  // liveVisible(为"流式内容跨会话防串"设的门控)左右。只要它属于当前会话(创建时打的
+  // ownerKey)就渲染,与流归属无关 —— 修"/btw 能发但没气泡":空闲态 owner 未认领/后台别的
+  // 会话在流/draft→init 窗口时 streamOwnerKey≠sessionQueueKey 会把气泡整块吞掉。ownerKey
+  // 守卫保证不泄漏到别的会话,且不偷后台流的归属(不动 streamOwnerKey)。
+  const visibleChat = chatMessages.filter(
+    (m) => liveVisible || (m.type === 'btw' && m.ownerKey === sessionQueueKey)
+  );
   // BF-1:展示口径统一走 visibleMessages(活跃流期间剔除本回合半成品),回合进度条/
   // 成本等派生统计与消息列表同源,不再出现"进度条多一个重复回合点"。
   const allMessages = [...visibleMessages, ...(liveVisible ? chatMessages : [])];
@@ -5550,7 +5569,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           输入框高度可变(多行/任务清单/附件),固定偏移总有挡住输入框的时候 */}
       <div className="flex-1 min-h-0 relative">
       <div ref={containerRef} onScroll={handleScroll} className="h-full overflow-y-auto relative z-10">
-          {visibleMessages.length === 0 && (liveVisible ? chatMessages.length : 0) === 0 ? (
+          {visibleMessages.length === 0 && visibleChat.length === 0 ? (
             <div className="mobile-draft-empty flex items-center justify-center h-full text-ink-muted text-sm font-body">
               {selectedSession?.draft ? '开始你的第一条消息 ↓' : '该会话没有可显示的消息'}
             </div>
@@ -5564,7 +5583,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                 onFork={forkCurrentSession}
                 retryActiveUuid={retryActiveUuid}
               />
-              {liveVisible && chatMessages.map((msg, i) => (
+              {visibleChat.map((msg, i) => (
                 <div key={msg.uuid || i} data-turn-uuid={msg.uuid} data-turn-role={msg.type}>
                   {msg.type === 'compact'
                     ? <CompactDivider />
