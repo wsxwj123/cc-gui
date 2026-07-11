@@ -340,45 +340,71 @@ export async function listSessions(projectHash) {
       // Check for subagent sessions
       const subagents = [];
       const subagentDir = join(projectPath, sessionId, 'subagents');
+      // 构建单条子代理条目(扁平 Task 子代理 与 workflow 起的 agent 共用)。extra 里带
+      // workflowId(workflow agent 特有)等额外字段。
+      const buildAgentEntry = async (agentPath, metaPath, extra = {}) => {
+        const agentEdges = await readJsonlEdges(agentPath, 5);
+        const agentFirstUser = agentEdges.head.find((r) => r.type === 'user');
+        let agentPrompt = '';
+        if (agentFirstUser?.message?.content) {
+          const raw = agentFirstUser.message.content;
+          if (typeof raw === 'string') agentPrompt = raw.slice(0, 100);
+          else if (Array.isArray(raw)) {
+            const t = raw.find((c) => c.type === 'text');
+            agentPrompt = t?.text?.slice(0, 100) || '';
+          }
+        }
+        const as = await stat(agentPath);
+        // R1: sibling meta.json 带 toolUseId(=父会话 Task tool_use 的 id)。workflow agent 的
+        // meta 没有 toolUseId(它不对应父流任何 Task 卡片),留空即可。
+        let agentMeta = {};
+        try { agentMeta = JSON.parse(await readFile(metaPath, 'utf-8')); } catch {}
+        const base = agentPath.split(/[/\\]/).pop().replace('.jsonl', '');
+        return {
+          sessionId: base,
+          projectHash,
+          filePath: agentPath,
+          firstPrompt: agentPrompt || base.replace('agent-', 'Agent '),
+          messageCount: agentEdges.totalLines,
+          lastActivity: agentEdges.tail[agentEdges.tail.length - 1]?.timestamp || new Date(as.mtimeMs).toISOString(),
+          model: agentEdges.head.find((r) => r.type === 'assistant')?.message?.model || null,
+          toolUseId: agentMeta.toolUseId || null,
+          agentType: agentMeta.agentType || null,
+          isSubagent: true,
+          ...extra,
+        };
+      };
       try {
         const agentFiles = await readdir(subagentDir);
         for (const af of agentFiles) {
           if (!af.endsWith('.jsonl')) continue;
           const agentPath = join(subagentDir, af);
           try {
-            const agentEdges = await readJsonlEdges(agentPath, 5);
-            const agentFirstUser = agentEdges.head.find((r) => r.type === 'user');
-            let agentPrompt = '';
-            if (agentFirstUser?.message?.content) {
-              const raw = agentFirstUser.message.content;
-              if (typeof raw === 'string') agentPrompt = raw.slice(0, 100);
-              else if (Array.isArray(raw)) {
-                const t = raw.find((c) => c.type === 'text');
-                agentPrompt = t?.text?.slice(0, 100) || '';
-              }
-            }
-            const as = await stat(agentPath);
-            // R1: sibling meta.json 带 toolUseId(=父会话 Task tool_use 的 id)。某些
-            // CLI 版本不往父流发 parent_tool_use_id 事件,前端内存态拿不到子代理模型,
-            // 全靠这里的 toolUseId 把 jsonl 里的 model 对回具体 Task 卡片。
-            let agentMeta = {};
-            try {
-              agentMeta = JSON.parse(await readFile(join(subagentDir, af.replace('.jsonl', '.meta.json')), 'utf-8'));
-            } catch {}
-            subagents.push({
-              sessionId: af.replace('.jsonl', ''),
-              projectHash,
-              filePath: agentPath,
-              firstPrompt: agentPrompt || af.replace('.jsonl', '').replace('agent-', 'Agent '),
-              messageCount: agentEdges.totalLines,
-              lastActivity: agentEdges.tail[agentEdges.tail.length - 1]?.timestamp || new Date(as.mtimeMs).toISOString(),
-              model: agentEdges.head.find((r) => r.type === 'assistant')?.message?.model || null,
-              toolUseId: agentMeta.toolUseId || null,
-              agentType: agentMeta.agentType || null,
-              isSubagent: true,
-            });
+            subagents.push(await buildAgentEntry(agentPath, join(subagentDir, af.replace('.jsonl', '.meta.json'))));
           } catch {}
         }
+        // Workflow(动态工作流)起的 agent 埋在 subagents/workflows/wf_*/agent-*.jsonl(深两层),
+        // 上面的一层扫描收不到 → 监控面板看不到 workflow 的 agent(用户报"用了 workflow 就看不到")。
+        // 递归进去补上,标 workflowId 供前端区分。实时面板另说(workflow 不走父流 Task 事件)。
+        try {
+          const wfRoot = join(subagentDir, 'workflows');
+          for (const wf of await readdir(wfRoot)) {
+            if (!wf.startsWith('wf_')) continue;
+            const wfDir = join(wfRoot, wf);
+            let wfFiles;
+            try { wfFiles = await readdir(wfDir); } catch { continue; }
+            for (const af of wfFiles) {
+              if (!af.startsWith('agent-') || !af.endsWith('.jsonl')) continue; // 跳过 journal.jsonl 等
+              try {
+                subagents.push(await buildAgentEntry(
+                  join(wfDir, af),
+                  join(wfDir, af.replace('.jsonl', '.meta.json')),
+                  { workflowId: wf },
+                ));
+              } catch {}
+            }
+          }
+        } catch {}
       } catch {}
 
       // 续段 = 头部带 compact_boundary(resume 回放写在最前面几条杂项之后,40 行
@@ -586,10 +612,20 @@ export async function getSessionMessages(sessionId, projectHash) {
     // 标题换了正文还是旧会话)。回退扫一层父会话目录找到真身。
     try {
       const entries = await readdir(join(PROJECTS_DIR, projectHash), { withFileTypes: true });
+      outer:
       for (const e of entries) {
         if (!e.isDirectory()) continue;
-        const cand = join(PROJECTS_DIR, projectHash, e.name, 'subagents', `${sessionId}.jsonl`);
+        const subDir = join(PROJECTS_DIR, projectHash, e.name, 'subagents');
+        const cand = join(subDir, `${sessionId}.jsonl`);
         if (existsSync(cand)) { filePath = cand; break; }
+        // workflow 起的 agent 深埋 subagents/workflows/wf_*/<sid>.jsonl(点开列表里的 workflow agent
+        // 要能找到真身,否则 404)。多探一层 workflows/。
+        try {
+          for (const wf of await readdir(join(subDir, 'workflows'))) {
+            const wfCand = join(subDir, 'workflows', wf, `${sessionId}.jsonl`);
+            if (existsSync(wfCand)) { filePath = wfCand; break outer; }
+          }
+        } catch {}
       }
     } catch {}
   }
