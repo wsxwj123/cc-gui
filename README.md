@@ -8,6 +8,52 @@ Claude GUI is a local graphical shell for the [Claude Code](https://docs.anthrop
 
 ---
 
+## Features
+
+Everything the `claude` CLI can do, made visual — plus shell-only conveniences the terminal never had.
+
+**Chat & sessions**
+- Browse, resume, and start sessions with rich rendering (Markdown, LaTeX, syntax highlighting)
+- **Split-screen** — run multiple sessions side by side, each with its own model / permission mode / thinking effort
+- Collapsible tool-call cards (Bash, Read, Edit, Web, Task, Skill…) with diffs; subagent runs visualized
+- **Plan-review & question cards** — approve plans or pick options graphically (`ExitPlanMode` / `AskUserQuestion`)
+- `@` reference picker (insert a file, or pull another session's summary in), slash-command completion (built-in + project-level), input prediction, message queue / stop / recall, WeChat-style compact chat mode
+
+**Models & providers**
+- Switch model & thinking effort per pane; switch provider (official subscription + many third-party relays: DeepSeek, Qwen, Kimi, GLM, Grok, OpenAI-compatible, …)
+- Manage custom providers (add/edit, fetch model list, test connection); 1M-context default; live context-usage badge
+
+**Permissions & planning**
+- Four permission modes (default / acceptEdits / plan / bypass), switchable mid-run; graphical permission cards; a permission-rules page
+
+**MCP & plugins**
+- Manage MCP servers (add, ping, OAuth login, enable/disable, edit) with **per-tool enable/disable + tool listing**
+- One-click official plugin install (enable/disable/update/remove), auto-synced to your agents
+
+**Skills**
+- Skills marketplace (multiple sources) and import from any GitHub / Gitee repo; local add / archive / delete
+
+**Files & code**
+- File browser (browse / edit / delete-with-undo / open-with-default-app; **PDF & HTML preview**)
+- Rollback & review (checkpoint snapshots, per-file or whole-session restore), diff viewer, uploads, Git integration, worktrees
+
+**Sessions**
+- Pinned / titled / archived session list, auto titles, session fork, targeted compaction & trim, per-turn spend cap
+
+**Monitoring & usage**
+- Monitor panel (in-turn Tasks / background tasks / background agents / `claude` processes), usage stats & `/insights` reports, process panel
+
+**Remote**
+- Reach it from your phone over a private network (Tailscale, etc.) with an access password; take over a session from your phone
+
+**Updates & environment**
+- GUI self-update with live progress; update / install / switch the Claude CLI from the GUI; environment checks (node / claude / python / uv / git)
+
+**Look & feel**
+- Guided tour, custom backgrounds & themes (light / dark and more), font scaling, prompt templates
+
+---
+
 ## 1. Prerequisites (read first)
 
 The GUI is only a shell around the `claude` CLI, so **install and sign into Claude Code first**:

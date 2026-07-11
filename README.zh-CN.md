@@ -8,6 +8,52 @@ Claude GUI 是 [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI
 
 ---
 
+## 功能一览
+
+`claude` CLI 能做的都做成可视化，再加上终端天生没有的外壳体验。
+
+**对话与会话**
+- 浏览、续接、新建会话，富文本渲染（Markdown / LaTeX / 代码高亮）
+- **分屏对比** —— 多窗格并排跑不同会话，各自独立模型 / 权限模式 / 思考强度
+- 工具调用卡片（Bash / Read / Edit / Web / Task / Skill，可折叠带 diff）、子代理运行可视化
+- **计划审查卡 & 问题选择卡** —— 图形化批准计划、选择选项（`ExitPlanMode` / `AskUserQuestion`）
+- `@` 引用选择器（插入文件，或把别的会话摘要引进来）、斜杠命令补全（内置 + 项目级）、输入预测、消息排队 / 停止 / 召回、微信式紧凑聊天模式
+
+**模型与 Provider**
+- 每窗格独立切换模型与思考强度；切换 Provider（官方订阅 + 大量第三方中转：DeepSeek、通义 Qwen、Kimi、GLM、Grok、OpenAI 兼容等）
+- 自定义 Provider 增删改（拉取模型列表、测连接）；1M 上下文默认；上下文占用徽章实时显示
+
+**权限与规划**
+- 四档权限模式（default / acceptEdits / plan / bypass）可中途切换；图形化权限弹卡；权限规则页
+
+**MCP 与插件**
+- MCP 服务器管理（增删、连通性测试、OAuth 登录、启停、编辑）+ **单工具级启用 / 禁用 + 查看工具列表**
+- 官方插件一键安装（启停 / 更新 / 删除），自动同步进所有 agent
+
+**技能（Skills）**
+- 技能市场（多源）+ 从任意 GitHub / Gitee 仓库导入；本机技能添加 / 归档 / 删除
+
+**文件与代码**
+- 文件浏览器（浏览 / 编辑 / 删除可撤销 / 用默认 App 打开；**PDF、HTML 预览**）
+- 回滚与审查（checkpoint 快照、按文件或整会话还原）、Diff 查看、上传、Git 集成、Worktree
+
+**会话管理**
+- 会话列表（置顶 / 自定义标题 / 归档）、自动标题、会话分叉、定向压缩与 trim、单轮花费上限
+
+**监控与用量**
+- 监控面板（当前对话 Task / 后台任务 / 后台代理 / claude 子进程）、用量统计与 `/insights` 报告、进程面板
+
+**远程访问**
+- 经私有网络（Tailscale 等）用手机访问，需访问密码；手机端接管某个会话
+
+**更新与环境**
+- GUI 自更新（实时进度）；GUI 内更新 / 安装 / 切换 Claude CLI；环境检查（node / claude / python / uv / git）
+
+**界面体验**
+- 使用指引浮层、自定义背景与主题（深浅色及更多）、字体缩放、Prompt 模板
+
+---
+
 ## 一、前置要求（必看）
 
 GUI 只是 `claude` CLI 的外壳，**必须先装好并登录 Claude Code**：
