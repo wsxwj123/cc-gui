@@ -2837,6 +2837,13 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // 否则会一直转(用户报告:AI 回复完成后仍显示"正在重做")。
   const [retryActiveUuid, setRetryActiveUuid] = useState(null);
   const [compacting, setCompacting] = useState(false); // /compact 进行中 → 显示压缩动画
+  // 输入预测(A):回合末 SDK 的 prompt_suggestion。{ sid, text } —— sid=产生建议的会话
+  // (streamSid/owner key),渲染时必须与当前查看会话匹配,防止切会话后建议串窗。
+  const [promptSuggestion, setPromptSuggestion] = useState(null);
+  // 等待状态行(G):SDK system status(auto-compact 压缩中)/api_retry(限流、5xx 自动
+  // 重试)/rate_limit_event 的即时文案。{ text } —— message_start(新内容开始流)与回合
+  // 收尾时清空。与 StreamingStatusLine 并存:那个描述"正在产出什么",这个描述"为什么在等"。
+  const [liveStatus, setLiveStatus] = useState(null);
   // 流式 result 事件携带本轮真实 usage(input+cache)。直接据此即时更新上下文徽章,
   // 不必等 jsonl refetch——修复"压缩后/每轮要等几轮才更新"的延迟(#5)。切换会话时清空。
   const [liveContextUsage, setLiveContextUsage] = useState(null);
@@ -2876,6 +2883,10 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // queue drain so we don't double-send — handleAccelerate drains directly, which
   // also covers reattach streams (whose finally never drains).
   const acceleratingRef = useRef(false);
+  // H 转后台:用户主动把前台回合转后台(只断本端 SSE,进程照跑)。被 abort 的
+  // handleSend finally 读它跳过排队消息外发——回合还在服务端跑,此刻外发会对同一
+  // jsonl 双写。finally 末尾复位。
+  const backgroundedRef = useRef(false);
 
   // Latest TodoWrite snapshot for the composer's checklist panel. TodoWrite
   // calls REPLACE the full list each time, so the newest call wins. Search
@@ -3097,6 +3108,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // expose `backgroundPid` so the composer can render the stop button + a
   // "正在继续工作…" indicator, matching how multi-terminal CLI sessions feel.
   const [backgroundPid, setBackgroundPid] = useState(null);
+  // H:上一轮 poll 看到的后台 pid。pid 从有到无=后台回合刚跑完,据此补一次历史拉取。
+  const lastSeenPidRef = useRef(null);
   // Transient toast for "auto-stripped thinking blocks after provider switch".
   // { text, expires } — set by handleSend's pre-flight check, auto-cleared.
   const [providerSwitchNotice, setProviderSwitchNotice] = useState(null);
@@ -3134,7 +3147,15 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         );
         // Only show "background working" if we're NOT actively streaming
         // locally — otherwise the local stream UI is already showing it.
-        setBackgroundPid(hit && !streamingRef.current ? String(hit.pid) : null);
+        const next = hit && !streamingRef.current ? String(hit.pid) : null;
+        // H 转后台:后台回合跑完(pid 消失)且本 pane 没在流(auto-reattach 被主动转后台
+        // 抑制,没有 reattach 流的 finally 替我们收尾)→ 静默拉一次历史,最终回复即刻上屏。
+        // 打包版没有文件 watcher,缺这步要等用户切走切回才看得到结果。
+        if (!next && lastSeenPidRef.current && !streamingRef.current && pollSid && selectedSession?.projectHash) {
+          fetchMessagesForTab(pollSid, selectedSession.projectHash, { silent: true });
+        }
+        lastSeenPidRef.current = next;
+        setBackgroundPid(next);
       } catch {}
     };
     poll();
@@ -3362,6 +3383,11 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     setStreamingThinking('');
     setStreamingToolCalls([]);
     setStreamingBlocks([]);
+    setLiveStatus(null);
+    // 输入预测(A):新回合开始,上一回合的建议作废(reattach 是同一回合的续播,不清)。
+    if (!reattachPid) setPromptSuggestion(null);
+    // 本回合是否开启输入预测(A):随全局开关。server 在 result 后留 3s 等待窗收建议。
+    const suggestOnClient = useStore.getState().promptSuggestions !== false;
 
     if (!reattachPid && !hiddenUserMessage) {
     // Push the user bubble IMMEDIATELY so multi-turn sends don't appear to
@@ -3569,6 +3595,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           keepAlive: useStore.getState().persistentChat !== false,
           // 花费上限(美元):>0 时透传 SDK maxBudgetUsd,进程累计花费达到上限即停。
           maxBudgetUsd: useStore.getState().maxBudgetUsd || undefined,
+          // 输入预测(A):server 据此启用 SDK promptSuggestions 并在 result 后留等待窗。
+          promptSuggestions: suggestOnClient,
         }),
       });
       const respJson = await res.json();
@@ -3754,6 +3782,50 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             setLiveContextUsage(null);
           }
 
+          // 等待状态(G):SDK system status —— sdk.d.ts 实测结构
+          // { type:'system', subtype:'status', status:'compacting'|'requesting'|null,
+          //   compact_result?, compact_error? }。compacting 覆盖 auto-compact(非用户
+          // /compact 触发,原来只有 compact_boundary 一条分隔、压缩过程零反馈)。
+          // requesting 每次 API 调用都发,太噪,不渲染;status:null=阶段结束,清行。
+          if (event.type === 'system' && event.subtype === 'status') {
+            if (event.status === 'compacting') setLiveStatus({ text: '正在压缩上下文…' });
+            else setLiveStatus(null);
+            if (event.compact_result === 'failed' && event.compact_error) {
+              setProviderSwitchNotice({ text: `上下文压缩失败:${String(event.compact_error).slice(0, 120)}` });
+            }
+          }
+          // 等待状态(G):API 可重试错误(限流/5xx/超时),SDK 自动退避重试 ——
+          // { type:'system', subtype:'api_retry', attempt, max_retries, retry_delay_ms,
+          //   error_status: number|null }(null=无 HTTP 响应的连接错误)。
+          if (event.type === 'system' && event.subtype === 'api_retry') {
+            const waitS = Math.ceil((event.retry_delay_ms || 0) / 1000);
+            const cause = event.error_status ? `HTTP ${event.error_status}` : '连接失败';
+            setLiveStatus({ text: `API 请求失败(${cause}),${waitS ? `${waitS}s 后` : ''}自动重试 第 ${event.attempt}/${event.max_retries} 次…` });
+          }
+          // 等待状态(G):限流信息(顶层事件,非 system subtype —— sdk.d.ts 实测)。
+          // { type:'rate_limit_event', rate_limit_info:{ status, resetsAt?, utilization? } }
+          // 仅 rejected/allowed_warning 值得打扰;allowed 恢复时清行。
+          if (event.type === 'rate_limit_event' && event.rate_limit_info) {
+            const ri = event.rate_limit_info;
+            if (ri.status === 'rejected' || ri.status === 'allowed_warning') {
+              const reset = ri.resetsAt ? new Date(ri.resetsAt * 1000).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }) : '';
+              setLiveStatus({ text: ri.status === 'rejected'
+                ? `已达用量限额${reset ? `,${reset} 重置` : ''},等待中…`
+                : `用量接近限额${typeof ri.utilization === 'number' ? `(${Math.round(ri.utilization)}%)` : ''}${reset ? `,${reset} 重置` : ''}` });
+            } else if (ri.status === 'allowed') {
+              setLiveStatus((prev) => (prev ? null : prev));
+            }
+          }
+
+          // 输入预测(A):回合末建议(在 result 之后到达,server 留了等待窗)。
+          // { type:'prompt_suggestion', suggestion, session_id } —— 归属取本次流的
+          // streamSid(发起时闭包/init 确定),渲染时与当前查看会话比对,不串窗。
+          if (event.type === 'prompt_suggestion') {
+            const sTxt = typeof event.suggestion === 'string' ? event.suggestion.trim() : '';
+            if (sTxt) setPromptSuggestion({ sid: streamSid || streamOwnerKeyRef.current, text: sTxt });
+            setLiveStatus(null);
+          }
+
           // Token-level deltas (--include-partial-messages). This is the path that
           // makes the GUI feel like the CLI terminal: text appears as it's generated.
           if (event.type === 'stream_event' && event.event) {
@@ -3796,6 +3868,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             }
 
             // Main turn — top-level model output
+            // 等待状态(G):新一次 API 调用的内容开始到达 → 之前的重试/限流等待已结束,清行。
+            if (ev.type === 'message_start') setLiveStatus(null);
             if (ev.type === 'message_start' && ev.message?.model) {
               setStreamingModel(ev.message.model);
               // #3:message_start 已携带输入侧 usage(input + cache_read/creation = 当前上下文占用),
@@ -4164,6 +4238,11 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           if (event.type === 'result' && !isCompact && event.usage) {
             resultUsage = event.usage;
           }
+          // 输入预测(A):result 之后 server 留 3s 等待窗收 prompt_suggestion,期间流
+          // 还没结束。如实标注在等什么(建议到达/超时收尾/中间 result 后新内容都会清)。
+          if (event.type === 'result' && !event.is_error && suggestOnClient && !isCompact && !isClear) {
+            setLiveStatus({ text: '正在预测下一步输入…' });
+          }
           // Z1:CLI 在 result 事件上报本轮实际成本 total_cost_usd,比单价表估算
           // 权威。compact 回合除外(其成本属压缩开销,且 usage 是压缩前旧上下文)。
           if (event.type === 'result' && !isCompact && typeof event.total_cost_usd === 'number' && event.total_cost_usd > 0) {
@@ -4307,6 +4386,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       // 避免重跑没产出内容时 effect 不触发 → 指示器一直转。
       setRetryActiveUuid(null);
       setCompacting(false);
+      setLiveStatus(null); // 等待状态(G):回合收尾一律清,不留残行
       // After the stream ends locally, hand the displayed history back to the
       // persisted jsonl. The catch: jsonl flushes the user prompt BEFORE the
       // assistant reply, and that flush races the stream's `result`. A single
@@ -4472,7 +4552,10 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       // 排队消息永不自动发出(分屏几乎必现)。排空用本 pane 当前会话 key,reattach
       // 回来时正是该会话;shiftMessage 原子 pop + reattach 串行(reattachedPidRef
       // 守卫)→ 不会与原 finally 双发。仍与 ⚡引导(acceleratingRef)互斥。
-      if (!acceleratingRef.current) {
+      // H 转后台:回合还在服务端跑,此刻外发排队消息会对同一会话双写(server 只复用
+      // idle slot,busy slot 会另起进程 --resume 同一 jsonl)。跳过;回来 reattach 的
+      // 流收尾时照常排空。
+      if (!acceleratingRef.current && !backgroundedRef.current) {
         const tabSel = getLocalSession();
         const queueKey = tabSel?.sessionId
           || `draft-${tabSel?.projectHash || 'none'}`;
@@ -4484,6 +4567,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         }
       }
       acceleratingRef.current = false;
+      backgroundedRef.current = false;
     }
   }, [selectedSession, selectedProject, streamingModel, isStreaming, sessionQueueKey]);
 
@@ -4504,6 +4588,27 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     reattachedPidRef.current = backgroundPid;
     handleSendRef.current?.(null, { reattachPid: backgroundPid });
   }, [backgroundPid]);
+
+  // H 转后台(用户主动):复用切走会话的 detach 路径 —— 只 abort 本端 SSE,进程照常
+  // 在服务端跑、jsonl 继续落盘。与切走的区别:留在本会话,所以要 ① 预置 reattachedPidRef
+  // 抑制 backgroundPid 轮询发现后的立即 auto-reattach(否则点了等于没点);② 标记
+  // backgroundedRef 让被 abort 的 finally 跳过排队消息外发(回合还在跑,外发=双写)。
+  // 已流式的半截内容由 AbortError catch 保留成气泡;后续内容经 jsonl 追加/回合完成刷新。
+  // 切走再切回会清 reattach 守卫,届时照常续播。
+  const handleBackgroundify = useCallback(() => {
+    const pid = activeProcRef.current;
+    if (!pid) return;
+    reattachedPidRef.current = String(pid);
+    backgroundedRef.current = true;
+    if (abortRef.current) {
+      try { abortRef.current.abort(); } catch {}
+      abortRef.current = null;
+    }
+    activeProcRef.current = null;
+    // reattach 截断口径与切走会话一致:切回/续播只藏 detach 之后落盘的内容。
+    if (selectedSession?.sessionId) detachTsBySidRef.current[selectedSession.sessionId] = Date.now();
+    setBackgroundPid(String(pid)); // 立即出「后台工作中」横幅,不等下一轮 poll
+  }, [selectedSession?.sessionId]);
 
   const handleStop = useCallback(() => {
     // 记下要停的 pid → poll/reattach 不再把它当「还在后台跑」(它在服务端 60s grace 内
@@ -5515,6 +5620,16 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                   </div>
                 </div>
               )}
+              {/* 等待状态行(G):压缩中/API 重试/限流等待的明确说明。与 StreamingStatusLine
+                  并存不互斥:那行说"正在产出什么",这行说"为什么在等"。缩进对齐正文列。 */}
+              {liveVisible && isStreaming && liveStatus && (
+                <div className="px-6 -mt-1 pb-3 animate-fade-in">
+                  <div className="max-w-[var(--content-max)] mx-auto flex items-center gap-2 pl-[50px] text-[12px] text-ink-faint font-body">
+                    <Loader2 size={11} className="animate-spin shrink-0 text-amber-600" />
+                    <span>{liveStatus.text}</span>
+                  </div>
+                </div>
+              )}
             </>
           )}
         </div>
@@ -5542,6 +5657,13 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         onSend={handleSend}
         onStop={handleStop}
         onAccelerate={messageQueue.length > 0 ? handleAccelerate : undefined}
+        // H 转后台:仅本地前台流式时提供(backgroundPid-only 态已在后台,无意义)。
+        onBackground={isStreaming ? handleBackgroundify : undefined}
+        // A 输入预测:建议归属会话与当前查看会话匹配才显示,防切会话串窗;流式中不显示。
+        suggestion={(!isStreaming && !backgroundPid && promptSuggestion
+          && (promptSuggestion.sid === selectedSession?.sessionId || promptSuggestion.sid === sessionQueueKey))
+          ? promptSuggestion.text : null}
+        onDismissSuggestion={() => setPromptSuggestion(null)}
         disabled={false}
         // Composer treats "background CLI still running" the same as local
         // streaming for UI purposes: send button becomes the small rounded-

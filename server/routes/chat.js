@@ -706,8 +706,11 @@ router.post('/chat', async (req, res) => {
           // 建议是本回合最后一条消息:result 已到(closeTimer 在挂)就立即收尾,
           // 不能走下面的 cancelClose 分支——那会把关闭取消掉、进程挂死等不到下一条。
           if (closeTimer) finalize();
-        } else if (closeTimer) {
-          cancelClose(); // result 之后又来事件 → 那个 result 不是最终的,取消关闭等下一个
+        } else if (closeTimer && m.type !== 'rate_limit_event') {
+          // result 之后又来事件 → 那个 result 不是最终的,取消关闭等下一个。
+          // rate_limit_event 例外:纯信息事件、任何时刻都可能到,不代表还有回合;
+          // 让它 cancel 会在等待窗内(尤其 suggestOn 的 3s)把 finalize 永久取消掉挂死。
+          cancelClose();
         }
       }
     } catch (e) {
