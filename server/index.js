@@ -42,6 +42,7 @@ import {
   hasPassword, setPassword, clearPassword, verifyPassword, issueToken, updateConfig, loadConfig,
 } from './services/auth.js';
 import { setupFileWatcher } from './services/file-watcher.js';
+import { resolveWorkspacePath } from './utils/safe-path.js';
 import { clients, broadcast } from './broadcast.js';
 import { getDefaultModel, getAvailableModels, setDefaultModel } from './services/model-resolver.js';
 import { readdir, readFile } from 'fs/promises';
@@ -513,6 +514,50 @@ async function getSkillDescription(skillDir, skillName) {
 app.get('/api/slash-commands', async (req, res) => {
   try {
     const commands = [...BUILTIN_COMMANDS];
+
+    // 项目级命令/skill:CLI 会加载 <cwd>/.claude/commands/*.md 与
+    // <cwd>/.claude/skills/<dir>/SKILL.md(官方已把自定义命令并入 skills 体系),
+    // 团队共享命令在 CLI 里能跑但此前补全列表看不到(和插件命令是同一类盲区)。
+    // 先于全局 ~/.claude/skills 扫描插入 → 同名时项目级优先(下方全局扫描的
+    // commands.some 去重会跳过)。cwd 必须过 resolveWorkspacePath 门禁,拒任意路径。
+    if (typeof req.query.cwd === 'string' && req.query.cwd) {
+      let projRoot = null;
+      try { projRoot = resolveWorkspacePath(req.query.cwd); } catch {}
+      if (projRoot) {
+        // .claude/commands/*.md → 命令名 = 文件名(去扩展名)
+        try {
+          const files = await readdir(join(projRoot, '.claude', 'commands'), { withFileTypes: true });
+          for (const f of files) {
+            const m = f.isFile() && f.name.match(/^(.+)\.md$/);
+            if (!m || commands.some((c) => c.name === `/${m[1]}`)) continue;
+            let desc = '项目命令';
+            try {
+              const content = await readFile(join(projRoot, '.claude', 'commands', f.name), 'utf-8');
+              const dm = content.match(/^\s*description\s*:\s*(.+)$/m);
+              if (dm) {
+                desc = dm[1].trim().replace(/^["']|["',]+$/g, '');
+                if (desc.length > 100) desc = desc.slice(0, 100) + '...';
+              }
+            } catch {}
+            commands.push({ name: `/${m[1]}`, desc, type: 'project', requiresAnthropic: false });
+          }
+        } catch {}
+        // .claude/skills/<dir>/SKILL.md → 命令名 = 目录名
+        try {
+          const projSkillsDir = join(projRoot, '.claude', 'skills');
+          const dirs = await readdir(projSkillsDir, { withFileTypes: true });
+          for (const d of dirs) {
+            if (!d.isDirectory() || d.name.startsWith('.') || commands.some((c) => c.name === `/${d.name}`)) continue;
+            commands.push({
+              name: `/${d.name}`,
+              desc: await getSkillDescription(projSkillsDir, d.name),
+              type: 'project',
+              requiresAnthropic: false,
+            });
+          }
+        } catch {}
+      }
+    }
 
     const skillsDir = join(homedir(), '.claude', 'skills');
     try {

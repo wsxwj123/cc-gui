@@ -216,12 +216,14 @@ const TYPE_ICONS = {
   builtin: Terminal,
   skill: Wrench,
   plugin: Puzzle,
+  project: Folder,
 };
 
 const TYPE_LABELS = {
   builtin: '内置',
   skill: '技能',
   plugin: '插件',
+  project: '项目',
 };
 
 export function ChatInput({ onSend, onStop, onAccelerate, disabled, isStreaming, backgroundWorking = false, queueLength = 0, queueItems = [], onRemoveFromQueue, onEditFromQueue, todos = null, plan = '', permKey = null, sessionId = null }) {
@@ -454,7 +456,12 @@ export function ChatInput({ onSend, onStop, onAccelerate, disabled, isStreaming,
   useEffect(() => {
     let cancelled = false;
     const load = () => {
-      fetch('/api/slash-commands')
+      // 项目级命令按当前窗格会话的项目 cwd 扫描(同 @ 引用面板的快照口径:
+      // 优先本窗格会话,回落全局选中项目,per-pane 不串扰)
+      const st = useStore.getState();
+      const pane = (st.paneSessions || []).find((x) => x?.sessionId && x.sessionId === sessionId);
+      const cwd = (pane || st.selectedSession)?.projectPath || st.selectedProject?.path || '';
+      fetch(`/api/slash-commands${cwd ? `?cwd=${encodeURIComponent(cwd)}` : ''}`)
         .then(r => r.json())
         .then(data => {
           if (cancelled) return;
@@ -468,7 +475,7 @@ export function ChatInput({ onSend, onStop, onAccelerate, disabled, isStreaming,
     const onFocus = () => load();
     window.addEventListener('focus', onFocus);
     return () => { cancelled = true; window.removeEventListener('focus', onFocus); };
-  }, []);
+  }, [sessionId]); // 会话切换 → cwd 可能变 → 重取项目级命令
 
   // Auto-resize textarea. When empty, pin to a single line: an empty textarea's
   // scrollHeight still counts the (long, wrappable) placeholder, so in a narrow
