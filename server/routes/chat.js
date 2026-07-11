@@ -174,6 +174,14 @@ const READ_CLASS = new Set([
 // plan 下永远拦(只读探索)。Bash/执行类与 MCP 不在此列,接受编辑下仍弹窗。
 const WRITE_CLASS = new Set(['Edit', 'MultiEdit', 'Write', 'NotebookEdit']);
 
+// 危险 Bash 命令服务端权威判定(原只在 client/useWebSocket.js 一份,注释指向的
+// server/hooks/permission-bridge.js 早已删除 → G3 完全单端化:客户端离线/多设备
+// 状态异常时危险命令无人拦。挪到服务端 canUseTool = 权威兜底,客户端那份只做红卡渲染)。
+const DANGEROUS_BASH = /\brm\s+-[a-z]*[rf]|\brm\s+--(recursive|force)|\bgit\s+clean\s+-[a-z]*f|\bgit\s+push\b[^\n]*(--force|\s-f\b)|\bgit\s+reset\s+--hard\b|\bgit\s+branch\s+-D\b|\bfind\b[^\n]*-delete\b|\bshred\b|\bdrop\s+(table|database)\b|\btruncate\b|\bmkfs\b|\bdd\s+if=[^\n]*of=\/dev|>\s*\/dev\/sd|[|]\s*(sudo\s+)?(ba)?sh\b|\bnpm\s+(i|install|add)\b|\bpnpm\s+(i|install|add)\b|\byarn\s+(add|install)\b|\bpip[23]?\s+install\b|\bbrew\s+install\b|\bsudo\b/i;
+function isDangerousBash(toolName, input) {
+  return toolName === 'Bash' && DANGEROUS_BASH.test(String(input?.command || ''));
+}
+
 let sdkCounter = 0;
 
 // #26 会话常驻:回合结束后进程保活等待下一条消息的空闲上限。到点关闭回收 ——
@@ -285,16 +293,33 @@ function makeCanUseTool(slot) {
       return { behavior: 'deny', message: `${refineReason}\n\n请根据以上反馈修订计划,然后再次调用 ExitPlanMode 重新提交修订后的计划等待用户确认。在计划获批前不要开始执行实际改动。` };
     }
     const mode = slot.guiMode;
+    // plan = 只读规划:写类【直接拒绝】(不能靠弹卡放行——实测 canUseTool 返回 allow
+    // 会覆盖 SDK plan 层,用户点"允许"就在规划模式下真写了文件);危险 Bash 也拒(plan
+    // 下 Bash 本自动放行,rm -rf/装包等会静默执行,plan 反比 default 更不安全)。
+    // 其余只读探索工具自动放行。ExitPlanMode/AskUserQuestion 已在上面单独处理。
+    if (mode === 'plan') {
+      if (WRITE_CLASS.has(toolName)) {
+        return { behavior: 'deny', message: '规划模式禁止写入文件。请先用 ExitPlanMode 提交计划并等待用户批准,获批后再执行改动。' };
+      }
+      if (isDangerousBash(toolName, input)) {
+        return { behavior: 'deny', message: '规划模式禁止执行有副作用的命令(删除/重置/安装等)。请先提交计划等待批准。' };
+      }
+      if (!/^mcp__/.test(toolName)) return { behavior: 'allow', updatedInput: input };
+      // MCP 工具可能有写副作用,plan 下不无条件放行,落到下面按 autoapprove/弹卡处理。
+    }
     if (mode === 'bypassPermissions') return { behavior: 'allow', updatedInput: input };
+    // 危险 Bash 服务端强拦:即使 acceptEdits/已永久授权也必须弹卡(与客户端 G3 同策,
+    // 现服务端为权威兜底)。放在 acceptEdits 自动放行【之前】。bypass 已在上面无条件放行
+    // (对齐官方 --dangerously-skip-permissions 的"全放"语义)。
+    if (isDangerousBash(toolName, input)) {
+      const r = await ask();
+      if (r.decision === 'allow') return { behavior: 'allow', updatedInput: (r.updatedInput && typeof r.updatedInput === 'object') ? r.updatedInput : input };
+      return { behavior: 'deny', message: r.reason || '用户拒绝执行该命令' };
+    }
     // 接受编辑:只读类 + 文件写入/编辑类自动放行(名副其实=改文件不弹窗,对齐官方 acceptEdits);
     // Bash/执行类与 MCP 仍走下面的弹窗。这才和"默认"拉开区别(默认下改文件也要弹窗)。
     if (mode === 'acceptEdits' && (READ_CLASS.has(toolName) || WRITE_CLASS.has(toolName))) {
       return { behavior: 'allow', updatedInput: input };
-    }
-    // plan = 只读探索:除写类(SDK plan 模式本就拦)外,探索工具(Bash/Read/Grep 等)一律自动
-    // 放行,复刻旧 permission-bridge 的 plan 行为。ExitPlanMode/AskUserQuestion 已在上面单独处理。
-    if (mode === 'plan') {
-      if (!WRITE_CLASS.has(toolName)) return { behavior: 'allow', updatedInput: input };
     }
     if (mcpAutoApproved(toolName)) return { behavior: 'allow', updatedInput: input };
     const r = await ask();

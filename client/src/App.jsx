@@ -175,13 +175,17 @@ function CheckpointButton({ sessionId, cwd, projectHash, onRestored }) {
           const trData = await tr.json().catch(() => ({}));
           trimOk = tr.ok;
           if (trData?.sessionReset) {
+            // 扫全部 pane(不只 selectedSession=pane0 镜像):检查点按钮可能开在 1-5 号
+            // pane,或同会话开多 pane。漏扫 → 那些 pane 留僵尸 sessionId,下次发送 CLI
+            // 报 "No conversation found"(本项目"按 sessionId 清理必扫全 paneSessions"惯性坑)。
             const st = useStore.getState();
-            const cur = st.selectedSession;
-            if (cur?.sessionId === sessionId) {
-              const draftKey = `draft-${cur.projectHash || 'none'}`;
-              st.migrateSessionKey(sessionId, draftKey, true);
-              st.setSelectedSession({ ...cur, sessionId: null, draft: true, draftId: newDraftId() });
-            }
+            (st.paneSessions || []).forEach((p, i) => {
+              if (p?.sessionId === sessionId) {
+                const draftKey = `draft-${p.projectHash || 'none'}`;
+                st.migrateSessionKey(sessionId, draftKey, true);
+                st.setPaneSession(i, { ...p, sessionId: null, draft: true, draftId: newDraftId() });
+              }
+            });
           }
         } catch {}
       }
@@ -3225,6 +3229,10 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     // `claude --remote-control --resume <id>` in a real terminal (TTY required)
     // so the Claude mobile app can take over; the GUI keeps syncing via jsonl.
     let checkpointPromise = Promise.resolve(null);
+    // 提升到 handleSend 顶层:init 事件里的"首条消息补拍 checkpoint"(流式循环内、
+    // 本 if 块外)要引用它们,声明在块内会 ReferenceError 炸掉整轮流式(v0.2.175 回归)。
+    let userMsgUuid = null;
+    let userMsgTimestamp = null;
     if (!reattachPid && !hiddenUserMessage) {
       const cmd = (prompt || '').trim().toLowerCase();
       if (cmd === '/remote-control' || cmd === '/rc' || cmd === 'remote-control') {
@@ -3355,8 +3363,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     // "swallow" the user's message while waiting on git checkpoint I/O. The
     // checkpoint runs in parallel and back-fills `checkpointSha` on the same
     // chatMessages entry when ready (rollback menu reads it from there).
-    const userMsgUuid = 'chat-user-' + Date.now();
-    const userMsgTimestamp = new Date().toISOString();
+    userMsgUuid = 'chat-user-' + Date.now();
+    userMsgTimestamp = new Date().toISOString();
     setChatMessages((prev) => [...prev, {
       uuid: userMsgUuid, type: 'user',
       timestamp: userMsgTimestamp, text: prompt,
@@ -3705,7 +3713,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
               // (无 sessionId)直接 return → 首轮 AI 改动无回滚锚点(resolve 还可能
               // 错选之后的快照)。此处 sid 刚诞生,数据全取发起时闭包(cwd/prompt/
               // userMsgUuid),归属安全。快照内容=AI 动手前的工作区(AI 还没开始改)。
-              if (cwd) {
+              if (cwd && userMsgUuid) {
                 fetch('/api/checkpoints', {
                   method: 'POST', headers: { 'Content-Type': 'application/json' },
                   body: JSON.stringify({
@@ -4614,10 +4622,20 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   const handleRollback = useCallback(async (msg, { mode, resendText = null, softFiles = false } = {}) => {
     const sel = getLocalSession();
     const proj = useStore.getState().selectedProject;
-    const cwd = proj?.path || sel?.projectPath;
-    const projectHash = proj?.hash || sel?.projectHash;
-    const idxInChat = chatMessages.findIndex((m) => m.uuid === msg.uuid);
-    const idxInStore = messages.findIndex((m) => m.uuid === msg.uuid);
+    // 会话优先于全局项目:setSelectedProject 支持"浏览别的项目、右侧会话不动",
+    // 且 worktree 会话的 projectPath 与主项目不同。取全局项目会把 A 会话的快照写进
+    // B 目录、trim 用错 hash(对齐 handleSend/FileReviewPanel 的会话优先口径)。
+    const cwd = sel?.projectPath || proj?.path;
+    const projectHash = sel?.projectHash || proj?.hash;
+    let idxInChat = chatMessages.findIndex((m) => m.uuid === msg.uuid);
+    let idxInStore = messages.findIndex((m) => m.uuid === msg.uuid);
+    // uuid 失配兜底:流式期间点"重新编辑"拿到的是 chat-user-<ts> 临时气泡,回合
+    // finalize 后 chatMessages 被清、历史换成 CLI uuid → 两处 findIndex 均 -1 →
+    // 原来直接 return 把用户已改的文本吞掉(输入框已清)。按时间戳回落匹配。
+    if (idxInChat === -1 && idxInStore === -1 && msg.timestamp) {
+      idxInStore = messages.findIndex((m) => m.type === 'user' && m.timestamp === msg.timestamp);
+      idxInChat = chatMessages.findIndex((m) => m.type === 'user' && m.timestamp === msg.timestamp);
+    }
     const resolveCheckpointSha = async () => {
       if (msg.checkpointSha) return msg.checkpointSha;
       if (!sel?.sessionId) return null;
@@ -4685,7 +4703,16 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       return;
     }
 
-    if (idxInChat === -1 && idxInStore === -1) return;
+    if (idxInChat === -1 && idxInStore === -1) {
+      // 仍找不到目标消息:不能静默丢弃用户已编辑的重发文本(输入框已被 handleSend 清空)。
+      // 有重发文本就当普通消息发出去,别让它凭空消失。
+      const txt = typeof resendText === 'object' ? (resendText?.prompt) : resendText;
+      if (txt && handleSendRef.current) {
+        setProviderSwitchNotice({ text: '未能定位原消息位置,已作为新消息发送(未裁剪历史)。' });
+        setTimeout(() => handleSendRef.current(txt), 50);
+      }
+      return;
+    }
 
     // 1) git restore only for modes that explicitly include files.
     const shouldRestoreFiles = mode === 'both' || mode === 'edit';
@@ -4726,6 +4753,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     //    timestamp for freshly-sent messages whose chat-user-<ts> uuid never
     //    landed in the jsonl (the CLI persists its own uuid but keeps the ts).
     let sessionWasReset = false;
+    let trimFailed = false;
     if (sel?.sessionId && projectHash) {
       const body = msg.uuid && !msg.uuid.startsWith('chat-')
         ? { projectHash, uuid: msg.uuid }
@@ -4737,6 +4765,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           body: JSON.stringify(body),
         });
         const trData = await tr.json().catch(() => ({}));
+        if (!tr.ok) trimFailed = true;
         // If trim wiped the session (no real messages would remain), we must
         // drop the sessionId locally — otherwise the next /api/chat would
         // try --resume on a deleted jsonl and CLI silently exits with
@@ -4759,7 +4788,12 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             draftId: newDraftId(),
           });
         }
-      } catch {}
+      } catch { trimFailed = true; }
+    }
+    // trim 失败(磁盘 jsonl 没裁)但 UI 已裁+即将重发 → 重发会落在未裁历史上、且
+    // step5 refetch 把旧消息全拉回。如实告知,不再静默(对齐 CheckpointsPanel)。
+    if (trimFailed && !sessionWasReset) {
+      setProviderSwitchNotice({ text: '会话记录裁剪失败,回退可能不完整(磁盘历史未改动),建议新建会话继续。' });
     }
 
     // 3) abort any in-flight stream from this session so the resend doesn't

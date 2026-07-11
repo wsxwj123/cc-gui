@@ -45,8 +45,11 @@ async function gitShadow(args, sessionId, workTree, opts = {}) {
   // (用户在无文件改动的消息上回滚时的还原失败根因)。
   // maxBuffer 32MB:默认 1MB 会让大仓库(2 万+ 文件)的 ls-tree/首次 commit 输出超限
   // 抛错 —— commit 实际已完成但请求报 500,meta 与 git log 漂移。timeout 60s 同理。
+  // LC_ALL=C 固定英文错误输出:错误分类靠 regex 匹配英文串(pathspec did not match
+  // 等),中文/其它 locale 下 git 输出本地化会让匹配全失效 → 空快照误判 restore_failed。
   return execFileP('git', ['--git-dir', gitDir, '--work-tree', workTree, ...args],
-    { timeout: 60000, cwd: workTree, maxBuffer: 32 * 1024 * 1024, ...opts });
+    { timeout: 60000, cwd: workTree, maxBuffer: 32 * 1024 * 1024, ...opts,
+      env: { ...process.env, LC_ALL: 'C', ...(opts.env || {}) } });
 }
 
 async function loadMeta(sessionId) {
@@ -251,7 +254,11 @@ router.post('/checkpoints/:sessionId/restore', async (req, res) => {
     const headFiles = await listTreeFiles(req.params.sessionId, workTree, 'HEAD').catch(() => []);
     const targetFiles = await listTreeFiles(req.params.sessionId, workTree, sha);
     const targetSet = new Set(targetFiles);
-    await gitShadow(['checkout', sha, '--', '.'], req.params.sessionId, workTree);
+    // 空树快照:`checkout <sha> -- .` 会抛 pathspec 错,让下面的删除循环整个跳过 →
+    // AI 新建文件全残留(用户报"回滚了但文件没动")。空树时不 checkout,只跑删除循环。
+    if (targetFiles.length > 0) {
+      await gitShadow(['checkout', sha, '--', '.'], req.params.sessionId, workTree);
+    }
     for (const rel of headFiles) {
       if (!targetSet.has(rel)) await removeWorktreePath(workTree, rel);
     }
@@ -259,10 +266,13 @@ router.post('/checkpoints/:sessionId/restore', async (req, res) => {
     // 清掉会丢用户数据。已跟踪文件的删除由上面的 removeWorktreePath 循环处理。
     res.json({ ok: true, removedSinceCheckpoint: headFiles.filter((rel) => !targetSet.has(rel)).length });
   } catch (err) {
-    // 区分"快照本身没文件"(pathspec 不匹配,工作区确实未动)与其他失败(超时把
-    // checkout 杀在半路=可能部分还原)—— 客户端据 code 决定文案,不能一律说"文件未改动"。
-    const empty = /pathspec .* did not match/.test(err.message || '');
-    res.status(400).json({ error: err.message, code: empty ? 'empty_checkpoint' : 'restore_failed' });
+    // 区分"快照本身没文件"(pathspec 不匹配,工作区确实未动)、快照对象不存在(bad
+    // object,文件一字未动)与其他失败(超时把 checkout 杀在半路=可能部分还原)。
+    const msg = err.message || '';
+    let code = 'restore_failed';
+    if (/pathspec .* did not match/.test(msg)) code = 'empty_checkpoint';
+    else if (/bad object|not a valid object|Not a valid object name/i.test(msg)) code = 'missing_snapshot';
+    res.status(400).json({ error: msg, code });
   }
 });
 

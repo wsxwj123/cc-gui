@@ -75,11 +75,12 @@ function ChangeItem({ change, sessionId, cwd, reviewed, onToggleReviewed }) {
           confirmDialog('恢复失败：' + (d.error || res.status));
           return;
         }
-        // allowDelete 只对 write(本轮新建语义)授权:快照里没有该文件时才删;
-        // edit 类文件不在快照(gitignored 等)→ 后端 404 如实报,绝不误删。
+        // allowDelete 只对【确认真新建】的文件授权(isNewFile===true,来自 jsonl 的
+        // toolUseResult.type==='create')。Write 覆写已存在文件(update)或结果缺失
+        // (null)一律不授权删除——否则覆写 gitignored 文件后回滚会把用户原文件销毁。
         const cr = await fetch(`/api/checkpoints/${sessionId}/restore-file`, {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ sha: rd.sha, cwd, file: change.file, allowDelete: change.type === 'write' }),
+          body: JSON.stringify({ sha: rd.sha, cwd, file: change.file, allowDelete: change.isNewFile === true }),
         });
         const cd = await cr.json().catch(() => ({}));
         if (cr.ok) markReverted('checkpoint');

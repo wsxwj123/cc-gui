@@ -92,19 +92,22 @@ export function trimJsonlBeforeTool(raw, toolUseId) {
             beforeBlocks.filter((b) => b?.type === 'tool_use' && b.id).map((b) => b.id)
           );
           if (keptToolIds.size > 0) {
-            for (let j = i + 1; j < lines.length; j++) {
+            // 并行工具在 jsonl 里交错布局(asst A / asst B / res A / res B):被裁工具
+            // 之前的 tool_use 的 result 未必紧跟下一行,可能在 cut 点之后更远处。向后
+            // 扫描【全部】剩余行,只救回匹配 keptToolIds 的 tool_result(其余一律丢弃),
+            // 集齐后停。原来只看紧跟一行 → 孤儿 tool_use → resume 时 API 400。
+            const stillNeed = new Set(keptToolIds);
+            for (let j = i + 1; j < lines.length && stillNeed.size > 0; j++) {
               if (!lines[j].trim()) continue;
               let next;
-              try { next = JSON.parse(lines[j]); } catch { break; }
+              try { next = JSON.parse(lines[j]); } catch { continue; }
               const nc = Array.isArray(next?.message?.content) ? next.message.content : null;
-              if (next.type === 'user' && nc && nc.some((b) => b?.type === 'tool_result')) {
-                const filtered = nc.filter((b) => b?.type !== 'tool_result' || keptToolIds.has(b.tool_use_id));
-                if (filtered.length > 0) {
-                  next.message = { ...next.message, content: filtered };
-                  keptLines.push(JSON.stringify(next));
-                }
+              if (next.type === 'user' && nc && nc.some((b) => b?.type === 'tool_result' && stillNeed.has(b.tool_use_id))) {
+                const filtered = nc.filter((b) => b?.type === 'tool_result' && stillNeed.has(b.tool_use_id));
+                filtered.forEach((b) => stillNeed.delete(b.tool_use_id));
+                next.message = { ...next.message, content: filtered };
+                keptLines.push(JSON.stringify(next));
               }
-              break; // 只处理紧跟的那条
             }
           }
         }

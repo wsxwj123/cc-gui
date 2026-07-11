@@ -99,6 +99,19 @@ export function extractFileChanges(records) {
   let turnPrompt = '';
   let turnTs = null;
 
+  // 预扫 Write 的执行结果:toolUseResult.type==='create'(真新建)/'update'(覆写已
+  // 存在文件)。按 tool_use_id 索引,回填到 change.isNewFile,供前端决定回滚能否删除。
+  const writeIsNew = new Map();
+  for (const record of records) {
+    if (record.type !== 'user') continue;
+    const tur = record.toolUseResult;
+    if (tur && typeof tur === 'object' && (tur.type === 'create' || tur.type === 'update')) {
+      const c = record.message?.content;
+      const tid = Array.isArray(c) ? c.find((b) => b?.type === 'tool_result')?.tool_use_id : null;
+      if (tid) writeIsNew.set(tid, tur.type === 'create');
+    }
+  }
+
   for (const record of records) {
     if (record.type === 'user') {
       const text = userInputText(record);
@@ -173,6 +186,11 @@ export function extractFileChanges(records) {
             ...turnMeta,
             type: 'write',
             toolUseId,
+            // isNewFile:仅当 Write 真的新建了文件(toolUseResult.type==='create')才为
+            // true。Write 也能【覆写】已存在文件(type==='update'),此时回滚不能当新建
+            // 直接删——CLAUDE.local.md / .env 等 gitignored 文件被覆写后若按"新建"删除
+            // 就把用户原文件销毁了。null=jsonl 无结果记录(保守当非新建,不授权删除)。
+            isNewFile: writeIsNew.has(toolUseId) ? writeIsNew.get(toolUseId) : null,
             file: input.file_path,
             timestamp: record.timestamp,
             model: record.message?.model,
