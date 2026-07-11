@@ -385,11 +385,13 @@ app.post('/api/network', async (req, res) => {
   if (!Number.isInteger(p) || p < 1024 || p > 65535) {
     return res.status(400).json({ error: '端口需为 1024–65535 的整数' });
   }
-  if (host === '0.0.0.0' && !hasPassword() && !(typeof password === 'string' && password.length >= 4)) {
-    return res.status(400).json({ error: '开启局域网访问必须先设置访问密码（至少 4 位）', needPassword: true });
+  // 密码等价于全主机 RCE(经 /api/chat),4 位在线爆破可行(限速仅指数退避封顶 5min/IP)
+  // → 局域网模式最小 8 位。
+  if (host === '0.0.0.0' && !hasPassword() && !(typeof password === 'string' && password.length >= 8)) {
+    return res.status(400).json({ error: '开启局域网访问必须先设置访问密码（至少 8 位）', needPassword: true });
   }
   try {
-    if (typeof password === 'string' && password.length >= 4) { setPassword(password); updateConfig({ defaultPassword: false }); }
+    if (typeof password === 'string' && password.length >= 8) { setPassword(password); updateConfig({ defaultPassword: false }); }
     // updateConfig merges so passwordHash / tokenSecret aren't clobbered.
     updateConfig({ host, port: p });
     res.json({ ok: true, host, port: p, restartRequired: true, watchdog: process.env.CGUI_WATCHDOG === '1' });
@@ -403,8 +405,8 @@ app.post('/api/network', async (req, res) => {
 app.post('/api/network/password', (req, res) => {
   const { password, clear } = req.body || {};
   if (clear) { clearPassword(); return res.json({ ok: true, hasPassword: false }); }
-  if (typeof password !== 'string' || password.length < 4) {
-    return res.status(400).json({ error: '密码至少 4 位' });
+  if (typeof password !== 'string' || password.length < 8) {
+    return res.status(400).json({ error: '密码至少 8 位' });
   }
   setPassword(password);
   res.json({ ok: true, hasPassword: true });

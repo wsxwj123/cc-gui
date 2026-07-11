@@ -209,7 +209,7 @@ function NetworkTab() {
       {lanOn && (
         <div className="space-y-1.5">
           <div className="text-[12px] text-ink-soft font-body">
-            访问密码 {cfg.hasPassword ? <span className="text-ink-faint">（已设置，留空＝不修改）</span> : <span className="text-error">（必填，至少 4 位）</span>}
+            访问密码 {cfg.hasPassword ? <span className="text-ink-faint">（已设置，留空＝不修改）</span> : <span className="text-error">（必填，至少 8 位）</span>}
           </div>
           <div className="relative">
             <input type={showPwd ? 'text' : 'password'} value={password} onChange={(e) => setPassword(e.target.value)}

@@ -38,8 +38,18 @@ export function EditDiffCard({ toolCall }) {
     if (content) hunks = [{ diff: unifiedDiff(filePath, null, content, 'new-file') }];
   }
 
-  const adds = hunks.reduce((acc, h) => acc + h.diff.split('\n').filter((l) => l.startsWith('+') && !l.startsWith('+++')).length, 0);
-  const dels = hunks.reduce((acc, h) => acc + h.diff.split('\n').filter((l) => l.startsWith('-') && !l.startsWith('---')).length, 0);
+  // ---/+++ 文件头只在每个 hunk 的前两行;正文里 `--`/`++` 开头的内容行(SQL 注释等)
+  // 拼上 diff 符号后同前缀,全局排除会少计(与 file-changes.js diffStats 同口径)。
+  const countHunk = (diff) => {
+    let a = 0, d = 0;
+    diff.split('\n').forEach((l, i) => {
+      if (i < 2 && (l.startsWith('+++') || l.startsWith('---'))) return;
+      if (l.startsWith('+')) a += 1; else if (l.startsWith('-')) d += 1;
+    });
+    return [a, d];
+  };
+  const adds = hunks.reduce((acc, h) => acc + countHunk(h.diff)[0], 0);
+  const dels = hunks.reduce((acc, h) => acc + countHunk(h.diff)[1], 0);
 
   const opLabel = name === 'Write' ? '新建' : name === 'MultiEdit' ? `${hunks.length} 处改动` : '编辑';
   const FileIcon = name === 'Write' ? FilePlus2 : FileText;

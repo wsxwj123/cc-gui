@@ -1759,6 +1759,11 @@ function SessionList() {
       });
       const d = await r.json();
       if (!r.ok) return confirmDialog('创建 worktree 失败：' + d.error);
+      // 复用了已存在的同名分支(删 worktree 时分支保留,同名重建会检出旧分支)——
+      // 该分支可能落后当前 HEAD 很久,提示用户,别让他以为拿到的是最新代码。
+      if (d.reusedBranch) {
+        confirmDialog(`已复用已存在的分支 ${d.branch}(非当前 HEAD,可能是之前删除 worktree 时保留的)。如需从最新代码开始,请换一个分支名。`, { confirmText: '知道了' });
+      }
       enterWorktree({ path: d.path, branch: d.branch });
       setNewWorktreeName('');
     } catch (err) {

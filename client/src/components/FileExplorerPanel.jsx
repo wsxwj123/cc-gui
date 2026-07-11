@@ -153,6 +153,9 @@ export function FileExplorerPanel() {
     setSelectedFile((sf) => (sf && (sf === path || sf.startsWith(path + '/')) ? null : sf));
     timersRef.current[path] = setTimeout(async () => {
       delete timersRef.current[path];
+      // 进入真删前先标 deleting:大目录删除要数秒,这期间横条不能再显示"可撤销"
+      // (点撤销只会清 UI 而文件照删=假撤销)。deleting 后横条改显"删除中…"并禁用撤销。
+      setPending((prev) => (prev[path] ? { ...prev, [path]: { ...prev[path], deleting: true } } : prev));
       try {
         const r = await fetch('/api/files/delete', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -172,6 +175,9 @@ export function FileExplorerPanel() {
   };
 
   const undoDelete = (path) => {
+    // 已进入删除中(定时器已触发、请求在途)不可撤销:此时 timer 已被 delete,清 UI
+    // 无法阻止后端删除,会造成"显示撤销成功但文件已删"的假象。
+    if (!timersRef.current[path]) return;
     clearTimeout(timersRef.current[path]);
     delete timersRef.current[path];
     setPending((prev) => { const n = { ...prev }; delete n[path]; return n; });
@@ -199,16 +205,22 @@ export function FileExplorerPanel() {
             title="刷新"
           ><RefreshCw size={11} /></button>
         </div>
-        {/* 待删除横条:每项独立 10s 倒计时,点撤销恢复 */}
+        {/* 待删除横条:每项独立 10s 倒计时,点撤销恢复;进入删除中则禁用撤销 */}
         {Object.entries(pending).map(([p, info]) => (
           <div key={p} className="mx-2 mb-1 px-2 py-1.5 rounded-lg bg-red-500/10 border border-red-500/20 flex items-center gap-2">
             <Trash2 size={11} className="text-red-600 shrink-0" />
             <span className="text-[11px] font-mono text-ink truncate flex-1" title={p}>{info.name}</span>
-            <span className="text-[10px] text-ink-faint font-mono shrink-0">
-              {Math.max(0, Math.ceil((info.deadline - nowTick) / 1000))}s
-            </span>
-            <button onClick={() => undoDelete(p)}
-              className="text-[11px] text-accent hover:underline shrink-0 font-body">撤销</button>
+            {info.deleting ? (
+              <span className="text-[10px] text-red-600 font-body shrink-0">删除中…</span>
+            ) : (
+              <>
+                <span className="text-[10px] text-ink-faint font-mono shrink-0">
+                  {Math.max(0, Math.ceil((info.deadline - nowTick) / 1000))}s
+                </span>
+                <button onClick={() => undoDelete(p)}
+                  className="text-[11px] text-accent hover:underline shrink-0 font-body">撤销</button>
+              </>
+            )}
           </div>
         ))}
         <TreeNode

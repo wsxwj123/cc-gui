@@ -63,7 +63,9 @@ function ChangeItem({ change, sessionId, cwd, reviewed, onToggleReviewed }) {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ file: change.file }),
       });
-      const d = await res.json();
+      // 非 JSON 响应(网关 5xx HTML)不能让 .json() 抛进外层 catch → 会跳过链路2 的
+      // checkpoint 回退。容错为 {} 后按 !res.ok 正常落到 fallback。
+      const d = await res.json().catch(() => ({}));
       if (res.ok) markReverted();
       else if (sessionId && cwd) {
         const params = new URLSearchParams();

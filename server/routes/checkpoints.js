@@ -131,7 +131,7 @@ router.post('/checkpoints', async (req, res) => {
       await gitShadow(
         ['commit', '--allow-empty', '-q', '-m', oneLineLabel(label) || `checkpoint ${new Date().toISOString()}`],
         sessionId, workTree,
-        { env: { ...process.env, GIT_AUTHOR_NAME: 'claude-gui', GIT_AUTHOR_EMAIL: 'gui@claude', GIT_COMMITTER_NAME: 'claude-gui', GIT_COMMITTER_EMAIL: 'gui@claude' } },
+        { env: { GIT_AUTHOR_NAME: 'claude-gui', GIT_AUTHOR_EMAIL: 'gui@claude', GIT_COMMITTER_NAME: 'claude-gui', GIT_COMMITTER_EMAIL: 'gui@claude' } },
       );
       const rev = await gitShadow(['rev-parse', 'HEAD'], sessionId, workTree);
       const sha = rev.stdout.trim();
@@ -218,6 +218,9 @@ router.get('/checkpoints/:sessionId/resolve', async (req, res) => {
       .map((line) => {
         const [sha, ts, ...rest] = line.split('\t');
         const label = rest.join('\t');
+        // pre-restore commit 不是用户消息锚点(restore 前自动拍的现状快照)——选中它
+        // 会把文件恢复成"上次回滚前"的状态。git-log 回落路径排除。
+        if (/^pre-restore /.test(label)) return null;
         const sameText = !prefix || label.includes(prefix);
         const baseTs = Number(ts) * 1000;
         if (before && targetTs && baseTs > targetTs) return null;
@@ -249,7 +252,7 @@ router.post('/checkpoints/:sessionId/restore', async (req, res) => {
       await gitShadow(['add', '-A'], req.params.sessionId, workTree);
       await gitShadow(['commit', '--allow-empty', '-q', '-m', `pre-restore ${new Date().toISOString()}`],
         req.params.sessionId, workTree,
-        { env: { ...process.env, GIT_AUTHOR_NAME: 'claude-gui', GIT_AUTHOR_EMAIL: 'gui@claude', GIT_COMMITTER_NAME: 'claude-gui', GIT_COMMITTER_EMAIL: 'gui@claude' } });
+        { env: { GIT_AUTHOR_NAME: 'claude-gui', GIT_AUTHOR_EMAIL: 'gui@claude', GIT_COMMITTER_NAME: 'claude-gui', GIT_COMMITTER_EMAIL: 'gui@claude' } });
     } catch { /* 快照失败(嵌入式仓库等)→ 退回旧行为:新增文件可能残留 */ }
     const headFiles = await listTreeFiles(req.params.sessionId, workTree, 'HEAD').catch(() => []);
     const targetFiles = await listTreeFiles(req.params.sessionId, workTree, sha);
