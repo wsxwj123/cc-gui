@@ -125,10 +125,19 @@ function loadNetworkConfig() {
       }
       return { host, port };
     }
-    // 首次无配置:默认**仅回环 127.0.0.1**,不开局域网、不写弱默认密码。
-    // 之前默认 0.0.0.0+123456 会让任何下载公开版的用户开箱即把 $HOME 操作与 Claude
-    // 会话暴露给同网段(弱密码 + 明文 HTTP)。改为安全默认:局域网访问由用户在
-    // 设置→网络 显式开启,届时强制设密码(下方 relisten/HARD SAFETY 保证无密码不放 0.0.0.0)。
+    // 首次无配置(按产品方/用户明确要求区分本地版与公开版):
+    //  - 本地 bot 版(routes 下有 *.local.js):默认仅回环 127.0.0.1,局域网由用户自己在设置→网络开。
+    //  - 公开版(无 *.local.js,CI checkout 不含 gitignored 的 .local):默认开局域网 0.0.0.0 +
+    //    默认密码 123456(defaultPassword:true 标记,UI 提示改)。⚠️安全:公开版用户开箱即在同网段
+    //    暴露 $HOME 操作+claude 会话,123456 可被秒爆;这是用户明确的免配置换安全取舍,可在设置→网络改。
+    const isLocalBuild = existsSync(join(__dirname, 'routes', 'bots.local.js'));
+    if (!isLocalBuild) {
+      try {
+        setPassword('123456');
+        updateConfig({ host: '0.0.0.0', port: 6677, defaultPassword: true });
+        return { host: '0.0.0.0', port: 6677 };
+      } catch {}
+    }
     return { host: '127.0.0.1', port: 6677 };
   } catch {}
   return { host: '127.0.0.1', port: 6677 };
@@ -386,13 +395,13 @@ app.post('/api/network', async (req, res) => {
   if (!Number.isInteger(p) || p < 1024 || p > 65535) {
     return res.status(400).json({ error: '端口需为 1024–65535 的整数' });
   }
-  // 密码等价于全主机 RCE(经 /api/chat),4 位在线爆破可行(限速仅指数退避封顶 5min/IP)
-  // → 局域网模式最小 8 位。
-  if (host === '0.0.0.0' && !hasPassword() && !(typeof password === 'string' && password.length >= 8)) {
-    return res.status(400).json({ error: '开启局域网访问必须先设置访问密码（至少 8 位）', needPassword: true });
+  // 密码等价于全主机 RCE(经 /api/chat),限速仅指数退避封顶 5min/IP → 最小 6 位(用户要求,
+  // 便于用 123456 等简单密码;⚠️弱密码在线爆破仍可行,联网暴露风险自负)。
+  if (host === '0.0.0.0' && !hasPassword() && !(typeof password === 'string' && password.length >= 6)) {
+    return res.status(400).json({ error: '开启局域网访问必须先设置访问密码（至少 6 位）', needPassword: true });
   }
   try {
-    if (typeof password === 'string' && password.length >= 8) { setPassword(password); updateConfig({ defaultPassword: false }); }
+    if (typeof password === 'string' && password.length >= 6) { setPassword(password); updateConfig({ defaultPassword: false }); }
     // updateConfig merges so passwordHash / tokenSecret aren't clobbered.
     updateConfig({ host, port: p });
     res.json({ ok: true, host, port: p, restartRequired: true, watchdog: process.env.CGUI_WATCHDOG === '1' });
@@ -406,8 +415,8 @@ app.post('/api/network', async (req, res) => {
 app.post('/api/network/password', (req, res) => {
   const { password, clear } = req.body || {};
   if (clear) { clearPassword(); return res.json({ ok: true, hasPassword: false }); }
-  if (typeof password !== 'string' || password.length < 8) {
-    return res.status(400).json({ error: '密码至少 8 位' });
+  if (typeof password !== 'string' || password.length < 6) {
+    return res.status(400).json({ error: '密码至少 6 位' });
   }
   setPassword(password);
   res.json({ ok: true, hasPassword: true });

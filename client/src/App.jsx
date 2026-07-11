@@ -478,23 +478,28 @@ function formatPathShort(path) {
 }
 
 // 模型的"原生上下文窗口"——用于顶部 x/窗口 徽章。
-// 优先级:① [1m] 后缀(用户显式开启 1M)→ 1M;② id 里自带窗口标注
-// (moonshot-v1-128k 等)→ 取该数;③ 原生 1M+ 的 provider 模型(Gemini /
-// GPT-5.x / DeepSeek-V4 / MiMo / MiniMax / Grok-4)→ 1M;④ Kimi 原生 256K;
-// ⑤ 其余(GLM=200K、Anthropic 未开 [1m]=200K 等)→ 200K 兜底。
-// 依据:用户核对官方文档 — GLM-5.1=200K、Kimi K2.6=256K,均非 1M。
+// 策略(用户要求):**默认按 1M 估算**,已知小于 1M 的模型显式回落到真实窗口。
+// 优先级:① [1m] 后缀 / 名字里的 -Nm 标注 → N×1M;② -Nk 标注(moonshot-v1-128k)→ N×1K;
+// ③ 已知更小的具体系列(见下,含 U3 实测:deepseek/mimo/GLM=200K、Kimi=256K)→ 其真实窗口;
+// ④ 其余(gemini/gpt-5.x/minimax/grok-4 及未知第三方)→ 默认 1M。默认 1M 只是初始估算,
+// /context 实测(优先级更高)或显式 [1m] 会进一步校正,不会因估大而误判(有超窗提示与 sane-ceiling)。
 function nativeContextWindow(model) {
   const id = (model || '').toLowerCase();
   if (/\[1m\]/i.test(id)) return 1_000_000;
+  const byM = id.match(/(\d+)m(?![a-z0-9])/);        // 如 -2m / -1m 显式标注,最权威
+  if (byM) return parseInt(byM[1], 10) * 1_000_000;
   const byName = id.match(/(\d+)k(?![a-z0-9])/);     // 如 moonshot-v1-128k
   if (byName) return parseInt(byName[1], 10) * 1000;
-  // GPT-5.x:mini / nano 是 400K,5.4/5.5/pro 是 ~1.05M(查 OpenAI 官方文档 2026-06)。
-  if (/gpt-5.*(mini|nano)/.test(id)) return 400_000;
-  // U3:deepseek/mimo 从 1M 名单移除 —— CLI /context 实测均为 200k 档(用户 Windows
-  // 上 deepseek 徽章 1M、点开实测 200k 的矛盾根因)。1M 须显式 [1m] 后缀或实测覆盖。
-  if (/gemini|gpt-5|minimax|grok-4/.test(id)) return 1_000_000;
-  if (/kimi/.test(id)) return 262_144;               // Kimi K2.6 原生 256K
-  return 200_000;
+  // 已知【小于 1M】的模型 → 回落真实窗口(默认改 1M 后必须显式挡下,否则超窗误判/不触发压缩)。
+  if (/claude|anthropic|opus|sonnet|haiku/.test(id)) return 200_000;         // Claude 原生 200K(1M 需 [1m])
+  if (/deepseek|mimo/.test(id)) return 200_000;                               // U3 实测 /context 200K
+  if (/kimi|moonshot/.test(id)) return 262_144;                              // Kimi K2.x 原生 256K
+  if (/glm|zhipu|chatglm/.test(id)) return 200_000;                          // GLM 实测 200K
+  if (/grok-?3|grok-?2/.test(id)) return 131_072;                            // Grok-3 128K(Grok-4 走下方默认 1M)
+  if (/gpt-4o|gpt-4-turbo|gpt-4\.1-(mini|nano)|llama|mistral|mixtral|command-r/.test(id)) return 131_072; // 主流 128K 档
+  if (/gpt-5.*(mini|nano)/.test(id)) return 400_000;                          // GPT-5 mini/nano 400K
+  // 其余(gemini / gpt-5(.x) / gpt-4.1 / minimax / grok-4 / 未知第三方)→ 默认 1M。
+  return 1_000_000;
 }
 
 // ─── Right Panel (overlay) ────────────────────────────────────

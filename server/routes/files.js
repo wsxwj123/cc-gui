@@ -290,6 +290,11 @@ router.put('/files/write', async (req, res) => {
  */
 router.post('/files/delete', async (req, res) => {
   try {
+    // 服务端二次确认:删除不可逆,必须显式 confirm:true(前端删除流程带上)。防裸请求/误触发
+    // 单发即删(P0 rebind 已由 Host 白名单堵,这是纵深防御)。
+    if (req.body?.confirm !== true) {
+      return res.status(400).json({ error: '删除需带 confirm:true 确认' });
+    }
     const real = await safePath(req.body?.path);
     // 最后一段是符号链接:只删链接本身(unlink),绝不 rm -rf 其指向的目标目录 —— 即便
     // 目标在工作区内,用户点"删除"意图是删这个链接,不是清空它指向的真实目录。safePath 已

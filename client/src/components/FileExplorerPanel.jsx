@@ -160,7 +160,7 @@ export function FileExplorerPanel() {
       try {
         const r = await fetch('/api/files/delete', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ path, rootPath }),
+          body: JSON.stringify({ path, rootPath, confirm: true }), // 服务端要求显式确认
         });
         const d = await r.json().catch(() => ({}));
         if (!r.ok) throw new Error(d.error || `${r.status}`);

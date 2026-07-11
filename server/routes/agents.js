@@ -298,6 +298,12 @@ router.get('/agents/background', async (req, res) => {
 router.post('/agents/background/dispatch', async (req, res) => {
   const { cwd, prompt, model } = req.body || {};
   if (typeof prompt !== 'string' || !prompt.trim()) return res.status(400).json({ error: 'prompt 必填' });
+  // Windows cmd 注入守卫:--bg 要求 prompt 走位置参数(无法改 stdin),Windows 上经 cmd.exe /c;
+  // libuv 只给含空格的参数加引号,故【无空格且含 cmd 元字符】的 prompt(如 "x&calc")会被 cmd
+  // 重解析执行 = 绕权限 RCE。真实任务描述都有空格(会被引用→安全),单 token 带元字符=攻击形态,拒。
+  if (process.platform === 'win32' && !/\s/.test(prompt.trim()) && /[&|<>^]/.test(prompt)) {
+    return res.status(400).json({ error: 'prompt 含不安全字符(单个词里的 & | < > ^);请用正常任务描述' });
+  }
   let dir;
   try { dir = resolveUnderHome(String(cwd || ''), { label: 'cwd' }); }
   catch (e) { return res.status(400).json({ error: e.message }); }
