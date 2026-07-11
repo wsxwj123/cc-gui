@@ -1191,6 +1191,9 @@ async function assertPublicBaseURL(baseURL) {
 }
 
 async function probeUpstreamModels(baseURL, apiKey) {
+  // SSRF 守卫放在这里 = 所有调用点(fetch-models 请求值 / provider/fetch-models 存储
+  // baseURL / active provider settings.json baseURL)一次全覆盖,不漏 sibling caller。
+  await assertPublicBaseURL(baseURL);
   const b = baseURL.trim().replace(/\/+$/, '');
   // 候选 URL,按命中率排序。多数 provider 走第一个就够;anthropic 中转(只 forward
   // /v1/messages、不实现 /v1/models)回退到「同源 OpenAI 端点」拉(BR-3 调研:DeepSeek
@@ -1282,7 +1285,7 @@ router.post('/custom-providers/fetch-models', async (req, res) => {
     }
     let base; try { base = new URL(baseURL); } catch { return res.status(400).json({ error: 'baseURL 非法' }); }
     if (!/^https?:$/.test(base.protocol)) return res.status(400).json({ error: 'baseURL 必须是 http(s)' });
-    await assertPublicBaseURL(baseURL);
+    // SSRF 守卫已在 probeUpstreamModels 内(覆盖全部调用点),此处不再重复。
     res.json({ models: await probeUpstreamModels(baseURL, apiKey) });
   } catch (err) {
     res.status(err.status || 502).json({ error: err.message });
@@ -1292,6 +1295,8 @@ router.post('/custom-providers/fetch-models', async (req, res) => {
 // 给指定 model 发一个最小请求,验证 provider「鉴权 + 该模型可达」。openai 兼容打
 // /chat/completions、anthropic 兼容打 /v1/messages,max_tokens:1 把成本/耗时压到最低。
 async function testProviderConnection({ type, baseURL, apiKey, model }) {
+  // SSRF 守卫根因覆盖:test 端点不经 probeUpstreamModels,单独在此兜一次。
+  await assertPublicBaseURL(baseURL);
   const b = String(baseURL).trim().replace(/\/+$/, '');
   const hasVer = /\/v\d+$/.test(b);
   let url, headers, body;
@@ -1340,11 +1345,10 @@ router.post('/custom-providers/test', async (req, res) => {
     if (!b.model) return res.status(400).json({ ok: false, error: '请先在「模型」框填一个模型 ID 再测试' });
     try { const u = new URL(baseURL); if (!/^https?:$/.test(u.protocol)) throw 0; }
     catch { return res.status(400).json({ ok: false, error: 'Base URL 必须是 http(s)' }); }
-    try { await assertPublicBaseURL(baseURL); }
-    catch (e) { return res.status(e.status || 400).json({ ok: false, error: e.message }); }
+    // SSRF 守卫在 testProviderConnection 内(根因覆盖),此处不再重复。
     res.json(await testProviderConnection({ type, baseURL, apiKey, model: b.model }));
   } catch (err) {
-    res.status(500).json({ ok: false, error: err.message });
+    res.status(err.status || 500).json({ ok: false, error: err.message });
   }
 });
 

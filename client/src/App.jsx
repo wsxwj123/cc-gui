@@ -4705,11 +4705,12 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
 
     if (idxInChat === -1 && idxInStore === -1) {
       // 仍找不到目标消息:不能静默丢弃用户已编辑的重发文本(输入框已被 handleSend 清空)。
-      // 有重发文本就当普通消息发出去,别让它凭空消失。
+      // 有重发文本就当普通消息发出去,别让它凭空消失。透传 options(附件 meta 等)。
       const txt = typeof resendText === 'object' ? (resendText?.prompt) : resendText;
+      const opts = typeof resendText === 'object' ? (resendText?.options || {}) : {};
       if (txt && handleSendRef.current) {
         setProviderSwitchNotice({ text: '未能定位原消息位置,已作为新消息发送(未裁剪历史)。' });
-        setTimeout(() => handleSendRef.current(txt), 50);
+        setTimeout(() => handleSendRef.current(txt, opts), 50);
       }
       return;
     }

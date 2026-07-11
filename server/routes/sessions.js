@@ -58,6 +58,14 @@ export function trimJsonlBeforeTool(raw, toolUseId) {
   let found = false;
   let removedFromLine = -1;
   let keptAssistantBlocks = 0;
+  // 追踪【所有保留记录】里已出现的 tool_use / tool_result id。实测 CLI 每条 assistant
+  // 记录只含一个 tool_use(0/6051 含多个),并行工具是【跨记录】交错布局:
+  //   asst(useA) / asst(useB) / user(resA) / user(resB)
+  // 裁 useB 时 useA 所在记录在 cut 点之前被保留,但它的 resA 在 cut 点之后 → 被整体丢弃
+  // → 孤儿 tool_use → resume 时 Anthropic API 400。所以要在 cut 后向后扫,救回【所有】
+  // 保留 tool_use 但 result 尚未出现的配对(不只 cut 记录同条内的 beforeBlocks)。
+  const seenToolUse = new Set();
+  const seenToolResult = new Set();
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
@@ -84,35 +92,30 @@ export function trimJsonlBeforeTool(raw, toolUseId) {
           obj.message = { ...obj.message, content: beforeBlocks };
           keptAssistantBlocks = beforeBlocks.length;
           keptLines.push(JSON.stringify(obj));
-          // 若 beforeBlocks 里仍有 tool_use(同一条 assistant 消息里、被裁工具之前的
-          // 其它工具),它们的 tool_result 在紧跟的 user 行里。必须保留这些配对的
-          // tool_result,否则留下孤儿 tool_use → resume 时 Anthropic API 400
-          // (每个 tool_use 必须有对应 tool_result)。只过滤掉被裁工具的 result。
-          const keptToolIds = new Set(
-            beforeBlocks.filter((b) => b?.type === 'tool_use' && b.id).map((b) => b.id)
-          );
-          if (keptToolIds.size > 0) {
-            // 并行工具在 jsonl 里交错布局(asst A / asst B / res A / res B):被裁工具
-            // 之前的 tool_use 的 result 未必紧跟下一行,可能在 cut 点之后更远处。向后
-            // 扫描【全部】剩余行,只救回匹配 keptToolIds 的 tool_result(其余一律丢弃),
-            // 集齐后停。原来只看紧跟一行 → 孤儿 tool_use → resume 时 API 400。
-            const stillNeed = new Set(keptToolIds);
-            for (let j = i + 1; j < lines.length && stillNeed.size > 0; j++) {
-              if (!lines[j].trim()) continue;
-              let next;
-              try { next = JSON.parse(lines[j]); } catch { continue; }
-              const nc = Array.isArray(next?.message?.content) ? next.message.content : null;
-              if (next.type === 'user' && nc && nc.some((b) => b?.type === 'tool_result' && stillNeed.has(b.tool_use_id))) {
-                const filtered = nc.filter((b) => b?.type === 'tool_result' && stillNeed.has(b.tool_use_id));
-                filtered.forEach((b) => stillNeed.delete(b.tool_use_id));
-                next.message = { ...next.message, content: filtered };
-                keptLines.push(JSON.stringify(next));
-              }
-            }
+          beforeBlocks.forEach((b) => { if (b?.type === 'tool_use' && b.id) seenToolUse.add(b.id); });
+        }
+        // 所有保留 tool_use 中,result 还没在 cut 点之前出现的 → 需向后救回。
+        const stillNeed = new Set([...seenToolUse].filter((id) => !seenToolResult.has(id)));
+        stillNeed.delete(toolUseId); // 被裁工具本身的 result 不救(它连同 tool_use 一起被删)
+        for (let j = i + 1; j < lines.length && stillNeed.size > 0; j++) {
+          if (!lines[j].trim()) continue;
+          let next;
+          try { next = JSON.parse(lines[j]); } catch { continue; }
+          const nc = Array.isArray(next?.message?.content) ? next.message.content : null;
+          if (next.type === 'user' && nc && nc.some((b) => b?.type === 'tool_result' && stillNeed.has(b.tool_use_id))) {
+            const filtered = nc.filter((b) => b?.type === 'tool_result' && stillNeed.has(b.tool_use_id));
+            filtered.forEach((b) => stillNeed.delete(b.tool_use_id));
+            next.message = { ...next.message, content: filtered };
+            keptLines.push(JSON.stringify(next));
           }
         }
         break;
       }
+      // 保留的 assistant 记录:记下其 tool_use id
+      content.forEach((b) => { if (b?.type === 'tool_use' && b.id) seenToolUse.add(b.id); });
+    } else if (obj.type === 'user' && content) {
+      // 保留的 user 记录:记下已配对的 tool_result id
+      content.forEach((b) => { if (b?.type === 'tool_result' && b.tool_use_id) seenToolResult.add(b.tool_use_id); });
     }
 
     keptLines.push(line);

@@ -51,7 +51,7 @@ function ChangeItem({ change, sessionId, cwd, reviewed, onToggleReviewed }) {
     e.stopPropagation();
     if (!change.file) return;
     const msg = change.type === 'write'
-      ? `恢复到 HEAD：\n${change.file}\n\n如果这是本轮新建且未被 git 跟踪的文件，会直接删除；否则会丢失该文件的未提交修改。确定？`
+      ? `恢复到 HEAD：\n${change.file}\n\n仅当确认为本轮真实新建的文件时才会删除；若是覆写已存在文件则恢复其快照内容或丢失未提交修改。确定？`
       : `恢复到 HEAD：\n${change.file}\n\n会丢失所有未提交修改，确定？`;
     if (!(await confirmDialog(msg, { danger: true }))) return;
     setBusy('revert');

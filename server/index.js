@@ -146,7 +146,11 @@ let lanMode = HOST === '0.0.0.0';
 
 function requestHostname(req) {
   const host = req?.headers?.host || '';
-  return host.replace(/^\[/, '').replace(/\](:\d+)?$/, '').replace(/:\d+$/, '');
+  if (!host) return '';
+  // 用 URL 归一化剥端口 —— 手写正则 `:\d+$` 会把裸 IPv6 `::1` 的 `:1` 当端口剥成 `:`
+  // (IPv6 环回白名单变死代码,[::1] 访问被误 403)。URL 正确处理 [v6]:port 与 v4:port。
+  try { return new URL('http://' + host).hostname.replace(/^\[|\]$/g, ''); }
+  catch { return host.replace(/:\d+$/, ''); }
 }
 
 function isAllowedBrowserOrigin(origin, req = null) {

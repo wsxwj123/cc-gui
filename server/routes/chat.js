@@ -293,13 +293,23 @@ function makeCanUseTool(slot) {
       return { behavior: 'deny', message: `${refineReason}\n\n请根据以上反馈修订计划,然后再次调用 ExitPlanMode 重新提交修订后的计划等待用户确认。在计划获批前不要开始执行实际改动。` };
     }
     const mode = slot.guiMode;
-    // plan = 只读规划:写类【直接拒绝】(不能靠弹卡放行——实测 canUseTool 返回 allow
-    // 会覆盖 SDK plan 层,用户点"允许"就在规划模式下真写了文件);危险 Bash 也拒(plan
-    // 下 Bash 本自动放行,rm -rf/装包等会静默执行,plan 反比 default 更不安全)。
-    // 其余只读探索工具自动放行。ExitPlanMode/AskUserQuestion 已在上面单独处理。
+    // plan = 只读规划:源文件写类【直接拒绝】(不能靠弹卡放行——实测 canUseTool 返回
+    // allow 会覆盖 SDK plan 层,用户点"允许"就在规划模式下真写了源文件);但计划类文档
+    // (.md/.txt/plan/todo 等)是特性(#4:允许 AI 在规划期写 plan.md)→ 走弹卡由用户
+    // 批准。危险 Bash 也弹卡(黑名单枚举不全,plan 号称只读却静默跑任意 Bash=信任违背)。
+    // 读类探索工具自动放行。判定与客户端 useWebSocket 的 planClass 逐字对齐。
     if (mode === 'plan') {
       if (WRITE_CLASS.has(toolName)) {
-        return { behavior: 'deny', message: '规划模式禁止写入文件。请先用 ExitPlanMode 提交计划并等待用户批准,获批后再执行改动。' };
+        const fp = String(input?.file_path || input?.path || input?.notebook_path || '').toLowerCase();
+        const base = fp.split(/[\\/]/).pop() || '';
+        const planClass = /\.(md|markdown|txt|rst|mdx)$/.test(fp) || /(plan|todo|notes?|draft|计划|待办)/.test(base);
+        if (!planClass) {
+          return { behavior: 'deny', message: '规划模式禁止修改源文件。可写计划类文档(.md/.txt 或名含 plan/todo),或用 ExitPlanMode 提交计划等待用户批准,获批后再改源码。' };
+        }
+        // 计划类文档 → 弹卡由用户决定(保留 #4 特性,不硬拒)。
+        const r = await ask();
+        if (r.decision === 'allow') return { behavior: 'allow', updatedInput: (r.updatedInput && typeof r.updatedInput === 'object') ? r.updatedInput : input };
+        return { behavior: 'deny', message: r.reason || '规划模式下该写入被拒绝' };
       }
       // Bash 在 plan 下【一律弹卡】,不自动放行:危险命令黑名单枚举不全(`> file` 清空、
       // `mv` 覆盖、`python -c "shutil.rmtree()"` 等都不在),plan 号称只读却静默跑任意
@@ -313,9 +323,10 @@ function makeCanUseTool(slot) {
       // MCP 工具可能有写副作用,plan 下不无条件放行,落到下面按 autoapprove/弹卡处理。
     }
     if (mode === 'bypassPermissions') return { behavior: 'allow', updatedInput: input };
-    // 危险 Bash 服务端强拦:即使 acceptEdits/已永久授权也必须弹卡(与客户端 G3 同策,
-    // 现服务端为权威兜底)。放在 acceptEdits 自动放行【之前】。bypass 已在上面无条件放行
-    // (对齐官方 --dangerously-skip-permissions 的"全放"语义)。
+    // 危险 Bash 走弹卡,放在 acceptEdits 自动放行【之前】:确保未来若 acceptEdits 扩大到
+    // 放行 Bash,危险命令仍先弹卡。当前 default/acceptEdits 下 Bash 本就落到下面 ask(),
+    // 故此块目前对裁决是等效前置(不改变结果);真正的"永久授权/自动放行"裁决在客户端
+    // respond 侧,客户端 G3(useWebSocket)对危险命令强制弹卡,两端正则逐字一致。
     if (isDangerousBash(toolName, input)) {
       const r = await ask();
       if (r.decision === 'allow') return { behavior: 'allow', updatedInput: (r.updatedInput && typeof r.updatedInput === 'object') ? r.updatedInput : input };
