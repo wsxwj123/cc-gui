@@ -66,11 +66,13 @@ export function SkillsPanel() {
       if (!r.ok) throw new Error(d.error || '更新失败');
       await loadLocal();
       setManageBusy(null); // 更新已完成,先停 spinner 再弹窗(否则用户不点弹窗则按钮无限转)
-      // #7 更新完成弹窗:有 frontmatter version 则显示"已更新为 vX",无则报来源。
+      // 远端无变化(重下内容与旧的一致)→ 明确显示"无更新",不再误报"已更新为 vX"。
       await confirmDialog(
-        d.version
-          ? `「${id}」已更新为 v${d.version}\n(来源 ${d.repo}${d.branch ? '@' + d.branch : ''})`
-          : `「${id}」已更新到最新\n(来源 ${d.repo}${d.branch ? '@' + d.branch : ''};该 skill 未声明版本号)`,
+        d.changed === false
+          ? `「${id}」已是最新,无更新\n(来源 ${d.repo}${d.branch ? '@' + d.branch : ''})`
+          : d.version
+            ? `「${id}」已更新为 v${d.version}\n(来源 ${d.repo}${d.branch ? '@' + d.branch : ''})`
+            : `「${id}」已更新到最新\n(来源 ${d.repo}${d.branch ? '@' + d.branch : ''};该 skill 未声明版本号)`,
         { confirmText: '知道了' },
       );
     } catch (e) { setNotice('错误: ' + e.message); }

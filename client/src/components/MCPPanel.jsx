@@ -224,11 +224,14 @@ export function MCPPanel() {
       setRestartHint(true);
       await fetchData();
       setPluginActioning(null); // 更新已完成,先停 spinner 再弹窗
-      // #7 更新完成弹窗显示新版本(后端读 installed_plugins.json 回传)
+      // 版本号更新前后没变 → 明确显示"无更新",不再误报"已更新为 vX"。
+      const pn = plugin.name.split('@')[0];
       await confirmDialog(
-        d.version
-          ? `插件「${plugin.name.split('@')[0]}」已更新为 v${d.version}\n(新会话生效)`
-          : `插件「${plugin.name.split('@')[0]}」已更新到最新(新会话生效)`,
+        d.changed === false
+          ? `插件「${pn}」已是最新,无更新${d.version ? `(v${d.version})` : ''}`
+          : d.version
+            ? `插件「${pn}」已更新为 v${d.version}\n(新会话生效)`
+            : `插件「${pn}」已更新到最新(新会话生效)`,
         { confirmText: '知道了' },
       );
     } catch (e) { setPluginErr(`${plugin.name}: ${e.message}`); }

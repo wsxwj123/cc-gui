@@ -192,7 +192,12 @@ function NetworkTab() {
       {cfg.defaultPassword && (
         <div className="flex items-start gap-2 text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded-lg p-2.5 font-body leading-relaxed">
           <AlertCircle size={14} className="mt-0.5 shrink-0 text-amber-600" />
-          <span>当前用的是<b>默认密码 123456</b>（为开箱即用的局域网访问预设）。这是弱密码，同一局域网内任何人都可能用它访问并控制你的 Claude——<b>请立刻在下方改成强密码</b>。若只在本机用，可取消下方「局域网访问」勾选并重启回到仅本机。</span>
+          <span>
+            局域网访问已默认开启,{cfg.defaultPasswordPlain
+              ? <>本机随机默认密码是 <b className="font-mono select-all bg-amber-100 px-1 rounded">{cfg.defaultPasswordPlain}</b>(手机/其它设备连接时输入这个)。</>
+              : <>已为本机生成随机默认密码(见配置)。</>}
+            这是自动生成的临时密码,<b>建议在下方改成自己好记的强密码</b>;若只在本机用,可取消下方「局域网访问」勾选并重启回到仅本机。
+          </span>
         </div>
       )}
       <div className="text-[11px] text-ink-muted font-body">
@@ -212,7 +217,7 @@ function NetworkTab() {
       {lanOn && (
         <div className="space-y-1.5">
           <div className="text-[12px] text-ink-soft font-body">
-            访问密码 {cfg.hasPassword ? <span className="text-ink-faint">（已设置，留空＝不修改）</span> : <span className="text-error">（必填，至少 8 位）</span>}
+            访问密码 {cfg.hasPassword ? <span className="text-ink-faint">（已设置，留空＝不修改）</span> : <span className="text-error">（必填，至少 6 位）</span>}
           </div>
           <div className="relative">
             <input type={showPwd ? 'text' : 'password'} value={password} onChange={(e) => setPassword(e.target.value)}

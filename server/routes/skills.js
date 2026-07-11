@@ -461,11 +461,15 @@ router.post('/skills/update', async (req, res) => {
   const src = sources[id];
   if (!src?.repo) return res.status(400).json({ error: '该 skill 无来源记录(非从 GitHub/Gitee 仓库导入,无法自动更新)' });
   try {
+    // 更新前的 SKILL.md 内容,用于判"其实没更新"(远端无变化则重下的字节与旧的一致)→ 前端显示"无更新"。
+    const beforeMd = await readSkillMd(join(SKILLS_DIR, id)) || '';
     const r = await doImport(src.repo, src.branch, [id], true, true, src.host || 'github'); // force:绕过 repoCache 拿最新 tree
     if (r.imported.includes(id)) {
       // 读更新后的 frontmatter version(有则回传,前端弹窗"已更新为 vX")
-      const fm = parseFrontmatter(await readSkillMd(join(SKILLS_DIR, id)) || '');
-      return res.json({ ok: true, repo: src.repo, branch: src.branch, host: src.host || 'github', version: fm.version || null });
+      const afterMd = await readSkillMd(join(SKILLS_DIR, id)) || '';
+      const fm = parseFrontmatter(afterMd);
+      const changed = beforeMd !== afterMd;
+      return res.json({ ok: true, repo: src.repo, branch: src.branch, host: src.host || 'github', version: fm.version || null, changed });
     }
     return res.status(500).json({ error: r.failed[0]?.error || '更新失败' });
   } catch (e) {

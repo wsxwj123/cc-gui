@@ -41,7 +41,17 @@ export function hasPassword() {
 export function setPassword(plain) {
   const salt = randomBytes(16).toString('hex');
   const hash = scryptSync(String(plain), salt, 64).toString('hex');
-  updateConfig({ passwordHash: { salt, hash } });
+  // 用户显式设的密码 → 清掉"默认密码"标记与明文(不再在 UI 提示"你在用默认密码")。
+  updateConfig({ passwordHash: { salt, hash }, defaultPassword: false, defaultPasswordPlain: null });
+}
+// 公开版首启:生成【每台随机】的默认局域网密码(非全网统一硬编码),存明文供本机 UI 显示一次
+// (手机连时要输;显示随机串成本为零,消灭"全网统一已知凭证"这个灾难面)。返回明文。
+export function setDefaultRandomPassword() {
+  const plain = randomBytes(4).toString('hex'); // 8 位十六进制,32bit 熵,配合限速在线爆破不可行
+  const salt = randomBytes(16).toString('hex');
+  const hash = scryptSync(plain, salt, 64).toString('hex');
+  updateConfig({ passwordHash: { salt, hash }, defaultPassword: true, defaultPasswordPlain: plain });
+  return plain;
 }
 export function clearPassword() {
   const c = loadConfig();

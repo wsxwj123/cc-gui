@@ -915,16 +915,21 @@ router.post('/plugins/:name/update', async (req, res) => {
     const { name } = req.params;
     if (!/^[A-Za-z0-9._@\-/]{1,100}$/.test(name)) throw new Error('invalid plugin name');
     const mk = name.includes('@') ? name.split('@')[1] : '';
+    const readVer = async () => {
+      try {
+        const reg = JSON.parse(await readFile(join(CLAUDE_DIR, 'plugins', 'installed_plugins.json'), 'utf-8'));
+        return reg?.plugins?.[name]?.[0]?.version || null;
+      } catch { return null; }
+    };
+    const beforeVersion = await readVer(); // 更新前版本,用于判"其实没更新"
     if (mk) { try { await runClaude(['plugin', 'marketplace', 'update', mk], { timeout: 30000 }); } catch {} }
     await runClaude(['plugin', 'update', name], { timeout: 90000 });
     invalidateMcpCache();
-    // 读更新后的版本回传(前端弹窗"已更新为 vX")。installed_plugins.json 键=name@marketplace。
-    let version = null;
-    try {
-      const reg = JSON.parse(await readFile(join(CLAUDE_DIR, 'plugins', 'installed_plugins.json'), 'utf-8'));
-      version = reg?.plugins?.[name]?.[0]?.version || null;
-    } catch {}
-    res.json({ ok: true, name, version, note: '已更新,新会话生效' });
+    const version = await readVer(); // 更新后版本(前端弹窗"已更新为 vX")
+    // changed:版本号都在且变了=真更新;都在且没变=无更新;版本号缺失(无声明)=判不了(undefined),
+    // 前端保留旧通用文案不误报版本。
+    const changed = (version != null && beforeVersion != null) ? (version !== beforeVersion) : undefined;
+    res.json({ ok: true, name, version, changed, note: '已更新,新会话生效' });
   } catch (err) {
     res.status(500).json({ error: (err.stderr?.toString() || err.message || '').trim() || '更新失败' });
   }

@@ -39,7 +39,7 @@ import skillsRoutes from './routes/skills.js';
 import backgroundsRoutes from './routes/backgrounds.js';
 import {
   authMiddleware, isLocalReq, isAuthorized, parseCookies, verifyToken,
-  hasPassword, setPassword, clearPassword, verifyPassword, issueToken, updateConfig, loadConfig,
+  hasPassword, setPassword, setDefaultRandomPassword, clearPassword, verifyPassword, issueToken, updateConfig, loadConfig,
 } from './services/auth.js';
 import { setupFileWatcher } from './services/file-watcher.js';
 import { resolveWorkspacePath } from './utils/safe-path.js';
@@ -128,13 +128,13 @@ function loadNetworkConfig() {
     // 首次无配置(按产品方/用户明确要求区分本地版与公开版):
     //  - 本地 bot 版(routes 下有 *.local.js):默认仅回环 127.0.0.1,局域网由用户自己在设置→网络开。
     //  - 公开版(无 *.local.js,CI checkout 不含 gitignored 的 .local):默认开局域网 0.0.0.0 +
-    //    默认密码 123456(defaultPassword:true 标记,UI 提示改)。⚠️安全:公开版用户开箱即在同网段
-    //    暴露 $HOME 操作+claude 会话,123456 可被秒爆;这是用户明确的免配置换安全取舍,可在设置→网络改。
+    //    【每台随机】默认密码(非全网统一硬编码,消灭"一个常量打穿所有装机"),明文存 config 供本机 UI
+    //    显示一次、defaultPassword:true 提示改。手机连时输那串随机码即可。用户改密码后标记与明文自动清。
     const isLocalBuild = existsSync(join(__dirname, 'routes', 'bots.local.js'));
     if (!isLocalBuild) {
       try {
-        setPassword('123456');
-        updateConfig({ host: '0.0.0.0', port: 6677, defaultPassword: true });
+        setDefaultRandomPassword(); // 写 passwordHash + defaultPassword:true + defaultPasswordPlain
+        updateConfig({ host: '0.0.0.0', port: 6677 });
         return { host: '0.0.0.0', port: 6677 };
       } catch {}
     }
@@ -377,8 +377,11 @@ app.get('/api/network', (req, res) => {
     watchdog,
     // Tauri 双击启动虽无 watchdog,但能运行时 relisten 切 host → 重启按钮可用。
     canRestart: watchdog || process.env.CGUI_TAURI === '1',
-    // 首次默认密码(123456)未改 → 前端横幅强提示改密码。
+    // 公开版首启的【随机】默认密码未改 → 前端横幅提示"你在用默认密码 XXXX,建议修改"。
     defaultPassword: loadConfig().defaultPassword === true,
+    // 明文只回给【本机请求】(本机 UI 要显示给用户抄到手机);远程/未鉴权不给,避免泄露默认密码。
+    defaultPasswordPlain: (isLocalReq(req) && loadConfig().defaultPassword === true)
+      ? (loadConfig().defaultPasswordPlain || null) : null,
   });
 });
 // POST /api/network — persist binding to ~/.claude-gui/network.json. Takes effect

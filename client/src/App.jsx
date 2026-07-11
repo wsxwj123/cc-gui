@@ -496,9 +496,9 @@ function nativeContextWindow(model) {
   if (/kimi|moonshot/.test(id)) return 262_144;                              // Kimi K2.x 原生 256K
   if (/glm|zhipu|chatglm/.test(id)) return 200_000;                          // GLM 实测 200K
   if (/grok-?3|grok-?2/.test(id)) return 131_072;                            // Grok-3 128K(Grok-4 走下方默认 1M)
-  if (/gpt-4o|gpt-4-turbo|gpt-4\.1-(mini|nano)|llama|mistral|mixtral|command-r/.test(id)) return 131_072; // 主流 128K 档
+  if (/gpt-4o|gpt-4-turbo|llama|mistral|mixtral|command-r/.test(id)) return 131_072; // 主流 128K 档
   if (/gpt-5.*(mini|nano)/.test(id)) return 400_000;                          // GPT-5 mini/nano 400K
-  // 其余(gemini / gpt-5(.x) / gpt-4.1 / minimax / grok-4 / 未知第三方)→ 默认 1M。
+  // 其余(gemini / gpt-5(.x) / gpt-4.1 全系〔mini/nano 也是 1M〕/ minimax / grok-4 / 未知第三方)→ 默认 1M。
   return 1_000_000;
 }
 
