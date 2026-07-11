@@ -73,7 +73,9 @@ async function runClaude(args, { timeout = 10000 } = {}) {
   return stdout;
 }
 
-const NAME_RE = /^[A-Za-z0-9_.:@/-]{1,128}$/;
+// 允许空格:claude.ai connector 的服务器名带空格(如 "claude.ai Google Drive")。
+// 所有 claude 调用走 execFile 参数数组无 shell,空格不构成注入面。
+const NAME_RE = /^[A-Za-z0-9_.:@/ -]{1,128}$/;
 function assertSafeName(name) {
   if (typeof name !== 'string' || !NAME_RE.test(name)) {
     throw new Error('invalid MCP server name');
@@ -134,14 +136,17 @@ function parseMcpList(output) {
 
     // 状态图标:CLI 实际用 ✔/✘(U+2714/2718),早期匹配的 ✓/✗(U+2713/2717)对不上 →
     // 状态恒 unknown + 命令尾巴被 " - ✔ Connected" 污染。这里两套都收,外加 ! 需认证。
-    const match = line.match(/^(\S+):\s+(.+?)(?:\s+-\s+([✓✔✗✘!])\s+(.+))?$/);
+    // 名字用 (.+?) 非贪婪到首个 ": ":claude.ai connector 名含空格(如
+    // "claude.ai Google Drive: https://... - ! Needs authentication"),\S+ 整行匹配不上被丢。
+    const match = line.match(/^(.+?):\s+(.+?)(?:\s+-\s+([✓✔✗✘!])\s+(.+))?$/);
     if (match) {
-      const [, name, command, statusIcon] = match;
+      const [, name, command, statusIcon, statusText] = match;
       const isHttp = command.includes('(HTTP)') || command.startsWith('http');
       const cleanCommand = command.replace(/\s*\(HTTP\)\s*$/, '').trim();
-      const status = (statusIcon === '✓' || statusIcon === '✔') ? 'connected'
+      const status = (statusIcon === '!' || /needs\s+auth/i.test(statusText || '')) ? 'needs-auth'
+        : (statusIcon === '✓' || statusIcon === '✔') ? 'connected'
         : (statusIcon === '✗' || statusIcon === '✘') ? 'disconnected'
-        : 'unknown'; // ! = 需认证 / 无图标 = 未知
+        : 'unknown';
 
       servers.push({
         name,
@@ -497,6 +502,38 @@ router.get('/mcp/:name/ping', async (req, res) => {
     });
   } catch (err) {
     res.status(400).json({ error: err.message });
+  }
+});
+
+// POST /api/mcp/:name/login — OAuth 授权:执行 `claude mcp login <name>`。CLI 会打开系统
+// 浏览器走授权流程,本地起回调服务,收到回调后进程才退出 → 超时给足 180s 等用户在浏览器
+// 完成操作。名字不存在 / 非 OAuth 服务器时 CLI 快速报错,stderr 原样透传给前端展示。
+router.post('/mcp/:name/login', async (req, res) => {
+  try {
+    const { name } = req.params;
+    assertSafeName(name);
+    await runClaude(['mcp', 'login', name], { timeout: 180000 });
+    invalidateMcpCache();
+    res.json({ ok: true, name });
+  } catch (err) {
+    // execFile 超时会杀掉子进程并置 killed —— 通常是用户未在浏览器完成授权。
+    if (err.killed) {
+      return res.status(504).json({ error: '等待浏览器授权超时(3 分钟)。若已完成授权,点「刷新」查看状态;否则重新点登录。' });
+    }
+    res.status(500).json({ error: (err.stderr?.toString() || err.message || '').trim() || '登录失败' });
+  }
+});
+
+// POST /api/mcp/:name/logout — 清除该服务器已存储的 OAuth 凭证(claude mcp logout)。
+router.post('/mcp/:name/logout', async (req, res) => {
+  try {
+    const { name } = req.params;
+    assertSafeName(name);
+    await runClaude(['mcp', 'logout', name], { timeout: 15000 });
+    invalidateMcpCache();
+    res.json({ ok: true, name });
+  } catch (err) {
+    res.status(500).json({ error: (err.stderr?.toString() || err.message || '').trim() || '登出失败' });
   }
 });
 
