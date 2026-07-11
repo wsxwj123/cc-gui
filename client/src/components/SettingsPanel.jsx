@@ -1164,6 +1164,27 @@ function PersistentChatToggle() {
   );
 }
 
+// 输入预测(SDK promptSuggestions):回合结束后模型追发一条对下一步输入的预测,
+// 输入框上方显示为可点击建议。生成蹭本回合的前缀缓存,成本极低;若不需要可关闭
+// (关闭后回合结束即收流,不再有建议等待窗)。
+function PromptSuggestionsToggle() {
+  const on = useStore((s) => s.promptSuggestions);
+  const setOn = useStore((s) => s.setPromptSuggestions);
+  return (
+    <div className="bg-canvas-warm border border-canvas-deep rounded-lg px-3 py-2.5 flex items-center gap-3">
+      <div className="min-w-0 flex-1">
+        <div className="text-xs text-ink font-body font-medium">输入预测</div>
+        <div className="text-[10.5px] text-ink-faint font-body">回合结束后由模型预测下一条可能的输入,在输入框上方显示为建议,点击即发送、也可填入编辑。预测蹭本回合的缓存生成,成本极低;首轮与规划模式不产生建议</div>
+      </div>
+      <button onClick={() => setOn(!on)}
+        className={`shrink-0 w-9 h-5 rounded-full transition-colors relative ${on ? 'bg-accent' : 'bg-ink-faint/30'}`}
+        title={on ? '已开启' : '已关闭'}>
+        <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-all ${on ? 'left-[18px]' : 'left-0.5'}`} />
+      </button>
+    </div>
+  );
+}
+
 function ExcludeDynamicPromptToggle() {
   const val = useStore((s) => s.excludeDynamicSystemPrompt); // 'auto' | true | false
   const setVal = useStore((s) => s.setExcludeDynamicSystemPrompt);
@@ -1383,6 +1404,7 @@ function OverviewTab({ settings, onSave, saving }) {
       <FullDiskAccessCard />
       <CloseBehaviorPicker />
       <PersistentChatToggle />
+      <PromptSuggestionsToggle />
       <ExcludeDynamicPromptToggle />
       <AutoCompactWindowSelect settings={settings} onSave={onSave} saving={saving} />
       <SmallFastModelInput env={env} onSave={onSave} saving={saving} />

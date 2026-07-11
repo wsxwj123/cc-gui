@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Send, Loader2, Square, Terminal, Puzzle, Wrench, Gauge, ChevronDown, X, FileText, Paperclip, Shield, ShieldOff, ClipboardList, Check, Pencil, Smartphone, Workflow, AtSign, MessagesSquare, Folder, CornerLeftUp } from 'lucide-react';
+import { Send, Loader2, Square, Terminal, Puzzle, Wrench, Gauge, ChevronDown, X, FileText, Paperclip, Shield, ShieldOff, ClipboardList, Check, Pencil, Smartphone, Workflow, AtSign, MessagesSquare, Folder, CornerLeftUp, Sparkles, ArrowDownToLine } from 'lucide-react';
 import { useStore, PERMISSION_MODES } from '../stores/sessionStore.js';
 import { PermissionPrompt } from './PermissionPrompt.jsx';
 import { TodoPanel } from './TodoPanel.jsx';
@@ -224,7 +224,7 @@ const TYPE_LABELS = {
   plugin: '插件',
 };
 
-export function ChatInput({ onSend, onStop, onAccelerate, disabled, isStreaming, backgroundWorking = false, queueLength = 0, queueItems = [], onRemoveFromQueue, onEditFromQueue, todos = null, plan = '', permKey = null, sessionId = null }) {
+export function ChatInput({ onSend, onStop, onAccelerate, onBackground, suggestion = null, onDismissSuggestion, disabled, isStreaming, backgroundWorking = false, queueLength = 0, queueItems = [], onRemoveFromQueue, onEditFromQueue, todos = null, plan = '', permKey = null, sessionId = null }) {
   const [text, setText] = useState('');
   // 编辑重发态(#4):点击「重新编辑并发送」后进入。此时历史消息尚未被破坏,
   // 按 Esc 可整条取消(清空输入+通知上层撤销待回滚),给用户反悔余地。
@@ -948,6 +948,39 @@ export function ChatInput({ onSend, onStop, onAccelerate, disabled, isStreaming,
             重挂以免跨会话串扰(每个会话独立的折叠/隐藏状态)。 */}
         <TodoPanel key={permKey || 'global'} todos={todos} plan={plan} />
 
+        {/* 输入预测(A):回合末模型预测的下一条输入。点击建议文本直接发送;
+            铅笔=填入输入框编辑;X=忽略。新回合开始/发送时上层自动清掉。 */}
+        {suggestion && !isStreaming && !rcLocked && (
+          <div className="mb-2 flex items-center gap-1 animate-fade-in">
+            <button
+              onClick={() => onSend?.(suggestion)}
+              className="group min-w-0 flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-accent/8 border border-accent/25 hover:bg-accent/15 transition-colors text-left"
+              title={`点击发送:${suggestion}`}
+            >
+              <Sparkles size={11} className="text-accent shrink-0" />
+              <span className="text-[11px] text-ink-soft font-body truncate">{suggestion}</span>
+            </button>
+            <button
+              onClick={() => {
+                setText(suggestion);
+                onDismissSuggestion?.();
+                setTimeout(() => textareaRef.current?.focus(), 0);
+              }}
+              className="shrink-0 p-1.5 rounded-full hover:bg-black/5 text-ink-faint hover:text-accent transition-colors"
+              title="填入输入框编辑"
+            >
+              <Pencil size={11} />
+            </button>
+            <button
+              onClick={() => onDismissSuggestion?.()}
+              className="shrink-0 p-1.5 rounded-full hover:bg-black/5 text-ink-faint hover:text-ink transition-colors"
+              title="忽略此建议"
+            >
+              <X size={11} />
+            </button>
+          </div>
+        )}
+
         <div
           className={`chat-composer glass-capsule flex items-end gap-2 px-5 py-3.5 ${dragging ? 'ring-2 ring-accent/60' : ''}`}
           onDragOver={(e) => { e.preventDefault(); setDragging(true); }}
@@ -998,6 +1031,18 @@ export function ChatInput({ onSend, onStop, onAccelerate, disabled, isStreaming,
               >
                 <Send size={13} />入队
               </button>
+              {/* H 转后台:只断本端连接,回合在服务端继续跑完(与切走会话的自动挂后台
+                  同一机制,这里是主动触发)。仅本地前台流式时上层才传 onBackground。 */}
+              {onBackground && (
+                <button
+                  onClick={onBackground}
+                  className="shrink-0 h-9 px-3 rounded-md bg-canvas-warm border border-canvas-deep hover:bg-black/5 text-ink-soft flex items-center justify-center gap-1.5 transition-colors text-[11px] font-medium"
+                  title="本回合转入后台继续运行,完成后自动提示;期间可切换到其它会话"
+                >
+                  <ArrowDownToLine size={11} />
+                  转后台
+                </button>
+              )}
               {/* Small rounded-rect stop button, CLI-style. Always-clickable
                   whether streaming locally or only running in background. */}
               <button

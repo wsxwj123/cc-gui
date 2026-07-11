@@ -343,6 +343,12 @@ export const useStore = create((set, get) => ({
     try { return localStorage.getItem('cgui-persistent-chat') !== '0'; } catch { return true; }
   })(),
 
+  // 输入预测:回合结束后 SDK 追发一条 prompt_suggestion(预测的下一条用户输入),
+  // 在输入框上方显示为可点击的建议。默认开;可在设置关闭。
+  promptSuggestions: (() => {
+    try { return localStorage.getItem('cgui-prompt-suggestions') !== '0'; } catch { return true; }
+  })(),
+
   // 聊天模式(全局,localStorage):开启后消息流只显示 AI 最终文本 + 用户消息,把
   // thinking / 工具 / 子代理 / skill 折叠成一行可点开的标记,像微信聊天。默认关。
   chatMode: (() => {
@@ -818,6 +824,11 @@ export const useStore = create((set, get) => ({
   setPersistentChat: (on) => {
     set({ persistentChat: !!on });
     try { localStorage.setItem('cgui-persistent-chat', on ? '1' : '0'); } catch {}
+  },
+
+  setPromptSuggestions: (on) => {
+    set({ promptSuggestions: !!on });
+    try { localStorage.setItem('cgui-prompt-suggestions', on ? '1' : '0'); } catch {}
   },
 
   setExcludeDynamicSystemPrompt: (v) => {
