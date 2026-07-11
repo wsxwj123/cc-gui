@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react';
-import { Folder, FolderOpen, File, RefreshCw, AlertCircle, ChevronRight, ChevronDown, FileText, Image as ImageIcon, ExternalLink, Film, Pencil, Save, Undo2, Redo2, X, Check, Trash2, AtSign, MoreVertical } from 'lucide-react';
+import { Folder, FolderOpen, File, RefreshCw, AlertCircle, ChevronRight, ChevronDown, FileText, Image as ImageIcon, ExternalLink, Film, Pencil, Save, Undo2, Redo2, X, Check, Trash2, AtSign } from 'lucide-react';
 import { useStore } from '../stores/sessionStore.js';
 import { MarkdownRenderer } from './MarkdownRenderer.jsx';
 import { ArtifactPreview } from './ArtifactPreview.jsx';
@@ -135,18 +135,17 @@ export function FileExplorerPanel() {
     setCtxMenu({ x, y, entry });
   }, []);
 
-  const addToContext = () => {
-    const { path } = ctxMenu.entry;
+  // 可传 path 调用(右键菜单 + 预览栏按钮共用)。macOS WKWebView 吞右键,预览栏按钮是可靠入口。
+  const addPathToContext = useCallback((path) => {
     let rel = rootPath && path.startsWith(rootPath) ? path.slice(rootPath.length).replace(/^[/\\]+/, '') : path;
     rel = rel.replace(/\\/g, '/');
     // targetKey 与 SessionDetail 的 sessionQueueKey 同构,分屏时只填活跃 pane 的输入框
     const targetKey = activeSession?.sessionId || `draft-${activeSession?.projectHash || 'none'}`;
     window.dispatchEvent(new CustomEvent('cgui:composer-fill', { detail: { text: `@${rel} `, append: true, targetKey } }));
     setCtxMenu(null);
-  };
+  }, [rootPath, activeSession?.sessionId, activeSession?.projectHash]);
 
-  const startDelete = () => {
-    const { path, name, parentPath } = ctxMenu.entry;
+  const deletePath = useCallback(({ path, name, parentPath }) => {
     setCtxMenu(null);
     // 删除的是当前预览的文件(或其所在目录)→ 立即清预览。子路径判定要同时认 / 和 \\ —
     // Windows 的 /api/files/list 返回反斜杠路径,只判 '/' 会让删目录后其内预览/选中态残留。
@@ -174,7 +173,7 @@ export function FileExplorerPanel() {
     }, 10_000);
     setNowTick(Date.now()); // 初显就用当前时刻,避免陈旧 tick 让倒计时首帧显示错误秒数
     setPending((prev) => ({ ...prev, [path]: { name, deadline: Date.now() + 10_000, parentPath } }));
-  };
+  }, [rootPath, fetchDir]);
 
   const undoDelete = (path) => {
     // 已进入删除中(定时器已触发、请求在途)不可撤销:此时 timer 已被 delete,清 UI
@@ -250,7 +249,7 @@ export function FileExplorerPanel() {
           <div className="absolute glass-popover py-1 min-w-[180px] shadow-lg"
             style={{ left: ctxMenu.x, top: ctxMenu.y }}
             onMouseDown={(e) => e.stopPropagation()}>
-            <button onClick={addToContext}
+            <button onClick={() => addPathToContext(ctxMenu.entry.path)}
               className="w-full text-left px-3 py-1.5 text-[12px] font-body text-ink hover:bg-accent/10 flex items-center gap-2">
               <AtSign size={12} className="text-accent shrink-0" />添加到上下文
             </button>
@@ -259,7 +258,7 @@ export function FileExplorerPanel() {
               <ExternalLink size={12} className="text-ink-faint shrink-0" />用默认 App 打开
             </button>
             {!ctxMenu.entry.isRoot && (
-              <button onClick={startDelete}
+              <button onClick={() => deletePath(ctxMenu.entry)}
                 className="w-full text-left px-3 py-1.5 text-[12px] font-body text-red-600 hover:bg-red-500/10 flex items-center gap-2">
                 <Trash2 size={12} className="shrink-0" />删除(10 秒内可撤销)
               </button>
@@ -278,7 +277,7 @@ export function FileExplorerPanel() {
             点击左侧文件查看预览
           </div>
         ) : (
-          <PreviewBody preview={preview} />
+          <PreviewBody preview={preview} onAddToContext={addPathToContext} onDelete={deletePath} />
         )}
       </div>
     </div>
@@ -297,7 +296,7 @@ function TreeNode({ path, name, depth, isDir, isRoot, parentPath, expanded, dirs
         // macOS WKWebView 对 user-select:none 元素不派发 contextmenu(Chromium 会),右键在真 app 里
         // 静默失效 → 补右键 mousedown(button===2,鼠标事件不受 user-select 影响,任何 webview 都发)兜底。
         onMouseDown={(e) => { if (e.button === 2 && onCtx) onCtx(e, { path, name, isDir, isRoot: !!isRoot, parentPath }); }}
-        className={`group flex items-center gap-1 px-2 py-0.5 rounded cursor-pointer text-[12px] font-body select-none ${
+        className={`flex items-center gap-1 px-2 py-0.5 rounded cursor-pointer text-[12px] font-body select-none ${
           isSelected ? 'bg-accent/15 text-accent' : 'hover:bg-canvas-warm text-ink'
         }`}
         style={{ paddingLeft: `${0.5 + depth * 0.9}rem` }}
@@ -315,15 +314,6 @@ function TreeNode({ path, name, depth, isDir, isRoot, parentPath, expanded, dirs
           </>
         )}
         <span className="truncate flex-1">{name}</span>
-        {/* ⋮ 菜单入口:右键在 WKWebView 上不稳(见上),左键点 ⋮ 任何 webview 都 100% 工作,
-            打开同一菜单(添加到上下文/默认App打开/删除)。hover 显示,stopPropagation 防触发行的打开/展开。 */}
-        <button
-          onClick={(e) => { e.stopPropagation(); onCtx && onCtx(e, { path, name, isDir, isRoot: !!isRoot, parentPath }); }}
-          className="opacity-0 group-hover:opacity-100 shrink-0 p-0.5 rounded hover:bg-black/10 text-ink-faint"
-          title="更多操作"
-        >
-          <MoreVertical size={12} />
-        </button>
       </div>
       {isDir && isOpen && dir && (
         <>
@@ -360,7 +350,7 @@ function TreeNode({ path, name, depth, isDir, isRoot, parentPath, expanded, dirs
   );
 }
 
-function PreviewBody({ preview }) {
+function PreviewBody({ preview, onAddToContext, onDelete }) {
   const e = ext(preview.name || '');
   const isImage = IMAGE_EXT.has(e);
   const isVideo = VIDEO_EXT.has(e);
@@ -478,6 +468,12 @@ function PreviewBody({ preview }) {
           </>
         ) : (
           <>
+            {/* macOS WKWebView 吞右键 → 文件操作的可靠入口放这条预览栏(标准左键按钮,任何 webview 都工作)。 */}
+            {onAddToContext && (
+              <button onClick={() => onAddToContext(preview.path)}
+                className="flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded text-accent hover:bg-accent/10 transition-colors shrink-0"
+                title="在输入框 @ 引用此文件"><AtSign size={10} />添加到上下文</button>
+            )}
             {editable && (
               <button onClick={() => setEditing(true)}
                 className="flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded text-ink-faint hover:text-ink hover:bg-canvas-deep transition-colors shrink-0"
@@ -490,6 +486,15 @@ function PreviewBody({ preview }) {
             >
               <ExternalLink size={10} />用默认App打开
             </button>
+            {onDelete && (
+              <button
+                onClick={() => onDelete({ path: preview.path, name: preview.name, parentPath: preview.path.replace(/[/\\][^/\\]*$/, '') })}
+                className="flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded text-red-600 hover:bg-red-500/10 transition-colors shrink-0"
+                title="删除此文件（10 秒内可撤销）"
+              >
+                <Trash2 size={10} />删除
+              </button>
+            )}
           </>
         )}
       </div>
@@ -536,7 +541,7 @@ function PreviewBody({ preview }) {
           />
         ) : preview.binary ? (
           <div className="px-3 py-4 text-[11px] text-ink-faint">
-            二进制文件 · 不渲染预览（可右键或 ⋮ 用默认 App 打开）
+            二进制文件 · 不渲染预览（点上方「用默认App打开」查看）
           </div>
         ) : isMarkdown ? (
           <div className="px-3 py-2">
