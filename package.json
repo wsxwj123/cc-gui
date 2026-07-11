@@ -18,6 +18,7 @@
     "test:session-trim": "node scripts/check-session-trim.mjs",
     "test:fork": "node scripts/check-fork.mjs",
     "test:routing": "node scripts/check-routing.mjs",
+    "test:permissions": "node scripts/check-permissions.mjs",
     "start": "NODE_ENV=production node server/index.js",
     "stop": "lsof -ti:6677 | xargs kill -9 2>/dev/null || true",
     "restart": "npm run stop && npm start",

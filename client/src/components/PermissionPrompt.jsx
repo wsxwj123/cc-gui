@@ -1,8 +1,9 @@
 import React, { useEffect, useState } from 'react';
-import { AlertCircle, Loader2, ClipboardList } from 'lucide-react';
+import { AlertCircle, Loader2, ClipboardList, ShieldAlert } from 'lucide-react';
 import { useStore } from '../stores/sessionStore.js';
 import { MarkdownRenderer } from './MarkdownRenderer.jsx';
 import { confirmDialog } from '../utils/confirmDialog.jsx';
+import { isDangerousCommand } from '../hooks/useWebSocket.js';
 
 // Color per tool family so the user's eye locks onto the risk class quickly.
 function toolBadgeClass(name) {
@@ -329,8 +330,96 @@ function AskQuestionCard({ req, onAnswer, processing, position, hydrate }) {
   );
 }
 
-function PermissionCard({ req, onResolve, onWhitelistAndAllow, onResolveSame, sameCount, processing, position, hydrate }) {
-  const [remember, setRemember] = useState(false);
+// 越界访问卡:SDK 沙箱边界(additionalDirectories)外的路径经 canUseTool 第三参
+// blockedPath 透出。仅本次允许=单次放行;授权此目录=addDirectories(默认本会话,
+// 勾选后永久写入 settings.json,与 CLI /add-dir 及 permissions.additionalDirectories 同源)。
+function BoundaryCard({ req, onResolve, onAuthorizeDir, processing, position, hydrate }) {
+  const [permanent, setPermanent] = useState(false);
+  useEffect(() => {
+    if (!hydrate) return; // BK-1:键盘只在主实例绑,避免子代理视图重复 respond
+    if (position !== 0) return;
+    const onKey = (e) => {
+      const t = e.target;
+      if (t && (t.tagName === 'TEXTAREA' || t.tagName === 'INPUT')) return;
+      if (e.key === 'Enter') { e.preventDefault(); onAuthorizeDir(req, permanent); }
+      else if (e.key === 'Escape') { e.preventDefault(); onResolve(req, 'deny'); }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [hydrate, position, req, permanent, onResolve, onAuthorizeDir]);
+
+  return (
+    <div className="flex flex-col max-h-[68vh] rounded-xl bg-white border border-canvas-deep shadow-lg overflow-hidden animate-fade-up relative">
+      <div className="px-4 py-2.5 flex items-center gap-2 border-b border-canvas-deep bg-rose-50/60">
+        <div className="w-6 h-6 rounded-md bg-rose-100 flex items-center justify-center shrink-0">
+          <ShieldAlert size={13} className="text-rose-700" />
+        </div>
+        <div className="text-[13px] font-medium text-ink flex items-center gap-1 flex-1 min-w-0">
+          <span className="shrink-0">Claude 想访问工作目录之外的路径</span>
+          <span className={`px-1.5 py-0.5 rounded font-mono text-[11px] ml-1 ${toolBadgeClass(req.toolName)}`}>
+            {req.toolName}
+          </span>
+        </div>
+        {req.cwd && (
+          <div className="text-[10px] text-ink-faint font-mono truncate max-w-[40%]" title={req.cwd}>
+            {req.cwd}
+          </div>
+        )}
+      </div>
+      <div className="px-4 py-3 flex-1 min-h-0 overflow-y-auto space-y-2">
+        <div>
+          <div className="text-[11px] text-ink-faint">越界路径</div>
+          <pre className="font-mono text-[12px] bg-rose-50/50 border border-rose-200 rounded px-2.5 py-2 whitespace-pre-wrap break-all text-ink mt-1">{String(req.blockedPath)}</pre>
+        </div>
+        {renderInput(req.toolName, req.toolInput)}
+      </div>
+      <div className="px-4 py-2.5 flex items-center gap-2 bg-canvas-warm/60 border-t border-canvas-deep">
+        <label className="flex items-center gap-1.5 text-[11px] text-ink-muted mr-auto cursor-pointer select-none" title="写入 ~/.claude/settings.json 的 permissions.additionalDirectories，终端 CLI 同样生效">
+          <input
+            type="checkbox"
+            className="rounded accent-accent"
+            checked={permanent}
+            onChange={(e) => setPermanent(e.target.checked)}
+          />
+          永久授权（写入 settings.json）
+        </label>
+        <button
+          disabled={processing}
+          onClick={() => onResolve(req, 'deny')}
+          className="px-3 py-1.5 rounded-md text-[12px] font-medium text-ink-muted hover:bg-canvas-deep disabled:opacity-50"
+          title="Esc"
+        >拒绝</button>
+        <button
+          disabled={processing}
+          onClick={() => onResolve(req, 'allow')}
+          className="px-3 py-1.5 rounded-md text-[12px] font-medium text-ink-muted hover:bg-canvas-deep disabled:opacity-50"
+          title="仅放行本次调用，不扩大可访问范围"
+        >仅本次允许</button>
+        <button
+          disabled={processing}
+          onClick={() => onAuthorizeDir(req, permanent)}
+          className="px-3 py-1.5 rounded-md text-[12px] font-medium text-white bg-rose-600 hover:bg-rose-700 disabled:opacity-50 inline-flex items-center gap-1.5"
+          title="Enter。未勾选永久时授权仅在本会话进程内有效"
+        >
+          {processing && <Loader2 size={11} className="animate-spin" />}
+          授权此目录 ↵
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function PermissionCard({ req, onResolve, onWhitelistAndAllow, onAlwaysAllow, onResolveSame, sameCount, processing, position, hydrate }) {
+  // remember:none=仅此次;session=本会话白名单(localStorage,行为同旧版);
+  // always=写 settings.json 的 permissions.allow 规则(经服务端 updatedPermissions,
+  // CLI 落盘,终端与 GUI 共用)。危险命令不提供 always(服务端同样忽略,保 G3 强拦)。
+  const [remember, setRemember] = useState('none');
+  const dangerous = isDangerousCommand(req);
+  const doAllow = () => {
+    if (remember === 'session') onWhitelistAndAllow(req);
+    else if (remember === 'always' && !dangerous) onAlwaysAllow(req);
+    else onResolve(req, 'allow');
+  };
   // Enter = allow, Esc = deny — only when this is the top card.
   useEffect(() => {
     if (!hydrate) return; // BK-1:键盘只在主实例绑,避免子代理视图重复 respond
@@ -338,10 +427,10 @@ function PermissionCard({ req, onResolve, onWhitelistAndAllow, onResolveSame, sa
     const onKey = (e) => {
       // ignore if user is typing in textarea/input
       const t = e.target;
-      if (t && (t.tagName === 'TEXTAREA' || t.tagName === 'INPUT')) return;
+      if (t && (t.tagName === 'TEXTAREA' || t.tagName === 'INPUT' || t.tagName === 'SELECT')) return;
       if (e.key === 'Enter') {
         e.preventDefault();
-        if (remember) onWhitelistAndAllow(req); else onResolve(req, 'allow');
+        doAllow();
       } else if (e.key === 'Escape') {
         e.preventDefault();
         onResolve(req, 'deny');
@@ -349,7 +438,7 @@ function PermissionCard({ req, onResolve, onWhitelistAndAllow, onResolveSame, sa
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [hydrate, position, req, remember, onResolve, onWhitelistAndAllow]);
+  }, [hydrate, position, req, remember, dangerous, onResolve, onWhitelistAndAllow, onAlwaysAllow]);
 
   return (
     <div className="flex flex-col max-h-[68vh] rounded-xl bg-white border border-canvas-deep shadow-lg overflow-hidden animate-fade-up relative">
@@ -383,14 +472,18 @@ function PermissionCard({ req, onResolve, onWhitelistAndAllow, onResolveSame, sa
         </div>
       )}
       <div className="px-4 py-2.5 flex items-center gap-2 bg-canvas-warm/60 border-t border-canvas-deep">
-        <label className="flex items-center gap-1.5 text-[11px] text-ink-muted mr-auto cursor-pointer select-none">
-          <input
-            type="checkbox"
-            className="rounded accent-accent"
-            checked={remember}
-            onChange={(e) => setRemember(e.target.checked)}
-          />
-          本会话内永远允许 <span className="font-mono">{req.toolName}</span>
+        <label className="flex items-center gap-1.5 text-[11px] text-ink-muted mr-auto select-none">
+          记住
+          <select
+            value={remember}
+            onChange={(e) => setRemember(e.target.value)}
+            className="text-[11px] border border-canvas-deep rounded px-1 py-0.5 bg-white text-ink"
+            title={dangerous ? '该命令命中危险命令清单，不提供永久授权' : '“始终允许”写入 ~/.claude/settings.json 的 permissions.allow，终端 CLI 同样生效'}
+          >
+            <option value="none">仅此次</option>
+            <option value="session">本会话内允许 {req.toolName}</option>
+            {!dangerous && <option value="always">始终允许（写入权限规则）</option>}
+          </select>
         </label>
         <button
           disabled={processing}
@@ -400,7 +493,7 @@ function PermissionCard({ req, onResolve, onWhitelistAndAllow, onResolveSame, sa
         >拒绝</button>
         <button
           disabled={processing}
-          onClick={() => remember ? onWhitelistAndAllow(req) : onResolve(req, 'allow')}
+          onClick={doAllow}
           className="px-3 py-1.5 rounded-md text-[12px] font-medium text-white bg-accent hover:opacity-90 disabled:opacity-50 inline-flex items-center gap-1.5"
           title="Enter"
         >
@@ -468,8 +561,8 @@ export function PermissionPrompt({ sessionId = null, onExecutePlan = null, hydra
         for (const it of items) {
           let wl = [];
           try { wl = JSON.parse(localStorage.getItem(`cgui-perm-wl-${it.sessionId || 'none'}`) || '[]'); } catch {}
-          if (wl.includes(it.toolName)) {
-            // 白名单命中:放行但不入表。
+          if (wl.includes(it.toolName) && !it.blockedPath) {
+            // 白名单命中:放行但不入表。越界请求(blockedPath)不吃白名单,必须弹卡。
             fetch(`/api/permissions/respond/${it.id}`, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
@@ -512,7 +605,7 @@ export function PermissionPrompt({ sessionId = null, onExecutePlan = null, hydra
     : all.filter((p) => !selectedSid || p.sessionId === selectedSid);
   if (mine.length === 0) return null;
 
-  const resolve = async (req, decision, reason, updatedInput) => {
+  const resolve = async (req, decision, reason, updatedInput, extra) => {
     setBusyId(req.id);
     try {
       const res = await fetch(`/api/permissions/respond/${req.id}`, {
@@ -520,7 +613,9 @@ export function PermissionPrompt({ sessionId = null, onExecutePlan = null, hydra
         headers: { 'Content-Type': 'application/json' },
         // updatedInput:SDK canUseTool 用 —— AskUserQuestion 的 {questions, answers}
         // 或被用户改过的工具入参。仅在提供时附带,保持旧 deny 路径不变。
-        body: JSON.stringify({ decision, reason, ...(updatedInput !== undefined ? { updatedInput } : {}) }),
+        // extra:{ always } / { authorizeDir } —— 服务端 makeCanUseTool 据此构造
+        // updatedPermissions(写规则 / 授权目录)。
+        body: JSON.stringify({ decision, reason, ...(updatedInput !== undefined ? { updatedInput } : {}), ...(extra || {}) }),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       // 只有确实送达后才撤卡片。原来无论成败都 remove → 网络失败时 CLI 端永久挂起等响应、
@@ -542,6 +637,16 @@ export function PermissionPrompt({ sessionId = null, onExecutePlan = null, hydra
     );
     await Promise.all([req, ...sameTool].map((r) => resolve(r, 'allow')));
   };
+
+  // "始终允许":服务端 canUseTool 经 updatedPermissions 回传规则,由 CLI 写入
+  // ~/.claude/settings.json 的 permissions.allow(优先用 SDK suggestions 的细粒度规则)。
+  // 之后命中规则的调用在 CLI 规则层直接放行,不再进 canUseTool,GUI 与终端共享记忆。
+  const alwaysAllow = (req) => resolve(req, 'allow', null, undefined, { always: true });
+
+  // 越界卡"授权此目录":addDirectories(session 级;permanent=写 settings.json 的
+  // permissions.additionalDirectories,跨会话与终端 CLI 生效)。
+  const authorizeDir = (req, permanent) =>
+    resolve(req, 'allow', null, undefined, { authorizeDir: permanent ? 'permanent' : 'session' });
 
   // Plan approved (SDK 引擎):allow ExitPlanMode → 模型退出 plan、在同一回合继续执行
   // (不再 deny+另起回合)。再把活跃 query 切到 acceptEdits,使后续写从"plan 硬拦"
@@ -609,11 +714,21 @@ export function PermissionPrompt({ sessionId = null, onExecutePlan = null, hydra
           position={0}
           hydrate={hydrate}
         />
+      ) : mine[0].blockedPath ? (
+        <BoundaryCard
+          req={mine[0]}
+          onResolve={resolve}
+          onAuthorizeDir={authorizeDir}
+          processing={busyId === mine[0].id}
+          position={0}
+          hydrate={hydrate}
+        />
       ) : (
         <PermissionCard
           req={mine[0]}
           onResolve={resolve}
           onWhitelistAndAllow={whitelistAndAllow}
+          onAlwaysAllow={alwaysAllow}
           onResolveSame={resolveSame}
           sameCount={matchesAcrossPanes(mine[0]).length}
           processing={busyId === mine[0].id}

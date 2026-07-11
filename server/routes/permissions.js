@@ -23,9 +23,10 @@ function settle(slot, payload) {
 /**
  * 进程内权限请求(SDK canUseTool 用)。建 pending 项 + 广播弹窗,返回一个 Promise,
  * 用户在界面点击后由 /respond 端点 resolve。
- * resolve 值: { decision:'allow'|'deny', reason?, updatedInput? }
+ * resolve 值: { decision:'allow'|'deny', reason?, updatedInput?, always?, authorizeDir? }
+ * blockedPath:SDK canUseTool 第三参透传的沙箱越界路径 → 前端渲染"越界访问"卡。
  */
-export function requestPermission({ toolName, toolInput, sessionId, cwd }) {
+export function requestPermission({ toolName, toolInput, sessionId, cwd, blockedPath, decisionReason, toolUseID }) {
   return new Promise((resolve) => {
     const id = randomUUID();
     const request = {
@@ -36,6 +37,9 @@ export function requestPermission({ toolName, toolInput, sessionId, cwd }) {
       cwd: cwd || null,
       hookEvent: 'canUseTool',
       createdAt: Date.now(),
+      ...(blockedPath ? { blockedPath } : {}),
+      ...(decisionReason ? { decisionReason } : {}),
+      ...(toolUseID ? { toolUseID } : {}),
     };
     pending.set(id, { request, resolve });
     broadcast({ type: 'permission:request', request });
@@ -86,6 +90,8 @@ router.post('/permissions/request', (req, res) => {
     cwd: req.body?.cwd || null,
     hookEvent: req.body?.hookEvent || 'PreToolUse',
     createdAt: Date.now(),
+    // 与 requestPermission 保持同构:越界路径透传给前端渲染越界卡。
+    ...(typeof req.body?.blockedPath === 'string' && req.body.blockedPath ? { blockedPath: req.body.blockedPath } : {}),
   };
 
   pending.set(id, { request, res });
@@ -105,10 +111,12 @@ router.post('/permissions/request', (req, res) => {
 
 /**
  * POST /api/permissions/respond/:id
- * Body: { decision: 'allow'|'deny', reason?, updatedInput? }
+ * Body: { decision: 'allow'|'deny', reason?, updatedInput?, always?, authorizeDir? }
  * 把用户的决定送回等待方:旧 hook 走 HTTP res,SDK canUseTool 走进程内 resolve。
  * updatedInput:AskUserQuestion 的 {questions, answers}、或被用户改过的工具入参,
  * canUseTool 据此返回 {behavior:'allow', updatedInput}。
+ * always=true:"始终允许" → canUseTool 经 updatedPermissions 写 settings.json 规则。
+ * authorizeDir='session'|'permanent':越界卡"授权此目录" → addDirectories。
  */
 router.post('/permissions/respond/:id', (req, res) => {
   const slot = pending.get(req.params.id);
@@ -121,8 +129,10 @@ router.post('/permissions/respond/:id', (req, res) => {
   const decision = req.body?.decision === 'allow' ? 'allow' : 'deny';
   const reason = req.body?.reason || null;
   const updatedInput = req.body?.updatedInput;
+  const always = req.body?.always === true;
+  const authorizeDir = ['session', 'permanent'].includes(req.body?.authorizeDir) ? req.body.authorizeDir : undefined;
   pending.delete(req.params.id);
-  settle(slot, { decision, reason, updatedInput });
+  settle(slot, { decision, reason, updatedInput, always, authorizeDir });
   broadcast({ type: 'permission:resolved', id: req.params.id, decision });
   res.json({ ok: true });
 });

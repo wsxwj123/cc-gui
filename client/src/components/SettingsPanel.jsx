@@ -82,7 +82,7 @@ export function SettingsPanel() {
   return (
     <div className="px-4 py-4 space-y-4 overflow-y-auto h-full">
       <div className="flex items-center gap-1 border-b border-canvas-deep -mx-4 px-4 pb-2">
-        {[['overview', '概览'], ['env', '环境'], ['hooks', 'Hooks'], ['json', '原始配置'], ['storage', '存储'], ['network', '网络']].map(([id, label]) => (
+        {[['overview', '概览'], ['env', '环境'], ['permissions', '权限'], ['hooks', 'Hooks'], ['json', '原始配置'], ['storage', '存储'], ['network', '网络']].map(([id, label]) => (
           <button key={id} onClick={() => setTab(id)}
             className={`text-[11px] px-2.5 py-1 rounded font-body transition-colors ${tab === id ? 'bg-accent/15 text-accent' : 'text-ink-muted hover:text-ink'}`}>
             {label}
@@ -101,6 +101,9 @@ export function SettingsPanel() {
 
       {tab === 'overview' && <OverviewTab settings={settings} onSave={save} saving={saving} />}
       {tab === 'env' && <EnvCheckPanel asModal={false} />}
+      {tab === 'permissions' && (
+        <PermissionsTab settings={settings} onSave={save} saving={saving} saved={saved} />
+      )}
       {tab === 'hooks' && (
         <HooksTab settings={settings} onSave={save} saving={saving} saved={saved} />
       )}
@@ -1410,6 +1413,108 @@ function OverviewTab({ settings, onSave, saving }) {
       </div>
 
       {isEmpty && <p className="text-xs text-ink-faint font-body py-4 text-center">settings.json 为空</p>}
+    </div>
+  );
+}
+
+// 权限规则管理:读写 ~/.claude/settings.json 的 permissions.allow/ask/deny(与 CLI
+// /permissions 命令同一存储,规则在 GUI 与终端 CLI 间互通)。评估顺序 deny → ask → allow,
+// 首个命中生效;permissions 下的其他键(additionalDirectories/defaultMode 等)原样保留。
+const PERMISSION_GROUPS = [
+  ['allow', '允许', '命中规则的工具调用直接放行，不再弹窗'],
+  ['ask', '询问', '命中规则时必弹窗确认（优先于允许规则）'],
+  ['deny', '拒绝', '命中规则的调用直接拒绝（最高优先级，任何允许规则无法覆盖）'],
+];
+
+function PermissionsTab({ settings, onSave, saving, saved }) {
+  const readLists = (s) => {
+    const p = (s && typeof s.permissions === 'object' && s.permissions) || {};
+    return {
+      allow: Array.isArray(p.allow) ? p.allow.filter((r) => typeof r === 'string') : [],
+      ask: Array.isArray(p.ask) ? p.ask.filter((r) => typeof r === 'string') : [],
+      deny: Array.isArray(p.deny) ? p.deny.filter((r) => typeof r === 'string') : [],
+    };
+  };
+  const [lists, setLists] = useState(() => readLists(settings));
+  const [drafts, setDrafts] = useState({ allow: '', ask: '', deny: '' });
+
+  // Re-sync if settings reloaded externally
+  useEffect(() => { setLists(readLists(settings)); }, [settings]);
+
+  const persist = (next) => {
+    setLists(next);
+    // Guard(同 HooksTab):settings 未加载成功时保存会清掉其余字段,直接不保存。
+    if (!settings) return;
+    const prev = (typeof settings.permissions === 'object' && settings.permissions) || {};
+    const perms = { ...prev };
+    // 空列表删除键,保持 settings.json 干净(与 CLI 未配置状态一致)。
+    for (const key of ['allow', 'ask', 'deny']) {
+      if (next[key].length) perms[key] = next[key]; else delete perms[key];
+    }
+    onSave({ ...settings, permissions: Object.keys(perms).length ? perms : null });
+  };
+
+  const addRule = (key) => {
+    const rule = drafts[key].trim();
+    if (!rule || lists[key].includes(rule)) return;
+    persist({ ...lists, [key]: [...lists[key], rule] });
+    setDrafts({ ...drafts, [key]: '' });
+  };
+
+  const removeRule = async (key, idx) => {
+    const rule = lists[key][idx];
+    if (!(await confirmDialog(`删除规则 ${rule}？`, { danger: true }))) return;
+    persist({ ...lists, [key]: lists[key].filter((_, i) => i !== idx) });
+  };
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center justify-between text-[10px] text-ink-faint">
+        <span className="font-body">规则写入 ~/.claude/settings.json 的 permissions 字段，终端 CLI 同样生效</span>
+        {saving && <span className="font-mono">保存中…</span>}
+        {saved && <span className="font-mono text-success">已保存</span>}
+      </div>
+      {PERMISSION_GROUPS.map(([key, label, desc]) => (
+        <div key={key} className="border border-canvas-deep rounded-lg overflow-hidden">
+          <div className="px-3 py-2 flex items-center gap-2 bg-canvas-warm/40">
+            <span className={`text-xs font-medium ${key === 'deny' ? 'text-error' : key === 'ask' ? 'text-amber-700' : 'text-ink-soft'}`}>{label}</span>
+            <span className="text-[10px] text-ink-faint font-body flex-1">{desc}</span>
+            <span className="text-[10px] text-ink-faint font-mono">{lists[key].length}</span>
+          </div>
+          <div className="border-t border-canvas-deep px-3 py-2 space-y-1.5">
+            {lists[key].map((rule, idx) => (
+              <div key={`${rule}-${idx}`} className="flex items-center gap-2 group">
+                <code className="flex-1 text-[11px] text-ink-muted font-mono break-all leading-snug">{rule}</code>
+                <button onClick={() => removeRule(key, idx)}
+                  className="opacity-0 group-hover:opacity-100 p-1 hover:bg-error/15 rounded shrink-0"
+                  title="删除">
+                  <Trash2 size={11} className="text-error" />
+                </button>
+              </div>
+            ))}
+            {!lists[key].length && <div className="text-[10.5px] text-ink-faint font-body">（无规则）</div>}
+            <div className="flex gap-1.5 pt-1">
+              <input
+                value={drafts[key]}
+                onChange={(e) => setDrafts({ ...drafts, [key]: e.target.value })}
+                onKeyDown={(e) => { if (e.key === 'Enter') addRule(key); }}
+                placeholder="如 Bash(git *) / Read(//path/**) / WebFetch(domain:example.com)"
+                className="flex-1 bg-canvas-warm border border-canvas-deep rounded px-2 py-1 text-[11px] font-mono"
+              />
+              <button onClick={() => addRule(key)} disabled={!drafts[key].trim() || saving}
+                className="btn-accent text-[11px] px-2.5 py-1 disabled:opacity-50">添加</button>
+            </div>
+          </div>
+        </div>
+      ))}
+      <div className="text-[10.5px] text-ink-faint bg-canvas-warm/60 border border-canvas-deep rounded-lg p-2.5 font-body leading-relaxed space-y-1">
+        <div className="text-ink-muted font-medium">规则语法</div>
+        <div>格式为 <code className="font-mono">Tool</code> 或 <code className="font-mono">Tool(specifier)</code>。裸工具名匹配该工具的全部调用。</div>
+        <div>Bash 支持 <code className="font-mono">*</code> 通配，如 <code className="font-mono">Bash(npm run *)</code>；<code className="font-mono">Bash(ls:*)</code> 等价于 <code className="font-mono">Bash(ls *)</code>。复合命令须每段子命令各自命中规则。</div>
+        <div>Read/Edit 用 gitignore 风格路径：<code className="font-mono">//</code> 开头为绝对路径（<code className="font-mono">Read(//Users/x/**)</code>），<code className="font-mono">~/</code> 为家目录，单个 <code className="font-mono">/</code> 开头相对设置文件所在目录。</div>
+        <div>WebFetch 用 <code className="font-mono">domain:</code> 前缀；MCP 工具用 <code className="font-mono">mcp__server</code> 或 <code className="font-mono">mcp__server__tool</code>。</div>
+        <div>权限卡片选「始终允许」生成的规则会出现在此处的允许列表。</div>
+      </div>
     </div>
   );
 }
