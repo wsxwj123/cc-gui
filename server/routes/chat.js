@@ -1089,9 +1089,57 @@ function cwdFromSessionFile(projectHash, sessionId) {
   return '';
 }
 
-router.get('/context/:sessionId', (req, res) => {
+// 把 SDK getContextUsage() 的结构化返回映射成本端点历史(spawn+parse)口径的字段,
+// 前端徽章/明细零改动即兼容。窗口取 maxTokens(实测 CLI 内部 maxTokens===rawMaxTokens,
+// percentage=round(total/max*100),与 /context markdown 的"a / b (c%)"同口径);第三方
+// provider 超窗时 pct 可 >100,照实返回不截断(前端有超窗提示)。isDeferred 分类(延迟
+// 加载、不占 totalTokens)原样保留 —— SDK 给的 name 已带 "(deferred)" 后缀,两路显示一致。
+function mapSdkContextUsage(u) {
+  const max = u.maxTokens || u.rawMaxTokens || 0;
+  const byServer = {};
+  for (const t of u.mcpTools || []) {
+    const s = t.serverName || '(unknown)';
+    byServer[s] = (byServer[s] || 0) + (t.tokens || 0);
+  }
+  return {
+    source: 'sdk', // 调试标记:毫秒级直调路径(vs 回落 spawn 路径无此字段)
+    model: u.model || null,
+    totalTokens: u.totalTokens || 0,
+    windowTokens: max,
+    pct: Math.round(u.percentage ?? (max ? (u.totalTokens / max) * 100 : 0)),
+    // 实测 SDK 的 isDeferred 分类 name 自带 " (deferred)" 后缀,与 markdown 表同名,原样透传。
+    categories: (u.categories || []).map((c) => ({
+      name: c.name,
+      tokens: c.tokens || 0,
+      pct: max ? +(((c.tokens || 0) / max) * 100).toFixed(1) : 0,
+    })),
+    mcpServers: Object.entries(byServer)
+      .map(([server, tokens]) => ({ server, tokens }))
+      .sort((a, b) => b.tokens - a.tokens),
+  };
+}
+
+router.get('/context/:sessionId', async (req, res) => {
   const { sessionId } = req.params;
   const projectHash = req.query.projectHash || '';
+
+  // 快路(#26 常驻进程红利):目标会话的保活进程还在(流式中或 idle)→ 直调 SDK 控制
+  // 请求 getContextUsage(),毫秒返回、不 fork、不留 jsonl、不碰 TCC。进程不在(draft/
+  // 首轮前/已回收/旧会话)或直调失败 → 回落下面的 spawn /context 路径,行为不变。
+  for (const slot of activeProcesses.values()) {
+    if (slot.sessionId !== sessionId || slot.exitCode !== null || slot.closing) continue;
+    if (typeof slot.query?.getContextUsage !== 'function') continue;
+    try {
+      const usage = await Promise.race([
+        slot.query.getContextUsage(),
+        new Promise((_, rej) => setTimeout(() => rej(new Error('getContextUsage 超时')), 5000)),
+      ]);
+      if (usage?.totalTokens > 0 && (usage?.maxTokens > 0 || usage?.rawMaxTokens > 0)) {
+        return res.json(mapSdkContextUsage(usage));
+      }
+    } catch {} // 控制通道异常/进程正退出 → 回落 spawn
+    break; // 同会话至多一个活 slot;直调失败也不再试其他
+  }
   // cwd 优先级:会话 jsonl 里的权威 cwd > 前端传的 > homedir 兜底。前端有时传空 cwd(session
   // 无 projectPath),回落 homedir 会让 --resume 找不到会话 → /context 失败。jsonl cwd 保证匹配。
   const cwd = cwdFromSessionFile(projectHash, sessionId) || req.query.cwd || homedir();
