@@ -4192,6 +4192,22 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             // the predictive strip) returns "400 Invalid signature in thinking
             // block" here. Strip the thinking blocks and resend ONCE — the
             // signatureRetry flag guards against an infinite loop if it persists.
+            // 订阅未开 1M 按量额度:官方订阅带 [1m] 后缀的请求被 API 拒
+            // ("Usage credits required for 1M context",1M 是按量计费 beta 不含在订阅内)。
+            // [1m] 钉在会话 pin 里持久生效,不剥则之后每条消息都失败 → 剥掉 pin/全局的
+            // [1m] 切回标准上下文并自动重发一次(oneMRetry 防循环),同 /compact 3606 与
+            // 签名自愈同款套路。要用 1M 的用户按提示开 usage credits 后再开 1M 开关即可。
+            if (/usage credits required for 1m context/i.test(msg) && !opts.oneMRetry && prompt) {
+              const _st = useStore.getState();
+              const _base = String(currentModel || '').replace(/\[1m\]/i, '');
+              if (_base) _st.setModelFor(sessionQueueKey, _base);
+              if (/\[1m\]/i.test(_st.currentModel || '')) _st.setModel(String(_st.currentModel).replace(/\[1m\]/i, ''));
+              setProviderSwitchNotice({ text: '订阅未开通 1M 上下文按量额度（usage credits），已自动切回标准上下文并重发本条。如需 1M：先到 claude.ai/settings/usage 开启 usage credits，再打开模型菜单的 1M 开关。' });
+              setTimeout(() => handleSendRef.current?.(prompt, { ...opts, oneMRetry: true }), 80);
+              accumulatedText = ''; accumulatedThinking = ''; currentToolCalls = [];
+              sawError = true;
+              break;
+            }
             if (/invalid signature in thinking/i.test(msg) && !opts.signatureRetry && prompt) {
               const _s = getLocalSession();
               if (_s?.sessionId && _s?.projectHash) {
