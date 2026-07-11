@@ -3567,6 +3567,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           excludeDynamicSystemPrompt: useStore.getState().excludeDynamicSystemPrompt,
           // #26 会话常驻:false 时 server 回合结束即关进程(逐回合冷启,旧行为)
           keepAlive: useStore.getState().persistentChat !== false,
+          // 花费上限(美元):>0 时透传 SDK maxBudgetUsd,进程累计花费达到上限即停。
+          maxBudgetUsd: useStore.getState().maxBudgetUsd || undefined,
         }),
       });
       const respJson = await res.json();
@@ -4057,11 +4059,28 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           //   - type:"error"  (our server's stderr/spawn fail wrapper)
           //   - type:"result" with is_error:true (CLI's own error envelope,
           //     e.g. "No conversation found with session ID: ...")
-          if (event.type === 'error' || (event.type === 'result' && event.is_error)) {
+          if (event.type === 'error' || (event.type === 'result' && (event.is_error || /^error_/.test(event.subtype || '')))) {
             // P1-1:服务端把 CLI stdout 里任意非 JSON 行(banner/调试/ANSI 噪声)包成
             // {type:'error',error:'bad-line'}。这类是良性噪声,绝不能当致命错误弹❌+break
             // 中止整轮(否则后续有效事件含 result 全丢,进程其实还在跑)。直接跳过。
             if (event.error === 'bad-line') continue;
+            // 花费上限(设置→对话花费上限):进程累计花费达到 maxBudgetUsd 时 CLI 返回
+            // error_max_budget_usd。给出明确提示而非通用报错;不自动重试(重试会立即再超)。
+            if (event.subtype === 'error_max_budget_usd') {
+              const _cap = useStore.getState().maxBudgetUsd;
+              setChatMessages((prev) => [...prev, {
+                uuid: 'chat-budget-' + Date.now(),
+                type: 'turn',
+                timestamp: new Date().toISOString(),
+                model: streamingModel,
+                text: [`已达到设置的对话花费上限${_cap ? `($${_cap})` : ''},本轮已停止。若需继续,请在设置中调高或清除「对话花费上限」后重发。`],
+                thinking: [], toolCalls: [],
+                blocks: [{ type: 'text', content: `已达到设置的对话花费上限${_cap ? `($${_cap})` : ''},本轮已停止。` }],
+                usage: null,
+              }]);
+              sawError = true;
+              break;
+            }
             const msg = (event.errors && event.errors.join('; '))
               || event.error
               // API 错误(如签名失效)经 result 事件返回:subtype 是误导性的 "success",
@@ -4668,6 +4687,38 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         setChatMessages((prev) => prev.slice(0, idxInChat));
       }
     };
+
+    // ── 定向压缩(summarize-before / summarize-after)────────────────────
+    // before:锚点之前的对话替换为 AI 摘要(原始记录保留在 jsonl,不再计入上下文);
+    // after:回退到锚点之前,锚点及之后压缩为摘要保留。服务端生成摘要 + 改写 jsonl
+    // (自动 .bak 备份)。见 server/routes/sessions.js compact-segment。
+    if (mode === 'summarize-before' || mode === 'summarize-after') {
+      const direction = mode === 'summarize-before' ? 'before' : 'after';
+      if (!sel?.sessionId || !projectHash) { confirmDialog('会话尚未创建,无法压缩。'); return; }
+      if (!msg.uuid || msg.uuid.startsWith('chat-')) { confirmDialog('该消息尚未写入会话记录,请稍后重试。'); return; }
+      if (activeProcRef.current) { confirmDialog('当前回合仍在进行,请先停止或等待完成后再压缩。'); return; }
+      const okGo = await confirmDialog(direction === 'before'
+        ? '将把这条消息之前的全部对话替换为一段 AI 生成的摘要。原始记录仍保留在会话文件中并可见,但不再计入上下文;改写前会写入 .bak 备份。摘要生成需要一到两分钟。是否继续?'
+        : '将回退到这条消息之前,并把这条消息及之后的对话压缩为一段摘要保留在上下文中。改写前会写入 .bak 备份。摘要生成需要一到两分钟。是否继续?', { danger: true });
+      if (!okGo) return;
+      const compactModel = String(useStore.getState().modelBySession[sel.sessionId] || useStore.getState().currentModel || '');
+      setProviderSwitchNotice({ text: '正在生成摘要并压缩会话,请勿在此期间发送消息…' });
+      try {
+        const r = await fetch(`/api/sessions/${sel.sessionId}/compact-segment`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ projectHash, uuid: msg.uuid, direction, model: compactModel }),
+        });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) { setProviderSwitchNotice({ text: '压缩失败:' + (d.error || r.status) + '(会话未改动)' }); return; }
+        if (direction === 'after') setChatMessages([]); // 尾段已被移除,清掉本地未落盘气泡
+        try { await fetchMessagesForTab(sel.sessionId, projectHash, { silent: true }); } catch {}
+        setProviderSwitchNotice({ text: direction === 'before' ? '已把此前对话压缩为摘要,上下文占用已降低。' : '已回退并把后续对话保留为摘要。' });
+      } catch (e) {
+        setProviderSwitchNotice({ text: '压缩失败:' + e.message });
+      }
+      return;
+    }
 
     // ── files only ────────────────────────────────────────────
     if (mode === 'files') {

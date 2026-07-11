@@ -16,6 +16,7 @@
     "smoke:http": "node scripts/check-http-smoke.cjs",
     "test:file-changes": "node scripts/check-file-changes.mjs",
     "test:session-trim": "node scripts/check-session-trim.mjs",
+    "test:compact-segment": "node scripts/check-compact-segment.mjs",
     "test:fork": "node scripts/check-fork.mjs",
     "test:routing": "node scripts/check-routing.mjs",
     "test:permissions": "node scripts/check-permissions.mjs",

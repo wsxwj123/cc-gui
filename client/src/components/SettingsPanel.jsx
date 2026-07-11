@@ -1167,6 +1167,35 @@ function PersistentChatToggle() {
   );
 }
 
+// 花费上限(SDK maxBudgetUsd,单位美元)。>0 时随每次发送传给 CLI:进程累计花费达到
+// 上限即停止本轮并提示。开启会话常驻时按同一常驻进程的多个回合累计;进程重开后重新计。
+// 置空 = 不限制(默认)。
+function MaxBudgetInput() {
+  const val = useStore((s) => s.maxBudgetUsd);
+  const setVal = useStore((s) => s.setMaxBudgetUsd);
+  const [draft, setDraft] = useState(val != null ? String(val) : '');
+  useEffect(() => { setDraft(val != null ? String(val) : ''); }, [val]);
+  const commit = () => setVal(draft.trim());
+  return (
+    <div className="bg-canvas-warm border border-canvas-deep rounded-lg px-3 py-2.5 flex items-center gap-3">
+      <div className="min-w-0 flex-1">
+        <div className="text-xs text-ink font-body font-medium">对话花费上限</div>
+        <div className="text-[10.5px] text-ink-faint font-body">若设置(单位美元),对话进程的累计花费达到该值时立即停止并提示。开启会话常驻时按同一常驻进程的多个回合累计,进程重开后重新计。置空 = 不限制</div>
+      </div>
+      <div className="shrink-0 flex items-center gap-1">
+        <span className="text-[11px] text-ink-faint font-mono">$</span>
+        <input
+          type="number" min="0" step="0.5" placeholder="不限"
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onBlur={commit}
+          onKeyDown={(e) => { if (e.key === 'Enter') e.currentTarget.blur(); }}
+          className="w-20 text-[11px] font-mono bg-canvas-base border border-canvas-deep rounded px-2 py-1 text-ink focus:border-accent outline-none" />
+      </div>
+    </div>
+  );
+}
+
 function ExcludeDynamicPromptToggle() {
   const val = useStore((s) => s.excludeDynamicSystemPrompt); // 'auto' | true | false
   const setVal = useStore((s) => s.setExcludeDynamicSystemPrompt);
@@ -1386,6 +1415,7 @@ function OverviewTab({ settings, onSave, saving }) {
       <FullDiskAccessCard />
       <CloseBehaviorPicker />
       <PersistentChatToggle />
+      <MaxBudgetInput />
       <ExcludeDynamicPromptToggle />
       <AutoCompactWindowSelect settings={settings} onSave={onSave} saving={saving} />
       <SmallFastModelInput env={env} onSave={onSave} saving={saving} />
