@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { readdir, stat, readFile, realpath, writeFile, rm } from 'fs/promises';
+import { readdir, stat, lstat, readFile, realpath, writeFile, rm, unlink } from 'fs/promises';
 import { createReadStream } from 'fs';
 import { join, resolve, relative, extname, isAbsolute } from 'path';
 import { homedir, platform } from 'os';
@@ -40,7 +40,7 @@ const SKIP_EXACT = new Set(['.DS_Store']);
  * (after realpath) under HOME — anything else is rejected. Returns the
  * realpath on success, throws on rejection.
  */
-async function safePath(p) {
+export async function safePath(p) {
   // isAbsolute is platform-aware (accepts /unix and C:\windows).
   if (typeof p !== 'string' || !isAbsolute(p)) {
     const err = new Error('absolute path required'); err.status = 400; throw err;
@@ -53,8 +53,18 @@ async function safePath(p) {
   // 例外:claude 用过的工作区(~/.claude/projects 有 hash 目录)及其子路径放行 ——
   // Windows 项目常在 $HOME 之外(D:\ 等其他盘),纯 $HOME 门禁把合法项目整片 403
   // (用户实报)。realpath 前后两种形态都试,防 junction/OneDrive 改写路径致 hash 对不上。
-  if (!isPathInside(real, HOME) && !isKnownClaudeWorkspace(real, resolve(p))) {
-    const err = new Error('路径不在家目录、也不在任何打开过的项目目录内'); err.status = 403; throw err;
+  if (!isPathInside(real, HOME)) {
+    const lexical = resolve(p);
+    // 工作区例外(任一形态命中即候选放行)。
+    if (!isKnownClaudeWorkspace(real, lexical)) {
+      const err = new Error('路径不在家目录、也不在任何打开过的项目目录内'); err.status = 403; throw err;
+    }
+    // symlink 逃逸防护(与 resolveWorkspacePath line-96 一致,原 safePath 漏了):realpath 改写过
+    // 路径(如工作区内 /proj/evil-link → /etc)时,只凭 lexical 命中工作区就放行会让 read/write/
+    // delete 作用到越界目标(rm -rf /etc)。故 real 与 lexical 不同时,real 自身必须可信(命中工作区)。
+    if (real !== lexical && !isKnownClaudeWorkspace(real)) {
+      const err = new Error('路径经符号链接指向工作区外,已拒绝'); err.status = 403; throw err;
+    }
   }
   return real;
 }
@@ -154,6 +164,12 @@ router.get('/files/list', async (req, res) => {
 router.get('/files/read', async (req, res) => {
   try {
     const real = await safePath(req.query.path);
+    // 凭据/鉴权配置不经通用读端点吐明文:write/delete 早有 PROTECTED_WRITE_RELPATHS 拦,read
+    // 之前没有 → authed 客户端/文件树预览能读出 .credentials.json(OAuth token)、network.json
+    // (passwordHash)、custom-providers.json(明文 apiKey)。这些各有专用端点,通用读一律 403。
+    if (PROTECTED_WRITE_RELPATHS.has(relative(HOME, real))) {
+      return res.status(403).json({ error: '该文件含敏感凭据,不提供预览' });
+    }
     const st = await stat(real);
     if (st.isDirectory()) return res.status(400).json({ error: 'not a file' });
 
@@ -216,12 +232,13 @@ router.post('/files/open', async (req, res) => {
     const real = await safePath(req.body?.path);
     const os = platform();
     let cmd, args;
-    if (os === 'darwin') { cmd = 'open'; args = [real]; }
+    // `--` 分隔符:文件名以 `-` 开头(如 -foo.txt)时 open/xdg-open 会把它当选项解析,加 -- 强制当路径。
+    if (os === 'darwin') { cmd = 'open'; args = ['--', real]; }
     else if (os === 'win32') {
       if (/[&|<>^"]/.test(real)) { const e = new Error('unsafe path for Windows open'); e.status = 400; throw e; }
       cmd = 'cmd'; args = ['/c', 'start', '', real];
     }
-    else { cmd = 'xdg-open'; args = [real]; }
+    else { cmd = 'xdg-open'; args = ['--', real]; }
     execFile(cmd, args, (err) => {
       // execFile already returned to the event loop; the response was sent
       // optimistically below. Log failures only.
@@ -274,6 +291,18 @@ router.put('/files/write', async (req, res) => {
 router.post('/files/delete', async (req, res) => {
   try {
     const real = await safePath(req.body?.path);
+    // 最后一段是符号链接:只删链接本身(unlink),绝不 rm -rf 其指向的目标目录 —— 即便
+    // 目标在工作区内,用户点"删除"意图是删这个链接,不是清空它指向的真实目录。safePath 已
+    // 挡住"链接指向工作区外"(逃逸防护),这里再保证指向工作区内的链接也只删链接。
+    const orig = resolve(req.body?.path || '');
+    const lst = await lstat(orig).catch(() => null);
+    if (lst?.isSymbolicLink()) {
+      if (PROTECTED_WRITE_RELPATHS.has(relative(HOME, orig))) {
+        return res.status(403).json({ error: '该文件受保护,不可删除' });
+      }
+      await unlink(orig);
+      return res.json({ ok: true, path: orig });
+    }
     if (PROTECTED_WRITE_RELPATHS.has(relative(HOME, real))) {
       return res.status(403).json({ error: '该文件受保护,不可删除' });
     }
@@ -282,7 +311,9 @@ router.post('/files/delete', async (req, res) => {
     // 已规范盘符/大小写)与 resolve(客户端原串)直接 === 可不匹配,第二道保险悄悄失效;
     // 故 win32 下不分大小写比较。
     const sameFsPath = (a, b) => process.platform === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b;
-    if (sameFsPath(real, HOME) || sameFsPath(real, resolve(req.body?.rootPath || ''))) {
+    // rootPath 缺失时 resolve('')=server cwd,拿它比较等于没比(P3):只在客户端确实传了 rootPath 时比。
+    const rootReal = req.body?.rootPath ? resolve(req.body.rootPath) : null;
+    if (sameFsPath(real, HOME) || (rootReal && sameFsPath(real, rootReal))) {
       return res.status(400).json({ error: '不允许删除根目录' });
     }
     // maxRetries:Windows 上文件被占用(刚"用默认 App 打开"又删)EBUSY/EPERM 概率高,直接报错。

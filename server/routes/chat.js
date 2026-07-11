@@ -995,19 +995,22 @@ router.post('/chat/btw', async (req, res) => {
   const question = String(req.body?.question || '').slice(0, 8000).trim();
   if (!question) return res.status(400).json({ error: 'question is required' });
   const sessionId = (typeof req.body?.sessionId === 'string') ? req.body.sessionId.trim() : '';
-  const model = String(req.body?.model || '').replace(/\[1m\]/i, '').trim();
+  const model = safeModelArg(String(req.body?.model || '').replace(/\[1m\]/i, ''));
   const cwd = (typeof req.body?.cwd === 'string' && req.body.cwd) ? req.body.cwd : homedir();
   try { if (!statSync(cwd).isDirectory()) throw new Error('nd'); }
   catch { return res.status(400).json({ error: '工作目录无效' }); }
 
-  const args = ['-p', question, '--permission-mode', 'plan'];
+  // question 走 stdin 不作 -p 参数:Windows 上 `cmd.exe /c claude.cmd -p "<question>"` 里无空格
+  // 且含 cmd 元字符(&|<>)的 question 会被 cmd 重解析执行(注入);model 同理过白名单。同 title/compact。
+  const args = ['-p', '--permission-mode', 'plan'];
   if (sessionId) args.push('--resume', sessionId, '--fork-session');
   args.push('--no-session-persistence');
   if (model) args.push('--model', model);
 
   let proc;
   try {
-    proc = claudeSpawn(args, { cwd, stdio: ['ignore', 'pipe', 'pipe'], env: cleanChildEnv() });
+    proc = claudeSpawn(args, { cwd, stdio: ['pipe', 'pipe', 'pipe'], env: cleanChildEnv() });
+    proc.stdin.write(question); proc.stdin.end();
   } catch (e) { return res.status(500).json({ error: 'spawn claude failed: ' + e.message }); }
   if (!proc.pid) { proc.on('error', () => {}); return res.status(500).json({ error: 'claude CLI not found' }); }
   // 同 /chat/title:stderr 是 pipe 但只读 stdout,必须排空,否则超 ~64KB 子进程挂死到超时。

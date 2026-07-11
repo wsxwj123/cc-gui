@@ -5,7 +5,7 @@ import { readFile, readdir, writeFile, mkdir, stat, open, unlink } from 'fs/prom
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { homedir } from 'os';
-import { getActiveChatProcesses, claudeSpawn, cleanChildEnv } from './chat.js';
+import { getActiveChatProcesses, claudeSpawn, cleanChildEnv, safeModelArg } from './chat.js';
 import { resolveUnderHome } from '../utils/safe-path.js';
 import { claudeCommand } from '../utils/claude-resolver.js';
 
@@ -304,7 +304,10 @@ router.post('/agents/background/dispatch', async (req, res) => {
   // 实测:--bg 与 -p 冲突(-p 不起 interactive 会话,agents 无法 attach)——prompt 必须
   // 走位置参数:`claude --bg '<task>'`。
   const args = ['--bg', prompt.trim(), '--permission-mode', 'acceptEdits'];
-  if (typeof model === 'string' && model.trim()) args.push('--model', model.trim());
+  // model 过白名单:Windows cmd.exe /c 下无空格+含 & 的 model 会被当命令分隔执行(RCE 绕权限)。
+  // 注:--bg 要求 prompt 走位置参数无法改 stdin,现实 prompt 多含空格会被 libuv 引用;model 是干净活口。
+  const safeModel = safeModelArg(model);
+  if (safeModel) args.push('--model', safeModel);
   try {
     const proc = claudeSpawn(args, { cwd: dir, stdio: ['ignore', 'pipe', 'pipe'], env: cleanChildEnv() });
     let out = '';

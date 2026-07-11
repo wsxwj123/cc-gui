@@ -991,11 +991,14 @@ router.post('/export-session', async (req, res) => {
     let target;
     const tp = typeof req.body?.targetPath === 'string' ? req.body.targetPath.trim() : '';
     if (tp) {
-      // 绝对路径(mac /… 或 win C:\…);强制 .md 后缀,防 NUL 注入。
-      if (!(/^\//.test(tp) || /^[A-Za-z]:[\\/]/.test(tp)) || tp.includes('\0')) {
-        return res.status(400).json({ error: 'targetPath 必须是绝对路径' });
-      }
-      target = tp.toLowerCase().endsWith('.md') ? tp : tp + '.md';
+      if (tp.includes('\0')) return res.status(400).json({ error: 'targetPath 非法' });
+      // $HOME 门禁(安全审计):targetPath 虽来自 Tauri 原生保存对话框,但端点本身不设防 →
+      // authed 局域网客户端可 POST 任意绝对路径覆盖别处 .md(如系统里的 README.md)。resolveUnderHome
+      // 限定 $HOME 内(Downloads/Desktop/Documents 均覆盖)+ 拒 ../ 段;强制 .md 防写成可执行/配置。
+      try {
+        target = resolveUnderHome(tp, { label: 'targetPath', requireCanonical: true });
+      } catch (e) { return res.status(400).json({ error: e.message }); }
+      target = target.toLowerCase().endsWith('.md') ? target : target + '.md';
       await mkdir(dirname(target), { recursive: true });
     } else {
       // 文件名白名单:去路径分隔符与危险字符,只留中英文数字点横杠空格,强制 .md

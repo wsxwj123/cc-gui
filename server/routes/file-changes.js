@@ -367,7 +367,9 @@ router.post('/file/open', async (req, res) => {
     const opener = process.platform === 'darwin' ? 'open'
                  : process.platform === 'win32' ? 'explorer'
                  : 'xdg-open';
-    await execFileP(opener, [file], { timeout: 5000 }).catch(() => {});
+    // `--`:文件名以 `-` 开头时 open/xdg-open 会当选项解析(explorer 无此语义,不加)。
+    const openArgs = process.platform === 'win32' ? [file] : ['--', file];
+    await execFileP(opener, openArgs, { timeout: 5000 }).catch(() => {});
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
