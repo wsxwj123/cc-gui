@@ -3160,6 +3160,16 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         // 打包版没有文件 watcher,缺这步要等用户切走切回才看得到结果。
         if (!next && lastSeenPidRef.current && !streamingRef.current && pollSid && selectedSession?.projectHash) {
           fetchMessagesForTab(pollSid, selectedSession.projectHash, { silent: true });
+          // H 转后台:auto-reattach 被抑制→没有 reattach 流的 finally 替我们排空队列。后台回合
+          // 跑完(pid 有→无)在此补一次排空(与 finally 4574 同一互斥判据),否则转后台期间入队的
+          // 消息永不自动发出。本分支每次完成只触发一次(lastSeenPidRef 下一轮已置 null)。
+          // 必须同步清 backgroundPidRef(否则它靠 effect 异步更新,50ms 后出队消息的 handleSend
+          // 撞到旧 pid→入队门又把它塞回空队列→丢消息死锁);pid 已消失,清了语义也对。
+          if (!acceleratingRef.current) {
+            backgroundPidRef.current = null;
+            const q = useStore.getState().shiftMessage(pollSid);
+            if (q?.text) setTimeout(() => handleSendRef.current?.(q.text, q.opts || (q.hidden ? { hiddenUserMessage: true } : {})), 50);
+          }
         }
         lastSeenPidRef.current = next;
         setBackgroundPid(next);
@@ -3359,7 +3369,10 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     // On reattach, the caller is the backgroundPid effect — we WANT it to take
     // over the stream, so skip the gate and the prep work (no user bubble,
     // no checkpoint, no provider-mismatch strip, no POST /api/chat).
-    if (!reattachPid && streamingRef.current) {
+    // H 转后台:backgroundPid 有值=本会话回合仍在服务端跑(streamingRef 已被 detach 置 false)。
+    // 也要入队——否则直发会 --resume 同一 jsonl 与后台回合双写(server 只复用 idle slot,
+    // busy slot 会另起进程)。队列在后台回合完成时由 backgroundPid 轮询分支排空(见 poll)。
+    if (!reattachPid && (streamingRef.current || backgroundPidRef.current)) {
       useStore.getState().enqueueMessage(sessionQueueKey, { text: prompt, queuedAt: Date.now(), hidden: !!hiddenUserMessage, opts });
       return;
     }
@@ -4817,7 +4830,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       const direction = mode === 'summarize-before' ? 'before' : 'after';
       if (!sel?.sessionId || !projectHash) { confirmDialog('会话尚未创建,无法压缩。'); return; }
       if (!msg.uuid || msg.uuid.startsWith('chat-')) { confirmDialog('该消息尚未写入会话记录,请稍后重试。'); return; }
-      if (activeProcRef.current) { confirmDialog('当前回合仍在进行,请先停止或等待完成后再压缩。'); return; }
+      if (activeProcRef.current || backgroundPidRef.current) { confirmDialog('当前回合仍在进行,请先停止或等待完成后再压缩。'); return; }
       const okGo = await confirmDialog(direction === 'before'
         ? '将把这条消息之前的全部对话替换为一段 AI 生成的摘要。原始记录仍保留在会话文件中并可见,但不再计入上下文;改写前会写入 .bak 备份。摘要生成需要一到两分钟。是否继续?'
         : '将回退到这条消息之前,并把这条消息及之后的对话压缩为一段摘要保留在上下文中。改写前会写入 .bak 备份。摘要生成需要一到两分钟。是否继续?', { danger: true });

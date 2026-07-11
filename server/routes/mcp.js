@@ -131,7 +131,8 @@ export async function listMcpTools(name, timeoutMs = 15000) {
   if (!cfg.command) return { transport: cfg.type || 'http', tools: null, note: '仅 stdio 类型支持查看工具清单;HTTP/SSE server 请在其平台侧管理。' };
   return await new Promise((resolve) => {
     const isWin = process.platform === 'win32';
-    let child, done = false, buf = '';
+    let child, done = false, buf = '', timer; // timer 提前声明:finish 里 clearTimeout(timer) 在
+    // 同步 spawn 失败路径会先于末尾赋值执行,用 const 声明会 TDZ ReferenceError 污染错误文案。
     const finish = (tools, note) => {
       if (done) return; done = true;
       clearTimeout(timer);
@@ -164,7 +165,7 @@ export async function listMcpTools(name, timeoutMs = 15000) {
       }
     });
     send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'claude-gui', version: '1' } } });
-    const timer = setTimeout(() => finish(null, '握手超时(server 无响应或不是标准 MCP stdio server)'), timeoutMs);
+    timer = setTimeout(() => finish(null, '握手超时(server 无响应或不是标准 MCP stdio server)'), timeoutMs);
   });
 }
 
