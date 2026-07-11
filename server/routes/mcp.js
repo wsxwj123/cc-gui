@@ -111,6 +111,62 @@ const GUI_DIR = join(CLAUDE_DIR, 'gui');
 const DISABLED_FILE = join(GUI_DIR, 'disabled-mcp.json');
 const AUTOAPPROVE_FILE = join(GUI_DIR, 'mcp-autoapprove.json'); // ["serverName", ...]
 const META_FILE = join(GUI_DIR, 'mcp-meta.json');               // { name: { label } }
+const DISABLED_TOOLS_FILE = join(GUI_DIR, 'disabled-mcp-tools.json'); // { serverName: ["tool1", ...] } 用户手动关掉的单个工具
+
+// 读/写"手动禁用的单个 MCP 工具"清单。禁用 = chat.js 把 `mcp__<server>__<tool>` 加进 SDK
+// query 的 disallowedTools → 模型【根本看不到】该工具(不是权限拦截)。解决 paper-search 这类
+// 一个 server 暴露十几个工具、模型乱选 crossref 的噪音问题。
+export async function readDisabledMcpTools() {
+  const j = await readJsonFile(DISABLED_TOOLS_FILE, {});
+  return (j && typeof j === 'object' && !Array.isArray(j)) ? j : {};
+}
+async function writeDisabledMcpTools(map) { await writeJsonFile(DISABLED_TOOLS_FILE, map); }
+
+// 连上某个已配置的 stdio MCP server 走 MCP 协议 tools/list 握手,返回其暴露的工具清单。
+// 没有 `claude mcp` 子命令能列工具(get 只给 config),故自己发 JSON-RPC(newline-delimited,
+// stdio 传输标准)。HTTP/SSE server 的握手不同(SSE 流),此函数只支持 stdio;HTTP 返回空+提示。
+export async function listMcpTools(name, timeoutMs = 15000) {
+  const cfg = await readRawMcpConfig(name);
+  if (!cfg) throw Object.assign(new Error('MCP server 未找到'), { status: 404 });
+  if (!cfg.command) return { transport: cfg.type || 'http', tools: null, note: '仅 stdio 类型支持查看工具清单;HTTP/SSE server 请在其平台侧管理。' };
+  return await new Promise((resolve) => {
+    const isWin = process.platform === 'win32';
+    let child, done = false, buf = '';
+    const finish = (tools, note) => {
+      if (done) return; done = true;
+      clearTimeout(timer);
+      try { if (isWin && child?.pid) spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], { stdio: 'ignore' }); else child?.kill('SIGKILL'); } catch {}
+      resolve({ transport: 'stdio', tools, note });
+    };
+    try {
+      child = spawn(cfg.command, Array.isArray(cfg.args) ? cfg.args : [], {
+        env: { ...process.env, ...(cfg.env || {}) }, stdio: ['pipe', 'pipe', 'ignore'],
+        shell: isWin, // uv/npx 在 Win 是 .cmd,不经 shell 会 ENOENT
+      });
+    } catch (e) { return finish(null, `启动失败: ${e.message}`); }
+    child.on('error', (e) => finish(null, `启动失败: ${e.message}`));
+    const send = (o) => { try { child.stdin.write(JSON.stringify(o) + '\n'); } catch {} };
+    // 按行解析 JSON-RPC,拿到 id:2(tools/list)的 result 即完成。
+    child.stdout.on('data', (d) => {
+      buf += d.toString();
+      let nl;
+      while ((nl = buf.indexOf('\n')) >= 0) {
+        const line = buf.slice(0, nl).trim(); buf = buf.slice(nl + 1);
+        if (!line) continue;
+        let msg; try { msg = JSON.parse(line); } catch { continue; }
+        if (msg.id === 1 && msg.result) { // initialize 完成 → 通知 initialized + 请求 tools/list
+          send({ jsonrpc: '2.0', method: 'notifications/initialized' });
+          send({ jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} });
+        } else if (msg.id === 2) {
+          const tools = (msg.result?.tools || []).map((t) => ({ name: t.name, description: String(t.description || '').slice(0, 300) }));
+          finish(tools);
+        }
+      }
+    });
+    send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'claude-gui', version: '1' } } });
+    const timer = setTimeout(() => finish(null, '握手超时(server 无响应或不是标准 MCP stdio server)'), timeoutMs);
+  });
+}
 
 // 把单行命令拆成 command + args[](尊重引号),对齐 claude code 官方配置的
 // { command, args } 结构。例:`npx -y @scope/pkg --flag "a b"` → {command:'npx',
@@ -932,6 +988,37 @@ router.post('/plugins/install', async (req, res) => {
   } catch (err) {
     res.status(500).json({ error: (err.stderr?.toString() || err.message || '').trim() || '安装失败' });
   }
+});
+
+// GET /api/mcp/:name/tools — 连 server 走 tools/list 握手,返回工具清单 + 各自是否被手动禁用。
+router.get('/mcp/:name/tools', async (req, res) => {
+  try {
+    const { name } = req.params;
+    assertSafeName(name);
+    const { transport, tools, note } = await listMcpTools(name);
+    const disabled = new Set((await readDisabledMcpTools())[name] || []);
+    res.json({
+      transport,
+      note: note || null,
+      tools: tools ? tools.map((t) => ({ ...t, enabled: !disabled.has(t.name) })) : null,
+    });
+  } catch (err) { res.status(err.status || 500).json({ error: err.message }); }
+});
+
+// PUT /api/mcp/:name/tools { disabled: ["toolName", ...] } — 保存该 server 手动禁用的工具清单。
+// 禁用即 chat.js 下一回合把 mcp__name__tool 加进 disallowedTools,模型看不到该工具。
+router.put('/mcp/:name/tools', async (req, res) => {
+  try {
+    const { name } = req.params;
+    assertSafeName(name);
+    const disabled = Array.isArray(req.body?.disabled)
+      ? req.body.disabled.filter((t) => typeof t === 'string' && t.trim()).map((t) => t.trim())
+      : [];
+    const map = await readDisabledMcpTools();
+    if (disabled.length) map[name] = [...new Set(disabled)]; else delete map[name];
+    await writeDisabledMcpTools(map);
+    res.json({ ok: true, name, disabled: map[name] || [] });
+  } catch (err) { res.status(err.status || 500).json({ error: err.message }); }
 });
 
 export default router;

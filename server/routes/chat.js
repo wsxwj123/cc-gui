@@ -405,12 +405,15 @@ export function resolveExcludeDyn(v) {
 function chatCompatKey({ workingDir, model, effort, appendSystemPrompt, promptSuggestions, excludeDynamicSystemPrompt, globalRead, dirs, maxBudgetUsd }) {
   let settingsMtime = 0;
   try { settingsMtime = statSync(pathJoin(homedir(), '.claude', 'settings.json')).mtimeMs; } catch {}
+  // 禁用工具清单变更也不能复用旧进程(disallowedTools 是 query 级选项,起时定死)→ 计入 mtime。
+  let disToolsMtime = 0;
+  try { disToolsMtime = statSync(pathJoin(homedir(), '.claude', 'gui', 'disabled-mcp-tools.json')).mtimeMs; } catch {}
   return JSON.stringify({
     cwd: workingDir, model, effort: effort || null,
     append: (typeof appendSystemPrompt === 'string' ? appendSystemPrompt.trim() : ''),
     suggest: promptSuggestions === true,
     xdyn: excludeDynamicSystemPrompt === true ? 1 : excludeDynamicSystemPrompt === false ? 0 : 'auto',
-    gr: globalRead !== false, dirs, settingsMtime,
+    gr: globalRead !== false, dirs, settingsMtime, disToolsMtime,
     budget: maxBudgetUsd || null, // 花费上限变化不能复用旧进程(query 级选项,起时定死)
   });
 }
@@ -425,6 +428,36 @@ export function closePersistentForSession(sessionId) {
     try { slot.input?.close(); } catch {}
     if (!slot.idle) { try { slot.abort?.abort(); } catch {} }
   }
+}
+
+// 关掉所有常驻/在跑的 claude 进程,返回关掉的数量。用途:Windows 上更新 claude 前必须先释放
+// claude.exe —— 运行中的 claude 会锁住该文件,npm/claude upgrade 覆盖时报 "could not write ...claude.exe"
+// (用户实报)。SDK 进程靠 close input + abort 退出(几百 ms 内),之后 npm 才能覆盖。
+export function closeAllPersistentProcesses() {
+  let n = 0;
+  for (const slot of activeProcesses.values()) {
+    if (slot.exitCode !== null) continue;
+    slot.closing = true;
+    try { slot.input?.close(); } catch {}
+    try { slot.abort?.abort(); } catch {}
+    n++;
+  }
+  return n;
+}
+
+// 用户在 MCP 面板手动禁用的单个工具 → SDK disallowedTools(`mcp__<server>__<tool>`),模型
+// 【根本看不到】被禁工具(不是权限拦截)。解决 paper-search 这类 server 暴露十几个工具、模型
+// 乱选 crossref 的噪音。同步读小 JSON(同 mcp-autoapprove 读法);不 import mcp.js 避免循环依赖
+// (mcp→agents→chat)。存储由 GET/PUT /api/mcp/:name/tools 维护。
+function buildDisallowedMcpTools() {
+  try {
+    const map = JSON.parse(readFileSync(pathJoin(homedir(), '.claude', 'gui', 'disabled-mcp-tools.json'), 'utf8'));
+    const out = [];
+    for (const [server, tools] of Object.entries(map || {})) {
+      for (const t of (Array.isArray(tools) ? tools : [])) if (t) out.push(`mcp__${server}__${t}`);
+    }
+    return out;
+  } catch { return []; }
 }
 
 router.post('/chat', async (req, res) => {
@@ -628,6 +661,9 @@ router.post('/chat', async (req, res) => {
   };
   if (effort && VALID_EFFORTS.has(effort)) options.effort = effort;
   if (budget) options.maxBudgetUsd = budget;
+  // 手动禁用的 MCP 工具:模型这一回合看不到它们(解决 paper-search crossref 噪音等)。
+  const disallowedMcpTools = buildDisallowedMcpTools();
+  if (disallowedMcpTools.length) options.disallowedTools = disallowedMcpTools;
   // 输入预测:每回合末 SDK 发一条 prompt_suggestion(在 result 之后,蹭父回合缓存
   // 几乎免费;首轮/plan 模式/API 错误后 SDK 自己不发)。开启时消息泵的关流时序对应放宽。
   const suggestOn = promptSuggestions === true;

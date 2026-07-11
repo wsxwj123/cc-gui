@@ -6,6 +6,7 @@ import { dirname, join } from 'path';
 import { tmpdir, homedir } from 'os';
 import { execFile, spawn } from 'child_process';
 import { promisify } from 'util';
+import { closeAllPersistentProcesses } from './chat.js';
 
 const execFileP = promisify(execFile);
 
@@ -408,6 +409,9 @@ router.post('/claude-update', async (req, res) => {
   const cmd = updateCmdFor(method, claudePath);
   // M1: native 自更新直连 claude.ai 下载,墙内必须带代理;npm/brew 同样受益。
   const proxyUrl = await detectLocalProxy().catch(() => null);
+  // Windows:运行中的 claude 锁住 claude.exe,npm/upgrade 覆盖时报 "could not write ...claude.exe"。
+  // 更新前先关掉 GUI 自己的常驻 claude 进程释放文件锁(终端里 npm 先下载,给进程退出留足时间)。
+  if (process.platform === 'win32') { try { closeAllPersistentProcesses(); } catch {} }
   try {
     launchInTerminal(cmd, `更新 Claude Code (${method})`, proxyUrl);
     res.json({ ok: true, launched: true, command: cmd, platform: process.platform, proxy: proxyUrl });
@@ -429,6 +433,11 @@ router.post('/claude-update/stream', async (req, res) => {
   if (proxyUrl) { env.HTTP_PROXY = env.HTTPS_PROXY = env.http_proxy = env.https_proxy = proxyUrl; }
   res.writeHead(200, { 'Content-Type': 'application/x-ndjson', 'Cache-Control': 'no-store' });
   res.write(JSON.stringify({ type: 'start', command: cmd, method, proxy: proxyUrl }) + '\n');
+  // Windows:先关常驻 claude 释放 claude.exe 锁(否则覆盖失败 "could not write");等 ~1.2s 让进程退出。
+  if (process.platform === 'win32') {
+    let closed = 0; try { closed = closeAllPersistentProcesses(); } catch {}
+    if (closed) { res.write(JSON.stringify({ type: 'log', line: `已关闭 ${closed} 个运行中的 claude 进程以释放 claude.exe(更新前置)` }) + '\n'); await new Promise((r) => setTimeout(r, 1200)); }
+  }
   let child;
   try {
     child = spawn(cmd, { shell: true, env });

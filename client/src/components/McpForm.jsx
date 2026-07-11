@@ -39,6 +39,10 @@ export function McpForm({ editing, onClose, onSaved }) {
   const [scope, setScope] = useState('user');
   const [autoApprove, setAutoApprove] = useState(false);
   const [envRows, setEnvRows] = useState([]); // [{k,v}]
+  // 工具管理(仅编辑现有 server):列出该 server 暴露的工具,逐个启用/禁用(禁用=模型看不到,
+  // 走 SDK disallowedTools)。解决 paper-search 这类一 server 十几工具、模型乱选 crossref 的噪音。
+  const [toolsState, setToolsState] = useState({ open: false, loading: false, list: null, err: '', note: '' });
+  const [toolsBusy, setToolsBusy] = useState(''); // 正在切换的工具名(防重复点)
   const [tplMeta, setTplMeta] = useState(null); // 选模板后的提示:{ note, needsArg, repo, docs }
   // uvx 型模板(Fetch / Paper Search)需要本机有 uv。选中时实时检测,缺失则内联引导安装。
   const [uvStatus, setUvStatus] = useState('idle'); // idle|checking|ok|missing|launched
@@ -114,6 +118,34 @@ export function McpForm({ editing, onClose, onSaved }) {
   const setEnv = (i, key, val) => setEnvRows((rows) => rows.map((r, idx) => idx === i ? { ...r, [key]: val } : r));
   const addEnv = () => setEnvRows((rows) => [...rows, { k: '', v: '' }]);
   const delEnv = (i) => setEnvRows((rows) => rows.filter((_, idx) => idx !== i));
+
+  const loadTools = async () => {
+    setToolsState((s) => ({ ...s, open: true, loading: true, err: '', note: '' }));
+    try {
+      const r = await fetch(`/api/mcp/${encodeURIComponent(editing.name)}/tools`);
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || `${r.status}`);
+      setToolsState({ open: true, loading: false, list: d.tools, err: '', note: d.note || '' });
+    } catch (e) {
+      setToolsState({ open: true, loading: false, list: null, err: e.message, note: '' });
+    }
+  };
+  // 切换单个工具启用态 → 即时 PUT 保存该 server 的禁用清单(独立于配置保存,下个回合生效)。
+  const toggleTool = async (toolName, nextEnabled) => {
+    if (toolsBusy) return;
+    setToolsBusy(toolName);
+    const nextList = toolsState.list.map((t) => t.name === toolName ? { ...t, enabled: nextEnabled } : t);
+    const disabled = nextList.filter((t) => !t.enabled).map((t) => t.name);
+    try {
+      const r = await fetch(`/api/mcp/${encodeURIComponent(editing.name)}/tools`, {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ disabled }),
+      });
+      if (!r.ok) { const d = await r.json().catch(() => ({})); throw new Error(d.error || `${r.status}`); }
+      setToolsState((s) => ({ ...s, list: nextList }));
+    } catch (e) {
+      setToolsState((s) => ({ ...s, err: `保存失败:${e.message}` }));
+    } finally { setToolsBusy(''); }
+  };
 
   const isStdio = transport === 'stdio';
 
@@ -280,6 +312,49 @@ export function McpForm({ editing, onClose, onSaved }) {
                 </div>
               ))}
             </div>
+
+            {/* 工具管理:仅编辑现有 server 时。查看该 server 暴露的工具,逐个启用/禁用。 */}
+            {isEdit && (
+              <div className="space-y-1.5">
+                <div className="flex items-center gap-2">
+                  <span className={labelCls}>工具</span>
+                  {!toolsState.open && (
+                    <button onClick={loadTools}
+                      className="flex items-center gap-1 text-[11px] px-2 py-0.5 rounded text-accent hover:bg-accent/10">
+                      <RefreshCw size={11} />查看工具（可单独启用/禁用）
+                    </button>
+                  )}
+                  {toolsState.open && !toolsState.loading && (
+                    <button onClick={loadTools} className="p-0.5 rounded hover:bg-canvas-warm text-ink-faint hover:text-accent" title="刷新">
+                      <RefreshCw size={12} />
+                    </button>
+                  )}
+                </div>
+                {toolsState.loading && <div className={hintCls}>正在连接 server 拉取工具清单…（约几秒)</div>}
+                {toolsState.err && <div className="text-[11px] text-error">{toolsState.err}</div>}
+                {toolsState.note && <div className={hintCls}>{toolsState.note}</div>}
+                {toolsState.open && !toolsState.loading && Array.isArray(toolsState.list) && (
+                  <div className="max-h-[220px] overflow-y-auto rounded-lg border border-canvas-deep divide-y divide-canvas-deep/60">
+                    {toolsState.list.length === 0 && <div className="px-3 py-2 text-[11px] text-ink-faint">该 server 未暴露工具。</div>}
+                    {toolsState.list.map((t) => (
+                      <div key={t.name} className="flex items-start gap-2 px-3 py-1.5">
+                        <div className="flex-1 min-w-0">
+                          <div className="text-[12px] font-mono text-ink truncate">{t.name}</div>
+                          {t.description && <div className="text-[10px] text-ink-faint leading-snug line-clamp-2">{t.description}</div>}
+                        </div>
+                        <button onClick={() => toggleTool(t.name, !t.enabled)} disabled={toolsBusy === t.name}
+                          className={`shrink-0 text-[10px] px-1.5 py-0.5 rounded transition-colors ${
+                            t.enabled ? 'text-accent hover:bg-accent/10' : 'text-ink-faint bg-canvas-warm hover:text-ink'
+                          } disabled:opacity-40`}>
+                          {t.enabled ? '已启用' : '已禁用'}
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                <div className={hintCls}>禁用的工具模型将看不到（不再误选）。改动下个回合生效。</div>
+              </div>
+            )}
 
             {err && <div className="text-[12px] text-error bg-error/10 border border-error/20 rounded px-3 py-2 whitespace-pre-wrap break-all">{err}</div>}
           </div>
