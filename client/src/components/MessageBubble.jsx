@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect, useLayoutEffect } from 'react';
 import { createPortal } from 'react-dom';
-import { User, Brain, Copy, Check, RotateCcw, Pencil, GitBranch } from 'lucide-react';
+import { User, Brain, Copy, Check, RotateCcw, Pencil, GitBranch, Archive, Scissors } from 'lucide-react';
 import { computeCost, formatCost } from '../utils/pricing.js';
 import { copyText } from '../utils/clipboard.js';
 import { useStore } from '../stores/sessionStore.js';
@@ -219,6 +219,27 @@ function RollbackMenu({ message, onAction }) {
         <div>
           <div className="text-[13px] font-medium text-ink font-body">编辑后重发</div>
           <div className="text-[11px] text-ink-faint font-body">自动回退文件，文本回到输入框</div>
+        </div>
+      </button>
+      <div className="border-t border-canvas-deep" />
+      <button
+        onClick={() => { onAction({ mode: 'summarize-before' }); setOpen(false); }}
+        className="w-full text-left px-3 py-2.5 hover:bg-canvas-warm flex items-start gap-2"
+      >
+        <Archive size={13} className="text-accent mt-0.5 shrink-0" />
+        <div>
+          <div className="text-[13px] font-medium text-ink font-body">压缩此前对话</div>
+          <div className="text-[11px] text-ink-faint font-body">此条之前的对话替换为 AI 摘要，此条及之后保留，降低上下文占用</div>
+        </div>
+      </button>
+      <button
+        onClick={() => { onAction({ mode: 'summarize-after' }); setOpen(false); }}
+        className="w-full text-left px-3 py-2.5 hover:bg-canvas-warm flex items-start gap-2"
+      >
+        <Scissors size={13} className="text-amber-600 mt-0.5 shrink-0" />
+        <div>
+          <div className="text-[13px] font-medium text-ink font-body">总结后回退到此处</div>
+          <div className="text-[11px] text-ink-faint font-body">回退到此条之前，此条及之后的对话压缩为摘要保留在上下文中</div>
         </div>
       </button>
     </div>

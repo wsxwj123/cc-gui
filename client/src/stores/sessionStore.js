@@ -343,6 +343,15 @@ export const useStore = create((set, get) => ({
     try { return localStorage.getItem('cgui-persistent-chat') !== '0'; } catch { return true; }
   })(),
 
+  // 花费上限(美元,localStorage):>0 时随每次发送传给 SDK 的 maxBudgetUsd,进程
+  // 累计花费达到上限即停止并返回 error_max_budget_usd。null = 不限(默认)。
+  maxBudgetUsd: (() => {
+    try {
+      const v = parseFloat(localStorage.getItem('cgui-max-budget-usd'));
+      return Number.isFinite(v) && v > 0 ? v : null;
+    } catch { return null; }
+  })(),
+
   // 聊天模式(全局,localStorage):开启后消息流只显示 AI 最终文本 + 用户消息,把
   // thinking / 工具 / 子代理 / skill 折叠成一行可点开的标记,像微信聊天。默认关。
   chatMode: (() => {
@@ -818,6 +827,16 @@ export const useStore = create((set, get) => ({
   setPersistentChat: (on) => {
     set({ persistentChat: !!on });
     try { localStorage.setItem('cgui-persistent-chat', on ? '1' : '0'); } catch {}
+  },
+
+  setMaxBudgetUsd: (v) => {
+    const n = parseFloat(v);
+    const val = Number.isFinite(n) && n > 0 ? n : null;
+    set({ maxBudgetUsd: val });
+    try {
+      if (val) localStorage.setItem('cgui-max-budget-usd', String(val));
+      else localStorage.removeItem('cgui-max-budget-usd');
+    } catch {}
   },
 
   setExcludeDynamicSystemPrompt: (v) => {

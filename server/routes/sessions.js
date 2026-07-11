@@ -1,8 +1,10 @@
 import { Router } from 'express';
 import { readdir, stat, readFile, writeFile, rename, open, mkdir } from 'fs/promises';
 import { join, dirname } from 'path';
-import { homedir } from 'os';
+import { homedir, tmpdir } from 'os';
+import { randomUUID } from 'crypto';
 import { closePersistentForSession } from './chat.js';
+import { isRealUserQuestion } from './fork.js';
 
 // Guard against path traversal: projectHash / sessionId arrive from request
 // bodies and queries, then get concatenated into fs paths. A crafted value
@@ -122,6 +124,171 @@ export function trimJsonlBeforeTool(raw, toolUseId) {
   }
 
   return { found, keptLines, removedFromLine, totalLines: lines.length, keptAssistantBlocks };
+}
+
+// ── 定向压缩(summarize from/up to here)────────────────────────────────────
+// 调研结论:CLI 交互式 /rewind 菜单的 "Summarize from/up to here" 是 local-jsx 组件,
+// headless/SDK 均无法触发;SDK 控制通道的 rewind_conversation 只做纯裁剪(等价 trim,
+// 且 SDK 未暴露方法)。故自实现:一次性 claude -p 生成段落摘要 → 改写 jsonl。
+// 改写格式逐字段对齐 CLI 自身的 partial compact 落盘形态(实测样本
+// ~/.claude/projects/**/14cb7804….jsonl:compact_boundary(parentUuid:null) →
+// isCompactSummary user 记录 → 保留段首条被物理重挂到摘要 uuid 下):
+//   resume 加载走 parentUuid 链(叶子=末行),链在 boundary(parent null)处终止,
+//   被压缩的原始记录物理保留在文件里(GUI 仍完整显示 + compact 分隔线),但不再
+//   进入上下文 —— 追加式改写,不删除任何历史记录,天然无孤儿 tool_use 风险。
+//
+// compactSegmentJsonl(raw, anchorUuid, direction, summaryContent) — 纯函数,可单测。
+//   direction 'before':锚点(真实用户消息)之前的对话替换为摘要,锚点及之后保留。
+//     布局 [prefix原样…, boundary, summary, 锚点(parentUuid→summary), suffix原样…]。
+//   direction 'after':裁掉锚点及之后(同 trim),在余下叶子后追加摘要记录。
+//     布局 [prefix原样…, summary(parentUuid→叶子)]。
+// 返回 { ok, lines } 或 { ok:false, error }。
+export function compactSegmentJsonl(raw, anchorUuid, direction, summaryContent) {
+  const lines = String(raw || '').split('\n');
+  let anchorIdx = -1;
+  let anchorObj = null;
+  const parsed = lines.map((line) => {
+    if (!line.trim()) return null;
+    try { return JSON.parse(line); } catch { return null; }
+  });
+  for (let i = 0; i < parsed.length; i++) {
+    if (parsed[i]?.uuid === anchorUuid) { anchorIdx = i; anchorObj = parsed[i]; break; }
+  }
+  if (anchorIdx === -1) return { ok: false, error: '锚点消息不在会话记录中' };
+  if (!isRealUserQuestion(anchorObj)) return { ok: false, error: '锚点必须是一条用户消息' };
+
+  // 模板字段取自锚点记录,保证新记录与该会话的落盘形态一致。
+  const now = new Date().toISOString();
+  const base = {
+    isSidechain: false,
+    userType: anchorObj.userType || 'external',
+    cwd: anchorObj.cwd,
+    sessionId: anchorObj.sessionId,
+    version: anchorObj.version,
+    ...(anchorObj.gitBranch !== undefined ? { gitBranch: anchorObj.gitBranch } : {}),
+  };
+  const summaryUuid = randomUUID();
+
+  const lastMsgUuid = (upto) => {
+    for (let i = upto - 1; i >= 0; i--) {
+      const o = parsed[i];
+      if (o?.uuid && (o.type === 'user' || o.type === 'assistant')) return o.uuid;
+    }
+    return null;
+  };
+
+  if (direction === 'before') {
+    const prefixLast = lastMsgUuid(anchorIdx);
+    if (!prefixLast) return { ok: false, error: '锚点之前没有可压缩的对话内容' };
+    // 边界安全检查:锚点及之后若引用了锚点之前的 tool_use(理论上不会——tool_result
+    // 总在下一条真实用户消息之前落盘),压缩会造成孤儿 tool_result → resume 时 API 400。
+    // 出现即拒绝,提示换锚点,绝不静默改写语义。
+    const suffixToolUse = new Set();
+    for (let i = anchorIdx; i < parsed.length; i++) {
+      const c = parsed[i]?.message?.content;
+      if (parsed[i]?.type === 'assistant' && Array.isArray(c)) {
+        for (const b of c) if (b?.type === 'tool_use' && b.id) suffixToolUse.add(b.id);
+      }
+    }
+    for (let i = anchorIdx; i < parsed.length; i++) {
+      const c = parsed[i]?.message?.content;
+      if (parsed[i]?.type === 'user' && Array.isArray(c)) {
+        for (const b of c) {
+          if (b?.type === 'tool_result' && b.tool_use_id && !suffixToolUse.has(b.tool_use_id)) {
+            return { ok: false, error: '该位置存在跨越锚点的工具调用配对,请选择更晚的一条用户消息' };
+          }
+        }
+      }
+    }
+    const boundaryUuid = randomUUID();
+    const prefixChars = lines.slice(0, anchorIdx).join('\n').length;
+    const boundary = {
+      parentUuid: null,
+      logicalParentUuid: prefixLast,
+      ...base,
+      type: 'system',
+      subtype: 'compact_boundary',
+      content: 'Conversation compacted',
+      isMeta: false,
+      timestamp: now,
+      uuid: boundaryUuid,
+      level: 'info',
+      // preTokens 粗估(chars/4)仅供展示;不写 preservedMessages 元数据——保留段
+      // 首条已物理重挂到摘要下,parentUuid 链自洽,任何版本的加载器都能正确接续。
+      compactMetadata: { trigger: 'manual', preTokens: Math.round(prefixChars / 4) },
+    };
+    const summary = {
+      parentUuid: boundaryUuid,
+      ...base,
+      type: 'user',
+      message: { role: 'user', content: summaryContent },
+      isVisibleInTranscriptOnly: true,
+      isCompactSummary: true,
+      timestamp: now,
+      uuid: summaryUuid,
+    };
+    const patchedAnchor = JSON.stringify({ ...anchorObj, parentUuid: summaryUuid });
+    return {
+      ok: true,
+      summaryUuid,
+      lines: [
+        ...lines.slice(0, anchorIdx),
+        JSON.stringify(boundary),
+        JSON.stringify(summary),
+        patchedAnchor,
+        ...lines.slice(anchorIdx + 1),
+      ],
+    };
+  }
+
+  if (direction === 'after') {
+    const keptLines = lines.slice(0, anchorIdx);
+    if (!hasRealConversationLine(keptLines)) {
+      return { ok: false, error: '锚点之前没有可保留的对话,请直接使用回滚' };
+    }
+    const leafUuid = lastMsgUuid(anchorIdx);
+    const summary = {
+      parentUuid: leafUuid,
+      ...base,
+      type: 'user',
+      message: { role: 'user', content: summaryContent },
+      isVisibleInTranscriptOnly: true,
+      isCompactSummary: true,
+      timestamp: now,
+      uuid: summaryUuid,
+    };
+    return { ok: true, summaryUuid, lines: [...keptLines, JSON.stringify(summary)] };
+  }
+
+  return { ok: false, error: 'direction 必须是 before 或 after' };
+}
+
+// 把一段 jsonl 记录渲染成给摘要模型看的纯文本转写(用户/助手文本 + 工具调用一行摘要)。
+// 超长截断保留最近内容(与 /session-ref 的 200KB 尾部保留同思路)。
+export function renderSegmentTranscript(parsedRecords, cap = 150 * 1024) {
+  const parts = [];
+  for (const o of parsedRecords) {
+    if (!o) continue;
+    if (o.type === 'user' && isRealUserQuestion(o)) {
+      const c = o.message?.content;
+      const text = typeof c === 'string'
+        ? c
+        : (Array.isArray(c) ? c.filter((b) => b?.type === 'text').map((b) => b.text).join('\n') : '');
+      if (text.trim()) parts.push(`用户: ${text.trim().slice(0, 6000)}`);
+    } else if (o.type === 'assistant' && Array.isArray(o.message?.content)) {
+      for (const b of o.message.content) {
+        if (b?.type === 'text' && b.text?.trim()) parts.push(`助手: ${b.text.trim().slice(0, 6000)}`);
+        else if (b?.type === 'tool_use') {
+          let inp = '';
+          try { inp = JSON.stringify(b.input).slice(0, 300); } catch {}
+          parts.push(`[工具 ${b.name}] ${inp}`);
+        }
+      }
+    }
+  }
+  let text = parts.join('\n\n');
+  if (text.length > cap) text = '(更早内容因超长被截断)\n\n…' + text.slice(text.length - cap);
+  return text;
 }
 
 // GET /api/projects — list all projects
@@ -329,6 +496,95 @@ router.post('/sessions/:sessionId/trim', async (req, res) => {
     // ever sees a truncated file.
     await writeJsonlAtomic(file, keptLines.join('\n'));
     res.json({ trimmed: true, removedFromLine: cutIdx, totalLines: lines.length });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * POST /api/sessions/:sessionId/compact-segment  { projectHash, uuid, direction, model? }
+ * 定向压缩(见 compactSegmentJsonl 顶部调研注释)。流程:
+ *   1. 读 jsonl,定位锚点,把待压缩段渲染成转写文本;
+ *   2. 一次性 claude -p 生成该段摘要(隔离 cwd、不落盘,复用标题生成的 spawn 形态);
+ *   3. 关常驻进程 → 重读 jsonl(摘要期间可能有变)→ .bak 备份 → 原子改写。
+ */
+router.post('/sessions/:sessionId/compact-segment', async (req, res) => {
+  try {
+    const { projectHash, uuid, direction } = req.body || {};
+    if (!projectHash || !uuid || (direction !== 'before' && direction !== 'after')) {
+      return res.status(400).json({ error: 'projectHash + uuid + direction(before|after) required' });
+    }
+    if (!safeId(projectHash) || !safeId(req.params.sessionId)) {
+      return res.status(400).json({ error: 'invalid projectHash or sessionId' });
+    }
+    const file = sessionFile(projectHash, req.params.sessionId);
+    let raw;
+    try { raw = await readFile(file, 'utf-8'); }
+    catch { return res.status(404).json({ error: 'session jsonl not found' }); }
+
+    // 定位锚点 + 组段。先干跑一次 compactSegmentJsonl 校验锚点合法(不是用户消息 /
+    // 跨锚点工具配对等),避免白跑一次昂贵的摘要生成。
+    const dry = compactSegmentJsonl(raw, uuid, direction, '(dry-run)');
+    if (!dry.ok) return res.status(400).json({ error: dry.error });
+
+    const lines = raw.split('\n');
+    const parsed = lines.map((l) => { if (!l.trim()) return null; try { return JSON.parse(l); } catch { return null; } });
+    const anchorIdx = parsed.findIndex((o) => o?.uuid === uuid);
+    const segment = direction === 'before' ? parsed.slice(0, anchorIdx) : parsed.slice(anchorIdx);
+    const transcript = renderSegmentTranscript(segment);
+    if (!transcript.trim()) return res.status(400).json({ error: '待压缩段没有可总结的内容' });
+
+    // 摘要生成:与 /chat/title 同形态(stdin 喂 prompt 绕开 Windows cmd 元字符;
+    // plan 模式只读;--no-session-persistence 不落盘;隔离 tmp cwd 不污染项目)。
+    const model = String(req.body?.model || '').replace(/\[1m\]/i, '').trim();
+    const prompt = `请把下面 <对话></对话> 标签内的一段开发对话压缩成一份信息保全的中文摘要。要求:\n- 保留:任务目标、关键决策与理由、涉及的文件路径与函数名、已完成/未完成事项、重要结论与数据、用户明确的要求与偏好。\n- 省略:寒暄、重复内容、工具调用的过程细节。\n- 用条目式陈述,直接输出摘要本身,不加任何前言或解释。\n\n<对话>\n${transcript}\n</对话>`;
+    const summaryText = await new Promise((resolve) => {
+      let proc;
+      try {
+        const args = ['-p', '--permission-mode', 'plan', '--no-session-persistence'];
+        if (model) args.push('--model', model);
+        const compactCwd = join(tmpdir(), 'cgui-compact');
+        mkdir(compactCwd, { recursive: true }).catch(() => {});
+        proc = claudeSpawn(args, { cwd: compactCwd, stdio: ['pipe', 'pipe', 'pipe'], env: cleanChildEnv() });
+        proc.stdin.write(prompt); proc.stdin.end();
+      } catch { return resolve(''); }
+      if (!proc.pid) return resolve('');
+      proc.stderr?.resume(); // 不排空 stderr 超 64KB 会把子进程写死(同 /chat/title)
+      let out = '';
+      let done = false;
+      const finish = () => {
+        if (done) return; done = true;
+        clearTimeout(timer);
+        try { proc.kill('SIGKILL'); } catch {}
+        resolve(out.trim());
+      };
+      const timer = setTimeout(finish, 180000);
+      proc.stdout.on('data', (c) => { out += c.toString(); });
+      proc.on('close', finish);
+      proc.on('error', () => { if (!done) { done = true; clearTimeout(timer); resolve(''); } });
+    });
+    // 失败/错误文本兜底:未登录、限流等 CLI 会把英文错误吐到 stdout,不能当摘要写进会话。
+    if (!summaryText || summaryText.length < 20
+      || /not logged in|please run|api key|unauthor|rate limit|error:|usage:/i.test(summaryText.slice(0, 200))) {
+      return res.status(502).json({ error: '摘要生成失败(模型无输出或返回错误),会话未改动' });
+    }
+
+    const summaryContent = direction === 'before'
+      ? `此前的对话内容已被压缩为以下摘要(原始记录保留在会话文件中,不再计入上下文):\n\n${summaryText}`
+      : `以下是本会话中已被回退移除的一段后续对话的摘要,供参考:\n\n${summaryText}`;
+
+    // 改写前关常驻进程(内存上下文与改写后的 jsonl 分叉,复用会答非所问,同 trim)。
+    closePersistentForSession(req.params.sessionId);
+    // 摘要生成耗时分钟级,期间会话可能有新回合落盘 → 重读最新内容再改写。
+    let freshRaw;
+    try { freshRaw = await readFile(file, 'utf-8'); }
+    catch { return res.status(404).json({ error: 'session jsonl not found' }); }
+    const result = compactSegmentJsonl(freshRaw, uuid, direction, summaryContent);
+    if (!result.ok) return res.status(409).json({ error: result.error });
+
+    try { await writeFile(file + '.bak', freshRaw, 'utf-8'); } catch {}
+    await writeJsonlAtomic(file, result.lines.join('\n'));
+    res.json({ ok: true, direction, summaryChars: summaryText.length });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

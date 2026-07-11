@@ -361,7 +361,7 @@ export function resolveExcludeDyn(v) {
 // (回落到与逐回合冷启相同的行为,零语义变化)。settings.json 的 mtime 计入键 ——
 // 切 provider / 改任何全局配置(无论经 GUI 还是终端 cc-switch)都会使旧进程不再被
 // 复用,规避"常驻进程拿着旧 provider/旧配置继续跑"的整类失败模式。
-function chatCompatKey({ workingDir, model, effort, appendSystemPrompt, promptSuggestions, excludeDynamicSystemPrompt, globalRead, dirs }) {
+function chatCompatKey({ workingDir, model, effort, appendSystemPrompt, promptSuggestions, excludeDynamicSystemPrompt, globalRead, dirs, maxBudgetUsd }) {
   let settingsMtime = 0;
   try { settingsMtime = statSync(pathJoin(homedir(), '.claude', 'settings.json')).mtimeMs; } catch {}
   return JSON.stringify({
@@ -370,6 +370,7 @@ function chatCompatKey({ workingDir, model, effort, appendSystemPrompt, promptSu
     suggest: promptSuggestions === true,
     xdyn: excludeDynamicSystemPrompt === true ? 1 : excludeDynamicSystemPrompt === false ? 0 : 'auto',
     gr: globalRead !== false, dirs, settingsMtime,
+    budget: maxBudgetUsd || null, // 花费上限变化不能复用旧进程(query 级选项,起时定死)
   });
 }
 
@@ -397,8 +398,13 @@ router.post('/chat', async (req, res) => {
     promptSuggestions,
     excludeDynamicSystemPrompt,
     keepAlive,
+    maxBudgetUsd,
   } = req.body;
   if (!prompt) return res.status(400).json({ error: 'prompt is required' });
+  // 花费上限(美元):>0 才生效。SDK 透传 CLI --max-budget-usd,进程累计花费达到
+  // 上限时本轮停止并返回 result subtype=error_max_budget_usd(前端有专门提示)。
+  const budgetUsd = Number(maxBudgetUsd);
+  const budget = Number.isFinite(budgetUsd) && budgetUsd > 0 ? budgetUsd : null;
 
   const model = requestedModel || await getDefaultModel();
   // DO NOT normalize cwd here. Claude CLI hashes the EXACT cwd string to
@@ -462,6 +468,7 @@ router.post('/chat', async (req, res) => {
   const reuseKey = chatCompatKey({
     workingDir, model, effort, appendSystemPrompt, promptSuggestions,
     excludeDynamicSystemPrompt, globalRead, dirs: [...dirSet].sort(),
+    maxBudgetUsd: budget,
   });
   if (sessionId) {
     for (const [alivePid, s] of activeProcesses) {
@@ -578,6 +585,7 @@ router.post('/chat', async (req, res) => {
     stderr: (d) => { const t = String(d).trim(); if (t) deliverLine(slot, JSON.stringify({ type: 'stderr', text: t })); },
   };
   if (effort && VALID_EFFORTS.has(effort)) options.effort = effort;
+  if (budget) options.maxBudgetUsd = budget;
   // 输入预测:每回合末 SDK 发一条 prompt_suggestion(在 result 之后,蹭父回合缓存
   // 几乎免费;首轮/plan 模式/API 错误后 SDK 自己不发)。开启时消息泵的关流时序对应放宽。
   const suggestOn = promptSuggestions === true;
