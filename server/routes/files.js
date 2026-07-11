@@ -9,13 +9,16 @@ import { isPathInside, isKnownClaudeWorkspace } from '../utils/safe-path.js';
 const router = Router();
 
 const HOME = homedir();
-// 安全:这些文件存鉴权/provider 凭据,各有专用安全端点(/api/settings、设置→网络),
-// 绝不允许经通用文件写端点覆盖 —— 否则已认证的局域网客户端可改写鉴权配置/把 provider
-// 指向自己的中转截获 token,把"可写 $HOME"升级为持久化控制(opus 审计 P0)。
+// 安全:这些文件存鉴权/provider 凭据或"启动即执行"的配置,各有专用安全端点,绝不允许
+// 经通用文件写/删端点覆盖或删除 —— 否则已认证客户端(或 AI)可改写鉴权配置/把 provider
+// 指向自己的中转截获 token/植入恶意 MCP,把"可写 $HOME"升级为持久化控制(安全审计)。
 const PROTECTED_WRITE_RELPATHS = new Set([
-  join('.claude-gui', 'network.json'),
-  join('.claude', 'settings.json'),
+  join('.claude-gui', 'network.json'),        // 鉴权(passwordHash/tokenSecret)
+  join('.claude-gui', 'custom-providers.json'), // 明文 provider apiKey
+  join('.claude', 'settings.json'),           // provider env/token
   join('.claude', 'settings.local.json'),
+  join('.claude', '.credentials.json'),       // 官方 OAuth token
+  '.claude.json',                             // mcpServers(启动即连,可植恶意 MCP)
 ]);
 const MAX_PREVIEW_BYTES = 256 * 1024; // 256KB cap for the read endpoint
 

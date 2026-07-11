@@ -301,8 +301,13 @@ function makeCanUseTool(slot) {
       if (WRITE_CLASS.has(toolName)) {
         return { behavior: 'deny', message: '规划模式禁止写入文件。请先用 ExitPlanMode 提交计划并等待用户批准,获批后再执行改动。' };
       }
-      if (isDangerousBash(toolName, input)) {
-        return { behavior: 'deny', message: '规划模式禁止执行有副作用的命令(删除/重置/安装等)。请先提交计划等待批准。' };
+      // Bash 在 plan 下【一律弹卡】,不自动放行:危险命令黑名单枚举不全(`> file` 清空、
+      // `mv` 覆盖、`python -c "shutil.rmtree()"` 等都不在),plan 号称只读却静默跑任意
+      // Bash = 信任违背。读类探索工具(Read/Grep/Glob/LS)仍自动放行,不影响规划体验。
+      if (toolName === 'Bash') {
+        const r = await ask();
+        if (r.decision === 'allow') return { behavior: 'allow', updatedInput: (r.updatedInput && typeof r.updatedInput === 'object') ? r.updatedInput : input };
+        return { behavior: 'deny', message: r.reason || '规划模式下该命令被拒绝' };
       }
       if (!/^mcp__/.test(toolName)) return { behavior: 'allow', updatedInput: input };
       // MCP 工具可能有写副作用,plan 下不无条件放行,落到下面按 autoapprove/弹卡处理。

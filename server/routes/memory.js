@@ -8,7 +8,7 @@ import { readFile, writeFile, mkdir, stat, readdir, unlink } from 'fs/promises';
 import { existsSync } from 'fs';
 import { homedir, platform } from 'os';
 import { join, dirname, resolve } from 'path';
-import { isPathInside } from '../utils/safe-path.js';
+import { isPathInside, isKnownClaudeWorkspace } from '../utils/safe-path.js';
 
 const router = Router();
 const HOME = homedir();
@@ -26,6 +26,10 @@ function resolvePath(level, cwd) {
   if (level === 'managed') return managedPath();
   if (!cwd) return null;
   const root = resolve(cwd);
+  // 门禁:project/local 会写 CLAUDE.md/CLAUDE.local.md 到 cwd —— 无校验则任意可写
+  // 目录都能被投放持久 prompt 注入(覆写他人项目的 CLAUDE.md,下次跑 claude 就吃到)。
+  // cwd 必须在 $HOME 内或是打开过的 claude 工作区(与 files.js safePath 同口径)。
+  if (!isPathInside(root, HOME) && !isKnownClaudeWorkspace(root)) return null;
   if (level === 'local') return join(root, 'CLAUDE.local.md');
   if (level === 'project') {
     const main = join(root, 'CLAUDE.md');

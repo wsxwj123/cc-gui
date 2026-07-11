@@ -1166,6 +1166,30 @@ async function tryFetchModels(url, apiKey) {
   return { status: lastStatus, body: lastBody };
 }
 
+// SSRF 守卫:provider baseURL 用户可填任意 URL,server 会带【存储的 apiKey】主动
+// fetch 并把上游响应反射回来 → 攻击者把 baseURL 指向内网/云元数据(169.254.169.254)
+// 探测,或指向自己的服务器把用户 provider 密钥骗出。解析主机名后拒绝环回/私网/链路本地。
+async function assertPublicBaseURL(baseURL) {
+  let host;
+  try { host = new URL(baseURL).hostname.replace(/^\[|\]$/g, ''); }
+  catch { const e = new Error('baseURL 非法'); e.status = 400; throw e; }
+  const { lookup } = await import('dns/promises');
+  let addrs;
+  try { addrs = await lookup(host, { all: true }); }
+  catch { const e = new Error('无法解析 baseURL 主机名'); e.status = 400; throw e; }
+  const isPrivate = (ip) => {
+    if (/^127\.|^0\.|^10\.|^169\.254\.|^192\.168\.|^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./.test(ip)) return true;
+    if (/^172\.(1[6-9]|2\d|3[01])\./.test(ip)) return true;
+    const l = ip.toLowerCase();
+    if (l === '::1' || l === '::' || l.startsWith('fe80:') || l.startsWith('fc') || l.startsWith('fd')) return true;
+    if (l.startsWith('::ffff:')) return isPrivate(l.slice(7)); // IPv4-mapped
+    return false;
+  };
+  if (addrs.some((a) => isPrivate(a.address))) {
+    const e = new Error('baseURL 指向内网/环回地址,已拒绝(SSRF 防护)'); e.status = 400; throw e;
+  }
+}
+
 async function probeUpstreamModels(baseURL, apiKey) {
   const b = baseURL.trim().replace(/\/+$/, '');
   // 候选 URL,按命中率排序。多数 provider 走第一个就够;anthropic 中转(只 forward
@@ -1251,14 +1275,17 @@ router.post('/custom-providers/fetch-models', async (req, res) => {
       const stored = (await readCustomProviders()).find((p) => p.id === req.body.id);
       if (stored) {
         if (!apiKey || !String(apiKey).trim()) apiKey = stored.apiKey;
-        baseURL = baseURL || stored.baseURL;
+        // 用存储 key 时 baseURL 也强制取存储值:否则攻击者传 {id, baseURL:自己的服务器}
+        // 让 server 把该 provider 的真实密钥发去攻击者端点。key 与 baseURL 必须同源。
+        baseURL = stored.baseURL;
       }
     }
     let base; try { base = new URL(baseURL); } catch { return res.status(400).json({ error: 'baseURL 非法' }); }
     if (!/^https?:$/.test(base.protocol)) return res.status(400).json({ error: 'baseURL 必须是 http(s)' });
+    await assertPublicBaseURL(baseURL);
     res.json({ models: await probeUpstreamModels(baseURL, apiKey) });
   } catch (err) {
-    res.status(502).json({ error: err.message });
+    res.status(err.status || 502).json({ error: err.message });
   }
 });
 
@@ -1302,8 +1329,10 @@ router.post('/custom-providers/test', async (req, res) => {
       // 若前端只回传了 apiKey 会让 type/baseURL undefined → URL 拼错/走错协议)。
       const stored = (await readCustomProviders()).find((p) => p.id === b.id);
       if (stored) {
-        if (!apiKey || !apiKey.trim()) apiKey = stored.apiKey;
-        baseURL = baseURL || stored.baseURL;
+        const usedStoredKey = !apiKey || !apiKey.trim();
+        if (usedStoredKey) apiKey = stored.apiKey;
+        // 用存储 key 时 baseURL 强制取存储值(防把密钥外传到攻击者 baseURL,同 fetch-models)。
+        baseURL = usedStoredKey ? stored.baseURL : (baseURL || stored.baseURL);
         type = type || stored.type;
       }
     }
@@ -1311,6 +1340,8 @@ router.post('/custom-providers/test', async (req, res) => {
     if (!b.model) return res.status(400).json({ ok: false, error: '请先在「模型」框填一个模型 ID 再测试' });
     try { const u = new URL(baseURL); if (!/^https?:$/.test(u.protocol)) throw 0; }
     catch { return res.status(400).json({ ok: false, error: 'Base URL 必须是 http(s)' }); }
+    try { await assertPublicBaseURL(baseURL); }
+    catch (e) { return res.status(e.status || 400).json({ ok: false, error: e.message }); }
     res.json(await testProviderConnection({ type, baseURL, apiKey, model: b.model }));
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });

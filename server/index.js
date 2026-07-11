@@ -162,6 +162,25 @@ function isAllowedBrowserOrigin(origin, req = null) {
 }
 
 const app = express();
+// ── DNS-rebinding 防护:Host 头白名单(必须在所有中间件/路由最前)──────────────
+// 根因:isLocalReq 只看 socket 是不是回环、CORS 用"Origin==自身 Host"自指判定,
+// 都不校验 Host 头本身。攻击者把 evil.com 短 TTL 重绑到 127.0.0.1,受害者浏览器
+// 连到回环但发 Host: evil.com → 被当本机免密 + CORS 自指放行 → 无密码接管全 API
+// (读 token/写删文件/跑命令)。实测复现:Host 伪装即 authed:true 且读到 network.json。
+// 修:请求 Host 的主机名必须 ∈ {localhost,127.0.0.1,::1,本机 LAN IP(仅 lanMode)}。
+// 浏览器无法伪造 Host(受 fetch 限制),故 evil.com 的 Host 一定落在白名单外 → 403。
+// 放行无 Host 头(非浏览器/健康探测)与端口无关(只比主机名)。
+function isAllowedHost(req) {
+  const h = requestHostname(req);
+  if (!h) return true; // 无 Host 头:非浏览器客户端,socket/密码层继续兜底
+  if (h === 'localhost' || h === '127.0.0.1' || h === '::1') return true;
+  if (lanMode && lanIps().includes(h)) return true;
+  return false;
+}
+app.use((req, res, next) => {
+  if (isAllowedHost(req)) return next();
+  res.status(403).json({ error: 'Host not allowed (DNS-rebinding protection)' });
+});
 // Same-origin only: in prod the SPA is served from this same port; in dev Vite
 // proxies /api + /ws server-side. So the only legitimate browser origins are
 // localhost/127.0.0.1. Reject everything else to blunt drive-by cross-origin
@@ -643,6 +662,8 @@ const wss = new WebSocketServer({
   server,
   path: '/ws',
   verifyClient: (info) => {
+    // WS 升级不经 express 中间件,须自带 DNS-rebinding 的 Host 白名单(同 HTTP 层)。
+    if (!isAllowedHost(info.req)) return false;
     if (!isAllowedBrowserOrigin(info.origin || info.req?.headers?.origin, info.req)) return false;
     if (!hasPassword()) return true;
     if (isLocalReq(info.req)) return true;
