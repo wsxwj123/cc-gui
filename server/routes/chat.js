@@ -408,12 +408,17 @@ function chatCompatKey({ workingDir, model, effort, appendSystemPrompt, promptSu
   // 禁用工具清单变更也不能复用旧进程(disallowedTools 是 query 级选项,起时定死)→ 计入 mtime。
   let disToolsMtime = 0;
   try { disToolsMtime = statSync(pathJoin(homedir(), '.claude', 'gui', 'disabled-mcp-tools.json')).mtimeMs; } catch {}
+  // 项目级 settings(.claude/settings{,.local}.json,hook/权限也可写在这)同理:终端改完
+  // 项目 hook,若该项目常驻进程还活着会拿旧 hook 继续跑 → mtime 计入键让下一轮换新进程。
+  let projSettingsMtime = 0;
+  try { projSettingsMtime += statSync(pathJoin(workingDir, '.claude', 'settings.json')).mtimeMs; } catch {}
+  try { projSettingsMtime += statSync(pathJoin(workingDir, '.claude', 'settings.local.json')).mtimeMs; } catch {}
   return JSON.stringify({
     cwd: workingDir, model, effort: effort || null,
     append: (typeof appendSystemPrompt === 'string' ? appendSystemPrompt.trim() : ''),
     suggest: promptSuggestions === true,
     xdyn: excludeDynamicSystemPrompt === true ? 1 : excludeDynamicSystemPrompt === false ? 0 : 'auto',
-    gr: globalRead !== false, dirs, settingsMtime, disToolsMtime,
+    gr: globalRead !== false, dirs, settingsMtime, disToolsMtime, projSettingsMtime,
     budget: maxBudgetUsd || null, // 花费上限变化不能复用旧进程(query 级选项,起时定死)
   });
 }
