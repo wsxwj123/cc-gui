@@ -276,6 +276,31 @@ router.put('/project-hooks', async (req, res) => {
   } catch (e) { res.status(400).json({ error: e.message }); }
 });
 
+// 全局 hooks 窄端点:HooksTab 保存不再走整文件 PUT /settings(那是"面板打开时快照"的
+// 读-改-写,面板开着期间切 provider/装插件/终端改配置的字段会被旧快照带回=丢更新)。
+// GET 每次现读磁盘;PUT 现读-合-写只动 hooks 键,其它字段永不触碰。
+router.get('/global-hooks', async (_req, res) => {
+  try {
+    if (!existsSync(SETTINGS_PATH)) return res.json({ hooks: {} });
+    const data = JSON.parse(await readFile(SETTINGS_PATH, 'utf-8'));
+    res.json({ hooks: data.hooks || {} });
+  } catch (e) { res.status(500).json({ error: 'settings.json 不是合法 JSON: ' + e.message }); }
+});
+router.put('/global-hooks', async (req, res) => {
+  try {
+    const hooks = req.body?.hooks;
+    if (!hooks || typeof hooks !== 'object' || Array.isArray(hooks)) return res.status(400).json({ error: 'hooks 必须是对象' });
+    let data = {};
+    if (existsSync(SETTINGS_PATH)) {
+      try { data = JSON.parse(await readFile(SETTINGS_PATH, 'utf-8')); }
+      catch { return res.status(500).json({ error: 'settings.json 已损坏(非法 JSON),拒绝写入以免覆盖,请先手动修复' }); }
+    }
+    if (Object.keys(hooks).length) data.hooks = hooks; else delete data.hooks;
+    await writeFile(SETTINGS_PATH, JSON.stringify(data, null, 2));
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 router.get('/settings', async (req, res) => {
   try {
     const raw = await readFile(SETTINGS_PATH, 'utf-8');

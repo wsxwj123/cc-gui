@@ -1595,38 +1595,30 @@ function HooksTab({ settings, onSave, saving, saved }) {
       .catch(() => {});
   }, []);
 
-  // Re-sync if settings reloaded externally(仅全局作用域;项目作用域数据来自 project-hooks)
-  useEffect(() => { if (scope === 'global') setHooks(settings?.hooks || {}); }, [settings, scope]);
-
-  // 切到项目作用域 → 拉该项目的 hooks
+  // 两种作用域都走窄端点、挂载/切换时现读磁盘 —— 不依赖设置面板打开时的 settings 快照。
+  // 全局若走整文件 PUT /settings,面板开着期间别处(切 provider/装插件/终端)写的字段会被
+  // 旧快照带回=丢更新;窄端点读-合-写只动 hooks 键,与其它 settings 写操作互不影响。
   useEffect(() => {
-    if (scope === 'global') return;
     let cancelled = false;
     setProjBusy(true);
-    fetch(`/api/project-hooks?cwd=${encodeURIComponent(scope)}`)
+    const url = scope === 'global' ? '/api/global-hooks' : `/api/project-hooks?cwd=${encodeURIComponent(scope)}`;
+    fetch(url)
       .then(async (r) => { const d = await r.json().catch(() => ({})); if (!r.ok) throw new Error(d.error || r.status); return d; })
       .then((d) => { if (!cancelled) setHooks(d.hooks || {}); })
-      .catch((e) => { if (!cancelled) { setHooks({}); confirmDialog('读取项目 hooks 失败：' + e.message); } })
+      .catch((e) => { if (!cancelled) { setHooks({}); confirmDialog('读取 hooks 失败：' + e.message); } })
       .finally(() => { if (!cancelled) setProjBusy(false); });
     return () => { cancelled = true; };
   }, [scope]);
 
   const persist = (next) => {
     setHooks(next);
-    if (scope === 'global') {
-      // Guard: if settings failed to load (null), spreading it would persist ONLY
-      // hooks and wipe the rest of settings.json. Bail rather than corrupt.
-      if (!settings) return;
-      onSave({ ...settings, hooks: next });
-      return;
-    }
     setProjBusy(true);
-    fetch('/api/project-hooks', {
-      method: 'PUT', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ cwd: scope, hooks: next }),
-    })
+    const req = scope === 'global'
+      ? fetch('/api/global-hooks', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ hooks: next }) })
+      : fetch('/api/project-hooks', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ cwd: scope, hooks: next }) });
+    req
       .then(async (r) => { const d = await r.json().catch(() => ({})); if (!r.ok) throw new Error(d.error || r.status); setProjSaved(true); setTimeout(() => setProjSaved(false), 1500); })
-      .catch((e) => confirmDialog('保存项目 hooks 失败：' + e.message))
+      .catch((e) => confirmDialog('保存 hooks 失败：' + e.message))
       .finally(() => setProjBusy(false));
   };
 
