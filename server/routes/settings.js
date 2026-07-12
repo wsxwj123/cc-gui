@@ -6,6 +6,7 @@ import { promisify } from 'util';
 import { join, isAbsolute } from 'path';
 import { homedir } from 'os';
 import { randomUUID } from 'crypto';
+import { resolveWorkspacePath } from '../utils/safe-path.js';
 import { startOpenAIProxy, setOpenAIUpstream, getProxyPort } from '../services/openai-proxy.js';
 import { startAnthropicProxy, setAnthropicUpstream, getAnthropicProxyPort } from '../services/anthropic-proxy.js';
 
@@ -241,6 +242,40 @@ function pathToHash(p) {
 }
 
 // GET /api/settings — read current settings
+// ── 项目级 hooks(<项目>/.claude/settings.json 的 hooks 字段)──────────────
+// 场景:技能自带 hook 但只想在某个项目里生效 → 写项目级而非全局。cwd 必须过
+// resolveWorkspacePath 门禁(HOME 内或已知 claude 工作区,拒任意路径);PUT 读-合-写
+// 只动 hooks 键,不整文件覆盖(项目 settings.json 里手写的权限/env 等其它字段不能丢)。
+router.get('/project-hooks', async (req, res) => {
+  try {
+    const root = resolveWorkspacePath(String(req.query.cwd || ''));
+    const file = join(root, '.claude', 'settings.json');
+    if (!existsSync(file)) return res.json({ hooks: {}, exists: false });
+    const data = JSON.parse(await readFile(file, 'utf-8'));
+    res.json({ hooks: data.hooks || {}, exists: true });
+  } catch (e) {
+    res.status(e instanceof SyntaxError ? 500 : 400).json({ error: e instanceof SyntaxError ? '项目 settings.json 不是合法 JSON,请先手动修复' : e.message });
+  }
+});
+router.put('/project-hooks', async (req, res) => {
+  try {
+    const root = resolveWorkspacePath(String(req.body?.cwd || ''));
+    const hooks = req.body?.hooks;
+    if (!hooks || typeof hooks !== 'object' || Array.isArray(hooks)) return res.status(400).json({ error: 'hooks 必须是对象' });
+    const dir = join(root, '.claude');
+    const file = join(dir, 'settings.json');
+    let data = {};
+    if (existsSync(file)) {
+      try { data = JSON.parse(await readFile(file, 'utf-8')); }
+      catch { return res.status(500).json({ error: '项目 settings.json 已损坏(非法 JSON),拒绝写入以免覆盖,请先手动修复' }); }
+    }
+    if (Object.keys(hooks).length) data.hooks = hooks; else delete data.hooks;
+    await mkdir(dir, { recursive: true });
+    await writeFile(file, JSON.stringify(data, null, 2));
+    res.json({ ok: true });
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});
+
 router.get('/settings', async (req, res) => {
   try {
     const raw = await readFile(SETTINGS_PATH, 'utf-8');

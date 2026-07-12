@@ -1577,21 +1577,57 @@ function PermissionsTab({ settings, onSave, saving, saved }) {
 }
 
 function HooksTab({ settings, onSave, saving, saved }) {
+  // 作用域:'global'=~/.claude/settings.json(所有项目);其余=项目根路径,读写
+  // <项目>/.claude/settings.json 的 hooks 字段(技能自带 hook 只想在某项目用的场景)。
+  const [scope, setScope] = useState('global');
+  const [projects, setProjects] = useState([]);
   const [hooks, setHooks] = useState(settings?.hooks || {});
+  const [projBusy, setProjBusy] = useState(false);
+  const [projSaved, setProjSaved] = useState(false);
   const [open, setOpen] = useState({});
   const [adding, setAdding] = useState(null); // event name being added to
   const [newCmd, setNewCmd] = useState('');
   const [newMatcher, setNewMatcher] = useState('');
 
-  // Re-sync if settings reloaded externally
-  useEffect(() => { setHooks(settings?.hooks || {}); }, [settings]);
+  useEffect(() => {
+    fetch('/api/projects').then((r) => r.json())
+      .then((d) => setProjects(Array.isArray(d) ? d : (d.projects || [])))
+      .catch(() => {});
+  }, []);
+
+  // Re-sync if settings reloaded externally(仅全局作用域;项目作用域数据来自 project-hooks)
+  useEffect(() => { if (scope === 'global') setHooks(settings?.hooks || {}); }, [settings, scope]);
+
+  // 切到项目作用域 → 拉该项目的 hooks
+  useEffect(() => {
+    if (scope === 'global') return;
+    let cancelled = false;
+    setProjBusy(true);
+    fetch(`/api/project-hooks?cwd=${encodeURIComponent(scope)}`)
+      .then(async (r) => { const d = await r.json().catch(() => ({})); if (!r.ok) throw new Error(d.error || r.status); return d; })
+      .then((d) => { if (!cancelled) setHooks(d.hooks || {}); })
+      .catch((e) => { if (!cancelled) { setHooks({}); confirmDialog('读取项目 hooks 失败：' + e.message); } })
+      .finally(() => { if (!cancelled) setProjBusy(false); });
+    return () => { cancelled = true; };
+  }, [scope]);
 
   const persist = (next) => {
     setHooks(next);
-    // Guard: if settings failed to load (null), spreading it would persist ONLY
-    // hooks and wipe the rest of settings.json. Bail rather than corrupt.
-    if (!settings) return;
-    onSave({ ...settings, hooks: next });
+    if (scope === 'global') {
+      // Guard: if settings failed to load (null), spreading it would persist ONLY
+      // hooks and wipe the rest of settings.json. Bail rather than corrupt.
+      if (!settings) return;
+      onSave({ ...settings, hooks: next });
+      return;
+    }
+    setProjBusy(true);
+    fetch('/api/project-hooks', {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ cwd: scope, hooks: next }),
+    })
+      .then(async (r) => { const d = await r.json().catch(() => ({})); if (!r.ok) throw new Error(d.error || r.status); setProjSaved(true); setTimeout(() => setProjSaved(false), 1500); })
+      .catch((e) => confirmDialog('保存项目 hooks 失败：' + e.message))
+      .finally(() => setProjBusy(false));
   };
 
   const removeHook = async (event, groupIdx, cmdIdx) => {
@@ -1621,10 +1657,24 @@ function HooksTab({ settings, onSave, saving, saved }) {
 
   return (
     <div className="space-y-2">
+      <div className="flex items-center gap-2">
+        <select value={scope} onChange={(e) => setScope(e.target.value)}
+          className="flex-1 min-w-0 bg-canvas-warm border border-canvas-deep rounded px-2 py-1 text-[11px] font-mono">
+          <option value="global">全局 — ~/.claude/settings.json（所有项目生效）</option>
+          {projects.map((p) => (
+            <option key={p.path} value={p.path}>项目 — {p.path}</option>
+          ))}
+        </select>
+      </div>
+      {scope !== 'global' && (
+        <div className="text-[10px] text-ink-faint font-body leading-snug">
+          写入 <code className="font-mono">{scope}/.claude/settings.json</code>，仅在该项目内生效。技能自带的 hook 若只需在此项目使用，在此处添加即可（全局同名 hook 无需重复）。
+        </div>
+      )}
       <div className="flex items-center justify-between text-[10px] text-ink-faint">
         <span className="font-body">{Object.keys(hooks).length} 个事件已配置 hook</span>
-        {saving && <span className="font-mono">保存中…</span>}
-        {saved && <span className="font-mono text-success">已保存</span>}
+        {(saving || projBusy) && <span className="font-mono">{scope === 'global' ? '保存中…' : '读写中…'}</span>}
+        {(saved || projSaved) && <span className="font-mono text-success">已保存</span>}
       </div>
       {events.map((event) => {
         const groups = hooks[event] || [];
