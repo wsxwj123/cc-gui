@@ -69,6 +69,9 @@ export function SettingsPanel() {
         body: JSON.stringify(body),
       });
       const data = await res.json();
+      // 失败响应体是 {error} 不是 settings——不检查就 setSettings 会把它当快照:权限/概览
+      // 全空、"settings 未加载拒写"守卫被 truthy 的 {error} 绕过,后续保存=真丢数据(审计#4)。
+      if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
       setSettings(data); setRawJson(JSON.stringify(data, null, 2));
       setSaved(true); setTimeout(() => setSaved(false), 1800);
     } catch (err) { setError(err.message); }
@@ -1515,32 +1518,43 @@ function PermissionsTab({ settings, onSave, saving, saved }) {
   // Re-sync if settings reloaded externally
   useEffect(() => { setLists(readLists(settings)); }, [settings]);
 
-  const persist = (next) => {
-    setLists(next);
-    // Guard(同 HooksTab):settings 未加载成功时保存会清掉其余字段,直接不保存。
+  // 保存=以【磁盘现读】的 permissions 为基底应用本次单条增/删(审计#3):面板开着期间
+  // CLI「始终允许」/越界授权写进的规则、additionalDirectories 等不会被面板旧快照顶掉。
+  // 现读失败回落面板快照(不比旧行为差)。仍只发 permissions 单键(服务端顶层合并)。
+  const persist = async (next, delta) => {
+    setLists(next); // 乐观更新显示;保存成功后 save→setSettings→effect 会以真值重同步
     if (!settings) return;
-    const prev = (typeof settings.permissions === 'object' && settings.permissions) || {};
+    let base = settings.permissions;
+    try {
+      const r = await fetch('/api/settings');
+      const fresh = await r.json();
+      if (r.ok && fresh && typeof fresh === 'object' && !fresh.error) base = fresh.permissions;
+    } catch {}
+    const prev = (typeof base === 'object' && base) || {};
     const perms = { ...prev };
-    // 空列表删除键,保持 settings.json 干净(与 CLI 未配置状态一致)。
     for (const key of ['allow', 'ask', 'deny']) {
-      if (next[key].length) perms[key] = next[key]; else delete perms[key];
+      let list = Array.isArray(prev[key]) ? prev[key].filter((x) => typeof x === 'string') : [];
+      if (delta?.key === key) {
+        if (delta.add && !list.includes(delta.add)) list = [...list, delta.add];
+        if (delta.remove) list = list.filter((x) => x !== delta.remove);
+      }
+      // 空列表删除键,保持 settings.json 干净(与 CLI 未配置状态一致)。
+      if (list.length) perms[key] = list; else delete perms[key];
     }
-    // 只发 permissions 一个键(服务端现读+顶层合并),不 spread 整份面板快照——否则面板
-    // 开着期间 provider/插件/终端写的其它字段会被旧快照带回(同 hooks v0.2.197 的修法)。
     onSave({ permissions: Object.keys(perms).length ? perms : null });
   };
 
   const addRule = (key) => {
     const rule = drafts[key].trim();
     if (!rule || lists[key].includes(rule)) return;
-    persist({ ...lists, [key]: [...lists[key], rule] });
+    persist({ ...lists, [key]: [...lists[key], rule] }, { key, add: rule });
     setDrafts({ ...drafts, [key]: '' });
   };
 
   const removeRule = async (key, idx) => {
     const rule = lists[key][idx];
     if (!(await confirmDialog(`删除规则 ${rule}？`, { danger: true }))) return;
-    persist({ ...lists, [key]: lists[key].filter((_, i) => i !== idx) });
+    persist({ ...lists, [key]: lists[key].filter((_, i) => i !== idx) }, { key, remove: rule });
   };
 
   return (
@@ -1708,8 +1722,8 @@ function HooksTab({ settings, onSave, saving, saved }) {
                         <span className="chip font-mono shrink-0 mt-0.5" title="matcher">{g.matcher}</span>
                       )}
                       <code className="flex-1 text-[10.5px] text-ink-muted font-mono break-all leading-snug">{h.command}</code>
-                      <button onClick={() => removeHook(event, gi, ci)}
-                        className="opacity-0 group-hover:opacity-100 p-1 hover:bg-error/15 rounded shrink-0"
+                      <button onClick={() => removeHook(event, gi, ci)} disabled={projBusy}
+                        className="opacity-0 group-hover:opacity-100 p-1 hover:bg-error/15 rounded shrink-0 disabled:opacity-30"
                         title="删除">
                         <Trash2 size={11} className="text-error" />
                       </button>
@@ -1725,7 +1739,7 @@ function HooksTab({ settings, onSave, saving, saved }) {
                       placeholder="shell 命令"
                       className="w-full h-16 bg-canvas-warm border border-canvas-deep rounded px-2 py-1 text-[11px] font-mono resize-none" />
                     <div className="flex gap-1.5">
-                      <button onClick={() => addHook(event)} disabled={!newCmd.trim()}
+                      <button onClick={() => addHook(event)} disabled={!newCmd.trim() || projBusy}
                         className="btn-accent text-[11px] px-2.5 py-1">添加</button>
                       <button onClick={() => { setAdding(null); setNewCmd(''); setNewMatcher(''); }}
                         className="text-[11px] px-2.5 py-1 text-ink-muted hover:text-ink">取消</button>

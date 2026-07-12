@@ -3055,8 +3055,10 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         // didn't byte-match (streaming-accumulated vs final jsonl can differ).
         // Fixes the "reply rendered twice" race (jsonl turn + local turn both show).
         const lastUser = [...prev].reverse().find((m) => m.type === 'user');
-        // 保留旁问气泡:btw 无 jsonl 孪生,整清会让它凭空消失(同 finalize 4470)。
-        if (lastUser && known.has(tkey(lastUser))) return prev.some((m) => m.type === 'btw') ? prev.filter((m) => m.type === 'btw') : [];
+        // 保留旁问气泡(btw 无 jsonl 孪生)与未落盘的停止半截回复(interrupted:停止场景
+        // "末条用户消息已落盘"≠"整轮落盘",半截 assistant 可能没写进 jsonl,整清=丢内容;
+        // 已落盘的(tkey 命中)照清防双渲染)。审计#7。
+        if (lastUser && known.has(tkey(lastUser))) return prev.filter((m) => m.type === 'btw' || (m.interrupted && !known.has(tkey(m))));
         return prev.filter((m) => !known.has(tkey(m)));
       });
     };
@@ -3081,8 +3083,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       };
       const known = new Set(messages.map(tkey));
       const lastUser = [...prev].reverse().find((m) => m.type === 'user');
-      // 保留旁问气泡(同 finalize 4470 / 上面的 reconcile):btw 无 jsonl 孪生,整清即消失。
-      if (lastUser && known.has(tkey(lastUser))) return prev.some((m) => m.type === 'btw') ? prev.filter((m) => m.type === 'btw') : [];
+      // 保留 btw 与未落盘的停止半截回复(同上面 reconcile,审计#7)。
+      if (lastUser && known.has(tkey(lastUser))) return prev.filter((m) => m.type === 'btw' || (m.interrupted && !known.has(tkey(m))));
       const next = prev.filter((m) => !known.has(tkey(m)));
       return next.length === prev.length ? prev : next;
     });
@@ -3135,6 +3137,12 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     // 进程(POST /chat 已把它存进 slot),reattach 回放 earlyLines 里的 init 完成绑定。
     const pollDraftId = !pollSid ? selectedSession?.draftId : null;
     if (!pollSid && !pollDraftId) { setBackgroundPid(null); return; }
+    // 切会话瞬间先清上个会话残留的 pid(首轮 poll 返回前最长 ~1.5s):否则 B 里短暂显示
+    // A 的"后台工作中",此刻点停止会 POST /chat/<A-pid>/stop 杀错 A 的后台回合(审计#5,
+    // 停止不可逆)。lastSeenPidRef 一并清,防 B 首轮 poll 误触"pid 有→无"的排空分支。
+    setBackgroundPid(null);
+    backgroundPidRef.current = null;
+    lastSeenPidRef.current = null;
     let cancelled = false;
     const poll = async () => {
       try {
@@ -3713,6 +3721,21 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
               // 把当前会话 key 变成真 id 后,渲染层会判定"流不属于当前会话"而误隐藏本条流。
               if (streamOwnerKeyRef.current === `draft-${sel.projectHash || 'none'}`) {
                 setStreamOwner(event.session_id);
+              }
+              // opus/sonnet 双审计:draft-key 升级成真 sid 后,两处本地态还挂着旧键,必须一并迁:
+              // ①chatMessages 里 ownerKey=draft-key 的本地注记(draft 里发的 /btw 气泡等)——
+              // visibleChat 按 ownerKey===sessionQueueKey 门控,不迁则键永不匹配、气泡凭空消失
+              // (btw 无 jsonl 孪生=内容丢失);②ChatInput 的 localStorage 草稿(cgui-draft:<key>)——
+              // draftKey 变更 effect 会读新键(必空)把正在打的下一条消息清掉,先把旧值复制过去。
+              {
+                const _dk0 = `draft-${sel.projectHash || 'none'}`;
+                setChatMessages((prev) => (prev.some((m) => m.ownerKey === _dk0)
+                  ? prev.map((m) => (m.ownerKey === _dk0 ? { ...m, ownerKey: event.session_id } : m))
+                  : prev));
+                try {
+                  const _dv = localStorage.getItem(`cgui-draft:${_dk0}`);
+                  if (_dv) { localStorage.setItem(`cgui-draft:${event.session_id}`, _dv); localStorage.removeItem(`cgui-draft:${_dk0}`); }
+                } catch {}
               }
               setSelectedSession({
                 ...sel,
