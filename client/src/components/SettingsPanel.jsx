@@ -1622,11 +1622,20 @@ function HooksTab({ settings, onSave, saving, saved }) {
   const [newCmd, setNewCmd] = useState('');
   const [newMatcher, setNewMatcher] = useState('');
 
-  useEffect(() => {
-    fetch('/api/projects').then((r) => r.json())
-      .then((d) => setProjects(Array.isArray(d) ? d : (d.projects || [])))
-      .catch(() => {});
-  }, []);
+  // 与侧栏项目列表同一口径:/api/projects 减去 hiddenProjects(用户在侧栏隐藏过的,
+  // 如 CLI 在 Temp 等目录跑过留下的 hash 残留)。此前裸取且只在挂载取一次 → 隐藏的
+  // Temp 冒出来、面板开着期间新加的项目看不到(用户实报两方向不一致)。
+  const loadProjects = () => {
+    Promise.all([
+      fetch('/api/projects').then((r) => r.json()).catch(() => []),
+      fetch('/api/prefs/hidden-projects').then((r) => r.json()).catch(() => ({ hidden: [] })),
+    ]).then(([pd, hd]) => {
+      const list = Array.isArray(pd) ? pd : (pd.projects || []);
+      const hidden = new Set(Array.isArray(hd?.hidden) ? hd.hidden : []);
+      setProjects(list.filter((p) => !hidden.has(p.hash)));
+    }).catch(() => {});
+  };
+  useEffect(() => { loadProjects(); }, []);
 
   // 两种作用域都走窄端点、挂载/切换时现读磁盘 —— 不依赖设置面板打开时的 settings 快照。
   // 全局若走整文件 PUT /settings,面板开着期间别处(切 provider/装插件/终端)写的字段会被
@@ -1683,7 +1692,7 @@ function HooksTab({ settings, onSave, saving, saved }) {
   return (
     <div className="space-y-2">
       <div className="flex items-center gap-2">
-        <select value={scope} onChange={(e) => setScope(e.target.value)}
+        <select value={scope} onChange={(e) => setScope(e.target.value)} onFocus={loadProjects}
           className="flex-1 min-w-0 bg-canvas-warm border border-canvas-deep rounded px-2 py-1 text-[11px] font-mono">
           <option value="global">全局 — ~/.claude/settings.json（所有项目生效）</option>
           {projects.map((p) => (
