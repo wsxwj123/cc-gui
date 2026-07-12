@@ -4197,7 +4197,11 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             // [1m] 钉在会话 pin 里持久生效,不剥则之后每条消息都失败 → 剥掉 pin/全局的
             // [1m] 切回标准上下文并自动重发一次(oneMRetry 防循环),同 /compact 3606 与
             // 签名自愈同款套路。要用 1M 的用户按提示开 usage credits 后再开 1M 开关即可。
-            if (/usage credits required for 1m context/i.test(msg) && !opts.oneMRetry && prompt) {
+            // 两种文案同一处置(2026-07 实测官方订阅):sonnet[1m]→"Usage credits required
+            // for 1M context"(1M 按量计费);haiku[1m]→"The long context beta is not yet
+            // available for this subscription"(不支持 1M)。opus-4.8/fable-5 的 [1m] 订阅
+            // 内可用(/context 实测真 1M 窗口),不会走到这。
+            if (/usage credits required for 1m context|long context beta is not (yet )?available/i.test(msg) && !opts.oneMRetry && prompt) {
               const _st = useStore.getState();
               const _base = String(currentModel || '').replace(/\[1m\]/i, '');
               if (_base) _st.setModelFor(sessionQueueKey, _base);
