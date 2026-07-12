@@ -4,13 +4,27 @@ import assert from 'node:assert/strict';
 import { buildAlwaysAllowUpdates, buildDirAuthUpdates } from '../server/utils/permission-rules.js';
 
 // ── buildAlwaysAllowUpdates ──────────────────────────────────────
-// SDK 给了 suggestions → 整组原样返回(官方 always-allow 语义,规则粒度由 CLI 决定)
+// SDK 给了 suggestions → 整组采用(规则粒度由 CLI 决定),但 addRules 的 destination
+// 统一改写 userSettings(实测 CLI 默认给 localSettings 落项目 settings.local.json,
+// 与 GUI"写入 ~/.claude/settings.json"承诺不符,设置→权限页读全局也看不到);
+// addDirectories/setMode 保持原样(实测建议附带 addDirectories(cwd, session)=
+// 会话级目录授权,改成 userSettings 会把项目目录永久写进全局=越权)。
+// 用例即 2026-07-12 真 CLI E2E 抓到的原始 suggestions 形态。
 {
   const sug = [
-    { type: 'addRules', rules: [{ toolName: 'Bash', ruleContent: 'git status:*' }], behavior: 'allow', destination: 'localSettings' },
-    { type: 'addRules', rules: [{ toolName: 'Read', ruleContent: '//tmp/**' }], behavior: 'allow', destination: 'session' },
+    { type: 'addRules', rules: [{ toolName: 'Bash', ruleContent: 'touch a.txt' }], behavior: 'allow', destination: 'localSettings' },
+    { type: 'addDirectories', directories: ['/tmp/scratch'], destination: 'session' },
+    { type: 'setMode', mode: 'acceptEdits', destination: 'session' },
   ];
-  assert.deepEqual(buildAlwaysAllowUpdates('Bash', { command: 'git status' }, sug), sug, 'suggestions returned as-is');
+  assert.deepEqual(
+    buildAlwaysAllowUpdates('Bash', { command: 'touch a.txt' }, sug),
+    [
+      { type: 'addRules', rules: [{ toolName: 'Bash', ruleContent: 'touch a.txt' }], behavior: 'allow', destination: 'userSettings' },
+      { type: 'addDirectories', directories: ['/tmp/scratch'], destination: 'session' },
+      { type: 'setMode', mode: 'acceptEdits', destination: 'session' },
+    ],
+    'addRules rewritten to userSettings; addDirectories/setMode untouched',
+  );
 }
 // 无建议 + Bash → 精确命令规则,写 userSettings
 assert.deepEqual(

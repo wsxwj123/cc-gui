@@ -5,15 +5,25 @@ import { dirname, extname } from 'node:path';
 
 /**
  * "始终允许" → 权限规则更新。
- * 优先原样返回 SDK 的 suggestions(sdk.d.ts:面向"always allow"场景应整组返回,
- * 是 CLI 官方生成的细粒度规则,如 Bash 前缀规则);无建议时按工具回落构造:
+ * 优先采用 SDK 的 suggestions(sdk.d.ts:面向"always allow"场景应整组返回,
+ * 是 CLI 官方生成的细粒度规则,如 Bash 前缀规则),但 destination 统一改写为
+ * userSettings:CLI 建议默认带 localSettings(项目 .claude/settings.local.json),
+ * 与 GUI 卡片"写入 ~/.claude/settings.json"的承诺不符,且设置→权限页只读全局,
+ * 落项目级用户就看不到自己批过的规则。只改写 addRules;addDirectories/setMode
+ * 等保持原 destination(实测 CLI 建议里附带 addDirectories(cwd, session)——
+ * 会话级目录授权,若也改成 userSettings 会把项目目录永久写进全局=越权)。
+ * 无建议时按工具回落构造:
  *   Bash     → 精确命令规则 Bash(<command>)(不自行做前缀泛化,泛化交给 SDK 建议)
  *   WebFetch → 域名规则 WebFetch(domain:<host>)
  *   其余     → 裸工具名(与旧"永远允许 <tool>"白名单语义一致)
  * destination=userSettings:写 ~/.claude/settings.json,跨会话、跨 GUI/终端生效。
  */
 export function buildAlwaysAllowUpdates(toolName, input, suggestions) {
-  if (Array.isArray(suggestions) && suggestions.length) return suggestions;
+  if (Array.isArray(suggestions) && suggestions.length) {
+    return suggestions.map((s) => (
+      (s && s.type === 'addRules') ? { ...s, destination: 'userSettings' } : s
+    ));
+  }
   const rule = { toolName };
   if (toolName === 'Bash') {
     const cmd = String(input?.command || '').trim();
