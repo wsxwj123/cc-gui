@@ -75,6 +75,23 @@ export function SettingsPanel() {
     setSaving(false);
   };
 
+  // env 单键补丁(改/增/删一个环境变量):走 /api/settings-env 现读-逐键改,不整包发快照
+  // env(否则面板开着期间 provider 切换写的 env 被旧快照顶掉)。响应=整份最新 settings。
+  const envPatch = async (patch) => {
+    setSaving(true); setError(null);
+    try {
+      const res = await fetch('/api/settings-env', {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(patch),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+      setSettings(data); setRawJson(JSON.stringify(data, null, 2));
+      setSaved(true); setTimeout(() => setSaved(false), 1800);
+    } catch (err) { setError(err.message); }
+    setSaving(false);
+  };
+
   if (loading) {
     return <div className="flex items-center justify-center py-12"><RefreshCw size={16} className="text-ink-faint animate-spin" /></div>;
   }
@@ -99,7 +116,7 @@ export function SettingsPanel() {
         </div>
       )}
 
-      {tab === 'overview' && <OverviewTab settings={settings} onSave={save} saving={saving} />}
+      {tab === 'overview' && <OverviewTab settings={settings} onSave={save} onEnvPatch={envPatch} saving={saving} />}
       {tab === 'env' && <EnvCheckPanel asModal={false} />}
       {tab === 'permissions' && (
         <PermissionsTab settings={settings} onSave={save} saving={saving} saved={saved} />
@@ -1064,7 +1081,7 @@ const ENV_VALUE_OPTIONS = {
 // 环境变量行内编辑:每项可改值/删除,底部可新增。改完(失焦/回车/选下拉/删除/新增)即把
 // 整个 env 对象 PUT 回 settings.json(浅合并整体替换 env,删除项自然消失)。父组件
 // 保存后回传新 settings → env 身份变化 → 重置草稿。敏感值默认密文,点眼睛看明文再改。
-function EnvEditor({ env, onSave, saving }) {
+function EnvEditor({ env, onEnvPatch, saving }) {
   const isSecret = (k) => /KEY|TOKEN|SECRET|PASSWORD|PWD|CREDENTIAL/i.test(k);
   const [draft, setDraft] = useState(env);
   const [revealed, setRevealed] = useState({});
@@ -1074,17 +1091,18 @@ function EnvEditor({ env, onSave, saving }) {
 
   useEffect(() => { setDraft(env); }, [env]);
 
-  const commit = (nextEnv) => { setErr(''); onSave?.({ env: nextEnv }); };
-  const saveValue = (k) => { if (draft[k] !== env[k]) commit({ ...env, [k]: draft[k] }); };
+  // 全部单键补丁(/api/settings-env 现读-逐键改):不整包发快照 env,面板开着期间
+  // provider 切换等写入的其它 env 键不会被顶掉。
+  const saveValue = (k) => { if (draft[k] !== env[k]) { setErr(''); onEnvPatch?.({ set: { [k]: draft[k] } }); } };
   const removeKey = async (k) => {
     if (!(await confirmDialog(`删除环境变量 ${k}?`, { danger: true }))) return;
-    const next = { ...env }; delete next[k]; commit(next);
+    setErr(''); onEnvPatch?.({ del: [k] });
   };
   const addKey = () => {
     const k = newKey.trim();
     if (!k) return;
     if (k in env) { setErr(`${k} 已存在`); return; }
-    commit({ ...env, [k]: newVal }); setNewKey(''); setNewVal('');
+    setErr(''); onEnvPatch?.({ set: { [k]: newVal } }); setNewKey(''); setNewVal('');
   };
 
   return (
@@ -1099,7 +1117,7 @@ function EnvEditor({ env, onSave, saving }) {
             {ENV_VALUE_OPTIONS[k] ? (
               <select
                 value={draft[k] ?? ''}
-                onChange={(e) => { const v = e.target.value; setDraft((d) => ({ ...d, [k]: v })); commit({ ...env, [k]: v }); }}
+                onChange={(e) => { const v = e.target.value; setDraft((d) => ({ ...d, [k]: v })); setErr(''); onEnvPatch?.({ set: { [k]: v } }); }}
                 disabled={saving}
                 className="flex-1 min-w-0 text-[11px] font-mono bg-canvas-warm border border-canvas-deep rounded px-2 py-1 text-ink focus:border-accent outline-none">
                 {/* 当前值不在预设列表时并入,避免自定义值被吞 */}
@@ -1282,16 +1300,15 @@ function AutoCompactWindowSelect({ settings, onSave, saving }) {
 // 轻量快速模型(env.ANTHROPIC_SMALL_FAST_MODEL):CLI 用它跑非核心小任务 —— 生成会话
 // 标题、后台压缩摘要等。默认与主模型同族的小号(如 haiku),设成更便宜/更快的模型可省钱提速,
 // 不影响正式对话质量。置空 = 交回 CLI 默认。写法同 EnvEditor:整块替换 env,空值删除该键。
-function SmallFastModelInput({ env, onSave, saving }) {
+function SmallFastModelInput({ env, onEnvPatch, saving }) {
   const current = env?.ANTHROPIC_SMALL_FAST_MODEL || '';
   const [draft, setDraft] = useState(current);
   useEffect(() => { setDraft(current); }, [current]);
   const commit = () => {
     const v = draft.trim();
     if (v === current) return;
-    const next = { ...env };
-    if (v) next.ANTHROPIC_SMALL_FAST_MODEL = v; else delete next.ANTHROPIC_SMALL_FAST_MODEL;
-    onSave?.({ env: next });
+    // 单键补丁,不整包发快照 env(防顶掉面板打开后别处写入的 env 键)
+    onEnvPatch?.(v ? { set: { ANTHROPIC_SMALL_FAST_MODEL: v } } : { del: ['ANTHROPIC_SMALL_FAST_MODEL'] });
   };
   return (
     <div className="bg-canvas-warm border border-canvas-deep rounded-lg px-3 py-2.5 flex items-center gap-3">
@@ -1419,7 +1436,7 @@ function ChatBackgroundCard() {
   );
 }
 
-function OverviewTab({ settings, onSave, saving }) {
+function OverviewTab({ settings, onSave, onEnvPatch, saving }) {
   const [showEnv, setShowEnv] = useState(false);
 
   const env = settings?.env || {};
@@ -1445,7 +1462,7 @@ function OverviewTab({ settings, onSave, saving }) {
       <MaxBudgetInput />
       <ExcludeDynamicPromptToggle />
       <AutoCompactWindowSelect settings={settings} onSave={onSave} saving={saving} />
-      <SmallFastModelInput env={env} onSave={onSave} saving={saving} />
+      <SmallFastModelInput env={env} onEnvPatch={onEnvPatch} saving={saving} />
       <ChatBackgroundCard />
       {rows.length > 0 && (
         <div className="bg-canvas-warm border border-canvas-deep rounded-lg divide-y divide-canvas-deep">
@@ -1466,7 +1483,7 @@ function OverviewTab({ settings, onSave, saving }) {
           <span className="text-xs text-ink-muted font-body flex-1">环境变量</span>
           <span className="text-xs text-ink-soft font-mono">{envKeys.length} 个</span>
         </button>
-        {showEnv && <EnvEditor env={env} onSave={onSave} saving={saving} />}
+        {showEnv && <EnvEditor env={env} onEnvPatch={onEnvPatch} saving={saving} />}
       </div>
 
       {isEmpty && <p className="text-xs text-ink-faint font-body py-4 text-center">settings.json 为空</p>}
@@ -1508,7 +1525,9 @@ function PermissionsTab({ settings, onSave, saving, saved }) {
     for (const key of ['allow', 'ask', 'deny']) {
       if (next[key].length) perms[key] = next[key]; else delete perms[key];
     }
-    onSave({ ...settings, permissions: Object.keys(perms).length ? perms : null });
+    // 只发 permissions 一个键(服务端现读+顶层合并),不 spread 整份面板快照——否则面板
+    // 开着期间 provider/插件/终端写的其它字段会被旧快照带回(同 hooks v0.2.197 的修法)。
+    onSave({ permissions: Object.keys(perms).length ? perms : null });
   };
 
   const addRule = (key) => {

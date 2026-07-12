@@ -301,6 +301,29 @@ router.put('/global-hooks', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// env 补丁端点:环境变量编辑全是单键操作(改/增/删一个变量),客户端若整包发快照 env,
+// 面板开着期间 provider 切换写的 env(BASE_URL/TOKEN/档位映射)会被旧快照顶掉。此端点
+// 现读磁盘、只对指定键 set/del,env 其它键与顶层其它字段零触碰。返回整份最新 settings
+// 供面板刷新快照(与 PUT /settings 响应同构)。
+router.put('/settings-env', async (req, res) => {
+  try {
+    const set = (req.body?.set && typeof req.body.set === 'object' && !Array.isArray(req.body.set)) ? req.body.set : {};
+    const del = Array.isArray(req.body?.del) ? req.body.del : [];
+    if (!Object.keys(set).length && !del.length) return res.status(400).json({ error: 'set/del 至少一项' });
+    let data = {};
+    if (existsSync(SETTINGS_PATH)) {
+      try { data = JSON.parse(await readFile(SETTINGS_PATH, 'utf-8')); }
+      catch { return res.status(500).json({ error: 'settings.json 已损坏(非法 JSON),拒绝写入以免覆盖,请先手动修复' }); }
+    }
+    const env = { ...(data.env || {}) };
+    for (const [k, v] of Object.entries(set)) env[String(k)] = String(v);
+    for (const k of del) delete env[String(k)];
+    if (Object.keys(env).length) data.env = env; else delete data.env;
+    await writeFile(SETTINGS_PATH, JSON.stringify(data, null, 2));
+    res.json(data);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 router.get('/settings', async (req, res) => {
   try {
     const raw = await readFile(SETTINGS_PATH, 'utf-8');
