@@ -480,25 +480,18 @@ export const useStore = create((set, get) => ({
       body: JSON.stringify({ sessionId: key, on }),
     }).catch(() => {});
   },
-  // 启动水合:服务端为准,本地多出的旧条目合并回推(同 hydrateCustomTitles 模式)。
+  // 启动水合:服务端为准,不回推。此前 legacy 合并回推无法区分「服务端删过该 key」
+  // (对端关 1m/切 provider/删会话 GC)和「服务端没见过」——跨设备离线场景会把已删
+  // 的旧 key 复活。context1m 只是模型 pin([1m] 后缀)的重装兜底副本,主数据是 pin;
+  // 放弃回推最坏在「PUT 失败+随后清 localStorage」双重失败下丢兜底,pin 仍在。
+  // fetch 失败(catch)保留本地镜像不覆盖。
   hydrateContext1m: async () => {
     try {
       const res = await fetch('/api/prefs/context-1m');
       const d = await res.json();
       const server = (d && d.sessions && typeof d.sessions === 'object') ? d.sessions : {};
-      const legacy = readLs('cgui-context-1m', {}) || {};
-      const merged = { ...legacy, ...server };
-      writeLs('cgui-context-1m', merged);
-      set({ context1mBySession: merged });
-      for (const sid of Object.keys(legacy)) {
-        if (!(sid in server)) {
-          fetch('/api/prefs/context-1m', {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ sessionId: sid, on: true }),
-          }).catch(() => {});
-        }
-      }
+      writeLs('cgui-context-1m', server);
+      set({ context1mBySession: server });
     } catch {}
   },
   // ws 'context-1m' 广播:全量替换(删除也要传播)。
