@@ -5,7 +5,7 @@ import { WebSocketServer } from 'ws';
 import cors from 'cors';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
-import { existsSync, readFileSync } from 'fs';
+import { existsSync, readFileSync, mkdirSync } from 'fs';
 import { createHash } from 'crypto';
 import sessionRoutes from './routes/sessions.js';
 import chatRoutes from './routes/chat.js';
@@ -105,6 +105,11 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
     } catch {}
   })();
 })();
+// 全新机器(从未跑过 claude)没有 ~/.claude 目录,而 settings.json 的 9 处写点
+// (provider 切换各分支 / PUT settings / settings-env / global-hooks)都用 writeFile
+// 直写不建父目录 → ENOENT"找不到 settings.json"(用户新机实报,还连锁出 provider
+// 重复条目)。boot 一次 mkdir 覆盖全部现存与未来写点;已存在时是 no-op。
+try { mkdirSync(join(homedir(), '.claude'), { recursive: true }); } catch (e) { console.warn('[boot] mkdir ~/.claude failed:', e.message); }
 // Network binding: env > ~/.claude-gui/network.json > loopback default.
 // External clients require the GUI password; binding 0.0.0.0 without one would
 // expose $HOME-backed actions and spawned Claude sessions to the network, so it
@@ -370,8 +375,13 @@ function lanIps() {
 }
 app.get('/api/network', (req, res) => {
   const watchdog = process.env.CGUI_WATCHDOG === '1';
+  // configHost=配置文件想要的绑定;与 live HOST 不一致(典型:配置 0.0.0.0 但 passwordHash
+  // 丢失被 HARD SAFETY 回落)→ downgraded,前端据此显示红色横幅引导补密码,不再静默"显示没打开"。
+  const _fileCfg = loadConfig();
+  const configHost = _fileCfg.host === '0.0.0.0' ? '0.0.0.0' : '127.0.0.1';
   res.json({
     host: HOST, port: PORT, lanMode, lanIps: lanIps(),
+    configHost, downgraded: configHost === '0.0.0.0' && !lanMode,
     configPath: NETWORK_CONFIG_PATH,
     hasPassword: hasPassword(),
     watchdog,

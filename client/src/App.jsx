@@ -7042,7 +7042,17 @@ function CustomProviderForm({ onSaved, editing, onCancel, onDirtyChange }) {
           body: JSON.stringify({ id: d.id }),
         });
         const sd = await sr.json().catch(() => ({}));
-        if (!sr.ok) throw new Error(sd.error || 'Provider 已保存,但自动切换失败');
+        if (!sr.ok) {
+          // 添加已成功持久化,只是切换失败——绝不能报"保存失败"(用户会重试→重复条目,
+          // 新机实报)。如实提示 + 正常关表单,列表里可手动切换。
+          useStore.getState().fetchModel?.();
+          window.dispatchEvent(new CustomEvent('cgui:provider-change'));
+          reset();
+          onSaved?.();
+          setBusy('');
+          confirmDialog(`Provider 已保存,但自动切换失败:${sd.error || '未知错误'}\n\n可稍后在 Provider 列表中手动点击切换。`);
+          return;
+        }
         useStore.getState().clearModelOverrides?.();
       }
       // If we just edited the ACTIVE provider, the backend synced its model

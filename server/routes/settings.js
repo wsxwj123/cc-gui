@@ -97,6 +97,20 @@ async function readCurrentSettings() {
   try { return JSON.parse(await readFile(SETTINGS_PATH, 'utf-8')); }
   catch { return {}; }
 }
+// 全新机器(从未跑过 claude)没有 ~/.claude.json,终端交互式 claude 会进"首次引导向导"
+// 强制官方 OAuth 登录——墙内直接撞地区屏蔽"不支持某些国家"(用户新机实报;cc-switch 无此
+// 问题正是因为它写了这个标记)。第三方 provider 本就无需登录 → 切换成功后补
+// hasCompletedOnboarding=true 跳过向导,终端 claude 直接用 settings env 凭证工作。
+// 读-合-写只动这一个键;文件损坏(非 ENOENT)时不动,宁可保留用户数据。
+// 仅第三方路径调用,官方订阅路径不写(登录流程由 CLI 自己管)。
+async function ensureOnboardingFlag() {
+  const p = join(homedir(), '.claude.json');
+  let cur = {};
+  try { cur = JSON.parse(await readFile(p, 'utf-8')); }
+  catch (e) { if (e.code !== 'ENOENT') return; }
+  if (cur && cur.hasCompletedOnboarding === true) return;
+  try { await writeFile(p, JSON.stringify({ ...(cur || {}), hasCompletedOnboarding: true }, null, 2)); } catch {}
+}
 // Remembers the LAST provider switched via the GUI (claude or openai). CC Switch's
 // own is_current flag never reflects a GUI switch (we only write settings.json,
 // not its db), so GET /providers reads this marker to mark the right row current —
@@ -703,6 +717,7 @@ router.post('/provider/switch', async (req, res) => {
     const next = { ...current, env };
     if (snapshot.model) next.model = snapshot.model;
     await writeFile(SETTINGS_PATH, JSON.stringify(next, null, 2));
+    await ensureOnboardingFlag(); // 非官方分支同样无需登录:跳过终端首次向导
     await writeActiveProviderId(hit.id);
     await unlink(ANTHROPIC_ACTIVE_PATH).catch(() => {});
     // Switching to a NATIVE claude provider means we're off the OpenAI proxy.
@@ -778,6 +793,7 @@ async function switchToOpenAIUpstream(up, requestedModel, res) {
   const ts = new Date().toISOString().replace(/[:.]/g, '-');
   await backupSettings(ts);
   await writeFile(SETTINGS_PATH, JSON.stringify(next, null, 2));
+  await ensureOnboardingFlag(); // 第三方无需登录:跳过终端首次向导(新机地区屏蔽根治)
   // Remember the active provider id (not the key) for restart recovery. Also
   // persist the provider's FULL model list + name so model-resolver can offer
   // every model in the ModelSelector (not just the one we switched to) — the CLI
@@ -814,6 +830,11 @@ async function switchToAnthropicUpstream(up, requestedModel, res) {
   const current = await readCurrentSettings();
   const env = mergeProviderEnv(current.env, snapshot.env || {});
   env.ANTHROPIC_BASE_URL = `http://127.0.0.1:${port}`;
+  // 全新机器(从未 /login、无 OAuth、无旧 token)修复:CLI 手里必须有【某个】凭证才会发请求,
+  // 否则直接报 "Invalid API key · Please run /login"(用户新机实报)。代理无条件用上游真实
+  // 密钥覆盖鉴权头,CLI 侧值无所谓 → 缺失时写占位 token(与 switchToOpenAIUpstream 758 行
+  // 的 'sk-openai-proxy' 同构);已有真 token(cc-switch snapshot 带的)保持不动。
+  if (!env.ANTHROPIC_AUTH_TOKEN && !env.ANTHROPIC_API_KEY) env.ANTHROPIC_AUTH_TOKEN = 'sk-cgui-anthropic-proxy';
   // Pick the active model: explicit request (if valid) > the snapshot's existing
   // ANTHROPIC_MODEL (if it belongs to THIS provider) > the provider's first model.
   // Without this, clicking a custom provider row (no model arg) would inherit the
@@ -849,6 +870,7 @@ async function switchToAnthropicUpstream(up, requestedModel, res) {
   const ts = new Date().toISOString().replace(/[:.]/g, '-');
   await backupSettings(ts);
   await writeFile(SETTINGS_PATH, JSON.stringify(next, null, 2));
+  await ensureOnboardingFlag(); // 第三方无需登录:跳过终端首次向导(新机地区屏蔽根治)
   // Persist the active marker (id/name/baseURL/model/models — NEVER the token).
   try {
     await mkdir(join(homedir(), '.claude-gui'), { recursive: true });
@@ -1032,6 +1054,11 @@ router.post('/custom-providers', async (req, res) => {
       if (tm) entry.tierModels = tm;
     }
     const list = await readCustomProviders();
+    // 幂等查重(用户新机实报:添加成功但后续 switch 失败被误报"保存失败"→重试 N 次
+    // = N 条重复条目)。同 type+name+baseURL 视为同一 provider,返回已存在的 id 而非
+    // 再 push;想建同名同址不同 key 的场景走"编辑"更新 key 即可。
+    const dup = list.find((p) => p.type === entry.type && p.name === entry.name && p.baseURL === entry.baseURL);
+    if (dup) return res.json({ ok: true, id: dup.id, existed: true });
     list.push(entry);
     await writeCustomProviders(list);
     res.json({ ok: true, id: entry.id });

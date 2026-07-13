@@ -157,7 +157,9 @@ function NetworkTab() {
     try {
       const r = await fetch('/api/network');
       const d = await r.json();
-      setCfg(d); setLanOn(d.host === '0.0.0.0'); setPort(d.port);
+      // lanOn 反映"配置意图"而非 live 绑定:配置 0.0.0.0 但密码丢失被启动兜底回落时
+      // (downgraded),开关仍显示勾选,配合红色横幅引导补密码,而不是静默显示"没开"。
+      setCfg(d); setLanOn((d.configHost || d.host) === '0.0.0.0'); setPort(d.port);
     } catch (e) { setErr(e.message); }
   };
   useEffect(() => { load(); }, []);
@@ -182,6 +184,12 @@ function NetworkTab() {
   // One-tap restart via the gui.command watchdog. Polls /api/network until the
   // server answers again, then reloads (so the new binding/cookie state applies).
   const restart = async () => {
+    // 未保存的改动(勾了开关/改了端口没点「保存」)直接点重启 = 静默丢失,用户以为开了
+    // 实际配置没写 → "重启后显示没打开"。先拦下来提示保存。
+    if (cfg && (lanOn !== ((cfg.configHost || cfg.host) === '0.0.0.0') || Number(port) !== Number(cfg.port))) {
+      setErr('有未保存的修改——请先点「保存」再点「重启 / 应用绑定」');
+      return;
+    }
     setRestarting(true); setErr(null); setMsg(null);
     try {
       const r = await fetch('/api/restart', { method: 'POST' });
@@ -209,6 +217,15 @@ function NetworkTab() {
 
   return (
     <div className="space-y-4">
+      {cfg.downgraded && (
+        <div className="flex items-start gap-2 text-[11px] text-red-800 bg-red-50 border border-red-200 rounded-lg p-2.5 font-body leading-relaxed">
+          <AlertCircle size={14} className="mt-0.5 shrink-0 text-red-600" />
+          <span>
+            配置中已开启局域网访问,但<b>未设置访问密码</b>,启动时已安全回落到仅本机(0.0.0.0 无密码不允许绑定)。
+            在下方输入访问密码并点「保存」,再点「重启 / 应用绑定」即可恢复局域网访问。
+          </span>
+        </div>
+      )}
       {cfg.defaultPassword && (
         <div className="flex items-start gap-2 text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded-lg p-2.5 font-body leading-relaxed">
           <AlertCircle size={14} className="mt-0.5 shrink-0 text-amber-600" />
