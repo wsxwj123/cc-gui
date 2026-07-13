@@ -548,11 +548,17 @@ function finalizeAgent(st, agentId, tnStatus, visited, authoritative) {
     if (status !== ag.status) st.upsertAgent(agentId, { status, finishedAt: Date.now() });
   }
   // 级联:本 agent 的 toolCalls 里 id 也是 activeAgents 条目的 = 它起的嵌套子代理,一并收尾。
+  // authoritative 透传给级联:嵌套子代理永远等不到自己的 task_notification(v0.2.211 实测),
+  // 随父的权威终态收敛比永久 stopped 更接近真相。守卫同步放行 canOverride 的精确前置
+  // (taskManaged+stopped+authoritative)——否则 stopped 子代理在这里就被跳过,覆盖门够不着。
   const ag2 = st.activeAgents[agentId];
   for (const tc of (ag2?.toolCalls || [])) {
     if (tc?.id && st.activeAgents[tc.id] && !visited.has(tc.id)) {
       const child = st.activeAgents[tc.id];
-      if (!['done', 'error', 'stopped'].includes(child.status)) finalizeAgent(st, tc.id, tnStatus, visited);
+      const childTerminal = ['done', 'error', 'stopped'].includes(child.status);
+      if (!childTerminal || (authoritative && child.taskManaged && child.status === 'stopped')) {
+        finalizeAgent(st, tc.id, tnStatus, visited, authoritative);
+      }
     }
   }
 }
