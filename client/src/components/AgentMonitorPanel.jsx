@@ -623,6 +623,7 @@ export function AgentMonitorPanel() {
   const [remote, setRemote] = useState({ agents: [], sources: { chatProcesses: 0, cliSessions: 0 } });
   const [loading, setLoading] = useState(true);
   const [stoppingPid, setStoppingPid] = useState(null);
+  const [wfAgents, setWfAgents] = useState([]); // workflow 内层 agent(磁盘轮询第四源)
   const localAgents = useStore((s) => s.activeAgents);
   const bgTasks = useStore((s) => s.bgTasks);
   const paneSessions = useStore((s) => s.paneSessions);
@@ -640,6 +641,21 @@ export function AgentMonitorPanel() {
         agents: Array.isArray(data.agents) ? data.agents : [],
         sources: data.sources || { chatProcesses: 0, cliSessions: 0 },
       });
+    } catch {}
+    // workflow 内层 agent:只扫【当前打开会话】的 workflows 目录(面板关闭即停轮询)。
+    // 多分屏窗格各自的 sid 都拉,合并去重;无 workflow 的会话返回空,零开销。
+    try {
+      const sids = [...new Map((useStore.getState().paneSessions || [])
+        .filter((p) => p?.sessionId && p?.projectHash)
+        .map((p) => [p.sessionId, p])).values()];
+      const lists = await Promise.all(sids.map((p) => fetch(
+        `/api/workflow-agents?projectHash=${encodeURIComponent(p.projectHash)}&sid=${encodeURIComponent(p.sessionId)}`,
+      ).then((x) => x.json()).catch(() => ({ agents: [] }))));
+      if (!mountedRef.current) return;
+      const merged = [];
+      const seen = new Set();
+      for (const l of lists) for (const a of (l.agents || [])) { if (!seen.has(a.id)) { seen.add(a.id); merged.push(a); } }
+      setWfAgents(merged);
     } catch {}
     if (!silent && mountedRef.current) setLoading(false);
   };
@@ -753,6 +769,25 @@ export function AgentMonitorPanel() {
           <FoldableSection icon={<PlayCircle size={10} />} title={`后台任务 (${bgList.length})`}>
             <div className="space-y-2">
               {bgList.map((t) => <BgTaskCard key={t.id} task={t} />)}
+            </div>
+          </FoldableSection>
+        )}
+
+        {/* workflow 内层 agent(Workflow 工具起的并行 agent)— 磁盘轮询,不流经父流。
+            整体 workflow 单元卡在上面「当前对话内 Task」区(带"工作流"badge);这里是它内部
+            各 agent 的实时状态(running/idle/done,journal.jsonl result 定 done、mtime 判活)。 */}
+        {wfAgents.length > 0 && (
+          <FoldableSection icon={<Bot size={10} />} title={`workflow 内层 agent (${wfAgents.length})`}>
+            <div className="space-y-1.5">
+              {wfAgents.map((a) => (
+                <div key={a.id} className="flex items-center gap-2 bg-canvas-warm border border-canvas-deep rounded-lg px-2.5 py-1.5">
+                  <Bot size={11} className="text-violet-600 shrink-0" />
+                  <span className="text-[11px] font-mono text-ink truncate flex-1" title={`${a.workflowId} · ${a.id}`}>
+                    {a.agentType || 'agent'} <span className="text-ink-faint">#{String(a.id).slice(-4)}</span>
+                  </span>
+                  <StatusBadge status={a.status === 'idle' ? 'idle' : a.status} />
+                </div>
+              ))}
             </div>
           </FoldableSection>
         )}

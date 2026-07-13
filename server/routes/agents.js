@@ -225,6 +225,51 @@ router.get('/agents/active', async (req, res) => {
   });
 });
 
+// GET /api/workflow-agents?projectHash=X&sid=Y — 当前会话 workflow 内层 agent 实时状态。
+// Workflow 工具起的内层 agent 不流经父流(父流只发 workflow 整体的 task_* 事件,见 App.jsx),
+// 其转写落磁盘 <sid>/subagents/workflows/wf_*/agent-*.jsonl。这里【只扫当前打开会话】的
+// workflows 目录出实时状态(前端面板关闭即停轮询):journal.jsonl 的 result 条 = 权威 done;
+// 否则 agent-*.jsonl mtime 新(<WF_ALIVE_MS)= running,过期 = idle(不谎称完成,同 bgTask 三态
+// 哲学)。Win 路径复用 join/readdir 不手拼分隔符。
+const WF_ALIVE_MS = 15000;
+const WF_SAFE_ID = /^[A-Za-z0-9._-]+$/;
+router.get('/workflow-agents', async (req, res) => {
+  const projectHash = String(req.query.projectHash || '');
+  const sid = String(req.query.sid || '');
+  if (!WF_SAFE_ID.test(projectHash) || !WF_SAFE_ID.test(sid)) return res.json({ agents: [] });
+  const wfRoot = join(homedir(), '.claude', 'projects', projectHash, sid, 'subagents', 'workflows');
+  let wfDirs = [];
+  try { wfDirs = await readdir(wfRoot); } catch { return res.json({ agents: [] }); }
+  const now = Date.now();
+  const out = [];
+  for (const wf of wfDirs) {
+    if (!wf.startsWith('wf_')) continue;
+    const wfDir = join(wfRoot, wf);
+    let files;
+    try { files = await readdir(wfDir); } catch { continue; }
+    // journal.jsonl:每内层 agent 一条 started + 完成后一条 result(带 agentId)。有 result = 权威 done。
+    const doneIds = new Set();
+    try {
+      const j = await readFile(join(wfDir, 'journal.jsonl'), 'utf-8');
+      for (const line of j.split('\n')) {
+        if (!line.trim()) continue;
+        try { const o = JSON.parse(line); if (o.type === 'result' && o.agentId) doneIds.add(o.agentId); } catch {}
+      }
+    } catch {}
+    for (const af of files) {
+      if (!af.startsWith('agent-') || !af.endsWith('.jsonl')) continue;
+      const agentId = af.replace(/^agent-/, '').replace(/\.jsonl$/, '');
+      let mtimeMs = 0;
+      try { mtimeMs = (await stat(join(wfDir, af))).mtimeMs; } catch { continue; }
+      let agentType = null;
+      try { agentType = JSON.parse(await readFile(join(wfDir, af.replace('.jsonl', '.meta.json')), 'utf-8')).agentType || null; } catch {}
+      const status = doneIds.has(agentId) ? 'done' : (now - mtimeMs < WF_ALIVE_MS ? 'running' : 'idle');
+      out.push({ id: agentId, workflowId: wf, agentType: agentType || 'workflow-subagent', status, lastActivity: mtimeMs || null });
+    }
+  }
+  res.json({ agents: out });
+});
+
 // ── 后台代理(claude --bg / claude agents)────────────────────────────────
 // CLI 原生能力包一层:`claude agents --json [--all]` 直接吐 JSON 数组
 // {pid,cwd,kind,startedAt,sessionId,name}(实测 2.1.198,非 TTY 可用);后台会话
