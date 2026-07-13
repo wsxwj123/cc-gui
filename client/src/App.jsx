@@ -7843,6 +7843,20 @@ export default function App() {
   // (and vice-versa). Live updates arrive via the ws 'custom-titles' broadcast.
   useEffect(() => { useStore.getState().hydrateCustomTitles(); useStore.getState().hydrateAutoTitles(); useStore.getState().hydrateContext1m(); }, []);
 
+  // 停止链路 #3:回合间到达的子代理权威终态通知(server 无活跃 SSE 时经全局 WS
+  // 广播 task-notification-bg → useWebSocket 转 window 事件)。按 tool_use_id 调
+  // finalizeAgent 收尾(幂等:已终态条目 no-op),级联嵌套子代理一并收。
+  useEffect(() => {
+    const onBgTaskNotification = (e) => {
+      const { tool_use_id, status } = e.detail || {};
+      if (!tool_use_id) return;
+      const st = useStore.getState();
+      if (st.activeAgents[tool_use_id]) finalizeAgent(st, tool_use_id, status);
+    };
+    window.addEventListener('cgui:task-notification-bg', onBgTaskNotification);
+    return () => window.removeEventListener('cgui:task-notification-bg', onBgTaskNotification);
+  }, []);
+
   // Optional local-only widgets (client/src/components/*.local.jsx). Fresh
   // checkouts have none; public builds temporarily move them out of the build
   // graph so personal controls do not enter client/dist or Tauri bundles.

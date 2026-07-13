@@ -212,6 +212,12 @@ export function useWebSocket() {
               // 1M 上下文会话标记(服务端持久化)在任一端改动后全端收敛。
               useStore.getState().applyRemoteContext1m(data.sessions || {});
               break;
+            case 'task-notification-bg':
+              // 停止链路 #3:回合间(无活跃 SSE)到达的子代理权威终态通知,server 经全局
+              // WS 兜底送达。App.jsx 顶层监听此事件按 tool_use_id 调 finalizeAgent(幂等,
+              // 终态守卫防重;SSE 在线时通知走原 SSE 路径,server 不广播此类型)。
+              window.dispatchEvent(new CustomEvent('cgui:task-notification-bg', { detail: data }));
+              break;
             case 'turn-complete': {
               // T2: 非聚焦会话回合完成 → 顶部悬浮提醒(标题+摘要,5s,点击跳转)。
               // 由服务端广播驱动 —— 切走会话时前端的 SSE fetch 已被切会话 effect

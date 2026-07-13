@@ -243,7 +243,28 @@ function makeInputQueue() {
 // 供下次 /stream 重连回放(detach-don't-abort)。
 function deliverLine(slot, line) {
   if (slot.listeners.size) { for (const fn of slot.listeners) { try { fn(line); } catch {} } }
-  else if (slot.earlyLines.length < MAX_EARLY_LINES) slot.earlyLines.push(line);
+  else {
+    if (slot.earlyLines.length < MAX_EARLY_LINES) slot.earlyLines.push(line);
+    // 停止链路 #3 兜底:后台化子代理跨回合才完成时,权威终态 task_notification 到达的
+    // 时刻往往没有活跃 SSE(per-turn 流已关)——只落 earlyLines 会被下条消息的
+    // `s.earlyLines = []` 清掉(或无人再读),前端卡片永远"工作中"。此处额外走全局 WS
+    // 广播(新类型 task-notification-bg;SSE 在线时走上面 if 分支不进这里,不会双发),
+    // 前端按 tool_use_id 幂等收尾。
+    if (line.includes('task_notification')) {
+      try {
+        const ev = JSON.parse(line);
+        if (ev?.type === 'system' && ev.subtype === 'task_notification') {
+          broadcast({
+            type: 'task-notification-bg',
+            sessionId: slot.sessionId || null,
+            tool_use_id: ev.tool_use_id || null,
+            task_id: ev.task_id || null,
+            status: ev.status || 'completed',
+          });
+        }
+      } catch {}
+    }
+  }
 }
 
 // 消息泵结束(result 后 generator 自然结束 / 出错 / 中断)收尾一次。
