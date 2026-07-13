@@ -5634,7 +5634,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
               <div className="text-[10px] text-ink-faint font-mono flex items-center gap-1 justify-end">
                 <BarChart3 size={10} />{totalAllTokens.toLocaleString()} tokens
                 {totalCostUsd > 0 && (
-                  <span className="text-accent/80 ml-1.5" title="按当前各模型官网价估算的累计费用（CNY 模型按 1 USD ≈ 7.2 CNY 换算）">
+                  <span className="text-accent/80 ml-1.5" title="按当前各模型官网价估算的累计费用（人民币，按 1 USD ≈ 7.2 CNY 换算）">
                     · {formatCost(totalCostUsd)}
                   </span>
                 )}

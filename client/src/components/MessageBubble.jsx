@@ -311,7 +311,7 @@ function UsageDisplay({ usage, model }) {
         <span
           className="ml-auto text-accent/80 font-mono"
           title={
-            `本条估算（${cost.currency === 'CNY' ? '原价 CNY，已按 1 USD ≈ 7.2 CNY 换算' : 'USD'}）\n` +
+            `本条估算（人民币，按 1 USD ≈ 7.2 CNY 换算）\n` +
             `input ${formatCost(cost.breakdown.input)}\n` +
             `output ${formatCost(cost.breakdown.output)}\n` +
             `cache read ${formatCost(cost.breakdown.cacheRead)}\n` +

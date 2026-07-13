@@ -188,11 +188,15 @@ export function computeCost(model, usage, provider) {
   return { totalUsd, breakdown, currency: p.currency };
 }
 
-/** Format a USD cost. Uses more precision for cheap calls. */
+/**
+ * Format a USD cost for display in CNY (×7.2, the same fixed rate as CNY_TO_USD).
+ * Tiers are re-cut for CNY magnitudes (values ~7× the USD ones).
+ */
 export function formatCost(usd) {
   if (usd == null || isNaN(usd)) return '';
-  if (usd < 0.0001) return '<$0.0001';
-  if (usd < 0.01)   return `$${usd.toFixed(4)}`;
-  if (usd < 1)      return `$${usd.toFixed(3)}`;
-  return `$${usd.toFixed(2)}`;
+  const cny = usd / CNY_TO_USD;
+  if (cny < 0.001) return '<¥0.001';
+  if (cny < 0.01)  return `¥${cny.toFixed(4)}`;
+  if (cny < 1)     return `¥${cny.toFixed(3)}`;
+  return `¥${cny.toFixed(2)}`;
 }
