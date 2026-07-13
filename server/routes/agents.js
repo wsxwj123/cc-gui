@@ -232,7 +232,7 @@ router.get('/agents/active', async (req, res) => {
 // 否则 agent-*.jsonl mtime 新(<WF_ALIVE_MS)= running,过期 = idle(不谎称完成,同 bgTask 三态
 // 哲学)。Win 路径复用 join/readdir 不手拼分隔符。
 const WF_ALIVE_MS = 15000;
-const WF_SAFE_ID = /^[A-Za-z0-9._-]+$/;
+const WF_SAFE_ID = /^(?!\.+$)[A-Za-z0-9._-]+$/;  // 排除纯点名(..)防路径穿透,见 LEARNINGS 同款规矩
 router.get('/workflow-agents', async (req, res) => {
   const projectHash = String(req.query.projectHash || '');
   const sid = String(req.query.sid || '');
