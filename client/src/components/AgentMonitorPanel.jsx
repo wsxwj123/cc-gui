@@ -368,6 +368,9 @@ function AgentCard({ agent }) {
           {hasDetail && (expanded ? <ChevronDown size={11} className="text-violet-600 shrink-0" /> : <ChevronRight size={11} className="text-violet-600 shrink-0" />)}
           <Bot size={11} className="text-violet-600 shrink-0" />
           <span className="text-xs font-semibold text-violet-900 font-mono truncate">{displayName}</span>
+          {agent.workflow && (
+            <span className="text-[9px] px-1 py-px bg-amber-100 text-amber-700 rounded font-body shrink-0" title="Workflow 工具起的工作流(整体作为一个单元显示;内层 agent 详情见会话转写)">工作流</span>
+          )}
           {displayModel && (
             <span className="text-[9px] px-1 py-px bg-violet-100 text-violet-700 rounded font-mono shrink-0" title="该子代理实际使用的模型">
               {displayModel}

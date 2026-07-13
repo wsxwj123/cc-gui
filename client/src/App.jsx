@@ -519,8 +519,11 @@ function finalizeAgent(st, agentId, tnStatus, visited) {
   const ag = st.activeAgents[agentId];
   if (!ag) return;
   if (!['done', 'error', 'stopped'].includes(ag.status)) {
+    // stopped 语义(fable A 实测修正):用户主动停止时,CLI 给顶层 agent 发的是 is_error 的
+    // "interrupted"回执(resultSeen+resultIsError),那不是真失败——只有【确实成功返回过】
+    // (resultSeen 且非 error)才标 done,其余一律 stopped(而非把 interrupt 回执误报成红色"错误")。
     const status = tnStatus === 'failed' ? 'error'
-      : tnStatus === 'stopped' ? (ag.resultSeen ? (ag.resultIsError ? 'error' : 'done') : 'stopped')
+      : tnStatus === 'stopped' ? (ag.resultSeen && !ag.resultIsError ? 'done' : 'stopped')
       : (ag.resultIsError ? 'error' : 'done');
     const patch = { status, finishedAt: Date.now() };
     if (ag.toolCalls?.some((t) => !t.result)) {
@@ -3886,6 +3889,32 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           // task_started 建立 task_id↔tool_use_id 映射,供只带 task_id 的 task_updated 兜底。
           if (event.type === 'system' && event.subtype === 'task_started' && event.task_id && event.tool_use_id) {
             taskIdToToolUse[event.task_id] = event.tool_use_id;
+            // workflow 实时可见性(v0.2.212,实测定档):Workflow 工具起的独立 runtime agent 不发
+            // 带 parent_tool_use_id 的 stream 增量,所以现有 activeAgents 对它建 0 条目、监控看不见;
+            // 但父流【实时发】task_started(task_type:'local_workflow', workflow_name, tool_use_id)
+            // + task_progress + 权威 task_notification(全带同一 tool_use_id)。这里为 workflow 单元
+            // 建一个 activeAgents 条目(tool_use_id 为键),后续 task_progress 滚动描述、task_notification
+            // 走现有 finalizeAgent 自动收尾——纯客户端小改,复用已建的 task_notification 架构。
+            if (event.task_type === 'local_workflow') {
+              const _st = useStore.getState();
+              if (!_st.activeAgents[event.tool_use_id]) {
+                _st.upsertAgent(event.tool_use_id, {
+                  workflow: true,
+                  name: event.workflow_name || 'workflow',
+                  description: event.description || '',
+                  status: 'working',
+                  startedAt: Date.now(),
+                  sessionId: getLocalSession()?.sessionId || null,
+                });
+              }
+            }
+          }
+          // workflow 进度:滚动更新描述(同 tool_use_id),不改状态。
+          if (event.type === 'system' && event.subtype === 'task_progress' && event.tool_use_id) {
+            const _st = useStore.getState();
+            if (_st.activeAgents[event.tool_use_id]?.workflow && event.description) {
+              _st.upsertAgent(event.tool_use_id, { description: event.description });
+            }
           }
           if (event.type === 'system' && event.subtype === 'task_notification') {
             const tuid = event.tool_use_id || (event.task_id ? taskIdToToolUse[event.task_id] : null);

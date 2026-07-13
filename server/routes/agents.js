@@ -182,6 +182,12 @@ router.get('/agents/active', async (req, res) => {
       const raw = await readFile(`${SESSIONS_DIR}/${f}`, 'utf-8');
       const s = JSON.parse(raw);
       if (!s.pid) continue;
+      // `claude --bg` 后台代理(注册表 kind='bg')不在此列出:它由 /api/agents/background
+      // 全权呈现,并有官方停止端点 `claude stop <id>`。若在这条 cli-session 通道也列出,前端
+      // "Claude 子进程"区会给它一个走 pid kill 的停止按钮,而多个后台代理的 pid 都指向同一个
+      // CLI supervisor → pid kill 连坐全停(agents.js background/stop 注释警告的危险路径)。
+      // 注:注册表文件里 kind='bg',`claude agents --json` 里是 'background',两处都跳过。
+      if (s.kind === 'bg' || s.kind === 'background') continue;
       // 已被 chat-process 收录的会话(按 sessionId 或 pid)不重复显示。
       if ((s.sessionId && seenSessionIds.has(s.sessionId)) || seenPids.has(Number(s.pid))) continue;
       // Check the process is still alive — claude often leaves stale files.
