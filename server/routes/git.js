@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { stat } from 'fs/promises';
-import { resolveUnderHome } from '../utils/safe-path.js';
+import { resolveWorkspacePath } from '../utils/safe-path.js';
 
 const execFileP = promisify(execFile);
 const router = Router();
@@ -10,7 +10,10 @@ const router = Router();
 function safeCwd(p) {
   // Normalize harmless `//+` / trailing slash inputs, but keep the HOME boundary
   // exact (`/Users/me2` must not pass for `/Users/me`).
-  return resolveUnderHome(p, { label: 'cwd' });
+  // 工作区例外版(fable 审计):Windows 项目常在 D:\ 等其他盘,严格 $HOME 门禁让
+  // git status 400 → GitInitBanner 静默失效、git init 必炸(与 purge 同类)。
+  // git -C 按文件系统身份工作,realpath 归一化形态无害。
+  return resolveWorkspacePath(p, { label: 'cwd' });
 }
 
 /** GET /api/git/status?cwd=... → { isRepo, branch, hasChanges } */

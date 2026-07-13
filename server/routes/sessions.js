@@ -910,8 +910,13 @@ router.delete('/bak-files', async (req, res) => {
 // D:\ 等其他盘,纯 $HOME 门禁让删除项目报"清理失败:outside $HOME"(用户实报);能出现在
 // 项目列表里的路径必然有 hash 目录,恰好被工作区例外覆盖。.. 段仍一律拒绝。
 router.post('/project/purge', async (req, res) => {
+  // 校验不改写(fable 审计 #4):resolveWorkspacePath 可能返回 realpath/normalize 后的
+  // 形态(mac /tmp→/private/tmp、Win junction/OneDrive),而 CLI 按【记录时的原始 cwd
+  // 字符串】hash 匹配项目——传改写形态可能对不上 hash 清不掉。门禁用解析结果,CLI 用原串
+  // (原串即项目列表反解出的记录形态)。
+  const rawCwd = String(req.body?.cwd || '');
   let dir;
-  try { dir = resolveWorkspacePath(String(req.body?.cwd || ''), { label: 'cwd', requireCanonical: true }); }
+  try { resolveWorkspacePath(rawCwd, { label: 'cwd', requireCanonical: true }); dir = rawCwd; }
   catch (e) { return res.status(400).json({ error: e.message }); }
 
   let proc;

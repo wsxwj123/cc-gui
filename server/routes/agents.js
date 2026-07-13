@@ -6,7 +6,7 @@ import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { homedir } from 'os';
 import { getActiveChatProcesses, claudeSpawn, cleanChildEnv, safeModelArg } from './chat.js';
-import { resolveUnderHome } from '../utils/safe-path.js';
+import { resolveWorkspacePath } from '../utils/safe-path.js';
 import { claudeCommand } from '../utils/claude-resolver.js';
 
 const execFileP = promisify(execFile);
@@ -305,7 +305,10 @@ router.post('/agents/background/dispatch', async (req, res) => {
     return res.status(400).json({ error: 'prompt 含不安全字符(单个词里的 & | < > ^);请用正常任务描述' });
   }
   let dir;
-  try { dir = resolveUnderHome(String(cwd || ''), { label: 'cwd' }); }
+  // 工作区例外版(fable 审计):后台代理语义=在该项目目录跑 claude --bg,Windows
+  // 其他盘项目走严格 $HOME 门禁必 400(与 purge 同类)。spawn cwd 用归一化形态无害
+  // (claude 记录的是自身 process.cwd())。
+  try { dir = resolveWorkspacePath(String(cwd || ''), { label: 'cwd' }); }
   catch (e) { return res.status(400).json({ error: e.message }); }
   // 实测:--bg 与 -p 冲突(-p 不起 interactive 会话,agents 无法 attach)——prompt 必须
   // 走位置参数:`claude --bg '<task>'`。
