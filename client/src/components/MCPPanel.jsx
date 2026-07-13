@@ -210,6 +210,9 @@ export function MCPPanel() {
       const d = await r.json();
       if (!r.ok) throw new Error(d.error || '安装失败');
       await fetchData(); // 刷新已安装列表
+      setInstallingPlugin(null); // 先停 spinner 再弹窗
+      // 与插件更新一致:安装成功弹窗提示(新会话生效)。
+      await confirmDialog(`插件「${plugin.name || id}」已安装${d.needsRestart === false ? '' : '(新会话生效)'}`, { confirmText: '知道了' });
     } catch (e) { setPluginErr(`${id}: ${e.message}`); }
     setInstallingPlugin(null);
   };
@@ -248,6 +251,8 @@ export function MCPPanel() {
       const d = await r.json();
       if (!r.ok) throw new Error(d.error || '卸载失败');
       await fetchData();
+      setPluginActioning(null); // 先停 spinner 再弹窗
+      await confirmDialog(`插件「${plugin.name.split('@')[0]}」已卸载`, { confirmText: '知道了' });
     } catch (e) { setPluginErr(`${plugin.name}: ${e.message}`); }
     setPluginActioning(null);
   };

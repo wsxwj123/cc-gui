@@ -185,6 +185,14 @@ export function SkillsPanel() {
         if (d.failed?.length) parts.push(`失败 ${d.failed.length}`);
         setNotice(parts.join(' · ') || '完成');
         setConflicts(null);
+        // 与技能更新/插件操作一致:导入成功弹窗提示(此前仅面板内小字,面板外看不到)。
+        if (d.imported?.length) {
+          setBusy(null);
+          await confirmDialog(
+            `已导入 ${d.imported.length} 个技能${d.failed?.length ? `,${d.failed.length} 个失败` : ''}${d.imported?.length ? `\n(${d.imported.map((x) => (typeof x === 'string' ? x : x.id || x.name)).filter(Boolean).slice(0, 8).join('、')})` : ''}`,
+            { confirmText: '知道了' },
+          );
+        }
       }
       await Promise.all([activeRepo ? loadOfficial(null, activeRepo, activeBranch, activeHost) : loadOfficial(source), loadLocal()]);
     } catch (e) { setNotice('错误: ' + e.message); }

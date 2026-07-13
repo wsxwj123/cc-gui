@@ -120,6 +120,34 @@ export const BUILTIN_MCP_SERVERS = [
     repo: 'wonderwhy-er/DesktopCommanderMCP',
     docs: 'https://github.com/wonderwhy-er/DesktopCommanderMCP',
   },
+  {
+    id: 'notion',
+    name: 'Notion',
+    transport: 'http',
+    url: 'https://mcp.notion.com/mcp',
+    env: [],
+    needsSetup: true,
+    setupTag: '首次登录',
+    note: 'Notion 官方远程 MCP。首次使用走 OAuth 授权登录,无需在此填 token。',
+    repo: 'makenotion/notion-mcp-server',
+    docs: 'https://developers.notion.com/docs/mcp',
+  },
+  {
+    id: 'zotero',
+    name: 'Zotero',
+    transport: 'stdio',
+    commandLine: 'uvx zotero-mcp',
+    env: [
+      { k: 'ZOTERO_LOCAL', hint: '填 true 用本地模式(需 Zotero 7 桌面开着,并在 设置→高级 勾选允许本地 API);只读免密钥' },
+      { k: 'ZOTERO_API_KEY', hint: '仅 Web API 模式需要,在 zotero.org/settings/keys 申请;本地模式留空' },
+      { k: 'ZOTERO_LIBRARY_ID', hint: '仅 Web API 模式需要,即你的 Zotero 用户 ID;本地模式留空' },
+    ],
+    needsSetup: true,
+    setupTag: '要 key/开桌面',
+    note: '连接 Zotero 文献库。Python 版,需先装 uv。两种模式:本地(ZOTERO_LOCAL=true,需 Zotero 7 桌面开着并开本地 API,只读免 key)或 Web API(填 KEY + LIBRARY_ID)。',
+    repo: '54yyyu/zotero-mcp',
+    docs: 'https://github.com/54yyyu/zotero-mcp',
+  },
 ];
 
 export function findBuiltinMcp(id) {
