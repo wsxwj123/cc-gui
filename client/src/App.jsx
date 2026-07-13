@@ -503,17 +503,39 @@ function nativeContextWindow(model) {
 }
 
 // ─── Right Panel (overlay) ────────────────────────────────────
-// 子代理终态收口的公共动作:标 done/error + 合成仍 pending 的子工具(U7:有些 provider
-// 不发子工具 tool_result,否则监控/展开视图永久转圈)。tnStatus 来自 task_notification.status。
-function finalizeAgent(st, agentId, tnStatus) {
+// 子代理终态收口的公共动作:标 done/error/stopped + 合成仍 pending 的子工具(U7:有些
+// provider 不发子工具 tool_result,否则监控/展开视图永久转圈)+【级联收尾嵌套子代理】。
+// tnStatus 来自 task_notification.status('completed'|'failed'|'stopped')或收口调用方语义。
+// 级联(fable 评估):能起 Task 的自定义 agent(orchestrator 等)会再起嵌套子代理 B,B 被建成
+// 独立 activeAgents 条目(无 status/无 sessionId),既不在 currentToolCalls 也不发以 B 为
+// tool_use_id 的 task_notification → 三条收尾路径都够不着 → 监控永久"工作中"(用户实报)。
+// B 一定是 A 的一个 toolCall(appendAgentTool(A,{id:B})),且 activeAgents[B] 存在 → 顺 toolCalls
+// 找 activeAgents 里的后代递归收尾即可精确定位、仅限本流后代、天然不跨窗格。visited 防环。
+// stopped 语义:tnStatus='stopped' 时,该 agent 若已 resultSeen(成功返回过)标 done,否则 stopped。
+function finalizeAgent(st, agentId, tnStatus, visited) {
+  visited = visited || new Set();
+  if (visited.has(agentId)) return;
+  visited.add(agentId);
   const ag = st.activeAgents[agentId];
   if (!ag) return;
-  const status = tnStatus === 'failed' ? 'error' : tnStatus === 'stopped' ? 'stopped' : (ag.resultIsError ? 'error' : 'done');
-  const patch = { status, finishedAt: Date.now() };
-  if (ag.toolCalls?.some((t) => !t.result)) {
-    patch.toolCalls = ag.toolCalls.map((t) => t.result ? t : { ...t, result: { content: '', isError: false, synthetic: true } });
+  if (!['done', 'error', 'stopped'].includes(ag.status)) {
+    const status = tnStatus === 'failed' ? 'error'
+      : tnStatus === 'stopped' ? (ag.resultSeen ? (ag.resultIsError ? 'error' : 'done') : 'stopped')
+      : (ag.resultIsError ? 'error' : 'done');
+    const patch = { status, finishedAt: Date.now() };
+    if (ag.toolCalls?.some((t) => !t.result)) {
+      patch.toolCalls = ag.toolCalls.map((t) => t.result ? t : { ...t, result: { content: '', isError: false, synthetic: true } });
+    }
+    st.upsertAgent(agentId, patch);
   }
-  st.upsertAgent(agentId, patch);
+  // 级联:本 agent 的 toolCalls 里 id 也是 activeAgents 条目的 = 它起的嵌套子代理,一并收尾。
+  const ag2 = st.activeAgents[agentId];
+  for (const tc of (ag2?.toolCalls || [])) {
+    if (tc?.id && st.activeAgents[tc.id] && !visited.has(tc.id)) {
+      const child = st.activeAgents[tc.id];
+      if (!['done', 'error', 'stopped'].includes(child.status)) finalizeAgent(st, tc.id, tnStatus, visited);
+    }
+  }
 }
 
 // Top-right panels — each key auto-wires a header icon (desktop + mobile menu)
@@ -4477,14 +4499,13 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       // Task/Agent id,不误伤其他 pane;已被 task_notification/顶层 result 标终态的此处 no-op。
       try {
         const _st = useStore.getState();
+        const _visited = new Set();
         for (const tc of currentToolCalls) {
-          if (tc && (tc.name === 'Task' || tc.name === 'Agent')) {
-            const _ag = _st.activeAgents[tc.id];
-            if (_ag && (_ag.status === 'running' || _ag.status === 'working' || _ag.status === 'starting' || _ag.status === 'streaming')) {
-              // resultSeen=子代理已成功返回(tool_result 到过),错误/断流收尾时标 done 而非 stopped
-              // (fable 审计#3:否则成功返回的子代理被误报"已停止")。未返回的才是真被停。
-              _st.upsertAgent(tc.id, { status: _ag.resultSeen ? (_ag.resultIsError ? 'error' : 'done') : 'stopped', finishedAt: Date.now() });
-            }
+          if (tc && (tc.name === 'Task' || tc.name === 'Agent') && _st.activeAgents[tc.id]) {
+            // finalizeAgent('stopped')级联:顶层 agent 若 resultSeen 标 done 否则 stopped,
+            // 并顺 toolCalls 递归收尾嵌套子代理(未 resultSeen→stopped)——修"嵌套子代理停止后
+            // 监控永久工作中"(fable 评估:嵌套 B 是独立 activeAgents 条目,不在 currentToolCalls)。
+            finalizeAgent(_st, tc.id, 'stopped', _visited);
           }
         }
       } catch {}
@@ -7785,6 +7806,7 @@ export default function App() {
   // sessionQueueKey that pane's composer sends with.
   const activeTabIndex = useStore((s) => s.activeTabIndex);
   const paneSessions = useStore((s) => s.paneSessions);
+  const paneCount = useStore((s) => s.paneCount);
   const customTitles = useStore((s) => s.customTitles);
   // U6:顶栏"项目/会话标题"也要跟随 AI 自动标题(custom > auto > firstPrompt),
   // 之前只读 customTitles → 自动标题生成后顶栏仍显示首条消息。
@@ -7795,7 +7817,14 @@ export default function App() {
   // 分屏焦点切换 / focus pane 的 session 变化时,让左侧 selectedProject 自动跟到
   // 对应项目,顺便 silent-refresh 该项目的 sessions 列表 — 这样用户切焦点时
   // 左侧能直接看到当前 pane 在用的会话(并被高亮),不用手动回项目列表找。
-  const activeProjectHash = activeSession?.projectHash;
+  //
+  // ⚠️ 用于本同步的活动会话【分屏下只认活动窗格,绝不回退到 selectedSession】:
+  // 删除聚焦窗格的会话时 handleDelete 把该窗格设 null,若沿用 activeSession 的
+  // `|| selectedSession` 回退,activeProjectHash 会跳到别的窗格(tab0)会话所属的
+  // 【另一个项目】→ 左侧列表莫名跳走(用户实报)。窗格空(null)时 activeProjectHash
+  // 为 undefined,effect 早退,selectedProject 留在原项目不动。非分屏仍用 selectedSession。
+  const syncActiveSession = paneCount > 1 ? ((paneSessions && paneSessions[activeTabIndex]) || null) : ((paneSessions && paneSessions[activeTabIndex]) || selectedSession);
+  const activeProjectHash = syncActiveSession?.projectHash;
   useEffect(() => {
     if (!activeProjectHash) return;
     const st = useStore.getState();
