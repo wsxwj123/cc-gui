@@ -282,7 +282,11 @@ export function installCmdFor(proxyUrl = null, method = 'native') { // export �
       return `call npm install -g @anthropic-ai/claude-code && powershell -NoProfile -Command "${psAppend}"`;
     }
     const rc = process.platform === 'darwin' ? '$HOME/.zshrc' : '$HOME/.bashrc';
-    return `npm install -g @anthropic-ai/claude-code && NPMBIN="$(npm prefix -g)/bin" && { case ":$PATH:" in *":$NPMBIN:"*) echo "PATH 已包含 $NPMBIN";; *) echo "export PATH=\\"$NPMBIN:\\$PATH\\"" >> ${rc} && echo "已把 $NPMBIN 写入 ${rc}(新开终端生效)";; esac; }`;
+    // EACCES 根治(用户实报 permission denied):官方 pkg 装的 node,npm 全局目录
+    // (/usr/local/lib/node_modules)归 root,裸 `npm install -g` 必失败。检测实际写入目录
+    // 不可写时改装到 ~/.npm-global(免 sudo;claude-resolver fixedCandidates 已含此落点,
+    // rc 未生效前 GUI 也能找到)。W 逐级回退:node_modules 可能尚不存在。
+    return `PREFIX="$(npm prefix -g)" && W="$PREFIX/lib/node_modules" && { [ -d "$W" ] || W="$PREFIX/lib"; } && { [ -d "$W" ] || W="$PREFIX"; } && { [ -w "$W" ] || { PREFIX="$HOME/.npm-global"; echo "npm 全局目录 $W 无写权限(permission denied 根因),改装到 $PREFIX(免 sudo)"; }; } && npm install -g --prefix "$PREFIX" @anthropic-ai/claude-code && NPMBIN="$PREFIX/bin" && { case ":$PATH:" in *":$NPMBIN:"*) echo "PATH 已包含 $NPMBIN";; *) echo "export PATH=\\"$NPMBIN:\\$PATH\\"" >> ${rc} && echo "已把 $NPMBIN 写入 ${rc}(新开终端生效)";; esac; }`;
   }
   if (process.platform === 'win32') {
     // O2: Windows 官方原生安装器(独立二进制,不需要 Node/npm,自动写 PATH)。
@@ -652,12 +656,12 @@ function envInstallCmd(target, proxyUrl = null, method = null) {
     `where winget >nul 2>nul & if errorlevel 1 ( echo winget 不可用,正在打开官方下载页... & start "" "${url}" ) else ( winget install -e --id ${id} )`;
   if (target === 'node') {
     if (win) return wingetOr('OpenJS.NodeJS.LTS', 'https://nodejs.org/en/download/');
-    if (mac) return 'brew install node || echo "未检测到 Homebrew,请到 https://nodejs.org 下载安装"';
+    if (mac) return 'brew install node || { echo "未检测到 Homebrew,已打开 Node.js 官网 —— 下载 pkg 双击安装即可(无需 Xcode CLT / Homebrew)"; open "https://nodejs.org/en/download/"; }';
     return 'sudo apt-get update && sudo apt-get install -y nodejs npm || echo "请用你的发行版包管理器安装 node"';
   }
   if (target === 'python') {
     if (win) return wingetOr('Python.Python.3.12', 'https://www.python.org/downloads/windows/');
-    if (mac) return 'brew install python || echo "未检测到 Homebrew,请到 https://www.python.org/downloads 下载安装"';
+    if (mac) return 'brew install python || { echo "未检测到 Homebrew,已打开 Python 官网 —— 下载 pkg 双击安装即可(无需 Xcode CLT / Homebrew)"; open "https://www.python.org/downloads/"; }';
     return 'sudo apt-get update && sudo apt-get install -y python3 python3-pip || echo "请用你的发行版包管理器安装 python3"';
   }
   if (target === 'git') {
