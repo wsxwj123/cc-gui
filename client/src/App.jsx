@@ -523,7 +523,10 @@ function finalizeAgent(st, agentId, tnStatus, visited) {
     // "interrupted"回执(resultSeen+resultIsError),那不是真失败——只有【确实成功返回过】
     // (resultSeen 且非 error)才标 done,其余一律 stopped(而非把 interrupt 回执误报成红色"错误")。
     const status = tnStatus === 'failed' ? 'error'
-      : tnStatus === 'stopped' ? (ag.resultSeen && !ag.resultIsError ? 'done' : 'stopped')
+      : tnStatus === 'stopped'
+        // 停止:仅【确实成功返回过】才 done。但 taskManaged agent 的 resultSeen 是"已派发提前回执"
+        // (非真完成,真完成只认 task_notification;能走到这说明 notification 未到=仍在跑)→ stopped。
+        ? (ag.resultSeen && !ag.resultIsError && !ag.taskManaged ? 'done' : 'stopped')
       : (ag.resultIsError ? 'error' : 'done');
     const patch = { status, finishedAt: Date.now() };
     if (ag.toolCalls?.some((t) => !t.result)) {
@@ -2917,6 +2920,11 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   const handleRollbackRef = useRef(null);
   const activeProcRef = useRef(null);
   const abortRef = useRef(null);
+  // killedRef:本回合的 abort 是否【真杀了服务端进程】(POST /chat/:pid/stop)。用户主动停止/加速/
+  // 编辑重发才置 true;后台化(backgroundify)与切会话(detach)只 abort 客户端流、进程继续跑,保持
+  // false。供 finally 区分:真杀进程才把后台化子代理(taskManaged)收 stopped,否则留 working 等
+  // 它自己的 task_notification(fable 复审 P1:turnAborted 不能只看 AbortError,detach 会误收)。
+  const killedRef = useRef(false);
   // pid 集合:被用户主动「停止」过的 chat 进程。停止后进程要等 close 才设 exitCode
   // (SIGTERM→SIGKILL 最多 5s),这期间 /agents/active 仍报 stoppable=true → backgroundPid
   // poll 会把它误判成「后台运行中」并闪黄条,甚至触发 auto-reattach 重连。记下已停的
@@ -3585,6 +3593,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     let orderedBlocks = [];  // [{ type, blockIndex, content?, toolCall? }, ...]
     let streamClosedNoticed = false; // CG-2:子代理打穿 canUseTool 通道的兜底提示,每轮只提示一次
     const taskIdToToolUse = {};  // task_started 建立 task_id→tool_use_id 映射,供只带 task_id 的 task_updated 用
+    let turnAborted = false;     // 用户主动停止(catch 到 AbortError)才 true;供 finally 区分"正常完成"(不收后台化子代理)与"停止"(收 stopped)
     let resultUsage = null;      // result 事件携带的本轮 usage(CLI 聚合口径)
     let resultCostUsd = null;    // result 事件携带的 total_cost_usd(CLI 权威成本)
     // 本次流真正归属的 sessionId:发起于真会话=闭包 sid;发起于 draft=init 事件里的新 sid。
@@ -3681,6 +3690,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
 
       const controller = new AbortController();
       abortRef.current = controller;
+      killedRef.current = false; // 本回合起始重置:除非随后真 POST /stop,否则 abort 不算杀进程
       const streamRes = await fetch(`/api/chat/${pid}/stream`, { signal: controller.signal });
       const reader = streamRes.body.getReader();
       const decoder = new TextDecoder();
@@ -3889,6 +3899,11 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           // task_started 建立 task_id↔tool_use_id 映射,供只带 task_id 的 task_updated 兜底。
           if (event.type === 'system' && event.subtype === 'task_started' && event.task_id && event.tool_use_id) {
             taskIdToToolUse[event.task_id] = event.tool_use_id;
+            // taskManaged:该 agent 有 task_notification 权威终态事件收尾,持久钉在条目上(跨回合/
+            // reattach 存活,不像 per-stream Set 重连即丢)。顶层 result 兜底一律不碰它;finally 仅在
+            // 【用户主动停止】时才收(进程被杀)。根治"后台化子代理(run_in_background,如深度调研)派发后
+            // 顶层 result / 回合 done 的 finally 把它误标 done,而它其实还在后台跑"(用户实报)。
+            { const _s0 = useStore.getState(); if (_s0.activeAgents[event.tool_use_id]) _s0.upsertAgent(event.tool_use_id, { taskManaged: true }); }
             // workflow 实时可见性(v0.2.212,实测定档):Workflow 工具起的独立 runtime agent 不发
             // 带 parent_tool_use_id 的 stream 增量,所以现有 activeAgents 对它建 0 条目、监控看不见;
             // 但父流【实时发】task_started(task_type:'local_workflow', workflow_name, tool_use_id)
@@ -3900,6 +3915,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
               if (!_st.activeAgents[event.tool_use_id]) {
                 _st.upsertAgent(event.tool_use_id, {
                   workflow: true,
+                  taskManaged: true,
                   name: event.workflow_name || 'workflow',
                   description: event.description || '',
                   status: 'working',
@@ -4391,15 +4407,19 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             resultCostUsd = event.total_cost_usd;
           }
           // 粗粒度兜底收口:主收口是 task_notification(精确、按 tool_use_id)。但不发 task_notification
-          // 的第三方 provider 靠这里——顶层成功 result(实测恒在所有子代理内容之后)把本回合还在跑的
-          // Task/Agent 一次性标 done + 合成 pending 子工具。已被 task_notification 标终态的此处 no-op。
-          // 状态 working→done 只跳一次,绝不回翻。
+          // 的第三方 provider 靠这里——顶层成功 result 把本回合还在跑的 Task/Agent 一次性标 done。
+          // ⚠️【taskManaged 的 agent(收到过 task_started)绝不在此收尾】(v0.2.214 根治用户实报"子代理
+          // 还在跑却显示已完成"):后台化子代理(run_in_background,如深度调研)派发后顶层 result 先返回、
+          // 子代理仍在后台跑,它真正的 task_notification 要几分钟后(甚至跨回合)才到——若在这里被顶层
+          // result 兜底标 done 就是【正在工作却显示已完成】。凡 taskManaged 交给 task_notification 权威
+          // 收尾(哪怕迟来),兜底只兜"根本不发 task 事件的第三方 provider"(其 agent 无 taskManaged)。
           if (event.type === 'result' && !event.is_error && !isCompact && !event.parent_tool_use_id) {
             const _st = useStore.getState();
             for (const tc of currentToolCalls) {
               if (!tc || (tc.name !== 'Task' && tc.name !== 'Agent')) continue;
               const _ag = _st.activeAgents[tc.id];
               if (!_ag) continue;
+              if (_ag.taskManaged) continue; // 有 task_notification 收尾 → 等它自己(后台化子代理迟来),别兜底误标
               if (['working', 'streaming', 'running', 'starting'].includes(_ag.status)) finalizeAgent(_st, tc.id, 'completed');
             }
           }
@@ -4483,6 +4503,10 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       // 永久丢失,切回 A 只剩 connecting 等新 delta(用户实报);且草稿豁免仍让 A 的孤儿在
       // 新建草稿 C 里串显。归属标记既保数据又断串扰,与 btw 的 ownerKey 同一机制。
       if (err.name === 'AbortError') {
+        // 仅【真杀进程】(POST /stop:停止/加速/编辑重发)才让 finally 收后台化子代理为 stopped;
+        // 后台化(backgroundify)与切会话(detach)只 abort 客户端流、进程继续跑 → killedRef=false →
+        // taskManaged 子代理留 working 等它自己的 task_notification(fable 复审 P1 根治)。
+        if (killedRef.current) turnAborted = true;
         // 用户主动「停止」:把已经流式显示的文本/思考/工具调用保留成一条气泡(标记
         // 已停止),而不是连同用户消息一起丢弃——以前这里静默清空,用户辛苦看到的半截
         // 回复+工具调用全没了,只剩刚发的消息(#6)。producedReply=true 让 finally 的
@@ -4531,6 +4555,12 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         const _visited = new Set();
         for (const tc of currentToolCalls) {
           if (tc && (tc.name === 'Task' || tc.name === 'Agent') && _st.activeAgents[tc.id]) {
+            // 【正常完成(非用户停止)时,taskManaged 的 agent 一律不在此收尾】(fable 审计 P0 根治):
+            // finally 每回合结束都跑(done-break 也走这里,非仅停止)——后台化子代理派发后本回合正常
+            // 结束,它还在后台跑、task_notification 几分钟后才到,若这里收尾就是"工作中却显示已完成"。
+            // 有 task_notification 收尾的(taskManaged)交给它自己;仅【用户主动停止 turnAborted】时进程被
+            // 杀,才把后台 agent 也收 stopped。不发 task 事件的第三方(无 taskManaged)照常兜底收尾。
+            if (!turnAborted && _st.activeAgents[tc.id].taskManaged) continue;
             // finalizeAgent('stopped')级联:顶层 agent 若 resultSeen 标 done 否则 stopped,
             // 并顺 toolCalls 递归收尾嵌套子代理(未 resultSeen→stopped)——修"嵌套子代理停止后
             // 监控永久工作中"(fable 评估:嵌套 B 是独立 activeAgents 条目,不在 currentToolCalls)。
@@ -4778,6 +4808,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     // 仍 stoppable)。持 SSE 的 activeProc 与不持 SSE 的 background 两条路径都要记。
     const pid = activeProcRef.current || backgroundPid;
     if (pid) stoppedPidsRef.current.add(String(pid));
+    killedRef.current = true; // 真杀进程 → finally 收后台化子代理为 stopped
     abortRef.current?.abort();
     if (activeProcRef.current) {
       fetch(`/api/chat/${activeProcRef.current}/stop`, { method: 'POST' });
@@ -4832,6 +4863,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
 
   // "⚡ 引导" — abort the in-flight chat and immediately fire the queued message.
   const handleAccelerate = useCallback(() => {
+    killedRef.current = true; // 引导=停当前回合(POST /stop)→ finally 收后台化子代理
     if (abortRef.current) try { abortRef.current.abort(); } catch {}
     if (activeProcRef.current) {
       fetch(`/api/chat/${activeProcRef.current}/stop`, { method: 'POST' }).catch(() => {});
@@ -5123,6 +5155,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
 
     // 3) abort any in-flight stream from this session so the resend doesn't
     //    collide with it.
+    killedRef.current = true; // 编辑重发=停当前回合(POST /stop)→ finally 收后台化子代理
     if (abortRef.current) { try { abortRef.current.abort(); } catch {} }
     if (activeProcRef.current) {
       fetch(`/api/chat/${activeProcRef.current}/stop`, { method: 'POST' }).catch(() => {});
@@ -5258,6 +5291,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         const trData = await tr.json().catch(() => ({}));
         if (!tr.ok) throw new Error(trData.error || tr.status);
 
+        killedRef.current = true; // 编辑重发(trim 分支)=停当前回合(POST /stop)→ finally 收后台化子代理
         if (abortRef.current) { try { abortRef.current.abort(); } catch {} }
         if (activeProcRef.current) {
           fetch(`/api/chat/${activeProcRef.current}/stop`, { method: 'POST' }).catch(() => {});
