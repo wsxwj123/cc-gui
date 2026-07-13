@@ -97,10 +97,14 @@ export function FileExplorerPanel() {
     if (!rootPath) return;
     // 起 watcher(幂等:server 对已监听的根只刷新 lastUsed)。失败(如平台不支持
     // 递归 watch)静默降级为手动刷新。
-    fetch('/api/files/watch', {
+    const watch = () => fetch('/api/files/watch', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ path: rootPath }),
     }).catch(() => {});
+    watch();
+    // 60s 心跳重发:server 重启 / LRU 淘汰(>5 项目)/ watcher error 自删后,原订阅
+    // 静默失效且无任何信号 → 周期性重发同一幂等 POST 自愈,顺带刷 lastUsed 降低被踢。
+    const heartbeat = setInterval(watch, 60_000);
     const pendingDirs = new Set();
     let timer = null;
     const onChange = (e) => {
@@ -133,6 +137,7 @@ export function FileExplorerPanel() {
     return () => {
       window.removeEventListener('cgui:project-file-change', onChange);
       if (timer) clearTimeout(timer);
+      clearInterval(heartbeat);
     };
   }, [rootPath, fetchDir]);
 
