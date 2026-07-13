@@ -43,8 +43,9 @@ const PRICES = {
   'deepseek-v3.1':               usd(0.14, 0.28, 0.0028, 0.14),    // 旧版,官方现表无单列→按 v4-flash 兜底
   'deepseek-v3.2-exp':           usd(0.14, 0.28, 0.0028, 0.14),    // 同上
 
-  // MiMo — 现仅 mimo-v2.5-pro。价格按 v2.5 系列参考(OpenRouter)。
-  'mimo-v2.5':                   usd(0.14, 0.28),
+  // MiMo 小米 — 2026-07-13 核实 mimo.mi.com 官方(CNY);cache 命中价极低单列
+  'mimo-v2.5':                   cny(1, 2, 0.02),
+  'mimo-v2.5-pro':               cny(3, 6, 0.025),  // 项目实际部署此档
 
   // Anthropic Claude — 2026-06-05 拉取 platform.claude.com 官方表
   'claude-opus-4-8':             usd(5, 25),       // 4.8 用新 tokenizer,可能多消耗 ~35% token
@@ -67,8 +68,8 @@ const PRICES = {
   'gemini-3.1-pro-preview':      usd(2.00, 12.00, 0.20),
   'gemini-3.5-flash':            usd(1.50, 9.00, 0.15),
 
-  // Moonshot Kimi — 2026-06-05 拉取 platform.kimi.com,CNY
-  'kimi-k2.6':                   cny(6.5, 27, 1.10),
+  // Moonshot Kimi — 2026-07-13 核实,微调贴合官方(CNY)
+  'kimi-k2.6':                   cny(6.8, 28.8, 1.15),
   'moonshot-v1-8k':              cny(2, 10),
   'moonshot-v1-32k':             cny(5, 20),
   'moonshot-v1-128k':            cny(10, 30),
@@ -80,18 +81,18 @@ const PRICES = {
   'grok-4.20-multi-agent-0309':  usd(1.25, 2.50, 1.25),
   'grok-build-0.1':              usd(1.00, 2.00, 1.00),
 
-  // 智谱 GLM — ⚠️ 官网定价 JS 渲染未抓到,以下用 2026 业内常识估值,以官网为准
-  'glm-4.6':                     cny(14, 56),       // 估值
-  'glm-4.5':                     cny(8, 32),        // 估值
-  'glm-4.5-air':                 cny(1, 4),         // 估值,air 版便宜
-  'glm-4-plus':                  cny(50, 50),       // 估值
-  'glm-z1-flash':                cny(1, 4),         // 估值
+  // 智谱 GLM — 2026-07-13 核实 bigmodel.cn 官方(4.6/4.5/air);plus/z1-flash 官方现役页无独立条目,保留估值
+  'glm-4.6':                     cny(4.3, 15.8),    // 官方 ≈$0.60/$2.20
+  'glm-4.5':                     cny(4.3, 15.8),    // 官方 ≈$0.60/$2.20
+  'glm-4.5-air':                 cny(1.4, 7.9),     // 官方 ≈$0.20/$1.10
+  'glm-4-plus':                  cny(50, 50),       // 估值(未抓到)
+  'glm-z1-flash':                cny(1, 4),         // 估值(未抓到)
 
-  // MiniMax — ⚠️ 官网文本模型定价未抓到,以下为估值,以官网为准
-  'MiniMax-M2':                  cny(8, 24),        // 估值
-  'MiniMax-M1':                  cny(8, 24),        // 估值
-  'MiniMax-Text-01':             cny(1, 8),         // 估值
-  'abab7-chat-preview':          cny(10, 30),       // 估值
+  // MiniMax — 2026-07-13 核实 platform.minimax.io 官方(M2/M1);Text-01/abab7 legacy 页已下,保留估值
+  'MiniMax-M2':                  cny(2.1, 8.4),     // 官方 ¥2.1/¥8.4,cache ¥0.21
+  'MiniMax-M1':                  cny(2.88, 15.8),   // 官方 ≈$0.40/$2.20
+  'MiniMax-Text-01':             cny(1, 8),         // 估值(legacy)
+  'abab7-chat-preview':          cny(10, 30),       // 估值(legacy)
 };
 
 // ── Z2: LiteLLM 远端单价表 ──────────────────────────────────────
@@ -151,7 +152,8 @@ function lookupPrice(model, provider) {
     return PRICES[target] || PRICES['deepseek-chat'];
   }
   if (hint === 'mimo') {
-    return PRICES['mimo-v2.5'] || null;
+    // 项目实际部署 mimo-v2.5-pro;provider.model 精确匹配优先,兜底 pro(原硬返回非-pro 偏低 3×)
+    return (provider && provider.model && PRICES[provider.model]) || PRICES['mimo-v2.5-pro'] || PRICES['mimo-v2.5'] || null;
   }
   // anthropic / bedrock / vertex / unknown → use claude name as displayed
   // LiteLLM 表优先(覆盖广、随上游更新),内置手抄表兜底。
