@@ -24,6 +24,8 @@ rfd = "0.15"
 
 [profile.release]
 codegen-units = 1
-lto = true
+# thin 替代 fat LTO:这个二进制只是壳(起 node + 系统 webview),运行时性能无关紧要;
+# fat LTO 在 Windows CI(4 核 MSVC)链接要多花数分钟,thin 体积仅略增。
+lto = "thin"
 opt-level = "s"
 strip = true

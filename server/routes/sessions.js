@@ -26,7 +26,7 @@ import {
 } from '../services/session-reader.js';
 import { claudeSpawn, cleanChildEnv, safeModelArg } from './chat.js';
 import { mkdirSync } from 'fs';
-import { resolveUnderHome } from '../utils/safe-path.js';
+import { resolveUnderHome, resolveWorkspacePath } from '../utils/safe-path.js';
 
 // L4: 附件元数据 sidecar — 写入位置与 session-reader 一致。
 const ATTACHMENTS_DIR = join(homedir(), '.claude-gui', 'attachments');
@@ -905,10 +905,13 @@ router.delete('/bak-files', async (req, res) => {
 // POST /api/project/purge { cwd } — 彻底清理某项目的 Claude 本地状态。
 // 危险操作:调用 CLI `claude project purge -y <path>`,删除 ~/.claude/projects/<hash>
 // 下的会话记录(.jsonl)与 memory/ 等 Claude 状态,不触碰项目源码(实测:-y 非交互,
-// 退出码 0,源目录文件保留)。cwd 经 resolveUnderHome 校验(必须在 $HOME 内、拒绝 .. 段)。
+// 退出码 0,源目录文件保留)。cwd 经 resolveWorkspacePath 校验:$HOME 内直接放行;$HOME 外
+// 但属于"已知 claude 工作区"(~/.claude/projects 有对应 hash)也放行——Windows 项目常在
+// D:\ 等其他盘,纯 $HOME 门禁让删除项目报"清理失败:outside $HOME"(用户实报);能出现在
+// 项目列表里的路径必然有 hash 目录,恰好被工作区例外覆盖。.. 段仍一律拒绝。
 router.post('/project/purge', async (req, res) => {
   let dir;
-  try { dir = resolveUnderHome(String(req.body?.cwd || ''), { label: 'cwd', requireCanonical: true }); }
+  try { dir = resolveWorkspacePath(String(req.body?.cwd || ''), { label: 'cwd', requireCanonical: true }); }
   catch (e) { return res.status(400).json({ error: e.message }); }
 
   let proc;

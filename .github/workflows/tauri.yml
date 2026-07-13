@@ -29,6 +29,11 @@ jobs:
         uses: actions/setup-node@v6
         with:
           node-version: 20
+          # npm 缓存:Windows 文件系统上两次 npm ci 是分钟级开销,缓存 npm store 显著缩短
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            client/package-lock.json
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
@@ -95,6 +100,8 @@ jobs:
         with:
           name: claude-gui-${{ matrix.os }}
           if-no-files-found: warn
+          # 安装包本身已是压缩格式(dmg UDZO / NSIS lzma),artifact 再压是纯浪费,存储级直传更快
+          compression-level: 0
           path: |
             src-tauri/target/release/bundle/dmg/*.dmg
             src-tauri/target/release/bundle/nsis/*.exe
