@@ -36,6 +36,36 @@ function withPrefsQueue(task) {
   return run;
 }
 
+// 会话删除时的 prefs GC:清掉四处按 sessionId 挂的残留(1M 标记/自动标题/自定义标题/
+// 置顶会话列表),否则 prefs.json 随删除只增不减,且被删 sid 的标记会污染未来复用同 id
+// 的水合。走 withPrefsQueue 与常规 PUT 串行;只对真有变化的类别广播(pinned 无广播类型,
+// 客户端只在挂载时拉取,残留 sid 无害)。
+export async function removeSessionFromPrefs(sessionId) {
+  if (typeof sessionId !== 'string' || !sessionId) return;
+  await withPrefsQueue(async () => {
+    const prefs = await loadPrefs();
+    const changed = { context1m: false, autoTitles: false, customTitles: false };
+    for (const key of ['context1m', 'autoTitles', 'customTitles']) {
+      const m = prefs[key];
+      if (m && typeof m === 'object' && sessionId in m) {
+        delete m[sessionId];
+        changed[key] = true;
+      }
+    }
+    let pinnedChanged = false;
+    const p = prefs.pinned;
+    if (p && Array.isArray(p.sessions) && p.sessions.includes(sessionId)) {
+      p.sessions = p.sessions.filter((id) => id !== sessionId);
+      pinnedChanged = true;
+    }
+    if (!changed.context1m && !changed.autoTitles && !changed.customTitles && !pinnedChanged) return;
+    await savePrefs(prefs);
+    if (changed.context1m) broadcast({ type: 'context-1m', sessions: prefs.context1m });
+    if (changed.autoTitles) broadcast({ type: 'auto-titles', titles: prefs.autoTitles });
+    if (changed.customTitles) broadcast({ type: 'custom-titles', titles: prefs.customTitles });
+  });
+}
+
 // GET /api/prefs/hidden-projects → { hidden: string[] }
 router.get('/prefs/hidden-projects', async (_req, res) => {
   const prefs = await loadPrefs();
