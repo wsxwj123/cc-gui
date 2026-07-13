@@ -405,8 +405,8 @@ function UsageDisplay({ usage, model, costUsd }) {
           className="ml-auto text-accent/80 font-mono"
           title={
             authoritative
-              ? 'CLI 上报的本轮实际成本（total_cost_usd，官方计费口径，按 1 USD ≈ 7.2 CNY 换算为人民币显示）'
-              : `本条估算（人民币，按 1 USD ≈ 7.2 CNY 换算）\n` +
+              ? 'CLI 上报的本轮实际成本（total_cost_usd，官方计费口径；美元计价模型按 1 USD ≈ 7.2 CNY 换算，人民币计价模型为原生定价）'
+              : `本条估算（人民币；美元计价模型按 1 USD ≈ 7.2 CNY 换算，人民币计价模型为原生定价）\n` +
                 `input ${formatCost(cost.breakdown.input)}\n` +
                 `output ${formatCost(cost.breakdown.output)}\n` +
                 `cache read ${formatCost(cost.breakdown.cacheRead)}\n` +
