@@ -639,6 +639,11 @@ router.post('/chat', async (req, res) => {
     keepAlive: wantKeepAlive,
     turnSubagentSeen: false, // 本回合是否起过子代理(关流去抖判据,回合级重置)
     idleTimer: null,
+    // 停止链路 #1:在飞子代理/后台任务薄记 { task_id → tool_use_id|true }。task_started 加、
+    // task_notification / task_updated(终态) 删。stop 时据此对每个活任务 query.stopTask()(优雅
+    // 停并发 stopped notification),并作为优雅窗"没停净"的正面证据:非空→收紧(等停/兜底 abort),
+    // 空→行为与改动前逐字节一致(零回归底座)。跨回合存活,不随回合级状态重置。
+    liveTasks: new Map(),
   };
   activeProcesses.set(procId, slot);
   slot.nulWatcher = startWinNulWatcher(workingDir);
@@ -764,6 +769,13 @@ router.post('/chat', async (req, res) => {
           for (const b of m.message.content) {
             if (b?.type === 'tool_use' && (b.name === 'Task' || b.name === 'Agent')) slot.turnSubagentSeen = true;
           }
+        }
+        // 停止链路 #1:薄记在飞任务(task_started 加,终态事件删)。task_notification 权威终态,
+        // task_updated 的 completed/failed/killed 亦算结束。SDK 事件都带 task_id(sdk.d.ts 4078-4159)。
+        if (m.type === 'system' && m.task_id) {
+          if (m.subtype === 'task_started') slot.liveTasks.set(m.task_id, m.tool_use_id || true);
+          else if (m.subtype === 'task_notification') slot.liveTasks.delete(m.task_id);
+          else if (m.subtype === 'task_updated' && ['completed', 'failed', 'killed'].includes(m.patch?.status)) slot.liveTasks.delete(m.task_id);
         }
         deliverLine(slot, line);
         if (m.type === 'result') {
@@ -904,7 +916,19 @@ router.post('/chat/:pid/stop', async (req, res) => {
   // #26:stop 一律走"彻底关闭"不转 idle —— 删除会话的先停后删链路靠"进程退净"判据,
   // 留个 idle 常驻进程会拖住轮询/事后复活刚删的 jsonl。空闲 slot 直接关流即退。
   slot.closing = true;
-  if (slot.idle) {
+  // 停止链路 #1(server 侧,替代旧 TODO):先对所有在飞子代理/后台任务 query.stopTask()——它承诺
+  // 发 task_notification status:stopped(sdk.d.ts:2440),UI 经 task-notification-bg 自动收尾。必须
+  // 在 interrupt / input.close 之前发,三者共用 stdin control 通道,先关会截断 stopTask 请求。
+  // 全 fire-and-forget + .catch(旧版 CLI 无此能力/竞态失败都不挂死,由下方 abort 兜底)。
+  const hadTasks = !!(slot.liveTasks && slot.liveTasks.size);
+  if (hadTasks) {
+    for (const tid of slot.liveTasks.keys()) {
+      try { slot.query?.stopTask?.(tid)?.catch?.(() => {}); } catch {}
+    }
+  }
+  // 空闲 slot 且无在飞任务:直接关流即退(原逻辑)。带活后台任务的 idle slot 不走此快路——
+  // CLI 为在飞任务保活不退(Stop hook background_tasks 证据),须走下方 stopTask+窗口+abort。
+  if (slot.idle && !hadTasks) {
     try { slot.input?.close(); } catch {}
     return res.json({ ok: true });
   }
@@ -915,17 +939,16 @@ router.post('/chat/:pid/stop', async (req, res) => {
     // pumpEnded——子代理回合 result 后有 4s 关流去抖(suggestion 3s),2s 窗内恒 false,
     // interrupt 成功也被硬杀;② 不能看"到过任何 result"——子代理回合的中间 result 在
     // stop 前早已出现,会误判已停而放跑还在继续的回合。
-    // TODO(停止链路 #1 server 侧,需真机复现后再收紧):已知第三个坑——回合里有
-    // run_in_background 后台化子代理时,interrupt 秒回的 interrupted result 会满足下面
-    // 判据而跳过 abort,但后台子代理活在 CLI 进程内、不经父流,进程没死继续跑。流内
-    // 探测不到它(result 后 input.close → generator 结束 → 再无事件可看),真判据需要
-    // 进程级探活(如子进程树是否静默)。此处历史上烧过六版,未经真机验证不动;当前由
-    // UI 侧兜底:taskManaged 条目的 stopped 是猜测态,迟到的真 task_notification
-    // (经 task-notification-bg 全局 WS 兜底送达)可覆盖为权威终态(App.jsx finalizeAgent)。
-    if (slot.pumpEnded || (slot.lastResultAt && slot.lastResultAt >= stopAt)) return;
+    // 停止链路 #1(第三个坑,已收紧):后台化子代理时 interrupt 秒回的 result 会满足前半判据,
+    // 但后台任务活在 CLI 进程内不经父流、进程没死。加 liveTasks.size===0 门控:仅当 stopTask
+    // 触发的 stopped notification 已泵到、薄记清空,才认优雅退出;仍有活任务=没停净→abort 杀整个
+    // CLI 进程(子代理是进程内循环,进程死即全停)。无后台任务时 size===0 恒真=原判据,逐字节一致。
+    const settled = slot.pumpEnded || (slot.lastResultAt && slot.lastResultAt >= stopAt);
+    const noLiveTasks = !slot.liveTasks || slot.liveTasks.size === 0;
+    if (settled && noLiveTasks) return;
     try { slot.abort?.abort(); } catch {}
     try { slot.input?.close(); } catch {}
-  }, 2000);
+  }, hadTasks ? 3000 : 2000);
   res.json({ ok: true });
 });
 
