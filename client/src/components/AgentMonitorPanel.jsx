@@ -677,13 +677,17 @@ export function AgentMonitorPanel() {
     setStoppingPid(pid);
     try {
       const r = await fetch(`/api/chat/${pid}/stop`, { method: 'POST' });
+      let killed = r.ok;
       if (r.status === 404) {
-        await fetch(`/api/processes/${pid}/kill`, { method: 'POST' });
+        const kr = await fetch(`/api/processes/${pid}/kill`, { method: 'POST' });
+        killed = kr.ok;
       }
       // 停止链路 #2:从监控面板杀进程 = 流外杀点。本会话的 SSE 以 reader done 正常
       // 结束(finally turnAborted=false),taskManaged 子代理条目没有任何收尾路径 →
       // 通知 App 顶层按 sessionId 级联收尾(finalizeSessionAgents,幂等)。
-      if (sessionId && (r.ok || r.status === 404)) {
+      // 仅在进程确实被杀掉(killed)时派发——kill 失败(500/pid 不在白名单)进程还活着,
+      // 派发会让非 taskManaged 子代理永久谎称 stopped(违背三态不谎称)。
+      if (sessionId && killed) {
         window.dispatchEvent(new CustomEvent('cgui:session-procs-killed', { detail: { sessionId } }));
       }
       await new Promise((r) => setTimeout(r, 400));

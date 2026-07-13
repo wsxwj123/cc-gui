@@ -6536,7 +6536,11 @@ export function ModelSelector({ compact = false, permKey = null }) {
   // `[1m]` 是 Claude Code 启用 1M 上下文的通用后缀约定。Anthropic(Opus 4.8/4.7/4.6、
   // Sonnet 4.6)和 MiMo(mimo-v2.5-pro[1m],见官方文档)等兼容 provider 都用它启用 1M。
   // 因此对所有模型开放——provider 若不支持会自行报错,由用户决定关掉。
-  const has1m = /\[1m\]/i.test(currentModel || '');
+  // 重装丢 pin 后 currentModel 回落全局(不带 [1m]),但服务端持久化的 context1mBySession
+  // 仍记着该会话开了 1M → 叠加进 has1m,否则下拉开关显示"关"、与徽章/发送(都读 context1m
+  // 兜底)反向,用户想关反而点成开。permKey 为 draft 时命中不到=不影响(draft 的 1m 在 pin 里)。
+  const ctx1m = useStore((s) => !!(permKey && s.context1mBySession[permKey]));
+  const has1m = ctx1m || /\[1m\]/i.test(currentModel || '');
   const toggle1m = () => {
     const base = (currentModel || '').replace(/\[1m\]/i, '');
     if (!base) return;
