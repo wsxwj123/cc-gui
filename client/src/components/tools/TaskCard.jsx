@@ -47,7 +47,10 @@ export function TaskCard({ toolCall }) {
   const isError = toolCall.result?.isError || agent?.status === 'error';
   // 已停止:主会话被停(stopped)或中断残骸。显示灰色断环,不再冒充绿勾"完成"。
   const isStopped = !isError && (agent?.status === 'stopped' || isInterrupted);
-  const isDone = !!toolCall.result || agentDone || isInterrupted;
+  // 完成判定(v0.2.210 勾号过早根治):有活跃 agent 时以 agent.status 为准(task_notification/
+  // 顶层 result 收口才 done),不被 tool_result 的 124ms 提前回执误点亮;无 agent(历史会话/
+  // 中断残骸/不发父流事件的 provider)才回退看 toolCall.result。
+  const isDone = agent ? agentDone : (!!toolCall.result || isInterrupted);
   const isWorking = !isDone;
 
   // P2: 历史会话重载后 activeAgents(内存态)是空的,点放大查不到数据 → 之前没反应。

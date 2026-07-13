@@ -503,6 +503,19 @@ function nativeContextWindow(model) {
 }
 
 // ─── Right Panel (overlay) ────────────────────────────────────
+// 子代理终态收口的公共动作:标 done/error + 合成仍 pending 的子工具(U7:有些 provider
+// 不发子工具 tool_result,否则监控/展开视图永久转圈)。tnStatus 来自 task_notification.status。
+function finalizeAgent(st, agentId, tnStatus) {
+  const ag = st.activeAgents[agentId];
+  if (!ag) return;
+  const status = tnStatus === 'failed' ? 'error' : tnStatus === 'stopped' ? 'stopped' : (ag.resultIsError ? 'error' : 'done');
+  const patch = { status, finishedAt: Date.now() };
+  if (ag.toolCalls?.some((t) => !t.result)) {
+    patch.toolCalls = ag.toolCalls.map((t) => t.result ? t : { ...t, result: { content: '', isError: false, synthetic: true } });
+  }
+  st.upsertAgent(agentId, patch);
+}
+
 // Top-right panels — each key auto-wires a header icon (desktop + mobile menu)
 // and its RightPanel body. Adding a key here is all the wiring needed.
 const PANEL_MAP = {
@@ -3546,6 +3559,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     let currentToolCalls = [];
     let orderedBlocks = [];  // [{ type, blockIndex, content?, toolCall? }, ...]
     let streamClosedNoticed = false; // CG-2:子代理打穿 canUseTool 通道的兜底提示,每轮只提示一次
+    const taskIdToToolUse = {};  // task_started 建立 task_id→tool_use_id 映射,供只带 task_id 的 task_updated 用
     let resultUsage = null;      // result 事件携带的本轮 usage(CLI 聚合口径)
     let resultCostUsd = null;    // result 事件携带的 total_cost_usd(CLI 权威成本)
     // 本次流真正归属的 sessionId:发起于真会话=闭包 sid;发起于 draft=init 事件里的新 sid。
@@ -3843,6 +3857,23 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           // 等待状态(G):API 可重试错误(限流/5xx/超时),SDK 自动退避重试 ——
           // { type:'system', subtype:'api_retry', attempt, max_retries, retry_delay_ms,
           //   error_status: number|null }(null=无 HTTP 响应的连接错误)。
+          // 子代理"勾号过早"根治(v0.2.210,实测+opencode 调研定案):CLI/SDK 为每个 Task 子代理
+          // 发【权威终态事件】——{type:'system', subtype:'task_notification', tool_use_id, status:
+          // completed|failed|stopped}(实测恒在子代理真正结束那刻、带我们的卡片键 tool_use_id)。
+          // 据此精确标 done,不再靠 tool_result(124ms 提前回执,竞态)也不靠 5s 猜时长。
+          // task_started 建立 task_id↔tool_use_id 映射,供只带 task_id 的 task_updated 兜底。
+          if (event.type === 'system' && event.subtype === 'task_started' && event.task_id && event.tool_use_id) {
+            taskIdToToolUse[event.task_id] = event.tool_use_id;
+          }
+          if (event.type === 'system' && event.subtype === 'task_notification') {
+            const tuid = event.tool_use_id || (event.task_id ? taskIdToToolUse[event.task_id] : null);
+            if (tuid) { const _st = useStore.getState(); if (_st.activeAgents[tuid]) finalizeAgent(_st, tuid, event.status); }
+          }
+          if (event.type === 'system' && event.subtype === 'task_updated'
+              && ['completed', 'failed', 'killed'].includes(event.patch?.status)) {
+            const tuid = event.tool_use_id || (event.task_id ? taskIdToToolUse[event.task_id] : null);
+            if (tuid) { const _st = useStore.getState(); if (_st.activeAgents[tuid]) finalizeAgent(_st, tuid, event.patch.status === 'killed' ? 'stopped' : event.patch.status); }
+          }
           if (event.type === 'system' && event.subtype === 'api_retry') {
             const waitS = Math.ceil((event.retry_delay_ms || 0) / 1000);
             const cause = event.error_status ? `HTTP ${event.error_status}` : '连接失败';
@@ -4119,24 +4150,18 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                     setProviderSwitchNotice({ text: '本回合先委派了子代理,SDK 的授权弹窗通道被打断(已知限制),计划/提问卡片这次弹不出。新开一条消息重做该操作即可正常。' });
                   }
                 }
-                // If this result closes a Task tool_use, mark the subagent done.
+                // 子代理"勾号过早"根治(v0.2.210 重构为 task_notification 权威信号):这条 tool_result
+                // 是"已派发"提前回执(实测开工 124ms 就返回,与子代理内容 flush 竞态)——【不标 done】,
+                // 只记结果文本 + resultSeen(供展示与错误路径判定),状态保持 working。真正标 done 由
+                // task_notification(带 tool_use_id、恒在子代理真正结束那刻,见 system 事件段)精确触发;
+                // 顶层 result 作粗粒度兜底(covers 不发 task_notification 的第三方 provider)。绝不回翻。
                 const store = useStore.getState();
                 if (store.activeAgents[block.tool_use_id]) {
                   store.upsertAgent(block.tool_use_id, {
-                    status: block.is_error ? 'error' : 'done',
-                    finishedAt: Date.now(), // 终态冻结时长:监控卡片据此停 tick
                     result: extractToolResultText(block.content),
+                    resultSeen: true,
+                    resultIsError: !!block.is_error,
                   });
-                  // U7 兜底:有些 CLI/provider 不往父流发子代理内部事件的 tool_result,
-                  // Task 已收尾时把仍 pending 的子工具统一标记完成,不再转圈。
-                  const ag = store.activeAgents[block.tool_use_id];
-                  if (ag?.toolCalls?.some((tc) => !tc.result)) {
-                    store.upsertAgent(block.tool_use_id, {
-                      toolCalls: ag.toolCalls.map((tc) => tc.result
-                        ? tc
-                        : { ...tc, result: { content: '', isError: false, synthetic: true } }),
-                    });
-                  }
                 }
                 // 后台任务:result 文本含 "ID: <shellId>" 和 "written to: <path>.output"。
                 // 提取后供 AgentMonitorPanel 直接 tail 那个文件(优先用返回的绝对路径原文)。
@@ -4314,6 +4339,19 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           if (event.type === 'result' && !isCompact && typeof event.total_cost_usd === 'number' && event.total_cost_usd > 0) {
             resultCostUsd = event.total_cost_usd;
           }
+          // 粗粒度兜底收口:主收口是 task_notification(精确、按 tool_use_id)。但不发 task_notification
+          // 的第三方 provider 靠这里——顶层成功 result(实测恒在所有子代理内容之后)把本回合还在跑的
+          // Task/Agent 一次性标 done + 合成 pending 子工具。已被 task_notification 标终态的此处 no-op。
+          // 状态 working→done 只跳一次,绝不回翻。
+          if (event.type === 'result' && !event.is_error && !isCompact && !event.parent_tool_use_id) {
+            const _st = useStore.getState();
+            for (const tc of currentToolCalls) {
+              if (!tc || (tc.name !== 'Task' && tc.name !== 'Agent')) continue;
+              const _ag = _st.activeAgents[tc.id];
+              if (!_ag) continue;
+              if (['working', 'streaming', 'running', 'starting'].includes(_ag.status)) finalizeAgent(_st, tc.id, 'completed');
+            }
+          }
           if (event.type === 'done') break;
         }
       }
@@ -4436,14 +4474,16 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       // 扫 currentToolCalls 而非 orderedBlocks(fable 审计):不发 partial stream_event
       // 的 provider(mimo 等)Task 只走整条 assistant 消息路径、reattach 后 orderedBlocks
       // 也拿不到断连前的 Task —— currentToolCalls 是两路径的并集。只动本流出现过的
-      // Task/Agent id,不误伤其他 pane;正常完成路径已被 tool_result 标 done,此处 no-op。
+      // Task/Agent id,不误伤其他 pane;已被 task_notification/顶层 result 标终态的此处 no-op。
       try {
         const _st = useStore.getState();
         for (const tc of currentToolCalls) {
           if (tc && (tc.name === 'Task' || tc.name === 'Agent')) {
             const _ag = _st.activeAgents[tc.id];
-            if (_ag && (_ag.status === 'running' || _ag.status === 'working' || _ag.status === 'starting')) {
-              _st.upsertAgent(tc.id, { status: 'stopped', finishedAt: Date.now() });
+            if (_ag && (_ag.status === 'running' || _ag.status === 'working' || _ag.status === 'starting' || _ag.status === 'streaming')) {
+              // resultSeen=子代理已成功返回(tool_result 到过),错误/断流收尾时标 done 而非 stopped
+              // (fable 审计#3:否则成功返回的子代理被误报"已停止")。未返回的才是真被停。
+              _st.upsertAgent(tc.id, { status: _ag.resultSeen ? (_ag.resultIsError ? 'error' : 'done') : 'stopped', finishedAt: Date.now() });
             }
           }
         }

@@ -441,7 +441,9 @@ function AgentCard({ agent }) {
                 <div key={tc.id || i} className="flex items-center gap-1.5 text-[11px] font-mono text-ink-soft py-0.5">
                   <span className="w-1 h-1 rounded-full bg-violet-400 shrink-0" />
                   <span>{tc.name}</span>
-                  {tc.result ? (tc.result.isError ? <span className="text-error">✗</span> : <span className="text-success">✓</span>) : <Loader2 size={10} className="text-ink-faint animate-spin" />}
+                  {tc.result ? (tc.result.isError ? <span className="text-error">✗</span> : <span className="text-success">✓</span>)
+                    : ['done', 'error', 'stopped'].includes(agent.status) ? <span className="text-success">✓</span>
+                    : <Loader2 size={10} className="text-ink-faint animate-spin" />}
                 </div>
               ))}
             </div>

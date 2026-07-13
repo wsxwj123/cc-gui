@@ -166,7 +166,7 @@ export function SkillsPanel() {
   }, [loadSavedRepos]);
   useEffect(() => { if (tab === 'import' && !activeRepo) loadOfficial(source); }, [tab, source, activeRepo, loadOfficial]);
 
-  const runImport = async (ids, overwrite, tag) => {
+  const runImport = async (ids, overwrite, tag, isUpdate = false) => {
     if (!ids.length) return;
     setBusy(tag); setNotice('');
     try {
@@ -185,11 +185,20 @@ export function SkillsPanel() {
         if (d.failed?.length) parts.push(`失败 ${d.failed.length}`);
         setNotice(parts.join(' · ') || '完成');
         setConflicts(null);
-        // 与技能更新/插件操作一致:导入成功弹窗提示(此前仅面板内小字,面板外看不到)。
-        if (d.imported?.length) {
-          setBusy(null);
+        setBusy(null); // 先停 spinner 再弹窗(否则用户不点弹窗则按钮无限转)
+        const names = (d.imported || []).map((x) => (typeof x === 'string' ? x : x.id || x.name)).filter(Boolean);
+        // 与技能更新/插件操作一致:导入/更新成功弹窗(此前仅面板内小字,面板外看不到)。
+        // 更新覆盖路径(已装·可更新覆盖)一律弹,给"已更新覆盖"专属文案,不再误报"已导入"。
+        if (isUpdate) {
           await confirmDialog(
-            `已导入 ${d.imported.length} 个技能${d.failed?.length ? `,${d.failed.length} 个失败` : ''}${d.imported?.length ? `\n(${d.imported.map((x) => (typeof x === 'string' ? x : x.id || x.name)).filter(Boolean).slice(0, 8).join('、')})` : ''}`,
+            d.imported?.length
+              ? `已用最新版本覆盖技能「${names.join('、') || ids.join('、')}」`
+              : (d.failed?.length ? `更新失败:${(d.failed[0]?.error) || '未知错误'}` : `「${ids.join('、')}」无变化`),
+            { confirmText: '知道了' },
+          );
+        } else if (d.imported?.length) {
+          await confirmDialog(
+            `已导入 ${d.imported.length} 个技能${d.failed?.length ? `,${d.failed.length} 个失败` : ''}${names.length ? `\n(${names.slice(0, 8).join('、')})` : ''}`,
             { confirmText: '知道了' },
           );
         }
@@ -402,7 +411,7 @@ export function SkillsPanel() {
                     {s.version && <span className="shrink-0 text-[10px] px-1 py-px bg-canvas-deep text-ink-faint rounded font-mono">v{s.version}</span>}
                     <SkillCopyBtn name={s.id} />
                     {s.installed ? (
-                      <button onClick={(e) => { e.stopPropagation(); runImport([s.id], true, s.id); }} disabled={!!busy}
+                      <button onClick={(e) => { e.stopPropagation(); runImport([s.id], true, s.id, true); }} disabled={!!busy}
                         className="shrink-0 text-[10px] px-2 py-0.5 rounded border border-canvas-deep text-ink-faint hover:text-ink hover:bg-canvas-deep flex items-center gap-1 disabled:opacity-50" title="已安装 — 点击用该源最新版本覆盖">
                         {busy === s.id ? <Loader2 size={10} className="animate-spin" /> : <Check size={10} className="text-success" />}已装·可更新覆盖
                       </button>
