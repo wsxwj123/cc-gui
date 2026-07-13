@@ -512,13 +512,20 @@ function nativeContextWindow(model) {
 // B 一定是 A 的一个 toolCall(appendAgentTool(A,{id:B})),且 activeAgents[B] 存在 → 顺 toolCalls
 // 找 activeAgents 里的后代递归收尾即可精确定位、仅限本流后代、天然不跨窗格。visited 防环。
 // stopped 语义:tnStatus='stopped' 时,该 agent 若已 resultSeen(成功返回过)标 done,否则 stopped。
-function finalizeAgent(st, agentId, tnStatus, visited) {
+function finalizeAgent(st, agentId, tnStatus, visited, authoritative) {
   visited = visited || new Set();
   if (visited.has(agentId)) return;
   visited.add(agentId);
   const ag = st.activeAgents[agentId];
   if (!ag) return;
-  if (!['done', 'error', 'stopped'].includes(ag.status)) {
+  const terminal = ['done', 'error', 'stopped'].includes(ag.status);
+  // 停止链路 #1(UI 侧):taskManaged 条目的 'stopped' 只是猜测——interrupt 后前端假定
+  // 进程已被杀(killedRef)/流外杀点批量收尾,但 /stop 的 2s 优雅窗可能被 interrupt 秒回的
+  // interrupted result 骗过而跳过 abort,后台化子代理实际还在跑。真 task_notification
+  // (authoritative=true,仅两条 task_notification 路径与 task_updated 终态传入)才是权威
+  // 终态,允许覆盖 stopped 为真实状态。done/error 不覆盖(那是真终态,不回翻)。
+  const canOverride = !!authoritative && !!ag.taskManaged && ag.status === 'stopped';
+  if (!terminal) {
     // stopped 语义(fable A 实测修正):用户主动停止时,CLI 给顶层 agent 发的是 is_error 的
     // "interrupted"回执(resultSeen+resultIsError),那不是真失败——只有【确实成功返回过】
     // (resultSeen 且非 error)才标 done,其余一律 stopped(而非把 interrupt 回执误报成红色"错误")。
@@ -533,6 +540,12 @@ function finalizeAgent(st, agentId, tnStatus, visited) {
       patch.toolCalls = ag.toolCalls.map((t) => t.result ? t : { ...t, result: { content: '', isError: false, synthetic: true } });
     }
     st.upsertAgent(agentId, patch);
+  } else if (canOverride) {
+    // 覆盖路径直接按通知 status 映射,不掺 resultIsError——interrupt 回执会把
+    // resultIsError 置真,若沿用上面的 completed→(resultIsError?error:done) 逻辑,
+    // 真完成会被误标 error。状态没变(stopped→stopped)不写,避免无谓刷新 finishedAt。
+    const status = tnStatus === 'failed' ? 'error' : tnStatus === 'completed' ? 'done' : 'stopped';
+    if (status !== ag.status) st.upsertAgent(agentId, { status, finishedAt: Date.now() });
   }
   // 级联:本 agent 的 toolCalls 里 id 也是 activeAgents 条目的 = 它起的嵌套子代理,一并收尾。
   const ag2 = st.activeAgents[agentId];
@@ -3965,12 +3978,13 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           }
           if (event.type === 'system' && event.subtype === 'task_notification') {
             const tuid = event.tool_use_id || (event.task_id ? taskIdToToolUse[event.task_id] : null);
-            if (tuid) { const _st = useStore.getState(); if (_st.activeAgents[tuid]) finalizeAgent(_st, tuid, event.status); }
+            // authoritative=true:权威终态,允许覆盖 taskManaged 的猜测性 stopped(停止链路 #1 UI 侧)。
+            if (tuid) { const _st = useStore.getState(); if (_st.activeAgents[tuid]) finalizeAgent(_st, tuid, event.status, undefined, true); }
           }
           if (event.type === 'system' && event.subtype === 'task_updated'
               && ['completed', 'failed', 'killed'].includes(event.patch?.status)) {
             const tuid = event.tool_use_id || (event.task_id ? taskIdToToolUse[event.task_id] : null);
-            if (tuid) { const _st = useStore.getState(); if (_st.activeAgents[tuid]) finalizeAgent(_st, tuid, event.patch.status === 'killed' ? 'stopped' : event.patch.status); }
+            if (tuid) { const _st = useStore.getState(); if (_st.activeAgents[tuid]) finalizeAgent(_st, tuid, event.patch.status === 'killed' ? 'stopped' : event.patch.status, undefined, true); }
           }
           if (event.type === 'system' && event.subtype === 'api_retry') {
             const waitS = Math.ceil((event.retry_delay_ms || 0) / 1000);
@@ -7874,7 +7888,8 @@ export default function App() {
       const { tool_use_id, status } = e.detail || {};
       if (!tool_use_id) return;
       const st = useStore.getState();
-      if (st.activeAgents[tool_use_id]) finalizeAgent(st, tool_use_id, status);
+      // authoritative=true:真 task_notification 允许覆盖 taskManaged 的猜测性 stopped(#1 UI 侧)。
+      if (st.activeAgents[tool_use_id]) finalizeAgent(st, tool_use_id, status, undefined, true);
     };
     // 停止链路 #2:监控面板杀 Claude 子进程后按 sessionId 级联收尾(流外杀点无流内信号)。
     const onSessionProcsKilled = (e) => {

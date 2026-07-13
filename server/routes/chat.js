@@ -915,6 +915,13 @@ router.post('/chat/:pid/stop', async (req, res) => {
     // pumpEnded——子代理回合 result 后有 4s 关流去抖(suggestion 3s),2s 窗内恒 false,
     // interrupt 成功也被硬杀;② 不能看"到过任何 result"——子代理回合的中间 result 在
     // stop 前早已出现,会误判已停而放跑还在继续的回合。
+    // TODO(停止链路 #1 server 侧,需真机复现后再收紧):已知第三个坑——回合里有
+    // run_in_background 后台化子代理时,interrupt 秒回的 interrupted result 会满足下面
+    // 判据而跳过 abort,但后台子代理活在 CLI 进程内、不经父流,进程没死继续跑。流内
+    // 探测不到它(result 后 input.close → generator 结束 → 再无事件可看),真判据需要
+    // 进程级探活(如子进程树是否静默)。此处历史上烧过六版,未经真机验证不动;当前由
+    // UI 侧兜底:taskManaged 条目的 stopped 是猜测态,迟到的真 task_notification
+    // (经 task-notification-bg 全局 WS 兜底送达)可覆盖为权威终态(App.jsx finalizeAgent)。
     if (slot.pumpEnded || (slot.lastResultAt && slot.lastResultAt >= stopAt)) return;
     try { slot.abort?.abort(); } catch {}
     try { slot.input?.close(); } catch {}
