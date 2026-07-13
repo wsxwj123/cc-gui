@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { readdir, stat, lstat, readFile, realpath, writeFile, rm, unlink } from 'fs/promises';
-import { createReadStream } from 'fs';
+import { createReadStream, watch as fsWatch } from 'fs';
+import { broadcast } from '../broadcast.js';
 import { join, resolve, relative, extname, isAbsolute } from 'path';
 import { homedir, platform } from 'os';
 import { execFile } from 'child_process';
@@ -324,6 +325,68 @@ router.post('/files/delete', async (req, res) => {
     // maxRetries:Windows 上文件被占用(刚"用默认 App 打开"又删)EBUSY/EPERM 概率高,直接报错。
     await rm(real, { recursive: true, force: false, maxRetries: 3, retryDelay: 100 });
     res.json({ ok: true, path: real });
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
+// ── 项目目录实时监听 ─────────────────────────────────────────────
+// 文件浏览器打开时 POST 项目根,起一个递归 fs.watch(mac FSEvents / Windows
+// ReadDirectoryChangesW,均为原生递归,开销小),事件按根聚合去抖 500ms 后走
+// 全局 WS 广播 { type: 'project-file-change', root, paths },前端只刷已展开
+// 目录。全局 ~/.claude watcher(file-watcher.js)不覆盖项目工作目录,故必须在
+// 这里单独监听。
+// ponytail: 无 unwatch 端点,watcher 常驻靠 LRU 上限(5 个根)回收;若用户并行
+// 开超过 5 个项目的文件树,最久未 watch 的根停止实时刷新(手动刷新仍可用)。
+const PROJECT_WATCHERS = new Map(); // root -> { watcher, pending:Set, timer, lastUsed }
+const MAX_PROJECT_WATCHERS = 5;
+const WATCH_FLUSH_MS = 500;
+const WATCH_MAX_PATHS = 200; // 单次 flush 上限(npm install 等风暴场景丢弃多余路径)
+
+function flushProjectEvents(root) {
+  const w = PROJECT_WATCHERS.get(root);
+  if (!w || !w.pending.size) return;
+  const paths = [...w.pending];
+  w.pending.clear();
+  broadcast({ type: 'project-file-change', root, paths });
+}
+
+router.post('/files/watch', async (req, res) => {
+  try {
+    const real = await safePath(req.body?.path);
+    const st = await stat(real);
+    if (!st.isDirectory()) return res.status(400).json({ error: 'not a directory' });
+    const existing = PROJECT_WATCHERS.get(real);
+    if (existing) { existing.lastUsed = Date.now(); return res.json({ ok: true, root: real }); }
+    // LRU 淘汰最久未用的根
+    if (PROJECT_WATCHERS.size >= MAX_PROJECT_WATCHERS) {
+      let oldest = null;
+      for (const [k, v] of PROJECT_WATCHERS) if (!oldest || v.lastUsed < PROJECT_WATCHERS.get(oldest).lastUsed) oldest = k;
+      if (oldest) {
+        const o = PROJECT_WATCHERS.get(oldest);
+        try { o.watcher.close(); } catch {}
+        if (o.timer) clearTimeout(o.timer);
+        PROJECT_WATCHERS.delete(oldest);
+      }
+    }
+    let watcher;
+    try {
+      watcher = fsWatch(real, { recursive: true }, (_evt, name) => {
+        const w = PROJECT_WATCHERS.get(real);
+        if (!w) return;
+        if (w.pending.size < WATCH_MAX_PATHS) w.pending.add(name ? join(real, name) : real);
+        if (!w.timer) w.timer = setTimeout(() => { w.timer = null; flushProjectEvents(real); }, WATCH_FLUSH_MS);
+      });
+      watcher.on('error', () => { // 目录被删/权限变化:关掉并移除,前端退回手动刷新
+        const w = PROJECT_WATCHERS.get(real);
+        if (w) { try { w.watcher.close(); } catch {} if (w.timer) clearTimeout(w.timer); PROJECT_WATCHERS.delete(real); }
+      });
+    } catch (e) {
+      // Linux 不支持 recursive fs.watch 等:实时刷新降级为不可用,不报错砸面板
+      return res.json({ ok: false, reason: e.message });
+    }
+    PROJECT_WATCHERS.set(real, { watcher, pending: new Set(), timer: null, lastUsed: Date.now() });
+    res.json({ ok: true, root: real });
   } catch (err) {
     res.status(err.status || 500).json({ error: err.message });
   }

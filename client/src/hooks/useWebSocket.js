@@ -70,6 +70,13 @@ export function useWebSocket() {
                 window.dispatchEvent(new CustomEvent('cgui:sessions-changed', { detail: { path: data.path } }));
               }
               break;
+            case 'project-file-change':
+              // 项目工作目录文件变动(server /api/files/watch 的递归 watcher,已 500ms
+              // 聚合)。转成 window 事件让 FileExplorerPanel 刷新已展开目录。
+              window.dispatchEvent(new CustomEvent('cgui:project-file-change', {
+                detail: { root: data.root, paths: data.paths || [] },
+              }));
+              break;
             case 'permission:request': {
               const req = data.request;
               // 诊断 Bug1(授权后工具仍不执行 / 不弹窗):打印每次收到的请求 + 命中分支。

@@ -86,6 +86,56 @@ export function FileExplorerPanel() {
     fetchDir(rootPath);
   }, [rootPath, fetchDir]);
 
+  // ── 实时刷新:订阅项目目录 fs 变动(server 递归 watcher → WS → window 事件)──
+  // 只刷"已展开且已缓存"的目录:变动路径的父目录(或路径自身是目录)命中才 refetch,
+  // 不做全树刷新。前端再聚合 300ms 去抖(server 侧已按根 500ms 聚合一次)。
+  const expandedRef = useRef(expanded);
+  expandedRef.current = expanded;
+  const dirsRef = useRef(dirs);
+  dirsRef.current = dirs;
+  useEffect(() => {
+    if (!rootPath) return;
+    // 起 watcher(幂等:server 对已监听的根只刷新 lastUsed)。失败(如平台不支持
+    // 递归 watch)静默降级为手动刷新。
+    fetch('/api/files/watch', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: rootPath }),
+    }).catch(() => {});
+    const pendingDirs = new Set();
+    let timer = null;
+    const onChange = (e) => {
+      const { root, paths } = e.detail || {};
+      if (!root || !Array.isArray(paths)) return;
+      const parentOf = (p) => p.replace(/[/\\][^/\\]*$/, ''); // 按 / 和 \ 切,兼容 Windows
+      for (const p of paths) {
+        // dirs 缓存 key 是混合形态:根 key 用面板的 rootPath(lexical),子目录 key 用
+        // /files/list 返回的 realpath 前缀。广播路径带 realpath 前缀 → 原样 + 重定基到
+        // rootPath 两种形态都当候选;外项目广播不会命中本面板缓存 key,天然被过滤。
+        const cands = [p, parentOf(p)];
+        if (root !== rootPath && p.startsWith(root)) {
+          const rp = rootPath + p.slice(root.length);
+          cands.push(rp, parentOf(rp));
+        }
+        for (const cand of cands) {
+          if (expandedRef.current.has(cand) && dirsRef.current[cand]) pendingDirs.add(cand);
+        }
+      }
+      if (pendingDirs.size && !timer) {
+        timer = setTimeout(() => {
+          timer = null;
+          const dirsToFetch = [...pendingDirs];
+          pendingDirs.clear();
+          dirsToFetch.forEach((d) => fetchDir(d));
+        }, 300);
+      }
+    };
+    window.addEventListener('cgui:project-file-change', onChange);
+    return () => {
+      window.removeEventListener('cgui:project-file-change', onChange);
+      if (timer) clearTimeout(timer);
+    };
+  }, [rootPath, fetchDir]);
+
   const toggle = (path, isDir) => {
     if (!isDir) return;
     setExpanded((prev) => {
