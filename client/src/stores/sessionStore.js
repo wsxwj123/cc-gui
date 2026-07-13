@@ -164,6 +164,10 @@ export const useStore = create((set, get) => ({
   // as the GLOBAL default (resolved from settings.json / WS); these maps hold
   // each session's explicit override. A session with no entry uses the default.
   modelBySession: readLs('cgui-model-by-session', {}),
+  // 开了 1M 上下文的会话 { [sessionId]: true }。服务端持久化(prefs.json)+ 本地镜像:
+  // [1m] 后缀只活在 modelBySession 的 pin 里,重装丢 localStorage 后历史消息恢复不了
+  // 它(jsonl 的 model 字段不带后缀)→ 启动时从服务端水合,解析模型时兜底补回后缀。
+  context1mBySession: readLs('cgui-context-1m', {}),
   // Per-SESSION reasoning effort (cgui-effort-by-session)。与 model/permission 一致:
   // 按会话隔离 + 持久化,同一模型在不同会话可设不同力度、互不影响。无 entry 的会话
   // 回落全局 `effort`(最终 settings.json env)。切模型时若该档不被新模型支持,CLI 自动
@@ -451,9 +455,57 @@ export const useStore = create((set, get) => ({
       // 回退到这个被改过的全局值 → 看起来"所有窗格共用模型"。单窗格显示靠 pinnedModel
       // (= modelBySession[key]) 已即时反映,无需写全局。与 setEffortFor 同构。
       set({ modelBySession: map });
+      // [1m] 标记同步到服务端(pin 是唯一携带 [1m] 的地方,localStorage 重装即丢,
+      // 服务端 prefs 兜底)。所有 pin 写入都流经这里=单一同步点;draft key 无稳定
+      // sessionId 不同步(migrateSessionKey 落到真 sid 时补)。
+      get().syncContext1m(key, model);
     } else {
       set({ currentModel: model });
     }
+  },
+  // key 为真 sessionId 时,把该会话的 1M 开关状态(model 是否带 [1m])同步到
+  // 本地镜像 + 服务端 /api/prefs/context-1m。状态没变不发请求。
+  syncContext1m: (key, model) => {
+    if (!key || key.startsWith('draft-')) return;
+    const on = /\[1m\]/i.test(model || '');
+    const cur = get().context1mBySession || {};
+    if (!!cur[key] === on) return;
+    const next = { ...cur };
+    if (on) next[key] = true; else delete next[key];
+    writeLs('cgui-context-1m', next);
+    set({ context1mBySession: next });
+    fetch('/api/prefs/context-1m', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sessionId: key, on }),
+    }).catch(() => {});
+  },
+  // 启动水合:服务端为准,本地多出的旧条目合并回推(同 hydrateCustomTitles 模式)。
+  hydrateContext1m: async () => {
+    try {
+      const res = await fetch('/api/prefs/context-1m');
+      const d = await res.json();
+      const server = (d && d.sessions && typeof d.sessions === 'object') ? d.sessions : {};
+      const legacy = readLs('cgui-context-1m', {}) || {};
+      const merged = { ...legacy, ...server };
+      writeLs('cgui-context-1m', merged);
+      set({ context1mBySession: merged });
+      for (const sid of Object.keys(legacy)) {
+        if (!(sid in server)) {
+          fetch('/api/prefs/context-1m', {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ sessionId: sid, on: true }),
+          }).catch(() => {});
+        }
+      }
+    } catch {}
+  },
+  // ws 'context-1m' 广播:全量替换(删除也要传播)。
+  applyRemoteContext1m: (sessions) => {
+    const next = (sessions && typeof sessions === 'object') ? sessions : {};
+    writeLs('cgui-context-1m', next);
+    set({ context1mBySession: next });
   },
   getModelFor: (key) => (key && get().modelBySession[key]) || get().currentModel,
   // Drop every per-session model pin. Called on a provider switch: those pins
@@ -464,7 +516,15 @@ export const useStore = create((set, get) => ({
     // U1/U4:清 pin 的同时推进 provider 代际戳,使发送路径不再信任此前的历史模型。
     const now = Date.now();
     writeLs('cgui-provider-epoch', now);
-    set({ modelBySession: {}, providerEpoch: now });
+    // 1M 标记随 pin 一起清(切 provider 语义:旧 provider 的 1M 支持不可假设迁移),
+    // 服务端全表同步清空,否则水合兜底会把 [1m] 又补回来。
+    writeLs('cgui-context-1m', {});
+    set({ modelBySession: {}, providerEpoch: now, context1mBySession: {} });
+    fetch('/api/prefs/context-1m', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ clear: true }),
+    }).catch(() => {});
   },
   // U3/V1:记录 /context 实测结果(分子+分母),徽章优先采用。
   setCtxMeasured: (sessionId, payload) => set((s) => (
@@ -503,6 +563,8 @@ export const useStore = create((set, get) => ({
     if (mbs[fromKey] != null && (force || mbs[toKey] == null)) {
       const m = { ...mbs, [toKey]: mbs[fromKey] }; delete m[fromKey];
       writeLs('cgui-model-by-session', m); patch.modelBySession = m;
+      // draft 期开的 [1m] 落到真 sessionId 时补同步服务端标记(draft key 不同步)。
+      get().syncContext1m(toKey, mbs[fromKey]);
     }
     const pms = get().permissionModeBySession;
     if (pms[fromKey] != null && (force || pms[toKey] == null)) {

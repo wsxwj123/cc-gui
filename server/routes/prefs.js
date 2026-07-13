@@ -160,6 +160,40 @@ router.put('/prefs/auto-titles', async (req, res) => {
   }
 });
 
+// 1M 上下文会话标记 { [sessionId]: true }。[1m] 后缀只存在前端 localStorage 的
+// 会话模型 pin 里,重装/清缓存即丢(jsonl 历史消息的 model 字段不带该后缀,无法从
+// 历史恢复)→ 服务端持久化这一位,前端启动水合兜底。
+// GET /api/prefs/context-1m → { sessions: { [sessionId]: true } }
+router.get('/prefs/context-1m', async (_req, res) => {
+  const prefs = await loadPrefs();
+  const sessions = (prefs.context1m && typeof prefs.context1m === 'object') ? prefs.context1m : {};
+  res.json({ sessions });
+});
+
+// PUT /api/prefs/context-1m
+//   { sessionId, on:bool } → per-key MERGE(on=false 删除该 key)
+//   { clear:true }         → 清空全表(切 provider 时与前端 clearModelOverrides 对齐)
+// 广播全量 map 供多端收敛(同 custom-titles 模式)。
+router.put('/prefs/context-1m', async (req, res) => {
+  const { sessionId, on, clear } = req.body || {};
+  if (!clear && (typeof sessionId !== 'string' || !sessionId)) {
+    return res.status(400).json({ error: 'sessionId 必须是非空字符串(或传 clear:true)' });
+  }
+  try {
+    const prefs = await loadPrefs();
+    let map = (prefs.context1m && typeof prefs.context1m === 'object') ? prefs.context1m : {};
+    if (clear) map = {};
+    else if (on) map[sessionId] = true;
+    else delete map[sessionId];
+    prefs.context1m = map;
+    await savePrefs(prefs);
+    broadcast({ type: 'context-1m', sessions: map });
+    res.json({ ok: true, sessions: map });
+  } catch (e) {
+    res.status(500).json({ error: '写入 1M 标记失败：' + e.message });
+  }
+});
+
 // 置顶(pin):项目 + 会话各一份 id 列表,服务端共享(同 hidden-projects 跨设备一致)。
 // 按 kind 单键合并,避免「置顶项目」的 PUT 覆盖掉「置顶会话」列表(反之亦然)。
 router.get('/prefs/pinned', async (_req, res) => {

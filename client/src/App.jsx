@@ -2850,7 +2850,13 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     if (selectedSession?.model && !providerEpoch) return selectedSession.model;
     return null;
   }, [selectedSession?.model, messages, providerEpoch]);
-  const currentModel = pinnedModel || historyModel || globalModel;
+  // 服务端持久化的 1M 标记兜底:重装丢 localStorage 后 pin 没了,historyModel 恢复的是
+  // 不带 [1m] 的 API 模型 id → 若该会话标记过 1M 且解析结果没带后缀,补回。pin 存在且
+  // 不带 [1m](用户显式关掉)时 setModelFor 的 syncContext1m 已把标记清掉,不会误补。
+  const context1mFlag = useStore((s) => !!(selectedSession?.sessionId && s.context1mBySession[selectedSession.sessionId]));
+  const resolvedModelBase = pinnedModel || historyModel || globalModel;
+  const currentModel = (context1mFlag && resolvedModelBase && !/\[1m\]/i.test(resolvedModelBase))
+    ? resolvedModelBase + '[1m]' : resolvedModelBase;
   const modelBySession = useStore((s) => s.modelBySession);
   const containerRef = useRef(null);
   const [autoScroll, setAutoScroll] = useState(true);
@@ -3624,7 +3630,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       const _pin = useStore.getState().modelBySession[sessionQueueKey];
       const _hist = resolveHistModel(getLocalMessages(), useStore.getState().providerEpoch || 0);
       const _stM = useStore.getState();
-      const currentModel = resolveSendModel({
+      let currentModel = resolveSendModel({
         pin: _pin,
         hist: _hist,
         globalModel: _stM.currentModel,
@@ -3632,6 +3638,11 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         customModels: _stM.customModels,
         officialAnthropic: (_stM.currentProvider?.providerHint || 'anthropic') === 'anthropic',
       });
+      // 1M 标记兜底(与徽章显示解析同一规则):重装丢 pin 后,发送也要带回 [1m],
+      // 否则显示 1M 而实际按 200K 发。用 selectedSession?.sessionId(勿用下方 const sid,
+      // TDZ)。pin 显式关 1m 时 syncContext1m 已清标记,不会误补。
+      const _c1m = selectedSession?.sessionId && _stM.context1mBySession?.[selectedSession.sessionId];
+      if (_c1m && currentModel && !/\[1m\]/i.test(currentModel)) currentModel = currentModel + '[1m]';
       const effort = useStore.getState().getEffortFor(sessionQueueKey);
       // When resuming an existing session, cwd MUST be the EXACT string the
       // CLI was launched with — including Unicode chars (e.g. `/foo/肠骨轴`).
@@ -7830,7 +7841,7 @@ export default function App() {
 
   // Pull the shared session-title map so a rename on the phone shows on the Mac
   // (and vice-versa). Live updates arrive via the ws 'custom-titles' broadcast.
-  useEffect(() => { useStore.getState().hydrateCustomTitles(); useStore.getState().hydrateAutoTitles(); }, []);
+  useEffect(() => { useStore.getState().hydrateCustomTitles(); useStore.getState().hydrateAutoTitles(); useStore.getState().hydrateContext1m(); }, []);
 
   // Optional local-only widgets (client/src/components/*.local.jsx). Fresh
   // checkouts have none; public builds temporarily move them out of the build
