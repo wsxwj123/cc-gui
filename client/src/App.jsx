@@ -544,6 +544,23 @@ function finalizeAgent(st, agentId, tnStatus, visited) {
   }
 }
 
+// 停止链路 #2:流外杀点(转后台后停止 handleStop backgroundPid 分支 / 监控面板停
+// Claude 子进程 / 删会话 stopSessionProcs)杀掉进程后,该会话的 activeAgents 非终态
+// 条目不会再收到任何流内信号(本地流 finally / 顶层 result / task_notification 都到
+// 不了)→ 按 sessionId 精确扫描级联收尾为 stopped。sessionId 严格相等:分屏下不碰
+// 其他会话;sessionId 为空的条目(draft 阶段/旧条目)保守不动。共享 visited:先收的
+// 级联已把后代标终态,后续根条目经 visited 去重不会重复处理。
+function finalizeSessionAgents(sessionId, tnStatus = 'stopped') {
+  if (!sessionId) return;
+  const st = useStore.getState();
+  const visited = new Set();
+  for (const [id, ag] of Object.entries(st.activeAgents || {})) {
+    if (!ag || ag.sessionId !== sessionId) continue;
+    if (['done', 'error', 'stopped'].includes(ag.status)) continue;
+    finalizeAgent(st, id, tnStatus, visited);
+  }
+}
+
 // Top-right panels — each key auto-wires a header icon (desktop + mobile menu)
 // and its RightPanel body. Adding a key here is all the wiring needed.
 const PANEL_MAP = {
@@ -1611,6 +1628,9 @@ function SessionList() {
         await new Promise((r) => setTimeout(r, 500));
         if ((await list().catch(() => [])).length === 0) break;
       }
+      // 停止链路 #2:删会话杀点。进程已杀,该会话 activeAgents 非终态条目(taskManaged
+      // 等)不会再有信号,就地级联收尾,防监控面板残留"工作中"。
+      finalizeSessionAgents(sessionId);
     } catch {}
   };
 
@@ -4826,10 +4846,13 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     } else if (backgroundPid) {
       // Background CLI proc — we're not holding the SSE but can still kill it.
       fetch(`/api/chat/${backgroundPid}/stop`, { method: 'POST' });
+      // 停止链路 #2:转后台后无本地流,finally 的 killedRef 收尾路径不存在 → 杀点
+      // 就地按 sessionId 收尾本会话 taskManaged 等非终态子代理(进程死了不会再有信号)。
+      finalizeSessionAgents(selectedSession?.sessionId);
     }
     // 两种情况都立即清掉本地「后台运行中」标记,不等下一轮 poll(那一轮还会误报)。
     setBackgroundPid(null);
-  }, [backgroundPid]);
+  }, [backgroundPid, selectedSession?.sessionId]);
   // CQ-15:把 handleStop / backgroundPid 包成 ref,供 ESC 监听读最新值而不必进 effect deps。
   // 原来 ESC effect 依赖 [isStreaming, backgroundPid, handleStop],而 backgroundPid 每 1.5s
   // poll 抖动、handleStop 随之重建 → effect 频繁 cleanup+register,切焦点同帧有「两个 pane
@@ -7853,8 +7876,17 @@ export default function App() {
       const st = useStore.getState();
       if (st.activeAgents[tool_use_id]) finalizeAgent(st, tool_use_id, status);
     };
+    // 停止链路 #2:监控面板杀 Claude 子进程后按 sessionId 级联收尾(流外杀点无流内信号)。
+    const onSessionProcsKilled = (e) => {
+      const sid = e.detail?.sessionId;
+      if (sid) finalizeSessionAgents(sid);
+    };
     window.addEventListener('cgui:task-notification-bg', onBgTaskNotification);
-    return () => window.removeEventListener('cgui:task-notification-bg', onBgTaskNotification);
+    window.addEventListener('cgui:session-procs-killed', onSessionProcsKilled);
+    return () => {
+      window.removeEventListener('cgui:task-notification-bg', onBgTaskNotification);
+      window.removeEventListener('cgui:session-procs-killed', onSessionProcsKilled);
+    };
   }, []);
 
   // Optional local-only widgets (client/src/components/*.local.jsx). Fresh

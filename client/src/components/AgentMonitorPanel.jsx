@@ -265,7 +265,7 @@ function RemoteAgentCard({ agent, stoppingPid, onStop }) {
       {agent.pid && agent.stoppable !== false && (
         <div className="mt-2 flex justify-end">
           <button
-            onClick={() => onStop(agent.pid)}
+            onClick={() => onStop(agent.pid, agent.sessionId)}
             disabled={stoppingPid === agent.pid}
             className="flex items-center gap-1 text-[10px] px-2 py-1 rounded bg-red-50 hover:bg-red-100 text-red-700 border border-red-200 transition-colors disabled:opacity-50"
           >
@@ -672,13 +672,19 @@ export function AgentMonitorPanel() {
   //   /api/processes/:pid/kill — whitelist-checked kill for any pid in the CLI
   //                              sessions registry (covers cli-session agents)
   // Try chat-stop first; on 404 fall back to processes-kill.
-  const stop = async (pid) => {
+  const stop = async (pid, sessionId) => {
     if (!pid) return;
     setStoppingPid(pid);
     try {
       const r = await fetch(`/api/chat/${pid}/stop`, { method: 'POST' });
       if (r.status === 404) {
         await fetch(`/api/processes/${pid}/kill`, { method: 'POST' });
+      }
+      // 停止链路 #2:从监控面板杀进程 = 流外杀点。本会话的 SSE 以 reader done 正常
+      // 结束(finally turnAborted=false),taskManaged 子代理条目没有任何收尾路径 →
+      // 通知 App 顶层按 sessionId 级联收尾(finalizeSessionAgents,幂等)。
+      if (sessionId && (r.ok || r.status === 404)) {
+        window.dispatchEvent(new CustomEvent('cgui:session-procs-killed', { detail: { sessionId } }));
       }
       await new Promise((r) => setTimeout(r, 400));
       await fetchActive(true);
