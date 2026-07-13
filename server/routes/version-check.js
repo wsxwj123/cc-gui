@@ -7,6 +7,7 @@ import { tmpdir, homedir } from 'os';
 import { execFile, spawn } from 'child_process';
 import { promisify } from 'util';
 import { closeAllPersistentProcesses } from './chat.js';
+import { isLocalReq } from '../services/auth.js';
 
 const execFileP = promisify(execFile);
 
@@ -508,6 +509,10 @@ router.get('/claude-installs', async (_req, res) => {
 // 钉死 GUI 用哪个 claude;path 传空串 → 清除,回到自动优先级。写覆盖文件并强制
 // resolver 重解析,下次聊天/agent/MCP spawn 立即用新的(无需重启)。
 router.put('/claude-active', async (req, res) => {
+  // 限本机请求(fable 审计实测:原来任何存在的文件都收,连不可执行文本都行,之后全部
+  // spawn 用它——authed 局域网客户端可打瘫 GUI,配合本机可执行恶意文件可升级 RCE)。
+  // 钉 claude 路径是桌面机主动作,与 permissions.js 权限检查接口同款门禁。
+  if (!isLocalReq(req)) return res.status(403).json({ error: '该操作仅限本机执行' });
   const p = typeof req.body?.path === 'string' ? req.body.path.trim() : '';
   if (p && !existsSync(p)) return res.status(400).json({ error: '该路径不存在或已失效' });
   try {

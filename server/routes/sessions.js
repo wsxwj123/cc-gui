@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { readdir, stat, readFile, writeFile, rename, open, mkdir } from 'fs/promises';
-import { join, dirname } from 'path';
+import { join, dirname, isAbsolute, resolve } from 'path';
+import { isLocalReq } from '../services/auth.js';
 import { homedir, tmpdir } from 'os';
 import { randomUUID } from 'crypto';
 import { closePersistentForSession } from './chat.js';
@@ -1000,12 +1001,22 @@ router.post('/export-session', async (req, res) => {
     const tp = typeof req.body?.targetPath === 'string' ? req.body.targetPath.trim() : '';
     if (tp) {
       if (tp.includes('\0')) return res.status(400).json({ error: 'targetPath 非法' });
-      // $HOME 门禁(安全审计):targetPath 虽来自 Tauri 原生保存对话框,但端点本身不设防 →
-      // authed 局域网客户端可 POST 任意绝对路径覆盖别处 .md(如系统里的 README.md)。resolveUnderHome
-      // 限定 $HOME 内(Downloads/Desktop/Documents 均覆盖)+ 拒 ../ 段;强制 .md 防写成可执行/配置。
-      try {
-        target = resolveUnderHome(tp, { label: 'targetPath', requireCanonical: true });
-      } catch (e) { return res.status(400).json({ error: e.message }); }
+      // 分层门禁(用户拍板:导出要能存任意位置含 D 盘,Mac/Win 同):
+      //  - 本机请求(桌面 app 原生保存对话框,isLocalReq)→ 任意绝对路径放行,仍拒 ../.
+      //    段 + 强制 .md(防写成可执行/配置);
+      //  - 局域网客户端 → 维持 $HOME 门禁(端点不设防时 authed 远端可覆盖别处 .md 的
+      //    任意写防护,原威胁模型只针对远端)。
+      if (isLocalReq(req)) {
+        const segs = tp.split(/[\\/]+/);
+        if (!isAbsolute(tp) || segs.some((s) => s === '.' || s === '..')) {
+          return res.status(400).json({ error: 'targetPath 非法' });
+        }
+        target = resolve(tp);
+      } else {
+        try {
+          target = resolveUnderHome(tp, { label: 'targetPath', requireCanonical: true });
+        } catch (e) { return res.status(400).json({ error: e.message }); }
+      }
       target = target.toLowerCase().endsWith('.md') ? target : target + '.md';
       await mkdir(dirname(target), { recursive: true });
     } else {
