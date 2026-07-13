@@ -125,6 +125,18 @@ function loadNetworkConfig() {
       // hand-edited config that requests network binding but has no passwordHash
       // falls back to loopback so there's never an auth-less open port.
       if (host === '0.0.0.0' && !cfg.passwordHash) {
+        // 公开版自愈(用户实报"设了密码保存重启后显示未打开"=陷阱态每次启动静默回落):
+        // 公开版本就默认"局域网开+每台随机密码",密码记录丢失时按同一策略重新生成随机
+        // 密码保持局域网开启(绝不无密码暴露),横幅会提示新默认密码并建议修改。
+        // 本地 bot 版不自愈(个人机器不该未经确认重新开放局域网),维持回落+downgraded 横幅引导。
+        const isPublicBuild = !existsSync(join(__dirname, 'routes', 'bots.local.js'));
+        if (isPublicBuild) {
+          try {
+            setDefaultRandomPassword();
+            console.warn('[network] config requests 0.0.0.0 but password record was missing — regenerated a random default password (public build self-heal), LAN stays enabled.');
+            return { host: '0.0.0.0', port };
+          } catch {}
+        }
         console.warn('[network] config requests 0.0.0.0 but no password is set — falling back to 127.0.0.1. Set a password in Settings → 网络 to enable network access.');
         host = '127.0.0.1';
       }
