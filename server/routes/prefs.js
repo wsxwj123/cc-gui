@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { readFile, writeFile, mkdir } from 'fs/promises';
+import { readFile, writeFile, mkdir, rename } from 'fs/promises';
 import { join, dirname } from 'path';
 import { homedir } from 'os';
 import { broadcast } from '../broadcast.js';
@@ -17,9 +17,23 @@ async function loadPrefs() {
   try { return JSON.parse(await readFile(PREFS_PATH, 'utf-8')); }
   catch { return {}; }
 }
+// 原子写:先写临时文件再 rename(rename 同目录原子)。此前 writeFile 直写,进程崩溃/
+// 断电写一半 → JSON 损坏 → loadPrefs 回落 {} → 下一次任何 PUT 把整份 prefs 静默重置。
+let tmpSeq = 0;
 async function savePrefs(obj) {
   await mkdir(dirname(PREFS_PATH), { recursive: true });
-  await writeFile(PREFS_PATH, JSON.stringify(obj, null, 2));
+  const tmp = `${PREFS_PATH}.tmp.${process.pid}.${tmpSeq++}`;
+  await writeFile(tmp, JSON.stringify(obj, null, 2));
+  await rename(tmp, PREFS_PATH);
+}
+// 写串行化:所有 prefs 写都是 read-merge-write,并发(手机+桌面同时 PUT)会互相覆盖
+// 丢一路。模块级 promise 链把「load→merge→save」整段排队,同一时刻只有一段在跑。
+// ponytail: 进程内全局队列;prefs 写频率极低,不值得按 key 分锁。
+let prefsQueue = Promise.resolve();
+function withPrefsQueue(task) {
+  const run = prefsQueue.then(task);
+  prefsQueue = run.then(() => {}, () => {}); // 失败不断链
+  return run;
 }
 
 // GET /api/prefs/hidden-projects → { hidden: string[] }
@@ -35,9 +49,11 @@ router.put('/prefs/hidden-projects', async (req, res) => {
     return res.status(400).json({ error: 'hidden 必须是字符串数组' });
   }
   try {
-    const prefs = await loadPrefs();
-    prefs.hiddenProjects = hidden;
-    await savePrefs(prefs);
+    await withPrefsQueue(async () => {
+      const prefs = await loadPrefs();
+      prefs.hiddenProjects = hidden;
+      await savePrefs(prefs);
+    });
     res.json({ ok: true, hidden });
   } catch (e) {
     res.status(500).json({ error: '写入偏好失败：' + e.message });
@@ -82,9 +98,11 @@ router.put('/prefs/hidden-providers', async (req, res) => {
     return res.status(400).json({ error: 'hidden 必须是字符串数组' });
   }
   try {
-    const prefs = await loadPrefs();
-    prefs.hiddenProviders = hidden;
-    await savePrefs(prefs);
+    await withPrefsQueue(async () => {
+      const prefs = await loadPrefs();
+      prefs.hiddenProviders = hidden;
+      await savePrefs(prefs);
+    });
     res.json({ ok: true, hidden });
   } catch (e) {
     res.status(500).json({ error: '写入偏好失败：' + e.message });
@@ -114,13 +132,16 @@ router.put('/prefs/custom-titles', async (req, res) => {
     return res.status(400).json({ error: 'title 必须是字符串' });
   }
   try {
-    const prefs = await loadPrefs();
-    const map = (prefs.customTitles && typeof prefs.customTitles === 'object') ? prefs.customTitles : {};
-    const trimmed = (title || '').trim();
-    if (trimmed) map[sessionId] = trimmed;
-    else delete map[sessionId];
-    prefs.customTitles = map;
-    await savePrefs(prefs);
+    const map = await withPrefsQueue(async () => {
+      const prefs = await loadPrefs();
+      const m = (prefs.customTitles && typeof prefs.customTitles === 'object') ? prefs.customTitles : {};
+      const trimmed = (title || '').trim();
+      if (trimmed) m[sessionId] = trimmed;
+      else delete m[sessionId];
+      prefs.customTitles = m;
+      await savePrefs(prefs);
+      return m;
+    });
     broadcast({ type: 'custom-titles', titles: map });
     res.json({ ok: true, titles: map });
   } catch (e) {
@@ -146,13 +167,16 @@ router.put('/prefs/auto-titles', async (req, res) => {
     return res.status(400).json({ error: 'title 必须是字符串' });
   }
   try {
-    const prefs = await loadPrefs();
-    const map = (prefs.autoTitles && typeof prefs.autoTitles === 'object') ? prefs.autoTitles : {};
-    const trimmed = (title || '').trim();
-    if (trimmed) map[sessionId] = trimmed;
-    else delete map[sessionId];
-    prefs.autoTitles = map;
-    await savePrefs(prefs);
+    const map = await withPrefsQueue(async () => {
+      const prefs = await loadPrefs();
+      const m = (prefs.autoTitles && typeof prefs.autoTitles === 'object') ? prefs.autoTitles : {};
+      const trimmed = (title || '').trim();
+      if (trimmed) m[sessionId] = trimmed;
+      else delete m[sessionId];
+      prefs.autoTitles = m;
+      await savePrefs(prefs);
+      return m;
+    });
     broadcast({ type: 'auto-titles', titles: map });
     res.json({ ok: true, titles: map });
   } catch (e) {
@@ -180,13 +204,16 @@ router.put('/prefs/context-1m', async (req, res) => {
     return res.status(400).json({ error: 'sessionId 必须是非空字符串(或传 clear:true)' });
   }
   try {
-    const prefs = await loadPrefs();
-    let map = (prefs.context1m && typeof prefs.context1m === 'object') ? prefs.context1m : {};
-    if (clear) map = {};
-    else if (on) map[sessionId] = true;
-    else delete map[sessionId];
-    prefs.context1m = map;
-    await savePrefs(prefs);
+    const map = await withPrefsQueue(async () => {
+      const prefs = await loadPrefs();
+      let m = (prefs.context1m && typeof prefs.context1m === 'object') ? prefs.context1m : {};
+      if (clear) m = {};
+      else if (on) m[sessionId] = true;
+      else delete m[sessionId];
+      prefs.context1m = m;
+      await savePrefs(prefs);
+      return m;
+    });
     broadcast({ type: 'context-1m', sessions: map });
     res.json({ ok: true, sessions: map });
   } catch (e) {
@@ -212,14 +239,17 @@ router.put('/prefs/pinned', async (req, res) => {
     return res.status(400).json({ error: 'kind 必须是 project/session,id 必须非空字符串' });
   }
   try {
-    const prefs = await loadPrefs();
-    const p = (prefs.pinned && typeof prefs.pinned === 'object') ? prefs.pinned : {};
-    const key = kind === 'project' ? 'projects' : 'sessions';
-    const list = new Set(Array.isArray(p[key]) ? p[key] : []);
-    if (pinned) list.add(id); else list.delete(id);
-    p[key] = [...list];
-    prefs.pinned = p;
-    await savePrefs(prefs);
+    const p = await withPrefsQueue(async () => {
+      const prefs = await loadPrefs();
+      const cur = (prefs.pinned && typeof prefs.pinned === 'object') ? prefs.pinned : {};
+      const key = kind === 'project' ? 'projects' : 'sessions';
+      const list = new Set(Array.isArray(cur[key]) ? cur[key] : []);
+      if (pinned) list.add(id); else list.delete(id);
+      cur[key] = [...list];
+      prefs.pinned = cur;
+      await savePrefs(prefs);
+      return cur;
+    });
     res.json({
       ok: true,
       projects: Array.isArray(p.projects) ? p.projects : [],
