@@ -6796,7 +6796,9 @@ function LoginScreen({ onSuccess }) {
         body: JSON.stringify({ password }),
       });
       if (res.ok) { onSuccess(); return; }
-      setError('密码错误');
+      // 透传后端错误体:429 限速返回"尝试过多,请 N 秒后再试",一律显示"密码错误"会误导用户重试
+      const j = await res.json().catch(() => null);
+      setError(j?.error || '密码错误');
     } catch { setError('网络错误'); }
     finally { setBusy(false); }
   };

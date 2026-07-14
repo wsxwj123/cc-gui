@@ -90,7 +90,7 @@ function fromLoginShell() {
   const shell = process.env.SHELL || 'sh';
   // -i 有小概率因怪异 rc 卡住/报错;safeExec 的 execFileSync 默认 stdin 即 EOF(rc 里的
   // read 立刻返回)+ 超时兜底。失败则回落原来的 `sh -lc`(至少覆盖 .profile)。
-  let out = safeExecStdout(shell, ['-ilc', 'command -v claude'], 6000);
+  let out = safeExecStdout(shell, ['-i', '-l', '-c', 'command -v claude'], 6000);
   if (!out) out = safeExecStdout('sh', ['-lc', 'command -v claude']);
   return pickLoginShellLine(out);
 }
@@ -104,7 +104,7 @@ function pickLoginShellLine(out) {
 async function fromLoginShellAsync() {
   if (isWin) return '';
   const shell = process.env.SHELL || 'sh';
-  let out = await safeExecAsync(shell, ['-ilc', 'command -v claude'], 6000);
+  let out = await safeExecAsync(shell, ['-i', '-l', '-c', 'command -v claude'], 6000);
   if (!out) out = await safeExecAsync('sh', ['-lc', 'command -v claude']);
   return pickLoginShellLine(out);
 }
@@ -225,6 +225,7 @@ function fixedCandidates() {
       join(home, 'scoop', 'shims', 'claude.cmd'),                 // scoop
       join(localApp, 'Volta', 'bin', 'claude.exe'),               // volta
       join(localApp, 'pnpm', 'claude.cmd'),                       // pnpm global
+      join(home, '.bun', 'bin', 'claude.exe'),                    // bun 全局
       ...nvmWinCandidates(appData),                               // nvm-windows
     ];
   }
@@ -240,6 +241,9 @@ function fixedCandidates() {
     join(home, 'Library', 'pnpm', 'claude'),                      // pnpm (mac)
     join(home, '.local', 'share', 'pnpm', 'claude'),              // pnpm (linux)
     join(home, '.config', 'yarn', 'global', 'node_modules', '.bin', 'claude'), // yarn global
+    join(home, '.bun', 'bin', 'claude'),                          // bun 全局
+    join(home, '.local', 'share', 'mise', 'shims', 'claude'),     // mise
+    join(home, '.asdf', 'shims', 'claude'),                       // asdf
     ...nvmNixCandidates(home),                                    // nvm / fnm
   ];
 }

@@ -5,15 +5,14 @@ import { Download, Check, Loader2, RefreshCw, AlertTriangle, CloudDownload, Exte
 import { copyText } from '../utils/clipboard.js';
 import { confirmDialog } from '../utils/confirmDialog.jsx';
 
-// CM-1:复制技能调用名。常驻显示 /<name>(用法不再只藏 tooltip),点击复制,复制后短暂打勾。
+// CM-1:复制技能调用名。纯图标按钮(斜杠名与条目真名常重复,文本移入 tooltip),点击复制,复制后短暂打勾。
 function SkillCopyBtn({ name }) {
   const [done, setDone] = useState(false);
   return (
     <button
       onClick={async (e) => { e.stopPropagation(); if (await copyText(`/${name}`)) { setDone(true); setTimeout(() => setDone(false), 1200); } }}
-      title={`复制「/${name}」—— 在输入框输入 /${name} 即可调用该技能`}
-      className="shrink-0 flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-mono text-ink-faint hover:text-ink hover:bg-canvas-deep transition-colors max-w-[140px]">
-      <span className="truncate">/{name}</span>
+      title={`复制调用命令「/${name}」—— 在输入框输入 /${name} 即可调用该技能`}
+      className="shrink-0 flex items-center px-1.5 py-0.5 rounded text-ink-faint hover:text-ink hover:bg-canvas-deep transition-colors">
       {done ? <Check size={11} className="text-success shrink-0" /> : <Copy size={11} className="shrink-0" />}
     </button>
   );
@@ -43,7 +42,9 @@ export function SkillsPanel() {
   const [updateInfo, setUpdateInfo] = useState({});       // 检查更新结果 { id: {local, remote, hasUpdate} }
   const [checkingUpd, setCheckingUpd] = useState(false);
 
-  const [busy, setBusy] = useState(null);             // null | 'all' | <skillId>
+  const [busy, setBusy] = useState(() => new Set()); // 进行中的导入/更新集合:'all' | <skillId>(可并发,互不禁用)
+  const busyAdd = (tag) => setBusy((p) => { const n = new Set(p); n.add(tag); return n; });
+  const busyDel = (tag) => setBusy((p) => { if (!p.has(tag)) return p; const n = new Set(p); n.delete(tag); return n; });
   const [conflicts, setConflicts] = useState(null);
   const [notice, setNotice] = useState('');
   const [expanded, setExpanded] = useState(null);     // 展开完整简介的行:'local:<id>' | 'off:<id>' | 'arch:<id>'
@@ -191,7 +192,7 @@ export function SkillsPanel() {
 
   const runImport = async (ids, overwrite, tag, isUpdate = false) => {
     if (!ids.length) return;
-    setBusy(tag); setNotice('');
+    busyAdd(tag); setNotice('');
     try {
       const r = await fetch('/api/skills/import', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -208,7 +209,7 @@ export function SkillsPanel() {
         if (d.failed?.length) parts.push(`失败 ${d.failed.length}`);
         setNotice(parts.join(' · ') || '完成');
         setConflicts(null);
-        setBusy(null); // 先停 spinner 再弹窗(否则用户不点弹窗则按钮无限转)
+        busyDel(tag); // 先停 spinner 再弹窗(否则用户不点弹窗则按钮无限转)
         const names = (d.imported || []).map((x) => (typeof x === 'string' ? x : x.id || x.name)).filter(Boolean);
         // 失败详情:后端 failed[] 每项带 error,弹窗逐条列出(最多 5 条防长列表,超出计数说明)。
         const failDetail = d.failed?.length
@@ -240,7 +241,7 @@ export function SkillsPanel() {
       }
       await Promise.all([activeRepo ? loadOfficial(null, activeRepo, activeBranch, activeHost) : loadOfficial(source), loadLocal()]);
     } catch (e) { setNotice('错误: ' + e.message); }
-    setBusy(null);
+    busyDel(tag);
   };
 
   const notInstalled = official.filter((s) => !s.installed);
@@ -449,18 +450,18 @@ export function SkillsPanel() {
               <div className="flex items-center gap-2">
                 <button onClick={() => { setConflicts(null); setNotice('已跳过重名 skill'); }}
                   className="px-2.5 py-1 rounded text-[11px] font-medium border border-canvas-deep text-ink-soft hover:bg-canvas-deep">跳过</button>
-                <button onClick={() => runImport(conflicts, true, 'all')} disabled={busy === 'all'}
+                <button onClick={() => runImport(conflicts, true, 'all')} disabled={busy.has('all')}
                   className="px-2.5 py-1 rounded text-[11px] font-medium text-white bg-amber-600 hover:bg-amber-700 disabled:opacity-50 flex items-center gap-1">
-                  {busy === 'all' && <Loader2 size={11} className="animate-spin" />}覆盖
+                  {busy.has('all') && <Loader2 size={11} className="animate-spin" />}覆盖
                 </button>
               </div>
             </div>
           )}
 
           <button onClick={() => runImport(notInstalled.map((s) => s.id), false, 'all')}
-            disabled={loadingOff || busy === 'all' || notInstalled.length === 0}
+            disabled={loadingOff || busy.size > 0 || notInstalled.length === 0}
             className="w-full flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg bg-accent text-white text-[12px] font-medium hover:bg-accent/90 transition-colors disabled:opacity-40 disabled:cursor-not-allowed">
-            {busy === 'all' ? <Loader2 size={13} className="animate-spin" /> : <CloudDownload size={13} />}
+            {busy.has('all') ? <Loader2 size={13} className="animate-spin" /> : <CloudDownload size={13} />}
             {loadingOff ? '加载中…' : notInstalled.length === 0 ? '此源已全部安装' : `一键导入全部(${notInstalled.length})`}
           </button>
 
@@ -476,14 +477,14 @@ export function SkillsPanel() {
                     {s.version && <span className="shrink-0 text-[10px] px-1 py-px bg-canvas-deep text-ink-faint rounded font-mono">v{s.version}</span>}
                     <SkillCopyBtn name={s.id} />
                     {s.installed ? (
-                      <button onClick={(e) => { e.stopPropagation(); runImport([s.id], true, s.id, true); }} disabled={!!busy}
+                      <button onClick={(e) => { e.stopPropagation(); runImport([s.id], true, s.id, true); }} disabled={busy.has(s.id) || busy.has('all')}
                         className="shrink-0 text-[10px] px-2 py-0.5 rounded border border-canvas-deep text-ink-faint hover:text-ink hover:bg-canvas-deep flex items-center gap-1 disabled:opacity-50" title="已安装 — 点击用该源最新版本覆盖">
-                        {busy === s.id ? <Loader2 size={10} className="animate-spin" /> : <Check size={10} className="text-success" />}已装·可更新覆盖
+                        {busy.has(s.id) ? <Loader2 size={10} className="animate-spin" /> : <Check size={10} className="text-success" />}已装·可更新覆盖
                       </button>
                     ) : (
-                      <button onClick={(e) => { e.stopPropagation(); runImport([s.id], false, s.id); }} disabled={!!busy}
+                      <button onClick={(e) => { e.stopPropagation(); runImport([s.id], false, s.id); }} disabled={busy.has(s.id) || busy.has('all')}
                         className="shrink-0 text-[10px] px-2 py-0.5 rounded bg-accent/10 text-accent hover:bg-accent/20 flex items-center gap-1 disabled:opacity-50">
-                        {busy === s.id ? <Loader2 size={10} className="animate-spin" /> : <Download size={10} />}导入
+                        {busy.has(s.id) ? <Loader2 size={10} className="animate-spin" /> : <Download size={10} />}导入
                       </button>
                     )}
                   </div>

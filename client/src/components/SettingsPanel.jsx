@@ -586,7 +586,7 @@ function UpdateAvailable({ state }) {
       // 静默回落旧下载流(不弹错误):endpoint 不可达 / 签名校验失败 / 权限被拒都可能,
       // 用户仍可用原「一键下载并安装」完成更新。
       console.warn('[updater] 自动更新失败,回落手动下载流:', e);
-      setAu({ status: 'fallback' });
+      setAu({ status: 'fallback', message: String(e?.message || e || '').slice(0, 200) });
     }
   };
 
@@ -730,6 +730,13 @@ function UpdateAvailable({ state }) {
       )}
       {canAutoUpdate && au.status === 'none' && (
         <div className="text-[12px] text-success">✓ 已是最新版本</div>
+      )}
+      {/* 自动更新通道异常不再静默:latest.json 不可达/格式坏/签名校验失败时,用户(和维护者)
+          需要知道更新链断了,而不是永远以为"没有新版本"。仍可用下方手动下载流完成更新。 */}
+      {au.status === 'fallback' && (
+        <div className="text-[12px] text-amber-700 bg-amber-50 border border-amber-200 rounded p-2">
+          自动更新通道异常,已回落手动下载{au.message ? `:${au.message}` : ''}
+        </div>
       )}
 
       {/* CJ-1:下载进度条 */}
