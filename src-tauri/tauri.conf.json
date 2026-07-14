@@ -12,7 +12,7 @@
   "plugins": {
     "updater": {
       "endpoints": ["https://github.com/wsxwj123/claude-gui/releases/latest/download/latest.json"],
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDVBRkQwODJBQzVCRTk1N0MKUldSOGxiN0ZLZ2o5V25iaTlDcGRoRURRMHlMYlhraE5DWEVoRDlkTEdrN05laW5jYlAvYWp4a3IK",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDM0QTgzRkFEOThFRUUzQTMKUldTajQrNllyVCtvTlA5QnFkNkIyVEpGSENIQ0dvMS9OVXAwUEZTbk9RQ21XeVBnRkJiM1JPa2EK",
       "windows": {
         "installMode": "passive"
       }
