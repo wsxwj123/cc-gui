@@ -245,12 +245,16 @@ export function SkillsPanel() {
   };
 
   const notInstalled = official.filter((s) => !s.installed);
-  // CM-1:本机 skill 按关键词过滤(名称 + 描述,大小写不敏感)
+  // CM-1:本机 skill 按关键词过滤(名称 + 描述,大小写不敏感)。
+  // 检查更新后把"有新版本"的置顶(stable sort,组内保持原序),免得用户逐条翻找。
   const filteredLocal = useMemo(() => {
     const q = query.trim().toLowerCase();
-    if (!q) return local;
-    return local.filter((s) => `${s.id} ${s.name} ${s.description}`.toLowerCase().includes(q));
-  }, [local, query]);
+    let list = q ? local.filter((s) => `${s.id} ${s.name} ${s.description}`.toLowerCase().includes(q)) : local;
+    if (Object.values(updateInfo).some((u) => u?.hasUpdate)) {
+      list = [...list].sort((a, b) => (updateInfo[b.id]?.hasUpdate ? 1 : 0) - (updateInfo[a.id]?.hasUpdate ? 1 : 0));
+    }
+    return list;
+  }, [local, query, updateInfo]);
   const tabBtn = (id, label, count) => (
     <button onClick={() => setTab(id)}
       className={`flex items-center gap-1.5 px-3 py-1.5 text-[12px] font-body rounded-lg transition-colors ${
