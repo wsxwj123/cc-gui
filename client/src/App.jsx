@@ -8197,14 +8197,21 @@ export default function App() {
 
   // 首次启动自动弹使用指引(仅桌面端):localStorage 无 cgui-tour-seen 标志即弹,
   // 看完/跳过在 onClose 写标志,此后只能从顶栏问号手动打开。手机布局不弹(导览
-  // 高亮的顶栏按钮在手机上大多不渲染,逐个跳过体验差)。延迟一拍让顶栏先挂载。
+  // 高亮的顶栏按钮在手机上大多不渲染,逐个跳过体验差)。
+  // ⚠️ 必须等首启的一次性弹窗(EnvCheckPanel 环境检查 / updateNotice 更新提示)先关闭再弹:
+  // 导览的高亮是"四周压暗 + 中间镂空透出下面内容",若叠在那些弹窗的遮罩之上,镂空透出的是
+  // 被盖灰的顶栏,看着就是一堆灰框(用户实测:更新弹窗关掉后手动点问号即正常)。deps 含这些
+  // 弹窗态 → 它们关闭后 effect 重跑,届时界面干净才弹。手动点问号不受此 gate 限制。
   useEffect(() => {
-    if (isMobile) return;
+    if (isMobile || tourOpen) return;
     try { if (localStorage.getItem('cgui-tour-seen')) return; } catch { return; }
+    const envBlocking = !cliInstalled && !cliCheckDismissed;      // 环境检查大弹窗在显示
+    const updateBlocking = !!updateNotice && !updateModalDismissed; // 更新大弹窗在显示
+    if (envBlocking || updateBlocking) return;                    // 让路,等其关闭后重跑
     const t = setTimeout(() => setTourOpen(true), 600);
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isMobile]);
+  }, [isMobile, tourOpen, cliInstalled, cliCheckDismissed, updateNotice, updateModalDismissed]);
   const closeTour = useCallback(() => {
     setTourOpen(false);
     try { localStorage.setItem('cgui-tour-seen', '1'); } catch {}
