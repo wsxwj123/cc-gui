@@ -7782,6 +7782,60 @@ function CompletionToasts() {
   );
 }
 
+// ─── 快捷键速查(Cmd/Ctrl+/)────────────────────────────────────
+// 纯静态清单,单实例挂在 App 顶层(非 per-pane 组件,不涉及窗格状态)。
+const SHORTCUT_GROUPS = [
+  ['输入与发送', [
+    ['Enter', '发送消息'],
+    ['Shift + Enter', '换行(Cmd/Ctrl + Enter 也可发送)'],
+    ['Cmd/Ctrl + Z', '撤销输入'],
+    ['↑(输入框为空时)', '召回最近发送/入队的消息'],
+    ['/', '打开命令面板(输入框内)'],
+    ['@', '引用项目文件 / 其它会话(输入框内)'],
+  ]],
+  ['会话', [
+    ['Cmd/Ctrl + N', '当前项目下新建会话'],
+    ['Cmd/Ctrl + ↑ / ↓', '切换到上/下一个会话(当前窗格)'],
+    ['Cmd/Ctrl + F', '会话内检索(当前窗格)'],
+    ['Esc 连按两次', '停止当前回合'],
+  ]],
+  ['界面', [
+    ['Ctrl + Tab', '分屏时轮换聚焦窗格'],
+    ['Cmd/Ctrl + /', '打开/关闭本速查'],
+  ]],
+];
+
+function ShortcutsPanel({ open, onClose }) {
+  if (!open) return null;
+  return (
+    <div className="fixed inset-0 z-[210] flex items-center justify-center bg-black/40 backdrop-blur-sm animate-fade-in" onClick={onClose}>
+      <div className="glass-popover w-[440px] max-w-[calc(var(--app-w,100vw)-1.5rem)] max-h-[80vh] rounded-2xl shadow-2xl animate-glass-rise overflow-hidden flex flex-col" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between px-5 py-3 border-b border-canvas-deep shrink-0">
+          <div className="text-[14px] font-display font-semibold text-ink">键盘快捷键</div>
+          <button onClick={onClose} className="p-1 rounded hover:bg-canvas-warm text-ink-faint hover:text-ink" title="关闭">
+            <X size={15} />
+          </button>
+        </div>
+        <div className="px-5 py-4 space-y-4 overflow-y-auto">
+          {SHORTCUT_GROUPS.map(([group, items]) => (
+            <div key={group}>
+              <div className="text-[10px] text-ink-faint uppercase tracking-wider font-body mb-1.5">{group}</div>
+              <div className="space-y-1">
+                {items.map(([keys, desc]) => (
+                  <div key={keys} className="flex items-center gap-3">
+                    <kbd className="shrink-0 min-w-[132px] px-1.5 py-0.5 rounded border border-canvas-deep bg-canvas-warm text-[11px] font-mono text-ink-soft text-center">{keys}</kbd>
+                    <span className="text-[12px] text-ink-muted font-body">{desc}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ─── Main App ──────────────────────────────────────────────────
 export default function App() {
   useWebSocket();
@@ -7816,6 +7870,67 @@ export default function App() {
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, []);
+
+  // 快捷键(单实例挂 App 顶层,处理器内 getState() 读活动窗格,避免闭包陈旧;
+  // 遵循 per-pane 纪律:只写活动窗格的 keyed slot,绝不写全局单值):
+  //  · Cmd/Ctrl+/  快捷键速查(meta 组合不会往输入框打字,聚焦时也响应)
+  //  · Ctrl+Tab    分屏窗格轮换(仅 paneCount>1)
+  //  · Cmd/Ctrl+↑/↓ 当前项目会话列表内切上/下一条(仅活动窗格;输入焦点时不抢——
+  //    textarea 里 Cmd+↑/↓ 是光标到头/尾的系统语义)
+  const [shortcutsOpen, setShortcutsOpen] = useState(false);
+  useEffect(() => {
+    const isEditable = (el) => !!el && (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT' || el.tagName === 'SELECT' || el.isContentEditable);
+    const onKey = (e) => {
+      const meta = e.metaKey || e.ctrlKey;
+      if (meta && !e.shiftKey && !e.altKey && e.key === '/') {
+        e.preventDefault();
+        setShortcutsOpen((v) => !v);
+        return;
+      }
+      if (e.ctrlKey && !e.metaKey && !e.shiftKey && !e.altKey && e.key === 'Tab') {
+        const st = useStore.getState();
+        if ((st.paneCount || 1) > 1) {
+          e.preventDefault();
+          st.setActiveTabIndex(((st.activeTabIndex || 0) + 1) % st.paneCount);
+        }
+        return;
+      }
+      if (meta && !e.shiftKey && !e.altKey && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
+        if (isEditable(document.activeElement)) return;
+        const st = useStore.getState();
+        const list = (st.sessions || []).filter((s) => !s.archived && s.sessionId);
+        if (!list.length) return;
+        const idx = st.activeTabIndex || 0;
+        const cur = (st.paneSessions && st.paneSessions[idx]) || st.selectedSession;
+        // 当前会话不在列表(draft/别的项目)时:↑ 落到最后一条,↓ 落到第一条。
+        let pos = cur?.sessionId ? list.findIndex((s) => s.sessionId === cur.sessionId) : -1;
+        pos = e.key === 'ArrowUp'
+          ? (pos <= 0 ? list.length - 1 : pos - 1)
+          : (pos < 0 || pos >= list.length - 1 ? 0 : pos + 1);
+        const target = list[pos];
+        if (!target || target.sessionId === cur?.sessionId) return;
+        e.preventDefault();
+        // 与侧栏 handleSelect 同一加载路径:keyed 写活动窗格 + 按 tab 拉消息。
+        st.setPaneSession(idx, target);
+        st.fetchMessages(target.sessionId, target.projectHash, { tab: idx });
+        return;
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+  // 速查开着时 Esc 关闭:用捕获阶段拦下,阻断冒泡阶段的「双击 Esc 停止流」监听
+  // (SessionDetail 挂在 window 冒泡阶段),避免关面板的 Esc 被计入停止连击。
+  useEffect(() => {
+    if (!shortcutsOpen) return;
+    const onEsc = (e) => {
+      if (e.key !== 'Escape') return;
+      e.stopPropagation();
+      setShortcutsOpen(false);
+    };
+    window.addEventListener('keydown', onEsc, true);
+    return () => window.removeEventListener('keydown', onEsc, true);
+  }, [shortcutsOpen]);
 
   // Bug #11:首次启动检测 claude CLI;没装就弹模态按系统给安装指引(给小白用户)。
   // dismissed 仅本次会话生效 — 跳过后下次启动还会再问,不本地永存(用户可能装了又卸)。
@@ -8382,6 +8497,7 @@ export default function App() {
       />
       {LocalWidget && <LocalWidget />}
       <GuideTour open={tourOpen} onClose={closeTour} hasProject={!!selectedProject} />
+      <ShortcutsPanel open={shortcutsOpen} onClose={() => setShortcutsOpen(false)} />
       {bundleMismatch && (
         <div className="fixed top-0 inset-x-0 z-[300] bg-red-600 text-white text-[12px] font-body px-4 py-2 flex items-center justify-center gap-3 shadow-lg">
           <span>⚠️ 界面 v{bundleMismatch.bundle} 与服务端 v{bundleMismatch.server} 不一致。请依次尝试：① 完全退出 GUI 再打开（会自动换用新版服务并绕过缓存）② 仍出现则说明安装包内是旧前端，请重新下载安装</span>
