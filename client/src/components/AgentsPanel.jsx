@@ -46,6 +46,35 @@ function parseToolsTokens(content) {
   return null;
 }
 
+// 解析/改写 frontmatter 的 `model:` 行。parse:无 frontmatter 返回 null(解析失败,
+// 编辑面板不显示下拉),有 frontmatter 无 model 行返回 ''(= 继承)。write:model 为空
+// 删除该行(删行与 model: inherit 等效——继承主对话模型);frontmatter 不合法原样返回。
+function parseModelValue(content) {
+  const lines = String(content || '').split('\n');
+  if (lines[0]?.trim() !== '---') return null;
+  for (let i = 1; i < lines.length; i++) {
+    if (lines[i].trim() === '---') return '';
+    const m = lines[i].match(/^model:\s*(.*)$/);
+    if (m) return m[1].trim();
+  }
+  return null;
+}
+function withModelValue(content, model) {
+  const lines = String(content || '').split('\n');
+  if (lines[0]?.trim() !== '---') return content;
+  let end = -1;
+  for (let i = 1; i < lines.length; i++) { if (lines[i].trim() === '---') { end = i; break; } }
+  if (end === -1) return content;
+  for (let i = 1; i < end; i++) {
+    if (/^model:/.test(lines[i])) {
+      if (!model) lines.splice(i, 1); else lines[i] = `model: ${model}`;
+      return lines.join('\n');
+    }
+  }
+  if (model) lines.splice(end, 0, `model: ${model}`);
+  return lines.join('\n');
+}
+
 export function AgentsPanel() {
   const [agents, setAgents] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -105,7 +134,8 @@ export function AgentsPanel() {
       // "Objects are not valid as a React child" → 生产白屏(dev 因 available 为空掩盖)。
       const ids = (Array.isArray(d.available) ? d.available : [])
         .map((x) => (typeof x === 'string' ? x : x && x.id)).filter(Boolean);
-      const opts = Array.from(new Set(['sonnet', 'opus', 'haiku', cur, ...ids])).filter(Boolean);
+      // inherit = 继承主对话当前模型(CLI 原生支持的 model 取值)。
+      const opts = Array.from(new Set(['inherit', 'sonnet', 'opus', 'haiku', cur, ...ids])).filter(Boolean);
       setDefaultModel(cur);
       setModelOptions(opts);
       setNewModel(cur);
@@ -156,6 +186,12 @@ export function AgentsPanel() {
   // tools 校验(非阻塞):未知的非 mcp__ 工具名 → 黄色警告,仍可保存(CLI 只是静默忽略)。
   const toolTokens = selected ? parseToolsTokens(content) : null;
   const unknownTools = (toolTokens || []).filter((t) => !t.startsWith('mcp__') && t !== '*' && !KNOWN_CLI_TOOLS.has(t));
+  // 编辑面板的 model 下拉:从 frontmatter 解析;null=frontmatter 不合法不显示。
+  // ''(无 model 行)与 inherit 等效,显示为 inherit;手输自定义 id 直接改正文 model: 行。
+  const editModel = selected ? parseModelValue(content) : null;
+  const baseModelOpts = modelOptions.length ? modelOptions : ['inherit', 'sonnet', 'opus', 'haiku'];
+  const editModelOpts = editModel && editModel !== '' && !baseModelOpts.includes(editModel)
+    ? [editModel, ...baseModelOpts] : baseModelOpts;
 
   if (loading) return <div className="flex items-center justify-center py-12"><RefreshCw size={16} className="animate-spin text-ink-faint" /></div>;
 
@@ -187,7 +223,7 @@ export function AgentsPanel() {
             <select value={newModel} onChange={(e) => setNewModel(e.target.value)}
               title="这个助手默认用哪个模型"
               className="bg-canvas border border-canvas-deep rounded px-1.5 py-1 text-xs font-mono max-w-[140px]">
-              {modelOptions.map((m) => <option key={m} value={m}>{m}</option>)}
+              {baseModelOpts.map((m) => <option key={m} value={m}>{m}</option>)}
             </select>
             <button onClick={createNew} className="btn-accent text-[11px] px-2 py-1">创建</button>
           </div>
@@ -250,8 +286,16 @@ export function AgentsPanel() {
         <div className="flex-1 min-w-0 flex flex-col">
           {selected ? (
             <>
-              <div className="px-3 py-2 border-b border-canvas-deep flex items-center justify-between">
+              <div className="px-3 py-2 border-b border-canvas-deep flex items-center justify-between gap-2">
                 <span className="text-xs font-mono text-ink-soft truncate">{selected}.md</span>
+                {editModel !== null && (
+                  <select value={editModel === '' ? 'inherit' : editModel}
+                    onChange={(e) => setContent(withModelValue(content, e.target.value))}
+                    title="该 agent 使用的模型;inherit 表示继承主对话当前模型。自定义模型 id 可在正文 model: 行手输"
+                    className="bg-canvas border border-canvas-deep rounded px-1.5 py-0.5 text-[10px] font-mono max-w-[130px] ml-auto shrink-0">
+                    {editModelOpts.map((m) => <option key={m} value={m}>{m}</option>)}
+                  </select>
+                )}
                 <button onClick={save} disabled={saving} className="btn-accent flex items-center gap-1 text-[11px] px-2 py-0.5">
                   {saved ? <Check size={11} /> : <Save size={11} />}
                   {saved ? '已存' : saving ? '…' : '保存'}
