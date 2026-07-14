@@ -188,6 +188,20 @@ export function AgentsPanel() {
   const unknownTools = (toolTokens || []).filter((t) => !t.startsWith('mcp__') && t !== '*' && !KNOWN_CLI_TOOLS.has(t));
   // 编辑面板的 model 下拉:从 frontmatter 解析;null=frontmatter 不合法不显示。
   // ''(无 model 行)与 inherit 等效,显示为 inherit;手输自定义 id 直接改正文 model: 行。
+  // tools 只读 chips 摘要:普通工具计数一组,mcp__<server>__* 按 server 分组。
+  // 纯前端解析;toolTokens 为 null(无 frontmatter/无 tools 行)则不显示。
+  let builtinToolCount = 0;
+  const mcpGroups = new Map(); // server → { all: 含 __* 通配, count: 单独放行的工具数 }
+  for (const t of toolTokens || []) {
+    if (t.startsWith('mcp__')) {
+      const rest = t.slice(5);
+      const idx = rest.indexOf('__');
+      const server = idx === -1 ? rest : rest.slice(0, idx);
+      const g = mcpGroups.get(server) || { all: false, count: 0 };
+      if (idx !== -1 && rest.slice(idx + 2) === '*') g.all = true; else g.count++;
+      mcpGroups.set(server, g);
+    } else builtinToolCount++;
+  }
   const editModel = selected ? parseModelValue(content) : null;
   const baseModelOpts = modelOptions.length ? modelOptions : ['inherit', 'sonnet', 'opus', 'haiku'];
   const editModelOpts = editModel && editModel !== '' && !baseModelOpts.includes(editModel)
@@ -301,6 +315,17 @@ export function AgentsPanel() {
                   {saved ? '已存' : saving ? '…' : '保存'}
                 </button>
               </div>
+              {toolTokens && (
+                <div className="px-3 py-1.5 border-b border-canvas-deep bg-canvas-warm/40 flex flex-wrap items-center gap-1 shrink-0"
+                  title="tools 字段解析摘要(只读)。MCP 面板增删 MCP 时会自动改写此字段">
+                  <span className="text-[10px] px-1.5 py-0.5 rounded bg-canvas border border-canvas-deep text-ink-muted font-mono">内置工具 ×{builtinToolCount}</span>
+                  {[...mcpGroups].map(([server, g]) => (
+                    <span key={server} className="text-[10px] px-1.5 py-0.5 rounded bg-accent/10 border border-canvas-deep text-accent font-mono">
+                      {server}({g.all ? '全部工具' : `${g.count} 个工具`})
+                    </span>
+                  ))}
+                </div>
+              )}
               {unknownTools.length > 0 && (
                 <div className="px-3 py-1.5 border-b border-canvas-deep bg-amber-500/10 text-[10px] text-amber-700 font-body leading-snug shrink-0">
                   以下工具名不在当前 CLI 内置工具集,保存后会被 CLI 静默忽略:<code className="font-mono">{unknownTools.join('、')}</code>。
