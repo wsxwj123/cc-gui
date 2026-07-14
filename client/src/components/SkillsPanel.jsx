@@ -5,15 +5,16 @@ import { Download, Check, Loader2, RefreshCw, AlertTriangle, CloudDownload, Exte
 import { copyText } from '../utils/clipboard.js';
 import { confirmDialog } from '../utils/confirmDialog.jsx';
 
-// CM-1:复制技能名(用 /<name> 经 slash 命令加载)。图标按钮,复制后短暂打勾。
+// CM-1:复制技能调用名。常驻显示 /<name>(用法不再只藏 tooltip),点击复制,复制后短暂打勾。
 function SkillCopyBtn({ name }) {
   const [done, setDone] = useState(false);
   return (
     <button
-      onClick={async (e) => { e.stopPropagation(); if (await copyText(name)) { setDone(true); setTimeout(() => setDone(false), 1200); } }}
-      title={`复制技能名「${name}」—— 输入框里用 /${name} 加载`}
-      className="shrink-0 p-1 rounded text-ink-faint hover:text-ink hover:bg-canvas-deep transition-colors">
-      {done ? <Check size={12} className="text-success" /> : <Copy size={12} />}
+      onClick={async (e) => { e.stopPropagation(); if (await copyText(`/${name}`)) { setDone(true); setTimeout(() => setDone(false), 1200); } }}
+      title={`复制「/${name}」—— 在输入框输入 /${name} 即可调用该技能`}
+      className="shrink-0 flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-mono text-ink-faint hover:text-ink hover:bg-canvas-deep transition-colors max-w-[140px]">
+      <span className="truncate">/{name}</span>
+      {done ? <Check size={11} className="text-success shrink-0" /> : <Copy size={11} className="shrink-0" />}
     </button>
   );
 }
@@ -97,7 +98,7 @@ export function SkillsPanel() {
       });
       const d = await r.json();
       if (!r.ok) throw new Error(d.error || '操作失败');
-      setNotice({ archive: `已归档「${id}」`, delete: `已删除「${id}」`, restore: `已恢复「${id}」` }[action]);
+      setNotice({ archive: `已归档「${id}」—— 已停用,可在「已归档」区恢复`, delete: `已删除「${id}」`, restore: `已恢复「${id}」` }[action]);
       await Promise.all([loadLocal(), loadArchived()]);
     } catch (e) { setNotice('错误: ' + e.message); }
     setManageBusy(null);
@@ -198,7 +199,8 @@ export function SkillsPanel() {
           );
         } else if (d.imported?.length) {
           await confirmDialog(
-            `已导入 ${d.imported.length} 个技能${d.failed?.length ? `,${d.failed.length} 个失败` : ''}${names.length ? `\n(${names.slice(0, 8).join('、')})` : ''}`,
+            `已导入 ${d.imported.length} 个技能${d.failed?.length ? `,${d.failed.length} 个失败` : ''}${names.length ? `\n(${names.slice(0, 8).join('、')})` : ''}`
+              + `\n\n在输入框输入 /技能名 即可调用(如 /${names[0] || ids[0]})`,
             { confirmText: '知道了' },
           );
         }
