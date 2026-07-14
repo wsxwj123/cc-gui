@@ -1,6 +1,7 @@
 import React, { useEffect, useState, useRef } from 'react';
 import { Settings, Save, RefreshCw, AlertCircle, Check, Plus, Trash2, ChevronDown, ChevronRight, ShieldCheck, ShieldAlert, ExternalLink, Eye, EyeOff } from 'lucide-react';
 import { openExternalUrl } from '../utils/openExternal.js';
+import { isTauri } from '../utils/pickDirectory.js';
 import { confirmDialog } from '../utils/confirmDialog.jsx';
 import { useStore } from '../stores/sessionStore.js';
 import EnvCheckPanel from './EnvCheckPanel.jsx';
@@ -468,8 +469,53 @@ function describeAssetTarget(asset, serverPlatform) {
 function UpdateAvailable({ state }) {
   // status: idle | downloading | done | err
   const [dl, setDl] = useState({ status: 'idle' });
+  // 自动更新(Tauri updater)状态:idle | checking | downloading | ready(装完待重启)
+  //  | none(updater 侧无更新) | fallback(任一步失败,回落旧下载流)
+  const [au, setAu] = useState({ status: 'idle' });
   const asset = pickAssetForPlatform(state.assets, state.serverPlatform);
   const target = describeAssetTarget(asset, state.serverPlatform);
+  // 自动更新 gate:必须在 Tauri 壳内,且服务端判定非本地 bot 版(localBuild=true 的本机
+  // 构建含 gitignored 的 bots.local.js 与 FDA 存活的本地签名,公开更新包都没有,自动覆盖
+  // = 丢 bot + 丢 FDA,只能走旧的手动下载流)。浏览器访问同样走旧流。
+  const canAutoUpdate = isTauri() && state.localBuild !== true && au.status !== 'fallback';
+
+  const startAutoUpdate = async () => {
+    setAu({ status: 'checking' });
+    try {
+      // 动态 import:浏览器环境没有 Tauri IPC,静态 import 会在非 Tauri 下直接崩。
+      const { check } = await import('@tauri-apps/plugin-updater');
+      const update = await check({ ...(state.proxy ? { proxy: state.proxy } : {}), timeout: 30000 });
+      if (!update) { setAu({ status: 'none' }); return; }
+      let received = 0, total = 0;
+      setAu({ status: 'downloading', percent: 0, received: 0, total: 0 });
+      await update.downloadAndInstall((ev) => {
+        if (ev.event === 'Started') {
+          total = ev.data.contentLength || 0;
+        } else if (ev.event === 'Progress') {
+          received += ev.data.chunkLength || 0;
+          const pct = total > 0 ? Math.min(100, Math.round((received / total) * 100)) : 0;
+          setAu({ status: 'downloading', percent: pct, received, total });
+        } else if (ev.event === 'Finished') {
+          setAu({ status: 'downloading', percent: 100, received, total });
+        }
+      });
+      setAu({ status: 'ready' });
+    } catch (e) {
+      // 静默回落旧下载流(不弹错误):endpoint 不可达 / 签名校验失败 / 权限被拒都可能,
+      // 用户仍可用原「一键下载并安装」完成更新。
+      console.warn('[updater] 自动更新失败,回落手动下载流:', e);
+      setAu({ status: 'fallback' });
+    }
+  };
+
+  const restartNow = async () => {
+    try {
+      const { relaunch } = await import('@tauri-apps/plugin-process');
+      await relaunch();
+    } catch (e) {
+      console.warn('[updater] relaunch 失败:', e);
+    }
+  };
 
   const startDownload = async () => {
     if (!asset) return;
@@ -525,7 +571,37 @@ function UpdateAvailable({ state }) {
       </div>
 
       <div className="flex items-center gap-2 flex-wrap">
-        {asset && dl.status !== 'done' && (
+        {canAutoUpdate && au.status === 'ready' && (
+          <button
+            onClick={restartNow}
+            className="px-3 py-1.5 text-[12px] bg-emerald-700 text-white rounded-md hover:bg-emerald-800 flex items-center gap-1.5"
+          >
+            立即重启
+          </button>
+        )}
+        {canAutoUpdate && au.status !== 'ready' && au.status !== 'none' && (
+          <button
+            onClick={startAutoUpdate}
+            disabled={au.status === 'checking' || au.status === 'downloading'}
+            className="px-3 py-1.5 text-[12px] bg-amber-700 text-white rounded-md hover:bg-amber-800 disabled:opacity-50 flex items-center gap-1.5"
+            title="下载更新包并安装,完成后重启即为新版本"
+          >
+            {au.status === 'checking' ? (
+              <>
+                <RefreshCw size={12} className="animate-spin" />
+                检查中…
+              </>
+            ) : au.status === 'downloading' ? (
+              <>
+                <RefreshCw size={12} className="animate-spin" />
+                下载中… {au.percent || 0}%
+              </>
+            ) : (
+              <>⬇️ 自动更新并重启</>
+            )}
+          </button>
+        )}
+        {!canAutoUpdate && asset && dl.status !== 'done' && (
           <button
             onClick={startDownload}
             disabled={dl.status === 'downloading'}
@@ -553,6 +629,26 @@ function UpdateAvailable({ state }) {
           手动查看 Release
         </button>
       </div>
+
+      {/* 自动更新进度条(与旧下载流同一套视觉) */}
+      {canAutoUpdate && au.status === 'downloading' && (
+        <div className="space-y-1">
+          <div className="h-2 w-full rounded-full bg-amber-200 overflow-hidden">
+            <div className="h-full bg-amber-600 transition-all duration-150" style={{ width: `${au.percent || 0}%` }} />
+          </div>
+          <div className="text-[11px] text-amber-700 font-mono">
+            {au.percent || 0}% · {Math.round((au.received || 0) / 1048576)}/{Math.round((au.total || 0) / 1048576)}MB
+          </div>
+        </div>
+      )}
+      {canAutoUpdate && au.status === 'ready' && (
+        <div className="text-[12px] text-emerald-700 bg-emerald-50 border border-emerald-200 rounded p-2">
+          ✓ 更新已下载并安装完成,点「立即重启」后即为新版本。
+        </div>
+      )}
+      {canAutoUpdate && au.status === 'none' && (
+        <div className="text-[12px] text-success">✓ 已是最新版本</div>
+      )}
 
       {/* CJ-1:下载进度条 */}
       {dl.status === 'downloading' && (
@@ -584,7 +680,7 @@ function UpdateAvailable({ state }) {
         <div className="text-[12px] text-error">下载失败:{dl.message}</div>
       )}
 
-      {!asset && (
+      {!canAutoUpdate && !asset && (
         <div className="text-[11px] text-amber-700">
           ⚠️ 没找到当前平台的安装包,请点上方链接手动下载。
         </div>
