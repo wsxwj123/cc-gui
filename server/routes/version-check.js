@@ -22,6 +22,10 @@ let cache = null;       // { tagName, htmlUrl, publishedAt, assets } 缓存的 G
 let cachedAt = 0;
 const CACHE_TTL_MS = 5 * 60 * 1000;
 
+// 本地 bot 版判据(与 server/index.js 的 IS_LOCAL_BUILD 同口径,此处 bots.local.js 是
+// 本文件的 sibling):前端自动更新 gate 用,防公开版自动更新覆盖带 bot 本地版。
+const IS_LOCAL_BUILD = existsSync(join(__dirname, 'bots.local.js'));
+
 function getCurrentVersion() {
   try { return JSON.parse(readFileSync(PKG_PATH, 'utf-8')).version || null; } catch { return null; }
 }
@@ -142,6 +146,11 @@ router.get('/version-check', async (req, res) => {
     // WebView2/WKWebView 的 UA 在某些版本被改写过,前端单独靠 UA 选 asset
     // 可能 null → 按钮不渲染只剩手动链接(用户当前的体感问题)。
     serverPlatform: process.platform,
+    // 本机 HTTP 代理(可能 null):前端 Tauri updater check({proxy}) 用。updater 的
+    // Rust 侧下载不读系统代理,墙内直连 GitHub 常超时,探测到 Clash 等本机代理就透传。
+    proxy: await detectLocalProxy().catch(() => null),
+    // 本地 bot 版标记:true 时前端禁用自动更新(公开包不含 bots.local.js/FDA 签名)。
+    localBuild: IS_LOCAL_BUILD,
   });
 });
 

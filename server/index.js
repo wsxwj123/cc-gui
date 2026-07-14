@@ -49,6 +49,10 @@ import { readdir, readFile } from 'fs/promises';
 import { homedir, networkInterfaces } from 'os';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+// 本地 bot 版判据:gitignored 的 bots.local.js 只在本机构建里存在,CI checkout(公开版)没有。
+// 网络绑定默认策略与 /api/health 的 localBuild 字段(前端自动更新 gate,防公开版自动更新
+// 覆盖带 bot 本地版丢 bots.local.js/FDA)都以此为准。
+const IS_LOCAL_BUILD = existsSync(join(__dirname, 'routes', 'bots.local.js'));
 
 // Tauri 启动的 server 从 GUI 进程继承 PATH,通常缺少用户 shell 里手工加的目录。
 // curl install.sh 装的 claude 落在 ~/.claude/local/bin(macOS/Linux/Windows 一致),
@@ -129,7 +133,7 @@ function loadNetworkConfig() {
         // 公开版本就默认"局域网开+每台随机密码",密码记录丢失时按同一策略重新生成随机
         // 密码保持局域网开启(绝不无密码暴露),横幅会提示新默认密码并建议修改。
         // 本地 bot 版不自愈(个人机器不该未经确认重新开放局域网),维持回落+downgraded 横幅引导。
-        const isPublicBuild = !existsSync(join(__dirname, 'routes', 'bots.local.js'));
+        const isPublicBuild = !IS_LOCAL_BUILD;
         if (isPublicBuild) {
           try {
             setDefaultRandomPassword();
@@ -147,7 +151,7 @@ function loadNetworkConfig() {
     //  - 公开版(无 *.local.js,CI checkout 不含 gitignored 的 .local):默认开局域网 0.0.0.0 +
     //    【每台随机】默认密码(非全网统一硬编码,消灭"一个常量打穿所有装机"),明文存 config 供本机 UI
     //    显示一次、defaultPassword:true 提示改。手机连时输那串随机码即可。用户改密码后标记与明文自动清。
-    const isLocalBuild = existsSync(join(__dirname, 'routes', 'bots.local.js'));
+    const isLocalBuild = IS_LOCAL_BUILD;
     if (!isLocalBuild) {
       try {
         setDefaultRandomPassword(); // 写 passwordHash + defaultPassword:true + defaultPasswordPlain
@@ -238,7 +242,7 @@ const APP_VERSION = (() => {
   catch { return null; }
 })();
 app.get('/api/health', (req, res) => {
-  res.json({ ok: true, app: 'claude-gui', port: PORT, version: APP_VERSION });
+  res.json({ ok: true, app: 'claude-gui', port: PORT, version: APP_VERSION, localBuild: IS_LOCAL_BUILD });
 });
 app.use('/api', authMiddleware);
 
