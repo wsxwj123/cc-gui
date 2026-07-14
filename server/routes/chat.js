@@ -639,11 +639,15 @@ router.post('/chat', async (req, res) => {
     keepAlive: wantKeepAlive,
     turnSubagentSeen: false, // 本回合是否起过子代理(关流去抖判据,回合级重置)
     idleTimer: null,
-    // 停止链路 #1:在飞子代理/后台任务薄记 { task_id → tool_use_id|true }。task_started 加、
-    // task_notification / task_updated(终态) 删。stop 时据此对每个活任务 query.stopTask()(优雅
-    // 停并发 stopped notification),并作为优雅窗"没停净"的正面证据:非空→收紧(等停/兜底 abort),
-    // 空→行为与改动前逐字节一致(零回归底座)。跨回合存活,不随回合级状态重置。
+    // 停止链路 #1:在飞子代理/后台任务薄记 { task_id → { toolUseId, kind } }。task_started 加、
+    // task_notification / task_updated(终态) 删。kind 三分:'shell'(Bash run_in_background,
+    // 选择性停止时保留)/'subagent'(带 subagent_type,停)/'unknown'(缺字段,防漏一并停)。
+    // stop 时按 kind 决定 stopTask 目标与 abort 抑制;空→行为与改动前逐字节一致(零回归底座)。
+    // 跨回合存活,不随回合级状态重置。
     liveTasks: new Map(),
+    // Bash run_in_background 的 tool_use_id 集合:task_started 的 task_type==='local_bash' 是
+    // shell 直接判据,此集合是双保险(第三方/旧版 CLI 缺 task_type 时按 tool_use_id 反查)。
+    bgBashToolIds: new Set(),
   };
   activeProcesses.set(procId, slot);
   slot.nulWatcher = startWinNulWatcher(workingDir);
@@ -750,10 +754,17 @@ router.post('/chat', async (req, res) => {
       slot.finishedAt = Date.now();
       deliverLine(slot, JSON.stringify({ type: 'done', exitCode: 0 }));
       if (slot.idleTimer) clearTimeout(slot.idleTimer);
-      slot.idleTimer = setTimeout(() => {
+      // idle 回收豁免:带活任务(不分 kind——后台化子代理同样不该被 idle 回收误杀)的进程
+      // 到点不关,重新武装同时长再等;任务全完成(liveTasks 清空)后下一轮到点正常回收。
+      const idleReclaim = () => {
+        if (slot.liveTasks?.size) {
+          slot.idleTimer = setTimeout(idleReclaim, KEEPALIVE_IDLE_MS);
+          return;
+        }
         slot.closing = true;
         try { input.close(); } catch {}
-      }, KEEPALIVE_IDLE_MS);
+      };
+      slot.idleTimer = setTimeout(idleReclaim, KEEPALIVE_IDLE_MS);
     } else {
       try { input.close(); } catch {}
     }
@@ -768,12 +779,22 @@ router.post('/chat', async (req, res) => {
         if (m.type === 'assistant' && Array.isArray(m.message?.content)) {
           for (const b of m.message.content) {
             if (b?.type === 'tool_use' && (b.name === 'Task' || b.name === 'Agent')) slot.turnSubagentSeen = true;
+            // 选择性停止:记下 Bash run_in_background 的 tool_use_id,task_started 时反查判 shell
+            if (b?.type === 'tool_use' && b.name === 'Bash' && b.input?.run_in_background === true) slot.bgBashToolIds.add(b.id);
           }
         }
         // 停止链路 #1:薄记在飞任务(task_started 加,终态事件删)。task_notification 权威终态,
         // task_updated 的 completed/failed/killed 亦算结束。SDK 事件都带 task_id(sdk.d.ts 4078-4159)。
         if (m.type === 'system' && m.task_id) {
-          if (m.subtype === 'task_started') slot.liveTasks.set(m.task_id, m.tool_use_id || true);
+          if (m.subtype === 'task_started') {
+            // kind 分类(A0 真机实测):Bash run_in_background 的 task_started 带
+            // task_type:'local_bash'(无 subagent_type);Task 子代理带 subagent_type
+            // (sdk.d.ts 4118-4140);都缺则 'unknown'(选择性停止时按可停处理,防第三方
+            // provider 缺字段时停止失效)。bgBashToolIds 是 task_type 缺失时的双保险。
+            const kind = (m.task_type === 'local_bash' || slot.bgBashToolIds.has(m.tool_use_id)) ? 'shell'
+              : (m.subagent_type ? 'subagent' : 'unknown');
+            slot.liveTasks.set(m.task_id, { toolUseId: m.tool_use_id || null, kind });
+          }
           else if (m.subtype === 'task_notification') slot.liveTasks.delete(m.task_id);
           else if (m.subtype === 'task_updated' && ['completed', 'failed', 'killed'].includes(m.patch?.status)) slot.liveTasks.delete(m.task_id);
         }
