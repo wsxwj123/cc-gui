@@ -84,7 +84,8 @@ async function scanLocalSkills() {
   const skills = await Promise.all(dirs.map(async (e) => {
     const md = await readSkillMd(join(SKILLS_DIR, e.name));
     const fm = md ? parseFrontmatter(md) : {};
-    return { id: e.name, name: fm.name || e.name, description: fm.description || '', version: fm.version || null };
+    // metaMissing:SKILL.md 缺失或 frontmatter 未解析到 name(此前静默以目录名空描述列出,用户无从分辨坏元数据)
+    return { id: e.name, name: fm.name || e.name, description: fm.description || '', version: fm.version || null, metaMissing: !fm.name };
   }));
   skills.sort((a, b) => a.id.localeCompare(b.id));
   return skills;
@@ -333,7 +334,7 @@ async function doImport(repo, branchArg, ids, overwrite, force = false, host = '
   const h = hostOf(host);
   const { skills, files, branch } = await loadRepo(repo, branchArg, force, host);
   const byId = new Map(skills.map((s) => [s.id, s]));
-  const imported = [], conflicts = [], failed = [];
+  const imported = [], conflicts = [], failed = [], badMeta = []; // badMeta:装入成功但 SKILL.md 元数据解析不到 name
   const sourcesPatch = {}; // 只累积本次新增的来源,收尾 mergeSources 串行合并(防并发覆盖丢记录)
   for (const id of ids) {
     const meta = byId.get(id);
@@ -373,6 +374,8 @@ async function doImport(repo, branchArg, ids, overwrite, force = false, host = '
       }
       if (dstashed) { await rm(dstashed, { recursive: true, force: true }).catch(() => {}); dstashed = null; }
       imported.push(id);
+      // 导入结果里标出坏元数据(frontmatter 解析不到 name),否则以目录名静默装入用户不知情
+      try { if (!parseFrontmatter(await readSkillMd(dest) || '').name) badMeta.push(id); } catch { /* 仅提示,失败不影响导入 */ }
       sourcesPatch[id] = { repo, branch, root: meta.root, host }; // 记来源供"更新"(含 host)
     } catch (e) {
       await rm(tmp, { recursive: true, force: true }).catch(() => {}); // 清半成品
@@ -382,7 +385,7 @@ async function doImport(repo, branchArg, ids, overwrite, force = false, host = '
   }
   if (imported.length) { try { await mergeSources(sourcesPatch); } catch { /* 记录失败不影响导入结果 */ } }
   localCache = null; // 装了新 skill,本机列表缓存失效
-  return { imported, conflicts, failed };
+  return { imported, conflicts, failed, badMeta };
 }
 
 // CQ批次4:除内置 SOURCES 外,支持 ?repo=owner/repo 一键拉任意 GitHub 仓库的 skill 列表。

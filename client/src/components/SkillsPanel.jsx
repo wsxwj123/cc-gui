@@ -192,19 +192,23 @@ export function SkillsPanel() {
         const failDetail = d.failed?.length
           ? `\n\n失败详情:\n${d.failed.slice(0, 5).map((f) => `· ${f.id}:${f.error || '未知错误'}`).join('\n')}${d.failed.length > 5 ? `\n· …及其余 ${d.failed.length - 5} 个(略)` : ''}`
           : '';
+        // 坏元数据说明:装入成功但 SKILL.md 未解析到名称(列表以目录名显示并打「元数据缺失」标)。
+        const badMetaNote = d.badMeta?.length
+          ? `\n\n注意:「${d.badMeta.slice(0, 5).join('、')}${d.badMeta.length > 5 ? ` 等 ${d.badMeta.length} 个` : ''}」的 SKILL.md 未解析到名称(frontmatter 缺失或格式有误),已按目录名装入`
+          : '';
         // 与技能更新/插件操作一致:导入/更新成功弹窗(此前仅面板内小字,面板外看不到)。
         // 更新覆盖路径(已装·可更新覆盖)一律弹,给"已更新覆盖"专属文案,不再误报"已导入"。
         if (isUpdate) {
           await confirmDialog(
             d.imported?.length
-              ? `已用最新版本覆盖技能「${names.join('、') || ids.join('、')}」`
+              ? `已用最新版本覆盖技能「${names.join('、') || ids.join('、')}」${badMetaNote}`
               : (d.failed?.length ? `更新失败:${(d.failed[0]?.error) || '未知错误'}` : `「${ids.join('、')}」无变化`),
             { confirmText: '知道了' },
           );
         } else if (d.imported?.length) {
           await confirmDialog(
             `已导入 ${d.imported.length} 个技能${d.failed?.length ? `,${d.failed.length} 个失败` : ''}${names.length ? `\n(${names.slice(0, 8).join('、')})` : ''}`
-              + `\n\n在输入框输入 /技能名 即可调用(如 /${names[0] || ids[0]})${failDetail}`,
+              + `\n\n在输入框输入 /技能名 即可调用(如 /${names[0] || ids[0]})${failDetail}${badMetaNote}`,
             { confirmText: '知道了' },
           );
         } else if (d.failed?.length) {
@@ -262,6 +266,12 @@ export function SkillsPanel() {
                   className="bg-canvas-warm border border-canvas-deep rounded-lg p-3 cursor-pointer" title="点击展开/收起完整简介">
                   <div className="flex items-center gap-2">
                     <span className="text-xs font-medium font-body text-ink truncate flex-1" title={s.id}>{s.name}</span>
+                    {s.metaMissing && (
+                      <span className="shrink-0 text-[9px] px-1 py-px bg-amber-500/10 text-amber-600 border border-amber-500/30 rounded font-body"
+                        title="SKILL.md 缺失或 frontmatter 未解析到名称,当前以目录名显示;claude 可能无法正确识别该技能">
+                        元数据缺失
+                      </span>
+                    )}
                     {s.version && <span className="shrink-0 text-[10px] px-1 py-px bg-canvas-deep text-ink-faint rounded font-mono">v{s.version}</span>}
                     <SkillCopyBtn name={s.id} />
                     {sourcesMap[s.id]?.repo && (
