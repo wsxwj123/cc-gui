@@ -112,9 +112,10 @@ export function SkillsPanel() {
   const manageSkill = useCallback(async (action, id) => {
     if (action === 'delete') {
       const ok = await confirmDialog(`删除技能「${id}」?\n\n将永久移除 ~/.claude/skills/${id},需重新下载才能恢复。`, { danger: true, confirmText: '删除' });
-      if (!ok) return;
+      if (!ok) return false;
     }
     setManageBusy(id); setNotice('');
+    let done = false;
     try {
       const r = await fetch(`/api/skills/${action}`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id }),
@@ -123,8 +124,10 @@ export function SkillsPanel() {
       if (!r.ok) throw new Error(d.error || '操作失败');
       setNotice({ archive: `已归档「${id}」—— 已停用,可在「已归档」区恢复`, delete: `已删除「${id}」`, restore: `已恢复「${id}」` }[action]);
       await Promise.all([loadLocal(), loadArchived()]);
+      done = true;
     } catch (e) { setNotice('错误: ' + e.message); }
     setManageBusy(null);
+    return done;
   }, [loadLocal, loadArchived]);
 
   const loadOfficial = useCallback(async (srcId, repo, branch, host) => {
@@ -481,10 +484,19 @@ export function SkillsPanel() {
                     {s.version && <span className="shrink-0 text-[10px] px-1 py-px bg-canvas-deep text-ink-faint rounded font-mono">v{s.version}</span>}
                     <SkillCopyBtn name={s.id} />
                     {s.installed ? (
+                      <>
                       <button onClick={(e) => { e.stopPropagation(); runImport([s.id], true, s.id, true); }} disabled={busy.has(s.id) || busy.has('all')}
                         className="shrink-0 text-[10px] px-2 py-0.5 rounded border border-canvas-deep text-ink-faint hover:text-ink hover:bg-canvas-deep flex items-center gap-1 disabled:opacity-50" title="已安装 — 点击用该源最新版本覆盖">
                         {busy.has(s.id) ? <Loader2 size={10} className="animate-spin" /> : <Check size={10} className="text-success" />}已装·可更新覆盖
                       </button>
+                      <button onClick={async (e) => {
+                          e.stopPropagation();
+                          if (await manageSkill('delete', s.id)) { activeRepo ? loadOfficial(null, activeRepo, activeBranch, activeHost) : loadOfficial(source); }
+                        }} disabled={!!manageBusy || busy.has(s.id) || busy.has('all')}
+                        className="shrink-0 p-1 rounded text-ink-faint hover:text-error hover:bg-canvas-deep disabled:opacity-50" title="删除本机已装的该技能(永久移除,需重新下载)">
+                        {manageBusy === s.id ? <Loader2 size={11} className="animate-spin" /> : <Trash2 size={11} />}
+                      </button>
+                      </>
                     ) : (
                       <button onClick={(e) => { e.stopPropagation(); runImport([s.id], false, s.id); }} disabled={busy.has(s.id) || busy.has('all')}
                         className="shrink-0 text-[10px] px-2 py-0.5 rounded bg-accent/10 text-accent hover:bg-accent/20 flex items-center gap-1 disabled:opacity-50">

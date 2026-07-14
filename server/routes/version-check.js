@@ -325,7 +325,7 @@ export function installCmdFor(proxyUrl = null, method = 'native') { // export �
 // PowerShell/系统代理设置,claude update / install.sh 直连 claude.ai 或 npm 经常
 // ETIMEDOUT。找到在听的端口就在更新/安装命令前 export,找不到返回 null(直连)。
 const COMMON_PROXY_PORTS = [7890, 7897, 1087, 8889, 8118, 10809];
-async function detectLocalProxy() {
+export async function detectLocalProxy() { // export:skills.js 直连 GitHub 失败时回落代理用
   // 用户已显式配置的优先(server 进程自己的 env)。
   const envProxy = process.env.HTTPS_PROXY || process.env.https_proxy || process.env.HTTP_PROXY || process.env.http_proxy;
   if (envProxy) return envProxy;

@@ -10,6 +10,71 @@ import { Router } from 'express';
 import { readdir, readFile, mkdir, writeFile, stat, rm, rename } from 'fs/promises';
 import { join } from 'path';
 import { homedir } from 'os';
+import { request as httpRequest } from 'http';
+import { request as httpsRequest } from 'https';
+import { detectLocalProxy } from './version-check.js';
+
+// ── 网络封装:直连失败回落本地代理 ────────────────────────────
+// 墙内直连 GitHub 时断时通,用户常开着 Clash 等本地代理却帮不上忙:Node fetch 不读
+// http_proxy 环境变量(Node≥25 读了,但其经代理的 TLS 隧道在部分代理下不稳,见 LEARNINGS)。
+// 这里手写标准 CONNECT 隧道(等价 curl -x),仅 skills 的 GitHub/Gitee 请求用,
+// 不设任何全局代理、不碰 claude 子进程环境。仅网络层失败才回落;HTTP 4xx/5xx 正常返回。
+function proxyGet(url, proxyUrl, { headers = {}, timeoutMs = 20000, redirects = 2 } = {}) {
+  return new Promise((resolve, reject) => {
+    const u = new URL(url), p = new URL(proxyUrl);
+    const creq = httpRequest({ host: p.hostname, port: Number(p.port) || 80, method: 'CONNECT', path: `${u.hostname}:${u.port || 443}` });
+    creq.setTimeout(timeoutMs, () => creq.destroy(new Error('代理连接超时')));
+    creq.on('error', reject);
+    creq.on('connect', (cres, socket) => {
+      if (cres.statusCode !== 200) { socket.destroy(); return reject(new Error(`代理 CONNECT ${cres.statusCode}`)); }
+      const req = httpsRequest(url, { createConnection: () => socket, agent: false, headers }, (r) => {
+        if ([301, 302, 307, 308].includes(r.statusCode) && r.headers.location && redirects > 0) {
+          r.resume(); // 丢弃 body
+          return resolve(proxyGet(new URL(r.headers.location, url).href, proxyUrl, { headers, timeoutMs, redirects: redirects - 1 }));
+        }
+        const chunks = [];
+        r.on('data', (c) => chunks.push(c));
+        r.on('error', reject);
+        r.on('end', () => {
+          const buf = Buffer.concat(chunks);
+          resolve({
+            ok: r.statusCode >= 200 && r.statusCode < 300,
+            status: r.statusCode,
+            headers: { get: (k) => r.headers[String(k).toLowerCase()] ?? null },
+            text: async () => buf.toString('utf-8'),
+            json: async () => JSON.parse(buf.toString('utf-8')),
+            arrayBuffer: async () => buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength),
+          });
+        });
+      });
+      req.setTimeout(timeoutMs, () => req.destroy(new Error('代理请求超时')));
+      req.on('error', reject);
+      req.end();
+    });
+    creq.end();
+  });
+}
+let _proxyHit = { at: 0, url: null }; // 探测结果 60s 缓存,避免每个文件下载都探测一轮端口
+async function localProxy() {
+  if (Date.now() - _proxyHit.at > 60_000) _proxyHit = { at: Date.now(), url: await detectLocalProxy().catch(() => null) };
+  return _proxyHit.url;
+}
+async function gfetch(url, opts = {}) {
+  let r;
+  try { r = await fetch(url, opts); }
+  catch (e) {
+    const proxy = await localProxy();
+    if (!proxy) throw e;
+    try { return await proxyGet(url, proxy, { headers: opts.headers || {} }); }
+    catch { throw e; } // 代理也失败 → 抛原始直连错误(对用户更可读)
+  }
+  // GitHub 匿名 API 限流(60次/时)按来源 IP 计:直连配额烧光时换代理链路重试,配额独立。
+  if (r.status === 403 && url.startsWith('https://api.github.com/')) {
+    const proxy = await localProxy();
+    if (proxy) { try { const pr = await proxyGet(url, proxy, { headers: opts.headers || {} }); if (pr.ok) return pr; } catch { /* 保留原响应 */ } }
+  }
+  return r;
+}
 
 const router = Router();
 const SKILLS_DIR = join(homedir(), '.claude', 'skills');
@@ -199,7 +264,7 @@ const hostOf = (h) => HOSTS[h] || HOSTS.github;
 // "Unexpected token '<'"(用户报告)。先验 r.ok + content-type,非 JSON 给可读错误而非裸 parse 报错。
 async function ghJson(url, hostLabel = 'GitHub') {
   let r;
-  try { r = await fetch(url, { headers: GH_HEADERS }); }
+  try { r = await gfetch(url, { headers: GH_HEADERS }); }
   catch (e) { const err = new Error(`无法连接 ${hostLabel}(网络受限?可尝试代理):${e.message}`); err.status = 0; throw err; }
   if (!r.ok) { const e = new Error(`${hostLabel} API ${r.status}`); e.status = r.status; throw e; }
   const ct = r.headers.get('content-type') || '';
@@ -255,7 +320,7 @@ async function loadRepo(repo, branchArg, force = false, host = 'github') {
     skills = await Promise.all(located.map(async (s) => {
       let name = s.id, description = '', version = null;
       try {
-        const raw = await fetch(h.raw(repo, branch, `${s.root}/SKILL.md`));
+        const raw = await gfetch(h.raw(repo, branch, `${s.root}/SKILL.md`));
         if (raw.ok) { const fm = parseFrontmatter(await raw.text()); name = fm.name || s.id; description = fm.description || ''; version = fm.version || null; }
       } catch { /* 留空 */ }
       return { id: s.id, name, description, version, root: s.root };
@@ -263,7 +328,11 @@ async function loadRepo(repo, branchArg, force = false, host = 'github') {
   } else {
     skills = located.map((s) => ({ id: s.id, name: s.id, description: '', version: null, root: s.root }));
   }
-  const entry = { skills, files: tree.filter((t) => t.type === 'blob'), branch, at: now, repo, host };
+  // 目录级 tree sha:技能根目录内容任何增删改(含 SKILL.md 之外的脚本)sha 都会变,
+  // 导入时记进来源,检查更新按 sha 精确比对——作者不维护 frontmatter version 也能测出更新。
+  const dirShas = {};
+  for (const t of tree) if (t.type === 'tree') dirShas[t.path] = t.sha;
+  const entry = { skills, files: tree.filter((t) => t.type === 'blob'), dirShas, branch, at: now, repo, host };
   repoCache.set(cacheKey, entry);
   return entry;
 }
@@ -335,7 +404,7 @@ async function rememberRepo(repo, branch, host = 'github') {
 // 共享导入逻辑(/import 与 /update 复用):下载 ids 对应 skill 覆盖到本机,并记来源。
 async function doImport(repo, branchArg, ids, overwrite, force = false, host = 'github') {
   const h = hostOf(host);
-  const { skills, files, branch } = await loadRepo(repo, branchArg, force, host);
+  const { skills, files, branch, dirShas = {} } = await loadRepo(repo, branchArg, force, host);
   const byId = new Map(skills.map((s) => [s.id, s]));
   const imported = [], conflicts = [], failed = [], badMeta = []; // badMeta:装入成功但 SKILL.md 元数据解析不到 name
   const sourcesPatch = {}; // 只累积本次新增的来源,收尾 mergeSources 串行合并(防并发覆盖丢记录)
@@ -357,14 +426,20 @@ async function doImport(repo, branchArg, ids, overwrite, force = false, host = '
     try {
       await mkdir(SKILLS_DIR, { recursive: true });   // 新机首次导入 skills/ 可能不存在,否则 rename ENOENT
       await mkdir(IMPORT_TMP_DIR, { recursive: true });
-      for (const f of blobs) {
-        const rel = f.path.slice(meta.root.length + 1); // 相对 skill 根
-        const target = join(tmp, rel);
-        await mkdir(join(target, '..'), { recursive: true });
-        const raw = await fetch(h.raw(repo, branch, f.path));
-        if (!raw.ok) throw new Error(`下载 ${rel} HTTP ${raw.status}`);
-        await writeFile(target, Buffer.from(await raw.arrayBuffer()));
-      }
+      // 并发下载(≤5 worker 抢队列):大技能几十个文件逐个串行太慢;任一失败抛出即整体失败,
+      // 由外层 catch 清临时目录(半成品不落地)。idx++ 在单线程事件循环里同步执行,无竞态。
+      let idx = 0;
+      await Promise.all(Array.from({ length: Math.min(5, blobs.length) }, async () => {
+        while (idx < blobs.length) {
+          const f = blobs[idx++];
+          const rel = f.path.slice(meta.root.length + 1); // 相对 skill 根
+          const target = join(tmp, rel);
+          await mkdir(join(target, '..'), { recursive: true });
+          const raw = await gfetch(h.raw(repo, branch, f.path));
+          if (!raw.ok) throw new Error(`下载 ${rel} HTTP ${raw.status}`);
+          await writeFile(target, Buffer.from(await raw.arrayBuffer()));
+        }
+      }));
       // 原子替换:先把旧版本 rename 到暂存(而非直接 rm),再 rename 新版本就位。
       // 若第二步失败(Win 杀毒/索引器锁目录致 EPERM),回滚旧版本 —— 避免"旧的删了新的没进=技能凭空消失"。
       const existed = await stat(dest).then(() => true).catch(() => false);
@@ -379,7 +454,7 @@ async function doImport(repo, branchArg, ids, overwrite, force = false, host = '
       imported.push(id);
       // 导入结果里标出坏元数据(frontmatter 解析不到 name),否则以目录名静默装入用户不知情
       try { if (!parseFrontmatter(await readSkillMd(dest) || '').name) badMeta.push(id); } catch { /* 仅提示,失败不影响导入 */ }
-      sourcesPatch[id] = { repo, branch, root: meta.root, host }; // 记来源供"更新"(含 host)
+      sourcesPatch[id] = { repo, branch, root: meta.root, host, sha: dirShas[meta.root] || null }; // 记来源供"更新"(含 host + 目录 tree sha 供精确比对)
     } catch (e) {
       await rm(tmp, { recursive: true, force: true }).catch(() => {}); // 清半成品
       if (dstashed) { await rename(dstashed, dest).catch(() => {}); } // 兜底:任何异常都让旧版本复位
@@ -460,25 +535,51 @@ router.get('/skills/sources-map', async (req, res) => {
 });
 
 // ── 检查更新(手动触发,不自动轮询)────────────────────────────────
-// 对有来源记录的本机 skill,拉源仓库 SKILL.md 的 frontmatter version 与本机版本纯字符串比对。
-// 直拉 raw 单文件(不走 loadRepo 的整仓 tree,免 API 限流);两侧都声明 version 才能判定,
-// 任一侧缺 version 返回 hasUpdate:null(未知,前端不亮角标)。
-// best-effort:单个拉取失败/超时静默跳过(墙内网络不稳,不报错不阻塞其它技能)。
+// 三级比对精度,逐级回落:
+// ① 目录 tree sha(导入时记录):按 (host,repo,branch) 分组,一组一次 tree API,
+//    技能根目录 sha 变了=有更新——作者不写 version、只改脚本不改 SKILL.md 都测得出。
+// ② 版本号:legacy 来源无 sha 或 tree 拉取失败(限流/私有仓)时,raw 拉 SKILL.md 比 frontmatter version。
+// ③ 全文:任一侧缺 version 时,比 SKILL.md 全文——有差异即视为有更新(不再返回"无法比对")。
+// best-effort:单项失败/超时静默跳过(墙内网络不稳,不报错不阻塞其它技能)。
 router.post('/skills/check-updates', async (req, res) => {
   const sources = await readSources();
   const updates = {};
-  await Promise.all(Object.entries(sources).map(async ([id, src]) => {
-    if (!src?.repo || !src?.root) return;
-    const localMd = await readSkillMd(join(SKILLS_DIR, id));
-    if (localMd === null) return; // 本机没装(已归档/删除),不检查
-    const local = parseFrontmatter(localMd).version;
-    try {
-      const h = hostOf(src.host || 'github');
-      const r = await fetch(h.raw(src.repo, src.branch, `${src.root}/SKILL.md`), { signal: AbortSignal.timeout(15000) });
-      if (!r.ok) return;
-      const remote = parseFrontmatter(await r.text()).version;
-      updates[id] = { local, remote, hasUpdate: local && remote ? local !== remote : null };
-    } catch { /* 网络失败静默跳过 */ }
+  const groups = new Map(); // `${host}:${repo}@${branch}` -> [[id, src], ...]
+  for (const [id, src] of Object.entries(sources)) {
+    if (!src?.repo || !src?.root) continue;
+    const key = `${src.host || 'github'}:${src.repo}@${src.branch || ''}`;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push([id, src]);
+  }
+  await Promise.all([...groups.values()].map(async (entries) => {
+    const src0 = entries[0][1];
+    const h = hostOf(src0.host || 'github');
+    let dirShas = null;
+    if (entries.some(([, s]) => s.sha)) { // 组里有 sha 记录才值得花一次 tree API
+      try {
+        const branch = src0.branch || await ghDefaultBranch(src0.repo, src0.host || 'github');
+        const tree = (await ghJson(h.tree(src0.repo, branch), h.label)).tree || [];
+        dirShas = {};
+        for (const t of tree) if (t.type === 'tree') dirShas[t.path] = t.sha;
+      } catch { dirShas = null; /* 限流/私有仓 → 逐技能回落 raw 比对 */ }
+    }
+    await Promise.all(entries.map(async ([id, src]) => {
+      const localMd = await readSkillMd(join(SKILLS_DIR, id));
+      if (localMd === null) return; // 本机没装(已归档/删除),不检查
+      const local = parseFrontmatter(localMd).version;
+      if (src.sha && dirShas?.[src.root]) {
+        updates[id] = { local, remote: null, hasUpdate: src.sha !== dirShas[src.root], via: 'sha' };
+        return;
+      }
+      try {
+        const r = await gfetch(h.raw(src.repo, src.branch, `${src.root}/SKILL.md`), { signal: AbortSignal.timeout(15000) });
+        if (!r.ok) return;
+        const remoteText = await r.text();
+        const remote = parseFrontmatter(remoteText).version;
+        const hasUpdate = local && remote ? local !== remote : localMd !== remoteText;
+        updates[id] = { local, remote, hasUpdate, via: local && remote ? 'version' : 'content' };
+      } catch { /* 网络失败静默跳过 */ }
+    }));
   }));
   res.json({ updates });
 });
