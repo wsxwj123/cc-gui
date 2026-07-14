@@ -8415,6 +8415,8 @@ export default function App() {
           isMobile={isMobile}
         />
         {LocalWidget && <LocalWidget />}
+        {/* 外接键盘按 Cmd+/ 也能开;不渲染的话状态会隐形置真并吞掉 Esc */}
+        <ShortcutsPanel open={shortcutsOpen} onClose={() => setShortcutsOpen(false)} />
         {!cliInstalled && !cliCheckDismissed && (
           <EnvCheckPanel onRecheck={checkCli} onDismiss={dismissCliCheck} />
         )}
