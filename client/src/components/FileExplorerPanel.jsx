@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react';
-import { Folder, FolderOpen, File, RefreshCw, AlertCircle, ChevronRight, ChevronDown, FileText, Image as ImageIcon, ExternalLink, Film, Pencil, Save, Undo2, Redo2, X, Check, Trash2, AtSign } from 'lucide-react';
+import { Folder, FolderOpen, File, RefreshCw, AlertCircle, ChevronRight, ChevronDown, FileText, Image as ImageIcon, ExternalLink, Film, Pencil, Save, Undo2, Redo2, X, Check, Trash2, AtSign, MoreVertical } from 'lucide-react';
 import { useStore } from '../stores/sessionStore.js';
 import { MarkdownRenderer } from './MarkdownRenderer.jsx';
 import { ArtifactPreview } from './ArtifactPreview.jsx';
@@ -200,7 +200,7 @@ export function FileExplorerPanel() {
     setCtxMenu(null);
   }, [rootPath, activeSession?.sessionId, activeSession?.projectHash]);
 
-  const deletePath = useCallback(({ path, name, parentPath }) => {
+  const deletePath = useCallback(({ path, name, parentPath, isRoot }) => {
     setCtxMenu(null);
     // 删除的是当前预览的文件(或其所在目录)→ 立即清预览。子路径判定要同时认 / 和 \\ —
     // Windows 的 /api/files/list 返回反斜杠路径,只判 '/' 会让删目录后其内预览/选中态残留。
@@ -215,7 +215,8 @@ export function FileExplorerPanel() {
       try {
         const r = await fetch('/api/files/delete', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ path, rootPath, confirm: true }), // 服务端要求显式确认
+          // 服务端要求显式确认;allowRoot 仅根删除流程带上(已过"删除项目文件夹"危险确认框)
+          body: JSON.stringify({ path, rootPath, confirm: true, ...(isRoot ? { allowRoot: true } : {}) }),
         });
         const d = await r.json().catch(() => ({}));
         if (!r.ok) throw new Error(d.error || `${r.status}`);
@@ -312,7 +313,20 @@ export function FileExplorerPanel() {
               className="w-full text-left px-3 py-1.5 text-[12px] font-body text-ink hover:bg-accent/10 flex items-center gap-2">
               <ExternalLink size={12} className="text-ink-faint shrink-0" />用默认 App 打开
             </button>
-            {!ctxMenu.entry.isRoot && (
+            {ctxMenu.entry.isRoot ? (
+              // 项目根目录:允许删除,但先过危险确认(整个项目从磁盘移除,和删普通子目录不是一个量级)
+              <button onClick={async () => {
+                  const entry = ctxMenu.entry; setCtxMenu(null);
+                  const { confirmDialog } = await import('../utils/confirmDialog.jsx');
+                  const ok = await confirmDialog(
+                    `将永久删除整个项目文件夹及其全部内容:\n${entry.path}\n\n删除后 10 秒内可在顶部横条撤销;项目条目之后可在侧栏移除。`,
+                    { danger: true, confirmText: '删除整个文件夹' });
+                  if (ok) deletePath(entry);
+                }}
+                className="w-full text-left px-3 py-1.5 text-[12px] font-body text-red-600 hover:bg-red-500/10 flex items-center gap-2">
+                <Trash2 size={12} className="shrink-0" />删除项目文件夹…
+              </button>
+            ) : (
               <button onClick={() => deletePath(ctxMenu.entry)}
                 className="w-full text-left px-3 py-1.5 text-[12px] font-body text-red-600 hover:bg-red-500/10 flex items-center gap-2">
                 <Trash2 size={12} className="shrink-0" />删除(10 秒内可撤销)
@@ -351,7 +365,7 @@ function TreeNode({ path, name, depth, isDir, isRoot, parentPath, expanded, dirs
         // macOS WKWebView 对 user-select:none 元素不派发 contextmenu(Chromium 会),右键在真 app 里
         // 静默失效 → 补右键 mousedown(button===2,鼠标事件不受 user-select 影响,任何 webview 都发)兜底。
         onMouseDown={(e) => { if (e.button === 2 && onCtx) onCtx(e, { path, name, isDir, isRoot: !!isRoot, parentPath }); }}
-        className={`flex items-center gap-1 px-2 py-0.5 rounded cursor-pointer text-[12px] font-body select-none ${
+        className={`group flex items-center gap-1 px-2 py-0.5 rounded cursor-pointer text-[12px] font-body select-none ${
           isSelected ? 'bg-accent/15 text-accent' : 'hover:bg-canvas-warm text-ink'
         }`}
         style={{ paddingLeft: `${0.5 + depth * 0.9}rem` }}
@@ -369,6 +383,17 @@ function TreeNode({ path, name, depth, isDir, isRoot, parentPath, expanded, dirs
           </>
         )}
         <span className="truncate flex-1">{name}</span>
+        {/* ⋮ 左键菜单入口:macOS WKWebView 在原生层吞掉右键(contextmenu/mousedown button2 都不进
+            DOM,见 memory wkwebview-no-contextmenu-on-user-select-none),右键菜单在真 app 里不可达,
+            项目根目录的打开/删除等操作没有任何入口 —— 这颗按钮是全平台可靠入口,与右键开同一菜单。 */}
+        {onCtx && (
+          <button
+            onClick={(e) => { e.stopPropagation(); onCtx(e, { path, name, isDir, isRoot: !!isRoot, parentPath }); }}
+            className="shrink-0 p-0.5 rounded text-ink-faint opacity-50 group-hover:opacity-100 hover:text-ink hover:bg-canvas-deep transition-opacity"
+            title="操作菜单(添加到上下文 / 打开 / 删除)">
+            <MoreVertical size={11} />
+          </button>
+        )}
       </div>
       {isDir && isOpen && dir && (
         <>

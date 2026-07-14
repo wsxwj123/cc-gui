@@ -319,7 +319,9 @@ router.post('/files/delete', async (req, res) => {
     const sameFsPath = (a, b) => process.platform === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b;
     // rootPath 缺失时 resolve('')=server cwd,拿它比较等于没比(P3):只在客户端确实传了 rootPath 时比。
     const rootReal = req.body?.rootPath ? resolve(req.body.rootPath) : null;
-    if (sameFsPath(real, HOME) || (rootReal && sameFsPath(real, rootReal))) {
+    // HOME 永远不许删;项目根目录默认拒绝,仅当前端根删除流程显式带 allowRoot:true
+    // (走过"删除项目文件夹"危险确认框)才放行 —— 误触根节点的兜底保留,授权删除放开。
+    if (sameFsPath(real, HOME) || (rootReal && sameFsPath(real, rootReal) && req.body?.allowRoot !== true)) {
       return res.status(400).json({ error: '不允许删除根目录' });
     }
     // maxRetries:Windows 上文件被占用(刚"用默认 App 打开"又删)EBUSY/EPERM 概率高,直接报错。

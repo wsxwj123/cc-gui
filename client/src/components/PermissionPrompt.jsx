@@ -187,6 +187,30 @@ function AskQuestionCard({ req, onAnswer, processing, position, hydrate }) {
   const total = questions.length;
   const isLast = qi >= total - 1;
 
+  // 组装第 i 题答案;pOv/cOv 允许用"刚点选还没进 state 的值"直接提交(单题点选即交,
+  // setState 异步,读 state 会拿到旧值)。
+  const answerWith = (i, pOv, cOv) => {
+    const c = ((cOv || customs)[i] || '').trim();
+    const p = (pOv || picks)[i];
+    const sel = Array.isArray(p) ? p.join('、') : (p || '');
+    return [sel, c].filter(Boolean).join('；');
+  };
+  const answerOf = (i) => answerWith(i);
+  const allAnswered = total > 0 && questions.every((_, i) => answerOf(i));
+  const firstUnanswered = questions.findIndex((_, i) => !answerOf(i));
+
+  const submit = (pOv, cOv) => {
+    if (!questions.every((_, i) => answerWith(i, pOv, cOv))) { if (firstUnanswered >= 0) setQi(firstUnanswered); return; }
+    const text = questions
+      .map((q, i) => `【${q.header || '问题' + (i + 1)}】${q.question}\n→ ${answerWith(i, pOv, cOv)}`)
+      .join('\n\n');
+    // 结构化 answers:key=问题原文,value=所选 label(多选用"、"拼)。SDK canUseTool 据此
+    // 返回 {behavior:'allow', updatedInput:{questions, answers}},模型干净收到。
+    const answers = {};
+    questions.forEach((q, i) => { answers[q.question] = answerWith(i, pOv, cOv); });
+    onAnswer(req, text, { questions, answers });
+  };
+
   const choose = (label, multi) => {
     const wasSelected = !multi && picks[qi] === label;
     setPicks((prev) => {
@@ -194,28 +218,14 @@ function AskQuestionCard({ req, onAnswer, processing, position, hydrate }) {
       const cur = Array.isArray(prev[qi]) ? prev[qi] : [];
       return { ...prev, [qi]: cur.includes(label) ? cur.filter((x) => x !== label) : [...cur, label] };
     });
+    // 只有一道题且单选:点选项即提交(免再点"提交"按钮);稍延迟让选中态可见。
+    // 多选不适用(要连选多个);取消选中不提交。已有自定义文本时一并带上。
+    if (!multi && !wasSelected && total === 1) {
+      setTimeout(() => submit({ ...picks, [qi]: label }, customs), 120);
+      return;
+    }
     // 单选选中即跳下一题(取消选中/多选/末题不跳),稍延迟让选中态可见
     if (!multi && !wasSelected && !isLast) setTimeout(() => setQi((i) => Math.min(i + 1, total - 1)), 150);
-  };
-  const answerOf = (i) => {
-    const c = (customs[i] || '').trim();
-    const p = picks[i];
-    const sel = Array.isArray(p) ? p.join('、') : (p || '');
-    return [sel, c].filter(Boolean).join('；');
-  };
-  const allAnswered = total > 0 && questions.every((_, i) => answerOf(i));
-  const firstUnanswered = questions.findIndex((_, i) => !answerOf(i));
-
-  const submit = () => {
-    if (!allAnswered) { if (firstUnanswered >= 0) setQi(firstUnanswered); return; }
-    const text = questions
-      .map((q, i) => `【${q.header || '问题' + (i + 1)}】${q.question}\n→ ${answerOf(i)}`)
-      .join('\n\n');
-    // 结构化 answers:key=问题原文,value=所选 label(多选用"、"拼)。SDK canUseTool 据此
-    // 返回 {behavior:'allow', updatedInput:{questions, answers}},模型干净收到。
-    const answers = {};
-    questions.forEach((q, i) => { answers[q.question] = answerOf(i); });
-    onAnswer(req, text, { questions, answers });
   };
 
   useEffect(() => {
@@ -285,7 +295,15 @@ function AskQuestionCard({ req, onAnswer, processing, position, hydrate }) {
             type="text"
             value={customs[qi] || ''}
             onChange={(e) => setCustoms((prev) => ({ ...prev, [qi]: e.target.value }))}
-            placeholder="或自定义回答…"
+            onKeyDown={(e) => {
+              // 输入框内 Enter:末题(含单题)直接提交,非末题已答则下一题 —— 与窗口级
+              // Enter 语义一致(窗口级 handler 刻意忽略 INPUT,这里补上)。
+              if (e.key !== 'Enter' || processing) return;
+              e.preventDefault();
+              if (isLast) submit();
+              else if (answerOf(qi)) setQi((i) => i + 1);
+            }}
+            placeholder={total === 1 ? '或自定义回答,回车提交…' : '或自定义回答…'}
             className="mt-0.5 text-[12px] font-body px-2.5 py-1.5 rounded-md border border-canvas-deep bg-white text-ink"
           />
         </div>
