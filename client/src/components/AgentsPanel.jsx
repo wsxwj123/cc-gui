@@ -298,7 +298,13 @@ export function AgentsPanel() {
 
       <div className="flex-1 min-h-0 overflow-hidden flex">
         <div className="w-[140px] border-r border-canvas-deep overflow-y-auto shrink-0">
-          {agents.length === 0 && <p className="text-[11px] text-ink-faint p-3 text-center font-body">无 agent</p>}
+          {agents.length === 0 && (
+            <div className="p-3 text-center space-y-2">
+              <p className="text-[11px] text-ink-faint font-body">无 agent</p>
+              <button onClick={() => { setShowBuiltin(true); fetchBuiltin(); }}
+                className="btn-accent text-[10px] px-2 py-1">从内置预设创建</button>
+            </div>
+          )}
           {agents.map((a) => (
             <div key={a.name} className="group relative flex items-center">
               <button onClick={() => open(a.name)}
