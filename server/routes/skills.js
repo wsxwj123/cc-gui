@@ -80,13 +80,16 @@ const LOCAL_TTL = 60 * 1000;
 async function scanLocalSkills() {
   let entries;
   try { entries = await readdir(SKILLS_DIR, { withFileTypes: true }); } catch { return []; }
-  const dirs = entries.filter((e) => e.isDirectory() && !e.name.startsWith('.'));
-  const skills = await Promise.all(dirs.map(async (e) => {
+  const dirs = entries.filter((e) => e.isDirectory() && !e.name.startsWith('.') && !e.name.startsWith('_'));
+  const skills = (await Promise.all(dirs.map(async (e) => {
     const md = await readSkillMd(join(SKILLS_DIR, e.name));
-    const fm = md ? parseFrontmatter(md) : {};
-    // metaMissing:SKILL.md 缺失或 frontmatter 未解析到 name(此前静默以目录名空描述列出,用户无从分辨坏元数据)
+    // 官方约定:技能=目录内含 SKILL.md。无 SKILL.md 的目录(如 8 个技能共用的 _shared 门禁基建、
+    // 或用户误建的普通目录)不是技能,直接跳过不列——否则用户会把它当废技能误删,搞坏基建。
+    if (!md) return null;
+    const fm = parseFrontmatter(md);
+    // metaMissing:有 SKILL.md 但 frontmatter 未解析到 name(坏元数据,仍列但打标提示)
     return { id: e.name, name: fm.name || e.name, description: fm.description || '', version: fm.version || null, metaMissing: !fm.name };
-  }));
+  }))).filter(Boolean);
   skills.sort((a, b) => a.id.localeCompare(b.id));
   return skills;
 }
@@ -113,7 +116,7 @@ router.get('/skills/archived', async (req, res) => {
   try {
     let entries;
     try { entries = await readdir(ARCHIVE_DIR, { withFileTypes: true }); } catch { return res.json({ skills: [] }); }
-    const dirs = entries.filter((e) => e.isDirectory() && !e.name.startsWith('.'));
+    const dirs = entries.filter((e) => e.isDirectory() && !e.name.startsWith('.') && !e.name.startsWith('_'));
     const skills = await Promise.all(dirs.map(async (e) => {
       const fm = parseFrontmatter(await readSkillMd(join(ARCHIVE_DIR, e.name)) || '');
       return { id: e.name, name: fm.name || e.name, description: fm.description || '' };

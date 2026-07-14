@@ -585,7 +585,8 @@ app.get('/api/slash-commands', async (req, res) => {
           const projSkillsDir = join(projRoot, '.claude', 'skills');
           const dirs = await readdir(projSkillsDir, { withFileTypes: true });
           for (const d of dirs) {
-            if (!d.isDirectory() || d.name.startsWith('.') || commands.some((c) => c.name === `/${d.name}`)) continue;
+            if (!d.isDirectory() || d.name.startsWith('.') || d.name.startsWith('_') || commands.some((c) => c.name === `/${d.name}`)) continue;
+            if (!existsSync(join(projSkillsDir, d.name, 'SKILL.md')) && !existsSync(join(projSkillsDir, d.name, 'skill.md'))) continue; // 无 SKILL.md 不是技能
             commands.push({
               name: `/${d.name}`,
               desc: await getSkillDescription(projSkillsDir, d.name),
@@ -600,7 +601,8 @@ app.get('/api/slash-commands', async (req, res) => {
     const skillsDir = join(homedir(), '.claude', 'skills');
     try {
       const entries = await readdir(skillsDir, { withFileTypes: true });
-      const skillDirs = entries.filter(e => e.isDirectory() && !e.name.startsWith('.'));
+      // 官方约定:技能=目录含 SKILL.md;跳 _/. 开头(如 _shared 门禁基建目录),无 SKILL.md 的目录不是技能不列
+      const skillDirs = entries.filter(e => e.isDirectory() && !e.name.startsWith('.') && !e.name.startsWith('_') && (existsSync(join(skillsDir, e.name, 'SKILL.md')) || existsSync(join(skillsDir, e.name, 'skill.md'))));
       const descriptions = await Promise.all(skillDirs.map(d => getSkillDescription(skillsDir, d.name)));
       skillDirs.forEach((entry, i) => {
         if (commands.some(c => c.name === `/${entry.name}`)) return;
