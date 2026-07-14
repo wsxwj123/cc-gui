@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useRef } from 'react';
-import { Settings, Save, RefreshCw, AlertCircle, Check, Plus, Trash2, ChevronDown, ChevronRight, ShieldCheck, ShieldAlert, ExternalLink, Eye, EyeOff } from 'lucide-react';
+import { Settings, Save, RefreshCw, AlertCircle, Check, Plus, Trash2, ChevronDown, ChevronRight, ShieldCheck, ShieldAlert, ExternalLink, Eye, EyeOff, Search } from 'lucide-react';
 import { openExternalUrl } from '../utils/openExternal.js';
 import { isTauri } from '../utils/pickDirectory.js';
 import { confirmDialog } from '../utils/confirmDialog.jsx';
@@ -9,6 +9,45 @@ import EnvCheckPanel from './EnvCheckPanel.jsx';
 const HOOK_EVENTS = [
   'UserPromptSubmit', 'SessionStart', 'SessionEnd', 'PreToolUse', 'PostToolUse',
   'Stop', 'SubagentStop', 'Notification',
+];
+
+// 生效时机徽章:标注该设置改动后何时起作用。
+// immediate=对下一次发送/操作即生效;session=需新开会话;restart=需重启应用/服务。
+const EFFECT_BADGE = {
+  immediate: ['即时', 'bg-emerald-50 text-emerald-700 border-emerald-200'],
+  session: ['新会话生效', 'bg-sky-50 text-sky-700 border-sky-200'],
+  restart: ['重启生效', 'bg-amber-50 text-amber-700 border-amber-200'],
+};
+function EffectBadge({ level }) {
+  const [label, cls] = EFFECT_BADGE[level] || EFFECT_BADGE.immediate;
+  return (
+    <span className={`shrink-0 text-[9px] leading-none px-1 py-0.5 rounded border font-body ${cls}`} title="该设置的生效时机">
+      {label}
+    </span>
+  );
+}
+
+// 设置搜索索引:纯前端按标题/关键词匹配,命中后切到对应 tab 并滚动高亮该设置组
+// (与顶栏「更新」按钮跳转同一 id+ring 机制)。新增设置组时在此登记。
+const SETTINGS_INDEX = [
+  { id: 'gui-update', tab: 'overview', title: 'GUI 版本与更新', keys: 'update 升级 版本 检查更新 下载' },
+  { id: 'cc-update', tab: 'overview', title: 'Claude Code CLI 更新 / 切换', keys: 'cli claude npm 原生 安装 版本 路径' },
+  { id: 'set-fda', tab: 'overview', title: '完全磁盘访问 (FDA)', keys: 'fda 磁盘 授权 权限 macos' },
+  { id: 'set-close-behavior', tab: 'overview', title: '关闭窗口行为', keys: '关闭 最小化 退出 窗口' },
+  { id: 'set-persistent-chat', tab: 'overview', title: '会话常驻进程', keys: '常驻 复用 冷启动 进程 persistent 缓存' },
+  { id: 'set-prompt-suggestions', tab: 'overview', title: '输入预测', keys: '预测 建议 suggestion 输入' },
+  { id: 'set-max-budget', tab: 'overview', title: '对话花费上限', keys: '花费 预算 budget 成本 上限 美元' },
+  { id: 'set-cache-opt', tab: 'overview', title: '缓存优化', keys: '缓存 cache 前缀 动态 系统提示' },
+  { id: 'set-auto-compact', tab: 'overview', title: '自动压缩窗口', keys: '压缩 compact token 上下文 窗口' },
+  { id: 'set-small-fast-model', tab: 'overview', title: '轻量快速模型', keys: '模型 标题 haiku 快速 small fast' },
+  { id: 'set-chat-background', tab: 'overview', title: '对话区背景', keys: '背景 图片 视频 纯色 遮罩' },
+  { id: 'set-env-editor', tab: 'overview', title: '环境变量', keys: 'env 变量 environment anthropic' },
+  { id: 'set-env-check', tab: 'env', title: '环境检查(node / claude / python / git / uv)', keys: '环境 依赖 node python git uv 安装' },
+  { id: 'set-permissions', tab: 'permissions', title: '权限规则(允许 / 询问 / 拒绝)', keys: 'permissions allow ask deny 权限 规则 工具' },
+  { id: 'set-hooks', tab: 'hooks', title: 'Hooks 钩子脚本', keys: 'hooks 钩子 脚本 事件' },
+  { id: 'set-json', tab: 'json', title: '原始配置 settings.json', keys: 'json 原始 配置 settings' },
+  { id: 'set-storage', tab: 'storage', title: '.bak 备份清理', keys: '存储 备份 bak 清理 磁盘 空间' },
+  { id: 'set-network', tab: 'network', title: '局域网访问与端口', keys: '网络 局域网 lan 密码 端口 手机 tailscale 远程' },
 ];
 
 export function SettingsPanel() {
@@ -34,25 +73,35 @@ export function SettingsPanel() {
 
   useEffect(() => { fetchSettings(); }, []);
 
+  // 切 tab + 滚动高亮指定设置组(id + ring,80ms 等目标 tab 挂载)。
+  // 顶栏「更新」跳转与下方设置搜索共用。
+  const jumpToSection = (section, tabId = 'overview') => {
+    if (!section) return;
+    setTab(tabId);
+    setTimeout(() => {
+      const el = document.getElementById(section);
+      if (!el) return;
+      el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      el.classList.add('ring-2', 'ring-accent', 'ring-offset-2', 'rounded-lg');
+      setTimeout(() => el.classList.remove('ring-2', 'ring-accent', 'ring-offset-2'), 2000);
+    }, 80);
+  };
+  const jumpRef = useRef(jumpToSection);
+  jumpRef.current = jumpToSection;
+
   // CJ-2:从顶栏「更新」按钮 / 弹窗"前往更新"跳转过来 → 切到 overview 并滚动高亮对应更新区
   // (gui-update / cc-update)。window.__cguiSettingsJump 兜底:点击早于本面板挂载时从这读。
   useEffect(() => {
-    const go = (section) => {
-      if (!section) return;
-      setTab('overview');
-      setTimeout(() => {
-        const el = document.getElementById(section);
-        if (!el) return;
-        el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-        el.classList.add('ring-2', 'ring-accent', 'ring-offset-2', 'rounded-lg');
-        setTimeout(() => el.classList.remove('ring-2', 'ring-accent', 'ring-offset-2'), 2000);
-      }, 80);
-    };
-    if (window.__cguiSettingsJump) { const s = window.__cguiSettingsJump; window.__cguiSettingsJump = null; go(s); }
-    const onJump = (e) => { window.__cguiSettingsJump = null; go(e?.detail?.section); };
+    if (window.__cguiSettingsJump) { const s = window.__cguiSettingsJump; window.__cguiSettingsJump = null; jumpRef.current(s); }
+    const onJump = (e) => { window.__cguiSettingsJump = null; jumpRef.current(e?.detail?.section); };
     window.addEventListener('cgui:settings-jump', onJump);
     return () => window.removeEventListener('cgui:settings-jump', onJump);
   }, []);
+
+  // 设置搜索:按标题/关键词匹配 SETTINGS_INDEX,点结果跳转并高亮。纯前端锚点,不做全文索引。
+  const [searchQ, setSearchQ] = useState('');
+  const q = searchQ.trim().toLowerCase();
+  const searchHits = q ? SETTINGS_INDEX.filter((it) => (it.title + ' ' + it.keys).toLowerCase().includes(q)) : [];
 
   // Persist either an arbitrary object (Hooks tab) or the raw JSON (JSON tab).
   const save = async (next) => {
@@ -114,6 +163,34 @@ export function SettingsPanel() {
         </button>
       </div>
 
+      {/* 设置搜索:输入关键词 → 列出匹配的设置组,点击切 tab 并滚动高亮 */}
+      <div className="relative">
+        <Search size={12} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-faint pointer-events-none" />
+        <input
+          value={searchQ}
+          onChange={(e) => setSearchQ(e.target.value)}
+          placeholder="搜索设置(如:压缩 / 密码 / 更新)…"
+          className="w-full bg-canvas-warm border border-canvas-deep rounded-lg pl-8 pr-3 py-1.5 text-[12px] text-ink placeholder-ink-faint font-body focus:outline-none focus:border-accent/40"
+        />
+        {q && (
+          <div className="mt-1.5 border border-canvas-deep rounded-lg overflow-hidden divide-y divide-canvas-deep/60">
+            {searchHits.length === 0 && (
+              <div className="px-3 py-2 text-[11px] text-ink-faint font-body">没有匹配的设置项</div>
+            )}
+            {searchHits.map((it) => (
+              <button key={it.id}
+                onClick={() => { setSearchQ(''); jumpToSection(it.id, it.tab); }}
+                className="w-full flex items-center gap-2 px-3 py-2 text-left hover:bg-canvas-warm transition-colors">
+                <span className="flex-1 text-[12px] text-ink font-body">{it.title}</span>
+                <span className="shrink-0 text-[10px] text-ink-faint font-body">
+                  {{ overview: '概览', env: '环境', permissions: '权限', hooks: 'Hooks', json: '原始配置', storage: '存储', network: '网络' }[it.tab] || it.tab}
+                </span>
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+
       {error && (
         <div className="flex items-center gap-2 text-xs text-error bg-error-subtle rounded-lg p-2.5">
           <AlertCircle size={13} /><span className="font-body">{error}</span>
@@ -121,20 +198,20 @@ export function SettingsPanel() {
       )}
 
       {tab === 'overview' && <OverviewTab settings={settings} onSave={save} onEnvPatch={envPatch} saving={saving} />}
-      {tab === 'env' && <EnvCheckPanel asModal={false} />}
+      {tab === 'env' && <div id="set-env-check"><EnvCheckPanel asModal={false} /></div>}
       {tab === 'permissions' && (
-        <PermissionsTab settings={settings} onSave={save} saving={saving} saved={saved} />
+        <div id="set-permissions"><PermissionsTab settings={settings} onSave={save} saving={saving} saved={saved} /></div>
       )}
       {tab === 'hooks' && (
-        <HooksTab settings={settings} onSave={save} saving={saving} saved={saved} />
+        <div id="set-hooks"><HooksTab settings={settings} onSave={save} saving={saving} saved={saved} /></div>
       )}
       {tab === 'json' && (
-        <JsonTab rawJson={rawJson} setRawJson={setRawJson} onSave={() => save()}
+        <div id="set-json"><JsonTab rawJson={rawJson} setRawJson={setRawJson} onSave={() => save()}
           onReset={() => { setRawJson(JSON.stringify(settings, null, 2)); setError(null); }}
-          saving={saving} saved={saved} />
+          saving={saving} saved={saved} /></div>
       )}
-      {tab === 'storage' && <StorageTab />}
-      {tab === 'network' && <NetworkTab />}
+      {tab === 'storage' && <div id="set-storage"><StorageTab /></div>}
+      {tab === 'network' && <div id="set-network"><NetworkTab /></div>}
     </div>
   );
 }
@@ -247,7 +324,7 @@ function NetworkTab() {
       <label className="flex items-start gap-3 cursor-pointer">
         <input type="checkbox" checked={lanOn} onChange={(e) => setLanOn(e.target.checked)} className="mt-0.5" />
         <div>
-          <div className="text-[13px] text-ink font-body font-medium">{lanOn ? '局域网访问：开启（绑定 0.0.0.0）' : '开启局域网访问（绑定 0.0.0.0）'}</div>
+          <div className="text-[13px] text-ink font-body font-medium flex items-center gap-1.5">{lanOn ? '局域网访问：开启（绑定 0.0.0.0）' : '开启局域网访问（绑定 0.0.0.0）'}<EffectBadge level="restart" /></div>
           <div className="text-[11px] text-ink-faint font-body">关闭=保存后回到仅本机 127.0.0.1；开启后同局域网 / Tailscale 设备（含手机）凭密码访问下方地址。</div>
         </div>
       </label>
@@ -271,7 +348,7 @@ function NetworkTab() {
       )}
 
       <div className="flex items-center gap-2">
-        <span className="text-[12px] text-ink-soft font-body">端口</span>
+        <span className="text-[12px] text-ink-soft font-body flex items-center gap-1.5">端口<EffectBadge level="restart" /></span>
         <input type="number" min={1024} max={65535} value={port} onChange={(e) => setPort(e.target.value)}
           className="w-24 px-2 py-1 text-[12px] font-mono border border-canvas-deep rounded bg-canvas text-ink" />
       </div>
@@ -1110,7 +1187,7 @@ function CloseBehaviorPicker() {
   };
   return (
     <div className="rounded-lg border border-canvas-deep bg-canvas-warm/40 p-3">
-      <div className="text-[12px] font-medium text-ink font-body mb-1.5">关闭窗口时(桌面版)</div>
+      <div className="text-[12px] font-medium text-ink font-body mb-1.5 flex items-center gap-1.5">关闭窗口时(桌面版)<EffectBadge level="immediate" /></div>
       <div className="flex items-center gap-2">
         {[['ask', '每次询问'], ['minimize', '最小化'], ['quit', '完全退出']].map(([v, label]) => (
           <button key={v} onClick={() => save(v)}
@@ -1294,7 +1371,7 @@ function PersistentChatToggle() {
   return (
     <div className="bg-canvas-warm border border-canvas-deep rounded-lg px-3 py-2.5 flex items-center gap-3">
       <div className="min-w-0 flex-1">
-        <div className="text-xs text-ink font-body font-medium">会话常驻进程</div>
+        <div className="text-xs text-ink font-body font-medium flex items-center gap-1.5">会话常驻进程<EffectBadge level="immediate" /></div>
         <div className="text-[10.5px] text-ink-faint font-body">回合结束后保留 CLI 进程,同一会话的下一条消息直接复用,省掉每回合的进程冷启动与 MCP 重启(约 5 秒),响应更快、第三方缓存更稳。切换模型/思考强度/provider 时自动重开进程。空闲 15 分钟自动回收</div>
       </div>
       <button onClick={() => setOn(!on)}
@@ -1318,7 +1395,7 @@ function MaxBudgetInput() {
   return (
     <div className="bg-canvas-warm border border-canvas-deep rounded-lg px-3 py-2.5 flex items-center gap-3">
       <div className="min-w-0 flex-1">
-        <div className="text-xs text-ink font-body font-medium">对话花费上限</div>
+        <div className="text-xs text-ink font-body font-medium flex items-center gap-1.5">对话花费上限<EffectBadge level="immediate" /></div>
         <div className="text-[10.5px] text-ink-faint font-body">若设置(单位美元),对话进程的累计花费达到该值时立即停止并提示。开启会话常驻时按同一常驻进程的多个回合累计,进程重开后重新计。置空 = 不限制</div>
       </div>
       <div className="shrink-0 flex items-center gap-1">
@@ -1344,7 +1421,7 @@ function PromptSuggestionsToggle() {
   return (
     <div className="bg-canvas-warm border border-canvas-deep rounded-lg px-3 py-2.5 flex items-center gap-3">
       <div className="min-w-0 flex-1">
-        <div className="text-xs text-ink font-body font-medium">输入预测</div>
+        <div className="text-xs text-ink font-body font-medium flex items-center gap-1.5">输入预测<EffectBadge level="immediate" /></div>
         <div className="text-[10.5px] text-ink-faint font-body">回合结束后由模型预测下一条可能的输入,在输入框上方显示为建议,点击即发送、也可填入编辑。预测蹭本回合的缓存生成,成本极低;首轮与规划模式不产生建议</div>
       </div>
       <button onClick={() => setOn(!on)}
@@ -1362,7 +1439,7 @@ function ExcludeDynamicPromptToggle() {
   return (
     <div className="bg-canvas-warm border border-canvas-deep rounded-lg px-3 py-2.5 flex items-center gap-3">
       <div className="min-w-0 flex-1">
-        <div className="text-xs text-ink font-body font-medium">缓存优化</div>
+        <div className="text-xs text-ink font-body font-medium flex items-center gap-1.5">缓存优化<EffectBadge level="immediate" /></div>
         <div className="text-[10.5px] text-ink-faint font-body">把每轮变化的动态段(工作目录、auto-memory、git 状态)移出系统提示、改注入首条用户消息,使系统提示保持静态,提升第三方 provider 的前缀缓存命中、降低费用。「自动」= 第三方 provider 开启、官方渠道关闭(官方无需开启)</div>
       </div>
       <div className="shrink-0 flex items-center gap-1">
@@ -1399,7 +1476,7 @@ function AutoCompactWindowSelect({ settings, onSave, saving }) {
   return (
     <div className="bg-canvas-warm border border-canvas-deep rounded-lg px-3 py-2.5 flex items-center gap-3">
       <div className="min-w-0 flex-1">
-        <div className="text-xs text-ink font-body font-medium">自动压缩窗口</div>
+        <div className="text-xs text-ink font-body font-medium flex items-center gap-1.5">自动压缩窗口<EffectBadge level="immediate" /></div>
         <div className="text-[10.5px] text-ink-faint font-body">上下文占用逼近该 token 窗口时,CLI 自动压缩会话历史。调大则更晚触发、保留更多上下文,调小则更早压缩。置为默认时按模型自动决定。若环境变量 CLAUDE_CODE_AUTO_COMPACT_WINDOW 已设置,则以环境变量为准。<span className="text-ink-muted">参考:200K 窗口模型选 150K–180K、1M 窗口模型选 800K–900K,给压缩留出余量</span></div>
       </div>
       <select
@@ -1429,7 +1506,7 @@ function SmallFastModelInput({ env, onEnvPatch, saving }) {
   return (
     <div className="bg-canvas-warm border border-canvas-deep rounded-lg px-3 py-2.5 flex items-center gap-3">
       <div className="min-w-0 flex-1">
-        <div className="text-xs text-ink font-body font-medium">轻量快速模型</div>
+        <div className="text-xs text-ink font-body font-medium flex items-center gap-1.5">轻量快速模型<EffectBadge level="immediate" /></div>
         <div className="text-[10.5px] text-ink-faint font-body">CLI 用它跑非核心小任务(生成会话标题、后台压缩摘要等),不影响正式对话。设成更便宜或更快的模型可省钱提速。置空恢复 CLI 默认。第三方 provider 需填该中转支持的模型 id。</div>
       </div>
       <input
@@ -1509,7 +1586,7 @@ function ChatBackgroundCard() {
   return (
     <div className="bg-canvas-warm border border-canvas-deep rounded-lg px-3 py-2.5 space-y-2.5">
       <div>
-        <div className="text-xs text-ink font-body font-medium">对话区背景</div>
+        <div className="text-xs text-ink font-body font-medium flex items-center gap-1.5">对话区背景<EffectBadge level="immediate" /></div>
         <div className="text-[10.5px] text-ink-faint font-body">
           设置对话消息区的背景:纯色、本地图片(png/jpg/gif/webp)或本地视频(mp4/webm),文件不超过 50MB。
           遮罩不透明度控制主题底色覆盖在背景上的比例,数值越高文字越易读。默认状态不修改现有外观。
@@ -1571,15 +1648,15 @@ function OverviewTab({ settings, onSave, onEnvPatch, saving }) {
     <div className="space-y-3">
       <div id="gui-update"><UpdateChecker /></div>
       <div id="cc-update"><CcUpdater /></div>
-      <FullDiskAccessCard />
-      <CloseBehaviorPicker />
-      <PersistentChatToggle />
-      <PromptSuggestionsToggle />
-      <MaxBudgetInput />
-      <ExcludeDynamicPromptToggle />
-      <AutoCompactWindowSelect settings={settings} onSave={onSave} saving={saving} />
-      <SmallFastModelInput env={env} onEnvPatch={onEnvPatch} saving={saving} />
-      <ChatBackgroundCard />
+      <div id="set-fda"><FullDiskAccessCard /></div>
+      <div id="set-close-behavior"><CloseBehaviorPicker /></div>
+      <div id="set-persistent-chat"><PersistentChatToggle /></div>
+      <div id="set-prompt-suggestions"><PromptSuggestionsToggle /></div>
+      <div id="set-max-budget"><MaxBudgetInput /></div>
+      <div id="set-cache-opt"><ExcludeDynamicPromptToggle /></div>
+      <div id="set-auto-compact"><AutoCompactWindowSelect settings={settings} onSave={onSave} saving={saving} /></div>
+      <div id="set-small-fast-model"><SmallFastModelInput env={env} onEnvPatch={onEnvPatch} saving={saving} /></div>
+      <div id="set-chat-background"><ChatBackgroundCard /></div>
       {rows.length > 0 && (
         <div className="bg-canvas-warm border border-canvas-deep rounded-lg divide-y divide-canvas-deep">
           {rows.map(([k, v]) => (
@@ -1592,7 +1669,7 @@ function OverviewTab({ settings, onSave, onEnvPatch, saving }) {
       )}
 
       {/* 环境变量 — 默认折叠;展开后每项可改值/删除,底部可新增。改完即写回 settings.json 的 env */}
-      <div className="border border-canvas-deep rounded-lg overflow-hidden">
+      <div id="set-env-editor" className="border border-canvas-deep rounded-lg overflow-hidden">
         <button onClick={() => setShowEnv((v) => !v)}
           className="w-full flex items-center gap-2 px-3 py-2.5 hover:bg-canvas-warm/60 text-left">
           {showEnv ? <ChevronDown size={12} className="text-ink-faint" /> : <ChevronRight size={12} className="text-ink-faint" />}
