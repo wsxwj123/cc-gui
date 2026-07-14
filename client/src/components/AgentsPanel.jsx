@@ -327,14 +327,6 @@ export function AgentsPanel() {
             <>
               <div className="px-3 py-2 border-b border-canvas-deep flex items-center justify-between gap-2">
                 <span className="text-xs font-mono text-ink-soft truncate">{selected}.md</span>
-                {editModel !== null && (
-                  <select value={editModel === '' ? 'inherit' : editModel}
-                    onChange={(e) => setContent(withModelValue(content, e.target.value))}
-                    title="该 agent 使用的模型;inherit 表示继承主对话当前模型。自定义模型 id 可在正文 model: 行手输"
-                    className="bg-canvas border border-canvas-deep rounded px-1.5 py-0.5 text-[10px] font-mono max-w-[130px] ml-auto shrink-0">
-                    {editModelOpts.map((m) => <option key={m} value={m}>{m}</option>)}
-                  </select>
-                )}
                 <button onClick={() => save()} disabled={saving} className="btn-accent flex items-center gap-1 text-[11px] px-2 py-0.5">
                   {saved ? <Check size={11} /> : <Save size={11} />}
                   {saved ? '已存' : saving ? '…' : '保存'}
@@ -353,15 +345,27 @@ export function AgentsPanel() {
                   </div>
                 </div>
               )}
-              {toolTokens && (
-                <div className="px-3 py-1.5 border-b border-canvas-deep bg-canvas-warm/40 flex flex-wrap items-center gap-1 shrink-0"
-                  title="tools 字段解析摘要(只读)。MCP 面板增删 MCP 时会自动改写此字段">
-                  <span className="text-[10px] px-1.5 py-0.5 rounded bg-canvas border border-canvas-deep text-ink-muted font-mono">内置工具 ×{builtinToolCount}</span>
-                  {[...mcpGroups].map(([server, g]) => (
-                    <span key={server} className="text-[10px] px-1.5 py-0.5 rounded bg-accent/10 border border-canvas-deep text-accent font-mono">
-                      {server}({g.all ? '全部工具' : `${g.count} 个工具`})
-                    </span>
-                  ))}
+              {(editModel !== null || toolTokens) && (
+                <div className="px-3 py-1.5 border-b border-canvas-deep bg-canvas-warm/40 flex flex-wrap items-center gap-1 shrink-0">
+                  {editModel !== null && (
+                    <select value={editModel === '' ? 'inherit' : editModel}
+                      onChange={(e) => setContent(withModelValue(content, e.target.value))}
+                      title="该 agent 使用的模型;inherit 表示继承主对话当前模型。自定义模型 id 可在正文 model: 行手输"
+                      className="bg-canvas border border-canvas-deep rounded px-1 py-0.5 text-[10px] font-mono max-w-[120px] shrink-0">
+                      {editModelOpts.map((m) => <option key={m} value={m}>{m}</option>)}
+                    </select>
+                  )}
+                  {toolTokens && (
+                    <>
+                      <span title="tools 字段解析摘要(只读)。MCP 面板增删 MCP 时会自动改写此字段"
+                        className="text-[10px] px-1.5 py-0.5 rounded bg-canvas border border-canvas-deep text-ink-muted font-mono">内置工具 ×{builtinToolCount}</span>
+                      {[...mcpGroups].map(([server, g]) => (
+                        <span key={server} className="text-[10px] px-1.5 py-0.5 rounded bg-accent/10 border border-canvas-deep text-accent font-mono">
+                          {server}({g.all ? '全部工具' : `${g.count} 个工具`})
+                        </span>
+                      ))}
+                    </>
+                  )}
                 </div>
               )}
               {unknownTools.length > 0 && (
