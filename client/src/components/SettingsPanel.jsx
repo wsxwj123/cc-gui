@@ -313,7 +313,7 @@ function NetworkTab() {
           <span>
             局域网访问已默认开启,{cfg.defaultPasswordPlain
               ? <>本机随机默认密码是 <b className="font-mono select-all bg-amber-100 px-1 rounded">{cfg.defaultPasswordPlain}</b>(手机/其它设备连接时输入这个)。</>
-              : <>已为本机生成随机默认密码(见配置)。</>}
+              : <>已生成随机默认密码。出于安全,明文仅在<b>电脑本机</b>的「设置 → 网络」页显示,远程设备上不显示——请到电脑上查看,或在下方直接改成新密码。</>}
             这是自动生成的临时密码,<b>建议在下方改成自己好记的强密码</b>;若只在本机用,可取消下方「局域网访问」勾选并重启回到仅本机。
           </span>
         </div>
