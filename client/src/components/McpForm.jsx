@@ -310,12 +310,19 @@ export function McpForm({ editing, onClose, onSaved }) {
                   <input value={row.k} onChange={(e) => setEnv(i, 'k', e.target.value)} placeholder="KEY"
                     className={`${inputCls} font-mono flex-1`} />
                   <span className="text-ink-faint">=</span>
-                  <input value={row.v} onChange={(e) => setEnv(i, 'v', e.target.value)} placeholder={row.hint || 'value'}
-                    title={row.hint || undefined}
+                  <input value={row.v} onChange={(e) => setEnv(i, 'v', e.target.value)} placeholder="value"
                     className={`${inputCls} font-mono flex-1`} />
                   <button onClick={() => delEnv(i)} className="p-1 text-ink-faint hover:text-error shrink-0"><Trash2 size={13} /></button>
                 </div>
               ))}
+              {/* 内置目录带的 env 说明(去哪申请 key 等):独立成区,不塞进窄的 value 输入框(会显示不全)。 */}
+              {envRows.some((r) => r.hint) && (
+                <div className="rounded-lg bg-canvas-warm/60 border border-canvas-deep px-3 py-2 text-[11px] text-ink-muted font-body leading-snug space-y-1">
+                  {envRows.filter((r) => r.hint).map((r, i) => (
+                    <div key={i}><span className="font-mono text-ink-soft">{r.k || 'KEY'}</span>:{r.hint}</div>
+                  ))}
+                </div>
+              )}
               {emptyTplEnvKeys.length > 0 && (
                 <div className="rounded-lg bg-amber-500/10 border border-amber-500/25 px-3 py-2 text-[11px] text-amber-700 font-body leading-snug">
                   未填 {emptyTplEnvKeys.join('、')},该 server 可能无法连接。可先保存,稍后编辑补填。

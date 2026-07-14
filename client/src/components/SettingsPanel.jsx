@@ -164,14 +164,17 @@ export function SettingsPanel() {
       </div>
 
       {/* 设置搜索:输入关键词 → 列出匹配的设置组,点击切 tab 并滚动高亮 */}
-      <div className="relative">
-        <Search size={12} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-faint pointer-events-none" />
-        <input
-          value={searchQ}
-          onChange={(e) => setSearchQ(e.target.value)}
-          placeholder="搜索设置(如:压缩 / 密码 / 更新)…"
-          className="w-full bg-canvas-warm border border-canvas-deep rounded-lg pl-8 pr-3 py-1.5 text-[12px] text-ink placeholder-ink-faint font-body focus:outline-none focus:border-accent/40"
-        />
+      <div>
+        {/* icon+input 单独包一层 relative:否则 relative 同时含下方结果列表时,图标 top-1/2 会落到整块中心(输入框下方) */}
+        <div className="relative">
+          <Search size={12} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-faint pointer-events-none" />
+          <input
+            value={searchQ}
+            onChange={(e) => setSearchQ(e.target.value)}
+            placeholder="搜索设置(如:压缩 / 密码 / 更新)…"
+            className="w-full bg-canvas-warm border border-canvas-deep rounded-lg pl-8 pr-3 py-1.5 text-[12px] text-ink placeholder-ink-faint font-body focus:outline-none focus:border-accent/40"
+          />
+        </div>
         {q && (
           <div className="mt-1.5 border border-canvas-deep rounded-lg overflow-hidden divide-y divide-canvas-deep/60">
             {searchHits.length === 0 && (
