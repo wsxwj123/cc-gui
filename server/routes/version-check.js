@@ -599,7 +599,7 @@ async function detectPython() {
 // 别人机器上不一定有 uv;uvx 需要时会自动下载托管 Python,所以只需检测/安装 uv。
 // 策略同 detectPython:PATH → login-shell → 全平台已知安装目录(astral/cargo/brew/
 // scoop/winget/pipx/rye 等),避免「PATH 没刷新/版本管理器装的」误报未装。
-async function detectUv() {
+export async function detectUv() { // export:mcp.js 把裸 uvx 改写为真实 uv 绝对路径用
   const tryRun = async (bin) => {
     try {
       const { stdout } = await execFileP(bin, ['--version'], { timeout: 5000 });

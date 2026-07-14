@@ -1,11 +1,13 @@
 import { Router } from 'express';
 import { readFile, readdir, stat, writeFile, mkdir } from 'fs/promises';
-import { join, sep } from 'path';
+import { join, sep, dirname } from 'path';
+import { existsSync } from 'fs';
 import { homedir } from 'os';
 import { execFile, spawn } from 'child_process';
 import { promisify } from 'util';
 import { syncMcpToAgents } from './agents.js';
 import { claudeCommand } from '../utils/claude-resolver.js';
+import { detectUv } from './version-check.js';
 
 const execFileP = promisify(execFile);
 
@@ -588,6 +590,14 @@ router.get('/mcp/:name/ping', async (req, res) => {
     }
     // CI-3:npx/uvx 缓存损坏(常见 Windows:_npx 下半截依赖丢失)报 ERR_MODULE_NOT_FOUND /
     // Cannot find package —— 这是用户机环境问题,给可操作修复提示,别只甩原始堆栈。
+    // Windows pip 残留 uvx 垫片(见 rewriteUvCommandLine 注释):给定向修复指引,并附检测到的真实 uv 位置。
+    if (stderr && /Could not find the `?uv`? binary/i.test(stderr)) {
+      let uvHint = '';
+      try { const hit = await detectUv(); if (hit?.installed && hit.path) uvHint = `\n(本机已检测到可用 uv:${hit.path})`; } catch {}
+      stderr = '⚠️ PATH 上的 uvx 是 pip 残留的启动器:它只找自己同目录的 uv.exe,而那里没有,'
+        + '于是挡住了真正可用的 uv。修复任选:① 在 GUI 里「编辑」该 MCP 直接保存(会自动改用真实 uv 的绝对路径);'
+        + '② 删除报错路径里残留的 uvx.exe(或 pip uninstall uv)后重试。' + uvHint + '\n\n原始报错:\n' + stderr;
+    }
     if (stderr && /ERR_MODULE_NOT_FOUND|Cannot find (package|module)/i.test(stderr)) {
       stderr = '⚠️ npx/uvx 缓存损坏(常见于 Windows)。修复:终端运行 `npm cache clean --force`,'
         + '或删除「用户目录\\AppData\\Local\\npm-cache\\_npx」后重试;uvx 则运行 `uv cache clean`。\n\n原始报错:\n'
@@ -725,6 +735,31 @@ router.put('/mcp/:name/disable', async (req, res) => {
 
 // 组装 `claude mcp add` 参数(新增/编辑共用)。stdio:命令行拆成 cmd+args 跟在 -- 后;
 // http/sse:直接给 URL。env 用可重复的 -e KEY=VAL。scope 用 -s。
+// Windows pip 残留 uvx 垫片坑:老 pip 装的 Python*\Scripts\uvx.exe 是个启动器,只找**同目录**
+// 的 uv.exe(pip 卸载不净/杀毒隔离后缺失),报 "Could not find the `uv` binary at either of:…"。
+// claude 按 PATH 解析裸 `uvx` 会先撞上这个坏垫片,而 env-check 检测到的真实 uv(astral/winget
+// 装的)在别处。添加/编辑 stdio MCP 时把裸 uvx/uv 改写为真实 uv 同目录的绝对路径(带引号,
+// parseCommandLine 支持),claude spawn 时直接命中好的那个,与 PATH 顺序无关。
+async function rewriteUvCommandLine(commandLine) {
+  if (process.platform !== 'win32' || typeof commandLine !== 'string') return commandLine;
+  const m = commandLine.match(/^(\s*)(uvx|uv)(\s|$)/i);
+  if (!m) return commandLine;
+  try {
+    const hit = await detectUv();
+    if (!hit?.installed || !hit.path) return commandLine;
+    let uvPath = hit.path;
+    if (!/[\\/]/.test(uvPath)) {
+      // PATH 命中时 detectUv 返回裸名,用 where 拿绝对路径(坏垫片目录没有 uv.exe,where uv 不会命中它)
+      const { stdout } = await execFileP('where', ['uv'], { timeout: 5000 });
+      uvPath = String(stdout).split(/\r?\n/).map((s) => s.trim()).filter(Boolean)[0] || '';
+    }
+    if (!uvPath) return commandLine;
+    const abs = join(dirname(uvPath), `${m[2].toLowerCase()}.exe`);
+    if (!existsSync(abs)) return commandLine;
+    return `${m[1]}"${abs}"${commandLine.slice(m[1].length + m[2].length)}`;
+  } catch { return commandLine; }
+}
+
 function buildAddArgs({ name, transport, commandLine, url, env, scope }) {
   const args = ['mcp', 'add'];
   if (transport === 'http' || transport === 'sse') args.push('-t', transport);
@@ -780,6 +815,7 @@ router.post('/mcp', async (req, res) => {
     assertSafeName(b.name);
     const scope = ['user', 'project', 'local'].includes(b.scope) ? b.scope : 'user';
     const transport = ['stdio', 'http', 'sse'].includes(b.transport) ? b.transport : 'stdio';
+    if (transport === 'stdio') b.commandLine = await rewriteUvCommandLine(b.commandLine);
     const args = buildAddArgs({ ...b, transport, scope });
     await runMcpAdd(args, b.name); // 检测"already exists"假成功
     await setAutoApprove(b.name, !!b.autoApprove);
@@ -802,6 +838,7 @@ router.put('/mcp/:name/config', async (req, res) => {
     const newName = b.name || name;
     const scope = ['user', 'project', 'local'].includes(b.scope) ? b.scope : 'user';
     const transport = ['stdio', 'http', 'sse'].includes(b.transport) ? b.transport : 'stdio';
+    if (transport === 'stdio') b.commandLine = await rewriteUvCommandLine(b.commandLine);
     const addArgs = buildAddArgs({ ...b, name: newName, transport, scope });
     // 改名场景:若目标名已被另一个服务器占用,必须在删除旧的之前拦下 —— 否则先 remove 旧的、
     // 再 add 撞 "already exists" 静默失败 → 旧服务器没了、新的没加上 = 数据丢失。

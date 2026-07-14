@@ -32,7 +32,9 @@ function PingButton({ name }) {
     }
   };
   return (
-    <span className="relative inline-flex">
+    // 浮层锚定到整张服务器卡片(卡片有 relative)而非本按钮:锚按钮时 w-64 向左展开会越过
+    // 面板左边界(Windows 用户实报溢出);left-0/right-0 撑满卡片宽,永不越界。
+    <span className="inline-flex">
       <button onClick={ping}
         title={state === 'err' ? '连接失败 —— 见下方原因' : '点击测试 MCP 服务器连通性 (ping)'}
         className={`p-1 rounded transition-colors ${
@@ -48,7 +50,7 @@ function PingButton({ name }) {
       </button>
       {/* 失败原因浮层:可见、可滚、手动关闭(不自动消失)—— 修"看不见报错" */}
       {state === 'err' && detail && (
-        <div className="absolute right-0 top-full mt-1 z-[60] w-64 max-w-[calc(100vw-1.5rem)] max-h-56 overflow-auto rounded-lg border border-error/30 bg-canvas shadow-2xl p-2.5"
+        <div className="absolute left-0 right-0 top-full mt-1 z-[60] max-h-56 overflow-auto rounded-lg border border-error/30 bg-canvas shadow-2xl p-2.5"
           onClick={(e) => e.stopPropagation()}>
           <div className="flex items-center justify-between mb-1.5">
             <span className="text-[11px] text-error font-body font-medium">连接失败原因</span>
@@ -397,7 +399,7 @@ export function MCPPanel() {
               return (
                 <div
                   key={srv.name}
-                  className={`bg-canvas-warm border rounded-lg p-3 transition-all duration-150 ${
+                  className={`relative bg-canvas-warm border rounded-lg p-3 transition-all duration-150 ${
                     disabled ? 'border-ink-ghost/30 opacity-50' : 'border-canvas-deep'
                   }`}
                 >
