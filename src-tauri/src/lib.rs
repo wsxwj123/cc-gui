@@ -694,6 +694,10 @@ pub fn run() {
         // 官方对话框插件:前端文件夹选择器走进程内原生对话框(秒开、置前)。
         // 权限见 capabilities/dialog.json(生产 remote 上下文须列全端口)。
         .plugin(tauri_plugin_dialog::init())
+        // 自动更新:updater(check/downloadAndInstall)+ process(更新完成后 relaunch)。
+        // 权限见 capabilities/updater.json(生产 remote 上下文须列全端口)。
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         // L1: 单例插件 — 双击 app 时不开新进程,把已有窗口前置聚焦,避免每次都开新窗口
         // 且不踩坏 6677 上活着的 server(浏览器 session 不掉)。
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {

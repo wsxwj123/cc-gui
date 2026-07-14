@@ -1,0 +1,22 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "updater",
+  "description": "允许主窗口调用 updater 插件(check/downloadAndInstall)与 process 插件的 relaunch(更新后重启)。生产构建里 webview 加载的是 http://127.0.0.1:<port>(WebviewUrl::External),对 Tauri ACL 属 remote 上下文,必须在 remote.urls 显式列出;端口与 lib.rs 的 DEFAULT_BACKEND_PORT..=MAX_BACKEND_PORT (6677..6687) 一一对应,改端口范围时需同步此列表(与 dialog.json 保持一致)。dev 模式 devUrl 属 local 上下文,由 local 默认值 true 覆盖。",
+  "windows": ["main"],
+  "remote": {
+    "urls": [
+      "http://127.0.0.1:6677",
+      "http://127.0.0.1:6678",
+      "http://127.0.0.1:6679",
+      "http://127.0.0.1:6680",
+      "http://127.0.0.1:6681",
+      "http://127.0.0.1:6682",
+      "http://127.0.0.1:6683",
+      "http://127.0.0.1:6684",
+      "http://127.0.0.1:6685",
+      "http://127.0.0.1:6686",
+      "http://127.0.0.1:6687"
+    ]
+  },
+  "permissions": ["updater:default", "process:allow-restart"]
+}
