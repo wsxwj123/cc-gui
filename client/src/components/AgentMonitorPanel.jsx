@@ -676,7 +676,8 @@ export function AgentMonitorPanel() {
     if (!pid) return;
     setStoppingPid(pid);
     try {
-      const r = await fetch(`/api/chat/${pid}/stop`, { method: 'POST' });
+      // 进程管理区停止=全杀(hard):用户点名停这个进程,后台 shell 任务一并停。
+      const r = await fetch(`/api/chat/${pid}/stop`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ hard: true }) });
       let killed = r.ok;
       if (r.status === 404) {
         const kr = await fetch(`/api/processes/${pid}/kill`, { method: 'POST' });

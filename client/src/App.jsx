@@ -1642,7 +1642,8 @@ function SessionList() {
       };
       const procs = await list();
       if (!procs.length) return;
-      await Promise.allSettled(procs.map((a) => fetch(`/api/chat/${a.pid}/stop`, { method: 'POST' })));
+      // 删会话=全杀(hard):后台 shell 长任务也停,不留孤儿进程复活刚删的 jsonl。
+      await Promise.allSettled(procs.map((a) => fetch(`/api/chat/${a.pid}/stop`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ hard: true }) })));
       for (let i = 0; i < 12; i++) { // 最多 ~6s:stop 有 2s 优雅窗 + SIGTERM→KILL 兜底
         await new Promise((r) => setTimeout(r, 500));
         if ((await list().catch(() => [])).length === 0) break;
@@ -5212,7 +5213,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     killedRef.current = true; // 编辑重发=停当前回合(POST /stop)→ finally 收后台化子代理
     if (abortRef.current) { try { abortRef.current.abort(); } catch {} }
     if (activeProcRef.current) {
-      fetch(`/api/chat/${activeProcRef.current}/stop`, { method: 'POST' }).catch(() => {});
+      // 编辑重发=全杀(hard):进程内存上下文与改写后的 jsonl 已分叉,留活任务会答非所问。
+      fetch(`/api/chat/${activeProcRef.current}/stop`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ hard: true }) }).catch(() => {});
       activeProcRef.current = null;
     }
     updateStreaming(false);
@@ -5348,7 +5350,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         killedRef.current = true; // 编辑重发(trim 分支)=停当前回合(POST /stop)→ finally 收后台化子代理
         if (abortRef.current) { try { abortRef.current.abort(); } catch {} }
         if (activeProcRef.current) {
-          fetch(`/api/chat/${activeProcRef.current}/stop`, { method: 'POST' }).catch(() => {});
+          // 编辑重发=全杀(hard):进程内存上下文与改写后的 jsonl 已分叉,留活任务会答非所问。
+          fetch(`/api/chat/${activeProcRef.current}/stop`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ hard: true }) }).catch(() => {});
           activeProcRef.current = null;
         }
         updateStreaming(false);

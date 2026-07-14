@@ -446,6 +446,7 @@ function chatCompatKey({ workingDir, model, effort, appendSystemPrompt, promptSu
 
 // 关掉某会话的常驻/在跑进程(回滚截断、删除会话前必须调:常驻进程的内存上下文与
 // 改写后的 jsonl 已分叉,复用会答非所问;删除后残余进程可能复活刚删的文件)。
+// 停止语义:closing+abort 直接杀进程,天然 hard(后台 shell 任务一并停,符合删除/回滚语义)。
 export function closePersistentForSession(sessionId) {
   if (!sessionId) return;
   for (const slot of activeProcesses.values()) {
@@ -459,6 +460,7 @@ export function closePersistentForSession(sessionId) {
 // 关掉所有常驻/在跑的 claude 进程,返回关掉的数量。用途:Windows 上更新 claude 前必须先释放
 // claude.exe —— 运行中的 claude 会锁住该文件,npm/claude upgrade 覆盖时报 "could not write ...claude.exe"
 // (用户实报)。SDK 进程靠 close input + abort 退出(几百 ms 内),之后 npm 才能覆盖。
+// 停止语义:同上,直接 abort 天然 hard(更新 claude 必须释放 claude.exe,全杀是刻意的)。
 export function closeAllPersistentProcesses() {
   let n = 0;
   for (const slot of activeProcesses.values()) {
