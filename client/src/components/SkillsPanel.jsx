@@ -188,6 +188,10 @@ export function SkillsPanel() {
         setConflicts(null);
         setBusy(null); // 先停 spinner 再弹窗(否则用户不点弹窗则按钮无限转)
         const names = (d.imported || []).map((x) => (typeof x === 'string' ? x : x.id || x.name)).filter(Boolean);
+        // 失败详情:后端 failed[] 每项带 error,弹窗逐条列出(最多 5 条防长列表,超出计数说明)。
+        const failDetail = d.failed?.length
+          ? `\n\n失败详情:\n${d.failed.slice(0, 5).map((f) => `· ${f.id}:${f.error || '未知错误'}`).join('\n')}${d.failed.length > 5 ? `\n· …及其余 ${d.failed.length - 5} 个(略)` : ''}`
+          : '';
         // 与技能更新/插件操作一致:导入/更新成功弹窗(此前仅面板内小字,面板外看不到)。
         // 更新覆盖路径(已装·可更新覆盖)一律弹,给"已更新覆盖"专属文案,不再误报"已导入"。
         if (isUpdate) {
@@ -200,9 +204,12 @@ export function SkillsPanel() {
         } else if (d.imported?.length) {
           await confirmDialog(
             `已导入 ${d.imported.length} 个技能${d.failed?.length ? `,${d.failed.length} 个失败` : ''}${names.length ? `\n(${names.slice(0, 8).join('、')})` : ''}`
-              + `\n\n在输入框输入 /技能名 即可调用(如 /${names[0] || ids[0]})`,
+              + `\n\n在输入框输入 /技能名 即可调用(如 /${names[0] || ids[0]})${failDetail}`,
             { confirmText: '知道了' },
           );
+        } else if (d.failed?.length) {
+          // 全部失败:此前只有面板小字"失败 N",不给原因;弹窗逐条列出 id+error。
+          await confirmDialog(`导入失败 ${d.failed.length} 个技能${failDetail}`, { confirmText: '知道了' });
         }
       }
       await Promise.all([activeRepo ? loadOfficial(null, activeRepo, activeBranch, activeHost) : loadOfficial(source), loadLocal()]);
