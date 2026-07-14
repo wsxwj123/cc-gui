@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useRef } from 'react';
-import { Server, Package, FolderOpen, RefreshCw, Plug, Activity, Check, X, Plus, Pencil, Trash2, Zap, Download, ArrowLeft, LogIn } from 'lucide-react';
+import { Server, Package, FolderOpen, RefreshCw, Plug, Activity, Check, X, Plus, Pencil, Trash2, Zap, Download, ArrowLeft, LogIn, LogOut } from 'lucide-react';
 import { BUILTIN_PLUGINS } from '../utils/builtinPlugins.js';
 import { findBuiltinMcp } from '../utils/builtinMcpServers.js';
 import { McpForm } from './McpForm.jsx';
@@ -196,6 +196,23 @@ export function MCPPanel() {
       await confirmDialog(`登录「${srv.label || srv.name}」失败:\n${err.message}`, { confirmText: '知道了' });
     }
     setLoggingIn(null);
+  };
+
+  // OAuth 退出登录:清除该服务器已存储的凭证(claude mcp logout),之后需重新登录才能使用。
+  const [loggingOut, setLoggingOut] = useState(null);
+  const handleLogout = async (srv) => {
+    const ok = await confirmDialog(`退出「${srv.label || srv.name}」的登录?\n\n将执行 claude mcp logout 清除已存储的授权凭证,之后需重新登录才能使用。`, { danger: true, confirmText: '退出登录' });
+    if (!ok) return;
+    setLoggingOut(srv.name);
+    try {
+      const r = await fetch(`/api/mcp/${encodeURIComponent(srv.name)}/logout`, { method: 'POST' });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+      await fetchData(false, true);
+    } catch (err) {
+      await confirmDialog(`退出登录「${srv.label || srv.name}」失败:\n${err.message}`, { confirmText: '知道了' });
+    }
+    setLoggingOut(null);
   };
 
   const handleDelete = async (srv) => {
@@ -397,6 +414,15 @@ export function MCPPanel() {
                       )}
                       {disabled && (
                         <span className="text-[10px] text-ink-ghost" title="已禁用（CLI 不会启动此 MCP）">已禁用</span>
+                      )}
+                      {/* 退出登录:仅 http/sse(OAuth 型)已连接的服务器。stdio 无登录态不显示。 */}
+                      {!disabled && srv.status === 'connected' && srv.transport !== 'stdio' && (
+                        <button onClick={() => handleLogout(srv)} disabled={loggingOut === srv.name}
+                          title="退出登录:执行 claude mcp logout 清除已存储的授权凭证"
+                          className="flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] font-body text-ink-faint hover:text-ink-muted hover:bg-canvas-deep transition-colors disabled:opacity-60">
+                          {loggingOut === srv.name ? <RefreshCw size={10} className="animate-spin" /> : <LogOut size={10} />}
+                          退出登录
+                        </button>
                       )}
                       {!disabled && srv.status === 'needs-auth' && (
                         <button onClick={() => handleLogin(srv)} disabled={loggingIn === srv.name}
