@@ -483,8 +483,13 @@ export function MCPPanel() {
             })}
           </div>
         ) : (
-          <div className="text-xs text-ink-faint font-body py-3 text-center bg-canvas-warm border border-canvas-deep rounded-lg">
-            没有配置 MCP 服务器
+          <div className="text-xs text-ink-faint font-body py-4 text-center bg-canvas-warm border border-canvas-deep rounded-lg space-y-2">
+            <div>没有配置 MCP 服务器</div>
+            {/* 空态 CTA:直接打开添加表单(内含内置推荐模板,选模板自动填好命令/env) */}
+            <button onClick={() => setForm({ add: true })}
+              className="inline-flex items-center gap-1 px-3 py-1.5 rounded-md bg-accent text-white text-[11px] font-medium hover:bg-accent/90 transition-colors">
+              <Plus size={11} />添加 MCP 服务器(含内置推荐)
+            </button>
           </div>
         )}
       </div>
