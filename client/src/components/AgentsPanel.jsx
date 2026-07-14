@@ -2,6 +2,50 @@ import React, { useEffect, useState } from 'react';
 import { Bot, RefreshCw, Save, Check, Plus, FileText, Download, Package, Trash2 } from 'lucide-react';
 import { confirmDialog } from '../utils/confirmDialog.jsx';
 
+// ── 维护型常量:CLI 内置工具真实注册表 ──────────────────────────────────
+// agent .md 的 tools 字段 = 声明 ∩ CLI 真实注册表,写错名不报错、被 CLI 静默丢弃
+// (memory [[subagent-toolset-not-from-md-todowrite-primary-only]])。此清单据本机
+// claude 2.1.208 headless `claude -p --output-format stream-json --verbose` 抓 init
+// 事件 tools 数组实测(2026-07-14),【随 CLI 版本升级需重抓维护】。
+// 注:AskUserQuestion/ExitPlanMode 不出现在裸 -p 的 init 里,但在 GUI 的 SDK 会话
+// 上下文注册(chat.js canUseTool 依赖),属有效名。chat.js:181/useWebSocket.js:120
+// 的清单是权限分级用途且含已废名(Glob/Grep/LS/TodoWrite),不能当源。
+const KNOWN_CLI_TOOLS = new Set([
+  'Task', 'Bash', 'Read', 'Edit', 'Write', 'NotebookEdit', 'WebFetch', 'WebSearch',
+  'Skill', 'ToolSearch', 'TaskCreate', 'TaskGet', 'TaskList', 'TaskOutput', 'TaskStop',
+  'TaskUpdate', 'AskUserQuestion', 'ExitPlanMode', 'Artifact', 'CronCreate', 'CronDelete',
+  'CronList', 'DesignSync', 'EnterWorktree', 'ExitWorktree', 'ListMcpResourcesTool',
+  'Monitor', 'PushNotification', 'ReadMcpResourceDirTool', 'ReadMcpResourceTool',
+  'RemoteTrigger', 'ReportFindings', 'ScheduleWakeup', 'SendMessage', 'Workflow',
+]);
+// 已废/更名工具 → 替代建议(2.1.183 起注册表移除 Glob/Grep/LS/NotebookRead/TodoWrite/
+// BashOutput/KillShell/SlashCommand,headless 实测确认)。
+const STALE_TOOL_HINTS = {
+  TodoWrite: '已更名,改用 TaskCreate/TaskUpdate/TaskList',
+  Glob: '已移除,建议删除(文件检索由 Read/Bash 覆盖)',
+  Grep: '已移除,建议删除(内容检索经 Bash 的 grep)',
+  LS: '已移除,建议删除',
+  NotebookRead: '已移除,改用 Read',
+  BashOutput: '已更名,改用 TaskOutput',
+  KillShell: '已更名,改用 TaskStop',
+  SlashCommand: '已移除,改用 Skill',
+};
+
+// 解析 .md frontmatter 的 `tools:` 行 → token 数组;无 frontmatter/无 tools 行返回 null
+// (null = 继承全部工具)。与 server/routes/agents.js rewriteAgentMcpTools 同口径:
+// 仅按行解析,不做完整 YAML。
+function parseToolsTokens(content) {
+  const lines = String(content || '').split('\n');
+  if (lines[0]?.trim() !== '---') return null;
+  for (let i = 1; i < lines.length; i++) {
+    if (lines[i].trim() === '---') return null;
+    if (/^tools:/.test(lines[i])) {
+      return lines[i].replace(/^tools:\s*/, '').split(',').map((s) => s.trim()).filter(Boolean);
+    }
+  }
+  return null;
+}
+
 export function AgentsPanel() {
   const [agents, setAgents] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -109,6 +153,10 @@ export function AgentsPanel() {
     setCreating(false); setNewName('');
   };
 
+  // tools 校验(非阻塞):未知的非 mcp__ 工具名 → 黄色警告,仍可保存(CLI 只是静默忽略)。
+  const toolTokens = selected ? parseToolsTokens(content) : null;
+  const unknownTools = (toolTokens || []).filter((t) => !t.startsWith('mcp__') && t !== '*' && !KNOWN_CLI_TOOLS.has(t));
+
   if (loading) return <div className="flex items-center justify-center py-12"><RefreshCw size={16} className="animate-spin text-ink-faint" /></div>;
 
   return (
@@ -209,6 +257,13 @@ export function AgentsPanel() {
                   {saved ? '已存' : saving ? '…' : '保存'}
                 </button>
               </div>
+              {unknownTools.length > 0 && (
+                <div className="px-3 py-1.5 border-b border-canvas-deep bg-amber-500/10 text-[10px] text-amber-700 font-body leading-snug shrink-0">
+                  以下工具名不在当前 CLI 内置工具集,保存后会被 CLI 静默忽略:<code className="font-mono">{unknownTools.join('、')}</code>。
+                  {unknownTools.filter((t) => STALE_TOOL_HINTS[t]).map((t) => `${t} ${STALE_TOOL_HINTS[t]};`).join('')}
+                  若为 MCP 工具需写完整前缀 <code className="font-mono">mcp__服务器名__工具名</code>。
+                </div>
+              )}
               <textarea value={content} onChange={(e) => setContent(e.target.value)} spellCheck={false}
                 className="flex-1 bg-canvas-warm border-0 p-3 text-[11px] font-mono text-ink-soft resize-none focus:outline-none leading-relaxed" />
               <div className="px-3 py-2 border-t border-canvas-deep bg-canvas-warm/40 text-[10px] text-ink-faint font-body leading-snug shrink-0">
