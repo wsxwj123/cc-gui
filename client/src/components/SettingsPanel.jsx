@@ -419,6 +419,8 @@ function StorageTab() {
   useEffect(() => { fetchList(); }, []);
 
   const deleteOne = async (item) => {
+    // 全项目其余删除均有确认,这里补齐:删了不可恢复(只影响对应那一次回滚/去思考块的撤销)。
+    if (!(await confirmDialog(`删除备份「${item.title || item.sessionId.slice(0, 8)}」(${fmtBytes(item.size)})？\n删除后将无法撤销对应的那一次回滚 / 去思考块操作，不影响当前对话。`, { danger: true }))) return;
     setBusy(true);
     try {
       await fetch('/api/bak-files', {
