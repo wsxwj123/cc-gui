@@ -354,7 +354,9 @@ export function MessageBubble({ message, onRollback, onFork }) {
               {Array.isArray(message.attachments) && message.attachments.length > 0 && (
                 <div className="mb-2 flex flex-wrap gap-2">
                   {message.attachments.map((a, i) => (
-                    <div key={i} className="flex items-center gap-2 px-2 py-1 bg-canvas border border-canvas-deep rounded-lg max-w-[260px]" title={a.path}>
+                    <div key={i}
+                      onDoubleClick={() => { fetch('/api/files/open', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: a.path }) }).catch(() => {}); }}
+                      className="flex items-center gap-2 px-2 py-1 bg-canvas border border-canvas-deep rounded-lg max-w-[260px] cursor-pointer hover:border-accent/40 transition-colors" title={`双击用默认应用打开\n${a.path}`}>
                       {a.kind === 'image' && a.preview ? (
                         <img src={a.preview} alt={a.name} className="w-10 h-10 rounded object-cover shrink-0" />
                       ) : (

@@ -45,6 +45,7 @@ function buildSteps(hasProject) {
     ...PANEL_STEPS,
     ['theme-toggle', '主题与外观', '外观相关设置:\n· 配色主题(多套深浅色可选)\n· 界面字号、对话正文字号\n· AI 思考时的加载动画样式(30 种可选)'],
     ['composer', '输入框', '· Cmd/Ctrl+Enter 发送、Enter 换行\n· 输入 / 打开命令面板(含 /branch 分叉、/goal 目标、插件命令等)\n· 输入 @ 打开引用选择器:按目录层级浏览项目文件(点文件夹进入、「返回上级」回退),输入关键词则全局搜索;Tab 切到会话页可把本项目其它会话的内容注入当前对话\n· 可【拖入】图片 / PDF / Word / Excel / PPT 等文件\n· Cmd/Ctrl+Z 撤销输入\n· AI 回复中再输入会入队;输入框为空时按 ↑ 键召回最近入队的消息\n· 按 Cmd/Ctrl+/ 打开快捷键速查表(含切换分屏窗格 Ctrl+Tab、切上/下一条会话 Cmd+↑/↓ 等全部快捷键)'],
+    ['help', '快捷键速查 & 重看指引', '随时按 Cmd/Ctrl+/ 打开【快捷键速查表】,里面列了发送、切会话、切分屏窗格等全部快捷键。\n· 以后忘了哪个功能,点这个问号就能重新走一遍本指引。'],
   );
   return steps.map(([sel, title, desc]) => ({ sel, title, desc }));
 }

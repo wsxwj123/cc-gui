@@ -8513,7 +8513,7 @@ export default function App() {
               <span className="text-[11px] leading-none font-body">更新</span>
             </button>
           )}
-          <button onClick={() => setTourOpen(true)} title="使用指引 — 逐个介绍界面功能"
+          <button data-tour="help" onClick={() => setTourOpen(true)} title="使用指引 — 逐个介绍界面功能"
             className="flex items-center justify-center p-1.5 rounded-lg text-ink-muted hover:text-ink hover:bg-black/5 transition-colors">
             <HelpCircle size={15} />
           </button>
