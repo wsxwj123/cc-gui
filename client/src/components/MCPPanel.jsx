@@ -252,8 +252,11 @@ export function MCPPanel() {
       if (!r.ok) throw new Error(d.error || '安装失败');
       await fetchData(); // 刷新已安装列表
       setInstallingPlugin(null); // 先停 spinner 再弹窗
-      // 与插件更新一致:安装成功弹窗提示(新会话生效)。
-      await confirmDialog(`插件「${plugin.name || id}」已安装${d.needsRestart === false ? '' : '(新会话生效)'}`, { confirmText: '知道了' });
+      // 与插件更新一致:安装成功弹窗提示(新会话生效);有 usage 的追加用法说明。
+      await confirmDialog(
+        `插件「${plugin.name || id}」已安装${d.needsRestart === false ? '' : '(新会话生效)'}${plugin.usage ? '\n\n' + plugin.usage : ''}`,
+        { confirmText: '知道了' },
+      );
     } catch (e) { setPluginErr(`${id}: ${e.message}`); }
     setInstallingPlugin(null);
   };
@@ -280,6 +283,24 @@ export function MCPPanel() {
       );
     } catch (e) { setPluginErr(`${plugin.name}: ${e.message}`); }
     setPluginActioning(null);
+  };
+
+  // 插件带来物清单:展开查看某插件提供的 skills / 命令 / agents(GET /api/plugins/:name/contents,
+  // best-effort 读插件缓存目录)。首次展开才拉取,之后开合复用已拉数据。
+  const [pluginContents, setPluginContents] = useState({}); // name -> { open, loading?, data?, err? }
+  const togglePluginContents = async (plugin) => {
+    const cur = pluginContents[plugin.name];
+    if (cur?.open) { setPluginContents((m) => ({ ...m, [plugin.name]: { ...cur, open: false } })); return; }
+    if (cur?.data || cur?.err) { setPluginContents((m) => ({ ...m, [plugin.name]: { ...cur, open: true } })); return; }
+    setPluginContents((m) => ({ ...m, [plugin.name]: { open: true, loading: true } }));
+    try {
+      const r = await fetch(`/api/plugins/${encodeURIComponent(plugin.name)}/contents`);
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+      setPluginContents((m) => ({ ...m, [plugin.name]: { open: true, data: d } }));
+    } catch (e) {
+      setPluginContents((m) => ({ ...m, [plugin.name]: { open: true, err: e.message } }));
+    }
   };
 
   // 卸载插件(claude plugin uninstall);卸载后在「添加」列表回到未安装态可重装。
@@ -523,7 +544,37 @@ export function MCPPanel() {
                     {plugin.installedAt && (
                       <span>安装: {new Date(plugin.installedAt).toLocaleDateString('zh-CN')}</span>
                     )}
+                    <button onClick={() => togglePluginContents(plugin)}
+                      className="ml-auto font-body text-ink-faint hover:text-accent transition-colors">
+                      {pluginContents[plugin.name]?.open ? '收起' : '查看内容'}
+                    </button>
                   </div>
+                  {/* 带来物清单:该插件提供的 skills(前缀调用名)/ 命令 / agents */}
+                  {pluginContents[plugin.name]?.open && (() => {
+                    const pc = pluginContents[plugin.name];
+                    if (pc.loading) return <div className="mt-2 pt-2 border-t border-canvas-deep/60 text-[10px] text-ink-faint font-body">读取中…</div>;
+                    if (pc.err) return <div className="mt-2 pt-2 border-t border-canvas-deep/60 text-[10px] text-ink-faint font-body">无法解析插件目录({pc.err})</div>;
+                    const d = pc.data;
+                    const empty = !d.skills.length && !d.commands.length && !d.agents.length && !d.hasMcp;
+                    return (
+                      <div className="mt-2 pt-2 border-t border-canvas-deep/60 space-y-1 text-[10px] font-body">
+                        {empty && <div className="text-ink-faint">未在插件目录发现 skills / 命令 / agents。</div>}
+                        {d.skills.length > 0 && (
+                          <div className="text-ink-faint break-all">
+                            skill(以 <span className="font-mono">{d.bare}:</span> 前缀调用):
+                            <span className="font-mono text-ink-muted"> {d.skills.map((s) => `${d.bare}:${s}`).join('、')}</span>
+                          </div>
+                        )}
+                        {d.commands.length > 0 && (
+                          <div className="text-ink-faint break-all">命令:<span className="font-mono text-ink-muted">{d.commands.join('、')}</span></div>
+                        )}
+                        {d.agents.length > 0 && (
+                          <div className="text-ink-faint break-all">agents:<span className="font-mono text-ink-muted">{d.agents.join('、')}</span></div>
+                        )}
+                        {d.hasMcp && <div className="text-ink-faint">内含 MCP server(随插件自动配置)。</div>}
+                      </div>
+                    );
+                  })()}
                 </div>
               );
             })}
@@ -602,7 +653,8 @@ export function MCPPanel() {
                           <span className="text-xs font-medium text-ink font-body">{p.name}</span>
                           {p.mcp && <span className="text-[9px] px-1 py-px bg-canvas-deep text-ink-faint rounded">MCP</span>}
                         </div>
-                        <div className="text-[10px] text-ink-faint font-body truncate mt-0.5">{p.desc}</div>
+                        {/* 不 truncate:关键说明(如 superpowers 的 skill 命名规则)被单行截断会看不到 */}
+                        <div className="text-[10px] text-ink-faint font-body leading-snug mt-0.5">{p.desc}</div>
                       </div>
                       {installed ? (
                         <span className="shrink-0 flex items-center gap-1 px-2.5 py-1 text-[12px] font-medium text-success">

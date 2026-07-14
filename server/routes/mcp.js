@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { readFile, readdir, stat, writeFile, mkdir } from 'fs/promises';
-import { join } from 'path';
+import { join, sep } from 'path';
 import { homedir } from 'os';
 import { execFile, spawn } from 'child_process';
 import { promisify } from 'util';
@@ -1005,6 +1005,44 @@ router.post('/plugins/install', async (req, res) => {
   } catch (err) {
     res.status(500).json({ error: (err.stderr?.toString() || err.message || '').trim() || '安装失败' });
   }
+});
+
+// GET /api/plugins/:name/contents — 列出某插件带来的 skills / 命令 / agents(读插件缓存目录)。
+// best-effort:目录结构由各插件自定,任何一段读不到就给空清单,不因结构不合预期而报错。
+// skill 调用名 = `<插件裸名>:<skill 目录名>`(插件 skill 装在 ~/.claude/plugins 缓存,
+// 不进 ~/.claude/skills,靠前缀命名调用)。
+router.get('/plugins/:name/contents', async (req, res) => {
+  try {
+    const { name } = req.params;
+    if (!/^[A-Za-z0-9._@\-/]{1,100}$/.test(name)) throw new Error('invalid plugin name');
+    let root = null;
+    try {
+      const reg = JSON.parse(await readFile(join(CLAUDE_DIR, 'plugins', 'installed_plugins.json'), 'utf-8'));
+      const inst = reg?.plugins?.[name];
+      root = (Array.isArray(inst) ? inst[0] : inst)?.installPath || null;
+    } catch {}
+    // installPath 来自 CLI 自己的注册表,但仍限定在插件缓存目录内(防注册表被改指向任意路径)。
+    const base = join(CLAUDE_DIR, 'plugins');
+    if (!root || !root.startsWith(base + sep)) {
+      return res.status(404).json({ error: '插件未安装或缓存目录未找到' });
+    }
+    const listDir = async (sub, { dirs = false } = {}) => {
+      try {
+        const entries = await readdir(join(root, sub), { withFileTypes: true });
+        return entries
+          .filter((e) => (dirs ? e.isDirectory() : e.isFile() && e.name.endsWith('.md')))
+          .map((e) => (dirs ? e.name : e.name.replace(/\.md$/, '')))
+          .filter((n) => !n.startsWith('.'));
+      } catch { return []; }
+    };
+    // skills 目录下常见两种布局:每个 skill 一个子目录(内含 SKILL.md),或直接平铺 <name>.md。
+    const skills = [...new Set([...(await listDir('skills', { dirs: true })), ...(await listDir('skills'))])];
+    const commands = await listDir('commands');
+    const agents = await listDir('agents');
+    let hasMcp = false;
+    try { await stat(join(root, '.mcp.json')); hasMcp = true; } catch {}
+    res.json({ name, bare: name.split('@')[0], skills, commands, agents, hasMcp });
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 // GET /api/mcp/:name/tools — 连 server 走 tools/list 握手,返回工具清单 + 各自是否被手动禁用。

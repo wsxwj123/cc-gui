@@ -21,6 +21,10 @@ export const BUILTIN_PLUGINS = [
   { id: 'playwright',           name: 'Playwright',          desc: '浏览器自动化(内含 MCP,自动 npx 拉起)', mcp: true },
   { id: 'context7',             name: 'Context7',            desc: '实时官方文档检索(内含 MCP,免 key)', mcp: true },
   // 非官方源插件:带 repo/marketplace,安装端点会先 `marketplace add <repo>` 再装。
-  { id: 'ponytail',             name: 'Ponytail',            desc: '懒惰资深开发风格:能不写的代码就不写,优先 stdlib/原生(第三方源)', repo: 'DietrichGebert/ponytail', marketplace: 'ponytail' },
-  { id: 'superpowers',          name: 'Superpowers',         desc: 'obra 出品工作流技能合集:头脑风暴/写计划/TDD/系统调试等(第三方源;skill 随插件装到 ~/.claude/plugins,以 superpowers:xxx 命名,不进 ~/.claude/skills)', repo: 'obra/superpowers-marketplace', marketplace: 'superpowers-marketplace' },
+  // usage:安装成功弹窗附加的用法说明(可选)。插件 skill 装在 ~/.claude/plugins 缓存,
+  // 以 <插件名>:<skill名> 前缀调用,不进 ~/.claude/skills —— 用户常因此找不到。
+  { id: 'ponytail',             name: 'Ponytail',            desc: '懒惰资深开发风格:能不写的代码就不写,优先 stdlib/原生(第三方源)', repo: 'DietrichGebert/ponytail', marketplace: 'ponytail',
+    usage: '插件内 skill 以 ponytail: 前缀调用,如 /ponytail:ponytail。不会出现在 Skill 面板列表,可在插件条目展开查看清单。' },
+  { id: 'superpowers',          name: 'Superpowers',         desc: 'obra 出品工作流技能合集:头脑风暴/写计划/TDD/系统调试等(第三方源;skill 随插件装到 ~/.claude/plugins,以 superpowers:xxx 命名,不进 ~/.claude/skills)', repo: 'obra/superpowers-marketplace', marketplace: 'superpowers-marketplace',
+    usage: '插件内 skill 以 superpowers: 前缀调用,如 /superpowers:brainstorming。不会出现在 Skill 面板列表,可在插件条目展开查看清单。' },
 ];
