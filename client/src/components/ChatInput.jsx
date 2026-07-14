@@ -327,12 +327,15 @@ export function ChatInput({ onSend, onStop, onAccelerate, onBackground, suggesti
   useEffect(() => {
     const onFill = (e) => {
       const t = e?.detail?.text || '';
-      if (!t) return;
+      const fillAttach = Array.isArray(e?.detail?.attachments) ? e.detail.attachments : null;
+      if (!t && !fillAttach) return;
       const targetKey = e?.detail?.targetKey;
       if (targetKey && targetKey !== permKey) return;
       // append 模式(文件浏览器右键"添加到上下文"):在现有草稿末尾追加,不覆盖。
       if (e?.detail?.append) setText((prev) => (prev && !/\s$/.test(prev) ? prev + ' ' : prev) + t);
       else setText(t);
+      // 编辑重发:恢复原附件为卡片(缩略图/文件名),可删除、可继续新增,不再是裸 @path 文本。
+      if (fillAttach) setAttachments(fillAttach);
       if (e?.detail?.editMode) setEditingResend(true);
       const ta = textareaRef.current;
       if (ta) {

@@ -5163,12 +5163,15 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     // already been removed from both arrays (re-fetch raced ahead, etc.),
     // the user still gets the original text in the input box, which is the
     // primary visible signal they expect from "重新编辑".
-    const originalText = msg.text || '';
-    if (mode === 'edit' && originalText) {
+    // 附件消息:回填纯文本(displayText,去掉 @path 附件标签)而非含 @path 的 outbound(msg.text),
+    // 并把原附件卡片数据一并带回,让输入框恢复成缩略图/文件名卡片(可删可再加),不再显示裸路径。
+    const hasAttach = Array.isArray(msg.attachments) && msg.attachments.length > 0;
+    const originalText = (hasAttach && msg.displayText !== undefined) ? msg.displayText : (msg.text || '');
+    if (mode === 'edit' && (originalText || hasAttach)) {
       // Target THIS pane's composer only (key == its sessionQueueKey). The old
       // untargeted store write + broadcast filled EVERY split pane's input box.
       const targetKey = sel?.sessionId || `draft-${sel?.projectHash || 'none'}`;
-      window.dispatchEvent(new CustomEvent('cgui:composer-fill', { detail: { text: originalText, targetKey, editMode: true } }));
+      window.dispatchEvent(new CustomEvent('cgui:composer-fill', { detail: { text: originalText, targetKey, editMode: true, attachments: hasAttach ? msg.attachments : undefined } }));
       // 非破坏式(#4):只回填输入框 + 记录待回滚目标,绝不在此刻 trim/截断/还原文件。
       // 等用户真正点发送时(handleSend 拦截)才回退;按 Esc 取消则历史毫发无损。
       setPendingEditRollback({ msg, targetKey });
