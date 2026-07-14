@@ -40,6 +40,8 @@ export function SkillsPanel() {
   const [activeBranch, setActiveBranch] = useState('');   // #2 自定义仓库的指定分支('' = 默认分支)
   const [activeHost, setActiveHost] = useState('github'); // 自定义仓库所在 host:github | gitee
   const [sourcesMap, setSourcesMap] = useState({});       // #3 已装 skill 的来源 { id: {repo, branch} }
+  const [updateInfo, setUpdateInfo] = useState({});       // 检查更新结果 { id: {local, remote, hasUpdate} }
+  const [checkingUpd, setCheckingUpd] = useState(false);
 
   const [busy, setBusy] = useState(null);             // null | 'all' | <skillId>
   const [conflicts, setConflicts] = useState(null);
@@ -56,6 +58,24 @@ export function SkillsPanel() {
     setLoadingLocal(false);
   }, []);
 
+  // 检查更新(手动触发):后端对有来源记录的技能拉源 SKILL.md 的 version 与本机比对,
+  // 有更新的在更新按钮上亮角标,无更新显示"已是最新",缺版本号无法比对的不标。
+  const checkUpdates = useCallback(async () => {
+    setCheckingUpd(true); setNotice('');
+    try {
+      const d = await (await fetch('/api/skills/check-updates', { method: 'POST' })).json();
+      const u = d.updates || {};
+      setUpdateInfo(u);
+      const vals = Object.values(u);
+      const n = vals.filter((x) => x.hasUpdate === true).length;
+      const unknown = vals.filter((x) => x.hasUpdate === null).length;
+      setNotice(n
+        ? `检查完成:${n} 个技能有新版本(更新按钮已标出)`
+        : `检查完成:未发现新版本${unknown ? `(${unknown} 个未声明版本号,无法比对)` : ''}`);
+    } catch (e) { setNotice('错误: ' + e.message); }
+    setCheckingUpd(false);
+  }, []);
+
   // #3 更新单个 skill:从记录的来源仓库+分支重拉覆盖。
   const updateSkill = useCallback(async (id) => {
     setManageBusy(id); setNotice('');
@@ -66,6 +86,8 @@ export function SkillsPanel() {
       const d = await r.json();
       if (!r.ok) throw new Error(d.error || '更新失败');
       await loadLocal();
+      // 已更新到最新 → 清掉该技能的"有新版本"标记
+      setUpdateInfo((p) => { if (!(id in p)) return p; const n = { ...p }; delete n[id]; return n; });
       setManageBusy(null); // 更新已完成,先停 spinner 再弹窗(否则用户不点弹窗则按钮无限转)
       // 远端无变化(重下内容与旧的一致)→ 明确显示"无更新",不再误报"已更新为 vX"。
       await confirmDialog(
@@ -258,6 +280,14 @@ export function SkillsPanel() {
               placeholder="搜索技能（名称 / 描述）..."
               className="w-full bg-canvas border border-canvas-deep rounded-lg pl-8 pr-3 py-1.5 text-xs text-ink placeholder-ink-ghost focus:outline-none focus:border-accent/40 font-body" />
           </div>
+          {/* 手动检查更新:仅对有来源记录(从 GitHub/Gitee 导入)的技能有效,不自动轮询 */}
+          {Object.keys(sourcesMap).length > 0 && (
+            <button onClick={checkUpdates} disabled={checkingUpd || !!manageBusy}
+              className="flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-body rounded-md border border-canvas-deep text-ink-muted hover:text-ink hover:bg-canvas-deep transition-colors disabled:opacity-50">
+              {checkingUpd ? <Loader2 size={11} className="animate-spin" /> : <RefreshCw size={11} />}
+              检查更新(比对来源仓库的版本号)
+            </button>
+          )}
           {notice && <div className="text-[11px] text-ink-soft bg-canvas-deep/60 border border-canvas-deep rounded px-2 py-1.5">{notice}</div>}
           {filteredLocal.length > 0 ? (
             <div className="space-y-2">
@@ -274,13 +304,22 @@ export function SkillsPanel() {
                     )}
                     {s.version && <span className="shrink-0 text-[10px] px-1 py-px bg-canvas-deep text-ink-faint rounded font-mono">v{s.version}</span>}
                     <SkillCopyBtn name={s.id} />
-                    {sourcesMap[s.id]?.repo && (
-                      <button onClick={(e) => { e.stopPropagation(); updateSkill(s.id); }} disabled={!!manageBusy}
-                        title={`从来源更新 —— ${sourcesMap[s.id].repo}${sourcesMap[s.id].branch ? '@' + sourcesMap[s.id].branch : ''},覆盖本机旧版本`}
-                        className="shrink-0 p-1 rounded text-ink-faint hover:text-accent hover:bg-accent/10 disabled:opacity-50">
-                        {manageBusy === s.id ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />}
-                      </button>
-                    )}
+                    {sourcesMap[s.id]?.repo && (() => {
+                      const u = updateInfo[s.id]; // 检查更新结果:true=有新版本(亮角标) false=已是最新 null/无=未比对
+                      return (
+                        <>
+                          {u?.hasUpdate === false && <span className="shrink-0 text-[9px] text-ink-faint font-body">已是最新</span>}
+                          <button onClick={(e) => { e.stopPropagation(); updateSkill(s.id); }} disabled={!!manageBusy}
+                            title={u?.hasUpdate
+                              ? `有新版本 v${u.remote}(本机 v${u.local})—— 点击从 ${sourcesMap[s.id].repo} 更新`
+                              : `从来源更新 —— ${sourcesMap[s.id].repo}${sourcesMap[s.id].branch ? '@' + sourcesMap[s.id].branch : ''},覆盖本机旧版本`}
+                            className={`relative shrink-0 p-1 rounded hover:bg-accent/10 disabled:opacity-50 ${u?.hasUpdate ? 'text-accent' : 'text-ink-faint hover:text-accent'}`}>
+                            {manageBusy === s.id ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />}
+                            {u?.hasUpdate === true && <span className="absolute top-0 right-0 w-1.5 h-1.5 rounded-full bg-accent" />}
+                          </button>
+                        </>
+                      );
+                    })()}
                     <button onClick={(e) => { e.stopPropagation(); manageSkill('archive', s.id); }} disabled={!!manageBusy}
                       title="归档 —— 移出加载目录停用,可在「已归档」恢复"
                       className="shrink-0 p-1 rounded text-ink-faint hover:text-ink hover:bg-canvas-deep disabled:opacity-50">

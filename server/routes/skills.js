@@ -456,6 +456,30 @@ router.get('/skills/sources-map', async (req, res) => {
   res.json({ sources: await readSources() });
 });
 
+// ── 检查更新(手动触发,不自动轮询)────────────────────────────────
+// 对有来源记录的本机 skill,拉源仓库 SKILL.md 的 frontmatter version 与本机版本纯字符串比对。
+// 直拉 raw 单文件(不走 loadRepo 的整仓 tree,免 API 限流);两侧都声明 version 才能判定,
+// 任一侧缺 version 返回 hasUpdate:null(未知,前端不亮角标)。
+// best-effort:单个拉取失败/超时静默跳过(墙内网络不稳,不报错不阻塞其它技能)。
+router.post('/skills/check-updates', async (req, res) => {
+  const sources = await readSources();
+  const updates = {};
+  await Promise.all(Object.entries(sources).map(async ([id, src]) => {
+    if (!src?.repo || !src?.root) return;
+    const localMd = await readSkillMd(join(SKILLS_DIR, id));
+    if (localMd === null) return; // 本机没装(已归档/删除),不检查
+    const local = parseFrontmatter(localMd).version;
+    try {
+      const h = hostOf(src.host || 'github');
+      const r = await fetch(h.raw(src.repo, src.branch, `${src.root}/SKILL.md`), { signal: AbortSignal.timeout(15000) });
+      if (!r.ok) return;
+      const remote = parseFrontmatter(await r.text()).version;
+      updates[id] = { local, remote, hasUpdate: local && remote ? local !== remote : null };
+    } catch { /* 网络失败静默跳过 */ }
+  }));
+  res.json({ updates });
+});
+
 // 更新单个 skill:按来源记录从原仓库+分支重拉,覆盖本机旧版本。
 router.post('/skills/update', async (req, res) => {
   const id = String(req.body?.id || '');
