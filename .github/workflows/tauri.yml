@@ -54,10 +54,18 @@ jobs:
       # installers (dmg on macOS, nsis/msi on Windows; bundle.targets="all").
       # CGUI_PUBLIC_BUILD=1 satisfies require-public-build.cjs; a CI checkout has
       # no *.local.* files (gitignored) so the bundle is inherently clean.
+      # --config 叠加 tauri.updater.conf.json(createUpdaterArtifacts,产出 .app.tar.gz
+      # 与 .sig 供自动更新;拆出主配置是因为本地 build 无签名私钥会失败)。tauri-action
+      # 未设 projectPath 时 CWD=仓库根,--config 相对路径按仓库根写。签名私钥来自
+      # repo secrets,TAURI_SIGNING_PRIVATE_KEY_PASSWORD 为空串(生成密钥时未设口令)。
       - name: Build app
         uses: tauri-apps/tauri-action@v0
+        with:
+          args: --config src-tauri/tauri.updater.conf.json
         env:
           CGUI_PUBLIC_BUILD: '1'
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
       # macOS dmg 里塞一个「使用说明.txt」,与 app 并列。此前塞的是 .command 脚本,
       # 但未公证脚本在 macOS 15(Sequoia)连右键打开都不放行(用户实测报
@@ -102,10 +110,15 @@ jobs:
           if-no-files-found: warn
           # 安装包本身已是压缩格式(dmg UDZO / NSIS lzma),artifact 再压是纯浪费,存储级直传更快
           compression-level: 0
+          # updater 产物:mac 用 .app.tar.gz(+.sig),不受上面 dmg 重打包影响;
+          # Windows NSIS 在 Tauri 2 直接对 setup.exe 出 .sig(无单独 zip 包)。
           path: |
             src-tauri/target/release/bundle/dmg/*.dmg
             src-tauri/target/release/bundle/nsis/*.exe
             src-tauri/target/release/bundle/msi/*.msi
+            src-tauri/target/release/bundle/macos/*.app.tar.gz
+            src-tauri/target/release/bundle/macos/*.app.tar.gz.sig
+            src-tauri/target/release/bundle/nsis/*.exe.sig
 
   # Single, race-free release: runs once after both builds, gathers every
   # installer, and publishes one GitHub Release for the pushed tag.
@@ -141,10 +154,54 @@ jobs:
           # Installer filenames contain spaces ("Claude GUI_x.y.z_…"), so read them
           # into an array (null-delimited) and pass quoted — an unquoted $FILES
           # word-splits on the space and gh can't find the file.
-          mapfile -d '' FILES < <(find dist-artifacts -type f \( -name '*.dmg' -o -name '*.exe' -o -name '*.msi' \) -print0)
+          # *.app.tar.gz / *.sig 是 updater 产物,随常规资产一起上传(latest.json 在下一步拼)。
+          mapfile -d '' FILES < <(find dist-artifacts -type f \( -name '*.dmg' -o -name '*.exe' -o -name '*.msi' -o -name '*.app.tar.gz' -o -name '*.sig' \) -print0)
           printf 'Attaching: %s\n' "${FILES[@]}"
           gh release create "${{ github.ref_name }}" \
             --repo "${{ github.repository }}" \
             --title "Claude GUI ${{ github.ref_name }}" \
             --notes-file notes.md \
             "${FILES[@]}"
+
+      # 拼 latest.json(Tauri updater 清单)并追传到 release。
+      #  - 资产 URL 必须用 gh release view 拿 GitHub 改写后的真实值(文件名含空格会被
+      #    改写成 "Claude.GUI_…",手拼必错)。
+      #  - signature 是 .sig 文件的【内容】(minisign base64),不是文件 URL。
+      #  - 平台键只有 darwin-aarch64 + windows-x86_64:CI 是 arm64 mac runner,从无
+      #    Intel 包;Windows 用 NSIS setup.exe 的 URL+sig。
+      - name: Build and upload latest.json
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          DARWIN_SIG_FILE=$(find dist-artifacts -type f -name '*.app.tar.gz.sig' | head -1)
+          WIN_SIG_FILE=$(find dist-artifacts -type f -name '*-setup.exe.sig' | head -1)
+          [ -n "$DARWIN_SIG_FILE" ] || { echo "FATAL: no .app.tar.gz.sig artifact (mac updater 签名缺失)"; exit 1; }
+          [ -n "$WIN_SIG_FILE" ] || { echo "FATAL: no -setup.exe.sig artifact (win updater 签名缺失)"; exit 1; }
+          # 断言签名非空且像 base64(空/乱码 = 私钥没生效,发出去的 latest.json 会让所有客户端校验失败)
+          for f in "$DARWIN_SIG_FILE" "$WIN_SIG_FILE"; do
+            if ! tr -d '\r\n' < "$f" | grep -qE '^[A-Za-z0-9+/=]{80,}$'; then
+              echo "FATAL: signature not base64-like: $f"; cat "$f"; exit 1
+            fi
+          done
+          DARWIN_URL=$(gh release view "$TAG" --repo "$REPO" --json assets \
+            -q '[.assets[] | select(.name | endswith(".app.tar.gz"))][0].url')
+          WIN_URL=$(gh release view "$TAG" --repo "$REPO" --json assets \
+            -q '[.assets[] | select(.name | endswith("-setup.exe"))][0].url')
+          [ -n "$DARWIN_URL" ] && [ "$DARWIN_URL" != "null" ] || { echo "FATAL: darwin asset url not found"; exit 1; }
+          [ -n "$WIN_URL" ] && [ "$WIN_URL" != "null" ] || { echo "FATAL: windows asset url not found"; exit 1; }
+          jq -n \
+            --arg version "${TAG#v}" \
+            --arg pub_date "$(date -u +%FT%TZ)" \
+            --arg durl "$DARWIN_URL" \
+            --arg wurl "$WIN_URL" \
+            --rawfile dsig "$DARWIN_SIG_FILE" \
+            --rawfile wsig "$WIN_SIG_FILE" \
+            '{version: $version, pub_date: $pub_date, platforms: {
+               "darwin-aarch64": { signature: ($dsig | gsub("[\r\n]"; "")), url: $durl },
+               "windows-x86_64": { signature: ($wsig | gsub("[\r\n]"; "")), url: $wurl }
+             }}' > latest.json
+          cat latest.json
+          gh release upload "$TAG" latest.json --repo "$REPO" --clobber
