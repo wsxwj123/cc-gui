@@ -336,8 +336,15 @@ export function SkillsPanel() {
               ))}
             </div>
           ) : (
-            <div className="text-xs text-ink-faint font-body py-6 text-center bg-canvas-warm border border-canvas-deep rounded-lg">
-              {loadingLocal ? '加载中…' : query.trim() ? `没有匹配「${query.trim()}」的技能` : '~/.claude/skills 下没有 skill'}
+            <div className="text-xs text-ink-faint font-body py-6 text-center bg-canvas-warm border border-canvas-deep rounded-lg space-y-3">
+              <div>{loadingLocal ? '加载中…' : query.trim() ? `没有匹配「${query.trim()}」的技能` : '~/.claude/skills 下没有 skill'}</div>
+              {/* 空态 CTA:直接进「导入」页从市场装,不让用户面对死胡同 */}
+              {!loadingLocal && !query.trim() && (
+                <button onClick={() => setTab('import')}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-accent text-white text-[12px] font-medium hover:bg-accent/90 transition-colors">
+                  <CloudDownload size={13} />从市场导入技能
+                </button>
+              )}
             </div>
           )}
         </>
