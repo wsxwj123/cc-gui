@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useRef } from 'react';
 import { AlertCircle, Loader2, ClipboardList, ShieldAlert } from 'lucide-react';
 import { useStore } from '../stores/sessionStore.js';
 import { MarkdownRenderer } from './MarkdownRenderer.jsx';
@@ -211,8 +211,14 @@ function AskQuestionCard({ req, onAnswer, processing, position, hydrate }) {
     onAnswer(req, text, { questions, answers });
   };
 
+  // 单题自动提交的延迟 timer 存 ref:120ms 窗口内改选/取消选中/点跳过时先取消旧 timer,
+  // 否则先到的 timer 会提交"不是用户最后所见"的选择(fable 审查项)。
+  const autoSubmitRef = useRef(null);
+  const cancelAutoSubmit = () => { if (autoSubmitRef.current) { clearTimeout(autoSubmitRef.current); autoSubmitRef.current = null; } };
+  useEffect(() => cancelAutoSubmit, []); // 卸载兜底
   const choose = (label, multi) => {
     const wasSelected = !multi && picks[qi] === label;
+    cancelAutoSubmit();
     setPicks((prev) => {
       if (!multi) return { ...prev, [qi]: prev[qi] === label ? undefined : label };
       const cur = Array.isArray(prev[qi]) ? prev[qi] : [];
@@ -221,7 +227,7 @@ function AskQuestionCard({ req, onAnswer, processing, position, hydrate }) {
     // 只有一道题且单选:点选项即提交(免再点"提交"按钮);稍延迟让选中态可见。
     // 多选不适用(要连选多个);取消选中不提交。已有自定义文本时一并带上。
     if (!multi && !wasSelected && total === 1) {
-      setTimeout(() => submit({ ...picks, [qi]: label }, customs), 120);
+      autoSubmitRef.current = setTimeout(() => submit({ ...picks, [qi]: label }, customs), 120);
       return;
     }
     // 单选选中即跳下一题(取消选中/多选/末题不跳),稍延迟让选中态可见
@@ -311,7 +317,7 @@ function AskQuestionCard({ req, onAnswer, processing, position, hydrate }) {
       <div className="px-4 py-2.5 flex items-center gap-2 bg-canvas-warm/60 border-t border-canvas-deep">
         <button
           disabled={processing}
-          onClick={() => onAnswer(req, '[用户跳过了此问题，请自行用合理默认值继续]')}
+          onClick={() => { cancelAutoSubmit(); onAnswer(req, '[用户跳过了此问题，请自行用合理默认值继续]'); }}
           className="px-3 py-1.5 rounded-md text-[12px] font-medium text-ink-muted hover:bg-canvas-deep disabled:opacity-50"
         >跳过</button>
         {total > 1 && (

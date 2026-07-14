@@ -130,6 +130,10 @@ async function writeDisabledMcpTools(map) { await writeJsonFile(DISABLED_TOOLS_F
 export async function listMcpTools(name, timeoutMs = 15000) {
   const cfg = await readRawMcpConfig(name);
   if (!cfg) throw Object.assign(new Error('MCP server 未找到'), { status: 404 });
+  return listToolsFromCfg(cfg, timeoutMs);
+}
+// 握手核心与"已配置的 server"解耦:添加表单在**添加前**预览工具清单时,传入草稿 cfg 直接握手。
+export async function listToolsFromCfg(cfg, timeoutMs = 15000) {
   if (!cfg.command) return { transport: cfg.type || 'http', tools: null, note: '仅 stdio 类型支持查看工具清单;HTTP/SSE server 请在其平台侧管理。' };
   return await new Promise((resolve) => {
     const isWin = process.platform === 'win32';
@@ -1090,6 +1094,23 @@ router.get('/plugins/:name/contents', async (req, res) => {
     try { await stat(join(root, '.mcp.json')); hasMcp = true; } catch {}
     res.json({ name, bare: name.split('@')[0], skills, commands, agents, hasMcp });
   } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// POST /api/mcp/preview-tools — **添加前**按表单草稿配置连 server 预览工具清单(不落任何配置)。
+// 仅 stdio;命令同添加路径过 rewriteUvCommandLine(Windows uvx 垫片坑同样适用)。
+router.post('/mcp/preview-tools', async (req, res) => {
+  try {
+    const b = req.body || {};
+    if ((b.transport || 'stdio') !== 'stdio') {
+      return res.json({ tools: null, note: '仅 stdio 类型支持查看工具清单;HTTP/SSE server 请在其平台侧管理。' });
+    }
+    const commandLine = await rewriteUvCommandLine(String(b.commandLine || ''));
+    const { command, args } = parseCommandLine(commandLine);
+    if (!command) return res.status(400).json({ error: '命令不能为空' });
+    const env = (b.env && typeof b.env === 'object') ? b.env : {};
+    const { tools, note } = await listToolsFromCfg({ command, args, env });
+    res.json({ tools, note: note || '' });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // GET /api/mcp/:name/tools — 连 server 走 tools/list 握手,返回工具清单 + 各自是否被手动禁用。

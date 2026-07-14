@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react';
-import { Folder, FolderOpen, File, RefreshCw, AlertCircle, ChevronRight, ChevronDown, FileText, Image as ImageIcon, ExternalLink, Film, Pencil, Save, Undo2, Redo2, X, Check, Trash2, AtSign, MoreVertical } from 'lucide-react';
+import { Folder, FolderOpen, File, RefreshCw, AlertCircle, ChevronRight, ChevronDown, FileText, Image as ImageIcon, ExternalLink, Film, Pencil, Save, Undo2, Redo2, X, Check, Trash2, AtSign, MoreVertical, ListChecks, Square, CheckSquare } from 'lucide-react';
 import { useStore } from '../stores/sessionStore.js';
 import { MarkdownRenderer } from './MarkdownRenderer.jsx';
 import { ArtifactPreview } from './ArtifactPreview.jsx';
@@ -220,6 +220,9 @@ export function FileExplorerPanel() {
         });
         const d = await r.json().catch(() => ({}));
         if (!r.ok) throw new Error(d.error || `${r.status}`);
+        // 根删成功:清树缓存并进入"项目已删除"空态——否则 pending 清除后根行取消隐藏,
+        // 旧 dirs 缓存把整棵已删的树原样渲染回来(幽灵树,点刷新才报错)。
+        if (isRoot) { setDirs({}); setExpanded(new Set()); setRootGone(true); }
       } catch (err) {
         const { confirmDialog } = await import('../utils/confirmDialog.jsx');
         confirmDialog(`删除失败:${err.message}`, { confirmText: '知道了' });
@@ -230,6 +233,49 @@ export function FileExplorerPanel() {
     setNowTick(Date.now()); // 初显就用当前时刻,避免陈旧 tick 让倒计时首帧显示错误秒数
     setPending((prev) => ({ ...prev, [path]: { name, deadline: Date.now() + 10_000, parentPath } }));
   }, [rootPath, fetchDir]);
+
+  // ── 批量选择删除 ──────────────────────────────────────────────
+  // 选中即立删有确认(批量无 10s 撤销窗:N 条倒计时横条既吵又占位,显式确认框替代)。
+  const [selMode, setSelMode] = useState(false);
+  const [selected, setSelected] = useState(() => new Set());
+  const [rootGone, setRootGone] = useState(false); // 项目根目录已被删除 → 空态,不再渲染旧缓存"幽灵树"
+  const toggleSel = useCallback((path) => {
+    setSelected((prev) => { const n = new Set(prev); if (n.has(path)) n.delete(path); else n.add(path); return n; });
+  }, []);
+  const exitSelMode = () => { setSelMode(false); setSelected(new Set()); };
+  const batchDelete = async () => {
+    // 剔除"祖先也被选中"的子项:先删目录再删其内文件必 404,只删顶层所选即可覆盖全部
+    const items = [...selected];
+    const tops = items.filter((p) => !items.some((q) => q !== p && (p.startsWith(q + '/') || p.startsWith(q + '\\'))));
+    if (!tops.length) return;
+    const names = tops.map((p) => p.split(/[/\\]/).pop());
+    const { confirmDialog } = await import('../utils/confirmDialog.jsx');
+    const ok = await confirmDialog(
+      `删除所选 ${tops.length} 项?\n\n${names.slice(0, 8).join('\n')}${tops.length > 8 ? `\n…等共 ${tops.length} 项` : ''}\n\n批量删除立即执行,不可撤销。`,
+      { danger: true, confirmText: `删除 ${tops.length} 项` });
+    if (!ok) return;
+    const underAny = (x) => tops.some((p) => x === p || x.startsWith(p + '/') || x.startsWith(p + '\\'));
+    setPreview((p) => (p && underAny(p.path) ? null : p));
+    setSelectedFile((sf) => (sf && underAny(sf) ? null : sf));
+    let fail = 0;
+    for (const p of tops) {
+      try {
+        const r = await fetch('/api/files/delete', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ path: p, rootPath, confirm: true }),
+        });
+        if (!r.ok) fail++;
+      } catch { fail++; }
+    }
+    exitSelMode();
+    // 刷新受影响的父目录(去重;父=路径去掉最后一段)
+    const parents = [...new Set(tops.map((p) => p.replace(/[/\\][^/\\]+$/, '') || rootPath))];
+    parents.forEach((d) => fetchDir(d));
+    if (fail) {
+      const { confirmDialog: dlg } = await import('../utils/confirmDialog.jsx');
+      dlg(`${fail} 项删除失败(其余已删除)。常见原因:文件被占用或已不存在。`, { confirmText: '知道了' });
+    }
+  };
 
   const undoDelete = (path) => {
     // 已进入删除中(定时器已触发、请求在途)不可撤销:此时 timer 已被 delete,清 UI
@@ -256,12 +302,27 @@ export function FileExplorerPanel() {
           <span className="text-[10px] text-ink-faint font-mono truncate" title={rootPath}>
             {rootPath.split(/[/\\]+/).slice(-2).join('/')}
           </span>
-          <button
-            onClick={() => fetchDir(rootPath)}
-            className="p-1 text-ink-faint hover:text-ink rounded"
-            title="刷新"
-          ><RefreshCw size={11} /></button>
+          <div className="flex items-center gap-0.5">
+            <button
+              onClick={() => (selMode ? exitSelMode() : setSelMode(true))}
+              className={`p-1 rounded ${selMode ? 'text-accent bg-accent/10' : 'text-ink-faint hover:text-ink'}`}
+              title={selMode ? '退出多选' : '多选(批量删除文件/文件夹)'}
+            ><ListChecks size={11} /></button>
+            <button
+              onClick={() => fetchDir(rootPath)}
+              className="p-1 text-ink-faint hover:text-ink rounded"
+              title="刷新"
+            ><RefreshCw size={11} /></button>
+          </div>
         </div>
+        {selMode && (
+          <div className="mx-2 mb-1 px-2 py-1.5 rounded-lg bg-accent/10 border border-accent/20 flex items-center gap-2">
+            <span className="text-[11px] font-body text-ink flex-1">已选 {selected.size} 项(点击条目勾选)</span>
+            <button onClick={batchDelete} disabled={!selected.size}
+              className="text-[11px] px-2 py-0.5 rounded bg-red-600 text-white disabled:opacity-40 hover:bg-red-700">删除所选</button>
+            <button onClick={exitSelMode} className="text-[11px] text-ink-muted hover:text-ink">取消</button>
+          </div>
+        )}
         {/* 待删除横条:每项独立 10s 倒计时,点撤销恢复;进入删除中则禁用撤销 */}
         {Object.entries(pending).map(([p, info]) => (
           <div key={p} className="mx-2 mb-1 px-2 py-1.5 rounded-lg bg-red-500/10 border border-red-500/20 flex items-center gap-2">
@@ -280,6 +341,11 @@ export function FileExplorerPanel() {
             )}
           </div>
         ))}
+        {rootGone ? (
+          <div className="px-4 py-8 text-center text-[12px] text-ink-faint font-body">
+            项目文件夹已删除。可在侧栏项目列表移除该条目。
+          </div>
+        ) : (
         <TreeNode
           path={rootPath}
           name={rootPath.split(/[/\\]+/).slice(-1)[0] || '/'}
@@ -294,7 +360,11 @@ export function FileExplorerPanel() {
           selectedFile={selectedFile}
           onCtx={onCtx}
           hidden={pending}
+          selMode={selMode}
+          selected={selected}
+          onToggleSel={toggleSel}
         />
+        )}
       </div>
 
       {/* 自建右键菜单(Tauri webview 无原生右键):遮罩点击即关 */}
@@ -353,24 +423,30 @@ export function FileExplorerPanel() {
   );
 }
 
-function TreeNode({ path, name, depth, isDir, isRoot, parentPath, expanded, dirs, toggle, openFile, selectedFile, onCtx, hidden }) {
+function TreeNode({ path, name, depth, isDir, isRoot, parentPath, expanded, dirs, toggle, openFile, selectedFile, onCtx, hidden, selMode, selected, onToggleSel }) {
   const isOpen = expanded.has(path);
   const dir = dirs[path];
   const isSelected = selectedFile === path;
+  const isChecked = selMode && selected?.has(path);
   return (
     <div>
       <div
-        onClick={() => isDir ? toggle(path, true) : openFile({ path, name, size: 0 })}
+        // 多选模式:点击=勾选(根目录除外,根仍是展开/收起——批量删根走单独的根删除流程);
+        // 普通模式:目录展开/收起,文件打开预览。
+        onClick={() => (selMode && !isRoot) ? onToggleSel(path) : isDir ? toggle(path, true) : openFile({ path, name, size: 0 })}
         onContextMenu={(e) => onCtx && onCtx(e, { path, name, isDir, isRoot: !!isRoot, parentPath })}
         // macOS WKWebView 对 user-select:none 元素不派发 contextmenu(Chromium 会),右键在真 app 里
         // 静默失效 → 补右键 mousedown(button===2,鼠标事件不受 user-select 影响,任何 webview 都发)兜底。
         onMouseDown={(e) => { if (e.button === 2 && onCtx) onCtx(e, { path, name, isDir, isRoot: !!isRoot, parentPath }); }}
         className={`group flex items-center gap-1 px-2 py-0.5 rounded cursor-pointer text-[12px] font-body select-none ${
-          isSelected ? 'bg-accent/15 text-accent' : 'hover:bg-canvas-warm text-ink'
+          isChecked ? 'bg-accent/20 text-ink' : isSelected ? 'bg-accent/15 text-accent' : 'hover:bg-canvas-warm text-ink'
         }`}
         style={{ paddingLeft: `${0.5 + depth * 0.9}rem` }}
         title={path}
       >
+        {selMode && !isRoot && (
+          isChecked ? <CheckSquare size={12} className="shrink-0 text-accent" /> : <Square size={12} className="shrink-0 text-ink-faint" />
+        )}
         {isDir ? (
           <>
             {isOpen ? <ChevronDown size={11} className="shrink-0 text-ink-faint" /> : <ChevronRight size={11} className="shrink-0 text-ink-faint" />}
@@ -422,6 +498,9 @@ function TreeNode({ path, name, depth, isDir, isRoot, parentPath, expanded, dirs
               selectedFile={selectedFile}
               onCtx={onCtx}
               hidden={hidden}
+              selMode={selMode}
+              selected={selected}
+              onToggleSel={onToggleSel}
             />
           ))}
         </>

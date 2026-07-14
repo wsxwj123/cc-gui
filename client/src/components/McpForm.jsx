@@ -123,7 +123,13 @@ export function McpForm({ editing, onClose, onSaved }) {
   const loadTools = async () => {
     setToolsState((s) => ({ ...s, open: true, loading: true, err: '', note: '' }));
     try {
-      const r = await fetch(`/api/mcp/${encodeURIComponent(editing.name)}/tools`);
+      // 编辑:按已配置的 server 名查;添加:按表单草稿配置直接握手预览(添加前就能看到工具清单)。
+      const r = isEdit
+        ? await fetch(`/api/mcp/${encodeURIComponent(editing.name)}/tools`)
+        : await fetch('/api/mcp/preview-tools', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ transport, commandLine, env: Object.fromEntries(envRows.filter((x) => x.k.trim()).map((x) => [x.k.trim(), x.v ?? ''])) }),
+          });
       const d = await r.json();
       if (!r.ok) throw new Error(d.error || `${r.status}`);
       setToolsState({ open: true, loading: false, list: d.tools, err: '', note: d.note || '' });
@@ -330,15 +336,15 @@ export function McpForm({ editing, onClose, onSaved }) {
               )}
             </div>
 
-            {/* 工具管理:仅编辑现有 server 时。查看该 server 暴露的工具,逐个启用/禁用。 */}
-            {isEdit && (
+            {/* 工具管理:编辑时可逐个启用/禁用;添加时按草稿配置预览清单(添加前就能看这个 server 有什么工具)。 */}
+            {(isEdit || (isStdio && commandLine.trim())) && (
               <div className="space-y-1.5">
                 <div className="flex items-center gap-2">
                   <span className={labelCls}>工具</span>
                   {!toolsState.open && (
                     <button onClick={loadTools}
                       className="flex items-center gap-1 text-[11px] px-2 py-0.5 rounded text-accent hover:bg-accent/10">
-                      <RefreshCw size={11} />查看工具（可单独启用/禁用）
+                      <RefreshCw size={11} />{isEdit ? '查看工具（可单独启用/禁用）' : '查看工具（按当前配置连一次预览）'}
                     </button>
                   )}
                   {toolsState.open && !toolsState.loading && (
@@ -359,17 +365,19 @@ export function McpForm({ editing, onClose, onSaved }) {
                           <div className="text-[12px] font-mono text-ink truncate">{t.name}</div>
                           {t.description && <div className="text-[10px] text-ink-faint leading-snug line-clamp-2">{t.description}</div>}
                         </div>
-                        <button onClick={() => toggleTool(t.name, !t.enabled)} disabled={toolsBusy === t.name}
-                          className={`shrink-0 text-[10px] px-1.5 py-0.5 rounded transition-colors ${
-                            t.enabled ? 'text-accent hover:bg-accent/10' : 'text-ink-faint bg-canvas-warm hover:text-ink'
-                          } disabled:opacity-40`}>
-                          {t.enabled ? '已启用' : '已禁用'}
-                        </button>
+                        {isEdit && (
+                          <button onClick={() => toggleTool(t.name, !t.enabled)} disabled={toolsBusy === t.name}
+                            className={`shrink-0 text-[10px] px-1.5 py-0.5 rounded transition-colors ${
+                              t.enabled ? 'text-accent hover:bg-accent/10' : 'text-ink-faint bg-canvas-warm hover:text-ink'
+                            } disabled:opacity-40`}>
+                            {t.enabled ? '已启用' : '已禁用'}
+                          </button>
+                        )}
                       </div>
                     ))}
                   </div>
                 )}
-                <div className={hintCls}>禁用的工具模型将看不到（不再误选）。改动下个回合生效。</div>
+                <div className={hintCls}>{isEdit ? '禁用的工具模型将看不到（不再误选）。改动下个回合生效。' : '预览仅供查看;添加完成后可在编辑页逐个启用/禁用工具。'}</div>
               </div>
             )}
 
