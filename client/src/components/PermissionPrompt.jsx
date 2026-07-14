@@ -200,6 +200,7 @@ function AskQuestionCard({ req, onAnswer, processing, position, hydrate }) {
   const firstUnanswered = questions.findIndex((_, i) => !answerOf(i));
 
   const submit = (pOv, cOv) => {
+    cancelAutoSubmit(); // 手动提交(Enter/按钮)抢先时取消在途的 120ms 自动提交,防同一 req 双发
     if (!questions.every((_, i) => answerWith(i, pOv, cOv))) { if (firstUnanswered >= 0) setQi(firstUnanswered); return; }
     const text = questions
       .map((q, i) => `【${q.header || '问题' + (i + 1)}】${q.question}\n→ ${answerWith(i, pOv, cOv)}`)

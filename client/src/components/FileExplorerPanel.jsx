@@ -83,6 +83,11 @@ export function FileExplorerPanel() {
     setExpanded(new Set([rootPath]));
     setSelectedFile(null);
     setPreview(null);
+    // 面板是常驻单实例,切项目必须复位跨项目危险状态(fable 审查 P1/P2):
+    // rootGone 不复位=新项目永远"项目已删除"空态;多选集不复位=在 B 项目树下批量删掉 A 的文件。
+    setRootGone(false);
+    setSelMode(false);
+    setSelected(new Set());
     fetchDir(rootPath);
   }, [rootPath, fetchDir]);
 
@@ -223,6 +228,12 @@ export function FileExplorerPanel() {
         // 根删成功:清树缓存并进入"项目已删除"空态——否则 pending 清除后根行取消隐藏,
         // 旧 dirs 缓存把整棵已删的树原样渲染回来(幽灵树,点刷新才报错)。
         if (isRoot) { setDirs({}); setExpanded(new Set()); setRootGone(true); }
+        // 单删成功后从多选集剔除该路径及其子项:否则随后的批量删除对已删路径再发请求,误报"删除失败"
+        setSelected((prev) => {
+          if (!prev.size) return prev;
+          const n = new Set([...prev].filter((x) => !underPath(x)));
+          return n.size === prev.size ? prev : n;
+        });
       } catch (err) {
         const { confirmDialog } = await import('../utils/confirmDialog.jsx');
         confirmDialog(`删除失败:${err.message}`, { confirmText: '知道了' });
@@ -239,11 +250,13 @@ export function FileExplorerPanel() {
   const [selMode, setSelMode] = useState(false);
   const [selected, setSelected] = useState(() => new Set());
   const [rootGone, setRootGone] = useState(false); // 项目根目录已被删除 → 空态,不再渲染旧缓存"幽灵树"
+  const [batchBusy, setBatchBusy] = useState(false); // 批量删除进行中:防二次点击重复触发
   const toggleSel = useCallback((path) => {
     setSelected((prev) => { const n = new Set(prev); if (n.has(path)) n.delete(path); else n.add(path); return n; });
   }, []);
   const exitSelMode = () => { setSelMode(false); setSelected(new Set()); };
   const batchDelete = async () => {
+    if (batchBusy) return;
     // 剔除"祖先也被选中"的子项:先删目录再删其内文件必 404,只删顶层所选即可覆盖全部
     const items = [...selected];
     const tops = items.filter((p) => !items.some((q) => q !== p && (p.startsWith(q + '/') || p.startsWith(q + '\\'))));
@@ -254,6 +267,7 @@ export function FileExplorerPanel() {
       `删除所选 ${tops.length} 项?\n\n${names.slice(0, 8).join('\n')}${tops.length > 8 ? `\n…等共 ${tops.length} 项` : ''}\n\n批量删除立即执行,不可撤销。`,
       { danger: true, confirmText: `删除 ${tops.length} 项` });
     if (!ok) return;
+    setBatchBusy(true);
     const underAny = (x) => tops.some((p) => x === p || x.startsWith(p + '/') || x.startsWith(p + '\\'));
     setPreview((p) => (p && underAny(p.path) ? null : p));
     setSelectedFile((sf) => (sf && underAny(sf) ? null : sf));
@@ -267,6 +281,7 @@ export function FileExplorerPanel() {
         if (!r.ok) fail++;
       } catch { fail++; }
     }
+    setBatchBusy(false);
     exitSelMode();
     // 刷新受影响的父目录(去重;父=路径去掉最后一段)
     const parents = [...new Set(tops.map((p) => p.replace(/[/\\][^/\\]+$/, '') || rootPath))];
@@ -309,7 +324,7 @@ export function FileExplorerPanel() {
               title={selMode ? '退出多选' : '多选(批量删除文件/文件夹)'}
             ><ListChecks size={11} /></button>
             <button
-              onClick={() => fetchDir(rootPath)}
+              onClick={() => { setRootGone(false); fetchDir(rootPath); }} // 复位空态:从废纸篓恢复文件夹后点刷新即可回来
               className="p-1 text-ink-faint hover:text-ink rounded"
               title="刷新"
             ><RefreshCw size={11} /></button>
@@ -318,8 +333,8 @@ export function FileExplorerPanel() {
         {selMode && (
           <div className="mx-2 mb-1 px-2 py-1.5 rounded-lg bg-accent/10 border border-accent/20 flex items-center gap-2">
             <span className="text-[11px] font-body text-ink flex-1">已选 {selected.size} 项(点击条目勾选)</span>
-            <button onClick={batchDelete} disabled={!selected.size}
-              className="text-[11px] px-2 py-0.5 rounded bg-red-600 text-white disabled:opacity-40 hover:bg-red-700">删除所选</button>
+            <button onClick={batchDelete} disabled={!selected.size || batchBusy}
+              className="text-[11px] px-2 py-0.5 rounded bg-red-600 text-white disabled:opacity-40 hover:bg-red-700">{batchBusy ? '删除中…' : '删除所选'}</button>
             <button onClick={exitSelMode} className="text-[11px] text-ink-muted hover:text-ink">取消</button>
           </div>
         )}
