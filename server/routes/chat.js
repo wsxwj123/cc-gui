@@ -923,54 +923,126 @@ router.get('/chat/:pid/stream', (req, res) => {
   });
 });
 
+// 停止语义(2026-07-14 用户拍板「选择性停止」)。调用方语义表:
+//   默认(hard 缺省/false)= 停当前回合 + 全部子代理(含后台化深度调研),**保留 Bash
+//   run_in_background 长任务**(训练等误杀不可恢复)。调用方:App.jsx handleStop 两分支
+//   (停止按钮/Esc)、handleAccelerate(加速)。
+//   hard:true = 全杀(与旧 A 版行为一致)。调用方:App.jsx stopSessionProcs(删会话)、
+//   编辑重发两处、AgentMonitorPanel stop(进程管理)。
+//   closePersistentForSession / closeAllPersistentProcesses 不走本路由,直接 closing+abort,
+//   天然 hard(见各自注释)。
 router.post('/chat/:pid/stop', async (req, res) => {
   const slot = activeProcesses.get(req.params.pid);
   if (!slot) return res.status(404).json({ error: 'Process not found' });
   // SDK:interrupt 让当前回合优雅停;abort 兜底强停;close input 让 generator 收尾。
   // **不能 await interrupt**(用户实报"按停止后子代理继续跑到完"的根因):回合正在跑
   // 子代理时,CLI 对 interrupt 控制请求的响应可能等到子代理收尾才回,await 会把下面的
-  // abort 兜底永远挡住 → 停止形同虚设。改 fire-and-forget + 2s 优雅窗:窗内消息泵
+  // abort 兜底永远挡住 → 停止形同虚设。改 fire-and-forget + 优雅窗:窗内消息泵
   // 正常收尾(pumpEnded,interrupt 生效、jsonl 完整)就不硬杀;超窗则 abort 杀整个 CLI
   // 进程(子代理是 CLI 进程内循环,进程死即全停)。input.close 同步延后——它与 interrupt
   // 共用 stdin 通道,立即关会把刚发的 interrupt 请求截断。
+  // express.json 全局挂载:无 body → {} → hard=false,老调用方向后兼容(选择性)。
+  const hard = req.body?.hard === true;
   const stopAt = Date.now();
-  // #26:stop 一律走"彻底关闭"不转 idle —— 删除会话的先停后删链路靠"进程退净"判据,
-  // 留个 idle 常驻进程会拖住轮询/事后复活刚删的 jsonl。空闲 slot 直接关流即退。
-  slot.closing = true;
-  // 停止链路 #1(server 侧,替代旧 TODO):先对所有在飞子代理/后台任务 query.stopTask()——它承诺
-  // 发 task_notification status:stopped(sdk.d.ts:2440),UI 经 task-notification-bg 自动收尾。必须
-  // 在 interrupt / input.close 之前发,三者共用 stdin control 通道,先关会截断 stopTask 请求。
-  // 全 fire-and-forget + .catch(旧版 CLI 无此能力/竞态失败都不挂死,由下方 abort 兜底)。
-  const hadTasks = !!(slot.liveTasks && slot.liveTasks.size);
-  if (hadTasks) {
-    for (const tid of slot.liveTasks.keys()) {
-      try { slot.query?.stopTask?.(tid)?.catch?.(() => {}); } catch {}
+  // 按 kind 分组:shell(Bash run_in_background,选择性停止时保留)/ 其余可停
+  // (subagent + unknown——unknown 也停,防第三方 provider 缺字段时停止失效)。
+  const shellTasks = [];
+  const stoppableTasks = [];
+  if (slot.liveTasks) {
+    for (const [tid, t] of slot.liveTasks) {
+      if (t && t.kind === 'shell') shellTasks.push(tid); else stoppableTasks.push(tid);
     }
   }
-  // 空闲 slot 且无在飞任务:直接关流即退(原逻辑)。带活后台任务的 idle slot 不走此快路——
-  // CLI 为在飞任务保活不退(Stop hook background_tasks 证据),须走下方 stopTask+窗口+abort。
-  if (slot.idle && !hadTasks) {
-    try { slot.input?.close(); } catch {}
+  const hadTasks = shellTasks.length + stoppableTasks.length > 0;
+
+  if (hard) {
+    // ===== hard 路径:全杀(删会话/编辑重发/进程管理),与旧 A 版行为一致。 =====
+    // #26:彻底关闭不转 idle —— 删除会话的先停后删链路靠"进程退净"判据,
+    // 留个 idle 常驻进程会拖住轮询/事后复活刚删的 jsonl。空闲 slot 直接关流即退。
+    slot.closing = true;
+    // 先对所有在飞子代理/后台任务 query.stopTask()——它承诺发 task_notification
+    // status:stopped(sdk.d.ts:2440),UI 经 task-notification-bg 自动收尾。必须在
+    // interrupt / input.close 之前发,三者共用 stdin control 通道,先关会截断 stopTask
+    // 请求。全 fire-and-forget + .catch(旧版 CLI 无此能力/竞态失败都不挂死,由下方 abort 兜底)。
+    if (hadTasks) {
+      for (const tid of slot.liveTasks.keys()) {
+        try { slot.query?.stopTask?.(tid)?.catch?.(() => {}); } catch {}
+      }
+    }
+    // 空闲 slot 且无在飞任务:直接关流即退(原逻辑)。带活后台任务的 idle slot 不走此快路——
+    // CLI 为在飞任务保活不退(Stop hook background_tasks 证据),须走下方 stopTask+窗口+abort。
+    if (slot.idle && !hadTasks) {
+      try { slot.input?.close(); } catch {}
+      return res.json({ ok: true });
+    }
+    try { slot.query?.interrupt?.()?.catch?.(() => {}); } catch {}
+    setTimeout(() => {
+      // 优雅收尾判据:pumpEnded(泵已收尾)或【stop 之后】到达过 result(interrupt 生效,
+      // 回合已以 interrupted result 停住)。两个坑都躲开(fable 审计):① 不能只看
+      // pumpEnded——子代理回合 result 后有 4s 关流去抖(suggestion 3s),窗内恒 false,
+      // interrupt 成功也被硬杀;② 不能看"到过任何 result"——子代理回合的中间 result 在
+      // stop 前早已出现,会误判已停而放跑还在继续的回合。
+      // 第三个坑:后台化子代理时 interrupt 秒回的 result 会满足前半判据,但后台任务活在
+      // CLI 进程内不经父流、进程没死。加 liveTasks.size===0 门控:仅当 stopTask 触发的
+      // stopped notification 已泵到、薄记清空,才认优雅退出;仍有活任务=没停净→abort 杀整个
+      // CLI 进程。无后台任务时 size===0 恒真=原判据,逐字节一致。
+      const settled = slot.pumpEnded || (slot.lastResultAt && slot.lastResultAt >= stopAt);
+      const noLiveTasks = !slot.liveTasks || slot.liveTasks.size === 0;
+      if (settled && noLiveTasks) return;
+      try { slot.abort?.abort(); } catch {}
+      try { slot.input?.close(); } catch {}
+    }, hadTasks ? 3000 : 2000);
     return res.json({ ok: true });
+  }
+
+  // ===== 选择性路径(默认):停当前回合 + 全部子代理,保留 shell 长任务。 =====
+  // stopTask 只发非 shell 任务;必须在 interrupt 之前发(共用 stdin,防截断),fire-and-forget。
+  for (const tid of stoppableTasks) {
+    try { slot.query?.stopTask?.(tid)?.catch?.(() => {}); } catch {}
+  }
+  // closing 后置:留 shell 时不置 —— finalize 的 keepAlive 分支要 !slot.closing 才转 idle,
+  // 置了会毒化 slot(回合收尾即关进程,shell 任务被连坐)。无 shell 时照旧彻底关闭。
+  if (!shellTasks.length) slot.closing = true;
+  if (slot.idle) {
+    if (!hadTasks) {
+      // idle 无任务:直接关流即退(closing 已置,=hard 同分支=改动前行为)。
+      try { slot.input?.close(); } catch {}
+      return res.json({ ok: true });
+    }
+    if (!stoppableTasks.length) {
+      // idle 仅 shell:没有可停对象,no-op 保活(不 closing、不 interrupt、不 abort)。
+      return res.json({ ok: true, kept: shellTasks.length });
+    }
+    if (shellTasks.length) {
+      // idle 混合:stopTask 已发(子代理经 stopped notification 收尾),不 closing、
+      // 不 interrupt、不 abort,进程为 shell 保活。
+      return res.json({ ok: true, kept: shellTasks.length });
+    }
+    // idle 仅 stoppable(无 shell):closing 已置、stopTask 已发,落到下方 interrupt+窗+abort(=hard)。
   }
   try { slot.query?.interrupt?.()?.catch?.(() => {}); } catch {}
   setTimeout(() => {
-    // 优雅收尾判据:pumpEnded(泵已收尾)或【stop 之后】到达过 result(interrupt 生效,
-    // 回合已以 interrupted result 停住)。两个坑都躲开(fable 审计):① 不能只看
-    // pumpEnded——子代理回合 result 后有 4s 关流去抖(suggestion 3s),2s 窗内恒 false,
-    // interrupt 成功也被硬杀;② 不能看"到过任何 result"——子代理回合的中间 result 在
-    // stop 前早已出现,会误判已停而放跑还在继续的回合。
-    // 停止链路 #1(第三个坑,已收紧):后台化子代理时 interrupt 秒回的 result 会满足前半判据,
-    // 但后台任务活在 CLI 进程内不经父流、进程没死。加 liveTasks.size===0 门控:仅当 stopTask
-    // 触发的 stopped notification 已泵到、薄记清空,才认优雅退出;仍有活任务=没停净→abort 杀整个
-    // CLI 进程(子代理是进程内循环,进程死即全停)。无后台任务时 size===0 恒真=原判据,逐字节一致。
+    // 优雅判据同 hard(pumpEnded / stop 后 result,三坑注释见 hard 路径),但任务清零只数
+    // 非 shell —— shell 是被刻意保留的,不算"没停净"。顺手修 HEAD bug:回合已 result、
+    // 4s 关流去抖窗内、只剩 shell 活任务时,旧判据 liveTasks.size===0 恒 false → 超窗
+    // abort 误杀训练;新判据 shell 不计入,settled 即优雅退。
     const settled = slot.pumpEnded || (slot.lastResultAt && slot.lastResultAt >= stopAt);
-    const noLiveTasks = !slot.liveTasks || slot.liveTasks.size === 0;
-    if (settled && noLiveTasks) return;
+    let liveStoppable = 0;
+    let liveShell = 0;
+    for (const t of (slot.liveTasks?.values() ?? [])) {
+      if (t && t.kind === 'shell') liveShell++; else liveStoppable++;
+    }
+    if (settled && liveStoppable === 0) return;
+    if (liveShell > 0) {
+      // 存在活 shell → 永不 abort(abort 杀整个 CLI 进程,shell 连坐、不可恢复)。
+      // 子代理若没停净,接受"不优雅"代价;要全杀走 hard(进程管理区)。
+      console.warn(`[chat] stop(${req.params.pid}): ${liveStoppable} stoppable task(s) unsettled but ${liveShell} live shell task(s) present — abort suppressed`);
+      return;
+    }
     try { slot.abort?.abort(); } catch {}
     try { slot.input?.close(); } catch {}
   }, hadTasks ? 3000 : 2000);
-  res.json({ ok: true });
+  res.json(shellTasks.length ? { ok: true, kept: shellTasks.length } : { ok: true });
 });
 
 // POST /api/chat/title  { firstUser, firstAssistant?, cwd? }
