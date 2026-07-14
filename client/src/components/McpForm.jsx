@@ -172,7 +172,7 @@ export function McpForm({ editing, onClose, onSaved }) {
           });
       const d = await r.json();
       if (!r.ok) throw new Error(d.error || '保存失败');
-      onSaved?.();
+      onSaved?.(name.trim(), !isEdit); // 传回名称 + 是否新增,供面板对新 server 自动探测连通性
       onClose?.();
     } catch (e) {
       setErr(e.message);

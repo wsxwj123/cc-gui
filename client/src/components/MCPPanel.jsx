@@ -1,8 +1,18 @@
 import React, { useEffect, useState, useRef } from 'react';
 import { Server, Package, FolderOpen, RefreshCw, Plug, Activity, Check, X, Plus, Pencil, Trash2, Zap, Download, ArrowLeft, LogIn } from 'lucide-react';
 import { BUILTIN_PLUGINS } from '../utils/builtinPlugins.js';
+import { findBuiltinMcp } from '../utils/builtinMcpServers.js';
 import { McpForm } from './McpForm.jsx';
 import { confirmDialog } from '../utils/confirmDialog.jsx';
+
+// /api/mcp/:name/ping 结果 → 展示文案(PingButton 与「添加后自动探测」共用)。
+// 失败时优先展示真实子进程 stderr(后端 spawn 抓的),这才是用户要看的"为什么连不上"。
+function formatPingDetail(d) {
+  const head = `${d.ms}ms${d.httpStatus ? ` · HTTP ${d.httpStatus}` : ''}${d.detail ? ' · ' + d.detail : ''}`;
+  return d.status === 'ok'
+    ? head
+    : `${head}${d.stderr ? '\n\n' + d.stderr : '\n(未捕获到子进程报错;可能是命令静默挂起或网络超时)'}`;
+}
 
 function PingButton({ name }) {
   const [state, setState] = useState(null); // null | 'busy' | 'ok' | 'err'
@@ -14,9 +24,7 @@ function PingButton({ name }) {
       const r = await fetch(`/api/mcp/${encodeURIComponent(name)}/ping`);
       const d = await r.json();
       const ok = d.status === 'ok';
-      const head = `${d.ms}ms${d.httpStatus ? ` · HTTP ${d.httpStatus}` : ''}${d.detail ? ' · ' + d.detail : ''}`;
-      // 失败时优先展示真实子进程 stderr(后端 spawn 抓的),这才是用户要看的"为什么连不上"。
-      setDetail(ok ? head : `${head}${d.stderr ? '\n\n' + d.stderr : '\n(未捕获到子进程报错;可能是命令静默挂起或网络超时)'}`);
+      setDetail(formatPingDetail(d));
       setState(ok ? 'ok' : 'err');
       if (ok) setTimeout(() => setState(null), 3000); // 成功才自动消失;失败保留让用户看清原因
     } catch (err) {
@@ -80,8 +88,24 @@ export function MCPPanel() {
   const [toggling, setToggling] = useState(null);
   const [pluginActioning, setPluginActioning] = useState(null); // 更新/卸载进行中的 plugin.name
   const [form, setForm] = useState(null); // null | { add:true } | srv对象 (编辑)
-  const [restartHint, setRestartHint] = useState(false); // 增删改后提示需重启生效
+  const [restartHint, setRestartHint] = useState(false); // 增删改后提示生效时机
+  // 添加后自动探测:null | { name, busy:true } | { name, detail }(失败详情,含子进程 stderr)
+  const [probe, setProbe] = useState(null);
   const mounted = useRef(true);
+
+  // 新添加的 server 自动 ping 一次:失败立刻把真实原因(stderr)摆出来,不用等用户手动点测试。
+  const autoProbe = async (name) => {
+    setProbe({ name, busy: true });
+    try {
+      const r = await fetch(`/api/mcp/${encodeURIComponent(name)}/ping`);
+      const d = await r.json();
+      if (!mounted.current) return;
+      if (d.status === 'ok') setProbe(null);
+      else setProbe({ name, detail: formatPingDetail(d) });
+    } catch (err) {
+      if (mounted.current) setProbe({ name, detail: err.message });
+    }
+  };
 
   // silent=true:不显示加载态,用于后台静默刷新(拉取后端补好的在线状态)。
   // force=true:?fresh=1 绕过后端 5min 缓存,手动「刷新」按钮用 —— 否则刚 `claude mcp add`
@@ -297,6 +321,21 @@ export function MCPPanel() {
           <button onClick={() => setRestartHint(false)} className="text-amber-700/70 hover:text-amber-700">✕</button>
         </div>
       )}
+      {/* 添加后自动探测结果:进行中 / 失败(含子进程 stderr 真因),成功不打扰 */}
+      {probe?.busy && (
+        <div className="flex items-center gap-2 text-[11px] text-ink-faint bg-canvas-warm border border-canvas-deep rounded-lg px-3 py-2">
+          <Activity size={11} className="animate-pulse" />正在测试「{probe.name}」连通性…
+        </div>
+      )}
+      {probe && !probe.busy && (
+        <div className="rounded-lg border border-error/30 bg-error/5 px-3 py-2 space-y-1">
+          <div className="flex items-center justify-between">
+            <span className="text-[11px] text-error font-body font-medium">「{probe.name}」已添加,但连接测试失败</span>
+            <button onClick={() => setProbe(null)} className="text-ink-faint hover:text-ink"><X size={11} /></button>
+          </div>
+          <pre className="text-[10px] text-ink-soft font-mono whitespace-pre-wrap break-all leading-snug max-h-40 overflow-auto">{probe.detail}</pre>
+        </div>
+      )}
       {/* MCP Servers */}
       <div>
         <h3 className="text-[10px] font-medium uppercase tracking-widest text-ink-faint font-body mb-3 flex items-center gap-1.5">
@@ -312,6 +351,11 @@ export function MCPPanel() {
           <div className="space-y-2">
             {sortedServers.map((srv) => {
               const disabled = srv.enabled === false;
+              // 未连接且内置目录声明了该 server 需要的 env → 行内提示缺什么、去哪填。
+              // 列表数据只有 env 键名没有值,故按目录声明提示"可能缺"而非断言。
+              const tplEnvKeys = (!disabled && srv.status === 'disconnected')
+                ? (findBuiltinMcp(srv.name)?.env || []).map((e) => e.k)
+                : [];
               return (
                 <div
                   key={srv.name}
@@ -380,6 +424,11 @@ export function MCPPanel() {
                   {srv.env?.length > 0 && (
                     <div className="text-[10px] text-ink-faint mt-1">
                       环境变量: {srv.env.join(', ')}
+                    </div>
+                  )}
+                  {tplEnvKeys.length > 0 && (
+                    <div className="text-[10px] text-amber-700 mt-1 font-body">
+                      可能缺 {tplEnvKeys.join(' / ')},点编辑填写。
                     </div>
                   )}
                 </div>
@@ -492,7 +541,7 @@ export function MCPPanel() {
         <McpForm
           editing={form.add ? null : form}
           onClose={() => setForm(null)}
-          onSaved={() => { fetchData(); setRestartHint(true); }}
+          onSaved={(savedName, isNew) => { fetchData(); setRestartHint(true); if (isNew && savedName) autoProbe(savedName); }}
         />
       )}
 
