@@ -77,7 +77,8 @@ export function McpForm({ editing, onClose, onSaved }) {
     setTransport(t.transport);
     if (t.transport === 'stdio') { setCommandLine(t.commandLine || ''); setUrl(''); }
     else { setUrl(t.url || ''); setCommandLine(''); }
-    setEnvRows((t.env || []).map((e) => ({ k: e.k, v: '' })));
+    // 保留目录里的 hint(如「在 tavily.com 申请」):作为 value 输入框 placeholder 告诉用户去哪拿。
+    setEnvRows((t.env || []).map((e) => ({ k: e.k, v: '', hint: e.hint || '' })));
     setTplMeta({ note: t.note, needsArg: t.needsArg, repo: t.repo, docs: t.docs });
     // uvx/uv 开头的命令需要 uv;选中即检测,其余模板清掉 uv 提示。
     if (/^uvx?\s/.test(t.commandLine || '')) checkUv(); else setUvStatus('idle');
@@ -148,6 +149,9 @@ export function McpForm({ editing, onClose, onSaved }) {
   };
 
   const isStdio = transport === 'stdio';
+
+  // 模板声明的 env(带 hint)值为空 → 内联警告。不阻断保存(允许先添加稍后补填)。
+  const emptyTplEnvKeys = envRows.filter((r) => r.hint && r.k.trim() && !String(r.v || '').trim()).map((r) => r.k.trim());
 
   const save = async () => {
     setErr('');
@@ -306,11 +310,17 @@ export function McpForm({ editing, onClose, onSaved }) {
                   <input value={row.k} onChange={(e) => setEnv(i, 'k', e.target.value)} placeholder="KEY"
                     className={`${inputCls} font-mono flex-1`} />
                   <span className="text-ink-faint">=</span>
-                  <input value={row.v} onChange={(e) => setEnv(i, 'v', e.target.value)} placeholder="value"
+                  <input value={row.v} onChange={(e) => setEnv(i, 'v', e.target.value)} placeholder={row.hint || 'value'}
+                    title={row.hint || undefined}
                     className={`${inputCls} font-mono flex-1`} />
                   <button onClick={() => delEnv(i)} className="p-1 text-ink-faint hover:text-error shrink-0"><Trash2 size={13} /></button>
                 </div>
               ))}
+              {emptyTplEnvKeys.length > 0 && (
+                <div className="rounded-lg bg-amber-500/10 border border-amber-500/25 px-3 py-2 text-[11px] text-amber-700 font-body leading-snug">
+                  未填 {emptyTplEnvKeys.join('、')},该 server 可能无法连接。可先保存,稍后编辑补填。
+                </div>
+              )}
             </div>
 
             {/* 工具管理:仅编辑现有 server 时。查看该 server 暴露的工具,逐个启用/禁用。 */}
