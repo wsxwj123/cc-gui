@@ -5896,8 +5896,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                     : msg.type === 'turn'
                     ? <>
                         <TurnBubble turn={msg} onRetry={handleRetryTurn} onRetryTool={(toolCall) => handleRetryTool(msg, toolCall)} retryActive={retryActiveUuid === msg.uuid} />
-                        {/* 鉴权类错误 turn 的动作链接:打开顶栏 Provider 弹层核对 key/渠道 */}
-                        {msg.errorAction === 'provider' && (
+                        {/* 鉴权类错误 turn 的动作链接:打开顶栏 Provider 弹层核对 key/渠道。
+                            仅桌面(顶栏 ProviderSwitcher 单实例在此渲染);手机布局无该弹层,隐藏按钮避免死点。 */}
+                        {msg.errorAction === 'provider' && !mobileChrome && (
                           <div className="px-4 pb-2 -mt-1">
                             <button
                               onClick={() => window.dispatchEvent(new CustomEvent('cgui:open-provider'))}

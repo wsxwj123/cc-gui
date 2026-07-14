@@ -255,9 +255,19 @@ const MCP_CACHE_TTL_MS = 5 * 60_000;
 // ~/.claude.json 的 mtime(CLI 每次会话都写它,会杀死进程复用);选落盘文件而非内存 epoch:
 // mtime 跨 server 重启稳定,内存变量重启归零会与旧兼容键撞车误复用。
 const MCP_STAMP_FILE = join(GUI_DIR, 'mcp-config.stamp');
-function invalidateMcpCache() {
+// 只清列表/详情内存缓存,不 touch 换代戳。用于"不改变常驻进程该加载什么 MCP"的变更
+// (如 autoapprove:chat.js 权限判定时实时 readFileSync mcp-autoapprove.json,不经 query 起时定死,
+// 无需换进程;touch 戳会让聊天中途勾选"自动执行"白白冷启动 ~5s)。
+function invalidateMcpListCache() {
   mcpCache = null; mcpCacheAt = 0;
   try { invalidateDetailsCache(); } catch {}
+}
+// 增删改 MCP(含登录/登出/插件变动):清缓存 + touch 换代戳,让 chat.js 常驻进程兼容键计入其
+// mtime → 同会话下条消息自动换新进程加载新 MCP。不能直接用 ~/.claude.json 的 mtime(CLI 每次
+// 会话都写它,会杀死复用);落盘文件而非内存 epoch(mtime 跨 server 重启稳定,内存变量重启归零
+// 会与旧兼容键撞车误复用)。
+function invalidateMcpCache() {
+  invalidateMcpListCache();
   mkdir(GUI_DIR, { recursive: true })
     .then(() => writeFile(MCP_STAMP_FILE, String(Date.now()) + '\n'))
     .catch(() => {}); // fire-and-forget:戳写失败只影响"下条消息自动生效",不阻塞主流程
@@ -889,7 +899,7 @@ router.put('/mcp/:name/autoapprove', async (req, res) => {
     const { name } = req.params;
     assertSafeName(name);
     await setAutoApprove(name, !!(req.body || {}).on);
-    invalidateMcpCache();
+    invalidateMcpListCache(); // autoapprove 运行时实时读,不换进程(不 touch 换代戳)
     res.json({ ok: true, name, autoApprove: !!(req.body || {}).on });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
