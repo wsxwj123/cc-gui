@@ -1173,6 +1173,51 @@ function ProjectList() {
     }
   };
 
+  // 添加项目入口(顶部 + 按钮 / 空态主按钮 / EmptyState 经事件触发共用):
+  // Tauri 或本机浏览器走系统文件夹选择器,远程/手机落到路径输入弹窗。
+  const openAddProject = async () => {
+    let path = null;
+    // Remember where the user picked last — open the dialog at the
+    // parent of that dir so they don't have to navigate from
+    // ~/Desktop every time. Falls back to Desktop on first run.
+    const lastStart = (() => {
+      try { return localStorage.getItem('cgui-picker-last-start') || ''; } catch { return ''; }
+    })();
+    // The native folder picker (osascript `choose folder`) opens on the
+    // SERVER's Mac screen — a phone/remote client never sees it and the
+    // fetch hangs, so the "+" looks dead. Only use it when the browser is
+    // on the same machine as the server; remote/phone falls through to the
+    // path prompt below.
+    // Tauri 环境走 pickDirectory(官方 dialog 插件,进程内 NSOpenPanel,秒开);
+    // 本地浏览器回退后端 picker;远程/手机不弹本地选择器(会开在服务器屏幕、
+    // 客户端 hang),落到下方路径输入框。
+    const isLocalHost = ['localhost', '127.0.0.1', '::1'].includes(window.location.hostname);
+    if (isTauri() || (isLocalHost && !isMobile)) {
+      try {
+        const data = await pickDirectory({ prompt: '选择项目目录', startDir: lastStart || undefined });
+        if (data.path === null) return;  // user cancelled
+        path = data.path;
+      } catch {
+        setAddDialogOpen(true);
+        return;
+      }
+    }
+    if (!path) {
+      setAddDialogOpen(true);
+      return;
+    }
+    await registerProjectPath(path);
+  };
+  // 主区 EmptyState 的「添加项目」按钮经事件触达这里(该按钮渲染在另一棵子树,
+  // 拿不到本组件的弹窗/选择器状态)。ref 取最新闭包,避免陈旧 state。
+  const openAddProjectRef = useRef(openAddProject);
+  openAddProjectRef.current = openAddProject;
+  useEffect(() => {
+    const f = () => openAddProjectRef.current?.();
+    window.addEventListener('cgui:add-project', f);
+    return () => window.removeEventListener('cgui:add-project', f);
+  }, []);
+
   const handlePickHit = async (hit) => {
     const project = projects.find((p) => p.hash === hit.projectHash);
     if (project) {
@@ -1197,39 +1242,7 @@ function ProjectList() {
             项目
           </h2>
           <button
-            onClick={async () => {
-              let path = null;
-              // Remember where the user picked last — open the dialog at the
-              // parent of that dir so they don't have to navigate from
-              // ~/Desktop every time. Falls back to Desktop on first run.
-              const lastStart = (() => {
-                try { return localStorage.getItem('cgui-picker-last-start') || ''; } catch { return ''; }
-              })();
-              // The native folder picker (osascript `choose folder`) opens on the
-              // SERVER's Mac screen — a phone/remote client never sees it and the
-              // fetch hangs, so the "+" looks dead. Only use it when the browser is
-              // on the same machine as the server; remote/phone falls through to the
-              // path prompt below.
-              // Tauri 环境走 pickDirectory(官方 dialog 插件,进程内 NSOpenPanel,秒开);
-              // 本地浏览器回退后端 picker;远程/手机不弹本地选择器(会开在服务器屏幕、
-              // 客户端 hang),落到下方路径输入框。
-              const isLocalHost = ['localhost', '127.0.0.1', '::1'].includes(window.location.hostname);
-              if (isTauri() || (isLocalHost && !isMobile)) {
-                try {
-                  const data = await pickDirectory({ prompt: '选择项目目录', startDir: lastStart || undefined });
-                  if (data.path === null) return;  // user cancelled
-                  path = data.path;
-                } catch {
-                  setAddDialogOpen(true);
-                  return;
-                }
-              }
-              if (!path) {
-                setAddDialogOpen(true);
-                return;
-              }
-              await registerProjectPath(path);
-            }}
+            onClick={openAddProject}
             data-tour="add-project"
             className="p-1 hover:bg-canvas-warm rounded transition-colors"
             title="添加项目（系统文件选择器）"
@@ -1315,6 +1328,14 @@ function ProjectList() {
             <p className="text-xs text-ink-faint font-body">
               {searchQuery ? '没有匹配的项目' : hiddenOnly ? '所有项目都已隐藏' : '没有找到项目'}
             </p>
+            {!searchQuery && !hiddenOnly && (
+              <button
+                onClick={openAddProject}
+                className="mt-3 px-3 py-1.5 rounded-full bg-accent text-white text-[12px] font-body"
+              >
+                添加项目文件夹
+              </button>
+            )}
             {hiddenOnly && (
               <button
                 onClick={() => { const next = new Set(); setHidden(next); persistHidden(next); }}
@@ -2149,15 +2170,51 @@ function SessionList() {
 }
 
 // ─── Empty State ───────────────────────────────────────────────
-function EmptyState() {
+// 按是否已有项目分支:无项目给「添加项目」(否则提示"从左侧开始"而左侧也是空的,
+// 新用户没有下一步);有项目未选会话给「新建会话」。tabIndex = 所在窗格,新会话
+// 写进该窗格自身(分屏下别的窗格不动)。
+function EmptyState({ tabIndex = 0 }) {
+  const hasProject = useStore((s) => !!s.selectedProject);
+  const addProject = () => {
+    // 「添加项目」流程(系统选择器/路径弹窗)在侧栏 ProjectList 内,经事件触达;
+    // 侧栏收起时先展开,让 ProjectList 挂载后再派发。
+    const st = useStore.getState();
+    if (st.sidebarCollapsed) st.toggleSidebar();
+    if (st.selectedProject) st.setSelectedProject(null); // 侧栏可能停在会话列表
+    setTimeout(() => window.dispatchEvent(new CustomEvent('cgui:add-project')), 60);
+  };
+  const newSession = () => {
+    const st = useStore.getState();
+    const proj = st.selectedProject;
+    if (!proj) return;
+    st.setPaneSession(tabIndex, { draft: true, draftId: newDraftId(), sessionId: null, projectHash: proj.hash, projectPath: proj.path, firstPrompt: '新会话' });
+    st.setPaneMessages(tabIndex, []);
+  };
   return (
     <div className="mobile-empty-state flex-1 flex items-center justify-center glass-base m-3 rounded-2xl relative animate-glass-rise">
       <div className="text-center relative z-10">
         <div className="w-20 h-20 rounded-3xl glass-thin flex items-center justify-center mx-auto mb-6">
           <Layers size={32} className="text-accent" />
         </div>
-        <h3 className="text-[22px] font-display font-semibold text-ink mb-1.5 tracking-tight">选择一个会话</h3>
-        <p className="text-[13px] text-ink-muted font-body">从左侧项目列表开始浏览历史记录</p>
+        {hasProject ? (
+          <>
+            <h3 className="text-[22px] font-display font-semibold text-ink mb-1.5 tracking-tight">选择一个会话</h3>
+            <p className="text-[13px] text-ink-muted font-body">从左侧会话列表选一条历史记录，或直接开始新会话</p>
+            <button onClick={newSession}
+              className="mt-5 px-4 py-2 rounded-full bg-accent text-white text-[13px] font-body hover:bg-accent/90 transition-colors">
+              新建会话
+            </button>
+          </>
+        ) : (
+          <>
+            <h3 className="text-[22px] font-display font-semibold text-ink mb-1.5 tracking-tight">添加一个项目开始</h3>
+            <p className="text-[13px] text-ink-muted font-body">选择一个本地文件夹作为项目，会话将在其中进行</p>
+            <button onClick={addProject}
+              className="mt-5 px-4 py-2 rounded-full bg-accent text-white text-[13px] font-body hover:bg-accent/90 transition-colors">
+              添加项目文件夹
+            </button>
+          </>
+        )}
       </div>
     </div>
   );
@@ -5421,7 +5478,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // We only let the loading screen short-circuit the primary tab — tab 1
   // fetches with silent:true so it never sets the global flag, and tab 0
   // remains the one that owns the spinner.
-  if (!selectedSession) return <EmptyState />;
+  if (!selectedSession) return <EmptyState tabIndex={tabIndex} />;
   if (loading && tabIndex === 0) return (
     <div className="flex-1 flex items-center justify-center bg-canvas">
       <div className="flex gap-1.5">
@@ -8000,6 +8057,21 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isMobile]);
 
+  // 首次启动自动弹使用指引(仅桌面端):localStorage 无 cgui-tour-seen 标志即弹,
+  // 看完/跳过在 onClose 写标志,此后只能从顶栏问号手动打开。手机布局不弹(导览
+  // 高亮的顶栏按钮在手机上大多不渲染,逐个跳过体验差)。延迟一拍让顶栏先挂载。
+  useEffect(() => {
+    if (isMobile) return;
+    try { if (localStorage.getItem('cgui-tour-seen')) return; } catch { return; }
+    const t = setTimeout(() => setTourOpen(true), 600);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isMobile]);
+  const closeTour = useCallback(() => {
+    setTourOpen(false);
+    try { localStorage.setItem('cgui-tour-seen', '1'); } catch {}
+  }, []);
+
   // Mobile: picking a session (or starting a new chat) auto-closes the drawer so
   // the chat is revealed — matching the Claude app. selectedSession changes
   // identity on every pick; project-only changes don't touch it, so the drawer
@@ -8309,7 +8381,7 @@ export default function App() {
         isMobile={isMobile}
       />
       {LocalWidget && <LocalWidget />}
-      <GuideTour open={tourOpen} onClose={() => setTourOpen(false)} hasProject={!!selectedProject} />
+      <GuideTour open={tourOpen} onClose={closeTour} hasProject={!!selectedProject} />
       {bundleMismatch && (
         <div className="fixed top-0 inset-x-0 z-[300] bg-red-600 text-white text-[12px] font-body px-4 py-2 flex items-center justify-center gap-3 shadow-lg">
           <span>⚠️ 界面 v{bundleMismatch.bundle} 与服务端 v{bundleMismatch.server} 不一致。请依次尝试：① 完全退出 GUI 再打开（会自动换用新版服务并绕过缓存）② 仍出现则说明安装包内是旧前端，请重新下载安装</span>
