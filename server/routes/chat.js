@@ -429,6 +429,10 @@ function chatCompatKey({ workingDir, model, effort, appendSystemPrompt, promptSu
   // 禁用工具清单变更也不能复用旧进程(disallowedTools 是 query 级选项,起时定死)→ 计入 mtime。
   let disToolsMtime = 0;
   try { disToolsMtime = statSync(pathJoin(homedir(), '.claude', 'gui', 'disabled-mcp-tools.json')).mtimeMs; } catch {}
+  // MCP 配置增删改(存 ~/.claude.json)后旧进程不能复用,否则新 MCP 同会话不生效。不能直接
+  // stat ~/.claude.json(CLI 每次会话都写它=永远不复用),mcp.js 的写路径会 touch 这个戳文件。
+  let mcpStampMtime = 0;
+  try { mcpStampMtime = statSync(pathJoin(homedir(), '.claude', 'gui', 'mcp-config.stamp')).mtimeMs; } catch {}
   // 项目级 settings(.claude/settings{,.local}.json,hook/权限也可写在这)同理:终端改完
   // 项目 hook,若该项目常驻进程还活着会拿旧 hook 继续跑 → mtime 计入键让下一轮换新进程。
   let projSettingsMtime = 0;
@@ -439,7 +443,7 @@ function chatCompatKey({ workingDir, model, effort, appendSystemPrompt, promptSu
     append: (typeof appendSystemPrompt === 'string' ? appendSystemPrompt.trim() : ''),
     suggest: promptSuggestions === true,
     xdyn: excludeDynamicSystemPrompt === true ? 1 : excludeDynamicSystemPrompt === false ? 0 : 'auto',
-    gr: globalRead !== false, dirs, settingsMtime, disToolsMtime, projSettingsMtime,
+    gr: globalRead !== false, dirs, settingsMtime, disToolsMtime, projSettingsMtime, mcpStampMtime,
     budget: maxBudgetUsd || null, // 花费上限变化不能复用旧进程(query 级选项,起时定死)
   });
 }

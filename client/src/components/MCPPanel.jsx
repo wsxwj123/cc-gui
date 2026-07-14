@@ -317,7 +317,7 @@ export function MCPPanel() {
       </div>
       {restartHint && (
         <div className="flex items-start gap-2 text-[11px] text-amber-700 bg-amber-500/10 border border-amber-500/30 rounded-lg px-3 py-2">
-          <span className="flex-1">配置已保存到 claude code。MCP 改动需<b>重启正在运行的会话</b>(或新建会话)才会被 claude 加载生效。</span>
+          <span className="flex-1">配置已保存到 claude code,将在每个会话的<b>下条消息</b>自动生效,无需重启会话。</span>
           <button onClick={() => setRestartHint(false)} className="text-amber-700/70 hover:text-amber-700">✕</button>
         </div>
       )}

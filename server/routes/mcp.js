@@ -250,7 +250,18 @@ let mcpCacheAt = 0;
 // Mutations (enable/disable) invalidate explicitly via invalidateMcpCache().
 // Pass `?fresh=1` to force a refresh.
 const MCP_CACHE_TTL_MS = 5 * 60_000;
-function invalidateMcpCache() { mcpCache = null; mcpCacheAt = 0; try { invalidateDetailsCache(); } catch {} }
+// MCP 配置换代戳:每次增删改(含登录/登出/插件变动)touch 一次,chat.js 的常驻进程兼容键
+// 计入其 mtime → 同会话下条消息自动换新进程加载新 MCP,无需重启会话。不能直接用
+// ~/.claude.json 的 mtime(CLI 每次会话都写它,会杀死进程复用);选落盘文件而非内存 epoch:
+// mtime 跨 server 重启稳定,内存变量重启归零会与旧兼容键撞车误复用。
+const MCP_STAMP_FILE = join(GUI_DIR, 'mcp-config.stamp');
+function invalidateMcpCache() {
+  mcpCache = null; mcpCacheAt = 0;
+  try { invalidateDetailsCache(); } catch {}
+  mkdir(GUI_DIR, { recursive: true })
+    .then(() => writeFile(MCP_STAMP_FILE, String(Date.now()) + '\n'))
+    .catch(() => {}); // fire-and-forget:戳写失败只影响"下条消息自动生效",不阻塞主流程
+}
 
 // 直接读 ~/.claude.json 顶层 mcpServers(`claude mcp add -s user` 的真实落点)。
 // 秒回、不做健康检查 —— 保证用户加的 MCP 一定显示,即便 `claude mcp list` 的健康检查
