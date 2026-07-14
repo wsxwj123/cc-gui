@@ -499,7 +499,11 @@ router.get('/agents/:name', async (req, res) => {
     for (const path of candidates) {
       try {
         const content = await readFile(path, 'utf-8');
-        return res.json({ name: req.params.name, path, content });
+        // mtimeMs 供编辑乐观锁:前端保存时带回 expectedMtimeMs,与磁盘比对防
+        // MCP 自动同步等后台改写被静默覆盖。
+        let mtimeMs = null;
+        try { mtimeMs = (await stat(path)).mtimeMs; } catch {}
+        return res.json({ name: req.params.name, path, content, mtimeMs });
       } catch {}
     }
     res.status(404).json({ error: 'agent not found' });
@@ -508,23 +512,41 @@ router.get('/agents/:name', async (req, res) => {
   }
 });
 
-/** PUT /api/agents/:name  { content } */
+/** PUT /api/agents/:name  { content, expectedMtimeMs? }
+ * 乐观锁:带 expectedMtimeMs 时与磁盘 mtime 比对,不一致返 409 + 当前磁盘内容
+ * (典型冲突源:用户编辑期间 MCP 面板增删触发 syncMcpToAgents 后台改写同一文件)。
+ * 不带 expectedMtimeMs = 无条件覆盖(前端"强制覆盖"选项/旧客户端兼容)。 */
 router.put('/agents/:name', async (req, res) => {
   try {
     assertName(req.params.name);
-    const { content } = req.body || {};
+    const { content, expectedMtimeMs } = req.body || {};
     if (typeof content !== 'string') throw new Error('content must be a string');
     await mkdir(AGENTS_DIR, { recursive: true });
     const path = join(AGENTS_DIR, req.params.name + '.md');
     // 区分新建 vs 编辑:新建时把当前所有 MCP 同步进这个新 agent(让它一创建就能用全部 MCP);
     // 编辑时不动(尊重用户手动增删的 MCP,避免把他刚删的又加回来)。
     let isNew = false;
-    try { await stat(path); } catch { isNew = true; }
-    await writeFile(path, content);
-    if (isNew) {
-      try { await syncMcpToAgents({ add: await currentUserMcpNames(), files: [req.params.name + '.md'] }); } catch {}
+    let cur = null;
+    try { cur = await stat(path); } catch { isNew = true; }
+    if (!isNew && expectedMtimeMs != null && cur.mtimeMs !== Number(expectedMtimeMs)) {
+      let current = '';
+      try { current = await readFile(path, 'utf-8'); } catch {}
+      return res.status(409).json({ error: 'conflict', mtimeMs: cur.mtimeMs, content: current });
     }
-    res.json({ ok: true, path });
+    await writeFile(path, content);
+    let syncedContent = null;
+    if (isNew) {
+      try {
+        await syncMcpToAgents({ add: await currentUserMcpNames(), files: [req.params.name + '.md'] });
+        // 同步可能追加了 mcp__x__* → 回传改写后内容,前端据此刷新编辑区,
+        // 否则下次保存会用旧内容把同步结果抹掉。
+        const after = await readFile(path, 'utf-8');
+        if (after !== content) syncedContent = after;
+      } catch {}
+    }
+    let mtimeMs = null;
+    try { mtimeMs = (await stat(path)).mtimeMs; } catch {}
+    res.json({ ok: true, path, mtimeMs, ...(syncedContent != null ? { content: syncedContent } : {}) });
   } catch (err) {
     res.status(400).json({ error: err.message });
   }

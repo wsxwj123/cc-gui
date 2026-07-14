@@ -82,6 +82,10 @@ export function AgentsPanel() {
   const [content, setContent] = useState('');
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
+  // 编辑乐观锁:open/save 记录磁盘 mtimeMs,保存时带回,server 不一致返 409
+  // (典型:编辑期间 MCP 自动同步后台改写同一文件)。conflict = 409 返回的 {mtimeMs, content}。
+  const [fileMtime, setFileMtime] = useState(null);
+  const [conflict, setConflict] = useState(null);
   const [creating, setCreating] = useState(false);
   const [newName, setNewName] = useState('');
   // 当前 provider 的默认模型 + 可选模型,供新建 agent 时预填 model 字段。
@@ -144,22 +148,35 @@ export function AgentsPanel() {
 
   const open = async (name) => {
     setSelected(name);
+    setConflict(null);
     try {
       const res = await fetch(`/api/agents/${encodeURIComponent(name)}`);
       const d = await res.json();
       setContent(res.ok ? (d.content || '') : '');
-    } catch { setContent(''); }
+      setFileMtime(res.ok ? (d.mtimeMs ?? null) : null);
+    } catch { setContent(''); setFileMtime(null); }
   };
 
-  const save = async () => {
+  const save = async (force = false) => {
     if (!selected) return;
     setSaving(true);
     try {
       const res = await fetch(`/api/agents/${encodeURIComponent(selected)}`, {
         method: 'PUT', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ content }),
+        // 不带 expectedMtimeMs = 无条件覆盖(强制覆盖/新建场景 fileMtime 为 null)。
+        body: JSON.stringify({ content, ...(!force && fileMtime != null ? { expectedMtimeMs: fileMtime } : {}) }),
       });
-      if (res.ok) { setSaved(true); setTimeout(() => setSaved(false), 1500); fetchAgents(); }
+      if (res.status === 409) {
+        const d = await res.json().catch(() => null);
+        if (d) setConflict({ mtimeMs: d.mtimeMs ?? null, content: d.content ?? '' });
+      } else if (res.ok) {
+        const d = await res.json().catch(() => null);
+        setFileMtime(d?.mtimeMs ?? null);
+        // 新建时 server 会把当前 MCP 同步进 tools 并回传改写后内容,刷进编辑区。
+        if (typeof d?.content === 'string') setContent(d.content);
+        setConflict(null);
+        setSaved(true); setTimeout(() => setSaved(false), 1500); fetchAgents();
+      }
     } catch {}
     setSaving(false);
   };
@@ -170,7 +187,7 @@ export function AgentsPanel() {
     if (!(await confirmDialog(`删除 agent「${name}」？\n将删除 ~/.claude/agents/${name}.md，不可恢复。`, { danger: true }))) return;
     try {
       await fetch(`/api/agents/${encodeURIComponent(name)}`, { method: 'DELETE' });
-      if (selected === name) { setSelected(null); setContent(''); }
+      if (selected === name) { setSelected(null); setContent(''); setFileMtime(null); setConflict(null); }
       fetchAgents();
       if (showBuiltin) fetchBuiltin();
     } catch {}
@@ -179,6 +196,8 @@ export function AgentsPanel() {
   const createNew = async () => {
     if (!/^[a-z0-9-]{1,64}$/.test(newName)) return confirmDialog('名字只能小写字母、数字、-');
     setSelected(newName);
+    setFileMtime(null); // 新文件,保存走无条件写入
+    setConflict(null);
     setContent(`---\nname: ${newName}\ndescription: 此处填写该 agent 的功能概览,主对话据此判断何时调用它\nmodel: ${newModel || defaultModel}\ntools: Read, Edit, Write, Bash, TaskCreate, TaskUpdate, TaskList, AskUserQuestion, ExitPlanMode\n---\n\n此处填写该 agent 的系统提示词:说明其职责、处理方式与输出要求。\n`);
     setCreating(false); setNewName('');
   };
@@ -310,11 +329,24 @@ export function AgentsPanel() {
                     {editModelOpts.map((m) => <option key={m} value={m}>{m}</option>)}
                   </select>
                 )}
-                <button onClick={save} disabled={saving} className="btn-accent flex items-center gap-1 text-[11px] px-2 py-0.5">
+                <button onClick={() => save()} disabled={saving} className="btn-accent flex items-center gap-1 text-[11px] px-2 py-0.5">
                   {saved ? <Check size={11} /> : <Save size={11} />}
                   {saved ? '已存' : saving ? '…' : '保存'}
                 </button>
               </div>
+              {conflict && (
+                <div className="px-3 py-2 border-b border-amber-500/30 bg-amber-500/10 text-[10px] text-amber-700 font-body leading-snug shrink-0 space-y-1">
+                  <p>保存已中止:文件在编辑期间被修改(可能是 MCP 自动同步改写了 tools 字段),请查看差异后重试。</p>
+                  <div className="flex gap-2">
+                    <button onClick={() => { setContent(conflict.content); setFileMtime(conflict.mtimeMs); setConflict(null); }}
+                      className="px-1.5 py-0.5 rounded bg-amber-50 text-amber-700 hover:bg-amber-500/20"
+                      title="用磁盘上的最新内容替换编辑区(丢弃本次未保存的修改)">加载最新</button>
+                    <button onClick={() => save(true)}
+                      className="px-1.5 py-0.5 rounded bg-amber-50 text-amber-700 hover:bg-amber-500/20"
+                      title="用编辑区内容覆盖磁盘文件(丢弃外部改动,含 MCP 同步结果)">强制覆盖</button>
+                  </div>
+                </div>
+              )}
               {toolTokens && (
                 <div className="px-3 py-1.5 border-b border-canvas-deep bg-canvas-warm/40 flex flex-wrap items-center gap-1 shrink-0"
                   title="tools 字段解析摘要(只读)。MCP 面板增删 MCP 时会自动改写此字段">
