@@ -4483,6 +4483,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
               sawError = true;
               break;
             }
+            // 鉴权类报错(401 / api key 无效等)大概率是 provider 的 key 配错/过期,
+            // 给错误块挂「检查 Provider 设置」动作(渲染在 visibleChat 的 turn 分支)。
+            const isAuthError = /\b401\b|unauthorized|authenticat|api[ -_]?key|x-api-key/i.test(msg);
             setChatMessages((prev) => [...prev, {
               uuid: 'chat-error-' + Date.now(),
               type: 'turn',
@@ -4493,6 +4496,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
               toolCalls: [],
               blocks: [{ type: 'text', content: `❌ **${msg}**` }],
               usage: null,
+              ...(isAuthError ? { errorAction: 'provider' } : {}),
             }]);
             sawError = true;
             break;
@@ -5890,7 +5894,19 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                     : msg.type === 'btw'
                     ? <BtwBubble msg={msg} onHide={(uuid) => setChatMessages((prev) => prev.filter((m) => m.uuid !== uuid))} />
                     : msg.type === 'turn'
-                    ? <TurnBubble turn={msg} onRetry={handleRetryTurn} onRetryTool={(toolCall) => handleRetryTool(msg, toolCall)} retryActive={retryActiveUuid === msg.uuid} />
+                    ? <>
+                        <TurnBubble turn={msg} onRetry={handleRetryTurn} onRetryTool={(toolCall) => handleRetryTool(msg, toolCall)} retryActive={retryActiveUuid === msg.uuid} />
+                        {/* 鉴权类错误 turn 的动作链接:打开顶栏 Provider 弹层核对 key/渠道 */}
+                        {msg.errorAction === 'provider' && (
+                          <div className="px-4 pb-2 -mt-1">
+                            <button
+                              onClick={() => window.dispatchEvent(new CustomEvent('cgui:open-provider'))}
+                              className="px-3 py-1.5 rounded-lg border border-canvas-deep bg-canvas-warm text-[12px] text-accent font-body hover:border-accent/40 transition-colors">
+                              检查 Provider 设置
+                            </button>
+                          </div>
+                        )}
+                      </>
                     : <MessageBubble message={{ ...msg, role: msg.type }}
                         onRollback={msg.type === 'user' ? handleRollback : undefined} />}
                 </div>
@@ -6147,6 +6163,12 @@ function ProviderSwitcher() {
     const onCh = () => load();
     window.addEventListener('cgui:provider-change', onCh);
     return () => window.removeEventListener('cgui:provider-change', onCh);
+  }, []);
+  // 错误 turn 的「检查 Provider 设置」按钮经事件打开本弹层(顶栏常驻单实例)。
+  useEffect(() => {
+    const onOpen = () => setOpen(true);
+    window.addEventListener('cgui:open-provider', onOpen);
+    return () => window.removeEventListener('cgui:open-provider', onOpen);
   }, []);
 
   useEffect(() => {
