@@ -1,4 +1,5 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react';
+import { createPortal } from 'react-dom';
 import { Folder, FolderOpen, File, RefreshCw, AlertCircle, ChevronRight, ChevronDown, FileText, Image as ImageIcon, ExternalLink, Film, Pencil, Save, Undo2, Redo2, X, Check, Trash2, AtSign, MoreVertical, ListChecks, Square, CheckSquare } from 'lucide-react';
 import { useStore } from '../stores/sessionStore.js';
 import { MarkdownRenderer } from './MarkdownRenderer.jsx';
@@ -382,8 +383,10 @@ export function FileExplorerPanel() {
         )}
       </div>
 
-      {/* 自建右键菜单(Tauri webview 无原生右键):遮罩点击即关 */}
-      {ctxMenu && (
+      {/* 自建右键菜单(Tauri webview 无原生右键):遮罩点击即关。
+          portal 到 document.body 逃离面板 animate-glass-rise 残留 transform 的包含块,
+          否则 fixed inset-0 遮罩被困在窄面板内、absolute left:clientX 飞出屏幕(真机 WKWebView bug)。 */}
+      {ctxMenu && createPortal(
         <div className="fixed inset-0 z-40"
           onMouseDown={() => setCtxMenu(null)}
           onContextMenu={(e) => { e.preventDefault(); setCtxMenu(null); }}>
@@ -418,7 +421,8 @@ export function FileExplorerPanel() {
               </button>
             )}
           </div>
-        </div>
+        </div>,
+        document.body
       )}
 
       {/* Draggable splitter */}

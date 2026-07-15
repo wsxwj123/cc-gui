@@ -73,6 +73,18 @@ export function SettingsPanel() {
 
   useEffect(() => { fetchSettings(); }, []);
 
+  // 外部改 settings.json(cc switch / 手改)→ 后端 file-watcher 广播 provider-change →
+  // useWebSocket 转成 window 'cgui:provider-change' 事件 → 这里自动重拉显示,无需手点重载。
+  // 硬边界:用户正在 JSON tab 编辑草稿(dirty)时不重拉,否则吞掉未保存编辑。
+  // dirty 判据 = rawJson 与已加载 settings 的序列化不一致(JSON tab 直接改 rawJson)。
+  const dirtyRef = useRef(false);
+  dirtyRef.current = settings != null && rawJson !== JSON.stringify(settings, null, 2);
+  useEffect(() => {
+    const onExternalChange = () => { if (!dirtyRef.current) fetchSettings(); };
+    window.addEventListener('cgui:provider-change', onExternalChange);
+    return () => window.removeEventListener('cgui:provider-change', onExternalChange);
+  }, []);
+
   // 切 tab + 滚动高亮指定设置组(id + ring,80ms 等目标 tab 挂载)。
   // 顶栏「更新」跳转与下方设置搜索共用。
   const jumpToSection = (section, tabId = 'overview') => {

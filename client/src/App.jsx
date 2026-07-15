@@ -2081,9 +2081,16 @@ function SessionList() {
           >
             <div className="px-4 py-2.5 text-[11px] text-ink-faint uppercase tracking-wider font-body flex items-center justify-between border-b border-canvas-deep shrink-0">
               <span>选择 / 新建 Git Worktree</span>
-              <button onClick={() => setWorktreeOpen(false)} className="p-1 hover:bg-canvas-warm rounded">
-                <X size={12} />
-              </button>
+              <div className="flex items-center gap-1">
+                {/* 刷新:重跑 openWorktreePicker(它已 setWorktreeList(null)+重拉),看到别处新建的 worktree */}
+                <button onClick={openWorktreePicker} title="刷新列表"
+                  className="p-1 hover:bg-canvas-warm rounded" disabled={worktreeList === null}>
+                  <RefreshCw size={12} className={worktreeList === null ? 'animate-spin' : ''} />
+                </button>
+                <button onClick={() => setWorktreeOpen(false)} className="p-1 hover:bg-canvas-warm rounded">
+                  <X size={12} />
+                </button>
+              </div>
             </div>
             <div className="flex-1 overflow-y-auto p-2">
               {worktreeList === null ? (
