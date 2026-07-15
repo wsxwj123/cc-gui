@@ -144,14 +144,17 @@ export function PreviewBody({ language, mode, code, debounced, fullscreen, ifram
   );
 }
 
-export function ArtifactPreview({ lang, code, coexist = false }) {
+export function ArtifactPreview({ lang, code, coexist = false, dockKey }) {
   const language = normLang(lang);
   const [mode, setMode] = useState('preview');
   const [fullscreen, setFullscreen] = useState(false);
   const debounced = useDebounced(code, 300);
   // #3 稳定身份:标识"这个内联块"是否正被停靠(dock 单例带回同一 artifactId)。
-  // 若流式期间父列表重排使本组件卸载重挂,useId 会变 → 断链(RESEARCH 备选 B 兜底);先按 A 实测。
-  const artifactId = useId();
+  // 优先用调用链透传的 dockKey(消息/turn 稳定前缀 + 代码块偏移):流式全程不变、组件重挂载
+  // 也不变 → 消除"重挂 useId 变→断链回弹→dock 冻结"。dockKey 缺失(coexist/文件预览等非流式
+  // 路径)时回退 useId,那些路径不流式,不受此 bug 影响。useId 恒调用(不违反 hooks 规则)。
+  const autoId = useId();
+  const artifactId = dockKey || autoId;
   const isDocked = useStore((s) => s.artifactDock?.artifactId === artifactId);
   const foldInline = isDocked && !coexist; // 会话内代码块停靠才折叠;文件浏览器停靠(coexist)不折叠
 

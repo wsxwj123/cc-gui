@@ -425,7 +425,7 @@ export function MessageBubble({ message, onRollback, onFork }) {
             </div>
           )}
 
-          {message.text && <MarkdownRenderer content={message.text} />}
+          {message.text && <MarkdownRenderer content={message.text} dockKeyPrefix={message.uuid} />}
 
           {message.toolCalls?.length > 0 && (
             <div className="mt-2">

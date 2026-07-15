@@ -8,6 +8,7 @@ import { Copy, Check } from 'lucide-react';
 import { copyText } from '../utils/clipboard.js';
 import { openExternalUrl } from '../utils/openExternal.js';
 import { ArtifactPreview, isPreviewable } from './ArtifactPreview.jsx';
+import { dockKeyFor } from '../utils/artifactDock.js';
 
 function CopyButton({ text }) {
   const [copied, setCopied] = useState(false);
@@ -56,6 +57,36 @@ function CodeBlock({ lang, code }) {
   );
 }
 
+// 围栏代码渲染。抽成函数以便注入 dockKeyPrefix(#3 稳定停靠身份的前缀);node 由
+// react-markdown 透传(passNode),node.position.start.offset 是本块在源文本中的起始偏移。
+function renderCode({ children, className, node, dockKeyPrefix, ...props }) {
+  const codeStr = String(children).replace(/\n$/, '');
+  // 块级判定:有 language-xxx 类名(带语言的围栏),或内容含换行。
+  // 行内代码按 markdown 定义恒为单行,故"含换行"必是围栏代码块 —— 这一条专门兜住
+  // **没标语言的围栏块**(纯 ``` ),否则它无 language- 类名会被误当行内,多行被压成
+  // 一段"段落式"橙色等宽文字(用户截图的根因)。
+  const isBlock = className?.includes('language-') || codeStr.includes('\n');
+  const lang = className?.replace('language-', '') || '';
+
+  if (isBlock) {
+    // html/svg/mermaid 代码块给「代码/预览」切换;其余语言走普通代码块。
+    if (isPreviewable(lang)) {
+      const dockKey = dockKeyFor(dockKeyPrefix, node?.position?.start?.offset);
+      return <ArtifactPreview lang={lang} code={codeStr} dockKey={dockKey} />;
+    }
+    return <CodeBlock lang={lang} code={codeStr} />;
+  }
+
+  return (
+    <code
+      className="bg-canvas-warm border border-canvas-deep px-1.5 py-0.5 rounded text-[0.88em] font-mono text-accent"
+      {...props}
+    >
+      {children}
+    </code>
+  );
+}
+
 const markdownComponents = {
   // ── Headings ──────────────────────────────────────────────────
   h1: ({ children }) => (
@@ -90,30 +121,8 @@ const markdownComponents = {
   ),
 
   // ── Code ──────────────────────────────────────────────────────
-  code: ({ children, className, ...props }) => {
-    const codeStr = String(children).replace(/\n$/, '');
-    // 块级判定:有 language-xxx 类名(带语言的围栏),或内容含换行。
-    // 行内代码按 markdown 定义恒为单行,故"含换行"必是围栏代码块 —— 这一条专门兜住
-    // **没标语言的围栏块**(纯 ``` ),否则它无 language- 类名会被误当行内,多行被压成
-    // 一段"段落式"橙色等宽文字(用户截图的根因)。
-    const isBlock = className?.includes('language-') || codeStr.includes('\n');
-    const lang = className?.replace('language-', '') || '';
-
-    if (isBlock) {
-      // html/svg/mermaid 代码块给「代码/预览」切换;其余语言走普通代码块。
-      if (isPreviewable(lang)) return <ArtifactPreview lang={lang} code={codeStr} />;
-      return <CodeBlock lang={lang} code={codeStr} />;
-    }
-
-    return (
-      <code
-        className="bg-canvas-warm border border-canvas-deep px-1.5 py-0.5 rounded text-[0.88em] font-mono text-accent"
-        {...props}
-      >
-        {children}
-      </code>
-    );
-  },
+  // 无 dockKeyPrefix 版(默认);MarkdownRenderer 有前缀时在 useMemo 里覆盖注入。
+  code: (props) => renderCode(props),
 
   // ── Pre (handled by code block above) ─────────────────────────
   pre: ({ children }) => <>{children}</>,
@@ -244,10 +253,13 @@ function wrapSpacedImageUrls(md) {
   });
 }
 
-export function MarkdownRenderer({ content, basePath }) {
-  // basePath 变化时才重建 components,避免每次渲染都生成新 img 组件。
+export function MarkdownRenderer({ content, basePath, dockKeyPrefix }) {
+  // basePath/dockKeyPrefix 变化时才重建 components,避免每次渲染都生成新组件。
+  // dockKeyPrefix 在流式全程稳定(turn.uuid 恒为 'streaming' 哨兵 + 块序号),故不会抖动。
   const components = useMemo(() => ({
     ...markdownComponents,
+    // #3 注入 dockKeyPrefix,让可预览代码块拿到稳定停靠身份。
+    code: (props) => renderCode({ ...props, dockKeyPrefix }),
     img: ({ src, alt, title }) => (
       <img
         src={resolveImageSrc(src, basePath)}
@@ -257,7 +269,7 @@ export function MarkdownRenderer({ content, basePath }) {
         className="max-w-full h-auto my-3 rounded border border-canvas-deep"
       />
     ),
-  }), [basePath]);
+  }), [basePath, dockKeyPrefix]);
   // 仅文件预览(有 basePath)才预处理空格图片 URL,聊天气泡保持原文不动。
   const text = useMemo(() => (basePath ? wrapSpacedImageUrls(content) : content), [content, basePath]);
   return (

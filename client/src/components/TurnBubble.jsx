@@ -555,7 +555,7 @@ function TurnBubbleInner({ turn, onRetry, onRetryTool, onFork, retryActive }) {
                 renderBlocks.forEach((b, i) => {
                   if (b.type === 'text' && b.content) {
                     flushBucket(i);
-                    out.push(<MarkdownRenderer key={`b-${i}`} content={b.content} />);
+                    out.push(<MarkdownRenderer key={`b-${i}`} content={b.content} dockKeyPrefix={`${turn.uuid}:${i}`} />);
                     return;
                   }
                   // 聊天模式(未展开):只收起工具/子代理/skill,思考过程照常走下面的折叠块渲染。
@@ -679,7 +679,7 @@ function TurnBubbleInner({ turn, onRetry, onRetryTool, onFork, retryActive }) {
                   )}
                 </div>
               )}
-              {fullText && <MarkdownRenderer content={fullText} />}
+              {fullText && <MarkdownRenderer content={fullText} dockKeyPrefix={turn.uuid} />}
               {/* 任务清单只走输入框上方常驻面板,legacy 路径同样不再内联渲染(见上)。 */}
               {!(chatMode && !chatExpanded) && hasInlineCalls && (
                 <div className="mt-2 space-y-2">
