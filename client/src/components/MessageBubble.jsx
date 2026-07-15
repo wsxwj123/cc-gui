@@ -89,6 +89,7 @@ function UserAvatar() {
 import { ModelBadge, ProviderAvatar } from './ModelBadge.jsx';
 import { ToolCallCard } from './ToolCallCard.jsx';
 import { MarkdownRenderer } from './MarkdownRenderer.jsx';
+import { thinkingLabel } from '../utils/streamStatus.js';
 
 // Per-message rollback menu. Shows three choices on click:
 //   - rollback message + later replies only (chat trim)
@@ -401,9 +402,9 @@ export function MessageBubble({ message, onRollback, onFork }) {
                 onClick={() => setShowThinking(!showThinking)}
                 className="flex items-center gap-1.5 text-[11px] text-ink-faint hover:text-ink-muted transition-colors font-body"
               >
-                <Brain size={12} />
-                <span>思考过程</span>
-                <span className="text-[10px]">{showThinking ? '▾' : '▸'}</span>
+                <Brain size={12} className="shrink-0" />
+                <span className="truncate">{thinkingLabel(message.thinking)}</span>
+                <span className="text-[10px] shrink-0">{showThinking ? '▾' : '▸'}</span>
               </button>
               {showThinking && (
                 <div className="thinking-block mt-2 p-4 rounded-lg text-xs text-ink-muted whitespace-pre-wrap max-h-64 overflow-y-auto font-body leading-relaxed">
