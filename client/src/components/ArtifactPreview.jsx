@@ -122,13 +122,47 @@ export function MermaidView({ code }) {
   );
 }
 
+// 长代码折叠:首 N 行 + "展开剩余/收起"(与 MarkdownRenderer 的 CodeBlock 同一套逻辑,
+// 抽此共用组件避免两处漂移)。className 传 <pre> 的完整样式(含深色底/边框);末行圆角由
+// collapsible 决定:可折叠时底部平接 toggle 按钮,不可折叠时收 rounded-b-lg。
+export function CollapsibleCode({ code, className = '', collapseAt = 5 }) {
+  const lines = code.split('\n');
+  const collapsible = lines.length > collapseAt;
+  const [expanded, setExpanded] = useState(false);
+  const shown = collapsible && !expanded ? lines.slice(0, collapseAt).join('\n') : code;
+  return (
+    <>
+      <pre className={`${className} ${collapsible ? '' : 'rounded-b-lg'}`}>
+        <code>{shown}</code>
+      </pre>
+      {collapsible && (
+        <button
+          onClick={() => setExpanded((e) => !e)}
+          className="w-full text-[11px] font-mono text-[#9a8e78] hover:text-[#cabba0] bg-[#2b2722] border border-[#3a342b] border-t-0 rounded-b-lg py-1 transition-colors"
+        >
+          {expanded ? '收起' : `展开剩余 ${lines.length - collapseAt} 行 ▾`}
+        </button>
+      )}
+    </>
+  );
+}
+
 // 渲染预览主体(代码/mermaid/html-iframe)。fullscreen 时 iframe 撑满高度,内联时固定 400px。
 export function PreviewBody({ language, mode, code, debounced, fullscreen, iframeKey }) {
   if (mode === 'code') {
+    // 全屏有纵向空间,保持 h-full 滚动;内联(会话内)长代码折叠首 5 行,复用 CollapsibleCode。
+    if (fullscreen) {
+      return (
+        <pre className="cgui-dark-select bg-[#211e19] p-4 overflow-auto text-[13px] leading-relaxed font-mono text-[#e8e2d6] h-full">
+          <code>{code}</code>
+        </pre>
+      );
+    }
     return (
-      <pre className={`cgui-dark-select bg-[#211e19] p-4 overflow-auto text-[13px] leading-relaxed font-mono text-[#e8e2d6] ${fullscreen ? 'h-full' : 'max-h-96'}`}>
-        <code>{code}</code>
-      </pre>
+      <CollapsibleCode
+        code={code}
+        className="cgui-dark-select bg-[#211e19] p-4 overflow-x-auto text-[13px] leading-relaxed font-mono text-[#e8e2d6]"
+      />
     );
   }
   if (language === 'mermaid') return <MermaidView code={debounced} />;
