@@ -214,14 +214,16 @@ export function ArtifactPreview({ lang, code, coexist = false, dockKey }) {
     wasFoldRef.current = foldInline;
   }, [foldInline]);
 
-  // 全屏时按 Esc 关闭 + 锁 body 滚动。
+  // 全屏时按 Esc 关闭 + 锁 body 滚动。capture 阶段监听(对齐 ImageLightbox),先于冒泡的上层 Esc。
+  // 注意:沙箱 iframe(无 allow-same-origin)会吞掉焦点在内时的 Esc,故真正的兜底是全屏浮层里
+  // 视口锚定的关闭按钮,Esc 只锦上添花。
   useEffect(() => {
     if (!fullscreen) return;
     const onKey = (e) => { if (e.key === 'Escape') setFullscreen(false); };
-    window.addEventListener('keydown', onKey);
+    window.addEventListener('keydown', onKey, true);
     const prev = document.body.style.overflow;
     document.body.style.overflow = 'hidden';
-    return () => { window.removeEventListener('keydown', onKey); document.body.style.overflow = prev; };
+    return () => { window.removeEventListener('keydown', onKey, true); document.body.style.overflow = prev; };
   }, [fullscreen]);
 
   const tabBtn = (active) =>
@@ -296,8 +298,17 @@ export function ArtifactPreview({ lang, code, coexist = false, dockKey }) {
           className="fixed inset-0 z-[200] flex items-center justify-center bg-black/70 p-4"
           onClick={() => setFullscreen(false)}
         >
+          {/* 视口锚定关闭键:锚在背景层(非卡片内),任何缩放/尺寸算错都留在视口右上角。
+              WebView2 下 vw/vh 不随 --ui-zoom 折算,裸 92vh 会把卡片顶栏(含关闭键)顶出屏幕 → 此为真兜底。 */}
+          <button
+            onClick={(e) => { e.stopPropagation(); setFullscreen(false); }}
+            title="退出全屏 (Esc)"
+            className="absolute top-4 right-4 z-[210] w-9 h-9 rounded-lg bg-white/10 hover:bg-white/20 text-white flex items-center justify-center"
+          >
+            <X size={16} />
+          </button>
           <div
-            className="flex flex-col w-[92vw] h-[92vh] rounded-lg border border-[#3a342b] overflow-hidden shadow-2xl"
+            className="flex flex-col w-[92%] h-[92%] rounded-lg border border-[#3a342b] overflow-hidden shadow-2xl"
             onClick={(e) => e.stopPropagation()}
           >
             {toolbar(true)}
@@ -327,14 +338,14 @@ export function ArtifactDock() {
   const language = normLang(artifactDock?.lang);
   const debounced = useDebounced(code, 300);
 
-  // 全屏时按 Esc 关闭 + 锁 body 滚动(与 ArtifactPreview 全屏一致)。
+  // 全屏时按 Esc 关闭 + 锁 body 滚动(与 ArtifactPreview 全屏一致,capture 阶段)。
   useEffect(() => {
     if (!fullscreen) return;
     const onKey = (e) => { if (e.key === 'Escape') setFullscreen(false); };
-    window.addEventListener('keydown', onKey);
+    window.addEventListener('keydown', onKey, true);
     const prev = document.body.style.overflow;
     document.body.style.overflow = 'hidden';
-    return () => { window.removeEventListener('keydown', onKey); document.body.style.overflow = prev; };
+    return () => { window.removeEventListener('keydown', onKey, true); document.body.style.overflow = prev; };
   }, [fullscreen]);
 
   if (!artifactDock) return null;
@@ -403,8 +414,16 @@ export function ArtifactDock() {
           className="fixed inset-0 z-[200] flex items-center justify-center bg-black/70 p-4"
           onClick={() => setFullscreen(false)}
         >
+          {/* 视口锚定关闭键:锚在背景层(非卡片内),WebView2 缩放算错时仍在视口右上角可点(见 ArtifactPreview 同注)。 */}
+          <button
+            onClick={(e) => { e.stopPropagation(); setFullscreen(false); }}
+            title="退出全屏 (Esc)"
+            className="absolute top-4 right-4 z-[210] w-9 h-9 rounded-lg bg-white/10 hover:bg-white/20 text-white flex items-center justify-center"
+          >
+            <X size={16} />
+          </button>
           <div
-            className="flex flex-col w-[92vw] h-[92vh] rounded-lg border border-[#3a342b] overflow-hidden shadow-2xl"
+            className="flex flex-col w-[92%] h-[92%] rounded-lg border border-[#3a342b] overflow-hidden shadow-2xl"
             onClick={(e) => e.stopPropagation()}
           >
             {toolbar(true)}
