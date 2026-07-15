@@ -36,6 +36,7 @@ const SETTINGS_INDEX = [
   { id: 'set-close-behavior', tab: 'overview', title: '关闭窗口行为', keys: '关闭 最小化 退出 窗口' },
   { id: 'set-persistent-chat', tab: 'overview', title: '会话常驻进程', keys: '常驻 复用 冷启动 进程 persistent 缓存' },
   { id: 'set-prompt-suggestions', tab: 'overview', title: '输入预测', keys: '预测 建议 suggestion 输入' },
+  { id: 'set-agent-teams', tab: 'overview', title: '队友协作(实验)', keys: '队友 协作 teams teammate 实验 agent' },
   { id: 'set-max-budget', tab: 'overview', title: '对话花费上限', keys: '花费 预算 budget 成本 上限 美元' },
   { id: 'set-cache-opt', tab: 'overview', title: '缓存优化', keys: '缓存 cache 前缀 动态 系统提示' },
   { id: 'set-auto-compact', tab: 'overview', title: '自动压缩窗口', keys: '压缩 compact token 上下文 窗口' },
@@ -1457,6 +1458,26 @@ function PromptSuggestionsToggle() {
   );
 }
 
+// 实验性 agent teams:开启后主控可派真队友(每个队友是独立完整 claude 实例,独立计费,
+// token 随队友数增加)。关闭时"派队友"只会得到普通子代理。默认关。
+function AgentTeamsToggle() {
+  const on = useStore((s) => s.agentTeams);
+  const setOn = useStore((s) => s.setAgentTeams);
+  return (
+    <div className="bg-canvas-warm border border-canvas-deep rounded-lg px-3 py-2.5 flex items-center gap-3">
+      <div className="min-w-0 flex-1">
+        <div className="text-xs text-ink font-body font-medium flex items-center gap-1.5">队友协作(实验)<EffectBadge level="immediate" /></div>
+        <div className="text-[10.5px] text-ink-faint font-body">启用实验性 agent teams。开启后主控可派出真队友，每个队友是独立完整实例、独立计费，token 随队友数量增加。关闭时"派队友"仅得到普通子代理</div>
+      </div>
+      <button onClick={() => setOn(!on)}
+        className={`shrink-0 w-9 h-5 rounded-full transition-colors relative ${on ? 'bg-accent' : 'bg-ink-faint/30'}`}
+        title={on ? '已开启' : '已关闭'}>
+        <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-all ${on ? 'left-[18px]' : 'left-0.5'}`} />
+      </button>
+    </div>
+  );
+}
+
 function ExcludeDynamicPromptToggle() {
   const val = useStore((s) => s.excludeDynamicSystemPrompt); // 'auto' | true | false
   const setVal = useStore((s) => s.setExcludeDynamicSystemPrompt);
@@ -1676,6 +1697,7 @@ function OverviewTab({ settings, onSave, onEnvPatch, saving }) {
       <div id="set-close-behavior"><CloseBehaviorPicker /></div>
       <div id="set-persistent-chat"><PersistentChatToggle /></div>
       <div id="set-prompt-suggestions"><PromptSuggestionsToggle /></div>
+      <div id="set-agent-teams"><AgentTeamsToggle /></div>
       <div id="set-max-budget"><MaxBudgetInput /></div>
       <div id="set-cache-opt"><ExcludeDynamicPromptToggle /></div>
       <div id="set-auto-compact"><AutoCompactWindowSelect settings={settings} onSave={onSave} saving={saving} /></div>

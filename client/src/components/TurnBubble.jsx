@@ -17,7 +17,7 @@ import { computeCost, formatCost } from '../utils/pricing.js';
 import { copyText } from '../utils/clipboard.js';
 import { useStore } from '../stores/sessionStore.js';
 import { TASK_TOOL_NAMES, rebuildTodosFromTaskCalls } from '../utils/todos.js';
-import { formatInputPreview, thinkingLabel, streamStatusText } from '../utils/streamStatus.js';
+import { formatInputPreview, thinkingLabel, groupCoworkBlocks, activeGroupKey } from '../utils/streamStatus.js';
 
 // Tools that get their own bespoke inline card (rendered in chronological order
 // inside the turn). Anything not in this set falls through to ToolCallsGroup,
@@ -77,6 +77,7 @@ function InlineToolCard({ toolCall, onRetryTool }) {
 }
 
 // 给 SubagentView 复用:子代理工具调用本应与母会话同样式(用户报告)。
+// CoworkBlocks:母/子共用的有序 blocks 渲染(§1.5 硬约束,单一渲染路径)。
 export { InlineToolCard, renderRichToolCard, ToolCallsGroup };
 
 // Returns the rich card React element for a tool, or null when no
@@ -367,6 +368,192 @@ function ToolCallsGroup({ toolCalls, onRetryTool }) {
   );
 }
 
+// ─── Cowork WorkGroup (一段正文之前的思考+工具打包折叠)──────────
+// 折叠内部按时序混排:思考段直接展开为可见文本(流式随流滚),工具卡复用
+// renderRichToolCard/ToolCallRow。活跃段默认展开随流刷新,正文落地后收起。
+function WorkGroup({ items, expanded, onToggle, onRetryTool }) {
+  const toolN = items.reduce((n, b) => n + (b.type === 'tool_use' ? 1 : 0), 0);
+  const hasThinking = items.some((b) => b.type === 'thinking');
+  const parts = [];
+  if (hasThinking) parts.push('思考');
+  if (toolN > 0) parts.push(`${toolN} 次工具调用`);
+  const summary = parts.join(' · ') || '工作过程';
+  return (
+    <div className="border-l-2 border-canvas-deep/40">
+      <button
+        onClick={onToggle}
+        className="w-full flex items-center gap-2 pl-3 pr-3 py-1.5 hover:bg-canvas-warm/40 rounded-r-md transition-colors text-left"
+      >
+        {expanded
+          ? <ChevronDown size={13} className="text-ink-faint shrink-0" />
+          : <ChevronRight size={13} className="text-ink-faint shrink-0" />}
+        {hasThinking
+          ? <Brain size={13} className="text-ink-muted shrink-0" />
+          : <Wrench size={13} className="text-ink-muted shrink-0" />}
+        <span className="text-xs text-ink-soft font-body">{summary}</span>
+      </button>
+      {expanded && (
+        <div className="pl-3 pr-2 pt-1 pb-2 space-y-2 animate-fade-in">
+          {items.map((b, i) => {
+            if (b.type === 'thinking') {
+              return (
+                <div key={`th-${i}`} className="thinking-block p-3 rounded-lg text-xs text-ink-muted whitespace-pre-wrap font-body leading-relaxed">
+                  {b.content}
+                </div>
+              );
+            }
+            const tc = b.toolCall;
+            const rich = renderRichToolCard(tc);
+            return rich
+              ? <ToolCallWithRetry key={tc.id || `t-${i}`} toolCall={tc} onRetryTool={onRetryTool}>{rich}</ToolCallWithRetry>
+              : <ToolCallRow key={tc.id || `t-${i}`} toolCall={tc} onRetryTool={onRetryTool} />;
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// 聊天模式的思考小折叠(受控展开,WKWebView <summary> 坑规避)。
+function ThinkingFold({ content, open, onToggle }) {
+  return (
+    <div className="mb-1">
+      <button
+        onClick={onToggle}
+        className="flex items-center gap-1.5 text-[11px] text-ink-faint hover:text-ink-muted cursor-pointer font-body w-full text-left"
+      >
+        <ChevronRight size={11} className={`transition-transform shrink-0 ${open ? 'rotate-90' : ''}`} />
+        <Brain size={12} className="shrink-0" />
+        <span className="truncate">{thinkingLabel(content)}</span>
+      </button>
+      {open && (
+        <div className="thinking-block mt-2 p-4 rounded-lg text-xs text-ink-muted whitespace-pre-wrap max-h-64 overflow-y-auto font-body leading-relaxed">
+          {content}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── CoworkBlocks:母会话 + 子代理共用的有序 blocks 渲染(单一渲染路径)──
+// 非聊天模式 → cowork 分组折叠(WorkGroup);聊天模式 → 维持现状(思考小折叠 +
+// 工具折成"执行了 N 步操作"一行)。Task/Skill/技能文档独立成段(折叠外醒目渲染)。
+// 折叠展开态 = 用户手动覆盖 ?? 是否活跃段(活跃段随流实时展开,正文落地自动收起)。
+export function CoworkBlocks({
+  blocks, isLive = false, onRetryTool,
+  dockKeyPrefix = 'blocks', trailing = null,
+  chatMode = false, chatExpanded = false, chatFoldBar = null, chatUnfoldBar = null,
+}) {
+  const [override, setOverride] = useState(() => new Map());       // group key → 用户设定展开态
+  const [openThinking, setOpenThinking] = useState(() => new Set()); // 聊天模式思考小折叠(按 block index)
+  const list = Array.isArray(blocks) ? blocks : [];
+
+  // 聊天模式:维持现状 —— 思考小折叠 + 工具折成"执行了 N 步操作"一行,不做 cowork 分组
+  // (按原始 block 顺序逐块渲染,保持思考/工具的交错顺序,不重排)。
+  if (chatMode) {
+    const out = [];
+    let bucket = [];
+    let hiddenTools = 0;
+    const flushBucket = (keyHint) => {
+      if (bucket.length > 0) { out.push(<ToolCallsGroup key={`bucket-${keyHint}`} toolCalls={bucket} onRetryTool={onRetryTool} />); bucket = []; }
+    };
+    list.forEach((b, i) => {
+      if (b.type === 'text' && b.content) {
+        flushBucket(i);
+        out.push(<MarkdownRenderer key={`b-${i}`} content={b.content} dockKeyPrefix={`${dockKeyPrefix}:${i}`} />);
+        return;
+      }
+      // 未展开:收起工具/子代理/skill(思考照常显示,清单不计)。
+      if (!chatExpanded && b.type === 'tool_use' && b.toolCall) {
+        if (!TASK_TOOL_NAMES.has(b.toolCall.name)) hiddenTools++;
+        return;
+      }
+      if (b.type === 'thinking' && b.content) {
+        flushBucket(i);
+        out.push(<ThinkingFold key={`b-${i}`} content={b.content} open={openThinking.has(i)}
+          onToggle={() => setOpenThinking((prev) => { const n = new Set(prev); n.has(i) ? n.delete(i) : n.add(i); return n; })} />);
+        return;
+      }
+      if (b.type === 'tool_use' && b.toolCall) {
+        if (TASK_TOOL_NAMES.has(b.toolCall.name)) { flushBucket(i); return; }
+        if (b.toolCall.name === 'Skill') {
+          const skillOf = (tc) => tc?.input?.skill || tc?.input?.name || tc?.name;
+          const sameSkill = (blk) => blk?.type === 'tool_use' && blk.toolCall?.name === 'Skill' && skillOf(blk.toolCall) === skillOf(b.toolCall);
+          if (sameSkill(list[i - 1])) return;
+          const calls = [b.toolCall];
+          for (let j = i + 1; j < list.length && sameSkill(list[j]); j++) calls.push(list[j].toolCall);
+          flushBucket(i);
+          const latest = calls[calls.length - 1];
+          out.push(<ToolCallWithRetry key={`b-${i}`} toolCall={latest} onRetryTool={onRetryTool} hoverOnly><SkillCard toolCall={latest} calls={calls} /></ToolCallWithRetry>);
+          return;
+        }
+        const skillDocName = getSkillDocReadName(b.toolCall);
+        if (skillDocName) {
+          flushBucket(i);
+          out.push(<ToolCallWithRetry key={`b-${i}`} toolCall={b.toolCall} onRetryTool={onRetryTool} hoverOnly><SkillCard toolCall={b.toolCall} nameOverride={skillDocName} subLabel="读取技能文档" /></ToolCallWithRetry>);
+          return;
+        }
+        if (b.toolCall.name === 'Task' || b.toolCall.name === 'Agent') {
+          flushBucket(i);
+          out.push(<ToolCallWithRetry key={`b-${i}`} toolCall={b.toolCall} onRetryTool={onRetryTool} hoverOnly><TaskCard toolCall={b.toolCall} /></ToolCallWithRetry>);
+          return;
+        }
+        bucket.push(b.toolCall);
+      }
+    });
+    flushBucket('end');
+    if (!chatExpanded && hiddenTools > 0 && chatFoldBar) out.push(chatFoldBar(`执行了 ${hiddenTools} 步操作`));
+    if (chatExpanded && chatUnfoldBar && list.some((b) => b.type === 'tool_use' && b.toolCall && !TASK_TOOL_NAMES.has(b.toolCall.name))) out.push(chatUnfoldBar);
+    return <div className="space-y-2">{out}{trailing}</div>;
+  }
+
+  // 非聊天模式:cowork 分组折叠。每段正文前连续的思考+通用工具打包成一个 WorkGroup。
+  const segments = groupCoworkBlocks(list, { getSkillDocReadName });
+  const activeKey = activeGroupKey(segments, isLive);
+  const out = segments.map((seg) => {
+    switch (seg.kind) {
+      case 'text':
+        return <MarkdownRenderer key={`t-${seg.key}`} content={seg.content} dockKeyPrefix={`${dockKeyPrefix}:${seg.index}`} />;
+      case 'task':
+        return (
+          <ToolCallWithRetry key={`k-${seg.key}`} toolCall={seg.toolCall} onRetryTool={onRetryTool} hoverOnly>
+            <TaskCard toolCall={seg.toolCall} />
+          </ToolCallWithRetry>
+        );
+      case 'skill': {
+        const latest = seg.calls[seg.calls.length - 1];
+        return (
+          <ToolCallWithRetry key={`k-${seg.key}`} toolCall={latest} onRetryTool={onRetryTool} hoverOnly>
+            <SkillCard toolCall={latest} calls={seg.calls} />
+          </ToolCallWithRetry>
+        );
+      }
+      case 'skilldoc':
+        return (
+          <ToolCallWithRetry key={`k-${seg.key}`} toolCall={seg.toolCall} onRetryTool={onRetryTool} hoverOnly>
+            <SkillCard toolCall={seg.toolCall} nameOverride={seg.name} subLabel="读取技能文档" />
+          </ToolCallWithRetry>
+        );
+      case 'group': {
+        const expanded = override.has(seg.key) ? override.get(seg.key) : (seg.key === activeKey);
+        return (
+          <WorkGroup
+            key={`wg-${seg.key}`}
+            items={seg.items}
+            expanded={expanded}
+            onToggle={() => setOverride((p) => { const n = new Map(p); n.set(seg.key, !expanded); return n; })}
+            onRetryTool={onRetryTool}
+          />
+        );
+      }
+      default:
+        return null;
+    }
+  });
+
+  return <div className="space-y-2">{out}{trailing}</div>;
+}
+
 // ─── Usage Display ─────────────────────────────────────────────
 function UsageDisplay({ usage, model, costUsd }) {
   if (!usage) return null;
@@ -420,9 +607,6 @@ function UsageDisplay({ usage, model, costUsd }) {
 // turn streams into separate state, so memo lets the old turns skip re-render.
 function TurnBubbleInner({ turn, onRetry, onRetryTool, onFork, retryActive }) {
   const [showThinking, setShowThinking] = useState(false);
-  // WKWebView 坑:<summary> 的 display 一旦被 flex/grid/block 覆盖(非默认 list-item),
-  // WebKit 就不再把它当披露控件,点了不切换 <details> open。改用受控展开 Set(按 block i)。
-  const [openThinking, setOpenThinking] = useState(() => new Set());
   const chatMode = useStore((s) => s.chatMode);
   const [chatExpanded, setChatExpanded] = useState(false);
   // 聊天模式:未展开时把思考/工具/子代理/skill 折叠成一行"思考并执行了 N 步操作 ›",
@@ -533,141 +717,36 @@ function TurnBubbleInner({ turn, onRetry, onRetryTool, onFork, retryActive }) {
               text → [round 2 tools] → … instead of one card per tool. The
               user can expand the round bar to see each tool's collapsed card,
               then expand individual cards for details. */}
-          {hasOrderedBlocks ? (
-            <div className="space-y-2">
-              {(() => {
-                const out = [];
-                let bucket = [];
-                let hiddenTools = 0;         // 聊天模式:折叠的工具/子代理/skill 步数(思考照常显示,清单不计)
-                const flushBucket = (keyHint) => {
-                  if (bucket.length > 0) {
-                    out.push(<ToolCallsGroup key={`bucket-${keyHint}`} toolCalls={bucket} onRetryTool={onRetryTool} />);
-                    bucket = [];
-                  }
-                };
-                // "重做此工具"乐观回退:截断到被点工具调用之前,该工具及之后不再渲染,
-                // 并在原位显示"正在重做此工具…"。服务端 trim+refetch 后此标记消失,
-                // 真正的重跑以流式气泡出现在同一位置。
-                const trimId = turn._retryTrimToolId;
-                let renderBlocks = turn.blocks;
-                let showRetrying = false;
-                if (trimId) {
-                  const cut = turn.blocks.findIndex((b) => b.type === 'tool_use' && b.toolCall?.id === trimId);
-                  if (cut >= 0) { renderBlocks = turn.blocks.slice(0, cut); showRetrying = true; }
-                }
-                renderBlocks.forEach((b, i) => {
-                  if (b.type === 'text' && b.content) {
-                    flushBucket(i);
-                    out.push(<MarkdownRenderer key={`b-${i}`} content={b.content} dockKeyPrefix={`${turn.uuid}:${i}`} />);
-                    return;
-                  }
-                  // 聊天模式(未展开):只收起工具/子代理/skill,思考过程照常走下面的折叠块渲染。
-                  if (chatMode && !chatExpanded && b.type === 'tool_use' && b.toolCall) {
-                    if (!TASK_TOOL_NAMES.has(b.toolCall.name)) hiddenTools++;
-                    return;
-                  }
-                  if (b.type === 'thinking' && b.content) {
-                    flushBucket(i);
-                    out.push(
-                      <div key={`b-${i}`} className="mb-1">
-                        <button
-                          onClick={() => setOpenThinking((prev) => { const n = new Set(prev); n.has(i) ? n.delete(i) : n.add(i); return n; })}
-                          className="flex items-center gap-1.5 text-[11px] text-ink-faint hover:text-ink-muted cursor-pointer font-body w-full text-left"
-                        >
-                          <ChevronRight size={11} className={`transition-transform shrink-0 ${openThinking.has(i) ? 'rotate-90' : ''}`} />
-                          <Brain size={12} className="shrink-0" />
-                          <span className="truncate">{thinkingLabel(b.content)}</span>
-                        </button>
-                        {openThinking.has(i) && (
-                          <div className="thinking-block mt-2 p-4 rounded-lg text-xs text-ink-muted whitespace-pre-wrap max-h-64 overflow-y-auto font-body leading-relaxed">
-                            {b.content}
-                          </div>
-                        )}
-                      </div>
-                    );
-                    return;
-                  }
-                  if (b.type === 'tool_use' && b.toolCall) {
-                    // 任务清单(TodoWrite/TaskCreate/TaskUpdate/TaskList)只在输入框上方的
-                    // 常驻面板(App.jsx currentTodos → TodoPanel)显示;对话流里不再内联渲染,
-                    // 否则同一份清单会同时出现在两处(用户选定:只留吸附面板)。flushBucket 保留
-                    // 原有的工具轮边界语义,只是不再 push 清单卡片。
-                    if (TASK_TOOL_NAMES.has(b.toolCall.name)) {
-                      flushBucket(i);
-                      return;
-                    }
-                    // Skill 调用:不并入折叠工具组,在回复流原位渲染居中横幅
-                    // (章节分隔样式,流光动画,见 SkillCard)。
-                    // 连续调用同一 skill 合并成一张横幅(带次数),不再一条条刷屏
-                    // (用户实报:多个"xxx 已调用"重复没必要)。中间隔了文本/思考/
-                    // 其他工具则不算连续,照常另起横幅。
-                    if (b.toolCall.name === 'Skill') {
-                      const skillOf = (tc) => tc?.input?.skill || tc?.input?.name || tc?.name;
-                      const sameSkill = (blk) => blk?.type === 'tool_use' && blk.toolCall?.name === 'Skill' && skillOf(blk.toolCall) === skillOf(b.toolCall);
-                      if (sameSkill(renderBlocks[i - 1])) return; // 已并入本连续段的首个横幅
-                      const calls = [b.toolCall];
-                      for (let j = i + 1; j < renderBlocks.length && sameSkill(renderBlocks[j]); j++) calls.push(renderBlocks[j].toolCall);
-                      flushBucket(i);
-                      const latest = calls[calls.length - 1];
-                      out.push(
-                        <ToolCallWithRetry key={`b-${i}`} toolCall={latest} onRetryTool={onRetryTool} hoverOnly>
-                          <SkillCard toolCall={latest} calls={calls} />
-                        </ToolCallWithRetry>
-                      );
-                      return;
-                    }
-                    // 读取类工具直读 skills/<name>/SKILL.md:AI 绕过 Skill 工具手动
-                    // 加载技能,同样按 skill 横幅渲染(小字注明"读取技能文档",
-                    // 展开可看原始调用入参/结果)。
-                    {
-                      const skillDocName = getSkillDocReadName(b.toolCall);
-                      if (skillDocName) {
-                        flushBucket(i);
-                        out.push(
-                          <ToolCallWithRetry key={`b-${i}`} toolCall={b.toolCall} onRetryTool={onRetryTool} hoverOnly>
-                            <SkillCard toolCall={b.toolCall} nameOverride={skillDocName} subLabel="读取技能文档" />
-                          </ToolCallWithRetry>
-                        );
-                        return;
-                      }
-                    }
-                    // 子代理派发(Task/Agent):独立卡片纵向排列,与普通工具折叠行
-                    // 明显区分;点开/放大交互仍由 TaskCard 自身承载。
-                    if (b.toolCall.name === 'Task' || b.toolCall.name === 'Agent') {
-                      flushBucket(i);
-                      out.push(
-                        <ToolCallWithRetry key={`b-${i}`} toolCall={b.toolCall} onRetryTool={onRetryTool} hoverOnly>
-                          <TaskCard toolCall={b.toolCall} />
-                        </ToolCallWithRetry>
-                      );
-                      return;
-                    }
-                    // Every other tool — Bash/Read/Edit/Grep/Web/etc. accumulates
-                    // into the current round bucket regardless of whether it was
-                    // previously rendered as an inline card.
-                    bucket.push(b.toolCall);
-                    return;
-                  }
-                });
-                flushBucket('end');
-                if (chatMode && !chatExpanded && hiddenTools > 0) {
-                  out.push(chatFoldBar(`执行了 ${hiddenTools} 步操作`));
-                }
-                if (chatMode && chatExpanded && renderBlocks.some((b) => b.type === 'tool_use' && b.toolCall && !TASK_TOOL_NAMES.has(b.toolCall.name))) {
-                  out.push(chatUnfoldBar);
-                }
-                if (showRetrying && retryActive) {
-                  out.push(
-                    <div key="retrying" className="flex items-center gap-2 text-[12px] text-accent font-body px-1 py-1.5">
-                      <Loader2 size={12} className="animate-spin" />
-                      <span>正在重做此工具…</span>
-                    </div>
-                  );
-                }
-                return out;
-              })()}
-            </div>
-          ) : (
+          {hasOrderedBlocks ? (() => {
+            // "重做此工具"乐观回退:截断到被点工具调用之前,该工具及之后不再渲染,
+            // 并在原位显示"正在重做此工具…"。服务端 trim+refetch 后此标记消失。
+            const trimId = turn._retryTrimToolId;
+            let renderBlocks = turn.blocks;
+            let showRetrying = false;
+            if (trimId) {
+              const cut = turn.blocks.findIndex((b) => b.type === 'tool_use' && b.toolCall?.id === trimId);
+              if (cut >= 0) { renderBlocks = turn.blocks.slice(0, cut); showRetrying = true; }
+            }
+            const trailing = (showRetrying && retryActive) ? (
+              <div key="retrying" className="flex items-center gap-2 text-[12px] text-accent font-body px-1 py-1.5">
+                <Loader2 size={12} className="animate-spin" />
+                <span>正在重做此工具…</span>
+              </div>
+            ) : null;
+            return (
+              <CoworkBlocks
+                blocks={renderBlocks}
+                isLive={isLiveStream}
+                onRetryTool={onRetryTool}
+                dockKeyPrefix={turn.uuid}
+                trailing={trailing}
+                chatMode={chatMode}
+                chatExpanded={chatExpanded}
+                chatFoldBar={chatFoldBar}
+                chatUnfoldBar={chatUnfoldBar}
+              />
+            );
+          })() : (
             <>
               {/* Legacy path for historical messages (no blocks array) */}
               {fullThinking && (
@@ -722,18 +801,8 @@ function TurnBubbleInner({ turn, onRetry, onRetryTool, onFork, retryActive }) {
             </div>
           )}
 
-          {/* #2 流式动态状态行:有 block 流入后(呼吸点已消失,两者互斥)按最后一个 block
-              显示当前动作。仅进行中的流(isLiveStream)显示,历史 turn 无。 */}
-          {isLiveStream && !isStreaming && (() => {
-            const st = streamStatusText(turn.blocks);
-            if (!st) return null;
-            return (
-              <div className="flex items-center gap-1.5 pt-1 text-[11px] text-ink-faint font-body">
-                <Loader2 size={11} className="animate-spin shrink-0 text-accent" />
-                <span className="truncate">{st}</span>
-              </div>
-            );
-          })()}
+          {/* #2 气泡内中文状态行已移除 — 只保留气泡外橙色工作文本(App.jsx StreamingStatusLine,
+              claude-code 原生 tool 名/动词 + 前置 spinner),避免同屏两行语义重复。 */}
 
           {/* Usage */}
           <UsageDisplay usage={turn.usage} model={turn.model} costUsd={turn.costUsd} />

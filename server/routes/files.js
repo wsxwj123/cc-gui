@@ -131,13 +131,13 @@ router.get('/files/list', async (req, res) => {
     const st = await stat(real);
     if (!st.isDirectory()) return res.status(400).json({ error: 'not a directory' });
 
-    // all=1 → 显示隐藏文件(.git/node_modules/dist 等 SKIP_DIRS 也列出);.DS_Store 纯噪音永远跳。
+    // all=1 → 显示隐藏文件(所有 . 开头项 + node_modules/dist 等 SKIP_DIRS 也列出);.DS_Store 纯噪音永远跳。
     const showAll = req.query.all === '1';
     const raw = await readdir(real, { withFileTypes: true });
     const entries = [];
     for (const e of raw) {
       if (SKIP_EXACT.has(e.name)) continue;
-      if (!showAll && e.isDirectory() && SKIP_DIRS.has(e.name)) continue;
+      if (!showAll && (e.name.startsWith('.') || (e.isDirectory() && SKIP_DIRS.has(e.name)))) continue;
       const full = join(real, e.name);
       let s;
       try { s = await stat(full); } catch { continue; }

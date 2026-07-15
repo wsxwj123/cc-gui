@@ -2,7 +2,7 @@ import React from 'react';
 import { Bot, Loader2, User } from 'lucide-react';
 import { useStore } from '../stores/sessionStore.js';
 import { MarkdownRenderer } from './MarkdownRenderer.jsx';
-import { ToolCallsGroup } from './TurnBubble.jsx';
+import { CoworkBlocks } from './TurnBubble.jsx';
 import { PermissionPrompt } from './PermissionPrompt.jsx';
 
 // #9/O4 子代理会话窗口:样式对齐正常会话(用户气泡在右、回复在左、思考/工具折叠),
@@ -35,9 +35,7 @@ export function SubagentView({ agentId, parentTitle, parentSessionId = null, onB
   const agentModel = agent.model || metaAgent?.model || null;
   const description = agent.description || '';
   const prompt = agent.prompt || '';
-  const thinkingOut = (agent.thinking || []).join('');
-  const textOut = (agent.text || []).join('');
-  const tools = agent.toolCalls || [];
+  const blocks = agent.blocks || [];
   const status = agent.status || 'working';
   const working = status === 'working' || status === 'starting';
 
@@ -116,21 +114,12 @@ export function SubagentView({ agentId, parentTitle, parentSessionId = null, onB
                 )}
               </div>
 
-              {thinkingOut && (
-                <details className="mb-2 rounded-lg border border-canvas-deep bg-canvas-warm/40 overflow-hidden">
-                  <summary className="cursor-pointer px-3 py-1.5 text-[11px] text-ink-faint font-body">🧠 思考过程</summary>
-                  <div className="px-3 pb-2.5 text-[12px] text-ink-soft font-body whitespace-pre-wrap max-h-72 overflow-y-auto">
-                    {thinkingOut}
-                  </div>
-                </details>
-              )}
-
-              {/* 复用母会话折叠组件(默认折叠、可展开),不再自搓 <details open> 全铺开。
-                  子代理工具形态 {id,name,input,result} 正好被 ToolCallsGroup 消费;子代理无重做入口,onRetryTool 不传。 */}
-              {tools.length > 0 && <ToolCallsGroup toolCalls={tools} />}
-
-              {textOut ? (
-                <div className="text-[13.5px] text-ink font-body"><MarkdownRenderer content={textOut} /></div>
+              {/* §1.5 硬约束:与母会话共用 CoworkBlocks(思考+工具按时序分组折叠、活跃段
+                  实时展开、正文落地自动收起),逐字节一致,仅多"子代理"标识。子代理无重做入口,
+                  onRetryTool 不传。blocks 空(某些 provider 不流式子代理内部)→ 走下方 result 兜底。 */}
+              {blocks.length > 0 ? (
+                // CoworkBlocks 已按时序渲染思考/工具/正文,正文无需再单独渲染。
+                <CoworkBlocks blocks={blocks} isLive={working} dockKeyPrefix={`agent:${agentId}`} />
               ) : agent.result ? (
                 // 有些 provider 不流式子代理内部内容,输出在 tool_result 里。
                 <div className="text-[13.5px] text-ink font-body">

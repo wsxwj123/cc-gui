@@ -423,7 +423,7 @@ export function resolveExcludeDyn(v) {
 // (回落到与逐回合冷启相同的行为,零语义变化)。settings.json 的 mtime 计入键 ——
 // 切 provider / 改任何全局配置(无论经 GUI 还是终端 cc-switch)都会使旧进程不再被
 // 复用,规避"常驻进程拿着旧 provider/旧配置继续跑"的整类失败模式。
-function chatCompatKey({ workingDir, model, effort, appendSystemPrompt, promptSuggestions, excludeDynamicSystemPrompt, globalRead, dirs, maxBudgetUsd }) {
+function chatCompatKey({ workingDir, model, effort, appendSystemPrompt, promptSuggestions, excludeDynamicSystemPrompt, globalRead, dirs, maxBudgetUsd, agentTeams }) {
   let settingsMtime = 0;
   try { settingsMtime = statSync(pathJoin(homedir(), '.claude', 'settings.json')).mtimeMs; } catch {}
   // 禁用工具清单变更也不能复用旧进程(disallowedTools 是 query 级选项,起时定死)→ 计入 mtime。
@@ -442,6 +442,8 @@ function chatCompatKey({ workingDir, model, effort, appendSystemPrompt, promptSu
     cwd: workingDir, model, effort: effort || null,
     append: (typeof appendSystemPrompt === 'string' ? appendSystemPrompt.trim() : ''),
     suggest: promptSuggestions === true,
+    teams: agentTeams === true, // teams 改变进程能力(env),不同则不能复用旧 idle 进程,否则串档
+
     xdyn: excludeDynamicSystemPrompt === true ? 1 : excludeDynamicSystemPrompt === false ? 0 : 'auto',
     gr: globalRead !== false, dirs, settingsMtime, disToolsMtime, projSettingsMtime, mcpStampMtime,
     budget: maxBudgetUsd || null, // 花费上限变化不能复用旧进程(query 级选项,起时定死)
@@ -505,6 +507,7 @@ router.post('/chat', async (req, res) => {
     excludeDynamicSystemPrompt,
     keepAlive,
     maxBudgetUsd,
+    agentTeams,
   } = req.body;
   if (!prompt) return res.status(400).json({ error: 'prompt is required' });
   // 花费上限(美元):>0 才生效。SDK 透传 CLI --max-budget-usd,进程累计花费达到
@@ -565,6 +568,10 @@ router.post('/chat', async (req, res) => {
   // env:剥掉继承的 ANTHROPIC_* 路由/鉴权 + 宿主 CLAUDE_CODE_* 标识,provider 由
   // settings.json(或 OAuth 钥匙串)决定。SDK 的 env 选项是"整体替换",传剥好的全量。
   const childEnv = cleanChildEnv();
+  // 实验性 agent teams(真队友,每个是独立完整实例)。默认关。必须在 cleanChildEnv 之后
+  // 注入 —— stripHostClaudeEnv 会把所有 CLAUDE_CODE_* 整类删掉(见其内注释),先注后 strip
+  // 等于白注。同 CLAUDE_CODE_ATTRIBUTION_HEADER 的处理位置(strip 之后回注)。
+  if (agentTeams === true) childEnv.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS = '1';
 
   // ── #26 会话常驻复用:同会话上一回合的进程还挂着(idle)且配置键完全一致 → 新消息
   // 直接推进它的 input,免掉整套冷启动(bun 二进制 + settings + 全部 MCP server,实测
@@ -575,7 +582,7 @@ router.post('/chat', async (req, res) => {
   const reuseKey = chatCompatKey({
     workingDir, model, effort, appendSystemPrompt, promptSuggestions,
     excludeDynamicSystemPrompt, globalRead, dirs: [...dirSet].sort(),
-    maxBudgetUsd: budget,
+    maxBudgetUsd: budget, agentTeams,
   });
   if (sessionId) {
     for (const [alivePid, s] of activeProcesses) {
@@ -681,6 +688,10 @@ router.post('/chat', async (req, res) => {
 
   const options = {
     model,
+    // 新模型(Fable5/Opus4.8·4.7/Sonnet5)默认 adaptive 思考的 display 是 omitted(不回摘要),
+    // GUI 就看不到思考内容。显式设 display:'summarized' 让其返回思考摘要;老模型本就 summarized,
+    // 设了无副作用。摘要由旁路模型生成、不计入用户 token 计费,恒定常量对所有请求一致(不进 compatKey)。
+    thinking: { type: 'adaptive', display: 'summarized' },
     // 默认 SDK 不带 Claude Code 系统提示 → 必须显式 preset 才复刻 CLI 行为(工具集/CLAUDE.md 等)。
     systemPrompt,
     // 必须含 user/project/local 才加载 settings.json(=第三方 provider 配置)与 CLAUDE.md。

@@ -135,6 +135,17 @@ export function applyReadingFont(id) {
 let nextPaneId = 6;
 const freshPaneId = () => `p${nextPaneId++}`;
 
+// 子代理有序 blocks:末块同类型(text/thinking)则并入 content,否则新起一块。
+// 因 append 按时序调用,可据此还原"思考→工具→思考"的先后(供 CoworkBlocks 渲染)。
+function appendAgentBlock(blocks, type, delta) {
+  const arr = Array.isArray(blocks) ? blocks : [];
+  const last = arr[arr.length - 1];
+  if (last && last.type === type) {
+    return [...arr.slice(0, -1), { ...last, content: (last.content || '') + delta }];
+  }
+  return [...arr, { type, content: delta }];
+}
+
 export const useStore = create((set, get) => ({
   // Data
   projects: [],
@@ -361,6 +372,12 @@ export const useStore = create((set, get) => ({
   // 在输入框上方显示为可点击的建议。默认开;可在设置关闭。
   promptSuggestions: (() => {
     try { return localStorage.getItem('cgui-prompt-suggestions') !== '0'; } catch { return true; }
+  })(),
+
+  // 实验性 agent teams(队友协作):开启后主控可派真队友,每个队友是独立完整实例、
+  // 独立计费,token 随队友数增加。默认关(见 sessionStore setter / SettingsPanel 说明)。
+  agentTeams: (() => {
+    try { return localStorage.getItem('cgui-agent-teams') === '1'; } catch { return false; }
   })(),
 
   // 聊天模式(全局,localStorage):开启后消息流只显示 AI 最终文本 + 用户消息,把
@@ -913,6 +930,11 @@ export const useStore = create((set, get) => ({
     try { localStorage.setItem('cgui-prompt-suggestions', on ? '1' : '0'); } catch {}
   },
 
+  setAgentTeams: (on) => {
+    set({ agentTeams: !!on });
+    try { localStorage.setItem('cgui-agent-teams', on ? '1' : '0'); } catch {}
+  },
+
   setExcludeDynamicSystemPrompt: (v) => {
     // v: 'auto' | true | false('auto' = server 按 provider 决定:第三方开/官方关)
     set({ excludeDynamicSystemPrompt: v === true ? true : v === false ? false : 'auto' });
@@ -982,26 +1004,31 @@ export const useStore = create((set, get) => ({
   },
 
   // ── Active subagent helpers ─────────────────────────────────
+  // 除旧的三数组(text/thinking/toolCalls,result 兜底/isStreaming 判定仍读)外,
+  // 维护一份有序 `blocks`(与主会话 orderedBlocks 同形 {type,content|toolCall}[]),
+  // 喂给 CoworkBlocks 与母会话共用同一套 cowork 渲染(§1.5)。因 append 调用本就按
+  // 时序到达,直接在 reducer 里"末块同类型则并入、否则新起一块"即可重建时序,
+  // App.jsx 两条子代理路径(stream_event / 整块 assistant)无需改动。
   upsertAgent: (id, patch) => set((s) => ({
     activeAgents: {
       ...s.activeAgents,
-      [id]: { ...(s.activeAgents[id] || { id, text: [], thinking: [], toolCalls: [] }), ...patch },
+      [id]: { ...(s.activeAgents[id] || { id, text: [], thinking: [], toolCalls: [], blocks: [] }), ...patch },
     },
   })),
   appendAgentText: (id, delta) => set((s) => {
     const cur = s.activeAgents[id];
     if (!cur) return s;
-    return { activeAgents: { ...s.activeAgents, [id]: { ...cur, text: [...cur.text, delta] } } };
+    return { activeAgents: { ...s.activeAgents, [id]: { ...cur, text: [...cur.text, delta], blocks: appendAgentBlock(cur.blocks,'text', delta) } } };
   }),
   appendAgentThinking: (id, delta) => set((s) => {
     const cur = s.activeAgents[id];
     if (!cur) return s;
-    return { activeAgents: { ...s.activeAgents, [id]: { ...cur, thinking: [...cur.thinking, delta] } } };
+    return { activeAgents: { ...s.activeAgents, [id]: { ...cur, thinking: [...cur.thinking, delta], blocks: appendAgentBlock(cur.blocks,'thinking', delta) } } };
   }),
   appendAgentTool: (id, tc) => set((s) => {
     const cur = s.activeAgents[id];
     if (!cur) return s;
-    return { activeAgents: { ...s.activeAgents, [id]: { ...cur, toolCalls: [...cur.toolCalls, tc] } } };
+    return { activeAgents: { ...s.activeAgents, [id]: { ...cur, toolCalls: [...cur.toolCalls, tc], blocks: [...(cur.blocks || []), { type: 'tool_use', toolCall: tc }] } } };
   }),
   updateAgentTool: (id, toolId, patch) => set((s) => {
     const cur = s.activeAgents[id];
@@ -1009,6 +1036,7 @@ export const useStore = create((set, get) => ({
     return { activeAgents: { ...s.activeAgents, [id]: {
       ...cur,
       toolCalls: cur.toolCalls.map((tc) => tc.id === toolId ? { ...tc, ...patch } : tc),
+      blocks: (cur.blocks || []).map((b) => (b.type === 'tool_use' && b.toolCall?.id === toolId) ? { ...b, toolCall: { ...b.toolCall, ...patch } } : b),
     } } };
   }),
 
