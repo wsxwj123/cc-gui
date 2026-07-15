@@ -7,7 +7,7 @@ import 'katex/dist/katex.min.css'; // CJ-3:KaTeX 样式(katex 本体经 mermaid 
 import { Copy, Check } from 'lucide-react';
 import { copyText } from '../utils/clipboard.js';
 import { openExternalUrl } from '../utils/openExternal.js';
-import { ArtifactPreview, isPreviewable } from './ArtifactPreview.jsx';
+import { ArtifactPreview, isPreviewable, CollapsibleCode } from './ArtifactPreview.jsx';
 import { dockKeyFor } from '../utils/artifactDock.js';
 
 function CopyButton({ text }) {
@@ -30,29 +30,18 @@ function CopyButton({ text }) {
 
 // Code block with copy + collapse: long blocks show the first 5 lines and a
 // toggle to expand the rest (keeps long tool output / files from flooding chat).
+// 折叠逻辑抽到 ArtifactPreview 的 CollapsibleCode 共用(artifact 代码视图同款,防漂移)。
 function CodeBlock({ lang, code }) {
-  const lines = code.split('\n');
-  const COLLAPSE_AT = 5;
-  const collapsible = lines.length > COLLAPSE_AT;
-  const [expanded, setExpanded] = useState(false);
-  const shown = collapsible && !expanded ? lines.slice(0, COLLAPSE_AT).join('\n') : code;
   return (
     <div className="relative group my-3">
       <div className="flex items-center justify-between px-3.5 py-1.5 bg-[#2b2722] rounded-t-lg border border-[#3a342b] border-b-0">
         <span className="text-[11px] font-mono text-[#9a8e78]">{lang || 'code'}</span>
         <CopyButton text={code} />
       </div>
-      <pre className={`bg-[#211e19] border border-[#3a342b] border-t-0 p-4 overflow-x-auto text-[13px] leading-relaxed font-mono text-[#e8e2d6] ${collapsible ? 'rounded-b-none' : 'rounded-b-lg'}`}>
-        <code>{shown}</code>
-      </pre>
-      {collapsible && (
-        <button
-          onClick={() => setExpanded((e) => !e)}
-          className="w-full text-[11px] font-mono text-[#9a8e78] hover:text-[#cabba0] bg-[#2b2722] border border-[#3a342b] border-t-0 rounded-b-lg py-1 transition-colors"
-        >
-          {expanded ? '收起' : `展开剩余 ${lines.length - COLLAPSE_AT} 行 ▾`}
-        </button>
-      )}
+      <CollapsibleCode
+        code={code}
+        className="bg-[#211e19] border border-[#3a342b] border-t-0 p-4 overflow-x-auto text-[13px] leading-relaxed font-mono text-[#e8e2d6]"
+      />
     </div>
   );
 }

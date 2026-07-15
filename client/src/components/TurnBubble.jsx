@@ -77,7 +77,7 @@ function InlineToolCard({ toolCall, onRetryTool }) {
 }
 
 // 给 SubagentView 复用:子代理工具调用本应与母会话同样式(用户报告)。
-export { InlineToolCard, renderRichToolCard };
+export { InlineToolCard, renderRichToolCard, ToolCallsGroup };
 
 // Returns the rich card React element for a tool, or null when no
 // specialty renderer exists for that tool name.
@@ -420,6 +420,9 @@ function UsageDisplay({ usage, model, costUsd }) {
 // turn streams into separate state, so memo lets the old turns skip re-render.
 function TurnBubbleInner({ turn, onRetry, onRetryTool, onFork, retryActive }) {
   const [showThinking, setShowThinking] = useState(false);
+  // WKWebView 坑:<summary> 的 display 一旦被 flex/grid/block 覆盖(非默认 list-item),
+  // WebKit 就不再把它当披露控件,点了不切换 <details> open。改用受控展开 Set(按 block i)。
+  const [openThinking, setOpenThinking] = useState(() => new Set());
   const chatMode = useStore((s) => s.chatMode);
   const [chatExpanded, setChatExpanded] = useState(false);
   // 聊天模式:未展开时把思考/工具/子代理/skill 折叠成一行"思考并执行了 N 步操作 ›",
@@ -566,16 +569,21 @@ function TurnBubbleInner({ turn, onRetry, onRetryTool, onFork, retryActive }) {
                   if (b.type === 'thinking' && b.content) {
                     flushBucket(i);
                     out.push(
-                      <details key={`b-${i}`} className="mb-1 group">
-                        <summary className="flex items-center gap-1.5 text-[11px] text-ink-faint hover:text-ink-muted cursor-pointer font-body list-none [&::-webkit-details-marker]:hidden">
-                          <ChevronRight size={11} className="transition-transform group-open:rotate-90 shrink-0" />
+                      <div key={`b-${i}`} className="mb-1">
+                        <button
+                          onClick={() => setOpenThinking((prev) => { const n = new Set(prev); n.has(i) ? n.delete(i) : n.add(i); return n; })}
+                          className="flex items-center gap-1.5 text-[11px] text-ink-faint hover:text-ink-muted cursor-pointer font-body w-full text-left"
+                        >
+                          <ChevronRight size={11} className={`transition-transform shrink-0 ${openThinking.has(i) ? 'rotate-90' : ''}`} />
                           <Brain size={12} className="shrink-0" />
                           <span className="truncate">{thinkingLabel(b.content)}</span>
-                        </summary>
-                        <div className="thinking-block mt-2 p-4 rounded-lg text-xs text-ink-muted whitespace-pre-wrap max-h-64 overflow-y-auto font-body leading-relaxed">
-                          {b.content}
-                        </div>
-                      </details>
+                        </button>
+                        {openThinking.has(i) && (
+                          <div className="thinking-block mt-2 p-4 rounded-lg text-xs text-ink-muted whitespace-pre-wrap max-h-64 overflow-y-auto font-body leading-relaxed">
+                            {b.content}
+                          </div>
+                        )}
+                      </div>
                     );
                     return;
                   }

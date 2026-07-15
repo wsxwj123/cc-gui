@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useId } from 'react';
+import React, { useState, useEffect, useId, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { Copy, Check, Code2, Eye, AlertTriangle, Maximize2, X, PanelRight, RefreshCw } from 'lucide-react';
 import { copyText } from '../utils/clipboard.js';
@@ -122,13 +122,47 @@ export function MermaidView({ code }) {
   );
 }
 
+// 长代码折叠:首 N 行 + "展开剩余/收起"(与 MarkdownRenderer 的 CodeBlock 同一套逻辑,
+// 抽此共用组件避免两处漂移)。className 传 <pre> 的完整样式(含深色底/边框);末行圆角由
+// collapsible 决定:可折叠时底部平接 toggle 按钮,不可折叠时收 rounded-b-lg。
+export function CollapsibleCode({ code, className = '', collapseAt = 5 }) {
+  const lines = code.split('\n');
+  const collapsible = lines.length > collapseAt;
+  const [expanded, setExpanded] = useState(false);
+  const shown = collapsible && !expanded ? lines.slice(0, collapseAt).join('\n') : code;
+  return (
+    <>
+      <pre className={`${className} ${collapsible ? '' : 'rounded-b-lg'}`}>
+        <code>{shown}</code>
+      </pre>
+      {collapsible && (
+        <button
+          onClick={() => setExpanded((e) => !e)}
+          className="w-full text-[11px] font-mono text-[#9a8e78] hover:text-[#cabba0] bg-[#2b2722] border border-[#3a342b] border-t-0 rounded-b-lg py-1 transition-colors"
+        >
+          {expanded ? '收起' : `展开剩余 ${lines.length - collapseAt} 行 ▾`}
+        </button>
+      )}
+    </>
+  );
+}
+
 // 渲染预览主体(代码/mermaid/html-iframe)。fullscreen 时 iframe 撑满高度,内联时固定 400px。
 export function PreviewBody({ language, mode, code, debounced, fullscreen, iframeKey }) {
   if (mode === 'code') {
+    // 全屏有纵向空间,保持 h-full 滚动;内联(会话内)长代码折叠首 5 行,复用 CollapsibleCode。
+    if (fullscreen) {
+      return (
+        <pre className="cgui-dark-select bg-[#211e19] p-4 overflow-auto text-[13px] leading-relaxed font-mono text-[#e8e2d6] h-full">
+          <code>{code}</code>
+        </pre>
+      );
+    }
     return (
-      <pre className={`cgui-dark-select bg-[#211e19] p-4 overflow-auto text-[13px] leading-relaxed font-mono text-[#e8e2d6] ${fullscreen ? 'h-full' : 'max-h-96'}`}>
-        <code>{code}</code>
-      </pre>
+      <CollapsibleCode
+        code={code}
+        className="cgui-dark-select bg-[#211e19] p-4 overflow-x-auto text-[13px] leading-relaxed font-mono text-[#e8e2d6]"
+      />
     );
   }
   if (language === 'mermaid') return <MermaidView code={debounced} />;
@@ -172,14 +206,24 @@ export function ArtifactPreview({ lang, code, coexist = false, dockKey }) {
     if (isDocked) useStore.getState().updateArtifactDockCode(artifactId, code);
   }, [code, isDocked, artifactId]);
 
-  // 全屏时按 Esc 关闭 + 锁 body 滚动。
+  // #3 停靠瞬间默认折成代码(内容已在右侧 dock),但只在 false→true 转换那一刻设一次:
+  // 若每次 render 都强设 code,用户点"预览"会立刻被打回代码,toggle 失效。
+  const wasFoldRef = useRef(false);
+  useEffect(() => {
+    if (foldInline && !wasFoldRef.current) setMode('code');
+    wasFoldRef.current = foldInline;
+  }, [foldInline]);
+
+  // 全屏时按 Esc 关闭 + 锁 body 滚动。capture 阶段监听(对齐 ImageLightbox),先于冒泡的上层 Esc。
+  // 注意:沙箱 iframe(无 allow-same-origin)会吞掉焦点在内时的 Esc,故真正的兜底是全屏浮层里
+  // 视口锚定的关闭按钮,Esc 只锦上添花。
   useEffect(() => {
     if (!fullscreen) return;
     const onKey = (e) => { if (e.key === 'Escape') setFullscreen(false); };
-    window.addEventListener('keydown', onKey);
+    window.addEventListener('keydown', onKey, true);
     const prev = document.body.style.overflow;
     document.body.style.overflow = 'hidden';
-    return () => { window.removeEventListener('keydown', onKey); document.body.style.overflow = prev; };
+    return () => { window.removeEventListener('keydown', onKey, true); document.body.style.overflow = prev; };
   }, [fullscreen]);
 
   const tabBtn = (active) =>
@@ -233,8 +277,9 @@ export function ArtifactPreview({ lang, code, coexist = false, dockKey }) {
     <>
       <div className="my-3 rounded-lg border border-[#3a342b] overflow-hidden">
         {toolbar(false)}
-        {foldInline ? (
-          // #3 已停靠:主体折叠成紧凑代码块 + 提示(实时内容看右侧 dock);toolbar 三按钮保留。
+        {foldInline && mode === 'code' ? (
+          // #3 已停靠且当前为代码档:主体折叠成紧凑代码块 + 提示(实时内容看右侧 dock);toolbar 三按钮保留。
+          // 点"预览"(mode='preview')则落到 else 分支的 PreviewBody,内联显示预览 → toggle 生效。
           <div>
             <pre className="cgui-dark-select bg-[#211e19] px-4 py-2 overflow-hidden text-[12px] leading-snug font-mono text-[#9a8e78] max-h-24">
               <code>{code}</code>
@@ -253,8 +298,17 @@ export function ArtifactPreview({ lang, code, coexist = false, dockKey }) {
           className="fixed inset-0 z-[200] flex items-center justify-center bg-black/70 p-4"
           onClick={() => setFullscreen(false)}
         >
+          {/* 视口锚定关闭键:锚在背景层(非卡片内),任何缩放/尺寸算错都留在视口右上角。
+              WebView2 下 vw/vh 不随 --ui-zoom 折算,裸 92vh 会把卡片顶栏(含关闭键)顶出屏幕 → 此为真兜底。 */}
+          <button
+            onClick={(e) => { e.stopPropagation(); setFullscreen(false); }}
+            title="退出全屏 (Esc)"
+            className="absolute top-4 right-4 z-[210] w-9 h-9 rounded-lg bg-white/10 hover:bg-white/20 text-white flex items-center justify-center"
+          >
+            <X size={16} />
+          </button>
           <div
-            className="flex flex-col w-[92vw] h-[92vh] rounded-lg border border-[#3a342b] overflow-hidden shadow-2xl"
+            className="flex flex-col w-[92%] h-[92%] rounded-lg border border-[#3a342b] overflow-hidden shadow-2xl"
             onClick={(e) => e.stopPropagation()}
           >
             {toolbar(true)}
@@ -284,14 +338,14 @@ export function ArtifactDock() {
   const language = normLang(artifactDock?.lang);
   const debounced = useDebounced(code, 300);
 
-  // 全屏时按 Esc 关闭 + 锁 body 滚动(与 ArtifactPreview 全屏一致)。
+  // 全屏时按 Esc 关闭 + 锁 body 滚动(与 ArtifactPreview 全屏一致,capture 阶段)。
   useEffect(() => {
     if (!fullscreen) return;
     const onKey = (e) => { if (e.key === 'Escape') setFullscreen(false); };
-    window.addEventListener('keydown', onKey);
+    window.addEventListener('keydown', onKey, true);
     const prev = document.body.style.overflow;
     document.body.style.overflow = 'hidden';
-    return () => { window.removeEventListener('keydown', onKey); document.body.style.overflow = prev; };
+    return () => { window.removeEventListener('keydown', onKey, true); document.body.style.overflow = prev; };
   }, [fullscreen]);
 
   if (!artifactDock) return null;
@@ -360,8 +414,16 @@ export function ArtifactDock() {
           className="fixed inset-0 z-[200] flex items-center justify-center bg-black/70 p-4"
           onClick={() => setFullscreen(false)}
         >
+          {/* 视口锚定关闭键:锚在背景层(非卡片内),WebView2 缩放算错时仍在视口右上角可点(见 ArtifactPreview 同注)。 */}
+          <button
+            onClick={(e) => { e.stopPropagation(); setFullscreen(false); }}
+            title="退出全屏 (Esc)"
+            className="absolute top-4 right-4 z-[210] w-9 h-9 rounded-lg bg-white/10 hover:bg-white/20 text-white flex items-center justify-center"
+          >
+            <X size={16} />
+          </button>
           <div
-            className="flex flex-col w-[92vw] h-[92vh] rounded-lg border border-[#3a342b] overflow-hidden shadow-2xl"
+            className="flex flex-col w-[92%] h-[92%] rounded-lg border border-[#3a342b] overflow-hidden shadow-2xl"
             onClick={(e) => e.stopPropagation()}
           >
             {toolbar(true)}
