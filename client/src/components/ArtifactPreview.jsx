@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useId } from 'react';
+import React, { useState, useEffect, useId, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { Copy, Check, Code2, Eye, AlertTriangle, Maximize2, X, PanelRight, RefreshCw } from 'lucide-react';
 import { copyText } from '../utils/clipboard.js';
@@ -172,6 +172,14 @@ export function ArtifactPreview({ lang, code, coexist = false, dockKey }) {
     if (isDocked) useStore.getState().updateArtifactDockCode(artifactId, code);
   }, [code, isDocked, artifactId]);
 
+  // #3 停靠瞬间默认折成代码(内容已在右侧 dock),但只在 false→true 转换那一刻设一次:
+  // 若每次 render 都强设 code,用户点"预览"会立刻被打回代码,toggle 失效。
+  const wasFoldRef = useRef(false);
+  useEffect(() => {
+    if (foldInline && !wasFoldRef.current) setMode('code');
+    wasFoldRef.current = foldInline;
+  }, [foldInline]);
+
   // 全屏时按 Esc 关闭 + 锁 body 滚动。
   useEffect(() => {
     if (!fullscreen) return;
@@ -233,8 +241,9 @@ export function ArtifactPreview({ lang, code, coexist = false, dockKey }) {
     <>
       <div className="my-3 rounded-lg border border-[#3a342b] overflow-hidden">
         {toolbar(false)}
-        {foldInline ? (
-          // #3 已停靠:主体折叠成紧凑代码块 + 提示(实时内容看右侧 dock);toolbar 三按钮保留。
+        {foldInline && mode === 'code' ? (
+          // #3 已停靠且当前为代码档:主体折叠成紧凑代码块 + 提示(实时内容看右侧 dock);toolbar 三按钮保留。
+          // 点"预览"(mode='preview')则落到 else 分支的 PreviewBody,内联显示预览 → toggle 生效。
           <div>
             <pre className="cgui-dark-select bg-[#211e19] px-4 py-2 overflow-hidden text-[12px] leading-snug font-mono text-[#9a8e78] max-h-24">
               <code>{code}</code>
