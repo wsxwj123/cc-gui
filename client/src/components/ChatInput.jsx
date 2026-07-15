@@ -4,6 +4,7 @@ import { useStore, PERMISSION_MODES } from '../stores/sessionStore.js';
 import { PermissionPrompt } from './PermissionPrompt.jsx';
 import { TodoPanel } from './TodoPanel.jsx';
 import { confirmDialog } from '../utils/confirmDialog.jsx';
+import { ImageLightbox } from './ImageLightbox.jsx';
 
 // Permission mode metadata — mirrors `claude --permission-mode <choice>`.
 export const MODE_META = {
@@ -240,6 +241,7 @@ export function ChatInput({ onSend, onStop, onAccelerate, onBackground, suggesti
   // Pending attachments: { kind, path, preview?, name, bytes }
   const [attachments, setAttachments] = useState([]);
   const [dragging, setDragging] = useState(false);
+  const [zoomImage, setZoomImage] = useState(null); // #7 单击放大的图片附件
   // @ 引用选择器(Tutti 式上下文引用):光标前出现 `@xxx` 时弹出,文件 tab 插入
   // `@相对路径`(CLI 原生 @ 语法读文件),会话 tab 把该会话导出为精简 md 后插入 `@绝对路径`。
   const [atState, setAtState] = useState(null); // null | { query, start } start = '@' 在 text 中的下标
@@ -925,7 +927,8 @@ export function ChatInput({ onSend, onStop, onAccelerate, onBackground, suggesti
                   <img
                     src={a.preview}
                     alt={a.name}
-                    className="h-16 w-16 object-cover rounded-lg border border-canvas-deep shadow-sm"
+                    onClick={() => setZoomImage({ src: a.preview, name: a.name, path: a.path })}
+                    className="h-16 w-16 object-cover rounded-lg border border-canvas-deep shadow-sm cursor-zoom-in"
                   />
                 ) : (
                   <div className="h-16 w-36 rounded-lg border border-canvas-deep bg-canvas-warm shadow-sm px-2 py-2 flex items-center gap-2">
@@ -952,6 +955,9 @@ export function ChatInput({ onSend, onStop, onAccelerate, onBackground, suggesti
             ))}
           </div>
         )}
+
+        {/* #7 图片附件单击放大 */}
+        <ImageLightbox src={zoomImage?.src} name={zoomImage?.name} path={zoomImage?.path} onClose={() => setZoomImage(null)} />
 
         {/* 任务清单 — 紧贴输入框上方(同一列内),作为输入框的附着条而非独立悬浮面板。
             折叠/隐藏/全完成自动折叠见 TodoPanel。key=permKey:折叠/隐藏是组件本地态,按会话

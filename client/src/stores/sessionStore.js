@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import { nextDockCode } from '../utils/artifactDock.js';
 
 // Helper: read JSON from localStorage with fallback.
 const readLs = (key, fallback) => {
@@ -760,6 +761,13 @@ export const useStore = create((set, get) => ({
   artifactDock: null,
   openArtifactDock: (payload) => set({ artifactDock: payload }),
   closeArtifactDock: () => set({ artifactDock: null }),
+  // #3 流式回写:内联块每 token 拿到新 code 同步进 dock,让停靠面板随流式实时刷新(不冻结在
+  // 点击瞬间快照)。双闸短路:仅"正被停靠的那个 artifact(id 匹配)"且"code 真变了"才 set,
+  // 防流式每 token 空 setState 风暴。
+  updateArtifactDockCode: (id, code) => set((s) => {
+    const next = nextDockCode(s.artifactDock, id, code);
+    return next === s.artifactDock ? {} : { artifactDock: next };
+  }),
 
   // ── Multi-pane actions (Phase 2) ───────────────────────────
   // Set how many panes are visible (1..6). Snaps activeTabIndex if it ends

@@ -17,6 +17,7 @@ import { computeCost, formatCost } from '../utils/pricing.js';
 import { copyText } from '../utils/clipboard.js';
 import { useStore } from '../stores/sessionStore.js';
 import { TASK_TOOL_NAMES, rebuildTodosFromTaskCalls } from '../utils/todos.js';
+import { formatInputPreview, thinkingLabel, streamStatusText } from '../utils/streamStatus.js';
 
 // Tools that get their own bespoke inline card (rendered in chronological order
 // inside the turn). Anything not in this set falls through to ToolCallsGroup,
@@ -145,16 +146,6 @@ const TOOL_ICONS = {
 
 function getToolIcon(name) {
   return TOOL_ICONS[name] || Wrench;
-}
-
-function formatInputPreview(input) {
-  if (!input) return '';
-  if (typeof input === 'string') return input;
-  if (input.command) return input.command;
-  if (input.file_path) return input.file_path.split(/[/\\]+/).pop();
-  if (input.pattern) return input.pattern;
-  if (input.query) return input.query;
-  return '';
 }
 
 function formatTime(ts) {
@@ -564,7 +555,7 @@ function TurnBubbleInner({ turn, onRetry, onRetryTool, onFork, retryActive }) {
                 renderBlocks.forEach((b, i) => {
                   if (b.type === 'text' && b.content) {
                     flushBucket(i);
-                    out.push(<MarkdownRenderer key={`b-${i}`} content={b.content} />);
+                    out.push(<MarkdownRenderer key={`b-${i}`} content={b.content} dockKeyPrefix={`${turn.uuid}:${i}`} />);
                     return;
                   }
                   // 聊天模式(未展开):只收起工具/子代理/skill,思考过程照常走下面的折叠块渲染。
@@ -578,8 +569,8 @@ function TurnBubbleInner({ turn, onRetry, onRetryTool, onFork, retryActive }) {
                       <details key={`b-${i}`} className="mb-1 group">
                         <summary className="flex items-center gap-1.5 text-[11px] text-ink-faint hover:text-ink-muted cursor-pointer font-body list-none [&::-webkit-details-marker]:hidden">
                           <ChevronRight size={11} className="transition-transform group-open:rotate-90 shrink-0" />
-                          <Brain size={12} />
-                          <span>思考过程</span>
+                          <Brain size={12} className="shrink-0" />
+                          <span className="truncate">{thinkingLabel(b.content)}</span>
                         </summary>
                         <div className="thinking-block mt-2 p-4 rounded-lg text-xs text-ink-muted whitespace-pre-wrap max-h-64 overflow-y-auto font-body leading-relaxed">
                           {b.content}
@@ -677,9 +668,9 @@ function TurnBubbleInner({ turn, onRetry, onRetryTool, onFork, retryActive }) {
                     onClick={() => setShowThinking(!showThinking)}
                     className="flex items-center gap-1.5 text-[11px] text-ink-faint hover:text-ink-muted transition-colors font-body"
                   >
-                    <Brain size={12} />
-                    <span>思考过程</span>
-                    <span className="text-[10px]">{showThinking ? '▾' : '▸'}</span>
+                    <Brain size={12} className="shrink-0" />
+                    <span className="truncate">{thinkingLabel(fullThinking)}</span>
+                    <span className="text-[10px] shrink-0">{showThinking ? '▾' : '▸'}</span>
                   </button>
                   {showThinking && (
                     <div className="thinking-block mt-2 p-4 rounded-lg text-xs text-ink-muted whitespace-pre-wrap max-h-64 overflow-y-auto font-body leading-relaxed">
@@ -688,7 +679,7 @@ function TurnBubbleInner({ turn, onRetry, onRetryTool, onFork, retryActive }) {
                   )}
                 </div>
               )}
-              {fullText && <MarkdownRenderer content={fullText} />}
+              {fullText && <MarkdownRenderer content={fullText} dockKeyPrefix={turn.uuid} />}
               {/* 任务清单只走输入框上方常驻面板,legacy 路径同样不再内联渲染(见上)。 */}
               {!(chatMode && !chatExpanded) && hasInlineCalls && (
                 <div className="mt-2 space-y-2">
@@ -722,6 +713,19 @@ function TurnBubbleInner({ turn, onRetry, onRetryTool, onFork, retryActive }) {
               <div className="w-2 h-2 rounded-full bg-accent/40" style={{ animation: 'breathe 1.4s ease-in-out infinite 0.4s' }} />
             </div>
           )}
+
+          {/* #2 流式动态状态行:有 block 流入后(呼吸点已消失,两者互斥)按最后一个 block
+              显示当前动作。仅进行中的流(isLiveStream)显示,历史 turn 无。 */}
+          {isLiveStream && !isStreaming && (() => {
+            const st = streamStatusText(turn.blocks);
+            if (!st) return null;
+            return (
+              <div className="flex items-center gap-1.5 pt-1 text-[11px] text-ink-faint font-body">
+                <Loader2 size={11} className="animate-spin shrink-0 text-accent" />
+                <span className="truncate">{st}</span>
+              </div>
+            );
+          })()}
 
           {/* Usage */}
           <UsageDisplay usage={turn.usage} model={turn.model} costUsd={turn.costUsd} />
