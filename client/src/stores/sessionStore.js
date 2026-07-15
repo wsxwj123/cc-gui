@@ -374,12 +374,6 @@ export const useStore = create((set, get) => ({
     try { return localStorage.getItem('cgui-prompt-suggestions') !== '0'; } catch { return true; }
   })(),
 
-  // 实验性 agent teams(队友协作):开启后主控可派真队友,每个队友是独立完整实例、
-  // 独立计费,token 随队友数增加。默认关(见 sessionStore setter / SettingsPanel 说明)。
-  agentTeams: (() => {
-    try { return localStorage.getItem('cgui-agent-teams') === '1'; } catch { return false; }
-  })(),
-
   // 聊天模式(全局,localStorage):开启后消息流只显示 AI 最终文本 + 用户消息,把
   // thinking / 工具 / 子代理 / skill 折叠成一行可点开的标记,像微信聊天。默认关。
   chatMode: (() => {
@@ -928,11 +922,6 @@ export const useStore = create((set, get) => ({
   setPromptSuggestions: (on) => {
     set({ promptSuggestions: !!on });
     try { localStorage.setItem('cgui-prompt-suggestions', on ? '1' : '0'); } catch {}
-  },
-
-  setAgentTeams: (on) => {
-    set({ agentTeams: !!on });
-    try { localStorage.setItem('cgui-agent-teams', on ? '1' : '0'); } catch {}
   },
 
   setExcludeDynamicSystemPrompt: (v) => {
