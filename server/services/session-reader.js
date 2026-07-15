@@ -604,6 +604,44 @@ function reconstructCommandPrompt(text, { bareToName = false } = {}) {
  *   usageTotals — 整会话用量聚合(见下方 sessionUsageById 注释)
  *     { input, output, cacheRead, cacheCreation, apiCalls }
  */
+/**
+ * 去掉 CLI resume 重放追加的重复记录。两类重放:
+ *
+ * CJ-1(1086be6):停止/排队场景 CLI 把一段历史【原样重放】追加进同一 jsonl,
+ * 连 uuid 都逐字节相同(实测 1157/1848 条与前文 uuid 完全一致,重放段从旧
+ * compact_boundary 开始)。按 record.uuid 去重、保留首次出现即可;无 uuid 的
+ * 记录(queue-operation 等)不参与。
+ *
+ * CJ-1 变体(本次):停止→--resume 时重放段带的是【新的 record.uuid】,uuid 去重
+ * 认不出 → 同一条 AI 回复渲染两遍(用户实报,内容一字不差、时间戳相同)。这类重放
+ * message.id 与内容仍逐字节不变,故对 assistant 记录额外按 (message.id + 内容签名)
+ * 去重。为何是"内容签名"而非只按 message.id:CLI 把一次 API 调用(一个 message.id)
+ * 的每个内容块【拆成多条记录】写入(thinking / text / tool_use 各一条,uuid 各异),
+ * 只按 message.id 去重会吞掉同一次调用的其余块(丢正文/工具调用)。内容签名既能区分
+ * 同一 message.id 下的不同块、又能认出重放的同一个块。实测 8 个真实会话此键零误删。
+ * user 记录不参与 message.id 去重(可能无/共享 message.id,按 uuid 已足够)。
+ */
+export function dedupReplayedRecords(rawRecords) {
+  const seenRecordUuids = new Set();
+  const seenAssistantBlocks = new Set();
+  return rawRecords.filter((r) => {
+    const u = r?.uuid;
+    if (u) {
+      if (seenRecordUuids.has(u)) return false;
+      seenRecordUuids.add(u);
+    }
+    if (r?.type === 'assistant') {
+      const mid = r?.message?.id;
+      if (mid) {
+        const sig = mid + ' ' + JSON.stringify(r?.message?.content ?? null);
+        if (seenAssistantBlocks.has(sig)) return false;
+        seenAssistantBlocks.add(sig);
+      }
+    }
+    return true;
+  });
+}
+
 export async function getSessionMessages(sessionId, projectHash) {
   let filePath = join(PROJECTS_DIR, projectHash, `${sessionId}.jsonl`);
   if (!existsSync(filePath)) {
@@ -630,19 +668,7 @@ export async function getSessionMessages(sessionId, projectHash) {
     } catch {}
   }
   const rawRecords = await parseJsonl(filePath);
-  // CJ-1:CLI 在某些 resume/排队场景会把一段历史记录【原样重放】追加进同一 jsonl
-  // (实测用户会话:1157/1848 条记录与前文 uuid 完全相同,内容逐字节一致,重放段
-  // 从旧 compact_boundary 开始)。线性解析不去重 → 同一段 AI 回复连同其工具调用组
-  // 渲染两遍(用户截图实报)。按记录 uuid 去重、保留首次出现;无 uuid 的记录
-  // (queue-operation 等)不参与去重。
-  const seenRecordUuids = new Set();
-  const records = rawRecords.filter((r) => {
-    const u = r?.uuid;
-    if (!u) return true;
-    if (seenRecordUuids.has(u)) return false;
-    seenRecordUuids.add(u);
-    return true;
-  });
+  const records = dedupReplayedRecords(rawRecords);
   // L4: 加载附件 sidecar,在 user 消息 push 时按 textHash 注入 attachments/displayText
   const attachmentsByHash = await readAttachmentsSidecar(sessionId);
 
