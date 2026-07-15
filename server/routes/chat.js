@@ -273,6 +273,7 @@ function finishSlot(slot, procId) {
   slot.pumpEnded = true;
   slot.idle = false;
   if (slot.idleTimer) { clearTimeout(slot.idleTimer); slot.idleTimer = null; }
+  if (slot.stopTimer) { clearTimeout(slot.stopTimer); slot.stopTimer = null; }
   if (slot.exitCode === null) slot.exitCode = 0;
   slot.finishedAt = Date.now();
   try { slot.nulWatcher?.close(); } catch {}
@@ -605,11 +606,52 @@ router.post('/chat', async (req, res) => {
       s.turnSubagentSeen = false;
       s.startedAt = Date.now();
       s.finishedAt = null;
+      // H2:上一回合停止链路的残留不得毒化本回合。① 取消上一回合武装的 stopTimer 并推进
+      // turnEpoch,让即便没 clear 掉的旧兜底回调进门比对失败 → no-op,不 abort 这个复用 slot;
+      // ② 清 lastResultAt(否则新回合 stop 的 settled 判据读到旧 result 时间);③ 清掉自维护
+      // 没删净的非 shell 陈旧任务(shell 后台任务刻意跨回合保留,不动)。
+      if (s.stopTimer) { clearTimeout(s.stopTimer); s.stopTimer = null; }
+      s.turnEpoch = (s.turnEpoch | 0) + 1;
+      s.lastResultAt = null;
+      if (s.liveTasks) for (const [tid, t] of s.liveTasks) { if (!t || t.kind !== 'shell') s.liveTasks.delete(tid); }
       s.promptPreview = String(prompt).slice(0, 80);
       s.guiMode = chosenMode;
       s.permissionMode = chosenMode;
       s.input.push({ type: 'user', message: { role: 'user', content: String(prompt) } });
       return res.json({ pid: alivePid, model: s.model, reused: true });
+    }
+  }
+
+  // #26 一会话一进程(H1 双 resume 根治):走到这里=没复用到 idle 进程,要冷启新
+  // `claude --resume <sid>`。但同一 sid 的上一回合进程可能正在收尾——用户点"停止"后
+  // interrupt 已发、abort 兜底还没到点(closing=true / idle=false / pumpEnded=false),
+  // 或配置变更刚把一个 idle slot 置 closing 关流。此刻并起第二个 --resume 会与它抢同一
+  // jsonl / 会话锁 → 新回合读到半写状态、拿不到干净 init/result → 几秒空产出。先等它
+  // pumpEnded 或被 delete 再冷启;非阻塞短轮询到上限,超时才强制 abort 兜底(interrupt
+  // 已在飞,极少走到)。idle 可复用 slot 不在此列(上面复用块已 return),不误伤 shell 保活。
+  if (sessionId) {
+    const tearingDown = () => {
+      for (const s of activeProcesses.values()) {
+        if (s.sessionId !== sessionId) continue;
+        if (!s.pumpEnded && s.exitCode === null && (s.closing || !s.idle)) return s;
+      }
+      return null;
+    };
+    const deadline = Date.now() + 4000;
+    let lingering;
+    while ((lingering = tearingDown()) && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    if (lingering) {
+      // 超时仍未收尾:强制关它,避免同 sid 双进程(可恢复 shell 已在 idle 复用路径处理,
+      // 到这里的 lingering 是正在停止/被弃用的进程,abort 是正确兜底)。
+      lingering.closing = true;
+      try { lingering.abort?.abort(); } catch {}
+      try { lingering.input?.close(); } catch {}
+      const hardDeadline = Date.now() + 1000;
+      while (tearingDown() && Date.now() < hardDeadline) {
+        await new Promise((r) => setTimeout(r, 50));
+      }
     }
   }
 
@@ -645,6 +687,11 @@ router.post('/chat', async (req, res) => {
     keepAlive: wantKeepAlive,
     turnSubagentSeen: false, // 本回合是否起过子代理(关流去抖判据,回合级重置)
     idleTimer: null,
+    // 停止兜底定时器(/stop 的 abort 兜底 setTimeout 句柄)+ 回合世代计数。回合级:复用一个
+    // idle slot 时 turnEpoch 自增,上一回合武装的 stopTimer 回调进门先比对 capturedEpoch,
+    // 不等即 no-op —— 即便 clear 没赶上也绝不误伤已被复用成新回合的 slot(H2 根治)。
+    stopTimer: null,
+    turnEpoch: 0,
     // 停止链路 #1:在飞子代理/后台任务薄记 { task_id → { toolUseId, kind } }。task_started 加、
     // task_notification / task_updated(终态) 删。kind 三分:'shell'(Bash run_in_background,
     // 选择性停止时保留)/'subagent'(带 subagent_type,停)/'unknown'(缺字段,防漏一并停)。
@@ -750,6 +797,8 @@ router.post('/chat', async (req, res) => {
   const cancelClose = () => { if (closeTimer) { clearTimeout(closeTimer); closeTimer = null; } };
   const finalize = () => {
     cancelClose();
+    // 回合优雅收尾:上一个 stop 武装的 abort 兜底不再需要,清掉防其误伤后续复用回合。
+    if (slot.stopTimer) { clearTimeout(slot.stopTimer); slot.stopTimer = null; }
     if (lastResultLine) { maybeBroadcastTurnComplete(slot, lastResultLine); lastResultLine = null; } // 回合完成 WS 只在最终 result 播
     // #26 会话常驻:回合收尾但进程不关。客户端照常收 done 结束本回合 SSE;slot 转 idle
     // 等同会话下一条消息复用(POST /chat 的复用块)。空闲超时回收防进程堆积。
@@ -982,7 +1031,11 @@ router.post('/chat/:pid/stop', async (req, res) => {
       return res.json({ ok: true });
     }
     try { slot.query?.interrupt?.()?.catch?.(() => {}); } catch {}
-    setTimeout(() => {
+    const hardEpoch = slot.turnEpoch | 0;
+    slot.stopTimer = setTimeout(() => {
+      // H2:回合已被复用推进(turnEpoch 变了)→ 这个兜底属于上一回合,no-op,绝不 abort 新回合。
+      if ((slot.turnEpoch | 0) !== hardEpoch) return;
+      slot.stopTimer = null;
       // 优雅收尾判据:pumpEnded(泵已收尾)或【stop 之后】到达过 result(interrupt 生效,
       // 回合已以 interrupted result 停住)。两个坑都躲开(fable 审计):① 不能只看
       // pumpEnded——子代理回合 result 后有 4s 关流去抖(suggestion 3s),窗内恒 false,
@@ -1027,7 +1080,11 @@ router.post('/chat/:pid/stop', async (req, res) => {
     // idle 仅 stoppable(无 shell):closing 已置、stopTask 已发,落到下方 interrupt+窗+abort(=hard)。
   }
   try { slot.query?.interrupt?.()?.catch?.(() => {}); } catch {}
-  setTimeout(() => {
+  const selEpoch = slot.turnEpoch | 0;
+  slot.stopTimer = setTimeout(() => {
+    // H2:回合已被复用推进(turnEpoch 变了)→ 兜底属于上一回合,no-op,绝不 abort 新回合。
+    if ((slot.turnEpoch | 0) !== selEpoch) return;
+    slot.stopTimer = null;
     // 优雅判据同 hard(pumpEnded / stop 后 result,三坑注释见 hard 路径),但任务清零只数
     // 非 shell —— shell 是被刻意保留的,不算"没停净"。顺手修 HEAD bug:回合已 result、
     // 4s 关流去抖窗内、只剩 shell 活任务时,旧判据 liveTasks.size===0 恒 false → 超窗
