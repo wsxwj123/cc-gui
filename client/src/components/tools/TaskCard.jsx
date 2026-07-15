@@ -31,9 +31,13 @@ export function TaskCard({ toolCall }) {
   // agent.name → server 提取的 metaAgent.agentType。最后才回退泛化文案。store 里的
   // agent.name 在某些 provider 下会停留在字面 'Agent'/'Task'(input 未解析成功时),
   // 这种情况下优先用 metaAgent.agentType 还原具体名。
-  const rawName = toolCall.input?.subagent_type || agent?.name || null;
+  // agent teams 队友:task_started(local_agent)在 store 打的标记。队友经 Agent 工具 spawn，
+  // 真名在 input.name(既非 subagent_type 也非 agent)→ 补读，否则回退成泛化名。
+  const isTeammate = agent?.isTeammate === true;
+  const rawName = toolCall.input?.subagent_type || agent?.name || toolCall.input?.name || null;
   const isGeneric = !rawName || rawName === 'Task' || rawName === 'Agent';
-  const subagentType = (isGeneric && metaAgent?.agentType) ? metaAgent.agentType : (rawName || '子代理');
+  const roleWord = isTeammate ? '队友' : '子代理';
+  const subagentType = (isGeneric && metaAgent?.agentType) ? metaAgent.agentType : (rawName || roleWord);
   const description = toolCall.input?.description || agent?.description || '';
   const prompt = toolCall.input?.prompt || '';
 
@@ -128,7 +132,7 @@ export function TaskCard({ toolCall }) {
         </span>
         <div className="flex-1 min-w-0">
           <div className="flex items-baseline gap-2 min-w-0">
-            <span className="text-[10px] uppercase tracking-[0.12em] text-ink-muted font-body shrink-0" title={`子代理: ${subagentType}`}>
+            <span className="text-[10px] uppercase tracking-[0.12em] text-ink-muted font-body shrink-0" title={`${roleWord}: ${subagentType}`}>
               {subagentType}
             </span>
             {agentModel && (

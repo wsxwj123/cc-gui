@@ -3792,6 +3792,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           maxBudgetUsd: useStore.getState().maxBudgetUsd || undefined,
           // 输入预测(A):server 据此启用 SDK promptSuggestions 并在 result 后留等待窗。
           promptSuggestions: suggestOnClient,
+          // 实验性 agent teams:开则 server 注入 CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1。默认关。
+          agentTeams: useStore.getState().agentTeams === true,
         }),
       });
       const respJson = await res.json();
@@ -4040,6 +4042,13 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                 });
               }
             }
+            // agent teams 队友:task_type==='local_agent' 是最权威的"这是真队友"信号
+            // (普通子代理无此 task_type)。打 isTeammate 标记,让卡片/状态行显示"队友"而非
+            // 泛化"子代理"。名字来源仍走 input.name 解析(见下方 upsertAgent)。
+            if (event.task_type === 'local_agent') {
+              const _st = useStore.getState();
+              if (_st.activeAgents[event.tool_use_id]) _st.upsertAgent(event.tool_use_id, { isTeammate: true });
+            }
           }
           // workflow 进度:滚动更新描述(同 tool_use_id),不改状态。
           if (event.type === 'system' && event.subtype === 'task_progress' && event.tool_use_id) {
@@ -4216,8 +4225,11 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                     setStreamingBlocks([...orderedBlocks]);
                   }
                   if ((block.name === 'Task' || block.name === 'Agent') && parsed) {
+                    // teammate(agent teams)经 Agent 工具 spawn，input 带的是 name(队友真名)
+                    // + model，既无 subagent_type 也无 agent → 补读 parsed.name，否则一路回退成
+                    // 'Agent'/'general-purpose'(用户主诉"显示子代理而非队友"的根因)。
                     store.upsertAgent(block.toolId, {
-                      name: parsed.subagent_type || parsed.agent || block.name,
+                      name: parsed.subagent_type || parsed.agent || parsed.name || block.name,
                       description: parsed.description || parsed.prompt?.slice(0, 80) || '',
                       status: 'working',
                       prompt: parsed.prompt || '',  // #9 子代理派发 prompt
@@ -4279,7 +4291,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                 if (block.name === 'Task' || block.name === 'Agent') {
                   const inp = block.input || {};
                   useStore.getState().upsertAgent(block.id, {
-                    name: inp.subagent_type || inp.agent || block.name,
+                    name: inp.subagent_type || inp.agent || inp.name || block.name,
                     description: inp.description || (inp.prompt ? String(inp.prompt).slice(0, 80) : ''),
                     prompt: inp.prompt || '',
                     status: 'working',
