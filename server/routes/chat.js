@@ -642,25 +642,26 @@ router.post('/chat', async (req, res) => {
     };
     const deadline = Date.now() + 4000;
     let lingering;
+    // 后台 shell 保活的 slot:配置变更(改 settings.json/换 model/effort)会把它置 closing 关流,
+    // 但 CLI 为后台任务保活、generator 不结束 → pumpEnded 永假 → tearingDown() 每轮都返回它。若
+    // 留在等待循环里会稳定白等满 4s,超时后 abort() 又会杀掉整个 CLI = 连坐杀后台训练 shell(不
+    // 可恢复)。铁律:误杀不可恢复 > 双 resume 竞争 —— 一旦发现活 shell 立即跳出,既不白等也不
+    // abort,退回改动前"旧进程为 shell 保活、与新 --resume 并存"的孤儿存活行为。判据与选择性
+    // 停止路径一致:t.kind === 'shell'。
+    const slotHasLiveShell = (s) => [...(s?.liveTasks?.values() ?? [])].some(t => t && t.kind === 'shell');
     while ((lingering = tearingDown()) && Date.now() < deadline) {
+      if (slotHasLiveShell(lingering)) { lingering = null; break; } // 保活:不等不杀,容忍双 resume
       await new Promise((r) => setTimeout(r, 50));
     }
     if (lingering) {
-      // 超时仍未收尾。强制 abort 前先查活 shell:配置变更(改 settings.json/换 model/effort)
-      // 会把一个"idle 但为后台 shell 保活"的 slot 置 closing 关流,但 CLI 为后台任务保活、
-      // generator 不结束 → pumpEnded 永假 → 走到这里。此时 abort() 会杀掉整个 CLI = 连坐杀掉
-      // 后台训练 shell(不可恢复)。铁律:误杀不可恢复 > 双 resume 竞争 —— 有活 shell 就放弃
-      // 强制 abort、也不再白等,容忍旧进程(为 shell 保活)与新 --resume 并存(退回改动前的
-      // 孤儿存活行为)。判据与选择性停止路径一致:t.kind === 'shell'。
-      const hasLiveShell = [...(lingering.liveTasks?.values() ?? [])].some(t => t && t.kind === 'shell');
-      if (!hasLiveShell) {
-        lingering.closing = true;
-        try { lingering.abort?.abort(); } catch {}
-        try { lingering.input?.close(); } catch {}
-        const hardDeadline = Date.now() + 1000;
-        while (tearingDown() && Date.now() < hardDeadline) {
-          await new Promise((r) => setTimeout(r, 50));
-        }
+      // 走到这里 lingering 必无活 shell(有 shell 已上面 break 清空),是正在停止/被弃用的进程,
+      // 强制 abort 是正确兜底,避免同 sid 双 --resume 抢会话锁。
+      lingering.closing = true;
+      try { lingering.abort?.abort(); } catch {}
+      try { lingering.input?.close(); } catch {}
+      const hardDeadline = Date.now() + 1000;
+      while (tearingDown() && Date.now() < hardDeadline) {
+        await new Promise((r) => setTimeout(r, 50));
       }
     }
   }
