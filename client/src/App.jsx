@@ -2381,6 +2381,7 @@ function StreamingStatusLine({ thinking, text, toolCalls, streamStart }) {
   return (
     <div className="px-6 -mt-2 pb-3 animate-fade-in">
       <div className="max-w-[var(--content-max)] mx-auto flex items-center gap-2 pl-[50px] text-[13px] text-ink-soft font-body">
+        <Loader2 size={11} className="animate-spin shrink-0" style={{ color: '#D97757' }} />
         <span className="font-mono truncate font-medium" style={{ color: '#D97757' }}>{label}</span>
         <span style={{ color: '#D97757' }}>…</span>
         <ElapsedTime startedAt={streamStart} className="ml-1" />
