@@ -681,6 +681,10 @@ router.post('/chat', async (req, res) => {
 
   const options = {
     model,
+    // 新模型(Fable5/Opus4.8·4.7/Sonnet5)默认 adaptive 思考的 display 是 omitted(不回摘要),
+    // GUI 就看不到思考内容。显式设 display:'summarized' 让其返回思考摘要;老模型本就 summarized,
+    // 设了无副作用。摘要由旁路模型生成、不计入用户 token 计费,恒定常量对所有请求一致(不进 compatKey)。
+    thinking: { type: 'adaptive', display: 'summarized' },
     // 默认 SDK 不带 Claude Code 系统提示 → 必须显式 preset 才复刻 CLI 行为(工具集/CLAUDE.md 等)。
     systemPrompt,
     // 必须含 user/project/local 才加载 settings.json(=第三方 provider 配置)与 CLAUDE.md。
