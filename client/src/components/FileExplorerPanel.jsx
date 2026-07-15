@@ -190,9 +190,12 @@ export function FileExplorerPanel() {
   const onCtx = useCallback((e, entry) => {
     e.preventDefault();
     e.stopPropagation();
-    // 贴边防溢出:菜单约 190x120,离视口边缘留余量
-    const x = Math.min(e.clientX, window.innerWidth - 200);
-    const y = Math.min(e.clientY, window.innerHeight - 150);
+    // ÷z:clientX/Y 是视觉 px(整个 UI 已 ×--ui-zoom,默认 1.2),但 portal 到 body 的
+    // fixed 菜单 left/top 按布局 px 解释,不除缩放会把菜单渲染到 clientX×z 处飞出视口(=真机"点了没反应")。
+    // 与检查点菜单/上下文用量菜单同款范式。z=1 时行为不变。贴边防溢出:菜单约 190x120,留余量。
+    const z = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--ui-zoom')) || 1;
+    const x = Math.min(e.clientX / z, window.innerWidth / z - 200);
+    const y = Math.min(e.clientY / z, window.innerHeight / z - 150);
     setCtxMenu({ x, y, entry });
   }, []);
 
@@ -247,7 +250,7 @@ export function FileExplorerPanel() {
   }, [rootPath, fetchDir]);
 
   // ── 批量选择删除 ──────────────────────────────────────────────
-  // 选中即立删有确认(批量无 10s 撤销窗:N 条倒计时横条既吵又占位,显式确认框替代)。
+  // 危险确认后不立即删:所选每项各进单删的 10s pending 撤销窗(与单删语义一致,用户要求)。
   const [selMode, setSelMode] = useState(false);
   const [selected, setSelected] = useState(() => new Set());
   const [rootGone, setRootGone] = useState(false); // 项目根目录已被删除 → 空态,不再渲染旧缓存"幽灵树"
@@ -265,32 +268,21 @@ export function FileExplorerPanel() {
     const names = tops.map((p) => p.split(/[/\\]/).pop());
     const { confirmDialog } = await import('../utils/confirmDialog.jsx');
     const ok = await confirmDialog(
-      `删除所选 ${tops.length} 项?\n\n${names.slice(0, 8).join('\n')}${tops.length > 8 ? `\n…等共 ${tops.length} 项` : ''}\n\n批量删除立即执行,不可撤销。`,
+      `删除所选 ${tops.length} 项?\n\n${names.slice(0, 8).join('\n')}${tops.length > 8 ? `\n…等共 ${tops.length} 项` : ''}\n\n删除后有 10 秒可撤销。`,
       { danger: true, confirmText: `删除 ${tops.length} 项` });
     if (!ok) return;
     setBatchBusy(true);
-    const underAny = (x) => tops.some((p) => x === p || x.startsWith(p + '/') || x.startsWith(p + '\\'));
-    setPreview((p) => (p && underAny(p.path) ? null : p));
-    setSelectedFile((sf) => (sf && underAny(sf) ? null : sf));
-    let fail = 0;
+    // 确认后不立即删:每个顶层项各进单删那套 10s pending 撤销窗(deletePath 已内含
+    // 清预览/选中态 + 定时真删 + 父目录刷新 + 失败提示 + 从多选集剔除),批量与单删语义一致。
     for (const p of tops) {
-      try {
-        const r = await fetch('/api/files/delete', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ path: p, rootPath, confirm: true }),
-        });
-        if (!r.ok) fail++;
-      } catch { fail++; }
+      deletePath({
+        path: p,
+        name: p.split(/[/\\]/).pop(),
+        parentPath: p.replace(/[/\\][^/\\]+$/, '') || rootPath,
+      });
     }
     setBatchBusy(false);
     exitSelMode();
-    // 刷新受影响的父目录(去重;父=路径去掉最后一段)
-    const parents = [...new Set(tops.map((p) => p.replace(/[/\\][^/\\]+$/, '') || rootPath))];
-    parents.forEach((d) => fetchDir(d));
-    if (fail) {
-      const { confirmDialog: dlg } = await import('../utils/confirmDialog.jsx');
-      dlg(`${fail} 项删除失败(其余已删除)。常见原因:文件被占用或已不存在。`, { confirmText: '知道了' });
-    }
   };
 
   const undoDelete = (path) => {
