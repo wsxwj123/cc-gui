@@ -4715,6 +4715,11 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       const _sel = getLocalSession();
       if (_sel?.sessionId && _sel?.projectHash) {
         const finalizeSid = _sel.sessionId;
+        // 同会话 stop→resend 守卫:本 finally 属于 turn-1,轮询期间(~2.4s)用户可能已对
+        // 同一会话发出 turn-2。activeProcRef 在本 finally 开头(4696)被置 null,只有新一轮
+        // 发送才会再置成新 pid → 非空即"同会话已开新回合"。此时绝不能 setChatMessages([]) /
+        // 过滤清掉 turn-2 刚 push 进 chatMessages 的在途本地消息(界面回复凭空消失的根因)。
+        const newRoundStarted = () => activeProcRef.current != null;
         const tkey = (m) => {
           const t = Array.isArray(m.text) ? m.text.join('') : (m.text || '');
           return `${m.type}|${(t || '').slice(0, 80)}`;
@@ -4742,6 +4747,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           // otherwise we'd fetch the old session into the now-current tab and clear
           // the wrong session's local messages.
           if (getLocalSession()?.sessionId !== finalizeSid) break;
+          if (newRoundStarted()) break; // 同会话已开新回合:保护 turn-2 在途本地消息
           // PEEK persisted WITHOUT committing to the store. A mid-round jsonl
           // (text+tool written, trailing text C not yet) must NEVER render — if we
           // committed it, the naive [...persisted, ...local] concat + coarse tkey
@@ -4756,14 +4762,17 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             // 才回退,尾部落盘检测形同虚设。兼容两种形态。
             if (r.ok) { const d = await r.json(); peeked = Array.isArray(d) ? d : (d?.messages || []); }
           } catch {}
-          if (getLocalSession()?.sessionId !== finalizeSid) break;
+          if (getLocalSession()?.sessionId !== finalizeSid || newRoundStarted()) break;
           if (!producedReply) {
             // Empty/errored turn — no jsonl twin to wait for. Commit persisted and
             // drop matched NON-turn locals (the user prompt); keep the local ⚠️/❌
             // turn visible.
             try { await fetchMessagesForTab(finalizeSid, _sel.projectHash, { silent: true }); } catch {}
             const known = new Set(getLocalMessages().map(tkey));
-            setChatMessages((prev) => (prev.length ? prev.filter((m) => m.type === 'turn' || !known.has(tkey(m))) : prev));
+            setChatMessages((prev) => {
+              if (newRoundStarted()) return prev; // await 期间开了新回合 → 不清在途消息
+              return prev.length ? prev.filter((m) => m.type === 'turn' || !known.has(tkey(m))) : prev;
+            });
             break;
           }
           if (roundLanded(peeked, i)) {
@@ -4773,7 +4782,10 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             // 例外:type==='btw' 旁问气泡只活在本地(永远没有 jsonl 孪生),整清会让它
             // 在回合结束时凭空消失;保留,切会话/刷新时自然清掉。
             try { await fetchMessagesForTab(finalizeSid, _sel.projectHash, { silent: true }); } catch {}
-            setChatMessages((prev) => (prev.some((m) => m.type === 'btw') ? prev.filter((m) => m.type === 'btw') : []));
+            setChatMessages((prev) => {
+              if (newRoundStarted()) return prev; // await 期间开了新回合 → 不清在途消息
+              return prev.some((m) => m.type === 'btw') ? prev.filter((m) => m.type === 'btw') : [];
+            });
             break;
           }
           if (i < 11) await new Promise((r) => setTimeout(r, 200));
