@@ -14,13 +14,30 @@ export function TodoPanel({ todos, plan = '' }) {
   const hasTodos = Array.isArray(todos) && todos.length > 0;
   const cleanPlan = String(plan || '').trim();
   if (!hasTodos && !cleanPlan) return null;
-  // 计划单独存在(批准后还没拆任务清单):外壳容器由 PlanBlock 自己带,
-  // 这样"隐藏计划"后不会留下空边框壳。
-  if (!hasTodos) return <PlanBlock plan={cleanPlan} standalone />;
-  return <TodoChecklist todos={todos} cleanPlan={cleanPlan} />;
+  // 计划卡与任务清单是两张独立并列的卡(兄弟节点),各自带外壳、各管各的隐藏 ——
+  // 隐藏清单不影响计划,隐藏计划不影响清单。
+  return (
+    <>
+      {cleanPlan && <PlanBlock plan={cleanPlan} />}
+      {hasTodos && <TodoChecklist todos={todos} />}
+    </>
+  );
 }
 
-function TodoChecklist({ todos, cleanPlan }) {
+// 隐藏后留下的极细"显示"小条:单行,点它取消隐藏恢复完整卡。别做大。
+function ShowBar({ label, onClick }) {
+  return (
+    <button
+      onClick={onClick}
+      className="mb-2 w-full flex items-center gap-1.5 px-3 py-1 text-[10px] text-ink-faint hover:text-ink-muted transition-colors"
+    >
+      <ChevronRight size={11} className="shrink-0" />
+      <span>{label}</span>
+    </button>
+  );
+}
+
+function TodoChecklist({ todos }) {
   const [collapsed, setCollapsed] = useState(true);
   // 隐藏态记录隐藏那一刻的"完整状态签名"(含 status):任务清单一旦有任何更新(内容或勾选
   // 变化)签名即变 → 自动重新显示 = "完全隐藏直到下次任务清单更新"。
@@ -45,12 +62,12 @@ function TodoChecklist({ todos, cleanPlan }) {
     }
   }, [allComplete, sig]);
 
-  // 已隐藏:整块不渲染,直到 sig 变化(下次任务清单更新)自动恢复。
-  if (hiddenSig === sig) return null;
+  // 已隐藏:只留一条可点"显示"小条(不占输入框空间),点它恢复;sig 变化(下次任务清单
+  // 更新)仍自动恢复完整卡。
+  if (hiddenSig === sig) return <ShowBar label="显示任务清单" onClick={() => setHiddenSig(null)} />;
 
   return (
     <div className="mb-2 rounded-xl border border-canvas-deep bg-canvas-warm/60 backdrop-blur-sm overflow-hidden">
-      {cleanPlan && <PlanBlock plan={cleanPlan} />}
       {/* Header:折叠切换(整段可点)+ 右侧独立隐藏按钮(button 不可嵌套,故并列)。
           折叠时不画下边框,折叠后只剩"标题行 + 下一条"两行。 */}
       <div className={`w-full flex items-center gap-2 px-3 py-2 ${collapsed ? '' : 'border-b border-canvas-deep/60'}`}>
@@ -95,15 +112,13 @@ function TodoChecklist({ todos, cleanPlan }) {
  * 下次批准新计划(文本不同)自动恢复,与 TodoChecklist 的 hiddenSig 同一套语义。
  * markdown 只在展开时渲染,避免长计划在折叠态也参与输入区的高频重渲。
  */
-function PlanBlock({ plan, standalone = false }) {
+function PlanBlock({ plan }) {
   const [open, setOpen] = useState(false);
   const [hiddenPlan, setHiddenPlan] = useState(null);
-  if (hiddenPlan === plan) return null;
-  const shell = standalone
-    ? 'mb-2 rounded-xl border border-canvas-deep bg-canvas-warm/60 backdrop-blur-sm overflow-hidden'
-    : 'border-b border-canvas-deep/60';
+  // 已隐藏:留一条可点"显示"小条恢复;批准新计划(plan 变)仍自动恢复完整卡。
+  if (hiddenPlan === plan) return <ShowBar label="显示已批准的计划" onClick={() => setHiddenPlan(null)} />;
   return (
-    <div className={shell}>
+    <div className="mb-2 rounded-xl border border-canvas-deep bg-canvas-warm/60 backdrop-blur-sm overflow-hidden">
       <div className="w-full flex items-center gap-2 px-3 py-2">
         <button
           onClick={() => setOpen((o) => !o)}
