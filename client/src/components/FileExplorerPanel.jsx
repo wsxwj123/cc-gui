@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { createPortal } from 'react-dom';
-import { Folder, FolderOpen, File, RefreshCw, AlertCircle, ChevronRight, ChevronDown, FileText, Image as ImageIcon, ExternalLink, Film, Pencil, Save, Undo2, Redo2, X, Check, Trash2, AtSign, MoreVertical, ListChecks, Square, CheckSquare } from 'lucide-react';
+import { Folder, FolderOpen, File, RefreshCw, AlertCircle, ChevronRight, ChevronDown, FileText, Image as ImageIcon, ExternalLink, Film, Pencil, Save, Undo2, Redo2, X, Check, Trash2, AtSign, MoreVertical, ListChecks, Square, CheckSquare, Eye, EyeOff } from 'lucide-react';
 import { useStore } from '../stores/sessionStore.js';
 import { MarkdownRenderer } from './MarkdownRenderer.jsx';
 import { ArtifactPreview } from './ArtifactPreview.jsx';
@@ -65,10 +65,15 @@ export function FileExplorerPanel() {
     initial: 280, min: 100, max: 600, axis: 'y', storageKey: 'cgui-files-tree-h',
   });
 
+  // 显示隐藏文件(.git/node_modules 等 SKIP_DIRS)。ref 供 fetchDir/watcher 读当前值避免闭包过期。
+  const [showHidden, setShowHidden] = useState(() => localStorage.getItem('cgui-files-show-hidden') === '1');
+  const showHiddenRef = useRef(showHidden);
+  showHiddenRef.current = showHidden;
+
   const fetchDir = useCallback(async (path) => {
     setDirs((prev) => ({ ...prev, [path]: { ...(prev[path] || {}), loading: true, error: null } }));
     try {
-      const r = await fetch(`/api/files/list?path=${encodeURIComponent(path)}`);
+      const r = await fetch(`/api/files/list?path=${encodeURIComponent(path)}${showHiddenRef.current ? '&all=1' : ''}`);
       const d = await r.json();
       if (!r.ok) throw new Error(d.error || `${r.status}`);
       setDirs((prev) => ({ ...prev, [path]: { entries: d.entries || [], loading: false, error: null } }));
@@ -311,6 +316,19 @@ export function FileExplorerPanel() {
             {rootPath.split(/[/\\]+/).slice(-2).join('/')}
           </span>
           <div className="flex items-center gap-0.5">
+            <button
+              onClick={() => {
+                const next = !showHidden;
+                setShowHidden(next);
+                showHiddenRef.current = next;               // 同步给 fetchDir(下面立即重拉要读到新值)
+                localStorage.setItem('cgui-files-show-hidden', next ? '1' : '0');
+                // 隐藏项要重新出现/消失,清缓存并重拉所有已展开目录(展开集不变)。
+                setDirs({});
+                [...expanded].forEach((p) => fetchDir(p));
+              }}
+              className={`p-1 rounded ${showHidden ? 'text-accent bg-accent/10' : 'text-ink-faint hover:text-ink'}`}
+              title={showHidden ? '隐藏 .git/node_modules 等' : '显示隐藏文件(.git/node_modules 等)'}
+            >{showHidden ? <Eye size={11} /> : <EyeOff size={11} />}</button>
             <button
               onClick={() => (selMode ? exitSelMode() : setSelMode(true))}
               className={`p-1 rounded ${selMode ? 'text-accent bg-accent/10' : 'text-ink-faint hover:text-ink'}`}
