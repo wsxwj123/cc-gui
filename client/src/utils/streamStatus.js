@@ -34,29 +34,6 @@ export function thinkingLabel(text) {
   return s ? `已思考 · ${s}` : '思考过程';
 }
 
-// 流式动态状态行文案:按流式 turn 的最后一个 block 推导当前动作。
-const STREAM_VERBS = {
-  Read: '正在读取', Bash: '正在运行命令', Grep: '正在搜索', Glob: '正在查找',
-  Edit: '正在编辑', Write: '正在编辑', MultiEdit: '正在编辑',
-  WebFetch: '正在检索', WebSearch: '正在检索',
-};
-export function streamStatusText(blocks) {
-  const last = blocks && blocks.length ? blocks[blocks.length - 1] : null;
-  if (!last) return null;
-  if (last.type === 'thinking') return '正在思考…';
-  if (last.type === 'text') return '正在回复…';
-  if (last.type === 'tool_use' && last.toolCall) {
-    const name = last.toolCall.name;
-    if (name === 'Task' || name === 'Agent') return '正在派发子代理…';
-    if (TASK_TOOL_NAMES.has(name)) return '正在整理任务清单…';
-    const verb = STREAM_VERBS[name];
-    const prev = formatInputPreview(last.toolCall.input);
-    if (verb) return prev ? `${verb} ${prev}` : `${verb}…`;
-    return `正在调用 ${name}…`;
-  }
-  return null;
-}
-
 // ── #1 cowork 分组(纯逻辑,母会话与子代理共用)────────────────────
 // 把一轮有序 blocks 切成"段":每段正文之前连续的 [思考 + 通用工具] 打包成一个
 // group(渲染为折叠),正文/子代理派发/Skill 横幅各自成段(折叠外醒目渲染)。

@@ -2,7 +2,7 @@
 // #2 思考折叠摘要 + 流式动态状态 纯逻辑自检。
 // 覆盖:摘要取首行/去 markdown/截断/空回退;状态行按最后 block 的类型与工具名映射。
 import assert from 'node:assert/strict';
-import { thinkingSummary, thinkingLabel, streamStatusText, groupCoworkBlocks, activeGroupKey } from '../../client/src/utils/streamStatus.js';
+import { thinkingSummary, thinkingLabel, groupCoworkBlocks, activeGroupKey } from '../../client/src/utils/streamStatus.js';
 
 // ── thinkingSummary ──
 assert.equal(thinkingSummary(''), null, '空串 → null');
@@ -24,37 +24,6 @@ assert.equal(thinkingSummary('这是 **加粗** 和 `代码`'), '这是 加粗 �
 assert.equal(thinkingLabel('分析问题的根因'), '已思考 · 分析问题的根因', '有摘要 → 已思考 · X');
 assert.equal(thinkingLabel(''), '思考过程', '无摘要 → 回退 思考过程');
 assert.equal(thinkingLabel('#'), '思考过程', '极短 → 回退 思考过程');
-
-// ── streamStatusText ──
-assert.equal(streamStatusText(null), null, 'null blocks → null');
-assert.equal(streamStatusText([]), null, '空 blocks → null');
-assert.equal(streamStatusText([{ type: 'thinking', content: 'x' }]), '正在思考…', '末 thinking → 正在思考');
-assert.equal(streamStatusText([{ type: 'text', content: 'x' }]), '正在回复…', '末 text → 正在回复');
-assert.equal(
-  streamStatusText([{ type: 'tool_use', toolCall: { name: 'Read', input: { file_path: '/a/b/foo.js' } } }]),
-  '正在读取 foo.js', 'Read → 正在读取 + 文件名(basename)');
-assert.equal(
-  streamStatusText([{ type: 'tool_use', toolCall: { name: 'Bash', input: {} } }]),
-  '正在运行命令…', 'Bash 无预览 → 动词 + 省略号');
-assert.equal(
-  streamStatusText([{ type: 'tool_use', toolCall: { name: 'Grep', input: { pattern: 'TODO' } } }]),
-  '正在搜索 TODO', 'Grep → 正在搜索 + pattern');
-assert.equal(
-  streamStatusText([{ type: 'tool_use', toolCall: { name: 'Task', input: {} } }]),
-  '正在派发子代理…', 'Task → 派发子代理');
-assert.equal(
-  streamStatusText([{ type: 'tool_use', toolCall: { name: 'TaskCreate', input: {} } }]),
-  '正在整理任务清单…', '任务清单工具 → 整理任务清单');
-assert.equal(
-  streamStatusText([{ type: 'tool_use', toolCall: { name: 'SomethingElse', input: {} } }]),
-  '正在调用 SomethingElse…', '未知工具 → 正在调用 name');
-// 取"最后一个" block(前面的忽略)
-assert.equal(
-  streamStatusText([
-    { type: 'text', content: 'a' },
-    { type: 'tool_use', toolCall: { name: 'Edit', input: { file_path: 'x/y.ts' } } },
-  ]),
-  '正在编辑 y.ts', '多 block → 只看最后一个');
 
 // ── groupCoworkBlocks (#1 cowork 分组)──
 const tool = (name, id = name) => ({ type: 'tool_use', toolCall: { id, name, input: {} } });

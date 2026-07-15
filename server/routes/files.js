@@ -137,7 +137,7 @@ router.get('/files/list', async (req, res) => {
     const entries = [];
     for (const e of raw) {
       if (SKIP_EXACT.has(e.name)) continue;
-      if (!showAll && (e.name.startsWith('.') || SKIP_DIRS.has(e.name))) continue;
+      if (!showAll && (e.name.startsWith('.') || (e.isDirectory() && SKIP_DIRS.has(e.name)))) continue;
       const full = join(real, e.name);
       let s;
       try { s = await stat(full); } catch { continue; }
