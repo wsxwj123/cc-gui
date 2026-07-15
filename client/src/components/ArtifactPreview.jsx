@@ -149,14 +149,25 @@ export function ArtifactPreview({ lang, code, coexist = false }) {
   const [mode, setMode] = useState('preview');
   const [fullscreen, setFullscreen] = useState(false);
   const debounced = useDebounced(code, 300);
+  // #3 稳定身份:标识"这个内联块"是否正被停靠(dock 单例带回同一 artifactId)。
+  // 若流式期间父列表重排使本组件卸载重挂,useId 会变 → 断链(RESEARCH 备选 B 兜底);先按 A 实测。
+  const artifactId = useId();
+  const isDocked = useStore((s) => s.artifactDock?.artifactId === artifactId);
+  const foldInline = isDocked && !coexist; // 会话内代码块停靠才折叠;文件浏览器停靠(coexist)不折叠
 
   // BH-1b: 桌面端点"停靠"开右侧 dock(全局单 dock);移动端无横向空间走全屏遮罩。
   // CK-5: coexist=true(从文件浏览器停靠)时,dock 作为独立最右列与文件浏览器并存,
   // 不替换右栏 —— 让用户一边看文件树一边大图预览 html/svg。
   const openDock = () => {
     const st = useStore.getState();
-    st.openArtifactDock({ lang: language, code, tabIndex: st.activeTabIndex, coexist });
+    st.openArtifactDock({ lang: language, code, tabIndex: st.activeTabIndex, coexist, artifactId });
   };
+
+  // #3 流式回写:被停靠时,内联块每拿到新 code 就同步进 dock,右侧面板随流式实时刷新
+  // (不再冻结在点击瞬间快照)。updateArtifactDockCode 内 id 匹配 + code 变化双闸短路。
+  useEffect(() => {
+    if (isDocked) useStore.getState().updateArtifactDockCode(artifactId, code);
+  }, [code, isDocked, artifactId]);
 
   // 全屏时按 Esc 关闭 + 锁 body 滚动。
   useEffect(() => {
@@ -219,7 +230,19 @@ export function ArtifactPreview({ lang, code, coexist = false }) {
     <>
       <div className="my-3 rounded-lg border border-[#3a342b] overflow-hidden">
         {toolbar(false)}
-        <PreviewBody language={language} mode={mode} code={code} debounced={debounced} fullscreen={false} />
+        {foldInline ? (
+          // #3 已停靠:主体折叠成紧凑代码块 + 提示(实时内容看右侧 dock);toolbar 三按钮保留。
+          <div>
+            <pre className="cgui-dark-select bg-[#211e19] px-4 py-2 overflow-hidden text-[12px] leading-snug font-mono text-[#9a8e78] max-h-24">
+              <code>{code}</code>
+            </pre>
+            <div className="px-3.5 py-1 bg-[#2b2722] text-[10px] font-mono text-[#9a8e78] flex items-center gap-1.5 border-t border-[#3a342b]">
+              <PanelRight size={10} className="shrink-0" /> 已停靠到右侧,内容随生成实时更新
+            </div>
+          </div>
+        ) : (
+          <PreviewBody language={language} mode={mode} code={code} debounced={debounced} fullscreen={false} />
+        )}
       </div>
 
       {fullscreen && createPortal(
