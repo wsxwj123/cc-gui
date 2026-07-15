@@ -72,4 +72,31 @@ function makeStopCallback(slot) {
   assert.strictEqual(slot.stopTimer, null, '执行后 stopTimer 置空');
 }
 
+// ---- 场景 4:冷启等待循环遇到"为后台 shell 保活"的 lingering slot → 不 abort ----
+// 复刻 chat.js 冷启前 lingering 收尾块的 H1 判据:超时未收尾时,有活 shell 就放弃强制
+// abort(abort 杀整个 CLI = 连坐杀后台训练 shell,不可恢复),容忍双 resume。
+function lingeringAbortDecision(lingering) {
+  const hasLiveShell = [...(lingering.liveTasks?.values() ?? [])].some(t => t && t.kind === 'shell');
+  let aborted = false;
+  if (!hasLiveShell) { aborted = true; } // 代表 lingering.abort.abort()
+  return { hasLiveShell, aborted };
+}
+{
+  // 有活 shell 的 lingering:必须不 abort
+  const withShell = { liveTasks: new Map([['t-shell', { kind: 'shell' }], ['t-sub', { kind: 'subagent' }]]) };
+  const r1 = lingeringAbortDecision(withShell);
+  assert.strictEqual(r1.hasLiveShell, true, '应识别到活 shell');
+  assert.strictEqual(r1.aborted, false, '有活 shell 时绝不强制 abort(否则连坐杀后台训练)');
+
+  // 无 shell 的 lingering(纯停止中/被弃用进程):走原有强制 abort 兜底
+  const noShell = { liveTasks: new Map([['t-sub', { kind: 'subagent' }]]) };
+  const r2 = lingeringAbortDecision(noShell);
+  assert.strictEqual(r2.hasLiveShell, false, '无 shell');
+  assert.strictEqual(r2.aborted, true, '无 shell 时保留强制 abort 兜底(避免同 sid 双进程)');
+
+  // liveTasks 为空/未定义:视作无 shell,正常 abort
+  const empty = {};
+  assert.strictEqual(lingeringAbortDecision(empty).aborted, true, 'liveTasks 缺失时按无 shell 处理');
+}
+
 console.log('check-stop-reuse-reset: all assertions passed');

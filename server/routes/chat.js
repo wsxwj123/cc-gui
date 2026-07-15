@@ -587,6 +587,12 @@ router.post('/chat', async (req, res) => {
         continue;
       }
       if (s.idleTimer) { clearTimeout(s.idleTimer); s.idleTimer = null; }
+      // epoch 门控前移到任何 await 之前:await setPermissionMode 让出事件循环期间,上一回合
+      // 停止链路武装但没 clear 掉的旧 stopTimer 兜底回调可能溜进来,以旧 epoch 匹配成功 →
+      // abort 这个正被复用的 slot。先 clear 旧 stopTimer 并推进 turnEpoch,让门控不依赖
+      // "idle slot 无 pending stopTimer"这条隐性不变式。
+      if (s.stopTimer) { clearTimeout(s.stopTimer); s.stopTimer = null; }
+      s.turnEpoch = (s.turnEpoch | 0) + 1;
       const wantPlanMode = (chosenMode === 'plan');
       if (wantPlanMode !== (s.sdkMode === 'plan')) {
         try {
@@ -606,12 +612,9 @@ router.post('/chat', async (req, res) => {
       s.turnSubagentSeen = false;
       s.startedAt = Date.now();
       s.finishedAt = null;
-      // H2:上一回合停止链路的残留不得毒化本回合。① 取消上一回合武装的 stopTimer 并推进
-      // turnEpoch,让即便没 clear 掉的旧兜底回调进门比对失败 → no-op,不 abort 这个复用 slot;
-      // ② 清 lastResultAt(否则新回合 stop 的 settled 判据读到旧 result 时间);③ 清掉自维护
-      // 没删净的非 shell 陈旧任务(shell 后台任务刻意跨回合保留,不动)。
-      if (s.stopTimer) { clearTimeout(s.stopTimer); s.stopTimer = null; }
-      s.turnEpoch = (s.turnEpoch | 0) + 1;
+      // H2:上一回合停止链路的残留不得毒化本回合(stopTimer clear + turnEpoch 推进已前移到
+      // await 之前)。① 清 lastResultAt(否则新回合 stop 的 settled 判据读到旧 result 时间);
+      // ② 清掉自维护没删净的非 shell 陈旧任务(shell 后台任务刻意跨回合保留,不动)。
       s.lastResultAt = null;
       if (s.liveTasks) for (const [tid, t] of s.liveTasks) { if (!t || t.kind !== 'shell') s.liveTasks.delete(tid); }
       s.promptPreview = String(prompt).slice(0, 80);
@@ -643,14 +646,21 @@ router.post('/chat', async (req, res) => {
       await new Promise((r) => setTimeout(r, 50));
     }
     if (lingering) {
-      // 超时仍未收尾:强制关它,避免同 sid 双进程(可恢复 shell 已在 idle 复用路径处理,
-      // 到这里的 lingering 是正在停止/被弃用的进程,abort 是正确兜底)。
-      lingering.closing = true;
-      try { lingering.abort?.abort(); } catch {}
-      try { lingering.input?.close(); } catch {}
-      const hardDeadline = Date.now() + 1000;
-      while (tearingDown() && Date.now() < hardDeadline) {
-        await new Promise((r) => setTimeout(r, 50));
+      // 超时仍未收尾。强制 abort 前先查活 shell:配置变更(改 settings.json/换 model/effort)
+      // 会把一个"idle 但为后台 shell 保活"的 slot 置 closing 关流,但 CLI 为后台任务保活、
+      // generator 不结束 → pumpEnded 永假 → 走到这里。此时 abort() 会杀掉整个 CLI = 连坐杀掉
+      // 后台训练 shell(不可恢复)。铁律:误杀不可恢复 > 双 resume 竞争 —— 有活 shell 就放弃
+      // 强制 abort、也不再白等,容忍旧进程(为 shell 保活)与新 --resume 并存(退回改动前的
+      // 孤儿存活行为)。判据与选择性停止路径一致:t.kind === 'shell'。
+      const hasLiveShell = [...(lingering.liveTasks?.values() ?? [])].some(t => t && t.kind === 'shell');
+      if (!hasLiveShell) {
+        lingering.closing = true;
+        try { lingering.abort?.abort(); } catch {}
+        try { lingering.input?.close(); } catch {}
+        const hardDeadline = Date.now() + 1000;
+        while (tearingDown() && Date.now() < hardDeadline) {
+          await new Promise((r) => setTimeout(r, 50));
+        }
       }
     }
   }
