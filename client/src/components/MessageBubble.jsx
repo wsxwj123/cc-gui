@@ -90,6 +90,7 @@ import { ModelBadge, ProviderAvatar } from './ModelBadge.jsx';
 import { ToolCallCard } from './ToolCallCard.jsx';
 import { MarkdownRenderer } from './MarkdownRenderer.jsx';
 import { thinkingLabel } from '../utils/streamStatus.js';
+import { ImageLightbox } from './ImageLightbox.jsx';
 
 // Per-message rollback menu. Shows three choices on click:
 //   - rollback message + later replies only (chat trim)
@@ -329,6 +330,7 @@ function UsageDisplay({ usage, model }) {
 export function MessageBubble({ message, onRollback, onFork }) {
   const isUser = message.role === 'user';
   const [showThinking, setShowThinking] = useState(false);
+  const [zoomImage, setZoomImage] = useState(null); // #7 单击放大的图片附件
 
   if (isUser) {
     return (
@@ -354,12 +356,18 @@ export function MessageBubble({ message, onRollback, onFork }) {
               {/* L3: 附件在文本上方,符合"附件→说明"的自然阅读顺序;CLI 仍收带 @path 的完整 outbound */}
               {Array.isArray(message.attachments) && message.attachments.length > 0 && (
                 <div className="mb-2 flex flex-wrap gap-2">
-                  {message.attachments.map((a, i) => (
+                  {message.attachments.map((a, i) => {
+                    const isImg = a.kind === 'image' && a.preview;
+                    return (
                     <div key={i}
-                      onDoubleClick={() => { fetch('/api/files/open', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: a.path }) }).catch(() => {}); }}
-                      className="flex items-center gap-2 px-2 py-1 bg-canvas border border-canvas-deep rounded-lg max-w-[260px] cursor-pointer hover:border-accent/40 transition-colors" title={`双击用默认应用打开\n${a.path}`}>
-                      {a.kind === 'image' && a.preview ? (
-                        <img src={a.preview} alt={a.name} className="w-10 h-10 rounded object-cover shrink-0" />
+                      // #7 决策:图片卡去双击(单击图片放大);非图片文件卡保持双击打开默认 App。
+                      onDoubleClick={isImg ? undefined : () => { fetch('/api/files/open', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: a.path }) }).catch(() => {}); }}
+                      className={`flex items-center gap-2 px-2 py-1 bg-canvas border border-canvas-deep rounded-lg max-w-[260px] hover:border-accent/40 transition-colors ${isImg ? '' : 'cursor-pointer'}`}
+                      title={isImg ? a.path : `双击用默认应用打开\n${a.path}`}>
+                      {isImg ? (
+                        <img src={a.preview} alt={a.name}
+                          onClick={(e) => { e.stopPropagation(); setZoomImage({ src: a.preview, name: a.name, path: a.path }); }}
+                          className="w-10 h-10 rounded object-cover shrink-0 cursor-zoom-in" />
                       ) : (
                         <div className="w-10 h-10 rounded bg-accent/10 flex items-center justify-center shrink-0">
                           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-accent"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
@@ -370,13 +378,16 @@ export function MessageBubble({ message, onRollback, onFork }) {
                         {a.bytes ? <div className="text-[10px] text-ink-faint font-mono">{(a.bytes/1024).toFixed(1)} KB</div> : null}
                       </div>
                     </div>
-                  ))}
+                  );
+                  })}
                 </div>
               )}
               <CollapsibleUserText text={(message.attachments?.length && message.displayText !== undefined) ? message.displayText : message.text} />
             </div>
           </div>
         </div>
+        {/* #7 已发送图片单击放大;lightbox 内含"用默认 App 打开" */}
+        <ImageLightbox src={zoomImage?.src} name={zoomImage?.name} path={zoomImage?.path} onClose={() => setZoomImage(null)} />
       </div>
     );
   }
