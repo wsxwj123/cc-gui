@@ -391,6 +391,28 @@ router.post('/worktree/merge', async (req, res) => {
   }
 });
 
+/** POST /api/worktree/reveal  { cwd, path } → 在系统文件管理器中显示该树目录。
+ *  不走 Tauri command(生产 remote 上下文有 ACL 坑);手机/远程访问时作用在
+ *  服务器本机上,属预期行为。 */
+router.post('/worktree/reveal', async (req, res) => {
+  try {
+    const ctx = await requireWorktree(req, res);
+    if (!ctx) return;
+    const cmd = process.platform === 'darwin' ? 'open'
+      : process.platform === 'win32' ? 'explorer' : 'xdg-open';
+    try {
+      // 数组传参不拼字符串(Windows execFile 内嵌双引号脆);目录路径直接传即可。
+      await execFileP(cmd, [ctx.wtPath], { timeout: 10000 });
+    } catch (err) {
+      // explorer.exe 即使成功打开也常以退出码 1 结束,Win 下非零退出不当失败。
+      if (process.platform !== 'win32') throw err;
+    }
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.stderr || err.message });
+  }
+});
+
 /** DELETE /api/worktree  { cwd, path } */
 router.delete('/worktree', async (req, res) => {
   try {

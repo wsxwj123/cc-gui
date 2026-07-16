@@ -1968,6 +1968,24 @@ function SessionList() {
     }
   };
 
+  // 在 Finder/资源管理器中显示该树目录(远程访问时打开的是服务器本机,预期行为)。
+  const revealWorktree = async (tree, e) => {
+    e?.stopPropagation();
+    if (!tree?.path || !selectedProject) return;
+    try {
+      const r = await fetch('/api/worktree/reveal', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cwd: selectedProject.path, path: tree.path }),
+      });
+      if (!r.ok) {
+        const d = await r.json().catch(() => ({}));
+        confirmDialog('打开失败：' + (d.error || r.status));
+      }
+    } catch (err) {
+      confirmDialog('打开失败：' + err.message);
+    }
+  };
+
   // 一键把 worktree 分支 merge 进主分支。冲突时服务端已自动 abort,这里只负责
   // 把冲突文件清单如实呈现;成功后刷新列表(领先数归零)。
   const mergeWorktree = async (tree, e) => {
@@ -2292,7 +2310,16 @@ function SessionList() {
                         </div>
                       )}
                     </div>
-                    {/* 侧栏操作键与行按钮并列(button 嵌 button 非法):合并 / 删除 */}
+                    {/* 侧栏操作键与行按钮并列(button 嵌 button 非法):打开目录 / 合并 / 删除 */}
+                    {!t.prunable && (
+                      <button
+                        onClick={(e) => revealWorktree(t, e)}
+                        title="在文件管理器中显示"
+                        className="shrink-0 px-2 rounded-lg border border-canvas-deep text-ink-faint hover:text-ink hover:bg-canvas-warm transition-colors flex items-center"
+                      >
+                        <FolderOpen size={13} />
+                      </button>
+                    )}
                     {!t.isMain && !t.prunable && t.aheadCount > 0 && (
                       <button
                         onClick={(e) => mergeWorktree(t, e)}
