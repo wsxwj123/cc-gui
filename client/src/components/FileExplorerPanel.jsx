@@ -192,6 +192,15 @@ export function FileExplorerPanel() {
     return () => clearInterval(id);
   }, [pendingCount]);
 
+  // Esc 关闭菜单:与遮罩外部点击共关同一 ctxMenu state,右键/⋮ 两种打开方式行为一致。
+  // 不 preventDefault/stopPropagation——App 的双击 Esc 停止逻辑首按只是记时,不冲突。
+  useEffect(() => {
+    if (!ctxMenu) return;
+    const onEsc = (e) => { if (e.key === 'Escape') setCtxMenu(null); };
+    window.addEventListener('keydown', onEsc);
+    return () => window.removeEventListener('keydown', onEsc);
+  }, [ctxMenu]);
+
   const onCtx = useCallback((e, entry) => {
     e.preventDefault();
     e.stopPropagation();
@@ -399,7 +408,11 @@ export function FileExplorerPanel() {
       {ctxMenu && createPortal(
         <div className="fixed inset-0 z-40"
           onMouseDown={() => setCtxMenu(null)}
-          onContextMenu={(e) => { e.preventDefault(); setCtxMenu(null); }}>
+          // 只压默认菜单,不在这里关闭:行上 mousedown(button2) 兜底先开菜单→React 同步
+          // flush 挂上本遮罩→同一手势随后的 contextmenu 落在遮罩上,若在此关闭=开了又关
+          // (Chromium/WebView2 右键"没反应"的根因)。关闭已由上面的 onMouseDown(任意键)
+          // 负责:右键另一行时 mousedown 关旧遮罩→contextmenu 落回行上开新菜单,天然切换。
+          onContextMenu={(e) => e.preventDefault()}>
           <div className="absolute glass-popover py-1 min-w-[180px] shadow-lg"
             style={{ left: ctxMenu.x, top: ctxMenu.y }}
             onMouseDown={(e) => e.stopPropagation()}>
