@@ -77,7 +77,8 @@ export function McpForm({ editing, onClose, onSaved }) {
   const [regLoading, setRegLoading] = useState(false);
   const [regErr, setRegErr] = useState('');
   useEffect(() => {
-    if (!regOpen || !regQuery.trim()) { setRegItems(null); setRegErr(''); return; }
+    // 早退也要复位 regLoading:在飞请求的完成回调被 alive=false 跳过,不复位则"搜索中"常驻。
+    if (!regOpen || !regQuery.trim()) { setRegItems(null); setRegErr(''); setRegLoading(false); return; }
     let alive = true;
     const t = setTimeout(async () => {
       setRegLoading(true); setRegErr('');
