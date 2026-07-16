@@ -1229,45 +1229,142 @@ function CloseBehaviorPicker() {
 // F1: 全局截图热键。写 ~/.claude-gui/hotkey.json,Tauri Rust 在启动时读取并注册系统快捷键。
 // MVP:仅「启用/禁用 + 显示当前快捷键」,改键后续再加。启用/禁用改后需重启应用生效
 // (Rust 只在 setup 读一次)。仅桌面壳有意义,浏览器页(6677)无系统级热键,故非 Tauri 不渲染。
+const DEFAULT_ACCEL = 'CmdOrCtrl+Shift+2';
+// keydown 组合 → Tauri accelerator。修饰键归一(mac Cmd 与 win Ctrl 都写 CmdOrCtrl),
+// 主键用 e.code 取原始字母/数字(避开 Shift 把 2 变 @),F1-F24 保留。要求至少一个修饰键
+// + 一个有效主键,否则返回 null(纯字母键会打字、不适合做全局热键)。字符集与后端 ACCEL_RE
+// (/^[A-Za-z0-9+ ]+$/)一致:CmdOrCtrl/Alt/Shift/字母/数字/Fn 全是字母数字。
+function eventToAccelerator(e) {
+  const mods = [];
+  if (e.metaKey || e.ctrlKey) mods.push('CmdOrCtrl');
+  if (e.altKey) mods.push('Alt');
+  if (e.shiftKey) mods.push('Shift');
+  const code = e.code || '';
+  let main = null;
+  if (/^Key[A-Z]$/.test(code)) main = code.slice(3);
+  else if (/^Digit[0-9]$/.test(code)) main = code.slice(5);
+  else if (/^F([1-9]|1[0-9]|2[0-4])$/.test(code)) main = code; // F1..F24
+  if (!main || mods.length === 0) return null;
+  return [...mods, main].join('+');
+}
+
 function ScreenshotHotkeyPicker() {
   const [cfg, setCfg] = useState(null); // { enabled, accelerator }
+  const [recording, setRecording] = useState(false);
+  const [captured, setCaptured] = useState(null); // 录制态临时捕获的 accelerator
+  const [err, setErr] = useState(null);
   useEffect(() => {
     fetch('/api/prefs/hotkey').then((r) => r.json())
-      .then((d) => setCfg({ enabled: d.enabled !== false, accelerator: d.accelerator || 'CmdOrCtrl+Shift+2' }))
-      .catch(() => setCfg({ enabled: true, accelerator: 'CmdOrCtrl+Shift+2' }));
+      .then((d) => setCfg({ enabled: d.enabled !== false, accelerator: d.accelerator || DEFAULT_ACCEL }))
+      .catch(() => setCfg({ enabled: true, accelerator: DEFAULT_ACCEL }));
   }, []);
+
+  // 录制态:捕获全局 keydown。Esc 取消;有效组合暂存到 captured 等确认。
+  useEffect(() => {
+    if (!recording) return;
+    const onKey = (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      if (e.key === 'Escape') { setRecording(false); setCaptured(null); return; }
+      const accel = eventToAccelerator(e);
+      if (accel) setCaptured(accel);
+    };
+    window.addEventListener('keydown', onKey, true);
+    return () => window.removeEventListener('keydown', onKey, true);
+  }, [recording]);
+
   if (!isTauri()) return null;
   if (!cfg) return null;
-  const save = (next) => {
-    setCfg(next);
-    fetch('/api/prefs/hotkey', {
-      method: 'PUT', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(next),
-    }).catch(() => {});
+
+  const invokeTauri = (cmd, args) =>
+    import('@tauri-apps/api/core').then(({ invoke }) => invoke(cmd, args));
+
+  // 应用配置:先经 Rust 命令真注册(失败即抛,是键位可用性的唯一权威),成功后再 PUT 落盘。
+  // 注册失败(被系统/其它 app 占用)时恢复旧键注册,避免热键彻底失效,并提示。
+  const apply = async (next) => {
+    setErr(null);
+    const prev = cfg;
+    try {
+      await invokeTauri('set_screenshot_hotkey', { enabled: next.enabled, accel: next.accelerator });
+      await fetch('/api/prefs/hotkey', {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(next),
+      });
+      setCfg(next);
+    } catch {
+      // 恢复旧键注册,状态回退
+      invokeTauri('set_screenshot_hotkey', { enabled: prev.enabled, accel: prev.accelerator }).catch(() => {});
+      setErr('该组合无法注册，可能被系统或其它应用占用，请换一个');
+    }
   };
+
+  const confirmCaptured = () => {
+    if (!captured) return;
+    setRecording(false);
+    const accel = captured;
+    setCaptured(null);
+    apply({ enabled: true, accelerator: accel });
+  };
+
   // 展示用:把 CmdOrCtrl 按平台显示为 ⌘ / Ctrl,更直观。存储值不变(始终 CmdOrCtrl+…)。
   const isMac = typeof navigator !== 'undefined' && /Mac/i.test(navigator.platform || '');
-  const display = (cfg.accelerator || '')
+  const toDisplay = (accel) => (accel || '')
     .replace(/CmdOrCtrl/gi, isMac ? '⌘' : 'Ctrl')
     .replace(/\bShift\b/gi, isMac ? '⇧' : 'Shift')
     .replace(/\bAlt\b/gi, isMac ? '⌥' : 'Alt')
     .split('+').map((s) => s.trim()).filter(Boolean).join(' + ');
+
   return (
     <div className="rounded-lg border border-canvas-deep bg-canvas-warm/40 p-3">
-      <div className="text-[12px] font-medium text-ink font-body mb-1.5 flex items-center gap-1.5">全局截图热键<EffectBadge level="restart" /></div>
-      <div className="flex items-center gap-3">
+      <div className="text-[12px] font-medium text-ink font-body mb-1.5 flex items-center gap-1.5">全局截图热键<EffectBadge level="immediate" /></div>
+      <div className="flex items-center gap-2 flex-wrap">
         <button
-          onClick={() => save({ ...cfg, enabled: !cfg.enabled })}
+          onClick={() => apply({ ...cfg, enabled: !cfg.enabled })}
           className={`px-2.5 py-1 text-[11px] rounded-md font-body transition-colors ${cfg.enabled ? 'bg-accent text-white' : 'bg-canvas-warm text-ink-muted hover:text-ink border border-canvas-deep'}`}>
           {cfg.enabled ? '已启用' : '已禁用'}
         </button>
-        <div className="text-[11px] text-ink-muted font-body">
-          当前快捷键：<span className="font-mono text-ink">{display || '未设置'}</span>
-        </div>
+        {recording ? (
+          <>
+            <span className="px-2.5 py-1 text-[11px] rounded-md font-mono border border-accent bg-accent/10 text-ink min-w-[120px] text-center">
+              {captured ? toDisplay(captured) : '按下组合键…'}
+            </span>
+            <button
+              onClick={confirmCaptured}
+              disabled={!captured}
+              className="px-2 py-1 text-[11px] rounded-md font-body bg-accent text-white disabled:opacity-40 disabled:cursor-not-allowed">
+              确认
+            </button>
+            <button
+              onClick={() => { setRecording(false); setCaptured(null); }}
+              className="px-2 py-1 text-[11px] rounded-md font-body bg-canvas-warm text-ink-muted hover:text-ink border border-canvas-deep">
+              取消
+            </button>
+          </>
+        ) : (
+          <>
+            <span className="text-[11px] text-ink-muted font-body">
+              当前快捷键：<span className="font-mono text-ink">{toDisplay(cfg.accelerator) || '未设置'}</span>
+            </span>
+            <button
+              onClick={() => { setErr(null); setCaptured(null); setRecording(true); }}
+              className="px-2 py-1 text-[11px] rounded-md font-body bg-canvas-warm text-ink-muted hover:text-ink border border-canvas-deep">
+              修改
+            </button>
+            {cfg.accelerator !== DEFAULT_ACCEL && (
+              <button
+                onClick={() => apply({ enabled: cfg.enabled, accelerator: DEFAULT_ACCEL })}
+                className="px-2 py-1 text-[11px] rounded-md font-body text-ink-faint hover:text-ink">
+                恢复默认
+              </button>
+            )}
+          </>
+        )}
       </div>
+      {err && <div className="text-[10.5px] text-red-500 font-body mt-1.5">{err}</div>}
       <div className="text-[10.5px] text-ink-faint font-body mt-1.5 leading-snug">
-        按下热键会将 GUI 置于最前并触发截图（macOS 框选区域或点击窗口，Windows 抓取主屏），截图自动加入当前会话输入框。
-        修改启用状态后需重新打开应用才生效。macOS 首次截图需在 系统设置 → 隐私与安全性 → 屏幕录制 勾选 Claude GUI。
+        按下热键触发截图（macOS 框选区域或点击窗口，Windows 抓取主屏），截图自动加入当前会话输入框，完成后 GUI 回到前台。
+        触发时不会抢占前台，避免盖住要截的目标窗口。修改后立即生效，无需重启。修改快捷键需按含 Cmd/Ctrl/Alt/Shift 的组合键，Esc 取消录制。
+        macOS 首次截图需在 系统设置 → 隐私与安全性 → 屏幕录制 勾选 Claude GUI。
       </div>
     </div>
   );
