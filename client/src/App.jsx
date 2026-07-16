@@ -1814,11 +1814,80 @@ function SessionList() {
   const [worktreeOpen, setWorktreeOpen] = useState(false);
   const [worktreeList, setWorktreeList] = useState(null);
   const [newWorktreeName, setNewWorktreeName] = useState('');
+  // 行内展开态:{ path, mode:'commits'|'dirty', loading, commits?, files?, error?,
+  // checked?:Set, message?, committing? } —— 一次只展开一行,再点同项收起。
+  const [wtExpand, setWtExpand] = useState(null);
+
+  // 展开某树的领先 commit 列表(点"领先 N"徽章)。
+  const toggleWtCommits = async (t) => {
+    if (wtExpand?.path === t.path && wtExpand.mode === 'commits') { setWtExpand(null); return; }
+    setWtExpand({ path: t.path, mode: 'commits', loading: true });
+    try {
+      const q = `cwd=${encodeURIComponent(selectedProject.path)}&path=${encodeURIComponent(t.path)}`;
+      const r = await fetch(`/api/worktree/commits?${q}`);
+      const d = await r.json();
+      setWtExpand((s) => s && s.path === t.path
+        ? (r.ok ? { ...s, loading: false, commits: d.commits || [], base: d.base }
+                : { ...s, loading: false, error: d.error || `${r.status}` })
+        : s);
+    } catch (e) {
+      setWtExpand((s) => s && s.path === t.path ? { ...s, loading: false, error: e.message } : s);
+    }
+  };
+
+  // 展开某树的脏文件勾选提交面板(点"N 未提交文件"徽章)。
+  const toggleWtDirty = async (t) => {
+    if (wtExpand?.path === t.path && wtExpand.mode === 'dirty') { setWtExpand(null); return; }
+    setWtExpand({ path: t.path, mode: 'dirty', loading: true, checked: new Set(), message: '' });
+    try {
+      const q = `cwd=${encodeURIComponent(selectedProject.path)}&path=${encodeURIComponent(t.path)}`;
+      const r = await fetch(`/api/worktree/dirty?${q}`);
+      const d = await r.json();
+      setWtExpand((s) => s && s.path === t.path
+        ? (r.ok ? { ...s, loading: false, files: d.files || [], checked: new Set((d.files || []).map((f) => f.file)) }
+                : { ...s, loading: false, error: d.error || `${r.status}` })
+        : s);
+    } catch (e) {
+      setWtExpand((s) => s && s.path === t.path ? { ...s, loading: false, error: e.message } : s);
+    }
+  };
+
+  const wtToggleFile = (file) => setWtExpand((s) => {
+    if (!s?.checked) return s;
+    const checked = new Set(s.checked);
+    if (checked.has(file)) checked.delete(file); else checked.add(file);
+    return { ...s, checked };
+  });
+
+  const wtCommit = async (t) => {
+    const s = wtExpand;
+    if (!s || s.path !== t.path) return;
+    const files = [...(s.checked || [])];
+    const message = (s.message || '').trim();
+    if (files.length === 0) return confirmDialog('未勾选任何文件。');
+    if (!message) return confirmDialog('请填写 commit message。');
+    if (!(await confirmDialog(`提交 ${files.length} 个文件到 ${t.branch || t.path}？\n\n${message}`, { danger: false }))) return;
+    setWtExpand((x) => x && x.path === t.path ? { ...x, committing: true } : x);
+    try {
+      const r = await fetch('/api/worktree/commit', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cwd: selectedProject.path, path: t.path, files, message }),
+      });
+      const d = await r.json();
+      if (!r.ok) { setWtExpand((x) => x && x.path === t.path ? { ...x, committing: false } : x); return confirmDialog('提交失败：' + (d.error || r.status)); }
+      setWtExpand(null);
+      openWorktreePicker(); // 刷新脏文件数/领先数
+    } catch (err) {
+      setWtExpand((x) => x && x.path === t.path ? { ...x, committing: false } : x);
+      confirmDialog('提交失败：' + err.message);
+    }
+  };
 
   const openWorktreePicker = async () => {
     if (!selectedProject) return;
     setWorktreeOpen(true);
     setWorktreeList(null);
+    setWtExpand(null);
     try {
       const r = await fetch(`/api/worktree?cwd=${encodeURIComponent(selectedProject.path)}`);
       const d = await r.json();
@@ -2101,13 +2170,18 @@ function SessionList() {
                 <div className="text-[11px] text-ink-faint py-6 text-center font-body">没有现有 worktree</div>
               ) : (
                 worktreeList.map((t) => (
-                  <div key={t.path} className="flex items-stretch gap-1 mb-1">
-                    <button
+                  <div key={t.path} className="mb-1">
+                   <div className="flex items-stretch gap-1">
+                    {/* 行容器改 div role=button:徽章是可点击控件,button 嵌 button 非法(WKWebView 行为不可预测) */}
+                    <div
+                      role="button"
+                      tabIndex={0}
                       onClick={() => { if (!t.prunable) enterWorktree(t); }}
+                      onKeyDown={(e) => { if (!t.prunable && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); enterWorktree(t); } }}
                       title={t.prunable ? '目录已丢失(被手动删除),只能删除此记录' : undefined}
-                      className={`flex-1 min-w-0 text-left px-3 py-2 rounded-lg border border-canvas-deep transition-colors group ${t.prunable ? 'opacity-50 cursor-not-allowed' : 'hover:bg-canvas-warm'}`}
+                      className={`flex-1 min-w-0 text-left px-3 py-2 rounded-lg border border-canvas-deep transition-colors group ${t.prunable ? 'opacity-50 cursor-not-allowed' : 'hover:bg-canvas-warm cursor-pointer'}`}
                     >
-                      <div className="flex items-center gap-2 mb-0.5 min-w-0">
+                      <div className="flex items-center gap-2 mb-0.5 min-w-0 flex-wrap">
                         <GitBranch size={12} className="text-accent shrink-0" />
                         <span className="text-xs font-medium font-mono text-ink truncate min-w-0">
                           {t.branch || '(detached)'}
@@ -2118,10 +2192,25 @@ function SessionList() {
                         {t.prunable && (
                           <span className="text-[9px] px-1.5 py-0.5 bg-red-50 text-red-600 rounded font-mono">目录已丢失</span>
                         )}
+                        {t.aheadCount > 0 && (
+                          <button
+                            type="button"
+                            onClick={(e) => { e.stopPropagation(); toggleWtCommits(t); }}
+                            title={`领先${t.aheadBase === 'upstream' ? '上游' : '主分支'} ${t.aheadCount} 个提交,点击查看列表`}
+                            className={`text-[9px] px-1.5 py-0.5 rounded font-mono transition-colors ${wtExpand?.path === t.path && wtExpand.mode === 'commits' ? 'bg-accent/20 text-accent' : 'bg-sky-50 text-sky-700 hover:bg-sky-100'}`}
+                          >
+                            领先 {t.aheadCount} 提交
+                          </button>
+                        )}
                         {t.dirtyFileCount > 0 && (
-                          <span className="text-[9px] px-1.5 py-0.5 bg-amber-50 text-amber-700 rounded font-mono">
-                            {t.dirtyFileCount} 未提交
-                          </span>
+                          <button
+                            type="button"
+                            onClick={(e) => { e.stopPropagation(); toggleWtDirty(t); }}
+                            title="未提交的文件,点击勾选提交"
+                            className={`text-[9px] px-1.5 py-0.5 rounded font-mono transition-colors ${wtExpand?.path === t.path && wtExpand.mode === 'dirty' ? 'bg-accent/20 text-accent' : 'bg-amber-50 text-amber-700 hover:bg-amber-100'}`}
+                          >
+                            {t.dirtyFileCount} 未提交文件
+                          </button>
                         )}
                       </div>
                       <div className="text-[10.5px] text-ink-faint font-mono truncate">{t.path}</div>
@@ -2133,7 +2222,7 @@ function SessionList() {
                           </span>
                         </div>
                       )}
-                    </button>
+                    </div>
                     {!t.isMain && (
                       <button
                         onClick={(e) => deleteWorktree(t, e)}
@@ -2143,6 +2232,73 @@ function SessionList() {
                         <Trash2 size={13} />
                       </button>
                     )}
+                   </div>
+                   {/* 行内展开:领先 commit 列表 / 脏文件勾选提交 */}
+                   {wtExpand?.path === t.path && (
+                     <div className="mt-1 ml-2 mr-9 rounded-lg border border-canvas-deep bg-canvas-warm/40 p-2 animate-fade-in">
+                       {wtExpand.loading ? (
+                         <div className="text-[10.5px] text-ink-faint py-2 text-center font-body">加载中…</div>
+                       ) : wtExpand.error ? (
+                         <div className="text-[10.5px] text-red-600 py-2 text-center font-body px-2">{wtExpand.error}</div>
+                       ) : wtExpand.mode === 'commits' ? (
+                         (wtExpand.commits || []).length === 0 ? (
+                           <div className="text-[10.5px] text-ink-faint py-2 text-center font-body">没有领先的提交</div>
+                         ) : (
+                           <div className="flex flex-col gap-1">
+                             {wtExpand.commits.map((c) => (
+                               <div key={c.sha} className="flex items-baseline gap-2 min-w-0">
+                                 <span className="text-[10px] font-mono text-accent shrink-0">{c.sha.slice(0, 7)}</span>
+                                 <span className="text-[10.5px] text-ink-soft font-body truncate min-w-0 flex-1">{c.subject}</span>
+                                 <span className="text-[9.5px] text-ink-ghost font-mono shrink-0">
+                                   {c.ts ? new Date(c.ts).toLocaleDateString('zh-CN') : ''}
+                                 </span>
+                               </div>
+                             ))}
+                           </div>
+                         )
+                       ) : (
+                         // dirty 勾选提交
+                         (wtExpand.files || []).length === 0 ? (
+                           <div className="text-[10.5px] text-ink-faint py-2 text-center font-body">没有未提交的文件</div>
+                         ) : (
+                           <div className="flex flex-col gap-1.5">
+                             <div className="max-h-40 overflow-y-auto flex flex-col gap-0.5">
+                               {wtExpand.files.map((f) => (
+                                 <label key={f.file} className="flex items-center gap-2 min-w-0 cursor-pointer hover:bg-canvas-warm rounded px-1 py-0.5">
+                                   <input
+                                     type="checkbox"
+                                     checked={wtExpand.checked?.has(f.file) || false}
+                                     onChange={() => wtToggleFile(f.file)}
+                                     className="shrink-0"
+                                   />
+                                   <span className="text-[9.5px] font-mono text-amber-700 shrink-0 w-5">{f.status || '?'}</span>
+                                   <span className="text-[10.5px] font-mono text-ink-soft truncate min-w-0">{f.file}</span>
+                                 </label>
+                               ))}
+                             </div>
+                             <input
+                               type="text"
+                               value={wtExpand.message || ''}
+                               onChange={(e) => setWtExpand((s) => s && s.path === t.path ? { ...s, message: e.target.value } : s)}
+                               placeholder="commit message"
+                               className="w-full bg-canvas border border-canvas-deep rounded px-2 py-1 text-[11px] font-mono text-ink focus:outline-none focus:border-accent/40"
+                             />
+                             <div className="flex items-center justify-between gap-2">
+                               <span className="text-[10px] text-ink-faint font-body">已选 {wtExpand.checked?.size || 0} / {wtExpand.files.length} 个文件</span>
+                               <button
+                                 type="button"
+                                 disabled={wtExpand.committing}
+                                 onClick={() => wtCommit(t)}
+                                 className="btn-accent px-3 py-1 text-[10.5px] font-body disabled:opacity-50"
+                               >
+                                 {wtExpand.committing ? '提交中…' : '提交所选'}
+                               </button>
+                             </div>
+                           </div>
+                         )
+                       )}
+                     </div>
+                   )}
                   </div>
                 ))
               )}

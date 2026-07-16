@@ -25,6 +25,46 @@ async function findGitRoot(start) {
   return null;
 }
 
+// Windows 上 git 输出正斜杠/盘符小写与 Node 路径不一致,统一归一后再比较。
+function normPath(p) {
+  const r = pathResolve(p);
+  return process.platform === 'win32' ? r.toLowerCase() : r;
+}
+
+/** 校验 query/body 里的 path 是本仓 `git worktree list` 登记的树。
+ *  safe() 只挡 $HOME 外与 ../,白名单再收紧到"只能对本仓 worktree 执行 git",
+ *  不开任意路径 git 执行口。校验失败已写响应,调用方拿到 null 直接 return。 */
+async function requireWorktree(req, res) {
+  const src = req.method === 'GET' ? req.query : (req.body || {});
+  const cwd = safe(String(src.cwd || ''));
+  const wtPath = safe(String(src.path || ''));
+  const root = await findGitRoot(cwd);
+  if (!root) { res.status(400).json({ error: 'not inside a git repo' }); return null; }
+  const out = await execFileP('git', ['-C', root, 'worktree', 'list', '--porcelain'], { timeout: 10000 });
+  const target = normPath(wtPath);
+  const listed = out.stdout.split('\n')
+    .some((l) => l.startsWith('worktree ') && normPath(l.slice(9)) === target);
+  if (!listed) { res.status(400).json({ error: 'path is not a worktree of this repo' }); return null; }
+  return { root, wtPath };
+}
+
+/** 该树的脏文件清单(porcelain -z 解析)。gitignored 文件天然不在 status 输出里,
+ *  .local/.env 等私有文件不会出现在候选清单。 */
+async function dirtyFiles(wtPath) {
+  const out = await execFileP('git', ['-C', wtPath, 'status', '--porcelain=v1', '-z'],
+    { timeout: 10000, maxBuffer: 8 * 1024 * 1024 });
+  const tokens = out.stdout.split('\0');
+  const files = [];
+  for (let i = 0; i < tokens.length; i++) {
+    const tk = tokens[i];
+    if (tk.length < 4) continue; // "XY <path>" 至少 4 字符
+    const status = tk.slice(0, 2);
+    files.push({ file: tk.slice(3), status: status.trim() });
+    if (status[0] === 'R' || status[0] === 'C') i++; // rename/copy 后跟原路径 token,跳过
+  }
+  return files;
+}
+
 /** POST /api/worktree  { cwd, name? } → creates a sibling worktree */
 router.post('/worktree', async (req, res) => {
   try {
@@ -87,6 +127,14 @@ router.get('/worktree', async (req, res) => {
     }
     if (cur) trees.push(cur);
 
+    // resolve 归一后再比:Windows 上 git porcelain 输出正斜杠(C:/Users/…)而 root
+    // 是 Node 反斜杠路径,字符串直比恒 false → 主工作区丢"主"标签、误出删除按钮。
+    // pathResolve 不归一盘符大小写:CLI cwd 常以小写盘符记录(d:\proj),仍会 false →
+    // 该修复要防的原症状换个形态复发;故 win32 下再 toLowerCase 比较(normPath)。
+    // 先算 isMain 才能拿到主分支名,供下方 aheadCount 用作基准。
+    for (const t of trees) t.isMain = normPath(t.path) === normPath(root);
+    const mainBranch = trees.find((t) => t.isMain)?.branch || null;
+
     // Enrich each worktree with last-commit subject + timestamp + uncommitted change count.
     for (const t of trees) {
       try {
@@ -98,17 +146,109 @@ router.get('/worktree', async (req, res) => {
         const status = await execFileP('git', ['-C', t.path, 'status', '--porcelain'], { timeout: 4000 });
         t.dirtyFileCount = status.stdout.trim().split('\n').filter(Boolean).length;
       } catch { t.dirtyFileCount = 0; }
-      // resolve 归一后再比:Windows 上 git porcelain 输出正斜杠(C:/Users/…)而 root
-      // 是 Node 反斜杠路径,字符串直比恒 false → 主工作区丢"主"标签、误出删除按钮。
-      // pathResolve 不归一盘符大小写:CLI cwd 常以小写盘符记录(d:\proj),仍会 false →
-      // 该修复要防的原症状换个形态复发;故 win32 下再 toLowerCase 比较。
-      const a = pathResolve(t.path), b = pathResolve(root);
-      t.isMain = process.platform === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b;
+      // 领先计数:有 upstream 用 @{u}(口径=未推送);否则非主树相对主分支;
+      // 都没有(主树无 upstream / detached 主分支)不给字段,前端不显示。
+      try {
+        let out = null, base = null;
+        try {
+          out = await execFileP('git', ['-C', t.path, 'rev-list', '--count', '@{u}..HEAD'], { timeout: 4000 });
+          base = 'upstream';
+        } catch {
+          if (!t.isMain && mainBranch && t.branch !== mainBranch) {
+            out = await execFileP('git', ['-C', t.path, 'rev-list', '--count', `refs/heads/${mainBranch}..HEAD`], { timeout: 4000 });
+            base = mainBranch;
+          }
+        }
+        if (out) { t.aheadCount = parseInt(out.stdout.trim(), 10) || 0; t.aheadBase = base; }
+      } catch {}
     }
 
     res.json({ root, trees });
   } catch (err) {
     res.status(500).json({ error: err.message });
+  }
+});
+
+/** GET /api/worktree/commits?cwd=&path= → 相对基准领先的 commit 列表(点徽章展开时拉取)。
+ *  base 解析:@{u} 存在用 upstream;否则主工作区分支;都没有退化为最近 20 条。 */
+router.get('/worktree/commits', async (req, res) => {
+  try {
+    const ctx = await requireWorktree(req, res);
+    if (!ctx) return;
+    const { root, wtPath } = ctx;
+    let range = null, base = null;
+    try {
+      await execFileP('git', ['-C', wtPath, 'rev-parse', '--verify', '--quiet', '@{u}'], { timeout: 4000 });
+      range = '@{u}..HEAD'; base = 'upstream';
+    } catch {
+      if (normPath(wtPath) !== normPath(root)) {
+        try {
+          const r = await execFileP('git', ['-C', root, 'symbolic-ref', '--short', '-q', 'HEAD'], { timeout: 4000 });
+          const mainBranch = r.stdout.trim();
+          if (mainBranch) { range = `refs/heads/${mainBranch}..HEAD`; base = mainBranch; }
+        } catch {}
+      }
+    }
+    const args = ['-C', wtPath, 'log', '--format=%H%x09%ct%x09%s'];
+    if (range) args.push(range, '-n', '50');
+    else args.push('-n', '20');
+    const out = await execFileP('git', args, { timeout: 10000, maxBuffer: 4 * 1024 * 1024 });
+    const commits = out.stdout.split('\n').filter(Boolean).map((l) => {
+      const [sha, ts, ...rest] = l.split('\t');
+      return { sha, ts: Number(ts) * 1000, subject: rest.join('\t') };
+    });
+    res.json({ base, commits });
+  } catch (err) {
+    res.status(500).json({ error: err.stderr || err.message });
+  }
+});
+
+/** GET /api/worktree/dirty?cwd=&path= → 脏文件清单(勾选提交的候选;不含 gitignored) */
+router.get('/worktree/dirty', async (req, res) => {
+  try {
+    const ctx = await requireWorktree(req, res);
+    if (!ctx) return;
+    res.json({ files: await dirtyFiles(ctx.wtPath) });
+  } catch (err) {
+    res.status(500).json({ error: err.stderr || err.message });
+  }
+});
+
+/** POST /api/worktree/commit  { cwd, path, files[], message } → 勾选的脏文件提交 */
+router.post('/worktree/commit', async (req, res) => {
+  try {
+    const ctx = await requireWorktree(req, res);
+    if (!ctx) return;
+    const { wtPath } = ctx;
+    const message = String(req.body?.message || '').trim();
+    if (!message) return res.status(400).json({ error: 'commit message required' });
+    const files = req.body?.files;
+    if (!Array.isArray(files) || files.length === 0 || !files.every((f) => typeof f === 'string' && f)) {
+      return res.status(400).json({ error: 'files must be a non-empty string array' });
+    }
+    // 白名单:每个文件必须在该树当前 porcelain 清单内 —— 挡 `:/`、`*`、../ 等
+    // 任意 pathspec 注入;gitignored 文件不在清单里,天然无法被提交(且不提供 -f)。
+    const dirty = new Set((await dirtyFiles(wtPath)).map((f) => f.file));
+    for (const f of files) {
+      if (!dirty.has(f)) return res.status(400).json({ error: `file not in dirty list: ${f}` });
+    }
+    // `--` 隔断防选项注入;-A 限定 pathspec,同时覆盖删除/改名。
+    await execFileP('git', ['-C', wtPath, 'add', '-A', '--', ...files], { timeout: 15000 });
+    // commit 带 pathspec:只提交勾选路径,别处预先 staged 的文件不会被顺带带上。
+    await execFileP('git', ['-C', wtPath, 'commit', '-m', message, '--', ...files], {
+      timeout: 30000,
+      env: {
+        ...process.env,
+        GIT_AUTHOR_NAME: process.env.GIT_AUTHOR_NAME || 'claude-gui',
+        GIT_AUTHOR_EMAIL: process.env.GIT_AUTHOR_EMAIL || 'gui@claude',
+        GIT_COMMITTER_NAME: process.env.GIT_COMMITTER_NAME || 'claude-gui',
+        GIT_COMMITTER_EMAIL: process.env.GIT_COMMITTER_EMAIL || 'gui@claude',
+      },
+    });
+    const rev = await execFileP('git', ['-C', wtPath, 'rev-parse', 'HEAD'], { timeout: 4000 });
+    res.json({ ok: true, sha: rev.stdout.trim(), committed: files.length });
+  } catch (err) {
+    res.status(500).json({ error: err.stderr || err.message });
   }
 });
 
