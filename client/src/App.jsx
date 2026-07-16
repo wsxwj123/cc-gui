@@ -2981,6 +2981,13 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // 不打这个标记就会被 handleScroll 误判成用户滚动。
   const programmaticScrollRef = useRef(false);
   const [chatMessages, setChatMessages] = useState([]);
+  // Mirror of chatMessages. handleSend is a useCallback whose deps don't include
+  // chatMessages, so its closure lags — a /btw answer arriving via async
+  // setChatMessages doesn't recreate the callback, and the next /btw would read
+  // stale history (continuous-btw thread would break). Read the ref for the
+  // freshest btw transcript. Updated every render below.
+  const chatMessagesRef = useRef(chatMessages);
+  chatMessagesRef.current = chatMessages;
   const [isStreaming, setIsStreaming] = useState(false);
   // Mirror of isStreaming in a ref. Used by handleSend's gate instead of the
   // closure'd state — closures lag one render behind, so a rapid rollback →
@@ -3499,7 +3506,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         // 连续旁问:收集本线程(同 ownerKey)前序已完成的问答作 history。复用与渲染完全
         // 相同的 ownerKey===sessionQueueKey 过滤(发起时闭包捕获,不在回调里现取),对齐
         // per-pane 隔离,防 async-callback-current-selection-leak 家族串扰。
-        const btwHistory = chatMessages
+        const btwHistory = chatMessagesRef.current
           .filter((m) => m.type === 'btw' && m.ownerKey === sessionQueueKey && !m.pending && !m.error)
           .map((m) => ({ q: m.question, a: m.text }));
         setChatMessages((prev) => [...prev, {

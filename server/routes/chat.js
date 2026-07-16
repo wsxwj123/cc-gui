@@ -1272,10 +1272,24 @@ router.post('/chat/btw', async (req, res) => {
   args.push('--no-session-persistence');
   if (model) args.push('--model', model);
 
+  // 旁问线程连续化(transcript replay):前端把本线程前序问答随 history 发来,拼进
+  // prompt 让本轮旁问延续上下文。全走 stdin(无 cmd 注入面),各处 slice 截断防 prompt 爆:
+  // 最多最近 20 轮,单问 4k / 单答 8k 字符。超限截旧的。history 只进 stdin 不落盘,不污染主会话。
+  const history = Array.isArray(req.body?.history) ? req.body.history.slice(-20) : [];
+  let composed = question;
+  if (history.length) {
+    const transcript = history
+      .map(h => `Q: ${String(h?.q || '').slice(0, 4000)}\nA: ${String(h?.a || '').slice(0, 8000)}`)
+      .join('\n\n');
+    composed =
+      `以下是此前的旁问对话记录(供你延续上下文,不要重复回答已答过的旧问题):\n\n${transcript}\n\n` +
+      `现在的追问:\n${question}`;
+  }
+
   let proc;
   try {
     proc = claudeSpawn(args, { cwd, stdio: ['pipe', 'pipe', 'pipe'], env: cleanChildEnv() });
-    proc.stdin.write(question); proc.stdin.end();
+    proc.stdin.write(composed); proc.stdin.end();
   } catch (e) { return res.status(500).json({ error: 'spawn claude failed: ' + e.message }); }
   if (!proc.pid) { proc.on('error', () => {}); return res.status(500).json({ error: 'claude CLI not found' }); }
   // 同 /chat/title:stderr 是 pipe 但只读 stdout,必须排空,否则超 ~64KB 子进程挂死到超时。
