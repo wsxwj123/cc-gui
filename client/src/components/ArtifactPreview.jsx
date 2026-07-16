@@ -4,6 +4,10 @@ import { Copy, Check, Code2, Eye, AlertTriangle, Maximize2, X, PanelRight, Refre
 import { copyText } from '../utils/clipboard.js';
 import { useStore } from '../stores/sessionStore.js';
 import { useResizable, Splitter } from '../hooks/useResizable.jsx';
+import {
+  ERROR_COLLECTOR, PREVIEW_ERR_KEY, PREVIEW_ERR_LABEL, MAX_PREVIEW_ERRORS,
+  normalizePreviewErr, formatPreviewErrors,
+} from '../utils/previewErrors.js';
 
 // BH-1b: 桌面端把"全屏"升级成右侧 dock,移动端无横向空间仍走全屏遮罩。
 function isMobileViewport() {
@@ -38,10 +42,11 @@ const STORAGE_SHIM = `<script>
 })();
 </script>`;
 
-// 在 HTML 头部注入 storage 垫片。srcDoc 为空(流式中)时不注入。
+// 在 HTML 头部注入 storage 垫片 + F2 运行时报错采集脚本。srcDoc 为空(流式中)时不注入。
+// 两者都是无副作用前缀(不改 artifact 渲染),与旧行为一致。
 function withShim(code) {
   if (!code || !code.trim()) return code;
-  return STORAGE_SHIM + code;
+  return STORAGE_SHIM + ERROR_COLLECTOR + code;
 }
 
 function normLang(lang) {
@@ -147,6 +152,95 @@ export function CollapsibleCode({ code, className = '', collapseAt = 5 }) {
   );
 }
 
+// F2 preview 开发者模式:承载沙箱 iframe + 采集其运行时报错 + 有错时右下角徽章/弹层。
+// 采集脚本由 withShim() 注入进 srcDoc,经 postMessage 穿透 sandbox。父页只收自己 iframe
+// (event.source 比对)的消息。srcDoc/iframeKey 变(流式新内容或手动刷新)即清空 buffer 重计
+// —— 规避流式半截 HTML 产生的伪错误(只有渲染稳定态的报错会留存)。
+export function PreviewIframe({ srcDoc, fullscreen, iframeKey }) {
+  const frameRef = useRef(null);
+  const [errors, setErrors] = useState([]);
+  const [open, setOpen] = useState(false);
+  const sigs = useRef(new Set());
+
+  // 内容变更/刷新 → 清空,规避流式半截 HTML 的伪错误累积。
+  useEffect(() => { setErrors([]); setOpen(false); sigs.current = new Set(); }, [srcDoc, iframeKey]);
+
+  useEffect(() => {
+    const onMsg = (e) => {
+      // sandbox opaque origin 下无法比对 origin,只能确认消息来自本 iframe 的 window。
+      if (!frameRef.current || e.source !== frameRef.current.contentWindow) return;
+      const rec = e.data && e.data[PREVIEW_ERR_KEY];
+      if (!rec) return;
+      const n = normalizePreviewErr(rec);
+      if (!n || sigs.current.has(n.sig)) return;
+      sigs.current.add(n.sig);
+      setErrors((prev) => (prev.length >= MAX_PREVIEW_ERRORS ? prev : [...prev, n]));
+    };
+    window.addEventListener('message', onMsg);
+    return () => window.removeEventListener('message', onMsg);
+  }, []);
+
+  // 填进当前活跃 pane 的输入框(用户自己按发送,不代发)。targetKey 与 sessionQueueKey 同构,
+  // 分屏时只填活跃 pane,避免串到别的会话(与 FileExplorer 的"添加到上下文"同款门控)。
+  const sendToAI = () => {
+    const text = formatPreviewErrors(errors);
+    if (!text) return;
+    const s = useStore.getState();
+    const pane = (s.paneSessions || [])[s.activeTabIndex] || s.selectedSession;
+    const targetKey = pane?.sessionId || `draft-${pane?.projectHash || 'none'}`;
+    window.dispatchEvent(new CustomEvent('cgui:composer-fill', { detail: { text, append: true, targetKey } }));
+    setOpen(false);
+  };
+
+  return (
+    <div className={`relative w-full ${fullscreen ? 'h-full' : 'h-[400px]'}`}>
+      <iframe
+        ref={frameRef}
+        // iframeKey 自增 → 重新挂载 iframe 实现 dock 的"刷新"。
+        key={iframeKey}
+        title="预览"
+        sandbox={SANDBOX_FLAGS}
+        srcDoc={srcDoc}
+        className="w-full h-full bg-white border-0 block"
+      />
+      {errors.length > 0 && (
+        <div className="absolute bottom-2 right-2 z-10 flex flex-col items-end">
+          {open && (
+            // flex 列三段(头/正文/底),不用 sticky —— webview 下 sticky 在带 transform 容器内失效。
+            <div className="mb-1.5 w-[320px] max-h-[280px] flex flex-col rounded-lg border border-[#3a342b] bg-[#2b2722] shadow-2xl overflow-hidden">
+              <div className="px-3 py-1.5 text-[10px] font-mono text-[#9a8e78] border-b border-[#3a342b] shrink-0">
+                预览运行时报错 · {errors.length} 条
+              </div>
+              <div className="flex-1 min-h-0 overflow-y-auto px-3 py-2 space-y-1.5">
+                {errors.map((e, i) => (
+                  <div key={i} className="text-[11px] font-mono text-[#e8e2d6] break-all leading-snug">
+                    <span className="text-amber-400/80">[{PREVIEW_ERR_LABEL[e.type] || e.type}]</span> {e.text}
+                  </div>
+                ))}
+              </div>
+              <div className="px-3 py-2 border-t border-[#3a342b] shrink-0">
+                <button
+                  onClick={sendToAI}
+                  className="w-full py-1 rounded-md bg-[#3a342b] text-[11px] font-mono text-[#e8e2d6] hover:bg-[#453e33] transition-colors"
+                >
+                  把报错发给 AI
+                </button>
+              </div>
+            </div>
+          )}
+          <button
+            onClick={() => setOpen((o) => !o)}
+            title="预览运行时报错"
+            className="flex items-center gap-1 px-2 py-1 rounded-md bg-[#2b2722]/95 border border-amber-500/40 text-[10px] font-mono text-amber-300 shadow-lg hover:bg-[#3a342b] transition-colors"
+          >
+            <AlertTriangle size={11} /> {errors.length}
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // 渲染预览主体(代码/mermaid/html-iframe)。fullscreen 时 iframe 撑满高度,内联时固定 400px。
 export function PreviewBody({ language, mode, code, debounced, fullscreen, iframeKey }) {
   if (mode === 'code') {
@@ -166,16 +260,7 @@ export function PreviewBody({ language, mode, code, debounced, fullscreen, ifram
     );
   }
   if (language === 'mermaid') return <MermaidView code={debounced} />;
-  return (
-    <iframe
-      // iframeKey 自增 → 重新挂载 iframe 实现 dock 的"刷新"。
-      key={iframeKey}
-      title="预览"
-      sandbox={SANDBOX_FLAGS}
-      srcDoc={withShim(debounced)}
-      className={`w-full bg-white border-0 block ${fullscreen ? 'h-full' : 'h-[400px]'}`}
-    />
-  );
+  return <PreviewIframe srcDoc={withShim(debounced)} fullscreen={fullscreen} iframeKey={iframeKey} />;
 }
 
 export function ArtifactPreview({ lang, code, coexist = false, dockKey }) {
