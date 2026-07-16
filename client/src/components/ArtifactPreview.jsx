@@ -6,7 +6,7 @@ import { useStore } from '../stores/sessionStore.js';
 import { useResizable, Splitter } from '../hooks/useResizable.jsx';
 import {
   ERROR_COLLECTOR, PREVIEW_ERR_KEY, PREVIEW_ERR_LABEL, MAX_PREVIEW_ERRORS,
-  normalizePreviewErr, formatPreviewErrors,
+  normalizePreviewErr, formatPreviewErrors, resolvePreviewErrLine,
 } from '../utils/previewErrors.js';
 import { makeModePersist } from '../utils/previewMode.js';
 
@@ -128,7 +128,7 @@ export function PreviewErrorBadge({ errors, source }) {
       {open && (
         // flex 列三段(头/正文/底),不用 sticky —— webview 下 sticky 在带 transform 容器内失效。
         // 宽高 clamp 在容器内(min(固定, 100%)):小窗退化为占满内滚,不溢出。别用 vw/vh(webview zoom 分母坑)。
-        <div className="mb-1.5 w-[320px] max-w-full max-h-[min(280px,100%)] pointer-events-auto flex flex-col rounded-lg border border-[#3a342b] bg-[#2b2722] shadow-2xl overflow-hidden">
+        <div className="mb-1.5 w-[320px] max-w-full min-h-[120px] max-h-[min(280px,calc(100%-2rem))] pointer-events-auto flex flex-col rounded-lg border border-[#3a342b] bg-[#2b2722] shadow-2xl overflow-hidden">
           {/* 头部 shrink-0:标题 + 右上角「发给 AI」,不随列表滚动,小窗也永远可见。
               用 flex 列结构而非 sticky —— webview 下 sticky 在带 transform 容器内失效。 */}
           <div className="flex items-center justify-between gap-2 px-3 py-1.5 border-b border-[#3a342b] shrink-0">
@@ -242,8 +242,8 @@ export function PreviewIframe({ srcDoc, source, fullscreen, iframeKey }) {
       if (!frameRef.current || e.source !== frameRef.current.contentWindow) return;
       let rec = e.data && e.data[PREVIEW_ERR_KEY];
       if (!rec) return;
-      // 还原 iframe 行号到用户源码行:减去 shim 前缀撑大的行数(不改原 e.data,拷一份)。
-      if (rec.type === 'error' && rec.line != null) rec = { ...rec, line: rec.line - SHIM_LINE_OFFSET };
+      // 还原 iframe 行号到用户源码行(仅 inline 脚本减 shim 偏移,外部脚本删 line 防错行误导)。
+      rec = resolvePreviewErrLine(rec, SHIM_LINE_OFFSET);
       const n = normalizePreviewErr(rec);
       if (!n || sigs.current.has(n.sig)) return;
       if (sigs.current.size >= MAX_PREVIEW_ERRORS) return;

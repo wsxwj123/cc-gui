@@ -35,12 +35,24 @@ export const ERROR_COLLECTOR = `<script>
 (function(){
   var K=${JSON.stringify(PREVIEW_ERR_KEY)};
   function send(o){try{var m={};m[K]=o;parent.postMessage(m,'*');}catch(e){}}
-  window.addEventListener('error',function(e){try{send({type:'error',msg:(e&&e.message)||'脚本错误',line:e&&e.lineno,col:e&&e.colno});}catch(x){}});
+  window.addEventListener('error',function(e){try{send({type:'error',msg:(e&&e.message)||'脚本错误',line:e&&e.lineno,col:e&&e.colno,file:e&&e.filename?String(e.filename).slice(0,200):''});}catch(x){}});
   window.addEventListener('unhandledrejection',function(e){try{var r=e&&e.reason;send({type:'reject',msg:''+((r&&(r.message||r.toString&&r.toString()))||r)});}catch(x){}});
   try{var _e=console.error;console.error=function(){try{send({type:'console',msg:Array.prototype.map.call(arguments,String).join(' ')});}catch(x){}return _e.apply(console,arguments);};}catch(x){}
   try{if(window.fetch){var _f=window.fetch;window.fetch=function(){var a=arguments;var u=(a[0]&&a[0].url)||a[0];return _f.apply(window,a).then(function(r){if(r&&!r.ok)send({type:'net',url:u,status:r.status});return r;}).catch(function(err){send({type:'net',url:u,err:''+err});throw err;});};}}catch(x){}
 })();
 </script>`;
+
+// 采集端行号还原:iframe onerror 的 lineno 含 shim 注入前缀的偏移。仅对 inline 脚本
+// (srcdoc 内联,filename 空或 about:srcdoc)且行号 > offset 的才减偏移,还原到用户源码行。
+// 外部 CDN 脚本的 lineno:跨域脱敏 → 0(减完是负数),带 CORS 头 → 相对外部 JS 的行(减完
+// 是看似合法却指向不相干源码的错行)。两种都会让摘要附上误导 AI 的源码片段 → 一律删掉 line
+// (无行号 = 不附片段,fail-safe)。返回新对象,不改原 rec。
+export function resolvePreviewErrLine(rec, offset) {
+  if (!rec || rec.type !== 'error' || rec.line == null) return rec;
+  const inline = !rec.file || rec.file === 'about:srcdoc';
+  if (inline && rec.line > offset) return { ...rec, line: rec.line - offset };
+  return { ...rec, line: undefined };
+}
 
 // 把原始采集记录规整成 {type, text, sig}:text 供展示/摘要,sig 供去重。非法输入返回 null。
 export function normalizePreviewErr(rec) {
@@ -76,7 +88,7 @@ export function formatPreviewErrors(errors, source) {
   const lines = errors.map((e, i) => `${i + 1}. [${PREVIEW_ERR_LABEL[e.type] || e.type}] ${e.text}`);
   let body = lines.join('\n');
   if (body.length > MAX_SUMMARY) body = body.slice(0, MAX_SUMMARY) + '\n…(已截断)';
-  let out = `预览运行时捕获到 ${errors.length} 条报错,请排查并修正上面的 HTML:\n\n\`\`\`\n${body}\n\`\`\``;
+  let out = `预览运行时捕获到 ${errors.length} 条报错,请排查并修正上面的代码:\n\n\`\`\`\n${body}\n\`\`\``;
 
   const srcLines = typeof source === 'string' && source ? source.split('\n') : null;
   if (srcLines) {

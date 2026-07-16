@@ -3,6 +3,7 @@
 import assert from 'node:assert/strict';
 import {
   normalizePreviewErr, formatPreviewErrors, PREVIEW_ERR_KEY, ERROR_COLLECTOR,
+  resolvePreviewErrLine,
 } from '../../client/src/utils/previewErrors.js';
 
 // ── normalizePreviewErr ──────────────────────────────────────────
@@ -143,6 +144,30 @@ const SRC = ['<html>', '<body>', '  <script>', '    bad()', '  </script>', '</bo
   assert.match(out, /…/);
 }
 
+// ── resolvePreviewErrLine:外部脚本行号防负数/错行 ───────────────
+const OFF = 20;  // 假设 shim 前缀 20 行
+// inline 脚本(filename 空):行号 > offset → 减偏移还原
+assert.equal(resolvePreviewErrLine({ type: 'error', line: 24, file: '' }, OFF).line, 4);
+// inline 脚本(about:srcdoc):同样减偏移
+assert.equal(resolvePreviewErrLine({ type: 'error', line: 24, file: 'about:srcdoc' }, OFF).line, 4);
+// 外部 CDN 脚本(有 filename)→ 删 line,不附片段(减完看似合法却指向不相干源码)
+{
+  const r = resolvePreviewErrLine({ type: 'error', msg: 'boom', line: 42, file: 'https://cdn.x/lib.js' }, OFF);
+  assert.equal(r.line, undefined, '外部脚本 line 被清掉');
+  // 下游:normalize 后无行号 → formatPreviewErrors 不附源码片段
+  const errs = [normalizePreviewErr(r)];
+  assert.doesNotMatch(formatPreviewErrors(errs, SRC), /出错行源码片段/, '外部脚本不附片段');
+}
+// 跨域脱敏 lineno=0(inline 但行号 <= offset)→ 删 line,不产生负行号
+{
+  const r = resolvePreviewErrLine({ type: 'error', msg: 'Script error.', line: 0, file: '' }, OFF);
+  assert.equal(r.line, undefined, 'lineno=0 被清掉,不减成负数');
+  assert.equal(normalizePreviewErr(r).line, null, '下游行号为 null,不附片段');
+}
+// 无 line / 非 error 类 → 原样返回(不误伤)
+assert.equal(resolvePreviewErrLine({ type: 'error', msg: 'x' }, OFF).line, undefined);
+assert.equal(resolvePreviewErrLine({ type: 'net', url: '/u', line: 30 }, OFF).line, 30);
+
 // ── ERROR_COLLECTOR 注入脚本 ──────────────────────────────────────
 // 是 <script> 字符串、引用约定键、hook 四类来源
 assert.match(ERROR_COLLECTOR, /^<script>/);
@@ -151,5 +176,7 @@ assert.match(ERROR_COLLECTOR, /addEventListener\('error'/);
 assert.match(ERROR_COLLECTOR, /unhandledrejection/);
 assert.match(ERROR_COLLECTOR, /console\.error/);
 assert.match(ERROR_COLLECTOR, /window\.fetch/);
+// error 事件带上 filename(供父页区分 inline vs 外部脚本)
+assert.match(ERROR_COLLECTOR, /e\.filename/);
 
 console.log('✓ check-preview-errors: all passed');
