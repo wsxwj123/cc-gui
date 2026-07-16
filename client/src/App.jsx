@@ -6318,6 +6318,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         plan={currentPlan}
         permKey={sessionQueueKey}
         sessionId={selectedSession?.sessionId || null}
+        tabIndex={tabIndex}
       />
     </div>
   );

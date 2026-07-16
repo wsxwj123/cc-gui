@@ -560,7 +560,9 @@ function cwdWithin(cwd, base) {
 // hydrate:挂载时是否从 /api/permissions/pending 拉取并自动放行白名单项。同一会话
 // 同时挂多个 PermissionPrompt(如 ChatInput 与子代理视图)时,只让其中一个 hydrate,
 // 避免对同一 id 重复 respond。两个实例共享 store,审批/驳回按 id 幂等。
-export function PermissionPrompt({ sessionId = null, onExecutePlan = null, hydrate = true }) {
+// tabIndex:本实例所属窗格身份(SessionDetail→ChatInput 传入)。分屏④出口用它严判
+// "活动窗格";null(SubagentView 等未传的调用方)退回按会话匹配的旧行为。
+export function PermissionPrompt({ sessionId = null, onExecutePlan = null, hydrate = true, tabIndex = null }) {
   const all = useStore((s) => s.pendingPermissions);
   const globalSid = useStore((s) => s.selectedSession?.sessionId);
   const paneSessions = useStore((s) => s.paneSessions);
@@ -648,7 +650,14 @@ export function PermissionPrompt({ sessionId = null, onExecutePlan = null, hydra
     : all.filter((p) => {
         if (sessionId ? p.sessionId === sessionId : !p.sessionId) return true;
         const active = paneSessions?.[activeTabIndex];
-        if ((active?.sessionId || null) !== (sessionId || null)) return false; // 本实例非活动窗格
+        // 活动窗格判定(只门控下面的④,上一行"归属本窗格会话"的严格匹配不受影响):
+        // 有窗格身份(tabIndex prop)按身份严判 —— 两窗格开同一 sessionId 时按会话比
+        // 较两边都算"活动",④会双显;按身份只有真活动窗格渲染。无身份的调用方退回
+        // 按会话匹配的旧行为(宁可双显不可全藏,卡全藏=回合卡死)。
+        const paneIsActive = tabIndex != null
+          ? tabIndex === activeTabIndex
+          : (active?.sessionId || null) === (sessionId || null);
+        if (!paneIsActive) return false; // 本实例非活动窗格
         if (!p.sessionId || knownSids.has(p.sessionId)) return false;          // 空 sid 走 draft 规则;已知别会话不串
         const panePath = active?.projectPath || projectPath;
         return !panePath || !p.cwd || cwdWithin(p.cwd, panePath);              // ④

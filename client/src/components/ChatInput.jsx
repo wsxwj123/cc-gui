@@ -227,7 +227,7 @@ const TYPE_LABELS = {
   project: '项目',
 };
 
-export function ChatInput({ onSend, onStop, onAccelerate, onBackground, suggestion = null, onDismissSuggestion, disabled, isStreaming, backgroundWorking = false, queueLength = 0, queueItems = [], onRemoveFromQueue, onEditFromQueue, todos = null, plan = '', permKey = null, sessionId = null }) {
+export function ChatInput({ onSend, onStop, onAccelerate, onBackground, suggestion = null, onDismissSuggestion, disabled, isStreaming, backgroundWorking = false, queueLength = 0, queueItems = [], onRemoveFromQueue, onEditFromQueue, todos = null, plan = '', permKey = null, sessionId = null, tabIndex = null }) {
   const [text, setText] = useState('');
   // 编辑重发态(#4):点击「重新编辑并发送」后进入。此时历史消息尚未被破坏,
   // 按 Esc 可整条取消(清空输入+通知上层撤销待回滚),给用户反悔余地。
@@ -772,6 +772,7 @@ export function ChatInput({ onSend, onStop, onAccelerate, onBackground, suggesti
           filtered to the active session. No-op when no requests pending. */}
       <PermissionPrompt
         sessionId={sessionId}
+        tabIndex={tabIndex}
         onExecutePlan={() => {
           // 批准计划 → 只同步本会话 GUI 档位为 acceptEdits。SDK 引擎下模型在同一回合内
           // 继续执行(approvePlan 已 allow ExitPlanMode + 切活跃 query 档位),无需另起回合。
