@@ -42,6 +42,22 @@ assert.equal(normalizePreviewErr({ type: 'weird', msg: 'hi' }).type, 'error');
 assert.equal(normalizePreviewErr(null), null);
 assert.equal(normalizePreviewErr('str'), null);
 
+// ── blank 空白提示(信息级)──────────────────────────────────────
+const SRC_FOR_BLANK = '<html><body></body></html>';
+{
+  const n = normalizePreviewErr({ type: 'blank' });
+  assert.equal(n.type, 'blank', 'blank 类型保留(不塌成 error)');
+  assert.match(n.text, /无可见内容/, 'blank 文案客观陈述');
+  assert.equal(n.line, undefined, 'blank 无行号');
+  assert.equal(n.sig, 'blank', 'blank sig 固定 → 每次加载最多一条');
+  // 两条 blank sig 相同 → 父页去重成一条
+  assert.equal(normalizePreviewErr({ type: 'blank' }).sig, n.sig);
+  // formatPreviewErrors:blank 措辞对齐"请检查 HTML 结构",不附源码片段
+  const out = formatPreviewErrors([n], SRC_FOR_BLANK);
+  assert.match(out, /\[空白提示\] 预览渲染为空,请检查 HTML 结构/);
+  assert.doesNotMatch(out, /出错行源码片段/, 'blank 无行号 → 不附片段');
+}
+
 // 超长 msg 截断(防爆屏)
 {
   const n = normalizePreviewErr({ type: 'console', msg: 'a'.repeat(1000) });
@@ -192,6 +208,11 @@ assert.match(ERROR_COLLECTOR, /console\.error/);
 assert.match(ERROR_COLLECTOR, /window\.fetch/);
 // error 事件带上 filename(供父页区分 inline vs 外部脚本)
 assert.match(ERROR_COLLECTOR, /e\.filename/);
+// blank 空白探测:load 延时 + 无可见内容判定(canvas/svg-only 不算空白)+ 发 type:'blank'
+assert.match(ERROR_COLLECTOR, /addEventListener\('load'/);
+assert.match(ERROR_COLLECTOR, /1200/);
+assert.match(ERROR_COLLECTOR, /querySelector\('img,canvas,svg,video,iframe,embed,object'\)/);
+assert.match(ERROR_COLLECTOR, /type:'blank'/);
 
 // ── 注入串可编译性 + srcDoc 结构完整性 ────────────────────────────
 // ERROR_COLLECTOR / STORAGE_SHIM 是拼进 iframe srcDoc 的 <script> 字符串模板。改坏一个

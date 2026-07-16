@@ -12,7 +12,11 @@ export const PREVIEW_ERR_LABEL = {
   reject: '未处理拒绝',
   console: 'console.error',
   net: '网络请求',
+  blank: '空白提示',
 };
+
+// blank 探测的固定文案(客观陈述,信息级,不带行号/源码片段)。
+const BLANK_TEXT = '预览为空:页面渲染后无可见内容,HTML 可能存在结构问题';
 
 const MAX_MSG = 300;      // 单条消息截断(防超长堆栈爆屏)
 const MAX_URL = 200;      // 单条 url 截断
@@ -34,11 +38,15 @@ function clamp(s, n) {
 export const ERROR_COLLECTOR = `<script>
 (function(){
   var K=${JSON.stringify(PREVIEW_ERR_KEY)};
-  function send(o){try{var m={};m[K]=o;parent.postMessage(m,'*');}catch(e){}}
+  var E=0;
+  function send(o){try{if(o&&o.type!=='blank')E++;var m={};m[K]=o;parent.postMessage(m,'*');}catch(e){}}
   window.addEventListener('error',function(e){try{send({type:'error',msg:(e&&e.message)||'脚本错误',line:e&&e.lineno,col:e&&e.colno,file:e&&e.filename?String(e.filename).slice(0,200):''});}catch(x){}});
   window.addEventListener('unhandledrejection',function(e){try{var r=e&&e.reason;send({type:'reject',msg:''+((r&&(r.message||r.toString&&r.toString()))||r)});}catch(x){}});
   try{var _e=console.error;console.error=function(){try{send({type:'console',msg:Array.prototype.map.call(arguments,String).join(' ')});}catch(x){}return _e.apply(console,arguments);};}catch(x){}
   try{if(window.fetch){var _f=window.fetch;window.fetch=function(){var a=arguments;var u=(a[0]&&a[0].url)||a[0];return _f.apply(window,a).then(function(r){if(r&&!r.ok)send({type:'net',url:u,status:r.status});return r;}).catch(function(err){send({type:'net',url:u,err:''+err});throw err;});};}}catch(x){}
+  // 空白探测(保守版):load 后再延时给异步建 DOM 留时间;仅在无任何其它报错、body 存在但既无
+  // 非空文本又无 img/canvas/svg/video/iframe/embed/object 时报一条信息级 blank。canvas/svg-only 页不算空白。
+  try{window.addEventListener('load',function(){setTimeout(function(){try{if(E>0)return;var b=document.body;if(!b)return;if(b.textContent&&b.textContent.trim())return;if(b.querySelector('img,canvas,svg,video,iframe,embed,object'))return;send({type:'blank'});}catch(x){}},1200);});}catch(x){}
 })();
 </script>`;
 
@@ -59,6 +67,10 @@ export function normalizePreviewErr(rec) {
   if (!rec || typeof rec !== 'object') return null;
   const type = PREVIEW_ERR_LABEL[rec.type] ? String(rec.type) : 'error';
   let text;
+  if (type === 'blank') {
+    // 信息级空白提示:固定文案,无行号、无源码片段。
+    return { type, text: BLANK_TEXT, sig: 'blank' };
+  }
   if (type === 'net') {
     const head = rec.status ? `HTTP ${rec.status}` : `请求失败${rec.err ? ': ' + clamp(rec.err, MAX_MSG) : ''}`;
     text = head + (rec.url ? ` ${clamp(rec.url, MAX_URL)}` : '');
@@ -88,7 +100,11 @@ export function normalizePreviewErr(rec) {
 // 不传 source → 行为与旧版一致(向后兼容)。
 export function formatPreviewErrors(errors, source) {
   if (!Array.isArray(errors) || errors.length === 0) return '';
-  const lines = errors.map((e, i) => `${i + 1}. [${PREVIEW_ERR_LABEL[e.type] || e.type}] ${e.text}`);
+  const lines = errors.map((e, i) => {
+    // blank 是信息级提示,措辞对齐"请检查 HTML 结构"(区别于运行时报错的"修正代码")。
+    const t = e.type === 'blank' ? '预览渲染为空,请检查 HTML 结构' : e.text;
+    return `${i + 1}. [${PREVIEW_ERR_LABEL[e.type] || e.type}] ${t}`;
+  });
   let body = lines.join('\n');
   if (body.length > MAX_SUMMARY) body = body.slice(0, MAX_SUMMARY) + '\n…(已截断)';
   let out = `预览运行时捕获到 ${errors.length} 条报错,请排查并修正上面的代码:\n\n\`\`\`\n${body}\n\`\`\``;
