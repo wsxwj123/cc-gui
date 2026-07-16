@@ -61,13 +61,15 @@ async function dirtyFiles(wtPath) {
     const status = tk.slice(0, 2);
     files.push({ file: tk.slice(3), status: status.trim() });
     if (status[0] === 'R' || status[0] === 'C') {
-      // rename/copy 后跟原路径 token:旧路径也入清单(状态记 D),提交勾选时新旧路径
-      // 一起提交,一次干净,不给下一次留一条悬空的删除。origin 标记供 commit 路由
-      // 把它排除出 `git add` 参数(旧路径已不在索引/工作区,add pathspec 会 fatal;
+      // rename/copy 后跟原路径 token,必须消费掉,否则会被误读成独立条目。
+      // 只有 rename 给旧路径补 D 条目(提交勾选时新旧路径一起提交,一次干净,
+      // 不给下一次留一条悬空的删除);copy 的源文件仍然存在,记 D 是错的——
+      // 勾选提交会把活文件当删除处理。origin 标记供 commit 路由把它排除出
+      // `git add` 参数(旧路径已不在索引/工作区,add pathspec 会 fatal;
       // 而 `git commit -- <path>` 认 HEAD,可正常带上删除)。
       i++;
       const from = tokens[i];
-      if (from) files.push({ file: from, status: 'D', origin: true });
+      if (from && status[0] === 'R') files.push({ file: from, status: 'D', origin: true });
     }
   }
   return files;
