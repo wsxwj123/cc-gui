@@ -79,7 +79,13 @@ export async function dirtyFiles(wtPath) {
   return files;
 }
 
-/** POST /api/worktree  { cwd, name? } → creates a sibling worktree */
+/** base ref 白名单(导出供单测):字符集收紧 + 拒首字符 '-'(execFile 数组传参
+ *  本身不走 shell,这里挡的是 `-`/`--` 开头的 git flag 注入)。 */
+export const isValidBaseRef = (s) =>
+  typeof s === 'string' && s.length > 0 && !s.startsWith('-') && /^[A-Za-z0-9._/-]+$/.test(s);
+
+/** POST /api/worktree  { cwd, name?, base? } → creates a sibling worktree
+ *  base(可选):分支名或 commit,新建分支从它出发;缺省保持现状(当前 HEAD)。 */
 router.post('/worktree', async (req, res) => {
   try {
     const cwd = safe(req.body?.cwd || '');
@@ -89,6 +95,19 @@ router.post('/worktree', async (req, res) => {
     if (!/[a-zA-Z0-9]/.test(name)) name = `session-${Date.now()}`;
     const root = await findGitRoot(cwd);
     if (!root) return res.status(400).json({ error: 'not inside a git repo' });
+
+    // 可选 base:白名单字符集 + rev-parse 验证确实指向一个 commit,两关都过才用。
+    let base = null;
+    if (req.body?.base) {
+      const raw = String(req.body.base);
+      if (!isValidBaseRef(raw)) return res.status(400).json({ error: `invalid base ref: ${raw}` });
+      try {
+        await execFileP('git', ['-C', root, 'rev-parse', '--verify', '--quiet', `${raw}^{commit}`], { timeout: 5000 });
+      } catch {
+        return res.status(400).json({ error: `base not found: ${raw}` });
+      }
+      base = raw;
+    }
 
     // Collect all worktrees in a single `<repo名>-worktrees/` folder beside the
     // repo, instead of scattering loose sibling dirs (which landed on Desktop
@@ -110,11 +129,13 @@ router.post('/worktree', async (req, res) => {
       await execFileP('git', ['-C', root, 'rev-parse', '--verify', '--quiet', `refs/heads/${branch}`], { timeout: 5000 });
       branchExists = true;
     } catch {}
+    // 复用已有分支时 base 不适用(检出的是分支现有指向),忽略之;前端已有
+    // reusedBranch 提示让用户知情。
     const addArgs = branchExists
       ? ['-C', root, 'worktree', 'add', target, branch]
-      : ['-C', root, 'worktree', 'add', '-b', branch, target];
+      : ['-C', root, 'worktree', 'add', '-b', branch, target, ...(base ? [base] : [])];
     await execFileP('git', addArgs, { timeout: 30000 });
-    res.json({ ok: true, path: target, branch, root, reusedBranch: branchExists });
+    res.json({ ok: true, path: target, branch, root, reusedBranch: branchExists, base });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -185,7 +206,14 @@ router.get('/worktree', async (req, res) => {
       } catch {}
     }
 
-    res.json({ root, trees });
+    // 本地分支列表(供"基于分支"新建下拉);取不到不影响主数据。
+    let branches;
+    try {
+      const br = await execFileP('git', ['-C', root, 'branch', '--format=%(refname:short)'], { timeout: 4000 });
+      branches = br.stdout.split('\n').map((s) => s.trim()).filter(Boolean);
+    } catch {}
+
+    res.json({ root, trees, branches });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

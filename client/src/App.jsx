@@ -1826,6 +1826,9 @@ function SessionList() {
   const [worktreeOpen, setWorktreeOpen] = useState(false);
   const [worktreeList, setWorktreeList] = useState(null);
   const [newWorktreeName, setNewWorktreeName] = useState('');
+  // 新建的可选基点:'' = 当前 HEAD(保持既有行为);候选来自 GET /api/worktree 的 branches。
+  const [worktreeBranches, setWorktreeBranches] = useState([]);
+  const [newWorktreeBase, setNewWorktreeBase] = useState('');
   // 行内展开态:{ path, mode:'commits'|'dirty', loading, commits?, files?, error?,
   // checked?:Set, message?, committing? } —— 一次只展开一行,再点同项收起。
   const [wtExpand, setWtExpand] = useState(null);
@@ -1907,7 +1910,7 @@ function SessionList() {
       const d = await r.json();
       // 错误如实显示(非 git 仓库/门禁拒绝等):吞成空列表会显示"没有现有 worktree"
       // 并把用户引去新建,新建才报真实错误。
-      if (r.ok) setWorktreeList(d.trees || []);
+      if (r.ok) { setWorktreeList(d.trees || []); setWorktreeBranches(d.branches || []); }
       else setWorktreeList({ error: d.error || `${r.status}` });
     } catch (e) {
       setWorktreeList({ error: e.message });
@@ -1948,7 +1951,7 @@ function SessionList() {
     try {
       const r = await fetch('/api/worktree', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ cwd: selectedProject.path, name }),
+        body: JSON.stringify({ cwd: selectedProject.path, name, ...(newWorktreeBase ? { base: newWorktreeBase } : {}) }),
       });
       const d = await r.json();
       if (!r.ok) return confirmDialog('创建 worktree 失败：' + d.error);
@@ -1959,6 +1962,7 @@ function SessionList() {
       }
       enterWorktree({ path: d.path, branch: d.branch });
       setNewWorktreeName('');
+      setNewWorktreeBase('');
     } catch (err) {
       confirmDialog('创建 worktree 失败：' + err.message);
     }
@@ -2363,8 +2367,22 @@ function SessionList() {
                   onChange={(e) => setNewWorktreeName(e.target.value)}
                   onKeyDown={(e) => e.key === 'Enter' && createWorktree()}
                   placeholder="分支名 (如 feature-X)"
-                  className="flex-1 bg-canvas border border-canvas-deep rounded px-2 py-1 text-[11px] font-mono text-ink focus:outline-none focus:border-accent/40"
+                  className="flex-1 min-w-0 bg-canvas border border-canvas-deep rounded px-2 py-1 text-[11px] font-mono text-ink focus:outline-none focus:border-accent/40"
                 />
+                {/* 可选基点:默认当前 HEAD;选了分支则新分支从它出发(复用旧分支时无效) */}
+                {worktreeBranches.length > 0 && (
+                  <select
+                    value={newWorktreeBase}
+                    onChange={(e) => setNewWorktreeBase(e.target.value)}
+                    title="新分支的起点,默认当前 HEAD"
+                    className="shrink-0 max-w-[38%] bg-canvas border border-canvas-deep rounded px-1.5 py-1 text-[11px] font-mono text-ink focus:outline-none focus:border-accent/40"
+                  >
+                    <option value="">基于当前 HEAD</option>
+                    {worktreeBranches.map((b) => (
+                      <option key={b} value={b}>基于 {b}</option>
+                    ))}
+                  </select>
+                )}
                 <button
                   onClick={createWorktree}
                   className="btn-accent px-3 py-1 text-[11px] font-body"
