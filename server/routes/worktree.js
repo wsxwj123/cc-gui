@@ -163,17 +163,25 @@ router.get('/worktree', async (req, res) => {
       // 领先计数:有 upstream 用 @{u}(口径=未推送);否则非主树相对主分支;
       // 都没有(主树无 upstream / detached 主分支)不给字段,前端不显示。
       try {
-        let out = null, base = null;
+        let out = null, base = null, baseRef = null;
         try {
           out = await execFileP('git', ['-C', t.path, 'rev-list', '--count', '@{u}..HEAD'], { timeout: 4000 });
-          base = 'upstream';
+          base = 'upstream'; baseRef = '@{u}';
         } catch {
           if (!t.isMain && mainBranch && t.branch !== mainBranch) {
             out = await execFileP('git', ['-C', t.path, 'rev-list', '--count', `refs/heads/${mainBranch}..HEAD`], { timeout: 4000 });
-            base = mainBranch;
+            base = mainBranch; baseRef = `refs/heads/${mainBranch}`;
           }
         }
         if (out) { t.aheadCount = parseInt(out.stdout.trim(), 10) || 0; t.aheadBase = base; }
+        // 落后计数(非主树):基准与 aheadCount 同口径,反向 rev-list。失败只丢
+        // behind 字段,不影响已写入的 aheadCount。
+        if (out && !t.isMain) {
+          try {
+            const behind = await execFileP('git', ['-C', t.path, 'rev-list', '--count', `HEAD..${baseRef}`], { timeout: 4000 });
+            t.behindCount = parseInt(behind.stdout.trim(), 10) || 0;
+          } catch {}
+        }
       } catch {}
     }
 

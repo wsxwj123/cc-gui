@@ -2226,6 +2226,14 @@ function SessionList() {
                             领先 {t.aheadCount} 提交
                           </button>
                         )}
+                        {t.behindCount > 0 && (
+                          <span
+                            title={`主分支有 ${t.behindCount} 个此树没有的提交`}
+                            className="text-[9px] px-1.5 py-0.5 rounded font-mono bg-orange-50 text-orange-700"
+                          >
+                            落后 {t.behindCount}
+                          </span>
+                        )}
                         {t.dirtyFileCount > 0 && (
                           <button
                             type="button"
