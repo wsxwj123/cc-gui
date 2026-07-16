@@ -104,6 +104,14 @@ export const BUILTIN_PROVIDERS = [
     docs: 'https://platform.stepfun.com/interface-key',
   },
   {
+    id: 'mimo-tokenplan',
+    name: '小米 MiMo(Token Plan 套餐)',
+    type: 'openai',
+    baseURL: 'https://token-plan-cn.xiaomimimo.com/v1',
+    note: '套餐制专用端点(与按量付费 api.xiaomimimo.com 不同 host)。需 Token Plan 专用 key(tp- 开头)。模型如 mimo-v2.5-pro/mimo-v2.5(1M 上下文)。',
+    docs: 'https://mimo.mi.com/docs/zh-CN/quick-start/summary/first-api-call',
+  },
+  {
     id: 'siliconflow',
     name: '硅基流动 SiliconFlow(聚合)',
     type: 'openai',
@@ -144,6 +152,14 @@ export const BUILTIN_PROVIDERS = [
     baseURL: 'https://open.bigmodel.cn/api/anthropic',
     note: '智谱的 Anthropic 兼容端点(官方文档已标注)。模型如 glm-4.7/glm-5。',
     docs: 'https://docs.bigmodel.cn/',
+  },
+  {
+    id: 'mimo-tokenplan-anthropic',
+    name: '小米 MiMo(Token Plan,Anthropic 协议)',
+    type: 'anthropic',
+    baseURL: 'https://token-plan-cn.xiaomimimo.com/anthropic',
+    note: '套餐制的 Anthropic 兼容端点(与按量付费 api.xiaomimimo.com/anthropic 不同 host)。需 Token Plan 专用 key(tp- 开头)。模型如 mimo-v2.5-pro/mimo-v2.5,pro 支持 1M 上下文([1m] 后缀)。',
+    docs: 'https://mimo.mi.com/docs/zh-CN/quick-start/summary/first-api-call',
   },
   {
     id: 'stepfun-anthropic',
