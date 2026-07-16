@@ -116,10 +116,13 @@ export function PreviewErrorBadge({ errors }) {
     setOpen(false);
   };
   return (
-    <div className="absolute bottom-2 right-2 z-10 flex flex-col items-end">
+    // inset-2 给容器确定的宽高(= 预览容器 - 16px),弹层用 % 才有分母可约束;pointer-events-none
+    // 让全尺寸遮罩不挡下方 iframe 点击,仅按钮/弹层收回 auto。justify-end 把内容压到右下。
+    <div className="absolute inset-2 z-10 flex flex-col items-end justify-end pointer-events-none">
       {open && (
         // flex 列三段(头/正文/底),不用 sticky —— webview 下 sticky 在带 transform 容器内失效。
-        <div className="mb-1.5 w-[320px] max-h-[280px] flex flex-col rounded-lg border border-[#3a342b] bg-[#2b2722] shadow-2xl overflow-hidden">
+        // 宽高 clamp 在容器内(min(固定, 100%)):小窗退化为占满内滚,不溢出。别用 vw/vh(webview zoom 分母坑)。
+        <div className="mb-1.5 w-[320px] max-w-full max-h-[min(280px,100%)] pointer-events-auto flex flex-col rounded-lg border border-[#3a342b] bg-[#2b2722] shadow-2xl overflow-hidden">
           <div className="px-3 py-1.5 text-[10px] font-mono text-[#9a8e78] border-b border-[#3a342b] shrink-0">
             预览运行时报错 · {errors.length} 条
           </div>
@@ -143,7 +146,7 @@ export function PreviewErrorBadge({ errors }) {
       <button
         onClick={() => setOpen((o) => !o)}
         title="预览运行时报错"
-        className="flex items-center gap-1 px-2 py-1 rounded-md bg-[#2b2722]/95 border border-amber-500/40 text-[10px] font-mono text-amber-300 shadow-lg hover:bg-[#3a342b] transition-colors"
+        className="pointer-events-auto flex items-center gap-1 px-2 py-1 rounded-md bg-[#2b2722]/95 border border-amber-500/40 text-[10px] font-mono text-amber-300 shadow-lg hover:bg-[#3a342b] transition-colors"
       >
         <AlertTriangle size={11} /> {errors.length}
       </button>
