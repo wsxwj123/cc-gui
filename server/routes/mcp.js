@@ -8,6 +8,7 @@ import { promisify } from 'util';
 import { syncMcpToAgents } from './agents.js';
 import { claudeCommand } from '../utils/claude-resolver.js';
 import { detectUv } from './version-check.js';
+import { searchRegistry } from '../services/mcp-registry.js';
 
 const execFileP = promisify(execFile);
 
@@ -1164,6 +1165,19 @@ router.post('/mcp/preview-tools', async (req, res) => {
     const { tools, note } = await listToolsFromCfg({ command, args, env });
     res.json({ tools, note: note || '' });
   } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// GET /api/mcp/registry-search?q=<关键词> — 搜索官方 MCP 注册表,返回可预填添加表单的条目。
+// CLI 无对应命令(见 services/mcp-registry.js 头注),直调注册表 HTTP API;15 分钟缓存 keyed by q。
+// 上游失败 502 + 可读 message(前端提示"网络不可达,可重试"),不静默回空列表。
+router.get('/mcp/registry-search', async (req, res) => {
+  try {
+    const q = String(req.query.q || '').trim();
+    if (!q) return res.json({ items: [] });
+    res.json({ items: await searchRegistry(q) });
+  } catch (err) {
+    res.status(502).json({ error: err.message });
+  }
 });
 
 // GET /api/mcp/:name/tools — 连 server 走 tools/list 握手,返回工具清单 + 各自是否被手动禁用。
