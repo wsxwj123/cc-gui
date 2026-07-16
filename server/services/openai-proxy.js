@@ -487,7 +487,18 @@ async function respondOk(upstreamResp, wantStream, clientRes, model) {
       streamOpenAIToAnthropic(streamFromWeb(upstreamResp.body), clientRes, model);
       return;
     }
-    const j = await upstreamResp.json().catch(() => null);
+    // 判官项3:劣质中转常把真 SSE body 错标成 text/plain/缺失 CT——直接 .json() 必失败,
+    // 会回归成 200 空消息(旧代码不看 CT 逐行解析本可用)。先试 JSON(保住 A 的 200+error
+    // 归一化透传,即使 error 文案里恰好含 "data:" 也不会误判),解析失败且 body 有 data:
+    // 行时把已缓冲文本回放给现有 SSE 转换链。
+    // ponytail: 回放是整体缓冲,错标 CT 的上游丢增量流式;要保首字延迟再做首块嗅探。
+    const txt = await upstreamResp.text().catch(() => '');
+    let j = null;
+    try { j = JSON.parse(txt); } catch {}
+    if (!j && /(^|\n)\s*data:/.test(txt)) {
+      streamOpenAIToAnthropic(streamFromWeb(new Response(txt).body), clientRes, model);
+      return;
+    }
     if (j && j.error) {
       clientRes.writeHead(errStatus(j.error), { 'Content-Type': 'application/json' });
       clientRes.end(JSON.stringify({ type: 'error', error: { type: 'api_error', message: errMsg(j.error) } }));
