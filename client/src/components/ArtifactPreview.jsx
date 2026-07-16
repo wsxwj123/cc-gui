@@ -173,6 +173,7 @@ export function PreviewIframe({ srcDoc, fullscreen, iframeKey }) {
       if (!rec) return;
       const n = normalizePreviewErr(rec);
       if (!n || sigs.current.has(n.sig)) return;
+      if (sigs.current.size >= MAX_PREVIEW_ERRORS) return;
       sigs.current.add(n.sig);
       setErrors((prev) => (prev.length >= MAX_PREVIEW_ERRORS ? prev : [...prev, n]));
     };

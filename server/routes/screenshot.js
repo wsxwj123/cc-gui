@@ -22,15 +22,17 @@ async function captureMac(outPath) {
 }
 
 async function captureWindows(outPath) {
-  // 单引号包路径:PowerShell 单引号内不做转义/变量展开,UUID.png 文件名不含单引号,安全
+  // 单引号包路径:PowerShell 单引号内不做转义/变量展开。文件名是 UUID.png 不含单引号,但
+  // tmpdir 前缀含 Windows 用户名可能带撇号(如 O'Brien)→ 提前闭合命令,故按 PS 规则把 ' 转成 ''。
   // (记忆 windows-porting-gotchas:execFile 内嵌路径用单引号,别用双引号)。MVP 只抓主屏。
+  const psPath = outPath.replace(/'/g, "''");
   const ps = [
     "Add-Type -AssemblyName System.Windows.Forms,System.Drawing;",
     "$b=[System.Windows.Forms.Screen]::PrimaryScreen.Bounds;",
     "$bmp=New-Object System.Drawing.Bitmap $b.Width,$b.Height;",
     "$g=[System.Drawing.Graphics]::FromImage($bmp);",
     "$g.CopyFromScreen($b.Location,[System.Drawing.Point]::Empty,$b.Size);",
-    `$bmp.Save('${outPath}',[System.Drawing.Imaging.ImageFormat]::Png);`,
+    `$bmp.Save('${psPath}',[System.Drawing.Imaging.ImageFormat]::Png);`,
     "$g.Dispose();$bmp.Dispose()",
   ].join(' ');
   await execFileP('powershell', ['-NoProfile', '-NonInteractive', '-Command', ps]);
