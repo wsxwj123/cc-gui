@@ -26,7 +26,8 @@ async function captureMac(outPath) {
 // 备份/恢复(剪贴板回写不可靠,且会覆盖截图本身)。系统 overlay 天然支持多显示器与 per-monitor DPI。
 // 取消/超时语义:正常退出但不写文件 → 路由按 canceled 处理,绝不静默降级成全屏。
 // Esc 快速判定:overlay 进程(Win10=ScreenClippingHost / Win11=SnippingTool)出现过又消失、
-// 宽限 3s 内仍无新图 → 取消;进程名不匹配的机型退化到 60s 超时兜底。overlay 从未出现 → 报错(exit 1)。
+// 宽限 3s 内仍无新图 → 取消;进程名不匹配的机型 sawOverlay 恒 false,60s 后与「overlay
+// 从未出现」同走报错(exit 1),**不是取消**(取消判定依赖认得出 overlay 进程名)。
 const WIN_SNIP_PS1 = `param([string]$OutPath)
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Windows.Forms,System.Drawing
@@ -38,16 +39,17 @@ $sawOverlay = $false
 $goneAt = $null
 while ([DateTime]::UtcNow -lt $deadline) {
   Start-Sleep -Milliseconds 250
+  $img = $null
   try {
     if ([CgUi.U32]::GetClipboardSequenceNumber() -ne $seq0 -and [System.Windows.Forms.Clipboard]::ContainsImage()) {
       $img = [System.Windows.Forms.Clipboard]::GetImage()
-      if ($img -ne $null) {
-        $img.Save($OutPath, [System.Drawing.Imaging.ImageFormat]::Png)
-        $img.Dispose()
-        exit 0
-      }
     }
   } catch { }
+  if ($img -ne $null) {
+    # Save 失败不能被剪贴板容错 catch 吞掉:用户已框选,吞了会误报「取消」→ 抛出走 exit 1 报错
+    try { $img.Save($OutPath, [System.Drawing.Imaging.ImageFormat]::Png); $img.Dispose(); exit 0 }
+    catch { throw ('clipboard image save failed: ' + $_.Exception.Message) }
+  }
   $procs = @(Get-Process -Name 'SnippingTool','ScreenClippingHost' -ErrorAction SilentlyContinue)
   if ($procs.Count -gt 0) { $sawOverlay = $true; $goneAt = $null }
   elseif ($sawOverlay) {

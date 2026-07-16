@@ -33,6 +33,7 @@ const PRICES = {
   'claude-mythos-5':             usd(10, 50, 1, 12.5),
   // Sonnet 5: 引导价 $2/$10(至 2026-08-31),之后 $3/$15。此处按引导价(cw $2.50/cr $0.20)。
   'claude-sonnet-5':             usd(2, 10, 0.2, 2.5),
+  'claude-opus-4-8':             usd(5, 25),       // 4.8 用新 tokenizer,可能多消耗 ~35% token
   'claude-opus-4-7':             usd(5, 25),
   'claude-opus-4-6':             usd(5, 25),
   'claude-opus-4-1':             usd(15, 75),
@@ -58,10 +59,6 @@ const PRICES = {
   // MiMo 小米 — 2026-07-13 核实 mimo.mi.com 官方(CNY);cache 命中价极低单列
   'mimo-v2.5':                   cny(1, 2, 0.02),
   'mimo-v2.5-pro':               cny(3, 6, 0.025),  // 项目实际部署此档
-
-  // Anthropic Claude — 2026-06-05 拉取 platform.claude.com 官方表
-  'claude-opus-4-8':             usd(5, 25),       // 4.8 用新 tokenizer,可能多消耗 ~35% token
-  'claude-haiku-4-5':            usd(1, 5),
 
   // OpenAI — 2026-06-05 拉取 developers.openai.com
   'gpt-5.5':                     usd(5, 30, 0.50),
@@ -202,7 +199,10 @@ function lookupPrice(model, provider) {
   if (ALIASES[model] && PRICES[ALIASES[model]]) return PRICES[ALIASES[model]];
   const stripped = model && model.replace(/-\d{8}$/, '');
   if (stripped && PRICES[stripped]) return PRICES[stripped];
-  const key = model && Object.keys(PRICES).find((k) => model.startsWith(k));
+  // 前缀兜底取**最长**匹配:'step-3.7-flash-xxx' 该命中 'step-3.7-flash' 而非先遇到的 'step-3'
+  const key = model && Object.keys(PRICES)
+    .filter((k) => model.startsWith(k))
+    .sort((a, b) => b.length - a.length)[0];
   return key ? PRICES[key] : null;
 }
 

@@ -1,9 +1,9 @@
 // Minimal runnable check for computeCost (pricing.js).
-// Run: node client/src/utils/pricing.test.mjs
+// Run: node tests/unit/check-pricing.mjs
 // Verifies the four usage paths (input/output/cacheRead/cacheWrite) all参与计价,
 // using the hardcoded fallback table (REMOTE is empty under node — no window/fetch).
 import assert from 'node:assert';
-import { computeCost, formatCost } from './pricing.js';
+import { computeCost, formatCost } from '../../client/src/utils/pricing.js';
 
 // Opus 4.8 fallback price = usd(5, 25) → input 5, output 25, cacheRead 0.5, cacheWrite 6.25.
 const usage = {
@@ -29,7 +29,18 @@ assert.ok(Math.abs(fable.totalUsd - 12.5) < 1e-9, `fable cacheWrite ${fable?.tot
 const qwen = computeCost('qwen-turbo', { input_tokens: 1_000_000 }, { providerHint: 'anthropic', model: 'qwen-turbo' });
 assert.ok(Math.abs(qwen.totalUsd - 0.3 / 7.2) < 1e-9, `qwen input ${qwen?.totalUsd} != ${0.3 / 7.2}`);
 
+// 前缀兜底取最长匹配:step-3.7-flash 命中自己的 ¥1.35/¥8.1 档,不被 'step-3' 抢跑。
+const CNY = 7.2;
+const step37 = computeCost('step-3.7-flash', { input_tokens: 1_000_000, output_tokens: 1_000_000 });
+assert.ok(Math.abs(step37.totalUsd - (1.35 + 8.1) / CNY) < 1e-9, `step-3.7-flash ${step37?.totalUsd} != ${(1.35 + 8.1) / CNY}`);
+// 带后缀 id 走前缀兜底,同样须命中最长前缀 step-3.7-flash(旧 find() 按插入序会先中 step-3)
+const step37sfx = computeCost('step-3.7-flash-preview', { input_tokens: 1_000_000, output_tokens: 1_000_000 });
+assert.ok(Math.abs(step37sfx.totalUsd - (1.35 + 8.1) / CNY) < 1e-9, `step-3.7-flash-preview ${step37sfx?.totalUsd} != ${(1.35 + 8.1) / CNY}`);
+// 无独立条目的 step-3.5-flash 前缀兜底命中 step-3 档(¥1.5/¥4)
+const step35 = computeCost('step-3.5-flash', { input_tokens: 1_000_000, output_tokens: 1_000_000 });
+assert.ok(Math.abs(step35.totalUsd - (1.5 + 4) / CNY) < 1e-9, `step-3.5-flash ${step35?.totalUsd} != ${(1.5 + 4) / CNY}`);
+
 // formatCost renders CNY (×7.2). 0.09125 USD → ¥0.657 (<¥1 → 3 decimals).
 assert.strictEqual(formatCost(expected), '¥0.657');
 
-console.log('pricing.test.mjs OK — totalUsd(opus4.8) =', r.totalUsd, '→', formatCost(r.totalUsd));
+console.log('check-pricing OK — totalUsd(opus4.8) =', r.totalUsd, '→', formatCost(r.totalUsd));

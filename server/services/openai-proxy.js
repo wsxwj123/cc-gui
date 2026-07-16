@@ -269,7 +269,10 @@ function rawErrMsg(e) {
   return e.message || (typeof e.error === 'string' ? e.error : '') || JSON.stringify(e);
 }
 function errMsg(e) {
-  return normalizeContextOverflow(rawErrMsg(e));
+  // 429 门:某些中转 200+error{code:429} 的限流文案含 "too many tokens",改写成
+  // prompt is too long 会让 CLI 误触发 compact 而非退避;无 code 的真超限体仍归一化。
+  const raw = rawErrMsg(e);
+  return errStatus(e) === 429 ? raw : normalizeContextOverflow(raw);
 }
 function errStatus(e) {
   // 上游 error 里带数字 code/status 就用它,否则(多为字符串码如 insufficient_quota)回 502。

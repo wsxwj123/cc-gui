@@ -52,6 +52,11 @@ const oaiUpstream = http.createServer((req, res) => {
   } else if (oaiMode === 'rate429') {
     res.writeHead(429, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: { message: 'Rate limit exceeded', code: 429 } }));
+  } else if (oaiMode === 'ctx_instream_429') {
+    // 200 + 流内 error 体带 code:429 且文案含超限特征词 —— errMsg 429 门后不得改写
+    res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+    res.write(`data: ${JSON.stringify({ error: { message: 'Rate limited: too many tokens per minute, retry later', code: 429 } })}\n\n`);
+    res.end();
   } else if (oaiMode === 'rate429_tokens') {
     // 某些中转的 429 限流文案含超限特征词 "too many tokens" —— 状态码收紧后不得改写
     res.writeHead(429, { 'Content-Type': 'application/json' });
@@ -87,6 +92,11 @@ oaiMode = 'ctx_instream';
 r = await postOai();
 assert(r.status !== 200, `oai ctx_instream (prestream) → non-200 (got ${r.status})`);
 assert(/prompt is too long: /.test(r.text) && r.text.includes('too many tokens'), 'oai in-stream error → normalized + original kept');
+
+oaiMode = 'ctx_instream_429';
+r = await postOai();
+assert(r.status === 429, `oai 200+error{code:429} → 429 (got ${r.status})`);
+assert(/too many tokens/.test(r.text) && !/prompt is too long/.test(r.text), 'oai 200+error{code:429} with overflow-like wording → NOT rewritten (errMsg 429-gated)');
 
 oaiMode = 'auth401';
 r = await postOai();
