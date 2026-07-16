@@ -164,11 +164,15 @@ export async function listProjects() {
         sessionCount = matched;
       }
 
+      // worktree 打标(纯字符串判据,零 git 调用):GUI 建的树在 <repo名>-worktrees/ 下,
+      // CLI agent 自动建的在 <repo>/.claude/worktrees/ 下。归一化反斜杠兼容 Windows。
+      const slashPath = realPath.replace(/\\/g, '/');
       projects.push({
         hash: entry.name,
         path: realPath,
         sessionCount,
         lastActivity: new Date(lastModified).toISOString(),
+        isWorktree: /-worktrees\//.test(slashPath) || /\/\.claude\/worktrees\//.test(slashPath),
       });
     } catch {
       // skip inaccessible dirs

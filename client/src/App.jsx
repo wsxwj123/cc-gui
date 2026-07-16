@@ -1284,6 +1284,9 @@ function ProjectList() {
                 <span className="text-[13px] text-ink-soft truncate font-body font-medium">
                   {formatPathShort(project.path)}
                 </span>
+                {project.isWorktree && (
+                  <span className="text-[9px] px-1 py-0.5 bg-canvas-deep text-ink-faint rounded font-mono shrink-0" title="Git worktree(独立工作树,非主仓目录)">⎇</span>
+                )}
               </div>
               {/* 路径小字放名字下方:同名最终文件夹靠完整路径区分 */}
               <div className="text-[10px] text-ink-faint font-mono truncate ml-[21px] mt-0.5" title={formatPath(project.path)}>
@@ -1750,16 +1753,25 @@ function SessionList() {
   useEffect(() => {
     if (!selectedProject?.hash) return;
     let timer = null;
-    const onChange = () => {
+    let projTimer = null;
+    const onChange = (e) => {
       if (timer) clearTimeout(timer);
       timer = setTimeout(() => {
         useStore.getState().fetchSessions(selectedProject.hash, { silent: true });
       }, 600);
+      // 未知 projectHash(如 worktree 首条消息落盘的新目录)→ 刷新项目列表让它冒出来。
+      // 已知 hash 直接跳过 + 800ms 去抖,busy stream 不会风暴。
+      const ph = e?.detail?.projectHash;
+      if (ph && !useStore.getState().projects.some((p) => p.hash === ph)) {
+        if (projTimer) clearTimeout(projTimer);
+        projTimer = setTimeout(() => useStore.getState().fetchProjects(), 800);
+      }
     };
     window.addEventListener('cgui:sessions-changed', onChange);
     return () => {
       window.removeEventListener('cgui:sessions-changed', onChange);
       if (timer) clearTimeout(timer);
+      if (projTimer) clearTimeout(projTimer);
     };
   }, [selectedProject?.hash]);
 
@@ -1817,6 +1829,8 @@ function SessionList() {
   // 行内展开态:{ path, mode:'commits'|'dirty', loading, commits?, files?, error?,
   // checked?:Set, message?, committing? } —— 一次只展开一行,再点同项收起。
   const [wtExpand, setWtExpand] = useState(null);
+  // agent 临时工作树分组(CLI 子代理自动建的 .claude/worktrees/agent-*)是否展开,默认收起。
+  const [wtAgentOpen, setWtAgentOpen] = useState(false);
 
   // 展开某树的领先 commit 列表(点"领先 N"徽章)。
   const toggleWtCommits = async (t) => {
@@ -1954,9 +1968,11 @@ function SessionList() {
     e?.stopPropagation();
     if (!tree?.path || !selectedProject || tree.isMain) return;
     const dirty = tree.dirtyFileCount > 0;
+    // 领先提交提示:分支保留所以 commit 不丢,明说免得用户误以为删树=丢工作。
+    const aheadNote = tree.aheadCount > 0 ? `该工作树领先 ${tree.aheadCount} 个提交，删除后分支保留、提交不丢。\n` : '';
     const msg = dirty
-      ? `删除这个 worktree 会丢失 ${tree.dirtyFileCount} 个未提交修改：\n${tree.path}\n\n分支 ${tree.branch || ''} 本身保留。确定强制删除？`
-      : `删除 worktree：\n${tree.path}\n\n只删这个工作树文件夹，分支 ${tree.branch || ''} 保留。确定？`;
+      ? `删除这个 worktree 会丢失 ${tree.dirtyFileCount} 个未提交修改：\n${tree.path}\n\n${aheadNote}分支 ${tree.branch || ''} 本身保留。确定强制删除？`
+      : `删除 worktree：\n${tree.path}\n\n${aheadNote}只删这个工作树文件夹，分支 ${tree.branch || ''} 保留。确定？`;
     if (!(await confirmDialog(msg, { danger: true }))) return;
     try {
       const r = await fetch('/api/worktree', {
@@ -2171,8 +2187,13 @@ function SessionList() {
                 <div className="text-[11px] text-red-600 py-6 text-center font-body px-4">{worktreeList.error}</div>
               ) : worktreeList.length === 0 ? (
                 <div className="text-[11px] text-ink-faint py-6 text-center font-body">没有现有 worktree</div>
-              ) : (
-                worktreeList.map((t) => (
+              ) : (() => {
+                // agent 临时工作树(CLI 子代理在 .claude/worktrees/agent-* 自动创建)归入
+                // 折叠分组:默认收起但不隐藏(仍可进入/删除回收);用户自建树照常平铺。
+                const isAgentTree = (t) => /[\\/]\.claude[\\/]worktrees[\\/]agent-/.test(t.path || '');
+                const agentTrees = worktreeList.filter(isAgentTree);
+                const userTrees = worktreeList.filter((t) => !isAgentTree(t));
+                const renderTree = (t) => (
                   <div key={t.path} className="mb-1">
                    <div className="flex items-stretch gap-1">
                     {/* 行容器改 div role=button:徽章是可点击控件,button 嵌 button 非法(WKWebView 行为不可预测) */}
@@ -2303,8 +2324,27 @@ function SessionList() {
                      </div>
                    )}
                   </div>
-                ))
-              )}
+                );
+                return (
+                  <>
+                    {userTrees.map(renderTree)}
+                    {agentTrees.length > 0 && (
+                      <div className="mt-1">
+                        <button
+                          type="button"
+                          onClick={() => setWtAgentOpen((v) => !v)}
+                          className="w-full flex items-center gap-1.5 px-3 py-1.5 text-[10.5px] text-ink-faint font-body hover:bg-canvas-warm rounded-lg transition-colors"
+                        >
+                          <ChevronDown size={11} className={`transition-transform ${wtAgentOpen ? '' : '-rotate-90'}`} />
+                          <span>agent 临时工作树</span>
+                          <span className="font-mono">×{agentTrees.length}</span>
+                        </button>
+                        {wtAgentOpen && agentTrees.map(renderTree)}
+                      </div>
+                    )}
+                  </>
+                );
+              })()}
             </div>
             <div className="border-t border-canvas-deep p-3 bg-canvas-warm/40 shrink-0">
               <div className="text-[10px] text-ink-faint uppercase tracking-wider font-body mb-1.5">新建 worktree</div>
