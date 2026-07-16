@@ -53,7 +53,7 @@ import { isInitBindingOrigin, migrateDraftQueue, paneMessagesOwned, resolveHistM
 import {
   FolderOpen, MessageSquare, ChevronLeft, ChevronRight, ChevronDown,
   Search, Hash, Layers, BarChart3, ArrowLeft, Plus,
-  RefreshCw, Activity, Settings, Server, GitBranch, FileDiff, Check, Wrench, X,
+  RefreshCw, Activity, Settings, Server, GitBranch, GitMerge, FileDiff, Check, Wrench, X,
   Sun, Moon, Monitor, Bot, Camera, History, Loader2, Shield, FolderTree,
   Archive, ArchiveRestore, Trash2, EyeOff, Columns2, Smartphone, Pencil, Type, Palette,
   Menu, SquarePen, Gauge, Cpu, CheckCircle2, BookText, Sparkles, HelpCircle, Pin,
@@ -1968,6 +1968,39 @@ function SessionList() {
     }
   };
 
+  // 一键把 worktree 分支 merge 进主分支。冲突时服务端已自动 abort,这里只负责
+  // 把冲突文件清单如实呈现;成功后刷新列表(领先数归零)。
+  const mergeWorktree = async (tree, e) => {
+    e?.stopPropagation();
+    if (!tree?.path || !selectedProject || tree.isMain) return;
+    const mainTree = Array.isArray(worktreeList) ? worktreeList.find((t) => t.isMain) : null;
+    const msg = `把分支 ${tree.branch || '(detached)'} 合并到主分支 ${mainTree?.branch || 'HEAD'}？\n\n` +
+      `该分支领先 ${tree.aheadCount || 0} 个提交。合并在主工作树执行；若有冲突会自动取消,不留半合并状态。`;
+    if (!(await confirmDialog(msg))) return;
+    try {
+      const r = await fetch('/api/worktree/merge', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cwd: selectedProject.path, path: tree.path }),
+      });
+      const d = await r.json();
+      if (!r.ok || d.ok === false) {
+        const conflicts = d.conflicts || [];
+        const note = conflicts.length
+          ? `合并冲突（已自动取消合并，主工作区未留下半合并状态）。冲突文件：\n\n${conflicts.slice(0, 20).join('\n')}` +
+            (conflicts.length > 20 ? `\n…共 ${conflicts.length} 个` : '') +
+            '\n\n请到会话里手动处理这些冲突后再合并。'
+          : `合并失败：${d.error || r.status}`;
+        return confirmDialog(note, { confirmText: '知道了' });
+      }
+      let note = `已把 ${d.branch} 合并进 ${d.targetBranch}（${d.mergedCommits} 个提交）。`;
+      if (d.warning) note += `\n\n${d.warning}`;
+      await confirmDialog(note, { confirmText: '好' });
+      openWorktreePicker(); // 刷新领先/落后计数
+    } catch (err) {
+      confirmDialog('合并失败：' + err.message);
+    }
+  };
+
   const deleteWorktree = async (tree, e) => {
     e?.stopPropagation();
     if (!tree?.path || !selectedProject || tree.isMain) return;
@@ -2259,6 +2292,16 @@ function SessionList() {
                         </div>
                       )}
                     </div>
+                    {/* 侧栏操作键与行按钮并列(button 嵌 button 非法):合并 / 删除 */}
+                    {!t.isMain && !t.prunable && t.aheadCount > 0 && (
+                      <button
+                        onClick={(e) => mergeWorktree(t, e)}
+                        title={`合并到主分支（领先 ${t.aheadCount} 个提交）` + (t.behindCount > 0 ? `。该树落后主分支 ${t.behindCount} 个提交,合并可能产生冲突` : '')}
+                        className="shrink-0 px-2 rounded-lg border border-canvas-deep text-ink-faint hover:text-accent hover:border-accent/40 hover:bg-canvas-warm transition-colors flex items-center"
+                      >
+                        <GitMerge size={13} />
+                      </button>
+                    )}
                     {!t.isMain && (
                       <button
                         onClick={(e) => deleteWorktree(t, e)}

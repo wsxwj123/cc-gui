@@ -264,6 +264,15 @@ router.get('/worktree/dirty', async (req, res) => {
   }
 });
 
+// commit/merge 都要求 git 身份;环境没配时兜底,免得整个操作 fatal。
+const gitIdentityEnv = () => ({
+  ...process.env,
+  GIT_AUTHOR_NAME: process.env.GIT_AUTHOR_NAME || 'claude-gui',
+  GIT_AUTHOR_EMAIL: process.env.GIT_AUTHOR_EMAIL || 'gui@claude',
+  GIT_COMMITTER_NAME: process.env.GIT_COMMITTER_NAME || 'claude-gui',
+  GIT_COMMITTER_EMAIL: process.env.GIT_COMMITTER_EMAIL || 'gui@claude',
+});
+
 /** POST /api/worktree/commit  { cwd, path, files[], message } → 勾选的脏文件提交 */
 router.post('/worktree/commit', async (req, res) => {
   try {
@@ -292,18 +301,93 @@ router.post('/worktree/commit', async (req, res) => {
     // commit 带 pathspec:只提交勾选路径,别处预先 staged 的文件不会被顺带带上。
     await execFileP('git', ['-C', wtPath, 'commit', '-m', message, '--', ...files], {
       timeout: 30000,
-      env: {
-        ...process.env,
-        GIT_AUTHOR_NAME: process.env.GIT_AUTHOR_NAME || 'claude-gui',
-        GIT_AUTHOR_EMAIL: process.env.GIT_AUTHOR_EMAIL || 'gui@claude',
-        GIT_COMMITTER_NAME: process.env.GIT_COMMITTER_NAME || 'claude-gui',
-        GIT_COMMITTER_EMAIL: process.env.GIT_COMMITTER_EMAIL || 'gui@claude',
-      },
+      env: gitIdentityEnv(),
     });
     const rev = await execFileP('git', ['-C', wtPath, 'rev-parse', 'HEAD'], { timeout: 4000 });
     res.json({ ok: true, sha: rev.stdout.trim(), committed: files.length });
   } catch (err) {
     res.status(500).json({ error: err.stderr || err.message });
+  }
+});
+
+/** merge 核心(导出供单测)。把 wtPath 检出的分支 merge 进主工作树当前分支:
+ *  - 分支名从 `git worktree list --porcelain` 取,不信任客户端传参;
+ *  - 前置:主树工作区必须干净(否则 409);该树自身脏只给 warning 不阻断
+ *    (merge 只动 commit,不碰它的工作区);
+ *  - 冲突/失败:先取冲突清单再无条件 `merge --abort`,绝不留半合并状态,
+ *    绝不 --force,绝不自动解决冲突。 */
+export async function mergeWorktreeIntoMain(root, wtPath) {
+  const fail = (msg, statusCode) => { const e = new Error(msg); e.statusCode = statusCode; return e; };
+  // 分支名从 porcelain 取(worktree 行之后、下一个 worktree 行之前的 branch 行)
+  const list = await execFileP('git', ['-C', root, 'worktree', 'list', '--porcelain'], { timeout: 10000 });
+  let branch = null, curPath = null;
+  for (const line of list.stdout.split('\n')) {
+    if (line.startsWith('worktree ')) curPath = line.slice(9);
+    else if (line.startsWith('branch ') && curPath && normPath(curPath) === normPath(wtPath)) {
+      branch = line.slice(7).replace(/^refs\/heads\//, '');
+    }
+  }
+  if (!branch) throw fail('该工作树处于 detached HEAD,没有可合并的分支', 400);
+  // 主树当前分支(detached 时 symbolic-ref 非零退出)
+  let targetBranch;
+  try {
+    const sym = await execFileP('git', ['-C', root, 'symbolic-ref', '--short', '-q', 'HEAD'], { timeout: 4000 });
+    targetBranch = sym.stdout.trim();
+  } catch { throw fail('主工作树处于 detached HEAD,无法确定合并目标分支', 400); }
+  if (!targetBranch) throw fail('主工作树处于 detached HEAD,无法确定合并目标分支', 400);
+  // 前置:主树必须干净(merge 会动主树工作区,脏树冲突时 abort 也救不回混杂改动)
+  const st = await execFileP('git', ['-C', root, 'status', '--porcelain'], { timeout: 10000, maxBuffer: 8 * 1024 * 1024 });
+  if (st.stdout.trim()) throw fail('主工作区有未提交改动,先提交或暂存后再合并', 409);
+  // 该树自身脏 → 提示但不阻断(merge 只合 commit,未提交内容本来就不在合并范围)
+  let warning = null;
+  try {
+    const wst = await execFileP('git', ['-C', wtPath, 'status', '--porcelain'], { timeout: 10000, maxBuffer: 8 * 1024 * 1024 });
+    const n = wst.stdout.trim() ? wst.stdout.trim().split('\n').length : 0;
+    if (n > 0) warning = `该工作树还有 ${n} 个未提交文件,本次合并不包含它们`;
+  } catch {}
+  // 摘要用:将要合入的 commit 数
+  let mergedCommits = 0;
+  try {
+    const c = await execFileP('git', ['-C', root, 'rev-list', '--count', `HEAD..refs/heads/${branch}`], { timeout: 10000 });
+    mergedCommits = parseInt(c.stdout.trim(), 10) || 0;
+  } catch {}
+  try {
+    await execFileP('git', ['-C', root, 'merge', '--no-edit', `refs/heads/${branch}`], { timeout: 30000, env: gitIdentityEnv() });
+  } catch (err) {
+    // 冲突清单必须在 abort 前取(abort 后 diff-filter=U 就空了)
+    let conflicts = [];
+    try {
+      const d = await execFileP('git', ['-C', root, 'diff', '--name-only', '--diff-filter=U'], { timeout: 10000, maxBuffer: 8 * 1024 * 1024 });
+      conflicts = d.stdout.split('\n').filter(Boolean);
+    } catch {}
+    // 无条件 abort,不留半合并;merge 未真正开始(如 unrelated histories 直接拒)时
+    // abort 会报 "no merge to abort",吞掉即可。
+    try { await execFileP('git', ['-C', root, 'merge', '--abort'], { timeout: 15000 }); } catch {}
+    return {
+      ok: false, branch, targetBranch, conflicts,
+      error: conflicts.length ? '合并冲突,已自动取消合并' : (err.stderr || err.message),
+    };
+  }
+  let sha = null;
+  try { sha = (await execFileP('git', ['-C', root, 'rev-parse', 'HEAD'], { timeout: 4000 })).stdout.trim(); } catch {}
+  return { ok: true, branch, targetBranch, mergedCommits, sha, warning };
+}
+
+/** POST /api/worktree/merge  { cwd, path } → 把该树分支 merge 进主树当前分支 */
+router.post('/worktree/merge', async (req, res) => {
+  try {
+    const ctx = await requireWorktree(req, res);
+    if (!ctx) return;
+    const { root, wtPath } = ctx;
+    if (normPath(wtPath) === normPath(root)) {
+      return res.status(400).json({ error: '不能对主工作树自身执行合并' });
+    }
+    const result = await mergeWorktreeIntoMain(root, wtPath);
+    // 冲突/合并失败:409 + 冲突文件清单(已自动 abort,主树无半合并状态)
+    if (!result.ok) return res.status(409).json(result);
+    res.json(result);
+  } catch (err) {
+    res.status(err.statusCode || 500).json({ error: err.stderr || err.message });
   }
 });
 
