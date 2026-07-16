@@ -31,7 +31,7 @@ export function TaskCard({ toolCall }) {
   // agent.name → server 提取的 metaAgent.agentType。最后才回退泛化文案。store 里的
   // agent.name 在某些 provider 下会停留在字面 'Agent'/'Task'(input 未解析成功时),
   // 这种情况下优先用 metaAgent.agentType 还原具体名。
-  const rawName = toolCall.input?.subagent_type || agent?.name || null;
+  const rawName = toolCall.input?.subagent_type || toolCall.input?.name || agent?.name || null;
   const isGeneric = !rawName || rawName === 'Task' || rawName === 'Agent';
   const subagentType = (isGeneric && metaAgent?.agentType) ? metaAgent.agentType : (rawName || '子代理');
   const description = toolCall.input?.description || agent?.description || '';

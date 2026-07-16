@@ -4217,7 +4217,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                   }
                   if ((block.name === 'Task' || block.name === 'Agent') && parsed) {
                     store.upsertAgent(block.toolId, {
-                      name: parsed.subagent_type || parsed.agent || block.name,
+                      name: parsed.subagent_type || parsed.agent || parsed.name || block.name,
                       description: parsed.description || parsed.prompt?.slice(0, 80) || '',
                       status: 'working',
                       prompt: parsed.prompt || '',  // #9 子代理派发 prompt
@@ -4279,7 +4279,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                 if (block.name === 'Task' || block.name === 'Agent') {
                   const inp = block.input || {};
                   useStore.getState().upsertAgent(block.id, {
-                    name: inp.subagent_type || inp.agent || block.name,
+                    name: inp.subagent_type || inp.agent || inp.name || block.name,
                     description: inp.description || (inp.prompt ? String(inp.prompt).slice(0, 80) : ''),
                     prompt: inp.prompt || '',
                     status: 'working',
