@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-set-screenshot-hotkey"
+description = "Enables the set_screenshot_hotkey command without any pre-configured scope."
+commands.allow = ["set_screenshot_hotkey"]
+
+[[permission]]
+identifier = "deny-set-screenshot-hotkey"
+description = "Denies the set_screenshot_hotkey command without any pre-configured scope."
+commands.deny = ["set_screenshot_hotkey"]
