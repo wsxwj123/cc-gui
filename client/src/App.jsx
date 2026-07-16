@@ -47,7 +47,7 @@ import { ArtifactDock } from './components/ArtifactPreview.jsx';
 import { FullDiskAccessModal } from './components/FullDiskAccessModal.jsx';
 import { BUILTIN_PROVIDERS, findBuiltin } from './utils/builtinProviders.js';
 import { computeCost, formatCost } from './utils/pricing.js';
-import { extractToolResultText } from './utils/toolResult.js';
+import { extractToolResultText, finalizePendingToolCalls } from './utils/toolResult.js';
 import { rebuildTodosFromTaskCalls } from './utils/todos.js';
 import { isInitBindingOrigin, migrateDraftQueue, resolveHistModel, resolveSendModel } from './utils/routing.js';
 import {
@@ -2576,7 +2576,7 @@ function GitInitBanner({ cwd }) {
 // The full summary lives in the JSONL; we deliberately don't render it.
 // 旁问气泡(/btw):独立于主对话流的问答卡片。仅存在于本地 chatMessages
 // (不写会话 jsonl),刷新/切会话即消失 —— 与 CLI /btw"不进历史"的语义一致。
-function BtwBubble({ msg, onHide }) {
+function BtwBubble({ msg, onHide, onClearThread }) {
   const [collapsed, setCollapsed] = useState(false);
   return (
     <div className="px-6 py-3 animate-fade-up" style={{ animationDuration: '0.25s' }}>
@@ -2602,7 +2602,15 @@ function BtwBubble({ msg, onHide }) {
               ? <div className="text-[13px] text-red-600/90 font-body">{msg.text}</div>
               : <MarkdownRenderer content={msg.text} />}
             {!msg.pending && !msg.error && (
-              <div className="mt-1.5 text-[10px] text-ink-faint font-body">旁问不写入会话历史，刷新后消失</div>
+              <div className="mt-1.5 flex items-center gap-2 text-[10px] text-ink-faint font-body">
+                <span>旁问不写入会话历史，刷新后消失</span>
+                {onClearThread && (
+                  <button onClick={() => onClearThread()} title="清空本会话的全部旁问，下次旁问从零开始"
+                    className="shrink-0 text-ink-faint hover:text-ink underline decoration-dotted">
+                    清空旁问线程
+                  </button>
+                )}
+              </div>
             )}
           </>)}
         </div>
@@ -3488,6 +3496,12 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         // 记录旁问归属的回合(发起时最后一个已渲染的用户回合)→ 右侧 TurnScrubber
         // 在该回合点标记"含旁问",悬浮可见。空会话无回合则 null(不关联任何点)。
         const atTurnUuid = [...messages].reverse().find((m) => m.type === 'user' && m.uuid)?.uuid || null;
+        // 连续旁问:收集本线程(同 ownerKey)前序已完成的问答作 history。复用与渲染完全
+        // 相同的 ownerKey===sessionQueueKey 过滤(发起时闭包捕获,不在回调里现取),对齐
+        // per-pane 隔离,防 async-callback-current-selection-leak 家族串扰。
+        const btwHistory = chatMessages
+          .filter((m) => m.type === 'btw' && m.ownerKey === sessionQueueKey && !m.pending && !m.error)
+          .map((m) => ({ q: m.question, a: m.text }));
         setChatMessages((prev) => [...prev, {
           uuid: btwUuid, type: 'btw', question: q, text: '', pending: true, atTurnUuid,
           // 打上创建时的会话键:旁问气泡是本会话本地注记,渲染只认这个 key、不受
@@ -3497,7 +3511,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         }]);
         fetch('/api/chat/btw', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ question: q, sessionId: btwSid || undefined, cwd: btwCwd, model: btwModel || undefined }),
+          body: JSON.stringify({ question: q, sessionId: btwSid || undefined, cwd: btwCwd, model: btwModel || undefined, history: btwHistory }),
         }).then(async (r) => {
           const d = await r.json().catch(() => ({}));
           if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
@@ -4640,7 +4654,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             timestamp: new Date().toISOString(), model: streamingModel,
             text: accumulatedText ? [accumulatedText] : [],
             thinking: accumulatedThinking ? [accumulatedThinking] : [],
-            toolCalls: currentToolCalls.map((tc) => ({ ...tc, category: tc.category || 'call' })),
+            // 停止时给未回执的普通工具补合成终态,Skill/Bash/Read 等卡片不再永久转圈
+            // (Task/Agent 状态由 activeAgents 驱动,合成 result 对其无害)。gate=turnAborted。
+            toolCalls: finalizePendingToolCalls(currentToolCalls, turnAborted),
             blocks: orderedBlocks,
             usage: null,
             interrupted: true,
@@ -5915,7 +5931,14 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                   {msg.type === 'compact'
                     ? <CompactDivider />
                     : msg.type === 'btw'
-                    ? <BtwBubble msg={msg} onHide={(uuid) => setChatMessages((prev) => prev.filter((m) => m.uuid !== uuid))} />
+                    ? <BtwBubble msg={msg} onHide={(uuid) => setChatMessages((prev) => prev.filter((m) => m.uuid !== uuid))}
+                        onClearThread={async () => {
+                          // 清空 = 删本 ownerKey 全部旁问气泡(纯前端过滤),线程状态只活在
+                          // chatMessages,删掉即"忘记",下次 /btw history 为空 = 重新开始。
+                          if (!(await confirmDialog('清空本会话的全部旁问？\n下次旁问将从零开始，不带此前上下文。', { danger: true }))) return;
+                          const ok = msg.ownerKey;
+                          setChatMessages((prev) => prev.filter((m) => !(m.type === 'btw' && m.ownerKey === ok)));
+                        }} />
                     : msg.type === 'turn'
                     ? <>
                         <TurnBubble turn={msg} onRetry={handleRetryTurn} onRetryTool={(toolCall) => handleRetryTool(msg, toolCall)} retryActive={retryActiveUuid === msg.uuid} />

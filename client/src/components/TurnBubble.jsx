@@ -228,6 +228,9 @@ function ToolCallRow({ toolCall, onRetryTool }) {
           {toolCall.result ? (
             hasError ? (
               <span className="text-[10px] text-error">错误</span>
+            ) : toolCall.result.interrupted ? (
+              // 停止补的合成终态:未回执工具被掐断,显示"已停止"而非绿勾冒充完成
+              <span className="text-[10px] text-ink-faint">已停止</span>
             ) : planApproved ? (
               <span className="text-[10px] text-success">✅ 计划已批准</span>
             ) : askAnswered ? (

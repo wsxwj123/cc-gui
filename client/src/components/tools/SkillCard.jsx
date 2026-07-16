@@ -15,6 +15,7 @@ export function SkillCard({ toolCall, nameOverride, subLabel, calls }) {
   const skillName = nameOverride || toolCall.input?.skill || toolCall.input?.name || toolCall.name;
   const result = toolCall.result;
   const isError = result?.isError;
+  const interrupted = result?.interrupted;  // 停止时补的合成终态:显示"已停止"而非"调用完成"
   const running = !result;
   const callCount = Array.isArray(calls) && calls.length > 1 ? calls.length : 0;
 
@@ -23,7 +24,7 @@ export function SkillCard({ toolCall, nameOverride, subLabel, calls }) {
   const inputPreview = inputEntries.length > 0
     ? inputEntries.map(([k, v]) => `${k}: ${typeof v === 'string' ? v : JSON.stringify(v)}`).join(' · ').slice(0, 120)
     : '';
-  const statusLabel = running ? '调用中' : (isError ? '调用失败' : '调用完成');
+  const statusLabel = running ? '调用中' : (interrupted ? '已停止' : (isError ? '调用失败' : '调用完成'));
   // 状态小字:硬编码英文 "Skill " 前缀已去掉(用户实报:名字后多出杂乱的"S"字样)。
   // 运行中只显状态不拼参数摘要;摘要在完成/失败态给,原始入参展开详情里始终有。
   const statusText = [subLabel, callCount ? `连续调用 ${callCount} 次` : null, statusLabel].filter(Boolean).join(' · ')
@@ -41,7 +42,7 @@ export function SkillCard({ toolCall, nameOverride, subLabel, calls }) {
         <span className="flex flex-col items-center min-w-0 max-w-[70%] px-1">
           <span
             className={`skill-banner-name text-[17px] font-semibold font-body leading-tight truncate max-w-full ${
-              running ? '' : (isError ? 'skill-banner-name-error' : 'skill-banner-name-done')
+              running || interrupted ? '' : (isError ? 'skill-banner-name-error' : 'skill-banner-name-done')
             }`}
           >
             {skillName}
@@ -72,6 +73,10 @@ export function SkillCard({ toolCall, nameOverride, subLabel, calls }) {
                   </pre>
                 </details>
                 {tcResult && (
+                  tcResult.interrupted && !tcContent ? (
+                    // 停止补的合成终态:无返回内容,给一行客观说明而非空白结果块
+                    <div className="px-3 py-2 text-[11px] text-ink-faint bg-canvas-warm/40">已停止,无返回结果</div>
+                  ) : (
                   <div className={`px-3 py-2 text-[11px] max-h-[600px] overflow-y-auto ${
                     tcErr ? 'bg-red-50 text-red-700' : 'bg-canvas-warm/40 text-ink-muted'
                   }`}>
@@ -81,6 +86,7 @@ export function SkillCard({ toolCall, nameOverride, subLabel, calls }) {
                       : <MarkdownRenderer content={tcContent} />
                     }
                   </div>
+                  )
                 )}
               </div>
             );
