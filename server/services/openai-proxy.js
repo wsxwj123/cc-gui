@@ -247,18 +247,49 @@ function sse(res, event, data) {
 
 const STOP_MAP = { stop: 'end_turn', length: 'max_tokens', tool_calls: 'tool_use', content_filter: 'end_turn' };
 
+// 从上游 OpenAI error 对象(或裸错误体)提取人类可读文案与合理状态码。
+function errMsg(e) {
+  if (!e) return 'upstream error';
+  if (typeof e === 'string') return e;
+  return e.message || (typeof e.error === 'string' ? e.error : '') || JSON.stringify(e);
+}
+function errStatus(e) {
+  // 上游 error 里带数字 code/status 就用它,否则(多为字符串码如 insufficient_quota)回 502。
+  const c = e && (e.status ?? e.code);
+  const n = typeof c === 'number' ? c : parseInt(c, 10);
+  return n >= 400 && n < 600 ? n : 502;
+}
+
 function streamOpenAIToAnthropic(upstreamRes, clientRes, model) {
   const msgId = 'msg_' + Math.random().toString(36).slice(2, 14);
-  clientRes.writeHead(200, {
-    'Content-Type': 'text/event-stream; charset=utf-8',
-    'Cache-Control': 'no-cache',
-    Connection: 'keep-alive',
-  });
-  sse(clientRes, 'message_start', {
-    type: 'message_start',
-    message: { id: msgId, type: 'message', role: 'assistant', model, content: [],
-      stop_reason: null, stop_sequence: null, usage: { input_tokens: 0, output_tokens: 0 } },
-  });
+  // 惰性 message_start:收到首个正常块才发。在此之前发现上游流内错误,可以改回非 200 +
+  // anthropic 错误体(CLI 只在非 200 时透出上游 message);已发流则退化成 anthropic error 事件。
+  let started = false;
+  let aborted = false;
+  const ensureStarted = () => {
+    if (started) return;
+    started = true;
+    clientRes.writeHead(200, {
+      'Content-Type': 'text/event-stream; charset=utf-8',
+      'Cache-Control': 'no-cache',
+      Connection: 'keep-alive',
+    });
+    sse(clientRes, 'message_start', {
+      type: 'message_start',
+      message: { id: msgId, type: 'message', role: 'assistant', model, content: [],
+        stop_reason: null, stop_sequence: null, usage: { input_tokens: 0, output_tokens: 0 } },
+    });
+  };
+  const emitUpstreamError = (err) => {
+    aborted = true;
+    if (!started) {
+      clientRes.writeHead(errStatus(err), { 'Content-Type': 'application/json' });
+      clientRes.end(JSON.stringify({ type: 'error', error: { type: 'api_error', message: errMsg(err) } }));
+    } else {
+      sse(clientRes, 'error', { type: 'error', error: { type: 'api_error', message: errMsg(err) } });
+      try { clientRes.end(); } catch {}
+    }
+  };
 
   // Block bookkeeping. Index 0 reserved for text once it starts; tool calls get
   // subsequent indices keyed by the OpenAI tool_call index.
@@ -270,6 +301,7 @@ function streamOpenAIToAnthropic(upstreamRes, clientRes, model) {
   let buf = '';
 
   const ensureTextBlock = () => {
+    ensureStarted();
     if (textOpen === false) {
       const idx = nextIndex++;
       sse(clientRes, 'content_block_start', { type: 'content_block_start', index: idx,
@@ -286,6 +318,7 @@ function streamOpenAIToAnthropic(upstreamRes, clientRes, model) {
   };
 
   const handleChunk = (json) => {
+    if (json.error) { emitUpstreamError(json.error); return; }
     if (json.usage) {
       // W8(R4):OpenAI 的 prompt_tokens 是【含缓存】的总输入,其中命中缓存的部分在
       // prompt_tokens_details.cached_tokens。此前直接整段当 input_tokens → 经本网关
@@ -317,6 +350,7 @@ function streamOpenAIToAnthropic(upstreamRes, clientRes, model) {
         const oaIdx = tc.index ?? 0;
         let entry = toolBlocks.get(oaIdx);
         if (!entry) {
+          ensureStarted();
           closeTextBlock();
           const aIdx = nextIndex++;
           entry = {
@@ -342,19 +376,32 @@ function streamOpenAIToAnthropic(upstreamRes, clientRes, model) {
   };
 
   upstreamRes.on('data', (chunk) => {
+    if (aborted) return;
     buf += chunk.toString('utf-8');
     let nl;
     while ((nl = buf.indexOf('\n')) !== -1) {
       const line = buf.slice(0, nl).trim();
       buf = buf.slice(nl + 1);
-      if (!line || !line.startsWith('data:')) continue;
+      if (aborted) return;
+      if (!line) continue;
+      if (!line.startsWith('data:')) {
+        // 兜底:CT 声明是 event-stream,却把裸 JSON 错误体当 body 发(某些中转站)。
+        // 未发流时识别 .error → 回非 200。跨行 pretty-JSON 靠改动点 A 的 CT 检查拦下,这里只认单行。
+        if (!started) {
+          try { const j = JSON.parse(line); if (j && j.error) { emitUpstreamError(j.error); return; } } catch {}
+        }
+        continue;
+      }
       const payload = line.slice(5).trim();
       if (payload === '[DONE]') continue;
       try { handleChunk(JSON.parse(payload)); } catch {}
+      if (aborted) return;
     }
   });
 
   upstreamRes.on('end', () => {
+    if (aborted) return;
+    ensureStarted(); // 空但成功的流:仍补出合法(空)的 anthropic 收尾
     closeTextBlock();
     for (const entry of toolBlocks.values()) {
       let input = {};
@@ -373,7 +420,17 @@ function streamOpenAIToAnthropic(upstreamRes, clientRes, model) {
     clientRes.end();
   });
 
-  upstreamRes.on('error', () => { try { clientRes.end(); } catch {} });
+  upstreamRes.on('error', (err) => {
+    if (aborted) return;
+    if (!started) {
+      try {
+        clientRes.writeHead(502, { 'Content-Type': 'application/json' });
+        clientRes.end(JSON.stringify({ type: 'error', error: { type: 'api_error', message: 'upstream stream error: ' + (err?.message || '') } }));
+      } catch {}
+    } else {
+      try { clientRes.end(); } catch {}
+    }
+  });
 }
 
 // non-streaming fallback
@@ -404,6 +461,36 @@ function openAIToAnthropicMessage(json, model) {
       };
     })(),
   };
+}
+
+// 上游 HTTP 200 时的统一收尾(流式/非流式共用,retry 成功路径也走这里)。
+// A:中转站常在 200 下返 JSON 错误体(Content-Type 非 event-stream)——不能当流处理,
+// 读 JSON 有 .error 则回非 200 anthropic 错误体(CLI 才透出上游 message);否则按非流式回复转换。
+async function respondOk(upstreamResp, wantStream, clientRes, model) {
+  if (wantStream) {
+    const ct = upstreamResp.headers.get('content-type') || '';
+    if (/event-stream/i.test(ct)) {
+      streamOpenAIToAnthropic(streamFromWeb(upstreamResp.body), clientRes, model);
+      return;
+    }
+    const j = await upstreamResp.json().catch(() => null);
+    if (j && j.error) {
+      clientRes.writeHead(errStatus(j.error), { 'Content-Type': 'application/json' });
+      clientRes.end(JSON.stringify({ type: 'error', error: { type: 'api_error', message: errMsg(j.error) } }));
+      return;
+    }
+    clientRes.writeHead(200, { 'Content-Type': 'application/json' });
+    clientRes.end(JSON.stringify(openAIToAnthropicMessage(j || {}, model)));
+    return;
+  }
+  const json = await upstreamResp.json().catch(() => ({}));
+  if (json && json.error) { // 非流式同样可能是 200+error 体
+    clientRes.writeHead(errStatus(json.error), { 'Content-Type': 'application/json' });
+    clientRes.end(JSON.stringify({ type: 'error', error: { type: 'api_error', message: errMsg(json.error) } }));
+    return;
+  }
+  clientRes.writeHead(200, { 'Content-Type': 'application/json' });
+  clientRes.end(JSON.stringify(openAIToAnthropicMessage(json, model)));
 }
 
 // ── proxy server ──────────────────────────────────────────────────────────
@@ -466,32 +553,20 @@ async function handle(req, clientRes) {
       try {
         upstreamResp = await postUpstream(retryReq);
         if (upstreamResp.ok) {
-          if (wantStream) {
-            const nodeStream = streamFromWeb(upstreamResp.body);
-            return streamOpenAIToAnthropic(nodeStream, clientRes, body.model);
-          }
-          const json = await upstreamResp.json().catch(() => ({}));
-          clientRes.writeHead(200, { 'Content-Type': 'application/json' });
-          clientRes.end(JSON.stringify(openAIToAnthropicMessage(json, body.model)));
-          return;
+          return respondOk(upstreamResp, wantStream, clientRes, body.model);
         }
         txt = await upstreamResp.text().catch(() => txt);
       } catch {}
     }
+    // C:文案打磨 —— 解析出上游 error.message,别把整段原始 JSON(带双状态码前缀)塞给用户。
+    let up_msg = txt;
+    try { const j = JSON.parse(txt); up_msg = errMsg(j.error || j); } catch {}
     clientRes.writeHead(upstreamResp.status, { 'Content-Type': 'application/json' });
-    clientRes.end(JSON.stringify({ type: 'error', error: { type: 'api_error', message: `upstream ${upstreamResp.status}: ${txt.slice(0, 500)}` } }));
+    clientRes.end(JSON.stringify({ type: 'error', error: { type: 'api_error', message: String(up_msg).slice(0, 500) } }));
     return;
   }
 
-  if (wantStream) {
-    // adapt web ReadableStream → node stream-ish via async iterator
-    const nodeStream = streamFromWeb(upstreamResp.body);
-    streamOpenAIToAnthropic(nodeStream, clientRes, body.model);
-  } else {
-    const json = await upstreamResp.json().catch(() => ({}));
-    clientRes.writeHead(200, { 'Content-Type': 'application/json' });
-    clientRes.end(JSON.stringify(openAIToAnthropicMessage(json, body.model)));
-  }
+  return respondOk(upstreamResp, wantStream, clientRes, body.model);
 }
 
 // Wrap a WHATWG ReadableStream in a minimal EventEmitter-like object exposing
