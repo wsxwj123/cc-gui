@@ -311,6 +311,12 @@ export async function listSessions(projectHash) {
       // 它会以"给下面这段对话起一个标题…"开头污染列表。无论如何都不显示。
       if (/^给下面这段对话起一个/.test(firstPrompt)) continue;
 
+      // security-guidance 官方插件在 Stop/commit/push 时用 Agent SDK 起一次性安全审查会话,
+      // cwd=用户项目 → jsonl 落进项目目录被当真实会话列出(无标题,首句=审查 prompt)。
+      // 不能按 promptSource/entrypoint 字段过滤(会误杀真会话);prompt 是固定机器串,
+      // 真人对话不会这样开头 → 按前缀跳过(与上面标题生成同套防御)。
+      if (/^Review this change for security vulnerabilities\./.test(firstPrompt)) continue;
+
       // BG9:某些外部 agent-teams/orchestration 工具会在项目目录写出名字像 sessionId
       // 的辅助 jsonl,内容是 agent-setting/queue-operation/ai-title 等非对话 type,
       // 没有任何 user/assistant 记录。session-reader 此前不识别 → 当成真实会话列出 →
