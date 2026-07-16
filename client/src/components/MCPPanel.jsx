@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useRef } from 'react';
-import { Server, Package, FolderOpen, RefreshCw, Plug, Activity, Check, X, Plus, Pencil, Trash2, Zap, Download, ArrowLeft, LogIn, LogOut } from 'lucide-react';
+import { Server, Package, FolderOpen, RefreshCw, Plug, Activity, Check, X, Plus, Pencil, Trash2, Zap, Download, ArrowLeft, LogIn, LogOut, Search, ChevronRight } from 'lucide-react';
 import { BUILTIN_PLUGINS } from '../utils/builtinPlugins.js';
 import { findBuiltinMcp } from '../utils/builtinMcpServers.js';
 import { McpForm } from './McpForm.jsx';
@@ -241,14 +241,38 @@ export function MCPPanel() {
   const [pluginErr, setPluginErr] = useState('');
   // 对齐 MCP 的交互:推荐插件收进"添加"按钮打开的弹层,列表只展示已安装项。
   const [pluginAddOpen, setPluginAddOpen] = useState(false);
+  // 折叠式"全市场搜索"(默认收起,不占密度):走 GET /api/plugins/available(后端缓存
+  // `claude plugin list --available --json`);query 变化去抖 350ms 再拉,后端内存过滤。
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [searchResult, setSearchResult] = useState(null); // null | { total, items }
+  const [searchLoading, setSearchLoading] = useState(false);
+  const [searchErr, setSearchErr] = useState('');
+  useEffect(() => {
+    if (!searchOpen) return;
+    let alive = true;
+    const t = setTimeout(async () => {
+      setSearchLoading(true); setSearchErr('');
+      try {
+        const r = await fetch(`/api/plugins/available?q=${encodeURIComponent(searchQuery.trim())}`);
+        const d = await r.json();
+        if (!alive) return;
+        if (!r.ok) throw new Error(d.error || '获取失败');
+        setSearchResult(d);
+      } catch (e) { if (alive) { setSearchErr(e.message); setSearchResult(null); } }
+      if (alive) setSearchLoading(false);
+    }, 350);
+    return () => { alive = false; clearTimeout(t); };
+  }, [searchOpen, searchQuery]);
   const installPlugin = async (plugin) => {
     const id = plugin.id;
     setInstallingPlugin(id); setPluginErr('');
     try {
       const r = await fetch('/api/plugins/install', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        // 非官方源插件(带 repo/marketplace)让后端先 marketplace add 再装。
-        body: JSON.stringify({ name: id, ...(plugin.repo ? { repo: plugin.repo, marketplace: plugin.marketplace } : {}) }),
+        // 非官方源插件(带 repo)让后端先 marketplace add 再装;marketplace 单独带上,
+        // 供市场搜索结果(已配置 marketplace、无 repo)装 `name@marketplace` 而非误落官方源。
+        body: JSON.stringify({ name: id, ...(plugin.repo ? { repo: plugin.repo } : {}), ...(plugin.marketplace ? { marketplace: plugin.marketplace } : {}) }),
       });
       const d = await r.json();
       if (!r.ok) throw new Error(d.error || '安装失败');
@@ -677,6 +701,68 @@ export function MCPPanel() {
                     </div>
                   );
                 })}
+              </div>
+
+              {/* 折叠式全市场搜索(高级):默认收起,不占密度。展开后从已配置 marketplace
+                  动态搜索全部可装插件。精选清单外的插件可能需 key/Docker/LSP,装了未必即用。 */}
+              <div className="border-t border-canvas-deep pt-3">
+                <button
+                  onClick={() => setSearchOpen((v) => !v)}
+                  className="w-full flex items-center gap-1.5 text-[12px] font-medium text-ink-faint hover:text-ink transition-colors">
+                  <ChevronRight size={13} className={`transition-transform ${searchOpen ? 'rotate-90' : ''}`} />
+                  <Search size={12} />
+                  从全部 marketplace 搜索(高级)
+                </button>
+                {searchOpen && (
+                  <div className="mt-3 space-y-2">
+                    <div className="relative">
+                      <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-faint pointer-events-none" />
+                      <input
+                        value={searchQuery}
+                        onChange={(e) => setSearchQuery(e.target.value)}
+                        placeholder="按名称 / 描述 / 来源过滤,留空列出全部"
+                        className="w-full pl-8 pr-3 py-1.5 text-[12px] bg-canvas-warm border border-canvas-deep rounded-lg text-ink placeholder:text-ink-faint focus:outline-none focus:border-accent" />
+                    </div>
+                    {searchErr && <div className="text-[11px] text-error bg-error/10 border border-error/20 rounded px-2 py-1.5 break-all">{searchErr}</div>}
+                    {searchLoading && <div className="flex items-center gap-1.5 text-[11px] text-ink-faint"><RefreshCw size={11} className="animate-spin" />搜索中…</div>}
+                    {!searchLoading && searchResult && (
+                      <>
+                        {searchResult.items.length === 0 && <div className="text-[11px] text-ink-faint py-1">无匹配插件。</div>}
+                        {searchResult.total > searchResult.items.length && (
+                          <div className="text-[10px] text-ink-faint">共 {searchResult.total} 项,仅显示前 {searchResult.items.length} 项,请细化关键词。</div>
+                        )}
+                        <div className="space-y-2">
+                          {searchResult.items.map((r) => {
+                            const busy = installingPlugin === r.name;
+                            const installed = installedPluginIds.has(r.name) || r.installed;
+                            return (
+                              <div key={r.pluginId} className="bg-canvas-warm border border-canvas-deep rounded-lg p-3 flex items-center gap-3">
+                                <div className="min-w-0 flex-1">
+                                  <div className="flex items-center gap-2">
+                                    <span className="text-xs font-medium text-ink font-body">{r.name}</span>
+                                    {r.marketplace && <span className="text-[9px] px-1 py-px bg-canvas-deep text-ink-faint rounded shrink-0">{r.marketplace}</span>}
+                                  </div>
+                                  {r.description && <div className="text-[10px] text-ink-faint font-body leading-snug mt-0.5">{r.description}</div>}
+                                </div>
+                                {installed ? (
+                                  <span className="shrink-0 flex items-center gap-1 px-2.5 py-1 text-[12px] font-medium text-success">
+                                    <Check size={12} />已安装
+                                  </span>
+                                ) : (
+                                  <button onClick={() => installPlugin({ id: r.name, name: r.name, marketplace: r.marketplace })} disabled={!!installingPlugin}
+                                    className="shrink-0 flex items-center gap-1 px-2.5 py-1 rounded text-[12px] font-medium text-white bg-accent hover:bg-accent-hover disabled:opacity-50">
+                                    {busy ? <RefreshCw size={12} className="animate-spin" /> : <Download size={12} />}
+                                    {busy ? '安装中…' : '安装'}
+                                  </button>
+                                )}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </>
+                    )}
+                  </div>
+                )}
               </div>
             </div>
           </div>
