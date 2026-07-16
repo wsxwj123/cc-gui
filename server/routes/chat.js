@@ -809,8 +809,17 @@ router.post('/chat', async (req, res) => {
   // 同时修好 CG-2(非规划模式"子代理后再要授权"也是同一根因)。
   let closeTimer = null;
   let lastResultLine = null;
+  // ── T0 诊断埋点(compact断流调研,根因确认后移除;见 .devflow/RESEARCH-autocompact-break.md §5 T0)──
+  // 纯 observer 零行为变更。走 stderr:打包版 stdout 丢 null、stderr 落 ~/.claude-gui/server.log。
+  // 目标:抓真实 auto-compact 的事件顺序 —— (a)压缩前有无中间 result;(b)status:compacting 与
+  // 该 result 先后;(c)续跑事件距中间 result 的间隔。正常回合每回合仅 2 行(result+finalize)。
+  const trace = (msg) => console.error(`[compact-trace] ${new Date().toISOString()} ${slot.sessionId || procId} ${msg}`);
+  const dtr = () => slot.lastResultAt ? `+${Date.now() - slot.lastResultAt}ms` : '-'; // 距本回合上一个 result
+  let traceCompacting = false; // 只为放行 compacting 后紧跟的 status:null 收尾行,过滤 requesting 噪音
+  let postDoneLogged = false;  // finalize 后的续跑泄漏每段只记 1 行,防刷屏
   const cancelClose = () => { if (closeTimer) { clearTimeout(closeTimer); closeTimer = null; } };
-  const finalize = () => {
+  const finalize = (traceReason = 'other') => {
+    trace(`finalize reason=${traceReason} turnSubagentSeen=${!!slot.turnSubagentSeen}`); // T0 诊断
     cancelClose();
     // 回合优雅收尾:上一个 stop 武装的 abort 兜底不再需要,清掉防其误伤后续复用回合。
     if (slot.stopTimer) { clearTimeout(slot.stopTimer); slot.stopTimer = null; }
@@ -846,6 +855,22 @@ router.post('/chat', async (req, res) => {
         if (!slot.sessionId && m.type === 'system' && m.subtype === 'init' && m.session_id) {
           slot.sessionId = m.session_id;
         }
+        // ── T0 诊断埋点(纯记录,不影响任何分支)──
+        if (m.type === 'system' && m.subtype === 'compact_boundary') {
+          trace(`compact_boundary trigger=${m.compact_metadata?.trigger} pre_tokens=${m.compact_metadata?.pre_tokens} ${dtr()}`);
+        } else if (m.type === 'system' && m.subtype === 'status') {
+          // 只记 compacting 相关(含其后首个收尾 status),requesting 等常规心跳不记
+          if (m.status === 'compacting' || m.compact_result !== undefined || traceCompacting) {
+            trace(`status status=${m.status ?? 'null'} compact_result=${m.compact_result ?? '-'} ${dtr()}`);
+          }
+          traceCompacting = m.status === 'compacting';
+        }
+        // finalize 已发 done 后(keepAlive 转 idle)仍有续跑事件到达 = 断流实锤,每段记 1 行
+        if (slot.idle && !postDoneLogged && (m.type === 'assistant' || m.type === 'user' || m.type === 'stream_event')) {
+          postDoneLogged = true;
+          trace(`post-done-event type=${m.type} ${dtr()} (done已发仍有续跑=中间result误finalize)`);
+        }
+        // ── T0 埋点结束 ──
         if (m.type === 'assistant' && Array.isArray(m.message?.content)) {
           for (const b of m.message.content) {
             if (b?.type === 'tool_use' && (b.name === 'Task' || b.name === 'Agent')) slot.turnSubagentSeen = true;
@@ -875,18 +900,22 @@ router.post('/chat', async (req, res) => {
           // 关流延迟:子代理回合沿用 4s 去抖;开了输入预测时 suggestion 在 result 之后
           // 才到,必须给等待窗(3s;SDK 不发时到点正常收尾)。都没有则立即关,零延迟。
           const delay = slot.turnSubagentSeen ? 4000 : (suggestOn ? 3000 : 0);
-          if (delay) { cancelClose(); closeTimer = setTimeout(finalize, delay); }
-          else finalize();
+          // T0 诊断:记 finalize 判据现场值
+          trace(`result subtype=${m.subtype} is_error=${!!m.is_error} num_turns=${m.num_turns} turnSubagentSeen=${!!slot.turnSubagentSeen} suggestOn=${suggestOn} delay=${delay}`);
+          postDoneLogged = false; // T0 诊断:新 result = 新段,续跑泄漏重新可记
+          if (delay) { cancelClose(); closeTimer = setTimeout(() => finalize(`debounce-${delay}ms`), delay); }
+          else finalize('result-immediate');
         } else if (m.type === 'prompt_suggestion') {
           // 建议是本回合最后一条消息:result 已到(closeTimer 在挂)就立即收尾,
           // 不能走下面的 cancelClose 分支——那会把关闭取消掉、进程挂死等不到下一条。
-          if (closeTimer) finalize();
+          if (closeTimer) finalize('prompt_suggestion');
         } else if (closeTimer && m.type !== 'rate_limit_event' && m.type !== 'system') {
           // result 之后又来事件 → 那个 result 不是最终的,取消关闭等下一个。
           // rate_limit_event / system(status、api_retry)例外:纯信息事件、任何时刻都可能到,
           // 不代表还有回合;尤其 suggestOn 的 3s 建议窗内 SDK 生成建议那次调用若限流/重试会发
           // system/api_retry,让它 cancel 会把 finalize 永久取消掉(无重武装)→ slot 挂死等不到
           // 下一条、前端"正在预测下一步输入…"卡死(fable 审计)。真续跑只会是 assistant/tool 事件。
+          trace(`cancel-close by=${m.type} ${dtr()} (result后有续跑,取消关流)`); // T0 诊断
           cancelClose();
         }
       }
