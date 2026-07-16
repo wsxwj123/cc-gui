@@ -60,7 +60,15 @@ async function dirtyFiles(wtPath) {
     if (tk.length < 4) continue; // "XY <path>" 至少 4 字符
     const status = tk.slice(0, 2);
     files.push({ file: tk.slice(3), status: status.trim() });
-    if (status[0] === 'R' || status[0] === 'C') i++; // rename/copy 后跟原路径 token,跳过
+    if (status[0] === 'R' || status[0] === 'C') {
+      // rename/copy 后跟原路径 token:旧路径也入清单(状态记 D),提交勾选时新旧路径
+      // 一起提交,一次干净,不给下一次留一条悬空的删除。origin 标记供 commit 路由
+      // 把它排除出 `git add` 参数(旧路径已不在索引/工作区,add pathspec 会 fatal;
+      // 而 `git commit -- <path>` 认 HEAD,可正常带上删除)。
+      i++;
+      const from = tokens[i];
+      if (from) files.push({ file: from, status: 'D', origin: true });
+    }
   }
   return files;
 }
@@ -228,12 +236,17 @@ router.post('/worktree/commit', async (req, res) => {
     }
     // 白名单:每个文件必须在该树当前 porcelain 清单内 —— 挡 `:/`、`*`、../ 等
     // 任意 pathspec 注入;gitignored 文件不在清单里,天然无法被提交(且不提供 -f)。
-    const dirty = new Set((await dirtyFiles(wtPath)).map((f) => f.file));
+    const dirtyList = await dirtyFiles(wtPath);
+    const dirty = new Set(dirtyList.map((f) => f.file));
     for (const f of files) {
       if (!dirty.has(f)) return res.status(400).json({ error: `file not in dirty list: ${f}` });
     }
+    // rename/copy 的旧路径(origin)不进 add:已不在索引/工作区,pathspec 无匹配会 fatal;
+    // 删除侧本就 staged,靠下面 commit 的 pathspec(认 HEAD)带上即可。
+    const origins = new Set(dirtyList.filter((f) => f.origin).map((f) => f.file));
+    const addFiles = files.filter((f) => !origins.has(f));
     // `--` 隔断防选项注入;-A 限定 pathspec,同时覆盖删除/改名。
-    await execFileP('git', ['-C', wtPath, 'add', '-A', '--', ...files], { timeout: 15000 });
+    if (addFiles.length) await execFileP('git', ['-C', wtPath, 'add', '-A', '--', ...addFiles], { timeout: 15000 });
     // commit 带 pathspec:只提交勾选路径,别处预先 staged 的文件不会被顺带带上。
     await execFileP('git', ['-C', wtPath, 'commit', '-m', message, '--', ...files], {
       timeout: 30000,

@@ -557,6 +557,7 @@ export function PermissionPrompt({ sessionId = null, onExecutePlan = null, hydra
   const globalSid = useStore((s) => s.selectedSession?.sessionId);
   const paneSessions = useStore((s) => s.paneSessions);
   const paneCount = useStore((s) => s.paneCount);
+  const activeTabIndex = useStore((s) => s.activeTabIndex);
   const removePendingPermission = useStore((s) => s.removePendingPermission);
   const whitelist = useStore((s) => s.whitelistPermissionTool);
   const [busyId, setBusyId] = useState(null);
@@ -632,7 +633,18 @@ export function PermissionPrompt({ sessionId = null, onExecutePlan = null, hydra
     // 审批卡(实测串显+重复弹,可在错误上下文里批准别会话的操作);pane0 也是 draft 时
     // 原 `!selectedSid ||` 短路更是显示全部会话的请求。改为:有 sid 严格匹配;draft 只
     // 显示"无 sessionId 的孤儿请求"(可能正是本 draft 发起的首个工具调用,不能漏)。
-    : all.filter((p) => (sessionId ? p.sessionId === sessionId : !p.sessionId));
+    // ④(分屏版):plan 回合 spawn 的新 sid 不在会话列表(knownSids)→ 按严格匹配无家可归,
+    // 卡片不可见、回合永久卡死。补单窗格分支 ④ 的等价规则:仅在【活动窗格】的实例上,
+    // 未知 sid 且请求 cwd 落在本 pane 项目路径下 → 显示。门控活动窗格防同一请求在
+    // 每个窗格重复弹;路径缺失时放行(照抄单窗格 ④ 语义:宁可见不可卡死)。
+    : all.filter((p) => {
+        if (sessionId ? p.sessionId === sessionId : !p.sessionId) return true;
+        const active = paneSessions?.[activeTabIndex];
+        if ((active?.sessionId || null) !== (sessionId || null)) return false; // 本实例非活动窗格
+        if (!p.sessionId || knownSids.has(p.sessionId)) return false;          // 空 sid 走 draft 规则;已知别会话不串
+        const panePath = active?.projectPath || projectPath;
+        return !panePath || !p.cwd || String(p.cwd).startsWith(panePath);      // ④
+      });
   if (mine.length === 0) return null;
 
   const resolve = async (req, decision, reason, updatedInput, extra) => {

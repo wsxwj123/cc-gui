@@ -2201,7 +2201,7 @@ function SessionList() {
                       role="button"
                       tabIndex={0}
                       onClick={() => { if (!t.prunable) enterWorktree(t); }}
-                      onKeyDown={(e) => { if (!t.prunable && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); enterWorktree(t); } }}
+                      onKeyDown={(e) => { /* target===currentTarget:徽章上按 Enter 冒泡不误触进入 */ if (!t.prunable && e.target === e.currentTarget && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); enterWorktree(t); } }}
                       title={t.prunable ? '目录已丢失(被手动删除),只能删除此记录' : undefined}
                       className={`flex-1 min-w-0 text-left px-3 py-2 rounded-lg border border-canvas-deep transition-colors group ${t.prunable ? 'opacity-50 cursor-not-allowed' : 'hover:bg-canvas-warm cursor-pointer'}`}
                     >
@@ -6143,6 +6143,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                   setSelectedSession({ ..._s, sessionId: null, draft: true, draftId: newDraftId() });
                 }
                 setChatMessages([]);
+                // 转 draft 必清 pane 历史归属(claimPaneMessages 契约自守是兜底,这里是正路)
+                useStore.getState().setPaneMessages(tabIndex, []);
                 setCtxOverflow(null);
               }}
               className="px-2.5 py-1 rounded text-[12px] font-medium text-red-700 border border-red-300 hover:bg-red-100"

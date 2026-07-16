@@ -890,6 +890,10 @@ export const useStore = create((set, get) => ({
     const idx = Math.max(0, Math.min(5, i | 0));
     const sids = [...get().paneMessagesSid];
     if (sids[idx] === (sid || null)) return;
+    // 契约自守:槽位已归属别的真 sid(非 draft 空槽)→ 说明某个重置点漏清了消息,
+    // 直接认领会把旧会话内容污染进新会话。此时清空消息再认领(setPaneMessages
+    // 同时写 arr+sid+pane0 镜像),以后新增重置点漏清也被这里兜住。
+    if (sids[idx] !== null) { get().setPaneMessages(idx, [], sid || null); return; }
     sids[idx] = sid || null;
     set({ paneMessagesSid: sids });
   },
@@ -1157,6 +1161,9 @@ export const useStore = create((set, get) => ({
       const data = await res.json();
       // 端点现返回 { messages, usageTotals };兼容旧的裸数组形态(升级过渡期)。
       const messages = Array.isArray(data) ? data : (Array.isArray(data?.messages) ? data.messages : []);
+      // 乱序守卫:响应落地时该 pane 已切走(sessionId 不再是发起时的)→ 整条丢弃,
+      // 防慢响应覆盖新会话的消息/归属标记造成永久空白。所有调用点发起时两者相等。
+      if (get().paneSessions[tab]?.sessionId !== sessionId) { if (!silent) set({ loading: false }); return; }
       get().setPaneMessages(tab, messages, sessionId);
       // 服务端算好的整会话用量聚合,SessionDetail 顶部用量条直接取用,
       // 避免前端对几千条历史消息每帧全量 reduce。
