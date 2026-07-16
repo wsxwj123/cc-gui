@@ -49,8 +49,8 @@ async function requireWorktree(req, res) {
 }
 
 /** 该树的脏文件清单(porcelain -z 解析)。gitignored 文件天然不在 status 输出里,
- *  .local/.env 等私有文件不会出现在候选清单。 */
-async function dirtyFiles(wtPath) {
+ *  .local/.env 等私有文件不会出现在候选清单。导出供单测(tests/unit/check-worktree-git.mjs)。 */
+export async function dirtyFiles(wtPath) {
   const out = await execFileP('git', ['-C', wtPath, 'status', '--porcelain=v1', '-z'],
     { timeout: 10000, maxBuffer: 8 * 1024 * 1024 });
   const tokens = out.stdout.split('\0');
@@ -60,8 +60,12 @@ async function dirtyFiles(wtPath) {
     if (tk.length < 4) continue; // "XY <path>" 至少 4 字符
     const status = tk.slice(0, 2);
     files.push({ file: tk.slice(3), status: status.trim() });
-    if (status[0] === 'R' || status[0] === 'C') {
+    if (status.includes('R') || status.includes('C')) {
       // rename/copy 后跟原路径 token,必须消费掉,否则会被误读成独立条目。
+      // 实测(git 2.50,复现脚本见 tests/unit/check-worktree-git.mjs):R 不止出现
+      // 在 X 位('R '/'RM'/'RD'),Y 位也会出现(' R',已跟踪文件 mv 后 `git add -N`
+      // 新路径),两种形态都带原路径 token;R/C 只出现在 rename/copy 条目,
+      // includes 匹配不会误伤其他状态('??' 等)。
       // 只有 rename 给旧路径补 D 条目(提交勾选时新旧路径一起提交,一次干净,
       // 不给下一次留一条悬空的删除);copy 的源文件仍然存在,记 D 是错的——
       // 勾选提交会把活文件当删除处理。origin 标记供 commit 路由把它排除出
@@ -69,7 +73,7 @@ async function dirtyFiles(wtPath) {
       // 而 `git commit -- <path>` 认 HEAD,可正常带上删除)。
       i++;
       const from = tokens[i];
-      if (from && status[0] === 'R') files.push({ file: from, status: 'D', origin: true });
+      if (from && status.includes('R')) files.push({ file: from, status: 'D', origin: true });
     }
   }
   return files;
