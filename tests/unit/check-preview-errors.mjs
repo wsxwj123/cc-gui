@@ -1,6 +1,9 @@
 #!/usr/bin/env node
 // F2 preview 报错采集:记录规整 + 摘要格式化纯逻辑自检。跑法:node tests/unit/check-preview-errors.mjs
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
   normalizePreviewErr, formatPreviewErrors, PREVIEW_ERR_KEY, ERROR_COLLECTOR,
   resolvePreviewErrLine,
@@ -189,5 +192,44 @@ assert.match(ERROR_COLLECTOR, /console\.error/);
 assert.match(ERROR_COLLECTOR, /window\.fetch/);
 // error 事件带上 filename(供父页区分 inline vs 外部脚本)
 assert.match(ERROR_COLLECTOR, /e\.filename/);
+
+// ── 注入串可编译性 + srcDoc 结构完整性 ────────────────────────────
+// ERROR_COLLECTOR / STORAGE_SHIM 是拼进 iframe srcDoc 的 <script> 字符串模板。改坏一个
+// 引号/括号 → 采集器装不上(零徽章);更坏是漏闭合 </script> 吞掉后续用户 HTML,把整页
+// 当脚本文本 → 预览完全空白。这类改动 vite build 不会报(模板串内容不被解析),这几条断言
+// 是唯一防线。STORAGE_SHIM 住在 ArtifactPreview.jsx(import React,node 不能直接 import),
+// 从源码文本抠字面量。
+const STORAGE_SHIM = (() => {
+  const jsx = fs.readFileSync(
+    path.join(path.dirname(fileURLToPath(import.meta.url)), '../../client/src/components/ArtifactPreview.jsx'),
+    'utf8',
+  );
+  const m = jsx.match(/const STORAGE_SHIM = `([\s\S]*?)`;/);
+  assert.ok(m, '能从 ArtifactPreview.jsx 抠出 STORAGE_SHIM 字面量');
+  return m[1];
+})();
+
+for (const [name, s] of [['ERROR_COLLECTOR', ERROR_COLLECTOR], ['STORAGE_SHIM', STORAGE_SHIM]]) {
+  assert.equal((s.match(/<script>/g) || []).length, 1, `${name} 恰好一个 <script>`);
+  assert.equal((s.match(/<\/script>/g) || []).length, 1,
+    `${name} 恰好一个 </script>(游离/漏闭合会吞掉后续用户 HTML → 预览空白)`);
+  const body = s.match(/<script>([\s\S]*)<\/script>/)[1];
+  // 内层 JS 编译不过 = 引号/括号被改坏,采集器整个装不上 → 零徽章。
+  assert.doesNotThrow(() => new Function(body), `${name} 内层 JS 可编译(new Function 不抛)`);
+}
+
+// srcDoc = STORAGE_SHIM + ERROR_COLLECTOR + 用户代码:拼接后用户代码必须原样保留,且注入
+// 前缀里所有 <script> 都在用户代码之前闭合(否则用户 HTML 被当脚本文本 → 空白)。
+{
+  const userCode = '<!DOCTYPE html><html><body><h1>__marker__</h1><script>oops()</scr' + 'ipt></body></html>';
+  const srcDoc = STORAGE_SHIM + ERROR_COLLECTOR + userCode;
+  assert.ok(srcDoc.includes(userCode), 'srcDoc 完整包含用户代码(未被注入前缀吞掉)');
+  const prefix = srcDoc.slice(0, srcDoc.indexOf(userCode));
+  assert.equal(
+    (prefix.match(/<script>/g) || []).length,
+    (prefix.match(/<\/script>/g) || []).length,
+    '注入前缀所有 script 标签均已闭合(不吞用户 HTML)',
+  );
+}
 
 console.log('✓ check-preview-errors: all passed');
