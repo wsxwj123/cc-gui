@@ -20,7 +20,7 @@ use std::path::PathBuf;
 use std::process::{Child, Command};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
-use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
+use tauri::{Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 
 const BACKEND_HOST: &str = "127.0.0.1";
 const DEFAULT_BACKEND_PORT: u16 = 6677;
@@ -47,6 +47,46 @@ fn read_close_behavior() -> String {
         }
     }
     "ask".to_string()
+}
+
+// F1 全局热键截图:读 ~/.claude-gui/hotkey.json {"enabled":bool,"accelerator":"CmdOrCtrl+Shift+2"}。
+// GUI 设置页经 server 端点写同一文件;Rust 侧仅在 setup 时读一次并注册,改配置后需重启生效
+// (MVP 不做 JS 侧实时重注册,设置页文案已注明)。缺省=启用 + CmdOrCtrl+Shift+2(避开系统
+// Cmd+Shift+3/4/5 截图键)。纯字符串解析、不引 serde,和 read_close_behavior 同风格,坏文件即回缺省。
+struct HotkeyConfig {
+    enabled: bool,
+    accelerator: String,
+}
+fn read_hotkey_config() -> HotkeyConfig {
+    const DEFAULT_ACCEL: &str = "CmdOrCtrl+Shift+2";
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .unwrap_or_default();
+    let p = PathBuf::from(home).join(".claude-gui").join("hotkey.json");
+    let s = match std::fs::read_to_string(&p) {
+        Ok(s) => s,
+        Err(_) => return HotkeyConfig { enabled: true, accelerator: DEFAULT_ACCEL.to_string() },
+    };
+    // enabled:显式写 "enabled": false 才禁用,其余(含缺字段)都视为启用。
+    let enabled = !(s.contains("\"enabled\": false") || s.contains("\"enabled\":false"));
+    // accelerator:取 "accelerator": "..." 双引号内内容;取不到用缺省。只允许 accelerator 常见字符,
+    // 防把任意字符串塞进热键解析(非法字符集合外一律回缺省)。
+    let accelerator = parse_json_string_field(&s, "accelerator")
+        .filter(|a| !a.is_empty() && a.chars().all(|c| c.is_ascii_alphanumeric() || c == '+' || c == ' '))
+        .unwrap_or_else(|| DEFAULT_ACCEL.to_string());
+    HotkeyConfig { enabled, accelerator }
+}
+
+// 从 {... "key": "value" ...} 里抠出 value(不引 serde,和本文件既有极简解析同风格)。
+// 只处理无转义的简单值(热键串就是 ASCII+ 加号,不含引号/反斜杠),够用。
+fn parse_json_string_field(json: &str, key: &str) -> Option<String> {
+    let needle = format!("\"{key}\"");
+    let after_key = &json[json.find(&needle)? + needle.len()..];
+    let after_colon = &after_key[after_key.find(':')? + 1..];
+    let start = after_colon.find('"')? + 1;
+    let rest = &after_colon[start..];
+    let end = rest.find('"')?;
+    Some(rest[..end].to_string())
 }
 
 // P1: 退出时杀整棵后端进程树。child.kill() 只杀 node 本身,node 再 spawn 的
@@ -279,6 +319,22 @@ mod node_probe_tests {
         // 没有 path 行 / path 为空 → None
         assert_eq!(nvm_settings_symlink("root: C:\\x\r\narch: 64\r\n"), None);
         assert_eq!(nvm_settings_symlink("path:\n"), None);
+    }
+}
+
+#[cfg(test)]
+mod hotkey_tests {
+    use super::parse_json_string_field;
+    #[test]
+    fn parses_accelerator_field() {
+        let j = r#"{ "enabled": true, "accelerator": "CmdOrCtrl+Shift+2" }"#;
+        assert_eq!(parse_json_string_field(j, "accelerator").as_deref(), Some("CmdOrCtrl+Shift+2"));
+        // 紧凑写法(无空格)
+        assert_eq!(parse_json_string_field(r#"{"accelerator":"Alt+F1"}"#, "accelerator").as_deref(), Some("Alt+F1"));
+        // 缺字段 → None
+        assert_eq!(parse_json_string_field(r#"{"enabled":false}"#, "accelerator"), None);
+        // 空值 → Some("")(调用方再 filter 掉)
+        assert_eq!(parse_json_string_field(r#"{"accelerator":""}"#, "accelerator").as_deref(), Some(""));
     }
 }
 
@@ -698,6 +754,8 @@ pub fn run() {
         // 权限见 capabilities/updater.json(生产 remote 上下文须列全端口)。
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
+        // F1: 全局热键截图。插件在此挂载,具体快捷键在 setup 里按 ~/.claude-gui/hotkey.json 注册。
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         // L1: 单例插件 — 双击 app 时不开新进程,把已有窗口前置聚焦,避免每次都开新窗口
         // 且不踩坏 6677 上活着的 server(浏览器 session 不掉)。
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
@@ -775,6 +833,33 @@ pub fn run() {
                     let _ = w2.unminimize();
                     let _ = w2.set_focus();
                 });
+            }
+
+            // F1: 注册全局截图热键。热键触发 → 置前主窗口 + emit 事件,前端监听后调 /api/screenshot。
+            // 在后台线程初始化之外单独注册(与端口探测无关,应尽早生效)。注册失败(键位非法/已被
+            // 其它 app 占用)只记日志、不阻断启动 —— GUI 其余功能不受影响。
+            {
+                use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
+                let cfg = read_hotkey_config();
+                if cfg.enabled {
+                    let accel = cfg.accelerator.clone();
+                    let reg = app.global_shortcut().on_shortcut(accel.as_str(), move |app, _shortcut, event| {
+                        // 只在按下沿触发(否则按住会重复 emit)。
+                        if event.state() != ShortcutState::Pressed { return; }
+                        if let Some(w) = app.get_webview_window("main") {
+                            let _ = w.unminimize();
+                            let _ = w.show();
+                            let _ = w.set_focus();
+                        }
+                        let _ = app.emit("cgui:screenshot-hotkey", ());
+                    });
+                    match reg {
+                        Ok(_) => log_startup(&format!("[tauri] registered screenshot hotkey '{accel}'")),
+                        Err(e) => log_startup(&format!("[tauri] failed to register screenshot hotkey '{accel}': {e}")),
+                    }
+                } else {
+                    log_startup("[tauri] screenshot hotkey disabled by config");
+                }
             }
 
             let handle = app.handle().clone();
