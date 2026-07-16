@@ -264,8 +264,13 @@ const MCP_STAMP_FILE = join(GUI_DIR, 'mcp-config.stamp');
 // 只清列表/详情内存缓存,不 touch 换代戳。用于"不改变常驻进程该加载什么 MCP"的变更
 // (如 autoapprove:chat.js 权限判定时实时 readFileSync mcp-autoapprove.json,不经 query 起时定死,
 // 无需换进程;touch 戳会让聊天中途勾选"自动执行"白白冷启动 ~5s)。
+// 全市场可装插件列表缓存(折叠式高级搜索用):`claude plugin list --available --json` 较慢
+// (拉全部已配置 marketplace),缓存全量 + 前端每次搜索只在内存过滤,不每击键跑一次 CLI。
+let availablePluginsCache = null; // { at, items }
+const AVAILABLE_PLUGINS_TTL_MS = 5 * 60_000;
 function invalidateMcpListCache() {
   mcpCache = null; mcpCacheAt = 0;
+  availablePluginsCache = null; // 装/卸插件后 installed 标记会变,一并失效
   try { invalidateDetailsCache(); } catch {}
 }
 // 增删改 MCP(含登录/登出/插件变动):清缓存 + touch 换代戳,让 chat.js 常驻进程兼容键计入其
@@ -1019,6 +1024,54 @@ async function ensureOfficialMarketplace() {
   try { await runClaude(['plugin', 'marketplace', 'add', 'anthropics/claude-plugins-official'], { timeout: 30000 }); } catch {}
   try { await runClaude(['plugin', 'marketplace', 'update', OFFICIAL_MARKETPLACE], { timeout: 30000 }); } catch {}
 }
+
+// GET /api/plugins/available?q=&fresh=1 — 全市场可装插件搜索(折叠式高级搜索)。
+//   数据源:`claude plugin list --available --json`(CLI 已聚合所有已配置 marketplace 的可装项),
+//   壳子原则:不自己爬网页。全量缓存 AVAILABLE_PLUGINS_TTL_MS,q 仅做内存过滤(名称/描述/来源)。
+//   结果限量返回避免前端渲染上百条;total 供前端提示"细化关键词"。
+async function loadAvailablePlugins(force = false) {
+  if (!force && availablePluginsCache && Date.now() - availablePluginsCache.at < AVAILABLE_PLUGINS_TTL_MS) {
+    return availablePluginsCache.items;
+  }
+  const out = await runClaude(['plugin', 'list', '--available', '--json'], { timeout: 60000 });
+  let parsed;
+  try { parsed = JSON.parse(out); } catch { throw new Error('无法解析插件列表输出'); }
+  const installedBare = new Set(
+    (parsed.installed || []).map((p) => String(p.id || '').split('@')[0]).filter(Boolean),
+  );
+  const items = (parsed.available || [])
+    .filter((a) => a && a.name)
+    .map((a) => ({
+      pluginId: a.pluginId || `${a.name}@${a.marketplaceName || ''}`,
+      name: a.name,
+      description: a.description || '',
+      marketplace: a.marketplaceName || String(a.pluginId || '').split('@')[1] || '',
+      installed: installedBare.has(a.name),
+    }));
+  availablePluginsCache = { at: Date.now(), items };
+  return items;
+}
+
+router.get('/plugins/available', async (req, res) => {
+  try {
+    const items = await loadAvailablePlugins(req.query.fresh === '1');
+    const q = String(req.query.q || '').trim().toLowerCase();
+    const filtered = q
+      ? items.filter((a) =>
+          a.name.toLowerCase().includes(q) ||
+          a.description.toLowerCase().includes(q) ||
+          a.marketplace.toLowerCase().includes(q))
+      : items;
+    const LIMIT = 60;
+    res.json({
+      total: filtered.length,
+      items: filtered.slice(0, LIMIT),
+      cachedAt: availablePluginsCache?.at || null,
+    });
+  } catch (err) {
+    res.status(500).json({ error: (err.stderr?.toString() || err.message || '').trim() || '获取插件列表失败' });
+  }
+});
 
 // POST /api/plugins/install { name, repo?, marketplace? }
 //   官方插件:`claude plugin install <name>@claude-plugins-official`(非交互)。
