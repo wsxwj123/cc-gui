@@ -70,6 +70,14 @@ assert.strictEqual(calls, 2, '不同 q 应打上游');
 assert.deepStrictEqual(await searchRegistry('   ', { fetchImpl: mockFetch }), []);
 assert.strictEqual(calls, 2);
 
+// ---- 缓存上限:FIFO 逐出,最早的 key 被挤出后再查会重新打上游 ----
+for (let i = 0; i < 55; i++) await searchRegistry(`cap-${i}`, { fetchImpl: mockFetch });
+const before = calls;
+await searchRegistry('cap-0', { fetchImpl: mockFetch }); // 已被逐出 → 重新 fetch
+assert.strictEqual(calls, before + 1, '超上限后最早 key 应被逐出,再查需重新打上游');
+await searchRegistry('cap-54', { fetchImpl: mockFetch }); // 最新的仍在缓存
+assert.strictEqual(calls, before + 1, '最新 key 应仍命中缓存');
+
 // ---- 上游错误 → 可读报错(不静默空列表) ----
 // 网络层失败(TUN 劫持 / 断网 / 超时)
 await assert.rejects(

@@ -6,6 +6,7 @@
 // 注册表返回的名称/描述/命令全部是外部数据:仅作为添加表单的预填初值展示,不自动执行安装。
 const REGISTRY_URL = 'https://registry.modelcontextprotocol.io/v0/servers';
 const CACHE_TTL_MS = 15 * 60_000;
+const CACHE_MAX = 50; // 只判 TTL 不清除会让去抖的中间关键词单调堆积;超上限删最早插入的
 const LIMIT = 20;
 const cache = new Map(); // q(lowercase) -> { at, items }
 
@@ -89,5 +90,7 @@ export async function searchRegistry(q, { fetchImpl = fetch, ttlMs = CACHE_TTL_M
     .map(normalizeRegistryEntry)
     .filter(Boolean);
   cache.set(key, { at: Date.now(), items });
+  // ponytail: FIFO 上限(Map 迭代序即插入序),命中率要求高再换 LRU
+  if (cache.size > CACHE_MAX) cache.delete(cache.keys().next().value);
   return items;
 }
