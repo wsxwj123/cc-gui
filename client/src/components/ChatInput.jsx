@@ -313,7 +313,13 @@ export function ChatInput({ onSend, onStop, onAccelerate, onBackground, suggesti
     draftBeforeHistoryRef.current = '';
   }, [draftKey]);
 
+  // 串扰#10b:key 变更帧跳过持久化 —— 切会话时本 effect 先于上面的 load effect 引发的
+  // rerender 执行,会以【旧 text + 新 key】写一次 localStorage(A 的草稿写进 B 的 key,
+  // 随即被 load 覆盖自愈;若两 effect 间卸载/崩溃则残留)。跳过该帧只堵错写,load 后
+  // text 的正常变更照常持久化。
+  const prevDraftKeyRef = useRef(draftKey);
   useEffect(() => {
+    if (prevDraftKeyRef.current !== draftKey) { prevDraftKeyRef.current = draftKey; return; }
     try {
       if (text) localStorage.setItem(draftKey, text);
       else localStorage.removeItem(draftKey);

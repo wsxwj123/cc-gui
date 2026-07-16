@@ -627,7 +627,11 @@ export function PermissionPrompt({ sessionId = null, onExecutePlan = null, hydra
         if (knownSids.has(p.sessionId)) return false;        // ③
         return !projectPath || !p.cwd || String(p.cwd).startsWith(projectPath); // ④
       })
-    : all.filter((p) => !selectedSid || p.sessionId === selectedSid);
+    // 串扰#4②:draft 窗格(selectedSid=null)原来 `!selectedSid ||` 短路显示【全部】
+    // 会话的待审请求 —— A 的权限/计划/选择卡串进 draft 窗格,且与 A 自己窗格重复弹,
+    // 可在错误上下文里批准 A 的操作。改为:有 sid 严格匹配;draft 只显示"无 sessionId
+    // 的孤儿请求"(可能正是本 draft 发起的首个工具调用,不能漏)。
+    : all.filter((p) => (selectedSid ? p.sessionId === selectedSid : !p.sessionId));
   if (mine.length === 0) return null;
 
   const resolve = async (req, decision, reason, updatedInput, extra) => {

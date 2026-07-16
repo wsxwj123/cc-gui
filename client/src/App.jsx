@@ -4719,7 +4719,10 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             // G4:上下文超窗 → 413 / prompt too long。/compact 也会因此失败(摘要请求本身超限)。
             // 不自动重试,弹引导横幅让用户选恢复方式。
             if (/\b413\b|payload too large|prompt is too long|too many tokens|input (?:is )?too long|exceed[a-z ]*context|context[a-z ]*exceed|maximum context/i.test(msg)) {
-              setCtxOverflow({ has1m: /\[1m\]/i.test(currentModel || ''), wasCompact: isCompact });
+              // 串扰#8:横幅打归属 key(流的 owner,draft→init 后已升级为真 sid),渲染
+              // 按 ownerKey===sessionQueueKey 门控 —— 否则 set 后只有手点才清,A 的超窗
+              // 横幅持久挂在 B 下,内嵌按钮还作用于 B(语义错位)。
+              setCtxOverflow({ has1m: /\[1m\]/i.test(currentModel || ''), wasCompact: isCompact, ownerKey: streamOwnerKeyRef.current });
               accumulatedText = ''; accumulatedThinking = ''; currentToolCalls = [];
               sawError = true;
               break;
@@ -6070,8 +6073,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         onCompact={() => handleSend('/compact')}
       />
 
-      {/* G4:上下文超窗 / compact 失败(413) 的恢复引导。带操作按钮,不自动重试。 */}
-      {ctxOverflow && (
+      {/* G4:上下文超窗 / compact 失败(413) 的恢复引导。带操作按钮,不自动重试。
+          串扰#8:按归属门控,只在触发它的会话下显示(切会话不残留,不搞异步清理)。 */}
+      {ctxOverflow && ctxOverflow.ownerKey === sessionQueueKey && (
         <div className="shrink-0 mx-6 mt-2 px-3 py-2.5 rounded-md bg-red-50 border border-red-200 animate-fade-up">
           <div className="text-red-700 text-[12px] font-body leading-snug mb-2">
             ⚠️ {ctxOverflow.wasCompact ? '/compact 失败' : '上下文超出模型窗口'}：当前对话已超过模型上下文上限，
