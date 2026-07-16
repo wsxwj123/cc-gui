@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { X, Plus, Trash2, RefreshCw, ExternalLink, ArrowLeft } from 'lucide-react';
+import { X, Plus, Trash2, RefreshCw, ExternalLink, ArrowLeft, Search, ChevronRight } from 'lucide-react';
 import { BUILTIN_MCP_SERVERS, findBuiltinMcp } from '../utils/builtinMcpServers.js';
 import { openExternalUrl } from '../utils/openExternal.js';
 
@@ -67,6 +67,44 @@ export function McpForm({ editing, onClose, onSaved }) {
   };
   // 用户一旦改过命令/URL,后台补全就不再覆盖这两个字段,避免边输入边被刷掉。
   const dirtyRef = React.useRef(false);
+
+  // 注册表搜索(仅新增态,折叠式,交互对齐插件面板的全市场搜索):关键词去抖 400ms 后
+  // GET /api/mcp/registry-search(后端 15min 缓存)。选中条目 → applyRegistryItem 预填表单,
+  // 用户可改可取消,最终仍走下方「添加」按钮的现有提交流程。
+  const [regOpen, setRegOpen] = useState(false);
+  const [regQuery, setRegQuery] = useState('');
+  const [regItems, setRegItems] = useState(null); // null | []
+  const [regLoading, setRegLoading] = useState(false);
+  const [regErr, setRegErr] = useState('');
+  useEffect(() => {
+    if (!regOpen || !regQuery.trim()) { setRegItems(null); setRegErr(''); return; }
+    let alive = true;
+    const t = setTimeout(async () => {
+      setRegLoading(true); setRegErr('');
+      try {
+        const r = await fetch(`/api/mcp/registry-search?q=${encodeURIComponent(regQuery.trim())}`);
+        const d = await r.json();
+        if (!alive) return;
+        if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+        setRegItems(d.items || []);
+      } catch (e) { if (alive) { setRegErr(e.message); setRegItems(null); } }
+      if (alive) setRegLoading(false);
+    }, 400);
+    return () => { alive = false; clearTimeout(t); };
+  }, [regOpen, regQuery]);
+  // 注册表条目内容是外部数据,仅作为表单初值填入,不自动提交安装。
+  const applyRegistryItem = (it) => {
+    setName(it.id || '');
+    setLabel('');
+    setTransport(it.transport || 'stdio');
+    if (it.transport === 'stdio') { setCommandLine(it.commandLine || ''); setUrl(''); }
+    else { setUrl(it.url || ''); setCommandLine(''); }
+    setEnvRows((it.env || []).map((e) => ({ k: e.k, v: '', hint: e.hint || '' })));
+    setTplMeta(it.repository ? { note: '来自 MCP 注册表,配置已预填,确认或修改后点「添加」。', repo: it.name, docs: it.repository } : null);
+    if (/^uvx?\s/.test(it.commandLine || '')) checkUv(); else setUvStatus('idle');
+    dirtyRef.current = true;
+    setErr('');
+  };
 
   // 选内置模板自动回填字段;需密钥的把 env 占位 key 填好(value 留空,用户补)。
   const applyTemplate = (id) => {
@@ -246,6 +284,55 @@ export function McpForm({ editing, onClose, onSaved }) {
                         <span className="flex-1">此 MCP 用 <code className="font-mono">uvx</code> 运行,本机未检测到 <code className="font-mono">uv</code>。装上后即可使用(uv 会自动备好 Python)。</span>
                         <button onClick={installUv}
                           className="shrink-0 px-2.5 py-1 rounded text-white bg-accent hover:bg-accent-hover text-[11px] font-medium">安装 uv</button>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* 注册表搜索(仅新增态,折叠式):搜官方 MCP 注册表,选中预填表单,仍走下方「添加」提交 */}
+            {!isEdit && (
+              <div className="space-y-1.5">
+                <button
+                  onClick={() => setRegOpen((v) => !v)}
+                  className="w-full flex items-center gap-1.5 text-[12px] font-medium text-ink-faint hover:text-ink transition-colors">
+                  <ChevronRight size={13} className={`transition-transform ${regOpen ? 'rotate-90' : ''}`} />
+                  <Search size={12} />
+                  从 MCP 注册表搜索
+                </button>
+                {regOpen && (
+                  <div className="space-y-2">
+                    <div className="relative">
+                      <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-faint pointer-events-none" />
+                      <input
+                        value={regQuery}
+                        onChange={(e) => setRegQuery(e.target.value)}
+                        placeholder="输入关键词搜索官方注册表,如 github / fetch"
+                        className={`${inputCls} pl-8`} />
+                    </div>
+                    <div className={hintCls}>数据来自 registry.modelcontextprotocol.io。选中条目后配置预填入下方表单,确认或修改后点「添加」。</div>
+                    {regErr && <div className="text-[11px] text-error bg-error/10 border border-error/20 rounded px-2 py-1.5 break-all">{regErr}</div>}
+                    {regLoading && <div className="flex items-center gap-1.5 text-[11px] text-ink-faint"><RefreshCw size={11} className="animate-spin" />搜索中…</div>}
+                    {!regLoading && !regErr && regItems && regItems.length === 0 && (
+                      <div className="text-[11px] text-ink-faint py-1">无匹配结果,换个关键词。</div>
+                    )}
+                    {!regLoading && regItems && regItems.length > 0 && (
+                      <div className="max-h-[220px] overflow-y-auto rounded-lg border border-canvas-deep divide-y divide-canvas-deep/60">
+                        {regItems.map((it) => (
+                          <button key={it.name} onClick={() => applyRegistryItem(it)}
+                            title="选中后将该条目的配置预填入下方表单"
+                            className="w-full text-left px-3 py-2 hover:bg-canvas-warm transition-colors">
+                            <div className="flex items-center gap-2">
+                              <span className="text-[12px] font-medium text-ink font-body truncate">{it.id || it.name}</span>
+                              <span className="shrink-0 text-[9px] px-1 py-px bg-canvas-deep text-ink-faint rounded font-mono">
+                                {it.kind === 'remote' ? `远程 ${it.transport}` : it.kind}
+                              </span>
+                              {it.version && <span className="shrink-0 text-[9px] text-ink-ghost font-mono">v{it.version}</span>}
+                            </div>
+                            {it.description && <div className="text-[10px] text-ink-faint font-body leading-snug mt-0.5 line-clamp-2">{it.description}</div>}
+                          </button>
+                        ))}
                       </div>
                     )}
                   </div>
