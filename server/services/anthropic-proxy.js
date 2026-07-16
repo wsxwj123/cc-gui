@@ -16,6 +16,7 @@
 // Bound to 127.0.0.1 only — no auth, never exposed.
 
 import http from 'node:http';
+import { normalizeContextOverflow } from './openai-proxy.js';
 
 // Fixed loopback port (distinct from openai-proxy's 8788) so the URL written into
 // settings.json survives watchdog restarts. Ephemeral fallback if it's taken.
@@ -156,6 +157,28 @@ async function handle(req, clientRes) {
   // Mirror upstream status + content-type. Deliberately DON'T copy content-encoding:
   // fetch already decompressed the body, so re-advertising gzip would corrupt it.
   const ct = upstreamResp.headers.get('content-type') || 'application/json';
+
+  // 唯一的非透传例外(auto-compact 修复):上游 4xx/5xx 的 JSON 错误体,若 error.message
+  // 命中上下文超限特征,归一化为 CLI 可识别的 "prompt is too long: <原文>"(CLI 才会缩组
+  // 重试摘要请求,第三方 auto-compact 不再杀回合)。其余一切错误字节原样透传——错误体
+  // 都很小,缓冲后不命中就原样发回,内容不变。非 JSON / 非超限 / SSE 均不动。
+  if (upstreamResp.status >= 400 && !/event-stream/i.test(ct)) {
+    let raw = '';
+    try { raw = await upstreamResp.text(); } catch { raw = ''; }
+    let out = raw;
+    try {
+      const j = JSON.parse(raw);
+      const m = j?.error?.message;
+      if (typeof m === 'string') {
+        const norm = normalizeContextOverflow(m);
+        if (norm !== m) { j.error.message = norm; out = JSON.stringify(j); }
+      }
+    } catch { /* 非 JSON 错误体:原样透传 */ }
+    clientRes.writeHead(upstreamResp.status, { 'Content-Type': ct, 'Cache-Control': 'no-cache' });
+    clientRes.end(out);
+    return;
+  }
+
   clientRes.writeHead(upstreamResp.status, { 'Content-Type': ct, 'Cache-Control': 'no-cache' });
 
   if (!upstreamResp.body) { clientRes.end(); return; }
