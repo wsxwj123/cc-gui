@@ -25,6 +25,12 @@ export function normalizeRegistryEntry(entry) {
   };
   const remote = Array.isArray(sv.remotes) ? sv.remotes.find((r) => r && r.url) : null;
   if (remote) {
+    // 信任边界:预填的 url 后续会作为 claude CLI 的裸位置参数,恶意注册表条目给
+    // `-` 开头字符串会被解析成 flag。URL 解析 + 协议仅允许 http/https,
+    // 不合格视为不可预填条目(return null,与下方仅 oci 的过滤同路)。
+    let parsed;
+    try { parsed = new URL(String(remote.url)); } catch { return null; }
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null;
     return {
       ...base,
       kind: 'remote',

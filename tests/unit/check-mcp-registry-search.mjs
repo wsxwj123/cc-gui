@@ -44,6 +44,11 @@ assert.strictEqual(remote.url, 'https://server.smithery.ai/x/mcp');
 const sse = normalizeRegistryEntry({ server: { name: 'a/b', remotes: [{ type: 'sse', url: 'https://x/sse' }] } });
 assert.strictEqual(sse.transport, 'sse');
 
+// remote.url 协议校验:`-` 开头串(会被 CLI 当 flag)/非 http(s) 协议 → null 不可预填;正常 https 通过
+assert.strictEqual(normalizeRegistryEntry({ server: { name: 'a/evil', remotes: [{ type: 'streamable-http', url: '-–evil' }] } }), null);
+assert.strictEqual(normalizeRegistryEntry({ server: { name: 'a/js', remotes: [{ type: 'streamable-http', url: 'javascript:alert(1)' }] } }), null);
+assert.strictEqual(normalizeRegistryEntry({ server: { name: 'a/good', remotes: [{ type: 'streamable-http', url: 'https://ok.example/mcp' }] } })?.url, 'https://ok.example/mcp');
+
 // 无 remotes / 无 npm/pypi 包(如仅 oci)→ null,不进结果
 assert.strictEqual(normalizeRegistryEntry({ server: { name: 'a/oci-only', packages: [{ registryType: 'oci', identifier: 'img' }] } }), null);
 assert.strictEqual(normalizeRegistryEntry({ server: { name: 'a/bare' } }), null);
