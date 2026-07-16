@@ -193,12 +193,17 @@ export function FileExplorerPanel() {
   }, [pendingCount]);
 
   // Esc 关闭菜单:与遮罩外部点击共关同一 ctxMenu state,右键/⋮ 两种打开方式行为一致。
-  // 不 preventDefault/stopPropagation——App 的双击 Esc 停止逻辑首按只是记时,不冲突。
+  // 捕获阶段拦下 + stopPropagation:阻断冒泡阶段的「双击 Esc 停止流」监听(App 挂在
+  // window 冒泡阶段),避免关菜单的 Esc 被计入停止连击。与 App 速查面板 Esc 同款口径。
   useEffect(() => {
     if (!ctxMenu) return;
-    const onEsc = (e) => { if (e.key === 'Escape') setCtxMenu(null); };
-    window.addEventListener('keydown', onEsc);
-    return () => window.removeEventListener('keydown', onEsc);
+    const onEsc = (e) => {
+      if (e.key !== 'Escape') return;
+      e.stopPropagation();
+      setCtxMenu(null);
+    };
+    window.addEventListener('keydown', onEsc, true);
+    return () => window.removeEventListener('keydown', onEsc, true);
   }, [ctxMenu]);
 
   const onCtx = useCallback((e, entry) => {
