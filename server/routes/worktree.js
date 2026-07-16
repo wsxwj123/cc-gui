@@ -363,9 +363,16 @@ export async function mergeWorktreeIntoMain(root, wtPath) {
     // 无条件 abort,不留半合并;merge 未真正开始(如 unrelated histories 直接拒)时
     // abort 会报 "no merge to abort",吞掉即可。
     try { await execFileP('git', ['-C', root, 'merge', '--abort'], { timeout: 15000 }); } catch {}
+    // abort 本身可能失败(典型:别的进程持有主树 index.lock),此时 MERGE_HEAD 残留=
+    // 半合并状态,不能仍宣称"已自动取消"。用 rev-parse 验证(worktree 场景 .git 可能是
+    // 文件,-C 主树 + rev-parse 比拼 .git/MERGE_HEAD 路径更稳):非零退出 = 不存在 = 已清。
+    const aborted = await execFileP('git', ['-C', root, 'rev-parse', '-q', '--verify', 'MERGE_HEAD'], { timeout: 4000 })
+      .then(() => false, () => true);
     return {
       ok: false, branch, targetBranch, conflicts,
-      error: conflicts.length ? '合并冲突,已自动取消合并' : (err.stderr || err.message),
+      error: conflicts.length
+        ? (aborted ? '合并冲突,已自动取消合并' : '合并冲突且自动取消失败,主工作树处于合并中状态,请手动执行 git merge --abort')
+        : (err.stderr || err.message),
     };
   }
   let sha = null;

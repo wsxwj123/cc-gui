@@ -121,6 +121,10 @@ const byFile = (files, f) => files.find((x) => x.file === f);
   assert.deepStrictEqual(r.conflicts, ['b.txt']);
   // 半合并状态检查:MERGE_HEAD 不存在、工作区干净、b.txt 回到 main 侧内容
   assert.ok(!existsSync(join(dir, '.git', 'MERGE_HEAD')), '必须已 merge --abort');
+  // 与生产判定同口径(rev-parse -q --verify 非零退出 = MERGE_HEAD 已清),
+  // 且文案必须走"已取消"分支——abort 失败时应换"请手动 git merge --abort"文案。
+  assert.throws(() => git(dir, 'rev-parse', '-q', '--verify', 'MERGE_HEAD'), 'rev-parse 应非零退出(MERGE_HEAD 已清)');
+  assert.strictEqual(r.error, '合并冲突,已自动取消合并');
   assert.strictEqual(git(dir, 'status', '--porcelain').trim(), '', 'abort 后主树应干净');
 }
 
