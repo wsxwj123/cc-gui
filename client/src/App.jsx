@@ -1902,7 +1902,10 @@ function SessionList() {
 
   const enterWorktree = (tree) => {
     if (!tree?.path || !selectedProject) return;
-    seedNewSessionDefaults(selectedProject.hash);
+    // 种子必须种在 worktree 自己的 draft 键上(与下方 draft.projectHash 同一 dash 算法)。
+    // 曾传 selectedProject.hash(主项目):worktree draft 无权限条目 → getPermissionModeFor
+    // 回退全局上次模式,上次开的 bypassPermissions 会直接泄进 worktree 新会话。
+    seedNewSessionDefaults(tree.path.replace(/[^A-Za-z0-9]/g, '-'));
     const draft = {
       draft: true,
       draftId: newDraftId(),
@@ -3229,6 +3232,20 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // jsonl 双写。finally 末尾复位。
   const backgroundedRef = useRef(false);
 
+  // C1/CQ-5:流式缓冲的归属门控(与消息渲染/统计同源)。原定义在早返回之后,上移到
+  // currentTodos/currentPlan 之前,让代办/计划重建共用同一门控(串扰窗口2:A 正在流式
+  // 建代办时切到 B,detach effect 清空前的首帧,A 的 TaskCreate 会闪进 B 的清单)。
+  // CQ-5:不加 `streamOwnerKey == null ||` 子句 —— owner=null 时恒 true 会把上个会话
+  // 残留的 chatMessages 显示到当前会话(串内容根因),handleSend 写用户气泡前已
+  // setStreamOwner,该显示的本地缓冲 owner 必等于 sessionQueueKey。
+  const liveVisible = streamOwnerKey === sessionQueueKey;
+  // v0.2.192 泛化:凡带 ownerKey 的本地条目(btw 旁问、AbortError 半截回复、error turn)
+  // 一律按归属门控——属于当前会话就显示、不属于就藏,与 liveVisible(流归属)解耦。
+  // 无 ownerKey 的条目(流式 turn/user 回显/compact)维持 liveVisible 门控。
+  const visibleChat = useMemo(() => chatMessages.filter(
+    (m) => (m.ownerKey ? m.ownerKey === sessionQueueKey : liveVisible)
+  ), [chatMessages, sessionQueueKey, liveVisible]);
+
   // Latest TodoWrite snapshot for the composer's checklist panel. TodoWrite
   // calls REPLACE the full list each time, so the newest call wins. Search
   // freshest-first: streaming blocks → chatMessages → persisted messages.
@@ -3237,17 +3254,19 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   const currentTodos = useMemo(() => {
     // BK-8a:输入框上方清单与气泡内清单(TurnBubble)共用同一份重建算法
     // (../utils/todos.js),消除两处口径差异。这里负责把全局所有 turn 的 toolCalls
-    // 按"老→新"摊平成单数组(messages → chatMessages → streamingBlocks),交给共享
+    // 按"老→新"摊平成单数组(messages → visibleChat → streamingBlocks),交给共享
     // 函数;TurnBubble 传单 turn 的 toolCalls。算法内部:最新 TodoWrite 快照优先
     // (摊平末尾的 streaming 最新),否则回放 TaskCreate/TaskUpdate 序列。
+    // 串扰窗口2:流式缓冲只在归属当前会话时计入(visibleChat/liveVisible 门控),
+    // 与消息渲染同一体系 —— 否则切会话首帧 A 的 TaskCreate 闪进 B 的清单。
     const flat = [];
     for (const m of messages) { if (m?.type === 'turn' && Array.isArray(m.toolCalls)) flat.push(...m.toolCalls); }
-    for (const m of chatMessages) { if (m?.type === 'turn' && Array.isArray(m.toolCalls)) flat.push(...m.toolCalls); }
-    for (const b of streamingBlocks) {
+    for (const m of visibleChat) { if (m?.type === 'turn' && Array.isArray(m.toolCalls)) flat.push(...m.toolCalls); }
+    for (const b of (liveVisible ? streamingBlocks : EMPTY_ARRAY)) {
       if (b?.type === 'tool_use' && b.toolCall) flat.push(b.toolCall);
     }
     return rebuildTodosFromTaskCalls(flat);
-  }, [streamingBlocks, chatMessages, messages]);
+  }, [streamingBlocks, visibleChat, messages, liveVisible]);
 
   // 最近一份【已批准】的 ExitPlanMode 计划全文,常驻在任务清单条顶部(默认折叠一行,
   // 展开可随时回看批准了什么)。与 G1/G2 收口不冲突:未批准/被拒的计划仍只在审批弹窗
@@ -3273,15 +3292,17 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       }
       return '';
     };
-    for (let i = streamingBlocks.length - 1; i >= 0; i--) {
-      const b = streamingBlocks[i];
+    // 串扰窗口2:流式缓冲按归属门控(同 currentTodos),不属于当前会话就不扫。
+    const liveBlocks = liveVisible ? streamingBlocks : EMPTY_ARRAY;
+    for (let i = liveBlocks.length - 1; i >= 0; i--) {
+      const b = liveBlocks[i];
       if (b?.type === 'tool_use') {
         const plan = readApprovedPlan(b.toolCall);
         if (plan) return plan;
       }
     }
-    for (let i = chatMessages.length - 1; i >= 0; i--) {
-      const plan = scanToolCalls(chatMessages[i]?.toolCalls);
+    for (let i = visibleChat.length - 1; i >= 0; i--) {
+      const plan = scanToolCalls(visibleChat[i]?.toolCalls);
       if (plan) return plan;
     }
     for (let i = messages.length - 1; i >= 0; i--) {
@@ -3289,7 +3310,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       if (plan) return plan;
     }
     return '';
-  }, [streamingBlocks, chatMessages, messages]);
+  }, [streamingBlocks, visibleChat, messages, liveVisible]);
 
   // When the file watcher reports a write to THIS session's jsonl (e.g. a
   // detached background stream from another tab/session is still writing),
@@ -5734,29 +5755,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     </div>
   );
 
-  // C1:流式缓冲(chatMessages)只在它归属当前查看的会话时才计入统计 —— 否则流归属
-  // 会话 A、用户切到会话 B 的那一帧(setChatMessages([]) 异步未提交前),A 的流式 turn
-  // 的 usage/cost 会被算进 B 的徽章/成本(切会话当帧串值闪现)。与渲染层(下面 liveVisible
-  // 隐藏流式气泡)同源,统计也走同一门控。
-  // CQ-5:原有 `streamOwnerKey == null ||` 子句是「串内容/重复渲染」根因——pane 初次挂载或
-  // 刚 setChatMessages([]) 未提交时 owner=null 会让 liveVisible 恒 true,把上个会话残留的
-  // chatMessages 显示到当前会话(切走切回就好=第二次 owner 已非 null)。handleSend 在写入
-  // 用户气泡前已 setStreamOwner(sessionQueueKey)(含 reattach),所以凡是该显示的本地缓冲
-  // owner 必等于 sessionQueueKey;去掉 null 子句即根治泄漏,且与上面 C1 注释本意一致。
-  const liveVisible = streamOwnerKey === sessionQueueKey;
-  // 旁问气泡是本窗格会话的本地注记(非流式内容,永不写 jsonl、切会话/刷新即清),不该受
-  // liveVisible(为"流式内容跨会话防串"设的门控)左右。只要它属于当前会话(创建时打的
-  // ownerKey)就渲染,与流归属无关 —— 修"/btw 能发但没气泡":空闲态 owner 未认领/后台别的
-  // 会话在流/draft→init 窗口时 streamOwnerKey≠sessionQueueKey 会把气泡整块吞掉。ownerKey
-  // 守卫保证不泄漏到别的会话,且不偷后台流的归属(不动 streamOwnerKey)。
-  // v0.2.192 泛化:凡带 ownerKey 的本地条目(btw 旁问、AbortError 半截回复、error turn)
-  // 一律按归属门控——属于当前会话就显示、不属于就藏,与 liveVisible(流归属)解耦。既修
-  // "切走再切回半截回复消失只剩 connecting"(孤儿被 liveVisible=false 藏住/被 stillHere 不
-  // push 丢掉),也修"A 的孤儿在新开流(owner 重合)时串进会话 C"(fable ② 诈尸)。无
-  // ownerKey 的条目(流式 turn/user 回显/compact)维持 liveVisible 门控不变。
-  const visibleChat = chatMessages.filter(
-    (m) => (m.ownerKey ? m.ownerKey === sessionQueueKey : liveVisible)
-  );
+  // C1:流式缓冲(chatMessages)只在它归属当前查看的会话时才计入统计/渲染 —— liveVisible
+  // 与 visibleChat 已上移到 currentTodos 之前(串扰窗口2,hook 区),这里直接使用。
   // BF-1:展示口径统一走 finalizedMessages(=visibleMessages 再补历史中断态,活跃流
   // 期间剔除本回合半成品),回合进度条/成本等派生统计与消息列表同源。
   const allMessages = [...finalizedMessages, ...visibleChat];
