@@ -92,11 +92,22 @@ assert.equal(normalizePreviewErr({ type: 'error', msg: 'x', line: 7 }).line, 7);
 }
 // 无行号 → line 为 null(不是 undefined 崩溃)
 assert.equal(normalizePreviewErr({ type: 'error', msg: 'boom' }).line, null);
+// 带 file 的外部脚本错误:即使 message 含 "on line N" 也不从文本复活行号
+// (rec.file 非空 → 正则 fallback 关闭;只有无 file 的 mermaid 父页错误才解析文本行号)
+{
+  const n = normalizePreviewErr({ type: 'error', msg: 'boom on line 5', file: 'https://cdn.x/lib.js' });
+  assert.equal(n.line, null, '带 file 的外部错误不从文本复活行号');
+  assert.doesNotMatch(n.text, /行 5/, '带 file 不在 text 显示行号');
+}
 // net/reject/console 无 line 字段(formatPreviewErrors 据此不附片段)
 assert.equal(normalizePreviewErr({ type: 'net', url: '/u', status: 500 }).line, undefined);
 
 // ── formatPreviewErrors(errors, source):附源码片段 ────────────────
 const SRC = ['<html>', '<body>', '  <script>', '    bad()', '  </script>', '</body>', '</html>'].join('\n');
+// 带 file 的外部错误(msg 含 "on line 5")→ 无行号 → 不附源码片段(承接上面正则 fallback 限父页路径)
+assert.doesNotMatch(
+  formatPreviewErrors([normalizePreviewErr({ type: 'error', msg: 'boom on line 5', file: 'https://cdn.x/lib.js' })], SRC),
+  /出错行源码片段/, '带 file 的外部错误不附源码片段');
 // 行号还原:error line=4 → 附 ±3 行(1..7)片段,出错行带 > 标记,含该行内容
 {
   const errs = [normalizePreviewErr({ type: 'error', msg: 'bad is not defined', line: 4 })];

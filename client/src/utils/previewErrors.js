@@ -67,7 +67,10 @@ export function normalizePreviewErr(rec) {
     // 行号:iframe onerror 给数字 rec.line(采集端已减去 shim 偏移,是用户源码行);
     // 父页渲染的 mermaid 无 rec.line,行号藏在消息文本里("... on line N"),解析出来。
     let line = Number.isFinite(rec.line) ? rec.line : null;
-    if (line == null) {
+    // 仅父页渲染的 mermaid(rec 从不带 file)才从消息文本"... on line N"里捞行号;外部脚本
+    // rec.file 是非空 URL、其 line 已被 resolvePreviewErrLine 清成 undefined,不许正则从文本
+    // 复活一个指向 artifact 源码的错行(会误导 AI 附上不相干片段)。
+    if (line == null && rec.file == null) {
       const m = /on line (\d+)/i.exec(rec.msg || '');
       if (m) line = parseInt(m[1], 10);
     }

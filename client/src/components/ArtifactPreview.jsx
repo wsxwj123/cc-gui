@@ -128,7 +128,7 @@ export function PreviewErrorBadge({ errors, source }) {
       {open && (
         // flex 列三段(头/正文/底),不用 sticky —— webview 下 sticky 在带 transform 容器内失效。
         // 宽高 clamp 在容器内(min(固定, 100%)):小窗退化为占满内滚,不溢出。别用 vw/vh(webview zoom 分母坑)。
-        <div className="mb-1.5 w-[320px] max-w-full min-h-[120px] max-h-[min(280px,calc(100%-2rem))] pointer-events-auto flex flex-col rounded-lg border border-[#3a342b] bg-[#2b2722] shadow-2xl overflow-hidden">
+        <div className="mb-1.5 w-[320px] max-w-full min-h-[90px] max-h-[min(280px,calc(100%-2rem))] pointer-events-auto flex flex-col rounded-lg border border-[#3a342b] bg-[#2b2722] shadow-2xl overflow-hidden">
           {/* 头部 shrink-0:标题 + 右上角「发给 AI」,不随列表滚动,小窗也永远可见。
               用 flex 列结构而非 sticky —— webview 下 sticky 在带 transform 容器内失效。 */}
           <div className="flex items-center justify-between gap-2 px-3 py-1.5 border-b border-[#3a342b] shrink-0">
@@ -181,7 +181,10 @@ export function MermaidView({ code }) {
     // 规整成与 iframe 同形状,复用 PreviewErrorBadge 一键发 AI。inline amber 框保留作上下文。
     const badgeErrors = [normalizePreviewErr({ type: 'error', msg: 'Mermaid: ' + err })].filter(Boolean);
     return (
-      <div className="relative">
+      // min-h-[190px]:错误框本身仅 ~49px,但徽章弹层锚在此 relative 容器内、以 % 约束高度。
+      // 撑高锚容器(内容驱动、卡片跟着长,不会被外层 overflow-hidden 裁)让 calc(100%-2rem)≈142px
+      // 足够放下弹层(min-h-[90px])+徽章,替代此前给弹层强撑 min-h 导致向上溢出被裁的回归。
+      <div className="relative min-h-[190px]">
         <div className="flex items-start gap-2 p-4 text-[12px] text-amber-400/90 bg-[#1a1714]">
           <AlertTriangle size={13} className="mt-0.5 shrink-0" />
           <span className="font-mono break-all">Mermaid: {err}</span>
