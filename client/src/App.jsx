@@ -7958,6 +7958,9 @@ export default function App() {
             attachments: [{ kind: 'image', path: d.path, preview: d.preview, name, bytes: d.bytes }],
           },
         }));
+        // 截图完成后把 GUI 带回前台展示已入框的图(热键回调不再提前置前——那会盖住目标窗口)。
+        // 仅成功路径调;取消(上面已 return)不打扰。
+        import('@tauri-apps/api/core').then(({ invoke }) => invoke('focus_main_window')).catch(() => {});
         showStatus('done', '截图已添加到输入框', 2500);
       } catch (err) {
         showStatus('error', '截图失败: ' + (err?.message || err), 8000);
