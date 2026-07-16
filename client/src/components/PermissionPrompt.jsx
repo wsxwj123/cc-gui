@@ -544,6 +544,14 @@ function PendingPill({ req, position }) {
   );
 }
 
+// cwd 归属判断:完全相等,或前缀后紧跟路径分隔符。纯 startsWith 会让 /a/bc 误配 /a/b。
+// 双端 dogfood:Windows 的 cwd 是反斜杠路径,分隔符须同时认 / 和 \(全仓按 [/\\] 切的先例)。
+function cwdWithin(cwd, base) {
+  const c = String(cwd);
+  const b = String(base).replace(/[/\\]+$/, ''); // 去尾分隔符,避免 base+'/' 双写
+  return c === b || c.startsWith(b + '/') || c.startsWith(b + '\\');
+}
+
 /**
  * Sits above ChatInput. Shows pending permission requests filtered to the
  * currently-selected session — other sessions' requests stay in the store
@@ -626,7 +634,7 @@ export function PermissionPrompt({ sessionId = null, onExecutePlan = null, hydra
         if (!p.sessionId) return true;                       // ②
         if (p.sessionId === selectedSid) return true;        // ①
         if (knownSids.has(p.sessionId)) return false;        // ③
-        return !projectPath || !p.cwd || String(p.cwd).startsWith(projectPath); // ④
+        return !projectPath || !p.cwd || cwdWithin(p.cwd, projectPath); // ④
       })
     // 串扰#4②:分屏按【本 pane 的 prop sessionId】过滤,不用 selectedSid —— 那个带
     // `|| globalSid` 兜底,draft 窗格(prop=null)会借用 pane0 的 sid 显示 pane0 会话的
@@ -643,7 +651,7 @@ export function PermissionPrompt({ sessionId = null, onExecutePlan = null, hydra
         if ((active?.sessionId || null) !== (sessionId || null)) return false; // 本实例非活动窗格
         if (!p.sessionId || knownSids.has(p.sessionId)) return false;          // 空 sid 走 draft 规则;已知别会话不串
         const panePath = active?.projectPath || projectPath;
-        return !panePath || !p.cwd || String(p.cwd).startsWith(panePath);      // ④
+        return !panePath || !p.cwd || cwdWithin(p.cwd, panePath);              // ④
       });
   if (mine.length === 0) return null;
 
