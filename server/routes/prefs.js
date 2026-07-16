@@ -121,6 +121,38 @@ router.put('/prefs/close-behavior', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// F1: 全局截图热键配置。独立文件 ~/.claude-gui/hotkey.json {"enabled":bool,"accelerator":str} —
+// Tauri Rust 侧在启动 setup 时读同一文件注册热键(改后需重启应用生效,MVP 不做实时重注册)。
+const HOTKEY_PATH = join(homedir(), '.claude-gui', 'hotkey.json');
+const DEFAULT_HOTKEY = { enabled: true, accelerator: 'CmdOrCtrl+Shift+2' };
+// 与 Rust read_hotkey_config 的字符集校验一致:字母数字 + '+' + 空格。
+const ACCEL_RE = /^[A-Za-z0-9+ ]+$/;
+router.get('/prefs/hotkey', async (_req, res) => {
+  try {
+    const d = JSON.parse(await readFile(HOTKEY_PATH, 'utf-8'));
+    res.json({
+      enabled: d.enabled !== false,
+      accelerator: (typeof d.accelerator === 'string' && ACCEL_RE.test(d.accelerator)) ? d.accelerator : DEFAULT_HOTKEY.accelerator,
+    });
+  } catch { res.json({ ...DEFAULT_HOTKEY }); }
+});
+router.put('/prefs/hotkey', async (req, res) => {
+  const { enabled, accelerator } = req.body || {};
+  if (typeof enabled !== 'boolean') {
+    return res.status(400).json({ error: 'enabled 必须是布尔值' });
+  }
+  const accel = typeof accelerator === 'string' ? accelerator.trim() : '';
+  if (accel && !ACCEL_RE.test(accel)) {
+    return res.status(400).json({ error: 'accelerator 只允许字母、数字、+ 和空格' });
+  }
+  const next = { enabled, accelerator: accel || DEFAULT_HOTKEY.accelerator };
+  try {
+    await mkdir(join(homedir(), '.claude-gui'), { recursive: true });
+    await writeFile(HOTKEY_PATH, JSON.stringify(next, null, 2));
+    res.json({ ok: true, ...next });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // PUT /api/prefs/hidden-providers { hidden: string[] }
 router.put('/prefs/hidden-providers', async (req, res) => {
   const { hidden } = req.body || {};
