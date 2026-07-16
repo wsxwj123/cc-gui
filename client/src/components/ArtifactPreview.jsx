@@ -8,6 +8,7 @@ import {
   ERROR_COLLECTOR, PREVIEW_ERR_KEY, PREVIEW_ERR_LABEL, MAX_PREVIEW_ERRORS,
   normalizePreviewErr, formatPreviewErrors,
 } from '../utils/previewErrors.js';
+import { makeModePersist } from '../utils/previewMode.js';
 
 // BH-1b: 桌面端把"全屏"升级成右侧 dock,移动端无横向空间仍走全屏遮罩。
 function isMobileViewport() {
@@ -57,6 +58,9 @@ export function isPreviewable(lang) {
   return PREVIEWABLE.has(normLang(lang));
 }
 
+// 问题1:mode('preview'|'code')按稳定 artifactId 记忆,规避流式重挂丢档。见 previewMode.js。
+const modePersist = makeModePersist();
+
 // mermaid 体积大(~500KB),懒加载且全局只初始化一次,多个图表共享同一实例。
 let mermaidPromise;
 function loadMermaid() {
@@ -94,6 +98,59 @@ export function CopyButton({ text }) {
   );
 }
 
+// 问题2:预览运行时报错的右下角徽章 + 弹层 + 「发给 AI」。抽成共用组件,让 iframe 预览
+// (PreviewIframe,html/svg 走沙箱)与父页渲染的 mermaid(MermaidView)复用同一套 UI/发送逻辑,
+// 不另造。errors 为已 normalize 的 {type,text,sig} 数组;空则不渲染。放在 relative 容器内。
+export function PreviewErrorBadge({ errors }) {
+  const [open, setOpen] = useState(false);
+  if (!errors || errors.length === 0) return null;
+  // 填进当前活跃 pane 的输入框(用户自己按发送,不代发)。targetKey 与 sessionQueueKey 同构,
+  // 分屏时只填活跃 pane(与 FileExplorer 的"添加到上下文"同款门控)。
+  const sendToAI = () => {
+    const text = formatPreviewErrors(errors);
+    if (!text) return;
+    const s = useStore.getState();
+    const pane = (s.paneSessions || [])[s.activeTabIndex] || s.selectedSession;
+    const targetKey = pane?.sessionId || `draft-${pane?.projectHash || 'none'}`;
+    window.dispatchEvent(new CustomEvent('cgui:composer-fill', { detail: { text, append: true, targetKey } }));
+    setOpen(false);
+  };
+  return (
+    <div className="absolute bottom-2 right-2 z-10 flex flex-col items-end">
+      {open && (
+        // flex 列三段(头/正文/底),不用 sticky —— webview 下 sticky 在带 transform 容器内失效。
+        <div className="mb-1.5 w-[320px] max-h-[280px] flex flex-col rounded-lg border border-[#3a342b] bg-[#2b2722] shadow-2xl overflow-hidden">
+          <div className="px-3 py-1.5 text-[10px] font-mono text-[#9a8e78] border-b border-[#3a342b] shrink-0">
+            预览运行时报错 · {errors.length} 条
+          </div>
+          <div className="flex-1 min-h-0 overflow-y-auto px-3 py-2 space-y-1.5">
+            {errors.map((e, i) => (
+              <div key={i} className="text-[11px] font-mono text-[#e8e2d6] break-all leading-snug">
+                <span className="text-amber-400/80">[{PREVIEW_ERR_LABEL[e.type] || e.type}]</span> {e.text}
+              </div>
+            ))}
+          </div>
+          <div className="px-3 py-2 border-t border-[#3a342b] shrink-0">
+            <button
+              onClick={sendToAI}
+              className="w-full py-1 rounded-md bg-[#3a342b] text-[11px] font-mono text-[#e8e2d6] hover:bg-[#453e33] transition-colors"
+            >
+              把报错发给 AI
+            </button>
+          </div>
+        </div>
+      )}
+      <button
+        onClick={() => setOpen((o) => !o)}
+        title="预览运行时报错"
+        className="flex items-center gap-1 px-2 py-1 rounded-md bg-[#2b2722]/95 border border-amber-500/40 text-[10px] font-mono text-amber-300 shadow-lg hover:bg-[#3a342b] transition-colors"
+      >
+        <AlertTriangle size={11} /> {errors.length}
+      </button>
+    </div>
+  );
+}
+
 export function MermaidView({ code }) {
   const [svg, setSvg] = useState('');
   const [err, setErr] = useState('');
@@ -111,10 +168,16 @@ export function MermaidView({ code }) {
   }, [code, id]);
 
   if (err) {
+    // 问题2:mermaid 在父页渲染(非 iframe),ERROR_COLLECTOR 覆盖不到;把 catch 到的渲染错误
+    // 规整成与 iframe 同形状,复用 PreviewErrorBadge 一键发 AI。inline amber 框保留作上下文。
+    const badgeErrors = [normalizePreviewErr({ type: 'error', msg: 'Mermaid: ' + err })].filter(Boolean);
     return (
-      <div className="flex items-start gap-2 p-4 text-[12px] text-amber-400/90 bg-[#1a1714]">
-        <AlertTriangle size={13} className="mt-0.5 shrink-0" />
-        <span className="font-mono break-all">Mermaid: {err}</span>
+      <div className="relative">
+        <div className="flex items-start gap-2 p-4 text-[12px] text-amber-400/90 bg-[#1a1714]">
+          <AlertTriangle size={13} className="mt-0.5 shrink-0" />
+          <span className="font-mono break-all">Mermaid: {err}</span>
+        </div>
+        <PreviewErrorBadge errors={badgeErrors} />
       </div>
     );
   }
@@ -159,11 +222,10 @@ export function CollapsibleCode({ code, className = '', collapseAt = 5 }) {
 export function PreviewIframe({ srcDoc, fullscreen, iframeKey }) {
   const frameRef = useRef(null);
   const [errors, setErrors] = useState([]);
-  const [open, setOpen] = useState(false);
   const sigs = useRef(new Set());
 
   // 内容变更/刷新 → 清空,规避流式半截 HTML 的伪错误累积。
-  useEffect(() => { setErrors([]); setOpen(false); sigs.current = new Set(); }, [srcDoc, iframeKey]);
+  useEffect(() => { setErrors([]); sigs.current = new Set(); }, [srcDoc, iframeKey]);
 
   useEffect(() => {
     const onMsg = (e) => {
@@ -181,18 +243,6 @@ export function PreviewIframe({ srcDoc, fullscreen, iframeKey }) {
     return () => window.removeEventListener('message', onMsg);
   }, []);
 
-  // 填进当前活跃 pane 的输入框(用户自己按发送,不代发)。targetKey 与 sessionQueueKey 同构,
-  // 分屏时只填活跃 pane,避免串到别的会话(与 FileExplorer 的"添加到上下文"同款门控)。
-  const sendToAI = () => {
-    const text = formatPreviewErrors(errors);
-    if (!text) return;
-    const s = useStore.getState();
-    const pane = (s.paneSessions || [])[s.activeTabIndex] || s.selectedSession;
-    const targetKey = pane?.sessionId || `draft-${pane?.projectHash || 'none'}`;
-    window.dispatchEvent(new CustomEvent('cgui:composer-fill', { detail: { text, append: true, targetKey } }));
-    setOpen(false);
-  };
-
   return (
     <div className={`relative w-full ${fullscreen ? 'h-full' : 'h-[400px]'}`}>
       <iframe
@@ -204,40 +254,7 @@ export function PreviewIframe({ srcDoc, fullscreen, iframeKey }) {
         srcDoc={srcDoc}
         className="w-full h-full bg-white border-0 block"
       />
-      {errors.length > 0 && (
-        <div className="absolute bottom-2 right-2 z-10 flex flex-col items-end">
-          {open && (
-            // flex 列三段(头/正文/底),不用 sticky —— webview 下 sticky 在带 transform 容器内失效。
-            <div className="mb-1.5 w-[320px] max-h-[280px] flex flex-col rounded-lg border border-[#3a342b] bg-[#2b2722] shadow-2xl overflow-hidden">
-              <div className="px-3 py-1.5 text-[10px] font-mono text-[#9a8e78] border-b border-[#3a342b] shrink-0">
-                预览运行时报错 · {errors.length} 条
-              </div>
-              <div className="flex-1 min-h-0 overflow-y-auto px-3 py-2 space-y-1.5">
-                {errors.map((e, i) => (
-                  <div key={i} className="text-[11px] font-mono text-[#e8e2d6] break-all leading-snug">
-                    <span className="text-amber-400/80">[{PREVIEW_ERR_LABEL[e.type] || e.type}]</span> {e.text}
-                  </div>
-                ))}
-              </div>
-              <div className="px-3 py-2 border-t border-[#3a342b] shrink-0">
-                <button
-                  onClick={sendToAI}
-                  className="w-full py-1 rounded-md bg-[#3a342b] text-[11px] font-mono text-[#e8e2d6] hover:bg-[#453e33] transition-colors"
-                >
-                  把报错发给 AI
-                </button>
-              </div>
-            </div>
-          )}
-          <button
-            onClick={() => setOpen((o) => !o)}
-            title="预览运行时报错"
-            className="flex items-center gap-1 px-2 py-1 rounded-md bg-[#2b2722]/95 border border-amber-500/40 text-[10px] font-mono text-amber-300 shadow-lg hover:bg-[#3a342b] transition-colors"
-          >
-            <AlertTriangle size={11} /> {errors.length}
-          </button>
-        </div>
-      )}
+      <PreviewErrorBadge errors={errors} />
     </div>
   );
 }
@@ -266,15 +283,17 @@ export function PreviewBody({ language, mode, code, debounced, fullscreen, ifram
 
 export function ArtifactPreview({ lang, code, coexist = false, dockKey }) {
   const language = normLang(lang);
-  const [mode, setMode] = useState('preview');
-  const [fullscreen, setFullscreen] = useState(false);
-  const debounced = useDebounced(code, 300);
   // #3 稳定身份:标识"这个内联块"是否正被停靠(dock 单例带回同一 artifactId)。
   // 优先用调用链透传的 dockKey(消息/turn 稳定前缀 + 代码块偏移):流式全程不变、组件重挂载
   // 也不变 → 消除"重挂 useId 变→断链回弹→dock 冻结"。dockKey 缺失(coexist/文件预览等非流式
   // 路径)时回退 useId,那些路径不流式,不受此 bug 影响。useId 恒调用(不违反 hooks 规则)。
   const autoId = useId();
   const artifactId = dockKey || autoId;
+  // 问题1:mode 惰性初始化从 modePersist 恢复(按 artifactId),setMode 写回 → 重挂不丢用户选的档。
+  const [mode, setModeState] = useState(() => modePersist.get(artifactId));
+  const setMode = (m) => { modePersist.set(artifactId, m); setModeState(m); };
+  const [fullscreen, setFullscreen] = useState(false);
+  const debounced = useDebounced(code, 300);
   const isDocked = useStore((s) => s.artifactDock?.artifactId === artifactId);
   const foldInline = isDocked && !coexist; // 会话内代码块停靠才折叠;文件浏览器停靠(coexist)不折叠
 
