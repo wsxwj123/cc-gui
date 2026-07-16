@@ -50,9 +50,9 @@ fn read_close_behavior() -> String {
 }
 
 // F1 全局热键截图:读 ~/.claude-gui/hotkey.json {"enabled":bool,"accelerator":"CmdOrCtrl+Shift+2"}。
-// GUI 设置页经 server 端点写同一文件;Rust 侧仅在 setup 时读一次并注册,改配置后需重启生效
-// (MVP 不做 JS 侧实时重注册,设置页文案已注明)。缺省=启用 + CmdOrCtrl+Shift+2(避开系统
-// Cmd+Shift+3/4/5 截图键)。纯字符串解析、不引 serde,和 read_close_behavior 同风格,坏文件即回缺省。
+// GUI 设置页经 server 端点写同一文件;Rust 侧 setup 时读一次注册,设置页改键经
+// set_screenshot_hotkey 命令实时重注册(不再需要重启)。缺省=启用 + CmdOrCtrl+Shift+2
+// (避开系统 Cmd+Shift+3/4/5 截图键)。纯字符串解析、不引 serde,和 read_close_behavior 同风格。
 struct HotkeyConfig {
     enabled: bool,
     accelerator: String,
@@ -69,12 +69,67 @@ fn read_hotkey_config() -> HotkeyConfig {
     };
     // enabled:显式写 "enabled": false 才禁用,其余(含缺字段)都视为启用。
     let enabled = !(s.contains("\"enabled\": false") || s.contains("\"enabled\":false"));
-    // accelerator:取 "accelerator": "..." 双引号内内容;取不到用缺省。只允许 accelerator 常见字符,
-    // 防把任意字符串塞进热键解析(非法字符集合外一律回缺省)。
+    // accelerator:取 "accelerator": "..." 双引号内内容;取不到/非法用缺省。
     let accelerator = parse_json_string_field(&s, "accelerator")
-        .filter(|a| !a.is_empty() && a.chars().all(|c| c.is_ascii_alphanumeric() || c == '+' || c == ' '))
+        .and_then(|a| sanitize_accel(&a))
         .unwrap_or_else(|| DEFAULT_ACCEL.to_string());
     HotkeyConfig { enabled, accelerator }
+}
+
+// accelerator 字符集白名单:字母/数字/'+'/空格,与 server/routes/prefs.js 的 ACCEL_RE
+// (/^[A-Za-z0-9+ ]+$/)一致。防把任意字符串塞进 global-shortcut 解析。非法/空 → None。
+fn sanitize_accel(a: &str) -> Option<String> {
+    let a = a.trim();
+    if a.is_empty() {
+        return None;
+    }
+    if a.chars().all(|c| c.is_ascii_alphanumeric() || c == '+' || c == ' ') {
+        Some(a.to_string())
+    } else {
+        None
+    }
+}
+
+// F1: 注册全局截图热键。先 unregister_all 清旧注册(rebind 幂等、避免重复注册报错),
+// 再 on_shortcut 挂新键。回调**不置前主窗口** —— 置前会盖住用户想截的目标窗口,导致每次
+// 都截到 GUI 自己(真机反馈)。桌面 WKWebView/WebView2 对非前台窗口的 webview 仍执行
+// JS 事件/fetch,后台也能收到该 emit 发起 /api/screenshot;截图完成后前端再经
+// focus_main_window 把 GUI 带回前台展示结果。setup 与 set_screenshot_hotkey 命令共用此函数。
+fn register_screenshot_hotkey(app: &tauri::AppHandle, accel: &str) -> Result<(), String> {
+    use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
+    let accel = sanitize_accel(accel).ok_or_else(|| "快捷键含非法字符".to_string())?;
+    let gs = app.global_shortcut();
+    let _ = gs.unregister_all();
+    gs.on_shortcut(accel.as_str(), move |app, _shortcut, event| {
+        // 只在按下沿触发(否则按住会重复 emit)。不置前主窗口(见上)。
+        if event.state() != ShortcutState::Pressed {
+            return;
+        }
+        let _ = app.emit("cgui:screenshot-hotkey", ());
+    })
+    .map_err(|e| e.to_string())
+}
+
+// 设置页改键/开关热键:enabled=true 用新 accel 重注册;false 则全部注销。
+// 注册失败(键位非法/被系统或其它 app 占用)返回 Err,前端提示并回退旧值。
+#[tauri::command]
+fn set_screenshot_hotkey(app: tauri::AppHandle, enabled: bool, accel: String) -> Result<(), String> {
+    use tauri_plugin_global_shortcut::GlobalShortcutExt;
+    if !enabled {
+        let _ = app.global_shortcut().unregister_all();
+        return Ok(());
+    }
+    register_screenshot_hotkey(&app, &accel)
+}
+
+// 截图完成后由前端调用,把 GUI 主窗带回前台展示已入框的截图(取消/失败不调,不打扰)。
+#[tauri::command]
+fn focus_main_window(app: tauri::AppHandle) {
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.unminimize();
+        let _ = w.show();
+        let _ = w.set_focus();
+    }
 }
 
 // 从 {... "key": "value" ...} 里抠出 value(不引 serde,和本文件既有极简解析同风格)。
@@ -324,7 +379,7 @@ mod node_probe_tests {
 
 #[cfg(test)]
 mod hotkey_tests {
-    use super::parse_json_string_field;
+    use super::{parse_json_string_field, sanitize_accel};
     #[test]
     fn parses_accelerator_field() {
         let j = r#"{ "enabled": true, "accelerator": "CmdOrCtrl+Shift+2" }"#;
@@ -335,6 +390,22 @@ mod hotkey_tests {
         assert_eq!(parse_json_string_field(r#"{"enabled":false}"#, "accelerator"), None);
         // 空值 → Some("")(调用方再 filter 掉)
         assert_eq!(parse_json_string_field(r#"{"accelerator":""}"#, "accelerator").as_deref(), Some(""));
+    }
+
+    #[test]
+    fn sanitize_accel_accepts_valid_and_rejects_junk() {
+        // 合法键位保留(与前端生成的一致)
+        assert_eq!(sanitize_accel("CmdOrCtrl+Shift+2").as_deref(), Some("CmdOrCtrl+Shift+2"));
+        assert_eq!(sanitize_accel("Alt+F1").as_deref(), Some("Alt+F1"));
+        // 前后空白裁剪
+        assert_eq!(sanitize_accel("  CmdOrCtrl+X  ").as_deref(), Some("CmdOrCtrl+X"));
+        // 空/纯空白 → None
+        assert_eq!(sanitize_accel(""), None);
+        assert_eq!(sanitize_accel("   "), None);
+        // 非法字符(引号/反斜杠/连字符等)一律拒绝,防注入
+        assert_eq!(sanitize_accel("Cmd+\"; rm -rf"), None);
+        assert_eq!(sanitize_accel("Ctrl-Alt-Del"), None);
+        assert_eq!(sanitize_accel("Cmd+\\"), None);
     }
 }
 
@@ -767,6 +838,8 @@ pub fn run() {
         }))
         .manage(Backend(Mutex::new(None)))
         .manage(BackendPort(Mutex::new(None)))
+        // F1: 设置页实时重注册热键 + 截图完成后置前主窗。app 本地命令无需 capability 授权。
+        .invoke_handler(tauri::generate_handler![set_screenshot_hotkey, focus_main_window])
         .setup(|app| {
             // ① 启动加速:窗口带内置启动页立即创建并显示。后端初始化(健康检查/杀旧
             // 进程/spawn node + 等端口就绪,常规 1~3s,杀旧/重试路径可达 20s+)以前全部
@@ -835,27 +908,16 @@ pub fn run() {
                 });
             }
 
-            // F1: 注册全局截图热键。热键触发 → 置前主窗口 + emit 事件,前端监听后调 /api/screenshot。
+            // F1: 注册全局截图热键。热键触发 → 仅 emit 事件(不置前主窗口,见
+            // register_screenshot_hotkey 注释),前端监听后调 /api/screenshot,完成后回置前。
             // 在后台线程初始化之外单独注册(与端口探测无关,应尽早生效)。注册失败(键位非法/已被
             // 其它 app 占用)只记日志、不阻断启动 —— GUI 其余功能不受影响。
             {
-                use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
                 let cfg = read_hotkey_config();
                 if cfg.enabled {
-                    let accel = cfg.accelerator.clone();
-                    let reg = app.global_shortcut().on_shortcut(accel.as_str(), move |app, _shortcut, event| {
-                        // 只在按下沿触发(否则按住会重复 emit)。
-                        if event.state() != ShortcutState::Pressed { return; }
-                        if let Some(w) = app.get_webview_window("main") {
-                            let _ = w.unminimize();
-                            let _ = w.show();
-                            let _ = w.set_focus();
-                        }
-                        let _ = app.emit("cgui:screenshot-hotkey", ());
-                    });
-                    match reg {
-                        Ok(_) => log_startup(&format!("[tauri] registered screenshot hotkey '{accel}'")),
-                        Err(e) => log_startup(&format!("[tauri] failed to register screenshot hotkey '{accel}': {e}")),
+                    match register_screenshot_hotkey(app.handle(), &cfg.accelerator) {
+                        Ok(_) => log_startup(&format!("[tauri] registered screenshot hotkey '{}'", cfg.accelerator)),
+                        Err(e) => log_startup(&format!("[tauri] failed to register screenshot hotkey '{}': {e}", cfg.accelerator)),
                     }
                 } else {
                     log_startup("[tauri] screenshot hotkey disabled by config");
