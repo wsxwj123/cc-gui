@@ -32,3 +32,18 @@ export function finalizePendingToolCalls(toolCalls, turnAborted) {
     };
   });
 }
+
+// 把 finalize 后的 toolCalls 按 id 回写进有序 blocks(fable 判官阻断项):官方 CLI
+// includePartialMessages 恒开必发 stream_event → tool_use 进 blocks → TurnBubble 有
+// blocks 时【只渲染 blocks】,只 finalize toolCalls 修不到主路径,卡片照样永久转圈。
+// 只替换"原本无 result 且 finalize 后拿到 result"的 tool_use 块;已有 result 的块
+// 与非工具块原引用返回,不打穿下游 memo。
+export function applyFinalizedToBlocks(blocks, finalizedCalls) {
+  if (!Array.isArray(blocks) || blocks.length === 0) return blocks;
+  const byId = new Map((finalizedCalls || []).filter((t) => t && t.id).map((t) => [t.id, t]));
+  return blocks.map((b) => {
+    if (!b || b.type !== 'tool_use' || !b.toolCall || b.toolCall.result) return b;
+    const fin = byId.get(b.toolCall.id);
+    return fin && fin.result ? { ...b, toolCall: fin } : b;
+  });
+}

@@ -47,7 +47,7 @@ import { ArtifactDock } from './components/ArtifactPreview.jsx';
 import { FullDiskAccessModal } from './components/FullDiskAccessModal.jsx';
 import { BUILTIN_PROVIDERS, findBuiltin } from './utils/builtinProviders.js';
 import { computeCost, formatCost } from './utils/pricing.js';
-import { extractToolResultText, finalizePendingToolCalls } from './utils/toolResult.js';
+import { extractToolResultText, finalizePendingToolCalls, applyFinalizedToBlocks } from './utils/toolResult.js';
 import { rebuildTodosFromTaskCalls } from './utils/todos.js';
 import { isInitBindingOrigin, migrateDraftQueue, resolveHistModel, resolveSendModel } from './utils/routing.js';
 import {
@@ -3291,6 +3291,30 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   const [backgroundPid, setBackgroundPid] = useState(null);
   // H:上一轮 poll 看到的后台 pid。pid 从有到无=后台回合刚跑完,据此补一次历史拉取。
   const lastSeenPidRef = useRef(null);
+  // 判官建议7(实测代码确认会回归):jsonl 解析层(session-reader getSessionMessages)
+  // 对未回执 tool_use 给 result:null 且无中断标记 → 停止(abort 兜底杀进程时 CLI 没机会
+  // 写 tool_result)后 refetch 用持久化 turn 替换本地气泡,专用卡又拿 result:null 永久
+  // 转圈。server 由另一路在改,修在渲染前的数据层(仅本 pane,不影响 SubagentView):
+  //   · 非末条消息的 turn:对话已推进,回合必已结束 → 未回执工具补中断态;
+  //   · 末条 turn:仅当本会话既无活跃流也无后台进程时才补 —— 有进程在跑说明工具可能
+  //     真在执行,保留转圈(结果落盘后 refetch 自然补上;reattach 起流后 isStreaming
+  //     翻 true 也会让这里重算收手)。
+  // finalize 复用 finalizePendingToolCalls(Task/Agent 不碰)并回写 blocks(主渲染路径)。
+  // 无需修补时返回原引用,不打穿 MessageList 的 memo。
+  const finalizedMessages = useMemo(() => {
+    const lastIdx = visibleMessages.length - 1;
+    const sessionBusy = !!backgroundPid || (isStreaming && streamOwnerKey === sessionQueueKey);
+    const needsFix = (m, i) => m?.type === 'turn'
+      && (i < lastIdx || !sessionBusy)
+      && Array.isArray(m.toolCalls)
+      && m.toolCalls.some((tc) => tc && !tc.result && tc.name !== 'Task' && tc.name !== 'Agent');
+    if (!visibleMessages.some(needsFix)) return visibleMessages;
+    return visibleMessages.map((m, i) => {
+      if (!needsFix(m, i)) return m;
+      const fin = finalizePendingToolCalls(m.toolCalls, true);
+      return { ...m, toolCalls: fin, blocks: applyFinalizedToBlocks(m.blocks, fin) };
+    });
+  }, [visibleMessages, backgroundPid, isStreaming, streamOwnerKey, sessionQueueKey]);
   // Transient toast for "auto-stripped thinking blocks after provider switch".
   // { text, expires } — set by handleSend's pre-flight check, auto-cleared.
   const [providerSwitchNotice, setProviderSwitchNotice] = useState(null);
@@ -4655,16 +4679,20 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         // 落盘轮询把它当正常产出处理(jsonl 若已写入半截会 refetch 覆盖,否则保留本地副本)。
         if (accumulatedText || accumulatedThinking || currentToolCalls.length > 0) {
           producedReply = true;
+          // 停止时给未回执的普通工具补合成终态,Skill/Bash/Read 等卡片不再永久转圈
+          // (Task/Agent 状态由 activeAgents 驱动,合成 result 对其无害)。gate=turnAborted。
+          // ⚠️ 必须同步回写 blocks(fable 判官阻断项):官方 provider 恒发 partial →
+          // tool_use 进 orderedBlocks → TurnBubble 有 blocks 时只渲染 blocks,只 finalize
+          // toolCalls 的话主路径卡片仍拿 result:null 永久转圈。
+          const finalizedCalls = finalizePendingToolCalls(currentToolCalls, turnAborted);
           setChatMessages((prev) => [...prev, {
             uuid: 'chat-stopped-' + Date.now(), type: 'turn',
             ownerKey: streamSid || sessionQueueKey,
             timestamp: new Date().toISOString(), model: streamingModel,
             text: accumulatedText ? [accumulatedText] : [],
             thinking: accumulatedThinking ? [accumulatedThinking] : [],
-            // 停止时给未回执的普通工具补合成终态,Skill/Bash/Read 等卡片不再永久转圈
-            // (Task/Agent 状态由 activeAgents 驱动,合成 result 对其无害)。gate=turnAborted。
-            toolCalls: finalizePendingToolCalls(currentToolCalls, turnAborted),
-            blocks: orderedBlocks,
+            toolCalls: finalizedCalls,
+            blocks: applyFinalizedToBlocks(orderedBlocks, finalizedCalls),
             usage: null,
             interrupted: true,
           }]);
@@ -5562,9 +5590,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   const visibleChat = chatMessages.filter(
     (m) => (m.ownerKey ? m.ownerKey === sessionQueueKey : liveVisible)
   );
-  // BF-1:展示口径统一走 visibleMessages(活跃流期间剔除本回合半成品),回合进度条/
-  // 成本等派生统计与消息列表同源,不再出现"进度条多一个重复回合点"。
-  const allMessages = [...visibleMessages, ...visibleChat];
+  // BF-1:展示口径统一走 finalizedMessages(=visibleMessages 再补历史中断态,活跃流
+  // 期间剔除本回合半成品),回合进度条/成本等派生统计与消息列表同源。
+  const allMessages = [...finalizedMessages, ...visibleChat];
   // 右侧回合进度条数据:每个用户回合一个点(摘要取去附件后的显示文本)。
   // 注意:必须是普通计算,不能用 useMemo —— 这里在 SessionDetail 的早返回
   // (if loading && tabIndex===0 return)之后,加 hook 会导致切换会话(loading 切换)时
@@ -5926,7 +5954,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           ) : (
             <>
               <MessageList
-                messages={visibleMessages}
+                messages={finalizedMessages}
                 onRetryTurn={stableRetryTurn}
                 onRetryTool={stableRetryTool}
                 onRollback={stableRollback}

@@ -80,9 +80,52 @@ function InlineToolCard({ toolCall, onRetryTool }) {
 // CoworkBlocks:母/子共用的有序 blocks 渲染(§1.5 硬约束,单一渲染路径)。
 export { InlineToolCard, renderRichToolCard, ToolCallsGroup };
 
+// 停止合成终态的统一降级卡(fable 判官严重项):合成 result 是 {isError:false,
+// interrupted:true},五张专用卡(Bash/EditDiff/Read/GrepGlob/Web)只有成功/失败两分支,
+// 会把"被停止"渲染成绿勾成功——EditDiffCard 最误导(未应用的 Edit 像已写入)。
+// 灰色"已停止"行,不绿勾、不显示成功产物;点开可看输入参数(信息不丢)。
+function InterruptedToolCard({ toolCall }) {
+  const [expanded, setExpanded] = useState(false);
+  const Icon = getToolIcon(toolCall.name);
+  // 写入类工具的中断态必须明确表达"未应用":改动没有写入文件。
+  const isWriteTool = toolCall.name === 'Edit' || toolCall.name === 'MultiEdit' || toolCall.name === 'Write';
+  const preview = formatInputPreview(toolCall.input);
+  return (
+    <div className="border border-canvas-sunken bg-canvas rounded-md overflow-hidden opacity-80">
+      <button
+        onClick={() => setExpanded(!expanded)}
+        className="w-full flex items-center gap-2 px-2.5 py-1.5 hover:bg-canvas-warm/60 transition-colors text-left"
+      >
+        <Icon size={12} className="text-ink-faint shrink-0" />
+        <span className="text-[11px] font-mono text-ink-muted truncate flex-1">{toolCall.name}</span>
+        {preview && (
+          <span className="text-[10px] text-ink-faint font-mono truncate max-w-[200px]">{preview}</span>
+        )}
+        <span className="text-[10px] text-ink-faint shrink-0">{isWriteTool ? '已停止（未应用）' : '已停止'}</span>
+      </button>
+      {expanded && (
+        <div className="border-t border-canvas-sunken p-2.5 animate-fade-in">
+          <div className="text-[9px] uppercase tracking-wider text-ink-faint mb-1">
+            输入（工具被停止,无返回结果{isWriteTool ? ',改动未写入文件' : ''}）
+          </div>
+          <pre className="text-[11px] bg-canvas-warm rounded p-2 overflow-x-auto max-h-48 font-mono text-ink-muted">
+            {JSON.stringify(toolCall.input, null, 2)}
+          </pre>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // Returns the rich card React element for a tool, or null when no
 // specialty renderer exists for that tool name.
 function renderRichToolCard(toolCall) {
+  // 统一在分发层拦截中断合成终态(逐卡加分支必漏,新增专用卡自动覆盖)。
+  // Skill 例外:SkillCard 自带中断态横幅(样式更贴合,保留)。Task/Agent 天然不进
+  // (finalizePendingToolCalls 不给它们补 result,状态走 activeAgents/TaskCard)。
+  if (toolCall.result?.interrupted && toolCall.name !== 'Skill') {
+    return <InterruptedToolCard toolCall={toolCall} />;
+  }
   switch (toolCall.name) {
     case 'Bash': return <BashCard toolCall={toolCall} />;
     case 'Edit':
