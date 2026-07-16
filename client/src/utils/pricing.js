@@ -154,7 +154,11 @@ function remoteLookup(model) {
   let e = REMOTE[model];
   if (!e) e = REMOTE[model.replace(/-\d{8}$/, '')];
   if (!e) {
-    const k = Object.keys(REMOTE).find((k) => model.startsWith(k));
+    // 前缀兜底取**最长**匹配(与下方内置表 lookupPrice 同口径):键序不确定时
+    // 短键(claude-3-5)不许抢走长键(claude-3-5-haiku)。
+    const k = Object.keys(REMOTE)
+      .filter((k) => model.startsWith(k))
+      .sort((a, b) => b.length - a.length)[0];
     e = k ? REMOTE[k] : null;
   }
   return e ? { ...e, currency: 'USD' } : null;

@@ -1,9 +1,28 @@
 // Minimal runnable check for computeCost (pricing.js).
 // Run: node tests/unit/check-pricing.mjs
 // Verifies the four usage paths (input/output/cacheRead/cacheWrite) all参与计价,
-// using the hardcoded fallback table (REMOTE is empty under node — no window/fetch).
+// using the hardcoded fallback table。REMOTE 表经 localStorage stub 注入(pricing.js
+// 模块加载时读 'cgui-litellm-prices'),只放 claude-3-5* 两键,不影响下方走内置表的断言。
 import assert from 'node:assert';
-import { computeCost, formatCost } from '../../client/src/utils/pricing.js';
+
+// 短键在前、长键在后:旧 find() 按键序先中短键 'claude-3-5',最长前缀匹配须中长键。
+const REMOTE_STUB = {
+  'claude-3-5':       { input: 100, output: 100, cacheRead: 10,   cacheWrite: 125 },
+  'claude-3-5-haiku': { input: 0.8, output: 4,   cacheRead: 0.08, cacheWrite: 1 },
+};
+globalThis.localStorage = {
+  getItem: (k) => (k === 'cgui-litellm-prices' ? JSON.stringify(REMOTE_STUB) : null),
+  setItem: () => {},
+};
+const { computeCost, formatCost } = await import('../../client/src/utils/pricing.js');
+
+// REMOTE 前缀兜底取最长:claude-3-5-haiku-latest(无精确键、无 -YYYYMMDD 后缀)
+// 同时命中 'claude-3-5' 与 'claude-3-5-haiku',必须取长键的 $0.8 而非短键的 $100。
+const rlong = computeCost('claude-3-5-haiku-latest', { input_tokens: 1_000_000 });
+assert.ok(Math.abs(rlong.totalUsd - 0.8) < 1e-9, `remote longest-prefix ${rlong?.totalUsd} != 0.8`);
+// 只中短键的 id 仍正常兜底到 'claude-3-5'。
+const rshort = computeCost('claude-3-5-sonnet-x', { input_tokens: 1_000_000 });
+assert.ok(Math.abs(rshort.totalUsd - 100) < 1e-9, `remote short-prefix ${rshort?.totalUsd} != 100`);
 
 // Opus 4.8 fallback price = usd(5, 25) → input 5, output 25, cacheRead 0.5, cacheWrite 6.25.
 const usage = {
