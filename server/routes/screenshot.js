@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
-import { mkdir, stat, readFile, unlink } from 'fs/promises';
+import { mkdir, stat, readFile, unlink, writeFile } from 'fs/promises';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { randomUUID } from 'crypto';
@@ -15,33 +15,69 @@ const execFileP = promisify(execFile);
 const SHOT_DIR = join(tmpdir(), 'cgui-attachments');
 
 // mac 交互式截图:screencapture -i 弹十字选区/点窗口。用户按 Esc 取消 → 进程退出 0 但不写文件,
-// 据「文件是否存在」判取消(非报错)。Windows 无交互取消,PowerShell 全屏抓主屏兜底。
+// 据「文件是否存在」判取消(非报错)。
 async function captureMac(outPath) {
   // -i 交互选区/点窗口;-x 静音(无快门声)。取消时不产文件。
   await execFileP('screencapture', ['-i', '-x', outPath]);
 }
 
+// Windows 交互式截图:ms-screenclip: 协议拉起系统区域截取(Snipping,Win10 1809+),用户框选后
+// 结果进剪贴板 → 轮询「剪贴板序列号变化 且 含图片」存 PNG。取舍:截图会占用用户剪贴板,不做
+// 备份/恢复(剪贴板回写不可靠,且会覆盖截图本身)。系统 overlay 天然支持多显示器与 per-monitor DPI。
+// 取消/超时语义:正常退出但不写文件 → 路由按 canceled 处理,绝不静默降级成全屏。
+// Esc 快速判定:overlay 进程(Win10=ScreenClippingHost / Win11=SnippingTool)出现过又消失、
+// 宽限 3s 内仍无新图 → 取消;进程名不匹配的机型退化到 60s 超时兜底。overlay 从未出现 → 报错(exit 1)。
+const WIN_SNIP_PS1 = `param([string]$OutPath)
+$ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName System.Windows.Forms,System.Drawing
+Add-Type -Namespace CgUi -Name U32 -MemberDefinition '[DllImport("user32.dll")] public static extern uint GetClipboardSequenceNumber();'
+$seq0 = [CgUi.U32]::GetClipboardSequenceNumber()
+Start-Process -FilePath 'explorer.exe' -ArgumentList 'ms-screenclip:'
+$deadline = [DateTime]::UtcNow.AddSeconds(60)
+$sawOverlay = $false
+$goneAt = $null
+while ([DateTime]::UtcNow -lt $deadline) {
+  Start-Sleep -Milliseconds 250
+  try {
+    if ([CgUi.U32]::GetClipboardSequenceNumber() -ne $seq0 -and [System.Windows.Forms.Clipboard]::ContainsImage()) {
+      $img = [System.Windows.Forms.Clipboard]::GetImage()
+      if ($img -ne $null) {
+        $img.Save($OutPath, [System.Drawing.Imaging.ImageFormat]::Png)
+        $img.Dispose()
+        exit 0
+      }
+    }
+  } catch { }
+  $procs = @(Get-Process -Name 'SnippingTool','ScreenClippingHost' -ErrorAction SilentlyContinue)
+  if ($procs.Count -gt 0) { $sawOverlay = $true; $goneAt = $null }
+  elseif ($sawOverlay) {
+    if ($goneAt -eq $null) { $goneAt = [DateTime]::UtcNow }
+    elseif (([DateTime]::UtcNow - $goneAt).TotalSeconds -ge 3) { exit 0 }
+  }
+}
+if (-not $sawOverlay) { throw 'ms-screenclip overlay not launched (Snipping Tool missing or protocol unsupported)' }
+exit 0
+`;
+
 async function captureWindows(outPath) {
-  // 单引号包路径:PowerShell 单引号内不做转义/变量展开。文件名是 UUID.png 不含单引号,但
-  // tmpdir 前缀含 Windows 用户名可能带撇号(如 O'Brien)→ 提前闭合命令,故按 PS 规则把 ' 转成 ''。
-  // (记忆 windows-porting-gotchas:execFile 内嵌路径用单引号,别用双引号)。MVP 只抓主屏。
-  const psPath = outPath.replace(/'/g, "''");
-  const ps = [
-    "Add-Type -AssemblyName System.Windows.Forms,System.Drawing;",
-    "$b=[System.Windows.Forms.Screen]::PrimaryScreen.Bounds;",
-    "$bmp=New-Object System.Drawing.Bitmap $b.Width,$b.Height;",
-    "$g=[System.Drawing.Graphics]::FromImage($bmp);",
-    "$g.CopyFromScreen($b.Location,[System.Drawing.Point]::Empty,$b.Size);",
-    `$bmp.Save('${psPath}',[System.Drawing.Imaging.ImageFormat]::Png);`,
-    "$g.Dispose();$bmp.Dispose()",
-  ].join(' ');
-  await execFileP('powershell', ['-NoProfile', '-NonInteractive', '-Command', ps]);
+  // 脚本落临时 .ps1 用 -File 传参:P/Invoke 定义必须含双引号,走 -Command 内嵌会撞 execFile
+  // 双引号转义坑(记忆 windows-porting-gotchas)。-Sta 保证 Clipboard API 可用。
+  const scriptPath = join(SHOT_DIR, `${randomUUID()}.ps1`);
+  await writeFile(scriptPath, WIN_SNIP_PS1, 'utf8');
+  try {
+    await execFileP('powershell', [
+      '-NoProfile', '-NonInteractive', '-Sta', '-ExecutionPolicy', 'Bypass',
+      '-File', scriptPath, outPath,
+    ], { timeout: 70_000, windowsHide: true });
+  } finally {
+    try { await unlink(scriptPath); } catch {}
+  }
 }
 
 /**
  * POST /api/screenshot
  * 触发系统截图,成功返回 { path, kind:'image', bytes, preview }。
- * 用户取消(mac Esc)返回 { canceled: true }。
+ * 用户取消(mac/win Esc、win 超时)返回 { canceled: true }。
  * 失败/空文件返回 4xx { error, needsScreenRecording? }(mac 屏幕录制未授权的常见形态)。
  */
 router.post('/screenshot', async (_req, res) => {
@@ -78,12 +114,12 @@ router.post('/screenshot', async (_req, res) => {
   // 无文件 / 空文件:清理残留空文件
   try { await unlink(outPath); } catch {}
 
-  // mac:命令正常退出但没产文件 = 用户按 Esc 取消(静默)。
-  if (platform === 'darwin' && !cmdError) {
+  // 命令正常退出但没产文件 = 用户取消(mac Esc / win Esc 或超时,脚本正常退出不写文件)。
+  if (!cmdError) {
     return res.json({ canceled: true });
   }
 
-  // 其余(命令报错 / Windows 抓不到 / 空文件):失败。mac 上最常见根因是屏幕录制未授权。
+  // 其余(命令报错 / 空文件):失败。mac 上最常见根因是屏幕录制未授权。
   const body = { error: cmdError ? ('截图命令失败: ' + cmdError.message) : '截图为空,未生成图片' };
   if (platform === 'darwin') {
     body.needsScreenRecording = true;
