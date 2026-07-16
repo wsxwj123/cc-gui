@@ -7593,6 +7593,14 @@ function CustomProviderForm({ onSaved, editing, onCancel, onDirtyChange }) {
   const [tierModels, setTierModels] = useState({ haiku: '', sonnet: '', opus: '' });
   const [busy, setBusy] = useState('');
   const isEdit = !!editing;
+  const formRef = useRef(null);
+  // 表单挂在列表顶部:点下方条目的「编辑」时列表往往已滚远,展开后把表单滚进视野。
+  // block:'start' 而非 'nearest' —— 表单比滚动容器高,'nearest' 会因"已覆盖视口"
+  // 而不滚,标题/名称字段留在视野外(实测)。scroll-mt-60 抵消下拉版 sticky 头部
+  // 高度(scrollTop clamp 到 0 = 滚回容器顶),不写死滚动容器,设置面板版同样适用。
+  useEffect(() => {
+    if (open || isEdit) formRef.current?.scrollIntoView({ block: 'start', behavior: 'smooth' });
+  }, [open, editing?.id]);
   // Entering edit mode: pre-fill from the chosen provider. The apiKey is NEVER
   // sent to the client (only `hasKey`), so leave it blank — blank means "keep".
   useEffect(() => {
@@ -7733,7 +7741,7 @@ function CustomProviderForm({ onSaved, editing, onCancel, onDirtyChange }) {
     );
   }
   return (
-    <div className="px-4 py-3 border-b border-canvas-deep/40 mb-1 space-y-2.5">
+    <div ref={formRef} className="px-4 py-3 border-b border-canvas-deep/40 mb-1 space-y-2.5 scroll-mt-60">
       <div className="flex items-center gap-2">
         <button onClick={close} className="p-1 -ml-1 text-ink-faint hover:text-ink" title="返回"><ArrowLeft size={16} /></button>
         <span className="flex-1 text-[13px] font-display font-semibold text-ink">{isEdit ? '编辑 Provider' : '新增 Provider'}<span className="text-[10px] font-body font-normal text-ink-faint ml-1">保存到本机</span></span>
