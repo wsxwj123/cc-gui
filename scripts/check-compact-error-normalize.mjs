@@ -24,6 +24,18 @@ for (const benign of ['Invalid API key', 'Rate limit exceeded, retry after 60s',
   assert(normalizeContextOverflow(benign) === benign, `unit: benign untouched: "${benign}"`);
 }
 
+// fable判官补漏的三条窄变体:正断言(命中归一化)+ 反断言(相似限流文案不误伤)。
+assert(normalizeContextOverflow('input length and max_tokens exceed context limit: 250000 > 200000').startsWith('prompt is too long: '), 'unit: anthropic "exceed context limit"(无s) normalized');
+assert(normalizeContextOverflow('The input token count exceeds the maximum number of tokens allowed (1048576).').startsWith('prompt is too long: '), 'unit: gemini "exceeds the maximum number of tokens allowed" normalized');
+assert(normalizeContextOverflow('Your request exceeded model token limit: 262144').startsWith('prompt is too long: '), 'unit: kimi "exceeded model token limit" normalized');
+for (const rateLimit of [
+  'You exceeded your per-minute rate limit, please slow down',
+  'Rate limit reached: tokens per min (TPM): limit 90000, used 91000',
+  'exceeded your current quota, please check your plan',
+]) {
+  assert(normalizeContextOverflow(rateLimit) === rateLimit, `unit: rate-limit wording untouched: "${rateLimit}"`);
+}
+
 // ── openai-proxy (8788-style translation path) ────────────────────────────
 let oaiMode = 'normal';
 const oaiUpstream = http.createServer((req, res) => {
@@ -40,6 +52,10 @@ const oaiUpstream = http.createServer((req, res) => {
   } else if (oaiMode === 'rate429') {
     res.writeHead(429, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: { message: 'Rate limit exceeded', code: 429 } }));
+  } else if (oaiMode === 'rate429_tokens') {
+    // 某些中转的 429 限流文案含超限特征词 "too many tokens" —— 状态码收紧后不得改写
+    res.writeHead(429, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: { message: 'Rate limited: too many tokens per minute, retry later', code: 429 } }));
   } else { // normal stream
     res.writeHead(200, { 'Content-Type': 'text/event-stream' });
     res.write('data: {"choices":[{"delta":{"content":"Hello"}}]}\n\n');
@@ -80,6 +96,10 @@ oaiMode = 'rate429';
 r = await postOai();
 assert(r.status === 429 && /Rate limit exceeded/.test(r.text) && !/prompt is too long/.test(r.text), 'oai 429 → untouched');
 
+oaiMode = 'rate429_tokens';
+r = await postOai();
+assert(r.status === 429 && /too many tokens/.test(r.text) && !/prompt is too long/.test(r.text), 'oai 429 with "too many tokens" wording → NOT rewritten (status-gated)');
+
 oaiMode = 'normal';
 r = await postOai();
 assert(r.status === 200 && /Hello/.test(r.text) && /event: message_stop/.test(r.text), 'oai normal stream → intact');
@@ -108,6 +128,14 @@ const antUpstream = http.createServer((req, res) => {
   } else if (antMode === 'nonjson502') {
     res.writeHead(502, { 'Content-Type': 'text/html' });
     res.end('<html>Bad Gateway</html>');
+  } else if (antMode === 'rate429_tokens') {
+    // 429 限流文案含 "too many tokens" —— 归一化范围收紧到 400/413 后不得改写
+    res.writeHead(429, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ type: 'error', error: { type: 'rate_limit_error', message: 'Rate limited: too many tokens per minute' } }));
+  } else if (antMode === 'huge400') {
+    // 坏网关 MB 级 HTML 错误页(含超限特征词)—— 超 256KB 缓冲上限,不解析原样透传
+    res.writeHead(400, { 'Content-Type': 'text/html' });
+    res.end('<html>' + 'x'.repeat(300 * 1024) + ' too many tokens </html>');
   } else { // normal anthropic SSE
     res.writeHead(200, { 'Content-Type': 'text/event-stream' });
     res.write('event: message_start\ndata: {"type":"message_start","message":{"id":"msg_1","usage":{"input_tokens":1,"output_tokens":0}}}\n\n');
@@ -160,6 +188,15 @@ assert(r.status === 400 && r.text === JSON.stringify({ type: 'error', error: { t
 antMode = 'nonjson502';
 r = await postAnt();
 assert(r.status === 502 && r.text === '<html>Bad Gateway</html>', 'ant non-JSON error body → passthrough as-is');
+
+antMode = 'rate429_tokens';
+r = await postAnt();
+assert(r.status === 429 && /too many tokens/.test(r.text) && !/prompt is too long/.test(r.text), 'ant 429 with "too many tokens" wording → NOT rewritten (status-gated)');
+
+antMode = 'huge400';
+r = await postAnt();
+const hugeExpected = '<html>' + 'x'.repeat(300 * 1024) + ' too many tokens </html>';
+assert(r.status === 400 && r.text === hugeExpected && !/prompt is too long/.test(r.text.slice(0, 100)), 'ant >256KB 400 body → passthrough byte-identical, not parsed/rewritten');
 
 antMode = 'normal';
 r = await postAnt();

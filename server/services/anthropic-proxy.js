@@ -158,23 +158,49 @@ async function handle(req, clientRes) {
   // fetch already decompressed the body, so re-advertising gzip would corrupt it.
   const ct = upstreamResp.headers.get('content-type') || 'application/json';
 
-  // 唯一的非透传例外(auto-compact 修复):上游 4xx/5xx 的 JSON 错误体,若 error.message
+  // 唯一的非透传例外(auto-compact 修复):上游 400/413 的 JSON 错误体,若 error.message
   // 命中上下文超限特征,归一化为 CLI 可识别的 "prompt is too long: <原文>"(CLI 才会缩组
-  // 重试摘要请求,第三方 auto-compact 不再杀回合)。其余一切错误字节原样透传——错误体
-  // 都很小,缓冲后不命中就原样发回,内容不变。非 JSON / 非超限 / SSE 均不动。
-  if (upstreamResp.status >= 400 && !/event-stream/i.test(ct)) {
-    let raw = '';
-    try { raw = await upstreamResp.text(); } catch { raw = ''; }
-    let out = raw;
+  // 重试摘要请求,第三方 auto-compact 不再杀回合)。只收 400/413:某些中转 429 限流文案
+  // 含 "too many tokens",改写会让 CLI 误触发 compact 而非退避;其余状态码走下方流式透传,
+  // 字节不变。非 JSON / 非超限 / SSE 均不动。缓冲设 256KB 上限:坏网关可能回 MB 级 HTML
+  // 错误页,超限不解析,已缓冲部分+剩余流原样透传。
+  if ((upstreamResp.status === 400 || upstreamResp.status === 413) && !/event-stream/i.test(ct) && upstreamResp.body) {
+    const MAX_ERR_BODY = 256 * 1024;
+    const chunks = [];
+    let total = 0;
+    let overflow = false;
+    const reader = upstreamResp.body.getReader();
     try {
-      const j = JSON.parse(raw);
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        chunks.push(Buffer.from(value));
+        total += value.byteLength;
+        if (total > MAX_ERR_BODY) { overflow = true; break; }
+      }
+    } catch { /* 上游中断:把已收到的原样发回 */ }
+    clientRes.writeHead(upstreamResp.status, { 'Content-Type': ct, 'Cache-Control': 'no-cache' });
+    if (overflow) {
+      for (const c of chunks) clientRes.write(c);
+      try {
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          clientRes.write(Buffer.from(value));
+        }
+      } catch { /* upstream aborted mid-stream */ }
+      clientRes.end();
+      return;
+    }
+    let out = Buffer.concat(chunks).toString('utf8');
+    try {
+      const j = JSON.parse(out);
       const m = j?.error?.message;
       if (typeof m === 'string') {
         const norm = normalizeContextOverflow(m);
         if (norm !== m) { j.error.message = norm; out = JSON.stringify(j); }
       }
     } catch { /* 非 JSON 错误体:原样透传 */ }
-    clientRes.writeHead(upstreamResp.status, { 'Content-Type': ct, 'Cache-Control': 'no-cache' });
     clientRes.end(out);
     return;
   }

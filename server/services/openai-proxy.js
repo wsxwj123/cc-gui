@@ -251,7 +251,10 @@ const STOP_MAP = { stop: 'end_turn', length: 'max_tokens', tool_calls: 'tool_use
 // "prompt is too long" 才会缩减分组重试摘要请求;OpenAI/中转措辞不被识别 →
 // compact 判失败 → 回合被杀。窄匹配超限特征,命中则改写为 CLI 可识别措辞,
 // 原文截断保留在后(用户仍看得到上游真实信息)。401/429/余额类不含这些特征,不受影响。
-const CTX_OVERFLOW_RE = /maximum context length|context_length_exceeded|too many tokens|exceeds\b.{0,40}\bcontext|input\b.{0,20}\btoo long/i;
+// 后三条为窄字面特征(fable判官补漏):Anthropic "input length and max_tokens exceed
+// context limit"(无s)、Gemini 系、Kimi;均不与限流文案("exceeded your per-minute rate
+// limit"/"tokens per min (TPM)")重叠,断言见 check-compact-error-normalize.mjs。
+const CTX_OVERFLOW_RE = /maximum context length|context_length_exceeded|too many tokens|exceeds\b.{0,40}\bcontext|input\b.{0,20}\btoo long|exceed context limit|exceeds the maximum number of tokens allowed|exceeded model token limit/i;
 export function normalizeContextOverflow(msg) {
   const s = String(msg ?? '');
   if (/prompt is too long/i.test(s)) return s; // 已是 CLI 可识别措辞(含幂等:避免重复前缀)
@@ -260,12 +263,13 @@ export function normalizeContextOverflow(msg) {
 }
 
 // 从上游 OpenAI error 对象(或裸错误体)提取人类可读文案与合理状态码。
-function errMsg(e) {
+function rawErrMsg(e) {
   if (!e) return 'upstream error';
-  if (typeof e === 'string') return normalizeContextOverflow(e);
-  return normalizeContextOverflow(
-    e.message || (typeof e.error === 'string' ? e.error : '') || JSON.stringify(e)
-  );
+  if (typeof e === 'string') return e;
+  return e.message || (typeof e.error === 'string' ? e.error : '') || JSON.stringify(e);
+}
+function errMsg(e) {
+  return normalizeContextOverflow(rawErrMsg(e));
 }
 function errStatus(e) {
   // 上游 error 里带数字 code/status 就用它,否则(多为字符串码如 insufficient_quota)回 502。
@@ -585,9 +589,12 @@ async function handle(req, clientRes) {
     }
     // C:文案打磨 —— 解析出上游 error.message,别把整段原始 JSON(带双状态码前缀)塞给用户。
     let up_msg = txt;
-    try { const j = JSON.parse(txt); up_msg = errMsg(j.error || j); } catch {}
-    // 非 JSON 错误体走不到 errMsg → 这里兜底归一化(幂等,重复调用无害)。
-    up_msg = normalizeContextOverflow(up_msg);
+    try { const j = JSON.parse(txt); up_msg = rawErrMsg(j.error || j); } catch {}
+    // 归一化只收 400/413(真超限状态码):某些中转 429 限流文案含 "too many tokens",
+    // 改写成 prompt is too long 会让 CLI 误触发 compact 而非退避。
+    if (upstreamResp.status === 400 || upstreamResp.status === 413) {
+      up_msg = normalizeContextOverflow(up_msg);
+    }
     clientRes.writeHead(upstreamResp.status, { 'Content-Type': 'application/json' });
     clientRes.end(JSON.stringify({ type: 'error', error: { type: 'api_error', message: String(up_msg).slice(0, 500) } }));
     return;
