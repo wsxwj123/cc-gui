@@ -337,7 +337,17 @@ export function ChatInput({ onSend, onStop, onAccelerate, onBackground, suggesti
       if (e?.detail?.append) setText((prev) => (prev && !/\s$/.test(prev) ? prev + ' ' : prev) + t);
       else setText(t);
       // 编辑重发:恢复原附件为卡片(缩略图/文件名),可删除、可继续新增,不再是裸 @path 文本。
-      if (fillAttach) setAttachments(fillAttach);
+      // append 模式(如截图热键):在现有附件末尾追加,不覆盖用户已挂的图/文件(按 path 去重)。
+      if (fillAttach) {
+        if (e?.detail?.appendAttachments) {
+          setAttachments((prev) => {
+            const seen = new Set(prev.map((a) => a.path));
+            return [...prev, ...fillAttach.filter((a) => !seen.has(a.path))];
+          });
+        } else {
+          setAttachments(fillAttach);
+        }
+      }
       if (e?.detail?.editMode) setEditingResend(true);
       const ta = textareaRef.current;
       if (ta) {
