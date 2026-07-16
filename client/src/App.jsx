@@ -6628,6 +6628,13 @@ function ProviderSwitcher() {
               <b>原理(协议路由)</b>：和 <a href="https://github.com/farion1231/cc-switch" target="_blank" rel="noreferrer" className="text-accent hover:underline">cc-switch</a> 一样把 Claude 模型名映射到第三方。OpenAI 格式经本地代理 <code className="font-mono">8788</code> 做协议翻译、Anthropic 格式经 <code className="font-mono">8789</code> 透传换 token —— 都是<b>本机中转</b>，非直连官方。
             </p>
           </div>
+          {/* 新增/编辑表单挂列表顶部:打开新增无需滚到底,点编辑也统一定位到顶部表单。 */}
+          <CustomProviderForm
+            editing={editingProvider}
+            onCancel={() => setEditingProvider(null)}
+            onSaved={() => { setEditingProvider(null); load(); }}
+            onDirtyChange={(d) => { formDirtyRef.current = d; }}
+          />
           {providers.filter((p) => showHidden || !hiddenProviders.has(p.id)).map((p) => (
             <div key={p.id} className={`px-3 py-1 ${isCur(p) ? 'bg-accent-subtle' : ''} ${hiddenProviders.has(p.id) ? 'opacity-50' : ''}`}>
               <div className="flex items-center gap-0.5 -mx-3 pr-2 pl-3 hover:bg-canvas-warm transition-colors">
@@ -6713,12 +6720,6 @@ function ProviderSwitcher() {
               </button>
             </div>
           )}
-          <CustomProviderForm
-            editing={editingProvider}
-            onCancel={() => setEditingProvider(null)}
-            onSaved={() => { setEditingProvider(null); load(); }}
-            onDirtyChange={(d) => { formDirtyRef.current = d; }}
-          />
         </div>
       )}
     </div>
@@ -7726,13 +7727,13 @@ function CustomProviderForm({ onSaved, editing, onCancel, onDirtyChange }) {
   if (!open && !isEdit) {
     return (
       <button onClick={() => setOpen(true)}
-        className="w-full flex items-center gap-2 px-4 py-3 text-left text-accent hover:bg-canvas-warm transition-colors border-t border-canvas-deep/40 mt-1">
+        className="w-full flex items-center gap-2 px-4 py-3 text-left text-accent hover:bg-canvas-warm transition-colors border-b border-canvas-deep/40 mb-1">
         <Plus size={16} /><span className="text-[14px] font-body">添加 Provider</span>
       </button>
     );
   }
   return (
-    <div className="px-4 py-3 border-t border-canvas-deep/40 mt-1 space-y-2.5">
+    <div className="px-4 py-3 border-b border-canvas-deep/40 mb-1 space-y-2.5">
       <div className="flex items-center gap-2">
         <button onClick={close} className="p-1 -ml-1 text-ink-faint hover:text-ink" title="返回"><ArrowLeft size={16} /></button>
         <span className="flex-1 text-[13px] font-display font-semibold text-ink">{isEdit ? '编辑 Provider' : '新增 Provider'}<span className="text-[10px] font-body font-normal text-ink-faint ml-1">保存到本机</span></span>
@@ -7880,6 +7881,12 @@ function MobileProviderPage() {
   const [editingProvider, setEditingProvider] = useState(null);
   return (
     <div className="py-1">
+      {/* 新增/编辑表单挂列表顶部:打开新增无需滚到底,点编辑也统一定位到顶部表单。 */}
+      <CustomProviderForm
+        editing={editingProvider}
+        onCancel={() => setEditingProvider(null)}
+        onSaved={() => { setEditingProvider(null); load(); }}
+      />
       {providers.map((p) => (
         <div key={p.id} className={`${isCur(p) ? 'bg-accent-subtle' : ''}`}>
           <div className="w-full flex items-center gap-1 pr-3 hover:bg-canvas-warm transition-colors">
@@ -7934,11 +7941,6 @@ function MobileProviderPage() {
           <button onClick={() => removeCustom(p.id, p.name)} title="删除" className="p-1.5 text-ink-faint hover:text-error shrink-0"><Trash2 size={15} /></button>
         </div>
       ))}
-      <CustomProviderForm
-        editing={editingProvider}
-        onCancel={() => setEditingProvider(null)}
-        onSaved={() => { setEditingProvider(null); load(); }}
-      />
     </div>
   );
 }
