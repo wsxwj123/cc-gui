@@ -24,6 +24,9 @@ tauri-plugin-dialog = "2"
 # 前端 gate 在 SettingsPanel(仅 Tauri 且非本地 bot 版才走自动更新)。
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
+# 全局热键:注册系统级快捷键(默认 CmdOrCtrl+Shift+2)→ 置前主窗口 + emit 事件给前端触发截图。
+# 只在 Rust 侧注册(setup 读 ~/.claude-gui/hotkey.json),不经 JS,故无需 capability/JS 插件包。
+tauri-plugin-global-shortcut = "2"
 # generate_context! 宏在 tauri.conf.json 含 plugins 配置时会展开出 serde_json::Value 字面量,
 # 需要本 crate 直接依赖 serde_json(仅 tauri 传递依赖不够,宏在本 crate 内展开)。
 serde_json = "1"

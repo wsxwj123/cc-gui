@@ -7919,6 +7919,62 @@ export default function App() {
     return () => window.removeEventListener('keydown', onKey);
   }, []);
 
+  // F1: 全局截图热键。Rust 侧注册系统快捷键(默认 CmdOrCtrl+Shift+2)→ emit
+  // 'cgui:screenshot-hotkey'。这里在 App 顶层单点监听:确定当前活动窗格 → 调 /api/screenshot →
+  // 成功后复用 composer-fill(append 模式)把图塞进活动窗格输入框。取消静默,失败给提示。
+  const [shotStatus, setShotStatus] = useState(null); // {kind:'busy'|'done'|'error', text}
+  const shotBusyRef = useRef(false);
+  useEffect(() => {
+    if (!isTauri()) return;
+    let unlisten = null;
+    let toastTimer = null;
+    const showStatus = (kind, text, ttl) => {
+      setShotStatus({ kind, text });
+      if (toastTimer) clearTimeout(toastTimer);
+      if (ttl) toastTimer = setTimeout(() => setShotStatus(null), ttl);
+    };
+    const onHotkey = async () => {
+      if (shotBusyRef.current) return; // 防重复触发(截图进行中再按无效)
+      shotBusyRef.current = true;
+      showStatus('busy', '正在截图，请框选区域或点击窗口…');
+      try {
+        const r = await fetch('/api/screenshot', { method: 'POST' });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) {
+          showStatus('error', d.error || '截图失败', 8000);
+          return;
+        }
+        if (d.canceled) { setShotStatus(null); return; }
+        // 目标窗格 = 当前活动窗格,key 与 SessionDetail 的 sessionQueueKey 同构。
+        const st = useStore.getState();
+        const idx = st.activeTabIndex || 0;
+        const sel = (st.paneSessions && st.paneSessions[idx]) || st.selectedSession;
+        const targetKey = sel?.sessionId || `draft-${sel?.projectHash || 'none'}`;
+        const name = String(d.path || 'screenshot.png').split(/[/\\]+/).pop();
+        window.dispatchEvent(new CustomEvent('cgui:composer-fill', {
+          detail: {
+            targetKey,
+            appendAttachments: true,
+            attachments: [{ kind: 'image', path: d.path, preview: d.preview, name, bytes: d.bytes }],
+          },
+        }));
+        showStatus('done', '截图已添加到输入框', 2500);
+      } catch (err) {
+        showStatus('error', '截图失败: ' + (err?.message || err), 8000);
+      } finally {
+        shotBusyRef.current = false;
+      }
+    };
+    import('@tauri-apps/api/event')
+      .then(({ listen }) => listen('cgui:screenshot-hotkey', onHotkey))
+      .then((fn) => { unlisten = fn; })
+      .catch(() => {});
+    return () => {
+      if (typeof unlisten === 'function') unlisten();
+      if (toastTimer) clearTimeout(toastTimer);
+    };
+  }, []);
+
   // 快捷键(单实例挂 App 顶层,处理器内 getState() 读活动窗格,避免闭包陈旧;
   // 遵循 per-pane 纪律:只写活动窗格的 keyed slot,绝不写全局单值):
   //  · Cmd/Ctrl+/  快捷键速查(meta 组合不会往输入框打字,聚焦时也响应)
@@ -8565,6 +8621,29 @@ export default function App() {
         </div>
       )}
       <CompletionToasts />
+      {/* F1: 截图热键状态提示(截图中/成功/失败)。取消不显示。 */}
+      {shotStatus && (
+        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-[210] max-w-[80vw]">
+          <div
+            className={`flex items-center gap-2 px-4 py-2 rounded-full shadow-lg text-sm font-body ${
+              shotStatus.kind === 'error'
+                ? 'bg-error text-white'
+                : shotStatus.kind === 'done'
+                ? 'bg-ink text-canvas'
+                : 'bg-ink/90 text-canvas'
+            }`}
+            role="status"
+          >
+            {shotStatus.kind === 'busy' && (
+              <span className="w-3.5 h-3.5 rounded-full border-2 border-canvas/40 border-t-canvas animate-spin shrink-0" />
+            )}
+            <span className="leading-snug">{shotStatus.text}</span>
+            {shotStatus.kind === 'error' && (
+              <X size={14} className="shrink-0 cursor-pointer hover:opacity-80" onClick={() => setShotStatus(null)} />
+            )}
+          </div>
+        </div>
+      )}
       {!cliInstalled && !cliCheckDismissed && (
         <EnvCheckPanel onRecheck={checkCli} onDismiss={dismissCliCheck} />
       )}

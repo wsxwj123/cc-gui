@@ -34,6 +34,7 @@ const SETTINGS_INDEX = [
   { id: 'cc-update', tab: 'overview', title: 'Claude Code CLI 更新 / 切换', keys: 'cli claude npm 原生 安装 版本 路径' },
   { id: 'set-fda', tab: 'overview', title: '完全磁盘访问 (FDA)', keys: 'fda 磁盘 授权 权限 macos' },
   { id: 'set-close-behavior', tab: 'overview', title: '关闭窗口行为', keys: '关闭 最小化 退出 窗口' },
+  { id: 'set-screenshot-hotkey', tab: 'overview', title: '全局截图热键', keys: '截图 热键 快捷键 screenshot hotkey 屏幕录制' },
   { id: 'set-persistent-chat', tab: 'overview', title: '会话常驻进程', keys: '常驻 复用 冷启动 进程 persistent 缓存' },
   { id: 'set-prompt-suggestions', tab: 'overview', title: '输入预测', keys: '预测 建议 suggestion 输入' },
   { id: 'set-max-budget', tab: 'overview', title: '对话花费上限', keys: '花费 预算 budget 成本 上限 美元' },
@@ -1225,6 +1226,53 @@ function CloseBehaviorPicker() {
   );
 }
 
+// F1: 全局截图热键。写 ~/.claude-gui/hotkey.json,Tauri Rust 在启动时读取并注册系统快捷键。
+// MVP:仅「启用/禁用 + 显示当前快捷键」,改键后续再加。启用/禁用改后需重启应用生效
+// (Rust 只在 setup 读一次)。仅桌面壳有意义,浏览器页(6677)无系统级热键,故非 Tauri 不渲染。
+function ScreenshotHotkeyPicker() {
+  const [cfg, setCfg] = useState(null); // { enabled, accelerator }
+  useEffect(() => {
+    fetch('/api/prefs/hotkey').then((r) => r.json())
+      .then((d) => setCfg({ enabled: d.enabled !== false, accelerator: d.accelerator || 'CmdOrCtrl+Shift+2' }))
+      .catch(() => setCfg({ enabled: true, accelerator: 'CmdOrCtrl+Shift+2' }));
+  }, []);
+  if (!isTauri()) return null;
+  if (!cfg) return null;
+  const save = (next) => {
+    setCfg(next);
+    fetch('/api/prefs/hotkey', {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(next),
+    }).catch(() => {});
+  };
+  // 展示用:把 CmdOrCtrl 按平台显示为 ⌘ / Ctrl,更直观。存储值不变(始终 CmdOrCtrl+…)。
+  const isMac = typeof navigator !== 'undefined' && /Mac/i.test(navigator.platform || '');
+  const display = (cfg.accelerator || '')
+    .replace(/CmdOrCtrl/gi, isMac ? '⌘' : 'Ctrl')
+    .replace(/\bShift\b/gi, isMac ? '⇧' : 'Shift')
+    .replace(/\bAlt\b/gi, isMac ? '⌥' : 'Alt')
+    .split('+').map((s) => s.trim()).filter(Boolean).join(' + ');
+  return (
+    <div className="rounded-lg border border-canvas-deep bg-canvas-warm/40 p-3">
+      <div className="text-[12px] font-medium text-ink font-body mb-1.5 flex items-center gap-1.5">全局截图热键<EffectBadge level="restart" /></div>
+      <div className="flex items-center gap-3">
+        <button
+          onClick={() => save({ ...cfg, enabled: !cfg.enabled })}
+          className={`px-2.5 py-1 text-[11px] rounded-md font-body transition-colors ${cfg.enabled ? 'bg-accent text-white' : 'bg-canvas-warm text-ink-muted hover:text-ink border border-canvas-deep'}`}>
+          {cfg.enabled ? '已启用' : '已禁用'}
+        </button>
+        <div className="text-[11px] text-ink-muted font-body">
+          当前快捷键：<span className="font-mono text-ink">{display || '未设置'}</span>
+        </div>
+      </div>
+      <div className="text-[10.5px] text-ink-faint font-body mt-1.5 leading-snug">
+        按下热键会将 GUI 置于最前并触发截图（macOS 框选区域或点击窗口，Windows 抓取主屏），截图自动加入当前会话输入框。
+        修改启用状态后需重新打开应用才生效。macOS 首次截图需在 系统设置 → 隐私与安全性 → 屏幕录制 勾选 Claude GUI。
+      </div>
+    </div>
+  );
+}
+
 // macOS 完全磁盘访问(FDA)状态卡。仅 macOS 渲染(端点返回 platform 判断)。
 // 主动 probe(readdir ~/Downloads)拿真实授权态:能读=已授权,读不了=未授权→红色
 // 提示 + 一键打开系统设置。持久自签后授权跨 build 存活,但首次/异常仍需用户操作。
@@ -1674,6 +1722,7 @@ function OverviewTab({ settings, onSave, onEnvPatch, saving }) {
       <div id="cc-update"><CcUpdater /></div>
       <div id="set-fda"><FullDiskAccessCard /></div>
       <div id="set-close-behavior"><CloseBehaviorPicker /></div>
+      <div id="set-screenshot-hotkey"><ScreenshotHotkeyPicker /></div>
       <div id="set-persistent-chat"><PersistentChatToggle /></div>
       <div id="set-prompt-suggestions"><PromptSuggestionsToggle /></div>
       <div id="set-max-budget"><MaxBudgetInput /></div>
