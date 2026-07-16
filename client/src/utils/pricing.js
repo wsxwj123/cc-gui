@@ -1,6 +1,11 @@
 // Model pricing table — USD per 1M tokens.
 // CNY-priced models are converted at a fixed rate (CNY_TO_USD) for display.
-// Sources fetched 2026-05-27 from each provider's official pricing page.
+// 这是**离线兜底表**;运行时优先用 /api/pricing 下发的 LiteLLM 远端表(REMOTE),
+// 覆盖更广更新更勤。手抄表只在 REMOTE 无该 model 时兜底。
+// 全量核对日期 2026-07-16(Anthropic/DeepSeek 官方页直核;国产厂官方页 JS 渲染抓不到,
+// 走搜索聚合近似,已逐条标注来源与置信度)。四价含义:input / output / cacheRead(缓存读)
+// / cacheWrite(缓存写)。usd()/cny() 未显式给缓存价时按 Anthropic 通用规则默认
+// cacheRead=0.1×input、cacheWrite=1.25×input(5min TTL)。
 
 const CNY_TO_USD = 1 / 7.2;
 
@@ -21,6 +26,13 @@ const usd = (input, output, cacheRead = input * 0.1, cacheWrite = input * 1.25) 
 // cache_write here is the 5-min TTL variant (1.25× input). 1-hr write is 2× input.
 const PRICES = {
   // Claude — Anthropic official
+  // 官方页直核 2026-07-16: platform.claude.com/docs/en/about-claude/pricing
+  // cacheWrite 列取 5min TTL 变体(=1.25×input);1h write=2×input 不建模。
+  // Fable 5 / Mythos 5(限量): $10/$50,cw $12.50,cr $1(用新 tokenizer,token 量 ~+30%)。
+  'claude-fable-5':              usd(10, 50, 1, 12.5),
+  'claude-mythos-5':             usd(10, 50, 1, 12.5),
+  // Sonnet 5: 引导价 $2/$10(至 2026-08-31),之后 $3/$15。此处按引导价(cw $2.50/cr $0.20)。
+  'claude-sonnet-5':             usd(2, 10, 0.2, 2.5),
   'claude-opus-4-7':             usd(5, 25),
   'claude-opus-4-6':             usd(5, 25),
   'claude-opus-4-1':             usd(15, 75),
@@ -33,8 +45,8 @@ const PRICES = {
   'claude-haiku-4-5-20251001':   usd(1, 5),
   'claude-3-5-haiku-20241022':   usd(0.80, 4),
 
-  // DeepSeek — USD/MTok, 2026-06-19 拉取 api-docs.deepseek.com/quick_start/pricing
-  // (官方页以 USD 计价)。cacheWrite=input:DeepSeek 不收 cache 写入费,cache miss 即标准 input 价。
+  // DeepSeek — USD/MTok, 官方页直核 2026-07-16 api-docs.deepseek.com/quick_start/pricing
+  // (与上次一致未变;官方页以 USD 计价)。cacheWrite=input:DeepSeek 不收 cache 写入费,cache miss 即标准 input 价。
   // deepseek-chat/reasoner 是 v4-flash 的 non-thinking/thinking 别名(2026-07-24 弃用,价格同)。
   'deepseek-chat':               usd(0.14, 0.28, 0.0028, 0.14),    // v4-flash non-thinking
   'deepseek-reasoner':           usd(0.14, 0.28, 0.0028, 0.14),    // v4-flash thinking
@@ -93,6 +105,33 @@ const PRICES = {
   'MiniMax-M1':                  cny(2.88, 15.8),   // 官方 ≈$0.40/$2.20
   'MiniMax-Text-01':             cny(1, 8),         // 估值(legacy)
   'abab7-chat-preview':          cny(10, 30),       // 估值(legacy)
+
+  // ── 内置 provider 补全(2026-07-16)──────────────────────────────
+  // 以下国产厂官方定价页均为 JS 渲染,WebFetch/r.jina.ai 抓不到实价;下列为**搜索聚合
+  // 近似值**(非官方页直核),仅作离线兜底。运行时 /api/pricing 的 LiteLLM 表已覆盖
+  // dashscope/volcengine/hunyuan/stepfun/baidu,优先生效,这里只在离线且 REMOTE 无该 id 时兜底。
+  // 币种 CNY(cny() 自动按 CNY_TO_USD 折 USD 存储)。model id 用「获取模型」实时拉取,
+  // 故用宽前缀键(lookupPrice 的 startsWith 兜底可匹配带版本后缀的 id)。
+
+  // 通义千问 Qwen(dashscope)— 搜索聚合,阿里云长期公开档位
+  'qwen3-max':                   cny(2.5, 10),      // 旗舰,阶梯计费起步价
+  'qwen-max':                    cny(2.5, 10),
+  'qwen-plus':                   cny(0.8, 2),       // 促销输入价¥0.8(原¥4)
+  'qwen-turbo':                  cny(0.3, 0.6),
+
+  // 豆包 Doubao(volcengine 火山方舟)— 搜索聚合(新浪/火山文档),分段计费取旗舰档
+  'doubao-seed':                 cny(6, 30, 1.2),   // Seed 2.1 Pro:输入¥6/输出¥30/缓存命中¥1.2
+
+  // 腾讯混元 Hunyuan — 搜索聚合(腾讯云文档/知乎)
+  'hunyuan-turbos':              cny(0.8, 2),
+  'hunyuan-t1':                  cny(1, 4),
+
+  // 阶跃 StepFun — 搜索聚合(IT之家/阿里云百炼代理页);step-3 为限时折扣价,易变
+  'step-3':                      cny(1.5, 4),
+  'step-3.7-flash':              cny(1.35, 8.1),
+
+  // 百度文心 ERNIE(qianfan): 未核实(官方页JS渲染+搜索无可靠聚合)→无离线兜底,
+  // 运行时依赖 LiteLLM(litellm_provider=baidu)。切勿编造。
 };
 
 // ── Z2: LiteLLM 远端单价表 ──────────────────────────────────────
