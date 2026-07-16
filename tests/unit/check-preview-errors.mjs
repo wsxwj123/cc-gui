@@ -80,6 +80,69 @@ assert.equal(formatPreviewErrors(null), '');
   assert.match(out, /已截断/);
 }
 
+// ── normalizePreviewErr:数字行号保留 + mermaid 文本行号解析 ────────
+// error 带数字 line → 输出保留 numeric line 字段(供 formatPreviewErrors 定位源码)
+assert.equal(normalizePreviewErr({ type: 'error', msg: 'x', line: 7 }).line, 7);
+// mermaid 无数字 line,行号藏消息里 → 解析出 numeric line
+{
+  const n = normalizePreviewErr({ type: 'error', msg: 'Mermaid: Parse error on line 4:\n...' });
+  assert.equal(n.line, 4, 'mermaid on line N 解析成 numeric line');
+  assert.match(n.text, /行 4/);
+}
+// 无行号 → line 为 null(不是 undefined 崩溃)
+assert.equal(normalizePreviewErr({ type: 'error', msg: 'boom' }).line, null);
+// net/reject/console 无 line 字段(formatPreviewErrors 据此不附片段)
+assert.equal(normalizePreviewErr({ type: 'net', url: '/u', status: 500 }).line, undefined);
+
+// ── formatPreviewErrors(errors, source):附源码片段 ────────────────
+const SRC = ['<html>', '<body>', '  <script>', '    bad()', '  </script>', '</body>', '</html>'].join('\n');
+// 行号还原:error line=4 → 附 ±3 行(1..7)片段,出错行带 > 标记,含该行内容
+{
+  const errs = [normalizePreviewErr({ type: 'error', msg: 'bad is not defined', line: 4 })];
+  const out = formatPreviewErrors(errs, SRC);
+  assert.match(out, /出错行源码片段/);
+  assert.match(out, /错误 1\(行 4\)/);
+  assert.match(out, /> {1,}4 {2}    bad\(\)/, '出错行带 > 标记且为源码第 4 行');
+  assert.match(out, /  1 {2}<html>/, '上文含第 1 行');
+  assert.match(out, /  7 {2}<\/html>/, '下文含第 7 行');
+}
+// 无 source → 向后兼容,不附片段(旧行为)
+{
+  const errs = [normalizePreviewErr({ type: 'error', msg: 'bad', line: 4 })];
+  assert.doesNotMatch(formatPreviewErrors(errs), /出错行源码片段/);
+}
+// 越界不附:行号 > 源码行数(999)/ 负数(-2)→ 无片段
+{
+  const over = [normalizePreviewErr({ type: 'error', msg: 'x', line: 999 })];
+  assert.doesNotMatch(formatPreviewErrors(over, SRC), /出错行源码片段/, '超长行号不附');
+  const neg = [normalizePreviewErr({ type: 'error', msg: 'x', line: -2 })];
+  assert.doesNotMatch(formatPreviewErrors(neg, SRC), /出错行源码片段/, '负行号不附');
+}
+// 无行号不附:error 无 line / net 类
+{
+  const noLine = [
+    normalizePreviewErr({ type: 'error', msg: 'no line here' }),
+    normalizePreviewErr({ type: 'net', url: '/api', status: 500 }),
+  ];
+  assert.doesNotMatch(formatPreviewErrors(noLine, SRC), /出错行源码片段/, '无行号不附');
+}
+// 只为前 5 条带行号错误附片段(总量控制)
+{
+  const errs = Array.from({ length: 8 }, () =>
+    normalizePreviewErr({ type: 'error', msg: 'x', line: 4 }));
+  const out = formatPreviewErrors(errs, SRC);
+  assert.ok(!/错误 6\(行/.test(out), '第 6 条起不附片段');
+  assert.match(out, /错误 5\(行/, '第 5 条仍附片段');
+}
+// 超长源码行截断(minified 一行几十 KB 不整塞进去)
+{
+  const bigSrc = 'a'.repeat(5000);
+  const errs = [normalizePreviewErr({ type: 'error', msg: 'x', line: 1 })];
+  const out = formatPreviewErrors(errs, bigSrc);
+  assert.ok(out.length < 1000, '超长源码行被截断');
+  assert.match(out, /…/);
+}
+
 // ── ERROR_COLLECTOR 注入脚本 ──────────────────────────────────────
 // 是 <script> 字符串、引用约定键、hook 四类来源
 assert.match(ERROR_COLLECTOR, /^<script>/);

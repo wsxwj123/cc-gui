@@ -50,6 +50,11 @@ function withShim(code) {
   return STORAGE_SHIM + ERROR_COLLECTOR + code;
 }
 
+// iframe onerror 的 lineno 相对 srcDoc 全文,而 srcDoc = 前缀(STORAGE_SHIM+ERROR_COLLECTOR)+ 用户代码。
+// 前缀末尾 </script> 无换行、与用户代码首行同一物理行,故 lineno 比用户源码行大 offset(= 前缀换行数)。
+// 采集时减回还原到用户源码行(见 PreviewIframe onMsg)。
+const SHIM_LINE_OFFSET = (STORAGE_SHIM + ERROR_COLLECTOR).split('\n').length - 1;
+
 function normLang(lang) {
   return String(lang || '').trim().split(/\s+/)[0].toLowerCase();
 }
@@ -101,13 +106,14 @@ export function CopyButton({ text }) {
 // 问题2:预览运行时报错的右下角徽章 + 弹层 + 「发给 AI」。抽成共用组件,让 iframe 预览
 // (PreviewIframe,html/svg 走沙箱)与父页渲染的 mermaid(MermaidView)复用同一套 UI/发送逻辑,
 // 不另造。errors 为已 normalize 的 {type,text,sig} 数组;空则不渲染。放在 relative 容器内。
-export function PreviewErrorBadge({ errors }) {
+export function PreviewErrorBadge({ errors, source }) {
   const [open, setOpen] = useState(false);
   if (!errors || errors.length === 0) return null;
   // 填进当前活跃 pane 的输入框(用户自己按发送,不代发)。targetKey 与 sessionQueueKey 同构,
-  // 分屏时只填活跃 pane(与 FileExplorer 的"添加到上下文"同款门控)。
+  // 分屏时只填活跃 pane(与 FileExplorer 的"添加到上下文"同款门控)。source 为 artifact 用户源码,
+  // 用于给带行号的错误附出错行代码片段。
   const sendToAI = () => {
-    const text = formatPreviewErrors(errors);
+    const text = formatPreviewErrors(errors, source);
     if (!text) return;
     const s = useStore.getState();
     const pane = (s.paneSessions || [])[s.activeTabIndex] || s.selectedSession;
@@ -123,8 +129,16 @@ export function PreviewErrorBadge({ errors }) {
         // flex 列三段(头/正文/底),不用 sticky —— webview 下 sticky 在带 transform 容器内失效。
         // 宽高 clamp 在容器内(min(固定, 100%)):小窗退化为占满内滚,不溢出。别用 vw/vh(webview zoom 分母坑)。
         <div className="mb-1.5 w-[320px] max-w-full max-h-[min(280px,100%)] pointer-events-auto flex flex-col rounded-lg border border-[#3a342b] bg-[#2b2722] shadow-2xl overflow-hidden">
-          <div className="px-3 py-1.5 text-[10px] font-mono text-[#9a8e78] border-b border-[#3a342b] shrink-0">
-            预览运行时报错 · {errors.length} 条
+          {/* 头部 shrink-0:标题 + 右上角「发给 AI」,不随列表滚动,小窗也永远可见。
+              用 flex 列结构而非 sticky —— webview 下 sticky 在带 transform 容器内失效。 */}
+          <div className="flex items-center justify-between gap-2 px-3 py-1.5 border-b border-[#3a342b] shrink-0">
+            <span className="text-[10px] font-mono text-[#9a8e78] truncate">预览运行时报错 · {errors.length} 条</span>
+            <button
+              onClick={sendToAI}
+              className="shrink-0 px-2 py-0.5 rounded-md bg-[#3a342b] text-[10px] font-mono text-[#e8e2d6] hover:bg-[#453e33] transition-colors"
+            >
+              发给 AI
+            </button>
           </div>
           <div className="flex-1 min-h-0 overflow-y-auto px-3 py-2 space-y-1.5">
             {errors.map((e, i) => (
@@ -132,14 +146,6 @@ export function PreviewErrorBadge({ errors }) {
                 <span className="text-amber-400/80">[{PREVIEW_ERR_LABEL[e.type] || e.type}]</span> {e.text}
               </div>
             ))}
-          </div>
-          <div className="px-3 py-2 border-t border-[#3a342b] shrink-0">
-            <button
-              onClick={sendToAI}
-              className="w-full py-1 rounded-md bg-[#3a342b] text-[11px] font-mono text-[#e8e2d6] hover:bg-[#453e33] transition-colors"
-            >
-              把报错发给 AI
-            </button>
           </div>
         </div>
       )}
@@ -180,7 +186,7 @@ export function MermaidView({ code }) {
           <AlertTriangle size={13} className="mt-0.5 shrink-0" />
           <span className="font-mono break-all">Mermaid: {err}</span>
         </div>
-        <PreviewErrorBadge errors={badgeErrors} />
+        <PreviewErrorBadge errors={badgeErrors} source={code} />
       </div>
     );
   }
@@ -222,7 +228,7 @@ export function CollapsibleCode({ code, className = '', collapseAt = 5 }) {
 // 采集脚本由 withShim() 注入进 srcDoc,经 postMessage 穿透 sandbox。父页只收自己 iframe
 // (event.source 比对)的消息。srcDoc/iframeKey 变(流式新内容或手动刷新)即清空 buffer 重计
 // —— 规避流式半截 HTML 产生的伪错误(只有渲染稳定态的报错会留存)。
-export function PreviewIframe({ srcDoc, fullscreen, iframeKey }) {
+export function PreviewIframe({ srcDoc, source, fullscreen, iframeKey }) {
   const frameRef = useRef(null);
   const [errors, setErrors] = useState([]);
   const sigs = useRef(new Set());
@@ -234,8 +240,10 @@ export function PreviewIframe({ srcDoc, fullscreen, iframeKey }) {
     const onMsg = (e) => {
       // sandbox opaque origin 下无法比对 origin,只能确认消息来自本 iframe 的 window。
       if (!frameRef.current || e.source !== frameRef.current.contentWindow) return;
-      const rec = e.data && e.data[PREVIEW_ERR_KEY];
+      let rec = e.data && e.data[PREVIEW_ERR_KEY];
       if (!rec) return;
+      // 还原 iframe 行号到用户源码行:减去 shim 前缀撑大的行数(不改原 e.data,拷一份)。
+      if (rec.type === 'error' && rec.line != null) rec = { ...rec, line: rec.line - SHIM_LINE_OFFSET };
       const n = normalizePreviewErr(rec);
       if (!n || sigs.current.has(n.sig)) return;
       if (sigs.current.size >= MAX_PREVIEW_ERRORS) return;
@@ -257,7 +265,7 @@ export function PreviewIframe({ srcDoc, fullscreen, iframeKey }) {
         srcDoc={srcDoc}
         className="w-full h-full bg-white border-0 block"
       />
-      <PreviewErrorBadge errors={errors} />
+      <PreviewErrorBadge errors={errors} source={source} />
     </div>
   );
 }
@@ -281,7 +289,7 @@ export function PreviewBody({ language, mode, code, debounced, fullscreen, ifram
     );
   }
   if (language === 'mermaid') return <MermaidView code={debounced} />;
-  return <PreviewIframe srcDoc={withShim(debounced)} fullscreen={fullscreen} iframeKey={iframeKey} />;
+  return <PreviewIframe srcDoc={withShim(debounced)} source={debounced} fullscreen={fullscreen} iframeKey={iframeKey} />;
 }
 
 export function ArtifactPreview({ lang, code, coexist = false, dockKey }) {

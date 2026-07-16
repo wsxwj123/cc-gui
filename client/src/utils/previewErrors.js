@@ -18,6 +18,9 @@ const MAX_MSG = 300;      // 单条消息截断(防超长堆栈爆屏)
 const MAX_URL = 200;      // 单条 url 截断
 export const MAX_PREVIEW_ERRORS = 50;   // buffer 上限
 const MAX_SUMMARY = 4000; // 摘要总量截断
+const MAX_SNIPPET_ERRORS = 5;  // 最多为前 N 条错误附源码片段
+const SNIPPET_CONTEXT = 3;     // 出错行上下各附 N 行
+const MAX_SNIPPET_LINE = 160;  // 单行源码截断(防 minified 一行几十 KB)
 
 function clamp(s, n) {
   s = String(s == null ? '' : s);
@@ -49,7 +52,15 @@ export function normalizePreviewErr(rec) {
     text = head + (rec.url ? ` ${clamp(rec.url, MAX_URL)}` : '');
   } else if (type === 'error') {
     text = clamp(rec.msg || '脚本错误', MAX_MSG);
-    if (rec.line != null) text += ` (行 ${rec.line}${rec.col != null ? ':' + rec.col : ''})`;
+    // 行号:iframe onerror 给数字 rec.line(采集端已减去 shim 偏移,是用户源码行);
+    // 父页渲染的 mermaid 无 rec.line,行号藏在消息文本里("... on line N"),解析出来。
+    let line = Number.isFinite(rec.line) ? rec.line : null;
+    if (line == null) {
+      const m = /on line (\d+)/i.exec(rec.msg || '');
+      if (m) line = parseInt(m[1], 10);
+    }
+    if (line != null) text += ` (行 ${line}${rec.col != null ? ':' + rec.col : ''})`;
+    return { type, text, sig: type + '|' + text, line };
   } else {
     text = clamp(rec.msg, MAX_MSG);
   }
@@ -57,10 +68,34 @@ export function normalizePreviewErr(rec) {
 }
 
 // 把已采集的错误列表格式化成简洁文本(每条 类型+消息+行号),供填进输入框。空列表返回 ''。
-export function formatPreviewErrors(errors) {
+// 传入 source(artifact 用户源码)时,为带有效行号的前 5 条错误各附出错行 ±3 行的代码片段
+// (带行号标注、代码围栏包裹),帮 AI 定位。行号越界/无行号则不附片段(不附错行误导)。
+// 不传 source → 行为与旧版一致(向后兼容)。
+export function formatPreviewErrors(errors, source) {
   if (!Array.isArray(errors) || errors.length === 0) return '';
   const lines = errors.map((e, i) => `${i + 1}. [${PREVIEW_ERR_LABEL[e.type] || e.type}] ${e.text}`);
   let body = lines.join('\n');
   if (body.length > MAX_SUMMARY) body = body.slice(0, MAX_SUMMARY) + '\n…(已截断)';
-  return `预览运行时捕获到 ${errors.length} 条报错,请排查并修正上面的 HTML:\n\n\`\`\`\n${body}\n\`\`\``;
+  let out = `预览运行时捕获到 ${errors.length} 条报错,请排查并修正上面的 HTML:\n\n\`\`\`\n${body}\n\`\`\``;
+
+  const srcLines = typeof source === 'string' && source ? source.split('\n') : null;
+  if (srcLines) {
+    const snippets = [];
+    for (let i = 0; i < errors.length && snippets.length < MAX_SNIPPET_ERRORS; i++) {
+      const ln = errors[i] && errors[i].line;
+      // 无行号 / 越界(负数或超出源码行数)→ 跳过,不附片段。
+      if (!Number.isInteger(ln) || ln < 1 || ln > srcLines.length) continue;
+      const from = Math.max(1, ln - SNIPPET_CONTEXT);
+      const to = Math.min(srcLines.length, ln + SNIPPET_CONTEXT);
+      const width = String(to).length;
+      const rows = [];
+      for (let l = from; l <= to; l++) {
+        const mark = l === ln ? '>' : ' ';   // 出错行加 > 标记
+        rows.push(`${mark} ${String(l).padStart(width)}  ${clamp(srcLines[l - 1], MAX_SNIPPET_LINE)}`);
+      }
+      snippets.push(`错误 ${i + 1}(行 ${ln}):\n\`\`\`\n${rows.join('\n')}\n\`\`\``);
+    }
+    if (snippets.length) out += `\n\n出错行源码片段:\n\n${snippets.join('\n\n')}`;
+  }
+  return out;
 }
