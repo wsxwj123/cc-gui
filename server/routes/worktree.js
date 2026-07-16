@@ -207,10 +207,12 @@ router.get('/worktree', async (req, res) => {
     }
 
     // 本地分支列表(供"基于分支"新建下拉);取不到不影响主数据。
+    // 过 isValidBaseRef:与 POST 侧白名单同口径,否则中文分支名、detached 时的伪条目
+    // "(头指针在 xxx 分离)"会进下拉,选中必 400。
     let branches;
     try {
       const br = await execFileP('git', ['-C', root, 'branch', '--format=%(refname:short)'], { timeout: 4000 });
-      branches = br.stdout.split('\n').map((s) => s.trim()).filter(Boolean);
+      branches = br.stdout.split('\n').map((s) => s.trim()).filter(isValidBaseRef);
     } catch {}
 
     res.json({ root, trees, branches });
