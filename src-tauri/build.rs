@@ -18,5 +18,14 @@ fn main() {
         .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string());
     println!("cargo:rustc-env=APP_VERSION={version}");
     println!("cargo:rerun-if-changed=../package.json");
-    tauri_build::build()
+    // app 自定义命令须在 manifest 声明,否则生产包(webview 加载 http://127.0.0.1:<port>
+    // = remote 上下文)里 ACL resolve_access 为空被驳回;仅 dev(devUrl 同源 local)放行。
+    // 配套 capabilities/app-hotkey.json 的 remote.urls 授权这两条命令。
+    tauri_build::try_build(
+        tauri_build::Attributes::new().app_manifest(
+            tauri_build::AppManifest::new()
+                .commands(&["set_screenshot_hotkey", "focus_main_window"]),
+        ),
+    )
+    .expect("failed to run tauri-build");
 }

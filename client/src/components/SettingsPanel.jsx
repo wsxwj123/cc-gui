@@ -1291,10 +1291,16 @@ function ScreenshotHotkeyPicker() {
         body: JSON.stringify(next),
       });
       setCfg(next);
-    } catch {
+    } catch (e) {
       // 恢复旧键注册,状态回退
       invokeTauri('set_screenshot_hotkey', { enabled: prev.enabled, accel: prev.accelerator }).catch(() => {});
-      setErr('该组合无法注册，可能被系统或其它应用占用，请换一个');
+      // 透出 Rust 真实错误:占用类保留原提示,其它错误显示摘要,避免单一归因掩盖真实原因(如 ACL 拒绝)
+      const msg = String(e?.message ?? e ?? '');
+      if (/already|registered|占用|in use|RegisterHotKey/i.test(msg)) {
+        setErr('该组合无法注册，可能被系统或其它应用占用，请换一个');
+      } else {
+        setErr(`热键注册失败：${msg.slice(0, 200) || '未知错误'}`);
+      }
     }
   };
 
