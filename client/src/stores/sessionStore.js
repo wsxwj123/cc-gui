@@ -254,6 +254,10 @@ export const useStore = create((set, get) => ({
   // paneMessages is in-memory only (re-fetched on session load). Persisting
   // it would bloat localStorage and the on-disk jsonl is the source of truth.
   paneMessages: [[], [], [], [], [], []],
+  // 串扰窗口1(跨会话串显根源):paneMessages 每格的归属 sessionId(draft/空=null)。
+  // 切会话只换 paneSessions、fetch 异步回来前 paneMessages 仍是上个会话的 —— 渲染层
+  // 据此标记同步判定"这份历史属于当前会话吗",不属于就当空数组,零窗口期。
+  paneMessagesSid: [null, null, null, null, null, null],
   // 整会话用量聚合(keyed by sessionId,服务端随 /messages 端点返回)。按 sessionId
   // 而非 pane 索引存放 —— 分屏关窗/换绑不需要 splice 同步,同会话多窗格天然共享。
   usageTotalsBySession: {},
@@ -803,21 +807,26 @@ export const useStore = create((set, get) => ({
       next[0] = null;
       const nextMsgs = [...cur.paneMessages];
       nextMsgs[0] = [];
+      const nextSids = [...cur.paneMessagesSid];
+      nextSids[0] = null;
       // Fresh id so the now-empty pane's SessionDetail unmounts cleanly.
       const ids = [...cur.paneIds];
       ids[0] = freshPaneId();
-      set({ paneSessions: next, paneMessages: nextMsgs, paneIds: ids, selectedSession: null, messages: [] });
+      set({ paneSessions: next, paneMessages: nextMsgs, paneMessagesSid: nextSids, paneIds: ids, selectedSession: null, messages: [] });
       writeLs('cgui-selected-session', null);
       writeLs('cgui-pane-sessions', next);
       return;
     }
     const sessions = [...cur.paneSessions];
     const msgs = [...cur.paneMessages];
+    const sids = [...cur.paneMessagesSid];
     const ids = [...cur.paneIds];
     // Splice (i) out then pad back to length 6 so index math stays stable.
     // paneIds splices in lockstep so surviving panes keep their React instance.
+    // paneMessagesSid 同步 splice —— 错位会让幸存窗格的历史被归属守卫误藏/误显。
     sessions.splice(i, 1); sessions.push(null);
     msgs.splice(i, 1); msgs.push([]);
+    sids.splice(i, 1); sids.push(null);
     ids.splice(i, 1); ids.push(freshPaneId());
     const newCount = cur.paneCount - 1;
     const newActive = cur.activeTabIndex >= newCount
@@ -834,6 +843,7 @@ export const useStore = create((set, get) => ({
       splitMode: newCount > 1,
       paneSessions: sessions,
       paneMessages: msgs,
+      paneMessagesSid: sids,
       paneIds: ids,
       activeTabIndex: newActive,
       // pane 0 changed if we removed pane 0 — keep legacy mirrors current.
@@ -862,13 +872,26 @@ export const useStore = create((set, get) => ({
     }
     set(patch);
   },
-  setPaneMessages: (i, messages) => {
+  // sid = 这批消息归属的 sessionId(draft/清空传 null,fetchMessages 传拉取的 sid)。
+  // 渲染层按 paneMessagesSid[i] === 当前会话 sid 决定可见性(串扰窗口1守卫)。
+  setPaneMessages: (i, messages, sid = null) => {
     const idx = Math.max(0, Math.min(5, i | 0));
     const arr = [...get().paneMessages];
     arr[idx] = Array.isArray(messages) ? messages : [];
-    const patch = { paneMessages: arr };
+    const sids = [...get().paneMessagesSid];
+    sids[idx] = sid || null;
+    const patch = { paneMessages: arr, paneMessagesSid: sids };
     if (idx === 0) patch.messages = arr[0];
     set(patch);
+  },
+  // draft→真 sid 升级(init 绑定点):pane 里 draft 期的历史(空数组)归属从 null 升级为
+  // 真 sid,避免绑定后、首次 fetch 回来前,归属守卫把活会话误判成"别人的"而藏空。
+  claimPaneMessages: (i, sid) => {
+    const idx = Math.max(0, Math.min(5, i | 0));
+    const sids = [...get().paneMessagesSid];
+    if (sids[idx] === (sid || null)) return;
+    sids[idx] = sid || null;
+    set({ paneMessagesSid: sids });
   },
   // Writes a session into whichever pane is active. Used by SessionList click.
   setActiveTabSession: (session) => {
@@ -1134,7 +1157,7 @@ export const useStore = create((set, get) => ({
       const data = await res.json();
       // 端点现返回 { messages, usageTotals };兼容旧的裸数组形态(升级过渡期)。
       const messages = Array.isArray(data) ? data : (Array.isArray(data?.messages) ? data.messages : []);
-      get().setPaneMessages(tab, messages);
+      get().setPaneMessages(tab, messages, sessionId);
       // 服务端算好的整会话用量聚合,SessionDetail 顶部用量条直接取用,
       // 避免前端对几千条历史消息每帧全量 reduce。
       if (data && !Array.isArray(data) && data.usageTotals) {

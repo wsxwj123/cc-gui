@@ -49,7 +49,7 @@ import { BUILTIN_PROVIDERS, findBuiltin } from './utils/builtinProviders.js';
 import { computeCost, formatCost } from './utils/pricing.js';
 import { extractToolResultText, finalizePendingToolCalls, applyFinalizedToBlocks } from './utils/toolResult.js';
 import { rebuildTodosFromTaskCalls } from './utils/todos.js';
-import { isInitBindingOrigin, migrateDraftQueue, resolveHistModel, resolveSendModel } from './utils/routing.js';
+import { isInitBindingOrigin, migrateDraftQueue, paneMessagesOwned, resolveHistModel, resolveSendModel } from './utils/routing.js';
 import {
   FolderOpen, MessageSquare, ChevronLeft, ChevronRight, ChevronDown,
   Search, Hash, Layers, BarChart3, ArrowLeft, Plus,
@@ -3024,10 +3024,16 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // mirrors in sync, so the rest of this component is unchanged.
   const paneSessions = useStore((s) => s.paneSessions);
   const paneMessages = useStore((s) => s.paneMessages);
+  const paneMessagesSid = useStore((s) => s.paneMessagesSid);
   const selectedSession = (paneSessions && paneSessions[tabIndex]) || null;
   // 空窗格时 paneMessages[tabIndex] 为 undefined,`|| []` 每次渲染造新数组 → 进下方多个
   // useMemo/useEffect deps 致每帧重跑。复用模块级冻结空数组保持引用稳定。
-  const messages = (paneMessages && paneMessages[tabIndex]) || EMPTY_ARRAY;
+  // 串扰窗口1守卫(主诉根因):切会话只换 paneSessions,paneMessages 要等 fetch 异步
+  // 回来才被覆盖 —— 这几十~几百 ms 里旧会话的历史会以新会话名义渲染(代办/计划/费用/
+  // 模型徽章全部派生自 messages,一处守卫全治)。渲染期同步判归属,不属于当前会话就当
+  // 空数组(模块级 EMPTY_ARRAY,引用稳定,防 zustand 新引用白屏 #185)。
+  const messagesOwned = paneMessagesOwned(paneMessagesSid && paneMessagesSid[tabIndex], selectedSession?.sessionId);
+  const messages = messagesOwned ? ((paneMessages && paneMessages[tabIndex]) || EMPTY_ARRAY) : EMPTY_ARRAY;
   // 本会话的队列/pin/owner key(草稿用 draft-<hash>)。必须在所有引用它的 effect 之前声明,
   // 否则 effect 依赖数组在渲染期先求值会命中 TDZ(Cannot access before initialization)。
   const sessionQueueKey = selectedSession?.sessionId || `draft-${selectedSession?.projectHash || 'none'}`;
@@ -3058,7 +3064,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     useStore.getState().setPaneSession(tabIndex, s);
   }, [tabIndex]);
   const setLocalMessages = useCallback((msgs) => {
-    useStore.getState().setPaneMessages(tabIndex, Array.isArray(msgs) ? msgs : []);
+    const st = useStore.getState();
+    // 归属 = 写入时刻本 pane 的会话(回滚裁剪/工具重做等都是对当前显示内容的改写)。
+    st.setPaneMessages(tabIndex, Array.isArray(msgs) ? msgs : [], st.paneSessions[tabIndex]?.sessionId || null);
   }, [tabIndex]);
   const getLocalMessages = useCallback(() => {
     return useStore.getState().paneMessages[tabIndex] || [];
@@ -4103,6 +4111,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                   if (_dv) { localStorage.setItem(`cgui-draft:${event.session_id}`, _dv); localStorage.removeItem(`cgui-draft:${_dk0}`); }
                 } catch {}
               }
+              // 串扰窗口1守卫的 draft→真 sid 升级:pane 历史(draft 期为空)的归属标记
+              // 同步升级成真 sid,否则绑定后、首次 fetch 回来前守卫会误藏活会话。
+              useStore.getState().claimPaneMessages(tabIndex, event.session_id);
               setSelectedSession({
                 ...sel,
                 draft: false,

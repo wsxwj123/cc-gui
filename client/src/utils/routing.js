@@ -83,3 +83,16 @@ export function resolveSendModel({ pin, hist, globalModel, availableModels, cust
   if (inProvider(globalModel)) return globalModel;
   return null;
 }
+
+/**
+ * 串扰窗口1守卫(第226轮主诉:切会话瞬间代办/计划/费用/模型徽章短暂串显):
+ * pane 的历史消息(paneMessages)是否归属当前查看的会话。切会话只换 paneSessions,
+ * paneMessages 等 fetch 异步覆盖 —— 归属标记(paneMessagesSid)≠当前 sessionId 时
+ * 渲染层必须把历史当空数组,不许显示上个会话的内容。
+ * 归一:draft/空窗格两侧都是 null(falsy 归一为 null 再比较,undefined===null 视为同)。
+ * @param {string|null|undefined} paneSid  paneMessagesSid[tabIndex](这批消息属于谁)
+ * @param {string|null|undefined} sessionId 当前 pane 会话的 sessionId(draft 为 null)
+ */
+export function paneMessagesOwned(paneSid, sessionId) {
+  return (paneSid || null) === (sessionId || null);
+}
