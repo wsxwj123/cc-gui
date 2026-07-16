@@ -46,7 +46,7 @@ export const ERROR_COLLECTOR = `<script>
   try{if(window.fetch){var _f=window.fetch;window.fetch=function(){var a=arguments;var u=(a[0]&&a[0].url)||a[0];return _f.apply(window,a).then(function(r){if(r&&!r.ok)send({type:'net',url:u,status:r.status});return r;}).catch(function(err){send({type:'net',url:u,err:''+err});throw err;});};}}catch(x){}
   // 空白探测(保守版):load 后再延时给异步建 DOM 留时间;仅在无任何其它报错、body 存在但既无
   // 非空文本又无 img/canvas/svg/video/iframe/embed/object 时报一条信息级 blank。canvas/svg-only 页不算空白。
-  try{window.addEventListener('load',function(){setTimeout(function(){try{if(E>0)return;var b=document.body;if(!b)return;if(b.textContent&&b.textContent.trim())return;if(b.querySelector('img,canvas,svg,video,iframe,embed,object'))return;send({type:'blank'});}catch(x){}},1200);});}catch(x){}
+  try{window.addEventListener('load',function(){setTimeout(function(){try{if(E>0)return;var b=document.body;if(!b)return;if(b.innerText&&b.innerText.trim())return;if(b.querySelector('img,canvas,svg,video,iframe,embed,object'))return;send({type:'blank'});}catch(x){}},1200);});}catch(x){}
 })();
 </script>`;
 
