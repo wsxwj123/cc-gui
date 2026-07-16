@@ -5,6 +5,40 @@
 ; 标准安装目录 node.exe → where node(走系统 PATH)。
 ; $0 用 Push/Pop 平衡保存,避免污染 Tauri 安装器模板的寄存器。
 
+; 装前钩子:先杀残留进程树,再让 NSIS 覆盖写文件。
+; 根因:GUI 点关闭=最小化到托盘(托盘式设计,后端常驻),后端 node 的 cwd =
+; <安装目录>\resources\_up_;Windows 不能覆盖被活进程占用 cwd 的目录,残留 node 会让
+; NSIS 覆盖安装报"无法 write"。锁源是 node(cwd 在安装目录),Claude GUI.exe 只是症状。
+; 原则:杀不到 = 没残留,属正常;任何一步失败都不 abort 安装(不 IfErrors/不 Abort)。
+!macro NSIS_HOOK_PREINSTALL
+  Push $0
+
+  ; 1) 主杀:按 image 名整树杀。productName="Claude GUI" 且未设 mainBinaryName,主程序即
+  ;    "Claude GUI.exe";/T 连带子进程(GUI→node→claude→MCP)。image 名带空格必须加引号。
+  nsExec::Exec 'taskkill /F /T /IM "Claude GUI.exe"'
+  Pop $0
+
+  ; 2) 孤儿兜底:若 Tauri 的 NSIS 模板在本钩子之前已强杀主进程(不带 /T),node 会成孤儿、
+  ;    /IM 已找不到 → 按命令行含【本次安装目录 + server\index.js】精确定位再杀。两步都做、
+  ;    幂等无害,不依赖钩子执行顺序的假设。用 Get-CimInstance(wmic 在 Win11 24H2 已移除,
+  ;    与仓库既有约定一致)。转义说明:$$_ 是 NSIS 转义后的 PowerShell $_;$INSTDIR 由 NSIS
+  ;    展开成真实安装路径(-like 里反斜杠为字面量);CommandLine 可能为 null,先判空防炸。
+  ;    默认安装路径不含 [ ] 等 -like 通配符,故直接内插;非默认路径含通配符是极端情形,不处理。
+  nsExec::Exec `powershell -NoProfile -Command "Get-CimInstance Win32_Process | Where-Object { $$_.CommandLine -and $$_.CommandLine -like '*$INSTDIR*server*index.js*' } | ForEach-Object { taskkill /F /T /PID $$_.ProcessId }"`
+  Pop $0
+
+  ; 3) 进程退出到文件句柄真正释放有延迟,等一拍再让 NSIS 开始写文件。
+  Sleep 500
+
+  Pop $0
+!macroend
+
+; 本机手工验证(Windows 真机):
+;   1) 装旧版 Claude GUI 并启动,开一个会话(拉起后端 node、可能拉起 claude.exe),点关闭(最小化到托盘)。
+;   2) 直接运行新版 setup.exe 覆盖安装 → 应不再报"无法 write"。
+;   3) 装完在 PowerShell 跑 `Get-CimInstance Win32_Process | ?{ $_.CommandLine -like '*server*index.js*' }`,
+;      应无旧安装目录的残留 node;`Get-Process 'Claude GUI' -ErrorAction SilentlyContinue` 应为空。
+
 !macro NSIS_HOOK_POSTINSTALL
   Push $0
   ; 安装器是【提权进程】,PATH 是管理员的,`where node` 看不到当前登录用户 PATH 里的
