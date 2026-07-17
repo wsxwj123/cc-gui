@@ -1829,6 +1829,9 @@ function SessionList() {
   // 新建的可选基点:'' = 当前 HEAD(保持既有行为);候选来自 GET /api/worktree 的 branches。
   const [worktreeBranches, setWorktreeBranches] = useState([]);
   const [newWorktreeBase, setNewWorktreeBase] = useState('');
+  // "基于分支"下拉展开态。原生 <select> 的弹出菜单由 OS 渲染、无法限高,本地分支
+  // 几百个时列表过长 → 换自绘弹层(限高+内部滚动,不截断数据)。
+  const [wtBaseOpen, setWtBaseOpen] = useState(false);
   // 行内展开态:{ path, mode:'commits'|'dirty', loading, commits?, files?, error?,
   // checked?:Set, message?, committing? } —— 一次只展开一行,再点同项收起。
   const [wtExpand, setWtExpand] = useState(null);
@@ -1905,6 +1908,7 @@ function SessionList() {
     setWorktreeOpen(true);
     setWorktreeList(null);
     setWtExpand(null);
+    setWtBaseOpen(false);
     try {
       const r = await fetch(`/api/worktree?cwd=${encodeURIComponent(selectedProject.path)}`);
       const d = await r.json();
@@ -1986,14 +1990,18 @@ function SessionList() {
     }
   };
 
-  // 一键把 worktree 分支 merge 进主分支。冲突时服务端已自动 abort,这里只负责
+  // 领先/落后计数的基准名(与 server 的 aheadBase 同口径):分支有 upstream 时
+  // 相对上游计数,否则相对主工作区分支——文案必须注明基准,别一律写"主分支"。
+  const wtBaseLabel = (t) => (t.aheadBase === 'upstream' ? '上游' : (t.aheadBase || '主分支'));
+
+  // 一键把 worktree 分支 merge 进主工作区当前分支。冲突时服务端已自动 abort,这里只负责
   // 把冲突文件清单如实呈现;成功后刷新列表(领先数归零)。
   const mergeWorktree = async (tree, e) => {
     e?.stopPropagation();
     if (!tree?.path || !selectedProject || tree.isMain) return;
     const mainTree = Array.isArray(worktreeList) ? worktreeList.find((t) => t.isMain) : null;
-    const msg = `把分支 ${tree.branch || '(detached)'} 合并到主分支 ${mainTree?.branch || 'HEAD'}？\n\n` +
-      `该分支领先 ${tree.aheadCount || 0} 个提交。合并在主工作树执行；若有冲突会自动取消,不留半合并状态。`;
+    const msg = `把分支 ${tree.branch || '(detached)'} 合并到 ${mainTree?.branch || '主工作区当前分支'}？\n\n` +
+      `该分支相对${wtBaseLabel(tree)}领先 ${tree.aheadCount || 0} 个提交。合并在主工作树执行；若有冲突会自动取消,不留半合并状态。`;
     if (!(await confirmDialog(msg))) return;
     try {
       const r = await fetch('/api/worktree/merge', {
@@ -2248,6 +2256,8 @@ function SessionList() {
                 const isAgentTree = (t) => /[\\/]\.claude[\\/]worktrees[\\/]agent-/.test(t.path || '');
                 const agentTrees = worktreeList.filter(isAgentTree);
                 const userTrees = worktreeList.filter((t) => !isAgentTree(t));
+                // merge 的真实目标 = 主工作区当前检出的分支(主项目本身是 worktree 时未必叫"主分支")
+                const mainBranchName = worktreeList.find((t) => t.isMain)?.branch;
                 const renderTree = (t) => (
                   <div key={t.path} className="mb-1">
                    <div className="flex items-stretch gap-1">
@@ -2275,7 +2285,7 @@ function SessionList() {
                           <button
                             type="button"
                             onClick={(e) => { e.stopPropagation(); toggleWtCommits(t); }}
-                            title={`领先${t.aheadBase === 'upstream' ? '上游' : '主分支'} ${t.aheadCount} 个提交,点击查看列表`}
+                            title={`领先${wtBaseLabel(t)} ${t.aheadCount} 个提交,点击查看列表`}
                             className={`text-[9px] px-1.5 py-0.5 rounded font-mono transition-colors ${wtExpand?.path === t.path && wtExpand.mode === 'commits' ? 'bg-accent/20 text-accent' : 'bg-sky-50 text-sky-700 hover:bg-sky-100'}`}
                           >
                             领先 {t.aheadCount} 提交
@@ -2283,7 +2293,7 @@ function SessionList() {
                         )}
                         {t.behindCount > 0 && (
                           <span
-                            title={`主分支有 ${t.behindCount} 个此树没有的提交`}
+                            title={`${wtBaseLabel(t)}有 ${t.behindCount} 个此树没有的提交`}
                             className="text-[9px] px-1.5 py-0.5 rounded font-mono bg-orange-50 text-orange-700"
                           >
                             落后 {t.behindCount}
@@ -2323,7 +2333,7 @@ function SessionList() {
                     {!t.isMain && !t.prunable && t.aheadCount > 0 && (
                       <button
                         onClick={(e) => mergeWorktree(t, e)}
-                        title={`合并到主分支（领先 ${t.aheadCount} 个提交）` + (t.behindCount > 0 ? `。该树落后主分支 ${t.behindCount} 个提交,合并可能产生冲突` : '')}
+                        title={`合并到 ${mainBranchName || '主工作区当前分支'}（相对${wtBaseLabel(t)}领先 ${t.aheadCount} 个提交）` + (t.behindCount > 0 ? `。该树落后${wtBaseLabel(t)} ${t.behindCount} 个提交,合并可能产生冲突` : '')}
                         className="shrink-0 px-2 rounded-lg border border-canvas-deep text-ink-faint hover:text-accent hover:border-accent/40 hover:bg-canvas-warm transition-colors flex items-center"
                       >
                         <GitMerge size={13} />
@@ -2339,9 +2349,13 @@ function SessionList() {
                       </button>
                     )}
                    </div>
-                   {/* 行内展开:领先 commit 列表 / 脏文件勾选提交 */}
+                   {/* 行内展开:领先 commit 列表 / 脏文件勾选提交。
+                       右边距按该行实际渲染的侧按钮数对齐(打开目录/合并/删除,与上方渲染条件
+                       一致,每键 31px 宽 + gap-1 4px ≈ 35px),原 mr-9 只按 1 个按钮估的。 */}
                    {wtExpand?.path === t.path && (
-                     <div className="mt-1 ml-2 mr-9 rounded-lg border border-canvas-deep bg-canvas-warm/40 p-2 animate-fade-in">
+                     <div
+                       style={{ marginRight: 35 * ((t.prunable ? 0 : 1) + (!t.isMain && !t.prunable && t.aheadCount > 0 ? 1 : 0) + (t.isMain ? 0 : 1)) }}
+                       className="mt-1 ml-2 rounded-lg border border-canvas-deep bg-canvas-warm/40 p-2 animate-fade-in">
                        {wtExpand.loading ? (
                          <div className="text-[10.5px] text-ink-faint py-2 text-center font-body">加载中…</div>
                        ) : wtExpand.error ? (
@@ -2441,17 +2455,42 @@ function SessionList() {
                 />
                 {/* 可选基点:默认当前 HEAD;选了分支则新分支从它出发(复用旧分支时无效) */}
                 {worktreeBranches.length > 0 && (
-                  <select
-                    value={newWorktreeBase}
-                    onChange={(e) => setNewWorktreeBase(e.target.value)}
-                    title="新分支的起点,默认当前 HEAD"
-                    className="shrink-0 max-w-[38%] bg-canvas border border-canvas-deep rounded px-1.5 py-1 text-[11px] font-mono text-ink focus:outline-none focus:border-accent/40"
-                  >
-                    <option value="">基于当前 HEAD</option>
-                    {worktreeBranches.map((b) => (
-                      <option key={b} value={b}>基于 {b}</option>
-                    ))}
-                  </select>
+                  <div className="relative shrink-0 max-w-[38%]">
+                    <button
+                      type="button"
+                      onClick={() => setWtBaseOpen((v) => !v)}
+                      title="新分支的起点,默认当前 HEAD"
+                      className="w-full flex items-center gap-1 bg-canvas border border-canvas-deep rounded px-1.5 py-1 text-[11px] font-mono text-ink focus:outline-none focus:border-accent/40 hover:border-accent/40"
+                    >
+                      <span className="truncate flex-1 text-left">{newWorktreeBase ? `基于 ${newWorktreeBase}` : '基于当前 HEAD'}</span>
+                      <ChevronDown size={11} className={`shrink-0 text-ink-faint transition-transform ${wtBaseOpen ? 'rotate-180' : ''}`} />
+                    </button>
+                    {wtBaseOpen && (
+                      <>
+                        <div className="fixed inset-0 z-10" onClick={() => setWtBaseOpen(false)} />
+                        {/* 本地分支可达数百条:限高 + 内部滚动,并截断到前 50 条(超长仓库
+                            几百条全渲染没有检索价值;需要更靠后的分支可在上方输入框直接填名字)。 */}
+                        <div className="absolute bottom-full mb-1 right-0 z-20 w-60 max-w-[70vw] glass-popover py-1 max-h-56 overflow-y-auto">
+                          {['', ...worktreeBranches.slice(0, 50)].map((b) => (
+                            <button
+                              key={b || '(HEAD)'}
+                              type="button"
+                              onClick={() => { setNewWorktreeBase(b); setWtBaseOpen(false); }}
+                              className={`w-full text-left px-2.5 py-1 text-[11px] font-mono truncate hover:bg-canvas-warm ${newWorktreeBase === b ? 'text-accent' : 'text-ink-soft'}`}
+                            >
+                              {b ? `基于 ${b}` : '基于当前 HEAD'}
+                            </button>
+                          ))}
+                          {worktreeBranches.length > 50 && (
+                            <button type="button" disabled
+                              className="w-full text-left px-2.5 py-1 text-[10px] font-body text-ink-faint cursor-default">
+                              (仅显示前 50 条,共 {worktreeBranches.length} 条)
+                            </button>
+                          )}
+                        </div>
+                      </>
+                    )}
+                  </div>
                 )}
                 <button
                   onClick={createWorktree}
