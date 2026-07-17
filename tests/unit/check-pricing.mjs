@@ -83,9 +83,12 @@ assert.ok(Math.abs(spro.totalUsd - (3 + 15)) < 1e-9, `sonar-pro ${spro?.totalUsd
 const mlarge = computeCost('mistral-large-2512', { input_tokens: 1_000_000, output_tokens: 1_000_000 });
 assert.ok(Math.abs(mlarge.totalUsd - (2 + 6)) < 1e-9, `mistral-large-2512 ${mlarge?.totalUsd} != 8`);
 
-// Z.ai:'glm-5' 不许抢走 'glm-5.2'(longest-prefix);glm-5.2 input = $1.4。
+// GLM-5 系国内 CNY 价(bigmodel.cn,[32K+) 档):'glm-5' 不许抢走 'glm-5.2'(longest-prefix);
+// glm-5.2 input ¥8。glm-5.1 须精确命中自己的 ¥8,不落 'glm-5' 前缀档(¥6)。
 const glm52 = computeCost('glm-5.2', { input_tokens: 1_000_000 });
-assert.ok(Math.abs(glm52.totalUsd - 1.4) < 1e-9, `glm-5.2 ${glm52?.totalUsd} != 1.4`);
+assert.ok(Math.abs(glm52.totalUsd - 8 / CNY) < 1e-9, `glm-5.2 ${glm52?.totalUsd} != ${8 / CNY}`);
+const glm51 = computeCost('glm-5.1', { input_tokens: 1_000_000 });
+assert.ok(Math.abs(glm51.totalUsd - 8 / CNY) < 1e-9, `glm-5.1 ${glm51?.totalUsd} != ${8 / CNY}`);
 
 // formatCost renders CNY (×7.2). 0.09125 USD → ¥0.657 (<¥1 → 3 decimals).
 assert.strictEqual(formatCost(expected), '¥0.657');
