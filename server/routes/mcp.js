@@ -518,7 +518,9 @@ export const HEADER_KEY_RE = /^[!#$%&'*+.^_`|~A-Za-z0-9-]+$/;
 
 // 从 `claude mcp get` 文本解析 Headers: 段(缩进的 `Key: value` 行,http/sse 才有)。
 // 实抓(2026-07):get 输出明文值(add 输出才 [REDACTED]),可用于编辑回显。
-function parseHeadersFromDetails(details) {
+// "禁用→启用带回 headers"与编辑回显全押在这个解析上 → export 供单测钉死
+// (tests/unit/check-mcp-add-headers.mjs,含真实 `claude mcp get` 输出样本)。
+export function parseHeadersFromDetails(details) {
   const headers = {};
   const section = String(details || '').split(/\n\s*Headers:/)[1];
   if (section) {
