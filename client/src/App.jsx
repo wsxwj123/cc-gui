@@ -3195,8 +3195,13 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // 你的答案要到模型下一次 API 调用的 message_start 才计入 —— 提示替代静止的误解。
   // 严格按本 pane 会话 id 门控(per-pane 纪律),布尔原始值选择器引用稳定。
   const _pendingSid = (paneSessions && paneSessions[tabIndex])?.sessionId || null;
+  // 归属口径对齐 PermissionPrompt(:640-668):卡片显示了 btw 就必须让路,否则展开态 z-46
+  // 盖住居中授权/计划卡右对齐的提交按钮、吃掉点击(#3 回归根因)。故认领两类请求:
+  //  ① p.sessionId 命中本窗格会话;② 无 sessionId 的孤儿请求(draft 首个工具调用 / plan
+  // 回合 CLI 尚未回 id)——孤儿只算在活动窗格,免得 A 窗格的挂起把 B 的浮窗一并收起。
   const hasPendingInteraction = useStore((s) =>
-    !!_pendingSid && s.pendingPermissions.some((p) => p.sessionId === _pendingSid));
+    s.pendingPermissions.some((p) =>
+      (p.sessionId && p.sessionId === _pendingSid) || (!p.sessionId && paneIsActive)));
   // 窗内检索(Cmd/Ctrl+F)开关 —— 仅当前聚焦 pane 响应。
   const [searchOpen, setSearchOpen] = useState(false);
   useEffect(() => {

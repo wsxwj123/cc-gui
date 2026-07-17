@@ -87,7 +87,7 @@ export default function BtwWindow({
       <button
         onClick={() => { if (paneIsActive && !suppressed) setCollapsed(false); }}
         title="旁问（不打断当前工作、不写入会话历史）"
-        style={{ position: 'absolute', right: 26, bottom: 12, zIndex: 46, opacity: suppressed ? 0.45 : 1 }}
+        style={{ position: 'absolute', right: 26, bottom: 12, zIndex: 46, opacity: suppressed ? 0.45 : 1, pointerEvents: suppressed ? 'none' : undefined }}
         className="max-md:right-4 flex items-center gap-1.5 rounded-full border border-canvas-deep bg-canvas-warm/90 backdrop-blur px-3 py-2 shadow-md hover:border-accent/40 transition-colors"
       >
         <MessageSquare size={14} className="text-accent" />
