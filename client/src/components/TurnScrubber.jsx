@@ -31,10 +31,13 @@ export default function TurnScrubber({ containerRef, turns }) {
     if (!el) return;
     setBox({ top: el.offsetTop, height: el.offsetHeight });
     const total = el.scrollHeight || 1;
+    // 首末点映射进留边区间:首条 offsetTop≈0 → 原 top:0% + translate(-50%) 圆心落在轨道
+    // 顶边、上半被裁 → 视觉上"缺首点"(#5,既有 bug)。上下各留 pad 让首末点完整可见。
+    const pad = 0.02;
     setPositions(turnsRef.current.map((t) => {
       const node = el.querySelector(`[data-turn-uuid="${t.uuid}"]`);
       if (!node) return null;
-      return Math.max(0, Math.min(1, node.offsetTop / total));
+      return Math.max(pad, Math.min(1 - pad, node.offsetTop / total));
     }));
   }, [containerRef]);
 
