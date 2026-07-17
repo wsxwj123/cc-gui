@@ -1296,7 +1296,10 @@ router.post('/chat/btw', async (req, res) => {
 
   // question 走 stdin 不作 -p 参数:Windows 上 `cmd.exe /c claude.cmd -p "<question>"` 里无空格
   // 且含 cmd 元字符(&|<>)的 question 会被 cmd 重解析执行(注入);model 同理过白名单。同 title/compact。
-  const args = ['-p', '--permission-mode', 'plan'];
+  // 对齐原生 /btw(side_question):canUseTool 恒 deny、单回合、纯凭已有上下文作答。
+  // 用 --tools "" 禁全部工具(CLI 官方 disable-all),是原生"零工具"的精确等价;
+  // 旧版误用 --permission-mode plan 让旁问能 Read/Grep 调查=比原生更宽、更慢,已纠。
+  const args = ['-p', '--tools', ''];
   if (sessionId) args.push('--resume', sessionId, '--fork-session');
   args.push('--no-session-persistence');
   if (model) args.push('--model', model);
