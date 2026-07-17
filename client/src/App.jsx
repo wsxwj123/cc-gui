@@ -3246,11 +3246,24 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       if ((e.metaKey || e.ctrlKey) && (e.key === 'f' || e.key === 'F')) {
         e.preventDefault();
         setSearchOpen(true);
+      } else if ((e.key === 'Delete' || e.key === 'Backspace') && !e.metaKey && !e.ctrlKey && !e.altKey) {
+        // 分屏下选中窗格按 Delete/Backspace = 从分屏移除该窗格(closePane 只隐藏窗格,绝不删会话/
+        // 不杀进程;真删会话仍须去左侧列表手点)。守卫:①输入框/可编辑元素聚焦时放行(那是删字符)
+        // ②分屏数>1 才有意义(单屏不关)。
+        // Mac 笔记本的「delete」键就是 Backspace(无独立 Forward Delete),故两键都收;为防误触,
+        // 排除【所有可交互/可编辑控件】聚焦态(输入框/按钮/下拉/链接/富文本)——只有真正点了窗格
+        // 空白(body/div 聚焦)才关窗格,避免"点过按钮后焦点在按钮/body 时误按 Backspace 静默关窗"。
+        const t = e.target;
+        if (t && (/^(INPUT|TEXTAREA|BUTTON|SELECT|A)$/.test(t.tagName) || t.isContentEditable)) return;
+        const st = useStore.getState();
+        if ((st.paneCount || 1) <= 1) return;
+        e.preventDefault();
+        st.closePane(tabIndex);
       }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [paneIsActive]);
+  }, [paneIsActive, tabIndex]);
   const setSelectedSession = useCallback((s) => {
     useStore.getState().setPaneSession(tabIndex, s);
   }, [tabIndex]);
@@ -6136,7 +6149,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
               <span className="text-[10px] text-ink-faint font-mono flex items-center gap-1 shrink-0 whitespace-nowrap">
                 <Hash size={10} />{selectedSession.sessionId?.slice(0, 8) || '新会话'}
               </span>
-              <span className="text-[10px] text-ink-faint font-mono shrink-0 whitespace-nowrap">{messages.length + chatMessages.length} 条消息</span>
+              <span className="text-[10px] text-ink-faint font-mono shrink-0 whitespace-nowrap">{messages.length + chatMessages.filter((m) => m.type !== 'btw').length} 条消息</span>
               {contextTokens > 0 && (
                 <ContextBreakdownButton
                   contextTokens={contextTokens}
@@ -6480,7 +6493,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         permKey={sessionQueueKey}
         sessionId={selectedSession?.sessionId || null}
         tabIndex={tabIndex}
-        onBtwOpen={() => setBtwOpenSignal((n) => n + 1)}
+        onBtwOpen={(messages.length > 0 || selectedSession?.sessionId) ? () => setBtwOpenSignal((n) => n + 1) : undefined}
         btwUnread={btwUnread}
       />
     </div>

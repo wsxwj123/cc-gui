@@ -252,6 +252,8 @@ export function ChatInput({ onSend, onStop, onAccelerate, onBackground, suggesti
   const [atBusy, setAtBusy] = useState(false);  // 会话引用生成中
   const atCtxRef = useRef({ cwd: '', projectHash: '' }); // 打开面板时快照,避免 selector 新引用重渲
   const sessions = useStore((s) => s.sessions);
+  // 分屏窗格越多 pane 越窄:≥4 分屏时「旁问」按钮只留图标、藏文字,免得挤占输入框宽度(判官挂账)。
+  const paneCount = useStore((s) => s.paneCount);
   const textareaRef = useRef(null);
   const fileInputRef = useRef(null);
   const draftBeforeHistoryRef = useRef('');
@@ -1048,7 +1050,7 @@ export function ChatInput({ onSend, onStop, onAccelerate, onBackground, suggesti
               title="旁问（不打断当前工作、不写入会话历史）"
             >
               <MessagesSquare size={15} />
-              <span className="text-[12px] font-body">旁问</span>
+              {paneCount < 4 && <span className="text-[12px] font-body">旁问</span>}
               {btwUnread > 0 && (
                 <span className="absolute -top-0.5 -right-0.5 min-w-[15px] h-[15px] px-1 rounded-full bg-accent text-white text-[9px] leading-[15px] text-center font-mono">
                   {btwUnread > 9 ? '9+' : btwUnread}
