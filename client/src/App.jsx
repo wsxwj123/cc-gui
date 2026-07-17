@@ -2728,8 +2728,10 @@ function StreamingStatusLine({ thinking, text, toolCalls, streamStart }) {
   // 缩进 50px(34px 头像 + 16px gap)与气泡正文列对齐,渲染在气泡下方。
   return (
     <div className="px-6 -mt-2 pb-3 animate-fade-in">
-      <div className="max-w-[var(--content-max)] mx-auto flex items-center gap-2 pl-[50px] text-[13px] text-ink-soft font-body">
-        <Loader2 size={11} className="animate-spin shrink-0" style={{ color: '#D97757' }} />
+      <div className="max-w-[var(--content-max)] mx-auto flex items-center gap-2 pl-[50px] text-[13px] text-ink-soft font-body" style={{ color: '#D97757' }}>
+        {/* 状态行指示器用主题选的加载动画(与下方 Connecting 行一致);LoadingMark 继承
+            currentColor,外层 style 已置橙 #D97757 —— cli 默认帧与其它 30 种样式同色。 */}
+        <span className="shrink-0 inline-flex items-center"><LoadingMark size={13} /></span>
         <span className="font-mono truncate font-medium" style={{ color: '#D97757' }}>{label}</span>
         <span style={{ color: '#D97757' }}>…</span>
         <ElapsedTime startedAt={streamStart} className="ml-1" />
