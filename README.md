@@ -1,4 +1,3 @@
-<!-- 待补 2 张手拍图:docs/screenshots/01-hero-split.png(分屏+右侧流式中)、docs/screenshots/05-monitor.png(子代理运行中的监控面板)。拍法见 .devflow/screenshot-guide.md;拍好前不要推送。 -->
 # Claude GUI
 
 <p align="center">
@@ -14,18 +13,10 @@
 
 > **English**: Claude GUI is a fully local graphical shell for the Claude Code CLI — a Tauri desktop app, a browser UI, and a mobile-friendly layout. Zero telemetry: every session runs through the `claude` CLI on your own machine. Split-screen sessions with per-pane model/permission, third-party provider switching, graphical permission & plan-review cards, subagent visualization, skills marketplace, and phone takeover over a private network.
 
-<table>
-  <tr>
-    <td align="center" width="62%">
-      <img src="docs/screenshots/01-hero-split.png" alt="分屏会话" width="620"><br>
-      <em>分屏两会话并行:左右窗格各自独立的模型 / 权限模式 / 思考强度,一侧正在流式输出</em>
-    </td>
-    <td align="center" width="38%">
-      <img src="docs/screenshots/02-mobile.png" alt="手机端" width="240"><br>
-      <em>手机端布局:私有网络访问,随时接管电脑上正在跑的会话</em>
-    </td>
-  </tr>
-</table>
+<p align="center">
+  <img src="docs/screenshots/hero.png" alt="Claude GUI 主界面" width="880"><br>
+  <em>主界面:顶栏一排即全部能力——模型 / 思考强度 / 权限模式 / Provider 切换,以及分屏、文件、审查、监控、Agent、用量、技能、MCP 工具等面板入口</em>
+</p>
 
 ---
 
@@ -52,27 +43,12 @@
 - **计划审查卡 & 问题选择卡** —— 图形化批准计划、选择选项(`ExitPlanMode` / `AskUserQuestion`)
 - `@` 引用选择器(插入文件,或把别的会话摘要引进来)、斜杠命令补全(内置 + 项目级)、输入预测、消息排队 / 停止 / 召回、微信式紧凑聊天模式
 
-<p align="center">
-  <img src="docs/screenshots/04-plan-review.png" alt="计划审查卡" width="720"><br>
-  <em>计划审查卡:模型在 plan 模式下产出的计划,图形化过目后一键批准或驳回</em>
-</p>
-
 **模型与 Provider**
 - 每窗格独立切换模型与思考强度;切换 Provider(官方订阅 + 大量第三方中转:DeepSeek、通义 Qwen、Kimi、GLM、Grok、OpenAI 兼容等)
 - 自定义 Provider 增删改(拉取模型列表、测连接);1M 上下文默认;上下文占用徽章实时显示
 
-<p align="center">
-  <img src="docs/screenshots/06-providers.png" alt="Provider 管理" width="720"><br>
-  <em>Provider 切换:官方与 DeepSeek、Kimi 等第三方中转一键切换,自定义 Provider 可增删改、拉取模型列表</em>
-</p>
-
 **权限与规划**
 - 四档权限模式(default / acceptEdits / plan / bypass)可中途切换;图形化权限弹卡;权限规则页
-
-<p align="center">
-  <img src="docs/screenshots/03-permission-card.png" alt="权限批准卡" width="720"><br>
-  <em>权限批准卡:每一次写操作 / 命令执行都弹卡说明,允许或拒绝由你点</em>
-</p>
 
 **MCP 与插件**
 - MCP 服务器管理(增删、连通性测试、OAuth 登录、启停、编辑)+ **单工具级启用 / 禁用 + 查看工具列表**
@@ -90,11 +66,6 @@
 
 **监控与用量**
 - 监控面板(当前对话 Task / 后台任务 / 后台代理 / claude 子进程)、用量统计与 `/insights` 报告、进程面板
-
-<p align="center">
-  <img src="docs/screenshots/05-monitor.png" alt="监控面板" width="720"><br>
-  <em>监控面板:子代理、后台任务与 claude 进程的运行状态一屏看全</em>
-</p>
 
 **远程访问**
 - 经私有网络(Tailscale 等)用手机访问,需访问密码;手机端接管某个会话
@@ -199,6 +170,12 @@ npm run tauri:build
 | 改了代码不生效 | 源码方式下需重新 `npm run build`(或重新双击 `gui.command` / `gui.bat`) |
 | macOS 双击 `gui.command` 没反应 | 「右键 → 打开」授权一次;或终端 `chmod +x gui.command` |
 | **macOS 提示「Claude GUI.app 已损坏,无法打开」**(且「隐私与安全性」里没有「仍要打开」按钮,macOS 15 后常见) | 这不是真损坏,是 Gatekeeper 给未签名 app 加的 quarantine 标记。终端跑一次:`sudo xattr -rd com.apple.quarantine "/Applications/Claude GUI.app"` 输入登录密码后再双击即可 |
+
+---
+
+## 致谢
+
+- **[cc-switch](https://github.com/farion1231/cc-switch)**(作者 [farion1231](https://github.com/farion1231))—— 优秀的 Claude Code 多 Provider 配置管理工具。Claude GUI 的「从 cc-switch 一键导入 Provider」功能与它对接,Provider 管理的设计也从中受益良多,特此感谢。
 
 ---
 

@@ -6,6 +6,11 @@ Claude GUI is a local graphical shell for the [Claude Code](https://docs.anthrop
 
 > Fully local — it collects no data; every session runs through the `claude` CLI on your own machine.
 
+<p align="center">
+  <img src="docs/screenshots/hero.png" alt="Claude GUI main window" width="880"><br>
+  <em>Main window: the top bar covers it all — model / thinking effort / permission mode / provider switching, plus panels for split-screen, files, review, monitoring, agents, usage, skills and MCP tools</em>
+</p>
+
 ---
 
 ## Features
@@ -146,6 +151,12 @@ Output lands in `src-tauri/target/release/bundle/` (`.dmg` on macOS, `.exe` / `.
 | Code changes not showing | From source you must `npm run build` again (or re-launch `gui.command` / `gui.bat`) |
 | macOS `gui.command` does nothing | Right-click → **Open** once to authorize, or `chmod +x gui.command` |
 | **macOS says "Claude GUI.app is damaged and can't be opened"** (and Privacy & Security has no **Open Anyway** button — common on macOS 15+) | Not actually damaged — Gatekeeper added a quarantine flag to the unsigned app. In Terminal: `sudo xattr -rd com.apple.quarantine "/Applications/Claude GUI.app"` then enter your login password and double-click again |
+
+---
+
+## Acknowledgments
+
+- **[cc-switch](https://github.com/farion1231/cc-switch)** by [farion1231](https://github.com/farion1231) — an excellent multi-provider configuration manager for Claude Code. Claude GUI's one-click "import from cc-switch" integrates with it, and its provider management influenced our design. Thank you!
 
 ---
 
