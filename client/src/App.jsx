@@ -3226,6 +3226,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // C2:用于把 AutoCompactBanner 限定在「当前聚焦的 pane」——分屏下非聚焦 pane 不应
   // 在你没看着时静默 /compact 改写历史。单窗格时 activeTabIndex 恒为 0 = 本 pane。
   const paneIsActive = useStore((s) => s.activeTabIndex) === tabIndex;
+  const paneCount = useStore((s) => s.paneCount);
   // 交互工具(AskUserQuestion/授权/计划审查)挂起时,徽章旁给"等待你回应"提示。
   // 实测(opus 调研):挂起前该次调用的 usage 已全部送达、徽章数据没漏;静止是因为
   // 你的答案要到模型下一次 API 调用的 message_start 才计入 —— 提示替代静止的误解。
@@ -6493,7 +6494,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         permKey={sessionQueueKey}
         sessionId={selectedSession?.sessionId || null}
         tabIndex={tabIndex}
-        onBtwOpen={(messages.length > 0 || selectedSession?.sessionId) ? () => setBtwOpenSignal((n) => n + 1) : undefined}
+        onBtwOpen={(messages.length > 0 || selectedSession?.sessionId || paneCount <= 1) ? () => setBtwOpenSignal((n) => n + 1) : undefined}
         btwUnread={btwUnread}
       />
     </div>
