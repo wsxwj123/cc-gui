@@ -218,7 +218,7 @@ export function FileExplorerPanel() {
     setCtxMenu({ x, y, entry });
   }, []);
 
-  // 可传 path 调用(右键菜单 + 预览栏按钮共用)。macOS WKWebView 吞右键,预览栏按钮是可靠入口。
+  // 可传 path 调用(右键菜单 + 预览栏按钮共用)。预览栏按钮是无右键场景的兜底入口。
   const addPathToContext = useCallback((path) => {
     let rel = rootPath && path.startsWith(rootPath) ? path.slice(rootPath.length).replace(/^[/\\]+/, '') : path;
     rel = rel.replace(/\\/g, '/');
@@ -324,7 +324,11 @@ export function FileExplorerPanel() {
   return (
     <div className="flex flex-col h-full">
       {/* Tree pane (height controlled by splitter) */}
-      <div style={{ height: treeHeight }} className="shrink-0 overflow-y-auto px-1 py-2 border-b border-canvas-deep">
+      {/* onContextMenu preventDefault:右键点遮罩空白关掉自家菜单后,同手势的 contextmenu 会透到
+          遮罩下方元素——落在树区若不压,会弹出系统原生右键菜单("关自家菜单却弹系统菜单"很突兀)。
+          只压树区不做全局压制;行上右键不受影响(行的 onCtx 已 stopPropagation,到不了这里)。 */}
+      <div style={{ height: treeHeight }} className="shrink-0 overflow-y-auto px-1 py-2 border-b border-canvas-deep"
+        onContextMenu={(e) => e.preventDefault()}>
         <div className="flex items-center justify-between px-3 mb-2">
           <span className="text-[10px] text-ink-faint font-mono truncate" title={rootPath}>
             {rootPath.split(/[/\\]+/).slice(-2).join('/')}
@@ -482,8 +486,9 @@ function TreeNode({ path, name, depth, isDir, isRoot, parentPath, expanded, dirs
         // 普通模式:目录展开/收起,文件打开预览。
         onClick={() => (selMode && !isRoot) ? onToggleSel(path) : isDir ? toggle(path, true) : openFile({ path, name, size: 0 })}
         onContextMenu={(e) => onCtx && onCtx(e, { path, name, isDir, isRoot: !!isRoot, parentPath })}
-        // macOS WKWebView 对 user-select:none 元素不派发 contextmenu(Chromium 会),右键在真 app 里
-        // 静默失效 → 补右键 mousedown(button===2,鼠标事件不受 user-select 影响,任何 webview 都发)兜底。
+        // 右键 mousedown(button===2)双保险:比 contextmenu 更早触发,菜单先开、遮罩先挂上,
+        // 同手势随后的 contextmenu 落在遮罩上被压掉。(曾归因"macOS WKWebView 对 select-none
+        // 不派发 contextmenu",已被同版最小复现推翻——真因是自家手势时序 bug,f2f7a8b 已修。)
         onMouseDown={(e) => { if (e.button === 2 && onCtx) onCtx(e, { path, name, isDir, isRoot: !!isRoot, parentPath }); }}
         className={`group flex items-center gap-1 px-2 py-0.5 rounded cursor-pointer text-[12px] font-body select-none ${
           isChecked ? 'bg-accent/20 text-ink' : isSelected ? 'bg-accent/15 text-accent' : 'hover:bg-canvas-warm text-ink'
@@ -506,9 +511,9 @@ function TreeNode({ path, name, depth, isDir, isRoot, parentPath, expanded, dirs
           </>
         )}
         <span className="truncate flex-1">{name}</span>
-        {/* ⋮ 左键菜单入口:macOS WKWebView 在原生层吞掉右键(contextmenu/mousedown button2 都不进
-            DOM,见 memory wkwebview-no-contextmenu-on-user-select-none),右键菜单在真 app 里不可达,
-            项目根目录的打开/删除等操作没有任何入口 —— 这颗按钮是全平台可靠入口,与右键开同一菜单。 */}
+        {/* ⋮ 左键菜单入口:与右键开同一菜单的全平台兜底(触控板/无右键设备也可达)。当年因误判
+            "macOS WKWebView 原生吞右键"而加,该结论已被同版最小复现推翻(真因是自家手势时序
+            bug,f2f7a8b 已修,mac 右键真机可用),按钮保留作可靠入口。 */}
         {onCtx && (
           <button
             onClick={(e) => { e.stopPropagation(); onCtx(e, { path, name, isDir, isRoot: !!isRoot, parentPath }); }}
@@ -674,7 +679,7 @@ function PreviewBody({ preview, onAddToContext, onDelete }) {
           </>
         ) : (
           <>
-            {/* macOS WKWebView 吞右键 → 文件操作的可靠入口放这条预览栏(标准左键按钮,任何 webview 都工作)。 */}
+            {/* 预览栏标准左键按钮:任何 webview 都工作的兜底入口(与右键菜单同功能)。 */}
             {onAddToContext && (
               <button onClick={() => onAddToContext(preview.path)}
                 className="flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded text-accent hover:bg-accent/10 transition-colors shrink-0"
