@@ -258,12 +258,21 @@ export async function scanToolInstalls(tool, deps = {}) {
 // 面板每次打开都会 fetch;全量扫描要 spawn 十几个进程,5 分钟缓存足够(装完软件用户会点
 // "重新检测" = refresh:true 强刷)。绝不阻塞 server 启动 —— 只有 env-check 请求才触发。
 let _scanCache = null;
+let _scanInflight = null; // 进行中的全量扫描 promise(并发去重,同 claude-resolver 的 _installsInflight)
 const SCAN_TTL_MS = 5 * 60 * 1000;
-export async function scanAllTools({ refresh = false } = {}) {
+// deps 仅供单测注入(透传 scanToolInstalls),生产不传。
+export async function scanAllTools({ refresh = false, deps } = {}) {
   if (!refresh && _scanCache && Date.now() - _scanCache.at < SCAN_TTL_MS) return _scanCache.data;
-  const tools = ['node', 'git', 'python', 'uv'];
-  const results = await Promise.all(tools.map((t) => scanToolInstalls(t).catch(() => [])));
-  const data = Object.fromEntries(tools.map((t, i) => [t, results[i]]));
-  _scanCache = { at: Date.now(), data };
-  return data;
+  // in-flight 去重:面板 mount 与"重新检测"可能并发打进来,缓存 miss 时各 spawn 十几个
+  // 进程。第一个存 promise,后到者(含 refresh:true)共享同一轮;完成后清除。
+  if (_scanInflight) return _scanInflight;
+  _scanInflight = (async () => {
+    const tools = ['node', 'git', 'python', 'uv'];
+    const results = await Promise.all(tools.map((t) => scanToolInstalls(t, deps).catch(() => [])));
+    const data = Object.fromEntries(tools.map((t, i) => [t, results[i]]));
+    _scanCache = { at: Date.now(), data };
+    return data;
+  })();
+  try { return await _scanInflight; }
+  finally { _scanInflight = null; }
 }

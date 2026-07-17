@@ -5,7 +5,7 @@
 import assert from 'node:assert';
 import {
   parseVersionOutput, nodeMeets, binNames, buildCandidates,
-  expandPattern, dedupeByReal, scanToolInstalls,
+  expandPattern, dedupeByReal, scanToolInstalls, scanAllTools,
 } from '../../server/utils/env-scanner.js';
 
 // ---- parseVersionOutput:各工具真实输出形态 ----
@@ -195,6 +195,33 @@ assert.strictEqual(ddWin.length, 1, 'win 路径大小写归一去重');
   const list = await scanToolInstalls('node', deps);
   assert.strictEqual(list.length, 2, 'PATH 命中与 nvm 各一条');
   assert.strictEqual(list.find((i) => i.via === 'PATH').path, '/opt/homebrew/bin/node');
+}
+
+// ---- scanAllTools 并发去重:并发首扫底层只 spawn 一轮,后到者共享 in-flight promise ----
+{
+  let calls = 0;
+  const deps = {
+    platform: 'darwin', home: '/Users/u', env: {},
+    exists: () => false,
+    readdir: () => { throw new Error('ENOENT'); },
+    realpath: (p) => p,
+    execOut: async () => { calls++; await new Promise((r) => setTimeout(r, 5)); return ''; },
+  };
+  // 基线:单独跑一轮,记录底层执行次数(which -a 每工具每 bin 名各一次)。
+  await scanAllTools({ refresh: true, deps });
+  const baseline = calls;
+  assert.ok(baseline > 0, '单轮扫描应有底层执行');
+  calls = 0;
+  const [a, b] = await Promise.all([
+    scanAllTools({ refresh: true, deps }),
+    scanAllTools({ refresh: true, deps }),
+  ]);
+  assert.strictEqual(calls, baseline, '两次并发调用底层执行只跑一轮');
+  assert.strictEqual(a, b, '后到者共享同一轮结果(同一对象)');
+  // 完成后 in-flight 已清除:下次 refresh 真跑新一轮(不是永久钉死同一 promise)。
+  calls = 0;
+  await scanAllTools({ refresh: true, deps });
+  assert.strictEqual(calls, baseline, '扫描完成后 in-flight 清除,后续 refresh 重新执行');
 }
 
 console.log('check-env-scanner: all assertions passed');
