@@ -54,6 +54,9 @@ export default function BtwWindow({
   // 不齐。按 offsetParent(=SessionDetail 根)宽算内容列右缘距 pane 右缘的内边距,夹到 ≥26
   // 以让开右缘 TurnScrubber(right:4 width:18)。pane 拖拽/窗口缩放都要重算 → ResizeObserver。
   const [rightInset, setRightInset] = useState(26);
+  // #5 底部让开输入框:浮窗贴 pane 底 bottom:12 会压住输入框(实测 gap 仅 2px)。测输入框
+  // (.chat-composer)顶相对 pane 底的距离 + 间距,让浮窗底缘落在输入框上方留白处。
+  const [bottomInset, setBottomInset] = useState(12);
   useEffect(() => {
     if (mobile) return;
     const parent = rootRef.current?.offsetParent;
@@ -69,10 +72,22 @@ export default function BtwWindow({
       const cmax = probe.clientWidth || pw;
       probe.remove();
       setRightInset(Math.max(26, (pw - Math.min(cmax, pw - 32)) / 2));
+      // 输入框顶相对 pane 底的布局 px 距离:累加 offsetTop 到 pane(与 clientHeight 同为 CSS px、
+      // 不受 zoom 影响,不用 rect)。找不到输入框(无会话)回落 12。浮窗底 = 该距离 + 12 间距。
+      const composer = parent.querySelector('.chat-composer');
+      if (composer) {
+        let ot = 0, node = composer;
+        while (node && node !== parent) { ot += node.offsetTop; node = node.offsetParent; }
+        setBottomInset(Math.max(12, parent.clientHeight - ot + 12));
+      } else setBottomInset(12);
     };
     calc();
     const ro = new ResizeObserver(calc);
     ro.observe(parent);
+    // 输入框多行变高时 pane 尺寸不变、只观测 parent 的 RO 不触发 → bottomInset 过期、间距被
+    // 吃掉甚至压框(#5 边角回退)。一并观测输入框外壳(.chat-input-shell 稳定、高度随行数变)。
+    const shell = parent.querySelector('.chat-input-shell');
+    if (shell) ro.observe(shell);
     return () => ro.disconnect();
   }, [expanded, mobile]);
 
@@ -124,7 +139,7 @@ export default function BtwWindow({
         ref={rootRef}
         onClick={() => { if (paneIsActive && !suppressed) setCollapsed(false); }}
         title="旁问（不打断当前工作、不写入会话历史）"
-        style={{ position: 'absolute', right: mobile ? 26 : rightInset, bottom: 12, zIndex: 46, opacity: suppressed ? 0.45 : 1, pointerEvents: suppressed ? 'none' : undefined }}
+        style={{ position: 'absolute', right: mobile ? 26 : rightInset, bottom: mobile ? 12 : bottomInset, zIndex: 46, opacity: suppressed ? 0.45 : 1, pointerEvents: suppressed ? 'none' : undefined }}
         className="max-md:right-4 flex items-center gap-1.5 rounded-full border border-canvas-deep bg-canvas-warm/90 backdrop-blur px-3 py-2 shadow-md hover:border-accent/40 transition-colors"
       >
         <MessageSquare size={14} className="text-accent" />
@@ -139,15 +154,17 @@ export default function BtwWindow({
   }
 
   // 展开态:桌面浮窗(可拖) / 手机底部抽屉。z-46:高于子代理面板(z-40),低于全局授权 modal(z-50+)。
+  // #7 固定高度、内部滚动:原 maxHeight 让窗口随问答变多而长高(用户困惑"越来越大")。改
+  // 固定 height(占面板 60%、封顶 460px),内容超出在窗内滚动,高度稳定不跳。
   const posStyle = mobile
     ? { position: 'absolute', left: 8, right: 8, bottom: 8, height: '68%', zIndex: 46 }
     : pos
-    ? { position: 'absolute', left: pos.left, top: pos.top, width: 360, maxHeight: '72%', zIndex: 46 }
-    : { position: 'absolute', right: rightInset, bottom: 12, width: 360, maxHeight: '72%', zIndex: 46 };
+    ? { position: 'absolute', left: pos.left, top: pos.top, width: 360, height: 'min(60%, 460px)', zIndex: 46 }
+    : { position: 'absolute', right: rightInset, bottom: bottomInset, width: 360, height: 'min(60%, 460px)', zIndex: 46 };
 
   return (
     <div ref={rootRef} style={posStyle}
-      className="flex flex-col rounded-2xl border border-canvas-deep bg-canvas shadow-xl overflow-hidden animate-fade-up">
+      className="flex flex-col rounded-[1.625rem] border border-canvas-deep bg-canvas shadow-xl overflow-hidden animate-fade-up">
       {/* 头部(拖动手柄) */}
       <div
         onPointerDown={startDrag} onPointerMove={onDrag} onPointerUp={endDrag}

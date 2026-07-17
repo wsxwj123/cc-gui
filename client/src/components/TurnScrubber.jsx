@@ -16,6 +16,7 @@ const HIDE_DELAY = 120;
 const magnify = (d) => (d === 0 ? 1.9 : d === 1 ? 1.45 : d === 2 ? 1.15 : 1);
 
 export default function TurnScrubber({ containerRef, turns }) {
+  const rootRef = useRef(null);                // 本组件根,取其 offsetParent 作定位基准
   const [box, setBox] = useState(null);        // { top, height } 相对根
   const [positions, setPositions] = useState([]); // 每个回合点 0~1
   const [hoverIdx, setHoverIdx] = useState(null);
@@ -29,7 +30,15 @@ export default function TurnScrubber({ containerRef, turns }) {
   const measure = useCallback(() => {
     const el = containerRef.current;
     if (!el) return;
-    setBox({ top: el.offsetTop, height: el.offsetHeight });
+    // box.top 必须是 containerRef 相对【本 scrubber 的 offsetParent】的偏移。此前直接用
+    // el.offsetTop,但 containerRef 的 offsetParent(消息滚动列)与 scrubber 的 offsetParent
+    // (面板根)不是同一个 → 差了标题栏高度(实测 79px),整条进度轨上移、首点跑出消息区上方
+    // (#7)。累加 offsetTop 到 scrubber 的定位基准(布局 px,与 zoom 无关)。rootRef 首帧未挂载
+    // 时回落 el.offsetParent(旧行为),ResizeObserver 首个回调会带正确基准重算修正。
+    const base = rootRef.current?.offsetParent || el.offsetParent;
+    let top = 0, node = el;
+    while (node && node !== base) { top += node.offsetTop; node = node.offsetParent; }
+    setBox({ top, height: el.offsetHeight });
     const total = el.scrollHeight || 1;
     // 首末点映射进留边区间:首条 offsetTop≈0 → 原 top:0% + translate(-50%) 圆心落在轨道
     // 顶边、上半被裁 → 视觉上"缺首点"(#5,既有 bug)。上下各留 pad 让首末点完整可见。
@@ -97,6 +106,7 @@ export default function TurnScrubber({ containerRef, turns }) {
 
   return (
     <div
+      ref={rootRef}
       onMouseLeave={leaveBar}
       style={{ position: 'absolute', right: 4, top: box.top, height: box.height, width: 18, zIndex: 45 }}
       className="max-md:hidden pointer-events-auto"
