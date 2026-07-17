@@ -124,7 +124,7 @@ export const BUILTIN_PROVIDERS = [
     name: '硅基流动 SiliconFlow(聚合)',
     type: 'openai',
     baseURL: 'https://api.siliconflow.cn/v1',
-    note: 'OpenAI 兼容聚合平台。模型 id 带前缀，如 deepseek-ai/DeepSeek-V3.2、zai-org/GLM-5.1、Kimi-K2.6。',
+    note: 'OpenAI 兼容聚合平台。模型 id 带组织前缀，如 deepseek-ai/DeepSeek-V3.2、zai-org/GLM-4.6、Qwen/Qwen3.5-397B-A17B;高配档再加 Pro/ 前缀(如 Pro/zai-org/GLM-5、Pro/zai-org/GLM-4.7)。',
     docs: 'https://cloud.siliconflow.cn/',
   },
   {
@@ -322,11 +322,19 @@ export const BUILTIN_PROVIDERS = [
     docs: 'https://docs.z.ai/devpack/quick-start',
   },
   {
+    id: 'qwen-dashscope-anthropic',
+    name: '通义千问 Qwen(百炼,Anthropic 协议)',
+    type: 'anthropic',
+    baseURL: 'https://dashscope.aliyuncs.com/apps/anthropic',
+    note: '阿里云百炼按量付费的 Anthropic 兼容端点(官方给 Claude Code 的北京地域地址;新加坡为 https://{WorkspaceId}.ap-southeast-1.maas.aliyuncs.com/apps/anthropic)。用百炼 API Key。模型如 qwen3.7-max/qwen3.6-flash。该端点仅提供 /v1/messages,无模型列表端点,「获取模型」不可用需手填。',
+    docs: 'https://help.aliyun.com/zh/model-studio/claude-code',
+  },
+  {
     id: 'qwen-coding-anthropic',
     name: '通义 Qwen Coding Plan(套餐,Anthropic 协议)',
     type: 'anthropic',
     baseURL: 'https://coding.dashscope.aliyuncs.com/apps/anthropic',
-    note: '阿里百炼 Coding Plan 套餐官方给 Claude Code 的端点,需套餐专用 key(与按量付费不通用;按量付费的 Anthropic 端点为 https://dashscope.aliyuncs.com/apps/anthropic)。模型如 qwen3.7-max/qwen3-coder-next。官方未提供 Coding Plan 的 OpenAI 兼容端点。',
+    note: '阿里百炼 Coding Plan 套餐官方给 Claude Code 的端点,需套餐专用 key(与按量付费不通用;按量付费的 Anthropic 端点见「通义千问 Qwen(百炼,Anthropic 协议)」条目)。模型如 qwen3.7-max/qwen3-coder-next。官方未提供 Coding Plan 的 OpenAI 兼容端点。',
     docs: 'https://help.aliyun.com/zh/model-studio/claude-code',
   },
   {
