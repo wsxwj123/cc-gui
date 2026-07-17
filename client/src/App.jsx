@@ -6283,7 +6283,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           输入框高度可变(多行/任务清单/附件),固定偏移总有挡住输入框的时候 */}
       <div className="flex-1 min-h-0 relative">
       <div ref={containerRef} onScroll={handleScroll} className="h-full overflow-y-auto relative z-10">
-          {visibleMessages.length === 0 && visibleChat.length === 0 ? (
+          {visibleMessages.length === 0 && visibleChat.filter((m) => m.type !== 'btw').length === 0 ? (
             <div className="mobile-draft-empty flex items-center justify-center h-full text-ink-muted text-sm font-body">
               {selectedSession?.draft ? '开始你的第一条消息 ↓' : '该会话没有可显示的消息'}
             </div>
