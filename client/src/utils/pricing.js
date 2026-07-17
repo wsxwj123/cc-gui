@@ -155,9 +155,9 @@ const PRICES = {
   // $5~$14/1K 请求)未建模,此处仅 token 单价。'sonar' 短键兜底同族其它 id(longest-prefix
   // 使 sonar-pro/-reasoning-pro/-deep-research 命中各自档)。
   'sonar':                       usd(1, 1, 1, 1),
-  'sonar-pro':                   usd(3, 15, 3, 15),
-  'sonar-reasoning-pro':         usd(2, 8, 2, 8),
-  'sonar-deep-research':         usd(2, 8, 2, 8),
+  'sonar-pro':                   usd(3, 15, 3, 3),
+  'sonar-reasoning-pro':         usd(2, 8, 2, 2),
+  'sonar-deep-research':         usd(2, 8, 2, 2),
 
   // Mistral — mistral.ai/pricing 直核 2026-07-17。缓存:cached input -90%
   // (cacheRead=0.1×input=默认),不收写入费(cacheWrite=input)。用 base 前缀键
@@ -166,11 +166,11 @@ const PRICES = {
   'mistral-medium':              usd(0.4, 2, 0.04, 0.4),
   'mistral-small':               usd(0.1, 0.3, 0.01, 0.1),
 
-  // Cerebras — cerebras.ai/pricing + inference-docs 直核 2026-07-17。
-  // 仅 gpt-oss-120b 拿到明确 input/output 拆分($0.25/$0.69);llama/qwen 官方页只给
-  // "10c/60c" 笼统值、未拆 in/out→不编。无 prompt caching(cacheRead/cacheWrite=input)。
+  // Cerebras — cerebras.ai/pricing 直核 2026-07-17(页面表格原文 "GPT OSS 120B |
+  // $0.35/M | $0.75/M")。仅 gpt-oss-120b 拿到明确 input/output 拆分;llama/qwen 官方页
+  // 只给笼统值、未拆 in/out→不编。无 prompt caching(cacheRead/cacheWrite=input)。
   // 注意与 Groq 的 'openai/gpt-oss-120b' 是不同 id(Cerebras 裸名),不冲突。
-  'gpt-oss-120b':                usd(0.25, 0.69, 0.25, 0.69),
+  'gpt-oss-120b':                usd(0.35, 0.75, 0.35, 0.35),
 
   // Z.ai 智谱国际站 — docs.z.ai/guides/overview/pricing 直核 2026-07-17(USD)。
   // glm-4.6/4.5/4.5-air 与国内 bigmodel 同 id,现值(≈$0.60/$2.20、$0.20/$1.10)一致→不重复加。
