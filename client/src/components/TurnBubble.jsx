@@ -602,12 +602,14 @@ export function CoworkBlocks({
 
 // ─── Usage Display ─────────────────────────────────────────────
 function UsageDisplay({ usage, model, costUsd }) {
+  // hook 必须无条件调用:移到 early return 之前(原在 if(!usage)return 之后=条件调用 hook,
+  // usage 有无切换时 hooks 数量变→React 崩;ESLint rules-of-hooks 抓出的真隐患)。
+  const provider = useStore((s) => s.currentProvider);
   if (!usage) return null;
   const input = usage.input_tokens || 0;
   const output = usage.output_tokens || 0;
   const cacheRead = usage.cache_read_input_tokens || 0;
   const cacheWrite = usage.cache_creation_input_tokens || 0;
-  const provider = useStore((s) => s.currentProvider);
   const cost = computeCost(model, usage, provider);
   // Z1:CLI result 事件的 total_cost_usd 是官方计费口径的权威成本,优先于单价表
   // 估算。第三方 provider 下 CLI 仍按 Claude 价目计算(模型名是伪装的),不可信。
