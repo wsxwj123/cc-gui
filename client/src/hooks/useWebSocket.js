@@ -182,7 +182,9 @@ export function useWebSocket() {
                 }).catch(() => {});
                 break;
               }
-              const wl = JSON.parse(localStorage.getItem(`cgui-perm-wl-${req.sessionId || 'none'}`) || '[]');
+              // draft(sessionId=null)不吃白名单:共享遗留键 cgui-perm-wl-none 会把
+              // 任何 draft 的同名工具自动放行(串放行),对该键一律不生效。
+              const wl = req.sessionId ? JSON.parse(localStorage.getItem(`cgui-perm-wl-${req.sessionId}`) || '[]') : [];
               if (wl.includes(req.toolName) && !req.blockedPath) {
                 if (import.meta.env?.DEV) console.log('[cgui-perm] auto-allow: whitelist', req.id, req.toolName);
                 fetch(`/api/permissions/respond/${req.id}`, {
