@@ -39,7 +39,10 @@ export default function TurnScrubber({ containerRef, turns }) {
   }, [containerRef]);
 
   // turns 变化(新增/裁剪回合)时重测一次;measure 本身稳定,不触发 observer 重建。
-  useLayoutEffect(() => { measure(); }, [measure, turns]);
+  // 依赖用稳定签名(回合数 + 末尾 uuid)而非数组引用:userTurns 每帧新建,若依赖引用则
+  // 切焦点/流式每帧都跑 O(n) querySelector + 强制同步回流,×2 pane 阻塞列表高亮绘制(#9)。
+  const turnsSig = turns.length + ':' + (turns[turns.length - 1]?.uuid || '');
+  useLayoutEffect(() => { measure(); }, [measure, turnsSig]);
 
   useEffect(() => {
     const el = containerRef.current;
