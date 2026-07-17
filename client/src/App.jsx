@@ -7643,20 +7643,35 @@ function CustomProviderForm({ onSaved, editing, onCancel, onDirtyChange, customC
   useEffect(() => {
     if (open || isEdit) formRef.current?.scrollIntoView({ block: 'start', behavior: 'smooth' });
   }, [open, editing?.id]);
+  // 新增态已填内容时点某条目「编辑」,预填会整表单覆盖 → 先经 confirmDialog 确认。
+  // 每次渲染在**非编辑态**记录 dirty;进入编辑态的那次渲染不更新,ref 里留的就是
+  // "点编辑前新增表单是否有未保存输入"。编辑态之间互切(A→B)不算新增态丢失,不拦。
+  const addDirtyRef = useRef(false);
+  useEffect(() => { if (!editing) addDirtyRef.current = dirty; });
   // Entering edit mode: pre-fill from the chosen provider. The apiKey is NEVER
   // sent to the client (only `hasKey`), so leave it blank — blank means "keep".
   useEffect(() => {
     if (!editing) return;
-    setName(editing.name || '');
-    setType(editing.type || 'openai');
-    setBaseURL(editing.baseURL || '');
-    setApiKey('');
-    setModelsText((editing.models || []).join('\n'));
-    setDefaultModel(editing.defaultModel || '');
-    setTierModels({ haiku: editing.tierModels?.haiku || '', sonnet: editing.tierModels?.sonnet || '', opus: editing.tierModels?.opus || '' });
-    setTestResult(null); // 切到另一个 provider 编辑时清掉上一个的测试结果横幅(否则误导)
-    setBusy('');
-    setOpen(true);
+    let stale = false; // 确认框挂起期间 editing 又变了(再点别的编辑/删除)则放弃本次预填
+    (async () => {
+      if (addDirtyRef.current) {
+        const ok = await confirmDialog(`放弃当前未保存的输入,改为编辑「${editing.name}」?`, { danger: true, confirmText: '放弃并编辑' });
+        if (stale) return;
+        if (!ok) { onCancel?.(); return; } // 保留新增表单已填内容,退回新增态
+        addDirtyRef.current = false;
+      }
+      setName(editing.name || '');
+      setType(editing.type || 'openai');
+      setBaseURL(editing.baseURL || '');
+      setApiKey('');
+      setModelsText((editing.models || []).join('\n'));
+      setDefaultModel(editing.defaultModel || '');
+      setTierModels({ haiku: editing.tierModels?.haiku || '', sonnet: editing.tierModels?.sonnet || '', opus: editing.tierModels?.opus || '' });
+      setTestResult(null); // 切到另一个 provider 编辑时清掉上一个的测试结果横幅(否则误导)
+      setBusy('');
+      setOpen(true);
+    })();
+    return () => { stale = true; };
   }, [editing?.id]);
   const reset = () => { setName(''); setType('openai'); setBaseURL(''); setApiKey(''); setModelsText(''); setDefaultModel(''); setTierModels({ haiku: '', sonnet: '', opus: '' }); setTestResult(null); setOpen(false); };
   const close = () => { reset(); onCancel?.(); };
