@@ -6670,6 +6670,7 @@ function ProviderSwitcher() {
           {/* 新增/编辑表单挂列表顶部:打开新增无需滚到底,点编辑也统一定位到顶部表单。 */}
           <CustomProviderForm
             editing={editingProvider}
+            customCount={customProviders.length}
             onCancel={() => setEditingProvider(null)}
             onSaved={() => { setEditingProvider(null); load(); }}
             onDirtyChange={(d) => { formDirtyRef.current = d; }}
@@ -7618,7 +7619,9 @@ function OpenAIModelManager({ provider, onSaved }) {
 
 // Shared add-custom-provider form. Both protocols; can live-fetch the upstream's
 // model catalogue via /v1/models. onSaved() refreshes the parent's list.
-function CustomProviderForm({ onSaved, editing, onCancel, onDirtyChange }) {
+// customCount = 保存前父级自定义 provider 数:仅添加**第一个**自定义 provider 时
+// 自动切换过去(新机首配免二次操作),已有自定义条目时只添加不切换(避免打断当前会话所用 provider)。
+function CustomProviderForm({ onSaved, editing, onCancel, onDirtyChange, customCount = 0 }) {
   const [open, setOpen] = useState(false);
   const [name, setName] = useState('');
   const [type, setType] = useState('openai');
@@ -7741,7 +7744,7 @@ function CustomProviderForm({ onSaved, editing, onCancel, onDirtyChange }) {
       });
       const d = await r.json();
       if (!r.ok) throw new Error(d.error || '保存失败');
-      if (!isEdit && d.id) {
+      if (!isEdit && d.id && customCount === 0) {
         const sr = await fetch('/api/provider/switch', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -7953,6 +7956,7 @@ function MobileProviderPage() {
       {/* 新增/编辑表单挂列表顶部:打开新增无需滚到底,点编辑也统一定位到顶部表单。 */}
       <CustomProviderForm
         editing={editingProvider}
+        customCount={customProviders.length}
         onCancel={() => setEditingProvider(null)}
         onSaved={() => { setEditingProvider(null); load(); }}
       />
