@@ -127,6 +127,62 @@ export const BUILTIN_PROVIDERS = [
     note: 'OpenAI 兼容聚合平台。模型 id 带前缀，如 deepseek-ai/DeepSeek-V3.2、zai-org/GLM-5.1、Kimi-K2.6。',
     docs: 'https://cloud.siliconflow.cn/',
   },
+  {
+    id: 'groq',
+    name: 'Groq',
+    type: 'openai',
+    baseURL: 'https://api.groq.com/openai/v1',
+    note: 'Groq LPU 高速推理平台,OpenAI 兼容。托管 Llama/Qwen/Kimi 等开源模型。',
+    docs: 'https://console.groq.com/docs/openai',
+  },
+  {
+    id: 'mistral',
+    name: 'Mistral',
+    type: 'openai',
+    baseURL: 'https://api.mistral.ai/v1',
+    note: 'Mistral La Plateforme,chat completions 为 OpenAI 兼容格式。模型如 mistral-large/codestral。',
+    docs: 'https://docs.mistral.ai/api/',
+  },
+  {
+    id: 'perplexity',
+    name: 'Perplexity',
+    type: 'openai',
+    baseURL: 'https://api.perplexity.ai',
+    note: '联网搜索问答模型(sonar 系列),chat/completions 为 OpenAI 兼容。官方现主推 Agent API,此兼容端点已标记为旧接口。',
+    docs: 'https://docs.perplexity.ai/',
+  },
+  {
+    id: 'together',
+    name: 'Together AI',
+    type: 'openai',
+    baseURL: 'https://api.together.ai/v1',
+    note: '开源模型托管平台,OpenAI 兼容。旧域名 api.together.xyz 仍可用。',
+    docs: 'https://docs.together.ai/docs/openai-api-compatibility',
+  },
+  {
+    id: 'fireworks',
+    name: 'Fireworks AI',
+    type: 'openai',
+    baseURL: 'https://api.fireworks.ai/inference/v1',
+    note: '开源模型托管平台,OpenAI 兼容。模型 id 带账户前缀,如 accounts/fireworks/models/deepseek-v3p2。该厂也有 Anthropic 端点(见下)。',
+    docs: 'https://docs.fireworks.ai/tools-sdks/openai-compatibility',
+  },
+  {
+    id: 'cerebras',
+    name: 'Cerebras',
+    type: 'openai',
+    baseURL: 'https://api.cerebras.ai/v1',
+    note: 'Cerebras 晶圆级芯片高速推理,OpenAI 兼容。托管 Llama/Qwen/gpt-oss 等开源模型。',
+    docs: 'https://inference-docs.cerebras.ai/introduction',
+  },
+  {
+    id: 'hyperbolic',
+    name: 'Hyperbolic',
+    type: 'openai',
+    baseURL: 'https://api.hyperbolic.xyz/v1',
+    note: '开源模型推理平台,OpenAI 兼容。',
+    docs: 'https://docs.hyperbolic.xyz/docs/inference-api',
+  },
 
   // ─── Anthropic 协议(直接发 anthropic 格式给端点) ───
   {
@@ -184,6 +240,14 @@ export const BUILTIN_PROVIDERS = [
     baseURL: 'https://api.stepfun.com',
     note: '阶跃的 Anthropic 兼容端点(CLI 会拼 /v1/messages)。支持 step-3.5-flash/step-3.7-flash。',
     docs: 'https://platform.stepfun.com/interface-key',
+  },
+  {
+    id: 'fireworks-anthropic',
+    name: 'Fireworks AI(Anthropic 协议)',
+    type: 'anthropic',
+    baseURL: 'https://api.fireworks.ai/inference',
+    note: 'Fireworks 的 Anthropic 兼容端点(支持 /v1/messages 含流式)。model 需填 Fireworks id,如 accounts/fireworks/models/deepseek-v3p2。',
+    docs: 'https://docs.fireworks.ai/tools-sdks/anthropic-compatibility',
   },
 ];
 
