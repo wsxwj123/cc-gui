@@ -81,7 +81,11 @@ export default function BtwWindow({
         let ot = 0, node = composer;
         while (node && node !== parent) { ot += node.offsetTop; node = node.offsetParent; }
         setBottomInset(Math.max(12, parent.clientHeight - ot + 12)); // 展开窗:输入框上方
-        setPillTop(ot + composer.offsetHeight + 10); // 收起浮标:输入框底下方 10px,落脚注留白区
+        // 收起浮标:在【输入框底】与【pane 底边界】之间垂直居中(原 +10 太靠下、快溢出边界)。
+        const composerBottom = ot + composer.offsetHeight;
+        const gapBelow = parent.clientHeight - composerBottom;
+        const pillH = rootRef.current?.offsetHeight || 38;
+        setPillTop(composerBottom + Math.max(4, (gapBelow - pillH) / 2));
       } else { setBottomInset(12); setPillTop(null); }
     };
     calc();
