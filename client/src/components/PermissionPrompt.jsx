@@ -691,7 +691,9 @@ export function PermissionPrompt({ sessionId = null, onExecutePlan = null, hydra
     // 勾选"本会话永远允许 X"时,把当前同会话同工具的其他待处理请求一并放行。它们
     // 在白名单写入之前就已并发发出(例:AI 一次抛 3 条 Bash),useWebSocket 的 auto-
     // allow 只对"之后"到达的请求生效,所以这几条会卡着要逐条点。这里补扫一次(#8)。
-    const sameTool = all.filter(
+    // req.sessionId 为 null(draft 孤儿)时不补扫:null === null 会把【其他 draft 会话】
+    // 的同名工具请求一并放行 → 只放行当前这一条,宁可少自动放行。
+    const sameTool = req.sessionId == null ? [] : all.filter(
       (p) => p.id !== req.id && p.sessionId === req.sessionId && p.toolName === req.toolName,
     );
     await Promise.all([req, ...sameTool].map((r) => resolve(r, 'allow')));
