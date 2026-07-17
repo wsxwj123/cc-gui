@@ -70,9 +70,15 @@ export default function BtwWindow({
     return () => ro.disconnect();
   }, [expanded, mobile]);
 
-  // 新内容滚到底。
+  // 新内容滚到底 —— 但仅当用户已贴底才自动跟随(抄主聊天区门控)。thread 每次渲染新引用会
+  // 让此 effect 每重渲都跑,原无条件 scrollTop=scrollHeight 会把上滚看历史的用户拽回底(#4)。
+  const onBodyScroll = () => {
+    const el = bodyRef.current;
+    if (el) atBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
+  };
   useEffect(() => {
-    if (expanded && bodyRef.current) bodyRef.current.scrollTop = bodyRef.current.scrollHeight;
+    if (expanded && atBottomRef.current && bodyRef.current)
+      bodyRef.current.scrollTop = bodyRef.current.scrollHeight;
   }, [thread, expanded]);
 
   const submit = () => {
@@ -160,7 +166,7 @@ export default function BtwWindow({
       </div>
 
       {/* 线程正文 */}
-      <div ref={bodyRef} className="flex-1 min-h-0 overflow-y-auto px-3 py-2 space-y-3">
+      <div ref={bodyRef} onScroll={onBodyScroll} className="flex-1 min-h-0 overflow-y-auto px-3 py-2 space-y-3">
         {thread.length === 0 ? (
           <div className="text-[12px] text-ink-faint font-body py-4 text-center">
             旁问一个问题——不打断当前工作、不写入会话历史。
