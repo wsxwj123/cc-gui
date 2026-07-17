@@ -132,6 +132,24 @@ fn focus_main_window(app: tauri::AppHandle) {
     }
 }
 
+// 自动更新装好后重启:先回收常驻 node 后端(否则老 node 变孤儿占端口,新实例健康检查/kill_stale
+// 竞态可能顶掉,见 memory stale-backend),再 app.restart() 加载 updater 已替换好的新 .app。
+// 挪到 Rust 侧做,绕开 process 插件在 remote 上下文(生产 webview = http://127.0.0.1:<port>)的
+// ACL 门控:前端 plugin-process 的 relaunch() 若后端端口 fallback 出 capabilities 白名单
+// (6677-6687)会被 ACL 拒,且被 catch{console.warn} 静默吞掉 = 用户"点重启没反应"的根因。
+#[tauri::command]
+fn restart_app(app: tauri::AppHandle) {
+    if let Some(backend) = app.try_state::<Backend>() {
+        if let Ok(mut guard) = backend.0.lock() {
+            if let Some(mut child) = guard.take() {
+                kill_backend_tree(&mut child);
+                let _ = child.wait(); // 回收,确保端口释放后新实例才起
+            }
+        }
+    }
+    app.restart(); // Tauri: cleanup_before_exit + spawn 新实例 + exit;返回 !
+}
+
 // 从 {... "key": "value" ...} 里抠出 value(不引 serde,和本文件既有极简解析同风格)。
 // 只处理无转义的简单值(热键串就是 ASCII+ 加号,不含引号/反斜杠),够用。
 fn parse_json_string_field(json: &str, key: &str) -> Option<String> {
@@ -839,7 +857,7 @@ pub fn run() {
         .manage(Backend(Mutex::new(None)))
         .manage(BackendPort(Mutex::new(None)))
         // F1: 设置页实时重注册热键 + 截图完成后置前主窗。app 本地命令无需 capability 授权。
-        .invoke_handler(tauri::generate_handler![set_screenshot_hotkey, focus_main_window])
+        .invoke_handler(tauri::generate_handler![set_screenshot_hotkey, focus_main_window, restart_app])
         .setup(|app| {
             // ① 启动加速:窗口带内置启动页立即创建并显示。后端初始化(健康检查/杀旧
             // 进程/spawn node + 等端口就绪,常规 1~3s,杀旧/重试路径可达 20s+)以前全部

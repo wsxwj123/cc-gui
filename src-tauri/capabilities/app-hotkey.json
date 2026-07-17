@@ -18,5 +18,5 @@
       "http://127.0.0.1:6687"
     ]
   },
-  "permissions": ["allow-set-screenshot-hotkey", "allow-focus-main-window"]
+  "permissions": ["allow-set-screenshot-hotkey", "allow-focus-main-window", "allow-restart-app"]
 }

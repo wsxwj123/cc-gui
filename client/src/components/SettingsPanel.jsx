@@ -606,10 +606,14 @@ function UpdateAvailable({ state }) {
 
   const restartNow = async () => {
     try {
-      const { relaunch } = await import('@tauri-apps/plugin-process');
-      await relaunch();
+      // 改走 Rust 侧 restart_app 命令(杀 node 后端+app.restart()),绕开 process 插件在 remote
+      // 上下文(http://127.0.0.1:<port>)的 ACL 门控——原 plugin-process 的 relaunch() 在端口
+      // fallback 出白名单时被 ACL 拒、又被 catch 静默吞掉 = 用户"点重启没反应"的根因。
+      const { invoke } = await import('@tauri-apps/api/core');
+      await invoke('restart_app');
     } catch (e) {
-      console.warn('[updater] relaunch 失败:', e);
+      // 不再静默吞:真失败时把错误 + 手动兜底告诉用户(更新其实已下载安装,手动重开即完成)。
+      confirmDialog('自动重启失败：' + String(e?.message || e) + '\n\n更新其实已下载安装,请手动完全退出 App(Cmd+Q)再重新打开即可完成更新。', { confirmText: '知道了' });
     }
   };
 
