@@ -596,7 +596,9 @@ export function PermissionPrompt({ sessionId = null, onExecutePlan = null, hydra
         const add = useStore.getState().addPendingPermission;
         for (const it of items) {
           let wl = [];
-          try { wl = JSON.parse(localStorage.getItem(`cgui-perm-wl-${it.sessionId || 'none'}`) || '[]'); } catch {}
+          // 共享遗留键 cgui-perm-wl-none 不生效:draft(sessionId=null)不吃白名单,
+          // 否则任何 draft 的同名工具都被旧存量键自动放行(串放行)。
+          try { wl = it.sessionId ? JSON.parse(localStorage.getItem(`cgui-perm-wl-${it.sessionId}`) || '[]') : []; } catch {}
           if (wl.includes(it.toolName) && !it.blockedPath) {
             // 白名单命中:放行但不入表。越界请求(blockedPath)不吃白名单,必须弹卡。
             fetch(`/api/permissions/respond/${it.id}`, {
@@ -687,7 +689,9 @@ export function PermissionPrompt({ sessionId = null, onExecutePlan = null, hydra
   };
 
   const whitelistAndAllow = async (req) => {
-    whitelist(req.sessionId, req.toolName);
+    // draft(sessionId=null)不写白名单:会落到共享键 cgui-perm-wl-none,之后任何
+    // draft 的同名工具都会被 auto-allow 命中(串放行)。null 时仅放行当前请求。
+    if (req.sessionId != null) whitelist(req.sessionId, req.toolName);
     // 勾选"本会话永远允许 X"时,把当前同会话同工具的其他待处理请求一并放行。它们
     // 在白名单写入之前就已并发发出(例:AI 一次抛 3 条 Bash),useWebSocket 的 auto-
     // allow 只对"之后"到达的请求生效,所以这几条会卡着要逐条点。这里补扫一次(#8)。
