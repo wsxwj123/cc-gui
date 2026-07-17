@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { MessageSquare, Minus, Send, Trash2, Loader2 } from 'lucide-react';
 import { MarkdownRenderer } from './MarkdownRenderer.jsx';
 import { confirmDialog } from '../utils/confirmDialog.jsx';
@@ -23,6 +23,7 @@ export default function BtwWindow({
   const rootRef = useRef(null);
   const bodyRef = useRef(null);
   const dragRef = useRef(null);
+  const atBottomRef = useRef(true);   // #4:仅当用户贴底才自动跟随新答,上滚后不抢回底
 
   const answered = thread.filter((m) => !m.pending && !m.error).length;
   const pending = thread.some((m) => m.pending);
@@ -35,10 +36,13 @@ export default function BtwWindow({
   useEffect(() => { if (expanded) setLastSeen(answered); }, [expanded, answered]);
 
   // 切会话:位置复位 + 已读基线归到新线程当前已答数(避免 A 的已读数套到 B),空线程默认收起。
-  useEffect(() => {
+  // 用 useLayoutEffect(非 useEffect):在 sessionKey 变的同帧、绘制前收起,消除"展开着的空窗"
+  // 闪现一帧(#2);B 有旁问则不收、保持展开显示 B 的线程。
+  useLayoutEffect(() => {
     setPos(null);
     setLastSeen(thread.filter((m) => !m.pending && !m.error).length);
     if (thread.length === 0) setCollapsed(true);
+    atBottomRef.current = true; // 新会话展开时贴底跟随(#4)
     // 只在会话键变时跑;thread 每次渲染新引用,不入依赖(仅取初值)。
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionKey]);
