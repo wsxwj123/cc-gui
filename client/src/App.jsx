@@ -8754,7 +8754,15 @@ export default function App() {
     if (!activeProjectHash) return;
     const st = useStore.getState();
     if (st.selectedProject?.hash === activeProjectHash) return;
-    const proj = (st.projects || []).find((p) => p.hash === activeProjectHash);
+    let proj = (st.projects || []).find((p) => p.hash === activeProjectHash);
+    // 兜底:未落盘的 worktree draft(新建会话没发消息)不在 projects 列表 → find 落空 → 原来直接
+    // return,导致切走再切回该空会话时左侧列表回不到它的项目(停在上一个窗格的项目,用户实报)。
+    // enterWorktree 首次进入时有同款兜底构造,这里对齐:用 draft 自带的 projectPath 构造最小 project
+    // (hash+path 都在 draft 里,不需请求)。仅对带 projectPath 的会话兜底,不给真落盘项目临时读不到瞎造。
+    if (!proj && syncActiveSession?.projectPath) {
+      const path = syncActiveSession.projectPath;
+      proj = { hash: activeProjectHash, path, isWorktree: /-worktrees[\\/]|[\\/]\.claude[\\/]worktrees[\\/]/.test(path), sessionCount: 0, lastActivity: null };
+    }
     if (!proj) return;
     st.setSelectedProject(proj);
     st.fetchSessions(proj.hash, { silent: true });
