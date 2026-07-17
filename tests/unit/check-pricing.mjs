@@ -89,6 +89,17 @@ const glm52 = computeCost('glm-5.2', { input_tokens: 1_000_000 });
 assert.ok(Math.abs(glm52.totalUsd - 8 / CNY) < 1e-9, `glm-5.2 ${glm52?.totalUsd} != ${8 / CNY}`);
 const glm51 = computeCost('glm-5.1', { input_tokens: 1_000_000 });
 assert.ok(Math.abs(glm51.totalUsd - 8 / CNY) < 1e-9, `glm-5.1 ${glm51?.totalUsd} != ${8 / CNY}`);
+// GLM Flash/视觉档不许前缀兜底落到高价档:
+// glm-4.7-flash 官方免费 → 计价存在且恒 0,不落 'glm-4.7'(¥4/¥16)。
+const gflash = computeCost('glm-4.7-flash', { input_tokens: 1_000_000, output_tokens: 1_000_000, cache_read_input_tokens: 1_000_000, cache_creation_input_tokens: 1_000_000 });
+assert.ok(gflash, 'glm-4.7-flash 应有价目条目(免费≠无条目)');
+assert.ok(Math.abs(gflash.totalUsd) < 1e-12, `glm-4.7-flash ${gflash?.totalUsd} != 0(前缀兜底漏到 glm-4.7 档?)`);
+// glm-4.7-flashx(z.ai $0.07/$0.4)精确命中,不落 'glm-4.7-flash'(免费)也不落 'glm-4.7'。
+const gflashx = computeCost('glm-4.7-flashx', { input_tokens: 1_000_000, output_tokens: 1_000_000 });
+assert.ok(Math.abs(gflashx.totalUsd - (0.07 + 0.4)) < 1e-9, `glm-4.7-flashx ${gflashx?.totalUsd} != 0.47`);
+// glm-5v-turbo(z.ai $1.2/$4)精确命中,不落 'glm-5'(¥6/¥22)前缀档。
+const g5vt = computeCost('glm-5v-turbo', { input_tokens: 1_000_000, output_tokens: 1_000_000 });
+assert.ok(Math.abs(g5vt.totalUsd - (1.2 + 4)) < 1e-9, `glm-5v-turbo ${g5vt?.totalUsd} != 5.2`);
 
 // formatCost renders CNY (×7.2). 0.09125 USD → ¥0.657 (<¥1 → 3 decimals).
 assert.strictEqual(formatCost(expected), '¥0.657');

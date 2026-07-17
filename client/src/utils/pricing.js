@@ -183,6 +183,15 @@ const PRICES = {
   'glm-5-turbo':                 cny(7, 26, 1.8, 7),    // 低档 [0,32K) 为 ¥5/¥22,命中 ¥1.2
   'glm-5':                       cny(6, 22, 1.5, 6),    // 低档 [0,32K) 为 ¥4/¥18,命中 ¥1
   'glm-4.7':                     cny(4, 16, 0.8, 4),    // 取 [32K,200K) 档;[0,32K) 按输出长度 ¥2/¥8 或 ¥3/¥14
+  // Flash/FlashX/视觉档(2026-07-17 直核):bigmodel.cn/pricing 是 SPA 抓不到数字,
+  // 免费口径取 docs.bigmodel.cn 模型总览(GLM-4.7-Flash 标注"免费模型");FlashX/5V-Turbo
+  // 用国际站 docs.z.ai 价目页 USD 数字(缓存存储限时免费→cacheWrite=input)。
+  // 不加这些键时前缀兜底会落到 'glm-4.7'/'glm-5' 高价档,免费/轻量模型被计成旗舰价。
+  'glm-4.7-flash':               cny(0, 0, 0, 0),           // 官方免费模型
+  'glm-4.7-flashx':              usd(0.07, 0.4, 0.01, 0.07),
+  'glm-5v-turbo':                usd(1.2, 4, 0.24, 1.2),
+  // 'glm-5v'(无 Turbo 后缀):bigmodel/z.ai 现行价目与模型总览均无此 id(视觉现役
+  // 仅 GLM-5V-Turbo/4.6V/4.5V)→ 按"拿不到留空不加"口径不编。
 
   // 未加(拿不到官方 per-model 数字,按口径留空不编):
   //   Together / Fireworks:定价页 JS 渲染取不到干净 per-id 单价,且 id 带 org/账户前缀
