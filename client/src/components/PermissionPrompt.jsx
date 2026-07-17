@@ -506,7 +506,10 @@ function PermissionCard({ req, onResolve, onWhitelistAndAllow, onAlwaysAllow, on
             title={dangerous ? '该命令命中危险命令清单，不提供永久授权' : '“始终允许”写入 ~/.claude/settings.json 的 permissions.allow，终端 CLI 同样生效'}
           >
             <option value="none">仅此次</option>
-            <option value="session">本会话内允许 {req.toolName}</option>
+            {/* draft(sessionId=null)不写白名单、不补扫(见 whitelistAndAllow)—— 该选项实际
+                只放行当前一条,与"仅此次"无异,照常显示会误导 → 隐藏;会话建立后恢复显示。
+                改文案成"仅本次允许"会与上面"仅此次"重复,故选隐藏。 */}
+            {req.sessionId != null && <option value="session">本会话内允许 {req.toolName}</option>}
             {!dangerous && <option value="always">始终允许（写入权限规则）</option>}
           </select>
         </label>
