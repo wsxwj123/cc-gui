@@ -1096,8 +1096,19 @@ function ProjectList() {
       .catch(() => {});
   }, []);
 
+  // #1 worktree 项目默认不混进顶层项目列表(跑过会话的 worktree 会作为独立项目平级冒出来、
+  // 干扰主项目)。设置里「显示 worktree 项目」开关控制,默认关;开关写 localStorage + 广播
+  // 事件,此处监听同步。worktree 仍可从「文件→worktree」弹窗进入(enterWorktree 会切过去)。
+  const [showWorktreeProjects, setShowWorktreeProjects] = useState(() => {
+    try { return localStorage.getItem('cgui-show-worktree-projects') === '1'; } catch { return false; }
+  });
+  useEffect(() => {
+    const h = () => { try { setShowWorktreeProjects(localStorage.getItem('cgui-show-worktree-projects') === '1'); } catch {} };
+    window.addEventListener('cgui:worktree-visibility', h);
+    return () => window.removeEventListener('cgui:worktree-visibility', h);
+  }, []);
   const filtered = projects.filter((p) =>
-    !hidden.has(p.hash) && p.path.toLowerCase().includes(searchQuery.toLowerCase())
+    !hidden.has(p.hash) && (showWorktreeProjects || !p.isWorktree) && p.path.toLowerCase().includes(searchQuery.toLowerCase())
   );
   const hiddenOnly = projects.length > 0 && filtered.length === 0 && searchQuery.length === 0 && hidden.size > 0;
   // 置顶项排最前(稳定排序保各组内原顺序)。
@@ -1940,7 +1951,13 @@ function SessionList() {
     // 种子必须种在 worktree 自己的 draft 键上(与下方 draft.projectHash 同一 dash 算法)。
     // 曾传 selectedProject.hash(主项目):worktree draft 无权限条目 → getPermissionModeFor
     // 回退全局上次模式,上次开的 bypassPermissions 会直接泄进 worktree 新会话。
-    seedNewSessionDefaults(tree.path.replace(/[^A-Za-z0-9]/g, '-'));
+    const wtHash = tree.path.replace(/[^A-Za-z0-9]/g, '-');
+    seedNewSessionDefaults(wtHash);
+    // #9 左侧会话列表切到该 worktree(否则点了 worktree、左侧仍停在原项目分支)。已跑过会话的
+    // worktree 用 projects 里的真实条目;首次进入无条目则构造最小对象(fetchSessions 返回空,正常)。
+    const wtProject = projects.find((p) => p.hash === wtHash) || { hash: wtHash, path: tree.path, isWorktree: true, sessionCount: 0, lastActivity: null };
+    setSelectedProject(wtProject);
+    fetchSessions(wtHash);
     const draft = {
       draft: true,
       draftId: newDraftId(),
@@ -1976,7 +1993,7 @@ function SessionList() {
       // 复用了已存在的同名分支(删 worktree 时分支保留,同名重建会检出旧分支)——
       // 该分支可能落后当前 HEAD 很久,提示用户,别让他以为拿到的是最新代码。
       if (d.reusedBranch) {
-        confirmDialog(`已复用已存在的分支 ${d.branch}(非当前 HEAD,可能是之前删除 worktree 时保留的)。如需从最新代码开始,请换一个分支名。`, { confirmText: '知道了' });
+        confirmDialog(`已复用同名的已有分支 ${d.branch}(可能不是最新代码——是之前删 worktree 时保留下来的)。如需从最新开始,请换一个分支名。`, { confirmText: '知道了' });
       }
       enterWorktree({ path: d.path, branch: d.branch });
       setNewWorktreeName('');
@@ -2045,20 +2062,36 @@ function SessionList() {
     e?.stopPropagation();
     if (!tree?.path || !selectedProject || tree.isMain) return;
     const dirty = tree.dirtyFileCount > 0;
+    const hasBranch = tree.branch && tree.branch !== '(detached)';
     // 领先提交提示:分支保留所以 commit 不丢,明说免得用户误以为删树=丢工作。
     const aheadNote = tree.aheadCount > 0 ? `该工作树领先 ${tree.aheadCount} 个提交，删除后分支保留、提交不丢。\n` : '';
     const msg = dirty
-      ? `删除这个 worktree 会丢失 ${tree.dirtyFileCount} 个未提交修改：\n${tree.path}\n\n${aheadNote}分支 ${tree.branch || ''} 本身保留。确定强制删除？`
-      : `删除 worktree：\n${tree.path}\n\n${aheadNote}只删这个工作树文件夹，分支 ${tree.branch || ''} 保留。确定？`;
-    if (!(await confirmDialog(msg, { danger: true }))) return;
+      ? `删除这个 worktree 会丢失 ${tree.dirtyFileCount} 个未提交修改：\n${tree.path}\n\n${aheadNote}默认只删工作树文件夹，分支 ${tree.branch || ''} 保留。确定强制删除？`
+      : `删除 worktree：\n${tree.path}\n\n${aheadNote}默认只删工作树文件夹，分支 ${tree.branch || ''} 保留。确定？`;
+    // 分支存在时给勾选项「同时删除分支」(#3)。返回 { confirmed, checked };无分支(detached)退回布尔。
+    const res = await confirmDialog(msg, {
+      danger: true,
+      checkbox: hasBranch ? { label: `同时删除分支 ${tree.branch}（未合并的提交会一起丢失，不可恢复）` } : null,
+    });
+    const confirmed = hasBranch ? res?.confirmed : res;
+    if (!confirmed) return;
+    const deleteBranch = hasBranch ? !!res.checked : false;
     try {
       const r = await fetch('/api/worktree', {
         method: 'DELETE', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ cwd: selectedProject.path, path: tree.path, force: dirty }),
+        body: JSON.stringify({ cwd: selectedProject.path, path: tree.path, force: dirty, deleteBranch }),
       });
       const d = await r.json();
       if (!r.ok) return confirmDialog('删除失败：' + (d.error || ''));
-      openWorktreePicker(); // 刷新列表
+      // 树删成功但分支没删掉(如被别处检出):不算整体失败,单独提示,列表照常刷新。
+      if (deleteBranch && d.branch && !d.branchDeleted) {
+        confirmDialog(`工作树已删除，但分支 ${d.branch} 未能删除：${d.branchError || '未知原因'}`, { confirmText: '知道了' });
+      }
+      // #9 副作用兜底:若删掉的正是当前选中的 worktree(enterWorktree 后 selectedProject 指向它),
+      // 删后 selectedProject 悬空指向已删路径(会话列表刷空、picker 依赖该 cwd 会拉取失败)→ 切回
+      // 项目列表。否则(在主仓里删别的 worktree)照常刷新弹窗。
+      if (selectedProject.path === tree.path) setSelectedProject(null);
+      else openWorktreePicker(); // 刷新列表
     } catch (err) {
       confirmDialog('删除失败：' + err.message);
     }
@@ -2356,7 +2389,7 @@ function SessionList() {
                     {!t.isMain && (
                       <button
                         onClick={(e) => deleteWorktree(t, e)}
-                        title="删除此 worktree（分支保留）"
+                        title="删除此 worktree（弹窗可勾选是否连分支一起删）"
                         className="shrink-0 px-2 rounded-lg border border-canvas-deep text-ink-faint hover:text-error hover:border-error/40 hover:bg-error-subtle transition-colors flex items-center"
                       >
                         <Trash2 size={13} />
@@ -2473,10 +2506,10 @@ function SessionList() {
                     <button
                       type="button"
                       onClick={() => setWtBaseOpen((v) => !v)}
-                      title="新分支的起点,默认当前 HEAD"
+                      title="新工作树里的代码从哪条分支的最新提交开始复制。默认=当前分支"
                       className="w-full flex items-center gap-1 bg-canvas border border-canvas-deep rounded px-1.5 py-1 text-[11px] font-mono text-ink focus:outline-none focus:border-accent/40 hover:border-accent/40"
                     >
-                      <span className="truncate flex-1 text-left">{newWorktreeBase ? `基于 ${newWorktreeBase}` : '基于当前 HEAD'}</span>
+                      <span className="truncate flex-1 text-left">{newWorktreeBase ? `起点：${newWorktreeBase}` : '起点：当前分支'}</span>
                       <ChevronDown size={11} className={`shrink-0 text-ink-faint transition-transform ${wtBaseOpen ? 'rotate-180' : ''}`} />
                     </button>
                     {wtBaseOpen && (
@@ -2492,7 +2525,7 @@ function SessionList() {
                               onClick={() => { setNewWorktreeBase(b); setWtBaseOpen(false); }}
                               className={`w-full text-left px-2.5 py-1 text-[11px] font-mono truncate hover:bg-canvas-warm ${newWorktreeBase === b ? 'text-accent' : 'text-ink-soft'}`}
                             >
-                              {b ? `基于 ${b}` : '基于当前 HEAD'}
+                              {b ? b : '当前分支（默认）'}
                             </button>
                           ))}
                           {worktreeBranches.length > 50 && (

@@ -37,6 +37,7 @@ const SETTINGS_INDEX = [
   { id: 'set-screenshot-hotkey', tab: 'overview', title: '全局截图热键', keys: '截图 热键 快捷键 screenshot hotkey 屏幕录制' },
   { id: 'set-persistent-chat', tab: 'overview', title: '会话常驻进程', keys: '常驻 复用 冷启动 进程 persistent 缓存' },
   { id: 'set-prompt-suggestions', tab: 'overview', title: '输入预测', keys: '预测 建议 suggestion 输入' },
+  { id: 'set-worktree-visibility', tab: 'overview', title: '显示 worktree 项目', keys: 'worktree 工作树 项目 列表 隐藏 显示 分支' },
   { id: 'set-max-budget', tab: 'overview', title: '对话花费上限', keys: '花费 预算 budget 成本 上限 美元' },
   { id: 'set-cache-opt', tab: 'overview', title: '缓存优化', keys: '缓存 cache 前缀 动态 系统提示' },
   { id: 'set-auto-compact', tab: 'overview', title: '自动压缩窗口', keys: '压缩 compact token 上下文 窗口' },
@@ -1613,6 +1614,30 @@ function MaxBudgetInput() {
 // 输入预测(SDK promptSuggestions):回合结束后模型追发一条对下一步输入的预测,
 // 输入框上方显示为可点击建议。生成蹭本回合的前缀缓存,成本极低;若不需要可关闭
 // (关闭后回合结束即收流,不再有建议等待窗)。
+function WorktreeVisibilityToggle() {
+  // 纯前端偏好(localStorage),不进 settings.json。改动广播事件,左侧项目列表(App.jsx)监听同步。
+  const [on, setOn] = useState(() => { try { return localStorage.getItem('cgui-show-worktree-projects') === '1'; } catch { return false; } });
+  const toggle = () => {
+    const v = !on;
+    setOn(v);
+    try { localStorage.setItem('cgui-show-worktree-projects', v ? '1' : '0'); } catch {}
+    window.dispatchEvent(new Event('cgui:worktree-visibility'));
+  };
+  return (
+    <div className="bg-canvas-warm border border-canvas-deep rounded-lg px-3 py-2.5 flex items-center gap-3">
+      <div className="min-w-0 flex-1">
+        <div className="text-xs text-ink font-body font-medium">在项目列表显示 worktree 项目</div>
+        <div className="text-[10.5px] text-ink-faint font-body">worktree 是隔离工作树。跑过会话的 worktree 默认不进左侧项目列表,以免与主项目平级混排造成干扰;需要时打开此项显示。无论开关状态,worktree 都可从顶栏「文件」的 worktree 弹窗进入。</div>
+      </div>
+      <button onClick={toggle}
+        className={`shrink-0 w-9 h-5 rounded-full transition-colors relative ${on ? 'bg-accent' : 'bg-ink-faint/30'}`}
+        title={on ? '已开启' : '已关闭'}>
+        <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-all ${on ? 'left-[18px]' : 'left-0.5'}`} />
+      </button>
+    </div>
+  );
+}
+
 function PromptSuggestionsToggle() {
   const on = useStore((s) => s.promptSuggestions);
   const setOn = useStore((s) => s.setPromptSuggestions);
@@ -1851,6 +1876,7 @@ function OverviewTab({ settings, onSave, onEnvPatch, saving }) {
       <div id="set-screenshot-hotkey"><ScreenshotHotkeyPicker /></div>
       <div id="set-persistent-chat"><PersistentChatToggle /></div>
       <div id="set-prompt-suggestions"><PromptSuggestionsToggle /></div>
+      <div id="set-worktree-visibility"><WorktreeVisibilityToggle /></div>
       <div id="set-max-budget"><MaxBudgetInput /></div>
       <div id="set-cache-opt"><ExcludeDynamicPromptToggle /></div>
       <div id="set-auto-compact"><AutoCompactWindowSelect settings={settings} onSave={onSave} saving={saving} /></div>

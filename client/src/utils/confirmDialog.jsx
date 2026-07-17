@@ -1,25 +1,28 @@
-import React, { useEffect } from 'react';
+import React, { useEffect, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 
 // Tauri 的 WKWebView/WebView2 会禁用原生 window.confirm() —— 破坏性操作的确认框
 // 点了没反应(confirm 同步返回 false → 直接 return)。这是之前删除会话按钮失效的根因。
 // 用一个 promise-based、自挂载的 React modal 替代:任何地方 `await confirmDialog(msg)`
 // 即可,返回 true/false。Esc/点击遮罩=取消,Enter/确定按钮=确认。
-function ConfirmModal({ message, danger, confirmText, cancelText, onResolve }) {
+function ConfirmModal({ message, danger, confirmText, cancelText, checkbox, onResolve }) {
+  const [checked, setChecked] = useState(false);
+  // 有 checkbox 时把勾选状态一并回传 → { confirmed, checked };否则保持布尔(向后兼容)。
+  const resolve = (confirmed) => onResolve(checkbox ? { confirmed, checked } : confirmed);
   useEffect(() => {
     // 只全局监听 Escape=取消。Enter=确认交给下方按钮的 autoFocus(焦点在按钮时
     // 浏览器原生用 Enter 激活),避免 input 聚焦场景下全局 Enter 误确认危险操作。
     const onKey = (e) => {
-      if (e.key === 'Escape') onResolve(false);
+      if (e.key === 'Escape') resolve(false);
     };
     document.addEventListener('keydown', onKey);
     return () => document.removeEventListener('keydown', onKey);
-  }, [onResolve]);
+  }, [onResolve, checked]);
 
   return (
     <div
       className="fixed inset-0 z-[10000] flex items-center justify-center bg-black/40 px-4 animate-fade-in"
-      onClick={() => onResolve(false)}
+      onClick={() => resolve(false)}
     >
       <div
         className="w-[min(92vw,420px)] rounded-xl bg-canvas border border-canvas-deep shadow-2xl p-5 animate-glass-rise"
@@ -28,19 +31,30 @@ function ConfirmModal({ message, danger, confirmText, cancelText, onResolve }) {
         <div className="text-[13px] text-ink font-body whitespace-pre-wrap leading-relaxed mb-4">
           {message}
         </div>
+        {checkbox && (
+          <label className="flex items-start gap-2 mb-4 cursor-pointer text-[12px] text-ink-soft font-body select-none">
+            <input
+              type="checkbox"
+              checked={checked}
+              onChange={(e) => setChecked(e.target.checked)}
+              className="mt-0.5 accent-red-600 shrink-0"
+            />
+            <span>{checkbox.label}</span>
+          </label>
+        )}
         <div className="flex justify-end gap-2">
           {/* danger 时焦点给取消键:队列化后弹窗一个接一个弹,若确认键 autoFocus,上一个通知弹窗
               按 Enter 关闭后下一个 danger 删除弹窗立即挂载并聚焦红键,Enter 连击/长按会未经阅读误删。 */}
           <button
             autoFocus={danger}
-            onClick={() => onResolve(false)}
+            onClick={() => resolve(false)}
             className="px-3 py-1.5 rounded-md text-[12px] text-ink-muted hover:bg-canvas-warm font-body transition-colors"
           >
             {cancelText}
           </button>
           <button
             autoFocus={!danger}
-            onClick={() => onResolve(true)}
+            onClick={() => resolve(true)}
             className={`px-3 py-1.5 rounded-md text-[12px] text-white font-body transition-colors ${danger ? 'bg-red-600 hover:bg-red-500' : 'bg-accent hover:bg-accent/90'}`}
           >
             {confirmText}
@@ -61,7 +75,7 @@ export function confirmDialog(message, opts) {
   return p;
 }
 
-function showConfirmDialog(message, { danger = false, confirmText = '确定', cancelText = '取消' } = {}) {
+function showConfirmDialog(message, { danger = false, confirmText = '确定', cancelText = '取消', checkbox = null } = {}) {
   return new Promise((resolve) => {
     const host = document.createElement('div');
     document.body.appendChild(host);
@@ -80,6 +94,7 @@ function showConfirmDialog(message, { danger = false, confirmText = '确定', ca
         danger={danger}
         confirmText={confirmText}
         cancelText={cancelText}
+        checkbox={checkbox}
         onResolve={finish}
       />
     );

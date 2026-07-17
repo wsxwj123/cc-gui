@@ -19,7 +19,18 @@ function safe(p) {
 async function findGitRoot(start) {
   let cwd = start;
   for (let i = 0; i < 24 && cwd !== '/'; i++) {
-    try { await stat(join(cwd, '.git')); return cwd; } catch {}
+    try {
+      await stat(join(cwd, '.git'));
+      // 命中 .git —— 主仓是目录、linked worktree 是 gitlink 文件,stat 都命中。若直接返回
+      // 这层,从 worktree 目录进来会把 worktree 自己当 root:isMain 比错基准(worktree 误标
+      // "主"、真主仓丢"主",#2),POST 建树 container 也会嵌套进 <worktree>-worktrees/(#1 隐患)。
+      // 用 git-common-dir 归一到主工作树:worktree 的 common-dir=主仓/.git(其父=主工作树),
+      // 主仓自身 common-dir=.git(父=自身,不变)。取不到(非常规布局)回落当层,不比原来更差。
+      try {
+        const { stdout } = await execFileP('git', ['-C', cwd, 'rev-parse', '--git-common-dir'], { timeout: 5000 });
+        return dirname(pathResolve(cwd, stdout.trim()));
+      } catch { return cwd; }
+    } catch {}
     cwd = dirname(cwd);
   }
   return null;
@@ -424,7 +435,7 @@ router.post('/worktree/reveal', async (req, res) => {
   }
 });
 
-/** DELETE /api/worktree  { cwd, path } */
+/** DELETE /api/worktree  { cwd, path, force?, deleteBranch? } */
 router.delete('/worktree', async (req, res) => {
   try {
     const cwd = safe(req.body?.cwd || '');
@@ -432,10 +443,31 @@ router.delete('/worktree', async (req, res) => {
     const root = await findGitRoot(cwd);
     if (!root) return res.status(400).json({ error: 'not inside a git repo' });
     if (wtPath === root) return res.status(400).json({ error: 'refusing to remove main worktree' });
+    // 若要连分支一起删,先从 porcelain 解析该树对应分支名(删树后就查不到了;不信客户端传参,
+    // 自己解析避免误删同名别的分支)。
+    let branch = null;
+    if (req.body?.deleteBranch === true) {
+      try {
+        const out = await execFileP('git', ['-C', root, 'worktree', 'list', '--porcelain'], { timeout: 10000 });
+        const target = normPath(wtPath);
+        let cur = null;
+        for (const line of out.stdout.split('\n')) {
+          if (line.startsWith('worktree ')) cur = line.slice(9);
+          else if (line.startsWith('branch ') && cur && normPath(cur) === target) { branch = line.slice(7).replace(/^refs\/heads\//, ''); break; }
+        }
+      } catch {}
+    }
     const args = ['-C', root, 'worktree', 'remove', wtPath];
     if (req.body?.force === true) args.push('--force'); // 删带未提交修改/未跟踪文件的工作树
     await execFileP('git', args, { timeout: 15000 });
-    res.json({ ok: true });
+    // 树移除后才能删分支(worktree 占用时 git 拒删)。-D 强删(允许未合并);删分支失败不算
+    // 整体失败——树已删成功,把分支删除结果回给前端提示即可。
+    let branchDeleted = false, branchError = null;
+    if (branch) {
+      try { await execFileP('git', ['-C', root, 'branch', '-D', branch], { timeout: 10000 }); branchDeleted = true; }
+      catch (e) { branchError = e.stderr || e.message; }
+    }
+    res.json({ ok: true, branch, branchDeleted, branchError });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
