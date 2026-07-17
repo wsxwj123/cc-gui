@@ -19,7 +19,7 @@ export function TodoPanel({ todos, plan = '', isStreaming = false }) {
   return (
     <>
       {cleanPlan && <PlanBlock plan={cleanPlan} />}
-      {hasTodos && <TodoChecklist todos={todos} />}
+      {hasTodos && <TodoChecklist todos={todos} isStreaming={isStreaming} />}
     </>
   );
 }
@@ -37,7 +37,7 @@ function ShowBar({ label, onClick }) {
   );
 }
 
-function TodoChecklist({ todos }) {
+function TodoChecklist({ todos, isStreaming = false }) {
   const [collapsed, setCollapsed] = useState(true);
   // 隐藏态记录隐藏那一刻的"完整状态签名"(含 status):任务清单一旦有任何更新(内容或勾选
   // 变化)签名即变 → 自动重新显示 = "完全隐藏直到下次任务清单更新"。
