@@ -59,9 +59,9 @@ export const BUILTIN_PROVIDERS = [
     id: 'minimax',
     name: 'MiniMax',
     type: 'openai',
-    baseURL: 'https://api.minimax.chat/v1',
-    note: 'OpenAI 兼容。',
-    docs: 'https://platform.minimaxi.com',
+    baseURL: 'https://api.minimaxi.com/v1',
+    note: '国内开放平台 OpenAI 兼容端点(官方文档已不再使用旧域名 api.minimax.chat)。国际站为 https://api.minimax.io/v1,key 与国内不通用。模型如 MiniMax-M3/M2.7。Anthropic 端点见下。',
+    docs: 'https://platform.minimaxi.com/docs/api-reference/text-openai-api',
   },
   {
     id: 'qwen-dashscope',
@@ -304,6 +304,14 @@ export const BUILTIN_PROVIDERS = [
     baseURL: 'https://api.fireworks.ai/inference',
     note: 'Fireworks 的 Anthropic 兼容端点(支持 /v1/messages 含流式)。model 需填 Fireworks id,如 accounts/fireworks/models/deepseek-v3p2。',
     docs: 'https://docs.fireworks.ai/tools-sdks/anthropic-compatibility',
+  },
+  {
+    id: 'minimax-anthropic',
+    name: 'MiniMax(Anthropic 协议)',
+    type: 'anthropic',
+    baseURL: 'https://api.minimaxi.com/anthropic',
+    note: 'MiniMax 国内开放平台 Anthropic 兼容端点(官方标注推荐)。国际站为 https://api.minimax.io/anthropic,key 与国内不通用。模型 MiniMax-M3(1M 上下文)/M2.x 系列。',
+    docs: 'https://platform.minimaxi.com/docs/api-reference/text-anthropic-api',
   },
   {
     id: 'zai-coding-anthropic',
