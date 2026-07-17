@@ -7883,6 +7883,28 @@ function CustomProviderForm({ onSaved, editing, onCancel, onDirtyChange }) {
   );
 }
 
+// 手机端模型 chip 列表:某些 provider 有上百个模型,全量渲染滚动吃力。
+// 默认只显示前 12 个 + 「+N 更多」展开/收起;纯显示层,不动数据。
+function MobileModelChips({ models, switching, onPick }) {
+  const [expanded, setExpanded] = useState(false);
+  const LIMIT = 12;
+  const shown = expanded ? models : models.slice(0, LIMIT);
+  return (
+    <div className="flex flex-wrap gap-1.5">
+      {shown.map((m) => (
+        <button key={m} disabled={switching} onClick={() => onPick(m)}
+          className="text-[11px] font-mono px-2 py-1 rounded-lg border border-canvas-deep text-ink-soft hover:border-accent hover:text-accent">{m}</button>
+      ))}
+      {models.length > LIMIT && (
+        <button type="button" onClick={() => setExpanded((v) => !v)}
+          className="text-[11px] font-body px-2 py-1 rounded-lg border border-dashed border-canvas-deep text-ink-faint hover:border-accent hover:text-accent">
+          {expanded ? '收起' : `+${models.length - LIMIT} 更多`}
+        </button>
+      )}
+    </div>
+  );
+}
+
 function MobileProviderPage() {
   const [providers, setProviders] = useState([]);
   const [openaiProviders, setOpenaiProviders] = useState([]);
@@ -7956,12 +7978,8 @@ function MobileProviderPage() {
           <div className={`text-[14px] font-body mb-1.5 flex items-center gap-2 ${isCur(p) ? 'text-accent font-medium' : 'text-ink'}`}>
             <span className="flex-1 truncate">{p.name}</span>
           </div>
-          <div className="flex flex-wrap gap-1.5">
-            {(p.models.length ? p.models : ['(默认)']).map((m) => (
-              <button key={m} disabled={switching} onClick={() => switchTo(p.id, p.models.length ? m : undefined)}
-                className="text-[11px] font-mono px-2 py-1 rounded-lg border border-canvas-deep text-ink-soft hover:border-accent hover:text-accent">{m}</button>
-            ))}
-          </div>
+          <MobileModelChips models={p.models.length ? p.models : ['(默认)']} switching={switching}
+            onPick={(m) => switchTo(p.id, p.models.length ? m : undefined)} />
           <OpenAIModelManager provider={p} onSaved={load} />
           <ProviderOverrideEditor provider={p} override={overrides[p.id]} onSaved={load} />
         </div>
@@ -7977,12 +7995,8 @@ function MobileProviderPage() {
               <span className="text-[9px] px-1 py-px bg-canvas-deep text-ink-faint rounded font-mono shrink-0">{p.type}</span>
               {isCur(p) && <Check size={14} className="text-accent shrink-0" />}
             </div>
-            <div className="flex flex-wrap gap-1.5">
-              {(p.models.length ? p.models : ['(默认)']).map((m) => (
-                <button key={m} disabled={switching} onClick={() => switchTo(p.id, p.models.length ? m : undefined)}
-                  className="text-[11px] font-mono px-2 py-1 rounded-lg border border-canvas-deep text-ink-soft hover:border-accent hover:text-accent">{m}</button>
-              ))}
-            </div>
+            <MobileModelChips models={p.models.length ? p.models : ['(默认)']} switching={switching}
+              onPick={(m) => switchTo(p.id, p.models.length ? m : undefined)} />
           </div>
           <button onClick={() => setEditingProvider(p)} title="编辑" className="p-1.5 text-ink-faint hover:text-accent shrink-0"><Pencil size={15} /></button>
           <button onClick={() => removeCustom(p.id, p.name)} title="删除" className="p-1.5 text-ink-faint hover:text-error shrink-0"><Trash2 size={15} /></button>
