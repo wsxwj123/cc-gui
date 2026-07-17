@@ -59,7 +59,7 @@ assert.ok(Math.abs(step37sfx.totalUsd - (1.35 + 8.1) / CNY) < 1e-9, `step-3.7-fl
 const step35 = computeCost('step-3.5-flash', { input_tokens: 1_000_000, output_tokens: 1_000_000 });
 assert.ok(Math.abs(step35.totalUsd - (1.5 + 4) / CNY) < 1e-9, `step-3.5-flash ${step35?.totalUsd} != ${(1.5 + 4) / CNY}`);
 
-// Kimi:开放平台官方价;highspeed 是独立档,最长前缀不许被 kimi-k2.7-code 抢走
+// Kimi:开放平台官方价;highspeed 有独立表键,走精确键命中(不进前缀兜底分支),须取自己的档
 const k27hs = computeCost('kimi-k2.7-code-highspeed', { input_tokens: 1_000_000, output_tokens: 1_000_000 });
 assert.ok(Math.abs(k27hs.totalUsd - (13 + 54) / CNY) < 1e-9, `kimi-k2.7-code-highspeed ${k27hs?.totalUsd} != ${(13 + 54) / CNY}`);
 // Kimi Code 套餐 id:k3[1m] 走 'k3' 前缀兜底,kimi-for-coding 精确命中

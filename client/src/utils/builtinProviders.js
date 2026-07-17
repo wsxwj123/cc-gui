@@ -116,7 +116,7 @@ export const BUILTIN_PROVIDERS = [
     name: 'Kimi Code(会员套餐)',
     type: 'openai',
     baseURL: 'https://api.kimi.com/coding/v1',
-    note: 'Kimi 会员 Kimi Code 权益端点(与按量付费开放平台 api.moonshot.cn 不同 host,后者见「Moonshot Kimi」)。key 在 Kimi Code 控制台创建。模型 k3(最高 1M 上下文,需 Moderato 及以上档位)/kimi-for-coding/kimi-for-coding-highspeed。官方文档主推 Anthropic 端点(见下),此为同 host 的 OpenAI 兼容路径。',
+    note: 'Kimi 会员 Kimi Code 权益端点(与按量付费开放平台 api.moonshot.cn 不同 host,后者见「Moonshot Kimi」)。key 在 Kimi Code 控制台创建。模型按档位开放:Andante→kimi-for-coding;Moderato→k3(262k 上下文);k3[1m](1M 上下文)与 kimi-for-coding-highspeed 需 Allegretto 及以上。官方文档主推 Anthropic 端点(见下),此为同 host 的 OpenAI 兼容路径。',
     docs: 'https://www.kimi.com/code/docs/third-party-tools/other-coding-agents.html',
   },
   {
@@ -174,7 +174,7 @@ export const BUILTIN_PROVIDERS = [
     name: 'Kimi Code(会员套餐,Anthropic 协议)',
     type: 'anthropic',
     baseURL: 'https://api.kimi.com/coding',
-    note: '官方文档给 Claude Code 的端点(ANTHROPIC_BASE_URL=https://api.kimi.com/coding/)。key 在 Kimi Code 控制台创建。模型 k3(1M 上下文用 k3[1m],需 Moderato 及以上档位)/kimi-for-coding/kimi-for-coding-highspeed;kimi-for-coding 需开 Thinking 否则被路由到 K2.6。',
+    note: '官方文档给 Claude Code 的端点(ANTHROPIC_BASE_URL=https://api.kimi.com/coding/)。key 在 Kimi Code 控制台创建。模型按档位开放:Andante→kimi-for-coding;Moderato→k3(262k 上下文);k3[1m](1M 上下文)与 kimi-for-coding-highspeed 需 Allegretto 及以上。kimi-for-coding 需开 Thinking 否则被路由到 K2.6。',
     docs: 'https://www.kimi.com/code/docs/third-party-tools/other-coding-agents.html',
   },
   {
