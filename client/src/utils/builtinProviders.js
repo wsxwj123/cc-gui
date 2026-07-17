@@ -183,6 +183,38 @@ export const BUILTIN_PROVIDERS = [
     note: '开源模型推理平台,OpenAI 兼容。',
     docs: 'https://docs.hyperbolic.xyz/docs/inference-api',
   },
+  {
+    id: 'poe',
+    name: 'Poe(订阅积分)',
+    type: 'openai',
+    baseURL: 'https://api.poe.com/v1',
+    note: 'Poe 的 OpenAI 兼容端点,用订阅积分计费,可调用平台上各家模型。key 在 poe.com/api/keys 创建。',
+    docs: 'https://creator.poe.com/docs/external-applications/openai-compatible-api',
+  },
+  {
+    id: '302ai',
+    name: '302.AI(聚合)',
+    type: 'openai',
+    baseURL: 'https://api.302.ai/v1',
+    note: '按量付费聚合平台,OpenAI 兼容。该平台也有 Anthropic 端点(见下)。',
+    docs: 'https://doc.302.ai/',
+  },
+  {
+    id: 'aihubmix',
+    name: 'AiHubMix(聚合)',
+    type: 'openai',
+    baseURL: 'https://aihubmix.com/v1',
+    note: 'OpenAI 兼容聚合平台。该平台也有 Anthropic 端点(见下)。',
+    docs: 'https://docs.aihubmix.com/',
+  },
+  {
+    id: 'openrouter',
+    name: 'OpenRouter',
+    type: 'openai',
+    baseURL: 'https://openrouter.ai/api/v1',
+    note: 'OpenRouter 聚合平台的 OpenAI 兼容端点。模型 ID 需带 provider 前缀(anthropic/、google/ 等)。Anthropic 协议条目见下。',
+    docs: 'https://openrouter.ai/docs/quickstart',
+  },
 
   // ─── Anthropic 协议(直接发 anthropic 格式给端点) ───
   {
@@ -248,6 +280,22 @@ export const BUILTIN_PROVIDERS = [
     baseURL: 'https://api.fireworks.ai/inference',
     note: 'Fireworks 的 Anthropic 兼容端点(支持 /v1/messages 含流式)。model 需填 Fireworks id,如 accounts/fireworks/models/deepseek-v3p2。',
     docs: 'https://docs.fireworks.ai/tools-sdks/anthropic-compatibility',
+  },
+  {
+    id: '302ai-anthropic',
+    name: '302.AI(聚合,Anthropic 协议)',
+    type: 'anthropic',
+    baseURL: 'https://api.302.ai',
+    note: '302.AI 的 Anthropic 兼容端点(CLI 会拼 /v1/messages),官方给 Claude Code 的 ANTHROPIC_BASE_URL 即此地址。',
+    docs: 'https://doc.302.ai/',
+  },
+  {
+    id: 'aihubmix-anthropic',
+    name: 'AiHubMix(聚合,Anthropic 协议)',
+    type: 'anthropic',
+    baseURL: 'https://aihubmix.com',
+    note: 'AiHubMix 的 Anthropic 兼容端点(/v1/messages,官方标注 Beta),可用 Anthropic 协议调用平台全部模型。',
+    docs: 'https://docs.aihubmix.com/cn/api/Anthropic-Compatible',
   },
 ];
 
