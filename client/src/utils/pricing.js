@@ -77,8 +77,16 @@ const PRICES = {
   'gemini-3.1-pro-preview':      usd(2.00, 12.00, 0.20),
   'gemini-3.5-flash':            usd(1.50, 9.00, 0.15),
 
-  // Moonshot Kimi — 2026-07-13 核实,微调贴合官方(CNY)
-  'kimi-k2.6':                   cny(6.8, 28.8, 1.15),
+  // Moonshot Kimi — 2026-07-17 官方页直核 platform.kimi.com/docs/pricing/chat-k3|k27-code|k26(CNY)
+  'kimi-k3':                     cny(20, 100, 2),
+  'kimi-k2.7-code-highspeed':    cny(13, 54, 2.6),
+  'kimi-k2.7-code':              cny(6.5, 27, 1.3),
+  'kimi-k2.6':                   cny(6.5, 27, 1.1),
+  // Kimi Code 会员套餐(api.kimi.com/coding)模型 id 别名——套餐制无按量单价,
+  // 按同模型开放平台价近似(k3→kimi-k3,kimi-for-coding→kimi-k2.7-code)。
+  'k3':                          cny(20, 100, 2),
+  'kimi-for-coding-highspeed':   cny(13, 54, 2.6),
+  'kimi-for-coding':             cny(6.5, 27, 1.3),
   'moonshot-v1-8k':              cny(2, 10),
   'moonshot-v1-32k':             cny(5, 20),
   'moonshot-v1-128k':            cny(10, 30),
