@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { readFileSync, writeFileSync, existsSync, realpathSync, readdirSync } from 'fs';
 import { resolveClaudeAsync, listClaudeInstallsAsync, getClaudeOverride, setClaudeOverride, winLivePathDirsAsync } from '../utils/claude-resolver.js';
+import { scanAllTools, nodeMeets, NODE_MIN_MAJOR } from '../utils/env-scanner.js';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import { tmpdir, homedir } from 'os';
@@ -717,24 +718,51 @@ async function detectGit() {
 }
 
 router.get('/env-check', async (req, res) => {
-  const { method, path: claudePath, via } = await detectInstall();
+  // ?refresh=1(面板"重新检测"):绕过全量扫描的 5 分钟缓存,装完软件立即可见。
+  const refresh = req.query.refresh === '1' || req.query.refresh === 'true';
+  const [{ method, path: claudePath, via }, python, uv, git, scan] = await Promise.all([
+    detectInstall(), detectPython(), detectUv(), detectGit(), scanAllTools({ refresh }),
+  ]);
   const claudeVersion = await getClaudeVersion(claudePath);
-  const python = await detectPython();
-  const uv = await detectUv();
-  const git = await detectGit();
+  // claude 的全部安装:复用 resolver 的全策略列举(与设置页"切换用哪个 claude"同源)。
+  const claudeInstalls = await Promise.all((await listClaudeInstallsAsync()).map(async (it) => ({
+    path: it.path, version: await getClaudeVersion(it.path),
+  })));
+  // 主检测(PATH 优先)落空但全量扫描扫到了(典型:装在非 C 盘/非常规目录且 PATH 没配)
+  // → 以扫描首个命中兜底报"已安装",resolvedPath 指向它。
+  const withScan = (primary, installs) => {
+    const p = (!primary.installed && installs.length)
+      ? { installed: true, version: installs[0].version, path: installs[0].path, via: 'scan' }
+      : primary;
+    return {
+      installed: p.installed, version: p.version || null,
+      // PATH 直查命中时 detect* 的 path 是裸命令名(如 'git'),换成扫描给出的绝对路径。
+      resolvedPath: (p.path && /[\\/]/.test(p.path)) ? p.path
+        : (installs.find((i) => i.via === 'PATH')?.path || p.path || null),
+      via: p.via || (p.installed ? 'PATH' : null),
+      installs,
+    };
+  };
   res.json({
-    node: { installed: true, version: process.version, required: true },
+    node: {
+      installed: true, version: process.version, required: true,
+      // GUI 后端实际跑在哪个 node 上(Tauri find_node 选定);扫描列表是机器上全部 node。
+      resolvedPath: process.execPath, via: 'runtime',
+      meets: nodeMeets(process.version), minVersion: String(NODE_MIN_MAJOR),
+      installs: scan.node,
+    },
     // resolvedPath/via:实际解析到的二进制位置与命中策略(PATH / login-shell /
-    // npm-prefix / known-path),检测面板据此展示"从哪找到的"。
+    // npm-prefix / known-path / scan),检测面板据此展示"从哪找到的"。
     claude: {
       // 解析到路径即算已装(即便 --version 超时未取到版本号),避免"已装但探测慢"被误报未安装。
       installed: !!claudePath, version: claudeVersion || null, method, required: true,
       resolvedPath: claudePath || null, via: via || null,
       versionProbeFailed: !!claudePath && !claudeVersion,
+      installs: claudeInstalls,
     },
-    git: { installed: git.installed, version: git.version || null, required: false },
-    python: { installed: python.installed, version: python.version || null, required: false },
-    uv: { installed: uv.installed, version: uv.version || null, required: false },
+    git: { ...withScan(git, scan.git), required: false },
+    python: { ...withScan(python, scan.python), required: false },
+    uv: { ...withScan(uv, scan.uv), required: false },
     platform: process.platform === 'darwin' ? 'mac' : process.platform === 'win32' ? 'windows' : 'linux',
   });
 });
