@@ -270,7 +270,7 @@ export const BUILTIN_PROVIDERS = [
     name: '智谱 GLM(Anthropic 协议)',
     type: 'anthropic',
     baseURL: 'https://open.bigmodel.cn/api/anthropic',
-    note: '智谱的 Anthropic 兼容端点(官方文档已标注)。模型如 glm-4.7/glm-5。',
+    note: '智谱的 Anthropic 兼容端点(官方文档已标注)。模型如 glm-5.2,旧款 glm-4.7 仍兼容。',
     docs: 'https://docs.bigmodel.cn/',
   },
   {
