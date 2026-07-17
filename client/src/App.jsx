@@ -5523,7 +5523,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         setLocalMessages(messages.slice(0, idxInStore));
         setChatMessages((prev) => prev.filter((m) => m.type === 'btw')); // 保留旁问气泡(本地注记)
       } else if (idxInChat !== -1) {
-        setChatMessages((prev) => prev.slice(0, idxInChat));
+        // 保留旁问:回滚首条(draft,消息还在 chatMessages)走此支,原 slice 会连 btw 一起切掉。
+        // 对齐 CLI 原生语义 —— /btw 是不落盘的临时 fork,主会话回滚与旁问物理无关,任何回滚都保留旁问(#6)。
+        setChatMessages((prev) => prev.filter((m, i) => i < idxInChat || m.type === 'btw'));
       }
     };
 
