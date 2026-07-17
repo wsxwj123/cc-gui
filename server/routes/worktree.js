@@ -354,7 +354,9 @@ export async function mergeWorktreeIntoMain(root, wtPath) {
     mergedCommits = parseInt(c.stdout.trim(), 10) || 0;
   } catch {}
   try {
-    await execFileP('git', ['-C', root, 'merge', '--no-edit', `refs/heads/${branch}`], { timeout: 30000, env: gitIdentityEnv() });
+    // -m 定制提交消息:默认消息会把整个 ref 写进去(Merge branch 'refs/heads/gui/x');
+    // 合并目标仍传全 ref(躲开与同名文件的歧义),消息里用短分支名。-m 自带免编辑器。
+    await execFileP('git', ['-C', root, 'merge', '-m', `Merge branch '${branch}' (Claude GUI)`, `refs/heads/${branch}`], { timeout: 30000, env: gitIdentityEnv() });
   } catch (err) {
     // 冲突清单必须在 abort 前取(abort 后 diff-filter=U 就空了)
     let conflicts = [];
