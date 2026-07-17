@@ -105,6 +105,24 @@ export function GuideTour({ open, onClose, hasProject }) {
     setPos({ top: top / zoom, left: left / zoom, zoom });
   }, [open, rect, i]);
 
+  // 兜底看门狗:目标元素中途消失(面板关闭/布局变化)时 rect/pos 残留,全屏遮罩会把
+  // 整页锁死(preview 实测过"顶栏全点不动")。定期验证当前目标仍在且可见:失效则顺延
+  // 到下一个有效步骤,全部无效直接结束 tour。失败方向=宁可结束指引也不能锁死界面。
+  useEffect(() => {
+    if (!open) return;
+    const timer = setInterval(() => {
+      let idx = i;
+      while (idx < steps.length) {
+        const el = document.querySelector(`[data-tour="${steps[idx].sel}"]`);
+        if (el && el.getBoundingClientRect().width > 0) break;
+        idx++;
+      }
+      if (idx >= steps.length) onClose();
+      else if (idx !== i) setI(idx);
+    }, 600);
+    return () => clearInterval(timer);
+  }, [open, i, steps, onClose]);
+
   const step = steps[i];
   // !step 兜底:tour 开着时 hasProject 变化使 steps 变短、i 越界 → 不渲染(定位 effect 会纠正 i)。
   if (!open || !rect || !step) return null;
@@ -115,15 +133,17 @@ export function GuideTour({ open, onClose, hasProject }) {
   const spot = { top: (rect.top - pad) / z, left: (rect.left - pad) / z, width: (rect.width + pad * 2) / z, height: (rect.height + pad * 2) / z };
 
   return (
-    <div ref={overlayRef} className="fixed inset-0 z-[400]">
+    // 根容器 pointer-events-none:遮罩是否拦截由下面的点击层单独控制,
+    // 说明卡未定位完成(pos 为空 = 卡片不可见)时不拦任何点击,防锁死。
+    <div ref={overlayRef} className="fixed inset-0 z-[400] pointer-events-none">
       {/* 高亮框 + 四周压暗(box-shadow 撑满屏) */}
       <div style={{ position: 'fixed', ...spot, borderRadius: 10, boxShadow: '0 0 0 9999px rgba(0,0,0,0.55)', transition: 'top .15s, left .15s, width .15s, height .15s' }}
         className="ring-2 ring-accent pointer-events-none" />
-      {/* 点暗区跳过 */}
-      <div className="absolute inset-0" onClick={onClose} />
+      {/* 点暗区跳过 —— 只在说明卡真实可见时才拦截整页点击 */}
+      {pos && <div className="absolute inset-0 pointer-events-auto" onClick={onClose} />}
       {/* 说明卡 */}
       <div ref={tipRef} style={{ position: 'fixed', width: TIP_W, top: pos?.top ?? 0, left: pos?.left ?? 0, visibility: pos ? 'visible' : 'hidden', zIndex: 5 }}
-        className="bg-canvas border border-canvas-deep rounded-xl shadow-2xl p-4 animate-glass-rise">
+        className="bg-canvas border border-canvas-deep rounded-xl shadow-2xl p-4 animate-glass-rise pointer-events-auto">
         <div className="flex items-center gap-2 mb-1.5">
           <span className="text-[13px] font-display font-semibold text-ink flex-1">{step.title}</span>
           <span className="text-[10px] text-ink-faint font-mono shrink-0">{i + 1}/{steps.length}</span>
