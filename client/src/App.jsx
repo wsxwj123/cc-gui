@@ -2338,7 +2338,7 @@ function SessionList() {
                       onClick={() => { if (!t.prunable) enterWorktree(t); }}
                       onKeyDown={(e) => { /* target===currentTarget:徽章上按 Enter 冒泡不误触进入 */ if (!t.prunable && e.target === e.currentTarget && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); enterWorktree(t); } }}
                       title={t.prunable ? '目录已丢失(被手动删除),只能删除此记录' : undefined}
-                      className={`flex-1 min-w-0 text-left px-3 py-2 rounded-lg border border-canvas-deep transition-colors group ${t.prunable ? 'opacity-50 cursor-not-allowed' : 'hover:bg-canvas-warm cursor-pointer'}`}
+                      className={`flex-1 min-w-0 text-left px-3 py-2 rounded-lg border transition-colors group ${t.prunable ? 'opacity-50 cursor-not-allowed border-canvas-deep' : selectedProject?.path === t.path ? 'border-accent bg-accent/8 cursor-pointer' : 'border-canvas-deep hover:bg-canvas-warm cursor-pointer'}`}
                     >
                       <div className="flex items-center gap-2 mb-0.5 min-w-0 flex-wrap">
                         <GitBranch size={12} className="text-accent shrink-0" />
@@ -2347,6 +2347,9 @@ function SessionList() {
                         </span>
                         {t.isMain && (
                           <span className="text-[9px] px-1.5 py-0.5 bg-canvas-deep text-ink-faint rounded font-mono">主</span>
+                        )}
+                        {selectedProject?.path === t.path && (
+                          <span className="text-[9px] px-1.5 py-0.5 bg-accent/15 text-accent rounded font-mono">当前</span>
                         )}
                         {t.prunable && (
                           <span className="text-[9px] px-1.5 py-0.5 bg-red-50 text-red-600 rounded font-mono">目录已丢失</span>
