@@ -68,6 +68,25 @@ assert.ok(Math.abs(k3m.totalUsd - (20 + 100) / CNY) < 1e-9, `k3[1m] ${k3m?.total
 const kfc = computeCost('kimi-for-coding', { input_tokens: 1_000_000, output_tokens: 1_000_000 });
 assert.ok(Math.abs(kfc.totalUsd - (6.5 + 27) / CNY) < 1e-9, `kimi-for-coding ${kfc?.totalUsd} != ${(6.5 + 27) / CNY}`);
 
+// Groq(2026-07-17):gpt-oss-120b 官方 id 带 openai/ 前缀,精确命中 $0.15/$0.60,cacheRead 半价 $0.075。
+const groq = computeCost('openai/gpt-oss-120b', { input_tokens: 1_000_000, cache_read_input_tokens: 1_000_000 });
+assert.ok(Math.abs(groq.totalUsd - (0.15 + 0.075)) < 1e-9, `groq gpt-oss-120b ${groq?.totalUsd} != 0.225`);
+// Cerebras 裸 id 'gpt-oss-120b' 是不同键($0.25/$0.69),不被 Groq 前缀抢。
+const cere = computeCost('gpt-oss-120b', { output_tokens: 1_000_000 });
+assert.ok(Math.abs(cere.totalUsd - 0.69) < 1e-9, `cerebras gpt-oss-120b ${cere?.totalUsd} != 0.69`);
+
+// Perplexity:'sonar' 短键不许抢走 'sonar-pro'(longest-prefix)。sonar-pro = $3/$15。
+const spro = computeCost('sonar-pro', { input_tokens: 1_000_000, output_tokens: 1_000_000 });
+assert.ok(Math.abs(spro.totalUsd - (3 + 15)) < 1e-9, `sonar-pro ${spro?.totalUsd} != 18`);
+
+// Mistral:base 前缀键兜底带版本后缀 id。mistral-large-2512 → 'mistral-large' = $2/$6。
+const mlarge = computeCost('mistral-large-2512', { input_tokens: 1_000_000, output_tokens: 1_000_000 });
+assert.ok(Math.abs(mlarge.totalUsd - (2 + 6)) < 1e-9, `mistral-large-2512 ${mlarge?.totalUsd} != 8`);
+
+// Z.ai:'glm-5' 不许抢走 'glm-5.2'(longest-prefix);glm-5.2 input = $1.4。
+const glm52 = computeCost('glm-5.2', { input_tokens: 1_000_000 });
+assert.ok(Math.abs(glm52.totalUsd - 1.4) < 1e-9, `glm-5.2 ${glm52?.totalUsd} != 1.4`);
+
 // formatCost renders CNY (×7.2). 0.09125 USD → ¥0.657 (<¥1 → 3 decimals).
 assert.strictEqual(formatCost(expected), '¥0.657');
 

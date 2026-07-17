@@ -138,6 +138,55 @@ const PRICES = {
 
   // 百度文心 ERNIE(qianfan): 未核实(官方页JS渲染+搜索无可靠聚合)→无离线兜底,
   // 运行时依赖 LiteLLM(litellm_provider=baidu)。切勿编造。
+
+  // ── 海外推理平台补全(2026-07-17 官方页直核)────────────────────────
+  // 这批 provider 官方定价页多为 SSR/文档站,已逐条上官方页核对 input/output/cache。
+  // 币种均 USD(usd())。缓存口径按各家官方计费模型逐条注释。
+
+  // Groq — groq.com/pricing 直核 2026-07-17。缓存:cached input 打 5 折(cacheRead=0.5×input),
+  // 不收 cache 写入费(cacheWrite=input)。gpt-oss 官方 id 带 openai/ 前缀。
+  'llama-3.3-70b-versatile':     usd(0.59, 0.79, 0.295, 0.59),
+  'llama-3.1-8b-instant':        usd(0.05, 0.08, 0.025, 0.05),
+  'openai/gpt-oss-120b':         usd(0.15, 0.60, 0.075, 0.15),
+  'openai/gpt-oss-20b':          usd(0.075, 0.30, 0.0375, 0.075),
+
+  // Perplexity — docs.perplexity.ai 定价章节直核 2026-07-17。sonar 系无 prompt caching
+  // (cacheRead/cacheWrite=input,无缓存计费);另有按请求的搜索上下文费(low/med/high,
+  // $5~$14/1K 请求)未建模,此处仅 token 单价。'sonar' 短键兜底同族其它 id(longest-prefix
+  // 使 sonar-pro/-reasoning-pro/-deep-research 命中各自档)。
+  'sonar':                       usd(1, 1, 1, 1),
+  'sonar-pro':                   usd(3, 15, 3, 15),
+  'sonar-reasoning-pro':         usd(2, 8, 2, 8),
+  'sonar-deep-research':         usd(2, 8, 2, 8),
+
+  // Mistral — mistral.ai/pricing 直核 2026-07-17。缓存:cached input -90%
+  // (cacheRead=0.1×input=默认),不收写入费(cacheWrite=input)。用 base 前缀键
+  // 兜底带版本后缀 id(mistral-large-2512 等)。codestral 未拿到明确 chat 单价→不编。
+  'mistral-large':               usd(2, 6, 0.2, 2),
+  'mistral-medium':              usd(0.4, 2, 0.04, 0.4),
+  'mistral-small':               usd(0.1, 0.3, 0.01, 0.1),
+
+  // Cerebras — cerebras.ai/pricing + inference-docs 直核 2026-07-17。
+  // 仅 gpt-oss-120b 拿到明确 input/output 拆分($0.25/$0.69);llama/qwen 官方页只给
+  // "10c/60c" 笼统值、未拆 in/out→不编。无 prompt caching(cacheRead/cacheWrite=input)。
+  // 注意与 Groq 的 'openai/gpt-oss-120b' 是不同 id(Cerebras 裸名),不冲突。
+  'gpt-oss-120b':                usd(0.25, 0.69, 0.25, 0.69),
+
+  // Z.ai 智谱国际站 — docs.z.ai/guides/overview/pricing 直核 2026-07-17(USD)。
+  // glm-4.6/4.5/4.5-air 与国内 bigmodel 同 id,现值(≈$0.60/$2.20、$0.20/$1.10)一致→不重复加。
+  // 下列 glm-5/5.2/4.7 为国际站新 id。缓存:cached input 单列命中价,写入"限时免费"→cacheWrite=input。
+  'glm-5.2':                     usd(1.4, 4.4, 0.26, 1.4),
+  'glm-5':                       usd(1.0, 3.2, 0.2, 1.0),
+  'glm-4.7':                     usd(0.6, 2.2, 0.11, 0.6),
+
+  // 未加(拿不到官方 per-model 数字,按口径留空不编):
+  //   Together / Fireworks:定价页 JS 渲染取不到干净 per-id 单价,且 id 带 org/账户前缀
+  //     (meta-llama/…、accounts/fireworks/models/…)、按参数尺寸分档;其托管的开源模型
+  //     已在 LiteLLM 远端表(together_ai/*、fireworks_ai/*)覆盖,运行时优先生效。
+  //   Hyperbolic:无独立官方价目页,取不到→留空。
+  //   MiniMax M3/M2.7:platform.minimaxi.com 文本模型价 JS 渲染核不到→保留现有 M2/M1 键。
+  //   Poe:订阅积分制,无按量单价→不入表。
+  //   302.AI / AiHubMix / OpenRouter:聚合平台按上游模型计价,LiteLLM 已覆盖上游 id→不加本地键。
 };
 
 // ── Z2: LiteLLM 远端单价表 ──────────────────────────────────────
