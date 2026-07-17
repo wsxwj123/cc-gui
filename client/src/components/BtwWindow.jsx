@@ -46,6 +46,26 @@ export default function BtwWindow({
   // 外部信号(主输入框 /btw 或窗口内发送)→ 展开。
   useEffect(() => { if (openSignal) setCollapsed(false); }, [openSignal]);
 
+  // #1 浮窗右缘对齐输入框右缘:输入框是居中定宽列(--content-max),浮窗贴 pane 右缘天生
+  // 不齐。按 offsetParent(=SessionDetail 根)宽算内容列右缘距 pane 右缘的内边距,夹到 ≥26
+  // 以让开右缘 TurnScrubber(right:4 width:18)。pane 拖拽/窗口缩放都要重算 → ResizeObserver。
+  const [rightInset, setRightInset] = useState(26);
+  useEffect(() => {
+    if (mobile) return;
+    const parent = rootRef.current?.offsetParent;
+    if (!parent) return;
+    const calc = () => {
+      const pw = parent.clientWidth || 0;
+      if (!pw) return;
+      const cmax = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--content-max')) || 1120;
+      setRightInset(Math.max(26, (pw - Math.min(cmax, pw - 32)) / 2));
+    };
+    calc();
+    const ro = new ResizeObserver(calc);
+    ro.observe(parent);
+    return () => ro.disconnect();
+  }, [expanded, mobile]);
+
   // 新内容滚到底。
   useEffect(() => {
     if (expanded && bodyRef.current) bodyRef.current.scrollTop = bodyRef.current.scrollHeight;
@@ -85,9 +105,10 @@ export default function BtwWindow({
   if (!expanded) {
     return (
       <button
+        ref={rootRef}
         onClick={() => { if (paneIsActive && !suppressed) setCollapsed(false); }}
         title="旁问（不打断当前工作、不写入会话历史）"
-        style={{ position: 'absolute', right: 26, bottom: 12, zIndex: 46, opacity: suppressed ? 0.45 : 1, pointerEvents: suppressed ? 'none' : undefined }}
+        style={{ position: 'absolute', right: mobile ? 26 : rightInset, bottom: 12, zIndex: 46, opacity: suppressed ? 0.45 : 1, pointerEvents: suppressed ? 'none' : undefined }}
         className="max-md:right-4 flex items-center gap-1.5 rounded-full border border-canvas-deep bg-canvas-warm/90 backdrop-blur px-3 py-2 shadow-md hover:border-accent/40 transition-colors"
       >
         <MessageSquare size={14} className="text-accent" />
@@ -106,7 +127,7 @@ export default function BtwWindow({
     ? { position: 'absolute', left: 8, right: 8, bottom: 8, height: '68%', zIndex: 46 }
     : pos
     ? { position: 'absolute', left: pos.left, top: pos.top, width: 360, maxHeight: '72%', zIndex: 46 }
-    : { position: 'absolute', right: 26, bottom: 12, width: 360, maxHeight: '72%', zIndex: 46 };
+    : { position: 'absolute', right: rightInset, bottom: 12, width: 360, maxHeight: '72%', zIndex: 46 };
 
   return (
     <div ref={rootRef} style={posStyle}
