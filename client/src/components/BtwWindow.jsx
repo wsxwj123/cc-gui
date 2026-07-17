@@ -61,7 +61,13 @@ export default function BtwWindow({
     const calc = () => {
       const pw = parent.clientWidth || 0;
       if (!pw) return;
-      const cmax = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--content-max')) || 1120;
+      // --content-max 是 clamp(...) 表达式,parseFloat 取不到 px;用 probe(挂到 pane 内、同为
+      // 布局 px、与 pw 同单位不受 app 缩放影响)读 clientWidth 解析出真实 content-max。
+      const probe = document.createElement('div');
+      probe.style.cssText = 'position:absolute;visibility:hidden;height:0;width:var(--content-max)';
+      parent.appendChild(probe);
+      const cmax = probe.clientWidth || pw;
+      probe.remove();
       setRightInset(Math.max(26, (pw - Math.min(cmax, pw - 32)) / 2));
     };
     calc();
