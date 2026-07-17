@@ -25,6 +25,18 @@ const mixed = buildAddArgs({
 });
 assert.deepStrictEqual(mixed.slice(mixed.indexOf('https://x.dev/mcp') + 1), ['-H', 'X-Ok: v2', '-e', 'K=1']);
 
+// RFC 7230 token 字符集:下划线等合法键保留(实抓 2026-07 CLI 接受 X-Custom_Key);
+// 被丢弃的键收集进 droppedHeaderKeys(只含键名不含值 —— 值可能是密钥,不得进响应/日志)。
+const dropped = [];
+const tokenArgs = buildAddArgs({
+  name: 't', transport: 'http', url: 'https://x.dev/mcp',
+  headers: { 'X-Custom_Key': 'v1', 'x-api.key': 'v2', 'Bad Key': 'secret-value', 'has:colon': 'v' }, env: {}, scope: 'user',
+}, dropped);
+assert.ok(tokenArgs.includes('X-Custom_Key: v1'), '下划线键名合法,不再被丢弃');
+assert.ok(tokenArgs.includes('x-api.key: v2'), '点号键名合法(token 字符)');
+assert.deepStrictEqual(dropped, ['Bad Key', 'has:colon'], '被丢弃的键名收集进 droppedHeaderKeys');
+assert.ok(!JSON.stringify(dropped).includes('secret-value'), 'droppedHeaderKeys 不含 header 值');
+
 // stdio:headers 不产生 -H(仅 http/sse 支持请求头)。
 const stdioArgs = buildAddArgs({
   name: 'fs', transport: 'stdio', commandLine: 'npx -y pkg',

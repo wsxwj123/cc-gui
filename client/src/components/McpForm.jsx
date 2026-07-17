@@ -19,6 +19,10 @@ const SCOPES = [
   { v: 'local', label: 'local · 仅本机当前项目' },
 ];
 
+// 请求头键名校验:RFC 7230 token 字符集。与 server/routes/mcp.js 的 HEADER_KEY_RE 同一
+// 口径 —— server 对非法键静默丢弃(仅响应带 warning),这里在提交前即时标红,改任一侧必须同步另一侧。
+const HEADER_KEY_RE = /^[!#$%&'*+.^_`|~A-Za-z0-9-]+$/;
+
 export function McpForm({ editing, onClose, onSaved }) {
   const isEdit = !!editing;
   // 不再用全屏 spinner 阻塞:编辑时立即用列表已有的 command/transport 回填,表单秒开可编辑。
@@ -30,6 +34,7 @@ export function McpForm({ editing, onClose, onSaved }) {
   const [refining, setRefining] = useState(isEdit); // 后台补全中
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState('');
+  const [warn, setWarn] = useState(''); // 保存成功但 server 丢弃了非法请求头键时的响应 warning
 
   const [name, setName] = useState(editing?.name || '');
   const [label, setLabel] = useState('');
@@ -206,9 +211,12 @@ export function McpForm({ editing, onClose, onSaved }) {
   // 模板/注册表声明的 env、请求头(带 hint)值为空 → 内联警告。不阻断保存(允许先添加稍后补填)。
   const emptyHinted = (rows) => rows.filter((r) => r.hint && r.k.trim() && !String(r.v || '').trim()).map((r) => r.k.trim());
   const emptyTplEnvKeys = [...emptyHinted(envRows), ...(isStdio ? [] : emptyHinted(headerRows))];
+  // 非法请求头键名(server 保存时会丢弃)→ 提交前即时标红提示,不阻断保存(与 server 行为一致)。
+  const badHeaderKeys = isStdio ? [] : headerRows.map((r) => r.k.trim()).filter((k) => k && !HEADER_KEY_RE.test(k));
 
   const save = async () => {
     setErr('');
+    setWarn('');
     if (!name.trim()) { setErr('ID 不能为空'); return; }
     if (isStdio && !commandLine.trim()) { setErr('命令不能为空'); return; }
     if (!isStdio && !url.trim()) { setErr('URL 不能为空'); return; }
@@ -229,6 +237,8 @@ export function McpForm({ editing, onClose, onSaved }) {
       const d = await r.json();
       if (!r.ok) throw new Error(d.error || '保存失败');
       onSaved?.(name.trim(), !isEdit); // 传回名称 + 是否新增,供面板对新 server 自动探测连通性
+      // 保存成功但 server 丢弃了非法请求头键 → 留在表单里内联展示 warning(自动关掉用户就看不见了)。
+      if (d.warning) { setWarn(d.warning); return; }
       onClose?.();
     } catch (e) {
       setErr(e.message);
@@ -446,8 +456,9 @@ export function McpForm({ editing, onClose, onSaved }) {
                 {headerRows.length === 0 && <div className={hintCls}>无。若该 server 需要认证,点 + 添加,如 Authorization = Bearer xxx。</div>}
                 {headerRows.map((row, i) => (
                   <div key={i} className="flex items-center gap-2">
+                    {/* 非法键名(server 保存时会丢弃)即时标红:直接替换 border 类,不靠 !important 竞争 */}
                     <input value={row.k} onChange={(e) => setHeader(i, 'k', e.target.value)} placeholder="Header-Name"
-                      className={`${inputCls} font-mono flex-1`} />
+                      className={`${row.k.trim() && !HEADER_KEY_RE.test(row.k.trim()) ? inputCls.replace('border-canvas-deep', 'border-error') : inputCls} font-mono flex-1`} />
                     <span className="text-ink-faint">:</span>
                     {/* 请求头的值多为 Bearer token 等密钥,按敏感值处理:密码框显示。 */}
                     <input type="password" autoComplete="off" value={row.v} onChange={(e) => setHeader(i, 'v', e.target.value)} placeholder="value"
@@ -455,6 +466,11 @@ export function McpForm({ editing, onClose, onSaved }) {
                     <button onClick={() => delHeader(i)} className="p-1 text-ink-faint hover:text-error shrink-0"><Trash2 size={13} /></button>
                   </div>
                 ))}
+                {badHeaderKeys.length > 0 && (
+                  <div className="text-[11px] text-error font-body leading-snug">
+                    键名 {badHeaderKeys.join('、')} 含非法字符(仅允许字母数字与 {'!#$%&\'*+.^_`|~-'}),保存时该请求头将被忽略。
+                  </div>
+                )}
                 {/* 注册表条目声明的请求头说明(必填/密钥等),布局同 env 的 hint 区。 */}
                 {headerRows.some((r) => r.hint) && (
                   <div className="rounded-lg bg-canvas-warm/60 border border-canvas-deep px-3 py-2 text-[11px] text-ink-muted font-body leading-snug space-y-1">
@@ -512,6 +528,12 @@ export function McpForm({ editing, onClose, onSaved }) {
             )}
 
             {err && <div className="text-[12px] text-error bg-error/10 border border-error/20 rounded px-3 py-2 whitespace-pre-wrap break-all">{err}</div>}
+            {/* 保存已成功但 server 丢弃了非法请求头键:琥珀色警告(非错误),用户修正键名重新保存即可。 */}
+            {warn && (
+              <div className="text-[12px] text-amber-700 bg-amber-500/10 border border-amber-500/25 rounded px-3 py-2 whitespace-pre-wrap break-all">
+                已保存,但:{warn}
+              </div>
+            )}
           </div>
         )}
 

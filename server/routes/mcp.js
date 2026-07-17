@@ -510,6 +510,12 @@ const detailsCache = new Map(); // name -> { at, out }
 const DETAILS_TTL_MS = 5 * 60_000;
 function invalidateDetailsCache() { detailsCache.clear(); }
 
+// 请求头键名白名单:RFC 7230 token 字符集(字母数字与 !#$%&'*+.^_`|~-)。之前只放
+// [A-Za-z0-9-],下划线等合法键(实抓 CLI 接受 X-Custom_Key)被静默丢弃 → 保存"成功"
+// 但 server 实际没带该头,连接失败无线索。client/src/components/McpForm.jsx 内联同一
+// regex 做提交前即时校验 —— 改这里必须同步那边。
+export const HEADER_KEY_RE = /^[!#$%&'*+.^_`|~A-Za-z0-9-]+$/;
+
 // 从 `claude mcp get` 文本解析 Headers: 段(缩进的 `Key: value` 行,http/sse 才有)。
 // 实抓(2026-07):get 输出明文值(add 输出才 [REDACTED]),可用于编辑回显。
 function parseHeadersFromDetails(details) {
@@ -518,7 +524,7 @@ function parseHeadersFromDetails(details) {
   if (section) {
     for (const line of section.split('\n')) {
       if (/^To remove/.test(line.trim())) break;
-      const hm = line.match(/^\s+([A-Za-z0-9-]+):\s?(.*)$/);
+      const hm = line.match(/^\s+([!#$%&'*+.^_`|~A-Za-z0-9-]+):\s?(.*)$/);
       if (hm) headers[hm[1]] = hm[2];
     }
   }
@@ -698,7 +704,7 @@ router.put('/mcp/:name/enable', async (req, res) => {
       args.push(String(httpUrl).trim());
       // 禁用时存下的请求头原样带回,否则带 headers 的 server 启用后连不上。
       for (const [k, v] of Object.entries(config.headers || {})) {
-        if (/^[A-Za-z0-9-]+$/.test(String(k).trim())) args.push('-H', `${String(k).trim()}: ${v ?? ''}`);
+        if (HEADER_KEY_RE.test(String(k).trim())) args.push('-H', `${String(k).trim()}: ${v ?? ''}`);
       }
     } else {
       args.push('--', String(config.command), ...((config.args || []).map(String)));
@@ -791,7 +797,9 @@ async function rewriteUvCommandLine(commandLine) {
 }
 
 // export 供单测(tests/unit/check-mcp-add-headers.mjs)直接断言参数组装。
-export function buildAddArgs({ name, transport, commandLine, url, env, headers, scope }) {
+// droppedHeaderKeys(可选,调用方传入数组):收集因键名非法被丢弃的请求头键,
+// 供 add/编辑端点在响应里带 warning —— 否则用户"保存成功"但该头没提交,连接失败无线索。
+export function buildAddArgs({ name, transport, commandLine, url, env, headers, scope }, droppedHeaderKeys = []) {
   const args = ['mcp', 'add'];
   if (transport === 'http' || transport === 'sse') args.push('-t', transport);
   args.push('-s', scope || 'user');
@@ -805,11 +813,13 @@ export function buildAddArgs({ name, transport, commandLine, url, env, headers, 
   if (transport === 'http' || transport === 'sse') {
     if (!url || !url.trim()) throw new Error('URL 不能为空');
     // 自定义请求头:每对一个 `-H "Key: Value"`(CLI 2026-07 实抓:-H, --header <header...>)。
-    // 键名限 HTTP token 字符,含冒号/空格的非法键直接丢弃(键来自表单/注册表,是数据不是指令)。
+    // 键名限 RFC 7230 token 字符,含冒号/空格的非法键整对丢弃并记入 droppedHeaderKeys
+    // (键来自表单/注册表,是数据不是指令;只记键名不记值,避免密钥进日志/响应)。
     const headerFlags = [];
     for (const [k, v] of Object.entries(headers || {})) {
       const key = String(k || '').trim();
-      if (/^[A-Za-z0-9-]+$/.test(key)) headerFlags.push('-H', `${key}: ${v ?? ''}`);
+      if (HEADER_KEY_RE.test(key)) headerFlags.push('-H', `${key}: ${v ?? ''}`);
+      else if (key) droppedHeaderKeys.push(key);
     }
     // url 在前,-H/-e 放末尾(变长参数在结尾不会吞掉其它位置参数)。
     args.push(url.trim(), ...headerFlags, ...envFlags);
@@ -820,6 +830,11 @@ export function buildAddArgs({ name, transport, commandLine, url, env, headers, 
     args.push(...envFlags, '--', command, ...cargs);
   }
   return args;
+}
+
+// 非法请求头键被丢弃时的响应 warning 文案(只含键名,不含值)。
+function droppedHeaderWarning(keys) {
+  return `请求头 ${keys.join('、')} 的键名含非法字符(仅允许字母数字与 !#$%&'*+.^_\`|~-),已忽略未提交,该 server 可能因此连不上。`;
 }
 
 // 跑 `claude mcp add`。坑:同名已存在时它把 "already exists" 打到 **stderr** 且**退出码 0**
@@ -854,7 +869,8 @@ router.post('/mcp', async (req, res) => {
     const scope = ['user', 'project', 'local'].includes(b.scope) ? b.scope : 'user';
     const transport = ['stdio', 'http', 'sse'].includes(b.transport) ? b.transport : 'stdio';
     if (transport === 'stdio') b.commandLine = await rewriteUvCommandLine(b.commandLine);
-    const args = buildAddArgs({ ...b, transport, scope });
+    const droppedHeaderKeys = [];
+    const args = buildAddArgs({ ...b, transport, scope }, droppedHeaderKeys);
     await runMcpAdd(args, b.name); // 检测"already exists"假成功
     await setAutoApprove(b.name, !!b.autoApprove);
     await setMeta(b.name, b.label);
@@ -862,7 +878,7 @@ router.post('/mcp', async (req, res) => {
     try { const dis = await readDisabled(); if (dis[b.name]) { delete dis[b.name]; await writeDisabled(dis); } } catch {}
     try { await syncMcpToAgents({ add: [b.name] }); } catch {} // 自动让所有 agent 能用这个 MCP
     invalidateMcpCache();
-    res.json({ ok: true, name: b.name });
+    res.json({ ok: true, name: b.name, ...(droppedHeaderKeys.length ? { warning: droppedHeaderWarning(droppedHeaderKeys) } : {}) });
   } catch (err) { res.status(err.status || 500).json({ error: err.message }); }
 });
 
@@ -877,7 +893,8 @@ router.put('/mcp/:name/config', async (req, res) => {
     const scope = ['user', 'project', 'local'].includes(b.scope) ? b.scope : 'user';
     const transport = ['stdio', 'http', 'sse'].includes(b.transport) ? b.transport : 'stdio';
     if (transport === 'stdio') b.commandLine = await rewriteUvCommandLine(b.commandLine);
-    const addArgs = buildAddArgs({ ...b, name: newName, transport, scope });
+    const droppedHeaderKeys = [];
+    const addArgs = buildAddArgs({ ...b, name: newName, transport, scope }, droppedHeaderKeys);
     // 改名场景:若目标名已被另一个服务器占用,必须在删除旧的之前拦下 —— 否则先 remove 旧的、
     // 再 add 撞 "already exists" 静默失败 → 旧服务器没了、新的没加上 = 数据丢失。
     if (newName !== name && await getServerDetails(newName)) {
@@ -896,7 +913,7 @@ router.put('/mcp/:name/config', async (req, res) => {
     // 改名:同步各 agent 的工具引用(旧名移除、新名加入);同名编辑无需动。
     if (newName !== name) { try { await syncMcpToAgents({ add: [newName], remove: [name] }); } catch {} }
     invalidateMcpCache();
-    res.json({ ok: true, name: newName });
+    res.json({ ok: true, name: newName, ...(droppedHeaderKeys.length ? { warning: droppedHeaderWarning(droppedHeaderKeys) } : {}) });
   } catch (err) { res.status(err.status || 500).json({ error: err.message }); }
 });
 
