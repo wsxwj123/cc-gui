@@ -14,7 +14,7 @@ import { confirmDialog } from '../utils/confirmDialog.jsx';
 // 布局遵循 sticky-fails-under-transform-modal-flex-column:flex 列三段,不用 sticky footer。
 export default function BtwWindow({
   thread, onSend, onClearThread,
-  sessionKey, paneIsActive = true, suppressed = false, mobile = false, openSignal = 0,
+  sessionKey, paneIsActive = true, suppressed = false, mobile = false, openSignal = 0, onUnreadChange,
 }) {
   const [collapsed, setCollapsed] = useState(true);
   const [pos, setPos] = useState(null);       // {left,top} pane-local px;null=默认右下角
@@ -35,6 +35,9 @@ export default function BtwWindow({
   // 展开(或保持展开)时把已读基线追平当前已答数 → 角标清零。
   useEffect(() => { if (expanded) setLastSeen(answered); }, [expanded, answered]);
 
+  // 未读数上报给宿主(收起态入口已移到输入框工具行的「旁问」按钮,角标显示在那)。
+  useEffect(() => { onUnreadChange?.(unread); }, [unread, onUnreadChange]);
+
   // 切会话:位置复位 + 已读基线归到新线程当前已答数(避免 A 的已读数套到 B),空线程默认收起。
   // 用 useLayoutEffect(非 useEffect):在 sessionKey 变的同帧、绘制前收起,消除"展开着的空窗"
   // 闪现一帧(#2);B 有旁问则不收、保持展开显示 B 的线程。
@@ -54,12 +57,13 @@ export default function BtwWindow({
   // 不齐。按 offsetParent(=SessionDetail 根)宽算内容列右缘距 pane 右缘的内边距,夹到 ≥26
   // 以让开右缘 TurnScrubber(right:4 width:18)。pane 拖拽/窗口缩放都要重算 → ResizeObserver。
   const [rightInset, setRightInset] = useState(26);
-  // 展开窗:浮在输入框上方(bottomInset,主动打开的浮层,可短暂遮消息)。
-  // 收起浮标:放输入框【下方】(pillTop,用 top 定位到输入框底下方一点)——之前 bottomInset 把
-  // 浮标也推到输入框上方,结果盖住正文(用户反馈#3)。浮标在输入框下方的脚注留白区,不挡正文。
+  // 展开窗:浮在输入框上方(bottomInset,主动打开的浮层,可短暂遮消息)。收起态入口已移到输入框
+  // 工具行的「旁问」按钮(方案A),不再有右下角浮标——从结构上避开与消息队列条/横幅抢右下角地皮。
   const [bottomInset, setBottomInset] = useState(12);
-  const [pillTop, setPillTop] = useState(null);
-  useEffect(() => {
+  // useLayoutEffect(非 useEffect):收起态 rootRef 未挂载、inset 停在默认;每个 pane 首次展开时
+  // 若用 useEffect(paint 后跑),首帧会用 bottomInset=12 把窗口贴 pane 底盖住输入框、随后才上移
+  // 修正=闪跳。改 layout effect 在 paint 前测好位置,首帧即正确。
+  useLayoutEffect(() => {
     if (mobile) return;
     const parent = rootRef.current?.offsetParent;
     if (!parent) return;
@@ -81,12 +85,7 @@ export default function BtwWindow({
         let ot = 0, node = composer;
         while (node && node !== parent) { ot += node.offsetTop; node = node.offsetParent; }
         setBottomInset(Math.max(12, parent.clientHeight - ot + 12)); // 展开窗:输入框上方
-        // 收起浮标:在【输入框底】与【pane 底边界】之间垂直居中(原 +10 太靠下、快溢出边界)。
-        const composerBottom = ot + composer.offsetHeight;
-        const gapBelow = parent.clientHeight - composerBottom;
-        const pillH = rootRef.current?.offsetHeight || 38;
-        setPillTop(composerBottom + Math.max(4, (gapBelow - pillH) / 2));
-      } else { setBottomInset(12); setPillTop(null); }
+      } else setBottomInset(12);
     };
     calc();
     const ro = new ResizeObserver(calc);
@@ -139,29 +138,9 @@ export default function BtwWindow({
   };
   const endDrag = (e) => { dragRef.current = null; e.currentTarget.releasePointerCapture?.(e.pointerId); };
 
-  // 收起态:浮标(带未读角标)。避开右缘 TurnScrubber(right:4,width:18)→ right:26。
-  // 位置:输入框【下方】脚注留白区(top:pillTop),不挡正文(#3);pillTop 未测出时回落 bottom:12。
-  // 圆角与输入框一致(rounded-[1.625rem]=26px),不用全圆胶囊(#3 圆角矩形弧度一致)。
-  if (!expanded) {
-    const pillPos = mobile ? { bottom: 12 } : (pillTop != null ? { top: pillTop } : { bottom: 12 });
-    return (
-      <button
-        ref={rootRef}
-        onClick={() => { if (paneIsActive && !suppressed) setCollapsed(false); }}
-        title="旁问（不打断当前工作、不写入会话历史）"
-        style={{ position: 'absolute', right: mobile ? 26 : rightInset, ...pillPos, zIndex: 46, opacity: suppressed ? 0.45 : 1, pointerEvents: suppressed ? 'none' : undefined }}
-        className="max-md:right-4 flex items-center gap-1.5 rounded-[1.625rem] border border-canvas-deep bg-canvas-warm/90 backdrop-blur px-3 py-2 shadow-md hover:border-accent/40 transition-colors"
-      >
-        <MessageSquare size={14} className="text-accent" />
-        <span className="text-[12px] font-body text-ink-muted">旁问</span>
-        {unread > 0 && (
-          <span className="ml-0.5 min-w-[16px] h-[16px] px-1 rounded-full bg-accent text-white text-[10px] leading-[16px] text-center font-mono">
-            {unread > 9 ? '9+' : unread}
-          </span>
-        )}
-      </button>
-    );
-  }
+  // 收起态:不渲染任何浮层 —— 入口(「旁问」按钮 + 未读角标)已移到输入框工具行(方案A),宿主
+  // 经 onUnreadChange 拿未读数、点击时用 openSignal 展开。组件仍挂载,hooks 继续算 unread 并上报。
+  if (!expanded) return null;
 
   // 展开态:桌面浮窗(可拖) / 手机底部抽屉。z-46:高于子代理面板(z-40),低于全局授权 modal(z-50+)。
   // #7 固定高度、内部滚动:原 maxHeight 让窗口随问答变多而长高(用户困惑"越来越大")。改

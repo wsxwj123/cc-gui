@@ -227,7 +227,7 @@ const TYPE_LABELS = {
   project: '项目',
 };
 
-export function ChatInput({ onSend, onStop, onAccelerate, onBackground, suggestion = null, onDismissSuggestion, disabled, isStreaming, backgroundWorking = false, queueLength = 0, queueItems = [], onRemoveFromQueue, onEditFromQueue, todos = null, plan = '', permKey = null, sessionId = null, tabIndex = null }) {
+export function ChatInput({ onSend, onStop, onAccelerate, onBackground, suggestion = null, onDismissSuggestion, disabled, isStreaming, backgroundWorking = false, queueLength = 0, queueItems = [], onRemoveFromQueue, onEditFromQueue, todos = null, plan = '', permKey = null, sessionId = null, tabIndex = null, onBtwOpen, btwUnread = 0 }) {
   const [text, setText] = useState('');
   // 编辑重发态(#4):点击「重新编辑并发送」后进入。此时历史消息尚未被破坏,
   // 按 Esc 可整条取消(清空输入+通知上层撤销待回滚),给用户反悔余地。
@@ -1038,6 +1038,24 @@ export function ChatInput({ onSend, onStop, onAccelerate, onBackground, suggesti
           >
             <Paperclip size={16} />
           </button>
+          {/* 旁问入口(方案A):放输入框工具行、附件按钮右侧,固定在稳定 chrome 里,不再和消息队列条/
+              横幅抢右下角浮动地皮。点击展开旁问浮窗(走 onBtwOpen→openSignal);未读角标显示在此。 */}
+          {onBtwOpen && (
+            <button
+              type="button"
+              onClick={onBtwOpen}
+              className="shrink-0 h-9 pl-2 pr-2.5 rounded-full hover:bg-black/5 text-ink-muted hover:text-accent flex items-center gap-1 transition-colors relative"
+              title="旁问（不打断当前工作、不写入会话历史）"
+            >
+              <MessagesSquare size={15} />
+              <span className="text-[12px] font-body">旁问</span>
+              {btwUnread > 0 && (
+                <span className="absolute -top-0.5 -right-0.5 min-w-[15px] h-[15px] px-1 rounded-full bg-accent text-white text-[9px] leading-[15px] text-center font-mono">
+                  {btwUnread > 9 ? '9+' : btwUnread}
+                </span>
+              )}
+            </button>
+          )}
           <textarea
             data-tour="composer"
             ref={textareaRef}

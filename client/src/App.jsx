@@ -3841,6 +3841,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
 
   // 旁问浮窗展开信号:每次发起旁问 +1,BtwWindow 监听后展开(主输入框 /btw 次入口也走它)。
   const [btwOpenSignal, setBtwOpenSignal] = useState(0);
+  // 旁问未读数:BtwWindow(收起态无 UI)上报,显示在输入框工具行「旁问」按钮的角标上(方案A)。
+  const [btwUnread, setBtwUnread] = useState(0);
   // 旁问共享发送:窗口内输入框(主入口,免 /btw 前缀)与主输入框 /btw(次入口)共用。
   // 从原 handleSend 的 /btw 分支整段抽出,逻辑零变化。三条回归守卫逐字保留:
   // ①流式中不改 owner(!streamingRef.current 才 setStreamOwner);
@@ -6121,6 +6123,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         suppressed={hasPendingInteraction}
         mobile={mobileChrome}
         openSignal={btwOpenSignal}
+        onUnreadChange={setBtwUnread}
       />
       {!mobileChrome && <div className="glass-bar shrink-0 px-6 py-3 relative z-30">
         {/* Title row wraps when the pane is narrow or font is scaled up so
@@ -6477,6 +6480,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         permKey={sessionQueueKey}
         sessionId={selectedSession?.sessionId || null}
         tabIndex={tabIndex}
+        onBtwOpen={() => setBtwOpenSignal((n) => n + 1)}
+        btwUnread={btwUnread}
       />
     </div>
   );
