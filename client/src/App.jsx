@@ -8548,7 +8548,10 @@ export default function App() {
       if (!force && now - lastRun < 5 * 60_000) return;
       lastRun = now;
       const n = {};
-      try { const d = await (await fetch('/api/version-check')).json(); if (d.hasUpdate) n.gui = d.latestVersion; } catch {}
+      // 本机 bot 版(localBuild)不提示 GUI 更新:app 内更新会覆盖丢 bot(SettingsPanel 也硬 gate
+      // 了下载入口),且本机版本号通常≥公开版,提示"有新版"是误导。version-check 响应已含 localBuild,
+      // 直接取用,不必多打 /api/health。Claude Code 更新与此无关,照常提示。
+      try { const d = await (await fetch('/api/version-check')).json(); if (d.hasUpdate && !d.localBuild) n.gui = d.latestVersion; } catch {}
       try { const d = await (await fetch('/api/claude-version-check')).json(); if (d.hasUpdate) n.cc = d.latestVersion; } catch {}
       setUpdateNotice((n.gui || n.cc) ? n : null);
     };

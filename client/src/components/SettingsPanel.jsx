@@ -653,6 +653,29 @@ function UpdateAvailable({ state }) {
     }
   };
 
+  // 本机 bot 版硬 gate:localBuild=true 的构建含 gitignored 的 bots.local.js 与本地签名,
+  // 公开更新包都没有。app 内任何下载/覆盖都会丢 bot + 丢 FDA(用户曾误点公开版覆盖 →
+  // 一直 connecting)。这里不提供任何下载/自动更新按钮,只留说明与查看链接,升级走本地重建。
+  if (state.localBuild === true) {
+    return (
+      <div className="text-[12px] bg-amber-50 border border-amber-200 text-amber-900 rounded p-2.5 space-y-1.5">
+        <div className="flex items-center gap-1.5">
+          <span>公开版新版:</span>
+          <b className="font-mono">v{state.latestVersion}</b>
+        </div>
+        <div className="text-amber-800">
+          当前是本机构建(含 bot 与本地签名)。app 内更新会拉公开版覆盖,导致 bot 丢失、FDA 失效——请用本地重建脚本升级,勿在此下载。
+        </div>
+        <button
+          onClick={(e) => { e.preventDefault(); openExternalUrl(state.htmlUrl); }}
+          className="text-accent underline text-[12px] bg-transparent border-0 cursor-pointer p-0"
+        >
+          查看 Release
+        </button>
+      </div>
+    );
+  }
+
   return (
     <div className="text-[12px] bg-amber-50 border border-amber-200 text-amber-900 rounded p-2.5 space-y-2">
       <div className="flex items-center gap-1.5">
