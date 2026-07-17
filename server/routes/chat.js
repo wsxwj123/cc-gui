@@ -1054,6 +1054,12 @@ router.post('/chat/:pid/stop', async (req, res) => {
   }
   const hadTasks = shellTasks.length + stoppableTasks.length > 0;
 
+  // 停止时清掉本会话挂起的交互卡片(Ask/计划/授权):它们等在后端的裸 Promise 上,停止链路原来
+  // 完全不碰 → 会话停了卡片却残留在最前方(用户实报)。dropPendingForSession 会 settle 那些
+  // Promise(deny,防 CLI 永久挂死)+ 按 sessionId 广播 permission:resolved,前端经现成 WS 路径
+  // 自动清掉【该会话】的卡片,天然分屏隔离。hard 与选择性两条路径都要清,故置于分支之前。
+  if (slot.sessionId) { try { dropPendingForSession(slot.sessionId); } catch {} }
+
   if (hard) {
     // ===== hard 路径:全杀(删会话/编辑重发/进程管理),与旧 A 版行为一致。 =====
     // #26:彻底关闭不转 idle —— 删除会话的先停后删链路靠"进程退净"判据,

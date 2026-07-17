@@ -5454,13 +5454,13 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     if (!paneIsActive) return;
     // 只在「焦点 pane」注册一次(deps 仅 paneIsActive)。是否有可停的流改为在按键时用 ref
     // 实时判断,不再让 isStreaming/backgroundPid 抖动驱动 effect 反复重注册(CQ-15 竞态根因)。
-    const hasPendingPerm = () => useStore.getState().pendingPermissions
-      .some((p) => p.sessionId === getLocalSession()?.sessionId);
     let lastEsc = 0;
     const onKey = (e) => {
       if (e.key !== 'Escape' || e.repeat) return; // ignore held-key repeats
       if (!streamingRef.current && !backgroundPidRef.current) return; // 本 pane 没有在跑的流,不拦截
-      if (hasPendingPerm()) { lastEsc = 0; return; } // permission card handles Esc
+      // 原来"有 pending 卡片(Ask/计划/授权)就 return 让卡片处理"→ 有卡片时双击 Esc 永远走不到停止、
+      // 卡片残留(用户实报)。改:第一次 Esc 仍让卡片自身 Esc(deny)照跑并 arm 第二次;第二次 Esc 汇入
+      // 停止(handleStop→/stop→dropPendingForSession 连带清本会话卡片)。单次 Esc=deny 语义不变。
       const now = e.timeStamp || performance.now();
       if (lastEsc && now - lastEsc <= 600) {
         lastEsc = 0;

@@ -10,7 +10,7 @@ import { MarkdownRenderer } from './MarkdownRenderer.jsx';
  * 两个按钮:折叠(只留"任务清单"标题行 + "下一条")/ 隐藏(整块消失,直到下次任务清单
  * 更新)。任务全部完成时自动折叠。
  */
-export function TodoPanel({ todos, plan = '' }) {
+export function TodoPanel({ todos, plan = '', isStreaming = false }) {
   const hasTodos = Array.isArray(todos) && todos.length > 0;
   const cleanPlan = String(plan || '').trim();
   if (!hasTodos && !cleanPlan) return null;
@@ -94,11 +94,11 @@ function TodoChecklist({ todos }) {
       </div>
       {/* 折叠:标题行 + 下一条;展开:完整清单(上限 40vh 滚动,给输入框留空间) */}
       {collapsed ? (
-        <div className="py-1.5">{nextTodo && <TodoRow todo={nextTodo} />}</div>
+        <div className="py-1.5">{nextTodo && <TodoRow todo={nextTodo} streaming={isStreaming} />}</div>
       ) : (
         <div className="max-h-[40vh] overflow-y-auto py-1.5">
           {todos.map((t, i) => (
-            <TodoRow key={t.id ?? t.taskId ?? t.content ?? i} todo={t} />
+            <TodoRow key={t.id ?? t.taskId ?? t.content ?? i} todo={t} streaming={isStreaming} />
           ))}
         </div>
       )}
@@ -153,7 +153,7 @@ function PlanBlock({ plan }) {
   );
 }
 
-function TodoRow({ todo }) {
+function TodoRow({ todo, streaming = false }) {
   const status = todo.status || 'pending';
   // Claude convention: when in_progress, show the activeForm (present-tense
   // progressive). Fall back to content if activeForm is missing.
@@ -168,7 +168,9 @@ function TodoRow({ todo }) {
     textCls = 'text-ink-faint line-through';
   } else if (status === 'in_progress') {
     Icon = Loader2;
-    iconCls = 'text-accent animate-spin';
+    // 仅在会话【真的在流式】时转圈;停止/非流式时渲染静态图标——否则会话停了那条 in_progress
+    // 还无限转圈(派生态永远停在 in_progress,不看会话是否在跑,用户实报)。
+    iconCls = streaming ? 'text-accent animate-spin' : 'text-accent/60';
     textCls = 'text-ink font-medium';
   } else {
     Icon = Circle;
