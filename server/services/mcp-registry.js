@@ -39,6 +39,14 @@ export function normalizeRegistryEntry(entry) {
       url: String(remote.url),
       commandLine: '',
       env: [],
+      // 条目声明的请求头:只预填键名(值留空由用户填),isSecret/isRequired 进 hint。
+      // 注册表内容是外部数据,仅作表单初值。
+      headers: (Array.isArray(remote.headers) ? remote.headers : [])
+        .filter((h) => h?.name)
+        .map((h) => ({
+          k: String(h.name),
+          hint: [h.isRequired ? '必填。' : '', h.isSecret ? '密钥。' : '', String(h.description || '')].filter(Boolean).join(''),
+        })),
     };
   }
   const pkgs = Array.isArray(sv.packages) ? sv.packages : [];

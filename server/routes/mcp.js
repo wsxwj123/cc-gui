@@ -510,6 +510,21 @@ const detailsCache = new Map(); // name -> { at, out }
 const DETAILS_TTL_MS = 5 * 60_000;
 function invalidateDetailsCache() { detailsCache.clear(); }
 
+// 从 `claude mcp get` 文本解析 Headers: 段(缩进的 `Key: value` 行,http/sse 才有)。
+// 实抓(2026-07):get 输出明文值(add 输出才 [REDACTED]),可用于编辑回显。
+function parseHeadersFromDetails(details) {
+  const headers = {};
+  const section = String(details || '').split(/\n\s*Headers:/)[1];
+  if (section) {
+    for (const line of section.split('\n')) {
+      if (/^To remove/.test(line.trim())) break;
+      const hm = line.match(/^\s+([A-Za-z0-9-]+):\s?(.*)$/);
+      if (hm) headers[hm[1]] = hm[2];
+    }
+  }
+  return headers;
+}
+
 async function getServerDetails(name) {
   try {
     assertSafeName(name);
@@ -681,6 +696,10 @@ router.put('/mcp/:name/enable', async (req, res) => {
     args.push(name);
     if (isHttp) {
       args.push(String(httpUrl).trim());
+      // 禁用时存下的请求头原样带回,否则带 headers 的 server 启用后连不上。
+      for (const [k, v] of Object.entries(config.headers || {})) {
+        if (/^[A-Za-z0-9-]+$/.test(String(k).trim())) args.push('-H', `${String(k).trim()}: ${v ?? ''}`);
+      }
     } else {
       args.push('--', String(config.command), ...((config.args || []).map(String)));
     }
@@ -726,6 +745,7 @@ router.put('/mcp/:name/disable', async (req, res) => {
       config.url = u;
       config.command = u; // 兼容旧 enable 逻辑(它对 http 读 config.command 当 URL)
       config.args = [];
+      config.headers = parseHeadersFromDetails(details); // 不存则禁用→启用会丢请求头,连不上
     } else {
       config.command = cmdMatch ? cmdMatch[1].trim() : '';
       config.args = argsMatch ? argsMatch[1].trim().split(/\s+/) : [];
@@ -770,7 +790,8 @@ async function rewriteUvCommandLine(commandLine) {
   } catch { return commandLine; }
 }
 
-function buildAddArgs({ name, transport, commandLine, url, env, scope }) {
+// export 供单测(tests/unit/check-mcp-add-headers.mjs)直接断言参数组装。
+export function buildAddArgs({ name, transport, commandLine, url, env, headers, scope }) {
   const args = ['mcp', 'add'];
   if (transport === 'http' || transport === 'sse') args.push('-t', transport);
   args.push('-s', scope || 'user');
@@ -783,8 +804,15 @@ function buildAddArgs({ name, transport, commandLine, url, env, scope }) {
   }
   if (transport === 'http' || transport === 'sse') {
     if (!url || !url.trim()) throw new Error('URL 不能为空');
-    // url 在前,-e 放末尾(变长参数在结尾不会吞掉其它位置参数)。
-    args.push(url.trim(), ...envFlags);
+    // 自定义请求头:每对一个 `-H "Key: Value"`(CLI 2026-07 实抓:-H, --header <header...>)。
+    // 键名限 HTTP token 字符,含冒号/空格的非法键直接丢弃(键来自表单/注册表,是数据不是指令)。
+    const headerFlags = [];
+    for (const [k, v] of Object.entries(headers || {})) {
+      const key = String(k || '').trim();
+      if (/^[A-Za-z0-9-]+$/.test(key)) headerFlags.push('-H', `${key}: ${v ?? ''}`);
+    }
+    // url 在前,-H/-e 放末尾(变长参数在结尾不会吞掉其它位置参数)。
+    args.push(url.trim(), ...headerFlags, ...envFlags);
   } else {
     const { command, args: cargs } = parseCommandLine(commandLine);
     if (!command) throw new Error('命令不能为空');
@@ -907,6 +935,7 @@ router.get('/mcp/:name/config', async (req, res) => {
         commandLine: transport === 'stdio' ? [c.command, ...(c.args || [])].filter(Boolean).join(' ') : '',
         url: transport !== 'stdio' ? (c.command || '') : '',
         env: c.env || {},
+        headers: c.headers || {},
       });
     }
     const details = await getServerDetails(name);
@@ -936,6 +965,7 @@ router.get('/mcp/:name/config', async (req, res) => {
       commandLine: transport === 'stdio' ? [cmd, cargs].filter(Boolean).join(' ') : '',
       url: transport !== 'stdio' ? (urlMatch ? urlMatch[1].trim() : cmd) : '',
       env,
+      headers: transport !== 'stdio' ? parseHeadersFromDetails(details) : {},
     });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });

@@ -39,6 +39,7 @@ export function McpForm({ editing, onClose, onSaved }) {
   const [scope, setScope] = useState('user');
   const [autoApprove, setAutoApprove] = useState(false);
   const [envRows, setEnvRows] = useState([]); // [{k,v}]
+  const [headerRows, setHeaderRows] = useState([]); // [{k,v,hint}] 仅 http/sse:自定义请求头(claude mcp add -H "Key: Value")
   // 工具管理(仅编辑现有 server):列出该 server 暴露的工具,逐个启用/禁用(禁用=模型看不到,
   // 走 SDK disallowedTools)。解决 paper-search 这类一 server 十几工具、模型乱选 crossref 的噪音。
   const [toolsState, setToolsState] = useState({ open: false, loading: false, list: null, err: '', note: '' });
@@ -101,6 +102,8 @@ export function McpForm({ editing, onClose, onSaved }) {
     if (it.transport === 'stdio') { setCommandLine(it.commandLine || ''); setUrl(''); }
     else { setUrl(it.url || ''); setCommandLine(''); }
     setEnvRows((it.env || []).map((e) => ({ k: e.k, v: '', hint: e.hint || '' })));
+    // 条目声明的请求头只预填键名,值留空由用户填(isSecret 等提示在 hint 里)。
+    setHeaderRows((it.headers || []).map((h) => ({ k: h.k, v: '', hint: h.hint || '' })));
     setTplMeta(it.repository ? { note: '来自 MCP 注册表,配置已预填,确认或修改后点「添加」。', repo: it.name, docs: it.repository } : null);
     if (/^uvx?\s/.test(it.commandLine || '')) checkUv(); else setUvStatus('idle');
     dirtyRef.current = true;
@@ -118,6 +121,7 @@ export function McpForm({ editing, onClose, onSaved }) {
     else { setUrl(t.url || ''); setCommandLine(''); }
     // 保留目录里的 hint(如「在 tavily.com 申请」):作为 value 输入框 placeholder 告诉用户去哪拿。
     setEnvRows((t.env || []).map((e) => ({ k: e.k, v: '', hint: e.hint || '' })));
+    setHeaderRows([]); // 内置模板不声明请求头,换模板时清掉上一次预填
     setTplMeta({ note: t.note, needsArg: t.needsArg, repo: t.repo, docs: t.docs });
     // uvx/uv 开头的命令需要 uv;选中即检测,其余模板清掉 uv 提示。
     if (/^uvx?\s/.test(t.commandLine || '')) checkUv(); else setUvStatus('idle');
@@ -140,6 +144,7 @@ export function McpForm({ editing, onClose, onSaved }) {
         setScope(d.scope || 'user');
         setAutoApprove(!!d.autoApprove);
         setEnvRows(Object.entries(d.env || {}).map(([k, v]) => ({ k, v: String(v) })));
+        setHeaderRows(Object.entries(d.headers || {}).map(([k, v]) => ({ k, v: String(v) })));
         // 命令/URL/类型:仅当用户尚未编辑时用权威值校正(列表里的种子通常已正确)。
         if (!dirtyRef.current) {
           setTransport(d.transport || 'stdio');
@@ -158,6 +163,9 @@ export function McpForm({ editing, onClose, onSaved }) {
   const setEnv = (i, key, val) => setEnvRows((rows) => rows.map((r, idx) => idx === i ? { ...r, [key]: val } : r));
   const addEnv = () => setEnvRows((rows) => [...rows, { k: '', v: '' }]);
   const delEnv = (i) => setEnvRows((rows) => rows.filter((_, idx) => idx !== i));
+  const setHeader = (i, key, val) => setHeaderRows((rows) => rows.map((r, idx) => idx === i ? { ...r, [key]: val } : r));
+  const addHeader = () => setHeaderRows((rows) => [...rows, { k: '', v: '' }]);
+  const delHeader = (i) => setHeaderRows((rows) => rows.filter((_, idx) => idx !== i));
 
   const loadTools = async () => {
     setToolsState((s) => ({ ...s, open: true, loading: true, err: '', note: '' }));
@@ -195,8 +203,9 @@ export function McpForm({ editing, onClose, onSaved }) {
 
   const isStdio = transport === 'stdio';
 
-  // 模板声明的 env(带 hint)值为空 → 内联警告。不阻断保存(允许先添加稍后补填)。
-  const emptyTplEnvKeys = envRows.filter((r) => r.hint && r.k.trim() && !String(r.v || '').trim()).map((r) => r.k.trim());
+  // 模板/注册表声明的 env、请求头(带 hint)值为空 → 内联警告。不阻断保存(允许先添加稍后补填)。
+  const emptyHinted = (rows) => rows.filter((r) => r.hint && r.k.trim() && !String(r.v || '').trim()).map((r) => r.k.trim());
+  const emptyTplEnvKeys = [...emptyHinted(envRows), ...(isStdio ? [] : emptyHinted(headerRows))];
 
   const save = async () => {
     setErr('');
@@ -205,7 +214,9 @@ export function McpForm({ editing, onClose, onSaved }) {
     if (!isStdio && !url.trim()) { setErr('URL 不能为空'); return; }
     const env = {};
     for (const { k, v } of envRows) { if (k.trim()) env[k.trim()] = v; }
-    const body = { name: name.trim(), transport, commandLine, url, scope, autoApprove, label, env };
+    const headers = {};
+    if (!isStdio) for (const { k, v } of headerRows) { if (k.trim()) headers[k.trim()] = v; }
+    const body = { name: name.trim(), transport, commandLine, url, scope, autoApprove, label, env, headers };
     setSaving(true);
     try {
       const r = isEdit
@@ -423,6 +434,37 @@ export function McpForm({ editing, onClose, onSaved }) {
                 </div>
               )}
             </div>
+
+            {/* 请求头(仅 http/sse):每对写成 claude mcp add 的 -H "Key: Value"。远程 server
+                (如 smithery 系)常需 Authorization: Bearer xxx 才能连上。 */}
+            {!isStdio && (
+              <div className="space-y-1.5">
+                <div className="flex items-center gap-2">
+                  <span className={labelCls}>请求头 (headers)</span>
+                  <button onClick={addHeader} className="p-0.5 rounded hover:bg-canvas-warm text-ink-faint hover:text-accent"><Plus size={13} /></button>
+                </div>
+                {headerRows.length === 0 && <div className={hintCls}>无。若该 server 需要认证,点 + 添加,如 Authorization = Bearer xxx。</div>}
+                {headerRows.map((row, i) => (
+                  <div key={i} className="flex items-center gap-2">
+                    <input value={row.k} onChange={(e) => setHeader(i, 'k', e.target.value)} placeholder="Header-Name"
+                      className={`${inputCls} font-mono flex-1`} />
+                    <span className="text-ink-faint">:</span>
+                    {/* 请求头的值多为 Bearer token 等密钥,按敏感值处理:密码框显示。 */}
+                    <input type="password" autoComplete="off" value={row.v} onChange={(e) => setHeader(i, 'v', e.target.value)} placeholder="value"
+                      className={`${inputCls} font-mono flex-1`} />
+                    <button onClick={() => delHeader(i)} className="p-1 text-ink-faint hover:text-error shrink-0"><Trash2 size={13} /></button>
+                  </div>
+                ))}
+                {/* 注册表条目声明的请求头说明(必填/密钥等),布局同 env 的 hint 区。 */}
+                {headerRows.some((r) => r.hint) && (
+                  <div className="rounded-lg bg-canvas-warm/60 border border-canvas-deep px-3 py-2 text-[11px] text-ink-muted font-body leading-snug space-y-1">
+                    {headerRows.filter((r) => r.hint).map((r, i) => (
+                      <div key={i}><span className="font-mono text-ink-soft">{r.k || 'Header'}</span>:{r.hint}</div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
 
             {/* 工具管理:编辑时可逐个启用/禁用;添加时按草稿配置预览清单(添加前就能看这个 server 有什么工具)。 */}
             {(isEdit || (isStdio && commandLine.trim())) && (
