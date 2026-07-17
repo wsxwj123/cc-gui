@@ -777,11 +777,31 @@ function MainLayout({ sidebarCollapsed, selectedProject, rightPanel, setRightPan
 // Adaptive: min-width is `em` (scales with font + zoom). 26em ≈ 416px keeps a
 // pane's chrome usable; the row scrolls horizontally when N panes exceed the
 // viewport instead of crushing each pane.
+// 关窗格前的守卫:被关窗格的会话正在运行(runningCwds)或有待处理授权(pendingPermissions)时先确认。
+// 授权卡只在该窗格的 SessionDetail 里渲染,关掉窗格 = 卡片随之 unmount,后端进程不被杀、会一直
+// 挂着等授权 → 会话卡住(用户实报 Bug4)。这里让用户知情:关闭后可在左侧列表重开该会话继续处理。
+// keydown(Delete)与 UI 关闭按钮两处共用,避免逻辑漂移。
+async function closePaneGuarded(i) {
+  const st = useStore.getState();
+  if ((st.paneCount || 1) <= 1) return;
+  const sess = st.paneSessions?.[i];
+  const busy = sess && ((sess.projectPath && st.runningCwds?.has(sess.projectPath))
+    || st.pendingPermissions.some((p) => p.sessionId === sess.sessionId));
+  if (!busy) { st.closePane(i); return; }   // 不忙:同步直接关,无 await 无竞态
+  const paneId = st.paneIds?.[i];           // 稳定身份,await 期间 index 可能左移
+  if (!(await confirmDialog(
+    '该窗格的会话正在运行或等待授权。关闭窗格后，它的授权请求将无处显示、会话可能卡在等待（进程不会被杀）。关闭后可在左侧会话列表重新打开它继续。确定关闭？',
+    { danger: true }))) return;
+  // 确认期间别处可能关了窗格使 index 左移 → 按稳定 paneId 重新定位再关,避免关错窗格(判官指双击竞态)。
+  const st2 = useStore.getState();
+  const idx = paneId != null ? (st2.paneIds || []).indexOf(paneId) : i;
+  if (idx >= 0 && (st2.paneCount || 1) > 1) st2.closePane(idx);
+}
+
 function SplitMain({ activeTabIndex, setActiveTabIndex }) {
   const paneCount = useStore((s) => s.paneCount);
   const paneSessions = useStore((s) => s.paneSessions);
   const paneIds = useStore((s) => s.paneIds);
-  const closePane = useStore((s) => s.closePane);
   const artifactDock = useStore((s) => s.artifactDock);
   const rowRef = useRef(null);
   const MIN_PANE_PX = 280;
@@ -895,7 +915,7 @@ function SplitMain({ activeTabIndex, setActiveTabIndex }) {
                     分屏 {i + 1}{focused ? ' · 当前' : ''}
                   </span>
                   <button
-                    onClick={(e) => { e.stopPropagation(); closePane(i); }}
+                    onClick={(e) => { e.stopPropagation(); closePaneGuarded(i); }}
                     className="w-5 h-5 rounded flex items-center justify-center text-ink-faint hover:text-ink hover:bg-canvas-deep transition-colors"
                     title="关闭此分屏（不结束会话 / 不杀进程）"
                   >
@@ -3259,7 +3279,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         const st = useStore.getState();
         if ((st.paneCount || 1) <= 1) return;
         e.preventDefault();
-        st.closePane(tabIndex);
+        closePaneGuarded(tabIndex); // 正在运行/等授权时先确认(见 closePaneGuarded)
       }
     };
     window.addEventListener('keydown', onKey);
