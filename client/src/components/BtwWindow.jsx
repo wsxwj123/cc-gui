@@ -14,7 +14,7 @@ import { confirmDialog } from '../utils/confirmDialog.jsx';
 // 布局遵循 sticky-fails-under-transform-modal-flex-column:flex 列三段,不用 sticky footer。
 export default function BtwWindow({
   thread, onSend, onClearThread,
-  sessionKey, paneIsActive = true, suppressed = false, mobile = false, openSignal = 0, onUnreadChange,
+  sessionKey, paneIsActive = true, suppressed = false, mobile = false, openSignal = 0, toggleSignal = 0, onUnreadChange,
 }) {
   const [collapsed, setCollapsed] = useState(true);
   const [pos, setPos] = useState(null);       // {left,top} pane-local px;null=默认右下角
@@ -52,6 +52,16 @@ export default function BtwWindow({
 
   // 外部信号(主输入框 /btw 或窗口内发送)→ 展开。
   useEffect(() => { if (openSignal) setCollapsed(false); }, [openSignal]);
+  // toggle 信号(输入框「旁问」按钮每点一次 +1)→ 切换 collapsed(展开↔收起)。ref guard 保证每个
+  // signal 值只处理一次:函数式 setCollapsed(c=>!c) 非幂等,若 StrictMode/重复触发使 effect 跑两
+  // 次会互相抵消(实测点按钮不收起的根因)。/btw 与窗口内发送仍走 openSignal 强制展开(非 toggle)。
+  const toggleSeenRef = useRef(0);
+  useEffect(() => {
+    if (toggleSignal && toggleSignal !== toggleSeenRef.current) {
+      toggleSeenRef.current = toggleSignal;
+      setCollapsed((c) => !c);
+    }
+  }, [toggleSignal]);
 
   // #1 浮窗右缘对齐输入框右缘:输入框是居中定宽列(--content-max),浮窗贴 pane 右缘天生
   // 不齐。按 offsetParent(=SessionDetail 根)宽算内容列右缘距 pane 右缘的内边距,夹到 ≥26
