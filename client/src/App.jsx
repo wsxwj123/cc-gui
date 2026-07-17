@@ -1832,6 +1832,19 @@ function SessionList() {
   // "基于分支"下拉展开态。原生 <select> 的弹出菜单由 OS 渲染、无法限高,本地分支
   // 几百个时列表过长 → 换自绘弹层(限高+内部滚动,不截断数据)。
   const [wtBaseOpen, setWtBaseOpen] = useState(false);
+  // Esc 关闭该下拉:捕获阶段拦下 + stopPropagation,阻断冒泡阶段的「双击 Esc 停止流」
+  // 监听(App 挂在 window 冒泡阶段),避免关弹层的 Esc 被计入停止连击。
+  // 与 FileExplorerPanel 右键菜单的 Esc 同款口径。
+  useEffect(() => {
+    if (!wtBaseOpen) return;
+    const onEsc = (e) => {
+      if (e.key !== 'Escape') return;
+      e.stopPropagation();
+      setWtBaseOpen(false);
+    };
+    window.addEventListener('keydown', onEsc, true);
+    return () => window.removeEventListener('keydown', onEsc, true);
+  }, [wtBaseOpen]);
   // 行内展开态:{ path, mode:'commits'|'dirty', loading, commits?, files?, error?,
   // checked?:Set, message?, committing? } —— 一次只展开一行,再点同项收起。
   const [wtExpand, setWtExpand] = useState(null);
