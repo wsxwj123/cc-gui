@@ -1011,8 +1011,12 @@ export const useStore = create((set, get) => ({
   },
 
   whitelistPermissionTool: (sessionId, toolName) => {
+    // 守卫下沉:draft(sessionId 为 null/undefined/空串)直接不写 —— 旧的 `|| 'none'` 兜底
+    // 会落到共享键 cgui-perm-wl-none,任何 draft 的同名工具都会被 auto-allow 误放行。
+    // 读取侧(useWebSocket / PermissionPrompt)已对称地不读该共享键。
+    if (!sessionId) return;
     try {
-      const key = `cgui-perm-wl-${sessionId || 'none'}`;
+      const key = `cgui-perm-wl-${sessionId}`;
       const cur = JSON.parse(localStorage.getItem(key) || '[]');
       if (!cur.includes(toolName)) cur.push(toolName);
       localStorage.setItem(key, JSON.stringify(cur));
