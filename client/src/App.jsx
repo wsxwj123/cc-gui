@@ -1955,9 +1955,12 @@ function SessionList() {
     seedNewSessionDefaults(wtHash);
     // #9 左侧会话列表切到该 worktree(否则点了 worktree、左侧仍停在原项目分支)。已跑过会话的
     // worktree 用 projects 里的真实条目;首次进入无条目则构造最小对象(fetchSessions 返回空,正常)。
-    const wtProject = projects.find((p) => p.hash === wtHash) || { hash: wtHash, path: tree.path, isWorktree: true, sessionCount: 0, lastActivity: null };
-    setSelectedProject(wtProject);
-    fetchSessions(wtHash);
+    // 注意:本函数作用域没有解构 projects/setSelectedProject/fetchSessions,必须走 getState()——
+    // 直接引用会抛 "Can't find variable: projects",createWorktree 完进入与点击切换都会炸。
+    const st = useStore.getState();
+    const wtProject = st.projects.find((p) => p.hash === wtHash) || { hash: wtHash, path: tree.path, isWorktree: true, sessionCount: 0, lastActivity: null };
+    st.setSelectedProject(wtProject);
+    st.fetchSessions(wtHash);
     const draft = {
       draft: true,
       draftId: newDraftId(),
@@ -2090,7 +2093,7 @@ function SessionList() {
       // #9 副作用兜底:若删掉的正是当前选中的 worktree(enterWorktree 后 selectedProject 指向它),
       // 删后 selectedProject 悬空指向已删路径(会话列表刷空、picker 依赖该 cwd 会拉取失败)→ 切回
       // 项目列表。否则(在主仓里删别的 worktree)照常刷新弹窗。
-      if (selectedProject.path === tree.path) setSelectedProject(null);
+      if (selectedProject.path === tree.path) useStore.getState().setSelectedProject(null);
       else openWorktreePicker(); // 刷新列表
     } catch (err) {
       confirmDialog('删除失败：' + err.message);

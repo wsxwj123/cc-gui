@@ -54,9 +54,11 @@ export default function BtwWindow({
   // 不齐。按 offsetParent(=SessionDetail 根)宽算内容列右缘距 pane 右缘的内边距,夹到 ≥26
   // 以让开右缘 TurnScrubber(right:4 width:18)。pane 拖拽/窗口缩放都要重算 → ResizeObserver。
   const [rightInset, setRightInset] = useState(26);
-  // #5 底部让开输入框:浮窗贴 pane 底 bottom:12 会压住输入框(实测 gap 仅 2px)。测输入框
-  // (.chat-composer)顶相对 pane 底的距离 + 间距,让浮窗底缘落在输入框上方留白处。
+  // 展开窗:浮在输入框上方(bottomInset,主动打开的浮层,可短暂遮消息)。
+  // 收起浮标:放输入框【下方】(pillTop,用 top 定位到输入框底下方一点)——之前 bottomInset 把
+  // 浮标也推到输入框上方,结果盖住正文(用户反馈#3)。浮标在输入框下方的脚注留白区,不挡正文。
   const [bottomInset, setBottomInset] = useState(12);
+  const [pillTop, setPillTop] = useState(null);
   useEffect(() => {
     if (mobile) return;
     const parent = rootRef.current?.offsetParent;
@@ -78,8 +80,9 @@ export default function BtwWindow({
       if (composer) {
         let ot = 0, node = composer;
         while (node && node !== parent) { ot += node.offsetTop; node = node.offsetParent; }
-        setBottomInset(Math.max(12, parent.clientHeight - ot + 12));
-      } else setBottomInset(12);
+        setBottomInset(Math.max(12, parent.clientHeight - ot + 12)); // 展开窗:输入框上方
+        setPillTop(ot + composer.offsetHeight + 10); // 收起浮标:输入框底下方 10px,落脚注留白区
+      } else { setBottomInset(12); setPillTop(null); }
     };
     calc();
     const ro = new ResizeObserver(calc);
@@ -133,14 +136,17 @@ export default function BtwWindow({
   const endDrag = (e) => { dragRef.current = null; e.currentTarget.releasePointerCapture?.(e.pointerId); };
 
   // 收起态:浮标(带未读角标)。避开右缘 TurnScrubber(right:4,width:18)→ right:26。
+  // 位置:输入框【下方】脚注留白区(top:pillTop),不挡正文(#3);pillTop 未测出时回落 bottom:12。
+  // 圆角与输入框一致(rounded-[1.625rem]=26px),不用全圆胶囊(#3 圆角矩形弧度一致)。
   if (!expanded) {
+    const pillPos = mobile ? { bottom: 12 } : (pillTop != null ? { top: pillTop } : { bottom: 12 });
     return (
       <button
         ref={rootRef}
         onClick={() => { if (paneIsActive && !suppressed) setCollapsed(false); }}
         title="旁问（不打断当前工作、不写入会话历史）"
-        style={{ position: 'absolute', right: mobile ? 26 : rightInset, bottom: mobile ? 12 : bottomInset, zIndex: 46, opacity: suppressed ? 0.45 : 1, pointerEvents: suppressed ? 'none' : undefined }}
-        className="max-md:right-4 flex items-center gap-1.5 rounded-full border border-canvas-deep bg-canvas-warm/90 backdrop-blur px-3 py-2 shadow-md hover:border-accent/40 transition-colors"
+        style={{ position: 'absolute', right: mobile ? 26 : rightInset, ...pillPos, zIndex: 46, opacity: suppressed ? 0.45 : 1, pointerEvents: suppressed ? 'none' : undefined }}
+        className="max-md:right-4 flex items-center gap-1.5 rounded-[1.625rem] border border-canvas-deep bg-canvas-warm/90 backdrop-blur px-3 py-2 shadow-md hover:border-accent/40 transition-colors"
       >
         <MessageSquare size={14} className="text-accent" />
         <span className="text-[12px] font-body text-ink-muted">旁问</span>
