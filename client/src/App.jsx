@@ -42,6 +42,7 @@ import { MemoryPanel } from './components/MemoryPanel.jsx';
 import { AgentsPanel } from './components/AgentsPanel.jsx';
 import { AgentMonitorPanel } from './components/AgentMonitorPanel.jsx';
 import { SubagentView } from './components/SubagentView.jsx';
+import BtwWindow from './components/BtwWindow.jsx';
 import EnvCheckPanel from './components/EnvCheckPanel.jsx';
 import { ArtifactDock } from './components/ArtifactPreview.jsx';
 import { FullDiskAccessModal } from './components/FullDiskAccessModal.jsx';
@@ -2921,50 +2922,6 @@ function GitInitBanner({ cwd }) {
 
 // Collapsed marker shown where the CLI compacted the conversation (/compact).
 // The full summary lives in the JSONL; we deliberately don't render it.
-// 旁问气泡(/btw):独立于主对话流的问答卡片。仅存在于本地 chatMessages
-// (不写会话 jsonl),刷新/切会话即消失 —— 与 CLI /btw"不进历史"的语义一致。
-function BtwBubble({ msg, onHide, onClearThread }) {
-  const [collapsed, setCollapsed] = useState(false);
-  return (
-    <div className="px-6 py-3 animate-fade-up" style={{ animationDuration: '0.25s' }}>
-      <div className="max-w-[var(--content-max)] mx-auto">
-        <div className="border border-dashed border-canvas-deep rounded-2xl px-4 py-3 bg-canvas-warm/50">
-          <div className="flex items-center gap-2 mb-1.5">
-            <span className="text-[10px] font-body uppercase tracking-wider text-ink-faint border border-canvas-deep rounded px-1.5 py-0.5 shrink-0">旁问</span>
-            <span className="text-[12px] text-ink-muted font-body truncate flex-1">{msg.question}</span>
-            {/* 折叠:只留问题行收起答案;隐藏:从本地视图移除(旁问本就不入历史) */}
-            <button onClick={() => setCollapsed((c) => !c)} title={collapsed ? '展开答案' : '折叠'}
-              className="shrink-0 text-ink-faint hover:text-ink">
-              <ChevronDown size={13} className={`transition-transform ${collapsed ? '-rotate-90' : ''}`} />
-            </button>
-            <button onClick={() => onHide?.(msg.uuid)} title="隐藏这条旁问"
-              className="shrink-0 text-ink-faint hover:text-ink">
-              <EyeOff size={12} />
-            </button>
-          </div>
-          {!collapsed && (<>
-            {msg.pending
-              ? <div className="text-[13px] text-ink-faint font-body animate-pulse">思考中…</div>
-              : msg.error
-              ? <div className="text-[13px] text-red-600/90 font-body">{msg.text}</div>
-              : <MarkdownRenderer content={msg.text} />}
-            {!msg.pending && !msg.error && (
-              <div className="mt-1.5 flex items-center gap-2 text-[10px] text-ink-faint font-body">
-                <span>旁问不写入会话历史，刷新后消失</span>
-                {onClearThread && (
-                  <button onClick={() => onClearThread()} title="清空本会话的全部旁问，下次旁问从零开始"
-                    className="shrink-0 text-ink-faint hover:text-ink underline decoration-dotted">
-                    清空旁问线程
-                  </button>
-                )}
-              </div>
-            )}
-          </>)}
-        </div>
-      </div>
-    </div>
-  );
-}
 
 function CompactDivider() {
   return (
@@ -3839,6 +3796,48 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   const messageQueueRaw = useStore((s) => s.messageQueue[sessionQueueKey]);
   const messageQueue = messageQueueRaw || EMPTY_ARRAY;
 
+  // 旁问浮窗展开信号:每次发起旁问 +1,BtwWindow 监听后展开(主输入框 /btw 次入口也走它)。
+  const [btwOpenSignal, setBtwOpenSignal] = useState(0);
+  // 旁问共享发送:窗口内输入框(主入口,免 /btw 前缀)与主输入框 /btw(次入口)共用。
+  // 从原 handleSend 的 /btw 分支整段抽出,逻辑零变化。三条回归守卫逐字保留:
+  // ①流式中不改 owner(!streamingRef.current 才 setStreamOwner);
+  // ②history 读 chatMessagesRef.current(不读闭包 chatMessages,连续旁问才不读旧值);
+  // ③ownerKey/btwSid 发起时闭包捕获(sessionQueueKey/btwSid),不在 fetch 回调里现取。
+  const sendBtw = useCallback((rawQ) => {
+    const q = String(rawQ || '').trim().replace(/^\/btw\s*/i, '');
+    if (!q) return;
+    setBtwOpenSignal((n) => n + 1);
+    const sel = getLocalSession();
+    const btwSid = sel?.sessionId || null;
+    const btwCwd = sel?.projectPath || selectedProject?.path;
+    const st = useStore.getState();
+    const btwModel = String((btwSid && st.modelBySession[btwSid]) || st.currentModel || '').replace(/\[1m\]/i, '');
+    const btwUuid = 'btw-' + Date.now();
+    // 守卫①:liveVisible 门控——空闲态 owner 为 null 会藏掉气泡,需认领;流式中不动 owner。
+    if (!streamingRef.current) setStreamOwner(sessionQueueKey);
+    // 守卫②③:读 ref 拿最新 transcript,发起时闭包捕获 sessionQueueKey 做 ownerKey 过滤。
+    const btwHistory = chatMessagesRef.current
+      .filter((m) => m.type === 'btw' && m.ownerKey === sessionQueueKey && !m.pending && !m.error)
+      .map((m) => ({ q: m.question, a: m.text }));
+    setChatMessages((prev) => [...prev, {
+      uuid: btwUuid, type: 'btw', question: q, text: '', pending: true,
+      ownerKey: sessionQueueKey,
+      timestamp: new Date().toISOString(),
+    }]);
+    fetch('/api/chat/btw', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question: q, sessionId: btwSid || undefined, cwd: btwCwd, model: btwModel || undefined, history: btwHistory }),
+    }).then(async (r) => {
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+      setChatMessages((prev) => prev.map((m) => m.uuid === btwUuid
+        ? { ...m, text: d.answer || '(无回答)', pending: false } : m));
+    }).catch((e) => {
+      setChatMessages((prev) => prev.map((m) => m.uuid === btwUuid
+        ? { ...m, text: '旁问失败：' + e.message, pending: false, error: true } : m));
+    });
+  }, [getLocalSession, selectedProject, sessionQueueKey, setChatMessages, setStreamOwner]);
+
   const handleSend = useCallback(async (prompt, opts = {}) => {
     const { reattachPid, appendSystemPrompt, hiddenUserMessage = false, meta } = opts;
     // AZ3:真实发送(非 reattach)恢复自动吸底——满足"回车发送后无手动滚动则吸底到最新"。
@@ -3887,44 +3886,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           confirmDialog('用法：/btw <问题>\n旁问一个问题——不打断当前工作、不写入会话历史。');
           return;
         }
-        const sel = getLocalSession();
-        const btwSid = sel?.sessionId || null;
-        const btwCwd = sel?.projectPath || selectedProject?.path;
-        const st = useStore.getState();
-        const btwModel = String((btwSid && st.modelBySession[btwSid]) || st.currentModel || '').replace(/\[1m\]/i, '');
-        const btwUuid = 'btw-' + Date.now();
-        // liveVisible 门控:chatMessages 只在 streamOwnerKey===sessionQueueKey 时渲染。
-        // 空闲态(刚进会话没发过消息)owner 为 null → 旁问气泡会被藏掉,需认领 owner。
-        // 流式进行中不动 owner(已有归属,乱改会影响 finalize/reattach 读 ownerRef 的逻辑)。
-        if (!streamingRef.current) setStreamOwner(sessionQueueKey);
-        // 记录旁问归属的回合(发起时最后一个已渲染的用户回合)→ 右侧 TurnScrubber
-        // 在该回合点标记"含旁问",悬浮可见。空会话无回合则 null(不关联任何点)。
-        const atTurnUuid = [...messages].reverse().find((m) => m.type === 'user' && m.uuid)?.uuid || null;
-        // 连续旁问:收集本线程(同 ownerKey)前序已完成的问答作 history。复用与渲染完全
-        // 相同的 ownerKey===sessionQueueKey 过滤(发起时闭包捕获,不在回调里现取),对齐
-        // per-pane 隔离,防 async-callback-current-selection-leak 家族串扰。
-        const btwHistory = chatMessagesRef.current
-          .filter((m) => m.type === 'btw' && m.ownerKey === sessionQueueKey && !m.pending && !m.error)
-          .map((m) => ({ q: m.question, a: m.text }));
-        setChatMessages((prev) => [...prev, {
-          uuid: btwUuid, type: 'btw', question: q, text: '', pending: true, atTurnUuid,
-          // 打上创建时的会话键:旁问气泡是本会话本地注记,渲染只认这个 key、不受
-          // liveVisible(流式防串门控)影响 —— 否则空闲/后台流/draft→init 窗口下气泡被吞。
-          ownerKey: sessionQueueKey,
-          timestamp: new Date().toISOString(),
-        }]);
-        fetch('/api/chat/btw', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ question: q, sessionId: btwSid || undefined, cwd: btwCwd, model: btwModel || undefined, history: btwHistory }),
-        }).then(async (r) => {
-          const d = await r.json().catch(() => ({}));
-          if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
-          setChatMessages((prev) => prev.map((m) => m.uuid === btwUuid
-            ? { ...m, text: d.answer || '(无回答)', pending: false } : m));
-        }).catch((e) => {
-          setChatMessages((prev) => prev.map((m) => m.uuid === btwUuid
-            ? { ...m, text: '旁问失败：' + e.message, pending: false, error: true } : m));
-        });
+        // 次入口:走共享 sendBtw(展开浮窗 + 发起旁问);逻辑与窗口内输入框一致。
+        sendBtw(q);
         return;
       }
       // Defense-in-depth: ChatInput already locks the composer when the session
@@ -5325,7 +5288,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       acceleratingRef.current = false;
       backgroundedRef.current = false;
     }
-  }, [selectedSession, selectedProject, streamingModel, isStreaming, sessionQueueKey]);
+  }, [selectedSession, selectedProject, streamingModel, isStreaming, sessionQueueKey, sendBtw]);
 
   // Ref to handleSend so the finally-block drain doesn't form a circular closure dep.
   const handleSendRef = useRef(null);
@@ -5484,7 +5447,10 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         // 的助手回复(在 jsonl、不在 earlyLines 回放里)照常从历史显示,不再凭空消失。
         if (prev?.sessionId) detachTsBySidRef.current[prev.sessionId] = Date.now();
         updateStreaming(false);
-        setChatMessages([]);
+        // 保留旁问气泡(本地注记,ownerKey 门控):切会话不清 btw,使浮窗线程"切走隐藏、切回还在"。
+        // 非 btw(turn/error/interrupted 半截回复)照旧清空——它们无 ownerKey 隔离,留着会串进新会话。
+        // btw 由 visibleChat 的 ownerKey===sessionQueueKey 过滤,永不在别的会话渲染,留着安全。
+        setChatMessages((prev) => prev.filter((m) => m.type === 'btw'));
         setStreamingText('');
         setStreamingThinking('');
         setStreamingToolCalls([]);
@@ -5959,11 +5925,6 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   const userTurns = allMessages
     .filter((m) => m.type === 'user' && m.uuid)
     .map((m) => ({ uuid: m.uuid, text: m.displayText || m.text || '', ts: m.timestamp }));
-  // 哪些回合发起过旁问(atTurnUuid)→ TurnScrubber 在这些点标记"含旁问"。旁问本地态,
-  // 数量极小,每帧新建 Set 无性能顾虑(与 userTurns 同理)。
-  const btwTurnUuids = new Set(
-    chatMessages.filter((m) => m.type === 'btw' && m.atTurnUuid).map((m) => m.atTurnUuid)
-  );
   // 用量汇总:优先取服务端聚合(usageTotals,jsonl 全文件按 message.id 去重逐条求和的
   // 地面真值口径),前端只叠加尚未落盘的流式回合(chatMessages,条数很小)——避免几千条
   // 历史消息每帧全量 reduce。无服务端聚合时(端点旧形态/加载失败)回退全量 reduce。
@@ -6102,8 +6063,20 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         <ChatSearch containerRef={containerRef} onClose={() => setSearchOpen(false)} />
       )}
       {!showAgentView && (
-        <TurnScrubber containerRef={containerRef} turns={userTurns} btwTurnUuids={btwTurnUuids} />
+        <TurnScrubber containerRef={containerRef} turns={userTurns} />
       )}
+      {/* 旁问浮窗:右下角浮动小窗,把本会话 /btw 线程聚合成连续对话。z-46 高于子代理面板
+          (z-40)故与之共存;suppressed=hasPendingInteraction 时让路授权/问题卡(收成浮标)。 */}
+      <BtwWindow
+        thread={visibleChat.filter((m) => m.type === 'btw')}
+        onSend={sendBtw}
+        onClearThread={() => setChatMessages((prev) => prev.filter((m) => !(m.type === 'btw' && m.ownerKey === sessionQueueKey)))}
+        sessionKey={sessionQueueKey}
+        paneIsActive={paneIsActive}
+        suppressed={hasPendingInteraction}
+        mobile={mobileChrome}
+        openSignal={btwOpenSignal}
+      />
       {!mobileChrome && <div className="glass-bar shrink-0 px-6 py-3 relative z-30">
         {/* Title row wraps when the pane is narrow or font is scaled up so
             the right-side stats/buttons drop to a second line instead of
@@ -6322,19 +6295,11 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                 onFork={forkCurrentSession}
                 retryActiveUuid={retryActiveUuid}
               />
-              {visibleChat.map((msg, i) => (
+              {/* btw 旁问不再进主流内联渲染 —— 改由右下角 BtwWindow 浮窗聚合成连续线程。 */}
+              {visibleChat.filter((msg) => msg.type !== 'btw').map((msg, i) => (
                 <div key={msg.uuid || i} data-turn-uuid={msg.uuid} data-turn-role={msg.type}>
                   {msg.type === 'compact'
                     ? <CompactDivider />
-                    : msg.type === 'btw'
-                    ? <BtwBubble msg={msg} onHide={(uuid) => setChatMessages((prev) => prev.filter((m) => m.uuid !== uuid))}
-                        onClearThread={async () => {
-                          // 清空 = 删本 ownerKey 全部旁问气泡(纯前端过滤),线程状态只活在
-                          // chatMessages,删掉即"忘记",下次 /btw history 为空 = 重新开始。
-                          if (!(await confirmDialog('清空本会话的全部旁问？\n下次旁问将从零开始，不带此前上下文。', { danger: true }))) return;
-                          const ok = msg.ownerKey;
-                          setChatMessages((prev) => prev.filter((m) => !(m.type === 'btw' && m.ownerKey === ok)));
-                        }} />
                     : msg.type === 'turn'
                     ? <>
                         <TurnBubble turn={msg} onRetry={handleRetryTurn} onRetryTool={(toolCall) => handleRetryTool(msg, toolCall)} retryActive={retryActiveUuid === msg.uuid} />
