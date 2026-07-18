@@ -6683,6 +6683,8 @@ function ProviderSwitcher() {
       document.removeEventListener('keydown', onEsc);
     };
   }, [open]);
+  // 关闭下拉时复位多选(顶栏常驻单实例,否则重开残留 selMode/选中项)。
+  useEffect(() => { if (!open) ms.exit(); }, [open]);
 
   // Always render — even with zero providers the dropdown still hosts the
   // "添加 Provider" form, so a fresh machine (no CC Switch, nothing added yet)
