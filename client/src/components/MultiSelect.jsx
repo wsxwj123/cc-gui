@@ -16,7 +16,9 @@ export function useMultiSelect() {
   const exit = useCallback(() => { setSelMode(false); setSelected(new Set()); }, []);
   // deleteOne(id)=>Promise 必须是纯后端调用、失败时 throw;删完统一由调用方刷新列表。
   // 返回 { total, ok, failed:[{id,error}] } 供调用方提示,取消/空选返回 null。
-  const runDelete = useCallback(async (deleteOne, { noun = '项', nameOf } = {}) => {
+  // sequential:true → 逐个 await(不并发)。用于删除会改写【共享文件】的场景:记忆删除各自
+  // read-modify-write 同一个 MEMORY.md 索引,并发会 lost-update 留悬空索引行,必须串行。
+  const runDelete = useCallback(async (deleteOne, { noun = '项', nameOf, sequential = false } = {}) => {
     if (busy) return null;
     const ids = [...selected];
     if (!ids.length) return null;
@@ -24,7 +26,16 @@ export function useMultiSelect() {
     const preview = labels.slice(0, 8).join('\n') + (labels.length > 8 ? `\n…等共 ${labels.length} 个` : '');
     if (!(await confirmDialog(`删除所选 ${ids.length} ${noun}?\n\n${preview}\n\n删除后不可恢复。`, { danger: true, confirmText: '删除' }))) return null;
     setBusy(true);
-    const results = await Promise.allSettled(ids.map((id) => deleteOne(id)));
+    let results;
+    if (sequential) {
+      results = [];
+      for (const id of ids) {
+        try { await deleteOne(id); results.push({ status: 'fulfilled' }); }
+        catch (e) { results.push({ status: 'rejected', reason: e }); }
+      }
+    } else {
+      results = await Promise.allSettled(ids.map((id) => deleteOne(id)));
+    }
     setBusy(false);
     exit();
     const failed = results

@@ -24,6 +24,7 @@ import { MessageBubble } from './components/MessageBubble.jsx';
 import { MarkdownRenderer } from './components/MarkdownRenderer.jsx';
 import { TurnBubble } from './components/TurnBubble.jsx';
 import TurnScrubber from './components/TurnScrubber.jsx';
+import { useMultiSelect, SelModeToggle, BatchBar, SelCheckbox } from './components/MultiSelect.jsx';
 import { pickDirectory, isTauri } from './utils/pickDirectory.js';
 import ChatSearch from './components/ChatSearch.jsx';
 import { confirmDialog } from './utils/confirmDialog.jsx';
@@ -6587,6 +6588,7 @@ function RemoteControlButton({ session }) {
 // then broadcasts provider-change so ModelSelector/cost displays self-refresh.
 // Hidden entirely when CC Switch isn't installed/empty.
 function ProviderSwitcher() {
+  const ms = useMultiSelect();
   const [providers, setProviders] = useState([]);
   // OpenAI-format providers (codex/opencode) — routed through the embedded
   // Anthropic↔OpenAI proxy on switch so the claude CLI can use them.
@@ -6785,25 +6787,38 @@ function ProviderSwitcher() {
             </div>
           ))}
           {customProviders.length > 0 && (
-            <div className="px-3 pt-2 pb-1 mt-1 border-t border-canvas-deep">
-              <div className="text-[10px] text-ink-faint uppercase tracking-wider font-body">自定义</div>
+            <div className="px-3 pt-2 pb-1 mt-1 border-t border-canvas-deep flex items-center gap-1">
+              <div className="text-[10px] text-ink-faint uppercase tracking-wider font-body flex-1">自定义</div>
+              <SelModeToggle selMode={ms.selMode} onToggle={() => (ms.selMode ? ms.exit() : ms.enter())} size={12} />
             </div>
+          )}
+          {ms.selMode && customProviders.length > 0 && (
+            <BatchBar count={ms.count} busy={ms.busy} noun="个 Provider" onExit={ms.exit}
+              onDelete={async () => {
+                const res = await ms.runDelete(
+                  (id) => fetch(`/api/custom-providers/${id}`, { method: 'DELETE' }).then((r) => { if (!r.ok) throw new Error('删除失败'); }),
+                  { noun: '个 Provider', nameOf: (id) => customProviders.find((p) => p.id === id)?.name || id });
+                if (res) load();
+              }} />
           )}
           {customProviders.map((p) => (
             <div key={p.id} className={`px-3 py-2 ${isCur(p) ? 'bg-accent-subtle' : ''}`}>
               <div className="flex items-center gap-2">
+                {ms.selMode && <SelCheckbox checked={ms.selected.has(p.id)} onClick={() => ms.toggle(p.id)} size={13} />}
                 {/* Click to switch (default model). The full model list lives in
                     the ModelSelector after switching — NOT nested under the
                     provider row. */}
-                <button disabled={switching} onClick={() => switchTo(p.id)}
+                <button disabled={switching} onClick={() => (ms.selMode ? ms.toggle(p.id) : switchTo(p.id))}
                   className={`flex-1 min-w-0 text-left flex items-center gap-2 ${switching ? 'opacity-50' : ''}`}>
                   <span className={`flex-1 text-xs font-body truncate ${isCur(p) ? 'text-accent font-medium' : 'text-ink'}`}>{p.name}</span>
                   {p.models.length > 0 && <span className="text-[9px] px-1 py-px bg-canvas-deep text-ink-faint rounded font-mono shrink-0">{p.models.length} 模型</span>}
                   <span className="text-[9px] px-1 py-px bg-canvas-deep text-ink-faint rounded font-mono shrink-0">{p.type}</span>
                   {isCur(p) && <Check size={12} className="text-accent shrink-0" />}
                 </button>
+                {!ms.selMode && (<>
                 <button onClick={() => setEditingProvider(p)} title="编辑" className="p-0.5 text-ink-faint hover:text-accent shrink-0"><Pencil size={12} /></button>
                 <button onClick={() => removeCustom(p.id, p.name)} title="删除" className="p-0.5 text-ink-faint hover:text-error shrink-0"><Trash2 size={12} /></button>
+                </>)}
               </div>
             </div>
           ))}
@@ -7992,6 +8007,7 @@ function MobileModelChips({ models, switching, onPick }) {
 }
 
 function MobileProviderPage() {
+  const ms = useMultiSelect();
   const [providers, setProviders] = useState([]);
   const [openaiProviders, setOpenaiProviders] = useState([]);
   const [customProviders, setCustomProviders] = useState([]);
@@ -8072,21 +8088,38 @@ function MobileProviderPage() {
         </div>
       ))}
       {customProviders.length > 0 && (
-        <div className="px-4 pt-3 pb-1 text-[11px] text-ink-faint uppercase tracking-wider font-body border-t border-canvas-deep/40 mt-1">自定义</div>
+        <div className="px-4 pt-3 pb-1 flex items-center gap-1 border-t border-canvas-deep/40 mt-1">
+          <div className="text-[11px] text-ink-faint uppercase tracking-wider font-body flex-1">自定义</div>
+          <SelModeToggle selMode={ms.selMode} onToggle={() => (ms.selMode ? ms.exit() : ms.enter())} size={14} />
+        </div>
+      )}
+      {ms.selMode && customProviders.length > 0 && (
+        <BatchBar count={ms.count} busy={ms.busy} noun="个 Provider" onExit={ms.exit}
+          onDelete={async () => {
+            const res = await ms.runDelete(
+              (id) => fetch(`/api/custom-providers/${id}`, { method: 'DELETE' }).then((r) => { if (!r.ok) throw new Error('删除失败'); }),
+              { noun: '个 Provider', nameOf: (id) => customProviders.find((p) => p.id === id)?.name || id });
+            if (res) load();
+          }} />
       )}
       {customProviders.map((p) => (
-        <div key={p.id} className="px-4 py-2.5 flex items-start gap-2">
+        <div key={p.id} className="px-4 py-2.5 flex items-start gap-2" onClick={ms.selMode ? () => ms.toggle(p.id) : undefined}>
+          {ms.selMode && <SelCheckbox checked={ms.selected.has(p.id)} onClick={() => ms.toggle(p.id)} size={15} className="mt-1" />}
           <div className="flex-1 min-w-0">
             <div className={`text-[14px] font-body mb-1 flex items-center gap-1.5 ${isCur(p) ? 'text-accent font-medium' : 'text-ink'}`}>
               <span className="truncate">{p.name}</span>
               <span className="text-[9px] px-1 py-px bg-canvas-deep text-ink-faint rounded font-mono shrink-0">{p.type}</span>
               {isCur(p) && <Check size={14} className="text-accent shrink-0" />}
             </div>
-            <MobileModelChips models={p.models.length ? p.models : ['(默认)']} switching={switching}
-              onPick={(m) => switchTo(p.id, p.models.length ? m : undefined)} />
+            {!ms.selMode && (
+              <MobileModelChips models={p.models.length ? p.models : ['(默认)']} switching={switching}
+                onPick={(m) => switchTo(p.id, p.models.length ? m : undefined)} />
+            )}
           </div>
+          {!ms.selMode && (<>
           <button onClick={() => setEditingProvider(p)} title="编辑" className="p-1.5 text-ink-faint hover:text-accent shrink-0"><Pencil size={15} /></button>
           <button onClick={() => removeCustom(p.id, p.name)} title="删除" className="p-1.5 text-ink-faint hover:text-error shrink-0"><Trash2 size={15} /></button>
+          </>)}
         </div>
       ))}
     </div>

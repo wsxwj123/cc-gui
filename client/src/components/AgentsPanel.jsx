@@ -205,6 +205,7 @@ export function AgentsPanel() {
       if (hitOpen) { setSelected(null); setContent(''); setFileMtime(null); setConflict(null); }
       fetchAgents();
       if (showBuiltin) fetchBuiltin();
+      if (res.failed.length) confirmDialog(`${res.failed.length}/${res.total} 个 agent 删除失败`, { danger: false });
     }
   };
 

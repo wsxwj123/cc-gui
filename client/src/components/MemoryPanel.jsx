@@ -202,7 +202,7 @@ function AutoMemoryTab({ cwd }) {
   const delOne = (file) => fetch(`/api/memory/entries/${encodeURIComponent(file)}?cwd=${encodeURIComponent(cwd)}`, { method: 'DELETE' })
     .then(async (r) => { if (!r.ok) { const d = await r.json().catch(() => ({})); throw new Error(d.error || '删除失败'); } });
   const onBatchDelete = async () => {
-    const res = await ms.runDelete(delOne, { noun: '条记忆', nameOf: (f) => entries.find((e) => e.file === f)?.name || f });
+    const res = await ms.runDelete(delOne, { noun: '条记忆', sequential: true, nameOf: (f) => entries.find((e) => e.file === f)?.name || f });
     if (res) { load(); if (res.failed.length) setErr(`${res.failed.length}/${res.total} 条删除失败`); }
   };
 
