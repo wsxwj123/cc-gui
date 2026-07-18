@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { useStore } from '../stores/sessionStore.js';
 import { Save, RefreshCw, Check, Lock, Trash2, ChevronLeft, Brain, BookText, Sparkles, Copy, ChevronDown, ChevronRight, Search } from 'lucide-react';
 import { confirmDialog } from '../utils/confirmDialog.jsx';
+import { useMultiSelect, SelModeToggle, BatchBar, SelCheckbox } from './MultiSelect.jsx';
 import { copyText } from '../utils/clipboard.js';
 
 // CLAUDE.md 指令编辑器。注意:CLAUDE.md 是用户写的"指令",不是"记忆"——官方语境里
@@ -135,6 +136,7 @@ function ClaudeMdEditor({ cwd }) {
 // 列表(name+description)→ 点开编辑/删除;删除联动清 MEMORY.md 索引行(后端做)。
 function AutoMemoryTab({ cwd }) {
   const [entries, setEntries] = useState([]);
+  const ms = useMultiSelect();
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState('');
   const [editing, setEditing] = useState(null); // { file, content, mtime }
@@ -154,7 +156,7 @@ function AutoMemoryTab({ cwd }) {
     setLoading(false);
   }, [cwd]);
 
-  useEffect(() => { setEditing(null); load(); }, [load]);
+  useEffect(() => { setEditing(null); ms.exit(); load(); }, [load]);
 
   const open = async (file) => {
     setErr('');
@@ -196,6 +198,14 @@ function AutoMemoryTab({ cwd }) {
     } catch (e) { setErr(e.message); }
   };
 
+  // 批量删除:并发调各自单删端点(纯后端,失败 throw),删完统一刷新一次。
+  const delOne = (file) => fetch(`/api/memory/entries/${encodeURIComponent(file)}?cwd=${encodeURIComponent(cwd)}`, { method: 'DELETE' })
+    .then(async (r) => { if (!r.ok) { const d = await r.json().catch(() => ({})); throw new Error(d.error || '删除失败'); } });
+  const onBatchDelete = async () => {
+    const res = await ms.runDelete(delOne, { noun: '条记忆', nameOf: (f) => entries.find((e) => e.file === f)?.name || f });
+    if (res) { load(); if (res.failed.length) setErr(`${res.failed.length}/${res.total} 条删除失败`); }
+  };
+
   if (editing) {
     return (
       <div className="flex-1 min-h-0 flex flex-col">
@@ -228,10 +238,12 @@ function AutoMemoryTab({ cwd }) {
         <span className="text-[10px] text-ink-faint font-body flex-1">
           Claude 自动记下的项目经验(每会话开头自动载入)。共 {entries.length} 条
         </span>
+        {entries.length > 0 && <SelModeToggle selMode={ms.selMode} onToggle={() => (ms.selMode ? ms.exit() : ms.enter())} size={12} />}
         <button onClick={load} disabled={loading} className="p-1 text-ink-faint hover:text-ink" title="重新加载">
           <RefreshCw size={12} className={loading ? 'animate-spin' : ''} />
         </button>
       </div>
+      {ms.selMode && <BatchBar count={ms.count} busy={ms.busy} onDelete={onBatchDelete} onExit={ms.exit} noun="条记忆" />}
       {err && <div className="px-3 py-2 text-xs text-amber-700 font-body shrink-0">{err}</div>}
       <div className="flex-1 min-h-0 overflow-y-auto divide-y divide-canvas-deep/50">
         {entries.length === 0 && !loading && (
@@ -241,16 +253,20 @@ function AutoMemoryTab({ cwd }) {
         )}
         {entries.map((e) => (
           <div key={e.file} className="px-3 py-2 flex items-start gap-2 hover:bg-canvas-warm/50 cursor-pointer group"
-            onClick={() => open(e.file)}>
-            <Brain size={12} className="text-accent/70 mt-0.5 shrink-0" />
+            onClick={() => (ms.selMode ? ms.toggle(e.file) : open(e.file))}>
+            {ms.selMode
+              ? <SelCheckbox checked={ms.selected.has(e.file)} onClick={() => ms.toggle(e.file)} size={13} className="mt-0.5" />
+              : <Brain size={12} className="text-accent/70 mt-0.5 shrink-0" />}
             <div className="min-w-0 flex-1">
               <div className="text-[12px] text-ink font-body font-medium truncate">{e.name || e.file}</div>
               {e.description && <div className="text-[10.5px] text-ink-muted font-body line-clamp-2">{e.description.replace(/^"|"$/g, '')}</div>}
             </div>
-            <button onClick={(ev) => { ev.stopPropagation(); remove(e.file); }}
-              className="p-1 text-ink-faint hover:text-error opacity-0 group-hover:opacity-100 shrink-0" title="删除">
-              <Trash2 size={11} />
-            </button>
+            {!ms.selMode && (
+              <button onClick={(ev) => { ev.stopPropagation(); remove(e.file); }}
+                className="p-1 text-ink-faint hover:text-error opacity-0 group-hover:opacity-100 shrink-0" title="删除">
+                <Trash2 size={11} />
+              </button>
+            )}
           </div>
         ))}
       </div>

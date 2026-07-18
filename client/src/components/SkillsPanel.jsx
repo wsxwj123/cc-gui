@@ -2,6 +2,7 @@
 // 源仓库(Anthropic / Superpowers / 开源社区 / 科研)拉取并导入,重名内联横幅选跳过/覆盖。
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import { Download, Check, Loader2, RefreshCw, AlertTriangle, CloudDownload, ExternalLink, Copy, Search, Archive, Trash2, RotateCcw, X } from 'lucide-react';
+import { useMultiSelect, SelModeToggle, BatchBar, SelCheckbox } from './MultiSelect.jsx';
 import { copyText } from '../utils/clipboard.js';
 import { confirmDialog } from '../utils/confirmDialog.jsx';
 
@@ -20,6 +21,7 @@ function SkillCopyBtn({ name }) {
 
 export function SkillsPanel() {
   const [tab, setTab] = useState('local');            // 'local' | 'import' | 'archived'
+  const ms = useMultiSelect();
   const [local, setLocal] = useState([]);
   const [loadingLocal, setLoadingLocal] = useState(true);
   const [archived, setArchived] = useState([]);
@@ -130,6 +132,14 @@ export function SkillsPanel() {
     return done;
   }, [loadLocal, loadArchived]);
 
+  // 批量删除本机已装 skill:并发调各自 POST /skills/delete(纯后端,失败 throw),删完统一刷新。
+  const delOne = (id) => fetch('/api/skills/delete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id }) })
+    .then(async (r) => { if (!r.ok) { const d = await r.json().catch(() => ({})); throw new Error(d.error || '删除失败'); } });
+  const onBatchDelete = async () => {
+    const res = await ms.runDelete(delOne, { noun: '个技能', nameOf: (id) => local.find((s) => s.id === id)?.name || id });
+    if (res) { setNotice(res.failed.length ? `已删 ${res.ok}/${res.total} 个,${res.failed.length} 个失败` : `已删除 ${res.ok} 个技能`); loadLocal(); loadArchived(); }
+  };
+
   const loadOfficial = useCallback(async (srcId, repo, branch, host) => {
     setLoadingOff(true); setOffErr(''); setConflicts(null);
     try {
@@ -187,6 +197,7 @@ export function SkillsPanel() {
   }, [customRepo, loadOfficial, loadSavedRepos]);
 
   useEffect(() => { loadLocal(); loadArchived(); }, [loadLocal, loadArchived]);
+  useEffect(() => { ms.exit(); }, [tab]); // 切 tab 复位多选,避免跨列表残留选中
   useEffect(() => {
     fetch('/api/skills/sources').then((r) => r.json()).then((d) => setSources(d.sources || [])).catch(() => {});
     loadSavedRepos();
@@ -272,10 +283,13 @@ export function SkillsPanel() {
         {tabBtn('local', '本机 Skill', local.length)}
         {tabBtn('import', '导入', null)}
         {tabBtn('archived', '已归档', archived.length)}
-        <button onClick={tab === 'local' ? loadLocal : tab === 'archived' ? loadArchived : () => (activeRepo ? loadOfficial(null, activeRepo, activeBranch, activeHost) : loadOfficial(source))} disabled={loadingLocal || loadingOff}
-          className="ml-auto p-1.5 text-ink-faint hover:text-ink rounded disabled:opacity-40" title="刷新">
-          <RefreshCw size={13} className={(loadingLocal || loadingOff) ? 'animate-spin' : ''} />
-        </button>
+        <div className="ml-auto flex items-center gap-1">
+          {tab === 'local' && local.length > 0 && <SelModeToggle selMode={ms.selMode} onToggle={() => (ms.selMode ? ms.exit() : ms.enter())} size={13} />}
+          <button onClick={tab === 'local' ? loadLocal : tab === 'archived' ? loadArchived : () => (activeRepo ? loadOfficial(null, activeRepo, activeBranch, activeHost) : loadOfficial(source))} disabled={loadingLocal || loadingOff}
+            className="p-1.5 text-ink-faint hover:text-ink rounded disabled:opacity-40" title="刷新">
+            <RefreshCw size={13} className={(loadingLocal || loadingOff) ? 'animate-spin' : ''} />
+          </button>
+        </div>
       </div>
 
       {tab === 'local' ? (
@@ -297,12 +311,14 @@ export function SkillsPanel() {
             </button>
           )}
           {notice && <div className="text-[11px] text-ink-soft bg-canvas-deep/60 border border-canvas-deep rounded px-2 py-1.5">{notice}</div>}
+          {ms.selMode && <BatchBar count={ms.count} busy={ms.busy} onDelete={onBatchDelete} onExit={ms.exit} noun="个技能" />}
           {filteredLocal.length > 0 ? (
             <div className="space-y-2">
               {filteredLocal.map((s) => (
-                <div key={s.id} onClick={() => setExpanded((p) => p === `local:${s.id}` ? null : `local:${s.id}`)}
+                <div key={s.id} onClick={() => (ms.selMode ? ms.toggle(s.id) : setExpanded((p) => p === `local:${s.id}` ? null : `local:${s.id}`))}
                   className="bg-canvas-warm border border-canvas-deep rounded-lg p-3 cursor-pointer" title="点击展开/收起完整简介">
                   <div className="flex items-center gap-2">
+                    {ms.selMode && <SelCheckbox checked={ms.selected.has(s.id)} onClick={() => ms.toggle(s.id)} />}
                     <span className="text-xs font-medium font-body text-ink truncate flex-1" title={s.id}>{s.name}</span>
                     {s.metaMissing && (
                       <span className="shrink-0 text-[9px] px-1 py-px bg-amber-500/10 text-amber-600 border border-amber-500/30 rounded font-body"
@@ -328,6 +344,7 @@ export function SkillsPanel() {
                         </>
                       );
                     })()}
+                    {!ms.selMode && (<>
                     <button onClick={(e) => { e.stopPropagation(); manageSkill('archive', s.id); }} disabled={!!manageBusy}
                       title="归档 —— 移出加载目录停用,可在「已归档」恢复"
                       className="shrink-0 p-1 rounded text-ink-faint hover:text-ink hover:bg-canvas-deep disabled:opacity-50">
@@ -338,6 +355,7 @@ export function SkillsPanel() {
                       className="shrink-0 p-1 rounded text-ink-faint hover:text-error hover:bg-error/10 disabled:opacity-50">
                       <Trash2 size={12} />
                     </button>
+                    </>)}
                   </div>
                   {s.description && <div className={`text-[11px] text-ink-muted font-body mt-1 ${expanded === `local:${s.id}` ? 'whitespace-pre-wrap' : 'line-clamp-2'}`}>{s.description}</div>}
                 </div>

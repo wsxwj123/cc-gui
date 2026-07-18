@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { Bot, RefreshCw, Save, Check, Plus, FileText, Download, Package, Trash2 } from 'lucide-react';
 import { confirmDialog } from '../utils/confirmDialog.jsx';
+import { useMultiSelect, SelModeToggle, BatchBar, SelCheckbox } from './MultiSelect.jsx';
 
 // ── 维护型常量:CLI 内置工具真实注册表 ──────────────────────────────────
 // agent .md 的 tools 字段 = 声明 ∩ CLI 真实注册表,写错名不报错、被 CLI 静默丢弃
@@ -77,6 +78,7 @@ function withModelValue(content, model) {
 
 export function AgentsPanel() {
   const [agents, setAgents] = useState([]);
+  const ms = useMultiSelect();
   const [loading, setLoading] = useState(true);
   const [selected, setSelected] = useState(null);
   const [content, setContent] = useState('');
@@ -193,6 +195,19 @@ export function AgentsPanel() {
     } catch {}
   };
 
+  // 批量删除:只作用于可删的自定义 agent(a.format !== 'cli' 才有删除按钮),并发调各自 DELETE 端点。
+  const delOne = (name) => fetch(`/api/agents/${encodeURIComponent(name)}`, { method: 'DELETE' })
+    .then(async (r) => { if (!r.ok) { const d = await r.json().catch(() => ({})); throw new Error(d.error || '删除失败'); } });
+  const onBatchDelete = async () => {
+    const hitOpen = selected && ms.selected.has(selected);
+    const res = await ms.runDelete(delOne, { noun: '个 agent' });
+    if (res) {
+      if (hitOpen) { setSelected(null); setContent(''); setFileMtime(null); setConflict(null); }
+      fetchAgents();
+      if (showBuiltin) fetchBuiltin();
+    }
+  };
+
   const createNew = async () => {
     if (!/^[a-z0-9-]{1,64}$/.test(newName)) return confirmDialog('名字只能小写字母、数字、-');
     setSelected(newName);
@@ -239,6 +254,7 @@ export function AgentsPanel() {
             <button onClick={() => { const n = !showBuiltin; setShowBuiltin(n); if (n) fetchBuiltin(); }}
               className={`p-1 hover:text-accent ${showBuiltin ? 'text-accent' : 'text-ink-faint'}`} title="安装内置 Agent 预设（explorer/oracle/orchestrator 等）"><Package size={12} /></button>
             <button onClick={() => setCreating(!creating)} className="p-1 text-ink-faint hover:text-accent" title="新建 agent"><Plus size={12} /></button>
+            {agents.some((a) => a.format !== 'cli') && <SelModeToggle selMode={ms.selMode} onToggle={() => (ms.selMode ? ms.exit() : ms.enter())} size={12} />}
             <button onClick={fetchAgents} className="p-1 text-ink-faint hover:text-ink-muted" title="刷新列表"><RefreshCw size={11} /></button>
           </div>
         </div>
@@ -296,6 +312,7 @@ export function AgentsPanel() {
         </div>
       )}
 
+      {ms.selMode && <BatchBar count={ms.count} busy={ms.busy} onDelete={onBatchDelete} onExit={ms.exit} noun="个 agent" />}
       <div className="flex-1 min-h-0 overflow-hidden flex">
         <div className="w-[140px] border-r border-canvas-deep overflow-y-auto shrink-0">
           {agents.length === 0 && (
@@ -305,21 +322,25 @@ export function AgentsPanel() {
                 className="btn-accent text-[10px] px-2 py-1">从内置预设创建</button>
             </div>
           )}
-          {agents.map((a) => (
+          {agents.map((a) => {
+            const canSel = ms.selMode && a.format !== 'cli';
+            return (
             <div key={a.name} className="group relative flex items-center">
-              <button onClick={() => open(a.name)}
-                className={`flex-1 min-w-0 sidebar-item text-left px-3 py-2 text-xs font-body truncate ${selected === a.name ? 'active text-accent' : 'text-ink-soft'}`}
-                title={a.description}>
+              {canSel && <SelCheckbox checked={ms.selected.has(a.name)} onClick={() => ms.toggle(a.name)} size={12} className="ml-1.5" />}
+              <button onClick={() => (canSel ? ms.toggle(a.name) : open(a.name))}
+                className={`flex-1 min-w-0 sidebar-item text-left px-3 py-2 text-xs font-body truncate ${selected === a.name ? 'active text-accent' : 'text-ink-soft'} ${ms.selMode && a.format === 'cli' ? 'opacity-40' : ''}`}
+                title={ms.selMode && a.format === 'cli' ? '内置 CLI agent,不可删除' : a.description}>
                 <FileText size={10} className="inline mr-1 text-ink-faint" />{a.name}
               </button>
-              {a.format !== 'cli' && (
+              {!ms.selMode && a.format !== 'cli' && (
                 <button onClick={() => del(a.name)} title="删除该 agent"
                   className="absolute right-1 opacity-0 group-hover:opacity-100 p-1 rounded text-ink-faint hover:text-red-500 hover:bg-black/5 transition-opacity">
                   <Trash2 size={11} />
                 </button>
               )}
             </div>
-          ))}
+            );
+          })}
         </div>
 
         <div className="flex-1 min-w-0 flex flex-col">
