@@ -1704,7 +1704,7 @@ function AutoCompactWindowSelect({ settings, onSave, saving }) {
     <div className="bg-canvas-warm border border-canvas-deep rounded-lg px-3 py-2.5 flex items-center gap-3">
       <div className="min-w-0 flex-1">
         <div className="text-xs text-ink font-body font-medium flex items-center gap-1.5">自动压缩窗口<EffectBadge level="immediate" /></div>
-        <div className="text-[10.5px] text-ink-faint font-body">上下文占用逼近该 token 窗口时,CLI 自动压缩会话历史。调大则更晚触发、保留更多上下文,调小则更早压缩。置为默认时按模型自动决定。若环境变量 CLAUDE_CODE_AUTO_COMPACT_WINDOW 已设置,则以环境变量为准。<span className="text-ink-muted">参考:200K 窗口模型选 150K–180K、1M 窗口模型选 800K–900K,给压缩留出余量</span></div>
+        <div className="text-[10.5px] text-ink-faint font-body">上下文占用逼近该 token 窗口时,CLI 自动压缩会话历史。调大则更晚触发、保留更多上下文,调小则更早压缩。<span className="text-ink-muted">置为默认时自动联动:官方模型由 CLI 按模型决定;第三方 provider 下,模型名带 [1m](1M 开关)则按 1M×0.85 联动,或按 Provider 编辑表单里填写的"上下文窗口"×0.85 联动。</span>此处显式选择任一数值、或设置了环境变量 CLAUDE_CODE_AUTO_COMPACT_WINDOW,均会覆盖联动,以显式值为准。</div>
       </div>
       <select
         value={current}

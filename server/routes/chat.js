@@ -69,6 +69,40 @@ export function safeModelArg(m) {
   return MODEL_ARG_RE.test(s) ? s : '';
 }
 
+// 自动压缩窗口联动:第三方 provider 下按【本回合实际模型 + 当前激活 provider】实时决定
+// autoCompactWindow,经 --settings 临时文件 per-spawn 覆盖(不写全局 settings.json,多会话
+// 互不影响;模型/provider 变化会重开进程,下一回合自动用新值)。
+// 优先级:用户显式设置(settings.json 顶层 autoCompactWindow 或 env 的
+// CLAUDE_CODE_AUTO_COMPACT_WINDOW)> 本联动 > CLI 默认。
+// 窗口来源两档:①模型名带 [1m] → 1,048,576(与 GUI 的 1M 开关天然联动,kimi-k3[1m] 等);
+// ②当前激活 provider(~/.claude-gui/active-provider.json → custom-providers.json)配置的
+// contextWindow 字段(GUI Provider 表单可填,如 deepseek 128k)。都没有 → null 交 CLI 默认。
+// 官方 OAuth(无 ANTHROPIC_BASE_URL)恒 null:CLI 认识官方模型,自动窗口本就准确。
+// 压缩线 = 窗口×0.85(给压缩摘要留余量);CLI schema 下限 100k,算出 <100k(如 64k 小窗)
+// 表达不了 → null(已知局限,如 kimi 不开 1M 的默认档)。
+export function resolveAutoCompactWindow(model) {
+  try {
+    const st = JSON.parse(readFileSync(pathJoin(homedir(), '.claude', 'settings.json'), 'utf8'));
+    if (typeof st?.autoCompactWindow === 'number') return null;      // 用户显式设置,尊重
+    if (st?.env?.CLAUDE_CODE_AUTO_COMPACT_WINDOW) return null;       // env 显式设置,尊重
+    if (!st?.env?.ANTHROPIC_BASE_URL) return null;                   // 官方,CLI 自动已准确
+    let win = null;
+    if (/\[1m\]/i.test(String(model || ''))) win = 1_048_576;
+    if (!win) {
+      const activeId = JSON.parse(readFileSync(pathJoin(homedir(), '.claude-gui', 'active-provider.json'), 'utf8'))?.id;
+      if (activeId) {
+        const cp = JSON.parse(readFileSync(pathJoin(homedir(), '.claude-gui', 'custom-providers.json'), 'utf8'));
+        const list = Array.isArray(cp) ? cp : (cp?.providers || []);
+        const cur = list.find((p) => p?.id === activeId);
+        if (cur && Number.isFinite(Number(cur.contextWindow))) win = Number(cur.contextWindow);
+      }
+    }
+    if (!win) return null;
+    const acw = Math.floor(win * 0.85);
+    return acw >= 100_000 ? Math.min(acw, 1_000_000) : null;
+  } catch { return null; }
+}
+
 // spawn claude 的统一入口:路径解析交给 claude-resolver(PATH → login shell →
 // npm prefix → 固定候选),此处只处理平台执行形态。
 // Windows:npm 装的 claude 是 claude.cmd,Node spawn 无法直接执行(.cmd 必须经
@@ -764,6 +798,20 @@ router.post('/chat', async (req, res) => {
   };
   if (effort && VALID_EFFORTS.has(effort)) options.effort = effort;
   if (budget) options.maxBudgetUsd = budget;
+  // 自动压缩窗口联动(1M 开关/provider contextWindow):per-spawn --settings 覆盖文件。
+  // extraArgs 经 SDK 透传为 CLI --settings <path>;进程随流结束,文件在 finally 清理。
+  let acwTmpFile = null;
+  {
+    const acw = resolveAutoCompactWindow(model);
+    if (acw) {
+      try {
+        acwTmpFile = pathJoin(tmpdir(), `cgui-acw-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.json`);
+        writeFileSync(acwTmpFile, JSON.stringify({ autoCompactWindow: acw }), 'utf8');
+        options.extraArgs = { ...(options.extraArgs || {}), settings: acwTmpFile };
+        trace(`autoCompactWindow linkage: ${acw} (model=${model})`); // T0 诊断
+      } catch { acwTmpFile = null; }
+    }
+  }
   // 手动禁用的 MCP 工具:模型这一回合看不到它们(解决 paper-search crossref 噪音等)。
   const disallowedMcpTools = buildDisallowedMcpTools();
   if (disallowedMcpTools.length) options.disallowedTools = disallowedMcpTools;
@@ -958,6 +1006,7 @@ router.post('/chat', async (req, res) => {
       }
     } finally {
       clearTimeout(stallTimer); // 看门狗随流关闭,不留孤儿定时器
+      if (acwTmpFile) { try { unlinkSync(acwTmpFile); } catch {} } // 压缩窗口覆盖临时文件清理
       cancelClose();
       if (lastResultLine) maybeBroadcastTurnComplete(slot, lastResultLine);
       input.close();

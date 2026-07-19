@@ -1053,6 +1053,11 @@ router.post('/custom-providers', async (req, res) => {
       const tm = sanitizeTierModels(req.body?.tierModels, cleanModels);
       if (tm) entry.tierModels = tm;
     }
+    // 上下文窗口(token,可选):自动压缩窗口联动用(chat.js resolveAutoCompactWindow)。
+    {
+      const cwNum = Number(req.body?.contextWindow);
+      if (Number.isFinite(cwNum) && cwNum >= 1000 && cwNum <= 10_000_000) entry.contextWindow = Math.floor(cwNum);
+    }
     const list = await readCustomProviders();
     // 幂等查重(用户新机实报:添加成功但后续 switch 失败被误报"保存失败"→重试 N 次
     // = N 条重复条目)。同 type+name+baseURL 视为同一 provider,返回已存在的 id 而非
@@ -1074,12 +1079,16 @@ router.put('/custom-providers/:id', async (req, res) => {
     const list = await readCustomProviders();
     const idx = list.findIndex((p) => p.id === req.params.id);
     if (idx === -1) return res.status(404).json({ error: 'not found' });
-    const { name, type, baseURL, apiKey, models, defaultModel, tierModels } = req.body || {};
+    const { name, type, baseURL, apiKey, models, defaultModel, tierModels, contextWindow } = req.body || {};
     if (!name || typeof name !== 'string') return res.status(400).json({ error: 'name 必填' });
     if (type !== 'openai' && type !== 'anthropic') return res.status(400).json({ error: 'type 必须是 openai 或 anthropic' });
     let url; try { url = new URL(baseURL); } catch { return res.status(400).json({ error: 'baseURL 非法' }); }
     if (!/^https?:$/.test(url.protocol)) return res.status(400).json({ error: 'baseURL 必须是 http(s)' });
     const prev = list[idx];
+    // 上下文窗口(token,可选):自动压缩窗口联动用。传 null/'' 清除;传合法数字更新;不传保留。
+    const cwNum = Number(contextWindow);
+    if (contextWindow === null || contextWindow === '') delete prev.contextWindow;
+    else if (Number.isFinite(cwNum) && cwNum >= 1000 && cwNum <= 10_000_000) prev.contextWindow = Math.floor(cwNum);
     const nextModels = Array.isArray(models)
       ? models.filter((m) => typeof m === 'string' && m.trim()).map((m) => m.trim())
       : (prev.models || []);

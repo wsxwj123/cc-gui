@@ -7720,6 +7720,9 @@ function CustomProviderForm({ onSaved, editing, onCancel, onDirtyChange, customC
   // BB6:档位映射 —— 子代理/标题/compact 用的 haiku/sonnet/opus alias 各自映射到该
   // provider 的真实模型(空=回退默认模型/选中模型,即维持 BA1 行为)。
   const [tierModels, setTierModels] = useState({ haiku: '', sonnet: '', opus: '' });
+  // 上下文窗口(token,可选):自动压缩窗口按它联动(切到该 provider 时压缩线=窗口×0.85)。
+  // 空 = 不联动(CLI 按 200K 假设;窗口更大的模型会被过早压缩用不满)。
+  const [ctxWindow, setCtxWindow] = useState('');
   const [busy, setBusy] = useState('');
   const isEdit = !!editing;
   const formRef = useRef(null);
@@ -7754,6 +7757,7 @@ function CustomProviderForm({ onSaved, editing, onCancel, onDirtyChange, customC
       setModelsText((editing.models || []).join('\n'));
       setDefaultModel(editing.defaultModel || '');
       setTierModels({ haiku: editing.tierModels?.haiku || '', sonnet: editing.tierModels?.sonnet || '', opus: editing.tierModels?.opus || '' });
+      setCtxWindow(editing.contextWindow ? String(editing.contextWindow) : '');
       setTestResult(null); // 切到另一个 provider 编辑时清掉上一个的测试结果横幅(否则误导)
       setBusy('');
       setOpen(true);
@@ -7836,6 +7840,8 @@ function CustomProviderForm({ onSaved, editing, onCancel, onDirtyChange, customC
         sonnet: parsedModels.includes(tierModels.sonnet) ? tierModels.sonnet : '',
         opus:   parsedModels.includes(tierModels.opus)   ? tierModels.opus   : '',
       };
+      // 上下文窗口(可选):空串 = 清除;后端校验范围 [1000, 10M]。
+      body.contextWindow = ctxWindow.trim() ? Number(ctxWindow.trim()) : null;
       // Edit mode: a blank key means "keep the stored one" (the client never holds
       // the real key), so only send apiKey when the user actually typed a new one.
       if (!isEdit || apiKey.trim()) body.apiKey = apiKey;
@@ -7958,6 +7964,16 @@ function CustomProviderForm({ onSaved, editing, onCancel, onDirtyChange, customC
             </select>
           </div>
         ))}
+      </div>
+      {/* 上下文窗口:自动压缩联动的数据源。填了 → 切到该 provider 时 CLI 自动压缩线=窗口×0.85
+          (大窗模型不再被 200K 假设过早压缩);留空 → CLI 默认。带 [1m] 的模型名无需填(1M 开关
+          自动联动)。 */}
+      <div className="flex items-center gap-2 pt-0.5">
+        <span className="text-[11px] text-ink-faint shrink-0 whitespace-nowrap">上下文窗口</span>
+        <input value={ctxWindow} onChange={(e) => setCtxWindow(e.target.value.replace(/[^\d]/g, ''))}
+          placeholder="可选,token 数。如 1000000(qwen/gemini 1M)、262144(256K)"
+          className={`${inputCls} flex-1 font-mono`}
+          title="该 provider 模型的上下文窗口(token)。填了则切到此 provider 时自动压缩窗口按它联动(×0.85);留空 = CLI 默认 200K 假设。模型名带 [1m] 时无需填。" />
       </div>
       <div className="flex gap-2">
         <button onClick={fetchModels} disabled={!!busy}
