@@ -912,6 +912,21 @@ export const useStore = create((set, get) => ({
     set({ backgroundSessions: cur });
   },
 
+  // ── 已停会话表(sid → 停止时刻) ─────────────────────────────
+  // 主会话被用户停止/删除/杀进程时记录。监控页 workflow 内层 agent 的状态来自服务端
+  // 扫 jsonl mtime(只有 done/running/idle,无 stopped 态)——停止后进程已死但 mtime
+  // 在存活窗内仍判 running,监控页据此表覆盖显示"已停止"。同 sid 新回合开始时清除。
+  stoppedSessions: {},
+  markSessionStopped: (sid) => set((s) => (
+    sid && !s.stoppedSessions[sid] ? { stoppedSessions: { ...s.stoppedSessions, [sid]: Date.now() } } : s
+  )),
+  clearSessionStopped: (sid) => set((s) => {
+    if (!sid || !s.stoppedSessions[sid]) return s;
+    const n = { ...s.stoppedSessions };
+    delete n[sid];
+    return { stoppedSessions: n };
+  }),
+
   // ── Permission popup helpers ───────────────────────────────
   addPendingPermission: (req) => set((s) => {
     if (s.pendingPermissions.some((p) => p.id === req.id)) return s;

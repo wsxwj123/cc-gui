@@ -627,6 +627,7 @@ export function AgentMonitorPanel() {
   const localAgents = useStore((s) => s.activeAgents);
   const bgTasks = useStore((s) => s.bgTasks);
   const paneSessions = useStore((s) => s.paneSessions);
+  const stoppedSessions = useStore((s) => s.stoppedSessions); // 已停会话表:wf 内层 agent 覆盖显示"已停止"
 
   const mountedRef = useRef(true);
   const fetchActive = async (silent = false) => {
@@ -654,7 +655,10 @@ export function AgentMonitorPanel() {
       if (!mountedRef.current) return;
       const merged = [];
       const seen = new Set();
-      for (const l of lists) for (const a of (l.agents || [])) { if (!seen.has(a.id)) { seen.add(a.id); merged.push(a); } }
+      // 附上归属 sid(lists[i] 对应 sids[i] 的查询):停止覆盖显示要按会话判,合并丢归属就判不了。
+      lists.forEach((l, i) => {
+        for (const a of (l.agents || [])) { if (!seen.has(a.id)) { seen.add(a.id); merged.push({ ...a, sessionId: sids[i]?.sessionId || null }); } }
+      });
       setWfAgents(merged);
     } catch {}
     if (!silent && mountedRef.current) setLoading(false);
@@ -790,15 +794,23 @@ export function AgentMonitorPanel() {
         {wfAgents.length > 0 && (
           <FoldableSection icon={<Bot size={10} />} title={`workflow 内层 agent (${wfAgents.length})`}>
             <div className="space-y-1.5">
-              {wfAgents.map((a) => (
+              {wfAgents.map((a) => {
+                // 主会话已被停止 → 前台 workflow 内层 agent 随主进程死,但服务端状态是
+                // mtime 推断(无 stopped 态,存活窗内仍报 running)。按已停表覆盖显示:
+                // 仅当该 agent 在停止时刻后【无新活动】才覆盖 —— 停止后仍在写 jsonl 的
+                // 是独立进程(后台任务),如实显示 running,不误伤。done 是权威终态不覆盖。
+                const stoppedAt = a.sessionId ? stoppedSessions[a.sessionId] : null;
+                const forceStopped = stoppedAt && a.status !== 'done' && (a.lastActivity || 0) < stoppedAt;
+                return (
                 <div key={a.id} className="flex items-center gap-2 bg-canvas-warm border border-canvas-deep rounded-lg px-2.5 py-1.5">
                   <Bot size={11} className="text-violet-600 shrink-0" />
                   <span className="text-[11px] font-mono text-ink truncate flex-1" title={`${a.workflowId} · ${a.id}`}>
                     {a.agentType || 'agent'} <span className="text-ink-faint">#{String(a.id).slice(-4)}</span>
                   </span>
-                  <StatusBadge status={a.status === 'idle' ? 'idle' : a.status} />
+                  <StatusBadge status={forceStopped ? 'stopped' : (a.status === 'idle' ? 'idle' : a.status)} />
                 </div>
-              ))}
+                );
+              })}
             </div>
           </FoldableSection>
         )}

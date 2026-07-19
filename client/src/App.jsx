@@ -574,6 +574,9 @@ function finalizeAgent(st, agentId, tnStatus, visited, authoritative) {
 function finalizeSessionAgents(sessionId, tnStatus = 'stopped') {
   if (!sessionId) return;
   const st = useStore.getState();
+  // 三个调用方(前台停止/删会话/杀进程)全是"该会话前台活动被终止"语义 → 记入已停表,
+  // 供监控页把 workflow 内层 agent(服务端 mtime 推断、无 stopped 态)覆盖显示为已停止。
+  st.markSessionStopped?.(sessionId);
   const visited = new Set();
   for (const [id, ag] of Object.entries(st.activeAgents || {})) {
     if (!ag || ag.sessionId !== sessionId) continue;
@@ -4273,6 +4276,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       const controller = new AbortController();
       abortRef.current = controller;
       killedRef.current = false; // 本回合起始重置:除非随后真 POST /stop,否则 abort 不算杀进程
+      // 新回合开始 = 会话复活:清除"已停"标记(监控页 wf 内层 agent 的 stopped 覆盖失效,
+      // 新 workflow 可正常显示 running)。draft 首发 sid 在 init 事件才确定,那里再清一次。
+      if (streamSid) useStore.getState().clearSessionStopped?.(streamSid);
       const streamRes = await fetch(`/api/chat/${pid}/stream`, { signal: controller.signal });
       const reader = streamRes.body.getReader();
       const decoder = new TextDecoder();
@@ -4330,6 +4336,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           // page refresh forgets the session even though it exists on disk.
           if (event.type === 'system' && event.subtype === 'init' && event.session_id) {
             streamSid = event.session_id; // 本次流归属的真 sid(draft 发起时在此确定)
+            useStore.getState().clearSessionStopped?.(event.session_id); // draft 首发:真 sid 此刻才知道
             // Record the provider this turn ran under so a later switch can strip
             // now-invalid thinking-block signatures. Model name can't tell a mimo
             // relay (claude-* names) from official, so we key off the live hint.
@@ -5166,6 +5173,12 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             finalizeAgent(_st, tc.id, 'stopped', _visited);
           }
         }
+        // 前台停止的穷举兜底(调研钉死的唯一漏网入口):上面只遍历本回合 currentToolCalls
+        // 树,不在树里的 activeAgents 条目(上一回合派的/reattach 后树重建丢失的)收不到
+        // stopped → 监控页永久"工作中"。删会话/转后台/杀进程三个兄弟入口早已接
+        // finalizeSessionAgents 穷举,唯独这里没接。turnAborted 仅真 POST /stop 时为 true
+        // (killedRef),后台化/切会话不误伤;函数幂等且只碰 activeAgents,不动 bgTasks。
+        if (turnAborted && streamSid) finalizeSessionAgents(streamSid);
       } catch {}
       updateStreaming(false);
       setStreamingText('');
