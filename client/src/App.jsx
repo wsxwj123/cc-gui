@@ -8494,6 +8494,37 @@ function ShortcutsPanel({ open, onClose }) {
 // ─── Main App ──────────────────────────────────────────────────
 export default function App() {
   useWebSocket();
+  // #12 后台任务全局活性探测(判官打回修复):bgTasks 的 status 只有创建时的 'running'
+  // (自然结束无退出码事件;监控卡的 phase 是组件本地态、面板关了就没人测)→ 任务清单
+  // 转圈据 status 判会永转。这里全局唯一轮询:对非终态任务每 5s 查 output 文件 size,
+  // 连续 6 轮(≈30s)无增长标 livePhase:'idle'(≈不再工作,不谎称完成),有增长标 'running'。
+  // ChatInput 的 bgWorking 据 livePhase 判;无任务时零请求。
+  useEffect(() => {
+    const sizes = {}; // taskId -> { size, stale }
+    const id = setInterval(async () => {
+      const st = useStore.getState();
+      const live = Object.values(st.bgTasks || {}).filter(
+        (t) => t && t.outputPath && !['done', 'failed', 'killed', 'stopped', 'error'].includes(t.status),
+      );
+      for (const t of live) {
+        try {
+          const prev = sizes[t.id] || { size: 0, stale: 0 };
+          const r = await fetch(`/api/bgtask/output?path=${encodeURIComponent(t.outputPath)}&offset=${prev.size}`);
+          const d = await r.json();
+          if (!d.exists) continue; // 文件未落盘/被清,不妄判
+          if (d.size > prev.size) {
+            sizes[t.id] = { size: d.size, stale: 0 };
+            if (t.livePhase !== 'running') st.upsertBgTask(t.id, { livePhase: 'running' });
+          } else {
+            const stale = prev.stale + 1;
+            sizes[t.id] = { size: prev.size, stale };
+            if (stale >= 6 && t.livePhase !== 'idle') st.upsertBgTask(t.id, { livePhase: 'idle' });
+          }
+        } catch { /* 网络瞬断,下轮再试 */ }
+      }
+    }, 5000);
+    return () => clearInterval(id);
+  }, []);
   const { sidebarCollapsed, toggleSidebar, selectedProject, selectedSession } = useStore();
   const [rightPanel, setRightPanel] = useState(null);
   const [tourOpen, setTourOpen] = useState(false); // CK-3 使用指引浮层

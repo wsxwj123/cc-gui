@@ -289,8 +289,11 @@ export function ChatInput({ onSend, onStop, onAccelerate, onBackground, suggesti
   const agentsWorking = useStore((s) => (sessionId
     ? Object.values(s.activeAgents || {}).some((a) => a && a.sessionId === sessionId && !TODO_AGENT_TERMINAL.includes(a.status))
     : false));
+  // livePhase 由 App 根的全局活性轮询维护('running'/'idle');'idle'=输出30s无增长≈
+  // 不再工作(自然结束无退出码事件,这是唯一可得信号)。无 livePhase(刚起跑)按工作中。
   const bgWorking = useStore((s) => (sessionId
-    ? Object.values(s.bgTasks || {}).some((t) => t && t.sessionId === sessionId && !TODO_BG_TERMINAL.includes(t.status))
+    ? Object.values(s.bgTasks || {}).some((t) => t && t.sessionId === sessionId
+        && !TODO_BG_TERMINAL.includes(t.status) && t.livePhase !== 'idle')
     : false));
   const reclaimRemote = async () => {
     if (!sessionId) return;

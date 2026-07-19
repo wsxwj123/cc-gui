@@ -560,7 +560,12 @@ function BgTaskCard({ task }) {
         body: JSON.stringify({ path: task.outputPath }),
       });
       const d = await r.json();
-      if (d.ok && d.located) { stoppedRef.current = true; setPhase('stopped'); }
+      if (d.ok && d.located) {
+        stoppedRef.current = true; setPhase('stopped');
+        // #12:写回 store 终态——否则 status 永远停在创建时的 'running',任务清单转圈
+        // (ChatInput bgWorking)与其他消费方拿到的都是死状态(判官抓的核心缺陷)。
+        useStore.getState().upsertBgTask(task.id, { status: 'stopped' });
+      }
       else setStopNote('未定位到进程(可能已结束)。若仍在运行,请在系统任务管理器手动结束');
     } catch { setStopNote('停止失败,请重试或手动结束'); }
     setStopping(false);
