@@ -1050,7 +1050,9 @@ export function ChatInput({ onSend, onStop, onAccelerate, onBackground, suggesti
               title="旁问（不打断当前工作、不写入会话历史）"
             >
               <MessagesSquare size={15} />
-              {paneCount < 4 && <span className="text-[12px] font-body">旁问</span>}
+              {/* 手机(max-md)藏文字只留图标:流式时同排还有入队/转后台/停止,375px 装不下会把
+                  停止按钮顶出输入框边界(#15);桌面分屏≥4 同理已藏。 */}
+              {paneCount < 4 && <span className="text-[12px] font-body max-md:hidden">旁问</span>}
               {btwUnread > 0 && (
                 <span className="absolute -top-0.5 -right-0.5 min-w-[15px] h-[15px] px-1 rounded-full bg-accent text-white text-[9px] leading-[15px] text-center font-mono">
                   {btwUnread > 9 ? '9+' : btwUnread}
@@ -1080,32 +1082,32 @@ export function ChatInput({ onSend, onStop, onAccelerate, onBackground, suggesti
               <button
                 onClick={handleSend}
                 disabled={!text.trim() && attachments.length === 0}
-                className="shrink-0 h-9 px-3 rounded-full bg-accent/10 hover:bg-accent/20 text-accent flex items-center justify-center gap-1 transition-colors disabled:opacity-50 text-[11px] font-medium"
+                className="shrink-0 h-9 px-3 max-md:px-2.5 rounded-full bg-accent/10 hover:bg-accent/20 text-accent flex items-center justify-center gap-1 transition-colors disabled:opacity-50 text-[11px] font-medium"
                 title="入队（当前消息发送完后自动发出）"
               >
-                <Send size={13} />入队
+                <Send size={13} /><span className="max-md:hidden">入队</span>
               </button>
               {/* H 转后台:只断本端连接,回合在服务端继续跑完(与切走会话的自动挂后台
                   同一机制,这里是主动触发)。仅本地前台流式时上层才传 onBackground。 */}
               {onBackground && (
                 <button
                   onClick={onBackground}
-                  className="shrink-0 h-9 px-3 rounded-md bg-canvas-warm border border-canvas-deep hover:bg-black/5 text-ink-soft flex items-center justify-center gap-1.5 transition-colors text-[11px] font-medium"
+                  className="shrink-0 h-9 px-3 max-md:px-2.5 rounded-md bg-canvas-warm border border-canvas-deep hover:bg-black/5 text-ink-soft flex items-center justify-center gap-1.5 max-md:gap-0 transition-colors text-[11px] font-medium"
                   title="本回合转入后台继续运行,完成后自动提示;期间可切换到其它会话"
                 >
                   <ArrowDownToLine size={11} />
-                  转后台
+                  <span className="max-md:hidden">转后台</span>
                 </button>
               )}
               {/* Small rounded-rect stop button, CLI-style. Always-clickable
                   whether streaming locally or only running in background. */}
               <button
                 onClick={onStop}
-                className="shrink-0 h-9 px-3 rounded-md bg-ink/90 hover:bg-ink text-canvas flex items-center justify-center gap-1.5 transition-colors text-[11px] font-medium"
+                className="shrink-0 h-9 px-3 max-md:px-2.5 rounded-md bg-ink/90 hover:bg-ink text-canvas flex items-center justify-center gap-1.5 max-md:gap-0 transition-colors text-[11px] font-medium"
                 title="停止生成"
               >
                 <Square size={11} className="fill-current" />
-                停止
+                <span className="max-md:hidden">停止</span>
               </button>
             </>
           ) : (
