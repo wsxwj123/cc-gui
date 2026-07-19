@@ -435,7 +435,12 @@ export async function listSessions(projectHash) {
         messageCount: totalLines,
         startTime: firstUser?.timestamp || new Date(s.birthtimeMs).toISOString(),
         lastActivity: lastRecord?.timestamp || new Date(s.mtimeMs).toISOString(),
-        model: head.find((r) => r.type === 'assistant')?.message?.model || null,
+        // #14:模型徽章取【最后一条】assistant 的 model —— 用户切 provider/model 后列表
+        // 跟随最新使用的模型;原取 head 首条=创建时初始模型,永不更新(用户实报)。
+        // 逆序扫 tail,跳过 <synthetic> 等伪模型 id(compact 摘要/错误占位,同 turn.model
+        // 过滤规则);tail 无 assistant(极短/纯用户消息尾)回落 head 原逻辑。
+        model: [...tail].reverse().find((r) => r.type === 'assistant' && r.message?.model && !/^</.test(r.message.model))?.message?.model
+          || head.find((r) => r.type === 'assistant')?.message?.model || null,
         fileSize: s.size,
         subagents: subagents.length > 0 ? subagents : undefined,
         archived,
