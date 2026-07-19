@@ -7915,6 +7915,9 @@ function CustomProviderForm({ onSaved, editing, onCancel, onDirtyChange, customC
               setType(tpl.type);
               setBaseURL(tpl.baseURL);
               setModelsText((tpl.models || []).join('\n'));
+              // 模板带保守的上下文窗口预设(取该家主力模型的最小主流窗口,宁小勿大)→ 自动
+              // 压缩联动开箱即用;模板没配(聚合类/窗口差异大)则清空=CLI 默认。
+              setCtxWindow(tpl.contextWindow ? String(tpl.contextWindow) : '');
               // 重置 select 自身,让用户能再次选(value 受控就不会卡)
               e.target.value = '';
             }}
