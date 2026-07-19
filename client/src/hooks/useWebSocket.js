@@ -303,6 +303,10 @@ export function useWebSocket() {
       if (cancelled || document.visibilityState !== 'visible') return;
       const ws = wsRef.current;
       if (!ws || ws.readyState === 2 || ws.readyState === 3) { // CLOSING/CLOSED/无
+        // 判官建议1:先摘掉老 socket 的 onclose 再重连 —— 否则切前台时老 socket 的
+        // onclose 事件可能在 connect() 之后补触发、再排一个 3s 重连定时器;弱网下新
+        // 连接握手 >3s 时定时器先响 → 双连接(重复广播/toast)。摘掉后彻底无竞态。
+        if (ws) { ws.onclose = null; try { ws.close(); } catch {} }
         if (reconnectRef.current) { clearTimeout(reconnectRef.current); reconnectRef.current = null; }
         connect();
       } else if (ws.readyState === 1) {

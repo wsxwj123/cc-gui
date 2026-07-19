@@ -772,6 +772,8 @@ wss.on('connection', (ws) => {
   // 客户端应用层心跳:回 pong 供对端确认链路存活。Tailscale/手机网络的"半死连接"
   // 不触发 close 事件,客户端靠"发 ping 后收不到任何消息"判死并重连(useWebSocket)。
   ws.on('message', (buf) => {
+    // 短路超大帧:ping 帧极小,>256B 不解析(避免对任意入站大 payload 做 JSON.parse)。
+    if (!buf || buf.length > 256) return;
     try {
       if (JSON.parse(buf)?.type === 'ping' && ws.readyState === 1) ws.send('{"type":"pong"}');
     } catch { /* 非 JSON 或非 ping,忽略 */ }
