@@ -808,7 +808,8 @@ router.post('/chat', async (req, res) => {
         acwTmpFile = pathJoin(tmpdir(), `cgui-acw-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.json`);
         writeFileSync(acwTmpFile, JSON.stringify({ autoCompactWindow: acw }), 'utf8');
         options.extraArgs = { ...(options.extraArgs || {}), settings: acwTmpFile };
-        trace(`autoCompactWindow linkage: ${acw} (model=${model})`); // T0 诊断
+        // (判官抓:此处不能调 trace —— 它声明在下方,TDZ 抛错会被本 catch 吞掉并把
+        // acwTmpFile 置 null → finally 清理失效、每次联动冷启泄漏一个临时文件。)
       } catch { acwTmpFile = null; }
     }
   }
@@ -841,6 +842,7 @@ router.post('/chat', async (req, res) => {
     slot.query = q;
   } catch (err) {
     activeProcesses.delete(procId);
+    if (acwTmpFile) { try { unlinkSync(acwTmpFile); } catch {} } // 泵未启动,finally 不会跑,就地清理(判官建议)
     return res.status(500).json({ error: 'query() failed: ' + err.message });
   }
 
