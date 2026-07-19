@@ -227,6 +227,10 @@ const TYPE_LABELS = {
   project: '项目',
 };
 
+// #12:任务清单转圈的"仍在工作"判定用的终态集(与监控页 AgentMonitorPanel 口径一致)。
+const TODO_AGENT_TERMINAL = ['done', 'error', 'stopped'];
+const TODO_BG_TERMINAL = ['done', 'failed', 'killed', 'stopped', 'error'];
+
 export function ChatInput({ onSend, onStop, onAccelerate, onBackground, suggestion = null, onDismissSuggestion, disabled, isStreaming, backgroundWorking = false, queueLength = 0, queueItems = [], onRemoveFromQueue, onEditFromQueue, todos = null, plan = '', permKey = null, sessionId = null, tabIndex = null, onBtwOpen, btwUnread = 0 }) {
   const [text, setText] = useState('');
   // 编辑重发态(#4):点击「重新编辑并发送」后进入。此时历史消息尚未被破坏,
@@ -279,6 +283,15 @@ export function ChatInput({ onSend, onStop, onAccelerate, onBackground, suggesti
   // the hidden `--remote-control` pty owns the session file, so spawning a `-p`
   // turn here would double-write the same jsonl. Reclaim to unlock.
   const rcLocked = useStore((s) => (sessionId ? !!s.remoteControlled[sessionId] : false));
+  // #12:任务清单转圈跟随"会话整体是否仍有工作":本地流式 || 本会话活跃子代理(含主会话
+  // 停止后仍在跑的后台化子代理)|| 本会话 run_in_background 后台长任务(如模型训练)。
+  // 主会话+子代理+后台任务全停才停转。selector 返回布尔,引用稳定不多渲。
+  const agentsWorking = useStore((s) => (sessionId
+    ? Object.values(s.activeAgents || {}).some((a) => a && a.sessionId === sessionId && !TODO_AGENT_TERMINAL.includes(a.status))
+    : false));
+  const bgWorking = useStore((s) => (sessionId
+    ? Object.values(s.bgTasks || {}).some((t) => t && t.sessionId === sessionId && !TODO_BG_TERMINAL.includes(t.status))
+    : false));
   const reclaimRemote = async () => {
     if (!sessionId) return;
     try {
@@ -982,7 +995,7 @@ export function ChatInput({ onSend, onStop, onAccelerate, onBackground, suggesti
         {/* 任务清单 — 紧贴输入框上方(同一列内),作为输入框的附着条而非独立悬浮面板。
             折叠/隐藏/全完成自动折叠见 TodoPanel。key=permKey:折叠/隐藏是组件本地态,按会话
             重挂以免跨会话串扰(每个会话独立的折叠/隐藏状态)。 */}
-        <TodoPanel key={permKey || 'global'} todos={todos} plan={plan} isStreaming={isStreaming} />
+        <TodoPanel key={permKey || 'global'} todos={todos} plan={plan} isStreaming={isStreaming || agentsWorking || bgWorking} />
 
         {/* 输入预测(A):回合末模型预测的下一条输入。点击建议文本直接发送;
             铅笔=填入输入框编辑;X=忽略。新回合开始/发送时上层自动清掉。 */}
