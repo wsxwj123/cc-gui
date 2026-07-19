@@ -496,6 +496,14 @@ if (typeof window !== 'undefined') {
 }
 function useResolvedWindow(model) {
   const [win, setWin] = useState(() => (model && resolvedWindowCache.has(model) ? resolvedWindowCache.get(model) : undefined));
+  // provider 切换计数:同名模型跨 provider(如两家都叫 gpt-5 且被 pin)时 model 字符串不变、
+  // effect 不重跑 → 清缓存也拿不到新值(判官建议2)。epoch 入 deps 强制重取。
+  const [pvEpoch, setPvEpoch] = useState(0);
+  useEffect(() => {
+    const bump = () => setPvEpoch((n) => n + 1);
+    window.addEventListener('cgui:provider-change', bump);
+    return () => window.removeEventListener('cgui:provider-change', bump);
+  }, []);
   useEffect(() => {
     if (!model) { setWin(undefined); return; }
     if (resolvedWindowCache.has(model)) { setWin(resolvedWindowCache.get(model)); return; }
@@ -509,7 +517,7 @@ function useResolvedWindow(model) {
       })
       .catch(() => { if (!dead) setWin(undefined); });
     return () => { dead = true; };
-  }, [model]);
+  }, [model, pvEpoch]);
   return win;
 }
 
@@ -6111,11 +6119,15 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // 之前"徽章显示 1M、点开 /context 却是 200k"的矛盾根因就是两套来源各算各的。
   // 显式 [1m] 后缀 > /context 实测缓存(实测可能是开 1m 之前测的) > 按名猜测。
   // (上移到分子之前,供下面的"usage 超窗 = 异常"健全性判断复用。)
-  // 优先级:[1m] 显式 > /context 实测 > 后端解析(与压缩联动同源,盖 128K/256K/400K 等
-  // 非两档谱系)> 本地按名猜测(官方/离线兜底)。
+  // 优先级:[1m] 显式 > 后端解析 resolvedWindow(与压缩联动同源;第三方按实抓/规则表/
+  // 手填,盖 128K/256K/400K/1M 非两档谱系)> /context 实测 > 本地按名猜测(兜底)。
+  // 【resolvedWindow 必须在 measuredCtx 之前】(判官抓):measuredCtx.windowTokens 来自
+  // CLI /context 自报窗口,对第三方恰是它的 200K 默认假设(每会话首回合后台探测就会填充,
+  // 常态路径),放前面会把更准的解析值压回 200K。官方场景 resolvedWindow 恒 null,自动
+  // 落到 measuredCtx(CLI 对官方准确),无回归。
   const contextWindow = /\[1m\]/i.test(currentModel || '')
     ? 1_000_000
-    : (measuredCtx?.windowTokens || resolvedWindow || nativeContextWindow(currentModel));
+    : (resolvedWindow || measuredCtx?.windowTokens || nativeContextWindow(currentModel));
   const measuredFresh = measuredCtx && measuredCtx.totalTokens > 0 && measuredCtx.ts >= Math.max(_liveTs, _jsonlTs);
   // 单次调用的输入侧上下文(input+cache_read+cache_creation)物理上不可能超过上下文窗口
   // (一次能发的就是这么多)。若 usage 之和超窗,说明这条 usage 是异常累加/口径错误(实测
