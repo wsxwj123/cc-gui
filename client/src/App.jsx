@@ -4966,7 +4966,15 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
               // 串扰#8:横幅打归属 key(流的 owner,draft→init 后已升级为真 sid),渲染
               // 按 ownerKey===sessionQueueKey 门控 —— 否则 set 后只有手点才清,A 的超窗
               // 横幅持久挂在 B 下,内嵌按钮还作用于 B(语义错位)。
-              setCtxOverflow({ has1m: /\[1m\]/i.test(currentModel || ''), wasCompact: isCompact, ownerKey: streamOwnerKeyRef.current });
+              // 从报错抽真实窗口(如 kimi "prompt is too long: 131072 tokens > 65536 maximum"):
+              // 小窗第三方(64k 等)下 CLI 仍按自认 200k 估算,自动压缩永不提前触发 → 回合中途
+              // 超限;横幅要把真实窗口亮给用户并给对建议(压缩摘要请求自身也会超小窗,难自救)。
+              const _lim = /(\d[\d,]*)\s*tokens?\s*>\s*(\d[\d,]*)\s*maximum/i.exec(msg);
+              setCtxOverflow({
+                has1m: /\[1m\]/i.test(currentModel || ''), wasCompact: isCompact, ownerKey: streamOwnerKeyRef.current,
+                used: _lim ? Number(_lim[1].replace(/,/g, '')) : null,
+                limit: _lim ? Number(_lim[2].replace(/,/g, '')) : null,
+              });
               accumulatedText = ''; accumulatedThinking = ''; currentToolCalls = [];
               sawError = true;
               break;
@@ -6342,8 +6350,16 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       {ctxOverflow && ctxOverflow.ownerKey === sessionQueueKey && (
         <div className="shrink-0 mx-6 mt-2 px-3 py-2.5 rounded-md bg-red-50 border border-red-200 animate-fade-up">
           <div className="text-red-700 text-[12px] font-body leading-snug mb-2">
-            ⚠️ {ctxOverflow.wasCompact ? '/compact 失败' : '上下文超出模型窗口'}：当前对话已超过模型上下文上限，
-            {ctxOverflow.wasCompact ? '压缩需要把整段对话发给模型做摘要，请求本身也超限（HTTP 413），所以压缩无法执行。' : '上游拒绝了整个请求（HTTP 413）。'}
+            ⚠️ {ctxOverflow.wasCompact ? '/compact 失败' : '上下文超出模型窗口'}：
+            {ctxOverflow.limit
+              ? `当前对话 ${Math.round(ctxOverflow.used / 1000)}k tokens，已超过该模型的真实上下文窗口 ${Math.round(ctxOverflow.limit / 1000)}k。`
+              : '当前对话已超过模型上下文上限，'}
+            {ctxOverflow.wasCompact ? '压缩需要把整段对话发给模型做摘要，请求本身也超限，所以压缩无法执行。' : '上游拒绝了整个请求。'}
+            {ctxOverflow.limit && ctxOverflow.limit < 190000 ? (
+              <span className="block mt-1">
+                该第三方模型窗口（{Math.round(ctxOverflow.limit / 1000)}k）远小于官方 200k——CLI 按 200k 估算，自动压缩不会提前触发，长对话或多工具回合会在中途突然超限，且此时压缩多半也救不回。长任务建议换窗口更大的模型或档位；用这个模型时尽量勤开新会话。
+              </span>
+            ) : null}
             选择下面任一方式恢复：
           </div>
           <div className="flex flex-wrap items-center gap-2">
