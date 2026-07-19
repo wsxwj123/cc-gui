@@ -1,17 +1,26 @@
 import React from 'react';
-import { Bot, Loader2, User } from 'lucide-react';
+import { Bot, GitBranch, Loader2, User } from 'lucide-react';
 import { useStore } from '../stores/sessionStore.js';
 import { MarkdownRenderer } from './MarkdownRenderer.jsx';
 import { CoworkBlocks } from './TurnBubble.jsx';
 import { PermissionPrompt } from './PermissionPrompt.jsx';
+import { LoadingMark, useCyclingVerb, ElapsedTime } from './LoadingBits.jsx';
+
+// 上下文占用简写(与主会话徽章同口径:k 计)。
+function fmtTok(n) {
+  if (!n || n <= 0) return null;
+  return n >= 1000 ? `${Math.round(n / 1000)}k` : String(n);
+}
 
 // #9/O4 子代理会话窗口:样式对齐正常会话(用户气泡在右、回复在左、思考/工具折叠),
 // 标题处「母会话标题 / 子代理名」层级面包屑,点母会话标题返回。
 // 数据来自 store.activeAgents[agentId](流式累积的 text/thinking/toolCalls)。
 export function SubagentView({ agentId, parentTitle, parentSessionId = null, onBack }) {
   const agent = useStore((s) => s.activeAgents[agentId]);
+  // hooks 必须在下面的早退 return 之前(rules-of-hooks)。
+  const verb = useCyclingVerb();
   // 兜底:store 拿不到具体名/model 时(provider 不发子代理流),从 server 提取的
-  // sessions.subagents 按 toolUseId(= agentId)对回 agentType / model。
+  // sessions.subagents 按 toolUseId(= agentId)对回 agentType / model / 上下文占用 / cwd。
   const sessionsList = useStore((s) => s.sessions);
   let metaAgent;
   for (const sess of (Array.isArray(sessionsList) ? sessionsList : [])) {
@@ -66,10 +75,25 @@ export function SubagentView({ agentId, parentTitle, parentSessionId = null, onB
             <Bot size={15} className="text-violet-600 shrink-0" />
             <span className="text-ink truncate">{name}</span>
           </div>
-          <div className="flex items-center gap-2 mt-0.5 text-[11px] font-mono text-ink-faint">
+          <div className="flex items-center gap-2 mt-0.5 text-[11px] font-mono text-ink-faint flex-wrap">
             {agentModel && (
               <span className="px-1.5 py-px bg-violet-100 text-violet-700 rounded" title="该子代理实际使用的模型">
                 {agentModel}
+              </span>
+            )}
+            {/* #2 上下文占用徽章(与主会话同口径:最后一次调用的 input+cache 之和,服务端
+                从子代理 jsonl 提取);无数据(provider 不落盘 usage)不显示。 */}
+            {fmtTok(metaAgent?.contextTokens) && (
+              <span className="px-1.5 py-px bg-canvas-deep text-ink-muted rounded" title="子代理当前上下文占用(最后一次调用口径)">
+                {fmtTok(metaAgent.contextTokens)} tokens
+              </span>
+            )}
+            {/* #11 worktree 徽标:子代理在 worktree 隔离副本里干活时显示(路径含 .claude/worktrees,
+                或 cwd 本身就是独立 worktree 目录),便于后期合并回主分支。文本优先分支名
+                (jsonl 顶层 gitBranch),比 agent-xxx 目录名有语义。 */}
+            {metaAgent?.cwd && /[/\\]\.claude[/\\]worktrees[/\\]|worktree/i.test(metaAgent.cwd) && (
+              <span className="px-1.5 py-px bg-amber-100 text-amber-700 rounded flex items-center gap-1" title={`该子代理工作在独立 worktree:${metaAgent.cwd}${metaAgent.gitBranch ? `(分支 ${metaAgent.gitBranch})` : ''}`}>
+                <GitBranch size={9} />{metaAgent.gitBranch || metaAgent.cwd.split(/[/\\]/).pop()}
               </span>
             )}
             <span className={`${statusMeta.cls} flex items-center gap-1 font-body`}>
@@ -125,11 +149,17 @@ export function SubagentView({ agentId, parentTitle, parentSessionId = null, onB
                 <div className="text-[13.5px] text-ink font-body">
                   <MarkdownRenderer content={typeof agent.result === 'string' ? agent.result : JSON.stringify(agent.result)} />
                 </div>
-              ) : working ? (
-                <div className="flex items-center gap-2 text-ink-faint text-sm font-body">
-                  <Loader2 size={14} className="animate-spin" /> 子代理运行中…
-                </div>
               ) : null}
+              {/* #2 底部加载动画+动态文本:与主会话流式状态行同款视觉物(LoadingMark+动态词+
+                  耗时,橙色 #D97757),取代原来的灰色"子代理运行中…"。 */}
+              {working && (
+                <div className="flex items-center gap-2 mt-2 text-[13px] font-body animate-fade-in" style={{ color: '#D97757' }}>
+                  <span className="shrink-0 inline-flex items-center"><LoadingMark size={13} /></span>
+                  <span className="font-mono truncate font-medium" style={{ color: '#D97757' }}>{verb}</span>
+                  <span style={{ color: '#D97757' }}>…</span>
+                  <ElapsedTime startedAt={agent.startedAt} className="ml-1" />
+                </div>
+              )}
             </div>
           </div>
         </div>

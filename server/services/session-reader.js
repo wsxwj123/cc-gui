@@ -370,6 +370,16 @@ export async function listSessions(projectHash) {
         let agentMeta = {};
         try { agentMeta = JSON.parse(await readFile(metaPath, 'utf-8')); } catch {}
         const base = agentPath.split(/[/\\]/).pop().replace('.jsonl', '');
+        // #2/#11 子代理视图数据:上下文占用取 tail 最后一条 assistant 的 usage(单次调用口径,
+        // 与主会话徽章同算法:input+cache_read+cache_creation);cwd 取任一记录顶层 cwd —— 子代理
+        // 在 worktree 隔离时它与主项目路径不同,前端据此显示 worktree 徽标。
+        const lastAsst = [...agentEdges.tail].reverse().find((r) => r.type === 'assistant' && r.message?.usage);
+        const au = lastAsst?.message?.usage || null;
+        const agentCtxTokens = au
+          ? (au.input_tokens || 0) + (au.cache_read_input_tokens || 0) + (au.cache_creation_input_tokens || 0)
+          : null;
+        const agentCwd = agentEdges.head.find((r) => r?.cwd)?.cwd || agentEdges.tail.find((r) => r?.cwd)?.cwd || null;
+        const agentBranch = agentEdges.head.find((r) => r?.gitBranch)?.gitBranch || null;
         return {
           sessionId: base,
           projectHash,
@@ -380,6 +390,9 @@ export async function listSessions(projectHash) {
           model: agentEdges.head.find((r) => r.type === 'assistant')?.message?.model || null,
           toolUseId: agentMeta.toolUseId || null,
           agentType: agentMeta.agentType || null,
+          contextTokens: agentCtxTokens,
+          cwd: agentCwd,
+          gitBranch: agentBranch,
           isSubagent: true,
           ...extra,
         };

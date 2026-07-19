@@ -24,6 +24,7 @@ import { MessageBubble } from './components/MessageBubble.jsx';
 import { MarkdownRenderer } from './components/MarkdownRenderer.jsx';
 import { TurnBubble } from './components/TurnBubble.jsx';
 import TurnScrubber from './components/TurnScrubber.jsx';
+import { LoadingMark, useCyclingVerb, ElapsedTime } from './components/LoadingBits.jsx';
 import { useMultiSelect, SelModeToggle, BatchBar, SelCheckbox } from './components/MultiSelect.jsx';
 import { pickDirectory, isTauri } from './utils/pickDirectory.js';
 import ChatSearch from './components/ChatSearch.jsx';
@@ -2645,30 +2646,6 @@ function EmptyState({ tabIndex = 0 }) {
 // ─── CLI-style spinner ─────────────────────────────────────────
 // Mimics claude-code terminal: a 6-point asterisk that cycles through Unicode
 // frames every ~100ms, paired with a verb that changes every ~3s.
-const SPINNER_FRAMES = ['✻', '✶', '✷', '✸', '✹', '✺'];
-const THINKING_VERBS = [
-  'Frolicking', 'Pondering', 'Brewing', 'Cogitating', 'Mulling',
-  'Conjuring', 'Crafting', 'Weaving', 'Synthesizing', 'Noodling',
-  'Spelunking', 'Marinating', 'Percolating', 'Ruminating',
-];
-// Bigger, brand-colored spinner — Claude terracotta #D97757, ~20px default
-// (was 14px and accent-blue). Matches Claude's official brand color so the
-// "thinking..." indicator feels like Claude's own UI.
-function CliSpinner({ size = 20 }) {
-  const [frame, setFrame] = useState(0);
-  useEffect(() => {
-    const id = setInterval(() => setFrame((f) => (f + 1) % SPINNER_FRAMES.length), 120);
-    return () => clearInterval(id);
-  }, []);
-  return (
-    <span
-      className="font-mono inline-block leading-none"
-      style={{ fontSize: size, color: '#D97757' }}
-    >
-      {SPINNER_FRAMES[frame]}
-    </span>
-  );
-}
 
 // Loading 动画样式库(选项 id 对应 index.css 的 .loading-<id>,移植自 clawd-station)。
 // 'cli' = 原 ASCII spinner,保持默认外观不变。主题弹窗里选,存 store.loadingStyle。
@@ -2692,17 +2669,6 @@ export const LOADING_OPTIONS = [
 ];
 
 // 统一加载指示:按用户选的样式渲染;variant 传入时强制该样式(预览网格用)。
-function LoadingMark({ size = 20, variant = null }) {
-  const chosen = useStore((s) => s.loadingStyle) || 'cli';
-  const style = variant || chosen;
-  if (style === 'cli') return <CliSpinner size={size} />;
-  return (
-    <span
-      className={`loading-mark loading-${style}`}
-      style={{ width: size, height: size }}
-    ><span /></span>
-  );
-}
 // ③ 对话区自定义背景层(设置→概览→对话区背景)。绝对定位铺满 pane,-z-10 置于
 // 内容之下(SessionDetail 根节点在启用背景时加 isolate 建立独立层叠上下文)。
 // 遮罩 = 主题底色(--color-canvas)按 maskOpacity 比例盖在背景上,深浅主题下都保证文字可读。
@@ -2729,14 +2695,6 @@ function ChatBackgroundLayer() {
   );
 }
 
-function useCyclingVerb() {
-  const [i, setI] = useState(() => Math.floor(Math.random() * THINKING_VERBS.length));
-  useEffect(() => {
-    const id = setInterval(() => setI((x) => (x + 1) % THINKING_VERBS.length), 3000);
-    return () => clearInterval(id);
-  }, []);
-  return THINKING_VERBS[i];
-}
 
 // ─── 压缩进度条 ────────────────────────────────────────────────
 // SDK 不流式发压缩百分比(只在完成后给 compact_boundary 的 pre/post_tokens),终端里
@@ -2756,19 +2714,6 @@ function CompactProgressBar() {
 // Inline status that mirrors the CLI's "✻ Frolicking…" prompt — spinner
 // char + verb + optional tool/phase detail. Updates live as the model
 // moves through phases inside one turn.
-// CJ-4:流式/思考/connecting 时的实时耗时计数,每秒跳一次。startedAt=本回合发起时间戳。
-function ElapsedTime({ startedAt, className = '' }) {
-  const [, tick] = useState(0);
-  useEffect(() => {
-    if (!startedAt) return;
-    const id = setInterval(() => tick((n) => n + 1), 1000);
-    return () => clearInterval(id);
-  }, [startedAt]);
-  if (!startedAt) return null;
-  const s = Math.max(0, Math.floor((Date.now() - startedAt) / 1000));
-  const txt = s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${s % 60}s`;
-  return <span className={`font-mono text-[12px] text-ink-faint tabular-nums shrink-0 ${className}`}>{txt}</span>;
-}
 
 function StreamingStatusLine({ thinking, text, toolCalls, streamStart }) {
   const verb = useCyclingVerb();
