@@ -853,7 +853,9 @@ router.post('/chat', async (req, res) => {
   // 静默超 STALL_MS 且【本回合起过子代理 + 当前无在跑的非 shell 任务 + 尚未收尾】才
   // 主动 finalize 解锁;任何消息到达即重置。正常流(消息间隔远小于阈值)与真在跑的
   // 子代理(liveTasks 门)都不会触发;shell 后台任务不阻塞主控,不计入等待。
-  const STALL_MS = 180_000;
+  // 阈值 300s:第三方 TTFT 常态 60-90s,大上下文/限流重试可更久,180s 只有 2-3x 余量
+  // 会误杀"慢但正常"的请求(判官缺陷2)——砍在生成中途会丢实时答案。300s 给足余量。
+  const STALL_MS = 300_000;
   let stallTimer = null;
   const armStall = () => {
     clearTimeout(stallTimer);
@@ -861,7 +863,16 @@ router.post('/chat', async (req, res) => {
       const busyNonShell = [...(slot.liveTasks?.values() ?? [])].some((t) => t && t.kind !== 'shell');
       if (!slot.idle && slot.turnSubagentSeen && !busyNonShell) {
         trace(`stall-watchdog fire after ${STALL_MS}ms silence`); // T0 诊断
-        deliverLine(slot, JSON.stringify({ type: 'stderr', text: '子代理已全部结束,但上游 3 分钟无后续输出,已自动收尾本回合(部分第三方 provider 偶发)。会话状态正常,可直接继续发消息。' }));
+        // stall_notice:客户端专用渲染分支(中性系统提示 turn,非红色错误)。原用 type:stderr
+        // 但客户端 SSE 分发根本不渲染 stderr = 提示白发(判官缺陷3)。
+        deliverLine(slot, JSON.stringify({ type: 'stall_notice', text: '子代理已全部结束,但上游超过 5 分钟无后续输出,已结束本回合并重置连接(部分第三方 provider 偶发)。已有内容完好,直接重发或继续即可。' }));
+        // 【必须强制拆进程,不能走 idle 复用】(判官缺陷1):卡死场景下 CLI 子进程正阻塞在
+        // 死掉的上游请求上,不是健康空闲。若只 finalize 转 idle,同会话 15 分钟内下一条消息
+        // 会复用这个僵尸(input.push 进挂住的进程、stdin 不被读、armStall 因 for await 不进
+        // 循环体而永不重挂)→ 二次卡死且无看门狗兜底。closing=true 让 finalize 走 input.close
+        // 分支、复用块的 !s.closing 门拒绝复用;abort 是本文件既有的标准拆除手段。
+        slot.closing = true;
+        try { slot.abort?.abort(); } catch {}
         finalize('stall-watchdog');
       } else if (!slot.idle) {
         armStall(); // 子代理仍在跑等条件不满足:继续观察下一窗

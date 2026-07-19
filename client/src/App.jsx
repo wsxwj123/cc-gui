@@ -4869,6 +4869,22 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
               }
             }
           }
+          // #13 看门狗提示:服务端 stall-watchdog 收尾回合时发的中性系统提示(上游长时间
+          // 无输出被主动收尾)。渲染成普通提示 turn(⏸ 前缀),不走红色错误分支不吓人;
+          // 随后的 done 事件正常收尾本轮。
+          if (event.type === 'stall_notice') {
+            setChatMessages((prev) => [...prev, {
+              uuid: 'stall-' + Date.now(),
+              type: 'turn',
+              timestamp: new Date().toISOString(),
+              model: streamingModel,
+              text: [`⏸ ${event.text || '上游长时间无输出,本回合已自动收尾。'}`],
+              thinking: [], toolCalls: [],
+              blocks: [{ type: 'text', content: `⏸ ${event.text || '上游长时间无输出,本回合已自动收尾。'}` }],
+              usage: null,
+            }]);
+            continue;
+          }
           // Surface CLI-side errors that previously got silently dropped:
           //   - type:"error"  (our server's stderr/spawn fail wrapper)
           //   - type:"result" with is_error:true (CLI's own error envelope,
