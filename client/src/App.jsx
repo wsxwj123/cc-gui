@@ -718,9 +718,12 @@ function MainLayout({ sidebarCollapsed, selectedProject, rightPanel, setRightPan
           </>
         )}
 
-        {/* Right panel — full-screen overlay */}
+        {/* Right panel — full-screen overlay。外层必须 flex:普通块级下 RightPanel(高度 auto)
+            被内容撑开超出屏幕、其内部 flex-1 滚动区拿不到有限高度 → 面板内容溢出被裁、触摸
+            滚不动(#18 手机文件浏览器等页面无法上下滑动的根因;桌面父容器是 flex 行天然拉伸
+            无此问题)。flex 默认 stretch 把 RightPanel 高度钉成屏高,内部滚动恢复。 */}
         {rightPanel && (
-          <div className="fixed inset-0 z-50 bg-canvas animate-glass-rise">
+          <div className="fixed inset-0 z-50 bg-canvas animate-glass-rise flex">
             <RightPanel panelId={rightPanel} onClose={() => setRightPanel(null)} width="100%" />
           </div>
         )}
