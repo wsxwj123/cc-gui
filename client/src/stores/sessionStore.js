@@ -1207,6 +1207,7 @@ export const useStore = create((set, get) => ({
       // 用户在 GUI 选过则尊重其选择(localStorage 有值,不覆盖)。
       try {
         if (!localStorage.getItem('cgui-effort') && data.defaultEffort) set({ effort: data.defaultEffort });
+        set({ defaultEffort: data.defaultEffort || '' }); // 判官建议:三个 /api/model 消费点同步此字段,防文案短暂陈旧
       } catch {}
     } catch {}
   },
