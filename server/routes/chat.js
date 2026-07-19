@@ -136,8 +136,12 @@ export function resolveAutoCompactWindow(model) {
       const p = Number(JSON.parse(readFileSync(pathJoin(homedir(), '.claude-gui', 'prefs.json'), 'utf8'))?.autoCompactPct);
       if (Number.isFinite(p) && p >= 50 && p <= 95) pct = p;
     } catch {}
-    const acw = Math.floor(win * pct / 100);
-    return acw >= 100_000 ? Math.min(acw, 1_000_000) : null;
+    // null 判据只看【窗口本身】<100K(CLI schema 下限压不住的真小窗,如 kimi 默认 64K);
+    // 窗口 ≥100K 时压缩线钳进 [100K, min(win,1M)] —— 不能因 pct 调低算出 <100K 就返回 null:
+    // 那会关掉 128K 家(deepseek旧系/grok-3/sonar)的防撞保护,CLI 默认压缩线(~156K)反而
+    // 打穿真窗口,恰是本联动要防的事故(判官抓的:用户调低百分比本意更安全,结果更危险)。
+    if (win < 100_000) return null;
+    return Math.min(Math.max(Math.floor(win * pct / 100), 100_000), Math.min(win, 1_000_000));
   } catch { return null; }
 }
 
