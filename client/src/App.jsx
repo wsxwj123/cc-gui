@@ -2788,7 +2788,12 @@ function StreamingStatusLine({ thinking, text, toolCalls, streamStart }) {
   } else if (thinking) {
     label = verb;
   } else {
-    return null;
+    // 不再 return null:不发 partial stream_event 的第三方(mimo/kimi/glm)只走整条
+    // assistant 消息路径,工具结果全回来后、下一条整消息到达前的空窗期 text/thinking/
+    // pendingTool 全空 → 原来这里隐藏整行,用户看到"橙色动态文本时有时无"(#10)。
+    // 官方靠 delta 立即填充故无感。回退显示动态词,与官方观感一致;回合结束(isStreaming
+    // false)整块卸载,不会滞留。
+    label = verb;
   }
   // 统一动效(用户反馈"跳动动画→静态头像"割裂):动画载体收敛到回复气泡的
   // ✻ 头像位(TurnBubble 的 ProviderAvatar thinking 态),状态行只保留纯文字,

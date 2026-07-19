@@ -848,9 +848,31 @@ router.post('/chat', async (req, res) => {
       try { input.close(); } catch {}
     }
   };
+  // #13 静默看门狗:部分第三方主控模型拿到子代理 tool_result 后,上游既不续写也不发
+  // 终态 result → 生成器永久阻塞、回合永不收尾、输入框恒灰(官方无此病)。条件极窄:
+  // 静默超 STALL_MS 且【本回合起过子代理 + 当前无在跑的非 shell 任务 + 尚未收尾】才
+  // 主动 finalize 解锁;任何消息到达即重置。正常流(消息间隔远小于阈值)与真在跑的
+  // 子代理(liveTasks 门)都不会触发;shell 后台任务不阻塞主控,不计入等待。
+  const STALL_MS = 180_000;
+  let stallTimer = null;
+  const armStall = () => {
+    clearTimeout(stallTimer);
+    stallTimer = setTimeout(() => {
+      const busyNonShell = [...(slot.liveTasks?.values() ?? [])].some((t) => t && t.kind !== 'shell');
+      if (!slot.idle && slot.turnSubagentSeen && !busyNonShell) {
+        trace(`stall-watchdog fire after ${STALL_MS}ms silence`); // T0 诊断
+        deliverLine(slot, JSON.stringify({ type: 'stderr', text: '子代理已全部结束,但上游 3 分钟无后续输出,已自动收尾本回合(部分第三方 provider 偶发)。会话状态正常,可直接继续发消息。' }));
+        finalize('stall-watchdog');
+      } else if (!slot.idle) {
+        armStall(); // 子代理仍在跑等条件不满足:继续观察下一窗
+      }
+    }, STALL_MS);
+  };
   (async () => {
     try {
+      armStall();
       for await (const m of q) {
+        armStall(); // 任何入站消息=上游还活着,重置静默计时
         const line = JSON.stringify(m);
         if (!slot.sessionId && m.type === 'system' && m.subtype === 'init' && m.session_id) {
           slot.sessionId = m.session_id;
@@ -924,6 +946,7 @@ router.post('/chat', async (req, res) => {
         deliverLine(slot, JSON.stringify({ type: 'error', error: e?.message || String(e) }));
       }
     } finally {
+      clearTimeout(stallTimer); // 看门狗随流关闭,不留孤儿定时器
       cancelClose();
       if (lastResultLine) maybeBroadcastTurnComplete(slot, lastResultLine);
       input.close();
