@@ -80,25 +80,63 @@ export function safeModelArg(m) {
 // 官方 OAuth(无 ANTHROPIC_BASE_URL)恒 null:CLI 认识官方模型,自动窗口本就准确。
 // 压缩线 = 窗口×0.85(给压缩摘要留余量);CLI schema 下限 100k,算出 <100k(如 64k 小窗)
 // 表达不了 → null(已知局限,如 kimi 不开 1M 的默认档)。
+// 模型窗口规则表:按【模型名】匹配,先具体后泛化,首中即返。比 per-provider 单值精确
+// 且不易过时 —— 新模型出来加一行即可(数据 2026-07 逐家官方文档核实)。claude-* 不列:
+// 200K=CLI 默认口径,无需干预。
+const MODEL_WINDOW_RULES = [
+  [/deepseek-?v4|deepseek.*-(flash|pro)\b/i, 1_048_576], // DeepSeek V4 flash/pro 均 1M
+  [/deepseek-(chat|reasoner|coder)/i, 131_072],          // DeepSeek 旧系 128K
+  [/glm-?5\.[2-9]|glm-?[6-9]/i, 1_048_576],              // GLM 5.2+ 1M
+  [/glm-?(4\.[5-9]|5(\.[01])?)\b/i, 204_800],            // GLM 4.5~5.1 200K
+  [/qwen-?3\.7.*max|qwen.*-1m\b/i, 1_048_576],           // Qwen3.7-Max 1M
+  [/kimi-?k3/i, 1_048_576],                              // Kimi k3 1M(实抓亦覆盖)
+  [/kimi-(k2\.[6-9]|for-coding)/i, 262_144],             // Kimi k2.6+/coding 256K
+  [/minimax|abab/i, 204_800],                            // MiniMax M2 系 ~200K
+  [/grok-?[4-9]/i, 262_144],
+  [/grok-?3/i, 131_072],
+  [/gemini/i, 1_048_576],
+  [/gpt-?5/i, 400_000],
+  [/sonar/i, 131_072],                                   // Perplexity Sonar 128K
+];
+
+// 解析模型真实窗口。优先级:[1m] 后缀(用户显式意图)> provider 实抓 modelWindows
+// (fetch-models 顺带持久化,端点自己报的最权威)> 模型名规则表 > provider 手填
+// contextWindow > null(CLI 默认)。
+function resolveModelWindow(model, providerEntry) {
+  const m = String(model || '');
+  if (/\[1m\]/i.test(m)) return 1_048_576;
+  const base = m.replace(/\[1m\]/i, '');
+  const mw = providerEntry?.modelWindows;
+  if (mw && Number.isFinite(Number(mw[base]))) return Number(mw[base]);
+  for (const [re, win] of MODEL_WINDOW_RULES) if (re.test(m)) return win;
+  if (providerEntry && Number.isFinite(Number(providerEntry.contextWindow))) return Number(providerEntry.contextWindow);
+  return null;
+}
+
 export function resolveAutoCompactWindow(model) {
   try {
     const st = JSON.parse(readFileSync(pathJoin(homedir(), '.claude', 'settings.json'), 'utf8'));
     if (typeof st?.autoCompactWindow === 'number') return null;      // 用户显式设置,尊重
     if (st?.env?.CLAUDE_CODE_AUTO_COMPACT_WINDOW) return null;       // env 显式设置,尊重
     if (!st?.env?.ANTHROPIC_BASE_URL) return null;                   // 官方,CLI 自动已准确
-    let win = null;
-    if (/\[1m\]/i.test(String(model || ''))) win = 1_048_576;
-    if (!win) {
+    let providerEntry = null;
+    try {
       const activeId = JSON.parse(readFileSync(pathJoin(homedir(), '.claude-gui', 'active-provider.json'), 'utf8'))?.id;
       if (activeId) {
         const cp = JSON.parse(readFileSync(pathJoin(homedir(), '.claude-gui', 'custom-providers.json'), 'utf8'));
         const list = Array.isArray(cp) ? cp : (cp?.providers || []);
-        const cur = list.find((p) => p?.id === activeId);
-        if (cur && Number.isFinite(Number(cur.contextWindow))) win = Number(cur.contextWindow);
+        providerEntry = list.find((p) => p?.id === activeId) || null;
       }
-    }
+    } catch { /* active/providers 读不到 → 只剩 [1m]/规则表两档 */ }
+    const win = resolveModelWindow(model, providerEntry);
     if (!win) return null;
-    const acw = Math.floor(win * 0.85);
+    // 压缩触发百分比:用户可调(prefs.autoCompactPct,50-95),默认 80%。
+    let pct = 80;
+    try {
+      const p = Number(JSON.parse(readFileSync(pathJoin(homedir(), '.claude-gui', 'prefs.json'), 'utf8'))?.autoCompactPct);
+      if (Number.isFinite(p) && p >= 50 && p <= 95) pct = p;
+    } catch {}
+    const acw = Math.floor(win * pct / 100);
     return acw >= 100_000 ? Math.min(acw, 1_000_000) : null;
   } catch { return null; }
 }

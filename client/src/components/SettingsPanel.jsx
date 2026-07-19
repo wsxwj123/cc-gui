@@ -1693,6 +1693,34 @@ const AUTO_COMPACT_OPTIONS = [
   { value: '500000',  label: '500K token' },
   { value: '1000000', label: '1M token' },
 ];
+// 自动压缩触发百分比:第三方 provider 联动时,压缩线 = 模型真实窗口 × 该百分比。
+// 存 ~/.claude-gui/prefs.json(跨设备同步),server 的 chat.js 换算成绝对值下发。
+function AutoCompactPctSelect() {
+  const [pct, setPct] = useState(80);
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    fetch('/api/prefs/auto-compact-pct').then((r) => r.json()).then((d) => { if (d.pct) setPct(d.pct); }).catch(() => {});
+  }, []);
+  const save = async (v) => {
+    setBusy(true); setPct(v);
+    try { await fetch('/api/prefs/auto-compact-pct', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pct: v }) }); } catch {}
+    setBusy(false);
+  };
+  return (
+    <div className="bg-canvas-warm border border-canvas-deep rounded-lg px-3 py-2.5 flex items-center gap-3">
+      <div className="min-w-0 flex-1">
+        <div className="text-xs text-ink font-body font-medium flex items-center gap-1.5">压缩触发百分比<EffectBadge level="immediate" /></div>
+        <div className="text-[10.5px] text-ink-faint font-body">第三方 provider 联动时的触发点:上下文占用达到模型真实窗口的该比例即自动压缩(如 1M 窗口 × 80% = 80 万时触发)。窗口来源:模型名 [1m] 后缀 / 获取模型时实抓 / 内置模型规则表 / Provider 表单手填。官方模型不受影响。</div>
+      </div>
+      <select value={String(pct)} disabled={busy}
+        onChange={(e) => save(Number(e.target.value))}
+        className="shrink-0 text-[11px] font-mono bg-canvas-base border border-canvas-deep rounded px-2 py-1 text-ink focus:border-accent outline-none">
+        {[70, 75, 80, 85, 90].map((v) => (<option key={v} value={String(v)}>{v}%</option>))}
+      </select>
+    </div>
+  );
+}
+
 function AutoCompactWindowSelect({ settings, onSave, saving }) {
   const raw = settings?.autoCompactWindow;
   const current = (typeof raw === 'number' && Number.isFinite(raw)) ? String(raw) : '';
@@ -1884,6 +1912,7 @@ function OverviewTab({ settings, onSave, onEnvPatch, saving }) {
       <div id="set-max-budget"><MaxBudgetInput /></div>
       <div id="set-cache-opt"><ExcludeDynamicPromptToggle /></div>
       <div id="set-auto-compact"><AutoCompactWindowSelect settings={settings} onSave={onSave} saving={saving} /></div>
+      <AutoCompactPctSelect />
       <div id="set-small-fast-model"><SmallFastModelInput env={env} onEnvPatch={onEnvPatch} saving={saving} /></div>
       <div id="set-chat-background"><ChatBackgroundCard /></div>
       {rows.length > 0 && (

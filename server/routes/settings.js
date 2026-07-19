@@ -1277,7 +1277,17 @@ async function tryFetchModels(url, apiKey) {
     if (r.ok) {
       const data = await r.json().catch(() => null);
       const arr = Array.isArray(data?.data) ? data.data : (Array.isArray(data?.models) ? data.models : []);
-      return { ids: [...new Set(arr.map((m) => (typeof m === 'string' ? m : m?.id)).filter(Boolean))] };
+      // 顺带抓每个模型的上下文窗口(kimi coding 端点/OpenRouter 等返回 context_length;
+      // DeepSeek/通义/智谱等不返回=空,由 chat.js 的模型名规则表兜底)。自动压缩联动用。
+      const ids = []; const windows = {};
+      for (const m of arr) {
+        const id = typeof m === 'string' ? m : m?.id;
+        if (!id || ids.includes(id)) continue;
+        ids.push(id);
+        const w = Number(m?.context_length ?? m?.context_window ?? m?.max_context_tokens ?? m?.max_input_tokens);
+        if (Number.isFinite(w) && w >= 1000) windows[id] = Math.floor(w);
+      }
+      return { ids, windows: Object.keys(windows).length ? windows : null };
     }
     lastStatus = r.status;
     lastBody = (await r.text().catch(() => '')).replace(/\s+/g, ' ').trim().slice(0, 160);
@@ -1329,7 +1339,7 @@ async function probeUpstreamModels(baseURL, apiKey) {
   let lastStatus = 0, lastBody = '', lastUrl = '';
   for (const url of [...new Set(candidates)]) {
     const res = await tryFetchModels(url, apiKey); // 超时直接向上抛
-    if (res.ids) return res.ids;                   // 200(空数组也算成功,由前端提示手填)
+    if (res.ids) return res;                       // {ids, windows} 200(空数组也算成功,由前端提示手填)
     lastStatus = res.status; lastBody = res.body; lastUrl = url;
   }
   // 区分鉴权失败 vs 没有 models 接口,后者明确引导手填(anthropic 中转常见)。
@@ -1405,7 +1415,10 @@ router.post('/custom-providers/fetch-models', async (req, res) => {
     let base; try { base = new URL(baseURL); } catch { return res.status(400).json({ error: 'baseURL 非法' }); }
     if (!/^https?:$/.test(base.protocol)) return res.status(400).json({ error: 'baseURL 必须是 http(s)' });
     // SSRF 守卫已在 probeUpstreamModels 内(覆盖全部调用点),此处不再重复。
-    res.json({ models: await probeUpstreamModels(baseURL, apiKey) });
+    const probed = await probeUpstreamModels(baseURL, apiKey);
+    // 实抓到窗口且是已存 provider → 持久化 modelWindows(自动压缩联动的最权威数据源)。
+    if (req.body?.id && probed.windows) persistModelWindows(req.body.id, probed.windows);
+    res.json({ models: probed.ids, windows: probed.windows || undefined });
   } catch (err) {
     res.status(err.status || 502).json({ error: err.message });
   }
@@ -1481,7 +1494,9 @@ router.post('/provider/fetch-models', async (req, res) => {
     if (id) {
       const up = await resolveOpenAIUpstreamById(id);
       if (!up) return res.status(404).json({ error: 'provider 不存在或非 OpenAI 格式' });
-      return res.json({ models: await probeUpstreamModels(up.baseURL, up.apiKey) });
+      const probed = await probeUpstreamModels(up.baseURL, up.apiKey);
+      if (probed.windows) persistModelWindows(id, probed.windows);
+      return res.json({ models: probed.ids, windows: probed.windows || undefined });
     }
     let env = {};
     try { env = (JSON.parse(await readFile(SETTINGS_PATH, 'utf-8')).env) || {}; } catch {}
@@ -1500,11 +1515,30 @@ router.post('/provider/fetch-models', async (req, res) => {
       }
     }
     if (base.includes('127.0.0.1')) return res.json({ models: [], note: 'OpenAI 代理 provider,模型见 provider 配置' });
-    res.json({ models: await probeUpstreamModels(base, token) });
+    const probed = await probeUpstreamModels(base, token);
+    // 当前激活 provider(env base 直连)也持久化窗口:id 从 active-provider.json 反查。
+    if (probed.windows) {
+      try {
+        const activeId = JSON.parse(await readFile(join(homedir(), '.claude-gui', 'active-provider.json'), 'utf-8'))?.id;
+        if (activeId) persistModelWindows(activeId, probed.windows);
+      } catch {}
+    }
+    res.json({ models: probed.ids, windows: probed.windows || undefined });
   } catch (err) {
     res.status(502).json({ error: err.message });
   }
 });
+
+// 把实抓的 per-模型窗口 merge 进 provider 条目(best-effort,失败不影响模型列表返回)。
+async function persistModelWindows(providerId, windows) {
+  try {
+    const list = await readCustomProviders();
+    const idx = list.findIndex((p) => p.id === providerId);
+    if (idx === -1) return;
+    list[idx].modelWindows = { ...(list[idx].modelWindows || {}), ...windows };
+    await writeCustomProviders(list);
+  } catch { /* 窗口持久化失败不阻塞主流程 */ }
+}
 
 // GET /api/provider-models — the user's per-provider model selections.
 router.get('/provider-models', async (_req, res) => {

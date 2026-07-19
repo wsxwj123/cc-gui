@@ -5,16 +5,11 @@
 // (如 deepseek 的 anthropic 端点实际按 claude-* 名映射,但具体可用 id 由上游决定)。
 // 模型一律由「获取模型」实时拉取或用户手填。价格表见 client/src/utils/pricing.js。
 
-// contextWindow(可选,token):自动压缩联动预设(压缩线=值×0.85,见 server chat.js
-// resolveAutoCompactWindow)。取值原则(填错方向代价不对称:填大→压缩线超真窗口→中途
-// 400;填小/不填→仅提前压缩):
-//   ①真窗口 <200K 的家(deepseek/perplexity/grok-3)必填 —— CLI 默认压缩线(~156K)会
-//     打穿它们,这是防撞保护;
-//   ②全系 ≥1M 且无小窗主流变体(gemini)或套餐阵容固定(GLM Coding 200K)才填大值;
-//     (同端点若手选 128K 级小模型如 Gemma/GLM-4.5,CLI 默认压缩线本就打穿它们,预设
-//     不引入新风险;真要用小模型请手动把窗口改小);
-//   ③开放平台模型阵容跨度大/聚合类/靠 [1m] 后缀联动的(kimi/mimo)一律不填 —— 盲填
-//     下限对大窗主力是负优化(压缩线反而早于默认)。
+// 上下文窗口与自动压缩联动:不再在模板里写死窗口值(死数据必然过时,如 deepseek v4
+// 发布后 128K 旧值立刻错)。窗口解析全部在 server/routes/chat.js 的 resolveModelWindow:
+// [1m] 后缀 > 获取模型时实抓的 per-模型窗口(kimi/openrouter 等 API 返回)> 按模型名的
+// 内置规则表(deepseek-v4→1M 等,新模型加一行)> Provider 表单手填 contextWindow。
+// 模板仍支持 contextWindow 字段(选模板预填表单),但仅在上述来源全部缺失时才需要。
 export const BUILTIN_PROVIDERS = [
   // ─── OpenAI 兼容(走内置 openai-proxy 转 anthropic 协议给 claude CLI) ───
   {
@@ -22,7 +17,6 @@ export const BUILTIN_PROVIDERS = [
     name: 'DeepSeek 官方',
     type: 'openai',
     baseURL: 'https://api.deepseek.com',
-    contextWindow: 128000,
     note: 'OpenAI 兼容 API。模型用「获取模型」拉取。',
     docs: 'https://api-docs.deepseek.com/quick_start/pricing',
   },
@@ -39,7 +33,6 @@ export const BUILTIN_PROVIDERS = [
     name: 'Google Gemini',
     type: 'openai',
     baseURL: 'https://generativelanguage.googleapis.com/v1beta/openai',
-    contextWindow: 1000000,
     note: 'Google AI Studio API key。OpenAI 兼容 endpoint。',
     docs: 'https://ai.google.dev/gemini-api/docs/pricing',
   },
@@ -56,7 +49,6 @@ export const BUILTIN_PROVIDERS = [
     name: 'xAI Grok',
     type: 'openai',
     baseURL: 'https://api.x.ai/v1',
-    contextWindow: 131072,
     note: 'OpenAI 兼容。',
     docs: 'https://docs.x.ai/docs/models',
   },
@@ -161,7 +153,6 @@ export const BUILTIN_PROVIDERS = [
     name: 'Perplexity',
     type: 'openai',
     baseURL: 'https://api.perplexity.ai',
-    contextWindow: 128000,
     note: '联网搜索问答模型(sonar 系列),chat/completions 为 OpenAI 兼容。官方现主推 Agent API,此兼容端点已标记为旧接口。',
     docs: 'https://docs.perplexity.ai/',
   },
@@ -210,7 +201,6 @@ export const BUILTIN_PROVIDERS = [
     name: 'Z.ai Coding Plan(套餐)',
     type: 'openai',
     baseURL: 'https://api.z.ai/api/coding/paas/v4',
-    contextWindow: 200000,
     note: '智谱国际站 GLM Coding Plan 套餐专用 OpenAI 兼容端点,需套餐 key,仅限 Coding 场景。Anthropic 端点见下。',
     docs: 'https://docs.z.ai/devpack/quick-start',
   },
@@ -219,7 +209,6 @@ export const BUILTIN_PROVIDERS = [
     name: '智谱 GLM Coding Plan(套餐)',
     type: 'openai',
     baseURL: 'https://open.bigmodel.cn/api/coding/paas/v4',
-    contextWindow: 200000,
     note: '国内 GLM Coding Plan 套餐专用 OpenAI 兼容端点,需套餐 key,仅限 Coding 场景(与通用按量端点 /api/paas/v4 不通用)。Anthropic 端点即「智谱 GLM(Anthropic 协议)」条目。',
     docs: 'https://docs.bigmodel.cn/cn/coding-plan/quick-start',
   },
@@ -270,7 +259,6 @@ export const BUILTIN_PROVIDERS = [
     name: 'DeepSeek(Anthropic 协议)',
     type: 'anthropic',
     baseURL: 'https://api.deepseek.com/anthropic',
-    contextWindow: 128000,
     note: 'DeepSeek 的 Anthropic 兼容端点。可填 deepseek 模型 id,也可填 claude-* 名(上游会映射:claude-opus→deepseek-v4-pro,claude-sonnet/haiku→deepseek-v4-flash)。',
     docs: 'https://api-docs.deepseek.com/guides/anthropic_api',
   },
@@ -335,7 +323,6 @@ export const BUILTIN_PROVIDERS = [
     name: 'Z.ai Coding Plan(套餐,Anthropic 协议)',
     type: 'anthropic',
     baseURL: 'https://api.z.ai/api/anthropic',
-    contextWindow: 200000,
     note: '智谱国际站 Coding Plan 官方给 Claude Code 的端点,需套餐 key。国内套餐对应端点见「智谱 GLM(Anthropic 协议)」。',
     docs: 'https://docs.z.ai/devpack/quick-start',
   },
