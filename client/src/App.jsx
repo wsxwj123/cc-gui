@@ -486,6 +486,33 @@ function formatPathShort(path) {
 // ③ 已知更小的具体系列(见下,含 U3 实测:deepseek/mimo/GLM=200K、Kimi=256K)→ 其真实窗口;
 // ④ 其余(gemini/gpt-5.x/minimax/grok-4 及未知第三方)→ 默认 1M。默认 1M 只是初始估算,
 // /context 实测(优先级更高)或显式 [1m] 会进一步校正,不会因估大而误判(有超窗提示与 sane-ceiling)。
+// 后端解析窗口缓存(与压缩联动同源:server /api/model-window → resolveModelWindow,
+// 含 [1m]/实抓/模型名规则表/provider 手填)。key=模型名;provider 切换清空(同名模型
+// 在不同 provider 窗口可能不同)。值:number=解析到;null=后端明确无解析(官方/未知,
+// 前端走 nativeContextWindow 兜底);无 key=未查过。
+const resolvedWindowCache = new Map();
+if (typeof window !== 'undefined') {
+  window.addEventListener('cgui:provider-change', () => resolvedWindowCache.clear());
+}
+function useResolvedWindow(model) {
+  const [win, setWin] = useState(() => (model && resolvedWindowCache.has(model) ? resolvedWindowCache.get(model) : undefined));
+  useEffect(() => {
+    if (!model) { setWin(undefined); return; }
+    if (resolvedWindowCache.has(model)) { setWin(resolvedWindowCache.get(model)); return; }
+    let dead = false;
+    fetch(`/api/model-window?model=${encodeURIComponent(model)}`)
+      .then((r) => r.json())
+      .then((d) => {
+        const v = Number.isFinite(d?.window) ? d.window : null;
+        resolvedWindowCache.set(model, v);
+        if (!dead) setWin(v);
+      })
+      .catch(() => { if (!dead) setWin(undefined); });
+    return () => { dead = true; };
+  }, [model]);
+  return win;
+}
+
 function nativeContextWindow(model) {
   const id = (model || '').toLowerCase();
   if (/\[1m\]/i.test(id)) return 1_000_000;
@@ -3320,6 +3347,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   const resolvedModelBase = pinnedModel || historyModel || globalModel;
   const currentModel = (context1mFlag && resolvedModelBase && !/\[1m\]/i.test(resolvedModelBase))
     ? resolvedModelBase + '[1m]' : resolvedModelBase;
+  // 徽章分母:后端解析的真实窗口(与压缩联动同源;官方/无解析=null 走本地兜底表)。
+  const resolvedWindow = useResolvedWindow(currentModel);
   const modelBySession = useStore((s) => s.modelBySession);
   const containerRef = useRef(null);
   const [autoScroll, setAutoScroll] = useState(true);
@@ -6082,9 +6111,11 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // 之前"徽章显示 1M、点开 /context 却是 200k"的矛盾根因就是两套来源各算各的。
   // 显式 [1m] 后缀 > /context 实测缓存(实测可能是开 1m 之前测的) > 按名猜测。
   // (上移到分子之前,供下面的"usage 超窗 = 异常"健全性判断复用。)
+  // 优先级:[1m] 显式 > /context 实测 > 后端解析(与压缩联动同源,盖 128K/256K/400K 等
+  // 非两档谱系)> 本地按名猜测(官方/离线兜底)。
   const contextWindow = /\[1m\]/i.test(currentModel || '')
     ? 1_000_000
-    : (measuredCtx?.windowTokens || nativeContextWindow(currentModel));
+    : (measuredCtx?.windowTokens || resolvedWindow || nativeContextWindow(currentModel));
   const measuredFresh = measuredCtx && measuredCtx.totalTokens > 0 && measuredCtx.ts >= Math.max(_liveTs, _jsonlTs);
   // 单次调用的输入侧上下文(input+cache_read+cache_creation)物理上不可能超过上下文窗口
   // (一次能发的就是这么多)。若 usage 之和超窗,说明这条 usage 是异常累加/口径错误(实测

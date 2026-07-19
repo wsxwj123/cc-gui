@@ -113,22 +113,36 @@ function resolveModelWindow(model, providerEntry) {
   return null;
 }
 
+// 当前激活 provider 条目(active-provider.json → custom-providers.json)。读不到返 null
+// (→ 窗口解析只剩 [1m]/规则表两档)。
+function readActiveProviderEntry() {
+  try {
+    const activeId = JSON.parse(readFileSync(pathJoin(homedir(), '.claude-gui', 'active-provider.json'), 'utf8'))?.id;
+    if (!activeId) return null;
+    const cp = JSON.parse(readFileSync(pathJoin(homedir(), '.claude-gui', 'custom-providers.json'), 'utf8'));
+    const list = Array.isArray(cp) ? cp : (cp?.providers || []);
+    return list.find((p) => p?.id === activeId) || null;
+  } catch { return null; }
+}
+
+// 供显示层(上下文徽章分母/压缩预警/明细底数)与压缩联动同源取窗口:第三方按
+// resolveModelWindow 解析;官方(无 BASE_URL)返回 null —— 前端本地表对官方是准的,
+// 且避免显示层与 CLI 自身口径打架。
+export function resolveDisplayWindow(model) {
+  try {
+    const st = JSON.parse(readFileSync(pathJoin(homedir(), '.claude', 'settings.json'), 'utf8'));
+    if (!st?.env?.ANTHROPIC_BASE_URL) return null;
+    return resolveModelWindow(model, readActiveProviderEntry());
+  } catch { return null; }
+}
+
 export function resolveAutoCompactWindow(model) {
   try {
     const st = JSON.parse(readFileSync(pathJoin(homedir(), '.claude', 'settings.json'), 'utf8'));
     if (typeof st?.autoCompactWindow === 'number') return null;      // 用户显式设置,尊重
     if (st?.env?.CLAUDE_CODE_AUTO_COMPACT_WINDOW) return null;       // env 显式设置,尊重
     if (!st?.env?.ANTHROPIC_BASE_URL) return null;                   // 官方,CLI 自动已准确
-    let providerEntry = null;
-    try {
-      const activeId = JSON.parse(readFileSync(pathJoin(homedir(), '.claude-gui', 'active-provider.json'), 'utf8'))?.id;
-      if (activeId) {
-        const cp = JSON.parse(readFileSync(pathJoin(homedir(), '.claude-gui', 'custom-providers.json'), 'utf8'));
-        const list = Array.isArray(cp) ? cp : (cp?.providers || []);
-        providerEntry = list.find((p) => p?.id === activeId) || null;
-      }
-    } catch { /* active/providers 读不到 → 只剩 [1m]/规则表两档 */ }
-    const win = resolveModelWindow(model, providerEntry);
+    const win = resolveModelWindow(model, readActiveProviderEntry());
     if (!win) return null;
     // 压缩触发百分比:用户可调(prefs.autoCompactPct,50-95),默认 80%。
     let pct = 80;
@@ -1065,6 +1079,12 @@ router.post('/chat', async (req, res) => {
 // 回合进行中切权限模式 —— SDK setPermissionMode(streaming-input 模式即时生效)。
 // GUI 档位映射:plan→SDK 'plan';其余→SDK 'default'(放行/弹窗由 canUseTool 按 guiMode 判)。
 // 批准计划后"执行"也走这里(前端把档位切到 acceptEdits)。已结束/无 query 的 slot 跳过。
+// 上下文徽章分母/压缩预警查询:按模型解析真实窗口(与压缩联动同一套 resolveModelWindow,
+// 显示与行为同源)。官方或无解析返回 window:null,前端走本地兜底表。
+router.get('/model-window', (req, res) => {
+  res.json({ window: resolveDisplayWindow(String(req.query.model || '')) });
+});
+
 router.post('/chat/permission-mode', async (req, res) => {
   const { sessionId, mode } = req.body || {};
   if (!sessionId || !mode || !VALID_PERMISSION_MODES.has(mode)) {
