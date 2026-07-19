@@ -92,7 +92,7 @@ function PlanReviewCard({ req, onResolve, onApprove, processing, position, hydra
   };
 
   return (
-    <div className="flex flex-col max-h-[68vh] rounded-xl bg-white border border-canvas-deep shadow-lg overflow-hidden animate-fade-up relative">
+    <div className="flex flex-col max-h-[42vh] rounded-xl bg-white border border-canvas-deep shadow-lg overflow-hidden animate-fade-up relative">
       <div className="px-4 py-2.5 flex items-center gap-2 border-b border-canvas-deep bg-blue-50/60">
         <div className="w-6 h-6 rounded-md bg-blue-100 flex items-center justify-center shrink-0">
           <ClipboardList size={13} className="text-blue-700" />
@@ -374,7 +374,7 @@ function BoundaryCard({ req, onResolve, onAuthorizeDir, processing, position, hy
   }, [hydrate, position, req, permanent, onResolve, onAuthorizeDir]);
 
   return (
-    <div className="flex flex-col max-h-[68vh] rounded-xl bg-white border border-canvas-deep shadow-lg overflow-hidden animate-fade-up relative">
+    <div className="flex flex-col max-h-[42vh] rounded-xl bg-white border border-canvas-deep shadow-lg overflow-hidden animate-fade-up relative">
       <div className="px-4 py-2.5 flex items-center gap-2 border-b border-canvas-deep bg-rose-50/60">
         <div className="w-6 h-6 rounded-md bg-rose-100 flex items-center justify-center shrink-0">
           <ShieldAlert size={13} className="text-rose-700" />
@@ -466,7 +466,7 @@ function PermissionCard({ req, onResolve, onWhitelistAndAllow, onAlwaysAllow, on
   }, [hydrate, position, req, remember, dangerous, onResolve, onWhitelistAndAllow, onAlwaysAllow]);
 
   return (
-    <div className="flex flex-col max-h-[68vh] rounded-xl bg-white border border-canvas-deep shadow-lg overflow-hidden animate-fade-up relative">
+    <div className="flex flex-col max-h-[42vh] rounded-xl bg-white border border-canvas-deep shadow-lg overflow-hidden animate-fade-up relative">
       <div className="px-4 py-2.5 flex items-center gap-2 border-b border-canvas-deep bg-amber-50/60">
         <div className="w-6 h-6 rounded-md bg-amber-100 flex items-center justify-center shrink-0">
           <AlertCircle size={13} className="text-amber-700" />
