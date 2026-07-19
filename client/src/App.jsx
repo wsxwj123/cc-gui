@@ -1722,6 +1722,7 @@ function SessionList() {
         { method: 'DELETE' }
       );
       if (!r.ok) { const e = await r.json().catch(() => ({})); confirmDialog('删除失败：' + (e.error || r.status)); return; }
+      useStore.getState().clearSessionStopped?.(session.sessionId); // 会话已删,已停表条目一并收口(判官建议)
       useStore.getState().fetchSessions(selectedProject.hash, { silent: true });
     } catch (err) {
       confirmDialog('删除失败：' + err.message);
