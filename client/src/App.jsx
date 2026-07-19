@@ -7082,6 +7082,8 @@ export function ModelSelector({ compact = false, permKey = null }) {
         // (实际对话已是 high:GUI 不传 --effort → CLI 读 settings;这里只让显示一致)。
         try {
           if (!localStorage.getItem('cgui-effort') && data.defaultEffort) useStore.setState({ effort: data.defaultEffort });
+          // 供 EffortSelector"默认"档显示真实落点(跟随全局 or 模型自适应),文案不再撒谎。
+          useStore.setState({ defaultEffort: data.defaultEffort || '' });
         } catch {}
         // Auto-load the live catalogue once per provider so the latest models
         // (e.g. Opus 4.8) show up without a manual "拉取最新" click — and persist
@@ -7391,6 +7393,7 @@ function MobileModelPage({ permKey }) {
       if (d.available) useStore.setState({ availableModels: d.available });
       try {
         if (!localStorage.getItem('cgui-effort') && d.defaultEffort) useStore.setState({ effort: d.defaultEffort });
+        useStore.setState({ defaultEffort: d.defaultEffort || '' });
       } catch {}
     }).catch(() => {});
   }, []);

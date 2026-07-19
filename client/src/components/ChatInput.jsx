@@ -162,6 +162,9 @@ export function EffortSelector({ permKey = null }) {
   // 会话隔离持久化,改它不影响其他会话。
   const effort = useStore((s) => (permKey && permKey in (s.effortBySession || {})) ? s.effortBySession[permKey] : s.effort);
   const openAIProtocol = useStore((s) => (s.currentProvider?.protocol || 'anthropic') === 'openai');
+  // 全局默认思考强度(settings 的 CLAUDE_CODE_EFFORT_LEVEL,/api/model 带回)。"默认"档
+  // 的真实落点:设了全局 → CLI 吃全局值;没设 → 由模型/服务端自适应。文案照实显示。
+  const defaultEffort = useStore((s) => s.defaultEffort || '');
   const setEffort = (id) => useStore.getState().setEffortFor(permKey, id);
   const [open, setOpen] = useState(false);
   const wrapRef = useRef(null);
@@ -197,16 +200,24 @@ export function EffortSelector({ permKey = null }) {
           <div className="px-3 py-1.5 text-[10px] text-ink-faint uppercase tracking-wider font-body">
             {openAIProtocol ? '推理力度 (reasoning_effort)' : '推理力度 (--effort)'}
           </div>
-          {EFFORT_LEVELS.map((e) => (
+          {EFFORT_LEVELS.map((e) => {
+            // "默认"档 desc 按真实落点显示:全局(settings 环境变量)设了值时 CLI 会吃它,
+            // 并非"CLI 自己决定"——原静态文案在设了全局时是错的(用户实报困惑)。
+            const desc = e.id !== '' ? e.desc
+              : defaultEffort
+                ? `跟随全局设置:${EFFORT_LEVELS.find((x) => x.id === defaultEffort)?.label || defaultEffort}(设置→环境变量可清除)`
+                : '未设全局,由模型自适应';
+            return (
             <button key={e.id || 'default'} onClick={() => { setEffort(e.id); setOpen(false); }}
               className={`w-full text-left px-3 py-1.5 hover:bg-black/5 flex items-center justify-between ${effort === e.id ? 'bg-accent/12' : ''}`}>
               <div>
                 <div className="text-xs font-medium text-ink font-body">{e.label}</div>
-                <div className="text-[10px] text-ink-faint font-body">{e.desc}</div>
+                <div className="text-[10px] text-ink-faint font-body">{desc}</div>
               </div>
               {effort === e.id && <div className="w-1.5 h-1.5 rounded-full bg-accent" />}
             </button>
-          ))}
+            );
+          })}
         </div>
       )}
     </div>
