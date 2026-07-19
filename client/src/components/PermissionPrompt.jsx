@@ -680,13 +680,19 @@ export function PermissionPrompt({ sessionId = null, onExecutePlan = null, hydra
         // extra:{ always } / { authorizeDir } —— 服务端 makeCanUseTool 据此构造
         // updatedPermissions(写规则 / 授权目录)。
         body: JSON.stringify({ decision, reason, ...(updatedInput !== undefined ? { updatedInput } : {}), ...(extra || {}) }),
+        // 15s 超时:手机(Tailscale)的半死连接下 fetch 会永久挂起 —— 按钮"点了没反应"
+        // 且 catch 永不触发。超时后走失败分支给出可见提示,卡片保留可重试。
+        signal: AbortSignal.timeout(15_000),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       // 只有确实送达后才撤卡片。原来无论成败都 remove → 网络失败时 CLI 端永久挂起等响应、
       // 而 GUI 已把卡撤掉无法重试 → 会话卡死。失败保留卡片并提示重试。
       removePendingPermission(req.id);
     } catch (e) {
-      confirmDialog('提交授权响应失败,请重试:' + (e?.message || e));
+      const timedOut = e?.name === 'TimeoutError' || e?.name === 'AbortError';
+      confirmDialog(timedOut
+        ? '提交超时:与电脑端的连接可能已断开(手机远程访问时常见)。请检查 Tailscale/网络后重试,卡片已保留。'
+        : '提交授权响应失败,请重试:' + (e?.message || e));
     }
     setBusyId(null);
   };
