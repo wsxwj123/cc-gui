@@ -1,4 +1,5 @@
 import React, { useEffect, useState, useRef } from 'react';
+import { createPortal } from 'react-dom';
 import { Server, Package, FolderOpen, RefreshCw, Plug, Activity, Check, X, Plus, Pencil, Trash2, Zap, Download, ArrowLeft, LogIn, LogOut, Search, ChevronRight } from 'lucide-react';
 import { BUILTIN_PLUGINS } from '../utils/builtinPlugins.js';
 import { findBuiltinMcp } from '../utils/builtinMcpServers.js';
@@ -655,7 +656,9 @@ export function MCPPanel() {
 
       {/* 添加插件弹层:官方推荐里尚未安装的项(Anthropic 自维护精选,claude-plugins-official)。
           交互对齐 McpForm 模态;安装逻辑复用 installPlugin,未改动。 */}
-      {pluginAddOpen && (
+      {/* 审计批E2:portal 到 body —— 面板 animate-glass-rise 残留 transform 会困住
+          fixed 遮罩(盖不满全屏),portal 后恒为真全屏遮罩;点外关闭逻辑不变。 */}
+      {pluginAddOpen && createPortal(
         <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/40 backdrop-blur-sm animate-fade-in" onClick={() => setPluginAddOpen(false)}>
           <div className="glass-popover w-[560px] max-w-[calc(var(--app-w,100vw)-1.5rem)] max-h-[90vh] flex flex-col overflow-hidden rounded-2xl shadow-2xl animate-glass-rise"
             onClick={(e) => e.stopPropagation()}>
@@ -766,7 +769,8 @@ export function MCPPanel() {
               </div>
             </div>
           </div>
-        </div>
+        </div>,
+        document.body,
       )}
     </div>
   );
