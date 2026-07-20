@@ -43,7 +43,8 @@ function buildSteps(hasProject) {
     // composer 系步骤:enter 自动建 draft 会话(无项目态建不出 → 整段自动跳过,末步文案引导重看)。
     ['composer', '输入框', '对话都从这里开始,下方一排是本会话的所有开关。\n· Enter 发送、Shift+Enter 换行;输入 / 打开命令面板;输入 @ 引用文件或其它会话\n· 可拖入图片 / PDF / Office 文件;Cmd/Ctrl+Z 撤销输入\n· AI 回复中再输入会入队;输入框为空按 ↑ 召回最近入队消息\n· 左侧气泡图标是「旁问」:不打断当前工作、不写入会话历史的临时提问(未读有角标)\n· 按 Cmd/Ctrl+/ 打开快捷键速查表', 'cgui:tour-ensure-draft'],
     ['mode-selector', '权限模式', '控制 AI 执行动作前是否询问你(按会话独立记忆):\n· 逐步确认:每次编辑 / 命令 / 网络前都询问,只读直接执行\n· 接受编辑:文件编辑直接执行,其它命令仍询问\n· 规划:只读研究并给出计划,你批准后自动切到执行档\n· 自动:后台安全分类器逐动作审查,通过即执行(仅官方 Anthropic 端点显示)\n· 放任:跳过全部权限检查(危险,仅建议隔离环境)', 'cgui:tour-ensure-draft'],
-    ['model-selector', '模型与 Provider', '选当前会话使用的具体模型(分屏时每格独立)。\n· 弹层顶部是 Provider 段:官方 Anthropic 与第三方中转一键切换,管理入口在 通用 → Provider\n· 支持 1M 上下文开关、搜索 / 拉取最新模型、手填自定义模型 ID', 'cgui:tour-ensure-draft'],
+    ['provider-selector', 'Provider', '切换 API 服务来源:官方 Anthropic 与第三方中转一键切换,对新发的消息生效。\n· 增删改 / 测试 / 隐藏 / 导入在 通用 → Provider 管理页', 'cgui:tour-ensure-draft'],
+    ['model-selector', '模型', '选当前会话使用的具体模型(分屏时每格独立)。\n· 支持 1M 上下文开关、搜索 / 拉取最新模型、手填自定义模型 ID', 'cgui:tour-ensure-draft'],
     ['effort-selector', '推理力度', '调 AI 的思考强度:低 / 中 / 高 / 极高 / 极限。\n· 越高思考越深入、结果越细致,但越慢、越费 token\n· 官方模型区别明显,部分第三方可能无效', 'cgui:tour-ensure-draft'],
     ['composer-more', '更多 ⋮', '低频会话级操作收在这里:\n· 主控 agent:选一个 agent(如 orchestrator 编排)主导本会话并委派其它 agent 并行干活,仅新建会话生效;内置预设首次启动已自动安装(可在 Agent 面板查看 / 编辑)\n· 远程控制:用手机 Claude App 同账号接管本会话\n· AI 工作中还会多一项「转后台」:本回合转后台继续跑,期间可切别的会话', ['cgui:tour-ensure-draft', 'cgui:composer-more-open']],
     ['ctx-badge', '会话信息徽章', '本会话的信息中枢:显示上下文占用 xx k / 窗口(百分比),点开看 /context 分项明细并可重新精确计算。\n· 弹层还收纳:当前模型与「曾用」模型史、第三方 provider 标识、工具调用次数、累计 token / 费用 / 缓存命中率\n· 新会话数据未到达时,徽章先显示模型徽章(零态),首个回合后自动切为占用数字'],

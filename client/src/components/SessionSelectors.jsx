@@ -160,14 +160,63 @@ export function ProviderSwitchList({ onSwitched }) {
   );
 }
 
-// P2.1:composer 模型 chip。弹层顶部并入 provider 段(展开即 ProviderSwitchList);
-// `cgui:open-provider` 事件(错误回合"检查 Provider 设置"按钮)改指向此弹层的
-// provider 段 —— respondOpenProvider 仅活跃窗格为 true,避免分屏多实例同时弹。
-export function ModelSelector({ compact = false, permKey = null, tourAnchor = false, respondOpenProvider = false }) {
+// 修正批#1:Provider 独立按钮(用户拍板:provider 与模型保持分开的按钮)。
+// 弹层复用 ProviderSwitchList(切换真调 /api/provider/switch);`cgui:open-provider`
+// 事件(错误回合"检查 Provider 设置"按钮)指向本弹层 —— respondOpenProvider 仅
+// 活跃窗格为 true,避免分屏多实例同时弹。provider 显示名由 ModelSelector 的
+// /api/model 加载写进 store(providerName),这里只读,不重复请求。
+export function ProviderSwitcher({ hideLabel = false, tourAnchor = false, respondOpenProvider = false }) {
+  const providerHint = useStore((s) => s.currentProvider?.providerHint || 'anthropic');
+  const provider = useStore((s) => s.providerName || '');
+  const [open, setOpen] = useState(false);
+  const wrapRef = useRef(null);
+  const label = provider || (providerHint === 'anthropic' ? 'Anthropic' : providerHint);
+
+  useEffect(() => {
+    if (!respondOpenProvider) return;
+    const onOpenProvider = () => setOpen(true);
+    window.addEventListener('cgui:open-provider', onOpenProvider);
+    return () => window.removeEventListener('cgui:open-provider', onOpenProvider);
+  }, [respondOpenProvider]);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDocClick = (e) => { if (!wrapRef.current?.contains(e.target)) setOpen(false); };
+    const onEsc = (e) => { if (e.key === 'Escape') setOpen(false); };
+    document.addEventListener('mousedown', onDocClick);
+    document.addEventListener('keydown', onEsc);
+    return () => {
+      document.removeEventListener('mousedown', onDocClick);
+      document.removeEventListener('keydown', onEsc);
+    };
+  }, [open]);
+
+  return (
+    <div ref={wrapRef} className="relative" data-tour={tourAnchor ? 'provider-selector' : undefined}>
+      <button onClick={() => setOpen(!open)}
+        className="flex items-center gap-1 px-2 py-1 rounded-md hover:bg-canvas-deep transition-colors"
+        title={`Provider: ${label} — 点击切换;增删改/测试在 通用 → Provider`}>
+        <Server size={12} className="text-ink-muted shrink-0" />
+        {!hideLabel && <span className="text-[11px] font-body text-ink-muted whitespace-nowrap max-w-[96px] truncate">{label}</span>}
+        <ChevronDown size={10} className="text-ink-faint" />
+      </button>
+      {open && (
+        <div className="glass-popover absolute left-0 bottom-full mb-2 w-72 max-w-[calc(var(--app-w,100vw)-1.5rem)] z-50 py-1 animate-glass-rise max-h-[min(60vh,calc(100dvh-6rem))] overflow-y-auto">
+          <div className="px-3 py-1.5 text-[10px] text-ink-faint uppercase tracking-wider font-body border-b border-canvas-deep">
+            Provider · 当前 <b className="normal-case">{label}</b>
+          </div>
+          <ProviderSwitchList onSwitched={() => setOpen(false)} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+// P2.1:composer 模型 chip(修正批#1:Provider 段移出为上方独立按钮,本弹层只管模型)。
+export function ModelSelector({ compact = false, permKey = null, tourAnchor = false }) {
   const { availableModels } = useStore();
   const customModels = useStore((s) => s.customModels);
   const providerHint = useStore((s) => s.currentProvider?.providerHint || 'anthropic');
-  const [provOpen, setProvOpen] = useState(false);
   // Per-session model: show/select THIS session's model (falls back to the
   // global resolved default when the session has no explicit pick). Picking
   // writes only the session override — never the global settings.json default.
@@ -204,6 +253,8 @@ export function ModelSelector({ compact = false, permKey = null, tourAnchor = fa
         if (cancelled) return;
         const prov = data.provider || '';
         setProvider(prov);
+        // Provider 独立按钮(ProviderSwitcher)只读 store,不重复请求 /api/model。
+        useStore.setState({ providerName: prov });
         // Seed the GLOBAL default only (never a per-session override) — this is
         // the resolved settings.json default, used as fallback for sessions
         // without an explicit pick.
@@ -236,14 +287,6 @@ export function ModelSelector({ compact = false, permKey = null, tourAnchor = fa
       window.removeEventListener('cgui:provider-change', onProviderChange);
     };
   }, []);
-
-  // 错误 turn 的「检查 Provider 设置」按钮:打开本弹层并展开 provider 段(仅活跃窗格响应)。
-  useEffect(() => {
-    if (!respondOpenProvider) return;
-    const onOpenProvider = () => { setOpen(true); setProvOpen(true); };
-    window.addEventListener('cgui:open-provider', onOpenProvider);
-    return () => window.removeEventListener('cgui:open-provider', onOpenProvider);
-  }, [respondOpenProvider]);
 
   // Outside-click close. Document listener works regardless of transform
   // containing blocks (the fixed-inset trick would be trapped in header).
@@ -306,7 +349,7 @@ export function ModelSelector({ compact = false, permKey = null, tourAnchor = fa
     <div ref={wrapRef} className="relative" data-tour={tourAnchor ? 'model-selector' : undefined}>
       <button onClick={() => setOpen(!open)}
         className={`flex items-center gap-1 px-2 py-1 rounded-md hover:bg-canvas-deep transition-colors ${compact ? '' : 'px-2.5'}`}
-        title={`模型: ${currentModel}${providerHint !== 'anthropic' ? `（provider: ${provider || providerHint}）` : ''} — 弹层顶部可切换 Provider`}>
+        title={`模型: ${currentModel}${providerHint !== 'anthropic' ? `（provider: ${provider || providerHint}）` : ''}`}>
         <ModelBadge model={currentModel} compact={compact} />
         {/* The vendor tag is redundant with the Claude model badge when on the
             official Anthropic endpoint — only show it for relays (DeepSeek/MiMo/
@@ -318,22 +361,6 @@ export function ModelSelector({ compact = false, permKey = null, tourAnchor = fa
       </button>
       {open && (
         <div className="glass-popover absolute left-0 bottom-full mb-2 w-80 max-w-[calc(var(--app-w,100vw)-1.5rem)] z-50 py-1 animate-glass-rise max-h-[min(60vh,calc(100dvh-6rem))] overflow-y-auto">
-          {/* P2.1 provider 段:切 provider 与选模型同一决策链,收在弹层顶部,点击展开。 */}
-          <div className="border-b border-canvas-deep">
-            <button onClick={() => setProvOpen((v) => !v)}
-              className="w-full text-left px-3 py-2 flex items-center gap-2 hover:bg-canvas-warm transition-colors">
-              <Server size={12} className="text-ink-muted shrink-0" />
-              <span className="text-[11px] text-ink font-body flex-1 min-w-0 truncate">
-                Provider：<b>{provider || (providerHint === 'anthropic' ? 'Anthropic' : providerHint)}</b>
-              </span>
-              <ChevronDown size={10} className={`text-ink-faint transition-transform ${provOpen ? 'rotate-180' : ''}`} />
-            </button>
-            {provOpen && (
-              <div className="pb-1 max-h-60 overflow-y-auto border-t border-canvas-deep/50">
-                <ProviderSwitchList onSwitched={() => setProvOpen(false)} />
-              </div>
-            )}
-          </div>
           <div className="px-3 py-2 sticky top-0 bg-canvas border-b border-canvas-deep">
             <div className="text-[10px] text-ink-faint uppercase tracking-wider font-body flex items-center justify-between">
               <span>选择模型</span>

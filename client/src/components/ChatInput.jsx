@@ -5,7 +5,7 @@ import { PermissionPrompt } from './PermissionPrompt.jsx';
 import { TodoPanel } from './TodoPanel.jsx';
 import { confirmDialog } from '../utils/confirmDialog.jsx';
 import { ImageLightbox } from './ImageLightbox.jsx';
-import { ModelSelector, RemoteControlButton } from './SessionSelectors.jsx';
+import { ModelSelector, ProviderSwitcher, RemoteControlButton } from './SessionSelectors.jsx';
 
 // Permission mode metadata — mirrors `claude --permission-mode <choice>`。
 // P2.1:文案对齐官方六档语义(RESEARCH-mode-semantics §④b);bypass 中文名保持「放任」。
@@ -1173,7 +1173,9 @@ export function ChatInput({ onSend, onStop, onAccelerate, onBackground, suggesti
             {/* 会话级选择器 chips(手机端隐藏,走 MobileMenu;分屏≥4 窄格藏文字只留图标)。 */}
             <div className="max-md:hidden flex items-center gap-0.5 min-w-0">
               <PermissionModeSelector permKey={permKey} hideLabel={paneCount >= 4} tourAnchor={paneIsActive} />
-              <ModelSelector compact permKey={permKey} tourAnchor={paneIsActive} respondOpenProvider={paneIsActive} />
+              {/* 修正批#1:Provider 独立按钮(与模型分开),cgui:open-provider 指向它。 */}
+              <ProviderSwitcher hideLabel={paneCount >= 4} tourAnchor={paneIsActive} respondOpenProvider={paneIsActive} />
+              <ModelSelector compact permKey={permKey} tourAnchor={paneIsActive} />
               <EffortSelector permKey={permKey} hideLabel={paneCount >= 4} tourAnchor={paneIsActive} />
               <ComposerMore permKey={permKey} sessionId={sessionId} isStreaming={isStreaming}
                 onBackground={onBackground} hideLabel={paneCount >= 4} tourAnchor={paneIsActive} />
