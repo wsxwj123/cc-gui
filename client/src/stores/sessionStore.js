@@ -25,8 +25,10 @@ const putCustomTitle = (sessionId, title) => {
   }).catch(() => {});
 };
 
-// Valid `--permission-mode` values per `claude --help`.
-export const PERMISSION_MODES = ['default', 'acceptEdits', 'plan', 'bypassPermissions'];
+// Valid `--permission-mode` values per `claude --help`。
+// P2.2:'auto' 为 SDK 原生自动档;是否显示由 useVisiblePermissionModes 门控
+// (仅官方 Anthropic provider + 未记 auto-unavailable 标记)。
+export const PERMISSION_MODES = ['default', 'acceptEdits', 'plan', 'auto', 'bypassPermissions'];
 
 // A1:切档 POST 送达为止重试(仿 respondPermission:8s 短超时快失败,1s/2s/4s/8s 封顶
 // 递增间隔)。裁决单点化后这条 POST 是切档生效+服务端重裁 pending 的唯一通道,半死连接

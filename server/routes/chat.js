@@ -259,7 +259,9 @@ export function getActiveChatProcesses() {
 }
 
 const VALID_EFFORTS = new Set(['low', 'medium', 'high', 'xhigh', 'max']);
-const VALID_PERMISSION_MODES = new Set(['default', 'acceptEdits', 'plan', 'bypassPermissions']);
+// P2.2:加 'auto'(SDK 原生自动档,后台分类器逐动作审查)。spawn(:642)与热切
+// (/chat/permission-mode)共用本 Set,一处改两处生效。
+const VALID_PERMISSION_MODES = new Set(['default', 'acceptEdits', 'plan', 'auto', 'bypassPermissions']);
 
 // ── SDK 引擎(@anthropic-ai/claude-agent-sdk)进程内辅助 ──────────────────────
 // canUseTool 回调能拿到 ExitPlanMode / AskUserQuestion(裸 CLI -p 不注册这俩工具),
@@ -418,6 +420,9 @@ function autoDecide(mode, toolName, input, boundary) {
     if (!/^mcp__/.test(toolName) && !boundary) return { decision: 'allow' };
     // MCP 工具可能有写副作用 / 越界不静默扩权 → 落到下方按 autoapprove/弹卡处理。
   }
+  // auto 档(P2.2):放行/拦截由 SDK 内部分类器完成,能到达 canUseTool 的都是分类器
+  // 上交/ask 规则强制的 → 走与 default 相同的分支(下方危险命令/MCP 自动放行/弹卡),
+  // GUI 不做二次裁决。无需显式分支:'auto' 不命中 plan/bypass/acceptEdits 任何一支。
   // 放任模式:一切放行(AskUserQuestion 上面已排除);越界附 session 级目录授权。
   if (mode === 'bypassPermissions') {
     return { decision: 'allow', ...(boundary ? { authorizeDir: 'session' } : {}) };
@@ -641,10 +646,11 @@ router.post('/chat', async (req, res) => {
 
   const chosenMode = (permissionMode && VALID_PERMISSION_MODES.has(permissionMode))
     ? permissionMode : 'default';
-  // SDK permissionMode:仅 plan 用 'plan'(让模型产出计划并经 canUseTool 弹 ExitPlanMode);
+  // SDK permissionMode:plan 用 'plan'(让模型产出计划并经 canUseTool 弹 ExitPlanMode);
+  // auto 用 'auto'(P2.2:分类器在 CLI/SDK 内部,GUI 模拟不了,必须原样透传让原生分类器接管);
   // GUI 的 default/acceptEdits/bypassPermissions 一律用 SDK 'default',放行/弹窗由 canUseTool
   // 按 slot.guiMode 决定(集中分级,复刻旧 hook 的语义)。
-  const sdkPermMode = chosenMode === 'plan' ? 'plan' : 'default';
+  const sdkPermMode = chosenMode === 'plan' ? 'plan' : chosenMode === 'auto' ? 'auto' : 'default';
 
   // additionalDirectories = SDK 的文件访问沙箱边界。越界访问现经 canUseTool 第三参的
   // blockedPath 透出 → makeCanUseTool 弹"越界访问"卡,用户可仅本次放行或授权目录
@@ -697,11 +703,11 @@ router.post('/chat', async (req, res) => {
       // "idle slot 无 pending stopTimer"这条隐性不变式。
       if (s.stopTimer) { clearTimeout(s.stopTimer); s.stopTimer = null; }
       s.turnEpoch = (s.turnEpoch | 0) + 1;
-      const wantPlanMode = (chosenMode === 'plan');
-      if (wantPlanMode !== (s.sdkMode === 'plan')) {
+      // SDK 层档位不一致(plan/auto/default 三种可能)→ 热切;失败放弃复用关旧开新。
+      if (sdkPermMode !== s.sdkMode) {
         try {
-          await s.query.setPermissionMode(wantPlanMode ? 'plan' : 'default');
-          s.sdkMode = wantPlanMode ? 'plan' : 'default';
+          await s.query.setPermissionMode(sdkPermMode);
+          s.sdkMode = sdkPermMode;
         } catch {
           // 热切失败 → 放弃复用,关旧开新
           s.closing = true;
@@ -1074,7 +1080,7 @@ router.post('/chat/permission-mode', async (req, res) => {
   if (!sessionId || !mode || !VALID_PERMISSION_MODES.has(mode)) {
     return res.status(400).json({ error: 'sessionId 与合法 mode 必填' });
   }
-  const sdkMode = mode === 'plan' ? 'plan' : 'default';
+  const sdkMode = mode === 'plan' ? 'plan' : mode === 'auto' ? 'auto' : 'default';
   let delivered = 0;
   for (const slot of activeProcesses.values()) {
     if (slot.sessionId !== sessionId || slot.exitCode !== null || !slot.query) continue;

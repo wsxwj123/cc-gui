@@ -5116,6 +5116,22 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
               sawError = true;
               break;
             }
+            // P2.2 auto 档运行时回退(T3 第二层门控):静态过滤放过但账户/模型/CLI 实际
+            // 不支持 auto → 报错。记 auto-unavailable(provider+model 键,本地存储,换
+            // provider/模型自动重试)→ 该组合下「自动」项隐藏;本会话切回逐步确认并
+            // 自动重发本条(autoRetry 防循环)。
+            if (useStore.getState().getPermissionModeFor(sessionQueueKey) === 'auto' && !opts.autoRetry && prompt
+              && /auto/i.test(msg) && /support|avail|invalid|eligib|permission|denied|mode/i.test(msg)) {
+              const _st = useStore.getState();
+              markAutoUnavailable(_st.currentProvider?.providerHint || 'anthropic',
+                _st.modelBySession[sessionQueueKey] || _st.currentModel || '');
+              _st.setPermissionMode('default', sessionQueueKey);
+              setProviderSwitchNotice({ text: '当前模型 / 账户不支持「自动」权限档，已回退「逐步确认」并重发本条。' });
+              setTimeout(() => handleSendRef.current?.(prompt, { ...opts, autoRetry: true }), 80);
+              accumulatedText = ''; accumulatedThinking = ''; currentToolCalls = [];
+              sawError = true;
+              break;
+            }
             // G4:上下文超窗 → 413 / prompt too long。/compact 也会因此失败(摘要请求本身超限)。
             // 不自动重试,弹引导横幅让用户选恢复方式。
             if (/\b413\b|payload too large|prompt is too long|too many tokens|input (?:is )?too long|exceed[a-z ]*context|context[a-z ]*exceed|maximum context/i.test(msg)) {
@@ -5297,6 +5313,17 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           }]);
         }
       } else if (!isNetworkDrop) {
+        // P2.2 auto 档 spawn 失败回退:旧 SDK/CLI 不接受 permissionMode:'auto' 时
+        // POST /chat 直接 500(query() failed)落到这里 —— 同 result 错误路径处置。
+        if (useStore.getState().getPermissionModeFor(sessionQueueKey) === 'auto' && !opts.autoRetry && prompt
+          && /auto|permission/i.test(String(err.message || ''))) {
+          const _st = useStore.getState();
+          markAutoUnavailable(_st.currentProvider?.providerHint || 'anthropic',
+            _st.modelBySession[sessionQueueKey] || _st.currentModel || '');
+          _st.setPermissionMode('default', sessionQueueKey);
+          setProviderSwitchNotice({ text: '当前 CLI / 账户不支持「自动」权限档，已回退「逐步确认」并重发本条。' });
+          setTimeout(() => handleSendRef.current?.(prompt, { ...opts, autoRetry: true }), 80);
+        } else {
         console.error('Chat error:', err);
         // Render the failure as a visible turn so the user isn't left staring at
         // a frozen "connecting" with no explanation (e.g. invalid project dir).
@@ -5312,6 +5339,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           blocks: [{ type: 'text', content: `❌ ${err.message || '发送失败'}` }],
           usage: null,
         }]);
+        }
       }
     } finally {
       // 停止/断流兜底:本回合派出的子代理若仍在运行态(中断后 tool_result 永不到达,
@@ -8559,6 +8587,29 @@ export default function App() {
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
+  }, []);
+
+  // P2.2(T2):内置 6 个 agent 首启静默安装一次(复用现有 install 端点,skip 不覆盖
+  // 用户同名文件)。marker 只跑一次;失败静默、不置 marker,下次启动再试;不阻断任何发送。
+  // 防"用户删过 agent 又被装回":仅当内置 agent 一个都没装时才安装;已装过任意一个
+  // 视为用户已接管,直接记 marker 不再打扰。
+  useEffect(() => {
+    try { if (localStorage.getItem('cgui-builtin-agents-installed') === '1') return; } catch {}
+    (async () => {
+      try {
+        const d = await (await fetch('/api/agents/builtin')).json();
+        const list = Array.isArray(d?.agents) ? d.agents : [];
+        if (!list.length) return; // 接口异常/无预设:静默,下次再试
+        if (!list.some((a) => a.installed)) {
+          const r = await fetch('/api/agents/builtin/install', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({}),
+          });
+          if (!r.ok) return; // 失败静默(磁盘/权限),下次启动再试
+        }
+        try { localStorage.setItem('cgui-builtin-agents-installed', '1'); } catch {}
+      } catch { /* 静默,下次启动再试 */ }
+    })();
   }, []);
 
   // Bug #11:首次启动检测 claude CLI;没装就弹模态按系统给安装指引(给小白用户)。
