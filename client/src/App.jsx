@@ -1541,7 +1541,9 @@ function ProjectList() {
           </div>
         )}
       </div>
-      {addDialogOpen && (
+      {/* 审计批E3:portal 到 body —— 手机抽屉/侧栏祖先带 transform 时 fixed 遮罩被困在
+          抽屉内(弹窗被裁、遮罩盖不满),portal 后恒真全屏;state 仍在 ProjectList 本组件。 */}
+      {addDialogOpen && createPortal(
         <div className="fixed inset-0 z-[80] bg-black/25 flex items-end md:items-center justify-center p-3">
           <div className="w-full max-w-md rounded-2xl bg-canvas border border-canvas-deep shadow-2xl overflow-hidden">
             <div className="flex items-center justify-between px-4 py-3 border-b border-canvas-deep">
@@ -1576,7 +1578,8 @@ function ProjectList() {
               </div>
             </form>
           </div>
-        </div>
+        </div>,
+        document.body,
       )}
     </div>
   );
