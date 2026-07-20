@@ -12,11 +12,67 @@ export function isDangerousCommand(req) {
   return DANGEROUS_BASH.test(String(req?.toolInput?.command || ''));
 }
 
+// 正在提交/重试中的请求 id → { cancelled }。两个作用:
+//   ① 同一 id 并发提交只跑一个(双实例/双击/对账重放都可能重复触发);
+//   ② 对账补拉重放 handlePermissionRequest 时跳过 in-flight 的 id,防止
+//      auto-allow 分支与用户已点的 deny 竞速双写。
+const inFlightResponds = new Map();
+
+// 共享提交器:把权限应答送达服务端为止。手机(Tailscale)半死 TCP 上一次性
+// POST 会静默丢失 → CLI 永久挂起等应答、刷新后同一弹窗重现(死循环根因)。
+// 单次 8s 短超时(快失败快重试,超时还会让浏览器废弃死掉的池连接,下次拿新
+// TCP),失败后递增间隔无限重试。服务端 respond 幂等(alreadyResolved),重试
+// 绝不会把同一应答写两次进 CLI。终止条件三选一:
+//   送达成功(HTTP 2xx,含 alreadyResolved)/ 卡片已被他端解决(对账或
+//   resolved 广播撤卡)/ cancelRespond 明确取消。
+// 服务端 15min TTL 与进程退出 dropPendingForSession 都会让重试命中
+// alreadyResolved 收敛,不存在永久重试。
+export async function respondPermission(id, body) {
+  if (inFlightResponds.has(id)) return false; // 同 id 并发提交只跑一个
+  const flight = { cancelled: false };
+  inFlightResponds.set(id, flight);
+  // 提交发起时卡片是否在 store 里:auto-allow/deny 分支从不入卡,对它们
+  // "卡片不存在"是常态,不能当"他端已解决"提前终止;只有本来有卡、后来
+  // 被 resolved 广播/对账撤掉,才说明他端已解决。
+  const hadCard = useStore.getState().pendingPermissions.some((p) => p.id === id);
+  try {
+    for (let attempt = 0; ; attempt++) {
+      if (flight.cancelled) return false;
+      try {
+        const r = await fetch(`/api/permissions/respond/${id}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+          signal: AbortSignal.timeout(8_000),
+        });
+        if (r.ok) return true; // 含 alreadyResolved —— 都算送达
+      } catch { /* 半死连接/超时,落到重试 */ }
+      // 1s/2s/4s/8s 封顶的递增间隔:连接刚抖一下时快速恢复,持续断开时不刷屏
+      await new Promise((ok) => setTimeout(ok, Math.min(1_000 * 2 ** attempt, 8_000)));
+      if (hadCard && !useStore.getState().pendingPermissions.some((p) => p.id === id)) {
+        return true; // 卡片已被 permission:resolved / 对账撤掉 → 他端已解决
+      }
+    }
+  } finally {
+    inFlightResponds.delete(id);
+  }
+}
+
+// 组件侧的明确取消(如未来加"取消提交"按钮):置位后当前重试循环在下个
+// 检查点退出,卡片去留由调用方决定。
+export function cancelRespond(id) {
+  const f = inFlightResponds.get(id);
+  if (f) f.cancelled = true;
+}
+
 // permission:request 的完整处理:按会话模式 auto-allow/deny 分流,否则弹卡。
 // 抽成模块级函数:WS 实时分支与【断线重连后的 pending 补拉】共用同一套逻辑,
 // 避免 auto-allow 规则两处维护漂移。原 case 内 break 改为 return,行为不变。
 function handlePermissionRequest(req) {
   if (!req || !req.id) return;
+    // in-flight 守卫:该 id 正在提交/重试中(多为用户已点了 deny/allow,应答还
+    // 没送达)。对账重放到这里若再走 auto-allow 分支,会和用户的决定竞速双写。
+    if (inFlightResponds.has(req.id)) return;
     // 诊断 Bug1(授权后工具仍不执行 / 不弹窗):打印每次收到的请求 + 命中分支。
     // 服务端 hook 实测正常 POST,可疑点在客户端这一段。下次复现时打开
     // 控制台过滤 [cgui-perm] 即可看出走的是哪条分支。
@@ -45,14 +101,10 @@ function handlePermissionRequest(req) {
     // 结束规划(进程级模式无法中途改变,新模式从下一条消息开始生效)。
     if (req.toolName === 'ExitPlanMode' && mode !== 'plan') {
       if (import.meta.env?.DEV) console.log('[cgui-perm] auto-finish: ExitPlanMode while mode=' + mode, req.id);
-      fetch(`/api/permissions/respond/${req.id}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          decision: 'deny',
-          reason: '用户已切出规划模式（当前 ' + mode + '）。请勿继续规划或再次调用 ExitPlanMode，直接简要总结并结束本回合；用户将以新模式重新发起请求。',
-        }),
-      }).catch(() => {});
+      respondPermission(req.id, {
+        decision: 'deny',
+        reason: '用户已切出规划模式（当前 ' + mode + '）。请勿继续规划或再次调用 ExitPlanMode，直接简要总结并结束本回合；用户将以新模式重新发起请求。',
+      });
       return;
     }
     const READ_CLASS = ['Read', 'Glob', 'Grep', 'LS', 'TodoWrite', 'TaskCreate', 'TaskUpdate', 'TaskList', 'NotebookRead', 'Skill'];
@@ -71,12 +123,8 @@ function handlePermissionRequest(req) {
     // CGUI_BYPASS_ALL_EXCEPT_ASK 语义对齐。
     if (mode === 'bypassPermissions' && req.toolName !== 'AskUserQuestion') {
       if (import.meta.env?.DEV) console.log('[cgui-perm] auto-allow: bypass', req.id);
-      fetch(`/api/permissions/respond/${req.id}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        // 越界请求附带 session 级目录授权,否则 allow 后仍被 FS 沙箱层挡回。
-        body: JSON.stringify({ decision: 'allow', ...(req.blockedPath ? { authorizeDir: 'session' } : {}) }),
-      }).catch(() => {});
+      // 越界请求附带 session 级目录授权,否则 allow 后仍被 FS 沙箱层挡回。
+      respondPermission(req.id, { decision: 'allow', ...(req.blockedPath ? { authorizeDir: 'session' } : {}) });
       return;
     }
     if (mode === 'plan' && PLAN_WRITE_CLASS.includes(req.toolName)) {
@@ -88,14 +136,10 @@ function handlePermissionRequest(req) {
       const planClass = /\.(md|markdown|txt|rst|mdx)$/.test(fp) || /(plan|todo|notes?|draft|计划|待办)/.test(base);
       if (!planClass) {
         if (import.meta.env?.DEV) console.log('[cgui-perm] deny: plan write', req.id, req.toolName);
-        fetch(`/api/permissions/respond/${req.id}`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            decision: 'deny',
-            reason: '当前是规划模式：禁止修改源文件。可写计划类文档(.md/.txt 或名含 plan/todo)，或用 ExitPlanMode 提交计划供用户审批。',
-          }),
-        }).catch(() => {});
+        respondPermission(req.id, {
+          decision: 'deny',
+          reason: '当前是规划模式：禁止修改源文件。可写计划类文档(.md/.txt 或名含 plan/todo)，或用 ExitPlanMode 提交计划供用户审批。',
+        });
         return;
       }
       // 计划类文档 → 不在此拦截,继续往下(默认弹窗/或其他模式处理)
@@ -104,20 +148,12 @@ function handlePermissionRequest(req) {
     // (与服务端 makeCanUseTool 的 boundary 判定对齐,沙箱边界不静默扩权)。
     if (mode === 'plan' && READ_CLASS.includes(req.toolName) && !req.blockedPath) {
       if (import.meta.env?.DEV) console.log('[cgui-perm] auto-allow: plan+readClass', req.id, req.toolName);
-      fetch(`/api/permissions/respond/${req.id}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ decision: 'allow' }),
-      }).catch(() => {});
+      respondPermission(req.id, { decision: 'allow' });
       return;
     }
     if (mode === 'acceptEdits' && READ_CLASS.includes(req.toolName) && !req.blockedPath) {
       if (import.meta.env?.DEV) console.log('[cgui-perm] auto-allow: acceptEdits+readClass', req.id, req.toolName);
-      fetch(`/api/permissions/respond/${req.id}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ decision: 'allow' }),
-      }).catch(() => {});
+      respondPermission(req.id, { decision: 'allow' });
       return;
     }
     // draft(sessionId=null)不吃白名单:共享遗留键 cgui-perm-wl-none 会把
@@ -125,11 +161,7 @@ function handlePermissionRequest(req) {
     const wl = req.sessionId ? JSON.parse(localStorage.getItem(`cgui-perm-wl-${req.sessionId}`) || '[]') : [];
     if (wl.includes(req.toolName) && !req.blockedPath) {
       if (import.meta.env?.DEV) console.log('[cgui-perm] auto-allow: whitelist', req.id, req.toolName);
-      fetch(`/api/permissions/respond/${req.id}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ decision: 'allow' }),
-      }).catch(() => {});
+      respondPermission(req.id, { decision: 'allow' });
       return;
     }
     if (import.meta.env?.DEV) console.log('[cgui-perm] → render popup (mode=' + mode + ')', req.id, req.toolName);
