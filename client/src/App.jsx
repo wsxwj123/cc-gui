@@ -18,7 +18,7 @@ const newDraftId = () => `d${Date.now()}-${++_draftSeq}`;
 // 感知不到 → 可能把 B 自己仍在跑的进程当成「需要 reattach」,reattach 的 finally 又清空 B
 // 的流式状态,外观上像「停一个把两个都停了」。改成模块级共享集合即可让停止全局可见。
 const stoppedChatPids = new Set();
-import { useStore, THEME_FAMILIES, FONT_OPTIONS, systemPrefersDark, PERMISSION_MODES } from './stores/sessionStore.js';
+import { useStore, THEME_FAMILIES, FONT_OPTIONS, systemPrefersDark } from './stores/sessionStore.js';
 import { useWebSocket } from './hooks/useWebSocket.js';
 import { MessageBubble } from './components/MessageBubble.jsx';
 import { MarkdownRenderer } from './components/MarkdownRenderer.jsx';
@@ -7449,9 +7449,11 @@ function MobileEffortPage({ permKey }) {
 
 function MobilePermissionPage({ permKey }) {
   const permissionMode = useStore((s) => (permKey ? (s.permissionModeBySession[permKey] || s.permissionMode) : s.permissionMode));
+  // P2.7:与桌面模式按钮同一份门控(五档平铺;「自动」仅官方 provider 且未记不可用标记)。
+  const visibleModes = useVisiblePermissionModes(permKey);
   return (
     <div className="py-1">
-      {PERMISSION_MODES.map((m) => {
+      {visibleModes.map((m) => {
         const meta = MODE_META[m];
         const MIcon = meta.icon;
         return (
@@ -7466,6 +7468,49 @@ function MobilePermissionPage({ permKey }) {
           </button>
         );
       })}
+    </div>
+  );
+}
+
+// P2.7:手机端主控 agent 分页(轴 B,与桌面 composer ⋮ 的 agent 段同一状态
+// activeAgentBySession)。仅新建会话生效,已开始的会话显示提示。
+function MobileAgentPage({ permKey, sessionStarted }) {
+  const active = useStore((s) => (permKey ? (s.activeAgentBySession || {})[permKey] || '' : ''));
+  const [agents, setAgents] = useState([]);
+  useEffect(() => {
+    fetch('/api/agents').then((r) => r.json()).then((d) => {
+      setAgents(Array.isArray(d?.agents) ? d.agents : []);
+    }).catch(() => {});
+  }, []);
+  const pick = (name) => useStore.getState().setActiveAgentFor(permKey, name);
+  return (
+    <div className="py-1">
+      <div className="px-4 pt-2 pb-1 text-[11px] text-ink-faint font-body">
+        选一个 agent 主导本会话并委派其它 agent(仅新建会话生效)
+      </div>
+      {sessionStarted && (
+        <div className="px-4 pb-2 text-[11px] text-amber-700 font-body leading-snug">会话已开始，无法更改；此选择在新建会话时生效。</div>
+      )}
+      <button onClick={() => pick('')}
+        className="w-full flex items-center gap-3 px-4 py-3 text-left hover:bg-canvas-warm transition-colors">
+        <span className="flex-1 text-[14px] font-body text-ink">普通模式</span>
+        {!active && <Check size={16} className="text-accent shrink-0" />}
+      </button>
+      {agents.map((a) => (
+        <button key={a.name} onClick={() => pick(a.name)}
+          className="w-full flex items-start gap-3 px-4 py-3 text-left hover:bg-canvas-warm transition-colors">
+          <div className="flex-1 min-w-0">
+            <div className="text-[14px] font-body text-ink truncate">
+              {a.name}{a.name === 'orchestrator' && <span className="text-[10px] text-accent ml-1">可分配其它 agent</span>}
+            </div>
+            {a.description && <div className="text-[11px] text-ink-faint font-body truncate">{a.description}</div>}
+          </div>
+          {active === a.name && <Check size={16} className="text-accent shrink-0 mt-0.5" />}
+        </button>
+      ))}
+      {agents.length === 0 && (
+        <div className="px-4 py-3 text-[12px] text-ink-faint font-body">暂无 agent。可在「Agent」面板安装内置预设。</div>
+      )}
     </div>
   );
 }
@@ -8173,6 +8218,7 @@ function MobileMenu({ setRightPanel, onClose }) {
   const claudeProtocol = useStore((s) => (s.currentProvider?.protocol || 'anthropic') !== 'openai');
   const effortLabel = (EFFORT_LEVELS.find((e) => e.id === effort) || EFFORT_LEVELS[0]).label;
   const permLabel = (MODE_META[permissionMode] || MODE_META.default).label;
+  const activeAgentLabel = useStore((s) => (s.activeAgentBySession || {})[permKey] || '普通');
 
   // New chat: prefer the selected project; fall back to the open session's
   // project so ✎ isn't a dead no-op. With no project at all, drop into the
@@ -8189,7 +8235,7 @@ function MobileMenu({ setRightPanel, onClose }) {
   };
   const openPanel = (id) => { setRightPanel(id); onClose(); };
 
-  const TITLES = { history: '会话与项目', model: '模型', effort: '推理力度', permission: '权限模式', provider: 'Provider', appearance: '外观', theme: '配色方案', readingfont: '对话正文字体' };
+  const TITLES = { history: '会话与项目', model: '模型', effort: '推理力度', permission: '权限模式', agent: '主控 agent', provider: 'Provider', appearance: '外观', theme: '配色方案', readingfont: '对话正文字体' };
 
   return (
     <div className="flex flex-col h-full">
@@ -8221,6 +8267,8 @@ function MobileMenu({ setRightPanel, onClose }) {
               <MobileMenuRow icon={Cpu} label="模型" value={<ModelBadge model={currentModel} compact />} onClick={() => push('model')} />
               {claudeProtocol && <MobileMenuRow icon={Gauge} label="推理力度" value={effortLabel} onClick={() => push('effort')} />}
               <MobileMenuRow icon={Shield} label="权限模式" value={permLabel} onClick={() => push('permission')} />
+              {/* P2.7:主控 agent(轴 B)入模式分页旁新行,与桌面 composer ⋮ 同一状态。 */}
+              <MobileMenuRow icon={Bot} label="主控 agent" value={activeAgentLabel} onClick={() => push('agent')} />
               <MobileMenuRow icon={Server} label="Provider" onClick={() => push('provider')} />
               {activeSession?.sessionId && (
                 <div className="px-4 py-2"><RemoteControlButton session={activeSession} /></div>
@@ -8239,6 +8287,7 @@ function MobileMenu({ setRightPanel, onClose }) {
           {page === 'model' && <MobileModelPage permKey={permKey} />}
           {page === 'effort' && <MobileEffortPage permKey={permKey} />}
           {page === 'permission' && <MobilePermissionPage permKey={permKey} />}
+          {page === 'agent' && <MobileAgentPage permKey={permKey} sessionStarted={!!activeSession?.sessionId} />}
           {page === 'provider' && <MobileProviderPage />}
           {page === 'appearance' && <MobileAppearancePage push={push} />}
           {page === 'theme' && <MobileThemePage />}
