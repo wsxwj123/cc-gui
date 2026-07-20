@@ -19,7 +19,7 @@ const newDraftId = () => `d${Date.now()}-${++_draftSeq}`;
 // 的流式状态,外观上像「停一个把两个都停了」。改成模块级共享集合即可让停止全局可见。
 const stoppedChatPids = new Set();
 import { useStore, THEME_FAMILIES, FONT_OPTIONS, systemPrefersDark, PERMISSION_MODES } from './stores/sessionStore.js';
-import { useWebSocket } from './hooks/useWebSocket.js';
+import { useWebSocket, respondPermission } from './hooks/useWebSocket.js';
 import { MessageBubble } from './components/MessageBubble.jsx';
 import { MarkdownRenderer } from './components/MarkdownRenderer.jsx';
 import { TurnBubble } from './components/TurnBubble.jsx';
@@ -9081,12 +9081,10 @@ export default function App() {
     // AskUserQuestion 例外:切到放任也要保留它的 picker,不能批量放行
     // (放行=CLI headless 跑不了该工具=AI 退化文本提问)。
     pending.filter((p) => p.sessionId === sid && p.toolName !== 'AskUserQuestion').forEach((p) => {
-      fetch(`/api/permissions/respond/${p.id}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ decision: 'allow' }),
-      }).catch(() => {});
-      useStore.getState().removePendingPermission(p.id);
+      // 共享提交器重试到送达;送达才撤卡(原先"先撤卡再一次性 fetch"在半死连接下
+      // 应答丢了卡也没了,无从重试 → CLI 挂死)。false=同 id 已有在途提交,卡交它收敛。
+      respondPermission(p.id, { decision: 'allow' })
+        .then((ok) => { if (ok) useStore.getState().removePendingPermission(p.id); });
     });
   }, [permissionMode, activeSession?.sessionId]);
 
