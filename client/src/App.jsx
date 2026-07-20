@@ -9137,10 +9137,26 @@ export default function App() {
     useStore.getState().fetchModel();
     const onProvCh = () => { useStore.getState().fetchProvider(); useStore.getState().fetchModel(); };
     window.addEventListener('cgui:provider-change', onProvCh);
+    // 审计批A1:断线期间 provider-change 广播已丢(半死连接常态)→ 重连成功即补拉
+    // provider/model 对账,与权限卡 refetchPendingPermissions 同构。
+    window.addEventListener('cgui:ws-reconnected', onProvCh);
+    // 回前台补拉(手机切后台期间 WS 冻结,回来时广播早丢):节流 60s,频繁切 tab 不打。
+    let lastVisPull = Date.now();
+    const onVis = () => {
+      if (document.visibilityState !== 'visible') return;
+      if (Date.now() - lastVisPull < 60_000) return;
+      lastVisPull = Date.now();
+      onProvCh();
+    };
+    document.addEventListener('visibilitychange', onVis);
     // Warm the MCP cache so the first click on the MCP panel is instant
     // (claude mcp list cold spawn is ~2s).
     fetch('/api/mcp').catch(() => {});
-    return () => window.removeEventListener('cgui:provider-change', onProvCh);
+    return () => {
+      window.removeEventListener('cgui:provider-change', onProvCh);
+      window.removeEventListener('cgui:ws-reconnected', onProvCh);
+      document.removeEventListener('visibilitychange', onVis);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
