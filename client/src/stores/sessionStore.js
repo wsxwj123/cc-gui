@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { nextDockCode } from '../utils/artifactDock.js';
+import { mergeSyncedMap } from '../utils/sessionSync.js';
 
 // Helper: read JSON from localStorage with fallback.
 const readLs = (key, fallback) => {
@@ -24,6 +25,22 @@ const putCustomTitle = (sessionId, title) => {
     body: JSON.stringify({ sessionId, title: title || '' }),
   }).catch(() => {});
 };
+
+// 审计批A2:会话级偏好(权限档/模型 pin/力度 pin)同步提交器。fire-and-forget,
+// 失败静默不崩 UI —— 挂载/重连的 GET 收敛是兜底。in-flight 记账:广播/水合期间
+// 不覆盖正在提交中的键,防「刚点的选择被旧广播闪回」。
+const syncInFlight = new Set(); // `${kind}:${sessionId}`
+const putSessionSync = (kind, sessionId, value) => {
+  const tag = `${kind}:${sessionId}`;
+  syncInFlight.add(tag);
+  fetch('/api/prefs/session-sync', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ kind, sessionId, value }),
+  }).catch(() => {}).finally(() => syncInFlight.delete(tag));
+};
+// 未落盘 draft(无稳定 session id)不同步;发首条消息落盘后经 migrateSessionKey 补推。
+const syncableKey = (key) => typeof key === 'string' && !!key && !key.startsWith('draft-');
 
 // Valid `--permission-mode` values per `claude --help`。
 // P2.2:'auto' 为 SDK 原生自动档;是否显示由 useVisiblePermissionModes 门控
@@ -466,6 +483,8 @@ export const useStore = create((set, get) => ({
       writeLs('cgui-perm-mode-by-session', map);
       // 同 setModelFor:keyed 时不动全局,避免分屏跨窗格污染(显示靠 permissionModeBySession[key])。
       set({ permissionModeBySession: map });
+      // 审计批A2:偏好层跨设备同步(只影响下次 spawn 的档位;运行时切档仍走下方 POST)。
+      if (syncableKey(key)) putSessionSync('permissionMode', key, mode);
     } else {
       set({ permissionMode: mode });
       writeLs('cgui-permission-mode', mode);
@@ -518,6 +537,8 @@ export const useStore = create((set, get) => ({
       // 服务端 prefs 兜底)。所有 pin 写入都流经这里=单一同步点;draft key 无稳定
       // sessionId 不同步(migrateSessionKey 落到真 sid 时补)。
       get().syncContext1m(key, model);
+      // 审计批A2:模型 pin 跨设备同步(会话→模型映射,per-pane=per-会话语义不变)。
+      if (syncableKey(key)) putSessionSync('modelPin', key, model);
     } else {
       set({ currentModel: model });
     }
@@ -559,6 +580,46 @@ export const useStore = create((set, get) => ({
     writeLs('cgui-context-1m', next);
     set({ context1mBySession: next });
   },
+  // 审计批A2:三张同步 map(权限档/模型 pin/力度 pin)的水合与广播收敛。
+  // 服务端值优先于 localStorage;draft 键与服务端缺失的本地实键保留、提交中的键
+  // 不被覆盖(合并规则见 utils/sessionSync.js)。正在流式中的会话不受影响 —— 这些
+  // map 只在【发送时】被读取(getModelFor/getEffortFor/getPermissionModeFor),
+  // 收敛不会改写已发出回合的参数,下一条消息才生效。providerEpoch 语义不变:
+  // 同步来的 pin 与本地 pin 同一存放地,切 provider 的 clearModelOverrides(本地
+  // fp 门控 + 服务端 clear)照常使其失效。
+  applyRemoteSessionSync: (d, { pushLocalOnly = false } = {}) => {
+    const specs = [
+      ['permissionModes', 'permissionModeBySession', 'cgui-perm-mode-by-session', 'permissionMode'],
+      ['modelPins', 'modelBySession', 'cgui-model-by-session', 'modelPin'],
+      ['effortPins', 'effortBySession', 'cgui-effort-by-session', 'effortPin'],
+    ];
+    const patch = {};
+    for (const [srvKey, stateKey, lsKey, kind] of specs) {
+      const server = (d && d[srvKey] && typeof d[srvKey] === 'object') ? d[srvKey] : {};
+      const local = get()[stateKey] || {};
+      const skip = new Set(
+        [...syncInFlight].filter((t) => t.startsWith(kind + ':')).map((t) => t.slice(kind.length + 1)),
+      );
+      const next = mergeSyncedMap(local, server, skip);
+      // 首次水合:本地有而服务端没有的实键(本功能上线前的存量 pin)推上去,
+      // 其他设备也能看到(同 hydrateCustomTitles 的 legacy 合并回推)。
+      if (pushLocalOnly) {
+        for (const k of Object.keys(local)) {
+          if (syncableKey(k) && !(k in server)) putSessionSync(kind, k, local[k]);
+        }
+      }
+      writeLs(lsKey, next);
+      patch[stateKey] = next;
+    }
+    set(patch);
+  },
+  hydrateSessionSync: async () => {
+    try {
+      const res = await fetch('/api/prefs/session-sync');
+      const d = await res.json();
+      get().applyRemoteSessionSync(d, { pushLocalOnly: true });
+    } catch {}
+  },
   getModelFor: (key) => (key && get().modelBySession[key]) || get().currentModel,
   // Drop every per-session model pin. Called on a provider switch: those pins
   // reference the OLD provider's models (and would otherwise mask the new
@@ -576,6 +637,12 @@ export const useStore = create((set, get) => ({
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ clear: true }),
+    }).catch(() => {});
+    // 审计批A2:服务端同步表的模型 pin 一并清,否则下次水合把旧 provider 的 pin 又拉回来。
+    fetch('/api/prefs/session-sync', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ clear: 'modelPins' }),
     }).catch(() => {});
   },
   // U3/V1:记录 /context 实测结果(分子+分母),徽章优先采用。
@@ -617,17 +684,21 @@ export const useStore = create((set, get) => ({
       writeLs('cgui-model-by-session', m); patch.modelBySession = m;
       // draft 期开的 [1m] 落到真 sessionId 时补同步服务端标记(draft key 不同步)。
       get().syncContext1m(toKey, mbs[fromKey]);
+      // 审计批A2:draft 期钉的模型落到真 sid 时补推同步表。
+      if (syncableKey(toKey)) putSessionSync('modelPin', toKey, mbs[fromKey]);
     }
     const pms = get().permissionModeBySession;
     if (pms[fromKey] != null && (force || pms[toKey] == null)) {
       const p = { ...pms, [toKey]: pms[fromKey] }; delete p[fromKey];
       writeLs('cgui-perm-mode-by-session', p); patch.permissionModeBySession = p;
+      if (syncableKey(toKey)) putSessionSync('permissionMode', toKey, pms[fromKey]);
     }
     // effort 也按会话隔离,draft→真 sessionId 时一并迁移,否则草稿里设的力度会丢。
     const ebs = get().effortBySession;
     if (ebs[fromKey] != null && (force || ebs[toKey] == null)) {
       const e2 = { ...ebs, [toKey]: ebs[fromKey] }; delete e2[fromKey];
       writeLs('cgui-effort-by-session', e2); patch.effortBySession = e2;
+      if (syncableKey(toKey)) putSessionSync('effortPin', toKey, ebs[fromKey]);
     }
     // BG5:活跃 Agent / 模式也按会话隔离,draft→真 sid 一并迁移,否则发送后模式开关回落"普通模式"。
     const abs = get().activeAgentBySession;
@@ -689,6 +760,8 @@ export const useStore = create((set, get) => ({
       const map = { ...get().effortBySession, [key]: e };
       writeLs('cgui-effort-by-session', map);
       set({ effortBySession: map });
+      // 审计批A2:力度 pin 跨设备同步('' 是合法档位「默认」,服务端按值存不删)。
+      if (syncableKey(key)) putSessionSync('effortPin', key, e);
     } else {
       set({ effort: e });
       try { localStorage.setItem('cgui-effort', e); } catch {}

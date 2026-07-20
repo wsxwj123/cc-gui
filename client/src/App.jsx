@@ -9148,11 +9148,16 @@ export default function App() {
     // 徽章显示"?",被用户误读为"手机不继承、必须重新选"。实际发送链(pin→历史→
     // 全局默认)一直是对的,这里只把"解析后的全局默认"显示出来。
     useStore.getState().fetchModel();
+    // 审计批A2:会话级偏好(权限档/模型 pin/力度 pin)水合 —— 服务端值优先收敛,
+    // 本地存量实键回推。挂载 + ws-reconnected 触发;provider-change 不触发(切换
+    // 链路里 clearModelOverrides 的 clear PUT 与 GET 会竞速,旧 pin 可能被拉回)。
+    useStore.getState().hydrateSessionSync();
     const onProvCh = () => { useStore.getState().fetchProvider(); useStore.getState().fetchModel(); };
     window.addEventListener('cgui:provider-change', onProvCh);
     // 审计批A1:断线期间 provider-change 广播已丢(半死连接常态)→ 重连成功即补拉
     // provider/model 对账,与权限卡 refetchPendingPermissions 同构。
-    window.addEventListener('cgui:ws-reconnected', onProvCh);
+    const onReconn = () => { onProvCh(); useStore.getState().hydrateSessionSync(); };
+    window.addEventListener('cgui:ws-reconnected', onReconn);
     // 回前台补拉(手机切后台期间 WS 冻结,回来时广播早丢):节流 60s,频繁切 tab 不打。
     let lastVisPull = Date.now();
     const onVis = () => {
@@ -9167,7 +9172,7 @@ export default function App() {
     fetch('/api/mcp').catch(() => {});
     return () => {
       window.removeEventListener('cgui:provider-change', onProvCh);
-      window.removeEventListener('cgui:ws-reconnected', onProvCh);
+      window.removeEventListener('cgui:ws-reconnected', onReconn);
       document.removeEventListener('visibilitychange', onVis);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
