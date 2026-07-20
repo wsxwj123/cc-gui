@@ -9224,12 +9224,15 @@ export default function App() {
     const onReconn = () => { onProvCh(); useStore.getState().hydrateSessionSync(); };
     window.addEventListener('cgui:ws-reconnected', onReconn);
     // 回前台补拉(手机切后台期间 WS 冻结,回来时广播早丢):节流 60s,频繁切 tab 不打。
+    // 审计批收尾#4:session-sync 也补拉,与 ws-reconnected 路径对齐(后台期间对端改的
+    // 权限档/模型 pin/力度 pin 广播已丢);首次迁移后水合纯拉取(收尾#1),多拉无副作用。
     let lastVisPull = Date.now();
     const onVis = () => {
       if (document.visibilityState !== 'visible') return;
       if (Date.now() - lastVisPull < 60_000) return;
       lastVisPull = Date.now();
       onProvCh();
+      useStore.getState().hydrateSessionSync();
     };
     document.addEventListener('visibilitychange', onVis);
     // Warm the MCP cache so the first click on the MCP panel is instant
