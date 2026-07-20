@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { nextDockCode } from '../utils/artifactDock.js';
-import { mergeSyncedMap, syncableKey, pushLocalOnlyKeys } from '../utils/sessionSync.js';
+import { mergeSyncedMap, syncableKey, pushLocalOnlyKeys, createInFlightCounter } from '../utils/sessionSync.js';
 
 // Helper: read JSON from localStorage with fallback.
 const readLs = (key, fallback) => {
@@ -27,17 +27,18 @@ const putCustomTitle = (sessionId, title) => {
 };
 
 // 审计批A2:会话级偏好(权限档/模型 pin/力度 pin)同步提交器。fire-and-forget,
-// 失败静默不崩 UI —— 挂载/重连的 GET 收敛是兜底。in-flight 记账:广播/水合期间
+// 失败静默不崩 UI —— 挂载/重连的 GET 收敛是兜底。in-flight 记账(收尾#3 计数化,
+// 同键两连改时第一个 PUT 的 finally 不再误摘第二个在途的保护标签):广播/水合期间
 // 不覆盖正在提交中的键,防「刚点的选择被旧广播闪回」。
-const syncInFlight = new Set(); // `${kind}:${sessionId}`
+const syncInFlight = createInFlightCounter(); // tag = `${kind}:${sessionId}`
 const putSessionSync = (kind, sessionId, value) => {
   const tag = `${kind}:${sessionId}`;
-  syncInFlight.add(tag);
+  syncInFlight.acquire(tag);
   fetch('/api/prefs/session-sync', {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ kind, sessionId, value }),
-  }).catch(() => {}).finally(() => syncInFlight.delete(tag));
+  }).catch(() => {}).finally(() => syncInFlight.release(tag));
 };
 
 // Valid `--permission-mode` values per `claude --help`。
@@ -596,7 +597,7 @@ export const useStore = create((set, get) => ({
       const server = (d && d[srvKey] && typeof d[srvKey] === 'object') ? d[srvKey] : {};
       const local = get()[stateKey] || {};
       const skip = new Set(
-        [...syncInFlight].filter((t) => t.startsWith(kind + ':')).map((t) => t.slice(kind.length + 1)),
+        syncInFlight.keys().filter((t) => t.startsWith(kind + ':')).map((t) => t.slice(kind.length + 1)),
       );
       const next = mergeSyncedMap(local, server, skip);
       // 首次水合:本地有而服务端没有的实键(本功能上线前的存量 pin)推上去,

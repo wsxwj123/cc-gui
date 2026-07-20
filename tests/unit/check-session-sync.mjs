@@ -3,7 +3,7 @@
 // effort '' 合法值各至少一条断言。node tests/unit/check-session-sync.mjs
 import assert from 'node:assert/strict';
 import { applySessionSyncPut, normalizeSessionSync, SYNC_KINDS } from '../../server/session-sync.js';
-import { mergeSyncedMap, pushLocalOnlyKeys, syncableKey } from '../../client/src/utils/sessionSync.js';
+import { mergeSyncedMap, pushLocalOnlyKeys, syncableKey, createInFlightCounter } from '../../client/src/utils/sessionSync.js';
 
 // ── 服务端:三张 map 各写入一条 ─────────────────────────────
 let st = normalizeSessionSync(null);
@@ -84,5 +84,18 @@ assert.deepEqual(srv.modelPins, {});
 // 修掉的正是这条路径:若仍走首次迁移分支,回推键集非空(且 draft 键被 syncableKey 排除)。
 assert.deepEqual(pushLocalOnlyKeys(localA, srv.modelPins), ['sid-old']);
 assert.ok(!syncableKey('draft-p') && syncableKey('sid-old'));
+
+// ── 收尾#3:计数式 in-flight,同键两连改不闪回 ─────────────────
+// 同键快速连改两次 → 两个 PUT 并发在途;第一个 settle 后标签必须仍在
+// (Set 版会被误删,窗口内旧广播闪回第二次选择),第二个 settle 后才移除。
+const flight = createInFlightCounter();
+flight.acquire('modelPin:sid-9'); // 第一次改
+flight.acquire('modelPin:sid-9'); // 第二次改(第一个 PUT 尚未 settle)
+flight.release('modelPin:sid-9'); // 第一个 PUT settle
+assert.ok(flight.has('modelPin:sid-9'), '第二个在途 PUT 的保护标签不得被第一个 finally 摘掉');
+assert.deepEqual(flight.keys(), ['modelPin:sid-9']);
+flight.release('modelPin:sid-9'); // 第二个 PUT settle
+assert.ok(!flight.has('modelPin:sid-9'));
+assert.deepEqual(flight.keys(), []);
 
 console.log('check-session-sync: all assertions passed');

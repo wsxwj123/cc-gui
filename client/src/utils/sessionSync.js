@@ -34,3 +34,19 @@ export function pushLocalOnlyKeys(local, server) {
   const s = (server && typeof server === 'object') ? server : {};
   return Object.keys(l).filter((k) => syncableKey(k) && !(k in s));
 }
+
+// 审计批收尾#3:in-flight 计数器。Set 版的坑:同键快速连改两次(两个 PUT 并发在途),
+// 第一个 PUT 的 finally delete 会把第二个在途的保护标签一并摘掉 → 此窗口内到达的
+// 旧广播把用户刚点的第二次选择闪回。计数归零才真正移除标签。
+export function createInFlightCounter() {
+  const m = new Map(); // tag → 在途计数
+  return {
+    acquire(tag) { m.set(tag, (m.get(tag) || 0) + 1); },
+    release(tag) {
+      const n = (m.get(tag) || 0) - 1;
+      if (n > 0) m.set(tag, n); else m.delete(tag);
+    },
+    has(tag) { return m.has(tag); },
+    keys() { return [...m.keys()]; },
+  };
+}
