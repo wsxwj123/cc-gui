@@ -65,107 +65,43 @@ export function cancelRespond(id) {
   if (f) f.cancelled = true;
 }
 
-// permission:request 的完整处理:按会话模式 auto-allow/deny 分流,否则弹卡。
-// 抽成模块级函数:WS 实时分支与【断线重连后的 pending 补拉】共用同一套逻辑,
-// 避免 auto-allow 规则两处维护漂移。原 case 内 break 改为 return,行为不变。
+// permission:request 的完整处理:危险命令强制弹红卡,白名单(用户显式授权)放行,其余弹卡。
+// A1 裁决单点化:mode 相关的 auto-allow/deny(bypass/plan/acceptEdits/U5 切出 plan)已全部
+// 上收服务端 —— canUseTool 广播前按真值 slot.guiMode 裁决过,能到达这里的请求都是服务端
+// 认为"该问人"的;用户中途切档由 POST /chat/permission-mode 触发服务端对 pending 重裁。
+// 客户端不再读本地 mode 抢答(多端 localStorage 缓存过期 → 后台端 auto-deny 互抢的根因)。
+// 抽成模块级函数:WS 实时分支与【断线重连后的 pending 补拉】共用同一套逻辑。
 function handlePermissionRequest(req) {
   if (!req || !req.id) return;
-    // in-flight 守卫:该 id 正在提交/重试中(多为用户已点了 deny/allow,应答还
-    // 没送达)。对账重放到这里若再走 auto-allow 分支,会和用户的决定竞速双写。
-    if (inFlightResponds.has(req.id)) return;
-    // 诊断 Bug1(授权后工具仍不执行 / 不弹窗):打印每次收到的请求 + 命中分支。
-    // 服务端 hook 实测正常 POST,可疑点在客户端这一段。下次复现时打开
-    // 控制台过滤 [cgui-perm] 即可看出走的是哪条分支。
-    try {
-      if (import.meta.env?.DEV) console.log('[cgui-perm] WS request', {
-        id: req?.id, tool: req?.toolName, sid: req?.sessionId,
-        cwd: req?.cwd,
-      });
-    } catch {}
-    // Mid-stream permission-mode override: even though chat.js
-    // spawned the CLI with a fixed mode, the user can flip the
-    // dropdown mid-stream and we honor it client-side. Order:
-    //   1. bypassPermissions → auto-allow EVERYTHING immediately
-    //   2. acceptEdits + tool in read-class list → auto-allow
-    //   3. per-session "永远允许 X" whitelist → auto-allow
-    //   4. otherwise → render popup
-    // Use the mode of the SESSION THIS REQUEST belongs to — NOT the
-    // global/active mirror. Otherwise a request for session B gets
-    // auto-allowed because session A happens to be in bypass/accept
-    // (the "授权串号" bug). Falls back to 'default' (prompt) when the
-    // session has no stored mode.
-    const mode = useStore.getState().getPermissionModeFor(req.sessionId);
-    // U5:CLI 以 --permission-mode plan 固定 spawn,整个回合锁在规划模式;
-    // 用户中途切出 plan 后,旧实现仍渲染规划卡片 → "一直给我规划卡片"。
-    // 现在:已切出 plan 时收到 ExitPlanMode,直接 deny 收尾本回合,提示模型
-    // 结束规划(进程级模式无法中途改变,新模式从下一条消息开始生效)。
-    if (req.toolName === 'ExitPlanMode' && mode !== 'plan') {
-      if (import.meta.env?.DEV) console.log('[cgui-perm] auto-finish: ExitPlanMode while mode=' + mode, req.id);
-      respondPermission(req.id, {
-        decision: 'deny',
-        reason: '用户已切出规划模式（当前 ' + mode + '）。请勿继续规划或再次调用 ExitPlanMode，直接简要总结并结束本回合；用户将以新模式重新发起请求。',
-      });
-      return;
-    }
-    const READ_CLASS = ['Read', 'Glob', 'Grep', 'LS', 'TodoWrite', 'TaskCreate', 'TaskUpdate', 'TaskList', 'NotebookRead', 'Skill'];
-    const PLAN_WRITE_CLASS = ['Edit', 'MultiEdit', 'Write', 'NotebookEdit'];
-    // G3:危险命令(删除/网络装包/sudo)在 default / acceptEdits 下、或已"永远允许 Bash"
-    // 时,也强制弹窗确认 —— 跳过下面的自动放行分支。但【放任模式】例外:用户明确要求
-    // 放任就是无脑放行一切(含 rm/install),所以放任下不拦。
-    if (isDangerousCommand(req) && mode !== 'bypassPermissions') {
-      if (import.meta.env?.DEV) console.log('[cgui-perm] → force prompt (dangerous)', req.id, req.toolName);
-      useStore.getState().addPendingPermission(req);
-      return;
-    }
-    // 放任模式排除 AskUserQuestion:它必须弹 GUI picker 让用户选,
-    // 否则被 auto-allow → CLI headless 无法运行该工具 → AI 退化成正
-    // 文提问(用户报告的"放任下 ask 不弹窗")。与服务端 hook 的
-    // CGUI_BYPASS_ALL_EXCEPT_ASK 语义对齐。
-    if (mode === 'bypassPermissions' && req.toolName !== 'AskUserQuestion') {
-      if (import.meta.env?.DEV) console.log('[cgui-perm] auto-allow: bypass', req.id);
-      // 越界请求附带 session 级目录授权,否则 allow 后仍被 FS 沙箱层挡回。
-      respondPermission(req.id, { decision: 'allow', ...(req.blockedPath ? { authorizeDir: 'session' } : {}) });
-      return;
-    }
-    if (mode === 'plan' && PLAN_WRITE_CLASS.includes(req.toolName)) {
-      // 规划模式放行计划类文档(.md/.txt/.rst 或名含 plan/todo/计划),只拦源
-      // 代码文件(#4)。与服务端 permission-bridge 的 isPlanClassPath 对齐。
-      const ti = req.toolInput || {};
-      const fp = String(ti.file_path || ti.path || ti.notebook_path || '').toLowerCase();
-      const base = fp.split(/[\\/]/).pop() || '';
-      const planClass = /\.(md|markdown|txt|rst|mdx)$/.test(fp) || /(plan|todo|notes?|draft|计划|待办)/.test(base);
-      if (!planClass) {
-        if (import.meta.env?.DEV) console.log('[cgui-perm] deny: plan write', req.id, req.toolName);
-        respondPermission(req.id, {
-          decision: 'deny',
-          reason: '当前是规划模式：禁止修改源文件。可写计划类文档(.md/.txt 或名含 plan/todo)，或用 ExitPlanMode 提交计划供用户审批。',
-        });
-        return;
-      }
-      // 计划类文档 → 不在此拦截,继续往下(默认弹窗/或其他模式处理)
-    }
-    // 越界访问(blockedPath):读类/白名单自动放行一律不适用 → 强制弹越界卡
-    // (与服务端 makeCanUseTool 的 boundary 判定对齐,沙箱边界不静默扩权)。
-    if (mode === 'plan' && READ_CLASS.includes(req.toolName) && !req.blockedPath) {
-      if (import.meta.env?.DEV) console.log('[cgui-perm] auto-allow: plan+readClass', req.id, req.toolName);
-      respondPermission(req.id, { decision: 'allow' });
-      return;
-    }
-    if (mode === 'acceptEdits' && READ_CLASS.includes(req.toolName) && !req.blockedPath) {
-      if (import.meta.env?.DEV) console.log('[cgui-perm] auto-allow: acceptEdits+readClass', req.id, req.toolName);
-      respondPermission(req.id, { decision: 'allow' });
-      return;
-    }
-    // draft(sessionId=null)不吃白名单:共享遗留键 cgui-perm-wl-none 会把
-    // 任何 draft 的同名工具自动放行(串放行),对该键一律不生效。
-    const wl = req.sessionId ? JSON.parse(localStorage.getItem(`cgui-perm-wl-${req.sessionId}`) || '[]') : [];
-    if (wl.includes(req.toolName) && !req.blockedPath) {
-      if (import.meta.env?.DEV) console.log('[cgui-perm] auto-allow: whitelist', req.id, req.toolName);
-      respondPermission(req.id, { decision: 'allow' });
-      return;
-    }
-    if (import.meta.env?.DEV) console.log('[cgui-perm] → render popup (mode=' + mode + ')', req.id, req.toolName);
+  // in-flight 守卫:该 id 正在提交/重试中(多为用户已点了 deny/allow,应答还
+  // 没送达)。对账重放到这里若再走 auto-allow 分支,会和用户的决定竞速双写。
+  if (inFlightResponds.has(req.id)) return;
+  try {
+    if (import.meta.env?.DEV) console.log('[cgui-perm] WS request', {
+      id: req?.id, tool: req?.toolName, sid: req?.sessionId,
+      cwd: req?.cwd,
+    });
+  } catch {}
+  // G3:危险命令(删除/网络装包/sudo)强制弹红色警示卡,越过白名单。放任模式下
+  // 服务端已直接放行、根本不会广播到这里 —— 无需再按 mode 豁免。
+  if (isDangerousCommand(req)) {
+    if (import.meta.env?.DEV) console.log('[cgui-perm] → force prompt (dangerous)', req.id, req.toolName);
     useStore.getState().addPendingPermission(req);
+    return;
+  }
+  // 白名单("本会话永远允许 X")是用户显式授权,非 mode 分支,保留客户端放行。
+  // draft(sessionId=null)不吃白名单:共享遗留键 cgui-perm-wl-none 会把
+  // 任何 draft 的同名工具自动放行(串放行),对该键一律不生效。
+  // 越界访问(blockedPath)不吃白名单 → 强制弹越界卡(沙箱边界不静默扩权)。
+  let wl = [];
+  try { wl = req.sessionId ? JSON.parse(localStorage.getItem(`cgui-perm-wl-${req.sessionId}`) || '[]') : []; } catch {}
+  if (Array.isArray(wl) && wl.includes(req.toolName) && !req.blockedPath) {
+    if (import.meta.env?.DEV) console.log('[cgui-perm] auto-allow: whitelist', req.id, req.toolName);
+    respondPermission(req.id, { decision: 'allow' });
+    return;
+  }
+  if (import.meta.env?.DEV) console.log('[cgui-perm] → render popup', req.id, req.toolName);
+  useStore.getState().addPendingPermission(req);
 }
 
 // 以服务端 pending 表为唯一真相做【对账】:add 服务端有而本地没有的卡(修

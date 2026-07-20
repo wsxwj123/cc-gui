@@ -28,6 +28,37 @@ const putCustomTitle = (sessionId, title) => {
 // Valid `--permission-mode` values per `claude --help`.
 export const PERMISSION_MODES = ['default', 'acceptEdits', 'plan', 'bypassPermissions'];
 
+// A1:切档 POST 送达为止重试(仿 respondPermission:8s 短超时快失败,1s/2s/4s/8s 封顶
+// 递增间隔)。裁决单点化后这条 POST 是切档生效+服务端重裁 pending 的唯一通道,半死连接
+// 上 fire-and-forget 静默丢 = 切档不生效。防重复:每会话仅保留最新一次在途 —— 同会话
+// 快速连切档时新切档取消旧重试,保证"后发覆盖先发"、不会旧档迟到反超。服务端对合法
+// body 恒 200(无活跃进程也 ok/delivered:0),重试只在网络失败时发生,必然收敛。
+const modePostFlights = new Map(); // sessionId → { cancelled }
+async function postPermissionMode(sessionId, mode) {
+  const prev = modePostFlights.get(sessionId);
+  if (prev) prev.cancelled = true;
+  const flight = { cancelled: false };
+  modePostFlights.set(sessionId, flight);
+  try {
+    for (let attempt = 0; ; attempt++) {
+      if (flight.cancelled) return;
+      try {
+        const r = await fetch('/api/chat/permission-mode', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ sessionId, mode }),
+          signal: AbortSignal.timeout(8_000),
+        });
+        if (r.ok) return;
+        if (r.status === 400) return; // 参数非法不可能靠重试自愈
+      } catch { /* 半死连接/超时,落到重试 */ }
+      await new Promise((ok) => setTimeout(ok, Math.min(1_000 * 2 ** attempt, 8_000)));
+    }
+  } finally {
+    if (modePostFlights.get(sessionId) === flight) modePostFlights.delete(sessionId);
+  }
+}
+
 // ── Theme families ───────────────────────────────────────────────
 // Each family carries a light + dark variant. `id` is the data-cgui-theme
 // value (empty = default Apple-system palette driven purely by data-theme).
@@ -428,12 +459,10 @@ export const useStore = create((set, get) => ({
     // W3②:该会话有正在运行的 CLI 回合时,经 server 向其 stdin 发
     // set_permission_mode control 消息 —— 模式切换对【当前回合】立即生效
     // (plan 模式切出当场停止规划)。draft key 无运行进程,server 找不到即 no-op。
+    // A1 裁决单点化后,这条 POST 是"切档生效 + 服务端对 pending 重裁"的唯一通道,
+    // 不能再 fire-and-forget 静默丢 → 送达为止重试(postPermissionMode)。
     if (key && !String(key).startsWith('draft-')) {
-      fetch('/api/chat/permission-mode', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sessionId: key, mode }),
-      }).catch(() => {});
+      postPermissionMode(key, mode);
     }
   },
   // Resolve the effective mode for a session key. An explicit per-session pick

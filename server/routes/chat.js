@@ -6,7 +6,7 @@ import { readFileSync, statSync, writeFileSync, unlinkSync, readdirSync, watch, 
 import { homedir, tmpdir } from 'node:os';
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import { getDefaultModel } from '../services/model-resolver.js';
-import { dropPendingForSession, requestPermission } from './permissions.js';
+import { dropPendingForSession, requestPermission, resolvePendingForSession } from './permissions.js';
 import { buildAlwaysAllowUpdates, buildDirAuthUpdates } from '../utils/permission-rules.js';
 import { resolveClaude } from '../utils/claude-resolver.js';
 import { broadcast } from '../broadcast.js';
@@ -390,6 +390,48 @@ function mcpAutoApproved(toolName) {
   } catch { return false; }
 }
 
+// A1 裁决单点化:mode 相关的自动裁决唯一实现。canUseTool(新请求广播前)与
+// POST /chat/permission-mode 的切档重裁(resolvePendingForSession)共用这一个函数,
+// 杜绝两份判定漂移。客户端不再按本地 mode 抢答(多端 localStorage 缓存过期互抢的根因)。
+// 返回:{ decision:'allow', authorizeDir? } 自动放行 / { decision:'deny', reason } 自动拒绝 /
+// null = 需要用户决定(弹卡/留卡)。
+const EXIT_PLAN_DENY_REASON = '用户已切出规划模式。请勿继续规划或再次调用 ExitPlanMode，直接简要总结并结束本回合；用户将以新模式重新发起请求。';
+function autoDecide(mode, toolName, input, boundary) {
+  // 提问卡永远等人;计划确认卡只在 plan 档等人 —— 已切出 plan 直接 deny(U5 上收服务端)。
+  if (toolName === 'AskUserQuestion') return null;
+  if (toolName === 'ExitPlanMode') {
+    return mode === 'plan' ? null : { decision: 'deny', reason: EXIT_PLAN_DENY_REASON };
+  }
+  // plan = 只读规划:源文件写类直接拒绝;计划类文档(.md/.txt/plan/todo 等)弹卡由用户批准;
+  // Bash 一律弹卡(危险黑名单枚举不全);读类探索工具自动放行;MCP/越界落到下方处理。
+  if (mode === 'plan') {
+    if (WRITE_CLASS.has(toolName)) {
+      const fp = String(input?.file_path || input?.path || input?.notebook_path || '').toLowerCase();
+      const base = fp.split(/[\\/]/).pop() || '';
+      const planClass = /\.(md|markdown|txt|rst|mdx)$/.test(fp) || /(plan|todo|notes?|draft|计划|待办)/.test(base);
+      if (!planClass) {
+        return { decision: 'deny', reason: '规划模式禁止修改源文件。可写计划类文档(.md/.txt 或名含 plan/todo),或用 ExitPlanMode 提交计划等待用户批准,获批后再改源码。' };
+      }
+      return null;
+    }
+    if (toolName === 'Bash') return null;
+    if (!/^mcp__/.test(toolName) && !boundary) return { decision: 'allow' };
+    // MCP 工具可能有写副作用 / 越界不静默扩权 → 落到下方按 autoapprove/弹卡处理。
+  }
+  // 放任模式:一切放行(AskUserQuestion 上面已排除);越界附 session 级目录授权。
+  if (mode === 'bypassPermissions') {
+    return { decision: 'allow', ...(boundary ? { authorizeDir: 'session' } : {}) };
+  }
+  // 危险 Bash 强制弹卡,放在 acceptEdits 自动放行【之前】(bypass 除外,上面已放行)。
+  if (isDangerousBash(toolName, input)) return null;
+  // 接受编辑:读类 + 文件写入/编辑类自动放行;越界例外,一律弹越界卡。
+  if (mode === 'acceptEdits' && (READ_CLASS.has(toolName) || WRITE_CLASS.has(toolName)) && !boundary) {
+    return { decision: 'allow' };
+  }
+  if (mcpAutoApproved(toolName) && !boundary) return { decision: 'allow' };
+  return null;
+}
+
 function makeCanUseTool(slot) {
   // 第三参 opts(sdk.d.ts CanUseTool):blockedPath=触发本次请求的沙箱越界路径;
   // suggestions=CLI 生成的"始终允许"规则建议(整组返回即官方 always-allow 语义);
@@ -430,6 +472,10 @@ function makeCanUseTool(slot) {
       return { behavior: 'deny', message: r.reason || '用户取消了提问' };
     }
     if (toolName === 'ExitPlanMode') {
+      // U5 上收服务端:已切出 plan 收到 ExitPlanMode → 直接 deny,不再弹卡等人
+      // (原客户端按本地 mode 抢答的分支已删,这里是唯一裁决点)。
+      const preVerdict = autoDecide(slot.guiMode, toolName, input, boundary);
+      if (preVerdict) return { behavior: 'deny', message: preVerdict.reason };
       const r = await ask();
       if (r.decision === 'allow') {
         // 批准计划 → 切到执行档(写仍弹窗)。SDK 模式切换由前端额外 POST /chat/permission-mode
@@ -437,66 +483,34 @@ function makeCanUseTool(slot) {
         slot.guiMode = 'acceptEdits';
         return { behavior: 'allow', updatedInput: input };
       }
+      // 切档重裁(resolvePendingForSession)送来的 U5 deny:用户已切出规划,不能再附
+      // "修订后重新提交 ExitPlanMode"指引(自相矛盾),原样返回。
+      if (r.reason === EXIT_PLAN_DENY_REASON) return { behavior: 'deny', message: r.reason };
       // CQ-6:用户点"修改"= deny。强化回写文案,明确要求模型【修订后再次调用 ExitPlanMode
       // 重新提交计划】,不要直接开始执行——否则模型常把 deny 当"放行去做"而在规划模式下直接动手。
       const refineReason = r.reason || '用户要求修改计划';
       return { behavior: 'deny', message: `${refineReason}\n\n请根据以上反馈修订计划,然后再次调用 ExitPlanMode 重新提交修订后的计划等待用户确认。在计划获批前不要开始执行实际改动。` };
     }
+    // mode 相关自动裁决统一走 autoDecide(与切档重裁共用一份判定,详见其注释)。
     const mode = slot.guiMode;
-    // plan = 只读规划:源文件写类【直接拒绝】(不能靠弹卡放行——实测 canUseTool 返回
-    // allow 会覆盖 SDK plan 层,用户点"允许"就在规划模式下真写了源文件);但计划类文档
-    // (.md/.txt/plan/todo 等)是特性(#4:允许 AI 在规划期写 plan.md)→ 走弹卡由用户
-    // 批准。危险 Bash 也弹卡(黑名单枚举不全,plan 号称只读却静默跑任意 Bash=信任违背)。
-    // 读类探索工具自动放行。判定与客户端 useWebSocket 的 planClass 逐字对齐。
-    if (mode === 'plan') {
-      if (WRITE_CLASS.has(toolName)) {
-        const fp = String(input?.file_path || input?.path || input?.notebook_path || '').toLowerCase();
-        const base = fp.split(/[\\/]/).pop() || '';
-        const planClass = /\.(md|markdown|txt|rst|mdx)$/.test(fp) || /(plan|todo|notes?|draft|计划|待办)/.test(base);
-        if (!planClass) {
-          return { behavior: 'deny', message: '规划模式禁止修改源文件。可写计划类文档(.md/.txt 或名含 plan/todo),或用 ExitPlanMode 提交计划等待用户批准,获批后再改源码。' };
-        }
-        // 计划类文档 → 弹卡由用户决定(保留 #4 特性,不硬拒)。plan 下忽略 always
-        // (不写持久规则,规划期不留跨会话授权)。
-        const r = await ask();
-        if (r.decision === 'allow') return allowResult(r, { allowAlways: false });
-        return { behavior: 'deny', message: r.reason || '规划模式下该写入被拒绝' };
+    const verdict = autoDecide(mode, toolName, input, boundary);
+    if (verdict) {
+      if (verdict.decision === 'allow') {
+        return allowResult(verdict.authorizeDir ? { authorizeDir: verdict.authorizeDir } : {}, { allowAlways: false });
       }
-      // Bash 在 plan 下【一律弹卡】,不自动放行:危险命令黑名单枚举不全(`> file` 清空、
-      // `mv` 覆盖、`python -c "shutil.rmtree()"` 等都不在),plan 号称只读却静默跑任意
-      // Bash = 信任违背。读类探索工具(Read/Grep/Glob/LS)仍自动放行,不影响规划体验。
-      if (toolName === 'Bash') {
-        const r = await ask();
-        if (r.decision === 'allow') return allowResult(r, { allowAlways: false });
-        return { behavior: 'deny', message: r.reason || '规划模式下该命令被拒绝' };
-      }
-      // 越界访问(boundary)不随读类自动放行 → 落到下面弹越界卡。
-      if (!/^mcp__/.test(toolName) && !boundary) return { behavior: 'allow', updatedInput: input };
-      // MCP 工具可能有写副作用,plan 下不无条件放行,落到下面按 autoapprove/弹卡处理。
+      return { behavior: 'deny', message: verdict.reason };
     }
-    // 放任模式:一切放行;越界时附带 session 级目录授权,否则 allow 也会在 FS 层再被挡。
-    if (mode === 'bypassPermissions') {
-      return allowResult(boundary ? { authorizeDir: 'session' } : {}, { allowAlways: false });
-    }
-    // 危险 Bash 走弹卡,放在 acceptEdits 自动放行【之前】:确保未来若 acceptEdits 扩大到
-    // 放行 Bash,危险命令仍先弹卡。当前 default/acceptEdits 下 Bash 本就落到下面 ask(),
-    // 故此块目前对裁决是等效前置(不改变结果);真正的"永久授权/自动放行"裁决在客户端
-    // respond 侧,客户端 G3(useWebSocket)对危险命令强制弹卡,两端正则逐字一致。
-    if (isDangerousBash(toolName, input)) {
-      const r = await ask();
-      if (r.decision === 'allow') return allowResult(r, { allowAlways: false });
-      return { behavior: 'deny', message: r.reason || '用户拒绝执行该命令' };
-    }
-    // 接受编辑:只读类 + 文件写入/编辑类自动放行(名副其实=改文件不弹窗,对齐官方 acceptEdits);
-    // Bash/执行类与 MCP 仍走下面的弹窗。这才和"默认"拉开区别(默认下改文件也要弹窗)。
-    // 越界访问例外:沙箱边界外的路径不随档位静默扩权,一律弹越界卡。
-    if (mode === 'acceptEdits' && (READ_CLASS.has(toolName) || WRITE_CLASS.has(toolName)) && !boundary) {
-      return { behavior: 'allow', updatedInput: input };
-    }
-    if (mcpAutoApproved(toolName) && !boundary) return { behavior: 'allow', updatedInput: input };
+    // null = 弹卡等用户。plan 档的写类/Bash 与危险命令忽略 always(不写持久规则:
+    // 规划期不留跨会话授权;危险命令写下 allow 规则会让 CLI 规则层直接放行绕过 G3 强拦)。
+    const noAlways = isDangerousBash(toolName, input)
+      || (mode === 'plan' && (WRITE_CLASS.has(toolName) || toolName === 'Bash'));
     const r = await ask();
-    if (r.decision === 'allow') return allowResult(r);
-    return { behavior: 'deny', message: r.reason || '用户拒绝执行该工具' };
+    if (r.decision === 'allow') return allowResult(r, { allowAlways: !noAlways });
+    const fallbackReason = (mode === 'plan' && WRITE_CLASS.has(toolName)) ? '规划模式下该写入被拒绝'
+      : (mode === 'plan' && toolName === 'Bash') ? '规划模式下该命令被拒绝'
+        : isDangerousBash(toolName, input) ? '用户拒绝执行该命令'
+          : '用户拒绝执行该工具';
+    return { behavior: 'deny', message: r.reason || fallbackReason };
   };
 }
 
@@ -1102,6 +1116,12 @@ router.post('/chat/permission-mode', async (req, res) => {
       delivered++;
     } catch {}
   }
+  // A1 切档重裁:对该会话已 pending 的卡按【新档】重新自动裁决(判定与 canUseTool 共用
+  // autoDecide 同一份)。allow/deny 走既有 settle 幂等路径,null 的卡保持等待用户。
+  // 原客户端"切放任批量放行"effect 与各 mode 抢答分支的职责全部由这里接管。
+  try {
+    resolvePendingForSession(sessionId, (r) => autoDecide(mode, r.toolName, r.toolInput, r.blockedPath || null));
+  } catch {}
   res.json({ ok: true, delivered });
 });
 

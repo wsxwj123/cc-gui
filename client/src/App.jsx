@@ -19,7 +19,7 @@ const newDraftId = () => `d${Date.now()}-${++_draftSeq}`;
 // 的流式状态,外观上像「停一个把两个都停了」。改成模块级共享集合即可让停止全局可见。
 const stoppedChatPids = new Set();
 import { useStore, THEME_FAMILIES, FONT_OPTIONS, systemPrefersDark, PERMISSION_MODES } from './stores/sessionStore.js';
-import { useWebSocket, respondPermission } from './hooks/useWebSocket.js';
+import { useWebSocket } from './hooks/useWebSocket.js';
 import { MessageBubble } from './components/MessageBubble.jsx';
 import { MarkdownRenderer } from './components/MarkdownRenderer.jsx';
 import { TurnBubble } from './components/TurnBubble.jsx';
@@ -9069,24 +9069,9 @@ export default function App() {
       .catch(() => {});
   }, []);
 
-  // Mid-stream mode change → bulk-resolve waiting popups, but ONLY for the
-  // session that was switched to 放任. "切到放任后该会话待处理工具直接放行"。
-  // Must NOT touch other sessions' pending requests (that was the 授权串号 bug).
-  const permissionMode = useStore((s) => s.permissionModeBySession[permKey] || 'default');
-  useEffect(() => {
-    if (permissionMode !== 'bypassPermissions') return;
-    const sid = activeSession?.sessionId;
-    if (!sid) return;
-    const pending = useStore.getState().pendingPermissions;
-    // AskUserQuestion 例外:切到放任也要保留它的 picker,不能批量放行
-    // (放行=CLI headless 跑不了该工具=AI 退化文本提问)。
-    pending.filter((p) => p.sessionId === sid && p.toolName !== 'AskUserQuestion').forEach((p) => {
-      // 共享提交器重试到送达;送达才撤卡(原先"先撤卡再一次性 fetch"在半死连接下
-      // 应答丢了卡也没了,无从重试 → CLI 挂死)。false=同 id 已有在途提交,卡交它收敛。
-      respondPermission(p.id, { decision: 'allow' })
-        .then((ok) => { if (ok) useStore.getState().removePendingPermission(p.id); });
-    });
-  }, [permissionMode, activeSession?.sessionId]);
+  // A1 裁决单点化:原"切到放任批量放行本会话 pending"effect 已删 —— 切档的
+  // POST /chat/permission-mode 在服务端按新档对 pending 重裁(resolvePendingForSession),
+  // allow/deny/撤卡全由服务端 settle + resolved 广播完成,客户端不再抢答。
 
   // Rehydrate after refresh: if a session was persisted, reload its message
   // history + the project's session list. silent:true so we don't render the

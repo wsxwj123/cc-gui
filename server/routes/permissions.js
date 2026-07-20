@@ -152,6 +152,30 @@ router.get('/permissions/pending', (req, res) => {
  * requests for that session so the hook bridge times out cleanly instead of
  * hanging forever.
  */
+/**
+ * A1 切档重裁:用户中途切权限档位后,按新档对该会话已 pending 的请求重新自动裁决
+ * (chat.js POST /chat/permission-mode 调用,decide = autoDecide 按新档柯里化)。
+ * decide(request) 返回 { decision:'allow'|'deny', reason?, authorizeDir? } 或 null(留卡等人)。
+ * 非 null 走既有 pending.delete + settle + broadcast 路径 —— 与用户手答完全同构,天然幂等:
+ * 用户在途手答先到的话条目已不在表里,重裁不会二次 settle(先答先赢)。
+ */
+export function resolvePendingForSession(sessionId, decide) {
+  for (const [id, slot] of pending.entries()) {
+    if (slot.request.sessionId !== sessionId) continue;
+    let verdict = null;
+    try { verdict = decide(slot.request); } catch { verdict = null; }
+    if (!verdict || !verdict.decision) continue;
+    const decision = verdict.decision === 'allow' ? 'allow' : 'deny';
+    pending.delete(id);
+    settle(slot, {
+      decision,
+      reason: verdict.reason || null,
+      ...(verdict.authorizeDir ? { authorizeDir: verdict.authorizeDir } : {}),
+    });
+    broadcast({ type: 'permission:resolved', id, decision });
+  }
+}
+
 export function dropPendingForSession(sessionId) {
   for (const [id, slot] of pending.entries()) {
     if (slot.request.sessionId === sessionId) {
