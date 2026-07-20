@@ -73,7 +73,7 @@ export function PermissionModeSelector({ permKey, tourAnchor = false }) {
         <ChevronDown size={10} className="text-ink-faint" />
       </button>
       <AnchoredPopover anchorRef={wrapRef} open={open} onRequestClose={() => setOpen(false)} drop="up"
-        className="w-64 max-w-[calc(var(--app-w,100vw)-1.5rem)] py-1 max-h-[min(60vh,calc(100dvh-6rem))] overflow-y-auto">
+        className="w-64 max-w-[calc(var(--app-w,100vw)-1.5rem)] py-1 max-h-[min(60vh,calc(var(--app-h,100dvh)-6rem))] overflow-y-auto">
         <div className="px-3 py-1.5 text-[10px] text-ink-faint uppercase tracking-wider font-body">权限模式 (--permission-mode)</div>
         {visibleModes.map((m) => {
           const meta = MODE_META[m];
@@ -140,7 +140,7 @@ export function EffortSelector({ permKey = null, hideLabel = false, tourAnchor =
         <ChevronDown size={10} className="text-ink-faint" />
       </button>
       <AnchoredPopover anchorRef={wrapRef} open={open} onRequestClose={() => setOpen(false)} drop={drop}
-        className="w-44 max-w-[calc(var(--app-w,100vw)-1.5rem)] py-1 max-h-[min(60vh,calc(100dvh-6rem))] overflow-y-auto">
+        className="w-44 max-w-[calc(var(--app-w,100vw)-1.5rem)] py-1 max-h-[min(60vh,calc(var(--app-h,100dvh)-6rem))] overflow-y-auto">
           <div className="px-3 py-1.5 text-[10px] text-ink-faint uppercase tracking-wider font-body">
             {openAIProtocol ? '推理力度 (reasoning_effort)' : '推理力度 (--effort)'}
           </div>

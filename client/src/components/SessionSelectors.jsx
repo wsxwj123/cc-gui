@@ -72,14 +72,7 @@ export function AnchoredPopover({ anchorRef, open, onRequestClose, drop = 'down'
   if (!open) return null;
   return createPortal(
     <div ref={elRef}
-      style={{
-        position: 'fixed', left: pos ? pos.left : 0, top: pos ? pos.top : 0, zIndex: 9999,
-        visibility: pos ? 'visible' : 'hidden',
-        // 高度封顶用 --app-h(innerHeight÷zoom,两引擎皆正确)。调用方 class 里的
-        // dvh/vh 在 Chromium 系(dev/Windows WebView2)是布局px、×zoom 后会视觉超屏,
-        // 这里兜底保证弹层永远不高过视口(配合调用方 overflow-y-auto 滚动)。
-        maxHeight: 'calc(var(--app-h, 100dvh) - 16px)',
-      }}
+      style={{ position: 'fixed', left: pos ? pos.left : 0, top: pos ? pos.top : 0, zIndex: 9999, visibility: pos ? 'visible' : 'hidden' }}
       className={`glass-popover animate-glass-rise ${className}`}>
       {children}
     </div>,
@@ -267,7 +260,7 @@ export function ProviderSwitcher({ hideLabel = false, tourAnchor = false, respon
         <ChevronDown size={10} className="text-ink-faint" />
       </button>
       <AnchoredPopover anchorRef={wrapRef} open={open} onRequestClose={() => setOpen(false)} drop={drop}
-        className="w-72 max-w-[calc(var(--app-w,100vw)-1.5rem)] py-1 max-h-[min(60vh,calc(100dvh-6rem))] overflow-y-auto">
+        className="w-72 max-w-[calc(var(--app-w,100vw)-1.5rem)] py-1 max-h-[min(60vh,calc(var(--app-h,100dvh)-6rem))] overflow-y-auto">
         <div className="px-3 py-1.5 text-[10px] text-ink-faint uppercase tracking-wider font-body border-b border-canvas-deep">
           Provider · 当前 <b className="normal-case">{label}</b>
         </div>
@@ -409,7 +402,7 @@ export function ModelSelector({ compact = false, permKey = null, tourAnchor = fa
         <ChevronDown size={10} className="text-ink-faint" />
       </button>
       <AnchoredPopover anchorRef={wrapRef} open={open} onRequestClose={() => setOpen(false)} drop={drop}
-        className="w-80 max-w-[calc(var(--app-w,100vw)-1.5rem)] py-1 max-h-[min(60vh,calc(100dvh-6rem))] overflow-y-auto">
+        className="w-80 max-w-[calc(var(--app-w,100vw)-1.5rem)] py-1 max-h-[min(60vh,calc(var(--app-h,100dvh)-6rem))] overflow-y-auto">
           <div className="px-3 py-2 sticky top-0 bg-canvas border-b border-canvas-deep">
             <div className="text-[10px] text-ink-faint uppercase tracking-wider font-body flex items-center justify-between">
               <span>选择模型</span>
