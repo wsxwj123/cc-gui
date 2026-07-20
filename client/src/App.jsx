@@ -2936,13 +2936,13 @@ function PermissionModeHintBanner({ permKey }) {
       <Shield size={13} className="text-amber-600 shrink-0" />
       <span className="text-amber-800 flex-1 min-w-[12rem]">
         当前是<b>规划模式</b>:AI 会先生成执行计划,你审批后再动手。
-        纯问答(不调工具)不会弹窗;想直接干活可切"默认"或"接受编辑"。
+        纯问答(不调工具)不会弹窗;想直接干活可切"逐步确认"或"接受编辑"。
       </span>
       <button
         onClick={() => setPermissionMode('default', permKey)}
         className="px-2 py-0.5 rounded bg-amber-100 hover:bg-amber-200 text-amber-900 text-[10px] font-medium shrink-0"
         title="每次工具调用都弹窗征求你同意"
-      >切默认</button>
+      >切逐步确认</button>
       <button
         onClick={() => setPermissionMode('acceptEdits', permKey)}
         className="px-2 py-0.5 rounded bg-amber-100 hover:bg-amber-200 text-amber-900 text-[10px] font-medium shrink-0"
@@ -6486,11 +6486,15 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         </div>
       )}
 
+      {/* P2.5 横幅单条化(降级预案:三横幅保持独立组件,只做同帧单显仲裁)——
+          同一时刻最多渲染一条,优先级:超窗恢复(错误) > 切换通知(5s 自消) > 规划
+          模式提示(常驻可关)。低优先级横幅被压制期间条件仍在则待高优先级消失后自然
+          回显;providerSwitchNotice 的 5s 计时独立运行,压制期间到期即清(可接受)。 */}
       {/* Permission-mode hint banner — moved here from ChatInput so it sits
-          directly under the session title. With our PreToolUse permission
-          bridge, default mode now correctly pops a dialog per tool. Banner is
-          dismissible per-user (localStorage). */}
-      <PermissionModeHintBanner permKey={sessionQueueKey} />
+          directly under the session title. Banner is dismissible per-user. */}
+      {!(ctxOverflow && ctxOverflow.ownerKey === sessionQueueKey) && !providerSwitchNotice && (
+        <PermissionModeHintBanner permKey={sessionQueueKey} />
+      )}
 
       {/* git-init 提示只在「项目头部」(侧栏)渲染一处(见 GitInitBanner @ 项目面板),
           这里不再重复挂载——两处同时显示同一提示且状态不同步(忽略/init 后只更新
@@ -6499,7 +6503,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       {/* Provider-switch notice — fades after 5s. Tells the user we just
           stripped thinking blocks from on-disk jsonl so cc switch's new
           backend won't reject the resumed history. */}
-      {providerSwitchNotice && (
+      {!(ctxOverflow && ctxOverflow.ownerKey === sessionQueueKey) && providerSwitchNotice && (
         <div className="shrink-0 mx-6 mt-2 px-3 py-2 rounded-md bg-amber-50 border border-amber-200 flex items-start gap-2 animate-fade-up">
           <span className="text-amber-700 text-[12px] font-body leading-snug flex-1">
             🔄 {providerSwitchNotice.text}
