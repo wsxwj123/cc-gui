@@ -7371,6 +7371,16 @@ function MobileModelPage({ permKey }) {
             {fetching ? '拉取中…' : '拉取最新'}
           </button>
         </div>
+        {/* 修正批#5:自定义模型 ID 输入框移到页顶(与桌面弹层一致),列表长了不用滚着找。 */}
+        <div className="flex gap-2">
+          <input value={customInput} onChange={(e) => setCustomInput(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter') { const v = customInput.trim(); if (v) { addCustom(v); setCustomInput(''); } } }}
+            placeholder="自定义模型 ID…"
+            className="flex-1 bg-canvas-warm border border-canvas-deep rounded-lg px-3 py-2 text-[13px] font-mono text-ink focus:outline-none focus:border-accent" />
+          <button onClick={() => { const v = customInput.trim(); if (v) { addCustom(v); setCustomInput(''); } }}
+            disabled={!customInput.trim()}
+            className="px-3 py-2 text-[12px] bg-accent text-white rounded-lg disabled:bg-canvas-deep disabled:text-ink-ghost">应用</button>
+        </div>
         {fetchNote && <div className="text-[11px] text-ink-faint font-body">{fetchNote}</div>}
       </div>
       <button onClick={toggle1m}
@@ -7424,18 +7434,7 @@ function MobileModelPage({ permKey }) {
           </div>
         );
       })}
-      <div className="px-4 py-3 border-t border-canvas-deep/40 mt-1">
-        <div className="text-[11px] text-ink-faint mb-1.5 font-body">自定义模型 ID</div>
-        <div className="flex gap-2">
-          <input value={customInput} onChange={(e) => setCustomInput(e.target.value)}
-            onKeyDown={(e) => { if (e.key === 'Enter') { const v = customInput.trim(); if (v) { addCustom(v); setCustomInput(''); } } }}
-            placeholder="输入模型 ID…"
-            className="flex-1 bg-canvas-warm border border-canvas-deep rounded-lg px-3 py-2 text-[13px] font-mono text-ink focus:outline-none focus:border-accent" />
-          <button onClick={() => { const v = customInput.trim(); if (v) { addCustom(v); setCustomInput(''); } }}
-            disabled={!customInput.trim()}
-            className="px-3 py-2 text-[12px] bg-accent text-white rounded-lg disabled:bg-canvas-deep disabled:text-ink-ghost">应用</button>
-        </div>
-      </div>
+      {/* 修正批#5:原底部「自定义模型 ID」块已上移到页顶。 */}
     </div>
   );
 }
