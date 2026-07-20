@@ -851,7 +851,9 @@ function MainLayout({ sidebarCollapsed, selectedProject, rightPanel, setRightPan
         {!sidebarCollapsed && (
           <>
             <div className="fixed inset-0 z-40 bg-black/40 animate-fade-in" onClick={toggleSidebar} />
-            <aside className="mobile-drawer fixed inset-y-0 left-0 z-50 w-[86vw] max-w-[360px] glass-thick flex flex-col overflow-hidden animate-glass-rise">
+            {/* 审计批B3:几何(定位/宽高)统一由 .mobile-drawer CSS 负责(zoom 不变量+减 --kb),
+                删掉与之打架的 inset-y-0 / w-[86vw](vh/vw 不折算 zoom 的旧写法)。 */}
+            <aside className="mobile-drawer z-50 glass-thick flex flex-col overflow-hidden animate-glass-rise">
               <MobileMenu setRightPanel={setRightPanel} onClose={toggleSidebar} updateNotice={updateNotice} />
             </aside>
           </>
