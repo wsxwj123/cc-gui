@@ -773,7 +773,7 @@ function PanelDock({ rightPanel, setRightPanel, updateNotice, jumpToUpdate }) {
           {/* CJ-2 更新提醒(原顶栏常驻按钮收进 rail;坞图标红点常驻提示) */}
           {updateNotice && (
             <button
-              onClick={() => jumpToUpdate(updateNotice.gui ? 'gui-update' : 'cc-update')}
+              onClick={() => { setRailOpen(false); jumpToUpdate(updateNotice.gui ? 'gui-update' : 'cc-update'); }}
               title={`有可用更新${updateNotice.gui ? ` · GUI v${updateNotice.gui}` : ''}${updateNotice.cc ? ` · Claude Code v${updateNotice.cc}` : ''} — 点击前往更新`}
               className="flex items-center gap-1 px-1.5 py-1 rounded-lg text-red-500 hover:bg-red-500/10 transition-colors animate-pulse">
               <RefreshCw size={15} />
@@ -6869,6 +6869,7 @@ function ProviderManager() {
             customCount={customProviders.length}
             onCancel={() => setEditingProvider(null)}
             onSaved={() => { setEditingProvider(null); load(); }}
+            onDirtyChange={(d) => { window.__cguiProviderFormDirty = d; }}
           />
           {providers.filter((p) => showHidden || !hiddenProviders.has(p.id)).map((p) => (
             <div key={p.id} className={`px-3 py-1 ${isCur(p) ? 'bg-accent-subtle' : ''} ${hiddenProviders.has(p.id) ? 'opacity-50' : ''}`}>
@@ -8468,7 +8469,28 @@ export default function App() {
     return () => clearInterval(id);
   }, []);
   const { sidebarCollapsed, toggleSidebar, selectedProject, selectedSession } = useStore();
-  const [rightPanel, setRightPanel] = useState(null);
+  const [rightPanel, setRightPanelRaw] = useState(null);
+  // T5#1 Provider 表单脏数据守卫:CustomProviderForm(设置→Provider)有未保存输入时
+  // window.__cguiProviderFormDirty=true(表单 onDirtyChange 上报,卸载自动清)。任何
+  // "离开设置面板"的路径(点坞图标切面板/关面板/Cmd+数字)统一走本守卫 setter:
+  // 先 confirmDialog 确认丢弃,取消则不动。进设置/设置内切换不拦。
+  const rightPanelRef = useRef(null);
+  const setRightPanel = useCallback((next) => {
+    const cur = rightPanelRef.current;
+    const target = typeof next === 'function' ? next(cur) : next;
+    if (cur === 'settings' && target !== 'settings' && window.__cguiProviderFormDirty) {
+      confirmDialog('Provider 表单有未保存的输入，离开设置面板将丢弃。仍要离开？', { danger: true, confirmText: '丢弃并离开' })
+        .then((ok) => {
+          if (!ok) return;
+          window.__cguiProviderFormDirty = false;
+          rightPanelRef.current = target;
+          setRightPanelRaw(target);
+        });
+      return;
+    }
+    rightPanelRef.current = target;
+    setRightPanelRaw(target);
+  }, []);
   const [tourOpen, setTourOpen] = useState(false); // CK-3 使用指引浮层
   // Auth gate: external clients with a password set must log in first. Loopback
   // (Mac) always reports authed, so this is a no-op locally.
@@ -8660,6 +8682,7 @@ export default function App() {
     const panelIds = Object.keys(PANEL_MAP);
     const onKey = (e) => {
       if (!(e.metaKey || e.ctrlKey) || e.shiftKey || e.altKey) return;
+      if (e.repeat) return; // T5#2:长按连发只算一次,避免面板开关反复闪
       if (!/^[0-9]$/.test(e.key)) return;
       const id = e.key === '0' ? 'settings' : panelIds[Number(e.key) - 1];
       if (!id) return;
