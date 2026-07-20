@@ -9181,6 +9181,18 @@ export default function App() {
   // All hooks above; safe to short-circuit to the login gate here.
   if (authLocked) return <LoginScreen onSuccess={() => window.location.reload()} />;
 
+  // 审计批A3:版本不一致横幅抽成共享块 —— 手机经局域网访问同一前端,旧 bundle 告警
+  // 同样需要可见(原来只在桌面 return 里渲染,手机端旧前端会静默伪装成新版)。
+  const bundleMismatchBanner = bundleMismatch && (
+    <div className="fixed top-0 inset-x-0 z-[300] bg-red-600 text-white text-[12px] font-body px-4 py-2 flex items-center justify-center gap-3 flex-wrap shadow-lg">
+      <span>⚠️ 界面 v{bundleMismatch.bundle} 与服务端 v{bundleMismatch.server} 不一致。请依次尝试：① 完全退出 GUI 再打开（会自动换用新版服务并绕过缓存）② 仍出现则说明安装包内是旧前端，请重新下载安装</span>
+      <button
+        onClick={() => { sessionStorage.removeItem('cgui-ver-busted'); window.location.replace('/?r=' + bundleMismatch.server); }}
+        className="px-2 py-0.5 rounded bg-white text-red-600 font-medium hover:bg-white/90 transition-colors shrink-0">重试</button>
+      <button onClick={() => setBundleMismatch(null)} className="px-2 py-0.5 rounded bg-white/20 hover:bg-white/30 transition-colors shrink-0">知道了</button>
+    </div>
+  );
+
   if (isMobile) {
     // CSS zoom scales fixed-size UI too. Keep the mobile root's layout box
     // divided by the zoom factor so "超大" text does not push the app outside
@@ -9212,6 +9224,10 @@ export default function App() {
         {LocalWidget && <LocalWidget />}
         {/* 外接键盘按 Cmd+/ 也能开;不渲染的话状态会隐形置真并吞掉 Esc */}
         <ShortcutsPanel open={shortcutsOpen} onClose={() => setShortcutsOpen(false)} />
+        {/* 审计批A3/A4:版本告警横幅 + 非聚焦会话完成提醒,手机端同样渲染
+            (toast 点击跳转走 paneSessions[0],手机单窗格语义一致)。 */}
+        {bundleMismatchBanner}
+        <CompletionToasts />
         {!cliInstalled && !cliCheckDismissed && (
           <EnvCheckPanel onRecheck={checkCli} onDismiss={dismissCliCheck} />
         )}
@@ -9292,15 +9308,7 @@ export default function App() {
       <ShortcutsPanel open={shortcutsOpen} onClose={() => setShortcutsOpen(false)} />
       {/* 修正批#7:Provider 管理独立弹窗(桌面;手机走合并入口页内的导航流全屏页) */}
       <ProviderManagerModal open={providerMgrOpen} onClose={() => setProviderMgrOpen(false)} />
-      {bundleMismatch && (
-        <div className="fixed top-0 inset-x-0 z-[300] bg-red-600 text-white text-[12px] font-body px-4 py-2 flex items-center justify-center gap-3 shadow-lg">
-          <span>⚠️ 界面 v{bundleMismatch.bundle} 与服务端 v{bundleMismatch.server} 不一致。请依次尝试：① 完全退出 GUI 再打开（会自动换用新版服务并绕过缓存）② 仍出现则说明安装包内是旧前端，请重新下载安装</span>
-          <button
-            onClick={() => { sessionStorage.removeItem('cgui-ver-busted'); window.location.replace('/?r=' + bundleMismatch.server); }}
-            className="px-2 py-0.5 rounded bg-white text-red-600 font-medium hover:bg-white/90 transition-colors shrink-0">重试</button>
-          <button onClick={() => setBundleMismatch(null)} className="px-2 py-0.5 rounded bg-white/20 hover:bg-white/30 transition-colors shrink-0">知道了</button>
-        </div>
-      )}
+      {bundleMismatchBanner}
       <CompletionToasts />
       {/* F1: 截图热键状态提示(截图中/成功/失败)。取消不显示。 */}
       {shotStatus && (
