@@ -8007,6 +8007,8 @@ function MobileProviderPage({ permKey, onPicked, onManage }) {
   const [switching, setSwitching] = useState(false);
   const [activeId, setActiveId] = useState(null);
   const [expandedId, setExpandedId] = useState(null); // 默认全折叠;一次只展开一个
+  // 审计批C5:已隐藏的导入项手机页也过滤(桌面切换卡片/管理页早有此行为,手机漏了)。
+  const [hiddenProviders, setHiddenProviders] = useState(new Set());
   const load = () => {
     fetch('/api/providers').then((r) => r.json()).then((d) => {
       setProviders(Array.isArray(d.providers) ? d.providers : []);
@@ -8014,6 +8016,9 @@ function MobileProviderPage({ permKey, onPicked, onManage }) {
       setCustomProviders(Array.isArray(d.customProviders) ? d.customProviders : []);
       setOverrides(d.overrides && typeof d.overrides === 'object' ? d.overrides : {});
     }).catch(() => {});
+    fetch('/api/prefs/hidden-providers').then((r) => r.json())
+      .then((d) => setHiddenProviders(new Set(Array.isArray(d.hidden) ? d.hidden : [])))
+      .catch(() => {});
   };
   useEffect(load, []);
   const isCur = (p) => (activeId != null ? p.id === activeId : p.isCurrent);
@@ -8060,7 +8065,8 @@ function MobileProviderPage({ permKey, onPicked, onManage }) {
       {/* 修正批#6:单一列表(mergeProviderLists,与桌面同一数据选择器)——官方置顶、
           名称序、来源徽章。 */}
       {(() => {
-        const rows = mergeProviderLists({ providers, openaiProviders, customProviders });
+        const rows = mergeProviderLists({ providers, openaiProviders, customProviders })
+          .filter((p) => !hiddenProviders.has(p.id));
         return (<>
           <div className="px-4 pt-3 pb-1 border-t border-canvas-deep/40 mt-1">
             <div className="text-[11px] text-ink-faint uppercase tracking-wider font-body">全部 Provider · 点行展开模型,选模型即切换</div>
