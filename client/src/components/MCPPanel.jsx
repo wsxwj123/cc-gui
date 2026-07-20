@@ -660,7 +660,7 @@ export function MCPPanel() {
           fixed 遮罩(盖不满全屏),portal 后恒为真全屏遮罩;点外关闭逻辑不变。 */}
       {pluginAddOpen && createPortal(
         <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/40 backdrop-blur-sm animate-fade-in" onClick={() => setPluginAddOpen(false)}>
-          <div className="glass-popover w-[560px] max-w-[calc(var(--app-w,100vw)-1.5rem)] max-h-[90vh] flex flex-col overflow-hidden rounded-2xl shadow-2xl animate-glass-rise"
+          <div className="glass-popover w-[560px] max-w-[calc(var(--app-w,100vw)-1.5rem)] max-h-[min(90vh,calc(var(--app-h,100dvh)-2rem))] flex flex-col overflow-hidden rounded-2xl shadow-2xl animate-glass-rise"
             onClick={(e) => e.stopPropagation()}>
             {/* flex 列三段:animate-glass-rise 收尾留 transform,其内 sticky 头在 WKWebView 失效
                 (长列表滚动时头部含关闭按钮会跟着滚走)→ 头/尾 shrink-0 + 正文 flex-1 滚动。 */}

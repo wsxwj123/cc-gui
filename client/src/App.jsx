@@ -2466,7 +2466,7 @@ function SessionList() {
           onClick={() => setWorktreeOpen(false)}
         >
           <div
-            className="glass-popover w-[480px] max-w-[calc(var(--app-w,100vw)-1.5rem)] max-h-[80vh] flex flex-col py-1 animate-glass-rise"
+            className="glass-popover w-[480px] max-w-[calc(var(--app-w,100vw)-1.5rem)] max-h-[min(80vh,calc(var(--app-h,100dvh)-2rem))] flex flex-col py-1 animate-glass-rise"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="px-4 py-2.5 text-[11px] text-ink-faint uppercase tracking-wider font-body flex items-center justify-between border-b border-canvas-deep shrink-0">
@@ -8413,7 +8413,7 @@ function ShortcutsPanel({ open, onClose }) {
   if (!open) return null;
   return (
     <div className="fixed inset-0 z-[210] flex items-center justify-center bg-black/40 backdrop-blur-sm animate-fade-in" onClick={onClose}>
-      <div className="glass-popover w-[440px] max-w-[calc(var(--app-w,100vw)-1.5rem)] max-h-[80vh] rounded-2xl shadow-2xl animate-glass-rise overflow-hidden flex flex-col" onClick={(e) => e.stopPropagation()}>
+      <div className="glass-popover w-[440px] max-w-[calc(var(--app-w,100vw)-1.5rem)] max-h-[min(80vh,calc(var(--app-h,100dvh)-2rem))] rounded-2xl shadow-2xl animate-glass-rise overflow-hidden flex flex-col" onClick={(e) => e.stopPropagation()}>
         <div className="flex items-center justify-between px-5 py-3 border-b border-canvas-deep shrink-0">
           <div className="text-[14px] font-display font-semibold text-ink">键盘快捷键</div>
           <button onClick={onClose} className="p-1 rounded hover:bg-canvas-warm text-ink-faint hover:text-ink" title="关闭">
