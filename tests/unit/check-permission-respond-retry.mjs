@@ -1,0 +1,68 @@
+#!/usr/bin/env node
+// 权限应答共享提交器(respondPermission)自检:半死连接下"送达为止"的核心语义。
+//   ① 首次失败自动重试,连接恢复后送达 → true(不再报错推给用户手点);
+//   ② HTTP 2xx(含 alreadyResolved)即算送达;
+//   ③ 同 id 并发提交只跑一个,重入方立即 false 且不多发请求;
+//   ④ 有卡路径:持续失败中卡片被 resolved 广播/对账撤掉 → 视为他端已解决,停止重试;
+//   ⑤ 无卡路径(auto-allow/deny 分支从不入卡):不因"卡不存在"提前终止,重试到送达;
+//   ⑥ cancelRespond 明确取消 → false 停止。
+// 运行:node tests/unit/check-permission-respond-retry.mjs(真实重试间隔,约 10s)
+import assert from 'node:assert/strict';
+
+// 浏览器全局垫片(store/hook 模块加载所需)
+globalThis.localStorage = { getItem: () => null, setItem: () => {}, removeItem: () => {} };
+globalThis.window = globalThis;
+globalThis.document = { addEventListener() {}, removeEventListener() {} };
+
+const { respondPermission, cancelRespond } = await import('../../client/src/hooks/useWebSocket.js');
+const { useStore } = await import('../../client/src/stores/sessionStore.js');
+
+const calls = [];
+let fetchImpl = null;
+globalThis.fetch = (url, opts) => { calls.push({ url, opts }); return fetchImpl(url, opts); };
+const fail = () => Promise.reject(new TypeError('network dead'));
+const ok200 = () => Promise.resolve({ ok: true, json: async () => ({ ok: true }) });
+
+// ① 失败→重试→送达
+calls.length = 0;
+let n = 0;
+fetchImpl = () => (++n === 1 ? fail() : ok200());
+assert.equal(await respondPermission('id-1', { decision: 'allow' }), true, '①重试后送达应返回 true');
+assert.equal(calls.length, 2, '①应恰好发送 2 次(1 失败 + 1 成功)');
+assert.ok(calls[0].url.endsWith('/id-1'), '①URL 带请求 id');
+assert.equal(JSON.parse(calls[0].opts.body).decision, 'allow', '①body 原样透传');
+
+// ② alreadyResolved(2xx)算送达
+fetchImpl = () => Promise.resolve({ ok: true, json: async () => ({ ok: true, alreadyResolved: true }) });
+assert.equal(await respondPermission('id-2', { decision: 'deny' }), true, '②alreadyResolved 算送达');
+
+// ③ 并发重入:第二次立即 false,不多发请求
+calls.length = 0;
+let release;
+fetchImpl = () => new Promise((r) => { release = () => r({ ok: true, json: async () => ({ ok: true }) }); });
+const first = respondPermission('id-3', { decision: 'allow' });
+assert.equal(await respondPermission('id-3', { decision: 'deny' }), false, '③重入应立即 false');
+assert.equal(calls.length, 1, '③重入不应多发请求');
+release();
+assert.equal(await first, true, '③先行提交正常完成');
+
+// ④ 有卡 + 持续失败 + 卡片被撤 → 他端已解决,true 收敛
+useStore.getState().addPendingPermission({ id: 'id-4', toolName: 'Bash' });
+fetchImpl = fail;
+setTimeout(() => useStore.getState().removePendingPermission('id-4'), 1500);
+assert.equal(await respondPermission('id-4', { decision: 'allow' }), true, '④卡片被撤应停止重试并返回 true');
+
+// ⑤ 无卡(auto 分支):不因"卡不存在"提前终止 —— 失败两轮后恢复仍能送达
+calls.length = 0;
+n = 0;
+fetchImpl = () => (++n <= 2 ? fail() : ok200());
+assert.equal(await respondPermission('id-5', { decision: 'allow' }), true, '⑤无卡路径重试到送达');
+assert.equal(calls.length, 3, '⑤应发送 3 次(2 失败 + 1 成功),而非首轮后误判"已解决"');
+
+// ⑥ cancelRespond → false 停止
+fetchImpl = fail;
+setTimeout(() => cancelRespond('id-6'), 500);
+assert.equal(await respondPermission('id-6', { decision: 'deny' }), false, '⑥取消应返回 false');
+
+console.log('check-permission-respond-retry: all assertions passed');
+process.exit(0);
