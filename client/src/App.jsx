@@ -1239,6 +1239,19 @@ function ProjectList() {
         const parent = clean.replace(/\/[^/]+\/?$/, '') || '/';
         localStorage.setItem('cgui-picker-last-start', parent);
       } catch {}
+      // A6:服务端在导入时检测 git HEAD,无则提示(不阻断导入)。复用顶部悬浮
+      // 提醒条(CompletionToasts,10s 自动消失);sessionId 为 null 时点击仅关闭。
+      if (data.noGitHead) {
+        useStore.getState().pushCompletionToast({
+          sessionId: null,
+          projectHash: data.addedHash || null,
+          session: null,
+          title: '已添加项目',
+          suffix: '提示',
+          summary: '该文件夹不是 git 仓库或没有提交，worktree 与子代理隔离功能不可用。',
+          ts: Date.now(),
+        });
+      }
       setAddDialogOpen(false);
       setAddPathInput('');
     } catch (err) {

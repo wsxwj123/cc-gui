@@ -372,6 +372,7 @@ router.put('/settings', async (req, res) => {
 
     let addedHash = null;
     let addedPath = null;
+    let noGitHead = false;
     if (addPath) {
       const absPath = addPath === '~'
         ? homedir()
@@ -398,6 +399,14 @@ router.put('/settings', async (req, res) => {
       }
       addedPath = clean;
       addedHash = pathToHash(clean);
+      // A6:检测该文件夹是否有 git HEAD(非 git 仓库或空仓库均失败)。仅作标记随
+      // 响应返回,前端据此提示 worktree/子代理隔离功能不可用;不阻断导入。链路里
+      // 既有的 rev-parse 检测都在使用时(worktree/git/checkpoints),导入时无,这里补上。
+      try {
+        await execFileP('git', ['-C', clean, 'rev-parse', 'HEAD'], { timeout: 4000 });
+      } catch {
+        noGitHead = true;
+      }
       const projectDir = join(PROJECTS_DIR, addedHash);
       try {
         await mkdir(projectDir, { recursive: true });
@@ -453,7 +462,7 @@ router.put('/settings', async (req, res) => {
       }
     }
     await writeFile(SETTINGS_PATH, JSON.stringify(updated, null, 2) + '\n');
-    res.json({ ...updated, ...(addedHash ? { addedHash, addedPath } : {}) });
+    res.json({ ...updated, ...(addedHash ? { addedHash, addedPath, noGitHead } : {}) });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
