@@ -8216,7 +8216,16 @@ function MobileMenu({ setRightPanel, onClose, updateNotice = null }) {
   const [stack, setStack] = useState(['root']);
   const page = stack[stack.length - 1];
   const push = (p) => setStack((s) => [...s, p]);
-  const back = () => setStack((s) => (s.length > 1 ? s.slice(0, -1) : s));
+  // 审计批判官3:管理页返回补脏表单守卫 —— 桌面弹窗 Esc/点外有 confirmDialog,
+  // 手机导航流的「返回」原来直接丢弃未保存输入。与 ProviderManagerModal 同语义。
+  const back = async () => {
+    if (page === 'providermanage' && window.__cguiProviderFormDirty) {
+      const ok = await confirmDialog('Provider 表单有未保存的输入，返回将丢弃。仍要返回？', { danger: true, confirmText: '丢弃并返回' });
+      if (!ok) return;
+      window.__cguiProviderFormDirty = false;
+    }
+    setStack((s) => (s.length > 1 ? s.slice(0, -1) : s));
+  };
 
   const activeTabIndex = useStore((s) => s.activeTabIndex);
   const paneSessions = useStore((s) => s.paneSessions);
