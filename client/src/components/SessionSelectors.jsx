@@ -410,9 +410,13 @@ export function ModelSelector({ compact = false, permKey = null, tourAnchor = fa
         )}
         <ChevronDown size={10} className="text-ink-faint" />
       </button>
+      {/* 审计批挂账:sticky 头改壳层 flex 列三段 —— AnchoredPopover 带 animate-glass-rise
+          (fill:both 收尾残留 transform),WKWebView/WebView2 里 transform 滚动容器内的
+          sticky top-0 失效(长列表滚动时搜索/自定义输入随内容滚走)。头 shrink-0 固定,
+          列表段独立滚动。 */}
       <AnchoredPopover anchorRef={wrapRef} open={open} onRequestClose={() => setOpen(false)} drop={drop}
-        className="w-80 max-w-[calc(var(--app-w,100vw)-1.5rem)] py-1 max-h-[min(60vh,calc(var(--app-h,100dvh)-6rem))] overflow-y-auto">
-          <div className="px-3 py-2 sticky top-0 bg-canvas border-b border-canvas-deep">
+        className="w-80 max-w-[calc(var(--app-w,100vw)-1.5rem)] py-1 max-h-[min(60vh,calc(var(--app-h,100dvh)-6rem))] flex flex-col overflow-hidden">
+          <div className="px-3 py-2 shrink-0 bg-canvas border-b border-canvas-deep">
             <div className="text-[10px] text-ink-faint uppercase tracking-wider font-body flex items-center justify-between">
               <span>选择模型</span>
               {provider && provider !== 'Anthropic' && <span className="text-ink-ghost normal-case">{provider}</span>}
@@ -446,6 +450,7 @@ export function ModelSelector({ compact = false, permKey = null, tourAnchor = fa
             </div>
             {fetchNote && <div className="text-[10px] text-ink-faint font-body mt-1">{fetchNote}</div>}
           </div>
+          <div className="flex-1 min-h-0 overflow-y-auto">
           {/* 1M context toggle — appends [1m] to the active model id.
               Claude Code 通用约定:Anthropic / MiMo 等兼容 provider 都用 [1m] 启用 1M。 */}
           <button onClick={toggle1m}
@@ -520,7 +525,8 @@ export function ModelSelector({ compact = false, permKey = null, tourAnchor = fa
               {(currentModel === m.id || currentModel === `${m.id}[1m]`) && <Check size={12} className="text-accent shrink-0" />}
             </button>
           ))}
-          {/* 修正批#5:原底部「自定义模型 ID」块已上移到 sticky 头(用户在长列表下找不到)。 */}
+          {/* 修正批#5:原底部「自定义模型 ID」块已上移到固定头(用户在长列表下找不到)。 */}
+          </div>
       </AnchoredPopover>
     </div>
   );
