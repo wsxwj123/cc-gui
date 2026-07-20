@@ -30,29 +30,41 @@ export const PERMISSION_MODES = ['default', 'acceptEdits', 'plan', 'bypassPermis
 
 // A1:切档 POST 送达为止重试(仿 respondPermission:8s 短超时快失败,1s/2s/4s/8s 封顶
 // 递增间隔)。裁决单点化后这条 POST 是切档生效+服务端重裁 pending 的唯一通道,半死连接
-// 上 fire-and-forget 静默丢 = 切档不生效。防重复:每会话仅保留最新一次在途 —— 同会话
-// 快速连切档时新切档取消旧重试,保证"后发覆盖先发"、不会旧档迟到反超。服务端对合法
-// body 恒 200(无活跃进程也 ok/delivered:0),重试只在网络失败时发生,必然收敛。
-const modePostFlights = new Map(); // sessionId → { cancelled }
+// 上 fire-and-forget 静默丢 = 切档不生效。
+// 防乱序:每会话【串行化】—— 同会话永远只有一条在途请求;在途未 settle 时连切档只更新
+// latestMode,在途 settle 后发现目标档已变再补发一次最新档。(cancelled 标志方案召不回
+// 已发出的 fetch:快速连切 bypass→default 时旧 bypass 请求可在半死连接上迟到反超,
+// slot.guiMode 错成 bypass、pending 被按 bypass 重裁全放行。串行化让新档必然在旧档
+// settle 之后才发出,服务端按到达序处理即最终一致。)服务端对合法 body 恒 200(无活跃
+// 进程也 ok/delivered:0),重试只在网络失败时发生,必然收敛。
+// ponytail: 客户端 8s abort 后请求仍可能被服务端迟处理,残余乱序窗口极窄;真踩到再上服务端单调 seq。
+const modePostFlights = new Map(); // sessionId → { latestMode }
 async function postPermissionMode(sessionId, mode) {
-  const prev = modePostFlights.get(sessionId);
-  if (prev) prev.cancelled = true;
-  const flight = { cancelled: false };
+  const inflight = modePostFlights.get(sessionId);
+  if (inflight) { inflight.latestMode = mode; return; } // 在途循环 settle 后补发最新档
+  const flight = { latestMode: mode };
   modePostFlights.set(sessionId, flight);
   try {
-    for (let attempt = 0; ; attempt++) {
-      if (flight.cancelled) return;
+    let attempt = 0;
+    for (;;) {
+      const target = flight.latestMode;
+      let delivered = false;
       try {
         const r = await fetch('/api/chat/permission-mode', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ sessionId, mode }),
+          body: JSON.stringify({ sessionId, mode: target }),
           signal: AbortSignal.timeout(8_000),
         });
-        if (r.ok) return;
-        if (r.status === 400) return; // 参数非法不可能靠重试自愈
+        delivered = r.ok || r.status === 400; // 400=参数非法,重试无法自愈,视为终态
       } catch { /* 半死连接/超时,落到重试 */ }
+      if (delivered) {
+        if (flight.latestMode === target) return; // 送达且期间没再切档 → 收敛
+        attempt = 0; // 期间又切了档:立即补发最新档,不背旧退避
+        continue;
+      }
       await new Promise((ok) => setTimeout(ok, Math.min(1_000 * 2 ** attempt, 8_000)));
+      attempt++;
     }
   } finally {
     if (modePostFlights.get(sessionId) === flight) modePostFlights.delete(sessionId);

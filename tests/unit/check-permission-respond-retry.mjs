@@ -99,5 +99,29 @@ assert.ok(useStore.getState().pendingPermissions.some((p) => p.id === 'id-9'), '
 assert.ok(useStore.getState().pendingPermissions.find((p) => p.id === 'id-9').receivedAt > 0, '⑧入列自动打 receivedAt 戳');
 useStore.getState().removePendingPermission('id-9');
 
+// ⑨ A1 切档 POST 串行化:同会话在途未 settle 时连切两档 → 不并发发送;在途 settle
+//    后只补发一次且是【最新档】(cancelled 方案召不回已发出的 fetch,旧档可迟到反超;
+//    串行化保证新档必然在旧档 settle 后才发出)。经 store.setPermissionMode 触发真实链路。
+{
+  calls.length = 0;
+  const pendingReleases = [];
+  fetchImpl = () => new Promise((r) => { pendingReleases.push(() => r({ ok: true, json: async () => ({ ok: true }) })); });
+  const modeCalls = () => calls.filter((c) => String(c.url).includes('/chat/permission-mode'));
+  useStore.getState().setPermissionMode('bypassPermissions', 'sid-9');
+  await new Promise((r) => setTimeout(r, 20)); // 首个 POST 发出并悬挂
+  assert.equal(modeCalls().length, 1, '⑨首个切档发出一条在途');
+  useStore.getState().setPermissionMode('acceptEdits', 'sid-9');
+  useStore.getState().setPermissionMode('default', 'sid-9');
+  await new Promise((r) => setTimeout(r, 20));
+  assert.equal(modeCalls().length, 1, '⑨在途未 settle 时连切档不并发发送');
+  pendingReleases.shift()(); // settle 首个(bypass)
+  await new Promise((r) => setTimeout(r, 20));
+  assert.equal(modeCalls().length, 2, '⑨settle 后恰好补发一次');
+  assert.equal(JSON.parse(modeCalls()[1].opts.body).mode, 'default', '⑨补发的是最新档(中间档被合并跳过)');
+  pendingReleases.shift()(); // settle 补发
+  await new Promise((r) => setTimeout(r, 20));
+  assert.equal(modeCalls().length, 2, '⑨目标未再变,循环收敛不再发送');
+}
+
 console.log('check-permission-respond-retry: all assertions passed');
 process.exit(0);

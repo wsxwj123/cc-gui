@@ -878,7 +878,7 @@ router.post('/chat', async (req, res) => {
         acwTmpFile = pathJoin(tmpdir(), `cgui-acw-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.json`);
         writeFileSync(acwTmpFile, JSON.stringify({ autoCompactWindow: acw }), 'utf8');
         options.extraArgs = { ...(options.extraArgs || {}), settings: acwTmpFile };
-        // (判官抓:此处不能调 trace —— 它声明在下方,TDZ 抛错会被本 catch 吞掉并把
+        // (此块内别调用声明在下方的辅助 —— TDZ 抛错会被本 catch 吞掉并把
         // acwTmpFile 置 null → finally 清理失效、每次联动冷启泄漏一个临时文件。)
       } catch { acwTmpFile = null; }
     }
