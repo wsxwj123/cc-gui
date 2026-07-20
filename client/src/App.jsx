@@ -31,7 +31,8 @@ import ChatSearch from './components/ChatSearch.jsx';
 import { confirmDialog } from './utils/confirmDialog.jsx';
 import { ChatInput, EffortSelector, EFFORT_LEVELS, markAutoUnavailable } from './components/ChatInput.jsx';
 import { ModelBadge, ProviderAvatar } from './components/ModelBadge.jsx';
-import { RemoteControlButton, ProviderSwitcher, ModelSelector } from './components/SessionSelectors.jsx';
+import { RemoteControlButton, ProviderSwitcher, ModelSelector, ProviderSourceBadge } from './components/SessionSelectors.jsx';
+import { mergeProviderLists } from './utils/providerList.js';
 import { UsagePanel } from './components/UsagePanel.jsx';
 import { ProcessPanel } from './components/ProcessPanel.jsx';
 import { SettingsPanel, ChatBackgroundCard } from './components/SettingsPanel.jsx';
@@ -6891,83 +6892,66 @@ function ProviderManager() {
             onSaved={() => { setEditingProvider(null); load(); }}
             onDirtyChange={(d) => { window.__cguiProviderFormDirty = d; }}
           />
-          {providers.filter((p) => showHidden || !hiddenProviders.has(p.id)).map((p) => (
-            <div key={p.id} className={`px-3 py-1 ${isCur(p) ? 'bg-accent-subtle' : ''} ${hiddenProviders.has(p.id) ? 'opacity-50' : ''}`}>
-              <div className="flex items-center gap-0.5 -mx-3 pr-2 pl-3 hover:bg-canvas-warm transition-colors">
-                <button disabled={switching} onClick={() => switchTo(p.id)}
-                  className={`flex-1 min-w-0 text-left py-1 flex items-center gap-2 ${switching ? 'opacity-50' : ''}`}>
-                  <span className={`flex-1 text-xs font-body truncate ${isCur(p) ? 'text-accent font-medium' : 'text-ink'}`}>{p.name}</span>
-                  {isCur(p) && <Check size={12} className="text-accent shrink-0" />}
-                </button>
-                <button onClick={() => toggleHideProvider(p.id)} title={hiddenProviders.has(p.id) ? '取消隐藏' : '从列表隐藏'} className="p-1 text-ink-faint hover:text-ink-muted shrink-0">
-                  {hiddenProviders.has(p.id) ? <ArchiveRestore size={12} /> : <EyeOff size={12} />}
-                </button>
+          {/* 修正批#6:单一列表(mergeProviderLists,与顶栏切换卡片同一数据选择器)——
+              官方置顶、其余按名称序;来源(导入/自定义/代理)降为行内小徽章,不再分组。
+              行内操作按来源:cc-switch/openai 导入项=隐藏;自定义=编辑/删除(+批量)。 */}
+          {(() => {
+            const rows = mergeProviderLists({ providers, openaiProviders, customProviders })
+              .filter((p) => p.source === 'custom' || showHidden || !hiddenProviders.has(p.id));
+            const hasCustom = customProviders.length > 0;
+            return (<>
+              <div className="px-3 pt-2 pb-1 border-t border-canvas-deep flex items-center gap-1">
+                <div className="text-[10px] text-ink-faint uppercase tracking-wider font-body flex-1">
+                  全部 Provider <span className="text-ink-ghost normal-case tracking-normal">· 点击即切换</span>
+                </div>
+                {hasCustom && <SelModeToggle selMode={ms.selMode} onToggle={() => (ms.selMode ? ms.exit() : ms.enter())} size={12} />}
               </div>
-              {p.category !== 'official' && <ProviderOverrideEditor provider={p} override={overrides[p.id]} onSaved={load} />}
-            </div>
-          ))}
-          {openaiProviders.length > 0 && (
-            <div className="px-3 pt-2 pb-1 mt-1 border-t border-canvas-deep">
-              <div className="text-[10px] text-ink-faint uppercase tracking-wider font-body flex items-center gap-1">
-                OpenAI 格式 <span className="text-ink-ghost normal-case tracking-normal">· 经内置代理</span>
-              </div>
-            </div>
-          )}
-          {openaiProviders.filter((p) => showHidden || !hiddenProviders.has(p.id)).map((p) => (
-            <div key={p.id} className={`px-3 py-2 ${isCur(p) ? 'bg-accent-subtle' : ''} ${hiddenProviders.has(p.id) ? 'opacity-50' : ''}`}>
-              <div className="flex items-center gap-2">
-                {/* Click the provider to switch to it (default model). The full
-                    model list lives in the ModelSelector after switching. */}
-                <button disabled={switching} onClick={() => switchTo(p.id)}
-                  className={`flex-1 min-w-0 text-left flex items-center gap-2 ${switching ? 'opacity-50' : ''}`}>
-                  <span className={`flex-1 text-xs font-body truncate ${isCur(p) ? 'text-accent font-medium' : 'text-ink'}`}>{p.name}</span>
-                  {p.models.length > 0 && <span className="text-[9px] px-1 py-px bg-canvas-deep text-ink-faint rounded font-mono shrink-0">{p.models.length} 模型</span>}
-                  {isCur(p) && <Check size={12} className="text-accent shrink-0" />}
-                </button>
-                <button onClick={() => toggleHideProvider(p.id)} title={hiddenProviders.has(p.id) ? '取消隐藏' : '从列表隐藏'} className="p-0.5 text-ink-faint hover:text-ink-muted shrink-0">
-                  {hiddenProviders.has(p.id) ? <ArchiveRestore size={12} /> : <EyeOff size={12} />}
-                </button>
-              </div>
-              <OpenAIModelManager provider={p} onSaved={load} />
-              <ProviderOverrideEditor provider={p} override={overrides[p.id]} onSaved={load} />
-            </div>
-          ))}
-          {customProviders.length > 0 && (
-            <div className="px-3 pt-2 pb-1 mt-1 border-t border-canvas-deep flex items-center gap-1">
-              <div className="text-[10px] text-ink-faint uppercase tracking-wider font-body flex-1">自定义</div>
-              <SelModeToggle selMode={ms.selMode} onToggle={() => (ms.selMode ? ms.exit() : ms.enter())} size={12} />
-            </div>
-          )}
-          {ms.selMode && customProviders.length > 0 && (
-            <BatchBar count={ms.count} busy={ms.busy} noun="个 Provider" onExit={ms.exit}
-              onDelete={async () => {
-                const res = await ms.runDelete(
-                  (id) => fetch(`/api/custom-providers/${id}`, { method: 'DELETE' }).then((r) => { if (!r.ok) throw new Error('删除失败'); }),
-                  { noun: '个 Provider', nameOf: (id) => customProviders.find((p) => p.id === id)?.name || id });
-                if (res) load();
-              }} />
-          )}
-          {customProviders.map((p) => (
-            <div key={p.id} className={`px-3 py-2 ${isCur(p) ? 'bg-accent-subtle' : ''}`}>
-              <div className="flex items-center gap-2">
-                {ms.selMode && <SelCheckbox checked={ms.selected.has(p.id)} onClick={() => ms.toggle(p.id)} size={13} />}
-                {/* Click to switch (default model). The full model list lives in
-                    the ModelSelector after switching — NOT nested under the
-                    provider row. */}
-                <button disabled={switching} onClick={() => (ms.selMode ? ms.toggle(p.id) : switchTo(p.id))}
-                  className={`flex-1 min-w-0 text-left flex items-center gap-2 ${switching ? 'opacity-50' : ''}`}>
-                  <span className={`flex-1 text-xs font-body truncate ${isCur(p) ? 'text-accent font-medium' : 'text-ink'}`}>{p.name}</span>
-                  {p.models.length > 0 && <span className="text-[9px] px-1 py-px bg-canvas-deep text-ink-faint rounded font-mono shrink-0">{p.models.length} 模型</span>}
-                  <span className="text-[9px] px-1 py-px bg-canvas-deep text-ink-faint rounded font-mono shrink-0">{p.type}</span>
-                  {isCur(p) && <Check size={12} className="text-accent shrink-0" />}
-                </button>
-                {!ms.selMode && (<>
-                <button onClick={() => setEditingProvider(p)} title="编辑" className="p-0.5 text-ink-faint hover:text-accent shrink-0"><Pencil size={12} /></button>
-                <button onClick={() => removeCustom(p.id, p.name)} title="删除" className="p-0.5 text-ink-faint hover:text-error shrink-0"><Trash2 size={12} /></button>
-                </>)}
-              </div>
-            </div>
-          ))}
+              {ms.selMode && hasCustom && (
+                <BatchBar count={ms.count} busy={ms.busy} noun="个 Provider" onExit={ms.exit}
+                  onDelete={async () => {
+                    const res = await ms.runDelete(
+                      (id) => fetch(`/api/custom-providers/${id}`, { method: 'DELETE' }).then((r) => { if (!r.ok) throw new Error('删除失败'); }),
+                      { noun: '个 Provider', nameOf: (id) => customProviders.find((p) => p.id === id)?.name || id });
+                    if (res) load();
+                  }} />
+              )}
+              {rows.map((p) => (
+                <div key={p.id} className={`px-3 py-1.5 ${isCur(p) ? 'bg-accent-subtle' : ''} ${hiddenProviders.has(p.id) ? 'opacity-50' : ''}`}>
+                  <div className="flex items-center gap-1.5 group/prov">
+                    {ms.selMode && p.source === 'custom' && (
+                      <SelCheckbox checked={ms.selected.has(p.id)} onClick={() => ms.toggle(p.id)} size={13} />
+                    )}
+                    {/* Click to switch (default model). The full model list lives in
+                        the ModelSelector after switching. */}
+                    <button disabled={switching}
+                      onClick={() => (ms.selMode && p.source === 'custom' ? ms.toggle(p.id) : switchTo(p.id))}
+                      className={`flex-1 min-w-0 text-left flex items-center gap-2 ${switching ? 'opacity-50' : ''}`}>
+                      <span className={`flex-1 text-xs font-body truncate ${isCur(p) ? 'text-accent font-medium' : 'text-ink'}`}>{p.name}</span>
+                      {p.models?.length > 0 && <span className="text-[9px] px-1 py-px bg-canvas-deep text-ink-faint rounded font-mono shrink-0">{p.models.length} 模型</span>}
+                      {p.source === 'custom' && p.type && <span className="text-[9px] px-1 py-px bg-canvas-deep text-ink-faint rounded font-mono shrink-0">{p.type}</span>}
+                      <ProviderSourceBadge p={p} />
+                      {isCur(p) && <Check size={12} className="text-accent shrink-0" />}
+                    </button>
+                    {/* 行内操作:hover 显现,减少常驻按钮噪音。 */}
+                    {!ms.selMode && p.source === 'custom' && (<span className="flex items-center gap-0.5 opacity-0 group-hover/prov:opacity-100 group-focus-within/prov:opacity-100 max-md:opacity-100 transition-opacity shrink-0">
+                      <button onClick={() => setEditingProvider(p)} title="编辑" className="p-0.5 text-ink-faint hover:text-accent"><Pencil size={12} /></button>
+                      <button onClick={() => removeCustom(p.id, p.name)} title="删除" className="p-0.5 text-ink-faint hover:text-error"><Trash2 size={12} /></button>
+                    </span>)}
+                    {(p.source === 'ccswitch' || p.source === 'openai') && (
+                      <button onClick={() => toggleHideProvider(p.id)} title={hiddenProviders.has(p.id) ? '取消隐藏' : '从列表隐藏'}
+                        className="p-0.5 text-ink-faint hover:text-ink-muted shrink-0 opacity-0 group-hover/prov:opacity-100 group-focus-within/prov:opacity-100 max-md:opacity-100 transition-opacity">
+                        {hiddenProviders.has(p.id) ? <ArchiveRestore size={12} /> : <EyeOff size={12} />}
+                      </button>
+                    )}
+                  </div>
+                  {p.source === 'openai' && <OpenAIModelManager provider={p} onSaved={load} />}
+                  {(p.source === 'ccswitch' || p.source === 'openai') && (
+                    <ProviderOverrideEditor provider={p} override={overrides[p.id]} onSaved={load} />
+                  )}
+                </div>
+              ))}
+            </>);
+          })()}
           {(() => {
             const hc = [...providers, ...openaiProviders].filter((p) => hiddenProviders.has(p.id)).length;
             return hc > 0 ? (
@@ -8006,69 +7990,75 @@ function MobileProviderPage() {
         onCancel={() => setEditingProvider(null)}
         onSaved={() => { setEditingProvider(null); load(); }}
       />
-      {providers.map((p) => (
-        <div key={p.id} className={`${isCur(p) ? 'bg-accent-subtle' : ''}`}>
-          <div className="w-full flex items-center gap-1 pr-3 hover:bg-canvas-warm transition-colors">
-            <button disabled={switching} onClick={() => switchTo(p.id)}
-              className={`flex-1 min-w-0 flex items-center gap-3 px-4 py-3 text-left ${switching ? 'opacity-50' : ''}`}>
-              <span className={`flex-1 text-[14px] font-body truncate ${isCur(p) ? 'text-accent font-medium' : 'text-ink'}`}>{p.name}</span>
-              {isCur(p) && <Check size={16} className="text-accent shrink-0" />}
-            </button>
+      {/* 修正批#6:单一列表(mergeProviderLists,与桌面同一数据选择器)——官方置顶、
+          名称序、来源徽章;每种来源保留自己的行模板(导入行=点行切换,openai/自定义
+          行=模型 chips 直切)。 */}
+      {(() => {
+        const rows = mergeProviderLists({ providers, openaiProviders, customProviders });
+        const hasCustom = customProviders.length > 0;
+        return (<>
+          <div className="px-4 pt-3 pb-1 flex items-center gap-1 border-t border-canvas-deep/40 mt-1">
+            <div className="text-[11px] text-ink-faint uppercase tracking-wider font-body flex-1">全部 Provider · 点击即切换</div>
+            {hasCustom && <SelModeToggle selMode={ms.selMode} onToggle={() => (ms.selMode ? ms.exit() : ms.enter())} size={14} />}
           </div>
-          {p.category !== 'official' && (
-            <div className="px-4 pb-2"><ProviderOverrideEditor provider={p} override={overrides[p.id]} onSaved={load} /></div>
+          {ms.selMode && hasCustom && (
+            <BatchBar count={ms.count} busy={ms.busy} noun="个 Provider" onExit={ms.exit}
+              onDelete={async () => {
+                const res = await ms.runDelete(
+                  (id) => fetch(`/api/custom-providers/${id}`, { method: 'DELETE' }).then((r) => { if (!r.ok) throw new Error('删除失败'); }),
+                  { noun: '个 Provider', nameOf: (id) => customProviders.find((p) => p.id === id)?.name || id });
+                if (res) load();
+              }} />
           )}
-        </div>
-      ))}
-      {openaiProviders.length > 0 && (
-        <div className="px-4 pt-3 pb-1 text-[11px] text-ink-faint uppercase tracking-wider font-body border-t border-canvas-deep/40 mt-1">OpenAI 格式 · 经内置代理</div>
-      )}
-      {openaiProviders.map((p) => (
-        <div key={p.id} className="px-4 py-2.5">
-          <div className={`text-[14px] font-body mb-1.5 flex items-center gap-2 ${isCur(p) ? 'text-accent font-medium' : 'text-ink'}`}>
-            <span className="flex-1 truncate">{p.name}</span>
-          </div>
-          <MobileModelChips models={p.models.length ? p.models : ['(默认)']} switching={switching}
-            onPick={(m) => switchTo(p.id, p.models.length ? m : undefined)} />
-          <OpenAIModelManager provider={p} onSaved={load} />
-          <ProviderOverrideEditor provider={p} override={overrides[p.id]} onSaved={load} />
-        </div>
-      ))}
-      {customProviders.length > 0 && (
-        <div className="px-4 pt-3 pb-1 flex items-center gap-1 border-t border-canvas-deep/40 mt-1">
-          <div className="text-[11px] text-ink-faint uppercase tracking-wider font-body flex-1">自定义</div>
-          <SelModeToggle selMode={ms.selMode} onToggle={() => (ms.selMode ? ms.exit() : ms.enter())} size={14} />
-        </div>
-      )}
-      {ms.selMode && customProviders.length > 0 && (
-        <BatchBar count={ms.count} busy={ms.busy} noun="个 Provider" onExit={ms.exit}
-          onDelete={async () => {
-            const res = await ms.runDelete(
-              (id) => fetch(`/api/custom-providers/${id}`, { method: 'DELETE' }).then((r) => { if (!r.ok) throw new Error('删除失败'); }),
-              { noun: '个 Provider', nameOf: (id) => customProviders.find((p) => p.id === id)?.name || id });
-            if (res) load();
-          }} />
-      )}
-      {customProviders.map((p) => (
-        <div key={p.id} className="px-4 py-2.5 flex items-start gap-2" onClick={ms.selMode ? () => ms.toggle(p.id) : undefined}>
-          {ms.selMode && <SelCheckbox checked={ms.selected.has(p.id)} onClick={() => ms.toggle(p.id)} size={15} className="mt-1" />}
-          <div className="flex-1 min-w-0">
-            <div className={`text-[14px] font-body mb-1 flex items-center gap-1.5 ${isCur(p) ? 'text-accent font-medium' : 'text-ink'}`}>
-              <span className="truncate">{p.name}</span>
-              <span className="text-[9px] px-1 py-px bg-canvas-deep text-ink-faint rounded font-mono shrink-0">{p.type}</span>
-              {isCur(p) && <Check size={14} className="text-accent shrink-0" />}
+          {rows.map((p) => (p.source === 'official' || p.source === 'ccswitch') ? (
+            <div key={p.id} className={`${isCur(p) ? 'bg-accent-subtle' : ''}`}>
+              <div className="w-full flex items-center gap-1 pr-3 hover:bg-canvas-warm transition-colors">
+                <button disabled={switching} onClick={() => switchTo(p.id)}
+                  className={`flex-1 min-w-0 flex items-center gap-3 px-4 py-3 text-left ${switching ? 'opacity-50' : ''}`}>
+                  <span className={`flex-1 text-[14px] font-body truncate ${isCur(p) ? 'text-accent font-medium' : 'text-ink'}`}>{p.name}</span>
+                  <ProviderSourceBadge p={p} />
+                  {isCur(p) && <Check size={16} className="text-accent shrink-0" />}
+                </button>
+              </div>
+              {p.source !== 'official' && (
+                <div className="px-4 pb-2"><ProviderOverrideEditor provider={p} override={overrides[p.id]} onSaved={load} /></div>
+              )}
             </div>
-            {!ms.selMode && (
+          ) : p.source === 'openai' ? (
+            <div key={p.id} className="px-4 py-2.5">
+              <div className={`text-[14px] font-body mb-1.5 flex items-center gap-2 ${isCur(p) ? 'text-accent font-medium' : 'text-ink'}`}>
+                <span className="flex-1 truncate">{p.name}</span>
+                <ProviderSourceBadge p={p} />
+                {isCur(p) && <Check size={14} className="text-accent shrink-0" />}
+              </div>
               <MobileModelChips models={p.models.length ? p.models : ['(默认)']} switching={switching}
                 onPick={(m) => switchTo(p.id, p.models.length ? m : undefined)} />
-            )}
-          </div>
-          {!ms.selMode && (<>
-          <button onClick={() => setEditingProvider(p)} title="编辑" className="p-1.5 text-ink-faint hover:text-accent shrink-0"><Pencil size={15} /></button>
-          <button onClick={() => removeCustom(p.id, p.name)} title="删除" className="p-1.5 text-ink-faint hover:text-error shrink-0"><Trash2 size={15} /></button>
-          </>)}
-        </div>
-      ))}
+              <OpenAIModelManager provider={p} onSaved={load} />
+              <ProviderOverrideEditor provider={p} override={overrides[p.id]} onSaved={load} />
+            </div>
+          ) : (
+            <div key={p.id} className="px-4 py-2.5 flex items-start gap-2" onClick={ms.selMode ? () => ms.toggle(p.id) : undefined}>
+              {ms.selMode && <SelCheckbox checked={ms.selected.has(p.id)} onClick={() => ms.toggle(p.id)} size={15} className="mt-1" />}
+              <div className="flex-1 min-w-0">
+                <div className={`text-[14px] font-body mb-1 flex items-center gap-1.5 ${isCur(p) ? 'text-accent font-medium' : 'text-ink'}`}>
+                  <span className="truncate">{p.name}</span>
+                  <span className="text-[9px] px-1 py-px bg-canvas-deep text-ink-faint rounded font-mono shrink-0">{p.type}</span>
+                  <ProviderSourceBadge p={p} />
+                  {isCur(p) && <Check size={14} className="text-accent shrink-0" />}
+                </div>
+                {!ms.selMode && (
+                  <MobileModelChips models={p.models.length ? p.models : ['(默认)']} switching={switching}
+                    onPick={(m) => switchTo(p.id, p.models.length ? m : undefined)} />
+                )}
+              </div>
+              {!ms.selMode && (<>
+              <button onClick={() => setEditingProvider(p)} title="编辑" className="p-1.5 text-ink-faint hover:text-accent shrink-0"><Pencil size={15} /></button>
+              <button onClick={() => removeCustom(p.id, p.name)} title="删除" className="p-1.5 text-ink-faint hover:text-error shrink-0"><Trash2 size={15} /></button>
+              </>)}
+            </div>
+          ))}
+        </>);
+      })()}
     </div>
   );
 }
