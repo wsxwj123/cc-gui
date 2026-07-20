@@ -8894,7 +8894,14 @@ export default function App() {
 
   // Pull the shared session-title map so a rename on the phone shows on the Mac
   // (and vice-versa). Live updates arrive via the ws 'custom-titles' broadcast.
-  useEffect(() => { useStore.getState().hydrateCustomTitles(); useStore.getState().hydrateAutoTitles(); useStore.getState().hydrateContext1m(); }, []);
+  // 审计批A6:ws-reconnected 时重跑 —— 断线期间的 custom/auto-titles、context-1m
+  // 广播已永久丢失,重连补拉一次收敛(与权限卡/列表对账同构;hydrate 均幂等)。
+  useEffect(() => {
+    const hydrate = () => { useStore.getState().hydrateCustomTitles(); useStore.getState().hydrateAutoTitles(); useStore.getState().hydrateContext1m(); };
+    hydrate();
+    window.addEventListener('cgui:ws-reconnected', hydrate);
+    return () => window.removeEventListener('cgui:ws-reconnected', hydrate);
+  }, []);
 
   // 停止链路 #3:回合间到达的子代理权威终态通知(server 无活跃 SSE 时经全局 WS
   // 广播 task-notification-bg → useWebSocket 转 window 事件)。按 tool_use_id 调
