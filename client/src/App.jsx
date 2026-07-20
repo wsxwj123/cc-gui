@@ -9181,15 +9181,11 @@ export default function App() {
             </>
           )}
         </div>
-        {/* 修正批#1b 顶栏终稿:右簇 [?帮助][Provider][模型][力度][远程][主题][设置坞]
-            (问号最左、设置最右)。Provider/模型/力度/远程从 composer 工具行迁回顶栏,
-            作用于「活跃窗格」的会话(headerPermKey,分屏时跟随聚焦格);composer 只留
+        {/* 顶栏终稿:右簇 [Provider][模型][力度][远程][主题][设置坞][?帮助]
+            (问号最右)。Provider/模型/力度/远程作用于「活跃窗格」的会话
+            (headerPermKey,分屏时跟随聚焦格);composer 只留
             [权限模式][附件][旁问]。弹层均走 AnchoredPopover(portal 顶层)向下弹。 */}
         <div className="flex items-center gap-1 flex-wrap justify-end min-w-0 ml-auto">
-          <button data-tour="help" onClick={() => setTourOpen(true)} title="使用指引 — 逐个介绍界面功能"
-            className="flex items-center justify-center p-1.5 rounded-lg text-ink-muted hover:text-ink hover:bg-black/5 transition-colors">
-            <HelpCircle size={15} />
-          </button>
           <ProviderSwitcher tourAnchor respondOpenProvider />
           <ModelSelector compact permKey={headerPermKey} tourAnchor />
           <EffortSelector permKey={headerPermKey} tourAnchor />
@@ -9199,6 +9195,10 @@ export default function App() {
           <ThemeToggle />
           {/* 面板坞:分屏 + 10 个面板 + 更新提醒收纳于此(点击展开 rail)。 */}
           <PanelDock rightPanel={rightPanel} setRightPanel={setRightPanel} updateNotice={updateNotice} jumpToUpdate={jumpToUpdate} />
+          <button data-tour="help" onClick={() => setTourOpen(true)} title="使用指引 — 逐个介绍界面功能"
+            className="flex items-center justify-center p-1.5 rounded-lg text-ink-muted hover:text-ink hover:bg-black/5 transition-colors">
+            <HelpCircle size={15} />
+          </button>
         </div>
       </header>
 
