@@ -4,18 +4,10 @@
 import { useState, useEffect, useLayoutEffect, useMemo, useRef } from 'react';
 import { X, ArrowRight, ArrowLeft } from 'lucide-react';
 
-// 顶栏功能面板按钮(与 PANEL_MAP 同序)。逐个圈。
+// P1.5:原 10 个面板步骤并为 1 步「面板坞」——步骤进入时经 cgui:dock-rail-open 事件
+// 展开 rail 做演示(第 4 元素 = enter 事件名),文案压缩为每面板一行。
 const PANEL_STEPS = [
-  ['panel-files', '文件', '浏览当前项目的文件树,点开任意文件查看或编辑。\n· 图片 / PDF / Word / Excel / PPT / 文本都能直接看\n· html / svg / mermaid 可内联渲染,也可侧边停靠放大\n· 预览(含会话里的 html / svg / mermaid 预览)出运行时报错时,右下角出现报错徽章,点开可一键把报错发给 AI 修复\n· 文本类文件可直接编辑并保存(带撤销/重做)\n· 右键文件/文件夹:添加到上下文(输入框自动 @ 该文件)、用默认 App 打开、删除(10 秒内可撤销)'],
-  ['panel-changes', '审查', '按 AI 的每个回合查看它改动了哪些文件。\n· 列出每回合新增/修改/删除的文件\n· 逐个文件看具体改动 diff(增删了哪些行)\n· 可回滚到某个回合改动之前的状态'],
-  ['panel-monitor', '监控', '看 AI 派出去的代理在干什么。\n· 上半:子代理(Task)实时状态树,每个在跑什么、可逐个停止\n· 下半「后台代理」:一句话派一个无人值守的后台任务,查看它在等什么/进度/结果,一键停止(走官方 claude stop,只停目标不连坐)\n· 各区块均可折叠/展开;结束超过 30 天的后台代理自动不再显示'],
-  ['panel-agents', 'Agent', '管理自定义子代理(存在 ~/.claude/agents 的 .md,定义名称/模型/可用工具/系统提示词)。\n· 新建 / 编辑 / 删除子代理\n· 一键安装内置预设:explorer(探索)、oracle(架构顾问)、orchestrator(编排)、designer、fixer 等'],
-  ['panel-usage', '用量', '统计 token 消耗与费用。\n· 按模型 / 项目 / 日期分组\n· 显示总 token、缓存命中 token、命中率\n· 一键生成官方 /insights 使用报告(内联预览)\n· 导出 CSV;官方订阅额度(非第三方)也在这看'],
-  ['panel-processes', '进程', '查看并管理正在运行的 claude 子进程。\n· 列出每个进程的 PID / 所属会话 / 已运行时长 / 模型\n· 可逐个停止(按进程精准杀,不误伤其它)'],
-  ['panel-mcp', '工具', '管理 MCP 服务器和插件。\n· 增删 MCP 服务器(stdio / SSE / Streamable HTTP)、测连通性\n· 选快速模板自动回填常用 MCP 字段\n· 插件:内置推荐(含 superpowers)在「添加」弹层一键安装;已装的可更新到最新版或卸载,卸载后回到添加页可重装\n· 「添加」弹层顶部「从全部 marketplace 搜索(高级)」可展开,按名称 / 描述 / 来源检索精选清单外的全部可装插件'],
-  ['panel-skills', '技能', '管理本机技能(skill)。\n· 查看 ~/.claude/skills 下已装的 skill;点任一条展开完整简介;SKILL.md 若声明 version 则显示版本号\n· 已装的可归档(停用、可随时恢复)或删除(需重新下载)\n· 一键从 Anthropic 官方及社区(vercel / hermes / garden 等)skill 市场导入\n· 也可粘贴 GitHub 或 Gitee 仓库地址导入(支持 /tree/分支、owner/repo@分支);导入过的仓库自动常驻列表可再次拉取或移除\n· 从市场/仓库装的技能带「更新」按钮,一键覆盖到上游最新'],
-  ['panel-memory', '指令', '三个标签页:\n· 指令(CLAUDE.md):编辑 全局 / 项目 / 项目·私人 / 组织 四级指令(项目级随 git 与团队共享,项目·私人只留本机不提交)\n· 自动记忆:查看/编辑 AI 自己写的跨会话记忆\n· 提示词库:780 条内置预设,按 33 个分类折叠浏览 + 搜索,一键复制到输入框或 CLAUDE.md'],
-  ['panel-settings', '设置', '多个标签页:\n· 概览:检查/安装更新、缓存优化开关、自动压缩窗口(token)、对话区背景(纯色/图片/视频 + 遮罩不透明度)\n· 全局热键截图:在概览里开启并可自定义热键(默认 Cmd/Ctrl+Shift+2);按下即置顶窗口截图(macOS 框选区域或点窗口),截图自动加进当前会话输入框\n· 环境:检查 node / claude / python / git / uv 是否就绪,缺失可装;安装失败后重新检测会恢复「安装」按钮\n· Hooks:配置钩子脚本\n· 原始配置:直接编辑 settings.json\n· 存储:清理缓存、彻底清理某项目的全部 Claude 状态\n· 网络:开局域网访问后配合内网穿透(如 Tailscale),手机浏览器可访问整个 GUI —— 与顶栏「远程」不同,那个是手机 App 只接管单条会话'],
+  ['panel-dock', '功能面板坞', '10 个功能面板都收纳在这个坞里:点坞图标原位展开面板条,再点任一图标打开对应面板;点外部或再点坞图标收起。\n· 文件:项目文件树,查看 / 编辑 / 预览,右键可添加到上下文\n· 审查:按回合看 AI 改了哪些文件(diff),可回滚\n· 监控:子代理 + 后台代理实时状态,可逐个停止\n· Agent:管理自定义子代理(~/.claude/agents)\n· 用量:token / 费用统计,/insights 报告,导出 CSV\n· 进程:查看并停止正在运行的 claude 子进程\n· 工具:MCP 服务器与插件的增删 / 测试 / 安装\n· 技能:skill 市场导入与本机技能管理\n· 指令:CLAUDE.md 四级指令 / 自动记忆 / 提示词库\n· 设置:通用 / 会话 / 外观 / Provider / 权限 / 网络 等 9 个标签页\n快捷键 Cmd/Ctrl+1..9 直达前 9 个面板、0 打开设置(面板条收起时同样可用);有可用更新时坞图标出现红点,展开后点「更新」直达设置更新区。', 'cgui:dock-rail-open'],
 ];
 
 function buildSteps(hasProject) {
@@ -35,7 +27,7 @@ function buildSteps(hasProject) {
     );
   }
   steps.push(
-    ['provider-switcher', '切换 Provider', '在官方 Anthropic 与第三方中转之间一键切换。\n· 点「添加」选内置预设:官方 OpenAI / Anthropic / Google Gemini、DeepSeek、Kimi、通义千问、豆包、智谱 GLM 等\n· 填 API key,点「获取模型」拉取该渠道可用模型即可用\n· 支持 openai 兼容与 anthropic 兼容两种协议(Gemini 走官方 OpenAI 兼容端点);选定协议后模板列表只显示该协议的预设,避免选错'],
+    ['provider-switcher', '切换 Provider', '在官方 Anthropic 与第三方中转之间一键切换(点任一条即切,对新发的消息生效)。\n· 增删改 / 测试连接 / 隐藏 / 从 cc-switch 导入等管理操作,在弹层底部「管理 Provider」进入 设置 → Provider 页\n· 管理页有内置模板:官方 OpenAI / Anthropic / Google Gemini、DeepSeek、Kimi、通义千问、豆包、智谱 GLM 等,填 API key、点「获取模型」即可用\n· 支持 openai 兼容与 anthropic 兼容两种协议,选定协议后模板只显示该协议预设,避免选错'],
     ['model-selector', '模型', '选当前会话使用的具体模型。\n· 分屏时每个窗格可各自独立选\n· 切到第三方 provider 会显示它自己的模型列表'],
     ['effort-selector', '推理力度', '调 AI 的思考强度:低 / 中 / 高 / 最高。\n· 越高思考越深入、结果越细致,但越慢、越费 token\n· 官方模型区别明显,部分第三方可能无效'],
     ['permission-selector', '权限模式', '控制 AI 调用工具时是否需要你逐个确认:\n· 默认:每个工具调用都弹卡片让你批准\n· 接受编辑:自动批准文件编辑,其它工具仍问\n· 规划:只读不改,先给出计划让你确认;计划批准后全文常驻在输入框上方(默认折叠一行,可展开回看或隐藏)\n· 放行:全自动执行、完全不问(慎用)'],
@@ -43,11 +35,15 @@ function buildSteps(hasProject) {
     ['remote-control', '手机远程控制', '用手机上的 Claude App 同账号接管当前这一条会话继续对话。\n· 需已登录官方账号、且当前非第三方 provider\n· 与「设置·网络 + Tailscale」不同:那个是手机浏览器访问整个 GUI 界面,这个只接管单条会话'],
     ['pane-count', '分屏', '把界面分成 1–6 个窗格,并排同时看和操作多个会话。\n· 每个窗格的模型 / 权限模式相互独立'],
     ...PANEL_STEPS,
-    ['theme-toggle', '主题与外观', '外观相关设置:\n· 配色主题(多套深浅色可选)\n· 界面字号、对话正文字号\n· AI 思考时的加载动画样式(30 种可选)'],
+    ['theme-toggle', '主题与外观', '外观相关设置:\n· 配色主题(多套深浅色可选)\n· 界面字号、对话正文字号\n· AI 思考时的加载动画样式(30 种可选)\n· 同样的设置也在 设置 → 外观 页(两处同源)'],
+    // P1.2 被收纳项的新落点:会话信息徽章 + 会话头 ⋮(无会话时锚点不在 DOM,自动跳过)。
+    ['ctx-badge', '会话信息徽章', '本会话的信息中枢:显示上下文占用 xx k / 窗口(百分比),点开看 /context 分项明细并可重新精确计算。\n· 弹层还收纳:当前模型与「曾用」模型史、第三方 provider 标识、工具调用次数、累计 token / 费用 / 缓存命中率\n· 新会话数据未到达时,徽章先显示模型徽章(零态),首个回合后自动切为占用数字'],
+    ['session-menu', '会话头 ⋮ 菜单', '更多会话操作收纳在这里:\n· 导出:把当前会话导出为 Markdown(下载到本地或复制到剪贴板)\n· 检查点:Checkpoint 时间线 —— 给工作目录拍快照,可随时回到某个快照并裁剪会话到该时刻\n· 重命名点标题旁铅笔;分叉 / 归档在左侧会话列表 hover 菜单'],
     ['composer', '输入框', '· Cmd/Ctrl+Enter 发送、Enter 换行\n· 输入 / 打开命令面板(含 /branch 分叉、/goal 目标、插件命令等)\n· 输入 @ 打开引用选择器:按目录层级浏览项目文件(点文件夹进入、「返回上级」回退),输入关键词则全局搜索;Tab 切到会话页可把本项目其它会话的内容注入当前对话\n· 可【拖入】图片 / PDF / Word / Excel / PPT 等文件\n· Cmd/Ctrl+Z 撤销输入\n· AI 回复中再输入会入队;输入框为空时按 ↑ 键召回最近入队的消息\n· 按 Cmd/Ctrl+/ 打开快捷键速查表(含切换分屏窗格 Ctrl+Tab、切上/下一条会话 Cmd+↑/↓ 等全部快捷键)'],
     ['help', '快捷键速查 & 重看指引', '随时按 Cmd/Ctrl+/ 打开【快捷键速查表】,里面列了发送、切会话、切分屏窗格等全部快捷键。\n· 以后忘了哪个功能,点这个问号就能重新走一遍本指引。'],
   );
-  return steps.map(([sel, title, desc]) => ({ sel, title, desc }));
+  // enter(可选)= 进入该步骤时 dispatch 的 window 事件名(如展开面板坞做演示)。
+  return steps.map(([sel, title, desc, enter]) => ({ sel, title, desc, enter }));
 }
 
 const TIP_W = 300;
@@ -62,7 +58,7 @@ export function GuideTour({ open, onClose, hasProject }) {
   // 问号导引 = 纯逐步(下一步/上一步),高亮【不随鼠标动】,逐个介绍界面功能。
 
   // 开:回到第 1 步(rect 由下面的定位 effect 设)。关:清残留 rect/pos —— 否则下次重开
-  // 的首帧会用到上一轮的旧 i/rect,而 steps 长度随 hasProject 变(有项目 22 步 / 无项目 21 步),
+  // 的首帧会用到上一轮的旧 i/rect,而 steps 长度随 hasProject 变(有项目态多 1 步),
   // 旧 i 越界 → steps[i] 为 undefined → 渲染抛错整页白屏(用户报:返回初始界面再点指引白屏)。
   useEffect(() => {
     if (open) setI(0);
@@ -80,11 +76,15 @@ export function GuideTour({ open, onClose, hasProject }) {
     }
     if (!el) { onClose(); return; }
     if (idx !== i) { setI(idx); return; }
+    // P1.5 步骤联动:进入带 enter 的步骤时 dispatch 对应事件(如 cgui:dock-rail-open 展开
+    // 面板坞)。展开会让锚点(wrapper)尺寸变化,320ms 后补量一次高亮框(等 rail 动画落定)。
+    if (steps[idx].enter) window.dispatchEvent(new CustomEvent(steps[idx].enter));
     el.scrollIntoView({ block: 'nearest' });
     const update = () => setRect(el.getBoundingClientRect());
     update();
+    const remeasure = steps[idx].enter ? setTimeout(update, 320) : null;
     window.addEventListener('resize', update);
-    return () => window.removeEventListener('resize', update);
+    return () => { window.removeEventListener('resize', update); if (remeasure) clearTimeout(remeasure); };
   }, [open, i, steps, onClose]);
 
   // 说明卡定位。关键:<html> 有 font-scale `zoom`(如 1.2),getBoundingClientRect 返回
