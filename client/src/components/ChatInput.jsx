@@ -1,11 +1,11 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Send, Loader2, Square, Terminal, Puzzle, Wrench, Gauge, ChevronDown, X, FileText, Paperclip, Shield, ShieldOff, ClipboardList, Check, Pencil, Smartphone, AtSign, MessagesSquare, Folder, CornerLeftUp, Sparkles, ArrowDownToLine, Zap, MoreHorizontal } from 'lucide-react';
+import { Send, Loader2, Square, Terminal, Puzzle, Wrench, Gauge, ChevronDown, X, FileText, Paperclip, Shield, ShieldOff, ClipboardList, Check, Pencil, Smartphone, AtSign, MessagesSquare, Folder, CornerLeftUp, Sparkles, ArrowDownToLine, Zap } from 'lucide-react';
 import { useStore, PERMISSION_MODES } from '../stores/sessionStore.js';
 import { PermissionPrompt } from './PermissionPrompt.jsx';
 import { TodoPanel } from './TodoPanel.jsx';
 import { confirmDialog } from '../utils/confirmDialog.jsx';
 import { ImageLightbox } from './ImageLightbox.jsx';
-import { ModelSelector, ProviderSwitcher, RemoteControlButton } from './SessionSelectors.jsx';
+import { AnchoredPopover } from './SessionSelectors.jsx';
 
 // Permission mode metadata — mirrors `claude --permission-mode <choice>`。
 // P2.1:文案对齐官方六档语义(RESEARCH-mode-semantics §④b);bypass 中文名保持「放任」。
@@ -49,9 +49,10 @@ export function useVisiblePermissionModes(permKey = null) {
     || (providerHint === 'anthropic' && !isAutoUnavailable(providerHint, model)));
 }
 
-// P2.1 模式按钮:纯权限档平铺(状态 = permissionMode 本值,per-pane keyed)。
-// composer 底部工具行内使用 → 弹层上弹(bottom-full)。
-export function PermissionModeSelector({ permKey, hideLabel = false, tourAnchor = false }) {
+// 修正批#1b 模式按钮:composer 工具行最左(桌面+手机同入口),弹层上弹。
+// 文案自适应:有空间显示档位名,容器变窄自动只留图标(container query,
+// .cgui-composer-tools / .cgui-perm-label 见 index.css)——桌面窄分屏与手机同一套逻辑。
+export function PermissionModeSelector({ permKey, tourAnchor = false }) {
   // Read THIS session's mode (keyed). Subscribing to the map slice keeps the
   // chip in sync when the active session changes underneath us.
   const permissionMode = useStore((s) => (permKey ? (s.permissionModeBySession[permKey] || s.permissionMode) : s.permissionMode));
@@ -62,119 +63,47 @@ export function PermissionModeSelector({ permKey, hideLabel = false, tourAnchor 
   const current = MODE_META[permissionMode] || MODE_META.default;
   const Icon = current.icon;
 
-  useEffect(() => {
-    if (!open) return;
-    const onDocClick = (e) => { if (!wrapRef.current?.contains(e.target)) setOpen(false); };
-    const onEsc = (e) => { if (e.key === 'Escape') setOpen(false); };
-    document.addEventListener('mousedown', onDocClick);
-    document.addEventListener('keydown', onEsc);
-    return () => {
-      document.removeEventListener('mousedown', onDocClick);
-      document.removeEventListener('keydown', onEsc);
-    };
-  }, [open]);
-
   return (
     <div ref={wrapRef} className="relative" data-tour={tourAnchor ? 'mode-selector' : undefined}>
       <button onClick={() => setOpen(!open)}
         className="flex items-center gap-1 px-2 py-1 rounded-md hover:bg-black/5 transition-colors"
         title={`权限模式: ${current.label} — ${current.desc}`}>
         <Icon size={12} className={current.tone} />
-        {!hideLabel && <span className={`text-[11px] font-body whitespace-nowrap ${current.tone}`}>{current.label}</span>}
+        <span className={`cgui-perm-label text-[11px] font-body whitespace-nowrap ${current.tone}`}>{current.label}</span>
         <ChevronDown size={10} className="text-ink-faint" />
       </button>
-      {open && (
-        <div className="glass-popover absolute left-0 bottom-full mb-2 w-64 z-50 py-1 animate-glass-rise max-h-[min(60vh,calc(100dvh-6rem))] overflow-y-auto">
-          <div className="px-3 py-1.5 text-[10px] text-ink-faint uppercase tracking-wider font-body">权限模式 (--permission-mode)</div>
-          {visibleModes.map((m) => {
-            const meta = MODE_META[m];
-            const MIcon = meta.icon;
-            return (
-              <button key={m}
-                onClick={() => {
-                  // plan 与 agent 不再互斥:内置 agent 的 tools 已含 ExitPlanMode,
-                  // agent 主控本体在 plan 模式下能正常出计划卡片(headless 实证)。
-                  setPermissionMode(m, permKey);
-                  setOpen(false);
-                }}
-                className={`w-full text-left px-3 py-2 flex items-start gap-2 ${permissionMode === m ? 'bg-accent/12' : ''} hover:bg-black/5`}>
-                <MIcon size={13} className={`${meta.tone} mt-0.5 shrink-0`} />
-                <div className="flex-1 min-w-0">
-                  <div className="text-xs font-medium text-ink font-body">{meta.label}</div>
-                  <div className="text-[10px] text-ink-faint font-body">{meta.desc}</div>
-                </div>
-                {permissionMode === m && <div className="w-1.5 h-1.5 rounded-full bg-accent mt-1.5 shrink-0" />}
-              </button>
-            );
-          })}
-        </div>
-      )}
-    </div>
-  );
-}
-
-// P2.1 composer ⋮ 溢出菜单:远程控制 + (流式时)转后台。远程激活显绿点。
-// 修正批#2:主控 agent 选择器已删除(用户拍板,零删除豁免)——只删前端入口,
-// store(activeAgentBySession)与发送链(options.agent)能力保留不拆。
-export function ComposerMore({ sessionId = null, isStreaming = false, onBackground, tourAnchor = false }) {
-  const rcActive = useStore((s) => (sessionId ? !!s.remoteControlled[sessionId] : false));
-  // 远程控制需要会话的 projectPath(cwd):按 sessionId 从窗格/选中会话反查,原始值为
-  // 字符串引用稳定,不会造成多余重渲。
-  const projectPath = useStore((s) => {
-    if (!sessionId) return '';
-    const pane = (s.paneSessions || []).find((x) => x?.sessionId === sessionId);
-    return (pane || s.selectedSession)?.projectPath || '';
-  });
-  const [open, setOpen] = useState(false);
-  const wrapRef = useRef(null);
-
-  useEffect(() => {
-    if (!open) return;
-    const onDocClick = (e) => { if (!wrapRef.current?.contains(e.target)) setOpen(false); };
-    const onEsc = (e) => { if (e.key === 'Escape') setOpen(false); };
-    document.addEventListener('mousedown', onDocClick);
-    document.addEventListener('keydown', onEsc);
-    return () => {
-      document.removeEventListener('mousedown', onDocClick);
-      document.removeEventListener('keydown', onEsc);
-    };
-  }, [open]);
-
-  // 导引联动:tour 的 composer-more 步骤经事件展开本菜单(仅活跃窗格挂锚点,tourAnchor 门控)。
-  useEffect(() => {
-    if (!tourAnchor) return;
-    const onOpen = () => setOpen(true);
-    window.addEventListener('cgui:composer-more-open', onOpen);
-    return () => window.removeEventListener('cgui:composer-more-open', onOpen);
-  }, [tourAnchor]);
-
-  return (
-    <div ref={wrapRef} className="relative" data-tour={tourAnchor ? 'composer-more' : undefined}>
-      <button onClick={() => setOpen(!open)}
-        className={`relative flex items-center gap-1 px-2 py-1 rounded-md hover:bg-black/5 transition-colors ${open ? 'bg-black/5' : ''}`}
-        title={`更多：远程控制${isStreaming ? ' / 转后台' : ''}`}>
-        <MoreHorizontal size={14} className="text-ink-muted" />
-        {rcActive && <span className="absolute -top-0.5 -right-0.5 w-2 h-2 rounded-full bg-green-500" title="远程控制已激活" />}
-      </button>
-      {open && (
-        <div className="glass-popover absolute right-0 bottom-full mb-2 w-64 max-w-[calc(var(--app-w,100vw)-1.5rem)] z-50 py-1 animate-glass-rise max-h-[min(60vh,calc(100dvh-6rem))] overflow-y-auto">
-          <div className="px-3 py-1.5 text-[10px] text-ink-faint uppercase tracking-wider font-body">会话操作</div>
-          <div className="px-2 py-1 flex items-center gap-2">
-            <RemoteControlButton session={sessionId ? { sessionId, projectPath } : null} />
-            <span className="text-[10px] text-ink-faint font-body">手机 Claude App 接管本会话</span>
-          </div>
-          {isStreaming && onBackground && (
-            <button onClick={() => { setOpen(false); onBackground(); }}
-              className="w-full text-left px-3 py-1.5 hover:bg-black/5 flex items-center gap-2">
-              <ArrowDownToLine size={12} className="text-ink-muted shrink-0" />
-              <span className="text-xs text-ink font-body">本回合转入后台运行</span>
+      <AnchoredPopover anchorRef={wrapRef} open={open} onRequestClose={() => setOpen(false)} drop="up"
+        className="w-64 max-w-[calc(var(--app-w,100vw)-1.5rem)] py-1 max-h-[min(60vh,calc(100dvh-6rem))] overflow-y-auto">
+        <div className="px-3 py-1.5 text-[10px] text-ink-faint uppercase tracking-wider font-body">权限模式 (--permission-mode)</div>
+        {visibleModes.map((m) => {
+          const meta = MODE_META[m];
+          const MIcon = meta.icon;
+          return (
+            <button key={m}
+              onClick={() => {
+                // plan 与 agent 不再互斥:内置 agent 的 tools 已含 ExitPlanMode,
+                // agent 主控本体在 plan 模式下能正常出计划卡片(headless 实证)。
+                setPermissionMode(m, permKey);
+                setOpen(false);
+              }}
+              className={`w-full text-left px-3 py-2 flex items-start gap-2 ${permissionMode === m ? 'bg-accent/12' : ''} hover:bg-black/5`}>
+              <MIcon size={13} className={`${meta.tone} mt-0.5 shrink-0`} />
+              <div className="flex-1 min-w-0">
+                <div className="text-xs font-medium text-ink font-body">{meta.label}</div>
+                <div className="text-[10px] text-ink-faint font-body">{meta.desc}</div>
+              </div>
+              {permissionMode === m && <div className="w-1.5 h-1.5 rounded-full bg-accent mt-1.5 shrink-0" />}
             </button>
-          )}
-        </div>
-      )}
+          );
+        })}
+      </AnchoredPopover>
     </div>
   );
 }
+
+// 修正批#1b:composer ⋮ 菜单已删除(用户终稿布局)。远程控制迁顶栏
+// (RemoteControlButton,手机走 MobileMenu 同一行);「转后台」并入流式时的
+// 输入行独立按钮(全平台,原仅手机兜底的那颗)。单一入口,无功能丢失。
 
 export const EFFORT_LEVELS = [
   { id: '',       label: '默认', desc: '让 CLI 自己决定' },
@@ -185,8 +114,8 @@ export const EFFORT_LEVELS = [
   { id: 'max',    label: '极限', desc: '最大努力' },
 ];
 
-// Dropdown anchored to the trigger button (lightweight, no full-screen blur).
-export function EffortSelector({ permKey = null, hideLabel = false, tourAnchor = false }) {
+// 修正批#1b:力度按钮(顶栏,作用于活跃窗格会话)。弹层走 AnchoredPopover。
+export function EffortSelector({ permKey = null, hideLabel = false, tourAnchor = false, drop = 'down' }) {
   // Per-SESSION effort:这条会话自己的力度,无 entry 回落全局默认。和模型/权限一样按
   // 会话隔离持久化,改它不影响其他会话。
   const effort = useStore((s) => (permKey && permKey in (s.effortBySession || {})) ? s.effortBySession[permKey] : s.effort);
@@ -199,20 +128,6 @@ export function EffortSelector({ permKey = null, hideLabel = false, tourAnchor =
   const wrapRef = useRef(null);
   const current = EFFORT_LEVELS.find((e) => e.id === effort) || EFFORT_LEVELS[0];
 
-  useEffect(() => {
-    if (!open) return;
-    const onDocClick = (e) => {
-      if (!wrapRef.current?.contains(e.target)) setOpen(false);
-    };
-    const onEsc = (e) => { if (e.key === 'Escape') setOpen(false); };
-    document.addEventListener('mousedown', onDocClick);
-    document.addEventListener('keydown', onEsc);
-    return () => {
-      document.removeEventListener('mousedown', onDocClick);
-      document.removeEventListener('keydown', onEsc);
-    };
-  }, [open]);
-
   return (
     <div ref={wrapRef} className="relative" data-tour={tourAnchor ? 'effort-selector' : undefined}>
       <button onClick={() => setOpen(!open)}
@@ -224,8 +139,8 @@ export function EffortSelector({ permKey = null, hideLabel = false, tourAnchor =
         {!hideLabel && <span className="text-[11px] font-body text-ink-muted whitespace-nowrap">{current.label}</span>}
         <ChevronDown size={10} className="text-ink-faint" />
       </button>
-      {open && (
-        <div className="glass-popover absolute left-0 bottom-full mb-2 w-44 z-50 py-1 animate-glass-rise max-h-[min(60vh,calc(100dvh-6rem))] overflow-y-auto">
+      <AnchoredPopover anchorRef={wrapRef} open={open} onRequestClose={() => setOpen(false)} drop={drop}
+        className="w-44 max-w-[calc(var(--app-w,100vw)-1.5rem)] py-1 max-h-[min(60vh,calc(100dvh-6rem))] overflow-y-auto">
           <div className="px-3 py-1.5 text-[10px] text-ink-faint uppercase tracking-wider font-body">
             {openAIProtocol ? '推理力度 (reasoning_effort)' : '推理力度 (--effort)'}
           </div>
@@ -247,8 +162,7 @@ export function EffortSelector({ permKey = null, hideLabel = false, tourAnchor =
             </button>
             );
           })}
-        </div>
-      )}
+      </AnchoredPopover>
     </div>
   );
 }
@@ -296,8 +210,6 @@ export function ChatInput({ onSend, onStop, onAccelerate, onBackground, suggesti
   const [atBusy, setAtBusy] = useState(false);  // 会话引用生成中
   const atCtxRef = useRef({ cwd: '', projectHash: '' }); // 打开面板时快照,避免 selector 新引用重渲
   const sessions = useStore((s) => s.sessions);
-  // 分屏窗格越多 pane 越窄:≥4 分屏时选择器 chips 藏文字只留图标,免得挤爆工具行。
-  const paneCount = useStore((s) => s.paneCount);
   // P2.4:data-tour 锚点只挂在【活跃窗格】—— composer per-pane 渲染后锚点会出现多份,
   // GuideTour querySelector 取首个可能圈错窗格;cgui:open-provider 也按此门控单实例响应。
   const paneIsActive = useStore((s) => (s.paneCount || 1) === 1 || (s.activeTabIndex || 0) === (tabIndex ?? 0));
@@ -1105,7 +1017,11 @@ export function ChatInput({ onSend, onStop, onAccelerate, onBackground, suggesti
             rows={1}
             className="w-full bg-transparent text-[14px] text-ink placeholder-ink-faint resize-none focus:outline-none font-body leading-relaxed py-1 min-h-[28px] max-h-[200px]"
           />
-          <div className="flex items-center gap-0.5 mt-1">
+          {/* 修正批#1b:工具行只留 [权限模式][附件][旁问](Provider/模型/力度/远程迁顶栏,
+              ⋮ 删除)。cgui-composer-tools = container query 容器:窄了权限按钮自动藏文字
+              只留图标(桌面窄分屏与手机同一套自适应,见 index.css)。 */}
+          <div className="cgui-composer-tools flex items-center gap-0.5 mt-1">
+            <PermissionModeSelector permKey={permKey} tourAnchor={paneIsActive} />
             <button
               type="button"
               onClick={() => fileInputRef.current?.click()}
@@ -1131,16 +1047,6 @@ export function ChatInput({ onSend, onStop, onAccelerate, onBackground, suggesti
                 )}
               </button>
             )}
-            {/* 会话级选择器 chips(手机端隐藏,走 MobileMenu;分屏≥4 窄格藏文字只留图标)。 */}
-            <div className="max-md:hidden flex items-center gap-0.5 min-w-0">
-              <PermissionModeSelector permKey={permKey} hideLabel={paneCount >= 4} tourAnchor={paneIsActive} />
-              {/* 修正批#1:Provider 独立按钮(与模型分开),cgui:open-provider 指向它。 */}
-              <ProviderSwitcher hideLabel={paneCount >= 4} tourAnchor={paneIsActive} respondOpenProvider={paneIsActive} />
-              <ModelSelector compact permKey={permKey} tourAnchor={paneIsActive} />
-              <EffortSelector permKey={permKey} hideLabel={paneCount >= 4} tourAnchor={paneIsActive} />
-              <ComposerMore sessionId={sessionId} isStreaming={isStreaming}
-                onBackground={onBackground} tourAnchor={paneIsActive} />
-            </div>
             <div className="flex-1 min-w-[8px]" />
             {isStreaming ? (
               <>
@@ -1153,11 +1059,11 @@ export function ChatInput({ onSend, onStop, onAccelerate, onBackground, suggesti
                 >
                   <Send size={13} /><span className="max-md:hidden">入队</span>
                 </button>
-                {/* H 转后台:桌面端已收进 ⋮ 菜单;手机端 chips(含 ⋮)隐藏,保留独立按钮兜底。 */}
+                {/* 修正批#1b 转后台:⋮ 已删,流式时的独立按钮升级为全平台唯一入口。 */}
                 {onBackground && (
                   <button
                     onClick={onBackground}
-                    className="md:hidden shrink-0 h-8 px-2.5 rounded-md bg-canvas-warm border border-canvas-deep hover:bg-black/5 text-ink-soft flex items-center justify-center transition-colors text-[11px] font-medium"
+                    className="shrink-0 h-8 px-2.5 rounded-md bg-canvas-warm border border-canvas-deep hover:bg-black/5 text-ink-soft flex items-center justify-center transition-colors text-[11px] font-medium"
                     title="本回合转入后台继续运行,完成后自动提示;期间可切换到其它会话"
                   >
                     <ArrowDownToLine size={11} />

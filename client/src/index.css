@@ -1998,3 +1998,12 @@ html { --content-max: clamp(768px, calc(var(--app-w, 100vw) * 0.7), 1120px); }
 @media (prefers-reduced-motion: reduce) {
   .loading-mark, .loading-mark::before, .loading-mark::after, .loading-mark span { animation-duration: 4s !important; }
 }
+
+/* ── 修正批#1b:composer 工具行自适应(container query) ─────────────
+ * .cgui-composer-tools 是查询容器(inline-size 包含只影响宽度来源,高度仍由内容撑)。
+ * 容器宽 < 400px(窄分屏格 / 手机 / 超大字号缩窄)时权限模式按钮自动藏文字只留图标
+ * —— 桌面与手机同一套"窄了自动缩"逻辑,无 JS。 */
+.cgui-composer-tools { container-type: inline-size; }
+@container (max-width: 400px) {
+  .cgui-perm-label { display: none; }
+}

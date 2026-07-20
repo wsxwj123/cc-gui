@@ -29,9 +29,9 @@ import { useMultiSelect, SelModeToggle, BatchBar, SelCheckbox } from './componen
 import { pickDirectory, isTauri } from './utils/pickDirectory.js';
 import ChatSearch from './components/ChatSearch.jsx';
 import { confirmDialog } from './utils/confirmDialog.jsx';
-import { ChatInput, EFFORT_LEVELS, MODE_META, useVisiblePermissionModes, markAutoUnavailable } from './components/ChatInput.jsx';
+import { ChatInput, EffortSelector, EFFORT_LEVELS, MODE_META, useVisiblePermissionModes, markAutoUnavailable } from './components/ChatInput.jsx';
 import { ModelBadge, ProviderAvatar } from './components/ModelBadge.jsx';
-import { RemoteControlButton } from './components/SessionSelectors.jsx';
+import { RemoteControlButton, ProviderSwitcher, ModelSelector } from './components/SessionSelectors.jsx';
 import { UsagePanel } from './components/UsagePanel.jsx';
 import { ProcessPanel } from './components/ProcessPanel.jsx';
 import { SettingsPanel, ChatBackgroundCard } from './components/SettingsPanel.jsx';
@@ -6605,8 +6605,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                     : msg.type === 'turn'
                     ? <>
                         <TurnBubble turn={msg} onRetry={handleRetryTurn} onRetryTool={(toolCall) => handleRetryTool(msg, toolCall)} retryActive={retryActiveUuid === msg.uuid} />
-                        {/* 鉴权类错误 turn 的动作链接:打开 composer 的 Provider 弹层核对 key/渠道
-                            (cgui:open-provider → ProviderSwitcher,仅活跃窗格响应)。
+                        {/* 鉴权类错误 turn 的动作链接:打开顶栏 Provider 弹层核对 key/渠道
+                            (cgui:open-provider → 顶栏 ProviderSwitcher 单实例)。
                             手机布局无该弹层(走 MobileMenu Provider 分页),隐藏按钮避免死点。 */}
                         {msg.errorAction === 'provider' && !mobileChrome && (
                           <div className="px-4 pb-2 -mt-1">
@@ -7452,30 +7452,9 @@ function MobileEffortPage({ permKey }) {
   );
 }
 
-function MobilePermissionPage({ permKey }) {
-  const permissionMode = useStore((s) => (permKey ? (s.permissionModeBySession[permKey] || s.permissionMode) : s.permissionMode));
-  // P2.7:与桌面模式按钮同一份门控(五档平铺;「自动」仅官方 provider 且未记不可用标记)。
-  const visibleModes = useVisiblePermissionModes(permKey);
-  return (
-    <div className="py-1">
-      {visibleModes.map((m) => {
-        const meta = MODE_META[m];
-        const MIcon = meta.icon;
-        return (
-          <button key={m} onClick={() => useStore.getState().setPermissionMode(m, permKey)}
-            className="w-full flex items-start gap-3 px-4 py-3 text-left hover:bg-canvas-warm transition-colors">
-            <MIcon size={16} className={`${meta.tone} mt-0.5 shrink-0`} />
-            <div className="flex-1 min-w-0">
-              <div className="text-[14px] font-body text-ink">{meta.label}</div>
-              <div className="text-[11px] text-ink-faint font-body">{meta.desc}</div>
-            </div>
-            {permissionMode === m && <Check size={16} className="text-accent shrink-0 mt-0.5" />}
-          </button>
-        );
-      })}
-    </div>
-  );
-}
+// 修正批#1b:MobilePermissionPage(手机菜单权限分页)已删除——权限模式唯一入口
+// 改为 composer 工具行最左的模式按钮(桌面/手机同一颗,五档门控同一份),菜单里
+// 再留一份就是双入口。
 
 // 修正批#2:MobileAgentPage(手机端主控 agent 分页)已删除——主控 agent 前端入口
 // 整体移除(用户拍板);store 与发送链能力保留(agent 化会话仍可由服务端/API 驱动)。
@@ -8176,13 +8155,11 @@ function MobileMenu({ setRightPanel, onClose }) {
 
   const currentModel = useStore((s) => s.modelBySession[permKey] || s.currentModel);
   const effort = useStore((s) => (permKey && permKey in (s.effortBySession || {})) ? s.effortBySession[permKey] : s.effort);
-  const permissionMode = useStore((s) => s.permissionModeBySession[permKey] || 'default');
   // --effort works on every claude-format upstream (official + mimo/deepseek/
   // openrouter relays); only the OpenAI proxy (codex-local) can't map it. Gate
   // on protocol, not providerHint.
   const claudeProtocol = useStore((s) => (s.currentProvider?.protocol || 'anthropic') !== 'openai');
   const effortLabel = (EFFORT_LEVELS.find((e) => e.id === effort) || EFFORT_LEVELS[0]).label;
-  const permLabel = (MODE_META[permissionMode] || MODE_META.default).label;
 
   // New chat: prefer the selected project; fall back to the open session's
   // project so ✎ isn't a dead no-op. With no project at all, drop into the
@@ -8199,7 +8176,7 @@ function MobileMenu({ setRightPanel, onClose }) {
   };
   const openPanel = (id) => { setRightPanel(id); onClose(); };
 
-  const TITLES = { history: '会话与项目', model: '模型', effort: '推理力度', permission: '权限模式', provider: 'Provider', appearance: '外观', theme: '配色方案', readingfont: '对话正文字体' };
+  const TITLES = { history: '会话与项目', model: '模型', effort: '推理力度', provider: 'Provider', appearance: '外观', theme: '配色方案', readingfont: '对话正文字体' };
 
   return (
     <div className="flex flex-col h-full">
@@ -8230,7 +8207,7 @@ function MobileMenu({ setRightPanel, onClose }) {
               <div className="px-4 pt-3 pb-1 text-[11px] text-ink-faint uppercase tracking-wider font-body">当前会话</div>
               <MobileMenuRow icon={Cpu} label="模型" value={<ModelBadge model={currentModel} compact />} onClick={() => push('model')} />
               {claudeProtocol && <MobileMenuRow icon={Gauge} label="推理力度" value={effortLabel} onClick={() => push('effort')} />}
-              <MobileMenuRow icon={Shield} label="权限模式" value={permLabel} onClick={() => push('permission')} />
+              {/* 修正批#1b:权限模式行已删——唯一入口在输入框工具行最左(桌面/手机同)。 */}
               <MobileMenuRow icon={Server} label="Provider" onClick={() => push('provider')} />
               {activeSession?.sessionId && (
                 <div className="px-4 py-2"><RemoteControlButton session={activeSession} /></div>
@@ -8248,7 +8225,6 @@ function MobileMenu({ setRightPanel, onClose }) {
           )}
           {page === 'model' && <MobileModelPage permKey={permKey} />}
           {page === 'effort' && <MobileEffortPage permKey={permKey} />}
-          {page === 'permission' && <MobilePermissionPage permKey={permKey} />}
           {page === 'provider' && <MobileProviderPage />}
           {page === 'appearance' && <MobileAppearancePage push={push} />}
           {page === 'theme' && <MobileThemePage />}
@@ -8429,6 +8405,10 @@ export default function App() {
     return () => clearInterval(id);
   }, []);
   const { sidebarCollapsed, toggleSidebar, selectedProject, selectedSession } = useStore();
+  // 修正批#1b:顶栏选择器(Provider/模型/力度/远程)作用于「活跃窗格」的会话——
+  // 未分屏 = selectedSession;分屏 = 聚焦格。返回既有对象引用,选择器稳定。
+  const headerPane = useStore((s) => (s.paneSessions && s.paneSessions[s.activeTabIndex || 0]) || s.selectedSession);
+  const headerPermKey = headerPane ? (headerPane.sessionId || `draft-${headerPane.projectHash || 'none'}`) : null;
   const [rightPanel, setRightPanelRaw] = useState(null);
   // T5#1 Provider 表单脏数据守卫:CustomProviderForm(设置→Provider)有未保存输入时
   // window.__cguiProviderFormDirty=true(表单 onDirtyChange 上报,卸载自动清)。任何
@@ -9186,13 +9166,21 @@ export default function App() {
             </>
           )}
         </div>
-        {/* P2.1/P2.3 顶栏收编:会话级选择器(Provider/模型/力度/权限/agent/远程)全部
-            内嵌 composer 工具行;分屏入坞 rail。右簇定稿 [?帮助][主题][设置坞]。 */}
+        {/* 修正批#1b 顶栏终稿:右簇 [?帮助][Provider][模型][力度][远程][主题][设置坞]
+            (问号最左、设置最右)。Provider/模型/力度/远程从 composer 工具行迁回顶栏,
+            作用于「活跃窗格」的会话(headerPermKey,分屏时跟随聚焦格);composer 只留
+            [权限模式][附件][旁问]。弹层均走 AnchoredPopover(portal 顶层)向下弹。 */}
         <div className="flex items-center gap-1 flex-wrap justify-end min-w-0 ml-auto">
           <button data-tour="help" onClick={() => setTourOpen(true)} title="使用指引 — 逐个介绍界面功能"
             className="flex items-center justify-center p-1.5 rounded-lg text-ink-muted hover:text-ink hover:bg-black/5 transition-colors">
             <HelpCircle size={15} />
           </button>
+          <ProviderSwitcher tourAnchor respondOpenProvider />
+          <ModelSelector compact permKey={headerPermKey} tourAnchor />
+          <EffortSelector permKey={headerPermKey} tourAnchor />
+          <span data-tour="remote-control" className="inline-flex">
+            <RemoteControlButton session={headerPane} />
+          </span>
           <ThemeToggle />
           {/* 面板坞:分屏 + 10 个面板 + 更新提醒收纳于此(点击展开 rail)。 */}
           <PanelDock rightPanel={rightPanel} setRightPanel={setRightPanel} updateNotice={updateNotice} jumpToUpdate={jumpToUpdate} />

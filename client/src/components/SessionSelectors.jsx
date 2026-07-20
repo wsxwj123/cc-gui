@@ -1,13 +1,84 @@
 // P2.0 组件抽离:ModelSelector / ProviderSwitcher / RemoteControlButton 从 App.jsx
 // 迁出为独立文件 —— ChatInput(composer 工具行)与 App 都要用它们,而 App import
 // ChatInput,留在 App.jsx 会形成循环 import。逻辑原样搬运,不改行为。
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useLayoutEffect } from 'react';
+import { createPortal } from 'react-dom';
 import { ChevronDown, Check, X, Settings, Server, Loader2, Smartphone } from 'lucide-react';
 import { useStore } from '../stores/sessionStore.js';
 import { ModelBadge } from './ModelBadge.jsx';
 import { confirmDialog } from '../utils/confirmDialog.jsx';
 
 const EMPTY_ARRAY = Object.freeze([]);
+
+// 修正批#3:统一弹层壳。portal 到 body + fixed 定位 → 不受任何祖先 stacking
+// context / transform 影响(已知陷阱:animate-glass-rise fill:both 残留 transform、
+// glass 系列 isolation),恒在顶层(zIndex 9999,与 CtxBadge 明细弹层同层),弹层
+// 背景为 .glass-popover 的全不透明 canvas 色 → 不透底。定位:锚点矩形量出后按
+// drop/align 摆放,放不下先翻转到另一侧,仍不够则夹紧回视口(pad 8px);内容异步
+// 变高(如 Provider 列表加载)由 ResizeObserver 触发重量。所有坐标按 --ui-zoom
+// 折算(rect 是视觉px,fixed left/top 是布局px —— CtxBadge 同款修法)。
+// outside-click/Esc 关闭由本组件统一处理(portal 后内容不在锚点 wrap 内,调用方
+// 自己的 contains 判定会误关,调用方不要再挂自己的 document 监听)。
+export function AnchoredPopover({ anchorRef, open, onRequestClose, drop = 'down', align = 'left', className = '', children }) {
+  const elRef = useRef(null);
+  const [pos, setPos] = useState(null);
+  const [bump, setBump] = useState(0);
+
+  useLayoutEffect(() => {
+    if (!open) { setPos(null); return; }
+    const a = anchorRef?.current, el = elRef.current;
+    if (!a || !el) return;
+    const z = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--ui-zoom')) || 1;
+    const pad = 8 * z, gap = 8 * z;
+    const r = a.getBoundingClientRect();
+    const m = el.getBoundingClientRect();
+    const vw = window.innerWidth, vh = window.innerHeight;
+    let left = align === 'right' ? r.right - m.width : r.left;
+    let top = drop === 'up' ? r.top - gap - m.height : r.bottom + gap;
+    // 越界翻转:首选方向放不下且另一侧放得下 → 翻。
+    if (drop === 'up' && top < pad && r.bottom + gap + m.height <= vh - pad) top = r.bottom + gap;
+    if (drop === 'down' && top + m.height > vh - pad && r.top - gap - m.height >= pad) top = r.top - gap - m.height;
+    // 夹紧兜底(翻转后仍可能越界,如超高弹层)。
+    left = Math.min(Math.max(left, pad), Math.max(pad, vw - pad - m.width));
+    top = Math.min(Math.max(top, pad), Math.max(pad, vh - pad - m.height));
+    setPos({ left: left / z, top: top / z });
+  }, [open, drop, align, bump]);
+
+  // 内容尺寸变化(异步列表加载)→ 重新定位。
+  useLayoutEffect(() => {
+    if (!open || !elRef.current) return;
+    const ro = new ResizeObserver(() => setBump((n) => n + 1));
+    ro.observe(elRef.current);
+    return () => ro.disconnect();
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e) => {
+      if (elRef.current?.contains(e.target)) return;
+      if (anchorRef?.current?.contains(e.target)) return;
+      onRequestClose?.();
+    };
+    const onEsc = (e) => { if (e.key === 'Escape') onRequestClose?.(); };
+    document.addEventListener('mousedown', onDown);
+    document.addEventListener('keydown', onEsc);
+    return () => {
+      document.removeEventListener('mousedown', onDown);
+      document.removeEventListener('keydown', onEsc);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
+
+  if (!open) return null;
+  return createPortal(
+    <div ref={elRef}
+      style={{ position: 'fixed', left: pos ? pos.left : 0, top: pos ? pos.top : 0, zIndex: 9999, visibility: pos ? 'visible' : 'hidden' }}
+      className={`glass-popover animate-glass-rise ${className}`}>
+      {children}
+    </div>,
+    document.body,
+  );
+}
 
 // Header button that hands the active session off to phone control. Like
 // Claude Desktop, the server hosts `claude --remote-control --resume <id>` on a
@@ -160,12 +231,12 @@ export function ProviderSwitchList({ onSwitched }) {
   );
 }
 
-// 修正批#1:Provider 独立按钮(用户拍板:provider 与模型保持分开的按钮)。
-// 弹层复用 ProviderSwitchList(切换真调 /api/provider/switch);`cgui:open-provider`
-// 事件(错误回合"检查 Provider 设置"按钮)指向本弹层 —— respondOpenProvider 仅
-// 活跃窗格为 true,避免分屏多实例同时弹。provider 显示名由 ModelSelector 的
-// /api/model 加载写进 store(providerName),这里只读,不重复请求。
-export function ProviderSwitcher({ hideLabel = false, tourAnchor = false, respondOpenProvider = false }) {
+// 修正批#1b:Provider 独立按钮(顶栏,与模型分开)。弹层复用 ProviderSwitchList
+// (切换真调 /api/provider/switch);`cgui:open-provider` 事件(错误回合"检查
+// Provider 设置"按钮)指向本弹层 —— 顶栏单实例,respondOpenProvider 恒开。
+// provider 显示名由 ModelSelector 的 /api/model 加载写进 store(providerName),
+// 这里只读,不重复请求。弹层走 AnchoredPopover(portal 顶层+夹紧)。
+export function ProviderSwitcher({ hideLabel = false, tourAnchor = false, respondOpenProvider = false, drop = 'down' }) {
   const providerHint = useStore((s) => s.currentProvider?.providerHint || 'anthropic');
   const provider = useStore((s) => s.providerName || '');
   const [open, setOpen] = useState(false);
@@ -179,18 +250,6 @@ export function ProviderSwitcher({ hideLabel = false, tourAnchor = false, respon
     return () => window.removeEventListener('cgui:open-provider', onOpenProvider);
   }, [respondOpenProvider]);
 
-  useEffect(() => {
-    if (!open) return;
-    const onDocClick = (e) => { if (!wrapRef.current?.contains(e.target)) setOpen(false); };
-    const onEsc = (e) => { if (e.key === 'Escape') setOpen(false); };
-    document.addEventListener('mousedown', onDocClick);
-    document.addEventListener('keydown', onEsc);
-    return () => {
-      document.removeEventListener('mousedown', onDocClick);
-      document.removeEventListener('keydown', onEsc);
-    };
-  }, [open]);
-
   return (
     <div ref={wrapRef} className="relative" data-tour={tourAnchor ? 'provider-selector' : undefined}>
       <button onClick={() => setOpen(!open)}
@@ -200,20 +259,19 @@ export function ProviderSwitcher({ hideLabel = false, tourAnchor = false, respon
         {!hideLabel && <span className="text-[11px] font-body text-ink-muted whitespace-nowrap max-w-[96px] truncate">{label}</span>}
         <ChevronDown size={10} className="text-ink-faint" />
       </button>
-      {open && (
-        <div className="glass-popover absolute left-0 bottom-full mb-2 w-72 max-w-[calc(var(--app-w,100vw)-1.5rem)] z-50 py-1 animate-glass-rise max-h-[min(60vh,calc(100dvh-6rem))] overflow-y-auto">
-          <div className="px-3 py-1.5 text-[10px] text-ink-faint uppercase tracking-wider font-body border-b border-canvas-deep">
-            Provider · 当前 <b className="normal-case">{label}</b>
-          </div>
-          <ProviderSwitchList onSwitched={() => setOpen(false)} />
+      <AnchoredPopover anchorRef={wrapRef} open={open} onRequestClose={() => setOpen(false)} drop={drop}
+        className="w-72 max-w-[calc(var(--app-w,100vw)-1.5rem)] py-1 max-h-[min(60vh,calc(100dvh-6rem))] overflow-y-auto">
+        <div className="px-3 py-1.5 text-[10px] text-ink-faint uppercase tracking-wider font-body border-b border-canvas-deep">
+          Provider · 当前 <b className="normal-case">{label}</b>
         </div>
-      )}
+        <ProviderSwitchList onSwitched={() => setOpen(false)} />
+      </AnchoredPopover>
     </div>
   );
 }
 
-// P2.1:composer 模型 chip(修正批#1:Provider 段移出为上方独立按钮,本弹层只管模型)。
-export function ModelSelector({ compact = false, permKey = null, tourAnchor = false }) {
+// 修正批#1b:模型 chip(顶栏,作用于活跃窗格的会话;Provider 为独立按钮,本弹层只管模型)。
+export function ModelSelector({ compact = false, permKey = null, tourAnchor = false, drop = 'down' }) {
   const { availableModels } = useStore();
   const customModels = useStore((s) => s.customModels);
   const providerHint = useStore((s) => s.currentProvider?.providerHint || 'anthropic');
@@ -288,22 +346,6 @@ export function ModelSelector({ compact = false, permKey = null, tourAnchor = fa
     };
   }, []);
 
-  // Outside-click close. Document listener works regardless of transform
-  // containing blocks (the fixed-inset trick would be trapped in header).
-  useEffect(() => {
-    if (!open) return;
-    const onDocClick = (e) => {
-      if (!wrapRef.current?.contains(e.target)) setOpen(false);
-    };
-    const onEsc = (e) => { if (e.key === 'Escape') setOpen(false); };
-    document.addEventListener('mousedown', onDocClick);
-    document.addEventListener('keydown', onEsc);
-    return () => {
-      document.removeEventListener('mousedown', onDocClick);
-      document.removeEventListener('keydown', onEsc);
-    };
-  }, [open]);
-
   const handleCustomSubmit = () => {
     const id = customInput.trim();
     if (id) { useStore.getState().addCustomModel(id); selectModel(id); setCustomInput(''); }
@@ -359,8 +401,8 @@ export function ModelSelector({ compact = false, permKey = null, tourAnchor = fa
         )}
         <ChevronDown size={10} className="text-ink-faint" />
       </button>
-      {open && (
-        <div className="glass-popover absolute left-0 bottom-full mb-2 w-80 max-w-[calc(var(--app-w,100vw)-1.5rem)] z-50 py-1 animate-glass-rise max-h-[min(60vh,calc(100dvh-6rem))] overflow-y-auto">
+      <AnchoredPopover anchorRef={wrapRef} open={open} onRequestClose={() => setOpen(false)} drop={drop}
+        className="w-80 max-w-[calc(var(--app-w,100vw)-1.5rem)] py-1 max-h-[min(60vh,calc(100dvh-6rem))] overflow-y-auto">
           <div className="px-3 py-2 sticky top-0 bg-canvas border-b border-canvas-deep">
             <div className="text-[10px] text-ink-faint uppercase tracking-wider font-body flex items-center justify-between">
               <span>选择模型</span>
@@ -471,8 +513,7 @@ export function ModelSelector({ compact = false, permKey = null, tourAnchor = fa
               </button>
             </div>
           </div>
-        </div>
-      )}
+      </AnchoredPopover>
     </div>
   );
 }
