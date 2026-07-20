@@ -5,6 +5,7 @@ import { join, resolve as resolvePath, sep } from 'path';
 import { homedir } from 'os';
 import { stat, mkdir, readFile, writeFile, rm, access } from 'fs/promises';
 import { resolveWorkspacePath } from '../utils/safe-path.js';
+import { broadcastSessionFileChange } from './sessions.js';
 
 const execFileP = promisify(execFile);
 const router = Router();
@@ -270,6 +271,14 @@ router.post('/checkpoints/:sessionId/restore', async (req, res) => {
     }
     // 不再 `git clean -fd`:未跟踪文件(用户手工建的 notes.txt 等)不属 shadow git 管辖,
     // 清掉会丢用户数据。已跟踪文件的删除由上面的 removeWorktreePath 循环处理。
+    // 通知他端会话可能已变(打包版无 watcher)。回滚 UI 是 restore+trim 连发,trim 的
+    // 广播已覆盖 jsonl;这里给单独 restore 的路径兜底,他端 refetch 幂等无害。
+    // projectHash 推导与 chat.js:33 同式(cwd 非字母数字全换 '-');即便 resolveWorkspacePath
+    // 规范化让 hash 与真实目录名有出入也无碍——客户端判据只看 `/projects/` 与 `/<sid>.jsonl` 后缀。
+    try {
+      const projectHash = String(workTree).replace(/[^A-Za-z0-9]/g, '-');
+      broadcastSessionFileChange(join(homedir(), '.claude', 'projects', projectHash, `${req.params.sessionId}.jsonl`));
+    } catch {}
     res.json({ ok: true, removedSinceCheckpoint: headFiles.filter((rel) => !targetSet.has(rel)).length });
   } catch (err) {
     // 区分"快照本身没文件"(pathspec 不匹配,工作区确实未动)、快照对象不存在(bad

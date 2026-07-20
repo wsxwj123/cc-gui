@@ -29,6 +29,7 @@ import {
 import { claudeSpawn, cleanChildEnv, safeModelArg } from './chat.js';
 import { mkdirSync } from 'fs';
 import { resolveUnderHome, resolveWorkspacePath } from '../utils/safe-path.js';
+import { broadcast } from '../broadcast.js';
 
 // L4: 附件元数据 sidecar — 写入位置与 session-reader 一致。
 const ATTACHMENTS_DIR = join(homedir(), '.claude-gui', 'attachments');
@@ -37,6 +38,19 @@ const router = Router();
 
 function sessionFile(projectHash, sessionId) {
   return join(homedir(), '.claude', 'projects', projectHash, `${sessionId}.jsonl`);
+}
+
+// 打包版 Tauri 后端禁用 chokidar watcher(CGUI_DISABLE_FILE_WATCHER=1)→ 改写 jsonl
+// 的端点自身不广播的话,其他客户端(手机/电脑多端)永远收不到"会话变了"的通知,停在
+// 旧画面。修法:写入点自己合成与原 watcher 同型的 file-change 广播(0ms,快于 watcher
+// 2.5s 轮询,且 dev/打包两形态都覆盖)。客户端判据只看字符串形态,不读文件——所以
+// DELETE/archive 后文件不存在也照发原 jsonl 路径。反斜杠统一成正斜杠:useWebSocket
+// 兼容 `\projects\`,但 SessionDetail 的 endsWith(`/${sid}.jsonl`) 只认正斜杠,原生
+// watcher 在 Windows 发反斜杠命中不了(既有缺陷),合成广播不复刻它。
+export function broadcastSessionFileChange(file, eventType = 'change') {
+  try {
+    broadcast({ type: 'file-change', eventType, path: String(file).replace(/\\/g, '/') });
+  } catch {}
 }
 
 function hasRealConversationLine(lines) {
@@ -483,6 +497,7 @@ router.post('/sessions/:sessionId/trim', async (req, res) => {
       // 的内容(可能只剩 meta),前端收到 sessionReset 转 draft、下次发消息新建会话。
       // 数据不丢、可在文件树找回,旧会话仍可手动删。
       await writeJsonlAtomic(file, keptLines.join('\n'));
+      broadcastSessionFileChange(file);
       return res.json({
         trimmed: true,
         sessionReset: true,
@@ -498,6 +513,7 @@ router.post('/sessions/:sessionId/trim', async (req, res) => {
     // same-dir temp and rename (POSIX-atomic on one filesystem) so no reader
     // ever sees a truncated file.
     await writeJsonlAtomic(file, keptLines.join('\n'));
+    broadcastSessionFileChange(file);
     res.json({ trimmed: true, removedFromLine: cutIdx, totalLines: lines.length });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -589,6 +605,7 @@ router.post('/sessions/:sessionId/compact-segment', async (req, res) => {
 
     try { await writeFile(file + '.bak', freshRaw, 'utf-8'); } catch {}
     await writeJsonlAtomic(file, result.lines.join('\n'));
+    broadcastSessionFileChange(file);
     res.json({ ok: true, direction, summaryChars: summaryText.length });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -628,6 +645,7 @@ router.post('/sessions/:sessionId/trim-before-tool', async (req, res) => {
       // 旧 sessionId → "No conversation found" 僵尸会话)。保留裁剪后的内容,回
       // sessionReset 让前端转 draft、下次发消息新建会话。
       await writeJsonlAtomic(file, keptLines.join('\n'));
+      broadcastSessionFileChange(file);
       return res.json({
         trimmed: true,
         sessionReset: true,
@@ -638,6 +656,7 @@ router.post('/sessions/:sessionId/trim-before-tool', async (req, res) => {
     }
 
     await writeJsonlAtomic(file, keptLines.join('\n'));
+    broadcastSessionFileChange(file);
     res.json({
       trimmed: true,
       toolUseId,
@@ -703,6 +722,7 @@ router.post('/sessions/:sessionId/strip-thinking', async (req, res) => {
     // 原子写(tmp+rename),和 trim 一致 —— 避免裸 writeFile 截断后、写完前被文件
     // 监听器读到空内容,导致前端会话瞬间清空。
     await writeJsonlAtomic(file, out.join('\n'));
+    broadcastSessionFileChange(file);
     res.json({ strippedBlocks, touchedLines });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -740,6 +760,7 @@ router.delete('/sessions/:sessionId', async (req, res) => {
     try { await unlink(join(homedir(), '.claude', 'sessions', `${req.params.sessionId}.json`)); } catch {}
     // Best-effort prefs GC(1M 标记/双份标题/置顶),失败不阻断删除响应。
     try { await removeSessionFromPrefs(req.params.sessionId); } catch {}
+    broadcastSessionFileChange(file, 'unlink'); // 文件已删,path 仍发原 jsonl 路径(客户端判据纯字符串)
     res.json({ deleted: deletedJsonl });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -774,6 +795,7 @@ router.post('/sessions/:sessionId/archive', async (req, res) => {
     } else {
       try { await unlink(marker); } catch {}
     }
+    broadcastSessionFileChange(jsonl); // 归档只写 sidecar,但他端侧栏要感知 → 仍按 jsonl 路径发
     res.json({ archived: !!archived });
   } catch (err) {
     res.status(500).json({ error: err.message });
