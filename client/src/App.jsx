@@ -4114,7 +4114,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           const d = await r.json();
           if (!r.ok) throw new Error(d.error || r.status);
           useStore.getState().setRemoteControl(sel.sessionId, true);
-          confirmDialog('远程控制已激活（后台运行，无终端窗口）。\n手机用 Claude App 接管此会话；电脑端 GUI 会自动同步消息。\n输入框已锁定，避免双写——点输入框上方的「收回控制」按钮（或输入框 ⋮ 菜单里的「已激活」）可收回。\n（需 Claude 账号登录，且当前未切到 deepseek/mimo 等三方模型）');
+          confirmDialog('远程控制已激活（后台运行，无终端窗口）。\n手机用 Claude App 接管此会话；电脑端 GUI 会自动同步消息。\n输入框已锁定，避免双写——点输入框上方的「收回控制」按钮（或顶栏的「已激活」按钮）可收回。\n（需 Claude 账号登录，且当前未切到 deepseek/mimo 等三方模型）');
         } catch (e) {
           confirmDialog('开启远程控制失败：' + e.message);
         }

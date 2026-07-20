@@ -988,9 +988,9 @@ export function ChatInput({ onSend, onStop, onAccelerate, onBackground, suggesti
           </div>
         )}
 
-        {/* P2.1 Codex 式两行 composer:上行整宽输入框,下行工具行
-            [+附件][旁问⊙][模式▾][模型▾][力度▾][⋮] … [发送/入队/停止]。
-            会话级选择器全部内嵌于此(顶栏收编);手机端隐藏 chips(走 MobileMenu 分页)。 */}
+        {/* 修正批#1b 两行 composer:上行整宽输入框,下行工具行
+            [权限模式▾][+附件][旁问⊙] … [发送 | 入队/转后台/停止](桌面/手机同一套)。
+            Provider/模型/力度/远程在顶栏;权限按钮文案窄容器自动缩为图标(container query)。 */}
         <div
           className={`chat-composer glass-capsule px-4 pt-2.5 pb-2 ${dragging ? 'ring-2 ring-accent/60' : ''}`}
           onDragOver={(e) => { e.preventDefault(); setDragging(true); }}
