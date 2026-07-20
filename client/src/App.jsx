@@ -3436,8 +3436,15 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         closePaneGuarded(tabIndex); // 正在运行/等授权时先确认(见 closePaneGuarded)
       }
     };
+    // 审计批C1:手机无 Cmd+F,MobileMenu「会话内检索」行派发此事件;仅活动窗格响应
+    // (与 Cmd+F 同门控),桌面不受影响。
+    const onOpenSearch = () => setSearchOpen(true);
     window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
+    window.addEventListener('cgui:open-search', onOpenSearch);
+    return () => {
+      window.removeEventListener('keydown', onKey);
+      window.removeEventListener('cgui:open-search', onOpenSearch);
+    };
   }, [paneIsActive, tabIndex]);
   const setSelectedSession = useCallback((s) => {
     useStore.getState().setPaneSession(tabIndex, s);
@@ -8263,6 +8270,12 @@ function MobileMenu({ setRightPanel, onClose }) {
                 <ChevronRight size={16} className="text-ink-ghost shrink-0" />
               </button>
               {claudeProtocol && <MobileMenuRow icon={Gauge} label="推理力度" value={effortLabel} onClick={() => push('effort')} />}
+              {/* 审计批C1:手机会话内检索入口(桌面为 Cmd+F)。事件由活动窗格的
+                  SessionDetail 接住并 setSearchOpen(true);先关抽屉让检索浮层可见。 */}
+              {activeSession && (
+                <MobileMenuRow icon={Search} label="会话内检索" chevron={false}
+                  onClick={() => { onClose(); window.dispatchEvent(new CustomEvent('cgui:open-search')); }} />
+              )}
               {/* 修正批#1b:权限模式行已删——唯一入口在输入框工具行最左(桌面/手机同)。 */}
               {activeSession?.sessionId && (
                 <div className="px-4 py-2"><RemoteControlButton session={activeSession} /></div>
