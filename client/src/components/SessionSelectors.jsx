@@ -7,8 +7,23 @@ import { ChevronDown, Check, X, Settings, Server, Loader2, Smartphone } from 'lu
 import { useStore } from '../stores/sessionStore.js';
 import { ModelBadge } from './ModelBadge.jsx';
 import { confirmDialog } from '../utils/confirmDialog.jsx';
+import { mergeProviderLists, SOURCE_BADGE } from '../utils/providerList.js';
 
 const EMPTY_ARRAY = Object.freeze([]);
+
+// 修正批#6:来源徽章(切换卡片/管理页/手机页共用)。官方不打徽章(它是基准项,
+// 恒置顶);合并了同名 cc-switch 导入项的自定义条目加提示。
+export function ProviderSourceBadge({ p }) {
+  if (p.source === 'official') return null;
+  const merged = (p.dupOf || []).some((d) => d.source === 'ccswitch' || d.source === 'openai');
+  return (
+    <span
+      className="text-[9px] px-1 py-px bg-canvas-warm border border-canvas-deep text-ink-faint rounded font-body shrink-0"
+      title={merged ? '同名的 cc-switch 导入项已合并进此条(以可编辑的自定义项为准)' : undefined}>
+      {SOURCE_BADGE[p.source] || p.source}{merged ? '·含导入' : ''}
+    </span>
+  );
+}
 
 // 修正批#3:统一弹层壳。portal 到 body + fixed 定位 → 不受任何祖先 stacking
 // context / transform 影响(已知陷阱:animate-glass-rise fill:both 残留 transform、
@@ -130,8 +145,8 @@ export function RemoteControlButton({ session }) {
   );
 }
 
-// P2.1:Provider 切换列表(内嵌版)。原顶栏 ProviderSwitcher 弹层瘦身而来,现作为
-// ModelSelector 弹层顶部的 provider 段渲染 —— "切 provider"与"选模型"同一决策链。
+// 修正批#6:Provider 切换列表 —— 单一列表(mergeProviderLists,与管理页同一数据
+// 选择器):官方置顶、其余按名称序,来源用小徽章标注,不再按来源分组。
 // 点行即切,当前项打勾;增删改/测试/隐藏/导入在 设置→Provider(底部直达链)。
 export function ProviderSwitchList({ onSwitched }) {
   const [providers, setProviders] = useState([]);
@@ -188,41 +203,24 @@ export function ProviderSwitchList({ onSwitched }) {
     window.dispatchEvent(new CustomEvent('cgui:open-settings', { detail: { section: 'set-provider-manage' } }));
   };
 
-  const row = (p, extra = null) => (
-    <button key={p.id} disabled={switching} onClick={() => switchTo(p.id)}
-      className={`w-full min-w-0 text-left px-3 py-1.5 flex items-center gap-2 hover:bg-canvas-warm transition-colors ${isCur(p) ? 'bg-accent-subtle' : ''} ${switching ? 'opacity-50' : ''}`}>
-      <span className={`flex-1 text-xs font-body truncate ${isCur(p) ? 'text-accent font-medium' : 'text-ink'}`}>{p.name}</span>
-      {extra}
-      {isCur(p) && <Check size={12} className="text-accent shrink-0" />}
-    </button>
-  );
-  const modelCountChip = (p) => (p.models?.length > 0
-    ? <span className="text-[9px] px-1 py-px bg-canvas-deep text-ink-faint rounded font-mono shrink-0">{p.models.length} 模型</span>
-    : null);
+  const rows = mergeProviderLists({ providers, openaiProviders, customProviders })
+    .filter((p) => !hiddenProviders.has(p.id));
 
   return (
     <div>
       <p className="px-3 pt-1 text-[10px] text-ink-faint font-body leading-snug">
         切换会改写 <code className="font-mono">~/.claude/settings.json</code>（自动备份），<b>对新发的消息生效</b>。
       </p>
-      {providers.filter((p) => !hiddenProviders.has(p.id)).map((p) => row(p))}
-      {openaiProviders.filter((p) => !hiddenProviders.has(p.id)).length > 0 && (
-        <div className="px-3 pt-2 pb-1 mt-1 border-t border-canvas-deep">
-          <div className="text-[10px] text-ink-faint uppercase tracking-wider font-body">OpenAI 格式 <span className="text-ink-ghost normal-case tracking-normal">· 经内置代理</span></div>
-        </div>
-      )}
-      {openaiProviders.filter((p) => !hiddenProviders.has(p.id)).map((p) => row(p, modelCountChip(p)))}
-      {customProviders.length > 0 && (
-        <div className="px-3 pt-2 pb-1 mt-1 border-t border-canvas-deep">
-          <div className="text-[10px] text-ink-faint uppercase tracking-wider font-body">自定义</div>
-        </div>
-      )}
-      {customProviders.map((p) => row(p, (
-        <>
-          {modelCountChip(p)}
-          <span className="text-[9px] px-1 py-px bg-canvas-deep text-ink-faint rounded font-mono shrink-0">{p.type}</span>
-        </>
-      )))}
+      {rows.map((p) => (
+        <button key={p.id} disabled={switching} onClick={() => switchTo(p.id)}
+          className={`w-full min-w-0 text-left px-3 py-1.5 flex items-center gap-2 hover:bg-canvas-warm transition-colors ${isCur(p) ? 'bg-accent-subtle' : ''} ${switching ? 'opacity-50' : ''}`}>
+          <span className={`flex-1 text-xs font-body truncate ${isCur(p) ? 'text-accent font-medium' : 'text-ink'}`}>{p.name}</span>
+          {p.models?.length > 0 && <span className="text-[9px] px-1 py-px bg-canvas-deep text-ink-faint rounded font-mono shrink-0">{p.models.length} 模型</span>}
+          {p.type && p.source === 'custom' && <span className="text-[9px] px-1 py-px bg-canvas-deep text-ink-faint rounded font-mono shrink-0">{p.type}</span>}
+          <ProviderSourceBadge p={p} />
+          {isCur(p) && <Check size={12} className="text-accent shrink-0" />}
+        </button>
+      ))}
       <button onClick={openManager}
         className="w-full text-left px-3 py-2 mt-1 text-[11px] text-accent hover:bg-canvas-warm border-t border-canvas-deep font-body flex items-center gap-1.5">
         <Settings size={12} /> 管理 Provider（增删改 · 测试 · 隐藏 · 导入）→
