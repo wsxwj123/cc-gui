@@ -1,13 +1,27 @@
 // CK-3: 使用指引。逐个高亮界面功能按钮,下方浮出说明文字。
-// 目标元素通过 data-tour="<id>" 定位;找不到的步骤自动跳过(如分屏/远程在某些态不渲染)。
+// 目标元素通过 data-tour="<id>" 定位;找不到的步骤自动跳过(如无项目态 composer 不在 DOM)。
 // 左栏是会话列表还是项目列表 → 动态裁剪对应步骤(避免在项目列表讲会话、反之亦然)。
+// P2.6 重编:选择器全在 composer 工具行就近讲;坞内分屏+面板平铺轮播;顶栏只剩 [?][主题][坞]。
+// 机制:步骤可带 enter(进入该步骤时 dispatch 的 window 事件,支持数组)——
+//  · cgui:tour-ensure-draft:无会话时在活跃窗格自动建 draft(App 监听;无项目则不建,步骤自动跳过)
+//  · cgui:composer-more-open:展开 composer ⋮ 菜单
+//  · cgui:dock-rail-open:展开顶栏面板坞 rail
+// enter 先派发再找锚点(draft/菜单/rail 是异步渲染,给 3×150ms 重试),仍找不到才顺延跳过。
 import { useState, useEffect, useLayoutEffect, useMemo, useRef } from 'react';
 import { X, ArrowRight, ArrowLeft } from 'lucide-react';
 
-// P1.5:原 10 个面板步骤并为 1 步「面板坞」——步骤进入时经 cgui:dock-rail-open 事件
-// 展开 rail 做演示(第 4 元素 = enter 事件名),文案压缩为每面板一行。
+// 面板 ×10 平铺(文案沿用),每步 enter=展开 rail(锚点 panel-<id> 仅 rail 展开时在 DOM)。
 const PANEL_STEPS = [
-  ['panel-dock', '设置(功能面板坞)', '10 个功能面板都收纳在顶栏「设置」里:点它原位展开面板条,再点任一图标打开对应面板;点外部或再点「设置」图标收起。\n· 文件:项目文件树,查看 / 编辑 / 预览,右键可添加到上下文\n· 审查:按回合看 AI 改了哪些文件(diff),可回滚\n· 监控:子代理 + 后台代理实时状态,可逐个停止\n· Agent:管理自定义子代理(~/.claude/agents)\n· 用量:token / 费用统计,/insights 报告,导出 CSV\n· 进程:查看并停止正在运行的 claude 子进程\n· 工具:MCP 服务器与插件的增删 / 测试 / 安装\n· 技能:skill 市场导入与本机技能管理\n· 指令:CLAUDE.md 四级指令 / 自动记忆 / 提示词库\n· 通用:更新 / 会话 / 外观 / Provider / 权限 / 网络 等 9 个标签页\n快捷键 Cmd/Ctrl+1..9 直达前 9 个面板、0 打开「通用」(面板条收起时同样可用);有可用更新时「设置」图标出现红点,展开后点「更新」直达更新区。', 'cgui:dock-rail-open'],
+  ['panel-files', '文件浏览器', '项目文件树:查看 / 编辑 / 预览文件,右键可把文件添加到对话上下文。', 'cgui:dock-rail-open'],
+  ['panel-changes', '文件审查', '按回合查看 AI 改了哪些文件(diff 对比),不满意可一键回滚。', 'cgui:dock-rail-open'],
+  ['panel-monitor', 'Subagent 监控', '子代理与后台代理的实时状态,可逐个停止。', 'cgui:dock-rail-open'],
+  ['panel-agents', 'Agent 管理', '管理自定义子代理(写入 ~/.claude/agents)。\n· 内置 orchestrator / explorer / oracle / designer / fixer 等预设首次启动已自动安装,在此可查看 / 编辑 / 重装', 'cgui:dock-rail-open'],
+  ['panel-usage', '用量统计', 'token / 费用统计,/insights 报告,可导出 CSV。', 'cgui:dock-rail-open'],
+  ['panel-processes', '进程管理', '查看并停止正在运行的 claude 子进程。', 'cgui:dock-rail-open'],
+  ['panel-mcp', '工具(MCP)', 'MCP 服务器与插件的增删 / 测试 / 安装。', 'cgui:dock-rail-open'],
+  ['panel-skills', 'Skill 市场', 'skill 市场导入与本机技能管理。', 'cgui:dock-rail-open'],
+  ['panel-memory', 'CLAUDE.md 指令', 'CLAUDE.md 四级指令 / 自动记忆 / 提示词库。', 'cgui:dock-rail-open'],
+  ['panel-settings', '通用设置', '更新 / 会话 / Provider / 环境 / 权限 / Hooks / 网络 / 高级 共 8 个标签页;顶部可搜索设置项。', 'cgui:dock-rail-open'],
 ];
 
 function buildSteps(hasProject) {
@@ -17,8 +31,7 @@ function buildSteps(hasProject) {
   if (hasProject) {
     steps.push(
       ['sidebar-list', '会话列表', '当前项目下的所有会话,点任一条进入。\n· 顶部切「活跃 / 已归档」、搜索会话标题\n· 每条会话可 pin 置顶、归档、删除、分叉(fork 出一条新线)\n· 点标题即可重命名'],
-      ['new-session', '新建会话', '在当前项目下开一个新会话(也可按 Cmd/Ctrl+N)。\n· 自动继承上一个会话的模型 / 推理力度 / 子代理模式,免得每次重选'],
-      ['new-worktree', 'worktree 隔离会话', '在新建的 git worktree 里开会话,改动与主工作区隔离 —— 适合让 AI 大改代码而不污染当前分支。\n· 可选已有 worktree,或填名字新建'],
+      ['new-session', '新建会话', '在当前项目下开一个新会话(也可按 Cmd/Ctrl+N)。\n· 自动继承上一个会话的模型 / 推理力度 / 主控 agent,免得每次重选\n· 旁边的「worktree」按钮在隔离的 git worktree 里开会话,改动不污染当前分支'],
     );
   } else {
     steps.push(
@@ -27,26 +40,34 @@ function buildSteps(hasProject) {
     );
   }
   steps.push(
-    ['provider-switcher', '切换 Provider', '在官方 Anthropic 与第三方中转之间一键切换(点任一条即切,对新发的消息生效)。\n· 增删改 / 测试连接 / 隐藏 / 从 cc-switch 导入等管理操作,在弹层底部「管理 Provider」进入 通用 → Provider 页\n· 管理页有内置模板:官方 OpenAI / Anthropic / Google Gemini、DeepSeek、Kimi、通义千问、豆包、智谱 GLM 等,填 API key、点「获取模型」即可用\n· 支持 openai 兼容与 anthropic 兼容两种协议,选定协议后模板只显示该协议预设,避免选错'],
-    ['model-selector', '模型', '选当前会话使用的具体模型。\n· 分屏时每个窗格可各自独立选\n· 切到第三方 provider 会显示它自己的模型列表'],
-    ['effort-selector', '推理力度', '调 AI 的思考强度:低 / 中 / 高 / 最高。\n· 越高思考越深入、结果越细致,但越慢、越费 token\n· 官方模型区别明显,部分第三方可能无效'],
-    ['permission-selector', '权限模式', '控制 AI 调用工具时是否需要你逐个确认:\n· 默认:每个工具调用都弹卡片让你批准\n· 接受编辑:自动批准文件编辑,其它工具仍问\n· 规划:只读不改,先给出计划让你确认;计划批准后全文常驻在输入框上方(默认折叠一行,可展开回看或隐藏)\n· 放行:全自动执行、完全不问(慎用)'],
-    ['agent-selector', '子代理模式', '选一个已安装的子代理作会话主控,它可经 Task 把任务委派给其它子代理并行执行。\n· 默认只有「普通模式」;orchestrator(编排)、explorer、oracle、designer、fixer 等预设需先在「Agent」面板点安装,才会出现在这里可选\n· 子代理跑完结果汇总回主对话;进度在「监控」面板看'],
-    ['remote-control', '手机远程控制', '用手机上的 Claude App 同账号接管当前这一条会话继续对话。\n· 需已登录官方账号、且当前非第三方 provider\n· 与「通用·网络 + Tailscale」不同:那个是手机浏览器访问整个 GUI 界面,这个只接管单条会话'],
-    ['pane-count', '分屏', '把界面分成 1–6 个窗格,并排同时看和操作多个会话。\n· 每个窗格的模型 / 权限模式相互独立'],
-    ...PANEL_STEPS,
-    ['theme-toggle', '主题与外观', '外观相关设置:\n· 配色主题(多套深浅色可选)\n· 界面字号、对话正文字号\n· AI 思考时的加载动画样式(30 种可选)\n· 同样的设置也在 通用 → 外观 页(两处同源)'],
-    // P1.2 被收纳项的新落点:会话信息徽章 + 会话头 ⋮(无会话时锚点不在 DOM,自动跳过)。
+    // composer 系步骤:enter 自动建 draft 会话(无项目态建不出 → 整段自动跳过,末步文案引导重看)。
+    ['composer', '输入框', '对话都从这里开始,下方一排是本会话的所有开关。\n· Enter 发送、Shift+Enter 换行;输入 / 打开命令面板;输入 @ 引用文件或其它会话\n· 可拖入图片 / PDF / Office 文件;Cmd/Ctrl+Z 撤销输入\n· AI 回复中再输入会入队;输入框为空按 ↑ 召回最近入队消息\n· 左侧气泡图标是「旁问」:不打断当前工作、不写入会话历史的临时提问(未读有角标)\n· 按 Cmd/Ctrl+/ 打开快捷键速查表', 'cgui:tour-ensure-draft'],
+    ['mode-selector', '权限模式', '控制 AI 执行动作前是否询问你(按会话独立记忆):\n· 逐步确认:每次编辑 / 命令 / 网络前都询问,只读直接执行\n· 接受编辑:文件编辑直接执行,其它命令仍询问\n· 规划:只读研究并给出计划,你批准后自动切到执行档\n· 自动:后台安全分类器逐动作审查,通过即执行(仅官方 Anthropic 端点显示)\n· 放任:跳过全部权限检查(危险,仅建议隔离环境)', 'cgui:tour-ensure-draft'],
+    ['model-selector', '模型与 Provider', '选当前会话使用的具体模型(分屏时每格独立)。\n· 弹层顶部是 Provider 段:官方 Anthropic 与第三方中转一键切换,管理入口在 通用 → Provider\n· 支持 1M 上下文开关、搜索 / 拉取最新模型、手填自定义模型 ID', 'cgui:tour-ensure-draft'],
+    ['effort-selector', '推理力度', '调 AI 的思考强度:低 / 中 / 高 / 极高 / 极限。\n· 越高思考越深入、结果越细致,但越慢、越费 token\n· 官方模型区别明显,部分第三方可能无效', 'cgui:tour-ensure-draft'],
+    ['composer-more', '更多 ⋮', '低频会话级操作收在这里:\n· 主控 agent:选一个 agent(如 orchestrator 编排)主导本会话并委派其它 agent 并行干活,仅新建会话生效;内置预设首次启动已自动安装(可在 Agent 面板查看 / 编辑)\n· 远程控制:用手机 Claude App 同账号接管本会话\n· AI 工作中还会多一项「转后台」:本回合转后台继续跑,期间可切别的会话', ['cgui:tour-ensure-draft', 'cgui:composer-more-open']],
     ['ctx-badge', '会话信息徽章', '本会话的信息中枢:显示上下文占用 xx k / 窗口(百分比),点开看 /context 分项明细并可重新精确计算。\n· 弹层还收纳:当前模型与「曾用」模型史、第三方 provider 标识、工具调用次数、累计 token / 费用 / 缓存命中率\n· 新会话数据未到达时,徽章先显示模型徽章(零态),首个回合后自动切为占用数字'],
     ['session-menu', '会话头 ⋮ 菜单', '更多会话操作收纳在这里:\n· 导出:把当前会话导出为 Markdown(下载到本地或复制到剪贴板)\n· 检查点:Checkpoint 时间线 —— 给工作目录拍快照,可随时回到某个快照并裁剪会话到该时刻\n· 重命名点标题旁铅笔;分叉 / 归档在左侧会话列表 hover 菜单'],
-    ['composer', '输入框', '· Cmd/Ctrl+Enter 发送、Enter 换行\n· 输入 / 打开命令面板(含 /branch 分叉、/goal 目标、插件命令等)\n· 输入 @ 打开引用选择器:按目录层级浏览项目文件(点文件夹进入、「返回上级」回退),输入关键词则全局搜索;Tab 切到会话页可把本项目其它会话的内容注入当前对话\n· 可【拖入】图片 / PDF / Word / Excel / PPT 等文件\n· Cmd/Ctrl+Z 撤销输入\n· AI 回复中再输入会入队;输入框为空时按 ↑ 键召回最近入队的消息\n· 按 Cmd/Ctrl+/ 打开快捷键速查表(含切换分屏窗格 Ctrl+Tab、切上/下一条会话 Cmd+↑/↓ 等全部快捷键)'],
-    ['help', '快捷键速查 & 重看指引', '随时按 Cmd/Ctrl+/ 打开【快捷键速查表】,里面列了发送、切会话、切分屏窗格等全部快捷键。\n· 以后忘了哪个功能,点这个问号就能重新走一遍本指引。'],
+    ['panel-dock', '设置(面板坞)', '分屏和所有功能面板都收纳在这:点它原位展开面板条,再点任一图标打开对应面板;点外部或再点图标收起。\n· 快捷键 Cmd/Ctrl+1..9 直达前 9 个面板、0 打开「通用」(面板条收起时同样可用)\n· 有可用更新时图标出现红点,展开后点「更新」直达更新区', 'cgui:dock-rail-open'],
+    ['dock-pane', '分屏', '把界面分成 1–6 个窗格,并排同时看和操作多个会话。\n· 每个窗格的模型 / 权限模式 / 力度相互独立\n· Ctrl+Tab 轮换聚焦窗格', 'cgui:dock-rail-open'],
+    ...PANEL_STEPS,
+    ['theme-toggle', '主题与外观', '外观相关设置的唯一入口:\n· 明暗 / 配色主题(多套深浅色)、界面字号、对话正文字体\n· AI 思考时的加载动画样式(30 种可选)\n· 聊天模式(折叠思考 / 工具只看对话文本)、对话区背景(纯色 / 图片 / 视频)'],
+    ['help', '快捷键速查 & 重看指引', '随时按 Cmd/Ctrl+/ 打开【快捷键速查表】,里面列了发送、切会话、切分屏窗格、面板直达等全部快捷键。\n· 以后忘了哪个功能,点这个问号就能重新走一遍本指引' + (hasProject ? '。' : ';添加项目后重看,可看到输入框一排开关的完整介绍。')],
   );
-  // enter(可选)= 进入该步骤时 dispatch 的 window 事件名(如展开面板坞做演示)。
+  // enter(可选)= 进入该步骤时 dispatch 的 window 事件名(字符串或数组)。
   return steps.map(([sel, title, desc, enter]) => ({ sel, title, desc, enter }));
 }
 
 const TIP_W = 300;
+const findEl = (sel) => {
+  const el = document.querySelector(`[data-tour="${sel}"]`);
+  return (el && el.getBoundingClientRect().width > 0) ? el : null;
+};
+const fireEnter = (step) => {
+  if (!step?.enter) return false;
+  for (const ev of [].concat(step.enter)) window.dispatchEvent(new CustomEvent(ev));
+  return true;
+};
 
 export function GuideTour({ open, onClose, hasProject }) {
   const steps = useMemo(() => buildSteps(hasProject), [hasProject]);
@@ -58,33 +79,49 @@ export function GuideTour({ open, onClose, hasProject }) {
   // 问号导引 = 纯逐步(下一步/上一步),高亮【不随鼠标动】,逐个介绍界面功能。
 
   // 开:回到第 1 步(rect 由下面的定位 effect 设)。关:清残留 rect/pos —— 否则下次重开
-  // 的首帧会用到上一轮的旧 i/rect,而 steps 长度随 hasProject 变(有项目态多 1 步),
-  // 旧 i 越界 → steps[i] 为 undefined → 渲染抛错整页白屏(用户报:返回初始界面再点指引白屏)。
+  // 的首帧会用到上一轮的旧 i/rect,而 steps 长度随 hasProject 变,旧 i 越界 →
+  // steps[i] 为 undefined → 渲染抛错整页白屏(用户报:返回初始界面再点指引白屏)。
   useEffect(() => {
     if (open) setI(0);
     else { setRect(null); setPos(null); }
   }, [open]);
 
-  // 定位当前步骤目标;找不到就顺延到下一个有效步骤,全部找不到则结束。
+  // 定位当前步骤目标。P2.6:先派发 enter(建 draft/开菜单/开 rail 都是异步渲染),
+  // 给 3×150ms 重试等锚点出现;仍找不到才顺延到下一个有效步骤,全部找不到则结束。
   useLayoutEffect(() => {
     if (!open) return;
-    let idx = i, el = null;
-    while (idx < steps.length) {
-      el = document.querySelector(`[data-tour="${steps[idx].sel}"]`);
-      if (el && el.getBoundingClientRect().width > 0) break;
-      el = null; idx++;
-    }
-    if (!el) { onClose(); return; }
-    if (idx !== i) { setI(idx); return; }
-    // P1.5 步骤联动:进入带 enter 的步骤时 dispatch 对应事件(如 cgui:dock-rail-open 展开
-    // 面板坞)。展开会让锚点(wrapper)尺寸变化,320ms 后补量一次高亮框(等 rail 动画落定)。
-    if (steps[idx].enter) window.dispatchEvent(new CustomEvent(steps[idx].enter));
-    el.scrollIntoView({ block: 'nearest' });
-    const update = () => setRect(el.getBoundingClientRect());
-    update();
-    const remeasure = steps[idx].enter ? setTimeout(update, 320) : null;
+    const step = steps[i];
+    if (!step) { onClose(); return; }
+    fireEnter(step);
+    let cancelled = false;
+    let tries = 0;
+    let retryTimer = null;
+    const resolve = () => {
+      if (cancelled) return;
+      const el = findEl(step.sel);
+      if (!el) {
+        if (tries < 3) { tries++; retryTimer = setTimeout(resolve, 150); return; }
+        // 锚点确实不在(如无项目态的 composer 系步骤)→ 顺延到下一个存在的步骤。
+        let idx = i + 1;
+        while (idx < steps.length && !findEl(steps[idx].sel) && !steps[idx].enter) idx++;
+        if (idx >= steps.length) { onClose(); return; }
+        setI(idx);
+        return;
+      }
+      el.scrollIntoView({ block: 'nearest' });
+      setRect(el.getBoundingClientRect());
+    };
+    resolve();
+    const update = () => { const el = findEl(step.sel); if (el) setRect(el.getBoundingClientRect()); };
+    // enter 引发的展开动画落定后补量一次高亮框。
+    const remeasure = step.enter ? setTimeout(update, 320) : null;
     window.addEventListener('resize', update);
-    return () => { window.removeEventListener('resize', update); if (remeasure) clearTimeout(remeasure); };
+    return () => {
+      cancelled = true;
+      window.removeEventListener('resize', update);
+      if (retryTimer) clearTimeout(retryTimer);
+      if (remeasure) clearTimeout(remeasure);
+    };
   }, [open, i, steps, onClose]);
 
   // 说明卡定位。关键:<html> 有 font-scale `zoom`(如 1.2),getBoundingClientRect 返回
@@ -105,20 +142,25 @@ export function GuideTour({ open, onClose, hasProject }) {
     setPos({ top: top / zoom, left: left / zoom, zoom });
   }, [open, rect, i]);
 
-  // 兜底看门狗:目标元素中途消失(面板关闭/布局变化)时 rect/pos 残留,全屏遮罩会把
-  // 整页锁死(preview 实测过"顶栏全点不动")。定期验证当前目标仍在且可见:失效则顺延
-  // 到下一个有效步骤,全部无效直接结束 tour。失败方向=宁可结束指引也不能锁死界面。
+  // 兜底看门狗:目标元素中途消失(rail 被点收起 / 布局变化)时 rect/pos 残留,全屏遮罩
+  // 会把整页锁死(preview 实测过"顶栏全点不动")。定期验证当前目标仍在且可见:
+  //  · 失效且该步带 enter → 先重派 enter(重开 rail/菜单)给两轮机会,不立即跳过;
+  //  · 仍失效 / 无 enter → 顺延到下一个有效步骤,全部无效直接结束 tour。
+  // 失败方向 = 宁可结束指引也不能锁死界面。
+  const missRef = useRef(0);
+  useEffect(() => { missRef.current = 0; }, [i, open]);
   useEffect(() => {
     if (!open) return;
     const timer = setInterval(() => {
-      let idx = i;
-      while (idx < steps.length) {
-        const el = document.querySelector(`[data-tour="${steps[idx].sel}"]`);
-        if (el && el.getBoundingClientRect().width > 0) break;
-        idx++;
-      }
+      const step = steps[i];
+      if (!step) { onClose(); return; }
+      if (findEl(step.sel)) { missRef.current = 0; return; }
+      missRef.current++;
+      if (missRef.current <= 2 && fireEnter(step)) return; // 重开展开态,下一轮再验
+      let idx = i + 1;
+      while (idx < steps.length && !findEl(steps[idx].sel) && !steps[idx].enter) idx++;
       if (idx >= steps.length) onClose();
-      else if (idx !== i) setI(idx);
+      else setI(idx);
     }, 600);
     return () => clearInterval(timer);
   }, [open, i, steps, onClose]);

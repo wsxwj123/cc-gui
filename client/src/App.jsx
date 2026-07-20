@@ -8585,6 +8585,24 @@ export default function App() {
     return () => window.removeEventListener('cgui:open-settings', onOpenSettings);
   }, []);
 
+  // P2.6 导引兜底:composer 系步骤进入时若活跃窗格无会话,自动建 draft(不落盘、无副作用),
+  // 让 composer/模式/模型/力度/⋮ 锚点进 DOM。无项目态不建 —— 这些步骤保持自动跳过,
+  // 导引末步文案引导"添加项目后重看"。复用 Cmd+N 的草稿逻辑,只写活跃窗格 keyed slot。
+  useEffect(() => {
+    const onEnsureDraft = () => {
+      const st = useStore.getState();
+      const idx = st.activeTabIndex || 0;
+      const cur = (st.paneSessions && st.paneSessions[idx]) || st.selectedSession;
+      if (cur) return; // 已有会话/draft,composer 已在
+      const proj = st.selectedProject;
+      if (!proj) return;
+      st.setPaneSession(idx, { draft: true, draftId: newDraftId(), sessionId: null, projectHash: proj.hash, projectPath: proj.path, firstPrompt: '新会话' });
+      st.setPaneMessages(idx, []);
+    };
+    window.addEventListener('cgui:tour-ensure-draft', onEnsureDraft);
+    return () => window.removeEventListener('cgui:tour-ensure-draft', onEnsureDraft);
+  }, []);
+
   // P1.6 面板直达:Cmd/Ctrl+1..9 按 PANEL_MAP 顺序开对应面板,0=设置;再按一次=关闭
   // (与点面板按钮同语义)。rightPanel 是 App 级单值状态、面板本身无 per-pane 语义,
   // 故挂 window 全局无需 paneIsActive 门控;不受面板坞折叠态影响(rail 收起也直达)。
