@@ -31,7 +31,7 @@ function buildSteps(hasProject) {
   if (hasProject) {
     steps.push(
       ['sidebar-list', '会话列表', '当前项目下的所有会话,点任一条进入。\n· 顶部切「活跃 / 已归档」、搜索会话标题\n· 每条会话可 pin 置顶、归档、删除、分叉(fork 出一条新线)\n· 点标题即可重命名'],
-      ['new-session', '新建会话', '在当前项目下开一个新会话(也可按 Cmd/Ctrl+N)。\n· 自动继承上一个会话的模型 / 推理力度 / 主控 agent,免得每次重选\n· 旁边的「worktree」按钮在隔离的 git worktree 里开会话,改动不污染当前分支'],
+      ['new-session', '新建会话', '在当前项目下开一个新会话(也可按 Cmd/Ctrl+N)。\n· 自动继承上一个会话的推理力度,免得每次重选\n· 旁边的「worktree」按钮在隔离的 git worktree 里开会话,改动不污染当前分支'],
     );
   } else {
     steps.push(
@@ -46,7 +46,7 @@ function buildSteps(hasProject) {
     ['provider-selector', 'Provider', '切换 API 服务来源:官方 Anthropic 与第三方中转一键切换,对新发的消息生效。\n· 增删改 / 测试 / 隐藏 / 导入在 通用 → Provider 管理页', 'cgui:tour-ensure-draft'],
     ['model-selector', '模型', '选当前会话使用的具体模型(分屏时每格独立)。\n· 支持 1M 上下文开关、搜索 / 拉取最新模型、手填自定义模型 ID', 'cgui:tour-ensure-draft'],
     ['effort-selector', '推理力度', '调 AI 的思考强度:低 / 中 / 高 / 极高 / 极限。\n· 越高思考越深入、结果越细致,但越慢、越费 token\n· 官方模型区别明显,部分第三方可能无效', 'cgui:tour-ensure-draft'],
-    ['composer-more', '更多 ⋮', '低频会话级操作收在这里:\n· 主控 agent:选一个 agent(如 orchestrator 编排)主导本会话并委派其它 agent 并行干活,仅新建会话生效;内置预设首次启动已自动安装(可在 Agent 面板查看 / 编辑)\n· 远程控制:用手机 Claude App 同账号接管本会话\n· AI 工作中还会多一项「转后台」:本回合转后台继续跑,期间可切别的会话', ['cgui:tour-ensure-draft', 'cgui:composer-more-open']],
+    ['composer-more', '更多 ⋮', '低频会话级操作收在这里:\n· 远程控制:用手机 Claude App 同账号接管本会话\n· AI 工作中还会多一项「转后台」:本回合转后台继续跑,期间可切别的会话', ['cgui:tour-ensure-draft', 'cgui:composer-more-open']],
     ['ctx-badge', '会话信息徽章', '本会话的信息中枢:显示上下文占用 xx k / 窗口(百分比),点开看 /context 分项明细并可重新精确计算。\n· 弹层还收纳:当前模型与「曾用」模型史、第三方 provider 标识、工具调用次数、累计 token / 费用 / 缓存命中率\n· 新会话数据未到达时,徽章先显示模型徽章(零态),首个回合后自动切为占用数字'],
     ['session-menu', '会话头 ⋮ 菜单', '更多会话操作收纳在这里:\n· 导出:把当前会话导出为 Markdown(下载到本地或复制到剪贴板)\n· 检查点:Checkpoint 时间线 —— 给工作目录拍快照,可随时回到某个快照并裁剪会话到该时刻\n· 重命名点标题旁铅笔;分叉 / 归档在左侧会话列表 hover 菜单'],
     ['panel-dock', '设置(面板坞)', '分屏和所有功能面板都收纳在这:点它原位展开面板条,再点任一图标打开对应面板;点外部或再点图标收起。\n· 快捷键 Cmd/Ctrl+1..9 直达前 9 个面板、0 打开「通用」(面板条收起时同样可用)\n· 有可用更新时图标出现红点,展开后点「更新」直达更新区', 'cgui:dock-rail-open'],

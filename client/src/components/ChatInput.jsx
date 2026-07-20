@@ -113,10 +113,10 @@ export function PermissionModeSelector({ permKey, hideLabel = false, tourAnchor 
   );
 }
 
-// P2.1 composer ⋮ 溢出菜单:主控 agent 选择(轴 B,原 AgentModeSelector 并入)+
-// 远程控制 + (流式时)转后台。选中非普通 agent 时按钮显名字角标;远程激活显绿点。
-export function ComposerMore({ permKey = null, sessionId = null, isStreaming = false, onBackground, hideLabel = false, tourAnchor = false }) {
-  const active = useStore((s) => (permKey ? (s.activeAgentBySession || {})[permKey] || '' : ''));
+// P2.1 composer ⋮ 溢出菜单:远程控制 + (流式时)转后台。远程激活显绿点。
+// 修正批#2:主控 agent 选择器已删除(用户拍板,零删除豁免)——只删前端入口,
+// store(activeAgentBySession)与发送链(options.agent)能力保留不拆。
+export function ComposerMore({ sessionId = null, isStreaming = false, onBackground, tourAnchor = false }) {
   const rcActive = useStore((s) => (sessionId ? !!s.remoteControlled[sessionId] : false));
   // 远程控制需要会话的 projectPath(cwd):按 sessionId 从窗格/选中会话反查,原始值为
   // 字符串引用稳定,不会造成多余重渲。
@@ -125,16 +125,11 @@ export function ComposerMore({ permKey = null, sessionId = null, isStreaming = f
     const pane = (s.paneSessions || []).find((x) => x?.sessionId === sessionId);
     return (pane || s.selectedSession)?.projectPath || '';
   });
-  const sessionStarted = !!sessionId;
   const [open, setOpen] = useState(false);
-  const [agents, setAgents] = useState([]);
   const wrapRef = useRef(null);
 
   useEffect(() => {
     if (!open) return;
-    fetch('/api/agents').then((r) => r.json()).then((d) => {
-      setAgents(Array.isArray(d?.agents) ? d.agents : []);
-    }).catch(() => {});
     const onDocClick = (e) => { if (!wrapRef.current?.contains(e.target)) setOpen(false); };
     const onEsc = (e) => { if (e.key === 'Escape') setOpen(false); };
     document.addEventListener('mousedown', onDocClick);
@@ -153,62 +148,28 @@ export function ComposerMore({ permKey = null, sessionId = null, isStreaming = f
     return () => window.removeEventListener('cgui:composer-more-open', onOpen);
   }, [tourAnchor]);
 
-  const pick = (name) => {
-    // plan 与 agent 不再互斥(内置 agent tools 已含 ExitPlanMode),选 agent 不再强制退出规划模式。
-    useStore.getState().setActiveAgentFor(permKey, name);
-  };
-
   return (
     <div ref={wrapRef} className="relative" data-tour={tourAnchor ? 'composer-more' : undefined}>
       <button onClick={() => setOpen(!open)}
         className={`relative flex items-center gap-1 px-2 py-1 rounded-md hover:bg-black/5 transition-colors ${open ? 'bg-black/5' : ''}`}
-        title={`更多：主控 agent${active ? `(${active})` : ''} / 远程控制${isStreaming ? ' / 转后台' : ''}`}>
-        <MoreHorizontal size={14} className={active ? 'text-accent' : 'text-ink-muted'} />
-        {active && !hideLabel && (
-          <span className="text-[10px] font-body text-accent max-w-[72px] truncate">{active}</span>
-        )}
+        title={`更多：远程控制${isStreaming ? ' / 转后台' : ''}`}>
+        <MoreHorizontal size={14} className="text-ink-muted" />
         {rcActive && <span className="absolute -top-0.5 -right-0.5 w-2 h-2 rounded-full bg-green-500" title="远程控制已激活" />}
       </button>
       {open && (
-        <div className="glass-popover absolute right-0 bottom-full mb-2 w-64 z-50 py-1 animate-glass-rise max-h-[min(60vh,calc(100dvh-6rem))] overflow-y-auto">
-          <div className="px-3 py-1.5 text-[10px] text-ink-faint uppercase tracking-wider font-body">主控 agent（仅新建会话生效）</div>
-          {sessionStarted && (
-            <div className="px-3 pb-1.5 text-[10px] text-amber-700 font-body leading-snug">会话已开始，无法更改；此选择在新建会话时生效。</div>
-          )}
-          <button onClick={() => pick('')}
-            className={`w-full text-left px-3 py-1.5 hover:bg-black/5 flex items-center gap-2 ${!active ? 'bg-accent/12' : ''}`}>
-            <span className="flex-1 text-xs font-medium text-ink font-body">普通模式</span>
-            {!active && <div className="w-1.5 h-1.5 rounded-full bg-accent shrink-0" />}
-          </button>
-          {agents.map((a) => (
-            <button key={a.name} onClick={() => pick(a.name)}
-              className={`w-full text-left px-3 py-1.5 hover:bg-black/5 flex items-start gap-2 ${active === a.name ? 'bg-accent/12' : ''}`}>
-              <div className="flex-1 min-w-0">
-                <div className="text-xs font-medium text-ink font-body truncate">
-                  {a.name}{a.name === 'orchestrator' && <span className="text-[9px] text-accent ml-1">可分配其它 agent</span>}
-                </div>
-                {a.description && <div className="text-[10px] text-ink-faint font-body truncate">{a.description}</div>}
-              </div>
-              {active === a.name && <div className="w-1.5 h-1.5 rounded-full bg-accent mt-1.5 shrink-0" />}
-            </button>
-          ))}
-          {agents.length === 0 && (
-            <div className="px-3 py-2 text-[11px] text-ink-faint font-body">暂无 agent。可在「Agent」面板安装内置预设。</div>
-          )}
-          <div className="border-t border-black/5 mt-1 pt-1">
-            <div className="px-3 py-1 text-[10px] text-ink-faint uppercase tracking-wider font-body">会话操作</div>
-            <div className="px-2 py-1 flex items-center gap-2">
-              <RemoteControlButton session={sessionId ? { sessionId, projectPath } : null} />
-              <span className="text-[10px] text-ink-faint font-body">手机 Claude App 接管本会话</span>
-            </div>
-            {isStreaming && onBackground && (
-              <button onClick={() => { setOpen(false); onBackground(); }}
-                className="w-full text-left px-3 py-1.5 hover:bg-black/5 flex items-center gap-2">
-                <ArrowDownToLine size={12} className="text-ink-muted shrink-0" />
-                <span className="text-xs text-ink font-body">本回合转入后台运行</span>
-              </button>
-            )}
+        <div className="glass-popover absolute right-0 bottom-full mb-2 w-64 max-w-[calc(var(--app-w,100vw)-1.5rem)] z-50 py-1 animate-glass-rise max-h-[min(60vh,calc(100dvh-6rem))] overflow-y-auto">
+          <div className="px-3 py-1.5 text-[10px] text-ink-faint uppercase tracking-wider font-body">会话操作</div>
+          <div className="px-2 py-1 flex items-center gap-2">
+            <RemoteControlButton session={sessionId ? { sessionId, projectPath } : null} />
+            <span className="text-[10px] text-ink-faint font-body">手机 Claude App 接管本会话</span>
           </div>
+          {isStreaming && onBackground && (
+            <button onClick={() => { setOpen(false); onBackground(); }}
+              className="w-full text-left px-3 py-1.5 hover:bg-black/5 flex items-center gap-2">
+              <ArrowDownToLine size={12} className="text-ink-muted shrink-0" />
+              <span className="text-xs text-ink font-body">本回合转入后台运行</span>
+            </button>
+          )}
         </div>
       )}
     </div>
@@ -1177,8 +1138,8 @@ export function ChatInput({ onSend, onStop, onAccelerate, onBackground, suggesti
               <ProviderSwitcher hideLabel={paneCount >= 4} tourAnchor={paneIsActive} respondOpenProvider={paneIsActive} />
               <ModelSelector compact permKey={permKey} tourAnchor={paneIsActive} />
               <EffortSelector permKey={permKey} hideLabel={paneCount >= 4} tourAnchor={paneIsActive} />
-              <ComposerMore permKey={permKey} sessionId={sessionId} isStreaming={isStreaming}
-                onBackground={onBackground} hideLabel={paneCount >= 4} tourAnchor={paneIsActive} />
+              <ComposerMore sessionId={sessionId} isStreaming={isStreaming}
+                onBackground={onBackground} tourAnchor={paneIsActive} />
             </div>
             <div className="flex-1 min-w-[8px]" />
             {isStreaming ? (
