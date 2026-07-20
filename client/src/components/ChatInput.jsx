@@ -1,24 +1,62 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Send, Loader2, Square, Terminal, Puzzle, Wrench, Gauge, ChevronDown, X, FileText, Paperclip, Shield, ShieldOff, ClipboardList, Check, Pencil, Smartphone, Workflow, AtSign, MessagesSquare, Folder, CornerLeftUp, Sparkles, ArrowDownToLine } from 'lucide-react';
+import { Send, Loader2, Square, Terminal, Puzzle, Wrench, Gauge, ChevronDown, X, FileText, Paperclip, Shield, ShieldOff, ClipboardList, Check, Pencil, Smartphone, AtSign, MessagesSquare, Folder, CornerLeftUp, Sparkles, ArrowDownToLine, Zap, MoreHorizontal } from 'lucide-react';
 import { useStore, PERMISSION_MODES } from '../stores/sessionStore.js';
 import { PermissionPrompt } from './PermissionPrompt.jsx';
 import { TodoPanel } from './TodoPanel.jsx';
 import { confirmDialog } from '../utils/confirmDialog.jsx';
 import { ImageLightbox } from './ImageLightbox.jsx';
+import { ModelSelector, RemoteControlButton } from './SessionSelectors.jsx';
 
-// Permission mode metadata — mirrors `claude --permission-mode <choice>`.
+// Permission mode metadata — mirrors `claude --permission-mode <choice>`。
+// P2.1:文案对齐官方六档语义(RESEARCH-mode-semantics §④b);bypass 中文名保持「放任」。
 export const MODE_META = {
-  default:           { label: '默认', desc: '改文件 / 执行命令 / MCP 调用前都弹窗；只读与安全命令（Read/echo 等）自动放行', icon: Shield,        tone: 'text-ink-muted' },
-  acceptEdits:       { label: '接受编辑', desc: '改文件（写入/编辑）自动放行；执行命令（Bash）/ MCP 仍弹窗', icon: Check,         tone: 'text-amber-600' },
-  plan:              { label: '规划', desc: '只规划，不执行任何工具', icon: ClipboardList, tone: 'text-blue-600' },
-  bypassPermissions: { label: '放任', desc: '跳过全部权限（危险）', icon: ShieldOff,     tone: 'text-red-500' },
+  default:           { label: '逐步确认', desc: '每次编辑 / 命令 / 网络请求前都询问；只读操作直接执行', icon: Shield,        tone: 'text-ink-muted' },
+  acceptEdits:       { label: '接受编辑', desc: '文件编辑与 mkdir/mv/rm 等文件命令直接执行；其它命令、网络、MCP 仍逐次询问', icon: Check,         tone: 'text-amber-600' },
+  plan:              { label: '规划', desc: '只读研究并给出方案，批准前不改任何文件；批准计划后自动切到执行档', icon: ClipboardList, tone: 'text-blue-600' },
+  auto:              { label: '自动', desc: '由后台安全分类器逐动作审查，通过即执行、有风险才询问；少弹窗但非零风险', icon: Zap,           tone: 'text-emerald-600' },
+  bypassPermissions: { label: '放任', desc: '跳过全部权限检查与提示（危险，仅建议在隔离环境使用）', icon: ShieldOff,     tone: 'text-red-500' },
 };
 
-export function PermissionModeSelector({ permKey }) {
+// ── auto 档可用性(T3 两层门控) ──────────────────────────────────
+// 静态过滤:仅官方 Anthropic provider 显示「自动」(第三方中转不支持 SDK auto 分类器);
+// 运行时失败(账户/模型/CLI 版本不够)由发送错误链路调用 markAutoUnavailable 记本地标记
+// (provider+model 键,换 provider/模型自动重试),此后该组合下隐藏。
+const AUTO_UNAVAILABLE_KEY = 'cgui-auto-unavailable';
+const autoKey = (hint, model) => `${hint || 'anthropic'}|${String(model || '').replace(/\[1m\]/i, '')}`;
+export function isAutoUnavailable(hint, model) {
+  try { return !!(JSON.parse(localStorage.getItem(AUTO_UNAVAILABLE_KEY) || '{}'))[autoKey(hint, model)]; }
+  catch { return false; }
+}
+export function markAutoUnavailable(hint, model) {
+  try {
+    const map = JSON.parse(localStorage.getItem(AUTO_UNAVAILABLE_KEY) || '{}');
+    map[autoKey(hint, model)] = true;
+    localStorage.setItem(AUTO_UNAVAILABLE_KEY, JSON.stringify(map));
+  } catch {}
+  window.dispatchEvent(new CustomEvent('cgui:auto-availability'));
+}
+// 当前可见的权限档列表(desktop 模式按钮与手机模式分页共用同一份门控)。
+export function useVisiblePermissionModes(permKey = null) {
+  const providerHint = useStore((s) => s.currentProvider?.providerHint || 'anthropic');
+  const model = useStore((s) => (permKey && s.modelBySession[permKey]) || s.currentModel || '');
+  const [, setBump] = useState(0);
+  useEffect(() => {
+    const f = () => setBump((n) => n + 1);
+    window.addEventListener('cgui:auto-availability', f);
+    return () => window.removeEventListener('cgui:auto-availability', f);
+  }, []);
+  return PERMISSION_MODES.filter((m) => m !== 'auto'
+    || (providerHint === 'anthropic' && !isAutoUnavailable(providerHint, model)));
+}
+
+// P2.1 模式按钮:纯权限档平铺(状态 = permissionMode 本值,per-pane keyed)。
+// composer 底部工具行内使用 → 弹层上弹(bottom-full)。
+export function PermissionModeSelector({ permKey, hideLabel = false, tourAnchor = false }) {
   // Read THIS session's mode (keyed). Subscribing to the map slice keeps the
   // chip in sync when the active session changes underneath us.
   const permissionMode = useStore((s) => (permKey ? (s.permissionModeBySession[permKey] || s.permissionMode) : s.permissionMode));
   const setPermissionMode = useStore((s) => s.setPermissionMode);
+  const visibleModes = useVisiblePermissionModes(permKey);
   const [open, setOpen] = useState(false);
   const wrapRef = useRef(null);
   const current = MODE_META[permissionMode] || MODE_META.default;
@@ -37,18 +75,18 @@ export function PermissionModeSelector({ permKey }) {
   }, [open]);
 
   return (
-    <div ref={wrapRef} className="relative">
+    <div ref={wrapRef} className="relative" data-tour={tourAnchor ? 'mode-selector' : undefined}>
       <button onClick={() => setOpen(!open)}
         className="flex items-center gap-1 px-2 py-1 rounded-md hover:bg-black/5 transition-colors"
-        title={`权限: ${current.label} — ${current.desc}`}>
+        title={`权限模式: ${current.label} — ${current.desc}`}>
         <Icon size={12} className={current.tone} />
-        <span className={`text-[11px] font-body ${current.tone}`}>{current.label}</span>
+        {!hideLabel && <span className={`text-[11px] font-body whitespace-nowrap ${current.tone}`}>{current.label}</span>}
         <ChevronDown size={10} className="text-ink-faint" />
       </button>
       {open && (
-        <div className="glass-popover absolute right-0 top-full mt-2 w-60 z-50 py-1 animate-glass-rise">
+        <div className="glass-popover absolute left-0 bottom-full mb-2 w-64 z-50 py-1 animate-glass-rise max-h-[min(60vh,calc(100dvh-6rem))] overflow-y-auto">
           <div className="px-3 py-1.5 text-[10px] text-ink-faint uppercase tracking-wider font-body">权限模式 (--permission-mode)</div>
-          {PERMISSION_MODES.map((m) => {
+          {visibleModes.map((m) => {
             const meta = MODE_META[m];
             const MIcon = meta.icon;
             return (
@@ -75,11 +113,19 @@ export function PermissionModeSelector({ permKey }) {
   );
 }
 
-// BG5:活跃 Agent / 模式开关。选一个 ~/.claude/agents 里的 agent 作会话主控
-// (CLI --agent),它可经 Task 委派子代理 —— 复刻 opencode 的 orchestrator 模式。
-// 仅新建会话生效(CLI 不接受 --resume 时改 agent),所以已开始的会话这里只读地显示。
-export function AgentModeSelector({ permKey = null, sessionStarted = false }) {
+// P2.1 composer ⋮ 溢出菜单:主控 agent 选择(轴 B,原 AgentModeSelector 并入)+
+// 远程控制 + (流式时)转后台。选中非普通 agent 时按钮显名字角标;远程激活显绿点。
+export function ComposerMore({ permKey = null, sessionId = null, isStreaming = false, onBackground, hideLabel = false, tourAnchor = false }) {
   const active = useStore((s) => (permKey ? (s.activeAgentBySession || {})[permKey] || '' : ''));
+  const rcActive = useStore((s) => (sessionId ? !!s.remoteControlled[sessionId] : false));
+  // 远程控制需要会话的 projectPath(cwd):按 sessionId 从窗格/选中会话反查,原始值为
+  // 字符串引用稳定,不会造成多余重渲。
+  const projectPath = useStore((s) => {
+    if (!sessionId) return '';
+    const pane = (s.paneSessions || []).find((x) => x?.sessionId === sessionId);
+    return (pane || s.selectedSession)?.projectPath || '';
+  });
+  const sessionStarted = !!sessionId;
   const [open, setOpen] = useState(false);
   const [agents, setAgents] = useState([]);
   const wrapRef = useRef(null);
@@ -99,36 +145,44 @@ export function AgentModeSelector({ permKey = null, sessionStarted = false }) {
     };
   }, [open]);
 
+  // 导引联动:tour 的 composer-more 步骤经事件展开本菜单(仅活跃窗格挂锚点,tourAnchor 门控)。
+  useEffect(() => {
+    if (!tourAnchor) return;
+    const onOpen = () => setOpen(true);
+    window.addEventListener('cgui:composer-more-open', onOpen);
+    return () => window.removeEventListener('cgui:composer-more-open', onOpen);
+  }, [tourAnchor]);
+
   const pick = (name) => {
     // plan 与 agent 不再互斥(内置 agent tools 已含 ExitPlanMode),选 agent 不再强制退出规划模式。
     useStore.getState().setActiveAgentFor(permKey, name);
-    setOpen(false);
   };
-  const label = active || '普通模式';
 
   return (
-    <div ref={wrapRef} className="relative">
+    <div ref={wrapRef} className="relative" data-tour={tourAnchor ? 'composer-more' : undefined}>
       <button onClick={() => setOpen(!open)}
-        className="flex items-center gap-1 px-2 py-1 rounded-md hover:bg-black/5 transition-colors"
-        title={sessionStarted ? '会话已开始，无法更改 agent；仅新建会话可选' : '选择主导本次对话的 agent，可自动分配其它 agent 协助（仅新建会话生效）'}>
-        <Workflow size={12} className={active ? 'text-accent' : 'text-ink-faint'} />
-        <span className={`text-[11px] font-body max-w-[110px] truncate ${active ? 'text-accent' : 'text-ink-muted'}`}>{label}</span>
-        <ChevronDown size={10} className="text-ink-faint" />
+        className={`relative flex items-center gap-1 px-2 py-1 rounded-md hover:bg-black/5 transition-colors ${open ? 'bg-black/5' : ''}`}
+        title={`更多：主控 agent${active ? `(${active})` : ''} / 远程控制${isStreaming ? ' / 转后台' : ''}`}>
+        <MoreHorizontal size={14} className={active ? 'text-accent' : 'text-ink-muted'} />
+        {active && !hideLabel && (
+          <span className="text-[10px] font-body text-accent max-w-[72px] truncate">{active}</span>
+        )}
+        {rcActive && <span className="absolute -top-0.5 -right-0.5 w-2 h-2 rounded-full bg-green-500" title="远程控制已激活" />}
       </button>
       {open && (
-        <div className="glass-popover absolute right-0 top-full mt-2 w-64 z-50 py-1 animate-glass-rise max-h-[60vh] overflow-y-auto">
-          <div className="px-3 py-1.5 text-[10px] text-ink-faint uppercase tracking-wider font-body">选择主导本次对话的 agent</div>
+        <div className="glass-popover absolute right-0 bottom-full mb-2 w-64 z-50 py-1 animate-glass-rise max-h-[min(60vh,calc(100dvh-6rem))] overflow-y-auto">
+          <div className="px-3 py-1.5 text-[10px] text-ink-faint uppercase tracking-wider font-body">主控 agent（仅新建会话生效）</div>
           {sessionStarted && (
             <div className="px-3 pb-1.5 text-[10px] text-amber-700 font-body leading-snug">会话已开始，无法更改；此选择在新建会话时生效。</div>
           )}
           <button onClick={() => pick('')}
-            className={`w-full text-left px-3 py-2 hover:bg-black/5 flex items-center gap-2 ${!active ? 'bg-accent/12' : ''}`}>
+            className={`w-full text-left px-3 py-1.5 hover:bg-black/5 flex items-center gap-2 ${!active ? 'bg-accent/12' : ''}`}>
             <span className="flex-1 text-xs font-medium text-ink font-body">普通模式</span>
             {!active && <div className="w-1.5 h-1.5 rounded-full bg-accent shrink-0" />}
           </button>
           {agents.map((a) => (
             <button key={a.name} onClick={() => pick(a.name)}
-              className={`w-full text-left px-3 py-2 hover:bg-black/5 flex items-start gap-2 ${active === a.name ? 'bg-accent/12' : ''}`}>
+              className={`w-full text-left px-3 py-1.5 hover:bg-black/5 flex items-start gap-2 ${active === a.name ? 'bg-accent/12' : ''}`}>
               <div className="flex-1 min-w-0">
                 <div className="text-xs font-medium text-ink font-body truncate">
                   {a.name}{a.name === 'orchestrator' && <span className="text-[9px] text-accent ml-1">可分配其它 agent</span>}
@@ -141,6 +195,20 @@ export function AgentModeSelector({ permKey = null, sessionStarted = false }) {
           {agents.length === 0 && (
             <div className="px-3 py-2 text-[11px] text-ink-faint font-body">暂无 agent。可在「Agent」面板安装内置预设。</div>
           )}
+          <div className="border-t border-black/5 mt-1 pt-1">
+            <div className="px-3 py-1 text-[10px] text-ink-faint uppercase tracking-wider font-body">会话操作</div>
+            <div className="px-2 py-1 flex items-center gap-2">
+              <RemoteControlButton session={sessionId ? { sessionId, projectPath } : null} />
+              <span className="text-[10px] text-ink-faint font-body">手机 Claude App 接管本会话</span>
+            </div>
+            {isStreaming && onBackground && (
+              <button onClick={() => { setOpen(false); onBackground(); }}
+                className="w-full text-left px-3 py-1.5 hover:bg-black/5 flex items-center gap-2">
+                <ArrowDownToLine size={12} className="text-ink-muted shrink-0" />
+                <span className="text-xs text-ink font-body">本回合转入后台运行</span>
+              </button>
+            )}
+          </div>
         </div>
       )}
     </div>
@@ -157,7 +225,7 @@ export const EFFORT_LEVELS = [
 ];
 
 // Dropdown anchored to the trigger button (lightweight, no full-screen blur).
-export function EffortSelector({ permKey = null }) {
+export function EffortSelector({ permKey = null, hideLabel = false, tourAnchor = false }) {
   // Per-SESSION effort:这条会话自己的力度,无 entry 回落全局默认。和模型/权限一样按
   // 会话隔离持久化,改它不影响其他会话。
   const effort = useStore((s) => (permKey && permKey in (s.effortBySession || {})) ? s.effortBySession[permKey] : s.effort);
@@ -185,18 +253,18 @@ export function EffortSelector({ permKey = null }) {
   }, [open]);
 
   return (
-    <div ref={wrapRef} className="relative">
+    <div ref={wrapRef} className="relative" data-tour={tourAnchor ? 'effort-selector' : undefined}>
       <button onClick={() => setOpen(!open)}
         className="flex items-center gap-1 px-2 py-1 rounded-md hover:bg-black/5 transition-colors"
         title={openAIProtocol
           ? `Effort: ${current.label}（OpenAI 兼容模式会映射为 reasoning_effort；不支持的端点自动降级）`
           : `Effort: ${current.label}`}>
         <Gauge size={12} className="text-ink-muted" />
-        <span className="text-[11px] font-body text-ink-muted">{current.label}</span>
+        {!hideLabel && <span className="text-[11px] font-body text-ink-muted whitespace-nowrap">{current.label}</span>}
         <ChevronDown size={10} className="text-ink-faint" />
       </button>
       {open && (
-        <div className="glass-popover absolute right-0 top-full mt-2 w-44 z-50 py-1 animate-glass-rise">
+        <div className="glass-popover absolute left-0 bottom-full mb-2 w-44 z-50 py-1 animate-glass-rise max-h-[min(60vh,calc(100dvh-6rem))] overflow-y-auto">
           <div className="px-3 py-1.5 text-[10px] text-ink-faint uppercase tracking-wider font-body">
             {openAIProtocol ? '推理力度 (reasoning_effort)' : '推理力度 (--effort)'}
           </div>
@@ -267,8 +335,11 @@ export function ChatInput({ onSend, onStop, onAccelerate, onBackground, suggesti
   const [atBusy, setAtBusy] = useState(false);  // 会话引用生成中
   const atCtxRef = useRef({ cwd: '', projectHash: '' }); // 打开面板时快照,避免 selector 新引用重渲
   const sessions = useStore((s) => s.sessions);
-  // 分屏窗格越多 pane 越窄:≥4 分屏时「旁问」按钮只留图标、藏文字,免得挤占输入框宽度(判官挂账)。
+  // 分屏窗格越多 pane 越窄:≥4 分屏时选择器 chips 藏文字只留图标,免得挤爆工具行。
   const paneCount = useStore((s) => s.paneCount);
+  // P2.4:data-tour 锚点只挂在【活跃窗格】—— composer per-pane 渲染后锚点会出现多份,
+  // GuideTour querySelector 取首个可能圈错窗格;cgui:open-provider 也按此门控单实例响应。
+  const paneIsActive = useStore((s) => (s.paneCount || 1) === 1 || (s.activeTabIndex || 0) === (tabIndex ?? 0));
   const textareaRef = useRef(null);
   const fileInputRef = useRef(null);
   const draftBeforeHistoryRef = useRef('');
@@ -1044,8 +1115,11 @@ export function ChatInput({ onSend, onStop, onAccelerate, onBackground, suggesti
           </div>
         )}
 
+        {/* P2.1 Codex 式两行 composer:上行整宽输入框,下行工具行
+            [+附件][旁问⊙][模式▾][模型▾][力度▾][⋮] … [发送/入队/停止]。
+            会话级选择器全部内嵌于此(顶栏收编);手机端隐藏 chips(走 MobileMenu 分页)。 */}
         <div
-          className={`chat-composer glass-capsule flex items-end gap-2 px-5 py-3.5 ${dragging ? 'ring-2 ring-accent/60' : ''}`}
+          className={`chat-composer glass-capsule px-4 pt-2.5 pb-2 ${dragging ? 'ring-2 ring-accent/60' : ''}`}
           onDragOver={(e) => { e.preventDefault(); setDragging(true); }}
           onDragLeave={() => setDragging(false)}
           onDrop={handleDrop}
@@ -1058,37 +1132,8 @@ export function ChatInput({ onSend, onStop, onAccelerate, onBackground, suggesti
             onChange={handleFilePick}
             className="hidden"
           />
-          <button
-            type="button"
-            onClick={() => fileInputRef.current?.click()}
-            disabled={disabled || rcLocked}
-            className="shrink-0 h-9 w-9 rounded-full hover:bg-black/5 text-ink-muted hover:text-accent flex items-center justify-center transition-colors disabled:opacity-50"
-            title="添加附件（图片、PDF 或文件）"
-          >
-            <Paperclip size={16} />
-          </button>
-          {/* 旁问入口(方案A):放输入框工具行、附件按钮右侧,固定在稳定 chrome 里,不再和消息队列条/
-              横幅抢右下角浮动地皮。点击展开旁问浮窗(走 onBtwOpen→openSignal);未读角标显示在此。 */}
-          {onBtwOpen && (
-            <button
-              type="button"
-              onClick={onBtwOpen}
-              className="shrink-0 h-9 pl-2 pr-2.5 rounded-full hover:bg-black/5 text-ink-muted hover:text-accent flex items-center gap-1 transition-colors relative"
-              title="旁问（不打断当前工作、不写入会话历史）"
-            >
-              <MessagesSquare size={15} />
-              {/* 手机(max-md)藏文字只留图标:流式时同排还有入队/转后台/停止,375px 装不下会把
-                  停止按钮顶出输入框边界(#15);桌面分屏≥4 同理已藏。 */}
-              {paneCount < 4 && <span className="text-[12px] font-body max-md:hidden">旁问</span>}
-              {btwUnread > 0 && (
-                <span className="absolute -top-0.5 -right-0.5 min-w-[15px] h-[15px] px-1 rounded-full bg-accent text-white text-[9px] leading-[15px] text-center font-mono">
-                  {btwUnread > 9 ? '9+' : btwUnread}
-                </span>
-              )}
-            </button>
-          )}
           <textarea
-            data-tour="composer"
+            data-tour={paneIsActive ? 'composer' : undefined}
             ref={textareaRef}
             value={text}
             onChange={handleTextChange}
@@ -1097,60 +1142,90 @@ export function ChatInput({ onSend, onStop, onAccelerate, onBackground, suggesti
             placeholder={rcLocked ? '已交给手机远程控制 · 点上方「收回控制」解锁' : (dragging ? '松开以添加图片、PDF、Office 或文本…' : '输入消息... (/ 打开命令)')}
             disabled={disabled || rcLocked}
             rows={1}
-            // 单行高度对齐左右按钮(h-9=36px):min-h-[36px]+py-1.5 让单行文字在 36px 行内
-            // 垂直居中,与 paperclip / 发送按钮(都 h-9 居中)对齐;多行时随内容增高、items-end
-            // 仍让按钮贴底。box-border(Tailwind preflight)下 min-h 含 padding。
-            className="flex-1 bg-transparent text-[14px] text-ink placeholder-ink-faint resize-none focus:outline-none font-body leading-relaxed py-1.5 min-h-[36px] max-h-[200px]"
+            className="w-full bg-transparent text-[14px] text-ink placeholder-ink-faint resize-none focus:outline-none font-body leading-relaxed py-1 min-h-[28px] max-h-[200px]"
           />
-
-          {isStreaming ? (
-            <>
-              {/* During streaming: input gets queued, "Send" button enqueues. */}
+          <div className="flex items-center gap-0.5 mt-1">
+            <button
+              type="button"
+              onClick={() => fileInputRef.current?.click()}
+              disabled={disabled || rcLocked}
+              className="shrink-0 h-8 w-8 rounded-full hover:bg-black/5 text-ink-muted hover:text-accent flex items-center justify-center transition-colors disabled:opacity-50"
+              title="添加附件（图片、PDF 或文件）"
+            >
+              <Paperclip size={15} />
+            </button>
+            {/* 旁问入口:纯图标(全平台,P2.1 去文字);未读角标显示在此。 */}
+            {onBtwOpen && (
+              <button
+                type="button"
+                onClick={onBtwOpen}
+                className="shrink-0 h-8 w-8 rounded-full hover:bg-black/5 text-ink-muted hover:text-accent flex items-center justify-center transition-colors relative"
+                title="旁问（不打断当前工作、不写入会话历史）"
+              >
+                <MessagesSquare size={15} />
+                {btwUnread > 0 && (
+                  <span className="absolute -top-0.5 -right-0.5 min-w-[15px] h-[15px] px-1 rounded-full bg-accent text-white text-[9px] leading-[15px] text-center font-mono">
+                    {btwUnread > 9 ? '9+' : btwUnread}
+                  </span>
+                )}
+              </button>
+            )}
+            {/* 会话级选择器 chips(手机端隐藏,走 MobileMenu;分屏≥4 窄格藏文字只留图标)。 */}
+            <div className="max-md:hidden flex items-center gap-0.5 min-w-0">
+              <PermissionModeSelector permKey={permKey} hideLabel={paneCount >= 4} tourAnchor={paneIsActive} />
+              <ModelSelector compact permKey={permKey} tourAnchor={paneIsActive} respondOpenProvider={paneIsActive} />
+              <EffortSelector permKey={permKey} hideLabel={paneCount >= 4} tourAnchor={paneIsActive} />
+              <ComposerMore permKey={permKey} sessionId={sessionId} isStreaming={isStreaming}
+                onBackground={onBackground} hideLabel={paneCount >= 4} tourAnchor={paneIsActive} />
+            </div>
+            <div className="flex-1 min-w-[8px]" />
+            {isStreaming ? (
+              <>
+                {/* During streaming: input gets queued, "Send" button enqueues. */}
+                <button
+                  onClick={handleSend}
+                  disabled={!text.trim() && attachments.length === 0}
+                  className="shrink-0 h-8 px-3 max-md:px-2.5 rounded-full bg-accent/10 hover:bg-accent/20 text-accent flex items-center justify-center gap-1 transition-colors disabled:opacity-50 text-[11px] font-medium"
+                  title="入队（当前消息发送完后自动发出）"
+                >
+                  <Send size={13} /><span className="max-md:hidden">入队</span>
+                </button>
+                {/* H 转后台:桌面端已收进 ⋮ 菜单;手机端 chips(含 ⋮)隐藏,保留独立按钮兜底。 */}
+                {onBackground && (
+                  <button
+                    onClick={onBackground}
+                    className="md:hidden shrink-0 h-8 px-2.5 rounded-md bg-canvas-warm border border-canvas-deep hover:bg-black/5 text-ink-soft flex items-center justify-center transition-colors text-[11px] font-medium"
+                    title="本回合转入后台继续运行,完成后自动提示;期间可切换到其它会话"
+                  >
+                    <ArrowDownToLine size={11} />
+                  </button>
+                )}
+                {/* Small rounded-rect stop button, CLI-style. Always-clickable
+                    whether streaming locally or only running in background. */}
+                <button
+                  onClick={onStop}
+                  className="shrink-0 h-8 px-3 max-md:px-2.5 rounded-md bg-ink/90 hover:bg-ink text-canvas flex items-center justify-center gap-1.5 max-md:gap-0 transition-colors text-[11px] font-medium"
+                  title="停止生成"
+                >
+                  <Square size={11} className="fill-current" />
+                  <span className="max-md:hidden">停止</span>
+                </button>
+              </>
+            ) : (
               <button
                 onClick={handleSend}
-                disabled={!text.trim() && attachments.length === 0}
-                className="shrink-0 h-9 px-3 max-md:px-2.5 rounded-full bg-accent/10 hover:bg-accent/20 text-accent flex items-center justify-center gap-1 transition-colors disabled:opacity-50 text-[11px] font-medium"
-                title="入队（当前消息发送完后自动发出）"
+                disabled={(!text.trim() && attachments.length === 0) || disabled || rcLocked}
+                className="btn-accent shrink-0 w-8 h-8 rounded-full flex items-center justify-center"
+                title="发送"
               >
-                <Send size={13} /><span className="max-md:hidden">入队</span>
+                {disabled ? (
+                  <Loader2 size={14} className="text-white/80 animate-spin" />
+                ) : (
+                  <Send size={14} className="text-white -mr-0.5" />
+                )}
               </button>
-              {/* H 转后台:只断本端连接,回合在服务端继续跑完(与切走会话的自动挂后台
-                  同一机制,这里是主动触发)。仅本地前台流式时上层才传 onBackground。 */}
-              {onBackground && (
-                <button
-                  onClick={onBackground}
-                  className="shrink-0 h-9 px-3 max-md:px-2.5 rounded-md bg-canvas-warm border border-canvas-deep hover:bg-black/5 text-ink-soft flex items-center justify-center gap-1.5 max-md:gap-0 transition-colors text-[11px] font-medium"
-                  title="本回合转入后台继续运行,完成后自动提示;期间可切换到其它会话"
-                >
-                  <ArrowDownToLine size={11} />
-                  <span className="max-md:hidden">转后台</span>
-                </button>
-              )}
-              {/* Small rounded-rect stop button, CLI-style. Always-clickable
-                  whether streaming locally or only running in background. */}
-              <button
-                onClick={onStop}
-                className="shrink-0 h-9 px-3 max-md:px-2.5 rounded-md bg-ink/90 hover:bg-ink text-canvas flex items-center justify-center gap-1.5 max-md:gap-0 transition-colors text-[11px] font-medium"
-                title="停止生成"
-              >
-                <Square size={11} className="fill-current" />
-                <span className="max-md:hidden">停止</span>
-              </button>
-            </>
-          ) : (
-            <button
-              onClick={handleSend}
-              disabled={(!text.trim() && attachments.length === 0) || disabled || rcLocked}
-              className="btn-accent shrink-0 w-9 h-9 rounded-full flex items-center justify-center"
-              title="发送"
-            >
-              {disabled ? (
-                <Loader2 size={15} className="text-white/80 animate-spin" />
-              ) : (
-                <Send size={15} className="text-white -mr-0.5" />
-              )}
-            </button>
-          )}
+            )}
+          </div>
         </div>
 
         {/* Background-streaming indicator. Shows when this session has a

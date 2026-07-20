@@ -59,20 +59,17 @@ export function RemoteControlButton({ session }) {
   );
 }
 
-// Provider 切换(P1.4 瘦身版):纯切换列表 —— 点行即切,当前项打勾;
-// 增删改/测试/隐藏/导入等管理操作整体在 设置→Provider(底部直达链)。
-// Hidden providers 仍按服务端 hidden 集过滤(取消隐藏在管理页操作)。
-export function ProviderSwitcher() {
+// P2.1:Provider 切换列表(内嵌版)。原顶栏 ProviderSwitcher 弹层瘦身而来,现作为
+// ModelSelector 弹层顶部的 provider 段渲染 —— "切 provider"与"选模型"同一决策链。
+// 点行即切,当前项打勾;增删改/测试/隐藏/导入在 设置→Provider(底部直达链)。
+export function ProviderSwitchList({ onSwitched }) {
   const [providers, setProviders] = useState([]);
   const [openaiProviders, setOpenaiProviders] = useState([]);
   const [customProviders, setCustomProviders] = useState([]);
   const [hiddenProviders, setHiddenProviders] = useState(new Set());
-  const [open, setOpen] = useState(false);
   const [switching, setSwitching] = useState(false);
   // Optimistic current id(cc-switch db 的 is_current 我们不写,切换后本地标记)。
   const [activeId, setActiveId] = useState(null);
-  const wrapRef = useRef(null);
-  const currentProvider = useStore((s) => s.currentProvider);
 
   const load = () => {
     fetch('/api/providers').then((r) => r.json()).then((d) => {
@@ -84,36 +81,15 @@ export function ProviderSwitcher() {
       .then((d) => setHiddenProviders(new Set(Array.isArray(d.hidden) ? d.hidden : [])))
       .catch(() => {});
   };
+  // 挂载即拉(本组件仅在 provider 段展开时挂载,展开即最新);外部改配置也跟着刷新。
   useEffect(() => {
     load();
     const onCh = () => load();
     window.addEventListener('cgui:provider-change', onCh);
     return () => window.removeEventListener('cgui:provider-change', onCh);
   }, []);
-  // 每次展开都重拉:管理页(设置→Provider)增删/隐藏后,这里即时反映,无需等 provider-change。
-  useEffect(() => { if (open) load(); }, [open]);
-  // 错误 turn 的「检查 Provider 设置」按钮经事件打开本弹层。
-  useEffect(() => {
-    const onOpen = () => setOpen(true);
-    window.addEventListener('cgui:open-provider', onOpen);
-    return () => window.removeEventListener('cgui:open-provider', onOpen);
-  }, []);
-  useEffect(() => {
-    if (!open) return;
-    const onDocClick = (e) => { if (!wrapRef.current?.contains(e.target)) setOpen(false); };
-    const onEsc = (e) => { if (e.key === 'Escape') setOpen(false); };
-    document.addEventListener('mousedown', onDocClick);
-    document.addEventListener('keydown', onEsc);
-    return () => {
-      document.removeEventListener('mousedown', onDocClick);
-      document.removeEventListener('keydown', onEsc);
-    };
-  }, [open]);
 
   const isCur = (p) => (activeId != null ? p.id === activeId : p.isCurrent);
-  const cur = providers.find(isCur) || openaiProviders.find(isCur) || customProviders.find(isCur);
-  const capHint = (h) => (h ? h.charAt(0).toUpperCase() + h.slice(1) : h);
-  const label = cur?.name || capHint(currentProvider?.providerHint) || 'Provider';
 
   const switchTo = async (id, model) => {
     setSwitching(true);
@@ -129,7 +105,7 @@ export function ProviderSwitcher() {
       useStore.getState().fetchProvider?.();
       useStore.getState().fetchModel?.();
       window.dispatchEvent(new CustomEvent('cgui:provider-change'));
-      setOpen(false);
+      onSwitched?.();
     } catch (e) {
       confirmDialog('切换 provider 失败：' + e.message);
     }
@@ -137,7 +113,7 @@ export function ProviderSwitcher() {
   };
 
   const openManager = () => {
-    setOpen(false);
+    onSwitched?.();
     window.dispatchEvent(new CustomEvent('cgui:open-settings', { detail: { section: 'set-provider-manage' } }));
   };
 
@@ -154,52 +130,44 @@ export function ProviderSwitcher() {
     : null);
 
   return (
-    <div ref={wrapRef} className="relative">
-      <button onClick={() => setOpen(!open)} title="切换 API Provider（管理入口在 通用 → Provider）"
-        className="flex items-center gap-1 px-2 py-1 rounded-md hover:bg-canvas-deep transition-colors">
-        <Server size={12} className="text-ink-muted" />
-        <span className="text-[11px] text-ink-soft font-body max-w-[88px] truncate">{label}</span>
-        <ChevronDown size={10} className="text-ink-faint" />
-      </button>
-      {open && (
-        <div className="glass-popover absolute left-0 top-full mt-2 w-60 max-w-[calc(var(--app-w,100vw)-1.5rem)] z-50 py-1 animate-glass-rise max-h-[70vh] overflow-y-auto max-md:fixed max-md:left-3 max-md:right-3 max-md:w-auto max-md:top-16 max-md:mt-0">
-          <div className="px-3 py-2 sticky top-0 bg-canvas border-b border-canvas-deep z-10">
-            <div className="text-[10px] text-ink-faint uppercase tracking-wider font-body">切换 Provider</div>
-            <p className="text-[10px] text-ink-faint font-body mt-1 leading-snug">
-              切换会改写 <code className="font-mono">~/.claude/settings.json</code>（自动备份），<b>对新发的消息生效</b>。若需增删改 / 测试 / 隐藏 / 导入，点底部「管理 Provider」。
-            </p>
-          </div>
-          {providers.filter((p) => !hiddenProviders.has(p.id)).map((p) => row(p))}
-          {openaiProviders.filter((p) => !hiddenProviders.has(p.id)).length > 0 && (
-            <div className="px-3 pt-2 pb-1 mt-1 border-t border-canvas-deep">
-              <div className="text-[10px] text-ink-faint uppercase tracking-wider font-body">OpenAI 格式 <span className="text-ink-ghost normal-case tracking-normal">· 经内置代理</span></div>
-            </div>
-          )}
-          {openaiProviders.filter((p) => !hiddenProviders.has(p.id)).map((p) => row(p, modelCountChip(p)))}
-          {customProviders.length > 0 && (
-            <div className="px-3 pt-2 pb-1 mt-1 border-t border-canvas-deep">
-              <div className="text-[10px] text-ink-faint uppercase tracking-wider font-body">自定义</div>
-            </div>
-          )}
-          {customProviders.map((p) => row(p, (
-            <>
-              {modelCountChip(p)}
-              <span className="text-[9px] px-1 py-px bg-canvas-deep text-ink-faint rounded font-mono shrink-0">{p.type}</span>
-            </>
-          )))}
-          <button onClick={openManager}
-            className="w-full text-left px-3 py-2 mt-1 text-[11px] text-accent hover:bg-canvas-warm border-t border-canvas-deep font-body flex items-center gap-1.5">
-            <Settings size={12} /> 管理 Provider（增删改 · 测试 · 隐藏 · 导入）→
-          </button>
+    <div>
+      <p className="px-3 pt-1 text-[10px] text-ink-faint font-body leading-snug">
+        切换会改写 <code className="font-mono">~/.claude/settings.json</code>（自动备份），<b>对新发的消息生效</b>。
+      </p>
+      {providers.filter((p) => !hiddenProviders.has(p.id)).map((p) => row(p))}
+      {openaiProviders.filter((p) => !hiddenProviders.has(p.id)).length > 0 && (
+        <div className="px-3 pt-2 pb-1 mt-1 border-t border-canvas-deep">
+          <div className="text-[10px] text-ink-faint uppercase tracking-wider font-body">OpenAI 格式 <span className="text-ink-ghost normal-case tracking-normal">· 经内置代理</span></div>
         </div>
       )}
+      {openaiProviders.filter((p) => !hiddenProviders.has(p.id)).map((p) => row(p, modelCountChip(p)))}
+      {customProviders.length > 0 && (
+        <div className="px-3 pt-2 pb-1 mt-1 border-t border-canvas-deep">
+          <div className="text-[10px] text-ink-faint uppercase tracking-wider font-body">自定义</div>
+        </div>
+      )}
+      {customProviders.map((p) => row(p, (
+        <>
+          {modelCountChip(p)}
+          <span className="text-[9px] px-1 py-px bg-canvas-deep text-ink-faint rounded font-mono shrink-0">{p.type}</span>
+        </>
+      )))}
+      <button onClick={openManager}
+        className="w-full text-left px-3 py-2 mt-1 text-[11px] text-accent hover:bg-canvas-warm border-t border-canvas-deep font-body flex items-center gap-1.5">
+        <Settings size={12} /> 管理 Provider（增删改 · 测试 · 隐藏 · 导入）→
+      </button>
     </div>
   );
 }
 
-export function ModelSelector({ compact = false, permKey = null }) {
+// P2.1:composer 模型 chip。弹层顶部并入 provider 段(展开即 ProviderSwitchList);
+// `cgui:open-provider` 事件(错误回合"检查 Provider 设置"按钮)改指向此弹层的
+// provider 段 —— respondOpenProvider 仅活跃窗格为 true,避免分屏多实例同时弹。
+export function ModelSelector({ compact = false, permKey = null, tourAnchor = false, respondOpenProvider = false }) {
   const { availableModels } = useStore();
   const customModels = useStore((s) => s.customModels);
+  const providerHint = useStore((s) => s.currentProvider?.providerHint || 'anthropic');
+  const [provOpen, setProvOpen] = useState(false);
   // Per-session model: show/select THIS session's model (falls back to the
   // global resolved default when the session has no explicit pick). Picking
   // writes only the session override — never the global settings.json default.
@@ -269,6 +237,14 @@ export function ModelSelector({ compact = false, permKey = null }) {
     };
   }, []);
 
+  // 错误 turn 的「检查 Provider 设置」按钮:打开本弹层并展开 provider 段(仅活跃窗格响应)。
+  useEffect(() => {
+    if (!respondOpenProvider) return;
+    const onOpenProvider = () => { setOpen(true); setProvOpen(true); };
+    window.addEventListener('cgui:open-provider', onOpenProvider);
+    return () => window.removeEventListener('cgui:open-provider', onOpenProvider);
+  }, [respondOpenProvider]);
+
   // Outside-click close. Document listener works regardless of transform
   // containing blocks (the fixed-inset trick would be trapped in header).
   useEffect(() => {
@@ -327,9 +303,10 @@ export function ModelSelector({ compact = false, permKey = null }) {
   if (!currentModel) return null;
 
   return (
-    <div ref={wrapRef} className="relative">
+    <div ref={wrapRef} className="relative" data-tour={tourAnchor ? 'model-selector' : undefined}>
       <button onClick={() => setOpen(!open)}
-        className={`flex items-center gap-1 px-2 py-1 rounded-md hover:bg-canvas-deep transition-colors ${compact ? '' : 'px-2.5'}`}>
+        className={`flex items-center gap-1 px-2 py-1 rounded-md hover:bg-canvas-deep transition-colors ${compact ? '' : 'px-2.5'}`}
+        title={`模型: ${currentModel}${providerHint !== 'anthropic' ? `（provider: ${provider || providerHint}）` : ''} — 弹层顶部可切换 Provider`}>
         <ModelBadge model={currentModel} compact={compact} />
         {/* The vendor tag is redundant with the Claude model badge when on the
             official Anthropic endpoint — only show it for relays (DeepSeek/MiMo/
@@ -340,7 +317,23 @@ export function ModelSelector({ compact = false, permKey = null }) {
         <ChevronDown size={10} className="text-ink-faint" />
       </button>
       {open && (
-        <div className="glass-popover absolute left-0 top-full mt-2 w-80 max-w-[calc(var(--app-w,100vw)-1.5rem)] z-50 py-1 animate-glass-rise max-h-[70vh] overflow-y-auto max-md:fixed max-md:left-3 max-md:right-3 max-md:w-auto max-md:top-16 max-md:mt-0">
+        <div className="glass-popover absolute left-0 bottom-full mb-2 w-80 max-w-[calc(var(--app-w,100vw)-1.5rem)] z-50 py-1 animate-glass-rise max-h-[min(60vh,calc(100dvh-6rem))] overflow-y-auto">
+          {/* P2.1 provider 段:切 provider 与选模型同一决策链,收在弹层顶部,点击展开。 */}
+          <div className="border-b border-canvas-deep">
+            <button onClick={() => setProvOpen((v) => !v)}
+              className="w-full text-left px-3 py-2 flex items-center gap-2 hover:bg-canvas-warm transition-colors">
+              <Server size={12} className="text-ink-muted shrink-0" />
+              <span className="text-[11px] text-ink font-body flex-1 min-w-0 truncate">
+                Provider：<b>{provider || (providerHint === 'anthropic' ? 'Anthropic' : providerHint)}</b>
+              </span>
+              <ChevronDown size={10} className={`text-ink-faint transition-transform ${provOpen ? 'rotate-180' : ''}`} />
+            </button>
+            {provOpen && (
+              <div className="pb-1 max-h-60 overflow-y-auto border-t border-canvas-deep/50">
+                <ProviderSwitchList onSwitched={() => setProvOpen(false)} />
+              </div>
+            )}
+          </div>
           <div className="px-3 py-2 sticky top-0 bg-canvas border-b border-canvas-deep">
             <div className="text-[10px] text-ink-faint uppercase tracking-wider font-body flex items-center justify-between">
               <span>选择模型</span>

@@ -29,9 +29,9 @@ import { useMultiSelect, SelModeToggle, BatchBar, SelCheckbox } from './componen
 import { pickDirectory, isTauri } from './utils/pickDirectory.js';
 import ChatSearch from './components/ChatSearch.jsx';
 import { confirmDialog } from './utils/confirmDialog.jsx';
-import { ChatInput, EffortSelector, PermissionModeSelector, AgentModeSelector, EFFORT_LEVELS, MODE_META } from './components/ChatInput.jsx';
+import { ChatInput, EFFORT_LEVELS, MODE_META, useVisiblePermissionModes, markAutoUnavailable } from './components/ChatInput.jsx';
 import { ModelBadge, ProviderAvatar } from './components/ModelBadge.jsx';
-import { ModelSelector, ProviderSwitcher, RemoteControlButton } from './components/SessionSelectors.jsx';
+import { RemoteControlButton } from './components/SessionSelectors.jsx';
 import { UsagePanel } from './components/UsagePanel.jsx';
 import { ProcessPanel } from './components/ProcessPanel.jsx';
 import { SettingsPanel } from './components/SettingsPanel.jsx';
@@ -753,6 +753,9 @@ function PanelDock({ rightPanel, setRightPanel, updateNotice, jumpToUpdate }) {
     <span ref={wrapRef} data-tour="panel-dock" className="inline-flex items-center gap-1">
       {railOpen && (
         <span className="cgui-dock-rail inline-flex items-center gap-1 rounded-xl bg-black/5 px-1 py-0.5">
+          {/* P2.3:分屏迁入坞 rail 首位(窗口级操作,与面板同属"工作区"语义)。 */}
+          <span data-tour="dock-pane" className="inline-flex"><PaneCountPicker /></span>
+          <span className="w-px h-4 bg-ink-ghost/30 mx-0.5" />
           {Object.entries(PANEL_MAP).map(([id, { icon: Icon, label }]) => (
             <button key={id} data-tour={`panel-${id}`} onClick={() => setRightPanel(rightPanel === id ? null : id)}
               className={`px-1.5 py-1 rounded-lg transition-all flex flex-col items-center gap-0.5 ${rightPanel === id ? 'bg-accent-subtle text-accent' : 'text-ink-muted hover:text-ink hover:bg-black/5'}`}
@@ -775,7 +778,7 @@ function PanelDock({ rightPanel, setRightPanel, updateNotice, jumpToUpdate }) {
       )}
       <button
         onClick={() => setRailOpen((v) => !v)}
-        title={`设置${activeMeta ? ` — 当前:${activeMeta.label}` : ''}（文件 / 审查 / 监控 / Agent / 用量 / 进程 / 工具 / 技能 / 指令 / 通用。Cmd/Ctrl+1..9、0 直达）`}
+        title={`设置${activeMeta ? ` — 当前:${activeMeta.label}` : ''}（分屏 + 文件 / 审查 / 监控 / Agent / 用量 / 进程 / 工具 / 技能 / 指令 / 通用。Cmd/Ctrl+1..9、0 直达）`}
         className={`relative px-1.5 py-1 rounded-lg transition-all flex flex-col items-center gap-0.5 ${
           railOpen || activeMeta ? 'bg-accent-subtle text-accent' : 'text-ink-muted hover:text-ink hover:bg-black/5'
         }`}
@@ -4095,7 +4098,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           const d = await r.json();
           if (!r.ok) throw new Error(d.error || r.status);
           useStore.getState().setRemoteControl(sel.sessionId, true);
-          confirmDialog('远程控制已激活（后台运行，无终端窗口）。\n手机用 Claude App 接管此会话；电脑端 GUI 会自动同步消息。\n输入框已锁定，避免双写——点顶部「已激活」可收回控制。\n（需 Claude 账号登录，且当前未切到 deepseek/mimo 等三方模型）');
+          confirmDialog('远程控制已激活（后台运行，无终端窗口）。\n手机用 Claude App 接管此会话；电脑端 GUI 会自动同步消息。\n输入框已锁定，避免双写——点输入框上方的「收回控制」按钮（或输入框 ⋮ 菜单里的「已激活」）可收回。\n（需 Claude 账号登录，且当前未切到 deepseek/mimo 等三方模型）');
         } catch (e) {
           confirmDialog('开启远程控制失败：' + e.message);
         }
@@ -4121,7 +4124,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       // A new `-p` turn here would double-write the RC pty's session jsonl.
       const lockedSid = getLocalSession()?.sessionId;
       if (lockedSid && useStore.getState().remoteControlled[lockedSid]) {
-        confirmDialog('此会话已交给手机远程控制，输入框已锁定。点顶部「已激活」收回控制后再发送。');
+        confirmDialog('此会话已交给手机远程控制，输入框已锁定。点输入框上方的「收回控制」按钮收回后再发送。');
         return;
       }
     }
@@ -8760,8 +8763,8 @@ export default function App() {
   // U6:顶栏"项目/会话标题"也要跟随 AI 自动标题(custom > auto > firstPrompt),
   // 之前只读 customTitles → 自动标题生成后顶栏仍显示首条消息。
   const autoTitles = useStore((s) => s.autoTitles);
-  const activeSession = (paneSessions && paneSessions[activeTabIndex]) || selectedSession;
-  const permKey = activeSession?.sessionId || `draft-${activeSession?.projectHash || 'none'}`;
+  // (P2.1) 顶栏会话级选择器已迁 composer:App 根不再需要 activeSession/permKey
+  // (各 pane 的 composer 用自己的 sessionQueueKey/sessionId)。
 
   // 分屏焦点切换 / focus pane 的 session 变化时,让左侧 selectedProject 自动跟到
   // 对应项目,顺便 silent-refresh 该项目的 sessions 列表 — 这样用户切焦点时
@@ -9068,26 +9071,16 @@ export default function App() {
             </>
           )}
         </div>
+        {/* P2.1/P2.3 顶栏收编:会话级选择器(Provider/模型/力度/权限/agent/远程)全部
+            内嵌 composer 工具行;分屏入坞 rail。右簇定稿 [?帮助][主题][设置坞]。 */}
         <div className="flex items-center gap-1 flex-wrap justify-end min-w-0 ml-auto">
-          <span data-tour="provider-switcher" className="inline-flex"><ProviderSwitcher /></span>
-          <span data-tour="model-selector" className="inline-flex"><ModelSelector compact permKey={permKey} /></span>
-          <span data-tour="effort-selector" className="inline-flex"><EffortSelector permKey={permKey} /></span>
-          <span data-tour="permission-selector" className="inline-flex"><PermissionModeSelector permKey={permKey} /></span>
-          <span data-tour="agent-selector" className="inline-flex"><AgentModeSelector permKey={permKey} sessionStarted={!!activeSession?.sessionId} /></span>
-          <span data-tour="remote-control" className="inline-flex"><RemoteControlButton session={activeSession} /></span>
-          <div className="w-px h-4 bg-ink-ghost/30 mx-1" />
-          {/* Split-screen toggle. Activates the right pane (initially empty
-              until user clicks a session in the sidebar). Click again to
-              collapse back to a single SessionDetail. */}
-          <span data-tour="pane-count" className="inline-flex"><PaneCountPicker /></span>
-          {/* P1.1 面板坞:原 10 个面板按钮 + 更新提醒按钮收纳于此(点击展开 rail)。 */}
-          <PanelDock rightPanel={rightPanel} setRightPanel={setRightPanel} updateNotice={updateNotice} jumpToUpdate={jumpToUpdate} />
           <button data-tour="help" onClick={() => setTourOpen(true)} title="使用指引 — 逐个介绍界面功能"
             className="flex items-center justify-center p-1.5 rounded-lg text-ink-muted hover:text-ink hover:bg-black/5 transition-colors">
             <HelpCircle size={15} />
           </button>
-          <div className="w-px h-4 bg-ink-ghost/30 mx-1" />
           <ThemeToggle />
+          {/* 面板坞:分屏 + 10 个面板 + 更新提醒收纳于此(点击展开 rail)。 */}
+          <PanelDock rightPanel={rightPanel} setRightPanel={setRightPanel} updateNotice={updateNotice} jumpToUpdate={jumpToUpdate} />
         </div>
       </header>
 
