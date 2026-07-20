@@ -45,6 +45,12 @@ assert.ok(r.error); assert.equal(r.changed, false);
 r = applySessionSyncPut(st, { kind: 'nope', sessionId: 's', value: 'x' });
 assert.ok(r.error);
 
+// 收尾#2:超长 sessionId 拒收(与 value 同款 ≤200)
+r = applySessionSyncPut(st, { kind: 'modelPin', sessionId: 'x'.repeat(201), value: 'm' });
+assert.ok(r.error); assert.equal(r.changed, false);
+r = applySessionSyncPut(st, { kind: 'modelPin', sessionId: 'x'.repeat(200), value: 'm' });
+assert.equal(r.error, null); assert.equal(r.changed, true);
+
 // SYNC_KINDS 覆盖三类
 assert.deepEqual(Object.keys(SYNC_KINDS).sort(), ['effortPin', 'modelPin', 'permissionMode']);
 

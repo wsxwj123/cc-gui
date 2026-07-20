@@ -40,8 +40,8 @@ export function applySessionSyncPut(cur, body) {
   }
   const mapKey = SYNC_KINDS[kind];
   if (!mapKey) return { maps, changed: false, error: 'kind 必须是 permissionMode/modelPin/effortPin' };
-  if (typeof sessionId !== 'string' || !sessionId || sessionId.startsWith('draft-')) {
-    return { maps, changed: false, error: 'sessionId 必须是非 draft 的非空字符串' };
+  if (typeof sessionId !== 'string' || !sessionId || sessionId.length > 200 || sessionId.startsWith('draft-')) {
+    return { maps, changed: false, error: 'sessionId 必须是非 draft 的 ≤200 字符非空字符串' };
   }
   const isDelete = value == null || (value === '' && kind !== 'effortPin');
   if (!isDelete && (typeof value !== 'string' || value.length > 200)) {
