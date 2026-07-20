@@ -175,7 +175,8 @@ function handlePermissionRequest(req) {
 // 骑在同一条半死 keep-alive 连接上超时,之后无任何机制再触发。现在挂在 25s
 // 心跳 tick 上周期执行,单次失败静默等下一轮(每 25s 必有下一轮,这就是自愈
 // 保证)。addPendingPermission 按 id 去重、respond 服务端幂等,重复对账安全。
-async function refetchPendingPermissions() {
+// export 仅供 tests/unit 自检覆盖"in-flight 卡不被对账误删"场景,运行时无外部调用方。
+export async function refetchPendingPermissions() {
   const fetchStart = Date.now();
   try {
     const r = await fetch('/api/permissions/pending', { signal: AbortSignal.timeout(8000) });
@@ -185,8 +186,12 @@ async function refetchPendingPermissions() {
     const serverIds = new Set(items.map((x) => x.id));
     // remove:本地有、服务端没有、且创建早于本次拉取 → 已在他端解决/被 drop。
     // createdAt < fetchStart 判据挡住"拉取飞行期间刚广播进来的新请求"被误删。
+    // in-flight 守卫(与下方 add 侧对称):提交中的卡不许被对账撤掉 —— 客户端
+    // 时钟超前服务端时,GET 飞行窗口内刚广播的新卡也可能满足 createdAt<fetchStart,
+    // 用户若已秒点提交,误删会让 respondPermission 的 hadCard 判据误判"他端已
+    // 解决"而放弃在途应答 → CLI 继续挂。送达后卡由调用方/resolved 广播撤。
     for (const p of useStore.getState().pendingPermissions) {
-      if (!serverIds.has(p.id) && (p.createdAt || 0) < fetchStart) {
+      if (!serverIds.has(p.id) && (p.createdAt || 0) < fetchStart && !inFlightResponds.has(p.id)) {
         useStore.getState().removePendingPermission(p.id);
       }
     }

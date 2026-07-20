@@ -5,7 +5,9 @@
 //   ③ 同 id 并发提交只跑一个,重入方立即 false 且不多发请求;
 //   ④ 有卡路径:持续失败中卡片被 resolved 广播/对账撤掉 → 视为他端已解决,停止重试;
 //   ⑤ 无卡路径(auto-allow/deny 分支从不入卡):不因"卡不存在"提前终止,重试到送达;
-//   ⑥ cancelRespond 明确取消 → false 停止。
+//   ⑥ cancelRespond 明确取消 → false 停止;
+//   ⑦ 对账 remove 侧 in-flight 守卫:提交中的卡不被对账撤掉(时钟超前+GET 飞行
+//      窗口新卡+用户秒点场景),非 in-flight 的残卡照常被撤。
 // 运行:node tests/unit/check-permission-respond-retry.mjs(真实重试间隔,约 10s)
 import assert from 'node:assert/strict';
 
@@ -14,7 +16,7 @@ globalThis.localStorage = { getItem: () => null, setItem: () => {}, removeItem: 
 globalThis.window = globalThis;
 globalThis.document = { addEventListener() {}, removeEventListener() {} };
 
-const { respondPermission, cancelRespond } = await import('../../client/src/hooks/useWebSocket.js');
+const { respondPermission, cancelRespond, refetchPendingPermissions } = await import('../../client/src/hooks/useWebSocket.js');
 const { useStore } = await import('../../client/src/stores/sessionStore.js');
 
 const calls = [];
@@ -63,6 +65,22 @@ assert.equal(calls.length, 3, '⑤应发送 3 次(2 失败 + 1 成功),而非首
 fetchImpl = fail;
 setTimeout(() => cancelRespond('id-6'), 500);
 assert.equal(await respondPermission('id-6', { decision: 'deny' }), false, '⑥取消应返回 false');
+
+// ⑦ 对账 remove 侧 in-flight 守卫:id-7 提交中(POST 持续失败),id-8 只是残卡;
+//    服务端 pending 为空 → 对账应撤 id-8、保 id-7(否则 hadCard 判据误判"他端已解决")
+useStore.getState().addPendingPermission({ id: 'id-7', toolName: 'Bash', createdAt: 0 });
+useStore.getState().addPendingPermission({ id: 'id-8', toolName: 'Bash', createdAt: 0 });
+fetchImpl = (url) => (String(url).includes('/pending')
+  ? Promise.resolve({ ok: true, json: async () => ({ items: [] }) })
+  : fail());
+const inflight = respondPermission('id-7', { decision: 'allow' }); // 立即失败,进重试等待
+await refetchPendingPermissions();
+const left = useStore.getState().pendingPermissions.map((p) => p.id);
+assert.ok(left.includes('id-7'), '⑦in-flight 的卡不被对账撤掉');
+assert.ok(!left.includes('id-8'), '⑦非 in-flight 的残卡照常被撤');
+cancelRespond('id-7');
+assert.equal(await inflight, false, '⑦收尾:取消在途提交');
+useStore.getState().removePendingPermission('id-7');
 
 console.log('check-permission-respond-retry: all assertions passed');
 process.exit(0);
