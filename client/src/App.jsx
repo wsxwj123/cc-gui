@@ -60,7 +60,7 @@ import {
   Sun, Moon, Monitor, Bot, Camera, History, Loader2, Shield, FolderTree,
   Archive, ArchiveRestore, Trash2, EyeOff, Columns2, Smartphone, Pencil, Type, Palette,
   Menu, SquarePen, Gauge, Cpu, CheckCircle2, BookText, Sparkles, HelpCircle, Pin,
-  Download, ClipboardCopy, LayoutGrid,
+  Download, ClipboardCopy, LayoutGrid, MoreHorizontal,
 } from 'lucide-react';
 import { copyText } from './utils/clipboard.js';
 
@@ -3290,6 +3290,39 @@ function ExportSessionButton({ messages, title }) {
   );
 }
 
+// P1.2 会话头 ⋮:导出 / Checkpoint 收纳于此(点击原位展开原按钮组,再点外部/Esc 收起,
+// 与面板坞同一交互)。按钮组件原样复用(各自的下拉/portal 弹层逻辑不动),零功能删除。
+function SessionHeaderMore({ children }) {
+  const [open, setOpen] = useState(false);
+  const wrapRef = useRef(null);
+  useEffect(() => {
+    if (!open) return;
+    const onDoc = (e) => {
+      if (wrapRef.current?.contains(e.target)) return;
+      // Checkpoint 的弹层是 body portal(不在 wrap 内):点它不能收起本组,否则按钮先卸载、
+      // 弹层随之消失,mousedown→click 之间条目点击直接失效。
+      if (e.target?.closest?.('.glass-popover')) return;
+      setOpen(false);
+    };
+    const onEsc = (e) => { if (e.key === 'Escape') setOpen(false); };
+    document.addEventListener('mousedown', onDoc);
+    document.addEventListener('keydown', onEsc);
+    return () => { document.removeEventListener('mousedown', onDoc); document.removeEventListener('keydown', onEsc); };
+  }, [open]);
+  return (
+    <span ref={wrapRef} data-tour="session-menu" className="inline-flex items-center gap-1">
+      {open && <span className="cgui-dock-rail inline-flex items-center gap-1 rounded-xl bg-black/5 px-1 py-0.5">{children}</span>}
+      <button
+        onClick={() => setOpen((v) => !v)}
+        title="更多会话操作（导出 Markdown / Checkpoint 时间线）"
+        className={`p-1.5 rounded-lg transition-colors ${open ? 'bg-accent-subtle text-accent' : 'text-ink-muted hover:text-ink hover:bg-canvas-warm'}`}
+      >
+        <MoreHorizontal size={14} />
+      </button>
+    </span>
+  );
+}
+
 // ─── Session Detail ────────────────────────────────────────────
 // React.memo:props 只有 tabIndex/mobileChrome(基元,稳定)。App 级状态变化(开面板、
 // 分屏数变化等)导致父组件重渲染时,同 props 直接跳过,不再 reconcile 这棵巨大的消息树
@@ -6253,6 +6286,19 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   const fmtTok = (n) => (n >= 1000 ? Math.round(n / 1000) + 'k' : String(n));
   const winLabel = contextWindow >= 1_000_000 ? '1M' : `${Math.round(contextWindow / 1000)}k`;
 
+  // P1.2:会话头被收纳信息 → 徽章弹层。provider hint 文案与原行内 chip 同逻辑
+  // (unknown 显 baseUrl hostname 而非丑的 "Unknown")。
+  const providerHintLabel = currentProvider?.providerHint && currentProvider.providerHint !== 'anthropic'
+    ? (currentProvider.providerHint === 'unknown'
+      ? (() => { try { return new URL(currentProvider.baseUrl).hostname; } catch { return '自定义'; } })()
+      : currentProvider.providerHint.charAt(0).toUpperCase() + currentProvider.providerHint.slice(1))
+    : null;
+  const badgeInfo = {
+    headerModel, models, toolCallCount,
+    providerHintLabel, providerBaseUrl: currentProvider?.baseUrl || '',
+    totalAllTokens, totalCostUsd, cacheRead: totalTokens.cacheRead, cacheHitPct, usageDetailTitle,
+  };
+
   return (
     <div className={`flex-1 flex flex-col min-h-0 glass-base relative ${hasChatBg ? 'isolate' : ''}`}>
       {/* ③ 对话区自定义背景(未设置时 null,外观与之前完全一致)。isolate 仅在启用
@@ -6305,7 +6351,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                 <Hash size={10} />{selectedSession.sessionId?.slice(0, 8) || '新会话'}
               </span>
               <span className="text-[10px] text-ink-faint font-mono shrink-0 whitespace-nowrap">{messages.length + chatMessages.filter((m) => m.type !== 'btw').length} 条消息</span>
-              {contextTokens > 0 && (
+              {/* P1.2 徽章零态壳:有会话即渲染(不再 contextTokens>0 门控);统计/provider
+                  hint/曾用模型收进弹层(badgeInfo),行内不再重复。 */}
+              <span data-tour="ctx-badge" className="inline-flex shrink-0">
                 <ContextBreakdownButton
                   contextTokens={contextTokens}
                   contextWindow={contextWindow}
@@ -6316,74 +6364,39 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                   projectHash={selectedSession.projectHash}
                   cwd={selectedSession.projectPath}
                   model={currentModel}
+                  info={badgeInfo}
                 />
-              )}
+              </span>
+              {/* 活动告警:需要用户立即注意,保留行内不进弹层(收进"点开才见"=告警不可见)。 */}
               {hasPendingInteraction && (
                 <span className="text-[10px] text-violet-600 font-body shrink-0 whitespace-nowrap animate-pulse"
                   title="存在等待你回应的选择/授权。token 已实时计入;你的答复将在模型下一次调用时计入上下文占用">
                   等待回应 · 答复后占用刷新
                 </span>
               )}
-              {toolCallCount > 0 && <span className="text-[10px] text-ink-faint font-mono shrink-0 whitespace-nowrap">{toolCallCount} 工具调用</span>}
-              {currentProvider?.providerHint && currentProvider.providerHint !== 'anthropic' && (
-                <span className="text-[10px] text-amber-700 bg-amber-50 border border-amber-200 rounded px-1.5 py-px font-mono shrink-0 whitespace-nowrap"
-                  title={`cc switch 路由：${currentProvider.baseUrl}`}>
-                  {currentProvider.providerHint === 'unknown'
-                    // unknown 时显示 baseUrl hostname,而非丑的 "Unknown"
-                    ? (() => { try { return new URL(currentProvider.baseUrl).hostname; } catch { return '自定义'; } })()
-                    : currentProvider.providerHint.charAt(0).toUpperCase() + currentProvider.providerHint.slice(1)}
-                </span>
-              )}
-              {/* Show the model the NEXT send will use (current selection),
-                  plus any historical models in muted form. Previously this
-                  only showed the historical aggregate, so picking Haiku in
-                  the dropdown but seeing the past message's Sonnet badge
-                  looked like the GUI ignored the switch. */}
-              <div className="flex items-center gap-1 shrink-0">
-                {headerModel && <ModelBadge model={headerModel} compact />}
-                {models.filter((m) => m !== headerModel).length > 0 && (
-                  <span className="text-[9px] text-ink-ghost font-mono whitespace-nowrap"
-                    title={`本会话历史用过: ${models.join(', ')}`}>
-                    曾用 {models.filter((m) => m !== headerModel).length} 个其他
-                  </span>
-                )}
-              </div>
             </div>
           </div>
           <div className="flex items-center gap-2 min-w-0 flex-wrap justify-end">
-            <ExportSessionButton
-              messages={[...messages, ...chatMessages]}
-              title={(selectedSession?.sessionId
-                && (useStore.getState().customTitles[selectedSession.sessionId]
-                  || useStore.getState().autoTitles[selectedSession.sessionId]))
-                || selectedSession?.firstPrompt || '会话'}
-            />
-            <CheckpointButton
-              sessionId={selectedSession?.sessionId}
-              cwd={selectedSession?.projectPath || selectedProject?.path}
-              projectHash={selectedSession?.projectHash}
-              onRestored={() => {
-                // #1:恢复 checkpoint 后重载本会话消息,让消息页跟着回到该时刻(裁剪在 restore 内做)。
-                const s = getLocalSession();
-                if (s?.sessionId && s?.projectHash) fetchMessagesForTab(s.sessionId, s.projectHash, { silent: true });
-              }}
-            />
-            {/* 悬停显示四项明细(输入/输出/缓存命中/缓存写入)与口径说明。 */}
-            <div className="text-right max-md:hidden" title={usageDetailTitle}>
-              <div className="text-[10px] text-ink-faint font-mono flex items-center gap-1 justify-end">
-                <BarChart3 size={10} />{totalAllTokens.toLocaleString()} tokens
-                {totalCostUsd > 0 && (
-                  <span className="text-accent/80 ml-1.5" title="按当前各模型官网价估算的累计费用（人民币，按 1 USD ≈ 7.2 CNY 换算）">
-                    · {formatCost(totalCostUsd)}
-                  </span>
-                )}
-              </div>
-              {totalTokens.cacheRead > 0 && (
-                <div className="text-[10px] text-ink-ghost font-mono">
-                  缓存命中 {totalTokens.cacheRead.toLocaleString()} · 命中率 {cacheHitPct.toFixed(1)}%
-                </div>
-              )}
-            </div>
+            {/* P1.2:导出 / Checkpoint 收进 ⋮(点击展开,组件原样复用)。 */}
+            <SessionHeaderMore>
+              <ExportSessionButton
+                messages={[...messages, ...chatMessages]}
+                title={(selectedSession?.sessionId
+                  && (useStore.getState().customTitles[selectedSession.sessionId]
+                    || useStore.getState().autoTitles[selectedSession.sessionId]))
+                  || selectedSession?.firstPrompt || '会话'}
+              />
+              <CheckpointButton
+                sessionId={selectedSession?.sessionId}
+                cwd={selectedSession?.projectPath || selectedProject?.path}
+                projectHash={selectedSession?.projectHash}
+                onRestored={() => {
+                  // #1:恢复 checkpoint 后重载本会话消息,让消息页跟着回到该时刻(裁剪在 restore 内做)。
+                  const s = getLocalSession();
+                  if (s?.sessionId && s?.projectHash) fetchMessagesForTab(s.sessionId, s.projectHash, { silent: true });
+                }}
+              />
+            </SessionHeaderMore>
           </div>
         </div>
       </div>}
@@ -6989,7 +7002,10 @@ function ProviderSwitcher() {
 // 上下文用量徽章 → 可点击,弹出 /context 风格的分项明细(#1)。数据来自后端
 // `/api/context/:sessionId`(对会话 fork 副本跑 /context 后解析,原会话不受影响)。
 const CTX_COLORS = ['#6366f1', '#0ea5e9', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899', '#14b8a6', '#a3a3a3'];
-function ContextBreakdownButton({ contextTokens, contextWindow, contextPct, fmtTok, winLabel, sessionId, projectHash, cwd, model }) {
+// P1.2:徽章升级为「会话信息徽章」。info(可选)= 被收纳的会话头信息(模型/曾用/provider
+// hint/工具调用数/token/费用/缓存统计),进弹层顶部分区;零态壳(contextTokens=0,新会话/
+// 首回合前)按钮显 ModelBadge+provider hint,占用数据到达后切回 xx k/窗口 xx% 显示。
+function ContextBreakdownButton({ contextTokens, contextWindow, contextPct, fmtTok, winLabel, sessionId, projectHash, cwd, model, info = null }) {
   const [open, setOpen] = useState(false);
   const [coords, setCoords] = useState(null);
   const [data, setData] = useState(null);
@@ -7086,13 +7102,61 @@ function ContextBreakdownButton({ contextTokens, contextWindow, contextPct, fmtT
       className="glass-popover w-[340px] max-w-[calc(var(--app-w,100vw)-1.5rem)] max-h-[80vh] overflow-y-auto py-2 animate-glass-rise"
     >
       <div className="px-3 pb-2 flex items-center gap-2 border-b border-black/5">
-        <span className="text-xs font-medium text-ink font-body">上下文用量</span>
+        <span className="text-xs font-medium text-ink font-body">{info ? '会话信息' : '上下文用量'}</span>
         {data?.model && <span className="text-[10px] text-ink-faint font-mono truncate max-w-[130px]" title={data.model}>{data.model}</span>}
         <button onClick={(e) => { e.stopPropagation(); load(); }} disabled={loading}
           className="ml-auto p-0.5 text-ink-faint hover:text-ink shrink-0" title="重新精确计算 /context（稍慢）">
           <RefreshCw size={11} className={loading ? 'animate-spin' : ''} />
         </button>
       </div>
+
+      {/* P1.2:会话头收纳区 —— 模型/曾用/provider hint/工具调用/token/费用/缓存统计。 */}
+      {info && (
+        <div className="px-3 py-2 border-b border-black/5 space-y-1.5">
+          {info.headerModel && (
+            <div className="flex items-center gap-2 text-[11px] font-body">
+              <span className="text-ink-faint w-14 shrink-0">模型</span>
+              <ModelBadge model={info.headerModel} compact />
+              {(info.models || []).filter((m) => m !== info.headerModel).length > 0 && (
+                <span className="text-[9px] text-ink-ghost font-mono truncate"
+                  title={`本会话历史用过: ${(info.models || []).join(', ')}`}>
+                  曾用 {(info.models || []).filter((m) => m !== info.headerModel).length} 个其他
+                </span>
+              )}
+            </div>
+          )}
+          {info.providerHintLabel && (
+            <div className="flex items-center gap-2 text-[11px] font-body">
+              <span className="text-ink-faint w-14 shrink-0">Provider</span>
+              <span className="text-[10px] text-amber-700 bg-amber-50 border border-amber-200 rounded px-1.5 py-px font-mono"
+                title={info.providerBaseUrl ? `cc switch 路由：${info.providerBaseUrl}` : undefined}>
+                {info.providerHintLabel}
+              </span>
+            </div>
+          )}
+          {info.toolCallCount > 0 && (
+            <div className="flex items-center gap-2 text-[11px] font-body">
+              <span className="text-ink-faint w-14 shrink-0">工具调用</span>
+              <span className="font-mono text-ink-muted">{info.toolCallCount} 次</span>
+            </div>
+          )}
+          <div className="flex items-center gap-2 text-[11px] font-body" title={info.usageDetailTitle}>
+            <span className="text-ink-faint w-14 shrink-0">累计 token</span>
+            <span className="font-mono text-ink-muted">{(info.totalAllTokens || 0).toLocaleString()}</span>
+            {info.totalCostUsd > 0 && (
+              <span className="font-mono text-accent/80" title="按当前各模型官网价估算的累计费用（人民币，按 1 USD ≈ 7.2 CNY 换算）">
+                · {formatCost(info.totalCostUsd)}
+              </span>
+            )}
+          </div>
+          {info.cacheRead > 0 && (
+            <div className="flex items-center gap-2 text-[11px] font-body" title={info.usageDetailTitle}>
+              <span className="text-ink-faint w-14 shrink-0">缓存命中</span>
+              <span className="font-mono text-ink-muted">{info.cacheRead.toLocaleString()} · 命中率 {(info.cacheHitPct || 0).toFixed(1)}%</span>
+            </div>
+          )}
+        </div>
+      )}
 
       {loading && !data && <div className="px-3 py-6 text-center text-xs text-ink-faint">正在计算 /context…</div>}
       {err && !data && <div className="px-3 py-4 text-xs text-amber-700">{err}</div>}
@@ -7155,14 +7219,21 @@ function ContextBreakdownButton({ contextTokens, contextWindow, contextPct, fmtT
     </div>
   );
 
+  // P1.2 零态壳:首回合前没有占用数据,徽章仍渲染(弹层可看会话信息),按钮显
+  // ModelBadge + provider hint 代替 0/xx (0%) 的无意义数字。
+  const zero = !(contextTokens > 0);
   return (
     <span ref={wrapRef} className="inline-flex shrink-0">
       <button
         onClick={toggle}
-        className={`text-[10px] font-mono whitespace-nowrap px-1.5 py-px rounded transition-colors cursor-pointer ${tone}`}
-        title="点击查看上下文分项明细（/context）"
+        className={`text-[10px] font-mono whitespace-nowrap px-1.5 py-px rounded transition-colors cursor-pointer inline-flex items-center gap-1 ${tone}`}
+        title={info ? '点击查看会话信息与上下文分项明细（/context）' : '点击查看上下文分项明细（/context）'}
       >
-        {fmtTok(contextTokens)}/{winLabel} ({contextPct}%)
+        {zero
+          ? (info?.headerModel
+            ? (<><ModelBadge model={info.headerModel} compact />{info.providerHintLabel && <span className="text-amber-700">{info.providerHintLabel}</span>}</>)
+            : '会话信息')
+          : `${fmtTok(contextTokens)}/${winLabel} (${contextPct}%)`}
       </button>
       {createPortal(menu, document.body)}
     </span>
