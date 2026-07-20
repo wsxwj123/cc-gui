@@ -2,8 +2,7 @@ import React, { useEffect, useState, useRef } from 'react';
 import { AlertCircle, Loader2, ClipboardList, ShieldAlert } from 'lucide-react';
 import { useStore } from '../stores/sessionStore.js';
 import { MarkdownRenderer } from './MarkdownRenderer.jsx';
-import { confirmDialog } from '../utils/confirmDialog.jsx';
-import { isDangerousCommand } from '../hooks/useWebSocket.js';
+import { isDangerousCommand, respondPermission } from '../hooks/useWebSocket.js';
 
 // Color per tool family so the user's eye locks onto the risk class quickly.
 function toolBadgeClass(name) {
@@ -604,11 +603,8 @@ export function PermissionPrompt({ sessionId = null, onExecutePlan = null, hydra
           try { wl = it.sessionId ? JSON.parse(localStorage.getItem(`cgui-perm-wl-${it.sessionId}`) || '[]') : []; } catch {}
           if (wl.includes(it.toolName) && !it.blockedPath) {
             // 白名单命中:放行但不入表。越界请求(blockedPath)不吃白名单,必须弹卡。
-            fetch(`/api/permissions/respond/${it.id}`, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ decision: 'allow' }),
-            }).catch(() => {});
+            // 共享提交器自带重试到送达 + in-flight 去重(双实例 hydrate 也不双发)。
+            respondPermission(it.id, { decision: 'allow' });
           } else {
             add(it);
           }
@@ -671,29 +667,23 @@ export function PermissionPrompt({ sessionId = null, onExecutePlan = null, hydra
 
   const resolve = async (req, decision, reason, updatedInput, extra) => {
     setBusyId(req.id);
-    try {
-      const res = await fetch(`/api/permissions/respond/${req.id}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        // updatedInput:SDK canUseTool 用 —— AskUserQuestion 的 {questions, answers}
-        // 或被用户改过的工具入参。仅在提供时附带,保持旧 deny 路径不变。
-        // extra:{ always } / { authorizeDir } —— 服务端 makeCanUseTool 据此构造
-        // updatedPermissions(写规则 / 授权目录)。
-        body: JSON.stringify({ decision, reason, ...(updatedInput !== undefined ? { updatedInput } : {}), ...(extra || {}) }),
-        // 15s 超时:手机(Tailscale)的半死连接下 fetch 会永久挂起 —— 按钮"点了没反应"
-        // 且 catch 永不触发。超时后走失败分支给出可见提示,卡片保留可重试。
-        signal: AbortSignal.timeout(15_000),
-      });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      // 只有确实送达后才撤卡片。原来无论成败都 remove → 网络失败时 CLI 端永久挂起等响应、
-      // 而 GUI 已把卡撤掉无法重试 → 会话卡死。失败保留卡片并提示重试。
-      removePendingPermission(req.id);
-    } catch (e) {
-      const timedOut = e?.name === 'TimeoutError' || e?.name === 'AbortError';
-      confirmDialog(timedOut
-        ? '提交超时:与电脑端的连接可能已断开(手机远程访问时常见)。请检查 Tailscale/网络后重试,卡片已保留。'
-        : '提交授权响应失败,请重试:' + (e?.message || e));
-    }
+    // 共享提交器负责"送达为止":半死连接下自动重试,不再 15s 超时报错让用户
+    // 手点重试(那是把送达责任推给用户 —— 死循环观感的来源)。转圈保持到送达,
+    // 或卡片被 resolved 广播/对账撤掉(他端已解决)。转圈期间按钮 disabled,
+    // 用户改不了选择 —— 第一次点击的决定必达。
+    // updatedInput:SDK canUseTool 用 —— AskUserQuestion 的 {questions, answers}
+    // 或被用户改过的工具入参。仅在提供时附带,保持旧 deny 路径不变。
+    // extra:{ always } / { authorizeDir } —— 服务端 makeCanUseTool 据此构造
+    // updatedPermissions(写规则 / 授权目录)。
+    const ok = await respondPermission(req.id, {
+      decision,
+      reason,
+      ...(updatedInput !== undefined ? { updatedInput } : {}),
+      ...(extra || {}),
+    });
+    // 只有确实送达后才撤卡片(ok=false 仅剩"同 id 已在提交中"的并发重入,
+    // 卡片去留交给先行的那次提交)。
+    if (ok) removePendingPermission(req.id);
     setBusyId(null);
   };
 
