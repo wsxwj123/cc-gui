@@ -2548,7 +2548,7 @@ function SessionList() {
                             type="button"
                             onClick={(e) => { e.stopPropagation(); toggleWtDirty(t); }}
                             title="未提交的文件,点击勾选提交"
-                            className={`text-[9px] px-1.5 py-0.5 rounded font-mono transition-colors ${wtExpand?.path === t.path && wtExpand.mode === 'dirty' ? 'bg-accent/20 text-accent' : 'bg-amber-50 text-amber-700 hover:bg-amber-100'}`}
+                            className={`text-[9px] px-1.5 py-0.5 rounded font-mono transition-colors ${wtExpand?.path === t.path && wtExpand.mode === 'dirty' ? 'bg-accent/20 text-accent' : 'bg-warning/15 text-warning hover:bg-warning/25'}`}
                           >
                             {t.dirtyFileCount} 未提交文件
                           </button>
@@ -7122,7 +7122,7 @@ function ContextBreakdownButton({ contextTokens, contextWindow, contextPct, fmtT
   };
 
   const tone = contextPct >= 80 ? 'text-error bg-error-subtle'
-    : contextPct >= 60 ? 'text-amber-700 bg-amber-50'
+    : contextPct >= 60 ? 'text-warning bg-warning/15'
     : 'text-ink-faint hover:bg-black/5';
 
   const cats = data?.categories || [];
@@ -7161,7 +7161,7 @@ function ContextBreakdownButton({ contextTokens, contextWindow, contextPct, fmtT
           {info.providerHintLabel && (
             <div className="flex items-center gap-2 text-[11px] font-body">
               <span className="text-ink-faint w-14 shrink-0">Provider</span>
-              <span className="text-[10px] text-amber-700 bg-amber-50 border border-amber-200 rounded px-1.5 py-px font-mono"
+              <span className="text-[10px] text-warning bg-warning/15 border border-warning/30 rounded px-1.5 py-px font-mono"
                 title={info.providerBaseUrl ? `cc switch 路由：${info.providerBaseUrl}` : undefined}>
                 {info.providerHintLabel}
               </span>

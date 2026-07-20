@@ -136,7 +136,7 @@ export function RemoteControlButton({ session }) {
           : '在手机上同账号控制此会话（用 Claude App 接管，需 Claude 账号、非 deepseek/mimo）')
         : '先发送一条消息创建会话，再开启远程控制'}
       className={`flex items-center gap-1 px-2 py-1 rounded-md transition-colors text-[11px] font-body ${
-        active ? 'bg-green-50 text-green-700' : 'hover:bg-canvas-deep text-ink-muted'
+        active ? 'bg-success/15 text-success' : 'hover:bg-canvas-deep text-ink-muted'
       } disabled:opacity-40 disabled:cursor-not-allowed`}
     >
       {busy ? <Loader2 size={13} className="animate-spin" /> : <Smartphone size={13} />}
@@ -411,7 +411,7 @@ export function ModelSelector({ compact = false, permKey = null, tourAnchor = fa
             <p className="text-[10px] text-ink-faint font-body mt-1 leading-snug">
               <b>alias</b> = CLI 接收 <code className="font-mono">sonnet/opus/haiku</code> 简称，由 CLI 解析到当前 tier 最新模型。
               {provider && provider !== 'Anthropic' && (
-                <span className="block text-amber-700 mt-0.5">
+                <span className="block text-warning mt-0.5">
                   ⚠ 当前 provider 是 <b>{provider}</b>，alias 可能被该 provider 重定向到其默认模型。建议用具体模型 ID。
                 </span>
               )}
@@ -462,7 +462,7 @@ export function ModelSelector({ compact = false, permKey = null, tourAnchor = fa
                   <div className="text-xs font-medium text-ink font-body flex items-center gap-1.5">
                     {m.name}
                     {isAlias && (
-                      <span className="text-[8.5px] px-1 py-px bg-amber-50 text-amber-700 rounded font-mono"
+                      <span className="text-[8.5px] px-1 py-px bg-warning/15 text-warning rounded font-mono"
                         title="CLI 解析的简称，实际模型由 CLI 决定">
                         alias
                       </span>
