@@ -7918,29 +7918,17 @@ function CustomProviderForm({ onSaved, editing, onCancel, onDirtyChange, customC
   );
 }
 
-// 手机端模型 chip 列表:某些 provider 有上百个模型,全量渲染滚动吃力。
-// 默认只显示前 12 个 + 「+N 更多」展开/收起;纯显示层,不动数据。
-function MobileModelChips({ models, switching, onPick }) {
-  const [expanded, setExpanded] = useState(false);
-  const LIMIT = 12;
-  const shown = expanded ? models : models.slice(0, LIMIT);
-  return (
-    <div className="flex flex-wrap gap-1.5">
-      {shown.map((m) => (
-        <button key={m} disabled={switching} onClick={() => onPick(m)}
-          className="text-[11px] font-mono px-2 py-1 rounded-lg border border-canvas-deep text-ink-soft hover:border-accent hover:text-accent">{m}</button>
-      ))}
-      {models.length > LIMIT && (
-        <button type="button" onClick={() => setExpanded((v) => !v)}
-          className="text-[11px] font-body px-2 py-1 rounded-lg border border-dashed border-canvas-deep text-ink-faint hover:border-accent hover:text-accent">
-          {expanded ? '收起' : `+${models.length - LIMIT} 更多`}
-        </button>
-      )}
-    </div>
-  );
-}
+// 手机批#4:MobileModelChips(行内模型 chip 平铺)已删——合并入口下模型 id 收进
+// 折叠区,按行列表展示,不再平铺撑爆页面。
 
-function MobileProviderPage() {
+// 手机批#4:「Provider / 模型」合并入口(用户定稿设计)。每个 provider 一行,默认
+// **折叠**不显模型 id;点行展开;展开后:
+//   - 当前激活 provider → 内嵌 MobileModelPage(原「模型」页全功能:搜索/拉取/自定义/
+//     1M,选择走 setModelFor 的 per-pane 语义,不重复切换);
+//   - 其它 provider → 该 provider 的模型 id 列表,点某个 id = 走既有 /api/provider/switch
+//     切换链路 + setModelFor 选中该模型,成功后 onPicked() 返回菜单根。
+// 数据仍走 mergeProviderLists(与桌面管理页/顶栏卡片同一选择器);桌面两个独立按钮零改动。
+function MobileProviderPage({ permKey, onPicked }) {
   const ms = useMultiSelect();
   const [providers, setProviders] = useState([]);
   const [openaiProviders, setOpenaiProviders] = useState([]);
@@ -7948,6 +7936,7 @@ function MobileProviderPage() {
   const [overrides, setOverrides] = useState({});
   const [switching, setSwitching] = useState(false);
   const [activeId, setActiveId] = useState(null);
+  const [expandedId, setExpandedId] = useState(null); // 默认全折叠;一次只展开一个
   const load = () => {
     fetch('/api/providers').then((r) => r.json()).then((d) => {
       setProviders(Array.isArray(d.providers) ? d.providers : []);
@@ -7958,8 +7947,11 @@ function MobileProviderPage() {
   };
   useEffect(load, []);
   const isCur = (p) => (activeId != null ? p.id === activeId : p.isCurrent);
+  // 既有切换链路原样保留(/api/provider/switch + clearModelOverrides + 双 fetch +
+  // provider-change 广播),只加了成功返回值供 pickModel 判断。
   const switchTo = async (id, model) => {
     setSwitching(true);
+    let ok = false;
     try {
       const r = await fetch('/api/provider/switch', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -7972,8 +7964,18 @@ function MobileProviderPage() {
       useStore.getState().fetchProvider?.();
       useStore.getState().fetchModel?.();
       window.dispatchEvent(new CustomEvent('cgui:provider-change'));
+      ok = true;
     } catch (e) { confirmDialog('切换 provider 失败：' + e.message); }
     setSwitching(false);
+    return ok;
+  };
+  // 展开列表里点某个模型 id:切到该 provider(既有链路)+ per-pane 选中该模型,
+  // 成功后返回菜单根(onPicked)。m 为空 = 该 provider 无模型列表,仅切换。
+  const pickModel = async (p, m) => {
+    const ok = await switchTo(p.id, m || undefined);
+    if (!ok) return;
+    if (m) useStore.getState().setModelFor(permKey, m); // clearModelOverrides 之后再钉,pin 存活
+    onPicked?.();
   };
   const removeCustom = async (id, name) => {
     if (!(await confirmDialog(`删除自定义 Provider「${name}」?`, { danger: true, confirmText: '删除' }))) return;
@@ -8001,7 +8003,7 @@ function MobileProviderPage() {
         const hasCustom = customProviders.length > 0;
         return (<>
           <div className="px-4 pt-3 pb-1 flex items-center gap-1 border-t border-canvas-deep/40 mt-1">
-            <div className="text-[11px] text-ink-faint uppercase tracking-wider font-body flex-1">全部 Provider · 点击即切换</div>
+            <div className="text-[11px] text-ink-faint uppercase tracking-wider font-body flex-1">全部 Provider · 点行展开模型,选模型即切换</div>
             {hasCustom && <SelModeToggle selMode={ms.selMode} onToggle={() => (ms.selMode ? ms.exit() : ms.enter())} size={14} />}
           </div>
           {ms.selMode && hasCustom && (
@@ -8013,53 +8015,66 @@ function MobileProviderPage() {
                 if (res) load();
               }} />
           )}
-          {rows.map((p) => (p.source === 'official' || p.source === 'ccswitch') ? (
-            <div key={p.id} className={`${isCur(p) ? 'bg-accent-subtle' : ''}`}>
-              <div className="w-full flex items-center gap-1 pr-3 hover:bg-canvas-warm transition-colors">
-                <button disabled={switching} onClick={() => switchTo(p.id)}
-                  className={`flex-1 min-w-0 flex items-center gap-3 px-4 py-3 text-left ${switching ? 'opacity-50' : ''}`}>
-                  <span className={`flex-1 text-[14px] font-body truncate ${isCur(p) ? 'text-accent font-medium' : 'text-ink'}`}>{p.name}</span>
-                  <ProviderSourceBadge p={p} />
-                  {isCur(p) && <Check size={16} className="text-accent shrink-0" />}
-                </button>
-              </div>
-              {p.source !== 'official' && (
-                <div className="px-4 pb-2"><ProviderOverrideEditor provider={p} override={overrides[p.id]} onSaved={load} /></div>
-              )}
-            </div>
-          ) : p.source === 'openai' ? (
-            <div key={p.id} className="px-4 py-2.5">
-              <div className={`text-[14px] font-body mb-1.5 flex items-center gap-2 ${isCur(p) ? 'text-accent font-medium' : 'text-ink'}`}>
-                <span className="flex-1 truncate">{p.name}</span>
-                <ProviderSourceBadge p={p} />
-                {isCur(p) && <Check size={14} className="text-accent shrink-0" />}
-              </div>
-              <MobileModelChips models={p.models.length ? p.models : ['(默认)']} switching={switching}
-                onPick={(m) => switchTo(p.id, p.models.length ? m : undefined)} />
-              <OpenAIModelManager provider={p} onSaved={load} />
-              <ProviderOverrideEditor provider={p} override={overrides[p.id]} onSaved={load} />
-            </div>
-          ) : (
-            <div key={p.id} className="px-4 py-2.5 flex items-start gap-2" onClick={ms.selMode ? () => ms.toggle(p.id) : undefined}>
-              {ms.selMode && <SelCheckbox checked={ms.selected.has(p.id)} onClick={() => ms.toggle(p.id)} size={15} className="mt-1" />}
-              <div className="flex-1 min-w-0">
-                <div className={`text-[14px] font-body mb-1 flex items-center gap-1.5 ${isCur(p) ? 'text-accent font-medium' : 'text-ink'}`}>
-                  <span className="truncate">{p.name}</span>
-                  <span className="text-[9px] px-1 py-px bg-canvas-deep text-ink-faint rounded font-mono shrink-0">{p.type}</span>
-                  <ProviderSourceBadge p={p} />
-                  {isCur(p) && <Check size={14} className="text-accent shrink-0" />}
+          {rows.map((p) => {
+            const cur = isCur(p);
+            const expanded = expandedId === p.id;
+            const selectable = ms.selMode && p.source === 'custom';
+            const models = Array.isArray(p.models) ? p.models : [];
+            return (
+              <div key={p.id} className={cur ? 'bg-accent-subtle' : ''}>
+                {/* 行头:点击=展开/收起(多选模式下自定义项=勾选)。折叠态不显模型 id。 */}
+                <div className="w-full flex items-center gap-1 pr-3 hover:bg-canvas-warm transition-colors">
+                  {selectable && <SelCheckbox checked={ms.selected.has(p.id)} onClick={() => ms.toggle(p.id)} size={15} />}
+                  <button
+                    onClick={() => (selectable ? ms.toggle(p.id) : setExpandedId(expanded ? null : p.id))}
+                    className="flex-1 min-w-0 flex items-center gap-2 px-4 py-3 text-left">
+                    {/* min-w 保证名称永不被 shrink-0 徽章挤到 0 宽(实测 322px 抽屉里
+                        "type+计数+来源+箭头+编辑删除"会吃光 flex-1;模型计数不进行头,
+                        展开即见列表,行头只留 type/来源)。 */}
+                    <span className={`flex-1 min-w-[64px] text-[14px] font-body truncate ${cur ? 'text-accent font-medium' : 'text-ink'}`}>{p.name}</span>
+                    {p.source === 'custom' && p.type && (
+                      <span className="text-[9px] px-1 py-px bg-canvas-deep text-ink-faint rounded font-mono shrink-0">{p.type}</span>
+                    )}
+                    <ProviderSourceBadge p={p} />
+                    {cur && <Check size={16} className="text-accent shrink-0" />}
+                    <ChevronDown size={14} className={`text-ink-ghost shrink-0 transition-transform ${expanded ? 'rotate-180' : ''}`} />
+                  </button>
+                  {p.source === 'custom' && !ms.selMode && (<>
+                    <button onClick={() => setEditingProvider(p)} title="编辑" className="p-1.5 text-ink-faint hover:text-accent shrink-0"><Pencil size={15} /></button>
+                    <button onClick={() => removeCustom(p.id, p.name)} title="删除" className="p-1.5 text-ink-faint hover:text-error shrink-0"><Trash2 size={15} /></button>
+                  </>)}
                 </div>
-                {!ms.selMode && (
-                  <MobileModelChips models={p.models.length ? p.models : ['(默认)']} switching={switching}
-                    onPick={(m) => switchTo(p.id, p.models.length ? m : undefined)} />
+                {expanded && !ms.selMode && (
+                  <div className="pb-2 border-b border-canvas-deep/40">
+                    {cur ? (
+                      // 当前激活 provider:内嵌原「模型」页(选择=per-pane pin,不重复切换;
+                      // 搜索/拉取最新/自定义 ID/1M 开关全保留)。
+                      <>
+                        <div className="px-4 pt-1 text-[11px] text-ink-faint font-body">当前 Provider · 选择模型仅作用于当前会话</div>
+                        <MobileModelPage permKey={permKey} />
+                      </>
+                    ) : (
+                      <div className="py-1">
+                        {(models.length ? models : [null]).map((m) => (
+                          <button key={m ?? 'default'} disabled={switching} onClick={() => pickModel(p, m)}
+                            className={`w-full flex items-center gap-2 pl-8 pr-4 py-2.5 text-left hover:bg-canvas-warm transition-colors ${switching ? 'opacity-50' : ''}`}>
+                            <span className="flex-1 text-[13px] font-mono text-ink truncate">{m || '（默认模型）'}</span>
+                            <span className="text-[10px] text-ink-faint font-body shrink-0">切换并使用</span>
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                    {p.source === 'openai' && (
+                      <div className="px-4"><OpenAIModelManager provider={p} onSaved={load} /></div>
+                    )}
+                    {(p.source === 'ccswitch' || p.source === 'openai') && (
+                      <div className="px-4"><ProviderOverrideEditor provider={p} override={overrides[p.id]} onSaved={load} /></div>
+                    )}
+                  </div>
                 )}
               </div>
-              {!ms.selMode && (<>
-              <button onClick={() => setEditingProvider(p)} title="编辑" className="p-1.5 text-ink-faint hover:text-accent shrink-0"><Pencil size={15} /></button>
-              <button onClick={() => removeCustom(p.id, p.name)} title="删除" className="p-1.5 text-ink-faint hover:text-error shrink-0"><Trash2 size={15} /></button>
-              </>)}
-            </div>
-          ))}
+            );
+          })}
         </>);
       })()}
     </div>
@@ -8184,7 +8199,9 @@ function MobileMenu({ setRightPanel, onClose }) {
   };
   const openPanel = (id) => { setRightPanel(id); onClose(); };
 
-  const TITLES = { history: '会话与项目', model: '模型', effort: '推理力度', provider: 'Provider', appearance: '外观', theme: '配色方案', readingfont: '对话正文字体' };
+  // 手机批#4:「模型」「Provider」两个入口合并为一个「Provider / 模型」页(双入口
+  // 让人误以为两套状态)。'model' 路由随之删除,MobileModelPage 内嵌进合并页。
+  const TITLES = { history: '会话与项目', effort: '推理力度', provider: 'Provider / 模型', appearance: '外观', theme: '配色方案', readingfont: '对话正文字体' };
 
   return (
     <div className="flex flex-col h-full">
@@ -8213,10 +8230,20 @@ function MobileMenu({ setRightPanel, onClose }) {
               <MobileMenuRow icon={SquarePen} label="新建会话" chevron={false} onClick={startNew} />
               <MobileMenuRow icon={MessageSquare} label="会话与项目" onClick={() => push('history')} />
               <div className="px-4 pt-3 pb-1 text-[11px] text-ink-faint uppercase tracking-wider font-body">当前会话</div>
-              <MobileMenuRow icon={Cpu} label="模型" value={<ModelBadge model={currentModel} compact />} onClick={() => push('model')} />
+              {/* 手机批#4:合并入口。值 = 解析后的实际发送模型(pin→全局默认),一眼
+                  看到"已继承",不再显示成未选;当前 provider 在入口页内高亮置顶(375px
+                  行宽放不下"provider 名+模型徽章"两段,名字挤成省略号反而更差)。 */}
+              {/* 不走 MobileMenuRow:其 value 槽 max-w-44% 挤压 flex-1 标签,"Provider/模型"
+                  +长模型 id 徽章在 375px 下必有一个被截。此行标签 shrink-0 保完整,徽章占余宽。 */}
+              <button onClick={() => push('provider')}
+                className="w-full flex items-center gap-3 px-4 py-3 text-left hover:bg-canvas-warm active:bg-canvas-deep/30 transition-colors">
+                <Server size={18} strokeWidth={1.75} className="text-ink-muted" />
+                <span className="shrink-0 text-[14px] font-body text-ink">Provider / 模型</span>
+                <span className="flex-1 min-w-0 flex justify-end"><ModelBadge model={currentModel} compact /></span>
+                <ChevronRight size={16} className="text-ink-ghost shrink-0" />
+              </button>
               {claudeProtocol && <MobileMenuRow icon={Gauge} label="推理力度" value={effortLabel} onClick={() => push('effort')} />}
               {/* 修正批#1b:权限模式行已删——唯一入口在输入框工具行最左(桌面/手机同)。 */}
-              <MobileMenuRow icon={Server} label="Provider" onClick={() => push('provider')} />
               {activeSession?.sessionId && (
                 <div className="px-4 py-2"><RemoteControlButton session={activeSession} /></div>
               )}
@@ -8231,9 +8258,8 @@ function MobileMenu({ setRightPanel, onClose }) {
               <div className="h-8" />
             </div>
           )}
-          {page === 'model' && <MobileModelPage permKey={permKey} />}
           {page === 'effort' && <MobileEffortPage permKey={permKey} />}
-          {page === 'provider' && <MobileProviderPage />}
+          {page === 'provider' && <MobileProviderPage permKey={permKey} onPicked={() => setStack(['root'])} />}
           {page === 'appearance' && <MobileAppearancePage push={push} />}
           {page === 'theme' && <MobileThemePage />}
           {page === 'readingfont' && <MobileReadingFontPage />}
