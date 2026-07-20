@@ -7322,17 +7322,9 @@ function MobileModelPage({ permKey }) {
   const [fetching, setFetching] = useState(false);
   const [query, setQuery] = useState('');
   // The desktop ModelSelector normally fetches the model catalogue; it isn't
-  // mounted on phones, so populate the global default + available list here.
-  useEffect(() => {
-    fetch('/api/model').then((r) => r.json()).then((d) => {
-      if (d.model) useStore.setState({ currentModel: d.model });
-      if (d.available) useStore.setState({ availableModels: d.available });
-      try {
-        if (!localStorage.getItem('cgui-effort') && d.defaultEffort) useStore.setState({ effort: d.defaultEffort });
-        useStore.setState({ defaultEffort: d.defaultEffort || '' });
-      } catch {}
-    }).catch(() => {});
-  }, []);
+  // mounted on phones. 手机批#3:改用 store.fetchModel(同一份 /api/model 落库逻辑,
+  // 含 providerName/defaultEffort),不再内联重复一份。
+  useEffect(() => { useStore.getState().fetchModel(); }, []);
   const has1m = /\[1m\]/i.test(currentModel || '');
   const pick = (id) => {
     const base = id.replace(/\[1m\]/i, '');
@@ -9093,7 +9085,12 @@ export default function App() {
     // routes Claude-shaped API calls elsewhere. Refresh on settings.json
     // change (the WS file-watcher dispatches cgui:provider-change).
     useStore.getState().fetchProvider();
-    const onProvCh = () => useStore.getState().fetchProvider();
+    // 手机批#3:全局默认模型(settings.json 解析结果)在挂载时就拉一次。桌面顶栏的
+    // ModelSelector 也会拉,但手机端不挂它 → currentModel 一直是 null,菜单里模型
+    // 徽章显示"?",被用户误读为"手机不继承、必须重新选"。实际发送链(pin→历史→
+    // 全局默认)一直是对的,这里只把"解析后的全局默认"显示出来。
+    useStore.getState().fetchModel();
+    const onProvCh = () => { useStore.getState().fetchProvider(); useStore.getState().fetchModel(); };
     window.addEventListener('cgui:provider-change', onProvCh);
     // Warm the MCP cache so the first click on the MCP panel is instant
     // (claude mcp list cold spawn is ~2s).
