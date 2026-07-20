@@ -148,6 +148,9 @@ export function useWebSocket() {
 
   useEffect(() => {
     let cancelled = false;
+    // 是否已成功连过一次:重连成功(非首连)才发 cgui:ws-reconnected 让各处对账,
+    // 首连不发(组件挂载本来就全量拉取,再发一次是浪费)。
+    let hadConnected = false;
 
     function connect() {
       if (cancelled) return;
@@ -163,6 +166,10 @@ export function useWebSocket() {
         lastMsgRef.current = Date.now();
         // 重连成功即补拉断线期间错过的权限卡(首连时列表通常为空,幂等无害)。
         refetchPendingPermissions();
+        // 断线期间的 file-change 等广播已永久丢失(Tailscale 半死连接常态)→ 重连
+        // 即广播一次对账事件,SessionDetail/侧栏各自 silent refetch,与权限卡同构。
+        if (hadConnected) window.dispatchEvent(new CustomEvent('cgui:ws-reconnected'));
+        hadConnected = true;
       };
 
       ws.onmessage = (event) => {

@@ -1857,8 +1857,11 @@ function SessionList() {
       }
     };
     window.addEventListener('cgui:sessions-changed', onChange);
+    // WS 重连成功 → 断线期间的 file-change 广播已丢,补拉一次列表对账(复用同一去抖)。
+    window.addEventListener('cgui:ws-reconnected', onChange);
     return () => {
       window.removeEventListener('cgui:sessions-changed', onChange);
+      window.removeEventListener('cgui:ws-reconnected', onChange);
       if (timer) clearTimeout(timer);
       if (projTimer) clearTimeout(projTimer);
     };
@@ -3652,8 +3655,16 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         return prev.filter((m) => !known.has(tkey(m)));
       });
     };
+    // WS 重连成功 → 断线期间本会话的 file-change 可能已丢,合成一个命中自己 sid 的
+    // 事件走同一条 refetch+去重链(streamingRef 守卫原样生效,不打断流式)。per-pane
+    // 多实例:每个 SessionDetail 只对账自己的 selectedSession,互不越界。
+    const onReconnect = () => onChange({ detail: { path: `/${selectedSession.sessionId}.jsonl` } });
     window.addEventListener('cgui:sessions-changed', onChange);
-    return () => window.removeEventListener('cgui:sessions-changed', onChange);
+    window.addEventListener('cgui:ws-reconnected', onReconnect);
+    return () => {
+      window.removeEventListener('cgui:sessions-changed', onChange);
+      window.removeEventListener('cgui:ws-reconnected', onReconnect);
+    };
   }, [selectedSession?.sessionId, selectedSession?.projectHash]);
 
   // 兜底去重(图1「频繁切换会话时同一条回复渲染两次」根治):每当本会话持久化 messages 变化
