@@ -7490,19 +7490,31 @@ function MobileModelPage({ permKey }) {
 
 function MobileEffortPage({ permKey }) {
   const effort = useStore((s) => (permKey && permKey in (s.effortBySession || {})) ? s.effortBySession[permKey] : s.effort);
+  // 审计批C3:判据/文案与桌面 EffortSelector 对齐 —— openai 协议下映射为
+  // reasoning_effort 照常可选;「默认」档 desc 按真实落点显示(设了全局跟随全局)。
+  const openAIProtocol = useStore((s) => (s.currentProvider?.protocol || 'anthropic') === 'openai');
+  const defaultEffort = useStore((s) => s.defaultEffort || '');
   return (
     <div className="py-1">
-      <div className="px-4 pt-2 pb-1 text-[11px] text-ink-faint font-body">作用于当前会话(每个会话独立记忆、互不影响)</div>
-      {EFFORT_LEVELS.map((e) => (
+      <div className="px-4 pt-2 pb-1 text-[11px] text-ink-faint font-body">
+        {openAIProtocol ? '推理力度 (reasoning_effort,不支持的端点自动降级) · ' : ''}作用于当前会话(每个会话独立记忆、互不影响)
+      </div>
+      {EFFORT_LEVELS.map((e) => {
+        const desc = e.id !== '' ? e.desc
+          : defaultEffort
+            ? `跟随全局设置:${EFFORT_LEVELS.find((x) => x.id === defaultEffort)?.label || defaultEffort}`
+            : '未设全局,由模型自适应';
+        return (
         <button key={e.id || 'default'} onClick={() => useStore.getState().setEffortFor(permKey, e.id)}
           className="w-full flex items-center gap-3 px-4 py-3 text-left hover:bg-canvas-warm transition-colors">
           <div className="flex-1 min-w-0">
             <div className="text-[14px] font-body text-ink">{e.label}</div>
-            <div className="text-[11px] text-ink-faint font-body">{e.desc}</div>
+            <div className="text-[11px] text-ink-faint font-body">{desc}</div>
           </div>
           {effort === e.id && <Check size={16} className="text-accent shrink-0" />}
         </button>
-      ))}
+        );
+      })}
     </div>
   );
 }
@@ -8207,10 +8219,6 @@ function MobileMenu({ setRightPanel, onClose }) {
   // 审计批C2:导出 Markdown 需要当前会话消息(手机单窗格=pane0/activeTabIndex)。
   const menuMessages = useStore((s) => (s.paneMessages && s.paneMessages[s.activeTabIndex]) || s.messages || EMPTY_ARRAY);
   const effort = useStore((s) => (permKey && permKey in (s.effortBySession || {})) ? s.effortBySession[permKey] : s.effort);
-  // --effort works on every claude-format upstream (official + mimo/deepseek/
-  // openrouter relays); only the OpenAI proxy (codex-local) can't map it. Gate
-  // on protocol, not providerHint.
-  const claudeProtocol = useStore((s) => (s.currentProvider?.protocol || 'anthropic') !== 'openai');
   const effortLabel = (EFFORT_LEVELS.find((e) => e.id === effort) || EFFORT_LEVELS[0]).label;
 
   // New chat: prefer the selected project; fall back to the open session's
@@ -8271,7 +8279,9 @@ function MobileMenu({ setRightPanel, onClose }) {
                 <span className="flex-1 min-w-0 flex justify-end"><ModelBadge model={currentModel} compact /></span>
                 <ChevronRight size={16} className="text-ink-ghost shrink-0" />
               </button>
-              {claudeProtocol && <MobileMenuRow icon={Gauge} label="推理力度" value={effortLabel} onClick={() => push('effort')} />}
+              {/* 审计批C3:门控判据与桌面 EffortSelector 统一 —— openai 协议同样显示
+                  (映射为 reasoning_effort,不支持的端点自动降级),文案在分页内区分。 */}
+              <MobileMenuRow icon={Gauge} label="推理力度" value={effortLabel} onClick={() => push('effort')} />
               {/* 审计批C1:手机会话内检索入口(桌面为 Cmd+F)。事件由活动窗格的
                   SessionDetail 接住并 setSearchOpen(true);先关抽屉让检索浮层可见。 */}
               {activeSession && (
