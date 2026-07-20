@@ -29,9 +29,9 @@ function EffectBadge({ level }) {
 
 // 设置搜索索引:纯前端按标题/关键词匹配,命中后切到对应 tab 并滚动高亮该设置组
 // (与顶栏「更新」按钮跳转同一 id+ring 机制)。新增设置组时在此登记。
-// P1.4 重组:原 overview 拆散到 通用(general)/会话(session)/外观(appearance)/
-// Provider(provider);json+storage 合并为 高级(advanced)。id 不变,老跳转链
-// (gui-update/cc-update 等)经 tabOf() 自动落到新 tab。
+// P1.4 重组:原 overview 拆散到 通用(general)/会话(session)/Provider(provider);
+// json+storage 合并为 高级(advanced)。id 不变,老跳转链(gui-update/cc-update 等)
+// 经 tabOf() 自动落到新 tab。P2.3:外观 tab 已删,外观项统一在顶栏「主题」弹层。
 const SETTINGS_INDEX = [
   { id: 'gui-update', tab: 'general', title: 'GUI 版本与更新', keys: 'update 升级 版本 检查更新 下载' },
   { id: 'cc-update', tab: 'general', title: 'Claude Code CLI 更新 / 切换', keys: 'cli claude npm 原生 安装 版本 路径' },
@@ -45,8 +45,6 @@ const SETTINGS_INDEX = [
   { id: 'set-cache-opt', tab: 'session', title: '缓存优化', keys: '缓存 cache 前缀 动态 系统提示' },
   { id: 'set-auto-compact', tab: 'session', title: '自动压缩窗口', keys: '压缩 compact token 上下文 窗口' },
   { id: 'set-small-fast-model', tab: 'session', title: '轻量快速模型', keys: '模型 标题 haiku 快速 small fast' },
-  { id: 'set-chat-background', tab: 'appearance', title: '对话区背景', keys: '背景 图片 视频 纯色 遮罩' },
-  { id: 'set-theme', tab: 'appearance', title: '主题 / 字号 / 加载动画', keys: '主题 深色 浅色 配色 字体 字号 动画 聊天模式 外观 theme' },
   { id: 'set-provider-manage', tab: 'provider', title: 'Provider 管理(增删改 / 测试 / 隐藏 / 导入)', keys: 'provider 中转 api key baseurl 模型 档位 导入 cc-switch 隐藏 删除 测试 切换' },
   { id: 'set-env-editor', tab: 'provider', title: '环境变量', keys: 'env 变量 environment anthropic' },
   { id: 'set-env-check', tab: 'env', title: '环境检查(node / claude / python / git / uv)', keys: '环境 依赖 node python git uv 安装' },
@@ -58,16 +56,18 @@ const SETTINGS_INDEX = [
 ];
 // 文案改名(用户指定):general tab 显示名「通用」→「更新」;id/tabOf 兼容映射不动
 // (顶栏更新按钮 jumpToUpdate 缺省仍落本 tab)。
+// P2.3:「外观」tab 删除 —— 与顶栏「主题」弹层重复(双入口);对话区背景等非重复项
+// 一并迁入主题弹层(App.jsx ThemeAppearanceBody),外观相关设置单一入口 = 顶栏主题按钮。
 const TAB_LABELS = {
-  general: '更新', session: '会话', appearance: '外观', provider: 'Provider',
+  general: '更新', session: '会话', provider: 'Provider',
   env: '环境', permissions: '权限', hooks: 'Hooks', network: '网络', advanced: '高级',
 };
 // 老代码/事件链按 section id 跳转时不带 tab(如顶栏更新按钮传 'gui-update')→ 从索引反查。
 const tabOf = (section) => SETTINGS_INDEX.find((it) => it.id === section)?.tab || 'general';
 
-// providerSlot / appearanceSlot:由 App.jsx 的 SettingsPanelHost 注入(ProviderManager /
-// ThemeAppearanceBody 定义在 App.jsx,slot 传入避免循环 import)。
-export function SettingsPanel({ providerSlot = null, appearanceSlot = null }) {
+// providerSlot:由 App.jsx 的 SettingsPanelHost 注入(ProviderManager 定义在 App.jsx,
+// slot 传入避免循环 import)。
+export function SettingsPanel({ providerSlot = null }) {
   const [settings, setSettings] = useState(null);
   const [rawJson, setRawJson] = useState('');
   const [loading, setLoading] = useState(true);
@@ -229,7 +229,6 @@ export function SettingsPanel({ providerSlot = null, appearanceSlot = null }) {
 
       {tab === 'general' && <GeneralTab settings={settings} />}
       {tab === 'session' && <SessionTab settings={settings} onSave={save} onEnvPatch={envPatch} saving={saving} />}
-      {tab === 'appearance' && <AppearanceTab appearanceSlot={appearanceSlot} />}
       {tab === 'provider' && <ProviderTab providerSlot={providerSlot} settings={settings} onEnvPatch={envPatch} saving={saving} />}
       {tab === 'env' && <div id="set-env-check"><EnvCheckPanel asModal={false} /></div>}
       {tab === 'permissions' && (
@@ -1803,7 +1802,7 @@ function SmallFastModelInput({ env, onEnvPatch, saving }) {
 // 对话区背景设置(③):纯色 / 本地图片 / 本地视频,附遮罩不透明度滑杆。
 // 状态存 store.chatBackground(localStorage 全局持久化);文件经 POST /api/backgrounds
 // 上传到 ~/.claude-gui/backgrounds/,客户端只持有服务端生成的文件名。
-function ChatBackgroundCard() {
+export function ChatBackgroundCard() {
   const bg = useStore((s) => s.chatBackground);
   const setBg = useStore((s) => s.setChatBackground);
   const [uploading, setUploading] = useState(false);
@@ -1952,21 +1951,6 @@ function SessionTab({ settings, onSave, onEnvPatch, saving }) {
   );
 }
 
-// 外观:对话区背景(← overview)+ 主题/字号/加载动画(appearanceSlot,与顶栏「主题」
-// 弹层同一组件同一 store,双入口同源)。
-function AppearanceTab({ appearanceSlot }) {
-  return (
-    <div className="space-y-3">
-      <div id="set-chat-background"><ChatBackgroundCard /></div>
-      {appearanceSlot && (
-        <div id="set-theme" className="border border-canvas-deep rounded-lg p-3 space-y-3">
-          <div className="text-[10px] text-ink-faint uppercase tracking-wider font-body">主题 / 字号 / 加载动画 <span className="normal-case tracking-normal">· 与顶栏「主题」按钮同源</span></div>
-          {appearanceSlot}
-        </div>
-      )}
-    </div>
-  );
-}
 
 // Provider:管理面板(providerSlot ← 顶栏 ProviderSwitcher 弹层管理段迁入)+ 环境变量
 // 编辑器(← overview,provider 相关 env 多在此改)。

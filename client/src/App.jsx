@@ -34,7 +34,7 @@ import { ModelBadge, ProviderAvatar } from './components/ModelBadge.jsx';
 import { RemoteControlButton } from './components/SessionSelectors.jsx';
 import { UsagePanel } from './components/UsagePanel.jsx';
 import { ProcessPanel } from './components/ProcessPanel.jsx';
-import { SettingsPanel } from './components/SettingsPanel.jsx';
+import { SettingsPanel, ChatBackgroundCard } from './components/SettingsPanel.jsx';
 import { FileExplorerPanel } from './components/FileExplorerPanel.jsx';
 import { SkillsPanel } from './components/SkillsPanel.jsx';
 import { GuideTour } from './components/GuideTour.jsx';
@@ -377,6 +377,12 @@ function ThemeAppearanceBody() {
 
       {/* ── Loading 动画样式(仅挂载时渲染,30 个动画不常驻) ── */}
       <LoadingStylePicker />
+
+      {/* ── 对话区背景(P2.3:随设置「外观」tab 删除迁入,主题弹层为外观唯一入口) ── */}
+      <ChatBackgroundCard />
+
+      {/* P3 皮肤系统落位:皮肤包选择器/管理(--skin-bg-image 等)计划挂在本弹层
+          「配色外观」下方,与 THEME_FAMILIES 同级呈现(见 PLAN-skin-system.md)。 */}
     </>
   );
 }
@@ -638,7 +644,7 @@ function finalizeSessionAgents(sessionId, tnStatus = 'stopped') {
 // ThemeAppearanceBody(主题/字号/动画,与顶栏弹层同源)作为 slot 传入 SettingsPanel,
 // 避免 SettingsPanel.jsx 反向 import App.jsx(循环 import/TDZ 风险)。
 function SettingsPanelHost() {
-  return <SettingsPanel providerSlot={<ProviderManager />} appearanceSlot={<ThemeAppearanceBody />} />;
+  return <SettingsPanel providerSlot={<ProviderManager />} />;
 }
 
 // Top-right panels — each key auto-wires a header icon (desktop + mobile menu)
@@ -8088,6 +8094,10 @@ function MobileAppearancePage({ push }) {
       <div className="px-4 pt-2 pb-2 text-[11px] text-ink-faint font-body">对话显示</div>
       <MobileMenuRow icon={MessageSquare} label="聊天模式" value={chatMode ? '开' : '关'} chevron={false} onClick={() => setChatMode(!chatMode)} />
       <div className="px-4 pt-1 text-[10px] text-ink-faint font-body leading-snug">开启后折叠思考/工具/子代理/技能,只看对话文本,配「微信」配色最像微信</div>
+      {/* P2.3:设置「外观」tab 删除后,加载动画与对话区背景在手机端的入口迁到这里
+          (桌面端在顶栏「主题」弹层),不丢功能。 */}
+      <div className="px-4 pt-3"><LoadingStylePicker /></div>
+      <div className="px-4 pt-3 pb-4"><ChatBackgroundCard /></div>
     </div>
   );
 }
