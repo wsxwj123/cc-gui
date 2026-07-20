@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { nextDockCode } from '../utils/artifactDock.js';
-import { mergeSyncedMap } from '../utils/sessionSync.js';
+import { mergeSyncedMap, syncableKey, pushLocalOnlyKeys } from '../utils/sessionSync.js';
 
 // Helper: read JSON from localStorage with fallback.
 const readLs = (key, fallback) => {
@@ -39,8 +39,6 @@ const putSessionSync = (kind, sessionId, value) => {
     body: JSON.stringify({ kind, sessionId, value }),
   }).catch(() => {}).finally(() => syncInFlight.delete(tag));
 };
-// 未落盘 draft(无稳定 session id)不同步;发首条消息落盘后经 migrateSessionKey 补推。
-const syncableKey = (key) => typeof key === 'string' && !!key && !key.startsWith('draft-');
 
 // Valid `--permission-mode` values per `claude --help`。
 // P2.2:'auto' 为 SDK 原生自动档;是否显示由 useVisiblePermissionModes 门控
@@ -603,21 +601,29 @@ export const useStore = create((set, get) => ({
       const next = mergeSyncedMap(local, server, skip);
       // 首次水合:本地有而服务端没有的实键(本功能上线前的存量 pin)推上去,
       // 其他设备也能看到(同 hydrateCustomTitles 的 legacy 合并回推)。
+      // 审计批收尾#1:只在初次迁移执行(hydrateSessionSync 以 marker 门控),
+      // 键集计算见 pushLocalOnlyKeys 注释 —— 每次水合都回推会复活对端已清的旧键。
       if (pushLocalOnly) {
-        for (const k of Object.keys(local)) {
-          if (syncableKey(k) && !(k in server)) putSessionSync(kind, k, local[k]);
-        }
+        for (const k of pushLocalOnlyKeys(local, server)) putSessionSync(kind, k, local[k]);
       }
       writeLs(lsKey, next);
       patch[stateKey] = next;
     }
     set(patch);
   },
+  // 审计批收尾#1:pushLocalOnly 仅首次水合执行(localStorage marker),此后纯拉取。
+  // 场景:设备 B 切 provider(本地清+服务端 clear modelPins)期间设备 A 离线;若 A
+  // 每次重连都回推,本地残留的旧 provider pin 会重新填进服务端并广播回 B → 该会话
+  // 下次发送旧模型 id 报 invalid model。marker 只在 GET 成功后置位(失败下次重试);
+  // 离线期间本机新钉的 pin 不靠回推 —— setter 的 fire-and-forget PUT 是主通道,
+  // 丢了也会在用户下次操作时补写。
   hydrateSessionSync: async () => {
     try {
       const res = await fetch('/api/prefs/session-sync');
       const d = await res.json();
-      get().applyRemoteSessionSync(d, { pushLocalOnly: true });
+      const migrated = readLs('cgui-session-sync-migrated', false);
+      get().applyRemoteSessionSync(d, { pushLocalOnly: !migrated });
+      if (!migrated) writeLs('cgui-session-sync-migrated', true);
     } catch {}
   },
   getModelFor: (key) => (key && get().modelBySession[key]) || get().currentModel,

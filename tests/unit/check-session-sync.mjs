@@ -3,7 +3,7 @@
 // effort '' 合法值各至少一条断言。node tests/unit/check-session-sync.mjs
 import assert from 'node:assert/strict';
 import { applySessionSyncPut, normalizeSessionSync, SYNC_KINDS } from '../../server/session-sync.js';
-import { mergeSyncedMap } from '../../client/src/utils/sessionSync.js';
+import { mergeSyncedMap, pushLocalOnlyKeys, syncableKey } from '../../client/src/utils/sessionSync.js';
 
 // ── 服务端:三张 map 各写入一条 ─────────────────────────────
 let st = normalizeSessionSync(null);
@@ -61,5 +61,22 @@ assert.equal(merged['sid-3'], 'high');
 // skip(提交中)键不被服务端覆盖
 merged = mergeSyncedMap({ 'sid-4': 'new' }, { 'sid-4': 'old' }, new Set(['sid-4']));
 assert.equal(merged['sid-4'], 'new');
+
+// ── 收尾#1:clear 之后离线残留键回推不复活(方案 b:pushLocalOnly 仅首次)──
+// 场景:设备 B 切 provider → 服务端 clear modelPins;设备 A 离线期间本地残留旧 pin。
+let srv = applySessionSyncPut(
+  { modelPins: { 'sid-old': 'old-provider-model' } }, { clear: 'modelPins' },
+).maps;
+assert.deepEqual(srv.modelPins, {});
+const localA = { 'sid-old': 'old-provider-model', 'draft-p': 'x' };
+// A 重连水合:已迁移(marker 置位)→ hydrateSessionSync 传 pushLocalOnly:false,
+// applyRemoteSessionSync 不执行回推 —— 服务端保持为空,B 不会被旧 pin 重新填上。
+// (本地值经 mergeSyncedMap 保留不闪回,但只留在 A 本机,不再进入同步表。)
+merged = mergeSyncedMap(localA, srv.modelPins);
+assert.equal(merged['sid-old'], 'old-provider-model');
+assert.deepEqual(srv.modelPins, {});
+// 修掉的正是这条路径:若仍走首次迁移分支,回推键集非空(且 draft 键被 syncableKey 排除)。
+assert.deepEqual(pushLocalOnlyKeys(localA, srv.modelPins), ['sid-old']);
+assert.ok(!syncableKey('draft-p') && syncableKey('sid-old'));
 
 console.log('check-session-sync: all assertions passed');

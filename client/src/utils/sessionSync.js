@@ -19,3 +19,18 @@ export function mergeSyncedMap(local, server, skip) {
   }
   return next;
 }
+
+// 未落盘 draft(无稳定 session id)不同步;发首条消息落盘后经 migrateSessionKey 补推。
+export const syncableKey = (key) => typeof key === 'string' && !!key && !key.startsWith('draft-');
+
+// 审计批收尾#1:初次迁移回推的键集 ——「本地有、服务端没有」的可同步实键(本功能
+// 上线前的存量 pin)。只允许在【从未迁移过】的首次水合执行(store 以 localStorage
+// marker 门控),此后水合纯拉取。否则每次重连都回推,离线设备会把对端已 clear
+// (切 provider)/已 GC(删会话)的旧键复活 —— 复活的旧 provider 模型 pin 让该
+// 会话下次发送报 invalid model。三张 map 同待遇(permissionModes/effortPins 虽无
+// clear 语义,但删会话 GC 同样会被回推复活)。
+export function pushLocalOnlyKeys(local, server) {
+  const l = (local && typeof local === 'object') ? local : {};
+  const s = (server && typeof server === 'object') ? server : {};
+  return Object.keys(l).filter((k) => syncableKey(k) && !(k in s));
+}
