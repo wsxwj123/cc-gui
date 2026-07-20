@@ -29,7 +29,7 @@ import { useMultiSelect, SelModeToggle, BatchBar, SelCheckbox } from './componen
 import { pickDirectory, isTauri } from './utils/pickDirectory.js';
 import ChatSearch from './components/ChatSearch.jsx';
 import { confirmDialog } from './utils/confirmDialog.jsx';
-import { ChatInput, EffortSelector, EFFORT_LEVELS, MODE_META, useVisiblePermissionModes, markAutoUnavailable } from './components/ChatInput.jsx';
+import { ChatInput, EffortSelector, EFFORT_LEVELS, markAutoUnavailable } from './components/ChatInput.jsx';
 import { ModelBadge, ProviderAvatar } from './components/ModelBadge.jsx';
 import { RemoteControlButton, ProviderSwitcher, ModelSelector } from './components/SessionSelectors.jsx';
 import { UsagePanel } from './components/UsagePanel.jsx';
