@@ -143,7 +143,7 @@ function PlanReviewCard({ req, onResolve, onApprove, processing, position, hydra
         </div>
       )}
       {!showRefine && (
-        <div className="px-4 py-2.5 flex items-center gap-2 bg-canvas-warm/60 border-t border-canvas-deep">
+        <div className="px-4 py-2.5 flex items-center flex-wrap gap-2 bg-canvas-warm/60 border-t border-canvas-deep">
           <button
             disabled={processing}
             onClick={() => setShowRefine(true)}
@@ -316,7 +316,7 @@ function AskQuestionCard({ req, onAnswer, processing, position, hydrate }) {
           />
         </div>
       </div>
-      <div className="px-4 py-2.5 flex items-center gap-2 bg-canvas-warm/60 border-t border-canvas-deep">
+      <div className="px-4 py-2.5 flex items-center flex-wrap gap-2 bg-canvas-warm/60 border-t border-canvas-deep">
         <button
           disabled={processing}
           onClick={() => { cancelAutoSubmit(); onAnswer(req, '[用户跳过了此问题，请自行用合理默认值继续]'); }}
@@ -399,7 +399,7 @@ function BoundaryCard({ req, onResolve, onAuthorizeDir, processing, position, hy
         </div>
         {renderInput(req.toolName, req.toolInput)}
       </div>
-      <div className="px-4 py-2.5 flex items-center gap-2 bg-canvas-warm/60 border-t border-canvas-deep">
+      <div className="px-4 py-2.5 flex items-center flex-wrap gap-2 bg-canvas-warm/60 border-t border-canvas-deep">
         <label className="flex items-center gap-1.5 text-[11px] text-ink-muted mr-auto cursor-pointer select-none" title="写入 ~/.claude/settings.json 的 permissions.additionalDirectories，终端 CLI 同样生效">
           <input
             type="checkbox"
@@ -497,7 +497,7 @@ function PermissionCard({ req, onResolve, onWhitelistAndAllow, onAlwaysAllow, on
           </button>
         </div>
       )}
-      <div className="px-4 py-2.5 flex items-center gap-2 bg-canvas-warm/60 border-t border-canvas-deep">
+      <div className="px-4 py-2.5 flex items-center flex-wrap gap-2 bg-canvas-warm/60 border-t border-canvas-deep">
         <label className="flex items-center gap-1.5 text-[11px] text-ink-muted mr-auto select-none">
           记住
           <select
