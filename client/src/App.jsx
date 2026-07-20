@@ -271,9 +271,10 @@ const TONES = [
   { id: 'auto', label: '跟随系统', Icon: Monitor },
 ];
 
-function ThemeToggle() {
-  const [open, setOpen] = useState(false);
-  const wrapRef = useRef(null);
+// P1.4 外观控件同源体(双入口):顶栏 ThemeToggle 弹层与 设置→外观 tab 共用这一个组件。
+// 状态单一数据源 —— 全部走 sessionStore(setTheme/setUiFontScale/…/localStorage),
+// 两处只是同一 store 的两个 view,不各自为政。
+function ThemeAppearanceBody() {
   const themeFamily = useStore((s) => s.themeFamily);
   const themeTone = useStore((s) => s.themeTone);
   const setTheme = useStore((s) => s.setTheme);
@@ -281,34 +282,11 @@ function ThemeToggle() {
   const setUiFontScale = useStore((s) => s.setUiFontScale);
   const readingFont = useStore((s) => s.readingFont);
   const setReadingFont = useStore((s) => s.setReadingFont);
-
-  useEffect(() => {
-    if (!open) return;
-    const onDown = (e) => { if (wrapRef.current && !wrapRef.current.contains(e.target)) setOpen(false); };
-    document.addEventListener('mousedown', onDown);
-    return () => document.removeEventListener('mousedown', onDown);
-  }, [open]);
-
   const effDark = themeTone === 'auto' ? systemPrefersDark() : themeTone === 'dark';
   const toneKey = effDark ? 'dark' : 'light';
-  const ToneIcon = themeTone === 'light' ? Sun : themeTone === 'dark' ? Moon : Monitor;
-
   return (
-    <div ref={wrapRef} className="relative">
-      <button onClick={() => setOpen((v) => !v)}
-        data-tour="theme-toggle"
-        className="px-1.5 py-1 rounded-lg text-ink-muted hover:text-ink hover:bg-black/5 transition-colors flex flex-col items-center gap-0.5"
-        title="主题与外观">
-        <ToneIcon size={15} />
-        <span className="text-[9px] leading-none font-body">主题</span>
-      </button>
-
-      {/* CJ-2:桌面端也要限高+整体滚动。此前只有移动端有 max-h,桌面端弹窗内容
-          (配色网格+动画网格)在大字号 zoom 下总高超过视口,动画网格的内部滚动窗口
-          有一截伸到屏幕外 → 用户把内部滚动条拖到底也看不全(实报)。 */}
-      {open && (
-        <div className="absolute right-0 top-full mt-2 z-[60] w-[300px] glass-popover rounded-2xl border border-canvas-deep shadow-xl p-3 space-y-3 max-h-[min(78dvh,calc(100dvh-6rem))] overflow-y-auto max-md:fixed max-md:left-3 max-md:right-3 max-md:top-16 max-md:w-auto max-md:mt-0 max-md:max-h-[78dvh]">
-          {/* ── Tone (light / dark / follow-system) ───────────── */}
+    <>
+      {/* ── Tone (light / dark / follow-system) ───────────── */}
           <div className="flex items-center gap-1 p-1 rounded-xl bg-black/5">
             {TONES.map(({ id, label, Icon }) => (
               <button key={id} onClick={() => setTheme(themeFamily, id)}
@@ -393,11 +371,45 @@ function ThemeToggle() {
             </div>
           </div>
 
-          {/* 聊天模式:折叠思考/工具/子代理/技能,消息流只留对话文本 */}
-          <ChatModeToggle />
+      {/* 聊天模式:折叠思考/工具/子代理/技能,消息流只留对话文本 */}
+      <ChatModeToggle />
 
-          {/* ── Loading 动画样式(仅弹窗打开时渲染,30 个动画不常驻) ── */}
-          <LoadingStylePicker />
+      {/* ── Loading 动画样式(仅挂载时渲染,30 个动画不常驻) ── */}
+      <LoadingStylePicker />
+    </>
+  );
+}
+
+function ThemeToggle() {
+  const [open, setOpen] = useState(false);
+  const wrapRef = useRef(null);
+  const themeTone = useStore((s) => s.themeTone);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e) => { if (wrapRef.current && !wrapRef.current.contains(e.target)) setOpen(false); };
+    document.addEventListener('mousedown', onDown);
+    return () => document.removeEventListener('mousedown', onDown);
+  }, [open]);
+
+  const ToneIcon = themeTone === 'light' ? Sun : themeTone === 'dark' ? Moon : Monitor;
+
+  return (
+    <div ref={wrapRef} className="relative">
+      <button onClick={() => setOpen((v) => !v)}
+        data-tour="theme-toggle"
+        className="px-1.5 py-1 rounded-lg text-ink-muted hover:text-ink hover:bg-black/5 transition-colors flex flex-col items-center gap-0.5"
+        title="主题与外观">
+        <ToneIcon size={15} />
+        <span className="text-[9px] leading-none font-body">主题</span>
+      </button>
+
+      {/* CJ-2:桌面端也要限高+整体滚动。此前只有移动端有 max-h,桌面端弹窗内容
+          (配色网格+动画网格)在大字号 zoom 下总高超过视口,动画网格的内部滚动窗口
+          有一截伸到屏幕外 → 用户把内部滚动条拖到底也看不全(实报)。 */}
+      {open && (
+        <div className="absolute right-0 top-full mt-2 z-[60] w-[300px] glass-popover rounded-2xl border border-canvas-deep shadow-xl p-3 space-y-3 max-h-[min(78dvh,calc(100dvh-6rem))] overflow-y-auto max-md:fixed max-md:left-3 max-md:right-3 max-md:top-16 max-md:w-auto max-md:mt-0 max-md:max-h-[78dvh]">
+          <ThemeAppearanceBody />
         </div>
       )}
     </div>
@@ -621,6 +633,13 @@ function finalizeSessionAgents(sessionId, tnStatus = 'stopped') {
   }
 }
 
+// P1.4:设置面板宿主 —— 把 App.jsx 内定义的 ProviderManager(增删改/测试/隐藏/导入)与
+// ThemeAppearanceBody(主题/字号/动画,与顶栏弹层同源)作为 slot 传入 SettingsPanel,
+// 避免 SettingsPanel.jsx 反向 import App.jsx(循环 import/TDZ 风险)。
+function SettingsPanelHost() {
+  return <SettingsPanel providerSlot={<ProviderManager />} appearanceSlot={<ThemeAppearanceBody />} />;
+}
+
 // Top-right panels — each key auto-wires a header icon (desktop + mobile menu)
 // and its RightPanel body. Adding a key here is all the wiring needed.
 const PANEL_MAP = {
@@ -633,7 +652,7 @@ const PANEL_MAP = {
   mcp: { label: '工具（MCP 服务器 · 插件）', icon: Server, component: MCPPanel },
   skills: { label: 'Skill 市场（导入官方技能）', icon: Sparkles, component: SkillsPanel },
   memory: { label: 'CLAUDE.md 指令', icon: BookText, component: MemoryPanel },
-  settings: { label: '设置', icon: Settings, component: SettingsPanel },
+  settings: { label: '设置', icon: Settings, component: SettingsPanelHost },
 };
 
 // useResizable + Splitter live in hooks/useResizable.js — kept aliased for
@@ -6730,12 +6749,12 @@ function RemoteControlButton({ session }) {
   );
 }
 
-// One-tap API provider switch, sourced from the user's CC Switch config (read
-// only, no keys leave the server). Switching overwrites ~/.claude/settings.json
-// with the chosen provider snapshot (server backs it up first); the file-watcher
-// then broadcasts provider-change so ModelSelector/cost displays self-refresh.
-// Hidden entirely when CC Switch isn't installed/empty.
-function ProviderSwitcher() {
+// P1.4 Provider 管理(设置→Provider tab)。原顶栏 ProviderSwitcher 弹层的管理段整体
+// 迁到这里:增删改/测试/隐藏/批量删除/cc-switch 导入/默认模型·档位映射/OpenAI 模型多选,
+// 一项不少;点行仍可切换。顶栏 ProviderSwitcher 瘦身为纯切换列表(见下),底部链到本页。
+// Switching overwrites ~/.claude/settings.json with the chosen provider snapshot
+// (server backs it up first); the file-watcher then broadcasts provider-change.
+function ProviderManager() {
   const ms = useMultiSelect();
   const [providers, setProviders] = useState([]);
   // OpenAI-format providers (codex/opencode) — routed through the embedded
@@ -6743,7 +6762,6 @@ function ProviderSwitcher() {
   const [openaiProviders, setOpenaiProviders] = useState([]);
   const [customProviders, setCustomProviders] = useState([]);
   const [overrides, setOverrides] = useState({});
-  const [open, setOpen] = useState(false);
   const [switching, setSwitching] = useState(false);
   // Optimistic current id: the CC Switch db's is_current isn't updated by us
   // (we never write that db), so after a switch we mark the active one locally.
@@ -6753,7 +6771,6 @@ function ProviderSwitcher() {
   // truly deleted instead.
   const [hiddenProviders, setHiddenProviders] = useState(new Set());
   const [showHidden, setShowHidden] = useState(false);
-  const wrapRef = useRef(null);
   const currentProvider = useStore((s) => s.currentProvider);
 
   const [importStatus, setImportStatus] = useState({ imported: true, ccSwitchAvailable: false, ccSwitchCount: 0 });
@@ -6804,37 +6821,14 @@ function ProviderSwitcher() {
     load();
   };
   const [editingProvider, setEditingProvider] = useState(null);
-  // BZ-2:加/编辑 provider 表单有未保存内容时,外部点击/Esc 不关闭下拉(否则卸载表单
-  // → 已输入的 url/key/model 全丢)。表单经 onDirtyChange 上报,这里用 ref 读最新值。
-  const formDirtyRef = useRef(false);
   useEffect(() => {
     load();
     const onCh = () => load();
     window.addEventListener('cgui:provider-change', onCh);
     return () => window.removeEventListener('cgui:provider-change', onCh);
   }, []);
-  // 错误 turn 的「检查 Provider 设置」按钮经事件打开本弹层(顶栏常驻单实例)。
-  useEffect(() => {
-    const onOpen = () => setOpen(true);
-    window.addEventListener('cgui:open-provider', onOpen);
-    return () => window.removeEventListener('cgui:open-provider', onOpen);
-  }, []);
 
-  useEffect(() => {
-    if (!open) return;
-    const onDocClick = (e) => { if (formDirtyRef.current) return; if (!wrapRef.current?.contains(e.target)) setOpen(false); };
-    const onEsc = (e) => { if (e.key === 'Escape') { if (formDirtyRef.current) return; setOpen(false); } };
-    document.addEventListener('mousedown', onDocClick);
-    document.addEventListener('keydown', onEsc);
-    return () => {
-      document.removeEventListener('mousedown', onDocClick);
-      document.removeEventListener('keydown', onEsc);
-    };
-  }, [open]);
-  // 关闭下拉时复位多选(顶栏常驻单实例,否则重开残留 selMode/选中项)。
-  useEffect(() => { if (!open) ms.exit(); }, [open]);
-
-  // Always render — even with zero providers the dropdown still hosts the
+  // Always render — even with zero providers the panel still hosts the
   // "添加 Provider" form, so a fresh machine (no CC Switch, nothing added yet)
   // can set up its first provider.
 
@@ -6843,7 +6837,6 @@ function ProviderSwitcher() {
   // providerHint is lowercase server-side (pricing/compare logic depends on it),
   // so capitalize only for display.
   const capHint = (h) => (h ? h.charAt(0).toUpperCase() + h.slice(1) : h);
-  const label = cur?.name || capHint(currentProvider?.providerHint) || 'Provider';
 
   const switchTo = async (id, model) => {
     setSwitching(true);
@@ -6861,7 +6854,6 @@ function ProviderSwitcher() {
       // Notify ModelSelector et al. so their live-fetched catalogue re-keys to the
       // new provider instead of showing the previous provider's fetched models.
       window.dispatchEvent(new CustomEvent('cgui:provider-change'));
-      setOpen(false);
     } catch (e) {
       confirmDialog('切换 provider 失败：' + e.message);
     }
@@ -6869,17 +6861,9 @@ function ProviderSwitcher() {
   };
 
   return (
-    <div ref={wrapRef} className="relative">
-      <button onClick={() => setOpen(!open)} title="切换 API Provider（来自 CC Switch）"
-        className="flex items-center gap-1 px-2 py-1 rounded-md hover:bg-canvas-deep transition-colors">
-        <Server size={12} className="text-ink-muted" />
-        <span className="text-[11px] text-ink-soft font-body max-w-[88px] truncate">{label}</span>
-        <ChevronDown size={10} className="text-ink-faint" />
-      </button>
-      {open && (
-        <div className="glass-popover absolute left-0 top-full mt-2 w-60 max-w-[calc(var(--app-w,100vw)-1.5rem)] z-50 py-1 animate-glass-rise max-h-[70vh] overflow-y-auto max-md:fixed max-md:left-3 max-md:right-3 max-md:w-auto max-md:top-16 max-md:mt-0">
-          <div className="px-3 py-2 sticky top-0 bg-canvas border-b border-canvas-deep">
-            <div className="text-[10px] text-ink-faint uppercase tracking-wider font-body">切换 Provider</div>
+    <div className="border border-canvas-deep rounded-lg overflow-hidden">
+          <div className="px-3 py-2 bg-canvas-warm border-b border-canvas-deep">
+            <div className="text-[10px] text-ink-faint uppercase tracking-wider font-body">Provider 管理 · 当前:{cur?.name || capHint(currentProvider?.providerHint) || '—'}</div>
             <p className="text-[10px] text-ink-faint font-body mt-1 leading-snug">
               借鉴 <a href="https://github.com/farion1231/cc-switch" target="_blank" rel="noreferrer" className="text-accent hover:underline">CC Switch</a>。切换会改写 <code className="font-mono">~/.claude/settings.json</code>（自动备份），<b>对新发的消息生效</b>。
             </p>
@@ -6893,7 +6877,6 @@ function ProviderSwitcher() {
             customCount={customProviders.length}
             onCancel={() => setEditingProvider(null)}
             onSaved={() => { setEditingProvider(null); load(); }}
-            onDirtyChange={(d) => { formDirtyRef.current = d; }}
           />
           {providers.filter((p) => showHidden || !hiddenProviders.has(p.id)).map((p) => (
             <div key={p.id} className={`px-3 py-1 ${isCur(p) ? 'bg-accent-subtle' : ''} ${hiddenProviders.has(p.id) ? 'opacity-50' : ''}`}>
@@ -6993,6 +6976,142 @@ function ProviderSwitcher() {
               </button>
             </div>
           )}
+    </div>
+  );
+}
+
+// 顶栏 Provider 切换(P1.4 瘦身版):纯切换列表 —— 点行即切,当前项打勾;
+// 增删改/测试/隐藏/导入等管理操作整体迁到 设置→Provider(底部直达链)。
+// Hidden providers 仍按服务端 hidden 集过滤(取消隐藏在管理页操作)。
+function ProviderSwitcher() {
+  const [providers, setProviders] = useState([]);
+  const [openaiProviders, setOpenaiProviders] = useState([]);
+  const [customProviders, setCustomProviders] = useState([]);
+  const [hiddenProviders, setHiddenProviders] = useState(new Set());
+  const [open, setOpen] = useState(false);
+  const [switching, setSwitching] = useState(false);
+  // Optimistic current id(cc-switch db 的 is_current 我们不写,切换后本地标记)。
+  const [activeId, setActiveId] = useState(null);
+  const wrapRef = useRef(null);
+  const currentProvider = useStore((s) => s.currentProvider);
+
+  const load = () => {
+    fetch('/api/providers').then((r) => r.json()).then((d) => {
+      setProviders(Array.isArray(d.providers) ? d.providers : []);
+      setOpenaiProviders(Array.isArray(d.openaiProviders) ? d.openaiProviders : []);
+      setCustomProviders(Array.isArray(d.customProviders) ? d.customProviders : []);
+    }).catch(() => {});
+    fetch('/api/prefs/hidden-providers').then((r) => r.json())
+      .then((d) => setHiddenProviders(new Set(Array.isArray(d.hidden) ? d.hidden : [])))
+      .catch(() => {});
+  };
+  useEffect(() => {
+    load();
+    const onCh = () => load();
+    window.addEventListener('cgui:provider-change', onCh);
+    return () => window.removeEventListener('cgui:provider-change', onCh);
+  }, []);
+  // 每次展开都重拉:管理页(设置→Provider)增删/隐藏后,这里即时反映,无需等 provider-change。
+  useEffect(() => { if (open) load(); }, [open]);
+  // 错误 turn 的「检查 Provider 设置」按钮经事件打开本弹层(顶栏常驻单实例)。
+  useEffect(() => {
+    const onOpen = () => setOpen(true);
+    window.addEventListener('cgui:open-provider', onOpen);
+    return () => window.removeEventListener('cgui:open-provider', onOpen);
+  }, []);
+  useEffect(() => {
+    if (!open) return;
+    const onDocClick = (e) => { if (!wrapRef.current?.contains(e.target)) setOpen(false); };
+    const onEsc = (e) => { if (e.key === 'Escape') setOpen(false); };
+    document.addEventListener('mousedown', onDocClick);
+    document.addEventListener('keydown', onEsc);
+    return () => {
+      document.removeEventListener('mousedown', onDocClick);
+      document.removeEventListener('keydown', onEsc);
+    };
+  }, [open]);
+
+  const isCur = (p) => (activeId != null ? p.id === activeId : p.isCurrent);
+  const cur = providers.find(isCur) || openaiProviders.find(isCur) || customProviders.find(isCur);
+  const capHint = (h) => (h ? h.charAt(0).toUpperCase() + h.slice(1) : h);
+  const label = cur?.name || capHint(currentProvider?.providerHint) || 'Provider';
+
+  const switchTo = async (id, model) => {
+    setSwitching(true);
+    try {
+      const r = await fetch('/api/provider/switch', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(model ? { id, model } : { id }),
+      });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || '切换失败');
+      setActiveId(id);
+      useStore.getState().clearModelOverrides?.();
+      useStore.getState().fetchProvider?.();
+      useStore.getState().fetchModel?.();
+      window.dispatchEvent(new CustomEvent('cgui:provider-change'));
+      setOpen(false);
+    } catch (e) {
+      confirmDialog('切换 provider 失败：' + e.message);
+    }
+    setSwitching(false);
+  };
+
+  const openManager = () => {
+    setOpen(false);
+    window.dispatchEvent(new CustomEvent('cgui:open-settings', { detail: { section: 'set-provider-manage' } }));
+  };
+
+  const row = (p, extra = null) => (
+    <button key={p.id} disabled={switching} onClick={() => switchTo(p.id)}
+      className={`w-full min-w-0 text-left px-3 py-1.5 flex items-center gap-2 hover:bg-canvas-warm transition-colors ${isCur(p) ? 'bg-accent-subtle' : ''} ${switching ? 'opacity-50' : ''}`}>
+      <span className={`flex-1 text-xs font-body truncate ${isCur(p) ? 'text-accent font-medium' : 'text-ink'}`}>{p.name}</span>
+      {extra}
+      {isCur(p) && <Check size={12} className="text-accent shrink-0" />}
+    </button>
+  );
+  const modelCountChip = (p) => (p.models?.length > 0
+    ? <span className="text-[9px] px-1 py-px bg-canvas-deep text-ink-faint rounded font-mono shrink-0">{p.models.length} 模型</span>
+    : null);
+
+  return (
+    <div ref={wrapRef} className="relative">
+      <button onClick={() => setOpen(!open)} title="切换 API Provider（管理入口在 设置 → Provider）"
+        className="flex items-center gap-1 px-2 py-1 rounded-md hover:bg-canvas-deep transition-colors">
+        <Server size={12} className="text-ink-muted" />
+        <span className="text-[11px] text-ink-soft font-body max-w-[88px] truncate">{label}</span>
+        <ChevronDown size={10} className="text-ink-faint" />
+      </button>
+      {open && (
+        <div className="glass-popover absolute left-0 top-full mt-2 w-60 max-w-[calc(var(--app-w,100vw)-1.5rem)] z-50 py-1 animate-glass-rise max-h-[70vh] overflow-y-auto max-md:fixed max-md:left-3 max-md:right-3 max-md:w-auto max-md:top-16 max-md:mt-0">
+          <div className="px-3 py-2 sticky top-0 bg-canvas border-b border-canvas-deep z-10">
+            <div className="text-[10px] text-ink-faint uppercase tracking-wider font-body">切换 Provider</div>
+            <p className="text-[10px] text-ink-faint font-body mt-1 leading-snug">
+              切换会改写 <code className="font-mono">~/.claude/settings.json</code>（自动备份），<b>对新发的消息生效</b>。若需增删改 / 测试 / 隐藏 / 导入，点底部「管理 Provider」。
+            </p>
+          </div>
+          {providers.filter((p) => !hiddenProviders.has(p.id)).map((p) => row(p))}
+          {openaiProviders.filter((p) => !hiddenProviders.has(p.id)).length > 0 && (
+            <div className="px-3 pt-2 pb-1 mt-1 border-t border-canvas-deep">
+              <div className="text-[10px] text-ink-faint uppercase tracking-wider font-body">OpenAI 格式 <span className="text-ink-ghost normal-case tracking-normal">· 经内置代理</span></div>
+            </div>
+          )}
+          {openaiProviders.filter((p) => !hiddenProviders.has(p.id)).map((p) => row(p, modelCountChip(p)))}
+          {customProviders.length > 0 && (
+            <div className="px-3 pt-2 pb-1 mt-1 border-t border-canvas-deep">
+              <div className="text-[10px] text-ink-faint uppercase tracking-wider font-body">自定义</div>
+            </div>
+          )}
+          {customProviders.map((p) => row(p, (
+            <>
+              {modelCountChip(p)}
+              <span className="text-[9px] px-1 py-px bg-canvas-deep text-ink-faint rounded font-mono shrink-0">{p.type}</span>
+            </>
+          )))}
+          <button onClick={openManager}
+            className="w-full text-left px-3 py-2 mt-1 text-[11px] text-accent hover:bg-canvas-warm border-t border-canvas-deep font-body flex items-center gap-1.5">
+            <Settings size={12} /> 管理 Provider（增删改 · 测试 · 隐藏 · 导入）→
+          </button>
         </div>
       )}
     </div>
@@ -8515,7 +8634,7 @@ function MobileMenu({ setRightPanel, onClose }) {
                 <MobileMenuRow key={id} icon={Icon} label={label} chevron={false} onClick={() => openPanel(id)} />
               ))}
               <div className="px-4 pt-3 pb-1 text-[11px] text-ink-faint uppercase tracking-wider font-body">系统</div>
-              <MobileMenuRow icon={Settings} label="设置（网络 / 密码 / 端口 / 存储）" chevron={false} onClick={() => openPanel('settings')} />
+              <MobileMenuRow icon={Settings} label="设置（通用 / 会话 / Provider / 网络 / 高级）" chevron={false} onClick={() => openPanel('settings')} />
               <div className="h-8" />
             </div>
           )}
@@ -8852,6 +8971,21 @@ export default function App() {
     window.addEventListener('keydown', onEsc, true);
     return () => window.removeEventListener('keydown', onEsc, true);
   }, [shortcutsOpen]);
+
+  // P1.4:任意组件经此事件打开设置面板并定位到指定设置组(如 ProviderSwitcher 底部
+  // 「管理 Provider」→ set-provider-manage)。与 jumpToUpdate 同一 __cguiSettingsJump 兜底。
+  useEffect(() => {
+    const onOpenSettings = (e) => {
+      setRightPanel('settings');
+      const section = e?.detail?.section;
+      if (section) {
+        window.__cguiSettingsJump = section;
+        window.dispatchEvent(new CustomEvent('cgui:settings-jump', { detail: { section } }));
+      }
+    };
+    window.addEventListener('cgui:open-settings', onOpenSettings);
+    return () => window.removeEventListener('cgui:open-settings', onOpenSettings);
+  }, []);
 
   // P1.6 面板直达:Cmd/Ctrl+1..9 按 PANEL_MAP 顺序开对应面板,0=设置;再按一次=关闭
   // (与点面板按钮同语义)。rightPanel 是 App 级单值状态、面板本身无 per-pane 语义,

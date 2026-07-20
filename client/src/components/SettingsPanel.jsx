@@ -29,37 +29,50 @@ function EffectBadge({ level }) {
 
 // 设置搜索索引:纯前端按标题/关键词匹配,命中后切到对应 tab 并滚动高亮该设置组
 // (与顶栏「更新」按钮跳转同一 id+ring 机制)。新增设置组时在此登记。
+// P1.4 重组:原 overview 拆散到 通用(general)/会话(session)/外观(appearance)/
+// Provider(provider);json+storage 合并为 高级(advanced)。id 不变,老跳转链
+// (gui-update/cc-update 等)经 tabOf() 自动落到新 tab。
 const SETTINGS_INDEX = [
-  { id: 'gui-update', tab: 'overview', title: 'GUI 版本与更新', keys: 'update 升级 版本 检查更新 下载' },
-  { id: 'cc-update', tab: 'overview', title: 'Claude Code CLI 更新 / 切换', keys: 'cli claude npm 原生 安装 版本 路径' },
-  { id: 'set-fda', tab: 'overview', title: '完全磁盘访问 (FDA)', keys: 'fda 磁盘 授权 权限 macos' },
-  { id: 'set-close-behavior', tab: 'overview', title: '关闭窗口行为', keys: '关闭 最小化 退出 窗口' },
-  { id: 'set-screenshot-hotkey', tab: 'overview', title: '全局截图热键', keys: '截图 热键 快捷键 screenshot hotkey 屏幕录制' },
-  { id: 'set-persistent-chat', tab: 'overview', title: '会话常驻进程', keys: '常驻 复用 冷启动 进程 persistent 缓存' },
-  { id: 'set-prompt-suggestions', tab: 'overview', title: '输入预测', keys: '预测 建议 suggestion 输入' },
-  { id: 'set-worktree-visibility', tab: 'overview', title: '显示 worktree 项目', keys: 'worktree 工作树 项目 列表 隐藏 显示 分支' },
-  { id: 'set-max-budget', tab: 'overview', title: '对话花费上限', keys: '花费 预算 budget 成本 上限 美元' },
-  { id: 'set-cache-opt', tab: 'overview', title: '缓存优化', keys: '缓存 cache 前缀 动态 系统提示' },
-  { id: 'set-auto-compact', tab: 'overview', title: '自动压缩窗口', keys: '压缩 compact token 上下文 窗口' },
-  { id: 'set-small-fast-model', tab: 'overview', title: '轻量快速模型', keys: '模型 标题 haiku 快速 small fast' },
-  { id: 'set-chat-background', tab: 'overview', title: '对话区背景', keys: '背景 图片 视频 纯色 遮罩' },
-  { id: 'set-env-editor', tab: 'overview', title: '环境变量', keys: 'env 变量 environment anthropic' },
+  { id: 'gui-update', tab: 'general', title: 'GUI 版本与更新', keys: 'update 升级 版本 检查更新 下载' },
+  { id: 'cc-update', tab: 'general', title: 'Claude Code CLI 更新 / 切换', keys: 'cli claude npm 原生 安装 版本 路径' },
+  { id: 'set-fda', tab: 'general', title: '完全磁盘访问 (FDA)', keys: 'fda 磁盘 授权 权限 macos' },
+  { id: 'set-close-behavior', tab: 'general', title: '关闭窗口行为', keys: '关闭 最小化 退出 窗口' },
+  { id: 'set-screenshot-hotkey', tab: 'general', title: '全局截图热键', keys: '截图 热键 快捷键 screenshot hotkey 屏幕录制' },
+  { id: 'set-persistent-chat', tab: 'session', title: '会话常驻进程', keys: '常驻 复用 冷启动 进程 persistent 缓存' },
+  { id: 'set-prompt-suggestions', tab: 'session', title: '输入预测', keys: '预测 建议 suggestion 输入' },
+  { id: 'set-worktree-visibility', tab: 'session', title: '显示 worktree 项目', keys: 'worktree 工作树 项目 列表 隐藏 显示 分支' },
+  { id: 'set-max-budget', tab: 'session', title: '对话花费上限', keys: '花费 预算 budget 成本 上限 美元' },
+  { id: 'set-cache-opt', tab: 'session', title: '缓存优化', keys: '缓存 cache 前缀 动态 系统提示' },
+  { id: 'set-auto-compact', tab: 'session', title: '自动压缩窗口', keys: '压缩 compact token 上下文 窗口' },
+  { id: 'set-small-fast-model', tab: 'session', title: '轻量快速模型', keys: '模型 标题 haiku 快速 small fast' },
+  { id: 'set-chat-background', tab: 'appearance', title: '对话区背景', keys: '背景 图片 视频 纯色 遮罩' },
+  { id: 'set-theme', tab: 'appearance', title: '主题 / 字号 / 加载动画', keys: '主题 深色 浅色 配色 字体 字号 动画 聊天模式 外观 theme' },
+  { id: 'set-provider-manage', tab: 'provider', title: 'Provider 管理(增删改 / 测试 / 隐藏 / 导入)', keys: 'provider 中转 api key baseurl 模型 档位 导入 cc-switch 隐藏 删除 测试 切换' },
+  { id: 'set-env-editor', tab: 'provider', title: '环境变量', keys: 'env 变量 environment anthropic' },
   { id: 'set-env-check', tab: 'env', title: '环境检查(node / claude / python / git / uv)', keys: '环境 依赖 node python git uv 安装' },
   { id: 'set-permissions', tab: 'permissions', title: '权限规则(允许 / 询问 / 拒绝)', keys: 'permissions allow ask deny 权限 规则 工具' },
   { id: 'set-hooks', tab: 'hooks', title: 'Hooks 钩子脚本', keys: 'hooks 钩子 脚本 事件' },
-  { id: 'set-json', tab: 'json', title: '原始配置 settings.json', keys: 'json 原始 配置 settings' },
-  { id: 'set-storage', tab: 'storage', title: '.bak 备份清理', keys: '存储 备份 bak 清理 磁盘 空间' },
+  { id: 'set-json', tab: 'advanced', title: '原始配置 settings.json', keys: 'json 原始 配置 settings' },
+  { id: 'set-storage', tab: 'advanced', title: '.bak 备份清理', keys: '存储 备份 bak 清理 磁盘 空间' },
   { id: 'set-network', tab: 'network', title: '局域网访问与端口', keys: '网络 局域网 lan 密码 端口 手机 tailscale 远程' },
 ];
+const TAB_LABELS = {
+  general: '通用', session: '会话', appearance: '外观', provider: 'Provider',
+  env: '环境', permissions: '权限', hooks: 'Hooks', network: '网络', advanced: '高级',
+};
+// 老代码/事件链按 section id 跳转时不带 tab(如顶栏更新按钮传 'gui-update')→ 从索引反查。
+const tabOf = (section) => SETTINGS_INDEX.find((it) => it.id === section)?.tab || 'general';
 
-export function SettingsPanel() {
+// providerSlot / appearanceSlot:由 App.jsx 的 SettingsPanelHost 注入(ProviderManager /
+// ThemeAppearanceBody 定义在 App.jsx,slot 传入避免循环 import)。
+export function SettingsPanel({ providerSlot = null, appearanceSlot = null }) {
   const [settings, setSettings] = useState(null);
   const [rawJson, setRawJson] = useState('');
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState(null);
-  const [tab, setTab] = useState('overview'); // overview | hooks | json | storage
+  const [tab, setTab] = useState('general'); // P1.4:9 tab,见 TAB_LABELS
 
   const fetchSettings = async () => {
     setLoading(true);
@@ -88,10 +101,10 @@ export function SettingsPanel() {
   }, []);
 
   // 切 tab + 滚动高亮指定设置组(id + ring,80ms 等目标 tab 挂载)。
-  // 顶栏「更新」跳转与下方设置搜索共用。
-  const jumpToSection = (section, tabId = 'overview') => {
+  // 顶栏「更新」跳转与下方设置搜索共用。tabId 缺省从 SETTINGS_INDEX 反查(老事件链只传 id)。
+  const jumpToSection = (section, tabId) => {
     if (!section) return;
-    setTab(tabId);
+    setTab(tabId || tabOf(section));
     setTimeout(() => {
       const el = document.getElementById(section);
       if (!el) return;
@@ -165,8 +178,8 @@ export function SettingsPanel() {
 
   return (
     <div className="px-4 py-4 space-y-4 overflow-y-auto h-full">
-      <div className="flex items-center gap-1 border-b border-canvas-deep -mx-4 px-4 pb-2">
-        {[['overview', '概览'], ['env', '环境'], ['permissions', '权限'], ['hooks', 'Hooks'], ['json', '原始配置'], ['storage', '存储'], ['network', '网络']].map(([id, label]) => (
+      <div className="flex items-center gap-1 flex-wrap border-b border-canvas-deep -mx-4 px-4 pb-2">
+        {Object.entries(TAB_LABELS).map(([id, label]) => (
           <button key={id} onClick={() => setTab(id)}
             className={`text-[11px] px-2.5 py-1 rounded font-body transition-colors ${tab === id ? 'bg-accent/15 text-accent' : 'text-ink-muted hover:text-ink'}`}>
             {label}
@@ -199,9 +212,7 @@ export function SettingsPanel() {
                 onClick={() => { setSearchQ(''); jumpToSection(it.id, it.tab); }}
                 className="w-full flex items-center gap-2 px-3 py-2 text-left hover:bg-canvas-warm transition-colors">
                 <span className="flex-1 text-[12px] text-ink font-body">{it.title}</span>
-                <span className="shrink-0 text-[10px] text-ink-faint font-body">
-                  {{ overview: '概览', env: '环境', permissions: '权限', hooks: 'Hooks', json: '原始配置', storage: '存储', network: '网络' }[it.tab] || it.tab}
-                </span>
+                <span className="shrink-0 text-[10px] text-ink-faint font-body">{TAB_LABELS[it.tab] || it.tab}</span>
               </button>
             ))}
           </div>
@@ -214,7 +225,10 @@ export function SettingsPanel() {
         </div>
       )}
 
-      {tab === 'overview' && <OverviewTab settings={settings} onSave={save} onEnvPatch={envPatch} saving={saving} />}
+      {tab === 'general' && <GeneralTab settings={settings} />}
+      {tab === 'session' && <SessionTab settings={settings} onSave={save} onEnvPatch={envPatch} saving={saving} />}
+      {tab === 'appearance' && <AppearanceTab appearanceSlot={appearanceSlot} />}
+      {tab === 'provider' && <ProviderTab providerSlot={providerSlot} settings={settings} onEnvPatch={envPatch} saving={saving} />}
       {tab === 'env' && <div id="set-env-check"><EnvCheckPanel asModal={false} /></div>}
       {tab === 'permissions' && (
         <div id="set-permissions"><PermissionsTab settings={settings} onSave={save} saving={saving} saved={saved} /></div>
@@ -222,13 +236,21 @@ export function SettingsPanel() {
       {tab === 'hooks' && (
         <div id="set-hooks"><HooksTab settings={settings} onSave={save} saving={saving} saved={saved} /></div>
       )}
-      {tab === 'json' && (
-        <div id="set-json"><JsonTab rawJson={rawJson} setRawJson={setRawJson} onSave={() => save()}
-          onReset={() => { setRawJson(JSON.stringify(settings, null, 2)); setError(null); }}
-          saving={saving} saved={saved} /></div>
-      )}
-      {tab === 'storage' && <div id="set-storage"><StorageTab /></div>}
       {tab === 'network' && <div id="set-network"><NetworkTab /></div>}
+      {tab === 'advanced' && (
+        <div className="space-y-5">
+          <div id="set-json">
+            <div className="text-[10px] text-ink-faint uppercase tracking-wider font-body mb-2">原始配置 settings.json</div>
+            <JsonTab rawJson={rawJson} setRawJson={setRawJson} onSave={() => save()}
+              onReset={() => { setRawJson(JSON.stringify(settings, null, 2)); setError(null); }}
+              saving={saving} saved={saved} />
+          </div>
+          <div id="set-storage" className="border-t border-canvas-deep pt-4">
+            <div className="text-[10px] text-ink-faint uppercase tracking-wider font-body mb-2">存储清理</div>
+            <StorageTab />
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -1884,21 +1906,13 @@ function ChatBackgroundCard() {
   );
 }
 
-function OverviewTab({ settings, onSave, onEnvPatch, saving }) {
-  const [showEnv, setShowEnv] = useState(false);
-
-  const env = settings?.env || {};
-  const envKeys = Object.keys(env);
-  // hooks 的查看/编辑在独立的 Hooks 标签页,概览不再重复展示;这里只用事件数判断概览是否为空。
-  const hookEvents = Object.keys(settings?.hooks || {});
-
+// P1.4:原 OverviewTab(14 组过载)拆散为 通用 / 会话 / 外观 / Provider 四个 tab。
+// 各设置组组件与 id 原样不动,只是换了落点(SETTINGS_INDEX 同步,搜索/跳转照常)。
+function GeneralTab({ settings }) {
   const rows = [];
   if (settings?.defaultModel || settings?.model) rows.push(['默认模型', settings.defaultModel || settings.model]);
   if (settings?.permissions) rows.push(['权限规则', `${Object.keys(settings.permissions).length} 条`]);
   if (settings?.plugins) rows.push(['插件', `${Object.keys(settings.plugins).length} 个`]);
-
-  const isEmpty = rows.length === 0 && envKeys.length === 0 && hookEvents.length === 0;
-
   return (
     <div className="space-y-3">
       <div id="gui-update"><UpdateChecker /></div>
@@ -1906,15 +1920,6 @@ function OverviewTab({ settings, onSave, onEnvPatch, saving }) {
       <div id="set-fda"><FullDiskAccessCard /></div>
       <div id="set-close-behavior"><CloseBehaviorPicker /></div>
       <div id="set-screenshot-hotkey"><ScreenshotHotkeyPicker /></div>
-      <div id="set-persistent-chat"><PersistentChatToggle /></div>
-      <div id="set-prompt-suggestions"><PromptSuggestionsToggle /></div>
-      <div id="set-worktree-visibility"><WorktreeVisibilityToggle /></div>
-      <div id="set-max-budget"><MaxBudgetInput /></div>
-      <div id="set-cache-opt"><ExcludeDynamicPromptToggle /></div>
-      <div id="set-auto-compact"><AutoCompactWindowSelect settings={settings} onSave={onSave} saving={saving} /></div>
-      <AutoCompactPctSelect />
-      <div id="set-small-fast-model"><SmallFastModelInput env={env} onEnvPatch={onEnvPatch} saving={saving} /></div>
-      <div id="set-chat-background"><ChatBackgroundCard /></div>
       {rows.length > 0 && (
         <div className="bg-canvas-warm border border-canvas-deep rounded-lg divide-y divide-canvas-deep">
           {rows.map(([k, v]) => (
@@ -1925,7 +1930,51 @@ function OverviewTab({ settings, onSave, onEnvPatch, saving }) {
           ))}
         </div>
       )}
+    </div>
+  );
+}
 
+function SessionTab({ settings, onSave, onEnvPatch, saving }) {
+  const env = settings?.env || {};
+  return (
+    <div className="space-y-3">
+      <div id="set-persistent-chat"><PersistentChatToggle /></div>
+      <div id="set-prompt-suggestions"><PromptSuggestionsToggle /></div>
+      <div id="set-worktree-visibility"><WorktreeVisibilityToggle /></div>
+      <div id="set-max-budget"><MaxBudgetInput /></div>
+      <div id="set-cache-opt"><ExcludeDynamicPromptToggle /></div>
+      <div id="set-auto-compact"><AutoCompactWindowSelect settings={settings} onSave={onSave} saving={saving} /></div>
+      <AutoCompactPctSelect />
+      <div id="set-small-fast-model"><SmallFastModelInput env={env} onEnvPatch={onEnvPatch} saving={saving} /></div>
+    </div>
+  );
+}
+
+// 外观:对话区背景(← overview)+ 主题/字号/加载动画(appearanceSlot,与顶栏「主题」
+// 弹层同一组件同一 store,双入口同源)。
+function AppearanceTab({ appearanceSlot }) {
+  return (
+    <div className="space-y-3">
+      <div id="set-chat-background"><ChatBackgroundCard /></div>
+      {appearanceSlot && (
+        <div id="set-theme" className="border border-canvas-deep rounded-lg p-3 space-y-3">
+          <div className="text-[10px] text-ink-faint uppercase tracking-wider font-body">主题 / 字号 / 加载动画 <span className="normal-case tracking-normal">· 与顶栏「主题」按钮同源</span></div>
+          {appearanceSlot}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Provider:管理面板(providerSlot ← 顶栏 ProviderSwitcher 弹层管理段迁入)+ 环境变量
+// 编辑器(← overview,provider 相关 env 多在此改)。
+function ProviderTab({ providerSlot, settings, onEnvPatch, saving }) {
+  const [showEnv, setShowEnv] = useState(false);
+  const env = settings?.env || {};
+  const envKeys = Object.keys(env);
+  return (
+    <div className="space-y-3">
+      <div id="set-provider-manage">{providerSlot}</div>
       {/* 环境变量 — 默认折叠;展开后每项可改值/删除,底部可新增。改完即写回 settings.json 的 env */}
       <div id="set-env-editor" className="border border-canvas-deep rounded-lg overflow-hidden">
         <button onClick={() => setShowEnv((v) => !v)}
@@ -1936,8 +1985,6 @@ function OverviewTab({ settings, onSave, onEnvPatch, saving }) {
         </button>
         {showEnv && <EnvEditor env={env} onEnvPatch={onEnvPatch} saving={saving} />}
       </div>
-
-      {isEmpty && <p className="text-xs text-ink-faint font-body py-4 text-center">settings.json 为空</p>}
     </div>
   );
 }
