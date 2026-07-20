@@ -8559,6 +8559,8 @@ const SHORTCUT_GROUPS = [
   ]],
   ['界面', [
     ['Ctrl + Tab', '分屏时轮换聚焦窗格'],
+    ['Cmd/Ctrl + 1 … 9', '打开/关闭对应面板(1 文件 2 审查 3 监控 4 Agent 5 用量 6 进程 7 工具 8 技能 9 指令)'],
+    ['Cmd/Ctrl + 0', '打开/关闭设置面板'],
     ['Cmd/Ctrl + /', '打开/关闭本速查'],
   ]],
 ];
@@ -8779,6 +8781,24 @@ export default function App() {
     window.addEventListener('keydown', onEsc, true);
     return () => window.removeEventListener('keydown', onEsc, true);
   }, [shortcutsOpen]);
+
+  // P1.6 面板直达:Cmd/Ctrl+1..9 按 PANEL_MAP 顺序开对应面板,0=设置;再按一次=关闭
+  // (与点面板按钮同语义)。rightPanel 是 App 级单值状态、面板本身无 per-pane 语义,
+  // 故挂 window 全局无需 paneIsActive 门控;不受面板坞折叠态影响(rail 收起也直达)。
+  // meta 组合键不会往输入框打字,输入焦点时也响应(与 Cmd+/ 同策略)。
+  useEffect(() => {
+    const panelIds = Object.keys(PANEL_MAP);
+    const onKey = (e) => {
+      if (!(e.metaKey || e.ctrlKey) || e.shiftKey || e.altKey) return;
+      if (!/^[0-9]$/.test(e.key)) return;
+      const id = e.key === '0' ? 'settings' : panelIds[Number(e.key) - 1];
+      if (!id) return;
+      e.preventDefault();
+      setRightPanel((cur) => (cur === id ? null : id));
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
 
   // Bug #11:首次启动检测 claude CLI;没装就弹模态按系统给安装指引(给小白用户)。
   // dismissed 仅本次会话生效 — 跳过后下次启动还会再问,不本地永存(用户可能装了又卸)。
