@@ -169,9 +169,12 @@ fn parse_json_string_field(json: &str, key: &str) -> Option<String> {
 fn kill_backend_tree(child: &mut Child) {
     #[cfg(target_os = "windows")]
     {
+        use std::os::windows::process::CommandExt;
         let pid = child.id();
+        // CREATE_NO_WINDOW:GUI 进程下 spawn console 程序不闪黑窗(退出瞬间弹 cmd 窗)
         let _ = Command::new("taskkill")
             .args(["/F", "/T", "/PID", &pid.to_string()])
+            .creation_flags(0x08000000)
             .status();
     }
     let _ = child.kill();
