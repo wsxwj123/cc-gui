@@ -1982,10 +1982,11 @@ function SessionList() {
       // 与 provider 无关,继续继承。  // ponytail: model 跟 provider 默认,不跟上条会话
       st.setModelFor(draftKey, ''); // 清掉 draftKey 可能残留的旧 pin → getModelFor 回落 currentModel
       st.setEffortFor(draftKey, st.getEffortFor(prevKey));
-      // 修正批#2:主控 agent 前端入口已删,不再继承且清掉 draftKey 残留——否则历史上
-      // 选过 agent 的用户会"隐形"带 agent 起新会话,界面上无处可见/可改。发送链保留。
-      st.setActiveAgentFor(draftKey, '');
     }
+    // 修正批#2:主控 agent 前端入口已删,新会话必须清掉 draftKey 残留——否则历史上
+    // 选过 agent 的用户会"隐形"带 agent 起新会话,界面上无处可见/可改。发送链保留。
+    // 放在 if 外:prevKey 为空或与 draftKey 相同(同项目重复新建)时残留同样要清。
+    st.setActiveAgentFor(draftKey, '');
     st.setPermissionMode('default', draftKey);
   };
 
