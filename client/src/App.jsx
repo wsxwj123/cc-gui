@@ -31,7 +31,7 @@ import ChatSearch from './components/ChatSearch.jsx';
 import { confirmDialog } from './utils/confirmDialog.jsx';
 import { ChatInput, EffortSelector, EFFORT_LEVELS, markAutoUnavailable } from './components/ChatInput.jsx';
 import { ModelBadge, ProviderAvatar } from './components/ModelBadge.jsx';
-import { RemoteControlButton, ProviderSwitcher, ModelSelector, ProviderSourceBadge } from './components/SessionSelectors.jsx';
+import { RemoteControlButton, ProviderSwitcher, ModelSelector, ProviderSourceBadge, AnchoredPopover } from './components/SessionSelectors.jsx';
 import { mergeProviderLists } from './utils/providerList.js';
 import { UsagePanel } from './components/UsagePanel.jsx';
 import { ProcessPanel } from './components/ProcessPanel.jsx';
@@ -2035,6 +2035,10 @@ function SessionList() {
   // "基于分支"下拉展开态。原生 <select> 的弹出菜单由 OS 渲染、无法限高,本地分支
   // 几百个时列表过长 → 换自绘弹层(限高+内部滚动,不截断数据)。
   const [wtBaseOpen, setWtBaseOpen] = useState(false);
+  // 审计批E4:基点下拉换 AnchoredPopover(body portal)。原自绘 absolute 弹层配
+  // fixed inset-0 遮罩,遮罩被模态卡 glassRise 残留 transform 困在卡内 → 点卡外
+  // 关不掉下拉(点到的是模态遮罩直接整窗关闭)。
+  const wtBaseBtnRef = useRef(null);
   // Esc 关闭该下拉:捕获阶段拦下 + stopPropagation,阻断冒泡阶段的「双击 Esc 停止流」
   // 监听(App 挂在 window 冒泡阶段),避免关弹层的 Esc 被计入停止连击。
   // 与 FileExplorerPanel 右键菜单的 Esc 同款口径。
@@ -2699,7 +2703,7 @@ function SessionList() {
                 />
                 {/* 可选基点:默认当前 HEAD;选了分支则新分支从它出发(复用旧分支时无效) */}
                 {worktreeBranches.length > 0 && (
-                  <div className="relative shrink-0 max-w-[38%]">
+                  <div ref={wtBaseBtnRef} className="relative shrink-0 max-w-[38%]">
                     <button
                       type="button"
                       onClick={() => setWtBaseOpen((v) => !v)}
@@ -2709,31 +2713,29 @@ function SessionList() {
                       <span className="truncate flex-1 text-left">{newWorktreeBase ? `起点：${newWorktreeBase}` : '起点：当前分支'}</span>
                       <ChevronDown size={11} className={`shrink-0 text-ink-faint transition-transform ${wtBaseOpen ? 'rotate-180' : ''}`} />
                     </button>
-                    {wtBaseOpen && (
-                      <>
-                        <div className="fixed inset-0 z-10" onClick={() => setWtBaseOpen(false)} />
-                        {/* 本地分支可达数百条:限高 + 内部滚动,并截断到前 50 条(超长仓库
-                            几百条全渲染没有检索价值;需要更靠后的分支可在上方输入框直接填名字)。 */}
-                        <div className="absolute bottom-full mb-1 right-0 z-20 w-60 max-w-[70vw] glass-popover py-1 max-h-56 overflow-y-auto">
-                          {['', ...worktreeBranches.slice(0, 50)].map((b) => (
-                            <button
-                              key={b || '(HEAD)'}
-                              type="button"
-                              onClick={() => { setNewWorktreeBase(b); setWtBaseOpen(false); }}
-                              className={`w-full text-left px-2.5 py-1 text-[11px] font-mono truncate hover:bg-canvas-warm ${newWorktreeBase === b ? 'text-accent' : 'text-ink-soft'}`}
-                            >
-                              {b ? b : '当前分支（默认）'}
-                            </button>
-                          ))}
-                          {worktreeBranches.length > 50 && (
-                            <button type="button" disabled
-                              className="w-full text-left px-2.5 py-1 text-[10px] font-body text-ink-faint cursor-default">
-                              (仅显示前 50 条,共 {worktreeBranches.length} 条)
-                            </button>
-                          )}
-                        </div>
-                      </>
-                    )}
+                    {/* 审计批E4:AnchoredPopover(body portal + 越界翻转/夹紧 + 点外/Esc 关闭)。
+                        本地分支可达数百条:限高 + 内部滚动,截断到前 50 条(需要更靠后的
+                        分支可在左侧输入框直接填名字)。 */}
+                    <AnchoredPopover anchorRef={wtBaseBtnRef} open={wtBaseOpen} onRequestClose={() => setWtBaseOpen(false)}
+                      drop="up" align="right"
+                      className="w-60 max-w-[calc(var(--app-w,100vw)-1.5rem)] py-1 max-h-56 overflow-y-auto">
+                      {['', ...worktreeBranches.slice(0, 50)].map((b) => (
+                        <button
+                          key={b || '(HEAD)'}
+                          type="button"
+                          onClick={() => { setNewWorktreeBase(b); setWtBaseOpen(false); }}
+                          className={`w-full text-left px-2.5 py-1 text-[11px] font-mono truncate hover:bg-canvas-warm ${newWorktreeBase === b ? 'text-accent' : 'text-ink-soft'}`}
+                        >
+                          {b ? b : '当前分支（默认）'}
+                        </button>
+                      ))}
+                      {worktreeBranches.length > 50 && (
+                        <button type="button" disabled
+                          className="w-full text-left px-2.5 py-1 text-[10px] font-body text-ink-faint cursor-default">
+                          (仅显示前 50 条,共 {worktreeBranches.length} 条)
+                        </button>
+                      )}
+                    </AnchoredPopover>
                   </div>
                 )}
                 <button
