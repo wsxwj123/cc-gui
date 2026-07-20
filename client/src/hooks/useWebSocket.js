@@ -278,14 +278,21 @@ export function useWebSocket() {
     // 心跳探活:每 25s 发应用层 ping(服务端回 pong,onmessage 刷新 lastMsgRef)。
     // 到点检查距上次任何入站消息 >40s(≥1 个 ping 周期无回音)→ 判定半死连接,
     // 主动 close 触发既有 onclose 3s 重连。CONNECTING/CLOSED 状态不动。
+    // A3 节流防误杀:窗口最小化 >5min 后浏览器把定时器节流到 ~60s+,tick 间连
+    // ping 都没发过,"40s 无消息"必然成立 → 误杀健康连接。记录 lastTickAt,本次
+    // tick 距上次实际间隔 >35s(被节流的实锤)则本轮跳过判死、仍照常 ping+对账;
+    // 只有本轮间隔正常(说明 ping 确实按周期发过)且仍 >40s 无入站才判死。
+    let lastTickAt = Date.now();
     const hb = setInterval(() => {
       if (cancelled) return;
+      const tickGap = Date.now() - lastTickAt;
+      lastTickAt = Date.now();
       // 每个心跳 tick 顺带对账 —— 不看 WS 死活:WS 看似活着(readyState=1)但
       // 半死时广播已经丢了,正是对账在兜底;WS 真死时重连间隙也不留盲区。
       refetchPendingPermissions();
       const ws = wsRef.current;
       if (!ws || ws.readyState !== 1) return;
-      if (Date.now() - lastMsgRef.current > 40_000) { try { ws.close(); } catch {} return; }
+      if (tickGap <= 35_000 && Date.now() - lastMsgRef.current > 40_000) { try { ws.close(); } catch {} return; }
       try { ws.send('{"type":"ping"}'); } catch {}
     }, 25_000);
 
