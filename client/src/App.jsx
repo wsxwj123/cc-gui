@@ -8204,6 +8204,8 @@ function MobileMenu({ setRightPanel, onClose }) {
   const permKey = activeSession?.sessionId || `draft-${activeSession?.projectHash || 'none'}`;
 
   const currentModel = useStore((s) => s.modelBySession[permKey] || s.currentModel);
+  // 审计批C2:导出 Markdown 需要当前会话消息(手机单窗格=pane0/activeTabIndex)。
+  const menuMessages = useStore((s) => (s.paneMessages && s.paneMessages[s.activeTabIndex]) || s.messages || EMPTY_ARRAY);
   const effort = useStore((s) => (permKey && permKey in (s.effortBySession || {})) ? s.effortBySession[permKey] : s.effort);
   // --effort works on every claude-format upstream (official + mimo/deepseek/
   // openrouter relays); only the OpenAI proxy (codex-local) can't map it. Gate
@@ -8279,6 +8281,29 @@ function MobileMenu({ setRightPanel, onClose }) {
               {/* 修正批#1b:权限模式行已删——唯一入口在输入框工具行最左(桌面/手机同)。 */}
               {activeSession?.sessionId && (
                 <div className="px-4 py-2"><RemoteControlButton session={activeSession} /></div>
+              )}
+              {/* 审计批C2:导出 Markdown / Checkpoint 时间线手机入口 —— 桌面在会话头 ⋮ 内,
+                  手机不渲染那块头部;组件原样复用(Checkpoint 弹层本就 body portal)。 */}
+              {activeSession?.sessionId && (
+                <div className="px-4 py-1 flex items-center gap-2">
+                  <ExportSessionButton
+                    messages={menuMessages}
+                    title={(useStore.getState().customTitles[activeSession.sessionId]
+                      || useStore.getState().autoTitles[activeSession.sessionId])
+                      || activeSession.firstPrompt || '会话'}
+                  />
+                  <CheckpointButton
+                    sessionId={activeSession.sessionId}
+                    cwd={activeSession.projectPath || selectedProject?.path}
+                    projectHash={activeSession.projectHash}
+                    onRestored={() => {
+                      const st = useStore.getState();
+                      if (activeSession.sessionId && activeSession.projectHash) {
+                        st.fetchMessages(activeSession.sessionId, activeSession.projectHash, { silent: true, tab: activeTabIndex });
+                      }
+                    }}
+                  />
+                </div>
               )}
               <div className="px-4 pt-3 pb-1 text-[11px] text-ink-faint uppercase tracking-wider font-body">外观</div>
               <MobileMenuRow icon={Palette} label="主题与字体" onClick={() => push('appearance')} />
