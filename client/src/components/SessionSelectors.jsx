@@ -254,7 +254,7 @@ export function ProviderSwitcher({ hideLabel = false, tourAnchor = false, respon
     <div ref={wrapRef} className="relative" data-tour={tourAnchor ? 'provider-selector' : undefined}>
       <button onClick={() => setOpen(!open)}
         className="flex items-center gap-1 px-2 py-1 rounded-md hover:bg-canvas-deep transition-colors"
-        title={`Provider: ${label} — 点击切换;增删改/测试在 通用 → Provider`}>
+        title={`Provider: ${label} — 点击切换;增删改/测试在弹层底部「管理 Provider」`}>
         <Server size={12} className="text-ink-muted shrink-0" />
         {!hideLabel && <span className="text-[11px] font-body text-ink-muted whitespace-nowrap max-w-[96px] truncate">{label}</span>}
         <ChevronDown size={10} className="text-ink-faint" />
