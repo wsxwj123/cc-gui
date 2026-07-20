@@ -5,7 +5,7 @@ import { WebSocketServer } from 'ws';
 import cors from 'cors';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
-import { existsSync, readFileSync, mkdirSync } from 'fs';
+import { existsSync, readFileSync, mkdirSync, watch as fsWatch } from 'fs';
 import { createHash } from 'crypto';
 import sessionRoutes from './routes/sessions.js';
 import chatRoutes from './routes/chat.js';
@@ -791,23 +791,26 @@ wss.on('connection', (ws) => {
 // connected client so ModelSelector / ProviderAvatar can refetch /api/model and
 // reflect the new provider without a page reload.
 let watcher = null;
+// W3①:provider-change 广播携带 provider 指纹(BASE_URL + 凭证哈希前 12 位)。客户端
+// 据此判断"是真的换了 provider(终端 cc switch)还是 settings.json 的其他改动",
+// 只有指纹变化才清会话模型钉选 + 推进 providerEpoch —— effort 等无关改动
+// 不能过度失效历史模型。chokidar 分支与打包版单文件 watch 分支共用。
+function broadcastProviderChange(filePath) {
+  let providerFp = null;
+  try {
+    const raw = JSON.parse(readFileSync(filePath, 'utf8'));
+    const env = raw?.env || {};
+    const base = String(env.ANTHROPIC_BASE_URL || 'official');
+    const cred = String(env.ANTHROPIC_AUTH_TOKEN || env.ANTHROPIC_API_KEY || '');
+    providerFp = base + '|' + createHash('sha256').update(cred).digest('hex').slice(0, 12);
+  } catch {}
+  broadcast({ type: 'provider-change', path: filePath, providerFp });
+}
 if (process.env.CGUI_DISABLE_FILE_WATCHER !== '1') {
   try {
     watcher = setupFileWatcher((eventType, filePath) => {
       if (filePath.endsWith('/.claude/settings.json') || filePath.endsWith('\\.claude\\settings.json')) {
-        // W3①:广播携带 provider 指纹(BASE_URL + 凭证哈希前 12 位)。客户端据此判断
-        // "是真的换了 provider(终端 cc switch)还是 settings.json 的其他改动",
-        // 只有指纹变化才清会话模型钉选 + 推进 providerEpoch —— effort 等无关改动
-        // 不能过度失效历史模型。
-        let providerFp = null;
-        try {
-          const raw = JSON.parse(readFileSync(filePath, 'utf8'));
-          const env = raw?.env || {};
-          const base = String(env.ANTHROPIC_BASE_URL || 'official');
-          const cred = String(env.ANTHROPIC_AUTH_TOKEN || env.ANTHROPIC_API_KEY || '');
-          providerFp = base + '|' + createHash('sha256').update(cred).digest('hex').slice(0, 12);
-        } catch {}
-        broadcast({ type: 'provider-change', path: filePath, providerFp });
+        broadcastProviderChange(filePath);
       }
       broadcast({ type: 'file-change', eventType, path: filePath });
     });
@@ -816,6 +819,25 @@ if (process.env.CGUI_DISABLE_FILE_WATCHER !== '1') {
   }
 } else {
   console.log('[file-watcher] disabled for packaged Tauri backend');
+  // 打包版禁 chokidar 后,终端 `cc switch` 改 settings.json 就再无人通知客户端 →
+  // GUI 顶栏 provider 头像/模型停在旧值。补一个只盯这一个文件的轻量 watch:
+  // watch 的是 ~/.claude 父目录而非文件本身 —— 编辑器与我们自己的写入都是
+  // tmp+rename 原子写,直接 watch 文件会在 rename 后盯着旧 inode 失联(mac 上
+  // fs.watch 文件跟的是 inode);watch 目录则 rename 进来也照报,跨平台稳。
+  // 500ms 去抖:一次原子写会连发 rename+change 多个事件,只广播一次。
+  try {
+    const settingsPath = join(homedir(), '.claude', 'settings.json');
+    let debounce = null;
+    const dirWatcher = fsWatch(join(homedir(), '.claude'), (eventType, filename) => {
+      // filename 偶发为 null(平台差异)→ 宽松处理:null 也当可能命中,由去抖兜住频率。
+      if (filename && String(filename) !== 'settings.json') return;
+      if (debounce) clearTimeout(debounce);
+      debounce = setTimeout(() => { try { broadcastProviderChange(settingsPath); } catch {} }, 500);
+    });
+    dirWatcher.on('error', () => {});
+  } catch {
+    console.warn('[file-watcher] settings.json single-file watch failed to start');
+  }
 }
 
 // Don't let a single bad request kill the whole dev server. Log loudly,
