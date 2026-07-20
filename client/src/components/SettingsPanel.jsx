@@ -56,8 +56,10 @@ const SETTINGS_INDEX = [
   { id: 'set-storage', tab: 'advanced', title: '.bak 备份清理', keys: '存储 备份 bak 清理 磁盘 空间' },
   { id: 'set-network', tab: 'network', title: '局域网访问与端口', keys: '网络 局域网 lan 密码 端口 手机 tailscale 远程' },
 ];
+// 文案改名(用户指定):general tab 显示名「通用」→「更新」;id/tabOf 兼容映射不动
+// (顶栏更新按钮 jumpToUpdate 缺省仍落本 tab)。
 const TAB_LABELS = {
-  general: '通用', session: '会话', appearance: '外观', provider: 'Provider',
+  general: '更新', session: '会话', appearance: '外观', provider: 'Provider',
   env: '环境', permissions: '权限', hooks: 'Hooks', network: '网络', advanced: '高级',
 };
 // 老代码/事件链按 section id 跳转时不带 tab(如顶栏更新按钮传 'gui-update')→ 从索引反查。
@@ -349,7 +351,7 @@ function NetworkTab() {
           <span>
             局域网访问已默认开启,{cfg.defaultPasswordPlain
               ? <>本机随机默认密码是 <b className="font-mono select-all bg-amber-100 px-1 rounded">{cfg.defaultPasswordPlain}</b>(手机/其它设备连接时输入这个)。</>
-              : <>已生成随机默认密码。出于安全,明文仅在<b>电脑本机</b>的「设置 → 网络」页显示,远程设备上不显示——请到电脑上查看,或在下方直接改成新密码。</>}
+              : <>已生成随机默认密码。出于安全,明文仅在<b>电脑本机</b>的「通用 → 网络」页显示,远程设备上不显示——请到电脑上查看,或在下方直接改成新密码。</>}
             这是自动生成的临时密码,<b>建议在下方改成自己好记的强密码</b>;若只在本机用,可取消下方「局域网访问」勾选并重启回到仅本机。
           </span>
         </div>
@@ -2269,7 +2271,7 @@ function JsonTab({ rawJson, setRawJson, onSave, onReset, saving, saved }) {
     <div className="space-y-3">
       <div className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded-lg p-2.5 font-body leading-snug space-y-1">
         <div>⚠️ 这是 <code className="font-mono">~/.claude/settings.json</code> 全文。保存=覆盖此处显示的所有字段;你<b>没看到/不小心删掉</b>的 hooks/mcpServers/enabledPlugins 也会丢。</div>
-        <div>编辑前先点右上角刷新,避免和「切 provider」/模型选择器的写入冲突(会用旧值覆盖新值)。一般场景建议用 概览/Hooks 等专用 tab,不直接动这里。</div>
+        <div>编辑前先点右上角刷新,避免和「切 provider」/模型选择器的写入冲突(会用旧值覆盖新值)。一般场景建议用 更新/会话/Hooks 等专用 tab,不直接动这里。</div>
       </div>
       <textarea value={rawJson} onChange={(e) => setRawJson(e.target.value)}
         spellCheck={false}

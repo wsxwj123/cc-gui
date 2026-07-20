@@ -652,7 +652,8 @@ const PANEL_MAP = {
   mcp: { label: '工具（MCP 服务器 · 插件）', icon: Server, component: MCPPanel },
   skills: { label: 'Skill 市场（导入官方技能）', icon: Sparkles, component: SkillsPanel },
   memory: { label: 'CLAUDE.md 指令', icon: BookText, component: MemoryPanel },
-  settings: { label: '设置', icon: Settings, component: SettingsPanelHost },
+  // 文案改名(用户指定,仅显示名,id/组件/事件不动):坞入口叫「设置」,本面板入口叫「通用」。
+  settings: { label: '通用', icon: Settings, component: SettingsPanelHost },
 };
 
 // useResizable + Splitter live in hooks/useResizable.js — kept aliased for
@@ -726,7 +727,7 @@ function PaneCountPicker() {
 // 点 rail 图标后不收起:方便连续切换面板,收起交给外部点击(与 Mac 菜单栏行为一致)。
 const PANEL_SHORT = {
   files: '文件', monitor: '监控', agents: 'Agent', usage: '用量', processes: '进程',
-  changes: '审查', mcp: '工具', skills: '技能', memory: '指令', settings: '设置',
+  changes: '审查', mcp: '工具', skills: '技能', memory: '指令', settings: '通用',
 };
 function PanelDock({ rightPanel, setRightPanel, updateNotice, jumpToUpdate }) {
   const [railOpen, setRailOpen] = useState(false);
@@ -773,13 +774,13 @@ function PanelDock({ rightPanel, setRightPanel, updateNotice, jumpToUpdate }) {
       )}
       <button
         onClick={() => setRailOpen((v) => !v)}
-        title={`功能面板${activeMeta ? ` — 当前:${activeMeta.label}` : ''}（文件 / 审查 / 监控 / Agent / 用量 / 进程 / 工具 / 技能 / 指令 / 设置。Cmd/Ctrl+1..9、0 直达)`}
+        title={`设置${activeMeta ? ` — 当前:${activeMeta.label}` : ''}（文件 / 审查 / 监控 / Agent / 用量 / 进程 / 工具 / 技能 / 指令 / 通用。Cmd/Ctrl+1..9、0 直达）`}
         className={`relative px-1.5 py-1 rounded-lg transition-all flex flex-col items-center gap-0.5 ${
           railOpen || activeMeta ? 'bg-accent-subtle text-accent' : 'text-ink-muted hover:text-ink hover:bg-black/5'
         }`}
       >
         <DockIcon size={15} />
-        <span className="text-[9px] leading-none font-body">{activeMeta ? PANEL_SHORT[rightPanel] : '面板'}</span>
+        <span className="text-[9px] leading-none font-body">{activeMeta ? PANEL_SHORT[rightPanel] : '设置'}</span>
         {updateNotice && (
           <span className="absolute top-0.5 right-0.5 w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse" title="有可用更新" />
         )}
@@ -2990,7 +2991,7 @@ function GitInitBanner({ cwd }) {
       <div className="bg-amber-50 border-b border-amber-200 px-4 py-2 text-[12px] font-body text-amber-900 flex items-center gap-2 flex-wrap">
         <GitBranch size={13} className="text-amber-600 shrink-0" />
         <span className="flex-1 min-w-[12rem]">
-          未检测到 <b>git</b>。装上 git 才能初始化仓库 / 回滚 AI 的修改。可在 设置 → 环境 里安装，或到 <b>git-scm.com</b> 下载。
+          未检测到 <b>git</b>。装上 git 才能初始化仓库 / 回滚 AI 的修改。可在 通用 → 环境 里安装，或到 <b>git-scm.com</b> 下载。
         </span>
         <button
           onClick={() => setKick((k) => k + 1)}
@@ -5030,7 +5031,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                 type: 'turn',
                 timestamp: new Date().toISOString(),
                 model: streamingModel,
-                text: [`已达到设置的对话花费上限${_cap ? `($${_cap})` : ''},本轮已停止。若需继续,请在设置中调高或清除「对话花费上限」后重发。`],
+                text: [`已达到设置的对话花费上限${_cap ? `($${_cap})` : ''},本轮已停止。若需继续,请在 通用 → 会话 里调高或清除「对话花费上限」后重发。`],
                 thinking: [], toolCalls: [],
                 blocks: [{ type: 'text', content: `已达到设置的对话花费上限${_cap ? `($${_cap})` : ''},本轮已停止。` }],
                 usage: null,
@@ -7076,7 +7077,7 @@ function ProviderSwitcher() {
 
   return (
     <div ref={wrapRef} className="relative">
-      <button onClick={() => setOpen(!open)} title="切换 API Provider（管理入口在 设置 → Provider）"
+      <button onClick={() => setOpen(!open)} title="切换 API Provider（管理入口在 通用 → Provider）"
         className="flex items-center gap-1 px-2 py-1 rounded-md hover:bg-canvas-deep transition-colors">
         <Server size={12} className="text-ink-muted" />
         <span className="text-[11px] text-ink-soft font-body max-w-[88px] truncate">{label}</span>
@@ -8634,7 +8635,7 @@ function MobileMenu({ setRightPanel, onClose }) {
                 <MobileMenuRow key={id} icon={Icon} label={label} chevron={false} onClick={() => openPanel(id)} />
               ))}
               <div className="px-4 pt-3 pb-1 text-[11px] text-ink-faint uppercase tracking-wider font-body">系统</div>
-              <MobileMenuRow icon={Settings} label="设置（通用 / 会话 / Provider / 网络 / 高级）" chevron={false} onClick={() => openPanel('settings')} />
+              <MobileMenuRow icon={Settings} label="通用（更新 / 会话 / Provider / 网络 / 高级）" chevron={false} onClick={() => openPanel('settings')} />
               <div className="h-8" />
             </div>
           )}
@@ -8750,7 +8751,7 @@ const SHORTCUT_GROUPS = [
   ['界面', [
     ['Ctrl + Tab', '分屏时轮换聚焦窗格'],
     ['Cmd/Ctrl + 1 … 9', '打开/关闭对应面板(1 文件 2 审查 3 监控 4 Agent 5 用量 6 进程 7 工具 8 技能 9 指令)'],
-    ['Cmd/Ctrl + 0', '打开/关闭设置面板'],
+    ['Cmd/Ctrl + 0', '打开/关闭「通用」面板(顶栏「设置」内)'],
     ['Cmd/Ctrl + /', '打开/关闭本速查'],
   ]],
 ];

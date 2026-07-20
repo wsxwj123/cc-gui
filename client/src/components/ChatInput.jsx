@@ -205,7 +205,7 @@ export function EffortSelector({ permKey = null }) {
             // 并非"CLI 自己决定"——原静态文案在设了全局时是错的(用户实报困惑)。
             const desc = e.id !== '' ? e.desc
               : defaultEffort
-                ? `跟随全局设置:${EFFORT_LEVELS.find((x) => x.id === defaultEffort)?.label || defaultEffort}(设置→环境变量可清除)`
+                ? `跟随全局设置:${EFFORT_LEVELS.find((x) => x.id === defaultEffort)?.label || defaultEffort}(通用 → Provider → 环境变量可清除)`
                 : '未设全局,由模型自适应';
             return (
             <button key={e.id || 'default'} onClick={() => { setEffort(e.id); setOpen(false); }}
