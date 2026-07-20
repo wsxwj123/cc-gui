@@ -1322,7 +1322,10 @@ export const useStore = create((set, get) => ({
     try {
       const res = await fetch('/api/model');
       const data = await res.json();
-      set({ currentModel: data.model, availableModels: data.available || [] });
+      // 判官4:异常响应(无 model 字段)不把 currentModel 打成 undefined ——
+      // 顶栏 ModelSelector 以 !currentModel 早退,会整个消失。
+      if (data.model) set({ currentModel: data.model });
+      set({ availableModels: data.available || [] });
       // 手机批#3:providerName 一并写入(桌面由 ModelSelector 的 load 写;手机端不挂
       // ModelSelector,菜单里"当前 Provider"的显示靠这里)。
       if (data.provider != null) set({ providerName: data.provider });
