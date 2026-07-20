@@ -120,14 +120,15 @@ export async function refetchPendingPermissions() {
     const d = await r.json();
     const items = d.items || [];
     const serverIds = new Set(items.map((x) => x.id));
-    // remove:本地有、服务端没有、且创建早于本次拉取 → 已在他端解决/被 drop。
-    // createdAt < fetchStart 判据挡住"拉取飞行期间刚广播进来的新请求"被误删。
-    // in-flight 守卫(与下方 add 侧对称):提交中的卡不许被对账撤掉 —— 客户端
-    // 时钟超前服务端时,GET 飞行窗口内刚广播的新卡也可能满足 createdAt<fetchStart,
-    // 用户若已秒点提交,误删会让 respondPermission 的 hadCard 判据误判"他端已
-    // 解决"而放弃在途应答 → CLI 继续挂。送达后卡由调用方/resolved 广播撤。
+    // remove:本地有、服务端没有、且【入列早于本次拉取】→ 已在他端解决/被 drop。
+    // A2:判据用 receivedAt(入列时的客户端时钟戳,store.addPendingPermission 打)
+    // 与 fetchStart 同钟比较 —— 原 createdAt 是服务端时钟,跨机漂移时 GET 飞行
+    // 窗口内刚广播的新卡也可能满足 createdAt<fetchStart 被误删。
+    // in-flight 守卫(与下方 add 侧对称):提交中的卡不许被对账撤掉 —— 误删会让
+    // respondPermission 的 hadCard 判据误判"他端已解决"而放弃在途应答 → CLI
+    // 继续挂。送达后卡由调用方/resolved 广播撤。
     for (const p of useStore.getState().pendingPermissions) {
-      if (!serverIds.has(p.id) && (p.createdAt || 0) < fetchStart && !inFlightResponds.has(p.id)) {
+      if (!serverIds.has(p.id) && (p.receivedAt || 0) < fetchStart && !inFlightResponds.has(p.id)) {
         useStore.getState().removePendingPermission(p.id);
       }
     }

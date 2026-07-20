@@ -959,7 +959,12 @@ export const useStore = create((set, get) => ({
   // ── Permission popup helpers ───────────────────────────────
   addPendingPermission: (req) => set((s) => {
     if (s.pendingPermissions.some((p) => p.id === req.id)) return s;
-    return { pendingPermissions: [...s.pendingPermissions, req] };
+    // A2:进本地列表时打【客户端时钟】戳 receivedAt。对账 remove 判据用它与本机
+    // fetchStart 比较(同钟可比);request.createdAt 是服务端时钟,跨机漂移时会把
+    // GET 飞行窗口内刚广播的新卡误判为"早于拉取"而误删。所有入列路径(WS 广播/
+    // 对账补拉/水合)都经这里,天然全覆盖。展开序保留调用方显式传入的 receivedAt
+    // (仅单测构造场景用)。
+    return { pendingPermissions: [...s.pendingPermissions, { receivedAt: Date.now(), ...req }] };
   }),
   removePendingPermission: (id) => set((s) => ({
     pendingPermissions: s.pendingPermissions.filter((p) => p.id !== id),

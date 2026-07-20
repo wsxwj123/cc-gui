@@ -67,9 +67,11 @@ setTimeout(() => cancelRespond('id-6'), 500);
 assert.equal(await respondPermission('id-6', { decision: 'deny' }), false, '⑥取消应返回 false');
 
 // ⑦ 对账 remove 侧 in-flight 守卫:id-7 提交中(POST 持续失败),id-8 只是残卡;
-//    服务端 pending 为空 → 对账应撤 id-8、保 id-7(否则 hadCard 判据误判"他端已解决")
-useStore.getState().addPendingPermission({ id: 'id-7', toolName: 'Bash', createdAt: 0 });
-useStore.getState().addPendingPermission({ id: 'id-8', toolName: 'Bash', createdAt: 0 });
+//    服务端 pending 为空 → 对账应撤 id-8、保 id-7(否则 hadCard 判据误判"他端已解决")。
+//    A2 后判据是【客户端入列戳 receivedAt】< fetchStart(不再用服务端 createdAt),
+//    显式传 receivedAt:0 构造"入列早于本次拉取"的残卡。
+useStore.getState().addPendingPermission({ id: 'id-7', toolName: 'Bash', receivedAt: 0 });
+useStore.getState().addPendingPermission({ id: 'id-8', toolName: 'Bash', receivedAt: 0 });
 fetchImpl = (url) => (String(url).includes('/pending')
   ? Promise.resolve({ ok: true, json: async () => ({ items: [] }) })
   : fail());
@@ -81,6 +83,21 @@ assert.ok(!left.includes('id-8'), '⑦非 in-flight 的残卡照常被撤');
 cancelRespond('id-7');
 assert.equal(await inflight, false, '⑦收尾:取消在途提交');
 useStore.getState().removePendingPermission('id-7');
+
+// ⑧ A2:GET 飞行窗口内刚入列的新卡(receivedAt 由 store 自动打,≥fetchStart)
+//    不被对账误删 —— 这正是 receivedAt 换掉跨机时钟 createdAt 要保住的场景。
+fetchImpl = (url) => {
+  if (String(url).includes('/pending')) {
+    // 模拟拉取飞行期间 WS 广播进来的新请求(服务端快照里自然没有它)
+    useStore.getState().addPendingPermission({ id: 'id-9', toolName: 'Bash' });
+    return Promise.resolve({ ok: true, json: async () => ({ items: [] }) });
+  }
+  return fail();
+};
+await refetchPendingPermissions();
+assert.ok(useStore.getState().pendingPermissions.some((p) => p.id === 'id-9'), '⑧飞行期新卡不被对账误删');
+assert.ok(useStore.getState().pendingPermissions.find((p) => p.id === 'id-9').receivedAt > 0, '⑧入列自动打 receivedAt 戳');
+useStore.getState().removePendingPermission('id-9');
 
 console.log('check-permission-respond-retry: all assertions passed');
 process.exit(0);
