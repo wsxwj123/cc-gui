@@ -60,7 +60,7 @@ import {
   Sun, Moon, Monitor, Bot, Camera, History, Loader2, Shield, FolderTree,
   Archive, ArchiveRestore, Trash2, EyeOff, Columns2, Smartphone, Pencil, Type, Palette,
   Menu, SquarePen, Gauge, Cpu, CheckCircle2, BookText, Sparkles, HelpCircle, Pin,
-  Download, ClipboardCopy,
+  Download, ClipboardCopy, LayoutGrid,
 } from 'lucide-react';
 import { copyText } from './utils/clipboard.js';
 
@@ -697,6 +697,75 @@ function PaneCountPicker() {
         </div>
       )}
     </div>
+  );
+}
+
+// P1.1 面板坞:顶栏 10 个面板按钮收纳为 1 个坞图标(Mac 折叠菜单栏式)。
+// 常态只显坞图标;点击原位展开成横向图标条(rail,含原 10 个面板按钮),再点某图标开
+// 对应面板;点外部 / Esc / 再点坞图标收起 rail。rightPanel 状态机不变,rail 只是入口层。
+// 更新提醒并入坞:入口红点常驻 + rail 内条件「更新」按钮(跳设置更新区)。
+// 点 rail 图标后不收起:方便连续切换面板,收起交给外部点击(与 Mac 菜单栏行为一致)。
+const PANEL_SHORT = {
+  files: '文件', monitor: '监控', agents: 'Agent', usage: '用量', processes: '进程',
+  changes: '审查', mcp: '工具', skills: '技能', memory: '指令', settings: '设置',
+};
+function PanelDock({ rightPanel, setRightPanel, updateNotice, jumpToUpdate }) {
+  const [railOpen, setRailOpen] = useState(false);
+  const wrapRef = useRef(null);
+  useEffect(() => {
+    if (!railOpen) return;
+    const onDoc = (e) => { if (!wrapRef.current?.contains(e.target)) setRailOpen(false); };
+    const onEsc = (e) => { if (e.key === 'Escape') setRailOpen(false); };
+    document.addEventListener('mousedown', onDoc);
+    document.addEventListener('keydown', onEsc);
+    return () => { document.removeEventListener('mousedown', onDoc); document.removeEventListener('keydown', onEsc); };
+  }, [railOpen]);
+  // 导引联动:tour 的面板步骤经此事件展开 rail 做演示(GuideTour 只 dispatch,不直接碰状态)。
+  useEffect(() => {
+    const onOpen = () => setRailOpen(true);
+    window.addEventListener('cgui:dock-rail-open', onOpen);
+    return () => window.removeEventListener('cgui:dock-rail-open', onOpen);
+  }, []);
+  const activeMeta = rightPanel ? PANEL_MAP[rightPanel] : null;
+  const DockIcon = activeMeta ? activeMeta.icon : LayoutGrid;
+  return (
+    <span ref={wrapRef} data-tour="panel-dock" className="inline-flex items-center gap-1">
+      {railOpen && (
+        <span className="cgui-dock-rail inline-flex items-center gap-1 rounded-xl bg-black/5 px-1 py-0.5">
+          {Object.entries(PANEL_MAP).map(([id, { icon: Icon, label }]) => (
+            <button key={id} data-tour={`panel-${id}`} onClick={() => setRightPanel(rightPanel === id ? null : id)}
+              className={`px-1.5 py-1 rounded-lg transition-all flex flex-col items-center gap-0.5 ${rightPanel === id ? 'bg-accent-subtle text-accent' : 'text-ink-muted hover:text-ink hover:bg-black/5'}`}
+              title={label}>
+              <Icon size={15} />
+              <span className="text-[9px] leading-none font-body">{PANEL_SHORT[id] || label}</span>
+            </button>
+          ))}
+          {/* CJ-2 更新提醒(原顶栏常驻按钮收进 rail;坞图标红点常驻提示) */}
+          {updateNotice && (
+            <button
+              onClick={() => jumpToUpdate(updateNotice.gui ? 'gui-update' : 'cc-update')}
+              title={`有可用更新${updateNotice.gui ? ` · GUI v${updateNotice.gui}` : ''}${updateNotice.cc ? ` · Claude Code v${updateNotice.cc}` : ''} — 点击前往更新`}
+              className="flex items-center gap-1 px-1.5 py-1 rounded-lg text-red-500 hover:bg-red-500/10 transition-colors animate-pulse">
+              <RefreshCw size={15} />
+              <span className="text-[11px] leading-none font-body">更新</span>
+            </button>
+          )}
+        </span>
+      )}
+      <button
+        onClick={() => setRailOpen((v) => !v)}
+        title={`功能面板${activeMeta ? ` — 当前:${activeMeta.label}` : ''}（文件 / 审查 / 监控 / Agent / 用量 / 进程 / 工具 / 技能 / 指令 / 设置。Cmd/Ctrl+1..9、0 直达)`}
+        className={`relative px-1.5 py-1 rounded-lg transition-all flex flex-col items-center gap-0.5 ${
+          railOpen || activeMeta ? 'bg-accent-subtle text-accent' : 'text-ink-muted hover:text-ink hover:bg-black/5'
+        }`}
+      >
+        <DockIcon size={15} />
+        <span className="text-[9px] leading-none font-body">{activeMeta ? PANEL_SHORT[rightPanel] : '面板'}</span>
+        {updateNotice && (
+          <span className="absolute top-0.5 right-0.5 w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse" title="有可用更新" />
+        )}
+      </button>
+    </span>
   );
 }
 
@@ -9233,33 +9302,8 @@ export default function App() {
               until user clicks a session in the sidebar). Click again to
               collapse back to a single SessionDetail. */}
           <span data-tour="pane-count" className="inline-flex"><PaneCountPicker /></span>
-          {Object.entries(PANEL_MAP).map(([id, { icon: Icon, label }]) => {
-            // Short chip label (always visible under the icon). Long `label`
-            // stays as the hover tooltip for the full name.
-            const SHORT = {
-              files: '文件', monitor: '监控', agents: 'Agent', usage: '用量', processes: '进程',
-              changes: '审查', mcp: '工具', skills: '技能', memory: '指令', settings: '设置',
-            };
-            const short = SHORT[id] || label;
-            return (
-              <button key={id} data-tour={`panel-${id}`} onClick={() => setRightPanel(rightPanel === id ? null : id)}
-                className={`px-1.5 py-1 rounded-lg transition-all flex flex-col items-center gap-0.5 ${rightPanel === id ? 'bg-accent-subtle text-accent' : 'text-ink-muted hover:text-ink hover:bg-black/5'}`}
-                title={label}>
-                <Icon size={15} />
-                <span className="text-[9px] leading-none font-body">{short}</span>
-              </button>
-            );
-          })}
-          {/* CJ-2:有可用更新时常驻提醒按钮(没在弹窗里点更新也长期显示);点击跳设置→更新区。 */}
-          {updateNotice && (
-            <button
-              onClick={() => jumpToUpdate(updateNotice.gui ? 'gui-update' : 'cc-update')}
-              title={`有可用更新${updateNotice.gui ? ` · GUI v${updateNotice.gui}` : ''}${updateNotice.cc ? ` · Claude Code v${updateNotice.cc}` : ''} — 点击前往更新`}
-              className="flex items-center gap-1 px-1.5 py-1 rounded-lg text-red-500 hover:bg-red-500/10 transition-colors animate-pulse">
-              <RefreshCw size={15} />
-              <span className="text-[11px] leading-none font-body">更新</span>
-            </button>
-          )}
+          {/* P1.1 面板坞:原 10 个面板按钮 + 更新提醒按钮收纳于此(点击展开 rail)。 */}
+          <PanelDock rightPanel={rightPanel} setRightPanel={setRightPanel} updateNotice={updateNotice} jumpToUpdate={jumpToUpdate} />
           <button data-tour="help" onClick={() => setTourOpen(true)} title="使用指引 — 逐个介绍界面功能"
             className="flex items-center justify-center p-1.5 rounded-lg text-ink-muted hover:text-ink hover:bg-black/5 transition-colors">
             <HelpCircle size={15} />

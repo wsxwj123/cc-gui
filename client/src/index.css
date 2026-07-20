@@ -1220,6 +1220,13 @@ html { --content-max: clamp(768px, calc(var(--app-w, 100vw) * 0.7), 1120px); }
   to { opacity: 1; transform: translateY(0) scale(1); }
 }
 
+/* P1.1 面板坞 rail:原位横向展开(轻量,与 glass 体系同缓动)。收起走条件卸载不做退场动画。 */
+@keyframes cguiRailIn {
+  from { opacity: 0; transform: translateX(8px) scale(0.97); }
+  to { opacity: 1; transform: translateX(0) scale(1); }
+}
+.cgui-dock-rail { animation: cguiRailIn 0.18s cubic-bezier(0.2, 0.8, 0.2, 1) both; }
+
 .animate-fade-up { animation: fadeUp 0.34s cubic-bezier(0.2, 0.8, 0.2, 1) both; }
 .animate-fade-in { animation: fadeIn 0.22s ease-out both; }
 .animate-slide-in { animation: slideIn 0.28s cubic-bezier(0.2, 0.8, 0.2, 1) both; }
