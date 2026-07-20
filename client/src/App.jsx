@@ -4353,7 +4353,16 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       // Permission mode / model / effort are all per-session: read THIS
       // session's stored value (keyed by sessionQueueKey) so each pane/session
       // sends with its own settings, not whatever was last globally selected.
-      const permissionMode = useStore.getState().getPermissionModeFor(sessionQueueKey);
+      let permissionMode = useStore.getState().getPermissionModeFor(sessionQueueKey);
+      // 修正批#5/判官①:auto 档仅官方 Anthropic 可用(SDK 安全分类器)。切到第三方后
+      // 静态过滤只是藏选项、不清已 pin 的 auto → 会原样发出;第三方的报错大概率不含
+      // "auto",运行时回退(报错文案正则)接不住,用户卡死。发送前就地降为 default
+      // 并回写 pin 闭环,附切换通知横幅。
+      if (permissionMode === 'auto' && (useStore.getState().currentProvider?.providerHint || 'anthropic') !== 'anthropic') {
+        permissionMode = 'default';
+        useStore.getState().setPermissionMode('default', sessionQueueKey);
+        setProviderSwitchNotice({ text: '「自动」权限档仅官方 Anthropic 端点支持,本会话已自动切回「逐步确认」。' });
+      }
       // 模型解析与徽章一致(#8):pin → 历史模型 → 全局默认。否则发送时只读 pin||全局,
       // 全局被 WS 重置成默认后,没 pin 的会话(尤其回滚后)会用默认模型发出,与徽章不符。
       // 模型解析(#8/U1/U4/BK-0 四轮 bug 聚集地)→ 纯逻辑抽到 utils/routing.js,
