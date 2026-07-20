@@ -7,7 +7,7 @@ import { ChevronDown, Check, X, Settings, Server, Loader2, Smartphone } from 'lu
 import { useStore } from '../stores/sessionStore.js';
 import { ModelBadge } from './ModelBadge.jsx';
 import { confirmDialog } from '../utils/confirmDialog.jsx';
-import { mergeProviderLists, SOURCE_BADGE } from '../utils/providerList.js';
+import { mergeProviderLists, rowIsCurrent, SOURCE_BADGE } from '../utils/providerList.js';
 
 const EMPTY_ARRAY = Object.freeze([]);
 
@@ -184,7 +184,8 @@ export function ProviderSwitchList({ onSwitched }) {
     return () => window.removeEventListener('cgui:provider-change', onCh);
   }, []);
 
-  const isCur = (p) => (activeId != null ? p.id === activeId : p.isCurrent);
+  // 审计批挂账:isCur 兼配 dupOf 里的 id(激活的是被合并的导入项时保留行照常高亮)。
+  const isCur = (p) => rowIsCurrent(p, activeId);
 
   const switchTo = async (id, model) => {
     setSwitching(true);
@@ -214,8 +215,8 @@ export function ProviderSwitchList({ onSwitched }) {
     window.dispatchEvent(new CustomEvent('cgui:open-provider-manager'));
   };
 
-  const rows = mergeProviderLists({ providers, openaiProviders, customProviders })
-    .filter((p) => !hiddenProviders.has(p.id));
+  // 审计批挂账:hidden 传入选择器,在合并前过滤 —— 隐藏的导入项不参与吞并/不进「含导入」徽章。
+  const rows = mergeProviderLists({ providers, openaiProviders, customProviders, hidden: hiddenProviders });
 
   return (
     <div>

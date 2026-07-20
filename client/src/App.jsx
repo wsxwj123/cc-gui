@@ -32,7 +32,7 @@ import { confirmDialog } from './utils/confirmDialog.jsx';
 import { ChatInput, EffortSelector, EFFORT_LEVELS, markAutoUnavailable } from './components/ChatInput.jsx';
 import { ModelBadge, ProviderAvatar } from './components/ModelBadge.jsx';
 import { RemoteControlButton, ProviderSwitcher, ModelSelector, ProviderSourceBadge, AnchoredPopover } from './components/SessionSelectors.jsx';
-import { mergeProviderLists } from './utils/providerList.js';
+import { mergeProviderLists, rowIsCurrent } from './utils/providerList.js';
 import { UsagePanel } from './components/UsagePanel.jsx';
 import { ProcessPanel } from './components/ProcessPanel.jsx';
 import { SettingsPanel, ChatBackgroundCard } from './components/SettingsPanel.jsx';
@@ -6855,7 +6855,8 @@ function ProviderManager() {
   // "添加 Provider" form, so a fresh machine (no CC Switch, nothing added yet)
   // can set up its first provider.
 
-  const isCur = (p) => (activeId != null ? p.id === activeId : p.isCurrent);
+  // 审计批挂账:isCur 兼配 dupOf 里的 id(raw 数组无 dupOf 时退化为原判定)。
+  const isCur = (p) => rowIsCurrent(p, activeId);
   const cur = providers.find(isCur) || openaiProviders.find(isCur) || customProviders.find(isCur);
   // providerHint is lowercase server-side (pricing/compare logic depends on it),
   // so capitalize only for display.
@@ -6906,8 +6907,9 @@ function ProviderManager() {
               官方置顶、其余按名称序;来源(导入/自定义/代理)降为行内小徽章,不再分组。
               行内操作按来源:cc-switch/openai 导入项=隐藏;自定义=编辑/删除(+批量)。 */}
           {(() => {
-            const rows = mergeProviderLists({ providers, openaiProviders, customProviders })
-              .filter((p) => p.source === 'custom' || showHidden || !hiddenProviders.has(p.id));
+            // 审计批挂账:非 showHidden 时 hidden 传入选择器在合并前过滤(隐藏项不参与
+            // 吞并/不进「含导入」徽章);showHidden 时不过滤,隐藏行以半透明展示可恢复。
+            const rows = mergeProviderLists({ providers, openaiProviders, customProviders, hidden: showHidden ? null : hiddenProviders });
             const hasCustom = customProviders.length > 0;
             return (<>
               <div className="px-3 pt-2 pb-1 border-t border-canvas-deep flex items-center gap-1">
@@ -8023,7 +8025,7 @@ function MobileProviderPage({ permKey, onPicked, onManage }) {
       .catch(() => {});
   };
   useEffect(load, []);
-  const isCur = (p) => (activeId != null ? p.id === activeId : p.isCurrent);
+  const isCur = (p) => rowIsCurrent(p, activeId); // 审计批挂账:兼配 dupOf
   // 既有切换链路原样保留(/api/provider/switch + clearModelOverrides + 双 fetch +
   // provider-change 广播),只加了成功返回值供 pickModel 判断。
   const switchTo = async (id, model) => {
@@ -8067,8 +8069,7 @@ function MobileProviderPage({ permKey, onPicked, onManage }) {
       {/* 修正批#6:单一列表(mergeProviderLists,与桌面同一数据选择器)——官方置顶、
           名称序、来源徽章。 */}
       {(() => {
-        const rows = mergeProviderLists({ providers, openaiProviders, customProviders })
-          .filter((p) => !hiddenProviders.has(p.id));
+        const rows = mergeProviderLists({ providers, openaiProviders, customProviders, hidden: hiddenProviders });
         return (<>
           <div className="px-4 pt-3 pb-1 border-t border-canvas-deep/40 mt-1">
             <div className="text-[11px] text-ink-faint uppercase tracking-wider font-body">全部 Provider · 点行展开模型,选模型即切换</div>
