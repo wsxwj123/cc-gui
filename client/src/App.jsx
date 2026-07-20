@@ -819,7 +819,7 @@ function useIsMobile() {
   return isMobile;
 }
 
-function MainLayout({ sidebarCollapsed, selectedProject, rightPanel, setRightPanel, isMobile }) {
+function MainLayout({ sidebarCollapsed, selectedProject, rightPanel, setRightPanel, isMobile, updateNotice = null }) {
   const [sidebarWidth, onSidebarDrag] = useResizable({
     initial: 268, min: 200, max: 480, axis: 'x', storageKey: 'cgui-sidebar-width',
   });
@@ -852,7 +852,7 @@ function MainLayout({ sidebarCollapsed, selectedProject, rightPanel, setRightPan
           <>
             <div className="fixed inset-0 z-40 bg-black/40 animate-fade-in" onClick={toggleSidebar} />
             <aside className="mobile-drawer fixed inset-y-0 left-0 z-50 w-[86vw] max-w-[360px] glass-thick flex flex-col overflow-hidden animate-glass-rise">
-              <MobileMenu setRightPanel={setRightPanel} onClose={toggleSidebar} />
+              <MobileMenu setRightPanel={setRightPanel} onClose={toggleSidebar} updateNotice={updateNotice} />
             </aside>
           </>
         )}
@@ -7337,12 +7337,14 @@ function LoginScreen({ onSuccess }) {
 // ONLY the current session; this panel slides in from the left and drills into
 // sub-pages (会话/模型/外观/…) one screen at a time, so a control's options never
 // overflow the viewport the way the desktop popovers (w-80 etc.) did.
-function MobileMenuRow({ icon: Icon, label, value, onClick, danger = false, chevron = true }) {
+function MobileMenuRow({ icon: Icon, label, value, onClick, danger = false, chevron = true, dot = false }) {
   return (
     <button onClick={onClick}
       className="w-full flex items-center gap-3 px-4 py-3 text-left hover:bg-canvas-warm active:bg-canvas-deep/30 transition-colors">
       {Icon && <Icon size={18} strokeWidth={1.75} className={danger ? 'text-error' : 'text-ink-muted'} />}
       <span className={`flex-1 text-[14px] font-body truncate ${danger ? 'text-error' : 'text-ink'}`}>{label}</span>
+      {/* 审计批A5:红点提醒(有可用更新等)。桌面 PanelDock 同语义。 */}
+      {dot && <span className="w-1.5 h-1.5 rounded-full bg-red-500 shrink-0 animate-pulse" />}
       {value != null && value !== '' && (
         <span className="text-[12px] text-ink-faint font-body truncate max-w-[44%] text-right shrink-0">{value}</span>
       )}
@@ -8202,7 +8204,7 @@ function MobileReadingFontPage() {
   );
 }
 
-function MobileMenu({ setRightPanel, onClose }) {
+function MobileMenu({ setRightPanel, onClose, updateNotice = null }) {
   const [stack, setStack] = useState(['root']);
   const page = stack[stack.length - 1];
   const push = (p) => setStack((s) => [...s, p]);
@@ -8323,7 +8325,8 @@ function MobileMenu({ setRightPanel, onClose }) {
               ))}
               <div className="px-4 pt-3 pb-1 text-[11px] text-ink-faint uppercase tracking-wider font-body">系统</div>
               {/* 修正批#7:设置里 Provider tab 已删(管理在上方 Provider/模型 入口页内) */}
-              <MobileMenuRow icon={Settings} label="通用（更新 / 会话 / 网络 / 高级）" chevron={false} onClick={() => openPanel('settings')} />
+              {/* 审计批A5:有可用更新时系统行加红点(桌面 PanelDock 红点同语义,手机原来无任何提示)。 */}
+              <MobileMenuRow icon={Settings} label="通用（更新 / 会话 / 网络 / 高级）" chevron={false} dot={!!updateNotice} onClick={() => openPanel('settings')} />
               <div className="h-8" />
             </div>
           )}
@@ -9255,6 +9258,7 @@ export default function App() {
           rightPanel={rightPanel}
           setRightPanel={setRightPanel}
           isMobile={isMobile}
+          updateNotice={updateNotice}
         />
         {LocalWidget && <LocalWidget />}
         {/* 外接键盘按 Cmd+/ 也能开;不渲染的话状态会隐形置真并吞掉 Esc */}
