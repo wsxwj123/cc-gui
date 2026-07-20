@@ -67,6 +67,15 @@ export function AnchoredPopover({ anchorRef, open, onRequestClose, drop = 'down'
     return () => ro.disconnect();
   }, [open]);
 
+  // 审计批挂账:窗口 resize(含旋屏/软键盘改变视口)→ 锚点矩形已变,重量重摆;
+  // 原来只在打开瞬间定位,resize 后弹层悬在旧坐标上错位/悬空。
+  useEffect(() => {
+    if (!open) return;
+    const onResize = () => setBump((n) => n + 1);
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, [open]);
+
   useEffect(() => {
     if (!open) return;
     const onDown = (e) => {
