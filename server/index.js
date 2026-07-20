@@ -860,6 +860,25 @@ async function relisten(newHost) {
   }
 }
 
+// A5 启动清扫:上次异常退出(崩溃/强杀)残留在系统临时目录的 cgui-acw-*.json /
+// cgui-settings-*.json(正常路径回合结束就地 unlink,残留只在异常退出时产生)。
+// 仅删 mtime>24h 的(绝不碰在跑会话正在用的),全程 best-effort 静默,异步不阻塞启动。
+(async () => {
+  try {
+    const { readdir, stat, unlink } = await import('fs/promises');
+    const { tmpdir } = await import('os');
+    const dir = tmpdir();
+    const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+    for (const name of await readdir(dir)) {
+      if (!/^cgui-(acw|settings)-.*\.json$/.test(name)) continue;
+      try {
+        const p = join(dir, name);
+        if ((await stat(p)).mtimeMs < cutoff) await unlink(p);
+      } catch { /* 单个文件失败不影响其余 */ }
+    }
+  } catch { /* tmpdir 不可读等,静默 */ }
+})();
+
 server.listen(PORT, HOST, () => {
   const exposure = HOST === '127.0.0.1'
     ? ' (loopback only)'
