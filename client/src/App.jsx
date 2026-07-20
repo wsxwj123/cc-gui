@@ -395,8 +395,13 @@ function ThemeToggle() {
   useEffect(() => {
     if (!open) return;
     const onDown = (e) => { if (wrapRef.current && !wrapRef.current.contains(e.target)) setOpen(false); };
+    const onEsc = (e) => { if (e.key === 'Escape') setOpen(false); }; // 修正批#3:补 Esc 关闭(所有弹层统一)
     document.addEventListener('mousedown', onDown);
-    return () => document.removeEventListener('mousedown', onDown);
+    document.addEventListener('keydown', onEsc);
+    return () => {
+      document.removeEventListener('mousedown', onDown);
+      document.removeEventListener('keydown', onEsc);
+    };
   }, [open]);
 
   const ToneIcon = themeTone === 'light' ? Sun : themeTone === 'dark' ? Moon : Monitor;
@@ -414,8 +419,10 @@ function ThemeToggle() {
       {/* CJ-2:桌面端也要限高+整体滚动。此前只有移动端有 max-h,桌面端弹窗内容
           (配色网格+动画网格)在大字号 zoom 下总高超过视口,动画网格的内部滚动窗口
           有一截伸到屏幕外 → 用户把内部滚动条拖到底也看不全(实报)。 */}
+      {/* 修正批#3:限高单位改 --app-h(zoom 折算后的真实视口)。dvh 在 Chromium 系
+          (dev/Windows WebView2)是布局px,大字号 zoom 下 ×1.45 视觉超屏(实测 976>800)。 */}
       {open && (
-        <div className="absolute right-0 top-full mt-2 z-[60] w-[300px] glass-popover rounded-2xl border border-canvas-deep shadow-xl p-3 space-y-3 max-h-[min(78dvh,calc(100dvh-6rem))] overflow-y-auto max-md:fixed max-md:left-3 max-md:right-3 max-md:top-16 max-md:w-auto max-md:mt-0 max-md:max-h-[78dvh]">
+        <div className="absolute right-0 top-full mt-2 z-[60] w-[300px] glass-popover rounded-2xl border border-canvas-deep shadow-xl p-3 space-y-3 max-h-[calc(var(--app-h,100dvh)-6rem)] overflow-y-auto max-md:fixed max-md:left-3 max-md:right-3 max-md:top-16 max-md:w-auto max-md:mt-0 max-md:max-h-[calc(var(--app-h,100dvh)*0.78)]">
           <ThemeAppearanceBody />
         </div>
       )}

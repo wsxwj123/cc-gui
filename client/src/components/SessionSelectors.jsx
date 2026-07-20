@@ -72,7 +72,14 @@ export function AnchoredPopover({ anchorRef, open, onRequestClose, drop = 'down'
   if (!open) return null;
   return createPortal(
     <div ref={elRef}
-      style={{ position: 'fixed', left: pos ? pos.left : 0, top: pos ? pos.top : 0, zIndex: 9999, visibility: pos ? 'visible' : 'hidden' }}
+      style={{
+        position: 'fixed', left: pos ? pos.left : 0, top: pos ? pos.top : 0, zIndex: 9999,
+        visibility: pos ? 'visible' : 'hidden',
+        // 高度封顶用 --app-h(innerHeight÷zoom,两引擎皆正确)。调用方 class 里的
+        // dvh/vh 在 Chromium 系(dev/Windows WebView2)是布局px、×zoom 后会视觉超屏,
+        // 这里兜底保证弹层永远不高过视口(配合调用方 overflow-y-auto 滚动)。
+        maxHeight: 'calc(var(--app-h, 100dvh) - 16px)',
+      }}
       className={`glass-popover animate-glass-rise ${className}`}>
       {children}
     </div>,
