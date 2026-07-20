@@ -21,7 +21,8 @@ const PANEL_STEPS = [
   ['panel-mcp', '工具(MCP)', 'MCP 服务器与插件的增删 / 测试 / 安装。', 'cgui:dock-rail-open'],
   ['panel-skills', 'Skill 市场', 'skill 市场导入与本机技能管理。', 'cgui:dock-rail-open'],
   ['panel-memory', 'CLAUDE.md 指令', 'CLAUDE.md 四级指令 / 自动记忆 / 提示词库。', 'cgui:dock-rail-open'],
-  ['panel-settings', '通用设置', '更新 / 会话 / Provider / 环境 / 权限 / Hooks / 网络 / 高级 共 8 个标签页;顶部可搜索设置项。', 'cgui:dock-rail-open'],
+  // 修正批#7:Provider tab 已删(管理迁顶栏 Provider 卡片底部「管理」弹窗),7 个标签页。
+  ['panel-settings', '通用设置', '更新 / 会话 / 环境 / 权限 / Hooks / 网络 / 高级 共 7 个标签页;顶部可搜索设置项。', 'cgui:dock-rail-open'],
 ];
 
 function buildSteps(hasProject) {
@@ -44,7 +45,7 @@ function buildSteps(hasProject) {
     ['composer', '输入框', '对话都从这里开始,下方一排是 [权限模式][附件][旁问] 三个按钮。\n· Enter 发送、Shift+Enter 换行;输入 / 打开命令面板;输入 @ 引用文件或其它会话\n· 可拖入图片 / PDF / Office 文件;Cmd/Ctrl+Z 撤销输入\n· AI 回复中再输入会入队;输入框为空按 ↑ 召回最近入队消息;AI 工作中还会出现「转后台」按钮\n· 气泡图标是「旁问」:不打断当前工作、不写入会话历史的临时提问(未读有角标)\n· 按 Cmd/Ctrl+/ 打开快捷键速查表', 'cgui:tour-ensure-draft'],
     ['mode-selector', '权限模式', '控制 AI 执行动作前是否询问你(按会话独立记忆;窄窗口下只显图标):\n· 逐步确认:每次编辑 / 命令 / 网络前都询问,只读直接执行\n· 接受编辑:文件编辑直接执行,其它命令仍询问\n· 规划:只读研究并给出计划,你批准后自动切到执行档\n· 自动:后台安全分类器逐动作审查,通过即执行(仅官方 Anthropic 端点显示)\n· 放任:跳过全部权限检查(危险,仅建议隔离环境)', 'cgui:tour-ensure-draft'],
     // 修正批#1b:Provider/模型/力度/远程在顶栏(锚点常驻,无需 ensure-draft)。
-    ['provider-selector', 'Provider', '切换 API 服务来源:官方 Anthropic 与第三方中转一键切换,对新发的消息生效。\n· 增删改 / 测试 / 隐藏 / 导入在 通用 → Provider 管理页'],
+    ['provider-selector', 'Provider', '切换 API 服务来源:官方 Anthropic 与第三方中转一键切换,对新发的消息生效。\n· 增删改 / 测试 / 隐藏 / 导入在列表底部「管理 Provider」弹窗'],
     ['model-selector', '模型', '选当前会话使用的具体模型(分屏时作用于聚焦的窗格,每格独立)。\n· 支持 1M 上下文开关、搜索 / 拉取最新模型、手填自定义模型 ID'],
     ['effort-selector', '推理力度', '调 AI 的思考强度:低 / 中 / 高 / 极高 / 极限(分屏时作用于聚焦的窗格)。\n· 越高思考越深入、结果越细致,但越慢、越费 token\n· 官方模型区别明显,部分第三方可能无效'],
     ['remote-control', '远程控制', '用手机 Claude App 同账号接管当前会话(需先发送一条消息创建会话)。\n· 激活后输入框锁定,再点一次收回控制'],

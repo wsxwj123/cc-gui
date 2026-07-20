@@ -648,12 +648,8 @@ function finalizeSessionAgents(sessionId, tnStatus = 'stopped') {
   }
 }
 
-// P1.4:设置面板宿主 —— 把 App.jsx 内定义的 ProviderManager(增删改/测试/隐藏/导入)与
-// ThemeAppearanceBody(主题/字号/动画,与顶栏弹层同源)作为 slot 传入 SettingsPanel,
-// 避免 SettingsPanel.jsx 反向 import App.jsx(循环 import/TDZ 风险)。
-function SettingsPanelHost() {
-  return <SettingsPanel providerSlot={<ProviderManager />} />;
-}
+// 修正批#7:SettingsPanelHost 已删——ProviderManager 迁出设置(providerSlot 注入不再
+// 需要),PANEL_MAP 直用 SettingsPanel。
 
 // Top-right panels — each key auto-wires a header icon (desktop + mobile menu)
 // and its RightPanel body. Adding a key here is all the wiring needed.
@@ -668,7 +664,7 @@ const PANEL_MAP = {
   skills: { label: 'Skill 市场（导入官方技能）', icon: Sparkles, component: SkillsPanel },
   memory: { label: 'CLAUDE.md 指令', icon: BookText, component: MemoryPanel },
   // 文案改名(用户指定,仅显示名,id/组件/事件不动):坞入口叫「设置」,本面板入口叫「通用」。
-  settings: { label: '通用', icon: Settings, component: SettingsPanelHost },
+  settings: { label: '通用', icon: Settings, component: SettingsPanel },
 };
 
 // useResizable + Splitter live in hooks/useResizable.js — kept aliased for
@@ -6977,6 +6973,53 @@ function ProviderManager() {
   );
 }
 
+// 修正批#7:Provider 管理独立弹窗(桌面)。设置→Provider tab 已删,顶栏 Provider 切换
+// 卡片底部「管理 Provider」经 cgui:open-provider-manager 事件打开本弹窗。ProviderManager
+// 组件原样承载(零功能删减);手机端不走这里(合并入口页内推进到同一组件的全屏页)。
+// 布局照 ShortcutsPanel:flex 列(头 shrink-0 / 正文 flex-1 min-h-0 overflow-y-auto),
+// 不用 sticky(glass 动画残留 transform 会让 sticky 哑,memory 实证);Esc/点外关闭,
+// 表单有未保存输入时先 confirmDialog(与原设置面板离开守卫同语义)。
+function ProviderManagerModal({ open, onClose }) {
+  const tryClose = useCallback(async () => {
+    if (window.__cguiProviderFormDirty) {
+      const ok = await confirmDialog('Provider 表单有未保存的输入，关闭将丢弃。仍要关闭？', { danger: true, confirmText: '丢弃并关闭' });
+      if (!ok) return;
+      window.__cguiProviderFormDirty = false;
+    }
+    onClose();
+  }, [onClose]);
+  // Esc 捕获阶段拦截:阻断冒泡的「双击 Esc 停止流」监听(与 ShortcutsPanel 同手法)。
+  useEffect(() => {
+    if (!open) return;
+    const onEsc = (e) => {
+      if (e.key !== 'Escape') return;
+      e.stopPropagation();
+      tryClose();
+    };
+    window.addEventListener('keydown', onEsc, true);
+    return () => window.removeEventListener('keydown', onEsc, true);
+  }, [open, tryClose]);
+  if (!open) return null;
+  return (
+    <div className="fixed inset-0 z-[210] flex items-center justify-center bg-black/40 backdrop-blur-sm animate-fade-in" onClick={tryClose}>
+      <div
+        className="glass-popover w-[720px] max-w-[calc(var(--app-w,100vw)-1.5rem)] max-h-[min(85vh,calc(var(--app-h,100dvh)-3rem))] rounded-2xl shadow-2xl animate-glass-rise overflow-hidden flex flex-col"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between px-5 py-3 border-b border-canvas-deep shrink-0">
+          <div className="text-[14px] font-display font-semibold text-ink">Provider 管理<span className="text-[11px] font-body font-normal text-ink-faint ml-2">增删改 / 测试 / 隐藏 / 导入 · 点行即切换</span></div>
+          <button onClick={tryClose} className="p-1 rounded hover:bg-canvas-warm text-ink-faint hover:text-ink" title="关闭">
+            <X size={15} />
+          </button>
+        </div>
+        <div className="flex-1 min-h-0 overflow-y-auto px-4 py-3">
+          <ProviderManager />
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // 上下文用量徽章 → 可点击,弹出 /context 风格的分项明细(#1)。数据来自后端
 // `/api/context/:sessionId`(对会话 fork 副本跑 /context 后解析,原会话不受影响)。
 const CTX_COLORS = ['#6366f1', '#0ea5e9', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899', '#14b8a6', '#a3a3a3'];
@@ -7928,8 +7971,9 @@ function CustomProviderForm({ onSaved, editing, onCancel, onDirtyChange, customC
 //   - 其它 provider → 该 provider 的模型 id 列表,点某个 id = 走既有 /api/provider/switch
 //     切换链路 + setModelFor 选中该模型,成功后 onPicked() 返回菜单根。
 // 数据仍走 mergeProviderLists(与桌面管理页/顶栏卡片同一选择器);桌面两个独立按钮零改动。
-function MobileProviderPage({ permKey, onPicked }) {
-  const ms = useMultiSelect();
+// 修正批#7:本页只留 切换/选模型;增删改/导入/隐藏/批量删除收进页顶「管理 Provider」
+// 入口(onManage → 同一导航流全屏页,渲染与桌面弹窗同一个 ProviderManager 组件)。
+function MobileProviderPage({ permKey, onPicked, onManage }) {
   const [providers, setProviders] = useState([]);
   const [openaiProviders, setOpenaiProviders] = useState([]);
   const [customProviders, setCustomProviders] = useState([]);
@@ -7977,60 +8021,37 @@ function MobileProviderPage({ permKey, onPicked }) {
     if (m) useStore.getState().setModelFor(permKey, m); // clearModelOverrides 之后再钉,pin 存活
     onPicked?.();
   };
-  const removeCustom = async (id, name) => {
-    if (!(await confirmDialog(`删除自定义 Provider「${name}」?`, { danger: true, confirmText: '删除' }))) return;
-    // If this provider is open in the edit form, close it first — otherwise the
-    // form lingers on a now-deleted target ("更新" would 404).
-    setEditingProvider((cur) => (cur?.id === id ? null : cur));
-    await fetch(`/api/custom-providers/${id}`, { method: 'DELETE' }).catch(() => {});
-    load();
-  };
-  const [editingProvider, setEditingProvider] = useState(null);
   return (
     <div className="py-1">
-      {/* 新增/编辑表单挂列表顶部:打开新增无需滚到底,点编辑也统一定位到顶部表单。 */}
-      <CustomProviderForm
-        editing={editingProvider}
-        customCount={customProviders.length}
-        onCancel={() => setEditingProvider(null)}
-        onSaved={() => { setEditingProvider(null); load(); }}
-      />
+      {/* 修正批#7:增删改/导入/隐藏/批量删除迁「管理 Provider」全屏页(与桌面弹窗同一
+          ProviderManager 组件);本页只留 切换 + 选模型,原页顶内嵌表单/行内编辑删除/多选删除。 */}
+      <button onClick={onManage}
+        className="w-full flex items-center gap-2 px-4 py-3 text-left text-accent hover:bg-canvas-warm transition-colors border-b border-canvas-deep/40 mb-1">
+        <Settings size={16} className="shrink-0" />
+        <span className="flex-1 text-[14px] font-body">管理 Provider（增删改 · 测试 · 隐藏 · 导入）</span>
+        <ChevronRight size={16} className="text-ink-ghost shrink-0" />
+      </button>
       {/* 修正批#6:单一列表(mergeProviderLists,与桌面同一数据选择器)——官方置顶、
-          名称序、来源徽章;每种来源保留自己的行模板(导入行=点行切换,openai/自定义
-          行=模型 chips 直切)。 */}
+          名称序、来源徽章。 */}
       {(() => {
         const rows = mergeProviderLists({ providers, openaiProviders, customProviders });
-        const hasCustom = customProviders.length > 0;
         return (<>
-          <div className="px-4 pt-3 pb-1 flex items-center gap-1 border-t border-canvas-deep/40 mt-1">
-            <div className="text-[11px] text-ink-faint uppercase tracking-wider font-body flex-1">全部 Provider · 点行展开模型,选模型即切换</div>
-            {hasCustom && <SelModeToggle selMode={ms.selMode} onToggle={() => (ms.selMode ? ms.exit() : ms.enter())} size={14} />}
+          <div className="px-4 pt-3 pb-1 border-t border-canvas-deep/40 mt-1">
+            <div className="text-[11px] text-ink-faint uppercase tracking-wider font-body">全部 Provider · 点行展开模型,选模型即切换</div>
           </div>
-          {ms.selMode && hasCustom && (
-            <BatchBar count={ms.count} busy={ms.busy} noun="个 Provider" onExit={ms.exit}
-              onDelete={async () => {
-                const res = await ms.runDelete(
-                  (id) => fetch(`/api/custom-providers/${id}`, { method: 'DELETE' }).then((r) => { if (!r.ok) throw new Error('删除失败'); }),
-                  { noun: '个 Provider', nameOf: (id) => customProviders.find((p) => p.id === id)?.name || id });
-                if (res) load();
-              }} />
-          )}
           {rows.map((p) => {
             const cur = isCur(p);
             const expanded = expandedId === p.id;
-            const selectable = ms.selMode && p.source === 'custom';
             const models = Array.isArray(p.models) ? p.models : [];
             return (
               <div key={p.id} className={cur ? 'bg-accent-subtle' : ''}>
-                {/* 行头:点击=展开/收起(多选模式下自定义项=勾选)。折叠态不显模型 id。 */}
+                {/* 行头:点击=展开/收起。折叠态不显模型 id。 */}
                 <div className="w-full flex items-center gap-1 pr-3 hover:bg-canvas-warm transition-colors">
-                  {selectable && <SelCheckbox checked={ms.selected.has(p.id)} onClick={() => ms.toggle(p.id)} size={15} />}
                   <button
-                    onClick={() => (selectable ? ms.toggle(p.id) : setExpandedId(expanded ? null : p.id))}
+                    onClick={() => setExpandedId(expanded ? null : p.id)}
                     className="flex-1 min-w-0 flex items-center gap-2 px-4 py-3 text-left">
                     {/* min-w 保证名称永不被 shrink-0 徽章挤到 0 宽(实测 322px 抽屉里
-                        "type+计数+来源+箭头+编辑删除"会吃光 flex-1;模型计数不进行头,
-                        展开即见列表,行头只留 type/来源)。 */}
+                        徽章簇会吃光 flex-1;模型计数不进行头,展开即见列表)。 */}
                     <span className={`flex-1 min-w-[64px] text-[14px] font-body truncate ${cur ? 'text-accent font-medium' : 'text-ink'}`}>{p.name}</span>
                     {p.source === 'custom' && p.type && (
                       <span className="text-[9px] px-1 py-px bg-canvas-deep text-ink-faint rounded font-mono shrink-0">{p.type}</span>
@@ -8039,12 +8060,8 @@ function MobileProviderPage({ permKey, onPicked }) {
                     {cur && <Check size={16} className="text-accent shrink-0" />}
                     <ChevronDown size={14} className={`text-ink-ghost shrink-0 transition-transform ${expanded ? 'rotate-180' : ''}`} />
                   </button>
-                  {p.source === 'custom' && !ms.selMode && (<>
-                    <button onClick={() => setEditingProvider(p)} title="编辑" className="p-1.5 text-ink-faint hover:text-accent shrink-0"><Pencil size={15} /></button>
-                    <button onClick={() => removeCustom(p.id, p.name)} title="删除" className="p-1.5 text-ink-faint hover:text-error shrink-0"><Trash2 size={15} /></button>
-                  </>)}
                 </div>
-                {expanded && !ms.selMode && (
+                {expanded && (
                   <div className="pb-2 border-b border-canvas-deep/40">
                     {cur ? (
                       // 当前激活 provider:内嵌原「模型」页(选择=per-pane pin,不重复切换;
@@ -8201,7 +8218,7 @@ function MobileMenu({ setRightPanel, onClose }) {
 
   // 手机批#4:「模型」「Provider」两个入口合并为一个「Provider / 模型」页(双入口
   // 让人误以为两套状态)。'model' 路由随之删除,MobileModelPage 内嵌进合并页。
-  const TITLES = { history: '会话与项目', effort: '推理力度', provider: 'Provider / 模型', appearance: '外观', theme: '配色方案', readingfont: '对话正文字体' };
+  const TITLES = { history: '会话与项目', effort: '推理力度', provider: 'Provider / 模型', providermanage: '管理 Provider', appearance: '外观', theme: '配色方案', readingfont: '对话正文字体' };
 
   return (
     <div className="flex flex-col h-full">
@@ -8254,12 +8271,15 @@ function MobileMenu({ setRightPanel, onClose }) {
                 <MobileMenuRow key={id} icon={Icon} label={label} chevron={false} onClick={() => openPanel(id)} />
               ))}
               <div className="px-4 pt-3 pb-1 text-[11px] text-ink-faint uppercase tracking-wider font-body">系统</div>
-              <MobileMenuRow icon={Settings} label="通用（更新 / 会话 / Provider / 网络 / 高级）" chevron={false} onClick={() => openPanel('settings')} />
+              {/* 修正批#7:设置里 Provider tab 已删(管理在上方 Provider/模型 入口页内) */}
+              <MobileMenuRow icon={Settings} label="通用（更新 / 会话 / 网络 / 高级）" chevron={false} onClick={() => openPanel('settings')} />
               <div className="h-8" />
             </div>
           )}
           {page === 'effort' && <MobileEffortPage permKey={permKey} />}
-          {page === 'provider' && <MobileProviderPage permKey={permKey} onPicked={() => setStack(['root'])} />}
+          {page === 'provider' && <MobileProviderPage permKey={permKey} onPicked={() => setStack(['root'])} onManage={() => push('providermanage')} />}
+          {/* 修正批#7:管理页 = 与桌面弹窗同一 ProviderManager 组件,宿主为导航流页面 */}
+          {page === 'providermanage' && <div className="px-3 py-2"><ProviderManager /></div>}
           {page === 'appearance' && <MobileAppearancePage push={push} />}
           {page === 'theme' && <MobileThemePage />}
           {page === 'readingfont' && <MobileReadingFontPage />}
@@ -8444,24 +8464,11 @@ export default function App() {
   const headerPane = useStore((s) => (s.paneSessions && s.paneSessions[s.activeTabIndex || 0]) || s.selectedSession);
   const headerPermKey = headerPane ? (headerPane.sessionId || `draft-${headerPane.projectHash || 'none'}`) : null;
   const [rightPanel, setRightPanelRaw] = useState(null);
-  // T5#1 Provider 表单脏数据守卫:CustomProviderForm(设置→Provider)有未保存输入时
-  // window.__cguiProviderFormDirty=true(表单 onDirtyChange 上报,卸载自动清)。任何
-  // "离开设置面板"的路径(点坞图标切面板/关面板/Cmd+数字)统一走本守卫 setter:
-  // 先 confirmDialog 确认丢弃,取消则不动。进设置/设置内切换不拦。
+  // 修正批#7:原 T5#1 "离开设置面板丢 Provider 表单输入"守卫已删——表单随 Provider tab
+  // 迁出设置,脏数据守卫改由 ProviderManagerModal 的关闭路径(Esc/点外/X)承担。
   const rightPanelRef = useRef(null);
   const setRightPanel = useCallback((next) => {
-    const cur = rightPanelRef.current;
-    const target = typeof next === 'function' ? next(cur) : next;
-    if (cur === 'settings' && target !== 'settings' && window.__cguiProviderFormDirty) {
-      confirmDialog('Provider 表单有未保存的输入，离开设置面板将丢弃。仍要离开？', { danger: true, confirmText: '丢弃并离开' })
-        .then((ok) => {
-          if (!ok) return;
-          window.__cguiProviderFormDirty = false;
-          rightPanelRef.current = target;
-          setRightPanelRaw(target);
-        });
-      return;
-    }
+    const target = typeof next === 'function' ? next(rightPanelRef.current) : next;
     rightPanelRef.current = target;
     setRightPanelRaw(target);
   }, []);
@@ -8615,8 +8622,17 @@ export default function App() {
     return () => window.removeEventListener('keydown', onEsc, true);
   }, [shortcutsOpen]);
 
-  // P1.4:任意组件经此事件打开设置面板并定位到指定设置组(如 ProviderSwitcher 底部
-  // 「管理 Provider」→ set-provider-manage)。与 jumpToUpdate 同一 __cguiSettingsJump 兜底。
+  // 修正批#7:Provider 管理独立弹窗(顶栏切换卡片底部「管理 Provider」触发;设置里的
+  // Provider tab 已删)。手机端不派发此事件(合并入口页内是导航流全屏页)。
+  const [providerMgrOpen, setProviderMgrOpen] = useState(false);
+  useEffect(() => {
+    const onOpenMgr = () => setProviderMgrOpen(true);
+    window.addEventListener('cgui:open-provider-manager', onOpenMgr);
+    return () => window.removeEventListener('cgui:open-provider-manager', onOpenMgr);
+  }, []);
+
+  // P1.4:任意组件经此事件打开设置面板并定位到指定设置组。与 jumpToUpdate 同一
+  // __cguiSettingsJump 兜底。
   useEffect(() => {
     const onOpenSettings = (e) => {
       setRightPanel('settings');
@@ -9237,6 +9253,8 @@ export default function App() {
       {LocalWidget && <LocalWidget />}
       <GuideTour open={tourOpen} onClose={closeTour} hasProject={!!selectedProject} />
       <ShortcutsPanel open={shortcutsOpen} onClose={() => setShortcutsOpen(false)} />
+      {/* 修正批#7:Provider 管理独立弹窗(桌面;手机走合并入口页内的导航流全屏页) */}
+      <ProviderManagerModal open={providerMgrOpen} onClose={() => setProviderMgrOpen(false)} />
       {bundleMismatch && (
         <div className="fixed top-0 inset-x-0 z-[300] bg-red-600 text-white text-[12px] font-body px-4 py-2 flex items-center justify-center gap-3 shadow-lg">
           <span>⚠️ 界面 v{bundleMismatch.bundle} 与服务端 v{bundleMismatch.server} 不一致。请依次尝试：① 完全退出 GUI 再打开（会自动换用新版服务并绕过缓存）② 仍出现则说明安装包内是旧前端，请重新下载安装</span>

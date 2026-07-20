@@ -198,9 +198,11 @@ export function ProviderSwitchList({ onSwitched }) {
     setSwitching(false);
   };
 
+  // 修正批#7:「管理 Provider」不再跳设置(Provider tab 已删),改开独立管理弹窗
+  // (App.jsx ProviderManagerModal 监听此事件)。
   const openManager = () => {
     onSwitched?.();
-    window.dispatchEvent(new CustomEvent('cgui:open-settings', { detail: { section: 'set-provider-manage' } }));
+    window.dispatchEvent(new CustomEvent('cgui:open-provider-manager'));
   };
 
   const rows = mergeProviderLists({ providers, openaiProviders, customProviders })

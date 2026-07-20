@@ -45,8 +45,9 @@ const SETTINGS_INDEX = [
   { id: 'set-cache-opt', tab: 'session', title: '缓存优化', keys: '缓存 cache 前缀 动态 系统提示' },
   { id: 'set-auto-compact', tab: 'session', title: '自动压缩窗口', keys: '压缩 compact token 上下文 窗口' },
   { id: 'set-small-fast-model', tab: 'session', title: '轻量快速模型', keys: '模型 标题 haiku 快速 small fast' },
-  { id: 'set-provider-manage', tab: 'provider', title: 'Provider 管理(增删改 / 测试 / 隐藏 / 导入)', keys: 'provider 中转 api key baseurl 模型 档位 导入 cc-switch 隐藏 删除 测试 切换' },
-  { id: 'set-env-editor', tab: 'provider', title: '环境变量', keys: 'env 变量 environment anthropic' },
+  // 修正批#7:Provider tab 已删——管理迁独立弹窗(顶栏 Provider 切换卡片底部「管理」
+  // 打开;手机在 Provider/模型合并入口页内),设置里不再留双入口。环境变量编辑器迁 高级。
+  { id: 'set-env-editor', tab: 'advanced', title: '环境变量', keys: 'env 变量 environment anthropic provider' },
   { id: 'set-env-check', tab: 'env', title: '环境检查(node / claude / python / git / uv)', keys: '环境 依赖 node python git uv 安装' },
   { id: 'set-permissions', tab: 'permissions', title: '权限规则(允许 / 询问 / 拒绝)', keys: 'permissions allow ask deny 权限 规则 工具' },
   { id: 'set-hooks', tab: 'hooks', title: 'Hooks 钩子脚本', keys: 'hooks 钩子 脚本 事件' },
@@ -59,15 +60,14 @@ const SETTINGS_INDEX = [
 // P2.3:「外观」tab 删除 —— 与顶栏「主题」弹层重复(双入口);对话区背景等非重复项
 // 一并迁入主题弹层(App.jsx ThemeAppearanceBody),外观相关设置单一入口 = 顶栏主题按钮。
 const TAB_LABELS = {
-  general: '更新', session: '会话', provider: 'Provider',
+  general: '更新', session: '会话',
   env: '环境', permissions: '权限', hooks: 'Hooks', network: '网络', advanced: '高级',
 };
 // 老代码/事件链按 section id 跳转时不带 tab(如顶栏更新按钮传 'gui-update')→ 从索引反查。
 const tabOf = (section) => SETTINGS_INDEX.find((it) => it.id === section)?.tab || 'general';
 
-// providerSlot:由 App.jsx 的 SettingsPanelHost 注入(ProviderManager 定义在 App.jsx,
-// slot 传入避免循环 import)。
-export function SettingsPanel({ providerSlot = null }) {
+// 修正批#7:providerSlot 已删——ProviderManager 不再进设置(独立弹窗/手机全屏页承载)。
+export function SettingsPanel() {
   const [settings, setSettings] = useState(null);
   const [rawJson, setRawJson] = useState('');
   const [loading, setLoading] = useState(true);
@@ -182,15 +182,9 @@ export function SettingsPanel({ providerSlot = null }) {
     <div className="px-4 py-4 space-y-4 overflow-y-auto h-full">
       <div className="flex items-center gap-1 flex-wrap border-b border-canvas-deep -mx-4 px-4 pb-2">
         {Object.entries(TAB_LABELS).map(([id, label]) => (
-          <button key={id} onClick={async () => {
-            // T5#1:Provider 表单有未保存输入时切走 tab 先确认(丢弃或留下),防止静默丢输入。
-            if (tab === 'provider' && id !== 'provider' && window.__cguiProviderFormDirty) {
-              const ok = await confirmDialog('Provider 表单有未保存的输入，切换后将丢弃。仍要切换？', { danger: true, confirmText: '丢弃并切换' });
-              if (!ok) return;
-              window.__cguiProviderFormDirty = false;
-            }
-            setTab(id);
-          }}
+          // 修正批#7:原 T5#1 Provider 表单脏数据切 tab 守卫已删——表单随 Provider tab
+          // 迁出设置(守卫改由 ProviderManagerModal 的关闭路径承担)。
+          <button key={id} onClick={() => setTab(id)}
             className={`text-[11px] px-2.5 py-1 rounded font-body transition-colors ${tab === id ? 'bg-accent/15 text-accent' : 'text-ink-muted hover:text-ink'}`}>
             {label}
           </button>
@@ -237,7 +231,6 @@ export function SettingsPanel({ providerSlot = null }) {
 
       {tab === 'general' && <GeneralTab settings={settings} />}
       {tab === 'session' && <SessionTab settings={settings} onSave={save} onEnvPatch={envPatch} saving={saving} />}
-      {tab === 'provider' && <ProviderTab providerSlot={providerSlot} settings={settings} onEnvPatch={envPatch} saving={saving} />}
       {tab === 'env' && <div id="set-env-check"><EnvCheckPanel asModal={false} /></div>}
       {tab === 'permissions' && (
         <div id="set-permissions"><PermissionsTab settings={settings} onSave={save} saving={saving} saved={saved} /></div>
@@ -257,6 +250,11 @@ export function SettingsPanel({ providerSlot = null }) {
           <div id="set-storage" className="border-t border-canvas-deep pt-4">
             <div className="text-[10px] text-ink-faint uppercase tracking-wider font-body mb-2">存储清理</div>
             <StorageTab />
+          </div>
+          {/* 修正批#7:环境变量编辑器自原 Provider tab 迁入(该 tab 已删,provider 相关
+              env 键切 provider 时由服务端写,这里是手动兜底编辑口)。 */}
+          <div className="border-t border-canvas-deep pt-4">
+            <EnvVarsSection settings={settings} onEnvPatch={envPatch} saving={saving} />
           </div>
         </div>
       )}
@@ -1960,25 +1958,22 @@ function SessionTab({ settings, onSave, onEnvPatch, saving }) {
 }
 
 
-// Provider:管理面板(providerSlot ← 顶栏 ProviderSwitcher 弹层管理段迁入)+ 环境变量
-// 编辑器(← overview,provider 相关 env 多在此改)。
-function ProviderTab({ providerSlot, settings, onEnvPatch, saving }) {
+// 修正批#7:原 ProviderTab 已删(ProviderManager 迁独立弹窗/手机全屏页)。环境变量
+// 编辑器保留,迁入 高级 tab —— 默认折叠;展开后每项可改值/删除,底部可新增,改完即
+// 写回 settings.json 的 env。
+function EnvVarsSection({ settings, onEnvPatch, saving }) {
   const [showEnv, setShowEnv] = useState(false);
   const env = settings?.env || {};
   const envKeys = Object.keys(env);
   return (
-    <div className="space-y-3">
-      <div id="set-provider-manage">{providerSlot}</div>
-      {/* 环境变量 — 默认折叠;展开后每项可改值/删除,底部可新增。改完即写回 settings.json 的 env */}
-      <div id="set-env-editor" className="border border-canvas-deep rounded-lg overflow-hidden">
-        <button onClick={() => setShowEnv((v) => !v)}
-          className="w-full flex items-center gap-2 px-3 py-2.5 hover:bg-canvas-warm/60 text-left">
-          {showEnv ? <ChevronDown size={12} className="text-ink-faint" /> : <ChevronRight size={12} className="text-ink-faint" />}
-          <span className="text-xs text-ink-muted font-body flex-1">环境变量</span>
-          <span className="text-xs text-ink-soft font-mono">{envKeys.length} 个</span>
-        </button>
-        {showEnv && <EnvEditor env={env} onEnvPatch={onEnvPatch} saving={saving} />}
-      </div>
+    <div id="set-env-editor" className="border border-canvas-deep rounded-lg overflow-hidden">
+      <button onClick={() => setShowEnv((v) => !v)}
+        className="w-full flex items-center gap-2 px-3 py-2.5 hover:bg-canvas-warm/60 text-left">
+        {showEnv ? <ChevronDown size={12} className="text-ink-faint" /> : <ChevronRight size={12} className="text-ink-faint" />}
+        <span className="text-xs text-ink-muted font-body flex-1">环境变量</span>
+        <span className="text-xs text-ink-soft font-mono">{envKeys.length} 个</span>
+      </button>
+      {showEnv && <EnvEditor env={env} onEnvPatch={onEnvPatch} saving={saving} />}
     </div>
   );
 }
