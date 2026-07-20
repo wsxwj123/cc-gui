@@ -91,8 +91,10 @@ function PlanReviewCard({ req, onResolve, onApprove, processing, position, hydra
   };
 
   return (
-    <div className="flex flex-col max-h-[42vh] rounded-xl bg-white border border-canvas-deep shadow-lg overflow-hidden animate-fade-up relative">
-      <div className="px-4 py-2.5 flex items-center gap-2 border-b border-canvas-deep bg-blue-50/60">
+    // 审计批E1:卡壳 bg-white→bg-canvas、头带固定浅色 X-50/60→半透明 X-500/10 —— 深色
+    // 主题下 text-ink 是浅色,压在固定浅底上不可读;半透明染色叠在主题 canvas 上明暗都成立。
+    <div className="flex flex-col max-h-[min(42vh,calc(var(--app-h,100dvh)*0.42))] rounded-xl bg-canvas border border-canvas-deep shadow-lg overflow-hidden animate-fade-up relative">
+      <div className="px-4 py-2.5 flex items-center gap-2 border-b border-canvas-deep bg-blue-500/10">
         <div className="w-6 h-6 rounded-md bg-blue-100 flex items-center justify-center shrink-0">
           <ClipboardList size={13} className="text-blue-700" />
         </div>
@@ -109,7 +111,7 @@ function PlanReviewCard({ req, onResolve, onApprove, processing, position, hydra
         <MarkdownRenderer content={plan || '(空计划)'} />
       </div>
       {showRefine && (
-        <div className="px-4 py-2.5 border-t border-canvas-deep bg-amber-50/40 space-y-2">
+        <div className="px-4 py-2.5 border-t border-canvas-deep bg-amber-500/10 space-y-2">
           <textarea
             value={feedback}
             onChange={(e) => setFeedback(e.target.value)}
@@ -125,7 +127,7 @@ function PlanReviewCard({ req, onResolve, onApprove, processing, position, hydra
             placeholder="告诉 Claude 该如何修改这份计划...（⌘/Ctrl+Enter 提交）"
             rows={3}
             autoFocus
-            className="w-full text-[12px] font-body px-2.5 py-2 rounded border border-canvas-deep bg-white text-ink resize-none"
+            className="w-full text-[12px] font-body px-2.5 py-2 rounded border border-canvas-deep bg-canvas text-ink resize-none"
           />
           <div className="flex items-center gap-2">
             <button
@@ -141,7 +143,7 @@ function PlanReviewCard({ req, onResolve, onApprove, processing, position, hydra
         </div>
       )}
       {!showRefine && (
-        <div className="px-4 py-2.5 flex items-center gap-2 bg-canvas-warm/60 border-t border-canvas-deep">
+        <div className="px-4 py-2.5 flex items-center flex-wrap gap-2 bg-canvas-warm/60 border-t border-canvas-deep">
           <button
             disabled={processing}
             onClick={() => setShowRefine(true)}
@@ -258,8 +260,8 @@ function AskQuestionCard({ req, onAnswer, processing, position, hydrate }) {
   const opts = Array.isArray(q.options) ? q.options : [];
 
   return (
-    <div className="flex flex-col max-h-[42vh] rounded-xl bg-white border border-canvas-deep shadow-lg overflow-hidden animate-fade-up relative">
-      <div className="px-4 py-2.5 flex items-center gap-2 border-b border-canvas-deep bg-violet-50/60">
+    <div className="flex flex-col max-h-[min(42vh,calc(var(--app-h,100dvh)*0.42))] rounded-xl bg-canvas border border-canvas-deep shadow-lg overflow-hidden animate-fade-up relative">
+      <div className="px-4 py-2.5 flex items-center gap-2 border-b border-canvas-deep bg-violet-500/10">
         <div className="w-6 h-6 rounded-md bg-violet-100 flex items-center justify-center shrink-0">
           <AlertCircle size={13} className="text-violet-700" />
         </div>
@@ -289,7 +291,7 @@ function AskQuestionCard({ req, onAnswer, processing, position, hydrate }) {
                 disabled={processing}
                 onClick={() => choose(label, multi)}
                 className={`text-left px-3 py-2 rounded-lg border text-[12.5px] transition-colors disabled:opacity-50 ${
-                  sel ? 'border-violet-400 bg-violet-50 text-ink' : 'border-canvas-deep bg-canvas-warm/40 text-ink-soft hover:bg-canvas-deep'
+                  sel ? 'border-violet-400 bg-violet-500/15 text-ink' : 'border-canvas-deep bg-canvas-warm/40 text-ink-soft hover:bg-canvas-deep'
                 }`}
               >
                 <span className="font-medium">{label}</span>
@@ -310,11 +312,11 @@ function AskQuestionCard({ req, onAnswer, processing, position, hydrate }) {
               else if (answerOf(qi)) setQi((i) => i + 1);
             }}
             placeholder={total === 1 ? '或自定义回答,回车提交…' : '或自定义回答…'}
-            className="mt-0.5 text-[12px] font-body px-2.5 py-1.5 rounded-md border border-canvas-deep bg-white text-ink"
+            className="mt-0.5 text-[12px] font-body px-2.5 py-1.5 rounded-md border border-canvas-deep bg-canvas text-ink"
           />
         </div>
       </div>
-      <div className="px-4 py-2.5 flex items-center gap-2 bg-canvas-warm/60 border-t border-canvas-deep">
+      <div className="px-4 py-2.5 flex items-center flex-wrap gap-2 bg-canvas-warm/60 border-t border-canvas-deep">
         <button
           disabled={processing}
           onClick={() => { cancelAutoSubmit(); onAnswer(req, '[用户跳过了此问题，请自行用合理默认值继续]'); }}
@@ -373,8 +375,8 @@ function BoundaryCard({ req, onResolve, onAuthorizeDir, processing, position, hy
   }, [hydrate, position, req, permanent, onResolve, onAuthorizeDir]);
 
   return (
-    <div className="flex flex-col max-h-[42vh] rounded-xl bg-white border border-canvas-deep shadow-lg overflow-hidden animate-fade-up relative">
-      <div className="px-4 py-2.5 flex items-center gap-2 border-b border-canvas-deep bg-rose-50/60">
+    <div className="flex flex-col max-h-[min(42vh,calc(var(--app-h,100dvh)*0.42))] rounded-xl bg-canvas border border-canvas-deep shadow-lg overflow-hidden animate-fade-up relative">
+      <div className="px-4 py-2.5 flex items-center gap-2 border-b border-canvas-deep bg-rose-500/10">
         <div className="w-6 h-6 rounded-md bg-rose-100 flex items-center justify-center shrink-0">
           <ShieldAlert size={13} className="text-rose-700" />
         </div>
@@ -393,11 +395,11 @@ function BoundaryCard({ req, onResolve, onAuthorizeDir, processing, position, hy
       <div className="px-4 py-3 flex-1 min-h-0 overflow-y-auto space-y-2">
         <div>
           <div className="text-[11px] text-ink-faint">越界路径</div>
-          <pre className="font-mono text-[12px] bg-rose-50/50 border border-rose-200 rounded px-2.5 py-2 whitespace-pre-wrap break-all text-ink mt-1">{String(req.blockedPath)}</pre>
+          <pre className="font-mono text-[12px] bg-rose-500/10 border border-rose-400/40 rounded px-2.5 py-2 whitespace-pre-wrap break-all text-ink mt-1">{String(req.blockedPath)}</pre>
         </div>
         {renderInput(req.toolName, req.toolInput)}
       </div>
-      <div className="px-4 py-2.5 flex items-center gap-2 bg-canvas-warm/60 border-t border-canvas-deep">
+      <div className="px-4 py-2.5 flex items-center flex-wrap gap-2 bg-canvas-warm/60 border-t border-canvas-deep">
         <label className="flex items-center gap-1.5 text-[11px] text-ink-muted mr-auto cursor-pointer select-none" title="写入 ~/.claude/settings.json 的 permissions.additionalDirectories，终端 CLI 同样生效">
           <input
             type="checkbox"
@@ -465,8 +467,8 @@ function PermissionCard({ req, onResolve, onWhitelistAndAllow, onAlwaysAllow, on
   }, [hydrate, position, req, remember, dangerous, onResolve, onWhitelistAndAllow, onAlwaysAllow]);
 
   return (
-    <div className="flex flex-col max-h-[42vh] rounded-xl bg-white border border-canvas-deep shadow-lg overflow-hidden animate-fade-up relative">
-      <div className="px-4 py-2.5 flex items-center gap-2 border-b border-canvas-deep bg-amber-50/60">
+    <div className="flex flex-col max-h-[min(42vh,calc(var(--app-h,100dvh)*0.42))] rounded-xl bg-canvas border border-canvas-deep shadow-lg overflow-hidden animate-fade-up relative">
+      <div className="px-4 py-2.5 flex items-center gap-2 border-b border-canvas-deep bg-amber-500/10">
         <div className="w-6 h-6 rounded-md bg-amber-100 flex items-center justify-center shrink-0">
           <AlertCircle size={13} className="text-amber-700" />
         </div>
@@ -495,13 +497,13 @@ function PermissionCard({ req, onResolve, onWhitelistAndAllow, onAlwaysAllow, on
           </button>
         </div>
       )}
-      <div className="px-4 py-2.5 flex items-center gap-2 bg-canvas-warm/60 border-t border-canvas-deep">
+      <div className="px-4 py-2.5 flex items-center flex-wrap gap-2 bg-canvas-warm/60 border-t border-canvas-deep">
         <label className="flex items-center gap-1.5 text-[11px] text-ink-muted mr-auto select-none">
           记住
           <select
             value={remember}
             onChange={(e) => setRemember(e.target.value)}
-            className="text-[11px] border border-canvas-deep rounded px-1 py-0.5 bg-white text-ink"
+            className="text-[11px] border border-canvas-deep rounded px-1 py-0.5 bg-canvas text-ink"
             title={dangerous ? '该命令命中危险命令清单，不提供永久授权' : '“始终允许”写入 ~/.claude/settings.json 的 permissions.allow，终端 CLI 同样生效'}
           >
             <option value="none">仅此次</option>
@@ -534,7 +536,7 @@ function PermissionCard({ req, onResolve, onWhitelistAndAllow, onAlwaysAllow, on
 
 function PendingPill({ req, position }) {
   return (
-    <div className="rounded-lg bg-white/60 border border-canvas-deep px-3 py-1.5 flex items-center gap-2 opacity-70">
+    <div className="rounded-lg bg-canvas/60 border border-canvas-deep px-3 py-1.5 flex items-center gap-2 opacity-70">
       <span className="text-[10px] font-mono text-ink-faint shrink-0">{position + 1}</span>
       <span className="text-[12px] text-ink shrink-0">
         <span className={`px-1.5 py-0.5 rounded font-mono text-[10px] ${toolBadgeClass(req.toolName)}`}>{req.toolName}</span>

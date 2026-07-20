@@ -77,7 +77,7 @@ export function ProcessPanel() {
                   <span className="text-xs font-mono text-ink-soft">
                     PID {proc.pid || '?'}
                   </span>
-                  <span className={`text-[10px] px-1.5 py-0.5 rounded ${proc.alive ? 'bg-green-50 text-success' : 'bg-canvas-deep text-ink-faint'}`}>
+                  <span className={`text-[10px] px-1.5 py-0.5 rounded ${proc.alive ? 'bg-success/15 text-success' : 'bg-canvas-deep text-ink-faint'}`}>
                     {proc.alive ? '运行中' : '已结束'}
                   </span>
                   {proc.alive && proc.pid && (
@@ -106,7 +106,7 @@ export function ProcessPanel() {
                 <div className="flex flex-wrap gap-2 text-[10px] text-ink-faint font-mono mt-1.5">
                   {proc.model && <span className="bg-canvas-warm px-1.5 py-0.5 rounded">{proc.model}</span>}
                   {proc.permissionMode && proc.permissionMode !== 'default' && (
-                    <span className="bg-amber-50 text-amber-700 px-1.5 py-0.5 rounded">{proc.permissionMode}</span>
+                    <span className="bg-warning/15 text-warning px-1.5 py-0.5 rounded">{proc.permissionMode}</span>
                   )}
                   {proc.kind && proc.kind !== 'gui-chat' && (
                     <span className="bg-canvas-warm px-1.5 py-0.5 rounded">{proc.kind}</span>

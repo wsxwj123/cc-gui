@@ -105,7 +105,12 @@ useStore.getState().removePendingPermission('id-9');
 {
   calls.length = 0;
   const pendingReleases = [];
-  fetchImpl = () => new Promise((r) => { pendingReleases.push(() => r({ ok: true, json: async () => ({ ok: true }) })); });
+  // 审计批A2 后 setPermissionMode 还会 fire-and-forget PUT /api/prefs/session-sync
+  // (偏好同步,失败静默、与切档 POST 互不依赖)—— 只悬挂 /chat/permission-mode,
+  // 其余请求即回 200,保持 ⑨ 只考察切档串行化本身。
+  fetchImpl = (url) => (String(url).includes('/chat/permission-mode')
+    ? new Promise((r) => { pendingReleases.push(() => r({ ok: true, json: async () => ({ ok: true }) })); })
+    : Promise.resolve({ ok: true, json: async () => ({ ok: true }) }));
   const modeCalls = () => calls.filter((c) => String(c.url).includes('/chat/permission-mode'));
   useStore.getState().setPermissionMode('bypassPermissions', 'sid-9');
   await new Promise((r) => setTimeout(r, 20)); // 首个 POST 发出并悬挂

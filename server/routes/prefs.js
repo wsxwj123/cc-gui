@@ -3,6 +3,7 @@ import { readFile, writeFile, mkdir, rename } from 'fs/promises';
 import { join, dirname } from 'path';
 import { homedir } from 'os';
 import { broadcast } from '../broadcast.js';
+import { applySessionSyncPut, normalizeSessionSync, SYNC_KINDS } from '../session-sync.js';
 
 // Server-side preferences that must be SHARED across devices (phone + Mac).
 // Today this is just the hidden-projects list: it used to live in each
@@ -58,11 +59,23 @@ export async function removeSessionFromPrefs(sessionId) {
       p.sessions = p.sessions.filter((id) => id !== sessionId);
       pinnedChanged = true;
     }
-    if (!changed.context1m && !changed.autoTitles && !changed.customTitles && !pinnedChanged) return;
+    // 审计批A2:会话级同步偏好(权限档/模型 pin/力度 pin)随会话删除一并 GC。
+    let syncChanged = false;
+    if (prefs.sessionSync && typeof prefs.sessionSync === 'object') {
+      for (const mapKey of Object.values(SYNC_KINDS)) {
+        const m = prefs.sessionSync[mapKey];
+        if (m && typeof m === 'object' && sessionId in m) {
+          delete m[sessionId];
+          syncChanged = true;
+        }
+      }
+    }
+    if (!changed.context1m && !changed.autoTitles && !changed.customTitles && !pinnedChanged && !syncChanged) return;
     await savePrefs(prefs);
     if (changed.context1m) broadcast({ type: 'context-1m', sessions: prefs.context1m });
     if (changed.autoTitles) broadcast({ type: 'auto-titles', titles: prefs.autoTitles });
     if (changed.customTitles) broadcast({ type: 'custom-titles', titles: prefs.customTitles });
+    if (syncChanged) broadcast({ type: 'session-sync', ...normalizeSessionSync(prefs.sessionSync) });
   });
 }
 
@@ -299,6 +312,39 @@ router.put('/prefs/context-1m', async (req, res) => {
     res.json({ ok: true, sessions: map });
   } catch (e) {
     res.status(500).json({ error: '写入 1M 标记失败：' + e.message });
+  }
+});
+
+// 审计批A2:会话级偏好跨设备同步 —— 三张 per-sessionKey map(权限档/模型 pin/
+// 力度 pin)。仿 custom-titles 模式:GET 水合、PUT 单键合并(后写胜出)+ 全量广播。
+// 只是「下次 spawn 用哪档」的偏好层,不碰 chat.js 的 slot.guiMode 运行时链路。
+// GET /api/prefs/session-sync → { permissionModes, modelPins, effortPins }
+router.get('/prefs/session-sync', async (_req, res) => {
+  const prefs = await loadPrefs();
+  res.json(normalizeSessionSync(prefs.sessionSync));
+});
+
+// PUT /api/prefs/session-sync
+//   { kind:'permissionMode'|'modelPin'|'effortPin', sessionId, value } 单键合并(value=null 删除)
+//   { clear:'modelPins' } 清空整表(切 provider 与前端 clearModelOverrides 对齐)
+// 幂等:同 body 重放结果一致;无变化时不写盘不广播。
+router.put('/prefs/session-sync', async (req, res) => {
+  try {
+    const out = await withPrefsQueue(async () => {
+      const prefs = await loadPrefs();
+      const r = applySessionSyncPut(prefs.sessionSync, req.body);
+      if (r.error) return r;
+      if (r.changed) {
+        prefs.sessionSync = r.maps;
+        await savePrefs(prefs);
+      }
+      return r;
+    });
+    if (out.error) return res.status(400).json({ error: out.error });
+    if (out.changed) broadcast({ type: 'session-sync', ...out.maps });
+    res.json({ ok: true, ...out.maps });
+  } catch (e) {
+    res.status(500).json({ error: '写入会话偏好失败：' + e.message });
   }
 });
 

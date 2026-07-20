@@ -7,7 +7,7 @@ import { ChevronDown, Check, X, Settings, Server, Loader2, Smartphone } from 'lu
 import { useStore } from '../stores/sessionStore.js';
 import { ModelBadge } from './ModelBadge.jsx';
 import { confirmDialog } from '../utils/confirmDialog.jsx';
-import { mergeProviderLists, SOURCE_BADGE } from '../utils/providerList.js';
+import { mergeProviderLists, rowIsCurrent, SOURCE_BADGE } from '../utils/providerList.js';
 
 const EMPTY_ARRAY = Object.freeze([]);
 
@@ -65,6 +65,15 @@ export function AnchoredPopover({ anchorRef, open, onRequestClose, drop = 'down'
     const ro = new ResizeObserver(() => setBump((n) => n + 1));
     ro.observe(elRef.current);
     return () => ro.disconnect();
+  }, [open]);
+
+  // 审计批挂账:窗口 resize(含旋屏/软键盘改变视口)→ 锚点矩形已变,重量重摆;
+  // 原来只在打开瞬间定位,resize 后弹层悬在旧坐标上错位/悬空。
+  useEffect(() => {
+    if (!open) return;
+    const onResize = () => setBump((n) => n + 1);
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
   }, [open]);
 
   useEffect(() => {
@@ -136,7 +145,7 @@ export function RemoteControlButton({ session }) {
           : '在手机上同账号控制此会话（用 Claude App 接管，需 Claude 账号、非 deepseek/mimo）')
         : '先发送一条消息创建会话，再开启远程控制'}
       className={`flex items-center gap-1 px-2 py-1 rounded-md transition-colors text-[11px] font-body ${
-        active ? 'bg-green-50 text-green-700' : 'hover:bg-canvas-deep text-ink-muted'
+        active ? 'bg-success/15 text-success' : 'hover:bg-canvas-deep text-ink-muted'
       } disabled:opacity-40 disabled:cursor-not-allowed`}
     >
       {busy ? <Loader2 size={13} className="animate-spin" /> : <Smartphone size={13} />}
@@ -175,7 +184,8 @@ export function ProviderSwitchList({ onSwitched }) {
     return () => window.removeEventListener('cgui:provider-change', onCh);
   }, []);
 
-  const isCur = (p) => (activeId != null ? p.id === activeId : p.isCurrent);
+  // 审计批挂账:isCur 兼配 dupOf 里的 id(激活的是被合并的导入项时保留行照常高亮)。
+  const isCur = (p) => rowIsCurrent(p, activeId);
 
   const switchTo = async (id, model) => {
     setSwitching(true);
@@ -198,13 +208,15 @@ export function ProviderSwitchList({ onSwitched }) {
     setSwitching(false);
   };
 
+  // 修正批#7:「管理 Provider」不再跳设置(Provider tab 已删),改开独立管理弹窗
+  // (App.jsx ProviderManagerModal 监听此事件)。
   const openManager = () => {
     onSwitched?.();
-    window.dispatchEvent(new CustomEvent('cgui:open-settings', { detail: { section: 'set-provider-manage' } }));
+    window.dispatchEvent(new CustomEvent('cgui:open-provider-manager'));
   };
 
-  const rows = mergeProviderLists({ providers, openaiProviders, customProviders })
-    .filter((p) => !hiddenProviders.has(p.id));
+  // 审计批挂账:hidden 传入选择器,在合并前过滤 —— 隐藏的导入项不参与吞并/不进「含导入」徽章。
+  const rows = mergeProviderLists({ providers, openaiProviders, customProviders, hidden: hiddenProviders });
 
   return (
     <div>
@@ -252,7 +264,7 @@ export function ProviderSwitcher({ hideLabel = false, tourAnchor = false, respon
     <div ref={wrapRef} className="relative" data-tour={tourAnchor ? 'provider-selector' : undefined}>
       <button onClick={() => setOpen(!open)}
         className="flex items-center gap-1 px-2 py-1 rounded-md hover:bg-canvas-deep transition-colors"
-        title={`Provider: ${label} — 点击切换;增删改/测试在 通用 → Provider`}>
+        title={`Provider: ${label} — 点击切换;增删改/测试在弹层底部「管理 Provider」`}>
         <Server size={12} className="text-ink-muted shrink-0" />
         {!hideLabel && <span className="text-[11px] font-body text-ink-muted whitespace-nowrap max-w-[96px] truncate">{label}</span>}
         <ChevronDown size={10} className="text-ink-faint" />
@@ -399,9 +411,13 @@ export function ModelSelector({ compact = false, permKey = null, tourAnchor = fa
         )}
         <ChevronDown size={10} className="text-ink-faint" />
       </button>
+      {/* 审计批挂账:sticky 头改壳层 flex 列三段 —— AnchoredPopover 带 animate-glass-rise
+          (fill:both 收尾残留 transform),WKWebView/WebView2 里 transform 滚动容器内的
+          sticky top-0 失效(长列表滚动时搜索/自定义输入随内容滚走)。头 shrink-0 固定,
+          列表段独立滚动。 */}
       <AnchoredPopover anchorRef={wrapRef} open={open} onRequestClose={() => setOpen(false)} drop={drop}
-        className="w-80 max-w-[calc(var(--app-w,100vw)-1.5rem)] py-1 max-h-[min(60vh,calc(var(--app-h,100dvh)-6rem))] overflow-y-auto">
-          <div className="px-3 py-2 sticky top-0 bg-canvas border-b border-canvas-deep">
+        className="w-80 max-w-[calc(var(--app-w,100vw)-1.5rem)] py-1 max-h-[min(60vh,calc(var(--app-h,100dvh)-6rem))] flex flex-col overflow-hidden">
+          <div className="px-3 py-2 shrink-0 bg-canvas border-b border-canvas-deep">
             <div className="text-[10px] text-ink-faint uppercase tracking-wider font-body flex items-center justify-between">
               <span>选择模型</span>
               {provider && provider !== 'Anthropic' && <span className="text-ink-ghost normal-case">{provider}</span>}
@@ -409,7 +425,7 @@ export function ModelSelector({ compact = false, permKey = null, tourAnchor = fa
             <p className="text-[10px] text-ink-faint font-body mt-1 leading-snug">
               <b>alias</b> = CLI 接收 <code className="font-mono">sonnet/opus/haiku</code> 简称，由 CLI 解析到当前 tier 最新模型。
               {provider && provider !== 'Anthropic' && (
-                <span className="block text-amber-700 mt-0.5">
+                <span className="block text-warning mt-0.5">
                   ⚠ 当前 provider 是 <b>{provider}</b>，alias 可能被该 provider 重定向到其默认模型。建议用具体模型 ID。
                 </span>
               )}
@@ -435,6 +451,7 @@ export function ModelSelector({ compact = false, permKey = null, tourAnchor = fa
             </div>
             {fetchNote && <div className="text-[10px] text-ink-faint font-body mt-1">{fetchNote}</div>}
           </div>
+          <div className="flex-1 min-h-0 overflow-y-auto">
           {/* 1M context toggle — appends [1m] to the active model id.
               Claude Code 通用约定:Anthropic / MiMo 等兼容 provider 都用 [1m] 启用 1M。 */}
           <button onClick={toggle1m}
@@ -460,7 +477,7 @@ export function ModelSelector({ compact = false, permKey = null, tourAnchor = fa
                   <div className="text-xs font-medium text-ink font-body flex items-center gap-1.5">
                     {m.name}
                     {isAlias && (
-                      <span className="text-[8.5px] px-1 py-px bg-amber-50 text-amber-700 rounded font-mono"
+                      <span className="text-[8.5px] px-1 py-px bg-warning/15 text-warning rounded font-mono"
                         title="CLI 解析的简称，实际模型由 CLI 决定">
                         alias
                       </span>
@@ -509,7 +526,8 @@ export function ModelSelector({ compact = false, permKey = null, tourAnchor = fa
               {(currentModel === m.id || currentModel === `${m.id}[1m]`) && <Check size={12} className="text-accent shrink-0" />}
             </button>
           ))}
-          {/* 修正批#5:原底部「自定义模型 ID」块已上移到 sticky 头(用户在长列表下找不到)。 */}
+          {/* 修正批#5:原底部「自定义模型 ID」块已上移到固定头(用户在长列表下找不到)。 */}
+          </div>
       </AnchoredPopover>
     </div>
   );

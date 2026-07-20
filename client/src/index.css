@@ -1429,8 +1429,11 @@ html { --content-max: clamp(768px, calc(var(--app-w, 100vw) * 0.7), 1120px); }
   .mobile-drawer {
     position: fixed;
     top: 0;
-    bottom: 0;
     left: 0;
+    /* 审计批B3:高度改 zoom 不变量并减软键盘高(--kb)。原 top/bottom:0 在 Android
+       Chromium 软键盘弹出时不缩 layout viewport,抽屉底部(会话列表搜索框等)被
+       键盘盖住;zoom>1 时 bottom:0 与 vh 类内容的坐标系也不一致。 */
+    height: calc(var(--app-h, 100dvh) - var(--kb, 0px));
     width: min(calc(var(--app-w, 100vw) * 0.86), 360px);
     padding-top: env(safe-area-inset-top);
     padding-bottom: env(safe-area-inset-bottom);

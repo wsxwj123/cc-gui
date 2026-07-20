@@ -31,8 +31,8 @@ import ChatSearch from './components/ChatSearch.jsx';
 import { confirmDialog } from './utils/confirmDialog.jsx';
 import { ChatInput, EffortSelector, EFFORT_LEVELS, markAutoUnavailable } from './components/ChatInput.jsx';
 import { ModelBadge, ProviderAvatar } from './components/ModelBadge.jsx';
-import { RemoteControlButton, ProviderSwitcher, ModelSelector, ProviderSourceBadge } from './components/SessionSelectors.jsx';
-import { mergeProviderLists } from './utils/providerList.js';
+import { RemoteControlButton, ProviderSwitcher, ModelSelector, ProviderSourceBadge, AnchoredPopover } from './components/SessionSelectors.jsx';
+import { mergeProviderLists, rowIsCurrent } from './utils/providerList.js';
 import { UsagePanel } from './components/UsagePanel.jsx';
 import { ProcessPanel } from './components/ProcessPanel.jsx';
 import { SettingsPanel, ChatBackgroundCard } from './components/SettingsPanel.jsx';
@@ -648,12 +648,8 @@ function finalizeSessionAgents(sessionId, tnStatus = 'stopped') {
   }
 }
 
-// P1.4:设置面板宿主 —— 把 App.jsx 内定义的 ProviderManager(增删改/测试/隐藏/导入)与
-// ThemeAppearanceBody(主题/字号/动画,与顶栏弹层同源)作为 slot 传入 SettingsPanel,
-// 避免 SettingsPanel.jsx 反向 import App.jsx(循环 import/TDZ 风险)。
-function SettingsPanelHost() {
-  return <SettingsPanel providerSlot={<ProviderManager />} />;
-}
+// 修正批#7:SettingsPanelHost 已删——ProviderManager 迁出设置(providerSlot 注入不再
+// 需要),PANEL_MAP 直用 SettingsPanel。
 
 // Top-right panels — each key auto-wires a header icon (desktop + mobile menu)
 // and its RightPanel body. Adding a key here is all the wiring needed.
@@ -668,7 +664,7 @@ const PANEL_MAP = {
   skills: { label: 'Skill 市场（导入官方技能）', icon: Sparkles, component: SkillsPanel },
   memory: { label: 'CLAUDE.md 指令', icon: BookText, component: MemoryPanel },
   // 文案改名(用户指定,仅显示名,id/组件/事件不动):坞入口叫「设置」,本面板入口叫「通用」。
-  settings: { label: '通用', icon: Settings, component: SettingsPanelHost },
+  settings: { label: '通用', icon: Settings, component: SettingsPanel },
 };
 
 // useResizable + Splitter live in hooks/useResizable.js — kept aliased for
@@ -823,7 +819,7 @@ function useIsMobile() {
   return isMobile;
 }
 
-function MainLayout({ sidebarCollapsed, selectedProject, rightPanel, setRightPanel, isMobile }) {
+function MainLayout({ sidebarCollapsed, selectedProject, rightPanel, setRightPanel, isMobile, updateNotice = null }) {
   const [sidebarWidth, onSidebarDrag] = useResizable({
     initial: 268, min: 200, max: 480, axis: 'x', storageKey: 'cgui-sidebar-width',
   });
@@ -855,8 +851,10 @@ function MainLayout({ sidebarCollapsed, selectedProject, rightPanel, setRightPan
         {!sidebarCollapsed && (
           <>
             <div className="fixed inset-0 z-40 bg-black/40 animate-fade-in" onClick={toggleSidebar} />
-            <aside className="mobile-drawer fixed inset-y-0 left-0 z-50 w-[86vw] max-w-[360px] glass-thick flex flex-col overflow-hidden animate-glass-rise">
-              <MobileMenu setRightPanel={setRightPanel} onClose={toggleSidebar} />
+            {/* 审计批B3:几何(定位/宽高)统一由 .mobile-drawer CSS 负责(zoom 不变量+减 --kb),
+                删掉与之打架的 inset-y-0 / w-[86vw](vh/vw 不折算 zoom 的旧写法)。 */}
+            <aside className="mobile-drawer z-50 glass-thick flex flex-col overflow-hidden animate-glass-rise">
+              <MobileMenu setRightPanel={setRightPanel} onClose={toggleSidebar} updateNotice={updateNotice} />
             </aside>
           </>
         )}
@@ -1545,7 +1543,9 @@ function ProjectList() {
           </div>
         )}
       </div>
-      {addDialogOpen && (
+      {/* 审计批E3:portal 到 body —— 手机抽屉/侧栏祖先带 transform 时 fixed 遮罩被困在
+          抽屉内(弹窗被裁、遮罩盖不满),portal 后恒真全屏;state 仍在 ProjectList 本组件。 */}
+      {addDialogOpen && createPortal(
         <div className="fixed inset-0 z-[80] bg-black/25 flex items-end md:items-center justify-center p-3">
           <div className="w-full max-w-md rounded-2xl bg-canvas border border-canvas-deep shadow-2xl overflow-hidden">
             <div className="flex items-center justify-between px-4 py-3 border-b border-canvas-deep">
@@ -1580,7 +1580,8 @@ function ProjectList() {
               </div>
             </form>
           </div>
-        </div>
+        </div>,
+        document.body,
       )}
     </div>
   );
@@ -2034,6 +2035,10 @@ function SessionList() {
   // "基于分支"下拉展开态。原生 <select> 的弹出菜单由 OS 渲染、无法限高,本地分支
   // 几百个时列表过长 → 换自绘弹层(限高+内部滚动,不截断数据)。
   const [wtBaseOpen, setWtBaseOpen] = useState(false);
+  // 审计批E4:基点下拉换 AnchoredPopover(body portal)。原自绘 absolute 弹层配
+  // fixed inset-0 遮罩,遮罩被模态卡 glassRise 残留 transform 困在卡内 → 点卡外
+  // 关不掉下拉(点到的是模态遮罩直接整窗关闭)。
+  const wtBaseBtnRef = useRef(null);
   // Esc 关闭该下拉:捕获阶段拦下 + stopPropagation,阻断冒泡阶段的「双击 Esc 停止流」
   // 监听(App 挂在 window 冒泡阶段),避免关弹层的 Esc 被计入停止连击。
   // 与 FileExplorerPanel 右键菜单的 Esc 同款口径。
@@ -2467,7 +2472,7 @@ function SessionList() {
           onClick={() => setWorktreeOpen(false)}
         >
           <div
-            className="glass-popover w-[480px] max-w-[calc(var(--app-w,100vw)-1.5rem)] max-h-[80vh] flex flex-col py-1 animate-glass-rise"
+            className="glass-popover w-[480px] max-w-[calc(var(--app-w,100vw)-1.5rem)] max-h-[min(80vh,calc(var(--app-h,100dvh)-2rem))] flex flex-col py-1 animate-glass-rise"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="px-4 py-2.5 text-[11px] text-ink-faint uppercase tracking-wider font-body flex items-center justify-between border-b border-canvas-deep shrink-0">
@@ -2547,7 +2552,7 @@ function SessionList() {
                             type="button"
                             onClick={(e) => { e.stopPropagation(); toggleWtDirty(t); }}
                             title="未提交的文件,点击勾选提交"
-                            className={`text-[9px] px-1.5 py-0.5 rounded font-mono transition-colors ${wtExpand?.path === t.path && wtExpand.mode === 'dirty' ? 'bg-accent/20 text-accent' : 'bg-amber-50 text-amber-700 hover:bg-amber-100'}`}
+                            className={`text-[9px] px-1.5 py-0.5 rounded font-mono transition-colors ${wtExpand?.path === t.path && wtExpand.mode === 'dirty' ? 'bg-accent/20 text-accent' : 'bg-warning/15 text-warning hover:bg-warning/25'}`}
                           >
                             {t.dirtyFileCount} 未提交文件
                           </button>
@@ -2698,7 +2703,7 @@ function SessionList() {
                 />
                 {/* 可选基点:默认当前 HEAD;选了分支则新分支从它出发(复用旧分支时无效) */}
                 {worktreeBranches.length > 0 && (
-                  <div className="relative shrink-0 max-w-[38%]">
+                  <div ref={wtBaseBtnRef} className="relative shrink-0 max-w-[38%]">
                     <button
                       type="button"
                       onClick={() => setWtBaseOpen((v) => !v)}
@@ -2708,31 +2713,29 @@ function SessionList() {
                       <span className="truncate flex-1 text-left">{newWorktreeBase ? `起点：${newWorktreeBase}` : '起点：当前分支'}</span>
                       <ChevronDown size={11} className={`shrink-0 text-ink-faint transition-transform ${wtBaseOpen ? 'rotate-180' : ''}`} />
                     </button>
-                    {wtBaseOpen && (
-                      <>
-                        <div className="fixed inset-0 z-10" onClick={() => setWtBaseOpen(false)} />
-                        {/* 本地分支可达数百条:限高 + 内部滚动,并截断到前 50 条(超长仓库
-                            几百条全渲染没有检索价值;需要更靠后的分支可在上方输入框直接填名字)。 */}
-                        <div className="absolute bottom-full mb-1 right-0 z-20 w-60 max-w-[70vw] glass-popover py-1 max-h-56 overflow-y-auto">
-                          {['', ...worktreeBranches.slice(0, 50)].map((b) => (
-                            <button
-                              key={b || '(HEAD)'}
-                              type="button"
-                              onClick={() => { setNewWorktreeBase(b); setWtBaseOpen(false); }}
-                              className={`w-full text-left px-2.5 py-1 text-[11px] font-mono truncate hover:bg-canvas-warm ${newWorktreeBase === b ? 'text-accent' : 'text-ink-soft'}`}
-                            >
-                              {b ? b : '当前分支（默认）'}
-                            </button>
-                          ))}
-                          {worktreeBranches.length > 50 && (
-                            <button type="button" disabled
-                              className="w-full text-left px-2.5 py-1 text-[10px] font-body text-ink-faint cursor-default">
-                              (仅显示前 50 条,共 {worktreeBranches.length} 条)
-                            </button>
-                          )}
-                        </div>
-                      </>
-                    )}
+                    {/* 审计批E4:AnchoredPopover(body portal + 越界翻转/夹紧 + 点外/Esc 关闭)。
+                        本地分支可达数百条:限高 + 内部滚动,截断到前 50 条(需要更靠后的
+                        分支可在左侧输入框直接填名字)。 */}
+                    <AnchoredPopover anchorRef={wtBaseBtnRef} open={wtBaseOpen} onRequestClose={() => setWtBaseOpen(false)}
+                      drop="up" align="right"
+                      className="w-60 max-w-[calc(var(--app-w,100vw)-1.5rem)] py-1 max-h-56 overflow-y-auto">
+                      {['', ...worktreeBranches.slice(0, 50)].map((b) => (
+                        <button
+                          key={b || '(HEAD)'}
+                          type="button"
+                          onClick={() => { setNewWorktreeBase(b); setWtBaseOpen(false); }}
+                          className={`w-full text-left px-2.5 py-1 text-[11px] font-mono truncate hover:bg-canvas-warm ${newWorktreeBase === b ? 'text-accent' : 'text-ink-soft'}`}
+                        >
+                          {b ? b : '当前分支（默认）'}
+                        </button>
+                      ))}
+                      {worktreeBranches.length > 50 && (
+                        <button type="button" disabled
+                          className="w-full text-left px-2.5 py-1 text-[10px] font-body text-ink-faint cursor-default">
+                          (仅显示前 50 条,共 {worktreeBranches.length} 条)
+                        </button>
+                      )}
+                    </AnchoredPopover>
                   </div>
                 )}
                 <button
@@ -3437,8 +3440,15 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         closePaneGuarded(tabIndex); // 正在运行/等授权时先确认(见 closePaneGuarded)
       }
     };
+    // 审计批C1:手机无 Cmd+F,MobileMenu「会话内检索」行派发此事件;仅活动窗格响应
+    // (与 Cmd+F 同门控),桌面不受影响。
+    const onOpenSearch = () => setSearchOpen(true);
     window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
+    window.addEventListener('cgui:open-search', onOpenSearch);
+    return () => {
+      window.removeEventListener('keydown', onKey);
+      window.removeEventListener('cgui:open-search', onOpenSearch);
+    };
   }, [paneIsActive, tabIndex]);
   const setSelectedSession = useCallback((s) => {
     useStore.getState().setPaneSession(tabIndex, s);
@@ -6845,7 +6855,8 @@ function ProviderManager() {
   // "添加 Provider" form, so a fresh machine (no CC Switch, nothing added yet)
   // can set up its first provider.
 
-  const isCur = (p) => (activeId != null ? p.id === activeId : p.isCurrent);
+  // 审计批挂账:isCur 兼配 dupOf 里的 id(raw 数组无 dupOf 时退化为原判定)。
+  const isCur = (p) => rowIsCurrent(p, activeId);
   const cur = providers.find(isCur) || openaiProviders.find(isCur) || customProviders.find(isCur);
   // providerHint is lowercase server-side (pricing/compare logic depends on it),
   // so capitalize only for display.
@@ -6896,8 +6907,9 @@ function ProviderManager() {
               官方置顶、其余按名称序;来源(导入/自定义/代理)降为行内小徽章,不再分组。
               行内操作按来源:cc-switch/openai 导入项=隐藏;自定义=编辑/删除(+批量)。 */}
           {(() => {
-            const rows = mergeProviderLists({ providers, openaiProviders, customProviders })
-              .filter((p) => p.source === 'custom' || showHidden || !hiddenProviders.has(p.id));
+            // 审计批挂账:非 showHidden 时 hidden 传入选择器在合并前过滤(隐藏项不参与
+            // 吞并/不进「含导入」徽章);showHidden 时不过滤,隐藏行以半透明展示可恢复。
+            const rows = mergeProviderLists({ providers, openaiProviders, customProviders, hidden: showHidden ? null : hiddenProviders });
             const hasCustom = customProviders.length > 0;
             return (<>
               <div className="px-3 pt-2 pb-1 border-t border-canvas-deep flex items-center gap-1">
@@ -6973,6 +6985,53 @@ function ProviderManager() {
               </button>
             </div>
           )}
+    </div>
+  );
+}
+
+// 修正批#7:Provider 管理独立弹窗(桌面)。设置→Provider tab 已删,顶栏 Provider 切换
+// 卡片底部「管理 Provider」经 cgui:open-provider-manager 事件打开本弹窗。ProviderManager
+// 组件原样承载(零功能删减);手机端不走这里(合并入口页内推进到同一组件的全屏页)。
+// 布局照 ShortcutsPanel:flex 列(头 shrink-0 / 正文 flex-1 min-h-0 overflow-y-auto),
+// 不用 sticky(glass 动画残留 transform 会让 sticky 哑,memory 实证);Esc/点外关闭,
+// 表单有未保存输入时先 confirmDialog(与原设置面板离开守卫同语义)。
+function ProviderManagerModal({ open, onClose }) {
+  const tryClose = useCallback(async () => {
+    if (window.__cguiProviderFormDirty) {
+      const ok = await confirmDialog('Provider 表单有未保存的输入，关闭将丢弃。仍要关闭？', { danger: true, confirmText: '丢弃并关闭' });
+      if (!ok) return;
+      window.__cguiProviderFormDirty = false;
+    }
+    onClose();
+  }, [onClose]);
+  // Esc 捕获阶段拦截:阻断冒泡的「双击 Esc 停止流」监听(与 ShortcutsPanel 同手法)。
+  useEffect(() => {
+    if (!open) return;
+    const onEsc = (e) => {
+      if (e.key !== 'Escape') return;
+      e.stopPropagation();
+      tryClose();
+    };
+    window.addEventListener('keydown', onEsc, true);
+    return () => window.removeEventListener('keydown', onEsc, true);
+  }, [open, tryClose]);
+  if (!open) return null;
+  return (
+    <div className="fixed inset-0 z-[210] flex items-center justify-center bg-black/40 backdrop-blur-sm animate-fade-in" onClick={tryClose}>
+      <div
+        className="glass-popover w-[720px] max-w-[calc(var(--app-w,100vw)-1.5rem)] max-h-[min(85vh,calc(var(--app-h,100dvh)-3rem))] rounded-2xl shadow-2xl animate-glass-rise overflow-hidden flex flex-col"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between px-5 py-3 border-b border-canvas-deep shrink-0">
+          <div className="text-[14px] font-display font-semibold text-ink">Provider 管理<span className="text-[11px] font-body font-normal text-ink-faint ml-2">增删改 / 测试 / 隐藏 / 导入 · 点行即切换</span></div>
+          <button onClick={tryClose} className="p-1 rounded hover:bg-canvas-warm text-ink-faint hover:text-ink" title="关闭">
+            <X size={15} />
+          </button>
+        </div>
+        <div className="flex-1 min-h-0 overflow-y-auto px-4 py-3">
+          <ProviderManager />
+        </div>
+      </div>
     </div>
   );
 }
@@ -7067,7 +7126,7 @@ function ContextBreakdownButton({ contextTokens, contextWindow, contextPct, fmtT
   };
 
   const tone = contextPct >= 80 ? 'text-error bg-error-subtle'
-    : contextPct >= 60 ? 'text-amber-700 bg-amber-50'
+    : contextPct >= 60 ? 'text-warning bg-warning/15'
     : 'text-ink-faint hover:bg-black/5';
 
   const cats = data?.categories || [];
@@ -7106,7 +7165,7 @@ function ContextBreakdownButton({ contextTokens, contextWindow, contextPct, fmtT
           {info.providerHintLabel && (
             <div className="flex items-center gap-2 text-[11px] font-body">
               <span className="text-ink-faint w-14 shrink-0">Provider</span>
-              <span className="text-[10px] text-amber-700 bg-amber-50 border border-amber-200 rounded px-1.5 py-px font-mono"
+              <span className="text-[10px] text-warning bg-warning/15 border border-warning/30 rounded px-1.5 py-px font-mono"
                 title={info.providerBaseUrl ? `cc switch 路由：${info.providerBaseUrl}` : undefined}>
                 {info.providerHintLabel}
               </span>
@@ -7243,7 +7302,18 @@ function LoginScreen({ onSuccess }) {
     finally { setBusy(false); }
   };
   return (
-    <div className="h-[100dvh] w-screen flex items-center justify-center bg-canvas px-6">
+    // 手机批#1:100dvh/w-screen 在真机不可靠 —— ①dvh 不折算 html zoom(字体缩放时
+    // 高度失真);②iOS 软键盘不缩 layout viewport,autoFocus 弹键盘后输入框被盖,
+    // 视觉上"没居中"。改用与 mobile root 相同的 zoom 不变量 px(--app-w/--app-h,
+    // 均在 auth 门控前的 effect 里就已写入)并减去 --kb(软键盘高),始终真居中。
+    <div
+      className="flex items-center justify-center bg-canvas px-6"
+      style={{
+        position: 'fixed', left: 0, top: 0,
+        width: 'var(--app-w, 100vw)',
+        height: 'calc(var(--app-h, 100dvh) - var(--kb, 0px))',
+      }}
+    >
       <form onSubmit={submit} className="w-full max-w-[320px] flex flex-col items-center gap-5">
         <div className="flex items-center gap-2">
           <span className="text-accent text-2xl leading-none font-mono">✻</span>
@@ -7273,12 +7343,14 @@ function LoginScreen({ onSuccess }) {
 // ONLY the current session; this panel slides in from the left and drills into
 // sub-pages (会话/模型/外观/…) one screen at a time, so a control's options never
 // overflow the viewport the way the desktop popovers (w-80 etc.) did.
-function MobileMenuRow({ icon: Icon, label, value, onClick, danger = false, chevron = true }) {
+function MobileMenuRow({ icon: Icon, label, value, onClick, danger = false, chevron = true, dot = false }) {
   return (
     <button onClick={onClick}
       className="w-full flex items-center gap-3 px-4 py-3 text-left hover:bg-canvas-warm active:bg-canvas-deep/30 transition-colors">
       {Icon && <Icon size={18} strokeWidth={1.75} className={danger ? 'text-error' : 'text-ink-muted'} />}
       <span className={`flex-1 text-[14px] font-body truncate ${danger ? 'text-error' : 'text-ink'}`}>{label}</span>
+      {/* 审计批A5:红点提醒(有可用更新等)。桌面 PanelDock 同语义。 */}
+      {dot && <span className="w-1.5 h-1.5 rounded-full bg-red-500 shrink-0 animate-pulse" />}
       {value != null && value !== '' && (
         <span className="text-[12px] text-ink-faint font-body truncate max-w-[44%] text-right shrink-0">{value}</span>
       )}
@@ -7311,17 +7383,9 @@ function MobileModelPage({ permKey }) {
   const [fetching, setFetching] = useState(false);
   const [query, setQuery] = useState('');
   // The desktop ModelSelector normally fetches the model catalogue; it isn't
-  // mounted on phones, so populate the global default + available list here.
-  useEffect(() => {
-    fetch('/api/model').then((r) => r.json()).then((d) => {
-      if (d.model) useStore.setState({ currentModel: d.model });
-      if (d.available) useStore.setState({ availableModels: d.available });
-      try {
-        if (!localStorage.getItem('cgui-effort') && d.defaultEffort) useStore.setState({ effort: d.defaultEffort });
-        useStore.setState({ defaultEffort: d.defaultEffort || '' });
-      } catch {}
-    }).catch(() => {});
-  }, []);
+  // mounted on phones. 手机批#3:改用 store.fetchModel(同一份 /api/model 落库逻辑,
+  // 含 providerName/defaultEffort),不再内联重复一份。
+  useEffect(() => { useStore.getState().fetchModel(); }, []);
   const has1m = /\[1m\]/i.test(currentModel || '');
   const pick = (id) => {
     const base = id.replace(/\[1m\]/i, '');
@@ -7434,19 +7498,31 @@ function MobileModelPage({ permKey }) {
 
 function MobileEffortPage({ permKey }) {
   const effort = useStore((s) => (permKey && permKey in (s.effortBySession || {})) ? s.effortBySession[permKey] : s.effort);
+  // 审计批C3:判据/文案与桌面 EffortSelector 对齐 —— openai 协议下映射为
+  // reasoning_effort 照常可选;「默认」档 desc 按真实落点显示(设了全局跟随全局)。
+  const openAIProtocol = useStore((s) => (s.currentProvider?.protocol || 'anthropic') === 'openai');
+  const defaultEffort = useStore((s) => s.defaultEffort || '');
   return (
     <div className="py-1">
-      <div className="px-4 pt-2 pb-1 text-[11px] text-ink-faint font-body">作用于当前会话(每个会话独立记忆、互不影响)</div>
-      {EFFORT_LEVELS.map((e) => (
+      <div className="px-4 pt-2 pb-1 text-[11px] text-ink-faint font-body">
+        {openAIProtocol ? '推理力度 (reasoning_effort,不支持的端点自动降级) · ' : ''}作用于当前会话(每个会话独立记忆、互不影响)
+      </div>
+      {EFFORT_LEVELS.map((e) => {
+        const desc = e.id !== '' ? e.desc
+          : defaultEffort
+            ? `跟随全局设置:${EFFORT_LEVELS.find((x) => x.id === defaultEffort)?.label || defaultEffort}`
+            : '未设全局,由模型自适应';
+        return (
         <button key={e.id || 'default'} onClick={() => useStore.getState().setEffortFor(permKey, e.id)}
           className="w-full flex items-center gap-3 px-4 py-3 text-left hover:bg-canvas-warm transition-colors">
           <div className="flex-1 min-w-0">
             <div className="text-[14px] font-body text-ink">{e.label}</div>
-            <div className="text-[11px] text-ink-faint font-body">{e.desc}</div>
+            <div className="text-[11px] text-ink-faint font-body">{desc}</div>
           </div>
           {effort === e.id && <Check size={16} className="text-accent shrink-0" />}
         </button>
-      ))}
+        );
+      })}
     </div>
   );
 }
@@ -7915,36 +7991,28 @@ function CustomProviderForm({ onSaved, editing, onCancel, onDirtyChange, customC
   );
 }
 
-// 手机端模型 chip 列表:某些 provider 有上百个模型,全量渲染滚动吃力。
-// 默认只显示前 12 个 + 「+N 更多」展开/收起;纯显示层,不动数据。
-function MobileModelChips({ models, switching, onPick }) {
-  const [expanded, setExpanded] = useState(false);
-  const LIMIT = 12;
-  const shown = expanded ? models : models.slice(0, LIMIT);
-  return (
-    <div className="flex flex-wrap gap-1.5">
-      {shown.map((m) => (
-        <button key={m} disabled={switching} onClick={() => onPick(m)}
-          className="text-[11px] font-mono px-2 py-1 rounded-lg border border-canvas-deep text-ink-soft hover:border-accent hover:text-accent">{m}</button>
-      ))}
-      {models.length > LIMIT && (
-        <button type="button" onClick={() => setExpanded((v) => !v)}
-          className="text-[11px] font-body px-2 py-1 rounded-lg border border-dashed border-canvas-deep text-ink-faint hover:border-accent hover:text-accent">
-          {expanded ? '收起' : `+${models.length - LIMIT} 更多`}
-        </button>
-      )}
-    </div>
-  );
-}
+// 手机批#4:MobileModelChips(行内模型 chip 平铺)已删——合并入口下模型 id 收进
+// 折叠区,按行列表展示,不再平铺撑爆页面。
 
-function MobileProviderPage() {
-  const ms = useMultiSelect();
+// 手机批#4:「Provider / 模型」合并入口(用户定稿设计)。每个 provider 一行,默认
+// **折叠**不显模型 id;点行展开;展开后:
+//   - 当前激活 provider → 内嵌 MobileModelPage(原「模型」页全功能:搜索/拉取/自定义/
+//     1M,选择走 setModelFor 的 per-pane 语义,不重复切换);
+//   - 其它 provider → 该 provider 的模型 id 列表,点某个 id = 走既有 /api/provider/switch
+//     切换链路 + setModelFor 选中该模型,成功后 onPicked() 返回菜单根。
+// 数据仍走 mergeProviderLists(与桌面管理页/顶栏卡片同一选择器);桌面两个独立按钮零改动。
+// 修正批#7:本页只留 切换/选模型;增删改/导入/隐藏/批量删除收进页顶「管理 Provider」
+// 入口(onManage → 同一导航流全屏页,渲染与桌面弹窗同一个 ProviderManager 组件)。
+function MobileProviderPage({ permKey, onPicked, onManage }) {
   const [providers, setProviders] = useState([]);
   const [openaiProviders, setOpenaiProviders] = useState([]);
   const [customProviders, setCustomProviders] = useState([]);
   const [overrides, setOverrides] = useState({});
   const [switching, setSwitching] = useState(false);
   const [activeId, setActiveId] = useState(null);
+  const [expandedId, setExpandedId] = useState(null); // 默认全折叠;一次只展开一个
+  // 审计批C5:已隐藏的导入项手机页也过滤(桌面切换卡片/管理页早有此行为,手机漏了)。
+  const [hiddenProviders, setHiddenProviders] = useState(new Set());
   const load = () => {
     fetch('/api/providers').then((r) => r.json()).then((d) => {
       setProviders(Array.isArray(d.providers) ? d.providers : []);
@@ -7952,11 +8020,17 @@ function MobileProviderPage() {
       setCustomProviders(Array.isArray(d.customProviders) ? d.customProviders : []);
       setOverrides(d.overrides && typeof d.overrides === 'object' ? d.overrides : {});
     }).catch(() => {});
+    fetch('/api/prefs/hidden-providers').then((r) => r.json())
+      .then((d) => setHiddenProviders(new Set(Array.isArray(d.hidden) ? d.hidden : [])))
+      .catch(() => {});
   };
   useEffect(load, []);
-  const isCur = (p) => (activeId != null ? p.id === activeId : p.isCurrent);
+  const isCur = (p) => rowIsCurrent(p, activeId); // 审计批挂账:兼配 dupOf
+  // 既有切换链路原样保留(/api/provider/switch + clearModelOverrides + 双 fetch +
+  // provider-change 广播),只加了成功返回值供 pickModel 判断。
   const switchTo = async (id, model) => {
     setSwitching(true);
+    let ok = false;
     try {
       const r = await fetch('/api/provider/switch', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -7969,94 +8043,90 @@ function MobileProviderPage() {
       useStore.getState().fetchProvider?.();
       useStore.getState().fetchModel?.();
       window.dispatchEvent(new CustomEvent('cgui:provider-change'));
+      ok = true;
     } catch (e) { confirmDialog('切换 provider 失败：' + e.message); }
     setSwitching(false);
+    return ok;
   };
-  const removeCustom = async (id, name) => {
-    if (!(await confirmDialog(`删除自定义 Provider「${name}」?`, { danger: true, confirmText: '删除' }))) return;
-    // If this provider is open in the edit form, close it first — otherwise the
-    // form lingers on a now-deleted target ("更新" would 404).
-    setEditingProvider((cur) => (cur?.id === id ? null : cur));
-    await fetch(`/api/custom-providers/${id}`, { method: 'DELETE' }).catch(() => {});
-    load();
+  // 展开列表里点某个模型 id:切到该 provider(既有链路)+ per-pane 选中该模型,
+  // 成功后返回菜单根(onPicked)。m 为空 = 该 provider 无模型列表,仅切换。
+  const pickModel = async (p, m) => {
+    const ok = await switchTo(p.id, m || undefined);
+    if (!ok) return;
+    if (m) useStore.getState().setModelFor(permKey, m); // clearModelOverrides 之后再钉,pin 存活
+    onPicked?.();
   };
-  const [editingProvider, setEditingProvider] = useState(null);
   return (
     <div className="py-1">
-      {/* 新增/编辑表单挂列表顶部:打开新增无需滚到底,点编辑也统一定位到顶部表单。 */}
-      <CustomProviderForm
-        editing={editingProvider}
-        customCount={customProviders.length}
-        onCancel={() => setEditingProvider(null)}
-        onSaved={() => { setEditingProvider(null); load(); }}
-      />
+      {/* 修正批#7:增删改/导入/隐藏/批量删除迁「管理 Provider」全屏页(与桌面弹窗同一
+          ProviderManager 组件);本页只留 切换 + 选模型,原页顶内嵌表单/行内编辑删除/多选删除。 */}
+      <button onClick={onManage}
+        className="w-full flex items-center gap-2 px-4 py-3 text-left text-accent hover:bg-canvas-warm transition-colors border-b border-canvas-deep/40 mb-1">
+        <Settings size={16} className="shrink-0" />
+        <span className="flex-1 text-[14px] font-body">管理 Provider（增删改 · 测试 · 隐藏 · 导入）</span>
+        <ChevronRight size={16} className="text-ink-ghost shrink-0" />
+      </button>
       {/* 修正批#6:单一列表(mergeProviderLists,与桌面同一数据选择器)——官方置顶、
-          名称序、来源徽章;每种来源保留自己的行模板(导入行=点行切换,openai/自定义
-          行=模型 chips 直切)。 */}
+          名称序、来源徽章。 */}
       {(() => {
-        const rows = mergeProviderLists({ providers, openaiProviders, customProviders });
-        const hasCustom = customProviders.length > 0;
+        const rows = mergeProviderLists({ providers, openaiProviders, customProviders, hidden: hiddenProviders });
         return (<>
-          <div className="px-4 pt-3 pb-1 flex items-center gap-1 border-t border-canvas-deep/40 mt-1">
-            <div className="text-[11px] text-ink-faint uppercase tracking-wider font-body flex-1">全部 Provider · 点击即切换</div>
-            {hasCustom && <SelModeToggle selMode={ms.selMode} onToggle={() => (ms.selMode ? ms.exit() : ms.enter())} size={14} />}
+          <div className="px-4 pt-3 pb-1 border-t border-canvas-deep/40 mt-1">
+            <div className="text-[11px] text-ink-faint uppercase tracking-wider font-body">全部 Provider · 点行展开模型,选模型即切换</div>
           </div>
-          {ms.selMode && hasCustom && (
-            <BatchBar count={ms.count} busy={ms.busy} noun="个 Provider" onExit={ms.exit}
-              onDelete={async () => {
-                const res = await ms.runDelete(
-                  (id) => fetch(`/api/custom-providers/${id}`, { method: 'DELETE' }).then((r) => { if (!r.ok) throw new Error('删除失败'); }),
-                  { noun: '个 Provider', nameOf: (id) => customProviders.find((p) => p.id === id)?.name || id });
-                if (res) load();
-              }} />
-          )}
-          {rows.map((p) => (p.source === 'official' || p.source === 'ccswitch') ? (
-            <div key={p.id} className={`${isCur(p) ? 'bg-accent-subtle' : ''}`}>
-              <div className="w-full flex items-center gap-1 pr-3 hover:bg-canvas-warm transition-colors">
-                <button disabled={switching} onClick={() => switchTo(p.id)}
-                  className={`flex-1 min-w-0 flex items-center gap-3 px-4 py-3 text-left ${switching ? 'opacity-50' : ''}`}>
-                  <span className={`flex-1 text-[14px] font-body truncate ${isCur(p) ? 'text-accent font-medium' : 'text-ink'}`}>{p.name}</span>
-                  <ProviderSourceBadge p={p} />
-                  {isCur(p) && <Check size={16} className="text-accent shrink-0" />}
-                </button>
-              </div>
-              {p.source !== 'official' && (
-                <div className="px-4 pb-2"><ProviderOverrideEditor provider={p} override={overrides[p.id]} onSaved={load} /></div>
-              )}
-            </div>
-          ) : p.source === 'openai' ? (
-            <div key={p.id} className="px-4 py-2.5">
-              <div className={`text-[14px] font-body mb-1.5 flex items-center gap-2 ${isCur(p) ? 'text-accent font-medium' : 'text-ink'}`}>
-                <span className="flex-1 truncate">{p.name}</span>
-                <ProviderSourceBadge p={p} />
-                {isCur(p) && <Check size={14} className="text-accent shrink-0" />}
-              </div>
-              <MobileModelChips models={p.models.length ? p.models : ['(默认)']} switching={switching}
-                onPick={(m) => switchTo(p.id, p.models.length ? m : undefined)} />
-              <OpenAIModelManager provider={p} onSaved={load} />
-              <ProviderOverrideEditor provider={p} override={overrides[p.id]} onSaved={load} />
-            </div>
-          ) : (
-            <div key={p.id} className="px-4 py-2.5 flex items-start gap-2" onClick={ms.selMode ? () => ms.toggle(p.id) : undefined}>
-              {ms.selMode && <SelCheckbox checked={ms.selected.has(p.id)} onClick={() => ms.toggle(p.id)} size={15} className="mt-1" />}
-              <div className="flex-1 min-w-0">
-                <div className={`text-[14px] font-body mb-1 flex items-center gap-1.5 ${isCur(p) ? 'text-accent font-medium' : 'text-ink'}`}>
-                  <span className="truncate">{p.name}</span>
-                  <span className="text-[9px] px-1 py-px bg-canvas-deep text-ink-faint rounded font-mono shrink-0">{p.type}</span>
-                  <ProviderSourceBadge p={p} />
-                  {isCur(p) && <Check size={14} className="text-accent shrink-0" />}
+          {rows.map((p) => {
+            const cur = isCur(p);
+            const expanded = expandedId === p.id;
+            const models = Array.isArray(p.models) ? p.models : [];
+            return (
+              <div key={p.id} className={cur ? 'bg-accent-subtle' : ''}>
+                {/* 行头:点击=展开/收起。折叠态不显模型 id。 */}
+                <div className="w-full flex items-center gap-1 pr-3 hover:bg-canvas-warm transition-colors">
+                  <button
+                    onClick={() => setExpandedId(expanded ? null : p.id)}
+                    className="flex-1 min-w-0 flex items-center gap-2 px-4 py-3 text-left">
+                    {/* min-w 保证名称永不被 shrink-0 徽章挤到 0 宽(实测 322px 抽屉里
+                        徽章簇会吃光 flex-1;模型计数不进行头,展开即见列表)。 */}
+                    <span className={`flex-1 min-w-[64px] text-[14px] font-body truncate ${cur ? 'text-accent font-medium' : 'text-ink'}`}>{p.name}</span>
+                    {p.source === 'custom' && p.type && (
+                      <span className="text-[9px] px-1 py-px bg-canvas-deep text-ink-faint rounded font-mono shrink-0">{p.type}</span>
+                    )}
+                    <ProviderSourceBadge p={p} />
+                    {cur && <Check size={16} className="text-accent shrink-0" />}
+                    <ChevronDown size={14} className={`text-ink-ghost shrink-0 transition-transform ${expanded ? 'rotate-180' : ''}`} />
+                  </button>
                 </div>
-                {!ms.selMode && (
-                  <MobileModelChips models={p.models.length ? p.models : ['(默认)']} switching={switching}
-                    onPick={(m) => switchTo(p.id, p.models.length ? m : undefined)} />
+                {expanded && (
+                  <div className="pb-2 border-b border-canvas-deep/40">
+                    {cur ? (
+                      // 当前激活 provider:内嵌原「模型」页(选择=per-pane pin,不重复切换;
+                      // 搜索/拉取最新/自定义 ID/1M 开关全保留)。
+                      <>
+                        <div className="px-4 pt-1 text-[11px] text-ink-faint font-body">当前 Provider · 选择模型仅作用于当前会话</div>
+                        <MobileModelPage permKey={permKey} />
+                      </>
+                    ) : (
+                      <div className="py-1">
+                        {(models.length ? models : [null]).map((m) => (
+                          <button key={m ?? 'default'} disabled={switching} onClick={() => pickModel(p, m)}
+                            className={`w-full flex items-center gap-2 pl-8 pr-4 py-2.5 text-left hover:bg-canvas-warm transition-colors ${switching ? 'opacity-50' : ''}`}>
+                            <span className="flex-1 text-[13px] font-mono text-ink truncate">{m || '（默认模型）'}</span>
+                            <span className="text-[10px] text-ink-faint font-body shrink-0">切换并使用</span>
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                    {p.source === 'openai' && (
+                      <div className="px-4"><OpenAIModelManager provider={p} onSaved={load} /></div>
+                    )}
+                    {(p.source === 'ccswitch' || p.source === 'openai') && (
+                      <div className="px-4"><ProviderOverrideEditor provider={p} override={overrides[p.id]} onSaved={load} /></div>
+                    )}
+                  </div>
                 )}
               </div>
-              {!ms.selMode && (<>
-              <button onClick={() => setEditingProvider(p)} title="编辑" className="p-1.5 text-ink-faint hover:text-accent shrink-0"><Pencil size={15} /></button>
-              <button onClick={() => removeCustom(p.id, p.name)} title="删除" className="p-1.5 text-ink-faint hover:text-error shrink-0"><Trash2 size={15} /></button>
-              </>)}
-            </div>
-          ))}
+            );
+          })}
         </>);
       })()}
     </div>
@@ -8145,11 +8215,20 @@ function MobileReadingFontPage() {
   );
 }
 
-function MobileMenu({ setRightPanel, onClose }) {
+function MobileMenu({ setRightPanel, onClose, updateNotice = null }) {
   const [stack, setStack] = useState(['root']);
   const page = stack[stack.length - 1];
   const push = (p) => setStack((s) => [...s, p]);
-  const back = () => setStack((s) => (s.length > 1 ? s.slice(0, -1) : s));
+  // 审计批判官3:管理页返回补脏表单守卫 —— 桌面弹窗 Esc/点外有 confirmDialog,
+  // 手机导航流的「返回」原来直接丢弃未保存输入。与 ProviderManagerModal 同语义。
+  const back = async () => {
+    if (page === 'providermanage' && window.__cguiProviderFormDirty) {
+      const ok = await confirmDialog('Provider 表单有未保存的输入，返回将丢弃。仍要返回？', { danger: true, confirmText: '丢弃并返回' });
+      if (!ok) return;
+      window.__cguiProviderFormDirty = false;
+    }
+    setStack((s) => (s.length > 1 ? s.slice(0, -1) : s));
+  };
 
   const activeTabIndex = useStore((s) => s.activeTabIndex);
   const paneSessions = useStore((s) => s.paneSessions);
@@ -8159,11 +8238,9 @@ function MobileMenu({ setRightPanel, onClose }) {
   const permKey = activeSession?.sessionId || `draft-${activeSession?.projectHash || 'none'}`;
 
   const currentModel = useStore((s) => s.modelBySession[permKey] || s.currentModel);
+  // 审计批C2:导出 Markdown 需要当前会话消息(手机单窗格=pane0/activeTabIndex)。
+  const menuMessages = useStore((s) => (s.paneMessages && s.paneMessages[s.activeTabIndex]) || s.messages || EMPTY_ARRAY);
   const effort = useStore((s) => (permKey && permKey in (s.effortBySession || {})) ? s.effortBySession[permKey] : s.effort);
-  // --effort works on every claude-format upstream (official + mimo/deepseek/
-  // openrouter relays); only the OpenAI proxy (codex-local) can't map it. Gate
-  // on protocol, not providerHint.
-  const claudeProtocol = useStore((s) => (s.currentProvider?.protocol || 'anthropic') !== 'openai');
   const effortLabel = (EFFORT_LEVELS.find((e) => e.id === effort) || EFFORT_LEVELS[0]).label;
 
   // New chat: prefer the selected project; fall back to the open session's
@@ -8181,7 +8258,9 @@ function MobileMenu({ setRightPanel, onClose }) {
   };
   const openPanel = (id) => { setRightPanel(id); onClose(); };
 
-  const TITLES = { history: '会话与项目', model: '模型', effort: '推理力度', provider: 'Provider', appearance: '外观', theme: '配色方案', readingfont: '对话正文字体' };
+  // 手机批#4:「模型」「Provider」两个入口合并为一个「Provider / 模型」页(双入口
+  // 让人误以为两套状态)。'model' 路由随之删除,MobileModelPage 内嵌进合并页。
+  const TITLES = { history: '会话与项目', effort: '推理力度', provider: 'Provider / 模型', providermanage: '管理 Provider', appearance: '外观', theme: '配色方案', readingfont: '对话正文字体' };
 
   return (
     <div className="flex flex-col h-full">
@@ -8210,12 +8289,53 @@ function MobileMenu({ setRightPanel, onClose }) {
               <MobileMenuRow icon={SquarePen} label="新建会话" chevron={false} onClick={startNew} />
               <MobileMenuRow icon={MessageSquare} label="会话与项目" onClick={() => push('history')} />
               <div className="px-4 pt-3 pb-1 text-[11px] text-ink-faint uppercase tracking-wider font-body">当前会话</div>
-              <MobileMenuRow icon={Cpu} label="模型" value={<ModelBadge model={currentModel} compact />} onClick={() => push('model')} />
-              {claudeProtocol && <MobileMenuRow icon={Gauge} label="推理力度" value={effortLabel} onClick={() => push('effort')} />}
+              {/* 手机批#4:合并入口。值 = 解析后的实际发送模型(pin→全局默认),一眼
+                  看到"已继承",不再显示成未选;当前 provider 在入口页内高亮置顶(375px
+                  行宽放不下"provider 名+模型徽章"两段,名字挤成省略号反而更差)。 */}
+              {/* 不走 MobileMenuRow:其 value 槽 max-w-44% 挤压 flex-1 标签,"Provider/模型"
+                  +长模型 id 徽章在 375px 下必有一个被截。此行标签 shrink-0 保完整,徽章占余宽。 */}
+              <button onClick={() => push('provider')}
+                className="w-full flex items-center gap-3 px-4 py-3 text-left hover:bg-canvas-warm active:bg-canvas-deep/30 transition-colors">
+                <Server size={18} strokeWidth={1.75} className="text-ink-muted" />
+                <span className="shrink-0 text-[14px] font-body text-ink">Provider / 模型</span>
+                <span className="flex-1 min-w-0 flex justify-end"><ModelBadge model={currentModel} compact /></span>
+                <ChevronRight size={16} className="text-ink-ghost shrink-0" />
+              </button>
+              {/* 审计批C3:门控判据与桌面 EffortSelector 统一 —— openai 协议同样显示
+                  (映射为 reasoning_effort,不支持的端点自动降级),文案在分页内区分。 */}
+              <MobileMenuRow icon={Gauge} label="推理力度" value={effortLabel} onClick={() => push('effort')} />
+              {/* 审计批C1:手机会话内检索入口(桌面为 Cmd+F)。事件由活动窗格的
+                  SessionDetail 接住并 setSearchOpen(true);先关抽屉让检索浮层可见。 */}
+              {activeSession && (
+                <MobileMenuRow icon={Search} label="会话内检索" chevron={false}
+                  onClick={() => { onClose(); window.dispatchEvent(new CustomEvent('cgui:open-search')); }} />
+              )}
               {/* 修正批#1b:权限模式行已删——唯一入口在输入框工具行最左(桌面/手机同)。 */}
-              <MobileMenuRow icon={Server} label="Provider" onClick={() => push('provider')} />
               {activeSession?.sessionId && (
                 <div className="px-4 py-2"><RemoteControlButton session={activeSession} /></div>
+              )}
+              {/* 审计批C2:导出 Markdown / Checkpoint 时间线手机入口 —— 桌面在会话头 ⋮ 内,
+                  手机不渲染那块头部;组件原样复用(Checkpoint 弹层本就 body portal)。 */}
+              {activeSession?.sessionId && (
+                <div className="px-4 py-1 flex items-center gap-2">
+                  <ExportSessionButton
+                    messages={menuMessages}
+                    title={(useStore.getState().customTitles[activeSession.sessionId]
+                      || useStore.getState().autoTitles[activeSession.sessionId])
+                      || activeSession.firstPrompt || '会话'}
+                  />
+                  <CheckpointButton
+                    sessionId={activeSession.sessionId}
+                    cwd={activeSession.projectPath || selectedProject?.path}
+                    projectHash={activeSession.projectHash}
+                    onRestored={() => {
+                      const st = useStore.getState();
+                      if (activeSession.sessionId && activeSession.projectHash) {
+                        st.fetchMessages(activeSession.sessionId, activeSession.projectHash, { silent: true, tab: activeTabIndex });
+                      }
+                    }}
+                  />
+                </div>
               )}
               <div className="px-4 pt-3 pb-1 text-[11px] text-ink-faint uppercase tracking-wider font-body">外观</div>
               <MobileMenuRow icon={Palette} label="主题与字体" onClick={() => push('appearance')} />
@@ -8224,13 +8344,16 @@ function MobileMenu({ setRightPanel, onClose }) {
                 <MobileMenuRow key={id} icon={Icon} label={label} chevron={false} onClick={() => openPanel(id)} />
               ))}
               <div className="px-4 pt-3 pb-1 text-[11px] text-ink-faint uppercase tracking-wider font-body">系统</div>
-              <MobileMenuRow icon={Settings} label="通用（更新 / 会话 / Provider / 网络 / 高级）" chevron={false} onClick={() => openPanel('settings')} />
+              {/* 修正批#7:设置里 Provider tab 已删(管理在上方 Provider/模型 入口页内) */}
+              {/* 审计批A5:有可用更新时系统行加红点(桌面 PanelDock 红点同语义,手机原来无任何提示)。 */}
+              <MobileMenuRow icon={Settings} label="通用（更新 / 会话 / 网络 / 高级）" chevron={false} dot={!!updateNotice} onClick={() => openPanel('settings')} />
               <div className="h-8" />
             </div>
           )}
-          {page === 'model' && <MobileModelPage permKey={permKey} />}
           {page === 'effort' && <MobileEffortPage permKey={permKey} />}
-          {page === 'provider' && <MobileProviderPage />}
+          {page === 'provider' && <MobileProviderPage permKey={permKey} onPicked={() => setStack(['root'])} onManage={() => push('providermanage')} />}
+          {/* 修正批#7:管理页 = 与桌面弹窗同一 ProviderManager 组件,宿主为导航流页面 */}
+          {page === 'providermanage' && <div className="px-3 py-2"><ProviderManager /></div>}
           {page === 'appearance' && <MobileAppearancePage push={push} />}
           {page === 'theme' && <MobileThemePage />}
           {page === 'readingfont' && <MobileReadingFontPage />}
@@ -8348,7 +8471,7 @@ function ShortcutsPanel({ open, onClose }) {
   if (!open) return null;
   return (
     <div className="fixed inset-0 z-[210] flex items-center justify-center bg-black/40 backdrop-blur-sm animate-fade-in" onClick={onClose}>
-      <div className="glass-popover w-[440px] max-w-[calc(var(--app-w,100vw)-1.5rem)] max-h-[80vh] rounded-2xl shadow-2xl animate-glass-rise overflow-hidden flex flex-col" onClick={(e) => e.stopPropagation()}>
+      <div className="glass-popover w-[440px] max-w-[calc(var(--app-w,100vw)-1.5rem)] max-h-[min(80vh,calc(var(--app-h,100dvh)-2rem))] rounded-2xl shadow-2xl animate-glass-rise overflow-hidden flex flex-col" onClick={(e) => e.stopPropagation()}>
         <div className="flex items-center justify-between px-5 py-3 border-b border-canvas-deep shrink-0">
           <div className="text-[14px] font-display font-semibold text-ink">键盘快捷键</div>
           <button onClick={onClose} className="p-1 rounded hover:bg-canvas-warm text-ink-faint hover:text-ink" title="关闭">
@@ -8415,24 +8538,11 @@ export default function App() {
   const headerPane = useStore((s) => (s.paneSessions && s.paneSessions[s.activeTabIndex || 0]) || s.selectedSession);
   const headerPermKey = headerPane ? (headerPane.sessionId || `draft-${headerPane.projectHash || 'none'}`) : null;
   const [rightPanel, setRightPanelRaw] = useState(null);
-  // T5#1 Provider 表单脏数据守卫:CustomProviderForm(设置→Provider)有未保存输入时
-  // window.__cguiProviderFormDirty=true(表单 onDirtyChange 上报,卸载自动清)。任何
-  // "离开设置面板"的路径(点坞图标切面板/关面板/Cmd+数字)统一走本守卫 setter:
-  // 先 confirmDialog 确认丢弃,取消则不动。进设置/设置内切换不拦。
+  // 修正批#7:原 T5#1 "离开设置面板丢 Provider 表单输入"守卫已删——表单随 Provider tab
+  // 迁出设置,脏数据守卫改由 ProviderManagerModal 的关闭路径(Esc/点外/X)承担。
   const rightPanelRef = useRef(null);
   const setRightPanel = useCallback((next) => {
-    const cur = rightPanelRef.current;
-    const target = typeof next === 'function' ? next(cur) : next;
-    if (cur === 'settings' && target !== 'settings' && window.__cguiProviderFormDirty) {
-      confirmDialog('Provider 表单有未保存的输入，离开设置面板将丢弃。仍要离开？', { danger: true, confirmText: '丢弃并离开' })
-        .then((ok) => {
-          if (!ok) return;
-          window.__cguiProviderFormDirty = false;
-          rightPanelRef.current = target;
-          setRightPanelRaw(target);
-        });
-      return;
-    }
+    const target = typeof next === 'function' ? next(rightPanelRef.current) : next;
     rightPanelRef.current = target;
     setRightPanelRaw(target);
   }, []);
@@ -8586,8 +8696,17 @@ export default function App() {
     return () => window.removeEventListener('keydown', onEsc, true);
   }, [shortcutsOpen]);
 
-  // P1.4:任意组件经此事件打开设置面板并定位到指定设置组(如 ProviderSwitcher 底部
-  // 「管理 Provider」→ set-provider-manage)。与 jumpToUpdate 同一 __cguiSettingsJump 兜底。
+  // 修正批#7:Provider 管理独立弹窗(顶栏切换卡片底部「管理 Provider」触发;设置里的
+  // Provider tab 已删)。手机端不派发此事件(合并入口页内是导航流全屏页)。
+  const [providerMgrOpen, setProviderMgrOpen] = useState(false);
+  useEffect(() => {
+    const onOpenMgr = () => setProviderMgrOpen(true);
+    window.addEventListener('cgui:open-provider-manager', onOpenMgr);
+    return () => window.removeEventListener('cgui:open-provider-manager', onOpenMgr);
+  }, []);
+
+  // P1.4:任意组件经此事件打开设置面板并定位到指定设置组。与 jumpToUpdate 同一
+  // __cguiSettingsJump 兜底。
   useEffect(() => {
     const onOpenSettings = (e) => {
       setRightPanel('settings');
@@ -8795,7 +8914,14 @@ export default function App() {
 
   // Pull the shared session-title map so a rename on the phone shows on the Mac
   // (and vice-versa). Live updates arrive via the ws 'custom-titles' broadcast.
-  useEffect(() => { useStore.getState().hydrateCustomTitles(); useStore.getState().hydrateAutoTitles(); useStore.getState().hydrateContext1m(); }, []);
+  // 审计批A6:ws-reconnected 时重跑 —— 断线期间的 custom/auto-titles、context-1m
+  // 广播已永久丢失,重连补拉一次收敛(与权限卡/列表对账同构;hydrate 均幂等)。
+  useEffect(() => {
+    const hydrate = () => { useStore.getState().hydrateCustomTitles(); useStore.getState().hydrateAutoTitles(); useStore.getState().hydrateContext1m(); };
+    hydrate();
+    window.addEventListener('cgui:ws-reconnected', hydrate);
+    return () => window.removeEventListener('cgui:ws-reconnected', hydrate);
+  }, []);
 
   // 停止链路 #3:回合间到达的子代理权威终态通知(server 无活跃 SSE 时经全局 WS
   // 广播 task-notification-bg → useWebSocket 转 window 事件)。按 tool_use_id 调
@@ -9082,17 +9208,58 @@ export default function App() {
     // routes Claude-shaped API calls elsewhere. Refresh on settings.json
     // change (the WS file-watcher dispatches cgui:provider-change).
     useStore.getState().fetchProvider();
-    const onProvCh = () => useStore.getState().fetchProvider();
+    // 手机批#3:全局默认模型(settings.json 解析结果)在挂载时就拉一次。桌面顶栏的
+    // ModelSelector 也会拉,但手机端不挂它 → currentModel 一直是 null,菜单里模型
+    // 徽章显示"?",被用户误读为"手机不继承、必须重新选"。实际发送链(pin→历史→
+    // 全局默认)一直是对的,这里只把"解析后的全局默认"显示出来。
+    useStore.getState().fetchModel();
+    // 审计批A2:会话级偏好(权限档/模型 pin/力度 pin)水合 —— 服务端值优先收敛,
+    // 本地存量实键回推。挂载 + ws-reconnected 触发;provider-change 不触发(切换
+    // 链路里 clearModelOverrides 的 clear PUT 与 GET 会竞速,旧 pin 可能被拉回)。
+    useStore.getState().hydrateSessionSync();
+    const onProvCh = () => { useStore.getState().fetchProvider(); useStore.getState().fetchModel(); };
     window.addEventListener('cgui:provider-change', onProvCh);
+    // 审计批A1:断线期间 provider-change 广播已丢(半死连接常态)→ 重连成功即补拉
+    // provider/model 对账,与权限卡 refetchPendingPermissions 同构。
+    const onReconn = () => { onProvCh(); useStore.getState().hydrateSessionSync(); };
+    window.addEventListener('cgui:ws-reconnected', onReconn);
+    // 回前台补拉(手机切后台期间 WS 冻结,回来时广播早丢):节流 60s,频繁切 tab 不打。
+    // 审计批收尾#4:session-sync 也补拉,与 ws-reconnected 路径对齐(后台期间对端改的
+    // 权限档/模型 pin/力度 pin 广播已丢);首次迁移后水合纯拉取(收尾#1),多拉无副作用。
+    let lastVisPull = Date.now();
+    const onVis = () => {
+      if (document.visibilityState !== 'visible') return;
+      if (Date.now() - lastVisPull < 60_000) return;
+      lastVisPull = Date.now();
+      onProvCh();
+      useStore.getState().hydrateSessionSync();
+    };
+    document.addEventListener('visibilitychange', onVis);
     // Warm the MCP cache so the first click on the MCP panel is instant
     // (claude mcp list cold spawn is ~2s).
     fetch('/api/mcp').catch(() => {});
-    return () => window.removeEventListener('cgui:provider-change', onProvCh);
+    return () => {
+      window.removeEventListener('cgui:provider-change', onProvCh);
+      window.removeEventListener('cgui:ws-reconnected', onReconn);
+      document.removeEventListener('visibilitychange', onVis);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // All hooks above; safe to short-circuit to the login gate here.
   if (authLocked) return <LoginScreen onSuccess={() => window.location.reload()} />;
+
+  // 审计批A3:版本不一致横幅抽成共享块 —— 手机经局域网访问同一前端,旧 bundle 告警
+  // 同样需要可见(原来只在桌面 return 里渲染,手机端旧前端会静默伪装成新版)。
+  const bundleMismatchBanner = bundleMismatch && (
+    <div className="fixed top-0 inset-x-0 z-[300] bg-red-600 text-white text-[12px] font-body px-4 py-2 flex items-center justify-center gap-3 flex-wrap shadow-lg">
+      <span>⚠️ 界面 v{bundleMismatch.bundle} 与服务端 v{bundleMismatch.server} 不一致。请依次尝试：① 完全退出 GUI 再打开（会自动换用新版服务并绕过缓存）② 仍出现则说明安装包内是旧前端，请重新下载安装</span>
+      <button
+        onClick={() => { sessionStorage.removeItem('cgui-ver-busted'); window.location.replace('/?r=' + bundleMismatch.server); }}
+        className="px-2 py-0.5 rounded bg-white text-red-600 font-medium hover:bg-white/90 transition-colors shrink-0">重试</button>
+      <button onClick={() => setBundleMismatch(null)} className="px-2 py-0.5 rounded bg-white/20 hover:bg-white/30 transition-colors shrink-0">知道了</button>
+    </div>
+  );
 
   if (isMobile) {
     // CSS zoom scales fixed-size UI too. Keep the mobile root's layout box
@@ -9121,10 +9288,15 @@ export default function App() {
           rightPanel={rightPanel}
           setRightPanel={setRightPanel}
           isMobile={isMobile}
+          updateNotice={updateNotice}
         />
         {LocalWidget && <LocalWidget />}
         {/* 外接键盘按 Cmd+/ 也能开;不渲染的话状态会隐形置真并吞掉 Esc */}
         <ShortcutsPanel open={shortcutsOpen} onClose={() => setShortcutsOpen(false)} />
+        {/* 审计批A3/A4:版本告警横幅 + 非聚焦会话完成提醒,手机端同样渲染
+            (toast 点击跳转走 paneSessions[0],手机单窗格语义一致)。 */}
+        {bundleMismatchBanner}
+        <CompletionToasts />
         {!cliInstalled && !cliCheckDismissed && (
           <EnvCheckPanel onRecheck={checkCli} onDismiss={dismissCliCheck} />
         )}
@@ -9203,15 +9375,9 @@ export default function App() {
       {LocalWidget && <LocalWidget />}
       <GuideTour open={tourOpen} onClose={closeTour} hasProject={!!selectedProject} />
       <ShortcutsPanel open={shortcutsOpen} onClose={() => setShortcutsOpen(false)} />
-      {bundleMismatch && (
-        <div className="fixed top-0 inset-x-0 z-[300] bg-red-600 text-white text-[12px] font-body px-4 py-2 flex items-center justify-center gap-3 shadow-lg">
-          <span>⚠️ 界面 v{bundleMismatch.bundle} 与服务端 v{bundleMismatch.server} 不一致。请依次尝试：① 完全退出 GUI 再打开（会自动换用新版服务并绕过缓存）② 仍出现则说明安装包内是旧前端，请重新下载安装</span>
-          <button
-            onClick={() => { sessionStorage.removeItem('cgui-ver-busted'); window.location.replace('/?r=' + bundleMismatch.server); }}
-            className="px-2 py-0.5 rounded bg-white text-red-600 font-medium hover:bg-white/90 transition-colors shrink-0">重试</button>
-          <button onClick={() => setBundleMismatch(null)} className="px-2 py-0.5 rounded bg-white/20 hover:bg-white/30 transition-colors shrink-0">知道了</button>
-        </div>
-      )}
+      {/* 修正批#7:Provider 管理独立弹窗(桌面;手机走合并入口页内的导航流全屏页) */}
+      <ProviderManagerModal open={providerMgrOpen} onClose={() => setProviderMgrOpen(false)} />
+      {bundleMismatchBanner}
       <CompletionToasts />
       {/* F1: 截图热键状态提示(截图中/成功/失败)。取消不显示。 */}
       {shotStatus && (

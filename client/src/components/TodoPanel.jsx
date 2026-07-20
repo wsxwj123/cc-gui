@@ -96,7 +96,7 @@ function TodoChecklist({ todos, isStreaming = false }) {
       {collapsed ? (
         <div className="py-1.5">{nextTodo && <TodoRow todo={nextTodo} streaming={isStreaming} />}</div>
       ) : (
-        <div className="max-h-[40vh] overflow-y-auto py-1.5">
+        <div className="max-h-[min(40vh,calc(var(--app-h,100dvh)*0.4))] overflow-y-auto py-1.5">
           {todos.map((t, i) => (
             <TodoRow key={t.id ?? t.taskId ?? t.content ?? i} todo={t} streaming={isStreaming} />
           ))}
@@ -145,7 +145,7 @@ function PlanBlock({ plan }) {
       {open && (
         // MarkdownRenderer 顶层自带 text-[15px] 基准(标题用 em 相对字号),这里是输入框
         // 上方的小面板,用后代选择器把基准压到 12.5px,整套排版等比缩小。
-        <div className="px-3 pb-2.5 max-h-[40vh] overflow-y-auto [&_.markdown-content]:text-[12.5px]">
+        <div className="px-3 pb-2.5 max-h-[min(40vh,calc(var(--app-h,100dvh)*0.4))] overflow-y-auto [&_.markdown-content]:text-[12.5px]">
           <MarkdownRenderer content={plan} />
         </div>
       )}

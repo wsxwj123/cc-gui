@@ -44,7 +44,7 @@ export function ImageLightbox({ src, name, path, onClose }) {
         src={src}
         alt={name || ''}
         onClick={(e) => e.stopPropagation()}
-        className="max-w-[92vw] max-h-[92vh] object-contain rounded-lg shadow-2xl"
+        className="max-w-[min(92vw,calc(var(--app-w,100vw)-1rem))] max-h-[min(92vh,calc(var(--app-h,100dvh)-1rem))] object-contain rounded-lg shadow-2xl"
       />
     </div>,
     document.body,

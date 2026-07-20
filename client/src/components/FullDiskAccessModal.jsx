@@ -7,7 +7,7 @@ import { X, ShieldAlert, ExternalLink } from 'lucide-react';
 export function FullDiskAccessModal({ onOpenSettings, onDismiss }) {
   return (
     <div className="fixed inset-0 z-[210] flex items-center justify-center bg-black/45 backdrop-blur-sm animate-fade-in">
-      <div className="glass-popover w-[500px] max-w-[calc(var(--app-w,100vw)-1.5rem)] max-h-[85vh] overflow-y-auto rounded-2xl shadow-2xl animate-glass-rise">
+      <div className="glass-popover w-[500px] max-w-[calc(var(--app-w,100vw)-1.5rem)] max-h-[min(85vh,calc(var(--app-h,100dvh)-2rem))] overflow-y-auto rounded-2xl shadow-2xl animate-glass-rise">
         <div className="px-5 py-4 border-b border-canvas-deep flex items-center gap-3">
           <div className="w-8 h-8 rounded-lg bg-amber-100 flex items-center justify-center shrink-0">
             <ShieldAlert size={16} className="text-amber-700" />

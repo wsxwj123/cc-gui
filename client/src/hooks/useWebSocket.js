@@ -236,6 +236,11 @@ export function useWebSocket() {
               // 1M 上下文会话标记(服务端持久化)在任一端改动后全端收敛。
               useStore.getState().applyRemoteContext1m(data.sessions || {});
               break;
+            case 'session-sync':
+              // 审计批A2:会话级偏好(权限档/模型 pin/力度 pin)任一端改动后全端收敛。
+              // 提交中的键不被覆盖(store 内 in-flight 记账),不打断用户手上操作。
+              useStore.getState().applyRemoteSessionSync(data);
+              break;
             case 'task-notification-bg':
               // 停止链路 #3:回合间(无活跃 SSE)到达的子代理权威终态通知,server 经全局
               // WS 兜底送达。App.jsx 顶层监听此事件按 tool_use_id 调 finalizeAgent(幂等,

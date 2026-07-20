@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { X, Plus, Trash2, RefreshCw, ExternalLink, ArrowLeft, Search, ChevronRight } from 'lucide-react';
 import { BUILTIN_MCP_SERVERS, findBuiltinMcp } from '../utils/builtinMcpServers.js';
 import { openExternalUrl } from '../utils/openExternal.js';
@@ -251,9 +252,13 @@ export function McpForm({ editing, onClose, onSaved }) {
   const labelCls = 'text-[12px] font-medium text-ink font-body';
   const hintCls = 'text-[11px] text-ink-faint font-body';
 
-  return (
+  // 审计批E2:portal 到 body —— 宿主面板 animate-glass-rise 收尾残留 transform 会把
+  // fixed inset-0 遮罩困在面板内(盖不满全屏、卡片被裁),portal 后不受任何祖先
+  // stacking context 影响(参照 FileExplorerPanel 右键菜单同手法)。点外/内部按钮
+  // 关闭逻辑不变(React 合成事件沿 React 树冒泡,不依赖 DOM 祖先)。
+  return createPortal(
     <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/40 backdrop-blur-sm animate-fade-in" onClick={onClose}>
-      <div className="glass-popover w-[560px] max-w-[calc(var(--app-w,100vw)-1.5rem)] max-h-[90vh] flex flex-col overflow-hidden rounded-2xl shadow-2xl animate-glass-rise"
+      <div className="glass-popover w-[560px] max-w-[calc(var(--app-w,100vw)-1.5rem)] max-h-[min(90vh,calc(var(--app-h,100dvh)-2rem))] flex flex-col overflow-hidden rounded-2xl shadow-2xl animate-glass-rise"
         onClick={(e) => e.stopPropagation()}>
         {/* flex 列布局:头/底 shrink-0 固定,中间主体独立滚动。原来是「整卡滚动 + sticky footer」,
             但 glassRise 动画以 scale(1)+fill:both 收尾使卡片永久带 transform,WKWebView/WebView2 里
@@ -546,6 +551,7 @@ export function McpForm({ editing, onClose, onSaved }) {
           </button>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
