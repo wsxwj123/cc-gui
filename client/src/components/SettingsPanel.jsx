@@ -182,7 +182,15 @@ export function SettingsPanel({ providerSlot = null }) {
     <div className="px-4 py-4 space-y-4 overflow-y-auto h-full">
       <div className="flex items-center gap-1 flex-wrap border-b border-canvas-deep -mx-4 px-4 pb-2">
         {Object.entries(TAB_LABELS).map(([id, label]) => (
-          <button key={id} onClick={() => setTab(id)}
+          <button key={id} onClick={async () => {
+            // T5#1:Provider 表单有未保存输入时切走 tab 先确认(丢弃或留下),防止静默丢输入。
+            if (tab === 'provider' && id !== 'provider' && window.__cguiProviderFormDirty) {
+              const ok = await confirmDialog('Provider 表单有未保存的输入，切换后将丢弃。仍要切换？', { danger: true, confirmText: '丢弃并切换' });
+              if (!ok) return;
+              window.__cguiProviderFormDirty = false;
+            }
+            setTab(id);
+          }}
             className={`text-[11px] px-2.5 py-1 rounded font-body transition-colors ${tab === id ? 'bg-accent/15 text-accent' : 'text-ink-muted hover:text-ink'}`}>
             {label}
           </button>
