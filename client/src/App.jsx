@@ -7243,7 +7243,18 @@ function LoginScreen({ onSuccess }) {
     finally { setBusy(false); }
   };
   return (
-    <div className="h-[100dvh] w-screen flex items-center justify-center bg-canvas px-6">
+    // 手机批#1:100dvh/w-screen 在真机不可靠 —— ①dvh 不折算 html zoom(字体缩放时
+    // 高度失真);②iOS 软键盘不缩 layout viewport,autoFocus 弹键盘后输入框被盖,
+    // 视觉上"没居中"。改用与 mobile root 相同的 zoom 不变量 px(--app-w/--app-h,
+    // 均在 auth 门控前的 effect 里就已写入)并减去 --kb(软键盘高),始终真居中。
+    <div
+      className="flex items-center justify-center bg-canvas px-6"
+      style={{
+        position: 'fixed', left: 0, top: 0,
+        width: 'var(--app-w, 100vw)',
+        height: 'calc(var(--app-h, 100dvh) - var(--kb, 0px))',
+      }}
+    >
       <form onSubmit={submit} className="w-full max-w-[320px] flex flex-col items-center gap-5">
         <div className="flex items-center gap-2">
           <span className="text-accent text-2xl leading-none font-mono">✻</span>
