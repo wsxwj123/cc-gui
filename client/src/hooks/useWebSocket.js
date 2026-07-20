@@ -168,16 +168,31 @@ function handlePermissionRequest(req) {
     useStore.getState().addPendingPermission(req);
 }
 
-// 断线重连/手机切回前台后,把断线期间错过的权限卡从服务端补拉回来。广播是
-// 一次性的,错过即永久丢失 —— 手机(Tailscale)端"卡片不出来"的主根因之一。
-// addPendingPermission 按 id 去重、respond 服务端幂等,重复补拉安全。
+// 以服务端 pending 表为唯一真相做【对账】:add 服务端有而本地没有的卡(修
+// "广播丢失→卡片永不出现"),remove 服务端已不存在的卡(修"他端已解决但
+// resolved 广播丢了→卡片残留")。旧实现是事件驱动的一次性补拉、失败即放弃、
+// 只加不删 —— 页面常驻前台时 visibilitychange 永不触发,重连后的补拉又可能
+// 骑在同一条半死 keep-alive 连接上超时,之后无任何机制再触发。现在挂在 25s
+// 心跳 tick 上周期执行,单次失败静默等下一轮(每 25s 必有下一轮,这就是自愈
+// 保证)。addPendingPermission 按 id 去重、respond 服务端幂等,重复对账安全。
 async function refetchPendingPermissions() {
+  const fetchStart = Date.now();
   try {
     const r = await fetch('/api/permissions/pending', { signal: AbortSignal.timeout(8000) });
     if (!r.ok) return;
     const d = await r.json();
-    (d.items || []).forEach(handlePermissionRequest);
-  } catch { /* 网络暂不可用,下次重连/切前台再试 */ }
+    const items = d.items || [];
+    const serverIds = new Set(items.map((x) => x.id));
+    // remove:本地有、服务端没有、且创建早于本次拉取 → 已在他端解决/被 drop。
+    // createdAt < fetchStart 判据挡住"拉取飞行期间刚广播进来的新请求"被误删。
+    for (const p of useStore.getState().pendingPermissions) {
+      if (!serverIds.has(p.id) && (p.createdAt || 0) < fetchStart) {
+        useStore.getState().removePendingPermission(p.id);
+      }
+    }
+    // add:重放进完整分流逻辑(内部按 id 去重 + in-flight 守卫不重放提交中的卡)
+    items.forEach(handlePermissionRequest);
+  } catch { /* 网络暂不可用,下个心跳 tick 再对账 */ }
 }
 
 export function useWebSocket() {
@@ -322,8 +337,12 @@ export function useWebSocket() {
     // 到点检查距上次任何入站消息 >40s(≥1 个 ping 周期无回音)→ 判定半死连接,
     // 主动 close 触发既有 onclose 3s 重连。CONNECTING/CLOSED 状态不动。
     const hb = setInterval(() => {
+      if (cancelled) return;
+      // 每个心跳 tick 顺带对账 —— 不看 WS 死活:WS 看似活着(readyState=1)但
+      // 半死时广播已经丢了,正是对账在兜底;WS 真死时重连间隙也不留盲区。
+      refetchPendingPermissions();
       const ws = wsRef.current;
-      if (cancelled || !ws || ws.readyState !== 1) return;
+      if (!ws || ws.readyState !== 1) return;
       if (Date.now() - lastMsgRef.current > 40_000) { try { ws.close(); } catch {} return; }
       try { ws.send('{"type":"ping"}'); } catch {}
     }, 25_000);
