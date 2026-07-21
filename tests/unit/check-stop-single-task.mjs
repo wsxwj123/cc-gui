@@ -9,8 +9,10 @@ import assert from 'node:assert/strict';
 const { useStore } = await import('../../client/src/stores/sessionStore.js');
 const st = () => useStore.getState();
 
-// fetch 桩:记录调用;/agents/active 返回混合列表(属主/别的会话/已结束/非 chat-process)。
+// fetch 桩:记录调用;/agents/active 返回混合列表(属主/别的会话/已结束/非 chat-process);
+// stop-task 的 stopped 结果可切换(S1 回滚用例)。
 const calls = [];
+let stopTaskStopped = true; // 属主 slot 是否命中
 globalThis.fetch = async (url, opts) => {
   calls.push({ url: String(url), opts });
   if (String(url) === '/api/agents/active') {
@@ -21,7 +23,7 @@ globalThis.fetch = async (url, opts) => {
       { kind: 'cli-session',  pid: '999',   sessionId: 'sid-A', stoppable: true },   // 非 chat-process,不发
     ] }) };
   }
-  return { json: async () => ({ ok: true, stopped: true }) };
+  return { json: async () => ({ ok: true, stopped: stopTaskStopped }) };
 };
 
 // 1) 非终态目标 → 乐观标 stopped,taskManaged 保留
@@ -47,5 +49,19 @@ assert.equal(st().activeAgents['tu-2'].status, 'done', '已 done 的目标不被
 calls.length = 0;
 await st().stopSingleTask('sid-A', '');
 assert.equal(calls.length, 0, '空 toolUseId 不发请求');
+
+// 5) S1 回滚:非终态目标,所有属主 pid 都返回 stopped:false(查无)→ 乐观 stopped 回滚为原状态
+stopTaskStopped = false;
+st().upsertAgent('tu-3', { sessionId: 'sid-A', status: 'working' });
+await st().stopSingleTask('sid-A', 'tu-3');
+assert.equal(st().activeAgents['tu-3'].status, 'working', '无一命中 → 乐观 stopped 回滚为原 working(不假「已停」)');
+
+// 6) S1 边界:回滚只在仍停于乐观 stopped 时发生——其间到达权威 done 不被回滚覆盖
+stopTaskStopped = false;
+st().upsertAgent('tu-4', { sessionId: 'sid-A', status: 'working' });
+const p = st().stopSingleTask('sid-A', 'tu-4');   // 乐观已标 stopped
+st().upsertAgent('tu-4', { status: 'done' });      // 模拟其间权威终态到达
+await p;
+assert.equal(st().activeAgents['tu-4'].status, 'done', '权威 done 到达后不被回滚覆盖');
 
 console.log('PASS check-stop-single-task');

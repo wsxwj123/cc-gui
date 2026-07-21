@@ -1290,16 +1290,25 @@ export const useStore = create((set, get) => ({
     if (!toolUseId) return;
     const st = get();
     const ag = st.activeAgents[toolUseId];
-    if (ag && !['done', 'error', 'stopped'].includes(ag.status)) {
-      st.upsertAgent(toolUseId, { status: 'stopped', finishedAt: Date.now() });
-    }
+    const prevStatus = ag?.status;
+    const didOptimistic = ag && !['done', 'error', 'stopped'].includes(prevStatus);
+    if (didOptimistic) st.upsertAgent(toolUseId, { status: 'stopped', finishedAt: Date.now() });
     try {
       const d = await fetch('/api/agents/active').then((r) => r.json());
       const procs = (d.agents || []).filter((a) => a.kind === 'chat-process' && a.sessionId === sessionId && a.stoppable === true);
-      await Promise.allSettled(procs.map((a) => fetch(`/api/chat/${a.pid}/stop-task`, {
+      const results = await Promise.allSettled(procs.map((a) => fetch(`/api/chat/${a.pid}/stop-task`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ toolUseId, sessionId }),
-      })));
+      }).then((r) => r.json())));
+      // S1:无一命中(所有属主 pid 都 stopped:false)= 该 task 已不在任何 slot 的 liveTasks,
+      // 不会再有权威 task_notification 纠正 → 乐观 stopped 是假阳性,回滚为原状态(避免卡片
+      // 假「已停」而 teammate 其实仍可被唤醒)。仅当仍停在我们乐观写的 stopped 上才回滚——
+      // 其间到达的权威终态(done/error/真 stopped)不覆盖。
+      const anyStopped = results.some((r) => r.status === 'fulfilled' && r.value?.stopped === true);
+      if (didOptimistic && !anyStopped) {
+        const cur = get().activeAgents[toolUseId];
+        if (cur && cur.status === 'stopped') get().upsertAgent(toolUseId, { status: prevStatus, finishedAt: null });
+      }
     } catch {}
   },
   // #9/AZ6 子代理会话窗口:按 tab 记录在主区打开查看的子代理 id(null = 看正常会话)。
