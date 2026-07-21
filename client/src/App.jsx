@@ -55,7 +55,7 @@ import { computeCost, formatCost } from './utils/pricing.js';
 import { extractToolResultText, finalizePendingToolCalls, applyFinalizedToBlocks } from './utils/toolResult.js';
 import { rebuildTodosFromTaskCalls } from './utils/todos.js';
 import { isInitBindingOrigin, migrateDraftQueue, paneMessagesOwned, resolveHistModel, resolveSendModel } from './utils/routing.js';
-import { nativeContextWindow } from './utils/contextWindow.js';
+import { nativeContextWindow, isBareClaudeAlias } from './utils/contextWindow.js';
 import {
   FolderOpen, MessageSquare, ChevronLeft, ChevronRight, ChevronDown,
   Search, Hash, Layers, BarChart3, ArrowLeft, Plus,
@@ -5212,15 +5212,25 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             // 鉴权类报错(401 / api key 无效等)大概率是 provider 的 key 配错/过期,
             // 给错误块挂「检查 Provider 设置」动作(渲染在 visibleChat 的 turn 分支)。
             const isAuthError = /\b401\b|unauthorized|authenticat|api[ -_]?key|x-api-key/i.test(msg);
+            // 低危#4:1M 推断被拒的显式提示。6bfc207 对「单次 ctxUsage 超名义窗口」的
+            // 会话推断补 [1m] 发送;账户 1M 资格不足时该请求被 API 拒,落到这里显示裸
+            // 报错。上方 5127 已自动切回捕获两种已知文案;其余含 1M/长上下文关键词的
+            // 拒绝(第三方/新文案)补一行引导:关掉模型弹层的 1M 开关再重试。纯文案层,
+            // 不动重试逻辑。
+            // (?<![$￥]) 排除 "$1m budget" 这类金额文案的误命中(判官次要项)
+            const isOneMReject = /(?<![$￥])\b1m\b|\[1m\]|long context|context length|1000000|1,000,000/i.test(msg);
+            const oneMHint = isOneMReject
+              ? '\n\n> 该会话被识别为 1M 上下文；若账户不支持,请在模型弹层关闭 1M 后重试。'
+              : '';
             setChatMessages((prev) => [...prev, {
               uuid: 'chat-error-' + Date.now(),
               type: 'turn',
               timestamp: new Date().toISOString(),
               model: streamingModel,
-              text: [`❌ **${msg}**\n\n常见原因：\n- session 不在当前 cwd 对应的项目目录 → 新建会话\n- jsonl 被 trim 后损坏 → 新建会话\n- CLI 版本异常 → 终端跑 \`claude --help\` 验证`],
+              text: [`❌ **${msg}**\n\n常见原因：\n- session 不在当前 cwd 对应的项目目录 → 新建会话\n- jsonl 被 trim 后损坏 → 新建会话\n- CLI 版本异常 → 终端跑 \`claude --help\` 验证${oneMHint}`],
               thinking: [],
               toolCalls: [],
-              blocks: [{ type: 'text', content: `❌ **${msg}**` }],
+              blocks: [{ type: 'text', content: `❌ **${msg}**${oneMHint}` }],
               usage: null,
               ...(isAuthError ? { errorAction: 'provider' } : {}),
             }]);
@@ -6403,10 +6413,14 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       ? (() => { try { return new URL(currentProvider.baseUrl).hostname; } catch { return '自定义'; } })()
       : currentProvider.providerHint.charAt(0).toUpperCase() + currentProvider.providerHint.slice(1))
     : null;
+  // 低危#3:第三方 provider + claude 系裸别名(sonnet/opus)→ 分母是本地默认猜测,
+  // 真实窗口由中转服务商映射的后端模型决定。徽章追加提示,避免用户把 1M 分母当准数。
+  const bareAliasWindowUnknown = _isThirdParty && isBareClaudeAlias(currentModel);
   const badgeInfo = {
     headerModel, models, toolCallCount,
     providerHintLabel, providerBaseUrl: currentProvider?.baseUrl || '',
     totalAllTokens, totalCostUsd, cacheRead: totalTokens.cacheRead, cacheHitPct, usageDetailTitle,
+    bareAliasWindowUnknown,
   };
 
   return (
@@ -6958,10 +6972,14 @@ function ProviderManager() {
                     )}
                     {/* Click to switch (default model). The full model list lives in
                         the ModelSelector after switching. */}
+                    {/* 低危#2:窄屏(322px 手机抽屉)徽章多时名称被 shrink-0 徽章挤没。
+                        窄视口下让名称独占第一行(强制占满、全宽可读、极长才截断),模型数
+                        /type/来源徽章换行到第二行。桌面弹窗在宽视口不触发,形态不变。
+                        (注:类名写在下方 className,不写进本注释避免 JIT 误扫成全局工具类) */}
                     <button disabled={switching}
                       onClick={() => (ms.selMode && p.source === 'custom' ? ms.toggle(p.id) : switchTo(p.id))}
-                      className={`flex-1 min-w-0 text-left flex items-center gap-2 ${switching ? 'opacity-50' : ''}`}>
-                      <span className={`flex-1 text-xs font-body truncate ${isCur(p) ? 'text-accent font-medium' : 'text-ink'}`}>{p.name}</span>
+                      className={`flex-1 min-w-0 text-left flex items-center gap-2 max-md:flex-wrap ${switching ? 'opacity-50' : ''}`}>
+                      <span title={p.name} className={`flex-1 min-w-0 max-md:!basis-full text-xs font-body truncate ${isCur(p) ? 'text-accent font-medium' : 'text-ink'}`}>{p.name}</span>
                       {p.models?.length > 0 && <span className="text-[9px] px-1 py-px bg-canvas-deep text-ink-faint rounded font-mono shrink-0">{p.models.length} 模型</span>}
                       {p.source === 'custom' && p.type && <span className="text-[9px] px-1 py-px bg-canvas-deep text-ink-faint rounded font-mono shrink-0">{p.type}</span>}
                       <ProviderSourceBadge p={p} />
@@ -7200,6 +7218,13 @@ function ContextBreakdownButton({ contextTokens, contextWindow, contextPct, fmtT
               <span className="font-mono text-ink-muted">{info.toolCallCount} 次</span>
             </div>
           )}
+          {/* 低危#3:第三方裸别名 → 分母为本地估算,实际窗口以服务商为准。点上方刷新
+              可让上游 /context 实测校正。 */}
+          {info.bareAliasWindowUnknown && (
+            <div className="text-[10px] text-amber-700 font-body leading-snug">
+              第三方中转下发裸别名,{winLabel} 分母为本地估算,实际窗口以服务商为准。
+            </div>
+          )}
           <div className="flex items-center gap-2 text-[11px] font-body" title={info.usageDetailTitle}>
             <span className="text-ink-faint w-14 shrink-0">累计 token</span>
             <span className="font-mono text-ink-muted">{(info.totalAllTokens || 0).toLocaleString()}</span>
@@ -7289,6 +7314,8 @@ function ContextBreakdownButton({ contextTokens, contextWindow, contextPct, fmtT
         className={`text-[10px] font-mono whitespace-nowrap px-1.5 py-px rounded transition-colors cursor-pointer inline-flex items-center gap-1 ${tone}`}
         title={(contextPct > 100
           ? `当前模型上下文窗口为 ${winLabel}，该会话已使用约 ${fmtTok(contextTokens)} —— 下一条消息发送将超出窗口，可能触发压缩或被上游拒绝。可切换更大窗口的模型，或手动 /compact 压缩。\n`
+          : '') + (info?.bareAliasWindowUnknown
+          ? `${winLabel} 分母为本地估算：第三方中转下发的是裸别名，实际窗口以服务商为准。\n`
           : '') + (info ? '点击查看会话信息与上下文分项明细（/context）' : '点击查看上下文分项明细（/context）')}
       >
         {zero

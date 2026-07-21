@@ -6,6 +6,16 @@
 // ③ 已知更小的具体系列(含 U3 实测:deepseek/mimo/GLM=200K、Kimi=256K)→ 其真实窗口;
 // ④ 其余(gemini/gpt-5.x/minimax/grok-4 及未知第三方)→ 默认 1M。默认 1M 只是初始估算,
 // /context 实测(优先级更高)或显式 [1m] 会进一步校正,不会因估大而误判(有超窗提示与 sane-ceiling)。
+// 低危#3:第三方裸别名判定。第三方 provider 下发 `sonnet`/`opus`/`haiku`(或
+// `claude-` 前缀)这类无版本号、无窗口标注的裸别名时,nativeContextWindow 只能落
+// 默认分母(opus/sonnet=1M),但真实窗口由中转服务商映射的后端模型决定、本地无从
+// 得知。徽章据此追加一句"实际窗口以服务商为准"(不新造手填窗口机制,提示为主;
+// 用户可在弹层点 /context 让上游实测校正)。仅裸别名命中 —— 带版本号(sonnet-5)、
+// 带窗口标注(-128k/[1m])的都有确定分母,不提示。
+export function isBareClaudeAlias(model) {
+  return /^(claude-)?(opus|sonnet|haiku)$/.test((model || '').toLowerCase().trim());
+}
+
 export function nativeContextWindow(model) {
   const id = (model || '').toLowerCase();
   if (/\[1m\]/i.test(id)) return 1_000_000;

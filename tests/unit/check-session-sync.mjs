@@ -3,7 +3,7 @@
 // effort '' 合法值各至少一条断言。node tests/unit/check-session-sync.mjs
 import assert from 'node:assert/strict';
 import { applySessionSyncPut, normalizeSessionSync, SYNC_KINDS } from '../../server/session-sync.js';
-import { mergeSyncedMap, pushLocalOnlyKeys, syncableKey, createInFlightCounter } from '../../client/src/utils/sessionSync.js';
+import { mergeSyncedMap, pushLocalOnlyKeys, syncableKey, createInFlightCounter, shouldMarkMigrated } from '../../client/src/utils/sessionSync.js';
 
 // ── 服务端:三张 map 各写入一条 ─────────────────────────────
 let st = normalizeSessionSync(null);
@@ -97,5 +97,18 @@ assert.deepEqual(flight.keys(), ['modelPin:sid-9']);
 flight.release('modelPin:sid-9'); // 第二个 PUT settle
 assert.ok(!flight.has('modelPin:sid-9'));
 assert.deepEqual(flight.keys(), []);
+
+// ── 低危#1:首次迁移 marker 只在回推整批成功后置位 ────────────────
+// 空批(无本地存量键)= 视为成功,直接置 marker
+assert.equal(shouldMarkMigrated([]), true);
+// 全成功 → 置位
+assert.equal(shouldMarkMigrated([true, true, true]), true);
+// 任一回推失败(离线/5xx)→ 不置位,下次重连重试整批
+assert.equal(shouldMarkMigrated([true, false]), false);
+assert.equal(shouldMarkMigrated([false]), false);
+// 重试后整批成功 → 置位
+assert.equal(shouldMarkMigrated([true]), true);
+// 兜底:undefined 视为空批成功
+assert.equal(shouldMarkMigrated(), true);
 
 console.log('check-session-sync: all assertions passed');

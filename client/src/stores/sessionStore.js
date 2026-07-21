@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { nextDockCode } from '../utils/artifactDock.js';
-import { mergeSyncedMap, syncableKey, pushLocalOnlyKeys, createInFlightCounter } from '../utils/sessionSync.js';
+import { mergeSyncedMap, syncableKey, pushLocalOnlyKeys, createInFlightCounter, shouldMarkMigrated } from '../utils/sessionSync.js';
 
 // Helper: read JSON from localStorage with fallback.
 const readLs = (key, fallback) => {
@@ -31,14 +31,16 @@ const putCustomTitle = (sessionId, title) => {
 // 同键两连改时第一个 PUT 的 finally 不再误摘第二个在途的保护标签):广播/水合期间
 // 不覆盖正在提交中的键,防「刚点的选择被旧广播闪回」。
 const syncInFlight = createInFlightCounter(); // tag = `${kind}:${sessionId}`
+// 返回 Promise<boolean>(PUT 是否成功);现有 setter 调用点忽略返回值仍是
+// fire-and-forget,首次迁移回推靠此判据门控 marker(低危#1)。
 const putSessionSync = (kind, sessionId, value) => {
   const tag = `${kind}:${sessionId}`;
   syncInFlight.acquire(tag);
-  fetch('/api/prefs/session-sync', {
+  return fetch('/api/prefs/session-sync', {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ kind, sessionId, value }),
-  }).catch(() => {}).finally(() => syncInFlight.release(tag));
+  }).then((res) => res.ok).catch(() => false).finally(() => syncInFlight.release(tag));
 };
 
 // Valid `--permission-mode` values per `claude --help`。
@@ -593,6 +595,7 @@ export const useStore = create((set, get) => ({
       ['effortPins', 'effortBySession', 'cgui-effort-by-session', 'effortPin'],
     ];
     const patch = {};
+    const pushes = []; // Promise<boolean>[];仅 pushLocalOnly 时非空,供 marker 门控
     for (const [srvKey, stateKey, lsKey, kind] of specs) {
       const server = (d && d[srvKey] && typeof d[srvKey] === 'object') ? d[srvKey] : {};
       const local = get()[stateKey] || {};
@@ -605,26 +608,32 @@ export const useStore = create((set, get) => ({
       // 审计批收尾#1:只在初次迁移执行(hydrateSessionSync 以 marker 门控),
       // 键集计算见 pushLocalOnlyKeys 注释 —— 每次水合都回推会复活对端已清的旧键。
       if (pushLocalOnly) {
-        for (const k of pushLocalOnlyKeys(local, server)) putSessionSync(kind, k, local[k]);
+        for (const k of pushLocalOnlyKeys(local, server)) pushes.push(putSessionSync(kind, k, local[k]));
       }
       writeLs(lsKey, next);
       patch[stateKey] = next;
     }
     set(patch);
+    return pushes; // 供 hydrateSessionSync 判断是否全部回推成功再置 marker
   },
   // 审计批收尾#1:pushLocalOnly 仅首次水合执行(localStorage marker),此后纯拉取。
   // 场景:设备 B 切 provider(本地清+服务端 clear modelPins)期间设备 A 离线;若 A
   // 每次重连都回推,本地残留的旧 provider pin 会重新填进服务端并广播回 B → 该会话
-  // 下次发送旧模型 id 报 invalid model。marker 只在 GET 成功后置位(失败下次重试);
-  // 离线期间本机新钉的 pin 不靠回推 —— setter 的 fire-and-forget PUT 是主通道,
-  // 丢了也会在用户下次操作时补写。
+  // 下次发送旧模型 id 报 invalid model。离线期间本机新钉的 pin 不靠回推 —— setter
+  // 的 fire-and-forget PUT 是主通道,丢了也会在用户下次操作时补写。
+  // 低危#1:marker 只在「回推批次全部成功 settle」后置位 —— 此前 GET 成功即置位,
+  // 但回推 PUT 若全失败(离线/5xx),存量键就此只留本机、再不回推。改为整批成功才
+  // 置位,任一失败不置位、下次重连重试整批(空批=无存量键 → 视为成功直接置位)。
   hydrateSessionSync: async () => {
     try {
       const res = await fetch('/api/prefs/session-sync');
       const d = await res.json();
       const migrated = readLs('cgui-session-sync-migrated', false);
-      get().applyRemoteSessionSync(d, { pushLocalOnly: !migrated });
-      if (!migrated) writeLs('cgui-session-sync-migrated', true);
+      const pushes = get().applyRemoteSessionSync(d, { pushLocalOnly: !migrated });
+      if (!migrated) {
+        const results = await Promise.all(pushes || []);
+        if (shouldMarkMigrated(results)) writeLs('cgui-session-sync-migrated', true);
+      }
     } catch {}
   },
   getModelFor: (key) => (key && get().modelBySession[key]) || get().currentModel,
