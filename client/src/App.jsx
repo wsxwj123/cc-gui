@@ -55,6 +55,7 @@ import { computeCost, formatCost } from './utils/pricing.js';
 import { extractToolResultText, finalizePendingToolCalls, applyFinalizedToBlocks } from './utils/toolResult.js';
 import { rebuildTodosFromTaskCalls } from './utils/todos.js';
 import { isInitBindingOrigin, migrateDraftQueue, paneMessagesOwned, resolveHistModel, resolveSendModel } from './utils/routing.js';
+import { nativeContextWindow } from './utils/contextWindow.js';
 import {
   FolderOpen, MessageSquare, ChevronLeft, ChevronRight, ChevronDown,
   Search, Hash, Layers, BarChart3, ArrowLeft, Plus,
@@ -548,24 +549,7 @@ function useResolvedWindow(model) {
   return win;
 }
 
-function nativeContextWindow(model) {
-  const id = (model || '').toLowerCase();
-  if (/\[1m\]/i.test(id)) return 1_000_000;
-  const byM = id.match(/(\d+)m(?![a-z0-9])/);        // 如 -2m / -1m 显式标注,最权威
-  if (byM) return parseInt(byM[1], 10) * 1_000_000;
-  const byName = id.match(/(\d+)k(?![a-z0-9])/);     // 如 moonshot-v1-128k
-  if (byName) return parseInt(byName[1], 10) * 1000;
-  // 已知【小于 1M】的模型 → 回落真实窗口(默认改 1M 后必须显式挡下,否则超窗误判/不触发压缩)。
-  if (/claude|anthropic|opus|sonnet|haiku/.test(id)) return 200_000;         // Claude 原生 200K(1M 需 [1m])
-  if (/deepseek|mimo/.test(id)) return 200_000;                               // U3 实测 /context 200K
-  if (/kimi|moonshot/.test(id)) return 262_144;                              // Kimi K2.x 原生 256K
-  if (/glm|zhipu|chatglm/.test(id)) return 200_000;                          // GLM 实测 200K
-  if (/grok-?3|grok-?2/.test(id)) return 131_072;                            // Grok-3 128K(Grok-4 走下方默认 1M)
-  if (/gpt-4o|gpt-4-turbo|llama|mistral|mixtral|command-r/.test(id)) return 131_072; // 主流 128K 档
-  if (/gpt-5.*(mini|nano)/.test(id)) return 400_000;                          // GPT-5 mini/nano 400K
-  // 其余(gemini / gpt-5(.x) / gpt-4.1 全系〔mini/nano 也是 1M〕/ minimax / grok-4 / 未知第三方)→ 默认 1M。
-  return 1_000_000;
-}
+// nativeContextWindow 抽到 utils/contextWindow.js(纯函数,tests/unit/check-context-window.mjs 单测)。
 
 // ─── Right Panel (overlay) ────────────────────────────────────
 // 子代理终态收口的公共动作:标 done/error/stopped + 合成仍 pending 的子工具(U7:有些
@@ -3153,21 +3137,20 @@ const MessageList = React.memo(function MessageList({ messages, onRetryTurn, onR
   ));
 });
 
-// 上下文达到此占比(%)时，GUI 侧主动提示并倒计时自动 /compact。
+// 上下文达到此占比(%)时，GUI 侧弹出压缩建议横幅。
 // 第一方(anthropic)由 CLI 原生 auto-compact 负责(约 92%)；第三方 provider 不支持
-// count_tokens、上下文窗口被 CLI 当兜底源 → 原生 auto-compact 不可靠/不触发，由本组件兜底。
+// count_tokens、上下文窗口被 CLI 当兜底源 → 原生 auto-compact 不可靠/不触发，由本横幅提示。
 const AUTO_COMPACT_THRESHOLD = 80;
 
-// GUI 侧自动压缩看门狗(仅第三方 provider 启用)。idle 且占比越过阈值时弹出倒计时，
-// 倒计时结束自动发 /compact；"取消"则本"轮次"内不再提示(占比降回阈值下才重新武装)。
+// GUI 侧压缩建议横幅(仅第三方 provider 启用)。idle 且占比越过阈值时弹出，由用户点击
+// 「立即压缩」才发 /compact —— GUI 绝不自动触发压缩(原 10s 倒计时自动 /compact 会在
+// 用户没看着时静默改写历史，且"曾用 1M 模型切回 200k"这类分母变化会让占比瞬间爆表、
+// 直接误压，已改为显式确认)；"取消"则本"轮次"内不再提示(占比降回阈值下才重新武装)。
 // 作为 SessionDetail 的子组件接收 contextPct —— 占比在父组件渲染末尾才算出、其后已无
 // hook 位，放子组件可避免 hook 顺序问题。按 sessionId key，切会话自动重置内部状态。
-function AutoCompactBanner({ contextPct, idle, enabled, onCompact, COUNTDOWN = 10 }) {
+function AutoCompactBanner({ contextPct, idle, enabled, onCompact }) {
   const [armed, setArmed] = useState(false);
-  const [secs, setSecs] = useState(COUNTDOWN);
   const dismissedRef = useRef(false);
-  const onCompactRef = useRef(onCompact);
-  onCompactRef.current = onCompact;        // 固定引用，倒计时 effect 不随父组件重渲染重置
 
   useEffect(() => {
     if (!enabled || contextPct < AUTO_COMPACT_THRESHOLD) {
@@ -3176,28 +3159,15 @@ function AutoCompactBanner({ contextPct, idle, enabled, onCompact, COUNTDOWN = 1
       return;
     }
     if (!idle || dismissedRef.current || armed) return;
-    setSecs(COUNTDOWN);
     setArmed(true);
-  }, [enabled, contextPct, idle, armed, COUNTDOWN]);
-
-  useEffect(() => {
-    if (!armed || !idle) return;           // 用户手动发消息(非 idle)时暂停倒计时
-    if (secs <= 0) {
-      setArmed(false);
-      dismissedRef.current = true;         // 防止压缩流跑起来前重复触发
-      onCompactRef.current();
-      return;
-    }
-    const t = setTimeout(() => setSecs((s) => s - 1), 1000);
-    return () => clearTimeout(t);
-  }, [armed, idle, secs]);
+  }, [enabled, contextPct, idle, armed]);
 
   if (!armed) return null;
   return (
     <div className="shrink-0 mx-6 mt-2 px-3 py-2.5 rounded-md bg-amber-50 border border-amber-200 animate-fade-up">
       <div className="flex items-center gap-2 flex-wrap">
         <span className="text-amber-800 text-[12px] font-body leading-snug">
-          上下文已达 <b>{contextPct}%</b>，当前 provider 不会自动压缩 —— 将在 <b>{secs}s</b> 后自动 /compact。
+          上下文已达 <b>{contextPct}%</b>，当前 provider 不会自动压缩 —— 建议手动压缩(/compact)后再继续。
         </span>
         <button
           onClick={() => { setArmed(false); dismissedRef.current = true; onCompact(); }}
@@ -3526,6 +3496,31 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     ? resolvedModelBase + '[1m]' : resolvedModelBase;
   // 徽章分母:后端解析的真实窗口(与压缩联动同源;官方/无解析=null 走本地兜底表)。
   const resolvedWindow = useResolvedWindow(currentModel);
+  // Desktop/CLI 1M 会话首开继承:jsonl 的 model 永远是裸 id(API 回包不带 [1m],1M 只是
+  // 请求侧 beta 后缀),历史解析恢复不出 1M → 徽章分母/下一条发送都按 200K 走,爆红
+  // 389k/200k(194%) 且发送真会超窗(用户实报:Desktop 用 opus 1M 跑的会话在 GUI 打开即爆红)。
+  // 唯一可靠证据:单次 API 调用的 ctxUsage(input+cache_read+cache_creation)物理上不可能
+  // 超过窗口,若超过名义窗口则该会话必然运行在 1M 上。仅官方 anthropic + claude 系裸模型 +
+  // 无用户显式 pin(pin 裸模型 = 显式关 1m,尊重不复活)时推断;命中即走 syncContext1m
+  // 落到与手动开关同一持久层(localStorage 镜像 + 服务端 prefs + WS 广播),徽章分母与
+  // 发送([1m] 兜底补回,4422)自动一致。第三方([1m] 对自定义模型名无效 #68522)不推断,
+  // 真超窗时徽章照实爆红(诚实警告,BG2)。上限 1_050_000 挡整轮累加的爆表脏值。
+  useEffect(() => {
+    const sid = selectedSession?.sessionId;
+    if (!sid || pinnedModel || context1mFlag || !messages.length) return;
+    const hint = currentProvider?.providerHint;
+    if (hint && hint !== 'anthropic') return;
+    const base = resolvedModelBase || '';
+    if (/\[1m\]/i.test(base) || !/claude|opus|sonnet|haiku/i.test(base)) return;
+    const nominal = nativeContextWindow(base);
+    if (nominal >= 1_000_000) return;
+    const over = messages.some((m) => {
+      const u = m.ctxUsage; // 只认单次调用口径;m.usage 是整轮累加,200K 窗口也能合法超 200K
+      const s = u ? (u.input_tokens || 0) + (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0) : 0;
+      return s > nominal * 1.05 && s <= 1_050_000;
+    });
+    if (over) useStore.getState().syncContext1m(sid, base + '[1m]');
+  }, [selectedSession?.sessionId, messages, pinnedModel, context1mFlag, resolvedModelBase, currentProvider]);
   const modelBySession = useStore((s) => s.modelBySession);
   const containerRef = useRef(null);
   const [autoScroll, setAutoScroll] = useState(true);
@@ -4084,13 +4079,40 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ question: q, sessionId: btwSid || undefined, cwd: btwCwd, model: btwModel || undefined, history: btwHistory }),
     }).then(async (r) => {
-      const d = await r.json().catch(() => ({}));
-      if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
-      setChatMessages((prev) => prev.map((m) => m.uuid === btwUuid
-        ? { ...m, text: d.answer || '(无回答)', pending: false } : m));
+      // 服务端已改 NDJSON 流式({delta}/{done}/{error} 行):逐 delta 追加渲染,对齐主会话
+      // 逐块出字;spawn 前失败仍是 500 JSON,统一走 !r.ok 分支。
+      if (!r.ok) {
+        const d = await r.json().catch(() => ({}));
+        throw new Error(d.error || `HTTP ${r.status}`);
+      }
+      const reader = r.body.getReader();
+      const dec = new TextDecoder();
+      let buf = '';
+      let got = false;
+      const handleLine = (line) => {
+        if (!line.trim()) return;
+        let ev; try { ev = JSON.parse(line); } catch { return; }
+        if (ev.delta) {
+          got = true;
+          setChatMessages((prev) => prev.map((m) => m.uuid === btwUuid
+            ? { ...m, text: m.text + ev.delta, pending: false } : m));
+        } else if (ev.error) throw new Error(ev.error);
+      };
+      for (;;) {
+        const { value, done: eof } = await reader.read();
+        if (value) {
+          buf += dec.decode(value, { stream: true });
+          let idx;
+          while ((idx = buf.indexOf('\n')) >= 0) { handleLine(buf.slice(0, idx)); buf = buf.slice(idx + 1); }
+        }
+        if (eof) break;
+      }
+      handleLine(buf);
+      if (!got) throw new Error('模型无回答');
     }).catch((e) => {
+      // 已有部分输出时保留半截回答,错误缀在其后(超时/断流不清空已渲染内容)。
       setChatMessages((prev) => prev.map((m) => m.uuid === btwUuid
-        ? { ...m, text: '旁问失败：' + e.message, pending: false, error: true } : m));
+        ? { ...m, text: (m.text ? m.text + '\n\n' : '') + '旁问失败：' + e.message, pending: false, error: true } : m));
     });
   }, [getLocalSession, selectedProject, sessionQueueKey, setChatMessages, setStreamOwner]);
 
@@ -6546,7 +6568,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         </div>
       )}
 
-      {/* 第三方 provider 上下文达阈值时的 GUI 侧自动压缩看门狗(原生 auto-compact 对第三方不可靠)。 */}
+      {/* 第三方 provider 上下文达阈值时的 GUI 侧压缩建议横幅(原生 auto-compact 对第三方
+          不可靠;GUI 只提示,由用户点击确认才 /compact,绝不自动触发)。 */}
       <AutoCompactBanner
         key={selectedSession.sessionId || 'draft'}
         contextPct={contextPct}
@@ -7264,7 +7287,9 @@ function ContextBreakdownButton({ contextTokens, contextWindow, contextPct, fmtT
       <button
         onClick={toggle}
         className={`text-[10px] font-mono whitespace-nowrap px-1.5 py-px rounded transition-colors cursor-pointer inline-flex items-center gap-1 ${tone}`}
-        title={info ? '点击查看会话信息与上下文分项明细（/context）' : '点击查看上下文分项明细（/context）'}
+        title={(contextPct > 100
+          ? `当前模型上下文窗口为 ${winLabel}，该会话已使用约 ${fmtTok(contextTokens)} —— 下一条消息发送将超出窗口，可能触发压缩或被上游拒绝。可切换更大窗口的模型，或手动 /compact 压缩。\n`
+          : '') + (info ? '点击查看会话信息与上下文分项明细（/context）' : '点击查看上下文分项明细（/context）')}
       >
         {zero
           ? (info?.headerModel

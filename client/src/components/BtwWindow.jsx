@@ -12,6 +12,13 @@ import { confirmDialog } from '../utils/confirmDialog.jsx';
 // 区分"切会话"vs"失焦",不踩 per-pane-window-effect-global-state-leak 家族坑。
 //
 // 布局遵循 sticky-fails-under-transform-modal-flex-column:flex 列三段,不用 sticky footer。
+//
+// 浮动窗固定宽 360;窄格吸附阈值 = 360(窗宽) + 26(rightInset 最小让位) + 8(左缘余量) ≈ 394,
+// 取 400:所属窗格宽 < 400 时浮动放不下,切换成手机端同款底部抽屉形态;拖宽自动恢复浮动
+// (pos 状态保留不丢)。
+const BTW_W = 360;
+const BTW_DOCK_W = 400;
+
 export default function BtwWindow({
   thread, onSend, onClearThread,
   sessionKey, paneIsActive = true, suppressed = false, mobile = false, openSignal = 0, toggleSignal = 0, onUnreadChange,
@@ -70,6 +77,10 @@ export default function BtwWindow({
   // 展开窗:浮在输入框上方(bottomInset,主动打开的浮层,可短暂遮消息)。收起态入口已移到输入框
   // 工具行的「旁问」按钮(方案A),不再有右下角浮标——从结构上避开与消息队列条/横幅抢右下角地皮。
   const [bottomInset, setBottomInset] = useState(12);
+  // 所属窗格宽度(布局 px):分屏拖窄 < BTW_DOCK_W 时切吸附形态。0=未测(首帧当浮动,
+  // useLayoutEffect 在 paint 前测好,不闪)。per-pane 本地 state,分屏各格互不干扰。
+  const [paneW, setPaneW] = useState(0);
+  const docked = mobile || (paneW > 0 && paneW < BTW_DOCK_W);
   // useLayoutEffect(非 useEffect):收起态 rootRef 未挂载、inset 停在默认;每个 pane 首次展开时
   // 若用 useEffect(paint 后跑),首帧会用 bottomInset=12 把窗口贴 pane 底盖住输入框、随后才上移
   // 修正=闪跳。改 layout effect 在 paint 前测好位置,首帧即正确。
@@ -80,6 +91,18 @@ export default function BtwWindow({
     const calc = () => {
       const pw = parent.clientWidth || 0;
       if (!pw) return;
+      setPaneW(pw);
+      // 越界夹紧:分屏布局/窗格尺寸变化后,把拖拽过的浮动窗夹回窗格可见区(症状:开分屏后
+      // 旁问窗停在旧绝对坐标被格边界裁掉)。按固定宽/封顶高常量算,不读 el 实测(吸附态
+      // el 宽=格宽-16,用实测会污染保留着的浮动坐标)。
+      const ph = parent.clientHeight || 0;
+      const bh = Math.min(460, ph * 0.6);
+      setPos((p) => {
+        if (!p) return p;
+        const left = Math.max(0, Math.min(pw - BTW_W, p.left));
+        const top = Math.max(0, Math.min(ph - bh, p.top));
+        return (left === p.left && top === p.top) ? p : { left, top };
+      });
       // --content-max 是 clamp(...) 表达式,parseFloat 取不到 px;用 probe(挂到 pane 内、同为
       // 布局 px、与 pw 同单位不受 app 缩放影响)读 clientWidth 解析出真实 content-max。
       const probe = document.createElement('div');
@@ -128,7 +151,7 @@ export default function BtwWindow({
 
   // 拖动:pointer 事件 + setPointerCapture(webview 惯例)。限制在 pane 内(clamp)。
   const startDrag = (e) => {
-    if (mobile) return;
+    if (docked) return;
     const el = rootRef.current;
     const parent = el?.offsetParent;
     if (!el || !parent) return;
@@ -155,11 +178,12 @@ export default function BtwWindow({
   // 展开态:桌面浮窗(可拖) / 手机底部抽屉。z-46:高于子代理面板(z-40),低于全局授权 modal(z-50+)。
   // #7 固定高度、内部滚动:原 maxHeight 让窗口随问答变多而长高(用户困惑"越来越大")。改
   // 固定 height(占面板 60%、封顶 460px),内容超出在窗内滚动,高度稳定不跳。
-  const posStyle = mobile
+  // docked(手机 或 窄分屏格 < BTW_DOCK_W):底部抽屉形态,放弃自由浮动;pos 保留,格子拖宽恢复。
+  const posStyle = docked
     ? { position: 'absolute', left: 8, right: 8, bottom: 8, height: '68%', zIndex: 46 }
     : pos
-    ? { position: 'absolute', left: pos.left, top: pos.top, width: 360, height: 'min(60%, 460px)', zIndex: 46 }
-    : { position: 'absolute', right: rightInset, bottom: bottomInset, width: 360, height: 'min(60%, 460px)', zIndex: 46 };
+    ? { position: 'absolute', left: pos.left, top: pos.top, width: BTW_W, height: 'min(60%, 460px)', zIndex: 46 }
+    : { position: 'absolute', right: rightInset, bottom: bottomInset, width: BTW_W, height: 'min(60%, 460px)', zIndex: 46 };
 
   return (
     <div ref={rootRef} style={posStyle}
@@ -167,7 +191,7 @@ export default function BtwWindow({
       {/* 头部(拖动手柄) */}
       <div
         onPointerDown={startDrag} onPointerMove={onDrag} onPointerUp={endDrag}
-        className={`shrink-0 flex items-center gap-2 px-3 py-2 border-b border-canvas-deep bg-canvas-warm/60 select-none ${mobile ? '' : 'cursor-move'}`}
+        className={`shrink-0 flex items-center gap-2 px-3 py-2 border-b border-canvas-deep bg-canvas-warm/60 select-none ${docked ? '' : 'cursor-move'}`}
       >
         <MessageSquare size={13} className="text-accent shrink-0" />
         <span className="text-[12px] font-body text-ink flex-1">旁问</span>
