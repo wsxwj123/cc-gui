@@ -7303,7 +7303,9 @@ function ContextBreakdownButton({ contextTokens, contextWindow, contextPct, fmtT
       <button
         onClick={toggle}
         className={`text-[10px] font-mono whitespace-nowrap px-1.5 py-px rounded transition-colors cursor-pointer inline-flex items-center gap-1 ${tone}`}
-        title={info ? '点击查看会话信息与上下文分项明细（/context）' : '点击查看上下文分项明细（/context）'}
+        title={(contextPct > 100
+          ? `当前模型上下文窗口为 ${winLabel}，该会话已使用约 ${fmtTok(contextTokens)} —— 下一条消息发送将超出窗口，可能触发压缩或被上游拒绝。可切换更大窗口的模型，或手动 /compact 压缩。\n`
+          : '') + (info ? '点击查看会话信息与上下文分项明细（/context）' : '点击查看上下文分项明细（/context）')}
       >
         {zero
           ? (info?.headerModel
