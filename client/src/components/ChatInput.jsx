@@ -250,6 +250,14 @@ export function ChatInput({ onSend, onStop, onAccelerate, onBackground, suggesti
     ? Object.values(s.bgTasks || {}).some((t) => t && t.sessionId === sessionId
         && !TODO_BG_TERMINAL.includes(t.status) && t.livePhase !== 'idle')
     : false));
+  // 停止按钮「工作中」判据。根因:服务端 4s 去抖会在子代理仍活跃 / 父进程续开回合弹权限卡时,
+  // 过早给主流发 done → isStreaming 转 false;只看 isStreaming 就「转圈还在、停止按钮却没了」。
+  // 含主流 / 活跃子代理(前台 Task,与转圈同源)/ 本会话待处理授权卡 —— 这些 onStop 都能停
+  // (interrupt 前台流+子代理 / dropPendingForSession)。刻意【不含 bgWorking】(run_in_background
+  // 后台长任务):onStop 停不了它(需进程管理区 stopTask),显示「停止」会误导且挡住「发送」;
+  // 后台任务另有「后台工作中」amber 提示,此态仍显「发送」可继续发消息。
+  const hasPendingPerm = useStore((s) => (sessionId ? (s.pendingPermissions || []).some((p) => p.sessionId === sessionId) : false));
+  const working = isStreaming || agentsWorking || hasPendingPerm;
   const reclaimRemote = async () => {
     if (!sessionId) return;
     try {
@@ -1050,9 +1058,9 @@ export function ChatInput({ onSend, onStop, onAccelerate, onBackground, suggesti
               </button>
             )}
             <div className="flex-1 min-w-[8px]" />
-            {isStreaming ? (
+            {/* 主流式中:入队(当前消息发送完后自动发出)+ 转后台。仅前台流有意义,故仍看 isStreaming。 */}
+            {isStreaming && (
               <>
-                {/* During streaming: input gets queued, "Send" button enqueues. */}
                 <button
                   onClick={handleSend}
                   disabled={!text.trim() && attachments.length === 0}
@@ -1061,7 +1069,6 @@ export function ChatInput({ onSend, onStop, onAccelerate, onBackground, suggesti
                 >
                   <Send size={13} /><span className="max-md:hidden">入队</span>
                 </button>
-                {/* 修正批#1b 转后台:⋮ 已删,流式时的独立按钮升级为全平台唯一入口。 */}
                 {onBackground && (
                   <button
                     onClick={onBackground}
@@ -1071,17 +1078,19 @@ export function ChatInput({ onSend, onStop, onAccelerate, onBackground, suggesti
                     <ArrowDownToLine size={11} />
                   </button>
                 )}
-                {/* Small rounded-rect stop button, CLI-style. Always-clickable
-                    whether streaming locally or only running in background. */}
-                <button
-                  onClick={onStop}
-                  className="shrink-0 h-8 px-3 max-md:px-2.5 rounded-md bg-ink/90 hover:bg-ink text-canvas flex items-center justify-center gap-1.5 max-md:gap-0 transition-colors text-[11px] font-medium"
-                  title="停止生成"
-                >
-                  <Square size={11} className="fill-current" />
-                  <span className="max-md:hidden">停止</span>
-                </button>
               </>
+            )}
+            {/* 停止按钮按「工作中」显示(主流式 / 活跃子代理 / 后台任务 / 待处理授权卡),恒表明仍在
+                工作 —— 修复「等子代理或弹权限卡时停止按钮消失」。onStop 实现(停止链路)不动。 */}
+            {working ? (
+              <button
+                onClick={onStop}
+                className="shrink-0 h-8 px-3 max-md:px-2.5 rounded-md bg-ink/90 hover:bg-ink text-canvas flex items-center justify-center gap-1.5 max-md:gap-0 transition-colors text-[11px] font-medium"
+                title="停止生成"
+              >
+                <Square size={11} className="fill-current" />
+                <span className="max-md:hidden">停止</span>
+              </button>
             ) : (
               <button
                 onClick={handleSend}
