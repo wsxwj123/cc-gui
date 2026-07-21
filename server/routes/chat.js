@@ -1506,7 +1506,13 @@ router.post('/chat/btw', async (req, res) => {
     try { killProcessTree(proc); } catch {}
     if (res.writableEnded || res.destroyed) return;
     if (!emitted && resultText) { send({ delta: resultText }); emitted = true; }
-    if (emitted) send({ done: true });
+    if (emitted) {
+      // 流中途 API 错误(cli-stream-json-error-shape:is_error、文案在 result):已发过
+      // delta 也要补发 {error} 行再收尾,否则错误被 {done} 吞掉,用户只见半截答案无提示。
+      // 前端 handleLine 收到 {error} 抛出→catch 把错误文案缀在已渲染的半截输出之后(4138)。
+      if (resultErr) send({ error: resultErr });
+      send({ done: true });
+    }
     else if (headersSent) send({ error: resultErr || '旁问失败:超时或模型无回答' });
     else return res.status(500).json({ error: resultErr || '旁问失败:超时或模型无回答' });
     res.end();
