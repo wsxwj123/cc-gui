@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { ChevronDown, ChevronRight, Loader2, Maximize2, CheckCircle2, XCircle, CircleSlash } from 'lucide-react';
+import { ChevronDown, ChevronRight, Loader2, Maximize2, CheckCircle2, XCircle, CircleSlash, Square } from 'lucide-react';
 import { useStore } from '../../stores/sessionStore.js';
 import { MarkdownRenderer } from '../MarkdownRenderer.jsx';
 import { extractToolResultText } from '../../utils/toolResult.js';
@@ -143,6 +143,19 @@ export function TaskCard({ toolCall }) {
             </div>
           )}
         </div>
+        {/* 部件①单卡停止:仅有活 agent 且非终态(isWorking)时常显。停止走 store action
+            (反查 pid + stop-task 端点 + 乐观收尾);stopPropagation 防触发外层展开。 */}
+        {isWorking && agent && (
+          <span
+            role="button"
+            tabIndex={0}
+            onClick={(e) => { e.stopPropagation(); useStore.getState().stopSingleTask(agent?.sessionId || paneSession?.sessionId || null, toolCall.id); }}
+            className="shrink-0 p-1 rounded text-ink-faint hover:text-error hover:bg-error/10 transition-colors cursor-pointer"
+            title="停止该子代理/teammate"
+          >
+            <Square size={12} className="fill-current" />
+          </span>
+        )}
         {/* 悬停浮现:子代理窗口入口(#9) + 展开箭头;触屏无 hover,常显淡态 */}
         <span className={`shrink-0 flex items-center gap-0.5 transition-opacity ${expanded ? 'opacity-100' : 'opacity-0 group-hover/tc:opacity-100 max-md:opacity-60'}`}>
           <span

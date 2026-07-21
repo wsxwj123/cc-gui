@@ -1279,6 +1279,29 @@ export const useStore = create((set, get) => ({
     bgTasks: { ...s.bgTasks, [id]: { ...(s.bgTasks[id] || { id }), ...patch } },
   })),
   clearAgents: () => set({ activeAgents: {} }),
+  // 部件①单卡精确停止:停某一个子代理/teammate。做成 store action 而非 App handler+props——
+  // TaskCard 深嵌在 TurnBubble(3 处渲染)下,透传要改 TurnBubble(不在方案文件清单里),
+  // 且卡片本就自带 fetch+getState 直调风格(见 TaskCard.openAgentView)。
+  //   1. 乐观收尾:非终态目标即刻标 stopped(第三方 provider 不发 task_notification 也能收敛);
+  //      保留 taskManaged,真权威终态到达时 finalizeAgent(authoritative) 仍可覆盖为真实状态。
+  //   2. 复用 stopSessionProcs 的 pid 解析(按 sessionId 扇出该会话全部 slot),POST stop-task
+  //      {toolUseId, sessionId};只属主且会话匹配的 slot stopped:true,其余无害 no-op。
+  stopSingleTask: async (sessionId, toolUseId) => {
+    if (!toolUseId) return;
+    const st = get();
+    const ag = st.activeAgents[toolUseId];
+    if (ag && !['done', 'error', 'stopped'].includes(ag.status)) {
+      st.upsertAgent(toolUseId, { status: 'stopped', finishedAt: Date.now() });
+    }
+    try {
+      const d = await fetch('/api/agents/active').then((r) => r.json());
+      const procs = (d.agents || []).filter((a) => a.kind === 'chat-process' && a.sessionId === sessionId && a.stoppable === true);
+      await Promise.allSettled(procs.map((a) => fetch(`/api/chat/${a.pid}/stop-task`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ toolUseId, sessionId }),
+      })));
+    } catch {}
+  },
   // #9/AZ6 子代理会话窗口:按 tab 记录在主区打开查看的子代理 id(null = 看正常会话)。
   setViewingAgent: (tab, id) => set((s) => ({
     viewingAgentByTab: { ...s.viewingAgentByTab, [tab]: id || null },

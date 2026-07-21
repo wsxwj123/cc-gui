@@ -1,5 +1,5 @@
 import React from 'react';
-import { Bot, GitBranch, Loader2, User } from 'lucide-react';
+import { Bot, GitBranch, Loader2, Square, User } from 'lucide-react';
 import { useStore } from '../stores/sessionStore.js';
 import { MarkdownRenderer } from './MarkdownRenderer.jsx';
 import { CoworkBlocks } from './TurnBubble.jsx';
@@ -47,6 +47,7 @@ export function SubagentView({ agentId, parentTitle, parentSessionId = null, onB
   const blocks = agent.blocks || [];
   const status = agent.status || 'working';
   const working = status === 'working' || status === 'starting';
+  const nonTerminal = !['done', 'error', 'stopped'].includes(status);
 
   const statusMeta = {
     starting: { label: '启动中', cls: 'text-blue-600' },
@@ -100,6 +101,17 @@ export function SubagentView({ agentId, parentTitle, parentSessionId = null, onB
               {working && <Loader2 size={10} className="animate-spin" />}
               {statusMeta.label}
             </span>
+            {/* 部件①单卡停止:非终态时显示。停止链路走 store action(反查 pid + stop-task 端点 +
+                乐观收尾)。sessionId 优先取 agent 捕获值,回退母会话。 */}
+            {nonTerminal && (
+              <button
+                onClick={() => useStore.getState().stopSingleTask(agent.sessionId || parentSessionId, agentId)}
+                className="px-1.5 py-px rounded bg-canvas-deep text-ink-muted hover:text-error hover:bg-error/10 flex items-center gap-1 transition-colors font-body"
+                title="停止该子代理/teammate"
+              >
+                <Square size={9} className="fill-current" />停止
+              </button>
+            )}
             {description && <span className="truncate font-body">{description}</span>}
           </div>
         </div>
