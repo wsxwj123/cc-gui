@@ -408,7 +408,7 @@ export function MCPPanel() {
           MCP 服务器
           <div className="flex-1" />
           <button onClick={() => setForm({ add: true })}
-            className="flex items-center gap-1 px-2 py-1 rounded-md bg-accent text-white text-[10px] font-medium hover:bg-accent/90 transition-colors normal-case tracking-normal">
+            className="flex items-center gap-1 px-2 py-1 rounded-md bg-accent text-on-accent text-[10px] font-medium hover:bg-accent/90 transition-colors normal-case tracking-normal">
             <Plus size={11} />添加
           </button>
         </h3>
@@ -514,7 +514,7 @@ export function MCPPanel() {
             <div>没有配置 MCP 服务器</div>
             {/* 空态 CTA:直接打开添加表单(内含内置推荐模板,选模板自动填好命令/env) */}
             <button onClick={() => setForm({ add: true })}
-              className="inline-flex items-center gap-1 px-3 py-1.5 rounded-md bg-accent text-white text-[11px] font-medium hover:bg-accent/90 transition-colors">
+              className="inline-flex items-center gap-1 px-3 py-1.5 rounded-md bg-accent text-on-accent text-[11px] font-medium hover:bg-accent/90 transition-colors">
               <Plus size={11} />添加 MCP 服务器(含内置推荐)
             </button>
           </div>
@@ -529,7 +529,7 @@ export function MCPPanel() {
           <div className="flex-1" />
           {/* 对齐 MCP 服务器的交互:推荐安装项收进"添加"弹层,不再平铺在面板上 */}
           <button onClick={() => { setPluginErr(''); setPluginAddOpen(true); }}
-            className="flex items-center gap-1 px-2 py-1 rounded-md bg-accent text-white text-[10px] font-medium hover:bg-accent/90 transition-colors normal-case tracking-normal">
+            className="flex items-center gap-1 px-2 py-1 rounded-md bg-accent text-on-accent text-[10px] font-medium hover:bg-accent/90 transition-colors normal-case tracking-normal">
             <Plus size={11} />添加
           </button>
         </h3>
@@ -717,7 +717,7 @@ export function MCPPanel() {
                                   </span>
                                 ) : (
                                   <button onClick={() => installPlugin({ id: r.name, name: r.name, marketplace: r.marketplace })} disabled={!!installingPlugin}
-                                    className="shrink-0 flex items-center gap-1 px-2.5 py-1 rounded text-[12px] font-medium text-white bg-accent hover:bg-accent-hover disabled:opacity-50">
+                                    className="shrink-0 flex items-center gap-1 px-2.5 py-1 rounded text-[12px] font-medium text-on-accent bg-accent hover:bg-accent-hover disabled:opacity-50">
                                     {busy ? <RefreshCw size={12} className="animate-spin" /> : <Download size={12} />}
                                     {busy ? '安装中…' : '安装'}
                                   </button>
@@ -758,7 +758,7 @@ export function MCPPanel() {
                         </span>
                       ) : (
                         <button onClick={() => installPlugin(p)} disabled={!!installingPlugin}
-                          className="shrink-0 flex items-center gap-1 px-2.5 py-1 rounded text-[12px] font-medium text-white bg-accent hover:bg-accent-hover disabled:opacity-50">
+                          className="shrink-0 flex items-center gap-1 px-2.5 py-1 rounded text-[12px] font-medium text-on-accent bg-accent hover:bg-accent-hover disabled:opacity-50">
                           {busy ? <RefreshCw size={12} className="animate-spin" /> : <Download size={12} />}
                           {busy ? '安装中…' : '安装'}
                         </button>

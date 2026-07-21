@@ -523,7 +523,7 @@ function PermissionCard({ req, onResolve, onWhitelistAndAllow, onAlwaysAllow, on
         <button
           disabled={processing}
           onClick={doAllow}
-          className="px-3 py-1.5 rounded-md text-[12px] font-medium text-white bg-accent hover:opacity-90 disabled:opacity-50 inline-flex items-center gap-1.5"
+          className="px-3 py-1.5 rounded-md text-[12px] font-medium text-on-accent bg-accent hover:opacity-90 disabled:opacity-50 inline-flex items-center gap-1.5"
           title="Enter"
         >
           {processing && <Loader2 size={11} className="animate-spin" />}

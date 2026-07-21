@@ -272,7 +272,7 @@ export function SkillsPanel() {
   const tabBtn = (id, label, count) => (
     <button onClick={() => setTab(id)}
       className={`flex items-center gap-1.5 px-3 py-1.5 text-[12px] font-body rounded-lg transition-colors ${
-        tab === id ? 'bg-accent text-white' : 'text-ink-muted hover:text-ink hover:bg-canvas-deep'}`}>
+        tab === id ? 'bg-accent text-on-accent' : 'text-ink-muted hover:text-ink hover:bg-canvas-deep'}`}>
       {label}{typeof count === 'number' && <span className="font-mono opacity-70">{count}</span>}
     </button>
   );
@@ -367,7 +367,7 @@ export function SkillsPanel() {
               {/* 空态 CTA:直接进「导入」页从市场装,不让用户面对死胡同 */}
               {!loadingLocal && !query.trim() && (
                 <button onClick={() => setTab('import')}
-                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-accent text-white text-[12px] font-medium hover:bg-accent/90 transition-colors">
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-accent text-on-accent text-[12px] font-medium hover:bg-accent/90 transition-colors">
                   <CloudDownload size={13} />从市场导入技能
                 </button>
               )}
@@ -424,7 +424,7 @@ export function SkillsPanel() {
               placeholder="owner/repo、@分支、或 GitHub/Gitee 仓库地址(含 /tree/分支)"
               className="flex-1 min-w-0 bg-canvas border border-canvas-deep rounded-md px-2 py-1 text-[11px] text-ink placeholder-ink-ghost focus:outline-none focus:border-accent/40 font-mono" />
             <button onClick={loadCustomRepo} disabled={loadingOff || !customRepo.trim()}
-              className="shrink-0 px-2.5 py-1 rounded-md bg-accent text-white text-[11px] font-body hover:bg-accent-hover disabled:opacity-50">
+              className="shrink-0 px-2.5 py-1 rounded-md bg-accent text-on-accent text-[11px] font-body hover:bg-accent-hover disabled:opacity-50">
               拉取仓库
             </button>
           </div>
@@ -485,7 +485,7 @@ export function SkillsPanel() {
 
           <button onClick={() => runImport(notInstalled.map((s) => s.id), false, 'all')}
             disabled={loadingOff || busy.size > 0 || notInstalled.length === 0}
-            className="w-full flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg bg-accent text-white text-[12px] font-medium hover:bg-accent/90 transition-colors disabled:opacity-40 disabled:cursor-not-allowed">
+            className="w-full flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg bg-accent text-on-accent text-[12px] font-medium hover:bg-accent/90 transition-colors disabled:opacity-40 disabled:cursor-not-allowed">
             {busy.has('all') ? <Loader2 size={13} className="animate-spin" /> : <CloudDownload size={13} />}
             {loadingOff ? '加载中…' : notInstalled.length === 0 ? '此源已全部安装' : `一键导入全部(${notInstalled.length})`}
           </button>

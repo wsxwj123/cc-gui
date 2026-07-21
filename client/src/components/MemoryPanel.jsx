@@ -123,7 +123,7 @@ function ClaudeMdEditor({ cwd }) {
         <div className="flex items-center justify-end gap-2 px-3 py-2 border-t border-canvas-deep shrink-0">
           {saved && <span className="text-[11px] text-emerald-600 flex items-center gap-1"><Check size={11} />已保存</span>}
           <button onClick={save} disabled={saving || !dirty}
-            className="flex items-center gap-1.5 px-3 py-1.5 text-[12px] rounded-md transition-colors disabled:opacity-40 text-white bg-accent hover:bg-accent/90">
+            className="flex items-center gap-1.5 px-3 py-1.5 text-[12px] rounded-md transition-colors disabled:opacity-40 text-on-accent bg-accent hover:bg-accent/90">
             <Save size={12} />{saving ? '保存中…' : '保存'}
           </button>
         </div>
@@ -224,7 +224,7 @@ function AutoMemoryTab({ cwd }) {
         <div className="flex items-center justify-end gap-2 px-3 py-2 border-t border-canvas-deep shrink-0">
           {saved && <span className="text-[11px] text-emerald-600 flex items-center gap-1"><Check size={11} />已保存</span>}
           <button onClick={save} disabled={saving || draft === editing.content}
-            className="flex items-center gap-1.5 px-3 py-1.5 text-[12px] rounded-md transition-colors disabled:opacity-40 text-white bg-accent hover:bg-accent/90">
+            className="flex items-center gap-1.5 px-3 py-1.5 text-[12px] rounded-md transition-colors disabled:opacity-40 text-on-accent bg-accent hover:bg-accent/90">
             <Save size={12} />{saving ? '保存中…' : '保存'}
           </button>
         </div>

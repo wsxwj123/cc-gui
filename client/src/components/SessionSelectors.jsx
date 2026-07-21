@@ -445,7 +445,7 @@ export function ModelSelector({ compact = false, permKey = null, tourAnchor = fa
                 placeholder="自定义模型 ID..."
                 className="flex-1 bg-canvas-warm border border-canvas-deep rounded px-2 py-1 text-xs font-mono text-ink focus:outline-none focus:border-accent/40" />
               <button onClick={handleCustomSubmit} disabled={!customInput.trim()}
-                className="px-2 py-1 text-[10px] bg-accent text-white rounded hover:bg-accent-hover disabled:bg-canvas-deep disabled:text-ink-ghost transition-colors shrink-0">
+                className="px-2 py-1 text-[10px] bg-accent text-on-accent rounded hover:bg-accent-hover disabled:bg-canvas-deep disabled:text-ink-ghost transition-colors shrink-0">
                 应用
               </button>
             </div>
@@ -463,7 +463,7 @@ export function ModelSelector({ compact = false, permKey = null, tourAnchor = fa
               </div>
             </div>
             <span className={`text-[9px] px-1.5 py-0.5 rounded font-mono shrink-0 ${
-              has1m ? 'bg-accent text-white' : 'bg-canvas-deep text-ink-faint'}`}>
+              has1m ? 'bg-accent text-on-accent' : 'bg-canvas-deep text-ink-faint'}`}>
               {has1m ? '已开启' : '关闭'}
             </span>
           </button>
@@ -483,7 +483,7 @@ export function ModelSelector({ compact = false, permKey = null, tourAnchor = fa
                       </span>
                     )}
                     {m.context1m && (
-                      <span className="text-[8.5px] px-1 py-px bg-accent text-white rounded font-mono"
+                      <span className="text-[8.5px] px-1 py-px bg-accent text-on-accent rounded font-mono"
                         title="1M tokens 上下文">
                         1M
                       </span>
@@ -506,7 +506,7 @@ export function ModelSelector({ compact = false, permKey = null, tourAnchor = fa
                 <div className="text-xs font-medium text-ink font-body flex items-center gap-1.5">
                   {m.name}
                   <span className="text-[8.5px] px-1 py-px bg-accent-subtle text-accent rounded font-mono">自定义</span>
-                  {m.context1m && <span className="text-[8.5px] px-1 py-px bg-accent text-white rounded font-mono">1M</span>}
+                  {m.context1m && <span className="text-[8.5px] px-1 py-px bg-accent text-on-accent rounded font-mono">1M</span>}
                 </div>
                 <div className="text-[10px] text-ink-faint font-mono truncate">{m.id}</div>
               </button>
