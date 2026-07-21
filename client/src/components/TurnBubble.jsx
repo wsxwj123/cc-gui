@@ -243,13 +243,28 @@ function isPlanApproved(toolCall) {
   return /用户已批准此计划/.test(text);
 }
 
+// O1 孪生:计划审批里「需要修改(追加反馈)」和「取消」都走 deny+feedback → CLI 写 isError=true,
+// 但都是正常流程不是失败。后端 deny message 固定含尾串「再次调用 ExitPlanMode 重新提交」(refine
+// 指引),取消额外以「用户取消计划」开头。据此把两者从错误态摘除并给友好文案。真正的工具失败文本
+// 不含该尾串,仍正确显红。
+function planDenyState(toolCall) {
+  if (toolCall?.name !== 'ExitPlanMode') return null;
+  const content = toolCall?.result?.content;
+  const text = typeof content === 'string'
+    ? content
+    : (Array.isArray(content) ? content.map((c) => c?.text || '').join('') : '');
+  if (!toolCall?.result?.isError || !/再次调用 ExitPlanMode 重新提交/.test(text)) return null;
+  return /^\s*用户取消计划/.test(text) ? 'cancelled' : 'refining';
+}
+
 // ─── Single Tool Call Row ──────────────────────────────────────
 function ToolCallRow({ toolCall, onRetryTool }) {
   const [expanded, setExpanded] = useState(false);
   const Icon = getToolIcon(toolCall.name);
   const askAnswered = isAskAnswered(toolCall);
   const planApproved = isPlanApproved(toolCall);
-  const hasError = toolCall.result?.isError && !askAnswered && !planApproved;
+  const planDeny = planDenyState(toolCall); // 'refining'(追加修改)| 'cancelled'(取消)| null
+  const hasError = toolCall.result?.isError && !askAnswered && !planApproved && !planDeny;
   const preview = formatInputPreview(toolCall.input);
 
   return (
@@ -276,6 +291,10 @@ function ToolCallRow({ toolCall, onRetryTool }) {
               <span className="text-[10px] text-ink-faint">已停止</span>
             ) : planApproved ? (
               <span className="text-[10px] text-success">✅ 计划已批准</span>
+            ) : planDeny === 'refining' ? (
+              <span className="text-[10px] text-accent">准备修改</span>
+            ) : planDeny === 'cancelled' ? (
+              <span className="text-[10px] text-ink-faint">已取消</span>
             ) : askAnswered ? (
               <span className="text-[10px] text-success">已答</span>
             ) : (
