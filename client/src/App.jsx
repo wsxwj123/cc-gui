@@ -6971,10 +6971,14 @@ function ProviderManager() {
                     )}
                     {/* Click to switch (default model). The full model list lives in
                         the ModelSelector after switching. */}
+                    {/* 低危#2:窄屏(322px 手机抽屉)徽章多时名称被 shrink-0 徽章挤没。
+                        窄视口下让名称独占第一行(强制占满、全宽可读、极长才截断),模型数
+                        /type/来源徽章换行到第二行。桌面弹窗在宽视口不触发,形态不变。
+                        (注:类名写在下方 className,不写进本注释避免 JIT 误扫成全局工具类) */}
                     <button disabled={switching}
                       onClick={() => (ms.selMode && p.source === 'custom' ? ms.toggle(p.id) : switchTo(p.id))}
-                      className={`flex-1 min-w-0 text-left flex items-center gap-2 ${switching ? 'opacity-50' : ''}`}>
-                      <span className={`flex-1 text-xs font-body truncate ${isCur(p) ? 'text-accent font-medium' : 'text-ink'}`}>{p.name}</span>
+                      className={`flex-1 min-w-0 text-left flex items-center gap-2 max-md:flex-wrap ${switching ? 'opacity-50' : ''}`}>
+                      <span title={p.name} className={`flex-1 min-w-0 max-md:!basis-full text-xs font-body truncate ${isCur(p) ? 'text-accent font-medium' : 'text-ink'}`}>{p.name}</span>
                       {p.models?.length > 0 && <span className="text-[9px] px-1 py-px bg-canvas-deep text-ink-faint rounded font-mono shrink-0">{p.models.length} 模型</span>}
                       {p.source === 'custom' && p.type && <span className="text-[9px] px-1 py-px bg-canvas-deep text-ink-faint rounded font-mono shrink-0">{p.type}</span>}
                       <ProviderSourceBadge p={p} />
