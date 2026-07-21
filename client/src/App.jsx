@@ -63,8 +63,9 @@ import {
   Sun, Moon, Monitor, Bot, Camera, History, Loader2, Shield, FolderTree,
   Archive, ArchiveRestore, Trash2, EyeOff, Columns2, Smartphone, Pencil, Type, Palette,
   Menu, SquarePen, Gauge, Cpu, CheckCircle2, BookText, Sparkles, HelpCircle, Pin,
-  Download, ClipboardCopy, LayoutGrid, MoreHorizontal,
+  Download, ClipboardCopy, LayoutGrid, MoreHorizontal, Star,
 } from 'lucide-react';
+import { buildFontEntries, groupFonts, detectFonts, platformCandidates, queryLocalFontFamilies } from './utils/systemFonts.js';
 import { copyText } from './utils/clipboard.js';
 
 // ── Per-session shadow-git checkpoints ──────────────────────────
@@ -274,6 +275,81 @@ const TONES = [
   { id: 'auto', label: '跟随系统', Icon: Monitor },
 ];
 
+// Shared reading-font picker (同源体,桌面弹层 + 手机页共用)。枚举本设备可用字体
+// (挂载时白名单 canvas 探测,永远可用;可选点按走 queryLocalFonts 拉全量,仅
+// Chromium 桌面支持且需授权),追加在内置预设之后;收藏(per-device)置顶,带搜索、
+// 滚动、每项以自身字体渲染预览。跨设备:各端枚举各自的字体(手机看手机的)。
+function FontPicker() {
+  const readingFont = useStore((s) => s.readingFont);
+  const setReadingFont = useStore((s) => s.setReadingFont);
+  const favorites = useStore((s) => s.favoriteFonts);
+  const toggleFav = useStore((s) => s.toggleFavoriteFont);
+  const [systemFamilies, setSystemFamilies] = useState([]);
+  const [query, setQuery] = useState('');
+  const [enumerating, setEnumerating] = useState(false);
+  const [enumerated, setEnumerated] = useState(false);
+
+  // Whitelist probe on mount — cheap, works in every webview incl. WKWebView.
+  useEffect(() => {
+    try { setSystemFamilies(detectFonts(platformCandidates())); } catch { /* keep builtins only */ }
+  }, []);
+
+  // Optional full enumeration (this click is the required user gesture). Graceful:
+  // null = unsupported / permission denied → keep the probed list, no error surfaced.
+  const enumerateAll = async () => {
+    setEnumerating(true);
+    try {
+      const fams = await queryLocalFontFamilies();
+      if (fams && fams.length) setSystemFamilies(fams);
+      setEnumerated(true);
+    } finally { setEnumerating(false); }
+  };
+
+  const entries = useMemo(() => buildFontEntries(systemFamilies), [systemFamilies]);
+  const groups = useMemo(() => groupFonts(entries, favorites, query), [entries, favorites, query]);
+  const canEnumerate = typeof window !== 'undefined' && typeof window.queryLocalFonts === 'function';
+  const nothing = !groups.favorites.length && !groups.builtins.length && !groups.systems.length;
+
+  const renderRow = (e) => {
+    const selected = readingFont === e.key;
+    const faved = favorites.includes(e.key);
+    return (
+      <div key={e.key} onClick={() => setReadingFont(e.key)}
+        className={`flex items-center gap-2 rounded-lg px-2 py-1.5 cursor-pointer transition-colors ${selected ? 'bg-accent/12' : 'hover:bg-canvas-warm'}`}>
+        <span className="flex-1 min-w-0 truncate text-[13px] text-ink" style={{ fontFamily: e.css }} title={e.name}>{e.name}</span>
+        {selected && <Check size={14} className="text-accent shrink-0" />}
+        <button onClick={(ev) => { ev.stopPropagation(); toggleFav(e.key); }}
+          className="shrink-0 p-0.5 text-ink-faint hover:text-amber-500" title={faved ? '取消收藏' : '收藏（置顶）'}>
+          <Star size={14} className={faved ? 'fill-amber-400 text-amber-400' : ''} />
+        </button>
+      </div>
+    );
+  };
+  const label = (text) => <div key={`l-${text}`} className="px-2 pt-2 pb-0.5 text-[9px] uppercase tracking-wider text-ink-faint font-body">{text}</div>;
+
+  return (
+    <div className="space-y-1.5">
+      <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="搜索字体…"
+        className="w-full text-[11px] font-body rounded-lg border border-canvas-deep bg-canvas px-2.5 py-1.5 text-ink placeholder-ink-ghost focus:outline-none focus:border-accent" />
+      <div className="max-h-[240px] overflow-y-auto -mx-0.5 px-0.5">
+        {groups.favorites.length > 0 && [label('收藏'), ...groups.favorites.map(renderRow)]}
+        {groups.builtins.length > 0 && [label('内置字体'), ...groups.builtins.map(renderRow)]}
+        {groups.systems.length > 0 && [label('系统字体（本设备）'), ...groups.systems.map(renderRow)]}
+        {nothing && <div className="px-2 py-4 text-[11px] text-ink-faint text-center font-body">没有匹配的字体</div>}
+      </div>
+      {canEnumerate && !enumerated && (
+        <button onClick={enumerateAll} disabled={enumerating}
+          className="w-full text-[10px] font-body rounded-lg border border-canvas-deep bg-canvas-warm px-2 py-1.5 text-ink-muted hover:text-ink disabled:opacity-50">
+          {enumerating ? '正在枚举…' : '枚举本设备全部系统字体'}
+        </button>
+      )}
+      <div className="text-[13px] text-ink-muted leading-snug px-0.5 font-reading">
+        示例 The quick brown fox · 敏捷的棕色狐狸
+      </div>
+    </div>
+  );
+}
+
 // P1.4 外观控件同源体(双入口):顶栏 ThemeToggle 弹层与 设置→外观 tab 共用这一个组件。
 // 状态单一数据源 —— 全部走 sessionStore(setTheme/setUiFontScale/…/localStorage),
 // 两处只是同一 store 的两个 view,不各自为政。
@@ -283,8 +359,6 @@ function ThemeAppearanceBody() {
   const setTheme = useStore((s) => s.setTheme);
   const uiFontScale = useStore((s) => s.uiFontScale);
   const setUiFontScale = useStore((s) => s.setUiFontScale);
-  const readingFont = useStore((s) => s.readingFont);
-  const setReadingFont = useStore((s) => s.setReadingFont);
   const effDark = themeTone === 'auto' ? systemPrefersDark() : themeTone === 'dark';
   const toneKey = effDark ? 'dark' : 'light';
   return (
@@ -330,15 +404,7 @@ function ThemeAppearanceBody() {
               <Type size={12} className="text-ink-muted" />
               <span className="text-[11px] text-ink font-body font-medium">对话正文字体</span>
             </div>
-            <select value={readingFont} onChange={(e) => setReadingFont(e.target.value)}
-              className="w-full text-[11px] font-body rounded-lg border border-canvas-deep bg-canvas px-2.5 py-1.5 text-ink focus:outline-none focus:border-accent cursor-pointer">
-              {FONT_OPTIONS.map((f) => (
-                <option key={f.id} value={f.id}>{f.name}</option>
-              ))}
-            </select>
-            <div className="text-[14px] text-ink-muted leading-snug px-0.5 font-reading">
-              示例 The quick brown fox · 敏捷的棕色狐狸
-            </div>
+            <FontPicker />
           </div>
 
           {/* ── Color family ──────────────────────────────────── */}
@@ -8252,17 +8318,9 @@ function MobileThemePage() {
 }
 
 function MobileReadingFontPage() {
-  const readingFont = useStore((s) => s.readingFont);
-  const setReadingFont = useStore((s) => s.setReadingFont);
   return (
-    <div className="py-1">
-      {FONT_OPTIONS.map((f) => (
-        <button key={f.id} onClick={() => setReadingFont(f.id)}
-          className="w-full flex items-center gap-3 px-4 py-3 text-left hover:bg-canvas-warm transition-colors">
-          <span className="flex-1 text-[15px] text-ink">{f.name}</span>
-          {readingFont === f.id && <Check size={16} className="text-accent shrink-0" />}
-        </button>
-      ))}
+    <div className="px-3 py-2">
+      <FontPicker />
     </div>
   );
 }
