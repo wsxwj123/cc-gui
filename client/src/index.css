@@ -1444,14 +1444,19 @@ html { --content-max: clamp(768px, calc(var(--app-w, 100vw) * 0.7), 1120px); }
   .mobile-drawer {
     position: fixed;
     top: 0;
+    bottom: 0;
     left: 0;
-    /* 审计批B3:高度改 zoom 不变量并减软键盘高(--kb)。原 top/bottom:0 在 Android
-       Chromium 软键盘弹出时不缩 layout viewport,抽屉底部(会话列表搜索框等)被
-       键盘盖住;zoom>1 时 bottom:0 与 vh 类内容的坐标系也不一致。 */
-    height: calc(var(--app-h, 100dvh) - var(--kb, 0px));
+    /* iOS批#2(改写审计批B3):全高覆盖层回归 top/bottom:0 —— inset 0 天然贴边且
+       zoom 不变(0×zoom=0,遮罩 fixed inset-0 同理早已验证),不依赖 JS 测量的
+       --app-h。原 height:calc(--app-h − --kb) 在 iOS Safari 下矮一截:innerHeight
+       跟随 visual viewport(工具栏伸缩/放大态取值偏小),测量时机不对就上下留缝
+       (iOS Chrome 工具栏行为不同故不复现)。B3 的两个目标不回退:①Android 软键盘
+       不缩 layout viewport 盖住抽屉底部 → --kb 从"砍高度"改为 padding-bottom 抬起
+       内部内容,背景仍满高;②Chromium zoom>1 坐标一致 → inset 0 本就是 zoom 不变量,
+       宽度仍用 --app-w 折算。 */
     width: min(calc(var(--app-w, 100vw) * 0.86), 360px);
     padding-top: env(safe-area-inset-top);
-    padding-bottom: env(safe-area-inset-bottom);
+    padding-bottom: calc(env(safe-area-inset-bottom) + var(--kb, 0px));
     border-top-left-radius: 0;
     border-bottom-left-radius: 0;
     background: var(--glass-bar-bg);
