@@ -35,6 +35,15 @@ export function pushLocalOnlyKeys(local, server) {
   return Object.keys(l).filter((k) => syncableKey(k) && !(k in s));
 }
 
+// 审计批低危#1:首次迁移的 marker 置位判据 —— 回推批次「全部成功」才置位。
+// 现状 bug:GET 成功即置 marker,但回推的 PUT 是 fire-and-forget,若全失败(离线/
+// 服务端 5xx),存量键就此只留本机、此后水合纯拉取再不回推 → 该批 pin 永不上云。
+// 修:marker 只在全部回推 settle 成功后置位;任一失败不置位,下次重连重试整批。
+// 空批(无本地存量键)视为成功(无可推即已收敛)。results = 各 PUT 的成功布尔。
+export function shouldMarkMigrated(results) {
+  return (results || []).every(Boolean);
+}
+
 // 审计批收尾#3:in-flight 计数器。Set 版的坑:同键快速连改两次(两个 PUT 并发在途),
 // 第一个 PUT 的 finally delete 会把第二个在途的保护标签一并摘掉 → 此窗口内到达的
 // 旧广播把用户刚点的第二次选择闪回。计数归零才真正移除标签。
