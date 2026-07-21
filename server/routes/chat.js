@@ -1027,6 +1027,25 @@ router.post('/chat', async (req, res) => {
           else if (m.subtype === 'task_updated' && ['completed', 'failed', 'killed'].includes(m.patch?.status)) slot.liveTasks.delete(m.task_id);
         }
         deliverLine(slot, line);
+        // Bug 修复(子代理后主 agent 续跑「看起来停了」):中间 result 已被 4s 去抖 finalize 转 idle,
+        // 但主 agent 又续跑了新回合(子代理完 → 续开回合去弹计划/权限卡,期间第三方 provider TTFT
+        // 可达 60-90s 远超 4s 窗)。把 idle 的 slot 标回活跃 → /agents/active 不再报 idle → 前端
+        // backgroundPid 轮询重新发现 → auto-reattach 重开 SSE 回放 earlyLines,续跑正文重现。
+        // 只认主 agent 顶层内容(parent_tool_use_id 空);后台子代理自身消息(带该字段)不触发,保住
+        // keepalive 语义与 deep-research(backgroundify 子代理)不回归;result/system/rate_limit_event
+        // 是终态/纯信息不触发。续跑回合自己的 result 到来照常 finalize→done→再 idle,每轮自愈。
+        if (slot.idle && !m.parent_tool_use_id
+            && m.type !== 'result' && m.type !== 'system' && m.type !== 'rate_limit_event' && m.type !== 'prompt_suggestion') {
+          slot.idle = false;
+          if (slot.idleTimer) { clearTimeout(slot.idleTimer); slot.idleTimer = null; }
+          // 复活=主 agent 续跑,则之前被 4s 去抖过早缓冲进 earlyLines 的 done 是错的:若 SSE 在
+          // finalize 前已断(WebView 空闲掐断/切窗格),done 落 earlyLines,reattach 回放到它会
+          // 立即收尾 SSE、丢弃其后续跑正文(判官指出的「陈旧 done 致 reattach 自杀」)。清掉它们,
+          // 续跑回合自己的真 result→done 会照常在末尾补上。
+          if (slot.earlyLines && slot.earlyLines.length) {
+            slot.earlyLines = slot.earlyLines.filter((l) => l.indexOf('"type":"done"') === -1);
+          }
+        }
         if (m.type === 'result') {
           lastResultLine = line;
           slot.lastResultAt = Date.now(); // stop 端点优雅窗判据(见 /stop 注释)

@@ -250,14 +250,14 @@ export function ChatInput({ onSend, onStop, onAccelerate, onBackground, suggesti
     ? Object.values(s.bgTasks || {}).some((t) => t && t.sessionId === sessionId
         && !TODO_BG_TERMINAL.includes(t.status) && t.livePhase !== 'idle')
     : false));
-  // 停止按钮「工作中」判据。根因:服务端 4s 去抖会在子代理仍活跃 / 父进程续开回合弹权限卡时,
-  // 过早给主流发 done → isStreaming 转 false;只看 isStreaming 就「转圈还在、停止按钮却没了」。
-  // 含主流 / 活跃子代理(前台 Task,与转圈同源)/ 本会话待处理授权卡 —— 这些 onStop 都能停
-  // (interrupt 前台流+子代理 / dropPendingForSession)。刻意【不含 bgWorking】(run_in_background
-  // 后台长任务):onStop 停不了它(需进程管理区 stopTask),显示「停止」会误导且挡住「发送」;
-  // 后台任务另有「后台工作中」amber 提示,此态仍显「发送」可继续发消息。
+  // 停止按钮「工作中」判据 = 主会话流在进行 || 本会话有待处理授权卡。服务端已修「子代理后主 agent
+  // 续跑过早关流」(chat.js idle 复活守卫),isStreaming 现在能准确反映主流是否在进行(含等前台
+  // 子代理、续跑 reattach 期间都保持 true),故不再需要 agentsWorking 兜底。刻意【不含 agentsWorking
+  // /bgWorking】:主会话回复完成后即使还有子代理/后台任务在跑,也应显示「发送」让用户继续发消息
+  // (对齐 claude desktop:主流完成→可发、主流未完成→入队);且 onStop 停不了后台化子代理 /
+  // run_in_background(需进程管理区),那时显示「停止」会误导。
   const hasPendingPerm = useStore((s) => (sessionId ? (s.pendingPermissions || []).some((p) => p.sessionId === sessionId) : false));
-  const working = isStreaming || agentsWorking || hasPendingPerm;
+  const working = isStreaming || hasPendingPerm;
   const reclaimRemote = async () => {
     if (!sessionId) return;
     try {
