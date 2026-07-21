@@ -1024,6 +1024,7 @@ export function ChatInput({ onSend, onStop, onAccelerate, onBackground, suggesti
             <PermissionModeSelector permKey={permKey} tourAnchor={paneIsActive} />
             <button
               type="button"
+              data-tour={paneIsActive ? 'attach' : undefined}
               onClick={() => fileInputRef.current?.click()}
               disabled={disabled || rcLocked}
               className="shrink-0 h-8 w-8 rounded-full hover:bg-black/5 text-ink-muted hover:text-accent flex items-center justify-center transition-colors disabled:opacity-50"
@@ -1035,6 +1036,7 @@ export function ChatInput({ onSend, onStop, onAccelerate, onBackground, suggesti
             {onBtwOpen && (
               <button
                 type="button"
+                data-tour={paneIsActive ? 'aside' : undefined}
                 onClick={onBtwOpen}
                 className="shrink-0 h-8 w-8 rounded-full hover:bg-black/5 text-ink-muted hover:text-accent flex items-center justify-center transition-colors relative"
                 title="旁问（不打断当前工作、不写入会话历史）"

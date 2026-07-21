@@ -784,23 +784,21 @@ function PaneCountPicker() {
 
 // P1.1 面板坞:顶栏 10 个面板按钮收纳为 1 个坞图标(Mac 折叠菜单栏式)。
 // 常态只显坞图标;点击原位展开成横向图标条(rail,含原 10 个面板按钮),再点某图标开
-// 对应面板;点外部 / Esc / 再点坞图标收起 rail。rightPanel 状态机不变,rail 只是入口层。
+// 对应面板;rail 持久展开 —— 再点坞图标 / Esc 才收起,点外部不收。rightPanel 状态机不变,rail 只是入口层。
 // 更新提醒并入坞:入口红点常驻 + rail 内条件「更新」按钮(跳设置更新区)。
-// 点 rail 图标后不收起:方便连续切换面板,收起交给外部点击(与 Mac 菜单栏行为一致)。
+// 点 rail 图标后不收起:方便连续切换面板。持久展开也根治了导引 panel 步骤间 rail 被点暗区/外部收起反复开合的闪烁。
 const PANEL_SHORT = {
   files: '文件', monitor: '监控', agents: 'Agent', usage: '用量', processes: '进程',
   changes: '审查', mcp: '工具', skills: '技能', memory: '指令', settings: '通用',
 };
 function PanelDock({ rightPanel, setRightPanel, updateNotice, jumpToUpdate }) {
   const [railOpen, setRailOpen] = useState(false);
-  const wrapRef = useRef(null);
+  // 持久展开:点外部不收(用户要「展开项常驻,再点坞按钮才收起」);保留 Esc 作主动收起。
   useEffect(() => {
     if (!railOpen) return;
-    const onDoc = (e) => { if (!wrapRef.current?.contains(e.target)) setRailOpen(false); };
     const onEsc = (e) => { if (e.key === 'Escape') setRailOpen(false); };
-    document.addEventListener('mousedown', onDoc);
     document.addEventListener('keydown', onEsc);
-    return () => { document.removeEventListener('mousedown', onDoc); document.removeEventListener('keydown', onEsc); };
+    return () => document.removeEventListener('keydown', onEsc);
   }, [railOpen]);
   // 导引联动:tour 的面板步骤经此事件展开 rail 做演示(GuideTour 只 dispatch,不直接碰状态)。
   useEffect(() => {
@@ -811,7 +809,7 @@ function PanelDock({ rightPanel, setRightPanel, updateNotice, jumpToUpdate }) {
   const activeMeta = rightPanel ? PANEL_MAP[rightPanel] : null;
   const DockIcon = activeMeta ? activeMeta.icon : LayoutGrid;
   return (
-    <span ref={wrapRef} data-tour="panel-dock" className="inline-flex items-center gap-1">
+    <span data-tour="panel-dock" className="inline-flex items-center gap-1">
       {railOpen && (
         <span className="cgui-dock-rail inline-flex items-center gap-1 rounded-xl bg-black/5 px-1 py-0.5">
           {/* P2.3:分屏迁入坞 rail 首位(窗口级操作,与面板同属"工作区"语义)。 */}
