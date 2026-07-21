@@ -64,4 +64,14 @@ st().upsertAgent('tu-4', { status: 'done' });      // 模拟其间权威终态�
 await p;
 assert.equal(st().activeAgents['tu-4'].status, 'done', '权威 done 到达后不被回滚覆盖');
 
+// 7) S1 边界:其间权威 stopped(status 与乐观值同形)到达 → 不被回滚。用显式 optimisticStop
+//    标记区分"我们乐观写的 stopped"与"权威 stopped";权威终态到达时 finalizeAgent 清 optimisticStop
+//    (此处模拟该清除),回滚够不着。
+stopTaskStopped = false;
+st().upsertAgent('tu-5', { sessionId: 'sid-A', status: 'working' });
+const p2 = st().stopSingleTask('sid-A', 'tu-5');   // 乐观标 stopped + optimisticStop:true
+st().upsertAgent('tu-5', { optimisticStop: false }); // 模拟权威 stopped 到达:finalizeAgent 清标记(status 仍 stopped)
+await p2;
+assert.equal(st().activeAgents['tu-5'].status, 'stopped', '权威 stopped(同形)到达后不被回滚翻回 working');
+
 console.log('PASS check-stop-single-task');

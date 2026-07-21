@@ -1292,7 +1292,10 @@ export const useStore = create((set, get) => ({
     const ag = st.activeAgents[toolUseId];
     const prevStatus = ag?.status;
     const didOptimistic = ag && !['done', 'error', 'stopped'].includes(prevStatus);
-    if (didOptimistic) st.upsertAgent(toolUseId, { status: 'stopped', finishedAt: Date.now() });
+    // optimisticStop 显式标记「这条 stopped 是我们乐观写的」——权威 stopped 落到乐观 stopped 上
+    // 时 status 同值、finalizeAgent 是 no-op,靠 status 区分不了两者;标记由 finalizeAgent 在
+    // 任何权威终态到达时清掉(App.jsx),回滚只认还带此标记的乐观 stopped。
+    if (didOptimistic) st.upsertAgent(toolUseId, { status: 'stopped', finishedAt: Date.now(), optimisticStop: true });
     try {
       const d = await fetch('/api/agents/active').then((r) => r.json());
       const procs = (d.agents || []).filter((a) => a.kind === 'chat-process' && a.sessionId === sessionId && a.stoppable === true);
@@ -1307,7 +1310,9 @@ export const useStore = create((set, get) => ({
       const anyStopped = results.some((r) => r.status === 'fulfilled' && r.value?.stopped === true);
       if (didOptimistic && !anyStopped) {
         const cur = get().activeAgents[toolUseId];
-        if (cur && cur.status === 'stopped') get().upsertAgent(toolUseId, { status: prevStatus, finishedAt: null });
+        // 仅回滚仍带 optimisticStop 的乐观 stopped:其间到达的权威终态(finalizeAgent 已清标记)
+        // 即便 status 同为 stopped,也够不着——不把真终态误翻回 working。
+        if (cur && cur.status === 'stopped' && cur.optimisticStop) get().upsertAgent(toolUseId, { status: prevStatus, finishedAt: null, optimisticStop: false });
       }
     } catch {}
   },

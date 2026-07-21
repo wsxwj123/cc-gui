@@ -656,6 +656,10 @@ function finalizeAgent(st, agentId, tnStatus, visited, authoritative) {
   visited.add(agentId);
   const ag = st.activeAgents[agentId];
   if (!ag) return;
+  // S1:权威终态一到就清 stopSingleTask 的乐观停止标记——即便 status 与乐观 stopped 同值(下面
+  // 是 no-op),也必须清,否则 stopSingleTask 的假阳性回滚会把这次真终态误翻回 working。仅
+  // authoritative 清:非权威的猜测性收尾不代表"确认",不解除待回滚保护。
+  if (authoritative && ag.optimisticStop) st.upsertAgent(agentId, { optimisticStop: false });
   const terminal = ['done', 'error', 'stopped'].includes(ag.status);
   // 停止链路 #1(UI 侧):taskManaged 条目的 'stopped' 只是猜测——interrupt 后前端假定
   // 进程已被杀(killedRef)/流外杀点批量收尾,但 /stop 的 2s 优雅窗可能被 interrupt 秒回的
