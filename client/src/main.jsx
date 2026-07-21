@@ -43,6 +43,14 @@ import './index.css';
   // Apply the saved reading font before mount so message prose doesn't flash
   // the default serif then swap.
   try { applyReadingFont(localStorage.getItem('cgui-reading-font') || 'newsreader'); } catch {}
+
+  // 界面不透明度:启动前预置 --surface-alpha,避免面板先按 100% 画一帧再跳。
+  try {
+    const sa = parseInt(localStorage.getItem('cgui-surface-alpha') || '', 10);
+    if (Number.isFinite(sa) && sa >= 55 && sa <= 100) {
+      root.style.setProperty('--surface-alpha', sa + '%');
+    }
+  } catch {}
 })();
 
 // CK-12: 全局输入框撤销/重做(Cmd/Ctrl+Z / Cmd/Ctrl+Shift+Z)。

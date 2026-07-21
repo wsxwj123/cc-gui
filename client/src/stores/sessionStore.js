@@ -419,6 +419,17 @@ export const useStore = create((set, get) => ({
   // maskOpacity = 遮罩不透明度:主题底色(--color-canvas)以该比例盖在背景上,保证文字可读。
   chatBackground: readLs('cgui-chat-background', null),
 
+  // 界面不透明度(百分比 55~100)。缩放各玻璃面板 background 的 alpha,让全局背景
+  // 图按需透出。100 = 各主题原始外观(默认,不改变现状)。per-device(localStorage),
+  // 切主题不重置。运行时写 :root --surface-alpha(main.jsx 启动前也预置一次防闪)。
+  surfaceAlpha: (() => {
+    try {
+      const v = parseInt(localStorage.getItem('cgui-surface-alpha') || '', 10);
+      if (Number.isFinite(v) && v >= 55 && v <= 100) return v;
+    } catch {}
+    return 100;
+  })(),
+
   // 缓存优化(CLI --exclude-dynamic-system-prompt-sections / SDK systemPrompt.excludeDynamicSections):
   // 把每轮变化的动态段(工作目录 / auto-memory / git 状态)移出系统提示、改注入首条用户消息,
   // 使系统提示保持静态、提升第三方 provider 的前缀缓存命中。三态:'auto'(默认,server 按
@@ -1136,6 +1147,16 @@ export const useStore = create((set, get) => ({
     const v = bg && bg.kind ? bg : null;
     set({ chatBackground: v });
     writeLs('cgui-chat-background', v);
+  },
+
+  // 界面不透明度设置(55~100)。写 store + localStorage + :root --surface-alpha(带 %)。
+  setSurfaceAlpha: (v) => {
+    const n = Math.max(55, Math.min(100, Math.round(Number(v) || 100)));
+    set({ surfaceAlpha: n });
+    try {
+      localStorage.setItem('cgui-surface-alpha', String(n));
+      document.documentElement.style.setProperty('--surface-alpha', n + '%');
+    } catch {}
   },
 
   setUiFontScale: (v) => {

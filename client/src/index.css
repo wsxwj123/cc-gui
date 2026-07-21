@@ -52,6 +52,11 @@
   --glass-shadow: 0 1px 1px rgba(0, 0, 0, 0.04), 0 14px 40px -16px rgba(0, 0, 0, 0.14);
   --scrollbar-thumb: rgba(0, 0, 0, 0.20);
   --scrollbar-thumb-hover: rgba(0, 0, 0, 0.34);
+  /* 界面不透明度(设置→外观):按此百分比缩放各玻璃面板 background 的 alpha,
+     让全局背景图按需透出。100% = 各主题原始外观(不改变现状);越低越透。
+     写在最外层 :root、不随主题翻转;运行时由 store.setSurfaceAlpha 覆盖。
+     弹层(.glass-popover)刻意不引用它 —— 下拉必须不透底,可读性红线。 */
+  --surface-alpha: 100%;
 
   /* ── Spacing ──────────────────────────────────────────────── */
   --spacing-sidebar: 268px;
@@ -1088,13 +1093,13 @@ html { --content-max: clamp(768px, calc(var(--app-w, 100vw) * 0.7), 1120px); }
    a card with edges — avoids the "false elliptical halo" effect when
    popovers above it provide a high-contrast reference. */
 .glass-base {
-  background: var(--glass-base-bg);
+  background: color-mix(in srgb, var(--glass-base-bg) var(--surface-alpha), transparent);
   border: none;
   box-shadow: none;
 }
 
 .glass-thick {
-  background: var(--glass-thick-bg);
+  background: color-mix(in srgb, var(--glass-thick-bg) var(--surface-alpha), transparent);
   border: 0.5px solid var(--glass-edge);
   box-shadow:
     inset 0 1px 0 var(--glass-specular),
@@ -1104,7 +1109,7 @@ html { --content-max: clamp(768px, calc(var(--app-w, 100vw) * 0.7), 1120px); }
 }
 
 .glass-thin {
-  background: var(--glass-thin-bg);
+  background: color-mix(in srgb, var(--glass-thin-bg) var(--surface-alpha), transparent);
   border: 0.5px solid var(--glass-edge);
   box-shadow:
     inset 0 1px 0 var(--glass-specular),
@@ -1113,7 +1118,7 @@ html { --content-max: clamp(768px, calc(var(--app-w, 100vw) * 0.7), 1120px); }
 
 /* CHEAP BLUR — only on small chrome surfaces. */
 .glass-bar {
-  background: var(--glass-bar-bg);
+  background: color-mix(in srgb, var(--glass-bar-bg) var(--surface-alpha), transparent);
   -webkit-backdrop-filter: blur(18px);
   backdrop-filter: blur(18px);
   border-bottom: 0.5px solid var(--glass-edge-outer);
@@ -1122,7 +1127,7 @@ html { --content-max: clamp(768px, calc(var(--app-w, 100vw) * 0.7), 1120px); }
 }
 
 .glass-capsule {
-  background: var(--glass-thick-bg);
+  background: color-mix(in srgb, var(--glass-thick-bg) var(--surface-alpha), transparent);
   -webkit-backdrop-filter: blur(16px);
   backdrop-filter: blur(16px);
   border: 0.5px solid var(--glass-edge);
