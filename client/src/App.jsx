@@ -642,7 +642,12 @@ const AGENT_TERMINAL_STATUS = ['done', 'error', 'stopped'];
 function reviveAgentIfTerminal(store, agentId) {
   if (!agentId) return;
   const ag = store.activeAgents?.[agentId];
-  if (ag && AGENT_TERMINAL_STATUS.includes(ag.status)) store.upsertAgent(agentId, { status: 'working', finishedAt: null });
+  if (!ag) return;
+  // 部件③:teammate 被 SendMessage 唤醒后又有活动到达(两条 resume 路径——partial 的
+  // message_start / 整条 assistant 消息——都经本函数),清待命 flag,否则边干活边错显「待命」
+  // 直到终态。SDK 无 Resume 钩子,只能在「又有活动」处清。
+  if (ag.teammateIdle) store.upsertAgent(agentId, { teammateIdle: false });
+  if (AGENT_TERMINAL_STATUS.includes(ag.status)) store.upsertAgent(agentId, { status: 'working', finishedAt: null });
 }
 
 function finalizeAgent(st, agentId, tnStatus, visited, authoritative) {
