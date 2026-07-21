@@ -793,7 +793,6 @@ const PANEL_SHORT = {
 };
 function PanelDock({ rightPanel, setRightPanel, updateNotice, jumpToUpdate }) {
   const [railOpen, setRailOpen] = useState(false);
-  const wrapRef = useRef(null);
   // 持久展开:点外部不收(用户要「展开项常驻,再点坞按钮才收起」);保留 Esc 作主动收起。
   useEffect(() => {
     if (!railOpen) return;
@@ -810,7 +809,7 @@ function PanelDock({ rightPanel, setRightPanel, updateNotice, jumpToUpdate }) {
   const activeMeta = rightPanel ? PANEL_MAP[rightPanel] : null;
   const DockIcon = activeMeta ? activeMeta.icon : LayoutGrid;
   return (
-    <span ref={wrapRef} data-tour="panel-dock" className="inline-flex items-center gap-1">
+    <span data-tour="panel-dock" className="inline-flex items-center gap-1">
       {railOpen && (
         <span className="cgui-dock-rail inline-flex items-center gap-1 rounded-xl bg-black/5 px-1 py-0.5">
           {/* P2.3:分屏迁入坞 rail 首位(窗口级操作,与面板同属"工作区"语义)。 */}
