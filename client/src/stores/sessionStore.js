@@ -147,7 +147,7 @@ export const THEME_FAMILIES = [
     light: { id: 'wechat-light', bg: '#EDEDED', bg2: '#E3E3E3', fg: '#1A1A1A', accent: '#07C160' },
     dark:  { id: 'wechat-dark',  bg: '#1A1A1A', bg2: '#0D0D0D', fg: '#EDEDED', accent: '#07C160' } },
   { id: 'skyline', name: '晴空',
-    light: { id: 'skyline-light', bg: '#EEF5FA', bg2: '#E4EFF6', fg: '#1F2E3A', accent: '#E8B23E' },
+    light: { id: 'skyline-light', bg: '#EEF5FA', bg2: '#E4EFF6', fg: '#1F2E3A', accent: '#C8901E' },
     dark:  { id: 'skyline-dark',  bg: '#141E28', bg2: '#1C2A36', fg: '#E6EEF4', accent: '#F0C24E' } },
 ];
 

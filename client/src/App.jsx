@@ -302,7 +302,7 @@ function FontPicker() {
     setEnumerating(true);
     try {
       const fams = await queryLocalFontFamilies();
-      if (fams && fams.length) { setSystemFamilies(fams); setEnumerated(true); }
+      if (fams && fams.length) { setSystemFamilies(fams); setEnumerated(true); setEnumNote(''); }
       else setEnumNote('此设备不支持或未授权全量枚举,已按内置字体库探测系统字体');
     } catch {
       setEnumNote('全量枚举被拒绝,已按内置字体库探测系统字体');

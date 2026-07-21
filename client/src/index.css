@@ -231,6 +231,7 @@
   --color-ink-faint: #606060;
   --color-ink-ghost: #404040;
   --color-accent: #FAB283;
+  --color-on-accent: #0A0A0A; /* 浅桃 accent 底配深字(原回落白 1.79:1 不可读) */
   --color-accent-hover: #FFCB9F;
   --color-accent-subtle: rgba(250, 178, 131, 0.16);
   --color-accent-muted: rgba(250, 178, 131, 0.32);
@@ -287,6 +288,7 @@
   --color-ink-faint: #6B7484;
   --color-ink-ghost: #4C566A;
   --color-accent: #88C0D0;
+  --color-on-accent: #2E3440; /* 浅青 accent 底配深字(原回落白 2.00:1 不可读) */
   --color-accent-hover: #A2D2E0;
   --color-accent-subtle: rgba(136, 192, 208, 0.16);
   --color-accent-muted: rgba(136, 192, 208, 0.32);
@@ -315,6 +317,7 @@
   --color-ink-faint: #6E6A86;
   --color-ink-ghost: #403D52;
   --color-accent: #9CCFD8;
+  --color-on-accent: #191724; /* 浅青 accent 底配深字(原回落白 1.70:1 不可读) */
   --color-accent-hover: #B7DFE7;
   --color-accent-subtle: rgba(156, 207, 216, 0.16);
   --color-accent-muted: rgba(156, 207, 216, 0.32);
@@ -343,6 +346,7 @@
   --color-ink-faint: #7F849C;
   --color-ink-ghost: #585B70;
   --color-accent: #89B4FA;
+  --color-on-accent: #1E1E2E; /* 浅蓝 accent 底配深字(原回落白 2.11:1 不可读) */
   --color-accent-hover: #A6C5FF;
   --color-accent-subtle: rgba(137, 180, 250, 0.16);
   --color-accent-muted: rgba(137, 180, 250, 0.32);
@@ -483,6 +487,7 @@
   --color-ink-faint: #5C7A58;
   --color-ink-ghost: #3E5240;
   --color-accent: #7FC06E;
+  --color-on-accent: #1A211C; /* 浅绿 accent 底配深字(原回落白 2.17:1 不可读) */
   --color-accent-hover: #95D183;
   --color-accent-subtle: rgba(127, 192, 110, 0.16);
   --color-accent-muted: rgba(127, 192, 110, 0.32);
