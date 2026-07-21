@@ -19,6 +19,7 @@
     "test:compact-segment": "node scripts/check-compact-segment.mjs",
     "test:fork": "node scripts/check-fork.mjs",
     "test:routing": "node scripts/check-routing.mjs",
+    "test:context-window": "node tests/unit/check-context-window.mjs",
     "test:permissions": "node scripts/check-permissions.mjs",
     "start": "NODE_ENV=production node server/index.js",
     "stop": "lsof -ti:6677 | xargs kill -9 2>/dev/null || true",
