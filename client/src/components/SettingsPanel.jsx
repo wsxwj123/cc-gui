@@ -1811,6 +1811,8 @@ function SmallFastModelInput({ env, onEnvPatch, saving }) {
 export function ChatBackgroundCard() {
   const bg = useStore((s) => s.chatBackground);
   const setBg = useStore((s) => s.setChatBackground);
+  const surfaceAlpha = useStore((s) => s.surfaceAlpha);
+  const setSurfaceAlpha = useStore((s) => s.setSurfaceAlpha);
   const [uploading, setUploading] = useState(false);
   const [err, setErr] = useState('');
 
@@ -1870,11 +1872,22 @@ export function ChatBackgroundCard() {
   return (
     <div className="bg-canvas-warm border border-canvas-deep rounded-lg px-3 py-2.5 space-y-2.5">
       <div>
-        <div className="text-xs text-ink font-body font-medium flex items-center gap-1.5">对话区背景<EffectBadge level="immediate" /></div>
+        <div className="text-xs text-ink font-body font-medium flex items-center gap-1.5">界面背景与不透明度<EffectBadge level="immediate" /></div>
         <div className="text-[10.5px] text-ink-faint font-body">
-          设置对话消息区的背景:纯色、本地图片(png/jpg/gif/webp)或本地视频(mp4/webm),文件不超过 50MB。
-          遮罩不透明度控制主题底色覆盖在背景上的比例,数值越高文字越易读。默认状态不修改现有外观。
+          设置全局背景:纯色、本地图片(png/jpg/gif/webp)或本地视频(mp4/webm),文件不超过 50MB,
+          对所有主题生效并透出到侧栏、顶栏、会话区与输入框(下拉弹层保持不透底)。
+          遮罩不透明度控制主题底色覆盖在背景上的比例,数值越高文字越易读;界面不透明度控制各面板的透明程度,
+          越低背景越明显。默认状态不修改现有外观。
         </div>
+      </div>
+      <div className="flex items-center gap-2">
+        <span className="text-[11px] text-ink-muted font-body shrink-0">界面不透明度</span>
+        <input
+          type="range" min="55" max="100" step="5" value={surfaceAlpha}
+          onChange={(e) => setSurfaceAlpha(Number(e.target.value))}
+          className="flex-1 accent-[var(--color-accent)]"
+        />
+        <span className="text-[11px] text-ink-soft font-mono w-9 text-right">{surfaceAlpha}%</span>
       </div>
       <div className="flex items-center gap-2 flex-wrap">
         <span className="text-[11px] text-ink-muted font-body">当前:{bg?.kind ? KIND_LABEL[bg.kind] || bg.kind : '默认'}</span>

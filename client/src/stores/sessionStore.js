@@ -1,6 +1,11 @@
 import { create } from 'zustand';
 import { nextDockCode } from '../utils/artifactDock.js';
 import { mergeSyncedMap, syncableKey, pushLocalOnlyKeys, createInFlightCounter, shouldMarkMigrated } from '../utils/sessionSync.js';
+import { FONT_OPTIONS, readingFontCss } from '../utils/systemFonts.js';
+
+// Re-exported so existing importers (App.jsx) keep working; the list and its
+// css-resolution logic now live in utils/systemFonts.js alongside the enumeration.
+export { FONT_OPTIONS };
 
 // Helper: read JSON from localStorage with fallback.
 const readLs = (key, fallback) => {
@@ -141,7 +146,18 @@ export const THEME_FAMILIES = [
   { id: 'wechat', name: '微信',
     light: { id: 'wechat-light', bg: '#EDEDED', bg2: '#E3E3E3', fg: '#1A1A1A', accent: '#07C160' },
     dark:  { id: 'wechat-dark',  bg: '#1A1A1A', bg2: '#0D0D0D', fg: '#EDEDED', accent: '#07C160' } },
+  { id: 'skyline', name: '晴空',
+    light: { id: 'skyline-light', bg: '#EEF5FA', bg2: '#E4EFF6', fg: '#1F2E3A', accent: '#E8B23E' },
+    dark:  { id: 'skyline-dark',  bg: '#141E28', bg2: '#1C2A36', fg: '#E6EEF4', accent: '#F0C24E' } },
 ];
+
+// Extra theme families registered at runtime by optional local-only widgets
+// (client/src/components/*.local.jsx). Kept in a module array so the non-React
+// helpers below (resolveTheme / initThemeFamily) can see them, and mirrored into
+// store state (extraThemeFamilies) so the theme popover re-renders when one lands.
+// Empty on a public build — no bundled family depends on it.
+const extraThemeFamilies = [];
+export function allThemeFamilies() { return THEME_FAMILIES.concat(extraThemeFamilies); }
 
 export function systemPrefersDark() {
   try { return window.matchMedia('(prefers-color-scheme: dark)').matches; }
@@ -152,7 +168,7 @@ export function systemPrefersDark() {
 // tone 'auto' picks light/dark from the OS at call time; presets are fixed
 // palettes so the variant id itself must flip (CSS can't auto-switch them).
 export function resolveTheme(familyId, tone) {
-  const fam = THEME_FAMILIES.find((f) => f.id === familyId) || THEME_FAMILIES[0];
+  const fam = allThemeFamilies().find((f) => f.id === familyId) || THEME_FAMILIES[0];
   const effDark = tone === 'auto' ? systemPrefersDark() : tone === 'dark';
   return { dataTheme: tone, cguiTheme: (effDark ? fam.dark.id : fam.light.id) || '' };
 }
@@ -164,7 +180,7 @@ function initThemeFamily() {
     if (fam) return fam;
     const preset = localStorage.getItem('cgui-theme-preset') || '';
     if (!preset) return 'default';
-    const m = THEME_FAMILIES.find((f) => f.light.id === preset || f.dark.id === preset);
+    const m = allThemeFamilies().find((f) => f.light.id === preset || f.dark.id === preset);
     return m ? m.id : 'default';
   } catch { return 'default'; }
 }
@@ -174,24 +190,22 @@ function initThemeTone() {
 }
 
 // ── Reading font (Claude message prose) ──────────────────────────
-// Like Claude Desktop's font setting. `css` is the font stack written to the
-// --font-reading custom property; system serifs (Times/Georgia) need no load,
-// 'Newsreader'/'JetBrains Mono'/'DM Sans' are already loaded in index.html.
-export const FONT_OPTIONS = [
-  { id: 'newsreader', name: '默认衬线 (Newsreader)', css: "'Newsreader', Georgia, serif" },
-  { id: 'times',      name: 'Times New Roman',       css: "'Times New Roman', Times, serif" },
-  { id: 'georgia',    name: 'Georgia',               css: "Georgia, 'Times New Roman', serif" },
-  { id: 'sans',       name: '无衬线 (DM Sans)',      css: "'DM Sans', -apple-system, system-ui, sans-serif" },
-  { id: 'mono',       name: '等宽 (JetBrains Mono)', css: "'JetBrains Mono', ui-monospace, monospace" },
-];
+// Like Claude Desktop's font setting. FONT_OPTIONS (built-in presets) and the
+// css-resolution live in utils/systemFonts.js; a stored value is either a preset
+// id or an enumerated system family name (readingFontCss resolves both).
 function initReadingFont() {
   try { return localStorage.getItem('cgui-reading-font') || 'newsreader'; }
   catch { return 'newsreader'; }
 }
-// Apply a reading-font id to the <html> --font-reading custom property.
+// Favorite fonts are per-device (each device enumerates its own families, so its
+// favorites are its own too) — plain localStorage, never in the cross-device sync.
+function initFavoriteFonts() {
+  const v = readLs('cgui-font-favorites', []);
+  return Array.isArray(v) ? v : [];
+}
+// Apply a reading-font value to the <html> --font-reading custom property.
 export function applyReadingFont(id) {
-  const opt = FONT_OPTIONS.find((f) => f.id === id) || FONT_OPTIONS[0];
-  try { document.documentElement.style.setProperty('--font-reading', opt.css); } catch {}
+  try { document.documentElement.style.setProperty('--font-reading', readingFontCss(id)); } catch {}
 }
 
 // Monotonic counter for fresh stable pane identity tokens (see paneIds).
@@ -408,6 +422,17 @@ export const useStore = create((set, get) => ({
   // maskOpacity = 遮罩不透明度:主题底色(--color-canvas)以该比例盖在背景上,保证文字可读。
   chatBackground: readLs('cgui-chat-background', null),
 
+  // 界面不透明度(百分比 55~100)。缩放各玻璃面板 background 的 alpha,让全局背景
+  // 图按需透出。100 = 各主题原始外观(默认,不改变现状)。per-device(localStorage),
+  // 切主题不重置。运行时写 :root --surface-alpha(main.jsx 启动前也预置一次防闪)。
+  surfaceAlpha: (() => {
+    try {
+      const v = parseInt(localStorage.getItem('cgui-surface-alpha') || '', 10);
+      if (Number.isFinite(v) && v >= 55 && v <= 100) return v;
+    } catch {}
+    return 100;
+  })(),
+
   // 缓存优化(CLI --exclude-dynamic-system-prompt-sections / SDK systemPrompt.excludeDynamicSections):
   // 把每轮变化的动态段(工作目录 / auto-memory / git 状态)移出系统提示、改注入首条用户消息,
   // 使系统提示保持静态、提升第三方 provider 的前缀缓存命中。三态:'auto'(默认,server 按
@@ -452,9 +477,13 @@ export const useStore = create((set, get) => ({
   themeFamily: initThemeFamily(),
   themeTone: initThemeTone(),
   cguiTheme: resolveTheme(initThemeFamily(), initThemeTone()).cguiTheme,
+  // Families registered at runtime by local widgets (empty on public builds).
+  extraThemeFamilies: [],
 
   // Reading font for Claude's message prose (see FONT_OPTIONS).
   readingFont: initReadingFont(),
+  // Favorited font keys (preset id or system family name), per-device.
+  favoriteFonts: initFavoriteFonts(),
 
   loading: false,
   // Separate from `loading`: list refreshes (projects/sessions) must NOT flip
@@ -1125,6 +1154,16 @@ export const useStore = create((set, get) => ({
     writeLs('cgui-chat-background', v);
   },
 
+  // 界面不透明度设置(55~100)。写 store + localStorage + :root --surface-alpha(带 %)。
+  setSurfaceAlpha: (v) => {
+    const n = Math.max(55, Math.min(100, Math.round(Number(v) || 100)));
+    set({ surfaceAlpha: n });
+    try {
+      localStorage.setItem('cgui-surface-alpha', String(n));
+      document.documentElement.style.setProperty('--surface-alpha', n + '%');
+    } catch {}
+  },
+
   setUiFontScale: (v) => {
     const n = Math.max(0.6, Math.min(2, Number(v) || 1));
     set({ uiFontScale: n });
@@ -1155,11 +1194,31 @@ export const useStore = create((set, get) => ({
       else root.removeAttribute('data-cgui-theme');
     } catch {}
   },
+  // Runtime theme-family registration for optional local widgets. Pushes into
+  // the module array (so resolveTheme sees it) + store state (so the popover
+  // re-renders). If the just-registered family is the one already selected
+  // (e.g. restored from localStorage before the widget loaded), re-apply so the
+  // data-cgui-theme attribute is corrected. Idempotent by id.
+  registerThemeFamily: (fam) => {
+    if (!fam || !fam.id) return;
+    if (extraThemeFamilies.some((f) => f.id === fam.id)) return;
+    extraThemeFamilies.push(fam);
+    set({ extraThemeFamilies: [...extraThemeFamilies] });
+    const s = get();
+    if (s.themeFamily === fam.id) s.setTheme(fam.id, s.themeTone);
+  },
   // Reading font: persist + apply the --font-reading custom property.
   setReadingFont: (id) => {
     set({ readingFont: id });
     try { localStorage.setItem('cgui-reading-font', id); } catch {}
     applyReadingFont(id);
+  },
+  // Toggle a font as favorite (bubbles to the top of the picker). Per-device.
+  toggleFavoriteFont: (key) => {
+    const cur = get().favoriteFonts;
+    const next = cur.includes(key) ? cur.filter((k) => k !== key) : [...cur, key];
+    set({ favoriteFonts: next });
+    writeLs('cgui-font-favorites', next);
   },
 
   whitelistPermissionTool: (sessionId, toolName) => {

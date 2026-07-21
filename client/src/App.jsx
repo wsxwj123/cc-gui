@@ -63,8 +63,9 @@ import {
   Sun, Moon, Monitor, Bot, Camera, History, Loader2, Shield, FolderTree,
   Archive, ArchiveRestore, Trash2, EyeOff, Columns2, Smartphone, Pencil, Type, Palette,
   Menu, SquarePen, Gauge, Cpu, CheckCircle2, BookText, Sparkles, HelpCircle, Pin,
-  Download, ClipboardCopy, LayoutGrid, MoreHorizontal,
+  Download, ClipboardCopy, LayoutGrid, MoreHorizontal, Star,
 } from 'lucide-react';
+import { buildFontEntries, groupFonts, detectFonts, platformCandidates, queryLocalFontFamilies } from './utils/systemFonts.js';
 import { copyText } from './utils/clipboard.js';
 
 // ── Per-session shadow-git checkpoints ──────────────────────────
@@ -274,6 +275,81 @@ const TONES = [
   { id: 'auto', label: '跟随系统', Icon: Monitor },
 ];
 
+// Shared reading-font picker (同源体,桌面弹层 + 手机页共用)。枚举本设备可用字体
+// (挂载时白名单 canvas 探测,永远可用;可选点按走 queryLocalFonts 拉全量,仅
+// Chromium 桌面支持且需授权),追加在内置预设之后;收藏(per-device)置顶,带搜索、
+// 滚动、每项以自身字体渲染预览。跨设备:各端枚举各自的字体(手机看手机的)。
+function FontPicker() {
+  const readingFont = useStore((s) => s.readingFont);
+  const setReadingFont = useStore((s) => s.setReadingFont);
+  const favorites = useStore((s) => s.favoriteFonts);
+  const toggleFav = useStore((s) => s.toggleFavoriteFont);
+  const [systemFamilies, setSystemFamilies] = useState([]);
+  const [query, setQuery] = useState('');
+  const [enumerating, setEnumerating] = useState(false);
+  const [enumerated, setEnumerated] = useState(false);
+
+  // Whitelist probe on mount — cheap, works in every webview incl. WKWebView.
+  useEffect(() => {
+    try { setSystemFamilies(detectFonts(platformCandidates())); } catch { /* keep builtins only */ }
+  }, []);
+
+  // Optional full enumeration (this click is the required user gesture). Graceful:
+  // null = unsupported / permission denied → keep the probed list, no error surfaced.
+  const enumerateAll = async () => {
+    setEnumerating(true);
+    try {
+      const fams = await queryLocalFontFamilies();
+      if (fams && fams.length) setSystemFamilies(fams);
+      setEnumerated(true);
+    } finally { setEnumerating(false); }
+  };
+
+  const entries = useMemo(() => buildFontEntries(systemFamilies), [systemFamilies]);
+  const groups = useMemo(() => groupFonts(entries, favorites, query), [entries, favorites, query]);
+  const canEnumerate = typeof window !== 'undefined' && typeof window.queryLocalFonts === 'function';
+  const nothing = !groups.favorites.length && !groups.builtins.length && !groups.systems.length;
+
+  const renderRow = (e) => {
+    const selected = readingFont === e.key;
+    const faved = favorites.includes(e.key);
+    return (
+      <div key={e.key} onClick={() => setReadingFont(e.key)}
+        className={`flex items-center gap-2 rounded-lg px-2 py-1.5 cursor-pointer transition-colors ${selected ? 'bg-accent/12' : 'hover:bg-canvas-warm'}`}>
+        <span className="flex-1 min-w-0 truncate text-[13px] text-ink" style={{ fontFamily: e.css }} title={e.name}>{e.name}</span>
+        {selected && <Check size={14} className="text-accent shrink-0" />}
+        <button onClick={(ev) => { ev.stopPropagation(); toggleFav(e.key); }}
+          className="shrink-0 p-0.5 text-ink-faint hover:text-amber-500" title={faved ? '取消收藏' : '收藏（置顶）'}>
+          <Star size={14} className={faved ? 'fill-amber-400 text-amber-400' : ''} />
+        </button>
+      </div>
+    );
+  };
+  const label = (text) => <div key={`l-${text}`} className="px-2 pt-2 pb-0.5 text-[9px] uppercase tracking-wider text-ink-faint font-body">{text}</div>;
+
+  return (
+    <div className="space-y-1.5">
+      <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="搜索字体…"
+        className="w-full text-[11px] font-body rounded-lg border border-canvas-deep bg-canvas px-2.5 py-1.5 text-ink placeholder-ink-ghost focus:outline-none focus:border-accent" />
+      <div className="max-h-[240px] overflow-y-auto -mx-0.5 px-0.5">
+        {groups.favorites.length > 0 && [label('收藏'), ...groups.favorites.map(renderRow)]}
+        {groups.builtins.length > 0 && [label('内置字体'), ...groups.builtins.map(renderRow)]}
+        {groups.systems.length > 0 && [label('系统字体（本设备）'), ...groups.systems.map(renderRow)]}
+        {nothing && <div className="px-2 py-4 text-[11px] text-ink-faint text-center font-body">没有匹配的字体</div>}
+      </div>
+      {canEnumerate && !enumerated && (
+        <button onClick={enumerateAll} disabled={enumerating}
+          className="w-full text-[10px] font-body rounded-lg border border-canvas-deep bg-canvas-warm px-2 py-1.5 text-ink-muted hover:text-ink disabled:opacity-50">
+          {enumerating ? '正在枚举…' : '枚举本设备全部系统字体'}
+        </button>
+      )}
+      <div className="text-[13px] text-ink-muted leading-snug px-0.5 font-reading">
+        示例 The quick brown fox · 敏捷的棕色狐狸
+      </div>
+    </div>
+  );
+}
+
 // P1.4 外观控件同源体(双入口):顶栏 ThemeToggle 弹层与 设置→外观 tab 共用这一个组件。
 // 状态单一数据源 —— 全部走 sessionStore(setTheme/setUiFontScale/…/localStorage),
 // 两处只是同一 store 的两个 view,不各自为政。
@@ -281,10 +357,9 @@ function ThemeAppearanceBody() {
   const themeFamily = useStore((s) => s.themeFamily);
   const themeTone = useStore((s) => s.themeTone);
   const setTheme = useStore((s) => s.setTheme);
+  const extraThemeFamilies = useStore((s) => s.extraThemeFamilies);
   const uiFontScale = useStore((s) => s.uiFontScale);
   const setUiFontScale = useStore((s) => s.setUiFontScale);
-  const readingFont = useStore((s) => s.readingFont);
-  const setReadingFont = useStore((s) => s.setReadingFont);
   const effDark = themeTone === 'auto' ? systemPrefersDark() : themeTone === 'dark';
   const toneKey = effDark ? 'dark' : 'light';
   return (
@@ -330,15 +405,7 @@ function ThemeAppearanceBody() {
               <Type size={12} className="text-ink-muted" />
               <span className="text-[11px] text-ink font-body font-medium">对话正文字体</span>
             </div>
-            <select value={readingFont} onChange={(e) => setReadingFont(e.target.value)}
-              className="w-full text-[11px] font-body rounded-lg border border-canvas-deep bg-canvas px-2.5 py-1.5 text-ink focus:outline-none focus:border-accent cursor-pointer">
-              {FONT_OPTIONS.map((f) => (
-                <option key={f.id} value={f.id}>{f.name}</option>
-              ))}
-            </select>
-            <div className="text-[14px] text-ink-muted leading-snug px-0.5 font-reading">
-              示例 The quick brown fox · 敏捷的棕色狐狸
-            </div>
+            <FontPicker />
           </div>
 
           {/* ── Color family ──────────────────────────────────── */}
@@ -349,7 +416,7 @@ function ThemeAppearanceBody() {
               <span className="ml-auto text-[9px] text-ink-faint font-body">当前 {toneKey === 'dark' ? '深色' : '浅色'}</span>
             </div>
             <div className="grid grid-cols-2 gap-1.5 max-h-[300px] overflow-y-auto pr-0.5">
-              {THEME_FAMILIES.map((fam) => {
+              {[...THEME_FAMILIES, ...extraThemeFamilies].map((fam) => {
                 const sw = fam[toneKey];
                 const active = themeFamily === fam.id;
                 return (
@@ -2817,11 +2884,14 @@ export const LOADING_OPTIONS = [
 ];
 
 // 统一加载指示:按用户选的样式渲染;variant 传入时强制该样式(预览网格用)。
-// ③ 对话区自定义背景层(设置→概览→对话区背景)。绝对定位铺满 pane,-z-10 置于
-// 内容之下(SessionDetail 根节点在启用背景时加 isolate 建立独立层叠上下文)。
-// 遮罩 = 主题底色(--color-canvas)按 maskOpacity 比例盖在背景上,深浅主题下都保证文字可读。
-// 未设置背景时返回 null,渲染结果与改动前完全一致。
-function ChatBackgroundLayer() {
+// ③ 全局自定义背景层(设置→外观→界面背景)。绝对定位铺满 app 根节点,-z-10 垫在
+// 所有面板之下(根节点 relative isolate 建立独立层叠上下文,把 -z-10 限定在 app 内、
+// 不掉到 body 之后)。各面板(侧栏/顶栏/会话区/输入框)用半透明玻璃透出此层;弹层
+// (.glass-popover)恒不透底。遮罩 = 主题底色(--color-canvas)按 maskOpacity 盖在背景上,
+// 深浅主题都保证文字可读。未设置背景时返回 null,与改动前外观完全一致(此时透出的是
+// body 的主题底色/晴空天空渐变,无需内置任何图片)。数据沿用 chatBackground 字段,老用户
+// 已设的背景无缝升级为全局,无迁移。
+function GlobalBackgroundLayer() {
   const bg = useStore((s) => s.chatBackground);
   if (!bg || !bg.kind) return null;
   const mask = Math.min(100, Math.max(0, Number(bg.maskOpacity ?? 40)));
@@ -3350,8 +3420,6 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // reference reads the local alias below, so the rest of this 700-line
   // component is unchanged.
   const { selectedProject, loading } = useStore();
-  // ③ 是否启用了对话区自定义背景(布尔原始值选择器,引用稳定)。启用时根节点加 isolate。
-  const hasChatBg = useStore((s) => !!(s.chatBackground && s.chatBackground.kind));
   // Pane routing generalized to N panes (0..5). Each SessionDetail reads/writes
   // its own slot in paneSessions/paneMessages. setPaneSession/setPaneMessages
   // keep the legacy selectedSession/messages (pane 0) + secondary* (pane 1)
@@ -6424,10 +6492,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   };
 
   return (
-    <div className={`flex-1 flex flex-col min-h-0 glass-base relative ${hasChatBg ? 'isolate' : ''}`}>
-      {/* ③ 对话区自定义背景(未设置时 null,外观与之前完全一致)。isolate 仅在启用
-          背景时加:让 -z-10 背景层限定在本 pane 的层叠上下文内、垫在所有内容之下。 */}
-      <ChatBackgroundLayer />
+    <div className="flex-1 flex flex-col min-h-0 glass-base relative">
+      {/* ③ 背景层已升级为全局(见 App 根节点的 GlobalBackgroundLayer),此处不再各 pane
+          单独渲染;pane 的 glass-base 半透明即透出全局背景。 */}
       {/* #9 子代理对话视图:覆盖在本 pane 之上,顶部面包屑可返回母会话。 */}
       {showAgentView && (
         <div className="absolute inset-0 z-40 flex flex-col bg-canvas">
@@ -8194,7 +8261,8 @@ function MobileAppearancePage({ push }) {
   const readingFont = useStore((s) => s.readingFont);
   const chatMode = useStore((s) => s.chatMode);
   const setChatMode = useStore((s) => s.setChatMode);
-  const famName = THEME_FAMILIES.find((f) => f.id === themeFamily)?.name || themeFamily;
+  const extraThemeFamilies = useStore((s) => s.extraThemeFamilies);
+  const famName = [...THEME_FAMILIES, ...extraThemeFamilies].find((f) => f.id === themeFamily)?.name || themeFamily;
   const fontName = FONT_OPTIONS.find((f) => f.id === readingFont)?.name || readingFont;
   return (
     <div className="py-2">
@@ -8226,11 +8294,12 @@ function MobileThemePage() {
   const themeFamily = useStore((s) => s.themeFamily);
   const themeTone = useStore((s) => s.themeTone);
   const setTheme = useStore((s) => s.setTheme);
+  const extraThemeFamilies = useStore((s) => s.extraThemeFamilies);
   const effDark = themeTone === 'auto' ? systemPrefersDark() : themeTone === 'dark';
   const toneKey = effDark ? 'dark' : 'light';
   return (
     <div className="grid grid-cols-2 gap-2 p-3">
-      {THEME_FAMILIES.map((fam) => {
+      {[...THEME_FAMILIES, ...extraThemeFamilies].map((fam) => {
         const sw = fam[toneKey];
         const active = themeFamily === fam.id;
         return (
@@ -8252,17 +8321,9 @@ function MobileThemePage() {
 }
 
 function MobileReadingFontPage() {
-  const readingFont = useStore((s) => s.readingFont);
-  const setReadingFont = useStore((s) => s.setReadingFont);
   return (
-    <div className="py-1">
-      {FONT_OPTIONS.map((f) => (
-        <button key={f.id} onClick={() => setReadingFont(f.id)}
-          className="w-full flex items-center gap-3 px-4 py-3 text-left hover:bg-canvas-warm transition-colors">
-          <span className="flex-1 text-[15px] text-ink">{f.name}</span>
-          {readingFont === f.id && <Check size={16} className="text-accent shrink-0" />}
-        </button>
-      ))}
+    <div className="px-3 py-2">
+      <FontPicker />
     </div>
   );
 }
@@ -9002,12 +9063,15 @@ export default function App() {
   // Optional local-only widgets (client/src/components/*.local.jsx). Fresh
   // checkouts have none; public builds temporarily move them out of the build
   // graph so personal controls do not enter client/dist or Tauri bundles.
-  const [LocalWidget, setLocalWidget] = useState(null);
+  // Render EVERY local widget (not just the first) so multiple *.local.jsx can
+  // coexist — e.g. a bot control + a local-only theme skin.
+  const [localWidgets, setLocalWidgets] = useState([]);
   useEffect(() => {
     const mods = import.meta.glob('./components/*.local.jsx');
-    const entry = Object.values(mods)[0];
-    if (entry) entry().then((m) => setLocalWidget(() => m.default)).catch(() => {});
+    Promise.all(Object.values(mods).map((fn) => fn().then((m) => m.default).catch(() => null)))
+      .then((list) => setLocalWidgets(list.filter(Boolean)));
   }, []);
+  const LocalWidgets = () => localWidgets.map((W, i) => <W key={i} />);
 
   // 全局轮询正在运行的 chat-process → store,驱动侧栏状态符号(ProjectList /
   // SessionItem)。与按会话的 backgroundPid 轮询相互独立。
@@ -9319,7 +9383,7 @@ export default function App() {
     // the physical viewport. `--kb` still lifts it above the soft keyboard.
     return (
       <div
-        className="cgui-mobile-root flex flex-col overflow-hidden"
+        className="cgui-mobile-root flex flex-col overflow-hidden isolate"
         style={{
           position: 'fixed',
           left: 0,
@@ -9333,6 +9397,8 @@ export default function App() {
           height: 'calc(var(--app-h, 100dvh) - var(--kb, 0px))',
         }}
       >
+        {/* ③ 全局自定义背景层(手机端同桌面)。 */}
+        <GlobalBackgroundLayer />
         <MobileTopBar onMenu={toggleSidebar} onNew={startMobileNewChat} title={mobileTitle} />
         <MainLayout
           sidebarCollapsed={sidebarCollapsed}
@@ -9342,7 +9408,7 @@ export default function App() {
           isMobile={isMobile}
           updateNotice={updateNotice}
         />
-        {LocalWidget && <LocalWidget />}
+        {LocalWidgets()}
         {/* 外接键盘按 Cmd+/ 也能开;不渲染的话状态会隐形置真并吞掉 Esc */}
         <ShortcutsPanel open={shortcutsOpen} onClose={() => setShortcutsOpen(false)} />
         {/* 审计批A3/A4:版本告警横幅 + 非聚焦会话完成提醒,手机端同样渲染
@@ -9357,7 +9423,9 @@ export default function App() {
   }
 
   return (
-    <div className="flex flex-col overflow-hidden" style={{ width: 'var(--app-w, 100vw)', height: 'var(--app-h, 100dvh)' }}>
+    <div className="flex flex-col overflow-hidden relative isolate" style={{ width: 'var(--app-w, 100vw)', height: 'var(--app-h, 100dvh)' }}>
+      {/* ③ 全局自定义背景层:垫在所有面板之下(root relative+isolate 兜住 -z-10)。 */}
+      <GlobalBackgroundLayer />
       {/* Top bar — glass */}
       {/* Top bar uses min-height instead of fixed h-12 so when font scales up
           and the right cluster wraps to a second line, the bar grows with the
@@ -9424,7 +9492,7 @@ export default function App() {
         setRightPanel={setRightPanel}
         isMobile={isMobile}
       />
-      {LocalWidget && <LocalWidget />}
+      {LocalWidgets()}
       <GuideTour open={tourOpen} onClose={closeTour} hasProject={!!selectedProject} />
       <ShortcutsPanel open={shortcutsOpen} onClose={() => setShortcutsOpen(false)} />
       {/* 修正批#7:Provider 管理独立弹窗(桌面;手机走合并入口页内的导航流全屏页) */}
