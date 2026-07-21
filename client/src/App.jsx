@@ -2818,11 +2818,14 @@ export const LOADING_OPTIONS = [
 ];
 
 // 统一加载指示:按用户选的样式渲染;variant 传入时强制该样式(预览网格用)。
-// ③ 对话区自定义背景层(设置→概览→对话区背景)。绝对定位铺满 pane,-z-10 置于
-// 内容之下(SessionDetail 根节点在启用背景时加 isolate 建立独立层叠上下文)。
-// 遮罩 = 主题底色(--color-canvas)按 maskOpacity 比例盖在背景上,深浅主题下都保证文字可读。
-// 未设置背景时返回 null,渲染结果与改动前完全一致。
-function ChatBackgroundLayer() {
+// ③ 全局自定义背景层(设置→外观→界面背景)。绝对定位铺满 app 根节点,-z-10 垫在
+// 所有面板之下(根节点 relative isolate 建立独立层叠上下文,把 -z-10 限定在 app 内、
+// 不掉到 body 之后)。各面板(侧栏/顶栏/会话区/输入框)用半透明玻璃透出此层;弹层
+// (.glass-popover)恒不透底。遮罩 = 主题底色(--color-canvas)按 maskOpacity 盖在背景上,
+// 深浅主题都保证文字可读。未设置背景时返回 null,与改动前外观完全一致(此时透出的是
+// body 的主题底色/晴空天空渐变,无需内置任何图片)。数据沿用 chatBackground 字段,老用户
+// 已设的背景无缝升级为全局,无迁移。
+function GlobalBackgroundLayer() {
   const bg = useStore((s) => s.chatBackground);
   if (!bg || !bg.kind) return null;
   const mask = Math.min(100, Math.max(0, Number(bg.maskOpacity ?? 40)));
@@ -3351,8 +3354,6 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // reference reads the local alias below, so the rest of this 700-line
   // component is unchanged.
   const { selectedProject, loading } = useStore();
-  // ③ 是否启用了对话区自定义背景(布尔原始值选择器,引用稳定)。启用时根节点加 isolate。
-  const hasChatBg = useStore((s) => !!(s.chatBackground && s.chatBackground.kind));
   // Pane routing generalized to N panes (0..5). Each SessionDetail reads/writes
   // its own slot in paneSessions/paneMessages. setPaneSession/setPaneMessages
   // keep the legacy selectedSession/messages (pane 0) + secondary* (pane 1)
@@ -6425,10 +6426,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   };
 
   return (
-    <div className={`flex-1 flex flex-col min-h-0 glass-base relative ${hasChatBg ? 'isolate' : ''}`}>
-      {/* ③ 对话区自定义背景(未设置时 null,外观与之前完全一致)。isolate 仅在启用
-          背景时加:让 -z-10 背景层限定在本 pane 的层叠上下文内、垫在所有内容之下。 */}
-      <ChatBackgroundLayer />
+    <div className="flex-1 flex flex-col min-h-0 glass-base relative">
+      {/* ③ 背景层已升级为全局(见 App 根节点的 GlobalBackgroundLayer),此处不再各 pane
+          单独渲染;pane 的 glass-base 半透明即透出全局背景。 */}
       {/* #9 子代理对话视图:覆盖在本 pane 之上,顶部面包屑可返回母会话。 */}
       {showAgentView && (
         <div className="absolute inset-0 z-40 flex flex-col bg-canvas">
@@ -9325,7 +9325,7 @@ export default function App() {
     // the physical viewport. `--kb` still lifts it above the soft keyboard.
     return (
       <div
-        className="cgui-mobile-root flex flex-col overflow-hidden"
+        className="cgui-mobile-root flex flex-col overflow-hidden isolate"
         style={{
           position: 'fixed',
           left: 0,
@@ -9339,6 +9339,8 @@ export default function App() {
           height: 'calc(var(--app-h, 100dvh) - var(--kb, 0px))',
         }}
       >
+        {/* ③ 全局自定义背景层(手机端同桌面)。 */}
+        <GlobalBackgroundLayer />
         <MobileTopBar onMenu={toggleSidebar} onNew={startMobileNewChat} title={mobileTitle} />
         <MainLayout
           sidebarCollapsed={sidebarCollapsed}
@@ -9363,7 +9365,9 @@ export default function App() {
   }
 
   return (
-    <div className="flex flex-col overflow-hidden" style={{ width: 'var(--app-w, 100vw)', height: 'var(--app-h, 100dvh)' }}>
+    <div className="flex flex-col overflow-hidden relative isolate" style={{ width: 'var(--app-w, 100vw)', height: 'var(--app-h, 100dvh)' }}>
+      {/* ③ 全局自定义背景层:垫在所有面板之下(root relative+isolate 兜住 -z-10)。 */}
+      <GlobalBackgroundLayer />
       {/* Top bar — glass */}
       {/* Top bar uses min-height instead of fixed h-12 so when font scales up
           and the right cluster wraps to a second line, the bar grows with the
