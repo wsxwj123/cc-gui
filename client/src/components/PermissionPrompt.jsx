@@ -226,9 +226,12 @@ function AskQuestionCard({ req, onAnswer, processing, position, hydrate }) {
       const cur = Array.isArray(prev[qi]) ? prev[qi] : [];
       return { ...prev, [qi]: cur.includes(label) ? cur.filter((x) => x !== label) : [...cur, label] };
     });
-    // 只有一道题且单选:点选项即提交(免再点"提交"按钮);稍延迟让选中态可见。
-    // 多选不适用(要连选多个);取消选中不提交。已有自定义文本时一并带上。
-    if (!multi && !wasSelected && total === 1) {
+    // 单选点选项即提交(免再点"提交"按钮),稍延迟让选中态可见。触发条件:
+    //  · 单题;或 · 多题走到最后一题、且其它题都已答完(othersAnswered)——「看最后一题的选择即交」。
+    // 多选不适用(要连选多个);取消选中不提交;已有自定义文本时一并带上。
+    // 前面有空题时 othersAnswered=false → 不自动提交,停在末题,提交按钮因 !allAnswered 保持灰色提示。
+    const othersAnswered = questions.every((_, i) => i === qi || answerOf(i));
+    if (!multi && !wasSelected && (total === 1 || (isLast && othersAnswered))) {
       autoSubmitRef.current = setTimeout(() => submit({ ...picks, [qi]: label }, customs), 120);
       return;
     }
@@ -343,7 +346,7 @@ function AskQuestionCard({ req, onAnswer, processing, position, hydrate }) {
         ) : (
           <button
             disabled={processing || !allAnswered}
-            onClick={submit}
+            onClick={() => submit()}
             className={`${total > 1 ? '' : 'ml-auto '}px-3 py-1.5 rounded-md text-[12px] font-medium text-white bg-violet-600 hover:bg-violet-700 disabled:opacity-50 inline-flex items-center gap-1.5`}
             title={allAnswered ? 'Enter' : `第 ${firstUnanswered + 1} 题还未回答`}
           >
