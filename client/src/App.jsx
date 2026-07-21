@@ -1685,6 +1685,10 @@ function SessionItem({ session, isSelected, onSelect, onFork, onArchive, onDelet
   const customTitle = useStore((s) => s.customTitles[session.sessionId]);
   const autoTitle = useStore((s) => s.autoTitles[session.sessionId]);
   const setCustomTitle = useStore((s) => s.setCustomTitle);
+  // 会话列表 model 徽章:优先当前 pin(用户在该会话切了 model/provider 即时生效),回落 session.model
+  // (后端已取 jsonl 最后一条 assistant 的 model 非首条;但「切了还没发新消息」时它仍是旧值)。
+  // primitive selector 只订阅本条 pin,不因 setModelFor 换整个 map 引用而触发全列表重渲。
+  const pinModel = useStore((s) => s.modelBySession[session.sessionId]);
   const [renaming, setRenaming] = useState(false);
   const [draft, setDraft] = useState('');
   const [deleteArmed, setDeleteArmed] = useState(false); // #2 删除二次确认中 → 强制操作组可见
@@ -1746,7 +1750,7 @@ function SessionItem({ session, isSelected, onSelect, onFork, onArchive, onDelet
               {/* Bottom row leaves space on the right for the hover action bar. */}
               <div className="flex items-center gap-2 gap-y-1 flex-wrap mt-1.5 pr-20">
                 {pinned && <Pin size={9} className="text-accent fill-accent shrink-0" />}
-                {session.model && <ModelBadge model={session.model} compact />}
+                {(pinModel || session.model) && <ModelBadge model={(pinModel || session.model).replace(/\[1m\]/i, '')} compact />}
                 <span className="text-[10px] text-ink-faint font-mono shrink-0 whitespace-nowrap">{session.messageCount}</span>
                 {hasSubagents && (
                   <span className="text-[10px] text-accent/60 font-mono shrink-0 whitespace-nowrap">+{session.subagents.length} 子任务</span>
