@@ -1448,7 +1448,11 @@ router.post('/chat/btw', async (req, res) => {
   // 对齐原生 /btw(side_question):canUseTool 恒 deny、单回合、纯凭已有上下文作答。
   // 用 --tools "" 禁全部工具(CLI 官方 disable-all),是原生"零工具"的精确等价;
   // 旧版误用 --permission-mode plan 让旁问能 Read/Grep 调查=比原生更宽、更慢,已纠。
-  const args = ['-p', '--tools', ''];
+  // 流式:stream-json + --include-partial-messages 拿逐 token 的 text_delta,以 NDJSON
+  // ({delta}/{done}/{error} 行)转发给前端逐块渲染 —— 旧版攒全量 res.json({answer}) 是
+  // "旁问不流式"的根因。-p + stream-json 必须带 --verbose(CLI 硬要求)。
+  const args = ['-p', '--tools', '',
+    '--output-format', 'stream-json', '--verbose', '--include-partial-messages'];
   if (sessionId) args.push('--resume', sessionId, '--fork-session');
   args.push('--no-session-persistence');
   if (model) args.push('--model', model);
@@ -1476,22 +1480,62 @@ router.post('/chat/btw', async (req, res) => {
   // 同 /chat/title:stderr 是 pipe 但只读 stdout,必须排空,否则超 ~64KB 子进程挂死到超时。
   proc.stderr?.resume();
 
-  let out = '';
+  // NDJSON 转发:首个 delta 到达才写流式头(之前失败仍可走 500 JSON);之后错误只能以
+  // {error} 行传递。X-Accel-Buffering: no 防中间层攒块。
+  let headersSent = false;
+  const send = (obj) => {
+    if (!headersSent) {
+      headersSent = true;
+      res.writeHead(200, {
+        'Content-Type': 'application/x-ndjson; charset=utf-8',
+        'Cache-Control': 'no-cache',
+        'X-Accel-Buffering': 'no',
+      });
+      res.flushHeaders?.();
+    }
+    res.write(JSON.stringify(obj) + '\n');
+  };
+  let emitted = false;    // 已发过 delta
+  let resultText = '';    // 兜底:无 partial(异常形态)时用 result 整段
+  let resultErr = '';     // cli-stream-json-error-shape:API 错误 is_error=true、文案在 result
   let done = false;
   const finish = () => {
     if (done) return;
     done = true;
     clearTimeout(timer);
     try { killProcessTree(proc); } catch {}
-    const answer = out.trim();
-    if (!answer) return res.status(500).json({ error: '旁问失败:超时或模型无回答' });
-    res.json({ answer });
+    if (res.writableEnded || res.destroyed) return;
+    if (!emitted && resultText) { send({ delta: resultText }); emitted = true; }
+    if (emitted) send({ done: true });
+    else if (headersSent) send({ error: resultErr || '旁问失败:超时或模型无回答' });
+    else return res.status(500).json({ error: resultErr || '旁问失败:超时或模型无回答' });
+    res.end();
   };
-  // 大会话 resume + 冷启动可能较慢,给 120s;超时若已有部分输出仍返回。
+  // 大会话 resume + 冷启动可能较慢,给 120s;超时若已有部分输出仍收尾返回已有部分。
   const timer = setTimeout(finish, 120000);
-  proc.stdout.on('data', (c) => { out += c.toString(); });
+  let buf = '';
+  proc.stdout.on('data', (c) => {
+    buf += c.toString();
+    let idx;
+    while ((idx = buf.indexOf('\n')) >= 0) {
+      const line = buf.slice(0, idx); buf = buf.slice(idx + 1);
+      if (!line.trim()) continue;
+      let ev; try { ev = JSON.parse(line); } catch { continue; }
+      if (ev.type === 'stream_event'
+        && ev.event?.type === 'content_block_delta'
+        && ev.event.delta?.type === 'text_delta'
+        && ev.event.delta.text) {
+        emitted = true;
+        send({ delta: ev.event.delta.text });
+      } else if (ev.type === 'result') {
+        if (ev.is_error) resultErr = String(ev.result || '').trim();
+        else if (typeof ev.result === 'string') resultText = ev.result.trim();
+      }
+    }
+  });
   proc.on('close', finish);
   proc.on('error', finish);
+  res.on('close', finish); // 客户端断开(关窗/刷新)→ 杀子进程,不留孤儿
 });
 
 // ── Context breakdown (#1) ────────────────────────────────────────────────

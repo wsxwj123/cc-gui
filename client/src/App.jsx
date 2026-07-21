@@ -4084,13 +4084,40 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ question: q, sessionId: btwSid || undefined, cwd: btwCwd, model: btwModel || undefined, history: btwHistory }),
     }).then(async (r) => {
-      const d = await r.json().catch(() => ({}));
-      if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
-      setChatMessages((prev) => prev.map((m) => m.uuid === btwUuid
-        ? { ...m, text: d.answer || '(无回答)', pending: false } : m));
+      // 服务端已改 NDJSON 流式({delta}/{done}/{error} 行):逐 delta 追加渲染,对齐主会话
+      // 逐块出字;spawn 前失败仍是 500 JSON,统一走 !r.ok 分支。
+      if (!r.ok) {
+        const d = await r.json().catch(() => ({}));
+        throw new Error(d.error || `HTTP ${r.status}`);
+      }
+      const reader = r.body.getReader();
+      const dec = new TextDecoder();
+      let buf = '';
+      let got = false;
+      const handleLine = (line) => {
+        if (!line.trim()) return;
+        let ev; try { ev = JSON.parse(line); } catch { return; }
+        if (ev.delta) {
+          got = true;
+          setChatMessages((prev) => prev.map((m) => m.uuid === btwUuid
+            ? { ...m, text: m.text + ev.delta, pending: false } : m));
+        } else if (ev.error) throw new Error(ev.error);
+      };
+      for (;;) {
+        const { value, done: eof } = await reader.read();
+        if (value) {
+          buf += dec.decode(value, { stream: true });
+          let idx;
+          while ((idx = buf.indexOf('\n')) >= 0) { handleLine(buf.slice(0, idx)); buf = buf.slice(idx + 1); }
+        }
+        if (eof) break;
+      }
+      handleLine(buf);
+      if (!got) throw new Error('模型无回答');
     }).catch((e) => {
+      // 已有部分输出时保留半截回答,错误缀在其后(超时/断流不清空已渲染内容)。
       setChatMessages((prev) => prev.map((m) => m.uuid === btwUuid
-        ? { ...m, text: '旁问失败：' + e.message, pending: false, error: true } : m));
+        ? { ...m, text: (m.text ? m.text + '\n\n' : '') + '旁问失败：' + e.message, pending: false, error: true } : m));
     });
   }, [getLocalSession, selectedProject, sessionQueueKey, setChatMessages, setStreamOwner]);
 
