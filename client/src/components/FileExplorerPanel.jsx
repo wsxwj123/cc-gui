@@ -668,42 +668,45 @@ function PreviewBody({ preview, onAddToContext, onDelete }) {
             <button onClick={redo} disabled={hist.ptr >= hist.stack.length - 1}
               className="p-1 rounded text-ink-faint hover:text-ink hover:bg-canvas-deep disabled:opacity-30 disabled:hover:bg-transparent shrink-0"
               title="重做"><Redo2 size={12} /></button>
-            <button onClick={save} disabled={!dirty || saving}
+            <button onClick={save} disabled={!dirty || saving} aria-label="保存到磁盘"
               className="flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded text-accent hover:bg-accent/10 disabled:opacity-40 disabled:hover:bg-transparent shrink-0"
               title="保存到磁盘">
-              {saving ? <RefreshCw size={10} className="animate-spin" /> : <Save size={10} />}保存
+              {saving ? <RefreshCw size={10} className="animate-spin" /> : <Save size={10} />}<span className="max-md:hidden">保存</span>
             </button>
-            <button onClick={() => { setEditing(false); setHist({ stack: [savedValue], ptr: 0 }); }}
+            <button onClick={() => { setEditing(false); setHist({ stack: [savedValue], ptr: 0 }); }} aria-label="取消编辑"
               className="flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded text-ink-faint hover:text-ink hover:bg-canvas-deep shrink-0"
-              title="取消编辑"><X size={10} />取消</button>
+              title="取消编辑"><X size={10} /><span className="max-md:hidden">取消</span></button>
           </>
         ) : (
           <>
             {/* 预览栏标准左键按钮:任何 webview 都工作的兜底入口(与右键菜单同功能)。 */}
+            {/* 手机断点(≤767px)按钮图标化(max-md:hidden 藏文字,title/aria-label 保留语义):
+                四个文字按钮固定横排不换行,375px 下「删除」溢出屏幕右缘被裁。桌面空间充裕保留文字。 */}
             {onAddToContext && (
-              <button onClick={() => onAddToContext(preview.path)}
+              <button onClick={() => onAddToContext(preview.path)} aria-label="在输入框 @ 引用此文件"
                 className="flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded text-accent hover:bg-accent/10 transition-colors shrink-0"
-                title="在输入框 @ 引用此文件"><AtSign size={10} />添加到上下文</button>
+                title="在输入框 @ 引用此文件"><AtSign size={10} /><span className="max-md:hidden">添加到上下文</span></button>
             )}
             {editable && (
-              <button onClick={() => setEditing(true)}
+              <button onClick={() => setEditing(true)} aria-label="编辑此文件"
                 className="flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded text-ink-faint hover:text-ink hover:bg-canvas-deep transition-colors shrink-0"
-                title="编辑此文件"><Pencil size={10} />编辑</button>
+                title="编辑此文件"><Pencil size={10} /><span className="max-md:hidden">编辑</span></button>
             )}
             <button
-              onClick={() => openWithDefaultApp(preview.path)}
+              onClick={() => openWithDefaultApp(preview.path)} aria-label="用系统默认应用打开"
               className="flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded text-ink-faint hover:text-ink hover:bg-canvas-deep transition-colors shrink-0"
               title="用系统默认应用打开"
             >
-              <ExternalLink size={10} />用默认App打开
+              <ExternalLink size={10} /><span className="max-md:hidden">用默认App打开</span>
             </button>
             {onDelete && (
               <button
                 onClick={() => onDelete({ path: preview.path, name: preview.name, parentPath: preview.path.replace(/[/\\][^/\\]*$/, '') })}
+                aria-label="删除此文件（10 秒内可撤销）"
                 className="flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded text-red-600 hover:bg-red-500/10 transition-colors shrink-0"
                 title="删除此文件（10 秒内可撤销）"
               >
-                <Trash2 size={10} />删除
+                <Trash2 size={10} /><span className="max-md:hidden">删除</span>
               </button>
             )}
           </>
