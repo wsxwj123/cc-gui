@@ -185,7 +185,7 @@ const TYPE_LABELS = {
 const TODO_AGENT_TERMINAL = ['done', 'error', 'stopped'];
 const TODO_BG_TERMINAL = ['done', 'failed', 'killed', 'stopped', 'error'];
 
-export function ChatInput({ onSend, onStop, onAccelerate, onBackground, suggestion = null, onDismissSuggestion, disabled, isStreaming, backgroundWorking = false, queueLength = 0, queueItems = [], onRemoveFromQueue, onEditFromQueue, todos = null, plan = '', permKey = null, sessionId = null, tabIndex = null, onBtwOpen, btwUnread = 0 }) {
+export function ChatInput({ onSend, onStop, onStopBackground, onAccelerate, onBackground, suggestion = null, onDismissSuggestion, disabled, isStreaming, backgroundWorking = false, queueLength = 0, queueItems = [], onRemoveFromQueue, onEditFromQueue, todos = null, plan = '', permKey = null, sessionId = null, tabIndex = null, onBtwOpen, btwUnread = 0 }) {
   const [text, setText] = useState('');
   // 编辑重发态(#4):点击「重新编辑并发送」后进入。此时历史消息尚未被破坏,
   // 按 Esc 可整条取消(清空输入+通知上层撤销待回滚),给用户反悔余地。
@@ -244,6 +244,11 @@ export function ChatInput({ onSend, onStop, onAccelerate, onBackground, suggesti
   const agentsWorking = useStore((s) => (sessionId
     ? Object.values(s.activeAgents || {}).some((a) => a && a.sessionId === sessionId && !TODO_AGENT_TERMINAL.includes(a.status))
     : false));
+  // 部件②总闸计数:本会话仍非终态的子代理/teammate 数。仅用于「回合已结束」(!working)时
+  // 显示独立「停止后台 N」按钮 —— 门控见下方按钮区。selector 返回数字(基元,引用稳定不多渲)。
+  const bgSubagentCount = useStore((s) => (sessionId
+    ? Object.values(s.activeAgents || {}).filter((a) => a && a.sessionId === sessionId && !TODO_AGENT_TERMINAL.includes(a.status)).length
+    : 0));
   // livePhase 由 App 根的全局活性轮询维护('running'/'idle');'idle'=输出30s无增长≈
   // 不再工作(自然结束无退出码事件,这是唯一可得信号)。无 livePhase(刚起跑)按工作中。
   const bgWorking = useStore((s) => (sessionId
@@ -1079,6 +1084,20 @@ export function ChatInput({ onSend, onStop, onAccelerate, onBackground, suggesti
                   </button>
                 )}
               </>
+            )}
+            {/* 部件②总闸:回合已结束(!working)且本会话仍有非终态后台子代理/teammate 时,
+                与发送键【并列】的独立按钮。刻意不进 working 二态(那是死锁根源):它的显隐不
+                影响发送键(仍按有文本可点),空框也绝不"既无停止又灰发送"。主流式期间 working
+                为真、本按钮不显,避免把主回合前台子代理算进 N 而误停。 */}
+            {!working && bgSubagentCount > 0 && onStopBackground && (
+              <button
+                onClick={() => onStopBackground(sessionId)}
+                className="shrink-0 h-8 px-2.5 rounded-md bg-canvas-warm border border-canvas-deep hover:bg-black/5 text-ink-soft flex items-center justify-center gap-1.5 max-md:gap-0 transition-colors text-[11px] font-medium"
+                title="停止本会话所有后台子代理/teammate（保留 run_in_background 长任务）"
+              >
+                <Square size={11} className="fill-current" />
+                <span className="max-md:hidden">停止后台 {bgSubagentCount}</span>
+              </button>
             )}
             {/* 停止按钮按「工作中」显示(主流式 / 活跃子代理 / 后台任务 / 待处理授权卡),恒表明仍在
                 工作 —— 修复「等子代理或弹权限卡时停止按钮消失」。onStop 实现(停止链路)不动。 */}

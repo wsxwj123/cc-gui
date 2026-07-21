@@ -1946,6 +1946,21 @@ function SessionList() {
     } catch {}
   };
 
+  // 部件②总闸:停本会话所有后台子代理/teammate(选择性 /stop,hard=false,保留 shell 长任务)。
+  // 复用 stopSessionProcs 的 pid 解析(按 sessionId 扇出到该会话全部 slot);空 body = 选择性停止,
+  // 不改 /stop 内部。分屏隔离:严格按 sessionId 过滤,不波及其它窗格。
+  const stopSessionBackground = async (sessionId) => {
+    if (!sessionId) return;
+    try {
+      const d = await fetch('/api/agents/active').then((r) => r.json());
+      const procs = (d.agents || []).filter((a) => a.kind === 'chat-process' && a.sessionId === sessionId && a.stoppable === true);
+      if (!procs.length) return;
+      await Promise.allSettled(procs.map((a) => fetch(`/api/chat/${a.pid}/stop`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+      })));
+    } catch {}
+  };
+
   const reallyDelete = async (session) => {
     try {
       await stopSessionProcs(session.sessionId);
@@ -6862,6 +6877,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       <ChatInput
         onSend={handleSend}
         onStop={handleStop}
+        onStopBackground={stopSessionBackground}
         onAccelerate={messageQueue.length > 0 ? handleAccelerate : undefined}
         // H 转后台:仅本地前台流式时提供(backgroundPid-only 态已在后台,无意义)。
         onBackground={isStreaming ? handleBackgroundify : undefined}
