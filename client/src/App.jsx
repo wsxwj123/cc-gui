@@ -288,6 +288,7 @@ function FontPicker() {
   const [query, setQuery] = useState('');
   const [enumerating, setEnumerating] = useState(false);
   const [enumerated, setEnumerated] = useState(false);
+  const [enumNote, setEnumNote] = useState('');
 
   // Whitelist probe on mount — cheap, works in every webview incl. WKWebView.
   useEffect(() => {
@@ -295,13 +296,16 @@ function FontPicker() {
   }, []);
 
   // Optional full enumeration (this click is the required user gesture). Graceful:
-  // null = unsupported / permission denied → keep the probed list, no error surfaced.
+  // 成功才隐藏按钮;null(不支持,如 WKWebView)/拒绝(WebView2 权限被拒)时保留白名单
+  // 探测的列表并显示一行提示(W1:别静默移除按钮让用户以为点了失效)。
   const enumerateAll = async () => {
     setEnumerating(true);
     try {
       const fams = await queryLocalFontFamilies();
-      if (fams && fams.length) setSystemFamilies(fams);
-      setEnumerated(true);
+      if (fams && fams.length) { setSystemFamilies(fams); setEnumerated(true); }
+      else setEnumNote('此设备不支持或未授权全量枚举,已按内置字体库探测系统字体');
+    } catch {
+      setEnumNote('全量枚举被拒绝,已按内置字体库探测系统字体');
     } finally { setEnumerating(false); }
   };
 
@@ -343,6 +347,7 @@ function FontPicker() {
           {enumerating ? '正在枚举…' : '枚举本设备全部系统字体'}
         </button>
       )}
+      {enumNote && <div className="px-2 pt-0.5 text-[10px] text-ink-faint text-center font-body leading-snug">{enumNote}</div>}
       <div className="text-[13px] text-ink-muted leading-snug px-0.5 font-reading">
         示例 The quick brown fox · 敏捷的棕色狐狸
       </div>
@@ -803,8 +808,10 @@ function PanelDock({ rightPanel, setRightPanel, updateNotice, jumpToUpdate }) {
   // 导引联动:tour 的面板步骤经此事件展开 rail 做演示(GuideTour 只 dispatch,不直接碰状态)。
   useEffect(() => {
     const onOpen = () => setRailOpen(true);
+    const onClose = () => setRailOpen(false); // 导引结束时收起(持久化删了点外部自动收,否则 rail 残留占顶栏)
     window.addEventListener('cgui:dock-rail-open', onOpen);
-    return () => window.removeEventListener('cgui:dock-rail-open', onOpen);
+    window.addEventListener('cgui:dock-rail-close', onClose);
+    return () => { window.removeEventListener('cgui:dock-rail-open', onOpen); window.removeEventListener('cgui:dock-rail-close', onClose); };
   }, []);
   const activeMeta = rightPanel ? PANEL_MAP[rightPanel] : null;
   const DockIcon = activeMeta ? activeMeta.icon : LayoutGrid;

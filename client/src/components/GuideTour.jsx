@@ -95,7 +95,8 @@ export function GuideTour({ open, onClose, hasProject }) {
   // steps[i] 为 undefined → 渲染抛错整页白屏(用户报:返回初始界面再点指引白屏)。
   useEffect(() => {
     if (open) setI(0);
-    else { setRect(null); setPos(null); }
+    // 关闭指引时收起被 panel 步骤展开的坞 rail(坞持久化后不再点外部自动收 → 否则残留占顶栏)。
+    else { setRect(null); setPos(null); window.dispatchEvent(new CustomEvent('cgui:dock-rail-close')); }
   }, [open]);
 
   // 定位当前步骤目标。P2.6:先派发 enter(建 draft/开菜单/开 rail 都是异步渲染),
