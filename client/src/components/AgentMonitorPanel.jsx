@@ -168,7 +168,7 @@ function BackgroundAgentsSection({ stoppingPid, onStop }) {
           disabled={!selectedProject || dispatching}
           className="flex-1 min-w-0 text-[11px] font-body bg-canvas-warm border border-canvas-deep rounded px-2 py-1.5 text-ink focus:border-accent outline-none" />
         <button onClick={dispatch} disabled={!prompt.trim() || !selectedProject || dispatching}
-          className="shrink-0 flex items-center gap-1 px-2.5 py-1.5 rounded text-[11px] font-medium text-white bg-accent hover:bg-accent/90 disabled:opacity-40">
+          className="shrink-0 flex items-center gap-1 px-2.5 py-1.5 rounded text-[11px] font-medium text-on-accent bg-accent hover:bg-accent/90 disabled:opacity-40">
           {dispatching ? <Loader2 size={11} className="animate-spin" /> : <PlayCircle size={11} />}派发
         </button>
       </div>

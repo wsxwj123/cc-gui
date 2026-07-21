@@ -369,7 +369,7 @@ function ThemeAppearanceBody() {
             {TONES.map(({ id, label, Icon }) => (
               <button key={id} onClick={() => setTheme(themeFamily, id)}
                 className={`flex-1 flex items-center justify-center gap-1 py-1.5 rounded-lg text-[11px] font-body transition-colors ${
-                  themeTone === id ? 'bg-accent text-white shadow-sm' : 'text-ink-muted hover:text-ink'}`}>
+                  themeTone === id ? 'bg-accent text-on-accent shadow-sm' : 'text-ink-muted hover:text-ink'}`}>
                 <Icon size={12} /> {label}
               </button>
             ))}
@@ -391,7 +391,7 @@ function ThemeAppearanceBody() {
                 <button key={label} onClick={() => setUiFontScale(value)}
                   className={`flex-1 py-1.5 rounded-lg text-[11px] font-body transition-colors ${
                     Math.abs(uiFontScale - value) < 0.03
-                      ? 'bg-accent text-white shadow-sm'
+                      ? 'bg-accent text-on-accent shadow-sm'
                       : 'text-ink-muted hover:text-ink'}`}>
                   {label}
                 </button>
@@ -768,7 +768,7 @@ function PaneCountPicker() {
                 key={n}
                 onClick={() => { setPaneCount(n); setOpen(false); }}
                 className={`py-1.5 rounded text-[12px] font-mono transition-colors ${
-                  paneCount === n ? 'bg-accent text-white' : 'hover:bg-canvas-warm text-ink'
+                  paneCount === n ? 'bg-accent text-on-accent' : 'hover:bg-canvas-warm text-ink'
                 }`}
               >{n}</button>
             ))}
@@ -1576,7 +1576,7 @@ function ProjectList() {
             {!searchQuery && !hiddenOnly && (
               <button
                 onClick={openAddProject}
-                className="mt-3 px-3 py-1.5 rounded-full bg-accent text-white text-[12px] font-body"
+                className="mt-3 px-3 py-1.5 rounded-full bg-accent text-on-accent text-[12px] font-body"
               >
                 添加项目文件夹
               </button>
@@ -1584,7 +1584,7 @@ function ProjectList() {
             {hiddenOnly && (
               <button
                 onClick={() => { const next = new Set(); setHidden(next); persistHidden(next); }}
-                className="mt-3 px-3 py-1.5 rounded-full bg-accent text-white text-[12px] font-body"
+                className="mt-3 px-3 py-1.5 rounded-full bg-accent text-on-accent text-[12px] font-body"
               >
                 显示全部项目
               </button>
@@ -1623,7 +1623,7 @@ function ProjectList() {
                 <button type="button" onClick={() => setAddDialogOpen(false)} className="px-3 py-2 rounded-lg text-[13px] text-ink-muted hover:bg-canvas-warm">
                   取消
                 </button>
-                <button disabled={addingProject || !addPathInput.trim()} className="px-4 py-2 rounded-lg bg-accent text-white text-[13px] disabled:opacity-50">
+                <button disabled={addingProject || !addPathInput.trim()} className="px-4 py-2 rounded-lg bg-accent text-on-accent text-[13px] disabled:opacity-50">
                   {addingProject ? '添加中...' : '添加'}
                 </button>
               </div>
@@ -2837,7 +2837,7 @@ function EmptyState({ tabIndex = 0 }) {
             <h3 className="text-[22px] font-display font-semibold text-ink mb-1.5 tracking-tight">选择一个会话</h3>
             <p className="text-[13px] text-ink-muted font-body">从左侧会话列表选一条历史记录，或直接开始新会话</p>
             <button onClick={newSession}
-              className="mt-5 px-4 py-2 rounded-full bg-accent text-white text-[13px] font-body hover:bg-accent/90 transition-colors">
+              className="mt-5 px-4 py-2 rounded-full bg-accent text-on-accent text-[13px] font-body hover:bg-accent/90 transition-colors">
               新建会话
             </button>
           </>
@@ -2846,7 +2846,7 @@ function EmptyState({ tabIndex = 0 }) {
             <h3 className="text-[22px] font-display font-semibold text-ink mb-1.5 tracking-tight">添加一个项目开始</h3>
             <p className="text-[13px] text-ink-muted font-body">选择一个本地文件夹作为项目，会话将在其中进行</p>
             <button onClick={addProject}
-              className="mt-5 px-4 py-2 rounded-full bg-accent text-white text-[13px] font-body hover:bg-accent/90 transition-colors">
+              className="mt-5 px-4 py-2 rounded-full bg-accent text-on-accent text-[13px] font-body hover:bg-accent/90 transition-colors">
               添加项目文件夹
             </button>
           </>
@@ -7446,7 +7446,7 @@ function LoginScreen({ onSuccess }) {
         {error && <span className="text-[12px] text-error font-body">{error}</span>}
         <button
           type="submit" disabled={busy || !password}
-          className="w-full py-3 rounded-xl bg-accent text-white font-body font-medium text-[15px] disabled:opacity-50 transition-opacity"
+          className="w-full py-3 rounded-xl bg-accent text-on-accent font-body font-medium text-[15px] disabled:opacity-50 transition-opacity"
         >
           {busy ? '验证中…' : '进入'}
         </button>
@@ -7482,7 +7482,7 @@ function MobileSegmented({ options, onChange }) {
       {options.map((o) => (
         <button key={String(o.value)} onClick={() => onChange(o.value)}
           className={`flex-1 flex items-center justify-center gap-1 py-2 rounded-lg text-[12px] font-body transition-colors ${
-            o.active ? 'bg-accent text-white shadow-sm' : 'text-ink-muted hover:text-ink'}`}>
+            o.active ? 'bg-accent text-on-accent shadow-sm' : 'text-ink-muted hover:text-ink'}`}>
           {o.icon && <o.icon size={13} />}{o.label}
         </button>
       ))}
@@ -7553,14 +7553,14 @@ function MobileModelPage({ permKey }) {
             className="flex-1 bg-canvas-warm border border-canvas-deep rounded-lg px-3 py-2 text-[13px] font-mono text-ink focus:outline-none focus:border-accent" />
           <button onClick={() => { const v = customInput.trim(); if (v) { addCustom(v); setCustomInput(''); } }}
             disabled={!customInput.trim()}
-            className="px-3 py-2 text-[12px] bg-accent text-white rounded-lg disabled:bg-canvas-deep disabled:text-ink-ghost">应用</button>
+            className="px-3 py-2 text-[12px] bg-accent text-on-accent rounded-lg disabled:bg-canvas-deep disabled:text-ink-ghost">应用</button>
         </div>
         {fetchNote && <div className="text-[11px] text-ink-faint font-body">{fetchNote}</div>}
       </div>
       <button onClick={toggle1m}
         className="w-full flex items-center gap-3 px-4 py-3 text-left hover:bg-canvas-warm transition-colors border-b border-canvas-deep/40">
         <span className="flex-1 text-[14px] font-body text-ink">1M 上下文</span>
-        <span className={`text-[10px] px-2 py-0.5 rounded font-mono ${has1m ? 'bg-accent text-white' : 'bg-canvas-deep text-ink-faint'}`}>
+        <span className={`text-[10px] px-2 py-0.5 rounded font-mono ${has1m ? 'bg-accent text-on-accent' : 'bg-canvas-deep text-ink-faint'}`}>
           {has1m ? '已开启' : '关闭'}
         </span>
       </button>
@@ -7719,7 +7719,7 @@ function ProviderOverrideEditor({ provider, override, onSaved }) {
             <OverrideSelect models={models} label="opus" value={tier.opus} onChange={(v) => setTier((s) => ({ ...s, opus: v }))} />
           </div>
           <button onClick={save} disabled={busy}
-            className="w-full px-3 py-1.5 text-[12px] bg-accent text-white rounded-lg disabled:opacity-50">
+            className="w-full px-3 py-1.5 text-[12px] bg-accent text-on-accent rounded-lg disabled:opacity-50">
             {busy ? '保存中…' : '保存'}
           </button>
           {saveMsg && (
@@ -7796,7 +7796,7 @@ function OpenAIModelManager({ provider, onSaved }) {
             {list.length === 0 && <div className="text-[11px] text-ink-faint px-1 py-2">无模型,点「重新拉取」或检查 provider 配置</div>}
           </div>
           <button onClick={save} disabled={busy === 'save'}
-            className="w-full px-3 py-1.5 text-[12px] bg-accent text-white rounded-lg disabled:opacity-50">
+            className="w-full px-3 py-1.5 text-[12px] bg-accent text-on-accent rounded-lg disabled:opacity-50">
             {busy === 'save' ? '保存中…' : `保存所选(${checked.size})`}
           </button>
         </div>
@@ -8090,7 +8090,7 @@ function CustomProviderForm({ onSaved, editing, onCancel, onDirtyChange, customC
           {busy === 'test' ? '测试中…' : '测试连接'}
         </button>
         <button onClick={save} disabled={!!busy}
-          className="flex-1 px-3 py-2 text-[12px] bg-accent text-white rounded-lg disabled:opacity-50">
+          className="flex-1 px-3 py-2 text-[12px] bg-accent text-on-accent rounded-lg disabled:opacity-50">
           {busy === 'save' ? '保存中…' : (isEdit ? '更新' : '保存')}
         </button>
       </div>
@@ -9543,7 +9543,7 @@ export default function App() {
               <button onClick={() => setUpdateModalDismissed(true)}
                 className="px-3 py-1.5 text-[12px] text-ink-muted hover:text-ink rounded-md hover:bg-canvas-warm transition-colors">稍后</button>
               <button onClick={() => jumpToUpdate(updateNotice.gui ? 'gui-update' : 'cc-update')}
-                className="px-3 py-1.5 text-[12px] text-white bg-accent hover:bg-accent/90 rounded-md transition-colors">前往更新</button>
+                className="px-3 py-1.5 text-[12px] text-on-accent bg-accent hover:bg-accent/90 rounded-md transition-colors">前往更新</button>
             </div>
           </div>
         </div>

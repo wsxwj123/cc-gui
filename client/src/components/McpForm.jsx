@@ -310,7 +310,7 @@ export function McpForm({ editing, onClose, onSaved }) {
                       <div className="flex items-center gap-2">
                         <span className="flex-1">此 MCP 用 <code className="font-mono">uvx</code> 运行,本机未检测到 <code className="font-mono">uv</code>。装上后即可使用(uv 会自动备好 Python)。</span>
                         <button onClick={installUv}
-                          className="shrink-0 px-2.5 py-1 rounded text-white bg-accent hover:bg-accent-hover text-[11px] font-medium">安装 uv</button>
+                          className="shrink-0 px-2.5 py-1 rounded text-on-accent bg-accent hover:bg-accent-hover text-[11px] font-medium">安装 uv</button>
                       </div>
                     )}
                   </div>
@@ -545,7 +545,7 @@ export function McpForm({ editing, onClose, onSaved }) {
         <div className="px-5 py-3 border-t border-canvas-deep flex items-center justify-end gap-2 bg-canvas-warm/40 shrink-0">
           <button onClick={onClose} className="px-3 py-1.5 text-[12px] text-ink-muted hover:text-ink rounded-md hover:bg-canvas-warm transition-colors">取消</button>
           <button onClick={save} disabled={saving}
-            className="flex items-center gap-1.5 px-3 py-1.5 text-[12px] text-white bg-accent hover:bg-accent/90 rounded-md transition-colors disabled:opacity-50">
+            className="flex items-center gap-1.5 px-3 py-1.5 text-[12px] text-on-accent bg-accent hover:bg-accent/90 rounded-md transition-colors disabled:opacity-50">
             {saving && <RefreshCw size={12} className="animate-spin" />}
             {isEdit ? '保存' : '添加'}
           </button>

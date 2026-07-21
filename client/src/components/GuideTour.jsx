@@ -213,7 +213,7 @@ export function GuideTour({ open, onClose, hasProject }) {
             </button>
           )}
           <button onClick={() => (last ? onClose() : setI(i + 1))}
-            className="px-2.5 py-1 text-[11px] rounded bg-accent text-white hover:bg-accent/90 flex items-center gap-1">
+            className="px-2.5 py-1 text-[11px] rounded bg-accent text-on-accent hover:bg-accent/90 flex items-center gap-1">
             {last ? '完成' : <>下一步<ArrowRight size={11} /></>}
           </button>
         </div>

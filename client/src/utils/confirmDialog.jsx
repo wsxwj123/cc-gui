@@ -55,7 +55,7 @@ function ConfirmModal({ message, danger, confirmText, cancelText, checkbox, onRe
           <button
             autoFocus={!danger}
             onClick={() => resolve(true)}
-            className={`px-3 py-1.5 rounded-md text-[12px] text-white font-body transition-colors ${danger ? 'bg-red-600 hover:bg-red-500' : 'bg-accent hover:bg-accent/90'}`}
+            className={`px-3 py-1.5 rounded-md text-[12px] font-body transition-colors ${danger ? 'bg-red-600 hover:bg-red-500 text-white' : 'bg-accent hover:bg-accent/90 text-on-accent'}`}
           >
             {confirmText}
           </button>

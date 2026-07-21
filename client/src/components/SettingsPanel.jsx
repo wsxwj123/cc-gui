@@ -890,7 +890,7 @@ function UpdateChecker() {
         <button
           onClick={check}
           disabled={state.status === 'checking'}
-          className="px-3 py-1.5 text-[12px] bg-accent text-white rounded-md hover:bg-accent/90 disabled:opacity-50 flex items-center gap-1.5 shrink-0"
+          className="px-3 py-1.5 text-[12px] bg-accent text-on-accent rounded-md hover:bg-accent/90 disabled:opacity-50 flex items-center gap-1.5 shrink-0"
         >
           <RefreshCw size={12} className={state.status === 'checking' ? 'animate-spin' : ''} />
           {state.status === 'checking' ? '检查中…' : '检查更新'}
@@ -1113,7 +1113,7 @@ function CcUpdater() {
           <button
             onClick={check}
             disabled={state.status === 'checking' || updating}
-            className="px-3 py-1.5 text-[12px] bg-accent text-white rounded-md hover:bg-accent/90 disabled:opacity-50 flex items-center gap-1.5 shrink-0"
+            className="px-3 py-1.5 text-[12px] bg-accent text-on-accent rounded-md hover:bg-accent/90 disabled:opacity-50 flex items-center gap-1.5 shrink-0"
           >
             <RefreshCw size={12} className={state.status === 'checking' ? 'animate-spin' : ''} />
             {state.status === 'checking' ? '检查中…' : '检查更新'}
@@ -1141,7 +1141,7 @@ function CcUpdater() {
                 placeholder="claude 可执行文件的完整路径"
                 className="flex-1 min-w-0 text-[11px] font-mono bg-canvas-warm border border-canvas-deep rounded px-2 py-1.5 text-ink focus:border-accent outline-none" />
               <button disabled={updating || !manualPath.trim()} onClick={() => switchActive(manualPath.trim())}
-                className="shrink-0 px-2.5 py-1.5 text-[11px] rounded-md bg-accent text-white hover:bg-accent/90 disabled:opacity-50">
+                className="shrink-0 px-2.5 py-1.5 text-[11px] rounded-md bg-accent text-on-accent hover:bg-accent/90 disabled:opacity-50">
                 使用此路径
               </button>
             </div>
@@ -1273,7 +1273,7 @@ function CloseBehaviorPicker() {
       <div className="flex items-center gap-2">
         {[['ask', '每次询问'], ['minimize', '最小化'], ['quit', '完全退出']].map(([v, label]) => (
           <button key={v} onClick={() => save(v)}
-            className={`px-2.5 py-1 text-[11px] rounded-md font-body transition-colors ${behavior === v ? 'bg-accent text-white' : 'bg-canvas-warm text-ink-muted hover:text-ink border border-canvas-deep'}`}>
+            className={`px-2.5 py-1 text-[11px] rounded-md font-body transition-colors ${behavior === v ? 'bg-accent text-on-accent' : 'bg-canvas-warm text-ink-muted hover:text-ink border border-canvas-deep'}`}>
             {label}
           </button>
         ))}
@@ -1383,7 +1383,7 @@ function ScreenshotHotkeyPicker() {
       <div className="flex items-center gap-2 flex-wrap">
         <button
           onClick={() => apply({ ...cfg, enabled: !cfg.enabled })}
-          className={`px-2.5 py-1 text-[11px] rounded-md font-body transition-colors ${cfg.enabled ? 'bg-accent text-white' : 'bg-canvas-warm text-ink-muted hover:text-ink border border-canvas-deep'}`}>
+          className={`px-2.5 py-1 text-[11px] rounded-md font-body transition-colors ${cfg.enabled ? 'bg-accent text-on-accent' : 'bg-canvas-warm text-ink-muted hover:text-ink border border-canvas-deep'}`}>
           {cfg.enabled ? '已启用' : '已禁用'}
         </button>
         {recording ? (
@@ -1394,7 +1394,7 @@ function ScreenshotHotkeyPicker() {
             <button
               onClick={confirmCaptured}
               disabled={!captured}
-              className="px-2 py-1 text-[11px] rounded-md font-body bg-accent text-white disabled:opacity-40 disabled:cursor-not-allowed">
+              className="px-2 py-1 text-[11px] rounded-md font-body bg-accent text-on-accent disabled:opacity-40 disabled:cursor-not-allowed">
               确认
             </button>
             <button
@@ -1480,7 +1480,7 @@ function FullDiskAccessCard() {
             <li>打开开关,完全退出本 app 后重新打开</li>
           </ol>
           <button onClick={openSettings}
-            className="flex items-center gap-1.5 px-3 py-1.5 text-[12px] text-white bg-accent hover:bg-accent/90 rounded-md transition-colors">
+            className="flex items-center gap-1.5 px-3 py-1.5 text-[12px] text-on-accent bg-accent hover:bg-accent/90 rounded-md transition-colors">
             <ExternalLink size={12} /> 打开系统设置
           </button>
         </div>
@@ -1701,7 +1701,7 @@ function ExcludeDynamicPromptToggle() {
       <div className="shrink-0 flex items-center gap-1">
         {[['auto', '自动'], [true, '开'], [false, '关']].map(([v, label]) => (
           <button key={String(v)} onClick={() => setVal(v)}
-            className={`px-2 py-1 text-[11px] rounded-md font-body transition-colors ${val === v ? 'bg-accent text-white' : 'bg-canvas-warm text-ink-muted hover:text-ink border border-canvas-deep'}`}>
+            className={`px-2 py-1 text-[11px] rounded-md font-body transition-colors ${val === v ? 'bg-accent text-on-accent' : 'bg-canvas-warm text-ink-muted hover:text-ink border border-canvas-deep'}`}>
             {label}
           </button>
         ))}

@@ -1043,7 +1043,7 @@ export function ChatInput({ onSend, onStop, onAccelerate, onBackground, suggesti
               >
                 <MessagesSquare size={15} />
                 {btwUnread > 0 && (
-                  <span className="absolute -top-0.5 -right-0.5 min-w-[15px] h-[15px] px-1 rounded-full bg-accent text-white text-[9px] leading-[15px] text-center font-mono">
+                  <span className="absolute -top-0.5 -right-0.5 min-w-[15px] h-[15px] px-1 rounded-full bg-accent text-on-accent text-[9px] leading-[15px] text-center font-mono">
                     {btwUnread > 9 ? '9+' : btwUnread}
                   </span>
                 )}
@@ -1124,7 +1124,7 @@ export function ChatInput({ onSend, onStop, onAccelerate, onBackground, suggesti
               {onAccelerate && (
                 <button
                   onClick={onAccelerate}
-                  className="px-2 py-0.5 rounded bg-accent text-white text-[10px] font-medium hover:bg-accent-hover"
+                  className="px-2 py-0.5 rounded bg-accent text-on-accent text-[10px] font-medium hover:bg-accent-hover"
                   title="立即中断当前回复，发出队列中的消息"
                 >
                   ⚡ 引导

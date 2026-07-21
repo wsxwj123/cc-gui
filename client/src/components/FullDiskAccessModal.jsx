@@ -34,7 +34,7 @@ export function FullDiskAccessModal({ onOpenSettings, onDismiss }) {
           <div className="flex items-center gap-2">
             <button onClick={onDismiss} className="px-3 py-1.5 text-[12px] text-ink-muted hover:text-ink rounded-md hover:bg-canvas-warm transition-colors">以后再说</button>
             <button onClick={onOpenSettings}
-              className="flex items-center gap-1.5 px-3 py-1.5 text-[12px] text-white bg-accent hover:bg-accent/90 rounded-md transition-colors">
+              className="flex items-center gap-1.5 px-3 py-1.5 text-[12px] text-on-accent bg-accent hover:bg-accent/90 rounded-md transition-colors">
               <ExternalLink size={12} /> 打开系统设置
             </button>
           </div>
