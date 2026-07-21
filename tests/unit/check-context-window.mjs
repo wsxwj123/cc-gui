@@ -3,7 +3,7 @@
 // 2026-07 官方口径 fable-5/mythos/sonnet-5/opus-4.6+/sonnet-4.6 原生 1M(无需 [1m]),
 // haiku 与老代 200K。旧表全 claude 系一律 200K 是"389k/200k(194%) 爆红"根因(ddd588a)。
 import assert from 'node:assert/strict';
-import { nativeContextWindow } from '../../client/src/utils/contextWindow.js';
+import { nativeContextWindow, isBareClaudeAlias } from '../../client/src/utils/contextWindow.js';
 
 const M1 = 1_000_000, K200 = 200_000;
 
@@ -54,5 +54,17 @@ assert.equal(nativeContextWindow('moonshot-v1-128k'), 128_000, '-Nk 标注优先
 assert.equal(nativeContextWindow('mimo-v2.5-pro[1m]'), M1, '第三方 [1m] 1M');
 assert.equal(nativeContextWindow('gemini-2.5-pro'), M1, '未列第三方默认 1M');
 assert.equal(nativeContextWindow(''), M1, '空模型走默认(徽章有 sane-ceiling 兜底)');
+
+// ── 低危#3:裸别名判定(第三方分母欠告警的触发条件)──────────────
+assert.equal(isBareClaudeAlias('sonnet'), true, '裸 sonnet');
+assert.equal(isBareClaudeAlias('opus'), true, '裸 opus');
+assert.equal(isBareClaudeAlias('haiku'), true, '裸 haiku');
+assert.equal(isBareClaudeAlias('claude-opus'), true, 'claude- 前缀裸别名');
+assert.equal(isBareClaudeAlias('Sonnet'), true, '大小写不敏感');
+assert.equal(isBareClaudeAlias('claude-opus-4-8'), false, '带版本号不算裸别名(分母确定)');
+assert.equal(isBareClaudeAlias('claude-sonnet-5'), false, '带版本号不算裸别名');
+assert.equal(isBareClaudeAlias('sonnet[1m]'), false, '带 [1m] 标注分母确定');
+assert.equal(isBareClaudeAlias('deepseek-chat'), false, '非 claude 系不算');
+assert.equal(isBareClaudeAlias(''), false, '空模型不算');
 
 console.log('check-context-window: all assertions passed');

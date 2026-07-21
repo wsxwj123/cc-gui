@@ -55,7 +55,7 @@ import { computeCost, formatCost } from './utils/pricing.js';
 import { extractToolResultText, finalizePendingToolCalls, applyFinalizedToBlocks } from './utils/toolResult.js';
 import { rebuildTodosFromTaskCalls } from './utils/todos.js';
 import { isInitBindingOrigin, migrateDraftQueue, paneMessagesOwned, resolveHistModel, resolveSendModel } from './utils/routing.js';
-import { nativeContextWindow } from './utils/contextWindow.js';
+import { nativeContextWindow, isBareClaudeAlias } from './utils/contextWindow.js';
 import {
   FolderOpen, MessageSquare, ChevronLeft, ChevronRight, ChevronDown,
   Search, Hash, Layers, BarChart3, ArrowLeft, Plus,
@@ -6403,10 +6403,14 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       ? (() => { try { return new URL(currentProvider.baseUrl).hostname; } catch { return '自定义'; } })()
       : currentProvider.providerHint.charAt(0).toUpperCase() + currentProvider.providerHint.slice(1))
     : null;
+  // 低危#3:第三方 provider + claude 系裸别名(sonnet/opus)→ 分母是本地默认猜测,
+  // 真实窗口由中转服务商映射的后端模型决定。徽章追加提示,避免用户把 1M 分母当准数。
+  const bareAliasWindowUnknown = _isThirdParty && isBareClaudeAlias(currentModel);
   const badgeInfo = {
     headerModel, models, toolCallCount,
     providerHintLabel, providerBaseUrl: currentProvider?.baseUrl || '',
     totalAllTokens, totalCostUsd, cacheRead: totalTokens.cacheRead, cacheHitPct, usageDetailTitle,
+    bareAliasWindowUnknown,
   };
 
   return (
@@ -7200,6 +7204,13 @@ function ContextBreakdownButton({ contextTokens, contextWindow, contextPct, fmtT
               <span className="font-mono text-ink-muted">{info.toolCallCount} 次</span>
             </div>
           )}
+          {/* 低危#3:第三方裸别名 → 分母为本地估算,实际窗口以服务商为准。点上方刷新
+              可让上游 /context 实测校正。 */}
+          {info.bareAliasWindowUnknown && (
+            <div className="text-[10px] text-amber-700 font-body leading-snug">
+              第三方中转下发裸别名,{winLabel} 分母为本地估算,实际窗口以服务商为准。
+            </div>
+          )}
           <div className="flex items-center gap-2 text-[11px] font-body" title={info.usageDetailTitle}>
             <span className="text-ink-faint w-14 shrink-0">累计 token</span>
             <span className="font-mono text-ink-muted">{(info.totalAllTokens || 0).toLocaleString()}</span>
@@ -7289,6 +7300,8 @@ function ContextBreakdownButton({ contextTokens, contextWindow, contextPct, fmtT
         className={`text-[10px] font-mono whitespace-nowrap px-1.5 py-px rounded transition-colors cursor-pointer inline-flex items-center gap-1 ${tone}`}
         title={(contextPct > 100
           ? `当前模型上下文窗口为 ${winLabel}，该会话已使用约 ${fmtTok(contextTokens)} —— 下一条消息发送将超出窗口，可能触发压缩或被上游拒绝。可切换更大窗口的模型，或手动 /compact 压缩。\n`
+          : '') + (info?.bareAliasWindowUnknown
+          ? `${winLabel} 分母为本地估算：第三方中转下发的是裸别名，实际窗口以服务商为准。\n`
           : '') + (info ? '点击查看会话信息与上下文分项明细（/context）' : '点击查看上下文分项明细（/context）')}
       >
         {zero
