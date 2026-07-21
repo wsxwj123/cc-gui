@@ -1393,6 +1393,21 @@ html { --content-max: clamp(768px, calc(var(--app-w, 100vw) * 0.7), 1120px); }
     background: var(--color-canvas);
   }
 
+  /* iOS批#1:iOS Safari 对 font-size<16px 的 input/textarea/select 聚焦时自动
+     放大整页(visual viewport zoom),blur 后不回退——登录密码框(text-[15px]+
+     autoFocus)一聚焦就把主界面钉死在放大态(顶栏被推出视口)。iOS Chrome 抑制
+     该行为,故仅 Safari 复现。根治=手机断点下所有表单控件字号钉 ≥16px(全仓
+     input/textarea 现存最大 15px,无被缩小的反例);不用 maximum-scale=1 禁缩放
+     (无障碍损伤)。!important 压过元素上的 text-[13px] 等 utility。
+     max(16px, 16px/zoom) 使"计算值"与"×html zoom 后的渲染值"双双 ≥16px——
+     WebKit 启发式无论按哪个口径判都不触发,且对 0.8~1.4 全部字号档成立
+     (--ui-zoom 未写入前回退 1,此刻 html zoom 也未应用,口径仍一致)。 */
+  input,
+  textarea,
+  select {
+    font-size: max(16px, calc(16px / var(--ui-zoom, 1))) !important;
+  }
+
   .cgui-mobile-root {
     background: var(--color-canvas);
     color: var(--color-ink);
