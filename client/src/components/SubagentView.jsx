@@ -48,6 +48,9 @@ export function SubagentView({ agentId, parentTitle, parentSessionId = null, onB
   const status = agent.status || 'working';
   const working = status === 'working' || status === 'starting';
   const nonTerminal = !['done', 'error', 'stopped'].includes(status);
+  // 部件③:待命态(TeammateIdle 广播,useWebSocket 按 name 标 teammateIdle)。独立 flag、
+  // 非终态时叠加显示,不动 status。
+  const idle = nonTerminal && !!agent.teammateIdle;
 
   const statusMeta = {
     starting: { label: '启动中', cls: 'text-blue-600' },
@@ -97,10 +100,16 @@ export function SubagentView({ agentId, parentTitle, parentSessionId = null, onB
                 <GitBranch size={9} />{metaAgent.gitBranch || metaAgent.cwd.split(/[/\\]/).pop()}
               </span>
             )}
-            <span className={`${statusMeta.cls} flex items-center gap-1 font-body`}>
-              {working && <Loader2 size={10} className="animate-spin" />}
-              {statusMeta.label}
-            </span>
+            {idle ? (
+              <span className="text-amber-600 flex items-center gap-1 font-body" title="teammate 已完成当前工作、待命等待唤醒(仍可停止)">
+                待命
+              </span>
+            ) : (
+              <span className={`${statusMeta.cls} flex items-center gap-1 font-body`}>
+                {working && <Loader2 size={10} className="animate-spin" />}
+                {statusMeta.label}
+              </span>
+            )}
             {/* 部件①单卡停止:非终态时显示。停止链路走 store action(反查 pid + stop-task 端点 +
                 乐观收尾)。sessionId 优先取 agent 捕获值,回退母会话。 */}
             {nonTerminal && (

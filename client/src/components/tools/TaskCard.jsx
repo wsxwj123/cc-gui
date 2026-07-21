@@ -52,6 +52,9 @@ export function TaskCard({ toolCall }) {
   // 中断残骸/不发父流事件的 provider)才回退看 toolCall.result。
   const isDone = agent ? agentDone : (!!toolCall.result || isInterrupted);
   const isWorking = !isDone;
+  // 部件③:待命态(TeammateIdle 广播,useWebSocket 按 name 标 teammateIdle)。仍非终态,
+  // 只是从「工作中」转圈改标「待命」;停止(①)照常可用。
+  const idle = isWorking && !!agent?.teammateIdle;
 
   // P2: 历史会话重载后 activeAgents(内存态)是空的,点放大查不到数据 → 之前没反应。
   // 兜底:打开前若 store 无此 agent,先从 toolCall 的 input/result 注册一份,再进入。
@@ -116,7 +119,9 @@ export function TaskCard({ toolCall }) {
       >
         {/* 图标位:运行中=三点脉冲;完成=绿色圆圈√;出错=红色圆圈×;已停止/中断=灰色断环 */}
         <span className="relative shrink-0 w-5 h-5 flex items-center justify-center text-ink-muted">
-          {isWorking ? (
+          {idle ? (
+            <span className="w-2 h-2 rounded-full bg-amber-500" aria-label="待命" title="待命等待唤醒" />
+          ) : isWorking ? (
             <span className="tc-agent-dots text-accent" aria-label="运行中"><span /><span /><span /></span>
           ) : isError ? (
             <XCircle size={16} className="text-error" aria-label="子代理出错" />
@@ -134,6 +139,11 @@ export function TaskCard({ toolCall }) {
             {agentModel && (
               <span className="text-[9px] font-mono text-ink-faint truncate" title="该子代理实际使用的模型">
                 {agentModel}
+              </span>
+            )}
+            {idle && (
+              <span className="text-[9px] text-amber-600 font-body shrink-0" title="teammate 已完成当前工作、待命等待唤醒(仍可停止)">
+                待命
               </span>
             )}
           </div>
