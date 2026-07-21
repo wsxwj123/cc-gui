@@ -5212,15 +5212,24 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             // 鉴权类报错(401 / api key 无效等)大概率是 provider 的 key 配错/过期,
             // 给错误块挂「检查 Provider 设置」动作(渲染在 visibleChat 的 turn 分支)。
             const isAuthError = /\b401\b|unauthorized|authenticat|api[ -_]?key|x-api-key/i.test(msg);
+            // 低危#4:1M 推断被拒的显式提示。6bfc207 对「单次 ctxUsage 超名义窗口」的
+            // 会话推断补 [1m] 发送;账户 1M 资格不足时该请求被 API 拒,落到这里显示裸
+            // 报错。上方 5127 已自动切回捕获两种已知文案;其余含 1M/长上下文关键词的
+            // 拒绝(第三方/新文案)补一行引导:关掉模型弹层的 1M 开关再重试。纯文案层,
+            // 不动重试逻辑。
+            const isOneMReject = /\b1m\b|\[1m\]|long context|context length|1000000|1,000,000/i.test(msg);
+            const oneMHint = isOneMReject
+              ? '\n\n> 该会话被识别为 1M 上下文；若账户不支持,请在模型弹层关闭 1M 后重试。'
+              : '';
             setChatMessages((prev) => [...prev, {
               uuid: 'chat-error-' + Date.now(),
               type: 'turn',
               timestamp: new Date().toISOString(),
               model: streamingModel,
-              text: [`❌ **${msg}**\n\n常见原因：\n- session 不在当前 cwd 对应的项目目录 → 新建会话\n- jsonl 被 trim 后损坏 → 新建会话\n- CLI 版本异常 → 终端跑 \`claude --help\` 验证`],
+              text: [`❌ **${msg}**\n\n常见原因：\n- session 不在当前 cwd 对应的项目目录 → 新建会话\n- jsonl 被 trim 后损坏 → 新建会话\n- CLI 版本异常 → 终端跑 \`claude --help\` 验证${oneMHint}`],
               thinking: [],
               toolCalls: [],
-              blocks: [{ type: 'text', content: `❌ **${msg}**` }],
+              blocks: [{ type: 'text', content: `❌ **${msg}**${oneMHint}` }],
               usage: null,
               ...(isAuthError ? { errorAction: 'provider' } : {}),
             }]);
