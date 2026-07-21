@@ -3512,6 +3512,31 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     ? resolvedModelBase + '[1m]' : resolvedModelBase;
   // 徽章分母:后端解析的真实窗口(与压缩联动同源;官方/无解析=null 走本地兜底表)。
   const resolvedWindow = useResolvedWindow(currentModel);
+  // Desktop/CLI 1M 会话首开继承:jsonl 的 model 永远是裸 id(API 回包不带 [1m],1M 只是
+  // 请求侧 beta 后缀),历史解析恢复不出 1M → 徽章分母/下一条发送都按 200K 走,爆红
+  // 389k/200k(194%) 且发送真会超窗(用户实报:Desktop 用 opus 1M 跑的会话在 GUI 打开即爆红)。
+  // 唯一可靠证据:单次 API 调用的 ctxUsage(input+cache_read+cache_creation)物理上不可能
+  // 超过窗口,若超过名义窗口则该会话必然运行在 1M 上。仅官方 anthropic + claude 系裸模型 +
+  // 无用户显式 pin(pin 裸模型 = 显式关 1m,尊重不复活)时推断;命中即走 syncContext1m
+  // 落到与手动开关同一持久层(localStorage 镜像 + 服务端 prefs + WS 广播),徽章分母与
+  // 发送([1m] 兜底补回,4422)自动一致。第三方([1m] 对自定义模型名无效 #68522)不推断,
+  // 真超窗时徽章照实爆红(诚实警告,BG2)。上限 1_050_000 挡整轮累加的爆表脏值。
+  useEffect(() => {
+    const sid = selectedSession?.sessionId;
+    if (!sid || pinnedModel || context1mFlag || !messages.length) return;
+    const hint = currentProvider?.providerHint;
+    if (hint && hint !== 'anthropic') return;
+    const base = resolvedModelBase || '';
+    if (/\[1m\]/i.test(base) || !/claude|opus|sonnet|haiku/i.test(base)) return;
+    const nominal = nativeContextWindow(base);
+    if (nominal >= 1_000_000) return;
+    const over = messages.some((m) => {
+      const u = m.ctxUsage; // 只认单次调用口径;m.usage 是整轮累加,200K 窗口也能合法超 200K
+      const s = u ? (u.input_tokens || 0) + (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0) : 0;
+      return s > nominal * 1.05 && s <= 1_050_000;
+    });
+    if (over) useStore.getState().syncContext1m(sid, base + '[1m]');
+  }, [selectedSession?.sessionId, messages, pinnedModel, context1mFlag, resolvedModelBase, currentProvider]);
   const modelBySession = useStore((s) => s.modelBySession);
   const containerRef = useRef(null);
   const [autoScroll, setAutoScroll] = useState(true);
