@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { ChevronDown, ChevronRight, Loader2, Maximize2, CheckCircle2, XCircle, CircleSlash } from 'lucide-react';
+import { ChevronDown, ChevronRight, Loader2, Maximize2, CheckCircle2, XCircle, CircleSlash, Square } from 'lucide-react';
 import { useStore } from '../../stores/sessionStore.js';
 import { MarkdownRenderer } from '../MarkdownRenderer.jsx';
 import { extractToolResultText } from '../../utils/toolResult.js';
@@ -52,6 +52,9 @@ export function TaskCard({ toolCall }) {
   // 中断残骸/不发父流事件的 provider)才回退看 toolCall.result。
   const isDone = agent ? agentDone : (!!toolCall.result || isInterrupted);
   const isWorking = !isDone;
+  // 部件③:待命态(TeammateIdle 广播,useWebSocket 按 name 标 teammateIdle)。仍非终态,
+  // 只是从「工作中」转圈改标「待命」;停止(①)照常可用。
+  const idle = isWorking && !!agent?.teammateIdle;
 
   // P2: 历史会话重载后 activeAgents(内存态)是空的,点放大查不到数据 → 之前没反应。
   // 兜底:打开前若 store 无此 agent,先从 toolCall 的 input/result 注册一份,再进入。
@@ -116,7 +119,9 @@ export function TaskCard({ toolCall }) {
       >
         {/* 图标位:运行中=三点脉冲;完成=绿色圆圈√;出错=红色圆圈×;已停止/中断=灰色断环 */}
         <span className="relative shrink-0 w-5 h-5 flex items-center justify-center text-ink-muted">
-          {isWorking ? (
+          {idle ? (
+            <span className="w-2 h-2 rounded-full bg-amber-500" aria-label="待命" title="待命等待唤醒" />
+          ) : isWorking ? (
             <span className="tc-agent-dots text-accent" aria-label="运行中"><span /><span /><span /></span>
           ) : isError ? (
             <XCircle size={16} className="text-error" aria-label="子代理出错" />
@@ -136,6 +141,11 @@ export function TaskCard({ toolCall }) {
                 {agentModel}
               </span>
             )}
+            {idle && (
+              <span className="text-[9px] text-amber-600 font-body shrink-0" title="teammate 已完成当前工作、待命等待唤醒(仍可停止)">
+                待命
+              </span>
+            )}
           </div>
           {description && (
             <div className="text-[12px] text-ink font-body truncate mt-0.5">
@@ -143,6 +153,19 @@ export function TaskCard({ toolCall }) {
             </div>
           )}
         </div>
+        {/* 部件①单卡停止:仅有活 agent 且非终态(isWorking)时常显。停止走 store action
+            (反查 pid + stop-task 端点 + 乐观收尾);stopPropagation 防触发外层展开。 */}
+        {isWorking && agent && (
+          <span
+            role="button"
+            tabIndex={0}
+            onClick={(e) => { e.stopPropagation(); useStore.getState().stopSingleTask(agent?.sessionId || paneSession?.sessionId || null, toolCall.id); }}
+            className="shrink-0 p-1 rounded text-ink-faint hover:text-error hover:bg-error/10 transition-colors cursor-pointer"
+            title="停止该子代理/teammate"
+          >
+            <Square size={12} className="fill-current" />
+          </span>
+        )}
         {/* 悬停浮现:子代理窗口入口(#9) + 展开箭头;触屏无 hover,常显淡态 */}
         <span className={`shrink-0 flex items-center gap-0.5 transition-opacity ${expanded ? 'opacity-100' : 'opacity-0 group-hover/tc:opacity-100 max-md:opacity-60'}`}>
           <span

@@ -1279,6 +1279,43 @@ export const useStore = create((set, get) => ({
     bgTasks: { ...s.bgTasks, [id]: { ...(s.bgTasks[id] || { id }), ...patch } },
   })),
   clearAgents: () => set({ activeAgents: {} }),
+  // 部件①单卡精确停止:停某一个子代理/teammate。做成 store action 而非 App handler+props——
+  // TaskCard 深嵌在 TurnBubble(3 处渲染)下,透传要改 TurnBubble(不在方案文件清单里),
+  // 且卡片本就自带 fetch+getState 直调风格(见 TaskCard.openAgentView)。
+  //   1. 乐观收尾:非终态目标即刻标 stopped(第三方 provider 不发 task_notification 也能收敛);
+  //      保留 taskManaged,真权威终态到达时 finalizeAgent(authoritative) 仍可覆盖为真实状态。
+  //   2. 复用 stopSessionProcs 的 pid 解析(按 sessionId 扇出该会话全部 slot),POST stop-task
+  //      {toolUseId, sessionId};只属主且会话匹配的 slot stopped:true,其余无害 no-op。
+  stopSingleTask: async (sessionId, toolUseId) => {
+    if (!toolUseId) return;
+    const st = get();
+    const ag = st.activeAgents[toolUseId];
+    const prevStatus = ag?.status;
+    const didOptimistic = ag && !['done', 'error', 'stopped'].includes(prevStatus);
+    // optimisticStop 显式标记「这条 stopped 是我们乐观写的」——权威 stopped 落到乐观 stopped 上
+    // 时 status 同值、finalizeAgent 是 no-op,靠 status 区分不了两者;标记由 finalizeAgent 在
+    // 任何权威终态到达时清掉(App.jsx),回滚只认还带此标记的乐观 stopped。
+    if (didOptimistic) st.upsertAgent(toolUseId, { status: 'stopped', finishedAt: Date.now(), optimisticStop: true });
+    try {
+      const d = await fetch('/api/agents/active').then((r) => r.json());
+      const procs = (d.agents || []).filter((a) => a.kind === 'chat-process' && a.sessionId === sessionId && a.stoppable === true);
+      const results = await Promise.allSettled(procs.map((a) => fetch(`/api/chat/${a.pid}/stop-task`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ toolUseId, sessionId }),
+      }).then((r) => r.json())));
+      // S1:无一命中(所有属主 pid 都 stopped:false)= 该 task 已不在任何 slot 的 liveTasks,
+      // 不会再有权威 task_notification 纠正 → 乐观 stopped 是假阳性,回滚为原状态(避免卡片
+      // 假「已停」而 teammate 其实仍可被唤醒)。仅当仍停在我们乐观写的 stopped 上才回滚——
+      // 其间到达的权威终态(done/error/真 stopped)不覆盖。
+      const anyStopped = results.some((r) => r.status === 'fulfilled' && r.value?.stopped === true);
+      if (didOptimistic && !anyStopped) {
+        const cur = get().activeAgents[toolUseId];
+        // 仅回滚仍带 optimisticStop 的乐观 stopped:其间到达的权威终态(finalizeAgent 已清标记)
+        // 即便 status 同为 stopped,也够不着——不把真终态误翻回 working。
+        if (cur && cur.status === 'stopped' && cur.optimisticStop) get().upsertAgent(toolUseId, { status: prevStatus, finishedAt: null, optimisticStop: false });
+      }
+    } catch {}
+  },
   // #9/AZ6 子代理会话窗口:按 tab 记录在主区打开查看的子代理 id(null = 看正常会话)。
   setViewingAgent: (tab, id) => set((s) => ({
     viewingAgentByTab: { ...s.viewingAgentByTab, [tab]: id || null },

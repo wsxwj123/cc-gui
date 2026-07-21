@@ -642,7 +642,12 @@ const AGENT_TERMINAL_STATUS = ['done', 'error', 'stopped'];
 function reviveAgentIfTerminal(store, agentId) {
   if (!agentId) return;
   const ag = store.activeAgents?.[agentId];
-  if (ag && AGENT_TERMINAL_STATUS.includes(ag.status)) store.upsertAgent(agentId, { status: 'working', finishedAt: null });
+  if (!ag) return;
+  // 部件③:teammate 被 SendMessage 唤醒后又有活动到达(两条 resume 路径——partial 的
+  // message_start / 整条 assistant 消息——都经本函数),清待命 flag,否则边干活边错显「待命」
+  // 直到终态。SDK 无 Resume 钩子,只能在「又有活动」处清。
+  if (ag.teammateIdle) store.upsertAgent(agentId, { teammateIdle: false });
+  if (AGENT_TERMINAL_STATUS.includes(ag.status)) store.upsertAgent(agentId, { status: 'working', finishedAt: null });
 }
 
 function finalizeAgent(st, agentId, tnStatus, visited, authoritative) {
@@ -651,6 +656,10 @@ function finalizeAgent(st, agentId, tnStatus, visited, authoritative) {
   visited.add(agentId);
   const ag = st.activeAgents[agentId];
   if (!ag) return;
+  // S1:权威终态一到就清 stopSingleTask 的乐观停止标记——即便 status 与乐观 stopped 同值(下面
+  // 是 no-op),也必须清,否则 stopSingleTask 的假阳性回滚会把这次真终态误翻回 working。仅
+  // authoritative 清:非权威的猜测性收尾不代表"确认",不解除待回滚保护。
+  if (authoritative && ag.optimisticStop) st.upsertAgent(agentId, { optimisticStop: false });
   const terminal = ['done', 'error', 'stopped'].includes(ag.status);
   // 停止链路 #1(UI 侧):taskManaged 条目的 'stopped' 只是猜测——interrupt 后前端假定
   // 进程已被杀(killedRef)/流外杀点批量收尾,但 /stop 的 2s 优雅窗可能被 interrupt 秒回的
@@ -1943,6 +1952,21 @@ function SessionList() {
       // 停止链路 #2:删会话杀点。进程已杀,该会话 activeAgents 非终态条目(taskManaged
       // 等)不会再有信号,就地级联收尾,防监控面板残留"工作中"。
       finalizeSessionAgents(sessionId);
+    } catch {}
+  };
+
+  // 部件②总闸:停本会话所有后台子代理/teammate(选择性 /stop,hard=false,保留 shell 长任务)。
+  // 复用 stopSessionProcs 的 pid 解析(按 sessionId 扇出到该会话全部 slot);空 body = 选择性停止,
+  // 不改 /stop 内部。分屏隔离:严格按 sessionId 过滤,不波及其它窗格。
+  const stopSessionBackground = async (sessionId) => {
+    if (!sessionId) return;
+    try {
+      const d = await fetch('/api/agents/active').then((r) => r.json());
+      const procs = (d.agents || []).filter((a) => a.kind === 'chat-process' && a.sessionId === sessionId && a.stoppable === true);
+      if (!procs.length) return;
+      await Promise.allSettled(procs.map((a) => fetch(`/api/chat/${a.pid}/stop`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+      })));
     } catch {}
   };
 
@@ -4984,6 +5008,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                   if ((block.name === 'Task' || block.name === 'Agent') && parsed) {
                     store.upsertAgent(block.toolId, {
                       name: parsed.subagent_type || parsed.agent || parsed.name || block.name,
+                      // 部件③:可寻址实例名单独存一份——TeammateIdle 钩子发的 teammate_name = input.name,
+                      // 而上面的 .name 会被 subagent_type 抢占,故 idle 匹配必须用这个未被抢占的名。
+                      teammateName: parsed.name || null,
                       description: parsed.description || parsed.prompt?.slice(0, 80) || '',
                       status: 'working',
                       prompt: parsed.prompt || '',  // #9 子代理派发 prompt
@@ -5047,6 +5074,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                   const inp = block.input || {};
                   useStore.getState().upsertAgent(block.id, {
                     name: inp.subagent_type || inp.agent || inp.name || block.name,
+                    // 部件③:同上,可寻址实例名(= TeammateIdle 的 teammate_name)单独存,不被 subagent_type 抢占。
+                    teammateName: inp.name || null,
                     description: inp.description || (inp.prompt ? String(inp.prompt).slice(0, 80) : ''),
                     prompt: inp.prompt || '',
                     status: 'working',
@@ -6862,6 +6891,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       <ChatInput
         onSend={handleSend}
         onStop={handleStop}
+        onStopBackground={stopSessionBackground}
         onAccelerate={messageQueue.length > 0 ? handleAccelerate : undefined}
         // H 转后台:仅本地前台流式时提供(backgroundPid-only 态已在后台,无意义)。
         onBackground={isStreaming ? handleBackgroundify : undefined}

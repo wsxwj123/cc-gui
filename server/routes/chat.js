@@ -865,6 +865,15 @@ router.post('/chat', async (req, res) => {
     // TS 无实质作用(官方那条"需 dummy hook"只针对 Python)。保留作无害保险(保持流活性)。
     hooks: {
       PreToolUse: [{ hooks: [async () => ({ continue: true })] }],
+      // 部件③:具名 in-process teammate 跑完当前工作转入待命(等 SendMessage 唤醒)时,
+      // SDK 回调此钩子。经全局 WS 广播 teammate-idle(带 sessionId 供分屏隔离),前端按
+      // name 反查卡片叠加「待命」显示。broadcast 遍历 WS 逐个 send,坏 socket 可能同步抛错
+      // → 必须 try/catch 兜住,回调任何情况只返回 {continue:true},绝不把异常抛回 SDK
+      // 扰动消息泵/关流时序(与上面 no-op PreToolUse 同性质)。
+      TeammateIdle: [{ hooks: [async (input) => {
+        try { broadcast({ type: 'teammate-idle', sessionId: slot.sessionId, teammateName: input?.teammate_name }); } catch {}
+        return { continue: true };
+      }] }],
     },
     cwd: workingDir,
     env: childEnv,
@@ -1318,6 +1327,35 @@ router.post('/chat/:pid/stop', async (req, res) => {
     try { slot.input?.close(); } catch {}
   }, hadTasks ? 3000 : 2000);
   res.json(shellTasks.length ? { ok: true, kept: shellTasks.length } : { ok: true });
+});
+
+// 停止链路 #1(部件①):按单个 task 精确停止 —— 净新增独立路由,与上面 1195-1321 的
+// /stop 停止链路零交叉(那是历史烧过六版的逐字节敏感区)。只对该 slot 内 toolUseId 对应的
+// 在飞 task 调 stopTask(fire-and-forget),【绝不 await、绝不 interrupt/abort、不碰优雅窗/
+// closing/turnEpoch/杀进程】——stopTask 自己发 task_notification(status:'stopped') 收尾,
+// 进程为其它任务/会话保活。幂等:重复调用安全。
+router.post('/chat/:pid/stop-task', (req, res) => {
+  const slot = activeProcesses.get(req.params.pid);
+  if (!slot) return res.status(404).json({ error: 'Process not found' });
+  const toolUseId = req.body?.toolUseId;
+  if (typeof toolUseId !== 'string' || !toolUseId) return res.status(400).json({ error: 'toolUseId required' });
+  // 会话归属守卫(防御纵深):前端把同一请求扇出到该会话的多个 pid;传了 sessionId 且与本
+  // slot 不匹配 → no-op stopped:false,停不到别的会话/窗格的 slot(即便前端 pid 扇出算错)。
+  const sessionId = req.body?.sessionId;
+  if (typeof sessionId === 'string' && sessionId && slot.sessionId !== sessionId) {
+    return res.json({ ok: true, stopped: false });
+  }
+  // 反查 liveTasks(value = {toolUseId, kind},task_started 时建于本文件上方)找 task_id。
+  let taskId = null;
+  for (const [tid, t] of (slot.liveTasks || new Map())) {
+    if (t && t.toolUseId === toolUseId) { taskId = tid; break; }
+  }
+  // 查无 task(已终态/已被移出 liveTasks/发到了非属主 pid)或 query 句柄不可用(已 close):
+  // 都不是错误,stopped:false(前端扇出到多 pid,只属主且会话匹配的 slot stopped:true)。
+  if (taskId == null) return res.json({ ok: true, stopped: false });
+  if (typeof slot.query?.stopTask !== 'function') return res.json({ ok: true, stopped: false });
+  try { slot.query.stopTask(taskId)?.catch?.(() => {}); } catch {}
+  return res.json({ ok: true, stopped: true });
 });
 
 // POST /api/chat/title  { firstUser, firstAssistant?, cwd? }
