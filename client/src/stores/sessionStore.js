@@ -143,6 +143,14 @@ export const THEME_FAMILIES = [
     dark:  { id: 'wechat-dark',  bg: '#1A1A1A', bg2: '#0D0D0D', fg: '#EDEDED', accent: '#07C160' } },
 ];
 
+// Extra theme families registered at runtime by optional local-only widgets
+// (client/src/components/*.local.jsx). Kept in a module array so the non-React
+// helpers below (resolveTheme / initThemeFamily) can see them, and mirrored into
+// store state (extraThemeFamilies) so the theme popover re-renders when one lands.
+// Empty on a public build — no bundled family depends on it.
+const extraThemeFamilies = [];
+export function allThemeFamilies() { return THEME_FAMILIES.concat(extraThemeFamilies); }
+
 export function systemPrefersDark() {
   try { return window.matchMedia('(prefers-color-scheme: dark)').matches; }
   catch { return false; }
@@ -152,7 +160,7 @@ export function systemPrefersDark() {
 // tone 'auto' picks light/dark from the OS at call time; presets are fixed
 // palettes so the variant id itself must flip (CSS can't auto-switch them).
 export function resolveTheme(familyId, tone) {
-  const fam = THEME_FAMILIES.find((f) => f.id === familyId) || THEME_FAMILIES[0];
+  const fam = allThemeFamilies().find((f) => f.id === familyId) || THEME_FAMILIES[0];
   const effDark = tone === 'auto' ? systemPrefersDark() : tone === 'dark';
   return { dataTheme: tone, cguiTheme: (effDark ? fam.dark.id : fam.light.id) || '' };
 }
@@ -164,7 +172,7 @@ function initThemeFamily() {
     if (fam) return fam;
     const preset = localStorage.getItem('cgui-theme-preset') || '';
     if (!preset) return 'default';
-    const m = THEME_FAMILIES.find((f) => f.light.id === preset || f.dark.id === preset);
+    const m = allThemeFamilies().find((f) => f.light.id === preset || f.dark.id === preset);
     return m ? m.id : 'default';
   } catch { return 'default'; }
 }
@@ -452,6 +460,8 @@ export const useStore = create((set, get) => ({
   themeFamily: initThemeFamily(),
   themeTone: initThemeTone(),
   cguiTheme: resolveTheme(initThemeFamily(), initThemeTone()).cguiTheme,
+  // Families registered at runtime by local widgets (empty on public builds).
+  extraThemeFamilies: [],
 
   // Reading font for Claude's message prose (see FONT_OPTIONS).
   readingFont: initReadingFont(),
@@ -1154,6 +1164,19 @@ export const useStore = create((set, get) => ({
       if (cguiTheme) root.setAttribute('data-cgui-theme', cguiTheme);
       else root.removeAttribute('data-cgui-theme');
     } catch {}
+  },
+  // Runtime theme-family registration for optional local widgets. Pushes into
+  // the module array (so resolveTheme sees it) + store state (so the popover
+  // re-renders). If the just-registered family is the one already selected
+  // (e.g. restored from localStorage before the widget loaded), re-apply so the
+  // data-cgui-theme attribute is corrected. Idempotent by id.
+  registerThemeFamily: (fam) => {
+    if (!fam || !fam.id) return;
+    if (extraThemeFamilies.some((f) => f.id === fam.id)) return;
+    extraThemeFamilies.push(fam);
+    set({ extraThemeFamilies: [...extraThemeFamilies] });
+    const s = get();
+    if (s.themeFamily === fam.id) s.setTheme(fam.id, s.themeTone);
   },
   // Reading font: persist + apply the --font-reading custom property.
   setReadingFont: (id) => {

@@ -281,6 +281,7 @@ function ThemeAppearanceBody() {
   const themeFamily = useStore((s) => s.themeFamily);
   const themeTone = useStore((s) => s.themeTone);
   const setTheme = useStore((s) => s.setTheme);
+  const extraThemeFamilies = useStore((s) => s.extraThemeFamilies);
   const uiFontScale = useStore((s) => s.uiFontScale);
   const setUiFontScale = useStore((s) => s.setUiFontScale);
   const readingFont = useStore((s) => s.readingFont);
@@ -349,7 +350,7 @@ function ThemeAppearanceBody() {
               <span className="ml-auto text-[9px] text-ink-faint font-body">当前 {toneKey === 'dark' ? '深色' : '浅色'}</span>
             </div>
             <div className="grid grid-cols-2 gap-1.5 max-h-[300px] overflow-y-auto pr-0.5">
-              {THEME_FAMILIES.map((fam) => {
+              {[...THEME_FAMILIES, ...extraThemeFamilies].map((fam) => {
                 const sw = fam[toneKey];
                 const active = themeFamily === fam.id;
                 return (
@@ -8194,7 +8195,8 @@ function MobileAppearancePage({ push }) {
   const readingFont = useStore((s) => s.readingFont);
   const chatMode = useStore((s) => s.chatMode);
   const setChatMode = useStore((s) => s.setChatMode);
-  const famName = THEME_FAMILIES.find((f) => f.id === themeFamily)?.name || themeFamily;
+  const extraThemeFamilies = useStore((s) => s.extraThemeFamilies);
+  const famName = [...THEME_FAMILIES, ...extraThemeFamilies].find((f) => f.id === themeFamily)?.name || themeFamily;
   const fontName = FONT_OPTIONS.find((f) => f.id === readingFont)?.name || readingFont;
   return (
     <div className="py-2">
@@ -8226,11 +8228,12 @@ function MobileThemePage() {
   const themeFamily = useStore((s) => s.themeFamily);
   const themeTone = useStore((s) => s.themeTone);
   const setTheme = useStore((s) => s.setTheme);
+  const extraThemeFamilies = useStore((s) => s.extraThemeFamilies);
   const effDark = themeTone === 'auto' ? systemPrefersDark() : themeTone === 'dark';
   const toneKey = effDark ? 'dark' : 'light';
   return (
     <div className="grid grid-cols-2 gap-2 p-3">
-      {THEME_FAMILIES.map((fam) => {
+      {[...THEME_FAMILIES, ...extraThemeFamilies].map((fam) => {
         const sw = fam[toneKey];
         const active = themeFamily === fam.id;
         return (
@@ -9002,12 +9005,15 @@ export default function App() {
   // Optional local-only widgets (client/src/components/*.local.jsx). Fresh
   // checkouts have none; public builds temporarily move them out of the build
   // graph so personal controls do not enter client/dist or Tauri bundles.
-  const [LocalWidget, setLocalWidget] = useState(null);
+  // Render EVERY local widget (not just the first) so multiple *.local.jsx can
+  // coexist — e.g. a bot control + a local-only theme skin.
+  const [localWidgets, setLocalWidgets] = useState([]);
   useEffect(() => {
     const mods = import.meta.glob('./components/*.local.jsx');
-    const entry = Object.values(mods)[0];
-    if (entry) entry().then((m) => setLocalWidget(() => m.default)).catch(() => {});
+    Promise.all(Object.values(mods).map((fn) => fn().then((m) => m.default).catch(() => null)))
+      .then((list) => setLocalWidgets(list.filter(Boolean)));
   }, []);
+  const LocalWidgets = () => localWidgets.map((W, i) => <W key={i} />);
 
   // 全局轮询正在运行的 chat-process → store,驱动侧栏状态符号(ProjectList /
   // SessionItem)。与按会话的 backgroundPid 轮询相互独立。
@@ -9342,7 +9348,7 @@ export default function App() {
           isMobile={isMobile}
           updateNotice={updateNotice}
         />
-        {LocalWidget && <LocalWidget />}
+        {LocalWidgets()}
         {/* 外接键盘按 Cmd+/ 也能开;不渲染的话状态会隐形置真并吞掉 Esc */}
         <ShortcutsPanel open={shortcutsOpen} onClose={() => setShortcutsOpen(false)} />
         {/* 审计批A3/A4:版本告警横幅 + 非聚焦会话完成提醒,手机端同样渲染
@@ -9424,7 +9430,7 @@ export default function App() {
         setRightPanel={setRightPanel}
         isMobile={isMobile}
       />
-      {LocalWidget && <LocalWidget />}
+      {LocalWidgets()}
       <GuideTour open={tourOpen} onClose={closeTour} hasProject={!!selectedProject} />
       <ShortcutsPanel open={shortcutsOpen} onClose={() => setShortcutsOpen(false)} />
       {/* 修正批#7:Provider 管理独立弹窗(桌面;手机走合并入口页内的导航流全屏页) */}
