@@ -4999,6 +4999,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                   if ((block.name === 'Task' || block.name === 'Agent') && parsed) {
                     store.upsertAgent(block.toolId, {
                       name: parsed.subagent_type || parsed.agent || parsed.name || block.name,
+                      // 部件③:可寻址实例名单独存一份——TeammateIdle 钩子发的 teammate_name = input.name,
+                      // 而上面的 .name 会被 subagent_type 抢占,故 idle 匹配必须用这个未被抢占的名。
+                      teammateName: parsed.name || null,
                       description: parsed.description || parsed.prompt?.slice(0, 80) || '',
                       status: 'working',
                       prompt: parsed.prompt || '',  // #9 子代理派发 prompt
@@ -5062,6 +5065,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                   const inp = block.input || {};
                   useStore.getState().upsertAgent(block.id, {
                     name: inp.subagent_type || inp.agent || inp.name || block.name,
+                    // 部件③:同上,可寻址实例名(= TeammateIdle 的 teammate_name)单独存,不被 subagent_type 抢占。
+                    teammateName: inp.name || null,
                     description: inp.description || (inp.prompt ? String(inp.prompt).slice(0, 80) : ''),
                     prompt: inp.prompt || '',
                     status: 'working',

@@ -257,7 +257,10 @@ export function useWebSocket() {
               const sid = data.sessionId;
               if (!name) break;
               for (const [id, ag] of Object.entries(st.activeAgents || {})) {
-                if (ag && ag.name === name && ag.sessionId === sid
+                // teammate_name = 可寻址实例名(input.name);优先比 ag.teammateName(未被 subagent_type
+                // 抢占的那份),回退比 ag.name(无 teammateName 的老条目/无名 teammate 兜底)。
+                const nameMatch = ag && (ag.teammateName ? ag.teammateName === name : ag.name === name);
+                if (nameMatch && ag.sessionId === sid
                     && !['done', 'error', 'stopped'].includes(ag.status)) {
                   st.upsertAgent(id, { teammateIdle: true });
                 }
