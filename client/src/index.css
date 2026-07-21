@@ -29,6 +29,10 @@
   --color-accent-hover: #000000;
   --color-accent-subtle: rgba(0, 0, 0, 0.06);
   --color-accent-muted: rgba(0, 0, 0, 0.16);
+  /* Text/icon color ON a filled accent surface (accent buttons, active search
+     highlight). Default white reads on every dark/colored accent the presets
+     ship; a light accent (晴空 缆车黄) overrides this to dark for contrast. */
+  --color-on-accent: #ffffff;
 
   /* ── Semantic — 中性 ──────────────────────────────────────── */
   --color-success: #16A34A;
@@ -918,6 +922,65 @@
   --scrollbar-thumb-hover: rgba(206, 205, 195, 0.26);
 }
 
+/* 晴空 Skyline Light — 清爽夏日晴空：冷静天蓝打底 + 缆车暖黄点缀。
+   配色取自用户「黄色缆车 + 浅蓝天空」照片。accent 为浅黄 → on-accent 用深色(黄底黑字)。 */
+:root[data-cgui-theme="skyline-light"] {
+  --color-canvas: #EEF5FA;
+  --color-canvas-warm: #F7FBFD;
+  --color-canvas-deep: #CBDCE8;
+  --color-canvas-sunken: #E4EFF6;
+  --color-ink: #1F2E3A;
+  --color-ink-soft: #33475A;
+  --color-ink-muted: #4A5D6B;
+  --color-ink-faint: #7B8D9A;
+  --color-ink-ghost: #AFC0CC;
+  --color-accent: #E8B23E;
+  --color-accent-hover: #D49E2A;
+  --color-accent-subtle: rgba(232, 178, 62, 0.16);
+  --color-accent-muted: rgba(232, 178, 62, 0.34);
+  --color-on-accent: #2A2013;
+  --glass-base-bg: rgba(238, 245, 250, 0.20);
+  --glass-thick-bg: rgba(247, 251, 253, 0.82);
+  --glass-thin-bg: rgba(238, 245, 250, 0.50);
+  --glass-bar-bg: rgba(238, 245, 250, 0.70);
+  --glass-specular: rgba(255, 255, 255, 0.78);
+  --glass-shade: rgba(31, 46, 58, 0.04);
+  --glass-edge: rgba(88, 130, 165, 0.18);
+  --glass-edge-outer: rgba(31, 46, 58, 0.06);
+  --glass-shadow: 0 1px 1px rgba(31, 46, 58, 0.04), 0 14px 40px -16px rgba(31, 46, 58, 0.18);
+  --scrollbar-thumb: rgba(31, 46, 58, 0.20);
+  --scrollbar-thumb-hover: rgba(31, 46, 58, 0.34);
+}
+
+/* 晴空 Skyline Dark — 深蓝夜空 + 提亮缆车黄(暗底更亮),保持对比度可读。 */
+:root[data-cgui-theme="skyline-dark"] {
+  --color-canvas: #141E28;
+  --color-canvas-warm: #1C2A36;
+  --color-canvas-deep: #2E4152;
+  --color-canvas-sunken: #0F171F;
+  --color-ink: #E6EEF4;
+  --color-ink-soft: #C9D6DF;
+  --color-ink-muted: #A8BAC6;
+  --color-ink-faint: #7A8C98;
+  --color-ink-ghost: #4A5964;
+  --color-accent: #F0C24E;
+  --color-accent-hover: #E3B23A;
+  --color-accent-subtle: rgba(240, 194, 78, 0.16);
+  --color-accent-muted: rgba(240, 194, 78, 0.32);
+  --color-on-accent: #241B0C;
+  --glass-base-bg: rgba(28, 42, 54, 0.30);
+  --glass-thick-bg: rgba(28, 42, 54, 0.88);
+  --glass-thin-bg: rgba(36, 52, 66, 0.58);
+  --glass-bar-bg: rgba(20, 30, 40, 0.82);
+  --glass-specular: rgba(255, 255, 255, 0.06);
+  --glass-shade: rgba(0, 0, 0, 0.32);
+  --glass-edge: rgba(240, 194, 78, 0.14);
+  --glass-edge-outer: rgba(0, 0, 0, 0.55);
+  --glass-shadow: 0 1px 1px rgba(0, 0, 0, 0.46), 0 14px 40px -16px rgba(0, 0, 0, 0.6);
+  --scrollbar-thumb: rgba(230, 238, 244, 0.14);
+  --scrollbar-thumb-hover: rgba(230, 238, 244, 0.26);
+}
+
 /* ════════════════════════════════════════════════════════════════
    Base — canvas with floating color light (visible THROUGH glass)
    ════════════════════════════════════════════════════════════════ */
@@ -946,6 +1009,21 @@ body {
     radial-gradient(ellipse 45% 35% at 10% 6%,  rgba(224, 138, 107, 0.10), transparent 70%),
     radial-gradient(ellipse 40% 32% at 92% 10%, rgba(201, 123, 39, 0.08), transparent 70%),
     radial-gradient(ellipse 50% 40% at 78% 96%, rgba(120, 140, 93, 0.07), transparent 70%);
+}
+
+/* 晴空 sky wash — 页面底衬一层竖向天空渐变 + 缆车暖黄的极淡角落点缀(纯 CSS,
+   零 JS)。放在深色 body 覆盖之后,同权重靠源码顺序压过它。不动 --color-canvas
+   本体(它被 color-mix/遮罩等当纯色用),只覆盖 body 的背景图层;卡片/弹层不透底,
+   用户自定义「对话区背景」仍叠在各 pane 之上不受影响。 */
+:root[data-cgui-theme="skyline-light"] body {
+  background-image:
+    linear-gradient(to bottom, rgba(160, 205, 232, 0.55), rgba(222, 238, 248, 0.10) 42%, transparent 66%),
+    radial-gradient(ellipse 46% 34% at 88% 8%, rgba(232, 178, 62, 0.10), transparent 70%);
+}
+:root[data-cgui-theme="skyline-dark"] body {
+  background-image:
+    linear-gradient(to bottom, rgba(38, 66, 96, 0.55), rgba(24, 38, 52, 0.20) 46%, transparent 72%),
+    radial-gradient(ellipse 46% 34% at 88% 8%, rgba(240, 194, 78, 0.09), transparent 70%);
 }
 
 #root { height: var(--app-h, 100vh); }
@@ -1361,7 +1439,7 @@ html { --content-max: clamp(768px, calc(var(--app-w, 100vw) * 0.7), 1120px); }
 
 .btn-accent {
   background: var(--color-accent);
-  color: white;
+  color: var(--color-on-accent, white);
   border: none;
   border-radius: var(--radius-md);
   box-shadow:
@@ -1540,7 +1618,7 @@ html { --content-max: clamp(768px, calc(var(--app-w, 100vw) * 0.7), 1120px); }
 }
 ::highlight(cgui-search-active) {
   background-color: var(--color-accent, #D97757);
-  color: #fff;
+  color: var(--color-on-accent, #fff);
 }
 
 /* ── 顶栏品牌 logo:Claude 官方风格 ──
