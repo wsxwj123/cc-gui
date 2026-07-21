@@ -5217,7 +5217,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             // 报错。上方 5127 已自动切回捕获两种已知文案;其余含 1M/长上下文关键词的
             // 拒绝(第三方/新文案)补一行引导:关掉模型弹层的 1M 开关再重试。纯文案层,
             // 不动重试逻辑。
-            const isOneMReject = /\b1m\b|\[1m\]|long context|context length|1000000|1,000,000/i.test(msg);
+            // (?<![$￥]) 排除 "$1m budget" 这类金额文案的误命中(判官次要项)
+            const isOneMReject = /(?<![$￥])\b1m\b|\[1m\]|long context|context length|1000000|1,000,000/i.test(msg);
             const oneMHint = isOneMReject
               ? '\n\n> 该会话被识别为 1M 上下文；若账户不支持,请在模型弹层关闭 1M 后重试。'
               : '';
