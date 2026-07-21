@@ -62,12 +62,15 @@
   --spacing-sidebar: 268px;
   --spacing-sessions: 312px;
 
-  /* ── Radius — Apple squircles ─────────────────────────────── */
+  /* ── Radius — Apple squircles ─────────────────────────────────
+     大档(lg/xl/2xl)收窄贴合 macOS 窗口外边界圆角(~11px):原 18/22/28
+     偏大,面板/卡片圆角比窗口本身还圆显得不协调。sm/md 已够小保留。
+     驱动 var(--radius-*) 与 Tailwind rounded-lg/xl/2xl 工具类(@theme token)。 */
   --radius-sm: 8px;
   --radius-md: 12px;
-  --radius-lg: 18px;
-  --radius-xl: 22px;
-  --radius-2xl: 28px;
+  --radius-lg: 13px;
+  --radius-xl: 15px;
+  --radius-2xl: 17px;
 }
 
 /* Dark tokens — packed into a mixin selector so they can be triggered by
@@ -1279,7 +1282,7 @@ html { --content-max: clamp(768px, calc(var(--app-w, 100vw) * 0.7), 1120px); }
      A solid translucent fill gives the same visual rhythm at 1/100 the cost. */
   background: var(--glass-base-bg);
   border: 0.5px solid var(--glass-edge);
-  border-radius: 22px;
+  border-radius: var(--radius-2xl); /* 圆角收窄批:原硬编码 22px,跟 2xl(17)对齐卡片体系 */
   box-shadow:
     inset 0 1px 0 var(--glass-specular),
     inset 0 -1px 0 var(--glass-shade),
