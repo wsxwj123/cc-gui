@@ -556,7 +556,17 @@ function nativeContextWindow(model) {
   const byName = id.match(/(\d+)k(?![a-z0-9])/);     // 如 moonshot-v1-128k
   if (byName) return parseInt(byName[1], 10) * 1000;
   // 已知【小于 1M】的模型 → 回落真实窗口(默认改 1M 后必须显式挡下,否则超窗误判/不触发压缩)。
-  if (/claude|anthropic|opus|sonnet|haiku/.test(id)) return 200_000;         // Claude 原生 200K(1M 需 [1m])
+  // Claude 系分代(2026-07 官方文档核实):fable-5/mythos-5/sonnet-5/opus-4.6+/sonnet-4.6
+  // 原生 1M(默认即 1M,无需 [1m] beta;CLI /context 对 sonnet-5 实测报 ~967k 印证);
+  // haiku 全系 200K;更老代(opus≤4.5、sonnet≤4.5、claude-3-x)200K(1M 需 [1m],走上方分支)。
+  // 旧表把全部 claude 系按 200K 算 → fable-5/Desktop opus 1M 会话首开徽章爆红 389k/200k(194%) 根因。
+  if (/claude|anthropic|opus|sonnet|haiku/.test(id)) {
+    if (/fable|mythos/.test(id)) return 1_000_000;
+    if (/opus-?4-?[6-9]|opus-?[5-9](?!\d)/.test(id)) return 1_000_000;
+    if (/sonnet-?4-?[6-9]|sonnet-?[5-9](?![\d-])/.test(id)) return 1_000_000;
+    if (/^(opus|sonnet)$/.test(id)) return 1_000_000;   // CLI 别名 = 当前 tier 最新 → 1M
+    return 200_000;                                     // haiku 全系 / opus≤4.5 / sonnet≤4.5 / claude-3-x
+  }
   if (/deepseek|mimo/.test(id)) return 200_000;                               // U3 实测 /context 200K
   if (/kimi|moonshot/.test(id)) return 262_144;                              // Kimi K2.x 原生 256K
   if (/glm|zhipu|chatglm/.test(id)) return 200_000;                          // GLM 实测 200K
