@@ -633,6 +633,18 @@ function useResolvedWindow(model) {
 // B 一定是 A 的一个 toolCall(appendAgentTool(A,{id:B})),且 activeAgents[B] 存在 → 顺 toolCalls
 // 找 activeAgents 里的后代递归收尾即可精确定位、仅限本流后代、天然不跨窗格。visited 防环。
 // stopped 语义:tnStatus='stopped' 时,该 agent 若已 resultSeen(成功返回过)标 done,否则 stopped。
+// teammate/子代理被 SendMessage 唤醒后,会有新的带 parent_tool_use_id 的 assistant 活动到达,
+// 但此时 agent 可能已是终态(done/stopped/error)——append 路径只追加内容、不翻状态,监控就卡在
+// 「已完成」不显示重新运行(用户报的 bug)。新活动到达且处于终态时复活为 working(清 finishedAt)。
+// 只在 assistant 侧(message_start / 整条 assistant 消息)调用,不在 user/tool_result 侧,否则
+// 完成后迟到的 tool_result 对账会误复活。终态判断做门控,避免每 token 抖动。
+const AGENT_TERMINAL_STATUS = ['done', 'error', 'stopped'];
+function reviveAgentIfTerminal(store, agentId) {
+  if (!agentId) return;
+  const ag = store.activeAgents?.[agentId];
+  if (ag && AGENT_TERMINAL_STATUS.includes(ag.status)) store.upsertAgent(agentId, { status: 'working', finishedAt: null });
+}
+
 function finalizeAgent(st, agentId, tnStatus, visited, authoritative) {
   visited = visited || new Set();
   if (visited.has(agentId)) return;
@@ -4850,6 +4862,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             const parentToolUseId = event.parent_tool_use_id || null;
             const store = useStore.getState();
             if (parentToolUseId) {
+              // 子代理被 SendMessage 唤醒后新流式活动到达,若已是终态则复活为 working(监控重显运行中)。
+              if (ev.type === 'message_start') reviveAgentIfTerminal(store, parentToolUseId);
               // M2(Q6): 子代理回合的 message_start 携带其实际模型 id,记到卡片上显示。
               if (ev.type === 'message_start' && ev.message?.model) {
                 store.upsertAgent(parentToolUseId, { model: ev.message.model });
@@ -4993,6 +5007,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             if (event.parent_tool_use_id) {
               const aStore = useStore.getState();
               const aid = event.parent_tool_use_id;
+              reviveAgentIfTerminal(aStore, aid); // 唤醒后整条 assistant 消息到达,终态则复活为运行中
               if (event.message.model) aStore.upsertAgent(aid, { model: event.message.model });
               for (const block of (Array.isArray(event.message.content) ? event.message.content : [])) {
                 if (block.type === 'text' && block.text) aStore.appendAgentText(aid, block.text);
