@@ -865,6 +865,15 @@ router.post('/chat', async (req, res) => {
     // TS 无实质作用(官方那条"需 dummy hook"只针对 Python)。保留作无害保险(保持流活性)。
     hooks: {
       PreToolUse: [{ hooks: [async () => ({ continue: true })] }],
+      // 部件③:具名 in-process teammate 跑完当前工作转入待命(等 SendMessage 唤醒)时,
+      // SDK 回调此钩子。经全局 WS 广播 teammate-idle(带 sessionId 供分屏隔离),前端按
+      // name 反查卡片叠加「待命」显示。broadcast 遍历 WS 逐个 send,坏 socket 可能同步抛错
+      // → 必须 try/catch 兜住,回调任何情况只返回 {continue:true},绝不把异常抛回 SDK
+      // 扰动消息泵/关流时序(与上面 no-op PreToolUse 同性质)。
+      TeammateIdle: [{ hooks: [async (input) => {
+        try { broadcast({ type: 'teammate-idle', sessionId: slot.sessionId, teammateName: input?.teammate_name }); } catch {}
+        return { continue: true };
+      }] }],
     },
     cwd: workingDir,
     env: childEnv,
