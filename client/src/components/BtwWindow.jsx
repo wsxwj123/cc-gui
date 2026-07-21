@@ -57,12 +57,17 @@ export default function BtwWindow({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionKey]);
 
-  // 外部信号(主输入框 /btw 或窗口内发送)→ 展开。
-  useEffect(() => { if (openSignal) setCollapsed(false); }, [openSignal]);
+  // 外部信号(主输入框 /btw 或窗口内发送)→ 展开。ref 初值=当前 openSignal:挂载那次为
+  // no-op —— btwOpenSignal 是持久只增计数器,切会话时主窗格 loading 使本窗卸载重挂,挂载时
+  // 此 effect 会读到持久正值误 setCollapsed(false)=「切会话旁问窗自动弹出」根因,故需 guard。
+  const openSeenRef = useRef(openSignal);
+  useEffect(() => {
+    if (openSignal && openSignal !== openSeenRef.current) { openSeenRef.current = openSignal; setCollapsed(false); }
+  }, [openSignal]);
   // toggle 信号(输入框「旁问」按钮每点一次 +1)→ 切换 collapsed(展开↔收起)。ref guard 保证每个
   // signal 值只处理一次:函数式 setCollapsed(c=>!c) 非幂等,若 StrictMode/重复触发使 effect 跑两
   // 次会互相抵消(实测点按钮不收起的根因)。/btw 与窗口内发送仍走 openSignal 强制展开(非 toggle)。
-  const toggleSeenRef = useRef(0);
+  const toggleSeenRef = useRef(toggleSignal); // 初值=当前值:挂载 no-op,同款防切会话重挂误触发
   useEffect(() => {
     if (toggleSignal && toggleSignal !== toggleSeenRef.current) {
       toggleSeenRef.current = toggleSignal;
