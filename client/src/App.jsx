@@ -813,7 +813,7 @@ function PaneCountPicker() {
 
 // P1.1 面板坞:顶栏 10 个面板按钮收纳为 1 个坞图标(Mac 折叠菜单栏式)。
 // 常态只显坞图标;点击原位展开成横向图标条(rail,含原 10 个面板按钮),再点某图标开
-// 对应面板;rail 持久展开 —— 再点坞图标 / Esc 才收起,点外部不收。rightPanel 状态机不变,rail 只是入口层。
+// 对应面板;rail 持久展开 —— 再点坞图标才收起,点外部不收。rightPanel 状态机不变,rail 只是入口层。
 // 更新提醒并入坞:入口红点常驻 + rail 内条件「更新」按钮(跳设置更新区)。
 // 点 rail 图标后不收起:方便连续切换面板。持久展开也根治了导引 panel 步骤间 rail 被点暗区/外部收起反复开合的闪烁。
 const PANEL_SHORT = {
@@ -822,13 +822,9 @@ const PANEL_SHORT = {
 };
 function PanelDock({ rightPanel, setRightPanel, updateNotice, jumpToUpdate }) {
   const [railOpen, setRailOpen] = useState(false);
-  // 持久展开:点外部不收(用户要「展开项常驻,再点坞按钮才收起」);保留 Esc 作主动收起。
-  useEffect(() => {
-    if (!railOpen) return;
-    const onEsc = (e) => { if (e.key === 'Escape') setRailOpen(false); };
-    document.addEventListener('keydown', onEsc);
-    return () => document.removeEventListener('keydown', onEsc);
-  }, [railOpen]);
+  // 持久展开:点外部不收(用户要「展开项常驻,再点坞按钮才收起」)。
+  // Esc 已让位给停会话(双击 Esc 停止流是唯一 Esc 全局语义,dock 不抢);收起只保留再点坞图标
+  // 和 cgui:dock-rail-close 事件。
   // 导引联动:tour 的面板步骤经此事件展开 rail 做演示(GuideTour 只 dispatch,不直接碰状态)。
   useEffect(() => {
     const onOpen = () => setRailOpen(true);
@@ -4694,6 +4690,12 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                   const _dv = localStorage.getItem(`cgui-draft:${_dk0}`);
                   if (_dv) { localStorage.setItem(`cgui-draft:${event.session_id}`, _dv); localStorage.removeItem(`cgui-draft:${_dk0}`); }
                 } catch {}
+                // 输入历史同迁:draft 期 saveHistoryEntry 写的是 cgui-input-history:draft-<hash> 旧键,
+                // 不迁则首条历史滞留旧键、且会污染该项目下一个 draft 的历史列表。幂等(旧键空则不动)。
+                try {
+                  const _hv = localStorage.getItem(`cgui-input-history:${_dk0}`);
+                  if (_hv && _hv !== '[]') { localStorage.setItem(`cgui-input-history:${event.session_id}`, _hv); localStorage.removeItem(`cgui-input-history:${_dk0}`); }
+                } catch {}
               }
               // 串扰窗口1守卫的 draft→真 sid 升级:pane 历史(draft 期为空)的归属标记
               // 同步升级成真 sid,否则绑定后、首次 fetch 回来前守卫会误藏活会话。
@@ -4724,6 +4726,14 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                 const _dk = `draft-${selectedSession?.projectHash || 'none'}`;
                 const _next = migrateDraftQueue(useStore.getState().messageQueue, _dk, event.session_id);
                 if (_next) useStore.setState({ messageQueue: _next });
+              } catch {}
+              // 输入历史同迁(用户已切走时 selIsOrigin=false,上面 origin 块不执行,在此兜底):
+              // draft 期历史存旧键,不迁则首条历史滞留旧键且污染该项目下一个 draft。取发起时闭包
+              // selectedSession(sel 是当前选中,用户已切走时会错迁别的项目)。selIsOrigin=true 时旧键已删,此处幂等 no-op。
+              try {
+                const _hk = `draft-${selectedSession?.projectHash || 'none'}`;
+                const _hv = localStorage.getItem(`cgui-input-history:${_hk}`);
+                if (_hv && _hv !== '[]') { localStorage.setItem(`cgui-input-history:${event.session_id}`, _hv); localStorage.removeItem(`cgui-input-history:${_hk}`); }
               } catch {}
               // Q3 标题提速:新会话拿到真 sid 就立刻并行生成标题(只用首条用户消息,
               // 不等回复完成)。失败时 result 后的兜底逻辑(带 firstAssistant)会重试。

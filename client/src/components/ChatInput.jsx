@@ -714,7 +714,11 @@ export function ChatInput({ onSend, onStop, onStopBackground, onAccelerate, onBa
       const el = textareaRef.current;
       const atStart = !el || el.selectionStart === 0;
       const atEnd = !el || el.selectionStart === el.value.length;
-      const canUseHistory = !text.startsWith('/') && (text.trim() === '' || historyCursor >= 0 || (e.key === 'ArrowUp' ? atStart : atEnd));
+      // 单行文本恒放行 ↑↓ 历史导航(对齐 Claude Code CLI 原生行编辑);多行保留 atStart/atEnd
+      // 门槛防劫持光标跨行移动。旧条件下单行非空+光标在行尾时 ↑ 是死键(用户实报):浏览历史中
+      // 编辑召回条目(如退格)会把 historyCursor 重置为 -1,此时回不到历史。单行放行后 ↑ 进导航
+      // 前会把当前文本存进 draftBeforeHistoryRef(下方),按 ↓ 到底可找回。
+      const canUseHistory = !text.startsWith('/') && (text.trim() === '' || historyCursor >= 0 || !text.includes('\n') || (e.key === 'ArrowUp' ? atStart : atEnd));
       if (canUseHistory) {
         const history = readHistory();
         if (history.length > 0 || historyCursor >= 0) {
