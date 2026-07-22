@@ -56,7 +56,7 @@ const putSessionSync = (kind, sessionId, value, { untracked = false } = {}) => {
 // 半死连接)服务端停留旧值,重启水合"服务端为准"把本地新值打回——1M 开关重启退回 200k
 // 的根因。修法不是合并时猜新旧(无法区分"服务端没见过"与"对端已删除",会复活删除),
 // 而是记账重放:写入先落 pending,PUT ok 才清;水合先重放 pending 再拉取,重放失败的键
-// 合并时不被服务端覆盖。对端正常删除(其 PUT 成功,无 pending)不受影影响。
+// 合并时不被服务端覆盖。对端正常删除(其 PUT 成功,无 pending)不受影响。
 const readPendingSync = () => readLs('cgui-sync-pending', {});
 const trackPending = (kind, sessionId, value) => {
   if (!sessionId) return;
@@ -88,7 +88,7 @@ async function replayPendingSync() {
         });
         ok = r.ok;
       } else {
-        ok = await putSessionSync(kind, sessionId, value);
+        ok = await putSessionSync(kind, sessionId, value, { untracked: true });
       }
     } catch {}
     if (ok) clearPending(kind, sessionId); else failed.add(tag);
@@ -668,9 +668,15 @@ export const useStore = create((set, get) => ({
       set({ context1mBySession: merged });
     } catch {}
   },
-  // ws 'context-1m' 广播:全量替换(删除也要传播)。
+  // ws 'context-1m' 广播:全量替换(删除也要传播)。outbox 未送达的键除外(判官 S):
+  // 本地刚改还没写进服务端时,旧广播不该把新状态闪回(与 applyRemoteSessionSync 同款 skip)。
   applyRemoteContext1m: (sessions) => {
-    const next = (sessions && typeof sessions === 'object') ? sessions : {};
+    const incoming = (sessions && typeof sessions === 'object') ? sessions : {};
+    const local = get().context1mBySession || {};
+    const next = { ...incoming };
+    for (const k of pendingKeysOf('context1m')) {
+      if (local[k]) next[k] = true; else delete next[k];
+    }
     writeLs('cgui-context-1m', next);
     set({ context1mBySession: next });
   },
