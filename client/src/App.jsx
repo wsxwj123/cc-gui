@@ -5615,7 +5615,11 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         // 重复 prompt 仍安全:count 必须先增长,tail 取本轮流式文本结尾,不会误匹配旧轮。
         const tail = (accumulatedText || '').replace(/\s+/g, ' ').trim().slice(-50);
         const roundLanded = (persisted, attempt) => {
-          if (persisted.filter((m) => m.type === 'turn').length <= turnsBefore) return false;
+          // reattach 豁免计数检查(调研根因①):reattach 的 turnsBefore 基准会被污染——
+          // 切回时历史重拉已把在途回合计入(或残留上一会话的列表),持久化计数永远
+          // ≤ 基准 → 本地副本永不清 → 持久化版+本地版双渲染。回放内容来自同一进程,
+          // done 到达即意味着该回合 jsonl 已写;保留 tail 匹配确认整轮(含尾部)落盘。
+          if (!reattachPid && persisted.filter((m) => m.type === 'turn').length <= turnsBefore) return false;
           if (!tail || attempt >= 9) return true; // 纯工具轮 / 已等够久 → count 足矣
           const lastTurn = [...persisted].reverse().find((m) => m.type === 'turn');
           const ptext = lastTurn
@@ -5675,6 +5679,15 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       // BF-1:回合收尾清历史截断,历史渲染交还 jsonl。放在 finalize 循环之后:break 与
       // 此处同一同步续体,React 合批 —— 与循环内 setChatMessages([]) 同帧提交,不会闪现
       // "本地已清、截断还在 → 该回合一帧不可见"。nav-away 提前 break / 无 sid 路径也覆盖。
+      // 流正常结束也记时刻(调研根因②):复活守卫(d3d747a)让 reattach 首次可在无 detach
+      // 时发生(子代理完→4s去抖发done→主agent续跑→轮询再reattach),无时刻就回落
+      // afterLastUser,把刚提交的上一轮正文切掉只剩 Connecting,重放又补不回来(实时流
+      // 走的从未进 earlyLines)。记结束时刻后 reattach 走 sinceTs 只藏会被重放的段落。
+      // 取 max 防与 detach 写入互相回拨;detach 的 AbortError 也走本 finally,值仅晚毫秒级。
+      if (streamSid) {
+        const prevTs = detachTsBySidRef.current[streamSid] || 0;
+        detachTsBySidRef.current[streamSid] = Math.max(prevTs, Date.now());
+      }
       setStreamHistCutoff(null);
       // Background refresh of sidebar session list. `silent:true` means the
       // global loading flag is NOT toggled, so SessionDetail doesn't swap to

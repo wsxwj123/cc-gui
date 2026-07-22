@@ -40,15 +40,61 @@ const putCustomTitle = (sessionId, title) => {
 const syncInFlight = createInFlightCounter(); // tag = `${kind}:${sessionId}`
 // 返回 Promise<boolean>(PUT 是否成功);现有 setter 调用点忽略返回值仍是
 // fire-and-forget,首次迁移回推靠此判据门控 marker(低危#1)。
-const putSessionSync = (kind, sessionId, value) => {
+const putSessionSync = (kind, sessionId, value, { untracked = false } = {}) => {
   const tag = `${kind}:${sessionId}`;
+  if (!untracked) trackPending(kind, sessionId, value); // outbox:先记账,ok 才清
   syncInFlight.acquire(tag);
   return fetch('/api/prefs/session-sync', {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ kind, sessionId, value }),
-  }).then((res) => res.ok).catch(() => false).finally(() => syncInFlight.release(tag));
+  }).then((res) => { if (res.ok) clearPending(kind, sessionId); return res.ok; })
+    .catch(() => false).finally(() => syncInFlight.release(tag));
 };
+
+// ── 同步 outbox(调研③根修):同步 PUT 全是 fire-and-forget,写丢(开完开关立刻 Cmd+Q/
+// 半死连接)服务端停留旧值,重启水合"服务端为准"把本地新值打回——1M 开关重启退回 200k
+// 的根因。修法不是合并时猜新旧(无法区分"服务端没见过"与"对端已删除",会复活删除),
+// 而是记账重放:写入先落 pending,PUT ok 才清;水合先重放 pending 再拉取,重放失败的键
+// 合并时不被服务端覆盖。对端正常删除(其 PUT 成功,无 pending)不受影影响。
+const readPendingSync = () => readLs('cgui-sync-pending', {});
+const trackPending = (kind, sessionId, value) => {
+  if (!sessionId) return;
+  const m = readPendingSync();
+  m[`${kind}:${sessionId}`] = value;
+  writeLs('cgui-sync-pending', m);
+};
+const clearPending = (kind, sessionId) => {
+  const m = readPendingSync();
+  if (`${kind}:${sessionId}` in m) { delete m[`${kind}:${sessionId}`]; writeLs('cgui-sync-pending', m); }
+};
+const pendingKeysOf = (kind) => new Set(
+  Object.keys(readPendingSync()).filter((t) => t.startsWith(kind + ':')).map((t) => t.slice(kind.length + 1)),
+);
+// 重放全部 pending(context1m 走自己的端点,其余走 session-sync)。返回仍失败的 tag 集。
+async function replayPendingSync() {
+  const entries = Object.entries(readPendingSync());
+  if (!entries.length) return new Set();
+  const failed = new Set();
+  await Promise.all(entries.map(async ([tag, value]) => {
+    const i = tag.indexOf(':');
+    const kind = tag.slice(0, i), sessionId = tag.slice(i + 1);
+    let ok = false;
+    try {
+      if (kind === 'context1m') {
+        const r = await fetch('/api/prefs/context-1m', {
+          method: 'PUT', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ sessionId, on: value === true }),
+        });
+        ok = r.ok;
+      } else {
+        ok = await putSessionSync(kind, sessionId, value);
+      }
+    } catch {}
+    if (ok) clearPending(kind, sessionId); else failed.add(tag);
+  }));
+  return failed;
+}
 
 // Valid `--permission-mode` values per `claude --help`。
 // P2.2:'auto' 为 SDK 原生自动档;是否显示由 useVisiblePermissionModes 门控
@@ -591,11 +637,12 @@ export const useStore = create((set, get) => ({
     if (on) next[key] = true; else delete next[key];
     writeLs('cgui-context-1m', next);
     set({ context1mBySession: next });
+    trackPending('context1m', key, on); // outbox:写丢可重放(重启退回 200k 的根修)
     fetch('/api/prefs/context-1m', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ sessionId: key, on }),
-    }).catch(() => {});
+    }).then((r) => { if (r.ok) clearPending('context1m', key); }).catch(() => {});
   },
   // 启动水合:服务端为准,不回推。此前 legacy 合并回推无法区分「服务端删过该 key」
   // (对端关 1m/切 provider/删会话 GC)和「服务端没见过」——跨设备离线场景会把已删
@@ -604,11 +651,21 @@ export const useStore = create((set, get) => ({
   // fetch 失败(catch)保留本地镜像不覆盖。
   hydrateContext1m: async () => {
     try {
+      // outbox 重放先行(调研③):本地有未送达的 1M 变更时先补写服务端,再拉取合并;
+      // 重放仍失败的键保留本地值,不被服务端旧值打回(对端正常删除无 pending,不受影响)。
+      const failedReplay = await replayPendingSync();
       const res = await fetch('/api/prefs/context-1m');
       const d = await res.json();
       const server = (d && d.sessions && typeof d.sessions === 'object') ? d.sessions : {};
-      writeLs('cgui-context-1m', server);
-      set({ context1mBySession: server });
+      const local = get().context1mBySession || {};
+      const merged = { ...server };
+      for (const tag of failedReplay) {
+        if (!tag.startsWith('context1m:')) continue;
+        const k = tag.slice('context1m:'.length);
+        if (local[k]) merged[k] = true; else delete merged[k];
+      }
+      writeLs('cgui-context-1m', merged);
+      set({ context1mBySession: merged });
     } catch {}
   },
   // ws 'context-1m' 广播:全量替换(删除也要传播)。
@@ -638,6 +695,8 @@ export const useStore = create((set, get) => ({
       const skip = new Set(
         syncInFlight.keys().filter((t) => t.startsWith(kind + ':')).map((t) => t.slice(kind.length + 1)),
       );
+      // outbox 未送达的键同样不被服务端旧值覆盖(调研③:重放失败的键本地胜,下次水合再重放)。
+      for (const k of pendingKeysOf(kind)) skip.add(k);
       const next = mergeSyncedMap(local, server, skip);
       // 首次水合:本地有而服务端没有的实键(本功能上线前的存量 pin)推上去,
       // 其他设备也能看到(同 hydrateCustomTitles 的 legacy 合并回推)。
@@ -662,6 +721,7 @@ export const useStore = create((set, get) => ({
   // 置位,任一失败不置位、下次重连重试整批(空批=无存量键 → 视为成功直接置位)。
   hydrateSessionSync: async () => {
     try {
+      await replayPendingSync(); // outbox 重放先行(调研③):未送达的 pin/档位先补写再拉取
       const res = await fetch('/api/prefs/session-sync');
       const d = await res.json();
       const migrated = readLs('cgui-session-sync-migrated', false);
