@@ -796,6 +796,7 @@ async function switchToOpenAIUpstream(up, requestedModel, res) {
     env.ANTHROPIC_DEFAULT_OPUS_MODEL = t.opus;
     env.ANTHROPIC_DEFAULT_FABLE_MODEL = t.fable;
   }
+  delete env.ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME;
   delete env.ANTHROPIC_DEFAULT_OPUS_MODEL_NAME;
   delete env.ANTHROPIC_DEFAULT_SONNET_MODEL_NAME;
   delete env.ANTHROPIC_DEFAULT_FABLE_MODEL_NAME;
@@ -937,6 +938,7 @@ async function switchToCustomProvider(p, requestedModel, res) {
     delete snapEnv.ANTHROPIC_DEFAULT_HAIKU_MODEL;
     delete snapEnv.ANTHROPIC_DEFAULT_SONNET_MODEL;
     delete snapEnv.ANTHROPIC_DEFAULT_OPUS_MODEL;
+    delete snapEnv.ANTHROPIC_DEFAULT_FABLE_MODEL;
     return switchToAnthropicUpstream(
       { id: p.id, name: p.name, baseURL: p.baseURL, authToken: p.apiKey, snapshot: { ...cur, env: snapEnv }, models, defaultModel: defModel, tierModels: p.tierModels },
       effModel, res,
@@ -954,6 +956,8 @@ async function switchToCustomProvider(p, requestedModel, res) {
   delete env.ANTHROPIC_DEFAULT_HAIKU_MODEL;
   delete env.ANTHROPIC_DEFAULT_SONNET_MODEL;
   delete env.ANTHROPIC_DEFAULT_OPUS_MODEL;
+  delete env.ANTHROPIC_DEFAULT_FABLE_MODEL;
+  delete env.ANTHROPIC_DEFAULT_FABLE_MODEL_NAME;
   // Official-anthropic direct (uses CLI OAuth) → the API strips the nonce itself,
   // so drop any stale attribution-header override left by a prior third-party switch.
   delete env.CLAUDE_CODE_ATTRIBUTION_HEADER;

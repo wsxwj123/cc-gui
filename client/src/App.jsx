@@ -7012,10 +7012,13 @@ function ProviderManager({ initialEditId = null }) {
   const [editingProvider, setEditingProvider] = useState(null);
   // 行内编辑直达(顶栏切换卡片每行的铅笔按钮):自定义项在列表加载后自动进编辑态;
   // 导入项(ccswitch/openai)的编辑内容(档位映射/模型管理)本就在行内展开,无需定位。
+  // 每个 editId 只处理一次:列表刷新(import/provider-change 后的 load)会换 customProviders
+  // 引用,不设闸会把用户正在编辑的表单反复重置(判官 S3)。
+  const handledEditIdRef = useRef(null);
   useEffect(() => {
-    if (!initialEditId) return;
+    if (!initialEditId || handledEditIdRef.current === initialEditId) return;
     const p = customProviders.find((x) => x.id === initialEditId);
-    if (p) setEditingProvider(p);
+    if (p) { handledEditIdRef.current = initialEditId; setEditingProvider(p); }
   }, [initialEditId, customProviders]);
   useEffect(() => {
     load();
@@ -7723,7 +7726,7 @@ function MobileEffortPage({ permKey }) {
 // 整体移除(用户拍板);store 与发送链能力保留(agent 化会话仍可由服务端/API 驱动)。
 
 // B 方案: 对【任意】provider(含 cc-switch 只读 / openai marker 组)设「默认模型 +
-// 档位映射(haiku/sonnet/opus)」。options 来自该 provider 的 models[];不暴露 baseURL/key。
+// 档位映射(haiku/sonnet/opus/fable)」。options 来自该 provider 的 models[];不暴露 baseURL/key。
 // 保存写 ~/.claude-gui/provider-overrides.json(PUT /api/provider-overrides/:id),不碰
 // cc-switch.db。空选项 = 清除该档(回退选中模型),全空 = 删除该 provider 的 override。
 // 模块级:避免在 ProviderOverrideEditor 渲染内联定义(否则每次 setState 重定义组件类型
@@ -7891,7 +7894,7 @@ function CustomProviderForm({ onSaved, editing, onCancel, onDirtyChange, customC
   const [modelsText, setModelsText] = useState('');
   const [testResult, setTestResult] = useState(null); // BZ-1:{ ok, error } | null
   const [defaultModel, setDefaultModel] = useState('');  // AZ8:该 provider 默认模型(空=用列表第一个)
-  // BB6:档位映射 —— 子代理/标题/compact 用的 haiku/sonnet/opus alias 各自映射到该
+  // BB6:档位映射 —— 子代理/标题/compact 用的 haiku/sonnet/opus/fable alias 各自映射到该
   // provider 的真实模型(空=回退默认模型/选中模型,即维持 BA1 行为)。
   const [tierModels, setTierModels] = useState({ haiku: '', sonnet: '', opus: '', fable: '' });
   // 上下文窗口(token,可选):自动压缩窗口按它联动(切到该 provider 时压缩线=窗口×0.85)。
@@ -7938,7 +7941,7 @@ function CustomProviderForm({ onSaved, editing, onCancel, onDirtyChange, customC
     })();
     return () => { stale = true; };
   }, [editing?.id]);
-  const reset = () => { setName(''); setType('openai'); setBaseURL(''); setApiKey(''); setModelsText(''); setDefaultModel(''); setTierModels({ haiku: '', sonnet: '', opus: '' }); setTestResult(null); setOpen(false); };
+  const reset = () => { setName(''); setType('openai'); setBaseURL(''); setApiKey(''); setModelsText(''); setDefaultModel(''); setTierModels({ haiku: '', sonnet: '', opus: '', fable: '' }); setTestResult(null); setOpen(false); };
   const close = () => { reset(); onCancel?.(); };
   const parseModels = () => modelsText.split(/[\n,]+/).map((s) => s.trim()).filter(Boolean);
   // BZ-2:有未保存内容时上报 dirty,父级据此阻止外部点击/Esc 关闭下拉(避免丢输入)。
@@ -8127,7 +8130,7 @@ function CustomProviderForm({ onSaved, editing, onCancel, onDirtyChange, customC
           {parseModels().map((m) => (<option key={m} value={m}>{m}</option>))}
         </select>
       </div>
-      {/* BB6:档位映射 —— 子代理/标题/compact 走 haiku/sonnet/opus 别名,分别映射到该
+      {/* BB6:档位映射 —— 子代理/标题/compact 走 haiku/sonnet/opus/fable 别名,分别映射到该
           provider 的真实模型(简单任务用便宜的、难的用强的)。留空 = 回退默认模型/选中模型。
           要生效:agent .md 写别名(model: haiku)而非具体 id(具体 id 优先级更高,绕过映射)。 */}
       <div className="space-y-1.5 pt-0.5">
