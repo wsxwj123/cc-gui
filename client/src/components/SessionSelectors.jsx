@@ -3,7 +3,7 @@
 // ChatInput,留在 App.jsx 会形成循环 import。逻辑原样搬运,不改行为。
 import React, { useState, useRef, useEffect, useLayoutEffect } from 'react';
 import { createPortal } from 'react-dom';
-import { ChevronDown, Check, X, Settings, Server, Loader2, Smartphone } from 'lucide-react';
+import { ChevronDown, Check, X, Settings, Server, Loader2, Smartphone, Pencil } from 'lucide-react';
 import { useStore } from '../stores/sessionStore.js';
 import { ModelBadge } from './ModelBadge.jsx';
 import { confirmDialog } from '../utils/confirmDialog.jsx';
@@ -214,6 +214,13 @@ export function ProviderSwitchList({ onSwitched }) {
     onSwitched?.();
     window.dispatchEvent(new CustomEvent('cgui:open-provider-manager'));
   };
+  // 行内编辑:直达管理弹窗并定位到该 provider(自定义项直接进编辑态;导入项的
+  // 档位映射/模型管理本就在弹窗内联展开)。官方项无可编辑内容,不给按钮。
+  // 手机端不派发此事件(管理走全屏页),按钮仅桌面显示。
+  const openEdit = (p) => {
+    onSwitched?.();
+    window.dispatchEvent(new CustomEvent('cgui:open-provider-manager', { detail: { editId: p.id } }));
+  };
 
   // 审计批挂账:hidden 传入选择器,在合并前过滤 —— 隐藏的导入项不参与吞并/不进「含导入」徽章。
   const rows = mergeProviderLists({ providers, openaiProviders, customProviders, hidden: hiddenProviders });
@@ -224,14 +231,22 @@ export function ProviderSwitchList({ onSwitched }) {
         切换会改写 <code className="font-mono">~/.claude/settings.json</code>（自动备份），<b>对新发的消息生效</b>。
       </p>
       {rows.map((p) => (
-        <button key={p.id} disabled={switching} onClick={() => switchTo(p.id)}
-          className={`w-full min-w-0 text-left px-3 py-1.5 flex items-center gap-2 hover:bg-canvas-warm transition-colors ${isCur(p) ? 'bg-accent-subtle' : ''} ${switching ? 'opacity-50' : ''}`}>
-          <span className={`flex-1 text-xs font-body truncate ${isCur(p) ? 'text-accent font-medium' : 'text-ink'}`}>{p.name}</span>
-          {p.models?.length > 0 && <span className="text-[9px] px-1 py-px bg-canvas-deep text-ink-faint rounded font-mono shrink-0">{p.models.length} 模型</span>}
-          {p.type && p.source === 'custom' && <span className="text-[9px] px-1 py-px bg-canvas-deep text-ink-faint rounded font-mono shrink-0">{p.type}</span>}
-          <ProviderSourceBadge p={p} />
-          {isCur(p) && <Check size={12} className="text-accent shrink-0" />}
-        </button>
+        <div key={p.id} className={`flex items-center group/prov ${isCur(p) ? 'bg-accent-subtle' : ''}`}>
+          <button disabled={switching} onClick={() => switchTo(p.id)}
+            className={`flex-1 min-w-0 text-left px-3 py-1.5 flex items-center gap-2 hover:bg-canvas-warm transition-colors ${switching ? 'opacity-50' : ''}`}>
+            <span className={`flex-1 text-xs font-body truncate ${isCur(p) ? 'text-accent font-medium' : 'text-ink'}`}>{p.name}</span>
+            {p.models?.length > 0 && <span className="text-[9px] px-1 py-px bg-canvas-deep text-ink-faint rounded font-mono shrink-0">{p.models.length} 模型</span>}
+            {p.type && p.source === 'custom' && <span className="text-[9px] px-1 py-px bg-canvas-deep text-ink-faint rounded font-mono shrink-0">{p.type}</span>}
+            <ProviderSourceBadge p={p} />
+            {isCur(p) && <Check size={12} className="text-accent shrink-0" />}
+          </button>
+          {p.source !== 'official' && (
+            <button onClick={() => openEdit(p)} title="编辑该 Provider"
+              className="p-1 mr-1.5 text-ink-faint hover:text-accent shrink-0 opacity-0 group-hover/prov:opacity-100 group-focus-within/prov:opacity-100 transition-opacity max-md:hidden">
+              <Pencil size={12} />
+            </button>
+          )}
+        </div>
       ))}
       <button onClick={openManager}
         className="w-full text-left px-3 py-2 mt-1 text-[11px] text-accent hover:bg-canvas-warm border-t border-canvas-deep font-body flex items-center gap-1.5">

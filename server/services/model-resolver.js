@@ -89,6 +89,7 @@ function inferTier(s) {
   if (u.includes('OPUS'))   return 'Opus';
   if (u.includes('SONNET')) return 'Sonnet';
   if (u.includes('HAIKU'))  return 'Haiku';
+  if (u.includes('FABLE'))  return 'Fable';
   if (u.includes('FAST') || u.includes('SMALL')) return 'Fast';
   return null;
 }
@@ -209,6 +210,7 @@ export async function getAvailableModels() {
     add('sonnet', 'Sonnet (alias)', 'Sonnet', 'cli-alias');
     add('opus',   'Opus (alias)',   'Opus',   'cli-alias');
     add('haiku',  'Haiku (alias)',  'Haiku',  'cli-alias');
+    add('fable',  'Fable (alias)',  'Fable',  'cli-alias');
   }
 
   // Guarantee current model is selectable (full id, [1m] preserved)

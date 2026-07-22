@@ -60,7 +60,7 @@ function isOfficialAnthropic(baseURL) {
 // provider's env, so switching to official never requests a non-claude model.
 function isClaudeModel(id) {
   if (!id || typeof id !== 'string') return false;
-  return /claude/i.test(id) || ['sonnet', 'opus', 'haiku'].includes(id);
+  return /claude/i.test(id) || ['sonnet', 'opus', 'haiku', 'fable'].includes(id);
 }
 
 const PROVIDER_ENV_KEYS = new Set([
@@ -73,9 +73,11 @@ const PROVIDER_ENV_KEYS = new Set([
   'ANTHROPIC_DEFAULT_HAIKU_MODEL',
   'ANTHROPIC_DEFAULT_SONNET_MODEL',
   'ANTHROPIC_DEFAULT_OPUS_MODEL',
+  'ANTHROPIC_DEFAULT_FABLE_MODEL',
   'ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME',
   'ANTHROPIC_DEFAULT_SONNET_MODEL_NAME',
   'ANTHROPIC_DEFAULT_OPUS_MODEL_NAME',
+  'ANTHROPIC_DEFAULT_FABLE_MODEL_NAME',
   'ANTHROPIC_REASONING_MODEL',
   'ANTHROPIC_SMALL_FAST_MODEL',
   // A(#50085): only the third-party switch paths re-set this to '0'. Listing it
@@ -150,13 +152,13 @@ async function writeCustomProviders(list) {
 }
 
 // BB6: validate a tierModels input against the provider's model list. Returns a
-// cleaned { haiku?, sonnet?, opus? } keeping only ids present in `models`, or null
+// cleaned { haiku?, sonnet?, opus?, fable? } keeping only ids present in `models`, or null
 // when nothing valid remains (caller then omits the field → switch回退 chosen).
 function sanitizeTierModels(input, models) {
   if (!input || typeof input !== 'object') return null;
   const allowed = new Set(models || []);
   const out = {};
-  for (const tier of ['haiku', 'sonnet', 'opus']) {
+  for (const tier of ['haiku', 'sonnet', 'opus', 'fable']) {
     const v = input[tier];
     if (typeof v === 'string' && allowed.has(v.trim())) out[tier] = v.trim();
   }
@@ -192,7 +194,7 @@ async function writeProviderModels(map) {
 
 // B 方案: per-provider「默认模型 + 档位映射」覆盖层,对【所有】provider 生效
 // (含 cc-switch 只读组 / openai marker 组),它们不在 custom-providers.json 里够不着
-// CustomProviderForm。Shape: { [providerId]: { defaultModel?, tierModels?{haiku,sonnet,opus} } }。
+// CustomProviderForm。Shape: { [providerId]: { defaultModel?, tierModels?{haiku,sonnet,opus,fable} } }。
 // 无文件 / 无该 id 条目 = 行为完全不变(向后兼容硬要求)。从不写 cc-switch.db。
 const PROVIDER_OVERRIDES_PATH = join(homedir(), '.claude-gui', 'provider-overrides.json');
 
@@ -741,15 +743,18 @@ router.post('/provider/switch', async (req, res) => {
 });
 
 // BB6: per-provider 档位映射。把子代理/标题/compact 用的 tier alias(haiku/sonnet/
-// opus)分别映射到该 provider 的三个真实模型(简单任务用便宜的,难的用强的)。
-// tierModels = { haiku?, sonnet?, opus? }(每值须 ∈ provider models[],写入时已校验)。
-// 缺档回退到 chosen → 维持现 BA1 行为(三档全=选中模型),向后兼容。
+// opus/fable)分别映射到该 provider 的真实模型(简单任务用便宜的,难的用强的)。
+// fable 档:CLI 2.1.201 起 ANTHROPIC_DEFAULT_FABLE_MODEL 为原生第四档(agent .md 可写
+// model: fable,与 opus 是独立槽位,借 opus 档注入语义是错的)。
+// tierModels = { haiku?, sonnet?, opus?, fable? }(每值须 ∈ provider models[],写入时已校验)。
+// 缺档回退到 chosen → 维持现 BA1 行为(全档=选中模型),向后兼容。
 function resolveTierModels(tierModels, chosen) {
   const tm = (tierModels && typeof tierModels === 'object') ? tierModels : {};
   return {
     haiku:  tm.haiku  || chosen,
     sonnet: tm.sonnet || chosen,
     opus:   tm.opus   || chosen,
+    fable:  tm.fable  || chosen,
   };
 }
 
@@ -789,9 +794,11 @@ async function switchToOpenAIUpstream(up, requestedModel, res) {
     env.ANTHROPIC_DEFAULT_HAIKU_MODEL = t.haiku;
     env.ANTHROPIC_DEFAULT_SONNET_MODEL = t.sonnet;
     env.ANTHROPIC_DEFAULT_OPUS_MODEL = t.opus;
+    env.ANTHROPIC_DEFAULT_FABLE_MODEL = t.fable;
   }
   delete env.ANTHROPIC_DEFAULT_OPUS_MODEL_NAME;
   delete env.ANTHROPIC_DEFAULT_SONNET_MODEL_NAME;
+  delete env.ANTHROPIC_DEFAULT_FABLE_MODEL_NAME;
   // A(#50085/#68900): third-party gateways keyed on the full request body get 0%
   // cache hits because CC prepends a per-request `cch=` nonce to the system prompt.
   // api.anthropic.com strips it; relays don't → set =0 to omit it. OpenAI proxy is
@@ -860,15 +867,17 @@ async function switchToAnthropicUpstream(up, requestedModel, res) {
   // 重定向到第三方真实模型(与 switchToOpenAIUpstream 同构)。chosen 缺失时清掉,避免
   // 沿用上一个 provider 的陈旧值。仅 anthropic 第三方路径受影响,官方/openai 不动。
   if (chosen) {
-    // BB6: per-tier mapping when configured, else all three = chosen (BA1 behavior).
+    // BB6: per-tier mapping when configured, else all tiers = chosen (BA1 behavior).
     const t = resolveTierModels(up.tierModels, chosen);
     env.ANTHROPIC_DEFAULT_HAIKU_MODEL = t.haiku;
     env.ANTHROPIC_DEFAULT_SONNET_MODEL = t.sonnet;
     env.ANTHROPIC_DEFAULT_OPUS_MODEL = t.opus;
+    env.ANTHROPIC_DEFAULT_FABLE_MODEL = t.fable;
   } else {
     delete env.ANTHROPIC_DEFAULT_HAIKU_MODEL;
     delete env.ANTHROPIC_DEFAULT_SONNET_MODEL;
     delete env.ANTHROPIC_DEFAULT_OPUS_MODEL;
+    delete env.ANTHROPIC_DEFAULT_FABLE_MODEL;
   }
   // A(#50085/#68900): this path is always a third-party anthropic relay (routed
   // through the loopback passthrough proxy), never api.anthropic.com — so strip the
@@ -1587,6 +1596,7 @@ async function syncActiveProviderSnapshot(activePath, providerId, models, defaul
               cur.env.ANTHROPIC_DEFAULT_HAIKU_MODEL = active.model;
               cur.env.ANTHROPIC_DEFAULT_SONNET_MODEL = active.model;
               cur.env.ANTHROPIC_DEFAULT_OPUS_MODEL = active.model;
+              cur.env.ANTHROPIC_DEFAULT_FABLE_MODEL = active.model;
             }
           } else {
             delete cur.env.ANTHROPIC_MODEL; // no models left — don't pin a stale one

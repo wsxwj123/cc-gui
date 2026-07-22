@@ -6943,7 +6943,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
 // 一项不少;点行仍可切换。顶栏 ProviderSwitcher 瘦身为纯切换列表(见下),底部链到本页。
 // Switching overwrites ~/.claude/settings.json with the chosen provider snapshot
 // (server backs it up first); the file-watcher then broadcasts provider-change.
-function ProviderManager() {
+function ProviderManager({ initialEditId = null }) {
   const ms = useMultiSelect();
   const [providers, setProviders] = useState([]);
   // OpenAI-format providers (codex/opencode) — routed through the embedded
@@ -7010,6 +7010,13 @@ function ProviderManager() {
     load();
   };
   const [editingProvider, setEditingProvider] = useState(null);
+  // 行内编辑直达(顶栏切换卡片每行的铅笔按钮):自定义项在列表加载后自动进编辑态;
+  // 导入项(ccswitch/openai)的编辑内容(档位映射/模型管理)本就在行内展开,无需定位。
+  useEffect(() => {
+    if (!initialEditId) return;
+    const p = customProviders.find((x) => x.id === initialEditId);
+    if (p) setEditingProvider(p);
+  }, [initialEditId, customProviders]);
   useEffect(() => {
     load();
     const onCh = () => load();
@@ -7165,7 +7172,7 @@ function ProviderManager() {
 // 布局照 ShortcutsPanel:flex 列(头 shrink-0 / 正文 flex-1 min-h-0 overflow-y-auto),
 // 不用 sticky(glass 动画残留 transform 会让 sticky 哑,memory 实证);Esc/点外关闭,
 // 表单有未保存输入时先 confirmDialog(与原设置面板离开守卫同语义)。
-function ProviderManagerModal({ open, onClose }) {
+function ProviderManagerModal({ open, onClose, editId = null }) {
   const tryClose = useCallback(async () => {
     if (window.__cguiProviderFormDirty) {
       const ok = await confirmDialog('Provider 表单有未保存的输入，关闭将丢弃。仍要关闭？', { danger: true, confirmText: '丢弃并关闭' });
@@ -7199,7 +7206,7 @@ function ProviderManagerModal({ open, onClose }) {
           </button>
         </div>
         <div className="flex-1 min-h-0 overflow-y-auto px-4 py-3">
-          <ProviderManager />
+          <ProviderManager initialEditId={editId} />
         </div>
       </div>
     </div>
@@ -7745,6 +7752,7 @@ function ProviderOverrideEditor({ provider, override, onSaved }) {
     haiku: ov.tierModels?.haiku || '',
     sonnet: ov.tierModels?.sonnet || '',
     opus: ov.tierModels?.opus || '',
+    fable: ov.tierModels?.fable || '',
   });
   const [busy, setBusy] = useState(false);
   const [saveMsg, setSaveMsg] = useState('');
@@ -7752,7 +7760,7 @@ function ProviderOverrideEditor({ provider, override, onSaved }) {
     setBusy(true); setSaveMsg('');
     try {
       const tierModels = {};
-      for (const t of ['haiku', 'sonnet', 'opus']) if (tier[t]) tierModels[t] = tier[t];
+      for (const t of ['haiku', 'sonnet', 'opus', 'fable']) if (tier[t]) tierModels[t] = tier[t];
       const r = await fetch(`/api/provider-overrides/${provider.id}`, {
         method: 'PUT', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -7781,6 +7789,7 @@ function ProviderOverrideEditor({ provider, override, onSaved }) {
             <OverrideSelect models={models} label="haiku" value={tier.haiku} onChange={(v) => setTier((s) => ({ ...s, haiku: v }))} />
             <OverrideSelect models={models} label="sonnet" value={tier.sonnet} onChange={(v) => setTier((s) => ({ ...s, sonnet: v }))} />
             <OverrideSelect models={models} label="opus" value={tier.opus} onChange={(v) => setTier((s) => ({ ...s, opus: v }))} />
+            <OverrideSelect models={models} label="fable" value={tier.fable} onChange={(v) => setTier((s) => ({ ...s, fable: v }))} />
           </div>
           <button onClick={save} disabled={busy}
             className="w-full px-3 py-1.5 text-[12px] bg-accent text-on-accent rounded-lg disabled:opacity-50">
@@ -7884,7 +7893,7 @@ function CustomProviderForm({ onSaved, editing, onCancel, onDirtyChange, customC
   const [defaultModel, setDefaultModel] = useState('');  // AZ8:该 provider 默认模型(空=用列表第一个)
   // BB6:档位映射 —— 子代理/标题/compact 用的 haiku/sonnet/opus alias 各自映射到该
   // provider 的真实模型(空=回退默认模型/选中模型,即维持 BA1 行为)。
-  const [tierModels, setTierModels] = useState({ haiku: '', sonnet: '', opus: '' });
+  const [tierModels, setTierModels] = useState({ haiku: '', sonnet: '', opus: '', fable: '' });
   // 上下文窗口(token,可选):自动压缩窗口按它联动(切到该 provider 时压缩线=窗口×0.85)。
   // 空 = 不联动(CLI 按 200K 假设;窗口更大的模型会被过早压缩用不满)。
   const [ctxWindow, setCtxWindow] = useState('');
@@ -7921,7 +7930,7 @@ function CustomProviderForm({ onSaved, editing, onCancel, onDirtyChange, customC
       setApiKey('');
       setModelsText((editing.models || []).join('\n'));
       setDefaultModel(editing.defaultModel || '');
-      setTierModels({ haiku: editing.tierModels?.haiku || '', sonnet: editing.tierModels?.sonnet || '', opus: editing.tierModels?.opus || '' });
+      setTierModels({ haiku: editing.tierModels?.haiku || '', sonnet: editing.tierModels?.sonnet || '', opus: editing.tierModels?.opus || '', fable: editing.tierModels?.fable || '' });
       setCtxWindow(editing.contextWindow ? String(editing.contextWindow) : '');
       setTestResult(null); // 切到另一个 provider 编辑时清掉上一个的测试结果横幅(否则误导)
       setBusy('');
@@ -8004,6 +8013,7 @@ function CustomProviderForm({ onSaved, editing, onCancel, onDirtyChange, customC
         haiku:  parsedModels.includes(tierModels.haiku)  ? tierModels.haiku  : '',
         sonnet: parsedModels.includes(tierModels.sonnet) ? tierModels.sonnet : '',
         opus:   parsedModels.includes(tierModels.opus)   ? tierModels.opus   : '',
+        fable:  parsedModels.includes(tierModels.fable)  ? tierModels.fable  : '',
       };
       // 上下文窗口(可选):空串 = 清除;后端校验范围 [1000, 10M]。
       body.contextWindow = ctxWindow.trim() ? Number(ctxWindow.trim()) : null;
@@ -8122,7 +8132,7 @@ function CustomProviderForm({ onSaved, editing, onCancel, onDirtyChange, customC
           要生效:agent .md 写别名(model: haiku)而非具体 id(具体 id 优先级更高,绕过映射)。 */}
       <div className="space-y-1.5 pt-0.5">
         <div className="text-[11px] text-ink-faint">档位映射 <span className="text-ink-faint/70">子代理/标题/compact 走便宜档,主对话走强档;留空 = 用默认模型</span></div>
-        {[['haiku', 'Haiku 档(子代理/标题/便宜)'], ['sonnet', 'Sonnet 档(常规)'], ['opus', 'Opus 档(最强)']].map(([tier, label]) => (
+        {[['haiku', 'Haiku 档(子代理/标题/便宜)'], ['sonnet', 'Sonnet 档(常规)'], ['opus', 'Opus 档(最强)'], ['fable', 'Fable 档(CLI 第四档,agent 可写 model:fable)']].map(([tier, label]) => (
           <div key={tier} className="flex items-center gap-2">
             <span className="text-[11px] text-ink-faint shrink-0 w-14 whitespace-nowrap">{tier}</span>
             <select value={tierModels[tier]} onChange={(e) => setTierModels((s) => ({ ...s, [tier]: e.target.value }))}
@@ -8874,8 +8884,10 @@ export default function App() {
   // 修正批#7:Provider 管理独立弹窗(顶栏切换卡片底部「管理 Provider」触发;设置里的
   // Provider tab 已删)。手机端不派发此事件(合并入口页内是导航流全屏页)。
   const [providerMgrOpen, setProviderMgrOpen] = useState(false);
+  // 行内编辑按钮直达:事件 detail.editId 带来要编辑的 provider(自定义项进编辑态)。
+  const [providerMgrEditId, setProviderMgrEditId] = useState(null);
   useEffect(() => {
-    const onOpenMgr = () => setProviderMgrOpen(true);
+    const onOpenMgr = (e) => { setProviderMgrEditId(e?.detail?.editId || null); setProviderMgrOpen(true); };
     window.addEventListener('cgui:open-provider-manager', onOpenMgr);
     return () => window.removeEventListener('cgui:open-provider-manager', onOpenMgr);
   }, []);
@@ -9558,7 +9570,7 @@ export default function App() {
       <GuideTour open={tourOpen} onClose={closeTour} hasProject={!!selectedProject} />
       <ShortcutsPanel open={shortcutsOpen} onClose={() => setShortcutsOpen(false)} />
       {/* 修正批#7:Provider 管理独立弹窗(桌面;手机走合并入口页内的导航流全屏页) */}
-      <ProviderManagerModal open={providerMgrOpen} onClose={() => setProviderMgrOpen(false)} />
+      <ProviderManagerModal open={providerMgrOpen} editId={providerMgrEditId} onClose={() => { setProviderMgrOpen(false); setProviderMgrEditId(null); }} />
       {bundleMismatchBanner}
       <CompletionToasts />
       {/* F1: 截图热键状态提示(截图中/成功/失败)。取消不显示。 */}

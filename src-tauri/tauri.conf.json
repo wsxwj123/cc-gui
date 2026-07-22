@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Claude GUI",
-  "version": "0.2.266",
+  "version": "0.2.267",
   "identifier": "com.claudegui.desktop",
   "build": {
     "beforeDevCommand": "npm run server",
@@ -11,7 +11,9 @@
   },
   "plugins": {
     "updater": {
-      "endpoints": ["https://github.com/wsxwj123/claude-gui/releases/latest/download/latest.json"],
+      "endpoints": [
+        "https://github.com/wsxwj123/claude-gui/releases/latest/download/latest.json"
+      ],
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDM0QTgzRkFEOThFRUUzQTMKUldTajQrNllyVCtvTlA5QnFkNkIyVEpGSENIQ0dvMS9OVXAwUEZTbk9RQ21XeVBnRkJiM1JPa2EK",
       "windows": {
         "installMode": "passive"
@@ -27,7 +29,11 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["app", "dmg", "nsis"],
+    "targets": [
+      "app",
+      "dmg",
+      "nsis"
+    ],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
