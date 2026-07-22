@@ -1038,7 +1038,9 @@ router.post('/chat', async (req, res) => {
             // provider 缺字段时停止失效)。bgBashToolIds 是 task_type 缺失时的双保险。
             const kind = (m.task_type === 'local_bash' || slot.bgBashToolIds.has(m.tool_use_id)) ? 'shell'
               : (m.subagent_type ? 'subagent' : 'unknown');
-            slot.liveTasks.set(m.task_id, { toolUseId: m.tool_use_id || null, kind });
+            // epoch=创建时回合世代:优雅判据只数本回合任务,跨回合保留的活条目由 stopTask
+            // 全量扇出+notification 收尾负责,陈旧(通知丢失)条目不致毒化 abort 判据(判官 R)。
+            slot.liveTasks.set(m.task_id, { toolUseId: m.tool_use_id || null, kind, epoch: slot.turnEpoch | 0 });
           }
           else if (m.subtype === 'task_notification') slot.liveTasks.delete(m.task_id);
           else if (m.subtype === 'task_updated' && ['completed', 'failed', 'killed'].includes(m.patch?.status)) slot.liveTasks.delete(m.task_id);
@@ -1173,7 +1175,8 @@ router.get('/chat/:pid/stream', (req, res) => {
   // 每一行消息:写给 client;若是 done 事件则收尾 SSE。
   const onLine = (line) => {
     if (!safeWrite('data: ' + line + '\n\n')) return;
-    if (line.indexOf('"type":"done"') !== -1) {
+    // 行首前缀匹配(判官 S):子串匹配会把正文里讨论 {"type":"done"} 的消息行误当控制行收尾。
+    if (line.startsWith('{"type":"done"')) {
       try { if (JSON.parse(line).type === 'done') safeEnd(); } catch {}
     }
   };
@@ -1325,7 +1328,10 @@ router.post('/chat/:pid/stop', async (req, res) => {
     let liveStoppable = 0;
     let liveShell = 0;
     for (const t of (slot.liveTasks?.values() ?? [])) {
-      if (t && t.kind === 'shell') liveShell++; else liveStoppable++;
+      if (t && t.kind === 'shell') { liveShell++; continue; }
+      // 只数本回合(selEpoch)任务:跨回合保留的活后台子代理的 stopTask 已发、notification
+      // 会照常收尾;陈旧(通知丢失)条目不算"没停净",防 idle 槽位被无谓 abort 回收(判官 R)。
+      if (t && (t.epoch | 0) === selEpoch) liveStoppable++;
     }
     if (settled && liveStoppable === 0) return;
     if (liveShell > 0) {
