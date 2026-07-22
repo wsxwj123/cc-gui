@@ -593,7 +593,7 @@ router.get('/providers', async (_req, res) => {
     hasKey: !!p.apiKey, isCustom: true, isCurrent: isCur(p.id, false),
   }));
   // B 方案: claude 只读组的 models[] 从其 snapshot.env 的 _MODEL 值提取(切换/导入路径
-  // 同口径),否则档位下拉无选项。official 不给 models(它有真三档,不走 override)。
+  // 同口径),否则档位下拉无选项。official 不给 models(它有真四档,不走 override)。
   const claudeProviders = rows.map((r) => {
     let models = [];
     if (r.category !== 'official') {
@@ -786,9 +786,9 @@ async function switchToOpenAIUpstream(up, requestedModel, res) {
   // beyond what cc-switch already stores.
   env.ANTHROPIC_AUTH_TOKEN = 'sk-openai-proxy';
   env.ANTHROPIC_MODEL = model;
-  // Route subagent aliases (haiku/sonnet/opus) to the provider's tier models so
+  // Route subagent aliases (haiku/sonnet/opus/fable) to the provider's tier models so
   // Task subagents work under the OpenAI backend too. BB6: per-tier mapping when
-  // configured, else all three = model (current BA1 behavior).
+  // configured, else all four = model (current BA1 behavior).
   {
     const t = resolveTierModels(up.tierModels, model);
     env.ANTHROPIC_DEFAULT_HAIKU_MODEL = t.haiku;
@@ -957,6 +957,9 @@ async function switchToCustomProvider(p, requestedModel, res) {
   delete env.ANTHROPIC_DEFAULT_SONNET_MODEL;
   delete env.ANTHROPIC_DEFAULT_OPUS_MODEL;
   delete env.ANTHROPIC_DEFAULT_FABLE_MODEL;
+  delete env.ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME;
+  delete env.ANTHROPIC_DEFAULT_SONNET_MODEL_NAME;
+  delete env.ANTHROPIC_DEFAULT_OPUS_MODEL_NAME;
   delete env.ANTHROPIC_DEFAULT_FABLE_MODEL_NAME;
   // Official-anthropic direct (uses CLI OAuth) → the API strips the nonce itself,
   // so drop any stale attribution-header override left by a prior third-party switch.

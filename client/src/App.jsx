@@ -7016,7 +7016,9 @@ function ProviderManager({ initialEditId = null }) {
   // 引用,不设闸会把用户正在编辑的表单反复重置(判官 S3)。
   const handledEditIdRef = useRef(null);
   useEffect(() => {
-    if (!initialEditId || handledEditIdRef.current === initialEditId) return;
+    // editId 清空(弹窗关闭)时复位闸:之后再次点同一行铅笔才能再进编辑态(判官 delta)。
+    if (!initialEditId) { handledEditIdRef.current = null; return; }
+    if (handledEditIdRef.current === initialEditId) return;
     const p = customProviders.find((x) => x.id === initialEditId);
     if (p) { handledEditIdRef.current = initialEditId; setEditingProvider(p); }
   }, [initialEditId, customProviders]);
@@ -8000,7 +8002,7 @@ function CustomProviderForm({ onSaved, editing, onCancel, onDirtyChange, customC
     const hasDefault = defaultModel && parsedModels.includes(defaultModel);
     if (!hasDefault && parsedModels.length > 1) {
       const ok = await confirmDialog(
-        `未设置默认模型。新会话及未指定模型的调用将使用列表第一个:${parsedModels[0]}。\n建议在下方设置默认模型,以及 haiku / sonnet / opus 三档对应的模型 id。\n\n仍以「${parsedModels[0]}」作默认保存?`,
+        `未设置默认模型。新会话及未指定模型的调用将使用列表第一个:${parsedModels[0]}。\n建议在下方设置默认模型,以及 haiku / sonnet / opus / fable 四档对应的模型 id。\n\n仍以「${parsedModels[0]}」作默认保存?`,
       );
       if (!ok) return; // 用户返回去设置默认模型 / 档位映射
     }
