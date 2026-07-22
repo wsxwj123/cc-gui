@@ -861,10 +861,10 @@ async function switchToAnthropicUpstream(up, requestedModel, res) {
     ? requestedModel
     : (models.includes(env.ANTHROPIC_MODEL) ? env.ANTHROPIC_MODEL : (models[0] || env.ANTHROPIC_MODEL));
   if (chosen) env.ANTHROPIC_MODEL = chosen; else delete env.ANTHROPIC_MODEL;
-  // BA1:子代理/标题/compact 等内部调用走 tier alias(sonnet/opus/haiku),claude CLI
+  // BA1:子代理/标题/compact 等内部调用走 tier alias(haiku/sonnet/opus/fable),claude CLI
   // 会把 alias 本地展开成【官方 id】(如 claude-sonnet-4-6)再发给上游;第三方 anthropic
   // 中转没有该 id → 报 "<model> is not a model ... may not exist or no access",还连带
-  // 让 bot 的 --resume 失败丢上下文。把三个 DEFAULT_*_MODEL 指向真实选中模型,alias 即
+  // 让 bot 的 --resume 失败丢上下文。把四个 DEFAULT_*_MODEL 指向真实选中模型,alias 即
   // 重定向到第三方真实模型(与 switchToOpenAIUpstream 同构)。chosen 缺失时清掉,避免
   // 沿用上一个 provider 的陈旧值。仅 anthropic 第三方路径受影响,官方/openai 不动。
   if (chosen) {
