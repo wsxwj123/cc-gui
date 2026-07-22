@@ -19,6 +19,8 @@ const readLs = (key, fallback) => {
 const writeLs = (key, val) => {
   try { localStorage.setItem(key, JSON.stringify(val)); } catch {}
 };
+// 数组类字段:只防解析错不够,残留对象/字符串(旧版格式漂移/手改)会让 .filter/.map 崩(判官 B#4)。
+const readLsArr = (key) => { const v = readLs(key, []); return Array.isArray(v) ? v : []; };
 
 // Push one session-title change to the shared server store (fire-and-forget).
 // Server merges per-key and broadcasts the full map back over ws so the other
@@ -71,6 +73,10 @@ async function postPermissionMode(sessionId, mode) {
   modePostFlights.set(sessionId, flight);
   try {
     let attempt = 0;
+    // 逃逸口(判官 S4):无限重试没有终止条件——会话已删/服务端长死时循环空转一辈子。
+    // 5 分钟上限:本地服务端真挂了整个 app 都不可用,到时未送达放弃即可(用户重切档会
+    // 另起 flight;旧 flight 由 finally 清 Map,不挡新 flight)。
+    const deadline = Date.now() + 5 * 60_000;
     for (;;) {
       const target = flight.latestMode;
       let delivered = false;
@@ -88,6 +94,7 @@ async function postPermissionMode(sessionId, mode) {
         attempt = 0; // 期间又切了档:立即补发最新档,不背旧退避
         continue;
       }
+      if (Date.now() > deadline) return;
       await new Promise((ok) => setTimeout(ok, Math.min(1_000 * 2 ** attempt, 8_000)));
       attempt++;
     }
@@ -236,7 +243,7 @@ export const useStore = create((set, get) => ({
   currentProvider: { providerHint: 'anthropic', baseUrl: '', model: null },
   // CLI session knobs. Persisted to localStorage so they survive reload.
   effort: (() => { try { return (typeof localStorage !== 'undefined' && localStorage.getItem('cgui-effort')) || ''; } catch { return ''; } })(),
-  addDirs: readLs('cgui-add-dirs', []),
+  addDirs: readLsArr('cgui-add-dirs'),
   // 默认 'default'(每个工具调用弹窗征求同意)。曾默认 'plan'(Bug #9),但选择器
   // 回退 'default'、而 banner/getPermissionModeFor 回退全局('plan') → 新建会话出现
   // "选择器显示默认却实际在跑 plan + banner 报规划模式"的三方不一致(用户报告的冲突)。
@@ -778,7 +785,7 @@ export const useStore = create((set, get) => ({
   // auto-enumeration only knows models from settings.json env + the provider's
   // config). Kept separate from availableModels because that array is replaced
   // wholesale on every /api/model fetch.
-  customModels: readLs('cgui-custom-models', []),
+  customModels: readLsArr('cgui-custom-models'),
   addCustomModel: (id) => {
     const v = String(id || '').trim();
     if (!v || get().customModels.includes(v)) return;
@@ -1437,7 +1444,7 @@ export const useStore = create((set, get) => ({
       // 判官4:异常响应(无 model 字段)不把 currentModel 打成 undefined ——
       // 顶栏 ModelSelector 以 !currentModel 早退,会整个消失。
       if (data.model) set({ currentModel: data.model });
-      set({ availableModels: data.available || [] });
+      set({ availableModels: Array.isArray(data.available) ? data.available : [] });
       // 手机批#3:providerName 一并写入(桌面由 ModelSelector 的 load 写;手机端不挂
       // ModelSelector,菜单里"当前 Provider"的显示靠这里)。
       if (data.provider != null) set({ providerName: data.provider });

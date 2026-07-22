@@ -25,6 +25,7 @@ import { MarkdownRenderer } from './components/MarkdownRenderer.jsx';
 import { TurnBubble } from './components/TurnBubble.jsx';
 import TurnScrubber from './components/TurnScrubber.jsx';
 import { LoadingMark, useCyclingVerb, ElapsedTime } from './components/LoadingBits.jsx';
+import { ErrorBoundary } from './components/ErrorBoundary.jsx';
 import { useMultiSelect, SelModeToggle, BatchBar, SelCheckbox } from './components/MultiSelect.jsx';
 import { pickDirectory, isTauri } from './utils/pickDirectory.js';
 import ChatSearch from './components/ChatSearch.jsx';
@@ -666,7 +667,9 @@ function finalizeAgent(st, agentId, tnStatus, visited, authoritative) {
   // interrupted result 骗过而跳过 abort,后台化子代理实际还在跑。真 task_notification
   // (authoritative=true,仅两条 task_notification 路径与 task_updated 终态传入)才是权威
   // 终态,允许覆盖 stopped 为真实状态。done/error 不覆盖(那是真终态,不回翻)。
-  const canOverride = !!authoritative && !!ag.taskManaged && ag.status === 'stopped';
+  // 乐观 stopped(optimisticStop,stopSingleTask 打在非 taskManaged 前台子代理上的)同样
+  // 可覆盖:停的瞬间子代理恰好真完成、权威 completed 到达时,不应永显「已停止」(判官 S3)。
+  const canOverride = !!authoritative && ag.status === 'stopped' && (!!ag.taskManaged || !!ag.optimisticStop);
   if (!terminal) {
     // stopped 语义(fable A 实测修正):用户主动停止时,CLI 给顶层 agent 发的是 is_error 的
     // "interrupted"回执(resultSeen+resultIsError),那不是真失败——只有【确实成功返回过】
@@ -698,7 +701,7 @@ function finalizeAgent(st, agentId, tnStatus, visited, authoritative) {
     if (tc?.id && st.activeAgents[tc.id] && !visited.has(tc.id)) {
       const child = st.activeAgents[tc.id];
       const childTerminal = ['done', 'error', 'stopped'].includes(child.status);
-      if (!childTerminal || (authoritative && child.taskManaged && child.status === 'stopped')) {
+      if (!childTerminal || (authoritative && child.status === 'stopped' && (child.taskManaged || child.optimisticStop))) {
         finalizeAgent(st, tc.id, tnStatus, visited, authoritative);
       }
     }
@@ -921,7 +924,7 @@ function MainLayout({ sidebarCollapsed, selectedProject, rightPanel, setRightPan
       <div className="flex-1 flex min-h-0 overflow-hidden relative">
         <main className="flex-1 flex flex-col relative overflow-hidden min-w-0">
           {/* Split mode has no room on a phone — always show one pane. */}
-          <SessionDetail tabIndex={0} mobileChrome />
+          <ErrorBoundary label="会话区"><SessionDetail tabIndex={0} mobileChrome /></ErrorBoundary>
         </main>
 
         {/* Sidebar drawer — Claude-app style multi-level menu */}
@@ -942,7 +945,7 @@ function MainLayout({ sidebarCollapsed, selectedProject, rightPanel, setRightPan
             无此问题)。flex 默认 stretch 把 RightPanel 高度钉成屏高,内部滚动恢复。 */}
         {rightPanel && (
           <div className="fixed inset-0 z-50 bg-canvas animate-glass-rise flex">
-            <RightPanel panelId={rightPanel} onClose={() => setRightPanel(null)} width="100%" />
+            <ErrorBoundary label="面板"><RightPanel panelId={rightPanel} onClose={() => setRightPanel(null)} width="100%" /></ErrorBoundary>
           </div>
         )}
       </div>
@@ -979,7 +982,7 @@ function MainLayout({ sidebarCollapsed, selectedProject, rightPanel, setRightPan
       {artifactDock?.coexist && rightPanel ? (
         <>
           <Splitter onMouseDown={onRightDrag} axis="x" />
-          <RightPanel panelId={rightPanel} onClose={() => setRightPanel(null)} width={rightPanelWidth} />
+          <ErrorBoundary label="面板"><RightPanel panelId={rightPanel} onClose={() => setRightPanel(null)} width={rightPanelWidth} /></ErrorBoundary>
           <ArtifactDock />
         </>
       ) : artifactDock ? (
@@ -987,7 +990,7 @@ function MainLayout({ sidebarCollapsed, selectedProject, rightPanel, setRightPan
       ) : rightPanel && (
         <>
           <Splitter onMouseDown={onRightDrag} axis="x" />
-          <RightPanel panelId={rightPanel} onClose={() => setRightPanel(null)} width={rightPanelWidth} />
+          <ErrorBoundary label="面板"><RightPanel panelId={rightPanel} onClose={() => setRightPanel(null)} width={rightPanelWidth} /></ErrorBoundary>
         </>
       )}
     </div>
@@ -1149,7 +1152,7 @@ function SplitMain({ activeTabIndex, setActiveTabIndex }) {
                 </div>
               )}
               {(soloPane || hasSession) ? (
-                <SessionDetail tabIndex={i} />
+                <ErrorBoundary label="会话区"><SessionDetail tabIndex={i} /></ErrorBoundary>
               ) : (
                 <div className="flex-1 flex items-center justify-center glass-base">
                   <div className="text-center px-4">
@@ -1870,7 +1873,11 @@ async function stopSessionBackground(sessionId) {
   if (!sessionId) return;
   try {
     const d = await fetch('/api/agents/active').then((r) => r.json());
-    const procs = (d.agents || []).filter((a) => a.kind === 'chat-process' && a.sessionId === sessionId && a.stoppable === true);
+    // 只停 idle 槽位(判官 M2):busy(streaming/starting)槽位说明该会话主回合在跑——
+    // 含「子代理刚完、主 agent 续跑、前端尚未 reattach」的秒级窗口,此时选择性 /stop
+    // 会把续跑的主回合正文一并 interrupt 掉,与按钮文案「只停后台」不符。跳过即可,
+    // reattach 后按钮随 working 态消失,用户要停主回合有专属停止键。
+    const procs = (d.agents || []).filter((a) => a.kind === 'chat-process' && a.sessionId === sessionId && a.stoppable === true && a.status === 'idle');
     if (!procs.length) return;
     await Promise.allSettled(procs.map((a) => fetch(`/api/chat/${a.pid}/stop`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',

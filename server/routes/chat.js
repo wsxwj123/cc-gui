@@ -720,13 +720,15 @@ router.post('/chat', async (req, res) => {
       s.earlyLines = [];
       s.completeNotified = false;
       s.turnSubagentSeen = false;
+      s.revived = false;
       s.startedAt = Date.now();
       s.finishedAt = null;
       // H2:上一回合停止链路的残留不得毒化本回合(stopTimer clear + turnEpoch 推进已前移到
       // await 之前)。① 清 lastResultAt(否则新回合 stop 的 settled 判据读到旧 result 时间);
-      // ② 清掉自维护没删净的非 shell 陈旧任务(shell 后台任务刻意跨回合保留,不动)。
+      // ② liveTasks 跨回合保留:条目由 task_started/notification 自维护增删,跨回合仍存活的后台
+      // 子代理也在其中——若按"非 shell 即陈旧"清掉,本回合选择性 /stop 与 stop-task 就停不到
+      // 上个回合遗留的活任务(调研 R2)。漏网条目(通知丢失)留着无害:stopTask 幂等 no-op。
       s.lastResultAt = null;
-      if (s.liveTasks) for (const [tid, t] of s.liveTasks) { if (!t || t.kind !== 'shell') s.liveTasks.delete(tid); }
       s.promptPreview = String(prompt).slice(0, 80);
       s.guiMode = chosenMode;
       s.permissionMode = chosenMode;
@@ -807,6 +809,7 @@ router.post('/chat', async (req, res) => {
     compatKey: reuseKey,     // 复用兼容键(含 settings.json mtime)
     keepAlive: wantKeepAlive,
     turnSubagentSeen: false, // 本回合是否起过子代理(关流去抖判据,回合级重置)
+    revived: false,          // 本回合是否经复活守卫从 idle 翻回活跃(看门狗判据,回合级重置)
     idleTimer: null,
     // 停止兜底定时器(/stop 的 abort 兜底 setTimeout 句柄)+ 回合世代计数。回合级:复用一个
     // idle slot 时 turnEpoch 自增,上一回合武装的 stopTimer 回调进门先比对 capturedEpoch,
@@ -987,10 +990,15 @@ router.post('/chat', async (req, res) => {
     clearTimeout(stallTimer);
     stallTimer = setTimeout(() => {
       const busyNonShell = [...(slot.liveTasks?.values() ?? [])].some((t) => t && t.kind !== 'shell');
-      if (!slot.idle && slot.turnSubagentSeen && !busyNonShell) {
+      // 判据含 revived:无子代理回合的续跑(auto-compact 后续写等)经复活守卫翻回活跃,
+      // turnSubagentSeen 仍是 false,不设 revived 分支这类续跑卡死永无看门狗兜底(判官 S2)。
+      if (!slot.idle && (slot.turnSubagentSeen || slot.revived) && !busyNonShell) {
         // stall_notice:客户端专用渲染分支(中性系统提示 turn,非红色错误)。原用 type:stderr
         // 但客户端 SSE 分发根本不渲染 stderr = 提示白发(判官缺陷3)。
-        deliverLine(slot, JSON.stringify({ type: 'stall_notice', text: '子代理已全部结束,但上游超过 5 分钟无后续输出,已结束本回合并重置连接(部分第三方 provider 偶发)。已有内容完好,直接重发或继续即可。' }));
+        const stallText = slot.turnSubagentSeen
+          ? '子代理已全部结束,但上游超过 5 分钟无后续输出,已结束本回合并重置连接(部分第三方 provider 偶发)。已有内容完好,直接重发或继续即可。'
+          : '上游超过 5 分钟无后续输出,已结束本回合并重置连接(部分第三方 provider 偶发)。已有内容完好,直接重发或继续即可。';
+        deliverLine(slot, JSON.stringify({ type: 'stall_notice', text: stallText }));
         // 【必须强制拆进程,不能走 idle 复用】(判官缺陷1):卡死场景下 CLI 子进程正阻塞在
         // 死掉的上游请求上,不是健康空闲。若只 finalize 转 idle,同会话 15 分钟内下一条消息
         // 会复用这个僵尸(input.push 进挂住的进程、stdin 不被读、armStall 因 for await 不进
@@ -1046,13 +1054,16 @@ router.post('/chat', async (req, res) => {
         if (slot.idle && !m.parent_tool_use_id
             && m.type !== 'result' && m.type !== 'system' && m.type !== 'rate_limit_event' && m.type !== 'prompt_suggestion') {
           slot.idle = false;
+          slot.revived = true; // 看门狗判据(无子代理续跑也纳入 5 分钟静默兜底)
           if (slot.idleTimer) { clearTimeout(slot.idleTimer); slot.idleTimer = null; }
           // 复活=主 agent 续跑,则之前被 4s 去抖过早缓冲进 earlyLines 的 done 是错的:若 SSE 在
           // finalize 前已断(WebView 空闲掐断/切窗格),done 落 earlyLines,reattach 回放到它会
           // 立即收尾 SSE、丢弃其后续跑正文(判官指出的「陈旧 done 致 reattach 自杀」)。清掉它们,
           // 续跑回合自己的真 result→done 会照常在末尾补上。
           if (slot.earlyLines && slot.earlyLines.length) {
-            slot.earlyLines = slot.earlyLines.filter((l) => l.indexOf('"type":"done"') === -1);
+            // 只剔行首就是 {"type":"done" 的控制行:assistant 正文若讨论 JSON 含同名字段,
+            // 子串匹配会把整条正文行误删(判官 S1)。done 行由本进程生成,恒为行首前缀。
+            slot.earlyLines = slot.earlyLines.filter((l) => !l.startsWith('{"type":"done"'));
           }
         }
         if (m.type === 'result') {
@@ -1347,12 +1358,16 @@ router.post('/chat/:pid/stop-task', (req, res) => {
   }
   // 反查 liveTasks(value = {toolUseId, kind},task_started 时建于本文件上方)找 task_id。
   let taskId = null;
+  let taskKind = null;
   for (const [tid, t] of (slot.liveTasks || new Map())) {
-    if (t && t.toolUseId === toolUseId) { taskId = tid; break; }
+    if (t && t.toolUseId === toolUseId) { taskId = tid; taskKind = t.kind; break; }
   }
   // 查无 task(已终态/已被移出 liveTasks/发到了非属主 pid)或 query 句柄不可用(已 close):
   // 都不是错误,stopped:false(前端扇出到多 pid,只属主且会话匹配的 slot stopped:true)。
   if (taskId == null) return res.json({ ok: true, stopped: false });
+  // shell 长任务(run_in_background 训练等)不可经此端点停:选择性 /stop 刻意保留它们
+  // (误杀不可恢复),单停语义同样只覆盖子代理/teammate;停 shell 走进程管理区。
+  if (taskKind === 'shell') return res.json({ ok: true, stopped: false });
   if (typeof slot.query?.stopTask !== 'function') return res.json({ ok: true, stopped: false });
   try { slot.query.stopTask(taskId)?.catch?.(() => {}); } catch {}
   return res.json({ ok: true, stopped: true });
@@ -1541,6 +1556,8 @@ router.post('/chat/btw', async (req, res) => {
   // {error} 行传递。X-Accel-Buffering: no 防中间层攒块。
   let headersSent = false;
   const send = (obj) => {
+    // 客户端断开到 close 杀进程的窄窗内,write 打到已销毁响应(偶发 ERR_STREAM_DESTROYED)。
+    if (res.writableEnded || res.destroyed) return;
     if (!headersSent) {
       headersSent = true;
       res.writeHead(200, {

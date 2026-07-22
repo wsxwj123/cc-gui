@@ -809,10 +809,13 @@ function broadcastProviderChange(filePath) {
 if (process.env.CGUI_DISABLE_FILE_WATCHER !== '1') {
   try {
     watcher = setupFileWatcher((eventType, filePath) => {
-      if (filePath.endsWith('/.claude/settings.json') || filePath.endsWith('\\.claude\\settings.json')) {
-        broadcastProviderChange(filePath);
+      // Windows 原生 watcher 发反斜杠路径,客户端 endsWith(`/sid.jsonl`) 只认正斜杠
+      // → dev 模式在 Windows 上会话变更不自动刷新(判官 A#2)。出口统一归一。
+      const normPath = String(filePath).replace(/\\/g, '/');
+      if (normPath.endsWith('/.claude/settings.json')) {
+        broadcastProviderChange(normPath);
       }
-      broadcast({ type: 'file-change', eventType, path: filePath });
+      broadcast({ type: 'file-change', eventType, path: normPath });
     });
   } catch {
     console.warn('File watcher failed to start (chokidar)');

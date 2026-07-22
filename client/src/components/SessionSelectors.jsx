@@ -327,7 +327,7 @@ export function ModelSelector({ compact = false, permKey = null, tourAnchor = fa
         // the resolved settings.json default, used as fallback for sessions
         // without an explicit pick.
         if (data.model) useStore.setState({ currentModel: data.model });
-        if (data.available) useStore.setState({ availableModels: data.available });
+        if (Array.isArray(data.available)) useStore.setState({ availableModels: data.available });
         // effort 显示:用户没在 GUI 显式选过(localStorage 空)时,用 settings.json 的默认
         // 思考强度(CLAUDE_CODE_EFFORT_LEVEL)显示,免得"settings 设了 high 却显示默认"
         // (实际对话已是 high:GUI 不传 --effort → CLI 读 settings;这里只让显示一致)。

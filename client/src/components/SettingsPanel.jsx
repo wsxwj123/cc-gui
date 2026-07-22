@@ -458,6 +458,9 @@ function StorageTab() {
     try {
       const r = await fetch('/api/bak-files');
       const d = await r.json();
+      // 形状防御:端点 500 时返回 {error},直收会让下方 data.items.length 抛 TypeError
+      // → 设置面板无错误边界,整 app 白屏(判官重要项)。
+      if (!r.ok || !Array.isArray(d?.items)) { setData({ items: [], totalBytes: 0 }); return; }
       setData(d);
     } catch {}
     setLoading(false);

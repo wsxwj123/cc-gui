@@ -463,7 +463,8 @@ function WorkGroup({ items, expanded, onToggle, onRetryTool }) {
             if (b.type === 'thinking') {
               return (
                 <div key={`th-${i}`} className="thinking-block p-3 rounded-lg text-xs text-ink-muted whitespace-pre-wrap font-body leading-relaxed">
-                  {b.content}
+                  {/* 第三方 provider 落盘非标准 thinking 块时 content 可能是对象,直接渲染会白屏(判官 B#5) */}
+                  {typeof b.content === 'string' ? b.content : JSON.stringify(b.content)}
                 </div>
               );
             }

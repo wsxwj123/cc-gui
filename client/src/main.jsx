@@ -1,6 +1,7 @@
 import React from 'react';
 import ReactDOM from 'react-dom/client';
 import App from './App.jsx';
+import { ErrorBoundary } from './components/ErrorBoundary.jsx';
 import { THEME_FAMILIES, resolveTheme, applyReadingFont } from './stores/sessionStore.js';
 import { initInputUndo } from './utils/inputUndo.js';
 import './index.css';
@@ -58,6 +59,9 @@ initInputUndo();
 
 ReactDOM.createRoot(document.getElementById('root')).render(
   <React.StrictMode>
-    <App />
+    {/* 根边界:整棵树崩了也给错误块+重试,不再整页白屏 */}
+    <ErrorBoundary label="应用">
+      <App />
+    </ErrorBoundary>
   </React.StrictMode>
 );

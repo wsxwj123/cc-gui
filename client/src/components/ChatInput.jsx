@@ -275,9 +275,12 @@ export function ChatInput({ onSend, onStop, onStopBackground, onAccelerate, onBa
   };
 
   const draftKey = `cgui-draft:${permKey || 'global'}`;
+  // 输入历史按会话隔离(permKey=sessionId 或 draft-项目hash):全局单一列表会让 A 会话的
+  // 输入在 B 会话上键翻出(用户实报)。旧全局键 cgui-input-history 不再读写(残留无害)。
+  const historyKey = `cgui-input-history:${permKey || 'global'}`;
   const readHistory = () => {
     try {
-      const parsed = JSON.parse(localStorage.getItem('cgui-input-history') || '[]');
+      const parsed = JSON.parse(localStorage.getItem(historyKey) || '[]');
       return Array.isArray(parsed) ? parsed.filter((x) => typeof x === 'string' && x.trim()) : [];
     } catch {
       return [];
@@ -288,7 +291,7 @@ export function ChatInput({ onSend, onStop, onStopBackground, onAccelerate, onBa
     if (!v) return;
     const list = readHistory().filter((x) => x !== v);
     list.unshift(v);
-    try { localStorage.setItem('cgui-input-history', JSON.stringify(list.slice(0, 100))); } catch {}
+    try { localStorage.setItem(historyKey, JSON.stringify(list.slice(0, 100))); } catch {}
   };
 
   useEffect(() => {
@@ -711,7 +714,7 @@ export function ChatInput({ onSend, onStop, onStopBackground, onAccelerate, onBa
       const el = textareaRef.current;
       const atStart = !el || el.selectionStart === 0;
       const atEnd = !el || el.selectionStart === el.value.length;
-      const canUseHistory = !text.startsWith('/') && (text.trim() === '' || (e.key === 'ArrowUp' ? atStart : historyCursor >= 0 && atEnd));
+      const canUseHistory = !text.startsWith('/') && (text.trim() === '' || historyCursor >= 0 || (e.key === 'ArrowUp' ? atStart : atEnd));
       if (canUseHistory) {
         const history = readHistory();
         if (history.length > 0 || historyCursor >= 0) {

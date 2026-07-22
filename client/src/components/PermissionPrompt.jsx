@@ -4,6 +4,9 @@ import { useStore } from '../stores/sessionStore.js';
 import { MarkdownRenderer } from './MarkdownRenderer.jsx';
 import { isDangerousCommand, respondPermission } from '../hooks/useWebSocket.js';
 
+// plan 档不写持久规则的工具集(与服务端 chat.js WRITE_CLASS 对齐)。
+const PLAN_WRITE_CLASS = new Set(['Edit', 'MultiEdit', 'Write', 'NotebookEdit']);
+
 // Color per tool family so the user's eye locks onto the risk class quickly.
 function toolBadgeClass(name) {
   if (!name) return 'bg-canvas-deep text-ink-muted';
@@ -444,9 +447,14 @@ function PermissionCard({ req, onResolve, onWhitelistAndAllow, onAlwaysAllow, on
   // CLI 落盘,终端与 GUI 共用)。危险命令不提供 always(服务端同样忽略,保 G3 强拦)。
   const [remember, setRemember] = useState('none');
   const dangerous = isDangerousCommand(req);
+  // 与服务端 noAlways 对齐(chat.js:510):plan 档的写类/Bash 同样不写持久规则——
+  // 客户端若不藏,用户选了「始终允许」会被服务端静默丢弃(调研附带发现)。
+  const guiMode = useStore((s) => s.getPermissionModeFor(req.sessionId));
+  const planNoAlways = guiMode === 'plan' && (PLAN_WRITE_CLASS.has(req.toolName) || req.toolName === 'Bash');
+  const noAlways = dangerous || planNoAlways;
   const doAllow = () => {
     if (remember === 'session') onWhitelistAndAllow(req);
-    else if (remember === 'always' && !dangerous) onAlwaysAllow(req);
+    else if (remember === 'always' && !noAlways) onAlwaysAllow(req);
     else onResolve(req, 'allow');
   };
   // Enter = allow, Esc = deny — only when this is the top card.
@@ -507,14 +515,14 @@ function PermissionCard({ req, onResolve, onWhitelistAndAllow, onAlwaysAllow, on
             value={remember}
             onChange={(e) => setRemember(e.target.value)}
             className="text-[11px] border border-canvas-deep rounded px-1 py-0.5 bg-canvas text-ink"
-            title={dangerous ? '该命令命中危险命令清单，不提供永久授权' : '“始终允许”写入 ~/.claude/settings.json 的 permissions.allow，终端 CLI 同样生效'}
+            title={noAlways ? '该命令/工具在当前模式下不提供永久授权' : '“始终允许”写入 ~/.claude/settings.json 的 permissions.allow，终端 CLI 同样生效'}
           >
             <option value="none">仅此次</option>
             {/* draft(sessionId=null)不写白名单、不补扫(见 whitelistAndAllow)—— 该选项实际
                 只放行当前一条,与"仅此次"无异,照常显示会误导 → 隐藏;会话建立后恢复显示。
                 改文案成"仅本次允许"会与上面"仅此次"重复,故选隐藏。 */}
             {req.sessionId != null && <option value="session">本会话内允许 {req.toolName}</option>}
-            {!dangerous && <option value="always">始终允许（写入权限规则）</option>}
+            {!noAlways && <option value="always">始终允许（写入权限规则）</option>}
           </select>
         </label>
         <button
