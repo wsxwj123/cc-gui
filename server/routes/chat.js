@@ -946,6 +946,7 @@ router.post('/chat', async (req, res) => {
   // result 后 4s 静默到点才真正关);没起子代理的普通回合只有一个 result,立即关——零延迟、零回归。
   // 同时修好 CG-2(非规划模式"子代理后再要授权"也是同一根因)。
   let closeTimer = null;
+  let closeDelayMs = 0; // 本回合 result 分支算出的关流延迟,收摊重武装时复用同一窗口
   let lastResultLine = null;
   const cancelClose = () => { if (closeTimer) { clearTimeout(closeTimer); closeTimer = null; } };
   const finalize = () => {
@@ -1074,19 +1075,31 @@ router.post('/chat', async (req, res) => {
           // 关流延迟:子代理回合沿用 4s 去抖;开了输入预测时 suggestion 在 result 之后
           // 才到,必须给等待窗(3s;SDK 不发时到点正常收尾)。都没有则立即关,零延迟。
           const delay = slot.turnSubagentSeen ? 4000 : (suggestOn ? 3000 : 0);
+          closeDelayMs = delay;
           if (delay) { cancelClose(); closeTimer = setTimeout(() => finalize(), delay); }
           else finalize();
         } else if (m.type === 'prompt_suggestion') {
           // 建议是本回合最后一条消息:result 已到(closeTimer 在挂)就立即收尾,
           // 不能走下面的 cancelClose 分支——那会把关闭取消掉、进程挂死等不到下一条。
           if (closeTimer) finalize();
-        } else if (closeTimer && m.type !== 'rate_limit_event' && m.type !== 'system') {
-          // result 之后又来事件 → 那个 result 不是最终的,取消关闭等下一个。
+        } else if (closeTimer && !m.parent_tool_use_id && m.type !== 'rate_limit_event' && m.type !== 'system') {
+          // result 之后又来事件 → 那个 result 不是最终的,等主回合续跑静默满 4s 才收摊。
+          // !m.parent_tool_use_id 守卫(与上方复活守卫对称):主回合派出的 run_in_background
+          // 后台子代理自己的事件(带该字段)不碰收摊计时器——否则子代理在 4s 窗内一吐字就把
+          // 收摊取消,而主回合已结束、唯一重武装点(下一个 result)永不到来 → done 永不发、
+          // slot 恒非 idle、前端发送按钮卡停止、新消息卡队列(实测:后台子代理窗内 2 条
+          // assistant 事件即触发)。原生 SDK 语义:result 后回合结束、后台任务继续跑、用户
+          // 可随时发新消息开新回合,外壳不挡路。
           // rate_limit_event / system(status、api_retry)例外:纯信息事件、任何时刻都可能到,
           // 不代表还有回合;尤其 suggestOn 的 3s 建议窗内 SDK 生成建议那次调用若限流/重试会发
           // system/api_retry,让它 cancel 会把 finalize 永久取消掉(无重武装)→ slot 挂死等不到
           // 下一条、前端"正在预测下一步输入…"卡死(fable 审计)。真续跑只会是 assistant/tool 事件。
+          // 取消后尾部去抖重武装(非永久取消):经守卫过滤后进得来这里的只剩主回合顶层续跑
+          // 事件,续跑输出静默满原窗口即收摊(复用 result 分支算好的 closeDelayMs,不把仅
+          // suggestOn 的 3s 窗延长成 4s);closeDelayMs 为 0(无子代理无 suggest 本不挂窗)
+          // 防御性兜底 4s。teammate/任何未预见事件类型最多推迟收摊,不会再造成永久挂死。
           cancelClose();
+          closeTimer = setTimeout(() => finalize(), closeDelayMs || 4000);
         }
       }
     } catch (e) {
