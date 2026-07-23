@@ -15,9 +15,15 @@ const router = Router();
 const pending = new Map();
 
 // 把决定送回等待方(HTTP res 或进程内 resolve 皆可),并从表里移除。
+// settled 原子标志:res close(挂起的 hook 连接断开)与 respond 几乎同时到达时,
+// 两边都可能拿到 slot —— 只允许先到的 settle 生效,第二次直接 noop,否则卡片会
+// 闪"已超时"后又被 allow 覆盖(双播 resolved)。返回是否真正完成了 settle。
 function settle(slot, payload) {
+  if (slot.settled) return false;
+  slot.settled = true;
   if (slot.res) { try { slot.res.json(payload); } catch {} }
   else if (slot.resolve) { try { slot.resolve(payload); } catch {} }
+  return true;
 }
 
 /**
@@ -102,8 +108,12 @@ router.post('/permissions/request', (req, res) => {
   // If client disconnects before resolving (e.g. server restarted, response
   // socket died), drop the entry so the map doesn't leak.
   res.on('close', () => {
-    if (pending.has(id)) {
+    const slot = pending.get(id);
+    if (slot) {
+      // 删除与置 settled 合并为原子段(单线程内不交出控制权):respond 若随后
+      // 到达,settle 见 settled 直接 noop,不会 timeout 之后又补一条 allow。
       pending.delete(id);
+      slot.settled = true;
       broadcast({ type: 'permission:resolved', id, decision: 'timeout' });
     }
   });
@@ -132,8 +142,10 @@ router.post('/permissions/respond/:id', (req, res) => {
   const always = req.body?.always === true;
   const authorizeDir = ['session', 'permanent'].includes(req.body?.authorizeDir) ? req.body.authorizeDir : undefined;
   pending.delete(req.params.id);
-  settle(slot, { decision, reason, updatedInput, always, authorizeDir });
-  broadcast({ type: 'permission:resolved', id: req.params.id, decision });
+  // settle 返回 false = res close 抢先广播过 timeout:不再补播 allow,保持单一终态。
+  if (settle(slot, { decision, reason, updatedInput, always, authorizeDir })) {
+    broadcast({ type: 'permission:resolved', id: req.params.id, decision });
+  }
   res.json({ ok: true });
 });
 
@@ -167,12 +179,14 @@ export function resolvePendingForSession(sessionId, decide) {
     if (!verdict || !verdict.decision) continue;
     const decision = verdict.decision === 'allow' ? 'allow' : 'deny';
     pending.delete(id);
-    settle(slot, {
+    // 与 respond 端点一致:settle 返回 false = res close 已抢先播过终态,不再补播,保持单一终态。
+    if (settle(slot, {
       decision,
       reason: verdict.reason || null,
       ...(verdict.authorizeDir ? { authorizeDir: verdict.authorizeDir } : {}),
-    });
-    broadcast({ type: 'permission:resolved', id, decision });
+    })) {
+      broadcast({ type: 'permission:resolved', id, decision });
+    }
   }
 }
 
@@ -180,8 +194,9 @@ export function dropPendingForSession(sessionId) {
   for (const [id, slot] of pending.entries()) {
     if (slot.request.sessionId === sessionId) {
       pending.delete(id);
-      settle(slot, { decision: 'deny', reason: 'CLI 进程已退出' });
-      broadcast({ type: 'permission:resolved', id, decision: 'deny' });
+      if (settle(slot, { decision: 'deny', reason: 'CLI 进程已退出' })) {
+        broadcast({ type: 'permission:resolved', id, decision: 'deny' });
+      }
     }
   }
 }

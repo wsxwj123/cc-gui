@@ -2,8 +2,9 @@ import { Router } from 'express';
 import { spawn, execFileSync } from 'child_process';
 import { dirname, join as pathJoin, isAbsolute, parse as pathParse } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { readFileSync, statSync, writeFileSync, unlinkSync, readdirSync, watch, existsSync, mkdirSync } from 'node:fs';
+import { readFileSync, statSync, writeFileSync, unlinkSync, readdirSync, watch, existsSync, mkdirSync, rmSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
+import { randomBytes } from 'node:crypto';
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import { getDefaultModel } from '../services/model-resolver.js';
 import { dropPendingForSession, requestPermission, resolvePendingForSession } from './permissions.js';
@@ -292,6 +293,14 @@ let sdkCounter = 0;
 // 常驻收益(免冷启/免 MCP 重启/前缀稳定)集中在活跃对话内,挂太久只是白占内存。
 const KEEPALIVE_IDLE_MS = 15 * 60 * 1000;
 
+// liveTasks 条目的"新鲜度"窗口:看门狗 busyNonShell 与 idleReclaim 豁免共用。
+// 超过窗长的条目视为陈旧(终态通知丢失的残留),不再阻塞看门狗/回收;窗内的
+// 跨回合活任务(teammate 等)仍算活,避免看门狗 abort 宿主进程连坐杀 teammate。
+// 天花板:真活超过 30 分钟的任务可能被误判陈旧 —— 看门狗可能在其仍跑时 finalize
+// 本回合、idle 回收可能杀掉其宿主进程(丢完成通知)。可接受的折中:通知丢失的
+// 陈旧条目会让 5 分钟兜底永不触发/常驻进程永不回收,危害更大。
+const LIVE_TASK_FRESH_MS = 30 * 60 * 1000;
+
 // 动态解析用户已装 claude(路径绝不写死,便于公开版在别人机器上跑)。解析到则让 SDK
 // 指向它(避免其自带 ~237M 二进制);解析不到返回 null,SDK 回落自带二进制。
 // 解析走统一 claude-resolver(PATH → login shell → npm prefix → 固定候选,带缓存
@@ -372,9 +381,15 @@ function finishSlot(slot, procId) {
   try { slot.nulWatcher?.close(); } catch {}
   sweepWinNulFiles(slot.cwd);
   if (slot.sessionId) { try { dropPendingForSession(slot.sessionId); } catch {} }
+  // closePersistentForSession 的等待方:进程收尾完成,可以安全读写 jsonl 了。
+  if (slot.closeWaiters?.length) {
+    const ws = slot.closeWaiters;
+    slot.closeWaiters = null;
+    for (const w of ws) { try { w(); } catch {} }
+  }
   // done:client 据此结束 SSE 读取。attach 中直接发;否则缓冲,等 attach 回放后收尾。
   deliverLine(slot, JSON.stringify({ type: 'done', exitCode: slot.exitCode }));
-  setTimeout(() => activeProcesses.delete(procId), 60_000);
+  setTimeout(() => activeProcesses.delete(procId), 60_000).unref();
 }
 
 // 统一权限回调:复刻旧 hook 的集中分级。AskUserQuestion / ExitPlanMode 必弹卡;普通工具
@@ -562,14 +577,35 @@ function chatCompatKey({ workingDir, model, effort, appendSystemPrompt, promptSu
 // 关掉某会话的常驻/在跑进程(回滚截断、删除会话前必须调:常驻进程的内存上下文与
 // 改写后的 jsonl 已分叉,复用会答非所问;删除后残余进程可能复活刚删的文件)。
 // 停止语义:closing+abort 直接杀进程,天然 hard(后台 shell 任务一并停,符合删除/回滚语义)。
+// 返回 Promise:进程退出/泵收尾(finishSlot 经 closeWaiters 通知)后 resolve —— 调用方
+// (trim/compact 等)await 后再读写 jsonl,不会读到进程退出前的旧写入;slot 本就不在或
+// 已结束则立即 resolve,5s 超时兜底防进程赖死永久等待。
 export function closePersistentForSession(sessionId) {
-  if (!sessionId) return;
-  for (const slot of activeProcesses.values()) {
+  if (!sessionId) return Promise.resolve();
+  // 先清该会话挂起的权限卡:否则卡片残留到进程退出才被 finishSlot 清(删/裁剪会话后
+  // 前端仍看到旧卡)。幂等,与 finishSlot 里的清理重复调用无害。
+  try { dropPendingForSession(sessionId); } catch {}
+  const waits = [];
+  for (const [procId, slot] of activeProcesses) {
     if (slot.sessionId !== sessionId || slot.exitCode !== null) continue;
     slot.closing = true;
     try { slot.input?.close(); } catch {}
     if (!slot.idle) { try { slot.abort?.abort(); } catch {} }
+    waits.push(new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        // 5s 超时兜底不能resolve了之:赖死 slot 残留 activeProcesses,后续再 trim/delete
+        // 同会话会重等 5s,残余进程还可能继续写 jsonl。补一次 abort 并强制 finishSlot
+        // 收尾(清 waiters/删定时器/60s 后移出表);pumpEnded 幂等,真泵随后自然结束时
+        // 对 finishSlot 的二次调用自动 no-op,不双发 done。
+        try { slot.abort?.abort(); } catch {}
+        finishSlot(slot, procId);
+        resolve();
+      }, 5000);
+      timer.unref?.();
+      (slot.closeWaiters ??= []).push(() => { clearTimeout(timer); resolve(); });
+    }));
   }
+  return Promise.all(waits);
 }
 
 // 关掉所有常驻/在跑的 claude 进程,返回关掉的数量。用途:Windows 上更新 claude 前必须先释放
@@ -967,7 +1003,12 @@ router.post('/chat', async (req, res) => {
       // idle 回收豁免:带活任务(不分 kind——后台化子代理同样不该被 idle 回收误杀)的进程
       // 到点不关,重新武装同时长再等;任务全完成(liveTasks 清空)后下一轮到点正常回收。
       const idleReclaim = () => {
-        if (slot.liveTasks?.size) {
+        // 只豁免【年龄 < LIVE_TASK_FRESH_MS】的条目:终态通知丢失的陈旧条目不再永久
+        // 阻回收(此前 liveTasks.size>0 恒豁免,残留一条就永不回收)。天花板见常量注释。
+        const now = Date.now();
+        const hasFreshTask = [...(slot.liveTasks?.values() ?? [])]
+          .some((t) => t && now - (t.createdAt || 0) < LIVE_TASK_FRESH_MS);
+        if (hasFreshTask) {
           slot.idleTimer = setTimeout(idleReclaim, KEEPALIVE_IDLE_MS);
           return;
         }
@@ -991,7 +1032,12 @@ router.post('/chat', async (req, res) => {
   const armStall = () => {
     clearTimeout(stallTimer);
     stallTimer = setTimeout(() => {
-      const busyNonShell = [...(slot.liveTasks?.values() ?? [])].some((t) => t && t.kind !== 'shell');
+      // busyNonShell 只统计【本 epoch】或【年龄 < LIVE_TASK_FRESH_MS】的非 shell 任务:
+      // 上一回合终态通知丢失的陈旧条目不再让 5 分钟兜底永不触发;但跨回合仍活着的
+      // teammate 在窗内仍算忙,看门狗不会 abort 宿主进程连坐杀它(权衡见常量注释)。
+      const now = Date.now();
+      const busyNonShell = [...(slot.liveTasks?.values() ?? [])].some((t) => t && t.kind !== 'shell'
+        && (t.epoch === (slot.turnEpoch | 0) || now - (t.createdAt || 0) < LIVE_TASK_FRESH_MS));
       // 判据含 revived:无子代理回合的续跑(auto-compact 后续写等)经复活守卫翻回活跃,
       // turnSubagentSeen 仍是 false,不设 revived 分支这类续跑卡死永无看门狗兜底(判官 S2)。
       if (!slot.idle && (slot.turnSubagentSeen || slot.revived) && !busyNonShell) {
@@ -1042,10 +1088,20 @@ router.post('/chat', async (req, res) => {
               : (m.subagent_type ? 'subagent' : 'unknown');
             // epoch=创建时回合世代:优雅判据只数本回合任务,跨回合保留的活条目由 stopTask
             // 全量扇出+notification 收尾负责,陈旧(通知丢失)条目不致毒化 abort 判据(判官 R)。
-            slot.liveTasks.set(m.task_id, { toolUseId: m.tool_use_id || null, kind, epoch: slot.turnEpoch | 0 });
+            // createdAt:看门狗 busyNonShell 与 idleReclaim 的"新鲜度"判据(见 LIVE_TASK_FRESH_MS)。
+            slot.liveTasks.set(m.task_id, { toolUseId: m.tool_use_id || null, kind, epoch: slot.turnEpoch | 0, createdAt: Date.now() });
           }
           else if (m.subtype === 'task_notification') slot.liveTasks.delete(m.task_id);
-          else if (m.subtype === 'task_updated' && ['completed', 'failed', 'killed'].includes(m.patch?.status)) slot.liveTasks.delete(m.task_id);
+          else if (m.subtype === 'task_updated') {
+            if (['completed', 'failed', 'killed'].includes(m.patch?.status)) slot.liveTasks.delete(m.task_id);
+            else {
+              // 非终态进度汇报 = 任务确实还活着:刷新新鲜度。否则 LIVE_TASK_FRESH_MS(30min)
+              // 会把真活超 30 分钟、持续汇报状态的 teammate/长任务误判陈旧;只有长时间
+              // 无任何事件的条目才该被判陈旧。
+              const t = slot.liveTasks.get(m.task_id);
+              if (t) t.createdAt = Date.now();
+            }
+          }
         }
         deliverLine(slot, line);
         // Bug 修复(子代理后主 agent 续跑「看起来停了」):中间 result 已被 4s 去抖 finalize 转 idle,
@@ -1446,6 +1502,15 @@ router.post('/chat/title', async (req, res) => {
   }
   stripHostClaudeEnv(childEnv);
 
+  // cwd 物理隔离(用户二报:标题 prompt 仍以会话形态冒头)。标题 prompt 自包含,根本
+  // 不需要项目上下文;此前 cwd 用会话项目目录,CLI 任何落盘/索引行为(版本差异、超时
+  // 被杀、错误路径)都会把"标题会话"挂进【用户项目】的会话列表。固定到专用 tmp 目录后,
+  // 即便上游行为再变,残留也只会出现在无人查看的 tmp hash 下,与用户项目彻底绝缘。
+  // 每次请求用唯一子目录:两个标题请求并发时共用同一 cwd 会互相污染(CLI 在该目录的
+  // 落盘/锁文件串扰);用完只删自己建的这个子目录,父目录 cgui-title 保留。
+  const titleCwd = pathJoin(tmpdir(), 'cgui-title', `${process.pid}-${randomBytes(4).toString('hex')}`);
+  try { mkdirSync(titleCwd, { recursive: true }); } catch {}
+  const cleanupTitleCwd = () => { try { rmSync(titleCwd, { recursive: true, force: true }); } catch {} };
   let proc;
   try {
     // --no-session-persistence:标题生成是一次性调用,绝不能落盘成会话 jsonl,否则项目
@@ -1457,12 +1522,6 @@ router.post('/chat/title', async (req, res) => {
     const titleArgs = ['-p', '--permission-mode', 'plan', '--no-session-persistence'];
     const safeModel = safeModelArg(model);
     if (safeModel) titleArgs.push('--model', safeModel);
-    // cwd 物理隔离(用户二报:标题 prompt 仍以会话形态冒头)。标题 prompt 自包含,根本
-    // 不需要项目上下文;此前 cwd 用会话项目目录,CLI 任何落盘/索引行为(版本差异、超时
-    // 被杀、错误路径)都会把"标题会话"挂进【用户项目】的会话列表。固定到专用 tmp 目录后,
-    // 即便上游行为再变,残留也只会出现在无人查看的 tmp hash 下,与用户项目彻底绝缘。
-    const titleCwd = pathJoin(tmpdir(), 'cgui-title');
-    try { mkdirSync(titleCwd, { recursive: true }); } catch {}
     proc = claudeSpawn(titleArgs, {
       cwd: titleCwd,
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -1471,9 +1530,10 @@ router.post('/chat/title', async (req, res) => {
     // prompt 经 stdin 喂入(见上方注释:绕开 Windows cmd 参数解析)。写完即关,让 -p 一次性执行。
     try { proc.stdin.write(prompt); proc.stdin.end(); } catch {}
   } catch {
+    cleanupTitleCwd();
     return res.json({ title: '' });
   }
-  if (!proc.pid) return res.json({ title: '' });
+  if (!proc.pid) { cleanupTitleCwd(); return res.json({ title: '' }); }
   // stderr 设了 pipe 但下面只读 stdout —— 不排空的话 CLI 往 stderr 写超 ~64KB(TCC/MCP 警告等)
   // 会撑爆管道缓冲区 → 子进程阻塞 → close 永不触发 → 卡到超时。drain 掉即可(标题生成用不到 stderr)。
   proc.stderr?.resume();
@@ -1485,6 +1545,7 @@ router.post('/chat/title', async (req, res) => {
     done = true;
     clearTimeout(timer);
     try { killProcessTree(proc); } catch {}
+    cleanupTitleCwd();
     // 清洗:去引号/换行/常见前缀(先不截断,元话术判定要看原始长度)
     const clean = String(title || '')
       .replace(/[\r\n]+/g, ' ')

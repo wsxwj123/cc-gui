@@ -27,7 +27,7 @@ import {
   attachmentTextHash,
 } from '../services/session-reader.js';
 import { claudeSpawn, cleanChildEnv, safeModelArg } from './chat.js';
-import { mkdirSync } from 'fs';
+import { mkdirSync, rmSync } from 'fs';
 import { resolveUnderHome, resolveWorkspacePath } from '../utils/safe-path.js';
 import { broadcast } from '../broadcast.js';
 
@@ -458,7 +458,8 @@ router.post('/sessions/:sessionId/trim', async (req, res) => {
       return res.status(400).json({ error: 'invalid projectHash or sessionId' });
     }
     // #26:改写历史前关掉常驻进程 —— 它的内存上下文与截断后的 jsonl 已分叉,复用会答非所问。
-    closePersistentForSession(req.params.sessionId);
+    // await 等进程真退出再读 jsonl,否则可能读到进程退出前的旧写入。
+    await closePersistentForSession(req.params.sessionId);
     const file = sessionFile(projectHash, req.params.sessionId);
     let raw;
     try { raw = await readFile(file, 'utf-8'); }
@@ -559,17 +560,20 @@ router.post('/sessions/:sessionId/compact-segment', async (req, res) => {
     const prompt = `请把下面 <对话></对话> 标签内的一段开发对话压缩成一份信息保全的中文摘要。要求:\n- 保留:任务目标、关键决策与理由、涉及的文件路径与函数名、已完成/未完成事项、重要结论与数据、用户明确的要求与偏好。\n- 省略:寒暄、重复内容、工具调用的过程细节。\n- 用条目式陈述,直接输出摘要本身,不加任何前言或解释。\n\n<对话>\n${transcript}\n</对话>`;
     const summaryText = await new Promise((resolve) => {
       let proc;
+      // 每次请求用唯一子目录(同 /chat/title):并发的两个压缩请求共用固定 cwd 会互相
+      // 污染;用完只删自己建的这个子目录,父目录 cgui-compact 保留。
+      const compactCwd = join(tmpdir(), 'cgui-compact', `${process.pid}-${randomUUID()}`);
+      const cleanupCompactCwd = () => { try { rmSync(compactCwd, { recursive: true, force: true }); } catch {} };
       try {
         const args = ['-p', '--permission-mode', 'plan', '--no-session-persistence'];
         if (model) args.push('--model', model);
-        const compactCwd = join(tmpdir(), 'cgui-compact');
         // 必须同步建目录:异步 mkdir 未 await 就 spawn(cwd:compactCwd),首次目录不存在
         // → spawn cwd 无效直接失败,用户首次用定向压缩必得 502(第二次才成)。同 title 用 mkdirSync。
         try { mkdirSync(compactCwd, { recursive: true }); } catch {}
         proc = claudeSpawn(args, { cwd: compactCwd, stdio: ['pipe', 'pipe', 'pipe'], env: cleanChildEnv() });
         proc.stdin.write(prompt); proc.stdin.end();
-      } catch { return resolve(''); }
-      if (!proc.pid) return resolve('');
+      } catch { cleanupCompactCwd(); return resolve(''); }
+      if (!proc.pid) { cleanupCompactCwd(); return resolve(''); }
       proc.stderr?.resume(); // 不排空 stderr 超 64KB 会把子进程写死(同 /chat/title)
       let out = '';
       let done = false;
@@ -577,12 +581,13 @@ router.post('/sessions/:sessionId/compact-segment', async (req, res) => {
         if (done) return; done = true;
         clearTimeout(timer);
         try { proc.kill('SIGKILL'); } catch {}
+        cleanupCompactCwd();
         resolve(out.trim());
       };
       const timer = setTimeout(finish, 180000);
       proc.stdout.on('data', (c) => { out += c.toString(); });
       proc.on('close', finish);
-      proc.on('error', () => { if (!done) { done = true; clearTimeout(timer); resolve(''); } });
+      proc.on('error', () => { if (!done) { done = true; clearTimeout(timer); cleanupCompactCwd(); resolve(''); } });
     });
     // 失败/错误文本兜底:未登录、限流等 CLI 会把英文错误吐到 stdout,不能当摘要写进会话。
     if (!summaryText || summaryText.length < 20
@@ -595,7 +600,8 @@ router.post('/sessions/:sessionId/compact-segment', async (req, res) => {
       : `以下是本会话中已被回退移除的一段后续对话的摘要,供参考:\n\n${summaryText}`;
 
     // 改写前关常驻进程(内存上下文与改写后的 jsonl 分叉,复用会答非所问,同 trim)。
-    closePersistentForSession(req.params.sessionId);
+    // await 等进程真退出再重读 jsonl(同 trim)。
+    await closePersistentForSession(req.params.sessionId);
     // 摘要生成耗时分钟级,期间会话可能有新回合落盘 → 重读最新内容再改写。
     let freshRaw;
     try { freshRaw = await readFile(file, 'utf-8'); }
@@ -629,7 +635,7 @@ router.post('/sessions/:sessionId/trim-before-tool', async (req, res) => {
     if (!safeId(projectHash) || !safeId(req.params.sessionId)) {
       return res.status(400).json({ error: 'invalid projectHash or sessionId' });
     }
-    closePersistentForSession(req.params.sessionId); // #26:改写历史前关常驻进程(同 trim)
+    await closePersistentForSession(req.params.sessionId); // #26:改写历史前关常驻进程(同 trim);await 等进程真退出再读 jsonl
 
     const file = sessionFile(projectHash, req.params.sessionId);
     let raw;
@@ -685,7 +691,7 @@ router.post('/sessions/:sessionId/strip-thinking', async (req, res) => {
     if (!safeId(projectHash) || !safeId(req.params.sessionId)) {
       return res.status(400).json({ error: 'invalid projectHash or sessionId' });
     }
-    closePersistentForSession(req.params.sessionId); // #26:改写历史前关常驻进程(同 trim)
+    await closePersistentForSession(req.params.sessionId); // #26:改写历史前关常驻进程(同 trim);await 等进程真退出再读 jsonl
     const file = join(homedir(), '.claude', 'projects', projectHash, `${req.params.sessionId}.jsonl`);
     let raw;
     try { raw = await readFile(file, 'utf-8'); }
@@ -743,7 +749,8 @@ router.delete('/sessions/:sessionId', async (req, res) => {
     const file = join(homedir(), '.claude', 'projects', projectHash, `${req.params.sessionId}.jsonl`);
     // #26:删除前关掉该会话的常驻/在跑进程 —— 残余进程可能把刚删的 jsonl 写"复活"。
     // 客户端删除链路已先调 /stop,这里是服务端兜底(直连 API 删除也安全)。
-    closePersistentForSession(req.params.sessionId);
+    // await 等进程真退出再 unlink,彻底排除退出前旧写入复活文件。
+    await closePersistentForSession(req.params.sessionId);
     const { unlink } = await import('fs/promises');
     let deletedJsonl = false;
     try {
