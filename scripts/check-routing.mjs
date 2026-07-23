@@ -32,10 +32,27 @@ assert.equal(isInitBindingOrigin(true, 'd1', null), false, 'no selection no bind
   assert.deepEqual(next.other, [{ text: 'x' }], 'unrelated keys untouched');
   assert.deepEqual(mq['draft-P'].length, 2, 'input map not mutated');
 }
-// 追加而非覆盖:sid 下已有排队消息时合并(draft 的在后)
+// 追加而非覆盖:sid 下已有排队消息时合并;无 queuedAt 时 stable sort 保持拼接序
 {
   const next = migrateDraftQueue({ 'draft-P': [{ text: 'b' }], 'sid-A': [{ text: 'a' }] }, 'draft-P', 'sid-A');
   assert.deepEqual(next['sid-A'].map((m) => m.text), ['a', 'b'], 'appends after existing');
+}
+// draft+real 混合必须按 queuedAt 升序:draft 期入队的 A(早)不能排在 init 后入队的 B(晚)
+// 之后 —— 简单拼接会让先发的 A 后出队,顺序颠倒(判官盲审#3)
+{
+  const next = migrateDraftQueue(
+    { 'draft-P': [{ text: 'a', queuedAt: 100 }], 'sid-A': [{ text: 'b', queuedAt: 200 }] },
+    'draft-P', 'sid-A');
+  assert.deepEqual(next['sid-A'].map((m) => m.text), ['a', 'b'], 'merged by queuedAt asc');
+  const rev = migrateDraftQueue(
+    { 'draft-P': [{ text: 'b', queuedAt: 200 }], 'sid-A': [{ text: 'a', queuedAt: 100 }] },
+    'draft-P', 'sid-A');
+  assert.deepEqual(rev['sid-A'].map((m) => m.text), ['a', 'b'], 'queuedAt wins over concat order');
+  // 无 queuedAt 的历史数据按 0 兜底(排最前)
+  const legacy = migrateDraftQueue(
+    { 'draft-P': [{ text: 'new', queuedAt: 300 }], 'sid-A': [{ text: 'old' }] },
+    'draft-P', 'sid-A');
+  assert.deepEqual(legacy['sid-A'].map((m) => m.text), ['old', 'new'], 'missing queuedAt falls back to 0');
 }
 // no-op:空队列 / 无此 key / 缺 sid / key===sid → null(调用方不 setState)
 assert.equal(migrateDraftQueue({ 'draft-P': [] }, 'draft-P', 'sid'), null, 'empty queue no-op');

@@ -446,7 +446,18 @@ export const useStore = create((set, get) => ({
   // Keyed by sessionId (or 'draft' for unsent drafts). When user types during
   // streaming + clicks 入队, message goes here. handleSend pops the queue after
   // the current chat finishes.
-  messageQueue: {},
+  // 持久化(#6):队列只活内存时刷新/崩溃即丢(排队消息凭空消失)。init 从 localStorage
+  // 读回,每次变更由文件尾 subscribe 镜像写入。崩溃后恢复 = 消息留在队列里等重发,
+  // 不自动发送(自动发可能撞正在进行的回合)。
+  messageQueue: (() => {
+    const v = readLs('cgui-message-queue', {});
+    if (!v || typeof v !== 'object' || Array.isArray(v)) return {};
+    // 逐 key 滤掉非数组值:localStorage 可被旧版/手改写入畸形数据,顶层是对象不代表
+    // 每个 value 都是队列数组 —— 不滤的话 [...list, msg] 之类会在消费处抛错。
+    const out = {};
+    for (const [k, val] of Object.entries(v)) { if (Array.isArray(val)) out[k] = val; }
+    return out;
+  })(),
 
   // Pending CLI permission requests waiting on the user. Each entry:
   //   { id, toolName, toolInput, sessionId, cwd, hookEvent, createdAt }
@@ -831,10 +842,31 @@ export const useStore = create((set, get) => ({
     const mq = get().messageQueue;
     if (Array.isArray(mq[fromKey]) && mq[fromKey].length) {
       const next = { ...mq };
-      const merged = force ? mq[fromKey] : [...(mq[fromKey] || []), ...(mq[toKey] || [])];
+      // 与 routing.migrateDraftQueue 同口径:按 queuedAt 升序合并(无 queuedAt 按 0 兜底),
+      // 不依赖拼接方向 —— 保证先发先入队的消息先出队,两条迁移路径行为一致。
+      const merged = force ? mq[fromKey] : [...(mq[fromKey] || []), ...(mq[toKey] || [])].sort((a, b) => (a?.queuedAt || 0) - (b?.queuedAt || 0));
       next[toKey] = merged;
       delete next[fromKey];
       patch.messageQueue = next;
+    }
+    // 判官重要2②:draft 阶段 upsert 的子代理/后台任务条目的 sessionId 是 draft-<hash> 键
+    // (App.jsx streamOwnerSid draft 回落),init 后必须随真 sid 迁移 —— 否则清理路径
+    // (finalizeSessionAgents 按真 sid 严格相等扫)永远扫不到 → 残留 + 监控幽灵条目。
+    const aas = get().activeAgents;
+    if (aas && Object.values(aas).some((ag) => ag && ag.sessionId === fromKey)) {
+      const next = {};
+      for (const [id, ag] of Object.entries(aas)) {
+        next[id] = (ag && ag.sessionId === fromKey) ? { ...ag, sessionId: toKey } : ag;
+      }
+      patch.activeAgents = next;
+    }
+    const bgs = get().bgTasks;
+    if (bgs && Object.values(bgs).some((t) => t && t.sessionId === fromKey)) {
+      const next = {};
+      for (const [id, t] of Object.entries(bgs)) {
+        next[id] = (t && t.sessionId === fromKey) ? { ...t, sessionId: toKey } : t;
+      }
+      patch.bgTasks = next;
     }
     if (Object.keys(patch).length) set(patch);
   },
@@ -1400,10 +1432,16 @@ export const useStore = create((set, get) => ({
     return { messageQueue: { ...s.messageQueue, [sessionKey]: [...list, msg] } };
   }),
   shiftMessage: (sessionKey) => {
-    const list = useStore.getState().messageQueue[sessionKey] || [];
-    if (list.length === 0) return null;
-    const [head, ...rest] = list;
-    useStore.setState((s) => ({ messageQueue: { ...s.messageQueue, [sessionKey]: rest } }));
+    // 原子 pop(#7):取 head 与写回 rest 必须在同一次 setState 里 —— 先 getState 再
+    // setState 的两步写法下,并发调用方(流收尾 drain / ⚡引导)会各读到同一个 head,
+    // 同一条排队消息被发出两遍。
+    let head = null;
+    useStore.setState((s) => {
+      const list = s.messageQueue[sessionKey] || [];
+      if (list.length === 0) return s;
+      head = list[0];
+      return { messageQueue: { ...s.messageQueue, [sessionKey]: list.slice(1) } };
+    });
     return head;
   },
   clearQueue: (sessionKey) => set((s) => {
@@ -1548,6 +1586,14 @@ export const useStore = create((set, get) => ({
     }).catch(() => {});
   },
 }));
+
+// messageQueue 持久化镜像(#6):引用变化即整体写 localStorage(init 在读回处)。
+// 放 subscribe 而非各 mutator 里写 —— enqueue/shift/clear/remove/migrateSessionKey
+// 五个写点全覆盖,新增写点也不会漏。
+useStore.subscribe((s, prev) => {
+  if (!prev) return; // 首次触发无 prev,无意义回写
+  if (s.messageQueue !== prev.messageQueue) writeLs('cgui-message-queue', s.messageQueue);
+});
 
 // When following the system, a preset family's fixed palette must flip with the
 // OS — re-resolve the variant id on every prefers-color-scheme change so React

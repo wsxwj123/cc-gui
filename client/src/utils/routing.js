@@ -31,7 +31,10 @@ export function migrateDraftQueue(messageQueue, draftKey, sid) {
   const q = messageQueue?.[draftKey];
   if (!Array.isArray(q) || q.length === 0 || !sid || draftKey === sid) return null;
   const next = { ...messageQueue };
-  next[sid] = [...(next[sid] || []), ...q];
+  // 合并必须按 queuedAt 升序,不能简单拼接:draft 期间入队的消息(早)若排在 real sid
+  // 已有队列(晚)之后,出队顺序颠倒 —— 先发的 A(draft 期)反而在后发的 B 之后发出。
+  // 无 queuedAt 的历史数据按 0 兜底(stable sort 保持原相对顺序)。
+  next[sid] = [...(next[sid] || []), ...q].sort((a, b) => (a?.queuedAt || 0) - (b?.queuedAt || 0));
   delete next[draftKey];
   return next;
 }

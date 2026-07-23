@@ -4486,6 +4486,16 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     // 本次流真正归属的 sessionId:发起于真会话=闭包 sid;发起于 draft=init 事件里的新 sid。
     // result 后的标题兜底等"归属敏感"逻辑一律用它,绝不摸 getLocalSession()(用户可能已切走)。
     let streamSid = selectedSession?.sessionId || null;
+    // 发起时的 projectHash 闭包(判官盲审重要1):finally 拉历史必须用它,不能现取
+    // getLocalSession()?.projectHash —— 流式期间用户切到另一个项目的会话时两者对不上,
+    // 会拉错项目历史/404。draft 会话也带 projectHash,全程有效。
+    const streamOwnerPh = selectedSession?.projectHash || null;
+    // 归属解析(子代理/后台任务/workflow 条目的 sessionId):本流归属优先 ——
+    // streamSid(init 后必有)> ownerKey。读 getLocalSession() 会在用户切会话后把条目
+    // 挂到别人头上(判官盲审#4)。draft 阶段(ownerKey 还是 draft-<hash>)也返回该 draft
+    // 键而非 null(判官盲审重要2):null 条目在 init 后 migrateSessionKey 无法迁移 →
+    // finalizeSessionAgents 按真 sid 扫不到 → 残留 + 监控幽灵;draft 键则可随迁移转正。
+    const streamOwnerSid = () => streamSid || streamOwnerKeyRef.current || null;
     try {
       let pid;
       if (reattachPid) {
@@ -4842,7 +4852,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                   description: event.description || '',
                   status: 'working',
                   startedAt: Date.now(),
-                  sessionId: getLocalSession()?.sessionId || null,
+                  sessionId: streamOwnerSid(),
                 });
               }
             }
@@ -4979,7 +4989,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                     description: '',
                     status: 'starting',
                     startedAt: Date.now(),
-                    sessionId: getLocalSession()?.sessionId || null,  // #9 归属会话
+                    sessionId: streamOwnerSid(),  // #9 归属会话(本流归属,不读当前 pane)
                   });
                 }
               }
@@ -5032,7 +5042,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                       description: parsed.description || parsed.prompt?.slice(0, 80) || '',
                       status: 'working',
                       prompt: parsed.prompt || '',  // #9 子代理派发 prompt
-                      sessionId: getLocalSession()?.sessionId || null,
+                      sessionId: streamOwnerSid(),
                     });
                   }
                 } catch {}
@@ -5098,7 +5108,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                     prompt: inp.prompt || '',
                     status: 'working',
                     startedAt: Date.now(),
-                    sessionId: getLocalSession()?.sessionId || null,
+                    sessionId: streamOwnerSid(),
                   });
                 }
                 // 后台任务:Bash run_in_background:true(python 等长进程也归此类)。实时输出
@@ -5109,7 +5119,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                     description: block.input.description || '',
                     status: 'running',
                     startedAt: Date.now(),
-                    sessionId: getLocalSession()?.sessionId || null,
+                    sessionId: streamOwnerSid(),
                   });
                 }
               }
@@ -5578,7 +5588,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         // stopped → 监控页永久"工作中"。删会话/转后台/杀进程三个兄弟入口早已接
         // finalizeSessionAgents 穷举,唯独这里没接。turnAborted 仅真 POST /stop 时为 true
         // (killedRef),后台化/切会话不误伤;函数幂等且只碰 activeAgents,不动 bgTasks。
-        if (turnAborted && streamSid) finalizeSessionAgents(streamSid);
+        // draft 阶段(未拿到真 sid)回落 ownerKey 的 draft-<hash> 键 —— 判官重要2 后 draft
+        // 期派出的子代理条目 sessionId 即该键,只传真 sid 会扫不到。
+        if (turnAborted && (streamSid || streamOwnerKeyRef.current)) finalizeSessionAgents(streamSid || streamOwnerKeyRef.current);
       } catch {}
       updateStreaming(false);
       setStreamingText('');
@@ -5603,9 +5615,13 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       // actually produced a reply, poll briefly until the assistant turn has
       // landed in jsonl; only THEN clear local. Empty/errored turns (no jsonl
       // twin) skip the wait and keep their local ⚠️/❌ notice.
-      const _sel = getLocalSession();
-      if (_sel?.sessionId && _sel?.projectHash) {
-        const finalizeSid = _sel.sessionId;
+      // 归属敏感(判官盲审#1):finalize 必须收尾【发起这次流的会话】,不能读
+      // getLocalSession() —— 流式期间用户已切到别的会话时,会把新会话当本流归属,
+      // fetch/清空错会话的本地消息。streamSid > ownerKey(非 draft)> 当前 pane 兜底。
+      const _ok1 = streamOwnerKeyRef.current;
+      const finalizeSid = streamSid || ((_ok1 && !String(_ok1).startsWith('draft-')) ? _ok1 : null)
+        || getLocalSession()?.sessionId || null;
+      if (finalizeSid) {
         // 同会话 stop→resend 守卫:本 finally 属于 turn-1,轮询期间(~2.4s)用户可能已对
         // 同一会话发出 turn-2。activeProcRef 在本 finally 开头(4696)被置 null,只有新一轮
         // 发送才会再置成新 pid → 非空即"同会话已开新回合"。此时绝不能 setChatMessages([]) /
@@ -5651,7 +5667,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           // (incl trailing text) has landed.
           let peeked = [];
           try {
-            const r = await fetch(`/api/sessions/${finalizeSid}/messages?projectHash=${encodeURIComponent(_sel.projectHash)}`);
+            const r = await fetch(`/api/sessions/${finalizeSid}/messages?projectHash=${encodeURIComponent(streamOwnerPh || '')}`);
             // 该端点直接返回数组(res.json(messages)),不是 {messages:[]}。原来取 .messages
             // 永远是 undefined→peeked 恒为 []→roundLanded 恒 false→每轮空跑满 12 次(~2.4s)
             // 才回退,尾部落盘检测形同虚设。兼容两种形态。
@@ -5662,7 +5678,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             // Empty/errored turn — no jsonl twin to wait for. Commit persisted and
             // drop matched NON-turn locals (the user prompt); keep the local ⚠️/❌
             // turn visible.
-            try { await fetchMessagesForTab(finalizeSid, _sel.projectHash, { silent: true }); } catch {}
+            try { await fetchMessagesForTab(finalizeSid, streamOwnerPh || '', { silent: true }); } catch {}
             const known = new Set(getLocalMessages().map(tkey));
             setChatMessages((prev) => {
               if (newRoundStarted()) return prev; // await 期间开了新回合 → 不清在途消息
@@ -5676,7 +5692,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             // jsonl, so clearing avoids a doubled turn).
             // 例外:type==='btw' 旁问气泡只活在本地(永远没有 jsonl 孪生),整清会让它
             // 在回合结束时凭空消失;保留,切会话/刷新时自然清掉。
-            try { await fetchMessagesForTab(finalizeSid, _sel.projectHash, { silent: true }); } catch {}
+            try { await fetchMessagesForTab(finalizeSid, streamOwnerPh || '', { silent: true }); } catch {}
             setChatMessages((prev) => {
               if (newRoundStarted()) return prev; // await 期间开了新回合 → 不清在途消息
               return prev.some((m) => m.type === 'btw') ? prev.filter((m) => m.type === 'btw') : [];
@@ -5723,7 +5739,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           (window.__cguiCtxProbe ||= {})[probeSid] = true;
           const _st3 = useStore.getState();
           const probeModel = _st3.modelBySession[probeSid] || _st3.currentModel || '';
-          const probePh = getLocalSession()?.projectHash || selectedSession?.projectHash || '';
+          // projectHash/cwd 同样取归属会话元数据:selectedSession 是发起时闭包(= owner
+          // 会话),不摸 getLocalSession()(用户切走后会把探测打到别的项目目录,判官盲审#5)。
+          const probePh = selectedSession?.projectHash || '';
           const probeCwd = selectedSession?.projectPath || selectedProject?.path || '';
           const qs2 = new URLSearchParams({ cwd: probeCwd, projectHash: probePh, model: probeModel });
           fetch(`/api/context/${probeSid}?${qs2.toString()}`)
@@ -5779,16 +5797,18 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       // first so React commits isStreaming=false before the next send starts.
       // AZ10:reattach 流结束也要排空。原本 skip-on-reattach 导致:分屏非焦点 pane 的
       // 本地流被 detach 后由 backgroundPid 轮询接管成 reattach 流,结束时跳过排空 →
-      // 排队消息永不自动发出(分屏几乎必现)。排空用本 pane 当前会话 key,reattach
-      // 回来时正是该会话;shiftMessage 原子 pop + reattach 串行(reattachedPidRef
+      // 排队消息永不自动发出(分屏几乎必现)。排空用本流归属会话 key(streamSid/ownerKey),
+      // reattach 回来时正是该会话;shiftMessage 原子 pop + reattach 串行(reattachedPidRef
       // 守卫)→ 不会与原 finally 双发。仍与 ⚡引导(acceleratingRef)互斥。
       // H 转后台:回合还在服务端跑,此刻外发排队消息会对同一会话双写(server 只复用
       // idle slot,busy slot 会另起进程 --resume 同一 jsonl)。跳过;回来 reattach 的
       // 流收尾时照常排空。
+      // queueKey 归属(判官盲审#1):排【发起这次流的会话】的队,不读本 pane 当前会话 ——
+      // 流式期间切会话时会把 A 的排队消息从 B 的队列里 pop(或漏 pop A 的)。
       if (!acceleratingRef.current && !backgroundedRef.current) {
-        const tabSel = getLocalSession();
-        const queueKey = tabSel?.sessionId
-          || `draft-${tabSel?.projectHash || 'none'}`;
+        const _ls = getLocalSession();
+        const queueKey = streamSid || streamOwnerKeyRef.current
+          || _ls?.sessionId || `draft-${_ls?.projectHash || 'none'}`;
         const next = useStore.getState().shiftMessage(queueKey);
         if (next?.text) {
           // 透传入队时的 opts(尤其 hiddenUserMessage)——否则计划执行这种隐藏续跑消息
@@ -5854,7 +5874,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       fetch(`/api/chat/${backgroundPid}/stop`, { method: 'POST' });
       // 停止链路 #2:转后台后无本地流,finally 的 killedRef 收尾路径不存在 → 杀点
       // 就地按 sessionId 收尾本会话 taskManaged 等非终态子代理(进程死了不会再有信号)。
-      finalizeSessionAgents(selectedSession?.sessionId);
+      // draft 会话(未拿到真 sid)用 draft-<hash> 键 —— 判官重要2 后 draft 阶段派出的
+      // 子代理条目 sessionId 就是该键,不补会扫不到残留。
+      finalizeSessionAgents(selectedSession?.sessionId || (selectedSession?.projectHash ? `draft-${selectedSession.projectHash}` : null));
     }
     // 两种情况都立即清掉本地「后台运行中」标记,不等下一轮 poll(那一轮还会误报)。
     setBackgroundPid(null);
@@ -5913,8 +5935,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     // when you revisit a still-generating session), so on mobile "⚡ 引导" did
     // nothing. Flag it so the finally doesn't also pop (double-send).
     acceleratingRef.current = true;
+    // queueKey 与流收尾 drain 同口径(判官盲审#8):本流归属 ownerKey 优先,当前 pane 兜底。
     const sel = getLocalSession();
-    const queueKey = sel?.sessionId || `draft-${sel?.projectHash || 'none'}`;
+    const queueKey = streamOwnerKeyRef.current || sel?.sessionId || `draft-${sel?.projectHash || 'none'}`;
     const next = useStore.getState().shiftMessage(queueKey);
     if (next?.text) setTimeout(() => handleSendRef.current?.(next.text, next.opts || (next.hidden ? { hiddenUserMessage: true } : {})), 80);
   }, []);
@@ -9556,11 +9579,13 @@ export default function App() {
               {formatPathShort(selectedProject.path)}
             </span>
           )}
-          {selectedSession && (
+          {/* 标题跟随焦点 pane(headerPane,判官盲审#2):全局 selectedSession 只是
+              pane 0 镜像,分屏焦点在别的 pane 时标题不跟随。同 headerPermKey 口径。 */}
+          {headerPane && (
             <>
               <span className="text-ink-ghost shrink-0">/</span>
               <span className="text-[11px] text-ink-muted font-body truncate min-w-0 max-w-[180px]">
-                {customTitles[selectedSession.sessionId] || autoTitles[selectedSession.sessionId] || selectedSession.firstPrompt?.slice(0, 36) || selectedSession.sessionId?.slice(0, 8) || '新会话'}
+                {customTitles[headerPane.sessionId] || autoTitles[headerPane.sessionId] || headerPane.firstPrompt?.slice(0, 36) || headerPane.sessionId?.slice(0, 8) || '新会话'}
               </span>
             </>
           )}
