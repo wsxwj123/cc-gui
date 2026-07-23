@@ -1,6 +1,6 @@
 // CK-4: Skill 市场。两个选项卡 —— 「本机」展示 ~/.claude/skills 已装;「导入」从多个
 // 源仓库(Anthropic / Superpowers / 开源社区 / 科研)拉取并导入,重名内联横幅选跳过/覆盖。
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { Download, Check, Loader2, RefreshCw, AlertTriangle, CloudDownload, ExternalLink, Copy, Search, Archive, Trash2, RotateCcw, X } from 'lucide-react';
 import { useMultiSelect, SelModeToggle, BatchBar, SelCheckbox } from './MultiSelect.jsx';
 import { copyText } from '../utils/clipboard.js';
@@ -9,9 +9,11 @@ import { confirmDialog } from '../utils/confirmDialog.jsx';
 // CM-1:复制技能调用名。纯图标按钮(斜杠名与条目真名常重复,文本移入 tooltip),点击复制,复制后短暂打勾。
 function SkillCopyBtn({ name }) {
   const [done, setDone] = useState(false);
+  const timerRef = useRef(null);
+  useEffect(() => () => clearTimeout(timerRef.current), []);
   return (
     <button
-      onClick={async (e) => { e.stopPropagation(); if (await copyText(`/${name}`)) { setDone(true); setTimeout(() => setDone(false), 1200); } }}
+      onClick={async (e) => { e.stopPropagation(); if (await copyText(`/${name}`)) { clearTimeout(timerRef.current); setDone(true); timerRef.current = setTimeout(() => setDone(false), 1200); } }}
       title={`复制调用命令「/${name}」—— 在输入框输入 /${name} 即可调用该技能`}
       className="shrink-0 flex items-center px-1.5 py-0.5 rounded text-ink-faint hover:text-ink hover:bg-canvas-deep transition-colors">
       {done ? <Check size={11} className="text-success shrink-0" /> : <Copy size={11} className="shrink-0" />}

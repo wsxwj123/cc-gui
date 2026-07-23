@@ -1,16 +1,19 @@
-import React, { useState } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { Copy, Check } from 'lucide-react';
 import { copyText } from '../utils/clipboard.js';
 
 export function CodeBlock({ code, language }) {
   const [copied, setCopied] = useState(false);
+  const timerRef = useRef(null);
+  useEffect(() => () => clearTimeout(timerRef.current), []);
 
   const handleCopy = async () => {
     // copyText falls back to execCommand on non-secure contexts (phone over
     // plain-http LAN / Tailscale), where navigator.clipboard is unavailable.
     if (await copyText(code)) {
+      clearTimeout(timerRef.current); // 连点复制:清掉旧 timer,否则旧句柄提前灭掉新状态
       setCopied(true);
-      setTimeout(() => setCopied(false), 1500);
+      timerRef.current = setTimeout(() => setCopied(false), 1500);
     }
   };
 

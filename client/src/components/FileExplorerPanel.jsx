@@ -192,6 +192,13 @@ export function FileExplorerPanel() {
     return () => clearInterval(id);
   }, [pendingCount]);
 
+  // 卸载兜底:撤销窗(10s)内面板被关掉时,清掉全部待执行删除定时器——否则面板已卸载
+  // 定时器仍触发,真实删除请求照发(用户以为撤销窗随面板一起没了,实际文件照删)。
+  useEffect(() => () => {
+    for (const t of Object.values(timersRef.current)) clearTimeout(t);
+    timersRef.current = {};
+  }, []);
+
   // Esc 关闭菜单:与遮罩外部点击共关同一 ctxMenu state,右键/⋮ 两种打开方式行为一致。
   // 捕获阶段拦下 + stopPropagation:阻断冒泡阶段的「双击 Esc 停止流」监听(App 挂在
   // window 冒泡阶段),避免关菜单的 Esc 被计入停止连击。与 App 速查面板 Esc 同款口径。

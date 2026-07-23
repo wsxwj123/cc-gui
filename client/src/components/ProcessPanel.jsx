@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useRef } from 'react';
 import { Activity, Cpu, MapPin, RefreshCw, Zap, Square, Loader2 } from 'lucide-react';
 import { confirmDialog } from '../utils/confirmDialog.jsx';
 
@@ -6,6 +6,10 @@ export function ProcessPanel() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [killing, setKilling] = useState(null);
+  const mountedRef = useRef(true);
+  // StrictMode 双挂载:useRef(true) 初值只在首挂载赋值,第二次挂载沿用已被 cleanup
+  // 置 false 的同一 ref → 永久 false。effect 体内先置 true 再 return cleanup。
+  useEffect(() => { mountedRef.current = true; return () => { mountedRef.current = false; }; }, []);
 
   const killProcess = async (pid) => {
     if (!pid || !(await confirmDialog(`确定停止 PID ${pid}？claude CLI 会立即终止。`, { danger: true }))) return;
@@ -17,11 +21,12 @@ export function ProcessPanel() {
         confirmDialog('停止失败：' + (e.error || r.status));
       }
       await new Promise((r) => setTimeout(r, 500));
+      if (!mountedRef.current) return; // 卸载守卫:500ms 等待期间面板可能已关闭
       await fetchProcesses();
     } catch (err) {
       confirmDialog('停止失败：' + err.message);
     }
-    setKilling(null);
+    if (mountedRef.current) setKilling(null);
   };
 
   const fetchProcesses = async () => {

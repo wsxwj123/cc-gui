@@ -18,6 +18,8 @@ function formatPingDetail(d) {
 function PingButton({ name }) {
   const [state, setState] = useState(null); // null | 'busy' | 'ok' | 'err'
   const [detail, setDetail] = useState('');
+  const timerRef = useRef(null);
+  useEffect(() => () => clearTimeout(timerRef.current), []);
   const ping = async (e) => {
     e?.stopPropagation();
     setState('busy'); setDetail('');
@@ -27,7 +29,7 @@ function PingButton({ name }) {
       const ok = d.status === 'ok';
       setDetail(formatPingDetail(d));
       setState(ok ? 'ok' : 'err');
-      if (ok) setTimeout(() => setState(null), 3000); // 成功才自动消失;失败保留让用户看清原因
+      if (ok) { clearTimeout(timerRef.current); timerRef.current = setTimeout(() => setState(null), 3000); } // 成功才自动消失;失败保留让用户看清原因
     } catch (err) {
       setState('err'); setDetail(err.message);
     }

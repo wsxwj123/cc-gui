@@ -265,12 +265,15 @@ function RollbackMenu({ message, onAction }) {
 
 function CopyButton({ text }) {
   const [copied, setCopied] = useState(false);
+  const timerRef = useRef(null);
+  useEffect(() => () => clearTimeout(timerRef.current), []);
   return (
     <button
       onClick={async () => {
         if (await copyText(text)) {
+          clearTimeout(timerRef.current); // 连点复制:清旧 timer,保住新状态的完整时长
           setCopied(true);
-          setTimeout(() => setCopied(false), 1500);
+          timerRef.current = setTimeout(() => setCopied(false), 1500);
         }
       }}
       className="p-1 hover:bg-canvas-deep rounded"

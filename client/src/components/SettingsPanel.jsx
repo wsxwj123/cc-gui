@@ -75,6 +75,18 @@ export function SettingsPanel() {
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState(null);
   const [tab, setTab] = useState('general'); // P1.4:9 tab,见 TAB_LABELS
+  // 「已保存」提示与滚动高亮环的短定时器统一登记,卸载 cleanup 全清——面板在倒计时
+  // 期间被关闭时,不再对已卸载组件 setState(React 警告 + 高亮环残留)。
+  const timersRef = useRef(new Set());
+  useEffect(() => () => { for (const t of timersRef.current) clearTimeout(t); timersRef.current.clear(); }, []);
+  const later = (fn, ms) => {
+    const t = setTimeout(() => { timersRef.current.delete(t); fn(); }, ms);
+    timersRef.current.add(t);
+  };
+  // 「已保存」提示独立 ref:连续两次保存要重置倒计时(清旧再设),later() 进 Set 做不到
+  // 定点清除——旧 timer 会按原时刻提前灭掉第二次的提示。
+  const savedTimerRef = useRef(null);
+  useEffect(() => () => clearTimeout(savedTimerRef.current), []);
 
   const fetchSettings = async () => {
     setLoading(true);
@@ -107,12 +119,12 @@ export function SettingsPanel() {
   const jumpToSection = (section, tabId) => {
     if (!section) return;
     setTab(tabId || tabOf(section));
-    setTimeout(() => {
+    later(() => {
       const el = document.getElementById(section);
       if (!el) return;
       el.scrollIntoView({ behavior: 'smooth', block: 'center' });
       el.classList.add('ring-2', 'ring-accent', 'ring-offset-2', 'rounded-lg');
-      setTimeout(() => el.classList.remove('ring-2', 'ring-accent', 'ring-offset-2'), 2000);
+      later(() => el.classList.remove('ring-2', 'ring-accent', 'ring-offset-2'), 2000);
     }, 80);
   };
   const jumpRef = useRef(jumpToSection);
@@ -152,7 +164,7 @@ export function SettingsPanel() {
       // 全空、"settings 未加载拒写"守卫被 truthy 的 {error} 绕过,后续保存=真丢数据(审计#4)。
       if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
       setSettings(data); setRawJson(JSON.stringify(data, null, 2));
-      setSaved(true); setTimeout(() => setSaved(false), 1800);
+      setSaved(true); clearTimeout(savedTimerRef.current); savedTimerRef.current = setTimeout(() => setSaved(false), 1800);
     } catch (err) { setError(err.message); }
     setSaving(false);
   };
@@ -169,7 +181,7 @@ export function SettingsPanel() {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
       setSettings(data); setRawJson(JSON.stringify(data, null, 2));
-      setSaved(true); setTimeout(() => setSaved(false), 1800);
+      setSaved(true); clearTimeout(savedTimerRef.current); savedTimerRef.current = setTimeout(() => setSaved(false), 1800);
     } catch (err) { setError(err.message); }
     setSaving(false);
   };
@@ -276,6 +288,13 @@ function NetworkTab() {
   const [restarting, setRestarting] = useState(false);
   const [msg, setMsg] = useState(null);
   const [err, setErr] = useState(null);
+  // 重启轮询的定时器句柄 + 挂载标志:面板在轮询期间被关掉时,卸载 cleanup 清掉后续
+  // tick,防止已卸载组件继续 setState 甚至触发 window.location.reload()。
+  const restartTimerRef = useRef(null);
+  const mountedRef = useRef(true);
+  // StrictMode 双挂载:ref 初值只赋一次,effect 体内先置 true 再 return cleanup,
+  // 否则首挂载 cleanup 置 false 后永久 false,重启轮询永远判"已卸载"卡死。
+  useEffect(() => { mountedRef.current = true; return () => { mountedRef.current = false; clearTimeout(restartTimerRef.current); }; }, []);
 
   const load = async () => {
     try {
@@ -323,15 +342,16 @@ function NetworkTab() {
       // Server exits ~250ms later; watchdog relaunches. Poll for it to come back.
       let tries = 0;
       const tick = async () => {
+        if (!mountedRef.current) return;
         tries++;
         try {
           const p = await fetch('/api/network', { cache: 'no-store' });
-          if (p.ok) { window.location.reload(); return; }
+          if (p.ok) { if (mountedRef.current) window.location.reload(); return; }
         } catch {}
-        if (tries < 40) setTimeout(tick, 500);
-        else { setRestarting(false); setErr('重启超时，请手动检查 server'); }
+        if (tries < 40) restartTimerRef.current = setTimeout(tick, 500);
+        else if (mountedRef.current) { setRestarting(false); setErr('重启超时，请手动检查 server'); }
       };
-      setTimeout(tick, 1200);
+      restartTimerRef.current = setTimeout(tick, 1200);
     } catch (e) { setErr(e.message); setRestarting(false); }
   };
 
@@ -2121,6 +2141,8 @@ function HooksTab({ settings, onSave, saving, saved }) {
   const [adding, setAdding] = useState(null); // event name being added to
   const [newCmd, setNewCmd] = useState('');
   const [newMatcher, setNewMatcher] = useState('');
+  const projSavedTimerRef = useRef(null);
+  useEffect(() => () => clearTimeout(projSavedTimerRef.current), []);
 
   // 与侧栏项目列表同一口径:/api/projects 减去 hiddenProjects(用户在侧栏隐藏过的,
   // 如 CLI 在 Temp 等目录跑过留下的 hash 残留)。此前裸取且只在挂载取一次 → 隐藏的
@@ -2159,7 +2181,7 @@ function HooksTab({ settings, onSave, saving, saved }) {
       ? fetch('/api/global-hooks', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ hooks: next }) })
       : fetch('/api/project-hooks', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ cwd: scope, hooks: next }) });
     req
-      .then(async (r) => { const d = await r.json().catch(() => ({})); if (!r.ok) throw new Error(d.error || r.status); setProjSaved(true); setTimeout(() => setProjSaved(false), 1500); })
+      .then(async (r) => { const d = await r.json().catch(() => ({})); if (!r.ok) throw new Error(d.error || r.status); setProjSaved(true); clearTimeout(projSavedTimerRef.current); projSavedTimerRef.current = setTimeout(() => setProjSaved(false), 1500); })
       .catch((e) => confirmDialog('保存 hooks 失败：' + e.message))
       .finally(() => setProjBusy(false));
   };

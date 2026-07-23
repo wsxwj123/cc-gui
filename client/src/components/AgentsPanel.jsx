@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useRef } from 'react';
 import { Bot, RefreshCw, Save, Check, Plus, FileText, Download, Package, Trash2 } from 'lucide-react';
 import { confirmDialog } from '../utils/confirmDialog.jsx';
 import { useMultiSelect, SelModeToggle, BatchBar, SelCheckbox } from './MultiSelect.jsx';
@@ -84,6 +84,8 @@ export function AgentsPanel() {
   const [content, setContent] = useState('');
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
+  const savedTimerRef = useRef(null);
+  useEffect(() => () => clearTimeout(savedTimerRef.current), []);
   // 编辑乐观锁:open/save 记录磁盘 mtimeMs,保存时带回,server 不一致返 409
   // (典型:编辑期间 MCP 自动同步后台改写同一文件)。conflict = 409 返回的 {mtimeMs, content}。
   const [fileMtime, setFileMtime] = useState(null);
@@ -177,7 +179,7 @@ export function AgentsPanel() {
         // 新建时 server 会把当前 MCP 同步进 tools 并回传改写后内容,刷进编辑区。
         if (typeof d?.content === 'string') setContent(d.content);
         setConflict(null);
-        setSaved(true); setTimeout(() => setSaved(false), 1500); fetchAgents();
+        setSaved(true); clearTimeout(savedTimerRef.current); savedTimerRef.current = setTimeout(() => setSaved(false), 1500); fetchAgents();
       }
     } catch {}
     setSaving(false);

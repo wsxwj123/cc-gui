@@ -221,9 +221,12 @@ function AskQuestionCard({ req, onAnswer, processing, position, hydrate }) {
   const autoSubmitRef = useRef(null);
   const cancelAutoSubmit = () => { if (autoSubmitRef.current) { clearTimeout(autoSubmitRef.current); autoSubmitRef.current = null; } };
   useEffect(() => cancelAutoSubmit, []); // 卸载兜底
+  const advanceRef = useRef(null); // 选中即跳下一题的 150ms 延迟,卸载兜底
+  useEffect(() => () => clearTimeout(advanceRef.current), []);
   const choose = (label, multi) => {
     const wasSelected = !multi && picks[qi] === label;
     cancelAutoSubmit();
+    clearTimeout(advanceRef.current); // 连点选项:旧跳转 timer 一并清,不与新选择竞态
     setPicks((prev) => {
       if (!multi) return { ...prev, [qi]: prev[qi] === label ? undefined : label };
       const cur = Array.isArray(prev[qi]) ? prev[qi] : [];
@@ -239,7 +242,7 @@ function AskQuestionCard({ req, onAnswer, processing, position, hydrate }) {
       return;
     }
     // 单选选中即跳下一题(取消选中/多选/末题不跳),稍延迟让选中态可见
-    if (!multi && !wasSelected && !isLast) setTimeout(() => setQi((i) => Math.min(i + 1, total - 1)), 150);
+    if (!multi && !wasSelected && !isLast) advanceRef.current = setTimeout(() => setQi((i) => Math.min(i + 1, total - 1)), 150);
   };
 
   useEffect(() => {

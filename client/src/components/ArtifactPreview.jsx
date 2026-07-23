@@ -92,9 +92,11 @@ function useDebounced(value, delay) {
 
 export function CopyButton({ text }) {
   const [copied, setCopied] = useState(false);
+  const timerRef = useRef(null);
+  useEffect(() => () => clearTimeout(timerRef.current), []);
   return (
     <button
-      onClick={async () => { if (await copyText(text)) { setCopied(true); setTimeout(() => setCopied(false), 1500); } }}
+      onClick={async () => { if (await copyText(text)) { clearTimeout(timerRef.current); setCopied(true); timerRef.current = setTimeout(() => setCopied(false), 1500); } }}
       className="flex items-center gap-1 text-[10px] text-[#9a8e78] hover:text-[#cabba0] transition-colors"
     >
       {copied ? <Check size={10} /> : <Copy size={10} />}

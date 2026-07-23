@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useStore } from '../stores/sessionStore.js';
 import { Save, RefreshCw, Check, Lock, Trash2, ChevronLeft, Brain, BookText, Sparkles, Copy, ChevronDown, ChevronRight, Search } from 'lucide-react';
 import { confirmDialog } from '../utils/confirmDialog.jsx';
@@ -50,6 +50,8 @@ function ClaudeMdEditor({ cwd }) {
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [err, setErr] = useState('');
+  const savedTimerRef = useRef(null);
+  useEffect(() => () => clearTimeout(savedTimerRef.current), []);
 
   const needsCwd = level === 'project' || level === 'local';
 
@@ -78,7 +80,7 @@ function ClaudeMdEditor({ cwd }) {
       });
       const d = await r.json();
       if (!r.ok) throw new Error(d.error || '保存失败');
-      setSaved(true); setTimeout(() => setSaved(false), 1800);
+      setSaved(true); clearTimeout(savedTimerRef.current); savedTimerRef.current = setTimeout(() => setSaved(false), 1800);
       setData((p) => ({ ...p, exists: true, content: draft }));
     } catch (e) { setErr(e.message); }
     setSaving(false);
@@ -143,6 +145,8 @@ function AutoMemoryTab({ cwd }) {
   const [draft, setDraft] = useState('');
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
+  const savedTimerRef = useRef(null);
+  useEffect(() => () => clearTimeout(savedTimerRef.current), []);
 
   const load = useCallback(async () => {
     if (!cwd) { setEntries([]); setErr('请先在左侧选择一个项目'); return; }
@@ -180,7 +184,7 @@ function AutoMemoryTab({ cwd }) {
       const d = await r.json();
       if (!r.ok) throw new Error(d.error || '保存失败');
       setEditing((p) => ({ ...p, content: draft, mtime: d.mtime }));
-      setSaved(true); setTimeout(() => setSaved(false), 1800);
+      setSaved(true); clearTimeout(savedTimerRef.current); savedTimerRef.current = setTimeout(() => setSaved(false), 1800);
       load();
     } catch (e) { setErr(e.message); }
     setSaving(false);
@@ -281,6 +285,8 @@ function PromptLibraryTab() {
   const [openGroups, setOpenGroups] = useState({});
   const [copiedId, setCopiedId] = useState('');
   const [query, setQuery] = useState('');
+  const copyTimerRef = useRef(null);
+  useEffect(() => () => clearTimeout(copyTimerRef.current), []);
 
   useEffect(() => {
     fetch('/api/prompt-templates')
@@ -308,7 +314,7 @@ function PromptLibraryTab() {
 
   const copy = async (t) => {
     const ok = await copyText(t.prompt || '');
-    if (ok) { setCopiedId(t.id); setTimeout(() => setCopiedId(''), 1500); }
+    if (ok) { setCopiedId(t.id); clearTimeout(copyTimerRef.current); copyTimerRef.current = setTimeout(() => setCopiedId(''), 1500); }
     else await confirmDialog('复制失败:剪贴板不可用', { danger: false });
   };
 

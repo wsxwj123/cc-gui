@@ -67,6 +67,7 @@ function BackgroundAgentsSection({ stoppingPid, onStop }) {
   const [note, setNote] = useState('');
   const [stoppingId, setStoppingId] = useState('');
   const mountedRef = useRef(true);
+  const loadTimerRef = useRef(null); // dispatch 后的 1.5s 刷新定时器,卸载兜底
   // sessionId → 是否已达终态(上次轮询)。null = 尚未完成首次轮询,首轮只记录
   // 不提醒(避免面板一打开就把历史已完成的全部弹一遍)。
   const prevTerminalRef = useRef(null);
@@ -106,7 +107,7 @@ function BackgroundAgentsSection({ stoppingPid, onStop }) {
     mountedRef.current = true;
     load();
     const id = setInterval(load, 5000);
-    return () => { mountedRef.current = false; clearInterval(id); };
+    return () => { mountedRef.current = false; clearInterval(id); clearTimeout(loadTimerRef.current); };
   }, []);
 
   const dispatch = async () => {
@@ -123,7 +124,8 @@ function BackgroundAgentsSection({ stoppingPid, onStop }) {
       if (!r.ok) throw new Error(d.error || '派发失败');
       setPrompt('');
       setNote(d.output?.split('\n')[0] || '已派发');
-      setTimeout(load, 1500);
+      clearTimeout(loadTimerRef.current); // 连续派发:清旧句柄,防覆盖成孤儿卸载清不到
+      loadTimerRef.current = setTimeout(load, 1500);
     } catch (e) { setNote(String(e.message || e)); }
     setDispatching(false);
   };
@@ -701,6 +703,7 @@ export function AgentMonitorPanel() {
         window.dispatchEvent(new CustomEvent('cgui:session-procs-killed', { detail: { sessionId } }));
       }
       await new Promise((r) => setTimeout(r, 400));
+      if (!mountedRef.current) return; // 卸载守卫:400ms 等待期间面板可能已关闭
       await fetchActive(true);
     } catch {}
     setStoppingPid(null);

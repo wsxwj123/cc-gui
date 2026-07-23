@@ -217,6 +217,13 @@ export function ChatInput({ onSend, onStop, onStopBackground, onAccelerate, onBa
   const fileInputRef = useRef(null);
   const draftBeforeHistoryRef = useRef('');
   const navigatingHistoryRef = useRef(false);
+  // 短交互定时器(高亮环褪去/延迟 focus/光标归位)统一登记,卸载 cleanup 全清。
+  const timersRef = useRef(new Set());
+  useEffect(() => () => { for (const t of timersRef.current) clearTimeout(t); timersRef.current.clear(); }, []);
+  const later = (fn, ms) => {
+    const t = setTimeout(() => { timersRef.current.delete(t); fn(); }, ms);
+    timersRef.current.add(t);
+  };
 
   // 双击 Esc 停止生成:唯一实现在 App.jsx 的 window 级 effect(带 paneIsActive 守卫
   // + permission 让行 + backgroundPid 支持)。这里曾有第二份 document 捕获实现(CD-2),
@@ -349,10 +356,10 @@ export function ChatInput({ onSend, onStop, onStopBackground, onAccelerate, onBa
       if (ta) {
         // Visual flash so the user can't miss the fill.
         ta.classList.add('ring-2', 'ring-accent', 'ring-offset-2');
-        setTimeout(() => {
+        later(() => {
           ta.classList.remove('ring-2', 'ring-accent', 'ring-offset-2');
         }, 1600);
-        setTimeout(() => ta.focus(), 0);
+        later(() => ta.focus(), 0);
       }
     };
     window.addEventListener('cgui:composer-fill', onFill);
@@ -593,13 +600,14 @@ export function ChatInput({ onSend, onStop, onStopBackground, onAccelerate, onBa
         .catch(() => { if (!cancelled) setAtFiles([]); });
       return () => { cancelled = true; };
     }
+    let cancelled = false;
     const t = setTimeout(() => {
       fetch(`/api/files/search?cwd=${encodeURIComponent(cwd)}&q=${encodeURIComponent(q)}`)
         .then((r) => r.json())
-        .then((d) => setAtFiles((d.files || []).map((f) => ({ kind: 'file', name: f, rel: f }))))
-        .catch(() => setAtFiles([]));
+        .then((d) => { if (cancelled) return; setAtFiles((d.files || []).map((f) => ({ kind: 'file', name: f, rel: f }))); })
+        .catch(() => { if (!cancelled) setAtFiles([]); });
     }, 180);
-    return () => clearTimeout(t);
+    return () => { cancelled = true; clearTimeout(t); };
   }, [atState?.query, atTab, !!atState, atDir]);
 
   // 会话 tab:store 里当前项目的会话列表,按首条提示词过滤,排除当前会话自己。
@@ -736,7 +744,7 @@ export function ChatInput({ onSend, onStop, onStopBackground, onAccelerate, onBa
             setHistoryCursor(nextCursor);
             setText(nextCursor >= 0 ? history[nextCursor] : draftBeforeHistoryRef.current);
           }
-          setTimeout(() => {
+          later(() => {
             const ta = textareaRef.current;
             if (ta) {
               const pos = ta.value.length;
@@ -991,7 +999,7 @@ export function ChatInput({ onSend, onStop, onStopBackground, onAccelerate, onBa
               onClick={() => {
                 setText(suggestion);
                 onDismissSuggestion?.();
-                setTimeout(() => textareaRef.current?.focus(), 0);
+                later(() => textareaRef.current?.focus(), 0);
               }}
               className="shrink-0 p-1.5 rounded-full hover:bg-black/5 text-ink-faint hover:text-accent transition-colors"
               title="填入输入框编辑"

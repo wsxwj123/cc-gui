@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useRef, useEffect } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
@@ -12,12 +12,15 @@ import { dockKeyFor } from '../utils/artifactDock.js';
 
 function CopyButton({ text }) {
   const [copied, setCopied] = useState(false);
+  const timerRef = useRef(null);
+  useEffect(() => () => clearTimeout(timerRef.current), []);
   return (
     <button
       onClick={async () => {
         if (await copyText(text)) {
+          clearTimeout(timerRef.current); // 连点复制:清旧 timer,保住新状态的完整时长
           setCopied(true);
-          setTimeout(() => setCopied(false), 1500);
+          timerRef.current = setTimeout(() => setCopied(false), 1500);
         }
       }}
       className="flex items-center gap-1 text-[10px] text-[#9a8e78] hover:text-[#cabba0] transition-colors"

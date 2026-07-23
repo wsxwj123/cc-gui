@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useRef } from 'react';
 import { FileText, Edit3, Terminal, RefreshCw, ChevronDown, ChevronRight, ExternalLink, RotateCcw, Check, Eye, EyeOff } from 'lucide-react';
 import { useStore } from '../stores/sessionStore.js';
 import { DiffViewer } from './DiffViewer.jsx';
@@ -39,12 +39,15 @@ function ChangeItem({ change, sessionId, cwd, reviewed, onToggleReviewed }) {
   // AZ13:回滚成功原本只把 hover-only 图标变勾,鼠标移开就看不见 → 用户感知不到成功。
   // 加一条短暂常显的成功文案。
   const [flash, setFlash] = useState(false); // false | 'head' | 'checkpoint'
+  const flashTimerRef = useRef(null);
+  useEffect(() => () => clearTimeout(flashTimerRef.current), []);
   // 两条链路语义不同:HEAD=丢弃全部未提交修改;checkpoint=回到该轮对话前的快照
   // (可能仍含更早回合的未提交改动)。文案如实区分,别都说"已恢复"。
   const markReverted = (via = 'head') => {
     setReverted(true);
     setFlash(via);
-    setTimeout(() => setFlash(false), 2600);
+    clearTimeout(flashTimerRef.current); // 连续恢复:清旧 timer,新提示拿满 2.6s
+    flashTimerRef.current = setTimeout(() => setFlash(false), 2600);
   };
 
   const revert = async (e) => {

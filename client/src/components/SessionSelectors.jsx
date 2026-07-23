@@ -297,7 +297,7 @@ export function ProviderSwitcher({ hideLabel = false, tourAnchor = false, respon
 
 // 修正批#1b:模型 chip(顶栏,作用于活跃窗格的会话;Provider 为独立按钮,本弹层只管模型)。
 export function ModelSelector({ compact = false, permKey = null, tourAnchor = false, drop = 'down' }) {
-  const { availableModels } = useStore();
+  const availableModels = useStore((s) => s.availableModels);
   const customModels = useStore((s) => s.customModels);
   const providerHint = useStore((s) => s.currentProvider?.providerHint || 'anthropic');
   // Per-session model: show/select THIS session's model (falls back to the
