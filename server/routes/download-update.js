@@ -111,10 +111,22 @@ router.post('/download-update', async (req, res) => {
   }
 
   try {
-    const r = await fetch(url, {
-      headers: { 'User-Agent': 'claude-gui-updater', 'Accept': 'application/octet-stream' },
-      redirect: 'follow',
-    });
+    // 重定向逐跳校验:github.com 的 release 资产会 302 到 cdn(release-assets/
+    // objects.githubusercontent.com),但 redirect:'follow' 会无脑跟到任意主机,
+    // 域名白名单形同虚设。改 manual + 手动跟,每跳目标必须在白名单内。
+    const dlHeaders = { 'User-Agent': 'claude-gui-updater', 'Accept': 'application/octet-stream' };
+    let r = await fetch(url, { headers: dlHeaders, redirect: 'manual' });
+    for (let hops = 0; r.status >= 300 && r.status < 400; hops++) {
+      if (hops >= 5) return res.status(502).json({ error: '重定向次数过多' });
+      const loc = r.headers.get('location');
+      if (!loc) return res.status(502).json({ error: `上游返回 ${r.status} 但无 Location` });
+      let nu;
+      try { nu = new URL(loc, url); } catch { return res.status(502).json({ error: '上游重定向地址非法' }); }
+      if (!allowedHosts.has(nu.hostname)) {
+        return res.status(400).json({ error: `重定向到非 GitHub 主机(${nu.hostname}),已拒绝` });
+      }
+      r = await fetch(nu, { headers: dlHeaders, redirect: 'manual' });
+    }
     if (!r.ok) return res.status(502).json({ error: `下载失败 HTTP ${r.status}` });
     if (!r.body) return res.status(502).json({ error: '上游返回空 body' });
     const contentLength = Number(r.headers.get('content-length') || 0);

@@ -565,6 +565,9 @@ async function handle(req, clientRes) {
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${up.apiKey}` },
       body: JSON.stringify(payload),
       signal: ac.signal,
+      // 不跟随重定向:上游 3xx 会把带 apiKey 的请求引到任意主机(密钥外泄/SSRF)。
+      // 3xx 落到下方 !ok 分支按原逻辑解析错误体上报。
+      redirect: 'manual',
     }).finally(() => clearTimeout(t));
   };
 

@@ -145,7 +145,9 @@ async function handle(req, clientRes) {
   const ac = new AbortController();
   const timer = setTimeout(() => ac.abort(), 90000);
   try {
-    upstreamResp = await fetch(url, { method: req.method, headers, body, signal: ac.signal });
+    // 不跟随重定向:上游 3xx 会把带 authToken 的请求引到任意主机(密钥外泄/SSRF)。
+    // 3xx 状态按原逻辑透传回 CLI,由 CLI 报错。
+    upstreamResp = await fetch(url, { method: req.method, headers, body, signal: ac.signal, redirect: 'manual' });
   } catch (err) {
     clientRes.writeHead(502, { 'Content-Type': 'application/json' });
     clientRes.end(JSON.stringify({ type: 'error', error: { type: 'api_error', message: 'upstream fetch failed: ' + err.message } }));

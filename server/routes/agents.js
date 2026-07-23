@@ -50,6 +50,19 @@ function rewriteAgentMcpTools(content, { add = [], remove = [] }) {
   return lines.join('\n');
 }
 
+// per-file 串行队列:syncMcpToAgents(后台)与 PUT /agents/:name(用户保存)并发
+// 读-改-写同一 .md 会互踩丢内容。同一文件的写操作挂队尾串行,finally 清 Map 项
+// (与 sessions.js writeJsonlAtomic 同模式)。
+const _agentFileQueues = new Map(); // filePath -> 队尾 Promise
+function enqueueAgentFile(file, fn) {
+  const prev = _agentFileQueues.get(file) || Promise.resolve();
+  const run = prev.catch(() => {}).then(fn);
+  _agentFileQueues.set(file, run);
+  const cleanup = () => { if (_agentFileQueues.get(file) === run) _agentFileQueues.delete(file); };
+  run.then(cleanup, cleanup);
+  return run;
+}
+
 // 对 ~/.claude/agents/ 下的 .md agent 批量同步。files 省略=全部 agent。
 export async function syncMcpToAgents({ add = [], remove = [], files = null } = {}) {
   if (!add.length && !remove.length) return;
@@ -59,9 +72,26 @@ export async function syncMcpToAgents({ add = [], remove = [], files = null } = 
   }
   for (const f of names) {
     const full = join(AGENTS_DIR, f);
-    let content; try { content = await readFile(full, 'utf-8'); } catch { continue; }
-    const updated = rewriteAgentMcpTools(content, { add, remove });
-    if (updated && updated !== content) { try { await writeFile(full, updated); } catch {} }
+    await enqueueAgentFile(full, async () => {
+      let content, mtime;
+      try {
+        content = await readFile(full, 'utf-8');
+        mtime = (await stat(full)).mtimeMs;
+      } catch { return; }
+      let updated = rewriteAgentMcpTools(content, { add, remove });
+      if (!updated || updated === content) return;
+      // 乐观锁:最终写之前再对一次 mtime —— 队列外的写入(编辑器/CLI/旧客户端直写)
+      // 在读之后动了文件,就重读重算一次;仍不一致则放弃本轮,宁可不同步也不覆盖他人写入。
+      try {
+        if ((await stat(full)).mtimeMs !== mtime) {
+          content = await readFile(full, 'utf-8');
+          mtime = (await stat(full)).mtimeMs;
+          updated = rewriteAgentMcpTools(content, { add, remove });
+          if (!updated || updated === content) return;
+        }
+      } catch { return; }
+      try { await writeFile(full, updated); } catch {}
+    });
   }
 }
 
@@ -482,7 +512,9 @@ router.post('/agents/builtin/install', async (req, res) => {
       let exists = false;
       try { await stat(dest); exists = true; } catch {}
       if (exists && !overwrite) { skipped.push(a.name); continue; }
-      await writeFile(dest, a.content, 'utf-8');
+      // 走与 PUT /agents/:name / syncMcpToAgents 相同的 per-file 队列:批量安装与
+      // 后台 MCP 同步并发写同一 .md 会互踩。
+      await enqueueAgentFile(dest, async () => { await writeFile(dest, a.content, 'utf-8'); });
       installed.push(a.name);
     }
     res.json({ ok: true, installed, skipped });
@@ -523,17 +555,23 @@ router.put('/agents/:name', async (req, res) => {
     if (typeof content !== 'string') throw new Error('content must be a string');
     await mkdir(AGENTS_DIR, { recursive: true });
     const path = join(AGENTS_DIR, req.params.name + '.md');
-    // 区分新建 vs 编辑:新建时把当前所有 MCP 同步进这个新 agent(让它一创建就能用全部 MCP);
-    // 编辑时不动(尊重用户手动增删的 MCP,避免把他刚删的又加回来)。
-    let isNew = false;
-    let cur = null;
-    try { cur = await stat(path); } catch { isNew = true; }
-    if (!isNew && expectedMtimeMs != null && cur.mtimeMs !== Number(expectedMtimeMs)) {
-      let current = '';
-      try { current = await readFile(path, 'utf-8'); } catch {}
-      return res.status(409).json({ error: 'conflict', mtimeMs: cur.mtimeMs, content: current });
-    }
-    await writeFile(path, content);
+    // 乐观锁比对 + 写入挂进与 syncMcpToAgents 相同的 per-file 队列:否则后台同步可能
+    // 插在 stat 与 writeFile 之间,先被覆盖再覆盖回去 = 两边内容互丢。
+    const { isNew, conflict } = await enqueueAgentFile(path, async () => {
+      // 区分新建 vs 编辑:新建时把当前所有 MCP 同步进这个新 agent(让它一创建就能用全部 MCP);
+      // 编辑时不动(尊重用户手动增删的 MCP,避免把他刚删的又加回来)。
+      let isNew = false;
+      let cur = null;
+      try { cur = await stat(path); } catch { isNew = true; }
+      if (!isNew && expectedMtimeMs != null && cur.mtimeMs !== Number(expectedMtimeMs)) {
+        let current = '';
+        try { current = await readFile(path, 'utf-8'); } catch {}
+        return { conflict: { mtimeMs: cur.mtimeMs, content: current } };
+      }
+      await writeFile(path, content);
+      return { isNew };
+    });
+    if (conflict) return res.status(409).json({ error: 'conflict', mtimeMs: conflict.mtimeMs, content: conflict.content });
     let syncedContent = null;
     if (isNew) {
       try {

@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { readFile, writeFile, mkdir, copyFile, unlink, readdir } from 'fs/promises';
+import { readFile, writeFile, mkdir, copyFile, unlink, readdir, rename } from 'fs/promises';
 import { existsSync } from 'fs';
 import { execFile, spawn } from 'child_process';
 import { promisify } from 'util';
@@ -146,9 +146,25 @@ async function readCustomProviders() {
   } catch { return []; }
 }
 
+// 原子写 + 串行队列:并发 create/edit/delete 各自读-改-写,半截 writeFile 或互相
+// 覆盖会丢 provider 条目。tmp 名带 uuid + rename 落地,写操作挂同一条 Promise 链
+// (与 sessions.js writeJsonlAtomic 同模式,单文件只需一条链)。
+let _customProvidersQueue = Promise.resolve();
 async function writeCustomProviders(list) {
-  await mkdir(join(homedir(), '.claude-gui'), { recursive: true });
-  await writeFile(CUSTOM_PROVIDERS_PATH, JSON.stringify(list, null, 2));
+  const run = _customProvidersQueue.catch(() => {}).then(async () => {
+    await mkdir(join(homedir(), '.claude-gui'), { recursive: true });
+    const tmp = `${CUSTOM_PROVIDERS_PATH}.tmp-${randomUUID()}`;
+    try {
+      await writeFile(tmp, JSON.stringify(list, null, 2));
+      await rename(tmp, CUSTOM_PROVIDERS_PATH);
+    } catch (err) {
+      // rename 前抛错会留 tmp-uuid 残留,兜底清掉(文件可能没写成,ENOENT 忽略)。
+      try { await unlink(tmp); } catch {}
+      throw err;
+    }
+  });
+  _customProvidersQueue = run;
+  return run;
 }
 
 // BB6: validate a tierModels input against the provider's model list. Returns a
@@ -334,6 +350,13 @@ router.put('/settings-env', async (req, res) => {
     const env = { ...(data.env || {}) };
     for (const [k, v] of Object.entries(set)) env[String(k)] = String(v);
     for (const k of del) delete env[String(k)];
+    // SSRF 守卫(与 provider 创建/切换同口径,环回放行):env 面板可直写
+    // ANTHROPIC_BASE_URL,绕过 provider 表单的校验 → 在此兜底挡内网地址。
+    for (const k of ['ANTHROPIC_BASE_URL', 'ANTHROPIC_API_URL']) {
+      if (env[k]) {
+        try { await assertPublicBaseURL(env[k]); } catch (e) { return res.status(e.status || 400).json({ error: e.message }); }
+      }
+    }
     if (Object.keys(env).length) data.env = env; else delete data.env;
     await writeFile(SETTINGS_PATH, JSON.stringify(data, null, 2));
     res.json(data);
@@ -461,6 +484,12 @@ router.put('/settings', async (req, res) => {
       const official = !base || /\/\/api\.anthropic\.com/.test(base);
       if (official && updated.model && updated.env?.ANTHROPIC_MODEL && updated.env.ANTHROPIC_MODEL !== updated.model) {
         updated.env.ANTHROPIC_MODEL = updated.model;
+      }
+    }
+    // SSRF 守卫(同口径,环回放行):整包 JSON 编辑可写入任意 ANTHROPIC_BASE_URL。
+    for (const k of ['ANTHROPIC_BASE_URL', 'ANTHROPIC_API_URL']) {
+      if (updated.env?.[k]) {
+        try { await assertPublicBaseURL(updated.env[k]); } catch (e) { return res.status(e.status || 400).json({ error: e.message }); }
       }
     }
     await writeFile(SETTINGS_PATH, JSON.stringify(updated, null, 2) + '\n');
@@ -721,6 +750,10 @@ router.post('/provider/switch', async (req, res) => {
 
     // Back up the current settings.json (timestamped) before overwriting.
     const ts = new Date().toISOString().replace(/[:.]/g, '-');
+    // SSRF 守卫(同口径):snapshot.env 的 ANTHROPIC_BASE_URL 将直写 settings 由 CLI 直连。
+    if (snapBase) {
+      try { await assertPublicBaseURL(snapBase); } catch (e) { return res.status(e.status || 400).json({ error: e.message }); }
+    }
     await backupSettings(ts);
 
     const current = await readCurrentSettings();
@@ -766,6 +799,9 @@ function resolveTierModels(tierModels, chosen) {
 // Normalized OpenAI-upstream switch — used by both cc-switch openai providers
 // and GUI custom providers (type=openai). `up` = { id, name, baseURL, apiKey, models }.
 async function switchToOpenAIUpstream(up, requestedModel, res) {
+  // SSRF 守卫(与 fetch-models/test 同口径,环回放行):切换后代理会带 apiKey 直连
+  // 该 baseURL,创建/编辑之外的切换路径(cc-switch 导入数据)也要挡内网。
+  try { await assertPublicBaseURL(up.baseURL); } catch (e) { return res.status(e.status || 400).json({ error: e.message }); }
   const models = up.models || [];
   const model = (requestedModel && models.includes(requestedModel))
     ? requestedModel
@@ -833,6 +869,8 @@ async function switchToOpenAIUpstream(up, requestedModel, res) {
 // the (poisoned) OAuth auth header for the provider's real token and forwards.
 // `up` = { id, name, baseURL, authToken, snapshot?, models? }.
 async function switchToAnthropicUpstream(up, requestedModel, res) {
+  // SSRF 守卫(同 switchToOpenAIUpstream):passthrough 代理带 authToken 直连该 baseURL。
+  try { await assertPublicBaseURL(up.baseURL); } catch (e) { return res.status(e.status || 400).json({ error: e.message }); }
   let port = getAnthropicProxyPort();
   if (!port) port = await startAnthropicProxy();
   if (!port) return res.status(500).json({ error: 'anthropic 代理启动失败(端口占用)' });
@@ -945,6 +983,8 @@ async function switchToCustomProvider(p, requestedModel, res) {
     );
   }
   // official-anthropic custom upstream (rare) — direct, uses the CLI OAuth.
+  // SSRF 守卫(同口径):该分支把 baseURL 直写 settings.env 由 CLI 直连,不过代理。
+  try { await assertPublicBaseURL(p.baseURL); } catch (e) { return res.status(e.status || 400).json({ error: e.message }); }
   const model = (effModel && models.includes(effModel))
     ? effModel : (defModel || models[0] || effModel || '');
   const current = await readCurrentSettings();
@@ -994,6 +1034,7 @@ router.post('/providers/import-from-ccswitch', async (_req, res) => {
     const list = await readCustomProviders();
     const seen = new Set(list.map((p) => p.ccSwitchSource).filter(Boolean));
     let added = 0;
+    let skippedInvalid = 0; // baseURL 不过 SSRF 校验被跳过的条数,随响应带回
     // claude-format providers(第三方 anthropic 兼容):env.ANTHROPIC_BASE_URL/TOKEN + _MODEL 列表
     for (const r of claudeRows) {
       if (seen.has(r.id)) continue;
@@ -1003,6 +1044,8 @@ router.post('/providers/import-from-ccswitch', async (_req, res) => {
       const baseURL = env.ANTHROPIC_BASE_URL || env.ANTHROPIC_API_URL;
       const apiKey = env.ANTHROPIC_AUTH_TOKEN || env.ANTHROPIC_API_KEY;
       if (!baseURL || !apiKey) continue;
+      // 导入的 baseURL 与手写 POST 同口径过 SSRF 校验:不过就跳过,不与 apiKey 一起落盘。
+      try { await assertPublicBaseURL(String(baseURL)); } catch { skippedInvalid++; continue; }
       const models = [...new Set(Object.entries(env)
         .filter(([k, v]) => /_MODEL$/.test(k) && typeof v === 'string' && v)
         .map(([, v]) => v))];
@@ -1022,6 +1065,7 @@ router.post('/providers/import-from-ccswitch', async (_req, res) => {
       if (seen.has(r.id)) continue;
       const p = parseOpenAIProvider(r.settings_config);
       if (!p) continue;
+      try { await assertPublicBaseURL(String(p.baseURL)); } catch { skippedInvalid++; continue; }
       list.push({
         id: randomUUID(),
         name: r.name,
@@ -1035,7 +1079,7 @@ router.post('/providers/import-from-ccswitch', async (_req, res) => {
     }
     await writeCustomProviders(list);
     await markCCSwitchImported();
-    res.json({ ok: true, added, total: list.length });
+    res.json({ ok: true, added, skippedInvalid, total: list.length });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -1059,6 +1103,9 @@ router.post('/custom-providers', async (req, res) => {
     if (type !== 'openai' && type !== 'anthropic') return res.status(400).json({ error: 'type 必须是 openai 或 anthropic' });
     let url; try { url = new URL(baseURL); } catch { return res.status(400).json({ error: 'baseURL 非法' }); }
     if (!/^https?:$/.test(url.protocol)) return res.status(400).json({ error: 'baseURL 必须是 http(s)' });
+    // SSRF 守卫与 fetch-models/test 同口径(本机环回中转放行):创建时挡下内网地址,
+    // 否则切换后 server 会带 apiKey 直连它。
+    try { await assertPublicBaseURL(baseURL); } catch (e) { return res.status(e.status || 400).json({ error: e.message }); }
     const cleanModels = Array.isArray(models) ? models.filter((m) => typeof m === 'string' && m.trim()).map((m) => m.trim()) : [];
     const entry = {
       id: randomUUID(),
@@ -1109,6 +1156,8 @@ router.put('/custom-providers/:id', async (req, res) => {
     if (type !== 'openai' && type !== 'anthropic') return res.status(400).json({ error: 'type 必须是 openai 或 anthropic' });
     let url; try { url = new URL(baseURL); } catch { return res.status(400).json({ error: 'baseURL 非法' }); }
     if (!/^https?:$/.test(url.protocol)) return res.status(400).json({ error: 'baseURL 必须是 http(s)' });
+    // SSRF 守卫(同创建路径):编辑可把 baseURL 改指向内网,而存储 apiKey 保留 → 必须挡。
+    try { await assertPublicBaseURL(baseURL); } catch (e) { return res.status(e.status || 400).json({ error: e.message }); }
     const prev = list[idx];
     // 上下文窗口(token,可选):自动压缩窗口联动用。传 null/'' 清除;传合法数字更新;不传保留。
     const cwNum = Number(contextWindow);
@@ -1323,7 +1372,8 @@ async function tryFetchModels(url, apiKey) {
 // SSRF 守卫:provider baseURL 用户可填任意 URL,server 会带【存储的 apiKey】主动
 // fetch 并把上游响应反射回来 → 攻击者把 baseURL 指向内网/云元数据(169.254.169.254)
 // 探测,或指向自己的服务器把用户 provider 密钥骗出。解析主机名后拒绝环回/私网/链路本地。
-async function assertPublicBaseURL(baseURL) {
+// export:mcp.js 的 ping 对 MCP server URL 也用同一口径。
+export async function assertPublicBaseURL(baseURL) {
   let host;
   try { host = new URL(baseURL).hostname.replace(/^\[|\]$/g, ''); }
   catch { const e = new Error('baseURL 非法'); e.status = 400; throw e; }
@@ -1331,6 +1381,11 @@ async function assertPublicBaseURL(baseURL) {
   let addrs;
   try { addrs = await lookup(host, { all: true }); }
   catch { const e = new Error('无法解析 baseURL 主机名'); e.status = 400; throw e; }
+  // 环回放行:本机中转(one-api / new-api / claude 自带的回环代理)是合法场景,
+  // server 打环回只到达用户自己机器,不构成内网探测面;且编辑态强制 baseURL 与存储
+  // key 同源,环回也骗不出已存密钥。私网/链路本地(真 SSRF 目标)仍拒绝。
+  const isLoopback = (ip) => /^127\./.test(ip) || ip === '::1' || /^::ffff:127\./i.test(ip);
+  if (addrs.length && addrs.every((a) => isLoopback(a.address))) return;
   const isPrivate = (ip) => {
     if (/^127\.|^0\.|^10\.|^169\.254\.|^192\.168\.|^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./.test(ip)) return true;
     if (/^172\.(1[6-9]|2\d|3[01])\./.test(ip)) return true;

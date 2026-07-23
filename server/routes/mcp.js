@@ -6,6 +6,7 @@ import { homedir } from 'os';
 import { execFile, spawn } from 'child_process';
 import { promisify } from 'util';
 import { syncMcpToAgents } from './agents.js';
+import { assertPublicBaseURL } from './settings.js';
 import { claudeCommand } from '../utils/claude-resolver.js';
 import { detectUv } from './version-check.js';
 import { searchRegistry } from '../services/mcp-registry.js';
@@ -20,14 +21,42 @@ async function readRawMcpConfig(name) {
   } catch { return null; }
 }
 
+// MCP command 来自用户配置,shell:true 会让每个 arg 过 cmd 元字符解释 = 命令注入面。
+// 照 chat.js claudeSpawn 手法:Windows 上先把裸命令名经 where.exe 解析成真实文件,
+// .cmd/.bat 显式包 cmd.exe /c(Node 安全策略拒绝直跑批处理),参数仍是独立 argv 不过
+// shell 字符串拼接;.exe / 非 Windows 直接 spawn。解析失败原样返回,由 spawn 报 ENOENT。
+async function spawnMcpCommand(command, args, opts) {
+  if (process.platform !== 'win32') return spawn(command, args, opts);
+  let resolved = command;
+  if (!/[\\/]/.test(command)) {
+    try {
+      const { stdout } = await execFileP('where', [command], { timeout: 5000 });
+      const hits = String(stdout).split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+      // 裸名可能同时命中无扩展名 shim 与 .cmd/.exe:优先可直接执行的扩展名。
+      resolved = hits.find((h) => /\.(exe|cmd|bat)$/i.test(h)) || hits[0] || command;
+    } catch { /* where 失败:原样交给 spawn 报错 */ }
+  }
+  if (/\.(cmd|bat)$/i.test(resolved)) return spawn('cmd.exe', ['/c', resolved, ...args], opts);
+  return spawn(resolved, args, opts);
+}
+
 // 直接 spawn stdio MCP 的命令抓早期 stderr —— `claude mcp get` 只报 "Failed to connect",
 // 不吐子进程真因(命令未找到 / 包无可执行入口 / 缺依赖 / realpath 缺失等)。最多等 timeoutMs:
 // stdio MCP 正常启动会静默等 stdin(无 stderr、不退出)→ 视为无早期错误;快速退出 + stderr = 真错误。
-function probeStdioStderr(cfg, timeoutMs = 6000) {
+async function probeStdioStderr(cfg, timeoutMs = 6000) {
+  if (!cfg || !cfg.command) return '';
+  const isWin = process.platform === 'win32';
+  // 先解析命令(spawnMcpCommand 是 async),再进 Promise 包事件流。
+  const spawnIt = await spawnMcpCommand(cfg.command, Array.isArray(cfg.args) ? cfg.args : [], {
+    env: { ...process.env, ...(cfg.env || {}) },
+    stdio: ['ignore', 'ignore', 'pipe'],
+    // 非 Win:独立进程组,便于负 pid 杀掉命令 fork 出的真实 server 子进程,不留孤儿。
+    detached: !isWin,
+  }).catch((e) => e);
+  if (spawnIt instanceof Error) return `spawn 失败: ${spawnIt.message}`;
+  const child = spawnIt;
   return new Promise((resolve) => {
-    if (!cfg || !cfg.command) return resolve('');
-    const isWin = process.platform === 'win32';
-    let stderr = '', done = false, child, timer;
+    let stderr = '', done = false, timer;
     const killTree = () => {
       if (!child || child.pid == null) return;
       try {
@@ -41,16 +70,6 @@ function probeStdioStderr(cfg, timeoutMs = 6000) {
       killTree();
       resolve((stderr.trim() + suffix).trim().slice(0, 1200));
     };
-    try {
-      child = spawn(cfg.command, Array.isArray(cfg.args) ? cfg.args : [], {
-        env: { ...process.env, ...(cfg.env || {}) },
-        stdio: ['ignore', 'ignore', 'pipe'],
-        // Windows:npx/uvx/uv 实为 .cmd,不经 shell spawn 会 ENOENT 误报"命令未找到"。
-        shell: isWin,
-        // 非 Win:独立进程组,便于负 pid 杀掉命令 fork 出的真实 server 子进程,不留孤儿。
-        detached: !isWin,
-      });
-    } catch (e) { return resolve(`spawn 失败: ${e.message}`); }
     child.stderr?.on('data', (d) => { stderr += d.toString(); });
     child.on('error', (e) => finish(e.code === 'ENOENT'
       ? `\n命令未找到: ${cfg.command}(不在 PATH 中 —— 该命令需要的运行时可能没装,或装了但 GUI 启动环境的 PATH 没包含它)`
@@ -136,22 +155,22 @@ export async function listMcpTools(name, timeoutMs = 15000) {
 // 握手核心与"已配置的 server"解耦:添加表单在**添加前**预览工具清单时,传入草稿 cfg 直接握手。
 export async function listToolsFromCfg(cfg, timeoutMs = 15000) {
   if (!cfg.command) return { transport: cfg.type || 'http', tools: null, note: '仅 stdio 类型支持查看工具清单;HTTP/SSE server 请在其平台侧管理。' };
+  const isWin = process.platform === 'win32';
+  // 先解析命令(spawnMcpCommand 是 async:Windows where.exe + .cmd 包 cmd.exe,不过 shell)。
+  const spawnIt = await spawnMcpCommand(cfg.command, Array.isArray(cfg.args) ? cfg.args : [], {
+    env: { ...process.env, ...(cfg.env || {}) }, stdio: ['pipe', 'pipe', 'ignore'],
+  }).catch((e) => e);
+  if (spawnIt instanceof Error) return { transport: 'stdio', tools: null, note: `启动失败: ${spawnIt.message}` };
+  const child = spawnIt;
   return await new Promise((resolve) => {
-    const isWin = process.platform === 'win32';
-    let child, done = false, buf = '', timer; // timer 提前声明:finish 里 clearTimeout(timer) 在
-    // 同步 spawn 失败路径会先于末尾赋值执行,用 const 声明会 TDZ ReferenceError 污染错误文案。
+    let done = false, buf = '', timer; // timer 提前声明:finish 里 clearTimeout(timer) 在
+    // 同步失败路径会先于末尾赋值执行,用 const 声明会 TDZ ReferenceError 污染错误文案。
     const finish = (tools, note) => {
       if (done) return; done = true;
       clearTimeout(timer);
       try { if (isWin && child?.pid) spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], { stdio: 'ignore' }); else child?.kill('SIGKILL'); } catch {}
       resolve({ transport: 'stdio', tools, note });
     };
-    try {
-      child = spawn(cfg.command, Array.isArray(cfg.args) ? cfg.args : [], {
-        env: { ...process.env, ...(cfg.env || {}) }, stdio: ['pipe', 'pipe', 'ignore'],
-        shell: isWin, // uv/npx 在 Win 是 .cmd,不经 shell 会 ENOENT
-      });
-    } catch (e) { return finish(null, `启动失败: ${e.message}`); }
     child.on('error', (e) => finish(null, `启动失败: ${e.message}`));
     const send = (o) => { try { child.stdin.write(JSON.stringify(o) + '\n'); } catch {} };
     // 按行解析 JSON-RPC,拿到 id:2(tools/list)的 result 即完成。
@@ -597,8 +616,14 @@ router.get('/mcp/:name/ping', async (req, res) => {
     let httpStatus = null;
     if (urlMatch) {
       try {
-        const r = await fetch(urlMatch[1], { method: 'HEAD', redirect: 'follow' });
+        // SSRF 守卫(与 provider baseURL 同口径,本机环回 MCP 放行):URL 来自 MCP 配置,
+        // server 主动 fetch 前挡内网/云元数据地址。
+        await assertPublicBaseURL(urlMatch[1]);
+        // SSRF 防护:redirect 必须 manual。assertPublicBaseURL 只校验初始 URL,
+        // follow 会让 302 绕进私网/云元数据地址。ping 场景不需要跟跳,3xx 直接按失败处理。
+        const r = await fetch(urlMatch[1], { method: 'HEAD', redirect: 'manual' });
         httpStatus = r.status;
+        if (httpStatus >= 300 && httpStatus < 400) throw new Error(`HTTP ${httpStatus} redirect`);
         // HTTP server may not allow HEAD — that's not a real failure if
         // the CLI itself says Connected.
         if (httpStatus >= 500 && status === 'ok') {

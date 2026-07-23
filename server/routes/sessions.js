@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { readdir, stat, readFile, writeFile, rename, open, mkdir } from 'fs/promises';
+import { readdir, stat, readFile, writeFile, rename, open, mkdir, unlink } from 'fs/promises';
 import { join, dirname, isAbsolute, resolve } from 'path';
 import { isLocalReq } from '../services/auth.js';
 import { homedir, tmpdir } from 'os';
@@ -64,11 +64,28 @@ function hasRealConversationLine(lines) {
   return false;
 }
 
+// 同一 jsonl 的写操作串行化:trim/compact/strip 并发时,固定临时名会互相覆盖再 rename
+// = 会话历史损坏。模块级 per-file Promise 链,新写挂到该文件队尾,finally 清 Map 项。
+// 临时名再带 uuid 双保险(崩溃残留/未来漏走队列的调用点也不会互踩)。
+const _jsonlWriteQueues = new Map(); // filePath -> 队尾 Promise
 async function writeJsonlAtomic(file, text) {
-  const finalText = text.length && !text.endsWith('\n') ? text + '\n' : text;
-  const tmp = `${file}.tmp-trim`;
-  await writeFile(tmp, finalText, 'utf-8');
-  await rename(tmp, file);
+  const prev = _jsonlWriteQueues.get(file) || Promise.resolve();
+  const run = prev.catch(() => {}).then(async () => {
+    const finalText = text.length && !text.endsWith('\n') ? text + '\n' : text;
+    const tmp = `${file}.tmp-trim-${randomUUID()}`;
+    try {
+      await writeFile(tmp, finalText, 'utf-8');
+      await rename(tmp, file);
+    } catch (err) {
+      // rename 前抛错会留 tmp-uuid 残留,兜底清掉(文件可能没写成,ENOENT 忽略)。
+      try { await unlink(tmp); } catch {}
+      throw err;
+    }
+  });
+  _jsonlWriteQueues.set(file, run);
+  const cleanup = () => { if (_jsonlWriteQueues.get(file) === run) _jsonlWriteQueues.delete(file); };
+  run.then(cleanup, cleanup);
+  return run;
 }
 
 export function trimJsonlBeforeTool(raw, toolUseId) {

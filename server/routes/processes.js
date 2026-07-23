@@ -75,6 +75,42 @@ async function winQueryProcesses(filter = null) {
   }
 }
 
+// 毫秒间隔 → ps etime 同款 [[dd-]hh:]mm:ss,前端"运行 xx"直接展示。
+function formatElapsedMs(ms) {
+  if (!Number.isFinite(ms) || ms < 0) return null;
+  const s = Math.floor(ms / 1000);
+  const d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+  const pad = (n) => String(n).padStart(2, '0');
+  if (d > 0) return `${d}-${pad(h)}:${pad(m)}:${pad(sec)}`;
+  if (h > 0) return `${pad(h)}:${pad(m)}:${pad(sec)}`;
+  return `${pad(m)}:${pad(sec)}`;
+}
+
+// CIM/wmic 的 CreationDate(yyyyMMddHHmmss,本机时区)→ Date;解析失败返回 null。
+function parseWmiDate(s) {
+  const m = String(s || '').match(/^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})/);
+  if (!m) return null;
+  return new Date(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]);
+}
+
+// ps 输出单行 → 统一形状 { pid, ppid, cpu, mem, elapsed, startedAt, command }。
+// 列固定为 pid,ppid,pcpu,pmem,etime,lstart(5 段),command(剩余)。lstart 形如
+// "Wed Jul 23 10:00:00 2026" 恒 5 个空白分隔段,按段数切比按正则稳。
+function parsePsLine(line, withPpid) {
+  const parts = line.trim().split(/\s+/);
+  if (parts.length < (withPpid ? 10 : 9)) return null;
+  let i = 0;
+  const pid = parseInt(parts[i++]);
+  const ppid = withPpid ? parseInt(parts[i++]) : null;
+  const cpu = parts[i++];
+  const mem = parts[i++];
+  const elapsed = parts[i++];
+  const startedAt = parts.slice(i, i + 5).join(' '); i += 5;
+  const command = parts.slice(i).join(' ');
+  if (!Number.isFinite(pid)) return null;
+  return { pid, ppid: Number.isFinite(ppid) ? ppid : null, cpu, mem, elapsed, startedAt, command };
+}
+
 async function getProcessInfo(pid) {
   const n = Number(pid);
   if (!Number.isInteger(n) || n <= 0) return null;
@@ -84,12 +120,13 @@ async function getProcessInfo(pid) {
       const rows = await winQueryProcesses(n);
       if (!rows.length) return null;
       const r = rows[0];
+      const start = parseWmiDate(r.CreationDate);
       return {
         pid: parseInt(r.ProcessId) || n,
         ppid: r.ParentProcessId ? parseInt(r.ParentProcessId) : null,
         cpu: null,
         mem: null,
-        elapsed: null,
+        elapsed: start ? formatElapsedMs(Date.now() - start.getTime()) : null, // 由 CreationDate 推算(etime 语义)
         startedAt: r.CreationDate || null,  // WMI 形如 20260619141700.000000+480
         command: r.CommandLine || null,
       };
@@ -98,18 +135,12 @@ async function getProcessInfo(pid) {
     }
   }
   try {
-    const { stdout: output } = await execFileP('ps', ['-p', String(n), '-o', 'pid,ppid,%cpu,%mem,etime,command'], { encoding: 'utf-8' });
-    const lines = output.trim().split('\n');
-    if (lines.length < 2) return null;
-    const parts = lines[1].trim().split(/\s+/);
-    return {
-      pid: parseInt(parts[0]),
-      ppid: parseInt(parts[1]),
-      cpu: parts[2],
-      mem: parts[3],
-      elapsed: parts[4],
-      command: parts.slice(5).join(' '),
-    };
+    // etime=运行时长(别用 ps aux 的 TIME 列,那是累计 CPU 时间);lstart=启动时间。
+    // LC_ALL=C:parsePsLine 按英文 locale 解析 lstart,非英文系统整批解析失败。
+    const { stdout: output } = await execFileP('ps', ['-p', String(n), '-o', 'pid=,ppid=,pcpu=,pmem=,etime=,lstart=,command='], { encoding: 'utf-8', env: { ...process.env, LC_ALL: 'C' } });
+    const line = output.trim();
+    if (!line) return null;
+    return parsePsLine(line, true);
   } catch {
     return null;
   }
@@ -171,30 +202,29 @@ router.get('/processes', async (req, res) => {
       try {
         claudeProcesses = (await winQueryProcesses())
           .filter((r) => r.CommandLine && /\bclaude\b/i.test(r.CommandLine) && !/claude-gui/i.test(r.CommandLine))
-          .map((r) => ({
-            pid: parseInt(r.ProcessId) || null,
-            cpu: null,
-            mem: null,
-            elapsed: null,
-            startedAt: r.CreationDate || null,
-            command: r.CommandLine,
-          }));
+          .map((r) => {
+            const start = parseWmiDate(r.CreationDate);
+            return {
+              pid: parseInt(r.ProcessId) || null,
+              ppid: r.ParentProcessId ? parseInt(r.ParentProcessId) : null,
+              cpu: null, // CIM 全量查 cpu/mem 代价高,面板只展示 null 占位
+              mem: null,
+              elapsed: start ? formatElapsedMs(Date.now() - start.getTime()) : null,
+              startedAt: r.CreationDate || null,
+              command: r.CommandLine,
+            };
+          });
       } catch {}
     } else {
       try {
-        const { stdout: psOutput } = await execFileP('ps', ['aux'], { encoding: 'utf-8', maxBuffer: 8 * 1024 * 1024 });
+        // 不用 ps aux:其第 9 列 TIME 是累计 CPU 时间不是运行时长(elapsed 语义错),
+        // 且没有 startedAt。显式列输出与 getProcessInfo 同口径解析。ppid 前端不展示,
+        // 全量列表省去一列(parsePsLine 第二参 false → ppid:null)。
+        // LC_ALL=C 同上:固定英文 locale 输出供 parsePsLine 解析。
+        const { stdout: psOutput } = await execFileP('ps', ['-ax', '-o', 'pid=,pcpu=,pmem=,etime=,lstart=,command='], { encoding: 'utf-8', maxBuffer: 8 * 1024 * 1024, env: { ...process.env, LC_ALL: 'C' } });
         claudeProcesses = psOutput.trim().split('\n').filter((line) => {
           return /\bclaude\b/.test(line) && !/claude-gui/.test(line) && !/\bgrep\b/.test(line);
-        }).map((line) => {
-          const parts = line.trim().split(/\s+/);
-          return {
-            pid: parseInt(parts[1]),
-            cpu: parts[2],
-            mem: parts[3],
-            elapsed: parts[9],
-            command: parts.slice(10).join(' '),
-          };
-        });
+        }).map((line) => parsePsLine(line, false)).filter(Boolean);
       } catch {}
     }
 
