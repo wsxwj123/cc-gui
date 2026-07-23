@@ -1762,7 +1762,7 @@ function AutoCompactPctSelect() {
     <div className="bg-canvas-warm border border-canvas-deep rounded-lg px-3 py-2.5 flex items-center gap-3">
       <div className="min-w-0 flex-1">
         <div className="text-xs text-ink font-body font-medium flex items-center gap-1.5">压缩触发百分比<EffectBadge level="immediate" /></div>
-        <div className="text-[10.5px] text-ink-faint font-body">第三方 provider 联动时的触发点:上下文占用达到模型真实窗口的该比例即自动压缩(如 1M 窗口 × 80% = 80 万时触发)。窗口来源:模型名 [1m] 后缀 / 获取模型时实抓 / 内置模型规则表 / Provider 表单手填。官方模型不受影响。<span className="text-ink-muted">规则表按模型名推断,逆向中转的名称若与真实窗口不符,请在 Provider 表单手填窗口覆盖。</span></div>
+        <div className="text-[10.5px] text-ink-faint font-body">第三方 provider 联动时的触发点:上下文占用达到模型真实窗口的该比例即自动压缩(如 1M 窗口 × 80% = 80 万时触发)。窗口来源:模型名 [1m] 后缀 / 获取模型时实抓 / 内置模型规则表 / Provider 表单手填。官方模型不受影响;显式设置了「自动压缩窗口」数值或环境变量 CLAUDE_CODE_AUTO_COMPACT_WINDOW 时,本项不生效(以显式值为准)。<span className="text-ink-muted">规则表按模型名推断,逆向中转的名称若与真实窗口不符,请在 Provider 表单手填窗口覆盖。</span></div>
       </div>
       <select value={String(pct)} disabled={busy}
         onChange={(e) => save(Number(e.target.value))}
