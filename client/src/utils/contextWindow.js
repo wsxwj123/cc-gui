@@ -17,7 +17,7 @@ export function isBareClaudeAlias(model) {
 }
 
 export function nativeContextWindow(model) {
-  const id = (model || '').toLowerCase();
+  const id = (model || '').toLowerCase().trim();
   if (/\[1m\]/i.test(id)) return 1_000_000;
   const byM = id.match(/(\d+)m(?![a-z0-9])/);        // 如 -2m / -1m 显式标注,最权威
   if (byM) return parseInt(byM[1], 10) * 1_000_000;
@@ -38,7 +38,9 @@ export function nativeContextWindow(model) {
     return 200_000;                                     // haiku 全系 / opus≤4.5 / sonnet≤4.5 / claude-3-x
   }
   if (/deepseek|mimo/.test(id)) return 200_000;                               // U3 实测 /context 200K
-  if (/kimi|moonshot/.test(id)) return 262_144;                              // Kimi K2.x 原生 256K
+  // 裸 'k3' 是 Kimi Code 套餐别名(不含 kimi/moonshot 字样所以上面正则漏网),官方 262K;
+  // 精确匹配防误伤(minimax-k3 之类)。k3[1m] 走上方 [1m] 分支返回 1M,不受影响。
+  if (/kimi|moonshot/.test(id) || id === 'k3') return 262_144;               // Kimi K2.x/K3 原生 256K
   if (/glm|zhipu|chatglm/.test(id)) return 200_000;                          // GLM 实测 200K
   if (/grok-?3|grok-?2/.test(id)) return 131_072;                            // Grok-3 128K(Grok-4 走下方默认 1M)
   if (/gpt-4o|gpt-4-turbo|llama|mistral|mixtral|command-r/.test(id)) return 131_072; // 主流 128K 档

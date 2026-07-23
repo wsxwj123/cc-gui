@@ -90,6 +90,7 @@ const MODEL_WINDOW_RULES = [
   [/glm-?(4\.[5-9]|5(\.[01])?)\b/i, 204_800],            // GLM 4.5~5.1 200K
   [/qwen-?3\.7.*max|qwen.*-1m\b/i, 1_048_576],           // Qwen3.7-Max 1M
   [/kimi-?k3/i, 1_048_576],                              // Kimi k3 1M(实抓亦覆盖)
+  [/^k3$/i, 262_144],                                    // 裸 k3=Kimi Code 套餐别名 256K(与客户端徽章一致)
   [/kimi-(k2\.[6-9]|for-coding)/i, 262_144],             // Kimi k2.6+/coding 256K
   [/minimax|abab/i, 204_800],                            // MiniMax M2 系 ~200K
   [/grok-?[4-9]/i, 262_144],

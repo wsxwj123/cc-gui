@@ -50,6 +50,10 @@ assert.equal(nativeContextWindow('claude-sonnet-52'), K200, '数字续接不误�
 assert.equal(nativeContextWindow('deepseek-chat'), K200, 'deepseek 200K');
 assert.equal(nativeContextWindow('mimo-v2.5-pro'), K200, 'mimo 200K');
 assert.equal(nativeContextWindow('kimi-k2.6'), 262_144, 'kimi 256K');
+assert.equal(nativeContextWindow('k3'), 262_144, '裸 k3 = Kimi Code 套餐别名 256K');
+assert.equal(nativeContextWindow('k3[1m]'), M1, 'k3[1m] 走 [1m] 分支 1M');
+assert.equal(nativeContextWindow('minimax-k3'), M1, '含 k3 字样的其他模型不被误捕(默认 1M)');
+assert.equal(nativeContextWindow('  k3 '), 262_144, '首尾空白被 trim 不影响 k3 精确匹配');
 assert.equal(nativeContextWindow('moonshot-v1-128k'), 128_000, '-Nk 标注优先');
 assert.equal(nativeContextWindow('mimo-v2.5-pro[1m]'), M1, '第三方 [1m] 1M');
 assert.equal(nativeContextWindow('gemini-2.5-pro'), M1, '未列第三方默认 1M');
