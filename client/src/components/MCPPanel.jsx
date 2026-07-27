@@ -22,6 +22,9 @@ function PingButton({ name }) {
   useEffect(() => () => clearTimeout(timerRef.current), []);
   const ping = async (e) => {
     e?.stopPropagation();
+    // 上一次成功留下的 3s 清除定时器必须在【发起时】就取消:成功后 3s 内再 ping 且这次失败,
+    // 旧定时器照样触发 setState(null),把刚摆出来的失败原因提前抹掉(看着像"点了没反应")。
+    clearTimeout(timerRef.current);
     setState('busy'); setDetail('');
     try {
       const r = await fetch(`/api/mcp/${encodeURIComponent(name)}/ping`);
@@ -29,7 +32,7 @@ function PingButton({ name }) {
       const ok = d.status === 'ok';
       setDetail(formatPingDetail(d));
       setState(ok ? 'ok' : 'err');
-      if (ok) { clearTimeout(timerRef.current); timerRef.current = setTimeout(() => setState(null), 3000); } // 成功才自动消失;失败保留让用户看清原因
+      if (ok) timerRef.current = setTimeout(() => setState(null), 3000); // 成功才自动消失;失败保留让用户看清原因
     } catch (err) {
       setState('err'); setDetail(err.message);
     }
