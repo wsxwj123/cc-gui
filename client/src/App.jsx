@@ -9201,6 +9201,12 @@ export default function App() {
     const onEsc = (e) => {
       if (e.isComposing || e.keyCode === 229) return; // IME 组字中的 Esc = 取消候选词
       if (e.key !== 'Escape' || e.repeat) return;
+      // R2:焦点在面板内的输入框/文本域/富文本里时,这一击是"取消本次编辑/退出输入",
+      // 不是"关掉整个面板" —— 不守卫的话在设置里改到一半按 Esc,面板连同未保存的编辑一起没了。
+      // 判据与 PermissionPrompt:101 同款(标签名 + contentEditable)。守卫只在本监听内,
+      // 不改任何其他层的 Esc 语义;不 stopPropagation,让浮层/卡片/会话级监听照常处理这一击。
+      const _t = e.target;
+      if (_t && (_t.tagName === 'TEXTAREA' || _t.tagName === 'INPUT' || _t.isContentEditable)) return;
       // confirmDialog 挂在 document 冒泡阶段(晚于本监听),不避让会「面板关了、确认框还在」。
       if (document.querySelector('[data-cgui-confirm]')) return;
       const _st = useStore.getState();
