@@ -5822,6 +5822,11 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       }
       acceleratingRef.current = false;
       backgroundedRef.current = false;
+      // 流归属 ref 生命周期收口:本流已结束,ref 不再代表任何在跑的流。不清会让非流式
+      // 期间的读点(⚡/异步回调)拿到上一个流的会话 = 串扰。只清 ref 不动 streamOwnerKey
+      // state —— state 驱动 liveVisible(CQ-5),此刻本地缓冲还没交还 jsonl,清了会让刚
+      // 产出的回复先隐藏再从历史冒出来(闪一下)。下一次发送/reattach 在 4333 重新认领。
+      streamOwnerKeyRef.current = null;
     }
   }, [selectedSession, selectedProject, streamingModel, isStreaming, sessionQueueKey, sendBtw]);
 
@@ -5939,9 +5944,12 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     // when you revisit a still-generating session), so on mobile "⚡ 引导" did
     // nothing. Flag it so the finally doesn't also pop (double-send).
     acceleratingRef.current = true;
-    // queueKey 与流收尾 drain 同口径(判官盲审#8):本流归属 ownerKey 优先,当前 pane 兜底。
+    // queueKey 与流收尾 drain 同口径(F1):消费端 handleSendRef 恒发进【本窗格当前会话】,
+    // 所以只能弹当前会话的队列 —— 入队侧(enqueueMessage)用的也正是这个 pane key,两端对称。
+    // 原来用 streamOwnerKeyRef:该 ref 流结束后从不清 → 非流式点 ⚡ 弹的是上一个流的队列
+    // (上个队列空=点了没反应,当前会话的排队消息永不发出;非空=上个会话的消息被发进当前会话)。
     const sel = getLocalSession();
-    const queueKey = streamOwnerKeyRef.current || sel?.sessionId || `draft-${sel?.projectHash || 'none'}`;
+    const queueKey = sel?.sessionId || `draft-${sel?.projectHash || 'none'}`;
     const next = useStore.getState().shiftMessage(queueKey);
     if (next?.text) setTimeout(() => handleSendRef.current?.(next.text, next.opts || (next.hidden ? { hiddenUserMessage: true } : {})), 80);
   }, []);
