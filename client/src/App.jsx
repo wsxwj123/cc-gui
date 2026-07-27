@@ -827,7 +827,7 @@ const PANEL_SHORT = {
 function PanelDock({ rightPanel, setRightPanel, updateNotice, jumpToUpdate }) {
   const [railOpen, setRailOpen] = useState(false);
   // 持久展开:点外部不收(用户要「展开项常驻,再点坞按钮才收起」)。
-  // Esc 已让位给停会话(双击 Esc 停止流是唯一 Esc 全局语义,dock 不抢);收起只保留再点坞图标
+  // Esc 已让位给停会话(Esc 的全局语义归会话:生成中停回合、空闲双击清输入/开检查点,dock 不抢);收起只保留再点坞图标
   // 和 cgui:dock-rail-close 事件。
   // 导引联动:tour 的面板步骤经此事件展开 rail 做演示(GuideTour 只 dispatch,不直接碰状态)。
   useEffect(() => {
@@ -5989,12 +5989,11 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   const backgroundPidRef = useRef(backgroundPid);
   useEffect(() => { backgroundPidRef.current = backgroundPid; }, [backgroundPid]);
 
-  // Double-ESC → interrupt streaming (matches Claude Code CLI). A SINGLE Esc
-  // keeps its local meaning (closing the slash-command menu / a popover); a
-  // SECOND Esc within 600ms aborts the current generation. Deliberately NOT
-  // gated on textarea/input focus: during a reply the cursor lives in the
-  // composer, so the old "ignore Esc from a textarea" guard meant Esc never
-  // interrupted in practice. Permission dialogs still own Esc (deny).
+  // 生成中【单击 Esc 即中断】——对齐 CLI 原生(pty 实测:单击就 Interrupted,第二击被吞)。
+  // 原来是 600ms 内双击才停,是 GUI 自造的差异,用户最常抱怨"按一下停不下来"。
+  // 前提是浮层各自吃掉自己的 Esc(见 E1:斜杠菜单/@面板/取消编辑重发/权限卡都已
+  // stopImmediatePropagation),否则"关个菜单"会连带停掉整回合。
+  // 刻意 NOT gated on textarea/input focus:回复期间光标就在输入框里,加焦点守卫等于永不生效。
   useEffect(() => {
     // AZ1:分屏下 esc 双击中断只作用于【焦点窗格】。effect 挂 window 级,每个流式
     // pane 各注册一个 listener;不加这道守卫则一次 esc 广播到所有 pane → 中断全部会话。
@@ -6002,21 +6001,13 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     if (!paneIsActive) return;
     // 只在「焦点 pane」注册一次(deps 仅 paneIsActive)。是否有可停的流改为在按键时用 ref
     // 实时判断,不再让 isStreaming/backgroundPid 抖动驱动 effect 反复重注册(CQ-15 竞态根因)。
-    let lastEsc = 0;
     const onKey = (e) => {
       if (e.key !== 'Escape' || e.repeat) return; // ignore held-key repeats
       if (!streamingRef.current && !backgroundPidRef.current) return; // 本 pane 没有在跑的流,不拦截
-      // 原来"有 pending 卡片(Ask/计划/授权)就 return 让卡片处理"→ 有卡片时双击 Esc 永远走不到停止、
-      // 卡片残留(用户实报)。改:第一次 Esc 仍让卡片自身 Esc(deny)照跑并 arm 第二次;第二次 Esc 汇入
-      // 停止(handleStop→/stop→dropPendingForSession 连带清本会话卡片)。单次 Esc=deny 语义不变。
-      const now = e.timeStamp || performance.now();
-      if (lastEsc && now - lastEsc <= 600) {
-        lastEsc = 0;
-        e.preventDefault();
-        handleStopRef.current?.();
-      } else {
-        lastEsc = now; // first press — let local Esc semantics run, arm the second
-      }
+      // pending 卡片(Ask/计划/授权)自己在捕获阶段吃掉 Esc(E1),走不到这里 = 单击只 deny;
+      // 卡片消失后再按 Esc 才停整轮(/stop 会 dropPendingForSession 连带清残留卡片)。
+      e.preventDefault();
+      handleStopRef.current?.();
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
@@ -8803,7 +8794,7 @@ const SHORTCUT_GROUPS = [
     ['Cmd/Ctrl + N', '当前项目下新建会话'],
     ['Cmd/Ctrl + ↑ / ↓', '切换到上/下一个会话(当前窗格)'],
     ['Cmd/Ctrl + F', '会话内检索(当前窗格)'],
-    ['Esc 连按两次', '停止当前回合'],
+    ['Esc（生成中）', '停止当前回合'],
   ]],
   ['界面', [
     ['Ctrl + Tab', '分屏时轮换聚焦窗格'],
