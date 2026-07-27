@@ -27,11 +27,15 @@ export function TaskCard({ toolCall }) {
   }
   const agentModel = agent?.model || metaAgent?.model || null;
 
-  // 名称优先级:input.subagent_type(实测 = web-search-agent 等具体名)→ store 里的
-  // agent.name → server 提取的 metaAgent.agentType。最后才回退泛化文案。store 里的
-  // agent.name 在某些 provider 下会停留在字面 'Agent'/'Task'(input 未解析成功时),
+  // 名称优先级:命名实例名(teammateName / input.name,SendMessage({to}) 寻址用的真名)
+  // → input.subagent_type(web-search-agent 等具体类型名)→ store 里的 agent.name →
+  // server 提取的 metaAgent.agentType。最后才回退泛化文案。
+  // 真名排最前(D6 实测):模型给命名 agent 时【同时】带 subagent_type
+  // ({name:"probe1", subagent_type:"general-purpose"}),类型名在前会把卡片显示成
+  // GENERAL-PURPOSE,一批命名队友全长一个样、分不清谁是谁。
+  // store 里的 agent.name 在某些 provider 下会停留在字面 'Agent'/'Task'(input 未解析成功时),
   // 这种情况下优先用 metaAgent.agentType 还原具体名。
-  const rawName = toolCall.input?.subagent_type || toolCall.input?.name || agent?.name || null;
+  const rawName = agent?.teammateName || toolCall.input?.name || toolCall.input?.subagent_type || agent?.name || null;
   const isGeneric = !rawName || rawName === 'Task' || rawName === 'Agent';
   const subagentType = (isGeneric && metaAgent?.agentType) ? metaAgent.agentType : (rawName || '子代理');
   const description = toolCall.input?.description || agent?.description || '';

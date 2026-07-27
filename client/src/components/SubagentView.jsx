@@ -38,7 +38,9 @@ export function SubagentView({ agentId, parentTitle, parentSessionId = null, onB
     );
   }
 
-  const rawName = agent.name || null;
+  // 与 TaskCard 同一优先级:命名实例名(teammateName,未被 subagent_type 抢占的那份)
+  // 优先于泛化类型名,否则命名队友在这里也显示成 general-purpose。
+  const rawName = agent.teammateName || agent.name || null;
   const isGeneric = !rawName || rawName === 'Task' || rawName === 'Agent';
   const name = (isGeneric && metaAgent?.agentType) ? metaAgent.agentType : (rawName || '子代理');
   const agentModel = agent.model || metaAgent?.model || null;
