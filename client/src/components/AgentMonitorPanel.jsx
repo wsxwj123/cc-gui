@@ -353,7 +353,10 @@ function AgentCard({ agent }) {
     metaAgent = sess?.subagents?.find?.((a) => a.toolUseId === agent.id);
     if (metaAgent) break;
   }
-  const displayName = agent.name || metaAgent?.agentType || '子代理';
+  // 名字优先级与 TaskCard / SubagentView 对齐:teammateName(input.name,模型给命名实例
+  // 起的真名,SendMessage({to}) 寻址用的那个)> agent.name(已被 subagent_type 抢占)>
+  // 兜底的 agentType。缺这条时会话里显示 xiaoming、监控面板却显示 GENERAL-PURPOSE。
+  const displayName = agent.teammateName || agent.name || metaAgent?.agentType || '子代理';
   const displayModel = agent.model || metaAgent?.model || null;
   const text = agent.text ? agent.text.join('') : '';
   const thinking = agent.thinking ? agent.thinking.join('') : '';
