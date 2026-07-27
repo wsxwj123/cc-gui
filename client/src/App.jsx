@@ -5805,11 +5805,15 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       // 流收尾时照常排空。
       // queueKey 归属(判官盲审#1):排【发起这次流的会话】的队,不读本 pane 当前会话 ——
       // 流式期间切会话时会把 A 的排队消息从 B 的队列里 pop(或漏 pop A 的)。
+      // 消费端归属校验(判官致命#1):drain 弹的是 owner 队列,但 handleSendRef 永远发进
+      // 【本窗格当前会话】—— 流式中切走会话时弹 A 的队 + 发进 B = 跨会话消息泄漏(A 的
+      // 排队消息进了 B,A 的队还少了一条)。owner ≠ 当前会话时整段跳过,留给该会话
+      // reattach 流的收尾排空(AZ10 原设计)。
       if (!acceleratingRef.current && !backgroundedRef.current) {
         const _ls = getLocalSession();
-        const queueKey = streamSid || streamOwnerKeyRef.current
-          || _ls?.sessionId || `draft-${_ls?.projectHash || 'none'}`;
-        const next = useStore.getState().shiftMessage(queueKey);
+        const curKey = _ls?.sessionId || `draft-${_ls?.projectHash || 'none'}`;
+        const queueKey = streamSid || streamOwnerKeyRef.current || curKey;
+        const next = queueKey === curKey ? useStore.getState().shiftMessage(queueKey) : null;
         if (next?.text) {
           // 透传入队时的 opts(尤其 hiddenUserMessage)——否则计划执行这种隐藏续跑消息
           // 出队重发时会变成可见的用户气泡(#5)。
