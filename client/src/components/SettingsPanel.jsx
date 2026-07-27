@@ -483,7 +483,9 @@ function StorageTab() {
       if (!r.ok || !Array.isArray(d?.items)) { setData({ items: [], totalBytes: 0 }); return; }
       setData(d);
     } catch {}
-    setLoading(false);
+    // finally 而非落在 try 之后:上面的形状防御 early return 会跳过它,loading 初值 true
+    // → 端点 500 时 spinner 永转、无重试入口(判官重要项)。
+    finally { setLoading(false); }
   };
   useEffect(() => { fetchList(); }, []);
 
