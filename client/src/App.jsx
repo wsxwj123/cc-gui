@@ -4070,6 +4070,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     backgroundPidRef.current = null;
     lastSeenPidRef.current = null;
     let cancelled = false;
+    let drainScheduled = false; // 排队消息排空的在途标记(见下方 drain 分支)
     const poll = async () => {
       try {
         const r = await fetch('/api/agents/active');
@@ -4094,15 +4095,39 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         // 打包版没有文件 watcher,缺这步要等用户切走切回才看得到结果。
         if (!next && lastSeenPidRef.current && !streamingRef.current && pollSid && selectedSession?.projectHash) {
           fetchMessagesForTab(pollSid, selectedSession.projectHash, { silent: true });
-          // H 转后台:auto-reattach 被抑制→没有 reattach 流的 finally 替我们排空队列。后台回合
-          // 跑完(pid 有→无)在此补一次排空(与 finally 4574 同一互斥判据),否则转后台期间入队的
-          // 消息永不自动发出。本分支每次完成只触发一次(lastSeenPidRef 下一轮已置 null)。
-          // 必须同步清 backgroundPidRef(否则它靠 effect 异步更新,50ms 后出队消息的 handleSend
-          // 撞到旧 pid→入队门又把它塞回空队列→丢消息死锁);pid 已消失,清了语义也对。
-          if (!acceleratingRef.current) {
+        }
+        // 排队消息自动排空(原「pid 有→无」分支的推广)。原分支要求本 pane 亲眼看到 pid
+        // 从有变无,于是用户实报的场景漏网:A 生成中排队 → 切到 B → A 在后台跑完 → 回到 A
+        // 时既没有本地流、也没有进程可见,pid 的那次「有→无」发生在 B 里,A 的队列就永远挂着,
+        // 横幅却写着「当前回复完成后自动发出」。判据改为状态式:本 pane 当前会话【无在跑进程
+        // + 无本地流 + 队列非空】即排空队首,进入会话后的首轮 poll 自然覆盖「切走期间跑完」。
+        // 归属守卫(不复活 F1 跨会话串扰):只弹本 pane 当前会话的队,消费端 handleSendRef
+        // 也恒发进本 pane 当前会话,key 构造与入队侧 sessionQueueKey 逐字同口径;并要求它
+        // 等于本 effect 轮询的那个会话,防 effect 清理与切会话之间的竞态错弹别人的队。
+        // 隐藏项(计划续跑等)只在【本 pane 亲眼看到 pid 有→无】时才发 —— 那是原分支就有的
+        // 行为,一字不改;新推广出来的「回来才发现已跑完」场景保守跳过隐藏项:它们不是用户
+        // 可见的排队消息,没有「回复完成后自动发出」这条 UI 承诺,留给 finally / ⚡ 路径。
+        // 必须同步清 backgroundPidRef(它靠 effect 异步更新,出队消息的 handleSend 撞到旧 pid
+        // 会把消息塞回空队列→死锁);pid 已消失,清了语义也对。
+        if (!next && !streamingRef.current && !acceleratingRef.current) {
+          const _sel = getLocalSession();
+          const drainKey = _sel?.sessionId || `draft-${_sel?.projectHash || 'none'}`;
+          const sameSession = pollSid ? drainKey === pollSid : _sel?.draftId === pollDraftId;
+          const head = (useStore.getState().messageQueue[drainKey] || [])[0];
+          const sawPidFinish = !!lastSeenPidRef.current; // 本 pane 看着这个回合跑完的
+          if (sameSession && head?.text && (!head.hidden || sawPidFinish) && !drainScheduled) {
             backgroundPidRef.current = null;
-            const q = useStore.getState().shiftMessage(pollSid);
-            if (q?.text) setTimeout(() => handleSendRef.current?.(q.text, q.opts || (q.hidden ? { hiddenUserMessage: true } : {})), 50);
+            drainScheduled = true; // 1.5s 的下一轮 poll 不许在这 50ms 里重复弹队(会打乱顺序)
+            setTimeout(() => {
+              drainScheduled = false;
+              // 落地前复查:这 50ms 里可能切了会话 / 新流起来了 —— 那就把消息留在队列里,
+              // 交给该会话下一次进入或流收尾的排空,绝不错发进别的会话。
+              if (cancelled || streamingRef.current || backgroundPidRef.current || acceleratingRef.current) return;
+              const s2 = getLocalSession();
+              if ((s2?.sessionId || `draft-${s2?.projectHash || 'none'}`) !== drainKey) return;
+              const q = useStore.getState().shiftMessage(drainKey);
+              if (q?.text) handleSendRef.current?.(q.text, q.opts || (q.hidden ? { hiddenUserMessage: true } : {}));
+            }, 50);
           }
         }
         lastSeenPidRef.current = next;
