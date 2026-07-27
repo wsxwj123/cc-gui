@@ -6065,6 +6065,10 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     // 第二击也不再让行,Esc 不会变成哑键。
     let yieldedForId = null;
     const onKey = (e) => {
+      // 输入法组字中按 Esc = 取消候选词,不是"停这一回合"。少了这道守卫,中文输入时
+      // 撤个候选就把整轮生成停了(判据同 ChatInput.jsx:694;原生 keydown 上 isComposing
+      // 在 event 本身,keyCode 229 兜底老 webview)。
+      if (e.isComposing || e.keyCode === 229) return;
       if (e.key !== 'Escape' || e.repeat) return; // ignore held-key repeats
       // 本窗格挂着权限/计划/越界卡时,这一击让给卡片(它的监听同挂 window 冒泡,见
       // PermissionPrompt 顶部注释:捕获相位已被 8 个浮层占着,抢相位会互相误伤)。
