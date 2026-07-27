@@ -5,6 +5,8 @@ import { MarkdownRenderer } from './MarkdownRenderer.jsx';
 import { CoworkBlocks } from './TurnBubble.jsx';
 import { PermissionPrompt } from './PermissionPrompt.jsx';
 import { LoadingMark, useCyclingVerb, ElapsedTime } from './LoadingBits.jsx';
+import { STOP_NO_OWNER_NOTICE } from './tools/TaskCard.jsx';
+import { confirmDialog } from '../utils/confirmDialog.jsx';
 
 // 上下文占用简写(与主会话徽章同口径:k 计)。
 function fmtTok(n) {
@@ -107,7 +109,12 @@ export function SubagentView({ agentId, parentTitle, parentSessionId = null, onB
                 乐观收尾)。sessionId 优先取 agent 捕获值,回退母会话。 */}
             {nonTerminal && (
               <button
-                onClick={() => useStore.getState().stopSingleTask(agent.sessionId || parentSessionId, agentId)}
+                onClick={async () => {
+                  // D5:同 TaskCard —— 没有 slot 认领(provider 不发 task 事件)时给一次提示,
+                  // 否则卡片闪一下转回运行中、零解释。
+                  const r = await useStore.getState().stopSingleTask(agent.sessionId || parentSessionId, agentId);
+                  if (r?.noOwner) confirmDialog(STOP_NO_OWNER_NOTICE, { confirmText: '知道了' });
+                }}
                 className="px-1.5 py-px rounded bg-canvas-deep text-ink-muted hover:text-error hover:bg-error/10 flex items-center gap-1 transition-colors font-body"
                 title="停止该子代理/teammate"
               >

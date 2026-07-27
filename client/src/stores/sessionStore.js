@@ -1439,7 +1439,12 @@ export const useStore = create((set, get) => ({
         // 即便 status 同为 stopped,也够不着——不把真终态误翻回 working。
         if (cur && cur.status === 'stopped' && cur.optimisticStop) get().upsertAgent(toolUseId, { status: prevStatus, finishedAt: null, optimisticStop: false });
       }
+      // D5:回滚是静默的 —— 不发 task 事件的 provider 下没有任何 slot 认领,卡片"闪一下又
+      // 转回去了",用户以为按钮坏了。把结果回给调用方(两处单卡停止按钮)提示一次;store 里
+      // 不直接弹窗,confirmDialog 是 JSX 模块,导进来会让 tests/unit 的 node 直跑 store 挂掉。
+      return { stopped: anyStopped, noOwner: didOptimistic && !anyStopped };
     } catch {}
+    return { stopped: false, noOwner: false };
   },
   // #9/AZ6 子代理会话窗口:按 tab 记录在主区打开查看的子代理 id(null = 看正常会话)。
   setViewingAgent: (tab, id) => set((s) => ({

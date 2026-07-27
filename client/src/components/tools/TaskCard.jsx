@@ -3,6 +3,10 @@ import { ChevronDown, ChevronRight, Loader2, Maximize2, CheckCircle2, XCircle, C
 import { useStore } from '../../stores/sessionStore.js';
 import { MarkdownRenderer } from '../MarkdownRenderer.jsx';
 import { extractToolResultText } from '../../utils/toolResult.js';
+import { confirmDialog } from '../../utils/confirmDialog.jsx';
+
+// 单卡停止落空提示(TaskCard / SubagentView 同一份文案)。
+export const STOP_NO_OWNER_NOTICE = '该 provider 不支持单独停止子代理(它不上报任务事件),这个子代理没有被停下。\n用输入框旁的停止键可以停掉当前回合。';
 
 // Subagent card — Task tool calls. Pulls the live agent state (text/thinking/
 // tool calls accumulated from stream_events with parent_tool_use_id) out of
@@ -56,6 +60,13 @@ export function TaskCard({ toolCall }) {
   // 中断残骸/不发父流事件的 provider)才回退看 toolCall.result。
   const isDone = agent ? agentDone : (!!toolCall.result || isInterrupted);
   const isWorking = !isDone;
+
+  // D5:单卡停止对不发 task 事件的 provider 会静默失败(乐观 stopped → 闪回 working),
+  // 用户以为按钮坏了。noOwner = 没有任何 slot 认领这个 task,提示一次并指向主停止键。
+  const stopThisAgent = async () => {
+    const r = await useStore.getState().stopSingleTask(agent?.sessionId || paneSession?.sessionId || null, toolCall.id);
+    if (r?.noOwner) confirmDialog(STOP_NO_OWNER_NOTICE, { confirmText: '知道了' });
+  };
 
   // P2: 历史会话重载后 activeAgents(内存态)是空的,点放大查不到数据 → 之前没反应。
   // 兜底:打开前若 store 无此 agent,先从 toolCall 的 input/result 注册一份,再进入。
@@ -153,7 +164,7 @@ export function TaskCard({ toolCall }) {
           <span
             role="button"
             tabIndex={0}
-            onClick={(e) => { e.stopPropagation(); useStore.getState().stopSingleTask(agent?.sessionId || paneSession?.sessionId || null, toolCall.id); }}
+            onClick={(e) => { e.stopPropagation(); stopThisAgent(); }}
             className="shrink-0 p-1 rounded text-ink-faint hover:text-error hover:bg-error/10 transition-colors cursor-pointer"
             title="停止该子代理/teammate"
           >
