@@ -68,6 +68,7 @@ import {
 } from 'lucide-react';
 import { buildFontEntries, groupFonts, detectFonts, platformCandidates, queryLocalFontFamilies } from './utils/systemFonts.js';
 import { copyText } from './utils/clipboard.js';
+import { escRoute, idleEscAction } from './utils/escAction.js';
 
 // ── Per-session shadow-git checkpoints ──────────────────────────
 // Session title with inline rename (click pencil → edit → Enter/blur saves,
@@ -125,7 +126,7 @@ function EditableSessionTitle({ session }) {
   );
 }
 
-function CheckpointButton({ sessionId, cwd, projectHash, onRestored }) {
+function CheckpointButton({ sessionId, cwd, projectHash, onRestored, openSignal = 0 }) {
   const [open, setOpen] = useState(false);
   const [entries, setEntries] = useState([]);
   const [busy, setBusy] = useState(false);
@@ -227,6 +228,18 @@ function CheckpointButton({ sessionId, cwd, projectHash, onRestored }) {
     }
     setOpen(true);
   };
+
+  // 键盘入口(空手双击 Esc = CLI 的 Rewind):复用上面同一个 toggle,不另造面板。
+  // openSignal 是时间戳:本组件挂在会话头 ⋮ 里,⋮ 收起时整个组件卸载 —— 父级会先把 ⋮ 展开,
+  // 我们在挂载后的这一帧才拿到 openSignal。用"1.5s 内算新鲜"过滤掉之后用户手动展开 ⋮
+  // 导致的重挂载(那时 openSignal 还是旧值,不该再自动弹)。
+  const escOpenedRef = useRef(0);
+  useEffect(() => {
+    if (!openSignal || openSignal === escOpenedRef.current) return;
+    escOpenedRef.current = openSignal;
+    if (Date.now() - openSignal > 1500) return;
+    if (!open) toggle();
+  }, [openSignal]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
     <div className="relative">
@@ -3439,9 +3452,12 @@ function ExportSessionButton({ messages, title }) {
 
 // P1.2 会话头 ⋮:导出 / Checkpoint 收纳于此(点击原位展开原按钮组,再点外部/Esc 收起,
 // 与面板坞同一交互)。按钮组件原样复用(各自的下拉/portal 弹层逻辑不动),零功能删除。
-function SessionHeaderMore({ children }) {
+function SessionHeaderMore({ children, forceOpenSignal = 0 }) {
   const [open, setOpen] = useState(false);
   const wrapRef = useRef(null);
+  // 空手双击 Esc 要弹 Checkpoint 时间线,而它就在本组下 —— 收起时组件根本没挂载。
+  // 先把这一组展开,让 CheckpointButton 挂上去自己弹(见其 openSignal)。
+  useEffect(() => { if (forceOpenSignal) setOpen(true); }, [forceOpenSignal]);
   useEffect(() => {
     if (!open) return;
     const onDoc = (e) => {
@@ -5992,25 +6008,73 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   const backgroundPidRef = useRef(backgroundPid);
   useEffect(() => { backgroundPidRef.current = backgroundPid; }, [backgroundPid]);
 
-  // 生成中【单击 Esc 即中断】——对齐 CLI 原生(pty 实测:单击就 Interrupted,第二击被吞)。
-  // 原来是 600ms 内双击才停,是 GUI 自造的差异,用户最常抱怨"按一下停不下来"。
+  // 空闲态双击 Esc 的副作用(判定在 utils/escAction.js,纯函数有单测)。
+  // 被 Esc 清掉的输入文本记在这里:壳层没有输入框撤销栈,⌘Z 撤不回受控组件的 setText,
+  // 所以"再双击一次 Esc"就是后悔药(和 CLI 一样只清不问,但比 CLI 多给一次找回机会)。
+  const escClearedTextRef = useRef('');
+  // 时间戳信号:空手双击 Esc → 展开会话头 ⋮ 并自动弹开 Checkpoint 时间线(GUI 侧的 Rewind)。
+  const [rewindSignal, setRewindSignal] = useState(0);
+  const handleIdleDoubleEsc = useCallback(() => {
+    const key = sessionQueueKey;
+    // 输入框文本的真实来源:ChatInput 每次变更都持久化到 cgui-draft:<permKey>(permKey 即
+    // sessionQueueKey)。直接读它,免得为一个快捷键把 text 状态提到父组件。
+    let draft = '';
+    try { draft = localStorage.getItem(`cgui-draft:${key}`) || ''; } catch {}
+    const action = idleEscAction({
+      draftText: draft,
+      clearedText: escClearedTextRef.current,
+      hasSession: !!selectedSession?.sessionId,
+    });
+    if (action === 'clear-input') {
+      escClearedTextRef.current = draft;
+      window.dispatchEvent(new CustomEvent('cgui:composer-clear', { detail: { targetKey: key } }));
+      setProviderSwitchNotice({ text: '输入框已清空。再连按两次 Esc 可把刚才的文字放回来。' });
+      return;
+    }
+    if (action === 'restore-input') {
+      window.dispatchEvent(new CustomEvent('cgui:composer-fill', { detail: { targetKey: key, text: escClearedTextRef.current } }));
+      escClearedTextRef.current = '';
+      return;
+    }
+    if (action === 'rewind-empty') {
+      setProviderSwitchNotice({ text: '本会话还没有发送过消息，没有可回退的检查点。' });
+      return;
+    }
+    setRewindSignal(Date.now());
+  }, [sessionQueueKey, selectedSession?.sessionId]);
+  const handleIdleDoubleEscRef = useRef(handleIdleDoubleEsc);
+  useEffect(() => { handleIdleDoubleEscRef.current = handleIdleDoubleEsc; }, [handleIdleDoubleEsc]);
+
+  // Esc 的会话级语义(对齐 CLI 原生,pty 实测):
+  //   生成中          → 单击即中断(原来要 600ms 内双击,是 GUI 自造差异)
+  //   空闲 + 有文字   → 双击(800ms 窗)清空输入框
+  //   空闲 + 输入框空 → 双击打开 Checkpoint 时间线(GUI 侧的 Rewind)
   // 前提是浮层各自吃掉自己的 Esc(见 E1:斜杠菜单/@面板/取消编辑重发/权限卡都已
   // stopImmediatePropagation),否则"关个菜单"会连带停掉整回合。
   // 刻意 NOT gated on textarea/input focus:回复期间光标就在输入框里,加焦点守卫等于永不生效。
   useEffect(() => {
-    // AZ1:分屏下 esc 双击中断只作用于【焦点窗格】。effect 挂 window 级,每个流式
-    // pane 各注册一个 listener;不加这道守卫则一次 esc 广播到所有 pane → 中断全部会话。
+    // AZ1:分屏下 esc 语义只作用于【焦点窗格】。effect 挂 window 级,每个 pane 各注册一个
+    // listener;不加这道守卫则一次 esc 广播到所有 pane → 中断/清空全部会话。
     // 与上方 Cmd+F effect 的 paneIsActive 守卫同构。单屏 activeTabIndex 恒 0,无回归。
     if (!paneIsActive) return;
     // 只在「焦点 pane」注册一次(deps 仅 paneIsActive)。是否有可停的流改为在按键时用 ref
     // 实时判断,不再让 isStreaming/backgroundPid 抖动驱动 effect 反复重注册(CQ-15 竞态根因)。
+    let lastEsc = 0;
     const onKey = (e) => {
       if (e.key !== 'Escape' || e.repeat) return; // ignore held-key repeats
-      if (!streamingRef.current && !backgroundPidRef.current) return; // 本 pane 没有在跑的流,不拦截
+      const now = e.timeStamp || performance.now();
+      const route = escRoute({
+        hasStream: !!(streamingRef.current || backgroundPidRef.current),
+        lastEscAt: lastEsc,
+        now,
+      });
+      if (route === 'arm') { lastEsc = now; return; } // 空闲首击:什么都不做,等第二击
+      lastEsc = 0;
+      e.preventDefault();
       // pending 卡片(Ask/计划/授权)自己在捕获阶段吃掉 Esc(E1),走不到这里 = 单击只 deny;
       // 卡片消失后再按 Esc 才停整轮(/stop 会 dropPendingForSession 连带清残留卡片)。
-      e.preventDefault();
-      handleStopRef.current?.();
+      if (route === 'stop') handleStopRef.current?.();
+      else handleIdleDoubleEscRef.current?.();
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
@@ -6780,7 +6844,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           </div>
           <div className="flex items-center gap-2 min-w-0 flex-wrap justify-end">
             {/* P1.2:导出 / Checkpoint 收进 ⋮(点击展开,组件原样复用)。 */}
-            <SessionHeaderMore>
+            <SessionHeaderMore forceOpenSignal={rewindSignal}>
               <ExportSessionButton
                 messages={[...messages, ...chatMessages]}
                 title={(selectedSession?.sessionId
@@ -6789,6 +6853,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                   || selectedSession?.firstPrompt || '会话'}
               />
               <CheckpointButton
+                openSignal={rewindSignal}
                 sessionId={selectedSession?.sessionId}
                 cwd={selectedSession?.projectPath || selectedProject?.path}
                 projectHash={selectedSession?.projectHash}
@@ -8798,6 +8863,8 @@ const SHORTCUT_GROUPS = [
     ['Cmd/Ctrl + ↑ / ↓', '切换到上/下一个会话(当前窗格)'],
     ['Cmd/Ctrl + F', '会话内检索(当前窗格)'],
     ['Esc（生成中）', '停止当前回合'],
+    ['Esc 连按两次（输入框有字）', '清空输入框，再连按两次可放回'],
+    ['Esc 连按两次（输入框为空）', '打开 Checkpoint 时间线回退'],
   ]],
   ['界面', [
     ['Ctrl + Tab', '分屏时轮换聚焦窗格'],

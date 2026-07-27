@@ -381,6 +381,22 @@ export function ChatInput({ onSend, onStop, onStopBackground, onAccelerate, onBa
     return () => window.removeEventListener('cgui:composer-fill', onFill);
   }, [permKey]);
 
+  // 空闲态双击 Esc 清空输入框(对齐 CLI 的 "double tap esc to clear input")。判定和
+  // 「清掉的文本」都在 SessionDetail 手里(它按 targetKey 定位窗格),这里只负责清;
+  // 想找回就再双击一次 Esc,那边会经 composer-fill 原样填回。draft 的 localStorage
+  // 由下方持久化 effect 随 text='' 自动删,这里不用重复删。
+  useEffect(() => {
+    const onClear = (e) => {
+      const targetKey = e?.detail?.targetKey;
+      if (targetKey && targetKey !== permKey) return;
+      setText('');
+      setHistoryCursor(-1);
+      draftBeforeHistoryRef.current = '';
+    };
+    window.addEventListener('cgui:composer-clear', onClear);
+    return () => window.removeEventListener('cgui:composer-clear', onClear);
+  }, [permKey]);
+
   // Read a File/Blob as a data URL.
   const fileToDataUrl = (file) => new Promise((resolve, reject) => {
     const reader = new FileReader();
