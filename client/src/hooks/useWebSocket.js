@@ -247,26 +247,6 @@ export function useWebSocket() {
               // 终态守卫防重;SSE 在线时通知走原 SSE 路径,server 不广播此类型)。
               window.dispatchEvent(new CustomEvent('cgui:task-notification-bg', { detail: data }));
               break;
-            case 'teammate-idle': {
-              // 部件③:具名 teammate 转入待命。按 name↔tool_use_id 反查卡片(activeAgents 已存
-              // name),给非终态且会话匹配的条目叠加独立 flag teammateIdle(不动 status,防污染
-              // finalizeAgent/终态判据)。同名 teammate 会一起标(SDK 载荷不带 tool_use_id,已知
-              // 上限,仅影响展示)。终态到达时卡片走终态、flag 自然被取代。
-              const st = useStore.getState();
-              const name = data.teammateName;
-              const sid = data.sessionId;
-              if (!name) break;
-              for (const [id, ag] of Object.entries(st.activeAgents || {})) {
-                // teammate_name = 可寻址实例名(input.name);优先比 ag.teammateName(未被 subagent_type
-                // 抢占的那份),回退比 ag.name(无 teammateName 的老条目/无名 teammate 兜底)。
-                const nameMatch = ag && (ag.teammateName ? ag.teammateName === name : ag.name === name);
-                if (nameMatch && ag.sessionId === sid
-                    && !['done', 'error', 'stopped'].includes(ag.status)) {
-                  st.upsertAgent(id, { teammateIdle: true });
-                }
-              }
-              break;
-            }
             case 'turn-complete': {
               // T2: 非聚焦会话回合完成 → 顶部悬浮提醒(标题+摘要,5s,点击跳转)。
               // 由服务端广播驱动 —— 切走会话时前端的 SSE fetch 已被切会话 effect

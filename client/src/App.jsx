@@ -644,10 +644,6 @@ function reviveAgentIfTerminal(store, agentId) {
   if (!agentId) return;
   const ag = store.activeAgents?.[agentId];
   if (!ag) return;
-  // 部件③:teammate 被 SendMessage 唤醒后又有活动到达(两条 resume 路径——partial 的
-  // message_start / 整条 assistant 消息——都经本函数),清待命 flag,否则边干活边错显「待命」
-  // 直到终态。SDK 无 Resume 钩子,只能在「又有活动」处清。
-  if (ag.teammateIdle) store.upsertAgent(agentId, { teammateIdle: false });
   if (AGENT_TERMINAL_STATUS.includes(ag.status)) store.upsertAgent(agentId, { status: 'working', finishedAt: null });
 }
 
@@ -5038,8 +5034,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                   if ((block.name === 'Task' || block.name === 'Agent') && parsed) {
                     store.upsertAgent(block.toolId, {
                       name: parsed.subagent_type || parsed.agent || parsed.name || block.name,
-                      // 部件③:可寻址实例名单独存一份——TeammateIdle 钩子发的 teammate_name = input.name,
-                      // 而上面的 .name 会被 subagent_type 抢占,故 idle 匹配必须用这个未被抢占的名。
+                      // 可寻址实例名(SendMessage({to}) 用的那个)单独存一份:上面的 .name 会被
+                      // subagent_type 抢占,显示真名必须用这份未被抢占的。
                       teammateName: parsed.name || null,
                       description: parsed.description || parsed.prompt?.slice(0, 80) || '',
                       status: 'working',
@@ -5104,7 +5100,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                   const inp = block.input || {};
                   useStore.getState().upsertAgent(block.id, {
                     name: inp.subagent_type || inp.agent || inp.name || block.name,
-                    // 部件③:同上,可寻址实例名(= TeammateIdle 的 teammate_name)单独存,不被 subagent_type 抢占。
+                    // 同上,可寻址实例名(SendMessage 寻址用)单独存,不被 subagent_type 抢占。
                     teammateName: inp.name || null,
                     description: inp.description || (inp.prompt ? String(inp.prompt).slice(0, 80) : ''),
                     prompt: inp.prompt || '',
