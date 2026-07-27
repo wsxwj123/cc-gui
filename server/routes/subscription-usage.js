@@ -129,8 +129,9 @@ router.get('/subscription-usage', async (_req, res) => {
   if (cache && now - cache.at < CACHE_MS) return res.json(cache.data);
   const token = await readClaudeOAuthToken();
   if (!token) return res.json({ official: true, error: '未找到 Claude 登录凭证（请在 Claude Code 中登录）' });
-  // curl config 的引号语法:含 " 或换行的 token 会破坏 header 行(理论上不会,信任边界仍拦一道)。
-  if (/["\r\n]/.test(token)) return res.json({ official: true, error: '登录凭证格式异常' });
+  // curl config 的引号语法:含 " / 反斜杠 / 换行的 token 会破坏 header 行(引号串里 curl 会
+  // 还原 \n \t \" 等转义序列,故反斜杠同样要拦)。理论上不会出现,信任边界仍拦一道。
+  if (/["\\\r\n]/.test(token)) return res.json({ official: true, error: '登录凭证格式异常' });
 
   let r;
   try {
