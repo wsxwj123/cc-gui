@@ -80,6 +80,9 @@ export function confirmDialog(message, opts) {
 function showConfirmDialog(message, { danger = false, confirmText = '确定', cancelText = '取消', checkbox = null } = {}) {
   return new Promise((resolve) => {
     const host = document.createElement('div');
+    // 标记供别处避让:确认框的 Esc 监听在 document 冒泡阶段,更早相位的监听(如面板页
+    // 的 document 捕获 Esc)必须先查这个标记再动手,否则会「底下的面板关了、确认框还在」。
+    host.dataset.cguiConfirm = '1';
     document.body.appendChild(host);
     const root = createRoot(host);
     let done = false;

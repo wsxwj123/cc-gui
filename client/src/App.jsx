@@ -9129,6 +9129,28 @@ export default function App() {
     return () => window.removeEventListener('keydown', onEsc, true);
   }, [shortcutsOpen]);
 
+  // 面板页(设置/MCP/技能…)开着时 Esc 先关面板,不穿透到会话级「生成中单击即停」。
+  // 边界(别回归 0.2.268):吃 Esc 的是【打开的面板页】,面板坞 rail 展开但没开面板页时
+  // rightPanel=null → 本 effect 不挂监听,Esc 照常走停止/双击语义。
+  // 相位选 document 捕获(不是 window 捕获):所有浮层(图片灯箱/预览/右键菜单/快捷键录制/
+  // Provider 弹窗/速查)都挂在 window 捕获且 stopPropagation,捕获顺序 window → document,
+  // 故面板内浮层恒先吃到这一击,面板不会被越级关掉;它们没接的那一击才轮到这里关面板,
+  // stopPropagation 再挡住冒泡阶段 SessionDetail 的停止监听。
+  // rightPanel 是 App 级单值状态(面板无 per-pane 语义),effect 只此一份,无需分屏门控。
+  useEffect(() => {
+    if (!rightPanel) return;
+    const onEsc = (e) => {
+      if (e.isComposing || e.keyCode === 229) return; // IME 组字中的 Esc = 取消候选词
+      if (e.key !== 'Escape' || e.repeat) return;
+      // confirmDialog 挂在 document 冒泡阶段(晚于本监听),不避让会「面板关了、确认框还在」。
+      if (document.querySelector('[data-cgui-confirm]')) return;
+      e.stopPropagation();
+      setRightPanel(null);
+    };
+    document.addEventListener('keydown', onEsc, true);
+    return () => document.removeEventListener('keydown', onEsc, true);
+  }, [rightPanel, setRightPanel]);
+
   // 修正批#7:Provider 管理独立弹窗(顶栏切换卡片底部「管理 Provider」触发;设置里的
   // Provider tab 已删)。手机端不派发此事件(合并入口页内是导航流全屏页)。
   const [providerMgrOpen, setProviderMgrOpen] = useState(false);
