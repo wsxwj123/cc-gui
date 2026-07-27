@@ -192,6 +192,19 @@ async function markCCSwitchImported() {
   await writeFile(CCSWITCH_IMPORTED_FLAG, new Date().toISOString());
 }
 
+// 内置官方 provider 合成行(用户实报:一次性导入后官方条目从列表消失,只能手工加 custom 顶替)。
+// 根因:import-from-ccswitch 跳过 category='official'(OAuth 订阅无 key 可导),导入后 GET
+// /providers 又不再读 cc-switch.db → 两头都没有官方行。没装过 cc-switch 的机器同理从来就没有。
+// 官方订阅不需要任何存储配置——切它就是"清掉路由/鉴权 env、回到 OAuth 登录",逻辑全在
+// /provider/switch 的 official 分支里现算。所以这里只在【拿到的行里确实没有 official】时补一条
+// 纯响应层的合成行:不落盘、不写 cc-switch.db,settings_config 给 '{}'(official 分支只读
+// id/name,env 从当前 settings.json 现算,不碰 snapshot)。
+const BUILTIN_OFFICIAL_ID = 'builtin-official';
+function withBuiltinOfficial(rows) {
+  if (rows.some((r) => r.category === 'official')) return rows; // db 里已有真官方行,不重复
+  return [...rows, { id: BUILTIN_OFFICIAL_ID, name: 'Claude 官方', category: 'official', is_current: 0, settings_config: '{}' }];
+}
+
 // Per-provider chosen model lists (the user's multi-select out of an OpenAI
 // provider's auto-fetched catalogue). Shape: { [providerId]: [modelId, ...] }.
 const PROVIDER_MODELS_PATH = join(homedir(), '.claude-gui', 'provider-models.json');
@@ -598,9 +611,9 @@ function parseOpenAIProvider(settingsConfig) {
 router.get('/providers', async (_req, res) => {
   // K4: 一次性导入后停止读 cc-switch.db,GUI 自己管 customProviders 即可。
   const imported = await isCCSwitchImported();
-  const rows = imported ? [] : await ccSwitchQuery(
+  const rows = withBuiltinOfficial(imported ? [] : await ccSwitchQuery(
     "SELECT id, name, category, is_current, settings_config FROM providers WHERE app_type='claude' ORDER BY sort_index"
-  );
+  ));
   const oaRows = imported ? [] : await ccSwitchQuery(
     "SELECT id, name, app_type, settings_config FROM providers WHERE app_type IN ('codex','opencode') ORDER BY sort_index"
   );
@@ -640,6 +653,7 @@ router.get('/providers', async (_req, res) => {
     };
   });
   res.json({
+    // rows 含合成的内置官方行 → available 恒 true(官方订阅任何时候都可切回),口径与列表一致。
     available: rows.length > 0 || openai.length > 0 || customProviders.length > 0,
     providers: claudeProviders,
     openaiProviders: openai,
@@ -659,9 +673,11 @@ router.post('/provider/switch', async (req, res) => {
     if (!id || typeof id !== 'string') return res.status(400).json({ error: 'id required' });
 
     // Read ALL claude providers and match in JS — user input never touches SQL.
-    const rows = await ccSwitchQuery(
+    // withBuiltinOfficial:db 无官方行时补合成行,使其 id 命中下面【现成的】official 分支。
+    const dbRows = await ccSwitchQuery(
       "SELECT id, name, category, settings_config FROM providers WHERE app_type='claude'"
     );
+    const rows = withBuiltinOfficial(dbRows);
     const hit = rows.find((r) => r.id === id);
 
     // Not a claude provider? Try the OpenAI-format set (routed via proxy).
@@ -684,7 +700,8 @@ router.post('/provider/switch', async (req, res) => {
       // GUI custom providers (stored outside cc-switch).
       const custom = (await readCustomProviders()).find((p) => p.id === id);
       if (custom) return switchToCustomProvider(custom, model, res);
-      if (rows.length === 0) return res.status(503).json({ error: 'CC Switch 数据库不可用' });
+      // 503 判据用 dbRows(rows 恒含合成官方行,拿它判会把"db 读不到"误报成 404)。
+      if (dbRows.length === 0) return res.status(503).json({ error: 'CC Switch 数据库不可用' });
       return res.status(404).json({ error: 'provider 不存在' });
     }
 
