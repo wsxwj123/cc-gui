@@ -6060,8 +6060,26 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     // 只在「焦点 pane」注册一次(deps 仅 paneIsActive)。是否有可停的流改为在按键时用 ref
     // 实时判断,不再让 isStreaming/backgroundPid 抖动驱动 effect 反复重注册(CQ-15 竞态根因)。
     let lastEsc = 0;
+    // 已经为哪张卡让过行(卡片 id)。让行只给一击:卡片吃下这击就 deny 并消失,下一击
+    // 自然落停止分支;若这张卡根本不吃 Esc(如 AskUserQuestion 选择卡)或压根没渲染,
+    // 第二击也不再让行,Esc 不会变成哑键。
+    let yieldedForId = null;
     const onKey = (e) => {
       if (e.key !== 'Escape' || e.repeat) return; // ignore held-key repeats
+      // 本窗格挂着权限/计划/越界卡时,这一击让给卡片(它的监听同挂 window 冒泡,见
+      // PermissionPrompt 顶部注释:捕获相位已被 8 个浮层占着,抢相位会互相误伤)。
+      // 焦点在输入框/下拉里时卡片自己会跳过(TEXTAREA/INPUT/SELECT 守卫),那种情况不让行,
+      // 否则 Esc 两边都没人接 = 哑键。
+      const t = e.target;
+      const typing = t && (t.tagName === 'TEXTAREA' || t.tagName === 'INPUT' || t.tagName === 'SELECT');
+      if (!typing) {
+        const st = useStore.getState();
+        // 归属口径同 hasPendingInteraction(:3534):命中本窗格会话的请求 + 无 sessionId 的
+        // 孤儿(本 effect 只在活动窗格注册,孤儿只算在活动窗格)。
+        const psid = (st.paneSessions && st.paneSessions[tabIndex])?.sessionId || null;
+        const card = st.pendingPermissions.find((p) => (p.sessionId && p.sessionId === psid) || !p.sessionId);
+        if (card && card.id !== yieldedForId) { yieldedForId = card.id; return; }
+      }
       const now = e.timeStamp || performance.now();
       const route = escRoute({
         hasStream: !!(streamingRef.current || backgroundPidRef.current),
@@ -6071,14 +6089,14 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       if (route === 'arm') { lastEsc = now; return; } // 空闲首击:什么都不做,等第二击
       lastEsc = 0;
       e.preventDefault();
-      // pending 卡片(Ask/计划/授权)自己在捕获阶段吃掉 Esc(E1),走不到这里 = 单击只 deny;
-      // 卡片消失后再按 Esc 才停整轮(/stop 会 dropPendingForSession 连带清残留卡片)。
+      // pending 卡片那一击已在上面让行 = 单击只 deny;卡片消失后再按 Esc 才停整轮
+      // (/stop 会 dropPendingForSession 连带清残留卡片)。
       if (route === 'stop') handleStopRef.current?.();
       else handleIdleDoubleEscRef.current?.();
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [paneIsActive]);
+  }, [paneIsActive, tabIndex]);
 
   // "⚡ 引导" — abort the in-flight chat and immediately fire the queued message.
   const handleAccelerate = useCallback(() => {
