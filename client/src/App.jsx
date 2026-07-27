@@ -68,7 +68,7 @@ import {
 } from 'lucide-react';
 import { buildFontEntries, groupFonts, detectFonts, platformCandidates, queryLocalFontFamilies } from './utils/systemFonts.js';
 import { copyText } from './utils/clipboard.js';
-import { escRoute, idleEscAction } from './utils/escAction.js';
+import { escRoute, idleEscAction, escYieldCardId } from './utils/escAction.js';
 
 // ── Per-session shadow-git checkpoints ──────────────────────────
 // Session title with inline rename (click pencil → edit → Enter/blur saves,
@@ -6078,16 +6078,16 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       // PermissionPrompt 顶部注释:捕获相位已被 8 个浮层占着,抢相位会互相误伤)。
       // 焦点在输入框/下拉里时卡片自己会跳过(TEXTAREA/INPUT/SELECT 守卫),那种情况不让行,
       // 否则 Esc 两边都没人接 = 哑键。
-      const t = e.target;
-      const typing = t && (t.tagName === 'TEXTAREA' || t.tagName === 'INPUT' || t.tagName === 'SELECT');
-      if (!typing) {
-        const st = useStore.getState();
-        // 归属口径同 hasPendingInteraction(:3534):命中本窗格会话的请求 + 无 sessionId 的
-        // 孤儿(本 effect 只在活动窗格注册,孤儿只算在活动窗格)。
-        const psid = (st.paneSessions && st.paneSessions[tabIndex])?.sessionId || null;
-        const card = st.pendingPermissions.find((p) => (p.sessionId && p.sessionId === psid) || !p.sessionId);
-        if (card && card.id !== yieldedForId) { yieldedForId = card.id; return; }
-      }
+      // 判定内核抽在 utils/escAction.js(纯函数,tests/unit/check-esc-action.mjs 锁);
+      // 归属口径同 hasPendingInteraction(:3534)。
+      const st = useStore.getState();
+      const yieldId = escYieldCardId({
+        targetTag: e.target && e.target.tagName,
+        pendingList: st.pendingPermissions,
+        psid: (st.paneSessions && st.paneSessions[tabIndex])?.sessionId || null,
+        yieldedForId,
+      });
+      if (yieldId) { yieldedForId = yieldId; return; }
       const now = e.timeStamp || performance.now();
       const route = escRoute({
         hasStream: !!(streamingRef.current || backgroundPidRef.current),

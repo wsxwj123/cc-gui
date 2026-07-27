@@ -76,7 +76,15 @@ function renderInput(toolName, input) {
 // acceptEdits turn to actually execute the approved plan.
 // Refine → CLI sees a `deny` with the feedback as `reason`, AI revises the
 // plan and re-emits ExitPlanMode. Cancel → plain deny.
-function PlanReviewCard({ req, onResolve, onApprove, processing, position, hydrate }) {
+// 分屏④:每个 pane 的 ChatInput 各渲染一个 hydrate=true 的 PermissionPrompt,卡片的
+// keydown 挂 window → 一击 Esc/Enter 会同时被非活动窗格的卡片吃掉(用户从未对它表态,
+// 却被 deny/approve;双 pane 同挂卡时更是齐 deny)。整只 handler 按窗格身份门控,与
+// App.jsx esc effect 的 paneIsActive 守卫同构。tabIndex=null(无身份的调用方,如手机/
+// 单屏旧路径)保持原行为;单屏 activeTabIndex 恒 0,零回归。
+const paneHasKeyboard = (tabIndex) =>
+  tabIndex == null || useStore.getState().activeTabIndex === tabIndex;
+
+function PlanReviewCard({ req, onResolve, onApprove, processing, position, hydrate, tabIndex }) {
   const plan = String(req.toolInput?.plan || '').trim();
   const [feedback, setFeedback] = useState('');
   const [showRefine, setShowRefine] = useState(false);
@@ -88,6 +96,7 @@ function PlanReviewCard({ req, onResolve, onApprove, processing, position, hydra
     if (!hydrate) return;
     if (position !== 0) return;
     const onKey = (e) => {
+      if (!paneHasKeyboard(tabIndex)) return;
       const t = e.target;
       if (t && (t.tagName === 'TEXTAREA' || t.tagName === 'INPUT')) return;
       if (e.key === 'Enter') { e.preventDefault(); onApprove(req); }
@@ -95,7 +104,7 @@ function PlanReviewCard({ req, onResolve, onApprove, processing, position, hydra
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [hydrate, position, req, onResolve, onApprove]);
+  }, [hydrate, position, tabIndex, req, onResolve, onApprove]);
 
   const submitRefine = () => {
     onResolve(req, 'deny', feedback.trim() || '请修改计划');
@@ -191,7 +200,7 @@ function PlanReviewCard({ req, onResolve, onApprove, processing, position, hydra
 // 盖住 AI 回复正文(用户报告"看不见正文")。
 // 高度:分屏为左右并排(窗格全高),故 vh=窗格高。卡片上限 42vh,加下方输入框≈窗格下半,
 // 正文保留上半(用户要求"只占会话窗口下二分之一",不论是否分屏)。卡片内部超出则自身滚动。
-function AskQuestionCard({ req, onAnswer, processing, position, hydrate }) {
+function AskQuestionCard({ req, onAnswer, processing, position, hydrate, tabIndex }) {
   const questions = Array.isArray(req.toolInput?.questions) ? req.toolInput.questions : [];
   const [picks, setPicks] = useState({});    // qi -> string | string[]
   const [customs, setCustoms] = useState({}); // qi -> free text
@@ -257,6 +266,7 @@ function AskQuestionCard({ req, onAnswer, processing, position, hydrate }) {
     if (!hydrate) return; // BK-1:键盘只在主实例绑,避免子代理视图重复 respond
     if (position !== 0) return;
     const onKey = (e) => {
+      if (!paneHasKeyboard(tabIndex)) return;
       const t = e.target;
       if (t && (t.tagName === 'TEXTAREA' || t.tagName === 'INPUT')) return;
       if (e.key === 'Enter') {
@@ -270,7 +280,7 @@ function AskQuestionCard({ req, onAnswer, processing, position, hydrate }) {
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [hydrate, position, qi, isLast, allAnswered, picks, customs]);
+  }, [hydrate, position, tabIndex, qi, isLast, allAnswered, picks, customs]);
 
   const q = questions[qi] || {};
   const multi = !!q.multiSelect;
@@ -376,12 +386,13 @@ function AskQuestionCard({ req, onAnswer, processing, position, hydrate }) {
 // 越界访问卡:SDK 沙箱边界(additionalDirectories)外的路径经 canUseTool 第三参
 // blockedPath 透出。仅本次允许=单次放行;授权此目录=addDirectories(默认本会话,
 // 勾选后永久写入 settings.json,与 CLI /add-dir 及 permissions.additionalDirectories 同源)。
-function BoundaryCard({ req, onResolve, onAuthorizeDir, processing, position, hydrate }) {
+function BoundaryCard({ req, onResolve, onAuthorizeDir, processing, position, hydrate, tabIndex }) {
   const [permanent, setPermanent] = useState(false);
   useEffect(() => {
     if (!hydrate) return; // BK-1:键盘只在主实例绑,避免子代理视图重复 respond
     if (position !== 0) return;
     const onKey = (e) => {
+      if (!paneHasKeyboard(tabIndex)) return;
       const t = e.target;
       if (t && (t.tagName === 'TEXTAREA' || t.tagName === 'INPUT')) return;
       if (e.key === 'Enter') { e.preventDefault(); onAuthorizeDir(req, permanent); }
@@ -389,7 +400,7 @@ function BoundaryCard({ req, onResolve, onAuthorizeDir, processing, position, hy
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [hydrate, position, req, permanent, onResolve, onAuthorizeDir]);
+  }, [hydrate, position, tabIndex, req, permanent, onResolve, onAuthorizeDir]);
 
   return (
     <div className="flex flex-col max-h-[min(42vh,calc(var(--app-h,100dvh)*0.42))] rounded-xl bg-canvas border border-canvas-deep shadow-lg overflow-hidden animate-fade-up relative">
@@ -452,7 +463,7 @@ function BoundaryCard({ req, onResolve, onAuthorizeDir, processing, position, hy
   );
 }
 
-function PermissionCard({ req, onResolve, onWhitelistAndAllow, onAlwaysAllow, onResolveSame, sameCount, processing, position, hydrate }) {
+function PermissionCard({ req, onResolve, onWhitelistAndAllow, onAlwaysAllow, onResolveSame, sameCount, processing, position, hydrate, tabIndex }) {
   // remember:none=仅此次;session=本会话白名单(localStorage,行为同旧版);
   // always=写 settings.json 的 permissions.allow 规则(经服务端 updatedPermissions,
   // CLI 落盘,终端与 GUI 共用)。危险命令不提供 always(服务端同样忽略,保 G3 强拦)。
@@ -473,6 +484,7 @@ function PermissionCard({ req, onResolve, onWhitelistAndAllow, onAlwaysAllow, on
     if (!hydrate) return; // BK-1:键盘只在主实例绑,避免子代理视图重复 respond
     if (position !== 0) return;
     const onKey = (e) => {
+      if (!paneHasKeyboard(tabIndex)) return;
       // ignore if user is typing in textarea/input
       const t = e.target;
       if (t && (t.tagName === 'TEXTAREA' || t.tagName === 'INPUT' || t.tagName === 'SELECT')) return;
@@ -486,7 +498,7 @@ function PermissionCard({ req, onResolve, onWhitelistAndAllow, onAlwaysAllow, on
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [hydrate, position, req, remember, dangerous, onResolve, onWhitelistAndAllow, onAlwaysAllow]);
+  }, [hydrate, position, tabIndex, req, remember, dangerous, onResolve, onWhitelistAndAllow, onAlwaysAllow]);
 
   return (
     <div className="flex flex-col max-h-[min(42vh,calc(var(--app-h,100dvh)*0.42))] rounded-xl bg-canvas border border-canvas-deep shadow-lg overflow-hidden animate-fade-up relative">
@@ -793,6 +805,7 @@ export function PermissionPrompt({ sessionId = null, onExecutePlan = null, hydra
           processing={busyId === mine[0].id}
           position={0}
           hydrate={hydrate}
+          tabIndex={tabIndex}
         />
       ) : mine[0].toolName === 'AskUserQuestion' ? (
         <AskQuestionCard
@@ -801,6 +814,7 @@ export function PermissionPrompt({ sessionId = null, onExecutePlan = null, hydra
           processing={busyId === mine[0].id}
           position={0}
           hydrate={hydrate}
+          tabIndex={tabIndex}
         />
       ) : mine[0].blockedPath ? (
         <BoundaryCard
@@ -810,6 +824,7 @@ export function PermissionPrompt({ sessionId = null, onExecutePlan = null, hydra
           processing={busyId === mine[0].id}
           position={0}
           hydrate={hydrate}
+          tabIndex={tabIndex}
         />
       ) : (
         <PermissionCard
@@ -822,6 +837,7 @@ export function PermissionPrompt({ sessionId = null, onExecutePlan = null, hydra
           processing={busyId === mine[0].id}
           position={0}
           hydrate={hydrate}
+          tabIndex={tabIndex}
         />
       )}
       {mine.slice(1).map((req, i) => (

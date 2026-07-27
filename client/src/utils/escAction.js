@@ -28,3 +28,17 @@ export function idleEscAction({ draftText = '', clearedText = '', hasSession = f
   if (String(clearedText || '').trim()) return 'restore-input';
   return hasSession ? 'rewind' : 'rewind-empty';
 }
+
+const TYPING_TAGS = new Set(['TEXTAREA', 'INPUT', 'SELECT']);
+
+// 这一击 Esc 要不要让给挂起的权限/计划/越界卡:返回让行的卡片 id(调用方记下来,
+// 一张卡只让一击),null = 不让,继续走 escRoute。
+// 归属口径:命中本窗格会话的请求 + 无 sessionId 的孤儿(调用方只在活动窗格注册,
+// 孤儿只算在活动窗格)。焦点在输入框/下拉里时卡片自己会跳过键盘,那种情况不让行,
+// 否则 Esc 两边都没人接 = 哑键。
+export function escYieldCardId({ targetTag = null, pendingList = [], psid = null, yieldedForId = null }) {
+  if (TYPING_TAGS.has(String(targetTag || '').toUpperCase())) return null;
+  const card = (pendingList || []).find((p) => (p.sessionId && p.sessionId === psid) || !p.sessionId);
+  if (!card || card.id === yieldedForId) return null;
+  return card.id;
+}

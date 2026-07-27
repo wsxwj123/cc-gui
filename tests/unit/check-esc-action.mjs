@@ -6,8 +6,9 @@
 //   ② 空闲首击只 arm、不产生任何副作用(回归=单击 Esc 误清输入/误弹面板)
 //   ③ 双击窗口 800ms:边界内算双击、超出重新 arm
 //   ④ 空闲双击的三条落点:有字清空 → 清空后可恢复 → 空手开回退;draft 无 sessionId 只提示
+//   ⑤ 让行判定:本窗格挂着卡片时那一击给卡片,一张卡只让一击;输入框里不让行
 import assert from 'node:assert/strict';
-import { ESC_DOUBLE_MS, escRoute, idleEscAction } from '../../client/src/utils/escAction.js';
+import { ESC_DOUBLE_MS, escRoute, idleEscAction, escYieldCardId } from '../../client/src/utils/escAction.js';
 
 assert.equal(ESC_DOUBLE_MS, 800, '双击窗口按 CLI 实测取 800ms');
 
@@ -39,4 +40,24 @@ assert.equal(ESC_DOUBLE_MS, 800, '双击窗口按 CLI 实测取 800ms');
   assert.equal(idleEscAction({}), 'rewind-empty', '缺省参数不炸');
 }
 
-console.log('✓ check-esc-action: 4 组断言全过');
+// ── ⑤ 让行判定 ────────────────────────────────────────────────
+{
+  const mine = { id: 'c1', sessionId: 's1' };
+  const other = { id: 'c2', sessionId: 's2' };
+  const orphan = { id: 'c3', sessionId: null };
+  const Y = (o) => escYieldCardId({ psid: 's1', ...o });
+
+  assert.equal(Y({ pendingList: [mine] }), 'c1', '本窗格有卡 → 让行');
+  assert.equal(Y({ pendingList: [other] }), null, '别窗格的卡不让行(否则 Esc 变哑键)');
+  assert.equal(Y({ pendingList: [other, orphan] }), 'c3', '无 sessionId 的孤儿算本窗格');
+  assert.equal(Y({ pendingList: [] }), null, '没卡片 → 直接走停止/双击语义');
+  assert.equal(Y({ pendingList: [mine], yieldedForId: 'c1' }), null, '同一张卡只让一击(卡片不吃 Esc 时第二击照停)');
+  assert.equal(Y({ pendingList: [mine], yieldedForId: 'c9' }), 'c1', '换了张新卡重新让行');
+  for (const tag of ['TEXTAREA', 'INPUT', 'SELECT']) {
+    assert.equal(Y({ pendingList: [mine], targetTag: tag }), null, `焦点在 ${tag} 里不让行(卡片自己也跳过)`);
+  }
+  assert.equal(Y({ pendingList: [mine], targetTag: 'DIV' }), 'c1', '普通元素上照常让行');
+  assert.equal(escYieldCardId({}), null, '缺省参数不炸');
+}
+
+console.log('✓ check-esc-action: 5 组断言全过');
