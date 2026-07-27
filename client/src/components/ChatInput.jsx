@@ -1127,7 +1127,7 @@ export function ChatInput({ onSend, onStop, onStopBackground, onAccelerate, onBa
               <button
                 onClick={() => onStopBackground(sessionId)}
                 className="shrink-0 h-8 px-2.5 rounded-md bg-canvas-warm border border-canvas-deep hover:bg-black/5 text-ink-soft flex items-center justify-center gap-1.5 max-md:gap-0 transition-colors text-[11px] font-medium"
-                title="停止本会话所有后台子代理/teammate（保留 run_in_background 长任务）"
+                title="停止本会话所有后台子代理与 teammate。run_in_background 启动的 Bash 长任务不在范围内，需在进程管理中单独停止。"
               >
                 <Square size={11} className="fill-current" />
                 <span className="max-md:hidden">停止后台 {bgSubagentCount}</span>

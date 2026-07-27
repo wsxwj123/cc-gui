@@ -5,8 +5,14 @@ import { MarkdownRenderer } from '../MarkdownRenderer.jsx';
 import { extractToolResultText } from '../../utils/toolResult.js';
 import { confirmDialog } from '../../utils/confirmDialog.jsx';
 
-// 单卡停止落空提示(TaskCard / SubagentView 同一份文案)。
-export const STOP_NO_OWNER_NOTICE = '该 provider 不支持单独停止子代理(它不上报任务事件),这个子代理没有被停下。\n用输入框旁的停止键可以停掉当前回合。';
+// 单卡停止落空提示(TaskCard / SubagentView 同一份文案)。落空有两种成因,原来只写了
+// 「provider 不支持」一种 —— 任务其实早已结束时也弹这句,用户会误以为 provider 有问题。
+// 按 stopSingleTask 返回的 procAlive(本会话还有没有可停的进程)区分。
+export function stopNoOwnerNotice(procAlive) {
+  return procAlive
+    ? '当前 provider 不上报任务事件,无法单独停止子代理,该子代理未被停止。\n若需停止,请用输入框旁的停止键停止当前回合。'
+    : '本会话已无运行中的进程,该子代理的任务已经结束,无需停止。\n卡片状态会在下次打开会话时更新。';
+}
 
 // Subagent card — Task tool calls. Pulls the live agent state (text/thinking/
 // tool calls accumulated from stream_events with parent_tool_use_id) out of
@@ -65,7 +71,7 @@ export function TaskCard({ toolCall }) {
   // 用户以为按钮坏了。noOwner = 没有任何 slot 认领这个 task,提示一次并指向主停止键。
   const stopThisAgent = async () => {
     const r = await useStore.getState().stopSingleTask(agent?.sessionId || paneSession?.sessionId || null, toolCall.id);
-    if (r?.noOwner) confirmDialog(STOP_NO_OWNER_NOTICE, { confirmText: '知道了' });
+    if (r?.noOwner) confirmDialog(stopNoOwnerNotice(r.procAlive), { confirmText: '知道了' });
   };
 
   // P2: 历史会话重载后 activeAgents(内存态)是空的,点放大查不到数据 → 之前没反应。
