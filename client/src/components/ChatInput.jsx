@@ -283,12 +283,25 @@ export function ChatInput({ onSend, onStop, onStopBackground, onAccelerate, onBa
 
   const draftKey = `cgui-draft:${permKey || 'global'}`;
   // 输入历史按会话隔离(permKey=sessionId 或 draft-项目hash):全局单一列表会让 A 会话的
-  // 输入在 B 会话上键翻出(用户实报)。旧全局键 cgui-input-history 不再读写(残留无害)。
+  // 输入在 B 会话上键翻出(用户实报)。
   const historyKey = `cgui-input-history:${permKey || 'global'}`;
+  // 隔离改造前的旧全局键。存量从未迁移 → 升级后所有既有历史 ↑ 翻不出来(像被清空)。
+  // 迁移策略:本会话键为空时【只读】回落到旧键,不删旧键 —— 多会话/多标签页同时在跑,
+  // 谁都可能是第一个读到的,删了就随机丢给其它会话。首次 saveHistoryEntry 会把回落读到的
+  // 列表连同新条目写进本会话键,此后该会话不再回落(旧键留着给还没写过的其它会话)。
+  const LEGACY_HISTORY_KEY = 'cgui-input-history';
+  const parseHistory = (raw) => {
+    try {
+      const parsed = JSON.parse(raw || '[]');
+      return Array.isArray(parsed) ? parsed.filter((x) => typeof x === 'string' && x.trim()) : [];
+    } catch {
+      return [];
+    }
+  };
   const readHistory = () => {
     try {
-      const parsed = JSON.parse(localStorage.getItem(historyKey) || '[]');
-      return Array.isArray(parsed) ? parsed.filter((x) => typeof x === 'string' && x.trim()) : [];
+      const list = parseHistory(localStorage.getItem(historyKey));
+      return list.length ? list : parseHistory(localStorage.getItem(LEGACY_HISTORY_KEY));
     } catch {
       return [];
     }
