@@ -239,6 +239,29 @@ function killProcessTree(proc) {
 // surface the live list to the GUI's Subagent monitor panel.
 const activeProcesses = new Map();
 
+// A1(D1)/A2(D2) 停止范围判定 —— 抽成纯函数供 tests/unit/check-stop-epoch-scope.mjs 单测。
+// 背景:liveTasks 跨回合保留(条目带 epoch),但此前只用于优雅窗计数,没用来决定"给谁发
+// stopTask" → 打断当前回合会连带杀掉上一回合派出、仍在后台跑的子代理(原生 Esc 不杀,GUI
+// 自己另有「停止后台 N」总闸,设计意图本就分开)。
+//   shellTasks     Bash run_in_background:选择性停止刻意保留(误杀不可恢复)
+//   stoppableTasks 本回合的非 shell 任务(allTasks 时=全部非 shell):发 stopTask
+//   keptTasks      跨回合仍活着的后台子代理:本次不停,并抑制 closing / abort(否则进程一死连坐)
+// allTasks=true 由「停止后台 N」总闸传入 → keptTasks 恒空,分组与改动前逐字等价。
+export function partitionStopTasks(liveTasks, turnEpoch, allTasks) {
+  const shellTasks = [];
+  const stoppableTasks = [];
+  const keptTasks = [];
+  const epoch = turnEpoch | 0;
+  for (const [tid, t] of (liveTasks || [])) {
+    if (t && t.kind === 'shell') { shellTasks.push(tid); continue; }
+    // 只有【明确带 epoch 且不等于本回合】才保留;空条目/缺 epoch 保持旧行为归入可停,
+    // 宁可多停一个来路不明的条目,也不让停止对第三方 provider 静默失效。
+    if (!allTasks && t && typeof t.epoch === 'number' && (t.epoch | 0) !== epoch) { keptTasks.push(tid); continue; }
+    stoppableTasks.push(tid);
+  }
+  return { shellTasks, stoppableTasks, keptTasks };
+}
+
 export function getActiveChatProcesses() {
   const out = [];
   for (const [procId, slot] of activeProcesses) {
@@ -1297,17 +1320,17 @@ router.post('/chat/:pid/stop', async (req, res) => {
   // 共用 stdin 通道,立即关会把刚发的 interrupt 请求截断。
   // express.json 全局挂载:无 body → {} → hard=false,老调用方向后兼容(选择性)。
   const hard = req.body?.hard === true;
+  // A1:allTasks=true 只由「停止后台 N」总闸传(用户显式"停掉所有后台"),保持全量语义;
+  // 主停止键 / Esc 不传 → 只停本回合派出的任务,跨回合后台子代理保留。
+  const allTasks = req.body?.allTasks === true;
   const stopAt = Date.now();
   // 按 kind 分组:shell(Bash run_in_background,选择性停止时保留)/ 其余可停
   // (subagent + unknown——unknown 也停,防第三方 provider 缺字段时停止失效)。
-  const shellTasks = [];
-  const stoppableTasks = [];
-  if (slot.liveTasks) {
-    for (const [tid, t] of slot.liveTasks) {
-      if (t && t.kind === 'shell') shellTasks.push(tid); else stoppableTasks.push(tid);
-    }
-  }
-  const hadTasks = shellTasks.length + stoppableTasks.length > 0;
+  // A1:再按回合世代分出 keptTasks(跨回合后台子代理,主停止不碰)。
+  const { shellTasks, stoppableTasks, keptTasks } = partitionStopTasks(slot.liveTasks, slot.turnEpoch, allTasks);
+  // hadTasks 口径不变(= liveTasks 非空):它决定 idle 快路径与 2s/3s 窗长,keptTasks 必须计入,
+  // 否则"只剩跨回合后台任务"会被当成无任务而直接 input.close() 关掉进程(连坐)。
+  const hadTasks = shellTasks.length + stoppableTasks.length + keptTasks.length > 0;
 
   // 停止时清掉本会话挂起的交互卡片(Ask/计划/授权):它们等在后端的裸 Promise 上,停止链路原来
   // 完全不碰 → 会话停了卡片却残留在最前方(用户实报)。dropPendingForSession 会 settle 那些
@@ -1366,7 +1389,9 @@ router.post('/chat/:pid/stop', async (req, res) => {
   }
   // closing 后置:留 shell 时不置 —— finalize 的 keepAlive 分支要 !slot.closing 才转 idle,
   // 置了会毒化 slot(回合收尾即关进程,shell 任务被连坐)。无 shell 时照旧彻底关闭。
-  if (!shellTasks.length) slot.closing = true;
+  // A1:跨回合后台子代理(keptTasks)与 shell 同处理 —— 保留它却让进程关掉等于白留。
+  const keptCount = shellTasks.length + keptTasks.length;
+  if (!keptCount) slot.closing = true;
   if (slot.idle) {
     if (!hadTasks) {
       // idle 无任务:直接关流即退(closing 已置,=hard 同分支=改动前行为)。
@@ -1374,13 +1399,13 @@ router.post('/chat/:pid/stop', async (req, res) => {
       return res.json({ ok: true });
     }
     if (!stoppableTasks.length) {
-      // idle 仅 shell:没有可停对象,no-op 保活(不 closing、不 interrupt、不 abort)。
-      return res.json({ ok: true, kept: shellTasks.length });
+      // idle 仅 shell / 仅跨回合后台任务:没有可停对象,no-op 保活(不 closing、不 interrupt、不 abort)。
+      return res.json({ ok: true, kept: keptCount });
     }
-    if (shellTasks.length) {
+    if (keptCount) {
       // idle 混合:stopTask 已发(子代理经 stopped notification 收尾),不 closing、
-      // 不 interrupt、不 abort,进程为 shell 保活。
-      return res.json({ ok: true, kept: shellTasks.length });
+      // 不 interrupt、不 abort,进程为 shell / 跨回合后台任务保活。
+      return res.json({ ok: true, kept: keptCount });
     }
     // idle 仅 stoppable(无 shell):closing 已置、stopTask 已发,落到下方 interrupt+窗+abort(=hard)。
   }
@@ -1413,7 +1438,7 @@ router.post('/chat/:pid/stop', async (req, res) => {
     try { slot.abort?.abort(); } catch {}
     try { slot.input?.close(); } catch {}
   }, hadTasks ? 3000 : 2000);
-  res.json(shellTasks.length ? { ok: true, kept: shellTasks.length } : { ok: true });
+  res.json(keptCount ? { ok: true, kept: keptCount } : { ok: true });
 });
 
 // 停止链路 #1(部件①):按单个 task 精确停止 —— 净新增独立路由,与上面 1195-1321 的

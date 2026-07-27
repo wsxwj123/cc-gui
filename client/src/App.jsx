@@ -1862,8 +1862,10 @@ function adoptFork(st, srcSession, newSessionId) {
 }
 
 // 部件②总闸:停本会话所有后台子代理/teammate(选择性 /stop,hard=false,保留 shell 长任务)。
-// 复用 stopSessionProcs 的 pid 解析(按 sessionId 扇出到该会话全部 slot);空 body = 选择性停止,
+// 复用 stopSessionProcs 的 pid 解析(按 sessionId 扇出到该会话全部 slot);hard 不传 = 选择性停止,
 // 不改 /stop 内部。分屏隔离:严格按 sessionId 过滤,不波及其它窗格。
+// A1:allTasks:true —— 主停止键改成只停【本回合】任务后,总闸是唯一"跨回合后台任务也停"的入口
+// (这正是它的语义),故显式声明全量范围;不传的调用方(主停止/Esc/⚡引导)自动只停本回合。
 // 模块级:SessionDetail 的 ChatInput 用(曾误定义在 SessionList 内,跨组件不可见→白屏)。
 async function stopSessionBackground(sessionId) {
   if (!sessionId) return;
@@ -1876,7 +1878,7 @@ async function stopSessionBackground(sessionId) {
     const procs = (d.agents || []).filter((a) => a.kind === 'chat-process' && a.sessionId === sessionId && a.stoppable === true && a.status === 'idle');
     if (!procs.length) return;
     await Promise.allSettled(procs.map((a) => fetch(`/api/chat/${a.pid}/stop`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ allTasks: true }),
     })));
   } catch {}
 }
