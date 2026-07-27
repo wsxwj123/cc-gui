@@ -19,6 +19,11 @@ const router = Router();
 // 非官方 provider 直接返回 official:false,前端整卡隐藏。
 let cache = null; // { at, data } —— 最后一次成功的数据,401/429 降级时回放
 const CACHE_MS = 60_000;
+// 负缓存:任何非 200(429/401/5xx)都进 CACHE_MS 冷却。没有它时首次就失败(cache 为空)
+// 的账号会在每次 chat-done + 120s 轮询上真打一次 API —— 正被限流时等于自己加长限流。
+// 冷却期内:有旧数据回旧数据(标 degraded),没有就回上次的错误文案。
+let cooldownUntil = 0;
+let lastError = '';
 const USAGE_URL = 'https://api.anthropic.com/api/oauth/usage';
 
 // 缺 `User-Agent: claude-code/<ver>` 会落入激进限流桶 → 持续 429。**前缀 claude-code/ 是关键**,
@@ -114,7 +119,14 @@ function fetchUsage(token, ua) {
 
 router.get('/subscription-usage', async (_req, res) => {
   if (!isOfficial()) return res.json({ official: false });
-  if (cache && Date.now() - cache.at < CACHE_MS) return res.json(cache.data);
+  const now = Date.now();
+  // 冷却期内一律不打真 API:有旧数据就回放(标 degraded,不把陈旧数据伪装成新鲜),
+  // 没有就回上次的错误文案。
+  if (now < cooldownUntil) {
+    if (cache) return res.json({ ...cache.data, degraded: true, error: lastError });
+    return res.json({ official: true, error: lastError || '用量接口暂不可用（稍后自动恢复）' });
+  }
+  if (cache && now - cache.at < CACHE_MS) return res.json(cache.data);
   const token = await readClaudeOAuthToken();
   if (!token) return res.json({ official: true, error: '未找到 Claude 登录凭证（请在 Claude Code 中登录）' });
   // curl config 的引号语法:含 " 或换行的 token 会破坏 header 行(理论上不会,信任边界仍拦一道)。
@@ -124,7 +136,9 @@ router.get('/subscription-usage', async (_req, res) => {
   try {
     r = await fetchUsage(token, await userAgent());
   } catch (e) {
-    return res.json({ official: true, error: '用量接口请求失败：' + e.message });
+    lastError = '用量接口请求失败：' + e.message;
+    cooldownUntil = Date.now() + CACHE_MS;
+    return res.json({ official: true, error: lastError });
   }
   if (r.status !== 200) {
     // 401 = OAuth accessToken 的刷新窗口(CLI 一跑就刷新自愈)。**绝不自己刷 token** ——
@@ -133,10 +147,10 @@ router.get('/subscription-usage', async (_req, res) => {
     const msg = r.status === 401 ? '凭证刷新中，显示上次数据（Claude Code 运行后自动恢复）'
       : r.status === 429 ? '接口限流中，显示上次数据（稍后自动恢复）'
         : `用量接口 HTTP ${r.status}`;
-    // 429 = 已被限流,再按 60s 节奏打真 API 只会延长限流。把缓存时间戳往后推,让降级期间的
-    // 后续请求直接吃缓存(下一次真请求至少 CACHE_MS 之后)。401 不推:它是刷新窗口,CLI 一跑
-    // 就自愈,推了反而拖慢恢复。
-    if (r.status === 429 && cache) cache.at = Date.now();
+    // 负缓存:任何非 200 都冷却 CACHE_MS。429 时再按 60s 节奏打真 API 只会延长限流;首次就
+    // 失败(cache 为空)时更关键 —— 没有它,每次 chat-done + 120s 轮询都会真打一次。
+    lastError = msg;
+    cooldownUntil = Date.now() + CACHE_MS;
     if (soft && cache) return res.json({ ...cache.data, degraded: true, error: msg });
     return res.json({ official: true, error: msg });
   }
@@ -144,6 +158,7 @@ router.get('/subscription-usage', async (_req, res) => {
   if (!parsed) return res.json({ official: true, error: '无法解析用量数据' });
   const data = { official: true, ...parsed, fetchedAt: Date.now() };
   cache = { at: Date.now(), data };
+  cooldownUntil = 0; lastError = ''; // 成功即解冷却
   res.json(data);
 });
 
