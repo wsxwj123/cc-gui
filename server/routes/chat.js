@@ -9,6 +9,7 @@ import { query } from '@anthropic-ai/claude-agent-sdk';
 import { getDefaultModel } from '../services/model-resolver.js';
 import { dropPendingForSession, requestPermission, resolvePendingForSession } from './permissions.js';
 import { buildAlwaysAllowUpdates, buildDirAuthUpdates } from '../utils/permission-rules.js';
+import { stripInheritedProviderEnv } from '../utils/provider-env.js';
 import { resolveClaude } from '../utils/claude-resolver.js';
 import { broadcast } from '../broadcast.js';
 
@@ -1774,15 +1775,8 @@ export function stripHostClaudeEnv(env) {
 }
 
 export function cleanChildEnv() {
-  const env = { ...process.env };
-  for (const k of [
-    'ANTHROPIC_MODEL', 'CLAUDE_MODEL',
-    'ANTHROPIC_BASE_URL', 'ANTHROPIC_API_URL', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN',
-    'ANTHROPIC_DEFAULT_HAIKU_MODEL', 'ANTHROPIC_DEFAULT_SONNET_MODEL', 'ANTHROPIC_DEFAULT_OPUS_MODEL', 'ANTHROPIC_DEFAULT_FABLE_MODEL',
-    'ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME', 'ANTHROPIC_DEFAULT_SONNET_MODEL_NAME', 'ANTHROPIC_DEFAULT_OPUS_MODEL_NAME', 'ANTHROPIC_DEFAULT_FABLE_MODEL_NAME',
-    'ANTHROPIC_REASONING_MODEL', 'ANTHROPIC_SMALL_FAST_MODEL',
-    'ANTHROPIC_PERMISSION_MODE', 'CLAUDE_PERMISSION_MODE', 'CLAUDE_DANGEROUSLY_SKIP_PERMISSIONS',
-  ]) delete env[k];
+  // 键清单已抽到 utils/provider-env.js(与 index.js 的 boot 清理共用同一份),行为不变。
+  const env = stripInheritedProviderEnv({ ...process.env });
   const out = stripHostClaudeEnv(env);
   // A(#50085) 兜底:第三方 provider(settings.json env 带 ANTHROPIC_BASE_URL)时强制关掉
   // CLI 每条消息都变的归因头 cch 哈希(x-anthropic-billing-header)——它把上游/中转的

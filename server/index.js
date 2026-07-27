@@ -48,6 +48,16 @@ import { clients, broadcast } from './broadcast.js';
 import { getDefaultModel, getAvailableModels, setDefaultModel } from './services/model-resolver.js';
 import { readdir, readFile } from 'fs/promises';
 import { homedir, networkInterfaces } from 'os';
+import { stripInheritedProviderEnv } from './utils/provider-env.js';
+
+// 宿主 env 隔离(必须是模块体的第一条语句):Claude Desktop / 一个 claude 会话起的 server
+// 会继承宿主的 ANTHROPIC_BASE_URL/_MODEL/_TOKEN。settings.json 切到官方后这些键在
+// settings 里已被删,但 model-resolver(provider 名、getDefaultModel 第 4 步)与
+// GET /api/provider 都会兜底读 process.env → 官方 provider 被判成 DeepSeek(CLI 四档
+// alias 行随之消失、"自动"权限档被降级、费用按第三方单价)。server 自身没有任何合法
+// 消费这些键的点(子 CLI 的 env 由 cleanChildEnv 单独构造),boot 时删干净即一处堵死。
+// 上面所有 import 只在函数体内读这些键,故此处清理先于任何读点生效。
+stripInheritedProviderEnv();
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 // 本地 bot 版判据:gitignored 的 bots.local.js 只在本机构建里存在,CI checkout(公开版)没有。
