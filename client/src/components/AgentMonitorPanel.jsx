@@ -647,6 +647,7 @@ export function AgentMonitorPanel() {
   const localAgents = useStore((s) => s.activeAgents);
   const bgTasks = useStore((s) => s.bgTasks);
   const paneSessions = useStore((s) => s.paneSessions);
+  const paneCount = useStore((s) => s.paneCount); // 打开会话集合按实际窗格数收窄(见 openSessionIds)
   const stoppedSessions = useStore((s) => s.stoppedSessions); // 已停会话表:wf 内层 agent 覆盖显示"已停止"
 
   const mountedRef = useRef(true);
@@ -727,13 +728,21 @@ export function AgentMonitorPanel() {
   // P1-3:activeAgents 是全局 map(不分会话),不过滤会把 A 会话的子代理显示在 B 面板,
   // 且完成的不消失、跨会话无限堆积。按当前打开会话过滤(同 bgList);sessionId 为空的
   // (旧条目/draft 阶段)保留显示避免误藏。
-  const openSessionIds = new Set((paneSessions || []).filter(Boolean).map((s) => s.sessionId).filter(Boolean));
+  // 窗格数收窄(与 AgentCard 的 inOpenPane 同口径):paneSessions 是按 tab 下标的数组,
+  // 分屏从 4 格改回 1 格后,2~4 号槽位还留着当时的会话对象 —— 不 slice 就把"已经关掉的
+  // 窗格"当成打开会话,它们的已完成子代理永远留在面板里(用户报的"久远残留"来源之一)。
+  const openSessionIds = new Set((paneSessions || []).slice(0, paneCount).filter(Boolean).map((s) => s.sessionId).filter(Boolean));
   // 运行中的子代理即使归属后台会话(不在任何窗格)也放行显示(卡片标"后台会话",
   // 点放大自动归位跳转)——否则切走会话后还在跑的子代理在监控里隐身,"看不见活动"。
   // done/error/stopped 仍按打开会话过滤,防跨会话无限堆积。
+  // 无 sessionId 的条目原本无条件放行(怕误藏 draft 期建的),但终态的无主条目谁也认领
+  // 不了、又永不过期 = 跨会话永久残留;只对【还在跑】的无主条目保留这条豁免。
+  // hydrated:翻历史会话点"放大"时 TaskCard 会给早已结束的历史 Task 补建 store 条目
+  // (只为放大视图取数据),它们不属于"当前对话内 Task",不进监控列表。
   const localList = Object.values(localAgents)
-    .filter((a) => !a.sessionId || openSessionIds.has(a.sessionId)
-      || a.status === 'working' || a.status === 'starting');
+    .filter((a) => !a.hydrated)
+    .filter((a) => a.status === 'working' || a.status === 'starting' || !a.status
+      || (a.sessionId ? openSessionIds.has(a.sessionId) : false));
   // 后台任务:只显示本 stream 捕获到、且已拿到输出文件路径的(以 A 通道为准,
   // 避免列出 tasks 目录里的历史幽灵 .output)。并且**只显示当前打开的会话**的后台任务
   // (按所有分屏窗格的 sessionId 过滤)—— 否则切会话后旧卡片会永久堆积且持续轮询。
@@ -745,13 +754,22 @@ export function AgentMonitorPanel() {
   // Bucket by status. 'working'/'starting' default expanded, the rest folded.
   // stopped 桶:主会话停止时被掐掉的子代理。之前没有这个桶 → stopped 条目不落
   // 任何桶直接消失,但区块标题计数又算上它("Task (3)"却只有 2 张卡)。
+  // 终态桶只留最近 10 条(与本面板「后台代理」区同一口径):activeAgents 是内存 map,
+  // 只有整页刷新才清空,而 GUI 常连着开好几天 —— 同一个会话跑过的每个子代理都会在
+  // 已完成桶里越堆越多。按结束时间倒序取最近 10 条,更早的自动退场(要看全量去会话转写)。
+  const recentTerminal = (list) => list
+    .slice()
+    .sort((a, b) => (b.finishedAt || b.startedAt || 0) - (a.finishedAt || a.startedAt || 0))
+    .slice(0, 10);
   const buckets = {
     working:    localList.filter((a) => a.status === 'working' || a.status === 'starting' || !a.status),
     waiting:    localList.filter((a) => a.status === 'needs_input'),
-    done:       localList.filter((a) => a.status === 'done'),
-    stopped:    localList.filter((a) => a.status === 'stopped'),
-    error:      localList.filter((a) => a.status === 'error'),
+    done:       recentTerminal(localList.filter((a) => a.status === 'done')),
+    stopped:    recentTerminal(localList.filter((a) => a.status === 'stopped')),
+    error:      recentTerminal(localList.filter((a) => a.status === 'error')),
   };
+  // 区块计数按【真正渲染出来的卡片数】算,否则终态截断后会出现"Task (23)"里只有 12 张卡。
+  const shownTaskCount = Object.values(buckets).reduce((n, list) => n + list.length, 0);
   const BUCKET_META = {
     working: { label: '工作中', defaultOpen: true,  color: 'text-blue-600' },
     waiting: { label: '等待输入', defaultOpen: true, color: 'text-violet-600' },
@@ -779,8 +797,8 @@ export function AgentMonitorPanel() {
 
       <div className="flex-1 overflow-y-auto p-3 space-y-3">
         {/* Local Task tool subagents (from current stream) — grouped by status */}
-        {localList.length > 0 && (
-          <FoldableSection icon={<Bot size={10} />} title={`当前对话内 Task (${localList.length})`}>
+        {shownTaskCount > 0 && (
+          <FoldableSection icon={<Bot size={10} />} title={`当前对话内 Task (${shownTaskCount})`}>
             <div className="space-y-3">
               {Object.entries(buckets).map(([key, agents]) => {
                 if (agents.length === 0) return null;

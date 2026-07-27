@@ -82,6 +82,9 @@ export function TaskCard({ toolCall }) {
     if (!st.activeAgents[toolCall.id]) {
       const resContent = toolCall.result?.content;
       st.upsertAgent(toolCall.id, {
+        // hydrated:这条是翻历史时为了放大视图现补的,不是本次对话跑起来的子代理 ——
+        // 监控面板据此排除,否则每点开一张历史 Task 卡就往「已完成」里塞一条久远条目。
+        hydrated: true,
         name: subagentType,
         description,
         prompt,
