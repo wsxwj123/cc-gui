@@ -160,7 +160,14 @@ let ccCache = null;       // claude-code 最新版本(native 渠道或 npm,按 c
 let ccCacheSrc = '';      // 'native' | 'npm' — 缓存来自哪个真源,防止跨源错用
 let ccCachedAt = 0;
 
+// 本机 claude 版本的内存缓存(按解析到的路径分键,不同安装各记各的)。版本号是强缓存
+// 友好的数据(只有用户更新 claude 才变),而 `claude --version` 冷启动会偶发超时:npm shim
+// 里再起一个 node、系统负载高、Windows 杀毒实时扫描。一次超时就报"读取版本超时"是误报,
+// 有旧值就用旧值(下一次成功探测自动刷新)。
+const ccVersionByPath = new Map();
+
 async function getClaudeVersion(claudePath) {
+  const cacheKey = claudePath || 'claude';
   try {
     // 优先用 detectInstall 解析到的绝对路径,确保"报告的版本"与"要更新的那个 claude"
     // 是同一个(否则 mac 上 login-shell PATH 与 Node 进程 PATH 顺序不同可能取到不同安装)。
@@ -169,16 +176,19 @@ async function getClaudeVersion(claudePath) {
     // (如 ...\npm\claude)——Node execFile **不能直接执行**它们(.cmd 抛 EINVAL、无扩展名抛
     // ENOENT),必须经 cmd.exe /c(cmd 会按 PATHEXT 把裸路径解析成 .cmd)。否则版本检测/环境
     // tab 永远 installed:false(用户报告:npm 装好仍扫不到)。与 cli-check.js 同款修法。
+    // 超时 15s(原 8s):冷启动实测会偶发擦线,超时值比"回退旧值"更早生效,先给足时间。
     let stdout;
     if (process.platform === 'win32') {
-      ({ stdout } = await execFileP('cmd.exe', ['/c', claudePath || 'claude', '--version'], { timeout: 8000 }));
+      ({ stdout } = await execFileP('cmd.exe', ['/c', claudePath || 'claude', '--version'], { timeout: 15000 }));
     } else {
-      ({ stdout } = await execFileP(claudePath || 'claude', ['--version'], { timeout: 8000 }));
+      ({ stdout } = await execFileP(claudePath || 'claude', ['--version'], { timeout: 15000 }));
     }
     const m = String(stdout).match(/(\d+\.\d+\.\d+)/);
-    return m ? m[1] : null;
+    if (m) { ccVersionByPath.set(cacheKey, m[1]); return m[1]; }
+    return ccVersionByPath.get(cacheKey) || null; // 输出没版本号(异常形态)→ 有旧值先顶着
   } catch {
-    return null; // CLI 未安装 / 不在 PATH
+    // 超时/异常:有缓存就回退旧值(不报错);没缓存才是真落空(未装 / 不在 PATH)。
+    return ccVersionByPath.get(cacheKey) || null;
   }
 }
 
