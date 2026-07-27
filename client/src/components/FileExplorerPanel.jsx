@@ -35,6 +35,78 @@ function fmtSize(n) {
   return `${(n / 1024 / 1024).toFixed(2)}MB`;
 }
 
+// ── 待删除项:模块作用域(刻意不放组件 state)────────────────────────
+// 10 秒倒计时是【撤销窗】,它的存活不能取决于面板是否挂载:Esc 关面板、切到别的面板、打开
+// ArtifactDock 都会卸载本组件。此前"卸载即 flush(立即真删)"把「点完删除按个 Esc」变成
+// 「文件当场永久删除」(服务端 rm -r 不进废纸篓,单文件删除路径又没有确认框),撤销条随面板
+// 一起消失 —— 撤销窗静默作废。现在倒计时活在模块态:卸载既不取消也不提前兑现,到点照删;
+// 重开面板还能看见剩余秒数并撤销。真正的退出(关窗/退 app)由 beforeunload 兜底立即兑现。
+// ⚠️ 定时器回调只碰模块态 + fetch,绝不引用组件 state(触发时组件可能早已卸载);UI 更新
+// 走订阅通知,重挂载的实例直接读本表渲染。
+const pendingDeletes = new Map(); // path -> { name, parentPath, isRoot, rootPath, deadline, deleting, timer }
+// 挂载中的面板实例回调 { onChange, onDone }。StrictMode 双挂载 = 两份订阅,各自增删互不干扰,
+// 模块态不受挂载/卸载影响(卸载只摘订阅,绝不清表)。
+const panelSubs = new Set();
+function notifyPending() {
+  for (const h of [...panelSubs]) { try { h.onChange(); } catch {} }
+}
+
+function deleteBody(path, item) {
+  // 服务端要求显式确认;allowRoot 仅根删除流程带上(已过"删除项目文件夹"危险确认框)
+  return JSON.stringify({ path, rootPath: item.rootPath, confirm: true, ...(item.isRoot ? { allowRoot: true } : {}) });
+}
+
+// 真删(定时器到点 / beforeunload 兜底共用)。开头从表里取不到 = 已撤销或已执行 → 幂等返回。
+async function firePendingDelete(path) {
+  const item = pendingDeletes.get(path);
+  if (!item || item.deleting) return;
+  if (item.timer) { clearTimeout(item.timer); item.timer = null; }
+  // 进入真删前先标 deleting:大目录删除要数秒,这期间横条不能再显示"可撤销"
+  // (点撤销只会清 UI 而文件照删=假撤销)。deleting 后横条改显"删除中…"并禁用撤销。
+  item.deleting = true;
+  notifyPending();
+  let error = null;
+  try {
+    const r = await fetch('/api/files/delete', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: deleteBody(path, item),
+    });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(d.error || `${r.status}`);
+  } catch (e) { error = e; }
+  pendingDeletes.delete(path);
+  notifyPending();
+  // 挂载中的实例刷新树/清空态;没有实例挂载时什么都不用做 —— 面板重挂载会清 dirs 缓存重拉整棵树。
+  for (const h of [...panelSubs]) { try { h.onDone(path, item, error); } catch {} }
+  if (error) {
+    const { confirmDialog } = await import('../utils/confirmDialog.jsx');
+    confirmDialog(`删除失败:${error.message}`, { confirmText: '知道了' });
+  }
+}
+
+// 撤销:只在定时器还在(未进入真删)时有效。
+function undoPendingDelete(path) {
+  const item = pendingDeletes.get(path);
+  if (!item || !item.timer) return;
+  clearTimeout(item.timer);
+  pendingDeletes.delete(path);
+  notifyPending();
+}
+
+// 退出 app / 关窗 / 刷新:已确认的删除意图立即兑现。此刻 fetch 会随页面销毁被中断,
+// 用 sendBeacon(浏览器负责把请求送出去)。ponytail:尽力而为 —— 送不出去的最坏结果是
+// 文件没删成(失败方向安全),不为此再造重试队列。
+function flushPendingDeletesOnExit() {
+  for (const [path, item] of pendingDeletes) {
+    if (item.deleting) continue; // 请求已在途,别再发一遍
+    if (item.timer) { clearTimeout(item.timer); item.timer = null; }
+    try {
+      navigator.sendBeacon('/api/files/delete', new Blob([deleteBody(path, item)], { type: 'application/json' }));
+    } catch {}
+  }
+  pendingDeletes.clear();
+}
+window.addEventListener('beforeunload', flushPendingDeletesOnExit);
+
 /**
  * Tree-style file explorer with click-to-preview. Sandboxed to the current
  * session's projectPath (server-side enforced under $HOME).
@@ -180,29 +252,41 @@ export function FileExplorerPanel() {
 
   // ── 右键菜单 + 删除(10s 可撤销) ──────────────────────────────
   // 删除 = 前端延迟提交:点删除后条目立即从树里隐藏、出可撤销横条倒计时,10 秒后才真调
-  // 后端删除;撤销 = 取消定时器恢复显示。失败方向安全:10s 内退出 app 文件"没删成"而非误删。
+  // 后端删除;撤销 = 摘掉队列条目恢复显示。待删表在模块作用域(见文件顶部 pendingDeletes):
+  // 关面板/切面板不影响倒计时,退出 app 才由 beforeunload 立即兑现。
   const [ctxMenu, setCtxMenu] = useState(null); // { x, y, entry:{path,name,isDir,isRoot,parentPath} }
-  const [pending, setPending] = useState({});   // path -> { name, deadline, parentPath }
   const [nowTick, setNowTick] = useState(Date.now());
-  const timersRef = useRef({});
-  const pendingFireRef = useRef({}); // path -> 真删函数(定时器回调本体),卸载时 flush 用
-  const pendingCount = Object.keys(pending).length;
+  const [, bumpPending] = useState(0); // 模块态 pendingDeletes 变更时重渲染
+  // 订阅模块级待删表:卸载只摘订阅(倒计时继续跑),重挂载直接读表 → 面板关了再开,
+  // 撤销条与剩余秒数原样还在。
   useEffect(() => {
-    if (!pendingCount) return;
+    const h = {
+      onChange: () => bumpPending((n) => n + 1),
+      onDone: (path, item, error) => {
+        if (!error) {
+          // 根删成功:清树缓存并进入"项目已删除"空态——否则 pending 清除后根行取消隐藏,
+          // 旧 dirs 缓存把整棵已删的树原样渲染回来(幽灵树,点刷新才报错)。
+          if (item.isRoot) { setDirs({}); setExpanded(new Set()); setRootGone(true); }
+          // 单删成功后从多选集剔除该路径及其子项:否则随后的批量删除对已删路径再发请求,误报"删除失败"
+          setSelected((prev) => {
+            if (!prev.size) return prev;
+            const n = new Set([...prev].filter((x) => !(x === path || x.startsWith(path + '/') || x.startsWith(path + '\\'))));
+            return n.size === prev.size ? prev : n;
+          });
+        }
+        if (item.parentPath) fetchDir(item.parentPath);
+      },
+    };
+    panelSubs.add(h);
+    setNowTick(Date.now()); // 重挂载时倒计时首帧就用当前时刻,不显示陈旧秒数
+    return () => { panelSubs.delete(h); };
+  }, [fetchDir]);
+  const pendingItems = [...pendingDeletes.entries()];
+  useEffect(() => {
+    if (!pendingItems.length) return;
     const id = setInterval(() => setNowTick(Date.now()), 500);
     return () => clearInterval(id);
-  }, [pendingCount]);
-
-  // 卸载兜底 = 立即执行(flush)待删项,不是取消。卸载点不止"退出 app":切换到其它面板、
-  // 关闭右栏、打开 ArtifactDock 都会卸载本组件 —— 静默取消会让用户已确认的删除在 10s 内
-  // 切个面板就作废、文件原样"复活"且无任何提示。倒计时给的是【撤销窗】,卸载不是撤销,
-  // 所以兑现删除意图。先清 timer 再逐个执行;fire 内部开头会把自己从两张表移除,
-  // 定时器同刻已触发的路径不会被二次执行(幂等防双删)。
-  useEffect(() => () => {
-    for (const t of Object.values(timersRef.current)) clearTimeout(t);
-    timersRef.current = {};
-    for (const fire of Object.values(pendingFireRef.current)) { try { fire(); } catch {} }
-  }, []);
+  }, [pendingItems.length]);
 
   // Esc 关闭菜单:与遮罩外部点击共关同一 ctxMenu state,右键/⋮ 两种打开方式行为一致。
   // 捕获阶段拦下 + stopPropagation:阻断冒泡阶段的「双击 Esc 停止流」监听(App 挂在
@@ -247,44 +331,17 @@ export function FileExplorerPanel() {
     const underPath = (x) => x === path || x.startsWith(path + '/') || x.startsWith(path + '\\');
     setPreview((p) => (p && underPath(p.path) ? null : p));
     setSelectedFile((sf) => (sf && underPath(sf) ? null : sf));
-    // 抽成具名函数:定时器到点与卸载 flush 走同一份真删逻辑。开头同步把自己从
-    // timers/pendingFire 两张表摘掉 = 天然幂等,两条触发路径不会重复删。
-    const fire = async () => {
-      if (!pendingFireRef.current[path]) return; // 已被另一条路径执行
-      delete timersRef.current[path];
-      delete pendingFireRef.current[path];
-      // 进入真删前先标 deleting:大目录删除要数秒,这期间横条不能再显示"可撤销"
-      // (点撤销只会清 UI 而文件照删=假撤销)。deleting 后横条改显"删除中…"并禁用撤销。
-      setPending((prev) => (prev[path] ? { ...prev, [path]: { ...prev[path], deleting: true } } : prev));
-      try {
-        const r = await fetch('/api/files/delete', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          // 服务端要求显式确认;allowRoot 仅根删除流程带上(已过"删除项目文件夹"危险确认框)
-          body: JSON.stringify({ path, rootPath, confirm: true, ...(isRoot ? { allowRoot: true } : {}) }),
-        });
-        const d = await r.json().catch(() => ({}));
-        if (!r.ok) throw new Error(d.error || `${r.status}`);
-        // 根删成功:清树缓存并进入"项目已删除"空态——否则 pending 清除后根行取消隐藏,
-        // 旧 dirs 缓存把整棵已删的树原样渲染回来(幽灵树,点刷新才报错)。
-        if (isRoot) { setDirs({}); setExpanded(new Set()); setRootGone(true); }
-        // 单删成功后从多选集剔除该路径及其子项:否则随后的批量删除对已删路径再发请求,误报"删除失败"
-        setSelected((prev) => {
-          if (!prev.size) return prev;
-          const n = new Set([...prev].filter((x) => !underPath(x)));
-          return n.size === prev.size ? prev : n;
-        });
-      } catch (err) {
-        const { confirmDialog } = await import('../utils/confirmDialog.jsx');
-        confirmDialog(`删除失败:${err.message}`, { confirmText: '知道了' });
-      }
-      setPending((prev) => { const n = { ...prev }; delete n[path]; return n; });
-      if (parentPath) fetchDir(parentPath);
+    if (pendingDeletes.has(path)) return; // 已在待删队列,不重复排期
+    const item = {
+      name, parentPath, isRoot: !!isRoot, rootPath,
+      deadline: Date.now() + 10_000, deleting: false, timer: null,
     };
-    pendingFireRef.current[path] = fire;
-    timersRef.current[path] = setTimeout(fire, 10_000);
+    // 定时器与真删逻辑都在模块作用域:面板卸载不取消也不提前兑现(见 pendingDeletes 注释)。
+    item.timer = setTimeout(() => firePendingDelete(path), 10_000);
+    pendingDeletes.set(path, item);
     setNowTick(Date.now()); // 初显就用当前时刻,避免陈旧 tick 让倒计时首帧显示错误秒数
-    setPending((prev) => ({ ...prev, [path]: { name, deadline: Date.now() + 10_000, parentPath } }));
-  }, [rootPath, fetchDir]);
+    notifyPending();
+  }, [rootPath]);
 
   // ── 批量选择删除 ──────────────────────────────────────────────
   // 危险确认后不立即删:所选每项各进单删的 10s pending 撤销窗(与单删语义一致,用户要求)。
@@ -322,15 +379,8 @@ export function FileExplorerPanel() {
     exitSelMode();
   };
 
-  const undoDelete = (path) => {
-    // 已进入删除中(定时器已触发、请求在途)不可撤销:此时 timer 已被 delete,清 UI
-    // 无法阻止后端删除,会造成"显示撤销成功但文件已删"的假象。
-    if (!timersRef.current[path]) return;
-    clearTimeout(timersRef.current[path]);
-    delete timersRef.current[path];
-    delete pendingFireRef.current[path]; // 必须一起摘,否则卸载 flush 会把已撤销的删除又执行掉
-    setPending((prev) => { const n = { ...prev }; delete n[path]; return n; });
-  };
+  // 撤销走模块级 undoPendingDelete:从 pendingDeletes 摘除条目 = 定时器与 beforeunload
+  // 兜底都不会再执行它。已进入删除中(请求在途)不可撤销(见其内注释)。
 
   if (!rootPath) {
     return (
@@ -387,7 +437,7 @@ export function FileExplorerPanel() {
           </div>
         )}
         {/* 待删除横条:每项独立 10s 倒计时,点撤销恢复;进入删除中则禁用撤销 */}
-        {Object.entries(pending).map(([p, info]) => (
+        {pendingItems.map(([p, info]) => (
           <div key={p} className="mx-2 mb-1 px-2 py-1.5 rounded-lg bg-red-500/10 border border-red-500/20 flex items-center gap-2">
             <Trash2 size={11} className="text-red-600 shrink-0" />
             <span className="text-[11px] font-mono text-ink truncate flex-1" title={p}>{info.name}</span>
@@ -398,7 +448,7 @@ export function FileExplorerPanel() {
                 <span className="text-[10px] text-ink-faint font-mono shrink-0">
                   {Math.max(0, Math.ceil((info.deadline - nowTick) / 1000))}s
                 </span>
-                <button onClick={() => undoDelete(p)}
+                <button onClick={() => undoPendingDelete(p)}
                   className="text-[11px] text-accent hover:underline shrink-0 font-body">撤销</button>
               </>
             )}
@@ -422,7 +472,7 @@ export function FileExplorerPanel() {
           openFile={openFile}
           selectedFile={selectedFile}
           onCtx={onCtx}
-          hidden={pending}
+          hidden={pendingDeletes}
           selMode={selMode}
           selected={selected}
           onToggleSel={toggleSel}
@@ -554,7 +604,7 @@ function TreeNode({ path, name, depth, isDir, isRoot, parentPath, expanded, dirs
               <AlertCircle size={10} />{dir.error}
             </div>
           )}
-          {dir.entries?.filter((e) => !hidden || !hidden[e.path]).map((e) => (
+          {dir.entries?.filter((e) => !hidden?.has(e.path)).map((e) => (
             <TreeNode
               key={e.path}
               path={e.path}
