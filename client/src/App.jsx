@@ -689,15 +689,19 @@ function finalizeAgent(st, agentId, tnStatus, visited, authoritative) {
     if (status !== ag.status) st.upsertAgent(agentId, { status, finishedAt: Date.now() });
   }
   // 级联:本 agent 的 toolCalls 里 id 也是 activeAgents 条目的 = 它起的嵌套子代理,一并收尾。
-  // authoritative 透传给级联:嵌套子代理永远等不到自己的 task_notification(v0.2.211 实测),
-  // 随父的权威终态收敛比永久 stopped 更接近真相。守卫同步放行 canOverride 的精确前置
-  // (taskManaged+stopped+authoritative)——否则 stopped 子代理在这里就被跳过,覆盖门够不着。
+  // 只收【还没有终态】的后代:2026-07-27 实测(P4 probe)推翻了原来"嵌套子代理永远等不到
+  // 自己的 task_notification(v0.2.211)"的前提 —— 嵌套 Agent 在父流发自己的 task_started +
+  // task_notification(带自己的 tool_use_id),有独立的权威终态。所以父的终态不该再往下透传
+  // 覆盖:父被停而子已完成时会把子从 done/自己的权威 stopped 误翻成父的状态。子条目若是被
+  // 猜出来的 stopped,由它自己的 task_notification 经上面的 canOverride 纠正(A4b 让嵌套条目
+  // 在 task_started 时就带上 taskManaged,那条路走得通)。
+  // 保留的这半:父终态时把【没有自己 task 事件、仍非终态】的后代一并收尾,否则监控永久转圈。
   const ag2 = st.activeAgents[agentId];
   for (const tc of (ag2?.toolCalls || [])) {
     if (tc?.id && st.activeAgents[tc.id] && !visited.has(tc.id)) {
       const child = st.activeAgents[tc.id];
       const childTerminal = ['done', 'error', 'stopped'].includes(child.status);
-      if (!childTerminal || (authoritative && child.status === 'stopped' && (child.taskManaged || child.optimisticStop))) {
+      if (!childTerminal) {
         finalizeAgent(st, tc.id, tnStatus, visited, authoritative);
       }
     }
@@ -4833,7 +4837,25 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             // reattach 存活,不像 per-stream Set 重连即丢)。顶层 result 兜底一律不碰它;finally 仅在
             // 【用户主动停止】时才收(进程被杀)。根治"后台化子代理(run_in_background,如深度调研)派发后
             // 顶层 result / 回合 done 的 finally 把它误标 done,而它其实还在后台跑"(用户实报)。
-            { const _s0 = useStore.getState(); if (_s0.activeAgents[event.tool_use_id]) _s0.upsertAgent(event.tool_use_id, { taskManaged: true }); }
+            // D4b:条目不存在时最小化建一条(仅 local_agent —— local_bash 建条目会在监控里
+            // 冒出假子代理卡,local_workflow 由下面自己的分支建)。嵌套子代理的条目原本要等它
+            // 自己的 message_start 才由 upsertAgent 顺带建出来,task_started 这刻还没有 →
+            // 存在性守卫落空 → 拿不到 taskManaged(被顶层 result 提前标 done)、也没有
+            // sessionId(停止时 finalizeSessionAgents 扫不到)。
+            {
+              const _s0 = useStore.getState();
+              if (_s0.activeAgents[event.tool_use_id]) _s0.upsertAgent(event.tool_use_id, { taskManaged: true });
+              else if (event.task_type === 'local_agent') {
+                _s0.upsertAgent(event.tool_use_id, {
+                  name: event.subagent_type || 'Agent',
+                  description: event.description || '',
+                  status: 'working',
+                  startedAt: Date.now(),
+                  taskManaged: true,
+                  sessionId: streamOwnerSid(),
+                });
+              }
+            }
             // workflow 实时可见性(v0.2.212,实测定档):Workflow 工具起的独立 runtime agent 不发
             // 带 parent_tool_use_id 的 stream 增量,所以现有 activeAgents 对它建 0 条目、监控看不见;
             // 但父流【实时发】task_started(task_type:'local_workflow', workflow_name, tool_use_id)
