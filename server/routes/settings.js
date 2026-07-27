@@ -1437,7 +1437,7 @@ async function probeUpstreamModels(baseURL, apiKey) {
 // login keychain; some setups use ~/.claude/.credentials.json. Returns the
 // accessToken or '' (non-macOS, logged out, or unreadable) so callers can fall
 // back to the tier aliases.
-async function readClaudeOAuthToken() {
+export async function readClaudeOAuthToken() {
   try {
     const { stdout } = await execFileP('security',
       ['find-generic-password', '-s', 'Claude Code-credentials', '-w'], { timeout: 5000 });
