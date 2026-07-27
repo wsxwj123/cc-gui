@@ -340,7 +340,7 @@ export function ArtifactPreview({ lang, code, coexist = false, dockKey }) {
   // 视口锚定的关闭按钮,Esc 只锦上添花。
   useEffect(() => {
     if (!fullscreen) return;
-    const onKey = (e) => { if (e.key === 'Escape') setFullscreen(false); };
+    const onKey = (e) => { if (e.key === 'Escape') { e.stopPropagation(); setFullscreen(false); } }; // 退全屏的 Esc 不再穿透到会话级监听(生成中单击即停)
     window.addEventListener('keydown', onKey, true);
     const prev = document.body.style.overflow;
     document.body.style.overflow = 'hidden';
@@ -462,7 +462,7 @@ export function ArtifactDock() {
   // 全屏时按 Esc 关闭 + 锁 body 滚动(与 ArtifactPreview 全屏一致,capture 阶段)。
   useEffect(() => {
     if (!fullscreen) return;
-    const onKey = (e) => { if (e.key === 'Escape') setFullscreen(false); };
+    const onKey = (e) => { if (e.key === 'Escape') { e.stopPropagation(); setFullscreen(false); } }; // 退全屏的 Esc 不再穿透到会话级监听(生成中单击即停)
     window.addEventListener('keydown', onKey, true);
     const prev = document.body.style.overflow;
     document.body.style.overflow = 'hidden';

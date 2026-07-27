@@ -100,7 +100,8 @@ function EditableSessionTitle({ session }) {
         onChange={(e) => setDraft(e.target.value)}
         onKeyDown={(e) => {
           if (e.key === 'Enter') { e.preventDefault(); save(); }
-          else if (e.key === 'Escape') { e.preventDefault(); setEditing(false); }
+          // 取消重命名的 Esc 已被消费,挡住 window 上的会话级监听(生成中单击即停)。
+          else if (e.key === 'Escape') { e.preventDefault(); e.nativeEvent?.stopImmediatePropagation?.(); setEditing(false); }
         }}
         onBlur={save}
         maxLength={200}
@@ -470,7 +471,8 @@ function ThemeToggle() {
   useEffect(() => {
     if (!open) return;
     const onDown = (e) => { if (wrapRef.current && !wrapRef.current.contains(e.target)) setOpen(false); };
-    const onEsc = (e) => { if (e.key === 'Escape') setOpen(false); }; // 修正批#3:补 Esc 关闭(所有弹层统一)
+    // 修正批#3:补 Esc 关闭(所有弹层统一)。stopPropagation:关弹层的 Esc 不冒到 window 上的会话级监听(生成中单击即停)。
+    const onEsc = (e) => { if (e.key === 'Escape') { e.stopPropagation(); setOpen(false); } };
     document.addEventListener('mousedown', onDown);
     document.addEventListener('keydown', onEsc);
     return () => {
@@ -775,7 +777,7 @@ function PaneCountPicker() {
   useEffect(() => {
     if (!open) return;
     const onDoc = (e) => { if (!wrapRef.current?.contains(e.target)) setOpen(false); };
-    const onEsc = (e) => { if (e.key === 'Escape') setOpen(false); };
+    const onEsc = (e) => { if (e.key === 'Escape') { e.stopPropagation(); setOpen(false); } }; // stopPropagation:关弹层的 Esc 不冒到 window 上的会话级监听(生成中单击即停)
     document.addEventListener('mousedown', onDoc);
     document.addEventListener('keydown', onEsc);
     return () => { document.removeEventListener('mousedown', onDoc); document.removeEventListener('keydown', onEsc); };
@@ -1738,7 +1740,8 @@ function SessionItem({ session, isSelected, onSelect, onFork, onArchive, onDelet
             onChange={(e) => setDraft(e.target.value)}
             onKeyDown={(e) => {
               if (e.key === 'Enter') { e.preventDefault(); saveRename(); }
-              else if (e.key === 'Escape') { e.preventDefault(); setRenaming(false); }
+              // 取消重命名的 Esc 已被消费,挡住 window 上的会话级监听(生成中单击即停)。
+              else if (e.key === 'Escape') { e.preventDefault(); e.nativeEvent?.stopImmediatePropagation?.(); setRenaming(false); }
             }}
             onBlur={saveRename}
             placeholder="自定义标题（清空恢复默认）"
@@ -3448,7 +3451,7 @@ function SessionHeaderMore({ children }) {
       if (e.target?.closest?.('.glass-popover')) return;
       setOpen(false);
     };
-    const onEsc = (e) => { if (e.key === 'Escape') setOpen(false); };
+    const onEsc = (e) => { if (e.key === 'Escape') { e.stopPropagation(); setOpen(false); } }; // stopPropagation:关弹层的 Esc 不冒到 window 上的会话级监听(生成中单击即停)
     document.addEventListener('mousedown', onDoc);
     document.addEventListener('keydown', onEsc);
     return () => { document.removeEventListener('mousedown', onDoc); document.removeEventListener('keydown', onEsc); };
@@ -7390,7 +7393,7 @@ function ContextBreakdownButton({ contextTokens, contextWindow, contextPct, fmtT
       if (menuRef.current?.contains(e.target)) return;
       setOpen(false);
     };
-    const onEsc = (e) => { if (e.key === 'Escape') setOpen(false); };
+    const onEsc = (e) => { if (e.key === 'Escape') { e.stopPropagation(); setOpen(false); } }; // stopPropagation:关弹层的 Esc 不冒到 window 上的会话级监听(生成中单击即停)
     document.addEventListener('click', onDocClick);
     document.addEventListener('keydown', onEsc);
     return () => {

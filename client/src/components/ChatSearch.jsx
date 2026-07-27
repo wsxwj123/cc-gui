@@ -102,7 +102,9 @@ export default function ChatSearch({ containerRef, onClose }) {
   }, [clearHighlights]);
 
   const onKeyDown = (e) => {
-    if (e.key === 'Escape') { e.preventDefault(); onClose(); }
+    // stopImmediatePropagation:关检索框的 Esc 已被消费,不得穿透到 window 上的会话级
+    // 监听(生成中单击 Esc 即停)。React 合成事件的 stopPropagation 拦不住原生冒泡。
+    if (e.key === 'Escape') { e.preventDefault(); e.nativeEvent?.stopImmediatePropagation?.(); onClose(); }
     else if (e.key === 'Enter') { e.preventDefault(); go(e.shiftKey ? -1 : 1); }
   };
 

@@ -83,7 +83,8 @@ export function AnchoredPopover({ anchorRef, open, onRequestClose, drop = 'down'
       if (anchorRef?.current?.contains(e.target)) return;
       onRequestClose?.();
     };
-    const onEsc = (e) => { if (e.key === 'Escape') onRequestClose?.(); };
+    // stopPropagation:关弹层的 Esc 不冒到 window 上的会话级监听(生成中单击即停)。
+    const onEsc = (e) => { if (e.key === 'Escape') { e.stopPropagation(); onRequestClose?.(); } };
     document.addEventListener('mousedown', onDown);
     document.addEventListener('keydown', onEsc);
     return () => {

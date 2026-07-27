@@ -113,7 +113,8 @@ function RollbackMenu({ message, onAction }) {
       if (menuRef.current?.contains(e.target)) return;
       setOpen(false);
     };
-    const onEsc = (e) => { if (e.key === 'Escape') setOpen(false); };
+    // stopPropagation:关回滚菜单的 Esc 不冒到 window 上的会话级监听(生成中单击即停)。
+    const onEsc = (e) => { if (e.key === 'Escape') { e.stopPropagation(); setOpen(false); } };
     // mousedown closes too aggressively (clicking inside menu before mouseup
     // can race with the close listener). Use `click` instead — fires only
     // after a complete press-release on the same target.

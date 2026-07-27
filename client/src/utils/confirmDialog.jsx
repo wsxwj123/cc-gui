@@ -13,7 +13,9 @@ function ConfirmModal({ message, danger, confirmText, cancelText, checkbox, onRe
     // 只全局监听 Escape=取消。Enter=确认交给下方按钮的 autoFocus(焦点在按钮时
     // 浏览器原生用 Enter 激活),避免 input 聚焦场景下全局 Enter 误确认危险操作。
     const onKey = (e) => {
-      if (e.key === 'Escape') resolve(false);
+      // stopPropagation:确认框吃掉这次 Esc,不让它继续冒到 window 上的会话级监听
+      // (生成中单击 Esc 即停 —— 取消一个确认框不该顺手停掉整回合)。
+      if (e.key === 'Escape') { e.stopPropagation(); resolve(false); }
     };
     document.addEventListener('keydown', onKey);
     return () => document.removeEventListener('keydown', onKey);
