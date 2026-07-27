@@ -247,6 +247,10 @@ const activeProcesses = new Map();
 //   stoppableTasks 本回合的非 shell 任务(allTasks 时=全部非 shell):发 stopTask
 //   keptTasks      跨回合仍活着的后台子代理:本次不停,并抑制 closing / abort(否则进程一死连坐)
 // allTasks=true 由「停止后台 N」总闸传入 → keptTasks 恒空,分组与改动前逐字等价。
+// ⚠️ 口径差异(真机实测的 bug):shellTasks / stoppableTasks 收 map key(=task_id),后续
+// stopTask(tid) 扇出靠它;keptTasks 却是回给客户端当 keptToolUseIds 用的,前端 visited 以
+// tool_use_id(toolu_xxx)为键 → 推 task_id 永不命中、排除机制静默失效。故 keptTasks 收
+// 条目的 toolUseId(缺失时回落 tid,聊胜于无)。两种口径不可互换。
 export function partitionStopTasks(liveTasks, turnEpoch, allTasks) {
   const shellTasks = [];
   const stoppableTasks = [];
@@ -256,7 +260,7 @@ export function partitionStopTasks(liveTasks, turnEpoch, allTasks) {
     if (t && t.kind === 'shell') { shellTasks.push(tid); continue; }
     // 只有【明确带 epoch 且不等于本回合】才保留;空条目/缺 epoch 保持旧行为归入可停,
     // 宁可多停一个来路不明的条目,也不让停止对第三方 provider 静默失效。
-    if (!allTasks && t && typeof t.epoch === 'number' && (t.epoch | 0) !== epoch) { keptTasks.push(tid); continue; }
+    if (!allTasks && t && typeof t.epoch === 'number' && (t.epoch | 0) !== epoch) { keptTasks.push(t.toolUseId || tid); continue; }
     stoppableTasks.push(tid);
   }
   return { shellTasks, stoppableTasks, keptTasks };

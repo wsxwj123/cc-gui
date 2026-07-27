@@ -31,6 +31,27 @@ const T = (kind, epoch) => ({ kind, epoch, createdAt: Date.now() });
   assert.deepEqual(all.shellTasks, ['t-shell', 't-shell-prev'], '总闸仍不碰 shell');
 }
 
+// keptTasks 的口径:必须是条目的 toolUseId(前端 visited 以 tool_use_id 为键),不是 map key
+// (task_id)。真机实测过的 bug:推 tid → 响应 ["ab72f652f9155179b"] 而真实键是
+// "toolu_01Qqs59U6sA6jFn9WudBPKR" → 排除永不命中。构造 toolUseId ≠ key 才能钉住。
+{
+  const live = new Map([
+    ['task_now', { kind: 'subagent', epoch: 3, toolUseId: 'toolu_NOW' }],
+    ['task_prev', { kind: 'subagent', epoch: 2, toolUseId: 'toolu_PREV' }],
+    ['task_prev2', { kind: 'subagent', epoch: 1, toolUseId: 'toolu_PREV2' }],
+    ['task_shell', { kind: 'shell', epoch: 1, toolUseId: 'toolu_SHELL' }],
+  ]);
+  const r = partitionStopTasks(live, 3, false);
+  assert.deepEqual(r.keptTasks, ['toolu_PREV', 'toolu_PREV2'],
+    'keptTasks 必须收条目的 toolUseId(回给前端当 keptToolUseIds),不能是 map key/task_id');
+  // 另两组仍是 map key —— stopTask(tid) 扇出靠它,改了就把停止弄坏
+  assert.deepEqual(r.stoppableTasks, ['task_now'], 'stoppableTasks 仍是 task_id(stopTask 扇出用)');
+  assert.deepEqual(r.shellTasks, ['task_shell'], 'shellTasks 仍是 task_id');
+  // toolUseId 缺失(旧条目/第三方 provider)回落 tid,不能变成 null/undefined 污染数组
+  const r2 = partitionStopTasks(new Map([['task_x', { kind: 'subagent', epoch: 1, toolUseId: null }]]), 3, false);
+  assert.deepEqual(r2.keptTasks, ['task_x'], 'toolUseId 缺失时回落 task_id,不得推入 null');
+}
+
 // 缺字段/空条目(第三方 provider 不发 task_type/epoch)保持旧行为:归入可停,防停止失效
 {
   const live = new Map([['t-null', null], ['t-nofield', {}]]);
@@ -90,6 +111,9 @@ const T = (kind, epoch) => ({ kind, epoch, createdAt: Date.now() });
   // 收尾会把服务端刚保留的跨回合后台子代理也乐观标 stopped(进程活着却显示已停止)。
   assert.equal((stopRoute.match(/kept: keptCount, keptToolUseIds: keptTasks/g) || []).length, 3,
     '选择性 /stop 的三处 kept 响应必须回 keptToolUseIds');
+  // keptTasks 的元素口径守卫:必须 push toolUseId(回落 tid),不得改回裸 push(tid)
+  assert.ok(/keptTasks\.push\(t\.toolUseId \|\| tid\)/.test(src),
+    'keptTasks 必须收 t.toolUseId(缺失回落 tid),推裸 tid 会让前端排除永不命中');
 
   // 客户端:停止收尾必须排除这些 id(预置 visited 同时跳过顶层扫描与级联),两条收尾路径都接。
   const app = readFileSync(
