@@ -19,12 +19,17 @@ function makeProbe(execImpl) {
       const m = String(stdout).match(/(\d+\.\d+\.\d+)/);
       if (m) { cache.set(cacheKey, m[1]); return m[1]; }
       return cache.get(cacheKey) || null;
-    } catch {
+    } catch (err) {
+      // 只有"探测本身没跑成"才回退缓存;二进制真没了(ENOENT)如实 null。
+      const transient = err?.killed === true || err?.signal != null
+        || ['ETIMEDOUT', 'EBUSY', 'EAGAIN'].includes(err?.code);
+      if (!transient) return null;
       return cache.get(cacheKey) || null;
     }
   };
 }
 const TIMEOUT = () => { throw Object.assign(new Error('ETIMEDOUT'), { killed: true }); };
+const GONE = () => { throw Object.assign(new Error('spawn ENOENT'), { code: 'ENOENT' }); };
 
 // 无缓存 + 超时 → null(真落空,端点照旧报错文案)
 {
@@ -41,6 +46,15 @@ const TIMEOUT = () => { throw Object.assign(new Error('ETIMEDOUT'), { killed: tr
   assert.equal(await probe('/usr/local/bin/claude'), '2.1.160', '再探超时 → 回退缓存版本,不报"读取版本超时"');
   mode = 'ok';
   assert.equal(await probe('/usr/local/bin/claude'), '2.1.160', '恢复后照常走真值');
+}
+
+// 二进制真没了(ENOENT):不回退缓存 —— 否则用户卸载/换装法后 GUI 一直报一个不存在的版本
+{
+  let mode = 'ok';
+  const probe = makeProbe(() => (mode === 'ok' ? '2.1.160 (Claude Code)' : GONE()));
+  assert.equal(await probe('/usr/local/bin/claude'), '2.1.160', '首次成功');
+  mode = 'gone';
+  assert.equal(await probe('/usr/local/bin/claude'), null, 'ENOENT → 如实 null,不拿缓存顶(未安装提示要能出来)');
 }
 
 // 缓存按路径分键:两个安装互不串版本
@@ -78,6 +92,8 @@ const TIMEOUT = () => { throw Object.assign(new Error('ETIMEDOUT'), { killed: tr
   assert.ok((fn.match(/ccVersionByPath\.get\(/g) || []).length >= 2, '成功无匹配 + catch 两条路径都要回退缓存');
   assert.ok(!/timeout:\s*8000/.test(fn), '版本探测超时不得回到 8s');
   assert.ok(/timeout:\s*15000/.test(fn), '版本探测超时应为 15s');
+  assert.ok(/const transient =/.test(fn) && /if \(!transient\) return null;/.test(fn),
+    'catch 必须区分超时(回退缓存)与二进制消失(如实 null)');
 }
 
-console.log('✓ check-claude-version-cache: 行为 4 组 + 源码守卫 全过');
+console.log('✓ check-claude-version-cache: 行为 5 组 + 源码守卫 全过');

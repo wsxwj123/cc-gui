@@ -186,8 +186,14 @@ async function getClaudeVersion(claudePath) {
     const m = String(stdout).match(/(\d+\.\d+\.\d+)/);
     if (m) { ccVersionByPath.set(cacheKey, m[1]); return m[1]; }
     return ccVersionByPath.get(cacheKey) || null; // 输出没版本号(异常形态)→ 有旧值先顶着
-  } catch {
-    // 超时/异常:有缓存就回退旧值(不报错);没缓存才是真落空(未装 / 不在 PATH)。
+  } catch (err) {
+    // 只有【探测本身没跑成】才回退旧值:超时(execFile killed / ETIMEDOUT)、被信号杀、
+    // 系统忙。二进制真没了(ENOENT/EACCES,用户卸载或换了安装方式)必须如实返回 null,
+    // 否则缓存会让 GUI 一直报一个已经不存在的版本、"未安装"提示永远出不来。
+    const transient = err?.killed === true
+      || err?.signal != null
+      || ['ETIMEDOUT', 'EBUSY', 'EAGAIN'].includes(err?.code);
+    if (!transient) return null;
     return ccVersionByPath.get(cacheKey) || null;
   }
 }
@@ -519,7 +525,8 @@ router.get('/claude-installs', async (_req, res) => {
   const installs = await Promise.all(list.map(async (it) => ({
     path: it.path,
     method: classifyClaudePath(it.real),
-    version: await getClaudeVersion(it.path),   // 失败为 null,best-effort
+    // 探测超时回退该路径上次探到的版本;二进制真没了(ENOENT 等)如实为 null。
+    version: await getClaudeVersion(it.path),
     active: !!activeKey && norm(it.real) === activeKey,
   })));
   res.json({ installs, overridden: !!override, override, activeVia: active?.via || null });
