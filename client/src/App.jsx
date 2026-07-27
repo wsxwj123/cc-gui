@@ -5878,7 +5878,13 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       // 期间的读点(⚡/异步回调)拿到上一个流的会话 = 串扰。只清 ref 不动 streamOwnerKey
       // state —— state 驱动 liveVisible(CQ-5),此刻本地缓冲还没交还 jsonl,清了会让刚
       // 产出的回复先隐藏再从历史冒出来(闪一下)。下一次发送/reattach 在 4333 重新认领。
-      streamOwnerKeyRef.current = null;
+      // 只在 ref 仍是【本流认领的那个 key】时清:本 finally 可能迟到(被 abort 的流收尾时
+      // 新流已经起来并认领了 ref),无脑清会把新流的归属抹掉 = 新流的异步回调读不到归属会话。
+      // 本流认领过的 key 有两个形态:发起时的 sessionQueueKey、init 拿到真 id 后升级的 streamSid。
+      if (streamOwnerKeyRef.current === sessionQueueKey
+          || (streamSid && streamOwnerKeyRef.current === streamSid)) {
+        streamOwnerKeyRef.current = null;
+      }
     }
   }, [selectedSession, selectedProject, streamingModel, isStreaming, sessionQueueKey, sendBtw]);
 
@@ -5986,16 +5992,22 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
 
   // "⚡ 引导" — abort the in-flight chat and immediately fire the queued message.
   const handleAccelerate = useCallback(() => {
-    killedRef.current = true; // 引导=停当前回合(POST /stop)→ finally 收后台化子代理
+    // 两个 flag 只在【真有在跑的流】时置:它们都是给"本流的 finally"看的
+    // (killedRef=这次 abort 真杀了进程、acceleratingRef=队列已被我弹过别再弹)。空闲态点 ⚡
+    // 没有 finally 会来读它们、更不会重置 → acceleratingRef 一直挂着 true,下一条流收尾时
+    // 整段 drain 被跳过,队列里的第 2 条永远不接力。
+    if (streamingRef.current) {
+      killedRef.current = true; // 引导=停当前回合(POST /stop)→ finally 收后台化子代理
+      // Drain the queue head ourselves instead of relying on the aborted send's
+      // finally: that finally SKIPS drain on a reattach stream (App enters reattach
+      // when you revisit a still-generating session), so on mobile "⚡ 引导" did
+      // nothing. Flag it so the finally doesn't also pop (double-send).
+      acceleratingRef.current = true;
+    }
     if (abortRef.current) try { abortRef.current.abort(); } catch {}
     if (activeProcRef.current) {
       fetch(`/api/chat/${activeProcRef.current}/stop`, { method: 'POST' }).catch(() => {});
     }
-    // Drain the queue head ourselves instead of relying on the aborted send's
-    // finally: that finally SKIPS drain on a reattach stream (App enters reattach
-    // when you revisit a still-generating session), so on mobile "⚡ 引导" did
-    // nothing. Flag it so the finally doesn't also pop (double-send).
-    acceleratingRef.current = true;
     // queueKey 与流收尾 drain 同口径(F1):消费端 handleSendRef 恒发进【本窗格当前会话】,
     // 所以只能弹当前会话的队列 —— 入队侧(enqueueMessage)用的也正是这个 pane key,两端对称。
     // 原来用 streamOwnerKeyRef:该 ref 流结束后从不清 → 非流式点 ⚡ 弹的是上一个流的队列
