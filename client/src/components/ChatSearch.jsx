@@ -101,11 +101,22 @@ export default function ChatSearch({ containerRef, onClose }) {
     return () => clearHighlights();
   }, [clearHighlights]);
 
+  // Esc 关检索:挂 document(本组件只在检索打开期间挂载,卸载即摘)。元素级 onKeyDown
+  // 只在输入框聚焦时收得到 —— 点了正文再按 Esc 就直穿到 window 上的会话级监听,变成
+  // "关个检索框停掉整回合"。stopPropagation 在 document 冒泡阶段即止,够挡住 window。
+  useEffect(() => {
+    const onKey = (e) => {
+      if (e.key !== 'Escape' || e.isComposing || e.keyCode === 229) return;
+      e.preventDefault();
+      e.stopPropagation();
+      onClose();
+    };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [onClose]);
+
   const onKeyDown = (e) => {
-    // stopImmediatePropagation:关检索框的 Esc 已被消费,不得穿透到 window 上的会话级
-    // 监听(生成中单击 Esc 即停)。React 合成事件的 stopPropagation 拦不住原生冒泡。
-    if (e.key === 'Escape') { e.preventDefault(); e.nativeEvent?.stopImmediatePropagation?.(); onClose(); }
-    else if (e.key === 'Enter') { e.preventDefault(); go(e.shiftKey ? -1 : 1); }
+    if (e.key === 'Enter') { e.preventDefault(); go(e.shiftKey ? -1 : 1); }
   };
 
   return (
