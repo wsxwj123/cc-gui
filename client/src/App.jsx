@@ -3768,6 +3768,14 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // handleSend finally 读它跳过排队消息外发——回合还在服务端跑,此刻外发会对同一
   // jsonl 双写。finally 末尾复位。
   const backgroundedRef = useRef(false);
+  // C1:本 pane 有一条流正在走 handleSend 的 finally 收尾(内含 fetch + 最多 11×200ms 的
+  // 落盘等待,真实 await 窗口 ~2.4s)。窗口内 streamingRef 已是 false、服务端进程也没了,
+  // poll 的排队排空分支(:4112)条件全满足会抢跑 shift 队首,finally 走到末尾又 shift 一条,
+  // 后者撞 :4377 的门被重新入队到队尾 → 排队消息乱序发出。收尾期间压住 poll 排空,
+  // 队列一律由 finally 逐条弹。目标场景(切走再回来)本地没有 finally 在途,不受影响。
+  // 用计数而非布尔:被 abort 的流 A 的 finally 会与新起的流 B 重叠(⚡引导/reattach 场景),
+  // 布尔会被 A 的收尾提前清成 false,B 自己的收尾窗口又敞开了。
+  const finalizeInFlightRef = useRef(0);
 
   // C1/CQ-5:流式缓冲的归属门控(与消息渲染/统计同源)。原定义在早返回之后,上移到
   // currentTodos/currentPlan 之前,让代办/计划重建共用同一门控(串扰窗口2:A 正在流式
@@ -4109,7 +4117,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         // 可见的排队消息,没有「回复完成后自动发出」这条 UI 承诺,留给 finally / ⚡ 路径。
         // 必须同步清 backgroundPidRef(它靠 effect 异步更新,出队消息的 handleSend 撞到旧 pid
         // 会把消息塞回空队列→死锁);pid 已消失,清了语义也对。
-        if (!next && !streamingRef.current && !acceleratingRef.current) {
+        // C1:本地流的 finally 正在收尾(streamingRef 已 false 但它自己马上要排空队列)→
+        // 这里绝不能抢跑,否则两边各弹一条 = 乱序(详见 finalizeInFlightRef 定义处)。
+        if (!next && !streamingRef.current && !acceleratingRef.current && finalizeInFlightRef.current === 0) {
           const _sel = getLocalSession();
           const drainKey = _sel?.sessionId || `draft-${_sel?.projectHash || 'none'}`;
           const sameSession = pollSid ? drainKey === pollSid : _sel?.draftId === pollDraftId;
@@ -4123,6 +4133,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
               // 落地前复查:这 50ms 里可能切了会话 / 新流起来了 —— 那就把消息留在队列里,
               // 交给该会话下一次进入或流收尾的排空,绝不错发进别的会话。
               if (cancelled || streamingRef.current || backgroundPidRef.current || acceleratingRef.current) return;
+              if (finalizeInFlightRef.current > 0) return; // C1:这 50ms 里有流开始收尾 → 让它自己排空
               const s2 = getLocalSession();
               if ((s2?.sessionId || `draft-${s2?.projectHash || 'none'}`) !== drainKey) return;
               const q = useStore.getState().shiftMessage(drainKey);
@@ -4560,6 +4571,10 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     // 键而非 null(判官盲审重要2):null 条目在 init 后 migrateSessionKey 无法迁移 →
     // finalizeSessionAgents 按真 sid 扫不到 → 残留 + 监控幽灵;draft 键则可随迁移转正。
     const streamOwnerSid = () => streamSid || streamOwnerKeyRef.current || null;
+    // C1:置在 try 的第一行(不是更早的 updateStreaming(true) 处),这样 +1 与下面 finally
+    // 的 -1 严格配对 —— try 之前抛错就根本没加过,不会把 poll 排空永久压死。
+    // 正常/reattach 两条起流路径共用这同一个 try/finally,一处覆盖两条。
+    finalizeInFlightRef.current += 1;
     try {
       let pid;
       if (reattachPid) {
@@ -5667,6 +5682,11 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         }
       }
     } finally {
+      // C1:整个收尾体裹一层 try/finally,末尾无条件把 finalizeInFlightRef 减回去 —— 收尾
+      // 中途抛错(setState/shiftMessage 等未被局部 catch 的调用)时计数若不减,poll 的排队
+      // 排空就永久哑掉。下面的收尾体【沿用原缩进不动】:重排 280 行只为对齐空白,既会淹没
+      // 审查视线,也会碰到明令不许动的 F1 drain 本体(:5946-5956)。
+      try {
       // 停止/断流兜底:本回合派出的子代理若仍在运行态(中断后 tool_result 永不到达,
       // 状态没人更新),统一标 stopped —— 否则卡片/监控永远转圈"运行中"(用户实报
       // "停止后子代理还在跑"的 UI 侧成因;进程侧由 stop 端点的 abort 兜底真杀)。
@@ -5953,6 +5973,10 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       if (streamOwnerKeyRef.current === sessionQueueKey
           || (streamSid && streamOwnerKeyRef.current === streamSid)) {
         streamOwnerKeyRef.current = null;
+      }
+      } finally {
+        // C1:收尾结束(含中途抛错)一律解锁;归零后 poll 的排队排空恢复接管。
+        finalizeInFlightRef.current = Math.max(0, finalizeInFlightRef.current - 1);
       }
     }
   }, [selectedSession, selectedProject, streamingModel, isStreaming, sessionQueueKey, sendBtw]);
