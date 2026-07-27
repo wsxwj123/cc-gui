@@ -1406,12 +1406,12 @@ router.post('/chat/:pid/stop', async (req, res) => {
     }
     if (!stoppableTasks.length) {
       // idle 仅 shell / 仅跨回合后台任务:没有可停对象,no-op 保活(不 closing、不 interrupt、不 abort)。
-      return res.json({ ok: true, kept: keptCount });
+      return res.json({ ok: true, kept: keptCount, keptToolUseIds: keptTasks });
     }
     if (keptCount) {
       // idle 混合:stopTask 已发(子代理经 stopped notification 收尾),不 closing、
       // 不 interrupt、不 abort,进程为 shell / 跨回合后台任务保活。
-      return res.json({ ok: true, kept: keptCount });
+      return res.json({ ok: true, kept: keptCount, keptToolUseIds: keptTasks });
     }
     // idle 仅 stoppable(无 shell):closing 已置、stopTask 已发,落到下方 interrupt+窗+abort(=hard)。
   }
@@ -1446,7 +1446,10 @@ router.post('/chat/:pid/stop', async (req, res) => {
     try { slot.abort?.abort(); } catch {}
     try { slot.input?.close(); } catch {}
   }, hadTasks ? 3000 : 2000);
-  res.json(keptCount ? { ok: true, kept: keptCount } : { ok: true });
+  // keptToolUseIds:被保留的跨回合后台子代理 id,回给客户端 —— 前端停止收尾会把该会话全部
+  // 非终态子代理乐观标 stopped,不排除这些就会"进程还活着却显示已停止"(与「停止后台 N」
+  // 徽章读的服务端真值互相矛盾)。仅数据,不影响本路由任何时序。
+  res.json(keptCount ? { ok: true, kept: keptCount, keptToolUseIds: keptTasks } : { ok: true });
 });
 
 // 停止链路 #1(部件①):按单个 task 精确停止 —— 净新增独立路由,与上面 1195-1321 的

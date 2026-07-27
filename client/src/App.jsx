@@ -714,13 +714,17 @@ function finalizeAgent(st, agentId, tnStatus, visited, authoritative) {
 // 不了)→ 按 sessionId 精确扫描级联收尾为 stopped。sessionId 严格相等:分屏下不碰
 // 其他会话;sessionId 为空的条目(draft 阶段/旧条目)保守不动。共享 visited:先收的
 // 级联已把后代标终态,后续根条目经 visited 去重不会重复处理。
-function finalizeSessionAgents(sessionId, tnStatus = 'stopped') {
+// excludeIds:服务端 /stop 选择性路径回的 keptToolUseIds —— 跨回合后台子代理本次【没被停】,
+// 进程还活着,乐观标 stopped 会让监控卡片显示"已停止"、单卡停止按钮消失(终态不显),与
+// 「停止后台 N」徽章(读服务端真值)互相矛盾。预置进 visited 即可同时跳过顶层扫描与级联,
+// 且不碰它们的 optimisticStop / 停止按钮可用性。宁可漏标(留 working 等权威终态纠正)。
+function finalizeSessionAgents(sessionId, tnStatus = 'stopped', excludeIds) {
   if (!sessionId) return;
   const st = useStore.getState();
   // 三个调用方(前台停止/删会话/杀进程)全是"该会话前台活动被终止"语义 → 记入已停表,
   // 供监控页把 workflow 内层 agent(服务端 mtime 推断、无 stopped 态)覆盖显示为已停止。
   st.markSessionStopped?.(sessionId);
-  const visited = new Set();
+  const visited = new Set(Array.isArray(excludeIds) ? excludeIds : []);
   for (const [id, ag] of Object.entries(st.activeAgents || {})) {
     if (!ag || ag.sessionId !== sessionId) continue;
     if (['done', 'error', 'stopped'].includes(ag.status)) continue;
@@ -3721,6 +3725,12 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // false。供 finally 区分:真杀进程才把后台化子代理(taskManaged)收 stopped,否则留 working 等
   // 它自己的 task_notification(fable 复审 P1:turnAborted 不能只看 AbortError,detach 会误收)。
   const killedRef = useRef(false);
+  // 最近一次【选择性】POST /stop 的响应 promise(hard 路径不设:hard 全停,没有保留项)。
+  // 服务端选择性停止会保留跨回合后台子代理(keptToolUseIds),finally 的穷举收尾必须跳过它们,
+  // 否则进程活着却显示"已停止"。abort() 只是排队 reject,handleStop / ⚡引导 整段同步跑完才
+  // 轮到 finally,所以 finally 读得到这个 ref;读完即清,避免跨回合复用陈旧结果。
+  // 响应本身是异步的(finally 早于它到达)→ 收尾挂在 promise 上,晚几毫秒,失败回落全量收尾。
+  const stopKeptRef = useRef(null);
   // pid 集合:被用户主动「停止」过的 chat 进程。停止后进程要等 close 才设 exitCode
   // (SIGTERM→SIGKILL 最多 5s),这期间 /agents/active 仍报 stoppable=true → backgroundPid
   // poll 会把它误判成「后台运行中」并闪黄条,甚至触发 auto-reattach 重连。记下已停的
@@ -5636,7 +5646,14 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         // (killedRef),后台化/切会话不误伤;函数幂等且只碰 activeAgents,不动 bgTasks。
         // draft 阶段(未拿到真 sid)回落 ownerKey 的 draft-<hash> 键 —— 判官重要2 后 draft
         // 期派出的子代理条目 sessionId 即该键,只传真 sid 会扫不到。
-        if (turnAborted && (streamSid || streamOwnerKeyRef.current)) finalizeSessionAgents(streamSid || streamOwnerKeyRef.current);
+        // 排除服务端本次保留的跨回合后台子代理(keptToolUseIds):它们没被 stopTask、进程还活着。
+        const _fsid = streamSid || streamOwnerKeyRef.current;
+        if (turnAborted && _fsid) {
+          const _keptP = stopKeptRef.current;
+          stopKeptRef.current = null;
+          if (_keptP) _keptP.then((d) => finalizeSessionAgents(_fsid, 'stopped', d?.keptToolUseIds));
+          else finalizeSessionAgents(_fsid); // hard 停止 / 无 /stop 响应可用 → 全量收尾(原行为)
+        }
       } catch {}
       updateStreaming(false);
       setStreamingText('');
@@ -5935,15 +5952,20 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     killedRef.current = true; // 真杀进程 → finally 收后台化子代理为 stopped
     abortRef.current?.abort();
     if (activeProcRef.current) {
-      fetch(`/api/chat/${activeProcRef.current}/stop`, { method: 'POST' });
+      // 响应存 ref 供 finally 排除服务端保留的跨回合后台子代理(见 stopKeptRef 注释)。
+      stopKeptRef.current = fetch(`/api/chat/${activeProcRef.current}/stop`, { method: 'POST' })
+        .then((r) => r.json()).catch(() => null);
     } else if (backgroundPid) {
-      // Background CLI proc — we're not holding the SSE but can still kill it.
-      fetch(`/api/chat/${backgroundPid}/stop`, { method: 'POST' });
       // 停止链路 #2:转后台后无本地流,finally 的 killedRef 收尾路径不存在 → 杀点
       // 就地按 sessionId 收尾本会话 taskManaged 等非终态子代理(进程死了不会再有信号)。
       // draft 会话(未拿到真 sid)用 draft-<hash> 键 —— 判官重要2 后 draft 阶段派出的
       // 子代理条目 sessionId 就是该键,不补会扫不到残留。
-      finalizeSessionAgents(selectedSession?.sessionId || (selectedSession?.projectHash ? `draft-${selectedSession.projectHash}` : null));
+      // 收尾挂到 /stop 响应上(晚几毫秒):选择性停止会保留跨回合后台子代理,它们没被停、
+      // 进程还活着,标 stopped 就是假终态。请求失败/无字段 → 回落全量收尾(原行为)。
+      const _bsid = selectedSession?.sessionId || (selectedSession?.projectHash ? `draft-${selectedSession.projectHash}` : null);
+      fetch(`/api/chat/${backgroundPid}/stop`, { method: 'POST' })
+        .then((r) => r.json()).catch(() => null)
+        .then((d) => finalizeSessionAgents(_bsid, 'stopped', d?.keptToolUseIds));
     }
     // 两种情况都立即清掉本地「后台运行中」标记,不等下一轮 poll(那一轮还会误报)。
     setBackgroundPid(null);
@@ -6006,7 +6028,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     }
     if (abortRef.current) try { abortRef.current.abort(); } catch {}
     if (activeProcRef.current) {
-      fetch(`/api/chat/${activeProcRef.current}/stop`, { method: 'POST' }).catch(() => {});
+      // 同 handleStop:响应存 ref,finally 据此跳过服务端保留的跨回合后台子代理。
+      stopKeptRef.current = fetch(`/api/chat/${activeProcRef.current}/stop`, { method: 'POST' })
+        .then((r) => r.json()).catch(() => null);
     }
     // queueKey 与流收尾 drain 同口径(F1):消费端 handleSendRef 恒发进【本窗格当前会话】,
     // 所以只能弹当前会话的队列 —— 入队侧(enqueueMessage)用的也正是这个 pane key,两端对称。

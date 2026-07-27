@@ -86,6 +86,22 @@ const T = (kind, epoch) => ({ kind, epoch, createdAt: Date.now() });
   // 停止链路核心时序不得被动:interrupt 不 await、优雅窗 3000/2000、abort+input.close 兜底
   assert.ok(/slot\.query\?\.interrupt\?\.\(\)\?\.catch\?\.\(\(\) => \{\}\)/.test(stopRoute), 'interrupt 必须 fire-and-forget');
   assert.ok((stopRoute.match(/hadTasks \? 3000 : 2000/g) || []).length === 2, 'hard/选择性两条优雅窗时长不得改');
+  // 保留项必须回给客户端:选择性路径带 kept 的三处响应都要带 keptToolUseIds,否则前端停止
+  // 收尾会把服务端刚保留的跨回合后台子代理也乐观标 stopped(进程活着却显示已停止)。
+  assert.equal((stopRoute.match(/kept: keptCount, keptToolUseIds: keptTasks/g) || []).length, 3,
+    '选择性 /stop 的三处 kept 响应必须回 keptToolUseIds');
+
+  // 客户端:停止收尾必须排除这些 id(预置 visited 同时跳过顶层扫描与级联),两条收尾路径都接。
+  const app = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'client', 'src', 'App.jsx'),
+    'utf8',
+  );
+  assert.ok(/function finalizeSessionAgents\(sessionId, tnStatus = 'stopped', excludeIds\)/.test(app),
+    'finalizeSessionAgents 必须接受 excludeIds');
+  assert.ok(/const visited = new Set\(Array\.isArray\(excludeIds\) \? excludeIds : \[\]\);/.test(app),
+    'excludeIds 必须预置进 visited(顶层+级联同时跳过)');
+  assert.equal((app.match(/finalizeSessionAgents\([^)]*'stopped', d\?\.keptToolUseIds\)/g) || []).length, 2,
+    '流内 finally 与 backgroundPid 两条停止收尾都必须传 keptToolUseIds');
 }
 
 console.log('✓ check-stop-epoch-scope: 分组 4 组 + abort 抑制 6 断言 + 源码守卫 全过');
