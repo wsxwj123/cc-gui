@@ -4343,6 +4343,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     updateStreaming(true);
     // I4:本次流的归属会话(draft 时是 draft-key,init 收到真 id 后会在下面升级)。
     setStreamOwner(sessionQueueKey);
+    // 新回合开始必清上一次 /stop 的响应 ref:上轮 finally 若因异常没读到就清,陈旧 promise
+    // 会被本回合 finally 当成"本次停止的保留项",按上一轮的 keptToolUseIds 排除收尾。
+    stopKeptRef.current = null;
     // BF-1:记录历史截断点 —— 流式期间任何历史重拉都会拉到本回合半成品,渲染层据此丢弃。
     // #4 修:reattach 若有本会话 detach 时刻,用 { sinceTs: detachTs } —— 只藏 detach 之后落盘
     // (会被 earlyLines 重放)的内容;detach 之前已产出的助手回复照常从历史显示(原 afterLastUser
@@ -5953,7 +5956,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     abortRef.current?.abort();
     if (activeProcRef.current) {
       // 响应存 ref 供 finally 排除服务端保留的跨回合后台子代理(见 stopKeptRef 注释)。
-      stopKeptRef.current = fetch(`/api/chat/${activeProcRef.current}/stop`, { method: 'POST' })
+      // 超时兜底:服务端挂死时 fetch 永不 settle → 挂在它上面的收尾永不跑,会话卡在"工作中"。
+      // 超时走 catch → null → 回落全量收尾(原行为)。
+      stopKeptRef.current = fetch(`/api/chat/${activeProcRef.current}/stop`, { method: 'POST', signal: AbortSignal.timeout(8000) })
         .then((r) => r.json()).catch(() => null);
     } else if (backgroundPid) {
       // 停止链路 #2:转后台后无本地流,finally 的 killedRef 收尾路径不存在 → 杀点
@@ -5963,7 +5968,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       // 收尾挂到 /stop 响应上(晚几毫秒):选择性停止会保留跨回合后台子代理,它们没被停、
       // 进程还活着,标 stopped 就是假终态。请求失败/无字段 → 回落全量收尾(原行为)。
       const _bsid = selectedSession?.sessionId || (selectedSession?.projectHash ? `draft-${selectedSession.projectHash}` : null);
-      fetch(`/api/chat/${backgroundPid}/stop`, { method: 'POST' })
+      fetch(`/api/chat/${backgroundPid}/stop`, { method: 'POST', signal: AbortSignal.timeout(8000) })
         .then((r) => r.json()).catch(() => null)
         .then((d) => finalizeSessionAgents(_bsid, 'stopped', d?.keptToolUseIds));
     }
@@ -6028,8 +6033,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     }
     if (abortRef.current) try { abortRef.current.abort(); } catch {}
     if (activeProcRef.current) {
-      // 同 handleStop:响应存 ref,finally 据此跳过服务端保留的跨回合后台子代理。
-      stopKeptRef.current = fetch(`/api/chat/${activeProcRef.current}/stop`, { method: 'POST' })
+      // 同 handleStop:响应存 ref,finally 据此跳过服务端保留的跨回合后台子代理(超时兜底同上)。
+      stopKeptRef.current = fetch(`/api/chat/${activeProcRef.current}/stop`, { method: 'POST', signal: AbortSignal.timeout(8000) })
         .then((r) => r.json()).catch(() => null);
     }
     // queueKey 与流收尾 drain 同口径(F1):消费端 handleSendRef 恒发进【本窗格当前会话】,

@@ -133,6 +133,10 @@ router.get('/subscription-usage', async (_req, res) => {
     const msg = r.status === 401 ? '凭证刷新中，显示上次数据（Claude Code 运行后自动恢复）'
       : r.status === 429 ? '接口限流中，显示上次数据（稍后自动恢复）'
         : `用量接口 HTTP ${r.status}`;
+    // 429 = 已被限流,再按 60s 节奏打真 API 只会延长限流。把缓存时间戳往后推,让降级期间的
+    // 后续请求直接吃缓存(下一次真请求至少 CACHE_MS 之后)。401 不推:它是刷新窗口,CLI 一跑
+    // 就自愈,推了反而拖慢恢复。
+    if (r.status === 429 && cache) cache.at = Date.now();
     if (soft && cache) return res.json({ ...cache.data, degraded: true, error: msg });
     return res.json({ official: true, error: msg });
   }

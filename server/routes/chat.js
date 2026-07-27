@@ -250,7 +250,8 @@ const activeProcesses = new Map();
 // ⚠️ 口径差异(真机实测的 bug):shellTasks / stoppableTasks 收 map key(=task_id),后续
 // stopTask(tid) 扇出靠它;keptTasks 却是回给客户端当 keptToolUseIds 用的,前端 visited 以
 // tool_use_id(toolu_xxx)为键 → 推 task_id 永不命中、排除机制静默失效。故 keptTasks 收
-// 条目的 toolUseId(缺失时回落 tid,聊胜于无)。两种口径不可互换。
+// 条目的 toolUseId(缺失时回落 tid:前端 visited 不会命中,该条目维持改动前"不被排除"的旧行为)。
+// 两种口径不可互换。
 export function partitionStopTasks(liveTasks, turnEpoch, allTasks) {
   const shellTasks = [];
   const stoppableTasks = [];
