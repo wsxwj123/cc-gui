@@ -511,6 +511,13 @@ function BgTaskCard({ task }) {
   const staleRef = useRef(0);
   const stoppedRef = useRef(false);
   const preRef = useRef(null);
+  // D7:子代理内部起的后台任务带 agentId —— 显示归属,免得进程管理区冒出一条来路不明的命令。
+  // 选择器只返回字符串(基元),不会因新引用触发 React #185。
+  const ownerAgentName = useStore((s) => {
+    if (!task.agentId) return '';
+    const ag = s.activeAgents[task.agentId];
+    return ag?.teammateName || ag?.name || '';
+  });
 
   useEffect(() => {
     if (!task.outputPath) return;
@@ -604,6 +611,9 @@ function BgTaskCard({ task }) {
         <div className="flex items-center gap-3 mt-1.5 pl-5 text-[10px] text-ink-faint font-mono">
           {task.startedAt && <span className="flex items-center gap-1"><Clock size={9} />{fmtElapsed(elapsed)}</span>}
           {task.shellId && <span className="truncate opacity-70" title={task.shellId}>{task.shellId}</span>}
+          {ownerAgentName && (
+            <span className="truncate opacity-70 font-body" title={`由子代理 ${ownerAgentName} 启动`}>子代理 {ownerAgentName}</span>
+          )}
         </div>
         {stopNote && <div className="mt-1.5 pl-5 text-[10px] text-amber-700 font-body leading-snug">{stopNote}</div>}
       </button>

@@ -5087,7 +5087,22 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
               for (const block of (Array.isArray(event.message.content) ? event.message.content : [])) {
                 if (block.type === 'text' && block.text) aStore.appendAgentText(aid, block.text);
                 else if (block.type === 'thinking' && block.thinking) aStore.appendAgentThinking(aid, block.thinking);
-                else if (block.type === 'tool_use') aStore.appendAgentTool(aid, { id: block.id, name: block.name, input: block.input || {}, result: null });
+                else if (block.type === 'tool_use') {
+                  aStore.appendAgentTool(aid, { id: block.id, name: block.name, input: block.input || {}, result: null });
+                  // D7:子代理内部起的 Bash run_in_background 此前只在顶层分支登记 → 进程管理区
+                  // 看不见、不能 tail、不能停(服务端却把它记为 shell 刻意保留 = 看不见也停不掉的
+                  // 常驻进程)。同款登记,附 agentId 标注归属。
+                  if (block.name === 'Bash' && block.input?.run_in_background === true) {
+                    aStore.upsertBgTask(block.id, {
+                      command: block.input.command || '',
+                      description: block.input.description || '',
+                      status: 'running',
+                      startedAt: Date.now(),
+                      sessionId: streamOwnerSid(),
+                      agentId: aid,
+                    });
+                  }
+                }
               }
               continue;
             }
@@ -5161,6 +5176,17 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                       isError: block.is_error || false,
                     },
                   });
+                  // D7:子代理内部后台任务的 shellId / .output 路径也在这条回执里(与顶层同格式)。
+                  // 不取就没有 outputPath → 监控区的 bgList 过滤掉它 → 依旧看不见也停不掉。
+                  if (aStore.bgTasks[block.tool_use_id]) {
+                    const txt = typeof block.content === 'string' ? block.content : JSON.stringify(block.content);
+                    const idm = txt.match(/ID:\s*([A-Za-z0-9_-]+)/);
+                    const pm = txt.match(/written to:\s*(.+?\.output)/);
+                    aStore.upsertBgTask(block.tool_use_id, {
+                      ...(idm ? { shellId: idm[1] } : {}),
+                      ...(pm ? { outputPath: pm[1] } : {}),
+                    });
+                  }
                 }
               }
               continue;
