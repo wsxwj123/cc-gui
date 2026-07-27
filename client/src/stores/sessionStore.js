@@ -42,13 +42,15 @@ const syncInFlight = createInFlightCounter(); // tag = `${kind}:${sessionId}`
 // fire-and-forget,首次迁移回推靠此判据门控 marker(低危#1)。
 const putSessionSync = (kind, sessionId, value, { untracked = false } = {}) => {
   const tag = `${kind}:${sessionId}`;
-  if (!untracked) trackPending(kind, sessionId, value); // outbox:先记账,ok 才清
+  // outbox:先记账,ok 才清。seq 随记账拿到(untracked 的重放路径读当前 seq),
+  // 响应回来只清"自己那次"的记账,过期响应不动新 pending。
+  const seq = untracked ? pendingSeq.get(tag) : trackPending(kind, sessionId, value);
   syncInFlight.acquire(tag);
   return fetch('/api/prefs/session-sync', {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ kind, sessionId, value }),
-  }).then((res) => { if (res.ok) clearPending(kind, sessionId); return res.ok; })
+  }).then((res) => { if (res.ok) clearPending(kind, sessionId, seq); return res.ok; })
     .catch(() => false).finally(() => syncInFlight.release(tag));
 };
 
@@ -58,15 +60,32 @@ const putSessionSync = (kind, sessionId, value, { untracked = false } = {}) => {
 // 而是记账重放:写入先落 pending,PUT ok 才清;水合先重放 pending 再拉取,重放失败的键
 // 合并时不被服务端覆盖。对端正常删除(其 PUT 成功,无 pending)不受影响。
 const readPendingSync = () => readLs('cgui-sync-pending', {});
+// 每 tag 一个单调 seq(内存态即可:pending 记账本身在 localStorage,seq 只用来识别
+// "这条响应对应的是不是最后一次记账")。连拨竞态(判官重要项):1M 开→关,先发的
+// "开"的 PUT 后回 ok,无值校验就把 pending 整条删了;此时后发的"关"若失败,已无人
+// 重放 → 水合按服务端旧值把 UI 打回"开",正是 outbox 要根治的写丢在竞态窗口复活。
+const pendingSeq = new Map();
 const trackPending = (kind, sessionId, value) => {
-  if (!sessionId) return;
+  if (!sessionId) return null;
+  const tag = `${kind}:${sessionId}`;
+  const seq = (pendingSeq.get(tag) || 0) + 1;
+  pendingSeq.set(tag, seq);
   const m = readPendingSync();
-  m[`${kind}:${sessionId}`] = value;
+  m[tag] = value;
   writeLs('cgui-sync-pending', m);
+  return seq;
 };
-const clearPending = (kind, sessionId) => {
+// seq = 发请求时那次记账的序号;与当前不符 = 期间又写了新值,这条是过期响应,不清。
+// (重放路径传发请求前读到的 seq;启动后从 localStorage 恢复的 pending 尚无 seq,
+// 两侧同为 undefined 仍相等 → 照常清除,不回归。)
+const clearPending = (kind, sessionId, seq) => {
+  const tag = `${kind}:${sessionId}`;
+  if (pendingSeq.get(tag) !== seq) return;
   const m = readPendingSync();
-  if (`${kind}:${sessionId}` in m) { delete m[`${kind}:${sessionId}`]; writeLs('cgui-sync-pending', m); }
+  // 不删 pendingSeq 条目:计数器必须对该 tag 单调递增。清空后重新从 1 起会让"刚清掉的
+  // 那次"与"下一次记账"撞上同一个 seq,迟到的旧响应又能误清新 pending(每 tag 一个小整数,
+  // 常驻内存开销可忽略)。
+  if (tag in m) { delete m[tag]; writeLs('cgui-sync-pending', m); }
 };
 const pendingKeysOf = (kind) => new Set(
   Object.keys(readPendingSync()).filter((t) => t.startsWith(kind + ':')).map((t) => t.slice(kind.length + 1)),
@@ -79,6 +98,7 @@ async function replayPendingSync() {
   await Promise.all(entries.map(async ([tag, value]) => {
     const i = tag.indexOf(':');
     const kind = tag.slice(0, i), sessionId = tag.slice(i + 1);
+    const seq = pendingSeq.get(tag); // 重放期间用户又改了值 → 记账 seq 前移,重放的 ok 不清新 pending
     let ok = false;
     try {
       if (kind === 'context1m') {
@@ -91,7 +111,7 @@ async function replayPendingSync() {
         ok = await putSessionSync(kind, sessionId, value, { untracked: true });
       }
     } catch {}
-    if (ok) clearPending(kind, sessionId); else failed.add(tag);
+    if (ok) clearPending(kind, sessionId, seq); else failed.add(tag);
   }));
   return failed;
 }
@@ -648,12 +668,12 @@ export const useStore = create((set, get) => ({
     if (on) next[key] = true; else delete next[key];
     writeLs('cgui-context-1m', next);
     set({ context1mBySession: next });
-    trackPending('context1m', key, on); // outbox:写丢可重放(重启退回 200k 的根修)
+    const seq = trackPending('context1m', key, on); // outbox:写丢可重放(重启退回 200k 的根修)
     fetch('/api/prefs/context-1m', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ sessionId: key, on }),
-    }).then((r) => { if (r.ok) clearPending('context1m', key); }).catch(() => {});
+    }).then((r) => { if (r.ok) clearPending('context1m', key, seq); }).catch(() => {});
   },
   // 启动水合:服务端为准,不回推。此前 legacy 合并回推无法区分「服务端删过该 key」
   // (对端关 1m/切 provider/删会话 GC)和「服务端没见过」——跨设备离线场景会把已删
