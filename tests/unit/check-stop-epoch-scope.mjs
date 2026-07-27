@@ -35,11 +35,13 @@ const T = (kind, epoch) => ({ kind, epoch, createdAt: Date.now() });
 // (task_id)。真机实测过的 bug:推 tid → 响应 ["ab72f652f9155179b"] 而真实键是
 // "toolu_01Qqs59U6sA6jFn9WudBPKR" → 排除永不命中。构造 toolUseId ≠ key 才能钉住。
 {
+  // createdAt 必带:保留分组还要求条目新鲜(见下面的陈旧条目用例),这里测的是 id 口径。
+  const at = Date.now();
   const live = new Map([
-    ['task_now', { kind: 'subagent', epoch: 3, toolUseId: 'toolu_NOW' }],
-    ['task_prev', { kind: 'subagent', epoch: 2, toolUseId: 'toolu_PREV' }],
-    ['task_prev2', { kind: 'subagent', epoch: 1, toolUseId: 'toolu_PREV2' }],
-    ['task_shell', { kind: 'shell', epoch: 1, toolUseId: 'toolu_SHELL' }],
+    ['task_now', { kind: 'subagent', epoch: 3, toolUseId: 'toolu_NOW', createdAt: at }],
+    ['task_prev', { kind: 'subagent', epoch: 2, toolUseId: 'toolu_PREV', createdAt: at }],
+    ['task_prev2', { kind: 'subagent', epoch: 1, toolUseId: 'toolu_PREV2', createdAt: at }],
+    ['task_shell', { kind: 'shell', epoch: 1, toolUseId: 'toolu_SHELL', createdAt: at }],
   ]);
   const r = partitionStopTasks(live, 3, false);
   assert.deepEqual(r.keptTasks, ['toolu_PREV', 'toolu_PREV2'],
@@ -48,7 +50,7 @@ const T = (kind, epoch) => ({ kind, epoch, createdAt: Date.now() });
   assert.deepEqual(r.stoppableTasks, ['task_now'], 'stoppableTasks 仍是 task_id(stopTask 扇出用)');
   assert.deepEqual(r.shellTasks, ['task_shell'], 'shellTasks 仍是 task_id');
   // toolUseId 缺失(旧条目/第三方 provider)回落 tid,不能变成 null/undefined 污染数组
-  const r2 = partitionStopTasks(new Map([['task_x', { kind: 'subagent', epoch: 1, toolUseId: null }]]), 3, false);
+  const r2 = partitionStopTasks(new Map([['task_x', { kind: 'subagent', epoch: 1, toolUseId: null, createdAt: at }]]), 3, false);
   assert.deepEqual(r2.keptTasks, ['task_x'], 'toolUseId 缺失时回落 task_id,不得推入 null');
 }
 
@@ -66,6 +68,32 @@ const T = (kind, epoch) => ({ kind, epoch, createdAt: Date.now() });
   const r = partitionStopTasks(live, 0, false);
   assert.deepEqual(r.stoppableTasks, ['t-a', 't-b'], 'epoch 0 == turnEpoch 0 → 本回合;缺 epoch 的条目同样可停');
   assert.deepEqual(r.keptTasks, [], 'epoch 缺失的条目按旧行为可停,不被误留');
+}
+
+// 陈旧条目(某子代理终态通知丢失 → 条目永远留在 liveTasks)不得进 keptTasks:
+// 进了会让 idle 分支认为"无可停对象"直接 no-op、活跃分支的 abort 兜底被 shouldSuppressAbort
+// 永久抑制 = 停止彻底失效。判据 = 年龄 < LIVE_TASK_FRESH_MS(30min),与看门狗/idleReclaim 同款。
+{
+  const now = Date.now();
+  const FRESH = 30 * 60 * 1000;
+  const live = new Map([
+    ['t-fresh', { kind: 'subagent', epoch: 2, toolUseId: 'toolu_FRESH', createdAt: now - 60_000 }],
+    ['t-stale', { kind: 'subagent', epoch: 2, toolUseId: 'toolu_STALE', createdAt: now - FRESH - 1 }],
+    ['t-noat', { kind: 'subagent', epoch: 2, toolUseId: 'toolu_NOAT' }], // createdAt 缺失 → 按陈旧处理
+  ]);
+  const r = partitionStopTasks(live, 3, false, now);
+  assert.deepEqual(r.keptTasks, ['toolu_FRESH'], '只有新鲜的跨回合后台子代理才保留');
+  assert.deepEqual(r.stoppableTasks, ['t-stale', 't-noat'],
+    '陈旧 / 无 createdAt 的跨回合条目归可停(宁可多停,不让停止静默失效)');
+  // 边界:年龄正好等于窗长算陈旧(与 chat.js 的 `<` 判据逐字一致)
+  const edge = new Map([['t-edge', { kind: 'subagent', epoch: 2, createdAt: now - FRESH }]]);
+  assert.deepEqual(partitionStopTasks(edge, 3, false, now).stoppableTasks, ['t-edge'], '年龄 = 窗长算陈旧');
+  // 总闸语义不受新鲜度影响
+  assert.deepEqual(partitionStopTasks(live, 3, true, now).keptTasks, [], '总闸 allTasks 下仍无保留组');
+  // now 缺省 = Date.now():新鲜的跨回合任务照常保留(默认参数不能把保留机制废掉)
+  assert.deepEqual(
+    partitionStopTasks(new Map([['t-live', { kind: 'subagent', epoch: 2, createdAt: Date.now() }]]), 3, false).keptTasks,
+    ['t-live'], 'now 缺省时新鲜跨回合任务仍保留');
 }
 
 // 无 liveTasks(未起过任务)不炸
@@ -114,6 +142,11 @@ const T = (kind, epoch) => ({ kind, epoch, createdAt: Date.now() });
   // keptTasks 的元素口径守卫:必须 push toolUseId(回落 tid),不得改回裸 push(tid)
   assert.ok(/keptTasks\.push\(t\.toolUseId \|\| tid\)/.test(src),
     'keptTasks 必须收 t.toolUseId(缺失回落 tid),推裸 tid 会让前端排除永不命中');
+  // 陈旧过滤(S2):两处判据都不得被去掉,否则通知丢失的残留条目会让停止静默失效
+  assert.ok(/now - \(t\.createdAt \|\| 0\) < LIVE_TASK_FRESH_MS/.test(src),
+    'partitionStopTasks 的保留判据必须带新鲜度过滤');
+  assert.ok(/Date\.now\(\) - \(t\.createdAt \|\| 0\) < LIVE_TASK_FRESH_MS\) liveCrossEpoch\+\+/.test(stopRoute),
+    'liveCrossEpoch 计数必须带新鲜度过滤(否则 abort 兜底被陈旧条目永久抑制)');
 
   // 客户端:停止收尾必须排除这些 id(预置 visited 同时跳过顶层扫描与级联),两条收尾路径都接。
   const app = readFileSync(

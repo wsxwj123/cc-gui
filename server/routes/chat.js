@@ -252,16 +252,22 @@ const activeProcesses = new Map();
 // tool_use_id(toolu_xxx)为键 → 推 task_id 永不命中、排除机制静默失效。故 keptTasks 收
 // 条目的 toolUseId(缺失时回落 tid:前端 visited 不会命中,该条目维持改动前"不被排除"的旧行为)。
 // 两种口径不可互换。
-export function partitionStopTasks(liveTasks, turnEpoch, allTasks) {
+// now:陈旧判据的时基(默认取当前时刻,单测可注入)。终态通知丢失的残留条目会永远留在
+// liveTasks 里,若照样归入 keptTasks,idle 分支会认为"没有可停对象"直接 no-op、活跃分支的
+// abort 兜底被 shouldSuppressAbort 永久抑制 → 停止彻底失效。故年龄 ≥ LIVE_TASK_FRESH_MS
+// 的跨回合条目按陈旧处理归入可停(与本函数"宁可多停,不让停止静默失效"的原则一致;判据与
+// idleReclaim / 看门狗 busyNonShell 同款)。
+export function partitionStopTasks(liveTasks, turnEpoch, allTasks, now = Date.now()) {
   const shellTasks = [];
   const stoppableTasks = [];
   const keptTasks = [];
   const epoch = turnEpoch | 0;
   for (const [tid, t] of (liveTasks || [])) {
     if (t && t.kind === 'shell') { shellTasks.push(tid); continue; }
-    // 只有【明确带 epoch 且不等于本回合】才保留;空条目/缺 epoch 保持旧行为归入可停,
-    // 宁可多停一个来路不明的条目,也不让停止对第三方 provider 静默失效。
-    if (!allTasks && t && typeof t.epoch === 'number' && (t.epoch | 0) !== epoch) { keptTasks.push(t.toolUseId || tid); continue; }
+    // 只有【明确带 epoch 且不等于本回合 且条目仍新鲜】才保留;空条目/缺 epoch/陈旧条目保持
+    // 旧行为归入可停,宁可多停一个来路不明的条目,也不让停止对第三方 provider 静默失效。
+    if (!allTasks && t && typeof t.epoch === 'number' && (t.epoch | 0) !== epoch
+      && now - (t.createdAt || 0) < LIVE_TASK_FRESH_MS) { keptTasks.push(t.toolUseId || tid); continue; }
     stoppableTasks.push(tid);
   }
   return { shellTasks, stoppableTasks, keptTasks };
@@ -1439,7 +1445,10 @@ router.post('/chat/:pid/stop', async (req, res) => {
       // 只数本回合(selEpoch)任务:跨回合保留的活后台子代理的 stopTask 已发、notification
       // 会照常收尾;陈旧(通知丢失)条目不算"没停净",防 idle 槽位被无谓 abort 回收(判官 R)。
       if (t && (t.epoch | 0) === selEpoch) liveStoppable++;
-      else if (t && typeof t.epoch === 'number') liveCrossEpoch++;
+      // 陈旧条目(终态通知丢失的残留)不计入 liveCrossEpoch:计入会让 shouldSuppressAbort
+      // 永久抑制 abort 兜底 = 停止静默失效。判据同 partitionStopTasks / 看门狗。
+      else if (t && typeof t.epoch === 'number'
+        && Date.now() - (t.createdAt || 0) < LIVE_TASK_FRESH_MS) liveCrossEpoch++;
     }
     if (settled && liveStoppable === 0) return;
     if (shouldSuppressAbort({ liveShell, liveCrossEpoch, allTasks })) {
