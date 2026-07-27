@@ -6011,7 +6011,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // 空闲态双击 Esc 的副作用(判定在 utils/escAction.js,纯函数有单测)。
   // 被 Esc 清掉的输入文本记在这里:壳层没有输入框撤销栈,⌘Z 撤不回受控组件的 setText,
   // 所以"再双击一次 Esc"就是后悔药(和 CLI 一样只清不问,但比 CLI 多给一次找回机会)。
-  const escClearedTextRef = useRef('');
+  // 必须带会话身份:SessionDetail 切会话不重挂,裸存字符串会让 A 会话清掉的文字在 B
+  // 会话双击 Esc 时填进 B(串扰)。存 { key, text },key 不匹配当没有。
+  const escClearedTextRef = useRef({ key: null, text: '' });
   // 时间戳信号:空手双击 Esc → 展开会话头 ⋮ 并自动弹开 Checkpoint 时间线(GUI 侧的 Rewind)。
   const [rewindSignal, setRewindSignal] = useState(0);
   const handleIdleDoubleEsc = useCallback(() => {
@@ -6020,20 +6022,22 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     // sessionQueueKey)。直接读它,免得为一个快捷键把 text 状态提到父组件。
     let draft = '';
     try { draft = localStorage.getItem(`cgui-draft:${key}`) || ''; } catch {}
+    // 只认本会话清掉的文字;别的会话留下的一律按"没有"处理(落 rewind 分支)。
+    const cleared = escClearedTextRef.current?.key === key ? (escClearedTextRef.current.text || '') : '';
     const action = idleEscAction({
       draftText: draft,
-      clearedText: escClearedTextRef.current,
+      clearedText: cleared,
       hasSession: !!selectedSession?.sessionId,
     });
     if (action === 'clear-input') {
-      escClearedTextRef.current = draft;
+      escClearedTextRef.current = { key, text: draft };
       window.dispatchEvent(new CustomEvent('cgui:composer-clear', { detail: { targetKey: key } }));
       setProviderSwitchNotice({ text: '输入框已清空。再连按两次 Esc 可把刚才的文字放回来。' });
       return;
     }
     if (action === 'restore-input') {
-      window.dispatchEvent(new CustomEvent('cgui:composer-fill', { detail: { targetKey: key, text: escClearedTextRef.current } }));
-      escClearedTextRef.current = '';
+      window.dispatchEvent(new CustomEvent('cgui:composer-fill', { detail: { targetKey: key, text: cleared } }));
+      escClearedTextRef.current = { key: null, text: '' };
       return;
     }
     if (action === 'rewind-empty') {
