@@ -262,6 +262,17 @@ export function partitionStopTasks(liveTasks, turnEpoch, allTasks) {
   return { shellTasks, stoppableTasks, keptTasks };
 }
 
+// A2(D2):优雅窗超时后是否抑制 abort。abort 杀的是整个 CLI 进程,进程内所有后台任务连坐死,
+// 所以除了原有的"有活 shell",跨回合仍活着的后台子代理同样抑制(A1 刚把它们从 stopTask 里
+// 摘出来保留,不抑制 abort 等于绕个弯还是杀了它)。本回合自己的任务不抑制:优雅窗内已发过
+// stopTask,超窗仍没停净就该 abort,否则挂死的进程无人收。总闸(allTasks)也不抑制——用户
+// 点名"停掉所有后台",杀干净正是意图,语义与改动前一致。
+// 纯函数,tests/unit/check-stop-epoch-scope.mjs 单测。
+export function shouldSuppressAbort({ liveShell = 0, liveCrossEpoch = 0, allTasks = false } = {}) {
+  if (liveShell > 0) return true;
+  return !allTasks && liveCrossEpoch > 0;
+}
+
 export function getActiveChatProcesses() {
   const out = [];
   for (const [procId, slot] of activeProcesses) {
@@ -1422,17 +1433,19 @@ router.post('/chat/:pid/stop', async (req, res) => {
     const settled = slot.pumpEnded || (slot.lastResultAt && slot.lastResultAt >= stopAt);
     let liveStoppable = 0;
     let liveShell = 0;
+    let liveCrossEpoch = 0; // A2:跨回合仍活着的后台子代理(A1 已把它们排除在 stopTask 之外)
     for (const t of (slot.liveTasks?.values() ?? [])) {
       if (t && t.kind === 'shell') { liveShell++; continue; }
       // 只数本回合(selEpoch)任务:跨回合保留的活后台子代理的 stopTask 已发、notification
       // 会照常收尾;陈旧(通知丢失)条目不算"没停净",防 idle 槽位被无谓 abort 回收(判官 R)。
       if (t && (t.epoch | 0) === selEpoch) liveStoppable++;
+      else if (t && typeof t.epoch === 'number') liveCrossEpoch++;
     }
     if (settled && liveStoppable === 0) return;
-    if (liveShell > 0) {
-      // 存在活 shell → 永不 abort(abort 杀整个 CLI 进程,shell 连坐、不可恢复)。
-      // 子代理若没停净,接受"不优雅"代价;要全杀走 hard(进程管理区)。
-      console.warn(`[chat] stop(${req.params.pid}): ${liveStoppable} stoppable task(s) unsettled but ${liveShell} live shell task(s) present — abort suppressed`);
+    if (shouldSuppressAbort({ liveShell, liveCrossEpoch, allTasks })) {
+      // 存在活 shell / 跨回合后台子代理 → 永不 abort(abort 杀整个 CLI 进程,它们连坐、
+      // 不可恢复)。本回合子代理若没停净,接受"不优雅"代价;要全杀走 hard(进程管理区)。
+      console.warn(`[chat] stop(${req.params.pid}): ${liveStoppable} stoppable task(s) unsettled but ${liveShell} live shell / ${liveCrossEpoch} cross-turn task(s) present — abort suppressed`);
       return;
     }
     try { slot.abort?.abort(); } catch {}
