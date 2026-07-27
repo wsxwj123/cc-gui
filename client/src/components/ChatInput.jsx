@@ -228,8 +228,10 @@ export function ChatInput({ onSend, onStop, onStopBackground, onAccelerate, onBa
   // 双击 Esc 停止生成:唯一实现在 App.jsx 的 window 级 effect(带 paneIsActive 守卫
   // + permission 让行 + backgroundPid 支持)。这里曾有第二份 document 捕获实现(CD-2),
   // 无 pane 守卫且捕获阶段先于守卫版执行 → 分屏多窗格流式时一次双击全停(用户实报,
-  // AZ1 只守卫了 App.jsx 那份漏了这份)——已删,禁止在此重加。textarea 的 Esc 只
-  // preventDefault 不 stopPropagation,事件照常冒泡到 window,守卫版收得到。
+  // AZ1 只守卫了 App.jsx 那份漏了这份)——已删,禁止在此重加。textarea 的 Esc 默认只
+  // preventDefault 不停传播,照常冒泡到 window 让守卫版收到;唯独【已被本组件消费】的三种
+  // Esc(关斜杠菜单 / 关 @ 面板 / 取消编辑重发)会 stopImmediatePropagation 挡住全局,
+  // 否则生成中单击即停会把「关个菜单」连带停掉整回合。
   // Permission mode lives in the store, keyed per-session via permKey so each
   // conversation keeps its own mode. Fall back to the global value only when
   // no key is supplied (shouldn't happen in normal render).
@@ -691,6 +693,10 @@ export function ChatInput({ onSend, onStop, onStopBackground, onAccelerate, onBa
         return;
       }
       if (e.key === 'Escape') {
+        // 这次 Esc 已被斜杠菜单消费,必须挡住 window 上的全局停止监听(生成中单击即停):
+        // 关菜单和停回合是两回事。React 合成事件的 stopPropagation 只在 React 树内生效,
+        // 原生事件仍会冒泡到 window → 必须停原生事件本身(全仓统一手法,见 ImageLightbox)。
+        e.nativeEvent?.stopImmediatePropagation?.();
         setShowCommands(false);
         return;
       }
@@ -702,13 +708,14 @@ export function ChatInput({ onSend, onStop, onStopBackground, onAccelerate, onBa
       if (e.key === 'ArrowUp') { e.preventDefault(); setAtIndex((i) => Math.max(i - 1, 0)); return; }
       if (e.key === 'Tab') { e.preventDefault(); setAtTab((t) => (t === 'files' ? 'sessions' : 'files')); return; }
       if (e.key === 'Enter' && !e.shiftKey && atItems.length > 0) { e.preventDefault(); if (!atBusy) pickAtItem(atItems[atIndex]); return; }
-      if (e.key === 'Escape') { e.preventDefault(); setAtState(null); return; }
+      if (e.key === 'Escape') { e.preventDefault(); e.nativeEvent?.stopImmediatePropagation?.(); setAtState(null); return; } // 同斜杠菜单:关面板的 Esc 不得穿透到全局停止
     }
 
     // 编辑重发态下按 Esc:取消本次编辑重发,清空输入并通知上层撤销待回滚(历史
     // 尚未被破坏,所以纯属"反悔",不会丢任何消息)。
     if (e.key === 'Escape' && editingResend) {
       e.preventDefault();
+      e.nativeEvent?.stopImmediatePropagation?.(); // 取消编辑重发已消费这次 Esc,不再计入全局(停止/清空)语义
       setText('');
       setEditingResend(false);
       try { localStorage.removeItem(draftKey); } catch {}

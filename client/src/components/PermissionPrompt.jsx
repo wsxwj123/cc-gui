@@ -7,6 +7,15 @@ import { isDangerousCommand, respondPermission } from '../hooks/useWebSocket.js'
 // plan 档不写持久规则的工具集(与服务端 chat.js WRITE_CLASS 对齐)。
 const PLAN_WRITE_CLASS = new Set(['Edit', 'MultiEdit', 'Write', 'NotebookEdit']);
 
+// 卡片吃掉这次 Esc。三张卡的键盘监听都挂在 window【捕获阶段】,先于挂在冒泡阶段的全局
+// 「Esc 停当前回合」跑;stopImmediatePropagation 连同一节点上后注册的监听一起挡掉
+// (同节点同阶段时 stopPropagation 挡不住)。
+// 刻意保留的与 CLI 的差异:终端里权限卡 Esc = 拒绝【并结束整轮】;GUI 这里 Esc 只拒绝该
+// 工具,回合继续(让"拒绝这一次、让它换个做法"能纯键盘完成)。要停整轮就再按一次 Esc。
+function eatEsc(e) {
+  e.stopImmediatePropagation();
+}
+
 // Color per tool family so the user's eye locks onto the risk class quickly.
 function toolBadgeClass(name) {
   if (!name) return 'bg-canvas-deep text-ink-muted';
@@ -83,10 +92,10 @@ function PlanReviewCard({ req, onResolve, onApprove, processing, position, hydra
       const t = e.target;
       if (t && (t.tagName === 'TEXTAREA' || t.tagName === 'INPUT')) return;
       if (e.key === 'Enter') { e.preventDefault(); onApprove(req); }
-      else if (e.key === 'Escape') { e.preventDefault(); onResolve(req, 'deny', '用户取消计划'); }
+      else if (e.key === 'Escape') { e.preventDefault(); eatEsc(e); onResolve(req, 'deny', '用户取消计划'); }
     };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
+    window.addEventListener('keydown', onKey, true);
+    return () => window.removeEventListener('keydown', onKey, true);
   }, [hydrate, position, req, onResolve, onApprove]);
 
   const submitRefine = () => {
@@ -377,10 +386,10 @@ function BoundaryCard({ req, onResolve, onAuthorizeDir, processing, position, hy
       const t = e.target;
       if (t && (t.tagName === 'TEXTAREA' || t.tagName === 'INPUT')) return;
       if (e.key === 'Enter') { e.preventDefault(); onAuthorizeDir(req, permanent); }
-      else if (e.key === 'Escape') { e.preventDefault(); onResolve(req, 'deny'); }
+      else if (e.key === 'Escape') { e.preventDefault(); eatEsc(e); onResolve(req, 'deny'); }
     };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
+    window.addEventListener('keydown', onKey, true);
+    return () => window.removeEventListener('keydown', onKey, true);
   }, [hydrate, position, req, permanent, onResolve, onAuthorizeDir]);
 
   return (
@@ -473,11 +482,12 @@ function PermissionCard({ req, onResolve, onWhitelistAndAllow, onAlwaysAllow, on
         doAllow();
       } else if (e.key === 'Escape') {
         e.preventDefault();
+        eatEsc(e);
         onResolve(req, 'deny');
       }
     };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
+    window.addEventListener('keydown', onKey, true);
+    return () => window.removeEventListener('keydown', onKey, true);
   }, [hydrate, position, req, remember, dangerous, onResolve, onWhitelistAndAllow, onAlwaysAllow]);
 
   return (
