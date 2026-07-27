@@ -3,6 +3,7 @@ import { AlertCircle, Loader2, ClipboardList, ShieldAlert } from 'lucide-react';
 import { useStore } from '../stores/sessionStore.js';
 import { MarkdownRenderer } from './MarkdownRenderer.jsx';
 import { isDangerousCommand, respondPermission } from '../hooks/useWebSocket.js';
+import { isEditableTarget } from '../utils/escAction.js';
 
 // plan 档不写持久规则的工具集(与服务端 chat.js WRITE_CLASS 对齐)。
 const PLAN_WRITE_CLASS = new Set(['Edit', 'MultiEdit', 'Write', 'NotebookEdit']);
@@ -98,7 +99,7 @@ function PlanReviewCard({ req, onResolve, onApprove, processing, position, hydra
     const onKey = (e) => {
       if (!paneHasKeyboard(tabIndex)) return;
       const t = e.target;
-      if (t && (t.tagName === 'TEXTAREA' || t.tagName === 'INPUT')) return;
+      if (isEditableTarget(t)) return; // 口径统一在 utils/escAction.js
       if (e.key === 'Enter') { e.preventDefault(); onApprove(req); }
       else if (e.key === 'Escape') { e.preventDefault(); onResolve(req, 'deny', '用户取消计划'); }
     };
@@ -268,7 +269,7 @@ function AskQuestionCard({ req, onAnswer, processing, position, hydrate, tabInde
     const onKey = (e) => {
       if (!paneHasKeyboard(tabIndex)) return;
       const t = e.target;
-      if (t && (t.tagName === 'TEXTAREA' || t.tagName === 'INPUT')) return;
+      if (isEditableTarget(t)) return; // 口径统一在 utils/escAction.js
       if (e.key === 'Enter') {
         e.preventDefault();
         // 非末题:当前题已答 → 下一题;末题:全答完 → 提交(submit 内部自带守门,
@@ -394,7 +395,7 @@ function BoundaryCard({ req, onResolve, onAuthorizeDir, processing, position, hy
     const onKey = (e) => {
       if (!paneHasKeyboard(tabIndex)) return;
       const t = e.target;
-      if (t && (t.tagName === 'TEXTAREA' || t.tagName === 'INPUT')) return;
+      if (isEditableTarget(t)) return; // 口径统一在 utils/escAction.js
       if (e.key === 'Enter') { e.preventDefault(); onAuthorizeDir(req, permanent); }
       else if (e.key === 'Escape') { e.preventDefault(); onResolve(req, 'deny'); }
     };
@@ -487,7 +488,7 @@ function PermissionCard({ req, onResolve, onWhitelistAndAllow, onAlwaysAllow, on
       if (!paneHasKeyboard(tabIndex)) return;
       // ignore if user is typing in textarea/input
       const t = e.target;
-      if (t && (t.tagName === 'TEXTAREA' || t.tagName === 'INPUT' || t.tagName === 'SELECT')) return;
+      if (isEditableTarget(t)) return; // 口径统一在 utils/escAction.js
       if (e.key === 'Enter') {
         e.preventDefault();
         doAllow();

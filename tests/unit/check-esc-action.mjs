@@ -8,7 +8,8 @@
 //   ④ 空闲双击的三条落点:有字清空 → 清空后可恢复 → 空手开回退;draft 无 sessionId 只提示
 //   ⑤ 让行判定:本窗格挂着卡片时那一击给卡片,一张卡只让一击;输入框里不让行
 import assert from 'node:assert/strict';
-import { ESC_DOUBLE_MS, escRoute, idleEscAction, escYieldCardId } from '../../client/src/utils/escAction.js';
+//   ⑥ 可编辑控件判据(App.jsx 面板监听 / 快捷键 / PermissionPrompt 共用同一份并集口径)
+import { ESC_DOUBLE_MS, escRoute, idleEscAction, escYieldCardId, isEditableTarget } from '../../client/src/utils/escAction.js';
 
 assert.equal(ESC_DOUBLE_MS, 800, '双击窗口按 CLI 实测取 800ms');
 
@@ -60,4 +61,15 @@ assert.equal(ESC_DOUBLE_MS, 800, '双击窗口按 CLI 实测取 800ms');
   assert.equal(escYieldCardId({}), null, '缺省参数不炸');
 }
 
-console.log('✓ check-esc-action: 5 组断言全过');
+// ── ⑥ 可编辑控件判据(并集:三种表单标签 + contentEditable)──────
+{
+  for (const tag of ['TEXTAREA', 'INPUT', 'SELECT']) {
+    assert.equal(isEditableTarget({ tagName: tag }), true, `${tag} 算可编辑`);
+  }
+  assert.equal(isEditableTarget({ tagName: 'DIV', isContentEditable: true }), true, '富文本算可编辑');
+  assert.equal(isEditableTarget({ tagName: 'DIV' }), false, '普通元素不算');
+  assert.equal(isEditableTarget({ tagName: 'BUTTON' }), false, '按钮不算(否则面板 Esc 关不掉)');
+  assert.equal(isEditableTarget(null), false, '空目标不炸');
+}
+
+console.log('✓ check-esc-action: 6 组断言全过');

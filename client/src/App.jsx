@@ -68,7 +68,7 @@ import {
 } from 'lucide-react';
 import { buildFontEntries, groupFonts, detectFonts, platformCandidates, queryLocalFontFamilies } from './utils/systemFonts.js';
 import { copyText } from './utils/clipboard.js';
-import { escRoute, idleEscAction, escYieldCardId } from './utils/escAction.js';
+import { escRoute, idleEscAction, escYieldCardId, isEditableTarget } from './utils/escAction.js';
 
 // ── Per-session shadow-git checkpoints ──────────────────────────
 // Session title with inline rename (click pencil → edit → Enter/blur saves,
@@ -1197,8 +1197,10 @@ function RightPanel({ panelId, onClose, width }) {
   if (!panelId || !PANEL_MAP[panelId]) return null;
   const { label, icon: Icon, component: PanelComponent } = PANEL_MAP[panelId];
 
+  // data-cgui-panel:面板容器标识。App 的 Esc 监听靠它判断「这一击落在面板里」
+  // (面板内输入框的 Esc 不得外泄到会话级停止监听)。别删。
   return (
-    <div style={{ width }} className="glass-thick shrink-0 flex flex-col m-3 ml-0 rounded-2xl overflow-hidden animate-glass-rise">
+    <div data-cgui-panel style={{ width }} className="glass-thick shrink-0 flex flex-col m-3 ml-0 rounded-2xl overflow-hidden animate-glass-rise">
       <div className="flex items-center justify-between px-4 py-3 border-b border-canvas-deep shrink-0">
         <div className="flex items-center gap-2">
           <Icon size={14} className="text-accent" />
@@ -9130,7 +9132,7 @@ export default function App() {
   //    textarea 里 Cmd+↑/↓ 是光标到头/尾的系统语义)
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   useEffect(() => {
-    const isEditable = (el) => !!el && (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT' || el.tagName === 'SELECT' || el.isContentEditable);
+    const isEditable = isEditableTarget; // 口径统一在 utils/escAction.js
     const onKey = (e) => {
       const meta = e.metaKey || e.ctrlKey;
       if (meta && !e.shiftKey && !e.altKey && e.key === '/') {
@@ -9198,23 +9200,37 @@ export default function App() {
   // rightPanel 是 App 级单值状态(面板无 per-pane 语义),effect 只此一份,无需分屏门控。
   useEffect(() => {
     if (!rightPanel) return;
+    // 已为哪张卡让过行。与 SessionDetail 停止监听里的同名变量【各自独立】:两处让行是
+    // 两件事(那边让的是"停整轮",这边让的是"关面板"),共享会互相吃掉对方的那一击。
+    // 没有这笔账时,遇上不吃 Esc 的卡(AskUserQuestion 选择卡)= 每一击都让行 → 面板永远关不掉。
+    let yieldedForId = null;
     const onEsc = (e) => {
       if (e.isComposing || e.keyCode === 229) return; // IME 组字中的 Esc = 取消候选词
       if (e.key !== 'Escape' || e.repeat) return;
-      // R2:焦点在面板内的输入框/文本域/富文本里时,这一击是"取消本次编辑/退出输入",
+      // R2:焦点在面板内的输入框/文本域/下拉/富文本里时,这一击是"取消本次编辑/退出输入",
       // 不是"关掉整个面板" —— 不守卫的话在设置里改到一半按 Esc,面板连同未保存的编辑一起没了。
-      // 判据与 PermissionPrompt:101 同款(标签名 + contentEditable)。守卫只在本监听内,
-      // 不改任何其他层的 Esc 语义;不 stopPropagation,让浮层/卡片/会话级监听照常处理这一击。
+      // 判据统一走 escAction.js 的 isEditableTarget。
+      // 且【面板内】的这一击必须就地截断:不 stopPropagation 的话它会冒到 window 上的
+      // 会话级监听(SessionDetail),生成中一击停整轮、空闲双击清聊天草稿 —— 在设置面板
+      // 里打字按个 Esc 把正在跑的回合停了。截断只针对面板容器内的目标:聊天输入框在
+      // pane 里,closest 命中不到 [data-cgui-panel],语义原样不动。
+      // 面板内没有任何组件用 React onKeyDown 接 Esc(录制快捷键/文件树右键菜单都挂 window
+      // 捕获、相位在本监听之前),所以捕获阶段截断不会掐掉面板自己的"取消编辑"。
       const _t = e.target;
-      if (_t && (_t.tagName === 'TEXTAREA' || _t.tagName === 'INPUT' || _t.isContentEditable)) return;
+      if (isEditableTarget(_t)) {
+        if (_t.closest?.('[data-cgui-panel]')) e.stopPropagation();
+        return;
+      }
       // confirmDialog 挂在 document 冒泡阶段(晚于本监听),不避让会「面板关了、确认框还在」。
       if (document.querySelector('[data-cgui-confirm]')) return;
       const _st = useStore.getState();
-      if (escYieldCardId({
+      const _yieldId = escYieldCardId({
         targetTag: e.target && e.target.tagName,
         pendingList: _st.pendingPermissions,
         psid: (_st.paneSessions && _st.paneSessions[_st.activeTabIndex || 0])?.sessionId || null,
-      })) return; // 让给权限/计划卡,面板不关
+        yieldedForId,
+      });
+      if (_yieldId) { yieldedForId = _yieldId; return; } // 让给权限/计划卡,面板不关
       e.stopPropagation();
       setRightPanel(null);
     };

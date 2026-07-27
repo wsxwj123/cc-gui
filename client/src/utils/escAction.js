@@ -31,13 +31,21 @@ export function idleEscAction({ draftText = '', clearedText = '', hasSession = f
 
 const TYPING_TAGS = new Set(['TEXTAREA', 'INPUT', 'SELECT']);
 
+// 「这一击落在可编辑控件里吗」的统一口径(原先 App.jsx / PermissionPrompt 各写一份,
+// 有的漏 SELECT、有的漏 contentEditable)。取各处并集:三种表单标签 + 富文本。
+// 参数是元素(也接受 { tagName } 这样的轻量对象,便于单测/只有标签名的调用方)。
+export function isEditableTarget(el) {
+  if (!el) return false;
+  return TYPING_TAGS.has(String(el.tagName || '').toUpperCase()) || !!el.isContentEditable;
+}
+
 // 这一击 Esc 要不要让给挂起的权限/计划/越界卡:返回让行的卡片 id(调用方记下来,
 // 一张卡只让一击),null = 不让,继续走 escRoute。
 // 归属口径:命中本窗格会话的请求 + 无 sessionId 的孤儿(调用方只在活动窗格注册,
 // 孤儿只算在活动窗格)。焦点在输入框/下拉里时卡片自己会跳过键盘,那种情况不让行,
 // 否则 Esc 两边都没人接 = 哑键。
 export function escYieldCardId({ targetTag = null, pendingList = [], psid = null, yieldedForId = null }) {
-  if (TYPING_TAGS.has(String(targetTag || '').toUpperCase())) return null;
+  if (isEditableTarget({ tagName: targetTag })) return null;
   const card = (pendingList || []).find((p) => (p.sessionId && p.sessionId === psid) || !p.sessionId);
   if (!card || card.id === yieldedForId) return null;
   return card.id;
