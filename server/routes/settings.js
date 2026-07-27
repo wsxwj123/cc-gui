@@ -205,6 +205,21 @@ function withBuiltinOfficial(rows) {
   return [...rows, { id: BUILTIN_OFFICIAL_ID, name: 'Claude 官方', category: 'official', is_current: 0, settings_config: '{}' }];
 }
 
+// 用户实报「点 Claude 官方 → provider 不存在」的根因是两端口径不对称:
+// GET /providers 在【已导入】时不读 cc-switch.db(rows=[])→ 补合成行,列表里官方的 id
+// 恒为 builtin-official;而 POST /provider/switch 不看 imported 直接读 db,db 里若有真官方行
+// (装过 cc-switch 的机器都有)withBuiltinOfficial 就不补合成行 → find(builtin-official) 落空
+// → 穿到 openai/custom 查找 → 404。这里回落到 db 的真官方行,并【保留请求的 id】:
+// 触发本回落 ⇔ 列表展示的就是合成 id,写 activeProviderId 必须用同一个 id,否则切完
+// isCurrent 对不上(列表不高亮)。official 分支只读 id/name,行为与合成行一致。
+export function findClaudeProviderRow(rows, id) {
+  const hit = rows.find((r) => r.id === id);
+  if (hit) return hit;
+  if (id !== BUILTIN_OFFICIAL_ID) return undefined;
+  const official = rows.find((r) => r.category === 'official');
+  return official ? { ...official, id: BUILTIN_OFFICIAL_ID } : undefined;
+}
+
 // Per-provider chosen model lists (the user's multi-select out of an OpenAI
 // provider's auto-fetched catalogue). Shape: { [providerId]: [modelId, ...] }.
 const PROVIDER_MODELS_PATH = join(homedir(), '.claude-gui', 'provider-models.json');
@@ -678,7 +693,7 @@ router.post('/provider/switch', async (req, res) => {
       "SELECT id, name, category, settings_config FROM providers WHERE app_type='claude'"
     );
     const rows = withBuiltinOfficial(dbRows);
-    const hit = rows.find((r) => r.id === id);
+    const hit = findClaudeProviderRow(rows, id);
 
     // Not a claude provider? Try the OpenAI-format set (routed via proxy).
     if (!hit) {
