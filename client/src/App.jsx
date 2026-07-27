@@ -5618,10 +5618,16 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       // 归属敏感(判官盲审#1):finalize 必须收尾【发起这次流的会话】,不能读
       // getLocalSession() —— 流式期间用户已切到别的会话时,会把新会话当本流归属,
       // fetch/清空错会话的本地消息。streamSid > ownerKey(非 draft)> 当前 pane 兜底。
+      // sid 与 projectHash 必须同源(判官重要#4):回落到当前会话的 sid 却仍用 owner 的
+      // projectHash,会拿"当前 sid + 别的项目 ph"去轮询/拉历史 → 404 空转 12 次(~2.4s)。
+      // 且旧代码有 `_sel?.sessionId && _sel?.projectHash` 双守卫,ph 为空整段跳过(空 ph
+      // 打到服务端同样是空转),这里恢复。
       const _ok1 = streamOwnerKeyRef.current;
-      const finalizeSid = streamSid || ((_ok1 && !String(_ok1).startsWith('draft-')) ? _ok1 : null)
-        || getLocalSession()?.sessionId || null;
-      if (finalizeSid) {
+      const ownerSid = streamSid || ((_ok1 && !String(_ok1).startsWith('draft-')) ? _ok1 : null);
+      const _fallbackSel = ownerSid ? null : getLocalSession();
+      const finalizeSid = ownerSid || _fallbackSel?.sessionId || null;
+      const finalizePh = (ownerSid ? streamOwnerPh : _fallbackSel?.projectHash) || '';
+      if (finalizeSid && finalizePh) {
         // 同会话 stop→resend 守卫:本 finally 属于 turn-1,轮询期间(~2.4s)用户可能已对
         // 同一会话发出 turn-2。activeProcRef 在本 finally 开头(4696)被置 null,只有新一轮
         // 发送才会再置成新 pid → 非空即"同会话已开新回合"。此时绝不能 setChatMessages([]) /
@@ -5667,7 +5673,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           // (incl trailing text) has landed.
           let peeked = [];
           try {
-            const r = await fetch(`/api/sessions/${finalizeSid}/messages?projectHash=${encodeURIComponent(streamOwnerPh || '')}`);
+            const r = await fetch(`/api/sessions/${finalizeSid}/messages?projectHash=${encodeURIComponent(finalizePh)}`);
             // 该端点直接返回数组(res.json(messages)),不是 {messages:[]}。原来取 .messages
             // 永远是 undefined→peeked 恒为 []→roundLanded 恒 false→每轮空跑满 12 次(~2.4s)
             // 才回退,尾部落盘检测形同虚设。兼容两种形态。
@@ -5678,7 +5684,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             // Empty/errored turn — no jsonl twin to wait for. Commit persisted and
             // drop matched NON-turn locals (the user prompt); keep the local ⚠️/❌
             // turn visible.
-            try { await fetchMessagesForTab(finalizeSid, streamOwnerPh || '', { silent: true }); } catch {}
+            try { await fetchMessagesForTab(finalizeSid, finalizePh, { silent: true }); } catch {}
             const known = new Set(getLocalMessages().map(tkey));
             setChatMessages((prev) => {
               if (newRoundStarted()) return prev; // await 期间开了新回合 → 不清在途消息
@@ -5692,7 +5698,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             // jsonl, so clearing avoids a doubled turn).
             // 例外:type==='btw' 旁问气泡只活在本地(永远没有 jsonl 孪生),整清会让它
             // 在回合结束时凭空消失;保留,切会话/刷新时自然清掉。
-            try { await fetchMessagesForTab(finalizeSid, streamOwnerPh || '', { silent: true }); } catch {}
+            try { await fetchMessagesForTab(finalizeSid, finalizePh, { silent: true }); } catch {}
             setChatMessages((prev) => {
               if (newRoundStarted()) return prev; // await 期间开了新回合 → 不清在途消息
               return prev.some((m) => m.type === 'btw') ? prev.filter((m) => m.type === 'btw') : [];
