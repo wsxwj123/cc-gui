@@ -1989,6 +1989,10 @@ function SessionList() {
       );
       if (!r.ok) { const e = await r.json().catch(() => ({})); confirmDialog('删除失败：' + (e.error || r.status)); return; }
       useStore.getState().clearSessionStopped?.(session.sessionId); // 会话已删,已停表条目一并收口(判官建议)
+      // 排队消息同清:messageQueue 镜像进 localStorage(cgui-message-queue),会话删了队列还在 →
+      // 下次有窗格用到同一 sessionId 键(reattach / 同名恢复)就把孤儿消息发出去。
+      // 只清 sessionId 键:draft-<projectHash> 是该项目【当前未落盘 draft】的队列,不属于本会话。
+      useStore.getState().clearQueue?.(session.sessionId);
       useStore.getState().fetchSessions(selectedProject.hash, { silent: true });
     } catch (err) {
       confirmDialog('删除失败：' + err.message);
@@ -2041,6 +2045,7 @@ function SessionList() {
   useEffect(() => () => {
     pendingDeletesRef.current.forEach((p) => {
       clearInterval(p.timer);
+      useStore.getState().clearQueue?.(p.session.sessionId); // 同 reallyDelete:不留孤儿队列
       stopSessionProcs(p.session.sessionId).then(() => fetch(
         `/api/sessions/${p.session.sessionId}?projectHash=${encodeURIComponent(p.session.projectHash)}`,
         { method: 'DELETE', keepalive: true }
