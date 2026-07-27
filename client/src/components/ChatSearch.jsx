@@ -101,9 +101,12 @@ export default function ChatSearch({ containerRef, onClose }) {
     return () => clearHighlights();
   }, [clearHighlights]);
 
-  // Esc 关检索:挂 document(本组件只在检索打开期间挂载,卸载即摘)。元素级 onKeyDown
+  // Esc 关检索:挂 window 捕获(本组件只在检索打开期间挂载,卸载即摘)。元素级 onKeyDown
   // 只在输入框聚焦时收得到 —— 点了正文再按 Esc 就直穿到 window 上的会话级监听,变成
-  // "关个检索框停掉整回合"。stopPropagation 在 document 冒泡阶段即止,够挡住 window。
+  // "关个检索框停掉整回合"。
+  // R1:原来挂 document 冒泡,晚于右侧面板监听的 document 捕获 → 面板开着时这一击先关面板、
+  // 检索框留着(层级颠倒)。改与灯箱/预览等浮层同款的 window 捕获,stopPropagation 一样
+  // 挡得住后面所有相位(含会话级停止监听)。
   useEffect(() => {
     const onKey = (e) => {
       if (e.key !== 'Escape' || e.isComposing || e.keyCode === 229) return;
@@ -111,8 +114,8 @@ export default function ChatSearch({ containerRef, onClose }) {
       e.stopPropagation();
       onClose();
     };
-    document.addEventListener('keydown', onKey);
-    return () => document.removeEventListener('keydown', onKey);
+    window.addEventListener('keydown', onKey, true);
+    return () => window.removeEventListener('keydown', onKey, true);
   }, [onClose]);
 
   const onKeyDown = (e) => {

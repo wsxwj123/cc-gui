@@ -114,15 +114,17 @@ function RollbackMenu({ message, onAction }) {
       setOpen(false);
     };
     // stopPropagation:关回滚菜单的 Esc 不冒到 window 上的会话级监听(生成中单击即停)。
+    // R1:相位挂 window 捕获(与灯箱/预览等浮层同款)。原来挂 document 冒泡 → 晚于右侧面板
+    // 监听的 document 捕获,面板开着时这一击先关面板、菜单留着(层级颠倒)。
     const onEsc = (e) => { if (e.key === 'Escape') { e.stopPropagation(); setOpen(false); } };
     // mousedown closes too aggressively (clicking inside menu before mouseup
     // can race with the close listener). Use `click` instead — fires only
     // after a complete press-release on the same target.
     document.addEventListener('click', onDocClick);
-    document.addEventListener('keydown', onEsc);
+    window.addEventListener('keydown', onEsc, true);
     return () => {
       document.removeEventListener('click', onDocClick);
-      document.removeEventListener('keydown', onEsc);
+      window.removeEventListener('keydown', onEsc, true);
     };
   }, [open]);
 

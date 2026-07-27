@@ -485,12 +485,14 @@ function ThemeToggle() {
     if (!open) return;
     const onDown = (e) => { if (wrapRef.current && !wrapRef.current.contains(e.target)) setOpen(false); };
     // 修正批#3:补 Esc 关闭(所有弹层统一)。stopPropagation:关弹层的 Esc 不冒到 window 上的会话级监听(生成中单击即停)。
+    // R1:keydown 挂 window 捕获(与灯箱/预览/文件树等 12 处浮层同款相位)。原来挂 document
+    // 冒泡 → 晚于面板监听的 document 捕获,面板开着时这一击先关面板、弹层留着(层级颠倒)。
     const onEsc = (e) => { if (e.key === 'Escape') { e.stopPropagation(); setOpen(false); } };
     document.addEventListener('mousedown', onDown);
-    document.addEventListener('keydown', onEsc);
+    window.addEventListener('keydown', onEsc, true);
     return () => {
       document.removeEventListener('mousedown', onDown);
-      document.removeEventListener('keydown', onEsc);
+      window.removeEventListener('keydown', onEsc, true);
     };
   }, [open]);
 
@@ -790,10 +792,11 @@ function PaneCountPicker() {
   useEffect(() => {
     if (!open) return;
     const onDoc = (e) => { if (!wrapRef.current?.contains(e.target)) setOpen(false); };
-    const onEsc = (e) => { if (e.key === 'Escape') { e.stopPropagation(); setOpen(false); } }; // stopPropagation:关弹层的 Esc 不冒到 window 上的会话级监听(生成中单击即停)
+    // R1:window 捕获(同 ThemeToggle,详见那里注释);stopPropagation 仍挡住会话级停止监听。
+    const onEsc = (e) => { if (e.key === 'Escape') { e.stopPropagation(); setOpen(false); } };
     document.addEventListener('mousedown', onDoc);
-    document.addEventListener('keydown', onEsc);
-    return () => { document.removeEventListener('mousedown', onDoc); document.removeEventListener('keydown', onEsc); };
+    window.addEventListener('keydown', onEsc, true);
+    return () => { document.removeEventListener('mousedown', onDoc); window.removeEventListener('keydown', onEsc, true); };
   }, [open]);
   return (
     <div ref={wrapRef} className="relative">
@@ -3467,10 +3470,11 @@ function SessionHeaderMore({ children, forceOpenSignal = 0 }) {
       if (e.target?.closest?.('.glass-popover')) return;
       setOpen(false);
     };
-    const onEsc = (e) => { if (e.key === 'Escape') { e.stopPropagation(); setOpen(false); } }; // stopPropagation:关弹层的 Esc 不冒到 window 上的会话级监听(生成中单击即停)
+    // R1:window 捕获(同 ThemeToggle,详见那里注释);stopPropagation 仍挡住会话级停止监听。
+    const onEsc = (e) => { if (e.key === 'Escape') { e.stopPropagation(); setOpen(false); } };
     document.addEventListener('mousedown', onDoc);
-    document.addEventListener('keydown', onEsc);
-    return () => { document.removeEventListener('mousedown', onDoc); document.removeEventListener('keydown', onEsc); };
+    window.addEventListener('keydown', onEsc, true);
+    return () => { document.removeEventListener('mousedown', onDoc); window.removeEventListener('keydown', onEsc, true); };
   }, [open]);
   return (
     <span ref={wrapRef} data-tour="session-menu" className="inline-flex items-center gap-1">
@@ -7533,12 +7537,13 @@ function ContextBreakdownButton({ contextTokens, contextWindow, contextPct, fmtT
       if (menuRef.current?.contains(e.target)) return;
       setOpen(false);
     };
-    const onEsc = (e) => { if (e.key === 'Escape') { e.stopPropagation(); setOpen(false); } }; // stopPropagation:关弹层的 Esc 不冒到 window 上的会话级监听(生成中单击即停)
+    // R1:window 捕获(同 ThemeToggle,详见那里注释);stopPropagation 仍挡住会话级停止监听。
+    const onEsc = (e) => { if (e.key === 'Escape') { e.stopPropagation(); setOpen(false); } };
     document.addEventListener('click', onDocClick);
-    document.addEventListener('keydown', onEsc);
+    window.addEventListener('keydown', onEsc, true);
     return () => {
       document.removeEventListener('click', onDocClick);
-      document.removeEventListener('keydown', onEsc);
+      window.removeEventListener('keydown', onEsc, true);
     };
   }, [open]);
 
@@ -9181,10 +9186,15 @@ export default function App() {
   // 面板页(设置/MCP/技能…)开着时 Esc 先关面板,不穿透到会话级「生成中单击即停」。
   // 边界(别回归 0.2.268):吃 Esc 的是【打开的面板页】,面板坞 rail 展开但没开面板页时
   // rightPanel=null → 本 effect 不挂监听,Esc 照常走停止/双击语义。
-  // 相位选 document 捕获(不是 window 捕获):所有浮层(图片灯箱/预览/右键菜单/快捷键录制/
-  // Provider 弹窗/速查)都挂在 window 捕获且 stopPropagation,捕获顺序 window → document,
-  // 故面板内浮层恒先吃到这一击,面板不会被越级关掉;它们没接的那一击才轮到这里关面板,
-  // stopPropagation 再挡住冒泡阶段 SessionDetail 的停止监听。
+  // 相位选 document 捕获(不是 window 捕获):浮层(图片灯箱/预览/右键菜单/快捷键录制/
+  // Provider 弹窗/速查/主题与分屏下拉/会话更多菜单/上下文徽章/模型选择器/回滚菜单/窗内检索)
+  // 都挂在 window 捕获且 stopPropagation,捕获顺序 window → document,故面板内浮层恒先吃到
+  // 这一击,面板不会被越级关掉;它们没接的那一击才轮到这里关面板,stopPropagation 再挡住
+  // 冒泡阶段 SessionDetail 的停止监听。
+  // 例外(R1):权限/计划/越界卡的键盘监听刻意留在 window 冒泡(捕获相位曾引发误 deny 竞争,
+  // 见 PermissionPrompt 顶部注释),相位上抢不过本监听 → 只能由本监听主动让行:本 pane 挂着
+  // 卡片时这一击归卡片(Esc=拒绝),面板不关。判据复用 SessionDetail 停止监听的同一纯函数
+  // escYieldCardId(焦点在输入框/下拉里时卡片自己会跳过键盘 → 那种情况不让行,免得两边都没人接)。
   // rightPanel 是 App 级单值状态(面板无 per-pane 语义),effect 只此一份,无需分屏门控。
   useEffect(() => {
     if (!rightPanel) return;
@@ -9193,6 +9203,12 @@ export default function App() {
       if (e.key !== 'Escape' || e.repeat) return;
       // confirmDialog 挂在 document 冒泡阶段(晚于本监听),不避让会「面板关了、确认框还在」。
       if (document.querySelector('[data-cgui-confirm]')) return;
+      const _st = useStore.getState();
+      if (escYieldCardId({
+        targetTag: e.target && e.target.tagName,
+        pendingList: _st.pendingPermissions,
+        psid: (_st.paneSessions && _st.paneSessions[_st.activeTabIndex || 0])?.sessionId || null,
+      })) return; // 让给权限/计划卡,面板不关
       e.stopPropagation();
       setRightPanel(null);
     };
