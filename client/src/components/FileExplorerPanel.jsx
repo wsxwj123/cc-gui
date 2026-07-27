@@ -185,6 +185,7 @@ export function FileExplorerPanel() {
   const [pending, setPending] = useState({});   // path -> { name, deadline, parentPath }
   const [nowTick, setNowTick] = useState(Date.now());
   const timersRef = useRef({});
+  const pendingFireRef = useRef({}); // path -> 真删函数(定时器回调本体),卸载时 flush 用
   const pendingCount = Object.keys(pending).length;
   useEffect(() => {
     if (!pendingCount) return;
@@ -192,11 +193,15 @@ export function FileExplorerPanel() {
     return () => clearInterval(id);
   }, [pendingCount]);
 
-  // 卸载兜底:撤销窗(10s)内面板被关掉时,清掉全部待执行删除定时器——否则面板已卸载
-  // 定时器仍触发,真实删除请求照发(用户以为撤销窗随面板一起没了,实际文件照删)。
+  // 卸载兜底 = 立即执行(flush)待删项,不是取消。卸载点不止"退出 app":切换到其它面板、
+  // 关闭右栏、打开 ArtifactDock 都会卸载本组件 —— 静默取消会让用户已确认的删除在 10s 内
+  // 切个面板就作废、文件原样"复活"且无任何提示。倒计时给的是【撤销窗】,卸载不是撤销,
+  // 所以兑现删除意图。先清 timer 再逐个执行;fire 内部开头会把自己从两张表移除,
+  // 定时器同刻已触发的路径不会被二次执行(幂等防双删)。
   useEffect(() => () => {
     for (const t of Object.values(timersRef.current)) clearTimeout(t);
     timersRef.current = {};
+    for (const fire of Object.values(pendingFireRef.current)) { try { fire(); } catch {} }
   }, []);
 
   // Esc 关闭菜单:与遮罩外部点击共关同一 ctxMenu state,右键/⋮ 两种打开方式行为一致。
@@ -242,8 +247,12 @@ export function FileExplorerPanel() {
     const underPath = (x) => x === path || x.startsWith(path + '/') || x.startsWith(path + '\\');
     setPreview((p) => (p && underPath(p.path) ? null : p));
     setSelectedFile((sf) => (sf && underPath(sf) ? null : sf));
-    timersRef.current[path] = setTimeout(async () => {
+    // 抽成具名函数:定时器到点与卸载 flush 走同一份真删逻辑。开头同步把自己从
+    // timers/pendingFire 两张表摘掉 = 天然幂等,两条触发路径不会重复删。
+    const fire = async () => {
+      if (!pendingFireRef.current[path]) return; // 已被另一条路径执行
       delete timersRef.current[path];
+      delete pendingFireRef.current[path];
       // 进入真删前先标 deleting:大目录删除要数秒,这期间横条不能再显示"可撤销"
       // (点撤销只会清 UI 而文件照删=假撤销)。deleting 后横条改显"删除中…"并禁用撤销。
       setPending((prev) => (prev[path] ? { ...prev, [path]: { ...prev[path], deleting: true } } : prev));
@@ -270,7 +279,9 @@ export function FileExplorerPanel() {
       }
       setPending((prev) => { const n = { ...prev }; delete n[path]; return n; });
       if (parentPath) fetchDir(parentPath);
-    }, 10_000);
+    };
+    pendingFireRef.current[path] = fire;
+    timersRef.current[path] = setTimeout(fire, 10_000);
     setNowTick(Date.now()); // 初显就用当前时刻,避免陈旧 tick 让倒计时首帧显示错误秒数
     setPending((prev) => ({ ...prev, [path]: { name, deadline: Date.now() + 10_000, parentPath } }));
   }, [rootPath, fetchDir]);
@@ -317,6 +328,7 @@ export function FileExplorerPanel() {
     if (!timersRef.current[path]) return;
     clearTimeout(timersRef.current[path]);
     delete timersRef.current[path];
+    delete pendingFireRef.current[path]; // 必须一起摘,否则卸载 flush 会把已撤销的删除又执行掉
     setPending((prev) => { const n = { ...prev }; delete n[path]; return n; });
   };
 
