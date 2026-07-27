@@ -729,6 +729,11 @@ export function ChatInput({ onSend, onStop, onStopBackground, onAccelerate, onBa
       const canUseHistory = !text.startsWith('/') && (text.trim() === '' || historyCursor >= 0 || !text.includes('\n') || (e.key === 'ArrowUp' ? atStart : atEnd));
       if (canUseHistory) {
         const history = readHistory();
+        // ↓ 只在【正在浏览历史】(historyCursor>=0)时有意义:cursor=-1 时按 ↓ 无历史可回退,
+        // 必须原样放行让光标正常下移。否则(单行放行 ↑↓ 后新引入)会走进下面的 ArrowDown 分支:
+        // setText(draftBeforeHistoryRef) 清空正在输入的文本,且 cursor 被减到 -2 让之后的 ↑
+        // 永远算不出 >=0 变成死键。必须在 preventDefault 之前 return。
+        if (e.key === 'ArrowDown' && historyCursor < 0) return;
         if (history.length > 0 || historyCursor >= 0) {
           e.preventDefault();
           navigatingHistoryRef.current = true;
@@ -740,7 +745,8 @@ export function ChatInput({ onSend, onStop, onStopBackground, onAccelerate, onBa
               setText(history[nextCursor]);
             }
           } else {
-            const nextCursor = historyCursor - 1;
+            // 钳位 -1(=退出历史、回填进历史前的草稿):再往下减会让 ↑ 的 min(cursor+1,…) 恒 <0。
+            const nextCursor = Math.max(historyCursor - 1, -1);
             setHistoryCursor(nextCursor);
             setText(nextCursor >= 0 ? history[nextCursor] : draftBeforeHistoryRef.current);
           }
