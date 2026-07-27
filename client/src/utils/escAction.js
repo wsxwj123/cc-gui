@@ -44,8 +44,10 @@ export function isEditableTarget(el) {
 // 归属口径:命中本窗格会话的请求 + 无 sessionId 的孤儿(调用方只在活动窗格注册,
 // 孤儿只算在活动窗格)。焦点在输入框/下拉里时卡片自己会跳过键盘,那种情况不让行,
 // 否则 Esc 两边都没人接 = 哑键。
+// targetTag 传【元素本身】才测得到 contentEditable(富文本);传裸标签名(单测/只有标签名的
+// 调用方)时包成 { tagName } 走同一判据,两种入参都成立。
 export function escYieldCardId({ targetTag = null, pendingList = [], psid = null, yieldedForId = null }) {
-  if (isEditableTarget({ tagName: targetTag })) return null;
+  if (isEditableTarget(typeof targetTag === 'string' ? { tagName: targetTag } : targetTag)) return null;
   const card = (pendingList || []).find((p) => (p.sessionId && p.sessionId === psid) || !p.sessionId);
   if (!card || card.id === yieldedForId) return null;
   return card.id;

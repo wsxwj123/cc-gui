@@ -6137,7 +6137,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       // 归属口径同 hasPendingInteraction(:3534)。
       const st = useStore.getState();
       const yieldId = escYieldCardId({
-        targetTag: e.target && e.target.tagName,
+        targetTag: e.target, // 传元素本身:只给 tagName 时 contentEditable 永远测不到(富文本焦点+卡片=哑键)
         pendingList: st.pendingPermissions,
         psid: (st.paneSessions && st.paneSessions[tabIndex])?.sessionId || null,
         yieldedForId,
@@ -9225,7 +9225,7 @@ export default function App() {
       if (document.querySelector('[data-cgui-confirm]')) return;
       const _st = useStore.getState();
       const _yieldId = escYieldCardId({
-        targetTag: e.target && e.target.tagName,
+        targetTag: e.target, // 传元素本身:只给 tagName 时 contentEditable 永远测不到(富文本焦点+卡片=哑键)
         pendingList: _st.pendingPermissions,
         psid: (_st.paneSessions && _st.paneSessions[_st.activeTabIndex || 0])?.sessionId || null,
         yieldedForId,
