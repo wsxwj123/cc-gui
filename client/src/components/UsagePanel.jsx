@@ -86,9 +86,9 @@ function BarRow({ label, value, max, color = 'var(--color-accent)' }) {
   );
 }
 
-// W7:官方订阅额度卡片(claude-usage-monitor 整合 P0)。数据来自
-// GET /api/subscription-usage(server spawn `claude -p /usage` 提取官方百分比,
-// 60s 缓存)。非官方 provider 返回 official:false → 整卡不渲染。
+// W7:官方订阅额度卡片。数据来自 GET /api/subscription-usage(server 调官方
+// api/oauth/usage,60s 缓存)。非官方 provider 返回 official:false → 整卡不渲染。
+// degraded:true = 凭证刷新窗口/限流,展示的是上次数据 —— 温和橙色提示,不走报错样式。
 function SubscriptionUsageCard() {
   const [data, setData] = useState(null);
   const load = () => fetch('/api/subscription-usage').then((r) => r.json()).then(setData).catch(() => {});
@@ -100,7 +100,8 @@ function SubscriptionUsageCard() {
     return () => { window.removeEventListener('cgui:chat-done', onChatDone); clearInterval(id); };
   }, []);
   if (!data || data.official === false) return null;
-  if (data.error) {
+  // degraded 时 error 只是降级说明,下面照常渲染上次数据。
+  if (data.error && !data.degraded) {
     return (
       <div>
         <h3 className="text-[10px] font-medium uppercase tracking-widest text-ink-faint font-body mb-3">订阅额度</h3>
@@ -111,16 +112,20 @@ function SubscriptionUsageCard() {
   const rows = [
     { label: '5 小时窗口', seg: data.session },
     { label: '本周 · 全模型', seg: data.weekAll },
-    { label: '本周 · Sonnet', seg: data.weekSonnet },
+    // 第三档的模型由服务端定(现为 Fable),标签跟随接口回传的 label,不写死。
+    { label: `本周 · ${data.weekScoped?.label || '当前模型'}`, seg: data.weekScoped },
   ].filter((r) => r.seg);
   if (!rows.length) return null;
   const tone = (p) => (p >= 90 ? 'var(--color-error,#dc2626)' : p >= 70 ? '#d97706' : 'var(--color-accent)');
   return (
     <div>
       <h3 className="text-[10px] font-medium uppercase tracking-widest text-ink-faint font-body mb-3">
-        订阅额度（官方 /usage）
+        订阅额度（官方用量接口）
       </h3>
       <div className="bg-canvas-warm border border-canvas-deep rounded-lg p-3 space-y-2">
+        {data.degraded && (
+          <div className="text-[10px] font-body leading-snug" style={{ color: '#d97706' }}>{data.error}</div>
+        )}
         {rows.map((r) => (
           <div key={r.label}>
             <div className="flex items-baseline justify-between mb-1">
