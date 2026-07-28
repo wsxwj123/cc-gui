@@ -152,8 +152,15 @@ export function SettingsPanel() {
       if (next !== undefined) {
         body = next;
       } else {
-        try { body = JSON.parse(rawJson); }
+        // JSON tab:发的是整份全文,带 _replace 标记让服务端整份替换写入——否则服务端按
+        // 补丁浅合并,用户删掉的顶层键(hooks 等)会被磁盘旧值合并复活,表现为保存后还原。
+        let parsed;
+        try { parsed = JSON.parse(rawJson); }
         catch { throw new Error('JSON 格式错误，请检查后再保存'); }
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+          throw new Error('settings.json 顶层必须是 JSON 对象');
+        }
+        body = { ...parsed, _replace: true };
       }
       const res = await fetch('/api/settings', {
         method: 'PUT', headers: { 'Content-Type': 'application/json' },

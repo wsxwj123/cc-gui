@@ -3,7 +3,7 @@ import { readFile, writeFile, mkdir, copyFile, unlink, readdir, rename } from 'f
 import { existsSync } from 'fs';
 import { execFile, spawn } from 'child_process';
 import { promisify } from 'util';
-import { join, isAbsolute } from 'path';
+import { join, isAbsolute, dirname } from 'path';
 import { homedir } from 'os';
 import { randomUUID } from 'crypto';
 import { resolveWorkspacePath } from '../utils/safe-path.js';
@@ -408,6 +408,18 @@ router.get('/settings', async (req, res) => {
   }
 });
 
+// 合并/替换语义(纯函数,供单测):
+// - 补丁模式(默认):浅合并进磁盘现值,body 顶层 null 键 = 删除该配置项。设置页各
+//   tab(权限/Hooks/会话开关)每次只发改动的那一项,靠合并保住其余键。
+// - 替换模式(replace=true):body 即完整新内容,不与磁盘合并——原始 JSON 编辑器发的
+//   是整份全文,合并会把用户删掉的顶层键(hooks 等)用磁盘旧值复活,表现为"一保存就
+//   恢复原样"。null 键同样删除(与补丁语义一致,避免写字面 null 进文件)。
+export function computeUpdatedSettings(current, body, replace = false) {
+  const updated = replace ? { ...body } : { ...current, ...body };
+  for (const k of Object.keys(body)) { if (body[k] === null) delete updated[k]; }
+  return updated;
+}
+
 // PUT /api/settings — update settings.
 // SPECIAL KEY: `_addProject` is NOT a real settings field; it's a request to
 // register a new project root by creating its hashed dir under
@@ -415,13 +427,16 @@ router.get('/settings', async (req, res) => {
 // verbatim into settings.json (polluting it) AND the project was never
 // actually visible to listProjects, so users would add a folder and watch it
 // vanish on every refresh.
+// SPECIAL KEY: `_replace` — 原始 JSON 编辑器整份保存标记,见 computeUpdatedSettings。
 router.put('/settings', async (req, res) => {
   try {
     const body = { ...(req.body || {}) };
     const addPath = typeof body._addProject === 'string' ? body._addProject.trim() : null;
     const createDir = body._createDir === true;
+    const replace = body._replace === true;
     delete body._addProject;
     delete body._createDir;
+    delete body._replace;
 
     let addedHash = null;
     let addedPath = null;
@@ -498,10 +513,7 @@ router.put('/settings', async (req, res) => {
     }
     // Also scrub any pre-existing `_addProject` pollution from earlier bug.
     delete current._addProject;
-    const updated = { ...current, ...body };
-    // 约定:body 中显式为 null 的顶层键 = 删除该配置项。浅合并无法删除键,故显式处理。
-    // 用于 GUI 把配置项恢复为 CLI 默认(如 autoCompactWindow 置空 = 按模型自动决定窗口)。
-    for (const k of Object.keys(body)) { if (body[k] === null) delete updated[k]; }
+    const updated = computeUpdatedSettings(current, body, replace);
     // 原始配置里 model 字段与 env.ANTHROPIC_MODEL 表达同一意图(默认模型),但 env 在
     // model-resolver 里优先级更高。用户只在 JSON 改 model、不改 env 时,env 会覆盖
     // model → "改默认模型看起来没生效"(改 sonnet 顶栏仍 haiku)。官方端点下两者不一致
