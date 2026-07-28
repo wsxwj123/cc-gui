@@ -420,6 +420,32 @@ export function computeUpdatedSettings(current, body, replace = false) {
   return updated;
 }
 
+// POST /api/settings/reveal — 在系统文件管理器中定位 settings.json(macOS/Win 高亮该
+// 文件,Linux 打开所在目录)。路径服务端写死、零入参;远程/手机访问时作用在服务器本机
+// (与 /worktree/reveal 同预期)。文件不存在时回落打开 ~/.claude 目录。
+router.post('/settings/reveal', async (_req, res) => {
+  try {
+    const hasFile = existsSync(SETTINGS_PATH);
+    let cmd, args;
+    if (process.platform === 'darwin') {
+      cmd = 'open'; args = hasFile ? ['-R', SETTINGS_PATH] : [dirname(SETTINGS_PATH)];
+    } else if (process.platform === 'win32') {
+      cmd = 'explorer'; args = hasFile ? [`/select,${SETTINGS_PATH}`] : [dirname(SETTINGS_PATH)];
+    } else {
+      cmd = 'xdg-open'; args = [dirname(SETTINGS_PATH)];
+    }
+    try {
+      await execFileP(cmd, args, { timeout: 10000 });
+    } catch (err) {
+      // explorer.exe 成功打开也常以非零退出码结束,Win 下不当失败(同 worktree/reveal)。
+      if (process.platform !== 'win32') throw err;
+    }
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // PUT /api/settings — update settings.
 // SPECIAL KEY: `_addProject` is NOT a real settings field; it's a request to
 // register a new project root by creating its hashed dir under

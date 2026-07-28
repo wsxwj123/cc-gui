@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useRef } from 'react';
-import { Settings, Save, RefreshCw, AlertCircle, Check, Plus, Trash2, ChevronDown, ChevronRight, ShieldCheck, ShieldAlert, ExternalLink, Eye, EyeOff, Search } from 'lucide-react';
+import { Settings, Save, RefreshCw, AlertCircle, Check, Plus, Trash2, ChevronDown, ChevronRight, ShieldCheck, ShieldAlert, ExternalLink, Eye, EyeOff, Search, FolderOpen } from 'lucide-react';
 import { openExternalUrl } from '../utils/openExternal.js';
 import { isTauri } from '../utils/pickDirectory.js';
 import { confirmDialog } from '../utils/confirmDialog.jsx';
@@ -2318,6 +2318,12 @@ function JsonTab({ rawJson, setRawJson, onSave, onReset, saving, saved }) {
         </button>
         <button onClick={onReset}
           className="px-3 py-1.5 bg-canvas-warm text-ink-faint text-xs font-body rounded-lg hover:text-ink-muted">重置</button>
+        {/* 在文件管理器中定位 settings.json(macOS/Win 高亮该文件)。远程访问时作用在服务器本机。 */}
+        <button onClick={() => fetch('/api/settings/reveal', { method: 'POST' }).catch(() => {})}
+          title="在文件夹中显示 ~/.claude/settings.json"
+          className="ml-auto flex items-center gap-1.5 px-3 py-1.5 bg-canvas-warm text-ink-faint text-xs font-body rounded-lg hover:text-ink-muted">
+          <FolderOpen size={12} />在文件夹中显示
+        </button>
       </div>
     </div>
   );
