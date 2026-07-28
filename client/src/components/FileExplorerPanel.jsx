@@ -396,7 +396,9 @@ export function FileExplorerPanel() {
       {/* onContextMenu preventDefault:右键点遮罩空白关掉自家菜单后,同手势的 contextmenu 会透到
           遮罩下方元素——落在树区若不压,会弹出系统原生右键菜单("关自家菜单却弹系统菜单"很突兀)。
           只压树区不做全局压制;行上右键不受影响(行的 onCtx 已 stopPropagation,到不了这里)。 */}
-      <div style={{ height: treeHeight }} className="shrink-0 overflow-y-auto px-1 py-2 border-b border-canvas-deep"
+      {/* 无预览时树占满全高(预览区整体不存在);有预览时按 splitter 高度分栏。 */}
+      <div style={preview ? { height: treeHeight } : undefined}
+        className={`overflow-y-auto px-1 py-2 ${preview ? 'shrink-0 border-b border-canvas-deep' : 'flex-1 min-h-0'}`}
         onContextMenu={(e) => e.preventDefault()}>
         <div className="flex items-center justify-between px-3 mb-2">
           <span className="text-[10px] text-ink-faint font-mono truncate" title={rootPath}>
@@ -526,19 +528,15 @@ export function FileExplorerPanel() {
         document.body
       )}
 
-      {/* Draggable splitter */}
-      <Splitter onMouseDown={onSplitDrag} axis="y" />
-
-      {/* Preview pane (fills remaining space) */}
-      <div className="flex-1 min-h-[80px] flex flex-col bg-canvas-sunken/40">
-        {!preview ? (
-          <div className="flex-1 flex items-center justify-center text-[11px] text-ink-faint font-body">
-            点击左侧文件查看预览
+      {/* 预览区(含分隔条)只在打开了预览时存在;关闭按钮把整个区域收起,树回满高。 */}
+      {preview && (
+        <>
+          <Splitter onMouseDown={onSplitDrag} axis="y" />
+          <div className="flex-1 min-h-[80px] flex flex-col bg-canvas-sunken/40">
+            <PreviewBody preview={preview} onAddToContext={addPathToContext} onDelete={deletePath} onClose={() => setPreview(null)} />
           </div>
-        ) : (
-          <PreviewBody preview={preview} onAddToContext={addPathToContext} onDelete={deletePath} onClose={() => setPreview(null)} />
-        )}
-      </div>
+        </>
+      )}
     </div>
   );
 }
