@@ -536,7 +536,7 @@ export function FileExplorerPanel() {
             点击左侧文件查看预览
           </div>
         ) : (
-          <PreviewBody preview={preview} onAddToContext={addPathToContext} onDelete={deletePath} />
+          <PreviewBody preview={preview} onAddToContext={addPathToContext} onDelete={deletePath} onClose={() => setPreview(null)} />
         )}
       </div>
     </div>
@@ -630,7 +630,7 @@ function TreeNode({ path, name, depth, isDir, isRoot, parentPath, expanded, dirs
   );
 }
 
-function PreviewBody({ preview, onAddToContext, onDelete }) {
+function PreviewBody({ preview, onAddToContext, onDelete, onClose }) {
   const e = ext(preview.name || '');
   const isImage = IMAGE_EXT.has(e);
   const isVideo = VIDEO_EXT.has(e);
@@ -721,9 +721,10 @@ function PreviewBody({ preview, onAddToContext, onDelete }) {
 
   return (
     <div className="flex-1 flex flex-col min-h-0">
-      <div className="px-3 py-1.5 border-b border-canvas-deep bg-canvas-warm/60 flex items-center gap-2 shrink-0">
+      {/* flex-wrap:面板拖窄时按钮整行下折,不再溢出右缘被裁(宽面板单行无变化)。 */}
+      <div className="px-3 py-1.5 border-b border-canvas-deep bg-canvas-warm/60 flex flex-wrap items-center gap-x-2 gap-y-1 shrink-0">
         <HeaderIcon size={11} className="text-ink-faint shrink-0" />
-        <span className="text-[11px] font-mono text-ink truncate flex-1" title={preview.path}>
+        <span className="text-[11px] font-mono text-ink truncate flex-1 min-w-[80px]" title={preview.path}>
           {preview.name}{dirty ? ' ·' : ''}
         </span>
         <span className="text-[10px] text-ink-faint font-mono shrink-0">
@@ -768,14 +769,23 @@ function PreviewBody({ preview, onAddToContext, onDelete }) {
             >
               <ExternalLink size={10} /><span className="max-md:hidden">用默认App打开</span>
             </button>
+            {/* 删除只留红色垃圾桶图标(语义在 title/aria-label),不占横排宽度。 */}
             {onDelete && (
               <button
                 onClick={() => onDelete({ path: preview.path, name: preview.name, parentPath: preview.path.replace(/[/\\][^/\\]*$/, '') })}
                 aria-label="删除此文件（10 秒内可撤销）"
-                className="flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded text-red-600 hover:bg-red-500/10 transition-colors shrink-0"
+                className="p-1 rounded text-red-600 hover:bg-red-500/10 transition-colors shrink-0"
                 title="删除此文件（10 秒内可撤销）"
               >
-                <Trash2 size={10} /><span className="max-md:hidden">删除</span>
+                <Trash2 size={12} />
+              </button>
+            )}
+            {/* 主动关闭预览(此前只能一直开着);编辑态不显示,由「取消」退出防误丢编辑。 */}
+            {onClose && (
+              <button onClick={onClose} aria-label="关闭预览"
+                className="p-1 rounded text-ink-faint hover:text-ink hover:bg-canvas-deep transition-colors shrink-0"
+                title="关闭预览">
+                <X size={12} />
               </button>
             )}
           </>
