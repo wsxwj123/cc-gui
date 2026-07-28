@@ -141,6 +141,14 @@ export function SkillsPanel() {
     const res = await ms.runDelete(delOne, { noun: '个技能', nameOf: (id) => local.find((s) => s.id === id)?.name || id });
     if (res) { setNotice(res.failed.length ? `已删 ${res.ok}/${res.total} 个,${res.failed.length} 个失败` : `已删除 ${res.ok} 个技能`); loadLocal(); loadArchived(); }
   };
+  // 导入页批量删除:仅作用于该源/仓库里「已装」的技能(同一单删端点并发),删完刷新源列表+本机+归档。
+  const onBatchDeleteImport = async () => {
+    const res = await ms.runDelete(delOne, { noun: '个已装技能', nameOf: (id) => official.find((s) => s.id === id)?.name || id });
+    if (res) {
+      setNotice(res.failed.length ? `已删 ${res.ok}/${res.total} 个,${res.failed.length} 个失败` : `已删除 ${res.ok} 个技能`);
+      await Promise.all([activeRepo ? loadOfficial(null, activeRepo, activeBranch, activeHost) : loadOfficial(source), loadLocal(), loadArchived()]);
+    }
+  };
 
   const loadOfficial = useCallback(async (srcId, repo, branch, host) => {
     setLoadingOff(true); setOffErr(''); setConflicts(null);
@@ -199,7 +207,9 @@ export function SkillsPanel() {
   }, [customRepo, loadOfficial, loadSavedRepos]);
 
   useEffect(() => { loadLocal(); loadArchived(); }, [loadLocal, loadArchived]);
-  useEffect(() => { ms.exit(); }, [tab]); // 切 tab 复位多选,避免跨列表残留选中
+  // 切 tab / 切源 / 切仓库复位多选:选中集是 id 集合,换列表后残留 id 会误删新列表外的技能。
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => { ms.exit(); }, [tab, source, activeRepo, activeBranch, activeHost]);
   useEffect(() => {
     fetch('/api/skills/sources').then((r) => r.json()).then((d) => setSources(d.sources || [])).catch(() => {});
     loadSavedRepos();
@@ -261,6 +271,7 @@ export function SkillsPanel() {
   };
 
   const notInstalled = official.filter((s) => !s.installed);
+  const installedIds = official.filter((s) => s.installed).map((s) => s.id); // 导入页多选/全选的可选集
   // CM-1:本机 skill 按关键词过滤(名称 + 描述,大小写不敏感)。
   // 检查更新后把"有新版本"的置顶(stable sort,组内保持原序),免得用户逐条翻找。
   const filteredLocal = useMemo(() => {
@@ -286,7 +297,8 @@ export function SkillsPanel() {
         {tabBtn('import', '导入', null)}
         {tabBtn('archived', '已归档', archived.length)}
         <div className="ml-auto flex items-center gap-1">
-          {tab === 'local' && local.length > 0 && <SelModeToggle selMode={ms.selMode} onToggle={() => (ms.selMode ? ms.exit() : ms.enter())} size={13} />}
+          {((tab === 'local' && local.length > 0) || (tab === 'import' && installedIds.length > 0)) &&
+            <SelModeToggle selMode={ms.selMode} onToggle={() => (ms.selMode ? ms.exit() : ms.enter())} size={13} />}
           <button onClick={tab === 'local' ? loadLocal : tab === 'archived' ? loadArchived : () => (activeRepo ? loadOfficial(null, activeRepo, activeBranch, activeHost) : loadOfficial(source))} disabled={loadingLocal || loadingOff}
             className="p-1.5 text-ink-faint hover:text-ink rounded disabled:opacity-40" title="刷新">
             <RefreshCw size={13} className={(loadingLocal || loadingOff) ? 'animate-spin' : ''} />
@@ -313,7 +325,8 @@ export function SkillsPanel() {
             </button>
           )}
           {notice && <div className="text-[11px] text-ink-soft bg-canvas-deep/60 border border-canvas-deep rounded px-2 py-1.5">{notice}</div>}
-          {ms.selMode && <BatchBar count={ms.count} busy={ms.busy} onDelete={onBatchDelete} onExit={ms.exit} noun="个技能" />}
+          {ms.selMode && <BatchBar count={ms.count} busy={ms.busy} onDelete={onBatchDelete} onExit={ms.exit} noun="个技能"
+            allIds={filteredLocal.map((s) => s.id)} onSetAll={ms.setAll} />}
           {filteredLocal.length > 0 ? (
             <div className="space-y-2">
               {filteredLocal.map((s) => (
@@ -464,6 +477,9 @@ export function SkillsPanel() {
 
           {offErr && <div className="text-[11px] text-error bg-error/10 border border-error/20 rounded px-2 py-1.5 break-all">{offErr}</div>}
           {notice && <div className="text-[11px] text-ink-soft bg-canvas-deep/60 border border-canvas-deep rounded px-2 py-1.5">{notice}</div>}
+          {/* 批量删除该源里已装的技能:未装项不可选(没有可删的东西) */}
+          {ms.selMode && <BatchBar count={ms.count} busy={ms.busy} onDelete={onBatchDeleteImport} onExit={ms.exit} noun="个已装技能"
+            allIds={installedIds} onSetAll={ms.setAll} />}
           {officialMeta.truncatedDesc && (
             <div className="text-[10px] text-ink-faint font-body">该源 skill 较多,仅列名称(不预取描述);导入后可在本机查看。</div>
           )}
@@ -486,7 +502,7 @@ export function SkillsPanel() {
           )}
 
           <button onClick={() => runImport(notInstalled.map((s) => s.id), false, 'all')}
-            disabled={loadingOff || busy.size > 0 || notInstalled.length === 0}
+            disabled={loadingOff || busy.size > 0 || notInstalled.length === 0 || ms.selMode}
             className="w-full flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg bg-accent text-on-accent text-[12px] font-medium hover:bg-accent/90 transition-colors disabled:opacity-40 disabled:cursor-not-allowed">
             {busy.has('all') ? <Loader2 size={13} className="animate-spin" /> : <CloudDownload size={13} />}
             {loadingOff ? '加载中…' : notInstalled.length === 0 ? '此源已全部安装' : `一键导入全部(${notInstalled.length})`}
@@ -497,13 +513,15 @@ export function SkillsPanel() {
           ) : (
             <div className="space-y-2">
               {official.map((s) => (
-                <div key={s.id} onClick={() => setExpanded((p) => p === `off:${s.id}` ? null : `off:${s.id}`)}
-                  className="bg-canvas-warm border border-canvas-deep rounded-lg p-3 cursor-pointer" title="点击展开/收起完整简介">
+                <div key={s.id} onClick={() => (ms.selMode ? (s.installed && ms.toggle(s.id)) : setExpanded((p) => p === `off:${s.id}` ? null : `off:${s.id}`))}
+                  className={`bg-canvas-warm border border-canvas-deep rounded-lg p-3 cursor-pointer ${ms.selMode && !s.installed ? 'opacity-40' : ''}`}
+                  title={ms.selMode ? (s.installed ? '点击勾选' : '未安装,无可删除') : '点击展开/收起完整简介'}>
                   <div className="flex items-center gap-2">
+                    {ms.selMode && s.installed && <SelCheckbox checked={ms.selected.has(s.id)} onClick={() => ms.toggle(s.id)} />}
                     <span className="text-xs font-medium font-body text-ink truncate flex-1" title={s.id}>{s.name}</span>
                     {s.version && <span className="shrink-0 text-[10px] px-1 py-px bg-canvas-deep text-ink-faint rounded font-mono">v{s.version}</span>}
                     <SkillCopyBtn name={s.id} />
-                    {s.installed ? (
+                    {ms.selMode ? null : s.installed ? (
                       <>
                       <button onClick={(e) => { e.stopPropagation(); runImport([s.id], true, s.id, true); }} disabled={busy.has(s.id) || busy.has('all')}
                         className="shrink-0 text-[10px] px-2 py-0.5 rounded border border-canvas-deep text-ink-faint hover:text-ink hover:bg-canvas-deep flex items-center gap-1 disabled:opacity-50" title="已安装 — 点击用该源最新版本覆盖">

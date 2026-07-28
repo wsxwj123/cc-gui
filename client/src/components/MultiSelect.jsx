@@ -12,6 +12,8 @@ export function useMultiSelect() {
   const toggle = useCallback((id) => {
     setSelected((prev) => { const n = new Set(prev); if (n.has(id)) n.delete(id); else n.add(id); return n; });
   }, []);
+  // 全选/清空:整组替换选中集(BatchBar 的「全选」按钮用,调用方传当前可见列表的 ids)。
+  const setAll = useCallback((ids) => setSelected(new Set(ids)), []);
   const enter = useCallback(() => setSelMode(true), []);
   const exit = useCallback(() => { setSelMode(false); setSelected(new Set()); }, []);
   // deleteOne(id)=>Promise 必须是纯后端调用、失败时 throw;删完统一由调用方刷新列表。
@@ -44,7 +46,7 @@ export function useMultiSelect() {
       .map((x) => ({ id: x.id, error: String(x.r.reason?.message || x.r.reason || '失败') }));
     return { total: ids.length, ok: ids.length - failed.length, failed };
   }, [busy, selected, exit]);
-  return { selMode, selected, busy, count: selected.size, toggle, enter, exit, runDelete };
+  return { selMode, selected, busy, count: selected.size, toggle, setAll, enter, exit, runDelete };
 }
 
 // 多选模式触发按钮(放面板工具栏)。
@@ -57,11 +59,19 @@ export function SelModeToggle({ selMode, onToggle, size = 13, className = '' }) 
   );
 }
 
-// 多选工具条:「已选 N · 删除所选 / 取消」。放列表顶部。
-export function BatchBar({ count, busy, onDelete, onExit, noun = '项' }) {
+// 多选工具条:「已选 N · 全选 / 删除所选 / 取消」。放列表顶部。
+// allIds(可选):当前可见列表全部可选 id → 显示「全选」;已全选时变「取消全选」。
+export function BatchBar({ count, busy, onDelete, onExit, noun = '项', allIds, onSetAll }) {
+  const allSelected = Array.isArray(allIds) && allIds.length > 0 && count >= allIds.length;
   return (
     <div className="flex items-center gap-2 px-3 py-1.5 bg-canvas-warm border-b border-canvas-deep shrink-0">
       <span className="text-[11px] font-body text-ink flex-1">已选 {count} {noun}(点条目勾选)</span>
+      {Array.isArray(allIds) && allIds.length > 0 && onSetAll && (
+        <button onClick={() => onSetAll(allSelected ? [] : allIds)} disabled={busy}
+          className="text-[11px] px-2 py-0.5 rounded border border-canvas-deep text-ink-muted hover:bg-canvas-deep disabled:opacity-40">
+          {allSelected ? '取消全选' : `全选(${allIds.length})`}
+        </button>
+      )}
       <button onClick={onDelete} disabled={!count || busy}
         className="text-[11px] px-2 py-0.5 rounded bg-red-600 text-white disabled:opacity-40 hover:bg-red-700">{busy ? '删除中…' : '删除所选'}</button>
       <button onClick={onExit} disabled={busy}
