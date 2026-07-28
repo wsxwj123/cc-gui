@@ -7394,7 +7394,7 @@ function ProviderManager({ initialEditId = null }) {
               </div>
               {ms.selMode && hasCustom && (
                 <BatchBar count={ms.count} busy={ms.busy} noun="个 Provider" onExit={ms.exit}
-                  allIds={customProviders.map((p) => p.id)} onSetAll={ms.setAll}
+                  allIds={customProviders.map((p) => p.id)} onSetAll={ms.setAll} selectedSet={ms.selected}
                   onDelete={async () => {
                     const res = await ms.runDelete(
                       (id) => fetch(`/api/custom-providers/${id}`, { method: 'DELETE' }).then((r) => { if (!r.ok) throw new Error('删除失败'); }),

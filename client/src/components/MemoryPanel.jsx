@@ -248,7 +248,7 @@ function AutoMemoryTab({ cwd }) {
         </button>
       </div>
       {ms.selMode && <BatchBar count={ms.count} busy={ms.busy} onDelete={onBatchDelete} onExit={ms.exit} noun="条记忆"
-        allIds={entries.map((e) => e.file)} onSetAll={ms.setAll} />}
+        allIds={entries.map((e) => e.file)} onSetAll={ms.setAll} selectedSet={ms.selected} />}
       {err && <div className="px-3 py-2 text-xs text-amber-700 font-body shrink-0">{err}</div>}
       <div className="flex-1 min-h-0 overflow-y-auto divide-y divide-canvas-deep/50">
         {entries.length === 0 && !loading && (

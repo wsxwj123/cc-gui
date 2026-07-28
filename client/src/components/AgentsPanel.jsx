@@ -316,7 +316,7 @@ export function AgentsPanel() {
       )}
 
       {ms.selMode && <BatchBar count={ms.count} busy={ms.busy} onDelete={onBatchDelete} onExit={ms.exit} noun="个 agent"
-        allIds={agents.filter((a) => a.format !== 'cli').map((a) => a.name)} onSetAll={ms.setAll} />}
+        allIds={agents.filter((a) => a.format !== 'cli').map((a) => a.name)} onSetAll={ms.setAll} selectedSet={ms.selected} />}
       <div className="flex-1 min-h-0 overflow-hidden flex">
         <div className="w-[140px] border-r border-canvas-deep overflow-y-auto shrink-0">
           {agents.length === 0 && (

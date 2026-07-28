@@ -326,7 +326,7 @@ export function SkillsPanel() {
           )}
           {notice && <div className="text-[11px] text-ink-soft bg-canvas-deep/60 border border-canvas-deep rounded px-2 py-1.5">{notice}</div>}
           {ms.selMode && <BatchBar count={ms.count} busy={ms.busy} onDelete={onBatchDelete} onExit={ms.exit} noun="个技能"
-            allIds={filteredLocal.map((s) => s.id)} onSetAll={ms.setAll} />}
+            allIds={filteredLocal.map((s) => s.id)} onSetAll={ms.setAll} selectedSet={ms.selected} />}
           {filteredLocal.length > 0 ? (
             <div className="space-y-2">
               {filteredLocal.map((s) => (
@@ -479,7 +479,7 @@ export function SkillsPanel() {
           {notice && <div className="text-[11px] text-ink-soft bg-canvas-deep/60 border border-canvas-deep rounded px-2 py-1.5">{notice}</div>}
           {/* 批量删除该源里已装的技能:未装项不可选(没有可删的东西) */}
           {ms.selMode && <BatchBar count={ms.count} busy={ms.busy} onDelete={onBatchDeleteImport} onExit={ms.exit} noun="个已装技能"
-            allIds={installedIds} onSetAll={ms.setAll} />}
+            allIds={installedIds} onSetAll={ms.setAll} selectedSet={ms.selected} />}
           {officialMeta.truncatedDesc && (
             <div className="text-[10px] text-ink-faint font-body">该源 skill 较多,仅列名称(不预取描述);导入后可在本机查看。</div>
           )}

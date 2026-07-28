@@ -61,8 +61,11 @@ export function SelModeToggle({ selMode, onToggle, size = 13, className = '' }) 
 
 // 多选工具条:「已选 N · 全选 / 删除所选 / 取消」。放列表顶部。
 // allIds(可选):当前可见列表全部可选 id → 显示「全选」;已全选时变「取消全选」。
-export function BatchBar({ count, busy, onDelete, onExit, noun = '项', allIds, onSetAll }) {
-  const allSelected = Array.isArray(allIds) && allIds.length > 0 && count >= allIds.length;
+// 已全选判定用逐项包含而非数量比较:选中集可能残留已切走的过滤视图里的 id(数量够但
+// 可见项没全选),数量判定会误显「取消全选」。selectedSet 缺省时退回数量判定。
+export function BatchBar({ count, busy, onDelete, onExit, noun = '项', allIds, onSetAll, selectedSet }) {
+  const allSelected = Array.isArray(allIds) && allIds.length > 0 &&
+    (selectedSet ? allIds.every((id) => selectedSet.has(id)) : count >= allIds.length);
   return (
     <div className="flex items-center gap-2 px-3 py-1.5 bg-canvas-warm border-b border-canvas-deep shrink-0">
       <span className="text-[11px] font-body text-ink flex-1">已选 {count} {noun}(点条目勾选)</span>
