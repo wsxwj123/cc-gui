@@ -703,17 +703,24 @@ function PreviewBody({ preview, onAddToContext, onDelete, onClose }) {
     }
   }, [preview.path, value]);
 
+  // 读取中/失败态也给关闭入口(否则出错的预览只能靠点别的文件顶掉,关不掉)。
+  const closeBtn = onClose ? (
+    <button onClick={onClose} aria-label="关闭预览" title="关闭预览"
+      className="absolute top-1 right-1 p-1 rounded text-ink-faint hover:text-ink hover:bg-canvas-deep transition-colors">
+      <X size={12} />
+    </button>
+  ) : null;
   if (preview.loading) {
     return (
-      <div className="flex-1 flex items-center justify-center text-[11px] text-ink-faint">
-        <RefreshCw size={12} className="animate-spin mr-1.5" /> 读取中…
+      <div className="relative flex-1 flex items-center justify-center text-[11px] text-ink-faint">
+        <RefreshCw size={12} className="animate-spin mr-1.5" /> 读取中…{closeBtn}
       </div>
     );
   }
   if (preview.error) {
     return (
-      <div className="flex-1 flex items-center justify-center text-[11px] text-red-600 gap-1.5">
-        <AlertCircle size={12} />{preview.error}
+      <div className="relative flex-1 flex items-center justify-center text-[11px] text-red-600 gap-1.5">
+        <AlertCircle size={12} />{preview.error}{closeBtn}
       </div>
     );
   }
