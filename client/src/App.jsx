@@ -4722,13 +4722,21 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       // getLocalSession() —— 流式期间用户可能已切到别的会话/项目(store 的 fetchMessages
       // 还有一层 paneSessions[tab] 乱序守卫,响应落地时切走了会整条丢弃)。
       let lastHistRefreshAt = Date.now();
+      let histRefreshInFlight = false; // 上一次还没落地就不再发:慢盘/大会话时避免请求叠罗汉
       const refreshHistIfDue = (force) => {
+        if (histRefreshInFlight) return;
         if (!shouldRefreshHist({ isReattach: !!reattachPid, now: Date.now(), lastAt: lastHistRefreshAt, force })) return;
-        lastHistRefreshAt = Date.now();
         const _sid = streamSid, _ph = streamOwnerPh;
         if (!_sid || !_ph) return;
-        // fire-and-forget:刷新失败不影响流本身
-        try { Promise.resolve(fetchMessagesForTab(_sid, _ph, { silent: true })).catch(() => {}); } catch {}
+        lastHistRefreshAt = Date.now();
+        histRefreshInFlight = true;
+        // fire-and-forget:刷新失败不影响流本身。force 撞上在途请求时被跳过也无妨 ——
+        // finally 的落盘轮询本来就会再拉一次收尾。
+        try {
+          Promise.resolve(fetchMessagesForTab(_sid, _ph, { silent: true }))
+            .catch(() => {})
+            .finally(() => { histRefreshInFlight = false; });
+        } catch { histRefreshInFlight = false; }
       };
       const isDuplicate = (line) => {
         if (recentLines.includes(line)) return true;
@@ -5892,8 +5900,16 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         const prevTs = detachTsBySidRef.current[streamSid] || 0;
         detachTsBySidRef.current[streamSid] = Math.max(prevTs, Date.now());
       }
-      setStreamHistCutoff(null);
-      setReattachStream(false); // 与截断同帧复位:下一轮(正常发送)照常画自己的流式气泡
+      // 复位只归"最后一个回合"所有:上面的 finalize 轮询含 await(最长 ~2.4s),这期间
+      // auto-reattach 完全可能已经起了 turn-2 并置好它自己的截断/reattach 标记 —— 无条件
+      // 复位会把 turn-2 的标记倒打回去(截断被清 + reattachStream 回 false = 双气泡在这个
+      // 窗口原样复现)。判据复用上面 newRoundStarted 的同一口径:activeProcRef 在本 finally
+      // 开头已置 null,非空 = 同会话新回合已起(reattach 在起流第一行同步置 pid,正常发送在
+      // 拿到 pid 后置)→ 交给新回合自己的 finally 复位,不越权。
+      if (activeProcRef.current == null) {
+        setStreamHistCutoff(null);
+        setReattachStream(false);
+      }
       // Background refresh of sidebar session list. `silent:true` means the
       // global loading flag is NOT toggled, so SessionDetail doesn't swap to
       // a loading screen and wipe out the user's scroll position.

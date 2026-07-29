@@ -8,6 +8,7 @@
 //   ③ reattach 期间用 SSE 事件节流刷历史(1.5s),回合结束 force 立刻收尾;
 //   ④ 非 reattach 永不触发这条刷新(不给正常流加任何额外请求)。
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { REATTACH_REFRESH_MS, resolveStreamHistCutoff, shouldRefreshHist } from '../../client/src/utils/reattach.js';
 
 // ── ① / ② 截断口径 ────────────────────────────────────────────
@@ -37,4 +38,23 @@ import { REATTACH_REFRESH_MS, resolveStreamHistCutoff, shouldRefreshHist } from 
   assert.equal(shouldRefreshHist(o({ force: true })), false, 'force 也不能给正常发送开这条路径');
 }
 
-console.log('✅ check-reattach-render: reattach 截断口径 + 刷新节流 全部通过');
+// ── ⑤ 源码守卫:finally 的复位必须被"无新回合"条件包住 ────────────
+// turn-1 的 finalize 落盘轮询含 await(~2.4s),期间 auto-reattach 可能已起 turn-2 并置好
+// 自己的标记;无条件复位会把 turn-2 的截断/reattach 标记倒打回去 → 双气泡在该窗口复现。
+// 判据用现成的 activeProcRef(finally 开头置 null,新回合起流时置 pid),与 newRoundStarted 同源。
+{
+  const src = readFileSync(new URL('../../client/src/App.jsx', import.meta.url), 'utf8');
+  assert.match(
+    src,
+    /if \(activeProcRef\.current == null\) \{\s*setStreamHistCutoff\(null\);\s*setReattachStream\(false\);\s*\}/,
+    'finally 里的 setStreamHistCutoff(null) + setReattachStream(false) 必须包在 activeProcRef.current == null 内,否则会覆盖已开始的下一回合的标记',
+  );
+  assert.equal((src.match(/setReattachStream\(false\)/g) || []).length, 1,
+    'reattachStream 只应有 finally 那一处复位:多一处裸复位就绕开了新回合守卫');
+  assert.equal((src.match(/setReattachStream\(/g) || []).length, 2,
+    'setReattachStream 全仓只应有 2 个调用点(起流置位 + finally 复位)');
+  assert.match(src, /if \(histRefreshInFlight\) return;/,
+    'reattach 历史刷新必须有 in-flight 去重,慢盘时别把 /messages 请求叠罗汉');
+}
+
+console.log('✅ check-reattach-render: reattach 截断口径 + 刷新节流 + finally 复位守卫 全部通过');
