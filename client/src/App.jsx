@@ -69,6 +69,7 @@ import {
 import { buildFontEntries, groupFonts, detectFonts, platformCandidates, queryLocalFontFamilies } from './utils/systemFonts.js';
 import { copyText } from './utils/clipboard.js';
 import { escRoute, idleEscAction, escYieldCardId, isEditableTarget } from './utils/escAction.js';
+import { resolveStreamHistCutoff, shouldRefreshHist } from './utils/reattach.js';
 
 // ── Per-session shadow-git checkpoints ──────────────────────────
 // Session title with inline rename (click pencil → edit → Enter/blur saves,
@@ -3734,10 +3735,13 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // 与流式气泡同屏 → 同一回合渲染两遍(用户截图:上块 jsonl 半成品带 usage,下块 Writing… 流式)。
   // 现有 tkey 去重只清 chatMessages,管不到 messages 侧。据此在渲染层把历史截断到本回合起点之前:
   //   { sinceTs }        正常发送:丢弃 timestamp ≥ 流起点的历史条目(本地已有用户气泡副本)
-  //   { afterLastUser }  reattach:真实起点未知,但进程还活着 ⇒ jsonl 末条用户消息就是本回合
-  //                      的 prompt(本地无副本,保留它),丢弃其后的条目。
+  //   { afterLastUser }  仅剩历史分支保留(reattach 已改为 null,见 resolveStreamHistCutoff)。
   // finalize 提交整轮落盘 + 清空本地副本时同步清空,历史交还 jsonl。
   const [streamHistCutoff, setStreamHistCutoff] = useState(null);
+  // reattach 双气泡根治:本次流是否 reattach(接管已在跑的进程)。为 true 时本窗格不画
+  // 自己的流式气泡/Connecting 占位 —— 内容由历史卡(jsonl)单一来源负责,重放事件只当
+  // 刷新触发器。口径与理由见 utils/reattach.js。
+  const [reattachStream, setReattachStream] = useState(false);
   const loadedSidRef = useRef(null); // I4:本窗格已加载历史的 sessionId,切会话时据此强制重载
   // 编辑重发待回滚(#4):点击「重新编辑并发送」时只回填输入框、记录目标消息,不做
   // 任何破坏性操作;真正发送时才回退,ESC 取消则原样保留。ref 供 handleSend 读取
@@ -4413,16 +4417,12 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     // 会被本回合 finally 当成"本次停止的保留项",按上一轮的 keptToolUseIds 排除收尾。
     stopKeptRef.current = null;
     // BF-1:记录历史截断点 —— 流式期间任何历史重拉都会拉到本回合半成品,渲染层据此丢弃。
-    // #4 修:reattach 若有本会话 detach 时刻,用 { sinceTs: detachTs } —— 只藏 detach 之后落盘
-    // (会被 earlyLines 重放)的内容;detach 之前已产出的助手回复照常从历史显示(原 afterLastUser
-    // 会把"最后一条用户消息之后"的全部内容切掉,含离开前已完成的回复 → 凭空消失,停止/完成才重现)。
-    // 无 detach 时刻(刷新后 rehydrate reattach,不知起点)则回落 afterLastUser,保持原行为不回归。
-    const reattachDts = reattachPid && selectedSession?.sessionId ? detachTsBySidRef.current[selectedSession.sessionId] : null;
-    setStreamHistCutoff(
-      reattachPid
-        ? (reattachDts ? { sinceTs: reattachDts } : { afterLastUser: true })
-        : { sinceTs: Date.now() },
-    );
+    // reattach 改为不截断(resolveStreamHistCutoff):{ sinceTs: detachTs } 是按 turn 粒度过滤的,
+    // 而一条 turn 的时间戳取本回合【第一条】assistant 记录的时间(必早于 detach)⇒ 在跑的整个
+    // turn 从来没被截掉,再叠加 earlyLines 重放出的流式气泡 = 同一段内容画成两个气泡。改为
+    // 「历史(jsonl)单一来源画、reattach 不画自己的气泡」(下面 setReattachStream + 渲染门)。
+    setReattachStream(!!reattachPid);
+    setStreamHistCutoff(resolveStreamHistCutoff(!!reattachPid, Date.now()));
     setCompacting(isCompact);
     setStreamingText('');
     setStreamingThinking('');
@@ -4714,6 +4714,22 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       // JSON 至少含 ev.uuid / index / delta.text 之一,合法重复的概率为 0)。
       const recentLines = [];
       const RECENT_MAX = 16;
+      // reattach 期间的历史刷新器:本流不画气泡,内容全靠历史卡,所以要让历史卡随 jsonl
+      // 增长。用收到的 SSE 事件当心跳做节流(1.5s),**不能**依赖 file watcher —— 打包版
+      // 的 jsonl watcher 是关的(server/index.js "file-watcher disabled for packaged
+      // Tauri backend"),否则整个 reattach 期间历史卡纹丝不动。
+      // 归属敏感:只刷本流归属的 sid+ph(streamSid/streamOwnerPh 闭包),绝不读
+      // getLocalSession() —— 流式期间用户可能已切到别的会话/项目(store 的 fetchMessages
+      // 还有一层 paneSessions[tab] 乱序守卫,响应落地时切走了会整条丢弃)。
+      let lastHistRefreshAt = Date.now();
+      const refreshHistIfDue = (force) => {
+        if (!shouldRefreshHist({ isReattach: !!reattachPid, now: Date.now(), lastAt: lastHistRefreshAt, force })) return;
+        lastHistRefreshAt = Date.now();
+        const _sid = streamSid, _ph = streamOwnerPh;
+        if (!_sid || !_ph) return;
+        // fire-and-forget:刷新失败不影响流本身
+        try { Promise.resolve(fetchMessagesForTab(_sid, _ph, { silent: true })).catch(() => {}); } catch {}
+      };
       const isDuplicate = (line) => {
         if (recentLines.includes(line)) return true;
         recentLines.push(line);
@@ -5033,7 +5049,15 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                 const blkKey = `a:${parentToolUseId}:${ev.index}`;
                 const block = blocks[blkKey];
                 const delta = ev.delta || {};
-                if (!block) continue;
+                if (!block) {
+                  // 孤儿 delta:reattach 重放的首批 delta 属于 detach 那一刻正在写的块,它的
+                  // content_block_start 早被消费、不在 earlyLines 里 ⇒ 这里查不到 block。
+                  // 原来整段静默丢弃 → 子代理卡片里这段输出永远看不到。按 delta 类型直接
+                  // 追加到子代理缓冲(tool_use 的 input_json 无 toolId,仍只能丢)。
+                  if (delta.type === 'text_delta') store.appendAgentText(parentToolUseId, delta.text || '');
+                  else if (delta.type === 'thinking_delta') store.appendAgentThinking(parentToolUseId, delta.thinking || '');
+                  continue;
+                }
                 if (delta.type === 'text_delta' && block.type === 'text') {
                   store.appendAgentText(parentToolUseId, delta.text || '');
                 } else if (delta.type === 'thinking_delta' && block.type === 'thinking') {
@@ -5552,11 +5576,18 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           }
           if (event.type === 'done') break;
         }
+        // reattach:每读到一批 SSE 行就考虑刷一次历史(内部节流,非 reattach 直接返回)。
+        refreshHistIfDue(false);
       }
+      // 回合结束(流关闭/done):立刻收尾刷一次,不等下一个节流窗,也不等 finally 的落盘轮询。
+      refreshHistIfDue(true);
 
       if (accumulatedText || accumulatedThinking || currentToolCalls.length > 0) {
         producedReply = true;
-        setChatMessages((prev) => [...prev, {
+        // reattach 不 push 本地副本:accumulatedText 只是 detach 之后被重放的那半截,
+        // 与历史卡里的完整回合重叠 —— push 了会在 finalize 清本地副本前闪一帧双气泡。
+        // producedReply 仍置 true,finalize 的落盘轮询/清理语义原样不变。
+        if (!reattachPid) setChatMessages((prev) => [...prev, {
           uuid: 'chat-assistant-' + Date.now(), type: 'turn',
           timestamp: new Date().toISOString(), model: streamingModel,
           text: accumulatedText ? [accumulatedText] : [],
@@ -5862,6 +5893,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         detachTsBySidRef.current[streamSid] = Math.max(prevTs, Date.now());
       }
       setStreamHistCutoff(null);
+      setReattachStream(false); // 与截断同帧复位:下一轮(正常发送)照常画自己的流式气泡
       // Background refresh of sidebar session list. `silent:true` means the
       // global loading flag is NOT toggled, so SessionDetail doesn't swap to
       // a loading screen and wipe out the user's scroll position.
@@ -6021,7 +6053,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       abortRef.current = null;
     }
     activeProcRef.current = null;
-    // reattach 截断口径与切走会话一致:切回/续播只藏 detach 之后落盘的内容。
+    // 记 detach 时刻(与切走会话一致)。截断口径已不再读它,见 detachTsBySidRef 声明处。
     if (selectedSession?.sessionId) detachTsBySidRef.current[selectedSession.sessionId] = Date.now();
     setBackgroundPid(String(pid)); // 立即出「后台工作中」横幅,不等下一轮 poll
   }, [selectedSession?.sessionId]);
@@ -6201,7 +6233,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // real sessionId mid-stream via the system/init event. We don't want to wipe
   // the user's just-sent message in that case.
   const prevSessionRef = useRef(selectedSession);
-  const detachTsBySidRef = useRef({}); // #4:{ [sessionId]: detach时刻 } —— reattach 截断口径
+  // #4:{ [sessionId]: detach时刻 }。原用途是 reattach 的历史截断口径,现已废弃(turn 粒度
+  // 时间戳让它恒失效,见 utils/reattach.js)——保留写入点,不再有读取点。
+  const detachTsBySidRef = useRef({});
   useEffect(() => {
     const prev = prevSessionRef.current;
     const curr = selectedSession;
@@ -7110,7 +7144,10 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                         onRollback={msg.type === 'user' ? handleRollback : undefined} />}
                 </div>
               ))}
-              {liveVisible && isStreaming && (streamingText || streamingThinking || streamingToolCalls.length > 0 || streamingBlocks.some((b) => (b?.content?.length > 0) || b?.toolCall)) && (
+              {/* reattach(切走再切回)不画流式气泡:同一段内容已经完整留在上面的历史卡里,
+                  再画一遍就是用户看到的"一条回复被拆成两个气泡 + 中间内容重复"。改由历史卡
+                  单一来源渲染(流式事件降级成历史刷新触发器,见 refreshHistIfDue)。 */}
+              {liveVisible && isStreaming && !reattachStream && (streamingText || streamingThinking || streamingToolCalls.length > 0 || streamingBlocks.some((b) => (b?.content?.length > 0) || b?.toolCall)) && (
                 <>
                   {/* 动效统一:气泡在前(头像 ✻ 呼吸),状态文字行随内容之后,
                       不再让独立的 LoadingMark 与完成后的静态头像形成两套视觉物 */}
@@ -7134,7 +7171,10 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                   之前误用 streamingBlocks.length===0,而 content_block_start 一开始就
                   push 空 block→占位符消失但内容又没来→空白无动画(回归)。改用 .some
                   判断真正有内容的 block,和上面的回复气泡严格互斥,不再跳位也不再空白。*/}
-              {liveVisible && isStreaming && !streamingText && !streamingThinking && streamingToolCalls.length === 0 && !streamingBlocks.some((b) => (b?.content?.length > 0) || b?.toolCall) && (
+              {/* reattach 同样不显示 Connecting:重放的首批 content_block_delta 找不到
+                  detach 前就被消费掉的 content_block_start,会被丢弃 → 占位一直挂着,
+                  就是用户看到的"切回先闪一段 Connecting"。 */}
+              {liveVisible && isStreaming && !reattachStream && !streamingText && !streamingThinking && streamingToolCalls.length === 0 && !streamingBlocks.some((b) => (b?.content?.length > 0) || b?.toolCall) && (
                 // 头像位统一用官方 Claude logo(ProviderAvatar,与完成后气泡头像同一视觉物),
                 // 加载时 thinking 呼吸、完成静止 —— 一致不割裂(用户明确"用左上角 logo 做头像")。
                 // 主题里选的加载动画作为状态行的小指示器(下面 Connecting 前),选择仍可见。
@@ -7158,6 +7198,16 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                     </div>
                   </div>
                 </div>
+              )}
+              {/* reattach 唯一的活体指示:气泡与 Connecting 都关掉了,只留这一行状态
+                  (在做什么 + 已用时长),否则历史卡两次刷新之间界面完全静止,像卡死。 */}
+              {liveVisible && isStreaming && reattachStream && (
+                <StreamingStatusLine
+                  thinking={streamingThinking}
+                  text={streamingText}
+                  toolCalls={streamingToolCalls}
+                  streamStart={streamStartRef.current}
+                />
               )}
               {/* 等待状态行(G):压缩中/API 重试/限流等待的明确说明。与 StreamingStatusLine
                   并存不互斥:那行说"正在产出什么",这行说"为什么在等"。缩进对齐正文列。 */}
