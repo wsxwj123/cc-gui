@@ -9,7 +9,12 @@
 //   ④ 非 reattach 永不触发这条刷新(不给正常流加任何额外请求)。
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { REATTACH_REFRESH_MS, resolveStreamHistCutoff, shouldRefreshHist } from '../../client/src/utils/reattach.js';
+import {
+  REATTACH_REFRESH_MS,
+  isCurrentStreamTurn,
+  resolveStreamHistCutoff,
+  shouldRefreshHist,
+} from '../../client/src/utils/reattach.js';
 
 // ── ① / ② 截断口径 ────────────────────────────────────────────
 {
@@ -38,23 +43,59 @@ import { REATTACH_REFRESH_MS, resolveStreamHistCutoff, shouldRefreshHist } from 
   assert.equal(shouldRefreshHist(o({ force: true })), false, 'force 也不能给正常发送开这条路径');
 }
 
-// ── ⑤ 源码守卫:finally 的复位必须被"无新回合"条件包住 ────────────
-// turn-1 的 finalize 落盘轮询含 await(~2.4s),期间 auto-reattach 可能已起 turn-2 并置好
-// 自己的标记;无条件复位会把 turn-2 的截断/reattach 标记倒打回去 → 双气泡在该窗口复现。
-// 判据用现成的 activeProcRef(finally 开头置 null,新回合起流时置 pid),与 newRoundStarted 同源。
+// ── ⑤ 回合 generation:新回合尚无 pid 时旧 finally 也不得清理 ─────
+{
+  let currentToken = 0;
+  const turn1Token = ++currentToken;
+  const state = {
+    messages: ['turn-1 reply'],
+    streamHistCutoff: { sinceTs: 100 },
+    reattachStream: true,
+  };
+
+  // turn-2 已同步进入起流、写入用户消息，但 checkpoint/provider 和 /api/chat 仍在等待，
+  // 所以 pid 还是 null。旧实现只看 pid 会误清；generation 必须立刻判 turn-1 已过期。
+  const turn2Token = ++currentToken;
+  state.messages.push('turn-2 user');
+  const turn2Pid = null;
+  assert.equal(turn2Pid, null, '场景前提:turn-2 尚未拿到 pid');
+  assert.equal(isCurrentStreamTurn(currentToken, turn1Token), false,
+    'turn-2 一进入起流就应使 turn-1 finalize 失效,不能等待 pid');
+  if (isCurrentStreamTurn(currentToken, turn1Token)) {
+    state.messages = [];
+    state.streamHistCutoff = null;
+    state.reattachStream = false;
+  }
+  assert.deepEqual(state, {
+    messages: ['turn-1 reply', 'turn-2 user'],
+    streamHistCutoff: { sinceTs: 100 },
+    reattachStream: true,
+  }, 'turn-1 不得清理 turn-2 的消息、截断或 reattach 状态');
+  assert.equal(isCurrentStreamTurn(currentToken, turn2Token), true,
+    'turn-2 自己仍拥有最终清理权');
+}
+
+// ── ⑥ 源码契约:token 必须早于起流状态/用户消息,finally 清理只认 token ──
 {
   const src = readFileSync(new URL('../../client/src/App.jsx', import.meta.url), 'utf8');
+  const tokenAt = src.indexOf('const streamTurnToken = ++streamTurnTokenRef.current;');
+  const streamingAt = src.indexOf('updateStreaming(true);', tokenAt);
+  const userMessageAt = src.indexOf("userMsgUuid = 'chat-user-'", tokenAt);
+  assert.ok(tokenAt >= 0 && tokenAt < streamingAt && tokenAt < userMessageAt,
+    '回合 token 必须在 updateStreaming(true) 和写用户消息前同步取得');
   assert.match(
     src,
-    /if \(activeProcRef\.current == null\) \{\s*setStreamHistCutoff\(null\);\s*setReattachStream\(false\);\s*\}/,
-    'finally 里的 setStreamHistCutoff(null) + setReattachStream(false) 必须包在 activeProcRef.current == null 内,否则会覆盖已开始的下一回合的标记',
+    /if \(isCurrentTurn\(\)\) \{\s*setStreamHistCutoff\(null\);\s*setReattachStream\(false\);\s*\}/,
+    'finally 的截断/reattach 复位必须只由当前 token 执行',
   );
+  assert.doesNotMatch(src, /const newRoundStarted = \(\) => activeProcRef\.current != null/,
+    'finally 不得再用 pid 判断新回合是否开始');
   assert.equal((src.match(/setReattachStream\(false\)/g) || []).length, 1,
-    'reattachStream 只应有 finally 那一处复位:多一处裸复位就绕开了新回合守卫');
+    'reattachStream 只应有 finally 那一处复位:多一处裸复位就绕开回合守卫');
   assert.equal((src.match(/setReattachStream\(/g) || []).length, 2,
     'setReattachStream 全仓只应有 2 个调用点(起流置位 + finally 复位)');
   assert.match(src, /if \(histRefreshInFlight\) return;/,
     'reattach 历史刷新必须有 in-flight 去重,慢盘时别把 /messages 请求叠罗汉');
 }
 
-console.log('✅ check-reattach-render: reattach 截断口径 + 刷新节流 + finally 复位守卫 全部通过');
+console.log('✅ check-reattach-render: reattach 截断口径 + 刷新节流 + generation 收尾守卫 全部通过');

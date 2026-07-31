@@ -18,6 +18,14 @@
 export const REATTACH_REFRESH_MS = 1500;
 
 /**
+ * 判断异步收尾是否仍属于当前回合。新回合在任何异步准备前同步递增 token，
+ * 因此不依赖 pid 是否已经由 /api/chat 返回。
+ */
+export function isCurrentStreamTurn(currentToken, turnToken) {
+  return currentToken === turnToken;
+}
+
+/**
  * 起流时的历史截断点。
  * @param {boolean} isReattach 本次是 reattach(接管已在跑的进程)还是正常发送
  * @param {number} now 起流时刻(正常发送用它当截断点)

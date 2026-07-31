@@ -69,7 +69,7 @@ import {
 import { buildFontEntries, groupFonts, detectFonts, platformCandidates, queryLocalFontFamilies } from './utils/systemFonts.js';
 import { copyText } from './utils/clipboard.js';
 import { escRoute, idleEscAction, escYieldCardId, isEditableTarget } from './utils/escAction.js';
-import { resolveStreamHistCutoff, shouldRefreshHist } from './utils/reattach.js';
+import { isCurrentStreamTurn, resolveStreamHistCutoff, shouldRefreshHist } from './utils/reattach.js';
 
 // ── Per-session shadow-git checkpoints ──────────────────────────
 // Session title with inline rename (click pencil → edit → Enter/blur saves,
@@ -3753,6 +3753,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   const setPendingEditRollback = useCallback((v) => { pendingEditRef.current = v; setPendingEditRollbackState(v); }, []);
   const handleRollbackRef = useRef(null);
   const activeProcRef = useRef(null);
+  // 每次真正进入发送/reattach 起流前同步递增。旧 finally 的异步轮询只认自己的 token，
+  // 不再等 /api/chat 返回 pid 才判断新回合是否已经开始。
+  const streamTurnTokenRef = useRef(0);
   const abortRef = useRef(null);
   // killedRef:本回合的 abort 是否【真杀了服务端进程】(POST /chat/:pid/stop)。用户主动停止/加速/
   // 编辑重发才置 true;后台化(backgroundify)与切会话(detach)只 abort 客户端流、进程继续跑,保持
@@ -4399,6 +4402,11 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       useStore.getState().enqueueMessage(sessionQueueKey, { text: prompt, queuedAt: Date.now(), hidden: !!hiddenUserMessage, opts });
       return;
     }
+
+    // 本次真正起流的 generation。必须在任何 await、updateStreaming(true) 和用户消息写入前
+    // 同步抢占；否则旧回合 finally 的落盘轮询会在本回合尚未拿到 pid 时误判为“没有新回合”。
+    const streamTurnToken = ++streamTurnTokenRef.current;
+    const isCurrentTurn = () => isCurrentStreamTurn(streamTurnTokenRef.current, streamTurnToken);
 
     const cwd = selectedSession?.projectPath || selectedProject?.path;
     // Note: previously this function had a blocking `confirm()` for git preflight.
@@ -5809,10 +5817,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       const finalizePh = (ownerSid ? streamOwnerPh : _fallbackSel?.projectHash) || '';
       if (finalizeSid && finalizePh) {
         // 同会话 stop→resend 守卫:本 finally 属于 turn-1,轮询期间(~2.4s)用户可能已对
-        // 同一会话发出 turn-2。activeProcRef 在本 finally 开头(4696)被置 null,只有新一轮
-        // 发送才会再置成新 pid → 非空即"同会话已开新回合"。此时绝不能 setChatMessages([]) /
-        // 过滤清掉 turn-2 刚 push 进 chatMessages 的在途本地消息(界面回复凭空消失的根因)。
-        const newRoundStarted = () => activeProcRef.current != null;
+        // 同一会话发出 turn-2。只认 handleSend 入口同步抢占的 generation；不能再看 pid，
+        // 因为 turn-2 会先起流、写用户消息，再等 checkpoint/provider 和 /api/chat 返回 pid。
         const tkey = (m) => {
           const t = Array.isArray(m.text) ? m.text.join('') : (m.text || '');
           return `${m.type}|${(t || '').slice(0, 80)}`;
@@ -5844,7 +5850,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           // otherwise we'd fetch the old session into the now-current tab and clear
           // the wrong session's local messages.
           if (getLocalSession()?.sessionId !== finalizeSid) break;
-          if (newRoundStarted()) break; // 同会话已开新回合:保护 turn-2 在途本地消息
+          if (!isCurrentTurn()) break; // 同会话已开新回合:保护 turn-2 在途本地消息
           // PEEK persisted WITHOUT committing to the store. A mid-round jsonl
           // (text+tool written, trailing text C not yet) must NEVER render — if we
           // committed it, the naive [...persisted, ...local] concat + coarse tkey
@@ -5859,7 +5865,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             // 才回退,尾部落盘检测形同虚设。兼容两种形态。
             if (r.ok) { const d = await r.json(); peeked = Array.isArray(d) ? d : (d?.messages || []); }
           } catch {}
-          if (getLocalSession()?.sessionId !== finalizeSid || newRoundStarted()) break;
+          if (getLocalSession()?.sessionId !== finalizeSid || !isCurrentTurn()) break;
           if (!producedReply) {
             // Empty/errored turn — no jsonl twin to wait for. Commit persisted and
             // drop matched NON-turn locals (the user prompt); keep the local ⚠️/❌
@@ -5867,7 +5873,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             try { await fetchMessagesForTab(finalizeSid, finalizePh, { silent: true }); } catch {}
             const known = new Set(getLocalMessages().map(tkey));
             setChatMessages((prev) => {
-              if (newRoundStarted()) return prev; // await 期间开了新回合 → 不清在途消息
+              if (!isCurrentTurn()) return prev; // await 期间开了新回合 → 不清在途消息
               return prev.length ? prev.filter((m) => m.type === 'turn' || !known.has(tkey(m))) : prev;
             });
             break;
@@ -5880,7 +5886,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             // 在回合结束时凭空消失;保留,切会话/刷新时自然清掉。
             try { await fetchMessagesForTab(finalizeSid, finalizePh, { silent: true }); } catch {}
             setChatMessages((prev) => {
-              if (newRoundStarted()) return prev; // await 期间开了新回合 → 不清在途消息
+              if (!isCurrentTurn()) return prev; // await 期间开了新回合 → 不清在途消息
               return prev.some((m) => m.type === 'btw') ? prev.filter((m) => m.type === 'btw') : [];
             });
             break;
@@ -5900,13 +5906,10 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         const prevTs = detachTsBySidRef.current[streamSid] || 0;
         detachTsBySidRef.current[streamSid] = Math.max(prevTs, Date.now());
       }
-      // 复位只归"最后一个回合"所有:上面的 finalize 轮询含 await(最长 ~2.4s),这期间
-      // auto-reattach 完全可能已经起了 turn-2 并置好它自己的截断/reattach 标记 —— 无条件
-      // 复位会把 turn-2 的标记倒打回去(截断被清 + reattachStream 回 false = 双气泡在这个
-      // 窗口原样复现)。判据复用上面 newRoundStarted 的同一口径:activeProcRef 在本 finally
-      // 开头已置 null,非空 = 同会话新回合已起(reattach 在起流第一行同步置 pid,正常发送在
-      // 拿到 pid 后置)→ 交给新回合自己的 finally 复位,不越权。
-      if (activeProcRef.current == null) {
+      // 复位只归当前 generation 所有:上面的 finalize 轮询含 await(最长 ~2.4s),这期间
+      // 新回合会在任何异步准备前同步抢占 token。旧 finally 即使看到新回合尚未拿到 pid，
+      // 也不能再清它的截断/reattach 标记。
+      if (isCurrentTurn()) {
         setStreamHistCutoff(null);
         setReattachStream(false);
       }
@@ -6024,8 +6027,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       // 只在 ref 仍是【本流认领的那个 key】时清:本 finally 可能迟到(被 abort 的流收尾时
       // 新流已经起来并认领了 ref),无脑清会把新流的归属抹掉 = 新流的异步回调读不到归属会话。
       // 本流认领过的 key 有两个形态:发起时的 sessionQueueKey、init 拿到真 id 后升级的 streamSid。
-      if (streamOwnerKeyRef.current === sessionQueueKey
-          || (streamSid && streamOwnerKeyRef.current === streamSid)) {
+      if (isCurrentTurn() && (streamOwnerKeyRef.current === sessionQueueKey
+          || (streamSid && streamOwnerKeyRef.current === streamSid))) {
         streamOwnerKeyRef.current = null;
       }
       } finally {
