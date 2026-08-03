@@ -43,6 +43,7 @@ export function SkillsPanel() {
   const [activeBranch, setActiveBranch] = useState('');   // #2 自定义仓库的指定分支('' = 默认分支)
   const [activeHost, setActiveHost] = useState('github'); // 自定义仓库所在 host:github | gitee
   const [sourcesMap, setSourcesMap] = useState({});       // #3 已装 skill 的来源 { id: {repo, branch} }
+  const [sourcesReadError, setSourcesReadError] = useState(false); // 来源记录文件读取失败(≠ 没有记录)
   const [updateInfo, setUpdateInfo] = useState({});       // 检查更新结果 { id: {local, remote, hasUpdate} }
   const [checkingUpd, setCheckingUpd] = useState(false);
 
@@ -58,8 +59,10 @@ export function SkillsPanel() {
     try { const d = await (await fetch('/api/skills')).json(); setLocal(d.skills || []); }
     catch { /* 忽略 */ }
     // #3 同时拉来源映射(哪些本机 skill 是从 GitHub 仓库导入的 → 显示"更新")
-    try { const s = await (await fetch('/api/skills/sources-map')).json(); setSourcesMap(s.sources || {}); }
-    catch { /* 忽略 */ }
+    try {
+      const s = await (await fetch('/api/skills/sources-map')).json();
+      setSourcesMap(s.sources || {}); setSourcesReadError(!!s.readError);
+    } catch { /* 忽略 */ }
     setLoadingLocal(false);
   }, []);
 
@@ -272,6 +275,7 @@ export function SkillsPanel() {
 
   const notInstalled = official.filter((s) => !s.installed);
   const installedIds = official.filter((s) => s.installed).map((s) => s.id); // 导入页多选/全选的可选集
+  const hasSources = Object.keys(sourcesMap).length > 0; // 有来源记录 = 能比对更新
   // CM-1:本机 skill 按关键词过滤(名称 + 描述,大小写不敏感)。
   // 检查更新后把"有新版本"的置顶(stable sort,组内保持原序),免得用户逐条翻找。
   const filteredLocal = useMemo(() => {
@@ -316,14 +320,17 @@ export function SkillsPanel() {
               placeholder="搜索技能（名称 / 描述）..."
               className="w-full bg-canvas border border-canvas-deep rounded-lg pl-8 pr-3 py-1.5 text-xs text-ink placeholder-ink-ghost focus:outline-none focus:border-accent/40 font-body" />
           </div>
-          {/* 手动检查更新:仅对有来源记录(从 GitHub/Gitee 导入)的技能有效,不自动轮询 */}
-          {Object.keys(sourcesMap).length > 0 && (
-            <button onClick={checkUpdates} disabled={checkingUpd || !!manageBusy}
-              className="flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-body rounded-md border border-canvas-deep text-ink-muted hover:text-ink hover:bg-canvas-deep transition-colors disabled:opacity-50">
-              {checkingUpd ? <Loader2 size={11} className="animate-spin" /> : <RefreshCw size={11} />}
-              检查更新(比对来源仓库的版本号)
-            </button>
-          )}
+          {/* 手动检查更新:仅对有来源记录(从 GitHub/Gitee 导入)的技能有效,不自动轮询。
+              无来源记录时按钮置灰而非隐藏 —— 隐藏会让用户以为本机根本没有"检查更新"这个功能,
+              title 说明为什么不可用(以及来源记录读取失败这一种故障)。 */}
+          <button onClick={checkUpdates} disabled={checkingUpd || !!manageBusy || !hasSources}
+            title={hasSources ? undefined : (sourcesReadError
+              ? '来源记录文件读取失败,当前无法比对更新。'
+              : '仅通过导入页安装的技能有来源记录,可比对更新。手动安装或同步的技能无来源记录。')}
+            className="flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-body rounded-md border border-canvas-deep text-ink-muted hover:text-ink hover:bg-canvas-deep transition-colors disabled:opacity-50">
+            {checkingUpd ? <Loader2 size={11} className="animate-spin" /> : <RefreshCw size={11} />}
+            检查更新(比对来源仓库的版本号)
+          </button>
           {notice && <div className="text-[11px] text-ink-soft bg-canvas-deep/60 border border-canvas-deep rounded px-2 py-1.5">{notice}</div>}
           {ms.selMode && <BatchBar count={ms.count} busy={ms.busy} onDelete={onBatchDelete} onExit={ms.exit} noun="个技能"
             allIds={filteredLocal.map((s) => s.id)} onSetAll={ms.setAll} selectedSet={ms.selected} />}

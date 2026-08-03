@@ -530,8 +530,15 @@ router.post('/skills/import', async (req, res) => {
 });
 
 // 已装 skill 的来源映射 { id: {repo, branch, root} } —— 前端据此对有来源的本机 skill 显示"更新"。
+// readError:文件存在但读不出/JSON 解析失败(权限、写坏截断)。此时 sources 为空与"从没导入过
+// 任何技能"在响应里长得一模一样,前端会把故障说成"没有来源记录",用户永远查不到真原因。
+// 文件不存在(ENOENT)是正常空,不算错。
 router.get('/skills/sources-map', async (req, res) => {
-  res.json({ sources: await readSources() });
+  let sources = {};
+  let readError = false;
+  try { sources = JSON.parse(await readFile(SOURCES_FILE, 'utf-8')) || {}; }
+  catch (e) { readError = e?.code !== 'ENOENT'; }
+  res.json({ sources, readError });
 });
 
 // ── 检查更新(手动触发,不自动轮询)────────────────────────────────
