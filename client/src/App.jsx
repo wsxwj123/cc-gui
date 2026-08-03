@@ -4852,6 +4852,12 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         const tries = nextAttachTry(attachFailRef.current, String(pid), ATTACH_MAX_TRIES);
         attachFailRef.current = tries;
         if (tries.exhausted) {
+          // 三振出局必须【重新上闩】,否则三振形同虚设:本函数开头刚把闩锁清空,而流式期间
+          // poll 恒写 backgroundPid=null(见它的 !streamingRef 判据),流一关 poll 就把 pid
+          // 翻回来 → auto-reattach effect 两条早退都不命中 → ≤1.5s 后照样自动重连,attach
+          // 2xx 还会把这条 sticky 横幅顺手清掉,用户只看见它闪一下。
+          // 上闩后唯一的复位入口是横幅上的「重试」按钮(对称清闩锁 + 计数 + bump nonce)。
+          reattachedPidRef.current = String(pid);
           // sticky 不自动过期;retryPid 让横幅上的「重试」按钮知道该清谁的计数。
           setProviderSwitchNotice({ text: '会话流连接失败。', sticky: true, retryPid: String(pid) });
           return;

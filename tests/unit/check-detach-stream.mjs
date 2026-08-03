@@ -141,6 +141,14 @@ assert.ok(/useEffect\(\(\) => detachStream[,)]/.test(src),
     '到上限要亮【可关闭且不自动消失】的提示');
   assert.ok(/retryPid: String\(pid\)/.test(seg),
     'sticky 提示要带 retryPid,横幅上的「重试」按钮据此清对应 pid 的计数');
+  // 判官 B1:三振分支必须【重新上闩】。本函数开头刚清空闩锁,而流式期间 poll 恒写
+  // backgroundPid=null,流一关 poll 就把 pid 翻回来 → auto-reattach effect 两条早退
+  // (!backgroundPid / 已 reattach)都不命中 → 照样自动重连,三振拦不住任何东西,
+  // 且 attach 2xx 会把刚挂上的 sticky 横幅清掉,用户只看见它闪一下。
+  const exI = seg.indexOf('if (tries.exhausted) {');
+  const exSeg = seg.slice(exI, seg.indexOf('return;', exI));
+  assert.ok(exI > 0 && /reattachedPidRef\.current = String\(pid\)/.test(exSeg),
+    '三振分支 return 前必须重新上闩(reattachedPidRef),否则 poll 会绕过三振继续自动重连');
 
   const j = src.indexOf('if (!streamRes.ok) {');
   assert.ok(j > i, 'handleSend 必须显式处理 attach 非 2xx');
@@ -212,12 +220,16 @@ assert.ok(/if \(!backgroundPid\) \{ if \(!streamingRef\.current\) reattachedPidR
         else scheduled += 1;
         return 'retry-scheduled';
       }
-      attachFailRef.current = null;
+      // ok=true 只代表 attach 拿到 2xx。此处【不】清计数 —— 与真实代码一致
+      // (App.jsx 是 `if (sawDoneEvent) attachFailRef.current = null;`):被中途掐断的流
+      // 每次都能 attach 成功,按 2xx 清账会让计数每轮归零,三振永远够不着 = 死代码。
       return 'streaming';
     } finally {
       inFlight = Math.max(0, inFlight - 1);
     }
   };
+  // 本流真的跑完(收到 done)才清账 —— 复位判据的唯一入口。
+  const finishStream = () => { attachFailRef.current = null; };
 
   assert.equal(runAttach(false, 'sdk-1'), 'retry-scheduled');
   assert.equal(inFlight, 0, '提前 return 也必须走 finally,否则 finalizeInFlightRef 永久压死排空');
@@ -232,9 +244,14 @@ assert.ok(/if \(!backgroundPid\) \{ if \(!streamingRef\.current\) reattachedPidR
   notice = null;
   assert.equal(nextAttachTry(attachFailRef.current, 'sdk-2', 3).count, 1, 'pid 变化必须重新计数');
   assert.equal(nextAttachTry(attachFailRef.current, 'sdk-2', 3).exhausted, false);
-  // 成功一次即清账
+  // attach 成功【不】清账:被掐断的流每次都 attach 成功,清了三振就永远够不着
+  attachFailRef.current = { pid: 'sdk-2', count: 2, exhausted: false };
   assert.equal(runAttach(true, 'sdk-2'), 'streaming');
-  assert.equal(attachFailRef.current, null);
+  assert.deepEqual(attachFailRef.current, { pid: 'sdk-2', count: 2, exhausted: false },
+    'attach 拿到 2xx 不得清账(真实代码只在收到 done 时清)');
+  // 跑完一整条流(done)才清账
+  finishStream();
+  assert.equal(attachFailRef.current, null, '收到 done = 通道确实好使,此时才清账');
 }
 
 // ── 8. 复刻:互踢链路修复后的稳态(后 attach 者获胜,不再来回踢)──────────
