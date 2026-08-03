@@ -9,6 +9,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import { nextAttachTry } from '../../client/src/utils/reattach.js';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const src = readFileSync(join(root, 'client/src/App.jsx'), 'utf8');
@@ -109,58 +110,141 @@ assert.ok(/useEffect\(\(\) => detachStream[,)]/.test(src),
   }
 }
 
-// ── 5. B3:attach 非 2xx 不再静默(本文件并入,与 B1 同一条故障链)────────
-// 修前:409 的响应体是 JSON,逐行解析一条 `data: ` 都匹配不到 → 循环空转一圈就结束、
-// 不抛错 → finally 把 isStreaming 关掉 → 只剩后台横幅,而 reattachedPidRef 已被赋值,
-// 同一 pid 永不重试 = 窗格永久没有追加通道。
+
+// ── 5. B3:attach 非 2xx 不再静默,且重试机制真能跑到上限 ─────────────
+// 修前①:409 的响应体是 JSON,逐行解析一条 `data: ` 都匹配不到 → 循环空转一圈就结束、
+// 不抛错 → 只剩后台横幅,而 reattachedPidRef 已被赋值,同一 pid 永不重试。
+// 修前②(审查揪出):失败计数没按 pid 记,还指望 backgroundPid 轮询驱动重试 —— 轮询每轮
+// setBackgroundPid(同一个 pid 字符串) 被 Object.is 短路,effect 根本不重跑,"三振出局"
+// 是永远够不着的死代码。
 {
   const i = src.indexOf('if (!streamRes.ok) {');
   assert.ok(i > 0, 'handleSend 必须显式处理 attach 非 2xx');
-  const seg = src.slice(i, i + 1400);
+  const seg = src.slice(i, i + 1800);
   assert.ok(/reattachedPidRef\.current = null/.test(seg),
     '非 2xx 必须清 reattachedPidRef,否则同一 pid 永不重试');
-  assert.ok(/attachFailRef\.current = \(attachFailRef\.current \|\| 0\) \+ 1/.test(seg), '必须累加失败次数');
+  assert.ok(/nextAttachTry\(attachFailRef\.current, String\(pid\), ATTACH_MAX_TRIES\)/.test(seg),
+    '失败计数必须按 pid 记(nextAttachTry),裸自增会把上一个进程的账算到下一个头上');
   assert.ok(/fetchMessagesForTab\(streamSid, streamOwnerPh/.test(seg),
     '必须回落重拉历史(用发起时闭包的 sid/ph,不得读 getLocalSession)');
-  assert.ok(/attachFailRef\.current >= 3/.test(seg), '必须有重试上限(3 次)后把错误亮给用户');
-  assert.ok(/attachFailRef\.current = 0;/.test(src.slice(i, i + 1600)), 'attach 成功必须归零计数');
+  assert.ok(/setTimeout\(\(\) => \{[\s\S]{0,400}?reattachPid: pid/.test(seg),
+    '未到上限必须自己排定时器重连 —— 靠 backgroundPid 轮询等于不重试');
+  assert.ok(/if \(streamingRef\.current \|\| reattachedPidRef\.current\) return;/.test(seg),
+    '重试前必须复查:已有流 / 已被别处接管就放弃');
+  assert.ok(/getLocalSession\(\)\?\.sessionId !== streamSid\) return;/.test(seg),
+    '重试前必须复查本 pane 没切走');
+  assert.ok(/tries\.exhausted/.test(seg) && /sticky: true/.test(seg),
+    '到上限要亮【可关闭且不自动消失】的提示');
+  assert.ok(/attachFailRef\.current = null;/.test(src.slice(i, i + 2200)), 'attach 成功必须清计数');
   // 提前 return 只能落在 try 内(要走 finally 完成 finalizeInFlightRef 的 -1)
   assert.ok(seg.indexOf('return;') < seg.indexOf('const reader'), '提前 return 必须在取 reader 之前');
 }
-// attach 预算随后台进程消失重置
-assert.ok(/if \(!backgroundPid\) \{ reattachedPidRef\.current = null; attachFailRef\.current = 0; return; \}/.test(src),
-  '后台进程消失时必须同时重置 attachFailRef,否则上个进程攒的失败次数会把下一个直接判死');
+// sticky 提示不许被 5s 定时器清掉
+assert.ok(/if \(!providerSwitchNotice \|\| providerSwitchNotice\.sticky\) return;/.test(src),
+  'sticky 提示必须豁免 5s 自动清除,否则用户还没看清就没了');
 
-// ── 6. 复刻:三次累加后抛错、成功归零、提前 return 仍走 finally ──────────
+// ── 6. 致命1:被接管的一方不得自动回连(否则两个视图无限互踢)───────────
+// 链条:窗格A 流式中 → poll 因 !streamingRef 恒写 backgroundPid=null → 清空分支把 A 的
+// reattach 守卫清掉 → 第二视图B attach 接管踢掉 A → A 的 reader 无 done 正常结束 → finally
+// 关流 → 下轮 poll null→P 翻转 → 守卫已空 → A 回连反踢 B → B 对称 → 每 1.5~3s 互踢无限循环。
 {
-  const attachFailRef = { current: 0 };
+  const i = src.indexOf('// 【被接管】判定');
+  assert.ok(i > 0, '必须有"被接管"判定');
+  const seg = src.slice(i, i + 1200);
+  assert.ok(/!sawDoneEvent && !controller\.signal\.aborted && !killedRef\.current && !backgroundedRef\.current/.test(seg),
+    '被接管判据 = 没收到 done + 不是本端 abort/停止/转后台;缺一条都会误判正常收尾或本端断开');
+  assert.ok(/reattachedPidRef\.current = String\(pid\)/.test(seg),
+    '被接管后必须抑制本 pid 自动回连(与转后台同一手法),否则互踢');
+  assert.ok(/if \(event\.type === 'done'\) \{ sawDoneEvent = true; break; \}/.test(src),
+    'done 事件必须记账,否则"没收到 done"判据恒真、正常收尾也会被当成被接管');
+}
+// 双保险:流式期间的 backgroundPid=null 不是"进程没了",不许当重置信号
+assert.ok(/if \(!backgroundPid\) \{ if \(!streamingRef\.current\) reattachedPidRef\.current = null; return; \}/.test(src),
+  '清空分支必须带 !streamingRef 门控 —— 流式期间 poll 恒写 null,清守卫会让被接管方立刻回连反踢');
+
+// ── 7. 复刻:pid 键计数 + 三振 + 提前 return 仍走 finally ────────────────
+{
+  const attachFailRef = { current: null };
   let inFlight = 0;
+  let notice = null;
+  let scheduled = 0;
   // 复刻 handleSend 的 try/finally 骨架:+1 在 try 第一行,-1 在 finally。
-  const runAttach = (ok, status = 409) => {
+  const runAttach = (ok, pid) => {
     inFlight += 1;
     try {
       if (!ok) {
-        attachFailRef.current = (attachFailRef.current || 0) + 1;
-        if (attachFailRef.current >= 3) throw new Error(`连接失败(${status})`);
-        return 'silent-retry';
+        const tries = nextAttachTry(attachFailRef.current, pid, 3);
+        attachFailRef.current = tries;
+        if (tries.exhausted) notice = { text: '会话流连接失败,请切走再切回重试。', sticky: true };
+        else scheduled += 1;
+        return 'retry-scheduled';
       }
-      attachFailRef.current = 0;
+      attachFailRef.current = null;
       return 'streaming';
     } finally {
       inFlight = Math.max(0, inFlight - 1);
     }
   };
 
-  assert.equal(runAttach(false), 'silent-retry');
+  assert.equal(runAttach(false, 'sdk-1'), 'retry-scheduled');
   assert.equal(inFlight, 0, '提前 return 也必须走 finally,否则 finalizeInFlightRef 永久压死排空');
-  assert.equal(runAttach(false), 'silent-retry');
-  assert.throws(() => runAttach(false), /连接失败/, '第三次必须把错误亮给用户,不再静默');
-  assert.equal(inFlight, 0, '抛错路径同样要走 finally');
-  assert.equal(attachFailRef.current, 3);
-  // 成功一次即归零 —— 偶发 409 不该在几分钟后攒够 3 次误报
-  attachFailRef.current = 2;
-  assert.equal(runAttach(true), 'streaming');
-  assert.equal(attachFailRef.current, 0);
+  assert.equal(scheduled, 1, '未到上限必须排重试');
+  runAttach(false, 'sdk-1');
+  assert.equal(notice, null, '第二次仍不打扰用户');
+  runAttach(false, 'sdk-1');
+  assert.ok(notice?.sticky, '第三次必须亮 sticky 提示');
+  assert.equal(scheduled, 2, '到上限后不再排重试,不能无限重连');
+  assert.equal(inFlight, 0);
+  // 换了 pid = 另一个进程,旧账清零(修前的裸自增会让新进程一上来就三振)
+  notice = null;
+  assert.equal(nextAttachTry(attachFailRef.current, 'sdk-2', 3).count, 1, 'pid 变化必须重新计数');
+  assert.equal(nextAttachTry(attachFailRef.current, 'sdk-2', 3).exhausted, false);
+  // 成功一次即清账
+  assert.equal(runAttach(true, 'sdk-2'), 'streaming');
+  assert.equal(attachFailRef.current, null);
 }
 
-console.log('✓ check-detach-stream: detachStream 抽取 + 卸载 detach + 稳定 paneKey + attach 非 2xx 不静默,守卫全过');
+// ── 8. 复刻:互踢链路修复后的稳态(后 attach 者获胜,不再来回踢)──────────
+{
+  // 两个视图看同一个会话,轮流跑"attach → 被接管 → 是否回连"。
+  const mkView = (name) => ({ name, streaming: false, guard: null });
+  const server = { holder: null };
+  const attach = (v, pid) => {
+    const loser = server.holder;
+    server.holder = v;
+    v.streaming = true;
+    v.guard = null;                     // 起流时清自己的守卫(handleSend 起点)
+    if (loser && loser !== v) {         // 老连接被 end:reader 无 done 结束
+      loser.streaming = false;
+      loser.guard = String(pid);        // 致命1 修复:被接管 → 抑制自动回连
+    }
+  };
+  // poll → auto-reattach effect(含双保险门控)
+  const poll = (v, pid) => {
+    const bg = v.streaming ? null : String(pid);
+    if (!bg) { if (!v.streaming) v.guard = null; return false; }
+    if (v.streaming) return false;
+    if (v.guard === bg) return false;   // 已被接管 → 不回连
+    attach(v, pid);
+    return true;
+  };
+  const A = mkView('A'), B = mkView('B');
+  attach(A, 'sdk-9');                   // A 先在跑
+  attach(B, 'sdk-9');                   // 用户在第二个视图打开同会话 → B 接管
+  assert.equal(server.holder, B, '后 attach 者获胜');
+  assert.equal(A.streaming, false);
+  // 之后无论轮询多少轮,都不能再有任何一方发起接管
+  let flips = 0;
+  for (let i = 0; i < 20; i++) { if (poll(A, 'sdk-9')) flips++; if (poll(B, 'sdk-9')) flips++; }
+  assert.equal(flips, 0, '稳态:双方都不再回连,不存在互踢');
+  assert.equal(server.holder, B, '持有者稳定在后 attach 的那一方');
+  // 败者切走再切回(切会话 effect 清 guard)→ 可以主动夺回,且夺回后同样只有一次翻转
+  A.guard = null;
+  assert.equal(poll(A, 'sdk-9'), true, '切走再切回后败者可恢复');
+  assert.equal(server.holder, A);
+  flips = 0;
+  for (let i = 0; i < 20; i++) { if (poll(A, 'sdk-9')) flips++; if (poll(B, 'sdk-9')) flips++; }
+  assert.equal(flips, 0, '换手之后依然是稳态,不会退化成互踢');
+}
+
+console.log('✓ check-detach-stream: detachStream + 卸载 detach + 稳定 paneKey + attach 非 2xx/pid 键三振 + 被接管不回连,守卫全过');

@@ -47,6 +47,12 @@ assert.equal(resizeScrollTop({ prevTop: 10, prevMax: 6496, scrollHeight: 7227, c
   assert.equal(v, 0);
   assert.ok(Number.isFinite(v));
 }
+// 上限快照过期(用户上翻后又流式追加了内容,没有滚动事件来刷新快照):
+// prevTop 已经超过 prevMax。拿过期基准算比例 = 100% 直接把人扔到底部,比不动还糟 → 只钳位。
+{
+  const v = resizeScrollTop({ prevTop: 5000, prevMax: 3000, scrollHeight: 9000, clientHeight: 200 });
+  assert.equal(v, 5000, '快照过期时必须原样保留位置,不得当成"已在底部"');
+}
 // 变化后不可滚动 → 0
 assert.equal(resizeScrollTop({ prevTop: 3248, prevMax: 6496, scrollHeight: 120, clientHeight: 400 }), 0);
 // 脏输入不得产出 NaN(NaN 写进 scrollTop 会被当 0 = 直接跳到顶)
@@ -59,22 +65,37 @@ for (const bad of [{}, { prevTop: NaN, prevMax: 100, scrollHeight: 500, clientHe
 {
   const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
   const src = readFileSync(join(root, 'client/src/App.jsx'), 'utf8');
-  const i = src.indexOf('const ro = new ResizeObserver(');
-  assert.ok(i > 0, 'SessionDetail 必须给滚动容器挂 ResizeObserver');
-  const seg = src.slice(i, i + 1600);
+  // 必须走 callback ref:SessionDetail 有 EmptyState / loading 两条早退分支,滚动容器会被
+  // 销毁重建;useEffect([]) 一次性捕获的节点在第一次切会话后就脱离文档,RO 观察空气,
+  // 整个修复从那一刻起失效(审查揪出的"重要2")。
+  assert.ok(/const setContainerRef = useCallback\(\(node\) => \{/.test(src),
+    '必须用 callback ref 挂 ResizeObserver,不能用 useEffect([]) 一次性捕获容器');
+  assert.ok(/<div ref=\{setContainerRef\} onScroll=\{handleScroll\}/.test(src),
+    '滚动容器必须绑 setContainerRef');
+  assert.ok(!/useEffect\(\(\) => \{\s*\n\s*const el = containerRef\.current;\s*\n\s*if \(!el \|\| typeof ResizeObserver/.test(src),
+    '旧的 useEffect([]) 版 ResizeObserver 必须已删除,不能两套并存');
+  const i = src.indexOf('const setContainerRef = useCallback(');
+  const seg = src.slice(i, i + 2200);
+  assert.ok(/scrollRoRef\.current\.disconnect\(\)/.test(seg), '重新挂载时必须先 disconnect 旧 observer');
+  assert.ok(/if \(!node \|\| typeof ResizeObserver === 'undefined'\) return;/.test(seg),
+    'node 为 null(卸载)时只 disconnect 不再观察');
   assert.ok(/if \(width !== lastWidth\)/.test(seg),
     '只在宽度变化时动作 —— 高度变化是输入框长高,归既有吸底 effect,插手会打架');
+  assert.ok(/CSS\.supports\?\.\('overflow-anchor', 'auto'\)/.test(seg) && /if \(!nativeAnchor\)/.test(seg),
+    '有原生 scroll anchoring 的引擎不得用等比近似值覆写它已经算准的 scrollTop');
+  assert.ok(/prevTop: node\.scrollTop/.test(seg),
+    'prevTop 取实时 scrollTop(宽度变化不改它,故实时值即变化前的值,且永不陈旧)');
+  assert.ok(/prevMax: scrollMaxRef\.current/.test(seg), '只有上限用快照');
   assert.ok(/stickToBottom: !userScrolledAwayRef\.current/.test(seg),
     '用户没在看历史时必须吸底,与吸底 effect 同一目标');
   assert.ok(/programmaticScrollRef\.current = true/.test(seg),
     '写 scrollTop 前必须打程序滚动标记,否则被 handleScroll 当成用户手势');
-  assert.ok(/Math\.abs\(next - el\.scrollTop\) >= 1/.test(seg),
+  assert.ok(/Math\.abs\(next - node\.scrollTop\) >= 1/.test(seg),
     '差值不足 1px 不写:否则标记被置真却等不到回弹事件,下一次真实滚动会被吞掉');
-  assert.ok(/ro\.disconnect\(\)/.test(seg), '必须在 cleanup 里 disconnect');
   // 基准快照要在 handleScroll 的程序滚动早退【之前】刷新,否则用过期基准算位置
   const hs = src.slice(src.indexOf('const handleScroll = () => {'), src.indexOf('// Restore the saved scroll position'));
-  assert.ok(hs.indexOf('scrollGeomRef.current = {') < hs.indexOf('if (programmaticScrollRef.current)'),
-    'scrollGeomRef 必须在程序滚动早退之前刷新');
+  assert.ok(hs.indexOf('scrollMaxRef.current =') < hs.indexOf('if (programmaticScrollRef.current)'),
+    'scrollMaxRef 必须在程序滚动早退之前刷新');
 }
 
 console.log('✓ check-scroll-clamp: 钳位 + 宽度变化等比还原 + effect 守卫全过');

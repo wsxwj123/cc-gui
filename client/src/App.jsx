@@ -69,7 +69,7 @@ import {
 import { buildFontEntries, groupFonts, detectFonts, platformCandidates, queryLocalFontFamilies } from './utils/systemFonts.js';
 import { copyText } from './utils/clipboard.js';
 import { escRoute, idleEscAction, escYieldCardId, isEditableTarget } from './utils/escAction.js';
-import { isCurrentStreamTurn, resolveStreamHistCutoff, shouldRefreshHist } from './utils/reattach.js';
+import { isCurrentStreamTurn, nextAttachTry, resolveStreamHistCutoff, shouldRefreshHist } from './utils/reattach.js';
 import { pruneByLiveSet } from './utils/levelPrune.js';
 import { classifyStopTargets } from './utils/stopTargets.js';
 import { resizeScrollTop } from './utils/scroll.js';
@@ -3722,9 +3722,10 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // 区分"程序触发的吸底写入"与"用户手势":吸底自己写 scrollTop 会触发 scroll 事件,
   // 不打这个标记就会被 handleScroll 误判成用户滚动。
   const programmaticScrollRef = useRef(false);
-  // 变化【前】的滚动几何(top / 可滚动上限)。容器宽度变化后消息重排、总高改变,靠它按
-  // 比例把位置搬回去(见下方 ResizeObserver)。在 handleScroll 里顺手刷新,零额外开销。
-  const scrollGeomRef = useRef({ top: 0, max: 0 });
+  // 变化【前】的可滚动上限(scrollHeight - clientHeight)。容器宽度变化后消息重排、总高
+  // 改变,靠它按比例把位置搬回去(见下方 setContainerRef 里的 ResizeObserver)。
+  // 在 handleScroll 里顺手刷新,零额外开销。
+  const scrollMaxRef = useRef(0);
   const [chatMessages, setChatMessages] = useState([]);
   // Mirror of chatMessages. handleSend is a useCallback whose deps don't include
   // chatMessages, so its closure lags — a /btw answer arriving via async
@@ -3796,10 +3797,12 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // 每次真正进入发送/reattach 起流前同步递增。旧 finally 的异步轮询只认自己的 token，
   // 不再等 /api/chat 返回 pid 才判断新回合是否已经开始。
   const streamTurnTokenRef = useRef(0);
-  // 连续 attach 失败次数(GET /chat/:pid/stream 非 2xx)。满 3 次才把错误亮给用户,
-  // 前两次静默交给 1.5s backgroundPid 轮询重试;attach 成功或后台进程消失即归零。
-  // 声明放这里(而非 reattachedPidRef 旁)只为作用域顺序好读:handleSend 定义在它之后。
-  const attachFailRef = useRef(0);
+  // attach 失败计数,{ pid, count }。**必须按 pid 记**:pid 变了就是另一个进程,旧账不算。
+  // 也不能靠 backgroundPid 轮询来重试 —— 它每轮 setBackgroundPid(同一个 pid 字符串)被
+  // Object.is 短路,auto-reattach 的 effect 根本不会重跑,计数永远到不了 3。重试由失败
+  // 分支自己排 setTimeout 驱动。声明放这里(而非 reattachedPidRef 旁)只为作用域顺序好读。
+  const attachFailRef = useRef(null);
+  const ATTACH_MAX_TRIES = 3;
   const abortRef = useRef(null);
   // 只做「断开本端 SSE」这一件事:abort 客户端 fetch → 服务端 req.on('close') → slot.attached=false,
   // 后续行落 earlyLines 等重连回放(detach-don't-abort,进程不死、jsonl 继续落盘)。
@@ -4127,7 +4130,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // { text, expires } — set by handleSend's pre-flight check, auto-cleared.
   const [providerSwitchNotice, setProviderSwitchNotice] = useState(null);
   useEffect(() => {
-    if (!providerSwitchNotice) return;
+    // sticky:需要用户看到并动手处理的提示(如"连不上会话流,切走再切回")不自动消失,
+    // 只能手动关。其余仍是 5s 自消的瞬时通知。
+    if (!providerSwitchNotice || providerSwitchNotice.sticky) return;
     const id = setTimeout(() => setProviderSwitchNotice(null), 5000);
     return () => clearTimeout(id);
   }, [providerSwitchNotice]);
@@ -4250,12 +4255,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
 
   const handleScroll = () => {
     if (!containerRef.current) return;
-    // 几何快照先于程序滚动的早退更新:宽度变化时要拿"变化前"的值做等比还原,
+    // 上限快照先于程序滚动的早退更新:宽度变化时要拿"变化前"的可滚动上限做等比还原,
     // 而程序吸底同样会改变它,漏记就会用过期基准算出错误位置。
-    {
-      const { scrollTop: t, scrollHeight: sh, clientHeight: ch } = containerRef.current;
-      scrollGeomRef.current = { top: t, max: Math.max(0, sh - ch) };
-    }
+    scrollMaxRef.current = Math.max(0, containerRef.current.scrollHeight - containerRef.current.clientHeight);
     // AZ3:程序触发的吸底写入会回弹一个 scroll 事件 → 跳过判定,别误判成用户滚动。
     if (programmaticScrollRef.current) { programmaticScrollRef.current = false; return; }
     const { scrollTop, scrollHeight, clientHeight } = containerRef.current;
@@ -4303,32 +4305,43 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // 整体位移几百像素,视口就可能正好停在两条消息之间的空白段,于是"看起来一片空白,
   // 上滑就恢复"。这里自己补一次锚定:只在【宽度】变化时按比例把位置搬过去。
   // 高度变化(输入框长高/任务清单展开)一律不管 —— 那是既有吸底 effect 的职责,插手会打架。
-  useEffect(() => {
-    const el = containerRef.current;
-    if (!el || typeof ResizeObserver === 'undefined') return;
-    let lastWidth = el.clientWidth;
+  //
+  // 必须走 callback ref 而不是 useEffect([]):SessionDetail 有 EmptyState / loading 两条
+  // 早退分支,滚动容器会被销毁重建,一次性捕获的 useEffect 会把 ResizeObserver 留在已经
+  // 脱离文档的旧节点上,从第一次切会话起整个修复失效。callback ref 每次挂载都重新接。
+  const scrollRoRef = useRef(null);
+  const setContainerRef = useCallback((node) => {
+    containerRef.current = node;
+    if (scrollRoRef.current) { scrollRoRef.current.disconnect(); scrollRoRef.current = null; }
+    if (!node || typeof ResizeObserver === 'undefined') return;
+    // 有原生 scroll anchoring 的引擎(Blink / WebView2)已经把 scrollTop 精确补偿好了,
+    // 用我们的等比近似值去覆写只会更差。只有不支持 overflow-anchor 的 WKWebView 需要出手。
+    const nativeAnchor = typeof CSS !== 'undefined' && !!CSS.supports?.('overflow-anchor', 'auto');
+    let lastWidth = node.clientWidth;
     const ro = new ResizeObserver(() => {
-      const width = el.clientWidth;
+      const width = node.clientWidth;
       if (width !== lastWidth) {
         lastWidth = width;
-        const prev = scrollGeomRef.current;
-        const next = resizeScrollTop({
-          prevTop: prev.top,
-          prevMax: prev.max,
-          scrollHeight: el.scrollHeight,
-          clientHeight: el.clientHeight,
-          // 用户没在看历史 → 直接吸底,与吸底 effect 同一目标,不会互相拉扯。
-          stickToBottom: !userScrolledAwayRef.current,
-        });
-        // 差值不足 1px 就不写:避免无谓的 scroll 事件,也避免 programmaticScrollRef
-        // 被置真却等不到回弹事件 → 下一次真实用户滚动被当成程序滚动吞掉。
-        if (Math.abs(next - el.scrollTop) >= 1) { programmaticScrollRef.current = true; el.scrollTop = next; }
+        if (!nativeAnchor) {
+          const next = resizeScrollTop({
+            // 宽度变化不会改 scrollTop,所以实时值就是"变化前"的值,而且永远不陈旧;
+            // 只有 prevMax 拿不到实时的,才用快照(其陈旧由 resizeScrollTop 自检)。
+            prevTop: node.scrollTop,
+            prevMax: scrollMaxRef.current,
+            scrollHeight: node.scrollHeight,
+            clientHeight: node.clientHeight,
+            // 用户没在看历史 → 直接吸底,与吸底 effect 同一目标,不会互相拉扯。
+            stickToBottom: !userScrolledAwayRef.current,
+          });
+          // 差值不足 1px 就不写:避免无谓的 scroll 事件,也避免 programmaticScrollRef
+          // 被置真却等不到回弹事件 → 下一次真实用户滚动被当成程序滚动吞掉。
+          if (Math.abs(next - node.scrollTop) >= 1) { programmaticScrollRef.current = true; node.scrollTop = next; }
+        }
       }
-      // 无论宽高变化都刷新基准:高度变化(输入框长高)同样改变可滚动上限。
-      scrollGeomRef.current = { top: el.scrollTop, max: Math.max(0, el.scrollHeight - el.clientHeight) };
+      scrollMaxRef.current = Math.max(0, node.scrollHeight - node.clientHeight);
     });
-    ro.observe(el);
-    return () => ro.disconnect();
+    ro.observe(node);
+    scrollRoRef.current = ro;
   }, []);
 
   // Message queue plumbing (#3) — when user types during streaming, the message
@@ -4801,14 +4814,24 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         // 非 2xx(409「已被占用」已由服务端改成新连接接管,这里是防御):响应体是 JSON 不是
         // SSE,下面的逐行解析一条 `data: ` 都匹配不到 → 循环空转一圈即结束、不抛错 → 本窗格
         // 从此没有任何追加通道,只剩一条承诺"自动追加"的后台横幅(用户实报"重开会话历史空")。
-        reattachedPidRef.current = null;   // 清 reattach 守卫,允许下一轮 1.5s 轮询重试
-        attachFailRef.current = (attachFailRef.current || 0) + 1;
+        reattachedPidRef.current = null;   // 清 reattach 守卫,允许重连
+        const tries = nextAttachTry(attachFailRef.current, String(pid), ATTACH_MAX_TRIES);
+        attachFailRef.current = tries;
         // 追加通道断了,至少把已落盘的历史补回来,别让窗格空着。
         if (streamSid && streamOwnerPh) { try { await fetchMessagesForTab(streamSid, streamOwnerPh, { silent: true }); } catch {} }
-        if (attachFailRef.current >= 3) throw new Error(`连接失败(${streamRes.status}):这个会话可能在别处被打开,或后端已重启。切走再切回可重试。`);
-        return; // 前两次静默重试,交给 backgroundPid 轮询(本 return 照样走 finally,±1 配对不破)
+        if (tries.exhausted) {
+          setProviderSwitchNotice({ text: '会话流连接失败,请切走再切回重试。', sticky: true });
+        } else {
+          // 显式排一次重连:poll 每轮写同一个 pid 会被 Object.is 短路,指望它重试等于不重试。
+          setTimeout(() => {
+            if (streamingRef.current || reattachedPidRef.current) return;   // 已有流 / 已被别处接管
+            if (streamSid && getLocalSession()?.sessionId !== streamSid) return; // 本 pane 已切走
+            handleSendRef.current?.(null, { reattachPid: pid });
+          }, 1500);
+        }
+        return; // 本 return 照样走 finally,finalizeInFlightRef 的 ±1 配对不破
       }
-      attachFailRef.current = 0;
+      attachFailRef.current = null;
       const reader = streamRes.body.getReader();
       const decoder = new TextDecoder();
       let buffer = '';
@@ -4862,6 +4885,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         if (recentLines.length > RECENT_MAX) recentLines.shift();
         return false;
       };
+      // 本流是否收到过 done 事件。没收到却正常结束 = 被别的视图接管(见循环之后)。
+      let sawDoneEvent = false;
 
       while (true) {
         const { done, value } = await reader.read();
@@ -5716,10 +5741,20 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
               if (['working', 'streaming', 'running', 'starting'].includes(_ag.status)) finalizeAgent(_st, tc.id, 'completed');
             }
           }
-          if (event.type === 'done') break;
+          if (event.type === 'done') { sawDoneEvent = true; break; }
         }
         // reattach:每读到一批 SSE 行就考虑刷一次历史(内部节流,非 reattach 直接返回)。
         refreshHistIfDue(false);
+      }
+      // 【被接管】判定:reader 正常结束、却从未收到 done 事件、也不是本端主动断开
+      // (停止/加速/转后台/切会话都会走 abort → catch,到不了这里)。这只可能是服务端的
+      // attach 接管协议把本连接 end 掉了 —— 同一会话被第二个视图打开(分屏同会话 / 桌面+
+      // 手机双端),后 attach 者获胜。
+      // 此时【绝不能】自动回连:本视图一回连就把对方踢掉,对方的流同样"无 done 结束"又回连
+      // 踢回来,两边每 1.5~3s 互踢一轮,无限循环。记下本 pid 抑制自动重连(与"转后台"同一
+      // 手法),败者切走再切回会清掉守卫,届时照常续播。
+      if (!sawDoneEvent && !controller.signal.aborted && !killedRef.current && !backgroundedRef.current) {
+        reattachedPidRef.current = String(pid);
       }
       // 回合结束(流关闭/done):立刻收尾刷一次,不等下一个节流窗,也不等 finally 的落盘轮询。
       refreshHistIfDue(true);
@@ -6175,8 +6210,11 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // banner — exactly what they complained about.
   const reattachedPidRef = useRef(null);
   useEffect(() => {
-    // 后台进程没了 = 新一轮 attach 预算重置,别让上个进程攒下的失败次数把下一个直接判死。
-    if (!backgroundPid) { reattachedPidRef.current = null; attachFailRef.current = 0; return; }
+    // backgroundPid 为空【不等于】后台进程没了:本地正在流时 poll 恒写 null(见它的
+    // `!streamingRef.current` 判据)。在流式期间清掉 reattach 守卫,会让"刚被别的视图接管"
+    // 的本视图立刻回连反踢对方,两边 1.5s 一轮互踢不停。只有真的没有本地流时才算重置信号。
+    // 失败计数已按 pid 记(nextAttachTry),pid 变了自然归零,这里不必也不该动它。
+    if (!backgroundPid) { if (!streamingRef.current) reattachedPidRef.current = null; return; }
     if (streamingRef.current) return;
     if (reattachedPidRef.current === backgroundPid) return; // already reattached
     reattachedPidRef.current = backgroundPid;
@@ -7246,7 +7284,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       {/* wrapper:让"回到底部"按钮锚定消息区底部(而非猜输入框高度的 bottom-24)——
           输入框高度可变(多行/任务清单/附件),固定偏移总有挡住输入框的时候 */}
       <div className="flex-1 min-h-0 relative">
-      <div ref={containerRef} onScroll={handleScroll} className="h-full overflow-y-auto relative z-10">
+      <div ref={setContainerRef} onScroll={handleScroll} className="h-full overflow-y-auto relative z-10">
           {visibleMessages.length === 0 && visibleChat.filter((m) => m.type !== 'btw').length === 0 ? (
             <div className="mobile-draft-empty flex items-center justify-center h-full text-ink-muted text-sm font-body">
               {selectedSession?.draft ? '开始你的第一条消息 ↓' : '该会话没有可显示的消息'}

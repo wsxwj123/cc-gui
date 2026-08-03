@@ -16,10 +16,15 @@ export function clampScrollTop({ scrollTop, scrollHeight, clientHeight, stickToB
 export function resizeScrollTop({ prevTop, prevMax, scrollHeight, clientHeight, stickToBottom = false }) {
   if (stickToBottom) return clampScrollTop({ scrollTop: 0, scrollHeight, clientHeight, stickToBottom: true });
   // 变化前不可滚动(内容比视口短)→ 没有比例可言,退回纯钳位。
-  if (!(prevMax > 0)) return clampScrollTop({ scrollTop: prevTop, scrollHeight, clientHeight });
+  // prevTop > prevMax = 上限快照已过期(用户上翻后又流式追加了内容,没有滚动事件来刷新它)。
+  // 拿过期基准算比例会算出 100% 直接把人扔到底部,那比不动还糟 —— 宁可不动。
+  // ponytail: 只做过期自检不做自动刷新;真要更准就得给内容盒也挂一个 ResizeObserver。
+  if (!(prevMax > 0) || !Number.isFinite(prevTop) || prevTop > prevMax) {
+    return clampScrollTop({ scrollTop: prevTop, scrollHeight, clientHeight });
+  }
   const max = Math.max(0, (scrollHeight || 0) - (clientHeight || 0));
   return clampScrollTop({
-    scrollTop: Math.round((Math.min(Math.max(0, prevTop || 0), prevMax) / prevMax) * max),
+    scrollTop: Math.round((Math.max(0, prevTop) / prevMax) * max),
     scrollHeight,
     clientHeight,
   });

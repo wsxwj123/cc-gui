@@ -51,3 +51,18 @@ export function shouldRefreshHist({ isReattach, now, lastAt, force = false, inte
   if (force) return true;          // 回合结束:立刻收尾刷一次,不等下一个节流窗
   return now - lastAt >= intervalMs;
 }
+
+/**
+ * attach 失败计数,**按 pid 记**。pid 变了就是另一个进程,旧账不算。
+ * 修前的计数不但没按 pid 记,还指望 backgroundPid 轮询驱动重试 —— 轮询每次
+ * setBackgroundPid(同一个 pid 字符串) 被 Object.is 短路,effect 根本不重跑,
+ * 计数永远到不了上限,"三振出局"是死代码。现在重试由失败分支自己排定时器驱动。
+ * @param {{pid:string, count:number}|null} prev 上一次的计数
+ * @param {string} pid 本次 attach 的进程 id
+ * @param {number} maxTries 上限,达到即 exhausted
+ * @returns {{pid:string, count:number, exhausted:boolean}}
+ */
+export function nextAttachTry(prev, pid, maxTries = 3) {
+  const count = (prev && prev.pid === pid ? prev.count : 0) + 1;
+  return { pid, count, exhausted: count >= maxTries };
+}
