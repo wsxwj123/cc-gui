@@ -1214,6 +1214,14 @@ router.post('/chat', async (req, res) => {
     // 必须含 user/project/local 才加载 settings.json(=第三方 provider 配置)与 CLAUDE.md。
     settingSources: ['user', 'project', 'local'],
     includePartialMessages: true,
+    // 子代理的 text/thinking 整条转发(带 parent_tool_use_id)。默认只发 tool_use/tool_result,
+    // 够做心跳计数但监控面板里的子代理没有正文,只能看到工具名。非逐 token:每条 assistant
+    // 消息一次(1-3KB),客户端按 parent_tool_use_id 分流进 activeAgents 后 continue,
+    // 不进主消息流、不打穿 MessageList 的 memo(见 App.jsx 的 assistant 快照分支)。
+    forwardSubagentText: true,
+    // 运行中的子代理每 ~30s 由其自身模型+缓存分叉出一句现在时进度描述,经 task_progress
+    // 的 summary 字段发回(跑不满 30s 的子代理不出摘要,属正常)。
+    agentProgressSummaries: true,
     permissionMode: sdkPermMode,
     canUseTool: makeCanUseTool(slot),
     // 返回 {continue:true} 的 no-op PreToolUse hook。注:曾以为它修 "Stream closed",经 opus

@@ -3342,6 +3342,30 @@ function GoalNotice({ goal }) {
   );
 }
 
+// 自动拒绝的判定来源(SDK decision_reason_type)。未列出的取值不显示来源,只显示原因文本。
+const DENIAL_SOURCE = {
+  classifier: '自动档分类器',
+  asyncAgent: '后台代理自动判定',
+  mode: '当前权限档',
+  rule: '权限规则',
+};
+
+// 被自动拒绝的工具调用(auto 档分类器 / deny 规则 / dontAsk 档 / 后台代理自动判定)不弹
+// 授权卡片,此前界面上只留下一条 is_error 的 tool_result,看不到拒绝原因。SDK 的
+// system/permission_denied 带人话原因与判定来源,单独渲染成一行系统提示。
+function DenialNotice({ denial }) {
+  const src = DENIAL_SOURCE[denial.reasonType] || '';
+  return (
+    <div className="max-w-[var(--content-max)] mx-auto px-4 py-1.5 flex items-start gap-2">
+      <Shield size={11} className="shrink-0 mt-0.5 text-ink-faint" />
+      <div className="min-w-0 text-[11px] font-body leading-snug">
+        <span className="text-ink-muted">已拒绝 {denial.toolName || '工具调用'}{src ? `（${src}）` : ''}</span>
+        {denial.message && <span className="text-ink-faint">：{denial.message}</span>}
+      </div>
+    </div>
+  );
+}
+
 // AZ11/AZ2 性能根治:历史消息列表抽成 memo 子组件。流式只更新 chatMessages/
 // streamingText(不动 messages),memo 命中 → 2万节点的历史列表在每个 token 不再
 // 重渲染;点功能按钮使 SessionDetail 重渲时同样跳过(根治"流式时/点按钮全局卡、
@@ -3370,6 +3394,8 @@ const MessageList = React.memo(function MessageList({ messages, onRetryTurn, onR
         ? <CompactDivider />
         : msg.type === 'goal'
         ? <GoalNotice goal={msg} />
+        : msg.type === 'denial'
+        ? <DenialNotice denial={msg} />
         : msg.type === 'turn'
         ? <TurnBubble turn={msg} onRetry={onRetryTurn} onRetryTool={getToolCb(msg)} onFork={onFork} retryActive={retryActiveUuid === msg.uuid} />
         : <MessageBubble message={{ ...msg, role: msg.type }}
@@ -5197,6 +5223,24 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
               setProviderSwitchNotice({ text: `上下文压缩失败:${String(event.compact_error).slice(0, 120)}` });
             }
           }
+          // 自动拒绝(M2):canUseTool 走 deny 短路时不弹卡片,SDK 另发一条
+          // { type:'system', subtype:'permission_denied', tool_name, tool_use_id, message,
+          //   decision_reason_type?, decision_reason?, agent_id? }。覆盖 auto 档分类器拒 /
+          //   deny 规则 / dontAsk 档拒 / 后台代理自动判定四条路径——它们此前在界面上只留下
+          //   一条 is_error 的 tool_result,拒绝原因完全不可见。按 tool_use_id 去重(同一次
+          //   调用只发一条),ownerKey 走流归属,和 goal 提示同一套门控。
+          if (event.type === 'system' && event.subtype === 'permission_denied') {
+            const dUuid = 'denied-' + (event.tool_use_id || event.uuid || Date.now());
+            setChatMessages((prev) => (prev.some((m) => m.uuid === dUuid) ? prev : [...prev, {
+              uuid: dUuid,
+              type: 'denial',
+              ownerKey: streamOwnerSid(),
+              timestamp: new Date().toISOString(),
+              toolName: event.tool_name || '',
+              reasonType: event.decision_reason_type || '',
+              message: event.message || event.decision_reason || '',
+            }]));
+          }
           // 等待状态(G):API 可重试错误(限流/5xx/超时),SDK 自动退避重试 ——
           // { type:'system', subtype:'api_retry', attempt, max_retries, retry_delay_ms,
           //   error_status: number|null }(null=无 HTTP 响应的连接错误)。
@@ -5263,11 +5307,17 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
               }
             }
           }
-          // workflow 进度:滚动更新描述(同 tool_use_id),不改状态。
+          // 进度:滚动更新描述(同 tool_use_id),不改状态。两个来源——
+          //   workflow 单元:description 随步骤变化;
+          //   普通子代理:开了 agentProgressSummaries 后每 ~30s 一条 summary(现在时的
+          //     "正在做什么"),优先于静态的派发 description。
+          // 原来这里带 `?.workflow` 守卫,子代理的 summary 全被丢掉,故放宽到任意已建条目
+          // (条目不存在时不建,避免凭空冒出卡片)。
           if (event.type === 'system' && event.subtype === 'task_progress' && event.tool_use_id) {
             const _st = useStore.getState();
-            if (_st.activeAgents[event.tool_use_id]?.workflow && event.description) {
-              _st.upsertAgent(event.tool_use_id, { description: event.description });
+            const desc = event.summary || event.description;
+            if (desc && _st.activeAgents[event.tool_use_id]) {
+              _st.upsertAgent(event.tool_use_id, { description: desc });
             }
           }
           if (event.type === 'system' && event.subtype === 'task_notification') {
@@ -7499,6 +7549,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                     ? <CompactDivider />
                     : msg.type === 'goal'
                     ? <GoalNotice goal={msg} />
+                    : msg.type === 'denial'
+                    ? <DenialNotice denial={msg} />
                     : msg.type === 'turn'
                     ? <>
                         <TurnBubble turn={msg} onRetry={handleRetryTurn} onRetryTool={(toolCall) => handleRetryTool(msg, toolCall)} retryActive={retryActiveUuid === msg.uuid} />
