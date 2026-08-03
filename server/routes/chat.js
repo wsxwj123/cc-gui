@@ -338,6 +338,17 @@ export function taskUpdatedTerminal(liveTasks, msg) {
   };
 }
 
+// 静默看门狗的"还有非 shell 任务在跑"判据。纯函数,单测同上。
+// 原判据是 `t.epoch === turnEpoch || 年龄 < freshMs`,epoch 支【没有年龄上限】——本回合
+// 派出的子代理只要丢一条终态通知,liveTasks 就永久留一条本 epoch 活条目 → 恒 true →
+// 5 分钟兜底永不触发 → done 永不发 → 输入框永久卡"停止"(用户实报 65 分钟)。两支合并
+// 成一支后本 epoch 条目不再无限期豁免;真活任务由 ① task_updated 非终态进度 ② level
+// 信号确认(reconcileLiveTasks 刷新 createdAt)两条路持续续命。
+export function hasFreshNonShellTask(liveTasks, now = Date.now(), freshMs = LIVE_TASK_FRESH_MS) {
+  return [...(liveTasks?.values() ?? [])]
+    .some((t) => t && t.kind !== 'shell' && now - (t.createdAt || 0) < freshMs);
+}
+
 export function getActiveChatProcesses() {
   const out = [];
   for (const [procId, slot] of activeProcesses) {
@@ -1154,12 +1165,12 @@ router.post('/chat', async (req, res) => {
   const armStall = () => {
     clearTimeout(stallTimer);
     stallTimer = setTimeout(() => {
-      // busyNonShell 只统计【本 epoch】或【年龄 < LIVE_TASK_FRESH_MS】的非 shell 任务:
-      // 上一回合终态通知丢失的陈旧条目不再让 5 分钟兜底永不触发;但跨回合仍活着的
-      // teammate 在窗内仍算忙,看门狗不会 abort 宿主进程连坐杀它(权衡见常量注释)。
+      // busyNonShell 只统计【年龄 < LIVE_TASK_FRESH_MS】的非 shell 任务(判据见
+      // hasFreshNonShellTask 注释):原来的 `epoch === turnEpoch` 一支没有年龄上限,
+      // 本回合子代理丢一条终态通知就把 5 分钟兜底永久解除。跨回合仍活着的 teammate
+      // 在窗内照样算忙,看门狗不会 abort 宿主进程连坐杀它(权衡见常量注释)。
       const now = Date.now();
-      const busyNonShell = [...(slot.liveTasks?.values() ?? [])].some((t) => t && t.kind !== 'shell'
-        && (t.epoch === (slot.turnEpoch | 0) || now - (t.createdAt || 0) < LIVE_TASK_FRESH_MS));
+      const busyNonShell = hasFreshNonShellTask(slot.liveTasks, now, LIVE_TASK_FRESH_MS);
       // 判据含 revived:无子代理回合的续跑(auto-compact 后续写等)经复活守卫翻回活跃,
       // turnSubagentSeen 仍是 false,不设 revived 分支这类续跑卡死永无看门狗兜底(判官 S2)。
       if (!slot.idle && (slot.turnSubagentSeen || slot.revived) && !busyNonShell) {
