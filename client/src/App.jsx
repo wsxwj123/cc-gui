@@ -3775,9 +3775,12 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // 否则会一直转(用户报告:AI 回复完成后仍显示"正在重做")。
   const [retryActiveUuid, setRetryActiveUuid] = useState(null);
   const [compacting, setCompacting] = useState(false); // /compact 进行中 → 显示压缩动画
-  // 输入预测(A):回合末 SDK 的 prompt_suggestion。{ sid, text } —— sid=产生建议的会话
-  // (streamSid/owner key),渲染时必须与当前查看会话匹配,防止切会话后建议串窗。
-  const [promptSuggestion, setPromptSuggestion] = useState(null);
+  // 输入预测(A):回合末 SDK 的 prompt_suggestion,按产生它的会话 key 存在 store
+  // (draft 期是 draft-key,拿到真 sid 后写的是真 sid,故两个 key 都取一次)。
+  // 原来存在本组件 useState:切走窗格/关分屏就随卸载丢失,回来永远看不到那条建议。
+  // 选择器只返回字符串(基元),不会因新引用触发 React #185。
+  const promptSuggestion = useStore((s) =>
+    s.promptSuggestionBySid[selectedSession?.sessionId] || s.promptSuggestionBySid[sessionQueueKey] || '');
   // 等待状态行(G):SDK system status(auto-compact 压缩中)/api_retry(限流、5xx 自动
   // 重试)/rate_limit_event 的即时文案。{ text } —— message_start(新内容开始流)与回合
   // 收尾时清空。与 StreamingStatusLine 并存:那个描述"正在产出什么",这个描述"为什么在等"。
@@ -4584,8 +4587,10 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     setStreamingBlocks([]);
     setLiveStatus(null);
     // 输入预测(A):新回合开始,上一回合的建议作废(reattach 是同一回合的续播,不清)。
-    if (!reattachPid) setPromptSuggestion(null);
-    // 本回合是否开启输入预测(A):随全局开关。server 在 result 后留 3s 等待窗收建议。
+    // 只清本会话的两个 key,别的会话的建议不受影响(store 是全局 map)。
+    if (!reattachPid) useStore.getState().clearPromptSuggestion(sessionQueueKey, selectedSession?.sessionId);
+    // 本回合是否开启输入预测(A):随全局开关。server 在 result 后留 4s 等待窗收建议,
+    // 窗外才到的走 WS 兜底(prompt-suggestion-bg)入位。
     const suggestOnClient = useStore.getState().promptSuggestions !== false;
 
     if (!reattachPid && !hiddenUserMessage) {
@@ -5256,7 +5261,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           // streamSid(发起时闭包/init 确定),渲染时与当前查看会话比对,不串窗。
           if (event.type === 'prompt_suggestion') {
             const sTxt = typeof event.suggestion === 'string' ? event.suggestion.trim() : '';
-            if (sTxt) setPromptSuggestion({ sid: streamSid || streamOwnerKeyRef.current, text: sTxt });
+            if (sTxt) useStore.getState().setPromptSuggestionFor(streamSid || streamOwnerKeyRef.current, sTxt);
             setLiveStatus(null);
           }
 
@@ -5785,7 +5790,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           if (event.type === 'result' && !isCompact && event.usage) {
             resultUsage = event.usage;
           }
-          // 输入预测(A):result 之后 server 留 3s 等待窗收 prompt_suggestion,期间流
+          // 输入预测(A):result 之后 server 留 4s 等待窗收 prompt_suggestion,期间流
           // 还没结束。如实标注在等什么(建议到达/超时收尾/中间 result 后新内容都会清)。
           if (event.type === 'result' && !event.is_error && suggestOnClient && !isCompact && !isClear) {
             setLiveStatus({ text: '正在预测下一步输入…' });
@@ -7535,11 +7540,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         onAccelerate={messageQueue.length > 0 ? handleAccelerate : undefined}
         // H 转后台:仅本地前台流式时提供(backgroundPid-only 态已在后台,无意义)。
         onBackground={isStreaming ? handleBackgroundify : undefined}
-        // A 输入预测:建议归属会话与当前查看会话匹配才显示,防切会话串窗;流式中不显示。
-        suggestion={(!isStreaming && !backgroundPid && promptSuggestion
-          && (promptSuggestion.sid === selectedSession?.sessionId || promptSuggestion.sid === sessionQueueKey))
-          ? promptSuggestion.text : null}
-        onDismissSuggestion={() => setPromptSuggestion(null)}
+        // A 输入预测:promptSuggestion 已按本会话的 key 取(见声明处),不会串窗;流式中不显示。
+        suggestion={(!isStreaming && !backgroundPid && promptSuggestion) ? promptSuggestion : null}
+        onDismissSuggestion={() => useStore.getState().clearPromptSuggestion(sessionQueueKey, selectedSession?.sessionId)}
         disabled={false}
         // Composer treats "background CLI still running" the same as local
         // streaming for UI purposes: send button becomes the small rounded-

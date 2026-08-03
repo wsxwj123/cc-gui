@@ -550,6 +550,12 @@ export const useStore = create((set, get) => ({
     try { return localStorage.getItem('cgui-prompt-suggestions') !== '0'; } catch { return true; }
   })(),
 
+  // 收到的建议本身:{ [sessionId]: '建议文本' }。放 store 而非 SessionDetail 的 useState
+  // ——建议在回合末到达,此时用户常已切走窗格/关掉分屏,组件 state 随卸载消失,切回来
+  // 建议就没了;而 SSE 与 WS 兜底两条送达路径也需要同一个落点。按 sessionId(draft 期是
+  // draft-key)存,渲染方按自己的 sid 取,不会跨窗格串。
+  promptSuggestionBySid: {},
+
   // 聊天模式(全局,localStorage):开启后消息流只显示 AI 最终文本 + 用户消息,把
   // thinking / 工具 / 子代理 / skill 折叠成一行可点开的标记,像微信聊天。默认关。
   chatMode: (() => {
@@ -1255,6 +1261,27 @@ export const useStore = create((set, get) => ({
   setPromptSuggestions: (on) => {
     set({ promptSuggestions: !!on });
     try { localStorage.setItem('cgui-prompt-suggestions', on ? '1' : '0'); } catch {}
+  },
+
+  // 建议入位。SSE(流内)与 WS 兜底(prompt-suggestion-bg)都调这里:同一条建议两条
+  // 路径都到时内容相等 → 直接返回,不重复 set(免多余渲染,也就无所谓谁先谁后)。
+  setPromptSuggestionFor: (sid, text) => {
+    const s = String(text || '').trim();
+    if (!sid || !s) return;
+    const cur = get().promptSuggestionBySid;
+    if (cur[sid] === s) return;
+    set({ promptSuggestionBySid: { ...cur, [sid]: s } });
+  },
+
+  // 清除(发新回合作废上一条 / 用户手动关掉)。一个会话在 draft 期与拿到真 id 后有两个
+  // key,故收变长参数一次清干净。
+  clearPromptSuggestion: (...sids) => {
+    const cur = get().promptSuggestionBySid;
+    const hit = sids.filter((k) => k && k in cur);
+    if (!hit.length) return;
+    const next = { ...cur };
+    for (const k of hit) delete next[k];
+    set({ promptSuggestionBySid: next });
   },
 
   setExcludeDynamicSystemPrompt: (v) => {

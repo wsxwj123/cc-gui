@@ -11,7 +11,7 @@ import { dropPendingForSession, requestPermission, resolvePendingForSession } fr
 import { buildAlwaysAllowUpdates, buildDirAuthUpdates } from '../utils/permission-rules.js';
 import { stripInheritedProviderEnv } from '../utils/provider-env.js';
 import { resolveClaude } from '../utils/claude-resolver.js';
-import { broadcast } from '../broadcast.js';
+import { broadcast, clients } from '../broadcast.js';
 
 // T2: 回合完成 WS 通知。前端切走会话时 SSE fetch 已被 abort(I4 渲染隔离的
 // 切会话 effect),完成信号唯一可靠的来源是服务端。每个进程只广播一次;三条
@@ -604,6 +604,27 @@ function deliverLine(slot, line) {
             task_id: ev.task_id || null,
             status: ev.status || 'completed',
           });
+        }
+      } catch {}
+    }
+    // 输入预测同款兜底(批K K2):建议在 result 之后由 SDK 另起一次模型调用生成,
+    // 慢于关流等待窗时(第三方中转/大上下文)SSE 早已 res.end() —— 只落 earlyLines
+    // 会被下条消息的 `s.earlyLines = []` 清掉,用户看到的就是"输入预测时有时无"。
+    // 走全局 WS 送达(前端按 sessionId 入位,与 SSE 路径同一存储、内容相等去重)。
+    if (line.includes('prompt_suggestion')) {
+      try {
+        const ev = JSON.parse(line);
+        if (ev?.type === 'prompt_suggestion' && ev.suggestion) {
+          broadcast({
+            type: 'prompt-suggestion-bg',
+            sessionId: slot.sessionId || null,
+            suggestion: ev.suggestion,
+          });
+          // WS 兜底也送不出去(没有任何在线客户端)= 这条建议真的丢了,如实记一行。
+          // 正常路径(SSE 在线或 WS 有客户端)不打日志。
+          if (![...clients].some((c) => c.readyState === 1)) {
+            console.warn(`[chat] prompt_suggestion 丢弃(无 SSE 监听且无 WS 客户端) session=${slot.sessionId || '-'}`);
+          }
         }
       } catch {}
     }
@@ -1465,8 +1486,12 @@ router.post('/chat', async (req, res) => {
           lastResultLine = line;
           slot.lastResultAt = Date.now(); // stop 端点优雅窗判据(见 /stop 注释)
           // 关流延迟:子代理回合沿用 4s 去抖;开了输入预测时 suggestion 在 result 之后
-          // 才到,必须给等待窗(3s;SDK 不发时到点正常收尾)。都没有则立即关,零延迟。
-          const delay = slot.turnSubagentSeen ? 4000 : (suggestOn ? 3000 : 0);
+          // 才到,必须给等待窗(SDK 不发时到点正常收尾)。都没有则立即关,零延迟。
+          // 建议窗原来是 3s,与子代理窗两套时限:建议由 SDK 在 result 后另起一次模型调用
+          // 生成,官方缓存命中约 1-2s,第三方中转/大上下文经常超 3s → 到点关流后建议才到,
+          // 无监听落 earlyLines 再被下条消息清掉 = 用户报的"时有时无"。统一 4s 消除两套时限
+          // (窗内没等到的仍有 deliverLine 的 WS 兜底)。
+          const delay = (slot.turnSubagentSeen || suggestOn) ? 4000 : 0;
           closeDelayMs = delay;
           if (delay) { cancelClose(); closeTimer = setTimeout(() => finalize(), delay); }
           else finalize();
@@ -1483,12 +1508,12 @@ router.post('/chat', async (req, res) => {
           // assistant 事件即触发)。原生 SDK 语义:result 后回合结束、后台任务继续跑、用户
           // 可随时发新消息开新回合,外壳不挡路。
           // rate_limit_event / system(status、api_retry)例外:纯信息事件、任何时刻都可能到,
-          // 不代表还有回合;尤其 suggestOn 的 3s 建议窗内 SDK 生成建议那次调用若限流/重试会发
+          // 不代表还有回合;尤其 suggestOn 的建议等待窗内 SDK 生成建议那次调用若限流/重试会发
           // system/api_retry,让它 cancel 会把 finalize 永久取消掉(无重武装)→ slot 挂死等不到
           // 下一条、前端"正在预测下一步输入…"卡死(fable 审计)。真续跑只会是 assistant/tool 事件。
           // 取消后尾部去抖重武装(非永久取消):经守卫过滤后进得来这里的只剩主回合顶层续跑
-          // 事件,续跑输出静默满原窗口即收摊(复用 result 分支算好的 closeDelayMs,不把仅
-          // suggestOn 的 3s 窗延长成 4s);closeDelayMs 为 0(无子代理无 suggest 本不挂窗)
+          // 事件,续跑输出静默满原窗口即收摊(复用 result 分支算好的 closeDelayMs,窗口值
+          // 由 result 分支单点决定);closeDelayMs 为 0(无子代理无 suggest 本不挂窗)
           // 防御性兜底 4s。teammate/任何未预见事件类型最多推迟收摊,不会再造成永久挂死。
           cancelClose();
           closeTimer = setTimeout(() => finalize(), closeDelayMs || 4000);
@@ -1726,7 +1751,7 @@ router.post('/chat/:pid/stop', async (req, res) => {
       slot.stopTimer = null;
       // 优雅收尾判据:pumpEnded(泵已收尾)或【stop 之后】到达过 result(interrupt 生效,
       // 回合已以 interrupted result 停住)。两个坑都躲开(fable 审计):① 不能只看
-      // pumpEnded——子代理回合 result 后有 4s 关流去抖(suggestion 3s),窗内恒 false,
+      // pumpEnded——子代理回合 / 开了输入预测的回合 result 后有 4s 关流去抖,窗内恒 false,
       // interrupt 成功也被硬杀;② 不能看"到过任何 result"——子代理回合的中间 result 在
       // stop 前早已出现,会误判已停而放跑还在继续的回合。
       // 第三个坑:后台化子代理时 interrupt 秒回的 result 会满足前半判据,但后台任务活在

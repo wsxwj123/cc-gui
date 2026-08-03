@@ -1713,7 +1713,7 @@ function PromptSuggestionsToggle() {
     <div className="bg-canvas-warm border border-canvas-deep rounded-lg px-3 py-2.5 flex items-center gap-3">
       <div className="min-w-0 flex-1">
         <div className="text-xs text-ink font-body font-medium flex items-center gap-1.5">输入预测<EffectBadge level="immediate" /></div>
-        <div className="text-[10.5px] text-ink-faint font-body">回合结束后由模型预测下一条可能的输入,在输入框上方显示为建议,点击即发送、也可填入编辑。预测蹭本回合的缓存生成,成本极低;首轮与规划模式不产生建议</div>
+        <div className="text-[10.5px] text-ink-faint font-body">回合结束后由模型预测下一条可能的输入,在输入框上方显示为建议,点击即发送、也可填入编辑。预测蹭本回合的缓存生成,成本极低;首轮、规划模式、以及本回合出现过 API 错误时不产生建议</div>
       </div>
       <button onClick={() => setOn(!on)}
         className={`shrink-0 w-9 h-5 rounded-full transition-colors relative ${on ? 'bg-accent' : 'bg-ink-faint/30'}`}

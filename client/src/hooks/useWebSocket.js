@@ -247,6 +247,12 @@ export function useWebSocket() {
               // 终态守卫防重;SSE 在线时通知走原 SSE 路径,server 不广播此类型)。
               window.dispatchEvent(new CustomEvent('cgui:task-notification-bg', { detail: data }));
               break;
+            case 'prompt-suggestion-bg':
+              // 输入预测兜底(批K K2):建议在 result 后由 SDK 另起一次调用生成,慢于关流
+              // 等待窗时 SSE 已关,服务端改走全局 WS 送来。落点与 SSE 路径同一个 store map,
+              // 按 sessionId 入位;两条路径都到时内容相等,setPromptSuggestionFor 自去重。
+              useStore.getState().setPromptSuggestionFor(data.sessionId, data.suggestion);
+              break;
             case 'background-tasks':
               // 批A:服务端按 CLI 的 background_tasks_changed(全量存活集快照)对完账后广播。
               // App.jsx 顶层监听:settled 的直接收尾,本会话不在集内的僵尸卡剪掉。纯 UI 收敛,
