@@ -71,6 +71,7 @@ import { copyText } from './utils/clipboard.js';
 import { escRoute, idleEscAction, escYieldCardId, isEditableTarget } from './utils/escAction.js';
 import { isCurrentStreamTurn, resolveStreamHistCutoff, shouldRefreshHist } from './utils/reattach.js';
 import { pruneByLiveSet } from './utils/levelPrune.js';
+import { classifyStopTargets } from './utils/stopTargets.js';
 
 // ── Per-session shadow-git checkpoints ──────────────────────────
 // Session title with inline rename (click pencil → edit → Enter/blur saves,
@@ -1920,8 +1921,24 @@ async function stopSessionBackground(sessionId) {
     // 含「子代理刚完、主 agent 续跑、前端尚未 reattach」的秒级窗口,此时选择性 /stop
     // 会把续跑的主回合正文一并 interrupt 掉,与按钮文案「只停后台」不符。跳过即可,
     // reattach 后按钮随 working 态消失,用户要停主回合有专属停止键。
-    const procs = (d.agents || []).filter((a) => a.kind === 'chat-process' && a.sessionId === sessionId && a.stoppable === true && a.status === 'idle');
-    if (!procs.length) return;
+    const { procs, busy } = classifyStopTargets(d.agents, sessionId);
+    // 原来这里是静默 return —— 用户点了「停止后台 N」什么都不发生,而按钮上的 N 读的是
+    // 前端 store(与服务端真值脱钩),僵尸卡让它显示"停止后台 3"而服务端一个进程都没有。
+    // 两种落空分开处理:
+    if (!procs.length) {
+      if (busy) {
+        // 主回合在跑(含"子代理刚完、主 agent 续跑、前端尚未 reattach"的秒级窗口)。
+        // 此时选择性 /stop 会把续跑的正文一并 interrupt,与按钮文案不符,故仍不发请求,
+        // 但要说清楚为什么没反应。【不清卡片】:进程活着,卡片可能是真的。
+        confirmDialog('主回合仍在进行中,后台子代理无法单独停止。请用输入框旁的停止键停止当前回合。', { confirmText: '知道了' });
+        return;
+      }
+      // 服务端已无本会话的任何可停对象 = 这些卡片是残留状态,顺手清掉(它们再也等不到
+      // 任何终态事件了)。下一次 task 事件到达会重新建条目,不会把真在跑的任务盖掉。
+      finalizeSessionAgents(sessionId);
+      confirmDialog('服务端已没有本会话的后台进程,这些卡片是残留状态,已为你清理。', { confirmText: '知道了' });
+      return;
+    }
     await Promise.allSettled(procs.map((a) => fetch(`/api/chat/${a.pid}/stop`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ allTasks: true }),
     })));
