@@ -195,6 +195,7 @@ router.get('/agents/active', async (req, res) => {
         : (p.startedAt ? Date.now() - p.startedAt : 0),
       status,
       stoppable: !finished,
+      cronHold: !!p.cronHold, // 建过 cron(/loop),进程被豁免于闲置回收(chat.js CRON_HOLD_MS)
     });
     seenPids.add(Number(p.pid));
     if (p.sessionId) seenSessionIds.add(p.sessionId);

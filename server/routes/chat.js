@@ -429,6 +429,8 @@ export function getActiveChatProcesses() {
       exitCode: slot.exitCode,
       attached: slot.attached,
       idle: !!slot.idle, // #26:回合间保活(非"正在跑"),agents/active 据此报 status idle
+      // F2:本会话建过 cron,进程正被豁免于 15 分钟闲置回收 —— 让"这个进程为什么不退"可见。
+      cronHold: slot.cronHoldUntil > Date.now(),
     });
   }
   return out;
@@ -474,6 +476,61 @@ const KEEPALIVE_IDLE_MS = 15 * 60 * 1000;
 // 本回合、idle 回收可能杀掉其宿主进程(丢完成通知)。可接受的折中:通知丢失的
 // 陈旧条目会让 5 分钟兜底永不触发/常驻进程永不回收,危害更大。
 const LIVE_TASK_FRESH_MS = 30 * 60 * 1000;
+
+// ── F2:cron(/loop)保活 ──────────────────────────────────────────────────────
+// cron 调度器活在 CLI 子进程内部(print.ts 的 createCronScheduler,1s tick),CronCreate
+// 默认 session-only 不落盘 —— 进程一关,内存里的 job 连调度器一起消失。上面的 15 分钟
+// idleReclaim 正是杀它的那把刀:实测全机 21+ 次定时任务、横跨 10 天、0 次触发记录。
+// 上限 2 小时的理由:① CronCreate 自己 7 天过期,照它挂 7 天 = 进程泄漏;② 一个 idle CLI
+// 进程连带它的全部 MCP server 常驻数百 MB,1s tick 也有 CPU 开销;③ 真实 /loop 场景(盯
+// 构建、轮询 PR)是分钟到小时级,2h 足够覆盖,又比 15min 的常规回收高一个数量级、语义上
+// 明确是"刻意豁免"而非"顺手延长"。到点后回落常规回收 —— /loop 的命令描述已写明"进程被
+// 回收后停止",不算静默失约。
+const CRON_HOLD_MS = 2 * 60 * 60 * 1000;
+// 同时最多 3 个会话享受 cron 保活,防止用户在 10 个会话各建一个 cron 把 10 个 CLI 进程钉住。
+// 超限时让【保活到期最早】的那些不再豁免(PLAN 原文写"先到先得",改成保新的:老 slot 本就
+// 快到期、白占名额,而用户刚建的循环最该活着;也避免"数量一超全体不豁免"的悬崖)。
+const CRON_HOLD_MAX_SLOTS = 3;
+
+// CronCreate/CronDelete 信号 → slot.cronHoldUntil。就地改 slot,纯函数(时基/窗长可注入),
+// tests/unit/check-cron-hold.mjs 真 import。形态取自真实会话 jsonl(95a66306,CLI 2.1.220,
+// `/loop 1m 告诉我后台任务的进度`):
+//   assistant: content[{type:'tool_use', id:'call_…', name:'CronCreate', input:{cron,prompt,recurring,durable}}]
+//   user:      content[{tool_use_id:'call_…', type:'tool_result',
+//                       content:'Scheduled recurring job 3fa91055 (Every minute). Session-only …'}]
+// 成功的 tool_result 【不带】 is_error 字段(失败/拒绝才带 is_error:true),故判 !b.is_error。
+// CronDelete 宽松处理:tool_result 里看不出删的是哪个 job、也不知道还剩没剩,删过就清零豁免,
+// 下一次 CronCreate 成功会重新挂上 —— 宁可少保活,不做进程泄漏。
+export function applyCronSignals(slot, m, now = Date.now(), holdMs = CRON_HOLD_MS) {
+  const content = m?.message?.content;
+  if (!slot || !Array.isArray(content)) return;
+  if (m.type === 'assistant') {
+    for (const b of content) {
+      if (b?.type !== 'tool_use') continue;
+      if (b.name === 'CronCreate') slot.cronToolIds?.add(b.id);
+      else if (b.name === 'CronDelete') slot.cronPendingDelete = true;
+    }
+    return;
+  }
+  if (m.type !== 'user') return;
+  for (const b of content) {
+    if (b?.type !== 'tool_result' || !slot.cronToolIds?.has(b.tool_use_id)) continue;
+    slot.cronToolIds.delete(b.tool_use_id);
+    if (!b.is_error) slot.cronHoldUntil = now + holdMs;
+  }
+  if (slot.cronPendingDelete) { slot.cronPendingDelete = false; slot.cronHoldUntil = 0; }
+}
+
+// idleReclaim 的 cron 豁免判据。纯函数,单测同上。
+// 上限用"比我晚到期的 slot 有几个"表达:≥ maxSlots 说明我在最旧的那批之外 → 不豁免。
+export function shouldHoldForCron(slot, allSlots, now = Date.now(), maxSlots = CRON_HOLD_MAX_SLOTS) {
+  if (!(slot?.cronHoldUntil > now)) return false;
+  let newer = 0;
+  for (const s of (allSlots || [])) {
+    if (s !== slot && s?.cronHoldUntil > slot.cronHoldUntil) newer++;
+  }
+  return newer < maxSlots;
+}
 
 // background_tasks_changed(level 信号)对账的年龄豁免窗。A0 真机实测:该信号恒在对应
 // 边沿事件【之前】不到 1ms 发出(起任务时先于 task_started、结束时先于 task_updated),
@@ -1074,6 +1131,11 @@ router.post('/chat', async (req, res) => {
     // 这就是"进程重启重置空集"的落点。
     lastLevelAt: 0,
     lastLevelSig: null,
+    // F2 cron 保活:在飞的 CronCreate tool_use id(等 tool_result 判成败)、
+    // 保活截止时刻(0=无)、本回合见过 CronDelete 待其 tool_result 落地。见 applyCronSignals。
+    cronToolIds: new Set(),
+    cronHoldUntil: 0,
+    cronPendingDelete: false,
   };
   activeProcesses.set(procId, slot);
   slot.nulWatcher = startWinNulWatcher(workingDir);
@@ -1219,6 +1281,12 @@ router.post('/chat', async (req, res) => {
           slot.idleTimer = setTimeout(idleReclaim, KEEPALIVE_IDLE_MS);
           return;
         }
+        // F2 cron 豁免:本会话建过 cron 且保活未到期 → 再等一轮(上限 2h / 最多 3 个 slot,
+        // 见 CRON_HOLD_MS)。回收这个进程 = 连带杀死进程内的 cron 调度器,循环静默停。
+        if (shouldHoldForCron(slot, activeProcesses.values(), now, CRON_HOLD_MAX_SLOTS)) {
+          slot.idleTimer = setTimeout(idleReclaim, KEEPALIVE_IDLE_MS);
+          return;
+        }
         slot.closing = true;
         try { input.close(); } catch {}
       };
@@ -1299,6 +1367,9 @@ router.post('/chat', async (req, res) => {
             if (b?.type === 'tool_use' && b.name === 'Bash' && b.input?.run_in_background === true) slot.bgBashToolIds.add(b.id);
           }
         }
+        // F2:CronCreate 成功 = 本会话有内存 cron(/loop 的正解),调度器就跑在这个 CLI 进程里,
+        // 15 分钟 idle 回收 = 循环静默死。只改 slot 上的簿记,不碰任何时序。
+        applyCronSignals(slot, m, Date.now(), CRON_HOLD_MS);
         // 停止链路 #1:薄记在飞任务(task_started 加,终态事件删)。task_notification 权威终态,
         // task_updated 的 completed/failed/killed 亦算结束。SDK 事件都带 task_id(sdk.d.ts 4078-4159)。
         if (m.type === 'system' && m.task_id) {

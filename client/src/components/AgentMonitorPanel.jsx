@@ -275,6 +275,11 @@ function RemoteAgentCard({ agent, stoppingPid, onStop }) {
         {agent.startedAt && <span className="flex items-center gap-1"><Clock size={9} />{fmtElapsed(agent.elapsedMs ?? (Date.now() - agent.startedAt))}</span>}
         {agent.model && <span className="truncate">{agent.model}</span>}
         {agent.cwd && <span className="truncate opacity-70" title={agent.cwd}>{agent.cwd.split(/[/\\]+/).pop()}</span>}
+        {agent.cronHold && (
+          <span className="font-body shrink-0" title="本会话创建过定时任务（/loop），进程暂缓闲置回收，最长 2 小时">
+            保持存活（定时任务）
+          </span>
+        )}
       </div>
       {agent.pid && agent.stoppable !== false && (
         <div className="mt-2 flex justify-end">
