@@ -378,6 +378,41 @@ export function hasCurrentEpochNonShellTask(liveTasks, epoch) {
     .some((t) => t && t.kind !== 'shell' && (t.epoch | 0) === (epoch | 0));
 }
 
+// ── F1:CLI init 事件上报的权威命令/技能表 ─────────────────────────────────────
+// /api/slash-commands 靠扫三处磁盘枚举,而 CLI 的内置 skill(/loop 等)打包在二进制里、
+// 磁盘上没有对应目录 → 用户敲 "/" 永远看不到它们(#11 的全部根因)。init 事件的
+// slash_commands + skills 是唯一权威来源(CLI 侧 = commands.filter(userInvocable !== false))。
+// 按 cwd 记(项目级命令因 cwd 而异),上限 20 条防无界增长(Map 迭代序=插入序,满了删最早的)。
+// 纯内存态:GUI server 重启后为空,合并逻辑必须容忍 null(回落纯磁盘扫描的现状)。
+const initCommandCache = new Map(); // cwd → { commands: string[], skills: string[], at: number }
+const INIT_CACHE_MAX = 20;
+
+// cwd 未命中时回落"最近一次任意 cwd"的表。风险与缓解:回落可能把 A 项目的项目级命令带进
+// B 项目 —— 但项目级命令本就由磁盘扫描按 cwd 精确提供且【先于】本合并插入(同名跳过),
+// 回落实际只影响全局内置/插件类,这类跨项目一致。
+export function getInitCommands(cwd) {
+  return initCommandCache.get(cwd)
+    || [...initCommandCache.values()].sort((a, b) => b.at - a.at)[0]
+    || null;
+}
+
+// 把 init 表并进磁盘扫描结果:只补缺失的名字,已有条目原样保留(BUILTIN_COMMANDS 由此
+// 退化成"描述元数据表",不再是可用性判据)。就地改 commands 并返回它。
+// 纯函数,tests/unit/check-slash-init-merge.mjs 真 import。
+export function mergeInitCommands(commands, init) {
+  if (!init) return commands;
+  const names = new Set(commands.map((c) => c.name));
+  for (const raw of [...(init.commands || []), ...(init.skills || [])]) {
+    if (typeof raw !== 'string' || !raw.trim()) continue;
+    const name = raw.startsWith('/') ? raw : `/${raw}`;
+    if (names.has(name)) continue;
+    names.add(name);
+    // init 出现 = CLI 真有这条命令,故一律不过 SUBSCRIPTION_ONLY_NAMES 门。
+    commands.push({ name, desc: 'CLI 上报的可用命令（无本地描述）', type: 'builtin', requiresAnthropic: false });
+  }
+  return commands;
+}
+
 export function getActiveChatProcesses() {
   const out = [];
   for (const [procId, slot] of activeProcesses) {
@@ -1246,6 +1281,16 @@ router.post('/chat', async (req, res) => {
         const line = JSON.stringify(m);
         if (!slot.sessionId && m.type === 'system' && m.subtype === 'init' && m.session_id) {
           slot.sessionId = m.session_id;
+        }
+        // F1:init 带的权威命令/技能表喂给 /api/slash-commands(含打包进二进制、磁盘扫不到的
+        // 内置 skill)。与上一个 if 分开写:那条有 !slot.sessionId 前置,复用回合(resume)时
+        // 恒 false,而命令表每回合都值得刷新。
+        if (m.type === 'system' && m.subtype === 'init'
+            && (Array.isArray(m.slash_commands) || Array.isArray(m.skills))) {
+          if (!initCommandCache.has(slot.cwd) && initCommandCache.size >= INIT_CACHE_MAX) {
+            initCommandCache.delete(initCommandCache.keys().next().value); // 满了删最早插入的
+          }
+          initCommandCache.set(slot.cwd, { commands: m.slash_commands || [], skills: m.skills || [], at: Date.now() });
         }
         if (m.type === 'assistant' && Array.isArray(m.message?.content)) {
           for (const b of m.message.content) {

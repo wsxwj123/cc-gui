@@ -8,7 +8,7 @@ import { fileURLToPath } from 'url';
 import { existsSync, readFileSync, mkdirSync, watch as fsWatch } from 'fs';
 import { createHash } from 'crypto';
 import sessionRoutes from './routes/sessions.js';
-import chatRoutes from './routes/chat.js';
+import chatRoutes, { getInitCommands, mergeInitCommands } from './routes/chat.js';
 import processRoutes from './routes/processes.js';
 import settingsRoutes, { restoreOpenAIProvider, restoreAnthropicProvider } from './routes/settings.js';
 import usageRoutes from './routes/usage.js';
@@ -519,6 +519,10 @@ const BUILTIN_COMMANDS = [
   // CLI 的 /btw 是交互式专属(stream-json 里发送被拒),GUI 前端拦截后走 /api/chat/btw
   // (headless fork,不污染主会话),故对用户可用,不标 interactiveOnly。
   { name: '/btw',             desc: '旁问一个问题（参数：<question>），不打断当前工作、不写入会话历史', type: 'builtin' },
+  // CLI 内置 skill，打包在二进制里、磁盘扫描枚举不到（init 表也会补一条，此处是 server
+  // 重启后缓存为空时的兜底）。描述里必须写清存活边界：调度器跑在本回合的 CLI 子进程内，
+  // 进程被回收或 GUI 关闭即停（server/routes/chat.js 的 cron 保活豁免只把回收推迟到 2 小时）。
+  { name: '/loop',            desc: '按间隔重复执行一个提示或斜杠命令（如 /loop 5m /foo）；省略间隔则由模型自行掌握节奏。循环由本地 CLI 进程驱动，关闭 GUI 或进程被回收后停止', type: 'builtin' },
 
   // -p 模式 CLI 拒绝（交互式专属）
   { name: '/branch',         desc: '从当前对话分叉出一条新线，在不影响原会话的前提下试另一种方向（fork）', type: 'builtin', interactiveOnly: true, note: 'GUI 已原生实现：每条消息/回复的「分叉」按钮从该处精确分叉（只保留到此的上下文），在最后一条分叉等价于整会话' },
@@ -544,8 +548,10 @@ const BUILTIN_COMMANDS = [
 ];
 
 // 第三方端点不可用的 skill/plugin 名称（按 slash 名匹配）
+// 'loop' 已移除：/loop 靠 CronCreate（纯本地工具、调度器在 CLI 进程内），与订阅无关；
+// 它此前只是永远走不到的死代码（磁盘上没有同名 skill 目录），激活成真过滤反而会误挡。
 const SUBSCRIPTION_ONLY_NAMES = new Set([
-  'loop', 'schedule', 'remote-trigger',
+  'schedule', 'remote-trigger',
 ]);
 
 // Extract description from SKILL.md frontmatter
@@ -684,6 +690,11 @@ app.get('/api/slash-commands', async (req, res) => {
         } catch {}
       }
     } catch {}
+
+    // 最后并入 CLI init 事件上报的权威表（含打包进二进制、上面三处磁盘扫描都看不到的
+    // 内置 skill，如 /loop）。放在最后 = 磁盘/硬编码已有的条目保留其描述与元数据，
+    // init 只补缺失的名字。缓存为空（server 刚重启、本 cwd 还没起过会话）时原样返回。
+    mergeInitCommands(commands, getInitCommands(typeof req.query.cwd === 'string' ? req.query.cwd : ''));
 
     // Tell the client which endpoint is currently active so it can gray out
     // subscription-only commands when cc switch points to a third-party endpoint.
