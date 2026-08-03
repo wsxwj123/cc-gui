@@ -7,7 +7,7 @@ import { homedir, tmpdir } from 'node:os';
 import { randomBytes } from 'node:crypto';
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import { getDefaultModel } from '../services/model-resolver.js';
-import { dropPendingForSession, requestElicitation, requestPermission, resolvePendingForSession } from './permissions.js';
+import { dropPendingForSession, requestElicitation, requestPermission, requestUserDialog, resolvePendingForSession } from './permissions.js';
 import { buildAlwaysAllowUpdates, buildDirAuthUpdates } from '../utils/permission-rules.js';
 import { stripInheritedProviderEnv } from '../utils/provider-env.js';
 import { resolveClaude } from '../utils/claude-resolver.js';
@@ -1230,6 +1230,16 @@ router.post('/chat', async (req, res) => {
     onElicitation: (request, opts = {}) => requestElicitation({
       ...request, sessionId: slot.sessionId, cwd: slot.cwd, signal: opts.signal,
     }),
+    // CLI 要宿主渲染阻塞对话框。onUserDialog 与 supportedDialogKinds 必须成对给:
+    // 只给 kinds 不给回调 SDK 在选项入口就抛;只给回调不声明 kind 则 CLI 一条都不发
+    // (失败闭合:未声明的 kind 退回无对话框行为,拒答就是经典报错结束回合)。
+    onUserDialog: (request, opts = {}) => (
+      request?.dialogKind === 'refusal_fallback_prompt'
+        ? requestUserDialog({ ...request, sessionId: slot.sessionId, cwd: slot.cwd, signal: opts.signal })
+        // 协议要求:认不出的 kind 必须回 cancelled,CLI 据此走该对话框的默认行为。
+        : Promise.resolve({ behavior: 'cancelled' })
+    ),
+    supportedDialogKinds: ['refusal_fallback_prompt'],
     // 返回 {continue:true} 的 no-op PreToolUse hook。注:曾以为它修 "Stream closed",经 opus
     // 实证那是误判(真因是子代理打穿 canUseTool 通道,见 disallowedTools 那段);此 hook 对
     // TS 无实质作用(官方那条"需 dummy hook"只针对 Python)。保留作无害保险(保持流活性)。

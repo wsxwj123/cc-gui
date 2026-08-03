@@ -76,6 +76,18 @@ export function elicitationResultFrom(payload = {}) {
   return payload.byUser ? { action: 'decline' } : { action: 'cancel' };
 }
 
+// 应答 → CLI UserDialogResult。result 取值只认这两个(界面按钮产生),其余一律 cancelled:
+// 局域网客户端也能 POST /respond,不能让任意字符串直达 CLI。cancelled 也是清卡的终态 ——
+// 停止/切会话时发 cancelled 而不是不应答,CLI 收到后走该对话框的默认行为,不必等到 park 超时。
+const DIALOG_RESULTS = new Set(['retry_fallback', 'edit_prompt']);
+export function userDialogResultFrom(payload = {}) {
+  const result = payload.content?.result;
+  if (payload.byUser && payload.decision === 'allow' && DIALOG_RESULTS.has(result)) {
+    return { behavior: 'completed', result };
+  }
+  return { behavior: 'cancelled' };
+}
+
 /** MCP elicitation(SDK onElicitation)。只有外部 stdio/http server 会发,进程内 SDK server 不支持。 */
 export function requestElicitation({ serverName, message, requestedSchema, title, displayName, description, sessionId, cwd, signal }) {
   return requestCard({
@@ -89,6 +101,18 @@ export function requestElicitation({ serverName, message, requestedSchema, title
     sessionId: sessionId || null,
     cwd: cwd || null,
   }, { signal, translate: elicitationResultFrom });
+}
+
+/** CLI request_user_dialog(SDK onUserDialog)。当前只声明 refusal_fallback_prompt 一种。 */
+export function requestUserDialog({ dialogKind, payload, toolUseID, sessionId, cwd, signal }) {
+  return requestCard({
+    kind: 'dialog',
+    dialogKind: String(dialogKind || ''),
+    payload: (payload && typeof payload === 'object') ? payload : {},
+    ...(toolUseID ? { toolUseID } : {}),
+    sessionId: sessionId || null,
+    cwd: cwd || null,
+  }, { signal, translate: userDialogResultFrom });
 }
 
 /**

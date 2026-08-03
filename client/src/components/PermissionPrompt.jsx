@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useRef } from 'react';
-import { AlertCircle, Loader2, ClipboardList, ShieldAlert, FormInput } from 'lucide-react';
+import { AlertCircle, Loader2, ClipboardList, ShieldAlert, FormInput, MessageSquareWarning } from 'lucide-react';
 import { useStore } from '../stores/sessionStore.js';
 import { MarkdownRenderer } from './MarkdownRenderer.jsx';
 import { isDangerousCommand, respondPermission } from '../hooks/useWebSocket.js';
@@ -590,6 +590,89 @@ function ElicitCard({ req, onSubmit, onDecline, processing, position, hydrate, t
   );
 }
 
+// 拒答重试卡(CLI request_user_dialog 的 refusal_fallback_prompt):当前模型拒绝了本次
+// 请求,CLI 询问宿主是换备用模型重试还是由用户改写提问。两个按钮对应 CLI 的
+// retry_fallback / edit_prompt;Esc 与停止清卡都回 cancelled(CLI 走该对话框的默认行为)。
+function RefusalDialogCard({ req, onChoose, onCancel, processing, position, hydrate, tabIndex }) {
+  const p = req.payload || {};
+  const fallback = p.fallbackModel || '备用模型';
+  const retracted = Array.isArray(p.retractedMessageUuids) ? p.retractedMessageUuids.length : 0;
+
+  useEffect(() => {
+    if (!hydrate) return; // BK-1:键盘只在主实例绑
+    if (position !== 0) return;
+    const onKey = (e) => {
+      if (!paneHasKeyboard(tabIndex)) return;
+      if (isEditableTarget(e.target)) return;
+      if (e.key === 'Enter') { e.preventDefault(); onChoose(req, 'retry_fallback'); }
+      else if (e.key === 'Escape') { e.preventDefault(); onCancel(req); }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [hydrate, position, tabIndex, req, onChoose, onCancel]);
+
+  return (
+    <div className="flex flex-col max-h-[min(42vh,calc(var(--app-h,100dvh)*0.42))] rounded-xl bg-canvas border border-canvas-deep shadow-lg overflow-hidden animate-fade-up relative">
+      <div className="px-4 py-2.5 flex items-center gap-2 border-b border-canvas-deep bg-orange-500/10">
+        <div className="w-6 h-6 rounded-md bg-orange-100 flex items-center justify-center shrink-0">
+          <MessageSquareWarning size={13} className="text-orange-700" />
+        </div>
+        <div className="text-[13px] font-medium text-ink flex-1 min-w-0">
+          Claude 拒答了这次请求
+          {p.apiRefusalCategory && (
+            <span className="ml-1.5 px-1.5 py-0.5 rounded bg-orange-100 text-orange-700 text-[10px] font-mono">
+              {String(p.apiRefusalCategory)}
+            </span>
+          )}
+        </div>
+        {req.cwd && (
+          <div className="text-[10px] text-ink-faint font-mono truncate max-w-[35%]" title={req.cwd}>{req.cwd}</div>
+        )}
+      </div>
+      <div className="px-4 py-3 flex-1 min-h-0 overflow-y-auto space-y-2">
+        <div className="text-[12.5px] text-ink whitespace-pre-wrap break-words">
+          {p.guidanceText || '当前模型拒绝了这次请求。可换用备用模型重试，或改写提问后重新发送。'}
+        </div>
+        {(p.originalModel || p.fallbackModel) && (
+          <div className="text-[11px] text-ink-faint font-mono">
+            {String(p.originalModel || '当前模型')} → {String(p.fallbackModel || '备用模型')}
+          </div>
+        )}
+        {retracted > 0 && (
+          // 取舍:CLI 在用户作答后会把这些消息从后续上下文里剔除,界面仍按 jsonl 原样显示,
+          // 故此处只声明影响范围,不改历史渲染(见交付说明)。
+          <div className="text-[11px] text-ink-faint leading-snug">
+            作答后本次拒答涉及的 {retracted} 条消息不再计入后续上下文，界面仍保留这些消息。
+          </div>
+        )}
+      </div>
+      <div className="px-4 py-2.5 flex items-center flex-wrap gap-2 bg-canvas-warm/60 border-t border-canvas-deep">
+        <button
+          disabled={processing}
+          onClick={() => onChoose(req, 'edit_prompt')}
+          className="px-3 py-1.5 rounded-md text-[12px] font-medium text-ink-muted hover:bg-canvas-deep disabled:opacity-50"
+        >我改一下提问</button>
+        <button
+          disabled={processing}
+          onClick={() => onCancel(req)}
+          className="px-3 py-1.5 rounded-md text-[12px] font-medium text-ink-muted hover:bg-canvas-deep disabled:opacity-50"
+          title="Esc"
+        >取消</button>
+        <button
+          autoFocus
+          disabled={processing}
+          onClick={() => onChoose(req, 'retry_fallback')}
+          className="ml-auto px-3 py-1.5 rounded-md text-[12px] font-medium text-white bg-orange-600 hover:bg-orange-700 disabled:opacity-50 inline-flex items-center gap-1.5"
+          title="Enter"
+        >
+          {processing && <Loader2 size={11} className="animate-spin" />}
+          换 {fallback} 重试 ↵
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function PermissionCard({ req, onResolve, onWhitelistAndAllow, onAlwaysAllow, onResolveSame, sameCount, processing, position, hydrate, tabIndex }) {
   // remember:none=仅此次;session=本会话白名单(localStorage,行为同旧版);
   // always=写 settings.json 的 permissions.allow 规则(经服务端 updatedPermissions,
@@ -711,7 +794,7 @@ function PermissionCard({ req, onResolve, onWhitelistAndAllow, onAlwaysAllow, on
 
 function PendingPill({ req, position }) {
   // kind 卡没有 toolName(它们不是工具授权),按类型给个标签,否则排队里是一枚空徽章。
-  const label = req.kind === 'elicitation' ? '填写信息' : req.toolName;
+  const label = req.kind === 'elicitation' ? '填写信息' : req.kind === 'dialog' ? '拒答处理' : req.toolName;
   return (
     <div className="rounded-lg bg-canvas/60 border border-canvas-deep px-3 py-1.5 flex items-center gap-2 opacity-70">
       <span className="text-[10px] font-mono text-ink-faint shrink-0">{position + 1}</span>
@@ -931,6 +1014,7 @@ export function PermissionPrompt({ sessionId = null, onExecutePlan = null, hydra
   // elicitation 提交 → 服务端翻译成 MCP 的 {action:'accept', content};
   // 拒绝(两张卡的「拒绝/取消」与 Esc)走裸 deny → decline / cancelled。
   const submitElicit = (req, content) => resolve(req, 'allow', null, undefined, { content });
+  const chooseDialog = (req, result) => resolve(req, 'allow', null, undefined, { content: { result } });
 
   // Opt-in batch: resolve the SAME request (same tool + identical input) in the
   // OTHER sessions currently open in panes. Different requests are untouched.
@@ -965,6 +1049,17 @@ export function PermissionPrompt({ sessionId = null, onExecutePlan = null, hydra
           req={mine[0]}
           onSubmit={submitElicit}
           onDecline={(r) => resolve(r, 'deny')}
+          processing={busyId === mine[0].id}
+          position={0}
+          hydrate={hydrate}
+          tabIndex={tabIndex}
+        />
+      ) : mine[0].kind === 'dialog' ? (
+        <RefusalDialogCard
+          key={mine[0].id}
+          req={mine[0]}
+          onChoose={chooseDialog}
+          onCancel={(r) => resolve(r, 'deny')}
           processing={busyId === mine[0].id}
           position={0}
           hydrate={hydrate}
