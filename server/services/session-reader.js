@@ -135,7 +135,9 @@ export async function listProjects() {
       let realPath = sidecarCwd;
       if (!realPath && newestFile) {
         try {
-          const { head } = await readJsonlEdges(join(projectPath, newestFile), 10);
+          // 只要头 10 条判 cwd:parseJsonl(limit) 读满即关流,不像 readJsonlEdges
+          // 那样为了 tail/totalLines 走完整个文件(项目列表读盘量的大头就在这)。
+          const head = await parseJsonl(join(projectPath, newestFile), { limit: 10 });
           realPath = cwdFromHead(head);
         } catch {}
       }
@@ -156,7 +158,7 @@ export async function listProjects() {
         let matched = 0;
         for (const f of jsonlFiles) {
           try {
-            const { head } = await readJsonlEdges(join(projectPath, f), 10);
+            const head = await parseJsonl(join(projectPath, f), { limit: 10 });
             const c = cwdFromHead(head);
             if (!c || c === sidecarCwd) matched += 1;
           } catch { matched += 1; }
@@ -278,14 +280,20 @@ export async function listSessions(projectHash) {
       // that user out → the whole session vanished from the list. 40 covers the
       // metadata pile; the cost is reading a few dozen extra lines per file.
       //
-      // 顺路收集全文件的 compact_boundary uuid(readJsonlEdges 本就逐行解析整个
-      // 文件,零额外 I/O)。注意 boundary 不止在头部:/compact 是先写进原文件继续
+      // 顺路收集全文件的 compact_boundary uuid(readJsonlEdges 本就逐行读完整个
+      // 文件,零额外 I/O)。回调收到的是**原始行字符串**:先用子串命中率极低的
+      // includes 预筛,再对极少数命中行 JSON.parse —— 中部行不再逐条解析。
+      // 注意 boundary 不止在头部:/compact 是先写进原文件继续
       // 对话,--resume 才新开文件并把 boundary 起的历史(uuid 原样)回放进新文件,
       // 所以"共享任一 boundary uuid"= 同一条对话链,这是唯一可靠的跨文件链接信号
       // (实测 logicalParentUuid 指向的记录在父文件中部而非尾部,尾部映射法 0 命中)。
       const boundaryUuids = [];
-      const { head, tail, totalLines } = await readJsonlEdges(filePath, 40, (r) => {
-        if (isBoundaryRecord(r)) boundaryUuids.push(r.uuid);
+      const { head, tail, totalLines } = await readJsonlEdges(filePath, 40, (raw) => {
+        if (!raw.includes('"compact_boundary"')) return;
+        try {
+          const r = JSON.parse(raw);
+          if (isBoundaryRecord(r)) boundaryUuids.push(r.uuid);
+        } catch {}
       });
 
       // Extract metadata from first REAL user message (skips isMeta / pure
