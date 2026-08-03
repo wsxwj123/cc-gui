@@ -3342,12 +3342,15 @@ function GoalNotice({ goal }) {
   );
 }
 
-// 自动拒绝的判定来源(SDK decision_reason_type)。未列出的取值不显示来源,只显示原因文本。
+// 自动拒绝的判定来源(SDK decision_reason_type)。该字段是【开放集】不是枚举,
+// 未列出的取值不显示来源、只显示原因文本(降级而不是显示原始英文标识符)。
+// subcommandResults:Bash 命令被拆成子命令逐条比对权限规则后拒绝(真机实测的取值)。
 const DENIAL_SOURCE = {
   classifier: '自动档分类器',
   asyncAgent: '后台代理自动判定',
   mode: '当前权限档',
   rule: '权限规则',
+  subcommandResults: '权限规则',
 };
 
 // 被自动拒绝的工具调用(auto 档分类器 / deny 规则 / dontAsk 档 / 后台代理自动判定)不弹
@@ -5238,7 +5241,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
               timestamp: new Date().toISOString(),
               toolName: event.tool_name || '',
               reasonType: event.decision_reason_type || '',
-              message: event.message || event.decision_reason || '',
+              // 截断:拒绝语里内嵌被拒命令的完整文本(heredoc 长命令会整段上屏),
+              // 同本文件 compact_error 的处理口径。
+              message: String(event.message || event.decision_reason || '').slice(0, 300),
             }]));
           }
           // 等待状态(G):API 可重试错误(限流/5xx/超时),SDK 自动退避重试 ——
@@ -6257,12 +6262,14 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             // Full round (incl trailing text) persisted → commit it to the store,
             // then drop ALL local copies (streamed text rarely byte-matches final
             // jsonl, so clearing avoids a doubled turn).
-            // 例外:type==='btw' 旁问气泡只活在本地(永远没有 jsonl 孪生),整清会让它
-            // 在回合结束时凭空消失;保留,切会话/刷新时自然清掉。
+            // 例外:'btw' 旁问气泡与 'denial' 自动拒绝提示只活在本地(永远没有 jsonl
+            // 孪生 —— CLI 不把 permission_denied 写进转写),整清会让它们在回合结束时
+            // 凭空消失(拒绝原因只闪现几秒);保留,切会话/刷新时自然清掉。
             try { await fetchMessagesForTab(finalizeSid, finalizePh, { silent: true }); } catch {}
             setChatMessages((prev) => {
               if (!isCurrentTurn()) return prev; // await 期间开了新回合 → 不清在途消息
-              return prev.some((m) => m.type === 'btw') ? prev.filter((m) => m.type === 'btw') : [];
+              const localOnly = (m) => m.type === 'btw' || m.type === 'denial';
+              return prev.some(localOnly) ? prev.filter(localOnly) : [];
             });
             break;
           }

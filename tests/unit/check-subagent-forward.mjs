@@ -79,6 +79,23 @@ const app = readFileSync(join(root, 'client/src/App.jsx'), 'utf8');
     '必须带流归属 ownerKey,否则拒绝提示会串到别的会话(visibleChat 按 ownerKey 门控)');
   assert.ok(/event\.message \|\| event\.decision_reason/.test(seg),
     '原因文本取 message(给模型的人话拒绝语),缺失时回落 decision_reason');
+  assert.ok(/\.slice\(0, 300\)/.test(seg),
+    '原因文本必须截断:拒绝语内嵌被拒命令全文,heredoc 长命令会整段上屏(同 compact_error 口径)');
+
+  // decision_reason_type 是开放集,真机 Bash 规则拒绝发的是 subcommandResults(不在
+  // SDK 注释举的四值内)。缺映射不会崩,但来源降级成不显示。
+  const src = app.slice(app.indexOf('const DENIAL_SOURCE'), app.indexOf('function DenialNotice'));
+  for (const k of ['classifier', 'asyncAgent', 'mode', 'rule', 'subcommandResults']) {
+    assert.ok(new RegExp(`${k}:`).test(src), `DENIAL_SOURCE 缺 ${k} 映射`);
+  }
+
+  // 回合落盘收尾会整清本地条目。denial 没有 jsonl 孪生(CLI 不把 permission_denied
+  // 写进转写)→ 不豁免就等于拒绝原因只在流式期间闪现几秒,历史侧的 denial 分支成死分支。
+  const land = app.indexOf('if (roundLanded(peeked, i))');
+  assert.ok(land > 0, 'roundLanded 收尾分支必须还在');
+  const landSeg = app.slice(land, land + 900);
+  assert.ok(/m\.type === 'btw' \|\| m\.type === 'denial'/.test(landSeg),
+    "回合落盘整清时必须豁免 denial(与 btw 同因:只活在本地、无 jsonl 孪生)");
   // 两个渲染点必须对称(历史列表 memo 组件 + 流式列表),漏一处就是"有数据不显示"。
   assert.equal(app.split("msg.type === 'denial'").length - 1, 2,
     "denial 分支必须在 MessageList 与流式列表两处都有(与 goal/compact 同款对称)");
