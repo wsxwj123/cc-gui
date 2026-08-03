@@ -247,6 +247,13 @@ export function useWebSocket() {
               // 终态守卫防重;SSE 在线时通知走原 SSE 路径,server 不广播此类型)。
               window.dispatchEvent(new CustomEvent('cgui:task-notification-bg', { detail: data }));
               break;
+            case 'background-tasks':
+              // 批A:服务端按 CLI 的 background_tasks_changed(全量存活集快照)对完账后广播。
+              // App.jsx 顶层监听:settled 的直接收尾,本会话不在集内的僵尸卡剪掉。纯 UI 收敛,
+              // 不驱动任何停止动作。卡片可能属于已切走/已关的窗格,那些窗格没有 SSE 通道,
+              // 所以必须走全局 WS 而不是流内事件。
+              window.dispatchEvent(new CustomEvent('cgui:background-tasks', { detail: data }));
+              break;
             case 'turn-complete': {
               // T2: 非聚焦会话回合完成 → 顶部悬浮提醒(标题+摘要,5s,点击跳转)。
               // 由服务端广播驱动 —— 切走会话时前端的 SSE fetch 已被切会话 effect

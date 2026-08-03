@@ -66,6 +66,10 @@ export function TaskCard({ toolCall }) {
   // 中断残骸/不发父流事件的 provider)才回退看 toolCall.result。
   const isDone = agent ? agentDone : (!!toolCall.result || isInterrupted);
   const isWorking = !isDone;
+  // settledBy(批A):这条终态是【对账猜出来的】—— 服务端存活集里已经没有它了(level 剪枝),
+  // 或者单卡停止时服务端任务表反查落空。我们只知道"它结束了",不知道成功还是失败,
+  // 所以不给绿勾(冒充成功),给中性灰环。真权威终态一到 finalizeAgent 会清掉这个标记。
+  const isSettledUnknown = isDone && !isError && !isStopped && !!agent?.settledBy;
 
   // D5:单卡停止对不发 task 事件的 provider 会静默失败(乐观 stopped → 闪回 working),
   // 用户以为按钮坏了。noOwner = 没有任何 slot 认领这个 task,提示一次并指向主停止键。
@@ -146,6 +150,9 @@ export function TaskCard({ toolCall }) {
             <XCircle size={16} className="text-error" aria-label="子代理出错" />
           ) : isStopped ? (
             <CircleSlash size={16} className="text-ink-faint" aria-label="子代理已停止" />
+          ) : isSettledUnknown ? (
+            <CircleSlash size={16} className="text-ink-faint" aria-label="子代理已结束"
+              title="该任务在服务端的任务表中已不存在,判定为已结束;未收到最终状态,成败未知。" />
           ) : (
             <CheckCircle2 size={16} className="text-success" aria-label="子代理完成" />
           )}

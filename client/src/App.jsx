@@ -70,6 +70,7 @@ import { buildFontEntries, groupFonts, detectFonts, platformCandidates, queryLoc
 import { copyText } from './utils/clipboard.js';
 import { escRoute, idleEscAction, escYieldCardId, isEditableTarget } from './utils/escAction.js';
 import { isCurrentStreamTurn, resolveStreamHistCutoff, shouldRefreshHist } from './utils/reattach.js';
+import { pruneByLiveSet } from './utils/levelPrune.js';
 
 // ── Per-session shadow-git checkpoints ──────────────────────────
 // Session title with inline rename (click pencil → edit → Enter/blur saves,
@@ -665,6 +666,15 @@ function reviveAgentIfTerminal(store, agentId) {
   if (AGENT_TERMINAL_STATUS.includes(ag.status)) store.upsertAgent(agentId, { status: 'working', finishedAt: null });
 }
 
+// 按 task_id 反查 agent id(批A A4)。task_updated 的类型里没有 tool_use_id,原来只能查
+// taskIdToToolUse —— 那是【每条 SSE 流的局部变量】,跨回合/reattach/刷新后为空。task_started
+// 时把 taskId 钉在条目上后,这条线性扫描就是跨回合可用的第二把钥匙(条目数 <100,O(n) 够用)。
+function findAgentIdByTaskId(st, taskId) {
+  if (!taskId) return null;
+  for (const [id, a] of Object.entries(st.activeAgents || {})) if (a?.taskId === taskId) return id;
+  return null;
+}
+
 function finalizeAgent(st, agentId, tnStatus, visited, authoritative) {
   visited = visited || new Set();
   if (visited.has(agentId)) return;
@@ -683,7 +693,12 @@ function finalizeAgent(st, agentId, tnStatus, visited, authoritative) {
   // 终态,允许覆盖 stopped 为真实状态。done/error 不覆盖(那是真终态,不回翻)。
   // 乐观 stopped(optimisticStop,stopSingleTask 打在非 taskManaged 前台子代理上的)同样
   // 可覆盖:停的瞬间子代理恰好真完成、权威 completed 到达时,不应永显「已停止」(判官 S3)。
-  const canOverride = !!authoritative && ag.status === 'stopped' && (!!ag.taskManaged || !!ag.optimisticStop);
+  // settledBy(批A):终态是【我们猜出来的】—— level 存活集剪枝 / 单卡停止落空。A0 实测
+  // level 信号恒在权威终态事件之前 <1ms 到达,若不许覆盖,每个任务都会先被猜成"已结束",
+  // 紧随其后的真状态(failed/stopped)反而被终态幂等守卫吞掉 = 状态保真度倒退。故凡带
+  // settledBy 的终态一律可被权威事件覆盖,覆盖时清掉标记。
+  const canOverride = !!authoritative
+    && (!!ag.settledBy || (ag.status === 'stopped' && (!!ag.taskManaged || !!ag.optimisticStop)));
   if (!terminal) {
     // stopped 语义(fable A 实测修正):用户主动停止时,CLI 给顶层 agent 发的是 is_error 的
     // "interrupted"回执(resultSeen+resultIsError),那不是真失败——只有【确实成功返回过】
@@ -704,7 +719,11 @@ function finalizeAgent(st, agentId, tnStatus, visited, authoritative) {
     // resultIsError 置真,若沿用上面的 completed→(resultIsError?error:done) 逻辑,
     // 真完成会被误标 error。状态没变(stopped→stopped)不写,避免无谓刷新 finishedAt。
     const status = tnStatus === 'failed' ? 'error' : tnStatus === 'completed' ? 'done' : 'stopped';
-    if (status !== ag.status) st.upsertAgent(agentId, { status, finishedAt: Date.now() });
+    // settledBy 必须清 —— 哪怕 status 恰好同值(猜的 done 撞上真 completed),留着标记
+    // 卡片就会一直显示中性的"已结束"而不是绿勾"完成"。
+    const patch = ag.settledBy ? { settledBy: null } : {};
+    if (status !== ag.status) { patch.status = status; patch.finishedAt = Date.now(); }
+    if (Object.keys(patch).length) st.upsertAgent(agentId, patch);
   }
   // 级联:本 agent 的 toolCalls 里 id 也是 activeAgents 条目的 = 它起的嵌套子代理,一并收尾。
   // 只收【还没有终态】的后代:2026-07-27 实测(P4 probe)推翻了原来"嵌套子代理永远等不到
@@ -4959,14 +4978,25 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             // sessionId(停止时 finalizeSessionAgents 扫不到)。
             {
               const _s0 = useStore.getState();
-              if (_s0.activeAgents[event.tool_use_id]) _s0.upsertAgent(event.tool_use_id, { taskManaged: true });
-              else if (event.task_type === 'local_agent') {
+              // taskId 钉在条目上(批A A4):task_updated 没有 tool_use_id,原来只能靠本流的
+              // taskIdToToolUse 反查,跨回合/reattach/刷新即失效 → 客户端永不收尾。
+              // sessionId 补齐(批A A5):先 message_start 后 task_started 的顺序下,这条存在性
+              // 分支原来只补 taskManaged —— 条目没有 sessionId 就不计入「停止后台 N」,也逃过
+              // finalizeSessionAgents(App.jsx:747 continue)。【已有值不覆盖】:归属敏感。
+              if (_s0.activeAgents[event.tool_use_id]) {
+                _s0.upsertAgent(event.tool_use_id, {
+                  taskManaged: true,
+                  taskId: event.task_id,
+                  sessionId: _s0.activeAgents[event.tool_use_id].sessionId || streamOwnerSid(),
+                });
+              } else if (event.task_type === 'local_agent') {
                 _s0.upsertAgent(event.tool_use_id, {
                   name: event.subagent_type || 'Agent',
                   description: event.description || '',
                   status: 'working',
                   startedAt: Date.now(),
                   taskManaged: true,
+                  taskId: event.task_id,
                   sessionId: streamOwnerSid(),
                 });
               }
@@ -4987,6 +5017,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                   description: event.description || '',
                   status: 'working',
                   startedAt: Date.now(),
+                  taskId: event.task_id,
                   sessionId: streamOwnerSid(),
                 });
               }
@@ -5006,8 +5037,12 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           }
           if (event.type === 'system' && event.subtype === 'task_updated'
               && ['completed', 'failed', 'killed'].includes(event.patch?.status)) {
-            const tuid = event.tool_use_id || (event.task_id ? taskIdToToolUse[event.task_id] : null);
-            if (tuid) { const _st = useStore.getState(); if (_st.activeAgents[tuid]) finalizeAgent(_st, tuid, event.patch.status === 'killed' ? 'stopped' : event.patch.status, undefined, true); }
+            const _st = useStore.getState();
+            // 第三条路(批A A4):taskIdToToolUse 是本流的局部 map,跨回合/reattach/刷新后为空。
+            // task_started 已把 taskId 钉在条目上,扫 activeAgents 反查即可。
+            const tuid = event.tool_use_id || (event.task_id ? taskIdToToolUse[event.task_id] : null)
+              || findAgentIdByTaskId(_st, event.task_id);
+            if (tuid && _st.activeAgents[tuid]) finalizeAgent(_st, tuid, event.patch.status === 'killed' ? 'stopped' : event.patch.status, undefined, true);
           }
           if (event.type === 'system' && event.subtype === 'api_retry') {
             const waitS = Math.ceil((event.retry_delay_ms || 0) / 1000);
@@ -9545,11 +9580,33 @@ export default function App() {
   // finalizeAgent 收尾(幂等:已终态条目 no-op),级联嵌套子代理一并收。
   useEffect(() => {
     const onBgTaskNotification = (e) => {
-      const { tool_use_id, status } = e.detail || {};
-      if (!tool_use_id) return;
+      const { tool_use_id, task_id, status } = e.detail || {};
       const st = useStore.getState();
+      // 双键(批A A4):服务端带了 task_id 却只用 tool_use_id,而 task_updated 转来的通知在
+      // 第三方 provider / 早期条目上可能没有 tool_use_id → 广播白发。
+      const id = (tool_use_id && st.activeAgents[tool_use_id]) ? tool_use_id : findAgentIdByTaskId(st, task_id);
       // authoritative=true:真 task_notification 允许覆盖 taskManaged 的猜测性 stopped(#1 UI 侧)。
-      if (st.activeAgents[tool_use_id]) finalizeAgent(st, tool_use_id, status, undefined, true);
+      if (id) finalizeAgent(st, id, status, undefined, true);
+    };
+    // 批A A4:服务端按 CLI 的 background_tasks_changed 对完账后广播的【存活集】。
+    // 只做两件事:① settled 里的条目直接收尾;② 本会话 taskManaged 且不在集内的僵尸卡剪掉。
+    // 【永不据此 finalize 流 / abort 进程】—— 纯 UI 收敛。收出来的终态标 settledBy,
+    // 表示"成败未知,只知道它结束了";随后到达的权威终态可以覆盖它(finalizeAgent canOverride)。
+    const settleByLevel = (id) => {
+      const st = useStore.getState();
+      const a = st.activeAgents[id];
+      // 已是终态就不碰:那可能是刚到的【权威】终态,盖上 settledBy 会把绿勾降级成中性"已结束"。
+      if (!a || ['done', 'error', 'stopped'].includes(a.status)) return;
+      // 先钉 settledBy(成败未知)再走既有收尾 —— finalizeAgent 还会级联收未终态的嵌套
+      // 子代理、给悬空的内部 toolCall 补合成结果,直接 upsert 拿不到这两件事。
+      // 非 authoritative:这只是对账推断,不解除 optimisticStop 的待回滚保护。
+      st.upsertAgent(id, { settledBy: 'level' });
+      finalizeAgent(st, id, 'completed');
+    };
+    const onBackgroundTasks = (e) => {
+      const d = e.detail || {};
+      for (const tuid of (d.settled || [])) settleByLevel(tuid);
+      for (const id of pruneByLiveSet(useStore.getState().activeAgents, d)) settleByLevel(id);
     };
     // 停止链路 #2:监控面板杀 Claude 子进程后按 sessionId 级联收尾(流外杀点无流内信号)。
     const onSessionProcsKilled = (e) => {
@@ -9557,9 +9614,11 @@ export default function App() {
       if (sid) finalizeSessionAgents(sid);
     };
     window.addEventListener('cgui:task-notification-bg', onBgTaskNotification);
+    window.addEventListener('cgui:background-tasks', onBackgroundTasks);
     window.addEventListener('cgui:session-procs-killed', onSessionProcsKilled);
     return () => {
       window.removeEventListener('cgui:task-notification-bg', onBgTaskNotification);
+      window.removeEventListener('cgui:background-tasks', onBackgroundTasks);
       window.removeEventListener('cgui:session-procs-killed', onSessionProcsKilled);
     };
   }, []);
