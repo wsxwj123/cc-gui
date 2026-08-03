@@ -1,8 +1,10 @@
 import { Router } from 'express';
-import { readFile, writeFile, mkdir, rename } from 'fs/promises';
+import { readFile, writeFile, mkdir, rename, appendFile } from 'fs/promises';
 import { join, dirname } from 'path';
 import { homedir } from 'os';
+import { renameSession } from '@anthropic-ai/claude-agent-sdk';
 import { broadcast } from '../broadcast.js';
+import { findSessionFile } from '../services/session-reader.js';
 import { applySessionSyncPut, normalizeSessionSync, SYNC_KINDS } from '../session-sync.js';
 
 // Server-side preferences that must be SHARED across devices (phone + Mac).
@@ -213,6 +215,27 @@ router.get('/prefs/custom-titles', async (_req, res) => {
   res.json({ titles });
 });
 
+// 改名同时落进会话 jsonl(SDK renameSession:纯本地追加一行 custom-title,零网络零
+// 子进程),让 CLI / 其它客户端看到同一个标题。prefs 仍写:跨端广播、列表搜索、以及
+// 未落盘的 draft 会话都只有它能兜住。
+// 清空标题时 SDK 拒绝空 title(它没有"取消改名"的接口),自己追加一行空 customTitle
+// 表达清除 —— 同一文件后写胜出,读侧把空串当作"无自定义标题"(见 takeTitleLine),
+// 否则清空后 jsonl 里的旧标题会把它顶回来。
+// 任何一步失败(会话未落盘/文件已删/权限)都只记日志:prefs 已经写成功,改名请求不该失败。
+export async function writeJsonlTitle(sessionId, title) {
+  try {
+    if (title) {
+      await renameSession(sessionId, title);
+      return;
+    }
+    const file = await findSessionFile(sessionId);
+    if (!file) throw new Error('session file not found');
+    await appendFile(file, JSON.stringify({ type: 'custom-title', customTitle: '', sessionId }) + '\n');
+  } catch (e) {
+    console.warn(`[prefs] 标题未能写入会话 jsonl(${sessionId}):${e.message}`);
+  }
+}
+
 // PUT /api/prefs/custom-titles { sessionId, title } → per-key MERGE (not a full
 // replace) so two devices renaming different sessions can't clobber each other.
 // Empty/whitespace title deletes the override. Broadcasts the full map so all
@@ -236,6 +259,7 @@ router.put('/prefs/custom-titles', async (req, res) => {
       await savePrefs(prefs);
       return m;
     });
+    await writeJsonlTitle(sessionId, (title || '').trim());
     broadcast({ type: 'custom-titles', titles: map });
     res.json({ ok: true, titles: map });
   } catch (e) {

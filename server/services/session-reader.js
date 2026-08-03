@@ -77,6 +77,47 @@ const CLAUDE_DIR = join(homedir(), '.claude');
 const PROJECTS_DIR = join(CLAUDE_DIR, 'projects');
 const SESSIONS_DIR = join(CLAUDE_DIR, 'sessions');
 
+// ── 会话 jsonl 里的标题行 ────────────────────────────────────────────────────
+// CLI/SDK 把标题作为独立记录追加进会话 jsonl(无 uuid/timestamp,同一文件可有多行,
+// 后写胜出):
+//   {"type":"custom-title","customTitle":"...","sessionId":"..."}  手动改名(renameSession)
+//   {"type":"ai-title","aiTitle":"...","sessionId":"..."}          CLI 首轮后自动生成
+// **两者必须分开取**:SDKSessionInfo.customTitle 把 ai-title 也塞进同一个字段,照抄它
+// 会让自动标题覆盖用户手改。GUI 的优先级链靠区分两者(见 client/src/utils/sessionTitle.js)。
+// customTitle 为空串 = 用户清空了自定义标题(SDK 的 renameSession 拒绝空标题,清空由
+// prefs.js 自己追加空行表达),按"无"处理。
+function takeTitleLine(raw, acc) {
+  if (!raw.includes('"custom-title"') && !raw.includes('"ai-title"')) return;
+  try {
+    const r = JSON.parse(raw);
+    if (r?.type === 'custom-title' && typeof r.customTitle === 'string') acc.customTitle = r.customTitle.trim();
+    else if (r?.type === 'ai-title' && typeof r.aiTitle === 'string') acc.aiTitle = r.aiTitle.trim();
+  } catch {}
+}
+
+/** 单个会话文件的标题行(不需要整份会话时用;edgeSize 0 = 只扫行不解析头尾)。 */
+export async function readSessionTitles(filePath) {
+  const acc = { customTitle: '', aiTitle: '' };
+  try { await readJsonlEdges(filePath, 0, (raw) => takeTitleLine(raw, acc)); } catch {}
+  return acc;
+}
+
+/**
+ * sessionId → 会话 jsonl 绝对路径。与 SDK 省略 dir 时的行为同款:逐个项目目录探
+ * `<sid>.jsonl`(sessionId 是 uuid,不可能跨项目撞名,首个命中即正解)。找不到返回 null
+ * (未落盘的 draft 会话就是这种情况)。
+ */
+export async function findSessionFile(sessionId) {
+  if (!/^[0-9a-fA-F-]{36}$/.test(String(sessionId || ''))) return null;
+  let dirs;
+  try { dirs = await readdir(PROJECTS_DIR); } catch { return null; }
+  for (const d of dirs) {
+    const p = join(PROJECTS_DIR, d, `${sessionId}.jsonl`);
+    if (existsSync(p)) return p;
+  }
+  return null;
+}
+
 /**
  * Decode project hash back to a readable path.
  * -Users-alice-Desktop-proj → /Users/alice/Desktop/proj
@@ -288,7 +329,11 @@ export async function listSessions(projectHash) {
       // 所以"共享任一 boundary uuid"= 同一条对话链,这是唯一可靠的跨文件链接信号
       // (实测 logicalParentUuid 指向的记录在父文件中部而非尾部,尾部映射法 0 命中)。
       const boundaryUuids = [];
+      // 标题行同路收集(见 takeTitleLine):追加位置不定(手改在尾、ai-title 在头),
+      // 走整文件回调比 head/tail 40 行窗口可靠,且零额外 I/O。
+      const titles = { customTitle: '', aiTitle: '' };
       const { head, tail, totalLines } = await readJsonlEdges(filePath, 40, (raw) => {
+        takeTitleLine(raw, titles);
         if (!raw.includes('"compact_boundary"')) return;
         try {
           const r = JSON.parse(raw);
@@ -453,6 +498,9 @@ export async function listSessions(projectHash) {
         projectPath: realCwd || decodeProjectHash(projectHash),
         filePath,
         firstPrompt,
+        // jsonl 里的两种标题,各自独立(不合并,理由见 takeTitleLine)。空串=没有。
+        customTitle: titles.customTitle,
+        aiTitle: titles.aiTitle,
         messageCount: totalLines,
         startTime: firstUser?.timestamp || new Date(s.birthtimeMs).toISOString(),
         lastActivity: lastRecord?.timestamp || new Date(s.mtimeMs).toISOString(),
@@ -546,6 +594,13 @@ function collapseCompactChains(sessions, chainMeta) {
       : (chainMeta.get(earliest.sessionId)?.fallbackPrompt
          || chainMeta.get(leaf.sessionId)?.fallbackPrompt);
     if (inherited) leaf.firstPrompt = inherited.slice(0, 200);
+    // 标题同理沿链继承:手改/自动标题写在链首文件里,续段自己的 jsonl 没有 ——
+    // 不继承等于 compact 之后标题凭空消失。续段自己有的(CLI 会给续段另生成
+    // ai-title)优先,不被链首盖掉。
+    if (root) {
+      leaf.customTitle = leaf.customTitle || root.customTitle;
+      leaf.aiTitle = leaf.aiTitle || root.aiTitle;
+    }
     visible.push(leaf);
   }
   return visible;

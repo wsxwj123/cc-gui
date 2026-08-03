@@ -74,6 +74,7 @@ import { histSig, isCurrentStreamTurn, nextAttachTry, resolveStreamHistCutoff, s
 import { pruneByLiveSet } from './utils/levelPrune.js';
 import { classifyStopTargets } from './utils/stopTargets.js';
 import { resizeScrollTop } from './utils/scroll.js';
+import { resolveSessionTitle } from './utils/sessionTitle.js';
 
 // ── Per-session shadow-git checkpoints ──────────────────────────
 // Session title with inline rename (click pencil → edit → Enter/blur saves,
@@ -84,8 +85,8 @@ function EditableSessionTitle({ session }) {
   const autoTitles = useStore((s) => s.autoTitles);
   const setCustomTitle = useStore((s) => s.setCustomTitle);
   const sid = session?.sessionId;
-  const auto = session?.firstPrompt?.slice(0, 80) || '会话详情';
-  const display = (sid && (customTitles[sid] || autoTitles[sid])) || auto;
+  const resolved = resolveSessionTitle(session, sid && customTitles[sid], sid && autoTitles[sid]);
+  const display = resolved.slice(0, 80) || '会话详情';
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState('');
   const inputRef = useRef(null);
@@ -93,7 +94,7 @@ function EditableSessionTitle({ session }) {
 
   const start = () => {
     if (!sid) return;
-    setDraft((customTitles[sid] || autoTitles[sid] || session.firstPrompt || '').slice(0, 200));
+    setDraft(resolved.slice(0, 200));
     setEditing(true);
   };
   const save = () => { setCustomTitle(sid, draft); setEditing(false); };
@@ -1772,7 +1773,7 @@ function SessionItem({ session, isSelected, onSelect, onFork, onArchive, onDelet
   const startRename = (e) => {
     e?.stopPropagation();
     if (isDraft) return;
-    setDraft((customTitle || autoTitle || session.firstPrompt || '').slice(0, 200));
+    setDraft(resolveSessionTitle(session, customTitle, autoTitle).slice(0, 200));
     setRenaming(true);
   };
   const saveRename = () => { setCustomTitle(session.sessionId, draft); setRenaming(false); };
@@ -1819,7 +1820,7 @@ function SessionItem({ session, isSelected, onSelect, onFork, onArchive, onDelet
             <StatusDot running={running} lastActivity={session.lastActivity} className="mt-0.5" />
             <div className="min-w-0 flex-1">
               <div className="text-[13px] text-ink-soft line-clamp-2 font-body leading-snug pr-1">
-                {customTitle || autoTitle || session.firstPrompt || '(空会话)'}
+                {resolveSessionTitle(session, customTitle, autoTitle) || '(空会话)'}
               </div>
               {/* Bottom row leaves space on the right for the hover action bar. */}
               <div className="flex items-center gap-2 gap-y-1 flex-wrap mt-1.5 pr-20">
@@ -1901,7 +1902,7 @@ function SessionItem({ session, isSelected, onSelect, onFork, onArchive, onDelet
 // 源会话显式 pin > 侧栏元数据 model > 全局兜底;effort/权限模式照搬。
 function adoptFork(st, srcSession, newSessionId) {
   const srcId = srcSession.sessionId;
-  const baseTitle = (st.customTitles[srcId] || st.autoTitles?.[srcId] || srcSession.firstPrompt || '会话')
+  const baseTitle = (resolveSessionTitle(srcSession, st.customTitles[srcId], st.autoTitles?.[srcId]) || '会话')
     .slice(0, 60).trim().replace(/分支\d+$/, '').trim();
   const reBranch = new RegExp('^' + baseTitle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '分支(\\d+)$');
   let maxN = 0;
@@ -1991,8 +1992,8 @@ function SessionList() {
       .catch(() => {});
   }, []);
 
-  // 标题取值与 SessionItem 渲染一致:自定义 > 自动 > 首条消息。搜索按它过滤。
-  const titleOf = (s) => (customTitles[s.sessionId] || autoTitles[s.sessionId] || s.firstPrompt || '');
+  // 标题取值与 SessionItem 渲染一致(共用 resolveSessionTitle)。搜索按它过滤。
+  const titleOf = (s) => resolveSessionTitle(s, customTitles[s.sessionId], autoTitles[s.sessionId]);
   const q = query.trim().toLowerCase();
   const visible = sessions
     .filter((s) => !!s.archived === showArchived)
@@ -5161,7 +5162,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                   const _m = String(_st.modelBySession[_sid] || _st.currentModel || '').replace(/\[1m\]/i, '');
                   fetch('/api/chat/title', {
                     method: 'POST', headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ firstUser: prompt, firstAssistant: '', cwd, model: _m }),
+                    body: JSON.stringify({ firstUser: prompt, firstAssistant: '', cwd, model: _m, sessionId: _sid }),
                   }).then((r) => r.json()).then((d) => {
                     if (d?.title) useStore.getState().setAutoTitle(_sid, d.title);
                     else titleAttempted.delete(_sid);
@@ -6361,7 +6362,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           fetch('/api/chat/title', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ firstUser: prompt, firstAssistant: accumulatedText || '', cwd, model: titleModel }),
+            // 带 sessionId:服务端先看该会话 jsonl 里 CLI 有没有写好 ai-title,有就直接用,
+            // 省掉一次 `claude -p` 冷启(回合已结束,这时它通常已经落盘)。
+            body: JSON.stringify({ firstUser: prompt, firstAssistant: accumulatedText || '', cwd, model: titleModel, sessionId: titleSid }),
           })
             .then((r) => r.json())
             .then((d) => {
@@ -7295,10 +7298,11 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           <SubagentView
             agentId={viewingAgentId}
             parentSessionId={selectedSession?.sessionId || null}
-            parentTitle={(selectedSession?.sessionId
-              && (useStore.getState().customTitles[selectedSession.sessionId]
-                || useStore.getState().autoTitles[selectedSession.sessionId]))
-              || selectedSession?.firstPrompt || '母会话'}
+            parentTitle={resolveSessionTitle(
+              selectedSession,
+              useStore.getState().customTitles[selectedSession?.sessionId],
+              useStore.getState().autoTitles[selectedSession?.sessionId],
+            ) || '母会话'}
             onBack={() => useStore.getState().setViewingAgent(tabIndex, null)}
           />
         </div>
@@ -7377,10 +7381,11 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             <SessionHeaderMore forceOpenSignal={rewindSignal}>
               <ExportSessionButton
                 messages={[...messages, ...chatMessages]}
-                title={(selectedSession?.sessionId
-                  && (useStore.getState().customTitles[selectedSession.sessionId]
-                    || useStore.getState().autoTitles[selectedSession.sessionId]))
-                  || selectedSession?.firstPrompt || '会话'}
+                title={resolveSessionTitle(
+                  selectedSession,
+                  useStore.getState().customTitles[selectedSession?.sessionId],
+                  useStore.getState().autoTitles[selectedSession?.sessionId],
+                ) || '会话'}
               />
               <CheckpointButton
                 openSignal={rewindSignal}
@@ -9295,9 +9300,11 @@ function MobileMenu({ setRightPanel, onClose, updateNotice = null }) {
                 <div className="px-4 py-1 flex items-center gap-2">
                   <ExportSessionButton
                     messages={menuMessages}
-                    title={(useStore.getState().customTitles[activeSession.sessionId]
-                      || useStore.getState().autoTitles[activeSession.sessionId])
-                      || activeSession.firstPrompt || '会话'}
+                    title={resolveSessionTitle(
+                      activeSession,
+                      useStore.getState().customTitles[activeSession.sessionId],
+                      useStore.getState().autoTitles[activeSession.sessionId],
+                    ) || '会话'}
                   />
                   <CheckpointButton
                     sessionId={activeSession.sessionId}
@@ -10160,7 +10167,7 @@ export default function App() {
     st.setPaneMessages(0, []);
   };
   const mobileTitle = mobileSelSession
-    ? (customTitles[mobileSelSession.sessionId] || autoTitles[mobileSelSession.sessionId] || mobileSelSession.firstPrompt?.slice(0, 24) || '新会话')
+    ? (resolveSessionTitle(mobileSelSession, customTitles[mobileSelSession.sessionId], autoTitles[mobileSelSession.sessionId]).slice(0, 24) || '新会话')
     : 'Claude Code';
 
   const uiFontScale = useStore((s) => s.uiFontScale);
@@ -10413,7 +10420,7 @@ export default function App() {
             <>
               <span className="text-ink-ghost shrink-0">/</span>
               <span className="text-[11px] text-ink-muted font-body truncate min-w-0 max-w-[180px]">
-                {customTitles[headerPane.sessionId] || autoTitles[headerPane.sessionId] || headerPane.firstPrompt?.slice(0, 36) || headerPane.sessionId?.slice(0, 8) || '新会话'}
+                {resolveSessionTitle(headerPane, customTitles[headerPane.sessionId], autoTitles[headerPane.sessionId]).slice(0, 36) || headerPane.sessionId?.slice(0, 8) || '新会话'}
               </span>
             </>
           )}

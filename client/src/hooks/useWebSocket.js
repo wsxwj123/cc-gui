@@ -1,5 +1,6 @@
 import { useEffect, useRef } from 'react';
 import { useStore } from '../stores/sessionStore.js';
+import { resolveSessionTitle } from '../utils/sessionTitle.js';
 
 // G3:危险命令启发式 —— 删除类 + 网络/装包 + sudo。命中即强制弹窗,不被任何自动放行豁免。
 // 【权威判定在服务端 server/routes/chat.js 的 DANGEROUS_BASH】(canUseTool 内强拦,
@@ -278,7 +279,7 @@ export function useWebSocket() {
                 sessionId: sid,
                 projectHash: data.projectHash || sess?.projectHash || null,
                 session: sess || { sessionId: sid, projectHash: data.projectHash || null, draft: false },
-                title: st.customTitles?.[sid] || st.autoTitles?.[sid] || sess?.firstPrompt?.slice(0, 24) || '会话',
+                title: resolveSessionTitle(sess, st.customTitles?.[sid], st.autoTitles?.[sid]).slice(0, 24) || '会话',
                 summary: data.summary || '',
                 ts: Date.now(),
               });

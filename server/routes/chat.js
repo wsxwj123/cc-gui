@@ -7,6 +7,7 @@ import { homedir, tmpdir } from 'node:os';
 import { randomBytes } from 'node:crypto';
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import { getDefaultModel } from '../services/model-resolver.js';
+import { findSessionFile, readSessionTitles } from '../services/session-reader.js';
 import { dropPendingForSession, requestElicitation, requestPermission, requestUserDialog, resolvePendingForSession } from './permissions.js';
 import { buildAlwaysAllowUpdates, buildDirAuthUpdates } from '../utils/permission-rules.js';
 import { stripInheritedProviderEnv } from '../utils/provider-env.js';
@@ -1905,6 +1906,19 @@ router.post('/chat/title', async (req, res) => {
   // small/fast 默认(如不存在的 mimo-v2.5)→ 标题永远失败(用户报告)。剥掉 [1m] 后缀。
   const model = String(req.body?.model || '').replace(/\[1m\]/i, '').trim();
   if (!firstUser) return res.json({ title: '' });
+
+  // 短路:CLI 首轮结束后自己会往会话 jsonl 写一行 ai-title。已经有了就直接用,不必再起
+  // 一个 `claude -p` 子进程算一遍(一次冷启 + 一次模型调用)。下面的自建链路保留:
+  // 第三方 provider 下 CLI 是否写 ai-title 未实测,读不到就照旧自己生成。
+  // 只认 ai-title:手改标题(custom-title)优先级本就高于自动标题,读侧会直接显示它。
+  const jsonlSid = String(req.body?.sessionId || '');
+  if (jsonlSid) {
+    try {
+      const f = await findSessionFile(jsonlSid);
+      const t = f ? await readSessionTitles(f) : null;
+      if (t?.aiTitle) return res.json({ title: t.aiTitle.slice(0, 24), source: 'jsonl' });
+    } catch {}
+  }
 
   // CI-6:斜杠命令开场的标题。首条是 `/xxx`(或 jsonl 里的 <command-name> 包裹形态)时,
   // 直接把它喂给模型会得到"没有看到需要起标题的对话内容,请把对话粘贴过来"这类反问

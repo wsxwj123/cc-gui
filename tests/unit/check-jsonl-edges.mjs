@@ -129,9 +129,13 @@ try {
     const headOnly = src.match(/parseJsonl\(join\(projectPath, \w+\), \{ limit: 10 \}\)/g) || [];
     assert.equal(headOnly.length, 2,
       'listProjects 的两处 head-only 读必须是 parseJsonl(…,{limit:10});换回 readJsonlEdges 就等于整文件扫');
-    // listSessions 的 boundary 收集必须先做子串预筛再 parse
-    assert.ok(/readJsonlEdges\(filePath, 40, \(raw\) => \{\s*if \(!raw\.includes\('"compact_boundary"'\)\) return;/.test(src),
+    // listSessions 的中部收集(boundary + 标题行)必须先做子串预筛再 parse。
+    // 批O 在同一个回调里加了 takeTitleLine(custom-title / ai-title),它自己第一句就是
+    // includes 预筛;boundary 那半的预筛必须仍在 parse 之前。
+    assert.ok(/readJsonlEdges\(filePath, 40, \(raw\) => \{\s*(takeTitleLine\(raw, titles\);\s*)?if \(!raw\.includes\('"compact_boundary"'\)\) return;/.test(src),
       'boundary 回调必须先 raw.includes 预筛再 JSON.parse(收到的是原始行字符串)');
+    assert.ok(/function takeTitleLine\(raw, acc\) \{\s*if \(!raw\.includes\('"custom-title"'\) && !raw\.includes\('"ai-title"'\)\) return;/.test(src),
+      '标题行收集同样必须先子串预筛(每条会话记录都会过这个回调,无脑 parse = 整文件解析)');
     // totalLines 有真实消费者(messageCount / "<3 行不列出"),不许被当死字段删掉
     assert.ok(src.includes('if (totalLines < 3) continue;'), 'totalLines 仍被空会话过滤消费');
     assert.equal((src.match(/messageCount: (totalLines|agentEdges\.totalLines)/g) || []).length, 3,
