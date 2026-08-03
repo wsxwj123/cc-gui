@@ -8016,7 +8016,10 @@ function MobileModelPage({ permKey }) {
               <div className="text-[14px] font-body text-ink truncate">{m.name}</div>
               <div className="text-[11px] text-ink-faint font-mono truncate">{m.source === 'cli-alias' ? '由 CLI 解析到当前 tier 最新' : m.id}</div>
             </div>
-            <span className="text-[10px] px-1.5 py-0.5 bg-canvas-deep text-ink-faint rounded font-mono shrink-0">{m.tier}</span>
+            {/* 同 SessionSelectors:空 tier 不渲染空药丸,选中行让位给勾 */}
+            {m.tier && !active && (
+              <span className="text-[10px] px-1.5 py-0.5 bg-canvas-deep text-ink-faint rounded font-mono shrink-0">{m.tier}</span>
+            )}
             {active && <Check size={16} className="text-accent shrink-0" />}
           </button>
         );

@@ -487,10 +487,11 @@ export function ModelSelector({ compact = false, permKey = null, tourAnchor = fa
           </button>
           {availableModels.filter((m) => match(m.id, m.name)).map((m) => {
             const isAlias = m.source === 'cli-alias';
+            const isSelected = currentModel === m.id || currentModel === `${m.id}[1m]`;
             return (
               <button key={m.id} onClick={() => selectModel(m.id)}
                 className={`w-full text-left px-3 py-2 hover:bg-canvas-warm transition-colors flex items-center gap-2 ${
-                  (currentModel === m.id || currentModel === `${m.id}[1m]`) ? 'bg-accent-subtle/50' : ''}`}>
+                  isSelected ? 'bg-accent-subtle/50' : ''}`}>
                 <div className="flex-1 min-w-0">
                   <div className="text-xs font-medium text-ink font-body flex items-center gap-1.5">
                     {m.name}
@@ -511,8 +512,11 @@ export function ModelSelector({ compact = false, permKey = null, tourAnchor = fa
                     {isAlias ? '由 CLI 解析到当前 tier 最新' : m.id}
                   </div>
                 </div>
-                <span className="text-[9px] px-1.5 py-0.5 bg-canvas-deep text-ink-faint rounded font-mono shrink-0">{m.tier}</span>
-                {(currentModel === m.id || currentModel === `${m.id}[1m]`) && <Check size={12} className="text-accent shrink-0" />}
+                {/* tier 可能为空串(model-resolver 推不出来)，空药丸会被当成"莫名标记"；选中行让位给勾。 */}
+                {m.tier && !isSelected && (
+                  <span className="text-[9px] px-1.5 py-0.5 bg-canvas-deep text-ink-faint rounded font-mono shrink-0">{m.tier}</span>
+                )}
+                {isSelected && <Check size={12} className="text-accent shrink-0" />}
               </button>
             );
           })}
