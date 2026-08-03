@@ -693,12 +693,15 @@ export function ChatInput({ onSend, onStop, onStopBackground, onAccelerate, onBa
     // command, and arrows navigate the candidate list. Let the IME own all keys.
     if (e.nativeEvent?.isComposing || e.key === 'Process' || e.keyCode === 229) return;
     if (showCommands) {
-      if (e.key === 'ArrowDown') {
+      // 正在翻历史(historyCursor>=0)时翻出 `/xxx` 会把斜杠菜单顶出来,此时 ↑↓ 必须继续归历史,
+      // 否则一翻到 / 开头的条目就再也翻不动。只门控这两个箭头分支:Tab/Enter 补全、Esc 关菜单
+      // 保持原样(Esc 一旦不被菜单消费就会穿透到全局"停止生成",见下方注释)。
+      if (e.key === 'ArrowDown' && historyCursor < 0) {
         e.preventDefault();
         setSelectedIndex((i) => Math.min(i + 1, filteredCommands.length - 1));
         return;
       }
-      if (e.key === 'ArrowUp') {
+      if (e.key === 'ArrowUp' && historyCursor < 0) {
         e.preventDefault();
         setSelectedIndex((i) => Math.max(i - 1, 0));
         return;
@@ -762,7 +765,9 @@ export function ChatInput({ onSend, onStop, onStopBackground, onAccelerate, onBa
       // 门槛防劫持光标跨行移动。旧条件下单行非空+光标在行尾时 ↑ 是死键(用户实报):浏览历史中
       // 编辑召回条目(如退格)会把 historyCursor 重置为 -1,此时回不到历史。单行放行后 ↑ 进导航
       // 前会把当前文本存进 draftBeforeHistoryRef(下方),按 ↓ 到底可找回。
-      const canUseHistory = !text.startsWith('/') && (text.trim() === '' || historyCursor >= 0 || !text.includes('\n') || (e.key === 'ArrowUp' ? atStart : atEnd));
+      // `/` 排除只针对【手打斜杠命令】(那时 cursor=-1,箭头归斜杠菜单);已经在翻历史时
+      // (cursor>=0)翻出的 `/compact` 之类不算手打,否则历史里一有 / 开头条目就卡死翻不过去。
+      const canUseHistory = (!text.startsWith('/') || historyCursor >= 0) && (text.trim() === '' || historyCursor >= 0 || !text.includes('\n') || (e.key === 'ArrowUp' ? atStart : atEnd));
       if (canUseHistory) {
         const history = readHistory();
         // ↓ 只在【正在浏览历史】(historyCursor>=0)时有意义:cursor=-1 时按 ↓ 无历史可回退,

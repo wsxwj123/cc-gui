@@ -4,16 +4,25 @@
 //   ① historyCursor=-1 时按 ↓ 会 setText(draftBeforeHistoryRef,初始 '')清空正在输入的文本;
 //   ② 同一按键把 cursor 减到 -2,之后 ↑ 的 min(cursor+1, len-1) 恒 <0 → ↑ 变死键。
 // 同时锁住 7342b29 本来修好的三条路径不回归(空文本 ↑↓ / 单行非空 ↑ / 历史中编辑后 ↑)。
+// 路径 6/7 是 #15:历史里翻出 `/compact` 之类后 ↑↓ 卡死(canUseHistory 写死 `/` 排除 +
+// 斜杠菜单抢箭头),判据统一改成"浏览态 historyCursor>=0 优先于 / 排除"。
 // 无框架,纯 assert;复刻组件内那段键盘逻辑(见 ChatInput.jsx:721-763)。
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { dirname, join } from 'node:path';
 
 // —— 复刻:一次按键作用于 { text, cursor, draft } 状态,返回新状态 + 是否吞键 ——
-function keyDown(state, key, history, { selectionStart = null } = {}) {
+function keyDown(state, key, history, { selectionStart = null, showCommands = false } = {}) {
   const { text, cursor, draft } = state;
   const pos = selectionStart == null ? text.length : selectionStart;
   const atStart = pos === 0;
   const atEnd = pos === text.length;
-  const canUseHistory = !text.startsWith('/')
+  // 斜杠菜单开着时只在【非浏览历史】(cursor<0)消费箭头(ChatInput.jsx:696/:704)
+  if (showCommands && (key === 'ArrowUp' || key === 'ArrowDown') && cursor < 0) {
+    return { ...state, prevented: true, menu: true };
+  }
+  const canUseHistory = (!text.startsWith('/') || cursor >= 0)
     && (text.trim() === '' || cursor >= 0 || !text.includes('\n') || (key === 'ArrowUp' ? atStart : atEnd));
   if (!canUseHistory) return { ...state, prevented: false };
   // 本次修复:↓ 在未浏览历史时不吞键,让光标正常下移
@@ -90,11 +99,55 @@ const S0 = { text: '', cursor: -1, draft: '' };
   assert.equal(down1.text, 'a\nb', '↓ 到底找回多行草稿');
 }
 
-// ── 路径 5:斜杠命令永不劫持(slash 菜单优先)──────────────────
+// ── 路径 5:【手打】斜杠命令不劫持(slash 菜单优先)────────────────
 {
   const slash = { text: '/comp', cursor: -1, draft: '' };
-  assert.equal(keyDown(slash, 'ArrowUp', HIST).prevented, false, '/ 开头不进历史导航');
-  assert.equal(keyDown(slash, 'ArrowDown', HIST).prevented, false, '/ 开头不进历史导航');
+  assert.equal(keyDown(slash, 'ArrowUp', HIST).prevented, false, '手打 / 开头不进历史导航');
+  assert.equal(keyDown(slash, 'ArrowDown', HIST).prevented, false, '手打 / 开头不进历史导航');
 }
 
-console.log('✓ check-input-history-nav: 5 条路径全过');
+// ── 路径 6(#15):历史里有 / 开头条目时不得卡死 ────────────────────
+// 修前 canUseHistory 写死 !text.startsWith('/'):翻出 '/compact' 后下一次 ↑↓ 整个历史分支
+// 被跳过,退化成光标移动 —— 历史一有 / 开头的条目就再也翻不过去。
+{
+  const H = ['/compact', '第二条'];
+  let s = keyDown(S0, 'ArrowUp', H);
+  assert.equal(s.text, '/compact', '空框 ↑ → 最新一条(/compact)');
+  s = keyDown(s, 'ArrowUp', H);
+  assert.equal(s.text, '第二条', '停在 /compact 上再 ↑ 必须能继续往上翻(修前失败)');
+  s = keyDown(s, 'ArrowDown', H);
+  assert.equal(s.text, '/compact', '↓ 回到 /compact');
+  s = keyDown(s, 'ArrowDown', H);
+  assert.equal(s.cursor, -1, '↓ 到底退出历史');
+  assert.equal(s.text, '', '退出历史回填草稿');
+  // 退出历史后又变回"手打 /"语义:此时 ↑ 从空框重新进历史,不受影响
+  assert.equal(keyDown(s, 'ArrowUp', H).text, '/compact');
+}
+
+// ── 路径 7(#15):斜杠菜单只在非浏览态吃箭头 ──────────────────────
+{
+  const H = ['/compact', '第二条'];
+  // 浏览历史中翻出 /compact → 菜单会自动弹出(text 以 / 开头),箭头必须仍归历史
+  const browsing = { text: '/compact', cursor: 0, draft: '' };
+  const up = keyDown(browsing, 'ArrowUp', H, { showCommands: true });
+  assert.equal(up.menu, undefined, '浏览历史中箭头不得被斜杠菜单吃掉');
+  assert.equal(up.text, '第二条', '浏览历史中 ↑ 继续翻历史');
+  // 手打 /compact(cursor=-1)→ 箭头归菜单(既有行为不能变)
+  const typed = { text: '/compact', cursor: -1, draft: '' };
+  assert.equal(keyDown(typed, 'ArrowDown', H, { showCommands: true }).menu, true, '手打时箭头归斜杠菜单');
+  // 浏览态下手打一个字符 → cursor 复位 -1 → 菜单箭头恢复
+  const afterTyping = typeText(browsing, '/comp');
+  assert.equal(keyDown(afterTyping, 'ArrowDown', H, { showCommands: true }).menu, true, '打字复位后箭头归菜单');
+}
+
+// ── 源码守卫:防止改回写死的 `/` 排除 ────────────────────────────
+{
+  const src = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '../../client/src/components/ChatInput.jsx'), 'utf8');
+  assert.ok(src.includes("(!text.startsWith('/') || historyCursor >= 0)"),
+    'canUseHistory 必须放行浏览态的 / 开头条目');
+  const kd = src.slice(src.indexOf('const handleKeyDown ='));
+  assert.ok(kd.split('historyCursor < 0').length - 1 >= 3,
+    'handleKeyDown 里 historyCursor < 0 门控至少 3 处(斜杠菜单两个箭头 + ↓ 早退)');
+}
+
+console.log('✓ check-input-history-nav: 7 条路径 + 源码守卫全过');
