@@ -13,14 +13,26 @@ function fmtElapsed(ms) {
   return `${h}h${m % 60}m`;
 }
 
+// 折叠态持久化:关闭监控面板会卸载整棵子树(App.jsx setRightPanel(null)),裸 useState
+// 每次重开都回默认值。按区块 id 存一张 { id: open } 表。
+// 只做区块层,不做卡片层(AgentCard / BgTaskCard 的 expanded):卡片 id 是 tool_use_id,
+// 每个新任务一个,持久化会让 localStorage 无界增长。
+const FOLD_KEY = 'cgui-monitor-fold';
+const readFold = () => {
+  try { return JSON.parse(localStorage.getItem(FOLD_KEY)) || {}; } catch { return {}; }
+};
+const writeFold = (id, open) => {
+  try { const m = readFold(); m[id] = open; localStorage.setItem(FOLD_KEY, JSON.stringify(m)); } catch {}
+};
+
 // 监控面板顶层区块的统一可折叠外壳(用户要求:所有选项都能折叠/展开)。
 // 标题行整行可点;默认展开,折叠态只留标题。内部 bucket(AgentBucket 等)本就可折叠,
 // 这层管的是「当前对话内 Task / 后台任务 / 后台代理 / Claude 子进程」四个大区。
-function FoldableSection({ icon, title, defaultOpen = true, children }) {
-  const [open, setOpen] = useState(defaultOpen);
+function FoldableSection({ id, icon, title, defaultOpen = true, children }) {
+  const [open, setOpen] = useState(() => readFold()[id] ?? defaultOpen);
   return (
     <section>
-      <button onClick={() => setOpen((v) => !v)}
+      <button onClick={() => setOpen((v) => { writeFold(id, !v); return !v; })}
         className="w-full text-left text-[10px] uppercase tracking-widest text-ink-faint font-body mb-2 flex items-center gap-1.5 hover:text-ink-muted transition-colors">
         {open ? <ChevronDown size={10} className="shrink-0" /> : <ChevronRight size={10} className="shrink-0" />}
         {icon}{title}
@@ -162,7 +174,7 @@ function BackgroundAgentsSection({ stoppingPid, onStop }) {
     .slice(0, 10);
 
   return (
-    <FoldableSection icon={<Bot size={10} />} title={`后台代理 (claude --bg) (${running.length})`}>
+    <FoldableSection id="bg-agents" icon={<Bot size={10} />} title={`后台代理 (claude --bg) (${running.length})`}>
       <div className="flex items-center gap-1.5 mb-2">
         <input value={prompt} onChange={(e) => setPrompt(e.target.value)}
           onKeyDown={(e) => { if (e.key === 'Enter' && !e.nativeEvent?.isComposing && e.keyCode !== 229) dispatch(); }}
@@ -281,12 +293,12 @@ function RemoteAgentCard({ agent, stoppingPid, onStop }) {
 }
 
 // Bucket wrapping multiple remote agent cards under a status heading.
-function RemoteBucket({ title, titleColor, defaultOpen, agents, stoppingPid, onStop }) {
-  const [open, setOpen] = useState(defaultOpen);
+function RemoteBucket({ id, title, titleColor, defaultOpen, agents, stoppingPid, onStop }) {
+  const [open, setOpen] = useState(() => readFold()[id] ?? defaultOpen);
   return (
     <div>
       <button
-        onClick={() => setOpen(!open)}
+        onClick={() => setOpen((v) => { writeFold(id, !v); return !v; })}
         className="w-full flex items-center gap-1.5 text-[10px] uppercase tracking-wider text-ink-faint font-body py-1 hover:text-ink-muted"
       >
         {open ? <ChevronDown size={10} /> : <ChevronRight size={10} />}
@@ -304,12 +316,12 @@ function RemoteBucket({ title, titleColor, defaultOpen, agents, stoppingPid, onS
 
 // Collapsible bucket — group header click toggles open, click on each
 // agent card expands its details inline.
-function AgentBucket({ title, titleColor, defaultOpen, agents }) {
-  const [open, setOpen] = useState(defaultOpen);
+function AgentBucket({ id, title, titleColor, defaultOpen, agents }) {
+  const [open, setOpen] = useState(() => readFold()[id] ?? defaultOpen);
   return (
     <div>
       <button
-        onClick={() => setOpen(!open)}
+        onClick={() => setOpen((v) => { writeFold(id, !v); return !v; })}
         className="w-full flex items-center gap-1.5 text-[10px] uppercase tracking-wider text-ink-faint font-body py-1 hover:text-ink-muted"
       >
         {open ? <ChevronDown size={10} /> : <ChevronRight size={10} />}
@@ -798,13 +810,14 @@ export function AgentMonitorPanel() {
       <div className="flex-1 overflow-y-auto p-3 space-y-3">
         {/* Local Task tool subagents (from current stream) — grouped by status */}
         {shownTaskCount > 0 && (
-          <FoldableSection icon={<Bot size={10} />} title={`当前对话内 Task (${shownTaskCount})`}>
+          <FoldableSection id="local-tasks" icon={<Bot size={10} />} title={`当前对话内 Task (${shownTaskCount})`}>
             <div className="space-y-3">
               {Object.entries(buckets).map(([key, agents]) => {
                 if (agents.length === 0) return null;
                 return (
                   <AgentBucket
                     key={key}
+                    id={`bucket-${key}`}
                     title={BUCKET_META[key].label}
                     titleColor={BUCKET_META[key].color}
                     // 本地子代理一律默认展开:跑完进 done 桶被折叠是"看不见子代理活动"
@@ -820,7 +833,7 @@ export function AgentMonitorPanel() {
 
         {/* 后台任务(Bash run_in_background / python 后台)— 实时 tail .output 文件 */}
         {bgList.length > 0 && (
-          <FoldableSection icon={<PlayCircle size={10} />} title={`后台任务 (${bgList.length})`}>
+          <FoldableSection id="bg-tasks" icon={<PlayCircle size={10} />} title={`后台任务 (${bgList.length})`}>
             <div className="space-y-2">
               {bgList.map((t) => <BgTaskCard key={t.id} task={t} />)}
             </div>
@@ -831,7 +844,7 @@ export function AgentMonitorPanel() {
             整体 workflow 单元卡在上面「当前对话内 Task」区(带"工作流"badge);这里是它内部
             各 agent 的实时状态(running/idle/done,journal.jsonl result 定 done、mtime 判活)。 */}
         {wfAgents.length > 0 && (
-          <FoldableSection icon={<Bot size={10} />} title={`workflow 内层 agent (${wfAgents.length})`}>
+          <FoldableSection id="wf-agents" icon={<Bot size={10} />} title={`workflow 内层 agent (${wfAgents.length})`}>
             <div className="space-y-1.5">
               {wfAgents.map((a) => {
                 // 主会话已被停止 → 前台 workflow 内层 agent 随主进程死,但服务端状态是
@@ -859,7 +872,7 @@ export function AgentMonitorPanel() {
 
         {/* Server-side chat children + CLI agents — bucketed by status so the
             "working" ones default open and finished/errored ones fold away. */}
-        <FoldableSection icon={<Terminal size={10} />} title={`Claude 子进程 (${remote.agents.length})`}>
+        <FoldableSection id="claude-procs" icon={<Terminal size={10} />} title={`Claude 子进程 (${remote.agents.length})`}>
           {remote.agents.length > 0 ? (
             (() => {
               const isWorking = (a) => ['streaming', 'starting', 'running', 'working'].includes(a.status);
@@ -876,7 +889,7 @@ export function AgentMonitorPanel() {
               return (
                 <div className="space-y-3">
                   {groups.map((g) => (
-                    <RemoteBucket key={g.key} title={g.label} titleColor={g.color} defaultOpen={g.defaultOpen} agents={g.list} stoppingPid={stoppingPid} onStop={stop} />
+                    <RemoteBucket key={g.key} id={`remote-${g.key}`} title={g.label} titleColor={g.color} defaultOpen={g.defaultOpen} agents={g.list} stoppingPid={stoppingPid} onStop={stop} />
                   ))}
                 </div>
               );
