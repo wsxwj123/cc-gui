@@ -260,7 +260,15 @@ export function SettingsPanel() {
       {tab === 'network' && <div id="set-network"><NetworkTab /></div>}
       {tab === 'advanced' && (
         <div className="space-y-5">
-          <div id="set-json">
+          {/* 修正批#7:环境变量编辑器自原 Provider tab 迁入(该 tab 已删,provider 相关
+              env 键切 provider 时由服务端写,这里是手动兜底编辑口)。
+              用户要求置顶:原来排在 settings.json 全文编辑器和存储清理之后,要翻很久才够得着,
+              而它是本 tab 唯一的高频编辑项。分隔线(border-t)跟着首块的身份走 —— 谁在最上面
+              谁不带,否则顶部会多出一条悬空横线。 */}
+          <div>
+            <EnvVarsSection settings={settings} onEnvPatch={envPatch} saving={saving} />
+          </div>
+          <div id="set-json" className="border-t border-canvas-deep pt-4">
             <div className="text-[10px] text-ink-faint uppercase tracking-wider font-body mb-2">原始配置 settings.json</div>
             <JsonTab rawJson={rawJson} setRawJson={setRawJson} onSave={() => save()}
               onReset={() => { setRawJson(JSON.stringify(settings, null, 2)); setError(null); }}
@@ -269,11 +277,6 @@ export function SettingsPanel() {
           <div id="set-storage" className="border-t border-canvas-deep pt-4">
             <div className="text-[10px] text-ink-faint uppercase tracking-wider font-body mb-2">存储清理</div>
             <StorageTab />
-          </div>
-          {/* 修正批#7:环境变量编辑器自原 Provider tab 迁入(该 tab 已删,provider 相关
-              env 键切 provider 时由服务端写,这里是手动兜底编辑口)。 */}
-          <div className="border-t border-canvas-deep pt-4">
-            <EnvVarsSection settings={settings} onEnvPatch={envPatch} saving={saving} />
           </div>
         </div>
       )}
