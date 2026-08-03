@@ -48,7 +48,11 @@ function startBridge(reply) {
     let body = '';
     req.on('data', (d) => { body += d; });
     req.on('end', () => {
-      received.push({ url: req.url, body: (() => { try { return JSON.parse(body); } catch { return null; } })() });
+      // 只记授权端点的请求:6702 上若正好开着 GUI 客户端,它每 1.5s 的轮询会打进来,
+      // 把"hook 发了几次请求"的断言搅成随机值。
+      if (req.url === '/api/permissions/request') {
+        received.push({ url: req.url, body: (() => { try { return JSON.parse(body); } catch { return null; } })() });
+      }
       if (reply === null) return; // 挂起(模拟"等用户点击"),永不响应
       res.writeHead(reply.status || 200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(reply.json ?? {}));
@@ -161,7 +165,22 @@ const decisionOf = (out) => {
   assert.ok(Date.now() - t0 >= 2500, '必须真的等满超时窗口,不能立刻放弃');
 }
 
-// ── ⑧ 派发侧接线守卫(agents.js 里的 hook 挂载与档位)─────────────────────
+// ── ⑧ fail-safe:stdin 读不出工具名 → 直接 deny,不弹"unknown"卡 ──────────
+{
+  const { server, received } = await startBridge({ json: { decision: 'allow' } });
+  const p = spawn(process.execPath, [HOOK, String(PORT)], { stdio: ['pipe', 'pipe', 'pipe'] });
+  let out = '';
+  p.stdout.on('data', (d) => { out += d; });
+  p.stdin.end('not json at all');
+  await new Promise((r) => p.on('close', r));
+  stopBridge(server);
+  const d = decisionOf(out);
+  assert.equal(d.behavior, 'deny', '解析不出工具名必须拒绝');
+  assert.ok(/缺少工具名/.test(d.message), '理由要说清是没解析出工具名');
+  assert.equal(received.length, 0, '不得为这种请求弹卡(用户看到 unknown 无从判断)');
+}
+
+// ── ⑨ 派发侧接线守卫(agents.js 里的 hook 挂载与档位)─────────────────────
 {
   const src = readFileSync(join(root, 'server/routes/agents.js'), 'utf8');
   assert.ok(/BG_PERMISSION_MODES = new Set\(\['default', 'acceptEdits', 'plan'\]\)/.test(src), '三档白名单');
@@ -193,6 +212,25 @@ const decisionOf = (out) => {
   assert.ok(split.indexOf('if (!paneIsActive) return false;') < split.indexOf('if (p.bgAgent) return true;'),
     '分屏:后台代理的卡片由活动窗格接住,必须排在 paneIsActive 门控之后');
   assert.ok(/{req\.bgAgent && \(/.test(prompt), '卡片必须标明来自后台代理');
+
+  // P1:批准后台代理的计划卡不得动【当前窗格】的权限档。/chat/permission-mode 打的是
+  // SDK 活跃 query(后台代理不在其中),onExecutePlan 更是直接改本窗格会话档位 →
+  // 批准别人的计划、污染自己的档位(项目史上 per-pane 泄漏同类)。
+  const approve = prompt.slice(prompt.indexOf('const approvePlan = async (req) => {'), prompt.indexOf('const answerQuestion ='));
+  assert.ok(/if \(req\.bgAgent\) return;/.test(approve), '后台代理的计划卡:allow 完就返回');
+  assert.ok(approve.indexOf('if (req.bgAgent) return;') < approve.indexOf("fetch('/api/chat/permission-mode'"),
+    'bgAgent 早退必须排在 /chat/permission-mode 之前');
+  assert.ok(approve.indexOf('if (req.bgAgent) return;') < approve.indexOf('onExecutePlan?.()'),
+    'bgAgent 早退必须排在 onExecutePlan 之前(它会改当前窗格档位)');
+
+  // P2:hook 只读 decision/updatedInput,always 会被静默丢弃 → 后台代理的卡不得给
+  // "始终允许"。并进 noAlways 而不是只藏 option:doAllow 也读它,分开写会漂移
+  // (卡片实例被 React 复用,remember='always' 能从上一张普通卡带过来)。
+  assert.ok(/const noAlways = dangerous \|\| planNoAlways \|\| !!req\.bgAgent;/.test(prompt),
+    'bgAgent 必须并进 noAlways(同时挡住 option 渲染与 doAllow 分支)');
+  assert.ok(/\{!noAlways && <option value="always">/.test(prompt), '"始终允许" option 受 noAlways 门控');
+  assert.ok(/remember === 'always' && !noAlways\) onAlwaysAllow\(req\)/.test(prompt),
+    'doAllow 的 always 分支同样受 noAlways 门控');
 }
 
-console.log('✓ check-permission-hook-bridge: allow/deny/不可达/非2xx/坏响应/超时 六态 + 派发接线全过');
+console.log('✓ check-permission-hook-bridge: allow/deny/不可达/非2xx/坏响应/超时/无工具名 七态 + 派发接线 + 卡片行为全过');

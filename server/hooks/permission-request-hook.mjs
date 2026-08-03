@@ -40,6 +40,13 @@ const main = async () => {
   let input = {};
   try { input = JSON.parse(await readStdin()) || {}; } catch { input = {}; }
 
+  // 连工具名都读不出来(stdin 不是 JSON / 形态变了)就别弹卡:那张卡会写着
+  // "Claude 想使用 unknown",用户无从判断该不该批。同样是 fail-safe 方向 —— 拒绝。
+  if (!input.tool_name) {
+    emit({ behavior: 'deny', message: 'Claude GUI 未能解析本次授权请求（缺少工具名），按拒绝处理。' });
+    return;
+  }
+
   const ctl = new AbortController();
   const timer = setTimeout(() => ctl.abort(), TIMEOUT_MS);
   try {
@@ -47,7 +54,7 @@ const main = async () => {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        toolName: input.tool_name || 'unknown',
+        toolName: input.tool_name,
         toolInput: input.tool_input || {},
         sessionId: input.session_id || null,
         cwd: input.cwd || null,

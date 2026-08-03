@@ -486,7 +486,12 @@ function PermissionCard({ req, onResolve, onWhitelistAndAllow, onAlwaysAllow, on
   // 客户端若不藏,用户选了「始终允许」会被服务端静默丢弃(调研附带发现)。
   const guiMode = useStore((s) => s.getPermissionModeFor(req.sessionId));
   const planNoAlways = guiMode === 'plan' && (PLAN_WRITE_CLASS.has(req.toolName) || req.toolName === 'Bash');
-  const noAlways = dangerous || planNoAlways;
+  // 后台代理的卡片走 PermissionRequest hook,裁决只回 decision/updatedInput —— always
+  // 会被静默丢弃(写规则是 SDK canUseTool 的 updatedPermissions 专属),可点却不生效 = 骗人。
+  // 并进 noAlways 而不是只藏 option:doAllow 也读这个值,分开写迟早漂移(卡片实例会被
+  // React 复用,remember='always' 能从上一张普通卡带过来,只藏 option 拦不住)。
+  // "本会话内允许"是前端白名单 + WS 自动放行,对后台代理照常有效,保留。
+  const noAlways = dangerous || planNoAlways || !!req.bgAgent;
   const doAllow = () => {
     if (remember === 'session') onWhitelistAndAllow(req);
     else if (remember === 'always' && !noAlways) onAlwaysAllow(req);
@@ -781,6 +786,11 @@ export function PermissionPrompt({ sessionId = null, onExecutePlan = null, hydra
   // 变为"经 canUseTool 弹窗"。onExecutePlan 仅用于同步 GUI 档位状态(已去掉 respawn)。
   const approvePlan = async (req) => {
     await resolve(req, 'allow');
+    // 后台代理的计划卡:allow 回 hook 就完了。下面两步都是【当前窗格】的操作 ——
+    // /chat/permission-mode 打的是 SDK 活跃 query(后台代理不在其中),onExecutePlan
+    // 更是直接把当前窗格会话的档位改成 acceptEdits(permKey 取的是本窗格,不是 bg 会话)
+    // = 批准别人的计划,污染自己的档位。
+    if (req.bgAgent) return;
     try {
       await fetch('/api/chat/permission-mode', {
         method: 'POST',
