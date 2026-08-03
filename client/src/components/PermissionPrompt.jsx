@@ -1,9 +1,10 @@
 import React, { useEffect, useState, useRef } from 'react';
-import { AlertCircle, Loader2, ClipboardList, ShieldAlert } from 'lucide-react';
+import { AlertCircle, Loader2, ClipboardList, ShieldAlert, FormInput } from 'lucide-react';
 import { useStore } from '../stores/sessionStore.js';
 import { MarkdownRenderer } from './MarkdownRenderer.jsx';
 import { isDangerousCommand, respondPermission } from '../hooks/useWebSocket.js';
 import { isEditableTarget } from '../utils/escAction.js';
+import { elicitFields, elicitMissing, buildElicitContent, initialElicitValues } from '../utils/elicitSchema.js';
 
 // plan 档不写持久规则的工具集(与服务端 chat.js WRITE_CLASS 对齐)。
 const PLAN_WRITE_CLASS = new Set(['Edit', 'MultiEdit', 'Write', 'NotebookEdit']);
@@ -476,6 +477,119 @@ function BoundaryCard({ req, onResolve, onAuthorizeDir, processing, position, hy
   );
 }
 
+// MCP elicitation 表单卡:MCP 服务器在工具执行途中要用户补一段结构化输入
+// (requestedSchema 是扁平 object schema)。服务端 requestElicitation 把它放进同一张
+// 挂起表,所以停止/切会话/进程退出的清卡逻辑对它一并生效。
+// 前端只发 allow/deny 两种决定,翻译成 MCP 的 accept/decline/cancel 在服务端做:
+// 提交=accept(带 content)、拒绝=decline、被系统清掉=cancel(用户未作答)。
+function ElicitCard({ req, onSubmit, onDecline, processing, position, hydrate, tabIndex }) {
+  const fields = elicitFields(req.requestedSchema);
+  const [values, setValues] = useState(() => initialElicitValues(elicitFields(req.requestedSchema)));
+  const missing = elicitMissing(fields, values);
+  const setVal = (k, v) => setValues((prev) => ({ ...prev, [k]: v }));
+  const submit = () => { if (!missing.length && !processing) onSubmit(req, buildElicitContent(fields, values)); };
+
+  useEffect(() => {
+    if (!hydrate) return; // BK-1:键盘只在主实例绑,避免子代理视图重复 respond
+    if (position !== 0) return;
+    const onKey = (e) => {
+      if (!paneHasKeyboard(tabIndex)) return;
+      if (isEditableTarget(e.target)) return; // 焦点在表单控件里时交给控件自己处理
+      if (e.key === 'Enter') { e.preventDefault(); submit(); }
+      else if (e.key === 'Escape') { e.preventDefault(); onDecline(req); }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [hydrate, position, tabIndex, req, values, processing, onSubmit, onDecline]);
+
+  return (
+    <div className="flex flex-col max-h-[min(42vh,calc(var(--app-h,100dvh)*0.42))] rounded-xl bg-canvas border border-canvas-deep shadow-lg overflow-hidden animate-fade-up relative">
+      <div className="px-4 py-2.5 flex items-center gap-2 border-b border-canvas-deep bg-cyan-500/10">
+        <div className="w-6 h-6 rounded-md bg-cyan-100 flex items-center justify-center shrink-0">
+          <FormInput size={13} className="text-cyan-700" />
+        </div>
+        <div className="text-[13px] font-medium text-ink flex-1 min-w-0 truncate">
+          {req.title || `${req.displayName || req.serverName} 需要你填写信息`}
+        </div>
+        <div className="text-[10px] text-ink-faint font-mono truncate max-w-[35%]" title={`MCP 服务器：${req.serverName}`}>
+          {req.serverName}
+        </div>
+      </div>
+      <div className="px-4 py-3 flex-1 min-h-0 overflow-y-auto space-y-3">
+        {req.message && <div className="text-[12.5px] text-ink whitespace-pre-wrap break-words">{req.message}</div>}
+        {req.description && <div className="text-[11px] text-ink-faint leading-snug">{req.description}</div>}
+        {fields.length === 0 && (
+          <div className="text-[12px] text-ink-faint">该请求没有需要填写的字段，确认即可继续。</div>
+        )}
+        {fields.map((f) => (
+          <div key={f.key} className="space-y-1">
+            <div className="text-[11px] text-ink-muted">
+              {f.label}{f.required && <span className="text-rose-600 ml-0.5">*</span>}
+            </div>
+            {f.description && <div className="text-[10.5px] text-ink-faint leading-snug">{f.description}</div>}
+            {f.type === 'enum' ? (
+              <div className="grid gap-1.5">
+                {f.options.map((o) => (
+                  <button
+                    key={o.value}
+                    type="button"
+                    disabled={processing}
+                    onClick={() => setVal(f.key, values[f.key] === o.value ? undefined : o.value)}
+                    className={`text-left px-3 py-1.5 rounded-lg border text-[12.5px] transition-colors disabled:opacity-50 ${
+                      values[f.key] === o.value ? 'border-cyan-400 bg-cyan-500/15 text-ink' : 'border-canvas-deep bg-canvas-warm/40 text-ink-soft hover:bg-canvas-deep'
+                    }`}
+                  >{o.label}</button>
+                ))}
+              </div>
+            ) : f.type === 'boolean' ? (
+              <label className="flex items-center gap-1.5 text-[12px] text-ink-soft cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  className="rounded accent-accent"
+                  disabled={processing}
+                  checked={!!values[f.key]}
+                  onChange={(e) => setVal(f.key, e.target.checked)}
+                />
+                {values[f.key] ? '是' : '否'}
+              </label>
+            ) : (
+              <input
+                type={f.type === 'number' ? 'number' : 'text'}
+                disabled={processing}
+                value={values[f.key] ?? ''}
+                min={f.type === 'number' && f.min != null ? f.min : undefined}
+                max={f.type === 'number' && f.max != null ? f.max : undefined}
+                step={f.type === 'number' && f.integer ? 1 : undefined}
+                onChange={(e) => setVal(f.key, e.target.value)}
+                onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); submit(); } }}
+                placeholder={f.type === 'number' && (f.min != null || f.max != null) ? `${f.min ?? ''}～${f.max ?? ''}` : ''}
+                className="w-full text-[12px] font-body px-2.5 py-1.5 rounded-md border border-canvas-deep bg-canvas text-ink"
+              />
+            )}
+          </div>
+        ))}
+      </div>
+      <div className="px-4 py-2.5 flex items-center flex-wrap gap-2 bg-canvas-warm/60 border-t border-canvas-deep">
+        <button
+          disabled={processing}
+          onClick={() => onDecline(req)}
+          className="px-3 py-1.5 rounded-md text-[12px] font-medium text-ink-muted hover:bg-canvas-deep disabled:opacity-50"
+          title="Esc。拒绝后 MCP 服务器会收到「用户拒绝提供」"
+        >拒绝</button>
+        <button
+          disabled={processing || missing.length > 0}
+          onClick={submit}
+          className="ml-auto px-3 py-1.5 rounded-md text-[12px] font-medium text-on-accent bg-accent hover:opacity-90 disabled:opacity-50 inline-flex items-center gap-1.5"
+          title={missing.length ? `还有 ${missing.length} 个必填项未填` : 'Enter'}
+        >
+          {processing && <Loader2 size={11} className="animate-spin" />}
+          提交 ↵
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function PermissionCard({ req, onResolve, onWhitelistAndAllow, onAlwaysAllow, onResolveSame, sameCount, processing, position, hydrate, tabIndex }) {
   // remember:none=仅此次;session=本会话白名单(localStorage,行为同旧版);
   // always=写 settings.json 的 permissions.allow 规则(经服务端 updatedPermissions,
@@ -596,14 +710,16 @@ function PermissionCard({ req, onResolve, onWhitelistAndAllow, onAlwaysAllow, on
 }
 
 function PendingPill({ req, position }) {
+  // kind 卡没有 toolName(它们不是工具授权),按类型给个标签,否则排队里是一枚空徽章。
+  const label = req.kind === 'elicitation' ? '填写信息' : req.toolName;
   return (
     <div className="rounded-lg bg-canvas/60 border border-canvas-deep px-3 py-1.5 flex items-center gap-2 opacity-70">
       <span className="text-[10px] font-mono text-ink-faint shrink-0">{position + 1}</span>
       <span className="text-[12px] text-ink shrink-0">
-        <span className={`px-1.5 py-0.5 rounded font-mono text-[10px] ${toolBadgeClass(req.toolName)}`}>{req.toolName}</span>
+        <span className={`px-1.5 py-0.5 rounded font-mono text-[10px] ${toolBadgeClass(req.toolName)}`}>{label}</span>
       </span>
       <span className="font-mono text-[11px] text-ink-faint truncate flex-1">
-        {String(req.toolInput?.command || req.toolInput?.file_path || req.toolInput?.url || req.toolInput?.pattern || req.toolInput?.query || '')}
+        {req.kind ? String(req.message || req.serverName || '') : String(req.toolInput?.command || req.toolInput?.file_path || req.toolInput?.url || req.toolInput?.pattern || req.toolInput?.query || '')}
       </span>
     </div>
   );
@@ -811,6 +927,11 @@ export function PermissionPrompt({ sessionId = null, onExecutePlan = null, hydra
     }
   };
 
+  // kind 卡的两个作答:都复用 resolve 的送达重试/撤卡链路,只多带一个 content。
+  // elicitation 提交 → 服务端翻译成 MCP 的 {action:'accept', content};
+  // 拒绝(两张卡的「拒绝/取消」与 Esc)走裸 deny → decline / cancelled。
+  const submitElicit = (req, content) => resolve(req, 'allow', null, undefined, { content });
+
   // Opt-in batch: resolve the SAME request (same tool + identical input) in the
   // OTHER sessions currently open in panes. Different requests are untouched.
   const sameInputKey = (r) => `${r.toolName} ${JSON.stringify(r.toolInput || {})}`;
@@ -835,7 +956,21 @@ export function PermissionPrompt({ sessionId = null, onExecutePlan = null, hydra
           {mine.length} 个待处理请求 · 上面的先处理
         </div>
       )}
-      {mine[0].toolName === 'ExitPlanMode' ? (
+      {/* key=请求 id:两张卡都带用户输入的本地 state。不给 key 时 React 会把上一张卡的
+          实例复用给下一个请求(同类型同位置),上一张表单填的值会原样带进新表单并被提交
+          给 MCP 服务器。 */}
+      {mine[0].kind === 'elicitation' ? (
+        <ElicitCard
+          key={mine[0].id}
+          req={mine[0]}
+          onSubmit={submitElicit}
+          onDecline={(r) => resolve(r, 'deny')}
+          processing={busyId === mine[0].id}
+          position={0}
+          hydrate={hydrate}
+          tabIndex={tabIndex}
+        />
+      ) : mine[0].toolName === 'ExitPlanMode' ? (
         <PlanReviewCard
           req={mine[0]}
           onResolve={resolve}

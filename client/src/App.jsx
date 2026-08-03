@@ -4145,10 +4145,11 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         // didn't byte-match (streaming-accumulated vs final jsonl can differ).
         // Fixes the "reply rendered twice" race (jsonl turn + local turn both show).
         const lastUser = [...prev].reverse().find((m) => m.type === 'user');
-        // 保留旁问气泡(btw 无 jsonl 孪生)与未落盘的停止半截回复(interrupted:停止场景
+        // 保留旁问气泡(btw 无 jsonl 孪生)、自动拒绝提示(denial 同样只活在本地,见
+        // 下方 localOnly)与未落盘的停止半截回复(interrupted:停止场景
         // "末条用户消息已落盘"≠"整轮落盘",半截 assistant 可能没写进 jsonl,整清=丢内容;
         // 已落盘的(tkey 命中)照清防双渲染)。审计#7。
-        if (lastUser && known.has(tkey(lastUser))) return prev.filter((m) => m.type === 'btw' || (m.interrupted && !known.has(tkey(m))));
+        if (lastUser && known.has(tkey(lastUser))) return prev.filter((m) => m.type === 'btw' || m.type === 'denial' || (m.interrupted && !known.has(tkey(m))));
         return prev.filter((m) => !known.has(tkey(m)));
       });
     };
@@ -4181,8 +4182,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       };
       const known = new Set(messages.map(tkey));
       const lastUser = [...prev].reverse().find((m) => m.type === 'user');
-      // 保留 btw 与未落盘的停止半截回复(同上面 reconcile,审计#7)。
-      if (lastUser && known.has(tkey(lastUser))) return prev.filter((m) => m.type === 'btw' || (m.interrupted && !known.has(tkey(m))));
+      // 保留 btw / denial 与未落盘的停止半截回复(同上面 reconcile,审计#7)。
+      if (lastUser && known.has(tkey(lastUser))) return prev.filter((m) => m.type === 'btw' || m.type === 'denial' || (m.interrupted && !known.has(tkey(m))));
       const next = prev.filter((m) => !known.has(tkey(m)));
       return next.length === prev.length ? prev : next;
     });

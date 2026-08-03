@@ -7,7 +7,7 @@ import { homedir, tmpdir } from 'node:os';
 import { randomBytes } from 'node:crypto';
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import { getDefaultModel } from '../services/model-resolver.js';
-import { dropPendingForSession, requestPermission, resolvePendingForSession } from './permissions.js';
+import { dropPendingForSession, requestElicitation, requestPermission, resolvePendingForSession } from './permissions.js';
 import { buildAlwaysAllowUpdates, buildDirAuthUpdates } from '../utils/permission-rules.js';
 import { stripInheritedProviderEnv } from '../utils/provider-env.js';
 import { resolveClaude } from '../utils/claude-resolver.js';
@@ -1224,6 +1224,12 @@ router.post('/chat', async (req, res) => {
     agentProgressSummaries: true,
     permissionMode: sdkPermMode,
     canUseTool: makeCanUseTool(slot),
+    // MCP 服务器要用户填表(elicitation)。走与授权卡同一张挂起表 → 停止/进程退出的清卡
+    // 对它天然生效。不自设超时:撤单权在 MCP 服务器(默认 60s),到点经 opts.signal 撤卡。
+    // 只有外部 stdio/http server 会发,SDK 进程内 server 不支持该能力。
+    onElicitation: (request, opts = {}) => requestElicitation({
+      ...request, sessionId: slot.sessionId, cwd: slot.cwd, signal: opts.signal,
+    }),
     // 返回 {continue:true} 的 no-op PreToolUse hook。注:曾以为它修 "Stream closed",经 opus
     // 实证那是误判(真因是子代理打穿 canUseTool 通道,见 disallowedTools 那段);此 hook 对
     // TS 无实质作用(官方那条"需 dummy hook"只针对 Python)。保留作无害保险(保持流活性)。

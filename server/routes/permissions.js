@@ -27,6 +27,71 @@ function settle(slot, payload) {
 }
 
 /**
+ * 「kind 卡」:elicitation(MCP 服务器要用户填表)与 dialog(CLI 要宿主弹阻塞对话框)。
+ * 两者都不是工具授权,但生命周期与授权卡完全一致 —— 等人回答、会话停了要撤、多端可见、
+ * 断线要能补拉。共用这张挂起表,dropPendingForSession / 对账 / 送达重试 / 刷新补拉全部
+ * 自动生效,不必各建一条通道。差别只在「决定怎么翻译回等待方」:授权卡回 {decision},
+ * elicitation 回 MCP 的 {action, content},dialog 回 CLI 的 {behavior, result}。
+ * 翻译函数随请求一起挂在 slot 上,所以清卡侧(dropPendingForSession)不需要认识这两类,
+ * 一行都不用改:它照旧 settle 一个 deny payload,翻译函数把它变成正确的「未作答」终态。
+ * 授权路径靠 toolName 判定(危险命令/白名单/切档重裁),kind 卡一律不带 toolName,
+ * 因此天然不会被那些路径误判。
+ */
+function requestCard(fields, { signal, translate }) {
+  return new Promise((resolve) => {
+    const id = randomUUID();
+    const request = { id, createdAt: Date.now(), ...fields };
+    // 撤单权在上游(MCP 服务器默认 60s、CLI 的 park deadline),本地不自设超时。上游撤单
+    // 经 signal 到达:此时必须把卡从表里删掉并撤下界面,否则用户对着一张已作废的卡填表。
+    const onAbort = () => {
+      const slot = pending.get(id);
+      if (!slot) return;
+      pending.delete(id);
+      if (settle(slot, { decision: 'deny', reason: '请求已被发起方取消' })) {
+        broadcast({ type: 'permission:resolved', id, decision: 'timeout' });
+      }
+    };
+    pending.set(id, {
+      request,
+      resolve: (payload) => {
+        try { signal?.removeEventListener('abort', onAbort); } catch {}
+        resolve(translate(payload || {}));
+      },
+    });
+    broadcast({ type: 'permission:request', request });
+    if (signal?.aborted) onAbort();
+    else { try { signal?.addEventListener('abort', onAbort, { once: true }); } catch {} }
+  });
+}
+
+// 应答 → MCP ElicitResult。byUser 是「用户在界面上按了拒绝」的标记(由 respond 端点打):
+// 没有它就是系统清卡(停止 / 进程退出 / 上游撤单),MCP 语义里那是 cancel(未作答),
+// 不是 decline(明确拒绝)——服务器据此决定要不要重试,翻错会让它以为用户拒绝了。
+export function elicitationResultFrom(payload = {}) {
+  if (payload.decision === 'allow') {
+    const content = (payload.content && typeof payload.content === 'object' && !Array.isArray(payload.content))
+      ? payload.content : {};
+    return { action: 'accept', content };
+  }
+  return payload.byUser ? { action: 'decline' } : { action: 'cancel' };
+}
+
+/** MCP elicitation(SDK onElicitation)。只有外部 stdio/http server 会发,进程内 SDK server 不支持。 */
+export function requestElicitation({ serverName, message, requestedSchema, title, displayName, description, sessionId, cwd, signal }) {
+  return requestCard({
+    kind: 'elicitation',
+    serverName: serverName || 'MCP',
+    message: typeof message === 'string' ? message : '',
+    requestedSchema: (requestedSchema && typeof requestedSchema === 'object') ? requestedSchema : {},
+    ...(title ? { title } : {}),
+    ...(displayName ? { displayName } : {}),
+    ...(description ? { description } : {}),
+    sessionId: sessionId || null,
+    cwd: cwd || null,
+  }, { signal, translate: elicitationResultFrom });
+}
+
+/**
  * 进程内权限请求(SDK canUseTool 用)。建 pending 项 + 广播弹窗,返回一个 Promise,
  * 用户在界面点击后由 /respond 端点 resolve。
  * resolve 值: { decision:'allow'|'deny', reason?, updatedInput?, always?, authorizeDir? }
@@ -63,7 +128,9 @@ const PENDING_TTL_MS = 15 * 60 * 1000;
 setInterval(() => {
   const now = Date.now();
   for (const [id, slot] of pending.entries()) {
-    if (NO_TTL_TOOLS.has(slot.request.toolName)) continue;
+    // kind 卡(elicitation/dialog)同属「等人回来做决定」:撤单权在上游(MCP 服务器 /
+    // CLI park deadline),经 signal 到达,本地不再叠一层 15 分钟。
+    if (slot.request.kind || NO_TTL_TOOLS.has(slot.request.toolName)) continue;
     if (now - slot.request.createdAt > PENDING_TTL_MS) {
       pending.delete(id);
       settle(slot, { decision: 'deny', reason: '权限请求超时（15 分钟未响应）' });
@@ -145,9 +212,13 @@ router.post('/permissions/respond/:id', (req, res) => {
   const updatedInput = req.body?.updatedInput;
   const always = req.body?.always === true;
   const authorizeDir = ['session', 'permanent'].includes(req.body?.authorizeDir) ? req.body.authorizeDir : undefined;
+  // content:kind 卡的结构化作答 —— elicitation 的表单值 / dialog 的 {result}。
+  // byUser:标记这个终态来自用户界面(而非停止清卡/上游撤单)。kind 卡的翻译函数据此
+  // 区分「明确拒绝」与「未作答」,两者对 MCP 服务器和 CLI 是不同语义。授权卡忽略这两个字段。
+  const content = (req.body?.content && typeof req.body.content === 'object') ? req.body.content : undefined;
   pending.delete(req.params.id);
   // settle 返回 false = res close 抢先广播过 timeout:不再补播 allow,保持单一终态。
-  if (settle(slot, { decision, reason, updatedInput, always, authorizeDir })) {
+  if (settle(slot, { decision, reason, updatedInput, always, authorizeDir, content, byUser: true })) {
     broadcast({ type: 'permission:resolved', id: req.params.id, decision });
   }
   res.json({ ok: true });
@@ -178,6 +249,9 @@ router.get('/permissions/pending', (req, res) => {
 export function resolvePendingForSession(sessionId, decide) {
   for (const [id, slot] of pending.entries()) {
     if (slot.request.sessionId !== sessionId) continue;
+    // 切档只重裁工具授权。kind 卡(MCP 表单 / CLI 对话框)不是权限请求,decide(autoDecide)
+    // 对它无意义:toolName 为空会落进「其余 → 按档位裁决」,把用户正在填的表单静默判掉。
+    if (slot.request.kind) continue;
     let verdict = null;
     try { verdict = decide(slot.request); } catch { verdict = null; }
     if (!verdict || !verdict.decision) continue;
