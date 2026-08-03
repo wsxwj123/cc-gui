@@ -48,18 +48,26 @@ const router = Router();
 // 读完整历史兜底,不丢数据。
 const MAX_EARLY_LINES = 5000;
 
-function settingsArgsToTempFile(args) {
-  const idx = args.indexOf('--settings');
-  if (idx === -1 || idx + 1 >= args.length) return { args, tempFile: null };
-  const val = args[idx + 1];
-  if (typeof val !== 'string' || !val.trim().startsWith('{')) return { args, tempFile: null }; // 已是路径
-  try {
-    const f = pathJoin(tmpdir(), `cgui-settings-${process.pid}-${Math.round(process.hrtime()[1])}.json`);
-    writeFileSync(f, val, 'utf8');
-    const next = args.slice();
-    next[idx + 1] = f;
-    return { args: next, tempFile: f };
-  } catch { return { args, tempFile: null }; }
+// Windows(cmd.exe /c 分支)专用:把内联 JSON 参数落成临时文件、改传路径。cmd.exe 会重
+// 解析参数里的双引号(它不认 MSVCRT 的 \" 转义),内联 JSON 必被打碎。--settings 与
+// --mcp-config 都接受"文件路径或 JSON 字符串",落盘即绕开。文件由调用方在进程退出后删。
+function jsonArgsToTempFiles(args) {
+  let next = args;
+  const tempFiles = [];
+  for (const flag of ['--settings', '--mcp-config']) {
+    const idx = next.indexOf(flag);
+    if (idx === -1 || idx + 1 >= next.length) continue;
+    const val = next[idx + 1];
+    if (typeof val !== 'string' || !val.trim().startsWith('{')) continue; // 已是路径
+    try {
+      const f = pathJoin(tmpdir(), `cgui-${flag.slice(2)}-${process.pid}-${Math.round(process.hrtime()[1])}.json`);
+      writeFileSync(f, val, 'utf8');
+      if (next === args) next = args.slice();
+      next[idx + 1] = f;
+      tempFiles.push(f);
+    } catch { /* 落盘失败就保持内联,不因临时文件问题阻断 spawn */ }
+  }
+  return { args: next, tempFiles };
 }
 // 模型名白名单:一次性 spawn(title/context/compact)把 model 当 `--model <v>` 参数传,
 // Windows 走 cmd.exe /c,libuv 不给不含空格的参数加引号 → `x&calc` 里的 `&` 被 cmd 当命令
@@ -171,11 +179,13 @@ export function claudeSpawn(args, opts) {
   const resolved = resolveClaude()?.path || null;
   if (process.platform === 'win32') {
     if (resolved && /\.(cmd|bat)$/i.test(resolved)) {
-      const { args: finalArgs, tempFile } = settingsArgsToTempFile(args);
+      const { args: finalArgs, tempFiles } = jsonArgsToTempFiles(args);
       const proc = spawn('cmd.exe', ['/c', resolved, ...finalArgs], opts);
       // C5:CLI 启动即读取 --settings 文件,进程退出后删掉,避免每回合一个 cgui-settings-*.json
       // 在 Windows tmp 里持续堆积(用户报告)。
-      if (tempFile) proc.on('close', () => { try { unlinkSync(tempFile); } catch {} });
+      if (tempFiles.length) proc.on('close', () => {
+        for (const f of tempFiles) { try { unlinkSync(f); } catch {} }
+      });
       return proc;
     }
     // 解析到 .exe(或其他可直接执行路径)→ 直接 spawn 该路径,比裸 'claude' 更可靠
@@ -1809,6 +1819,47 @@ router.post('/chat/title', async (req, res) => {
   proc.on('error', () => finish(''));
 });
 
+// 旁问的 system-reminder,对齐 CLI 原生 /btw(side_question)的语义:独立轻量代理、
+// 单回合、零工具、只答不做。**必须有它**,因为 --resume 会把主会话尾部的悬空回合原样
+// 带进来,CLI 还会自动补一句 "Continue from where you left off."(--resume 遇未完成
+// 回合的固定修复注入)—— 没有这段约束时模型看到的字面诉求是"把主会话那件事做完",
+// 于是旁问答的是主会话的问题(用户报的串台)。"Do NOT continue, resume…"那两行专压这句注入。
+// 纯 ASCII 且不含双引号:Windows 上 `cmd.exe /c claude.cmd` 会重解析引号与非 ASCII 码页。
+export const BTW_SYSTEM_REMINDER = [
+  '<system-reminder>',
+  'This is a side question from the user. You must answer this one question directly, in a single response.',
+  '- You are a separate, lightweight agent spawned only to answer this question.',
+  '- The main agent is NOT interrupted; it keeps working independently in the background.',
+  '- You share the conversation context but are a completely separate instance.',
+  '- Do NOT reference being interrupted, and do not describe what you were previously doing; that framing is wrong.',
+  '- Do NOT continue, resume, or finish any task, question or instruction that appears earlier in the context,',
+  '  including any directive to continue from where you left off. Answer ONLY the new question below.',
+  'CRITICAL CONSTRAINTS:',
+  '- You have NO tools available: you cannot read files, run commands, search, or take any action.',
+  '- This is a one-off response; there will be no follow-up turn.',
+  '- Answer only from what you already know from the conversation context.',
+  '- NEVER open with phrases like Let me check or I will now, and never promise to take any action.',
+  '- If you do not know, say so; do not offer to look it up.',
+  '</system-reminder>',
+].join('\n');
+
+// 旁问 argv。抽成纯函数只为可单测(tests/unit/check-btw-args.mjs)。
+// --tools "" 只关【内置】工具集,MCP 服务器照常加载(实测旁问 tools 里躺着 13 个
+// mcp__* → 模型自称有工具、还真去调)。真零工具 = --tools "" + 空 --mcp-config +
+// --strict-mcp-config(只认 --mcp-config 给的,忽略 .mcp.json/用户配置)+
+// --disable-slash-commands(CLI 官方描述 "Disable all skills")。
+export function buildBtwArgs({ sessionId, model } = {}) {
+  const args = ['-p', '--tools', '',
+    '--mcp-config', '{"mcpServers":{}}', '--strict-mcp-config',
+    '--disable-slash-commands',
+    '--append-system-prompt', BTW_SYSTEM_REMINDER,
+    '--output-format', 'stream-json', '--verbose', '--include-partial-messages'];
+  if (sessionId) args.push('--resume', sessionId, '--fork-session');
+  args.push('--no-session-persistence');
+  if (model) args.push('--model', model);
+  return args;
+}
+
 // POST /api/chat/btw  { question, sessionId?, cwd?, model? }
 // 旁问(对齐 CLI 交互式 /btw 的语义):不打断当前工作、不写入会话历史地问一个问题。
 // CLI 的 /btw 是 local-jsx 交互式专属命令 —— stream-json 通道里发送实测被回
@@ -1816,7 +1867,8 @@ router.post('/chat/title', async (req, res) => {
 //   --resume + --fork-session   → 在主会话的【fork 副本】上提问,回答带完整上下文;
 //   --no-session-persistence    → fork 不落盘(实测:主会话 jsonl md5 不变、无新 jsonl)。
 // 无 sessionId(草稿会话)时退化为无上下文的一次性提问。
-// --permission-mode plan:旁问只答不改,写类工具在 FS 层被挡,读类照常。
+// argv 见 buildBtwArgs(零工具 + 单回合 side-question reminder);旧版误用
+// --permission-mode plan 让旁问能 Read/Grep 调查=比原生更宽、更慢,已纠。
 router.post('/chat/btw', async (req, res) => {
   const question = String(req.body?.question || '').slice(0, 8000).trim();
   if (!question) return res.status(400).json({ error: 'question is required' });
@@ -1828,17 +1880,10 @@ router.post('/chat/btw', async (req, res) => {
 
   // question 走 stdin 不作 -p 参数:Windows 上 `cmd.exe /c claude.cmd -p "<question>"` 里无空格
   // 且含 cmd 元字符(&|<>)的 question 会被 cmd 重解析执行(注入);model 同理过白名单。同 title/compact。
-  // 对齐原生 /btw(side_question):canUseTool 恒 deny、单回合、纯凭已有上下文作答。
-  // 用 --tools "" 禁全部工具(CLI 官方 disable-all),是原生"零工具"的精确等价;
-  // 旧版误用 --permission-mode plan 让旁问能 Read/Grep 调查=比原生更宽、更慢,已纠。
   // 流式:stream-json + --include-partial-messages 拿逐 token 的 text_delta,以 NDJSON
   // ({delta}/{done}/{error} 行)转发给前端逐块渲染 —— 旧版攒全量 res.json({answer}) 是
   // "旁问不流式"的根因。-p + stream-json 必须带 --verbose(CLI 硬要求)。
-  const args = ['-p', '--tools', '',
-    '--output-format', 'stream-json', '--verbose', '--include-partial-messages'];
-  if (sessionId) args.push('--resume', sessionId, '--fork-session');
-  args.push('--no-session-persistence');
-  if (model) args.push('--model', model);
+  const args = buildBtwArgs({ sessionId, model });
 
   // 旁问线程连续化(transcript replay):前端把本线程前序问答随 history 发来,拼进
   // prompt 让本轮旁问延续上下文。全走 stdin(无 cmd 注入面),各处 slice 截断防 prompt 爆:
