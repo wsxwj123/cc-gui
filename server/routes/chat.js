@@ -353,11 +353,16 @@ export function hasFreshNonShellTask(liveTasks, now = Date.now(), freshMs = LIVE
     .some((t) => t && t.kind !== 'shell' && now - (t.createdAt || 0) < freshMs);
 }
 
-// level 信号不可用时的降级判据(审查 R1)= 修前那支"本回合条目无限期豁免"。
-// 上面的年龄上限之所以敢做,前提是 level 信号会持续确认真活任务并刷新 createdAt。这个前提
-// 在两种情况下不成立:① 旧版 CLI(<2.1.220)根本不发该信号;② 本 slot 至今一条都没收到。
+// level 信号不新鲜时的降级判据(审查 R1)= 修前那支"本回合条目无限期豁免"。
+// 上面的年龄上限之所以敢做,前提是 level 信号会持续确认真活任务并刷新 createdAt。但该信号
+// 是【成员变化才发】的边沿信号,不是心跳,前提在两种情况下不成立:
+//   ① 旧版 CLI(<2.1.220)根本不发(slot.lastLevelAt 恒 0);
+//   ② 单个子代理独自长跑,期间无任何任务起停 —— 起它那一刻发过一条,之后一条都不来。
 // 此时若照严判据走,"真活超 30 分钟 + 父流 5 分钟零消息"的子代理会被看门狗 abort 连坐杀死
-// (不可恢复),而修前的 epoch 无限豁免恰好保护这个场景。故:收到过 level 信号才启用严判据。
+// (强拆进程,不可恢复),而修前的 epoch 无限豁免恰好保护这个场景。
+// 故判据用【时效】而非"收到过没有":最近一个 LIVE_TASK_FRESH_MS 窗内有 level 信号确认过,
+// 才启用严判据;否则回落宽判据。失败方向由此翻转为"终态事件与 level 信号双丢失(极罕见)时
+// 看门狗被挡住",而僵尸条目的清理本来就由 A1 的 level 对账负责 —— 宁漏标,不误杀。
 export function hasCurrentEpochNonShellTask(liveTasks, epoch) {
   return [...(liveTasks?.values() ?? [])]
     .some((t) => t && t.kind !== 'shell' && (t.epoch | 0) === (epoch | 0));
@@ -1014,10 +1019,11 @@ router.post('/chat', async (req, res) => {
     // Bash run_in_background 的 tool_use_id 集合:task_started 的 task_type==='local_bash' 是
     // shell 直接判据,此集合是双保险(第三方/旧版 CLI 缺 task_type 时按 tool_use_id 反查)。
     bgBashToolIds: new Set(),
-    // 批A level 信号(background_tasks_changed)。sawLevel:本 slot 收到过该信号没有 ——
-    // 看门狗据此在严/宽判据间切换(见 hasCurrentEpochNonShellTask)。lastLevelSig:上次广播的
-    // 存活集签名,用于去重。都随进程重建而重置,这就是"进程重启重置空集"的落点。
-    sawLevel: false,
+    // 批A level 信号(background_tasks_changed)。lastLevelAt:最近一次收到该信号的时刻 ——
+    // 看门狗据此在严/宽判据间切换(见 hasCurrentEpochNonShellTask);0 = 从没收到过(旧版
+    // CLI 不发)。lastLevelSig:上次广播的存活集签名,用于去重。都随进程重建而重置,
+    // 这就是"进程重启重置空集"的落点。
+    lastLevelAt: 0,
     lastLevelSig: null,
   };
   activeProcesses.set(procId, slot);
@@ -1188,12 +1194,14 @@ router.post('/chat', async (req, res) => {
       // hasFreshNonShellTask 注释):原来的 `epoch === turnEpoch` 一支没有年龄上限,
       // 本回合子代理丢一条终态通知就把 5 分钟兜底永久解除。跨回合仍活着的 teammate
       // 在窗内照样算忙,看门狗不会 abort 宿主进程连坐杀它(权衡见常量注释)。
-      // 降级守卫(审查 R1):严判据的续命全靠 level 信号刷新 createdAt。本 slot 至今没收到过
-      // 该信号(旧版 CLI 不发 / 本回合没触发过成员变化)时回落修前的宽判据,否则真活的长任务
-      // 会被 abort 连坐杀掉 —— 看门狗到点是强拆进程,误杀不可恢复,宁可漏兜底。
+      // 降级守卫(审查 R1):严判据的续命全靠 level 信号刷新 createdAt,而它是【成员变化才发】
+      // 的边沿信号、不是心跳。故判据取【时效】:最近一个 LIVE_TASK_FRESH_MS 窗内没有任何
+      // level 信号确认过(旧版 CLI 恒 0 / 单个子代理独自长跑期间无任务起停)就回落修前的宽
+      // 判据,否则真活的长任务会被 abort 连坐杀掉 —— 看门狗到点是强拆进程,误杀不可恢复。
       const now = Date.now();
       const busyNonShell = hasFreshNonShellTask(slot.liveTasks, now, LIVE_TASK_FRESH_MS)
-        || (!slot.sawLevel && hasCurrentEpochNonShellTask(slot.liveTasks, slot.turnEpoch));
+        || (now - (slot.lastLevelAt || 0) >= LIVE_TASK_FRESH_MS
+          && hasCurrentEpochNonShellTask(slot.liveTasks, slot.turnEpoch));
       // 判据含 revived:无子代理回合的续跑(auto-compact 后续写等)经复活守卫翻回活跃,
       // turnSubagentSeen 仍是 false,不设 revived 分支这类续跑卡死永无看门狗兜底(判官 S2)。
       if (!slot.idle && (slot.turnSubagentSeen || slot.revived) && !busyNonShell) {
@@ -1271,7 +1279,7 @@ router.post('/chat', async (req, res) => {
         // 【只喂簿记与 UI】:绝不用它驱动 finalize()/abort()/input.close()/stopTimer,
         // 停止链路的既有时序一个字不动。
         else if (m.type === 'system' && m.subtype === 'background_tasks_changed' && Array.isArray(m.tasks)) {
-          slot.sawLevel = true; // 看门狗据此启用严判据(见 hasCurrentEpochNonShellTask 注释)
+          slot.lastLevelAt = Date.now(); // 看门狗据此在严/宽判据间切换(见 hasCurrentEpochNonShellTask)
           const { settled, added, liveIds } = reconcileLiveTasks(
             slot.liveTasks, m.tasks, Date.now(), LEVEL_GRACE_MS, slot.turnEpoch | 0);
           broadcastLiveTasks(slot, liveIds, settled, added);

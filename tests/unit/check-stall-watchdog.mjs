@@ -47,17 +47,29 @@ const old = (ms) => now - ms;
     'level 信号确认仍活 → createdAt 刷新 → 真在跑的长任务重新算忙,看门狗不碰它');
 }
 
-// ── R1 降级守卫:level 信号不来时回落宽判据 ─────────────────────────
-// 严判据的续命全靠 level 信号刷新 createdAt。信号不来时(旧版 CLI <2.1.220 不发;或本 slot
-// 至今没触发过任务集成员变化)真活的长任务会被看门狗 abort 连坐杀死 —— 而看门狗到点是强拆
-// 进程,误杀不可恢复。故 slot.sawLevel 为假时回落修前的"本回合条目无限期豁免"。
+// ── R1 降级守卫:level 信号【不新鲜】时回落宽判据 ────────────────────
+// 严判据的续命全靠 level 信号刷新 createdAt,而它是【成员变化才发】的边沿信号、不是心跳。
+// 判据取时效而非"收到过没有":单个子代理独自长跑时,起它那一刻发过一条、之后一条都不来,
+// 只判"收到过"照样会在 40 分钟后把它 abort 连坐杀掉(强拆进程,不可恢复)。
+// 失败方向由此翻转成"终态事件 + level 信号双丢失(极罕见)时看门狗被挡",而僵尸条目的清理
+// 本来就由 A1 的 level 对账负责 —— 宁漏标,不误杀。
 {
   const live = new Map([['t', { kind: 'subagent', epoch: 3, createdAt: old(40 * 60 * 1000) }]]);
-  // 泵里的合成判据:hasFresh || (!sawLevel && hasCurrentEpoch)
-  const busy = (sawLevel) => hasFreshNonShellTask(live, now, FRESH)
-    || (!sawLevel && hasCurrentEpochNonShellTask(live, 3));
-  assert.equal(busy(false), true, '没收到过 level 信号 → 回落宽判据,本回合陈旧条目仍算忙(不被 abort 误杀)');
-  assert.equal(busy(true), false, '收到过 level 信号 → 启用严判据,陈旧条目不再解除看门狗');
+  // 泵里的合成判据:hasFresh || (level 信号超窗 && hasCurrentEpoch)
+  const busy = (lastLevelAt) => hasFreshNonShellTask(live, now, FRESH)
+    || (now - (lastLevelAt || 0) >= FRESH && hasCurrentEpochNonShellTask(live, 3));
+
+  // 三态:
+  // ① 旧版 CLI(<2.1.220)从不发该信号 → lastLevelAt 恒 0 → 宽判据
+  assert.equal(busy(0), true, '旧版 CLI 无 level 信号 → 回落宽判据,本回合条目仍算忙(不被 abort 误杀)');
+  // ② 信号新鲜(窗内确认过)→ 严判据,陈旧条目不再解除看门狗
+  assert.equal(busy(old(60_000)), false, 'level 信号新鲜 → 启用严判据,陈旧条目不再解除看门狗');
+  // ③ 信号陈旧(超出 FRESH 窗,即单个子代理独自长跑期间无任务起停)→ 回落宽判据
+  assert.equal(busy(old(40 * 60 * 1000)), true,
+    'level 信号超窗 → 回落宽判据(只判"收到过"会在这里把真活的长任务误杀)');
+  // 边界:年龄正好等于窗长算超窗(与 `>=` 判据逐字一致)
+  assert.equal(busy(old(FRESH)), true, 'level 信号年龄 = 窗长即算陈旧');
+  assert.equal(busy(old(FRESH - 1)), false, '差 1ms 仍算新鲜 → 严判据');
 
   // 降级支只豁免【本回合】,跨回合的陈旧残留照样不算忙(否则看门狗又被永久解除)
   const prev = new Map([['t', { kind: 'subagent', epoch: 1, createdAt: old(40 * 60 * 1000) }]]);
@@ -77,10 +89,13 @@ const old = (ms) => now - ms;
   const { dirname, join } = await import('node:path');
   const src = readFileSync(
     join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'server', 'routes', 'chat.js'), 'utf8');
-  assert.ok(/const busyNonShell = hasFreshNonShellTask\(slot\.liveTasks, now, LIVE_TASK_FRESH_MS\)\s*\n\s*\|\| \(!slot\.sawLevel && hasCurrentEpochNonShellTask\(slot\.liveTasks, slot\.turnEpoch\)\);/.test(src),
-    '看门狗判据 = 严判据 || 降级守卫(R1);少了降级支会误杀 level 信号不可用时的真活长任务');
-  assert.ok(/slot\.sawLevel = true;/.test(src), 'level 分支必须置 sawLevel');
-  assert.ok(/sawLevel: false,/.test(src), 'slot 字面量必须声明 sawLevel(默认宽判据)');
+  assert.ok(/const busyNonShell = hasFreshNonShellTask\(slot\.liveTasks, now, LIVE_TASK_FRESH_MS\)\s*\n\s*\|\| \(now - \(slot\.lastLevelAt \|\| 0\) >= LIVE_TASK_FRESH_MS\s*\n\s*&& hasCurrentEpochNonShellTask\(slot\.liveTasks, slot\.turnEpoch\)\);/.test(src),
+    '看门狗判据 = 严判据 || 降级守卫(R1);降级条件必须是【时效】,只判"收到过"覆盖不到独自长跑的子代理');
+  assert.ok(/slot\.lastLevelAt = Date\.now\(\);/.test(src), 'level 分支必须刷新 lastLevelAt');
+  assert.ok(/lastLevelAt: 0,/.test(src), 'slot 字面量必须声明 lastLevelAt(0 = 从没收到过 → 宽判据)');
+  assert.ok(!/sawLevel/.test(src), '旧的 sawLevel 一次性开关必须删干净,不留双份判据');
+  // 复用同一个常量,不新造数字
+  assert.ok(!/>= 30 \* 60 \* 1000/.test(src), '降级判据必须复用 LIVE_TASK_FRESH_MS,不得写裸数字');
   assert.ok(!/t\.epoch === \(slot\.turnEpoch \| 0\) \|\| now - \(t\.createdAt \|\| 0\) < LIVE_TASK_FRESH_MS/.test(src),
     '不得再出现"epoch 支无年龄上限"的旧判据');
   assert.equal(src.match(/const LIVE_TASK_FRESH_MS = 30 \* 60 \* 1000;/g)?.length, 1,
@@ -91,4 +106,4 @@ const old = (ms) => now - ms;
   assert.ok(/const STALL_MS = 300_000;/.test(src), '静默阈值 300s 不得改');
 }
 
-console.log('✓ check-stall-watchdog: 年龄上限 9 断言 + level 续命 + R1 降级守卫 + 源码守卫 全过');
+console.log('✓ check-stall-watchdog: 年龄上限 9 断言 + level 续命 + R1 降级三态 + 源码守卫 全过');
