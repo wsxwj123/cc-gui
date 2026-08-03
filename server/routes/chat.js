@@ -983,9 +983,13 @@ router.post('/chat', async (req, res) => {
     earlyLines: [],
     earlyErrors: [],
     listeners: new Set(), // 活跃 SSE 写函数(attach 加,断连删)
+    // 活跃 SSE 连接句柄 { onLine, end }。listeners 只有写函数、没法主动关掉老响应,
+    // 新连接接管时需要它逐个 end(见 claimAttach)。
+    attachments: new Set(),
     exitCode: null,
     pumpEnded: false,
     attached: false,
+    attachToken: 0,     // 当前 attach 持有者的序号,close 回调据此判断该不该让位
     sessionId: sessionId || null,
     // draft 发起的流带客户端 draftId:init 前用户切走再切回时,轮询按它找回本进程
     // reattach(僵尸 draft 修复,fable 审计第5项)。init 后 sessionId 就位,它只是冗余。
@@ -1394,13 +1398,45 @@ router.post('/chat/permission-mode', async (req, res) => {
 });
 
 
+// ── SSE 接管协议(修「关窗格后重开会话历史空」)────────────────────────────────
+// 原来 slot.attached 为真就回 409 拒绝。可老监听多半是僵尸:客户端关窗格时从不 abort
+// (已在 App.jsx 补 detachStream,这里是第二道保险,也覆盖崩溃/断网等 close 事件丢失的
+// 情况),于是新窗格被永久挡在门外 —— 没有任何追加通道,只剩一条承诺"自动追加"的横幅。
+// 改成「新连接接管」:主动 end 掉老响应,它的 req.on('close') 照常跑清理。
+// attachToken 是这条协议的唯一防线:老连接的 close 回调必然晚于新 attach 到达,若无条件
+// 把 slot.attached 置 false,下一个 attach 又会走接管分支踢掉刚接上的正常连接(attach 抖动)。
+// 故让位只在【自己仍是当前持有者】时生效。纯函数,tests/unit/check-stream-attach-takeover.mjs 真 import。
+let attachSeq = 0;
+
+export function claimAttach(slot, token) {
+  if (slot.attached) {
+    // 先 end 老响应再清 listeners:end 之后老连接的 safeWrite 有 closed/!res.writable 守卫,
+    // 写不进去只静默返回,不会与新连接双写同一条流。
+    for (const ev of [...(slot.attachments || [])]) { try { ev.end(); } catch { /* 已断开 */ } }
+    slot.attachments?.clear();
+    slot.listeners.clear();
+  }
+  slot.attached = true;
+  slot.attachToken = token;
+  return slot;
+}
+
+export function releaseAttach(slot, token, onLine) {
+  slot.listeners.delete(onLine);
+  for (const ev of (slot.attachments || [])) {
+    if (ev.onLine === onLine) { slot.attachments.delete(ev); break; }
+  }
+  if (slot.attachToken === token) slot.attached = false; // 只有仍是当前持有者才让位
+  return slot;
+}
+
 // SSE attach。SDK 引擎下消息由 slot.listeners 实时推送(deliverLine),不再监听 proc.stdout。
 // 断连不杀 query(detach-don't-abort):移除监听后续消息回落 earlyLines,重连回放。
 router.get('/chat/:pid/stream', (req, res) => {
   const slot = activeProcesses.get(req.params.pid);
   if (!slot) return res.status(404).json({ error: 'Process not found' });
-  if (slot.attached) return res.status(409).json({ error: 'Stream already attached' });
-  slot.attached = true;
+  const myToken = ++attachSeq;
+  claimAttach(slot, myToken);
 
   res.writeHead(200, {
     'Content-Type': 'text/event-stream',
@@ -1448,13 +1484,16 @@ router.get('/chat/:pid/stream', (req, res) => {
       if (!safeWrite(': keep-alive\n\n')) { clearInterval(keepAlive); keepAlive = null; }
     }, 10000);
     slot.listeners.add(onLine);
+    // 接管时要能主动 end 掉老响应,故把 onLine 与它的 end 成对登记。
+    slot.attachments.add({ onLine, end: safeEnd });
   }
 
   req.on('close', () => {
     closed = true;
     if (keepAlive) { clearInterval(keepAlive); keepAlive = null; }
-    slot.listeners.delete(onLine);
-    slot.attached = false; // 后续消息回落 earlyLines,等重连回放
+    // 后续消息回落 earlyLines,等重连回放。attached 只在自己仍是持有者时让位:
+    // 被接管的老连接 close 晚到,不能把新连接的 attached 抹掉(否则下一个 attach 又踢人)。
+    releaseAttach(slot, myToken, onLine);
   });
 });
 
