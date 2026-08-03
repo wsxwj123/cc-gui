@@ -490,7 +490,8 @@ app.put('/api/model', async (req, res) => {
     await setDefaultModel(model);
     res.json({ ok: true, model });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    // setDefaultModel 的官方端点残留守卫抛 err.status=400(用户输入问题,不是服务端故障)。
+    res.status(err.status || 500).json({ error: err.message });
   }
 });
 

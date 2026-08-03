@@ -15,7 +15,9 @@ const app = readFileSync(join(root, 'client/src/App.jsx'), 'utf8');
 const count = (s, sub) => s.split(sub).length - 1;
 
 // ── 1. 选中判据抽成常量,不再原地重复 ─────────────────────────
-assert.ok(/const isSelected = currentModel === m\.id \|\| currentModel === `\$\{m\.id\}\[1m\]`;/.test(sel),
+// 批P 起判据前可带外部模型名守卫(!foreign &&,官方端点下的第三方残留行不给勾),
+// 表达式本体不变、仍是唯一一处常量。见 check-model-residue-guard.mjs。
+assert.ok(/const isSelected = [^;]*currentModel === m\.id \|\| currentModel === `\$\{m\.id\}\[1m\]`[^;]*;/.test(sel),
   'SessionSelectors:availableModels 行内必须有 const isSelected 常量');
 // 桌面:availableModels 组 2 处内联判据 → 1 处常量;customRows/fetchedRows(各 2 处)按方案不动。
 assert.ok(count(sel, 'currentModel === `${m.id}[1m]`') <= 5,

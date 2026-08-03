@@ -406,6 +406,19 @@ export function ModelSelector({ compact = false, permKey = null, tourAnchor = fa
     if (!base) return;
     setModel(has1m ? base : `${base}[1m]`);
   };
+  // 防线之三(残留可见):官方端点(provider === 'Anthropic')下出现的非 claude 模型名
+  // 是第三方 provider 的残留 —— cc-switch 的"通用配置"会把 deepseek 等模型名漏进官方
+  // provider 的 env,会话 pin 也可能留着切换前的旧值。服务端已在写入侧拒绝、读取侧自愈
+  // (server/services/model-resolver.js 的 isClaudeModel / healForeignModel,判据须与此处
+  // 一致),但 env 里其它 *_MODEL 键枚举出的行仍会列进来。这类行标成异常、不给勾,
+  // 避免用户当成正常选项点下去,再拿一个官方不存在的模型名发请求。
+  const isForeignModel = (id) => {
+    if (provider !== 'Anthropic' || !id) return false;
+    const base = id.replace(/\[1m\]$/i, '');
+    return !/claude/i.test(base) && !['sonnet', 'opus', 'haiku', 'fable'].includes(base);
+  };
+  const currentForeign = isForeignModel(currentModel);
+
   // 切换模型时保留当前 1M 标记,避免换模型静默丢掉 1M 选择。
   const selectModel = (id) => {
     const base = id.replace(/\[1m\]/i, '');
@@ -445,6 +458,11 @@ export function ModelSelector({ compact = false, permKey = null, tourAnchor = fa
               {provider && provider !== 'Anthropic' && (
                 <span className="block text-warning mt-0.5">
                   ⚠ 当前 provider 是 <b>{provider}</b>，alias 可能被该 provider 重定向到其默认模型。建议用具体模型 ID。
+                </span>
+              )}
+              {currentForeign && (
+                <span className="block text-warning mt-0.5">
+                  当前模型 <code className="font-mono">{currentModel}</code> 不属于 Claude 官方端点，通常是切换 provider 后的残留。需在下方改选 claude 模型，或切回该模型所属的 provider。
                 </span>
               )}
             </p>
@@ -487,7 +505,8 @@ export function ModelSelector({ compact = false, permKey = null, tourAnchor = fa
           </button>
           {availableModels.filter((m) => match(m.id, m.name)).map((m) => {
             const isAlias = m.source === 'cli-alias';
-            const isSelected = currentModel === m.id || currentModel === `${m.id}[1m]`;
+            const foreign = isForeignModel(m.id);
+            const isSelected = !foreign && (currentModel === m.id || currentModel === `${m.id}[1m]`);
             return (
               <button key={m.id} onClick={() => selectModel(m.id)}
                 className={`w-full text-left px-3 py-2 hover:bg-canvas-warm transition-colors flex items-center gap-2 ${
@@ -505,6 +524,12 @@ export function ModelSelector({ compact = false, permKey = null, tourAnchor = fa
                       <span className="text-[8.5px] px-1 py-px bg-accent text-on-accent rounded font-mono"
                         title="1M tokens 上下文">
                         1M
+                      </span>
+                    )}
+                    {foreign && (
+                      <span className="text-[8.5px] px-1 py-px bg-warning/15 text-warning rounded font-mono"
+                        title="该模型名不属于当前 provider(Claude 官方端点不提供它),通常是切换 provider 后残留在配置里的">
+                        异常
                       </span>
                     )}
                   </div>

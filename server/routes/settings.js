@@ -10,6 +10,7 @@ import { resolveWorkspacePath } from '../utils/safe-path.js';
 import { createConnection } from 'node:net';
 import { startOpenAIProxy, setOpenAIUpstream, getProxyPort } from '../services/openai-proxy.js';
 import { startAnthropicProxy, setAnthropicUpstream, getAnthropicProxyPort } from '../services/anthropic-proxy.js';
+import { isOfficialAnthropic, isClaudeModel } from '../services/model-resolver.js';
 
 const execFileP = promisify(execFile);
 const CC_SWITCH_DB = join(homedir(), '.cc-switch', 'cc-switch.db');
@@ -48,21 +49,10 @@ const OPENAI_ACTIVE_PATH = join(homedir(), '.claude-gui', 'openai-active.json');
 // Stores only id/name/baseURL/model — never the token (re-read on restart).
 const ANTHROPIC_ACTIVE_PATH = join(homedir(), '.claude-gui', 'anthropic-active.json');
 
-// Official Anthropic = use the CLI's own OAuth/subscription directly (no proxy).
-// Anything else with the Anthropic wire format (deepseek/mimo/relays) must go
-// through the proxy so the CLI's poisoned OAuth token is stripped + replaced.
-function isOfficialAnthropic(baseURL) {
-  if (!baseURL) return true; // empty → CLI default endpoint (api.anthropic.com)
-  try { return new URL(baseURL).hostname.endsWith('anthropic.com'); } catch { return false; }
-}
-
-// A claude-family model id (or CLI tier alias). Used to drop FOREIGN model ids
-// (e.g. deepseek) that cc-switch's "common config" leaks into the official
-// provider's env, so switching to official never requests a non-claude model.
-function isClaudeModel(id) {
-  if (!id || typeof id !== 'string') return false;
-  return /claude/i.test(id) || ['sonnet', 'opus', 'haiku', 'fable'].includes(id);
-}
+// isOfficialAnthropic(官方端点判据)/ isClaudeModel(claude 家族模型名判据)现由
+// services/model-resolver.js 单一持有 —— 本文件的 provider 切换、model-resolver 的读取
+// 自愈、PUT /api/model 的写入拒绝是同一条"外部模型名残留"防线的三层,判据必须同源,
+// 各留一份副本迟早会漂。语义与调用处一字未改(见文件头 import)。
 
 const PROVIDER_ENV_KEYS = new Set([
   'ANTHROPIC_BASE_URL',
