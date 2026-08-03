@@ -8,9 +8,14 @@
 //     side-question reminder,必须明确"不要继续上文的任务/续跑指令"。
 // 直接 import chat.js 的真函数(非复刻):删任一 flag 或改坏 reminder,下面必失败。
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { dirname, join } from 'node:path';
 import { buildBtwArgs, BTW_SYSTEM_REMINDER } from '../../server/routes/chat.js';
 
 const valueOf = (args, flag) => args[args.indexOf(flag) + 1];
+const repo = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
+const src = (p) => readFileSync(join(repo, p), 'utf8');
 
 // ── 1. 真零工具的四件套 + reminder 都在 ──────────────────────────
 {
@@ -34,7 +39,16 @@ const valueOf = (args, flag) => args[args.indexOf(flag) + 1];
   // 压 CLI 自动注入的 "Continue from where you left off."(串台的直接诱因)
   assert.ok(/continue from where you left off/i.test(r), 'reminder 缺"不要续跑上文"约束');
   assert.ok(/Let me check/.test(r), 'reminder 缺"禁 Let me… 开场"');
-  // Windows 走 cmd.exe /c 会重解析引号/非 ASCII:reminder 必须 ASCII 且无双引号
+}
+
+// ── 2b. reminder 的 argv 形态:单行 + 纯 ASCII + 无双引号 ────────────
+// win32 分支走 `cmd.exe /c claude.cmd`,argv 被 cmd 重解析:换行在 cmd 参数里无法
+// 转义(BatBadBut/CVE-2024-24576 同源),LF 处命令被截断 → reminder 正文和它后面的
+// 全部 flag 一起丢;非 ASCII 撞码页;双引号被 cmd 吃掉。三条都是 Windows 上的静默
+// 失效,mac 一侧永远测不出来,只能靠这里焊死。
+{
+  const r = BTW_SYSTEM_REMINDER;
+  assert.ok(!/[\r\n]/.test(r), 'reminder 含换行(Windows cmd.exe 会在此截断整条命令)');
   // eslint-disable-next-line no-control-regex
   assert.ok(!/[^\x00-\x7F]/.test(r), 'reminder 含非 ASCII 字符(Windows 码页会打碎)');
   assert.ok(!r.includes('"'), 'reminder 含双引号(Windows cmd 会重解析)');
@@ -69,6 +83,16 @@ const valueOf = (args, flag) => args[args.indexOf(flag) + 1];
 {
   const args = buildBtwArgs({ sessionId: 's', model: 'deepseek-v4-pro' });
   assert.equal(valueOf(args, '--model'), 'deepseek-v4-pro');
+}
+
+// ── 6. 源码守卫:路由真的在用 buildBtwArgs;清空文案不再骗人 ─────────
+{
+  const chat = src('server/routes/chat.js');
+  assert.ok(/const args = buildBtwArgs\(/.test(chat),
+    '/chat/btw 路由必须调 buildBtwArgs —— 内联回 args 数组会让上面所有断言失效');
+  const btw = src('client/src/components/BtwWindow.jsx');
+  assert.ok(!btw.includes('从零开始'),
+    '清空提示不得再称"从零开始":清的只是本浮窗记录,主会话上下文照旧 --resume 带上');
 }
 
 console.log('check-btw-args: OK');

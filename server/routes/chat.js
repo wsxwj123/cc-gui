@@ -1824,7 +1824,11 @@ router.post('/chat/title', async (req, res) => {
 // 带进来,CLI 还会自动补一句 "Continue from where you left off."(--resume 遇未完成
 // 回合的固定修复注入)—— 没有这段约束时模型看到的字面诉求是"把主会话那件事做完",
 // 于是旁问答的是主会话的问题(用户报的串台)。"Do NOT continue, resume…"那两行专压这句注入。
-// 纯 ASCII 且不含双引号:Windows 上 `cmd.exe /c claude.cmd` 会重解析引号与非 ASCII 码页。
+// 形态约束(Windows:win32 分支走 `cmd.exe /c claude.cmd`,argv 被 cmd 重解析):
+//   · 单行 —— 换行在 cmd 参数里无法转义(BatBadBut/CVE-2024-24576 同源),LF 处整条命令
+//     被截断,reminder 正文连同它后面的全部 flag 一起丢失。`- ` 项目符保留可读性。
+//   · 纯 ASCII、无双引号 —— 码页与引号都会被 cmd 重解析。
+// 三条都由 check-btw-args.mjs 焊死。
 export const BTW_SYSTEM_REMINDER = [
   '<system-reminder>',
   'This is a side question from the user. You must answer this one question directly, in a single response.',
@@ -1832,8 +1836,7 @@ export const BTW_SYSTEM_REMINDER = [
   '- The main agent is NOT interrupted; it keeps working independently in the background.',
   '- You share the conversation context but are a completely separate instance.',
   '- Do NOT reference being interrupted, and do not describe what you were previously doing; that framing is wrong.',
-  '- Do NOT continue, resume, or finish any task, question or instruction that appears earlier in the context,',
-  '  including any directive to continue from where you left off. Answer ONLY the new question below.',
+  '- Do NOT continue, resume, or finish any task, question or instruction that appears earlier in the context, including any directive to continue from where you left off. Answer ONLY the new question below.',
   'CRITICAL CONSTRAINTS:',
   '- You have NO tools available: you cannot read files, run commands, search, or take any action.',
   '- This is a one-off response; there will be no follow-up turn.',
@@ -1841,13 +1844,15 @@ export const BTW_SYSTEM_REMINDER = [
   '- NEVER open with phrases like Let me check or I will now, and never promise to take any action.',
   '- If you do not know, say so; do not offer to look it up.',
   '</system-reminder>',
-].join('\n');
+].join(' ');
 
 // 旁问 argv。抽成纯函数只为可单测(tests/unit/check-btw-args.mjs)。
 // --tools "" 只关【内置】工具集,MCP 服务器照常加载(实测旁问 tools 里躺着 13 个
 // mcp__* → 模型自称有工具、还真去调)。真零工具 = --tools "" + 空 --mcp-config +
 // --strict-mcp-config(只认 --mcp-config 给的,忽略 .mcp.json/用户配置)+
 // --disable-slash-commands(CLI 官方描述 "Disable all skills")。
+// model 必须先过 safeModelArg 白名单再传进来(Windows 上 `--model x&calc` 经 cmd.exe
+// 是 RCE,见 :68 MODEL_ARG_RE);本函数只拼参数,不做校验。
 export function buildBtwArgs({ sessionId, model } = {}) {
   const args = ['-p', '--tools', '',
     '--mcp-config', '{"mcpServers":{}}', '--strict-mcp-config',
