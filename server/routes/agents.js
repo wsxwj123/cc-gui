@@ -162,6 +162,51 @@ router.get('/agents', async (req, res) => {
  * The two are merged by pid (so a chat-process we spawned doesn't appear
  * twice). Frontend polls this every ~1.5s when the panel is open.
  */
+// CLI 的会话注册表目录。homedir() 而非 process.env.HOME:Windows 上 HOME 为空
+// (CO-1 同款教训)→ 读 `undefined/.claude/sessions` 恒失败被吞。
+const SESSIONS_DIR = join(homedir(), '.claude', 'sessions');
+
+// 注册表条目(~/.claude/sessions/<pid>.json)→ /agents/active 的一条记录。
+// 纯函数(IO 在调用方),便于单测。job = readBgJobState() 结果,仅后台代理传。
+//
+// status 只认 'waiting' 一个源值,其余一律 'alive':批K 定的语义是"注册表对外部会话
+// 只能确知进程还活着"。CLI 目前只在会话真的停下来等人时才写 status/waitingFor
+// (busy/shell/idle 等取值前端没有对应桶,盲目透传会把外部终端会话甩进"其他"桶)。
+// 'waiting' 是唯一能确知的新事实——它在等人,所以透传。
+export function buildCliSessionEntry(s, fallbackId, job = null) {
+  const isBg = s.kind === 'bg' || s.kind === 'background';
+  const waiting = s.status === 'waiting' || job?.jobState === 'blocked';
+  const startedAt = s.startedAt || s.procStart || null;
+  return {
+    kind: 'cli-session',
+    // 注册表自己的 kind(interactive/bg 等)独立返回,前端据此分区。
+    cliKind: s.kind || null,
+    pid: String(s.pid),
+    sessionId: s.sessionId || fallbackId,
+    cwd: s.cwd || null,
+    model: null,
+    promptPreview: s.kind || s.entrypoint || '',
+    permissionMode: 'default',
+    startedAt,
+    elapsedMs: startedAt ? Date.now() - startedAt : null,
+    status: waiting ? 'waiting' : 'alive',
+    // waitingFor:CLI 写下的等待原因(permission prompt / input needed / dialog open /
+    // sandbox request / worker request),前端翻成中文副标题。
+    waitingFor: s.waitingFor || null,
+    // 后台代理补落盘状态:state=working/blocked/…,needs 是 CLI 写的人话待办
+    // (如 "approve Write: /abs/path")= "它在等你什么"的答案。
+    ...(isBg ? {
+      state: job?.jobState ?? null,
+      tempo: job?.tempo ?? s.tempo ?? null,
+      needs: job?.needs || s.needs || '',
+    } : {}),
+    // 后台代理**只读**:多个后台代理的 pid 都指向同一个 CLI supervisor,pid kill 会
+    // 连坐全停(见 background/stop 注释)。它们的停止走 `claude stop <id>`,由
+    // /api/agents/background 那条通道提供按钮。
+    stoppable: !isBg,
+  };
+}
+
 router.get('/agents/active', async (req, res) => {
   const out = [];
   const seenPids = new Set();
@@ -202,9 +247,6 @@ router.get('/agents/active', async (req, res) => {
   }
 
   // 2. CLI's own active session registry
-  // homedir() 而非 process.env.HOME:Windows 上 HOME 为空(CO-1 同款教训)→ 原来读
-  // `undefined/.claude/sessions` 恒失败被吞 → Win 上 cli-session 卡片永远不出现。
-  const SESSIONS_DIR = join(homedir(), '.claude', 'sessions');
   let entries = [];
   try { entries = await readdir(SESSIONS_DIR); } catch {}
   for (const f of entries) {
@@ -213,40 +255,24 @@ router.get('/agents/active', async (req, res) => {
       const raw = await readFile(`${SESSIONS_DIR}/${f}`, 'utf-8');
       const s = JSON.parse(raw);
       if (!s.pid) continue;
-      // `claude --bg` 后台代理(注册表 kind='bg')不在此列出:它由 /api/agents/background
-      // 全权呈现,并有官方停止端点 `claude stop <id>`。若在这条 cli-session 通道也列出,前端
-      // "Claude 子进程"区会给它一个走 pid kill 的停止按钮,而多个后台代理的 pid 都指向同一个
-      // CLI supervisor → pid kill 连坐全停(agents.js background/stop 注释警告的危险路径)。
-      // 注:注册表文件里 kind='bg',`claude agents --json` 里是 'background',两处都跳过。
-      if (s.kind === 'bg' || s.kind === 'background') continue;
+      // `claude --bg` 后台代理(注册表 kind='bg';`claude agents --json` 里叫 'background')
+      // 以【只读条目】列出(stoppable:false),不给 pid kill 按钮 —— 多个后台代理的 pid 都指向
+      // 同一个 CLI supervisor,pid kill 会连坐全停(background/stop 注释警告的危险路径)。
+      // 之所以要列:它们的"在等你"(status/waitingFor + jobs 落盘 state/needs)是 app 级角标
+      // 的数据源,而这条通道是本机唯一不需要每次 spawn `claude agents` 的廉价来源。
+      // 面板里它们仍由 /api/agents/background 那一区呈现(前端按 cliKind 过滤,不重复显示)。
+      const isBg = s.kind === 'bg' || s.kind === 'background';
       // 已被 chat-process 收录的会话(按 sessionId 或 pid)不重复显示。
       if ((s.sessionId && seenSessionIds.has(s.sessionId)) || seenPids.has(Number(s.pid))) continue;
       // Check the process is still alive — claude often leaves stale files.
       let alive = false;
       try { process.kill(Number(s.pid), 0); alive = true; } catch {}
       if (!alive) continue;
-      out.push({
-        kind: 'cli-session',
-        // 注册表自己的 kind(interactive/background 等)独立返回,前端据此分区
-        // (后台代理面板 filter cliKind==='background');原来塞在 promptPreview 里没法区分。
-        cliKind: s.kind || null,
-        pid: String(s.pid),
-        sessionId: s.sessionId || f.replace('.json', ''),
-        cwd: s.cwd || null,
-        model: null,
-        promptPreview: s.kind || s.entrypoint || '',
-        permissionMode: 'default',
-        startedAt: s.startedAt || s.procStart || null,
-        elapsedMs: (s.startedAt || s.procStart) ? Date.now() - (s.startedAt || s.procStart) : null,
-        // 'alive' 而非 'running':注册表文件只在会话启动时写一次(mtime 恒等 startedAt),
-        // 这里唯一能确知的事实是 `process.kill(pid, 0)` 没抛 —— 进程还在。它是否正在生成
-        // 无从判断,报 'running' 会让前端把每个开着的终端/Claude Desktop 会话都归进"工作中"。
-        status: 'alive',
-        // We can still stop these via /api/processes/:pid/kill which whitelists
-        // any pid listed in the sessions registry (which is exactly where this
-        // entry came from). The UI should show a working stop button.
-        stoppable: true,
-      });
+      // 后台代理:补读 ~/.claude/jobs/<id>/state.json(state/needs/tempo)。
+      const job = isBg ? await readBgJobState(bgJobIdOf(s)) : null;
+      // 已结束的后台代理不列出:supervisor pid 长期存活,否则终态条目会永久挂在列表里。
+      if (isBg && job && BG_TERMINAL_STATES.has(job.jobState)) continue;
+      out.push(buildCliSessionEntry(s, f.replace('.json', ''), job));
     } catch {}
   }
 
@@ -329,8 +355,42 @@ async function readBgJobState(id) {
       endedAt: s.updatedAt ? Date.parse(s.updatedAt) || null : null,
       detail: typeof s.detail === 'string' ? s.detail.slice(0, 300) : '',
       resultPreview: typeof s.output?.result === 'string' ? s.output.result.slice(0, 500) : '',
+      // needs:CLI 写的人话待办(如 "approve Write: /abs/path"),blocked 时才有 ——
+      // 这就是"后台代理在等你什么"的答案,面板直接显示给用户。
+      needs: typeof s.needs === 'string' ? s.needs.slice(0, 300) : '',
+      tempo: typeof s.tempo === 'string' ? s.tempo : null,
+      // 落盘 state 单独用 jobState 键回传,【不能】叫 state:/agents/background 那边
+      // Object.assign 到 base 上会覆盖 `claude agents --json` 的权威 state
+      // (两边不同步时终态判定会来回跳)。cli-session 那边没有别的来源,才用它当 state。
+      jobState: typeof s.state === 'string' ? s.state : null,
     };
   } catch { return null; }
+}
+
+// 后台会话 → jobs 目录名。`claude agents --json` 给 id;注册表文件里叫 jobId;
+// 都缺时用 sessionId 前 8 位(实测 2.1.200 的命名规则)。
+function bgJobIdOf(a) {
+  return a.jobId || a.id || (a.sessionId ? String(a.sessionId).slice(0, 8) : null);
+}
+
+// ~/.claude/sessions/*.json 里 CLI 自己写的等待态,按 sessionId 索引。
+// 后台代理的 `claude agents --json` 输出没有 status/waitingFor,只有注册表有。
+async function readWaitingRegistry() {
+  const map = new Map();
+  let entries = [];
+  try { entries = await readdir(SESSIONS_DIR); } catch { return map; }
+  for (const f of entries) {
+    if (!f.endsWith('.json')) continue;
+    try {
+      const s = JSON.parse(await readFile(join(SESSIONS_DIR, f), 'utf-8'));
+      if (!s.sessionId) continue;
+      map.set(s.sessionId, {
+        status: s.status === 'waiting' ? 'waiting' : null,
+        waitingFor: s.waitingFor || null,
+      });
+    } catch {}
+  }
+  return map;
 }
 
 // 后台会话的终态(结束不再变化)。running/working 等一律视为进行中。
@@ -353,6 +413,7 @@ router.get('/agents/background', async (req, res) => {
         try { resolve(JSON.parse(out)); } catch { reject(new Error('claude agents 输出不是 JSON')); }
       });
     });
+    const registry = await readWaitingRegistry();
     const agents = await Promise.all((Array.isArray(list) ? list : []).map(async (a) => {
       const base = {
         pid: a.pid, cwd: a.cwd || null, kind: a.kind || '', name: a.name || '',
@@ -362,12 +423,19 @@ router.get('/agents/background', async (req, res) => {
         state: a.state || null,
         projectHash: a.cwd ? cwdToProjectHash(a.cwd) : null,
         endedAt: null, detail: '', resultPreview: '',
+        // 等待态四件套(与 /agents/active 的 cli-session 条目同构)
+        status: null, waitingFor: null, needs: '', tempo: null,
       };
-      // 终态的后台会话补结束时间与结果摘要(jobs/<id>/state.json,best-effort)
-      if (a.kind === 'background' && BG_TERMINAL_STATES.has(a.state)) {
-        const jobId = a.id || (a.sessionId ? String(a.sessionId).slice(0, 8) : null);
-        const extra = await readBgJobState(jobId);
+      // jobs/<id>/state.json(best-effort)。**非终态也读**:blocked 的 needs 才是
+      // "它在等你什么"的答案,只在终态读等于把等待信息全丢了。
+      if (a.kind === 'background') {
+        const extra = await readBgJobState(bgJobIdOf(a));
         if (extra) Object.assign(base, extra);
+        // status/waitingFor 只有注册表有(--json 输出不带)。
+        const reg = a.sessionId ? registry.get(a.sessionId) : null;
+        if (reg) Object.assign(base, reg);
+        // 落盘 state 是 blocked 但注册表还没写 waiting 时,仍按"在等你"呈现。
+        if (!base.status && base.jobState === 'blocked') base.status = 'waiting';
       }
       return base;
     }));

@@ -16,12 +16,16 @@ const panel = readFileSync(join(root, 'client/src/components/AgentMonitorPanel.j
 const agentsSrc = readFileSync(join(root, 'server/routes/agents.js'), 'utf8');
 
 // ── 1. 服务端:cli-session 条目报 'alive' 而不是 'running' ─────────────
+// 批L L1-a 把这段抽成了 buildCliSessionEntry(纯函数,取值语义见
+// tests/unit/check-agents-waiting-fields.mjs 的真 import 断言),这里跟着改成对该函数
+// 取源码守卫。语义不变:默认 alive,只有 CLI 自己写下的 'waiting' 才透传。
 {
-  const i = agentsSrc.indexOf("kind: 'cli-session'");
-  assert.ok(i > 0, "server/routes/agents.js 必须仍有 kind: 'cli-session' 条目");
-  const seg = agentsSrc.slice(i, agentsSrc.indexOf('stoppable: true', i));
-  assert.ok(/status: 'alive'/.test(seg),
-    "cli-session 只能确知进程活着,status 必须是 'alive'");
+  const i = agentsSrc.indexOf('export function buildCliSessionEntry');
+  assert.ok(i > 0, 'server/routes/agents.js 必须仍有 cli-session 条目映射函数');
+  const seg = agentsSrc.slice(i, agentsSrc.indexOf("router.get('/agents/active'", i));
+  assert.ok(/kind: 'cli-session'/.test(seg), "映射结果必须仍是 kind: 'cli-session'");
+  assert.ok(/status: waiting \? 'waiting' : 'alive'/.test(seg),
+    "cli-session 默认只能确知进程活着 → 'alive';唯一例外是 CLI 明写的 'waiting'");
   assert.ok(!/status: 'running'/.test(seg),
     "cli-session 不得报 'running'(注册表无法判断是否正在生成)");
 }

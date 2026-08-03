@@ -160,8 +160,11 @@ function BackgroundAgentsSection({ stoppingPid, onStop }) {
     setStoppingId('');
   };
 
-  // 运行中 = 未达终态(state 缺失但有活 pid 的旧版 CLI 输出也归运行中)
-  const running = agents.filter((a) => !BG_TERMINAL.has(a.state));
+  // 运行中 = 未达终态(state 缺失但有活 pid 的旧版 CLI 输出也归运行中)。
+  // 在等你的(blocked / 注册表 waiting)排最前:它们不会自己走完,不处理就一直卡着。
+  const waitsForYou = (a) => a.state === 'blocked' || a.status === 'waiting';
+  const running = agents.filter((a) => !BG_TERMINAL.has(a.state))
+    .sort((x, y) => (waitsForYou(y) ? 1 : 0) - (waitsForYou(x) ? 1 : 0));
   // 已完成的按结束时间(缺失退回开始时间)倒序,只显示最近 10 条防列表无限膨胀;
   // 超过 30 天的结束态自动不再显示(用户要求"自动清除"——CLI 侧数据不动,仅从监控隐藏)。
   const THIRTY_D = 30 * 24 * 3600 * 1000;
@@ -194,7 +197,7 @@ function BackgroundAgentsSection({ stoppingPid, onStop }) {
               <div className="flex items-center gap-2">
                 <Bot size={11} className="text-accent" />
                 <span className="text-[11px] text-ink font-body truncate flex-1" title={a.name}>{a.name || `bg #${a.pid}`}</span>
-                {a.state && <StatusBadge status={a.state} />}
+                {a.state && <StatusBadge status={a.state} waitingFor={a.waitingFor} needs={a.needs} />}
                 <span className="text-[10px] text-ink-faint font-mono shrink-0">{fmtElapsed(a.elapsedMs)}</span>
                 {/* 运行中(含 blocked=等待授权/额度)也能直接查看会话,不必先停止 —— 修用户报
                     "受阻状态点停止后才能查看结果" */}
@@ -211,6 +214,11 @@ function BackgroundAgentsSection({ stoppingPid, onStop }) {
                   </button>
                 )}
               </div>
+              {/* needs = CLI 写的人话待办(如 approve Write: /abs/path)。受阻的代理
+                  在等什么,直接写出来,不用点进会话翻。 */}
+              {a.needs && (
+                <div className="text-[10.5px] text-amber-700 font-body line-clamp-2 mt-1" title={a.needs}>{a.needs}</div>
+              )}
               {a.cwd && <div className="text-[10px] text-ink-faint font-mono truncate mt-1" title={a.cwd}>{a.cwd.split(/[/\\]+/).pop()}</div>}
             </div>
           ))}
@@ -264,7 +272,7 @@ function RemoteAgentCard({ agent, stoppingPid, onStop }) {
         <span className="text-xs font-medium text-ink font-mono truncate">
           {agent.kind === 'chat-process' ? `chat #${agent.pid}` : (agent.name || `cli #${agent.pid}`)}
         </span>
-        <div className="ml-auto"><StatusBadge status={agent.status} /></div>
+        <div className="ml-auto"><StatusBadge status={agent.status} waitingFor={agent.waitingFor} needs={agent.needs} /></div>
       </div>
       {(agent.promptPreview || agent.lastResponse) && (
         <div className="text-[10.5px] text-ink-muted font-body line-clamp-2" title={agent.promptPreview || agent.lastResponse}>
@@ -312,7 +320,9 @@ function RemoteBucket({ id, title, titleColor, defaultOpen, agents, stoppingPid,
       </button>
       {open && (
         <div className="space-y-2 mt-1.5">
-          {agents.map((a, i) => <RemoteAgentCard key={a.pid || a.id || i} agent={a} stoppingPid={stoppingPid} onStop={onStop} />)}
+          {/* key 优先 sessionId:同一 CLI supervisor 下的多个后台会话 pid 相同,
+              按 pid 当 key 会撞键(同一条卡片被反复复用/错位)。 */}
+          {agents.map((a, i) => <RemoteAgentCard key={a.sessionId || a.pid || a.id || i} agent={a} stoppingPid={stoppingPid} onStop={onStop} />)}
         </div>
       )}
     </div>
@@ -491,7 +501,18 @@ function AgentCard({ agent }) {
   );
 }
 
-function StatusBadge({ status }) {
+// CLI 写在 ~/.claude/sessions/<pid>.json 的 waitingFor 取值 → 中文副标题。
+// 会话真的停下来等人时才有值,它决定徽章旁边显示"在等什么"。
+const WAITING_FOR_LABEL = {
+  'permission prompt': '等待授权',
+  'input needed': '等待输入',
+  'dialog open': '有弹窗',
+  'sandbox request': '等待沙箱放行',
+  'worker request': '队友等待',
+};
+
+// waitingFor:等待原因,追加为徽章副标题;needs:CLI 写的人话待办,进 tooltip。
+function StatusBadge({ status, waitingFor = null, needs = '' }) {
   const map = {
     streaming:   { label: '运行中',  bg: 'bg-blue-50',  fg: 'text-blue-700',   border: 'border-blue-200' },
     starting:    { label: '启动中',  bg: 'bg-amber-50', fg: 'text-amber-700',  border: 'border-amber-200' },
@@ -509,11 +530,16 @@ function StatusBadge({ status }) {
     failed:      { label: '失败',    bg: 'bg-red-50',   fg: 'text-red-700',    border: 'border-red-200' },
     killed:      { label: '已终止',  bg: 'bg-red-50',   fg: 'text-red-700',    border: 'border-red-200' },
     blocked:     { label: '受阻',    bg: 'bg-amber-50', fg: 'text-amber-700',  border: 'border-amber-200' },
+    // 'waiting' = CLI 注册表写下的"会话停下来等人"(waitingFor 说明等什么)。
+    // 与 needs_input 同色系:两者都是"在等你",不是在跑。
+    waiting:     { label: '等待中',  bg: 'bg-violet-50', fg: 'text-violet-700', border: 'border-violet-200' },
   };
   const m = map[status] || { label: status || '—', bg: 'bg-canvas-warm', fg: 'text-ink-muted', border: 'border-canvas-deep' };
+  const sub = waitingFor ? (WAITING_FOR_LABEL[waitingFor] || String(waitingFor)) : '';
   return (
-    <span className={`text-[10px] px-1.5 py-0.5 rounded font-mono ${m.bg} ${m.fg} border ${m.border}`}>
-      {m.label}
+    <span title={needs || undefined}
+      className={`text-[10px] px-1.5 py-0.5 rounded font-mono ${m.bg} ${m.fg} border ${m.border}`}>
+      {m.label}{sub ? ` · ${sub}` : ''}
     </span>
   );
 }
@@ -799,6 +825,10 @@ export function AgentMonitorPanel() {
     ...wfAgents.filter((a) => a.status === 'running'),
     ...recentTerminal(wfAgents.filter((a) => a.status !== 'running')),
   ];
+  // 后台代理(cliKind='bg')在 /agents/active 里是【只读条目】,存在的意义是给 app 级
+  // 角标当廉价数据源;面板里它们由上面「后台代理 (claude --bg)」那一区呈现(带停止/查看
+  // 按钮),这里过滤掉,免得同一个代理在两处各显示一遍。
+  const procAgents = remote.agents.filter((a) => a.cliKind !== 'bg' && a.cliKind !== 'background');
   const BUCKET_META = {
     working: { label: '工作中', defaultOpen: true,  color: 'text-blue-600' },
     waiting: { label: '等待输入', defaultOpen: true, color: 'text-violet-600' },
@@ -891,8 +921,8 @@ export function AgentMonitorPanel() {
             "working" ones default open and finished/errored ones fold away.
             标题不叫"子进程":这里除了 GUI 自己起的 chat-process,还包含终端 / Claude Desktop
             开的 claude 会话(cli-session),它们不是 GUI 的子进程。 */}
-        <FoldableSection id="claude-procs" icon={<Terminal size={10} />} title={`本机 Claude 进程 (${remote.agents.length})`}>
-          {remote.agents.length > 0 ? (
+        <FoldableSection id="claude-procs" icon={<Terminal size={10} />} title={`本机 Claude 进程 (${procAgents.length})`}>
+          {procAgents.length > 0 ? (
             (() => {
               const isWorking = (a) => ['streaming', 'starting', 'running', 'working'].includes(a.status);
               const isDone = (a) => ['done', 'finished', 'completed'].includes(a.status);
@@ -901,13 +931,14 @@ export function AgentMonitorPanel() {
               // 外部 CLI 会话(终端 / Claude Desktop 开的 claude):只知道进程活着,不知道
               // 是否在生成 —— 单列一组,不进"工作中"。
               const isAlive = (a) => a.status === 'alive';
+              // "等待输入"排最前:在等你的不会自己走完,不处理就一直卡着。
               const groups = [
-                { key: 'working', label: '工作中', color: 'text-blue-600', defaultOpen: true, list: remote.agents.filter(isWorking) },
-                { key: 'waiting', label: '等待输入', color: 'text-violet-600', defaultOpen: true, list: remote.agents.filter(isWaiting) },
-                { key: 'alive', label: '存活（外部会话）', color: 'text-ink-muted', defaultOpen: false, list: remote.agents.filter(isAlive) },
-                { key: 'done', label: '已完成', color: 'text-green-600', defaultOpen: false, list: remote.agents.filter(isDone) },
-                { key: 'error', label: '错误', color: 'text-red-600', defaultOpen: false, list: remote.agents.filter(isError) },
-                { key: 'other', label: '其他', color: 'text-ink-muted', defaultOpen: false, list: remote.agents.filter((a) => !isWorking(a) && !isDone(a) && !isError(a) && !isWaiting(a) && !isAlive(a)) },
+                { key: 'waiting', label: '等待输入', color: 'text-violet-600', defaultOpen: true, list: procAgents.filter(isWaiting) },
+                { key: 'working', label: '工作中', color: 'text-blue-600', defaultOpen: true, list: procAgents.filter(isWorking) },
+                { key: 'alive', label: '存活（外部会话）', color: 'text-ink-muted', defaultOpen: false, list: procAgents.filter(isAlive) },
+                { key: 'done', label: '已完成', color: 'text-green-600', defaultOpen: false, list: procAgents.filter(isDone) },
+                { key: 'error', label: '错误', color: 'text-red-600', defaultOpen: false, list: procAgents.filter(isError) },
+                { key: 'other', label: '其他', color: 'text-ink-muted', defaultOpen: false, list: procAgents.filter((a) => !isWorking(a) && !isDone(a) && !isError(a) && !isWaiting(a) && !isAlive(a)) },
               ].filter((g) => g.list.length > 0);
               return (
                 <div className="space-y-3">
