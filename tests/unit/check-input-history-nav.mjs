@@ -148,6 +148,18 @@ const S0 = { text: '', cursor: -1, draft: '' };
   const kd = src.slice(src.indexOf('const handleKeyDown ='));
   assert.ok(kd.split('historyCursor < 0').length - 1 >= 3,
     'handleKeyDown 里 historyCursor < 0 门控至少 3 处(斜杠菜单两个箭头 + ↓ 早退)');
+  // 补全后必须退出浏览态:否则紧接着按 ↑ 会继续翻历史,把刚补全的命令覆盖掉。
+  const sc = src.slice(src.indexOf('const selectCommand ='), src.indexOf('// ── @ 引用选择器'));
+  assert.ok(/setHistoryCursor\(-1\)/.test(sc), 'selectCommand 必须 setHistoryCursor(-1) 退出历史浏览态');
+}
+
+// ── 补全后 ↑ 不再覆盖:复刻"选中命令 → cursor 复位 → ↑ 走菜单而非历史" ────
+{
+  const H = ['第一条', '第二条'];
+  // 浏览历史翻出 /compact(cursor≥0)后点选补全 → cursor 必须回 -1
+  const afterSelect = { text: '/compact ', cursor: -1, draft: '' };
+  assert.equal(keyDown(afterSelect, 'ArrowUp', H, { showCommands: true }).menu, true,
+    '补全后 ↑ 归斜杠菜单,不得继续翻历史覆盖补全文本');
 }
 
 console.log('✓ check-input-history-nav: 7 条路径 + 源码守卫全过');

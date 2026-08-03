@@ -601,6 +601,9 @@ export function ChatInput({ onSend, onStop, onStopBackground, onAccelerate, onBa
       setText(cmd + ' ');
     }
     setShowCommands(false);
+    // 补全后退出历史浏览态:斜杠菜单是从"翻历史翻出 /xxx"这条路径进来的,cursor 还 ≥0 时
+    // 紧接着按 ↑ 会继续翻历史,把刚补全的命令覆盖掉。
+    setHistoryCursor(-1);
     textareaRef.current?.focus();
   };
 
