@@ -121,16 +121,16 @@ assert.ok(/useEffect\(\(\) => detachStream[,)]/.test(src),
 // 修前②(审查揪出):失败计数没按 pid 记,还指望 backgroundPid 轮询驱动重试 —— 轮询每轮
 // setBackgroundPid(同一个 pid 字符串) 被 Object.is 短路,effect 根本不重跑,"三振出局"
 // 是永远够不着的死代码。
+// 批J J2:恢复逻辑抽成 recoverAttach,两个调用点共用(attach 非 2xx + 流被静默掐断)。
+// 下面按 recoverAttach 的函数体核对,再核对非 2xx 分支确实调它。
 {
-  const i = src.indexOf('if (!streamRes.ok) {');
-  assert.ok(i > 0, 'handleSend 必须显式处理 attach 非 2xx');
+  const i = src.indexOf('const recoverAttach = () => {');
+  assert.ok(i > 0, 'attach 断链的恢复逻辑必须抽成 recoverAttach(两处共用,避免漂移)');
   const seg = src.slice(i, i + 1800);
   assert.ok(/reattachedPidRef\.current = null/.test(seg),
-    '非 2xx 必须清 reattachedPidRef,否则同一 pid 永不重试');
+    '恢复时必须清 reattachedPidRef,否则同一 pid 永不重试');
   assert.ok(/nextAttachTry\(attachFailRef\.current, String\(pid\), ATTACH_MAX_TRIES\)/.test(seg),
     '失败计数必须按 pid 记(nextAttachTry),裸自增会把上一个进程的账算到下一个头上');
-  assert.ok(/fetchMessagesForTab\(streamSid, streamOwnerPh/.test(seg),
-    '必须回落重拉历史(用发起时闭包的 sid/ph,不得读 getLocalSession)');
   assert.ok(/attachRetryTimerRef\.current = setTimeout\(\(\) => \{[\s\S]{0,400}?reattachPid: pid/.test(seg),
     '未到上限必须自己排定时器重连(id 挂 attachRetryTimerRef,供 detachStream 清)—— 靠 backgroundPid 轮询等于不重试');
   assert.ok(/if \(streamingRef\.current \|\| reattachedPidRef\.current\) return;/.test(seg),
@@ -139,12 +139,24 @@ assert.ok(/useEffect\(\(\) => detachStream[,)]/.test(src),
     '重试前必须复查本 pane 没切走');
   assert.ok(/tries\.exhausted/.test(seg) && /sticky: true/.test(seg),
     '到上限要亮【可关闭且不自动消失】的提示');
-  assert.ok(/attachFailRef\.current = null;/.test(src.slice(i, i + 2200)), 'attach 成功必须清计数');
-  // sticky 横幅不会自己过期(第 143 行豁免了 5s 定时器),attach 成功后不清就一直挂着报错。
-  assert.ok(/setProviderSwitchNotice\(\(n\) => \(n\?\.sticky \? null : n\)\);/.test(src.slice(i, i + 2600)),
+  assert.ok(/retryPid: String\(pid\)/.test(seg),
+    'sticky 提示要带 retryPid,横幅上的「重试」按钮据此清对应 pid 的计数');
+
+  const j = src.indexOf('if (!streamRes.ok) {');
+  assert.ok(j > i, 'handleSend 必须显式处理 attach 非 2xx');
+  const seg2 = src.slice(j, j + 1200);
+  assert.ok(/fetchMessagesForTab\(streamSid, streamOwnerPh/.test(seg2),
+    '必须回落重拉历史(用发起时闭包的 sid/ph,不得读 getLocalSession)');
+  assert.ok(/recoverAttach\(\);/.test(seg2), '非 2xx 必须走 recoverAttach');
+  // 计数复位判据:必须是"本流真跑完(done)"而非"attach 拿到 2xx"——被中途掐断的流每次都
+  // attach 成功,按 2xx 复位会让三振保护成死代码,坏传输每 1.5s 无限重连。
+  assert.ok(/if \(sawDoneEvent\) attachFailRef\.current = null;/.test(src),
+    'attach 失败计数只许在收到 done 时复位');
+  // sticky 横幅不会自己过期(下面豁免了 5s 定时器),attach 成功后不清就一直挂着报错。
+  assert.ok(/setProviderSwitchNotice\(\(n\) => \(n\?\.sticky \? null : n\)\);/.test(src.slice(j, j + 2000)),
     'attach 成功必须清掉三振留下的 sticky 失败横幅(函数式更新,避开闭包陈旧值)');
   // 提前 return 只能落在 try 内(要走 finally 完成 finalizeInFlightRef 的 -1)
-  assert.ok(seg.indexOf('return;') < seg.indexOf('const reader'), '提前 return 必须在取 reader 之前');
+  assert.ok(seg2.indexOf('return;') < seg2.indexOf('const reader'), '提前 return 必须在取 reader 之前');
 }
 // sticky 提示不许被 5s 定时器清掉
 assert.ok(/if \(!providerSwitchNotice \|\| providerSwitchNotice\.sticky\) return;/.test(src),
@@ -152,22 +164,32 @@ assert.ok(/if \(!providerSwitchNotice \|\| providerSwitchNotice\.sticky\) return
 
 // ── 6. 致命1:被接管的一方不得自动回连(否则两个视图无限互踢)───────────
 // 链条:窗格A 流式中 → poll 因 !streamingRef 恒写 backgroundPid=null → 清空分支把 A 的
-// reattach 守卫清掉 → 第二视图B attach 接管踢掉 A → A 的 reader 无 done 正常结束 → finally
-// 关流 → 下轮 poll null→P 翻转 → 守卫已空 → A 回连反踢 B → B 对称 → 每 1.5~3s 互踢无限循环。
+// reattach 守卫清掉 → 第二视图B attach 接管踢掉 A → A 的流结束 → finally 关流 → 下轮 poll
+// null→P 翻转 → 守卫已空 → A 回连反踢 B → B 对称 → 每 1.5~3s 互踢无限循环。
+// 批J J2:判据从"无 done 却正常结束"(猜)改成服务端明发的 detached 事件(明说)——
+// WebView 空闲掐断 / 断网与被接管是同一形态,猜错一次就把 reattach 闩死、本回合永不重连。
+// 互踢那条不变量原样保留,只是触发它的判据换了权威来源。
 {
-  const i = src.indexOf('// 【被接管】判定');
-  assert.ok(i > 0, '必须有"被接管"判定');
-  const seg = src.slice(i, i + 1200);
-  assert.ok(/!sawDoneEvent && !sawError && !controller\.signal\.aborted && !killedRef\.current && !backgroundedRef\.current/.test(seg),
-    '被接管判据 = 没收到 done + 本流没自己报错 + 不是本端 abort/停止/转后台;缺一条都会误判正常收尾或本端断开');
-  // 7 个错误分支都是 `sawError = true; break`,同样"无 done 结束"。少了 !sawError,
-  // 一次上游报错就会把 pid 写进 reattach 守卫,把这条会话的自动续播一起封死。
-  assert.ok(src.split('sawError = true;').length - 1 >= 7,
-    '错误分支应仍以 sawError=true 收尾(判据依赖它)');
+  const i = src.indexOf("if (event.type === 'detached')");
+  assert.ok(i > 0, '必须有 detached 分支(被接管的唯一权威判据)');
+  const seg = src.slice(i, i + 400);
   assert.ok(/reattachedPidRef\.current = String\(pid\)/.test(seg),
     '被接管后必须抑制本 pid 自动回连(与转后台同一手法),否则互踢');
+  assert.ok(/sawTakeover = true/.test(seg),
+    '被接管要记账,否则下面的静默掉线分支会再叠一次重连 = 回连反踢');
+  // 服务端得真发这条事件,否则客户端分支永远等不到 → 退回没有恢复的形态。
+  const server = readFileSync(new URL('../../server/routes/chat.js', import.meta.url), 'utf8');
+  assert.ok(/type: 'detached', reason: 'takeover'/.test(server),
+    '服务端必须在 end 掉被接管的旧连接之前发 detached 事件');
+  // 静默掉线(非接管、非报错、非本端 abort)= 传输断了,走三振重连;误判成"被接管"就是原 bug。
+  assert.ok(/!sawDoneEvent && !sawTakeover && !sawError\s*\n?\s*&& !controller\.signal\.aborted && !killedRef\.current && !backgroundedRef\.current/.test(src),
+    '静默掉线判据 = 没 done + 没被接管 + 本流没报错 + 不是本端 abort/停止/转后台');
+  // 7 个错误分支都是 `sawError = true; break`,同样"无 done 结束"。少了 !sawError,
+  // 一次上游报错就会触发一轮没意义的重连。
+  assert.ok(src.split('sawError = true;').length - 1 >= 7,
+    '错误分支应仍以 sawError=true 收尾(判据依赖它)');
   assert.ok(/if \(event\.type === 'done'\) \{ sawDoneEvent = true; break; \}/.test(src),
-    'done 事件必须记账,否则"没收到 done"判据恒真、正常收尾也会被当成被接管');
+    'done 事件必须记账,否则"没收到 done"判据恒真、正常收尾也会被当成掉线去重连');
 }
 // 双保险:流式期间的 backgroundPid=null 不是"进程没了",不许当重置信号
 assert.ok(/if \(!backgroundPid\) \{ if \(!streamingRef\.current\) reattachedPidRef\.current = null; return; \}/.test(src),
@@ -186,7 +208,7 @@ assert.ok(/if \(!backgroundPid\) \{ if \(!streamingRef\.current\) reattachedPidR
       if (!ok) {
         const tries = nextAttachTry(attachFailRef.current, pid, 3);
         attachFailRef.current = tries;
-        if (tries.exhausted) notice = { text: '会话流连接失败,请切走再切回重试。', sticky: true };
+        if (tries.exhausted) notice = { text: '会话流连接失败。', sticky: true, retryPid: pid };
         else scheduled += 1;
         return 'retry-scheduled';
       }

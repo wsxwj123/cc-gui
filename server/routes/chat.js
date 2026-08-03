@@ -1558,11 +1558,24 @@ router.post('/chat/permission-mode', async (req, res) => {
 // 故让位只在【自己仍是当前持有者】时生效。纯函数,tests/unit/check-stream-attach-takeover.mjs 真 import。
 let attachSeq = 0;
 
+// 「被接管」必须由服务端明说(批J J2)。客户端原来只能从「reader 无 done 却正常结束」去
+// 猜自己被接管,可 WebView 空闲掐断 / 网络断开也是同一形态 —— 猜错一次就把 reattach 闩锁
+// 焊死(本回合内永不重连),横幅一直挂、内容只能等回合结束一次性塞入。故 end 之前先给每个
+// 旧响应写一行 detached 事件,让客户端确定性区分「被接管」与「传输掉线」。
+export const DETACHED_TAKEOVER_LINE = JSON.stringify({ type: 'detached', reason: 'takeover' });
+
 export function claimAttach(slot, token) {
   if (slot.attached) {
     // 先 end 老响应再清 listeners:end 之后老连接的 safeWrite 有 closed/!res.writable 守卫,
     // 写不进去只静默返回,不会与新连接双写同一条流。
-    for (const ev of [...(slot.attachments || [])]) { try { ev.end(); } catch { /* 已断开 */ } }
+    // 告知与 end 分两步各自 try/catch:某条连接已死(EPIPE)不得跳过它的 end,更不得中断
+    // 其余连接的清理 —— 接管走不完的话新窗格永远接不上。
+    // 走 ev.onLine 而不是自己拼 `data: `:它就是这条连接的写函数(带 closed/writable 守卫),
+    // 且 detached 不匹配 `{"type":"done"` 前缀,不会被误当收尾控制行。
+    for (const ev of [...(slot.attachments || [])]) {
+      try { ev.onLine?.(DETACHED_TAKEOVER_LINE); } catch { /* 写不进去也要往下走 end */ }
+      try { ev.end(); } catch { /* 已断开 */ }
+    }
     slot.attachments?.clear();
     slot.listeners.clear();
   }

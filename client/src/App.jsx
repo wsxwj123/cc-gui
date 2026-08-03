@@ -69,7 +69,7 @@ import {
 import { buildFontEntries, groupFonts, detectFonts, platformCandidates, queryLocalFontFamilies } from './utils/systemFonts.js';
 import { copyText } from './utils/clipboard.js';
 import { escRoute, idleEscAction, escYieldCardId, isEditableTarget } from './utils/escAction.js';
-import { isCurrentStreamTurn, nextAttachTry, resolveStreamHistCutoff, shouldRefreshHist } from './utils/reattach.js';
+import { histSig, isCurrentStreamTurn, nextAttachTry, resolveStreamHistCutoff, shouldRefreshHist } from './utils/reattach.js';
 import { pruneByLiveSet } from './utils/levelPrune.js';
 import { classifyStopTargets } from './utils/stopTargets.js';
 import { resizeScrollTop } from './utils/scroll.js';
@@ -3052,7 +3052,25 @@ function CompactProgressBar() {
 // char + verb + optional tool/phase detail. Updates live as the model
 // moves through phases inside one turn.
 
-function StreamingStatusLine({ thinking, text, toolCalls, streamStart }) {
+// reattach 状态行专用:「上次更新 N 秒前」。reattach 期间界面只有一行循环动词在动,
+// 用户分不出「在跑但 jsonl 还没写」和「已经卡死」—— 实测相邻 jsonl 记录间隔 p75=7.6s、
+// p90=17.4s、max=445s,长单块回合几十秒不落盘是常态,光看动词永远像卡住了。
+// getAt 读 ref(历史真的带回新内容时才推进,见 utils/reattach.js histSig),自己每秒 tick,
+// 只重渲这一行;interval 随本组件挂载/卸载,状态行不可见时不跑。
+function LastUpdateAgo({ getAt }) {
+  const [, tick] = useState(0);
+  useEffect(() => {
+    const id = setInterval(() => tick((n) => n + 1), 1000);
+    return () => clearInterval(id);
+  }, []);
+  const at = getAt?.();
+  if (!at) return null;
+  const s = Math.max(0, Math.floor((Date.now() - at) / 1000));
+  const txt = s < 60 ? `${s} 秒前` : `${Math.floor(s / 60)} 分 ${s % 60} 秒前`;
+  return <span className="text-[12px] text-ink-faint shrink-0 tabular-nums">· 上次更新 {txt}</span>;
+}
+
+function StreamingStatusLine({ thinking, text, toolCalls, streamStart, lastUpdateAt = null }) {
   const verb = useCyclingVerb();
   let label = null;
   // Latest unresolved tool call (no result yet) → "Bash(ls)"
@@ -3089,6 +3107,8 @@ function StreamingStatusLine({ thinking, text, toolCalls, streamStart }) {
         <span className="font-mono truncate font-medium" style={{ color: '#D97757' }}>{label}</span>
         <span style={{ color: '#D97757' }}>…</span>
         <ElapsedTime startedAt={streamStart} className="ml-1" />
+        {/* 只有 reattach 分支传 lastUpdateAt(它那边没有流式气泡,唯一的活体指示就是这行) */}
+        {lastUpdateAt && <LastUpdateAgo getAt={lastUpdateAt} />}
       </div>
     </div>
   );
@@ -3806,6 +3826,17 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // 三振重试排的 setTimeout id。不清掉的话:窗格已卸载/已切走,1.5s 后定时器照样触发
   // handleSendRef → 起一条没人要的僵尸 attach。detachStream(卸载 + 切会话共用)统一清。
   const attachRetryTimerRef = useRef(null);
+  // reattach 状态行的「上次更新 N 秒前」。at=历史最近一次【真的带回新内容】的时刻,
+  // sig=当时最后一条消息的签名(见 utils/reattach.js histSig)。放 ref 不放 state:
+  // 它每 1.5s 可能变一次,进 state 会把整个 SessionDetail(含长历史列表)拖去重渲。
+  // 读取由状态行里的 LastUpdateAgo 自己每秒 tick,只重渲那一行。
+  const histFreshRef = useRef({ at: 0, sig: null });
+  // 稳定身份的读取器:传给状态行当 prop,不会因为 ref 内容变化触发重渲。
+  const getHistFreshAt = useCallback(() => histFreshRef.current.at, []);
+  // 三振横幅「重试」按钮的重连触发器。auto-reattach effect 只依赖 backgroundPid,
+  // 而重试时 pid 没变 → Object.is 短路,effect 永不重跑(已知坑)。故 bump 这个 nonce
+  // 并把它加进该 effect 的 deps。
+  const [attachRetryNonce, setAttachRetryNonce] = useState(0);
   const abortRef = useRef(null);
   // 只做「断开本端 SSE」这一件事:abort 客户端 fetch → 服务端 req.on('close') → slot.attached=false,
   // 后续行落 earlyLines 等重连回放(detach-don't-abort,进程不死、jsonl 继续落盘)。
@@ -4813,36 +4844,43 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       // 新回合开始 = 会话复活:清除"已停"标记(监控页 wf 内层 agent 的 stopped 覆盖失效,
       // 新 workflow 可正常显示 running)。draft 首发 sid 在 init 事件才确定,那里再清一次。
       if (streamSid) useStore.getState().clearSessionStopped?.(streamSid);
+      // attach 通道断了的统一恢复。两个调用点:①attach 非 2xx(下面);②已连上的流被静默
+      // 掐断(收到 done 之前 reader 就结束,见循环之后)。两者都是【传输掉线】—— 真正的
+      // "被接管"由服务端发 detached 事件明说,走它自己的分支,不到这里。
+      const recoverAttach = () => {
+        reattachedPidRef.current = null;   // 清 reattach 守卫,允许重连
+        const tries = nextAttachTry(attachFailRef.current, String(pid), ATTACH_MAX_TRIES);
+        attachFailRef.current = tries;
+        if (tries.exhausted) {
+          // sticky 不自动过期;retryPid 让横幅上的「重试」按钮知道该清谁的计数。
+          setProviderSwitchNotice({ text: '会话流连接失败。', sticky: true, retryPid: String(pid) });
+          return;
+        }
+        // 显式排一次重连:poll 每轮写同一个 pid 会被 Object.is 短路,指望它重试等于不重试。
+        // id 挂 ref:卸载/切会话时 detachStream 清掉,不留 1.5s 的僵尸 attach 缝隙。
+        // 排新的先清旧的:ref 只存一个 id,手动重发叠加上一次失败会把旧 id 冲掉 →
+        // 那个孤儿定时器再没人能 clear,detachStream 也清不到,1.5s 后照样起僵尸 attach。
+        clearTimeout(attachRetryTimerRef.current);
+        attachRetryTimerRef.current = setTimeout(() => {
+          attachRetryTimerRef.current = null;
+          if (streamingRef.current || reattachedPidRef.current) return;   // 已有流 / 已被别处接管
+          if (streamSid && getLocalSession()?.sessionId !== streamSid) return; // 本 pane 已切走
+          handleSendRef.current?.(null, { reattachPid: pid });
+        }, 1500);
+      };
       const streamRes = await fetch(`/api/chat/${pid}/stream`, { signal: controller.signal });
       if (!streamRes.ok) {
         // 非 2xx(409「已被占用」已由服务端改成新连接接管,这里是防御):响应体是 JSON 不是
         // SSE,下面的逐行解析一条 `data: ` 都匹配不到 → 循环空转一圈即结束、不抛错 → 本窗格
         // 从此没有任何追加通道,只剩一条承诺"自动追加"的后台横幅(用户实报"重开会话历史空")。
-        reattachedPidRef.current = null;   // 清 reattach 守卫,允许重连
-        const tries = nextAttachTry(attachFailRef.current, String(pid), ATTACH_MAX_TRIES);
-        attachFailRef.current = tries;
-        // 追加通道断了,至少把已落盘的历史补回来,别让窗格空着。
+        // 追加通道断了,至少把已落盘的历史补回来,别让窗格空着(本分支从没起过流,没有别处补)。
         if (streamSid && streamOwnerPh) { try { await fetchMessagesForTab(streamSid, streamOwnerPh, { silent: true }); } catch {} }
-        if (tries.exhausted) {
-          setProviderSwitchNotice({ text: '会话流连接失败,请切走再切回重试。', sticky: true });
-        } else {
-          // 显式排一次重连:poll 每轮写同一个 pid 会被 Object.is 短路,指望它重试等于不重试。
-          // id 挂 ref:卸载/切会话时 detachStream 清掉,不留 1.5s 的僵尸 attach 缝隙。
-          // 排新的先清旧的:ref 只存一个 id,手动重发叠加上一次失败会把旧 id 冲掉 →
-          // 那个孤儿定时器再没人能 clear,detachStream 也清不到,1.5s 后照样起僵尸 attach。
-          clearTimeout(attachRetryTimerRef.current);
-          attachRetryTimerRef.current = setTimeout(() => {
-            attachRetryTimerRef.current = null;
-            if (streamingRef.current || reattachedPidRef.current) return;   // 已有流 / 已被别处接管
-            if (streamSid && getLocalSession()?.sessionId !== streamSid) return; // 本 pane 已切走
-            handleSendRef.current?.(null, { reattachPid: pid });
-          }, 1500);
-        }
+        recoverAttach();
         return; // 本 return 照样走 finally,finalizeInFlightRef 的 ±1 配对不破
       }
-      attachFailRef.current = null;
-      // attach 成功 = 三振那条 sticky 失败横幅("请切走再切回重试")已经过时,清掉。
-      // sticky 不自动过期,不清就一直挂着,恢复之后还在报错。函数式更新避开闭包陈旧值。
+      // attach 成功 = 三振那条 sticky 失败横幅已经过时,清掉。sticky 不自动过期,不清就
+      // 一直挂着,恢复之后还在报错。函数式更新避开闭包陈旧值。
+      // 注意这里【不】清失败计数:计数在收到 done(本流真的跑完)时才清,见循环之后。
       setProviderSwitchNotice((n) => (n?.sticky ? null : n));
       const reader = streamRes.body.getReader();
       const decoder = new TextDecoder();
@@ -4876,6 +4914,18 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       // 还有一层 paneSessions[tab] 乱序守卫,响应落地时切走了会整条丢弃)。
       let lastHistRefreshAt = Date.now();
       let histRefreshInFlight = false; // 上一次还没落地就不再发:慢盘/大会话时避免请求叠罗汉
+      // reattach 起流即把「上次更新」的基准设成此刻(状态行从 0 秒开始数)。
+      if (reattachPid) histFreshRef.current = { at: Date.now(), sig: null };
+      // 刷新落地后记一笔:只有本 pane 的最后一条消息签名【变了】才算"更新"。
+      // fetchMessages 内部有乱序守卫(响应落地时 pane 已切走则整条丢弃),数据没被应用时
+      // 签名自然不变,所以这里不需要再判一次归属。
+      const noteHistApplied = () => {
+        const arr = useStore.getState().paneMessages[tabIndex] || [];
+        const sig = histSig(arr[arr.length - 1]);
+        const prev = histFreshRef.current;
+        if (prev.sig === null) { histFreshRef.current = { at: prev.at, sig }; return; } // 首次只记基线
+        if (sig !== prev.sig) histFreshRef.current = { at: Date.now(), sig };
+      };
       const refreshHistIfDue = (force) => {
         if (histRefreshInFlight) return;
         if (!shouldRefreshHist({ isReattach: !!reattachPid, now: Date.now(), lastAt: lastHistRefreshAt, force })) return;
@@ -4888,7 +4938,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         try {
           Promise.resolve(fetchMessagesForTab(_sid, _ph, { silent: true }))
             .catch(() => {})
-            .finally(() => { histRefreshInFlight = false; });
+            .finally(() => { histRefreshInFlight = false; noteHistApplied(); });
         } catch { histRefreshInFlight = false; }
       };
       const isDuplicate = (line) => {
@@ -4897,8 +4947,11 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         if (recentLines.length > RECENT_MAX) recentLines.shift();
         return false;
       };
-      // 本流是否收到过 done 事件。没收到却正常结束 = 被别的视图接管(见循环之后)。
+      // 本流是否收到过 done 事件(正常收尾)。
       let sawDoneEvent = false;
+      // 本流是否被服务端明确告知「已被新连接接管」(detached 事件)。以前靠"无 done 却
+      // 正常结束"猜,而掐断 SSE 是同一形态 —— 猜错就把 reattach 闩死。现在只认服务端明说。
+      let sawTakeover = false;
 
       while (true) {
         const { done, value } = await reader.read();
@@ -5753,24 +5806,37 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
               if (['working', 'streaming', 'running', 'starting'].includes(_ag.status)) finalizeAgent(_st, tc.id, 'completed');
             }
           }
+          // 服务端明说本连接被新 attach 接管(chat.js claimAttach 在 end 之前发)。
+          // 同一会话被第二个视图打开(分屏同会话 / 桌面+手机双端),后 attach 者获胜。
+          // 此时【绝不能】自动回连:一回连就把对方踢掉,对方同样"被接管"再回连踢回来,
+          // 两边每 1.5~3s 互踢一轮不停。记下本 pid 抑制自动重连(与"转后台"同一手法),
+          // 败者切走再切回会清掉守卫,届时照常续播。
+          if (event.type === 'detached') {
+            sawTakeover = true;
+            reattachedPidRef.current = String(pid);
+            break;
+          }
           if (event.type === 'done') { sawDoneEvent = true; break; }
         }
         // reattach:每读到一批 SSE 行就考虑刷一次历史(内部节流,非 reattach 直接返回)。
         refreshHistIfDue(false);
       }
-      // 【被接管】判定:reader 正常结束、却从未收到 done 事件、也不是本端主动断开
-      // (停止/加速/转后台/切会话都会走 abort → catch,到不了这里)。这只可能是服务端的
-      // attach 接管协议把本连接 end 掉了 —— 同一会话被第二个视图打开(分屏同会话 / 桌面+
-      // 手机双端),后 attach 者获胜。
-      // 此时【绝不能】自动回连:本视图一回连就把对方踢掉,对方的流同样"无 done 结束"又回连
-      // 踢回来,两边每 1.5~3s 互踢一轮,无限循环。记下本 pid 抑制自动重连(与"转后台"同一
-      // 手法),败者切走再切回会清掉守卫,届时照常续播。
-      // !sawError:7 个错误分支都是 `sawError = true; break`,同样"无 done 结束"。那是本流
-      // 自己报错退出,不是被别的视图接管 —— 误判会把 pid 记进 reattach 守卫,把这条会话的
-      // 自动续播一并封死。
-      if (!sawDoneEvent && !sawError && !controller.signal.aborted && !killedRef.current && !backgroundedRef.current) {
-        reattachedPidRef.current = String(pid);
+      // 【传输掉线】判定:reader 正常结束、却从未收到 done,也没收到服务端的 detached
+      // 告知 —— 那就不是被接管,是这条 SSE 被掐了(WebView 空闲回收 / 网络抖动 / 中间层
+      // 超时)。原来这里把这一形态一律当"被接管"猜,猜错一次就把 reattach 闩锁焊死:本
+      // 回合内永不重连(auto-reattach effect 只在 !backgroundPid 时清闩),横幅一直挂着、
+      // 内容只能等回合结束一次性塞入。改成走已有的 per-pid 三振重试路径。
+      // 排除项:①sawError —— 7 个错误分支都是 `sawError = true; break`,是本流自己报错
+      // 退出,重连没有意义;②本端主动断开(停止/加速/转后台/切会话走 abort → catch,
+      // 本来就到不了这里,留作显式守卫)。
+      if (!sawDoneEvent && !sawTakeover && !sawError
+        && !controller.signal.aborted && !killedRef.current && !backgroundedRef.current) {
+        recoverAttach();
       }
+      // 本流正常收尾 = 这条 attach 通道确实好使,之前那几次失败不算数。
+      // 判据不能用"attach 拿到 2xx":被中途掐断的流每次都能 attach 成功 → 计数每轮归零 →
+      // 三振保护成死代码,坏传输会每 1.5s 无限重连下去。
+      if (sawDoneEvent) attachFailRef.current = null;
       // 回合结束(流关闭/done):立刻收尾刷一次,不等下一个节流窗,也不等 finally 的落盘轮询。
       refreshHistIfDue(true);
 
@@ -6234,7 +6300,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     if (reattachedPidRef.current === backgroundPid) return; // already reattached
     reattachedPidRef.current = backgroundPid;
     handleSendRef.current?.(null, { reattachPid: backgroundPid });
-  }, [backgroundPid]);
+    // attachRetryNonce:三振横幅上的「重试」按钮触发器。pid 不变时 setBackgroundPid 被
+    // Object.is 短路,只依赖 backgroundPid 的话 effect 永不重跑 = 按钮点了没反应。
+  }, [backgroundPid, attachRetryNonce]);
 
   // H 转后台(用户主动):复用切走会话的 detach 路径 —— 只 abort 本端 SSE,进程照常
   // 在服务端跑、jsonl 继续落盘。与切走的区别:留在本会话,所以要 ① 预置 reattachedPidRef
@@ -7227,6 +7295,22 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           <span className="text-amber-700 text-[12px] font-body leading-snug flex-1">
             🔄 {providerSwitchNotice.text}
           </span>
+          {/* 三振出局(attach 连败 ATTACH_MAX_TRIES 次)后的手动重连入口。原文案让用户
+              "切走再切回"才能重试 —— 那是把复位动作交给用户去猜。点这里等价:清该 pid
+              的失败计数 + 清 reattach 闩锁 + bump nonce 触发 auto-reattach effect。 */}
+          {providerSwitchNotice.retryPid && (
+            <button
+              onClick={() => {
+                if (attachFailRef.current?.pid === providerSwitchNotice.retryPid) attachFailRef.current = null;
+                reattachedPidRef.current = null;
+                setProviderSwitchNotice(null);
+                // nonce 是必须的:重试时 backgroundPid 没变,effect 的 deps 被 Object.is
+                // 短路就永不重跑(这条踩过)。
+                setAttachRetryNonce((n) => n + 1);
+              }}
+              className="shrink-0 px-2 py-0.5 rounded text-[12px] font-medium text-amber-800 border border-amber-300 hover:bg-amber-100"
+            >重试</button>
+          )}
           <button
             onClick={() => setProviderSwitchNotice(null)}
             className="text-amber-600 hover:text-amber-800 text-[14px] leading-none px-1"
@@ -7402,6 +7486,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                   text={streamingText}
                   toolCalls={streamingToolCalls}
                   streamStart={streamStartRef.current}
+                  lastUpdateAt={getHistFreshAt}
                 />
               )}
               {/* 等待状态行(G):压缩中/API 重试/限流等待的明确说明。与 StreamingStatusLine

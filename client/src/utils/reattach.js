@@ -53,6 +53,32 @@ export function shouldRefreshHist({ isReattach, now, lastAt, force = false, inte
 }
 
 /**
+ * 「历史真的长出新内容了吗」的 O(1) 判据 —— 取本 pane 最后一条消息的签名。
+ *
+ * 为什么需要它:reattach 期间每 1.5s 刷一次历史,但刷到的多半和上次一样(实测相邻 jsonl
+ * 记录间隔 p75=7.6s / p90=17.4s / max=445s,长单块回合几十秒不落盘是常态)。若按「刷新
+ * 发生」记时间戳,界面会恒显"0 秒前",区分不出「在跑但没落盘」和「卡死」—— 那正是这行
+ * 状态要回答的问题。所以只在签名变化时才认定"更新了"。
+ *
+ * 为什么这么取:session-reader 的一条 turn = 一条用户 prompt 到下一条之间的全部 assistant
+ * 记录,CLI 每写一条记录就往当前 turn 追一个块 → blocks 长度必变;新回合则 uuid 变。
+ * 整段 JSON.stringify 也能判,但长回合是几十上百 KB,每次刷新算一遍不值当。
+ * @param {object|null|undefined} m 最后一条消息
+ * @returns {string} 内容未变则恒等
+ */
+export function histSig(m) {
+  if (!m) return '';
+  const text = Array.isArray(m.text) ? m.text : [];
+  return [
+    m.uuid || '',
+    Array.isArray(m.blocks) ? m.blocks.length : 0,
+    Array.isArray(m.toolCalls) ? m.toolCalls.length : 0,
+    text.length,
+    String(text[text.length - 1] || '').length,
+  ].join('|');
+}
+
+/**
  * attach 失败计数,**按 pid 记**。pid 变了就是另一个进程,旧账不算。
  * 修前的计数不但没按 pid 记,还指望 backgroundPid 轮询驱动重试 —— 轮询每次
  * setBackgroundPid(同一个 pid 字符串) 被 Object.is 短路,effect 根本不重跑,

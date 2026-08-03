@@ -11,6 +11,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import {
   REATTACH_REFRESH_MS,
+  histSig,
   isCurrentStreamTurn,
   resolveStreamHistCutoff,
   shouldRefreshHist,
@@ -98,4 +99,57 @@ import {
     'reattach 历史刷新必须有 in-flight 去重,慢盘时别把 /messages 请求叠罗汉');
 }
 
-console.log('✅ check-reattach-render: reattach 截断口径 + 刷新节流 + generation 收尾守卫 全部通过');
+// ── ⑦ histSig:「历史真的长出新内容了吗」的判据(批J J2 的"上次更新 N 秒前")──
+// 只在内容变化时变。恒变(如掺进 Date.now())会让状态行恒显"0 秒前";恒不变则永远
+// 显示一个越来越大的数字 —— 两种坏法都让这行状态回答不了"是在跑还是卡死"。
+{
+  const turn = (over = {}) => ({
+    uuid: 'u1', blocks: [{ type: 'text' }], toolCalls: [], text: ['abc'], ...over,
+  });
+  assert.equal(histSig(turn()), histSig(turn()), '同样内容必须得到同样签名(纯函数)');
+  assert.equal(histSig(null), '', '空历史不得抛错');
+  assert.equal(histSig(undefined), '', '空历史不得抛错');
+  // 四条变化通道各自都要被捕捉到
+  assert.notEqual(histSig(turn()), histSig(turn({ uuid: 'u2' })), '换了回合(uuid)必须判为更新');
+  assert.notEqual(histSig(turn()), histSig(turn({ blocks: [{}, {}] })),
+    'CLI 每写一条 assistant 记录就多一个块 —— 这是最主要的增长信号');
+  assert.notEqual(histSig(turn()), histSig(turn({ toolCalls: [{ id: 't' }] })), '新工具调用必须判为更新');
+  assert.notEqual(histSig(turn()), histSig(turn({ text: ['abcd'] })), '末段文本变长必须判为更新');
+  // 字段缺失(第三方 provider 形态不全)不得抛错
+  assert.doesNotThrow(() => histSig({ uuid: 'x' }));
+  assert.doesNotThrow(() => histSig({ text: 'not-an-array' }));
+}
+
+// ── ⑧ 源码契约:被接管从"猜"改成服务端明说(批J J2)────────────────────
+{
+  const src = readFileSync(new URL('../../client/src/App.jsx', import.meta.url), 'utf8');
+  const server = readFileSync(new URL('../../server/routes/chat.js', import.meta.url), 'utf8');
+  // 服务端必须真的发这条事件,否则客户端的 detached 分支永远等不到 → 退回没有恢复的状态。
+  assert.match(server, /type: 'detached', reason: 'takeover'/,
+    '服务端必须在接管旧连接前发 detached 事件');
+  assert.match(src, /if \(event\.type === 'detached'\)/,
+    '客户端必须有 detached 分支(被接管的唯一权威判据)');
+  // 五条件猜测判定必须已删:WebView/网络掐断 SSE 与被接管是同一形态,猜错一次就把
+  // reattach 闩锁焊死(本回合内永不重连)。
+  assert.doesNotMatch(src, /if \(!sawDoneEvent && !sawError && !controller\.signal\.aborted/,
+    '"无 done 静默结束 = 被接管"的猜测判定必须删除,改由服务端 detached 明说');
+  // 其余静默掉线一律走三振重试路径。
+  assert.match(src, /if \(!sawDoneEvent && !sawTakeover && !sawError[\s\S]{0,160}recoverAttach\(\);/,
+    '静默掉线(非接管、非报错、非本端 abort)必须走 recoverAttach 重连');
+  assert.equal((src.match(/recoverAttach\(\);/g) || []).length, 2,
+    'recoverAttach 应有且只有两个调用点:attach 非 2xx + 流被静默掐断');
+  // 三振计数的复位判据:必须是"本流真的跑完(done)",不能是"attach 拿到 2xx"——
+  // 被掐断的流每次都能 attach 成功,按 2xx 复位会让三振保护变成死代码、无限重连。
+  assert.match(src, /if \(sawDoneEvent\) attachFailRef\.current = null;/,
+    'attach 失败计数只许在收到 done 时复位');
+  assert.equal((src.match(/attachFailRef\.current = null/g) || []).length, 2,
+    'attachFailRef 复位点只应有 2 处(done 收尾 + 三振横幅的重试按钮)');
+  // 重试按钮的 nonce 必须进 auto-reattach effect 的 deps,否则 pid 不变时 Object.is 短路,
+  // effect 永不重跑 = 按钮点了没反应(已知坑)。
+  assert.match(src, /\}, \[backgroundPid, attachRetryNonce\]\);/,
+    'auto-reattach effect 的 deps 必须含 attachRetryNonce');
+  assert.doesNotMatch(src, /会话流连接失败,请切走再切回重试。/,
+    '三振文案不得再让用户"切走再切回"猜复位动作,改为横幅上的重试按钮');
+}
+
+console.log('✅ check-reattach-render: reattach 截断口径 + 刷新节流 + generation 收尾守卫 + 接管明说 全部通过');
