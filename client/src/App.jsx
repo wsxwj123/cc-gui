@@ -69,6 +69,7 @@ import {
 import { buildFontEntries, groupFonts, detectFonts, platformCandidates, queryLocalFontFamilies } from './utils/systemFonts.js';
 import { copyText } from './utils/clipboard.js';
 import { escRoute, idleEscAction, escYieldCardId, isEditableTarget } from './utils/escAction.js';
+import { waitingSessionKeys, countAttention, applyAttentionBadge } from './utils/attention.js';
 import { histSig, isCurrentStreamTurn, nextAttachTry, resolveStreamHistCutoff, shouldRefreshHist } from './utils/reattach.js';
 import { pruneByLiveSet } from './utils/levelPrune.js';
 import { classifyStopTargets } from './utils/stopTargets.js';
@@ -864,7 +865,7 @@ const PANEL_SHORT = {
   files: '文件', monitor: '监控', agents: 'Agent', usage: '用量', processes: '进程',
   changes: '审查', mcp: '工具', skills: '技能', memory: '指令', settings: '通用',
 };
-function PanelDock({ rightPanel, setRightPanel, updateNotice, jumpToUpdate }) {
+function PanelDock({ rightPanel, setRightPanel, updateNotice, jumpToUpdate, attentionCount = 0 }) {
   const [railOpen, setRailOpen] = useState(false);
   // 持久展开:点外部不收(用户要「展开项常驻,再点坞按钮才收起」)。
   // Esc 已让位给停会话(Esc 的全局语义归会话:生成中停回合、空闲双击清输入/开检查点,dock 不抢);收起只保留再点坞图标
@@ -917,6 +918,12 @@ function PanelDock({ rightPanel, setRightPanel, updateNotice, jumpToUpdate }) {
         <span className="text-[9px] leading-none font-body">{activeMeta ? PANEL_SHORT[rightPanel] : '设置'}</span>
         {updateNotice && (
           <span className="absolute top-0.5 right-0.5 w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse" title="有可用更新" />
+        )}
+        {/* 在等你:待处理授权卡 + 卡住的后台代理。与更新红点错开位置(左下角),两者可同时出现。
+            Dock 角标只在 mac 有,窗口标题计数是跨平台兜底,这个点是前台可见的第三路。 */}
+        {attentionCount > 0 && (
+          <span className="absolute bottom-0.5 left-0.5 w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse"
+            title={`${attentionCount} 项在等你处理（待处理授权 / 卡住的后台代理），见监控面板`} />
         )}
       </button>
     </span>
@@ -9951,6 +9958,9 @@ export default function App() {
 
   // 全局轮询正在运行的 chat-process → store,驱动侧栏状态符号(ProjectList /
   // SessionItem)。与按会话的 backgroundPid 轮询相互独立。
+  // 顺带算出"在等你"的代理(后台代理卡在授权 / 外部会话停下等人)——复用这条已有轮询,
+  // 不为角标另起一条。存成逗号串而不是数组:新数组引用会让 App 根组件每 1.5s 白重渲一次。
+  const [waitingKeys, setWaitingKeys] = useState('');
   useEffect(() => {
     let cancelled = false;
     const poll = async () => {
@@ -9964,12 +9974,19 @@ export default function App() {
           new Set(running.map((a) => a.sessionId).filter(Boolean)),
           new Set(running.map((a) => a.cwd).filter(Boolean)),
         );
+        setWaitingKeys(waitingSessionKeys(d.agents));
       } catch {}
     };
     poll();
     const id = setInterval(poll, 1500);
     return () => { cancelled = true; clearInterval(id); };
   }, []);
+  // app 级"在等你"提示:待处理卡片 + 在等你的代理(同一会话两边都有则只算一件事)。
+  // Dock 角标(mac)+ 窗口标题计数(跨平台兜底)+ 坞图标小红点(前台可见)。
+  // 选择器只返回字符串(基元):返回数组会因新引用触发 React #185 整页白屏。
+  const pendingKeys = useStore((s) => s.pendingPermissions.map((p) => p.sessionId || '').join(','));
+  const attentionCount = countAttention(waitingKeys, pendingKeys);
+  useEffect(() => { applyAttentionBadge(attentionCount); }, [attentionCount]);
   // Per-session permission key for the header chip + bypass auto-resolve.
   // Follows the ACTIVE pane (not always pane 0) so in split mode the top-bar
   // mode chip controls whichever pane the user last focused — matching the
@@ -10354,7 +10371,7 @@ export default function App() {
           </span>
           <ThemeToggle />
           {/* 面板坞:分屏 + 10 个面板 + 更新提醒收纳于此(点击展开 rail)。 */}
-          <PanelDock rightPanel={rightPanel} setRightPanel={setRightPanel} updateNotice={updateNotice} jumpToUpdate={jumpToUpdate} />
+          <PanelDock rightPanel={rightPanel} setRightPanel={setRightPanel} updateNotice={updateNotice} jumpToUpdate={jumpToUpdate} attentionCount={attentionCount} />
           <button data-tour="help" onClick={() => setTourOpen(true)} title="使用指引 — 逐个介绍界面功能"
             className="flex items-center justify-center p-1.5 rounded-lg text-ink-muted hover:text-ink hover:bg-black/5 transition-colors">
             <HelpCircle size={15} />

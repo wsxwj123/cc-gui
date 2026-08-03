@@ -54,9 +54,20 @@ function startBridge(reply) {
       res.end(JSON.stringify(reply.json ?? {}));
     });
   });
-  return new Promise((resolve) => {
-    server.listen(PORT, '127.0.0.1', () => resolve({ server, received }));
+  return new Promise((resolve, reject) => {
+    // unref:6702 上若有别的东西在轮询,它挂起的连接会让 server.close() 迟迟不放手、
+    // 测试进程永不退出。listen 失败必须 reject —— 否则端口被占时这个 Promise 永远不
+    // resolve,测试表现为"卡住"而不是"失败",最难查。
+    server.once('error', reject);
+    server.listen(PORT, '127.0.0.1', () => { server.unref(); resolve({ server, received }); });
   });
+}
+
+// 关闭假 bridge:必须连带掐断已建立的连接。case ⑦ 故意不响应,连接会一直挂着 ——
+// 只 close() 的话端口不会真正释放,下一个用例(或下一次运行)bind 就 EADDRINUSE。
+function stopBridge(server) {
+  try { server.closeAllConnections?.(); } catch {}
+  server.close();
 }
 
 const decisionOf = (out) => {
@@ -69,7 +80,7 @@ const decisionOf = (out) => {
 {
   const { server, received } = await startBridge({ json: { decision: 'allow' } });
   const { out, code } = await runHook(PORT);
-  server.close();
+  stopBridge(server);
   assert.equal(code, 0, 'hook 必须以 0 退出(非 0 会被 CLI 当执行失败)');
   assert.deepEqual(decisionOf(out), { behavior: 'allow' });
   // 请求体要能被 GUI 的挂起式端点直接消费
@@ -90,7 +101,7 @@ const decisionOf = (out) => {
   const upd = { file_path: '/tmp/proj/a.txt', content: 'edited' };
   const { server } = await startBridge({ json: { decision: 'allow', updatedInput: upd } });
   const { out } = await runHook(PORT);
-  server.close();
+  stopBridge(server);
   assert.deepEqual(decisionOf(out), { behavior: 'allow', updatedInput: upd }, '改过的入参要带回 CLI');
 }
 
@@ -98,7 +109,7 @@ const decisionOf = (out) => {
 {
   const { server } = await startBridge({ json: { decision: 'deny', reason: '不要动这个文件' } });
   const { out } = await runHook(PORT);
-  server.close();
+  stopBridge(server);
   const d = decisionOf(out);
   assert.equal(d.behavior, 'deny');
   assert.equal(d.message, '不要动这个文件');
@@ -118,7 +129,7 @@ const decisionOf = (out) => {
 {
   const { server } = await startBridge({ status: 403, json: { error: 'nope' } });
   const { out } = await runHook(PORT);
-  server.close();
+  stopBridge(server);
   const d = decisionOf(out);
   assert.equal(d.behavior, 'deny');
   assert.ok(/403/.test(d.message), '拒绝理由要带上状态码');
@@ -131,8 +142,9 @@ const decisionOf = (out) => {
     req.on('end', () => { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end('not json'); });
   });
   await new Promise((r) => server.listen(PORT, '127.0.0.1', r));
+  server.unref();
   const { out } = await runHook(PORT);
-  server.close();
+  stopBridge(server);
   assert.equal(decisionOf(out).behavior, 'deny', '响应不可解析同样按拒绝处理');
 }
 
@@ -142,7 +154,7 @@ const decisionOf = (out) => {
   const { server } = await startBridge(null);
   const t0 = Date.now();
   const { out } = await runHook(PORT, { timeoutMs: 12000 });
-  server.close();
+  stopBridge(server);
   const d = decisionOf(out);
   assert.equal(d.behavior, 'deny', '超时必须自己吐 deny —— 被 hook timeout 杀掉就没有任何输出');
   assert.ok(/等待授权超过/.test(d.message), '超时理由要说清是等太久');

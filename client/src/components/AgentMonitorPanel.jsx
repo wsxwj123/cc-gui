@@ -192,18 +192,19 @@ function BackgroundAgentsSection({ stoppingPid, onStop }) {
           {dispatching ? <Loader2 size={11} className="animate-spin" /> : <PlayCircle size={11} />}派发
         </button>
       </div>
-      <div className="flex items-center gap-1.5 mb-2">
+      {/* 权限档独占一行:面板窄(~300px),与说明文字并排会把说明挤成四行 */}
+      <div className="mb-2">
         <select value={permMode} onChange={(e) => setPermMode(e.target.value)} disabled={dispatching}
-          className="text-[11px] font-body bg-canvas-warm border border-canvas-deep rounded px-1.5 py-1 text-ink focus:border-accent outline-none">
+          className="w-full text-[11px] font-body bg-canvas-warm border border-canvas-deep rounded px-1.5 py-1 text-ink focus:border-accent outline-none">
           <option value="acceptEdits">自动执行文件编辑（acceptEdits）</option>
           <option value="default">逐项确认（default）</option>
           <option value="plan">规划（plan）</option>
         </select>
-        <span className="text-[10px] text-ink-faint font-body leading-snug flex-1 min-w-0">
+        <div className="text-[10px] text-ink-faint font-body leading-snug mt-1">
           {permMode === 'acceptEdits'
             ? '文件编辑自动执行，其余请求仍会询问（询问期间代理处于等待状态）。'
             : `${permMode === 'plan' ? '代理只做调研与计划，不写文件。' : '每项操作都要你确认。'}授权请求会以权限卡出现在界面上，标记为「后台代理」；5 分钟内未应答按拒绝处理。`}
-        </span>
+        </div>
       </div>
       {note && <div className="text-[10px] text-ink-faint font-mono mb-2 truncate" title={note}>{note}</div>}
       {running.length > 0 && (
