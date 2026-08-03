@@ -321,6 +321,23 @@ export function reconcileLiveTasks(liveTasks, tasksPayload, now = Date.now(), gr
   return { settled, added, liveIds: [...live.keys()] };
 }
 
+// task_updated 终态:删除前把 toolUseId 取出来。task_updated 的类型里【没有 tool_use_id】
+// (sdk.d.ts:4142-4159),客户端只能靠每条流的局部 map 反查,跨回合/reattach/刷新后为空
+// → 服务端已删、客户端永不收尾(僵尸"工作中"卡的结构性成因)。服务端知道映射,由它翻译。
+// 纯函数,单测同上。
+export const TASK_TERMINAL_STATUSES = ['completed', 'failed', 'killed'];
+export function taskUpdatedTerminal(liveTasks, msg) {
+  const status = msg?.patch?.status;
+  if (!TASK_TERMINAL_STATUSES.includes(status)) return { deleted: false, notify: null };
+  const t = (liveTasks || new Map()).get(msg.task_id);
+  liveTasks?.delete(msg.task_id);
+  if (!t?.toolUseId) return { deleted: true, notify: null };
+  return {
+    deleted: true,
+    notify: { tool_use_id: t.toolUseId, task_id: msg.task_id, status: status === 'killed' ? 'stopped' : status },
+  };
+}
+
 export function getActiveChatProcesses() {
   const out = [];
   for (const [procId, slot] of activeProcesses) {
@@ -1198,8 +1215,14 @@ router.post('/chat', async (req, res) => {
           }
           else if (m.subtype === 'task_notification') slot.liveTasks.delete(m.task_id);
           else if (m.subtype === 'task_updated') {
-            if (['completed', 'failed', 'killed'].includes(m.patch?.status)) slot.liveTasks.delete(m.task_id);
-            else {
+            const { deleted, notify } = taskUpdatedTerminal(slot.liveTasks, m);
+            // 无条件广播(不像 deliverLine 只在无监听时兜底):本 bug 的核心正是"SSE 在线
+            // 但客户端解不出 tool_use_id"。安全性靠客户端 finalizeAgent 的终态幂等守卫,
+            // 与 SSE 路径重复到达无害;tool_use_id 全局唯一,串不到别的会话。
+            if (notify) {
+              try { broadcast({ type: 'task-notification-bg', sessionId: slot.sessionId || null, ...notify }); } catch {}
+            }
+            if (!deleted) {
               // 非终态进度汇报 = 任务确实还活着:刷新新鲜度。否则 LIVE_TASK_FRESH_MS(30min)
               // 会把真活超 30 分钟、持续汇报状态的 teammate/长任务误判陈旧;只有长时间
               // 无任何事件的条目才该被判陈旧。

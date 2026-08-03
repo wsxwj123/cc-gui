@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// 批A A1 护栏:服务端按 CLI 的 level 信号 background_tasks_changed 对账在飞任务集。
+// 批A A1/A2 护栏:服务端按 CLI 的 level 信号对账在飞任务集 + task_updated 终态翻译 toolUseId。
 // 回归对象:边沿事件(task_started/task_notification/task_updated)丢一条,liveTasks 就永久
 // 残留"在飞"条目 → 卡片永久转圈、看门狗被解除。level 信号是官方给的全量存活集快照。
 // 直接 import chat.js 的真函数(非复刻):判据被改回去时下面的断言必须失败。
@@ -18,7 +18,7 @@
 //   4. 空集恒对应任务真结束:sleep 300 一直在集内,直到进程退出被 killed 才出集 ——
 //      它不随回合边界抖动,可以放心当存活集用。
 import assert from 'node:assert/strict';
-import { reconcileLiveTasks, partitionStopTasks } from '../../server/routes/chat.js';
+import { reconcileLiveTasks, taskUpdatedTerminal, partitionStopTasks } from '../../server/routes/chat.js';
 
 const GRACE = 1500;
 const now = 1_000_000_000;
@@ -97,6 +97,35 @@ const old = (ms) => now - ms;
   assert.doesNotThrow(() => reconcileLiveTasks(null, [{ task_id: 'x' }], now, GRACE), 'liveTasks 为空不抛');
 }
 
+// ── A2 taskUpdatedTerminal:删除前翻译 toolUseId ────────────────────
+// task_updated 的类型里没有 tool_use_id(sdk.d.ts:4142-4159),客户端只能靠每条流的
+// 局部 map 反查 —— 跨回合/reattach/刷新后那个 map 是空的,于是服务端已删、客户端永不
+// 收尾(僵尸"工作中"卡的结构性成因)。映射只有服务端有,必须由服务端翻译后广播。
+{
+  const mk = () => new Map([['t1', { toolUseId: 'toolu_1', kind: 'subagent', createdAt: now }]]);
+  for (const [status, expect] of [['completed', 'completed'], ['failed', 'failed'], ['killed', 'stopped']]) {
+    const live = mk();
+    const r = taskUpdatedTerminal(live, { task_id: 't1', patch: { status } });
+    assert.equal(r.deleted, true, `${status} 是终态 → 删除条目`);
+    assert.deepEqual(r.notify, { tool_use_id: 'toolu_1', task_id: 't1', status: expect },
+      `${status} → 广播 ${expect}(killed 映射成 stopped,与 SSE 路径同口径)`);
+    assert.equal(live.size, 0, '终态后条目必须删掉');
+  }
+  // 非终态(进度汇报)不删不广播 —— 调用方据此刷新 createdAt
+  const live = mk();
+  const r = taskUpdatedTerminal(live, { task_id: 't1', patch: { status: 'running' } });
+  assert.deepEqual(r, { deleted: false, notify: null }, '非终态 patch 不删不广播');
+  assert.equal(live.size, 1, '非终态条目留着');
+  // 没有 toolUseId(第三方 provider / 只从 level 信号补建的条目)→ 删但不广播,不能广播 null
+  const live2 = new Map([['t2', { toolUseId: null, kind: 'subagent', createdAt: now }]]);
+  const r2 = taskUpdatedTerminal(live2, { task_id: 't2', patch: { status: 'completed' } });
+  assert.deepEqual(r2, { deleted: true, notify: null }, '无 toolUseId 时 notify 为 null(不广播空键)');
+  // 条目根本不在表里(重复到达 / 已被 level 信号先剪掉)→ 幂等,不抛
+  assert.deepEqual(taskUpdatedTerminal(new Map(), { task_id: 'nope', patch: { status: 'completed' } }),
+    { deleted: true, notify: null }, '不存在的 task_id 幂等');
+  assert.deepEqual(taskUpdatedTerminal(new Map(), {}), { deleted: false, notify: null }, '缺 patch 不炸');
+}
+
 // ── A0 真机实样固定件:载荷契约不得漂移 ─────────────────────────────
 // tests/fixtures/background-tasks-changed.sample.jsonl 是 A0 探测原样抓取的三条(未改一字)。
 // CLI 换版本后若字段变形,这里先炸,而不是等真机上任务卡片乱收尾才发现。
@@ -137,6 +166,11 @@ const old = (ms) => now - ms;
   assert.ok(/reconcileLiveTasks\(slot\.liveTasks, m\.tasks, Date\.now\(\)\)/.test(src),
     '泵里必须调 reconcileLiveTasks 对账');
   assert.ok(/const LEVEL_GRACE_MS = 1500;/.test(src), 'level 对账的 grace 窗常量必须在');
+  // A2 广播:无条件发(SSE 在线时客户端也解不出 tool_use_id,正是本 bug 的核心)
+  assert.ok(/const \{ deleted, notify \} = taskUpdatedTerminal\(slot\.liveTasks, m\);/.test(src),
+    'task_updated 必须走 taskUpdatedTerminal(删除前取 toolUseId)');
+  assert.ok(/broadcast\(\{ type: 'task-notification-bg', sessionId: slot\.sessionId \|\| null, \.\.\.notify \}\)/.test(src),
+    'task_updated 终态必须经 task-notification-bg 广播收尾');
   // level 信号只喂簿记与广播,绝不驱动停止链路
   const lvl = src.slice(src.indexOf("m.subtype === 'background_tasks_changed'"));
   const branch = lvl.slice(0, lvl.indexOf('deliverLine(slot, line);'));
@@ -145,4 +179,4 @@ const old = (ms) => now - ms;
   }
 }
 
-console.log('✓ check-level-reconcile: A1 对账 6 组 + A0 实样固定件 + 源码守卫 全过');
+console.log('✓ check-level-reconcile: A1 对账 6 组 + A2 终态翻译 + A0 实样固定件 + 源码守卫 全过');
