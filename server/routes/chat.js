@@ -625,6 +625,9 @@ function broadcastLiveTasks(slot, liveIds, settled, added) {
       sessionId: slot.sessionId || null,
       taskIds: liveIds,
       // 客户端卡片按 tool_use_id 索引,故把服务端才知道的映射一并翻译过去。
+      // 这里不按 kind 过滤,shell(local_bash)条目也在内:客户端只拿它做"存活 = 别剪"的
+      // 白名单,而 shell 从不建子代理卡片,多带无害。若将来给 shell 也建卡,这里必须按
+      // kind 拆开,否则两类卡会共用同一份存活集互相干扰。
       toolUseIds: [...(slot.liveTasks?.values() ?? [])].map((t) => t?.toolUseId).filter(Boolean),
       settled: settled.map((s) => s.toolUseId).filter(Boolean),
       ts: Date.now(),
@@ -907,7 +910,7 @@ function buildDisallowedMcpTools() {
 // 叠加在 claude_code preset 上,additive、低风险:① 提问走 AskUserQuestion 工具而非写进
 // 计划正文(第10);② 计划批准后用 TaskCreate 拆任务清单跟踪(第11);③ 被要求"修改"时
 // 修订后再次 ExitPlanMode 重新提交、不要直接开始执行(第6,与 deny 文案双保险)。
-const PLAN_GUIDE = '【规划模式补充指引 —— 仅在规划(plan)模式下适用,其它模式忽略本段】1) 若需要向用户提问以澄清需求,必须调用 AskUserQuestion 工具,不要把问题直接写进 ExitPlanMode 的计划正文里。2) 计划被用户批准、进入执行后,请用 TaskCreate 把计划拆成任务清单并逐项更新状态,让用户能看到进度。3) 若用户对计划反馈"需要修改",请据此修订计划后【再次调用 ExitPlanMode】重新提交、等待确认,不要直接开始执行。';
+const PLAN_GUIDE = '【规划模式补充指引 —— 仅与规划(plan)工作流及其后续执行回合相关,无关回合忽略本段】1) 若需要向用户提问以澄清需求,必须调用 AskUserQuestion 工具,不要把问题直接写进 ExitPlanMode 的计划正文里。2) 计划被用户批准、进入执行后,请用 TaskCreate 把计划拆成任务清单并逐项更新状态,让用户能看到进度。3) 若用户对计划反馈"需要修改",请据此修订计划后【再次调用 ExitPlanMode】重新提交、等待确认,不要直接开始执行。';
 
 // 引导【无条件】进系统提示,不再按 permissionMode 分支——两点收益,一点代价:
 //  ① 前缀缓存:系统提示是整个前缀的最前段,按模式分两种写法 = 账号级前缀缓存劈成两桶
@@ -915,7 +918,9 @@ const PLAN_GUIDE = '【规划模式补充指引 —— 仅在规划(plan)模式�
 //  ② 顺带修一个真 bug:引导只在 spawn 时定型,POST /chat/permission-mode 中途热切进
 //     plan 的回合此前【根本没有】引导。恒定注入后热切回合也有。
 // 代价:非规划回合的系统提示也带这段。故文案首句写死适用条件让模型自行门控;三条正文
-// 逐字未动,规划模式下的语义与改动前完全一致。
+// 逐字未动,规划模式下的语义与改动前完全一致。首句门控条件写的是「规划工作流及其后续
+// 执行回合」而非「plan 模式」:第2条(批准后用 TaskCreate 拆清单)本就发生在计划批准、
+// 退出 plan 模式【之后】的执行回合,写成"仅 plan 模式适用"会让模型把它一并忽略。
 // (曾评估"改注入用户消息"以避免这点代价:与 CLI 的斜杠命令解析冲突——前置会让 `/xxx`
 //  不再以 `/` 开头认不出命令,后置会被卷进 <command-args> 传给 skill 当参数,故放弃。)
 export function composeAppendSystemPrompt(appendSystemPrompt) {
@@ -1987,7 +1992,7 @@ export const BTW_SYSTEM_REMINDER = [
 // --strict-mcp-config(只认 --mcp-config 给的,忽略 .mcp.json/用户配置)+
 // --disable-slash-commands(CLI 官方描述 "Disable all skills")。
 // model 必须先过 safeModelArg 白名单再传进来(Windows 上 `--model x&calc` 经 cmd.exe
-// 是 RCE,见 :68 MODEL_ARG_RE);本函数只拼参数,不做校验。
+// 是 RCE,见 MODEL_ARG_RE);本函数只拼参数,不做校验。
 export function buildBtwArgs({ sessionId, model } = {}) {
   const args = ['-p', '--tools', '',
     '--mcp-config', '{"mcpServers":{}}', '--strict-mcp-config',

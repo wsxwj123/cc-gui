@@ -31,6 +31,10 @@ export function pruneByLiveSet(agents, payload) {
     if (a.taskId && taskIds.includes(a.taskId)) continue;
     // 刚起的不剪:与服务端 grace 对称,防"卡片先建、level 载荷后到"的乱序误收。
     // startedAt 缺失同样不剪(判不出年龄就别动它)。
+    // 跨设备钟差(手机/平板远程访问 GUI,浏览器时钟 vs 服务端时钟):ts 是服务端 Date.now()、
+    // startedAt 是本机 Date.now(),两方向都不会误收 —— 本机钟快 → 卡片看着更年轻 → 只是这轮
+    // 不剪(漏剪,等下一次广播或真终态事件);本机钟慢 → 这道门槛形同虚设,但真正的防线是服务端
+    // 那道 LEVEL_GRACE_MS(now 与 createdAt 都取服务端时钟,与本机钟差无关),这里只是第二道。
     if (!(a.startedAt && a.startedAt < ts - LEVEL_PRUNE_MIN_AGE_MS)) continue;
     out.push(id);
   }

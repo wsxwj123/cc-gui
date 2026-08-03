@@ -49,7 +49,17 @@ assert.ok(/if \(Object\.keys\(entry\)\.length\) map\[id\] = entry;/.test(src), '
   assert.ok(!/body: \{ id, model/.test(body), 'reapply 不得指定 model');
 }
 
-// ── 5. 不碰 PUT /api/settings 的补丁/全文两种语义 ───────────────────
+// ── 5. reapply 的成功判定不得默认成功 ────────────────────────────
+// fakeRes._status 初值若是 200,handler 异步抛错(异常被 catch 吞掉、根本没碰过 res)
+// 也会被报成 reapplied:true —— 前端显示"已生效",settings.json 其实一个字没写。
+{
+  const fn = src.slice(src.indexOf('async function reapplyIfActive('));
+  const body = fn.slice(0, fn.indexOf('\n}\n') + 2);
+  assert.ok(/_status: 0,/.test(body), 'fakeRes._status 必须初始为 0(不是 200):没写过状态 = 不算成功');
+  assert.ok(/fakeRes\._status >= 200 && fakeRes\._status < 300/.test(body), 'reapply 成功判定按 2xx 区间');
+}
+
+// ── 6. 不碰 PUT /api/settings 的补丁/全文两种语义 ───────────────────
 assert.equal(count(src, 'export function computeUpdatedSettings('), 1, 'computeUpdatedSettings 仍是唯一实现(补丁/全文语义不得被本改动波及)');
 
 console.log('✓ check-provider-reapply: 两条改模型路径共用 reapply + 路由存在性全过');

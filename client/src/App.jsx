@@ -4828,6 +4828,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         } else {
           // 显式排一次重连:poll 每轮写同一个 pid 会被 Object.is 短路,指望它重试等于不重试。
           // id 挂 ref:卸载/切会话时 detachStream 清掉,不留 1.5s 的僵尸 attach 缝隙。
+          // 排新的先清旧的:ref 只存一个 id,手动重发叠加上一次失败会把旧 id 冲掉 →
+          // 那个孤儿定时器再没人能 clear,detachStream 也清不到,1.5s 后照样起僵尸 attach。
+          clearTimeout(attachRetryTimerRef.current);
           attachRetryTimerRef.current = setTimeout(() => {
             attachRetryTimerRef.current = null;
             if (streamingRef.current || reattachedPidRef.current) return;   // 已有流 / 已被别处接管
@@ -7608,7 +7611,7 @@ function ProviderManager({ initialEditId = null }) {
               借鉴 <a href="https://github.com/farion1231/cc-switch" target="_blank" rel="noreferrer" className="text-accent hover:underline">CC Switch</a>。切换会改写 <code className="font-mono">~/.claude/settings.json</code>（自动备份），<b>对新发的消息生效</b>。
             </p>
             <p className="text-[10px] text-ink-faint font-body mt-1 leading-snug border-t border-canvas-deep/40 pt-1">
-              <b>原理(协议路由)</b>：和 <a href="https://github.com/farion1231/cc-switch" target="_blank" rel="noreferrer" className="text-accent hover:underline">cc-switch</a> 一样把 Claude 模型名映射到第三方。OpenAI 格式经本地代理 <code className="font-mono">8788</code> 做协议翻译、Anthropic 格式经 <code className="font-mono">8789</code> 透传换 token —— 都是<b>本机中转</b>，非直连官方。
+              <b>原理(协议路由)</b>：和 <a href="https://github.com/farion1231/cc-switch" target="_blank" rel="noreferrer" className="text-accent hover:underline">cc-switch</a> 一样把 Claude 模型名映射到第三方。OpenAI 格式经本地代理 <code className="font-mono">8788</code> 做协议翻译、Anthropic 格式经 <code className="font-mono">8789</code> 透传换 token —— 都是<b>本机中转</b>，非直连官方。若本机运行常驻代理服务，切换时改写为其端口 <code className="font-mono">8798</code> / <code className="font-mono">8799</code>，GUI 关闭后转发不中断。
             </p>
           </div>
           {/* 新增/编辑表单挂列表顶部:打开新增无需滚到底,点编辑也统一定位到顶部表单。 */}

@@ -1389,15 +1389,18 @@ async function reapplyIfActive(id) {
     if ((await readActiveProviderId()) !== id) return false;
     const layer = router.stack.find((l) => l.route && l.route.path === '/provider/switch');
     if (!layer) return false;
+    // _status 初始 0(不是 200):handler 异步抛错、根本没碰过 res 时,下面的 catch 吞掉异常,
+    // 初值 200 会把"什么都没发生"报成 reapplied:true —— 前端据此显示"已生效",而 settings.json
+    // 里还是旧映射。json() 补默认 200 是照 express 语义(成功路径只调 res.json,不调 res.status)。
     const fakeRes = {
-      _status: 200, _body: null,
+      _status: 0, _body: null,
       status(s) { this._status = s; return this; },
-      json(b) { this._body = b; return this; },
+      json(b) { if (!this._status) this._status = 200; this._body = b; return this; },
     };
     const fakeReq = { body: { id }, headers: { 'Content-Type': 'application/json' } };
     // 复用 /provider/switch 的实现:它已正确处理 anthropic / openai / custom 三类。
     await Promise.resolve(layer.route.stack[0].handle(fakeReq, fakeRes, () => {})).catch(() => {});
-    return fakeRes._status === 200;
+    return fakeRes._status >= 200 && fakeRes._status < 300;
   } catch { return false; }
 }
 

@@ -20,8 +20,11 @@ assert.ok(guideOnly.startsWith('【规划模式补充指引'), '引导以标题�
 assert.ok(guideOnly.includes('必须调用 AskUserQuestion 工具'), '第1条:提问走 AskUserQuestion');
 assert.ok(guideOnly.includes('请用 TaskCreate 把计划拆成任务清单'), '第2条:批准后 TaskCreate 拆清单');
 assert.ok(guideOnly.includes('【再次调用 ExitPlanMode】重新提交'), '第3条:要求修改则重新提交');
-// 适用条件写进文案本身,替代原来的代码分支(非 plan 回合靠模型自行门控)
-assert.ok(guideOnly.includes('仅在规划(plan)模式下适用'), '文案自带适用条件');
+// 适用条件写进文案本身,替代原来的代码分支(非 plan 回合靠模型自行门控)。
+// 条件必须覆盖「批准后的执行回合」:第2条的 TaskCreate 发生在退出 plan 模式之后,
+// 写成"仅 plan 模式适用"会让执行回合把第2条一起忽略掉。
+assert.ok(guideOnly.includes('仅与规划(plan)工作流及其后续执行回合相关'), '文案自带适用条件');
+assert.ok(!guideOnly.includes('仅在规划(plan)模式下适用'), '适用条件不得收窄回"仅 plan 模式"');
 
 // ── G3 ② 恒等:不接受模式参数,任何调用都返回同一段引导(前缀才可能跨会话共享) ──
 assert.equal(composeAppendSystemPrompt(), guideOnly, '无参数 = 同一段');
