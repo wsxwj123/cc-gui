@@ -661,7 +661,7 @@ export function dedupReplayedRecords(rawRecords) {
     if (r?.type === 'assistant') {
       const mid = r?.message?.id;
       if (mid) {
-        const sig = mid + ' ' + JSON.stringify(r?.message?.content ?? null);
+        const sig = mid + '\u0000' + JSON.stringify(r?.message?.content ?? null);
         if (seenAssistantBlocks.has(sig)) return false;
         seenAssistantBlocks.add(sig);
       }
