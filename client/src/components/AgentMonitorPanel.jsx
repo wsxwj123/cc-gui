@@ -75,6 +75,9 @@ function BackgroundAgentsSection({ stoppingPid, onStop }) {
   const selectedProject = useStore((s) => s.selectedProject);
   const [agents, setAgents] = useState([]);
   const [prompt, setPrompt] = useState('');
+  // 后台代理的权限档。默认 acceptEdits(沿用既有行为);选 default 时服务端会给它挂上
+  // PermissionRequest hook,授权请求以权限卡出现在界面上。
+  const [permMode, setPermMode] = useState('acceptEdits');
   const [dispatching, setDispatching] = useState(false);
   const [note, setNote] = useState('');
   const [stoppingId, setStoppingId] = useState('');
@@ -130,7 +133,7 @@ function BackgroundAgentsSection({ stoppingPid, onStop }) {
     try {
       const r = await fetch('/api/agents/background/dispatch', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ cwd, prompt: p }),
+        body: JSON.stringify({ cwd, prompt: p, permissionMode: permMode }),
       });
       const d = await r.json();
       if (!r.ok) throw new Error(d.error || '派发失败');
@@ -181,13 +184,26 @@ function BackgroundAgentsSection({ stoppingPid, onStop }) {
       <div className="flex items-center gap-1.5 mb-2">
         <input value={prompt} onChange={(e) => setPrompt(e.target.value)}
           onKeyDown={(e) => { if (e.key === 'Enter' && !e.nativeEvent?.isComposing && e.keyCode !== 229) dispatch(); }}
-          placeholder={selectedProject ? `派一个后台任务到 ${selectedProject.name || '当前项目'}(接受编辑模式)` : '先在左侧选择项目'}
+          placeholder={selectedProject ? `派一个后台任务到 ${selectedProject.name || '当前项目'}` : '先在左侧选择项目'}
           disabled={!selectedProject || dispatching}
           className="flex-1 min-w-0 text-[11px] font-body bg-canvas-warm border border-canvas-deep rounded px-2 py-1.5 text-ink focus:border-accent outline-none" />
         <button onClick={dispatch} disabled={!prompt.trim() || !selectedProject || dispatching}
           className="shrink-0 flex items-center gap-1 px-2.5 py-1.5 rounded text-[11px] font-medium text-on-accent bg-accent hover:bg-accent/90 disabled:opacity-40">
           {dispatching ? <Loader2 size={11} className="animate-spin" /> : <PlayCircle size={11} />}派发
         </button>
+      </div>
+      <div className="flex items-center gap-1.5 mb-2">
+        <select value={permMode} onChange={(e) => setPermMode(e.target.value)} disabled={dispatching}
+          className="text-[11px] font-body bg-canvas-warm border border-canvas-deep rounded px-1.5 py-1 text-ink focus:border-accent outline-none">
+          <option value="acceptEdits">自动执行文件编辑（acceptEdits）</option>
+          <option value="default">逐项确认（default）</option>
+          <option value="plan">规划（plan）</option>
+        </select>
+        <span className="text-[10px] text-ink-faint font-body leading-snug flex-1 min-w-0">
+          {permMode === 'acceptEdits'
+            ? '文件编辑自动执行，其余请求仍会询问（询问期间代理处于等待状态）。'
+            : `${permMode === 'plan' ? '代理只做调研与计划，不写文件。' : '每项操作都要你确认。'}授权请求会以权限卡出现在界面上，标记为「后台代理」；5 分钟内未应答按拒绝处理。`}
+        </span>
       </div>
       {note && <div className="text-[10px] text-ink-faint font-mono mb-2 truncate" title={note}>{note}</div>}
       {running.length > 0 && (

@@ -98,6 +98,10 @@ router.post('/permissions/request', (req, res) => {
     createdAt: Date.now(),
     // 与 requestPermission 保持同构:越界路径透传给前端渲染越界卡。
     ...(typeof req.body?.blockedPath === 'string' && req.body.blockedPath ? { blockedPath: req.body.blockedPath } : {}),
+    // bgAgent:请求来自后台代理(claude --bg 的 PermissionRequest hook)。前端据此
+    // ①把卡片标成"后台代理" ②让它在当前窗格可见 —— 后台代理的会话通常没开在任何
+    // 窗格,按会话归属过滤会把卡片整个藏掉,用户永远看不到、代理永远等不到答复。
+    ...(req.body?.bgAgent === true ? { bgAgent: true } : {}),
   };
 
   pending.set(id, { request, res });

@@ -8,6 +8,7 @@ import { homedir } from 'os';
 import { getActiveChatProcesses, claudeSpawn, cleanChildEnv, safeModelArg } from './chat.js';
 import { resolveWorkspacePath } from '../utils/safe-path.js';
 import { claudeCommand } from '../utils/claude-resolver.js';
+import { dropPendingForSession } from './permissions.js';
 
 const execFileP = promisify(execFile);
 const router = Router();
@@ -373,6 +374,18 @@ function bgJobIdOf(a) {
   return a.jobId || a.id || (a.sessionId ? String(a.sessionId).slice(0, 8) : null);
 }
 
+// 停止时要清权限卡:前端传来的 id 可能是 jobId 也可能是 sessionId,而权限卡按
+// hook 报的 session_id 归属。把 job state 里记的会话 id 一并取出,逐个清。
+async function bgSessionIdsFor(id) {
+  const ids = new Set([id]);
+  if (!/^[A-Za-z0-9_-]{1,64}$/.test(String(id || ''))) return ids;
+  try {
+    const s = JSON.parse(await readFile(join(homedir(), '.claude', 'jobs', String(id), 'state.json'), 'utf-8'));
+    for (const k of ['sessionId', 'resumeSessionId']) if (typeof s[k] === 'string' && s[k]) ids.add(s[k]);
+  } catch {}
+  return ids;
+}
+
 // ~/.claude/sessions/*.json 里 CLI 自己写的等待态,按 sessionId 索引。
 // 后台代理的 `claude agents --json` 输出没有 status/waitingFor,只有注册表有。
 async function readWaitingRegistry() {
@@ -445,11 +458,72 @@ router.get('/agents/background', async (req, res) => {
   }
 });
 
-// POST /api/agents/background/dispatch { cwd, prompt, model? }
-// `claude --bg -p <prompt>`:派后台代理立即返回。默认 --permission-mode acceptEdits ——
-// 后台无人值守,default 会卡在授权等待(canUseTool 通道不在场);绝不静默 bypass。
+// ── 后台代理的权限应答通道(default 档)────────────────────────────────────
+// GUI 自带的 PermissionRequest hook:把后台代理的授权请求转成界面上的权限卡。
+// 经 `--settings <file>` 挂上,不动用户的 ~/.claude/settings.json(实测 CLI 对
+// --settings 是【追加合并】,用户原有配置照常生效;哨兵见 checkSettingsMergeSentinel)。
+const HOOK_SCRIPT = join(dirname(fileURLToPath(import.meta.url)), '..', 'hooks', 'permission-request-hook.mjs');
+const BG_HOOK_SETTINGS = join(homedir(), '.claude-gui', 'bg-permission-hook.settings.json');
+
+// hook 的 command 是交给 shell 执行的字符串,路径带空格(如 "/…/claude gui/…")必须自己引。
+function shellQuote(s) {
+  const v = String(s);
+  return process.platform === 'win32' ? `"${v.replace(/"/g, '""')}"` : `'${v.replace(/'/g, "'\\''")}'`;
+}
+
+// 写成【稳定文件】而不是内联 JSON:claudeSpawn 的 Windows 分支会把内联 JSON 落成临时
+// 文件、并在**派发进程**退出时删掉,而真正跑代理的是另一个常驻 supervisor,之后再读就
+// 没了。稳定文件没有这个竞态,也方便排查。端口每次重写(GUI 可能落在 6677..6687)。
+async function writeBgHookSettings(port) {
+  const command = `${shellQuote(process.execPath)} ${shellQuote(HOOK_SCRIPT)} ${Number(port) || 6677}`;
+  const body = {
+    hooks: {
+      // matcher '*' = 所有工具(CLI 的匹配函数:matcher 缺省或 '*' 直接返回 true)。写明
+      // 而不是省略,免得日后有人以为它只对某几个工具生效。
+      // timeout 是 hook 允许阻塞的秒数 = 用户的应答窗口(hook 脚本自己在 295s 先超时吐 deny)。
+      PermissionRequest: [{ matcher: '*', hooks: [{ type: 'command', command, timeout: 300 }] }],
+    },
+  };
+  await mkdir(dirname(BG_HOOK_SETTINGS), { recursive: true });
+  await writeFile(BG_HOOK_SETTINGS, JSON.stringify(body, null, 2), 'utf-8');
+  return BG_HOOK_SETTINGS;
+}
+
+// --settings 合并语义哨兵。实测(CLI 2.1.220)是追加合并:挂了 hook 的后台代理,job
+// state 里照样带着用户 settings 的 providerEnv。若哪天变成整体替换,后台代理会静默丢掉
+// 用户的 provider 配置(跑错账号/错模型)——那是必须立刻知道的语义变更,故派发后抽查一次。
+// 只在用户确实有 ANTHROPIC_* 环境变量时才判(否则 providerEnv 本就该是空的);只 log。
+async function checkSettingsMergeSentinel(sinceMs) {
+  try {
+    const userEnv = JSON.parse(await readFile(join(homedir(), '.claude', 'settings.json'), 'utf-8'))?.env || {};
+    if (!Object.keys(userEnv).some((k) => k.startsWith('ANTHROPIC_'))) return;
+    const jobsDir = join(homedir(), '.claude', 'jobs');
+    let newest = null;
+    for (const d of await readdir(jobsDir)) {
+      try {
+        const p = join(jobsDir, d, 'state.json');
+        const m = (await stat(p)).mtimeMs;
+        if (m >= sinceMs && (!newest || m > newest.m)) newest = { m, p };
+      } catch {}
+    }
+    if (!newest) return;
+    const s = JSON.parse(await readFile(newest.p, 'utf-8'));
+    if (!s.providerEnv || !Object.keys(s.providerEnv).length) {
+      console.warn('[bg-dispatch] --settings 似乎已从"合并"变为"替换":新后台代理的 providerEnv 为空,'
+        + '而用户 settings.json 里有 ANTHROPIC_* 环境变量。后台代理可能跑在错误的 provider 上,请核实。');
+    }
+  } catch {}
+}
+
+// 后台代理的权限档白名单。默认仍是 acceptEdits(不改变现有用户行为)。
+const BG_PERMISSION_MODES = new Set(['default', 'acceptEdits', 'plan']);
+
+// POST /api/agents/background/dispatch { cwd, prompt, model?, permissionMode? }
+// `claude --bg <prompt>`:派后台代理立即返回。permissionMode 默认 acceptEdits ——
+// 后台无人值守;选 default 时必须同时挂上 PermissionRequest hook,否则代理会卡在
+// 授权等待永不返回。绝不静默 bypass。
 router.post('/agents/background/dispatch', async (req, res) => {
-  const { cwd, prompt, model } = req.body || {};
+  const { cwd, prompt, model, permissionMode } = req.body || {};
   if (typeof prompt !== 'string' || !prompt.trim()) return res.status(400).json({ error: 'prompt 必填' });
   // Windows cmd 注入守卫:--bg 要求 prompt 走位置参数(无法改 stdin),Windows 上经 cmd.exe /c;
   // libuv 只给含空格的参数加引号,故【无空格且含 cmd 元字符】的 prompt(如 "x&calc")会被 cmd
@@ -465,11 +539,23 @@ router.post('/agents/background/dispatch', async (req, res) => {
   catch (e) { return res.status(400).json({ error: e.message }); }
   // 实测:--bg 与 -p 冲突(-p 不起 interactive 会话,agents 无法 attach)——prompt 必须
   // 走位置参数:`claude --bg '<task>'`。
-  const args = ['--bg', prompt.trim(), '--permission-mode', 'acceptEdits'];
+  const mode = BG_PERMISSION_MODES.has(permissionMode) ? permissionMode : 'acceptEdits';
+  const args = ['--bg', prompt.trim(), '--permission-mode', mode];
+  // 只给用户主动选的 default / plan 挂 hook。acceptEdits 一个字不动 —— 它是既有默认档,
+  // 挂上会改变它的既有行为(GUI 没开时,原本"卡着等、可事后在终端 attach 应答"的请求
+  // 会变成立即拒绝)。注:acceptEdits 档下的非编辑类请求(Bash 等)照旧可能永久等待,
+  // 那是本批之外的老问题,现在至少能在监控面板看见"等待授权"。
+  if (mode !== 'acceptEdits') {
+    // 挂不上 hook 就不派:这两档没有应答通道 = 代理必然卡在授权等待永不返回,
+    // 那正是本通道要消灭的静默失败,不能"降级"成它。
+    try { args.push('--settings', await writeBgHookSettings(req.socket?.localPort)); }
+    catch (e) { return res.status(500).json({ error: `无法写入授权 hook 配置(${e.message});已取消派发` }); }
+  }
   // model 过白名单:Windows cmd.exe /c 下无空格+含 & 的 model 会被当命令分隔执行(RCE 绕权限)。
   // 注:--bg 要求 prompt 走位置参数无法改 stdin,现实 prompt 多含空格会被 libuv 引用;model 是干净活口。
   const safeModel = safeModelArg(model);
   if (safeModel) args.push('--model', safeModel);
+  const dispatchedAt = Date.now();
   try {
     const proc = claudeSpawn(args, { cwd: dir, stdio: ['ignore', 'pipe', 'pipe'], env: cleanChildEnv() });
     let out = '';
@@ -487,7 +573,8 @@ router.post('/agents/background/dispatch', async (req, res) => {
     if (!done.timedOut && done.code !== 0) {
       return res.status(500).json({ error: (errOut || out || `claude --bg 退出码 ${done.code}`).trim().slice(0, 1000) });
     }
-    res.json({ ok: true, output: out.trim().slice(0, 2000), ...(done.timedOut ? { note: '派发进程未在 20s 内退出,代理可能仍已启动' } : {}) });
+    if (mode !== 'acceptEdits') setTimeout(() => { checkSettingsMergeSentinel(dispatchedAt); }, 3000).unref();
+    res.json({ ok: true, mode, output: out.trim().slice(0, 2000), ...(done.timedOut ? { note: '派发进程未在 20s 内退出,代理可能仍已启动' } : {}) });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -517,6 +604,10 @@ router.post('/agents/background/stop', async (req, res) => {
     if (code !== 0) {
       return res.status(500).json({ error: (errOut || out || `claude stop 退出码 ${code}`).trim().slice(0, 500) });
     }
+    // 停进程不会自动清它的权限卡(卡片是独立态,批J 同款教训):留着就是一张"应答了也
+    // 没人收"的卡。id 可能是 jobId 也可能是 sessionId,连同 job state 里记的会话 id
+    // 一起清一遍(不匹配的是 no-op)。
+    for (const sid of await bgSessionIdsFor(id)) dropPendingForSession(sid);
     res.json({ ok: true });
   } catch (err) {
     return res.status(500).json({ error: err.message });

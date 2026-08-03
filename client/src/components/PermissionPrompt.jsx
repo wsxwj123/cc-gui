@@ -520,6 +520,12 @@ function PermissionCard({ req, onResolve, onWhitelistAndAllow, onAlwaysAllow, on
           <AlertCircle size={13} className="text-amber-700" />
         </div>
         <div className="text-[13px] font-medium text-ink flex items-center gap-1 flex-1 min-w-0">
+          {/* 后台代理的请求会显示在当前窗格(它的会话没开在任何窗格),必须标明来源:
+              否则用户会以为是当前会话要做这件事,在错误的上下文里批准。 */}
+          {req.bgAgent && (
+            <span className="shrink-0 px-1.5 py-0.5 rounded bg-violet-100 text-violet-700 text-[10px] font-body"
+              title="该请求来自后台代理（claude --bg），不是当前会话">后台代理</span>
+          )}
           <span className="shrink-0">Claude 想使用</span>
           <span className={`px-1.5 py-0.5 rounded font-mono text-[11px] ml-1 ${toolBadgeClass(req.toolName)}`}>
             {req.toolName}
@@ -684,8 +690,13 @@ export function PermissionPrompt({ sessionId = null, onExecutePlan = null, hydra
   const sessionsList = useStore((s) => s.sessions);
   const projectPath = useStore((s) => s.selectedProject?.path);
   const knownSids = new Set((Array.isArray(sessionsList) ? sessionsList : []).map((x) => x.sessionId));
+  // ⑤ 后台代理(claude --bg)的请求:它的会话不开在任何窗格,①~④ 逐条都判不到,卡片
+  //    会被整个藏掉 —— 用户看不到、代理等不到答复,只能超时按拒绝处理。这类请求无家可归
+  //    是常态而非异常,故一律显示(单窗格);分屏只在活动窗格显示,防同一请求每格弹一遍。
+  //    卡片自带"后台代理"标记,不会被误认成当前会话发起的操作。
   const mine = paneCount === 1
     ? all.filter((p) => {
+        if (p.bgAgent) return true;                          // ⑤
         if (!p.sessionId) return true;                       // ②
         if (p.sessionId === selectedSid) return true;        // ①
         if (knownSids.has(p.sessionId)) return false;        // ③
@@ -711,6 +722,7 @@ export function PermissionPrompt({ sessionId = null, onExecutePlan = null, hydra
           ? tabIndex === activeTabIndex
           : (active?.sessionId || null) === (sessionId || null);
         if (!paneIsActive) return false; // 本实例非活动窗格
+        if (p.bgAgent) return true;                                            // ⑤ 后台代理的请求无家可归,活动窗格接住
         if (!p.sessionId || knownSids.has(p.sessionId)) return false;          // 空 sid 走 draft 规则;已知别会话不串
         const panePath = active?.projectPath || projectPath;
         return !panePath || !p.cwd || cwdWithin(p.cwd, panePath);              // ④
