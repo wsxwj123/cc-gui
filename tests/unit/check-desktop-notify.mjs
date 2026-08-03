@@ -98,6 +98,21 @@ const plan = (o) => planNotification({ enabled: true, focused: false, ...o });
   assert.ok(individual + mergedCount <= 16, `3 分钟总量必须被压住,实际 ${individual + mergedCount}`);
 }
 
+// ── 3c. 为什么"重放已知卡不发通知"必须在入口挡,不能指望 60s 去重 ──────────
+// 心跳每 25s 无条件对账(refetchPendingPermissions),会把服务端所有 pending 项重放进
+// handlePermissionRequest。一张没人处理的卡每轮都在、每轮都重放,而 60s 去重只压得住
+// 两轮 —— 第 75 秒那轮就过期了。下面用真实时钟节拍证明:防轰炸【兜不住】这个节奏,
+// 所以 addCard 必须按"store 里已有同 id"直接不发(见第 8 组守卫)。
+{
+  resetNotifyState();
+  const key = 'sid:permission';
+  const fired = [];
+  for (let t = 0; t <= 200_000; t += 25_000) {         // 25s 心跳,同一张卡一直没被处理
+    if (plan({ key, title: '等待授权', body: 'Bash', now: T0 + t })) fired.push(t / 1000);
+  }
+  assert.deepEqual(fired, [0, 75, 150], '去重只挡到 50s,第 75/150 秒各会重发一条 —— 这正是要在入口挡掉的原因');
+}
+
 // ── 4. maybeNotify 的真实门控(hasFocus + 开关)────────────────────────────
 // 真调 maybeNotify,靠注入 globalThis 的 document / localStorage 打桩。返回值就是它
 // 决定要发的内容,不发返回 null。
@@ -185,8 +200,13 @@ const plan = (o) => planNotification({ enabled: true, focused: false, ...o });
 {
   const ws = readFileSync(join(root, 'client/src/hooks/useWebSocket.js'), 'utf8');
   assert.ok(/import \{ maybeNotify, permissionNotice \} from '\.\.\/utils\/desktopNotify\.js'/.test(ws));
-  assert.ok(/function addCard\(req\) \{\s*maybeNotify\(permissionNotice\(req\)\);\s*useStore\.getState\(\)\.addPendingPermission\(req\);/.test(ws),
-    '弹卡与发通知必须在同一个入口,否则新增分支会漏通知');
+  assert.ok(/function addCard\(req\) \{\s*const known = useStore\.getState\(\)\.pendingPermissions\.some\(\(p\) => p\.id === req\.id\);\s*if \(!known\) maybeNotify\(permissionNotice\(req\)\);\s*useStore\.getState\(\)\.addPendingPermission\(req\);/.test(ws),
+    '弹卡与发通知必须在同一个入口(否则新增分支漏通知),且【只对表里还没有的卡】发 —— '
+    + '25s 心跳对账会把未处理的卡一轮轮重放进来,不挡住就每 75s 重发一条(见第 3c 组)');
+  // 判据必须是 store 里有没有这张卡,不能拿 inFlightResponds 顶替:那个守卫只挡"提交中"
+  // 的卡,挡不住"已入表、用户还没点"的卡 —— 后者恰恰是会被重放的那批。
+  assert.ok(/const known = useStore\.getState\(\)\.pendingPermissions\.some/.test(ws),
+    '重放判据取 store 里是否已有同 id');
   const handler = ws.slice(ws.indexOf('function handlePermissionRequest'), ws.indexOf('function addCard'));
   assert.equal((handler.match(/addPendingPermission\(/g) || []).length, 0,
     'handlePermissionRequest 里不许再直接入表 —— 绕过 addCard 就没有通知');

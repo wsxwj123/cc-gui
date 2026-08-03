@@ -109,8 +109,16 @@ function handlePermissionRequest(req) {
 // 弹卡 = 一次"在等你"。窗口不在前台时同时发一条系统通知(自带去重/限流,见
 // desktopNotify.js)。只挂在真正入表的两个分支上:白名单自动放行的请求用户根本不需要
 // 知道,给它发通知就是纯噪音。
+//
+// known 守卫是必需的,不是保险:refetchPendingPermissions 每 25s 心跳无条件对账,把
+// 服务端所有 pending 项重放进 handlePermissionRequest —— 卡还没被处理时它每轮都在,
+// 每轮都会走到这里。desktopNotify 的 60s 去重只压得住两轮,t0+75s 那轮就过期了,之后
+// 每 75s 原样重发一条(几张卡挂着就是每分钟顶满限流)。inFlightResponds 挡不住:那个
+// 守卫只挡"提交中",挡不住"入表未处理"。判据用 store 里是否已有同 id:重放已知卡 →
+// 不是新事件,不发。卡被对账 remove 后又真的重现 → known=false,重新通知,正确。
 function addCard(req) {
-  maybeNotify(permissionNotice(req));
+  const known = useStore.getState().pendingPermissions.some((p) => p.id === req.id);
+  if (!known) maybeNotify(permissionNotice(req));
   useStore.getState().addPendingPermission(req);
 }
 
