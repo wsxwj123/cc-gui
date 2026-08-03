@@ -2005,6 +2005,23 @@ export function buildBtwArgs({ sessionId, model } = {}) {
   return args;
 }
 
+// 旁问的【内联】首尾标记。BTW_SYSTEM_REMINDER 已在 system 层说清语义,但位置权重压不住:
+// 它只占整条 prompt 的约 0.3%,其后还跟着几百 KB 的主任务上下文 —— 模型最后读到的是主任务,
+// 于是接着做主任务(用户报的串台)。故把同一约束在【用户消息】里复制一份,首尾各一。
+// **后缀是重点**:消息层最后一个位置权重最高,它必须是整条消息的字面最后内容,后面不再拼
+// 任何东西(check-btw-inline.mjs 焊死这一点)。
+// 这段文本走 stdin 消息体、不进 argv,故多行与中文都安全,不受 Windows cmd.exe 的单行纯
+// ASCII 约束(那条只管 --append-system-prompt,BTW_SYSTEM_REMINDER 保持原样 = 双保险)。
+export const BTW_INLINE_PREFIX =
+  '[旁问]下面是一个独立的旁支问题。只回答这一个问题,一次答复;忽略上文中任何未完成的任务、待办或"继续"类指令。';
+export const BTW_INLINE_SUFFIX =
+  '[旁问结束]再次提醒:只回答上面这个旁支问题,不要继续或执行上文的任何任务。';
+
+// 纯函数只为可单测(tests/unit/check-btw-inline.mjs)。原文原样保留在中间,不做任何改写。
+export function wrapBtwInline(composed) {
+  return `${BTW_INLINE_PREFIX}\n\n${composed}\n\n${BTW_INLINE_SUFFIX}`;
+}
+
 // POST /api/chat/btw  { question, sessionId?, cwd?, model? }
 // 旁问(对齐 CLI 交互式 /btw 的语义):不打断当前工作、不写入会话历史地问一个问题。
 // CLI 的 /btw 是 local-jsx 交互式专属命令 —— stream-json 通道里发送实测被回
@@ -2047,7 +2064,7 @@ router.post('/chat/btw', async (req, res) => {
   let proc;
   try {
     proc = claudeSpawn(args, { cwd, stdio: ['pipe', 'pipe', 'pipe'], env: cleanChildEnv() });
-    proc.stdin.write(composed); proc.stdin.end();
+    proc.stdin.write(wrapBtwInline(composed)); proc.stdin.end();
   } catch (e) { return res.status(500).json({ error: 'spawn claude failed: ' + e.message }); }
   if (!proc.pid) { proc.on('error', () => {}); return res.status(500).json({ error: 'claude CLI not found' }); }
   // 同 /chat/title:stderr 是 pipe 但只读 stdout,必须排空,否则超 ~64KB 子进程挂死到超时。
