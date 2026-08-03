@@ -296,7 +296,11 @@ export function shouldSuppressAbort({ liveShell = 0, liveCrossEpoch = 0, allTask
 //    "uuid":"…","session_id":"…"}   ← 无顶层 task_id,故走独立分支
 // 实测 local_bash(Bash run_in_background)与 local_agent(前台 Task 子代理)都在集内,
 // 空集恒对应任务真结束(sleep 300 直到被 kill 才出集),不随回合边界抖动。
-export function reconcileLiveTasks(liveTasks, tasksPayload, now = Date.now(), graceMs = LEVEL_GRACE_MS) {
+// epoch:补建条目的回合世代,调用点必须传 slot.turnEpoch(审查 R2)。写死 0 会让复用回合
+// (turnEpoch≥1)补建出来的条目被 partitionStopTasks 当成"跨回合任务"归进 keptTasks ——
+// 选择性停止不对它发 stopTask,liveCrossEpoch>0 还会经 shouldSuppressAbort 抑制 abort 兜底,
+// CLI 挂死时停止就失去硬兜底。参数排在最后是为了不动既有调用点的位置语义。
+export function reconcileLiveTasks(liveTasks, tasksPayload, now = Date.now(), graceMs = LEVEL_GRACE_MS, epoch = 0) {
   if (!liveTasks) liveTasks = new Map(); // 未起过任务的 slot(实际恒非空,防御)
   const live = new Map();
   for (const t of (Array.isArray(tasksPayload) ? tasksPayload : [])) {
@@ -315,7 +319,7 @@ export function reconcileLiveTasks(liveTasks, tasksPayload, now = Date.now(), gr
     // 就能让选择性停止把用户的后台训练任务当子代理杀掉(不可恢复)。
     const kind = t.task_type === 'local_bash' ? 'shell'
       : (t.task_type === 'local_agent' ? 'subagent' : 'unknown');
-    liveTasks.set(tid, { toolUseId: null, kind, epoch: 0, createdAt: now, fromLevel: true });
+    liveTasks.set(tid, { toolUseId: null, kind, epoch: epoch | 0, createdAt: now, fromLevel: true });
     added.push(tid);
   }
   return { settled, added, liveIds: [...live.keys()] };
@@ -347,6 +351,16 @@ export function taskUpdatedTerminal(liveTasks, msg) {
 export function hasFreshNonShellTask(liveTasks, now = Date.now(), freshMs = LIVE_TASK_FRESH_MS) {
   return [...(liveTasks?.values() ?? [])]
     .some((t) => t && t.kind !== 'shell' && now - (t.createdAt || 0) < freshMs);
+}
+
+// level 信号不可用时的降级判据(审查 R1)= 修前那支"本回合条目无限期豁免"。
+// 上面的年龄上限之所以敢做,前提是 level 信号会持续确认真活任务并刷新 createdAt。这个前提
+// 在两种情况下不成立:① 旧版 CLI(<2.1.220)根本不发该信号;② 本 slot 至今一条都没收到。
+// 此时若照严判据走,"真活超 30 分钟 + 父流 5 分钟零消息"的子代理会被看门狗 abort 连坐杀死
+// (不可恢复),而修前的 epoch 无限豁免恰好保护这个场景。故:收到过 level 信号才启用严判据。
+export function hasCurrentEpochNonShellTask(liveTasks, epoch) {
+  return [...(liveTasks?.values() ?? [])]
+    .some((t) => t && t.kind !== 'shell' && (t.epoch | 0) === (epoch | 0));
 }
 
 export function getActiveChatProcesses() {
@@ -1000,6 +1014,11 @@ router.post('/chat', async (req, res) => {
     // Bash run_in_background 的 tool_use_id 集合:task_started 的 task_type==='local_bash' 是
     // shell 直接判据,此集合是双保险(第三方/旧版 CLI 缺 task_type 时按 tool_use_id 反查)。
     bgBashToolIds: new Set(),
+    // 批A level 信号(background_tasks_changed)。sawLevel:本 slot 收到过该信号没有 ——
+    // 看门狗据此在严/宽判据间切换(见 hasCurrentEpochNonShellTask)。lastLevelSig:上次广播的
+    // 存活集签名,用于去重。都随进程重建而重置,这就是"进程重启重置空集"的落点。
+    sawLevel: false,
+    lastLevelSig: null,
   };
   activeProcesses.set(procId, slot);
   slot.nulWatcher = startWinNulWatcher(workingDir);
@@ -1169,8 +1188,12 @@ router.post('/chat', async (req, res) => {
       // hasFreshNonShellTask 注释):原来的 `epoch === turnEpoch` 一支没有年龄上限,
       // 本回合子代理丢一条终态通知就把 5 分钟兜底永久解除。跨回合仍活着的 teammate
       // 在窗内照样算忙,看门狗不会 abort 宿主进程连坐杀它(权衡见常量注释)。
+      // 降级守卫(审查 R1):严判据的续命全靠 level 信号刷新 createdAt。本 slot 至今没收到过
+      // 该信号(旧版 CLI 不发 / 本回合没触发过成员变化)时回落修前的宽判据,否则真活的长任务
+      // 会被 abort 连坐杀掉 —— 看门狗到点是强拆进程,误杀不可恢复,宁可漏兜底。
       const now = Date.now();
-      const busyNonShell = hasFreshNonShellTask(slot.liveTasks, now, LIVE_TASK_FRESH_MS);
+      const busyNonShell = hasFreshNonShellTask(slot.liveTasks, now, LIVE_TASK_FRESH_MS)
+        || (!slot.sawLevel && hasCurrentEpochNonShellTask(slot.liveTasks, slot.turnEpoch));
       // 判据含 revived:无子代理回合的续跑(auto-compact 后续写等)经复活守卫翻回活跃,
       // turnSubagentSeen 仍是 false,不设 revived 分支这类续跑卡死永无看门狗兜底(判官 S2)。
       if (!slot.idle && (slot.turnSubagentSeen || slot.revived) && !busyNonShell) {
@@ -1248,7 +1271,9 @@ router.post('/chat', async (req, res) => {
         // 【只喂簿记与 UI】:绝不用它驱动 finalize()/abort()/input.close()/stopTimer,
         // 停止链路的既有时序一个字不动。
         else if (m.type === 'system' && m.subtype === 'background_tasks_changed' && Array.isArray(m.tasks)) {
-          const { settled, added, liveIds } = reconcileLiveTasks(slot.liveTasks, m.tasks, Date.now());
+          slot.sawLevel = true; // 看门狗据此启用严判据(见 hasCurrentEpochNonShellTask 注释)
+          const { settled, added, liveIds } = reconcileLiveTasks(
+            slot.liveTasks, m.tasks, Date.now(), LEVEL_GRACE_MS, slot.turnEpoch | 0);
           broadcastLiveTasks(slot, liveIds, settled, added);
         }
         deliverLine(slot, line);

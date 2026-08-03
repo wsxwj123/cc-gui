@@ -6,7 +6,7 @@
 // 真正卡死的路径(其余"卡住"多是主回合确实还没结束,显示是对的)。
 // 直接 import chat.js 的真函数(非复刻)。
 import assert from 'node:assert/strict';
-import { hasFreshNonShellTask, reconcileLiveTasks } from '../../server/routes/chat.js';
+import { hasFreshNonShellTask, hasCurrentEpochNonShellTask, reconcileLiveTasks } from '../../server/routes/chat.js';
 
 const FRESH = 30 * 60 * 1000;
 const now = 1_000_000_000;
@@ -47,6 +47,29 @@ const old = (ms) => now - ms;
     'level 信号确认仍活 → createdAt 刷新 → 真在跑的长任务重新算忙,看门狗不碰它');
 }
 
+// ── R1 降级守卫:level 信号不来时回落宽判据 ─────────────────────────
+// 严判据的续命全靠 level 信号刷新 createdAt。信号不来时(旧版 CLI <2.1.220 不发;或本 slot
+// 至今没触发过任务集成员变化)真活的长任务会被看门狗 abort 连坐杀死 —— 而看门狗到点是强拆
+// 进程,误杀不可恢复。故 slot.sawLevel 为假时回落修前的"本回合条目无限期豁免"。
+{
+  const live = new Map([['t', { kind: 'subagent', epoch: 3, createdAt: old(40 * 60 * 1000) }]]);
+  // 泵里的合成判据:hasFresh || (!sawLevel && hasCurrentEpoch)
+  const busy = (sawLevel) => hasFreshNonShellTask(live, now, FRESH)
+    || (!sawLevel && hasCurrentEpochNonShellTask(live, 3));
+  assert.equal(busy(false), true, '没收到过 level 信号 → 回落宽判据,本回合陈旧条目仍算忙(不被 abort 误杀)');
+  assert.equal(busy(true), false, '收到过 level 信号 → 启用严判据,陈旧条目不再解除看门狗');
+
+  // 降级支只豁免【本回合】,跨回合的陈旧残留照样不算忙(否则看门狗又被永久解除)
+  const prev = new Map([['t', { kind: 'subagent', epoch: 1, createdAt: old(40 * 60 * 1000) }]]);
+  assert.equal(hasCurrentEpochNonShellTask(prev, 3), false, '跨回合陈旧条目不进降级豁免');
+  // shell 永不计入降级支
+  assert.equal(hasCurrentEpochNonShellTask(new Map([['t', { kind: 'shell', epoch: 3 }]]), 3), false,
+    'shell 不计入降级判据');
+  // epoch 归一化与 `|0` 口径一致;缺 epoch 的条目按 0 算
+  assert.equal(hasCurrentEpochNonShellTask(new Map([['t', { kind: 'subagent' }]]), 0), true, '缺 epoch 按 0 算');
+  assert.equal(hasCurrentEpochNonShellTask(null, 0), false, '无 liveTasks 不炸');
+}
+
 // ── 源码守卫:判据不得被改回去 ──────────────────────────────────────
 {
   const { readFileSync } = await import('node:fs');
@@ -54,8 +77,10 @@ const old = (ms) => now - ms;
   const { dirname, join } = await import('node:path');
   const src = readFileSync(
     join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'server', 'routes', 'chat.js'), 'utf8');
-  assert.ok(/const busyNonShell = hasFreshNonShellTask\(slot\.liveTasks, now, LIVE_TASK_FRESH_MS\)/.test(src),
-    '看门狗判据必须走 hasFreshNonShellTask(带年龄上限)');
+  assert.ok(/const busyNonShell = hasFreshNonShellTask\(slot\.liveTasks, now, LIVE_TASK_FRESH_MS\)\s*\n\s*\|\| \(!slot\.sawLevel && hasCurrentEpochNonShellTask\(slot\.liveTasks, slot\.turnEpoch\)\);/.test(src),
+    '看门狗判据 = 严判据 || 降级守卫(R1);少了降级支会误杀 level 信号不可用时的真活长任务');
+  assert.ok(/slot\.sawLevel = true;/.test(src), 'level 分支必须置 sawLevel');
+  assert.ok(/sawLevel: false,/.test(src), 'slot 字面量必须声明 sawLevel(默认宽判据)');
   assert.ok(!/t\.epoch === \(slot\.turnEpoch \| 0\) \|\| now - \(t\.createdAt \|\| 0\) < LIVE_TASK_FRESH_MS/.test(src),
     '不得再出现"epoch 支无年龄上限"的旧判据');
   assert.equal(src.match(/const LIVE_TASK_FRESH_MS = 30 \* 60 \* 1000;/g)?.length, 1,
@@ -66,4 +91,4 @@ const old = (ms) => now - ms;
   assert.ok(/const STALL_MS = 300_000;/.test(src), '静默阈值 300s 不得改');
 }
 
-console.log('✓ check-stall-watchdog: 年龄上限 9 断言 + level 续命 + 源码守卫 全过');
+console.log('✓ check-stall-watchdog: 年龄上限 9 断言 + level 续命 + R1 降级守卫 + 源码守卫 全过');

@@ -48,24 +48,37 @@ const old = (ms) => now - ms;
   assert.equal(reconcileLiveTasks(live, [], now, GRACE).settled.length, 1, '年龄 = grace 即可剪');
 }
 {
-  // ③ payload 里的新 task_id → 补建,kind 严格按 task_type
+  // ③ payload 里的新 task_id → 补建,kind 严格按 task_type;epoch 取调用点传入的回合世代
+  //    【turnEpoch 必须用非 0】(审查 R2):原用例传 0,恰好与写死的 epoch:0 相等而掩盖了偏差。
+  const TURN = 3;
   const live = new Map();
   const r = reconcileLiveTasks(live, [
     { task_id: 't-bash', task_type: 'local_bash' },
     { task_id: 't-agent', task_type: 'local_agent' },
     { task_id: 't-weird', task_type: 'something_else' },
     { task_id: 't-nokind' },
-  ], now, GRACE);
+  ], now, GRACE, TURN);
   assert.deepEqual(r.added, ['t-bash', 't-agent', 't-weird', 't-nokind'], '没见过的 task_id 全部补建');
   assert.equal(live.get('t-bash').kind, 'shell', 'local_bash → shell(错分类会让选择性停止杀掉后台训练任务)');
   assert.equal(live.get('t-agent').kind, 'subagent', 'local_agent → subagent');
   assert.equal(live.get('t-weird').kind, 'unknown', '未知 task_type → unknown(按可停处理,不让停止静默失效)');
   assert.equal(live.get('t-nokind').kind, 'unknown', '缺 task_type → unknown');
   assert.equal(live.get('t-bash').toolUseId, null, '补建条目没有 tool_use_id(level 载荷不带)');
-  // 补建的 shell 条目必须被选择性停止认成 shell(否则总闸会把用户的后台 bash 一起杀)
-  const part = partitionStopTasks(live, 0, false, now);
+  assert.equal(live.get('t-agent').epoch, TURN, '补建条目的 epoch = 当前回合世代,不得写死 0');
+
+  const part = partitionStopTasks(live, TURN, false, now);
+  // R2:补建的非 shell 条目必须归【可停】。写死 epoch:0 时它会被当成跨回合任务归进 keptTasks,
+  // 于是选择性停止不发 stopTask,liveCrossEpoch>0 还经 shouldSuppressAbort 抑制 abort 兜底 ——
+  // CLI 挂死时停止就失去硬兜底(bookend 被驱逐、task_started 真丢失时的实打实场景)。
+  assert.deepEqual(part.keptTasks, [], '本回合补建的条目不得被当成跨回合任务保留(R2)');
+  assert.ok(part.stoppableTasks.includes('t-agent'), 'level 补建的子代理条目必须可停');
+  // 补建的 shell 条目仍必须被认成 shell(否则总闸会把用户的后台 bash 一起杀)
   assert.ok(part.shellTasks.includes('t-bash'), 'level 补建的 local_bash 条目必须进 shellTasks');
   assert.ok(!part.stoppableTasks.includes('t-bash'), 'level 补建的 shell 绝不能进可停组');
+  // epoch 缺省仍是 0(既有调用点位置语义不变)
+  const live2 = new Map();
+  reconcileLiveTasks(live2, [{ task_id: 'x', task_type: 'local_agent' }], now, GRACE);
+  assert.equal(live2.get('x').epoch, 0, 'epoch 参数缺省为 0(排在最后,不动既有调用点)');
 }
 {
   // ④ 已有条目的 kind 绝不被 payload 覆盖(task_started 的 kind 判据带 bgBashToolIds 双保险,更准)
@@ -163,8 +176,8 @@ const old = (ms) => now - ms;
     join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'server', 'routes', 'chat.js'), 'utf8');
   assert.ok(/else if \(m\.type === 'system' && m\.subtype === 'background_tasks_changed' && Array\.isArray\(m\.tasks\)\)/.test(src),
     'level 信号必须有独立分支(它没有顶层 task_id,进不了 task_id 那个 if)');
-  assert.ok(/reconcileLiveTasks\(slot\.liveTasks, m\.tasks, Date\.now\(\)\)/.test(src),
-    '泵里必须调 reconcileLiveTasks 对账');
+  assert.ok(/reconcileLiveTasks\(\s*\n?\s*slot\.liveTasks, m\.tasks, Date\.now\(\), LEVEL_GRACE_MS, slot\.turnEpoch \| 0\)/.test(src),
+    '泵里必须调 reconcileLiveTasks 且【透传 turnEpoch】(R2:写死 0 会让补建条目逃过选择性停止)');
   assert.ok(/const LEVEL_GRACE_MS = 1500;/.test(src), 'level 对账的 grace 窗常量必须在');
   // A2 广播:无条件发(SSE 在线时客户端也解不出 tool_use_id,正是本 bug 的核心)
   assert.ok(/const \{ deleted, notify \} = taskUpdatedTerminal\(slot\.liveTasks, m\);/.test(src),
