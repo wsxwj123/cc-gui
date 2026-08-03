@@ -109,4 +109,58 @@ assert.ok(/useEffect\(\(\) => detachStream[,)]/.test(src),
   }
 }
 
-console.log('✓ check-detach-stream: detachStream 抽取 + 卸载 detach + 稳定 paneKey 守卫全过');
+// ── 5. B3:attach 非 2xx 不再静默(本文件并入,与 B1 同一条故障链)────────
+// 修前:409 的响应体是 JSON,逐行解析一条 `data: ` 都匹配不到 → 循环空转一圈就结束、
+// 不抛错 → finally 把 isStreaming 关掉 → 只剩后台横幅,而 reattachedPidRef 已被赋值,
+// 同一 pid 永不重试 = 窗格永久没有追加通道。
+{
+  const i = src.indexOf('if (!streamRes.ok) {');
+  assert.ok(i > 0, 'handleSend 必须显式处理 attach 非 2xx');
+  const seg = src.slice(i, i + 1400);
+  assert.ok(/reattachedPidRef\.current = null/.test(seg),
+    '非 2xx 必须清 reattachedPidRef,否则同一 pid 永不重试');
+  assert.ok(/attachFailRef\.current = \(attachFailRef\.current \|\| 0\) \+ 1/.test(seg), '必须累加失败次数');
+  assert.ok(/fetchMessagesForTab\(streamSid, streamOwnerPh/.test(seg),
+    '必须回落重拉历史(用发起时闭包的 sid/ph,不得读 getLocalSession)');
+  assert.ok(/attachFailRef\.current >= 3/.test(seg), '必须有重试上限(3 次)后把错误亮给用户');
+  assert.ok(/attachFailRef\.current = 0;/.test(src.slice(i, i + 1600)), 'attach 成功必须归零计数');
+  // 提前 return 只能落在 try 内(要走 finally 完成 finalizeInFlightRef 的 -1)
+  assert.ok(seg.indexOf('return;') < seg.indexOf('const reader'), '提前 return 必须在取 reader 之前');
+}
+// attach 预算随后台进程消失重置
+assert.ok(/if \(!backgroundPid\) \{ reattachedPidRef\.current = null; attachFailRef\.current = 0; return; \}/.test(src),
+  '后台进程消失时必须同时重置 attachFailRef,否则上个进程攒的失败次数会把下一个直接判死');
+
+// ── 6. 复刻:三次累加后抛错、成功归零、提前 return 仍走 finally ──────────
+{
+  const attachFailRef = { current: 0 };
+  let inFlight = 0;
+  // 复刻 handleSend 的 try/finally 骨架:+1 在 try 第一行,-1 在 finally。
+  const runAttach = (ok, status = 409) => {
+    inFlight += 1;
+    try {
+      if (!ok) {
+        attachFailRef.current = (attachFailRef.current || 0) + 1;
+        if (attachFailRef.current >= 3) throw new Error(`连接失败(${status})`);
+        return 'silent-retry';
+      }
+      attachFailRef.current = 0;
+      return 'streaming';
+    } finally {
+      inFlight = Math.max(0, inFlight - 1);
+    }
+  };
+
+  assert.equal(runAttach(false), 'silent-retry');
+  assert.equal(inFlight, 0, '提前 return 也必须走 finally,否则 finalizeInFlightRef 永久压死排空');
+  assert.equal(runAttach(false), 'silent-retry');
+  assert.throws(() => runAttach(false), /连接失败/, '第三次必须把错误亮给用户,不再静默');
+  assert.equal(inFlight, 0, '抛错路径同样要走 finally');
+  assert.equal(attachFailRef.current, 3);
+  // 成功一次即归零 —— 偶发 409 不该在几分钟后攒够 3 次误报
+  attachFailRef.current = 2;
+  assert.equal(runAttach(true), 'streaming');
+  assert.equal(attachFailRef.current, 0);
+}
+
+console.log('✓ check-detach-stream: detachStream 抽取 + 卸载 detach + 稳定 paneKey + attach 非 2xx 不静默,守卫全过');

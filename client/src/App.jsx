@@ -3792,6 +3792,10 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // 每次真正进入发送/reattach 起流前同步递增。旧 finally 的异步轮询只认自己的 token，
   // 不再等 /api/chat 返回 pid 才判断新回合是否已经开始。
   const streamTurnTokenRef = useRef(0);
+  // 连续 attach 失败次数(GET /chat/:pid/stream 非 2xx)。满 3 次才把错误亮给用户,
+  // 前两次静默交给 1.5s backgroundPid 轮询重试;attach 成功或后台进程消失即归零。
+  // 声明放这里(而非 reattachedPidRef 旁)只为作用域顺序好读:handleSend 定义在它之后。
+  const attachFailRef = useRef(0);
   const abortRef = useRef(null);
   // 只做「断开本端 SSE」这一件事:abort 客户端 fetch → 服务端 req.on('close') → slot.attached=false,
   // 后续行落 earlyLines 等重连回放(detach-don't-abort,进程不死、jsonl 继续落盘)。
@@ -4748,6 +4752,18 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       // 新 workflow 可正常显示 running)。draft 首发 sid 在 init 事件才确定,那里再清一次。
       if (streamSid) useStore.getState().clearSessionStopped?.(streamSid);
       const streamRes = await fetch(`/api/chat/${pid}/stream`, { signal: controller.signal });
+      if (!streamRes.ok) {
+        // 非 2xx(409「已被占用」已由服务端改成新连接接管,这里是防御):响应体是 JSON 不是
+        // SSE,下面的逐行解析一条 `data: ` 都匹配不到 → 循环空转一圈即结束、不抛错 → 本窗格
+        // 从此没有任何追加通道,只剩一条承诺"自动追加"的后台横幅(用户实报"重开会话历史空")。
+        reattachedPidRef.current = null;   // 清 reattach 守卫,允许下一轮 1.5s 轮询重试
+        attachFailRef.current = (attachFailRef.current || 0) + 1;
+        // 追加通道断了,至少把已落盘的历史补回来,别让窗格空着。
+        if (streamSid && streamOwnerPh) { try { await fetchMessagesForTab(streamSid, streamOwnerPh, { silent: true }); } catch {} }
+        if (attachFailRef.current >= 3) throw new Error(`连接失败(${streamRes.status}):这个会话可能在别处被打开,或后端已重启。切走再切回可重试。`);
+        return; // 前两次静默重试,交给 backgroundPid 轮询(本 return 照样走 finally,±1 配对不破)
+      }
+      attachFailRef.current = 0;
       const reader = streamRes.body.getReader();
       const decoder = new TextDecoder();
       let buffer = '';
@@ -6114,7 +6130,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // banner — exactly what they complained about.
   const reattachedPidRef = useRef(null);
   useEffect(() => {
-    if (!backgroundPid) { reattachedPidRef.current = null; return; }
+    // 后台进程没了 = 新一轮 attach 预算重置,别让上个进程攒下的失败次数把下一个直接判死。
+    if (!backgroundPid) { reattachedPidRef.current = null; attachFailRef.current = 0; return; }
     if (streamingRef.current) return;
     if (reattachedPidRef.current === backgroundPid) return; // already reattached
     reattachedPidRef.current = backgroundPid;
