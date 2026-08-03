@@ -902,6 +902,27 @@ function buildDisallowedMcpTools() {
   } catch { return []; }
 }
 
+// CQ:追加(而非替换)规划模式行为引导——修第 10/11 项并强化第 6 项。不用 SDK 的
+// planModeInstructions(它会整段替换默认计划工作流 body,丢失原生规划逻辑),改成 append
+// 叠加在 claude_code preset 上,additive、低风险:① 提问走 AskUserQuestion 工具而非写进
+// 计划正文(第10);② 计划批准后用 TaskCreate 拆任务清单跟踪(第11);③ 被要求"修改"时
+// 修订后再次 ExitPlanMode 重新提交、不要直接开始执行(第6,与 deny 文案双保险)。
+const PLAN_GUIDE = '【规划模式补充指引 —— 仅在规划(plan)模式下适用,其它模式忽略本段】1) 若需要向用户提问以澄清需求,必须调用 AskUserQuestion 工具,不要把问题直接写进 ExitPlanMode 的计划正文里。2) 计划被用户批准、进入执行后,请用 TaskCreate 把计划拆成任务清单并逐项更新状态,让用户能看到进度。3) 若用户对计划反馈"需要修改",请据此修订计划后【再次调用 ExitPlanMode】重新提交、等待确认,不要直接开始执行。';
+
+// 引导【无条件】进系统提示,不再按 permissionMode 分支——两点收益,一点代价:
+//  ① 前缀缓存:系统提示是整个前缀的最前段,按模式分两种写法 = 账号级前缀缓存劈成两桶
+//     (DeepSeek pro 未命中价是命中的 120 倍)。恒定写法让所有会话共享同一前缀。
+//  ② 顺带修一个真 bug:引导只在 spawn 时定型,POST /chat/permission-mode 中途热切进
+//     plan 的回合此前【根本没有】引导。恒定注入后热切回合也有。
+// 代价:非规划回合的系统提示也带这段。故文案首句写死适用条件让模型自行门控;三条正文
+// 逐字未动,规划模式下的语义与改动前完全一致。
+// (曾评估"改注入用户消息"以避免这点代价:与 CLI 的斜杠命令解析冲突——前置会让 `/xxx`
+//  不再以 `/` 开头认不出命令,后置会被卷进 <command-args> 传给 skill 当参数,故放弃。)
+export function composeAppendSystemPrompt(appendSystemPrompt) {
+  const userAppend = (typeof appendSystemPrompt === 'string') ? appendSystemPrompt.trim() : '';
+  return userAppend ? `${userAppend}\n\n${PLAN_GUIDE}` : PLAN_GUIDE;
+}
+
 router.post('/chat', async (req, res) => {
   const {
     prompt, sessionId, cwd,
@@ -1147,16 +1168,7 @@ router.post('/chat', async (req, res) => {
   // 首条用户消息(streaming-input);保持 input 打开作 control 通道。
   input.push({ type: 'user', message: { role: 'user', content: String(prompt) } });
 
-  // CQ:规划模式下追加(而非替换)行为引导——修第 10/11 项并强化第 6 项。不用 SDK 的
-  // planModeInstructions(它会整段替换默认计划工作流 body,丢失原生规划逻辑),改成 append
-  // 叠加在 claude_code preset 上,additive、低风险:① 提问走 AskUserQuestion 工具而非写进
-  // 计划正文(第10);② 计划批准后用 TaskCreate 拆任务清单跟踪(第11);③ 被要求"修改"时
-  // 修订后再次 ExitPlanMode 重新提交、不要直接开始执行(第6,与下方 deny 文案双保险)。
-  let appendText = (typeof appendSystemPrompt === 'string') ? appendSystemPrompt.trim() : '';
-  if (sdkPermMode === 'plan') {
-    const planGuide = '【规划模式补充指引】1) 若需要向用户提问以澄清需求,必须调用 AskUserQuestion 工具,不要把问题直接写进 ExitPlanMode 的计划正文里。2) 计划被用户批准、进入执行后,请用 TaskCreate 把计划拆成任务清单并逐项更新状态,让用户能看到进度。3) 若用户对计划反馈"需要修改",请据此修订计划后【再次调用 ExitPlanMode】重新提交、等待确认,不要直接开始执行。';
-    appendText = appendText ? `${appendText}\n\n${planGuide}` : planGuide;
-  }
+  const appendText = composeAppendSystemPrompt(appendSystemPrompt);
   const systemPrompt = appendText
     ? { type: 'preset', preset: 'claude_code', append: appendText.slice(0, 8000) }
     : { type: 'preset', preset: 'claude_code' };
@@ -1190,7 +1202,10 @@ router.post('/chat', async (req, res) => {
     },
     cwd: workingDir,
     env: childEnv,
-    additionalDirectories: [...dirSet],
+    // .sort():Set 的插入序让同一组目录在不同会话里顺序不同 → 系统提示里的目录列表不同 →
+    // 跨会话前缀缓存不共享(缓存是账号级前缀匹配,不是会话级)。上面 chatCompatKey 的 dirs
+    // 本就是 [...dirSet].sort(),改完两边口径才一致(改前是"键排序、实参不排序")。
+    additionalDirectories: [...dirSet].sort(),
     abortController: abort,
     stderr: (d) => { const t = String(d).trim(); if (t) deliverLine(slot, JSON.stringify({ type: 'stderr', text: t })); },
   };
