@@ -54,6 +54,22 @@ try {
     assert.equal(t.aiTitle, '自动标题', '清空自定义标题不影响 ai-title');
   }
 
+  // 吞并防线:清空标题之后又聊了两句,CLI 会追加新的 ai-title —— 行序是 custom('') 在前、
+  // ai 在后。读侧若把 ai-title 并进 customTitle(SDKSessionInfo.customTitle 就是这么干的),
+  // 新自动标题会顶掉刚清空的自定义标题 = 清空当场失效。前面两个用例的行序恰好掩护得住
+  // 这种吞并(ai 行在前被后来的 custom 覆盖),必须单独按这个行序验。
+  {
+    const f = join(dir, 'cleared-then-ai.jsonl');
+    writeFileSync(f, [
+      line({ type: 'custom-title', customTitle: '旧标题', sessionId: SID }),
+      line({ type: 'custom-title', customTitle: '', sessionId: SID }),
+      line({ type: 'ai-title', aiTitle: '新自动标题', sessionId: SID }),
+    ].join('\n') + '\n');
+    const t = await readSessionTitles(f);
+    assert.equal(t.customTitle, '', '清空后新来的 ai-title 不得回填 customTitle(两个字段严禁合并)');
+    assert.equal(t.aiTitle, '新自动标题', 'ai-title 自己照常更新');
+  }
+
   // 坏行/无标题行/文件不存在都不能抛
   {
     const f = join(dir, 'junk.jsonl');

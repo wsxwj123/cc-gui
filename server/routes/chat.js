@@ -1943,7 +1943,9 @@ router.post('/chat/title', async (req, res) => {
     try {
       const f = await findSessionFile(jsonlSid);
       const t = f ? await readSessionTitles(f) : null;
-      if (t?.aiTitle) return res.json({ title: t.aiTitle.slice(0, 24), source: 'jsonl' });
+      // 60 而非下面自建标题的 24:24 是按中文标题定的口径,CLI 写的 ai-title 常是英文,
+      // 24 会在词中间硬切(实测 "Investigate large Word f")。60 只当兜底防线用。
+      if (t?.aiTitle) return res.json({ title: t.aiTitle.slice(0, 60), source: 'jsonl' });
     } catch {}
   }
 
