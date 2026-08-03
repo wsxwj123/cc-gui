@@ -285,6 +285,42 @@ export function shouldSuppressAbort({ liveShell = 0, liveCrossEpoch = 0, allTask
   return !allTasks && liveCrossEpoch > 0;
 }
 
+// ── level 信号对账(CLI 2.1.220+ system/background_tasks_changed)──────────────
+// 边沿事件(task_started/task_notification/task_updated)任一条丢失,liveTasks 就永久
+// 残留一条"在飞"条目 → 看门狗被解除、卡片永久转圈。官方给的 level 信号是【当前全部
+// 存活后台任务的全量快照】,语义是 "replace their set with each payload",正为此而设。
+// 纯函数(tests/unit/check-level-reconcile.mjs 真 import):就地改 liveTasks,返回本次
+// 变化。A0 真机实样(2026-08-03,CLI 2.1.220,headless -p):
+//   {"type":"system","subtype":"background_tasks_changed",
+//    "tasks":[{"task_id":"bqmaziuib","task_type":"local_bash","description":"…"}],
+//    "uuid":"…","session_id":"…"}   ← 无顶层 task_id,故走独立分支
+// 实测 local_bash(Bash run_in_background)与 local_agent(前台 Task 子代理)都在集内,
+// 空集恒对应任务真结束(sleep 300 直到被 kill 才出集),不随回合边界抖动。
+export function reconcileLiveTasks(liveTasks, tasksPayload, now = Date.now(), graceMs = LEVEL_GRACE_MS) {
+  if (!liveTasks) liveTasks = new Map(); // 未起过任务的 slot(实际恒非空,防御)
+  const live = new Map();
+  for (const t of (Array.isArray(tasksPayload) ? tasksPayload : [])) {
+    if (t && t.task_id) live.set(t.task_id, t);
+  }
+  const settled = [];
+  for (const [tid, t] of (liveTasks || new Map())) {
+    if (live.has(tid)) { if (t) t.createdAt = now; continue; } // 权威确认仍活 → 刷新新鲜度
+    if (now - (t?.createdAt || 0) < graceMs) continue;         // 刚登记,防乱序误剪
+    settled.push({ taskId: tid, toolUseId: t?.toolUseId || null });
+    liveTasks.delete(tid);
+  }
+  const added = [];
+  for (const [tid, t] of live) {
+    if (liveTasks.has(tid)) continue; // 【只补不改】已有条目的 kind 绝不覆盖:一次错分类
+    // 就能让选择性停止把用户的后台训练任务当子代理杀掉(不可恢复)。
+    const kind = t.task_type === 'local_bash' ? 'shell'
+      : (t.task_type === 'local_agent' ? 'subagent' : 'unknown');
+    liveTasks.set(tid, { toolUseId: null, kind, epoch: 0, createdAt: now, fromLevel: true });
+    added.push(tid);
+  }
+  return { settled, added, liveIds: [...live.keys()] };
+}
+
 export function getActiveChatProcesses() {
   const out = [];
   for (const [procId, slot] of activeProcesses) {
@@ -346,6 +382,12 @@ const KEEPALIVE_IDLE_MS = 15 * 60 * 1000;
 // 本回合、idle 回收可能杀掉其宿主进程(丢完成通知)。可接受的折中:通知丢失的
 // 陈旧条目会让 5 分钟兜底永不触发/常驻进程永不回收,危害更大。
 const LIVE_TASK_FRESH_MS = 30 * 60 * 1000;
+
+// background_tasks_changed(level 信号)对账的年龄豁免窗。A0 真机实测:该信号恒在对应
+// 边沿事件【之前】不到 1ms 发出(起任务时先于 task_started、结束时先于 task_updated),
+// 所以刚登记的条目理论上不会撞上"不在集内"。1.5s 是防事件乱序/重连回放的安全余量:
+// 年龄不足此窗的条目一律不剪,宁可晚一轮收尾也不误剪真在跑的任务。
+const LEVEL_GRACE_MS = 1500;
 
 // 动态解析用户已装 claude(路径绝不写死,便于公开版在别人机器上跑)。解析到则让 SDK
 // 指向它(避免其自带 ~237M 二进制);解析不到返回 null,SDK 回落自带二进制。
@@ -413,6 +455,28 @@ function deliverLine(slot, line) {
       } catch {}
     }
   }
+}
+
+// level 信号广播:把服务端刚对完账的存活集喂给所有客户端,让它们剪掉自己那份僵尸卡。
+// 走全局 WS 而非 SSE —— 卡片可能属于已切走/已关窗格的会话,那些窗格没有 SSE 通道。
+// 载荷只带 id 数组(不含描述/正文),体积恒定。
+// 去重:存活集签名与上次相同【且本次无增删】才跳过,防任务多时成员抖动刷屏;
+// 只比签名会漏掉"集合没变但有条目过了 grace 被剪"的那一拍(settled 被吞 = 卡片继续转)。
+function broadcastLiveTasks(slot, liveIds, settled, added) {
+  const sig = liveIds.join(',');
+  if (sig === slot.lastLevelSig && !settled.length && !added.length) return;
+  slot.lastLevelSig = sig;
+  try {
+    broadcast({
+      type: 'background-tasks',
+      sessionId: slot.sessionId || null,
+      taskIds: liveIds,
+      // 客户端卡片按 tool_use_id 索引,故把服务端才知道的映射一并翻译过去。
+      toolUseIds: [...(slot.liveTasks?.values() ?? [])].map((t) => t?.toolUseId).filter(Boolean),
+      settled: settled.map((s) => s.toolUseId).filter(Boolean),
+      ts: Date.now(),
+    });
+  } catch {}
 }
 
 // 消息泵结束(result 后 generator 自然结束 / 出错 / 中断)收尾一次。
@@ -1143,6 +1207,15 @@ router.post('/chat', async (req, res) => {
               if (t) t.createdAt = Date.now();
             }
           }
+        }
+        // 停止链路 #4(level 信号,CLI 2.1.220+):无顶层 task_id,故走独立分支。tasks 是
+        // 【当前全部存活后台任务】的全量快照,官方语义 "replace their set with each payload"
+        // —— 丢失的 bookend 不再能把卡片钉死在"工作中"。
+        // 【只喂簿记与 UI】:绝不用它驱动 finalize()/abort()/input.close()/stopTimer,
+        // 停止链路的既有时序一个字不动。
+        else if (m.type === 'system' && m.subtype === 'background_tasks_changed' && Array.isArray(m.tasks)) {
+          const { settled, added, liveIds } = reconcileLiveTasks(slot.liveTasks, m.tasks, Date.now());
+          broadcastLiveTasks(slot, liveIds, settled, added);
         }
         deliverLine(slot, line);
         // Bug 修复(子代理后主 agent 续跑「看起来停了」):中间 result 已被 4s 去抖 finalize 转 idle,

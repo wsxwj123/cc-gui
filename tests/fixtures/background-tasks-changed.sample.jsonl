@@ -1,0 +1,3 @@
+{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"bqh4sp1oa","task_type":"local_bash","description":"Run sleep in background for 25 seconds"}],"uuid":"65497555-760c-476c-a094-16419417000c","session_id":"9348284e-2e58-4dd5-8056-b545d572d4ad"}
+{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"adb65bfdad25966dc","task_type":"local_agent","description":"简单数学运算"}],"uuid":"8f76dee7-cb2e-4e83-956f-2513a410014a","session_id":"6baf1eee-07b7-42ae-a155-923654b91456"}
+{"type":"system","subtype":"background_tasks_changed","tasks":[],"uuid":"dea05df9-6442-4787-a728-ae31cb378f2f","session_id":"9348284e-2e58-4dd5-8056-b545d572d4ad"}
