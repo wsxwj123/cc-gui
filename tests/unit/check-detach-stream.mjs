@@ -44,6 +44,10 @@ assert.ok(/useEffect\(\(\) => detachStream[,)]/.test(src),
   // 不能并进 detachStream —— 并了会让切会话/关窗格也抑制 auto-reattach。
   assert.ok(!/reattachedPidRef|backgroundedRef/.test(body),
     'detachStream 不得掺 backgroundify 的 reattachedPidRef/backgroundedRef');
+  // 三振重试排的 1.5s 定时器:不在这里清,卸载/切走之后它照样触发 handleSendRef,
+  // 起一条没人要的僵尸 attach。
+  assert.ok(/clearTimeout\(attachRetryTimerRef\.current\)/.test(body),
+    'detachStream 必须 clearTimeout(attachRetryTimerRef.current) —— 否则留 1.5s 僵尸 attach 缝隙');
 }
 
 // ── 3. SplitMain 必须用稳定 paneId 当 key,不能用数组下标 ────────────
@@ -127,8 +131,8 @@ assert.ok(/useEffect\(\(\) => detachStream[,)]/.test(src),
     '失败计数必须按 pid 记(nextAttachTry),裸自增会把上一个进程的账算到下一个头上');
   assert.ok(/fetchMessagesForTab\(streamSid, streamOwnerPh/.test(seg),
     '必须回落重拉历史(用发起时闭包的 sid/ph,不得读 getLocalSession)');
-  assert.ok(/setTimeout\(\(\) => \{[\s\S]{0,400}?reattachPid: pid/.test(seg),
-    '未到上限必须自己排定时器重连 —— 靠 backgroundPid 轮询等于不重试');
+  assert.ok(/attachRetryTimerRef\.current = setTimeout\(\(\) => \{[\s\S]{0,400}?reattachPid: pid/.test(seg),
+    '未到上限必须自己排定时器重连(id 挂 attachRetryTimerRef,供 detachStream 清)—— 靠 backgroundPid 轮询等于不重试');
   assert.ok(/if \(streamingRef\.current \|\| reattachedPidRef\.current\) return;/.test(seg),
     '重试前必须复查:已有流 / 已被别处接管就放弃');
   assert.ok(/getLocalSession\(\)\?\.sessionId !== streamSid\) return;/.test(seg),
@@ -136,6 +140,9 @@ assert.ok(/useEffect\(\(\) => detachStream[,)]/.test(src),
   assert.ok(/tries\.exhausted/.test(seg) && /sticky: true/.test(seg),
     '到上限要亮【可关闭且不自动消失】的提示');
   assert.ok(/attachFailRef\.current = null;/.test(src.slice(i, i + 2200)), 'attach 成功必须清计数');
+  // sticky 横幅不会自己过期(第 143 行豁免了 5s 定时器),attach 成功后不清就一直挂着报错。
+  assert.ok(/setProviderSwitchNotice\(\(n\) => \(n\?\.sticky \? null : n\)\);/.test(src.slice(i, i + 2600)),
+    'attach 成功必须清掉三振留下的 sticky 失败横幅(函数式更新,避开闭包陈旧值)');
   // 提前 return 只能落在 try 内(要走 finally 完成 finalizeInFlightRef 的 -1)
   assert.ok(seg.indexOf('return;') < seg.indexOf('const reader'), '提前 return 必须在取 reader 之前');
 }
@@ -151,8 +158,12 @@ assert.ok(/if \(!providerSwitchNotice \|\| providerSwitchNotice\.sticky\) return
   const i = src.indexOf('// 【被接管】判定');
   assert.ok(i > 0, '必须有"被接管"判定');
   const seg = src.slice(i, i + 1200);
-  assert.ok(/!sawDoneEvent && !controller\.signal\.aborted && !killedRef\.current && !backgroundedRef\.current/.test(seg),
-    '被接管判据 = 没收到 done + 不是本端 abort/停止/转后台;缺一条都会误判正常收尾或本端断开');
+  assert.ok(/!sawDoneEvent && !sawError && !controller\.signal\.aborted && !killedRef\.current && !backgroundedRef\.current/.test(seg),
+    '被接管判据 = 没收到 done + 本流没自己报错 + 不是本端 abort/停止/转后台;缺一条都会误判正常收尾或本端断开');
+  // 7 个错误分支都是 `sawError = true; break`,同样"无 done 结束"。少了 !sawError,
+  // 一次上游报错就会把 pid 写进 reattach 守卫,把这条会话的自动续播一起封死。
+  assert.ok(src.split('sawError = true;').length - 1 >= 7,
+    '错误分支应仍以 sawError=true 收尾(判据依赖它)');
   assert.ok(/reattachedPidRef\.current = String\(pid\)/.test(seg),
     '被接管后必须抑制本 pid 自动回连(与转后台同一手法),否则互踢');
   assert.ok(/if \(event\.type === 'done'\) \{ sawDoneEvent = true; break; \}/.test(src),

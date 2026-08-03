@@ -3803,6 +3803,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // 分支自己排 setTimeout 驱动。声明放这里(而非 reattachedPidRef 旁)只为作用域顺序好读。
   const attachFailRef = useRef(null);
   const ATTACH_MAX_TRIES = 3;
+  // 三振重试排的 setTimeout id。不清掉的话:窗格已卸载/已切走,1.5s 后定时器照样触发
+  // handleSendRef → 起一条没人要的僵尸 attach。detachStream(卸载 + 切会话共用)统一清。
+  const attachRetryTimerRef = useRef(null);
   const abortRef = useRef(null);
   // 只做「断开本端 SSE」这一件事:abort 客户端 fetch → 服务端 req.on('close') → slot.attached=false,
   // 后续行落 earlyLines 等重连回放(detach-don't-abort,进程不死、jsonl 继续落盘)。
@@ -3811,6 +3814,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // 不做任何 setState:卸载路径会调它,组件此时正在拆除。
   const detachStream = useCallback(() => {
     if (abortRef.current) { try { abortRef.current.abort(); } catch {} abortRef.current = null; }
+    if (attachRetryTimerRef.current) { clearTimeout(attachRetryTimerRef.current); attachRetryTimerRef.current = null; }
     activeProcRef.current = null;
   }, []);
   // 卸载即 detach。关窗格(closePane splice paneIds)只让本 pane 的 SessionDetail 卸载,
@@ -4823,7 +4827,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           setProviderSwitchNotice({ text: '会话流连接失败,请切走再切回重试。', sticky: true });
         } else {
           // 显式排一次重连:poll 每轮写同一个 pid 会被 Object.is 短路,指望它重试等于不重试。
-          setTimeout(() => {
+          // id 挂 ref:卸载/切会话时 detachStream 清掉,不留 1.5s 的僵尸 attach 缝隙。
+          attachRetryTimerRef.current = setTimeout(() => {
+            attachRetryTimerRef.current = null;
             if (streamingRef.current || reattachedPidRef.current) return;   // 已有流 / 已被别处接管
             if (streamSid && getLocalSession()?.sessionId !== streamSid) return; // 本 pane 已切走
             handleSendRef.current?.(null, { reattachPid: pid });
@@ -4832,6 +4838,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         return; // 本 return 照样走 finally,finalizeInFlightRef 的 ±1 配对不破
       }
       attachFailRef.current = null;
+      // attach 成功 = 三振那条 sticky 失败横幅("请切走再切回重试")已经过时,清掉。
+      // sticky 不自动过期,不清就一直挂着,恢复之后还在报错。函数式更新避开闭包陈旧值。
+      setProviderSwitchNotice((n) => (n?.sticky ? null : n));
       const reader = streamRes.body.getReader();
       const decoder = new TextDecoder();
       let buffer = '';
@@ -5753,7 +5762,10 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       // 此时【绝不能】自动回连:本视图一回连就把对方踢掉,对方的流同样"无 done 结束"又回连
       // 踢回来,两边每 1.5~3s 互踢一轮,无限循环。记下本 pid 抑制自动重连(与"转后台"同一
       // 手法),败者切走再切回会清掉守卫,届时照常续播。
-      if (!sawDoneEvent && !controller.signal.aborted && !killedRef.current && !backgroundedRef.current) {
+      // !sawError:7 个错误分支都是 `sawError = true; break`,同样"无 done 结束"。那是本流
+      // 自己报错退出,不是被别的视图接管 —— 误判会把 pid 记进 reattach 守卫,把这条会话的
+      // 自动续播一并封死。
+      if (!sawDoneEvent && !sawError && !controller.signal.aborted && !killedRef.current && !backgroundedRef.current) {
         reattachedPidRef.current = String(pid);
       }
       // 回合结束(流关闭/done):立刻收尾刷一次,不等下一个节流窗,也不等 finally 的落盘轮询。
