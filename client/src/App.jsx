@@ -3793,6 +3793,19 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // 不再等 /api/chat 返回 pid 才判断新回合是否已经开始。
   const streamTurnTokenRef = useRef(0);
   const abortRef = useRef(null);
+  // 只做「断开本端 SSE」这一件事:abort 客户端 fetch → 服务端 req.on('close') → slot.attached=false,
+  // 后续行落 earlyLines 等重连回放(detach-don't-abort,进程不死、jsonl 继续落盘)。
+  // 切会话与关窗格共用,避免两条路径漂移 —— 关窗格漏 abort 正是「关掉分屏再打开该会话,
+  // 历史全空、只剩后台横幅」的根因(僵尸 SSE 让服务端 slot.attached 恒 true,新窗格 attach 吃 409)。
+  // 不做任何 setState:卸载路径会调它,组件此时正在拆除。
+  const detachStream = useCallback(() => {
+    if (abortRef.current) { try { abortRef.current.abort(); } catch {} abortRef.current = null; }
+    activeProcRef.current = null;
+  }, []);
+  // 卸载即 detach。关窗格(closePane splice paneIds)只让本 pane 的 SessionDetail 卸载,
+  // 兄弟窗格 key 稳定不受影响;abortRef 为 null 时是纯 no-op,故 StrictMode 的
+  // mount→cleanup→mount 双跑无害。
+  useEffect(() => detachStream, [detachStream]);
   // killedRef:本回合的 abort 是否【真杀了服务端进程】(POST /chat/:pid/stop)。用户主动停止/加速/
   // 编辑重发才置 true;后台化(backgroundify)与切会话(detach)只 abort 客户端流、进程继续跑,保持
   // false。供 finally 区分:真杀进程才把后台化子代理(taskManaged)收 stopped,否则留 working 等
@@ -6323,13 +6336,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         // whatever has been persisted so far. This trades live-streaming
         // continuity for the user's actual ask: "don't kill my reply just
         // because I clicked elsewhere."
-        if (abortRef.current) {
-          try { abortRef.current.abort(); } catch {}
-          abortRef.current = null;
-        }
         // Do NOT POST /api/chat/:pid/stop here — that would kill the proc.
         // Just forget the ref so we don't accidentally stop it later.
-        activeProcRef.current = null;
+        detachStream();
         // #4:记录本会话 detach 时刻(按 sessionId 键,不跨会话共享)。切回后 reattach 用它做
         // sinceTs 截断,只藏"detach 之后落盘、且会被 earlyLines 重放"的内容;detach 之前已产出
         // 的助手回复(在 jsonl、不在 earlyLines 回放里)照常从历史显示,不再凭空消失。
