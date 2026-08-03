@@ -31,6 +31,10 @@ tauri-plugin-global-shortcut = "2"
 # 需要本 crate 直接依赖 serde_json(仅 tauri 传递依赖不够,宏在本 crate 内展开)。
 serde_json = "1"
 rfd = "0.15"
+# 系统通知:窗口不在前台时,待处理的授权/表单请求与停下等待的后台代理发一条系统通知。
+# 权限见 capabilities/notification.json(生产 remote 上下文须列全端口)。发送方全在前端
+# (client/src/utils/desktopNotify.js),Rust 侧只挂插件。
+tauri-plugin-notification = "2"
 
 [profile.release]
 codegen-units = 1

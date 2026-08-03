@@ -3,6 +3,7 @@ import { Settings, Save, RefreshCw, AlertCircle, Check, Plus, Trash2, ChevronDow
 import { openExternalUrl } from '../utils/openExternal.js';
 import { isTauri } from '../utils/pickDirectory.js';
 import { confirmDialog } from '../utils/confirmDialog.jsx';
+import { desktopNotifyEnabled, NOTIFY_PREF_KEY } from '../utils/desktopNotify.js';
 import { useStore } from '../stores/sessionStore.js';
 import EnvCheckPanel from './EnvCheckPanel.jsx';
 
@@ -37,6 +38,7 @@ const SETTINGS_INDEX = [
   { id: 'cc-update', tab: 'general', title: 'Claude Code CLI 更新 / 切换', keys: 'cli claude npm 原生 安装 版本 路径' },
   { id: 'set-fda', tab: 'general', title: '完全磁盘访问 (FDA)', keys: 'fda 磁盘 授权 权限 macos' },
   { id: 'set-close-behavior', tab: 'general', title: '关闭窗口行为', keys: '关闭 最小化 退出 窗口' },
+  { id: 'set-desktop-notify', tab: 'general', title: '桌面通知', keys: '通知 提醒 系统通知 notification 后台 等待' },
   { id: 'set-screenshot-hotkey', tab: 'general', title: '全局截图热键', keys: '截图 热键 快捷键 screenshot hotkey 屏幕录制' },
   { id: 'set-persistent-chat', tab: 'session', title: '会话常驻进程', keys: '常驻 复用 冷启动 进程 persistent 缓存' },
   { id: 'set-prompt-suggestions', tab: 'session', title: '输入预测', keys: '预测 建议 suggestion 输入' },
@@ -1318,6 +1320,30 @@ function CloseBehaviorPicker() {
   );
 }
 
+// L2: 桌面通知开关。纯前端偏好(localStorage,与字体/主题同规矩:手机与桌面各自独立),
+// 默认开。发送与防轰炸在 client/src/utils/desktopNotify.js,读的就是这个键。
+function DesktopNotifyToggle() {
+  const [on, setOn] = useState(() => desktopNotifyEnabled());
+  const toggle = () => {
+    const v = !on;
+    setOn(v);
+    try { localStorage.setItem(NOTIFY_PREF_KEY, v ? '1' : '0'); } catch {}
+  };
+  return (
+    <div className="bg-canvas-warm border border-canvas-deep rounded-lg px-3 py-2.5 flex items-center gap-3">
+      <div className="min-w-0 flex-1">
+        <div className="text-xs text-ink font-body font-medium flex items-center gap-1.5">桌面通知<EffectBadge level="immediate" /></div>
+        <div className="text-[10.5px] text-ink-faint font-body">后台代理或权限请求等待处理、且窗口不在前台时,发送系统通知。同一件事 60 秒内只发一次,60 秒内超过 3 条时其余合并为一条。窗口在前台不发。若系统设置里关闭了本应用的通知权限,此开关无效。</div>
+      </div>
+      <button onClick={toggle}
+        className={`shrink-0 w-9 h-5 rounded-full transition-colors relative ${on ? 'bg-accent' : 'bg-ink-faint/30'}`}
+        title={on ? '已开启' : '已关闭'}>
+        <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-all ${on ? 'left-[18px]' : 'left-0.5'}`} />
+      </button>
+    </div>
+  );
+}
+
 // F1: 全局截图热键。写 ~/.claude-gui/hotkey.json,Tauri Rust 在启动时读取并注册系统快捷键。
 // MVP:仅「启用/禁用 + 显示当前快捷键」,改键后续再加。启用/禁用改后需重启应用生效
 // (Rust 只在 setup 读一次)。仅桌面壳有意义,浏览器页(6677)无系统级热键,故非 Tauri 不渲染。
@@ -1974,6 +2000,7 @@ function GeneralTab({ settings }) {
       <div id="cc-update"><CcUpdater /></div>
       <div id="set-fda"><FullDiskAccessCard /></div>
       <div id="set-close-behavior"><CloseBehaviorPicker /></div>
+      <div id="set-desktop-notify"><DesktopNotifyToggle /></div>
       <div id="set-screenshot-hotkey"><ScreenshotHotkeyPicker /></div>
       {rows.length > 0 && (
         <div className="bg-canvas-warm border border-canvas-deep rounded-lg divide-y divide-canvas-deep">

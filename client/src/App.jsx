@@ -70,6 +70,7 @@ import { buildFontEntries, groupFonts, detectFonts, platformCandidates, queryLoc
 import { copyText } from './utils/clipboard.js';
 import { escRoute, idleEscAction, escYieldCardId, isEditableTarget } from './utils/escAction.js';
 import { waitingSessionKeys, countAttention, applyAttentionBadge } from './utils/attention.js';
+import { notifyWaiting } from './utils/desktopNotify.js';
 import { histSig, isCurrentStreamTurn, nextAttachTry, resolveStreamHistCutoff, shouldRefreshHist } from './utils/reattach.js';
 import { pruneByLiveSet } from './utils/levelPrune.js';
 import { classifyStopTargets } from './utils/stopTargets.js';
@@ -10054,6 +10055,9 @@ export default function App() {
   const pendingKeys = useStore((s) => s.pendingPermissions.map((p) => p.sessionId || '').join(','));
   const attentionCount = countAttention(waitingKeys, pendingKeys);
   useEffect(() => { applyAttentionBadge(attentionCount); }, [attentionCount]);
+  // L2:窗口不在前台时,后台代理【新】转 waiting/blocked 发一条系统通知。依赖是等待集合
+  // 本身(字符串),notifyWaiting 内部只挑上升沿 —— 按水平值发会每 1.5s 重发一遍。
+  useEffect(() => { notifyWaiting(waitingKeys); }, [waitingKeys]);
   // Per-session permission key for the header chip + bypass auto-resolve.
   // Follows the ACTIVE pane (not always pane 0) so in split mode the top-bar
   // mode chip controls whichever pane the user last focused — matching the

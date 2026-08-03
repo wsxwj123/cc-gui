@@ -1,6 +1,7 @@
 import { useEffect, useRef } from 'react';
 import { useStore } from '../stores/sessionStore.js';
 import { resolveSessionTitle } from '../utils/sessionTitle.js';
+import { maybeNotify, permissionNotice } from '../utils/desktopNotify.js';
 
 // G3:危险命令启发式 —— 删除类 + 网络/装包 + sudo。命中即强制弹窗,不被任何自动放行豁免。
 // 【权威判定在服务端 server/routes/chat.js 的 DANGEROUS_BASH】(canUseTool 内强拦,
@@ -87,7 +88,7 @@ function handlePermissionRequest(req) {
   // 服务端已直接放行、根本不会广播到这里 —— 无需再按 mode 豁免。
   if (isDangerousCommand(req)) {
     if (import.meta.env?.DEV) console.log('[cgui-perm] → force prompt (dangerous)', req.id, req.toolName);
-    useStore.getState().addPendingPermission(req);
+    addCard(req);
     return;
   }
   // 白名单("本会话永远允许 X")是用户显式授权,非 mode 分支,保留客户端放行。
@@ -102,6 +103,14 @@ function handlePermissionRequest(req) {
     return;
   }
   if (import.meta.env?.DEV) console.log('[cgui-perm] → render popup', req.id, req.toolName);
+  addCard(req);
+}
+
+// 弹卡 = 一次"在等你"。窗口不在前台时同时发一条系统通知(自带去重/限流,见
+// desktopNotify.js)。只挂在真正入表的两个分支上:白名单自动放行的请求用户根本不需要
+// 知道,给它发通知就是纯噪音。
+function addCard(req) {
+  maybeNotify(permissionNotice(req));
   useStore.getState().addPendingPermission(req);
 }
 

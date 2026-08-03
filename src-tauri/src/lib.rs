@@ -846,6 +846,10 @@ pub fn run() {
         // 权限见 capabilities/updater.json(生产 remote 上下文须列全端口)。
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
+        // L2: 系统通知(窗口不在前台时提示有东西在等你)。权限见 capabilities/notification.json。
+        // 桌面端只注册 notify/request_permission/is_permission_granted 三个命令,
+        // 通知点击回调(onAction)在桌面端不存在 —— 前端不要接,聚焦靠 Dock 角标 + 应用内。
+        .plugin(tauri_plugin_notification::init())
         // F1: 全局热键截图。插件在此挂载,具体快捷键在 setup 里按 ~/.claude-gui/hotkey.json 注册。
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         // L1: 单例插件 — 双击 app 时不开新进程,把已有窗口前置聚焦,避免每次都开新窗口
