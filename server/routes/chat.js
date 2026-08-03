@@ -4,7 +4,7 @@ import { dirname, join as pathJoin, isAbsolute, parse as pathParse } from 'node:
 import { fileURLToPath } from 'node:url';
 import { readFileSync, statSync, writeFileSync, unlinkSync, readdirSync, watch, existsSync, mkdirSync, rmSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
-import { randomBytes } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import { getDefaultModel } from '../services/model-resolver.js';
 import { findSessionFile, readSessionTitles } from '../services/session-reader.js';
@@ -441,7 +441,11 @@ export function getActiveChatProcesses() {
 const VALID_EFFORTS = new Set(['low', 'medium', 'high', 'xhigh', 'max']);
 // P2.2:加 'auto'(SDK 原生自动档,后台分类器逐动作审查)。spawn(:642)与热切
 // (/chat/permission-mode)共用本 Set,一处改两处生效。
-const VALID_PERMISSION_MODES = new Set(['default', 'acceptEdits', 'plan', 'auto', 'bypassPermissions']);
+// 批O:加 'dontAsk'(不打扰)。**GUI 自己模拟,绝不透传给 SDK** —— 透传原生 dontAsk 会让
+// CLI 直接按 settings.json 的 permissions.allow 预授权判定,canUseTool 一次都不调:危险
+// Bash 强拦、MCP 自动执行名单、越界卡、AskUserQuestion 特判全部失效,而用户的 allow 名单
+// 通常是空的({}),结果就是"全拒且没有任何防线"。sdkMode 映射(:1000/:1578)保持落 'default'。
+const VALID_PERMISSION_MODES = new Set(['default', 'acceptEdits', 'plan', 'auto', 'dontAsk', 'bypassPermissions']);
 
 // ── SDK 引擎(@anthropic-ai/claude-agent-sdk)进程内辅助 ──────────────────────
 // canUseTool 回调能拿到 ExitPlanMode / AskUserQuestion(裸 CLI -p 不注册这俩工具),
@@ -702,7 +706,7 @@ function mcpAutoApproved(toolName) {
 // 返回:{ decision:'allow', authorizeDir? } 自动放行 / { decision:'deny', reason } 自动拒绝 /
 // null = 需要用户决定(弹卡/留卡)。
 const EXIT_PLAN_DENY_REASON = '用户已切出规划模式。请勿继续规划或再次调用 ExitPlanMode，直接简要总结并结束本回合；用户将以新模式重新发起请求。';
-function autoDecide(mode, toolName, input, boundary) {
+export function autoDecide(mode, toolName, input, boundary) {
   // 提问卡永远等人;计划确认卡只在 plan 档等人 —— 已切出 plan 直接 deny(U5 上收服务端)。
   if (toolName === 'AskUserQuestion') return null;
   if (toolName === 'ExitPlanMode') {
@@ -730,6 +734,14 @@ function autoDecide(mode, toolName, input, boundary) {
   // 放任模式:一切放行(AskUserQuestion 上面已排除);越界附 session 级目录授权。
   if (mode === 'bypassPermissions') {
     return { decision: 'allow', ...(boundary ? { authorizeDir: 'session' } : {}) };
+  }
+  // 不打扰:只读工具与已勾选"自动执行"的 MCP 直接放行,其余一律拒绝且不弹卡。
+  // 放在危险 Bash 强拦(下一句)之前 —— 那句返回 null 是"弹卡等人",本档的承诺是永不弹卡,
+  // 而这里对 Bash 的裁决是 deny,比弹卡更严,不构成放宽。越界(boundary)不放行:沙箱外的
+  // 读同样要人点头,不打扰不等于自动扩权。
+  if (mode === 'dontAsk') {
+    if ((READ_CLASS.has(toolName) || mcpAutoApproved(toolName)) && !boundary) return { decision: 'allow' };
+    return { decision: 'deny', reason: '当前为「不打扰」档:未预授权的操作一律拒绝。切换权限档位后重试。' };
   }
   // 危险 Bash 强制弹卡,放在 acceptEdits 自动放行【之前】(bypass 除外,上面已放行)。
   if (isDangerousBash(toolName, input)) return null;
@@ -807,6 +819,21 @@ function makeCanUseTool(slot) {
       if (verdict.decision === 'allow') {
         return allowResult(verdict.authorizeDir ? { authorizeDir: verdict.authorizeDir } : {}, { allowAlways: false });
       }
+      // 自动拒绝要让用户看见原因。实测 CLI 2.1.220 只为【它自己】短路的拒绝(deny 规则、
+      // 分类器)发 system/permission_denied;canUseTool 返回的 deny 它不发 —— 不补这一条,
+      // GUI 模拟的档位拒绝(不打扰档、规划模式写拦)在界面上就只剩一条 is_error 的
+      // tool_result,拒绝原因等于没有。形状与 SDK 那条事件一致,客户端按 tool_use_id 去重
+      // (将来 CLI 补发同一次调用也不会出现两行)。
+      deliverLine(slot, JSON.stringify({
+        type: 'system',
+        subtype: 'permission_denied',
+        tool_name: toolName,
+        tool_use_id: opts.toolUseID || '',
+        decision_reason_type: 'mode',
+        message: verdict.reason || '',
+        session_id: slot.sessionId || '',
+        uuid: randomUUID(),
+      }));
       return { behavior: 'deny', message: verdict.reason };
     }
     // null = 弹卡等用户。plan 档的写类/Bash 与危险命令忽略 always(不写持久规则:

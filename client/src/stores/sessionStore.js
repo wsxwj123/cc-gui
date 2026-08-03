@@ -119,7 +119,9 @@ async function replayPendingSync() {
 // Valid `--permission-mode` values per `claude --help`。
 // P2.2:'auto' 为 SDK 原生自动档;是否显示由 useVisiblePermissionModes 门控
 // (仅官方 Anthropic provider + 未记 auto-unavailable 标记)。
-export const PERMISSION_MODES = ['default', 'acceptEdits', 'plan', 'auto', 'bypassPermissions'];
+// 批O:'dontAsk'(不打扰)由服务端 autoDecide 模拟,不透传给 SDK(理由见 chat.js
+// VALID_PERMISSION_MODES);对 provider 无要求,恒显示。
+export const PERMISSION_MODES = ['default', 'acceptEdits', 'plan', 'auto', 'dontAsk', 'bypassPermissions'];
 
 // A1:切档 POST 送达为止重试(仿 respondPermission:8s 短超时快失败,1s/2s/4s/8s 封顶
 // 递增间隔)。裁决单点化后这条 POST 是切档生效+服务端重裁 pending 的唯一通道,半死连接
