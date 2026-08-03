@@ -11,7 +11,7 @@ import { AnchoredPopover } from './SessionSelectors.jsx';
 // P2.1:文案对齐官方六档语义(RESEARCH-mode-semantics §④b);bypass 中文名保持「放任」。
 export const MODE_META = {
   default:           { label: '逐步确认', desc: '每次编辑 / 命令 / 网络请求前都询问；只读操作直接执行', icon: Shield,        tone: 'text-ink-muted' },
-  acceptEdits:       { label: '接受编辑', desc: '文件编辑与 mkdir/mv/rm 等文件命令直接执行；其它命令、网络、MCP 仍逐次询问', icon: Check,         tone: 'text-amber-600' },
+  acceptEdits:       { label: '接受编辑', desc: '自动执行文件编辑（Edit / Write / NotebookEdit）；Bash 命令、网络、MCP 仍逐次询问', icon: Check,         tone: 'text-amber-600' },
   plan:              { label: '规划', desc: '只读研究并给出方案，批准前不改任何文件；批准计划后自动切到执行档', icon: ClipboardList, tone: 'text-blue-600' },
   auto:              { label: '自动', desc: '由后台安全分类器逐动作审查，通过即执行、有风险才询问；少弹窗但非零风险', icon: Zap,           tone: 'text-emerald-600' },
   bypassPermissions: { label: '放任', desc: '跳过全部权限检查与提示（危险，仅建议在隔离环境使用）', icon: ShieldOff,     tone: 'text-red-500' },

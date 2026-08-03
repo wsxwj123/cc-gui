@@ -66,6 +66,17 @@ function renderInput(toolName, input) {
   );
 }
 
+// CLI 给出的「为什么弹这张卡」。SDK canUseTool 第三参 decisionReason 原样透传到
+// permission:request 广播(server/routes/permissions.js),此前前端完全没渲染 —— 用户
+// 看到的只有工具名和参数,判断不了是规则命中、沙箱越界还是分类器上交。
+// sdk.d.ts 声明为 string,但它直接来自 CLI 的 decision_reason,不排除对象形态;
+// 取不出可读文本就整行不显示,绝不渲染成 [object Object]。
+function DecisionReason({ reason }) {
+  const text = typeof reason === 'string' ? reason : (typeof reason?.reason === 'string' ? reason.reason : '');
+  if (!text.trim()) return null;
+  return <div className="text-[11px] text-ink-faint leading-snug mb-2">原因：{text}</div>;
+}
+
 // Plan-mode review card. Triggered by ExitPlanMode tool_use which our hook
 // intercepts like any other PreToolUse.
 //
@@ -422,6 +433,7 @@ function BoundaryCard({ req, onResolve, onAuthorizeDir, processing, position, hy
         )}
       </div>
       <div className="px-4 py-3 flex-1 min-h-0 overflow-y-auto space-y-2">
+        <DecisionReason reason={req.decisionReason} />
         <div>
           <div className="text-[11px] text-ink-faint">越界路径</div>
           <pre className="font-mono text-[12px] bg-rose-500/10 border border-rose-400/40 rounded px-2.5 py-2 whitespace-pre-wrap break-all text-ink mt-1">{String(req.blockedPath)}</pre>
@@ -519,7 +531,10 @@ function PermissionCard({ req, onResolve, onWhitelistAndAllow, onAlwaysAllow, on
           </div>
         )}
       </div>
-      <div className="px-4 py-3 flex-1 min-h-0 overflow-y-auto">{renderInput(req.toolName, req.toolInput)}</div>
+      <div className="px-4 py-3 flex-1 min-h-0 overflow-y-auto">
+        <DecisionReason reason={req.decisionReason} />
+        {renderInput(req.toolName, req.toolInput)}
+      </div>
       {sameCount > 0 && (
         <div className="px-4 pb-2 -mt-1">
           <button
