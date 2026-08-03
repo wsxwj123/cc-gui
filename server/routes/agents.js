@@ -238,7 +238,10 @@ router.get('/agents/active', async (req, res) => {
         permissionMode: 'default',
         startedAt: s.startedAt || s.procStart || null,
         elapsedMs: (s.startedAt || s.procStart) ? Date.now() - (s.startedAt || s.procStart) : null,
-        status: 'running',
+        // 'alive' 而非 'running':注册表文件只在会话启动时写一次(mtime 恒等 startedAt),
+        // 这里唯一能确知的事实是 `process.kill(pid, 0)` 没抛 —— 进程还在。它是否正在生成
+        // 无从判断,报 'running' 会让前端把每个开着的终端/Claude Desktop 会话都归进"工作中"。
+        status: 'alive',
         // We can still stop these via /api/processes/:pid/kill which whitelists
         // any pid listed in the sessions registry (which is exactly where this
         // entry came from). The UI should show a working stop button.

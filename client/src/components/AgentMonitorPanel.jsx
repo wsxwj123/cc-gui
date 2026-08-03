@@ -501,6 +501,9 @@ function StatusBadge({ status }) {
     stopped:     { label: '已停止',  bg: 'bg-red-50',   fg: 'text-red-700',    border: 'border-red-200' },
     error:       { label: '错误',    bg: 'bg-red-50',   fg: 'text-red-700',    border: 'border-red-200' },
     needs_input: { label: '待输入',  bg: 'bg-violet-50', fg: 'text-violet-700', border: 'border-violet-200' },
+    // 'alive' = 外部 CLI 会话(终端/Claude Desktop)的进程还活着,是否正在生成无从判断
+    // (注册表文件只在启动时写一次)。用中性色,不与"工作中"的活跃蓝混淆。
+    alive:       { label: '存活',    bg: 'bg-canvas-warm', fg: 'text-ink-muted', border: 'border-canvas-deep' },
     // 后台代理(claude agents --json)的 state 取值(实测 2.1.200:working/blocked/done 等)
     running:     { label: '运行中',  bg: 'bg-blue-50',  fg: 'text-blue-700',   border: 'border-blue-200' },
     failed:      { label: '失败',    bg: 'bg-red-50',   fg: 'text-red-700',    border: 'border-red-200' },
@@ -774,9 +777,11 @@ export function AgentMonitorPanel() {
   // 终态桶只留最近 10 条(与本面板「后台代理」区同一口径):activeAgents 是内存 map,
   // 只有整页刷新才清空,而 GUI 常连着开好几天 —— 同一个会话跑过的每个子代理都会在
   // 已完成桶里越堆越多。按结束时间倒序取最近 10 条,更早的自动退场(要看全量去会话转写)。
+  // lastActivity 兜底是给 workflow 内层 agent 用的(它没有 finishedAt/startedAt,
+  // 时间字段是磁盘 mtime);本地 Task 条目没有该字段,取值语义不变。
   const recentTerminal = (list) => list
     .slice()
-    .sort((a, b) => (b.finishedAt || b.startedAt || 0) - (a.finishedAt || a.startedAt || 0))
+    .sort((a, b) => (b.finishedAt || b.startedAt || b.lastActivity || 0) - (a.finishedAt || a.startedAt || a.lastActivity || 0))
     .slice(0, 10);
   const buckets = {
     working:    localList.filter((a) => a.status === 'working' || a.status === 'starting' || !a.status),
@@ -787,6 +792,13 @@ export function AgentMonitorPanel() {
   };
   // 区块计数按【真正渲染出来的卡片数】算,否则终态截断后会出现"Task (23)"里只有 12 张卡。
   const shownTaskCount = Object.values(buckets).reduce((n, list) => n + list.length, 0);
+  // workflow 内层 agent 同样要截断:一次 workflow 能起几十个内层 agent,跑完全留在
+  // 列表里(用户实测 37 条堆满面板)。running 全留(在跑的一个都不能藏),终态
+  // (done/idle)按最近活动时间取最近 10 条,与本地 Task 终态桶同一口径。
+  const wfShown = [
+    ...wfAgents.filter((a) => a.status === 'running'),
+    ...recentTerminal(wfAgents.filter((a) => a.status !== 'running')),
+  ];
   const BUCKET_META = {
     working: { label: '工作中', defaultOpen: true,  color: 'text-blue-600' },
     waiting: { label: '等待输入', defaultOpen: true, color: 'text-violet-600' },
@@ -848,10 +860,10 @@ export function AgentMonitorPanel() {
         {/* workflow 内层 agent(Workflow 工具起的并行 agent)— 磁盘轮询,不流经父流。
             整体 workflow 单元卡在上面「当前对话内 Task」区(带"工作流"badge);这里是它内部
             各 agent 的实时状态(running/idle/done,journal.jsonl result 定 done、mtime 判活)。 */}
-        {wfAgents.length > 0 && (
-          <FoldableSection id="wf-agents" icon={<Bot size={10} />} title={`workflow 内层 agent (${wfAgents.length})`}>
+        {wfShown.length > 0 && (
+          <FoldableSection id="wf-agents" icon={<Bot size={10} />} title={`workflow 内层 agent (${wfShown.length})`}>
             <div className="space-y-1.5">
-              {wfAgents.map((a) => {
+              {wfShown.map((a) => {
                 // 主会话已被停止 → 前台 workflow 内层 agent 随主进程死,但服务端状态是
                 // mtime 推断(无 stopped 态,存活窗内仍报 running)。按已停表覆盖显示:
                 // 仅当该 agent 在停止时刻后【无新活动】才覆盖 —— 停止后仍在写 jsonl 的
@@ -876,20 +888,26 @@ export function AgentMonitorPanel() {
         <BackgroundAgentsSection stoppingPid={stoppingPid} onStop={stop} />
 
         {/* Server-side chat children + CLI agents — bucketed by status so the
-            "working" ones default open and finished/errored ones fold away. */}
-        <FoldableSection id="claude-procs" icon={<Terminal size={10} />} title={`Claude 子进程 (${remote.agents.length})`}>
+            "working" ones default open and finished/errored ones fold away.
+            标题不叫"子进程":这里除了 GUI 自己起的 chat-process,还包含终端 / Claude Desktop
+            开的 claude 会话(cli-session),它们不是 GUI 的子进程。 */}
+        <FoldableSection id="claude-procs" icon={<Terminal size={10} />} title={`本机 Claude 进程 (${remote.agents.length})`}>
           {remote.agents.length > 0 ? (
             (() => {
               const isWorking = (a) => ['streaming', 'starting', 'running', 'working'].includes(a.status);
               const isDone = (a) => ['done', 'finished', 'completed'].includes(a.status);
               const isError = (a) => ['error', 'failed'].includes(a.status);
               const isWaiting = (a) => ['needs_input', 'waiting'].includes(a.status);
+              // 外部 CLI 会话(终端 / Claude Desktop 开的 claude):只知道进程活着,不知道
+              // 是否在生成 —— 单列一组,不进"工作中"。
+              const isAlive = (a) => a.status === 'alive';
               const groups = [
                 { key: 'working', label: '工作中', color: 'text-blue-600', defaultOpen: true, list: remote.agents.filter(isWorking) },
                 { key: 'waiting', label: '等待输入', color: 'text-violet-600', defaultOpen: true, list: remote.agents.filter(isWaiting) },
+                { key: 'alive', label: '存活（外部会话）', color: 'text-ink-muted', defaultOpen: false, list: remote.agents.filter(isAlive) },
                 { key: 'done', label: '已完成', color: 'text-green-600', defaultOpen: false, list: remote.agents.filter(isDone) },
                 { key: 'error', label: '错误', color: 'text-red-600', defaultOpen: false, list: remote.agents.filter(isError) },
-                { key: 'other', label: '其他', color: 'text-ink-muted', defaultOpen: false, list: remote.agents.filter((a) => !isWorking(a) && !isDone(a) && !isError(a) && !isWaiting(a)) },
+                { key: 'other', label: '其他', color: 'text-ink-muted', defaultOpen: false, list: remote.agents.filter((a) => !isWorking(a) && !isDone(a) && !isError(a) && !isWaiting(a) && !isAlive(a)) },
               ].filter((g) => g.list.length > 0);
               return (
                 <div className="space-y-3">
