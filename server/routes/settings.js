@@ -7,6 +7,7 @@ import { join, isAbsolute, dirname } from 'path';
 import { homedir } from 'os';
 import { randomUUID } from 'crypto';
 import { resolveWorkspacePath } from '../utils/safe-path.js';
+import { createConnection } from 'node:net';
 import { startOpenAIProxy, setOpenAIUpstream, getProxyPort } from '../services/openai-proxy.js';
 import { startAnthropicProxy, setAnthropicUpstream, getAnthropicProxyPort } from '../services/anthropic-proxy.js';
 
@@ -861,6 +862,36 @@ function resolveTierModels(tierModels, chosen) {
   };
 }
 
+// 常驻 daemon 端口。本机装了 launchd 常驻代理(com.wsxwj.anthropic-proxy)时,它跑
+// 的是本仓库同一份 anthropic-proxy / openai-proxy 代码,并自己 watch settings.json 与
+// ~/.claude-gui/ 解析上游。把它的端口写进 settings.json 的好处:GUI 关掉之后,共用同一份
+// settings.json 的 bot(telegram/微信)仍能转发,不再 ECONNREFUSED。
+// 探测不通就回落 GUI 进程内端口 —— 公开版(没这个 daemon)、daemon 未装、daemon 挂掉
+// 三种场景统一走这条回落路径,行为与探测前完全一致。
+const DAEMON_ANTHROPIC_PORT = 8799;
+const DAEMON_OPENAI_PORT = 8798;
+
+// 纯 TCP 连通性探测:能建连即 true,超时/拒绝/异常一律 false,绝不抛。
+// 不发送也不读取任何数据(自然不碰 token/key)。
+// ponytail: 只判端口在听,不校验对端身份;回环 + 固定端口下够用,要更严就得给代理加健康端点。
+export function probeTcpPort(port, { host = '127.0.0.1', timeout = 200 } = {}) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const done = (v) => { if (!settled) { settled = true; resolve(v); } };
+    try {
+      const sock = createConnection({ host, port, timeout });
+      sock.on('connect', () => { sock.destroy(); done(true); });
+      sock.on('error', () => { sock.destroy(); done(false); });
+      sock.on('timeout', () => { sock.destroy(); done(false); });
+    } catch { done(false); }
+  });
+}
+
+// 写进 settings.json 的代理端口:常驻 daemon 在听就用它,否则用 GUI 进程内代理端口。
+export async function pickProxyPort(daemonPort, inProcessPort) {
+  return (await probeTcpPort(daemonPort)) ? daemonPort : inProcessPort;
+}
+
 // Switch to an OpenAI-compatible provider. Unlike claude providers (whose
 // settings_config IS a settings.json), these need the embedded proxy: we point
 // the CLI's ANTHROPIC_BASE_URL at the loopback proxy and feed it the real
@@ -886,7 +917,7 @@ async function switchToOpenAIUpstream(up, requestedModel, res) {
   // Start from the live settings.json so hooks/permissions survive the switch.
   const current = await readCurrentSettings();
   const env = { ...(current.env || {}) };
-  env.ANTHROPIC_BASE_URL = `http://127.0.0.1:${port}`;
+  env.ANTHROPIC_BASE_URL = `http://127.0.0.1:${await pickProxyPort(DAEMON_OPENAI_PORT, port)}`;
   // The CLI must send *some* token; the proxy ignores it and injects the real
   // upstream key itself, so we never expose the real key to the CLI env file
   // beyond what cc-switch already stores.
@@ -954,7 +985,7 @@ async function switchToAnthropicUpstream(up, requestedModel, res) {
   const snapshot = (up.snapshot && typeof up.snapshot === 'object') ? up.snapshot : {};
   const current = await readCurrentSettings();
   const env = mergeProviderEnv(current.env, snapshot.env || {});
-  env.ANTHROPIC_BASE_URL = `http://127.0.0.1:${port}`;
+  env.ANTHROPIC_BASE_URL = `http://127.0.0.1:${await pickProxyPort(DAEMON_ANTHROPIC_PORT, port)}`;
   // 全新机器(从未 /login、无 OAuth、无旧 token)修复:CLI 手里必须有【某个】凭证才会发请求,
   // 否则直接报 "Invalid API key · Please run /login"(用户新机实报)。代理无条件用上游真实
   // 密钥覆盖鉴权头,CLI 侧值无所谓 → 缺失时写占位 token(与 switchToOpenAIUpstream 758 行
