@@ -884,8 +884,33 @@ export async function getSessionMessages(sessionId, projectHash) {
         }
       }
       if (record.timestamp) currentTurn.timestamp = record.timestamp;
+    } else if (record.type === 'attachment' && record.attachment?.type === 'goal_status') {
+      // /goal(会话级 Stop 钩子)的唯一可见信号。实测 CLI 2.1.220:goal_status 只写进
+      // transcript,stream-json 一条都不发,所以历史侧不放行 = 目标在 GUI 里完全不可见
+      // (用户报"修了 loop 怎么没修 goal")。四种形态(取自 CLI 自身的写入函数):
+      //   met:false + sentinel  → 刚设目标
+      //   met:false 无 sentinel → 钩子判定未达成(带 reason),模型被强制续跑
+      //   met:true  无 sentinel → 达成(带 reason/iterations/durationMs/tokens),目标自动清除
+      //   met:true  + sentinel  → 用户 `/goal clear` 手动清除
+      // 前端据"最后一条"判当前是否有活动目标,故四种都要放行(少放一种就会有残留徽章)。
+      // isLocalCommandEcho 不开口子:`/goal X` 紧邻的 `<local-command-stdout>Goal set: X`
+      // 与上面 sentinel 记录的 condition 逐字相同(见 check-goal-visible 的等价断言),
+      // 再放行一条就是同一句话连画两行(用户气泡里的 `/goal X` 已是第三遍)。回显整体
+      // 过滤是从前修过的功能,不为一条冗余信息破例。
+      const g = record.attachment;
+      flushTurn();
+      messages.push({
+        type: 'goal',
+        uuid: record.uuid,
+        timestamp: record.timestamp,
+        met: !!g.met,
+        sentinel: !!g.sentinel,
+        condition: typeof g.condition === 'string' ? g.condition : '',
+        reason: typeof g.reason === 'string' ? g.reason : '',
+        iterations: typeof g.iterations === 'number' ? g.iterations : null,
+      });
     }
-    // Skip attachment, queue-operation, last-prompt, permission-mode, etc.
+    // Skip 其余 attachment、queue-operation、last-prompt、permission-mode 等
   }
 
   flushTurn();

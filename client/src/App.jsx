@@ -64,7 +64,7 @@ import {
   Sun, Moon, Monitor, Bot, Camera, History, Loader2, Shield, FolderTree,
   Archive, ArchiveRestore, Trash2, EyeOff, Columns2, Smartphone, Pencil, Type, Palette,
   Menu, SquarePen, Gauge, Cpu, CheckCircle2, BookText, Sparkles, HelpCircle, Pin,
-  Download, ClipboardCopy, LayoutGrid, MoreHorizontal, Star,
+  Download, ClipboardCopy, LayoutGrid, MoreHorizontal, Star, Target,
 } from 'lucide-react';
 import { buildFontEntries, groupFonts, detectFonts, platformCandidates, queryLocalFontFamilies } from './utils/systemFonts.js';
 import { copyText } from './utils/clipboard.js';
@@ -3311,6 +3311,30 @@ function CompactDivider() {
   );
 }
 
+// /goal(会话级 Stop 钩子)的消息流提示。四种形态见 session-reader 的 goal 分支;
+// 另有第五种只在流式出现:`Stop hook feedback:` 那条 user 事件(唯一实时可见的续跑证据),
+// 由下面的流式分支合成 met:false + sentinel:false 的等价条目。
+// 一律弱化成一行提示,不做成气泡:它是过程信息,不是对话内容。
+// condition 为空 = 该 feedback 不是 /goal 的 `[条件]: 理由` 形态(用户自配的 Stop 钩子
+// 也走同一前缀),此时不冒称"目标",按通用钩子措辞。
+function GoalNotice({ goal }) {
+  const cond = goal.condition || '';
+  const reason = goal.reason || '';
+  const label = goal.met
+    ? (goal.sentinel ? '目标已清除' : `目标达成${goal.iterations ? `（${goal.iterations} 轮）` : ''}`)
+    : (goal.sentinel ? '目标已设置' : (cond ? '目标未达成，已自动继续' : 'Stop 钩子拦下停止，已自动继续'));
+  const detail = goal.met ? (reason || cond) : (goal.sentinel ? cond : (reason || cond));
+  return (
+    <div className="max-w-[var(--content-max)] mx-auto px-4 py-1.5 flex items-start gap-2">
+      <Target size={11} className={`shrink-0 mt-0.5 ${goal.met && !goal.sentinel ? 'text-success' : 'text-ink-faint'}`} />
+      <div className="min-w-0 text-[11px] font-body leading-snug">
+        <span className={goal.met && !goal.sentinel ? 'text-success' : 'text-ink-muted'}>{label}</span>
+        {detail && <span className="text-ink-faint">：{detail}</span>}
+      </div>
+    </div>
+  );
+}
+
 // AZ11/AZ2 性能根治:历史消息列表抽成 memo 子组件。流式只更新 chatMessages/
 // streamingText(不动 messages),memo 命中 → 2万节点的历史列表在每个 token 不再
 // 重渲染;点功能按钮使 SessionDetail 重渲时同样跳过(根治"流式时/点按钮全局卡、
@@ -3337,6 +3361,8 @@ const MessageList = React.memo(function MessageList({ messages, onRetryTurn, onR
     <div key={msg.uuid || i} data-turn-uuid={msg.uuid} data-turn-role={msg.type}>
       {msg.type === 'compact'
         ? <CompactDivider />
+        : msg.type === 'goal'
+        ? <GoalNotice goal={msg} />
         : msg.type === 'turn'
         ? <TurnBubble turn={msg} onRetry={onRetryTurn} onRetryTool={getToolCb(msg)} onFork={onFork} retryActive={retryActiveUuid === msg.uuid} />
         : <MessageBubble message={{ ...msg, role: msg.type }}
@@ -3582,6 +3608,21 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // 本会话的队列/pin/owner key(草稿用 draft-<hash>)。必须在所有引用它的 effect 之前声明,
   // 否则 effect 依赖数组在渲染期先求值会命中 TDZ(Cannot access before initialization)。
   const sessionQueueKey = selectedSession?.sessionId || `draft-${selectedSession?.projectHash || 'none'}`;
+  // /goal 当前是否还挂着:取历史里【最后一条】goal 记录。达成与手动清除都写 met:true
+  // (CLI 的写入函数只有这一种表达),所以"最后一条 met=false"⇔"目标仍在生效"。
+  // 清除规则 = 纯派生,没有任何需要手动置空的时机:
+  //   · 达成 / `/goal clear` → 末条 met:true → 本 memo 返回 null,徽章消失;
+  //   · 切会话 / 切窗格 → messages 是 per-pane 的另一份 → 天然按 sid 隔离;
+  //   · 回合结束刷新历史 → 新记录追加在末尾,状态跟着最后一条走。
+  // 唯一数据源是历史(messages),不掺流式的 chatMessages:两个来源就有"谁更晚"的判定,
+  // 那才是残留徽章的由来。代价是"设目标的那一回合内"徽章还没亮 —— 该回合的续跑证据
+  // 由消息流里的 Stop hook feedback 提示行承担,下一回合起徽章接手。
+  const activeGoal = useMemo(() => {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (messages[i]?.type === 'goal') return messages[i].met ? null : messages[i];
+    }
+    return null;
+  }, [messages]);
   // C2:用于把 AutoCompactBanner 限定在「当前聚焦的 pane」——分屏下非聚焦 pane 不应
   // 在你没看着时静默 /compact 改写历史。单窗格时 activeTabIndex 恒为 0 = 本 pane。
   const paneIsActive = useStore((s) => s.activeTabIndex) === tabIndex;
@@ -5542,6 +5583,30 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
               continue;
             }
             for (const block of (Array.isArray(event.message.content) ? event.message.content : [])) {
+              // /goal 未达成:CLI 把判定理由作为一条 user 事件喂回模型并强制续跑。
+              // 这是"自动续跑"在流式里【唯一】可见的证据 —— goal_status 只写 transcript,
+              // 实测 stream-json 一条都不发(见 session-reader 的 goal 分支)。形态固定为
+              // `Stop hook feedback:\n[<condition>]: <reason>`。只认这个前缀,不放行任意
+              // 纯文本 user 事件(那会把各种内部回喂消息都变成噪音);用户自配的 Stop 钩子
+              // 也是这个形态,一并显示是通用行为。
+              // ⚠ 流与转写的 content 形态【不同】(2.1.220 真机探针实测):流里是
+              // `content:[{type:'text',text:…}]` 数组,转写里同一条是纯字符串且 isMeta。
+              // 所以本分支按 block 遍历成立,历史侧则由 goal_status 的 met:false 记录
+              // 承担同一信息 —— 别照搬其中一边的形态去改另一边。
+              if (block.type === 'text' && /^Stop hook feedback:/.test(block.text || '')) {
+                const raw = String(block.text).replace(/^Stop hook feedback:\s*/, '');
+                const parsed = raw.match(/^\[([\s\S]*?)\]:\s*([\s\S]*)$/);
+                setChatMessages((prev) => [...prev, {
+                  uuid: 'goal-fb-' + Date.now(),
+                  type: 'goal',
+                  ownerKey: streamSid || streamOwnerKeyRef.current,
+                  timestamp: new Date().toISOString(),
+                  met: false,
+                  sentinel: false,
+                  condition: parsed ? parsed[1] : '',
+                  reason: parsed ? parsed[2] : raw,
+                }]);
+              }
               if (block.type === 'tool_result') {
                 // CG-2 兜底:本回合先委派了子代理 → SDK 的 canUseTool 通道被打穿 → 之后的
                 // ExitPlanMode/AskUserQuestion/授权请求会报 "Tool permission request failed:
@@ -7222,6 +7287,17 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                   info={badgeInfo}
                 />
               </span>
+              {/* /goal 生效中:Stop 钩子会拦住"想停就停",不显式标出用户看不出为什么模型
+                  一直续跑。达成/清除后 activeGoal 自动为空,徽章随之消失。 */}
+              {activeGoal && (
+                <span className="text-[10px] text-ink-muted font-body shrink-0 max-w-[260px] flex items-center gap-1"
+                  title={`目标进行中：${activeGoal.condition || '(无条件文本)'}${activeGoal.reason ? `\n最近判定：${activeGoal.reason}` : ''}`}>
+                  <Target size={10} className="shrink-0" />
+                  {/* truncate 必须落在文本自己的块级 span 上:挂在 flex 容器上 text-overflow
+                      不生效(flex item 不是 inline 内容),条件长了会硬切没有省略号。 */}
+                  <span className="truncate">目标进行中：{activeGoal.condition || '(无条件文本)'}</span>
+                </span>
+              )}
               {/* 活动告警:需要用户立即注意,保留行内不进弹层(收进"点开才见"=告警不可见)。 */}
               {hasPendingInteraction && (
                 <span className="text-[10px] text-violet-600 font-body shrink-0 whitespace-nowrap animate-pulse"
@@ -7414,6 +7490,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                 <div key={msg.uuid || i} data-turn-uuid={msg.uuid} data-turn-role={msg.type}>
                   {msg.type === 'compact'
                     ? <CompactDivider />
+                    : msg.type === 'goal'
+                    ? <GoalNotice goal={msg} />
                     : msg.type === 'turn'
                     ? <>
                         <TurnBubble turn={msg} onRetry={handleRetryTurn} onRetryTool={(toolCall) => handleRetryTool(msg, toolCall)} retryActive={retryActiveUuid === msg.uuid} />
