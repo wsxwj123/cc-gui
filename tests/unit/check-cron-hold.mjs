@@ -119,6 +119,30 @@ const CRON_DELETE_USE = {
   assert.equal(shouldHoldForCron(slot, [slot], now, MAX), false, '清零后照常回收');
 }
 
+// ── ⑤b 删旧建新(改循环间隔):同一条 user 消息里 delete 与 create 的 result 一起到 ──
+// 清零块必须在配对循环【之前】,否则刚挂上的新保活会被随后的 pendingDelete 抹掉 = 复现原 bug。
+{
+  const slot = newSlot();
+  slot.cronHoldUntil = now - 1000; // 上一轮的旧保活(已过期与否不影响本用例)
+  // 一条 assistant 消息里 CronCreate 声明在 CronDelete 之前(模型并行调两个工具的常见顺序)
+  applyCronSignals(slot, {
+    type: 'assistant',
+    message: { role: 'assistant', content: [
+      { type: 'tool_use', id: 'call_new', name: 'CronCreate', input: { cron: '*/5 * * * *', recurring: true } },
+      { type: 'tool_use', id: 'call_old', name: 'CronDelete', input: { id: '3fa91055' } },
+    ] },
+  }, now, HOLD);
+  applyCronSignals(slot, {
+    type: 'user',
+    message: { role: 'user', content: [
+      { tool_use_id: 'call_old', type: 'tool_result', content: 'Deleted job 3fa91055' },
+      { tool_use_id: 'call_new', type: 'tool_result', content: 'Scheduled recurring job 8c21ff40 (Every 5 minutes). Session-only …' },
+    ] },
+  }, now, HOLD);
+  assert.equal(slot.cronHoldUntil, now + HOLD, '删旧建新后新保活必须存活(清零在配对循环之前)');
+  assert.equal(shouldHoldForCron(slot, [slot], now, MAX), true, '改完间隔的循环仍豁免回收');
+}
+
 // ── ⑥ 与既有信号互不干扰 ─────────────────────────────────────────────────
 {
   const slot = newSlot();

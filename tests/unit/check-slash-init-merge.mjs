@@ -44,13 +44,14 @@ const chatSrc = readFileSync(join(ROOT, 'server', 'routes', 'chat.js'), 'utf8');
   assert.deepEqual(out.map((c) => c.name).sort(), ['/already', '/bare'], '统一补成 /name,不出现 //name');
 }
 
-// ── ④ 缓存为空(server 刚重启)必须容忍 → 回落纯磁盘扫描的现状 ─────────────
+// ── ④ 缓存未命中(server 刚重启 / 新项目首条消息前)→ 退回纯磁盘扫描 ────────
 {
   const commands = [{ name: '/clear' }];
   assert.equal(mergeInitCommands(commands, null), commands, 'init 为 null 时原样返回,不抛');
+  assert.equal(getInitCommands('/nowhere'), null, 'cwd 未命中必须返回 null');
   assert.equal(mergeInitCommands(commands, getInitCommands('/nowhere')), commands,
-    '空缓存下 getInitCommands 返回 null,合并是 no-op');
-  assert.deepEqual(commands.map((c) => c.name), ['/clear'], '空缓存不污染磁盘结果');
+    '未命中时合并是 no-op');
+  assert.deepEqual(commands.map((c) => c.name), ['/clear'], '未命中不污染磁盘结果');
   // 脏数据不炸
   const dirty = mergeInitCommands([], { commands: [null, '', '  ', 3], skills: undefined });
   assert.deepEqual(dirty, [], '非字符串/空白项直接跳过');
@@ -74,6 +75,12 @@ const chatSrc = readFileSync(join(ROOT, 'server', 'routes', 'chat.js'), 'utf8');
 
   assert.ok(/initCommandCache\.set\(slot\.cwd,/.test(chatSrc),
     '消息泵必须把 init 的命令表写进缓存(按 cwd 键)');
+  // 跨 cwd 回落曾被真机证伪:init 的 slash_commands 里确实含项目级命令(某项目的
+  // od-contribute 在 171 条里),回落 = A 项目的命令名漏进 B 项目的补全列表。
+  const getter = chatSrc.match(/export function getInitCommands\(cwd\) \{([\s\S]*?)\n\}/);
+  assert.ok(getter, 'getInitCommands 仍在');
+  assert.ok(!/initCommandCache\.values\(\)/.test(getter[1]),
+    'getInitCommands 不得回落到"最近一次任意 cwd"的表:会把 A 项目的项目级命令泄漏进 B 项目');
   assert.ok(/Array\.isArray\(m\.slash_commands\) \|\| Array\.isArray\(m\.skills\)/.test(chatSrc),
     'init 分支判据必须认 slash_commands / skills 两个字段');
   assert.ok(/INIT_CACHE_MAX/.test(chatSrc) && /initCommandCache\.delete\(/.test(chatSrc),

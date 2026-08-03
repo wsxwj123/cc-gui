@@ -387,13 +387,14 @@ export function hasCurrentEpochNonShellTask(liveTasks, epoch) {
 const initCommandCache = new Map(); // cwd → { commands: string[], skills: string[], at: number }
 const INIT_CACHE_MAX = 20;
 
-// cwd 未命中时回落"最近一次任意 cwd"的表。风险与缓解:回落可能把 A 项目的项目级命令带进
-// B 项目 —— 但项目级命令本就由磁盘扫描按 cwd 精确提供且【先于】本合并插入(同名跳过),
-// 回落实际只影响全局内置/插件类,这类跨项目一致。
+// cwd 未命中就返回 null,【不回落】到"最近一次任意 cwd"的表。曾以为回落只会带进全局内置类
+// (项目级命令由磁盘扫描按 cwd 精确提供、先于合并插入),但真机抓 init 事件证伪:slash_commands
+// 里确实含项目级命令(某项目的 od-contribute 就在那 171 条里)→ 回落会把 A 项目的项目命令名
+// 追加进 B 项目的补全列表(幽灵命令),而新项目发首条消息前必然 miss,正是用户敲 "/" 的高频时点。
+// 回落的剩余收益(其他内置 skill 在首条消息前提前可见)远小于跨项目泄漏的困惑;/loop 另有
+// BUILTIN_COMMANDS 兜底,miss 时列表与改动前一致。
 export function getInitCommands(cwd) {
-  return initCommandCache.get(cwd)
-    || [...initCommandCache.values()].sort((a, b) => b.at - a.at)[0]
-    || null;
+  return initCommandCache.get(cwd) || null;
 }
 
 // 把 init 表并进磁盘扫描结果:只补缺失的名字,已有条目原样保留(BUILTIN_COMMANDS 由此
@@ -513,12 +514,15 @@ export function applyCronSignals(slot, m, now = Date.now(), holdMs = CRON_HOLD_M
     return;
   }
   if (m.type !== 'user') return;
+  // 【必须在下面的循环之前清】:模型并行"删旧建新"(改循环间隔)时,同一条 user 消息里
+  // CronDelete 与 CronCreate 的 tool_result 一起到 —— 放在循环之后会把刚挂上的新保活抹掉。
+  // 先清后挂,净效果才对。
+  if (slot.cronPendingDelete) { slot.cronPendingDelete = false; slot.cronHoldUntil = 0; }
   for (const b of content) {
     if (b?.type !== 'tool_result' || !slot.cronToolIds?.has(b.tool_use_id)) continue;
     slot.cronToolIds.delete(b.tool_use_id);
     if (!b.is_error) slot.cronHoldUntil = now + holdMs;
   }
-  if (slot.cronPendingDelete) { slot.cronPendingDelete = false; slot.cronHoldUntil = 0; }
 }
 
 // idleReclaim 的 cron 豁免判据。纯函数,单测同上。
