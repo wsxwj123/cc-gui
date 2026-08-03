@@ -1284,7 +1284,10 @@ router.put('/custom-providers/:id', async (req, res) => {
       type === 'openai' ? OPENAI_ACTIVE_PATH : ANTHROPIC_ACTIVE_PATH,
       prev.id, list[idx].models, list[idx].defaultModel,
     );
-    res.json({ ok: true, id: prev.id });
+    // 快照只管 UI 显示;CLI 认的是 settings.json 的 env,得重跑 switch 才写。
+    // 少了这一步,用户在编辑表单里改默认模型/档位映射保存后毫无反应(#13)。
+    const reapplied = await reapplyIfActive(prev.id);
+    res.json({ ok: true, id: prev.id, reapplied });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -1340,6 +1343,33 @@ async function resolveProviderModelsById(id) {
   return null;
 }
 
+// provider 配置改完后,若它正是【当前激活】的那个,透明重跑一次 switch。
+// 存在的理由:CLI 只认 settings.json 的 env(ANTHROPIC_MODEL / ANTHROPIC_DEFAULT_*_MODEL),
+// 而这些 env 只在 switch 里生成 —— 光把新配置写进 custom-providers.json /
+// provider-overrides.json 对 CLI 是不可见的,用户得手动再切一次 provider 才生效。
+// 返回是否真的重写了 settings.json,前端据此提示"已生效"还是"切回该 provider 后生效"。
+// 副作用(有意为之):settings.json mtime 变 → chat.js 的 chatCompatKey 变 → 下一条消息
+// 不复用常驻 CLI 进程(冷启一次)。新模型必须生效,这个代价是必要的。
+// 不传 model:让 switch 按 provider 自己的 defaultModel 重算(它已校验在 models[] 内,
+// 拿不到就回落 models[0]),绝不会写出列表外的模型。
+// 无递归风险:switch 从不写 custom-providers.json(全部 5 个写入点都是路由处理器)。
+async function reapplyIfActive(id) {
+  try {
+    if ((await readActiveProviderId()) !== id) return false;
+    const layer = router.stack.find((l) => l.route && l.route.path === '/provider/switch');
+    if (!layer) return false;
+    const fakeRes = {
+      _status: 200, _body: null,
+      status(s) { this._status = s; return this; },
+      json(b) { this._body = b; return this; },
+    };
+    const fakeReq = { body: { id }, headers: { 'Content-Type': 'application/json' } };
+    // 复用 /provider/switch 的实现:它已正确处理 anthropic / openai / custom 三类。
+    await Promise.resolve(layer.route.stack[0].handle(fakeReq, fakeRes, () => {})).catch(() => {});
+    return fakeRes._status === 200;
+  } catch { return false; }
+}
+
 // GET /api/provider-overrides — 回显全部 override(无文件 = {})。
 router.get('/provider-overrides', async (_req, res) => {
   res.json(await readProviderOverrides());
@@ -1371,27 +1401,9 @@ router.put('/provider-overrides/:id', async (req, res) => {
     // 正是当前激活的,自动透明重跑一次 switch 把新的 tierModels 注入 settings.json,
     // 让映射立刻生效。若不是激活的就只持久化,等下次切到它再生效。reapplied 字段告诉
     // 前端是否已重写 settings,以提示"立刻生效"或"切回该 provider 后生效"。
-    let reapplied = false;
-    try {
-      const activeId = await readActiveProviderId();
-      if (activeId === id && Object.keys(entry).length) {
-        const headers = { 'Content-Type': 'application/json' };
-        const fakeRes = {
-          _status: 200, _body: null,
-          status(s) { this._status = s; return this; },
-          json(b) { this._body = b; return this; },
-        };
-        const fakeReq = { body: { id }, headers };
-        // 复用本路由的 switch 实现:它已正确处理 anthropic/openai/custom 三类。
-        await new Promise((resolve) => {
-          const layer = router.stack.find((l) => l.route && l.route.path === '/provider/switch');
-          if (!layer) return resolve();
-          const handler = layer.route.stack[0].handle;
-          Promise.resolve(handler(fakeReq, fakeRes, () => {})).then(resolve).catch(() => resolve());
-        });
-        reapplied = fakeRes._status === 200;
-      }
-    } catch {}
+    // 清空 override 同样要 reapply:否则旧档位映射还留在 settings.json 里(原来带
+    // `Object.keys(entry).length` 条件,清空时静默不生效)。
+    const reapplied = await reapplyIfActive(id);
     res.json({ ok: true, id, override: map[id] || null, reapplied });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
