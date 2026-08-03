@@ -72,6 +72,7 @@ import { escRoute, idleEscAction, escYieldCardId, isEditableTarget } from './uti
 import { isCurrentStreamTurn, resolveStreamHistCutoff, shouldRefreshHist } from './utils/reattach.js';
 import { pruneByLiveSet } from './utils/levelPrune.js';
 import { classifyStopTargets } from './utils/stopTargets.js';
+import { resizeScrollTop } from './utils/scroll.js';
 
 // ── Per-session shadow-git checkpoints ──────────────────────────
 // Session title with inline rename (click pencil → edit → Enter/blur saves,
@@ -3721,6 +3722,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // 区分"程序触发的吸底写入"与"用户手势":吸底自己写 scrollTop 会触发 scroll 事件,
   // 不打这个标记就会被 handleScroll 误判成用户滚动。
   const programmaticScrollRef = useRef(false);
+  // 变化【前】的滚动几何(top / 可滚动上限)。容器宽度变化后消息重排、总高改变,靠它按
+  // 比例把位置搬回去(见下方 ResizeObserver)。在 handleScroll 里顺手刷新,零额外开销。
+  const scrollGeomRef = useRef({ top: 0, max: 0 });
   const [chatMessages, setChatMessages] = useState([]);
   // Mirror of chatMessages. handleSend is a useCallback whose deps don't include
   // chatMessages, so its closure lags — a /btw answer arriving via async
@@ -4246,6 +4250,12 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
 
   const handleScroll = () => {
     if (!containerRef.current) return;
+    // 几何快照先于程序滚动的早退更新:宽度变化时要拿"变化前"的值做等比还原,
+    // 而程序吸底同样会改变它,漏记就会用过期基准算出错误位置。
+    {
+      const { scrollTop: t, scrollHeight: sh, clientHeight: ch } = containerRef.current;
+      scrollGeomRef.current = { top: t, max: Math.max(0, sh - ch) };
+    }
     // AZ3:程序触发的吸底写入会回弹一个 scroll 事件 → 跳过判定,别误判成用户滚动。
     if (programmaticScrollRef.current) { programmaticScrollRef.current = false; return; }
     const { scrollTop, scrollHeight, clientHeight } = containerRef.current;
@@ -4285,6 +4295,41 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     }
     scrollRestoredRef.current = selectedSession?.sessionId;
   }, [messages.length, chatMessages.length, selectedSession?.sessionId, scrollPersistKey]);
+
+  // #4 关右侧面板(监控/文件/…)后会话区空白、往上滑才找得回内容。
+  // 关面板 = 本容器变宽 → 每条消息重新折行变矮 → 全文总高缩短。Blink/Gecko 有 scroll
+  // anchoring 会自动补偿 scrollTop(实测 Chrome 开面板 3248→3549、关回来 3549→3248),
+  // 但 WKWebView(Tauri 的 webview)不实现 overflow-anchor —— scrollTop 原地不动、内容
+  // 整体位移几百像素,视口就可能正好停在两条消息之间的空白段,于是"看起来一片空白,
+  // 上滑就恢复"。这里自己补一次锚定:只在【宽度】变化时按比例把位置搬过去。
+  // 高度变化(输入框长高/任务清单展开)一律不管 —— 那是既有吸底 effect 的职责,插手会打架。
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el || typeof ResizeObserver === 'undefined') return;
+    let lastWidth = el.clientWidth;
+    const ro = new ResizeObserver(() => {
+      const width = el.clientWidth;
+      if (width !== lastWidth) {
+        lastWidth = width;
+        const prev = scrollGeomRef.current;
+        const next = resizeScrollTop({
+          prevTop: prev.top,
+          prevMax: prev.max,
+          scrollHeight: el.scrollHeight,
+          clientHeight: el.clientHeight,
+          // 用户没在看历史 → 直接吸底,与吸底 effect 同一目标,不会互相拉扯。
+          stickToBottom: !userScrolledAwayRef.current,
+        });
+        // 差值不足 1px 就不写:避免无谓的 scroll 事件,也避免 programmaticScrollRef
+        // 被置真却等不到回弹事件 → 下一次真实用户滚动被当成程序滚动吞掉。
+        if (Math.abs(next - el.scrollTop) >= 1) { programmaticScrollRef.current = true; el.scrollTop = next; }
+      }
+      // 无论宽高变化都刷新基准:高度变化(输入框长高)同样改变可滚动上限。
+      scrollGeomRef.current = { top: el.scrollTop, max: Math.max(0, el.scrollHeight - el.clientHeight) };
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
 
   // Message queue plumbing (#3) — when user types during streaming, the message
   // is queued and dispatched after the current chat finishes (or when the user
