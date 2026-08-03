@@ -5,13 +5,15 @@ import { MarkdownRenderer } from '../MarkdownRenderer.jsx';
 import { extractToolResultText } from '../../utils/toolResult.js';
 import { confirmDialog } from '../../utils/confirmDialog.jsx';
 
-// 单卡停止落空提示(TaskCard / SubagentView 同一份文案)。落空有两种成因,原来只写了
-// 「provider 不支持」一种 —— 任务其实早已结束时也弹这句,用户会误以为 provider 有问题。
-// 按 stopSingleTask 返回的 procAlive(本会话还有没有可停的进程)区分。
+// 单卡停止落空提示(TaskCard / SubagentView 同一份文案)。
+// 落空的真实含义是【服务端的任务表里没有这个 task】:服务端 stop-task 回 stopped:false
+// 的四种情形中,实际命中的必然是"liveTasks 反查不到 toolUseId"。原文案把它解释成
+// 「当前 provider 不上报任务事件」是误诊 —— 代码从没判过 provider,而任务早已结束、
+// 宿主进程重启丢了记账同样会走到这里。按 procAlive(本会话还有没有可停的进程)区分。
 export function stopNoOwnerNotice(procAlive) {
   return procAlive
-    ? '当前 provider 不上报任务事件,无法单独停止子代理,该子代理未被停止。\n若需停止,请用输入框旁的停止键停止当前回合。'
-    : '本会话已无运行中的进程,该子代理的任务已经结束,无需停止。\n卡片状态会在下次打开会话时更新。';
+    ? '该任务在服务端的任务表中已不存在,通常是它早已结束,或宿主进程重启后丢失了记账。卡片已标记为已结束。\n若主回合仍在进行,请用输入框旁的停止键停止当前回合。'
+    : '本会话已无运行中的进程,该任务已经结束。卡片已标记为已结束。';
 }
 
 // Subagent card — Task tool calls. Pulls the live agent state (text/thinking/

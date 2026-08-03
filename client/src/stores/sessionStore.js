@@ -1428,22 +1428,26 @@ export const useStore = create((set, get) => ({
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ toolUseId, sessionId }),
       }).then((r) => r.json())));
-      // S1:无一命中(所有属主 pid 都 stopped:false)= 该 task 已不在任何 slot 的 liveTasks,
-      // 不会再有权威 task_notification 纠正 → 乐观 stopped 是假阳性,回滚为原状态(避免卡片
-      // 假「已停」而 teammate 其实仍可被唤醒)。仅当仍停在我们乐观写的 stopped 上才回滚——
-      // 其间到达的权威终态(done/error/真 stopped)不覆盖。
+      // S1:无一命中(所有属主 pid 都 stopped:false)= 该 task 已不在任何 slot 的 liveTasks。
+      // 【落终态,不回滚成"工作中"】(批A A6):原来回滚成 prevStatus(working)。可落空恰恰
+      // 说明服务端任务表里已经没有它了 —— 既不会再有权威 task_notification 来纠正,回滚就
+      // 造出一张永远转圈的僵尸卡(用户实报)。成败未知,故标 settledBy 让 UI 显示中性"已结束"
+      // 而非绿勾"完成";真权威终态若还是到了,finalizeAgent 的 canOverride 会覆盖并清标记。
+      // 仍只动我们乐观写的那条 stopped:其间到达的权威终态(finalizeAgent 已清 optimisticStop)
+      // 即便 status 同为 stopped 也够不着。
       const anyStopped = results.some((r) => r.status === 'fulfilled' && r.value?.stopped === true);
       if (didOptimistic && !anyStopped) {
         const cur = get().activeAgents[toolUseId];
-        // 仅回滚仍带 optimisticStop 的乐观 stopped:其间到达的权威终态(finalizeAgent 已清标记)
-        // 即便 status 同为 stopped,也够不着——不把真终态误翻回 working。
-        if (cur && cur.status === 'stopped' && cur.optimisticStop) get().upsertAgent(toolUseId, { status: prevStatus, finishedAt: null, optimisticStop: false });
+        if (cur && cur.status === 'stopped' && cur.optimisticStop) {
+          get().upsertAgent(toolUseId, { status: 'done', settledBy: 'gone', finishedAt: Date.now(), optimisticStop: false });
+        }
       }
       // D5:回滚是静默的 —— 不发 task 事件的 provider 下没有任何 slot 认领,卡片"闪一下又
       // 转回去了",用户以为按钮坏了。把结果回给调用方(两处单卡停止按钮)提示一次;store 里
       // 不直接弹窗,confirmDialog 是 JSX 模块,导进来会让 tests/unit 的 node 直跑 store 挂掉。
       // procAlive:本会话是否还有可停的 chat 进程。落空原因两种,提示文案据此细分——
-      // 无进程 = 回合早已结束(任务本就停了);有进程却无人认领 = provider 不上报任务事件。
+      // 无进程 = 回合早已结束;有进程却无人认领 = 该 task 已不在服务端任务表(早已结束,
+      // 或宿主进程重启后丢了记账)。与 provider 无关:代码从没判过 provider。
       return { stopped: anyStopped, noOwner: didOptimistic && !anyStopped, procAlive: procs.length > 0 };
     } catch {}
     return { stopped: false, noOwner: false, procAlive: false };
