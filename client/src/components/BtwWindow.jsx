@@ -204,7 +204,10 @@ export default function BtwWindow({
           onPointerDown={(e) => e.stopPropagation()}
           onClick={async () => {
             if (thread.length === 0) return;
-            if (!(await confirmDialog('清空本会话的全部旁问？\n下次旁问将从零开始，不带此前上下文。', { danger: true }))) return;
+            // 文案必须与实情一致:清空只删本浮窗这几条问答记录(前端数组),旁问永远
+            // --resume 主会话取上下文,主会话那部分清不掉也不该清 —— 与 CLI 原生 /btw
+            // 一致(共享上下文、独立回答)。旧文案称清空后不再带此前上下文,与实情不符。
+            if (!(await confirmDialog('清空本浮窗的旁问记录？\n清空后下一次旁问不再携带这些问答；主会话的上下文仍会带上（与 CLI 原生 /btw 一致）。', { danger: true }))) return;
             onClearThread();
           }}
           title="清空旁问线程" className="shrink-0 text-ink-faint hover:text-red-500">
