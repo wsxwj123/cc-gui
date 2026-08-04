@@ -172,6 +172,41 @@ function sanitizeTierModels(input, models) {
   return Object.keys(out).length ? out : null;
 }
 
+// R3: 用户自填的每模型单价 modelPrices —— { [modelId]: {in,out,cacheRead,cacheWrite} | {plan:true} },
+// 单位【人民币元 / 每百万 token】。内置价表算不准中转站(服务商自定价)和套餐包月,只有用户
+// 知道实付多少;前端计价层(client/src/utils/pricing.js)拿它盖过所有内置来源。
+// 校验口径与 contextWindow 同族:数字必须有限且 >= 0;上界 PRICE_MAX 挡住笔误/垃圾数据;
+// 条目数与 model id 长度都封顶,免得一次 PUT 把配置文件撑爆。全空条目删键,一条不剩返回 null。
+// model id **不要求**在 models[] 内:上游/中转返回的真实 id 常与列表里填的不一致,而计价
+// 认的是消息里的真实 id。
+const PRICE_MAX = 1_000_000;   // ¥100万/百万 token,任何真实定价都远在其下
+const PRICE_MAX_ENTRIES = 200;
+const PRICE_MAX_ID_LEN = 200;
+export function sanitizeModelPrices(input) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return null;
+  const num = (v) => {
+    const x = typeof v === 'string' ? Number(v.trim() || NaN) : v;
+    return typeof x === 'number' && Number.isFinite(x) && x >= 0 && x <= PRICE_MAX ? x : null;
+  };
+  const out = {};
+  for (const [rawId, rawVal] of Object.entries(input)) {
+    if (Object.keys(out).length >= PRICE_MAX_ENTRIES) break;
+    const id = typeof rawId === 'string' ? rawId.trim() : '';
+    if (!id || id.length > PRICE_MAX_ID_LEN) continue;
+    if (!rawVal || typeof rawVal !== 'object') continue;
+    if (rawVal.plan === true) { out[id] = { plan: true }; continue; }  // 套餐档:价格字段无意义,不存
+    const e = {};
+    for (const k of ['in', 'out', 'cacheRead', 'cacheWrite']) {
+      const n = num(rawVal[k]);
+      if (n !== null) e[k] = n;
+    }
+    // in/out 都没有 = 用户没填价(只填缓存价无法计价)→ 删键,回落内置表。
+    if (e.in === undefined && e.out === undefined) continue;
+    out[id] = e;
+  }
+  return Object.keys(out).length ? out : null;
+}
+
 // K4: 一次性导入 cc-switch 后,GUI 不再读 cc-switch.db。该 flag 文件存在 = 已导入,
 // GET /providers 仅返回 customProviders;再次"重新导入"会按 ccSwitchSource id 去重补差。
 const CCSWITCH_IMPORTED_FLAG = join(homedir(), '.claude-gui', 'ccswitch-imported.flag');
@@ -688,6 +723,11 @@ router.get('/providers', async (_req, res) => {
   const customProviders = (await readCustomProviders()).map((p) => ({
     id: p.id, name: p.name, type: p.type, baseURL: p.baseURL,
     models: p.models || [], defaultModel: p.defaultModel || '', tierModels: p.tierModels || null,
+    // R3: 计价层(pricing.js setUserPrices)与编辑表单预填都读这里。apiKey 永不下发,
+    // 边界不变 —— 只多了两个用户自己填的配置字段。
+    // contextWindow 原先没回显 → 表单预填恒空 → 每次「更新」都把已存的窗口清掉(PUT 收到
+    // null 即删)。补上它顺带修掉这条:同一处遗漏,modelPrices 不补一样会被清空。
+    contextWindow: p.contextWindow || null, modelPrices: p.modelPrices || null,
     hasKey: !!p.apiKey, isCustom: true, isCurrent: isCur(p.id, false),
   }));
   // B 方案: claude 只读组的 models[] 从其 snapshot.env 的 _MODEL 值提取(切换/导入路径
@@ -1194,6 +1234,7 @@ router.get('/custom-providers', async (_req, res) => {
       id: p.id, name: p.name, type: p.type, baseURL: p.baseURL,
       models: p.models || [], defaultModel: p.defaultModel || '',
       tierModels: p.tierModels || null, hasKey: !!p.apiKey,
+      contextWindow: p.contextWindow || null, modelPrices: p.modelPrices || null,
     })),
   });
 });
@@ -1233,6 +1274,11 @@ router.post('/custom-providers', async (req, res) => {
       const cwNum = Number(req.body?.contextWindow);
       if (Number.isFinite(cwNum) && cwNum >= 1000 && cwNum <= 10_000_000) entry.contextWindow = Math.floor(cwNum);
     }
+    // R3: 每模型单价(可选,CNY/百万 token)。非法条目逐条丢弃,一条不剩则不写此键。
+    {
+      const mp = sanitizeModelPrices(req.body?.modelPrices);
+      if (mp) entry.modelPrices = mp;
+    }
     const list = await readCustomProviders();
     // 幂等查重(用户新机实报:添加成功但后续 switch 失败被误报"保存失败"→重试 N 次
     // = N 条重复条目)。同 type+name+baseURL 视为同一 provider,返回已存在的 id 而非
@@ -1254,7 +1300,7 @@ router.put('/custom-providers/:id', async (req, res) => {
     const list = await readCustomProviders();
     const idx = list.findIndex((p) => p.id === req.params.id);
     if (idx === -1) return res.status(404).json({ error: 'not found' });
-    const { name, type, baseURL, apiKey, models, defaultModel, tierModels, contextWindow } = req.body || {};
+    const { name, type, baseURL, apiKey, models, defaultModel, tierModels, contextWindow, modelPrices } = req.body || {};
     if (!name || typeof name !== 'string') return res.status(400).json({ error: 'name 必填' });
     if (type !== 'openai' && type !== 'anthropic') return res.status(400).json({ error: 'type 必须是 openai 或 anthropic' });
     let url; try { url = new URL(baseURL); } catch { return res.status(400).json({ error: 'baseURL 非法' }); }
@@ -1266,6 +1312,12 @@ router.put('/custom-providers/:id', async (req, res) => {
     const cwNum = Number(contextWindow);
     if (contextWindow === null || contextWindow === '') delete prev.contextWindow;
     else if (Number.isFinite(cwNum) && cwNum >= 1000 && cwNum <= 10_000_000) prev.contextWindow = Math.floor(cwNum);
+    // R3: 每模型单价。显式传入则整体覆盖(传 null/空对象/全非法 = 清空);不传则保留旧值。
+    // 整体覆盖是对的:表单每次提交都带全量 modelPrices,删掉的行必须真的消失。
+    if (modelPrices !== undefined) {
+      const mp = sanitizeModelPrices(modelPrices);
+      if (mp) prev.modelPrices = mp; else delete prev.modelPrices;
+    }
     const nextModels = Array.isArray(models)
       ? models.filter((m) => typeof m === 'string' && m.trim()).map((m) => m.trim())
       : (prev.models || []);

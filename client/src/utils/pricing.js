@@ -264,6 +264,109 @@ function remoteLookup(model) {
   return e ? { ...e, currency: 'USD' } : null;
 }
 
+// ── R3: 用户自填单价(最高优先级,赢过 REMOTE / PRICES / ALIASES)──────────
+// 内置价表永远算不准两类情况,而只有用户自己知道实付多少:
+//   ① 中转站:同一个 gpt-5.6-sol,走中转站是服务商自定价(通常低于官网),走本地代理是
+//      订阅额度。jsonl 顶层字段只有 uuid/timestamp/cwd/sessionId/version/gitBranch,
+//      没有 baseURL/provider,事后无法反推 → 只能由用户在 provider 表单里填。
+//   ② 套餐包月:付的是月费不是 token 费,按单价算出的金额没有意义 → 只显示用量。
+// 数据来自 provider 条目的 modelPrices:
+//   { [modelId]: { in, out, cacheRead, cacheWrite } | { plan: true } }
+// 单位【人民币元 / 每百万 token】(内部按 CNY_TO_USD 折 USD,与其余价表同口径)。
+// 缺省语义(与 UI 说明逐字一致):
+//   · in / out 留空 → 该项回落内置表同项(内置表也没有该模型时按 0),不是把整条按 0 算;
+//   · 缓存两项留空 → 按 cacheRead=0.1×in、cacheWrite=1.25×in(与 cny()/usd() 同默认倍率);
+//   · in 与 out 都没填 → 整条当没填,完全回落内置表。
+// 匹配【按 model id 精确匹配,与当前 provider 无关】—— 和 lookupPrice 的"计价第一依据永远
+// 是这条消息实际用的模型"是同一条原则(jsonl 只有 model)。
+// ponytail: 精确匹配就够 —— id 是用户从自己的模型列表里选或手输的。不做去日期后缀/最长前缀
+// 兜底,免得"填了 gpt-5.6 把 gpt-5.6-luna 也一起计价"这种意外;要覆盖多个 id 就多填几行。
+const UP_KEY = 'cgui-user-prices';
+let USER_ACTIVE = new Map();  // 当前激活 provider 填的价
+let USER_ANY = new Map();     // 全部 provider 填的价(同 id 取列表里第一个)
+
+function sanitizeUserPrice(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  if (raw.plan === true) return { plan: true };
+  const n = (v) => {
+    const x = typeof v === 'string' ? Number(v.trim() || NaN) : v;
+    return typeof x === 'number' && Number.isFinite(x) && x >= 0 ? x : null;
+  };
+  const e = { in: n(raw.in), out: n(raw.out), cacheRead: n(raw.cacheRead), cacheWrite: n(raw.cacheWrite) };
+  return (e.in != null || e.out != null) ? e : null;  // 一项价都没有 = 当没填
+}
+
+/**
+ * 把 provider 列表里的 modelPrices 装进查价层。入参 = GET /api/providers 的
+ * customProviders(含 isCurrent),不含也永远不该含 apiKey。
+ * 【同 id 冲突】两个 provider 给同一个 model id 填了不同价时:优先当前激活 provider 的,
+ * 否则取列表里第一个匹配。这是 jsonl 不记 provider 造成的固有天花板 —— 一条历史消息
+ * 只留下 model id,分不出它当年走的是哪个 provider,任何规则都是猜,取"当前激活的"至少
+ * 让用户看到的数字和他此刻的账单口径一致。
+ */
+export function setUserPrices(providers, persist = true) {
+  const active = new Map();
+  const any = new Map();
+  const slim = [];
+  for (const p of Array.isArray(providers) ? providers : []) {
+    const mp = p && p.modelPrices;
+    if (!mp || typeof mp !== 'object') continue;
+    let kept = false;
+    for (const [id, raw] of Object.entries(mp)) {
+      const e = sanitizeUserPrice(raw);
+      if (!e || !id) continue;
+      kept = true;
+      if (p.isCurrent && !active.has(id)) active.set(id, e);
+      if (!any.has(id)) any.set(id, e);
+    }
+    if (kept) slim.push({ isCurrent: !!p.isCurrent, modelPrices: mp });
+  }
+  USER_ACTIVE = active;
+  USER_ANY = any;
+  // 缓存使下次加载首帧就有用户价(与 REMOTE 同一套路);hydrate 成功后覆盖。
+  if (persist) { try { localStorage.setItem(UP_KEY, JSON.stringify(slim)); } catch { /* 隐私模式/配额 */ } }
+}
+
+/** 该 model id 的用户配置条目({in,out,...} 或 {plan:true}),没有则 null。 */
+export function userModelPrice(model) {
+  if (!model) return null;
+  return USER_ACTIVE.get(model) || USER_ANY.get(model) || null;
+}
+
+// 用户条目 → 与 PRICES 同形状的四价条目(USD/1M)。plan 档不产生价格(走 isPlanBilling)。
+function userPriceEntry(model) {
+  const u = userModelPrice(model);
+  if (!u || u.plan) return null;
+  const base = lookupByModel(model);  // 未填项的回落源,可能为 null
+  const input  = u.in  != null ? u.in  * CNY_TO_USD : (base ? base.input : 0);
+  const output = u.out != null ? u.out * CNY_TO_USD : (base ? base.output : 0);
+  const fallbackRead  = u.in != null ? input * 0.1  : (base ? base.cacheRead : 0);
+  const fallbackWrite = u.in != null ? input * 1.25 : (base ? base.cacheWrite : 0);
+  return {
+    input,
+    output,
+    cacheRead:  u.cacheRead  != null ? u.cacheRead  * CNY_TO_USD : fallbackRead,
+    cacheWrite: u.cacheWrite != null ? u.cacheWrite * CNY_TO_USD : fallbackWrite,
+    currency: 'CNY',
+    source: 'user',
+  };
+}
+
+async function hydrateUserPrices() {
+  try {
+    const r = await fetch('/api/providers');
+    const j = await r.json();
+    if (j && Array.isArray(j.customProviders)) setUserPrices(j.customProviders);
+  } catch { /* 拉不到 → 沿用 localStorage 缓存 */ }
+}
+if (typeof window !== 'undefined') {
+  try { setUserPrices(JSON.parse(localStorage.getItem(UP_KEY) || '[]'), false); } catch { /* 缓存损坏 */ }
+  // 自 hydrate 兜底:不依赖任何组件的挂载顺序。provider 增删改/切换后 App 会广播
+  // cgui:provider-change,顺带重拉一次,改完价格立即生效不用刷新。
+  hydrateUserPrices();
+  window.addEventListener('cgui:provider-change', hydrateUserPrices);
+}
+
 // Common aliases the CLI may emit.
 // 裸别名对应哪一代是有歧义的(会话当年跑的可能是别的代),只能取"该别名当前指向的
 // 主力型号";已存在的三条不动(改了也只是把一个猜测换成另一个猜测)。
@@ -305,6 +408,10 @@ function lookupByModel(model) {
 //   deepseek / mimo              → 这条消息自己的 model 优先,查不到才回落 env 档位
 function lookupPrice(model, provider) {
   if (!model && !(provider && provider.model)) return null;
+  // R3:用户自填单价最高优先级 —— 赢过 REMOTE / 内置表,也赢过下面 deepseek/mimo 的
+  // env 档位回落(用户填的是他这条消息实付的钱,任何推断都不该盖过它)。
+  const user = userPriceEntry(model);
+  if (user) return user;
   const hint = (provider && provider.providerHint) || 'anthropic';
 
   // Q-a:计价的第一依据永远是【这条消息实际用的模型】,不是 provider.model(= 当前
@@ -373,6 +480,11 @@ export function isSubscriptionBilling(provider, model) {
  * 这类一律【显示 + 在 title 标注按官网价估算】,不静默隐藏。
  */
 export function isPlanBilling(provider, model) {
+  // R3:用户为这个 model id 显式配置过 → 以他的配置为准,优先级最高。勾了「套餐包月」
+  // 就是套餐(不显示金额);填了单价就是按量(哪怕 id 命中下面的 Kimi 白名单、哪怕当前
+  // 是 Claude 订阅态 —— 中转站转售 claude-* 是真花钱的,不能跟着订阅一起藏)。
+  const u = userModelPrice(model);
+  if (u) return !!u.plan;
   // ponytail: 前缀白名单够用 —— 套餐 id 与开放平台 id 不同名。将来 Kimi 改名在这里补键,
   // 不必引入"按消息记 provider"的新体系(jsonl 也存不下)。
   if (/^(k3|kimi-for-coding)/.test(model || '')) return true;
@@ -403,7 +515,9 @@ export function computeCost(model, usage, provider) {
     cacheWrite: (cacheWrite * p.cacheWrite) / M,
   };
   const totalUsd = breakdown.input + breakdown.output + breakdown.cacheRead + breakdown.cacheWrite;
-  return { totalUsd, breakdown, currency: p.currency };
+  // source='user' = 这条按用户自填单价算的 → 显示口径改成"按你填写的单价计算",
+  // 不再说"按官网价估算"(TurnBubble / MessageBubble / UsagePanel 三处同一判据)。
+  return { totalUsd, breakdown, currency: p.currency, source: p.source || 'table' };
 }
 
 /**
