@@ -587,6 +587,15 @@ router.get('/provider', async (_req, res) => {
       process.env.ANTHROPIC_MODEL || process.env.CLAUDE_MODEL || ''
     ) || null;
 
+    // 计费口径判据(只回布尔,绝不回令牌本身):官方订阅切换时 /provider/switch 的
+    // official 分支会显式删掉 ANTHROPIC_AUTH_TOKEN / ANTHROPIC_API_KEY 回到 OAuth 登录,
+    // 所以「providerHint=anthropic 且这两个 key 都没有」= 包月订阅,按 token 单价算出的
+    // 费用对用户是误导(他不按量付费),前端据此只显示用量不显示价格。
+    const hasAuthKey = !!(
+      env.ANTHROPIC_AUTH_TOKEN || env.ANTHROPIC_API_KEY ||
+      process.env.ANTHROPIC_AUTH_TOKEN || process.env.ANTHROPIC_API_KEY
+    );
+
     const u = baseUrl.toLowerCase();
     let providerHint = 'anthropic';
     if (!u || u.includes('anthropic.com')) providerHint = 'anthropic';
@@ -607,7 +616,7 @@ router.get('/provider', async (_req, res) => {
     let protocol = 'anthropic';
     try { await readFile(OPENAI_ACTIVE_PATH, 'utf-8'); protocol = 'openai'; } catch {}
 
-    res.json({ baseUrl, providerHint, model, protocol });
+    res.json({ baseUrl, providerHint, model, protocol, hasAuthKey });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

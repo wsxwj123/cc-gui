@@ -13,7 +13,7 @@ import { TaskCard } from './tools/TaskCard.jsx';
 import { GrepGlobCard } from './tools/GrepGlobCard.jsx';
 import { WebCard } from './tools/WebCard.jsx';
 import { SkillCard } from './tools/SkillCard.jsx';
-import { computeCost, formatCost } from '../utils/pricing.js';
+import { computeCost, formatCost, isSubscriptionBilling } from '../utils/pricing.js';
 import { copyText } from '../utils/clipboard.js';
 import { useStore } from '../stores/sessionStore.js';
 import { TASK_TOOL_NAMES, rebuildTodosFromTaskCalls } from '../utils/todos.js';
@@ -637,7 +637,10 @@ function UsageDisplay({ usage, model, costUsd }) {
   // Z1:CLI result 事件的 total_cost_usd 是官方计费口径的权威成本,优先于单价表
   // 估算。第三方 provider 下 CLI 仍按 Claude 价目计算(模型名是伪装的),不可信。
   const official = !provider || (provider.providerHint || 'anthropic') === 'anthropic';
-  const authoritative = official && typeof costUsd === 'number' && costUsd > 0;
+  // 官方订阅是包月,CLI 上报的 total_cost_usd 是"按 API 单价这轮值多少钱",不是用户
+  // 的账单 → 订阅态一并不显示(computeCost 已在订阅态返回 null,这条走的是另一条路)。
+  const authoritative = official && !isSubscriptionBilling(provider)
+    && typeof costUsd === 'number' && costUsd > 0;
   return (
     <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[10px] text-ink-faint mt-2 pt-2 border-t border-canvas-deep/50">
       <span title="input_tokens — 仅指未命中缓存的新 token(Anthropic 计费口径),不是全部输入">输入 {input.toLocaleString()}</span>

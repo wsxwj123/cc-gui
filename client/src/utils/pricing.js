@@ -300,11 +300,28 @@ function lookupPrice(model, provider) {
 }
 
 /**
+ * 官方订阅(Pro/Max 包月)计费判据。订阅用户不按 token 付费,把单价表算出的金额
+ * 显示给他是误导 —— 那是"如果走 API 会花多少",不是他的账单。
+ * 判据与 GET /api/provider 同源:providerHint='anthropic'(baseUrl 为空或
+ * api.anthropic.com)且 settings.json 里没有 ANTHROPIC_AUTH_TOKEN / API_KEY
+ * (切官方时被显式删掉,CLI 只能走 OAuth 订阅)。官方 + 有 key = 按量付费,照常显示。
+ * hasAuthKey 缺失(旧数据 / fetchProvider 尚未返回)一律判为非订阅:失败方向是
+ * "照常显示价格",不是"多藏一个数字"。
+ */
+export function isSubscriptionBilling(provider) {
+  if (!provider) return false;
+  return (provider.providerHint || 'anthropic') === 'anthropic' && provider.hasAuthKey === false;
+}
+
+/**
  * Compute USD cost for a single message's usage object.
  * Returns { totalUsd, breakdown: {input, output, cacheRead, cacheWrite} } or null.
+ * 订阅态返回 null —— 这是所有费用展示的唯一出口,各处 `cost && (...)` 条件渲染
+ * 因此自动只剩用量,不用在每个显示点各加一遍判断。
  */
 export function computeCost(model, usage, provider) {
   if (!usage) return null;
+  if (isSubscriptionBilling(provider)) return null;
   const p = lookupPrice(model, provider);
   if (!p) return null;
   const input = usage.input_tokens || 0;
