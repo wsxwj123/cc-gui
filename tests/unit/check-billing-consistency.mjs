@@ -129,4 +129,20 @@ for (const m of ['k30', 'k3-turbo', 'k3.5', 'k3-pro', 'kimi-for-coding-x', 'kimi
   assert.equal(isPlanBilling(null, m), false, `${m} 不是套餐 id,不该被前缀匹配藏掉金额`);
 }
 
+// ── R5:面板里"有没有价"的三处判据必须同源 ────────────────────────────
+// aggregateCost 返回 {usd:0}(免费模型 / token 极少)时:组头按 `g.usd > 0` 判显「—」
+// (含义是"查不到单价"),组内行按 `cost.usd != null` 判显 `<¥0.001`,柱子又是灰的 ——
+// 同一份数据三种说法。groupByProvider 在 UsagePanel.jsx 内部,该文件是 JSX 且依赖
+// React/store,node 里 import 不了,故按源码钉。
+{
+  const { readFile } = await import('node:fs/promises');
+  const src = await readFile(new URL('../../client/src/components/UsagePanel.jsx', import.meta.url), 'utf8');
+  assert.match(src, /if \(c\.usd != null\) \{ g\.usd \+= c\.usd; g\.priced = true; \}/,
+    '组的 priced 累加判据不再是 c.usd != null,与行的判据脱钩了');
+  assert.doesNotMatch(src, /g\.usd > 0/,
+    '还有显示点在用旧判据 g.usd > 0(组头与柱状图都应走 g.priced)');
+  assert.equal((src.match(/g\.priced/g) || []).length, 3,
+    'g.priced 应恰好出现三处:累加、组头金额、柱状图颜色');
+}
+
 console.log('check-billing-consistency OK');

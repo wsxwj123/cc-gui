@@ -101,9 +101,15 @@ assert.ok(computeCost('gpt-5.6-sol', IO, SUB), '分不出接入方式的不该�
 // ── R5-a:持久化 oauth 判据不许套到"按 token 真实计费的 claude-*"上 ─────────
 // 【本段必须放在文件末尾】它会写入 lastOfficialBilling(模块级),之后第三方 provider 下的
 // Claude 家族消息一律按最后一次观察到的官方口径判(R4-b),前面各条断言的前提就变了。
+// 【覆盖面,别读成"Bedrock/Vertex 都修好了"】providerHint 只由 GET /api/provider 从
+// ANTHROPIC_BASE_URL 猜出来,所以下面这两个 fixture 代表的是"把 base URL 指向
+// bedrock/amazonaws/vertex/googleapis 网关"这一种接法。Claude Code 官方的标准姿势
+// CLAUDE_CODE_USE_BEDROCK=1 / CLAUDE_CODE_USE_VERTEX=1 **不设 base URL**(本仓没有任何
+// 地方处理这两个环境变量),那种配置下 hint 落 'anthropic'、hasAuthKey 又是 false,会在
+// 官方分支就被判成订阅 —— R5-a 覆盖不到,属已知限制。
 observeOfficialBilling({ providerHint: 'anthropic', hasAuthKey: false }); // 观察到:官方走 OAuth 订阅
-const BEDROCK = { providerHint: 'bedrock', hasAuthKey: true };
-const VERTEX = { providerHint: 'vertex', hasAuthKey: true };
+const BEDROCK = { providerHint: 'bedrock', hasAuthKey: true };  // = base URL 指向 bedrock 网关
+const VERTEX = { providerHint: 'vertex', hasAuthKey: true };    // = base URL 指向 vertex 网关
 const RELAY = { providerHint: 'unknown', hasAuthKey: true };   // 中转站
 // Bedrock / Vertex 的 claude-* 走 AWS / GCP 账单按 token 真花钱,与 Claude 订阅是两笔钱。
 // 判官实测回归:观察到 oauth 前显示 {usd:5},之后被藏成 {subscription:true}。

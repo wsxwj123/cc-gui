@@ -280,22 +280,29 @@ function remoteLookup(model) {
 // 匹配【按归一化后的 model id 匹配,与当前 provider 无关】—— 和 lookupPrice 的"计价第一
 // 依据永远是这条消息实际用的模型"是同一条原则(jsonl 只有 model)。
 const UP_KEY = 'cgui-user-prices';
-let USER_ACTIVE = new Map();  // 当前激活 provider 填的价(键已归一化)
-let USER_ANY = new Map();     // 全部 provider 填的价(同 id 取列表里第一个)
+let USER_ACTIVE = new Map();  // 当前激活 provider 填的价(精确键 + 归一键两层)
+let USER_ANY = new Map();     // 全部 provider 填的价(同键取列表里第一个)
 
 /**
- * R5-c:用户价查找的 model id 归一化。存入与查询走同一个函数,故两侧写法不一致也能对上。
- * 四步:trim → 小写 → 剥 [1m] 后缀 → 剥命名空间前缀。
- * 为什么必须有:同一个模型在历史里两种形态并存 —— 'gpt-5.6-sol' 与 'openai/gpt-5.6-sol'、
+ * R5-c:用户价查找的两层键。存入与查询都走这两个函数,故两侧写法不一致也能对上。
+ *   exactKey — trim + 小写。用户输入的空白与大小写不该导致落空,但 id 本身一字不改。
+ *   normModelKey — 在 exactKey 基础上再剥 [1m] 后缀与命名空间前缀。
+ * 为什么要归一层:同一个模型在历史里两种形态并存 —— 'gpt-5.6-sol' 与 'openai/gpt-5.6-sol'、
  * 'kimi-k3' 与 'moonshotai/kimi-k3';[1m] 是 CLI 通用的 1M 上下文后缀(同一个模型)。
- * 原先纯 Map.get 精确匹配,带前缀/带 [1m] 的那部分消息会**静默**回落官网价,用户看不出来。
+ * 原先纯精确匹配,带前缀/带 [1m] 的那部分消息会**静默**回落官网价,用户看不出来。
+ * 【为什么归一层不能单独用】命名空间不是纯噪声:内置表里 'openai/gpt-oss-120b'(Groq,
+ * $0.15/$0.60)与 'gpt-oss-120b'(Cerebras,$0.35/$0.75)本来就是两个价不同的模型(见
+ * PRICES 里那两行的注释)。无条件剥前缀会把它们合成一个键,用户填的 Cerebras 价被 Groq
+ * 的顶掉、差 23 倍且完全静默 —— 比"少算成官网价"更隐蔽(口径标签还写着"按你填写的单价")。
+ * 所以:装填两遍(精确键全部落位后,归一键只补空位),查询也按 精确 → 归一 的顺序。
  * 【仍然不做】去日期后缀 / 最长前缀兜底:填 'gpt-5.6' 不许把 'gpt-5.6-luna' 一起计价 ——
  * 那是当初拒绝前缀兜底的理由,至今成立。要覆盖多个 id 就多填几行。
  * 【已知天花板】'k3' 与 'k3[1m]' 归一后同键,分不出 1M 变体的差价(用户也没有别的地方
- * 能表达这个差价);两个都填时取列表里先出现的那条。
+ * 能表达这个差价);两个都填时精确键各自成立,只有没精确命中时才落到归一层。
  */
+const exactKey = (id) => String(id || '').trim().toLowerCase();
 function normModelKey(id) {
-  const s = String(id || '').trim().toLowerCase().replace(/\[1m\]$/, '');
+  const s = exactKey(id).replace(/\[1m\]$/, '');
   return s.slice(s.lastIndexOf('/') + 1);
 }
 
@@ -322,19 +329,30 @@ export function setUserPrices(providers, persist = true) {
   const active = new Map();
   const any = new Map();
   const slim = [];
+  const flat = [];  // [{ isCurrent, id, e }],保持 provider 列表顺序
   for (const p of Array.isArray(providers) ? providers : []) {
     const mp = p && p.modelPrices;
     if (!mp || typeof mp !== 'object') continue;
     let kept = false;
     for (const [id, raw] of Object.entries(mp)) {
       const e = sanitizeUserPrice(raw);
-      const key = normModelKey(id);
-      if (!e || !key) continue;
+      if (!e || !exactKey(id)) continue;
       kept = true;
-      if (p.isCurrent && !active.has(key)) active.set(key, e);
-      if (!any.has(key)) any.set(key, e);
+      flat.push({ isCurrent: !!p.isCurrent, id, e });
     }
     if (kept) slim.push({ isCurrent: !!p.isCurrent, modelPrices: mp });
+  }
+  // 两遍装填,键按种类打 'e:'/'n:' 前缀分开命名空间。前缀不能省:两种键混在同一个 Map 里
+  // 时,'gpt-oss-120b' 既可能是 Cerebras 的**精确**键、也可能是 Groq 的 'openai/…' 归一
+  // 出来的键,查询方分不出命中的是哪一种 —— 于是"精确优先"退化成"谁先写进去谁赢"。
+  for (const [tag, keyOf] of [['e:', exactKey], ['n:', normModelKey]]) {
+    for (const { isCurrent, id, e } of flat) {
+      const raw = keyOf(id);
+      if (!raw) continue;
+      const k = tag + raw;
+      if (isCurrent && !active.has(k)) active.set(k, e);
+      if (!any.has(k)) any.set(k, e);
+    }
   }
   USER_ACTIVE = active;
   USER_ANY = any;
@@ -342,11 +360,18 @@ export function setUserPrices(providers, persist = true) {
   if (persist) { try { localStorage.setItem(UP_KEY, JSON.stringify(slim)); } catch { /* 隐私模式/配额 */ } }
 }
 
-/** 该 model id 的用户配置条目({in,out,...} 或 {plan:true}),没有则 null。 */
+/**
+ * 该 model id 的用户配置条目({in,out,...} 或 {plan:true}),没有则 null。
+ * 顺序:精确键(激活 → 任意)→ 归一键(激活 → 任意)。
+ * 精确整体优先于"当前激活" —— 精确匹配讲的是**模型身份**(Groq 的 openai/gpt-oss-120b
+ * 与 Cerebras 的 gpt-oss-120b 是两个模型),isCurrent 只是同一身份撞车时的裁决规则。
+ */
 export function userModelPrice(model) {
-  const key = normModelKey(model);
-  if (!key) return null;
-  return USER_ACTIVE.get(key) || USER_ANY.get(key) || null;
+  const exact = exactKey(model);
+  if (!exact) return null;
+  const norm = 'n:' + normModelKey(model);
+  return USER_ACTIVE.get('e:' + exact) || USER_ANY.get('e:' + exact)
+    || USER_ACTIVE.get(norm) || USER_ANY.get(norm) || null;
 }
 
 // 用户条目 → 与 PRICES 同形状的四价条目(USD/1M)。plan 档不产生价格(走 isPlanBilling)。
@@ -482,7 +507,15 @@ export function isSubscriptionBilling(provider, model) {
   if (hint === 'anthropic') return provider.hasAuthKey === false;
   // R5-a:Bedrock / Vertex 上的 claude-* 是**按 token 真实计费**的(走 AWS / GCP 账单,
   // 与 Claude 订阅是两笔钱),持久化的 oauth 判据对它们不适用 —— 套用等于把真实账单
-  // 藏成"订阅内"。这两个 hint 由 baseUrl 可靠识别,所以能精确排除。
+  // 藏成"订阅内"。
+  // 【覆盖面,别写成"Bedrock/Vertex 都修好了"】providerHint 的产地(server/routes/
+  // settings.js 的 GET /provider)**只从 ANTHROPIC_BASE_URL 猜**,所以这里只覆盖"把
+  // base URL 指向 bedrock/amazonaws/vertex/googleapis 网关"这一种接法。Claude Code 官方
+  // 的标准姿势是 CLAUDE_CODE_USE_BEDROCK=1 / CLAUDE_CODE_USE_VERTEX=1 且**不设 base
+  // URL**(本仓一处都没处理这两个环境变量),那种配置下 hint 落 'anthropic'、AWS_* 凭证
+  // 又使 hasAuthKey 为 false → 在上面那行就被判成订阅,根本走不到这里。
+  // 补这个缺口要动 providerHint 的语义,而它流向 lookupPrice 等多处;本机无此接法,
+  // 不为一个用不到的场景改公共判据。留作已知限制。
   if (hint === 'bedrock' || hint === 'vertex') return false;
   // R4-b:当前是别的第三方 provider —— 这条 Claude 消息显然不是现在发的,判据要用【当时】的
   // 鉴权方式,而 jsonl 里没有。原实现在这里直接 return false(= 拿此刻的第三方身份顶替),
@@ -552,9 +585,10 @@ export function probeOfficialBilling() {
         try { localStorage.setItem(OFFICIAL_BILLING_KEY, 'oauth'); } catch { /* 隐私模式/配额 */ }
       }
     } catch { /* 网络/解析失败 → 不写记录 */ }
-    probing = null;
     return lastOfficialBilling;
-  })();
+    // 清空放 .finally 而不是函数体末尾:body 若全程同步跑完(fetch 同步抛),体内的
+    // probing = null 会先于外层赋值执行 → probing 永远非空 = 再也不重试。
+  })().finally(() => { probing = null; });
   return probing;
 }
 if (typeof window !== 'undefined') probeOfficialBilling();

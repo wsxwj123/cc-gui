@@ -286,7 +286,7 @@ export function UsagePanel() {
               <div className="pb-2 mb-1 border-b border-canvas-deep">
                 {groups.map((g) => (
                   <BarRow key={`bar-${g.key}`} label={g.label} value={g.tokens} max={maxTok}
-                    color={g.usd > 0 ? 'var(--color-accent)' : 'color-mix(in srgb, var(--color-ink-faint) 60%, transparent)'} />
+                    color={g.priced ? 'var(--color-accent)' : 'color-mix(in srgb, var(--color-ink-faint) 60%, transparent)'} />
                 ))}
               </div>
             );

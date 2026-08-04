@@ -110,4 +110,39 @@ delete store['cgui-official-billing'];
   assert.ok(fresh.computeCost('claude-opus-5', IO, THIRD), '官方 API key 档被误判成订阅,金额被藏了');
 }
 
+// ── 接线本身:浏览器环境下模块必须真的自动探一次 ────────────────────────
+// pricing.js 末尾那行 `if (typeof window !== 'undefined') probeOfficialBilling();` 是全仓
+// 唯一的接线点。删掉它功能全死,而上面每一条断言照样绿 —— 上一批栽的就是"测试绿而产品
+// 无效"这个坑。文件开头那条 calls.length === 0 断的是**反面**(node 下不探),正面得单独验。
+delete store['cgui-official-billing'];
+{
+  globalThis.window = { addEventListener() {} };  // 模块的浏览器分支只用到这一个方法
+  calls = [];
+  respond = async (u) => (String(u).includes('subscription-usage')
+    ? json({ official: true, weekAll: { percent: 7 } })
+    : json({ customProviders: [] }));            // 同一分支里的 hydrateUserPrices
+  const wired = await import('../../client/src/utils/pricing.js?fresh=wired');
+  assert.ok(calls.some((u) => /subscription-usage\?probe=1/.test(String(u))),
+    `浏览器环境下模块没有自动探测(接线断了):${JSON.stringify(calls)}`);
+  await wired.probeOfficialBilling();  // 等 import 时那次探测落地
+  assert.equal(store['cgui-official-billing'], 'oauth', '自动探测拿到用量却没写记录');
+  assert.equal(wired.computeCost('claude-opus-5', IO, THIRD), null,
+    '自动探测的结果没有作用到计价上');
+  delete globalThis.window;
+}
+
+// ── 服务端那道门的放行条件 ──────────────────────────────────────────
+// 改回 `if (!isOfficial())`,挂着第三方 provider 时探测就恒拿到 official:false,B 整条失效,
+// 而客户端全部单测照样绿。真路由测试要么打真 API、要么改用户的 settings.json,两者都不许,
+// 故按源码钉死这一行的**完整条件**(不是 includes 字段名那种弱形式 —— 那连语义写反都放行)。
+{
+  const { readFile } = await import('node:fs/promises');
+  const src = await readFile(new URL('../../server/routes/subscription-usage.js', import.meta.url), 'utf8');
+  const gate = src.match(/if \(([^\n]*?)\) return res\.json\(\{ official: false \}\);/);
+  assert.ok(gate, '没找到 subscription-usage 的 official 门(改写法了就同步这条断言)');
+  assert.equal(gate[1].trim(), '!req.query.probe && !isOfficial()',
+    `门的放行条件被改动,探测将拿不到答案:${gate[1]}`);
+}
+
 console.log('check-billing-probe OK');
+process.exit(0);  // 模块的浏览器分支挂了个 3s 的 REMOTE 刷新定时器,不必等它

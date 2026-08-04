@@ -143,6 +143,30 @@ setUserPrices([P({ 'claude-sonnet-4-5': { in: 720, out: 720 } })]);
 assert.equal(userModelPrice('claude-sonnet-4-5-20250929'), null, '不该做去日期后缀兜底');
 near(computeCost('claude-sonnet-4-5-20250929', IO1M).totalUsd, 3 + 15, '去日期后缀兜底污染了内置价');
 
+// ⑱ R5-c 的另一条红线:剥命名空间**不许**把内置表刻意区分的两个模型合并。
+// 'openai/gpt-oss-120b' 是 Groq($0.15/$0.60),'gpt-oss-120b' 是 Cerebras($0.35/$0.75)——
+// 同一份 PRICES 里就是两个价不同的模型。无条件剥前缀会让用户填的 Cerebras 价被 Groq 的
+// 顶掉,差 23 倍且完全静默(而且口径标签还写着"按你填写的单价",比少算成官网价更隐蔽)。
+// 装填两遍(精确键先全部落位)+ 查询按 精确 → 归一,两者缺一这组就红。
+const GROQ = { 'openai/gpt-oss-120b': { in: 1.08, out: 4.32 } };   // ¥1.08/¥4.32 = $0.15/$0.60
+const CEREBRAS = { 'gpt-oss-120b': { in: 25.2, out: 54.0 } };      // ¥25.2/¥54.0 = $3.50/$7.50
+for (const order of [[GROQ, CEREBRAS], [CEREBRAS, GROQ]]) {  // 结果不许依赖 provider 列表顺序
+  setUserPrices(order.map((mp) => P(mp)));
+  near(computeCost('openai/gpt-oss-120b', IO1M).totalUsd, 0.15 + 0.60, 'Groq 那行被串了');
+  near(computeCost('gpt-oss-120b', IO1M).totalUsd, 3.50 + 7.50, 'Cerebras 那行被 Groq 的价顶掉');
+}
+// 命名空间不同、基名相同的一般情形同样各归各。
+setUserPrices([P({ 'groq/foo': { in: 7.2, out: 0 } }), P({ 'cerebras/foo': { in: 72, out: 0 } })]);
+near(computeCost('groq/foo', IN1M).totalUsd, 1, 'groq/foo 被串');
+near(computeCost('cerebras/foo', IN1M).totalUsd, 10, 'cerebras/foo 被 groq/foo 顶掉');
+// 精确整体优先于"当前激活":激活的是 Groq,但消息的 model 精确等于 Cerebras 那个 id。
+// 精确讲的是模型身份,isCurrent 只是同一身份撞车时的裁决规则。
+setUserPrices([P(CEREBRAS), P(GROQ, true)]);
+near(computeCost('gpt-oss-120b', IO1M).totalUsd, 3.50 + 7.50, '激活 provider 的归一键抢了别人的精确键');
+// C 的正当收益不能丢:只配了一个时,另一种写法仍靠归一层命中。
+setUserPrices([P(GROQ)]);
+near(computeCost('gpt-oss-120b', IO1M).totalUsd, 0.15 + 0.60, '只配一个时归一层兜底失效');
+
 // ⑰ R5-d:provider 编辑表单的 dirty 判据必须覆盖所有会被保存的字段。漏一个,只填了那个
 // 字段就点下拉外面 = 下拉静默关掉、输入丢失(ctxWindow 是老问题,modelPrices 是 R3 新增)。
 // 判据是组件内部的派生值、没法单独 import,这里按源码断言 —— 抓的是"加了字段忘了加进 dirty"
