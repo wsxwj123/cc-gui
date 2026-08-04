@@ -7,9 +7,14 @@
 
 // 上下文窗口与自动压缩联动:不再在模板里写死窗口值(死数据必然过时,如 deepseek v4
 // 发布后 128K 旧值立刻错)。窗口解析全部在 server/routes/chat.js 的 resolveModelWindow:
-// [1m] 后缀 > 获取模型时实抓的 per-模型窗口(kimi/openrouter 等 API 返回)> 按模型名的
-// 内置规则表(deepseek-v4→1M 等,新模型加一行)> Provider 表单手填 contextWindow。
-// 模板仍支持 contextWindow 字段(选模板预填表单),但仅在上述来源全部缺失时才需要。
+// [1m] 后缀 > 获取模型时实抓的 per-模型窗口(kimi/openrouter 等 API 返回)> Provider
+// 表单手填 contextWindow > 按模型名的内置规则表(deepseek-v4→1M 等,新模型加一行)。
+// 手填排在规则表之前:规则表是"按模型名猜这就是官方那个模型",中转站用官方模型名
+// 转售却给更小的窗口时这个赌注不成立,必须让用户明示的值赢(否则规则表报大 → 永不
+// 主动压缩 → 直接撞上游 context overflow)。
+// 模板【不填】contextWindow:内置 provider 的窗口由规则表负责,模板一旦预填死数据,
+// 用户没主动填过也会被当成"用户明示"而压掉规则表。此优先级还记在
+// server/routes/chat.js resolveModelWindow 与 SettingsPanel 的说明文案里,改一处要三处同步。
 export const BUILTIN_PROVIDERS = [
   // ─── OpenAI 兼容(走内置 openai-proxy 转 anthropic 协议给 claude CLI) ───
   {

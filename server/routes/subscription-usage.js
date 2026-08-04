@@ -117,8 +117,12 @@ function fetchUsage(token, ua) {
   });
 }
 
-router.get('/subscription-usage', async (_req, res) => {
-  if (!isOfficial()) return res.json({ official: false });
+router.get('/subscription-usage', async (req, res) => {
+  // 额度卡问的是"当前 provider 的额度",非官方时整卡隐藏 → isOfficial() 门。
+  // R5-b:计价层的 ?probe=1 问的是另一件事 ——"这台机器是否存在官方订阅"(OAuth 凭证是
+  // 机器级的,与当前挂着哪个 provider 无关),那道门对它是误伤:挂着第三方 provider 时
+  // 恒返回 official:false,探测永远拿不到答案,而这正是它要覆盖的场景。
+  if (!req.query.probe && !isOfficial()) return res.json({ official: false });
   const now = Date.now();
   // 冷却期内一律不打真 API:有旧数据就回放(标 degraded,不把陈旧数据伪装成新鲜),
   // 没有就回上次的错误文案。

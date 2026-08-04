@@ -51,8 +51,9 @@ import BtwWindow from './components/BtwWindow.jsx';
 import EnvCheckPanel from './components/EnvCheckPanel.jsx';
 import { ArtifactDock } from './components/ArtifactPreview.jsx';
 import { FullDiskAccessModal } from './components/FullDiskAccessModal.jsx';
+import { ProviderPriceEditor } from './components/ProviderPriceEditor.jsx';
 import { BUILTIN_PROVIDERS, findBuiltin } from './utils/builtinProviders.js';
-import { computeCost, formatCost } from './utils/pricing.js';
+import { computeCost, formatCost, setUserPrices, observeOfficialBilling } from './utils/pricing.js';
 import { extractToolResultText, finalizePendingToolCalls, applyFinalizedToBlocks } from './utils/toolResult.js';
 import { rebuildTodosFromTaskCalls } from './utils/todos.js';
 import { isInitBindingOrigin, migrateDraftQueue, paneMessagesOwned, resolveHistModel, resolveSendModel } from './utils/routing.js';
@@ -7756,6 +7757,9 @@ function ProviderManager({ initialEditId = null }) {
       setOpenaiProviders(Array.isArray(d.openaiProviders) ? d.openaiProviders : []);
       setCustomProviders(Array.isArray(d.customProviders) ? d.customProviders : []);
       setOverrides(d.overrides && typeof d.overrides === 'object' ? d.overrides : {});
+      // R3:顺手把用户自填单价装进计价层。pricing.js 自己也会 hydrate + 监听
+      // cgui:provider-change,这里只是省掉一次往返,不是唯一入口。
+      setUserPrices(Array.isArray(d.customProviders) ? d.customProviders : []);
     }).catch(() => {});
     fetch('/api/providers/import-status').then((r) => r.json())
       .then((d) => setImportStatus(d || {})).catch(() => {});
@@ -8158,7 +8162,7 @@ function ContextBreakdownButton({ contextTokens, contextWindow, contextPct, fmtT
             <span className="text-ink-faint w-14 shrink-0">累计 token</span>
             <span className="font-mono text-ink-muted">{(info.totalAllTokens || 0).toLocaleString()}</span>
             {info.totalCostUsd > 0 && (
-              <span className="font-mono text-accent/80" title="按当前各模型官网价估算的累计费用（人民币，按 1 USD ≈ 7.2 CNY 换算）">
+              <span className="font-mono text-accent/80" title="按各模型官网价估算的累计费用（人民币，按 1 USD ≈ 7.2 CNY 换算）。套餐制模型（Claude 官方订阅、Kimi Code 会员套餐）不按 token 计费，不计入此数。若模型经中转站接入，实际单价以服务商为准。">
                 · {formatCost(info.totalCostUsd)}
               </span>
             )}
@@ -8674,6 +8678,30 @@ function OpenAIModelManager({ provider, onSaved }) {
   );
 }
 
+// R3:存储形态(数字 / {plan:true})↔ 编辑器形态(字符串 + plan 布尔)互转。
+// 编辑器里存字符串是为了让输入框能停在 '1.' 这种中间态,保存时才转数字。
+const pricesToForm = (mp) => Object.fromEntries(Object.entries(mp || {}).map(([id, e]) => [id, {
+  in: e?.in != null ? String(e.in) : '',
+  out: e?.out != null ? String(e.out) : '',
+  cacheRead: e?.cacheRead != null ? String(e.cacheRead) : '',
+  cacheWrite: e?.cacheWrite != null ? String(e.cacheWrite) : '',
+  plan: e?.plan === true,
+}]));
+const pricesToWire = (form) => {
+  const out = {};
+  for (const [id, r] of Object.entries(form || {})) {
+    if (r?.plan) { out[id] = { plan: true }; continue; }  // 套餐档:价格字段无意义
+    const e = {};
+    for (const k of ['in', 'out', 'cacheRead', 'cacheWrite']) {
+      const v = String(r?.[k] ?? '').trim();
+      if (v !== '' && Number.isFinite(Number(v))) e[k] = Number(v);
+    }
+    // 输入价与输出价都没填 = 这行等于没填(只填缓存价无法计价)→ 不提交,回落内置表。
+    if (e.in !== undefined || e.out !== undefined) out[id] = e;
+  }
+  return out;
+};
+
 // Shared add-custom-provider form. Both protocols; can live-fetch the upstream's
 // model catalogue via /v1/models. onSaved() refreshes the parent's list.
 // customCount = 保存前父级自定义 provider 数:仅添加**第一个**自定义 provider 时
@@ -8693,6 +8721,9 @@ function CustomProviderForm({ onSaved, editing, onCancel, onDirtyChange, customC
   // 上下文窗口(token,可选):自动压缩窗口按它联动(切到该 provider 时压缩线=窗口×0.85)。
   // 空 = 不联动(CLI 按 200K 假设;窗口更大的模型会被过早压缩用不满)。
   const [ctxWindow, setCtxWindow] = useState('');
+  // R3:每模型实付单价(CNY/百万 token)。编辑器内部值是字符串(输入框原样),保存时转数字。
+  // 形态 { [modelId]: { in, out, cacheRead, cacheWrite, plan } };空 = 全部回落内置官网价。
+  const [modelPrices, setModelPrices] = useState({});
   const [busy, setBusy] = useState('');
   const isEdit = !!editing;
   const formRef = useRef(null);
@@ -8728,17 +8759,22 @@ function CustomProviderForm({ onSaved, editing, onCancel, onDirtyChange, customC
       setDefaultModel(editing.defaultModel || '');
       setTierModels({ haiku: editing.tierModels?.haiku || '', sonnet: editing.tierModels?.sonnet || '', opus: editing.tierModels?.opus || '', fable: editing.tierModels?.fable || '' });
       setCtxWindow(editing.contextWindow ? String(editing.contextWindow) : '');
+      setModelPrices(pricesToForm(editing.modelPrices));
       setTestResult(null); // 切到另一个 provider 编辑时清掉上一个的测试结果横幅(否则误导)
       setBusy('');
       setOpen(true);
     })();
     return () => { stale = true; };
   }, [editing?.id]);
-  const reset = () => { setName(''); setType('openai'); setBaseURL(''); setApiKey(''); setModelsText(''); setDefaultModel(''); setTierModels({ haiku: '', sonnet: '', opus: '', fable: '' }); setTestResult(null); setOpen(false); };
+  const reset = () => { setName(''); setType('openai'); setBaseURL(''); setApiKey(''); setModelsText(''); setDefaultModel(''); setTierModels({ haiku: '', sonnet: '', opus: '', fable: '' }); setCtxWindow(''); setModelPrices({}); setTestResult(null); setOpen(false); };
   const close = () => { reset(); onCancel?.(); };
   const parseModels = () => modelsText.split(/[\n,]+/).map((s) => s.trim()).filter(Boolean);
   // BZ-2:有未保存内容时上报 dirty,父级据此阻止外部点击/Esc 关闭下拉(避免丢输入)。
-  const dirty = (open || isEdit) && !!(name.trim() || baseURL.trim() || apiKey.trim() || modelsText.trim());
+  // R5-d:ctxWindow / modelPrices 原先不在判据里 —— 只填了上下文窗口或单价就点下拉外面,
+  // 下拉静默关掉、输入没了。modelPrices 只要有行就算 dirty(值全空也是用户选过模型的结果,
+  // 丢掉同样是丢输入);编辑态本来就因预填的 name/baseURL 恒 dirty,这两项只在新增态起作用。
+  const dirty = (open || isEdit) && !!(name.trim() || baseURL.trim() || apiKey.trim() || modelsText.trim()
+    || ctxWindow.trim() || Object.keys(modelPrices).length);
   useEffect(() => { onDirtyChange?.(dirty); }, [dirty]);
   useEffect(() => () => onDirtyChange?.(false), []); // 卸载时清掉,避免残留 dirty 卡住关闭
   // BZ-1:测试连接 —— 给默认模型/列表第一个发最小请求,验证鉴权 + 模型可达。
@@ -8813,6 +8849,8 @@ function CustomProviderForm({ onSaved, editing, onCancel, onDirtyChange, customC
       };
       // 上下文窗口(可选):空串 = 清除;后端校验范围 [1000, 10M]。
       body.contextWindow = ctxWindow.trim() ? Number(ctxWindow.trim()) : null;
+      // R3:每模型单价(可选)。永远发全量 —— 删掉的行必须真的消失(后端整体覆盖)。
+      body.modelPrices = pricesToWire(modelPrices);
       // Edit mode: a blank key means "keep the stored one" (the client never holds
       // the real key), so only send apiKey when the user actually typed a new one.
       if (!isEdit || apiKey.trim()) body.apiKey = apiKey;
@@ -8949,6 +8987,9 @@ function CustomProviderForm({ onSaved, editing, onCancel, onDirtyChange, customC
           className={`${inputCls} flex-1 font-mono`}
           title="该 provider 模型的上下文窗口(token)。填了则切到此 provider 时自动压缩窗口按它联动(×0.85);留空 = CLI 默认 200K 假设。模型名带 [1m] 时无需填。" />
       </div>
+      {/* R3:每模型实付单价。中转站按服务商自定价、套餐按月计费,内置官网价都算不准;
+          jsonl 又不记 baseURL/provider 事后反推不了 → 只能由用户填。填了就赢过所有内置来源。 */}
+      <ProviderPriceEditor value={modelPrices} onChange={setModelPrices} models={parseModels()} inputCls={inputCls} />
       <div className="flex gap-2">
         <button onClick={fetchModels} disabled={!!busy}
           className="flex-1 px-3 py-2 text-[12px] border border-accent text-accent rounded-lg disabled:opacity-50">
@@ -9486,6 +9527,11 @@ function ShortcutsPanel({ open, onClose }) {
 // ─── Main App ──────────────────────────────────────────────────
 export default function App() {
   useWebSocket();
+  // R4-b:记下"官方 provider 当前是怎么计费的"(OAuth 订阅 / API key 按量)。历史消息里
+  // 没有当时的鉴权方式,拿此刻的顶替会让切一次 provider 就把订阅期的 Claude 消息按 API
+  // 单价重算(判官实测 ¥4,690 → ¥498,876)。这里是全局唯一观察点,跟随 store 的刷新节奏。
+  const _provForBilling = useStore((s) => s.currentProvider);
+  useEffect(() => { observeOfficialBilling(_provForBilling); }, [_provForBilling]);
   // #12 后台任务全局活性探测(判官打回修复):bgTasks 的 status 只有创建时的 'running'
   // (自然结束无退出码事件;监控卡的 phase 是组件本地态、面板关了就没人测)→ 任务清单
   // 转圈据 status 判会永转。这里全局唯一轮询:对非终态任务每 5s 查 output 文件 size,

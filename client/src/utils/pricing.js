@@ -3,7 +3,9 @@
 // 这是**离线兜底表**;运行时优先用 /api/pricing 下发的 LiteLLM 远端表(REMOTE),
 // 覆盖更广更新更勤。手抄表只在 REMOTE 无该 model 时兜底。
 // 全量核对日期 2026-07-16(Anthropic/DeepSeek 官方页直核;国产厂官方页 JS 渲染抓不到,
-// 走搜索聚合近似,已逐条标注来源与置信度)。四价含义:input / output / cacheRead(缓存读)
+// 走搜索聚合近似,已逐条标注来源与置信度)。2026-08-04 按"历史里真实出现过的 model id"
+// 抽查重核 Anthropic / OpenAI / DeepSeek / Kimi / MiMo 官方页(GLM 本机零调用未重核),
+// 补齐有调用记录却缺条目的 id,详见各段注释。四价含义:input / output / cacheRead(缓存读)
 // / cacheWrite(缓存写)。usd()/cny() 未显式给缓存价时按 Anthropic 通用规则默认
 // cacheRead=0.1×input、cacheWrite=1.25×input(5min TTL)。
 
@@ -26,13 +28,16 @@ const usd = (input, output, cacheRead = input * 0.1, cacheWrite = input * 1.25) 
 // cache_write here is the 5-min TTL variant (1.25× input). 1-hr write is 2× input.
 const PRICES = {
   // Claude — Anthropic official
-  // 官方页直核 2026-07-16: platform.claude.com/docs/en/about-claude/pricing
+  // 官方页直核 2026-08-04(上次 2026-07-16,数字未变): platform.claude.com/docs/en/about-claude/pricing
   // cacheWrite 列取 5min TTL 变体(=1.25×input);1h write=2×input 不建模。
   // Fable 5 / Mythos 5(限量): $10/$50,cw $12.50,cr $1(用新 tokenizer,token 量 ~+30%)。
   'claude-fable-5':              usd(10, 50, 1, 12.5),
   'claude-mythos-5':             usd(10, 50, 1, 12.5),
   // Sonnet 5: 引导价 $2/$10(至 2026-08-31),之后 $3/$15。此处按引导价(cw $2.50/cr $0.20)。
   'claude-sonnet-5':             usd(2, 10, 0.2, 2.5),
+  // Opus 5: 官方页 $5/$25、5m 写 $6.25、命中 $0.50(= usd() 默认倍率)。历史里 4.2 万条
+  // 调用却一直缺条目,只靠 LiteLLM 远端表兜着 —— 远端拉不到时整批消息无价可显。
+  'claude-opus-5':               usd(5, 25),
   'claude-opus-4-8':             usd(5, 25),       // 4.8 用新 tokenizer,可能多消耗 ~35% token
   'claude-opus-4-7':             usd(5, 25),
   'claude-opus-4-6':             usd(5, 25),
@@ -46,9 +51,19 @@ const PRICES = {
   'claude-haiku-4-5-20251001':   usd(1, 5),
   'claude-3-5-haiku-20241022':   usd(0.80, 4),
 
-  // DeepSeek — USD/MTok, 官方页直核 2026-07-16 api-docs.deepseek.com/quick_start/pricing
-  // (与上次一致未变;官方页以 USD 计价)。cacheWrite=input:DeepSeek 不收 cache 写入费,cache miss 即标准 input 价。
-  // deepseek-chat/reasoner 是 v4-flash 的 non-thinking/thinking 别名(2026-07-24 弃用,价格同)。
+  // DeepSeek — USD/MTok, 官方页直核 2026-08-04(与 2026-07-16 一致未变)
+  // api-docs.deepseek.com/quick_start/pricing。cacheWrite=input:DeepSeek 不收 cache 写入费,
+  // cache miss 即标准 input 价(实测 400 条 deepseek 记录 cache_creation 恒为 0,该列不参与计算)。
+  // 【峰谷计价——已核实但刻意不实现】官方页公告原文:"DeepSeek API 服务即将采用峰谷定价
+  // 策略,高峰时段价格为平时价格 2 倍,适用所有计费项,具体时间以正式通知为准。【高峰时段
+  // 定义:北京时间每日 9:00~12:00 和 14:00~18:00】"。关键词是"即将采用"+"以正式通知为准":
+  // 政策尚未生效、也没有生效日期。下表就是现行实际计费的"平时价格"。现在加 2× 时段维度,
+  // 等于把今天所有历史消息按一个还没生效的规则算错一倍;等正式通知后再按消息 timestamp
+  // 补 peak/offPeak 两组价(jsonl timestamp 是 UTC ISO8601,北京时间恒 UTC+8 无夏令时,
+  // 换算本身可靠,唯一缺的就是生效日期)。
+  // deepseek-chat/reasoner 是 v4-flash 的 non-thinking/thinking 别名(2026-07-24 弃用);
+  // 官方现行价目页已不再列出这两个 id,保留作兜底(运行时 LiteLLM 远端表优先,那边仍给
+  // 旧价 $0.28/$0.42)。本机历史零调用,不动。
   'deepseek-chat':               usd(0.14, 0.28, 0.0028, 0.14),    // v4-flash non-thinking
   'deepseek-reasoner':           usd(0.14, 0.28, 0.0028, 0.14),    // v4-flash thinking
   'deepseek-v4-flash':           usd(0.14, 0.28, 0.0028, 0.14),
@@ -56,17 +71,28 @@ const PRICES = {
   'deepseek-v3.1':               usd(0.14, 0.28, 0.0028, 0.14),    // 旧版,官方现表无单列→按 v4-flash 兜底
   'deepseek-v3.2-exp':           usd(0.14, 0.28, 0.0028, 0.14),    // 同上
 
-  // MiMo 小米 — 2026-07-13 核实 mimo.mi.com 官方(CNY);cache 命中价极低单列
+  // MiMo 小米 — 2026-08-04 官方页直核 mimo.mi.com/pricing(CNY,与 2026-07-13 一致未变);
+  // cache 命中价极低单列。无时段/长度阶梯,单组固定价。
   'mimo-v2.5':                   cny(1, 2, 0.02),
   'mimo-v2.5-pro':               cny(3, 6, 0.025),  // 项目实际部署此档
+  // UltraSpeed 是独立档(¥9/¥18,命中 ¥0.075),没有这个键时前缀兜底会落到 pro 档 = 少算 3×。
+  'mimo-v2.5-pro-ultraspeed':    cny(9, 18, 0.075),
+  // mimo-v2 系(mimo-v2-flash 等)2026-06-30 已下线,官方价目页无条目 → 按"拿不到不编"留空。
 
-  // OpenAI — 2026-06-05 拉取 developers.openai.com
-  'gpt-5.5':                     usd(5, 30, 0.50),
-  'gpt-5.5-pro':                 usd(30, 180, 30),  // pro 无 cache 优惠,cacheRead = input
-  'gpt-5.4':                     usd(2.50, 15, 0.25),
-  'gpt-5.4-mini':                usd(0.75, 4.50, 0.075),
-  'gpt-5.4-nano':                usd(0.20, 1.25, 0.02),
-  'gpt-5.4-pro':                 usd(30, 180, 30),
+  // OpenAI — 2026-08-04 官方页直核 developers.openai.com/api/docs/pricing(补 5.6 系;
+  // 5.4/5.5 的 input/output/cacheRead 沿用 2026-06-05 录入值,与 LiteLLM 表一致;
+  // cacheWrite 列本轮统一成 input,与 LiteLLM(按 1.25×input 生成)不同,见下)。
+  // OpenAI 只有"缓存命中"折扣、不收缓存写入费 → cacheWrite=input(实测 3313 条 gpt 记录
+  // cache_creation 恒为 0,这一列不参与计算,改的是口径不是数字)。
+  'gpt-5.6-sol':                 usd(5, 30, 0.50, 5),
+  'gpt-5.6-terra':               usd(2, 12, 0.20, 2),
+  'gpt-5.6-luna':                usd(0.20, 1.20, 0.02, 0.20),
+  'gpt-5.5':                     usd(5, 30, 0.50, 5),
+  'gpt-5.5-pro':                 usd(30, 180, 30, 30),  // pro 无 cache 优惠,cacheRead = input
+  'gpt-5.4':                     usd(2.50, 15, 0.25, 2.50),
+  'gpt-5.4-mini':                usd(0.75, 4.50, 0.075, 0.75),
+  'gpt-5.4-nano':                usd(0.20, 1.25, 0.02, 0.20),
+  'gpt-5.4-pro':                 usd(30, 180, 30, 30),
 
   // Google Gemini — 2026-06-05 拉取 ai.google.dev,paid tier
   'gemini-2.5-pro':              usd(1.25, 10, 0.125),
@@ -78,6 +104,8 @@ const PRICES = {
   'gemini-3.5-flash':            usd(1.50, 9.00, 0.15),
 
   // Moonshot Kimi — 2026-07-17 官方页直核 platform.kimi.com/docs/pricing/chat-k3|k27-code|k26(CNY)
+  // 2026-08-04 重核 chat-k3:命中 ¥2 / 未命中 ¥20 / 输出 ¥100,与下表一致;官方页无时段折扣、
+  // 无按上下文长度的阶梯,单组固定价。
   // cacheWrite=input:Kimi 只有缓存命中/未命中两档、不收 cache 写入费,cache miss 即标准 input 价(同 DeepSeek)。
   'kimi-k3':                     cny(20, 100, 2, 20),
   'kimi-k2.7-code-highspeed':    cny(13, 54, 2.6, 13),
@@ -236,39 +264,166 @@ function remoteLookup(model) {
   return e ? { ...e, currency: 'USD' } : null;
 }
 
+// ── R3: 用户自填单价(最高优先级,赢过 REMOTE / PRICES / ALIASES)──────────
+// 内置价表永远算不准两类情况,而只有用户自己知道实付多少:
+//   ① 中转站:同一个 gpt-5.6-sol,走中转站是服务商自定价(通常低于官网),走本地代理是
+//      订阅额度。jsonl 顶层字段只有 uuid/timestamp/cwd/sessionId/version/gitBranch,
+//      没有 baseURL/provider,事后无法反推 → 只能由用户在 provider 表单里填。
+//   ② 套餐包月:付的是月费不是 token 费,按单价算出的金额没有意义 → 只显示用量。
+// 数据来自 provider 条目的 modelPrices:
+//   { [modelId]: { in, out, cacheRead, cacheWrite } | { plan: true } }
+// 单位【人民币元 / 每百万 token】(内部按 CNY_TO_USD 折 USD,与其余价表同口径)。
+// 缺省语义(与 UI 说明逐字一致):
+//   · in / out 留空 → 该项回落内置表同项(内置表也没有该模型时按 0),不是把整条按 0 算;
+//   · 缓存两项留空 → 按 cacheRead=0.1×in、cacheWrite=1.25×in(与 cny()/usd() 同默认倍率);
+//   · in 与 out 都没填 → 整条当没填,完全回落内置表。
+// 匹配【按归一化后的 model id 匹配,与当前 provider 无关】—— 和 lookupPrice 的"计价第一
+// 依据永远是这条消息实际用的模型"是同一条原则(jsonl 只有 model)。
+const UP_KEY = 'cgui-user-prices';
+let USER_ACTIVE = new Map();  // 当前激活 provider 填的价(精确键 + 归一键两层)
+let USER_ANY = new Map();     // 全部 provider 填的价(同键取列表里第一个)
+
+/**
+ * R5-c:用户价查找的两层键。存入与查询都走这两个函数,故两侧写法不一致也能对上。
+ *   exactKey — trim + 小写。用户输入的空白与大小写不该导致落空,但 id 本身一字不改。
+ *   normModelKey — 在 exactKey 基础上再剥 [1m] 后缀与命名空间前缀。
+ * 为什么要归一层:同一个模型在历史里两种形态并存 —— 'gpt-5.6-sol' 与 'openai/gpt-5.6-sol'、
+ * 'kimi-k3' 与 'moonshotai/kimi-k3';[1m] 是 CLI 通用的 1M 上下文后缀(同一个模型)。
+ * 原先纯精确匹配,带前缀/带 [1m] 的那部分消息会**静默**回落官网价,用户看不出来。
+ * 【为什么归一层不能单独用】命名空间不是纯噪声:内置表里 'openai/gpt-oss-120b'(Groq,
+ * $0.15/$0.60)与 'gpt-oss-120b'(Cerebras,$0.35/$0.75)本来就是两个价不同的模型(见
+ * PRICES 里那两行的注释)。无条件剥前缀会把它们合成一个键,用户填的 Cerebras 价被 Groq
+ * 的顶掉、差 23 倍且完全静默 —— 比"少算成官网价"更隐蔽(口径标签还写着"按你填写的单价")。
+ * 所以:装填两遍(精确键全部落位后,归一键只补空位),查询也按 精确 → 归一 的顺序。
+ * 【仍然不做】去日期后缀 / 最长前缀兜底:填 'gpt-5.6' 不许把 'gpt-5.6-luna' 一起计价 ——
+ * 那是当初拒绝前缀兜底的理由,至今成立。要覆盖多个 id 就多填几行。
+ * 【已知天花板】'k3' 与 'k3[1m]' 归一后同键,分不出 1M 变体的差价(用户也没有别的地方
+ * 能表达这个差价);两个都填时精确键各自成立,只有没精确命中时才落到归一层。
+ */
+const exactKey = (id) => String(id || '').trim().toLowerCase();
+function normModelKey(id) {
+  const s = exactKey(id).replace(/\[1m\]$/, '');
+  return s.slice(s.lastIndexOf('/') + 1);
+}
+
+function sanitizeUserPrice(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  if (raw.plan === true) return { plan: true };
+  const n = (v) => {
+    const x = typeof v === 'string' ? Number(v.trim() || NaN) : v;
+    return typeof x === 'number' && Number.isFinite(x) && x >= 0 ? x : null;
+  };
+  const e = { in: n(raw.in), out: n(raw.out), cacheRead: n(raw.cacheRead), cacheWrite: n(raw.cacheWrite) };
+  return (e.in != null || e.out != null) ? e : null;  // 一项价都没有 = 当没填
+}
+
+/**
+ * 把 provider 列表里的 modelPrices 装进查价层。入参 = GET /api/providers 的
+ * customProviders(含 isCurrent),不含也永远不该含 apiKey。
+ * 【同 id 冲突】两个 provider 给同一个 model id 填了不同价时:优先当前激活 provider 的,
+ * 否则取列表里第一个匹配。这是 jsonl 不记 provider 造成的固有天花板 —— 一条历史消息
+ * 只留下 model id,分不出它当年走的是哪个 provider,任何规则都是猜,取"当前激活的"至少
+ * 让用户看到的数字和他此刻的账单口径一致。
+ */
+export function setUserPrices(providers, persist = true) {
+  const active = new Map();
+  const any = new Map();
+  const slim = [];
+  const flat = [];  // [{ isCurrent, id, e }],保持 provider 列表顺序
+  for (const p of Array.isArray(providers) ? providers : []) {
+    const mp = p && p.modelPrices;
+    if (!mp || typeof mp !== 'object') continue;
+    let kept = false;
+    for (const [id, raw] of Object.entries(mp)) {
+      const e = sanitizeUserPrice(raw);
+      if (!e || !exactKey(id)) continue;
+      kept = true;
+      flat.push({ isCurrent: !!p.isCurrent, id, e });
+    }
+    if (kept) slim.push({ isCurrent: !!p.isCurrent, modelPrices: mp });
+  }
+  // 两遍装填,键按种类打 'e:'/'n:' 前缀分开命名空间。前缀不能省:两种键混在同一个 Map 里
+  // 时,'gpt-oss-120b' 既可能是 Cerebras 的**精确**键、也可能是 Groq 的 'openai/…' 归一
+  // 出来的键,查询方分不出命中的是哪一种 —— 于是"精确优先"退化成"谁先写进去谁赢"。
+  for (const [tag, keyOf] of [['e:', exactKey], ['n:', normModelKey]]) {
+    for (const { isCurrent, id, e } of flat) {
+      const raw = keyOf(id);
+      if (!raw) continue;
+      const k = tag + raw;
+      if (isCurrent && !active.has(k)) active.set(k, e);
+      if (!any.has(k)) any.set(k, e);
+    }
+  }
+  USER_ACTIVE = active;
+  USER_ANY = any;
+  // 缓存使下次加载首帧就有用户价(与 REMOTE 同一套路);hydrate 成功后覆盖。
+  if (persist) { try { localStorage.setItem(UP_KEY, JSON.stringify(slim)); } catch { /* 隐私模式/配额 */ } }
+}
+
+/**
+ * 该 model id 的用户配置条目({in,out,...} 或 {plan:true}),没有则 null。
+ * 顺序:精确键(激活 → 任意)→ 归一键(激活 → 任意)。
+ * 精确整体优先于"当前激活" —— 精确匹配讲的是**模型身份**(Groq 的 openai/gpt-oss-120b
+ * 与 Cerebras 的 gpt-oss-120b 是两个模型),isCurrent 只是同一身份撞车时的裁决规则。
+ */
+export function userModelPrice(model) {
+  const exact = exactKey(model);
+  if (!exact) return null;
+  const norm = 'n:' + normModelKey(model);
+  return USER_ACTIVE.get('e:' + exact) || USER_ANY.get('e:' + exact)
+    || USER_ACTIVE.get(norm) || USER_ANY.get(norm) || null;
+}
+
+// 用户条目 → 与 PRICES 同形状的四价条目(USD/1M)。plan 档不产生价格(走 isPlanBilling)。
+function userPriceEntry(model) {
+  const u = userModelPrice(model);
+  if (!u || u.plan) return null;
+  const base = lookupByModel(model);  // 未填项的回落源,可能为 null
+  const input  = u.in  != null ? u.in  * CNY_TO_USD : (base ? base.input : 0);
+  const output = u.out != null ? u.out * CNY_TO_USD : (base ? base.output : 0);
+  const fallbackRead  = u.in != null ? input * 0.1  : (base ? base.cacheRead : 0);
+  const fallbackWrite = u.in != null ? input * 1.25 : (base ? base.cacheWrite : 0);
+  return {
+    input,
+    output,
+    cacheRead:  u.cacheRead  != null ? u.cacheRead  * CNY_TO_USD : fallbackRead,
+    cacheWrite: u.cacheWrite != null ? u.cacheWrite * CNY_TO_USD : fallbackWrite,
+    currency: 'CNY',
+    source: 'user',
+  };
+}
+
+async function hydrateUserPrices() {
+  try {
+    const r = await fetch('/api/providers');
+    const j = await r.json();
+    if (j && Array.isArray(j.customProviders)) setUserPrices(j.customProviders);
+  } catch { /* 拉不到 → 沿用 localStorage 缓存 */ }
+}
+if (typeof window !== 'undefined') {
+  try { setUserPrices(JSON.parse(localStorage.getItem(UP_KEY) || '[]'), false); } catch { /* 缓存损坏 */ }
+  // 自 hydrate 兜底:不依赖任何组件的挂载顺序。provider 增删改/切换后 App 会广播
+  // cgui:provider-change,顺带重拉一次,改完价格立即生效不用刷新。
+  hydrateUserPrices();
+  window.addEventListener('cgui:provider-change', hydrateUserPrices);
+}
+
 // Common aliases the CLI may emit.
+// 裸别名对应哪一代是有歧义的(会话当年跑的可能是别的代),只能取"该别名当前指向的
+// 主力型号";已存在的三条不动(改了也只是把一个猜测换成另一个猜测)。
 const ALIASES = {
   'sonnet': 'claude-sonnet-4-6',
   'opus':   'claude-opus-4-7',
   'haiku':  'claude-haiku-4-5',
+  // 与上面三条同理:CLI 发裸 'fable' 时原先四路查价全落空 = 无价可显。
+  // (本机 3749 个 jsonl 的 assistant 消息里实际出现 0 次 —— 上一版注释写的"717 条"
+  //  是拿 rg 抓 "model":" 时把 Agent 工具入参 model:"fable" 也算进去了,不是真调用。)
+  'fable':  'claude-fable-5',
 };
 
-// When provider routing is in effect (cc switch), the stream-json's model
-// field still says "claude-sonnet-X-X" because the CLI is Claude-shaped. The
-// real upstream is in ANTHROPIC_MODEL env. We choose a price by provider hint
-// + model resolution rules:
-//   anthropic / bedrock / vertex → Claude prices for the (displayed) model
-//   deepseek                     → DeepSeek prices for resolvedModel or default
-//   mimo / openrouter / silicon  → unsupported, return null (don't lie)
-function lookupPrice(model, provider) {
-  if (!model && !(provider && provider.model)) return null;
-  const hint = (provider && provider.providerHint) || 'anthropic';
-
-  if (hint === 'deepseek') {
-    // Prefer env-set upstream model name; fall back to deepseek-chat default.
-    const remote = remoteLookup(provider.model);
-    if (remote) return remote;
-    const target = (provider.model && PRICES[provider.model])
-      ? provider.model
-      : (PRICES['deepseek-' + (provider.model || '')] ? 'deepseek-' + provider.model : 'deepseek-chat');
-    return PRICES[target] || PRICES['deepseek-chat'];
-  }
-  if (hint === 'mimo') {
-    // 项目实际部署 mimo-v2.5-pro;provider.model 精确匹配优先,兜底 pro(原硬返回非-pro 偏低 3×)
-    return (provider && provider.model && PRICES[provider.model]) || PRICES['mimo-v2.5-pro'] || PRICES['mimo-v2.5'] || null;
-  }
-  // anthropic / bedrock / vertex / unknown → use claude name as displayed
-  // LiteLLM 表优先(覆盖广、随上游更新),内置手抄表兜底。
+// 按 model id 查价(与 provider 无关的纯解析):LiteLLM 远端表优先(覆盖广、随上游
+// 更新),内置手抄表兜底;再依次试别名、去日期后缀、最长前缀、去命名空间前缀。
+function lookupByModel(model) {
   const remote = remoteLookup(model) || (ALIASES[model] && remoteLookup(ALIASES[model]));
   if (remote) return remote;
   if (PRICES[model]) return PRICES[model];
@@ -279,15 +434,207 @@ function lookupPrice(model, provider) {
   const key = model && Object.keys(PRICES)
     .filter((k) => model.startsWith(k))
     .sort((a, b) => b.length - a.length)[0];
-  return key ? PRICES[key] : null;
+  if (key) return PRICES[key];
+  // 聚合平台/网关下发带命名空间的 id(moonshotai/kimi-k3、openai/gpt-5.6-sol):它们按
+  // 上游模型计价,去掉命名空间再查一次,总好过整条消息无价可显。精确键在前面已匹配,
+  // 故 Groq 的 'openai/gpt-oss-120b'(与 Cerebras 裸名不同价)仍走自己的键,不受影响。
+  return model && model.includes('/') ? lookupByModel(model.slice(model.lastIndexOf('/') + 1)) : null;
+}
+
+// 按 model + provider 查一条单价。
+//   任何 hint  → 用户自填单价永远最优先(R3)
+//   anthropic / bedrock / vertex / unknown → 直接按这条消息的 model 查
+//   deepseek / mimo → 同样先按这条消息的 model 查,**查不到才**回落 env 档位
+// 【R4-c2 纠正旧注释】原注释写着"cc switch 路由时 stream-json 的 model 字段仍是
+// claude-sonnet-X-X,真实上游在 ANTHROPIC_MODEL env"——已被实测推翻:本机历史里的 24 个
+// model id 全是真实上游名(deepseek-v4-flash 14,239 条、k3 14,229 条、mimo-v2.5-pro
+// 3,121 条),没有伪装成 claude-* 的。所以 env 档位(provider.model)只是**消息没带
+// model 时**的兜底,不是主依据。别照着旧注释把这两个分支"修回"按 env 计价。
+function lookupPrice(model, provider) {
+  if (!model && !(provider && provider.model)) return null;
+  // R3:用户自填单价最高优先级 —— 赢过 REMOTE / 内置表,也赢过下面 deepseek/mimo 的
+  // env 档位回落(用户填的是他这条消息实付的钱,任何推断都不该盖过它)。
+  const user = userPriceEntry(model);
+  if (user) return user;
+  const hint = (provider && provider.providerHint) || 'anthropic';
+
+  // Q-a:计价的第一依据永远是【这条消息实际用的模型】,不是 provider.model(= 当前
+  // env 档位)。这两个分支原先完全忽略传入的 model,后果:①换档后回看旧会话全按新档
+  // 计价(deepseek v4-flash↔v4-pro 差 3×);②当前切到 deepseek/mimo 时打开任何历史
+  // Claude/Kimi 会话,整条会话按 deepseek/mimo 单价算(差一个数量级)。
+  // 回落路径原样保留:消息无 model(老 jsonl / 流式首帧)时仍按 env 档位。
+  if (hint === 'deepseek') {
+    const byMsg = lookupByModel(model) || (model && PRICES['deepseek-' + model]);
+    if (byMsg) return byMsg;
+    // Prefer env-set upstream model name; fall back to deepseek-chat default.
+    const remote = remoteLookup(provider.model);
+    if (remote) return remote;
+    const target = (provider.model && PRICES[provider.model])
+      ? provider.model
+      : (PRICES['deepseek-' + (provider.model || '')] ? 'deepseek-' + provider.model : 'deepseek-chat');
+    return PRICES[target] || PRICES['deepseek-chat'];
+  }
+  if (hint === 'mimo') {
+    // 项目实际部署 mimo-v2.5-pro;provider.model 精确匹配次之,兜底 pro(原硬返回非-pro 偏低 3×)
+    return lookupByModel(model)
+      || (provider && provider.model && PRICES[provider.model])
+      || PRICES['mimo-v2.5-pro'] || PRICES['mimo-v2.5'] || null;
+  }
+  // anthropic / bedrock / vertex / unknown → use claude name as displayed
+  return lookupByModel(model);
+}
+
+/**
+ * 官方订阅(Pro/Max 包月)计费判据 —— 判的是【这条消息】,不是整个界面。
+ * 订阅包月覆盖的只有 Claude 那部分:把单价表算出的金额显示给订阅用户是误导
+ * (那是"如果走 API 会花多少",不是他的账单)。但同一个人切到 deepseek/kimi/gpt
+ * 跑过的消息是**另外真金白银付的**,恰恰是订阅用户唯一需要看的费用 —— 所以判据
+ * 必须带上 model:只看当前 provider 会把第三方花费一起藏了(判官实测:本机第三方
+ * 消息 3.6 万条、真实花费约 ¥1.27 万,全被藏成 0)。这和 lookupPrice 里"计价第一
+ * 依据永远是这条消息实际用的模型"是同一条原则,与 UsagePanel 的分档口径一致
+ * (R4-a 起面板与气泡共用 computeCost / aggregateCost,不再各判各的)。
+ * 两个条件:
+ *   model 是 Claude 家族(含裸别名 opus/sonnet/haiku/fable)
+ *   + 【当时】走的是官方 OAuth(切官方时 AUTH_TOKEN/API_KEY 被显式删掉,只能走 OAuth)
+ * model 缺失、鉴权方式不明,一律判非订阅:失败方向是"照常显示价格",不是"多藏一个数字"。
+ */
+export function isSubscriptionBilling(provider, model) {
+  if (!provider) return false;
+  // 本机 29.9 万条 assistant 记录里的 24 个 model id 实测:命中的恰是 10 个 claude-*,
+  // 第三方(k3 / kimi-for-coding / gpt-5.5 / deepseek-* / mimo-* / moonshotai/*)无一误伤。
+  if (!/claude|opus|sonnet|haiku|fable|mythos/i.test(model || '')) return false;
+  const hint = provider.providerHint || 'anthropic';
+  if (hint === 'anthropic') return provider.hasAuthKey === false;
+  // R5-a:Bedrock / Vertex 上的 claude-* 是**按 token 真实计费**的(走 AWS / GCP 账单,
+  // 与 Claude 订阅是两笔钱),持久化的 oauth 判据对它们不适用 —— 套用等于把真实账单
+  // 藏成"订阅内"。
+  // 【覆盖面,别写成"Bedrock/Vertex 都修好了"】providerHint 的产地(server/routes/
+  // settings.js 的 GET /provider)**只从 ANTHROPIC_BASE_URL 猜**,所以这里只覆盖"把
+  // base URL 指向 bedrock/amazonaws/vertex/googleapis 网关"这一种接法。Claude Code 官方
+  // 的标准姿势是 CLAUDE_CODE_USE_BEDROCK=1 / CLAUDE_CODE_USE_VERTEX=1 且**不设 base
+  // URL**(本仓一处都没处理这两个环境变量),那种配置下 hint 落 'anthropic'、AWS_* 凭证
+  // 又使 hasAuthKey 为 false → 在上面那行就被判成订阅,根本走不到这里。
+  // 补这个缺口要动 providerHint 的语义,而它流向 lookupPrice 等多处;本机无此接法,
+  // 不为一个用不到的场景改公共判据。留作已知限制。
+  if (hint === 'bedrock' || hint === 'vertex') return false;
+  // R4-b:当前是别的第三方 provider —— 这条 Claude 消息显然不是现在发的,判据要用【当时】的
+  // 鉴权方式,而 jsonl 里没有。原实现在这里直接 return false(= 拿此刻的第三方身份顶替),
+  // 于是切一次 provider 历史金额就翻转:判官实测订阅态合计 ¥4,690,切到第三方立刻变
+  // ¥498,876,多出的 49 万全是订阅期 Claude 消息按 API 单价算出的虚构钱。
+  // 改用最后一次观察到的官方计费方式;从没观察到过则维持原行为(照常显示)。
+  // 【代价说明,勿再写成"中转站不受影响"】中转站的 hint 是 'unknown',与"订阅期跑的
+  // Claude 历史"在 jsonl 里长得一模一样(顶层只有 uuid/timestamp/cwd/sessionId/version/
+  // gitBranch,没有 baseURL),分不出来 → 观察到 oauth 后,中转站转售的 claude-* 会跟着
+  // 一起藏。逃生口是用户在 provider 表单里为该 model id 填单价(优先级最高,见 isPlanBilling)。
+  return lastOfficialBilling === 'oauth';
+}
+
+// ── R4-b:最后一次观察到的【官方计费方式】────────────────────────────
+// 'oauth' = 订阅包月(官方 provider 且无 AUTH_TOKEN/API_KEY)| 'apikey' = 按量付费。
+// ponytail: localStorage 一行就够 —— 与 cgui-user-prices / cgui-litellm-prices 同层,纯展示
+// 口径。丢了只会回落成"照常显示价格"(多显示,不多藏),不值得为它引入服务端持久化。
+// 已知天花板:同一台机器换了账号(订阅号 → API key 号)时,换之前的历史会按换之后的口径判。
+// 要根治得按消息记当时的鉴权方式,而 jsonl 存不下 —— 与"同一 model id 在不同 provider
+// 不同价"是同一个天花板。
+const OFFICIAL_BILLING_KEY = 'cgui-official-billing';
+let lastOfficialBilling = null;
+try { lastOfficialBilling = localStorage.getItem(OFFICIAL_BILLING_KEY) || null; } catch { /* 隐私模式 */ }
+
+/**
+ * 记下"官方 provider 当前是怎么计费的"。只在 provider 确实是官方时记录 —— 第三方的
+ * hasAuthKey 说的是第三方的 token,不是官方计费方式,不许污染记录。
+ * 调用点:App 根组件对 currentProvider 的 effect(全局唯一,跟随 store 的刷新节奏)。
+ */
+export function observeOfficialBilling(provider) {
+  if (!provider || (provider.providerHint || 'anthropic') !== 'anthropic') return;
+  if (typeof provider.hasAuthKey !== 'boolean') return;  // 不知道就别记(旧数据/未返回)
+  const mode = provider.hasAuthKey ? 'apikey' : 'oauth';
+  if (mode === lastOfficialBilling) return;
+  lastOfficialBilling = mode;
+  try { localStorage.setItem(OFFICIAL_BILLING_KEY, mode); } catch { /* 隐私模式/配额 */ }
+}
+
+/**
+ * R5-b:没有本地记录时的一次性引导探测。
+ * observeOfficialBilling 只在【当前 provider 恰好是官方】时才写记录,所以新装机 / 清了
+ * localStorage 且当前挂着第三方 provider 的用户根本不会有记录 —— 订阅期跑的 Claude 历史
+ * 于是全按 API 单价算:判官在真实历史上实测合计 ¥166,204.71(有记录时 ¥665.75),要用户
+ * 手动切一次官方 provider 才自愈。
+ * 探测走 GET /api/subscription-usage?probe=1(Anthropic OAuth 用量端点,GUI 本来就在用):
+ * 它能返回用量 = 这台机器存在官方订阅 → 记 'oauth'。客户端只看结果,不接触任何凭证。
+ * 失败方向:超时 / 未登录 / 解析不出 / 任何异常一律**不写记录**,回落现有行为(照常显示
+ * 价格)—— 与 observeOfficialBilling 的"不知道就别记"同一条口径。
+ * 只探一次:有记录就不探(记录是更强的证据);并发调用共用同一个 in-flight promise。
+ * 【已知天花板】探测是异步的,结果落地后已渲染的金额要等下一次渲染才更新。
+ */
+let probing = null;
+export function probeOfficialBilling() {
+  if (lastOfficialBilling) return Promise.resolve(lastOfficialBilling);
+  if (probing) return probing;
+  probing = (async () => {
+    try {
+      const r = await fetch('/api/subscription-usage?probe=1');
+      const j = await r.json();
+      // official:true + 至少一档用量解析成功 = 这台机器确有官方订阅。
+      // official:false(当前 provider 不是官方)与带 error 的降级响应都不算证据。
+      // 再查一次 lastOfficialBilling:请求在飞的这段时间里 observeOfficialBilling 可能已经
+      // 直接观察到了当前官方 provider 的计费方式 —— 那是更强的证据(读的是实际配置),
+      // 探测(机器级)不许覆盖它。
+      if (!lastOfficialBilling && j && j.official === true && (j.session || j.weekAll || j.weekScoped)) {
+        lastOfficialBilling = 'oauth';
+        try { localStorage.setItem(OFFICIAL_BILLING_KEY, 'oauth'); } catch { /* 隐私模式/配额 */ }
+      }
+    } catch { /* 网络/解析失败 → 不写记录 */ }
+    return lastOfficialBilling;
+    // 清空放 .finally 而不是函数体末尾:body 若全程同步跑完(fetch 同步抛),体内的
+    // probing = null 会先于外层赋值执行 → probing 永远非空 = 再也不重试。
+  })().finally(() => { probing = null; });
+  return probing;
+}
+if (typeof window !== 'undefined') probeOfficialBilling();
+
+/**
+ * 套餐包月档:按 token 单价算出来的金额没有意义(用户付的是月费,不是 token 费)→ 不显示。
+ * 两类:
+ *   1. Claude 官方订阅(见 isSubscriptionBilling);
+ *   2. Kimi Code 会员套餐(baseURL api.kimi.com/coding)。它的模型 id 是套餐专属的
+ *      k3 / kimi-for-coding / kimi-for-coding-highspeed,与开放平台按量付费的
+ *      kimi-k3 / kimi-k2.7-code 不同名 → 单看 model id 就能可靠区分,不依赖当前 env。
+ *      (下面价表里那三个键按开放平台同型号价近似,套餐档不显示金额,它们只作兜底。)
+ * 其余(DeepSeek / MiMo / 官方 API key / 中转站)一律按量档,照常显示金额。
+ * 【已知天花板】jsonl 不记接入方式 —— 实测顶层字段只有 uuid / timestamp / cwd /
+ * sessionId / version / gitBranch 等,没有 baseURL / provider;同一个 gpt-5.6-sol
+ * 既可能走中转站(自定价、通常低于官网)也可能走本地 codex 代理(ChatGPT 订阅额度),
+ * 单价基准分不出来。按"宁可看到标注了不确定的数字,也不要什么都看不到"的口径:
+ * 这类一律【显示 + 在 title 标注按官网价估算】,不静默隐藏。
+ */
+export function isPlanBilling(provider, model) {
+  // R3:用户为这个 model id 显式配置过 → 以他的配置为准,优先级最高。勾了「套餐包月」
+  // 就是套餐(不显示金额);填了单价就是按量(哪怕 id 命中下面的 Kimi 白名单、哪怕当前
+  // 是 Claude 订阅态)。这条同时是中转站转售 claude-* 的**唯一逃生口**:那笔钱是真花的,
+  // 但 jsonl 分不出中转站与官方订阅(见 isSubscriptionBilling 末尾),只能由用户填单价
+  // 把它从订阅口径里捞回来。
+  const u = userModelPrice(model);
+  if (u) return !!u.plan;
+  // ponytail: 整串白名单够用 —— 套餐 id 与开放平台 id 不同名。将来 Kimi 改名在这里补键,
+  // 不必引入"按消息记 provider"的新体系(jsonl 也存不下)。
+  // R4-c1:锚定整串,不是前缀。原 /^(k3|kimi-for-coding)/ 会把 k30 / k3-turbo / k3.5 一起
+  // 当套餐静默藏掉金额(今天无碰撞,Kimi 开放平台出裸 k3.x 就中招)。[1m] 是 CLI 通用的
+  // 1M 上下文后缀,同一个模型,要保留。
+  if (/^(k3|kimi-for-coding(-highspeed)?)(\[1m\])?$/.test(model || '')) return true;
+  return isSubscriptionBilling(provider, model);
 }
 
 /**
  * Compute USD cost for a single message's usage object.
  * Returns { totalUsd, breakdown: {input, output, cacheRead, cacheWrite} } or null.
+ * 套餐档的消息返回 null —— 这是所有费用展示的唯一出口,各处 `cost && (...)`
+ * 条件渲染因此自动只剩用量,不用在每个显示点各加一遍判断。判据带 model,
+ * 所以订阅态下同一条会话里按量付费模型的花费照常显示、Claude 的不显示。
  */
 export function computeCost(model, usage, provider) {
   if (!usage) return null;
+  if (isPlanBilling(provider, model)) return null;
   const p = lookupPrice(model, provider);
   if (!p) return null;
   const input = usage.input_tokens || 0;
@@ -302,7 +649,47 @@ export function computeCost(model, usage, provider) {
     cacheWrite: (cacheWrite * p.cacheWrite) / M,
   };
   const totalUsd = breakdown.input + breakdown.output + breakdown.cacheRead + breakdown.cacheWrite;
-  return { totalUsd, breakdown, currency: p.currency };
+  // source='user' = 这条按用户自填单价算的 → 显示口径改成"按你填写的单价计算",
+  // 不再说"按官网价估算"(TurnBubble / MessageBubble / UsagePanel 三处同一判据)。
+  return { totalUsd, breakdown, currency: p.currency, source: p.source || 'table' };
+}
+
+/**
+ * R4-a:用量面板的费用口径 —— 服务端按 model 聚合后的 { input, output, cacheRead,
+ * cacheWrite } 走同一个 computeCost,与逐条消息的气泡逐位一致(单价×token 是线性的,
+ * 先加后乘与先乘后加结果相同)。返回三态,对应面板的三种显示:
+ *   { usd }            → 金额
+ *   { subscription }   → 订阅内 / 套餐内(付的是月费,按 token 算出来的数没有意义)
+ *   { unknown }        → 「—」(查不到这个 model 的单价,无从计算)
+ * 【为什么要有这个函数】原先 UsagePanel 自带一套分档:/claude|opus|sonnet|haiku/ 一律当
+ * 订阅藏掉(连官方 API key 付费用户的钱也藏)、只有 deepseek/mimo 算钱、其余一律「—」。
+ * 判官实测同一份真实历史:面板 ¥211.70 vs 气泡 ¥4,689.56,差 22 倍。口径必须只有一个出口。
+ */
+export function aggregateCost(model, tokens, provider) {
+  const c = computeCost(model, {
+    input_tokens: tokens.input, output_tokens: tokens.output,
+    cache_read_input_tokens: tokens.cacheRead, cache_creation_input_tokens: tokens.cacheWrite || 0,
+  }, provider);
+  if (c) return { usd: c.totalUsd };
+  // computeCost 返回 null 有两种原因,面板要分开显示:套餐/订阅档 vs 查无单价。
+  return isPlanBilling(provider, model) ? { subscription: true } : { unknown: true };
+}
+
+/**
+ * 费用数字的悬浮说明 —— TurnBubble / MessageBubble / UsagePanel 三处共用,口径靠共用
+ * 保证一致,不靠各自维护同一段话。用了用户自填单价的消息如实说明来源,不再说"按官网价估算"。
+ */
+export function costTitle(cost) {
+  if (!cost) return '';
+  const head = cost.source === 'user'
+    ? '本条按你为该模型填写的单价计算（人民币 / 每百万 token）。\n单价在 provider 编辑表单的「计价」中设置，留空的项按内置官网价回落。\n'
+    : '本条估算（人民币；美元计价模型按 1 USD ≈ 7.2 CNY 换算，人民币计价模型为原生定价）\n'
+      + '单价取各模型官网价目。若该模型经中转站接入或按套餐计费，则在 provider 编辑表单的「计价」中填写实付单价。\n';
+  return head
+    + `input ${formatCost(cost.breakdown.input)}\n`
+    + `output ${formatCost(cost.breakdown.output)}\n`
+    + `cache read ${formatCost(cost.breakdown.cacheRead)}\n`
+    + `cache write ${formatCost(cost.breakdown.cacheWrite)}`;
 }
 
 /**

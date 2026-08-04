@@ -13,7 +13,7 @@ import { TaskCard } from './tools/TaskCard.jsx';
 import { GrepGlobCard } from './tools/GrepGlobCard.jsx';
 import { WebCard } from './tools/WebCard.jsx';
 import { SkillCard } from './tools/SkillCard.jsx';
-import { computeCost, formatCost } from '../utils/pricing.js';
+import { computeCost, formatCost, isPlanBilling, costTitle } from '../utils/pricing.js';
 import { copyText } from '../utils/clipboard.js';
 import { useStore } from '../stores/sessionStore.js';
 import { TASK_TOOL_NAMES, rebuildTodosFromTaskCalls } from '../utils/todos.js';
@@ -637,7 +637,14 @@ function UsageDisplay({ usage, model, costUsd }) {
   // Z1:CLI result 事件的 total_cost_usd 是官方计费口径的权威成本,优先于单价表
   // 估算。第三方 provider 下 CLI 仍按 Claude 价目计算(模型名是伪装的),不可信。
   const official = !provider || (provider.providerHint || 'anthropic') === 'anthropic';
-  const authoritative = official && typeof costUsd === 'number' && costUsd > 0;
+  // 套餐包月(Claude 订阅 / Kimi Code)下,CLI 上报的 total_cost_usd 是"按 API 单价这轮
+  // 值多少钱",不是用户的账单 → 不显示(computeCost 已返回 null,这条走的是另一条路)。
+  // 判据必须带 model:订阅态下跑按量付费模型的回合是真花钱的,不能一起藏。
+  // R3:用户为这个模型填了实付单价 → 他的单价赢过 CLI 的 total_cost_usd。CLI 那个数字
+  // 是按 Anthropic 官网价目算的"这轮值多少钱",用户填的才是他实付的。
+  const authoritative = official && !isPlanBilling(provider, model)
+    && cost?.source !== 'user'
+    && typeof costUsd === 'number' && costUsd > 0;
   return (
     <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[10px] text-ink-faint mt-2 pt-2 border-t border-canvas-deep/50">
       <span title="input_tokens — 仅指未命中缓存的新 token(Anthropic 计费口径),不是全部输入">输入 {input.toLocaleString()}</span>
@@ -652,14 +659,12 @@ function UsageDisplay({ usage, model, costUsd }) {
       {(authoritative || cost) && (
         <span
           className="ml-auto text-accent/80 font-mono"
+          // R3:非 authoritative 分支的说明文案由 pricing.js 统一给(三个费用显示点共用),
+          // 用户填过单价时如实说明是按他填写的单价算,不再说"按官网价估算"。
           title={
             authoritative
               ? 'CLI 上报的本轮实际成本（total_cost_usd，官方计费口径；美元计价模型按 1 USD ≈ 7.2 CNY 换算，人民币计价模型为原生定价）'
-              : `本条估算（人民币；美元计价模型按 1 USD ≈ 7.2 CNY 换算，人民币计价模型为原生定价）\n` +
-                `input ${formatCost(cost.breakdown.input)}\n` +
-                `output ${formatCost(cost.breakdown.output)}\n` +
-                `cache read ${formatCost(cost.breakdown.cacheRead)}\n` +
-                `cache write ${formatCost(cost.breakdown.cacheWrite)}`
+              : costTitle(cost)
           }
         >
           {formatCost(authoritative ? costUsd : cost.totalUsd)}
