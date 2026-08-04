@@ -277,13 +277,27 @@ function remoteLookup(model) {
 //   · in / out 留空 → 该项回落内置表同项(内置表也没有该模型时按 0),不是把整条按 0 算;
 //   · 缓存两项留空 → 按 cacheRead=0.1×in、cacheWrite=1.25×in(与 cny()/usd() 同默认倍率);
 //   · in 与 out 都没填 → 整条当没填,完全回落内置表。
-// 匹配【按 model id 精确匹配,与当前 provider 无关】—— 和 lookupPrice 的"计价第一依据永远
-// 是这条消息实际用的模型"是同一条原则(jsonl 只有 model)。
-// ponytail: 精确匹配就够 —— id 是用户从自己的模型列表里选或手输的。不做去日期后缀/最长前缀
-// 兜底,免得"填了 gpt-5.6 把 gpt-5.6-luna 也一起计价"这种意外;要覆盖多个 id 就多填几行。
+// 匹配【按归一化后的 model id 匹配,与当前 provider 无关】—— 和 lookupPrice 的"计价第一
+// 依据永远是这条消息实际用的模型"是同一条原则(jsonl 只有 model)。
 const UP_KEY = 'cgui-user-prices';
-let USER_ACTIVE = new Map();  // 当前激活 provider 填的价
+let USER_ACTIVE = new Map();  // 当前激活 provider 填的价(键已归一化)
 let USER_ANY = new Map();     // 全部 provider 填的价(同 id 取列表里第一个)
+
+/**
+ * R5-c:用户价查找的 model id 归一化。存入与查询走同一个函数,故两侧写法不一致也能对上。
+ * 四步:trim → 小写 → 剥 [1m] 后缀 → 剥命名空间前缀。
+ * 为什么必须有:同一个模型在历史里两种形态并存 —— 'gpt-5.6-sol' 与 'openai/gpt-5.6-sol'、
+ * 'kimi-k3' 与 'moonshotai/kimi-k3';[1m] 是 CLI 通用的 1M 上下文后缀(同一个模型)。
+ * 原先纯 Map.get 精确匹配,带前缀/带 [1m] 的那部分消息会**静默**回落官网价,用户看不出来。
+ * 【仍然不做】去日期后缀 / 最长前缀兜底:填 'gpt-5.6' 不许把 'gpt-5.6-luna' 一起计价 ——
+ * 那是当初拒绝前缀兜底的理由,至今成立。要覆盖多个 id 就多填几行。
+ * 【已知天花板】'k3' 与 'k3[1m]' 归一后同键,分不出 1M 变体的差价(用户也没有别的地方
+ * 能表达这个差价);两个都填时取列表里先出现的那条。
+ */
+function normModelKey(id) {
+  const s = String(id || '').trim().toLowerCase().replace(/\[1m\]$/, '');
+  return s.slice(s.lastIndexOf('/') + 1);
+}
 
 function sanitizeUserPrice(raw) {
   if (!raw || typeof raw !== 'object') return null;
@@ -314,10 +328,11 @@ export function setUserPrices(providers, persist = true) {
     let kept = false;
     for (const [id, raw] of Object.entries(mp)) {
       const e = sanitizeUserPrice(raw);
-      if (!e || !id) continue;
+      const key = normModelKey(id);
+      if (!e || !key) continue;
       kept = true;
-      if (p.isCurrent && !active.has(id)) active.set(id, e);
-      if (!any.has(id)) any.set(id, e);
+      if (p.isCurrent && !active.has(key)) active.set(key, e);
+      if (!any.has(key)) any.set(key, e);
     }
     if (kept) slim.push({ isCurrent: !!p.isCurrent, modelPrices: mp });
   }
@@ -329,8 +344,9 @@ export function setUserPrices(providers, persist = true) {
 
 /** 该 model id 的用户配置条目({in,out,...} 或 {plan:true}),没有则 null。 */
 export function userModelPrice(model) {
-  if (!model) return null;
-  return USER_ACTIVE.get(model) || USER_ANY.get(model) || null;
+  const key = normModelKey(model);
+  if (!key) return null;
+  return USER_ACTIVE.get(key) || USER_ANY.get(key) || null;
 }
 
 // 用户条目 → 与 PRICES 同形状的四价条目(USD/1M)。plan 档不产生价格(走 isPlanBilling)。
@@ -462,12 +478,21 @@ export function isSubscriptionBilling(provider, model) {
   // 本机 29.9 万条 assistant 记录里的 24 个 model id 实测:命中的恰是 10 个 claude-*,
   // 第三方(k3 / kimi-for-coding / gpt-5.5 / deepseek-* / mimo-* / moonshotai/*)无一误伤。
   if (!/claude|opus|sonnet|haiku|fable|mythos/i.test(model || '')) return false;
-  if ((provider.providerHint || 'anthropic') === 'anthropic') return provider.hasAuthKey === false;
-  // R4-b:当前是第三方 provider —— 这条 Claude 消息显然不是现在发的,判据要用【当时】的
+  const hint = provider.providerHint || 'anthropic';
+  if (hint === 'anthropic') return provider.hasAuthKey === false;
+  // R5-a:Bedrock / Vertex 上的 claude-* 是**按 token 真实计费**的(走 AWS / GCP 账单,
+  // 与 Claude 订阅是两笔钱),持久化的 oauth 判据对它们不适用 —— 套用等于把真实账单
+  // 藏成"订阅内"。这两个 hint 由 baseUrl 可靠识别,所以能精确排除。
+  if (hint === 'bedrock' || hint === 'vertex') return false;
+  // R4-b:当前是别的第三方 provider —— 这条 Claude 消息显然不是现在发的,判据要用【当时】的
   // 鉴权方式,而 jsonl 里没有。原实现在这里直接 return false(= 拿此刻的第三方身份顶替),
   // 于是切一次 provider 历史金额就翻转:判官实测订阅态合计 ¥4,690,切到第三方立刻变
   // ¥498,876,多出的 49 万全是订阅期 Claude 消息按 API 单价算出的虚构钱。
   // 改用最后一次观察到的官方计费方式;从没观察到过则维持原行为(照常显示)。
+  // 【代价说明,勿再写成"中转站不受影响"】中转站的 hint 是 'unknown',与"订阅期跑的
+  // Claude 历史"在 jsonl 里长得一模一样(顶层只有 uuid/timestamp/cwd/sessionId/version/
+  // gitBranch,没有 baseURL),分不出来 → 观察到 oauth 后,中转站转售的 claude-* 会跟着
+  // 一起藏。逃生口是用户在 provider 表单里为该 model id 填单价(优先级最高,见 isPlanBilling)。
   return lastOfficialBilling === 'oauth';
 }
 
@@ -497,6 +522,44 @@ export function observeOfficialBilling(provider) {
 }
 
 /**
+ * R5-b:没有本地记录时的一次性引导探测。
+ * observeOfficialBilling 只在【当前 provider 恰好是官方】时才写记录,所以新装机 / 清了
+ * localStorage 且当前挂着第三方 provider 的用户根本不会有记录 —— 订阅期跑的 Claude 历史
+ * 于是全按 API 单价算:判官在真实历史上实测合计 ¥166,204.71(有记录时 ¥665.75),要用户
+ * 手动切一次官方 provider 才自愈。
+ * 探测走 GET /api/subscription-usage?probe=1(Anthropic OAuth 用量端点,GUI 本来就在用):
+ * 它能返回用量 = 这台机器存在官方订阅 → 记 'oauth'。客户端只看结果,不接触任何凭证。
+ * 失败方向:超时 / 未登录 / 解析不出 / 任何异常一律**不写记录**,回落现有行为(照常显示
+ * 价格)—— 与 observeOfficialBilling 的"不知道就别记"同一条口径。
+ * 只探一次:有记录就不探(记录是更强的证据);并发调用共用同一个 in-flight promise。
+ * 【已知天花板】探测是异步的,结果落地后已渲染的金额要等下一次渲染才更新。
+ */
+let probing = null;
+export function probeOfficialBilling() {
+  if (lastOfficialBilling) return Promise.resolve(lastOfficialBilling);
+  if (probing) return probing;
+  probing = (async () => {
+    try {
+      const r = await fetch('/api/subscription-usage?probe=1');
+      const j = await r.json();
+      // official:true + 至少一档用量解析成功 = 这台机器确有官方订阅。
+      // official:false(当前 provider 不是官方)与带 error 的降级响应都不算证据。
+      // 再查一次 lastOfficialBilling:请求在飞的这段时间里 observeOfficialBilling 可能已经
+      // 直接观察到了当前官方 provider 的计费方式 —— 那是更强的证据(读的是实际配置),
+      // 探测(机器级)不许覆盖它。
+      if (!lastOfficialBilling && j && j.official === true && (j.session || j.weekAll || j.weekScoped)) {
+        lastOfficialBilling = 'oauth';
+        try { localStorage.setItem(OFFICIAL_BILLING_KEY, 'oauth'); } catch { /* 隐私模式/配额 */ }
+      }
+    } catch { /* 网络/解析失败 → 不写记录 */ }
+    probing = null;
+    return lastOfficialBilling;
+  })();
+  return probing;
+}
+if (typeof window !== 'undefined') probeOfficialBilling();
+
+/**
  * 套餐包月档:按 token 单价算出来的金额没有意义(用户付的是月费,不是 token 费)→ 不显示。
  * 两类:
  *   1. Claude 官方订阅(见 isSubscriptionBilling);
@@ -514,7 +577,9 @@ export function observeOfficialBilling(provider) {
 export function isPlanBilling(provider, model) {
   // R3:用户为这个 model id 显式配置过 → 以他的配置为准,优先级最高。勾了「套餐包月」
   // 就是套餐(不显示金额);填了单价就是按量(哪怕 id 命中下面的 Kimi 白名单、哪怕当前
-  // 是 Claude 订阅态 —— 中转站转售 claude-* 是真花钱的,不能跟着订阅一起藏)。
+  // 是 Claude 订阅态)。这条同时是中转站转售 claude-* 的**唯一逃生口**:那笔钱是真花的,
+  // 但 jsonl 分不出中转站与官方订阅(见 isSubscriptionBilling 末尾),只能由用户填单价
+  // 把它从订阅口径里捞回来。
   const u = userModelPrice(model);
   if (u) return !!u.plan;
   // ponytail: 整串白名单够用 —— 套餐 id 与开放平台 id 不同名。将来 Kimi 改名在这里补键,

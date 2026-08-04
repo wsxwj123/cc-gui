@@ -10,7 +10,8 @@
 import assert from 'node:assert';
 
 globalThis.localStorage = { getItem: () => null, setItem: () => {} };
-const { isSubscriptionBilling, isPlanBilling, computeCost } = await import('../../client/src/utils/pricing.js');
+const { isSubscriptionBilling, isPlanBilling, computeCost, observeOfficialBilling } =
+  await import('../../client/src/utils/pricing.js');
 
 const SUB = { providerHint: 'anthropic', baseUrl: '', hasAuthKey: false };   // 订阅态
 const PAID = { providerHint: 'anthropic', baseUrl: '', hasAuthKey: true };   // 官方按量付费
@@ -96,5 +97,36 @@ assert.strictEqual(isPlanBilling(SUB, 'mimo-v2.5-pro'), false, 'MiMo=按量档')
 // 中转站的 gpt-5.6-sol 与官方同名,jsonl 也不存接入方式 → 分不出来就照常显示(不静默隐藏)
 assert.strictEqual(isPlanBilling(SUB, 'gpt-5.6-sol'), false, '分不出接入方式的一律显示');
 assert.ok(computeCost('gpt-5.6-sol', IO, SUB), '分不出接入方式的不该静默隐藏');
+
+// ── R5-a:持久化 oauth 判据不许套到"按 token 真实计费的 claude-*"上 ─────────
+// 【本段必须放在文件末尾】它会写入 lastOfficialBilling(模块级),之后第三方 provider 下的
+// Claude 家族消息一律按最后一次观察到的官方口径判(R4-b),前面各条断言的前提就变了。
+observeOfficialBilling({ providerHint: 'anthropic', hasAuthKey: false }); // 观察到:官方走 OAuth 订阅
+const BEDROCK = { providerHint: 'bedrock', hasAuthKey: true };
+const VERTEX = { providerHint: 'vertex', hasAuthKey: true };
+const RELAY = { providerHint: 'unknown', hasAuthKey: true };   // 中转站
+// Bedrock / Vertex 的 claude-* 走 AWS / GCP 账单按 token 真花钱,与 Claude 订阅是两笔钱。
+// 判官实测回归:观察到 oauth 前显示 {usd:5},之后被藏成 {subscription:true}。
+for (const [name, p] of [['bedrock', BEDROCK], ['vertex', VERTEX]]) {
+  assert.strictEqual(isSubscriptionBilling(p, 'claude-opus-5'), false,
+    `${name} 的 claude-* 是按 token 真实计费的,不该被持久化 oauth 判据藏掉`);
+  assert.strictEqual(isPlanBilling(p, 'claude-opus-5'), false, `${name} 不该被判成套餐档`);
+  const c = computeCost('claude-opus-5', IO, p);
+  assert.ok(c && Math.abs(c.totalUsd - 30) < 1e-9, `${name} 的 claude-opus-5 金额被藏了:${c?.totalUsd}`);
+  // 裸别名与带日期后缀的 id 同样不许藏
+  assert.ok(computeCost('opus', IO, p), `${name} 的裸别名 opus 被藏了`);
+  assert.ok(computeCost('claude-sonnet-4-5-20250929', IO, p), `${name} 的带日期 id 被藏了`);
+  // 第一道 model 判据没被绕过:非 Claude 模型本来就照常计价
+  assert.ok(computeCost('deepseek-v4-flash', IO, p), `${name} 的第三方模型被藏了`);
+}
+// 中转站(unknown hint)与"订阅期跑的 Claude 历史"在 jsonl 里长得一模一样,分不出来 →
+// 已知代价:跟着订阅一起藏。逃生口是用户自填单价(见 check-user-prices.mjs ⑧)。
+// 这条断言把"代价"钉成显式契约,免得注释与实现再次背离。
+assert.strictEqual(isSubscriptionBilling(RELAY, 'claude-opus-5'), true,
+  '中转站 claude-* 当前按最后一次观察到的官方口径判(已知天花板)');
+assert.strictEqual(computeCost('claude-opus-5', IO, RELAY), null);
+// 官方分支不受持久化记录影响:有 key 仍是按量付费,照常显示
+assert.strictEqual(isSubscriptionBilling(PAID, 'claude-opus-5'), false, '官方 API key 档被误藏');
+assert.ok(computeCost('claude-opus-5', IO, PAID), '官方 API key 档的金额被藏了');
 
 console.log('check-subscription-billing OK');
