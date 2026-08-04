@@ -7,8 +7,9 @@
 // 两表各自漂移过(服务端 k3=262144 / 客户端 deepseek=200000,均已被实测证伪)。
 // 策略(用户要求):**默认按 1M 估算**,已知小于 1M 的模型显式回落到真实窗口。
 // 优先级:① [1m] 后缀 / 名字里的 -Nm 标注 → N×1M;② -Nk 标注(moonshot-v1-128k)→ N×1K;
-// ③ 已知更小的具体系列(含 U3 实测:deepseek/mimo/GLM=200K、Kimi=256K)→ 其真实窗口;
-// ④ 其余(gemini/gpt-5.x/minimax/grok-4 及未知第三方)→ 默认 1M。默认 1M 只是初始估算,
+// ③ 已知具体系列(GLM=200K、Kimi K2.x=256K、DeepSeek 旧系=128K、GPT-5/mini/nano=400K 等)
+//    → 其真实窗口,按代际拆分(旧表把 deepseek/mimo 一律记 200K,已被历史实测打穿);
+// ④ 其余(gemini/minimax/grok-4 及未知第三方)→ 默认 1M。默认 1M 只是初始估算,
 // /context 实测(优先级更高)或显式 [1m] 会进一步校正,不会因估大而误判(有超窗提示与 sane-ceiling)。
 // 低危#3:第三方裸别名判定。第三方 provider 下发 `sonnet`/`opus`/`haiku`(或
 // `claude-` 前缀)这类无版本号、无窗口标注的裸别名时,nativeContextWindow 只能落
