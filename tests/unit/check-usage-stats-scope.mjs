@@ -1,26 +1,32 @@
 #!/usr/bin/env node
-// 用量统计的取数范围护栏(server/services/usage-stats.js recompute)。守两条独立的规则,
-// 它们曾被写成"同理排除"而混为一谈,导致合计少算六成:
-//   ① 流式分片按 message.id 去重 —— 同一次 API 调用在 jsonl 里落多条 usage 相同的
-//      assistant 记录,重复计入 = 成倍虚算(本机实测 30.0 万条 → 14.0 万条唯一)。
-//   ② 子代理(isSidechain / parentToolUseId)必须【计入】—— 它们是独立的 API 请求、
-//      单独计费(本机实测合计 ¥665.75 → ¥1,694.35)。
-// 分片是"同一次调用的重复记录",子代理是"另一次真实调用",两者性质相反。
-// 对照:session-reader.js 排除子代理是对的,因为那里算的是上下文徽章的【主回合占用】。
-// 直接 import 真函数(不复刻)。PROJECTS_DIR 在模块顶层由 homedir() 求值,故每个用例
-// 先设 HOME 再用带 query 的 import 拿一份全新模块实例(绕开 ESM 模块缓存与内部 _cache)。
+// 用量统计的取数范围护栏(server/services/usage-stats.js)。守三条容易互相混淆的规则:
+//   ① **扫描深度**:会话本体在 `<项目>/<sessionId>.jsonl`,子代理 transcript 在
+//      `<项目>/<sessionId>/subagents/agent-*.jsonl`(workflow 起的还要再深一层)。
+//      只读顶层一层 = 一条子代理记录都读不到(本机实测顶层 1441 个文件含 sidechain 的
+//      为 0,深层 2150 个全是)。**本文件第一版就栽在这:把 sidechain 记录写进顶层
+//      jsonl,测试绿了而产品一分钱没修回来。用例必须按真实目录形态摆。**
+//   ② **子代理计入**:它们是独立的 API 请求、单独计费,排除等于漏算。
+//   ③ **按 message.id 跨文件去重**:流式分片会落多条 usage 相同的记录;续接/分叉会话
+//      时 CLI 又把历史整段抄进新 jsonl,所以去重必须跨文件,per-file 去重会让总量翻倍。
+// ② 与 ③ 性质相反(一个是"另一次真实调用",一个是"同一次调用的重复记录"),曾被写成
+// "同理排除"而一起砍掉。对照:session-reader.js 排除子代理是对的,那里算的是上下文
+// 徽章的【主回合占用】,不是【花了多少钱】。
+// 直接 import 真函数(不复刻)。PROJECTS_DIR 在模块顶层由 homedir() 求值,故先设 HOME
+// 再用带 query 的 import 拿全新模块实例(绕开 ESM 缓存与内部 _cache)。
 import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
 
 const homes = [];
-function makeHome(lines) {
+function makeHome(tree) {
   const home = mkdtempSync(join(tmpdir(), 'cgui-usage-'));
   homes.push(home);
-  const proj = join(home, '.claude', 'projects', 'demo');
-  mkdirSync(proj, { recursive: true });
-  writeFileSync(join(proj, 's.jsonl'), lines.join('\n') + '\n');
+  for (const [rel, lines] of Object.entries(tree)) {
+    const abs = join(home, '.claude', 'projects', rel);
+    mkdirSync(dirname(abs), { recursive: true });
+    writeFileSync(abs, lines.join('\n') + '\n');
+  }
   return home;
 }
 const rec = (o) => JSON.stringify({ type: 'assistant', timestamp: '2026-08-04T00:00:00.000Z', ...o });
@@ -34,43 +40,57 @@ async function statsFor(home, tag) {
 }
 
 try {
-  // ── ① 混合用例:去重生效、子代理计入 ─────────────────────────
-  const mixed = await statsFor(makeHome([
-    rec(msg('m1', 'main-model', 100, 10)),
-    rec(msg('m1', 'main-model', 100, 10)),                                // 同一次调用的流式分片 → 去重
-    rec({ ...msg('m2', 'sub-model', 500, 50), isSidechain: true }),        // 子代理 → 计入
-    rec({ ...msg('m3', 'sub-model', 7, 1), parentToolUseId: 'toolu_x' }),  // 子代理 → 计入
-    rec({ message: { id: 'm4', model: 'x' } }),                           // 无 usage → 跳过
-    JSON.stringify({ type: 'user', message: { id: 'm5' } }),               // 非 assistant → 跳过
-  ]), 'mixed');
+  // ── ① 真实目录形态:会话在项目目录直属,子代理在两层深的 subagents/ 下 ──────
+  const s = await statsFor(makeHome({
+    'demo/s1.jsonl': [
+      rec(msg('m1', 'main-model', 100, 10)),
+      rec(msg('m1', 'main-model', 100, 10)),                                  // 流式分片 → 去重
+      rec({ message: { id: 'm4', model: 'x' } }),                             // 无 usage → 跳过
+      JSON.stringify({ type: 'user', message: { id: 'm5' } }),                 // 非 assistant → 跳过
+    ],
+    // 续接会话:CLI 把历史整段抄了过来,m1 在两个文件里各出现一次
+    'demo/s2.jsonl': [
+      rec(msg('m1', 'main-model', 100, 10)),                                  // 跨文件重复 → 仍只算一次
+      rec(msg('m9', 'main-model', 3, 1)),                                     // s2 自己的新调用
+    ],
+    // 子代理 transcript 的真实落点(比会话本体深两层)
+    'demo/s1/subagents/agent-x.jsonl': [
+      rec({ ...msg('g1', 'sub-model', 500, 50), isSidechain: true }),
+      rec({ ...msg('g2', 'sub-model', 7, 1), parentToolUseId: 'toolu_x' }),
+    ],
+  }), 'nested');
 
-  assert.equal(mixed.total.input, 607, '总输入 = 主 100(去重后一次) + 子代理 500 + 7');
-  assert.equal(mixed.total.output, 61, '总输出 = 10 + 50 + 1');
+  assert.equal(s.total.input, 610, '总输入 = 主 100(跨文件只算一次) + 3 + 子代理 500 + 7');
+  assert.equal(s.total.output, 62, '总输出 = 10 + 1 + 50 + 1');
 
-  const byModel = Object.fromEntries(mixed.byModel.map((r) => [r.model, r]));
-  assert.equal(byModel['main-model'].calls, 1, '分片必须去重:两条同 message.id 只算一次调用');
-  assert.ok(byModel['sub-model'], '子代理跑的模型必须出现在 byModel 里,不能整行消失');
+  const byModel = Object.fromEntries(s.byModel.map((r) => [r.model, r]));
+  assert.ok(byModel['sub-model'], '递归扫描必须读到两层深的 subagents/,否则子代理花费整个消失');
   assert.equal(byModel['sub-model'].calls, 2, 'isSidechain 与 parentToolUseId 两种子代理记录都要计入');
   assert.equal(byModel['sub-model'].input, 507);
+  assert.equal(byModel['main-model'].calls, 2, '同一 message.id 跨两个文件出现,只能算一次调用');
+  assert.equal(byModel['main-model'].input, 103);
 
-  // ── ② 纯子代理用例:旧实现在这里恒为 0(本文件的红点) ─────────
-  const subOnly = await statsFor(makeHome([
-    rec({ ...msg('s1', 'sub-model', 1000, 100), isSidechain: true }),
-    rec({ ...msg('s2', 'sub-model', 2000, 200), parentToolUseId: 'toolu_y' }),
-  ]), 'subonly');
+  assert.equal(s.total.sessionCount, 2, '会话数只数项目目录直属的 jsonl,子代理 transcript 不是独立会话');
 
-  assert.equal(subOnly.total.input, 3000, '整个会话都是子代理时,花费不许归零');
+  const byProject = Object.fromEntries(s.byProject.map((r) => [r.hash, r]));
+  assert.equal(byProject['demo'].input, 610, '深层文件归属到它所在的顶层项目,不另起一行');
+
+  // ── ② 纯子代理会话:整个项目只有子代理记录时,花费不许归零 ─────────────
+  const subOnly = await statsFor(makeHome({
+    'demo/sx.jsonl': [],                                                       // 会话本体无 usage
+    'demo/sx/subagents/agent-y.jsonl': [
+      rec({ ...msg('h1', 'sub-model', 1000, 100), isSidechain: true }),
+    ],
+    // workflow 起的 agent 埋得更深一层,同样要算
+    'demo/sx/subagents/workflows/wf_1/agent-z.jsonl': [
+      rec({ ...msg('h2', 'sub-model', 2000, 200), isSidechain: true }),
+    ],
+  }), 'subonly');
+
+  assert.equal(subOnly.total.input, 3000, '会话本体没花钱、钱全花在子代理上时,合计不许是 0');
   assert.equal(subOnly.total.output, 300);
   assert.equal(subOnly.byModel.length, 1, '子代理模型必须成行');
-
-  // ── ③ 变异验证:证明上面的断言真的会挂 ────────────────────────
-  // 复刻"旧口径"(排除子代理)套在同一份数据上,断言必须失败 —— 否则说明断言是摆设。
-  let caught = false;
-  try {
-    const oldStyleInput = 0; // 旧实现把两条子代理记录都 return 掉,合计恒 0
-    assert.equal(oldStyleInput, 3000, '旧口径下合计为 0');
-  } catch { caught = true; }
-  assert.ok(caught, '变异验证:旧口径(排除子代理)必须让断言变红');
+  assert.equal(subOnly.total.sessionCount, 1, '三个文件只对应一个会话');
 
   console.log('check-usage-stats-scope: PASS');
 } finally {

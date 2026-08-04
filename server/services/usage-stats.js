@@ -13,7 +13,29 @@ const PROJECTS_DIR = join(homedir(), '.claude', 'projects');
 let _cache = { sig: null, data: null };
 let _refreshing = false;
 
-// 快速遍历:只 stat 不读内容,返回 [{ path, projectName, mtimeMs }] + 签名。
+// 递归收集项目目录下的所有 jsonl:会话本体在 `<项目>/<sessionId>.jsonl`,子代理的
+// transcript 另存在 `<项目>/<sessionId>/subagents/agent-*.jsonl`(workflow 起的 agent
+// 还要再深一层 `subagents/workflows/wf_*/`)。
+// **只读顶层一层等于一条子代理记录都读不到**:本机实测顶层 1441 个文件里含 sidechain
+// 的是 0,深层 2150 个文件全是 —— 子代理那部分花费会整个从统计里消失。
+async function walkJsonl(dir, projectName, depth, out) {
+  let entries;
+  try { entries = await readdir(dir, { withFileTypes: true }); }
+  catch { return; }
+  for (const e of entries) {
+    const p = join(dir, e.name);
+    if (e.isDirectory()) { await walkJsonl(p, projectName, depth + 1, out); continue; }
+    if (!e.name.endsWith('.jsonl')) continue;
+    try {
+      const st = await stat(p);
+      // depth 0 = 项目目录直属 = 一个会话;更深的是该会话的子代理 transcript,
+      // 花的钱要算,但不能让 sessionCount 跟着虚高。
+      out.push({ path: p, projectName, mtimeMs: st.mtimeMs, isSession: depth === 0 });
+    } catch {}
+  }
+}
+
+// 快速遍历:只 stat 不读内容,返回 [{ path, projectName, mtimeMs, isSession }] + 签名。
 async function listJsonl() {
   let projectDirs;
   try { projectDirs = await readdir(PROJECTS_DIR, { withFileTypes: true }); }
@@ -21,16 +43,7 @@ async function listJsonl() {
   const files = [];
   for (const dir of projectDirs) {
     if (!dir.isDirectory()) continue;
-    const projectPath = join(PROJECTS_DIR, dir.name);
-    let names;
-    try { names = (await readdir(projectPath)).filter((f) => f.endsWith('.jsonl')); }
-    catch { continue; }
-    for (const name of names) {
-      try {
-        const st = await stat(join(projectPath, name));
-        files.push({ path: join(projectPath, name), projectName: dir.name, mtimeMs: st.mtimeMs });
-      } catch {}
-    }
+    await walkJsonl(join(PROJECTS_DIR, dir.name), dir.name, 0, files);
   }
   const sig = files.length + ':' + files.reduce((s, f) => s + f.mtimeMs, 0);
   return { files, sig };
@@ -69,21 +82,24 @@ async function recompute(jsonlFiles, sig) {
   let totalCacheWrite = 0;
   let sessionCount = 0;
 
+  // 按 message.id 去重 —— 同一 API 调用的流式分片在 jsonl 里会落多条 usage 相同的
+  // assistant 记录,不去重会成倍虚算。**这个 Set 必须跨文件共用**:续接/分叉会话时
+  // CLI 把历史整段抄进新的 jsonl,同一次调用因此出现在多个文件里(本机实测 1.4 万个
+  // message.id 出现在不止一个文件、多出 4 万条重复记录,per-file 去重会让 token 总数
+  // 和各行 calls 接近翻倍)。
+  const seenIds = new Set();
   {
     for (const fileInfo of jsonlFiles) {
       const dir = { name: fileInfo.projectName };
       try {
         // 流式逐行聚合,不全量驻留(长会话 jsonl 可达数万行,旧版 limit:5000 截断会漏计)。
-        // W8:按 message.id 去重 —— 同一 API 调用的流式分片在 jsonl 里可能落多条
-        // assistant 记录(usage 相同),不去重会成倍虚算(本机实测 30.0 万条 → 14.0 万条唯一)。
         // sidechain(子代理)【计入】:子代理的每次调用都是独立的 API 请求、单独计费,
-        // 排除等于漏算(本机实测合计 ¥665.75 → ¥1,694.35,少六成)。原实现把它与分片去重
-        // 并列成"同理排除",是把两类不同的东西归成一类:分片是同一次调用的重复记录,
-        // 子代理是另一次真实调用。
-        // 与 session-reader.js:928 的相反口径不冲突:那里排除子代理是对的,因为上下文
-        // 徽章算的是【主回合占用了多少窗口】,子代理另有自己的上下文;此处算的是
-        // 【一共花了多少钱】。同一个 isSidechain 标记,两个问题两个答案。
-        const seenIds = new Set();
+        // 排除等于漏算。原实现把它与分片去重并列成"同理排除",是把两类相反的东西归成
+        // 一类:分片是同一次调用的重复记录,子代理是另一次真实调用。
+        // (光删掉那行过滤是不够的 —— 子代理 transcript 根本不在顶层,见 walkJsonl。)
+        // 与 session-reader.js 排除子代理的相反口径不冲突:那里算的是上下文徽章的
+        // 【主回合占用了多少窗口】,子代理另有自己的上下文;此处算的是【一共花了多少钱】。
+        // 同一个 isSidechain 标记,两个问题两个答案。
         await streamJsonl(fileInfo.path, (record) => {
           if (record.type !== 'assistant') return;
           const usage = record.message?.usage;
@@ -130,7 +146,9 @@ async function recompute(jsonlFiles, sig) {
           byDay[day].cacheWrite += cacheWrite;
           byDay[day].calls++;
         });
-        sessionCount++;
+        // 只有项目目录直属的 jsonl 才是一个会话;它的子代理 transcript 花费要算,
+        // 但不是独立会话,否则"会话数"会被子代理撑成两三倍。
+        if (fileInfo.isSession) sessionCount++;
       } catch {
         // skip unreadable files
       }
