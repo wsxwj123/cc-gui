@@ -53,7 +53,7 @@ import { ArtifactDock } from './components/ArtifactPreview.jsx';
 import { FullDiskAccessModal } from './components/FullDiskAccessModal.jsx';
 import { ProviderPriceEditor } from './components/ProviderPriceEditor.jsx';
 import { BUILTIN_PROVIDERS, findBuiltin } from './utils/builtinProviders.js';
-import { computeCost, formatCost, setUserPrices } from './utils/pricing.js';
+import { computeCost, formatCost, setUserPrices, observeOfficialBilling } from './utils/pricing.js';
 import { extractToolResultText, finalizePendingToolCalls, applyFinalizedToBlocks } from './utils/toolResult.js';
 import { rebuildTodosFromTaskCalls } from './utils/todos.js';
 import { isInitBindingOrigin, migrateDraftQueue, paneMessagesOwned, resolveHistModel, resolveSendModel } from './utils/routing.js';
@@ -9523,6 +9523,11 @@ function ShortcutsPanel({ open, onClose }) {
 // ─── Main App ──────────────────────────────────────────────────
 export default function App() {
   useWebSocket();
+  // R4-b:记下"官方 provider 当前是怎么计费的"(OAuth 订阅 / API key 按量)。历史消息里
+  // 没有当时的鉴权方式,拿此刻的顶替会让切一次 provider 就把订阅期的 Claude 消息按 API
+  // 单价重算(判官实测 ¥4,690 → ¥498,876)。这里是全局唯一观察点,跟随 store 的刷新节奏。
+  const _provForBilling = useStore((s) => s.currentProvider);
+  useEffect(() => { observeOfficialBilling(_provForBilling); }, [_provForBilling]);
   // #12 后台任务全局活性探测(判官打回修复):bgTasks 的 status 只有创建时的 'running'
   // (自然结束无退出码事件;监控卡的 phase 是组件本地态、面板关了就没人测)→ 任务清单
   // 转圈据 status 判会永转。这里全局唯一轮询:对非终态任务每 5s 查 output 文件 size,

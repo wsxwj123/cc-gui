@@ -400,12 +400,15 @@ function lookupByModel(model) {
   return model && model.includes('/') ? lookupByModel(model.slice(model.lastIndexOf('/') + 1)) : null;
 }
 
-// When provider routing is in effect (cc switch), the stream-json's model
-// field still says "claude-sonnet-X-X" because the CLI is Claude-shaped. The
-// real upstream is in ANTHROPIC_MODEL env. We choose a price by provider hint
-// + model resolution rules:
-//   anthropic / bedrock / vertex → Claude prices for the (displayed) model
-//   deepseek / mimo              → 这条消息自己的 model 优先,查不到才回落 env 档位
+// 按 model + provider 查一条单价。
+//   任何 hint  → 用户自填单价永远最优先(R3)
+//   anthropic / bedrock / vertex / unknown → 直接按这条消息的 model 查
+//   deepseek / mimo → 同样先按这条消息的 model 查,**查不到才**回落 env 档位
+// 【R4-c2 纠正旧注释】原注释写着"cc switch 路由时 stream-json 的 model 字段仍是
+// claude-sonnet-X-X,真实上游在 ANTHROPIC_MODEL env"——已被实测推翻:本机历史里的 24 个
+// model id 全是真实上游名(deepseek-v4-flash 14,239 条、k3 14,229 条、mimo-v2.5-pro
+// 3,121 条),没有伪装成 claude-* 的。所以 env 档位(provider.model)只是**消息没带
+// model 时**的兜底,不是主依据。别照着旧注释把这两个分支"修回"按 env 计价。
 function lookupPrice(model, provider) {
   if (!model && !(provider && provider.model)) return null;
   // R3:用户自填单价最高优先级 —— 赢过 REMOTE / 内置表,也赢过下面 deepseek/mimo 的
@@ -447,21 +450,50 @@ function lookupPrice(model, provider) {
  * 跑过的消息是**另外真金白银付的**,恰恰是订阅用户唯一需要看的费用 —— 所以判据
  * 必须带上 model:只看当前 provider 会把第三方花费一起藏了(判官实测:本机第三方
  * 消息 3.6 万条、真实花费约 ¥1.27 万,全被藏成 0)。这和 lookupPrice 里"计价第一
- * 依据永远是这条消息实际用的模型"是同一条原则,与 UsagePanel 的分档口径一致。
- * 三个条件缺一不可:
- *   providerHint='anthropic'(baseUrl 为空或 api.anthropic.com)
- *   + hasAuthKey === false(切官方时 AUTH_TOKEN/API_KEY 被显式删掉,只能走 OAuth)
- *   + model 是 Claude 家族(含裸别名 opus/sonnet/haiku/fable)
- * hasAuthKey 缺失(旧数据 / fetchProvider 未返回)、model 缺失,一律判非订阅:
- * 失败方向是"照常显示价格",不是"多藏一个数字"。
+ * 依据永远是这条消息实际用的模型"是同一条原则,与 UsagePanel 的分档口径一致
+ * (R4-a 起面板与气泡共用 computeCost / aggregateCost,不再各判各的)。
+ * 两个条件:
+ *   model 是 Claude 家族(含裸别名 opus/sonnet/haiku/fable)
+ *   + 【当时】走的是官方 OAuth(切官方时 AUTH_TOKEN/API_KEY 被显式删掉,只能走 OAuth)
+ * model 缺失、鉴权方式不明,一律判非订阅:失败方向是"照常显示价格",不是"多藏一个数字"。
  */
 export function isSubscriptionBilling(provider, model) {
   if (!provider) return false;
-  if ((provider.providerHint || 'anthropic') !== 'anthropic') return false;
-  if (provider.hasAuthKey !== false) return false;
   // 本机 29.9 万条 assistant 记录里的 24 个 model id 实测:命中的恰是 10 个 claude-*,
   // 第三方(k3 / kimi-for-coding / gpt-5.5 / deepseek-* / mimo-* / moonshotai/*)无一误伤。
-  return /claude|opus|sonnet|haiku|fable|mythos/i.test(model || '');
+  if (!/claude|opus|sonnet|haiku|fable|mythos/i.test(model || '')) return false;
+  if ((provider.providerHint || 'anthropic') === 'anthropic') return provider.hasAuthKey === false;
+  // R4-b:当前是第三方 provider —— 这条 Claude 消息显然不是现在发的,判据要用【当时】的
+  // 鉴权方式,而 jsonl 里没有。原实现在这里直接 return false(= 拿此刻的第三方身份顶替),
+  // 于是切一次 provider 历史金额就翻转:判官实测订阅态合计 ¥4,690,切到第三方立刻变
+  // ¥498,876,多出的 49 万全是订阅期 Claude 消息按 API 单价算出的虚构钱。
+  // 改用最后一次观察到的官方计费方式;从没观察到过则维持原行为(照常显示)。
+  return lastOfficialBilling === 'oauth';
+}
+
+// ── R4-b:最后一次观察到的【官方计费方式】────────────────────────────
+// 'oauth' = 订阅包月(官方 provider 且无 AUTH_TOKEN/API_KEY)| 'apikey' = 按量付费。
+// ponytail: localStorage 一行就够 —— 与 cgui-user-prices / cgui-litellm-prices 同层,纯展示
+// 口径。丢了只会回落成"照常显示价格"(多显示,不多藏),不值得为它引入服务端持久化。
+// 已知天花板:同一台机器换了账号(订阅号 → API key 号)时,换之前的历史会按换之后的口径判。
+// 要根治得按消息记当时的鉴权方式,而 jsonl 存不下 —— 与"同一 model id 在不同 provider
+// 不同价"是同一个天花板。
+const OFFICIAL_BILLING_KEY = 'cgui-official-billing';
+let lastOfficialBilling = null;
+try { lastOfficialBilling = localStorage.getItem(OFFICIAL_BILLING_KEY) || null; } catch { /* 隐私模式 */ }
+
+/**
+ * 记下"官方 provider 当前是怎么计费的"。只在 provider 确实是官方时记录 —— 第三方的
+ * hasAuthKey 说的是第三方的 token,不是官方计费方式,不许污染记录。
+ * 调用点:App 根组件对 currentProvider 的 effect(全局唯一,跟随 store 的刷新节奏)。
+ */
+export function observeOfficialBilling(provider) {
+  if (!provider || (provider.providerHint || 'anthropic') !== 'anthropic') return;
+  if (typeof provider.hasAuthKey !== 'boolean') return;  // 不知道就别记(旧数据/未返回)
+  const mode = provider.hasAuthKey ? 'apikey' : 'oauth';
+  if (mode === lastOfficialBilling) return;
+  lastOfficialBilling = mode;
+  try { localStorage.setItem(OFFICIAL_BILLING_KEY, mode); } catch { /* 隐私模式/配额 */ }
 }
 
 /**
@@ -485,9 +517,12 @@ export function isPlanBilling(provider, model) {
   // 是 Claude 订阅态 —— 中转站转售 claude-* 是真花钱的,不能跟着订阅一起藏)。
   const u = userModelPrice(model);
   if (u) return !!u.plan;
-  // ponytail: 前缀白名单够用 —— 套餐 id 与开放平台 id 不同名。将来 Kimi 改名在这里补键,
+  // ponytail: 整串白名单够用 —— 套餐 id 与开放平台 id 不同名。将来 Kimi 改名在这里补键,
   // 不必引入"按消息记 provider"的新体系(jsonl 也存不下)。
-  if (/^(k3|kimi-for-coding)/.test(model || '')) return true;
+  // R4-c1:锚定整串,不是前缀。原 /^(k3|kimi-for-coding)/ 会把 k30 / k3-turbo / k3.5 一起
+  // 当套餐静默藏掉金额(今天无碰撞,Kimi 开放平台出裸 k3.x 就中招)。[1m] 是 CLI 通用的
+  // 1M 上下文后缀,同一个模型,要保留。
+  if (/^(k3|kimi-for-coding(-highspeed)?)(\[1m\])?$/.test(model || '')) return true;
   return isSubscriptionBilling(provider, model);
 }
 
@@ -518,6 +553,27 @@ export function computeCost(model, usage, provider) {
   // source='user' = 这条按用户自填单价算的 → 显示口径改成"按你填写的单价计算",
   // 不再说"按官网价估算"(TurnBubble / MessageBubble / UsagePanel 三处同一判据)。
   return { totalUsd, breakdown, currency: p.currency, source: p.source || 'table' };
+}
+
+/**
+ * R4-a:用量面板的费用口径 —— 服务端按 model 聚合后的 { input, output, cacheRead,
+ * cacheWrite } 走同一个 computeCost,与逐条消息的气泡逐位一致(单价×token 是线性的,
+ * 先加后乘与先乘后加结果相同)。返回三态,对应面板的三种显示:
+ *   { usd }            → 金额
+ *   { subscription }   → 订阅内 / 套餐内(付的是月费,按 token 算出来的数没有意义)
+ *   { unknown }        → 「—」(查不到这个 model 的单价,无从计算)
+ * 【为什么要有这个函数】原先 UsagePanel 自带一套分档:/claude|opus|sonnet|haiku/ 一律当
+ * 订阅藏掉(连官方 API key 付费用户的钱也藏)、只有 deepseek/mimo 算钱、其余一律「—」。
+ * 判官实测同一份真实历史:面板 ¥211.70 vs 气泡 ¥4,689.56,差 22 倍。口径必须只有一个出口。
+ */
+export function aggregateCost(model, tokens, provider) {
+  const c = computeCost(model, {
+    input_tokens: tokens.input, output_tokens: tokens.output,
+    cache_read_input_tokens: tokens.cacheRead, cache_creation_input_tokens: tokens.cacheWrite || 0,
+  }, provider);
+  if (c) return { usd: c.totalUsd };
+  // computeCost 返回 null 有两种原因,面板要分开显示:套餐/订阅档 vs 查无单价。
+  return isPlanBilling(provider, model) ? { subscription: true } : { unknown: true };
 }
 
 /**

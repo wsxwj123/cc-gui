@@ -2,40 +2,22 @@ import React, { useEffect, useState } from 'react';
 import { Cpu, Calendar, RefreshCw, FolderOpen, Download, FileText } from 'lucide-react';
 import { ModelBadge, modelProvider } from './ModelBadge.jsx';
 import { ArtifactPreview } from './ArtifactPreview.jsx';
-import { computeCost, formatCost, userModelPrice } from '../utils/pricing.js';
+import { aggregateCost, formatCost } from '../utils/pricing.js';
+import { useStore } from '../stores/sessionStore.js';
 
-// Differentiated billing for the usage panel:
-//   Anthropic models (Max subscription) → no per-token charge ("订阅内")
-//   third-party (deepseek / mimo via cc switch) → real per-token cost
-// The server aggregates byModel as { input, output, cacheRead, cacheWrite, calls };
-// adapt that into the usage shape computeCost expects.
-function modelCost(model, m) {
-  const usage = {
-    input_tokens: m.input, output_tokens: m.output,
-    cache_read_input_tokens: m.cacheRead, cache_creation_input_tokens: m.cacheWrite || 0,
-  };
-  // R3:用户为这个 model id 填过单价/套餐标记 → 最高优先级,赢过下面"按模型名猜 provider"
-  // 的老逻辑(那套会把中转站转售的 claude-* 一律当订阅内藏掉,把没进白名单的模型显示为 —)。
-  const user = userModelPrice(model);
-  if (user) {
-    if (user.plan) return { subscription: true };   // 套餐包月:只显示用量,与订阅同一档
-    const c = computeCost(model, usage, null);
-    return c ? { usd: c.totalUsd } : { unknown: true };
-  }
-  const lower = (model || '').toLowerCase();
-  if (/claude|opus|sonnet|haiku/.test(lower)) return { subscription: true };
-  let provider = null;
-  if (lower.includes('deepseek')) provider = { providerHint: 'deepseek', model };
-  else if (lower.includes('mimo')) provider = { providerHint: 'mimo' };
-  if (!provider) return { unknown: true };
-  const c = computeCost(model, usage, provider);
-  return c ? { usd: c.totalUsd } : { unknown: true };
-}
+// R4-a:面板的费用口径 = 消息气泡的口径,只有 aggregateCost / computeCost 一个出口。
+// 服务端把 byModel 聚合成 { input, output, cacheRead, cacheWrite, calls },aggregateCost
+// 负责把它喂给 computeCost 并给出 金额 / 订阅内 / 「—」三态。
+// 【删掉了什么】原先这里自带一套分档:/claude|opus|sonnet|haiku/ 一律当订阅藏掉(不看
+// hasAuthKey,连官方 API key 付费用户的钱也藏)、只有 deepseek/mimo 算钱、其余一律「—」。
+// 判官实测同一份真实历史:面板 ¥211.70 vs 气泡 ¥4,689.56,差 22 倍;差额全是
+// gpt-5.6-sol / gpt-5.5 / moonshotai-kimi-k3 这类"面板显横杠、气泡显金额"的模型。
+// provider 由组件从 store 取当前值透传,与气泡(useStore(s => s.currentProvider))同源。
 
 // Group flat byModel rows under their provider. Each group carries its model
-// rows, summed tokens, summed third-party cost, and whether any member is an
-// Anthropic subscription model (→ provider shows "订阅内" instead of a price).
-function groupByProvider(byModel) {
+// rows, summed tokens, summed cost, and whether any member is billed by
+// subscription / plan (→ provider shows "订阅内" instead of a price).
+function groupByProvider(byModel, provider) {
   const map = new Map();
   for (const m of byModel) {
     const { key, label } = modelProvider(m.model);
@@ -43,7 +25,7 @@ function groupByProvider(byModel) {
     const g = map.get(key);
     g.models.push(m);
     g.tokens += m.input + m.output;
-    const c = modelCost(m.model, m);
+    const c = aggregateCost(m.model, m, provider);
     if (c.subscription) g.subscription = true;
     if (c.usd) g.usd += c.usd;
   }
@@ -201,6 +183,9 @@ function InsightsReportCard() {
 export function UsagePanel() {
   const [stats, setStats] = useState(null);
   const [loading, setLoading] = useState(true);
+  // R4-a:与消息气泡同源的 provider,透传给 aggregateCost —— 两个视图必须用同一个判据,
+  // 否则又会出现"面板和气泡对同一批数据给两个数"。
+  const provider = useStore((s) => s.currentProvider);
 
   const fetchStats = async (silent = false) => {
     if (!silent) setLoading(true);
@@ -291,7 +276,7 @@ export function UsagePanel() {
         <div className="bg-canvas-warm border border-canvas-deep rounded-lg p-3 space-y-3">
           {/* CQ批次4:provider 级用量柱状图(沿用 BarRow,零依赖)。付费=主色,订阅/免费=灰。 */}
           {(() => {
-            const groups = groupByProvider(stats.byModel);
+            const groups = groupByProvider(stats.byModel, provider);
             if (groups.length < 2) return null;
             const maxTok = Math.max(...groups.map((g) => g.tokens), 1);
             return (
@@ -303,7 +288,7 @@ export function UsagePanel() {
               </div>
             );
           })()}
-          {groupByProvider(stats.byModel).map((g) => (
+          {groupByProvider(stats.byModel, provider).map((g) => (
             <div key={g.key}>
               {/* Provider header — name + total cost (订阅内 / $x / —). */}
               <div className="flex items-center gap-2 mb-1.5">
@@ -321,7 +306,7 @@ export function UsagePanel() {
               {/* Model rows */}
               <div className="pl-2 border-l border-canvas-deep space-y-1.5">
                 {g.models.map((m) => {
-                  const cost = modelCost(m.model, m);
+                  const cost = aggregateCost(m.model, m, provider);
                   return (
                     <div key={m.model} className="flex items-center gap-2">
                       <ModelBadge model={m.model} compact />
@@ -345,7 +330,7 @@ export function UsagePanel() {
             </div>
           ))}
           {(() => {
-            const total = stats.byModel.reduce((acc, m) => acc + (modelCost(m.model, m).usd || 0), 0);
+            const total = stats.byModel.reduce((acc, m) => acc + (aggregateCost(m.model, m, provider).usd || 0), 0);
             if (total <= 0) return null;
             return (
               <div className="mt-1 pt-2 border-t border-canvas-deep flex items-center justify-between">

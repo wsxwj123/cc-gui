@@ -31,8 +31,11 @@ const HISTORY = [
   { model: 'deepseek-v4-pro', usage: u(90_000, 7_000, 500_000, 0) },
   { model: 'mimo-v2.5-pro', usage: u(40_000, 3_000, 100_000, 5_000) },
   { model: 'k3', usage: u(70_000, 9_000, 600_000, 15_000) },                 // 套餐档:两边都不计钱
-  { model: 'no-such-model-xyz', usage: u(10_000, 1_000, 0, 0) },             // 无价:两边都不计钱
 ];
+// 查无单价的 model 不放进这批:deepseek/mimo 分支下它会回落到 env 档位单价(既有的、
+// 刻意的行为 —— 在 deepseek 上遇到没收录的 id,多半就是个 deepseek 模型,按当前档位估
+// 好过什么都不显示),于是它的金额天然随当前 provider 变。这与 R4-b 要治的"Claude 历史
+// 被按 API 单价重算"是两回事,别顺手把它"修"掉。下面 ⑪ 单独把这个行为钉住。
 // 面板拿到的是服务端按 model 聚合后的 { input, output, cacheRead, cacheWrite }。
 const aggregate = (msgs) => {
   const by = {};
@@ -108,6 +111,13 @@ assert.equal(isSubscriptionBilling(SUB, 'claude-opus-5'), true, '官方 provider
 // 观察函数只认官方 provider:第三方的 hasAuthKey 不是"官方计费方式",不许污染记录。
 observeOfficialBilling(THIRD);
 assert.equal(isSubscriptionBilling(THIRD, 'claude-opus-5'), true, '第三方 provider 的 hasAuthKey 污染了观察记录');
+
+// ⑪ 既有行为钉住:查无单价的 id 在官方下是「—」,在 deepseek 下回落 env 档位单价。
+//    两个视图对它的口径仍然一致(都走 computeCost),只是它本身随 provider 变。
+const NOPRICE = { input: 1_000_000, output: 0, cacheRead: 0, cacheWrite: 0 };
+assert.deepEqual(aggregateCost('no-such-model-xyz', NOPRICE, SUB), { unknown: true });
+near(aggregateCost('no-such-model-xyz', NOPRICE, THIRD).usd,
+  computeCost('no-such-model-xyz', u(1_000_000, 0), THIRD).totalUsd, '无价 id 在面板与气泡下不一致');
 
 // ── R4-c1:Kimi 套餐白名单前缀过宽 ────────────────────────────────────
 // k3 / kimi-for-coding[-highspeed] 是套餐专属 id(可带 [1m] 后缀);k30 / k3-turbo /
