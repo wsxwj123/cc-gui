@@ -80,7 +80,8 @@ const PRICES = {
   // mimo-v2 系(mimo-v2-flash 等)2026-06-30 已下线,官方价目页无条目 → 按"拿不到不编"留空。
 
   // OpenAI — 2026-08-04 官方页直核 developers.openai.com/api/docs/pricing(补 5.6 系;
-  // 5.4/5.5 数字沿用 2026-06-05 录入值,与 LiteLLM 表逐项一致)。
+  // 5.4/5.5 的 input/output/cacheRead 沿用 2026-06-05 录入值,与 LiteLLM 表一致;
+  // cacheWrite 列本轮统一成 input,与 LiteLLM(按 1.25×input 生成)不同,见下)。
   // OpenAI 只有"缓存命中"折扣、不收缓存写入费 → cacheWrite=input(实测 3313 条 gpt 记录
   // cache_creation 恒为 0,这一列不参与计算,改的是口径不是数字)。
   'gpt-5.6-sol':                 usd(5, 30, 0.50, 5),
@@ -270,7 +271,10 @@ const ALIASES = {
   'sonnet': 'claude-sonnet-4-6',
   'opus':   'claude-opus-4-7',
   'haiku':  'claude-haiku-4-5',
-  'fable':  'claude-fable-5',   // 历史 717 条裸 'fable' 原先四路查价全落空 = 无价可显
+  // 与上面三条同理:CLI 发裸 'fable' 时原先四路查价全落空 = 无价可显。
+  // (本机 3749 个 jsonl 的 assistant 消息里实际出现 0 次 —— 上一版注释写的"717 条"
+  //  是拿 rg 抓 "model":" 时把 Agent 工具入参 model:"fable" 也算进去了,不是真调用。)
+  'fable':  'claude-fable-5',
 };
 
 // 按 model id 查价(与 provider 无关的纯解析):LiteLLM 远端表优先(覆盖广、随上游
@@ -330,28 +334,61 @@ function lookupPrice(model, provider) {
 }
 
 /**
- * 官方订阅(Pro/Max 包月)计费判据。订阅用户不按 token 付费,把单价表算出的金额
- * 显示给他是误导 —— 那是"如果走 API 会花多少",不是他的账单。
- * 判据与 GET /api/provider 同源:providerHint='anthropic'(baseUrl 为空或
- * api.anthropic.com)且 settings.json 里没有 ANTHROPIC_AUTH_TOKEN / API_KEY
- * (切官方时被显式删掉,CLI 只能走 OAuth 订阅)。官方 + 有 key = 按量付费,照常显示。
- * hasAuthKey 缺失(旧数据 / fetchProvider 尚未返回)一律判为非订阅:失败方向是
- * "照常显示价格",不是"多藏一个数字"。
+ * 官方订阅(Pro/Max 包月)计费判据 —— 判的是【这条消息】,不是整个界面。
+ * 订阅包月覆盖的只有 Claude 那部分:把单价表算出的金额显示给订阅用户是误导
+ * (那是"如果走 API 会花多少",不是他的账单)。但同一个人切到 deepseek/kimi/gpt
+ * 跑过的消息是**另外真金白银付的**,恰恰是订阅用户唯一需要看的费用 —— 所以判据
+ * 必须带上 model:只看当前 provider 会把第三方花费一起藏了(判官实测:本机第三方
+ * 消息 3.6 万条、真实花费约 ¥1.27 万,全被藏成 0)。这和 lookupPrice 里"计价第一
+ * 依据永远是这条消息实际用的模型"是同一条原则,与 UsagePanel 的分档口径一致。
+ * 三个条件缺一不可:
+ *   providerHint='anthropic'(baseUrl 为空或 api.anthropic.com)
+ *   + hasAuthKey === false(切官方时 AUTH_TOKEN/API_KEY 被显式删掉,只能走 OAuth)
+ *   + model 是 Claude 家族(含裸别名 opus/sonnet/haiku/fable)
+ * hasAuthKey 缺失(旧数据 / fetchProvider 未返回)、model 缺失,一律判非订阅:
+ * 失败方向是"照常显示价格",不是"多藏一个数字"。
  */
-export function isSubscriptionBilling(provider) {
+export function isSubscriptionBilling(provider, model) {
   if (!provider) return false;
-  return (provider.providerHint || 'anthropic') === 'anthropic' && provider.hasAuthKey === false;
+  if ((provider.providerHint || 'anthropic') !== 'anthropic') return false;
+  if (provider.hasAuthKey !== false) return false;
+  // 本机 29.9 万条 assistant 记录里的 24 个 model id 实测:命中的恰是 10 个 claude-*,
+  // 第三方(k3 / kimi-for-coding / gpt-5.5 / deepseek-* / mimo-* / moonshotai/*)无一误伤。
+  return /claude|opus|sonnet|haiku|fable|mythos/i.test(model || '');
+}
+
+/**
+ * 套餐包月档:按 token 单价算出来的金额没有意义(用户付的是月费,不是 token 费)→ 不显示。
+ * 两类:
+ *   1. Claude 官方订阅(见 isSubscriptionBilling);
+ *   2. Kimi Code 会员套餐(baseURL api.kimi.com/coding)。它的模型 id 是套餐专属的
+ *      k3 / kimi-for-coding / kimi-for-coding-highspeed,与开放平台按量付费的
+ *      kimi-k3 / kimi-k2.7-code 不同名 → 单看 model id 就能可靠区分,不依赖当前 env。
+ *      (下面价表里那三个键按开放平台同型号价近似,套餐档不显示金额,它们只作兜底。)
+ * 其余(DeepSeek / MiMo / 官方 API key / 中转站)一律按量档,照常显示金额。
+ * 【已知天花板】jsonl 不记接入方式 —— 实测顶层字段只有 uuid / timestamp / cwd /
+ * sessionId / version / gitBranch 等,没有 baseURL / provider;同一个 gpt-5.6-sol
+ * 既可能走中转站(自定价、通常低于官网)也可能走本地 codex 代理(ChatGPT 订阅额度),
+ * 单价基准分不出来。按"宁可看到标注了不确定的数字,也不要什么都看不到"的口径:
+ * 这类一律【显示 + 在 title 标注按官网价估算】,不静默隐藏。
+ */
+export function isPlanBilling(provider, model) {
+  // ponytail: 前缀白名单够用 —— 套餐 id 与开放平台 id 不同名。将来 Kimi 改名在这里补键,
+  // 不必引入"按消息记 provider"的新体系(jsonl 也存不下)。
+  if (/^(k3|kimi-for-coding)/.test(model || '')) return true;
+  return isSubscriptionBilling(provider, model);
 }
 
 /**
  * Compute USD cost for a single message's usage object.
  * Returns { totalUsd, breakdown: {input, output, cacheRead, cacheWrite} } or null.
- * 订阅态返回 null —— 这是所有费用展示的唯一出口,各处 `cost && (...)` 条件渲染
- * 因此自动只剩用量,不用在每个显示点各加一遍判断。
+ * 套餐档的消息返回 null —— 这是所有费用展示的唯一出口,各处 `cost && (...)`
+ * 条件渲染因此自动只剩用量,不用在每个显示点各加一遍判断。判据带 model,
+ * 所以订阅态下同一条会话里按量付费模型的花费照常显示、Claude 的不显示。
  */
 export function computeCost(model, usage, provider) {
   if (!usage) return null;
-  if (isSubscriptionBilling(provider)) return null;
+  if (isPlanBilling(provider, model)) return null;
   const p = lookupPrice(model, provider);
   if (!p) return null;
   const input = usage.input_tokens || 0;

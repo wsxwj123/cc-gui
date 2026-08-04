@@ -62,11 +62,12 @@ assert.ok(Math.abs(step35.totalUsd - (1.5 + 4) / CNY) < 1e-9, `step-3.5-flash ${
 // Kimi:开放平台官方价;highspeed 有独立表键,走精确键命中(不进前缀兜底分支),须取自己的档
 const k27hs = computeCost('kimi-k2.7-code-highspeed', { input_tokens: 1_000_000, output_tokens: 1_000_000 });
 assert.ok(Math.abs(k27hs.totalUsd - (13 + 54) / CNY) < 1e-9, `kimi-k2.7-code-highspeed ${k27hs?.totalUsd} != ${(13 + 54) / CNY}`);
-// Kimi Code 套餐 id:k3[1m] 走 'k3' 前缀兜底,kimi-for-coding 精确命中
-const k3m = computeCost('k3[1m]', { input_tokens: 1_000_000, output_tokens: 1_000_000 });
-assert.ok(Math.abs(k3m.totalUsd - (20 + 100) / CNY) < 1e-9, `k3[1m] ${k3m?.totalUsd} != ${(20 + 100) / CNY}`);
-const kfc = computeCost('kimi-for-coding', { input_tokens: 1_000_000, output_tokens: 1_000_000 });
-assert.ok(Math.abs(kfc.totalUsd - (6.5 + 27) / CNY) < 1e-9, `kimi-for-coding ${kfc?.totalUsd} != ${(6.5 + 27) / CNY}`);
+// Kimi Code 会员套餐 id(k3 / kimi-for-coding*)是包月制,不按 token 计费 →
+// computeCost 恒 null(价表里那三个键只作兜底)。判据见 check-subscription-billing.mjs。
+for (const m of ['k3[1m]', 'kimi-for-coding', 'kimi-for-coding-highspeed']) {
+  assert.strictEqual(computeCost(m, { input_tokens: 1_000_000, output_tokens: 1_000_000 }), null,
+    `${m} 是套餐 id,不该按开放平台按量价算出金额`);
+}
 
 // Groq(2026-07-17):gpt-oss-120b 官方 id 带 openai/ 前缀,精确命中 $0.15/$0.60,cacheRead 半价 $0.075。
 const groq = computeCost('openai/gpt-oss-120b', { input_tokens: 1_000_000, cache_read_input_tokens: 1_000_000 });

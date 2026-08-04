@@ -573,9 +573,11 @@ router.put('/settings', async (req, res) => {
 router.get('/provider', async (_req, res) => {
   try {
     let env = {};
+    let apiKeyHelper = '';
     try {
       const settings = JSON.parse(await readFile(SETTINGS_PATH, 'utf-8'));
       if (settings && settings.env && typeof settings.env === 'object') env = settings.env;
+      if (typeof settings?.apiKeyHelper === 'string') apiKeyHelper = settings.apiKeyHelper;
     } catch {}
     // env vars on settings.json win over process.env (cc switch writes there).
     const baseUrl = String(
@@ -589,12 +591,13 @@ router.get('/provider', async (_req, res) => {
 
     // 计费口径判据(只回布尔,绝不回令牌本身):官方订阅切换时 /provider/switch 的
     // official 分支会显式删掉 ANTHROPIC_AUTH_TOKEN / ANTHROPIC_API_KEY 回到 OAuth 登录,
-    // 所以「providerHint=anthropic 且这两个 key 都没有」= 包月订阅,按 token 单价算出的
-    // 费用对用户是误导(他不按量付费),前端据此只显示用量不显示价格。
-    const hasAuthKey = !!(
-      env.ANTHROPIC_AUTH_TOKEN || env.ANTHROPIC_API_KEY ||
-      process.env.ANTHROPIC_AUTH_TOKEN || process.env.ANTHROPIC_API_KEY
-    );
+    // 所以「providerHint=anthropic 且这两个 key 都没有」= 包月订阅,前端据此对 Claude 系
+    // 模型只显示用量不显示价格(第三方模型照常显示,那是另外真金白银付的)。
+    // apiKeyHelper 也算有 key:它是 CLI 现取 API key 的钩子,配了它就是按量付费,
+    // 漏判会把付费用户的价格藏掉(失败方向必须是"不多藏")。
+    // 不看 process.env:server/index.js 启动时 stripInheritedProviderEnv() 已把
+    // ANTHROPIC_AUTH_TOKEN/API_KEY 从本进程 env 删掉,写在这里是死代码,徒增误解。
+    const hasAuthKey = !!(env.ANTHROPIC_AUTH_TOKEN || env.ANTHROPIC_API_KEY || apiKeyHelper);
 
     const u = baseUrl.toLowerCase();
     let providerHint = 'anthropic';

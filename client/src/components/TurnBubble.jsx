@@ -13,7 +13,7 @@ import { TaskCard } from './tools/TaskCard.jsx';
 import { GrepGlobCard } from './tools/GrepGlobCard.jsx';
 import { WebCard } from './tools/WebCard.jsx';
 import { SkillCard } from './tools/SkillCard.jsx';
-import { computeCost, formatCost, isSubscriptionBilling } from '../utils/pricing.js';
+import { computeCost, formatCost, isPlanBilling } from '../utils/pricing.js';
 import { copyText } from '../utils/clipboard.js';
 import { useStore } from '../stores/sessionStore.js';
 import { TASK_TOOL_NAMES, rebuildTodosFromTaskCalls } from '../utils/todos.js';
@@ -637,9 +637,10 @@ function UsageDisplay({ usage, model, costUsd }) {
   // Z1:CLI result 事件的 total_cost_usd 是官方计费口径的权威成本,优先于单价表
   // 估算。第三方 provider 下 CLI 仍按 Claude 价目计算(模型名是伪装的),不可信。
   const official = !provider || (provider.providerHint || 'anthropic') === 'anthropic';
-  // 官方订阅是包月,CLI 上报的 total_cost_usd 是"按 API 单价这轮值多少钱",不是用户
-  // 的账单 → 订阅态一并不显示(computeCost 已在订阅态返回 null,这条走的是另一条路)。
-  const authoritative = official && !isSubscriptionBilling(provider)
+  // 套餐包月(Claude 订阅 / Kimi Code)下,CLI 上报的 total_cost_usd 是"按 API 单价这轮
+  // 值多少钱",不是用户的账单 → 不显示(computeCost 已返回 null,这条走的是另一条路)。
+  // 判据必须带 model:订阅态下跑按量付费模型的回合是真花钱的,不能一起藏。
+  const authoritative = official && !isPlanBilling(provider, model)
     && typeof costUsd === 'number' && costUsd > 0;
   return (
     <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[10px] text-ink-faint mt-2 pt-2 border-t border-canvas-deep/50">
@@ -659,6 +660,7 @@ function UsageDisplay({ usage, model, costUsd }) {
             authoritative
               ? 'CLI 上报的本轮实际成本（total_cost_usd，官方计费口径；美元计价模型按 1 USD ≈ 7.2 CNY 换算，人民币计价模型为原生定价）'
               : `本条估算（人民币；美元计价模型按 1 USD ≈ 7.2 CNY 换算，人民币计价模型为原生定价）\n` +
+                `单价取各模型官网价目。若该模型经中转站接入，实际单价以服务商为准。\n` +
                 `input ${formatCost(cost.breakdown.input)}\n` +
                 `output ${formatCost(cost.breakdown.output)}\n` +
                 `cache read ${formatCost(cost.breakdown.cacheRead)}\n` +

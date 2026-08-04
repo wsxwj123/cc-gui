@@ -8158,7 +8158,7 @@ function ContextBreakdownButton({ contextTokens, contextWindow, contextPct, fmtT
             <span className="text-ink-faint w-14 shrink-0">累计 token</span>
             <span className="font-mono text-ink-muted">{(info.totalAllTokens || 0).toLocaleString()}</span>
             {info.totalCostUsd > 0 && (
-              <span className="font-mono text-accent/80" title="按当前各模型官网价估算的累计费用（人民币，按 1 USD ≈ 7.2 CNY 换算）">
+              <span className="font-mono text-accent/80" title="按各模型官网价估算的累计费用（人民币，按 1 USD ≈ 7.2 CNY 换算）。套餐制模型（Claude 官方订阅、Kimi Code 会员套餐）不按 token 计费，不计入此数。若模型经中转站接入，实际单价以服务商为准。">
                 · {formatCost(info.totalCostUsd)}
               </span>
             )}

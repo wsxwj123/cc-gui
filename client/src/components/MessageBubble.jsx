@@ -322,6 +322,7 @@ function UsageDisplay({ usage, model }) {
           className="ml-auto text-accent/80 font-mono"
           title={
             `本条估算（人民币；美元计价模型按 1 USD ≈ 7.2 CNY 换算，人民币计价模型为原生定价）\n` +
+            `单价取各模型官网价目。若该模型经中转站接入，实际单价以服务商为准。\n` +
             `input ${formatCost(cost.breakdown.input)}\n` +
             `output ${formatCost(cost.breakdown.output)}\n` +
             `cache read ${formatCost(cost.breakdown.cacheRead)}\n` +
