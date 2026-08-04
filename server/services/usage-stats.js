@@ -82,17 +82,35 @@ async function recompute(jsonlFiles, sig) {
   let totalCacheWrite = 0;
   let sessionCount = 0;
 
-  // 按 message.id 去重 —— 同一 API 调用的流式分片在 jsonl 里会落多条 usage 相同的
-  // assistant 记录,不去重会成倍虚算。**这个 Set 必须跨文件共用**:续接/分叉会话时
-  // CLI 把历史整段抄进新的 jsonl,同一次调用因此出现在多个文件里(本机实测 1.4 万个
-  // message.id 出现在不止一个文件、多出 4 万条重复记录,per-file 去重会让 token 总数
-  // 和各行 calls 接近翻倍)。
-  const seenIds = new Set();
+  // 一次 API 调用在 jsonl 里按 content block 拆成多条 assistant 记录,共用同一个
+  // message.id。**它们的 usage 不是相同的**:中间那些 stop_reason 为 null 的记录带的是
+  // 还没写完的账(output 常常是 0),只有收尾那条(stop_reason 非 null)是真数。所以按
+  // message.id 去重时"留哪一条"是有对错的 —— 留第一条会把整次调用的输出丢掉
+  // (本机实测:10.1 万个 id 里 3.9 万个的第一条没写完,先到先得使 output 少算 42%、
+  // input 多算 139%、金额少 21%)。这里按【token 总量最大】的那条留,理由:
+  //   · 与"留收尾那条"等价 —— 未写完的账不可能大于写完的;
+  //   · 不依赖记录出现顺序(跨文件时顺序由目录遍历决定,不可靠);
+  //   · 整条替换而非逐字段取 max,不会把两条记录的字段拼成一条现实中不存在的账。
+  // 去重本身**必须跨文件**:续接/分叉会话时 CLI 把历史整段抄进新的 jsonl,同一次调用
+  // 因此出现在多个文件里(本机实测 1.4 万个 id 跨文件,其中 99.6% 是逐字节相同的抄本)。
+  // 代价是要驻留 id → 最优记录的映射(本机 10.1 万条,约十几 MB),换的是这个正确性。
+  const bestById = new Map();
+  const bump = (model, project, day, u) => {
+    totalInput += u.input; totalOutput += u.output;
+    totalCacheRead += u.cacheRead; totalCacheWrite += u.cacheWrite;
+    for (const [bucket, key] of [[byModel, model], [byProject, project], [byDay, day]]) {
+      if (!bucket[key]) bucket[key] = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, calls: 0 };
+      bucket[key].input += u.input;
+      bucket[key].output += u.output;
+      bucket[key].cacheRead += u.cacheRead;
+      bucket[key].cacheWrite += u.cacheWrite;
+      bucket[key].calls++;
+    }
+  };
   {
     for (const fileInfo of jsonlFiles) {
-      const dir = { name: fileInfo.projectName };
       try {
-        // 流式逐行聚合,不全量驻留(长会话 jsonl 可达数万行,旧版 limit:5000 截断会漏计)。
+        // 流式逐行,不全量驻留 jsonl 本体(长会话可达数万行,旧版 limit:5000 截断会漏计)。
         // sidechain(子代理)【计入】:子代理的每次调用都是独立的 API 请求、单独计费,
         // 排除等于漏算。原实现把它与分片去重并列成"同理排除",是把两类相反的东西归成
         // 一类:分片是同一次调用的重复记录,子代理是另一次真实调用。
@@ -104,47 +122,25 @@ async function recompute(jsonlFiles, sig) {
           if (record.type !== 'assistant') return;
           const usage = record.message?.usage;
           if (!usage) return;
-          const mid = record.message?.id;
-          if (mid) {
-            if (seenIds.has(mid)) return;
-            seenIds.add(mid);
-          }
 
+          const u = {
+            input: usage.input_tokens || 0,
+            output: usage.output_tokens || 0,
+            cacheRead: usage.cache_read_input_tokens || 0,
+            cacheWrite: usage.cache_creation_input_tokens || 0,
+          };
           const model = record.message?.model || 'unknown';
-          const input = usage.input_tokens || 0;
-          const output = usage.output_tokens || 0;
-          const cacheRead = usage.cache_read_input_tokens || 0;
-          const cacheWrite = usage.cache_creation_input_tokens || 0;
           const day = record.timestamp ? record.timestamp.slice(0, 10) : 'unknown';
+          const mid = record.message?.id;
+          // 没有 message.id 就无从去重(本机 30 万条里只有 1 条),直接计入,
+          // 不能拿空串当键 —— 那会把它们全并成一条。
+          if (!mid) return bump(model, fileInfo.projectName, day, u);
 
-          totalInput += input;
-          totalOutput += output;
-          totalCacheRead += cacheRead;
-          totalCacheWrite += cacheWrite;
-
-          // By model
-          if (!byModel[model]) byModel[model] = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, calls: 0 };
-          byModel[model].input += input;
-          byModel[model].output += output;
-          byModel[model].cacheRead += cacheRead;
-          byModel[model].cacheWrite += cacheWrite;
-          byModel[model].calls++;
-
-          // By project
-          if (!byProject[dir.name]) byProject[dir.name] = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, calls: 0 };
-          byProject[dir.name].input += input;
-          byProject[dir.name].output += output;
-          byProject[dir.name].cacheRead += cacheRead;
-          byProject[dir.name].cacheWrite += cacheWrite;
-          byProject[dir.name].calls++;
-
-          // By day
-          if (!byDay[day]) byDay[day] = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, calls: 0 };
-          byDay[day].input += input;
-          byDay[day].output += output;
-          byDay[day].cacheRead += cacheRead;
-          byDay[day].cacheWrite += cacheWrite;
-          byDay[day].calls++;
+          const total = u.input + u.output + u.cacheRead + u.cacheWrite;
+          const prev = bestById.get(mid);
+          if (!prev || total > prev.total) {
+            bestById.set(mid, { model, project: fileInfo.projectName, day, total, u });
+          }
         });
         // 只有项目目录直属的 jsonl 才是一个会话;它的子代理 transcript 花费要算,
         // 但不是独立会话,否则"会话数"会被子代理撑成两三倍。
@@ -154,6 +150,8 @@ async function recompute(jsonlFiles, sig) {
       }
     }
   }
+  // 全部文件读完才结算:一次调用的最优记录可能出现在任意一个文件的任意一行。
+  for (const b of bestById.values()) bump(b.model, b.project, b.day, b.u);
 
   const result = {
     total: { input: totalInput, output: totalOutput, cacheRead: totalCacheRead, cacheWrite: totalCacheWrite, sessionCount },

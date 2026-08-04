@@ -30,9 +30,12 @@ function makeHome(tree) {
   return home;
 }
 const rec = (o) => JSON.stringify({ type: 'assistant', timestamp: '2026-08-04T00:00:00.000Z', ...o });
-const msg = (id, model, input, output) => ({
-  message: { id, model, usage: { input_tokens: input, output_tokens: output, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } },
+const msg = (id, model, input, output, stopReason = 'end_turn') => ({
+  message: { id, model, stop_reason: stopReason, usage: { input_tokens: input, output_tokens: output, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } },
 });
+// 未写完的分片:stop_reason 为 null、output 还是 0。它和收尾那条共用同一个 message.id,
+// 去重时留错了就等于把整次调用的输出丢掉。
+const partial = (id, model, input) => msg(id, model, input, 0, null);
 async function statsFor(home, tag) {
   process.env.HOME = home;
   const { getUsageStats } = await import(`../../server/services/usage-stats.js?case=${tag}`);
@@ -43,8 +46,8 @@ try {
   // ── ① 真实目录形态:会话在项目目录直属,子代理在两层深的 subagents/ 下 ──────
   const s = await statsFor(makeHome({
     'demo/s1.jsonl': [
-      rec(msg('m1', 'main-model', 100, 10)),
-      rec(msg('m1', 'main-model', 100, 10)),                                  // 流式分片 → 去重
+      rec(partial('m1', 'main-model', 100)),                                  // 未写完的分片(先出现)
+      rec(msg('m1', 'main-model', 100, 10)),                                  // 收尾那条才是真账
       rec({ message: { id: 'm4', model: 'x' } }),                             // 无 usage → 跳过
       JSON.stringify({ type: 'user', message: { id: 'm5' } }),                 // 非 assistant → 跳过
     ],
@@ -52,6 +55,8 @@ try {
     'demo/s2.jsonl': [
       rec(msg('m1', 'main-model', 100, 10)),                                  // 跨文件重复 → 仍只算一次
       rec(msg('m9', 'main-model', 3, 1)),                                     // s2 自己的新调用
+      rec(msg('m7', 'main-model', 20, 5)),                                    // 收尾那条【先】出现
+      rec(partial('m7', 'main-model', 20)),                                   // 未写完的分片【后】出现,不许覆盖
     ],
     // 子代理 transcript 的真实落点(比会话本体深两层)
     'demo/s1/subagents/agent-x.jsonl': [
@@ -60,20 +65,22 @@ try {
     ],
   }), 'nested');
 
-  assert.equal(s.total.input, 610, '总输入 = 主 100(跨文件只算一次) + 3 + 子代理 500 + 7');
-  assert.equal(s.total.output, 62, '总输出 = 10 + 1 + 50 + 1');
+  assert.equal(s.total.input, 630, '总输入 = 主 100(跨文件只算一次) + 3 + 20 + 子代理 500 + 7');
+  // 这条是"留哪一条"的红线:留未写完的分片会得到 52(m1 的 10 丢了) 或 62(m7 的 5 丢了)。
+  assert.equal(s.total.output, 67, '总输出 = 10 + 1 + 5 + 50 + 1;分片去重必须留收尾那条,不是先到先得');
 
   const byModel = Object.fromEntries(s.byModel.map((r) => [r.model, r]));
   assert.ok(byModel['sub-model'], '递归扫描必须读到两层深的 subagents/,否则子代理花费整个消失');
   assert.equal(byModel['sub-model'].calls, 2, 'isSidechain 与 parentToolUseId 两种子代理记录都要计入');
   assert.equal(byModel['sub-model'].input, 507);
-  assert.equal(byModel['main-model'].calls, 2, '同一 message.id 跨两个文件出现,只能算一次调用');
-  assert.equal(byModel['main-model'].input, 103);
+  assert.equal(byModel['main-model'].calls, 3, '同一 message.id 无论出现几次、在几个文件里,都只算一次调用');
+  assert.equal(byModel['main-model'].input, 123, 'm1 100 + m9 3 + m7 20');
+  assert.equal(byModel['main-model'].output, 16, 'm1 10 + m9 1 + m7 5 —— m7 的收尾记录先出现、未写完的后出现,不许被覆盖');
 
   assert.equal(s.total.sessionCount, 2, '会话数只数项目目录直属的 jsonl,子代理 transcript 不是独立会话');
 
   const byProject = Object.fromEntries(s.byProject.map((r) => [r.hash, r]));
-  assert.equal(byProject['demo'].input, 610, '深层文件归属到它所在的顶层项目,不另起一行');
+  assert.equal(byProject['demo'].input, 630, '深层文件归属到它所在的顶层项目,不另起一行');
 
   // ── ② 纯子代理会话:整个项目只有子代理记录时,花费不许归零 ─────────────
   const subOnly = await statsFor(makeHome({
