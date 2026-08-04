@@ -75,11 +75,17 @@ async function recompute(jsonlFiles, sig) {
       try {
         // 流式逐行聚合,不全量驻留(长会话 jsonl 可达数万行,旧版 limit:5000 截断会漏计)。
         // W8:按 message.id 去重 —— 同一 API 调用的流式分片在 jsonl 里可能落多条
-        // assistant 记录(usage 相同),不去重会成倍虚算。sidechain(子代理)同理排除。
+        // assistant 记录(usage 相同),不去重会成倍虚算(本机实测 30.0 万条 → 14.0 万条唯一)。
+        // sidechain(子代理)【计入】:子代理的每次调用都是独立的 API 请求、单独计费,
+        // 排除等于漏算(本机实测合计 ¥665.75 → ¥1,694.35,少六成)。原实现把它与分片去重
+        // 并列成"同理排除",是把两类不同的东西归成一类:分片是同一次调用的重复记录,
+        // 子代理是另一次真实调用。
+        // 与 session-reader.js:928 的相反口径不冲突:那里排除子代理是对的,因为上下文
+        // 徽章算的是【主回合占用了多少窗口】,子代理另有自己的上下文;此处算的是
+        // 【一共花了多少钱】。同一个 isSidechain 标记,两个问题两个答案。
         const seenIds = new Set();
         await streamJsonl(fileInfo.path, (record) => {
           if (record.type !== 'assistant') return;
-          if (record.isSidechain || record.parentToolUseId) return;
           const usage = record.message?.usage;
           if (!usage) return;
           const mid = record.message?.id;
