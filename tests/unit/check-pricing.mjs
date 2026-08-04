@@ -101,6 +101,33 @@ assert.ok(Math.abs(gflashx.totalUsd - (0.07 + 0.4)) < 1e-9, `glm-4.7-flashx ${gf
 const g5vt = computeCost('glm-5v-turbo', { input_tokens: 1_000_000, output_tokens: 1_000_000 });
 assert.ok(Math.abs(g5vt.totalUsd - (1.2 + 4)) < 1e-9, `glm-5v-turbo ${g5vt?.totalUsd} != 5.2`);
 
+// ── Q-c(2026-08-04 官方页重核):历史里真实出现过、原先无价或落错档的 id ──
+// Opus 5(历史 4.2 万条):官方 $5/$25。原先内置表无条目,只靠 LiteLLM 远端表兜。
+const opus5 = computeCost('claude-opus-5', { input_tokens: 1_000_000, output_tokens: 1_000_000 });
+assert.ok(Math.abs(opus5.totalUsd - (5 + 25)) < 1e-9, `claude-opus-5 ${opus5?.totalUsd} != 30`);
+// GPT-5.6 系(官方 developers.openai.com):sol $5/$30、terra $2/$12、luna $0.2/$1.2。
+const sol = computeCost('gpt-5.6-sol', { input_tokens: 1_000_000, output_tokens: 1_000_000, cache_read_input_tokens: 1_000_000 });
+assert.ok(Math.abs(sol.totalUsd - (5 + 30 + 0.5)) < 1e-9, `gpt-5.6-sol ${sol?.totalUsd} != 35.5`);
+const terra = computeCost('gpt-5.6-terra', { input_tokens: 1_000_000, output_tokens: 1_000_000 });
+assert.ok(Math.abs(terra.totalUsd - (2 + 12)) < 1e-9, `gpt-5.6-terra ${terra?.totalUsd} != 14`);
+const luna = computeCost('gpt-5.6-luna', { input_tokens: 1_000_000, output_tokens: 1_000_000 });
+assert.ok(Math.abs(luna.totalUsd - (0.2 + 1.2)) < 1e-9, `gpt-5.6-luna ${luna?.totalUsd} != 1.4`);
+// MiMo UltraSpeed 独立档 ¥9/¥18:不许被 'mimo-v2.5-pro'(¥3/¥6)前缀兜底吃掉(少算 3×)。
+const ultra = computeCost('mimo-v2.5-pro-ultraspeed', { input_tokens: 1_000_000, output_tokens: 1_000_000 });
+assert.ok(Math.abs(ultra.totalUsd - (9 + 18) / CNY) < 1e-9, `mimo ultraspeed ${ultra?.totalUsd} != ${(9 + 18) / CNY}`);
+// 裸别名 'fable'(历史 717 条)原先四路查价全落空 → 现走 ALIASES 到 claude-fable-5($10/$50)。
+const fableAlias = computeCost('fable', { input_tokens: 1_000_000, output_tokens: 1_000_000 });
+assert.ok(Math.abs(fableAlias.totalUsd - (10 + 50)) < 1e-9, `fable 别名 ${fableAlias?.totalUsd} != 60`);
+// 带命名空间的聚合平台 id:去掉命名空间按上游模型计价。
+const nsKimi = computeCost('moonshotai/kimi-k3', { input_tokens: 1_000_000, output_tokens: 1_000_000 });
+assert.ok(Math.abs(nsKimi.totalUsd - (20 + 100) / CNY) < 1e-9, `moonshotai/kimi-k3 ${nsKimi?.totalUsd} != ${(20 + 100) / CNY}`);
+const nsGpt = computeCost('openai/gpt-5.6-sol', { input_tokens: 1_000_000, output_tokens: 1_000_000 });
+assert.ok(Math.abs(nsGpt.totalUsd - (5 + 30)) < 1e-9, `openai/gpt-5.6-sol ${nsGpt?.totalUsd} != 35`);
+// 回归守卫:Groq 的 'openai/gpt-oss-120b' 有自己的精确键($0.15/$0.60),不许被去命名空间
+// 后的 Cerebras 裸键($0.35/$0.75)顶掉 —— 精确匹配必须先于去命名空间兜底。
+const groqNs = computeCost('openai/gpt-oss-120b', { input_tokens: 1_000_000, output_tokens: 1_000_000 });
+assert.ok(Math.abs(groqNs.totalUsd - (0.15 + 0.60)) < 1e-9, `groq 精确键被命名空间兜底顶掉 ${groqNs?.totalUsd} != 0.75`);
+
 // formatCost renders CNY (×7.2). 0.09125 USD → ¥0.657 (<¥1 → 3 decimals).
 assert.strictEqual(formatCost(expected), '¥0.657');
 

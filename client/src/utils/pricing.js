@@ -3,7 +3,9 @@
 // 这是**离线兜底表**;运行时优先用 /api/pricing 下发的 LiteLLM 远端表(REMOTE),
 // 覆盖更广更新更勤。手抄表只在 REMOTE 无该 model 时兜底。
 // 全量核对日期 2026-07-16(Anthropic/DeepSeek 官方页直核;国产厂官方页 JS 渲染抓不到,
-// 走搜索聚合近似,已逐条标注来源与置信度)。四价含义:input / output / cacheRead(缓存读)
+// 走搜索聚合近似,已逐条标注来源与置信度)。2026-08-04 按"历史里真实出现过的 model id"
+// 抽查重核 Anthropic / OpenAI / DeepSeek / Kimi / MiMo 官方页(GLM 本机零调用未重核),
+// 补齐有调用记录却缺条目的 id,详见各段注释。四价含义:input / output / cacheRead(缓存读)
 // / cacheWrite(缓存写)。usd()/cny() 未显式给缓存价时按 Anthropic 通用规则默认
 // cacheRead=0.1×input、cacheWrite=1.25×input(5min TTL)。
 
@@ -26,13 +28,16 @@ const usd = (input, output, cacheRead = input * 0.1, cacheWrite = input * 1.25) 
 // cache_write here is the 5-min TTL variant (1.25× input). 1-hr write is 2× input.
 const PRICES = {
   // Claude — Anthropic official
-  // 官方页直核 2026-07-16: platform.claude.com/docs/en/about-claude/pricing
+  // 官方页直核 2026-08-04(上次 2026-07-16,数字未变): platform.claude.com/docs/en/about-claude/pricing
   // cacheWrite 列取 5min TTL 变体(=1.25×input);1h write=2×input 不建模。
   // Fable 5 / Mythos 5(限量): $10/$50,cw $12.50,cr $1(用新 tokenizer,token 量 ~+30%)。
   'claude-fable-5':              usd(10, 50, 1, 12.5),
   'claude-mythos-5':             usd(10, 50, 1, 12.5),
   // Sonnet 5: 引导价 $2/$10(至 2026-08-31),之后 $3/$15。此处按引导价(cw $2.50/cr $0.20)。
   'claude-sonnet-5':             usd(2, 10, 0.2, 2.5),
+  // Opus 5: 官方页 $5/$25、5m 写 $6.25、命中 $0.50(= usd() 默认倍率)。历史里 4.2 万条
+  // 调用却一直缺条目,只靠 LiteLLM 远端表兜着 —— 远端拉不到时整批消息无价可显。
+  'claude-opus-5':               usd(5, 25),
   'claude-opus-4-8':             usd(5, 25),       // 4.8 用新 tokenizer,可能多消耗 ~35% token
   'claude-opus-4-7':             usd(5, 25),
   'claude-opus-4-6':             usd(5, 25),
@@ -46,9 +51,19 @@ const PRICES = {
   'claude-haiku-4-5-20251001':   usd(1, 5),
   'claude-3-5-haiku-20241022':   usd(0.80, 4),
 
-  // DeepSeek — USD/MTok, 官方页直核 2026-07-16 api-docs.deepseek.com/quick_start/pricing
-  // (与上次一致未变;官方页以 USD 计价)。cacheWrite=input:DeepSeek 不收 cache 写入费,cache miss 即标准 input 价。
-  // deepseek-chat/reasoner 是 v4-flash 的 non-thinking/thinking 别名(2026-07-24 弃用,价格同)。
+  // DeepSeek — USD/MTok, 官方页直核 2026-08-04(与 2026-07-16 一致未变)
+  // api-docs.deepseek.com/quick_start/pricing。cacheWrite=input:DeepSeek 不收 cache 写入费,
+  // cache miss 即标准 input 价(实测 400 条 deepseek 记录 cache_creation 恒为 0,该列不参与计算)。
+  // 【峰谷计价——已核实但刻意不实现】官方页公告原文:"DeepSeek API 服务即将采用峰谷定价
+  // 策略,高峰时段价格为平时价格 2 倍,适用所有计费项,具体时间以正式通知为准。【高峰时段
+  // 定义:北京时间每日 9:00~12:00 和 14:00~18:00】"。关键词是"即将采用"+"以正式通知为准":
+  // 政策尚未生效、也没有生效日期。下表就是现行实际计费的"平时价格"。现在加 2× 时段维度,
+  // 等于把今天所有历史消息按一个还没生效的规则算错一倍;等正式通知后再按消息 timestamp
+  // 补 peak/offPeak 两组价(jsonl timestamp 是 UTC ISO8601,北京时间恒 UTC+8 无夏令时,
+  // 换算本身可靠,唯一缺的就是生效日期)。
+  // deepseek-chat/reasoner 是 v4-flash 的 non-thinking/thinking 别名(2026-07-24 弃用);
+  // 官方现行价目页已不再列出这两个 id,保留作兜底(运行时 LiteLLM 远端表优先,那边仍给
+  // 旧价 $0.28/$0.42)。本机历史零调用,不动。
   'deepseek-chat':               usd(0.14, 0.28, 0.0028, 0.14),    // v4-flash non-thinking
   'deepseek-reasoner':           usd(0.14, 0.28, 0.0028, 0.14),    // v4-flash thinking
   'deepseek-v4-flash':           usd(0.14, 0.28, 0.0028, 0.14),
@@ -56,17 +71,27 @@ const PRICES = {
   'deepseek-v3.1':               usd(0.14, 0.28, 0.0028, 0.14),    // 旧版,官方现表无单列→按 v4-flash 兜底
   'deepseek-v3.2-exp':           usd(0.14, 0.28, 0.0028, 0.14),    // 同上
 
-  // MiMo 小米 — 2026-07-13 核实 mimo.mi.com 官方(CNY);cache 命中价极低单列
+  // MiMo 小米 — 2026-08-04 官方页直核 mimo.mi.com/pricing(CNY,与 2026-07-13 一致未变);
+  // cache 命中价极低单列。无时段/长度阶梯,单组固定价。
   'mimo-v2.5':                   cny(1, 2, 0.02),
   'mimo-v2.5-pro':               cny(3, 6, 0.025),  // 项目实际部署此档
+  // UltraSpeed 是独立档(¥9/¥18,命中 ¥0.075),没有这个键时前缀兜底会落到 pro 档 = 少算 3×。
+  'mimo-v2.5-pro-ultraspeed':    cny(9, 18, 0.075),
+  // mimo-v2 系(mimo-v2-flash 等)2026-06-30 已下线,官方价目页无条目 → 按"拿不到不编"留空。
 
-  // OpenAI — 2026-06-05 拉取 developers.openai.com
-  'gpt-5.5':                     usd(5, 30, 0.50),
-  'gpt-5.5-pro':                 usd(30, 180, 30),  // pro 无 cache 优惠,cacheRead = input
-  'gpt-5.4':                     usd(2.50, 15, 0.25),
-  'gpt-5.4-mini':                usd(0.75, 4.50, 0.075),
-  'gpt-5.4-nano':                usd(0.20, 1.25, 0.02),
-  'gpt-5.4-pro':                 usd(30, 180, 30),
+  // OpenAI — 2026-08-04 官方页直核 developers.openai.com/api/docs/pricing(补 5.6 系;
+  // 5.4/5.5 数字沿用 2026-06-05 录入值,与 LiteLLM 表逐项一致)。
+  // OpenAI 只有"缓存命中"折扣、不收缓存写入费 → cacheWrite=input(实测 3313 条 gpt 记录
+  // cache_creation 恒为 0,这一列不参与计算,改的是口径不是数字)。
+  'gpt-5.6-sol':                 usd(5, 30, 0.50, 5),
+  'gpt-5.6-terra':               usd(2, 12, 0.20, 2),
+  'gpt-5.6-luna':                usd(0.20, 1.20, 0.02, 0.20),
+  'gpt-5.5':                     usd(5, 30, 0.50, 5),
+  'gpt-5.5-pro':                 usd(30, 180, 30, 30),  // pro 无 cache 优惠,cacheRead = input
+  'gpt-5.4':                     usd(2.50, 15, 0.25, 2.50),
+  'gpt-5.4-mini':                usd(0.75, 4.50, 0.075, 0.75),
+  'gpt-5.4-nano':                usd(0.20, 1.25, 0.02, 0.20),
+  'gpt-5.4-pro':                 usd(30, 180, 30, 30),
 
   // Google Gemini — 2026-06-05 拉取 ai.google.dev,paid tier
   'gemini-2.5-pro':              usd(1.25, 10, 0.125),
@@ -78,6 +103,8 @@ const PRICES = {
   'gemini-3.5-flash':            usd(1.50, 9.00, 0.15),
 
   // Moonshot Kimi — 2026-07-17 官方页直核 platform.kimi.com/docs/pricing/chat-k3|k27-code|k26(CNY)
+  // 2026-08-04 重核 chat-k3:命中 ¥2 / 未命中 ¥20 / 输出 ¥100,与下表一致;官方页无时段折扣、
+  // 无按上下文长度的阶梯,单组固定价。
   // cacheWrite=input:Kimi 只有缓存命中/未命中两档、不收 cache 写入费,cache miss 即标准 input 价(同 DeepSeek)。
   'kimi-k3':                     cny(20, 100, 2, 20),
   'kimi-k2.7-code-highspeed':    cny(13, 54, 2.6, 13),
@@ -237,10 +264,13 @@ function remoteLookup(model) {
 }
 
 // Common aliases the CLI may emit.
+// 裸别名对应哪一代是有歧义的(会话当年跑的可能是别的代),只能取"该别名当前指向的
+// 主力型号";已存在的三条不动(改了也只是把一个猜测换成另一个猜测)。
 const ALIASES = {
   'sonnet': 'claude-sonnet-4-6',
   'opus':   'claude-opus-4-7',
   'haiku':  'claude-haiku-4-5',
+  'fable':  'claude-fable-5',   // 历史 717 条裸 'fable' 原先四路查价全落空 = 无价可显
 };
 
 // 按 model id 查价(与 provider 无关的纯解析):LiteLLM 远端表优先(覆盖广、随上游
