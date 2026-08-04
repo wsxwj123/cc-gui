@@ -243,32 +243,9 @@ const ALIASES = {
   'haiku':  'claude-haiku-4-5',
 };
 
-// When provider routing is in effect (cc switch), the stream-json's model
-// field still says "claude-sonnet-X-X" because the CLI is Claude-shaped. The
-// real upstream is in ANTHROPIC_MODEL env. We choose a price by provider hint
-// + model resolution rules:
-//   anthropic / bedrock / vertex → Claude prices for the (displayed) model
-//   deepseek                     → DeepSeek prices for resolvedModel or default
-//   mimo / openrouter / silicon  → unsupported, return null (don't lie)
-function lookupPrice(model, provider) {
-  if (!model && !(provider && provider.model)) return null;
-  const hint = (provider && provider.providerHint) || 'anthropic';
-
-  if (hint === 'deepseek') {
-    // Prefer env-set upstream model name; fall back to deepseek-chat default.
-    const remote = remoteLookup(provider.model);
-    if (remote) return remote;
-    const target = (provider.model && PRICES[provider.model])
-      ? provider.model
-      : (PRICES['deepseek-' + (provider.model || '')] ? 'deepseek-' + provider.model : 'deepseek-chat');
-    return PRICES[target] || PRICES['deepseek-chat'];
-  }
-  if (hint === 'mimo') {
-    // 项目实际部署 mimo-v2.5-pro;provider.model 精确匹配优先,兜底 pro(原硬返回非-pro 偏低 3×)
-    return (provider && provider.model && PRICES[provider.model]) || PRICES['mimo-v2.5-pro'] || PRICES['mimo-v2.5'] || null;
-  }
-  // anthropic / bedrock / vertex / unknown → use claude name as displayed
-  // LiteLLM 表优先(覆盖广、随上游更新),内置手抄表兜底。
+// 按 model id 查价(与 provider 无关的纯解析):LiteLLM 远端表优先(覆盖广、随上游
+// 更新),内置手抄表兜底;再依次试别名、去日期后缀、最长前缀、去命名空间前缀。
+function lookupByModel(model) {
   const remote = remoteLookup(model) || (ALIASES[model] && remoteLookup(ALIASES[model]));
   if (remote) return remote;
   if (PRICES[model]) return PRICES[model];
@@ -279,7 +256,47 @@ function lookupPrice(model, provider) {
   const key = model && Object.keys(PRICES)
     .filter((k) => model.startsWith(k))
     .sort((a, b) => b.length - a.length)[0];
-  return key ? PRICES[key] : null;
+  if (key) return PRICES[key];
+  // 聚合平台/网关下发带命名空间的 id(moonshotai/kimi-k3、openai/gpt-5.6-sol):它们按
+  // 上游模型计价,去掉命名空间再查一次,总好过整条消息无价可显。精确键在前面已匹配,
+  // 故 Groq 的 'openai/gpt-oss-120b'(与 Cerebras 裸名不同价)仍走自己的键,不受影响。
+  return model && model.includes('/') ? lookupByModel(model.slice(model.lastIndexOf('/') + 1)) : null;
+}
+
+// When provider routing is in effect (cc switch), the stream-json's model
+// field still says "claude-sonnet-X-X" because the CLI is Claude-shaped. The
+// real upstream is in ANTHROPIC_MODEL env. We choose a price by provider hint
+// + model resolution rules:
+//   anthropic / bedrock / vertex → Claude prices for the (displayed) model
+//   deepseek / mimo              → 这条消息自己的 model 优先,查不到才回落 env 档位
+function lookupPrice(model, provider) {
+  if (!model && !(provider && provider.model)) return null;
+  const hint = (provider && provider.providerHint) || 'anthropic';
+
+  // Q-a:计价的第一依据永远是【这条消息实际用的模型】,不是 provider.model(= 当前
+  // env 档位)。这两个分支原先完全忽略传入的 model,后果:①换档后回看旧会话全按新档
+  // 计价(deepseek v4-flash↔v4-pro 差 3×);②当前切到 deepseek/mimo 时打开任何历史
+  // Claude/Kimi 会话,整条会话按 deepseek/mimo 单价算(差一个数量级)。
+  // 回落路径原样保留:消息无 model(老 jsonl / 流式首帧)时仍按 env 档位。
+  if (hint === 'deepseek') {
+    const byMsg = lookupByModel(model) || (model && PRICES['deepseek-' + model]);
+    if (byMsg) return byMsg;
+    // Prefer env-set upstream model name; fall back to deepseek-chat default.
+    const remote = remoteLookup(provider.model);
+    if (remote) return remote;
+    const target = (provider.model && PRICES[provider.model])
+      ? provider.model
+      : (PRICES['deepseek-' + (provider.model || '')] ? 'deepseek-' + provider.model : 'deepseek-chat');
+    return PRICES[target] || PRICES['deepseek-chat'];
+  }
+  if (hint === 'mimo') {
+    // 项目实际部署 mimo-v2.5-pro;provider.model 精确匹配次之,兜底 pro(原硬返回非-pro 偏低 3×)
+    return lookupByModel(model)
+      || (provider && provider.model && PRICES[provider.model])
+      || PRICES['mimo-v2.5-pro'] || PRICES['mimo-v2.5'] || null;
+  }
+  // anthropic / bedrock / vertex / unknown → use claude name as displayed
+  return lookupByModel(model);
 }
 
 /**
