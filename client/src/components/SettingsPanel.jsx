@@ -1795,7 +1795,7 @@ function AutoCompactWindowSelect({ settings, onSave, saving }) {
     <div className="bg-canvas-warm border border-canvas-deep rounded-lg px-3 py-2.5 flex items-center gap-3">
       <div className="min-w-0 flex-1">
         <div className="text-xs text-ink font-body font-medium flex items-center gap-1.5">自动压缩窗口<EffectBadge level="immediate" /></div>
-        <div className="text-[10.5px] text-ink-faint font-body">此值是上下文窗口大小,不是触发点。CLI 在该窗口基础上扣掉输出与摘要预留(最多 33K)得到触发线,占用达到触发线即压缩会话历史 —— 填 1M 时约在 96.7 万处触发。调大则更晚触发、保留更多上下文,调小则更早压缩。<span className="text-ink-muted">选「默认」时自动联动:官方模型由 CLI 按模型决定;第三方 provider 按模型真实窗口下发,窗口来源依次取模型名 [1m] 后缀、获取模型时实抓的窗口、内置模型规则表、Provider 表单手填的「上下文窗口」。规则表按模型名推断,若中转服务商的模型名与真实窗口不符,须在 Provider 表单手填窗口覆盖。</span>此处显式选择任一数值、或设置了环境变量 CLAUDE_CODE_AUTO_COMPACT_WINDOW,均会关闭上述联动,以显式值为准。</div>
+        <div className="text-[10.5px] text-ink-faint font-body">此值是上下文窗口大小,不是触发点。CLI 在该窗口基础上扣掉输出与摘要预留(最多 33K)得到触发线,占用达到触发线即压缩会话历史 —— 填 1M 时约在 96.7 万处触发。调大则更晚触发、保留更多上下文,调小则更早压缩。<span className="text-ink-muted">选「默认」时自动联动:官方模型由 CLI 按模型决定;第三方 provider 按模型真实窗口下发,窗口来源依次取模型名 [1m] 后缀、获取模型时实抓的窗口、Provider 表单手填的「上下文窗口」、内置模型规则表。规则表按模型名推断,若中转服务商以某个模型名提供的窗口与该模型的官方窗口不符,须在 Provider 表单手填窗口,手填值优先于规则表。</span>此处显式选择任一数值、或设置了环境变量 CLAUDE_CODE_AUTO_COMPACT_WINDOW,均会关闭上述联动,以显式值为准。</div>
       </div>
       <select
         value={current}

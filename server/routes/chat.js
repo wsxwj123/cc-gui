@@ -83,11 +83,9 @@ export function safeModelArg(m) {
 // 自动压缩窗口联动:第三方 provider 下按【本回合实际模型 + 当前激活 provider】实时决定
 // 窗口,经 --settings 临时文件 per-spawn 覆盖(不写全局 settings.json,多会话互不影响;
 // 模型/provider 变化会重开进程,下一回合自动用新值)。
-// 优先级:用户显式设置(settings.json 顶层 autoCompactWindow 或 env 的
-// CLAUDE_CODE_AUTO_COMPACT_WINDOW)> 本联动 > CLI 默认。
-// 窗口来源两档:①模型名带 [1m] → 1,048,576(与 GUI 的 1M 开关天然联动,kimi-k3[1m] 等);
-// ②当前激活 provider(~/.claude-gui/active-provider.json → custom-providers.json)配置的
-// contextWindow 字段(GUI Provider 表单可填,如 deepseek 128k)。都没有 → null 交 CLI 默认。
+// 优先级:用户显式设置(settings.json 顶层 autoCompactWindow,或 env 的
+// CLAUDE_CODE_AUTO_COMPACT_WINDOW / CLAUDE_CODE_MAX_CONTEXT_TOKENS)> 本联动 > CLI 默认。
+// 窗口来源见 resolveModelWindow:[1m] 后缀 > provider 实抓 > provider 手填 > 规则表。
 // 官方 OAuth(无 ANTHROPIC_BASE_URL)恒 null:CLI 认识官方模型,自动窗口本就准确。
 //
 // CLI 2.1.221 二进制 + headless /context 实测确认的语义(别再按旧注释的 ×0.85 理解):
@@ -96,19 +94,21 @@ export function safeModelArg(m) {
 //   硬阻断线 = CLI 自己认的模型窗口 − min(模型最大输出, 20000) − 3000
 // 关键:CLI「自己认的模型窗口」对任何它不认识的第三方模型名恒为 200,000,只有两条路能抬高
 // ——模型名里带 [1m],或 env.CLAUDE_CODE_MAX_CONTEXT_TOKENS(仅对非 claude- 前缀的模型名生效)。
-// 因此单写 autoCompactWindow 抬不动窗口(会被 min 钳回 200K),还会顺带武装 ~180K 的硬阻断线,
-// 把 1M 的第三方模型压成 200K。两个键必须一起写:MAX_CONTEXT_TOKENS 校正 CLI 的窗口认知,
-// autoCompactWindow 负责武装主动压缩(不写它时 CLI 只做被动压缩——等上游报「prompt too long」
-// 才压,这正是历史会话里 deepseek 冲到 68 万、k3 冲到 32 万都没主动压缩过的原因)。
-// autoCompactWindow 的 CLI schema 是 int [100000, 1000000];窗口 <100K(如 kimi 不开 1M 的
-// 默认档)表达不了 → 整个联动返回 null 交回 CLI 默认,不能硬钳到 100K(那等于谎报窗口)。
+// 因此单写 autoCompactWindow 抬不动窗口(会被 min 钳回 200K),等于把 1M 的第三方模型压到
+// 17% 还顺带武装 ~180K 的硬阻断线。两个键必须一起写:MAX_CONTEXT_TOKENS 校正 CLI 的窗口
+// 认知,autoCompactWindow 负责武装主动压缩 —— 不写它时 CLI 只做被动压缩(等上游报错才压,
+// 且靠匹配 Anthropic 格式的错误文案,第三方中转的文案不一定匹配,兜不住)。
+// autoCompactWindow 的 CLI schema 是 int [100000, 1000000],且越界值被 zod .catch(void 0)
+// 静默丢弃(不报错),所以钳位是必须的不是可选的。
 //
 // 模型窗口规则表:按【模型名】匹配,先具体后泛化,首中即返。比 per-provider 单值精确
 // 且不易过时 —— 新模型出来加一行即可(数据 2026-08 逐家官方文档核实)。claude-* 不列:
 // 200K=CLI 默认口径,无需干预。
 const MODEL_WINDOW_RULES = [
   [/deepseek-?v4|deepseek.*-(flash|pro)\b/i, 1_048_576], // DeepSeek V4 flash/pro 均 1M
-  [/deepseek-(chat|reasoner|coder)/i, 131_072],          // DeepSeek 旧系 128K
+  [/deepseek-(chat|reasoner|coder)/i, 131_072],          // DeepSeek 旧系 128K。⚠️ deepseek-chat 是"跟随最新 V 系"
+  //                                                        的别名,官方把它切到 V4 这行就会把 1M 砍成 10%,发现
+  //                                                        deepseek-chat 实际窗口变大时要跟进改
   [/glm-?5\.[2-9]|glm-?[6-9]/i, 1_048_576],              // GLM 5.2+ 1M
   [/glm-?(4\.[5-9]|5(\.[01])?)\b/i, 204_800],            // GLM 4.5~5.1 200K
   [/qwen-?3\.7.*max|qwen.*-1m\b/i, 1_048_576],           // Qwen3.7-Max 1M
@@ -118,27 +118,34 @@ const MODEL_WINDOW_RULES = [
   //                                                        旧值 262,144 被实测证伪(历史最大 prompt 319,687)。
   //                                                        ^k3 前缀判据与客户端一致:minimax-k3、k30 不误伤。
   [/kimi-(k2\.[6-9]|for-coding)/i, 262_144],             // Kimi k2.6+/coding 256K
-  [/mimo-?v?2\.5|mimo-?v?[3-9]/i, 1_000_000],            // 小米 MiMo v2.5+ 1M(mimo.mi.com 模型规格页)
+  [/mimo-?v?2\.5|mimo-?v?([3-9]|\d\d)/i, 1_000_000],     // 小米 MiMo v2.5+ 1M(mimo.xiaomi.com 模型规格页)。
+  //                                                        \d\d 让 mimo-v10 这类两位版本号也中,别静默回落旧档
   [/minimax|abab/i, 204_800],                            // MiniMax M2 系 ~200K
   [/grok-?[4-9]/i, 262_144],
   [/grok-?3/i, 131_072],
   [/gemini/i, 1_048_576],
-  [/gpt-?5\.[4-9]/i, 1_050_000],                         // GPT-5.4 起全系 1.05M(sol/terra/luna 同窗口)
+  [/gpt-?5\.([4-9]|\d\d)/i, 1_050_000],                  // GPT-5.4 起全系 1.05M(sol/terra/luna 同窗口)。
+  //                                                        \d\d 覆盖 gpt-5.10 这类两位小版本
   [/gpt-?5/i, 400_000],                                  // GPT-5 / mini / nano 400K
   [/sonar/i, 131_072],                                   // Perplexity Sonar 128K
 ];
 
 // 解析模型真实窗口。优先级:[1m] 后缀(用户显式意图)> provider 实抓 modelWindows
-// (fetch-models 顺带持久化,端点自己报的最权威)> 模型名规则表 > provider 手填
-// contextWindow > null(CLI 默认)。
+// (fetch-models 顺带持久化,端点自己报的最权威)> provider 表单手填 contextWindow
+// (用户明示)> 模型名规则表(我们按名字猜)> null(CLI 默认)。
+// 手填必须排在规则表【之前】:中转站常以 kimi-k3 之名只提供 256K,用户按提示手填 262144
+// 却被规则表的 1,048,576 压掉 → 下发 1M 窗口、压缩线 971K,会话跑到 256K 直接撞上游
+// context overflow,全程不主动压缩(CLI 的被动压缩靠匹配 Anthropic 格式的错误文案,
+// 第三方中转的文案不一定匹配,兜不住)。内置 provider 模板一个都没预填 contextWindow,
+// 所以"没填就走规则表"天然做到了"手填只对不在内置列表里的中转站生效"。
 function resolveModelWindow(model, providerEntry) {
   const m = String(model || '');
   if (/\[1m\]/i.test(m)) return 1_048_576;
   const base = m.replace(/\[1m\]/i, '');
   const mw = providerEntry?.modelWindows;
   if (mw && Number.isFinite(Number(mw[base]))) return Number(mw[base]);
-  for (const [re, win] of MODEL_WINDOW_RULES) if (re.test(m)) return win;
   if (providerEntry && Number.isFinite(Number(providerEntry.contextWindow))) return Number(providerEntry.contextWindow);
+  for (const [re, win] of MODEL_WINDOW_RULES) if (re.test(m)) return win;
   return null;
 }
 
@@ -172,20 +179,25 @@ export function resolveCompactWindowSettings(model) {
     const st = JSON.parse(readFileSync(pathJoin(homedir(), '.claude', 'settings.json'), 'utf8'));
     if (typeof st?.autoCompactWindow === 'number') return null;      // 用户显式设置,尊重
     if (st?.env?.CLAUDE_CODE_AUTO_COMPACT_WINDOW) return null;       // env 显式设置,尊重
+    // 改用两键联动后,真正决定窗口的是 MAX_CONTEXT_TOKENS。GUI 没有对应 UI,用户手写在
+    // settings.json 里就是刻意的;--settings 临时文件按键覆盖同名键(会赢),必须一并让位。
+    if (st?.env?.CLAUDE_CODE_MAX_CONTEXT_TOKENS) return null;
     if (!st?.env?.ANTHROPIC_BASE_URL) return null;                   // 官方,CLI 自动已准确
     const win = resolveModelWindow(model, readActiveProviderEntry());
     if (!win) return null;
-    // 窗口 <100K(如 kimi 不开 1M 的默认档)低于 CLI 的 autoCompactWindow schema 下限,
-    // 表达不了 → 整个联动让位交回 CLI 默认。不能硬钳到 100K:那是对 CLI 谎报窗口,会把
-    // 压缩线和硬阻断线放到真窗口之外,恰是本联动要防的撞窗事故(判官抓过的老坑)。
-    if (win < 100_000) return null;
     return {
       // 主动压缩的触发窗口。CLI 拿到后自己扣掉输出与摘要预留(约 33K)才触发,所以这里
       // 给真实窗口即可 —— GUI 再乘一遍百分比 = 折上折,已删。
-      autoCompactWindow: Math.min(win, 1_000_000),                   // CLI schema 上限 1M
+      // schema 是 int [100000, 1000000] 且越界值静默丢弃(zod .catch(void 0)),所以钳位
+      // 是必须的。<100K 的小窗(如 kimi 不开 1M 的默认档)抬到下限 100K 不会谎报窗口 ——
+      // 有效窗口 = min(MAX_CONTEXT_TOKENS, 本值),下面那行已把真值告诉 CLI,min 会拉回来
+      // (实测:MCT=64000 + acw=100000 → /context 报 64k 窗口、压缩线 35K,正确)。
+      autoCompactWindow: Math.min(Math.max(win, 100_000), 1_000_000),
       // 校正 CLI 对第三方模型窗口的认知:它不认识的模型名一律按 200K 算,只写
       // autoCompactWindow 会被 min(200K, 值) 钳回去抬不动。CLI 只对非 claude- 前缀的
       // 模型名读这个 env,claude-* 走它自己的表,写了不生效也无害。
+      // --settings 的 env 与 settings.json 是【按键深合并】,只加这一个键,
+      // ANTHROPIC_BASE_URL / AUTH_TOKEN 等原样保留,第三方不会断线。
       env: { CLAUDE_CODE_MAX_CONTEXT_TOKENS: String(win) },
     };
   } catch { return null; }

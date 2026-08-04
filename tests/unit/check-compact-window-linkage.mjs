@@ -36,11 +36,12 @@ function setup({ settings, provider } = {}) {
     write('.claude-gui/custom-providers.json', []);
   }
 }
-// 便捷断言:期望窗口 win → autoCompactWindow=min(win,1M) 且 env 报真实 win。
+// 便捷断言:期望窗口 win → autoCompactWindow 钳进 CLI schema 的 [100K, 1M],env 永远报真实 win
+// (有效窗口 = min(env 值, autoCompactWindow),所以钳位不会谎报窗口)。
 function expectWindow(model, win, msg) {
   const got = resolveCompactWindowSettings(model);
   assert.deepEqual(got, {
-    autoCompactWindow: Math.min(win, 1_000_000),
+    autoCompactWindow: Math.min(Math.max(win, 100_000), 1_000_000),
     env: { CLAUDE_CODE_MAX_CONTEXT_TOKENS: String(win) },
   }, msg);
 }
@@ -54,12 +55,20 @@ try {
   assert.equal(resolveCompactWindowSettings('k3'), null, '用户在设置页显式填了 autoCompactWindow → 联动整个让位');
 
   setup({ settings: { env: { ANTHROPIC_BASE_URL: 'https://relay.example/v1', CLAUDE_CODE_AUTO_COMPACT_WINDOW: '250000' } } });
-  assert.equal(resolveCompactWindowSettings('k3'), null, 'env 显式设置 → 联动整个让位');
+  assert.equal(resolveCompactWindowSettings('k3'), null, 'env CLAUDE_CODE_AUTO_COMPACT_WINDOW 显式设置 → 联动整个让位');
 
-  // ── 小窗让位:<100K 低于 CLI schema 下限,表达不了就交回 CLI 默认 ──
-  // 不能硬钳到 100K —— 那是对 CLI 谎报窗口,会把压缩线/硬阻断线放到真窗口之外。
+  // 改两键联动后真正决定窗口的是 MAX_CONTEXT_TOKENS,它也必须算"用户显式设置"。
+  // GUI 没有对应 UI,写在 settings.json 里的一定是用户为自家中转手写的,不能被联动改掉。
+  setup({ settings: { env: { ANTHROPIC_BASE_URL: 'https://relay.example/v1', CLAUDE_CODE_MAX_CONTEXT_TOKENS: '300000' } } });
+  assert.equal(resolveCompactWindowSettings('k3'), null, 'env CLAUDE_CODE_MAX_CONTEXT_TOKENS 显式设置 → 联动整个让位');
+
+  // ── 小窗(<100K)照常保护 ────────────────────────────────────────
+  // autoCompactWindow 钳到 schema 下限 100K 不会谎报窗口:有效窗口 = min(MAX_CONTEXT_TOKENS,
+  // autoCompactWindow),env 报了真值 64000 就会把它拉回来。实测 /context 报 64k、压缩线 35K。
+  // 旧实现在这里直接返回 null,64K 小窗拿不到任何主动压缩保护。
   setup({ provider: { contextWindow: 64_000 } });
-  assert.equal(resolveCompactWindowSettings('some-tiny-model'), null, '窗口 64K < schema 下限 100K → null');
+  expectWindow('some-tiny-model', 64_000, '64K 小窗:acw 钳到下限 100K,env 报真实 64000');
+  assert.equal(resolveCompactWindowSettings('some-tiny-model').autoCompactWindow, 100_000, 'acw 不得低于 CLI schema 下限,否则被 zod .catch 静默丢弃');
   setup({ provider: { contextWindow: 100_000 } });
   expectWindow('some-model', 100_000, '窗口恰好 100K → 落在下限上,照常下发');
 
@@ -81,6 +90,7 @@ try {
   // ── mimo(R1:服务端此前完全没有 mimo 规则 → 联动与徽章分母全落空)──
   expectWindow('mimo-v2.5-pro', 1_000_000, 'MiMo v2.5 官方 1M');
   assert.equal(resolveCompactWindowSettings('mimo-v2-flash'), null, 'MiMo 旧代已下线无官方规格 → 不猜,交 CLI 默认');
+  expectWindow('mimo-v10', 1_000_000, '两位版本号不静默回落(v10 ≥ v2.5)');
 
   // ── gpt-5 拆分(R1:5.4 起 1.05M,gpt-5/mini/nano 仍 400K)───────────
   expectWindow('gpt-5.6-sol', 1_050_000, 'GPT-5.6 官方 1.05M;autoCompactWindow 被 CLI schema 上限钳到 1M,env 仍报真实 1.05M');
@@ -89,6 +99,8 @@ try {
   expectWindow('gpt-5', 400_000, 'GPT-5 仍 400K');
   expectWindow('gpt-5-mini', 400_000, 'GPT-5 mini 仍 400K(拆分不能把它一起调大)');
   expectWindow('gpt-5-nano', 400_000, 'GPT-5 nano 仍 400K');
+  expectWindow('gpt-5.10', 1_050_000, '两位小版本不静默回落 400K 档');
+  expectWindow('gpt-5.1', 400_000, '5.4 之前的小版本仍走 400K(两位数放宽不能误伤单位数)');
 
   // ── deepseek 代际 ───────────────────────────────────────────────
   expectWindow('deepseek-v4-flash', 1_048_576, 'DeepSeek V4 1M(实测最大 680,100 已打穿旧的 200K 口径)');
@@ -105,12 +117,19 @@ try {
   setup({ provider: { contextWindow: 128_000 } });
   expectWindow('deepseek-chat[1m]', 1_048_576, '[1m] 后缀压过规则表与 provider 手填窗口');
 
-  // ── provider 实抓窗口 > 规则表 > provider 手填 ──────────────────
+  // ── provider 实抓窗口 > provider 手填 > 规则表 ──────────────────
   setup({ provider: { contextWindow: 128_000, modelWindows: { 'k3': 524_288 } } });
-  expectWindow('k3', 524_288, 'provider 实抓的 modelWindows 压过内置规则表');
+  expectWindow('k3', 524_288, 'provider 实抓的 modelWindows 压过手填与规则表');
   setup({ provider: { contextWindow: 512_000 } });
-  expectWindow('who-knows-model', 512_000, '规则表未命中时回落 provider 手填的 contextWindow');
-  expectWindow('k3', 1_048_576, '规则表命中时优先于 provider 手填');
+  expectWindow('who-knows-model', 512_000, '规则表未命中时用 provider 手填的 contextWindow');
+  // ↓ 这条断言 2026-08 被翻过来:原先钉的是"规则表优先于手填"。
+  // 依据一:用户明示 > 我们按模型名猜。内置 provider 模板零个预填 contextWindow,
+  //   所以"没填走规则表"天然让手填只对不在内置列表里的中转站生效。
+  // 依据二:反向会撞硬错误 —— 中转站以 kimi-k3 之名只给 256K,用户手填 262144 被规则表的
+  //   1,048,576 压掉后,下发 1M 窗口、压缩线 971K,会话跑到 256K 直撞上游 context overflow
+  //   且全程不主动压缩;而 CLI 的被动压缩靠匹配 Anthropic 格式错误文案,中转文案不一定匹配。
+  setup({ provider: { contextWindow: 262_144 } });
+  expectWindow('kimi-k3', 262_144, '手填窗口优先于规则表(判官复现的撞窗场景:中转以 kimi-k3 之名只给 256K)');
 
   console.log('check-compact-window-linkage: all assertions passed');
 } finally {

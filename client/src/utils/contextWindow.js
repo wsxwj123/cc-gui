@@ -2,9 +2,11 @@
 // 本地兜底表。完整优先级见 App.jsx SessionDetail:显式 [1m] > 后端 resolvedWindow >
 // /context 实测 > 本函数。
 // ⚠️ 本表只是兜底:第三方 provider 下由服务端 chat.js 的 MODEL_WINDOW_RULES 说了算
-// (resolveDisplayWindow 走那张表,官方 OAuth 时才返回 null 落到本函数)。两张表对
-// k3 / deepseek / mimo / gpt-5 必须给出一致答案,改一处必须同步改另一处 —— 历史上
-// 两表各自漂移过(服务端 k3=262144 / 客户端 deepseek=200000,均已被实测证伪)。
+// (resolveDisplayWindow 走那张表,官方 OAuth 时才返回 null 落到本函数)。两表口径【不完全
+// 一致】且不必强求一致:本表对未知模型默认 1M、服务端未命中返 null,策略本就不同(差分过
+// 64 个模型名,minimax-k3、deepseek-v3.2、k3-256k 等仍有差)。真正要求是:改动某个模型族的
+// 窗口时两边一起看,别只改一处 —— 历史上就是各自漂移出的事故(服务端 k3=262144 /
+// 客户端 deepseek=200000,均已被实测证伪)。
 // 策略(用户要求):**默认按 1M 估算**,已知小于 1M 的模型显式回落到真实窗口。
 // 优先级:① [1m] 后缀 / 名字里的 -Nm 标注 → N×1M;② -Nk 标注(moonshot-v1-128k)→ N×1K;
 // ③ 已知具体系列(GLM=200K、Kimi K2.x=256K、DeepSeek 旧系=128K、GPT-5/mini/nano=400K 等)
@@ -45,7 +47,7 @@ export function nativeContextWindow(model) {
   // DeepSeek 按代际拆分(与服务端表同口径)。旧的"deepseek|mimo 一律 200K"被实测证伪:
   // deepseek-v4-flash 历史最大 prompt 680,100 早已打穿 200K。
   if (/deepseek/.test(id)) return /deepseek-?v4|deepseek.*-(flash|pro)\b/.test(id) ? 1_048_576 : 131_072;
-  if (/mimo/.test(id)) return /mimo-?v?2\.5|mimo-?v?[3-9]/.test(id) ? 1_000_000 : 200_000; // MiMo v2.5+ 官方 1M;更老代无官方规格,保守 200K
+  if (/mimo/.test(id)) return /mimo-?v?2\.5|mimo-?v?([3-9]|\d\d)/.test(id) ? 1_000_000 : 200_000; // MiMo v2.5+ 官方 1M(\d\d 兜住 mimo-v10 这类两位版本);更老代无官方规格,保守 200K
   // 'k3' 打头是 Kimi Code 套餐别名(不含 kimi/moonshot 字样所以上面正则漏网)。
   // 前缀判据:必须 ^k3 后接 . 或 - 或结束,minimax-k3(非开头)、k30(数字续接)都不误伤。
   // k3[1m] / k3-1m 走上方 [1m]、-Nm 分支返回 1M;k3-256k 走上方 -Nk 分支返回 256,000。
@@ -54,7 +56,7 @@ export function nativeContextWindow(model) {
   if (/glm|zhipu|chatglm/.test(id)) return 200_000;                          // GLM 实测 200K
   if (/grok-?3|grok-?2/.test(id)) return 131_072;                            // Grok-3 128K(Grok-4 走下方默认 1M)
   if (/gpt-4o|gpt-4-turbo|llama|mistral|mixtral|command-r/.test(id)) return 131_072; // 主流 128K 档
-  if (/gpt-?5\.[4-9]/.test(id)) return 1_050_000;                             // GPT-5.4 起全系 1.05M(sol/terra/luna 同窗口)
+  if (/gpt-?5\.([4-9]|\d\d)/.test(id)) return 1_050_000;                      // GPT-5.4 起全系 1.05M(sol/terra/luna 同窗口;\d\d 兜住 gpt-5.10)
   if (/gpt-?5/.test(id)) return 400_000;                                      // GPT-5 / mini / nano 400K
   // 其余(gemini / gpt-4.1 全系〔mini/nano 也是 1M〕/ minimax / grok-4 / 未知第三方)→ 默认 1M。
   return 1_000_000;
