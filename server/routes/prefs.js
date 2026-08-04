@@ -118,24 +118,9 @@ router.get('/prefs/hidden-providers', async (_req, res) => {
 // P1: 关闭行为(ask|minimize|quit)。独立文件 ~/.claude-gui/close-behavior.json —
 // Tauri Rust 侧在 CloseRequested 时直接读同一文件,不经 server。
 const CLOSE_BEHAVIOR_PATH = join(homedir(), '.claude-gui', 'close-behavior.json');
-// 自动压缩触发百分比(默认 80,范围 50-95)。第三方 provider 下 chat.js 按
-// 「模型真实窗口 × pct%」换算 autoCompactWindow 下发(per-spawn --settings 联动)。
-router.get('/prefs/auto-compact-pct', async (_req, res) => {
-  const p = Number((await loadPrefs()).autoCompactPct);
-  res.json({ pct: (Number.isFinite(p) && p >= 50 && p <= 95) ? p : 80 });
-});
-router.put('/prefs/auto-compact-pct', async (req, res) => {
-  const p = Number(req.body?.pct);
-  if (!Number.isFinite(p) || p < 50 || p > 95) return res.status(400).json({ error: 'pct 必须在 50-95 之间' });
-  try {
-    await withPrefsQueue(async () => {
-      const prefs = await loadPrefs();
-      prefs.autoCompactPct = Math.round(p);
-      await savePrefs(prefs);
-    });
-    res.json({ ok: true, pct: Math.round(p) });
-  } catch (e) { res.status(500).json({ error: e.message }); }
-});
+// (已删)/prefs/auto-compact-pct:「压缩触发百分比」与设置页的「自动压缩窗口」是同一件事的
+// 两个入口,且 CLI 的 autoCompactWindow 本就是【窗口】、由 CLI 自己扣固定预留得到触发线,
+// GUI 再乘一遍百分比等于折上折。已合并为单一入口,联动逻辑见 chat.js resolveCompactWindowSettings。
 
 router.get('/prefs/close-behavior', async (_req, res) => {
   try {

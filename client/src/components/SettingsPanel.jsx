@@ -1771,9 +1771,10 @@ function ExcludeDynamicPromptToggle() {
   );
 }
 
-// 自动压缩窗口(settings.json 的 autoCompactWindow,单位 token;官方配置项,CLI 范围
-// 100000–1000000)。上下文占用逼近该窗口时 CLI 自动压缩历史。置空 = 恢复 CLI 默认
-// (按模型自动决定)。注:环境变量 CLAUDE_CODE_AUTO_COMPACT_WINDOW 若已设置会覆盖此项。
+// 自动压缩窗口(settings.json 的 autoCompactWindow,单位 token;官方配置项,CLI schema
+// 范围 100000–1000000)。它是【窗口大小】不是触发线:CLI 拿到后自己扣掉输出与摘要预留
+// (约 33K)才触发压缩。置空 = 恢复 CLI 默认(第三方 provider 由 GUI 按模型窗口联动)。
+// 注:环境变量 CLAUDE_CODE_AUTO_COMPACT_WINDOW 若已设置会覆盖此项。
 const AUTO_COMPACT_OPTIONS = [
   { value: '',        label: '默认(按模型自动)' },
   { value: '100000',  label: '100K token' },
@@ -1783,34 +1784,6 @@ const AUTO_COMPACT_OPTIONS = [
   { value: '500000',  label: '500K token' },
   { value: '1000000', label: '1M token' },
 ];
-// 自动压缩触发百分比:第三方 provider 联动时,压缩线 = 模型真实窗口 × 该百分比。
-// 存 ~/.claude-gui/prefs.json(跨设备同步),server 的 chat.js 换算成绝对值下发。
-function AutoCompactPctSelect() {
-  const [pct, setPct] = useState(80);
-  const [busy, setBusy] = useState(false);
-  useEffect(() => {
-    fetch('/api/prefs/auto-compact-pct').then((r) => r.json()).then((d) => { if (d.pct) setPct(d.pct); }).catch(() => {});
-  }, []);
-  const save = async (v) => {
-    setBusy(true); setPct(v);
-    try { await fetch('/api/prefs/auto-compact-pct', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pct: v }) }); } catch {}
-    setBusy(false);
-  };
-  return (
-    <div className="bg-canvas-warm border border-canvas-deep rounded-lg px-3 py-2.5 flex items-center gap-3">
-      <div className="min-w-0 flex-1">
-        <div className="text-xs text-ink font-body font-medium flex items-center gap-1.5">压缩触发百分比<EffectBadge level="immediate" /></div>
-        <div className="text-[10.5px] text-ink-faint font-body">第三方 provider 联动时的触发点:上下文占用达到模型真实窗口的该比例即自动压缩(如 1M 窗口 × 80% = 80 万时触发)。窗口来源:模型名 [1m] 后缀 / 获取模型时实抓 / 内置模型规则表 / Provider 表单手填。官方模型不受影响;显式设置了「自动压缩窗口」数值或环境变量 CLAUDE_CODE_AUTO_COMPACT_WINDOW 时,本项不生效(以显式值为准)。<span className="text-ink-muted">规则表按模型名推断,逆向中转的名称若与真实窗口不符,请在 Provider 表单手填窗口覆盖。</span></div>
-      </div>
-      <select value={String(pct)} disabled={busy}
-        onChange={(e) => save(Number(e.target.value))}
-        className="shrink-0 text-[11px] font-mono bg-canvas-base border border-canvas-deep rounded px-2 py-1 text-ink focus:border-accent outline-none">
-        {[70, 75, 80, 85, 90].map((v) => (<option key={v} value={String(v)}>{v}%</option>))}
-      </select>
-    </div>
-  );
-}
-
 function AutoCompactWindowSelect({ settings, onSave, saving }) {
   const raw = settings?.autoCompactWindow;
   const current = (typeof raw === 'number' && Number.isFinite(raw)) ? String(raw) : '';
@@ -1822,7 +1795,7 @@ function AutoCompactWindowSelect({ settings, onSave, saving }) {
     <div className="bg-canvas-warm border border-canvas-deep rounded-lg px-3 py-2.5 flex items-center gap-3">
       <div className="min-w-0 flex-1">
         <div className="text-xs text-ink font-body font-medium flex items-center gap-1.5">自动压缩窗口<EffectBadge level="immediate" /></div>
-        <div className="text-[10.5px] text-ink-faint font-body">上下文占用逼近该 token 窗口时,CLI 自动压缩会话历史。调大则更晚触发、保留更多上下文,调小则更早压缩。<span className="text-ink-muted">置为默认时自动联动:官方模型由 CLI 按模型决定;第三方 provider 下,模型名带 [1m](1M 开关)则按 1M×0.85 联动,或按 Provider 编辑表单里填写的"上下文窗口"×0.85 联动。</span>此处显式选择任一数值、或设置了环境变量 CLAUDE_CODE_AUTO_COMPACT_WINDOW,均会覆盖联动,以显式值为准。</div>
+        <div className="text-[10.5px] text-ink-faint font-body">此值是上下文窗口大小,不是触发点。CLI 在该窗口基础上扣掉输出与摘要预留(最多 33K)得到触发线,占用达到触发线即压缩会话历史 —— 填 1M 时约在 96.7 万处触发。调大则更晚触发、保留更多上下文,调小则更早压缩。<span className="text-ink-muted">选「默认」时自动联动:官方模型由 CLI 按模型决定;第三方 provider 按模型真实窗口下发,窗口来源依次取模型名 [1m] 后缀、获取模型时实抓的窗口、内置模型规则表、Provider 表单手填的「上下文窗口」。规则表按模型名推断,若中转服务商的模型名与真实窗口不符,须在 Provider 表单手填窗口覆盖。</span>此处显式选择任一数值、或设置了环境变量 CLAUDE_CODE_AUTO_COMPACT_WINDOW,均会关闭上述联动,以显式值为准。</div>
       </div>
       <select
         value={current}
@@ -2026,7 +1999,6 @@ function SessionTab({ settings, onSave, onEnvPatch, saving }) {
       <div id="set-max-budget"><MaxBudgetInput /></div>
       <div id="set-cache-opt"><ExcludeDynamicPromptToggle /></div>
       <div id="set-auto-compact"><AutoCompactWindowSelect settings={settings} onSave={onSave} saving={saving} /></div>
-      <AutoCompactPctSelect />
       <div id="set-small-fast-model"><SmallFastModelInput env={env} onEnvPatch={onEnvPatch} saving={saving} /></div>
     </div>
   );
