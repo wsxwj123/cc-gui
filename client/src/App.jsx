@@ -8770,7 +8770,11 @@ function CustomProviderForm({ onSaved, editing, onCancel, onDirtyChange, customC
   const close = () => { reset(); onCancel?.(); };
   const parseModels = () => modelsText.split(/[\n,]+/).map((s) => s.trim()).filter(Boolean);
   // BZ-2:有未保存内容时上报 dirty,父级据此阻止外部点击/Esc 关闭下拉(避免丢输入)。
-  const dirty = (open || isEdit) && !!(name.trim() || baseURL.trim() || apiKey.trim() || modelsText.trim());
+  // R5-d:ctxWindow / modelPrices 原先不在判据里 —— 只填了上下文窗口或单价就点下拉外面,
+  // 下拉静默关掉、输入没了。modelPrices 只要有行就算 dirty(值全空也是用户选过模型的结果,
+  // 丢掉同样是丢输入);编辑态本来就因预填的 name/baseURL 恒 dirty,这两项只在新增态起作用。
+  const dirty = (open || isEdit) && !!(name.trim() || baseURL.trim() || apiKey.trim() || modelsText.trim()
+    || ctxWindow.trim() || Object.keys(modelPrices).length);
   useEffect(() => { onDirtyChange?.(dirty); }, [dirty]);
   useEffect(() => () => onDirtyChange?.(false), []); // 卸载时清掉,避免残留 dirty 卡住关闭
   // BZ-1:测试连接 —— 给默认模型/列表第一个发最小请求,验证鉴权 + 模型可达。
