@@ -521,6 +521,23 @@ export function computeCost(model, usage, provider) {
 }
 
 /**
+ * 费用数字的悬浮说明 —— TurnBubble / MessageBubble / UsagePanel 三处共用,口径靠共用
+ * 保证一致,不靠各自维护同一段话。用了用户自填单价的消息如实说明来源,不再说"按官网价估算"。
+ */
+export function costTitle(cost) {
+  if (!cost) return '';
+  const head = cost.source === 'user'
+    ? '本条按你为该模型填写的单价计算（人民币 / 每百万 token）。\n单价在 provider 编辑表单的「计价」中设置，留空的项按内置官网价回落。\n'
+    : '本条估算（人民币；美元计价模型按 1 USD ≈ 7.2 CNY 换算，人民币计价模型为原生定价）\n'
+      + '单价取各模型官网价目。若该模型经中转站接入或按套餐计费，则在 provider 编辑表单的「计价」中填写实付单价。\n';
+  return head
+    + `input ${formatCost(cost.breakdown.input)}\n`
+    + `output ${formatCost(cost.breakdown.output)}\n`
+    + `cache read ${formatCost(cost.breakdown.cacheRead)}\n`
+    + `cache write ${formatCost(cost.breakdown.cacheWrite)}`;
+}
+
+/**
  * Format a USD cost for display in CNY (×7.2, the same fixed rate as CNY_TO_USD).
  * Tiers are re-cut for CNY magnitudes (values ~7× the USD ones).
  */

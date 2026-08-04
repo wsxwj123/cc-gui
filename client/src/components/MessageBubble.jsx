@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect, useLayoutEffect } from 'react';
 import { createPortal } from 'react-dom';
 import { User, Brain, Copy, Check, RotateCcw, Pencil, GitBranch, Archive, Scissors } from 'lucide-react';
-import { computeCost, formatCost } from '../utils/pricing.js';
+import { computeCost, formatCost, costTitle } from '../utils/pricing.js';
 import { copyText } from '../utils/clipboard.js';
 import { useStore } from '../stores/sessionStore.js';
 
@@ -320,14 +320,9 @@ function UsageDisplay({ usage, model }) {
       {cost && (
         <span
           className="ml-auto text-accent/80 font-mono"
-          title={
-            `本条估算（人民币；美元计价模型按 1 USD ≈ 7.2 CNY 换算，人民币计价模型为原生定价）\n` +
-            `单价取各模型官网价目。若该模型经中转站接入，实际单价以服务商为准。\n` +
-            `input ${formatCost(cost.breakdown.input)}\n` +
-            `output ${formatCost(cost.breakdown.output)}\n` +
-            `cache read ${formatCost(cost.breakdown.cacheRead)}\n` +
-            `cache write ${formatCost(cost.breakdown.cacheWrite)}`
-          }
+          // R3:说明文案(含"按你填写的单价"/"按官网价估算"的口径切换)由 pricing.js 统一给,
+          // 三个费用显示点共用同一份,不各自维护。
+          title={costTitle(cost)}
         >
           {formatCost(cost.totalUsd)}
         </span>

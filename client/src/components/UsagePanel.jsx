@@ -2,7 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { Cpu, Calendar, RefreshCw, FolderOpen, Download, FileText } from 'lucide-react';
 import { ModelBadge, modelProvider } from './ModelBadge.jsx';
 import { ArtifactPreview } from './ArtifactPreview.jsx';
-import { computeCost, formatCost } from '../utils/pricing.js';
+import { computeCost, formatCost, userModelPrice } from '../utils/pricing.js';
 
 // Differentiated billing for the usage panel:
 //   Anthropic models (Max subscription) → no per-token charge ("订阅内")
@@ -10,16 +10,25 @@ import { computeCost, formatCost } from '../utils/pricing.js';
 // The server aggregates byModel as { input, output, cacheRead, cacheWrite, calls };
 // adapt that into the usage shape computeCost expects.
 function modelCost(model, m) {
+  const usage = {
+    input_tokens: m.input, output_tokens: m.output,
+    cache_read_input_tokens: m.cacheRead, cache_creation_input_tokens: m.cacheWrite || 0,
+  };
+  // R3:用户为这个 model id 填过单价/套餐标记 → 最高优先级,赢过下面"按模型名猜 provider"
+  // 的老逻辑(那套会把中转站转售的 claude-* 一律当订阅内藏掉,把没进白名单的模型显示为 —)。
+  const user = userModelPrice(model);
+  if (user) {
+    if (user.plan) return { subscription: true };   // 套餐包月:只显示用量,与订阅同一档
+    const c = computeCost(model, usage, null);
+    return c ? { usd: c.totalUsd } : { unknown: true };
+  }
   const lower = (model || '').toLowerCase();
   if (/claude|opus|sonnet|haiku/.test(lower)) return { subscription: true };
   let provider = null;
   if (lower.includes('deepseek')) provider = { providerHint: 'deepseek', model };
   else if (lower.includes('mimo')) provider = { providerHint: 'mimo' };
   if (!provider) return { unknown: true };
-  const c = computeCost(model, {
-    input_tokens: m.input, output_tokens: m.output,
-    cache_read_input_tokens: m.cacheRead, cache_creation_input_tokens: m.cacheWrite || 0,
-  }, provider);
+  const c = computeCost(model, usage, provider);
   return c ? { usd: c.totalUsd } : { unknown: true };
 }
 
@@ -304,7 +313,7 @@ export function UsagePanel() {
                 {g.usd > 0 ? (
                   <span className="text-[11px] text-accent font-mono">{formatCost(g.usd)}</span>
                 ) : g.subscription ? (
-                  <span className="text-[10px] text-ink-faint font-body" title="Anthropic 订阅额度内，不按 token 计费">订阅内</span>
+                  <span className="text-[10px] text-ink-faint font-body" title="按订阅或套餐计费，不按 token 计价">订阅内</span>
                 ) : (
                   <span className="text-[10px] text-ink-ghost font-mono" title="无定价数据">—</span>
                 )}

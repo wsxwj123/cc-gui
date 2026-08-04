@@ -17,7 +17,7 @@ globalThis.localStorage = {
   setItem: () => {},
 };
 
-const { computeCost, isPlanBilling, setUserPrices, userModelPrice } =
+const { computeCost, isPlanBilling, setUserPrices, userModelPrice, costTitle } =
   await import('../../client/src/utils/pricing.js');
 
 const IN1M = { input_tokens: 1_000_000 };
@@ -102,7 +102,14 @@ near(computeCost('gpt-5.6-sol', IN1M).totalUsd, 999, 'REMOTE 层被破坏');
 near(computeCost('claude-opus-5', IN1M).totalUsd, 5, '内置表层被破坏');
 assert.equal(computeCost('claude-opus-5', IN1M).source, 'table', '无用户价时 source 应为 table');
 
-// ⑬ 后端校验:sanitizeModelPrices 拒绝非法输入、丢空条目、封上界与条目数。
+// ⑬ 显示口径:三处费用显示共用的说明文案,按来源切换措辞(用户价不再说"按官网价估算")。
+setUserPrices([P({ 'my-model': { in: 7.2, out: 7.2 } })]);
+assert.match(costTitle(computeCost('my-model', IN1M)), /按你为该模型填写的单价/, '用户价的说明文案没切换');
+setUserPrices([]);
+assert.match(costTitle(computeCost('claude-opus-5', IN1M)), /官网价目/, '内置价仍应说明是按官网价估算');
+assert.equal(costTitle(null), '', '无 cost 时不产生文案');
+
+// ⑭ 后端校验:sanitizeModelPrices 拒绝非法输入、丢空条目、封上界与条目数。
 const { sanitizeModelPrices } = await import('../../server/routes/settings.js');
 assert.deepEqual(sanitizeModelPrices({ a: { in: 1, out: 2 } }), { a: { in: 1, out: 2 } }, '合法条目应原样保留');
 assert.deepEqual(sanitizeModelPrices({ a: { plan: true, in: 9 } }), { a: { plan: true } }, '套餐条目只留 plan 标记');
