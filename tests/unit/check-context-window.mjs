@@ -59,6 +59,7 @@ assert.equal(nativeContextWindow('deepseek-v4-pro'), K1M, 'deepseek V4 pro 同�
 assert.equal(nativeContextWindow('mimo-v2.5-pro'), M1, 'MiMo v2.5 1M [官方 mimo.mi.com 规格页;实测最大 183,223 已打穿旧值 200K 的近半]');
 assert.equal(nativeContextWindow('mimo-v2-flash'), K200, 'MiMo 旧代已下线无官方规格 → 保守 200K [实测最大 83,847,未打穿]');
 assert.equal(nativeContextWindow('mimo-v10'), M1, '两位版本号不静默回落旧档(v10 ≥ v2.5)');
+assert.equal(nativeContextWindow('mimo-20260115'), K200, '裸日期后缀不是版本号:两位分支必须挡住 mimo-YYYYMMDD 的前两位');
 assert.equal(nativeContextWindow('kimi-k2.6'), 262_144, 'kimi K2.x 256K [官方 platform.kimi.ai]');
 assert.equal(nativeContextWindow('k3'), K1M, '裸 k3 = Kimi Code 套餐别名,官方 1,048,576 [实测最大 319,687 已证伪旧值 262,144]');
 assert.equal(nativeContextWindow('kimi-k3'), K1M, 'kimi-k3 全名同为 1M [官方]');
@@ -80,6 +81,7 @@ assert.equal(nativeContextWindow('gpt-5.6-sol'), 1_050_000, 'GPT-5.6 全档 1.05
 assert.equal(nativeContextWindow('openai/gpt-5.6-sol'), 1_050_000, '带 openai/ 前缀的同一模型给同一答案');
 assert.equal(nativeContextWindow('gpt-5.10'), 1_050_000, '两位小版本不静默回落 400K 档');
 assert.equal(nativeContextWindow('gpt-5.1'), 400_000, '5.4 之前的小版本仍走 400K(两位数放宽不能误伤单位数)');
+assert.equal(nativeContextWindow('gpt-5.05'), 400_000, '前导零的两位小版本语义上小于 5.4,不进 1.05M 档');
 assert.equal(nativeContextWindow('gemini-2.5-pro'), M1, '未列第三方默认 1M');
 assert.equal(nativeContextWindow(''), M1, '空模型走默认(徽章有 sane-ceiling 兜底)');
 

@@ -91,6 +91,7 @@ try {
   expectWindow('mimo-v2.5-pro', 1_000_000, 'MiMo v2.5 官方 1M');
   assert.equal(resolveCompactWindowSettings('mimo-v2-flash'), null, 'MiMo 旧代已下线无官方规格 → 不猜,交 CLI 默认');
   expectWindow('mimo-v10', 1_000_000, '两位版本号不静默回落(v10 ≥ v2.5)');
+  assert.equal(resolveCompactWindowSettings('mimo-20260115'), null, '裸日期后缀不是版本号:两位分支必须挡住 mimo-YYYYMMDD 的前两位,否则谎报 1M');
 
   // ── gpt-5 拆分(R1:5.4 起 1.05M,gpt-5/mini/nano 仍 400K)───────────
   expectWindow('gpt-5.6-sol', 1_050_000, 'GPT-5.6 官方 1.05M;autoCompactWindow 被 CLI schema 上限钳到 1M,env 仍报真实 1.05M');
@@ -101,6 +102,7 @@ try {
   expectWindow('gpt-5-nano', 400_000, 'GPT-5 nano 仍 400K');
   expectWindow('gpt-5.10', 1_050_000, '两位小版本不静默回落 400K 档');
   expectWindow('gpt-5.1', 400_000, '5.4 之前的小版本仍走 400K(两位数放宽不能误伤单位数)');
+  expectWindow('gpt-5.05', 400_000, '前导零的两位小版本语义上小于 5.4,不进 1.05M 档');
 
   // ── deepseek 代际 ───────────────────────────────────────────────
   expectWindow('deepseek-v4-flash', 1_048_576, 'DeepSeek V4 1M(实测最大 680,100 已打穿旧的 200K 口径)');

@@ -118,14 +118,17 @@ const MODEL_WINDOW_RULES = [
   //                                                        旧值 262,144 被实测证伪(历史最大 prompt 319,687)。
   //                                                        ^k3 前缀判据与客户端一致:minimax-k3、k30 不误伤。
   [/kimi-(k2\.[6-9]|for-coding)/i, 262_144],             // Kimi k2.6+/coding 256K
-  [/mimo-?v?2\.5|mimo-?v?([3-9]|\d\d)/i, 1_000_000],     // 小米 MiMo v2.5+ 1M(mimo.xiaomi.com 模型规格页)。
-  //                                                        \d\d 让 mimo-v10 这类两位版本号也中,别静默回落旧档
+  [/mimo-?v?2\.5|mimo-?v?([3-9]|[1-9]\d(?!\d))/i, 1_000_000], // 小米 MiMo v2.5+ 1M(mimo.xiaomi.com 模型规格页)。
+  //                                                        两位分支让 mimo-v10 也中,别静默回落旧档;
+  //                                                        (?!\d) 挡住裸日期后缀 —— mimo-20260115 的 "20"
+  //                                                        后面还有数字,不该被当成版本号 10+
   [/minimax|abab/i, 204_800],                            // MiniMax M2 系 ~200K
   [/grok-?[4-9]/i, 262_144],
   [/grok-?3/i, 131_072],
   [/gemini/i, 1_048_576],
-  [/gpt-?5\.([4-9]|\d\d)/i, 1_050_000],                  // GPT-5.4 起全系 1.05M(sol/terra/luna 同窗口)。
-  //                                                        \d\d 覆盖 gpt-5.10 这类两位小版本
+  [/gpt-?5\.([4-9]|[1-9]\d(?!\d))/i, 1_050_000],         // GPT-5.4 起全系 1.05M(sol/terra/luna 同窗口)。
+  //                                                        两位分支覆盖 gpt-5.10;首位排除 0,免得 gpt-5.05
+  //                                                        (语义上小于 5.4)被误判进 1.05M 档
   [/gpt-?5/i, 400_000],                                  // GPT-5 / mini / nano 400K
   [/sonar/i, 131_072],                                   // Perplexity Sonar 128K
 ];
@@ -192,6 +195,10 @@ export function resolveCompactWindowSettings(model) {
       // 是必须的。<100K 的小窗(如 kimi 不开 1M 的默认档)抬到下限 100K 不会谎报窗口 ——
       // 有效窗口 = min(MAX_CONTEXT_TOKENS, 本值),下面那行已把真值告诉 CLI,min 会拉回来
       // (实测:MCT=64000 + acw=100000 → /context 报 64k 窗口、压缩线 35K,正确)。
+      // 例外:模型名以 claude- 开头时 CLI 忽略 MAX_CONTEXT_TOKENS(见下方注释),此时抬到
+      // 100K 下限的小窗保护落空 —— 但实测结局与改前的"直接不干预"完全相同(压缩线永远
+      // 够不着,会话在真窗口处被上游打死;硬阻断线两版都是 CLI 自认窗口算的,不受影响),
+      // 不是新引入的伤害。要踩中须同时满足"模型名 claude-*"+"真实窗口<100K"。
       autoCompactWindow: Math.min(Math.max(win, 100_000), 1_000_000),
       // 校正 CLI 对第三方模型窗口的认知:它不认识的模型名一律按 200K 算,只写
       // autoCompactWindow 会被 min(200K, 值) 钳回去抬不动。CLI 只对非 claude- 前缀的
