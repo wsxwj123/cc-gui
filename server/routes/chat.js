@@ -81,18 +81,30 @@ export function safeModelArg(m) {
 }
 
 // 自动压缩窗口联动:第三方 provider 下按【本回合实际模型 + 当前激活 provider】实时决定
-// autoCompactWindow,经 --settings 临时文件 per-spawn 覆盖(不写全局 settings.json,多会话
-// 互不影响;模型/provider 变化会重开进程,下一回合自动用新值)。
+// 窗口,经 --settings 临时文件 per-spawn 覆盖(不写全局 settings.json,多会话互不影响;
+// 模型/provider 变化会重开进程,下一回合自动用新值)。
 // 优先级:用户显式设置(settings.json 顶层 autoCompactWindow 或 env 的
 // CLAUDE_CODE_AUTO_COMPACT_WINDOW)> 本联动 > CLI 默认。
 // 窗口来源两档:①模型名带 [1m] → 1,048,576(与 GUI 的 1M 开关天然联动,kimi-k3[1m] 等);
 // ②当前激活 provider(~/.claude-gui/active-provider.json → custom-providers.json)配置的
 // contextWindow 字段(GUI Provider 表单可填,如 deepseek 128k)。都没有 → null 交 CLI 默认。
 // 官方 OAuth(无 ANTHROPIC_BASE_URL)恒 null:CLI 认识官方模型,自动窗口本就准确。
-// 压缩线 = 窗口×0.85(给压缩摘要留余量);CLI schema 下限 100k,算出 <100k(如 64k 小窗)
-// 表达不了 → null(已知局限,如 kimi 不开 1M 的默认档)。
+//
+// CLI 2.1.221 二进制 + headless /context 实测确认的语义(别再按旧注释的 ×0.85 理解):
+//   有效窗口 = min(CLI 自己认的模型窗口, settings.autoCompactWindow)
+//   压缩线   = 有效窗口 − min(模型最大输出, 20000) − 13000   ← 固定预留,不是乘百分比
+//   硬阻断线 = CLI 自己认的模型窗口 − min(模型最大输出, 20000) − 3000
+// 关键:CLI「自己认的模型窗口」对任何它不认识的第三方模型名恒为 200,000,只有两条路能抬高
+// ——模型名里带 [1m],或 env.CLAUDE_CODE_MAX_CONTEXT_TOKENS(仅对非 claude- 前缀的模型名生效)。
+// 因此单写 autoCompactWindow 抬不动窗口(会被 min 钳回 200K),还会顺带武装 ~180K 的硬阻断线,
+// 把 1M 的第三方模型压成 200K。两个键必须一起写:MAX_CONTEXT_TOKENS 校正 CLI 的窗口认知,
+// autoCompactWindow 负责武装主动压缩(不写它时 CLI 只做被动压缩——等上游报「prompt too long」
+// 才压,这正是历史会话里 deepseek 冲到 68 万、k3 冲到 32 万都没主动压缩过的原因)。
+// autoCompactWindow 的 CLI schema 是 int [100000, 1000000];窗口 <100K(如 kimi 不开 1M 的
+// 默认档)表达不了 → 整个联动返回 null 交回 CLI 默认,不能硬钳到 100K(那等于谎报窗口)。
+//
 // 模型窗口规则表:按【模型名】匹配,先具体后泛化,首中即返。比 per-provider 单值精确
-// 且不易过时 —— 新模型出来加一行即可(数据 2026-07 逐家官方文档核实)。claude-* 不列:
+// 且不易过时 —— 新模型出来加一行即可(数据 2026-08 逐家官方文档核实)。claude-* 不列:
 // 200K=CLI 默认口径,无需干预。
 const MODEL_WINDOW_RULES = [
   [/deepseek-?v4|deepseek.*-(flash|pro)\b/i, 1_048_576], // DeepSeek V4 flash/pro 均 1M
@@ -100,14 +112,19 @@ const MODEL_WINDOW_RULES = [
   [/glm-?5\.[2-9]|glm-?[6-9]/i, 1_048_576],              // GLM 5.2+ 1M
   [/glm-?(4\.[5-9]|5(\.[01])?)\b/i, 204_800],            // GLM 4.5~5.1 200K
   [/qwen-?3\.7.*max|qwen.*-1m\b/i, 1_048_576],           // Qwen3.7-Max 1M
-  [/kimi-?k3/i, 1_048_576],                              // Kimi k3 1M(实抓亦覆盖)
-  [/^k3$/i, 262_144],                                    // 裸 k3=Kimi Code 套餐别名 256K(与客户端徽章一致)
+  [/^k3-?256k/i, 262_144],                               // Kimi Code 的 k3-256k 是固定 256K 档(官方文档明列)
+  [/kimi-?k3|^k3([.-]|$)/i, 1_048_576],                  // Kimi K3 全系 1M。裸 k3/k3-0905/k3.5 是 Kimi Code
+  //                                                        套餐别名,官方 platform.kimi.ai 报 1,048,576;
+  //                                                        旧值 262,144 被实测证伪(历史最大 prompt 319,687)。
+  //                                                        ^k3 前缀判据与客户端一致:minimax-k3、k30 不误伤。
   [/kimi-(k2\.[6-9]|for-coding)/i, 262_144],             // Kimi k2.6+/coding 256K
+  [/mimo-?v?2\.5|mimo-?v?[3-9]/i, 1_000_000],            // 小米 MiMo v2.5+ 1M(mimo.mi.com 模型规格页)
   [/minimax|abab/i, 204_800],                            // MiniMax M2 系 ~200K
   [/grok-?[4-9]/i, 262_144],
   [/grok-?3/i, 131_072],
   [/gemini/i, 1_048_576],
-  [/gpt-?5/i, 400_000],
+  [/gpt-?5\.[4-9]/i, 1_050_000],                         // GPT-5.4 起全系 1.05M(sol/terra/luna 同窗口)
+  [/gpt-?5/i, 400_000],                                  // GPT-5 / mini / nano 400K
   [/sonar/i, 131_072],                                   // Perplexity Sonar 128K
 ];
 
@@ -148,7 +165,9 @@ export function resolveDisplayWindow(model) {
   } catch { return null; }
 }
 
-export function resolveAutoCompactWindow(model) {
+// 本回合要 per-spawn 合并进 --settings 的压缩相关配置。返回 null = 不干预,交 CLI 默认。
+// 返回值就是写进临时 settings 文件的整个对象(见下方 spawn 处),两个键的分工见上方注释。
+export function resolveCompactWindowSettings(model) {
   try {
     const st = JSON.parse(readFileSync(pathJoin(homedir(), '.claude', 'settings.json'), 'utf8'));
     if (typeof st?.autoCompactWindow === 'number') return null;      // 用户显式设置,尊重
@@ -156,18 +175,19 @@ export function resolveAutoCompactWindow(model) {
     if (!st?.env?.ANTHROPIC_BASE_URL) return null;                   // 官方,CLI 自动已准确
     const win = resolveModelWindow(model, readActiveProviderEntry());
     if (!win) return null;
-    // 压缩触发百分比:用户可调(prefs.autoCompactPct,50-95),默认 80%。
-    let pct = 80;
-    try {
-      const p = Number(JSON.parse(readFileSync(pathJoin(homedir(), '.claude-gui', 'prefs.json'), 'utf8'))?.autoCompactPct);
-      if (Number.isFinite(p) && p >= 50 && p <= 95) pct = p;
-    } catch {}
-    // null 判据只看【窗口本身】<100K(CLI schema 下限压不住的真小窗,如 kimi 默认 64K);
-    // 窗口 ≥100K 时压缩线钳进 [100K, min(win,1M)] —— 不能因 pct 调低算出 <100K 就返回 null:
-    // 那会关掉 128K 家(deepseek旧系/grok-3/sonar)的防撞保护,CLI 默认压缩线(~156K)反而
-    // 打穿真窗口,恰是本联动要防的事故(判官抓的:用户调低百分比本意更安全,结果更危险)。
+    // 窗口 <100K(如 kimi 不开 1M 的默认档)低于 CLI 的 autoCompactWindow schema 下限,
+    // 表达不了 → 整个联动让位交回 CLI 默认。不能硬钳到 100K:那是对 CLI 谎报窗口,会把
+    // 压缩线和硬阻断线放到真窗口之外,恰是本联动要防的撞窗事故(判官抓过的老坑)。
     if (win < 100_000) return null;
-    return Math.min(Math.max(Math.floor(win * pct / 100), 100_000), Math.min(win, 1_000_000));
+    return {
+      // 主动压缩的触发窗口。CLI 拿到后自己扣掉输出与摘要预留(约 33K)才触发,所以这里
+      // 给真实窗口即可 —— GUI 再乘一遍百分比 = 折上折,已删。
+      autoCompactWindow: Math.min(win, 1_000_000),                   // CLI schema 上限 1M
+      // 校正 CLI 对第三方模型窗口的认知:它不认识的模型名一律按 200K 算,只写
+      // autoCompactWindow 会被 min(200K, 值) 钳回去抬不动。CLI 只对非 claude- 前缀的
+      // 模型名读这个 env,claude-* 走它自己的表,写了不生效也无害。
+      env: { CLAUDE_CODE_MAX_CONTEXT_TOKENS: String(win) },
+    };
   } catch { return null; }
 }
 
@@ -1293,11 +1313,11 @@ router.post('/chat', async (req, res) => {
   // extraArgs 经 SDK 透传为 CLI --settings <path>;进程随流结束,文件在 finally 清理。
   let acwTmpFile = null;
   {
-    const acw = resolveAutoCompactWindow(model);
+    const acw = resolveCompactWindowSettings(model);
     if (acw) {
       try {
         acwTmpFile = pathJoin(tmpdir(), `cgui-acw-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.json`);
-        writeFileSync(acwTmpFile, JSON.stringify({ autoCompactWindow: acw }), 'utf8');
+        writeFileSync(acwTmpFile, JSON.stringify(acw), 'utf8');
         options.extraArgs = { ...(options.extraArgs || {}), settings: acwTmpFile };
         // (此块内别调用声明在下方的辅助 —— TDZ 抛错会被本 catch 吞掉并把
         // acwTmpFile 置 null → finally 清理失效、每次联动冷启泄漏一个临时文件。)
