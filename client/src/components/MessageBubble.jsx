@@ -317,13 +317,11 @@ function UsageDisplay({ usage, model }) {
       <span>输出 {output.toLocaleString()}</span>
       {cacheRead > 0 && <span title="cache_read_input_tokens">缓存命中 {cacheRead.toLocaleString()}</span>}
       {cacheWrite > 0 && <span title="cache_creation_input_tokens">缓存写入 {cacheWrite.toLocaleString()}</span>}
+      {/* R3:说明文案(含"按你填写的单价"/"按官网价估算"的口径切换)由 pricing.js 统一给,
+          三个费用显示点共用同一份,不各自维护。
+          注释写在属性外:JSX 属性位的 // 行注释会被部分 parser 连同后面的属性一起吃掉。 */}
       {cost && (
-        <span
-          className="ml-auto text-accent/80 font-mono"
-          // R3:说明文案(含"按你填写的单价"/"按官网价估算"的口径切换)由 pricing.js 统一给,
-          // 三个费用显示点共用同一份,不各自维护。
-          title={costTitle(cost)}
-        >
+        <span className="ml-auto text-accent/80 font-mono" title={costTitle(cost)}>
           {formatCost(cost.totalUsd)}
         </span>
       )}

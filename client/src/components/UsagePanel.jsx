@@ -21,13 +21,16 @@ function groupByProvider(byModel, provider) {
   const map = new Map();
   for (const m of byModel) {
     const { key, label } = modelProvider(m.model);
-    if (!map.has(key)) map.set(key, { key, label, models: [], tokens: 0, usd: 0, subscription: false });
+    if (!map.has(key)) map.set(key, { key, label, models: [], tokens: 0, usd: 0, priced: false, subscription: false });
     const g = map.get(key);
     g.models.push(m);
     g.tokens += m.input + m.output;
     const c = aggregateCost(m.model, m, provider);
     if (c.subscription) g.subscription = true;
-    if (c.usd) g.usd += c.usd;
+    // priced 与行里的 `cost.usd != null` 同判据:算得出金额就算"有价",哪怕金额是 0
+    // (免费模型 / token 极少)。原先只看 `if (c.usd)`,0 元的组在组头显「—」(无定价数据)
+    // 而行里显 `<¥0.001`,同一份数据两种说法。
+    if (c.usd != null) { g.usd += c.usd; g.priced = true; }
   }
   // Paid providers first (by cost desc), then subscription/unknown by tokens.
   return [...map.values()].sort((a, b) => (b.usd - a.usd) || (b.tokens - a.tokens));
@@ -295,7 +298,7 @@ export function UsagePanel() {
                 <span className="text-[11px] font-semibold text-ink font-body">{g.label}</span>
                 <span className="text-[9px] text-ink-ghost font-mono">{g.models.length} 模型</span>
                 <div className="flex-1" />
-                {g.usd > 0 ? (
+                {g.priced ? (
                   <span className="text-[11px] text-accent font-mono">{formatCost(g.usd)}</span>
                 ) : g.subscription ? (
                   <span className="text-[10px] text-ink-faint font-body" title="按订阅或套餐计费，不按 token 计价">订阅内</span>
