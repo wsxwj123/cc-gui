@@ -309,9 +309,15 @@ app.post('/api/login', (req, res) => {
     return res.status(401).json({ error: '密码错误' });
   }
   _loginFails.delete(ip); // 成功登录清零
+  // Secure 按来源区分(审计-1):隧道域名访问走 https,但 CF 边缘 80 端口默认也开,
+  // 手机一旦走 http:// 隧道域名,30 天 token 会在手机→边缘这段公网明文泄露 → 隧道
+  // 来源的 cookie 追加 Secure(浏览器只在 https 回传)。本机 localhost/LAN 是 http,
+  // 加 Secure 会打断 LAN 登录(Safari 不认 http+Secure)→ 本机/LAN 来源不加。
+  const t = getTunnelHostname();
+  const secure = t && requestHostname(req) === t ? '; Secure' : '';
   res.setHeader(
     'Set-Cookie',
-    `cgui_token=${issueToken()}; HttpOnly; Path=/; SameSite=Lax; Max-Age=${30 * 24 * 3600}`,
+    `cgui_token=${issueToken()}; HttpOnly; Path=/; SameSite=Lax; Max-Age=${30 * 24 * 3600}${secure}`,
   );
   res.json({ ok: true });
 });
