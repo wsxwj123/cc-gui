@@ -223,6 +223,25 @@ app.use((req, res, next) => {
   if (isAllowedHost(req)) return next();
   res.status(403).json({ error: 'Host not allowed (DNS-rebinding protection)' });
 });
+// ── 隧道 http→https 301(修"http 下 Secure cookie 拒存 → 登录死循环")─────────
+// 根因链:CF 边缘 80 端口开着不自动跳转;审计-1 给隧道来源的 cookie 加了 Secure,
+// 手机经 http:// 隧道域名登录成功但浏览器在 http 下拒存 Secure cookie → reload 后
+// auth-status 无 cookie → 弹回登录页死循环。源站自己动手:Host===配置的
+// tunnelHostname 且 CF-Visitor 的 JSON 里 scheme==="http" → 301 到 https。
+// 位置约定:在 Host 白名单门之后(evil.com 依旧先 403)、鉴权与限速之前
+// (POST /api/login 也 301,不吃密码错误或限速次数)。
+// CF-Visitor 只用于判 scheme 这一个用途,不作任何放行依据;无此头 / scheme=https /
+// 非隧道 Host / 本机伪造此头(Host 不匹配) / 畸形 JSON → 一律不 301、不 5xx,按原逻辑走。
+app.use((req, res, next) => {
+  const t = getTunnelHostname();
+  if (!t || requestHostname(req) !== t) return next();
+  const visitor = req.headers['cf-visitor'];
+  if (typeof visitor !== 'string') return next();
+  let scheme = null;
+  try { scheme = JSON.parse(visitor)?.scheme; } catch { return next(); }
+  if (scheme !== 'http') return next();
+  res.redirect(301, `https://${req.headers.host}${req.originalUrl}`);
+});
 // Same-origin only: in prod the SPA is served from this same port; in dev Vite
 // proxies /api + /ws server-side. So the only legitimate browser origins are
 // localhost/127.0.0.1. Reject everything else to blunt drive-by cross-origin
