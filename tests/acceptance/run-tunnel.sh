@@ -95,6 +95,7 @@ edit_conf set "$TUNNEL_HOSTNAME"
 echo
 echo "[config] tunnelHostname=$TUNNEL_HOSTNAME 已写入(server 未重启,PID 仍是 $SRV_PID)"
 run_suite tests/acceptance/tunnel-matrix-anon.acceptance.mjs
+run_suite tests/acceptance/tunnel-http-redirect.acceptance.mjs
 run_suite tests/acceptance/tunnel-login.acceptance.mjs
 run_suite tests/acceptance/tunnel-ws.acceptance.mjs
 
