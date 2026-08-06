@@ -41,6 +41,7 @@ import screenshotRoutes from './routes/screenshot.js';
 import {
   authMiddleware, isLocalReq, isAuthorized, parseCookies, verifyToken,
   hasPassword, setPassword, setDefaultRandomPassword, clearPassword, verifyPassword, issueToken, updateConfig, loadConfig,
+  requestHostname, getTunnelHostname,
 } from './services/auth.js';
 import { setupFileWatcher } from './services/file-watcher.js';
 import { resolveWorkspacePath } from './utils/safe-path.js';
@@ -186,15 +187,6 @@ if (HOST === '0.0.0.0' && !hasPassword()) {
 // can flip the binding at runtime (设置→网络 的局域网开关,无需重启进程)。
 let lanMode = HOST === '0.0.0.0';
 
-function requestHostname(req) {
-  const host = req?.headers?.host || '';
-  if (!host) return '';
-  // 用 URL 归一化剥端口 —— 手写正则 `:\d+$` 会把裸 IPv6 `::1` 的 `:1` 当端口剥成 `:`
-  // (IPv6 环回白名单变死代码,[::1] 访问被误 403)。URL 正确处理 [v6]:port 与 v4:port。
-  try { return new URL('http://' + host).hostname.replace(/^\[|\]$/g, ''); }
-  catch { return host.replace(/:\d+$/, ''); }
-}
-
 function isAllowedBrowserOrigin(origin, req = null) {
   if (!origin) return true;
   try {
@@ -213,14 +205,18 @@ const app = express();
 // 都不校验 Host 头本身。攻击者把 evil.com 短 TTL 重绑到 127.0.0.1,受害者浏览器
 // 连到回环但发 Host: evil.com → 被当本机免密 + CORS 自指放行 → 无密码接管全 API
 // (读 token/写删文件/跑命令)。实测复现:Host 伪装即 authed:true 且读到 network.json。
-// 修:请求 Host 的主机名必须 ∈ {localhost,127.0.0.1,::1,本机 LAN IP(仅 lanMode)}。
-// 浏览器无法伪造 Host(受 fetch 限制),故 evil.com 的 Host 一定落在白名单外 → 403。
+// 修:请求 Host 的主机名必须 ∈ {localhost,127.0.0.1,::1,本机 LAN IP(仅 lanMode),
+// tunnelHostname(仅配置且合法时)}。浏览器无法伪造 Host(受 fetch 限制),故 evil.com
+// 的 Host 一定落在白名单外 → 403。
 // 放行无 Host 头(非浏览器/健康探测)与端口无关(只比主机名)。
+// 隧道域名放行只开门不减免密码:isLocalReq 的 CF 标记+Host 双否决保证隧道流量仍要密码。
 function isAllowedHost(req) {
   const h = requestHostname(req);
   if (!h) return true; // 无 Host 头:非浏览器客户端,socket/密码层继续兜底
   if (h === 'localhost' || h === '127.0.0.1' || h === '::1') return true;
   if (lanMode && lanIps().includes(h)) return true;
+  const t = getTunnelHostname(); // 每请求现读,配置生效免重启;未配置/非法 → '' 不放行
+  if (t && h === t) return true;
   return false;
 }
 app.use((req, res, next) => {
@@ -271,7 +267,23 @@ app.use('/api', (req, res, next) => {
 // S2:登录失败限速。无此限制时,配合局域网绑定,在线爆破密码可行(scrypt 只防离线)。
 // 按来源 IP 计失败数,≥5 次起指数退避锁定(封顶 5 分钟),成功即清零。纯内存、进程级。
 const _loginFails = new Map(); // ip -> { count, until }
-function _loginIp(req) { return req.socket?.remoteAddress || req.ip || 'unknown'; }
+// 分桶 key:隧道流量 socket 全是回环(cloudflared 拨入),按 socket 分桶等于全网共享一桶
+// (一个攻击者锁死所有隧道用户)且攻击者换个出口 IP 也不换桶(限速对隧道爆破失效)。
+// 故仅当三条件同时成立——socket 回环 ∧ Host===配置的 tunnelHostname ∧ cf-ray 存在
+// (即确系隧道流量)——才按 CF-Connecting-IP 值分桶(该头由 CF 边缘重写,隧道攻击者
+// 无法伪造);其余一律回落 socket 分桶。LAN 直连者伪造 CF 头换桶绕限速的后门由此堵死
+// (socket 非回环,三条件直接不成立);取不到 cf-connecting-ip 时回落 socket 共享桶
+// (仍限速,安全方向)。CF 头在此只用于【分桶】,绝不用于放行/grant。
+function _loginIp(req) {
+  const socketIp = req.socket?.remoteAddress || req.ip || 'unknown';
+  const loopback = socketIp === '127.0.0.1' || socketIp === '::1' || socketIp === '::ffff:127.0.0.1';
+  const t = getTunnelHostname();
+  if (loopback && t && requestHostname(req) === t && req.headers?.['cf-ray'] !== undefined) {
+    const cfIp = req.headers['cf-connecting-ip'];
+    if (typeof cfIp === 'string' && cfIp) return cfIp;
+  }
+  return socketIp;
+}
 function _loginBlockedMs(ip) {
   const r = _loginFails.get(ip);
   return r && r.until > Date.now() ? r.until - Date.now() : 0;
