@@ -95,9 +95,48 @@ export function verifyToken(token) {
 }
 
 // ── request helpers ──────────────────────────────────────────────
+// 从 Host 头取主机名(剥端口)。用 URL 归一化 —— 手写正则 `:\d+$` 会把裸 IPv6 `::1`
+// 的 `:1` 当端口剥成 `:`(IPv6 环回白名单变死代码,[::1] 访问被误 403)。
+// URL 正确处理 [v6]:port 与 v4:port。原实现自 index.js 搬入(DNS-rebinding 防护与
+// 本机判定共用同一套主机名口径,不能两处各写一份)。
+export function requestHostname(req) {
+  const host = req?.headers?.host || '';
+  if (!host) return '';
+  try { return new URL('http://' + host).hostname.replace(/^\[|\]$/g, ''); }
+  catch { return host.replace(/:\d+$/, ''); }
+}
+
+// 隧道域名(手机经 Cloudflare Tunnel 访问时 Host 头的值),从 network.json 读。
+// 每请求现读(与 hasPassword 同模式,换配置免重启是有意为之)。小写化后校验为
+// 纯主机名(不含 scheme/端口/路径);缺省/非法 → '' = 视为未配置(不放行,行为与
+// 改动前完全一致),写错不炸,绝不"读不到就全开"。
+export function getTunnelHostname() {
+  const v = loadConfig().tunnelHostname;
+  if (typeof v !== 'string') return '';
+  const h = v.toLowerCase();
+  return /^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$/.test(h) ? h : '';
+}
+
+// 判"本机 vs 外部"的三信号与判定:socket 回环 ∧ 无 CF 四件套 ∧ Host 缺省或本机集,
+// 全部满足才判本机(免密),任一不满足即外部(要密码)。拿不准一律外部(fail-safe)。
+// 为什么不再只看 socket:cloudflared 跑在本机,它向 127.0.0.1 拨入,所有隧道流量的
+// socket 都是回环(实测 ::ffff:127.0.0.1),只看 socket 会把公网流量误放成本机免密。
+// CF 标记头(只数枚举四件套 cf-ray/cf-connecting-ip/cf-visitor/cf-ipcountry,
+// cdn-loop、cf-cache-status 等不参与判定)由 Cloudflare 边缘写入,客户端无法剥离,
+// 本机直连者伪造它们只会把自己判成外部 —— 但 CF 头只用于【否决】,绝不用作放行依据
+// (X-Forwarded-For / cf-connecting-ip 本机可伪造,同样绝不用于 grant)。
+// Host 头 curl 能伪造,但伪造方向只会"更像外部"(伪造 localhost 仍过不了 CF 否决),
+// 判错永远偏向要密码一侧,属 fail-safe。
+const LOCAL_SOCKET_ADDRS = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1']);
+const LOCAL_HOSTNAMES = new Set(['localhost', '127.0.0.1', '::1']);
+const CF_MARKER_HEADERS = ['cf-ray', 'cf-connecting-ip', 'cf-visitor', 'cf-ipcountry'];
 export function isLocalReq(req) {
-  const a = req?.socket?.remoteAddress || '';
-  return a === '127.0.0.1' || a === '::1' || a === '::ffff:127.0.0.1';
+  if (!LOCAL_SOCKET_ADDRS.has(req?.socket?.remoteAddress || '')) return false;
+  const headers = req?.headers || {};
+  for (const h of CF_MARKER_HEADERS) if (headers[h] !== undefined) return false; // node 已小写化 header 名
+  const host = requestHostname(req);
+  if (host && !LOCAL_HOSTNAMES.has(host)) return false;
+  return true;
 }
 export function parseCookies(req) {
   const raw = req?.headers?.cookie || '';
