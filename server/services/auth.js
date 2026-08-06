@@ -95,10 +95,11 @@ export function verifyToken(token) {
 }
 
 // ── request helpers ──────────────────────────────────────────────
-// 从 Host 头取主机名(剥端口)。用 URL 归一化 —— 手写正则 `:\d+$` 会把裸 IPv6 `::1`
-// 的 `:1` 当端口剥成 `:`(IPv6 环回白名单变死代码,[::1] 访问被误 403)。
-// URL 正确处理 [v6]:port 与 v4:port。原实现自 index.js 搬入(DNS-rebinding 防护与
-// 本机判定共用同一套主机名口径,不能两处各写一份)。
+// 从 Host 头取主机名(剥端口)。用 URL 归一化 —— 手写正则 `:\d+$` 会把带括号的
+// `[::1]:port` 剥错(IPv6 环回白名单变死代码)。URL 正确处理 [v6]:port 与 v4:port。
+// 已知边界(行为 fail-safe,不改):裸 `::1`(无括号,非标准 Host 形态,浏览器总会
+// 带括号)URL 解析会抛 → 走 fallback 剥成 `:` → 不匹配白名单被拒,方向是"多拦"
+// 不是"多放",安全。
 export function requestHostname(req) {
   const host = req?.headers?.host || '';
   if (!host) return '';
