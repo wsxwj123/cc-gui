@@ -88,15 +88,28 @@ writeJson(SETTINGS, { env: { ANTHROPIC_MODEL: 'claude-sonnet-4-6' } });   // 无
 }
 
 // ── ④ pty 输出里的失败自检:窄匹配,拿不准不杀 ──────────────────────────────
-const FAIL_LINE = 'Remote Control is only available when using Claude via api.anthropic.com.';
-// 真实形态:ANSI 色码 + 提示框边框 + 前后正常输出。
-const boxed = [
-  '\x1b[2m╭─────────────────────────────────╮\x1b[0m',
-  `\x1b[33m│\x1b[0m \x1b[1m${FAIL_LINE}\x1b[0m \x1b[33m│\x1b[0m`,
-  '\x1b[2m╰─────────────────────────────────╯\x1b[0m',
-].join('\r\n');
-assert.equal(rcFailureIn(boxed), FAIL_LINE, `带色码/边框的失败提示没被识别:${JSON.stringify(rcFailureIn(boxed))}`);
-assert.equal(rcFailureIn(`welcome\n${FAIL_LINE}\nbye`), FAIL_LINE, '夹在正常输出里的失败提示应被识别');
+// 正例逐字取自 RESEARCH-r5-cli-native.md Q4(CLI 二进制原文)。**每条都要有**:只认端点
+// 那一条时,官方端点 + API key 的用户照样恒显「已激活」+ 输入框锁死 + 零提示(判官必修项)。
+const FAIL_LINES = [
+  ['端点(BASE_URL 非官方)', 'Remote Control is only available when using Claude via api.anthropic.com.'],
+  ['订阅', 'Remote Control requires a claude.ai subscription. Run `claude auth login` to sign in.'],
+  ['长期令牌只有推理权限', 'Remote Control requires a full-scope login token. Long-lived tokens (from `claude setup-token` or CLAUDE_CODE_OAUTH_TOKEN) are limited to inference-only for security reasons.'],
+  ['组织策略(直撇号)', "Remote Control is disabled by your organization's policy (managed setting `disableRemoteControl`)."],
+  ['组织策略(弯撇号渲染)', 'Remote Control is disabled by your organization’s policy (managed setting `disableRemoteControl`).'],
+  ['云会话', 'Remote Control is not available inside a cloud session.'],
+  ['bridge 环境注册被拒', 'Remote Control environments are not available for your account.'],
+  ['企业网关', 'This session is connected through an enterprise cloud gateway (set up via /login), which does not support Remote Control.'],
+];
+for (const [name, line] of FAIL_LINES) {
+  // 真实形态:ANSI 色码 + 提示框边框 + 前后正常输出。
+  const boxed = [
+    '\x1b[2m╭─────────────────────────────────╮\x1b[0m',
+    `\x1b[33m│\x1b[0m \x1b[1m${line}\x1b[0m \x1b[33m│\x1b[0m`,
+    '\x1b[2m╰─────────────────────────────────╯\x1b[0m',
+  ].join('\r\n');
+  assert.equal(rcFailureIn(boxed), line, `带色码/边框的「${name}」拒绝没被识别:${JSON.stringify(rcFailureIn(boxed))}`);
+  assert.equal(rcFailureIn(`welcome\n${line}\nbye`), line, `夹在正常输出里的「${name}」拒绝应被识别`);
+}
 for (const [name, out] of [
   ['空输出', ''],
   ['undefined', undefined],
@@ -104,6 +117,13 @@ for (const [name, out] of [
   ['成功激活的提示', 'Remote Control session is active — open Claude on your phone to take over.'],
   ['只是提到功能名', 'Type /remote-control to hand this session to your phone.'],
   ['模型自己在聊这个话题', 'The Remote Control feature requires api.anthropic.com, per the docs.'],
+  // 扩了正则之后新增的近似句(每条新文案配一条"像但不是"的反例,防止顺手写宽)
+  ['订阅正常', 'Remote Control is enabled — your claude.ai subscription covers it.'],
+  ['令牌说明文', 'Long-lived tokens from `claude setup-token` are fine for CI runs.'],
+  ['组织放开了策略', "Your organization's policy allows Remote Control."],
+  ['云会话但可用', 'Cloud session detected; Remote Control is available here.'],
+  ['企业代理不是网关那条', 'Connecting through an enterprise proxy at proxy.corp:8080.'],
+  ['环境列表正常', 'Remote Control environments: 2 available for this account.'],
 ]) {
   assert.equal(rcFailureIn(out), null, `误杀:「${name}」被判成了失败`);
 }

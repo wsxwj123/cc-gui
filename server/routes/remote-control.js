@@ -63,11 +63,26 @@ for (const sig of ['SIGINT', 'SIGTERM']) {
 const failures = new Map();
 
 // CLI 侧拒绝 Remote Control 的提示只印在 pty 里 —— `--remote-control` 是 flag 形态,
-// 被拒后照常进交互会话、进程不退出,所以既没有退出码也没有别的信号可用。这里只认二进制
-// 里的原文一句(`Remote Control is only available when using Claude via api.anthropic.com.`),
-// 窄匹配 + 拿不准一律放行:误杀会把本来能用的远程控制掐掉,比漏判更糟。
+// 被拒后照常进交互会话、进程不退出,所以既没有退出码也没有别的信号可用。
+// 逐条锚定二进制里的原文(RESEARCH-r5-cli-native.md Q4 已把它们摘全),窄联合而不是
+// 泛化成 /Remote Control/:误杀会把本来能用的远程控制掐掉,比漏判更糟,拿不准一律放行。
+// 【覆盖】端点(BASE_URL 非 api.anthropic.com)、订阅、长期令牌(setup-token /
+//   CLAUDE_CODE_OAUTH_TOKEN)、组织策略 disableRemoteControl、云会话、企业网关、
+//   bridge 环境注册失败。
+// 【不覆盖】① feature-flag 关闭(DISABLE_TELEMETRY / DO_NOT_TRACK /
+//   CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC / DISABLE_GROWTHBOOK)—— CLI 不印任何文案;
+//   ② 提示被终端折行截断在两行之间;③ 8KB 之后才出现的拒绝。这几类仍会停在"显示已激活"。
+// 撇号在不同渲染下有 ' / ’ 两形,组织策略那条断在撇号之前。
 // 输出带 ANSI 色码与提示框边框,先剥掉再匹配、再取那一行原话回给用户。
-const RC_FAILURE_RE = /Remote Control is only available/;
+const RC_FAILURE_RE = new RegExp([
+  'Remote Control is only available',                  // ANTHROPIC_BASE_URL 指向非官方主机
+  'Remote Control requires a claude\\.ai subscription', // API key / 未登录订阅
+  'Remote Control requires a full-scope login token',   // setup-token / OAUTH_TOKEN 只有推理权限
+  'Remote Control is disabled by your organization',    // 管理策略 disableRemoteControl
+  'Remote Control is not available inside a cloud session',
+  'Remote Control environments are not available',      // bridge 环境注册被账号拒绝
+  'connected through an enterprise cloud gateway',      // 唯一不以 Remote Control 开头的一条
+].join('|'));
 // eslint-disable-next-line no-control-regex
 const ANSI_RE = /\x1b\[[0-9;?]*[ -/]*[@-~]/g;
 export function rcFailureIn(output) {
@@ -159,10 +174,11 @@ router.post('/remote-control', async (req, res) => {
     active.set(sessionId, entry);
 
     // Drain output so the pty buffer never blocks; we don't render it anywhere.
-    // 但开头这段要看一眼:provider 门只堵住 base URL 那一条,CLI 还会因未登录 claude.ai
-    // 订阅 / API key 认证 / 灰度未放量拒绝激活,同样是「印一行提示、进程继续跑」。命中即
-    // 杀 pty 并从 active 摘掉 —— 状态端点随之变回未激活并带上原话,前端据此解锁,不再
-    // 谎称「已激活」。
+    // 但开头这段要看一眼:provider 门只堵住 base URL 那一条,CLI 还会因订阅 / 长期令牌 /
+    // 组织策略 / 云会话 / 企业网关拒绝激活,同样是「印一行提示、进程继续跑」。命中即杀 pty
+    // 并从 active 摘掉 —— 状态端点随之变回未激活并带上原话,前端据此解锁,不再谎称
+    // 「已激活」。认哪几条、漏哪几类见 RC_FAILURE_RE 上方(feature-flag 那类 CLI 不印文案,
+    // 检测不到)。
     let head = '';
     let scanning = true;
     term.onData((chunk) => {
