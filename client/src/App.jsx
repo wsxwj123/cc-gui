@@ -1899,6 +1899,12 @@ function SessionItem({ session, isSelected, onSelect, onFork, onArchive, onDelet
   );
 }
 
+// 分支正在运行的会话时的确认文案(侧栏分支按钮与消息级分叉共用)。分支 = 复制 jsonl,
+// 只拿得到当前已落盘的内容:进行中的回合还没写完,子代理更不会跟着过去(它们的
+// tool_use.id 虽被复制,进程仍归源会话)。分支也不会停掉源会话。
+const FORK_RUNNING_CONFIRM =
+  '该会话正在运行。分支只复制当前已落盘的内容,正在进行的回合与子代理不会带入分支,也不会因分支而停止。确定分支?';
+
 // fork 命名+配置继承(侧栏分支按钮与消息级分叉共用)。标题「<源标题>分支N」:
 // 洗掉已有分支后缀使分支的分支同族;N=现有自定义标题中同族最大+1。配置继承(AZ7):
 // 源会话显式 pin > 侧栏元数据 model > 全局兜底;effort/权限模式照搬。
@@ -2479,6 +2485,12 @@ function SessionList() {
   const handleNewWorktree = openWorktreePicker;
 
   const handleFork = async (session) => {
+    // 本入口分支的是【侧栏点中的那条会话】,不一定是当前窗格 —— 用轮询得到的
+    // runningSessionIds(有可停 chat-process 的会话,前台流式与转后台都在内)判在跑,
+    // 而不是本窗格的 streamingRef。getState 取点击那一刻的最新值,避免闭包读到旧 Set。
+    if (useStore.getState().runningSessionIds.has(session.sessionId)) {
+      if (!(await confirmDialog(FORK_RUNNING_CONFIRM, { confirmText: '继续分支' }))) return;
+    }
     setForking(session.sessionId);
     try {
       const res = await fetch('/api/fork', {
@@ -7125,6 +7137,11 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     const st = useStore.getState();
     const sess = st.paneSessions?.[tabIndex];
     if (!sess?.sessionId) { await confirmDialog('草稿会话尚未开始,无法分叉'); return; }
+    // 本入口分支的永远是【本窗格】这条会话:直接读本窗格的运行态。两个都要看 ——
+    // 只查 streamingRef 会漏"转后台"那半(v0.2.191 漏判律)。
+    if (streamingRef.current || backgroundPidRef.current) {
+      if (!(await confirmDialog(FORK_RUNNING_CONFIRM, { confirmText: '继续分叉' }))) return;
+    }
     const anchor = (typeof upToUuid === 'string' && !upToUuid.startsWith('chat-') && upToUuid !== 'streaming') ? upToUuid : null;
     try {
       const res = await fetch('/api/fork', {
