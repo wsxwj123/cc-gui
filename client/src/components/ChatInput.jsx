@@ -186,7 +186,7 @@ const TYPE_LABELS = {
 const TODO_AGENT_TERMINAL = ['done', 'error', 'stopped'];
 const TODO_BG_TERMINAL = ['done', 'failed', 'killed', 'stopped', 'error'];
 
-export function ChatInput({ onSend, onStop, onStopBackground, onAccelerate, onBackground, suggestion = null, onDismissSuggestion, disabled, isStreaming, backgroundWorking = false, queueLength = 0, queueItems = [], onRemoveFromQueue, onEditFromQueue, todos = null, plan = '', permKey = null, sessionId = null, tabIndex = null, onBtwOpen, btwUnread = 0 }) {
+export function ChatInput({ onSend, onStop, onStopBackground, onAccelerate, canSteer = false, onBackground, suggestion = null, onDismissSuggestion, disabled, isStreaming, backgroundWorking = false, queueLength = 0, queueItems = [], onRemoveFromQueue, onEditFromQueue, todos = null, plan = '', permKey = null, sessionId = null, tabIndex = null, onBtwOpen, btwUnread = 0 }) {
   const [text, setText] = useState('');
   // 编辑重发态(#4):点击「重新编辑并发送」后进入。此时历史消息尚未被破坏,
   // 按 Esc 可整条取消(清空输入+通知上层撤销待回滚),给用户反悔余地。
@@ -1218,10 +1218,13 @@ export function ChatInput({ onSend, onStop, onStopBackground, onAccelerate, onBa
               {onAccelerate && (
                 <button
                   onClick={onAccelerate}
-                  className="px-2 py-0.5 rounded bg-accent text-on-accent text-[10px] font-medium hover:bg-accent-hover"
-                  title="立即中断当前回复，发出队列中的消息"
+                  disabled={!canSteer}
+                  className="px-2 py-0.5 rounded bg-accent text-on-accent text-[10px] font-medium hover:bg-accent-hover disabled:opacity-40 disabled:hover:bg-accent"
+                  title={canSteer
+                    ? '把这条消息并入当前回合：不打断生成，模型在下一个工具结果处读到它并调整后续动作。并入后不可撤回。'
+                    : '当前没有可并入的回合（回合正在建立或已结束）。消息留在队列中，回合结束后自动发出。'}
                 >
-                  ⚡ 引导
+                  ⚡ 并入
                 </button>
               )}
             </div>

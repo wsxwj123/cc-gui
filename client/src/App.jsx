@@ -4410,7 +4410,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
               const s2 = getLocalSession();
               if ((s2?.sessionId || `draft-${s2?.projectHash || 'none'}`) !== drainKey) return;
               const q = useStore.getState().shiftMessage(drainKey);
-              if (q?.text) handleSendRef.current?.(q.text, q.opts || (q.hidden ? { hiddenUserMessage: true } : {}));
+              // fromQueue:排空出来的消息不得走引导注入(那等于"入队"按钮失效),
+              // 撞上新流时维持原行为——重新入队等下一次排空。
+              if (q?.text) handleSendRef.current?.(q.text, { ...(q.opts || (q.hidden ? { hiddenUserMessage: true } : {})), fromQueue: true });
             }, 50);
           }
         }
@@ -4779,7 +4781,11 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     //   ③ hiddenUserMessage:计划续跑/工具重做等系统消息,语义就是排到回合结束(#5)。
     // 注入失败(connecting 窗口没有活 slot / 网络失败)一律回落入队,消息绝不丢。
     if (!reattachPid && !opts.forceSend && (streamingRef.current || backgroundPidRef.current)) {
-      if (!hiddenUserMessage && !opts.fromQueue
+      // 内部重发(队列排空 / 失效会话 freshRetry / 签名失配 signatureRetry / auto 档回退
+      // autoRetry)一律不注入:它们要么是"排到回合结束"的队列语义,要么是"这一回合失败了、
+      // 重开一个"的语义,注入进正在跑的回合都是错的。用户手打的消息不带这些标记。
+      const _internalResend = !!(opts.fromQueue || opts.freshRetry || opts.signatureRetry || opts.autoRetry);
+      if (!hiddenUserMessage && !_internalResend
         && await steerCurrentTurnRef.current?.(prompt, { meta })) return;
       useStore.getState().enqueueMessage(sessionQueueKey, { text: prompt, queuedAt: Date.now(), hidden: !!hiddenUserMessage, opts });
       return;
@@ -6588,8 +6594,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         const next = queueKey === curKey ? useStore.getState().shiftMessage(queueKey) : null;
         if (next?.text) {
           // 透传入队时的 opts(尤其 hiddenUserMessage)——否则计划执行这种隐藏续跑消息
-          // 出队重发时会变成可见的用户气泡(#5)。
-          setTimeout(() => handleSendRef.current?.(next.text, next.opts || (next.hidden ? { hiddenUserMessage: true } : {})), 50);
+          // 出队重发时会变成可见的用户气泡(#5)。fromQueue 同 poll 排空:排队消息不走注入。
+          setTimeout(() => handleSendRef.current?.(next.text, { ...(next.opts || (next.hidden ? { hiddenUserMessage: true } : {})), fromQueue: true }), 50);
         }
       }
       acceleratingRef.current = false;
