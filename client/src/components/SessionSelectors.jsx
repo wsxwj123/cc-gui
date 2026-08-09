@@ -119,6 +119,30 @@ export function RemoteControlButton({ session }) {
   const sid = session?.sessionId || null;
   const cwd = session?.projectPath || null;
   const active = useStore((s) => (sid ? !!s.remoteControlled[sid] : false));
+  // Remote Control 是第一方能力:CLI 自 2.1.196 起,ANTHROPIC_BASE_URL 指向 api.anthropic.com
+  // 以外的主机即禁用。切第三方必写该变量 → 此时按钮置灰(服务端另有硬门,见
+  // server/routes/remote-control.js;这里只是别让用户点了才知道)。门控写法同
+  // useVisiblePermissionModes 的「自动」档。providerHint 判据是 base URL 主机名,回环代理
+  // 落 'unknown' 而不是 'anthropic' —— 方向正确。
+  const isOfficial = useStore((s) => (s.currentProvider?.providerHint || 'anthropic') === 'anthropic');
+
+  // 激活期间轮询已有的状态端点:服务端在 pty 输出里发现 CLI 拒绝激活(未登录订阅 / 灰度
+  // 未放量等)会杀掉进程并把状态改回未激活;RC 会话在手机侧结束时同理。不跟着解锁的话,
+  // 按钮会一直显示「已激活」、输入框一直锁着,而手机根本没接上。
+  useEffect(() => {
+    if (!sid || !active) return;
+    const timer = setInterval(async () => {
+      try {
+        const r = await fetch(`/api/remote-control?sessionId=${encodeURIComponent(sid)}`);
+        const d = await r.json();
+        if (d?.active) return;
+        useStore.getState().setRemoteControl(sid, false);
+        // failure 由服务端读一次即清 → 多处挂载也只提示一次。
+        if (d?.failure) confirmDialog('远程控制未能激活：' + d.failure);
+      } catch {}
+    }, 5000);
+    return () => clearInterval(timer);
+  }, [sid, active]);
 
   const toggle = async () => {
     if (!sid || busy) return;
@@ -141,12 +165,15 @@ export function RemoteControlButton({ session }) {
   return (
     <button
       onClick={toggle}
-      disabled={!sid || busy}
-      title={sid
-        ? (active
+      // 已激活时不受 provider 门控影响 —— 激活后切了 provider 仍需能点「收回控制」。
+      disabled={!sid || busy || (!isOfficial && !active)}
+      title={!sid
+        ? '先发送一条消息创建会话，再开启远程控制'
+        : active
           ? '已在手机上远程控制此会话 · 点击收回控制'
-          : '在手机上同账号控制此会话（用 Claude App 接管，需 Claude 账号、非 deepseek/mimo）')
-        : '先发送一条消息创建会话，再开启远程控制'}
+          : isOfficial
+            ? '在手机上同账号控制此会话（用 Claude App 接管，需官方 Anthropic 端点 + claude.ai 订阅登录）'
+            : '当前 provider 非官方 Anthropic，远程控制不可用。'}
       className={`flex items-center gap-1 px-2 py-1 rounded-md transition-colors text-[11px] font-body ${
         active ? 'bg-success/15 text-success' : 'hover:bg-canvas-deep text-ink-muted'
       } disabled:opacity-40 disabled:cursor-not-allowed`}
