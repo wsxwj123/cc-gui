@@ -1,9 +1,18 @@
-import React, { useState } from 'react';
+import React, { useState, useContext } from 'react';
 import { ChevronDown, ChevronRight, Loader2, Maximize2, CheckCircle2, XCircle, CircleSlash, Square } from 'lucide-react';
 import { useStore } from '../../stores/sessionStore.js';
 import { MarkdownRenderer } from '../MarkdownRenderer.jsx';
 import { extractToolResultText } from '../../utils/toolResult.js';
+import { resolveOwnedAgent } from '../../utils/agentOwner.js';
 import { confirmDialog } from '../../utils/confirmDialog.jsx';
+
+// 卡片归属:这张 Task 卡渲染在【哪个会话】里(历史 turn 的 record.sessionId,
+// 由 TurnBubble 供给)。activeAgents 是按 tool_use.id 的全局表,而分支(fork)复制出的
+// 卡片与源会话共用同一批 id —— 没有归属就会取到源会话正在跑的 agent(Bug5)。
+// 用 context 而不是逐层 prop:TaskCard 有四条渲染路径(renderRichToolCard /
+// ToolCallsGroup / WorkGroup / CoworkBlocks),逐层加 prop 要改 5 个签名 8 个调用点,
+// 漏一条就漏一条串扰。默认 null = 不判定(流式本地 turn 无 sessionId,行为不变)。
+export const TaskOwnerContext = React.createContext(null);
 
 // 单卡停止落空提示(TaskCard / SubagentView 同一份文案)。
 // 落空的真实含义是【服务端的任务表里没有这个 task】:服务端 stop-task 回 stopped:false
@@ -24,7 +33,10 @@ export function stopNoOwnerNotice(procAlive) {
 // in store.activeAgents.
 export function TaskCard({ toolCall }) {
   const [expanded, setExpanded] = useState(false);
-  const agent = useStore((s) => s.activeAgents[toolCall.id]);
+  // 归属校验:store 里同 id 的条目若属于别的会话(分支复制出的卡片撞源会话的
+  // tool_use.id),当它不存在 —— 自然落进下面的 isInterrupted 残骸分支。
+  const ownerSid = useContext(TaskOwnerContext);
+  const agent = resolveOwnedAgent(useStore((s) => s.activeAgents[toolCall.id]), ownerSid);
   const setViewingAgent = useStore((s) => s.setViewingAgent);
   // R1: 某些 CLI 版本不往父流发 parent_tool_use_id 事件,activeAgents 永远没有
   // model。兜底:会话对象的 subagents(server 从 subagents/*.meta.json + jsonl
@@ -59,6 +71,8 @@ export function TaskCard({ toolCall }) {
   // 中断残骸:内存无此 agent(活着的 Task 必有 activeAgents 条目)且无 tool_result。
   // fork 复制来的"运行中"子代理、app 重启后打开的被中断会话都落在这里——不能再当
   // 运行中转圈(之前永远三点脉冲),按已停止显示。
+  // 注意:fork 那一路此前【走不到这里】—— 源会话还在跑时同 id 的 agent 查得到,
+  // 这条兜底整条失效。上面的归属校验把它判成"不存在",兜底才真正生效。
   const isInterrupted = !agent && !toolCall.result;
   const isError = toolCall.result?.isError || agent?.status === 'error';
   // 已停止:主会话被停(stopped)或中断残骸。显示灰色断环,不再冒充绿勾"完成"。
@@ -75,8 +89,11 @@ export function TaskCard({ toolCall }) {
 
   // D5:单卡停止对不发 task 事件的 provider 会静默失败(乐观 stopped → 闪回 working),
   // 用户以为按钮坏了。noOwner = 没有任何 slot 认领这个 task,提示一次并指向主停止键。
+  // 停止路由按【卡片归属】优先:agent.sessionId 是发起时钉的会话(分支场景=源会话),
+  // 排在前面就会把停止请求打到源会话头上(Bug5 现象②)。paneSession 是【焦点窗格】,
+  // 分屏下随焦点漂移,只能垫底。
   const stopThisAgent = async () => {
-    const r = await useStore.getState().stopSingleTask(agent?.sessionId || paneSession?.sessionId || null, toolCall.id);
+    const r = await useStore.getState().stopSingleTask(ownerSid || agent?.sessionId || paneSession?.sessionId || null, toolCall.id);
     if (r?.noOwner) confirmDialog(stopNoOwnerNotice(r.procAlive), { confirmText: '知道了' });
   };
 
@@ -85,6 +102,10 @@ export function TaskCard({ toolCall }) {
   const openAgentView = (e) => {
     e.stopPropagation();
     const st = useStore.getState();
+    // 条目【存在但不归本会话】(分支复制来的同 id)时不能补写:activeAgents 按
+    // tool_use.id 全局唯一,upsert 会把源会话那条正在跑的 agent 直接覆盖掉(新串扰)。
+    // 因此只在完全没有条目时 hydrate;归属不符的照旧进视图,SubagentView 用同一判定
+    // 显示「该子代理数据已不可用」,不会渲染源会话的实时内容。
     if (!st.activeAgents[toolCall.id]) {
       const resContent = toolCall.result?.content;
       st.upsertAgent(toolCall.id, {
@@ -98,7 +119,8 @@ export function TaskCard({ toolCall }) {
         // 中断残骸注册为 stopped 而非 working:否则放大视图对早已死掉的 Task 永远转圈
         status: isError ? 'error' : (isStopped ? 'stopped' : (toolCall.result ? 'done' : 'working')),
         startedAt: Date.now(),
-        sessionId: st.paneSessions[st.activeTabIndex]?.sessionId || st.selectedSession?.sessionId || null,
+        // 归属优先取卡片自己的会话:补写的条目与卡片同源,下一帧才过得了归属校验。
+        sessionId: ownerSid || st.paneSessions[st.activeTabIndex]?.sessionId || st.selectedSession?.sessionId || null,
         result: resContent != null ? extractToolResultText(resContent) : null,
       });
       // 水合完整转写:历史子代理的思考/工具/正文躺在 subagents/agent-*.jsonl,

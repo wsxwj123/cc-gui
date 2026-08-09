@@ -6,6 +6,7 @@ import { CoworkBlocks } from './TurnBubble.jsx';
 import { PermissionPrompt } from './PermissionPrompt.jsx';
 import { LoadingMark, useCyclingVerb, ElapsedTime } from './LoadingBits.jsx';
 import { stopNoOwnerNotice } from './tools/TaskCard.jsx';
+import { resolveOwnedAgent } from '../utils/agentOwner.js';
 import { confirmDialog } from '../utils/confirmDialog.jsx';
 
 // 上下文占用简写(与主会话徽章同口径:k 计)。
@@ -18,7 +19,10 @@ function fmtTok(n) {
 // 标题处「母会话标题 / 子代理名」层级面包屑,点母会话标题返回。
 // 数据来自 store.activeAgents[agentId](流式累积的 text/thinking/toolCalls)。
 export function SubagentView({ agentId, parentTitle, parentSessionId = null, onBack }) {
-  const agent = useStore((s) => s.activeAgents[agentId]);
+  // 与 TaskCard 同一归属判定:activeAgents 按 tool_use.id 全局唯一,分支(fork)会话
+  // 复制出的卡片撞源会话的 id —— 不校验就会在分支窗格里渲染【源会话正在流的实时内容】,
+  // 停止键也会停到源会话。归属不符时按"数据不可用"处理(走下面的 !agent 早退)。
+  const agent = resolveOwnedAgent(useStore((s) => s.activeAgents[agentId]), parentSessionId);
   // hooks 必须在下面的早退 return 之前(rules-of-hooks)。
   const verb = useCyclingVerb();
   // 兜底:store 拿不到具体名/model 时(provider 不发子代理流),从 server 提取的
@@ -106,13 +110,14 @@ export function SubagentView({ agentId, parentTitle, parentSessionId = null, onB
               {statusMeta.label}
             </span>
             {/* 部件①单卡停止:非终态时显示。停止链路走 store action(反查 pid + stop-task 端点 +
-                乐观收尾)。sessionId 优先取 agent 捕获值,回退母会话。 */}
+                乐观收尾)。sessionId 以【本视图所属母会话】为准,agent 捕获值垫底 ——
+                agent.sessionId 是发起时钉的会话,分支场景下它指向源会话(Bug5 现象②)。 */}
             {nonTerminal && (
               <button
                 onClick={async () => {
                   // D5:同 TaskCard —— 没有 slot 认领(provider 不发 task 事件)时给一次提示,
                   // 否则卡片闪一下转回运行中、零解释。
-                  const r = await useStore.getState().stopSingleTask(agent.sessionId || parentSessionId, agentId);
+                  const r = await useStore.getState().stopSingleTask(parentSessionId || agent.sessionId, agentId);
                   if (r?.noOwner) confirmDialog(stopNoOwnerNotice(r.procAlive), { confirmText: '知道了' });
                 }}
                 className="px-1.5 py-px rounded bg-canvas-deep text-ink-muted hover:text-error hover:bg-error/10 flex items-center gap-1 transition-colors font-body"

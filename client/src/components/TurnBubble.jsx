@@ -9,7 +9,7 @@ import { MarkdownRenderer } from './MarkdownRenderer.jsx';
 import { BashCard } from './tools/BashCard.jsx';
 import { EditDiffCard } from './tools/EditDiffCard.jsx';
 import { ReadCard } from './tools/ReadCard.jsx';
-import { TaskCard } from './tools/TaskCard.jsx';
+import { TaskCard, TaskOwnerContext } from './tools/TaskCard.jsx';
 import { GrepGlobCard } from './tools/GrepGlobCard.jsx';
 import { WebCard } from './tools/WebCard.jsx';
 import { SkillCard } from './tools/SkillCard.jsx';
@@ -739,10 +739,15 @@ function TurnBubbleInner({ turn, onRetry, onRetryTool, onFork, retryActive }) {
   const isLiveStream = turn.uuid === 'streaming';
 
   return (
-    // 入场动画只给"正在流式"的临时 turn 播放。回复完成后这条会从 streaming(key=
-    // 'streaming') 切到 chatMessages(key='chat-assistant-…') 再切到 jsonl(真 uuid),
-    // 三次换 key → React 反复卸载重挂 TurnBubble。若固化后的 turn 仍带 animate-fade-up,
-    // 每次重挂都会重放淡入 → 用户看到"回复完成后闪烁一下再显示"。固化 turn 去掉动画即可。
+    // 本回合的会话归属(session-reader 给每条历史 turn 打的 record.sessionId)供给
+    // 树内所有 TaskCard:分支(fork)复制出的卡片与源会话共用 tool_use.id,没有这个值
+    // 就会取到源会话正在跑的 agent(显示运行中 + 停错会话)。流式的本地 turn 没有
+    // sessionId 字段 → null → 完全走原逻辑。
+    <TaskOwnerContext.Provider value={turn.sessionId || null}>
+    {/* 入场动画只给"正在流式"的临时 turn 播放。回复完成后这条会从 streaming(key=
+        'streaming') 切到 chatMessages(key='chat-assistant-…') 再切到 jsonl(真 uuid),
+        三次换 key → React 反复卸载重挂 TurnBubble。若固化后的 turn 仍带 animate-fade-up,
+        每次重挂都会重放淡入 → 用户看到"回复完成后闪烁一下再显示"。固化 turn 去掉动画即可。 */}
     <div className={`group px-6 py-4 ${isLiveStream ? 'animate-fade-up' : ''}`} style={isLiveStream ? { animationDuration: '0.25s' } : undefined}>
       <div className="max-w-[var(--content-max)] mx-auto flex items-start gap-4">
         {/* Avatar — tinted by the actual provider behind the model.
@@ -897,6 +902,7 @@ function TurnBubbleInner({ turn, onRetry, onRetryTool, onFork, retryActive }) {
         </div>
       </div>
     </div>
+    </TaskOwnerContext.Provider>
   );
 }
 
