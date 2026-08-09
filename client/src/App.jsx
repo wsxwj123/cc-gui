@@ -1476,16 +1476,30 @@ function ProjectList() {
         const parent = clean.replace(/\/[^/]+\/?$/, '') || '/';
         localStorage.setItem('cgui-picker-last-start', parent);
       } catch {}
-      // A6:服务端在导入时检测 git HEAD,无则提示(不阻断导入)。复用顶部悬浮
-      // 提醒条(CompletionToasts,10s 自动消失);sessionId 为 null 时点击仅关闭。
-      if (data.noGitHead) {
+      // A6/Bug7:服务端导入时探测 git,三态(repoNoCommit / notRepo / gitCheckFailed),
+      // 不阻断导入。旧版只有一条 10s 自动消失的浮条,且把 git 调用失败也说成"不是 git
+      // 仓库",用户既被误导又没有出路。现在:需要用户处理的两态记进 importGitState,由
+      // 常驻的 GitInitBanner 给出对应按钮;浮条只作即时告知,文案按态区分。
+      // notRepo 不用记:横幅自己的 /api/git/status 探测就能得出(isRepo:false)。
+      const gitState = data.gitState || (data.noGitHead ? 'notRepo' : 'ok');
+      if (gitState !== 'ok') {
+        if (gitState === 'repoNoCommit') importGitState.set(clean, gitState);
+        const reasonText = {
+          gitMissing: '未检测到 git',
+          timeout: 'git 命令超时',
+          ownership: 'git 拒绝访问该仓库（属主与当前用户不一致）',
+        }[data.gitCheckReason] || data.gitCheckDetail || '原因未知';
         useStore.getState().pushCompletionToast({
           sessionId: null,
           projectHash: data.addedHash || null,
           session: null,
           title: '已添加项目',
           suffix: '提示',
-          summary: '该文件夹不是 git 仓库或没有提交，worktree 与子代理隔离功能不可用。',
+          summary: gitState === 'repoNoCommit'
+            ? '该目录所在的 git 仓库还没有任何提交。worktree 与回滚基线需要至少一个提交，项目栏横幅提供「创建基线提交」。'
+            : gitState === 'notRepo'
+              ? '该文件夹不是 git 仓库。worktree 与回滚基线不可用，项目栏横幅提供「立即初始化」。'
+              : `git 检查未能完成（${reasonText}），未能判断该文件夹是否为 git 仓库。导入不受影响。`,
           ts: Date.now(),
         });
       }
@@ -3186,8 +3200,14 @@ function PermissionModeHintBanner({ permKey }) {
   );
 }
 
+// 导入时服务端报告的 git 态(path → 'repoNoCommit'),给 GitInitBanner 用。
+// /api/git/status 只答"是不是仓库",分不出"在仓库里但零提交",而那正是 Bug7 的缝:
+// 横幅因 isRepo:true 整条隐藏 → 用户只看到一条 10s 就消失、又没有按钮的提示。
+// 模块级(ProjectList 写、SessionList 里的横幅读,跨组件);基线提交成功后即删。
+const importGitState = new Map();
+
 function GitInitBanner({ cwd }) {
-  // 'unknown' | 'repo' | 'norepo' | 'dismissed' | 'busy' | 'done' | 'partial'
+  // 'unknown' | 'repo' | 'norepo' | 'nocommit' | 'dismissed' | 'busy' | 'done' | 'partial'
   const [status, setStatus] = useState(null);
   const [warning, setWarning] = useState(null);
   // Recheck git status whenever `cwd` changes OR a kick counter ticks (so we
@@ -3202,7 +3222,9 @@ function GitInitBanner({ cwd }) {
       .then((r) => r.json())
       // T3: permissionDenied = macOS 没给本 app 磁盘权限(git 在 Desktop 等目录
       // 被 TCC 拒)。此时既不是 repo 也不该引导 init —— 显示权限引导横幅。
-      .then((s) => setStatus(s?.gitMissing ? 'nogit' : (s?.permissionDenied ? 'tcc' : (s?.isRepo === false ? 'norepo' : 'repo'))))
+      // isRepo:true 但导入时发现零提交 → 'nocommit'(给「创建基线提交」按钮)。
+      .then((s) => setStatus(s?.gitMissing ? 'nogit' : (s?.permissionDenied ? 'tcc' : (s?.isRepo === false ? 'norepo'
+        : (importGitState.get(cwd) === 'repoNoCommit' ? 'nocommit' : 'repo')))))
       .catch(() => setStatus('repo'));  // network err → silent
   }, [cwd, kick]);
 
@@ -3240,9 +3262,10 @@ function GitInitBanner({ cwd }) {
     );
   }
 
-  if (status !== 'norepo' && status !== 'busy' && status !== 'done' && status !== 'partial') return null;
+  if (status !== 'norepo' && status !== 'nocommit' && status !== 'busy' && status !== 'done' && status !== 'partial') return null;
 
   const init = async () => {
+    const from = status;  // 失败时回到发起态('norepo' / 'nocommit'),别把零提交仓库说成非仓库
     setStatus('busy');
     setWarning(null);
     try {
@@ -3252,6 +3275,9 @@ function GitInitBanner({ cwd }) {
       });
       const data = await r.json().catch(() => ({}));
       if (r.ok) {
+        // 已是仓库时 /api/git/init 只做 add -A + commit(already:true),正是零提交
+        // 仓库需要的基线提交;补上后清掉导入态,重探测才不会又回到 'nocommit'。
+        importGitState.delete(cwd);
         // Re-check status from the server — banner hides if isRepo flipped.
         setKick((k) => k + 1);
         if (data.baselineWarning) {
@@ -3262,9 +3288,9 @@ function GitInitBanner({ cwd }) {
         }
       } else {
         confirmDialog('git init 失败：' + (data.error || r.status));
-        setStatus('norepo');
+        setStatus(from);
       }
-    } catch (err) { confirmDialog('git init 失败：' + err.message); setStatus('norepo'); }
+    } catch (err) { confirmDialog('git init 失败：' + err.message); setStatus(from); }
   };
 
   const dismiss = () => {
@@ -3276,7 +3302,35 @@ function GitInitBanner({ cwd }) {
     return (
       <div className="bg-green-50 border-b border-green-200 px-4 py-2 text-[12px] font-body text-green-800 flex items-center gap-2">
         <GitBranch size={13} className="text-green-700 shrink-0" />
-        <span className="flex-1">已 <code className="font-mono">git init</code> + 基线提交，AI 修改可随时回滚。</span>
+        {/* 两条来路共用:非仓库(init + 基线提交)与零提交仓库(只补基线提交)。 */}
+        <span className="flex-1">已创建基线提交，AI 的修改可随时回滚。</span>
+      </div>
+    );
+  }
+
+  // 在仓库里但一个提交都没有(git init 过、从没 commit)。/api/git/status 只答 isRepo,
+  // 这一态由导入时的服务端探测标记(importGitState)。按钮走同一个 /api/git/init:
+  // already:true 时它只做 add -A + commit,正好是这里需要的基线提交。
+  if (status === 'nocommit' || (status === 'busy' && importGitState.get(cwd) === 'repoNoCommit')) {
+    return (
+      <div className="bg-amber-50 border-b border-amber-200 px-4 py-2 text-[12px] font-body text-amber-900 flex items-center gap-2">
+        <GitBranch size={13} className="text-amber-700 shrink-0" />
+        <span className="flex-1">
+          <b>这个 git 仓库还没有任何提交</b>。worktree 与基于 git 的回滚需要至少一个提交，建议先做一次基线提交。
+        </span>
+        <button
+          onClick={init}
+          disabled={status === 'busy'}
+          className="px-2.5 py-1 rounded bg-amber-700 text-white text-[11px] font-medium hover:bg-amber-800 disabled:opacity-50 shrink-0"
+        >
+          {status === 'busy' ? '提交中…' : '创建基线提交'}
+        </button>
+        <button
+          onClick={dismiss}
+          className="px-2 py-1 rounded text-amber-800 text-[11px] hover:bg-amber-100 shrink-0"
+        >
+          本会话忽略
+        </button>
       </div>
     );
   }
