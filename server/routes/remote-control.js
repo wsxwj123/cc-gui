@@ -4,6 +4,7 @@ import { resolve } from 'path';
 import { homedir } from 'os';
 import { isPathInside, isKnownClaudeWorkspace } from '../utils/safe-path.js';
 import { claudeCommand } from '../utils/claude-resolver.js';
+import { getAvailableModels } from '../services/model-resolver.js';
 
 // node-pty 是本 server 唯一的原生模块,其 .node 二进制按「构建时的 Node ABI」编译。
 // 打包发布时(CI Node 20)编译进 bundle,但 app 运行时 spawn 的是用户机器上「任意版本」
@@ -57,9 +58,37 @@ for (const sig of ['SIGINT', 'SIGTERM']) {
   process.once(sig, () => { killAll(); process.exit(0); });
 }
 
+// 自检发现「CLI 拒绝激活」时记下原话,供状态端点回话一次。读一次即清:客户端拿去提示
+// 过就不再需要,也免得这张表随失败过的 sessionId 无限长。
+const failures = new Map();
+
+// CLI 侧拒绝 Remote Control 的提示只印在 pty 里 —— `--remote-control` 是 flag 形态,
+// 被拒后照常进交互会话、进程不退出,所以既没有退出码也没有别的信号可用。这里只认二进制
+// 里的原文一句(`Remote Control is only available when using Claude via api.anthropic.com.`),
+// 窄匹配 + 拿不准一律放行:误杀会把本来能用的远程控制掐掉,比漏判更糟。
+// 输出带 ANSI 色码与提示框边框,先剥掉再匹配、再取那一行原话回给用户。
+const RC_FAILURE_RE = /Remote Control is only available/;
+// eslint-disable-next-line no-control-regex
+const ANSI_RE = /\x1b\[[0-9;?]*[ -/]*[@-~]/g;
+export function rcFailureIn(output) {
+  const clean = String(output || '').replace(ANSI_RE, '');
+  if (!RC_FAILURE_RE.test(clean)) return null;
+  const line = clean.split(/\r?\n/).find((l) => RC_FAILURE_RE.test(l)) || '';
+  return line.replace(/[│|╭╮╯╰─\s]+/g, ' ').trim().slice(0, 200);
+}
+// 只扫开头这么多输出:失败提示在启动后不久就印出来,之后都是正常会话内容,扫全程既占
+// 内存又抬高误杀概率。
+const SCAN_LIMIT = 8 * 1024;
+
 function statusOf(sessionId) {
   const e = active.get(sessionId);
-  return e ? { active: true, startedAt: e.startedAt, cwd: e.cwd } : { active: false };
+  if (e) return { active: true, startedAt: e.startedAt, cwd: e.cwd };
+  const failure = failures.get(sessionId);
+  if (failure) {
+    failures.delete(sessionId);
+    return { active: false, failure };
+  }
+  return { active: false };
 }
 
 // POST /api/remote-control  { sessionId, cwd } — start (or return existing) RC session.
@@ -70,6 +99,20 @@ router.post('/remote-control', async (req, res) => {
 
     if (active.has(sessionId)) {
       return res.json({ ok: true, sessionId, ...statusOf(sessionId), reused: true });
+    }
+    failures.delete(sessionId); // 新的一次尝试,旧结论作废
+
+    // Remote Control 是 Anthropic 第一方能力:CLI 自 2.1.196 起,`ANTHROPIC_BASE_URL` 指向
+    // api.anthropic.com 以外的主机即禁用它(二进制原文:"Remote Control is only available
+    // when using Claude via api.anthropic.com."),而 GUI 切任何第三方 provider 都必写这个
+    // 变量(中转与 openai 协议都落回环代理)。此前这里不判:pty 里那个 `--remote-control`
+    // 交互进程照常起、不退出,失败提示又被 onData 丢掉 → 按钮恒绿「已激活」、输入框锁死,
+    // 手机永远接不上。判据与 /api/slash-commands 的 isAnthropic 同源(getAvailableModels
+    // 已把回环代理还原成真实 provider 名),顶栏按钮与手打 /rc 两个入口都经过这里。
+    let provider = 'Anthropic';
+    try { provider = (await getAvailableModels()).provider || 'Anthropic'; } catch {}
+    if (provider !== 'Anthropic') {
+      throw new Error(`远程控制要求 ANTHROPIC_BASE_URL 指向 api.anthropic.com。当前 provider 为「${provider}」，切回官方 Anthropic 后可开启。`);
     }
 
     let dir = HOME;
@@ -116,7 +159,23 @@ router.post('/remote-control', async (req, res) => {
     active.set(sessionId, entry);
 
     // Drain output so the pty buffer never blocks; we don't render it anywhere.
-    term.onData(() => {});
+    // 但开头这段要看一眼:provider 门只堵住 base URL 那一条,CLI 还会因未登录 claude.ai
+    // 订阅 / API key 认证 / 灰度未放量拒绝激活,同样是「印一行提示、进程继续跑」。命中即
+    // 杀 pty 并从 active 摘掉 —— 状态端点随之变回未激活并带上原话,前端据此解锁,不再
+    // 谎称「已激活」。
+    let head = '';
+    let scanning = true;
+    term.onData((chunk) => {
+      if (!scanning) return;
+      head += chunk;
+      if (head.length >= SCAN_LIMIT) scanning = false;
+      const failure = rcFailureIn(head);
+      if (!failure) return;
+      scanning = false;
+      failures.set(sessionId, failure);
+      try { term.kill(); } catch {}
+      active.delete(sessionId);
+    });
     term.onExit(() => { active.delete(sessionId); });
 
     res.json({ ok: true, sessionId, ...statusOf(sessionId) });
