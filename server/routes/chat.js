@@ -1663,6 +1663,48 @@ router.post('/chat/permission-mode', async (req, res) => {
   res.json({ ok: true, delivered });
 });
 
+// ── 引导注入(无打断 steering)────────────────────────────────────────────────
+// 「忙」的判据:复用块(:1107)那一行【只把 s.idle 取反】,其余存活条件逐字照抄。
+//   复用块要的是 s.idle(回合间保活、等下一条消息)→ push 开【新回合】;
+//   这里要的是 !s.idle(回合正在跑)→ push 被 CLI 在下一个工具结果边界折叠进【同一回合】
+//   (实测:1 个 init / 1 个 result,不传 priority = 默认档折叠;'later' 才另起回合)。
+// 与 v0.2.264 复活守卫自洽:主 agent 在 4s 去抖 finalize 之后续跑时,守卫(:1561)把
+// slot.idle 翻回 false 并置 revived —— 那正是"确实有一个在跑的回合",此时注入应当成立,
+// 所以判据用 s.idle(会随复活翻转)而不是 finishedAt/lastResultAt 这类不回退的时刻字段。
+// 反过来 finalize 转 idle 的 slot 一律拒绝:对 idle slot push = 开一个前端不知道的新回合
+// (SSE 已发 done 关闭,输出无人接),必须 409 让客户端回落入队。
+// 【已知窄竞态】result 刚落、finalize 还没把 idle 置真的那几毫秒里注入 → 消息会变成
+// 下一回合的开场且此时 SSE 可能已关。不额外加锁:这一形态与既有的"后台回合"完全同构,
+// 由 backgroundPid 轮询 + auto-reattach 接住(slot 非 idle → /agents/active 报在跑 →
+// 前端重开 SSE 回放 earlyLines),内容不丢。
+export function findBusySlot(procs, sessionId) {
+  if (!sessionId) return null;
+  for (const [pid, s] of procs) {
+    if (!s || s.sessionId !== sessionId) continue;
+    if (s.idle || s.closing || s.pumpEnded || s.exitCode !== null) continue;
+    if (!s.input) continue;
+    return { pid, slot: s };
+  }
+  return null;
+}
+
+// 独立路由(照 /chat/permission-mode 形态:按 sessionId 找 slot → 直接对 slot 动作),
+// 完全绕开 POST /chat 的复用块与 tearingDown 等待/强杀段 —— 那两段一个字不动。
+router.post('/chat/steer', (req, res) => {
+  const { sessionId, content, uuid } = req.body || {};
+  if (!sessionId || typeof content !== 'string' || !content.trim()) {
+    return res.status(400).json({ error: 'sessionId 与 content 必填' });
+  }
+  const hit = findBusySlot(activeProcesses, String(sessionId));
+  if (!hit) return res.status(409).json({ error: 'no-active-turn' });
+  // 形状与复用块 :1149 的 push 逐字一致,只多一个 uuid —— 带 uuid 时 SDK 会回吐
+  // command_lifecycle{queued|started|completed},前端据此驱动"已排队 → 已并入"角标。
+  const msg = { type: 'user', message: { role: 'user', content: String(content) } };
+  if (uuid) msg.uuid = String(uuid);
+  hit.slot.input.push(msg);
+  res.json({ ok: true, pid: hit.pid });
+});
+
 
 // ── SSE 接管协议(修「关窗格后重开会话历史空」)────────────────────────────────
 // 原来 slot.attached 为真就回 409 拒绝。可老监听多半是僵尸:客户端关窗格时从不 abort
