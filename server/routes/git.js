@@ -34,7 +34,15 @@ router.get('/git/status', async (req, res) => {
         const s = await execFileP('git', ['-C', cwd, 'status', '--porcelain'], { timeout: 4000 });
         hasChanges = s.stdout.trim().length > 0;
       } catch {}
-      res.json({ isRepo: true, root, branch, hasChanges });
+      // 在仓库里但一个提交都没有(git init 过、从没 commit):worktree 与基于 git 的
+      // 回滚都要求至少一个提交,前端据此给「创建基线提交」按钮。此前这一态只在
+      // 导入响应里出现一次,存量项目选中时横幅拿不到 → 没提示也没入口(Bug7)。
+      // 这里已确认在仓库内(--show-toplevel 成功),HEAD 失败即无提交,不必再细分形态。
+      let hasCommit = true;
+      try {
+        await execFileP('git', ['-C', cwd, 'rev-parse', 'HEAD'], { timeout: 4000 });
+      } catch { hasCommit = false; }
+      res.json({ isRepo: true, root, branch, hasChanges, hasCommit });
     } catch (e) {
       // T3: 只有 git 明确说 "not a git repository" 才算 norepo。其他失败形态
       // (macOS TCC 拒 Desktop 等受保护目录:有时 stderr 带 "Operation not
