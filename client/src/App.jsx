@@ -7128,11 +7128,21 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     //    collide with it.
     killedRef.current = true; // 编辑重发=停当前回合(POST /stop)→ finally 收后台化子代理
     if (abortRef.current) { try { abortRef.current.abort(); } catch {} }
+    // Bug8:与 handleStop(:6660/:6683)对称的两件事,回滚这条路一直漏做 ——
+    // ① 被杀的 pid 记进 stoppedPidsRef:服务端优雅窗 2~3s 内它仍 stoppable,不记的话
+    //    1.5s 的轮询会把刚杀掉的进程当"后台还在跑" → backgroundPid 被置成死 pid → 重发
+    //    撞门变排队 + auto-reattach 去连一个死进程(用户报的"多一条一模一样的"主推手);
+    // ② setBackgroundPid(null) 立即清本地标记,不等下一轮(那一轮还会误报)。
+    // 前台流与转后台两种形态都要记(与 handleStop 的 pid 取法逐字一致)。
+    const _rbPid = activeProcRef.current || backgroundPidRef.current;
+    if (_rbPid) stoppedPidsRef.current.add(String(_rbPid));
     if (activeProcRef.current) {
       // 编辑重发=全杀(hard):进程内存上下文与改写后的 jsonl 已分叉,留活任务会答非所问。
       fetch(`/api/chat/${activeProcRef.current}/stop`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ hard: true }) }).catch(() => {});
       activeProcRef.current = null;
     }
+    setBackgroundPid(null);
+    backgroundPidRef.current = null; // state 要下一帧才同步,重发在 50ms 后落地,先同步清
     updateStreaming(false);
     setStreamingText('');
     setStreamingThinking('');
@@ -7157,15 +7167,14 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     // mode === 'message' | 'both': 直接重发原文,等价于"重做本轮"。只有"编辑后重发"(edit)
     // 才回输入框等用户手改。两者区别仅在文件:'both' 已在上面还原快照,'message' 不动文件。
     if (originalText && handleSendRef.current) {
-      setTimeout(() => {
-        if (typeof resendText === 'object' && resendText) {
-          handleSendRef.current(resendText.prompt || originalText, resendText.options || {});
-        } else {
-          handleSendRef.current(resendText || originalText);
-        }
-      }, 50);
+      // Bug8:走 resendReplacing —— forceSend 绕过入队门 + 发前轮询本地 ref 等停止落地(≤4s)。
+      if (typeof resendText === 'object' && resendText) {
+        resendReplacing(resendText.prompt || originalText, resendText.options || {});
+      } else {
+        resendReplacing(resendText || originalText);
+      }
     }
-  }, [chatMessages, messages, fetchMessagesForTab, setLocalMessages, setSelectedSession, getLocalSession]);
+  }, [chatMessages, messages, fetchMessagesForTab, setLocalMessages, setSelectedSession, getLocalSession, resendReplacing]);
   useEffect(() => { handleRollbackRef.current = handleRollback; }, [handleRollback]);
   // 切换会话时清掉待回滚 + 即时上下文用量 + 打开的子代理视图,避免泄漏到另一会话。
   useEffect(() => {
@@ -7265,11 +7274,17 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
 
         killedRef.current = true; // 编辑重发(trim 分支)=停当前回合(POST /stop)→ finally 收后台化子代理
         if (abortRef.current) { try { abortRef.current.abort(); } catch {} }
+        // Bug8 同批(调研点名:同一个病换个入口):被杀 pid 记账 + 立即清后台标记,
+        // 判据与取法同 handleRollback / handleStop。
+        const _rtPid = activeProcRef.current || backgroundPidRef.current;
+        if (_rtPid) stoppedPidsRef.current.add(String(_rtPid));
         if (activeProcRef.current) {
           // 编辑重发=全杀(hard):进程内存上下文与改写后的 jsonl 已分叉,留活任务会答非所问。
           fetch(`/api/chat/${activeProcRef.current}/stop`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ hard: true }) }).catch(() => {});
           activeProcRef.current = null;
         }
+        setBackgroundPid(null);
+        backgroundPidRef.current = null;
         updateStreaming(false);
         setStreamingText('');
         setStreamingThinking('');
@@ -7278,12 +7293,11 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         setStreamHistCutoff(null); // BF-1:同上,截断随中止的流作废
         try { await fetchMessagesForTab(sel.sessionId, projectHash, { silent: true }); } catch {}
 
-        setTimeout(() => {
-          handleSendRef.current?.(
-            `<cgui-tool-retry tool="${toolCall.name}">继续</cgui-tool-retry>`,
-            { appendSystemPrompt, hiddenUserMessage: true },
-          );
-        }, 50);
+        // Bug8:同 handleRollback —— forceSend 绕门 + 发前轮询等停止落地。
+        resendReplacing(
+          `<cgui-tool-retry tool="${toolCall.name}">继续</cgui-tool-retry>`,
+          { appendSystemPrompt, hiddenUserMessage: true },
+        );
       } catch (err) {
         confirmDialog('工具局部重做失败：' + err.message);
         setRetryActiveUuid(null);  // 关指示器,避免失败后一直转
@@ -7291,7 +7305,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         try { await fetchMessagesForTab(sel.sessionId, projectHash, { silent: true }); } catch {}
       }
     })();
-  }, [getLocalSession, fetchMessagesForTab, getLocalMessages, setLocalMessages]);
+  }, [getLocalSession, fetchMessagesForTab, getLocalMessages, setLocalMessages, resendReplacing]);
 
   // AZ11:给 memo 的 MessageList 传【引用稳定】的回调。原始 handleRollback/handleRetryTurn
   // 的 deps 含 messages/chatMessages → 流式中每 token 都会换新身份 → 直接传会让 memo
