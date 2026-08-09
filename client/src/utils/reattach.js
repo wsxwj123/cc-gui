@@ -92,3 +92,48 @@ export function nextAttachTry(prev, pid, maxTries = 3) {
   const count = (prev && prev.pid === pid ? prev.count : 0) + 1;
   return { pid, count, exhausted: count >= maxTries };
 }
+
+/**
+ * reattach 闩锁(App.jsx 的 reattachedPidRef)的唯一决策。两个调用点共用:
+ *   ① backgroundPid 轮询驱动的 auto-reattach effect —— streamEnd 传 null;
+ *   ② reattach 流收尾 —— streamEnd 传 'done' | 'takeover' | 'dropped'。
+ *
+ * 为什么要有 ②(修「第二次复活起会话静止」):闩锁原本只有 ① 一个复位入口,而它要求
+ * backgroundPid 这个 React state 发生一次「变成 null 且此刻没有本地流」的跳变。可轮询
+ * 在 reattach 流还跑着的时候就已经把 state 写成 null 了(它的 !streamingRef 判据),这次
+ * 跳变被「正在流,别清」那一支吃掉;等 reattach 流真结束时 state 早就是 null,再写 null
+ * 被 Object.is 短路 → effect 不再运行 → 闩锁永远停在旧 pid。而 #26 会话常驻让整个会话
+ * 共用同一个 pid,「一个 pid 只 reattach 一次」于是等于「一个会话只 reattach 一次」:
+ * 服务端进程第二次复活时横幅挂着、没有流、也没有历史刷新,界面完全静止。补上「本次
+ * reattach 已经正常收尾」这个真实复位信号即可。
+ *
+ * streamEnd 必须是三态,不能压成一个布尔:
+ *   'done'     本回合真的结束(服务端 finalize 发的 done)→ 清闩,下一次复活能再接;
+ *   'takeover' 服务端明说本连接被新 attach 接管(detached)→ 【不清】,一清就回连反踢,
+ *              两个视图 1.5~3s 一轮互踢不停;
+ *   'dropped'  传输被静默掐断(既无 done 也无 detached)→ 【不清】,这形态归 recoverAttach
+ *              的 per-pid 三振重试管,这里插手会打穿三振保护。
+ *
+ * @param {{guard?: string|null, backgroundPid?: string|null, streaming?: boolean,
+ *          streamEnd?: null|'done'|'takeover'|'dropped'}} o
+ * @returns {{guard: string|null, reattach: boolean}} guard = 闩锁的新值(原样写回 ref)
+ */
+export function nextReattachGuard({ guard = null, backgroundPid = null, streaming = false, streamEnd = null } = {}) {
+  if (streamEnd) return { guard: streamEnd === 'done' ? null : guard, reattach: false };
+  // backgroundPid 为空【不等于】后台进程没了:本地正在流时轮询恒写 null。只有真的没有
+  // 本地流,这个空值才算「进程闲下来了」的复位信号。
+  if (!backgroundPid) return { guard: streaming ? guard : null, reattach: false };
+  if (streaming) return { guard, reattach: false };              // 本地已有流,不必也不该再接
+  if (guard === backgroundPid) return { guard, reattach: false }; // 这一次复活已经接过了
+  return { guard: backgroundPid, reattach: true };
+}
+
+/**
+ * 「这个会话仍在后台工作中」横幅的存在门槛。横幅的隐含前提是「你离开过」,而一次
+ * 误判回合结束 + 自动 reattach 通常在 1.5s 轮询周期内就接回来了 —— 不加门槛的话用户
+ * 人就在当前会话看着,横幅却闪一下,语义正好反了。真正切走再回来的场景横幅本来就要
+ * 挂很久,2s 门槛对它无感。
+ * 注意只门控横幅文案(backgroundWorking),不碰 isStreaming —— 后者还担着「后台跑着时
+ * 禁止直发、走入队」的职责,延迟它会开出双写窗口。
+ */
+export const BG_BANNER_DELAY_MS = 2000;

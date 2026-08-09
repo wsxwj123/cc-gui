@@ -72,7 +72,7 @@ import { copyText } from './utils/clipboard.js';
 import { escRoute, idleEscAction, escYieldCardId, isEditableTarget } from './utils/escAction.js';
 import { waitingSessionKeys, countAttention, applyAttentionBadge } from './utils/attention.js';
 import { notifyWaiting } from './utils/desktopNotify.js';
-import { histSig, isCurrentStreamTurn, nextAttachTry, resolveStreamHistCutoff, shouldRefreshHist } from './utils/reattach.js';
+import { BG_BANNER_DELAY_MS, histSig, isCurrentStreamTurn, nextAttachTry, nextReattachGuard, resolveStreamHistCutoff, shouldRefreshHist } from './utils/reattach.js';
 import { pruneByLiveSet } from './utils/levelPrune.js';
 import { classifyStopTargets } from './utils/stopTargets.js';
 import { resizeScrollTop } from './utils/scroll.js';
@@ -4344,6 +4344,18 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     return () => { cancelled = true; clearInterval(id); };
   }, [selectedSession?.sessionId, selectedSession?.draftId]);
 
+  // B「后台工作中」横幅的存在门槛(理由见 utils/reattach.js BG_BANNER_DELAY_MS):
+  // 只有「无本地流 + 有后台进程」持续超过 BG_BANNER_DELAY_MS 才出横幅。auto-reattach
+  // 一般在一个轮询周期(1.5s)内就把流接回来,门槛内的抖动因此不再闪横幅;真切走再回来
+  // 的场景本来就挂很久,不受影响。只门控横幅,composer 的 isStreaming 口径一字不动。
+  const backgroundOnly = !isStreaming && !!backgroundPid;
+  const [bgBannerDue, setBgBannerDue] = useState(false);
+  useEffect(() => {
+    if (!backgroundOnly) { setBgBannerDue(false); return; }
+    const t = setTimeout(() => setBgBannerDue(true), BG_BANNER_DELAY_MS);
+    return () => clearTimeout(t);
+  }, [backgroundOnly]);
+
   // Auto-scroll: coalesce frequent stream deltas into a single rAF tick so the
   // page doesn't visibly "flicker" with smooth-scroll animations on every
   // token. Use direct scrollTop write (cheaper than scrollIntoView + smooth,
@@ -5975,6 +5987,16 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         && !controller.signal.aborted && !killedRef.current && !backgroundedRef.current) {
         recoverAttach();
       }
+      // reattach 流的闩锁复位:以 done 正常收尾 = 这一次复活接完了,清闩让【下一次】复活
+      // 还能再接一次。不清的话,#26 会话常驻下整个会话共用一个 pid,「一个 pid 只 reattach
+      // 一次」= 一个会话只 reattach 一次,第二次复活起横幅挂着、无流、无历史刷新(用户报的
+      // "子代理都完成了 AI 还卡在那儿")。takeover/传输掉线两支【不清】,见纯函数注释。
+      if (reattachPid) {
+        reattachedPidRef.current = nextReattachGuard({
+          guard: reattachedPidRef.current,
+          streamEnd: sawDoneEvent ? 'done' : (sawTakeover ? 'takeover' : 'dropped'),
+        }).guard;
+      }
       // 本流正常收尾 = 这条 attach 通道确实好使,之前那几次失败不算数。
       // 判据不能用"attach 拿到 2xx":被中途掐断的流每次都能 attach 成功 → 计数每轮归零 →
       // 三振保护成死代码,坏传输会每 1.5s 无限重连下去。
@@ -6437,15 +6459,16 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // banner — exactly what they complained about.
   const reattachedPidRef = useRef(null);
   useEffect(() => {
-    // backgroundPid 为空【不等于】后台进程没了:本地正在流时 poll 恒写 null(见它的
-    // `!streamingRef.current` 判据)。在流式期间清掉 reattach 守卫,会让"刚被别的视图接管"
-    // 的本视图立刻回连反踢对方,两边 1.5s 一轮互踢不停。只有真的没有本地流时才算重置信号。
+    // 判据全在 utils/reattach.js 的 nextReattachGuard(纯函数,与 reattach 流收尾那个
+    // 复位点共用同一套规则,有单测)。要点:backgroundPid 为空【不等于】后台进程没了 ——
+    // 本地正在流时 poll 恒写 null(见它的 `!streamingRef.current` 判据),流式期间清掉守卫
+    // 会让"刚被别的视图接管"的本视图立刻回连反踢对方,两边 1.5s 一轮互踢不停。
     // 失败计数已按 pid 记(nextAttachTry),pid 变了自然归零,这里不必也不该动它。
-    if (!backgroundPid) { if (!streamingRef.current) reattachedPidRef.current = null; return; }
-    if (streamingRef.current) return;
-    if (reattachedPidRef.current === backgroundPid) return; // already reattached
-    reattachedPidRef.current = backgroundPid;
-    handleSendRef.current?.(null, { reattachPid: backgroundPid });
+    const { guard, reattach } = nextReattachGuard({
+      guard: reattachedPidRef.current, backgroundPid, streaming: streamingRef.current,
+    });
+    reattachedPidRef.current = guard;
+    if (reattach) handleSendRef.current?.(null, { reattachPid: backgroundPid });
     // attachRetryNonce:三振横幅上的「重试」按钮触发器。pid 不变时 setBackgroundPid 被
     // Object.is 短路,只依赖 backgroundPid 的话 effect 永不重跑 = 按钮点了没反应。
   }, [backgroundPid, attachRetryNonce]);
@@ -7700,7 +7723,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         // streaming for UI purposes: send button becomes the small rounded-
         // rect stop, banner shows "继续工作中…".
         isStreaming={isStreaming || !!backgroundPid}
-        backgroundWorking={!isStreaming && !!backgroundPid}
+        backgroundWorking={backgroundOnly && bgBannerDue}
         queueLength={messageQueue.length}
         queueItems={messageQueue}
         onRemoveFromQueue={(i) => useStore.getState().removeFromQueue(sessionQueueKey, i)}

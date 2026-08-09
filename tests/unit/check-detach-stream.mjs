@@ -199,9 +199,16 @@ assert.ok(/if \(!providerSwitchNotice \|\| providerSwitchNotice\.sticky\) return
   assert.ok(/if \(event\.type === 'done'\) \{ sawDoneEvent = true; break; \}/.test(src),
     'done 事件必须记账,否则"没收到 done"判据恒真、正常收尾也会被当成掉线去重连');
 }
-// 双保险:流式期间的 backgroundPid=null 不是"进程没了",不许当重置信号
-assert.ok(/if \(!backgroundPid\) \{ if \(!streamingRef\.current\) reattachedPidRef\.current = null; return; \}/.test(src),
-  '清空分支必须带 !streamingRef 门控 —— 流式期间 poll 恒写 null,清守卫会让被接管方立刻回连反踢');
+// 双保险:流式期间的 backgroundPid=null 不是"进程没了",不许当重置信号。
+// 判据已抽到 utils/reattach.js 的 nextReattachGuard(见 check-reattach-guard.mjs),
+// 这里改钉两头:纯函数里的门控规则 + effect 确实把本地流态喂给了它。
+{
+  const util = readFileSync(new URL('../../client/src/utils/reattach.js', import.meta.url), 'utf8');
+  assert.ok(/if \(!backgroundPid\) return \{ guard: streaming \? guard : null, reattach: false \};/.test(util),
+    '清空分支必须带 streaming 门控 —— 流式期间 poll 恒写 null,清守卫会让被接管方立刻回连反踢');
+  assert.ok(/nextReattachGuard\(\{\s*guard: reattachedPidRef\.current, backgroundPid, streaming: streamingRef\.current,/.test(src),
+    'auto-reattach effect 必须把 streamingRef 实时值传给判据,否则门控形同虚设');
+}
 
 // ── 7. 复刻:pid 键计数 + 三振 + 提前 return 仍走 finally ────────────────
 {
