@@ -4026,9 +4026,10 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // Set by "⚡ 引导": tells the aborted in-flight send's finally to skip its own
   // queue drain so we don't double-send — handleAccelerate drains directly, which
   // also covers reattach streams (whose finally never drains).
-  // 设计甲之后 ⚡ 改成「无打断注入」(不 abort、不 POST /stop、不经 handleSend),已没有
-  // 需要被抑制的 finally —— 本旗恒 false,下面几处守卫因而恒成立。保留而不删:
-  // tests/unit/check-reattach-guard.mjs 锁着 drain 守卫的原文形状,改它属于另一批的事。
+  // 设计甲之后 ⚡ 改成「无打断注入」(不 abort、不 POST /stop、不经 handleSend),但这面旗
+  // 仍然有活干:⚡ 的 peek→注入(await)→出队 之间若回合正好收尾,两条 drain 会抢先把同一条
+  // 排队消息弹出去重发 = 同文双发。⚡ 期间置起、自管 try/finally 复位(不再依赖某条被 abort
+  // 的流的 finally 来清 —— 那是它当年在空闲态点 ⚡ 后永久挂 true 的老 bug)。
   const acceleratingRef = useRef(false);
   // H 转后台:用户主动把前台回合转后台(只断本端 SSE,进程照跑)。被 abort 的
   // handleSend finally 读它跳过排队消息外发——回合还在服务端跑,此刻外发会对同一
@@ -4785,7 +4786,16 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       // autoRetry)一律不注入:它们要么是"排到回合结束"的队列语义,要么是"这一回合失败了、
       // 重开一个"的语义,注入进正在跑的回合都是错的。用户手打的消息不带这些标记。
       const _internalResend = !!(opts.fromQueue || opts.freshRetry || opts.signatureRetry || opts.autoRetry);
-      if (!hiddenUserMessage && !_internalResend
+      // 注入的前置判据必须与 ⚡ 的 canSteer 同口径(判官致命-2):门本身用
+      // streamingRef 是对的(它管"要不要拦"),但"能不能注入"要看【服务端确实有本会话的
+      // 活 slot】= activeProcRef(前台流已拿到 pid)或 backgroundPidRef(回合已转后台)。
+      // 两者皆空的两种形态都必须回落入队,不能试注入:
+      //   · connecting 窗口:POST /chat 还没回 pid,注入必 409(白跑一趟);
+      //   · 回滚/重做的替换窗:resendReplacing 已同步清空两个 ref、新回合正靠服务端
+      //     tearingDown 等 4s 强杀旧 slot —— 此刻注入会打进那个【注定被杀的旧 slot】,
+      //     消息随 abort 一起消失(改动前它只会被入队,不会丢 = 净新增的丢失路径)。
+      const _canSteer = !!(activeProcRef.current || backgroundPidRef.current);
+      if (_canSteer && !hiddenUserMessage && !_internalResend
         && await steerCurrentTurnRef.current?.(prompt, { meta })) return;
       useStore.getState().enqueueMessage(sessionQueueKey, { text: prompt, queuedAt: Date.now(), hidden: !!hiddenUserMessage, opts });
       return;
@@ -6399,6 +6409,20 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           const t = Array.isArray(m.text) ? m.text.join('') : (m.text || '');
           return `${m.type}|${(t || '').slice(0, 80)}`;
         };
+        // 引导注入的回捞(判官重要-1):注入已送达,但回合在 CLI 折叠(fold)之前就被停止/
+        // 结束 —— 那条命令躺在 CLI 进程内存的命令队列里随进程一起死,jsonl 里查无此条,
+        // 而下面的清空点又会把本地气泡一并抹掉 = 用户文字彻底蒸发且界面不留痕。
+        // 判据只看"落没落盘",不碰对账核心(roundLanded 一字未动):带 steerId 的本地气泡
+        // 若不在持久化集合里,就放回消息队列(用户可编辑/删除/等 drain 发出),并明说一句。
+        // 不自动重发:那等于替用户在一个刚被停掉的回合上做主。
+        const rescueUnfoldedSteer = (locals, knownKeys) => {
+          const lost = locals.filter((m) => m?.steerId && m.text && !knownKeys.has(tkey(m)));
+          if (!lost.length) return;
+          for (const m of lost) {
+            useStore.getState().enqueueMessage(finalizeSid, { text: m.text, queuedAt: Date.now(), hidden: false, opts: {} });
+          }
+          setProviderSwitchNotice({ text: `有 ${lost.length} 条并入的消息本回合没有被读到（回合先结束了），已放回队列，可编辑后再发。` });
+        };
         // 一轮回复可能跨多条 assistant 消息(text → 工具 → text):jsonl 先写
         // assistant[text+tool],turn COUNT 此刻就 +1,但工具之后的尾部文本是更晚的
         // 另一条 assistant 消息。只按 count 判定会在尾部文本落盘前就判"已落盘"→ 清掉
@@ -6448,6 +6472,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             // turn visible.
             try { await fetchMessagesForTab(finalizeSid, finalizePh, { silent: true }); } catch {}
             const known = new Set(getLocalMessages().map(tkey));
+            if (isCurrentTurn()) rescueUnfoldedSteer(chatMessagesRef.current, known); // 清之前先回捞
             setChatMessages((prev) => {
               if (!isCurrentTurn()) return prev; // await 期间开了新回合 → 不清在途消息
               return prev.length ? prev.filter((m) => m.type === 'turn' || !known.has(tkey(m))) : prev;
@@ -6462,6 +6487,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             // 孪生 —— CLI 不把 permission_denied 写进转写),整清会让它们在回合结束时
             // 凭空消失(拒绝原因只闪现几秒);保留,切会话/刷新时自然清掉。
             try { await fetchMessagesForTab(finalizeSid, finalizePh, { silent: true }); } catch {}
+            // 清之前先回捞未被折叠的注入消息(判据:带 steerId 且持久化里查无此条)。
+            if (isCurrentTurn()) rescueUnfoldedSteer(chatMessagesRef.current, new Set(getLocalMessages().map(tkey)));
             setChatMessages((prev) => {
               if (!isCurrentTurn()) return prev; // await 期间开了新回合 → 不清在途消息
               const localOnly = (m) => m.type === 'btw' || m.type === 'denial';
@@ -6834,7 +6861,18 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     const idx = q.findIndex((m) => m && !m.hidden && m.text);
     if (idx < 0) return;
     const head = q[idx];
-    if (!(await steerCurrentTurnRef.current?.(head.text, { meta: head.opts?.meta }))) {
+    // acceleratingRef 复活(判官建议-1):peek→注入(await fetch)→出队 之间若 done 到达,
+    // 流收尾的 drain 会先 shiftMessage 把同一条弹出去重发 = 同文双发。这面旗就是为此存在的
+    // 互斥闸(finally 的 drain 与 poll 的 drain 都读它),自管 try/finally 复位,不依赖某条流的
+    // finally 来清 —— 空闲态点 ⚡ 时没有任何 finally 会来读它(那正是它当年挂死的老 bug)。
+    acceleratingRef.current = true;
+    let ok = false;
+    try {
+      ok = !!(await steerCurrentTurnRef.current?.(head.text, { meta: head.opts?.meta }));
+    } finally {
+      acceleratingRef.current = false;
+    }
+    if (!ok) {
       setProviderSwitchNotice({ text: '当前没有可并入的回合（回合正在建立或已结束），消息仍在队列中，回合结束后会自动发出。' });
       return;
     }
@@ -7133,13 +7171,19 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     //    1.5s 的轮询会把刚杀掉的进程当"后台还在跑" → backgroundPid 被置成死 pid → 重发
     //    撞门变排队 + auto-reattach 去连一个死进程(用户报的"多一条一模一样的"主推手);
     // ② setBackgroundPid(null) 立即清本地标记,不等下一轮(那一轮还会误报)。
-    // 前台流与转后台两种形态都要记(与 handleStop 的 pid 取法逐字一致)。
+    // ③ 后台态也要【真的发 /stop】(判官重要-2):只记账不发停,旧回合在新回合的
+    //    tearingDown 4s 强杀之前会继续往刚裁剪过的 jsonl 追加(裁剪被部分复写);带活
+    //    shell 时 tearingDown 更是直接放行不杀 = 旧进程与新 --resume 并存双写。
+    // 前台流与转后台两种形态都要记;pid 取 ref 而非 state(state 有一帧延迟)。
     const _rbPid = activeProcRef.current || backgroundPidRef.current;
     if (_rbPid) stoppedPidsRef.current.add(String(_rbPid));
     if (activeProcRef.current) {
       // 编辑重发=全杀(hard):进程内存上下文与改写后的 jsonl 已分叉,留活任务会答非所问。
       fetch(`/api/chat/${activeProcRef.current}/stop`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ hard: true }) }).catch(() => {});
       activeProcRef.current = null;
+    } else if (backgroundPidRef.current) {
+      // 同款请求形状,fire-and-forget(绝不 await:控制类调用要留超时兜底权给轮询)。
+      fetch(`/api/chat/${backgroundPidRef.current}/stop`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ hard: true }) }).catch(() => {});
     }
     setBackgroundPid(null);
     backgroundPidRef.current = null; // state 要下一帧才同步,重发在 50ms 后落地,先同步清
@@ -7274,14 +7318,16 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
 
         killedRef.current = true; // 编辑重发(trim 分支)=停当前回合(POST /stop)→ finally 收后台化子代理
         if (abortRef.current) { try { abortRef.current.abort(); } catch {} }
-        // Bug8 同批(调研点名:同一个病换个入口):被杀 pid 记账 + 立即清后台标记,
-        // 判据与取法同 handleRollback / handleStop。
+        // Bug8 同批(调研点名:同一个病换个入口):被杀 pid 记账 + 后台态真发 /stop +
+        // 立即清后台标记,三件事与 handleRollback / handleStop 同款。
         const _rtPid = activeProcRef.current || backgroundPidRef.current;
         if (_rtPid) stoppedPidsRef.current.add(String(_rtPid));
         if (activeProcRef.current) {
           // 编辑重发=全杀(hard):进程内存上下文与改写后的 jsonl 已分叉,留活任务会答非所问。
           fetch(`/api/chat/${activeProcRef.current}/stop`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ hard: true }) }).catch(() => {});
           activeProcRef.current = null;
+        } else if (backgroundPidRef.current) {
+          fetch(`/api/chat/${backgroundPidRef.current}/stop`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ hard: true }) }).catch(() => {});
         }
         setBackgroundPid(null);
         backgroundPidRef.current = null;

@@ -605,10 +605,16 @@ function makeInputQueue() {
   let waiting = null;
   let closed = false;
   return {
+    // 返回值 = 这条消息有没有真的进队。close 之后 push 是 no-op —— 引导注入(/chat/steer)
+    // 必须据此回 409,否则会出现"200 却没送达"的静默吞消息(判官致命-1:keepAlive=false 时
+    // finalize 走 else 分支只 close 不置 closing/idle,到 finishSlot 置 pumpEnded 之间有个
+    // 真实窗口,slot 各旗看起来全"忙",push 却掉进已关的队列)。现有两个调用点(复用块
+    // :1149 与冷启首条 :1262)都不读返回值,行为零变化。
     push(msg) {
-      if (closed) return;
+      if (closed) return false;
       if (waiting) { const w = waiting; waiting = null; w({ value: msg, done: false }); }
       else q.push(msg);
+      return true;
     },
     close() {
       closed = true;
@@ -1701,7 +1707,10 @@ router.post('/chat/steer', (req, res) => {
   // command_lifecycle{queued|started|completed},前端据此驱动"已排队 → 已并入"角标。
   const msg = { type: 'user', message: { role: 'user', content: String(content) } };
   if (uuid) msg.uuid = String(uuid);
-  hit.slot.input.push(msg);
+  // push 返回 false = 队列已 close(finalize 的 else 分支/停止兜底刚关流,但 closing/idle/
+  // pumpEnded 三面旗还没落地)→ 这条消息没人会读到,必须当作"没有活回合"回 409,让客户端
+  // 回落入队。绝不能凭"旗看起来是忙的"就回 200(判官致命-1:200 空吞 = 用户文字无声蒸发)。
+  if (!hit.slot.input.push(msg)) return res.status(409).json({ error: 'no-active-turn' });
   res.json({ ok: true, pid: hit.pid });
 });
 
