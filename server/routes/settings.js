@@ -472,6 +472,32 @@ router.post('/settings/reveal', async (_req, res) => {
   }
 });
 
+/**
+ * 导入项目时的 git 三态判定(纯函数,输入是两次 `git rev-parse` 的失败对象)。
+ * 旧实现只跑 `rev-parse HEAD` 且裸 catch:git 没装 / TCC 拒读 / dubious ownership /
+ * 超时统统被归成"不是 git 仓库",而"仓库存在但零提交"也报同一句话 —— 用户拿到的
+ * 是一条误导且没有出路的提示(Bug7)。
+ *   headErr   = `rev-parse HEAD` 的错误(成功传 null)→ 判"有没有提交"
+ *   insideErr = `rev-parse --is-inside-work-tree` 的错误(成功传 null)→ 判"在不在仓库里"
+ * 只有 git 明确说 "not a git repository" 才算 notRepo(口径同 git.js 的 /git/status,
+ * git 2.50 输出本地化,双语正则必需);其余失败一律 gitCheckFailed,不冒称"不是仓库"。
+ * @returns {{gitState:'ok'|'repoNoCommit'|'notRepo'|'gitCheckFailed', gitCheckReason?:string, gitCheckDetail?:string}}
+ */
+export function classifyGitProbe({ headErr = null, insideErr = null } = {}) {
+  if (!headErr) return { gitState: 'ok' };
+  if (!insideErr) return { gitState: 'repoNoCommit' };
+  const msg = String(insideErr.stderr || insideErr.message || '');
+  if (/not a git repository|不是.*git\s*仓库/i.test(msg)) return { gitState: 'notRepo' };
+  if (insideErr.code === 'ENOENT') return { gitState: 'gitCheckFailed', gitCheckReason: 'gitMissing' };
+  if (insideErr.killed) return { gitState: 'gitCheckFailed', gitCheckReason: 'timeout' };
+  if (/dubious ownership|可疑所有权/i.test(msg)) return { gitState: 'gitCheckFailed', gitCheckReason: 'ownership' };
+  return {
+    gitState: 'gitCheckFailed',
+    gitCheckReason: 'other',
+    gitCheckDetail: msg.split('\n')[0].slice(0, 160) || undefined,
+  };
+}
+
 // PUT /api/settings — update settings.
 // SPECIAL KEY: `_addProject` is NOT a real settings field; it's a request to
 // register a new project root by creating its hashed dir under
@@ -493,6 +519,7 @@ router.put('/settings', async (req, res) => {
     let addedHash = null;
     let addedPath = null;
     let noGitHead = false;
+    let gitProbe = { gitState: 'ok' };
     if (addPath) {
       const absPath = addPath === '~'
         ? homedir()
@@ -519,13 +546,22 @@ router.put('/settings', async (req, res) => {
       }
       addedPath = clean;
       addedHash = pathToHash(clean);
-      // A6:检测该文件夹是否有 git HEAD(非 git 仓库或空仓库均失败)。仅作标记随
-      // 响应返回,前端据此提示 worktree/子代理隔离功能不可用;不阻断导入。链路里
-      // 既有的 rev-parse 检测都在使用时(worktree/git/checkpoints),导入时无,这里补上。
-      try {
-        await execFileP('git', ['-C', clean, 'rev-parse', 'HEAD'], { timeout: 4000 });
-      } catch {
-        noGitHead = true;
+      // A6:导入时探测 git 状态,只作标记随响应返回,不阻断导入(链路里既有的
+      // rev-parse 检测都在使用时:worktree/git/checkpoints)。三态见 classifyGitProbe:
+      // 第二次探测只在 HEAD 失败时跑,正常仓库仍是一次 git 调用。
+      {
+        let headErr = null, insideErr = null;
+        try {
+          await execFileP('git', ['-C', clean, 'rev-parse', 'HEAD'], { timeout: 4000 });
+        } catch (err) { headErr = err; }
+        if (headErr) {
+          try {
+            await execFileP('git', ['-C', clean, 'rev-parse', '--is-inside-work-tree'], { timeout: 4000 });
+          } catch (err) { insideErr = err; }
+        }
+        gitProbe = classifyGitProbe({ headErr, insideErr });
+        // 兼容旧前端 bundle(打包版前端与服务端可能不同版):noGitHead 语义不变。
+        noGitHead = gitProbe.gitState !== 'ok';
       }
       const projectDir = join(PROJECTS_DIR, addedHash);
       try {
@@ -585,7 +621,7 @@ router.put('/settings', async (req, res) => {
       }
     }
     await writeFile(SETTINGS_PATH, JSON.stringify(updated, null, 2) + '\n');
-    res.json({ ...updated, ...(addedHash ? { addedHash, addedPath, noGitHead } : {}) });
+    res.json({ ...updated, ...(addedHash ? { addedHash, addedPath, noGitHead, ...gitProbe } : {}) });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
