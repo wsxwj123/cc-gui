@@ -485,6 +485,10 @@ router.post('/settings/reveal', async (_req, res) => {
  */
 export function classifyGitProbe({ headErr = null, insideErr = null } = {}) {
   if (!headErr) return { gitState: 'ok' };
+  // HEAD 探测超时时"零提交"这个结论并不成立(第二条命令碰巧成功也只说明在仓库里)。
+  // 宣称"仓库没有任何提交"会引导用户去做一次把全部未提交改动打成一个 commit 的写操作,
+  // 基于误判的写操作不做 —— 归到 gitCheckFailed。零提交的真实形态是 code 128,不受影响。
+  if (headErr.killed) return { gitState: 'gitCheckFailed', gitCheckReason: 'timeout' };
   if (!insideErr) return { gitState: 'repoNoCommit' };
   const msg = String(insideErr.stderr || insideErr.message || '');
   if (/not a git repository|不是.*git\s*仓库/i.test(msg)) return { gitState: 'notRepo' };
@@ -496,6 +500,23 @@ export function classifyGitProbe({ headErr = null, insideErr = null } = {}) {
     gitCheckReason: 'other',
     gitCheckDetail: msg.split('\n')[0].slice(0, 160) || undefined,
   };
+}
+
+/**
+ * 跑上面那两条探测命令并归类。路由与单测共用同一个函数(测试复刻路由代码会漂移)。
+ * 第二条只在 HEAD 失败时跑 —— 正常仓库仍然只有一次 git 调用。
+ */
+export async function probeGitState(dir) {
+  let headErr = null, insideErr = null;
+  try {
+    await execFileP('git', ['-C', dir, 'rev-parse', 'HEAD'], { timeout: 4000 });
+  } catch (err) { headErr = err; }
+  if (headErr) {
+    try {
+      await execFileP('git', ['-C', dir, 'rev-parse', '--is-inside-work-tree'], { timeout: 4000 });
+    } catch (err) { insideErr = err; }
+  }
+  return classifyGitProbe({ headErr, insideErr });
 }
 
 // PUT /api/settings — update settings.
@@ -546,23 +567,11 @@ router.put('/settings', async (req, res) => {
       }
       addedPath = clean;
       addedHash = pathToHash(clean);
-      // A6:导入时探测 git 状态,只作标记随响应返回,不阻断导入(链路里既有的
-      // rev-parse 检测都在使用时:worktree/git/checkpoints)。三态见 classifyGitProbe:
-      // 第二次探测只在 HEAD 失败时跑,正常仓库仍是一次 git 调用。
-      {
-        let headErr = null, insideErr = null;
-        try {
-          await execFileP('git', ['-C', clean, 'rev-parse', 'HEAD'], { timeout: 4000 });
-        } catch (err) { headErr = err; }
-        if (headErr) {
-          try {
-            await execFileP('git', ['-C', clean, 'rev-parse', '--is-inside-work-tree'], { timeout: 4000 });
-          } catch (err) { insideErr = err; }
-        }
-        gitProbe = classifyGitProbe({ headErr, insideErr });
-        // 兼容旧前端 bundle(打包版前端与服务端可能不同版):noGitHead 语义不变。
-        noGitHead = gitProbe.gitState !== 'ok';
-      }
+      // A6:导入时探测 git 状态(三态见 classifyGitProbe),只作标记随响应返回,不阻断
+      // 导入(链路里既有的 rev-parse 检测都在使用时:worktree/git/checkpoints)。
+      gitProbe = await probeGitState(clean);
+      // 兼容旧前端 bundle(打包版前端与服务端可能不同版):noGitHead 语义不变。
+      noGitHead = gitProbe.gitState !== 'ok';
       const projectDir = join(PROJECTS_DIR, addedHash);
       try {
         await mkdir(projectDir, { recursive: true });

@@ -1481,7 +1481,9 @@ function ProjectList() {
       // 仓库",用户既被误导又没有出路。现在:需要用户处理的两态记进 importGitState,由
       // 常驻的 GitInitBanner 给出对应按钮;浮条只作即时告知,文案按态区分。
       // notRepo 不用记:横幅自己的 /api/git/status 探测就能得出(isRepo:false)。
-      const gitState = data.gitState || (data.noGitHead ? 'notRepo' : 'ok');
+      // 'legacy' = 新前端配旧服务端(装机版前端与后端可能不同版):只有 noGitHead 这个
+      // 合并态,分不出"非仓库"还是"零提交",文案必须骑墙,不能斩钉截铁说不是仓库。
+      const gitState = data.gitState || (data.noGitHead ? 'legacy' : 'ok');
       if (gitState !== 'ok') {
         if (gitState === 'repoNoCommit') importGitState.set(clean, gitState);
         const reasonText = {
@@ -1499,7 +1501,9 @@ function ProjectList() {
             ? '该目录所在的 git 仓库还没有任何提交。worktree 与回滚基线需要至少一个提交，项目栏横幅提供「创建基线提交」。'
             : gitState === 'notRepo'
               ? '该文件夹不是 git 仓库。worktree 与回滚基线不可用，项目栏横幅提供「立即初始化」。'
-              : `git 检查未能完成（${reasonText}），未能判断该文件夹是否为 git 仓库。导入不受影响。`,
+              : gitState === 'legacy'
+                ? '该文件夹不是 git 仓库或没有提交，worktree 与回滚基线不可用，详见项目栏横幅。'
+                : `git 检查未能完成（${reasonText}），未能判断该文件夹是否为 git 仓库。导入不受影响。`,
           ts: Date.now(),
         });
       }

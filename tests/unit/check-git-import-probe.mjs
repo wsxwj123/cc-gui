@@ -13,14 +13,12 @@
 //   git 没装     两条都 code 'ENOENT',stderr 空
 // 只有 dubious ownership / timeout 没法在单测里真造,单独用最小对象覆盖分支。
 import assert from 'node:assert/strict';
-import { execFile, execFileSync } from 'node:child_process';
-import { promisify } from 'node:util';
+import { execFileSync } from 'node:child_process';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { classifyGitProbe } from '../../server/routes/settings.js';
+import { classifyGitProbe, probeGitState } from '../../server/routes/settings.js';
 
-const execFileP = promisify(execFile);
 const roots = [];
 function mkdir_(...seg) {
   const dir = realpathSync(mkdtempSync(join(tmpdir(), 'cgui-gitimport-')));
@@ -30,19 +28,8 @@ function mkdir_(...seg) {
 }
 const git = (cwd, ...args) => execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf8', stdio: 'pipe' });
 
-// 复刻 settings.js 的探测顺序:HEAD 成功即 ok,失败才补 --is-inside-work-tree。
-async function probe(dir, bin = 'git') {
-  let headErr = null, insideErr = null;
-  try {
-    await execFileP(bin, ['-C', dir, 'rev-parse', 'HEAD'], { timeout: 4000 });
-  } catch (err) { headErr = err; }
-  if (headErr) {
-    try {
-      await execFileP(bin, ['-C', dir, 'rev-parse', '--is-inside-work-tree'], { timeout: 4000 });
-    } catch (err) { insideErr = err; }
-  }
-  return classifyGitProbe({ headErr, insideErr });
-}
+// 跑的是路由同一个函数(probeGitState),不是复刻 —— 复刻会随路由改动漂移。
+const probe = probeGitState;
 
 try {
   // ── 1. 有提交的仓库:根与子目录都是 ok(子目录本来就不该报错,锁定不回归)──
@@ -77,8 +64,11 @@ try {
   // ── 4. git 调用失败:一律 gitCheckFailed,绝不冒称"不是仓库"──
   {
     const dir = mkdir_();
-    git(dir, 'init', '-q', '-b', 'main', '.');  // 真仓库,只是 git 拿不到
-    const r = await probe(dir, 'cgui-git-does-not-exist');
+    git(dir, 'init', '-q', '-b', 'main', '.');  // 真仓库,只是 git 找不着
+    const realPath = process.env.PATH;
+    process.env.PATH = join(dir, 'no-such-bin-dir');  // 真 ENOENT:让 git 不可解析,不伪造错误对象
+    let r;
+    try { r = await probe(dir); } finally { process.env.PATH = realPath; }
     assert.deepEqual(r, { gitState: 'gitCheckFailed', gitCheckReason: 'gitMissing' }, 'git 没装(ENOENT)= gitCheckFailed');
   }
   // 超时 / dubious ownership 造不出真环境,用与真形态一致的最小对象覆盖分支:
@@ -87,6 +77,13 @@ try {
     classifyGitProbe({ headErr: { killed: true }, insideErr: { killed: true, stderr: '' } }),
     { gitState: 'gitCheckFailed', gitCheckReason: 'timeout' },
     '超时 = gitCheckFailed(timeout)',
+  );
+  // HEAD 超时而第二条恰好成功:不得判成 repoNoCommit —— 那会宣称"仓库没有任何提交"
+  // 并引导用户做一次把全部未提交改动打成 commit 的写操作(基于误判的写)。
+  assert.deepEqual(
+    classifyGitProbe({ headErr: { killed: true }, insideErr: null }),
+    { gitState: 'gitCheckFailed', gitCheckReason: 'timeout' },
+    'HEAD 超时 + 第二条成功 = gitCheckFailed,不是 repoNoCommit',
   );
   assert.deepEqual(
     classifyGitProbe({
