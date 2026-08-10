@@ -16,7 +16,11 @@ function safeCwd(p) {
   return resolveWorkspacePath(p, { label: 'cwd' });
 }
 
-/** GET /api/git/status?cwd=... → { isRepo, branch, hasChanges } */
+/**
+ * GET /api/git/status?cwd=... → { isRepo, root, branch, hasChanges, hasCommit }
+ * `root` = 仓库根(`rev-parse --show-toplevel`)。cwd 是子文件夹时它与 cwd 不同,
+ * 前端据此告诉用户"这个零提交仓库其实在上层哪个目录"。
+ */
 router.get('/git/status', async (req, res) => {
   try {
     const cwd = safeCwd(String(req.query.cwd || ''));
@@ -90,42 +94,57 @@ router.post('/git/init', async (req, res) => {
       await execFileP('git', ['-C', cwd, 'init'], { timeout: 8000 });
     }
 
-    // Baseline commit phase. `add -A` may fail when the working tree contains
+    // Baseline commit phase. `add` may fail when the working tree contains
     // embedded git repos with no commits, or other corner cases. In that
     // scenario the user STILL has a usable git repo (init succeeded) — only
     // the baseline snapshot is missing. We surface a warning instead of a
     // 500 so the GUI stops nagging "not a git repo" forever.
     let committed = false, sha = null;
     let baselineWarning = null;
+    const digest = (err) => (err?.killed ? '(超时)' : '') +
+      String(err?.stderr || err?.message || '').split('\n')[0].slice(0, 200);
     if (commit) {
       try {
-        await execFileP('git', ['-C', cwd, 'add', '-A'], { timeout: 15000 });
+        // `-- .` 限定到 cwd 这棵子树。git ≥2.0 的 `add -A` 不带 pathspec = **整个工作树**:
+        // 项目是巨型仓库的子文件夹时(兄弟项目 / node_modules / 嵌套仓库)会扫全树 →
+        // 超时 → 基线永远建不出来(用户实测:按钮转几十秒后无效回弹),而且会把兄弟
+        // 项目的文件一并提交进去。限定后提交只含项目文件夹自身内容。
+        await execFileP('git', ['-C', cwd, 'add', '-A', '--', '.'], { timeout: 45000 });
+      } catch (err) {
+        baselineWarning = 'add 失败(目录可能过大,或含嵌入式 git 仓库):' + digest(err);
+      }
+    }
+    if (commit && !baselineWarning) {
+      try {
+        let staged = false;
         try {
           await execFileP('git', ['-C', cwd, 'diff', '--cached', '--quiet'], { timeout: 4000 });
-          // No staged changes — nothing to commit.
-        } catch {
-          try {
-            await execFileP('git', ['-C', cwd, 'commit', '-m', message], {
-              timeout: 30000,
-              env: {
-                ...process.env,
-                GIT_AUTHOR_NAME: process.env.GIT_AUTHOR_NAME || 'claude-gui',
-                GIT_AUTHOR_EMAIL: process.env.GIT_AUTHOR_EMAIL || 'gui@claude',
-                GIT_COMMITTER_NAME: process.env.GIT_COMMITTER_NAME || 'claude-gui',
-                GIT_COMMITTER_EMAIL: process.env.GIT_COMMITTER_EMAIL || 'gui@claude',
-              },
-            });
-            committed = true;
-            const rev = await execFileP('git', ['-C', cwd, 'rev-parse', 'HEAD'], { timeout: 4000 });
-            sha = rev.stdout.trim();
-          } catch (err) {
-            baselineWarning = 'commit failed: ' + (err.stderr || err.message);
-          }
+        } catch { staged = true; }
+        let hasHead = true;
+        try {
+          await execFileP('git', ['-C', cwd, 'rev-parse', 'HEAD'], { timeout: 4000 });
+        } catch { hasHead = false; }
+        // 没东西可提交(空文件夹 / 内容全被 .gitignore 挡掉)且仓库还没有 HEAD 时建空提交:
+        // 基线的唯一要求是 HEAD 存在(worktree 与回滚探测都只看 HEAD)。此前这种情况直接
+        // 静默返回 ok,HEAD 永远不出现 → 横幅永久循环(用户实测:空项目文件夹 + 上层零
+        // 提交仓库)。已经有 HEAD 的仓库不造空提交,免得往正常历史里塞噪音。
+        if (staged || !hasHead) {
+          await execFileP('git', ['-C', cwd, 'commit', ...(staged ? [] : ['--allow-empty']), '-m', message], {
+            timeout: 30000,
+            env: {
+              ...process.env,
+              GIT_AUTHOR_NAME: process.env.GIT_AUTHOR_NAME || 'claude-gui',
+              GIT_AUTHOR_EMAIL: process.env.GIT_AUTHOR_EMAIL || 'gui@claude',
+              GIT_COMMITTER_NAME: process.env.GIT_COMMITTER_NAME || 'claude-gui',
+              GIT_COMMITTER_EMAIL: process.env.GIT_COMMITTER_EMAIL || 'gui@claude',
+            },
+          });
+          committed = true;
+          const rev = await execFileP('git', ['-C', cwd, 'rev-parse', 'HEAD'], { timeout: 4000 });
+          sha = rev.stdout.trim();
         }
       } catch (err) {
-        // `git add -A` failed (most commonly: embedded repo without commits).
-        // Repo itself is fine — just skip baseline commit.
-        baselineWarning = 'add -A failed (embedded repos?): ' + (err.stderr || err.message);
+        baselineWarning = 'commit 失败:' + digest(err);
       }
     }
 

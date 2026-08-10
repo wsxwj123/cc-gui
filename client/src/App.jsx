@@ -3217,21 +3217,38 @@ function GitInitBanner({ cwd }) {
   // Recheck git status whenever `cwd` changes OR a kick counter ticks (so we
   // can re-run the check after a successful init without remounting).
   const [kick, setKick] = useState(0);
+  const [repoRoot, setRepoRoot] = useState(null);
+  // 探测 effect 里要读当前 status 又不能把它放进 deps(那会自触发),用 ref 取。
+  const statusRef = useRef(null);
+  const statusCwdRef = useRef(null);
+  statusRef.current = status;
   useEffect(() => {
     if (!cwd) return;
+    // 用户操作的结果态不被重探测冲掉:init 成功后 setStatus('done'/'partial'),
+    // 而本 effect 会立刻把它改回 'unknown'→'repo' → 绿条闪一下就没,用户只看到
+    // 按钮回弹、以为没生效(实测反馈)。busy 期间同理不能被覆盖。
+    // 只在**同一个 cwd** 上守;换项目必须重新探测(否则会挂着上一个项目的结果)。
+    if (statusCwdRef.current === cwd && ['busy', 'done', 'partial'].includes(statusRef.current)) return;
+    statusCwdRef.current = cwd;
     const skipKey = `cgui-git-skip-${cwd}`;
     if (sessionStorage.getItem(skipKey)) { setStatus('dismissed'); return; }
     setStatus('unknown');
     fetch(`/api/git/status?cwd=${encodeURIComponent(cwd)}`)
-      .then((r) => r.json())
+      // 非 2xx(隧道/代理拦截、后端 400)不当探测结果用:下面的映射只接受真答案。
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error('HTTP ' + r.status))))
       // T3: permissionDenied = macOS 没给本 app 磁盘权限(git 在 Desktop 等目录
       // 被 TCC 拒)。此时既不是 repo 也不该引导 init —— 显示权限引导横幅。
       // isRepo:true 但零提交 → 'nocommit'(给「创建基线提交」按钮)。以服务端 hasCommit
       // 为准(存量项目一选中就能判,且刷新不丢);importGitState 只作兜底:新前端配旧
       // 服务端时没有 hasCommit 字段,回落到本次导入探测的结果。
-      .then((s) => setStatus(s?.gitMissing ? 'nogit' : (s?.permissionDenied ? 'tcc' : (s?.isRepo === false ? 'norepo'
-        : ((s?.hasCommit === false || importGitState.get(cwd) === 'repoNoCommit') ? 'nocommit' : 'repo')))))
-      .catch(() => setStatus('repo'));  // network err → silent
+      .then((s) => {
+        setRepoRoot(typeof s?.root === 'string' ? s.root : null);
+        setStatus(s?.gitMissing ? 'nogit' : (s?.permissionDenied ? 'tcc' : (s?.isRepo === false ? 'norepo'
+          : ((s?.hasCommit === false || importGitState.get(cwd) === 'repoNoCommit') ? 'nocommit' : 'repo'))));
+      })
+      // fail-safe:探测失败(断网 / 手机隧道被拦 / 非 2xx)一律**不显示任何 git 横幅**。
+      // 绝不冒称"不是 git 仓库"—— 那会让用户对着一个其实是仓库的目录反复点初始化。
+      .catch(() => { setRepoRoot(null); setStatus('repo'); });
   }, [cwd, kick]);
 
   if (status === 'tcc') {
@@ -3271,7 +3288,7 @@ function GitInitBanner({ cwd }) {
   if (status !== 'norepo' && status !== 'nocommit' && status !== 'busy' && status !== 'done' && status !== 'partial') return null;
 
   const init = async () => {
-    const from = status;  // 失败时回到发起态('norepo' / 'nocommit'),别把零提交仓库说成非仓库
+    const from = status;  // 失败时回到发起态('norepo' / 'nocommit' / 'partial'),别把零提交仓库说成非仓库
     setStatus('busy');
     setWarning(null);
     try {
@@ -3281,11 +3298,11 @@ function GitInitBanner({ cwd }) {
       });
       const data = await r.json().catch(() => ({}));
       if (r.ok) {
-        // 已是仓库时 /api/git/init 只做 add -A + commit(already:true),正是零提交
-        // 仓库需要的基线提交;补上后清掉导入态,重探测才不会又回到 'nocommit'。
+        // 已是仓库时 /api/git/init 只做 add + commit(already:true),正是零提交仓库
+        // 需要的基线提交;补上后清掉导入态,免得下次挂载又回到 'nocommit'。
         importGitState.delete(cwd);
-        // Re-check status from the server — banner hides if isRepo flipped.
-        setKick((k) => k + 1);
+        // 这里不再 setKick 重探测:'done'/'partial' 是操作结果的终态,重探测只会把它
+        // 冲掉(见探测 effect 的守卫)。切换项目时 cwd 变,自然会重新探测。
         if (data.baselineWarning) {
           setWarning(data.baselineWarning);
           setStatus('partial');
@@ -3304,6 +3321,17 @@ function GitInitBanner({ cwd }) {
     setStatus('dismissed');
   };
 
+  // busy 一条共用:三条来路(非仓库 init / 零提交补基线 / partial 重试)文案都一样,
+  // 且大目录的 add 可能跑几十秒 —— 说清楚在等什么,别让用户以为按钮没反应。
+  if (status === 'busy') {
+    return (
+      <div className="bg-amber-50 border-b border-amber-200 px-4 py-2 text-[12px] font-body text-amber-900 flex items-center gap-2">
+        <GitBranch size={13} className="text-amber-700 shrink-0" />
+        <span className="flex-1">正在创建基线提交…目录较大时这一步（<code className="font-mono">git add</code>）可能需要几十秒。</span>
+      </div>
+    );
+  }
+
   if (status === 'done') {
     return (
       <div className="bg-green-50 border-b border-green-200 px-4 py-2 text-[12px] font-body text-green-800 flex items-center gap-2">
@@ -3314,22 +3342,26 @@ function GitInitBanner({ cwd }) {
     );
   }
 
-  // 在仓库里但一个提交都没有(git init 过、从没 commit)。/api/git/status 只答 isRepo,
-  // 这一态由导入时的服务端探测标记(importGitState)。按钮走同一个 /api/git/init:
-  // already:true 时它只做 add -A + commit,正好是这里需要的基线提交。
-  if (status === 'nocommit' || (status === 'busy' && importGitState.get(cwd) === 'repoNoCommit')) {
+  // 在仓库里但一个提交都没有(git init 过、从没 commit)。判据是 /api/git/status 的
+  // hasCommit(存量项目也算得出),importGitState 只兜底旧服务端。按钮走同一个
+  // /api/git/init:already:true 时它只做 add + commit,正好是这里需要的基线提交。
+  if (status === 'nocommit') {
     return (
       <div className="bg-amber-50 border-b border-amber-200 px-4 py-2 text-[12px] font-body text-amber-900 flex items-center gap-2">
         <GitBranch size={13} className="text-amber-700 shrink-0" />
         <span className="flex-1">
           <b>这个 git 仓库还没有任何提交</b>。worktree 与基于 git 的回滚需要至少一个提交，建议先做一次基线提交。
+          {/* 仓库根常常在项目目录的上层(用户实景:项目是空文件夹,仓库根是它的父目录),
+              不说清楚的话用户不知道自己在给哪个仓库补提交。 */}
+          {repoRoot && repoRoot !== cwd && (
+            <span className="block text-[10.5px] text-amber-700 mt-0.5 font-mono truncate" title={repoRoot}>仓库根：{repoRoot}</span>
+          )}
         </span>
         <button
           onClick={init}
-          disabled={status === 'busy'}
-          className="px-2.5 py-1 rounded bg-amber-700 text-white text-[11px] font-medium hover:bg-amber-800 disabled:opacity-50 shrink-0"
+          className="px-2.5 py-1 rounded bg-amber-700 text-white text-[11px] font-medium hover:bg-amber-800 shrink-0"
         >
-          {status === 'busy' ? '提交中…' : '创建基线提交'}
+          创建基线提交
         </button>
         <button
           onClick={dismiss}
@@ -3345,11 +3377,14 @@ function GitInitBanner({ cwd }) {
     return (
       <div className="bg-amber-50 border-b border-amber-200 px-4 py-2 text-[12px] font-body text-amber-900 flex items-start gap-2">
         <GitBranch size={13} className="text-amber-700 shrink-0 mt-0.5" />
+        {/* 原文案写死"已 git init、目录含嵌入式仓库",但目录已是仓库时根本没 init 过,
+            失败原因也可能是目录过大导致 add 超时(用户实测)。改为如实转述服务端原因。 */}
         <span className="flex-1">
-          <b>已 <code className="font-mono">git init</code>，基线提交跳过</b>
-          ：目录里含嵌入式 git 仓库无法 <code className="font-mono">add -A</code>。回滚仍可用（基于发送前的 checkpoint），但全量基线提交不会被记录。
-          {warning && <span className="block text-[10.5px] text-amber-700 mt-1 font-mono truncate">{warning.slice(0, 200)}</span>}
+          <b>基线提交未完成</b>
+          ：暂存或提交这一步失败（目录过大、含嵌入式 git 仓库等）。回滚仍可用（基于发送前的 checkpoint），但全量基线提交没有记录。
+          {warning && <span className="block text-[10.5px] text-amber-700 mt-1 font-mono truncate" title={warning}>{warning.slice(0, 200)}</span>}
         </span>
+        <button onClick={init} className="px-2 py-1 rounded bg-amber-700 text-white text-[11px] font-medium hover:bg-amber-800 shrink-0">重试</button>
         <button onClick={dismiss} className="text-amber-700 hover:text-amber-900 underline text-[11px] shrink-0">本会话忽略</button>
       </div>
     );
@@ -3363,10 +3398,9 @@ function GitInitBanner({ cwd }) {
       </span>
       <button
         onClick={init}
-        disabled={status === 'busy'}
-        className="px-2.5 py-1 rounded bg-amber-700 text-white text-[11px] font-medium hover:bg-amber-800 disabled:opacity-50 shrink-0"
+        className="px-2.5 py-1 rounded bg-amber-700 text-white text-[11px] font-medium hover:bg-amber-800 shrink-0"
       >
-        {status === 'busy' ? '初始化中…' : '立即初始化'}
+        立即初始化
       </button>
       <button
         onClick={dismiss}
