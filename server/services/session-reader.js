@@ -964,6 +964,29 @@ export async function getSessionMessages(sessionId, projectHash) {
         reason: typeof g.reason === 'string' ? g.reason : '',
         iterations: typeof g.iterations === 'number' ? g.iterations : null,
       });
+    } else if (record.type === 'attachment' && record.attachment?.type === 'queued_command') {
+      // 「⚡ 并入」注入的消息,在【本回合还有工具边界】时被 CLI 折叠进同一回合:磁盘上
+      // 没有 user 行,原文只存在于这条 attachment —— 写在折叠位置(紧跟 queue-operation
+      // {operation:'remove'}、在 AI 后续回应之前),即真实的并入点。实测对该会话 --resume
+      // 后模型能一字不差复述这条消息 → CLI 在 resume 时把它重建回上下文,它是一等历史。
+      // 不合成的后果:AI 行为变了,但 GUI 对话里永远看不到用户说过什么(0.2.285 的真 bug)。
+      // 只认 queued_command:queue-operation 的 dequeue 之后必跟一条真 user 行,给它合成
+      // 就是同一句话画两遍。record 自带 uuid,天然参与上面的 uuid 去重(resume 重放安全)。
+      const a = record.attachment;
+      const prompt = typeof a.prompt === 'string' ? a.prompt : '';
+      if (prompt.trim()) {
+        // flushTurn 把在飞回合从折叠点切开 → 历史天然渲染成「回合A → 引导气泡 → 回合B」,
+        // 与 Claude Desktop 一致。
+        flushTurn();
+        messages.push({
+          type: 'user',
+          uuid: record.uuid,
+          steered: true,
+          steerUuid: a.source_uuid || null,
+          text: prompt,
+          timestamp: record.timestamp || a.timestamp,
+        });
+      }
     }
     // Skip 其余 attachment、queue-operation、last-prompt、permission-mode 等
   }
