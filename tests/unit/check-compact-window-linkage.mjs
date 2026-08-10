@@ -117,7 +117,9 @@ try {
 
   // ── [1m] 后缀最高优先级(GUI 的 1M 开关)────────────────────────
   setup({ provider: { contextWindow: 128_000 } });
-  expectWindow('deepseek-chat[1m]', 1_048_576, '[1m] 后缀压过规则表与 provider 手填窗口');
+  // 值必须是 1,000,000 整:与 CLI(带 [1m] 直接 return 1e6)和客户端 contextWindow.js 同口径。
+  // 旧值 1,048,576 是自造的,会让徽章分母/MAX_CONTEXT_TOKENS 比 CLI 自认窗口大 4.8 万。
+  expectWindow('deepseek-chat[1m]', 1_000_000, '[1m] 后缀压过规则表与 provider 手填窗口,且值为 1,000,000(CLI 口径)');
 
   // ── provider 实抓窗口 > provider 手填 > 规则表 ──────────────────
   setup({ provider: { contextWindow: 128_000, modelWindows: { 'k3': 524_288 } } });

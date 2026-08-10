@@ -143,7 +143,12 @@ const MODEL_WINDOW_RULES = [
 // 所以"没填就走规则表"天然做到了"手填只对不在内置列表里的中转站生效"。
 function resolveModelWindow(model, providerEntry) {
   const m = String(model || '');
-  if (/\[1m\]/i.test(m)) return 1_048_576;
+  // [1m] = 1,000,000 整,与 CLI 口径一致(2.1.226 二进制:带 [1m] 直接 return 1e6),也与
+  // 客户端 contextWindow.js 一致。旧值 1,048,576(2^20)是自造的,让 /api/model-window 下发的
+  // 徽章分母比 CLI 自己认的窗口大 4.8 万 —— 下方 autoCompactWindow 有 1e6 钳位看不出来,
+  // env.CLAUDE_CODE_MAX_CONTEXT_TOKENS 却是原样下发。规则表里 kimi-k3/gemini/deepseek-v4
+  // 等厂商【原生】1,048,576 是各家真实规格,与本行无关,不动。
+  if (/\[1m\]/i.test(m)) return 1_000_000;
   const base = m.replace(/\[1m\]/i, '');
   const mw = providerEntry?.modelWindows;
   if (mw && Number.isFinite(Number(mw[base]))) return Number(mw[base]);

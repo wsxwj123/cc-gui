@@ -57,7 +57,7 @@ import { computeCost, formatCost, setUserPrices, observeOfficialBilling } from '
 import { extractToolResultText, finalizePendingToolCalls, applyFinalizedToBlocks } from './utils/toolResult.js';
 import { rebuildTodosFromTaskCalls } from './utils/todos.js';
 import { isSteered, firstSteerableIndex, reconcileSteered, persistedUserSigs, steerSig } from './utils/steerQueue.js';
-import { isInitBindingOrigin, migrateDraftQueue, paneMessagesOwned, resolveHistModel, resolveSendModel } from './utils/routing.js';
+import { isInitBindingOrigin, migrateDraftQueue, paneMessagesOwned, resolveHistModel, resolveSelectorModel, resolveSendModel } from './utils/routing.js';
 import { nativeContextWindow, isBareClaudeAlias } from './utils/contextWindow.js';
 import {
   FolderOpen, MessageSquare, ChevronLeft, ChevronRight, ChevronDown,
@@ -8668,7 +8668,10 @@ function MobileSegmented({ options, onChange }) {
 function MobileModelPage({ permKey }) {
   const availableModels = useStore((s) => s.availableModels);
   const customModels = useStore((s) => s.customModels);
-  const currentModel = useStore((s) => (permKey && s.modelBySession[permKey]) || s.currentModel);
+  // 与桌面 ModelSelector / 徽章 / 发送同一条解析链(pin → 历史 → 全局 + context1m),
+  // 见 utils/routing.js:旧的 `pin || global` 会让无 pin 的会话点 1M 开关时静默换模型,
+  // 且手机页原先没叠 context1m,开关状态与徽章反向。
+  const currentModel = useStore((s) => resolveSelectorModel(s, permKey));
   const [customInput, setCustomInput] = useState('');
   const [fetched, setFetched] = useState([]);
   const [fetchNote, setFetchNote] = useState('');
@@ -8679,6 +8682,9 @@ function MobileModelPage({ permKey }) {
   // 含 providerName/defaultEffort),不再内联重复一份。
   useEffect(() => { useStore.getState().fetchModel(); }, []);
   const has1m = /\[1m\]/i.test(currentModel || '');
+  // 同桌面:原生 1M 的 claude 模型(4.7 起)开关无额外效果,只在 title 说明,不禁用。
+  const native1m = /claude|opus|sonnet|haiku|fable|mythos/i.test(currentModel || '')
+    && nativeContextWindow((currentModel || '').replace(/\[1m\]/i, '')) >= 1_000_000;
   const pick = (id) => {
     const base = id.replace(/\[1m\]/i, '');
     useStore.getState().setModelFor(permKey, has1m ? `${base}[1m]` : base);
@@ -8733,9 +8739,15 @@ function MobileModelPage({ permKey }) {
         {fetchNote && <div className="text-[11px] text-ink-faint font-body">{fetchNote}</div>}
       </div>
       <button onClick={toggle1m}
+        title={native1m ? '该模型原生 1M，开启无额外效果' : undefined}
         className="w-full flex items-center gap-3 px-4 py-3 text-left hover:bg-canvas-warm transition-colors border-b border-canvas-deep/40">
-        <span className="flex-1 text-[14px] font-body text-ink">1M 上下文</span>
-        <span className={`text-[10px] px-2 py-0.5 rounded font-mono ${has1m ? 'bg-accent text-on-accent' : 'bg-canvas-deep text-ink-faint'}`}>
+        <div className="flex-1 min-w-0">
+          <div className="text-[14px] font-body text-ink">1M 上下文</div>
+          <div className="text-[11px] text-ink-faint font-body leading-snug">
+            给当前模型追加 [1m] 后缀。opus-4.6 / sonnet-4.6 原生窗口为 200K，需开启此项才是 1M；opus-4.7 及以上、sonnet-5、fable-5 原生即 1M，开启无额外效果。改动在下一条消息发出时生效。
+          </div>
+        </div>
+        <span className={`text-[10px] px-2 py-0.5 rounded font-mono shrink-0 ${has1m ? 'bg-accent text-on-accent' : 'bg-canvas-deep text-ink-faint'}`}>
           {has1m ? '已开启' : '关闭'}
         </span>
       </button>

@@ -57,6 +57,32 @@ export function resolveHistModel(messages, providerEpoch = 0) {
   return null;
 }
 
+/**
+ * 选择器侧「当前模型」解析:模型下拉与 1M 开关显示/操作的那个模型。
+ * 必须与徽章(App.jsx pin → 历史 → 全局 + context1m 兜底)和发送(resolveSendModel)同口径。
+ * 旧实现只有 `pin || global`,两处后果:
+ *  ① 无 pin 的老会话下拉显示的是全局默认模型,点 1M 开关会把会话静默 pin 成【另一个模型】[1m]
+ *    —— 用户只想开 1M,模型被换了且没有提示;
+ *  ② 手机页(MobileModelPage)连 context1m 标记都没叠,重装丢 pin 后开关显示"关",
+ *    与徽章/发送反向,用户想关反而点成开。
+ * 历史这一环用会话元数据 model —— 徽章在 messages 未加载时用的同一来源(选择器拿不到
+ * messages),并沿用同样的 providerEpoch 门控:切过 provider 后不信任无时间戳的元数据,
+ * 否则会把旧 provider 的模型 id 显示/pin 给新 provider(U1/U4 同一族)。
+ * @param {object} s store 状态(读 modelBySession/paneSessions/selectedSession/currentModel/providerEpoch/context1mBySession)
+ * @param {string|null} permKey 会话 key(真会话 = sessionId,草稿 = `draft-<hash>`)
+ * @returns {string} 模型 id(可能带 [1m]);无从解析时返回全局默认(可能为空串)
+ */
+export function resolveSelectorModel(s, permKey) {
+  if (!s) return '';
+  const pin = permKey ? s.modelBySession?.[permKey] : null;
+  const meta = (permKey && !s.providerEpoch)
+    ? [...(s.paneSessions || []), s.selectedSession].find((x) => x?.sessionId === permKey)?.model
+    : null;
+  const base = pin || meta || s.currentModel;
+  const ctx1m = permKey ? !!s.context1mBySession?.[permKey] : false;
+  return (base && ctx1m && !/\[1m\]/i.test(base)) ? `${base}[1m]` : base;
+}
+
 const bareModel = (m) => String(m || '').replace(/\[1m\]/i, '');
 const isClaudeId = (m) => /^claude-[a-z0-9.-]+(\[1m\])?$/i.test(String(m || ''));
 

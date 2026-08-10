@@ -8,6 +8,8 @@ import { useStore } from '../stores/sessionStore.js';
 import { ModelBadge } from './ModelBadge.jsx';
 import { confirmDialog } from '../utils/confirmDialog.jsx';
 import { mergeProviderLists, rowIsCurrent, SOURCE_BADGE } from '../utils/providerList.js';
+import { resolveSelectorModel } from '../utils/routing.js';
+import { nativeContextWindow } from '../utils/contextWindow.js';
 
 const EMPTY_ARRAY = Object.freeze([]);
 
@@ -333,7 +335,8 @@ export function ModelSelector({ compact = false, permKey = null, tourAnchor = fa
   // Per-session model: show/select THIS session's model (falls back to the
   // global resolved default when the session has no explicit pick). Picking
   // writes only the session override — never the global settings.json default.
-  const currentModel = useStore((s) => (permKey && s.modelBySession[permKey]) || s.currentModel);
+  // 解析链(pin → 历史 → 全局,再叠 context1m)与徽章/发送同源,在 utils/routing.js。
+  const currentModel = useStore((s) => resolveSelectorModel(s, permKey));
   const setModel = (id) => useStore.getState().setModelFor(permKey, id);
   const [open, setOpen] = useState(false);
   const [customInput, setCustomInput] = useState('');
@@ -420,14 +423,17 @@ export function ModelSelector({ compact = false, permKey = null, tourAnchor = fa
   // 1M-context toggle: Claude Code enables the 1M beta via a `[1m]` suffix on
   // the model id (same thing the CLI's /model picker writes). Toggling just
   // adds/removes the suffix on whatever model is current.
-  // `[1m]` 是 Claude Code 启用 1M 上下文的通用后缀约定。Anthropic(Opus 4.8/4.7/4.6、
-  // Sonnet 4.6)和 MiMo(mimo-v2.5-pro[1m],见官方文档)等兼容 provider 都用它启用 1M。
+  // `[1m]` 是 Claude Code 启用 1M 上下文的通用后缀约定。Anthropic(4.6 一代靠它开 1M beta)
+  // 和 MiMo(mimo-v2.5-pro[1m],见官方文档)等兼容 provider 都用它启用 1M。
   // 因此对所有模型开放——provider 若不支持会自行报错,由用户决定关掉。
-  // 重装丢 pin 后 currentModel 回落全局(不带 [1m]),但服务端持久化的 context1mBySession
-  // 仍记着该会话开了 1M → 叠加进 has1m,否则下拉开关显示"关"、与徽章/发送(都读 context1m
-  // 兜底)反向,用户想关反而点成开。permKey 为 draft 时命中不到=不影响(draft 的 1m 在 pin 里)。
-  const ctx1m = useStore((s) => !!(permKey && s.context1mBySession[permKey]));
-  const has1m = ctx1m || /\[1m\]/i.test(currentModel || '');
+  // context1m 标记已在 resolveSelectorModel 里叠进 currentModel(重装丢 pin 后仍认得出
+  // 该会话开着 1M),此处只需读后缀。
+  const has1m = /\[1m\]/i.test(currentModel || '');
+  // 原生 1M 的 claude 模型(4.7 起)上开关无额外效果:headless 实测 claude-sonnet-5 与
+  // claude-sonnet-5[1m] 报的 contextWindow 都是 1,000,000,带后缀也不报错 → 保留可用,只在
+  // title 里说明。第三方未知模型名在兜底表里默认 1M,不能据此宣称"原生 1M",故限 claude 系。
+  const native1m = /claude|opus|sonnet|haiku|fable|mythos/i.test(currentModel || '')
+    && nativeContextWindow((currentModel || '').replace(/\[1m\]/i, '')) >= 1_000_000;
   const toggle1m = () => {
     const base = (currentModel || '').replace(/\[1m\]/i, '');
     if (!base) return;
@@ -518,11 +524,12 @@ export function ModelSelector({ compact = false, permKey = null, tourAnchor = fa
           {/* 1M context toggle — appends [1m] to the active model id.
               Claude Code 通用约定:Anthropic / MiMo 等兼容 provider 都用 [1m] 启用 1M。 */}
           <button onClick={toggle1m}
+            title={native1m ? '该模型原生 1M，开启无额外效果' : undefined}
             className="w-full text-left px-3 py-2 hover:bg-canvas-warm transition-colors flex items-center gap-2 border-b border-canvas-deep">
             <div className="flex-1 min-w-0">
               <div className="text-xs font-medium text-ink font-body">1M 上下文</div>
               <div className="text-[10px] text-ink-faint font-body leading-snug">
-                给当前模型追加 <code className="font-mono">[1m]</code> 后缀（1M tokens 上下文，需 provider 支持）
+                给当前模型追加 <code className="font-mono">[1m]</code> 后缀。opus-4.6 / sonnet-4.6 原生窗口为 200K，需开启此项才是 1M；opus-4.7 及以上、sonnet-5、fable-5 原生即 1M，开启无额外效果。改动在下一条消息发出时生效（当前回合的进程沿用旧窗口）。
               </div>
             </div>
             <span className={`text-[9px] px-1.5 py-0.5 rounded font-mono shrink-0 ${
