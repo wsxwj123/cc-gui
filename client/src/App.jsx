@@ -3524,8 +3524,8 @@ const MessageList = React.memo(function MessageList({ messages, onRetryTurn, onR
         : msg.type === 'turn'
         ? <TurnBubble turn={msg} onRetry={onRetryTurn} onRetryTool={getToolCb(msg)} onFork={onFork} retryActive={retryActiveUuid === msg.uuid} />
         : <MessageBubble message={{ ...msg, role: msg.type }}
-            onRollback={msg.type === 'user' ? onRollback : undefined}
-            onFork={msg.type === 'user' ? onFork : undefined} />}
+            onRollback={msg.type === 'user' && !msg.steered ? onRollback : undefined}
+            onFork={msg.type === 'user' && !msg.steered ? onFork : undefined} />}
     </div>
   ));
 });
@@ -6887,6 +6887,20 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     return () => window.removeEventListener('keydown', onKey);
   }, [paneIsActive, tabIndex]);
 
+  // ── 引导消息入流(设计丙 = Desktop 形态)────────────────────────────────
+  // 队列追踪结构(条目 + steerId/steeredAt + drain 跳过 + 回合收尾 reconcile)原样不动,
+  // 只改【呈现】:并入成功的条目不再挂在输入框上方的 chip 区,而是作为用户气泡画进对话流,
+  // 并把流式内容从切口处切成两段。理由:它是一句已经说出去、模型已经读到的话,属于对话;
+  // 挂在输入框上方会让用户以为"还没发出去"。
+  // 交接语义(与 reconcile 严格对称,不新增判据):
+  //   落地 → 条目出队 + 历史里已有 reader 合成的同一条消息 → 本地气泡消失,位置交还 jsonl;
+  //   没落地 → 条目翻回普通排队态(不再 isSteered)→ 气泡消失、chip 复现可编辑,一字不丢。
+  // 声明在 handleAccelerate 之【前】:那条回调要写 steerAnchorRef(本仓踩过 TDZ 白屏,
+  // 引用一律放在使用点上方)。
+  const steerAnchorRef = useRef({}); // { [steerId]: 点 ⚡ 那一刻已产出的流式块数 } = 切口
+  const streamingBlocksRef = useRef(EMPTY_ARRAY);
+  useEffect(() => { streamingBlocksRef.current = streamingBlocks; }, [streamingBlocks]);
+
   // "⚡ 并入" — 把队列里第一条还没注入过的消息推进正在跑的回合(设计乙)。
   // 旧实现是 abort 本端 SSE + POST /stop + 当成新消息重发(= interrupt 重来),在
   // backgroundPid 态与 connecting 窗口下三个动作全落空、队首弹出又被入队门塞回队尾 =
@@ -6924,6 +6938,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       setProviderSwitchNotice({ text: '当前没有可并入的回合（回合正在建立或已结束），消息仍在队列中，回合结束后会自动发出。' });
       return;
     }
+    // 切口位置(设计丙):记下"此刻已经产出了几个流式块"。气泡画在这一刀上,其后的
+    // 块开进新的回合容器 —— 与 Claude Desktop 一致(上一块之上、新回复在气泡下方开始)。
+    steerAnchorRef.current[steerId] = streamingBlocksRef.current.length;
     // 原地标记而不是出队。按文本复查下标:注入这几百毫秒里队列可能被改动过。
     const st = useStore.getState();
     const now = st.messageQueue[queueKey] || [];
@@ -6931,6 +6948,45 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     if (at < 0) return; // 用户在这期间把它删了 —— 消息已送达,不再凭空塞回去
     st.replaceQueue(queueKey, now.map((m, i) => (i === at ? { ...m, steerId, steerState: 'sent', steeredAt } : m)));
   }, [getLocalSession]);
+
+  // 防同帧双气泡:jsonl 一旦把它写成历史(reader 合成的消息带 uuid/steerUuid),本地就不画。
+  // 出队与历史刷新是同一次回合收尾,以 persisted 为准才能无缝交接、不闪双。
+  const persistedSteerIds = useMemo(() => persistedSteerKeys(finalizedMessages), [finalizedMessages]);
+  const liveSteerItems = useMemo(
+    () => messageQueue.filter((m) => isSteered(m) && !persistedSteerIds.has(m.steerId)),
+    [messageQueue, persistedSteerIds]);
+  // 把流式块按切口切段:[段1, 引导气泡, 段2, …]。没有待画的引导条目时返回 null,
+  // 渲染走原来的单气泡路径(零结构变化)。
+  const liveSteerSegments = useMemo(() => {
+    if (!liveSteerItems.length) return null;
+    const cuts = liveSteerItems
+      .map((item) => {
+        const anchor = steerAnchorRef.current[item.steerId];
+        return { item, at: Math.min(Number.isInteger(anchor) ? anchor : streamingBlocks.length, streamingBlocks.length) };
+      })
+      .sort((a, b) => a.at - b.at);
+    const segs = [];
+    let from = 0;
+    for (const c of cuts) {
+      const at = Math.max(from, c.at);
+      segs.push({ blocks: streamingBlocks.slice(from, at), steer: c.item });
+      from = at;
+    }
+    segs.push({ blocks: streamingBlocks.slice(from), steer: null });
+    return segs;
+  }, [liveSteerItems, streamingBlocks]);
+  // 流式回复气泡这一刻在不在画(判据与原来 JSX 内联的那串逐字相同,只是提出来复用):
+  // 它为真才有块可切;为假(后台态/切回重放/首字未到)时引导气泡走流末兜底,不能凭空消失。
+  const liveTurnVisible = liveVisible && isStreaming && !reattachStream
+    && !!(streamingText || streamingThinking || streamingToolCalls.length > 0
+      || streamingBlocks.some((b) => (b?.content?.length > 0) || b?.toolCall));
+  // 引导气泡的统一渲染:无回滚/分叉入口(已送达,撤不回来),带"已并入"小标。
+  const renderSteerBubble = (item) => (
+    <MessageBubble key={item.steerId} message={{
+      role: 'user', type: 'user', uuid: item.steerId, text: item.text, steered: true,
+      timestamp: item.steeredAt ? new Date(item.steeredAt).toISOString() : undefined,
+    }} />
+  );
 
   // Reset per-session UI state when the selectedSession object changes.
   // KEY DIFFERENCE FROM PREVIOUS IMPL: depend on the selectedSession reference,
@@ -7908,24 +7964,44 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                         )}
                       </>
                     : <MessageBubble message={{ ...msg, role: msg.type }}
-                        onRollback={msg.type === 'user' ? handleRollback : undefined} />}
+                        onRollback={msg.type === 'user' && !msg.steered ? handleRollback : undefined} />}
                 </div>
               ))}
               {/* reattach(切走再切回)不画流式气泡:同一段内容已经完整留在上面的历史卡里,
                   再画一遍就是用户看到的"一条回复被拆成两个气泡 + 中间内容重复"。改由历史卡
                   单一来源渲染(流式事件降级成历史刷新触发器,见 refreshHistIfDue)。 */}
-              {liveVisible && isStreaming && !reattachStream && (streamingText || streamingThinking || streamingToolCalls.length > 0 || streamingBlocks.some((b) => (b?.content?.length > 0) || b?.toolCall)) && (
+              {liveTurnVisible && (
                 <>
                   {/* 动效统一:气泡在前(头像 ✻ 呼吸),状态文字行随内容之后,
                       不再让独立的 LoadingMark 与完成后的静态头像形成两套视觉物 */}
-                  <TurnBubble turn={{
-                    uuid: 'streaming', type: 'turn', timestamp: new Date().toISOString(), model: streamingModel,
-                    text: streamingText ? [streamingText] : [],
-                    thinking: streamingThinking ? [streamingThinking] : [],
-                    toolCalls: streamingToolCalls.map((tc) => ({ ...tc, category: 'call' })),
-                    blocks: streamingBlocks,
-                    usage: null,
-                  }} />
+                  {/* 引导消息切流(设计丙):有并入条目时按切口把流式块切成几段,气泡落在切口,
+                      其后的块开进新的回合容器;没有则是原来的单气泡(同一个表达式,零结构变化)。 */}
+                  {(liveSteerSegments || [{ blocks: streamingBlocks, steer: null }]).map((seg, si, segs) => {
+                    const first = si === 0;
+                    // 空段不画空壳气泡(点 ⚡ 时若一个块都还没产出,切口就在 0)
+                    const hasContent = seg.blocks.length > 0
+                      || (first && !!(streamingText || streamingThinking || streamingToolCalls.length > 0));
+                    return (
+                      <React.Fragment key={seg.steer?.steerId || `seg-${si}`}>
+                        {hasContent && (
+                          <TurnBubble turn={{
+                            // 'streaming' 是 TurnBubble 的"这条还在产出"哨兵(头像转、入场动画、
+                            // isLive)。新内容只会追加到【最后一段】,所以哨兵给它;切口之前的
+                            // 段已经定型,拿到 streaming-<i> 就不再转圈。
+                            uuid: si === segs.length - 1 ? 'streaming' : `streaming-${si}`, type: 'turn', timestamp: new Date().toISOString(), model: streamingModel,
+                            // legacy 三件套只属于第一段:不发 partial stream_event 的 provider
+                            // 没有 blocks 可切,内容全在这里,复制到每段就是重复渲染。
+                            text: first && streamingText ? [streamingText] : [],
+                            thinking: first && streamingThinking ? [streamingThinking] : [],
+                            toolCalls: first ? streamingToolCalls.map((tc) => ({ ...tc, category: 'call' })) : [],
+                            blocks: seg.blocks,
+                            usage: null,
+                          }} />
+                        )}
+                        {seg.steer && renderSteerBubble(seg.steer)}
+                      </React.Fragment>
+                    );
+                  })}
                   <StreamingStatusLine
                     thinking={streamingThinking}
                     text={streamingText}
@@ -7934,6 +8010,10 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                   />
                 </>
               )}
+              {/* 兜底:流式气泡此刻没在画(后台态 / 切回重放 / 首字还没到)时,并入的消息
+                  也必须看得见 —— chip 区已经不再显示它,这里不画就等于用户说的话凭空消失。
+                  画在流末;回合收尾后由 jsonl 给出真实位置(persisted 去重接管)。 */}
+              {!liveTurnVisible && liveSteerItems.map(renderSteerBubble)}
               {/* Connecting 占位:仅在「没有任何可见内容」时显示(空占位 block 不算)。
                   之前误用 streamingBlocks.length===0,而 content_block_start 一开始就
                   push 空 block→占位符消失但内容又没来→空白无动画(回归)。改用 .some

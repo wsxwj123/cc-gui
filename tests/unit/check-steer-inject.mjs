@@ -330,20 +330,62 @@ assert.ok(/if \(event\.type === 'command_lifecycle' && event\.command_uuid && ev
   '宽松解析(SDK 类型里没有该事件),只认 started/completed');
 assert.ok(/\{ \.\.\.m, steerState: 'merged' \} : m\)\)\);/.test(app), '事件到了把队列条目文案精确到"已并入"');
 
-// ── 10) ChatInput:已注入条目不可编辑/不可撤回 + 状态文案 ──────────
+// ── 10) ChatInput:已注入条目不在 chip 区显示(R7-3)+ 不可编辑/不可撤回 ──
 const chatInput = read('client', 'src', 'components', 'ChatInput.jsx');
 assert.ok(/import \{ isSteered, firstSteerableIndex \} from '\.\.\/utils\/steerQueue\.js';/.test(chatInput),
   'UI 与 store 用同一份判据');
+assert.ok(/q\.hidden \|\| isSteered\(q\) \? null :/.test(chatInput),
+  '已并入的条目不在 chip 区渲染(它已进对话流);返回 null 而不是过滤数组 —— 编辑/删除按下标操作 store,索引必须对齐');
+assert.ok(/\{queueItems\.filter\(\(q\) => !q\.hidden && !isSteered\(q\)\)\.length > 0 && \(/.test(chatInput),
+  '整块指示器的显隐也排除已并入条目 —— 否则并入后剩一个空壳框');
+assert.ok(!/已引导 <b>/.test(chatInput), '"已引导 N 条"的 chip 文案随之退役(状态改由对话流里的气泡表达)');
+assert.ok(!/已并入当前回合 · 等待 AI 处理/.test(chatInput), 'chip 上的状态小字退役(条目根本不在这里画了)');
 assert.ok(/\{onEditFromQueue && !isSteered\(q\) && \(/.test(chatInput), '已注入 → 不给编辑按钮(撤不回来)');
 assert.ok(/\{onRemoveFromQueue && !isSteered\(q\) && \(/.test(chatInput), '已注入 → 不给删除按钮');
 assert.ok(/!queueItems\[i\]\?\.hidden && !isSteered\(queueItems\[i\]\)/.test(chatInput),
   'ArrowUp 召回也要跳过已注入条目');
-assert.ok(/q\.steerState === 'merged' \? '已并入当前回合 · 等待 AI 处理' : '已引导 · 等待 AI 读取'/.test(chatInput),
-  '条目上显示状态(lifecycle 事件到了才精确到"已并入")');
 assert.ok(/disabled=\{!canSteer \|\| firstSteerableIndex\(queueItems\) < 0\}/.test(chatInput),
   'connecting 置灰判据保留,外加"没有可引导条目"也置灰');
 assert.ok(/canSteer = false/.test(chatInput), 'canSteer 默认 false:没传就按不可注入处理');
 assert.ok(/canSteer=\{!!\(liveChatPid \|\| backgroundPid\)\}/.test(app), 'canSteer 判据不动');
+
+// ── 13) R7-3 呈现:引导消息进对话流 + 切流 + 去重 + 无回滚/分叉入口 ──────
+// 机制选 b(在流式累积结构上显式切段):live 渲染【不是】以 user 消息分组的 —— 整段流式
+// 内容是一个 TurnBubble 吃 streamingBlocks,而 visibleChat 里的 user 条目一律画在它上方。
+// 所以往 chatMessages 插一条 user(机制 a)只会让气泡悬在流式块【上面】= 设计乙撤掉的错序。
+assert.ok(/const steerAnchorRef = useRef\(\{\}\);/.test(app),
+  '记下点 ⚡ 那一刻已产出的块数 = 切口位置(气泡之后的块开进新回合容器)');
+assert.ok(/steerAnchorRef\.current\[steerId\] = streamingBlocksRef\.current\.length;/.test(app),
+  '切口在注入成功后立刻取,读 ref 不读闭包(handleAccelerate 的 deps 不含流式状态)');
+assert.ok(/const liveSteerItems = useMemo\(\s*\n\s*\(\) => messageQueue\.filter\(\(m\) => isSteered\(m\) && !persistedSteerIds\.has\(m\.steerId\)\),/.test(app),
+  '待画的引导气泡 = 本窗格队列里已注入、且历史里还没有的条目(按 sessionQueueKey 天然按会话/窗格归属)');
+assert.ok(/const persistedSteerIds = useMemo\(\(\) => persistedSteerKeys\(finalizedMessages\), \[finalizedMessages\]\);/.test(app),
+  '去重复用对账的同一份 id 口径(uuid + steerUuid),不另写一套');
+assert.ok(/const liveSteerSegments = useMemo\(\(\) => \{\s*\n\s*if \(!liveSteerItems\.length\) return null;/.test(app),
+  '没有引导条目 → 返回 null,渲染走原来的单气泡路径(零结构变化)');
+assert.ok(/\(liveSteerSegments \|\| \[\{ blocks: streamingBlocks, steer: null \}\]\)\.map\(\(seg, si, segs\) => \{/.test(app),
+  '流式区按段渲染,段间插引导气泡');
+assert.ok(/uuid: si === segs\.length - 1 \? 'streaming' : `streaming-\$\{si\}`/.test(app),
+  "'streaming' 哨兵(转圈/入场动画/isLive)给【最后一段】—— 新内容只往那里追加,给第一段就是切口之上的定型内容在转圈");
+assert.ok(/\{seg\.steer && renderSteerBubble\(seg\.steer\)\}/.test(app), '切口处画气泡');
+assert.ok(/\{!liveTurnVisible && liveSteerItems\.map\(renderSteerBubble\)\}/.test(app),
+  '流式气泡没在画(后台态/切回重放/首字未到)时的兜底 —— chip 已不显示它,这里不画就是消息凭空消失');
+assert.ok(/const renderSteerBubble = \(item\) => \(\s*\n\s*<MessageBubble key=\{item\.steerId\} message=\{\{\s*\n\s*role: 'user', type: 'user', uuid: item\.steerId, text: item\.text, steered: true,/.test(app),
+  '引导气泡就是普通用户气泡 + steered 标记;不传 onRollback/onFork = 没有回滚/分叉入口');
+assert.equal((app.match(/onRollback=\{msg\.type === 'user' && !msg\.steered \? /g) || []).length, 2,
+  '历史与流式两处渲染都对 steered 消息关掉回滚(它在 jsonl 里的锚点是 attachment 行,按它裁剪未验证)');
+assert.ok(/onFork=\{msg\.type === 'user' && !msg\.steered \? onFork : undefined\}/.test(app),
+  '分叉入口同样对 steered 消息关闭');
+const bubble = read('client', 'src', 'components', 'MessageBubble.jsx');
+assert.ok(/\{message\.steered && \(/.test(bubble) && /已并入/.test(bubble),
+  '气泡上有"已并入"小标 —— 否则用户看到一条自己的消息夹在 AI 回复中间会以为漏发了');
+
+// reader 侧:合成消息带 steered/steerUuid(前端的小标与对账都依赖它)
+const reader = read('server', 'services', 'session-reader.js');
+assert.ok(/record\.type === 'attachment' && record\.attachment\?\.type === 'queued_command'/.test(reader),
+  '折叠形态的引导消息必须进历史(reader 分支);细节见 check-reader-queued-command');
+assert.ok(/steered: true,\s*\n\s*steerUuid: a\.source_uuid \|\| null,/.test(reader),
+  '合成消息带 steered 标记与 source_uuid → 前端画小标 + 精确对账');
 
 // ── 11) Bug8 回滚重复(不变):forceSend + 等停止落地 + 三件对称 ────
 assert.ok(/if \(Date\.now\(\) < deadline && \(streamingRef\.current \|\| backgroundPidRef\.current\)\) \{/.test(app),

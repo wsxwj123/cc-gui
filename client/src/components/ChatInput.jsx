@@ -1211,17 +1211,16 @@ export function ChatInput({ onSend, onStop, onStopBackground, onAccelerate, canS
 
         {/* Queue indicator + per-item preview + edit/delete + accelerate.
             Q5: 计数排除 hidden 项(计划执行等系统续跑消息)——全是 hidden 时整个指示器不渲染,
-            体验对齐 Claude Desktop(批准计划后看不到任何"排队提示")。 */}
-        {queueItems.filter((q) => !q.hidden).length > 0 && (
+            体验对齐 Claude Desktop(批准计划后看不到任何"排队提示")。
+            R7-3: 已并入(isSteered)的条目也不在这里显示 —— 它已经送达 CLI、模型已经读到,
+            属于对话而不属于"待发队列",改由对话流里的用户气泡呈现(Desktop 形态)。
+            没落地时回合收尾的 reconcile 会把它翻回普通排队态,那时它自动回到这里可编辑。 */}
+        {queueItems.filter((q) => !q.hidden && !isSteered(q)).length > 0 && (
           <div className="mt-2 rounded-lg bg-accent/8 border border-accent/20 text-[11px] font-body overflow-hidden">
             <div className="px-3 py-1.5 flex items-center gap-2 border-b border-accent/15">
               <Send size={11} className="text-accent shrink-0" />
               <span className="text-ink-soft flex-1">
-                {queueItems.filter((q) => !q.hidden && !isSteered(q)).length > 0 ? (
-                  <><b>{queueItems.filter((q) => !q.hidden && !isSteered(q)).length}</b> 条消息已排队 · 当前回复完成后自动发出</>
-                ) : (
-                  <>已引导 <b>{queueItems.filter((q) => !q.hidden).length}</b> 条 · 等待 AI 在本回合读取</>
-                )}
+                <b>{queueItems.filter((q) => !q.hidden && !isSteered(q)).length}</b> 条消息已排队 · 当前回复完成后自动发出
               </span>
               {onAccelerate && (
                 <button
@@ -1238,19 +1237,14 @@ export function ChatInput({ onSend, onStop, onStopBackground, onAccelerate, canS
             </div>
             <ul className="divide-y divide-accent/10">
               {queueItems.map((q, i) => (
-                q.hidden ? null : // 隐藏续跑消息(如计划执行)不在队列里显示(#5);保留索引对齐 store
+                // 隐藏续跑消息(如计划执行)不在队列里显示(#5);已并入的条目改在对话流里
+                // 画成用户气泡(R7-3)。两者都返回 null 而不是过滤数组 —— 编辑/删除回调按
+                // 下标操作 store,索引必须与 store 对齐。
+                q.hidden || isSteered(q) ? null :
                 <li key={`${q.queuedAt}-${i}`} className="px-3 py-1.5 flex items-start gap-2 group hover:bg-accent/5">
                   <span className="text-[10px] text-ink-faint font-mono shrink-0 mt-0.5">#{i + 1}</span>
                   <div className="flex-1 min-w-0">
                     <span className="text-ink-soft block line-clamp-2 leading-snug" title={q.text}>{q.text}</span>
-                    {/* 已注入(steer 已送达 CLI):不可编辑、不可撤回、排空也会跳过它。
-                        它出现在对话流里的时机由回合结束后的 jsonl 重排决定(真实并入位置);
-                        回合收尾若核对到它没被读到,会自动翻回普通排队态。 */}
-                    {isSteered(q) && (
-                      <span className="mt-0.5 block text-[10px] text-accent/80">
-                        {q.steerState === 'merged' ? '已并入当前回合 · 等待 AI 处理' : '已引导 · 等待 AI 读取'}
-                      </span>
-                    )}
                   </div>
                   <div className="shrink-0 flex items-center gap-0.5 opacity-60 group-hover:opacity-100 transition-opacity">
                     {onEditFromQueue && !isSteered(q) && (

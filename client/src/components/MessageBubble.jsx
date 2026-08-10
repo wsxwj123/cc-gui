@@ -344,6 +344,16 @@ export function MessageBubble({ message, onRollback, onFork }) {
           </div>
           <div className="flex-1 min-w-0 flex flex-col items-end">
             <div className="flex items-center gap-2 mb-1.5">
+              {/* 「⚡ 并入」进上一个回合的消息:它不是新回合的开头,而是插进了正在跑的回合。
+                  标出来,否则用户看到一条用户气泡夹在 AI 回复中间会以为是自己漏发了。
+                  这类消息没有回滚/分叉入口 —— 它在 jsonl 里的锚点是 attachment 行,
+                  按它裁剪的行为未验证,不开这个口子(调用方传不传 onRollback 决定)。 */}
+              {message.steered && (
+                <span className="px-1.5 py-0.5 rounded bg-accent/12 text-accent text-[10px] font-body"
+                  title="这条消息是在上一个回复进行中并入的，模型在同一回合里读到了它">
+                  已并入
+                </span>
+              )}
               {onRollback && <RollbackMenu message={message} onAction={(a) => onRollback(message, a)} />}
               {onFork && (
                 <button onClick={() => onFork(message.uuid)} title="从这条消息分叉出一条新线(只保留到此为止的上下文,丢弃其后对话,原会话不动)"
