@@ -3289,20 +3289,27 @@ function GitInitBanner({ cwd }) {
 
   const init = async () => {
     const from = status;  // 失败时回到发起态('norepo' / 'nocommit' / 'partial'),别把零提交仓库说成非仓库
+    // 归属:大目录的 add 要跑几十秒,这期间用户完全可能切到别的项目。结果只许写回
+    // 发起时的那个 cwd —— 否则 A 的结果落到 B 上:成功 → B 挂上被钉态守卫锁住、
+    // 永不自愈的假"已创建基线提交";partial → B 显示"未完成 + 重试",点下去会对 B
+    // (可能是干净仓库)执行计划外的 add + commit。归属取发起时闭包,写前比当前 ref。
+    const initCwd = cwd;
+    const mine = () => statusCwdRef.current === initCwd;
     setStatus('busy');
     setWarning(null);
     try {
       const r = await fetch('/api/git/init', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ cwd }),
+        body: JSON.stringify({ cwd: initCwd }),
       });
       const data = await r.json().catch(() => ({}));
       if (r.ok) {
         // 已是仓库时 /api/git/init 只做 add + commit(already:true),正是零提交仓库
         // 需要的基线提交;补上后清掉导入态,免得下次挂载又回到 'nocommit'。
-        importGitState.delete(cwd);
+        importGitState.delete(initCwd);
         // 这里不再 setKick 重探测:'done'/'partial' 是操作结果的终态,重探测只会把它
         // 冲掉(见探测 effect 的守卫)。切换项目时 cwd 变,自然会重新探测。
+        if (!mine()) return;
         if (data.baselineWarning) {
           setWarning(data.baselineWarning);
           setStatus('partial');
@@ -3311,9 +3318,14 @@ function GitInitBanner({ cwd }) {
         }
       } else {
         confirmDialog('git init 失败：' + (data.error || r.status));
+        if (!mine()) return;
         setStatus(from);
       }
-    } catch (err) { confirmDialog('git init 失败：' + err.message); setStatus(from); }
+    } catch (err) {
+      confirmDialog('git init 失败：' + err.message);
+      if (!mine()) return;
+      setStatus(from);
+    }
   };
 
   const dismiss = () => {

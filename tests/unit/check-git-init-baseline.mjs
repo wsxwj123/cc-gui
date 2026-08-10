@@ -128,6 +128,18 @@ try {
       '探测失败必须 fail-safe 到不显示横幅(绝不冒称"不是 git 仓库")');
     assert.ok(!/setStatus\('norepo'\)[^\n]*catch/.test(banner) && !/catch[^\n]*setStatus\('norepo'\)/.test(banner),
       'fetch 失败路径绝不能映射成 norepo');
+
+    // init 的异步回调归属:add 跑几十秒期间用户可能切项目,A 的结果不许写到 B 上
+    // (成功 → B 挂上被钉态守卫锁死的假绿条;partial → 点重试会对 B 执行计划外的
+    // add+commit)。归属取发起时闭包 initCwd,写 state 前比当前 statusCwdRef。
+    const initBody = banner.slice(banner.indexOf('const init = async'), banner.indexOf('const dismiss ='));
+    assert.ok(initBody, 'init() 不见了');
+    assert.match(initBody, /const initCwd = cwd;/, 'init 必须在发起时闭包捕获 cwd');
+    assert.match(initBody, /statusCwdRef\.current === initCwd/, '归属校验必须比当前 ref 与发起时 cwd(别用渲染态闭包)');
+    assert.equal(
+      (initBody.match(/if \(!mine\(\)\) return;/g) || []).length, 3,
+      '三条写结果 state 的路径(done/partial、非 2xx 回退、异常回退)都必须先过归属守卫',
+    );
   }
 
   console.log('OK check-git-init-baseline');
