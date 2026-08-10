@@ -1,7 +1,10 @@
 #!/usr/bin/env node
 // 上下文徽章分母本地兜底表自检(nativeContextWindow 纯函数):
-// 2026-07 官方口径 fable-5/mythos/sonnet-5/opus-4.6+/sonnet-4.6 原生 1M(无需 [1m]),
-// haiku 与老代 200K。旧表全 claude 系一律 200K 是"389k/200k(194%) 爆红"根因(ddd588a)。
+// 口径依据 = CLI 2.1.226 二进制模型注册表 + headless 实测。原生 1M(native_1m)从 4.7 起:
+// fable-5/mythos-5/opus-5/sonnet-5/opus-4.7/opus-4.8;4.6 一代(opus-4-6/sonnet-4-6)注册表
+// 是 window:200000 + supports_1m_beta,1M 要 [1m] 后缀;haiku 与老代 200K。
+// 两个方向的历史事故都由本文件钉住:全 claude 系一律 200K → fable-5 爆红 389k/200k(ddd588a);
+// 4.6 一代记成 1M → 60% 的会话显示 12%、不预警不压缩直撞 CLI 硬阻断线(2026-08 修正)。
 import assert from 'node:assert/strict';
 import { nativeContextWindow, isBareClaudeAlias } from '../../client/src/utils/contextWindow.js';
 
@@ -10,14 +13,14 @@ const M1 = 1_000_000, K200 = 200_000;
 // ── 现网 8 形态 ──────────────────────────────────────────────
 assert.equal(nativeContextWindow('claude-fable-5'), M1, 'fable-5 原生 1M');
 assert.equal(nativeContextWindow('claude-sonnet-5'), M1, 'sonnet-5 原生 1M');
-assert.equal(nativeContextWindow('claude-opus-4-6'), M1, 'opus-4.6 原生 1M');
-assert.equal(nativeContextWindow('claude-opus-4-7'), M1, 'opus-4.7 原生 1M');
-assert.equal(nativeContextWindow('claude-opus-4-8'), M1, 'opus-4.8 原生 1M');
-assert.equal(nativeContextWindow('claude-sonnet-4-6'), M1, 'sonnet-4.6 原生 1M');
+assert.equal(nativeContextWindow('claude-opus-4-6'), K200, 'opus-4.6 原生 200K,1M 需 [1m] [CLI 2.1.226 二进制注册表 + headless 实测]');
+assert.equal(nativeContextWindow('claude-opus-4-7'), M1, 'opus-4.7 原生 1M [同上]');
+assert.equal(nativeContextWindow('claude-opus-4-8'), M1, 'opus-4.8 原生 1M [同上]');
+assert.equal(nativeContextWindow('claude-sonnet-4-6'), K200, 'sonnet-4.6 原生 200K,1M 需 [1m] [同上]');
 assert.equal(nativeContextWindow('claude-sonnet-4-5-20250929'), K200, 'sonnet-4.5 全 id 200K');
 assert.equal(nativeContextWindow('claude-haiku-4-5'), K200, 'haiku-4.5 200K');
 
-// ── 分代边界:x.5 vs x.6 一位之差 ────────────────────────────
+// ── 分代边界:x.6 vs x.7 一位之差(原生 1M 的分界线)───────────
 assert.equal(nativeContextWindow('claude-sonnet-4-5'), K200, 'sonnet-4.5 是 200K');
 assert.equal(nativeContextWindow('claude-opus-4-5'), K200, 'opus-4.5 是 200K');
 assert.equal(nativeContextWindow('claude-opus-4-5-20251101'), K200, 'opus-4.5 全 id 200K');
@@ -34,9 +37,11 @@ assert.equal(nativeContextWindow('opus'), M1, '别名 opus = 最新 opus → 1M'
 assert.equal(nativeContextWindow('sonnet'), M1, '别名 sonnet = 最新 sonnet → 1M');
 assert.equal(nativeContextWindow('haiku'), K200, '别名 haiku 200K');
 
-// ── [1m] 后缀恒 1M(老代靠它开 1M beta)─────────────────────
+// ── [1m] 后缀恒 1M(4.6 及更老代靠它开 1M beta)──────────────
 assert.equal(nativeContextWindow('claude-sonnet-4-5[1m]'), M1, '[1m] 后缀 1M');
 assert.equal(nativeContextWindow('claude-opus-4-8[1m]'), M1, '[1m] 后缀 1M');
+assert.equal(nativeContextWindow('claude-opus-4-6[1m]'), M1, 'opus-4.6 的 1M 只能靠 [1m](裸 id 是 200K)');
+assert.equal(nativeContextWindow('claude-sonnet-4-6[1m]'), M1, 'sonnet-4.6 同理');
 
 // ── 未来带日期新代:保守挡回 200K(断言现状)─────────────────
 // (?![\d-]) 使 sonnet-5-20260101 / opus-5-20260101 不中 1M 支 → 200K。这是刻意的保守

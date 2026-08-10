@@ -31,16 +31,20 @@ export function nativeContextWindow(model) {
   const byName = id.match(/(\d+)k(?![a-z0-9])/);     // 如 moonshot-v1-128k
   if (byName) return parseInt(byName[1], 10) * 1000;
   // 已知【小于 1M】的模型 → 回落真实窗口(默认改 1M 后必须显式挡下,否则超窗误判/不触发压缩)。
-  // Claude 系分代(2026-07 官方文档核实):fable-5/mythos-5/sonnet-5/opus-4.6+/sonnet-4.6
-  // 原生 1M(默认即 1M,无需 [1m] beta;CLI /context 对 sonnet-5 实测报 ~967k 印证);
-  // haiku 全系 200K;更老代(opus≤4.5、sonnet≤4.5、claude-3-x)200K(1M 需 [1m],走上方分支)。
-  // 旧表把全部 claude 系按 200K 算 → fable-5/Desktop opus 1M 会话首开徽章爆红 389k/200k(194%) 根因。
+  // Claude 系分代(证据:CLI 2.1.226 二进制模型注册表 + headless 实测):原生 1M(注册表
+  // native_1m:true)从 4.7 起 —— fable-5/mythos-5/opus-5/sonnet-5/opus-4.7/opus-4.8;
+  // 【4.6 一代(opus-4-6、sonnet-4-6)注册表写的是 window:200000】,只有 supports_1m_beta,
+  // 1M 必须靠 [1m] 后缀开(走本函数最上方分支);haiku 全系与更老代(opus≤4.5、sonnet≤4.5、
+  // claude-3-x)同为 200K。旧表把 4.6 一代记成 1M 是错的:/context 实测对裸 claude-opus-4-6
+  // 报 31k/200k,而本表在实测缺席时(新会话/探测超时)当分母 → 60% 的会话显示 12%,不预警
+  // 不压缩,一路撞 CLI 硬阻断线。反向的旧事故(全 claude 系一律 200K → fable-5 爆红
+  // 389k/200k)由下面 1M 那两支挡住,两边都不能再漂。
   // (?![\d-]) 两支对称:挡数字续接(sonnet-52)与带日期新代(sonnet-5-20260101)——后者按
   // 保守 200K 现状,由 1M 运行时推断(App.jsx 单次 ctxUsage 超窗证据,6bfc207)自愈。
   if (/claude|anthropic|opus|sonnet|haiku/.test(id)) {
     if (/fable|mythos/.test(id)) return 1_000_000;
-    if (/opus-?4-?[6-9]|opus-?[5-9](?![\d-])/.test(id)) return 1_000_000;
-    if (/sonnet-?4-?[6-9]|sonnet-?[5-9](?![\d-])/.test(id)) return 1_000_000;
+    if (/opus-?4-?[7-9]|opus-?[5-9](?![\d-])/.test(id)) return 1_000_000;
+    if (/sonnet-?4-?[7-9]|sonnet-?[5-9](?![\d-])/.test(id)) return 1_000_000;
     if (/^(opus|sonnet)$/.test(id)) return 1_000_000;   // CLI 别名 = 当前 tier 最新 → 1M
     return 200_000;                                     // haiku 全系 / opus≤4.5 / sonnet≤4.5 / claude-3-x
   }
