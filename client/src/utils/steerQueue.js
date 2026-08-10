@@ -35,16 +35,40 @@ export function steerSig(text) {
   return String(text || '').replace(/\s+/g, ' ').trim().slice(0, 80);
 }
 
-// 持久化消息里所有用户消息的签名集合(reconcileSteered 的输入)。
+// 持久化消息里所有用户消息的签名 → 该签名【最晚】一次落盘的时刻(ms)。
+// 判官必修-2:只有签名集合不够 —— 用户历史上发过同文(「继续」这类高频短句)时,
+// 新的同文注入消息会命中那条【旧】记录被误判"已落盘"→ 静默出队 = 丢字。所以带上时刻,
+// 由 sigLanded 只认「⚡ 之后」写进去的记录。无 timestamp 的记录记 0(= 永远算旧,
+// 宁可翻回也不误出队)。
 export function persistedUserSigs(persisted) {
-  const out = new Set();
+  const out = new Map();
   for (const m of (Array.isArray(persisted) ? persisted : [])) {
     if (m?.type !== 'user') continue;
     const t = Array.isArray(m.text) ? m.text.join('') : m.text;
     const sig = steerSig(t);
-    if (sig) out.add(sig);
+    if (!sig) continue;
+    const ts = m.timestamp ? Date.parse(m.timestamp) : NaN;
+    const at = Number.isFinite(ts) ? ts : 0;
+    if (at >= (out.get(sig) ?? -1)) out.set(sig, at);
   }
   return out;
+}
+
+// 落盘时刻容差:steeredAt 在 POST 之前取,CLI 落盘只会更晚,容差只兜毫秒级抖动。
+// 放大它就是放大"历史同文被当成本次落盘"的窗口,别调大。
+export const STEER_LAND_TOLERANCE_MS = 1000;
+
+// 这条已注入的消息,在它被 ⚡ 出去【之后】真落盘了吗?
+// 方向硬定死:拿不准一律算【没落盘】(翻回队列 → 用户看得见、可重发),
+// 因为误判"落盘了"就是静默丢字,无痕、不可恢复。
+export function sigLanded(sigMap, text, steeredAt) {
+  const sig = steerSig(text);
+  if (!sig || !sigMap) return false;
+  // Set 是旧口径(只有"有没有"),没时刻信息 → 退化成老行为
+  const at = typeof sigMap.get === 'function' ? sigMap.get(sig) : (sigMap.has?.(sig) ? Infinity : undefined);
+  if (at === undefined) return false;
+  if (!steeredAt) return true; // 条目没记 ⚡ 时刻(旧数据)→ 退回老口径,不误翻回制造双发
+  return at >= steeredAt - STEER_LAND_TOLERANCE_MS;
 }
 
 // 回合收尾的落地判定(替代旧设计里的"气泡回捞"):对每个已注入的队列条目查持久化 ——
@@ -56,12 +80,12 @@ export function persistedUserSigs(persisted) {
 export function reconcileSteered(list, landedSigs) {
   if (!Array.isArray(list) || !list.length) return list;
   if (!list.some(isSteered)) return list;
-  const sigs = landedSigs instanceof Set ? landedSigs : new Set();
+  const sigs = (landedSigs instanceof Map || landedSigs instanceof Set) ? landedSigs : new Map();
   const out = [];
   for (const m of list) {
     if (!isSteered(m)) { out.push(m); continue; }
-    if (sigs.has(steerSig(m.text))) continue; // 已落盘 → 出队
-    const { steerId, steerState, ...rest } = m; // eslint-disable-line no-unused-vars
+    if (sigLanded(sigs, m.text, m.steeredAt)) continue; // ⚡ 之后落盘 → 出队
+    const { steerId, steerState, steeredAt, ...rest } = m; // eslint-disable-line no-unused-vars
     out.push(rest); // 没落盘 → 翻回普通排队态
   }
   return out;
@@ -77,7 +101,7 @@ export function stripSteerState(queueMap) {
     if (!Array.isArray(list)) continue;
     out[k] = list.map((m) => {
       if (!isSteered(m)) return m;
-      const { steerId, steerState, ...rest } = m; // eslint-disable-line no-unused-vars
+      const { steerId, steerState, steeredAt, ...rest } = m; // eslint-disable-line no-unused-vars
       return rest;
     });
   }

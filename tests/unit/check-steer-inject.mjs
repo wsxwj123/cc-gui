@@ -6,8 +6,10 @@
 // 那一行【只把 s.idle 取反】:复用块要 idle(开新回合),注入要 !idle(并进在跑的回合)。
 // 对 idle slot 绝不能 push —— 那会开一个前端不知道的新回合(SSE 已 done 关闭,输出无人接)。
 //
-// 客户端:发送门在"回合进行中"改走注入,失败(409/网络)一律回落既有入队路径;队列排空/
-// 内部重发不注入;⚡ 从 interrupt+重发改成注入(Bug1 三种失效形态一并消失)。
+// 客户端(设计乙,用户实测后改版):发送门在"回合进行中"一律【入队】(0.2.283 行为),
+// 注入的唯一入口是队列条目上的「⚡ 并入」;注入成功后消息留在队列区换状态显示,不出队、
+// 不画乐观气泡 —— 出不出队由回合收尾的持久化核对(reconcileSteered)决定:
+// ⚡ 之后落盘 → 出队,没落盘 → 翻回可编辑排队态(不丢字)。
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -129,7 +131,7 @@ assert.ok(/lingering\.abort\?\.\abort\(\)/.test(chat), 'tearingDown 等待+强�
 
 // ── 3) 队列态机(真 import 纯函数)——— 设计乙的核心 ────────────────
 const { isSteered, firstDrainableIndex, firstSteerableIndex, reconcileSteered,
-  persistedUserSigs, steerSig, stripSteerState } = await import('../../client/src/utils/steerQueue.js');
+  persistedUserSigs, steerSig, sigLanded, stripSteerState } = await import('../../client/src/utils/steerQueue.js');
 
 const q1 = { text: '普通排队', queuedAt: 1 };
 const q2 = { text: '已注入', queuedAt: 2, steerId: 'u-1', steerState: 'sent' };
@@ -168,10 +170,35 @@ assert.equal(steerSig('  a   b \n'), 'a b');
 assert.ok(persistedUserSigs([{ type: 'turn', text: ['x'] }, { type: 'user', text: 'y' }]).has('y'));
 assert.equal(persistedUserSigs([{ type: 'turn', text: ['x'] }]).has('x'), false, '只认 user 记录');
 
+// (c2) 判官必修-2:历史同文不算落盘。签名口径是"全会话历史 + 前 80 字",用户以前发过
+//      「继续」这类高频短句时,回合中新排队的同文被 ⚡ 并入 → 回合被停(实际没落盘)→
+//      旧记录命中签名 → 误判"已落盘" → 静默出队 = 丢字,无痕不可恢复。故只认 ⚡ 之后落盘的。
+{
+  const T = 1_700_000_000_000;
+  const at = (ms) => new Date(ms).toISOString();
+  const item = { text: '继续', queuedAt: 9, steerId: 'u-2', steerState: 'sent', steeredAt: T };
+  const older = { type: 'user', text: '继续', timestamp: at(T - 60_000) };
+
+  const kept = reconcileSteered([item], persistedUserSigs([older]));
+  assert.deepEqual(kept.map((m) => m.text), ['继续'], '历史同文不算落盘 —— 只认 ⚡ 之后写进 jsonl 的记录(误判就是静默丢字)');
+  assert.equal(isSteered(kept[0]), false, '历史同文场景下条目翻回可编辑排队态');
+  assert.equal('steeredAt' in kept[0], false, '翻回时时刻字段一并清掉');
+
+  const fresh = { type: 'user', text: '继续', timestamp: at(T + 500) };
+  assert.deepEqual(reconcileSteered([item], persistedUserSigs([older, fresh])), [],
+    '⚡ 之后真落盘了 → 照常出队(别一律翻回,那是双发)');
+  assert.equal(persistedUserSigs([fresh, older]).get('继续'), T + 500, '同签名取【最晚】一次落盘时刻,新记录不被旧记录盖掉');
+  assert.equal(sigLanded(persistedUserSigs([{ type: 'user', text: '继续' }]), '继续', T), false,
+    '记录没 timestamp → 不算落盘(方向定死:宁翻回勿丢字)');
+  assert.equal(sigLanded(persistedUserSigs([older]), '继续', undefined), true,
+    '条目没记 steeredAt(旧数据)→ 退回"有就算落盘"的老口径,不制造双发');
+}
+
 // (d) 跨重启:steer 态是进程内在飞状态,恢复时必须洗掉 —— 否则 drain 永远跳过它 = 永久卡死
 {
-  const restored = stripSteerState({ sid: [q2], bad: 'not-an-array' });
+  const restored = stripSteerState({ sid: [{ ...q2, steeredAt: 123 }], bad: 'not-an-array' });
   assert.equal(isSteered(restored.sid[0]), false, 'localStorage 恢复的已注入条目退回普通排队态');
+  assert.equal('steeredAt' in restored.sid[0], false, 'steeredAt 同属在飞状态,跨重启一并洗掉');
   assert.equal(restored.sid[0].text, '已注入', '文字保留');
   assert.equal('bad' in restored, false, '畸形值滤掉');
 }
@@ -205,8 +232,10 @@ assert.ok(/signal: AbortSignal\.timeout\(4000\)/.test(app), '注入请求有超�
 
 // ── 7) ⚡ = 注入并原地标记,不出队(设计乙 ②)────────────────────
 assert.ok(/const idx = firstSteerableIndex\(q\);/.test(app), '⚡ 取第一条可引导的(跳过 hidden 与已注入)');
-assert.ok(/st\.replaceQueue\(queueKey, now\.map\(\(m, i\) => \(i === at \? \{ \.\.\.m, steerId, steerState: 'sent' \} : m\)\)\);/.test(app),
+assert.ok(/st\.replaceQueue\(queueKey, now\.map\(\(m, i\) => \(i === at \? \{ \.\.\.m, steerId, steerState: 'sent', steeredAt \} : m\)\)\);/.test(app),
   '注入成功 = 原地标成"已并入",消息留在队列区(不出队、不画气泡)');
+assert.ok(/const steeredAt = Date\.now\(\);\s*\n\s*let steerId = null;/.test(app),
+  'steeredAt 在 POST 【之前】取 —— CLI 落盘只可能更晚,取晚了会把自己这次落盘判成"旧记录"');
 assert.ok(/if \(at < 0\) return; \/\/ 用户在这期间把它删了/.test(app), '注入期间条目被删 → 不凭空塞回去');
 assert.ok(/setProviderSwitchNotice\(\{ text: '当前没有可并入的回合/.test(app),
   '409 维持现状:留队 + 客观提示,可以再点');
@@ -219,6 +248,14 @@ assert.ok(/const next = reconcileSteered\(list, sigs\);/.test(app), '复用纯�
 assert.equal((app.match(/if \(isCurrentTurn\(\)\) reconcileSteeredQueue\(getLocalMessages\(\)\);/g) || []).length, 2,
   '两个对账清空点(roundLanded 分支 + !producedReply 分支)都做落地判定');
 assert.ok(/有 \$\{back\} 条并入的消息本回合没有被读到/.test(app), '翻回时给明确提示,不闷声');
+// 判官必修-1:两个判定都写在 break 之前的分支里,12 轮轮询耗尽时循环从【底部掉出】——
+// producedReply 为真但 turn 没落盘(手动停止/进程被杀/interrupt 早期)正是这条高频路径。
+assert.ok(/if \(isCurrentTurn\(\) && getLocalSession\(\)\?\.sessionId === finalizeSid\) \{\s*\n\s*reconcileSteeredQueue\(lastPeeked \|\| getLocalMessages\(\)\);\s*\n\s*\}/.test(app),
+  '轮询耗尽掉出循环后补一次落地判定 —— 否则停止后条目挂死"已引导",不可编辑不可删不可重发');
+assert.ok(/let lastPeeked = null;[\s\S]{0,3000}?lastPeeked = peeked;/.test(app),
+  '兜底判定用最后一次 peek 到的持久化(store 副本停在回合开始前,更旧)');
+assert.ok(/if \(i < 11\) await new Promise\(\(r\) => setTimeout\(r, 200\)\);/.test(app),
+  '轮询次数/间隔本身不动(只补兜底调用)');
 assert.ok(!/rescueUnfoldedSteer/.test(app), '旧的"气泡回捞"实现已删净(它为旧设计服务)');
 assert.ok(/roundLanded = \(persisted, attempt\) => \{/.test(app) && /if \(!tail \|\| attempt >= 9\) return true;/.test(app),
   '对账判据 roundLanded 一字未动');

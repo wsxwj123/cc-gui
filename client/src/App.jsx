@@ -56,7 +56,7 @@ import { BUILTIN_PROVIDERS, findBuiltin } from './utils/builtinProviders.js';
 import { computeCost, formatCost, setUserPrices, observeOfficialBilling } from './utils/pricing.js';
 import { extractToolResultText, finalizePendingToolCalls, applyFinalizedToBlocks } from './utils/toolResult.js';
 import { rebuildTodosFromTaskCalls } from './utils/todos.js';
-import { isSteered, firstSteerableIndex, reconcileSteered, persistedUserSigs, steerSig } from './utils/steerQueue.js';
+import { isSteered, firstSteerableIndex, reconcileSteered, persistedUserSigs, sigLanded } from './utils/steerQueue.js';
 import { isInitBindingOrigin, migrateDraftQueue, paneMessagesOwned, resolveHistModel, resolveSelectorModel, resolveSendModel } from './utils/routing.js';
 import { nativeContextWindow, isBareClaudeAlias } from './utils/contextWindow.js';
 import {
@@ -4695,7 +4695,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // 引导消息自动落在真实的并入位置、AI 回应成独立新块,终态本来就是对的;而流式期间提前
   // 画的那个气泡贴在上一条用户消息之后、悬在流式块上方 = 错序。所以对话流里它只在回合
   // 结束 reconcile 时从 jsonl 出现;在此之前,它留在队列区换个状态显示。
-  // 返回 true = 已送达 CLI(调用方负责把队列条目标成"已并入"),false = 没送到。
+  // 返回 command uuid = 已送达 CLI(调用方拿它把队列条目标成"已并入"),null = 没送到。
   const steerCurrentTurn = useCallback(async (text, { meta = null } = {}) => {
     const body = String(text || '');
     if (!body.trim()) return null;
@@ -6443,7 +6443,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           if (next === list) return;
           st.replaceQueue(finalizeSid, next);
           // 翻回普通排队态的条数(落地的那些是直接出队,不提示)
-          const back = list.filter((m) => isSteered(m) && !sigs.has(steerSig(m.text))).length;
+          const back = list.filter((m) => isSteered(m) && !sigLanded(sigs, m.text, m.steeredAt)).length;
           if (back > 0) {
             setProviderSwitchNotice({ text: `有 ${back} 条并入的消息本回合没有被读到（回合先结束了），已退回队列，可编辑后再发。` });
           }
@@ -6470,6 +6470,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             : '';
           return ptext.includes(tail);
         };
+        let lastPeeked = null; // 最后一次 peek 到的持久化(循环耗尽时的兜底判定用它,比 store 副本新)
         for (let i = 0; i < 12; i++) {
           // Bail if the user navigated THIS pane to another session mid-finalize:
           // otherwise we'd fetch the old session into the now-current tab and clear
@@ -6488,7 +6489,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             // 该端点直接返回数组(res.json(messages)),不是 {messages:[]}。原来取 .messages
             // 永远是 undefined→peeked 恒为 []→roundLanded 恒 false→每轮空跑满 12 次(~2.4s)
             // 才回退,尾部落盘检测形同虚设。兼容两种形态。
-            if (r.ok) { const d = await r.json(); peeked = Array.isArray(d) ? d : (d?.messages || []); }
+            if (r.ok) { const d = await r.json(); peeked = Array.isArray(d) ? d : (d?.messages || []); lastPeeked = peeked; }
           } catch {}
           if (getLocalSession()?.sessionId !== finalizeSid || !isCurrentTurn()) break;
           if (!producedReply) {
@@ -6521,6 +6522,18 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             break;
           }
           if (i < 11) await new Promise((r) => setTimeout(r, 200));
+        }
+        // 判官必修-1:12 轮轮询耗尽会从循环【底部掉出】——producedReply 为真但 turn 没落盘
+        // (手动停止、进程被杀、interrupt 早期)就是这条路径,而它恰恰是需求⑤点名的场景。
+        // 两个落地判定都写在 break 之前的分支里,掉出时一个都不执行 → 已注入条目永远挂着
+        // "已引导",不可编辑不可删不可召回,要等下一个回合收尾或重启才解卡。这里补一次兜底。
+        // 守卫 = 循环内那两处的 isCurrentTurn 再加一条会话判等(循环里那两处本就跑在会话
+        // 判等之后):切走/开新回合的 break 路径不该由这里善后,此刻 store 副本已是别的会话
+        // 的历史,拿它比签名会张冠李戴。走到两个判定分支再掉出的情况,条目已不带 steerId,
+        // 这里天然空跑。数据优先用最后一次 peek 到的持久化(store 副本停在回合开始前,更旧,
+        // 只会更倾向翻回 = 安全侧)。
+        if (isCurrentTurn() && getLocalSession()?.sessionId === finalizeSid) {
+          reconcileSteeredQueue(lastPeeked || getLocalMessages());
         }
       }
       // BF-1:回合收尾清历史截断,历史渲染交还 jsonl。放在 finalize 循环之后:break 与
@@ -6893,6 +6906,10 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     // 自管 try/finally 复位,不依赖某条流的 finally 来清 —— 空闲态点 ⚡ 时没有任何 finally
     // 会来读它(那正是它当年永久挂 true 的老 bug)。
     acceleratingRef.current = true;
+    // 落地判定的时间基准(判官必修-2):在 POST 【之前】取 —— CLI 落盘只可能更晚,这样
+    // 「⚡ 之后落盘」的判据不会被自己的 await 窗口穿帮;历史上发过的同文旧记录则一律落在
+    // 这个时刻之前,不再被误认成"本次已落盘"(那等于静默丢字)。
+    const steeredAt = Date.now();
     let steerId = null;
     try {
       steerId = await steerCurrentTurnRef.current?.(head.text, { meta: head.opts?.meta });
@@ -6908,7 +6925,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     const now = st.messageQueue[queueKey] || [];
     const at = now[idx]?.text === head.text ? idx : now.findIndex((m) => m?.text === head.text);
     if (at < 0) return; // 用户在这期间把它删了 —— 消息已送达,不再凭空塞回去
-    st.replaceQueue(queueKey, now.map((m, i) => (i === at ? { ...m, steerId, steerState: 'sent' } : m)));
+    st.replaceQueue(queueKey, now.map((m, i) => (i === at ? { ...m, steerId, steerState: 'sent', steeredAt } : m)));
   }, [getLocalSession]);
 
   // Reset per-session UI state when the selectedSession object changes.
