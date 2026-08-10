@@ -249,6 +249,8 @@ app.use((req, res, next) => {
 app.use(cors((req, cb) => cb(null, {
   origin: (origin, originCb) => {
     if (isAllowedBrowserOrigin(origin, req)) return originCb(null, true);
+    // 拒了要留痕:曾因 403 不记来源,把 7 月的旧拦截噪音误当成隧道故障排查半天。
+    console.warn('[cors] blocked origin=%s host=%s path=%s', origin, requestHostname(req) || '(无)', req.originalUrl);
     const err = new Error('Cross-origin request blocked by Claude GUI');
     err.status = 403; // surfaced as a clean 403 by the error handler below
     return originCb(err);
@@ -815,8 +817,8 @@ const wss = new WebSocketServer({
   path: '/ws',
   verifyClient: (info) => {
     // WS 升级不经 express 中间件,须自带 DNS-rebinding 的 Host 白名单(同 HTTP 层)。
-    if (!isAllowedHost(info.req)) return false;
-    if (!isAllowedBrowserOrigin(info.origin || info.req?.headers?.origin, info.req)) return false;
+    if (!isAllowedHost(info.req)) { console.warn('[ws] blocked host=%s', requestHostname(info.req) || '(无)'); return false; }
+    if (!isAllowedBrowserOrigin(info.origin || info.req?.headers?.origin, info.req)) { console.warn('[ws] blocked origin=%s host=%s', info.origin || info.req?.headers?.origin, requestHostname(info.req) || '(无)'); return false; }
     if (!hasPassword()) return true;
     if (isLocalReq(info.req)) return true;
     return verifyToken(parseCookies(info.req).cgui_token);
