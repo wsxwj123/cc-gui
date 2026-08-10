@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import { nextDockCode } from '../utils/artifactDock.js';
 import { mergeSyncedMap, syncableKey, pushLocalOnlyKeys, createInFlightCounter, shouldMarkMigrated } from '../utils/sessionSync.js';
 import { FONT_OPTIONS, readingFontCss } from '../utils/systemFonts.js';
+import { firstDrainableIndex, stripSteerState } from '../utils/steerQueue.js';
 
 // Re-exported so existing importers (App.jsx) keep working; the list and its
 // css-resolution logic now live in utils/systemFonts.js alongside the enumeration.
@@ -478,7 +479,9 @@ export const useStore = create((set, get) => ({
     // 每个 value 都是队列数组 —— 不滤的话 [...list, msg] 之类会在消费处抛错。
     const out = {};
     for (const [k, val] of Object.entries(v)) { if (Array.isArray(val)) out[k] = val; }
-    return out;
+    // 恢复时洗掉 steer 态:它是【进程内在飞】的状态,跨重启必然失效。带着"已并入"回来的
+    // 条目会被 drain 永久跳过 = 消息永久卡在队列里(见 utils/steerQueue.js)。
+    return stripSteerState(out);
   })(),
 
   // Pending CLI permission requests waiting on the user. Each entry:
@@ -1495,15 +1498,24 @@ export const useStore = create((set, get) => ({
     // 原子 pop(#7):取 head 与写回 rest 必须在同一次 setState 里 —— 先 getState 再
     // setState 的两步写法下,并发调用方(流收尾 drain / ⚡引导)会各读到同一个 head,
     // 同一条排队消息被发出两遍。
+    // 设计乙:跳过【已注入(steer)】的条目 —— 它已经送达 CLI 在等这一回合读,drain 再发
+    // 一次就是双发。两个调用方(流收尾 drain / poll drain)都是排空,故判据放在这里一处
+    // 生效(见 utils/steerQueue.js 的 firstDrainableIndex)。
     let head = null;
     useStore.setState((s) => {
       const list = s.messageQueue[sessionKey] || [];
-      if (list.length === 0) return s;
-      head = list[0];
-      return { messageQueue: { ...s.messageQueue, [sessionKey]: list.slice(1) } };
+      const i = firstDrainableIndex(list);
+      if (i < 0) return s;
+      head = list[i];
+      return { messageQueue: { ...s.messageQueue, [sessionKey]: [...list.slice(0, i), ...list.slice(i + 1)] } };
     });
     return head;
   },
+  // 队列整体替换。用于两处:① steer 200 后把该条目原地标成"已并入";② 回合收尾的
+  // 落地判定(reconcileSteered)。调用方负责用纯函数算好新数组。
+  replaceQueue: (sessionKey, list) => set((s) => (
+    { messageQueue: { ...s.messageQueue, [sessionKey]: Array.isArray(list) ? list : [] } }
+  )),
   clearQueue: (sessionKey) => set((s) => {
     const next = { ...s.messageQueue };
     delete next[sessionKey];

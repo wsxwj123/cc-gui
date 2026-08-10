@@ -6,6 +6,7 @@ import { TodoPanel } from './TodoPanel.jsx';
 import { confirmDialog } from '../utils/confirmDialog.jsx';
 import { ImageLightbox } from './ImageLightbox.jsx';
 import { AnchoredPopover } from './SessionSelectors.jsx';
+import { isSteered, firstSteerableIndex } from '../utils/steerQueue.js';
 
 // Permission mode metadata — mirrors `claude --permission-mode <choice>`。
 // P2.1:文案对齐官方六档语义(RESEARCH-mode-semantics §④b);bypass 中文名保持「放任」。
@@ -752,8 +753,11 @@ export function ChatInput({ onSend, onStop, onStopBackground, onAccelerate, canS
     // ArrowUp 把最近入队的一条放回输入框并从队列移除(复用 onEditFromQueue 的出队+回填)。
     // 优先于历史导航——先召回队列,队列空了再翻历史。
     if (e.key === 'ArrowUp' && !e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey && text.trim() === '') {
+      // 已注入的条目跳过:它已经送达 CLI,召回到输入框等于给了一个撤不回来的撤回。
       let lastIdx = -1;
-      for (let i = queueItems.length - 1; i >= 0; i--) { if (!queueItems[i]?.hidden) { lastIdx = i; break; } }
+      for (let i = queueItems.length - 1; i >= 0; i--) {
+        if (!queueItems[i]?.hidden && !isSteered(queueItems[i])) { lastIdx = i; break; }
+      }
       if (lastIdx >= 0 && onEditFromQueue) {
         e.preventDefault();
         onEditFromQueue(lastIdx);
@@ -1213,15 +1217,19 @@ export function ChatInput({ onSend, onStop, onStopBackground, onAccelerate, canS
             <div className="px-3 py-1.5 flex items-center gap-2 border-b border-accent/15">
               <Send size={11} className="text-accent shrink-0" />
               <span className="text-ink-soft flex-1">
-                <b>{queueItems.filter((q) => !q.hidden).length}</b> 条消息已排队 · 当前回复完成后自动发出
+                {queueItems.filter((q) => !q.hidden && !isSteered(q)).length > 0 ? (
+                  <><b>{queueItems.filter((q) => !q.hidden && !isSteered(q)).length}</b> 条消息已排队 · 当前回复完成后自动发出</>
+                ) : (
+                  <>已引导 <b>{queueItems.filter((q) => !q.hidden).length}</b> 条 · 等待 AI 在本回合读取</>
+                )}
               </span>
               {onAccelerate && (
                 <button
                   onClick={onAccelerate}
-                  disabled={!canSteer}
+                  disabled={!canSteer || firstSteerableIndex(queueItems) < 0}
                   className="px-2 py-0.5 rounded bg-accent text-on-accent text-[10px] font-medium hover:bg-accent-hover disabled:opacity-40 disabled:hover:bg-accent"
                   title={canSteer
-                    ? '把这条消息并入当前回合：不打断生成，模型在下一个工具结果处读到它并调整后续动作。并入后不可撤回。'
+                    ? '把队列里的下一条消息并入当前回合：不打断生成，模型在下一个工具结果处读到它并调整后续动作。并入后不可撤回。'
                     : '当前没有可并入的回合（回合正在建立或已结束）。消息留在队列中，回合结束后自动发出。'}
                 >
                   ⚡ 并入
@@ -1233,9 +1241,19 @@ export function ChatInput({ onSend, onStop, onStopBackground, onAccelerate, canS
                 q.hidden ? null : // 隐藏续跑消息(如计划执行)不在队列里显示(#5);保留索引对齐 store
                 <li key={`${q.queuedAt}-${i}`} className="px-3 py-1.5 flex items-start gap-2 group hover:bg-accent/5">
                   <span className="text-[10px] text-ink-faint font-mono shrink-0 mt-0.5">#{i + 1}</span>
-                  <span className="text-ink-soft flex-1 line-clamp-2 leading-snug" title={q.text}>{q.text}</span>
+                  <div className="flex-1 min-w-0">
+                    <span className="text-ink-soft block line-clamp-2 leading-snug" title={q.text}>{q.text}</span>
+                    {/* 已注入(steer 已送达 CLI):不可编辑、不可撤回、排空也会跳过它。
+                        它出现在对话流里的时机由回合结束后的 jsonl 重排决定(真实并入位置);
+                        回合收尾若核对到它没被读到,会自动翻回普通排队态。 */}
+                    {isSteered(q) && (
+                      <span className="mt-0.5 block text-[10px] text-accent/80">
+                        {q.steerState === 'merged' ? '已并入当前回合 · 等待 AI 处理' : '已引导 · 等待 AI 读取'}
+                      </span>
+                    )}
+                  </div>
                   <div className="shrink-0 flex items-center gap-0.5 opacity-60 group-hover:opacity-100 transition-opacity">
-                    {onEditFromQueue && (
+                    {onEditFromQueue && !isSteered(q) && (
                       <button
                         onClick={() => onEditFromQueue(i)}
                         className="p-1 hover:bg-accent/15 rounded"
@@ -1244,7 +1262,7 @@ export function ChatInput({ onSend, onStop, onStopBackground, onAccelerate, canS
                         <Pencil size={11} className="text-accent" />
                       </button>
                     )}
-                    {onRemoveFromQueue && (
+                    {onRemoveFromQueue && !isSteered(q) && (
                       <button
                         onClick={() => onRemoveFromQueue(i)}
                         className="p-1 hover:bg-red-100 rounded"

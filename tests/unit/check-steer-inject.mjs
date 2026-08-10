@@ -127,104 +127,137 @@ assert.ok(/if \(!s\.idle \|\| s\.closing \|\| s\.pumpEnded \|\| s\.exitCode !== 
   'POST /chat 复用块的 idle 门一个字没动');
 assert.ok(/lingering\.abort\?\.\abort\(\)/.test(chat), 'tearingDown 等待+强杀段原样保留');
 
-// ── 3) 客户端:发送门分流 ─────────────────────────────────────────
+// ── 3) 队列态机(真 import 纯函数)——— 设计乙的核心 ────────────────
+const { isSteered, firstDrainableIndex, firstSteerableIndex, reconcileSteered,
+  persistedUserSigs, steerSig, stripSteerState } = await import('../../client/src/utils/steerQueue.js');
+
+const q1 = { text: '普通排队', queuedAt: 1 };
+const q2 = { text: '已注入', queuedAt: 2, steerId: 'u-1', steerState: 'sent' };
+const q3 = { text: '隐藏续跑', queuedAt: 3, hidden: true };
+
+// (a) 已注入的条目:drain 必须跳过 —— 它已送达 CLI,再发一次就是双发
+assert.equal(isSteered(q2), true);
+assert.equal(isSteered(q1), false);
+assert.equal(firstDrainableIndex([q2, q1]), 1, 'drain 跳过已注入条目,取下一条可发的');
+assert.equal(firstDrainableIndex([q2]), -1, '全是已注入 → 没得可发(不能退回发它)');
+assert.equal(firstDrainableIndex([q3, q1]), 0, 'hidden 项照旧参与 drain(它只是不在 UI 显示)');
+
+// (b) ⚡ 只对"用户可见且没注入过"的条目开放
+assert.equal(firstSteerableIndex([q3, q2, q1]), 2, '跳过 hidden 与已注入');
+assert.equal(firstSteerableIndex([q3, q2]), -1, '没有可引导的 → ⚡ 该置灰');
+
+// (c) 落地判定:查到了→出队;查不到→翻回普通排队态(可编辑、会被 drain 发出)
+{
+  const list = [q1, q2];
+  const landed = reconcileSteered(list, persistedUserSigs([{ type: 'user', text: '已注入' }]));
+  assert.deepEqual(landed.map((m) => m.text), ['普通排队'], '落盘了 → 从队列移除(它已是对话历史)');
+
+  const lost = reconcileSteered(list, persistedUserSigs([{ type: 'user', text: '别的消息' }]));
+  assert.deepEqual(lost.map((m) => m.text), ['普通排队', '已注入'], '没落盘 → 留在队列(不丢字)');
+  assert.equal(isSteered(lost[1]), false, '没落盘 → 翻回普通排队态(可编辑/可删/会被 drain 发出)');
+  assert.equal('steerState' in lost[1], false, '状态字段一并清干净');
+  assert.equal(lost[0], q1, '未注入条目原样不动(同一引用)');
+}
+// 无已注入条目时返回原引用(不打穿 React 引用比较)
+{
+  const l = [q1];
+  assert.equal(reconcileSteered(l, new Set()), l, '没有已注入条目 → 原引用返回');
+}
+// 文本签名:空白规整后比对(CLI 落盘可能规整空白)
+assert.equal(steerSig('  a   b \n'), 'a b');
+assert.ok(persistedUserSigs([{ type: 'turn', text: ['x'] }, { type: 'user', text: 'y' }]).has('y'));
+assert.equal(persistedUserSigs([{ type: 'turn', text: ['x'] }]).has('x'), false, '只认 user 记录');
+
+// (d) 跨重启:steer 态是进程内在飞状态,恢复时必须洗掉 —— 否则 drain 永远跳过它 = 永久卡死
+{
+  const restored = stripSteerState({ sid: [q2], bad: 'not-an-array' });
+  assert.equal(isSteered(restored.sid[0]), false, 'localStorage 恢复的已注入条目退回普通排队态');
+  assert.equal(restored.sid[0].text, '已注入', '文字保留');
+  assert.equal('bad' in restored, false, '畸形值滤掉');
+}
+
+// ── 4) 接线:store 的 drain 跳过 + 恢复清洗 ───────────────────────
+const store = read('client', 'src', 'stores', 'sessionStore.js');
+assert.ok(/import \{ firstDrainableIndex, stripSteerState \} from '\.\.\/utils\/steerQueue\.js';/.test(store),
+  'store 复用同一份纯函数,不另写一套判据');
+assert.ok(/const i = firstDrainableIndex\(list\);\s*\n\s*if \(i < 0\) return s;/.test(store),
+  'shiftMessage(两条 drain 的唯一出口)跳过已注入条目 —— 红线:再发一次就是双发');
+assert.ok(/return stripSteerState\(out\);/.test(store), 'localStorage 恢复时洗掉 steer 态');
+assert.ok(/replaceQueue: \(sessionKey, list\) => set\(/.test(store), '队列整体替换(标记/落地判定共用)');
+
+// ── 5) 发送门:回合进行中【默认入队】,不再默认注入(设计乙 ①)────────
 const app = read('client', 'src', 'App.jsx');
-assert.ok(/if \(!reattachPid && !opts\.forceSend && \(streamingRef\.current \|\| backgroundPidRef\.current\)\) \{/.test(app),
-  '发送门:forceSend(回滚/重做的重发)直接绕门 = 有意打断替换');
-assert.ok(/if \(_canSteer && !hiddenUserMessage && !_internalResend\s*\n\s*&& await steerCurrentTurnRef\.current\?\.\(prompt, \{ meta \}\)\) return;/.test(app),
-  '回合进行中的用户手打消息先试注入');
-// 判官致命-2:注入判据必须与 ⚡ 的 canSteer 同口径(ref 版)。用 streamingRef 会在
-// connecting 窗口空跑,更要命的是在回滚/重做的替换窗里把消息注入【注定被 tearingDown
-// 杀掉的旧 slot】→ 随 abort 一起丢(改动前只是入队,不会丢 = 净新增丢失路径)。
-assert.ok(/const _canSteer = !!\(activeProcRef\.current \|\| backgroundPidRef\.current\);/.test(app),
-  '注入前置 = 服务端确有本会话活 slot(activeProcRef 或 backgroundPidRef),与 canSteer 同口径');
-assert.ok(/const _internalResend = !!\(opts\.fromQueue \|\| opts\.freshRetry \|\| opts\.signatureRetry \|\| opts\.autoRetry\);/.test(app),
-  '队列排空与内部重发不注入(否则「入队」按钮失效 / 重发进了要被替换的回合)');
-// 承重点:注入失败必须回落入队 —— 删掉这一行就是"消息凭空消失"
-assert.ok(/&& await steerCurrentTurnRef[\s\S]{0,120}useStore\.getState\(\)\.enqueueMessage\(sessionQueueKey, \{ text: prompt/.test(app),
-  '注入失败(409/网络)紧接着回落 enqueueMessage,消息绝不丢');
-assert.ok(/if \(!r\.ok\) return false;/.test(app) && /\} catch \{ return false; \}/.test(app),
-  'steerCurrentTurn:非 2xx 与异常都返回 false(交给调用方入队)');
+assert.ok(/if \(!reattachPid && !opts\.forceSend && \(streamingRef\.current \|\| backgroundPidRef\.current\)\) \{\s*\n\s*useStore\.getState\(\)\.enqueueMessage\(sessionQueueKey, \{ text: prompt, queuedAt: Date\.now\(\), hidden: !!hiddenUserMessage, opts \}\);\s*\n\s*return;\s*\n\s*\}/.test(app),
+  '回合进行中直发 = 入队(0.2.283 行为);门里不得再有任何注入分流');
+assert.ok(!/_canSteer && !hiddenUserMessage/.test(app), '默认注入分流已撤掉');
+assert.ok(!/_internalResend/.test(app), 'fromQueue/freshRetry 等"别注入"的标记随之退役,不留死代码');
+assert.ok(/const resendReplacing = useCallback\(\(text, opts = \{\}\) => \{/.test(app)
+  && /handleSendRef\.current\?\.\(text, \{ \.\.\.opts, forceSend: true \}\);/.test(app),
+  'forceSend 绕门路径(回滚/重做)保持不动');
+
+// ── 6) 不再乐观画气泡(设计乙 ③)─────────────────────────────────
+assert.ok(!/steerId: cmdUuid, steerState: 'queued'/.test(app), '撤掉 steer 成功后立即 push 的本地用户气泡');
+assert.ok(!/\}, 10_000\);/.test(app), '气泡的 10s 角标兜底随气泡一起退役');
+assert.ok(!/msg\.steerState/.test(app), '消息流里不再渲染 steer 角标(位置交给回合结束后的 jsonl 重排)');
+assert.ok(/return cmdUuid;/.test(app) && /if \(!r\.ok\) return null;/.test(app),
+  'steerCurrentTurn 只回报送没送到(成功返回 command uuid,失败 null),不碰 chatMessages');
 assert.ok(/signal: AbortSignal\.timeout\(4000\)/.test(app), '注入请求有超时兜底,不裸等');
-assert.ok(/if \(!sid\) return false; \/\/ draft/.test(app), 'draft(无真 sid)不注入 → 回落入队');
 
-// 本地气泡必带 ownerKey(本仓铁律:凡新增 chatMessages 条目按归属门控渲染)
-assert.ok(/uuid: 'chat-user-' \+ Date\.now\(\), type: 'user', ownerKey: sid,/.test(app),
-  '注入的用户气泡必须带 ownerKey,否则注入后切走会串进别的会话');
-
-// ── 4) command_lifecycle 角标(未在 sdk.d.ts 声明 → 宽松解析)+ 不永卡 ──
-assert.ok(/if \(event\.type === 'command_lifecycle' && event\.command_uuid\) \{/.test(app),
-  '宽松解析 command_lifecycle(SDK 类型里没有,只做存在性判断)');
-assert.ok(/const merged = event\.state !== 'queued';/.test(app),
-  "started/completed → 已并入;只有 queued 保持排队态");
-assert.ok(/steerState: 'queued'/.test(app) && /steerState: null/.test(app),
-  '角标兜底:10s 没等到事件就摘掉(第三方 provider 可能不发)');
-assert.ok(/\}, 10_000\);/.test(app), '兜底定时器 10s');
-assert.ok(/msg\.steerState === 'merged' \? '已并入当前回合' : '已排队 · 等待并入当前回合'/.test(app),
-  '角标两态渲染');
-
-// ── 5) ⚡ 改道:注入,不再 interrupt+重发(Bug1)──────────────────
-assert.ok(!/const handleAccelerate = useCallback\(\(\) => \{[\s\S]{0,900}?POST[\s\S]{0,80}stop/.test(app),
-  '⚡ 里的 interrupt+重发链已整段删除(不留死代码)');
-assert.ok(/const handleAccelerate = useCallback\(async \(\) => \{[\s\S]{0,900}?steerCurrentTurnRef\.current\?\.\(head\.text/.test(app),
-  '⚡ = 把队首消息注入当前回合');
-assert.ok(/const idx = q\.findIndex\(\(m\) => m && !m\.hidden && m\.text\);/.test(app),
-  '按下标取第一条可见排队消息(队首是隐藏项时不能用 shiftMessage,会删错条)');
+// ── 7) ⚡ = 注入并原地标记,不出队(设计乙 ②)────────────────────
+assert.ok(/const idx = firstSteerableIndex\(q\);/.test(app), '⚡ 取第一条可引导的(跳过 hidden 与已注入)');
+assert.ok(/st\.replaceQueue\(queueKey, now\.map\(\(m, i\) => \(i === at \? \{ \.\.\.m, steerId, steerState: 'sent' \} : m\)\)\);/.test(app),
+  '注入成功 = 原地标成"已并入",消息留在队列区(不出队、不画气泡)');
+assert.ok(/if \(at < 0\) return; \/\/ 用户在这期间把它删了/.test(app), '注入期间条目被删 → 不凭空塞回去');
 assert.ok(/setProviderSwitchNotice\(\{ text: '当前没有可并入的回合/.test(app),
-  '注入失败给客观提示,消息留在队列里(不静默吞)');
-const chatInput = read('client', 'src', 'components', 'ChatInput.jsx');
-assert.ok(/disabled=\{!canSteer\}/.test(chatInput), 'connecting 窗口(无活 slot)⚡ 置灰');
-assert.ok(/canSteer = false/.test(chatInput), 'canSteer 默认 false:没传就按不可注入处理');
-assert.ok(/⚡ 并入/.test(chatInput), '按钮文案与新语义一致(不再是"中断当前回复")');
-assert.ok(/canSteer=\{!!\(liveChatPid \|\| backgroundPid\)\}/.test(app),
-  '可注入 = 前台流已拿到 pid 或回合已转后台');
+  '409 维持现状:留队 + 客观提示,可以再点');
+assert.ok(/acceleratingRef\.current = true;[\s\S]{0,400}?\} finally \{\s*\n\s*acceleratingRef\.current = false;\s*\n\s*\}/.test(app),
+  '注入 await 窗内与 drain 互斥(此刻条目还没被标 steerId,shiftMessage 的跳过判据兜不住)');
 
-// ── 6) Bug8 回滚重复:forceSend + 等停止落地 + 与 handleStop 对称记账 ────
-assert.ok(/const resendReplacing = useCallback\(\(text, opts = \{\}\) => \{/.test(app), '重发通道抽成一处');
-assert.ok(/if \(Date\.now\(\) < deadline && \(streamingRef\.current \|\| backgroundPidRef\.current\)\) \{/.test(app),
-  '发前轮询【两个】ref(v0.2.191 转后台漏判律),不是只看 streamingRef');
-assert.ok(/const deadline = Date\.now\(\) \+ 4000;/.test(app), '轮询上限 4s,超时也发(不裸 await 控制调用)');
-assert.ok(/handleSendRef\.current\?\.\(text, \{ \.\.\.opts, forceSend: true \}\);/.test(app),
-  '重发带 forceSend 绕过入队门(旧行为:撞门变排队 = 队列里多一条一模一样的)');
-assert.equal((app.match(/stoppedPidsRef\.current\.add\(String\(_r[bt]Pid\)\)/g) || []).length, 2,
-  '回滚与工具重做两个入口都要记被杀 pid(与 handleStop:6660 对称)');
-assert.equal((app.match(/const _r[bt]Pid = activeProcRef\.current \|\| backgroundPidRef\.current;/g) || []).length, 2,
-  'pid 取法与 handleStop 逐字一致:前台流与转后台两种形态都要记');
-// 两个重发入口都要立即清后台标记(state 下一帧才同步,重发 50ms 后落地 → ref 也要同步清)。
-// 锚在 updateStreaming(false) 之前,与切会话 poll 里那处(其后是 lastSeenPidRef)区分开。
-assert.equal((app.match(/backgroundPidRef\.current = null;[^\n]*\n\s*updateStreaming\(false\);/g) || []).length, 2,
-  '回滚与工具重做两个入口都清 backgroundPid(state + ref)');
-assert.ok(/resendReplacing\(\s*\n?\s*`<cgui-tool-retry/.test(app), 'handleRetryTool 同批改(否则同一个 bug 换个入口复现)');
-assert.ok(/resendReplacing\(resendText\.prompt \|\| originalText, resendText\.options \|\| \{\}\);/.test(app),
-  '编辑重发(handleRollback 的 resendText 分支)同一通道');
-
-// 判官重要-2:后台态也要真的发 /stop —— 只记账不发停,旧回合在新回合 tearingDown 4s
-// 强杀前会继续往刚裁剪的 jsonl 追加;带活 shell 时 tearingDown 直接放行不杀 = 双写。
-assert.equal((app.match(/\} else if \(backgroundPidRef\.current\) \{\s*\n(?:\s*\/\/[^\n]*\n)?\s*fetch\(`\/api\/chat\/\$\{backgroundPidRef\.current\}\/stop`[^\n]*hard: true/g) || []).length, 2,
-  '回滚与工具重做在后台态都要 fire-and-forget 发 hard /stop(handleStop 的第三件事)');
-
-// ── 6.5) 判官重要-1:未被折叠的注入消息在回合收尾时回捞进队列,不静默清掉 ────
-assert.ok(/const rescueUnfoldedSteer = \(locals, knownKeys\) => \{/.test(app), '回捞函数存在');
-assert.ok(/const lost = locals\.filter\(\(m\) => m\?\.steerId && m\.text && !knownKeys\.has\(tkey\(m\)\)\);/.test(app),
-  '判据只看"带 steerId 且持久化里查无此条",不碰对账核心');
-assert.ok(/for \(const m of lost\) \{\s*\n\s*useStore\.getState\(\)\.enqueueMessage\(finalizeSid, \{ text: m\.text/.test(app),
-  '回捞 = 放回消息队列(归属回合发起会话,不是当前 pane)');
-assert.equal((app.match(/if \(isCurrentTurn\(\)\) rescueUnfoldedSteer\(chatMessagesRef\.current,/g) || []).length, 2,
-  '两个清空点(roundLanded 分支 + !producedReply 分支)清之前都要先回捞');
-assert.ok(/有 \$\{lost\.length\} 条并入的消息本回合没有被读到/.test(app), '回捞给明确提示,不闷声');
+// ── 8) 回合收尾的落地判定接线(设计乙 ④)───────────────────────
+assert.ok(/const reconcileSteeredQueue = \(persisted\) => \{/.test(app), '落地判定函数存在');
+assert.ok(/const next = reconcileSteered\(list, sigs\);/.test(app), '复用纯函数,不另写判据');
+assert.equal((app.match(/if \(isCurrentTurn\(\)\) reconcileSteeredQueue\(getLocalMessages\(\)\);/g) || []).length, 2,
+  '两个对账清空点(roundLanded 分支 + !producedReply 分支)都做落地判定');
+assert.ok(/有 \$\{back\} 条并入的消息本回合没有被读到/.test(app), '翻回时给明确提示,不闷声');
+assert.ok(!/rescueUnfoldedSteer/.test(app), '旧的"气泡回捞"实现已删净(它为旧设计服务)');
 assert.ok(/roundLanded = \(persisted, attempt\) => \{/.test(app) && /if \(!tail \|\| attempt >= 9\) return true;/.test(app),
   '对账判据 roundLanded 一字未动');
 
-// ── 6.6) 判官建议-1:⚡ 的 await 窗内与 drain 互斥(acceleratingRef 复活)────
-assert.ok(/acceleratingRef\.current = true;\s*\n\s*let ok = false;\s*\n\s*try \{[\s\S]{0,200}?\} finally \{\s*\n\s*acceleratingRef\.current = false;\s*\n\s*\}/.test(app),
-  '⚡ 注入期间置起互斥旗并自管 finally 复位(不依赖某条流的 finally —— 那是老挂死 bug)');
+// ── 9) command_lifecycle:只做文案精确化,不参与落地判定(设计乙 ⑤)──
+assert.ok(/if \(event\.type === 'command_lifecycle' && event\.command_uuid && event\.state !== 'queued'\) \{/.test(app),
+  '宽松解析(SDK 类型里没有该事件),只认 started/completed');
+assert.ok(/\{ \.\.\.m, steerState: 'merged' \} : m\)\)\);/.test(app), '事件到了把队列条目文案精确到"已并入"');
 
-// ── 7) 附带发现2:旧流 finally 的三行加归属守卫 ───────────────────
+// ── 10) ChatInput:已注入条目不可编辑/不可撤回 + 状态文案 ──────────
+const chatInput = read('client', 'src', 'components', 'ChatInput.jsx');
+assert.ok(/import \{ isSteered, firstSteerableIndex \} from '\.\.\/utils\/steerQueue\.js';/.test(chatInput),
+  'UI 与 store 用同一份判据');
+assert.ok(/\{onEditFromQueue && !isSteered\(q\) && \(/.test(chatInput), '已注入 → 不给编辑按钮(撤不回来)');
+assert.ok(/\{onRemoveFromQueue && !isSteered\(q\) && \(/.test(chatInput), '已注入 → 不给删除按钮');
+assert.ok(/!queueItems\[i\]\?\.hidden && !isSteered\(queueItems\[i\]\)/.test(chatInput),
+  'ArrowUp 召回也要跳过已注入条目');
+assert.ok(/q\.steerState === 'merged' \? '已并入当前回合 · 等待 AI 处理' : '已引导 · 等待 AI 读取'/.test(chatInput),
+  '条目上显示状态(lifecycle 事件到了才精确到"已并入")');
+assert.ok(/disabled=\{!canSteer \|\| firstSteerableIndex\(queueItems\) < 0\}/.test(chatInput),
+  'connecting 置灰判据保留,外加"没有可引导条目"也置灰');
+assert.ok(/canSteer = false/.test(chatInput), 'canSteer 默认 false:没传就按不可注入处理');
+assert.ok(/canSteer=\{!!\(liveChatPid \|\| backgroundPid\)\}/.test(app), 'canSteer 判据不动');
+
+// ── 11) Bug8 回滚重复(不变):forceSend + 等停止落地 + 三件对称 ────
+assert.ok(/if \(Date\.now\(\) < deadline && \(streamingRef\.current \|\| backgroundPidRef\.current\)\) \{/.test(app),
+  '发前轮询【两个】ref(v0.2.191 转后台漏判律)');
+assert.ok(/const deadline = Date\.now\(\) \+ 4000;/.test(app), '轮询上限 4s,超时也发(不裸 await 控制调用)');
+assert.equal((app.match(/stoppedPidsRef\.current\.add\(String\(_r[bt]Pid\)\)/g) || []).length, 2,
+  '回滚与工具重做两个入口都记被杀 pid');
+assert.equal((app.match(/backgroundPidRef\.current = null;[^\n]*\n\s*updateStreaming\(false\);/g) || []).length, 2,
+  '两个入口都清 backgroundPid(state + ref)');
+assert.equal((app.match(/\} else if \(backgroundPidRef\.current\) \{\s*\n(?:\s*\/\/[^\n]*\n)?\s*fetch\(`\/api\/chat\/\$\{backgroundPidRef\.current\}\/stop`[^\n]*hard: true/g) || []).length, 2,
+  '后台态也真发 hard /stop(handleStop 的第三件事)');
+assert.ok(/resendReplacing\(\s*\n?\s*`<cgui-tool-retry/.test(app), 'handleRetryTool 同批');
+assert.ok(/resendReplacing\(resendText\.prompt \|\| originalText, resendText\.options \|\| \{\}\);/.test(app), '编辑重发同一通道');
+
+// ── 12) 附带发现2:旧流 finally 的归属守卫(不变)──────────────────
 assert.ok(/if \(isCurrentTurn\(\)\) \{\s*\n\s*updateStreaming\(false\);\s*\n\s*activeProcRef\.current = null;\s*\n\s*abortRef\.current = null;/.test(app),
-  'connecting 窗口下迟到的旧 finally 不得把【新回合】的停止句柄清成 null(否则新回合停不掉)');
-
-// ── 8) 队列排空三条路径的 fromQueue 标记 ─────────────────────────
-assert.equal((app.match(/fromQueue: true \}\)/g) || []).length, 2,
-  'finally 排空 + poll 排空两条 drain 都标 fromQueue(⚡ 已不走 handleSend)');
+  'connecting 窗口下迟到的旧 finally 不得把【新回合】的停止句柄清成 null');
 
 console.log('PASS check-steer-inject');
