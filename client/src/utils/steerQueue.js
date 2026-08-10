@@ -54,6 +54,21 @@ export function persistedUserSigs(persisted) {
   return out;
 }
 
+// 持久化消息里所有能指认"这条引导消息落盘了"的 id。两种落盘形态各出一个键(实测 CLI 2.1.226):
+//   形态 A(有工具边界,折叠进同一回合):磁盘上没有 user 行,只有 attachment{queued_command},
+//     reader 合成的消息带 steerUuid = 我们 push 时传的 command uuid;
+//   形态 B(纯文本回合,排到回合末另起新回合):真 user 行,其 uuid 就是那个 command uuid。
+// 两个字段都收进同一个集合,落地判定用 steerId 直接命中 —— 比签名精确,不受同文/空白规整影响。
+export function persistedSteerKeys(persisted) {
+  const out = new Set();
+  for (const m of (Array.isArray(persisted) ? persisted : [])) {
+    if (m?.type !== 'user') continue;
+    if (m.uuid) out.add(m.uuid);
+    if (m.steerUuid) out.add(m.steerUuid);
+  }
+  return out;
+}
+
 // 落盘时刻容差:steeredAt 在 POST 之前取,CLI 落盘只会更晚,容差只兜毫秒级抖动。
 // 放大它就是放大"历史同文被当成本次落盘"的窗口,别调大。
 export const STEER_LAND_TOLERANCE_MS = 1000;
@@ -71,20 +86,30 @@ export function sigLanded(sigMap, text, steeredAt) {
   return at >= steeredAt - STEER_LAND_TOLERANCE_MS;
 }
 
+// 单条已注入条目的落地判定。两级判据,顺序不可颠倒:
+//   ① steerId 精确命中(persistedSteerKeys)—— 权威,两种落盘形态都覆盖;
+//   ② 退回签名 + steeredAt 时刻兜底 —— 给没有 steerId 的旧数据,以及 id 因故对不上的情况。
+// 方向仍旧硬定死:两级都拿不准 = 没落盘(翻回队列可见可重发),误判"落盘了"是静默丢字。
+export function steerLanded(item, sigMap, steerKeys) {
+  if (!item) return false;
+  if (item.steerId && steerKeys?.has?.(item.steerId)) return true;
+  return sigLanded(sigMap, item.text, item.steeredAt);
+}
+
 // 回合收尾的落地判定(替代旧设计里的"气泡回捞"):对每个已注入的队列条目查持久化 ——
 //   查到了 → CLI 真读了它,从队列移除(它已是对话历史的一部分);
 //   查不到 → 折叠之前回合就被停/进程死了,那条命令随 CLI 内存队列一起没了 →
 //            退回普通排队态(steerId/steerState 清掉),用户可编辑、可删、也会被 drain
 //            正常发出。**一个字都不丢**,这就是撤掉气泡回捞后"无丢失"的承载点。
 // 未注入的条目原样不动。无变化时返回原数组引用(不打穿 React 的引用比较)。
-export function reconcileSteered(list, landedSigs) {
+export function reconcileSteered(list, landedSigs, steerKeys) {
   if (!Array.isArray(list) || !list.length) return list;
   if (!list.some(isSteered)) return list;
   const sigs = (landedSigs instanceof Map || landedSigs instanceof Set) ? landedSigs : new Map();
   const out = [];
   for (const m of list) {
     if (!isSteered(m)) { out.push(m); continue; }
-    if (sigLanded(sigs, m.text, m.steeredAt)) continue; // ⚡ 之后落盘 → 出队
+    if (steerLanded(m, sigs, steerKeys)) continue; // ⚡ 之后落盘(id 命中或签名+时刻)→ 出队
     const { steerId, steerState, steeredAt, ...rest } = m; // eslint-disable-line no-unused-vars
     out.push(rest); // 没落盘 → 翻回普通排队态
   }

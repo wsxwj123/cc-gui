@@ -56,7 +56,7 @@ import { BUILTIN_PROVIDERS, findBuiltin } from './utils/builtinProviders.js';
 import { computeCost, formatCost, setUserPrices, observeOfficialBilling } from './utils/pricing.js';
 import { extractToolResultText, finalizePendingToolCalls, applyFinalizedToBlocks } from './utils/toolResult.js';
 import { rebuildTodosFromTaskCalls } from './utils/todos.js';
-import { isSteered, firstSteerableIndex, reconcileSteered, persistedUserSigs, sigLanded } from './utils/steerQueue.js';
+import { isSteered, firstSteerableIndex, reconcileSteered, persistedUserSigs, persistedSteerKeys, steerLanded } from './utils/steerQueue.js';
 import { isInitBindingOrigin, migrateDraftQueue, paneMessagesOwned, resolveHistModel, resolveSelectorModel, resolveSendModel } from './utils/routing.js';
 import { nativeContextWindow, isBareClaudeAlias } from './utils/contextWindow.js';
 import {
@@ -6434,16 +6434,20 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         //            翻回普通排队态,可编辑可删,也会被 drain 正常发出 = 一个字都不丢。
         // 判据只看"落没落盘",不看 command_lifecycle(第三方 provider 未必发);对账核心
         // roundLanded 一字未动,这里只是它旁边独立的一步。纯逻辑在 utils/steerQueue.js。
+        // R7-2:先用 steerId 精确匹配(persistedSteerKeys 收 user 消息的 uuid 与 steerUuid,
+        // 覆盖折叠/排到回合末两种落盘形态),命中不了才退回签名+steeredAt 时刻兜底 ——
+        // 只认签名会把折叠形态判成"没落盘" → 翻回队列 → drain 再发一遍 = 双发。
         const reconcileSteeredQueue = (persisted) => {
           const st = useStore.getState();
           const list = st.messageQueue[finalizeSid];
           if (!list?.length || !list.some(isSteered)) return;
           const sigs = persistedUserSigs(persisted);
-          const next = reconcileSteered(list, sigs);
+          const keys = persistedSteerKeys(persisted);
+          const next = reconcileSteered(list, sigs, keys);
           if (next === list) return;
           st.replaceQueue(finalizeSid, next);
           // 翻回普通排队态的条数(落地的那些是直接出队,不提示)
-          const back = list.filter((m) => isSteered(m) && !sigLanded(sigs, m.text, m.steeredAt)).length;
+          const back = list.filter((m) => isSteered(m) && !steerLanded(m, sigs, keys)).length;
           if (back > 0) {
             setProviderSwitchNotice({ text: `有 ${back} 条并入的消息本回合没有被读到（回合先结束了），已退回队列，可编辑后再发。` });
           }

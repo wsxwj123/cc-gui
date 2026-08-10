@@ -131,7 +131,8 @@ assert.ok(/lingering\.abort\?\.\abort\(\)/.test(chat), 'tearingDown 等待+强�
 
 // ── 3) 队列态机(真 import 纯函数)——— 设计乙的核心 ────────────────
 const { isSteered, firstDrainableIndex, firstSteerableIndex, reconcileSteered,
-  persistedUserSigs, steerSig, sigLanded, stripSteerState } = await import('../../client/src/utils/steerQueue.js');
+  persistedUserSigs, persistedSteerKeys, steerLanded, steerSig, sigLanded,
+  stripSteerState } = await import('../../client/src/utils/steerQueue.js');
 
 const q1 = { text: '普通排队', queuedAt: 1 };
 const q2 = { text: '已注入', queuedAt: 2, steerId: 'u-1', steerState: 'sent' };
@@ -194,6 +195,67 @@ assert.equal(persistedUserSigs([{ type: 'turn', text: ['x'] }]).has('x'), false,
     '条目没记 steeredAt(旧数据)→ 退回"有就算落盘"的老口径,不制造双发');
 }
 
+// (c3) R7-2:steerId 精确对账。只认签名的老口径在【折叠形态】上直接破功 ——
+//      实测 CLI 2.1.226:回合里还有工具边界时,注入的消息被折叠进同一回合,磁盘上【没有
+//      user 行】,原文只存在于 attachment{queued_command}。签名查不到 → 判"没落盘" →
+//      翻回队列 → drain 再发一遍 = 双发(乙的两条硬红线之一被打穿,只因用户测的是纯文本
+//      回合才没踩到)。修法:reader 合成的消息带 steerUuid,真 user 行本身 uuid 就是
+//      command uuid,两个字段一起进 persistedSteerKeys,用 steerId 直接命中。
+{
+  const T = 1_700_000_000_000;
+  const at = (ms) => new Date(ms).toISOString();
+  const CMD = 'cmd-uuid-42';
+  const item = { text: '改主意了：只数到15就停', queuedAt: 1, steerId: CMD, steerState: 'sent', steeredAt: T };
+
+  // 形态 A:折叠 —— reader 合成的消息,uuid 是 attachment 自己的,steerUuid 才是 command uuid
+  const foldMsg = { type: 'user', uuid: 'fb7d5660-attachment', steered: true, steerUuid: CMD,
+    text: '改主意了：只数到15就停', timestamp: at(T + 300) };
+  const keysA = persistedSteerKeys([foldMsg]);
+  assert.ok(keysA.has(CMD), 'steerUuid 必须进集合 —— 折叠形态唯一能指认落盘的 id');
+  assert.ok(keysA.has('fb7d5660-attachment'), 'uuid 也进集合(形态 B 靠它)');
+  assert.equal(steerLanded(item, persistedUserSigs([foldMsg]), keysA), true, '折叠形态:steerUuid 命中 → 已落盘');
+  assert.deepEqual(reconcileSteered([item], persistedUserSigs([foldMsg]), keysA), [], '折叠形态照常出队(不出 = 双发)');
+
+  // 形态 B:排到回合末 —— 真 user 行,uuid 就是 command uuid
+  const drainMsg = { type: 'user', uuid: CMD, text: '改主意了：只数到15就停', timestamp: at(T + 300) };
+  const keysB = persistedSteerKeys([drainMsg]);
+  assert.equal(steerLanded(item, persistedUserSigs([drainMsg]), keysB), true, '形态 B:user 行 uuid 命中 → 已落盘');
+  assert.deepEqual(reconcileSteered([item], persistedUserSigs([drainMsg]), keysB), [], '形态 B 照常出队');
+
+  // id 匹配的【独有】承重点:落地判定不再依赖时间戳与文本规整。签名兜底对"没有可用
+  // 时间戳的记录"一律判没落盘(它的方向红线:宁翻回勿丢字),放在折叠形态上就是翻回 →
+  // drain 再发一遍 = 双发。有 id 就能直接认出"这就是我们推的那条",与时刻无关。
+  // (删掉 steerLanded 里的 id 命中那一行,下面两条必红 —— 这是本节的变异哨兵。)
+  const noTs = { type: 'user', uuid: 'fb7d5660-attachment', steered: true, steerUuid: CMD, text: '改主意了：只数到15就停' };
+  assert.equal(sigLanded(persistedUserSigs([noTs]), item.text, item.steeredAt), false,
+    '签名兜底:记录没时间戳 → 判没落盘(它的既有方向,未改)');
+  assert.equal(steerLanded(item, persistedUserSigs([noTs]), persistedSteerKeys([noTs])), true,
+    'id 命中 → 照样判已落盘,不受时间戳缺失影响(否则同一条消息会被 drain 再发一遍)');
+  assert.deepEqual(reconcileSteered([item], persistedUserSigs([noTs]), persistedSteerKeys([noTs])), [],
+    'id 命中即出队 —— 精确匹配是主判据,签名只是兜底');
+
+  // 精确匹配不是万能开关:id 命中【只在真有那条记录时】发生,别的会话/别的消息不会误命中
+  const foreign = persistedSteerKeys([{ type: 'user', uuid: 'someone-else', text: '别的消息', timestamp: at(T + 300) }]);
+  assert.equal(steerLanded(item, persistedUserSigs([]), foreign), false, 'id 不在集合里 → 不算落盘');
+
+  // 时刻过滤仍然生效:id 没命中时退回签名兜底,历史同文旧记录不许把它判成落盘(否则静默丢字)
+  const older = { type: 'user', uuid: 'old-row', text: '改主意了：只数到15就停', timestamp: at(T - 60_000) };
+  const kept = reconcileSteered([item], persistedUserSigs([older]), persistedSteerKeys([older]));
+  assert.deepEqual(kept.map((m) => m.text), ['改主意了：只数到15就停'], 'id 不命中 + 只有更早的同文 → 不出队(时刻过滤没被精确匹配架空)');
+  assert.equal(isSteered(kept[0]), false, '不出队时照旧翻回可编辑排队态');
+
+  // 无 steerId 的旧数据(0.2.283 之前入队的条目):走签名兜底,行为与改动前一致
+  const legacy = { text: '继续', queuedAt: 2, steerState: 'sent', steeredAt: T };
+  assert.equal(isSteered(legacy), false, '没有 steerId 就不是"已注入"条目(判据未变)');
+  const legacyWithId = { ...legacy, steerId: 'ghost-id' };
+  assert.equal(steerLanded(legacyWithId, persistedUserSigs([{ type: 'user', text: '继续', timestamp: at(T + 10) }]), new Set()),
+    true, 'id 集合为空 → 签名+时刻兜底照旧判定落盘');
+  assert.equal(steerLanded(legacyWithId, persistedUserSigs([{ type: 'user', text: '继续', timestamp: at(T - 10_000) }]), new Set()),
+    false, '兜底路径的时刻口径原样保留');
+  assert.equal(steerLanded({ text: 'x' }, new Map(), new Set()), false, '两级都拿不准 → 一律算没落盘(方向红线)');
+  assert.equal(persistedSteerKeys([{ type: 'turn', uuid: 'turn-uuid' }]).has('turn-uuid'), false, '只收 user 消息的 id');
+}
+
 // (d) 跨重启:steer 态是进程内在飞状态,恢复时必须洗掉 —— 否则 drain 永远跳过它 = 永久卡死
 {
   const restored = stripSteerState({ sid: [{ ...q2, steeredAt: 123 }], bad: 'not-an-array' });
@@ -244,7 +306,10 @@ assert.ok(/acceleratingRef\.current = true;[\s\S]{0,400}?\} finally \{\s*\n\s*ac
 
 // ── 8) 回合收尾的落地判定接线(设计乙 ④)───────────────────────
 assert.ok(/const reconcileSteeredQueue = \(persisted\) => \{/.test(app), '落地判定函数存在');
-assert.ok(/const next = reconcileSteered\(list, sigs\);/.test(app), '复用纯函数,不另写判据');
+assert.ok(/const sigs = persistedUserSigs\(persisted\);\s*\n\s*const keys = persistedSteerKeys\(persisted\);\s*\n\s*const next = reconcileSteered\(list, sigs, keys\);/.test(app),
+  '复用纯函数,不另写判据;steerId 精确匹配的 keys 必须一起传进去(不传 = 折叠形态判成没落盘 = 双发)');
+assert.ok(/const back = list\.filter\(\(m\) => isSteered\(m\) && !steerLanded\(m, sigs, keys\)\)\.length;/.test(app),
+  '"翻回几条"的计数与出队判据必须同一个函数,否则提示条数与实际行为对不上');
 assert.equal((app.match(/if \(isCurrentTurn\(\)\) reconcileSteeredQueue\(getLocalMessages\(\)\);/g) || []).length, 2,
   '两个对账清空点(roundLanded 分支 + !producedReply 分支)都做落地判定');
 assert.ok(/有 \$\{back\} 条并入的消息本回合没有被读到/.test(app), '翻回时给明确提示,不闷声');
