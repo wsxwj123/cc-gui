@@ -4457,9 +4457,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
               const s2 = getLocalSession();
               if ((s2?.sessionId || `draft-${s2?.projectHash || 'none'}`) !== drainKey) return;
               const q = useStore.getState().shiftMessage(drainKey);
-              // fromQueue:排空出来的消息不得走引导注入(那等于"入队"按钮失效),
-              // 撞上新流时维持原行为——重新入队等下一次排空。
-              if (q?.text) handleSendRef.current?.(q.text, { ...(q.opts || (q.hidden ? { hiddenUserMessage: true } : {})), fromQueue: true });
+              if (q?.text) handleSendRef.current?.(q.text, q.opts || (q.hidden ? { hiddenUserMessage: true } : {}));
             }, 50);
           }
         }
@@ -4688,39 +4686,32 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     });
   }, [getLocalSession, selectedProject, sessionQueueKey, setChatMessages, setStreamOwner]);
 
-  // ── 引导注入(设计甲):回合进行中直发 = 不打断,把消息推进【正在跑的那个回合】────
-  // CLI 原生语义(实测):回车不打断,消息在下一个工具结果边界被折叠进同一回合。服务端
-  // POST /api/chat/steer 对忙 slot 做 input.push;没有活回合(connecting 窗口 / slot 已
-  // 转 idle)返回 409 —— 调用方一律回落到既有入队路径,消息绝不丢。
-  // 返回 true = 已注入(用户气泡已上屏),false = 未注入(调用方负责入队)。
+  // ── 引导注入(设计乙):把一条【已在队列里】的消息推进正在跑的回合,不打断 ────────
+  // CLI 原生语义(实测):回合进行中推第二条 user 消息不中断,CLI 在下一个工具结果边界
+  // 把它折叠进同一回合。服务端 POST /api/chat/steer 对忙 slot 做 input.push;没有活回合
+  // (connecting 窗口 / slot 已转 idle / 队列已关)返回 409。
+  // 【设计乙的关键改动】注入成功后**不画本地气泡** —— 用户实测:回合结束后从 jsonl 重排,
+  // 引导消息自动落在真实的并入位置、AI 回应成独立新块,终态本来就是对的;而流式期间提前
+  // 画的那个气泡贴在上一条用户消息之后、悬在流式块上方 = 错序。所以对话流里它只在回合
+  // 结束 reconcile 时从 jsonl 出现;在此之前,它留在队列区换个状态显示。
+  // 返回 true = 已送达 CLI(调用方负责把队列条目标成"已并入"),false = 没送到。
   const steerCurrentTurn = useCallback(async (text, { meta = null } = {}) => {
     const body = String(text || '');
-    if (!body.trim()) return false;
+    if (!body.trim()) return null;
     const sel = getLocalSession();
     const sid = sel?.sessionId;
-    if (!sid) return false; // draft 还没拿到真 sid → 服务端按 sessionId 找不到 slot
+    if (!sid) return null; // draft 还没拿到真 sid → 服务端按 sessionId 找不到 slot
     const cmdUuid = (globalThis.crypto?.randomUUID?.() || `steer-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`);
     try {
       const r = await fetch('/api/chat/steer', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ sessionId: sid, content: body, uuid: cmdUuid }),
-        // 本地路由同步返回;超时兜底防"后端挂死时消息卡在半空"(失败即回落入队)。
+        // 本地路由同步返回;超时兜底防"后端挂死时消息卡在半空"(失败=消息留在队列里)。
         signal: AbortSignal.timeout(4000),
       });
-      if (!r.ok) return false;
-    } catch { return false; }
-    // 用户气泡立即上屏。ownerKey 必带(本仓铁律:凡新增 chatMessages 本地条目一律按归属
-    // 门控渲染)—— 注入期间用户切走会话,气泡不得串进别的会话。
-    setChatMessages((prev) => [...prev, {
-      uuid: 'chat-user-' + Date.now(), type: 'user', ownerKey: sid,
-      timestamp: new Date().toISOString(), text: body,
-      // 注入不拍 git 检查点:回合进行中文件正被改写,此刻的快照对"回滚到这条消息"没有意义。
-      checkpointSha: null,
-      attachments: meta?.attachments,
-      displayText: meta?.displayText,
-      steerId: cmdUuid, steerState: 'queued',
-    }]);
+      if (!r.ok) return null;
+    } catch { return null; }
     // 附件 sidecar:与普通发送同一套(按 textHash 索引),否则回合落盘后从 jsonl 重画的
     // 气泡拿不到缩略图。
     if (meta?.attachments?.length > 0) {
@@ -4729,15 +4720,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         body: JSON.stringify({ text: body, attachments: meta.attachments, displayText: meta.displayText || '' }),
       }).catch(() => {});
     }
-    // 角标兜底:command_lifecycle 是实跑可见但未在 sdk.d.ts 声明的事件,第三方 provider
-    // 未必发 —— 10s 没等到 started 就把角标摘掉,绝不永久停在"已排队"。
-    setTimeout(() => {
-      setChatMessages((prev) => (prev.some((m) => m.steerId === cmdUuid && m.steerState === 'queued')
-        ? prev.map((m) => (m.steerId === cmdUuid && m.steerState === 'queued' ? { ...m, steerState: null } : m))
-        : prev));
-    }, 10_000);
-    return true;
-  }, [getLocalSession, setChatMessages]);
+    return cmdUuid;
+  }, [getLocalSession]);
   const steerCurrentTurnRef = useRef(null);
   useEffect(() => { steerCurrentTurnRef.current = steerCurrentTurn; }, [steerCurrentTurn]);
 
@@ -4821,28 +4805,13 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     // H 转后台:backgroundPid 有值=本会话回合仍在服务端跑(streamingRef 已被 detach 置 false)。
     // 也要入队——否则直发会 --resume 同一 jsonl 与后台回合双写(server 只复用 idle slot,
     // busy slot 会另起进程)。队列在后台回合完成时由 backgroundPid 轮询分支排空(见 poll)。
-    // 设计甲(Bug4):用户【当场手打】的消息改走无打断注入(steer),不再默认排队 —— 与 CLI
-    // 原生一致(回车不打断、折叠进当前回合)。三类调用不注入,维持原入队行为:
-    //   ① forceSend:回滚/重做的重发,是【有意打断替换】,连队列门都不进(见下面的门本身);
-    //   ② fromQueue:三条 drain 路径把队列消息喂回来的,注入了就等于"入队"按钮失效;
-    //   ③ hiddenUserMessage:计划续跑/工具重做等系统消息,语义就是排到回合结束(#5)。
-    // 注入失败(connecting 窗口没有活 slot / 网络失败)一律回落入队,消息绝不丢。
+    // 设计乙(用户实测后定稿):回合进行中直发【一律入队】,与 0.2.283 行为一致。
+    // 0.2.284 曾让手打消息默认走无打断注入(steer),用户实测打回:注入本身没问题(回合
+    // 结束后从 jsonl 重排,位置与独立回应块都正确),但流式期间提前画的本地气泡会贴在上
+    // 一条用户消息之后、悬在流式块上方 = 错序。故默认退回排队,注入改为【显式动作】——
+    // 队列条目上的「⚡ 并入」按钮(handleAccelerate)。
+    // forceSend(回滚/重做的重发 = 有意打断替换)照旧连这道门都不进。
     if (!reattachPid && !opts.forceSend && (streamingRef.current || backgroundPidRef.current)) {
-      // 内部重发(队列排空 / 失效会话 freshRetry / 签名失配 signatureRetry / auto 档回退
-      // autoRetry)一律不注入:它们要么是"排到回合结束"的队列语义,要么是"这一回合失败了、
-      // 重开一个"的语义,注入进正在跑的回合都是错的。用户手打的消息不带这些标记。
-      const _internalResend = !!(opts.fromQueue || opts.freshRetry || opts.signatureRetry || opts.autoRetry);
-      // 注入的前置判据必须与 ⚡ 的 canSteer 同口径(判官致命-2):门本身用
-      // streamingRef 是对的(它管"要不要拦"),但"能不能注入"要看【服务端确实有本会话的
-      // 活 slot】= activeProcRef(前台流已拿到 pid)或 backgroundPidRef(回合已转后台)。
-      // 两者皆空的两种形态都必须回落入队,不能试注入:
-      //   · connecting 窗口:POST /chat 还没回 pid,注入必 409(白跑一趟);
-      //   · 回滚/重做的替换窗:resendReplacing 已同步清空两个 ref、新回合正靠服务端
-      //     tearingDown 等 4s 强杀旧 slot —— 此刻注入会打进那个【注定被杀的旧 slot】,
-      //     消息随 abort 一起消失(改动前它只会被入队,不会丢 = 净新增的丢失路径)。
-      const _canSteer = !!(activeProcRef.current || backgroundPidRef.current);
-      if (_canSteer && !hiddenUserMessage && !_internalResend
-        && await steerCurrentTurnRef.current?.(prompt, { meta })) return;
       useStore.getState().enqueueMessage(sessionQueueKey, { text: prompt, queuedAt: Date.now(), hidden: !!hiddenUserMessage, opts });
       return;
     }
@@ -6667,8 +6636,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         const next = queueKey === curKey ? useStore.getState().shiftMessage(queueKey) : null;
         if (next?.text) {
           // 透传入队时的 opts(尤其 hiddenUserMessage)——否则计划执行这种隐藏续跑消息
-          // 出队重发时会变成可见的用户气泡(#5)。fromQueue 同 poll 排空:排队消息不走注入。
-          setTimeout(() => handleSendRef.current?.(next.text, { ...(next.opts || (next.hidden ? { hiddenUserMessage: true } : {})), fromQueue: true }), 50);
+          // 出队重发时会变成可见的用户气泡(#5)。
+          setTimeout(() => handleSendRef.current?.(next.text, next.opts || (next.hidden ? { hiddenUserMessage: true } : {})), 50);
         }
       }
       acceleratingRef.current = false;
@@ -7903,19 +7872,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                           </div>
                         )}
                       </>
-                    : <>
-                        <MessageBubble message={{ ...msg, role: msg.type }}
-                          onRollback={msg.type === 'user' ? handleRollback : undefined} />
-                        {/* 引导注入的状态角标(command_lifecycle 驱动;事件缺席时 10s 自动摘掉)。
-                            回合落盘后本地气泡整批清除、由 jsonl 重画,角标随之消失。 */}
-                        {msg.steerState && (
-                          <div className="px-6 -mt-2 pb-2">
-                            <div className="max-w-[var(--content-max)] mx-auto text-right text-[11px] text-ink-faint font-body">
-                              {msg.steerState === 'merged' ? '已并入当前回合' : '已排队 · 等待并入当前回合'}
-                            </div>
-                          </div>
-                        )}
-                      </>}
+                    : <MessageBubble message={{ ...msg, role: msg.type }}
+                        onRollback={msg.type === 'user' ? handleRollback : undefined} />}
                 </div>
               ))}
               {/* reattach(切走再切回)不画流式气泡:同一段内容已经完整留在上面的历史卡里,
