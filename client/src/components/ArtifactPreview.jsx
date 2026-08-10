@@ -212,14 +212,29 @@ export function CollapsibleCode({ code, className = '', collapseAt = 5 }) {
   const collapsible = lines.length > collapseAt;
   const [expanded, setExpanded] = useState(false);
   const shown = collapsible && !expanded ? lines.slice(0, collapseAt).join('\n') : code;
+  const toggle = () => setExpanded((e) => !e);
   return (
     <>
-      <pre className={`${className} ${collapsible ? '' : 'rounded-b-lg'}`}>
-        <code>{shown}</code>
-      </pre>
+      {/* 展开态在代码区顶部再挂一个「收起」:长代码不用翻到最下面才能收(底部那个保留)。
+          绝对定位不占文档流,两个消费端(markdown 代码块 / artifact 代码视图)各自的工具条
+          行不受影响;折叠态不显示它(折叠头本身就在顶部,点它即展开)。 */}
+      <div className="relative">
+        {collapsible && expanded && (
+          <button
+            onClick={toggle}
+            title="收起代码"
+            className="absolute top-1.5 right-2 z-10 text-[10px] font-mono text-[#9a8e78] hover:text-[#cabba0] bg-[#2b2722]/90 border border-[#3a342b] rounded px-1.5 py-0.5 transition-colors"
+          >
+            收起 ▴
+          </button>
+        )}
+        <pre className={`${className} ${collapsible ? '' : 'rounded-b-lg'}`}>
+          <code>{shown}</code>
+        </pre>
+      </div>
       {collapsible && (
         <button
-          onClick={() => setExpanded((e) => !e)}
+          onClick={toggle}
           className="w-full text-[11px] font-mono text-[#9a8e78] hover:text-[#cabba0] bg-[#2b2722] border border-[#3a342b] border-t-0 rounded-b-lg py-1 transition-colors"
         >
           {expanded ? '收起' : `展开剩余 ${lines.length - collapseAt} 行 ▾`}
