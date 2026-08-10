@@ -15,6 +15,7 @@ import { WebCard } from './tools/WebCard.jsx';
 import { SkillCard } from './tools/SkillCard.jsx';
 import { computeCost, formatCost, isPlanBilling, costTitle } from '../utils/pricing.js';
 import { copyText } from '../utils/clipboard.js';
+import { shouldShowBottomCopy } from '../utils/scroll.js';
 import { useStore } from '../stores/sessionStore.js';
 import { TASK_TOOL_NAMES, rebuildTodosFromTaskCalls } from '../utils/todos.js';
 import { formatInputPreview, thinkingLabel, groupCoworkBlocks, activeGroupKey } from '../utils/streamStatus.js';
@@ -687,6 +688,29 @@ function TurnBubbleInner({ turn, onRetry, onRetryTool, onFork, retryActive }) {
   const [showThinking, setShowThinking] = useState(false);
   const chatMode = useStore((s) => s.chatMode);
   const [chatExpanded, setChatExpanded] = useState(false);
+
+  // 长回复(气泡高过所在窗格可视区)在气泡末尾补一个复制按钮 —— 看到末尾时顶部那个
+  // 已经滚出视野。判据只比高度不追滚动位置(shouldShowBottomCopy 单测)。
+  // 一个 ResizeObserver 同时盯气泡和容器:容器那份把分屏切换/窗口缩放一并覆盖,
+  // 不用另挂 window.resize + 防抖。状态是本气泡的叶子 state,不外传、不引发全列表重渲。
+  const bubbleRef = useRef(null);
+  const [showBottomCopy, setShowBottomCopy] = useState(false);
+  useEffect(() => {
+    const el = bubbleRef.current;
+    // ponytail: 找不到滚动容器(非聊天流宿主)就不判、不显示 —— 拿 window 高度当容器
+    // 高度在分屏下必然判错,宁可少一个按钮。
+    const scroller = el?.closest?.('[data-chat-scroll]');
+    if (!el || !scroller || typeof ResizeObserver === 'undefined') return undefined;
+    const measure = () => {
+      const next = shouldShowBottomCopy({ bubbleH: el.offsetHeight, viewH: scroller.clientHeight });
+      setShowBottomCopy((prev) => (prev === next ? prev : next));
+    };
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    ro.observe(scroller);
+    measure();
+    return () => ro.disconnect();
+  }, []);
   // 聊天模式:未展开时把思考/工具/子代理/skill 折叠成一行"思考并执行了 N 步操作 ›",
   // 点开还原完整过程;展开后给一行"收起过程"。两条在有序 blocks 与 legacy 路径共用。
   const chatFoldBar = (label) => (
@@ -750,7 +774,7 @@ function TurnBubbleInner({ turn, onRetry, onRetryTool, onFork, retryActive }) {
         'streaming') 切到 chatMessages(key='chat-assistant-…') 再切到 jsonl(真 uuid),
         三次换 key → React 反复卸载重挂 TurnBubble。若固化后的 turn 仍带 animate-fade-up,
         每次重挂都会重放淡入 → 用户看到"回复完成后闪烁一下再显示"。固化 turn 去掉动画即可。 */}
-    <div className={`group px-6 py-4 ${isLiveStream ? 'animate-fade-up' : ''}`} style={isLiveStream ? { animationDuration: '0.25s' } : undefined}>
+    <div ref={bubbleRef} className={`group px-6 py-4 ${isLiveStream ? 'animate-fade-up' : ''}`} style={isLiveStream ? { animationDuration: '0.25s' } : undefined}>
       <div className="max-w-[var(--content-max)] mx-auto flex items-start gap-4">
         {/* Avatar — tinted by the actual provider behind the model.
             无 mt + 标题行 min-h-[34px] items-center → 头像与「Claude …」标题行等高、
@@ -889,16 +913,21 @@ function TurnBubbleInner({ turn, onRetry, onRetryTool, onFork, retryActive }) {
 
           {/* Usage */}
           <UsageDisplay usage={turn.usage} model={turn.model} costUsd={turn.costUsd} />
-          {onRetry && !isLiveStream && turn.uuid !== 'streaming' && (
-            <div className="flex justify-end mt-2">
-              <button
-                onClick={() => onRetry(turn)}
-                className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-[11px] text-ink-faint hover:text-accent hover:bg-canvas-warm transition-colors"
-                title="回滚到这条 AI 回复之前，让 AI 重新生成"
-              >
-                <RotateCcw size={12} />
-                <span>重做这条回复</span>
-              </button>
+          {/* 末尾右下操作行:长回复补的复制按钮(与顶部同一个 CopyButton)+ 重做这条回复。
+              两者共用一行,免得各占一行叠在正文下面。 */}
+          {(showBottomCopy || (onRetry && !isLiveStream && turn.uuid !== 'streaming')) && (
+            <div className="flex justify-end items-center gap-1 mt-2">
+              {showBottomCopy && <CopyButton text={fullText} />}
+              {onRetry && !isLiveStream && turn.uuid !== 'streaming' && (
+                <button
+                  onClick={() => onRetry(turn)}
+                  className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-[11px] text-ink-faint hover:text-accent hover:bg-canvas-warm transition-colors"
+                  title="回滚到这条 AI 回复之前，让 AI 重新生成"
+                >
+                  <RotateCcw size={12} />
+                  <span>重做这条回复</span>
+                </button>
+              )}
             </div>
           )}
         </div>

@@ -1,5 +1,14 @@
 // 会话滚动容器的位置钳位 / 重排后重定位。纯函数,tests/unit/check-scroll-clamp.mjs 单测。
 
+// AI 回复气泡底部要不要再给一个复制按钮:气泡比所在滚动容器的可视高度还高(一屏看不全,
+// 看到末尾时顶部那个复制按钮已经滚出视野)才给。纯高度对比,不追踪滚动位置。
+// 相等 = 刚好看全 → 不给。容器/气泡高度为 0(未挂载、隐藏窗格)→ 无从判断,不给。
+// 单调性:显示按钮只会让 bubbleH 变大,判据不会因此翻回 false,故 ResizeObserver 不抖。
+export function shouldShowBottomCopy({ bubbleH, viewH }) {
+  if (!(bubbleH > 0) || !(viewH > 0)) return false;
+  return bubbleH > viewH;
+}
+
 // 把 scrollTop 钳进合法区间。stickToBottom=true(用户没在看历史)直接吸底。
 export function clampScrollTop({ scrollTop, scrollHeight, clientHeight, stickToBottom = false }) {
   const max = Math.max(0, (scrollHeight || 0) - (clientHeight || 0));
