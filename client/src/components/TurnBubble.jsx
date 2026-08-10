@@ -437,8 +437,8 @@ function ToolCallsGroup({ toolCalls, onRetryTool }) {
 }
 
 // ─── Cowork WorkGroup (一段正文之前的思考+工具打包折叠)──────────
-// 折叠内部按时序混排:思考段直接展开为可见文本(流式随流滚),工具卡复用
-// renderRichToolCard/ToolCallRow。活跃段默认展开随流刷新,正文落地后收起。
+// 折叠内部按时序混排:思考段折成一行(ThinkingFold,与工具行同规则默认收起),工具卡
+// 复用 renderRichToolCard/ToolCallRow。活跃段默认展开随流刷新,正文落地后收起。
 function WorkGroup({ items, expanded, onToggle, onRetryTool }) {
   const toolN = items.reduce((n, b) => n + (b.type === 'tool_use' ? 1 : 0), 0);
   const hasThinking = items.some((b) => b.type === 'thinking');
@@ -463,14 +463,8 @@ function WorkGroup({ items, expanded, onToggle, onRetryTool }) {
       {expanded && (
         <div className="pl-3 pr-2 pt-1 pb-2 space-y-2 animate-fade-in">
           {items.map((b, i) => {
-            if (b.type === 'thinking') {
-              return (
-                <div key={`th-${i}`} className="thinking-block p-3 rounded-lg text-xs text-ink-muted whitespace-pre-wrap font-body leading-relaxed">
-                  {/* 第三方 provider 落盘非标准 thinking 块时 content 可能是对象,直接渲染会白屏(判官 B#5) */}
-                  {typeof b.content === 'string' ? b.content : JSON.stringify(b.content)}
-                </div>
-              );
-            }
+            // 思考链与工具行一致:默认折叠一行,点击展开(用户要求)。
+            if (b.type === 'thinking') return <ThinkingFold key={`th-${i}`} content={b.content} />;
             const tc = b.toolCall;
             const rich = renderRichToolCard(tc);
             return rich
@@ -483,21 +477,29 @@ function WorkGroup({ items, expanded, onToggle, onRetryTool }) {
   );
 }
 
-// 聊天模式的思考小折叠(受控展开,WKWebView <summary> 坑规避)。
-function ThinkingFold({ content, open, onToggle }) {
+// 思考链折叠(自管展开态,WKWebView <summary> 坑规避)。与工具行同规则:默认折叠成
+// 一行(Chevron + Brain + 首句截断),点击展开/收起,展开态 max-h-64 内滚。流式在飞的
+// 思考走的也是这里(streamingBlocks → CoworkBlocks),同样默认折叠,折叠头 label 随内容更新。
+// 展开态放在这个叶子组件内部而非父级:父级不因某块展开而整树重渲,也不会给上层
+// React.memo(MessageList / TurnBubble) 传新身份 prop 打穿记忆化。
+function ThinkingFold({ content }) {
+  const [open, setOpen] = useState(false);
+  // 第三方 provider 落盘非标准 thinking 块时 content 可能是对象,直接渲染会白屏(判官 B#5)。
+  // 守卫收在组件内 = 两个渲染点(WorkGroup / 聊天模式)一次覆盖。
+  const text = typeof content === 'string' ? content : JSON.stringify(content);
   return (
     <div className="mb-1">
       <button
-        onClick={onToggle}
+        onClick={() => setOpen((v) => !v)}
         className="flex items-center gap-1.5 text-[11px] text-ink-faint hover:text-ink-muted cursor-pointer font-body w-full text-left"
       >
         <ChevronRight size={11} className={`transition-transform shrink-0 ${open ? 'rotate-90' : ''}`} />
         <Brain size={12} className="shrink-0" />
-        <span className="truncate">{thinkingLabel(content)}</span>
+        <span className="truncate">{thinkingLabel(text)}</span>
       </button>
       {open && (
         <div className="thinking-block mt-2 p-4 rounded-lg text-xs text-ink-muted whitespace-pre-wrap max-h-64 overflow-y-auto font-body leading-relaxed">
-          {content}
+          {text}
         </div>
       )}
     </div>
@@ -514,7 +516,8 @@ export function CoworkBlocks({
   chatMode = false, chatExpanded = false, chatFoldBar = null, chatUnfoldBar = null,
 }) {
   const [override, setOverride] = useState(() => new Map());       // group key → 用户设定展开态
-  const [openThinking, setOpenThinking] = useState(() => new Set()); // 聊天模式思考小折叠(按 block index)
+  // 思考小折叠的展开态归 ThinkingFold 自己管(叶子 state),这里不再持有 —— 展开一块
+  // 不必重渲整个 CoworkBlocks 子树。
   const list = Array.isArray(blocks) ? blocks : [];
 
   // 聊天模式:维持现状 —— 思考小折叠 + 工具折成"执行了 N 步操作"一行,不做 cowork 分组
@@ -539,8 +542,7 @@ export function CoworkBlocks({
       }
       if (b.type === 'thinking' && b.content) {
         flushBucket(i);
-        out.push(<ThinkingFold key={`b-${i}`} content={b.content} open={openThinking.has(i)}
-          onToggle={() => setOpenThinking((prev) => { const n = new Set(prev); n.has(i) ? n.delete(i) : n.add(i); return n; })} />);
+        out.push(<ThinkingFold key={`b-${i}`} content={b.content} />);
         return;
       }
       if (b.type === 'tool_use' && b.toolCall) {
