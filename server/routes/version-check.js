@@ -443,7 +443,9 @@ router.get('/claude-version-check', async (req, res) => {
 
 /**
  * POST /api/claude-update — 按检测到的安装方式运行匹配的更新命令。
- * native→claude update,brew→brew upgrade,npm→npm i -g。超时 8 分钟。
+ * native→claude update,brew→brew upgrade,npm→也走 claude update(npm 包 ≥2.1.227
+ * 是原生安装器引导壳,npm i -g 只会拉壳不出可用 CLI,见 updateCmdFor)。
+ * 超时 8 分钟,到点对整棵进程树 SIGKILL(见 /claude-update/stream),不留僵尸。
  */
 router.post('/claude-update', async (req, res) => {
   const { method, path: claudePath } = await detectInstall();
