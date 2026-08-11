@@ -914,7 +914,10 @@ export function resolveExcludeDyn(v) {
 // (回落到与逐回合冷启相同的行为,零语义变化)。settings.json 的 mtime 计入键 ——
 // 切 provider / 改任何全局配置(无论经 GUI 还是终端 cc-switch)都会使旧进程不再被
 // 复用,规避"常驻进程拿着旧 provider/旧配置继续跑"的整类失败模式。
-function chatCompatKey({ workingDir, model, effort, appendSystemPrompt, promptSuggestions, excludeDynamicSystemPrompt, globalRead, dirs, maxBudgetUsd }) {
+// R8-4:model 不再计入键 —— SDK query.setModel 已实测可回合间热切(spike-a,2.1.227),
+// 仅换模型不必整进程重建(冷启丢温 MCP,实测 ~5s)。复用命中路径在推消息前对账
+// slot.currentModel,不一致就 setModel;失败仍走关旧开新,行为兜回改动前。
+export function chatCompatKey({ workingDir, effort, appendSystemPrompt, promptSuggestions, excludeDynamicSystemPrompt, globalRead, dirs, maxBudgetUsd }) { // export 仅为可单测
   let settingsMtime = 0;
   try { settingsMtime = statSync(pathJoin(homedir(), '.claude', 'settings.json')).mtimeMs; } catch {}
   // 禁用工具清单变更也不能复用旧进程(disallowedTools 是 query 级选项,起时定死)→ 计入 mtime。
@@ -930,7 +933,7 @@ function chatCompatKey({ workingDir, model, effort, appendSystemPrompt, promptSu
   try { projSettingsMtime += statSync(pathJoin(workingDir, '.claude', 'settings.json')).mtimeMs; } catch {}
   try { projSettingsMtime += statSync(pathJoin(workingDir, '.claude', 'settings.local.json')).mtimeMs; } catch {}
   return JSON.stringify({
-    cwd: workingDir, model, effort: effort || null,
+    cwd: workingDir, effort: effort || null,
     append: (typeof appendSystemPrompt === 'string' ? appendSystemPrompt.trim() : ''),
     suggest: promptSuggestions === true,
     xdyn: excludeDynamicSystemPrompt === true ? 1 : excludeDynamicSystemPrompt === false ? 0 : 'auto',
@@ -1109,7 +1112,7 @@ router.post('/chat', async (req, res) => {
   // 与逐回合冷启完全一致。keepAlive===false(GUI 开关关掉)时同样只关不复用。
   const wantKeepAlive = keepAlive !== false;
   const reuseKey = chatCompatKey({
-    workingDir, model, effort, appendSystemPrompt, promptSuggestions,
+    workingDir, effort, appendSystemPrompt, promptSuggestions,
     excludeDynamicSystemPrompt, globalRead, dirs: [...dirSet].sort(),
     maxBudgetUsd: budget,
   });
@@ -1138,6 +1141,33 @@ router.post('/chat', async (req, res) => {
           s.closing = true;
           try { s.input.close(); } catch {}
           break;
+        }
+      }
+      // R8-4:模型不一致 → setModel 热切(spike-a 实测 2.1.227:回合间调用生效,切换后
+      // CLI 补发新 init,同 session_id,SSE 照常透传、客户端 init 幂等)。compatKey 已
+      // 不含 model,仅换模型不再整进程重建(保住温 MCP)。守卫与 setPermissionMode 同款:
+      // 失败/超时(5s)/await 期间 epoch 被推进或 slot 被置 closing → 放弃复用关旧开新,
+      // 绝不悬空、绝不带错模型继续(冷启路径 options.model 恒正确)。
+      if (model !== s.currentModel) {
+        const epochAtSwitch = s.turnEpoch | 0;
+        let switchTimer = null;
+        try {
+          await Promise.race([
+            s.query.setModel(model),
+            new Promise((_, reject) => {
+              switchTimer = setTimeout(() => reject(new Error('setModel 超时')), 5000);
+              switchTimer.unref?.();
+            }),
+          ]);
+          if ((s.turnEpoch | 0) !== epochAtSwitch || s.closing) throw new Error('setModel 期间回合已被推进');
+          s.currentModel = model;
+          s.model = model; // 进程面板/复用响应展示的模型同步对齐
+        } catch {
+          s.closing = true;
+          try { s.input.close(); } catch {}
+          break;
+        } finally {
+          if (switchTimer) clearTimeout(switchTimer);
         }
       }
       // 重置回合级状态(新回合从干净缓冲开始;上一回合内容客户端已消费或以 jsonl 为准)
@@ -1227,6 +1257,9 @@ router.post('/chat', async (req, res) => {
     draftId: (!sessionId && typeof req.body?.draftId === 'string' && req.body.draftId) ? req.body.draftId : null,
     cwd: workingDir,
     model,
+    // R8-4:进程内当前生效模型(spawn 时=options.model 实际值;复用路径 setModel 成功后
+    // 更新)。compatKey 已不含 model,复用对账全靠它。
+    currentModel: model,
     promptPreview: String(prompt).slice(0, 80),
     permissionMode: permissionMode || 'default',
     guiMode: chosenMode,
