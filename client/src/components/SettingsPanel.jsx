@@ -1025,7 +1025,9 @@ function CcUpdater() {
     try { fresh = (await (await fetch('/api/claude-installs')).json()).installs || []; } catch {}
     setInstalls(fresh);
     setUpdating(false);
-    const list = fresh.filter((i) => i.method === m);
+    // R8-1 补齐:broken 壳包不算"已装"(切过去 spawn 必废,服务端也会 400 拒绝)——
+    // 点方式卡走安装流程重装修复,是坏壳包用户的正确出口。
+    const list = fresh.filter((i) => i.method === m && !i.broken);
     if (list.find((i) => i.active)) return;                    // 已是当前使用
     if (list.length > 0) { await switchActive(list[0].path); return; }
     await doInstall(m, state.installed !== false);
@@ -1087,7 +1089,8 @@ function CcUpdater() {
       if (++tries > 36) { clearInterval(pollRef.current); pollRef.current = null; return; }
       let list = [];
       try { list = (await (await fetch('/api/claude-installs')).json()).installs || []; } catch { return; }
-      const hit = list.find((i) => i.method === method);
+      // broken 壳包不算装完(postinstall 半途而废的残骸也会被扫到),等真二进制落地
+      const hit = list.find((i) => i.method === method && !i.broken);
       if (!hit) return;
       clearInterval(pollRef.current); pollRef.current = null;
       setInstalls(list);
@@ -1254,7 +1257,9 @@ function CcUpdater() {
         </div>
         <div className="grid grid-cols-2 gap-1.5">
           {[['native', '原生版(官方安装器)'], ['npm', 'npm 版']].map(([m, label]) => {
-            const list = Array.isArray(installs) ? installs.filter((i) => i.method === m) : [];
+            // broken 壳包不当"已装"展示(与 clickMethod 同口径):方式卡显示"未安装 ·
+            // 点击安装"引导重装修复,坏项详情在下方明细列表(有 broken 时强制显示)。
+            const list = Array.isArray(installs) ? installs.filter((i) => i.method === m && !i.broken) : [];
             const it = list.find((i) => i.active) || list[0] || null;
             const isActive = !!(it && it.active);
             return (
@@ -1270,10 +1275,12 @@ function CcUpdater() {
             );
           })}
         </div>
-        {/* 明细列表只在方式卡覆盖不了时显示:brew/未知方式、或同一方式有多处安装(需精确钉选)。
-            常规"1 原生 + 1 npm"场景方式卡已够,再列一遍=重复的切换按钮(用户反馈)。 */}
+        {/* 明细列表只在方式卡覆盖不了时显示:brew/未知方式、同一方式有多处安装(需精确
+            钉选)、或存在坏壳包(R8-1:方式卡已把 broken 项当"未安装"藏起,坏项的警示与
+            原因必须在这里可见)。常规"1 原生 + 1 npm"场景方式卡已够,再列一遍=重复按钮。 */}
         {Array.isArray(installs) && (
           installs.some((i) => i.method !== 'native' && i.method !== 'npm')
+          || installs.some((i) => i.broken)
           || installs.filter((i) => i.method === 'native').length > 1
           || installs.filter((i) => i.method === 'npm').length > 1
         ) && (
@@ -1281,16 +1288,29 @@ function CcUpdater() {
             {installs.map((it) => {
               const label = METHOD_LABEL[it.method] || it.method || '未知';
               return (
-                <button key={it.path} disabled={updating || it.active} onClick={() => switchActive(it.path)}
-                  className={`w-full flex items-center gap-2 px-2.5 py-1.5 text-left rounded-md border transition-colors ${it.active ? 'bg-accent/10 border-accent/40 cursor-default' : 'bg-canvas-warm border-canvas-deep hover:border-accent/40 disabled:opacity-50'}`}>
+                <button key={it.path} disabled={updating || it.active || it.broken}
+                  onClick={() => switchActive(it.path)}
+                  title={it.broken ? (it.reason || '壳包未完成安装') : undefined}
+                  className={`w-full flex items-center gap-2 px-2.5 py-1.5 text-left rounded-md border transition-colors ${it.active ? 'bg-accent/10 border-accent/40 cursor-default' : it.broken ? 'bg-canvas-warm border-warning/40 cursor-not-allowed opacity-80' : 'bg-canvas-warm border-canvas-deep hover:border-accent/40 disabled:opacity-50'}`}>
                   <span className={`shrink-0 w-3.5 h-3.5 rounded-full border grid place-items-center ${it.active ? 'border-accent' : 'border-ink-faint'}`}>
                     {it.active && <span className="w-2 h-2 rounded-full bg-accent" />}
                   </span>
                   <span className="min-w-0 flex-1">
-                    <span className="text-[11.5px] font-body text-ink">{label}{it.version ? ` · v${it.version}` : ''}{it.active ? ' · 当前' : ''}</span>
+                    <span className="text-[11.5px] font-body text-ink">
+                      {label}{it.version ? ` · v${it.version}` : ''}{it.active ? ' · 当前' : ''}
+                      {/* R8-1 补齐:壳包/坏安装徽标。shim=中性标注(npm 引导壳,修好的属正常
+                          安装);broken=警示,不可切换,reason 悬浮与小字说明。 */}
+                      {it.shim && !it.broken && <span className="ml-1.5 text-[9px] text-ink-faint border border-canvas-deep rounded px-1">npm 壳包</span>}
+                      {it.broken && <span className="ml-1.5 text-[9px] text-warning border border-warning/40 rounded px-1">不可用</span>}
+                    </span>
                     <span className="block text-[10px] font-mono text-ink-faint truncate">{it.path}</span>
+                    {it.broken && (
+                      <span className="block text-[10px] text-warning font-body">
+                        {it.reason || '壳包未完成安装'};不可选择,可用上方按钮重装修复
+                      </span>
+                    )}
                   </span>
-                  {!it.active && <span className="shrink-0 text-[10.5px] text-accent font-body">切换</span>}
+                  {!it.active && !it.broken && <span className="shrink-0 text-[10.5px] text-accent font-body">切换</span>}
                 </button>
               );
             })}

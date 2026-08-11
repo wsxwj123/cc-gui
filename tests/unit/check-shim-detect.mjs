@@ -104,4 +104,29 @@ const mkPkg = (prefixRel, { installCjs, binKind }) => {
 }
 
 rmSync(root, { recursive: true, force: true });
-console.log('✓ check-shim-detect: 魔数 8 形态 + 壳包三态 + 双布局 全过');
+
+// ── ③ 禁选接线守卫(验收补齐2):坏壳包前后端都不许被选中 ─────────────────
+{
+  const { readFileSync } = await import('node:fs');
+  const { join: j, dirname } = await import('node:path');
+  const { fileURLToPath } = await import('node:url');
+  const ROOT = j(dirname(fileURLToPath(import.meta.url)), '..', '..');
+  // 服务端:PUT /claude-active 必须用 classifyShim 判 broken 并 400 拒绝(防旧前端/绕过前端)
+  const vc = readFileSync(j(ROOT, 'server', 'routes', 'version-check.js'), 'utf8');
+  const putBlock = vc.slice(vc.indexOf("router.put('/claude-active'"));
+  assert.ok(/classifyShim\(real\)/.test(putBlock), 'PUT claude-active 必须按 realpath 判壳包');
+  assert.ok(/shimInfo\?\.broken/.test(putBlock) && /status\(400\)/.test(putBlock),
+    'broken 项必须 400 拒绝(变异哨兵:删服务端拒绝这里红)');
+  // 前端:安装列表渲染 shim/broken 徽标,broken 禁选,方式卡/装后轮询把 broken 当未装
+  const sp = readFileSync(j(ROOT, 'client', 'src', 'components', 'SettingsPanel.jsx'), 'utf8');
+  assert.ok(/npm 壳包/.test(sp), '明细列表渲染 shim 中性徽标');
+  assert.ok(/it\.broken/.test(sp) && /disabled=\{updating \|\| it\.active \|\| it\.broken\}/.test(sp),
+    'broken 项按钮必须禁用');
+  assert.ok(/it\.reason/.test(sp), 'broken 原因(reason)对用户可见');
+  assert.ok((sp.match(/&& !i\.broken/g) || []).length >= 3,
+    '方式卡显示/点击/装后轮询三处都把 broken 当未安装(引导重装而非选中坏项)');
+  assert.ok(/installs\.some\(\(i\) => i\.broken\)/.test(sp),
+    '存在坏壳包时明细列表强制显示(否则警示画了看不见)');
+}
+
+console.log('✓ check-shim-detect: 魔数 8 形态 + 壳包三态 + 双布局 + 禁选接线守卫 全过');

@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { readFileSync, writeFileSync, existsSync, realpathSync, readdirSync } from 'fs';
-import { resolveClaudeAsync, listClaudeInstallsAsync, getClaudeOverride, setClaudeOverride, winLivePathDirsAsync } from '../utils/claude-resolver.js';
+import { resolveClaudeAsync, listClaudeInstallsAsync, getClaudeOverride, setClaudeOverride, winLivePathDirsAsync, classifyShim } from '../utils/claude-resolver.js';
 import { scanAllTools, nodeMeets, NODE_MIN_MAJOR } from '../utils/env-scanner.js';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
@@ -557,7 +557,8 @@ router.get('/claude-installs', async (_req, res) => {
     method: classifyClaudePath(it.real),
     // 探测超时回退该路径上次探到的版本;二进制真没了(ENOENT 等)如实为 null。
     // R8-1:broken 的壳包(bin 还是文本 stub)不再跑 --version —— 执行文本 stub 必失败,
-    // 白等一次超时;version 如实 null,前端按 broken 提示。
+    // 白等一次超时;version 如实 null。前端(设置页安装列表)按 broken 渲染警示徽标并
+    // 禁选;PUT /claude-active 服务端同判 broken 拒绝(双保险,防旧前端选中坏项)。
     version: it.broken ? null : await getClaudeVersion(it.path),
     active: !!activeKey && norm(it.real) === activeKey,
     // R8-1:npm 引导壳标注(只增字段,老前端忽略)。shim=引导壳安装;broken=未完成
@@ -581,6 +582,16 @@ router.put('/claude-active', async (req, res) => {
   if (!isLocalReq(req)) return res.status(403).json({ error: '该操作仅限本机执行' });
   const p = typeof req.body?.path === 'string' ? req.body.path.trim() : '';
   if (p && !existsSync(p)) return res.status(400).json({ error: '该路径不存在或已失效' });
+  // R8-1 补齐:坏壳包(bin 还是文本 stub)禁选 —— 钉死它之后所有 spawn 都会废。服务端
+  // 兜底判定,防旧前端/绕过前端直接 PUT 选中坏项。按 realpath 判(入口可能是 shim)。
+  if (p) {
+    let real = p;
+    try { real = realpathSync(p); } catch {}
+    const shimInfo = classifyShim(real);
+    if (shimInfo?.broken) {
+      return res.status(400).json({ error: `该安装不可用:${shimInfo.reason || '壳包未完成安装'}。请重装后再选择。` });
+    }
+  }
   try {
     setClaudeOverride(p);
     const active = await resolveClaudeAsync({ refresh: true });
