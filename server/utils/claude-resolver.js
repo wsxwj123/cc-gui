@@ -20,7 +20,7 @@ async function safeExecAsync(file, args, timeout = 5000) {
   try { const { stdout } = await execFileP(file, args, { timeout }); return String(stdout).trim(); }
   catch (e) { return e?.stdout ? String(e.stdout).trim() : ''; }
 }
-import { existsSync, statSync, readdirSync, readFileSync, writeFileSync, mkdirSync, realpathSync } from 'fs';
+import { existsSync, statSync, readdirSync, readFileSync, writeFileSync, mkdirSync, realpathSync, openSync, readSync, closeSync } from 'fs';
 import { homedir } from 'os';
 import { join, dirname } from 'path';
 
@@ -349,11 +349,69 @@ export function claudeCommand(args = []) {
   return { file: bin, args };
 }
 
+// ── R8-1 壳包识别 ─────────────────────────────────────────────
+// 背景:npm 包 @anthropic-ai/claude-code ≥2.1.227 是「原生安装器引导壳」:bin 指
+// bin/claude.exe,初始是 ASCII 假启动器文本,真二进制由 postinstall 从 optionalDep
+// 平台包本地拷贝覆盖。慢源(npmmirror 对 81MB 平台包 16-20KB/s)+ 超时中断会留下
+// 「装了但 bin 还是文本 stub」的死安装 —— 列表里看着正常、切过去 spawn 就废。
+// 靠读文件头魔数识别真伪:**只读前几个字节,绝不执行不可信文件**。
+// 返回 'binary'(Mach-O/PE/ELF 真可执行)| 'text'(shebang/ASCII stub)| 'unreadable'。
+export function sniffBinaryKind(p) {
+  let fd = null;
+  try {
+    fd = openSync(p, 'r');
+    const buf = Buffer.alloc(8);
+    const n = readSync(fd, buf, 0, 8, 0);
+    if (n < 4) return 'text'; // 不足 4 字节放不下任何可执行魔数,必是残缺文本
+    const be = buf.readUInt32BE(0);
+    // Mach-O 薄/胖二进制(两种字节序)| ELF | PE('MZ')
+    if ([0xFEEDFACE, 0xFEEDFACF, 0xCEFAEDFE, 0xCFFAEDFE, 0xCAFEBABE, 0xBEBAFECA].includes(be)) return 'binary';
+    if (buf[0] === 0x7F && buf[1] === 0x45 && buf[2] === 0x4C && buf[3] === 0x46) return 'binary';
+    if (buf[0] === 0x4D && buf[1] === 0x5A) return 'binary';
+    return 'text';
+  } catch { return 'unreadable'; }
+  finally { if (fd !== null) { try { closeSync(fd); } catch {} } }
+}
+
+// 从安装项的真实路径推导 npm 包目录(非 npm 包安装返回 null)。两种形态:
+// ① real 已在包内(mac 的 bin/claude 软链解析后、直扫 pkgBin 命中);
+// ② real 是 shim(Windows 的 <prefix>\claude.cmd 非软链 / 断链 shim),按 npm 布局
+//    从所在目录猜 node_modules 落点(win 平铺 / *nix lib/node_modules 两种)。
+function npmPkgDirFor(real) {
+  const norm = String(real).replace(/\\/g, '/');
+  const m = norm.match(/^(.*\/node_modules\/@anthropic-ai\/claude-code)\//i);
+  if (m) return m[1];
+  const dir = norm.replace(/\/[^/]*$/, '');
+  for (const c of [
+    `${dir}/node_modules/@anthropic-ai/claude-code`,
+    `${dir.replace(/\/bin$/, '')}/lib/node_modules/@anthropic-ai/claude-code`,
+  ]) { try { if (existsSync(c)) return c; } catch {} }
+  return null;
+}
+
+// 壳包判定(导出仅为可单测)。判据双条件防误判(风险清单:修好的壳包不能标 broken):
+// 「是壳包」= 包目录存在 install.cjs(≥2.1.227 引导壳专属特征);
+// 「坏」= bin 目标(bin/claude.exe)缺失或文件头是文本(postinstall 没落真二进制)。
+// 修好的壳包(claude.exe 为真 Mach-O/PE)只标 shim:true,是正常安装。
+export function classifyShim(real, pkgDirOverride = null) {
+  const pkgDir = pkgDirOverride ?? npmPkgDirFor(real);
+  if (!pkgDir) return null;
+  try { if (!existsSync(join(pkgDir, 'install.cjs'))) return null; } catch { return null; }
+  const binTarget = join(pkgDir, 'bin', 'claude.exe');
+  if (!existsSync(binTarget)) {
+    return { shim: true, broken: true, reason: '壳包未完成安装(postinstall 未落真二进制)' };
+  }
+  if (sniffBinaryKind(binTarget) !== 'binary') {
+    return { shim: true, broken: true, reason: '壳包未完成安装(postinstall 未落真二进制)' };
+  }
+  return { shim: true };
+}
+
 /**
  * 列出机器上所有能找到的 claude 安装(跑全部解析策略,不止第一个命中)。
  * 按真实路径(解 symlink)去重 —— PATH 命中的 ~/.local/bin/claude 与已知候选
  * 里的同一个软链会指向同一 real,只算一个;npm 版和原生版 real 不同,各算一个。
- * 返回 [{ path, real }],path 是首次发现的入口路径(可直接执行)。
+ * 返回 [{ path, real, shim?, broken?, reason? }],path 是首次发现的入口路径(可直接执行)。
  */
 // 候选路径列表 → 去重后的 [{path, real}]。按【逻辑安装身份】去重,而非裸真实路径:
 // Windows npm 版会同时命中 shim(`<prefix>\claude.cmd`,非软链)和包内二进制
@@ -375,7 +433,8 @@ function buildInstalls(paths) {
     const key = keyOf(real);
     if (seen.has(key)) continue;
     seen.add(key);
-    out.push({ path: p, real });
+    // R8-1:npm 引导壳标注(shim/broken/reason)。非壳包安装 classifyShim 返回 null,零字段。
+    out.push({ path: p, real, ...(classifyShim(real) || {}) });
   }
   return out;
 }

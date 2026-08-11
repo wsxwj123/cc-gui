@@ -265,17 +265,25 @@ async function detectInstall() {
 
 // 按安装方式给出更新命令。native 用「绝对路径 + update」自更新,避免终端里裸 `claude`
 // 解析到另一个安装(用户的 shell PATH 和 GUI 的 PATH 顺序可能不同)。
-function updateCmdFor(method, claudePath) {
+export function updateCmdFor(method, claudePath) { // export 仅为可单测
   switch (method) {
     // Y1:brew 渠道由社区维护、版本严重滞后(用户实测 latest 仅 1.5x,官方已 2.1.x),
     // `brew upgrade` 等于没更新。改为直接运行官方原生安装器:装到 ~/.local/bin,
     // GUI 的 PATH 前置使其优先于 brew 旧版,此后由 claude 自更新接管。
     case 'brew': return installCmdFor();
-    // Windows npm 安装的更新仍走 npm(装在哪就用哪更新),用淘宝镜像兜底 —
-    // registry.npmjs.org 常被墙,且 cmd 子终端不继承系统代理。
-    case 'npm':  return process.platform === 'win32'
-      ? 'call npm install -g @anthropic-ai/claude-code@latest --registry=https://registry.npmmirror.com'  // call:npm.cmd 在 .bat 里需 call 才返回,否则后续 pause 被跳过窗口闪退
-      : 'npm install -g @anthropic-ai/claude-code@latest';
+    // R8-1:npm 渠道已被官方降级为原生安装器引导壳(≥2.1.227 的 npm 包 bin 是引导 stub,
+    // 真二进制来自 optionalDep 平台包)。再 `npm i -g` 会撞慢源半途而废的整条事故链
+    // (npmmirror 对 81MB 平台包 16-20KB/s → GUI 更新流超时留僵尸 → bin 链未建 → 死安装)。
+    // 更新改走原生渠道:`claude update` 自更新(npm 装的 claude 同样支持,装到 ~/.local 后
+    // 由原生自更新接管)。用绝对路径防终端 PATH 解析到另一个安装;Windows 上 npm 的入口
+    // 是 claude.cmd(批处理)—— .bat 里直调另一个 .cmd 控制权不返回,必须 call(同
+    // installCmdFor 注释的坑);mac/linux 单引号防路径含空格/$。
+    case 'npm': {
+      if (process.platform === 'win32') {
+        return claudePath ? `call "${claudePath}" update` : 'call claude update';
+      }
+      return claudePath ? `'${claudePath.replace(/'/g, `'\\''`)}' update` : 'claude update';
+    }
     case 'native':
     default: {
       // update 与 upgrade 是同一命令的别名;用 upgrade(用户实测 Windows 上体验更好)。
@@ -428,6 +436,8 @@ router.get('/claude-version-check', async (req, res) => {
     method,                         // native | brew | npm | unknown
     updateCommand: updateCmdFor(method, claudePath),
     hasUpdate: latest ? semverGt(latest, currentVersion) : false,
+    // R8-1(只增字段):npm 安装的更新已不再走 npm,前端可展示原因。
+    ...(method === 'npm' ? { updateNote: 'npm 渠道已被官方降级为原生安装器引导壳,更新经 claude update 走原生渠道。' } : {}),
   });
 });
 
@@ -471,10 +481,30 @@ router.post('/claude-update/stream', async (req, res) => {
   }
   let child;
   try {
-    child = spawn(cmd, { shell: true, env });
+    // R8-1:detached(非 Win)让 shell 成为新进程组组长,超时/断连时可整组
+    // SIGKILL(-pid)—— 原来 child.kill() 只 SIGTERM 到 shell,npm/安装器孙进程
+    // 存活成僵尸(本机事故链:慢源 8 分钟超时后僵尸 npm 继续半写 bin 目录)。
+    child = spawn(cmd, { shell: true, env, detached: process.platform !== 'win32' });
   } catch (e) {
     res.write(JSON.stringify({ type: 'error', error: e.message }) + '\n'); return res.end();
   }
+  // 可靠杀整棵进程树:Win 用 taskkill /T /F(按 PID 递归);*nix 杀进程组(-pid),
+  // 组不在了(已退出)回落单杀。幂等,超时/断连/收尾多次调用无害。
+  const killTree = () => {
+    if (!child.pid) return;
+    if (process.platform === 'win32') {
+      try { execFile('taskkill', ['/PID', String(child.pid), '/T', '/F'], () => {}); } catch {}
+    } else {
+      try { process.kill(-child.pid, 'SIGKILL'); } catch { try { child.kill('SIGKILL'); } catch {} }
+    }
+  };
+  // 超时 8 分钟【必须杀进程】:原来只有注释声称超时、实际无定时器 —— 慢源下载挂死时
+  // 流永不结束,用户关页面 req close 的 SIGTERM 又杀不到孙进程,留僵尸 + 半成品安装。
+  const killTimer = setTimeout(() => {
+    try { res.write(JSON.stringify({ type: 'error', error: '更新超过 8 分钟未完成,已终止(网络过慢或源不可达;可开代理后重试,或改用终端更新)' }) + '\n'); } catch {}
+    killTree();
+  }, 8 * 60 * 1000);
+  killTimer.unref?.();
   const pump = (chunk) => {
     String(chunk).split(/\r?\n/).forEach((line) => {
       if (line.trim()) { try { res.write(JSON.stringify({ type: 'log', line }) + '\n'); } catch {} }
@@ -482,9 +512,9 @@ router.post('/claude-update/stream', async (req, res) => {
   };
   child.stdout?.on('data', pump);
   child.stderr?.on('data', pump);
-  child.on('error', (e) => { try { res.write(JSON.stringify({ type: 'error', error: e.message }) + '\n'); res.end(); } catch {} });
-  child.on('close', (code) => { try { res.write(JSON.stringify({ type: 'done', code }) + '\n'); res.end(); } catch {} });
-  req.on('close', () => { try { child.kill(); } catch {} });
+  child.on('error', (e) => { clearTimeout(killTimer); try { res.write(JSON.stringify({ type: 'error', error: e.message }) + '\n'); res.end(); } catch {} });
+  child.on('close', (code) => { clearTimeout(killTimer); try { res.write(JSON.stringify({ type: 'done', code }) + '\n'); res.end(); } catch {} });
+  req.on('close', () => { clearTimeout(killTimer); killTree(); });
 });
 
 /**
@@ -526,8 +556,14 @@ router.get('/claude-installs', async (_req, res) => {
     path: it.path,
     method: classifyClaudePath(it.real),
     // 探测超时回退该路径上次探到的版本;二进制真没了(ENOENT 等)如实为 null。
-    version: await getClaudeVersion(it.path),
+    // R8-1:broken 的壳包(bin 还是文本 stub)不再跑 --version —— 执行文本 stub 必失败,
+    // 白等一次超时;version 如实 null,前端按 broken 提示。
+    version: it.broken ? null : await getClaudeVersion(it.path),
     active: !!activeKey && norm(it.real) === activeKey,
+    // R8-1:npm 引导壳标注(只增字段,老前端忽略)。shim=引导壳安装;broken=未完成
+    // (postinstall 没落真二进制,切过去 spawn 必废),reason 给人话原因。
+    ...(it.shim ? { shim: true } : {}),
+    ...(it.broken ? { broken: true, reason: it.reason || '' } : {}),
   })));
   res.json({ installs, overridden: !!override, override, activeVia: active?.via || null });
 });
