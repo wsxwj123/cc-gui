@@ -62,7 +62,7 @@ import { extractToolResultText, finalizePendingToolCalls, applyFinalizedToBlocks
 import { rebuildTodosFromTaskCalls } from './utils/todos.js';
 import { isSteered, firstSteerableIndex, reconcileSteered, persistedUserSigs, persistedSteerKeys, steerLanded } from './utils/steerQueue.js';
 import { isInitBindingOrigin, migrateDraftQueue, paneMessagesOwned, resolveHistModel, resolveSelectorModel, resolveSendModel } from './utils/routing.js';
-import { nativeContextWindow, isBareClaudeAlias } from './utils/contextWindow.js';
+import { nativeContextWindow, isBareClaudeAlias, pickCliContextWindow } from './utils/contextWindow.js';
 import { extractMcpServerIssues, formatMcpServerNotice } from './utils/mcpStatus.js';
 import {
   FolderOpen, MessageSquare, ChevronLeft, ChevronRight, ChevronDown,
@@ -623,8 +623,12 @@ function formatPathShort(path) {
 // 在不同 provider 窗口可能不同)。值:number=解析到;null=后端明确无解析(官方/未知,
 // 前端走 nativeContextWindow 兜底);无 key=未查过。
 const resolvedWindowCache = new Map();
+// R8-6:缓存值来源标注(model → { source:'cli'|'provider', at })。'cli' = result.modelUsage
+// 自报窗口(会话内压缩执行口径,最权威);'provider' = /api/model-window(手配/规则表)。
+// 覆盖方向单行道:cli 覆盖 provider,provider 不覆盖 cli(fetch 回写前查这里)。
+const resolvedWindowMeta = new Map();
 if (typeof window !== 'undefined') {
-  window.addEventListener('cgui:provider-change', () => resolvedWindowCache.clear());
+  window.addEventListener('cgui:provider-change', () => { resolvedWindowCache.clear(); resolvedWindowMeta.clear(); });
 }
 function useResolvedWindow(model) {
   const [win, setWin] = useState(() => (model && resolvedWindowCache.has(model) ? resolvedWindowCache.get(model) : undefined));
@@ -636,6 +640,16 @@ function useResolvedWindow(model) {
     window.addEventListener('cgui:provider-change', bump);
     return () => window.removeEventListener('cgui:provider-change', bump);
   }, []);
+  // R8-6:CLI 自报窗口(result.modelUsage)落缓存后即时刷新正在显示的分母 —— 缓存命中
+  // 路径不再 refetch,没有这个监听的话新值要等 model 变化/重挂载才生效。
+  useEffect(() => {
+    const onCliWin = (e) => {
+      const m = e?.detail?.model;
+      if (m && m === model && resolvedWindowCache.has(model)) setWin(resolvedWindowCache.get(model));
+    };
+    window.addEventListener('cgui:model-window-cli', onCliWin);
+    return () => window.removeEventListener('cgui:model-window-cli', onCliWin);
+  }, [model]);
   useEffect(() => {
     if (!model) { setWin(undefined); return; }
     if (resolvedWindowCache.has(model)) { setWin(resolvedWindowCache.get(model)); return; }
@@ -644,8 +658,13 @@ function useResolvedWindow(model) {
       .then((r) => r.json())
       .then((d) => {
         const v = Number.isFinite(d?.window) ? d.window : null;
-        resolvedWindowCache.set(model, v);
-        if (!dead) setWin(v);
+        // R8-6 覆盖方向单行道:fetch 在飞期间 result.modelUsage 已写入 cli 值时,
+        // provider-config 不得覆盖(cli 是会话内压缩执行口径,最权威;反向 cli 直接覆盖)。
+        if (resolvedWindowMeta.get(model)?.source !== 'cli') {
+          resolvedWindowCache.set(model, v);
+          resolvedWindowMeta.set(model, { source: 'provider', at: Date.now() });
+        }
+        if (!dead) setWin(resolvedWindowCache.get(model));
       })
       .catch(() => { if (!dead) setWin(undefined); });
     return () => { dead = true; };
@@ -4993,6 +5012,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     let turnAborted = false;     // 用户主动停止(catch 到 AbortError)才 true;供 finally 区分"正常完成"(不收后台化子代理)与"停止"(收 stopped)
     let resultUsage = null;      // result 事件携带的本轮 usage(CLI 聚合口径)
     let resultCostUsd = null;    // result 事件携带的 total_cost_usd(CLI 权威成本)
+    // R8-6:本回合 message_start 携带的实际模型 id(API 回包口径,与 modelUsage 的 key
+    // 同源)。streamingModel 是 React state,本闭包里读到的是发起时的陈旧值,不能用。
+    let turnModel = null;
     // 本次流真正归属的 sessionId:发起于真会话=闭包 sid;发起于 draft=init 事件里的新 sid。
     // result 后的标题兜底等"归属敏感"逻辑一律用它,绝不摸 getLocalSession()(用户可能已切走)。
     let streamSid = selectedSession?.sessionId || null;
@@ -5646,6 +5668,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             if (ev.type === 'message_start') setLiveStatus(null);
             if (ev.type === 'message_start' && ev.message?.model) {
               setStreamingModel(ev.message.model);
+              turnModel = ev.message.model; // R8-6:result.modelUsage exact 匹配用(闭包内新鲜值)
               // #3:message_start 已携带输入侧 usage(input + cache_read/creation = 当前上下文占用),
               // 立刻据此更新上下文徽章 —— 不必等回合结束的 result 事件,显示/更新都更快。
               const u = ev.message.usage;
@@ -6138,6 +6161,23 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           // 实时提供(末次调用 = 当前真实上下文)。compact 回合的 usage 也是旧大上下文,同样不取。
           if (event.type === 'result' && !isCompact && event.usage) {
             resultUsage = event.usage;
+          }
+          // R8-6:CLI 自报窗口(result.modelUsage[*].contextWindow,静态字段)→ 徽章分母。
+          // 会话内 CLI 自报是压缩执行口径 = 最权威;2.1.223 起 CLI 对 unknown model 也按
+          // 假定窗口强制压缩,分母按它显示才与真实行为一致。写入 resolvedWindow 缓存标
+          // source:'cli'(覆盖 provider-config,反向不覆盖);matchedModel 与 turnModel
+          // 两个 key 都写(第三方中转两者可能有别名差,徽章按 GUI 侧模型名查缓存)。
+          // ⚠️ 红线:只读 contextWindow;modelUsage 的 *Tokens 与 result.usage 都是整轮
+          // 累积口径,绝不写入"当前占用"(分子仍只来自 message_start/message_delta)。
+          if (event.type === 'result' && event.modelUsage) {
+            const cliWin = pickCliContextWindow(event.modelUsage, turnModel);
+            if (cliWin) {
+              for (const wk of new Set([cliWin.matchedModel, turnModel].filter(Boolean))) {
+                resolvedWindowCache.set(wk, cliWin.window);
+                resolvedWindowMeta.set(wk, { source: 'cli', at: Date.now() });
+                try { window.dispatchEvent(new CustomEvent('cgui:model-window-cli', { detail: { model: wk } })); } catch {}
+              }
+            }
           }
           // 输入预测(A):result 之后 server 留 4s 等待窗收 prompt_suggestion,期间流
           // 还没结束。如实标注在等什么(建议到达/超时收尾/中间 result 后新内容都会清)。

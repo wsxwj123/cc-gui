@@ -23,6 +23,29 @@ export function isBareClaudeAlias(model) {
   return /^(claude-)?(opus|sonnet|haiku)$/.test((model || '').toLowerCase().trim());
 }
 
+// R8-6:从 result.modelUsage 提取 CLI 自报的上下文窗口(徽章分母 B 方案)。
+// 语义依据(spike-a 实测,CLI 2.1.227):result.modelUsage = { "<完整模型id>":
+// { inputTokens, ..., contextWindow, maxOutputTokens, canonicalModel, provider } },
+// contextWindow 是 CLI 自认口径(压缩执行按它算)= 分母最权威来源。
+// 匹配策略保守(风险清单:别名/多模型 entry 匹配错分母):
+//   exact 命中 modelId → 取;exact 未命中且仅一个 entry → 用之(单模型回合的常态);
+//   多 entry 且无 exact(如子代理用了不同模型)→ 不取,保持现状。
+// contextWindow 非有限正数 → 丢弃。返回 { window, matchedModel } | null。
+// ⚠️ 红线(memory context-badge-usage-source):本函数只读 contextWindow 静态字段,
+// modelUsage 里的 *Tokens 是整轮累积口径,绝不能拿去当"当前占用"。
+export function pickCliContextWindow(modelUsage, modelId) {
+  if (!modelUsage || typeof modelUsage !== 'object' || Array.isArray(modelUsage)) return null;
+  const valid = (e) => !!e && Number.isFinite(e.contextWindow) && e.contextWindow > 0;
+  if (modelId && valid(modelUsage[modelId])) {
+    return { window: modelUsage[modelId].contextWindow, matchedModel: modelId };
+  }
+  const keys = Object.keys(modelUsage);
+  if (keys.length === 1 && valid(modelUsage[keys[0]])) {
+    return { window: modelUsage[keys[0]].contextWindow, matchedModel: keys[0] };
+  }
+  return null;
+}
+
 export function nativeContextWindow(model) {
   const id = (model || '').toLowerCase().trim();
   if (/\[1m\]/i.test(id)) return 1_000_000;
