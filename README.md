@@ -94,12 +94,12 @@
 
 ## 一、前置要求(必看)
 
-GUI 只是 `claude` CLI 的外壳,**必须先装好并登录 Claude Code**:
+GUI 只是 `claude` CLI 的外壳,**唯一硬性前置是装好 Claude Code CLI**:
 
-1. 安装 [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code/setup),确保终端里 `claude` 命令可用。
-2. 终端跑一次 `claude`,确认能正常对话(已登录订阅或配好 API Key)。
-
-没有这一步,GUI 打开后无法发消息。
+1. 安装 [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code/setup),确保终端里 `claude` 命令可用(没有它,GUI 打开后无法发消息)。
+2. 认证方式**二选一**:
+   - **官方订阅 / 官方 API**:终端跑一次 `claude` 完成登录;或
+   - **不登录官方,直接用第三方**:打开 GUI → 设置 → Provider,填好任意第三方中转的 API 地址与 Key 即可直接对话。**无需登录 Anthropic 账号,也无需手动创建 `~/.claude` 目录**(首次启动自动创建,macOS 与 Windows 相同)。
 
 ---
 
