@@ -917,7 +917,14 @@ export function resolveExcludeDyn(v) {
 // R8-4:model 不再计入键 —— SDK query.setModel 已实测可回合间热切(spike-a,2.1.227),
 // 仅换模型不必整进程重建(冷启丢温 MCP,实测 ~5s)。复用命中路径在推消息前对账
 // slot.currentModel,不一致就 setModel;失败仍走关旧开新,行为兜回改动前。
-export function chatCompatKey({ workingDir, effort, appendSystemPrompt, promptSuggestions, excludeDynamicSystemPrompt, globalRead, dirs, maxBudgetUsd }) { // export 仅为可单测
+// 但压缩联动产物(per-spawn --settings 的 CLAUDE_CODE_MAX_CONTEXT_TOKENS)是 spawn 时
+// 按当时 model 一次性写死的,进程活着改不了 —— 第三方下切"窗口不同"的模型(含同名
+// 模型加/去 [1m])若热切复用,CLI 会拿旧压缩线跑新模型,小窗认大窗、主动压缩失灵、
+// 撞上游 context overflow(正是该联动当初根治的事故形态)。故把产物指纹(acw:MCT
+// 数值或 null)计入键:官方(恒 null)与第三方同窗模型间照旧热切,异窗切换 key 变 →
+// 走既有 teardown+冷启,压缩线随新 spawn 重算。指纹由调用点用与 spawn 完全相同的
+// resolveCompactWindowSettings(model) 的同一次结果取出,恒一致、不重复 IO。
+export function chatCompatKey({ workingDir, effort, appendSystemPrompt, promptSuggestions, excludeDynamicSystemPrompt, globalRead, dirs, maxBudgetUsd, acw }) { // export 仅为可单测
   let settingsMtime = 0;
   try { settingsMtime = statSync(pathJoin(homedir(), '.claude', 'settings.json')).mtimeMs; } catch {}
   // 禁用工具清单变更也不能复用旧进程(disallowedTools 是 query 级选项,起时定死)→ 计入 mtime。
@@ -939,6 +946,7 @@ export function chatCompatKey({ workingDir, effort, appendSystemPrompt, promptSu
     xdyn: excludeDynamicSystemPrompt === true ? 1 : excludeDynamicSystemPrompt === false ? 0 : 'auto',
     gr: globalRead !== false, dirs, settingsMtime, disToolsMtime, projSettingsMtime, mcpStampMtime,
     budget: maxBudgetUsd || null, // 花费上限变化不能复用旧进程(query 级选项,起时定死)
+    acw: acw ?? null, // 压缩窗口指纹(MCT 数值或 null):异窗模型切换必须冷启重算压缩线
   });
 }
 
@@ -1111,10 +1119,14 @@ router.post('/chat', async (req, res) => {
   // 热切(与 /chat/permission-mode 同机制);其余任何差异 → 关旧进程走全新冷启,行为
   // 与逐回合冷启完全一致。keepAlive===false(GUI 开关关掉)时同样只关不复用。
   const wantKeepAlive = keepAlive !== false;
+  // 压缩联动产物在此算一次:指纹进 compatKey、spawn 块复用同一对象写临时 --settings 文件
+  // (同一次计算 = 指纹与实际写入值恒一致,也不为每请求多做一遍文件 IO)。
+  const acwSettings = resolveCompactWindowSettings(model);
   const reuseKey = chatCompatKey({
     workingDir, effort, appendSystemPrompt, promptSuggestions,
     excludeDynamicSystemPrompt, globalRead, dirs: [...dirSet].sort(),
     maxBudgetUsd: budget,
+    acw: acwSettings?.env?.CLAUDE_CODE_MAX_CONTEXT_TOKENS ?? null,
   });
   if (sessionId) {
     for (const [alivePid, s] of activeProcesses) {
@@ -1376,7 +1388,7 @@ router.post('/chat', async (req, res) => {
   // extraArgs 经 SDK 透传为 CLI --settings <path>;进程随流结束,文件在 finally 清理。
   let acwTmpFile = null;
   {
-    const acw = resolveCompactWindowSettings(model);
+    const acw = acwSettings; // compatKey 指纹与写入值取自同一次计算(见 reuseKey 处注释)
     if (acw) {
       try {
         acwTmpFile = pathJoin(tmpdir(), `cgui-acw-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.json`);

@@ -19,7 +19,8 @@ const REAL_HOME = process.env.HOME;
 const home = mkdtempSync(join(tmpdir(), 'cgui-compat-test-'));
 process.env.HOME = home;
 
-const { chatCompatKey } = await import('../../server/routes/chat.js');
+const { chatCompatKey, resolveCompactWindowSettings } = await import('../../server/routes/chat.js');
+import { mkdirSync, writeFileSync } from 'node:fs';
 
 const base = {
   workingDir: '/tmp/proj', effort: 'high', appendSystemPrompt: '', promptSuggestions: false,
@@ -36,6 +37,35 @@ try {
   assert.notEqual(kA, chatCompatKey({ ...base, effort: 'low' }), 'effort 变化仍换 key');
   assert.notEqual(kA, chatCompatKey({ ...base, workingDir: '/tmp/other' }), 'cwd 变化仍换 key');
   assert.notEqual(kA, chatCompatKey({ ...base, maxBudgetUsd: 5 }), 'budget 变化仍换 key');
+
+  // ── ①b 压缩窗口指纹(验收必修1):异窗模型不得热切复用 ─────────────────────
+  // 背景:per-spawn --settings 的压缩线(CLAUDE_CODE_MAX_CONTEXT_TOKENS)是 spawn 时按
+  // 当时 model 写死的,进程活着改不了。key 去掉 model 后,若指纹不进 key,第三方下切
+  // 异窗模型会拿旧压缩线跑新模型(小窗认大窗 → 主动压缩失灵 → 撞上游 overflow)。
+  // keyFor 复刻 POST /chat 调用点写法:同一 resolveCompactWindowSettings 结果取指纹。
+  const keyFor = (model) => {
+    const acwS = resolveCompactWindowSettings(model);
+    return chatCompatKey({ ...base, acw: acwS?.env?.CLAUDE_CODE_MAX_CONTEXT_TOKENS ?? null });
+  };
+  mkdirSync(join(home, '.claude'), { recursive: true });
+  mkdirSync(join(home, '.claude-gui'), { recursive: true });
+  // 第三方场景(settings.json 带 BASE_URL,无显式压缩设置;无 provider 手配 → 走规则表)
+  writeFileSync(join(home, '.claude', 'settings.json'),
+    JSON.stringify({ env: { ANTHROPIC_BASE_URL: 'https://relay.example/v1' } }), 'utf8');
+  writeFileSync(join(home, '.claude-gui', 'active-provider.json'), '{}', 'utf8');
+  // 异窗:kimi-k3(1,048,576)vs minimax-m2(204,800)→ 指纹不同 → key 必须不同(冷启重算压缩线)
+  assert.notEqual(keyFor('kimi-k3'), keyFor('minimax-m2'),
+    '第三方异窗模型 key 必须不同(变异哨兵:删 acw 指纹字段这里红)');
+  // 同名模型加 [1m](不动 settings.json 的操作,验收点名场景):窗口 204,800 → 1,000,000
+  assert.notEqual(keyFor('glm-4.6'), keyFor('glm-4.6[1m]'), '加/去 [1m] 属异窗切换,必须冷启');
+  // 同窗:glm-4.6 与 minimax-m2 都解析 204,800 → 指纹同 → key 相同(照旧 setModel 热切)
+  assert.equal(keyFor('glm-4.6'), keyFor('minimax-m2'), '第三方同窗模型仍热切(key 相同)');
+  // 规则表不认识的第三方模型 → 联动不干预(null),彼此同 key
+  assert.equal(keyFor('unknown-model-x'), keyFor('another-unknown-y'), '无解析窗口的模型间照旧热切');
+  // 官方场景(无 BASE_URL):联动恒 null → 任意模型 key 相同(热切不受影响)
+  writeFileSync(join(home, '.claude', 'settings.json'), JSON.stringify({ model: 'sonnet' }), 'utf8');
+  assert.equal(keyFor('claude-sonnet-4-6'), keyFor('claude-opus-5'), '官方 provider 任意模型间照旧热切');
+  assert.equal(keyFor('kimi-k3'), keyFor('minimax-m2'), '官方下规则表模型也不受联动影响');
 
   // ── ② 复用对账行为(与 chat.js 复用块同构的最小执行模型,mock query 计数) ──
   // 结构照抄实现:5s race + epoch 复查 + 失败置 closing。源码守卫(下方③)钉住实现
@@ -123,6 +153,14 @@ try {
   assert.ok(/setModel 超时/.test(reuseBlock) && /Promise\.race/.test(reuseBlock), '必须有 5s 超时 race(不能悬空)');
   // slot 定义带 currentModel 初始化(spawn 时 = options.model 实际值)
   assert.ok(/currentModel: model,/.test(src), 'slot 定义必须初始化 currentModel');
+  // 验收必修1:压缩窗口指纹与 spawn 写入值必须来自【同一次】resolveCompactWindowSettings
+  // 调用(恒一致 + 不重复 IO):POST /chat 里先算 acwSettings,key 取其 MCT,spawn 块复用。
+  assert.ok(/const acwSettings = resolveCompactWindowSettings\(model\)/.test(src),
+    'POST /chat 必须先算一次 acwSettings');
+  assert.ok(/acw: acwSettings\?\.env\?\.CLAUDE_CODE_MAX_CONTEXT_TOKENS \?\? null/.test(src),
+    'compatKey 指纹取自同一次计算结果');
+  assert.ok(/const acw = acwSettings;/.test(src) && !/const acw = resolveCompactWindowSettings\(model\)/.test(src),
+    'spawn 块复用同一 acwSettings,不得二次调用(两次调用可能不一致)');
 }
 
 console.log('✓ check-compat-key-model: key 去 model + 对账五态(同/换/错/超时/epoch) + 源码守卫 全过');
