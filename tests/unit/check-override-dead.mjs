@@ -76,7 +76,12 @@ try {
   // 验收补齐3:清除失败不得静默(局域网端 403 等)。非 2xx 必须抛出并落 clearErr 渲染。
   const clearFn = ep.slice(ep.indexOf('const clearOverride'), ep.indexOf('const install ='));
   assert.ok(/if \(!r\.ok\)/.test(clearFn), 'clearOverride 必须检查响应状态(403 不算成功)');
-  assert.ok(/setClearErr\(/.test(clearFn), '失败必须置 clearErr(变异哨兵:改回吞错这里红)');
+  // 精确钉 catch 块内的置错(开头的 setClearErr(null) 是清空,不算):catch (e) 之后
+  // 必须把异常消息写进 clearErr —— 改回 catch{} 吞错时这里必红。
+  const catchAt = clearFn.indexOf('catch (e)');
+  assert.ok(catchAt > -1, 'clearOverride 必须捕获异常(带绑定,不许裸 catch 吞掉)');
+  assert.ok(/setClearErr\(e\.message/.test(clearFn.slice(catchAt)),
+    'catch 内必须把错误消息置入 clearErr(变异哨兵:改回吞错这里红)');
   assert.ok(/清除失败/.test(ep), '失败提示对用户可见');
 }
 
