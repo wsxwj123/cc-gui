@@ -42,12 +42,23 @@ export default function EnvCheckPanel({ onDismiss, onRecheck, asModal = true }) 
 
   // R8-2:清除失效的手动指定路径(override)。PUT path:'' 幂等 —— override 文件不存在
   // 也返回 ok;清除后 resolver 回自动优先级,立即重检刷新显示。
+  // 失败不静默(验收补齐3):该端点限本机执行,局域网端会 403 —— 吞掉错误则用户点了
+  // 没反应、横幅还挂着。失败置 clearErr 渲染在横幅内,成功路径原样(重检刷新会清)。
+  const [clearErr, setClearErr] = useState(null);
   const clearOverride = async () => {
+    setClearErr(null);
     try {
-      await fetch('/api/claude-active', {
+      const r = await fetch('/api/claude-active', {
         method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: '' }),
       });
-    } catch {}
+      if (!r.ok) {
+        const d = await r.json().catch(() => ({}));
+        throw new Error(d.error || `HTTP ${r.status}`);
+      }
+    } catch (e) {
+      setClearErr(e.message || '请求失败');
+      return; // 清除没成功,不重检(状态未变,重检只会闪一下)
+    }
     check(true);
   };
 
@@ -114,6 +125,10 @@ export default function EnvCheckPanel({ onDismiss, onRecheck, asModal = true }) 
                       清除指定
                     </button>
                     <span className="ml-1 text-ink-faint">如需改用其他安装,在设置→更新页选择。</span>
+                    {/* 403 时服务端 error 已是「该操作仅限本机执行」,原样透出即可 */}
+                    {clearErr && (
+                      <span className="block mt-0.5 text-error">清除失败:{clearErr}</span>
+                    )}
                   </div>
                 )}
                 {!ok && data && (

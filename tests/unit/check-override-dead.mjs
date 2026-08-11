@@ -73,6 +73,11 @@ try {
   const ep = readFileSync(join(ROOT, 'client', 'src', 'components', 'EnvCheckPanel.jsx'), 'utf8');
   assert.ok(/overrideDead/.test(ep) && /claude-active/.test(ep),
     '环境面板消费 overrideDead 且提供清除动作(PUT claude-active)');
+  // 验收补齐3:清除失败不得静默(局域网端 403 等)。非 2xx 必须抛出并落 clearErr 渲染。
+  const clearFn = ep.slice(ep.indexOf('const clearOverride'), ep.indexOf('const install ='));
+  assert.ok(/if \(!r\.ok\)/.test(clearFn), 'clearOverride 必须检查响应状态(403 不算成功)');
+  assert.ok(/setClearErr\(/.test(clearFn), '失败必须置 clearErr(变异哨兵:改回吞错这里红)');
+  assert.ok(/清除失败/.test(ep), '失败提示对用户可见');
 }
 
 console.log('✓ check-override-dead: 死判定/静默回落/清除幂等/活不误标/端点与前端守卫 全过');
