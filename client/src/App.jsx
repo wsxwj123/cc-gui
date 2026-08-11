@@ -7,6 +7,10 @@ import { createPortal } from 'react-dom';
 const EMPTY_ARRAY = Object.freeze([]);
 // 已尝试过自动生成标题的 sessionId(无论成功失败),防止失败时每轮重复 spawn 标题进程。
 const titleAttempted = new Set();
+// R8-5:已就 MCP 状态提示过的进程 pid。按 slot 生命周期去重:同一常驻进程的重复 init
+// (setModel 热切补发、reattach 回放 earlyLines)不重复提示;进程重建(新 pid)后 MCP
+// 会重连,状态可能已变,重新评估。模块级(非组件 state):分屏多 pane / 重挂载共享。
+const mcpNoticeSeenPids = new Set();
 // Draft 会话唯一标识。draft key(`draft-<projectHash>`)按项目生成,同项目先后两个 draft
 // 完全同构无法区分 → 会话A(draft)流式中 init 在途时用户新建 draft B,init 到达会把 A 的
 // session_id 绑到 B 的 pane(getLocalSession() 只判"是 draft"),B 首条消息就 --resume 进
@@ -59,6 +63,7 @@ import { rebuildTodosFromTaskCalls } from './utils/todos.js';
 import { isSteered, firstSteerableIndex, reconcileSteered, persistedUserSigs, persistedSteerKeys, steerLanded } from './utils/steerQueue.js';
 import { isInitBindingOrigin, migrateDraftQueue, paneMessagesOwned, resolveHistModel, resolveSelectorModel, resolveSendModel } from './utils/routing.js';
 import { nativeContextWindow, isBareClaudeAlias } from './utils/contextWindow.js';
+import { extractMcpServerIssues, formatMcpServerNotice } from './utils/mcpStatus.js';
 import {
   FolderOpen, MessageSquare, ChevronLeft, ChevronRight, ChevronDown,
   Search, Hash, Layers, BarChart3, ArrowLeft, Plus,
@@ -5258,6 +5263,17 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           if (event.type === 'system' && event.subtype === 'init' && event.session_id) {
             streamSid = event.session_id; // 本次流归属的真 sid(draft 发起时在此确定)
             useStore.getState().clearSessionStopped?.(event.session_id); // draft 首发:真 sid 此刻才知道
+            // R8-5:MCP server 非 connected 状态提示(needs-auth/failed 等此前静默不可用,
+            // 用户只看到工具调不动)。多个合并成一条;字段缺失/空数组纯函数内静默;按 pid
+            // 去重(见 mcpNoticeSeenPids 注释),只在真提示过后记账 —— 首个 init 全 connected、
+            // setModel 补发的 init 才出问题的场景仍能提示到。
+            if (!mcpNoticeSeenPids.has(String(pid))) {
+              const mcpNotice = formatMcpServerNotice(extractMcpServerIssues(event.mcp_servers));
+              if (mcpNotice) {
+                mcpNoticeSeenPids.add(String(pid));
+                setProviderSwitchNotice({ text: mcpNotice });
+              }
+            }
             // Record the provider this turn ran under so a later switch can strip
             // now-invalid thinking-block signatures. Model name can't tell a mimo
             // relay (claude-* names) from official, so we key off the live hint.
