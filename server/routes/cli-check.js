@@ -1,7 +1,8 @@
 import { Router } from 'express';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
-import { resolveClaude } from '../utils/claude-resolver.js';
+import { existsSync } from 'fs';
+import { resolveClaude, getClaudeOverride } from '../utils/claude-resolver.js';
 
 const execFileP = promisify(execFile);
 const router = Router();
@@ -27,18 +28,23 @@ async function claudeVersion(p) {
  * 路径),与 claudeSpawn / SDK / env-check 同源 —— 检测到的即是实际会用的那个。
  */
 router.get('/cli-check', async (req, res) => {
+  // R8-2:手动指定的 claude 路径已失效(文件没了)→ 显式告知(只增字段,老前端忽略)。
+  // 此前 resolver 静默回落自动优先级,用户以为还在用指定的那个,实际跑的是回落安装。
+  const override = getClaudeOverride();
+  const deadFields = (override && !existsSync(override)) ? { overrideDead: true, override } : {};
   const hit = resolveClaude();
   if (!hit) {
-    return res.json({ installed: false, error: '所有检测策略均未找到 claude(PATH / login shell / npm 前缀 / 已知路径)' });
+    return res.json({ installed: false, error: '所有检测策略均未找到 claude(PATH / login shell / npm 前缀 / 已知路径)', ...deadFields });
   }
   try {
     const version = await claudeVersion(hit.path);
-    return res.json({ installed: true, version, via: hit.via, path: hit.path, resolvedPath: hit.path });
+    return res.json({ installed: true, version, via: hit.via, path: hit.path, resolvedPath: hit.path, ...deadFields });
   } catch (err) {
     return res.json({
       installed: false,
       resolvedPath: hit.path,
       error: `已定位到 ${hit.path},但执行 --version 失败:${err.message || err}`,
+      ...deadFields,
     });
   }
 });

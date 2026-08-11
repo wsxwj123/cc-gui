@@ -957,9 +957,17 @@ function CcUpdater() {
   const [result, setResult] = useState(null);
   const [logLines, setLogLines] = useState([]);   // CN-2 更新实时日志
   const [installs, setInstalls] = useState(null); // 机器上检测到的所有 claude 安装(null=未加载)
+  // R8-2:手动指定的 claude 路径已失效(文件没了,resolver 静默回落中)。{ override } | null。
+  const [overrideDead, setOverrideDead] = useState(null);
+  // 「重新选择」动作滚动到下方安装切换区
+  const installListRef = useRef(null);
 
   const loadInstalls = async () => {
-    try { setInstalls((await (await fetch('/api/claude-installs')).json()).installs || []); }
+    try {
+      const d = await (await fetch('/api/claude-installs')).json();
+      setInstalls(d.installs || []);
+      setOverrideDead(d.overrideDead ? { override: d.override || '' } : null); // 旧后端无字段 → 不渲染横幅
+    }
     catch { setInstalls([]); }
   };
 
@@ -1209,10 +1217,36 @@ function CcUpdater() {
         )
       )}
       {state.status === 'err' && <div className="text-[12px] text-error">{state.error}</div>}
+      {/* R8-2:死 override 横幅。手动指定的路径已失效时 resolver 静默回落自动优先级,
+          用户以为还在用指定的那个 —— 显式提示 + 两个出口:清除指定(回自动)/重新选择
+          (滚到下方安装切换区)。旧后端无 overrideDead 字段 → overrideDead 恒 null 不渲染。 */}
+      {overrideDead && (
+        <div className="text-[12px] bg-warning/10 border border-warning/30 text-warning rounded p-2.5 space-y-1.5">
+          <div className="leading-snug">
+            手动指定的 claude 路径已失效:<code className="font-mono break-all">{overrideDead.override}</code>
+            {(() => {
+              const act = Array.isArray(installs) ? installs.find((i) => i.active) : null;
+              return act
+                ? <>;当前回落:<code className="font-mono break-all">{act.path}</code>{act.version ? `(v${act.version})` : ''}</>
+                : ';且未找到可回落的安装';
+            })()}
+          </div>
+          <div className="flex items-center gap-2">
+            <button onClick={() => switchActive('')} disabled={updating}
+              className="px-2.5 py-1 text-[11.5px] rounded-md border border-warning/40 text-warning hover:bg-warning/15 disabled:opacity-50">
+              清除指定(转自动解析)
+            </button>
+            <button onClick={() => installListRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' })}
+              className="px-2.5 py-1 text-[11.5px] rounded-md border border-warning/40 text-warning hover:bg-warning/15">
+              重新选择
+            </button>
+          </div>
+        </div>
+      )}
       {/* 使用哪个 Claude:原生版/npm 版两个按钮常驻(不论是否安装)。点击时先重扫一遍
           安装列表(覆盖"刚在终端装完回来点"的场景):该方式已装→直接切换;未装→确认后打开
           终端安装。下方仍列出检测到的全部安装(brew/多处并存时可精确钉选某一处)。 */}
-      <div className="border-t border-canvas-deep/60 pt-2 space-y-1.5">
+      <div ref={installListRef} className="border-t border-canvas-deep/60 pt-2 space-y-1.5">
         <div className="text-[11px] text-ink-muted font-body">
           使用哪个 Claude{Array.isArray(installs) && installs.length > 0 && (
             <span className="text-ink-faint">(检测到 {installs.length} 处安装)</span>

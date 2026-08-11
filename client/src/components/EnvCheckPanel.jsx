@@ -40,6 +40,17 @@ export default function EnvCheckPanel({ onDismiss, onRecheck, asModal = true }) 
   }, [onRecheck]);
   useEffect(() => { check(); }, [check]);
 
+  // R8-2:清除失效的手动指定路径(override)。PUT path:'' 幂等 —— override 文件不存在
+  // 也返回 ok;清除后 resolver 回自动优先级,立即重检刷新显示。
+  const clearOverride = async () => {
+    try {
+      await fetch('/api/claude-active', {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: '' }),
+      });
+    } catch {}
+    check(true);
+  };
+
   // method:仅 claude 用 'npm' | 'native';其余 target 不传(后端按 target 自带命令)。
   const install = async (key, method) => {
     try {
@@ -89,6 +100,20 @@ export default function EnvCheckPanel({ onDismiss, onRecheck, asModal = true }) 
                 {ok && item?.resolvedPath && (
                   <div className="text-[10px] text-ink-faint font-mono truncate" title={item.resolvedPath}>
                     {item.resolvedPath}
+                  </div>
+                )}
+                {/* R8-2:手动指定的 claude 路径已失效(旧后端无此字段则不渲染,可选链兜底) */}
+                {row.key === 'claude' && item?.overrideDead && (
+                  <div className="mt-1 px-2 py-1.5 rounded bg-warning/10 border border-warning/30 text-[10.5px] text-warning font-body leading-snug">
+                    手动指定的 claude 路径已失效:<span className="font-mono break-all">{item.override}</span>
+                    {item?.resolvedPath
+                      ? <>;当前回落:<span className="font-mono break-all">{item.resolvedPath}</span>{item?.version ? `(v${item.version})` : ''}</>
+                      : ';且未找到可回落的安装'}
+                    <button onClick={clearOverride}
+                      className="ml-1.5 px-1.5 py-0.5 rounded border border-warning/40 text-warning hover:bg-warning/15">
+                      清除指定
+                    </button>
+                    <span className="ml-1 text-ink-faint">如需改用其他安装,在设置→更新页选择。</span>
                   </div>
                 )}
                 {!ok && data && (

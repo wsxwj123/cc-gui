@@ -565,7 +565,10 @@ router.get('/claude-installs', async (_req, res) => {
     ...(it.shim ? { shim: true } : {}),
     ...(it.broken ? { broken: true, reason: it.reason || '' } : {}),
   })));
-  res.json({ installs, overridden: !!override, override, activeVia: active?.via || null });
+  // R8-2:手动指定的路径已失效(卸载/移动)→ 显式标注,前端渲染横幅给「清除指定 /
+  // 重新选择」出口;此前 resolver 只静默回落,用户以为还在用指定的那个。只增字段。
+  const overrideDead = !!override && !existsSync(override);
+  res.json({ installs, overridden: !!override, override, overrideDead, activeVia: active?.via || null });
 });
 
 // PUT /api/claude-active { path }
@@ -776,6 +779,9 @@ router.get('/env-check', async (req, res) => {
   const [{ method, path: claudePath, via }, python, uv, git, scan] = await Promise.all([
     detectInstall(), detectPython(), detectUv(), detectGit(), scanAllTools({ refresh }),
   ]);
+  // R8-2:死 override 判定(手动指定的 claude 路径文件已不存在)
+  const claudeOverride = getClaudeOverride();
+  const claudeOverrideDead = !!claudeOverride && !existsSync(claudeOverride);
   const claudeVersion = await getClaudeVersion(claudePath);
   // claude 的全部安装:复用 resolver 的全策略列举(与设置页"切换用哪个 claude"同源)。
   const claudeInstalls = await Promise.all((await listClaudeInstallsAsync()).map(async (it) => ({
@@ -812,6 +818,8 @@ router.get('/env-check', async (req, res) => {
       resolvedPath: claudePath || null, via: via || null,
       versionProbeFailed: !!claudePath && !claudeVersion,
       installs: claudeInstalls,
+      // R8-2:死 override 标注(环境检查面板据此显示横幅,与 cli-check/claude-installs 同口径)
+      ...(claudeOverrideDead ? { overrideDead: true, override: claudeOverride } : {}),
     },
     git: { ...withScan(git, scan.git), required: false },
     python: { ...withScan(python, scan.python), required: false },
