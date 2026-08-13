@@ -999,7 +999,7 @@ async function switchToOpenAIUpstream(up, requestedModel, res) {
   // Start the proxy (idempotent, fixed port) and point it at this upstream.
   let port = getProxyPort();
   if (!port) port = await startOpenAIProxy();
-  setOpenAIUpstream({ baseURL: up.baseURL, apiKey: up.apiKey });
+  setOpenAIUpstream({ baseURL: up.baseURL, apiKey: up.apiKey, model });
 
   // Start from the live settings.json so hooks/permissions survive the switch.
   const current = await readCurrentSettings();
@@ -1927,7 +1927,7 @@ export async function restoreOpenAIProvider() {
   }
   if (!upstream) return;
   await startOpenAIProxy();
-  setOpenAIUpstream({ baseURL: upstream.baseURL, apiKey: upstream.apiKey });
+  setOpenAIUpstream({ baseURL: upstream.baseURL, apiKey: upstream.apiKey, model: active.model });
 }
 
 // Boot-time twin of restoreOpenAIProvider for the Anthropic passthrough proxy.

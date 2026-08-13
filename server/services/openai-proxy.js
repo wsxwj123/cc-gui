@@ -25,9 +25,17 @@ let server = null;
 let boundPort = 0;
 
 export function setOpenAIUpstream(next) {
-  upstream = next && next.baseURL && next.apiKey
-    ? { baseURL: String(next.baseURL).replace(/\/+$/, ''), apiKey: String(next.apiKey) }
-    : null;
+  if (!next || !next.baseURL) {
+    upstream = null;
+    return upstream;
+  }
+  upstream = {
+    baseURL: String(next.baseURL).replace(/\/+$/, ''),
+    apiKey: next.apiKey ? String(next.apiKey) : '',
+    // model 供 upstreamNoVision 判定 opencode+deepseek 场景剥图;不带 model 的旧调用
+    // (baseURL+apiKey)仍工作,model 为空、行为不变。
+    model: next.model ? String(next.model) : '',
+  };
   return upstream;
 }
 
@@ -48,8 +56,14 @@ function systemToText(system) {
 // CI-4:已知无 vision 的 OpenAI 兼容上游(对 image_url 报 400 "unknown variant 'image_url'")。
 // 按 baseURL 命中,后续可扩展。命中时把 image block 剥成文本占位,避免整个请求 400 失败。
 const NO_VISION_HOSTS = /deepseek/i;
-function upstreamNoVision() {
-  return !!(upstream?.baseURL && NO_VISION_HOSTS.test(upstream.baseURL));
+const OPENCODE_HOST = /opencode/i;
+const DEEPSEEK_MODEL = /deepseek/i;
+export function upstreamNoVision() {
+  if (!upstream?.baseURL) return false;
+  if (NO_VISION_HOSTS.test(upstream.baseURL)) return true;
+  // opencode 走 OpenAI 协议,baseURL 不含 deepseek;但选 deepseek 系模型时上游同样无 vision,
+  // 历史 image 块原样转发会 400。按「opencode baseURL + deepseek 系 model」补判。
+  return OPENCODE_HOST.test(upstream.baseURL) && DEEPSEEK_MODEL.test(upstream.model || '');
 }
 
 export function anthropicToOpenAIMessages(messages, system) {
