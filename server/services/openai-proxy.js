@@ -52,7 +52,7 @@ function upstreamNoVision() {
   return !!(upstream?.baseURL && NO_VISION_HOSTS.test(upstream.baseURL));
 }
 
-function anthropicToOpenAIMessages(messages, system) {
+export function anthropicToOpenAIMessages(messages, system) {
   const out = [];
   const noVision = upstreamNoVision();
   const sys = systemToText(system);
@@ -74,11 +74,16 @@ function anthropicToOpenAIMessages(messages, system) {
     const imageParts = [];
     const toolCalls = [];
     const toolResults = [];
+    const thinkingParts = [];
 
     for (const block of content) {
       if (!block || typeof block !== 'object') continue;
       if (block.type === 'text') {
         textParts.push(block.text || '');
+      } else if (block.type === 'thinking') {
+        // 历史 thinking 块不能丢:deepseek 系上游要求 thinking 轮次必须回传 reasoning_content,
+        // 缺了同会话续聊报 400。收集后作 assistant 顶层字段,不进 content(正文/思考分离)。
+        thinkingParts.push(block.thinking || '');
       } else if (block.type === 'tool_use') {
         toolCalls.push({
           id: block.id,
@@ -116,7 +121,8 @@ function anthropicToOpenAIMessages(messages, system) {
       const txt = textParts.join('');
       if (txt) m.content = txt;
       if (toolCalls.length) m.tool_calls = toolCalls;
-      if (m.content != null || m.tool_calls) out.push(m);
+      if (thinkingParts.length) m.reasoning_content = thinkingParts.join('');
+      if (m.content != null || m.tool_calls || m.reasoning_content != null) out.push(m);
     } else {
       // user (or tool) — emit tool_result FIRST, then text.
       // OpenAI 协议要求 assistant.tool_calls 后必须立即跟 tool messages 配对,
