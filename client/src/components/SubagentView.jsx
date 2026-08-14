@@ -1,5 +1,5 @@
-import React from 'react';
-import { Bot, GitBranch, Loader2, Square, User } from 'lucide-react';
+import React, { useEffect, useRef, useState } from 'react';
+import { Bot, ChevronDown, GitBranch, Loader2, Square, User } from 'lucide-react';
 import { useStore } from '../stores/sessionStore.js';
 import { MarkdownRenderer } from './MarkdownRenderer.jsx';
 import { CoworkBlocks } from './TurnBubble.jsx';
@@ -8,6 +8,7 @@ import { LoadingMark, useCyclingVerb, ElapsedTime } from './LoadingBits.jsx';
 import { stopNoOwnerNotice } from './tools/TaskCard.jsx';
 import { resolveOwnedAgent } from '../utils/agentOwner.js';
 import { confirmDialog } from '../utils/confirmDialog.jsx';
+import { shouldPauseAutoScroll } from '../utils/scroll.js';
 
 // 上下文占用简写(与主会话徽章同口径:k 计)。
 function fmtTok(n) {
@@ -25,6 +26,10 @@ export function SubagentView({ agentId, parentTitle, parentSessionId = null, onB
   const agent = resolveOwnedAgent(useStore((s) => s.activeAgents[agentId]), parentSessionId);
   // hooks 必须在下面的早退 return 之前(rules-of-hooks)。
   const verb = useCyclingVerb();
+  const scrollRef = useRef(null);
+  const followBottomRef = useRef(true);
+  const lastScrollTopRef = useRef(0);
+  const [atBottom, setAtBottom] = useState(true);
   // 兜底:store 拿不到具体名/model 时(provider 不发子代理流),从 server 提取的
   // sessions.subagents 按 toolUseId(= agentId)对回 agentType / model / 上下文占用 / cwd。
   const sessionsList = useStore((s) => s.sessions);
@@ -33,6 +38,45 @@ export function SubagentView({ agentId, parentTitle, parentSessionId = null, onB
     metaAgent = sess?.subagents?.find?.((a) => a.toolUseId === agentId);
     if (metaAgent) break;
   }
+
+  // 与 TaskCard 同一优先级:命名实例名(teammateName,未被 subagent_type 抢占的那份)
+  // 优先于泛化类型名,否则命名队友在这里也显示成 general-purpose。
+  const rawName = agent?.teammateName || agent?.name || null;
+  const isGeneric = !rawName || rawName === 'Task' || rawName === 'Agent';
+  const name = (isGeneric && metaAgent?.agentType) ? metaAgent.agentType : (rawName || '子代理');
+  const agentModel = agent?.model || metaAgent?.model || null;
+  const description = agent?.description || '';
+  const prompt = agent?.prompt || '';
+  const blocks = agent?.blocks || [];
+  const status = agent?.status || 'working';
+  const working = status === 'working' || status === 'starting';
+  const nonTerminal = !['done', 'error', 'stopped'].includes(status);
+
+  useEffect(() => {
+    followBottomRef.current = true;
+    lastScrollTopRef.current = 0;
+    setAtBottom(true);
+  }, [agentId]);
+
+  useEffect(() => {
+    if (!followBottomRef.current) return;
+    const id = requestAnimationFrame(() => {
+      const el = scrollRef.current;
+      if (el) el.scrollTop = el.scrollHeight;
+    });
+    return () => cancelAnimationFrame(id);
+  }, [blocks, agent?.result, working]);
+
+  const handleScroll = () => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const movedUp = shouldPauseAutoScroll({ previousTop: lastScrollTopRef.current, currentTop: el.scrollTop });
+    lastScrollTopRef.current = el.scrollTop;
+    const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
+    if (movedUp) followBottomRef.current = false;
+    else if (distance < 40) followBottomRef.current = true;
+    setAtBottom(distance < 120);
+  };
 
   if (!agent) {
     return (
@@ -43,19 +87,6 @@ export function SubagentView({ agentId, parentTitle, parentSessionId = null, onB
       </div>
     );
   }
-
-  // 与 TaskCard 同一优先级:命名实例名(teammateName,未被 subagent_type 抢占的那份)
-  // 优先于泛化类型名,否则命名队友在这里也显示成 general-purpose。
-  const rawName = agent.teammateName || agent.name || null;
-  const isGeneric = !rawName || rawName === 'Task' || rawName === 'Agent';
-  const name = (isGeneric && metaAgent?.agentType) ? metaAgent.agentType : (rawName || '子代理');
-  const agentModel = agent.model || metaAgent?.model || null;
-  const description = agent.description || '';
-  const prompt = agent.prompt || '';
-  const blocks = agent.blocks || [];
-  const status = agent.status || 'working';
-  const working = status === 'working' || status === 'starting';
-  const nonTerminal = !['done', 'error', 'stopped'].includes(status);
 
   const statusMeta = {
     starting: { label: '启动中', cls: 'text-blue-600' },
@@ -132,10 +163,11 @@ export function SubagentView({ agentId, parentTitle, parentSessionId = null, onB
       </div>
 
       {/* 消息流 — 正常会话气泡样式 */}
-      <div className="flex-1 overflow-y-auto">
-        {/* 派发 prompt = 用户气泡(右侧) */}
-        {prompt && (
-          <div className="group px-6 py-4">
+      <div className="flex-1 min-h-0 relative">
+        <div ref={scrollRef} onScroll={handleScroll} data-subagent-scroll className="h-full overflow-y-auto">
+          {/* 派发 prompt = 用户气泡(右侧) */}
+          {prompt && (
+            <div className="group px-6 py-4">
             <div className="max-w-[var(--content-max)] mx-auto flex flex-row-reverse gap-3">
               <div className="shrink-0 mt-0.5 w-[34px] h-[34px] rounded-full bg-accent/15 flex items-center justify-center">
                 <User size={16} className="text-accent" />
@@ -148,7 +180,7 @@ export function SubagentView({ agentId, parentTitle, parentSessionId = null, onB
               </div>
             </div>
           </div>
-        )}
+          )}
 
         {/* 子代理回复 = Claude 气泡(左侧):思考折叠 + 工具列表 + 正文 */}
         <div className="group px-6 py-4">
@@ -189,6 +221,22 @@ export function SubagentView({ agentId, parentTitle, parentSessionId = null, onB
             </div>
           </div>
         </div>
+        </div>
+        {!atBottom && (
+          <button
+            onClick={() => {
+              const el = scrollRef.current;
+              if (el) el.scrollTop = el.scrollHeight;
+              followBottomRef.current = true;
+              setAtBottom(true);
+            }}
+            className="absolute bottom-3 left-1/2 -translate-x-1/2 z-10 bg-canvas border border-canvas-deep hover:bg-canvas-warm rounded-full p-2 shadow-sm transition-colors"
+            title="回到底部"
+            aria-label="回到底部"
+          >
+            <ChevronDown size={14} className="text-ink-muted" />
+          </button>
+        )}
       </div>
 
       {/* 子代理的权限申请也在此显示,使在子代理视图内同样可审批(母会话视图同一张卡;

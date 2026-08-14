@@ -107,13 +107,13 @@ const makeTestQueue = () => {
   assert.equal(q.push({ type: 'user', message: { role: 'user', content: 'x' } }), true, '正常 push 返回 true');
 }
 
-// ── 2) 路由接线:push 形状与复用块 :1149 逐字一致(外加 uuid)+ 409 语义 ────
+// ── 2) 路由接线:SDKUserMessage 明确 priority=now + uuid + 409 语义 ────
 const chat = read('server', 'routes', 'chat.js');
 assert.ok(/router\.post\('\/chat\/steer'/.test(chat), '独立路由,不动 POST \/chat');
 assert.ok(/const hit = findBusySlot\(activeProcesses, String\(sessionId\)\);\s*\n\s*if \(!hit\) return res\.status\(409\)\.json\(\{ error: 'no-active-turn' \}\);/.test(chat),
   '找不到忙 slot → 409 no-active-turn(客户端据此回落入队)');
-assert.ok(/const msg = \{ type: 'user', message: \{ role: 'user', content: String\(content\) \} \};/.test(chat),
-  'push 形状与复用块 :1149 逐字一致');
+assert.ok(/const msg = \{\s*\n\s*type: 'user',[\s\S]{0,220}?parent_tool_use_id: null,\s*\n\s*priority: 'now',\s*\n\s*\};/.test(chat),
+  '并入消息遵循官方 SDKUserMessage 形状，并显式使用 priority=now');
 assert.ok(/if \(uuid\) msg\.uuid = String\(uuid\);/.test(chat),
   '带 uuid 才有 command_lifecycle 可用(角标数据源)');
 // 判官致命-1 的两处承重点:push 有返回值 + 路由据返回值 409(缺一就是"200 空吞")
@@ -274,10 +274,12 @@ assert.ok(/const i = firstDrainableIndex\(list\);\s*\n\s*if \(i < 0\) return s;/
 assert.ok(/return stripSteerState\(out\);/.test(store), 'localStorage 恢复时洗掉 steer 态');
 assert.ok(/replaceQueue: \(sessionKey, list\) => set\(/.test(store), '队列整体替换(标记/落地判定共用)');
 
-// ── 5) 发送门:回合进行中【默认入队】,不再默认注入(设计乙 ①)────────
+// ── 5) 发送门:裸 Enter 默认入队，只有 Cmd/Ctrl+Enter 显式注入(设计乙 ①)──
 const app = read('client', 'src', 'App.jsx');
-assert.ok(/if \(!reattachPid && !opts\.forceSend && \(streamingRef\.current \|\| backgroundPidRef\.current\)\) \{\s*\n\s*useStore\.getState\(\)\.enqueueMessage\(sessionQueueKey, \{ text: prompt, queuedAt: Date\.now\(\), hidden: !!hiddenUserMessage, opts \}\);\s*\n\s*return;\s*\n\s*\}/.test(app),
-  '回合进行中直发 = 入队(0.2.283 行为);门里不得再有任何注入分流');
+assert.ok(/if \(!reattachPid && !opts\.forceSend && \(streamingRef\.current \|\| backgroundPidRef\.current\)\) \{[\s\S]{0,240}?enqueueMessage\(sessionQueueKey,[\s\S]{0,1800}?if \(opts\.steer && !hiddenUserMessage\)/.test(app),
+  '忙回合必须先入队保底，只有显式 steer 意图才尝试并入');
+assert.ok(/当前回合暂时无法并入，消息已保留在队列中/.test(app),
+  '并入失败必须保留队列消息并明确提示');
 assert.ok(!/_canSteer && !hiddenUserMessage/.test(app), '默认注入分流已撤掉');
 assert.ok(!/_internalResend/.test(app), 'fromQueue/freshRetry 等"别注入"的标记随之退役,不留死代码');
 assert.ok(/const resendReplacing = useCallback\(\(text, opts = \{\}\) => \{/.test(app)

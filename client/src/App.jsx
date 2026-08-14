@@ -81,7 +81,7 @@ import { notifyWaiting } from './utils/desktopNotify.js';
 import { BG_BANNER_DELAY_MS, histSig, isCurrentStreamTurn, nextAttachTry, nextReattachGuard, resolveStreamHistCutoff, shouldRefreshHist } from './utils/reattach.js';
 import { pruneByLiveSet } from './utils/levelPrune.js';
 import { classifyStopTargets } from './utils/stopTargets.js';
-import { resizeScrollTop } from './utils/scroll.js';
+import { resizeScrollTop, shouldPauseAutoScroll } from './utils/scroll.js';
 import { resolveSessionTitle } from './utils/sessionTitle.js';
 
 // ── Per-session shadow-git checkpoints ──────────────────────────
@@ -3362,19 +3362,19 @@ function GitInitBanner({ cwd }) {
   // 且大目录的 add 可能跑几十秒 —— 说清楚在等什么,别让用户以为按钮没反应。
   if (status === 'busy') {
     return (
-      <div className="bg-amber-50 border-b border-amber-200 px-4 py-2 text-[12px] font-body text-amber-900 flex items-center gap-2">
+      <div className="min-w-0 overflow-hidden bg-amber-50 border-b border-amber-200 px-4 py-2 text-[12px] font-body text-amber-900 flex items-center gap-2">
         <GitBranch size={13} className="text-amber-700 shrink-0" />
-        <span className="flex-1">正在创建基线提交…目录较大时这一步（<code className="font-mono">git add</code>）可能需要几十秒。</span>
+        <span className="flex-1 min-w-0 break-words">正在创建基线提交…目录较大时这一步（<code className="font-mono">git add</code>）可能需要几十秒。</span>
       </div>
     );
   }
 
   if (status === 'done') {
     return (
-      <div className="bg-green-50 border-b border-green-200 px-4 py-2 text-[12px] font-body text-green-800 flex items-center gap-2">
+      <div className="min-w-0 overflow-hidden bg-green-50 border-b border-green-200 px-4 py-2 text-[12px] font-body text-green-800 flex items-center gap-2">
         <GitBranch size={13} className="text-green-700 shrink-0" />
         {/* 两条来路共用:非仓库(init + 基线提交)与零提交仓库(只补基线提交)。 */}
-        <span className="flex-1">已创建基线提交，AI 的修改可随时回滚。</span>
+        <span className="flex-1 min-w-0 break-words">已创建基线提交，AI 的修改可随时回滚。</span>
       </div>
     );
   }
@@ -3384,9 +3384,9 @@ function GitInitBanner({ cwd }) {
   // /api/git/init:already:true 时它只做 add + commit,正好是这里需要的基线提交。
   if (status === 'nocommit') {
     return (
-      <div className="bg-amber-50 border-b border-amber-200 px-4 py-2 text-[12px] font-body text-amber-900 flex items-center gap-2">
+      <div className="min-w-0 overflow-hidden bg-amber-50 border-b border-amber-200 px-4 py-2 text-[12px] font-body text-amber-900 flex items-center gap-2">
         <GitBranch size={13} className="text-amber-700 shrink-0" />
-        <span className="flex-1">
+        <span className="flex-1 min-w-0 break-words">
           <b>这个 git 仓库还没有任何提交</b>。worktree 与基于 git 的回滚需要至少一个提交，建议先做一次基线提交。
           {/* 仓库根常常在项目目录的上层(用户实景:项目是空文件夹,仓库根是它的父目录),
               不说清楚的话用户不知道自己在给哪个仓库补提交。 */}
@@ -3412,11 +3412,11 @@ function GitInitBanner({ cwd }) {
 
   if (status === 'partial') {
     return (
-      <div className="bg-amber-50 border-b border-amber-200 px-4 py-2 text-[12px] font-body text-amber-900 flex items-start gap-2">
+      <div className="min-w-0 overflow-hidden bg-amber-50 border-b border-amber-200 px-4 py-2 text-[12px] font-body text-amber-900 flex items-start gap-2">
         <GitBranch size={13} className="text-amber-700 shrink-0 mt-0.5" />
         {/* 原文案写死"已 git init、目录含嵌入式仓库",但目录已是仓库时根本没 init 过,
             失败原因也可能是目录过大导致 add 超时(用户实测)。改为如实转述服务端原因。 */}
-        <span className="flex-1">
+        <span className="flex-1 min-w-0 break-words">
           <b>基线提交未完成</b>
           ：暂存或提交这一步失败（目录过大、含嵌入式 git 仓库等）。回滚仍可用（基于发送前的 checkpoint），但全量基线提交没有记录。
           {warning && <span className="block text-[10.5px] text-amber-700 mt-1 font-mono truncate" title={warning}>{warning.slice(0, 200)}</span>}
@@ -3428,9 +3428,9 @@ function GitInitBanner({ cwd }) {
   }
 
   return (
-    <div className="bg-amber-50 border-b border-amber-200 px-4 py-2 text-[12px] font-body text-amber-900 flex items-center gap-2">
+    <div className="min-w-0 overflow-hidden bg-amber-50 border-b border-amber-200 px-4 py-2 text-[12px] font-body text-amber-900 flex items-center gap-2">
       <GitBranch size={13} className="text-amber-700 shrink-0" />
-      <span className="flex-1">
+      <span className="flex-1 min-w-0 break-words">
         <b>这个目录不是 git 仓库</b>。建议先 init + 基线提交，方便回滚 AI 的修改。
       </span>
       <button
@@ -3965,6 +3965,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // 区分"程序触发的吸底写入"与"用户手势":吸底自己写 scrollTop 会触发 scroll 事件,
   // 不打这个标记就会被 handleScroll 误判成用户滚动。
   const programmaticScrollRef = useRef(false);
+  const programmaticScrollTargetRef = useRef(0);
+  const lastScrollTopRef = useRef(0);
   // 变化【前】的可滚动上限(scrollHeight - clientHeight)。容器宽度变化后消息重排、总高
   // 改变,靠它按比例把位置搬回去(见下方 setContainerRef 里的 ResizeObserver)。
   // 在 handleScroll 里顺手刷新,零额外开销。
@@ -4102,6 +4104,10 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // 排队消息弹出去重发 = 同文双发。⚡ 期间置起、自管 try/finally 复位(不再依赖某条被 abort
   // 的流的 finally 来清 —— 那是它当年在空闲态点 ⚡ 后永久挂 true 的老 bug)。
   const acceleratingRef = useRef(false);
+  // 引导消息的流式切口必须在所有发送入口之前声明：队列按钮与 Cmd/Ctrl+Enter 共用。
+  const steerAnchorRef = useRef({});
+  const streamingBlocksRef = useRef(EMPTY_ARRAY);
+  useEffect(() => { streamingBlocksRef.current = streamingBlocks; }, [streamingBlocks]);
   // H 转后台:用户主动把前台回合转后台(只断本端 SSE,进程照跑)。被 abort 的
   // handleSend finally 读它跳过排队消息外发——回合还在服务端跑,此刻外发会对同一
   // jsonl 双写。finally 末尾复位。
@@ -4230,38 +4236,6 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   useEffect(() => {
     if (streamOwnerKeyRef.current !== sessionQueueKey) setLiveContextUsage(null);
   }, [sessionQueueKey]);
-
-  // X2/I6:打开会话时后台对齐一次 /context(每会话每次运行只测一次)。覆盖两类
-  // 徽章空窗:①重启后内存实测为空;②会话以 /compact 收尾,compact 之后没有任何
-  // 带 usage 的回合(jsonl 路径无值可取,用户截图场景)。/context 不走主对话模型,
-  // 但会打多次 count_tokens(免费、有网络往返);回写后徽章与点开明细一致,且明细
-  // 缓存进 store 供弹层秒开(AA1)。
-  useEffect(() => {
-    const sid = selectedSession?.sessionId;
-    if (!sid || streamingRef.current) return;
-    const st = useStore.getState();
-    if (st.ctxMeasuredBySession[sid]) return;
-    const once = (window.__cguiCtxProbeOnce ||= new Set());
-    if (once.has(sid)) return;
-    once.add(sid);
-    const qs = new URLSearchParams({
-      cwd: selectedSession.projectPath || '',
-      projectHash: selectedSession.projectHash || '',
-      model: st.modelBySession[sid] || st.currentModel || '',
-    });
-    fetch(`/api/context/${sid}?${qs.toString()}`)
-      .then((r) => r.json())
-      .then((d) => {
-        if (d?.totalTokens > 0 && d?.windowTokens > 0) {
-          useStore.getState().setCtxMeasured(sid, { totalTokens: d.totalTokens, windowTokens: d.windowTokens });
-        }
-        useStore.getState().setCtxBreakdown(sid, d); // AA1:缓存明细供弹层秒开
-      })
-      // C3:失败要把 sid 从 once 集合删掉,否则首次探测失败(网络/500)后永不重试,
-      // "无 usage 回合 + compact 收尾"场景徽章永久空窗到刷新。与 __cguiCtxProbe 的
-      // finally 清理对齐。
-      .catch(() => { once.delete(sid); });
-  }, [selectedSession?.sessionId]);
 
   useEffect(() => {
     if (!selectedSession?.sessionId || !selectedSession?.projectHash) return;
@@ -4515,7 +4489,12 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     if (userScrolledAwayRef.current) return;  // AZ3:用户在看历史时不抢滚
     const id = requestAnimationFrame(() => {
       const el = containerRef.current;
-      if (el) { programmaticScrollRef.current = true; el.scrollTop = el.scrollHeight; }
+      if (el) {
+        const target = Math.max(0, el.scrollHeight - el.clientHeight);
+        programmaticScrollRef.current = true;
+        programmaticScrollTargetRef.current = target;
+        el.scrollTop = target;
+      }
     });
     return () => cancelAnimationFrame(id);
   }, [messages, chatMessages, streamingText, streamingThinking, streamingToolCalls]);
@@ -4537,16 +4516,22 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
 
   const handleScroll = () => {
     if (!containerRef.current) return;
+    const { scrollTop, scrollHeight, clientHeight } = containerRef.current;
+    const movedUp = shouldPauseAutoScroll({ previousTop: lastScrollTopRef.current, currentTop: scrollTop });
+    lastScrollTopRef.current = scrollTop;
     // 上限快照先于程序滚动的早退更新:宽度变化时要拿"变化前"的可滚动上限做等比还原,
     // 而程序吸底同样会改变它,漏记就会用过期基准算出错误位置。
-    scrollMaxRef.current = Math.max(0, containerRef.current.scrollHeight - containerRef.current.clientHeight);
-    // AZ3:程序触发的吸底写入会回弹一个 scroll 事件 → 跳过判定,别误判成用户滚动。
-    if (programmaticScrollRef.current) { programmaticScrollRef.current = false; return; }
-    const { scrollTop, scrollHeight, clientHeight } = containerRef.current;
+    scrollMaxRef.current = Math.max(0, scrollHeight - clientHeight);
+    // 用户向上滚的实际位移优先于尚未回弹的程序滚动标记。旧逻辑先吞掉程序事件，
+    // 触控板恰好在这个窗口起手时，第一段上滚也被吞掉，下一 token 又把视口拉回底部。
+    const reachedProgrammaticTarget = programmaticScrollRef.current
+      && Math.abs(scrollTop - programmaticScrollTargetRef.current) < 1;
+    if (reachedProgrammaticTarget) { programmaticScrollRef.current = false; return; }
+    if (movedUp) userScrolledAwayRef.current = true;
+    programmaticScrollRef.current = false;
     const distFromBottom = scrollHeight - scrollTop - clientHeight;
-    // 迟滞:滚离 >200 上锁(暂停自动吸底),滚回贴底 <40 解锁;两阈值拉开消除边界抖动。
-    if (distFromBottom > 200) userScrolledAwayRef.current = true;
-    else if (distFromBottom < 40) userScrolledAwayRef.current = false;
+    // 向上位移立即上锁；贴底 <40 才解锁。保留迟滞只用于解锁，消除边界抖动。
+    if (distFromBottom < 40) userScrolledAwayRef.current = false;
     setAutoScroll(distFromBottom < 120);  // 仅驱动「回到底部」按钮显隐
     if (scrollPersistKey) {
       try { localStorage.setItem(scrollPersistKey, String(scrollTop)); } catch {}
@@ -4569,8 +4554,10 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       // Defer to next frame so DOM is laid out
       requestAnimationFrame(() => {
         if (el) {
+          const target = Math.min(Math.max(0, top), Math.max(0, el.scrollHeight - el.clientHeight));
           programmaticScrollRef.current = true;
-          el.scrollTop = top;
+          programmaticScrollTargetRef.current = target;
+          el.scrollTop = target;
           const away = el.scrollHeight - el.scrollTop - el.clientHeight >= 120;
           userScrolledAwayRef.current = away;  // AZ3:恢复的位置若不在底部则保持暂停吸底
           setAutoScroll(!away);
@@ -4617,7 +4604,11 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           });
           // 差值不足 1px 就不写:避免无谓的 scroll 事件,也避免 programmaticScrollRef
           // 被置真却等不到回弹事件 → 下一次真实用户滚动被当成程序滚动吞掉。
-          if (Math.abs(next - node.scrollTop) >= 1) { programmaticScrollRef.current = true; node.scrollTop = next; }
+          if (Math.abs(next - node.scrollTop) >= 1) {
+            programmaticScrollRef.current = true;
+            programmaticScrollTargetRef.current = next;
+            node.scrollTop = next;
+          }
         }
       }
       scrollMaxRef.current = Math.max(0, node.scrollHeight - node.clientHeight);
@@ -4830,14 +4821,38 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     // H 转后台:backgroundPid 有值=本会话回合仍在服务端跑(streamingRef 已被 detach 置 false)。
     // 也要入队——否则直发会 --resume 同一 jsonl 与后台回合双写(server 只复用 idle slot,
     // busy slot 会另起进程)。队列在后台回合完成时由 backgroundPid 轮询分支排空(见 poll)。
-    // 设计乙(用户实测后定稿):回合进行中直发【一律入队】,与 0.2.283 行为一致。
+    // 设计乙(用户实测后定稿):回合进行中裸 Enter 直发【一律入队】,与 0.2.283 行为一致。
     // 0.2.284 曾让手打消息默认走无打断注入(steer),用户实测打回:注入本身没问题(回合
     // 结束后从 jsonl 重排,位置与独立回应块都正确),但流式期间提前画的本地气泡会贴在上
     // 一条用户消息之后、悬在流式块上方 = 错序。故默认退回排队,注入改为【显式动作】——
     // 队列条目上的「⚡ 并入」按钮(handleAccelerate)。
     // forceSend(回滚/重做的重发 = 有意打断替换)照旧连这道门都不进。
     if (!reattachPid && !opts.forceSend && (streamingRef.current || backgroundPidRef.current)) {
-      useStore.getState().enqueueMessage(sessionQueueKey, { text: prompt, queuedAt: Date.now(), hidden: !!hiddenUserMessage, opts });
+      const queuedAt = Date.now();
+      useStore.getState().enqueueMessage(sessionQueueKey, { text: prompt, queuedAt, hidden: !!hiddenUserMessage, opts });
+      // Cmd/Ctrl+Enter:先入队保底，再调用 CLI/SDK 的实时输入队列。连接中、回合刚收尾或
+      // provider 不支持时 steer 返回 null，条目原样留队，绝不因快捷键失败而丢消息。
+      if (opts.steer && !hiddenUserMessage) {
+        acceleratingRef.current = true;
+        const steeredAt = Date.now();
+        let steerId = null;
+        try {
+          steerId = await steerCurrentTurnRef.current?.(prompt, { meta });
+        } finally {
+          acceleratingRef.current = false;
+        }
+        if (steerId) {
+          steerAnchorRef.current[steerId] = streamingBlocksRef.current.length;
+          const st = useStore.getState();
+          const now = st.messageQueue[sessionQueueKey] || [];
+          const at = now.findIndex((item) => item?.queuedAt === queuedAt && item?.text === prompt);
+          if (at >= 0) st.replaceQueue(sessionQueueKey, now.map((item, i) => (
+            i === at ? { ...item, steerId, steerState: 'sent', steeredAt } : item
+          )));
+        } else {
+          setProviderSwitchNotice({ text: '当前回合暂时无法并入，消息已保留在队列中，回复完成后会自动发出。' });
+        }
+      }
       return;
     }
 
@@ -6628,35 +6643,6 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       // Notify panels (UsagePanel) to refresh their stats.
       window.dispatchEvent(new CustomEvent('cgui:chat-done'));
 
-      // V1:回合结束后台自动跑一次 /context(fork 不落盘、纯本地计算),把实测的
-      // 分子/分母回写徽章 —— usage 事件只反映"上次 API 调用收到的输入",与 /context
-      // 的"下次发送的真实上下文"存在系统性差值(用户实测 117k vs 138k)。实测对齐后
-      // 徽章与点开的明细一致。best-effort、不阻塞;同会话并发探测去重。
-      try {
-        const _ok2 = streamOwnerKeyRef.current;
-        const probeSid = (_ok2 && !String(_ok2).startsWith('draft-')) ? _ok2 : getLocalSession()?.sessionId;
-        if (probeSid && (producedReply || isCompact) && !isClear && !window.__cguiCtxProbe?.[probeSid]) {
-          (window.__cguiCtxProbe ||= {})[probeSid] = true;
-          const _st3 = useStore.getState();
-          const probeModel = _st3.modelBySession[probeSid] || _st3.currentModel || '';
-          // projectHash/cwd 同样取归属会话元数据:selectedSession 是发起时闭包(= owner
-          // 会话),不摸 getLocalSession()(用户切走后会把探测打到别的项目目录,判官盲审#5)。
-          const probePh = selectedSession?.projectHash || '';
-          const probeCwd = selectedSession?.projectPath || selectedProject?.path || '';
-          const qs2 = new URLSearchParams({ cwd: probeCwd, projectHash: probePh, model: probeModel });
-          fetch(`/api/context/${probeSid}?${qs2.toString()}`)
-            .then((r) => r.json())
-            .then((d) => {
-              if (d?.totalTokens > 0 && d?.windowTokens > 0) {
-                useStore.getState().setCtxMeasured(probeSid, { totalTokens: d.totalTokens, windowTokens: d.windowTokens });
-              }
-              useStore.getState().setCtxBreakdown(probeSid, d); // AA1:缓存明细供弹层秒开
-            })
-            .catch(() => {})
-            .finally(() => { delete window.__cguiCtxProbe[probeSid]; });
-        }
-      } catch {}
-
       // 首轮后自动生成会话标题(B):一次性隔离 claude 调用,best-effort、不阻塞。
       // 仅当会话已有真实 sessionId、且既无自定义标题也无已生成的自动标题时触发,
       // 所以每个会话最多生成一次。失败/空标题静默回退到第一条消息。
@@ -6951,12 +6937,6 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // 交接语义(与 reconcile 严格对称,不新增判据):
   //   落地 → 条目出队 + 历史里已有 reader 合成的同一条消息 → 本地气泡消失,位置交还 jsonl;
   //   没落地 → 条目翻回普通排队态(不再 isSteered)→ 气泡消失、chip 复现可编辑,一字不丢。
-  // 声明在 handleAccelerate 之【前】:那条回调要写 steerAnchorRef(本仓踩过 TDZ 白屏,
-  // 引用一律放在使用点上方)。
-  const steerAnchorRef = useRef({}); // { [steerId]: 点 ⚡ 那一刻已产出的流式块数 } = 切口
-  const streamingBlocksRef = useRef(EMPTY_ARRAY);
-  useEffect(() => { streamingBlocksRef.current = streamingBlocks; }, [streamingBlocks]);
-
   // "⚡ 并入" — 把队列里第一条还没注入过的消息推进正在跑的回合(设计乙)。
   // 旧实现是 abort 本端 SSE + POST /stop + 当成新消息重发(= interrupt 重来),在
   // backgroundPid 态与 connecting 窗口下三个动作全落空、队首弹出又被入队门塞回队尾 =
@@ -8135,7 +8115,12 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
               // every scrollable ancestor (incl. the root flex), shoving the
               // header off-screen and leaving a blank gap at the bottom (#16).
               const el = containerRef.current;
-              if (el) { programmaticScrollRef.current = true; el.scrollTop = el.scrollHeight; }
+              if (el) {
+                const target = Math.max(0, el.scrollHeight - el.clientHeight);
+                programmaticScrollRef.current = true;
+                programmaticScrollTargetRef.current = target;
+                el.scrollTop = target;
+              }
               userScrolledAwayRef.current = false;  // AZ3:显式回到底部 → 恢复跟随
               setAutoScroll(true);
             }}
@@ -8490,6 +8475,18 @@ function ContextBreakdownButton({ contextTokens, contextWindow, contextPct, fmtT
   const menuRef = useRef(null);
   // AA1:后台探测(开会话/回合后)缓存的完整明细 —— 点开优先读它,秒显,不 spawn。
   const cachedBreakdown = useStore((s) => s.ctxBreakdownBySession[sessionId]);
+  const localBreakdown = {
+    model: model || '',
+    totalTokens: contextTokens || 0,
+    windowTokens: contextWindow || 0,
+    pct: contextPct || 0,
+    localOnly: true,
+    categories: [
+      { name: '当前上下文（本地统计）', tokens: contextTokens || 0, pct: contextPct || 0 },
+      { name: 'Free space', tokens: Math.max(0, (contextWindow || 0) - (contextTokens || 0)), pct: Math.max(0, 100 - (contextPct || 0)) },
+    ],
+    mcpServers: [],
+  };
 
   useEffect(() => {
     if (!open) return;
@@ -8540,8 +8537,8 @@ function ContextBreakdownButton({ contextTokens, contextWindow, contextPct, fmtT
       // U3/V1:把 CLI 实测的分子+分母回写为本会话徽章的权威值,徽章与明细从此一致。
       if (d?.windowTokens > 0) useStore.getState().setCtxMeasured(sessionId, { totalTokens: d.totalTokens || 0, windowTokens: d.windowTokens });
       useStore.getState().setCtxBreakdown(sessionId, d); // AA1:刷新缓存
-    } catch (e) { setErr(e.message); setData(null); }
-    setLoading(false);
+    } catch (e) { setErr(e.message); }
+    finally { setLoading(false); }
   };
 
   const toggle = (e) => {
@@ -8556,9 +8553,10 @@ function ContextBreakdownButton({ contextTokens, contextWindow, contextPct, fmtT
       const rLeft = r.left / z, rTop = r.top / z, rBottom = r.bottom / z;
       const openBelow = (visH - rBottom) >= rTop;
       setCoords({ left: rLeft, top: openBelow ? rBottom + gap : rTop - gap, ty: openBelow ? '0' : '-100%' });
-      // AA1:有后台缓存的明细就秒显,不再每次 spawn /context(5~30s)。无缓存才现算。
-      if (cachedBreakdown?.categories?.length > 0) { setData(cachedBreakdown); setErr(''); }
-      else load();
+      // 点击永远只做本地渲染：有精确缓存就秒显缓存，否则先显 usage/jsonl 本地统计。
+      // `/context` 会触发 count_tokens 网络请求，只有用户点刷新按钮时才精确计算。
+      setData(cachedBreakdown?.categories?.length > 0 ? cachedBreakdown : localBreakdown);
+      setErr('');
     }
     setOpen(!open);
   };
@@ -8579,6 +8577,7 @@ function ContextBreakdownButton({ contextTokens, contextWindow, contextPct, fmtT
       <div className="px-3 pb-2 flex items-center gap-2 border-b border-black/5">
         <span className="text-xs font-medium text-ink font-body">{info ? '会话信息' : '上下文用量'}</span>
         {data?.model && <span className="text-[10px] text-ink-faint font-mono truncate max-w-[130px]" title={data.model}>{data.model}</span>}
+        {data?.localOnly && <span className="text-[9px] text-ink-faint font-body">本地统计</span>}
         <button onClick={(e) => { e.stopPropagation(); load(); }} disabled={loading}
           className="ml-auto p-0.5 text-ink-faint hover:text-ink shrink-0" title="重新精确计算 /context（稍慢）">
           <RefreshCw size={11} className={loading ? 'animate-spin' : ''} />
@@ -8641,7 +8640,7 @@ function ContextBreakdownButton({ contextTokens, contextWindow, contextPct, fmtT
       )}
 
       {loading && !data && <div className="px-3 py-6 text-center text-xs text-ink-faint">正在计算 /context…</div>}
-      {err && !data && <div className="px-3 py-4 text-xs text-amber-700">{err}</div>}
+      {err && <div className="px-3 py-2 text-[10px] text-amber-700">精确计算失败：{err}。当前仍显示本地统计。</div>}
 
       {data && (
         <div className="px-3 pt-2">

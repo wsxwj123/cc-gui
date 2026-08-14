@@ -92,10 +92,12 @@ for (const bad of [{}, { prevTop: NaN, prevMax: 100, scrollHeight: 500, clientHe
     '写 scrollTop 前必须打程序滚动标记,否则被 handleScroll 当成用户手势');
   assert.ok(/Math\.abs\(next - node\.scrollTop\) >= 1/.test(seg),
     '差值不足 1px 不写:否则标记被置真却等不到回弹事件,下一次真实滚动会被吞掉');
-  // 基准快照要在 handleScroll 的程序滚动早退【之前】刷新,否则用过期基准算位置
+  // 基准快照要在 handleScroll 的程序滚动目标早退【之前】刷新,否则用过期基准算位置
   const hs = src.slice(src.indexOf('const handleScroll = () => {'), src.indexOf('// Restore the saved scroll position'));
-  assert.ok(hs.indexOf('scrollMaxRef.current =') < hs.indexOf('if (programmaticScrollRef.current)'),
+  assert.ok(hs.indexOf('scrollMaxRef.current =') < hs.indexOf('if (reachedProgrammaticTarget)'),
     'scrollMaxRef 必须在程序滚动早退之前刷新');
+  assert.ok(/shouldPauseAutoScroll/.test(hs) && hs.indexOf('movedUp') < hs.indexOf('reachedProgrammaticTarget'),
+    '必须先读取真实向上位移，再判断程序目标，避免尚未回弹的旧标记吞掉用户起手滚动');
 }
 
 console.log('✓ check-scroll-clamp: 钳位 + 宽度变化等比还原 + effect 守卫全过');

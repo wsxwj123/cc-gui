@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState, useCallback } from 'react';
 
-// 右侧竖向回合进度条(仿 gemini-voyager + macOS Dock 放大)。
-// 每个用户回合一个点;hover 按【索引距离】做 dock 放大 + 浮窗显示该回合消息摘要,
+// 右侧竖向回合进度条(Claude Code/Codex 式线性波形 + macOS Dock 放大)。
+// 每个用户回合一条横线;hover 按【索引距离】向左拉长 + 浮窗显示该回合消息摘要,
 // 点击平滑滚动到该回合。
 //
 // 定位:作为 SessionDetail 根(position:relative)的 absolute 子元素,贴 right;
@@ -12,8 +12,8 @@ import { useEffect, useLayoutEffect, useRef, useState, useCallback } from 'react
 
 const SHOW_DELAY = 220;
 const HIDE_DELAY = 120;
-// Dock 放大:按到悬停点的索引距离,近大远小。
-const magnify = (d) => (d === 0 ? 1.9 : d === 1 ? 1.45 : d === 2 ? 1.15 : 1);
+// 波形拉伸:按到悬停线的索引距离,近长远短。右端固定,视觉像振幅向内容区传播。
+const waveWidth = (d) => (d === 0 ? 16 : d === 1 ? 11 : d === 2 ? 8 : 5);
 
 export default function TurnScrubber({ containerRef, turns }) {
   const rootRef = useRef(null);                // 本组件根,取其 offsetParent 作定位基准
@@ -101,12 +101,25 @@ export default function TurnScrubber({ containerRef, turns }) {
     clearTimeout(hideTimer.current);
     hideTimer.current = setTimeout(() => setTipIdx(null), HIDE_DELAY);
   };
+  const moveBar = (e) => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    const y = rect.height > 0 ? (e.clientY - rect.top) / rect.height : 0;
+    let nearest = null;
+    let best = Infinity;
+    positions.forEach((position, i) => {
+      if (position == null) return;
+      const distance = Math.abs(position - y);
+      if (distance < best) { best = distance; nearest = i; }
+    });
+    setHoverIdx(nearest);
+  };
 
   if (!box || turns.length < 2) return null;
 
   return (
     <div
       ref={rootRef}
+      onMouseMove={moveBar}
       onMouseLeave={leaveBar}
       style={{ position: 'absolute', right: 4, top: box.top, height: box.height, width: 18, zIndex: 45 }}
       className="max-md:hidden pointer-events-auto"
@@ -122,13 +135,23 @@ export default function TurnScrubber({ containerRef, turns }) {
           onMouseEnter={() => enterDot(i)}
           onClick={() => scrollToTurn(t.uuid)}
           style={{
-            position: 'absolute', top: `${n * 100}%`, left: '50%',
-            transform: `translate(-50%, -50%) scale(${magnify(hoverIdx == null ? 9 : Math.abs(i - hoverIdx))})`,
-            transition: 'transform 0.12s ease, background-color 0.12s',
+            position: 'absolute', top: `${n * 100}%`, right: 0,
+            transform: 'translateY(-50%)',
           }}
-          className="w-[6px] h-[6px] rounded-full bg-ink-faint/50 hover:bg-accent cursor-pointer"
+          className="w-[18px] h-3 cursor-pointer flex items-center justify-end group"
           aria-label={`跳到第 ${i + 1} 个回合`}
-        />
+        >
+          <span
+            data-turn-wave
+            style={{
+              width: waveWidth(hoverIdx == null ? 9 : Math.abs(i - hoverIdx)),
+              height: hoverIdx === i ? 3 : 2,
+            }}
+            className={`block rounded-full transition-[width,height,background-color,opacity] duration-150 ease-out ${
+              hoverIdx === i ? 'bg-accent opacity-100' : 'bg-ink-faint/55 opacity-80 group-hover:bg-accent'
+            }`}
+          />
+        </button>
         );
       })}
       {tipIdx != null && positions[tipIdx] != null && turns[tipIdx] && (

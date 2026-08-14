@@ -563,7 +563,7 @@ export function ChatInput({ onSend, onStop, onStopBackground, onAccelerate, canS
     // 已输入 / 的情况下列表永远空。count 由 commands/isAnthropic 派生,变化即触发更新。
   }, [text, filteredCommands.length]);
 
-  const handleSend = () => {
+  const handleSend = (submitOpts = {}) => {
     const trimmed = text.trim();
     // Allow send if there's text OR attachments (so "just describe this image" works).
     if (!trimmed && attachments.length === 0) return;
@@ -582,7 +582,7 @@ export function ChatInput({ onSend, onStop, onStopBackground, onAccelerate, canS
     const meta = attachments.length > 0
       ? { attachments: attachments.map((a) => ({ kind: a.kind, name: a.name, path: a.path, preview: a.preview, bytes: a.bytes })), displayText: trimmed }
       : undefined;
-    onSend(outbound, meta ? { meta } : undefined);
+    onSend(outbound, meta ? { ...submitOpts, meta } : submitOpts);
     setText('');
     setEditingResend(false);
     setHistoryCursor(-1);
@@ -812,13 +812,15 @@ export function ChatInput({ onSend, onStop, onStopBackground, onAccelerate, canS
       }
     }
 
-    // 发送:裸 Enter 发送,Shift+Enter 换行(用户要求,标准聊天习惯;Cmd/Ctrl+Enter 仍兼容)。
+    // 发送语义对齐 CLI 输入队列:裸 Enter 正常提交(忙回合由上层排队),Shift+Enter 换行;
+    // 忙回合的 Cmd/Ctrl+Enter 显式请求无打断并入。空闲时 Cmd/Ctrl+Enter 仍是普通提交。
     // IME 合成期已在本函数顶部 return,中文候选回车不会误发。stopPropagation 阻止冒泡到 window
     // 上的 plan/权限卡片 Enter 监听(否则那个 Enter 会被吃掉去"批准计划")。
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       e.stopPropagation();
-      handleSend();
+      const mergeIntoCurrentTurn = isStreaming && (e.metaKey || e.ctrlKey);
+      handleSend({ steer: mergeIntoCurrentTurn });
     }
   };
 
@@ -1137,7 +1139,7 @@ export function ChatInput({ onSend, onStop, onStopBackground, onAccelerate, canS
             {isStreaming && (
               <>
                 <button
-                  onClick={handleSend}
+                  onClick={() => handleSend()}
                   disabled={!text.trim() && attachments.length === 0}
                   className="shrink-0 h-8 px-3 max-md:px-2.5 rounded-full bg-accent/10 hover:bg-accent/20 text-accent flex items-center justify-center gap-1 transition-colors disabled:opacity-50 text-[11px] font-medium"
                   title="入队（当前消息发送完后自动发出）"
@@ -1182,7 +1184,7 @@ export function ChatInput({ onSend, onStop, onStopBackground, onAccelerate, canS
               </button>
             ) : (
               <button
-                onClick={handleSend}
+                onClick={() => handleSend()}
                 disabled={(!text.trim() && attachments.length === 0) || disabled || rcLocked}
                 className="btn-accent shrink-0 w-8 h-8 rounded-full flex items-center justify-center"
                 title="发送"

@@ -1722,8 +1722,8 @@ router.post('/chat/permission-mode', async (req, res) => {
 // ── 引导注入(无打断 steering)────────────────────────────────────────────────
 // 「忙」的判据:复用块(:1107)那一行【只把 s.idle 取反】,其余存活条件逐字照抄。
 //   复用块要的是 s.idle(回合间保活、等下一条消息)→ push 开【新回合】;
-//   这里要的是 !s.idle(回合正在跑)→ push 被 CLI 在下一个工具结果边界折叠进【同一回合】
-//   (实测:1 个 init / 1 个 result,不传 priority = 默认档折叠;'later' 才另起回合)。
+//   这里要的是 !s.idle(回合正在跑)→ 通过 SDKUserMessage.priority='now' 明确要求当前回合
+//   在下一个可接收输入的边界读取；不再依赖 SDK 未声明的默认 priority。
 // 与 v0.2.264 复活守卫自洽:主 agent 在 4s 去抖 finalize 之后续跑时,守卫(:1561)把
 // slot.idle 翻回 false 并置 revived —— 那正是"确实有一个在跑的回合",此时注入应当成立,
 // 所以判据用 s.idle(会随复活翻转)而不是 finishedAt/lastResultAt 这类不回退的时刻字段。
@@ -1753,9 +1753,14 @@ router.post('/chat/steer', (req, res) => {
   }
   const hit = findBusySlot(activeProcesses, String(sessionId));
   if (!hit) return res.status(409).json({ error: 'no-active-turn' });
-  // 形状与复用块 :1149 的 push 逐字一致,只多一个 uuid —— 带 uuid 时 SDK 会回吐
+  // 形状遵循本机 @anthropic-ai/claude-agent-sdk 的 SDKUserMessage；带 uuid 时 SDK 会回吐
   // command_lifecycle{queued|started|completed},前端据此驱动"已排队 → 已并入"角标。
-  const msg = { type: 'user', message: { role: 'user', content: String(content) } };
+  const msg = {
+    type: 'user',
+    message: { role: 'user', content: String(content) },
+    parent_tool_use_id: null,
+    priority: 'now',
+  };
   if (uuid) msg.uuid = String(uuid);
   // push 返回 false = 队列已 close(finalize 的 else 分支/停止兜底刚关流,但 closing/idle/
   // pumpEnded 三面旗还没落地)→ 这条消息没人会读到,必须当作"没有活回合"回 409,让客户端
@@ -2536,7 +2541,11 @@ router.get('/context/:sessionId', async (req, res) => {
       if (usage?.totalTokens > 0 && (usage?.maxTokens > 0 || usage?.rawMaxTokens > 0)) {
         return res.json(mapSdkContextUsage(usage));
       }
-    } catch {} // 控制通道异常/进程正退出 → 回落 spawn
+    } catch {
+      // 活 slot 的控制请求已经占用过一次 count_tokens；再串行 fork /context 最坏会让一次
+      // 点击等待 8s + 30s。GUI 已有本地 usage 兜底，精确刷新失败应尽快返回而不是叠加重试。
+      return res.status(504).json({ error: '当前回合的精确上下文计算超时，请稍后重试' });
+    }
     break; // 同会话至多一个活 slot;直调失败也不再试其他
   }
   // cwd 优先级:会话 jsonl 里的权威 cwd > 前端传的 > homedir 兜底。前端有时传空 cwd(session
