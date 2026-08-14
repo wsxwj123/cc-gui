@@ -35,5 +35,9 @@ assert.match(subagent, /data-subagent-scroll/,
   '子代理会话必须提供独立滚动容器与回底入口');
 assert.match(app, /min-w-0 overflow-hidden[\s\S]{0,300}min-w-0 break-words[^>]*>正在创建基线提交/,
   '侧栏基线提示文本必须允许收缩和断行，不能越出面板');
+const gitBanner = app.slice(app.indexOf('function GitInitBanner'), app.indexOf('function CompactDivider'));
+assert.match(gitBanner, />本文件夹未git初始化<\//, '未初始化横幅正文必须逐字匹配');
+assert.match(gitBanner, /flex flex-col gap-2[\s\S]*本文件夹未git初始化[\s\S]*flex flex-wrap gap-1\.5[\s\S]*立即初始化[\s\S]*本会话忽略/,
+  '未初始化横幅必须正文在上、动作在下并允许按钮换行');
 
 console.log('✓ check-session-interaction-fixes: 五项交互回归守卫全过');

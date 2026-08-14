@@ -3428,23 +3428,25 @@ function GitInitBanner({ cwd }) {
   }
 
   return (
-    <div className="min-w-0 overflow-hidden bg-amber-50 border-b border-amber-200 px-4 py-2 text-[12px] font-body text-amber-900 flex items-center gap-2">
-      <GitBranch size={13} className="text-amber-700 shrink-0" />
-      <span className="flex-1 min-w-0 break-words">
-        <b>这个目录不是 git 仓库</b>。建议先 init + 基线提交，方便回滚 AI 的修改。
-      </span>
-      <button
-        onClick={init}
-        className="px-2.5 py-1 rounded bg-amber-700 text-white text-[11px] font-medium hover:bg-amber-800 shrink-0"
-      >
-        立即初始化
-      </button>
-      <button
-        onClick={dismiss}
-        className="px-2 py-1 rounded text-amber-800 text-[11px] hover:bg-amber-100 shrink-0"
-      >
-        本会话忽略
-      </button>
+    <div className="min-w-0 bg-amber-50 border-b border-amber-200 px-4 py-2 text-[12px] font-body text-amber-900 flex flex-col gap-2">
+      <div className="min-w-0 flex items-start gap-2">
+        <GitBranch size={13} className="text-amber-700 shrink-0 mt-0.5" />
+        <span className="min-w-0 whitespace-normal">本文件夹未git初始化</span>
+      </div>
+      <div className="min-w-0 flex flex-wrap gap-1.5">
+        <button
+          onClick={init}
+          className="min-w-0 max-w-full flex-[1_1_7rem] px-2.5 py-1 rounded bg-amber-700 text-white text-[11px] font-medium hover:bg-amber-800 whitespace-nowrap"
+        >
+          立即初始化
+        </button>
+        <button
+          onClick={dismiss}
+          className="min-w-0 max-w-full flex-[1_1_7rem] px-2 py-1 rounded text-amber-800 text-[11px] hover:bg-amber-100 whitespace-nowrap"
+        >
+          本会话忽略
+        </button>
+      </div>
     </div>
   );
 }
