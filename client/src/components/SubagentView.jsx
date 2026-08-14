@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Bot, ChevronDown, GitBranch, Loader2, Square, User } from 'lucide-react';
 import { useStore } from '../stores/sessionStore.js';
 import { MarkdownRenderer } from './MarkdownRenderer.jsx';
@@ -8,7 +8,7 @@ import { LoadingMark, useCyclingVerb, ElapsedTime } from './LoadingBits.jsx';
 import { stopNoOwnerNotice } from './tools/TaskCard.jsx';
 import { resolveOwnedAgent } from '../utils/agentOwner.js';
 import { confirmDialog } from '../utils/confirmDialog.jsx';
-import { shouldPauseAutoScroll } from '../utils/scroll.js';
+import { advanceScrollTransaction, beginScrollTransaction, keyRequestsReading, shouldPauseAutoScroll } from '../utils/scroll.js';
 
 // 上下文占用简写(与主会话徽章同口径:k 计)。
 function fmtTok(n) {
@@ -19,7 +19,7 @@ function fmtTok(n) {
 // #9/O4 子代理会话窗口:样式对齐正常会话(用户气泡在右、回复在左、思考/工具折叠),
 // 标题处「母会话标题 / 子代理名」层级面包屑,点母会话标题返回。
 // 数据来自 store.activeAgents[agentId](流式累积的 text/thinking/toolCalls)。
-export function SubagentView({ agentId, parentTitle, parentSessionId = null, onBack }) {
+export function SubagentView({ agentId, paneId, active = false, parentTitle, parentSessionId = null, onBack }) {
   // 与 TaskCard 同一归属判定:activeAgents 按 tool_use.id 全局唯一,分支(fork)会话
   // 复制出的卡片撞源会话的 id —— 不校验就会在分支窗格里渲染【源会话正在流的实时内容】,
   // 停止键也会停到源会话。归属不符时按"数据不可用"处理(走下面的 !agent 早退)。
@@ -29,6 +29,7 @@ export function SubagentView({ agentId, parentTitle, parentSessionId = null, onB
   const scrollRef = useRef(null);
   const followBottomRef = useRef(true);
   const lastScrollTopRef = useRef(0);
+  const scrollTransactionRef = useRef(null);
   const [atBottom, setAtBottom] = useState(true);
   // 兜底:store 拿不到具体名/model 时(provider 不发子代理流),从 server 提取的
   // sessions.subagents 按 toolUseId(= agentId)对回 agentType / model / 上下文占用 / cwd。
@@ -52,31 +53,73 @@ export function SubagentView({ agentId, parentTitle, parentSessionId = null, onB
   const working = status === 'working' || status === 'starting';
   const nonTerminal = !['done', 'error', 'stopped'].includes(status);
 
+  const scrollOwnerKey = `${paneId}:${parentSessionId}:${agentId}`;
   useEffect(() => {
     followBottomRef.current = true;
     lastScrollTopRef.current = 0;
+    scrollTransactionRef.current = null;
     setAtBottom(true);
-  }, [agentId]);
+  }, [scrollOwnerKey]);
+
+  const writeProgrammaticScroll = useCallback((el, target, kind) => {
+    const transaction = beginScrollTransaction(kind, target);
+    scrollTransactionRef.current = transaction;
+    el.scrollTop = target;
+    requestAnimationFrame(() => {
+      if (scrollTransactionRef.current === transaction) scrollTransactionRef.current = null;
+    });
+  }, []);
 
   useEffect(() => {
     if (!followBottomRef.current) return;
     const id = requestAnimationFrame(() => {
       const el = scrollRef.current;
-      if (el) el.scrollTop = el.scrollHeight;
+      if (el) {
+        const target = Math.max(0, el.scrollHeight - el.clientHeight);
+        writeProgrammaticScroll(el, target, 'follow');
+      }
     });
     return () => cancelAnimationFrame(id);
-  }, [blocks, agent?.result, working]);
+  }, [blocks, agent?.result, working, writeProgrammaticScroll]);
 
   const handleScroll = () => {
     const el = scrollRef.current;
     if (!el) return;
-    const movedUp = shouldPauseAutoScroll({ previousTop: lastScrollTopRef.current, currentTop: el.scrollTop });
+    const previousTop = lastScrollTopRef.current;
+    const movedUp = shouldPauseAutoScroll({ previousTop, currentTop: el.scrollTop });
+    const target = scrollTransactionRef.current?.kind === 'follow'
+      ? Math.max(0, el.scrollHeight - el.clientHeight)
+      : scrollTransactionRef.current?.target;
+    const result = advanceScrollTransaction(scrollTransactionRef.current, {
+      previousTop,
+      currentTop: el.scrollTop,
+      target,
+    });
+    scrollTransactionRef.current = result.transaction;
     lastScrollTopRef.current = el.scrollTop;
     const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
-    if (movedUp) followBottomRef.current = false;
+    if (result.handled) return;
+    if (result.expired) followBottomRef.current = distance <= 40;
+    else if (movedUp || result.userMovedAway) followBottomRef.current = false;
     else if (distance < 40) followBottomRef.current = true;
     setAtBottom(distance < 120);
   };
+  const markReading = useCallback(() => {
+    scrollTransactionRef.current = null;
+    followBottomRef.current = false;
+    setAtBottom(false);
+  }, []);
+
+  useEffect(() => {
+    if (!active) return undefined;
+    const onReadingKey = (event) => {
+      const target = event.target;
+      if (target && (/^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName) || target.isContentEditable)) return;
+      if (keyRequestsReading(event.key)) markReading();
+    };
+    window.addEventListener('keydown', onReadingKey);
+    return () => window.removeEventListener('keydown', onReadingKey);
+  }, [active, markReading]);
 
   if (!agent) {
     return (
@@ -164,7 +207,17 @@ export function SubagentView({ agentId, parentTitle, parentSessionId = null, onB
 
       {/* 消息流 — 正常会话气泡样式 */}
       <div className="flex-1 min-h-0 relative">
-        <div ref={scrollRef} onScroll={handleScroll} data-subagent-scroll className="h-full overflow-y-auto">
+        <div
+          ref={scrollRef}
+          onScroll={handleScroll}
+          onWheel={(event) => { if (event.deltaY < 0) markReading(); }}
+          onPointerDown={(event) => {
+            const rect = event.currentTarget.getBoundingClientRect();
+            if (event.clientX >= rect.right - 16) markReading();
+          }}
+          data-subagent-scroll
+          className="h-full overflow-y-auto"
+        >
           {/* 派发 prompt = 用户气泡(右侧) */}
           {prompt && (
             <div className="group px-6 py-4">
@@ -226,7 +279,10 @@ export function SubagentView({ agentId, parentTitle, parentSessionId = null, onB
           <button
             onClick={() => {
               const el = scrollRef.current;
-              if (el) el.scrollTop = el.scrollHeight;
+              if (el) {
+                const target = Math.max(0, el.scrollHeight - el.clientHeight);
+                writeProgrammaticScroll(el, target, 'return-bottom');
+              }
               followBottomRef.current = true;
               setAtBottom(true);
             }}

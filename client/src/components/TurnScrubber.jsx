@@ -13,7 +13,7 @@ import { turnWaveWidth } from '../utils/turnWave.js';
 
 const SHOW_DELAY = 220;
 const HIDE_DELAY = 120;
-export default function TurnScrubber({ containerRef, turns }) {
+export default function TurnScrubber({ containerRef, turns, onNavigate }) {
   const rootRef = useRef(null);                // 本组件根,取其 offsetParent 作定位基准
   const [box, setBox] = useState(null);        // { top, height } 相对根
   const [positions, setPositions] = useState([]); // 每个回合点 0~1
@@ -81,6 +81,7 @@ export default function TurnScrubber({ containerRef, turns }) {
     const target = Math.max(0, node.offsetTop - 8);
     const start = el.scrollTop;
     const dist = target - start;
+    onNavigate?.();
     if (Math.abs(dist) < 2) return;
     const dur = 320;
     let t0 = null;

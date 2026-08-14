@@ -82,7 +82,7 @@ import { notifyWaiting } from './utils/desktopNotify.js';
 import { BG_BANNER_DELAY_MS, histSig, isCurrentStreamTurn, nextAttachTry, nextReattachGuard, resolveStreamHistCutoff, shouldRefreshHist } from './utils/reattach.js';
 import { pruneByLiveSet } from './utils/levelPrune.js';
 import { classifyStopTargets } from './utils/stopTargets.js';
-import { resizeScrollTop, shouldPauseAutoScroll } from './utils/scroll.js';
+import { advanceScrollTransaction, beginScrollTransaction, keyRequestsReading, resizeScrollTop, shouldPauseAutoScroll } from './utils/scroll.js';
 import { resolveSessionTitle } from './utils/sessionTitle.js';
 
 // ── Per-session shadow-git checkpoints ──────────────────────────
@@ -3968,13 +3968,20 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   const userScrolledAwayRef = useRef(false);
   // 区分"程序触发的吸底写入"与"用户手势":吸底自己写 scrollTop 会触发 scroll 事件,
   // 不打这个标记就会被 handleScroll 误判成用户滚动。
-  const programmaticScrollRef = useRef(false);
-  const programmaticScrollTargetRef = useRef(0);
+  const scrollTransactionRef = useRef(null);
   const lastScrollTopRef = useRef(0);
   // 变化【前】的可滚动上限(scrollHeight - clientHeight)。容器宽度变化后消息重排、总高
   // 改变,靠它按比例把位置搬回去(见下方 setContainerRef 里的 ResizeObserver)。
   // 在 handleScroll 里顺手刷新,零额外开销。
   const scrollMaxRef = useRef(0);
+  const scrollOwnerKey = selectedSession?.sessionId ? `${paneId}:${selectedSession.sessionId}` : null;
+  useLayoutEffect(() => {
+    scrollTransactionRef.current = null;
+    lastScrollTopRef.current = 0;
+    scrollMaxRef.current = 0;
+    userScrolledAwayRef.current = false;
+    setAutoScroll(true);
+  }, [scrollOwnerKey]);
   const [chatMessages, setChatMessages] = useState([]);
   // Mirror of chatMessages. handleSend is a useCallback whose deps don't include
   // chatMessages, so its closure lags — a /btw answer arriving via async
@@ -4477,6 +4484,33 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     return () => clearTimeout(t);
   }, [backgroundOnly]);
 
+  const markScrollReading = useCallback(() => {
+    scrollTransactionRef.current = null;
+    userScrolledAwayRef.current = true;
+    setAutoScroll(false);
+  }, []);
+  const writeProgrammaticScroll = useCallback((el, target, kind = 'follow') => {
+    const transaction = beginScrollTransaction(kind, target);
+    scrollTransactionRef.current = transaction;
+    el.scrollTop = target;
+    requestAnimationFrame(() => {
+      if (scrollTransactionRef.current === transaction) {
+        scrollTransactionRef.current = null;
+      }
+    });
+  }, []);
+
+  useEffect(() => {
+    if (!paneIsActive || showAgentView) return undefined;
+    const onReadingKey = (event) => {
+      const target = event.target;
+      if (target && (/^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName) || target.isContentEditable)) return;
+      if (keyRequestsReading(event.key)) markScrollReading();
+    };
+    window.addEventListener('keydown', onReadingKey);
+    return () => window.removeEventListener('keydown', onReadingKey);
+  }, [markScrollReading, paneIsActive, showAgentView]);
+
   // Auto-scroll: coalesce frequent stream deltas into a single rAF tick so the
   // page doesn't visibly "flicker" with smooth-scroll animations on every
   // token. Use direct scrollTop write (cheaper than scrollIntoView + smooth,
@@ -4487,13 +4521,11 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       const el = containerRef.current;
       if (el) {
         const target = Math.max(0, el.scrollHeight - el.clientHeight);
-        programmaticScrollRef.current = true;
-        programmaticScrollTargetRef.current = target;
-        el.scrollTop = target;
+        writeProgrammaticScroll(el, target, 'follow');
       }
     });
     return () => cancelAnimationFrame(id);
-  }, [messages, chatMessages, streamingText, streamingThinking, streamingToolCalls]);
+  }, [messages, chatMessages, streamingText, streamingThinking, streamingToolCalls, writeProgrammaticScroll]);
 
   // 重做工具的转圈指示器:一旦重跑的流式内容(文本/思考/工具)出现,就关掉指示器
   // ——此时重跑已就地以流式气泡呈现,指示器再转就是多余且会"完成后仍在转"。
@@ -4506,32 +4538,44 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
 
   // Persist scroll position per session so refresh keeps the user where they
   // were (not at top, not at bottom — wherever they were reading).
-  const scrollPersistKey = selectedSession?.sessionId
-    ? `cgui-scroll-${selectedSession.sessionId}`
-    : null;
+  const scrollPersistKey = scrollOwnerKey ? `cgui-scroll-${scrollOwnerKey}` : null;
 
   const handleScroll = () => {
     if (!containerRef.current) return;
     const { scrollTop, scrollHeight, clientHeight } = containerRef.current;
     const movedUp = shouldPauseAutoScroll({ previousTop: lastScrollTopRef.current, currentTop: scrollTop });
+    const previousTop = lastScrollTopRef.current;
+    const dynamicTarget = scrollTransactionRef.current?.kind === 'follow'
+      ? Math.max(0, scrollHeight - clientHeight)
+      : scrollTransactionRef.current?.target;
+    const transactionResult = advanceScrollTransaction(scrollTransactionRef.current, {
+      previousTop,
+      currentTop: scrollTop,
+      target: dynamicTarget,
+    });
+    scrollTransactionRef.current = transactionResult.transaction;
     lastScrollTopRef.current = scrollTop;
     // 上限快照先于程序滚动的早退更新:宽度变化时要拿"变化前"的可滚动上限做等比还原,
     // 而程序吸底同样会改变它,漏记就会用过期基准算出错误位置。
     scrollMaxRef.current = Math.max(0, scrollHeight - clientHeight);
     // 用户向上滚的实际位移优先于尚未回弹的程序滚动标记。旧逻辑先吞掉程序事件，
     // 触控板恰好在这个窗口起手时，第一段上滚也被吞掉，下一 token 又把视口拉回底部。
-    const reachedProgrammaticTarget = programmaticScrollRef.current
-      && Math.abs(scrollTop - programmaticScrollTargetRef.current) < 1;
-    if (reachedProgrammaticTarget) { programmaticScrollRef.current = false; return; }
-    if (movedUp) userScrolledAwayRef.current = true;
-    programmaticScrollRef.current = false;
+    if (transactionResult.handled) return;
     const distFromBottom = scrollHeight - scrollTop - clientHeight;
+    const movedIntoReading = movedUp || transactionResult.userMovedAway;
+    if (transactionResult.expired) userScrolledAwayRef.current = distFromBottom > 40;
+    else if (movedIntoReading) userScrolledAwayRef.current = true;
     // 向上位移立即上锁；贴底 <40 才解锁。保留迟滞只用于解锁，消除边界抖动。
-    if (distFromBottom < 40) userScrolledAwayRef.current = false;
+    if (!transactionResult.expired && !movedIntoReading && distFromBottom < 40) userScrolledAwayRef.current = false;
     setAutoScroll(distFromBottom < 120);  // 仅驱动「回到底部」按钮显隐
     if (scrollPersistKey) {
       try { localStorage.setItem(scrollPersistKey, String(scrollTop)); } catch {}
     }
+  };
+  const handleScrollWheel = (event) => { if (event.deltaY < 0) markScrollReading(); };
+  const handleScrollPointer = (event) => {
+    const rect = event.currentTarget.getBoundingClientRect();
+    if (event.clientX >= rect.right - 16) markScrollReading();
   };
 
   // Restore the saved scroll position when messages first load (or session changes).
@@ -4542,26 +4586,29 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     const el = containerRef.current;
     if (!el || !scrollPersistKey) return;
     // Only attempt restore once per session's messages-loaded state.
-    if (scrollRestoredRef.current === selectedSession?.sessionId) return;
+    if (scrollRestoredRef.current === scrollOwnerKey) return;
     if (messages.length === 0 && chatMessages.length === 0) return;
-    const saved = localStorage.getItem(scrollPersistKey);
+    const legacyKey = selectedSession?.sessionId ? `cgui-scroll-${selectedSession.sessionId}` : null;
+    const ownSaved = localStorage.getItem(scrollPersistKey);
+    const saved = ownSaved ?? (legacyKey ? localStorage.getItem(legacyKey) : null);
     if (saved !== null) {
       const top = Number(saved);
+      if (ownSaved === null) {
+        try { localStorage.setItem(scrollPersistKey, saved); } catch {}
+      }
       // Defer to next frame so DOM is laid out
       requestAnimationFrame(() => {
         if (el) {
           const target = Math.min(Math.max(0, top), Math.max(0, el.scrollHeight - el.clientHeight));
-          programmaticScrollRef.current = true;
-          programmaticScrollTargetRef.current = target;
-          el.scrollTop = target;
+          writeProgrammaticScroll(el, target, 'restore');
           const away = el.scrollHeight - el.scrollTop - el.clientHeight >= 120;
           userScrolledAwayRef.current = away;  // AZ3:恢复的位置若不在底部则保持暂停吸底
           setAutoScroll(!away);
         }
       });
     }
-    scrollRestoredRef.current = selectedSession?.sessionId;
-  }, [messages.length, chatMessages.length, selectedSession?.sessionId, scrollPersistKey]);
+    scrollRestoredRef.current = scrollOwnerKey;
+  }, [messages.length, chatMessages.length, selectedSession?.sessionId, scrollOwnerKey, scrollPersistKey, writeProgrammaticScroll]);
 
   // #4 关右侧面板(监控/文件/…)后会话区空白、往上滑才找得回内容。
   // 关面板 = 本容器变宽 → 每条消息重新折行变矮 → 全文总高缩短。Blink/Gecko 有 scroll
@@ -4598,12 +4645,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             // 用户没在看历史 → 直接吸底,与吸底 effect 同一目标,不会互相拉扯。
             stickToBottom: !userScrolledAwayRef.current,
           });
-          // 差值不足 1px 就不写:避免无谓的 scroll 事件,也避免 programmaticScrollRef
-          // 被置真却等不到回弹事件 → 下一次真实用户滚动被当成程序滚动吞掉。
+          // 差值不足 1px 就不写:避免无谓的 scroll 事件和 transaction 生命周期。
           if (Math.abs(next - node.scrollTop) >= 1) {
-            programmaticScrollRef.current = true;
-            programmaticScrollTargetRef.current = next;
-            node.scrollTop = next;
+            writeProgrammaticScroll(node, next, 'resize');
           }
         }
       }
@@ -4611,7 +4655,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     });
     ro.observe(node);
     scrollRoRef.current = ro;
-  }, []);
+  }, [writeProgrammaticScroll]);
 
   // Message queue plumbing (#3) — when user types during streaming, the message
   // is queued and dispatched after the current chat finishes. “⚡ 并入”只请求 priority-now，
@@ -4739,8 +4783,6 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
 
   const handleSend = useCallback(async (prompt, opts = {}) => {
     const { reattachPid, appendSystemPrompt, hiddenUserMessage = false, meta } = opts;
-    // AZ3:真实发送(非 reattach)恢复自动吸底——满足"回车发送后无手动滚动则吸底到最新"。
-    if (!reattachPid) userScrolledAwayRef.current = false;
     // Intercept the /remote-control (alias /rc) command. It CANNOT be sent
     // through `claude -p` — slash commands are interactive-only and the CLI
     // rejects them ("isn't available in this environment"). Instead we launch
@@ -4851,6 +4893,13 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         }
       }
       return;
+    }
+
+    // 只有真正开始新的空闲回合才恢复 following；忙碌 Enter 排队/并入不清阅读意图。
+    if (!reattachPid) {
+      userScrolledAwayRef.current = false;
+      scrollTransactionRef.current = null;
+      setAutoScroll(true);
     }
 
     // 本次真正起流的 generation。必须在任何 await、updateStreaming(true) 和用户消息写入前
@@ -7682,6 +7731,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         <div className="absolute inset-0 z-40 flex flex-col bg-canvas">
           <SubagentView
             agentId={viewingAgentId}
+            paneId={paneId}
+            active={paneIsActive}
             parentSessionId={selectedSession?.sessionId || null}
             parentTitle={resolveSessionTitle(
               selectedSession,
@@ -7697,7 +7748,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         <ChatSearch containerRef={containerRef} onClose={() => setSearchOpen(false)} />
       )}
       {!showAgentView && (
-        <TurnScrubber containerRef={containerRef} turns={userTurns} />
+        <TurnScrubber containerRef={containerRef} turns={userTurns} onNavigate={markScrollReading} />
       )}
       {/* 旁问浮窗:右下角浮动小窗,把本会话 /btw 线程聚合成连续对话。z-46 高于子代理面板
           (z-40)故与之共存;suppressed=hasPendingInteraction 时让路授权/问题卡(收成浮标)。 */}
@@ -7927,7 +7978,14 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       <div className="flex-1 min-h-0 relative">
       {/* data-chat-scroll:气泡用 closest() 找到"自己所在窗格的滚动容器"(分屏时每个窗格
           一个,不能拿 window),据其可视高度决定长回复要不要补底部复制按钮。 */}
-      <div ref={setContainerRef} onScroll={handleScroll} data-chat-scroll className="h-full overflow-y-auto relative z-10">
+      <div
+        ref={setContainerRef}
+        onScroll={handleScroll}
+        onWheel={handleScrollWheel}
+        onPointerDown={handleScrollPointer}
+        data-chat-scroll
+        className="h-full overflow-y-auto relative z-10"
+      >
           {visibleMessages.length === 0 && visibleChat.filter((m) => m.type !== 'btw').length === 0 ? (
             <div className="mobile-draft-empty flex items-center justify-center h-full text-ink-muted text-sm font-body">
               {selectedSession?.draft ? '开始你的第一条消息 ↓' : '该会话没有可显示的消息'}
@@ -8085,9 +8143,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
               const el = containerRef.current;
               if (el) {
                 const target = Math.max(0, el.scrollHeight - el.clientHeight);
-                programmaticScrollRef.current = true;
-                programmaticScrollTargetRef.current = target;
-                el.scrollTop = target;
+                writeProgrammaticScroll(el, target, 'return-bottom');
               }
               userScrolledAwayRef.current = false;  // AZ3:显式回到底部 → 恢复跟随
               setAutoScroll(true);

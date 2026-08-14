@@ -24,6 +24,42 @@ export function shouldPauseAutoScroll({ previousTop, currentTop }) {
   return currentTop < previousTop - 0.5;
 }
 
+export function beginScrollTransaction(kind, target, startedAt = performance.now()) {
+  return { kind, target, startedAt, active: true };
+}
+
+export function advanceScrollTransaction(transaction, {
+  previousTop,
+  currentTop,
+  target = transaction?.target,
+  now = performance.now(),
+} = {}) {
+  if (!transaction?.active) return { transaction: null, handled: false, userMovedAway: false };
+  if (now - transaction.startedAt > 1000) {
+    return { transaction: null, handled: false, userMovedAway: false, expired: true };
+  }
+  if (Math.abs(currentTop - target) <= 1) {
+    return { transaction: null, handled: true, userMovedAway: false, reached: true };
+  }
+  const direction = Math.sign(target - previousTop);
+  const movement = currentTop - previousTop;
+  const movingToward = direction >= 0
+    ? movement >= -0.5 && currentTop <= target + 1
+    : movement <= 0.5 && currentTop >= target - 1;
+  if (movingToward) {
+    return {
+      transaction: { ...transaction, target },
+      handled: true,
+      userMovedAway: false,
+    };
+  }
+  return { transaction: null, handled: false, userMovedAway: movement < -0.5 };
+}
+
+export function keyRequestsReading(key) {
+  return key === 'PageUp' || key === 'ArrowUp' || key === 'Home';
+}
+
 // 容器【宽度】变化(开/关右侧面板、拖分屏宽、关窗格)后消息会重排,总高随之变化。
 // Blink/Gecko 有 scroll anchoring 会自动补偿 scrollTop,WKWebView(Tauri 的 webview,
 // 以及 iOS/macOS Safari)没有 —— scrollTop 原地不动而内容整体位移,视口就可能停在两条
