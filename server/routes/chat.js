@@ -2477,20 +2477,6 @@ function parseContextMarkdown(md) {
   return out;
 }
 
-// 从会话 jsonl 读原始 cwd:`claude --resume <sid>` 要求进程 cwd 哈希到会话所在 project,
-// 否则 CLI 报 "No conversation found" → /context 落空("未获取到 /context 输出",用户报"当前无法获取")。
-// 前端传的 cwd(来自 session.projectPath)对某些会话为空 → 旧代码回落 homedir() 必然 mismatch。
-// jsonl 的消息行带权威 cwd,直接读它最可靠(与 provider 无关,官方/第三方同理)。
-function cwdFromSessionFile(projectHash, sessionId) {
-  if (!/^[A-Za-z0-9._-]+$/.test(projectHash) || !/^[A-Za-z0-9._-]+$/.test(sessionId)) return '';
-  try {
-    const txt = readFileSync(pathJoin(homedir(), '.claude', 'projects', projectHash, `${sessionId}.jsonl`), 'utf8');
-    const m = txt.match(/"cwd":"((?:[^"\\]|\\.)*)"/); // 首个带 cwd 的行
-    if (m) return JSON.parse(`"${m[1]}"`); // 反转义 JSON 字符串(路径含反斜杠时)
-  } catch {}
-  return '';
-}
-
 // 把 SDK getContextUsage() 的结构化返回映射成本端点历史(spawn+parse)口径的字段,
 // 前端徽章/明细零改动即兼容。窗口取 maxTokens(实测 CLI 内部 maxTokens===rawMaxTokens,
 // percentage=round(total/max*100),与 /context markdown 的"a / b (c%)"同口径);第三方
@@ -2504,7 +2490,8 @@ function mapSdkContextUsage(u) {
     byServer[s] = (byServer[s] || 0) + (t.tokens || 0);
   }
   return {
-    source: 'sdk', // 调试标记:毫秒级直调路径(vs 回落 spawn 路径无此字段)
+    source: 'sdk',
+    sampledAt: new Date().toISOString(),
     model: u.model || null,
     totalTokens: u.totalTokens || 0,
     windowTokens: max,
@@ -2521,41 +2508,129 @@ function mapSdkContextUsage(u) {
   };
 }
 
+const CONTEXT_SESSION_RE = /^[A-Za-z0-9._-]{1,128}$/;
+const CONTEXT_PROJECT_RE = /^[A-Za-z0-9._-]{1,4096}$/;
+
+export function validateContextRequest(req) {
+  const sessionId = typeof req.params?.sessionId === 'string' ? req.params.sessionId : '';
+  if (!CONTEXT_SESSION_RE.test(sessionId)) return null;
+  const values = {};
+  for (const name of ['projectHash', 'cwd', 'model']) {
+    const value = req.query?.[name];
+    if (value === undefined) { values[name] = ''; continue; }
+    if (typeof value !== 'string') return null;
+    values[name] = value;
+  }
+  if (values.projectHash && !CONTEXT_PROJECT_RE.test(values.projectHash)) return null;
+  if (values.cwd && (values.cwd.length > 4096 || !values.cwd.trim())) return null;
+  if (values.model && !MODEL_ARG_RE.test(values.model)) return null;
+  return { sessionId, ...values };
+}
+
+function readHistoricalContextMeta(sessionId) {
+  const projectsDir = pathJoin(homedir(), '.claude', 'projects');
+  let file = '';
+  let projectHash = '';
+  let dirs = [];
+  try { dirs = readdirSync(projectsDir); } catch {}
+  for (const dir of dirs) {
+    if (!CONTEXT_PROJECT_RE.test(dir)) continue;
+    const candidate = pathJoin(projectsDir, dir, `${sessionId}.jsonl`);
+    if (existsSync(candidate)) { file = candidate; projectHash = dir; break; }
+  }
+  if (!file) return null;
+  let raw = '';
+  try { raw = readFileSync(file, 'utf8'); } catch { return null; }
+  let cwd = '';
+  let model = null;
+  for (const line of raw.split('\n')) {
+    if (!line.trim()) continue;
+    try {
+      const record = JSON.parse(line);
+      if (!cwd && typeof record?.cwd === 'string' && record.cwd) cwd = record.cwd;
+      if (record?.type === 'assistant' && typeof record.message?.model === 'string'
+        && record.message.model && !record.message.model.startsWith('<')) model = record.message.model;
+    } catch {}
+  }
+  return { sessionId, projectHash, cwd, model };
+}
+
+function trustedContextMeta(sessionId) {
+  for (const slot of activeProcesses.values()) {
+    if (slot.sessionId !== sessionId || slot.exitCode !== null || slot.closing) continue;
+    const cwd = typeof slot.cwd === 'string' ? slot.cwd : '';
+    return {
+      sessionId,
+      projectHash: cwd ? cwd.replace(/[^A-Za-z0-9]/g, '-') : '',
+      cwd,
+      model: slot.currentModel || slot.model || null,
+      slot,
+    };
+  }
+  return readHistoricalContextMeta(sessionId);
+}
+
+export function contextHintsMatch(request, meta) {
+  return (!request.projectHash || request.projectHash === meta.projectHash)
+    && (!request.cwd || request.cwd === meta.cwd)
+    && (!request.model || request.model === meta.model);
+}
+
+export function validContextPayload(payload) {
+  const label = (value) => typeof value === 'string' && value.trim().length > 0 && value.trim().length <= 200;
+  const nonNegative = (value) => Number.isFinite(value) && value >= 0;
+  return payload && (payload.source === 'sdk' || payload.source === 'cli')
+    && typeof payload.sampledAt === 'string' && Number.isFinite(Date.parse(payload.sampledAt))
+    && (payload.model === null || (typeof payload.model === 'string' && payload.model.trim() && payload.model.length <= 256))
+    && Number.isInteger(payload.totalTokens) && payload.totalTokens >= 0
+    && Number.isInteger(payload.windowTokens) && payload.windowTokens > 0
+    && nonNegative(payload.pct)
+    && Array.isArray(payload.categories) && payload.categories.every((item) => item && label(item.name)
+      && Number.isInteger(item.tokens) && item.tokens >= 0 && nonNegative(item.pct))
+    && Array.isArray(payload.mcpServers) && payload.mcpServers.every((item) => item && label(item.server)
+      && Number.isInteger(item.tokens) && item.tokens >= 0);
+}
+
 router.get('/context/:sessionId', async (req, res) => {
-  const { sessionId } = req.params;
-  const projectHash = req.query.projectHash || '';
+  const request = validateContextRequest(req);
+  if (!request) return res.status(400).json({ ok: false, code: 'invalid-context-request', error: '上下文请求参数无效' });
+  const meta = trustedContextMeta(request.sessionId);
+  if (!meta) return res.status(404).json({ ok: false, code: 'context-session-not-found', error: '找不到对应会话' });
+  if (!contextHintsMatch(request, meta)) {
+    return res.status(409).json({ ok: false, code: 'context-session-mismatch', error: '上下文请求与会话不匹配' });
+  }
+  const { sessionId } = request;
+  const { projectHash, cwd } = meta;
 
   // 快路(#26 常驻进程红利):目标会话的保活进程还在(流式中或 idle)→ 直调 SDK 控制
   // 请求 getContextUsage(),毫秒返回、不 fork、不留 jsonl、不碰 TCC。进程不在(draft/
   // 首轮前/已回收/旧会话)或直调失败 → 回落下面的 spawn /context 路径,行为不变。
-  for (const slot of activeProcesses.values()) {
-    if (slot.sessionId !== sessionId || slot.exitCode !== null || slot.closing) continue;
+  for (const slot of meta.slot ? [meta.slot] : []) {
     if (typeof slot.query?.getContextUsage !== 'function') continue;
     try {
+      const timeoutError = new Error('context-sdk-timeout');
       const usage = await Promise.race([
         slot.query.getContextUsage(),
         // 8s(实测 warm ~1.5-3s,大上下文近满窗时 count_tokens 往返可超 5s):超时太短会白等
         // 后再回落到更慢的 spawn(5-30s),反而更慢;放宽到 8s 让绝大多数大会话仍走快路。
-        new Promise((_, rej) => setTimeout(() => rej(new Error('getContextUsage 超时')), 8000)),
+        new Promise((_, reject) => setTimeout(() => reject(timeoutError), 8000)),
       ]);
       if (usage?.totalTokens > 0 && (usage?.maxTokens > 0 || usage?.rawMaxTokens > 0)) {
-        return res.json(mapSdkContextUsage(usage));
+        const payload = mapSdkContextUsage(usage);
+        if (!validContextPayload(payload)) {
+          return res.status(500).json({ ok: false, code: 'context-internal', error: '上下文计算失败' });
+        }
+        return res.json(payload);
       }
-    } catch {
-      // 活 slot 的控制请求已经占用过一次 count_tokens；再串行 fork /context 最坏会让一次
-      // 点击等待 8s + 30s。GUI 已有本地 usage 兜底，精确刷新失败应尽快返回而不是叠加重试。
-      return res.status(504).json({ error: '当前回合的精确上下文计算超时，请稍后重试' });
+    } catch (error) {
+      if (error?.message === 'context-sdk-timeout') {
+        return res.status(504).json({ ok: false, code: 'context-sdk-timeout', error: '精确上下文计算超时，请稍后重试' });
+      }
+      return res.status(500).json({ ok: false, code: 'context-internal', error: '上下文计算失败' });
     }
-    break; // 同会话至多一个活 slot;直调失败也不再试其他
   }
-  // cwd 优先级:会话 jsonl 里的权威 cwd > 前端传的 > homedir 兜底。前端有时传空 cwd(session
-  // 无 projectPath),回落 homedir 会让 --resume 找不到会话 → /context 失败。jsonl cwd 保证匹配。
-  const cwd = cwdFromSessionFile(projectHash, sessionId) || req.query.cwd || homedir();
-  // V2:不带 --model 时 CLI 按 settings.json 默认模型(如 haiku)计算窗口与显示,
-  // 与会话实际模型不符(用户报告:点徽章显示 haiku)。前端把会话当前模型传进来。
-  const model = safeModelArg(req.query.model);
   try { if (!statSync(cwd).isDirectory()) throw new Error('nd'); }
-  catch { return res.status(400).json({ error: '工作目录无效' }); }
+  catch { return res.status(400).json({ ok: false, code: 'context-cwd-invalid', error: '会话工作目录无效' }); }
 
   const args = [
     '-p', '/context',
@@ -2566,12 +2641,16 @@ router.get('/context/:sessionId', async (req, res) => {
     // 不落盘:/context 只是读当前上下文,fork 副本不该留在磁盘(否则也会冒出空白会话)。
     '--no-session-persistence',
   ];
+  const model = safeModelArg(meta.model);
   if (model) args.push('--model', model);
   let proc;
   try {
-    proc = claudeSpawn(args, { cwd, stdio: ['ignore', 'pipe', 'pipe'], env: cleanChildEnv() });
-  } catch (e) { return res.status(500).json({ error: 'spawn claude failed: ' + e.message }); }
-  if (!proc.pid) { proc.on('error', () => {}); return res.status(500).json({ error: 'claude CLI not found' }); }
+    proc = claudeSpawn(args, { cwd, stdio: ['ignore', 'pipe', 'pipe'], env: cleanChildEnv(), shell: false });
+  } catch { return res.status(500).json({ ok: false, code: 'context-cli-unavailable', error: '无法启动上下文计算' }); }
+  if (!proc.pid) {
+    proc.on('error', () => {});
+    return res.status(500).json({ ok: false, code: 'context-cli-unavailable', error: '无法启动上下文计算' });
+  }
   // 同 /chat/title:stderr 是 pipe 但只读 stdout,必须排空,否则 stderr 超 ~64KB 子进程挂死到超时。
   proc.stderr?.resume();
 
@@ -2590,11 +2669,16 @@ router.get('/context/:sessionId', async (req, res) => {
     cleanupFork();
     if (!res.headersSent) res.status(code).json(payload);
   };
-  const timer = setTimeout(() => finish({
-    // X2:实测超时的常见根因不是 CLI 慢,而是 macOS TCC —— 重装/升级 GUI 后
-    // cdhash 变化,完全磁盘访问的旧授权"显示勾选实为失效",子进程 open() 被挂起。
-    error: '/context 超时。若反复出现：系统设置→隐私与安全性→完全磁盘访问 里把 Claude GUI 关掉再打开，然后重启应用（重装后旧授权会失效）。',
-  }, 504), 30000);
+  const timer = setTimeout(() => finish({ ok: false, code: 'context-cli-timeout', error: '精确上下文计算超时，请稍后重试' }, 504), 30000);
+  const abandon = () => {
+    if (done || res.writableEnded) return;
+    done = true;
+    clearTimeout(timer);
+    try { killProcessTree(proc); } catch {}
+    cleanupFork();
+  };
+  req.on('aborted', abandon);
+  res.on('close', abandon);
 
   proc.stdout.on('data', (c) => {
     out += c.toString();
@@ -2614,10 +2698,14 @@ router.get('/context/:sessionId', async (req, res) => {
         if (o.type === 'result' && typeof o.result === 'string' && o.result.includes('Context Usage')) md = o.result;
       } catch {}
     }
-    if (!md) return finish({ error: '未获取到 /context 输出' }, 502);
-    finish({ raw: md, ...parseContextMarkdown(md) });
+    if (!md) return finish({ ok: false, code: 'context-output-invalid', error: '未获得有效的上下文统计' }, 502);
+    const payload = { source: 'cli', sampledAt: new Date().toISOString(), ...parseContextMarkdown(md) };
+    if (!validContextPayload(payload)) {
+      return finish({ ok: false, code: 'context-output-invalid', error: '未获得有效的上下文统计' }, 502);
+    }
+    finish(payload);
   });
-  proc.on('error', (e) => finish({ error: e.message }, 500));
+  proc.on('error', () => finish({ ok: false, code: 'context-cli-unavailable', error: '无法启动上下文计算' }, 500));
 });
 
 export default router;

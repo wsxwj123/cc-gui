@@ -52,6 +52,7 @@ import { AgentsPanel } from './components/AgentsPanel.jsx';
 import { AgentMonitorPanel } from './components/AgentMonitorPanel.jsx';
 import { SubagentView } from './components/SubagentView.jsx';
 import BtwWindow from './components/BtwWindow.jsx';
+import { contextCanonicalKey, contextErrorMessage, isValidContextResponse } from './utils/contextCache.js';
 import EnvCheckPanel from './components/EnvCheckPanel.jsx';
 import { ArtifactDock } from './components/ArtifactPreview.jsx';
 import { FullDiskAccessModal } from './components/FullDiskAccessModal.jsx';
@@ -8475,8 +8476,13 @@ function ContextBreakdownButton({ contextTokens, contextWindow, contextPct, fmtT
   const [showMcp, setShowMcp] = useState(false);
   const wrapRef = useRef(null);
   const menuRef = useRef(null);
-  // AA1:后台探测(开会话/回合后)缓存的完整明细 —— 点开优先读它,秒显,不 spawn。
-  const cachedBreakdown = useStore((s) => s.ctxBreakdownBySession[sessionId]);
+  const requestRef = useRef(null);
+  const canonicalKey = useMemo(
+    () => contextCanonicalKey(sessionId, projectHash, cwd, model),
+    [sessionId, projectHash, cwd, model],
+  );
+  const cachedBreakdown = useStore((s) => s.ctxBreakdownBySession[canonicalKey]);
+  const contextCacheRevision = useStore((s) => s.contextCacheRevision);
   const localBreakdown = {
     model: model || '',
     totalTokens: contextTokens || 0,
@@ -8490,22 +8496,41 @@ function ContextBreakdownButton({ contextTokens, contextWindow, contextPct, fmtT
     mcpServers: [],
   };
 
+  const cancelRequest = useCallback(() => {
+    requestRef.current?.controller.abort();
+    requestRef.current = null;
+    setLoading(false);
+  }, []);
+
+  useEffect(() => {
+    cancelRequest();
+    if (open) {
+      setData(cachedBreakdown || localBreakdown);
+      setErr('');
+    }
+  // localBreakdown deliberately snapshots the current render when the identity changes.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [canonicalKey, contextCacheRevision]);
+
+  useEffect(() => () => cancelRequest(), [cancelRequest]);
+
   useEffect(() => {
     if (!open) return;
     const onDocClick = (e) => {
       if (wrapRef.current?.contains(e.target)) return;
       if (menuRef.current?.contains(e.target)) return;
+      cancelRequest();
       setOpen(false);
     };
     // R1:window 捕获(同 ThemeToggle,详见那里注释);stopPropagation 仍挡住会话级停止监听。
-    const onEsc = (e) => { if (e.key === 'Escape') { e.stopPropagation(); setOpen(false); } };
+    const onEsc = (e) => { if (e.key === 'Escape') { e.stopPropagation(); cancelRequest(); setOpen(false); } };
     document.addEventListener('click', onDocClick);
     window.addEventListener('keydown', onEsc, true);
     return () => {
       document.removeEventListener('click', onDocClick);
       window.removeEventListener('keydown', onEsc, true);
     };
-  }, [open]);
+  }, [open, cancelRequest]);
 
   // 渲染后兜底钳制(回滚菜单同款):left=rLeft 是左对齐到按钮,而徽章位于右上统计区,
   // 340px 浮层易冲出右缘;窄屏/zoom 下 max-w 只收宽不挪 left,仍可能右溢。量真实矩形,
@@ -8527,20 +8552,36 @@ function ContextBreakdownButton({ contextTokens, contextWindow, contextPct, fmtT
 
   const load = async () => {
     if (!sessionId) { setErr('发送一条消息后才能查看明细'); setData(null); return; }
+    if (requestRef.current?.canonicalKey === canonicalKey) return;
+    cancelRequest();
+    const requestEpoch = useStore.getState().nextContextRequestEpoch();
+    const controller = new AbortController();
+    requestRef.current = { canonicalKey, requestEpoch, controller };
     setLoading(true); setErr('');
     try {
       // V2:把会话当前模型传给 /context —— 否则 CLI 按 settings.json 默认模型
       // (如 haiku)计算窗口并显示,与会话实际模型不符。
       const qs = new URLSearchParams({ cwd: cwd || '', projectHash: projectHash || '', model: model || '' });
-      const r = await fetch(`/api/context/${sessionId}?${qs.toString()}`);
-      const d = await r.json();
-      if (!r.ok || d.error) throw new Error(d.error || '获取失败');
+      const r = await fetch(`/api/context/${sessionId}?${qs.toString()}`, { signal: controller.signal });
+      const d = await r.json().catch(() => null);
+      if (!r.ok) throw Object.assign(new Error('context-request-failed'), { code: d?.code });
+      if (!isValidContextResponse(d)) throw Object.assign(new Error('context-response-invalid'), { code: 'context-response-invalid' });
+      const current = requestRef.current;
+      if (!current || current.canonicalKey !== canonicalKey || current.requestEpoch !== requestEpoch) return;
       setData(d);
       // U3/V1:把 CLI 实测的分子+分母回写为本会话徽章的权威值,徽章与明细从此一致。
       if (d?.windowTokens > 0) useStore.getState().setCtxMeasured(sessionId, { totalTokens: d.totalTokens || 0, windowTokens: d.windowTokens });
-      useStore.getState().setCtxBreakdown(sessionId, d); // AA1:刷新缓存
-    } catch (e) { setErr(e.message); }
-    finally { setLoading(false); }
+      useStore.getState().setCtxBreakdown(canonicalKey, d, requestEpoch);
+    } catch (e) {
+      if (e.name !== 'AbortError' && requestRef.current?.requestEpoch === requestEpoch) {
+        setErr(contextErrorMessage(e.code));
+      }
+    } finally {
+      if (requestRef.current?.requestEpoch === requestEpoch) {
+        requestRef.current = null;
+        setLoading(false);
+      }
+    }
   };
 
   const toggle = (e) => {
@@ -8557,8 +8598,10 @@ function ContextBreakdownButton({ contextTokens, contextWindow, contextPct, fmtT
       setCoords({ left: rLeft, top: openBelow ? rBottom + gap : rTop - gap, ty: openBelow ? '0' : '-100%' });
       // 点击永远只做本地渲染：有精确缓存就秒显缓存，否则先显 usage/jsonl 本地统计。
       // `/context` 会触发 count_tokens 网络请求，只有用户点刷新按钮时才精确计算。
-      setData(cachedBreakdown?.categories?.length > 0 ? cachedBreakdown : localBreakdown);
+      setData(cachedBreakdown || localBreakdown);
       setErr('');
+    } else if (open) {
+      cancelRequest();
     }
     setOpen(!open);
   };
@@ -8579,8 +8622,11 @@ function ContextBreakdownButton({ contextTokens, contextWindow, contextPct, fmtT
       <div className="px-3 pb-2 flex items-center gap-2 border-b border-black/5">
         <span className="text-xs font-medium text-ink font-body">{info ? '会话信息' : '上下文用量'}</span>
         {data?.model && <span className="text-[10px] text-ink-faint font-mono truncate max-w-[130px]" title={data.model}>{data.model}</span>}
-        {data?.localOnly && <span className="text-[9px] text-ink-faint font-body">本地统计</span>}
+        {data?.localOnly && !loading && !err && <span className="text-[9px] text-ink-faint font-body">本地统计</span>}
+        {loading && <span className="text-[9px] text-ink-faint font-body">正在精确计算…</span>}
+        {!loading && !err && data?.sampledAt && <span className="text-[9px] text-ink-faint font-body">精确统计 · {data.sampledAt}</span>}
         <button onClick={(e) => { e.stopPropagation(); load(); }} disabled={loading}
+          aria-label="精确计算上下文"
           className="ml-auto p-0.5 text-ink-faint hover:text-ink shrink-0" title="重新精确计算 /context（稍慢）">
           <RefreshCw size={11} className={loading ? 'animate-spin' : ''} />
         </button>
@@ -8642,7 +8688,7 @@ function ContextBreakdownButton({ contextTokens, contextWindow, contextPct, fmtT
       )}
 
       {loading && !data && <div className="px-3 py-6 text-center text-xs text-ink-faint">正在计算 /context…</div>}
-      {err && <div className="px-3 py-2 text-[10px] text-amber-700">精确计算失败：{err}。当前仍显示本地统计。</div>}
+      {err && <div className="px-3 py-2 text-[10px] text-amber-700">精确计算失败：{err}。当前仍显示已有统计。</div>}
 
       {data && (
         <div className="px-3 pt-2">

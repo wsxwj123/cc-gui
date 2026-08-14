@@ -3,6 +3,7 @@ import { nextDockCode } from '../utils/artifactDock.js';
 import { mergeSyncedMap, syncableKey, pushLocalOnlyKeys, createInFlightCounter, shouldMarkMigrated } from '../utils/sessionSync.js';
 import { FONT_OPTIONS, readingFontCss } from '../utils/systemFonts.js';
 import { firstDrainableIndex, stripSteerState } from '../utils/steerQueue.js';
+import { isValidContextResponse, shouldReplaceContextCache } from '../utils/contextCache.js';
 
 // Re-exported so existing importers (App.jsx) keep working; the list and its
 // css-resolution logic now live in utils/systemFonts.js alongside the enumeration.
@@ -364,11 +365,10 @@ export const useStore = create((set, get) => ({
   // 这是权威来源 —— 徽章的分子/分母与按事件 usage/模型名猜测不一致时,以实测为准
   // (回合结束后台自动探测一次 + 点徽章手动探测都会回写)。仅内存态,不持久化。
   ctxMeasuredBySession: {},
-  // AA1:缓存 /context 的完整分项明细 { [sessionId]: { categories, mcpServers, model,
-  // totalTokens, windowTokens, pct, ts } }。后台探测(开会话/回合后)拿到的 d 整体存进
-  // 来,点徽章弹层直接读缓存秒开 —— 不必再 spawn `claude -p /context`(冷启动+多次
-  // count_tokens 网络往返,5~30s)。仅内存态。
+  // /context 精确缓存按 canonical key 隔离；requestEpoch 只负责生成实例内唯一请求代次。
   ctxBreakdownBySession: {},
+  contextRequestEpoch: 0,
+  contextCacheRevision: 0,
   // Sessions currently handed off to phone remote control (sessionId → true).
   // While set, the GUI must NOT spawn `-p` turns for that session (both would
   // write the same jsonl). The composer locks and shows a reclaim banner.
@@ -811,22 +811,26 @@ export const useStore = create((set, get) => ({
       ? { ctxMeasuredBySession: { ...s.ctxMeasuredBySession, [sessionId]: { ...payload, ts: payload.ts || Date.now() } } }
       : s
   )),
-  // AA1:存 /context 完整明细供弹层秒开。要求有 categories(否则无明细可显)。
-  // 择优缓存:/context 是新 fork 出来的临时进程跑的,MCP 服务有时还没连上就快照(竞态),
-  // 偶尔会拿到"类别更少"的退化结果(如缺 MCP、或第三方下塌成只剩 Skills+Messages)。
-  // 后台探测多次,只要其中一次完整,就让它留住——退化结果不覆盖更完整的缓存。
-  // (用户显式点刷新走 load() 的 setData,直接显示那次结果,不受此影响。)
-  setCtxBreakdown: (sessionId, data) => set((s) => {
-    if (!sessionId || !Array.isArray(data?.categories) || data.categories.length === 0) return s;
-    // 拒绝不一致/空结果:/context 对刚压缩或瞬态会话偶尔返回 totalTokens=0 但 pct>0,
-    // 缓存后弹层会显示"0 / 200k (25%)"这种自相矛盾的头部(用户报告 #1)。丢弃不缓存。
-    if (!(data.totalTokens > 0)) return s;
-    const realCats = (cats) => cats.filter((c) => !/free space/i.test(c.name)).length;
-    const prev = s.ctxBreakdownBySession[sessionId];
-    // 仅当新结果类别数 >= 旧缓存时才覆盖;更少则视为退化快照,保留旧的更完整版本。
-    if (prev?.categories && realCats(data.categories) < realCats(prev.categories)) return s;
-    return { ctxBreakdownBySession: { ...s.ctxBreakdownBySession, [sessionId]: { ...data, ts: Date.now() } } };
+  nextContextRequestEpoch: () => {
+    let epoch = 0;
+    set((s) => { epoch = s.contextRequestEpoch + 1; return { contextRequestEpoch: epoch }; });
+    return epoch;
+  },
+  setCtxBreakdown: (canonicalKey, data, requestEpoch) => set((s) => {
+    if (!canonicalKey || !isValidContextResponse(data)) return s;
+    const previous = s.ctxBreakdownBySession[canonicalKey];
+    if (!shouldReplaceContextCache(previous, data, requestEpoch)) return s;
+    return {
+      ctxBreakdownBySession: {
+        ...s.ctxBreakdownBySession,
+        [canonicalKey]: { ...data, requestEpoch },
+      },
+    };
   }),
+  clearContextExactCache: () => set((s) => ({
+    ctxBreakdownBySession: {},
+    contextCacheRevision: s.contextCacheRevision + 1,
+  })),
   // When a draft session (keyed `draft-<projectHash>`) gets its real CLI session
   // id, carry its per-session model + permission pins over to the new key. Without
   // this the pins orphan under the draft key, so the model the user picked for a
@@ -1675,5 +1679,11 @@ if (typeof window !== 'undefined' && window.matchMedia) {
   window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
     const s = useStore.getState();
     if (s.themeTone === 'auto') s.setTheme(s.themeFamily, 'auto');
+  });
+}
+
+if (typeof window !== 'undefined') {
+  window.addEventListener('cgui:provider-change', () => {
+    useStore.getState().clearContextExactCache();
   });
 }
