@@ -2,7 +2,7 @@ import { create } from 'zustand';
 import { nextDockCode } from '../utils/artifactDock.js';
 import { mergeSyncedMap, syncableKey, pushLocalOnlyKeys, createInFlightCounter, shouldMarkMigrated } from '../utils/sessionSync.js';
 import { FONT_OPTIONS, readingFontCss } from '../utils/systemFonts.js';
-import { firstDrainableIndex, stripSteerState } from '../utils/steerQueue.js';
+import { createQueueId, firstDrainableIndex, isSteerBarrier, reconcileSteered, stripSteerState } from '../utils/steerQueue.js';
 import { isValidContextResponse, shouldReplaceContextCache } from '../utils/contextCache.js';
 
 // Re-exported so existing importers (App.jsx) keep working; the list and its
@@ -300,6 +300,26 @@ function appendAgentBlock(blocks, type, delta) {
   return [...arr, { type, content: delta }];
 }
 
+const QUEUE_STORAGE_KEY = 'cgui-message-queue';
+const rawQueueSnapshot = readLs(QUEUE_STORAGE_KEY, {});
+const initialQueueMap = {};
+if (rawQueueSnapshot && typeof rawQueueSnapshot === 'object' && !Array.isArray(rawQueueSnapshot)) {
+  for (const [key, value] of Object.entries(rawQueueSnapshot)) {
+    if (Array.isArray(value)) initialQueueMap[key] = value;
+  }
+}
+const recoveredQueueMap = stripSteerState(initialQueueMap);
+
+const persistQueueSnapshot = (messageQueue, verify = false) => {
+  if (typeof localStorage === 'undefined') return true;
+  try {
+    const serialized = JSON.stringify(messageQueue);
+    localStorage.setItem(QUEUE_STORAGE_KEY, serialized);
+    return !verify || localStorage.getItem(QUEUE_STORAGE_KEY) === serialized;
+  } catch { return false; }
+};
+persistQueueSnapshot(recoveredQueueMap);
+
 export const useStore = create((set, get) => ({
   // Data
   projects: [],
@@ -472,17 +492,7 @@ export const useStore = create((set, get) => ({
   // 持久化(#6):队列只活内存时刷新/崩溃即丢(排队消息凭空消失)。init 从 localStorage
   // 读回,每次变更由文件尾 subscribe 镜像写入。崩溃后恢复 = 消息留在队列里等重发,
   // 不自动发送(自动发可能撞正在进行的回合)。
-  messageQueue: (() => {
-    const v = readLs('cgui-message-queue', {});
-    if (!v || typeof v !== 'object' || Array.isArray(v)) return {};
-    // 逐 key 滤掉非数组值:localStorage 可被旧版/手改写入畸形数据,顶层是对象不代表
-    // 每个 value 都是队列数组 —— 不滤的话 [...list, msg] 之类会在消费处抛错。
-    const out = {};
-    for (const [k, val] of Object.entries(v)) { if (Array.isArray(val)) out[k] = val; }
-    // 恢复时洗掉 steer 态:它是【进程内在飞】的状态,跨重启必然失效。带着"已并入"回来的
-    // 条目会被 drain 永久跳过 = 消息永久卡在队列里(见 utils/steerQueue.js)。
-    return stripSteerState(out);
-  })(),
+  messageQueue: recoveredQueueMap,
 
   // Pending CLI permission requests waiting on the user. Each entry:
   //   { id, toolName, toolInput, sessionId, cwd, hookEvent, createdAt }
@@ -1494,9 +1504,158 @@ export const useStore = create((set, get) => ({
   })),
 
   // ── Message queue helpers (#3) ──────────────────────────────
-  enqueueMessage: (sessionKey, msg) => set((s) => {
+  enqueueMessage: (sessionKey, msg) => {
+    const queued = { ...msg, queueId: msg?.queueId || createQueueId('queue') };
+    set((s) => {
+      const list = s.messageQueue[sessionKey] || [];
+      return { messageQueue: { ...s.messageQueue, [sessionKey]: [...list, queued] } };
+    });
+    return queued;
+  },
+  prepareSteer: (sessionKey, queueId) => {
+    let prepared = null;
+    set((s) => {
+      const list = s.messageQueue[sessionKey] || [];
+      const index = list.findIndex((item) => item?.queueId === queueId);
+      if (index < 0 || isSteerBarrier(list[index])) return s;
+      const stableQueueId = list[index].queueId || createQueueId('queue');
+      const steerId = list[index].steerId || createQueueId('steer');
+      prepared = { ...list[index], queueId: stableQueueId, steerId, steerState: 'unknown', attemptWasAmbiguous: false };
+      const nextList = list.map((item, i) => (i === index ? prepared : item));
+      const nextQueue = { ...s.messageQueue, [sessionKey]: nextList };
+      if (!persistQueueSnapshot(nextQueue, true)) { prepared = null; return s; }
+      return { messageQueue: nextQueue };
+    });
+    return prepared;
+  },
+  settleSteer: (sessionKey, queueId, outcome) => set((s) => {
     const list = s.messageQueue[sessionKey] || [];
-    return { messageQueue: { ...s.messageQueue, [sessionKey]: [...list, msg] } };
+    const index = list.findIndex((item) => item?.queueId === queueId);
+    if (index < 0) return s;
+    const current = list[index];
+    let nextItem = current;
+    if (outcome === 'accepted') nextItem = { ...current, steerState: 'accepted' };
+    else if (outcome === 'ambiguous' || current.attemptWasAmbiguous) {
+      nextItem = { ...current, steerState: 'needs-review', attemptWasAmbiguous: true };
+    } else if (outcome === 'explicit-reject') {
+      const { steerId, steerState, steeredAt, attemptWasAmbiguous, ...queued } = current;
+      void steerId; void steerState; void steeredAt; void attemptWasAmbiguous;
+      nextItem = queued;
+    }
+    if (nextItem === current) return s;
+    const nextQueue = { ...s.messageQueue, [sessionKey]: list.map((item, i) => (i === index ? nextItem : item)) };
+    if (!persistQueueSnapshot(nextQueue, true)) return s;
+    return { messageQueue: nextQueue };
+  }),
+  reconcileSteerQueue: (sessionKey, steerKeys) => set((s) => {
+    const list = s.messageQueue[sessionKey] || [];
+    const nextList = reconcileSteered(list, null, steerKeys);
+    if (nextList === list) return s;
+    const nextQueue = { ...s.messageQueue, [sessionKey]: nextList };
+    if (!persistQueueSnapshot(nextQueue, true)) return s;
+    return { messageQueue: nextQueue };
+  }),
+  beginQueueClaim: (sessionKey, queueId, targetPaneId) => {
+    const claimId = createQueueId('claim');
+    let claimed = false;
+    set((s) => {
+      const list = s.messageQueue[sessionKey] || [];
+      const index = list.findIndex((item) => item?.queueId === queueId && item.steerState === 'needs-review');
+      const paneHasDraft = Object.values(s.messageQueue).some((items) => Array.isArray(items)
+        && items.some((item) => item?.claimDraft?.targetPaneId === targetPaneId));
+      if (index < 0 || !targetPaneId || paneHasDraft) return s;
+      const nextItem = { ...list[index], steerState: 'claiming', claimId, targetPaneId };
+      const nextQueue = { ...s.messageQueue, [sessionKey]: list.map((item, i) => (i === index ? nextItem : item)) };
+      if (!persistQueueSnapshot(nextQueue, true)) return s;
+      claimed = true;
+      return { messageQueue: nextQueue };
+    });
+    return claimed ? claimId : null;
+  },
+  writePendingClaimDraft: (sessionKey, queueId, claimId, targetPaneId) => {
+    let written = false;
+    set((s) => {
+      const item = (s.messageQueue[sessionKey] || []).find((entry) => entry?.queueId === queueId
+        && entry.steerState === 'claiming' && entry.claimId === claimId && entry.targetPaneId === targetPaneId);
+      if (!item) return s;
+      const attachments = Array.isArray(item.opts?.meta?.attachments) ? item.opts.meta.attachments : [];
+      const claimDraft = {
+        sessionKey,
+        sourceQueueId: queueId,
+        claimId,
+        targetPaneId,
+        text: attachments.length ? (item.opts?.meta?.displayText || '') : item.text,
+        queueText: item.text,
+        attachments,
+        sendable: false,
+      };
+      const nextQueue = {
+        ...s.messageQueue,
+        [sessionKey]: (s.messageQueue[sessionKey] || []).map((entry) => (
+          entry === item ? { ...entry, claimDraft } : entry
+        )),
+      };
+      if (!persistQueueSnapshot(nextQueue, true)) return s;
+      written = true;
+      return { messageQueue: nextQueue };
+    });
+    return written;
+  },
+  finalizeQueueClaim: (sessionKey, queueId, claimId, targetPaneId) => {
+    let finalized = false;
+    set((s) => {
+      const list = s.messageQueue[sessionKey] || [];
+      const item = list.find((entry) => entry?.queueId === queueId && entry.steerState === 'claiming'
+        && entry.claimId === claimId && entry.targetPaneId === targetPaneId);
+      const draft = item?.claimDraft;
+      if (!item || !draft || draft.sendable || draft.sessionKey !== sessionKey
+        || draft.sourceQueueId !== queueId || draft.claimId !== claimId || draft.queueText !== item.text) return s;
+      const draftSlot = {
+        text: '',
+        queuedAt: item.queuedAt,
+        hidden: true,
+        queueId: createQueueId('claim-draft'),
+        claimDraft: { ...draft, sendable: true },
+      };
+      const nextQueue = { ...s.messageQueue, [sessionKey]: list.map((entry) => (entry === item ? draftSlot : entry)) };
+      if (!persistQueueSnapshot(nextQueue, true)) return s;
+      finalized = true;
+      return { messageQueue: nextQueue };
+    });
+    return finalized;
+  },
+  rollbackQueueClaim: (sessionKey, queueId, claimId, targetPaneId) => set((s) => {
+    const list = s.messageQueue[sessionKey] || [];
+    const nextList = list.map((item) => {
+      if (item?.queueId !== queueId || item.claimId !== claimId || item.targetPaneId !== targetPaneId) return item;
+      const { claimId: _claimId, targetPaneId: _targetPaneId, claimDraft: _claimDraft, ...rest } = item;
+      void _claimId; void _targetPaneId; void _claimDraft;
+      return { ...rest, steerState: 'needs-review', attemptWasAmbiguous: true };
+    });
+    const nextQueue = { ...s.messageQueue, [sessionKey]: nextList };
+    if (!persistQueueSnapshot(nextQueue, true)) return s;
+    return { messageQueue: nextQueue };
+  }),
+  updateClaimDraft: (targetPaneId, claimId, patch) => set((s) => {
+    let found = false;
+    const nextQueue = Object.fromEntries(Object.entries(s.messageQueue).map(([key, list]) => [key, list.map((item) => {
+      const current = item?.claimDraft;
+      if (!current?.sendable || current.targetPaneId !== targetPaneId || current.claimId !== claimId) return item;
+      found = true;
+      return { ...item, claimDraft: { ...current, ...patch } };
+    })]));
+    if (!found || !persistQueueSnapshot(nextQueue, true)) return s;
+    return { messageQueue: nextQueue };
+  }),
+  clearClaimDraft: (targetPaneId, claimId) => set((s) => {
+    let found = false;
+    const nextQueue = Object.fromEntries(Object.entries(s.messageQueue).map(([key, list]) => [key, list.filter((item) => {
+      const matches = item?.claimDraft?.targetPaneId === targetPaneId && item.claimDraft.claimId === claimId;
+      if (matches) found = true;
+      return !matches;
+    })]));
+    if (!found || !persistQueueSnapshot(nextQueue, true)) return s;
+    return { messageQueue: nextQueue };
   }),
   shiftMessage: (sessionKey) => {
     // 原子 pop(#7):取 head 与写回 rest 必须在同一次 setState 里 —— 先 getState 再
@@ -1527,7 +1686,7 @@ export const useStore = create((set, get) => ({
   }),
   removeFromQueue: (sessionKey, index) => set((s) => {
     const list = s.messageQueue[sessionKey] || [];
-    if (index < 0 || index >= list.length) return s;
+    if (index < 0 || index >= list.length || isSteerBarrier(list[index]) || list[index]?.claimDraft) return s;
     const next = [...list.slice(0, index), ...list.slice(index + 1)];
     return { messageQueue: { ...s.messageQueue, [sessionKey]: next } };
   }),
@@ -1596,13 +1755,13 @@ export const useStore = create((set, get) => ({
       // pane: in split view a sibling pane showing the same reset session would
       // also re-fetch and go empty ("该会话没有可显示的消息" everywhere). Keep
       // whatever is there — a genuinely empty session still returns 200 + [].
-      if (!res.ok) { if (!silent) set({ loading: false }); return; }
+      if (!res.ok) { if (!silent) set({ loading: false }); return false; }
       const data = await res.json();
       // 端点现返回 { messages, usageTotals };兼容旧的裸数组形态(升级过渡期)。
       const messages = Array.isArray(data) ? data : (Array.isArray(data?.messages) ? data.messages : []);
       // 乱序守卫:响应落地时该 pane 已切走(sessionId 不再是发起时的)→ 整条丢弃,
       // 防慢响应覆盖新会话的消息/归属标记造成永久空白。所有调用点发起时两者相等。
-      if (get().paneSessions[tab]?.sessionId !== sessionId) { if (!silent) set({ loading: false }); return; }
+      if (get().paneSessions[tab]?.sessionId !== sessionId) { if (!silent) set({ loading: false }); return false; }
       get().setPaneMessages(tab, messages, sessionId);
       // 服务端算好的整会话用量聚合,SessionDetail 顶部用量条直接取用,
       // 避免前端对几千条历史消息每帧全量 reduce。
@@ -1610,9 +1769,11 @@ export const useStore = create((set, get) => ({
         set((s) => ({ usageTotalsBySession: { ...s.usageTotalsBySession, [sessionId]: data.usageTotals } }));
       }
       if (!silent) set({ loading: false });
+      return true;
     } catch (err) {
       // Network/parse failure — keep existing messages rather than blanking.
       if (!silent) set({ error: err.message, loading: false });
+      return false;
     }
   },
 
@@ -1663,12 +1824,10 @@ export const useStore = create((set, get) => ({
   },
 }));
 
-// messageQueue 持久化镜像(#6):引用变化即整体写 localStorage(init 在读回处)。
-// 放 subscribe 而非各 mutator 里写 —— enqueue/shift/clear/remove/migrateSessionKey
-// 五个写点全覆盖,新增写点也不会漏。
+// claim draft 作为 hidden、空 text 的队列槽，与普通队列项留在同一旧格式快照中。
 useStore.subscribe((s, prev) => {
   if (!prev) return; // 首次触发无 prev,无意义回写
-  if (s.messageQueue !== prev.messageQueue) writeLs('cgui-message-queue', s.messageQueue);
+  if (s.messageQueue !== prev.messageQueue) persistQueueSnapshot(s.messageQueue);
 });
 
 // When following the system, a preset family's fixed palette must flip with the

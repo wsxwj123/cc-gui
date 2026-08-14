@@ -61,7 +61,7 @@ import { BUILTIN_PROVIDERS, findBuiltin } from './utils/builtinProviders.js';
 import { computeCost, formatCost, setUserPrices, observeOfficialBilling } from './utils/pricing.js';
 import { extractToolResultText, finalizePendingToolCalls, applyFinalizedToBlocks } from './utils/toolResult.js';
 import { rebuildTodosFromTaskCalls } from './utils/todos.js';
-import { isSteered, firstSteerableIndex, reconcileSteered, persistedUserSigs, persistedSteerKeys, steerLanded } from './utils/steerQueue.js';
+import { isSteered, firstSteerableIndex, isSteerBarrier, persistedSteerKeys } from './utils/steerQueue.js';
 import { isInitBindingOrigin, migrateDraftQueue, paneMessagesOwned, resolveHistModel, resolveSelectorModel, resolveSendModel } from './utils/routing.js';
 import { nativeContextWindow, isBareClaudeAlias, pickCliContextWindow } from './utils/contextWindow.js';
 import { extractMcpServerIssues, formatMcpServerNotice } from './utils/mcpStatus.js';
@@ -3782,6 +3782,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   const paneMessages = useStore((s) => s.paneMessages);
   const paneMessagesSid = useStore((s) => s.paneMessagesSid);
   const selectedSession = (paneSessions && paneSessions[tabIndex]) || null;
+  const paneId = useStore((s) => s.paneIds?.[tabIndex] || `pane-${tabIndex}`);
   // 空窗格时 paneMessages[tabIndex] 为 undefined,`|| []` 每次渲染造新数组 → 进下方多个
   // useMemo/useEffect deps 致每帧重跑。复用模块级冻结空数组保持引用稳定。
   // 串扰窗口1守卫(主诉根因):切会话只换 paneSessions,paneMessages 要等 fetch 异步
@@ -4099,14 +4100,6 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // poll 会把它误判成「后台运行中」并闪黄条,甚至触发 auto-reattach 重连。记下已停的
   // pid,poll 与 reattach 都跳过它。CQ-15:指向模块级共享集合,使分屏各 pane 互相感知停止。
   const stoppedPidsRef = useRef(stoppedChatPids);
-  // Set by "⚡ 引导": tells the aborted in-flight send's finally to skip its own
-  // queue drain so we don't double-send — handleAccelerate drains directly, which
-  // also covers reattach streams (whose finally never drains).
-  // 设计甲之后 ⚡ 改成「无打断注入」(不 abort、不 POST /stop、不经 handleSend),但这面旗
-  // 仍然有活干:⚡ 的 peek→注入(await)→出队 之间若回合正好收尾,两条 drain 会抢先把同一条
-  // 排队消息弹出去重发 = 同文双发。⚡ 期间置起、自管 try/finally 复位(不再依赖某条被 abort
-  // 的流的 finally 来清 —— 那是它当年在空闲态点 ⚡ 后永久挂 true 的老 bug)。
-  const acceleratingRef = useRef(false);
   // 引导消息的流式切口必须在所有发送入口之前声明：队列按钮与 Cmd/Ctrl+Enter 共用。
   const steerAnchorRef = useRef({});
   const streamingBlocksRef = useRef(EMPTY_ARRAY);
@@ -4441,7 +4434,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         // 会把消息塞回空队列→死锁);pid 已消失,清了语义也对。
         // C1:本地流的 finally 正在收尾(streamingRef 已 false 但它自己马上要排空队列)→
         // 这里绝不能抢跑,否则两边各弹一条 = 乱序(详见 finalizeInFlightRef 定义处)。
-        if (!next && !streamingRef.current && !acceleratingRef.current && finalizeInFlightRef.current === 0) {
+        if (!next && !streamingRef.current && finalizeInFlightRef.current === 0) {
           const _sel = getLocalSession();
           const drainKey = _sel?.sessionId || `draft-${_sel?.projectHash || 'none'}`;
           const sameSession = pollSid ? drainKey === pollSid : _sel?.draftId === pollDraftId;
@@ -4454,7 +4447,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
               drainScheduled = false;
               // 落地前复查:这 50ms 里可能切了会话 / 新流起来了 —— 那就把消息留在队列里,
               // 交给该会话下一次进入或流收尾的排空,绝不错发进别的会话。
-              if (cancelled || streamingRef.current || backgroundPidRef.current || acceleratingRef.current) return;
+              if (cancelled || streamingRef.current || backgroundPidRef.current) return;
               if (finalizeInFlightRef.current > 0) return; // C1:这 50ms 里有流开始收尾 → 让它自己排空
               const s2 = getLocalSession();
               if ((s2?.sessionId || `draft-${s2?.projectHash || 'none'}`) !== drainKey) return;
@@ -4621,8 +4614,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   }, []);
 
   // Message queue plumbing (#3) — when user types during streaming, the message
-  // is queued and dispatched after the current chat finishes (or when the user
-  // clicks "⚡ 引导" to abort + send the queue immediately).
+  // is queued and dispatched after the current chat finishes. “⚡ 并入”只请求 priority-now，
+  // 不打断当前回合；队首持久 barrier 负责与排空互斥。
   // CRITICAL: never use `|| []` inside a zustand selector — that returns a
   // fresh array reference on every render and triggers React error #185
   // "Maximum update depth exceeded" (which blanks the whole page).
@@ -4631,6 +4624,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   const headerModel = modelBySession[sessionQueueKey] || currentModel;
   const messageQueueRaw = useStore((s) => s.messageQueue[sessionQueueKey]);
   const messageQueue = messageQueueRaw || EMPTY_ARRAY;
+  const claimDraft = messageQueue.find((item) => item?.claimDraft?.targetPaneId === paneId
+    && item.claimDraft.sendable)?.claimDraft || null;
 
   // 旁问浮窗展开信号:每次发起旁问 +1,BtwWindow 监听后展开(主输入框 /btw 次入口也走它)。
   const [btwOpenSignal, setBtwOpenSignal] = useState(0);
@@ -4713,34 +4708,32 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // 引导消息自动落在真实的并入位置、AI 回应成独立新块,终态本来就是对的;而流式期间提前
   // 画的那个气泡贴在上一条用户消息之后、悬在流式块上方 = 错序。所以对话流里它只在回合
   // 结束 reconcile 时从 jsonl 出现;在此之前,它留在队列区换个状态显示。
-  // 返回 command uuid = 已送达 CLI(调用方拿它把队列条目标成"已并入"),null = 没送到。
-  const steerCurrentTurn = useCallback(async (text, { meta = null } = {}) => {
+  const steerCurrentTurn = useCallback(async (text, { meta = null, steerId, sessionId } = {}) => {
     const body = String(text || '');
-    if (!body.trim()) return null;
-    const sel = getLocalSession();
-    const sid = sel?.sessionId;
-    if (!sid) return null; // draft 还没拿到真 sid → 服务端按 sessionId 找不到 slot
-    const cmdUuid = (globalThis.crypto?.randomUUID?.() || `steer-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`);
+    if (!body.trim() || !sessionId || !steerId) return { outcome: 'explicit-reject' };
     try {
       const r = await fetch('/api/chat/steer', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sessionId: sid, content: body, uuid: cmdUuid }),
-        // 本地路由同步返回;超时兜底防"后端挂死时消息卡在半空"(失败=消息留在队列里)。
+        body: JSON.stringify({ sessionId, content: body, uuid: steerId }),
         signal: AbortSignal.timeout(4000),
       });
-      if (!r.ok) return null;
-    } catch { return null; }
-    // 附件 sidecar:与普通发送同一套(按 textHash 索引),否则回合落盘后从 jsonl 重画的
-    // 气泡拿不到缩略图。
-    if (meta?.attachments?.length > 0) {
-      fetch(`/api/sessions/${sid}/attachments`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text: body, attachments: meta.attachments, displayText: meta.displayText || '' }),
-      }).catch(() => {});
-    }
-    return cmdUuid;
-  }, [getLocalSession]);
+      const response = await r.json().catch(() => null);
+      if (r.ok && response?.ok === true && response?.accepted === true) {
+        if (meta?.attachments?.length > 0) {
+          fetch(`/api/sessions/${sessionId}/attachments`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ text: body, attachments: meta.attachments, displayText: meta.displayText || '' }),
+          }).catch(() => {});
+        }
+        return { outcome: 'accepted', pid: response.pid, duplicate: response.duplicate === true };
+      }
+      const explicit = (r.status === 400 && ['invalid-steer-request', 'malformed-json'].includes(response?.code))
+        || (r.status === 409 && ['no-active-turn', 'steer-id-conflict'].includes(response?.code))
+        || (r.status === 413 && response?.code === 'request-too-large');
+      return { outcome: explicit ? 'explicit-reject' : 'ambiguous', code: response?.code };
+    } catch { return { outcome: 'ambiguous' }; }
+  }, []);
   const steerCurrentTurnRef = useRef(null);
   useEffect(() => { steerCurrentTurnRef.current = steerCurrentTurn; }, [steerCurrentTurn]);
 
@@ -4832,28 +4825,29 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     // forceSend(回滚/重做的重发 = 有意打断替换)照旧连这道门都不进。
     if (!reattachPid && !opts.forceSend && (streamingRef.current || backgroundPidRef.current)) {
       const queuedAt = Date.now();
-      useStore.getState().enqueueMessage(sessionQueueKey, { text: prompt, queuedAt, hidden: !!hiddenUserMessage, opts });
+      const queued = useStore.getState().enqueueMessage(sessionQueueKey, { text: prompt, queuedAt, hidden: !!hiddenUserMessage, opts });
       // Cmd/Ctrl+Enter:先入队保底，再调用 CLI/SDK 的实时输入队列。连接中、回合刚收尾或
-      // provider 不支持时 steer 返回 null，条目原样留队，绝不因快捷键失败而丢消息。
+      // provider 不支持时，明确拒绝才回 queued；任何模糊结果都成为持久 barrier。
       if (opts.steer && !hiddenUserMessage) {
-        acceleratingRef.current = true;
-        const steeredAt = Date.now();
-        let steerId = null;
-        try {
-          steerId = await steerCurrentTurnRef.current?.(prompt, { meta });
-        } finally {
-          acceleratingRef.current = false;
+        const st = useStore.getState();
+        const prepared = st.prepareSteer(sessionQueueKey, queued.queueId);
+        if (!prepared) {
+          setProviderSwitchNotice({ text: '无法持久化并入状态，消息仍保留在队列中。' });
+          return;
         }
-        if (steerId) {
-          steerAnchorRef.current[steerId] = streamingBlocksRef.current.length;
-          const st = useStore.getState();
-          const now = st.messageQueue[sessionQueueKey] || [];
-          const at = now.findIndex((item) => item?.queuedAt === queuedAt && item?.text === prompt);
-          if (at >= 0) st.replaceQueue(sessionQueueKey, now.map((item, i) => (
-            i === at ? { ...item, steerId, steerState: 'sent', steeredAt } : item
-          )));
+        const sid = getLocalSession()?.sessionId;
+        const result = await steerCurrentTurnRef.current?.(prepared.text, {
+          meta: prepared.opts?.meta,
+          steerId: prepared.steerId,
+          sessionId: sid,
+        }) || { outcome: 'ambiguous' };
+        useStore.getState().settleSteer(sessionQueueKey, prepared.queueId, result.outcome);
+        if (result.outcome === 'accepted') {
+          steerAnchorRef.current[prepared.steerId] = streamingBlocksRef.current.length;
+        } else if (result.outcome === 'ambiguous') {
+          setProviderSwitchNotice({ text: '并入结果无法确认，已暂停后续队列。' });
         } else {
-          setProviderSwitchNotice({ text: '当前回合暂时无法并入，消息已保留在队列中，回复完成后会自动发出。' });
+          setProviderSwitchNotice({ text: '当前没有可并入的回合，消息仍在队列中。' });
         }
       }
       return;
@@ -5612,22 +5606,6 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             const sTxt = typeof event.suggestion === 'string' ? event.suggestion.trim() : '';
             if (sTxt) useStore.getState().setPromptSuggestionFor(streamSid || streamOwnerKeyRef.current, sTxt);
             setLiveStatus(null);
-          }
-
-          // 引导注入的状态精确化(纯文案)。{ type:'command_lifecycle', command_uuid, state }
-          // state: 'queued'(进 CLI 命令队列) → 'started'(在工具结果边界被折叠进本回合) →
-          // 'completed'。该事件【不在 sdk.d.ts 的类型里】,是实跑可见的未声明事件,按未知
-          // 类型宽松解析(只判存在性)。第三方 provider 未必发 —— 所以它只把队列条目的文案
-          // 从"已引导"精确到"已并入",【落地判定一律以回合收尾的持久化核对为准】
-          // (reconcileSteered),不依赖本事件。
-          if (event.type === 'command_lifecycle' && event.command_uuid && event.state !== 'queued') {
-            const _sq = useStore.getState();
-            const _qk = streamSid || streamOwnerKeyRef.current;
-            const _ql = (_qk && _sq.messageQueue[_qk]) || null;
-            if (_ql?.some((m) => m.steerId === event.command_uuid)) {
-              _sq.replaceQueue(_qk, _ql.map((m) => (m.steerId === event.command_uuid
-                ? { ...m, steerState: 'merged' } : m)));
-            }
           }
 
           // Token-level deltas (--include-partial-messages). This is the path that
@@ -6501,29 +6479,18 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           const t = Array.isArray(m.text) ? m.text.join('') : (m.text || '');
           return `${m.type}|${(t || '').slice(0, 80)}`;
         };
-        // 引导注入的落地判定(设计乙,取代旧的"气泡回捞"):注入过的消息留在队列里挂着
-        // "已并入"状态,回合收尾时拿持久化核对 ——
-        //   查到了 → CLI 真读了它,它已经是对话历史的一部分 → 从队列移除;
-        //   查不到 → 折叠之前回合就被停/进程死了,那条命令随 CLI 内存队列一起没了 →
-        //            翻回普通排队态,可编辑可删,也会被 drain 正常发出 = 一个字都不丢。
-        // 判据只看"落没落盘",不看 command_lifecycle(第三方 provider 未必发);对账核心
-        // roundLanded 一字未动,这里只是它旁边独立的一步。纯逻辑在 utils/steerQueue.js。
-        // R7-2:先用 steerId 精确匹配(persistedSteerKeys 收 user 消息的 uuid 与 steerUuid,
-        // 覆盖折叠/排到回合末两种落盘形态),命中不了才退回签名+steeredAt 时刻兜底 ——
-        // 只认签名会把折叠形态判成"没落盘" → 翻回队列 → drain 再发一遍 = 双发。
+        // 并入收尾只接受两种 JSONL UUID 正向证明；未命中不能证明未消费，转 needs-review
+        // 队首 barrier，绝不自动回 queued 或向新的当前 slot 重试。
         const reconcileSteeredQueue = (persisted) => {
           const st = useStore.getState();
           const list = st.messageQueue[finalizeSid];
-          if (!list?.length || !list.some(isSteered)) return;
-          const sigs = persistedUserSigs(persisted);
+          if (!list?.length || !list.some((item) => isSteerBarrier(item) || item?.steerId)) return;
           const keys = persistedSteerKeys(persisted);
-          const next = reconcileSteered(list, sigs, keys);
-          if (next === list) return;
-          st.replaceQueue(finalizeSid, next);
-          // 翻回普通排队态的条数(落地的那些是直接出队,不提示)
-          const back = list.filter((m) => isSteered(m) && !steerLanded(m, sigs, keys)).length;
-          if (back > 0) {
-            setProviderSwitchNotice({ text: `有 ${back} 条并入的消息本回合没有被读到（回合先结束了），已退回队列，可编辑后再发。` });
+          const reviewCount = list.filter((item) => item?.steerId
+            && !keys.has(String(item.steerId).toLowerCase())).length;
+          st.reconcileSteerQueue(finalizeSid, keys);
+          if (reviewCount > 0) {
+            setProviderSwitchNotice({ text: '并入结果无法确认，已暂停后续队列。' });
           }
         };
         // 一轮回复可能跨多条 assistant 消息(text → 工具 → text):jsonl 先写
@@ -6603,13 +6570,10 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         }
         // 判官必修-1:12 轮轮询耗尽会从循环【底部掉出】——producedReply 为真但 turn 没落盘
         // (手动停止、进程被杀、interrupt 早期)就是这条路径,而它恰恰是需求⑤点名的场景。
-        // 两个落地判定都写在 break 之前的分支里,掉出时一个都不执行 → 已注入条目永远挂着
-        // "已引导",不可编辑不可删不可召回,要等下一个回合收尾或重启才解卡。这里补一次兜底。
+        // 两个 UUID 对账点都写在 break 之前，轮询耗尽时也必须执行一次，令未命中项进入复核。
         // 守卫 = 循环内那两处的 isCurrentTurn 再加一条会话判等(循环里那两处本就跑在会话
         // 判等之后):切走/开新回合的 break 路径不该由这里善后,此刻 store 副本已是别的会话
-        // 的历史,拿它比签名会张冠李戴。走到两个判定分支再掉出的情况,条目已不带 steerId,
-        // 这里天然空跑。数据优先用最后一次 peek 到的持久化(store 副本停在回合开始前,更旧,
-        // 只会更倾向翻回 = 安全侧)。
+        // 的历史会串会话。数据优先用最后一次 peek 到的持久化；未命中只会保守暂停。
         if (isCurrentTurn() && getLocalSession()?.sessionId === finalizeSid) {
           reconcileSteeredQueue(lastPeeked || getLocalMessages());
         }
@@ -6690,7 +6654,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       // 本地流被 detach 后由 backgroundPid 轮询接管成 reattach 流,结束时跳过排空 →
       // 排队消息永不自动发出(分屏几乎必现)。排空用本流归属会话 key(streamSid/ownerKey),
       // reattach 回来时正是该会话;shiftMessage 原子 pop + reattach 串行(reattachedPidRef
-      // 守卫)→ 不会与原 finally 双发。仍与 ⚡引导(acceleratingRef)互斥。
+      // 守卫)→ 不会与原 finally 双发。steer 在 HTTP 前已持久化为队首 barrier。
       // H 转后台:回合还在服务端跑,此刻外发排队消息会对同一会话双写(server 只复用
       // idle slot,busy slot 会另起进程 --resume 同一 jsonl)。跳过;回来 reattach 的
       // 流收尾时照常排空。
@@ -6700,7 +6664,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       // 【本窗格当前会话】—— 流式中切走会话时弹 A 的队 + 发进 B = 跨会话消息泄漏(A 的
       // 排队消息进了 B,A 的队还少了一条)。owner ≠ 当前会话时整段跳过,留给该会话
       // reattach 流的收尾排空(AZ10 原设计)。
-      if (!acceleratingRef.current && !backgroundedRef.current) {
+      if (!backgroundedRef.current) {
         const _ls = getLocalSession();
         const curKey = _ls?.sessionId || `draft-${_ls?.projectHash || 'none'}`;
         const queueKey = streamSid || streamOwnerKeyRef.current || curKey;
@@ -6711,7 +6675,6 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           setTimeout(() => handleSendRef.current?.(next.text, next.opts || (next.hidden ? { hiddenUserMessage: true } : {})), 50);
         }
       }
-      acceleratingRef.current = false;
       backgroundedRef.current = false;
       // 流归属 ref 生命周期收口:本流已结束,ref 不再代表任何在跑的流。不清会让非流式
       // 期间的读点(⚡/异步回调)拿到上一个流的会话 = 串扰。只清 ref 不动 streamOwnerKey
@@ -6933,13 +6896,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   }, [paneIsActive, tabIndex]);
 
   // ── 引导消息入流(设计丙 = Desktop 形态)────────────────────────────────
-  // 队列追踪结构(条目 + steerId/steeredAt + drain 跳过 + 回合收尾 reconcile)原样不动,
-  // 只改【呈现】:并入成功的条目不再挂在输入框上方的 chip 区,而是作为用户气泡画进对话流,
-  // 并把流式内容从切口处切成两段。理由:它是一句已经说出去、模型已经读到的话,属于对话;
-  // 挂在输入框上方会让用户以为"还没发出去"。
-  // 交接语义(与 reconcile 严格对称,不新增判据):
-  //   落地 → 条目出队 + 历史里已有 reader 合成的同一条消息 → 本地气泡消失,位置交还 jsonl;
-  //   没落地 → 条目翻回普通排队态(不再 isSteered)→ 气泡消失、chip 复现可编辑,一字不丢。
+  // server 明确 accepted 的条目在流内画临时用户气泡；JSONL UUID 命中后交还历史，
+  // 未命中则转 needs-review 并回到队列面板，不做文本签名推断。
   // "⚡ 并入" — 把队列里第一条还没注入过的消息推进正在跑的回合(设计乙)。
   // 旧实现是 abort 本端 SSE + POST /stop + 当成新消息重发(= interrupt 重来),在
   // backgroundPid 态与 connecting 窗口下三个动作全落空、队首弹出又被入队门塞回队尾 =
@@ -6947,7 +6905,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // 注入成功后消息【留在队列区】换成"已并入"状态,不出队、不画气泡:
   //   · 它已送达 CLI,drain 再发就是双发(shiftMessage 跳过已注入条目,那条是红线);
   //   · 对话流里它由回合结束后的 jsonl 重排给出真实位置(用户实测确认终态正确);
-  //   · 回合收尾的 reconcileSteeredQueue 负责"落地了就出队 / 没落地就翻回可编辑"。
+  //   · 回合收尾的 reconcileSteeredQueue 负责"UUID 命中出队 / 未命中暂停复核"。
   const handleAccelerate = useCallback(async () => {
     // queueKey 与流收尾 drain 同口径(F1):入队侧(enqueueMessage)用的也是这个 pane key。
     const sel = getLocalSession();
@@ -6957,40 +6915,47 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     const idx = firstSteerableIndex(q);
     if (idx < 0) return;
     const head = q[idx];
-    // acceleratingRef 复活(判官建议-1):注入(await fetch)期间若回合正好收尾,drain 会
-    // 先 shiftMessage 把同一条弹出去重发 = 同文双发(此刻条目还没被标上 steerId,
-    // shiftMessage 的跳过判据还兜不住它)。这面旗就是为此存在的互斥闸(两条 drain 都读它),
-    // 自管 try/finally 复位,不依赖某条流的 finally 来清 —— 空闲态点 ⚡ 时没有任何 finally
-    // 会来读它(那正是它当年永久挂 true 的老 bug)。
-    acceleratingRef.current = true;
-    // 落地判定的时间基准(判官必修-2):在 POST 【之前】取 —— CLI 落盘只可能更晚,这样
-    // 「⚡ 之后落盘」的判据不会被自己的 await 窗口穿帮;历史上发过的同文旧记录则一律落在
-    // 这个时刻之前,不再被误认成"本次已落盘"(那等于静默丢字)。
-    const steeredAt = Date.now();
-    let steerId = null;
-    try {
-      steerId = await steerCurrentTurnRef.current?.(head.text, { meta: head.opts?.meta });
-    } finally {
-      acceleratingRef.current = false;
-    }
-    if (!steerId) {
-      setProviderSwitchNotice({ text: '当前没有可并入的回合（回合正在建立或已结束），消息仍在队列中，回合结束后会自动发出。' });
+    const st = useStore.getState();
+    const prepared = st.prepareSteer(queueKey, head.queueId);
+    if (!prepared) {
+      setProviderSwitchNotice({ text: '无法持久化并入状态，消息仍保留在队列中。' });
       return;
     }
-    // 切口位置(设计丙):记下"此刻已经产出了几个流式块"。气泡画在这一刀上,其后的
-    // 块开进新的回合容器 —— 与 Claude Desktop 一致(上一块之上、新回复在气泡下方开始)。
-    steerAnchorRef.current[steerId] = streamingBlocksRef.current.length;
-    // 原地标记而不是出队。按文本复查下标:注入这几百毫秒里队列可能被改动过。
-    const st = useStore.getState();
-    const now = st.messageQueue[queueKey] || [];
-    const at = now[idx]?.text === head.text ? idx : now.findIndex((m) => m?.text === head.text);
-    if (at < 0) return; // 用户在这期间把它删了 —— 消息已送达,不再凭空塞回去
-    st.replaceQueue(queueKey, now.map((m, i) => (i === at ? { ...m, steerId, steerState: 'sent', steeredAt } : m)));
+    const sid = sel?.sessionId;
+    const result = await steerCurrentTurnRef.current?.(prepared.text, {
+      meta: prepared.opts?.meta,
+      steerId: prepared.steerId,
+      sessionId: sid,
+    }) || { outcome: 'ambiguous' };
+    useStore.getState().settleSteer(queueKey, prepared.queueId, result.outcome);
+    if (result.outcome === 'accepted') {
+      steerAnchorRef.current[prepared.steerId] = streamingBlocksRef.current.length;
+    } else if (result.outcome === 'ambiguous') {
+      setProviderSwitchNotice({ text: '并入结果无法确认，已暂停后续队列。' });
+    } else {
+      setProviderSwitchNotice({ text: '当前没有可并入的回合，消息仍在队列中。' });
+    }
   }, [getLocalSession]);
 
   // 防同帧双气泡:jsonl 一旦把它写成历史(reader 合成的消息带 uuid/steerUuid),本地就不画。
   // 出队与历史刷新是同一次回合收尾,以 persisted 为准才能无缝交接、不闪双。
   const persistedSteerIds = useMemo(() => persistedSteerKeys(finalizedMessages), [finalizedMessages]);
+  useEffect(() => {
+    useStore.getState().reconcileSteerQueue(sessionQueueKey, persistedSteerIds);
+  }, [sessionQueueKey, persistedSteerIds]);
+  const refreshQueueEvidence = useCallback(async (queueId) => {
+    const before = getLocalSession();
+    if (!before?.sessionId || !before?.projectHash) return { matched: false, current: false, refreshed: false };
+    const refreshed = await fetchMessagesForTab(before.sessionId, before.projectHash, { silent: true });
+    const after = getLocalSession();
+    const current = after?.sessionId === before.sessionId && after?.projectHash === before.projectHash;
+    const persisted = current ? (useStore.getState().paneMessages[tabIndex] || []) : [];
+    const keys = persistedSteerKeys(persisted);
+    const item = (useStore.getState().messageQueue[sessionQueueKey] || []).find((entry) => entry?.queueId === queueId);
+    const matched = !!(item?.steerId && keys.has(String(item.steerId).toLowerCase()));
+    useStore.getState().reconcileSteerQueue(sessionQueueKey, keys);
+    return { matched, current, refreshed };
+  }, [fetchMessagesForTab, getLocalSession, sessionQueueKey, tabIndex]);
   const liveSteerItems = useMemo(
     () => messageQueue.filter((m) => isSteered(m) && !persistedSteerIds.has(m.steerId)),
     [messageQueue, persistedSteerIds]);
@@ -8155,6 +8120,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         backgroundWorking={backgroundOnly && bgBannerDue}
         queueLength={messageQueue.length}
         queueItems={messageQueue}
+        paneId={paneId}
+        claimDraft={claimDraft}
+        onRefreshQueueEvidence={refreshQueueEvidence}
         onRemoveFromQueue={(i) => useStore.getState().removeFromQueue(sessionQueueKey, i)}
         onEditFromQueue={(i) => {
           const item = messageQueue[i];

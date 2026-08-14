@@ -116,9 +116,10 @@ const PID = 'sdk-7';
   assert.doesNotMatch(src, /backgroundWorking=\{!isStreaming && !!backgroundPid\}/,
     '横幅不得再直连轮询瞬时态(一次误判 done 就闪一下"后台工作中",语义正好反了)');
   assert.equal(BG_BANNER_DELAY_MS, 2000, '门槛取 2s:略大于 1.5s 轮询周期,盖住一轮自愈');
-  // 次生风险自查(RESEARCH §4):回合收尾的排队排空守卫不得被本次修复动到。
-  assert.match(src, /if \(!acceleratingRef\.current && !backgroundedRef\.current\) \{/,
-    '排队排空的 ⚡/转后台 互斥守卫必须原样保留');
+  // steer 已在 HTTP 前把队首持久化成 barrier，排空只需保留“转后台”互斥。
+  assert.match(src, /if \(!backgroundedRef\.current\) \{/,
+    '转后台期间仍不得排空；steer 由队首 barrier 防双发');
+  assert.doesNotMatch(src, /acceleratingRef/, '不得退回跨条目共享的 accelerating 布尔锁');
   assert.match(src, /const next = queueKey === curKey \? useStore\.getState\(\)\.shiftMessage\(queueKey\) : null;/,
     '排空的 owner 归属校验必须原样保留(否则跨会话串扰 + 双 resume)');
 }

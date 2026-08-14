@@ -1310,6 +1310,8 @@ router.post('/chat', async (req, res) => {
     cronToolIds: new Set(),
     cronHoldUntil: 0,
     cronPendingDelete: false,
+    // 同一 slot 内的 steer 本地接纳回执。随 slot 完整 dispose 释放；不做 TTL/跨进程复用。
+    steerReceipts: new Map(),
   };
   activeProcesses.set(procId, slot);
   slot.nulWatcher = startWinNulWatcher(workingDir);
@@ -1744,29 +1746,60 @@ export function findBusySlot(procs, sessionId) {
   return null;
 }
 
+const STEER_SESSION_RE = /^[A-Za-z0-9._-]{1,128}$/;
+const STEER_UUID_RE = /^(?:[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}|steer-[a-z0-9-]+)$/;
+
+export function validateSteerRequest(body) {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return null;
+  if (typeof body.sessionId !== 'string' || typeof body.uuid !== 'string' || typeof body.content !== 'string') return null;
+  const sessionId = body.sessionId.trim();
+  const uuid = body.uuid.trim().toLowerCase();
+  if (!STEER_SESSION_RE.test(sessionId) || uuid.length > 128 || !STEER_UUID_RE.test(uuid) || !body.content.trim()) return null;
+  return { sessionId, uuid, content: body.content };
+}
+
+export function acceptSteer(procs, request) {
+  for (const [pid, slot] of procs) {
+    if (!slot || slot.sessionId !== request.sessionId) continue;
+    const previous = slot.steerReceipts?.get(request.uuid);
+    if (previous === undefined) continue;
+    if (previous !== request.content) {
+      return { status: 409, body: { ok: false, code: 'steer-id-conflict', error: '并入标识冲突' } };
+    }
+    return { status: 200, body: { ok: true, accepted: true, duplicate: true, pid: String(pid) } };
+  }
+  const hit = findBusySlot(procs, request.sessionId);
+  if (!hit) {
+    return { status: 409, body: { ok: false, code: 'no-active-turn', error: '当前没有可并入的回合' } };
+  }
+  const msg = {
+    type: 'user',
+    message: { role: 'user', content: request.content },
+    parent_tool_use_id: null,
+    priority: 'now',
+    uuid: request.uuid,
+  };
+  try {
+    if (!hit.slot.input.push(msg)) {
+      return { status: 409, body: { ok: false, code: 'no-active-turn', error: '当前没有可并入的回合' } };
+    }
+  } catch {
+    return { status: 500, body: { ok: false, code: 'steer-acceptance-unknown', error: '并入结果无法确认' } };
+  }
+  if (!(hit.slot.steerReceipts instanceof Map)) hit.slot.steerReceipts = new Map();
+  hit.slot.steerReceipts.set(request.uuid, request.content);
+  return { status: 200, body: { ok: true, accepted: true, duplicate: false, pid: String(hit.pid) } };
+}
+
 // 独立路由(照 /chat/permission-mode 形态:按 sessionId 找 slot → 直接对 slot 动作),
 // 完全绕开 POST /chat 的复用块与 tearingDown 等待/强杀段 —— 那两段一个字不动。
 router.post('/chat/steer', (req, res) => {
-  const { sessionId, content, uuid } = req.body || {};
-  if (!sessionId || typeof content !== 'string' || !content.trim()) {
-    return res.status(400).json({ error: 'sessionId 与 content 必填' });
+  const request = validateSteerRequest(req.body);
+  if (!request) {
+    return res.status(400).json({ ok: false, code: 'invalid-steer-request', error: '并入请求参数无效' });
   }
-  const hit = findBusySlot(activeProcesses, String(sessionId));
-  if (!hit) return res.status(409).json({ error: 'no-active-turn' });
-  // 形状遵循本机 @anthropic-ai/claude-agent-sdk 的 SDKUserMessage；带 uuid 时 SDK 会回吐
-  // command_lifecycle{queued|started|completed},前端据此驱动"已排队 → 已并入"角标。
-  const msg = {
-    type: 'user',
-    message: { role: 'user', content: String(content) },
-    parent_tool_use_id: null,
-    priority: 'now',
-  };
-  if (uuid) msg.uuid = String(uuid);
-  // push 返回 false = 队列已 close(finalize 的 else 分支/停止兜底刚关流,但 closing/idle/
-  // pumpEnded 三面旗还没落地)→ 这条消息没人会读到,必须当作"没有活回合"回 409,让客户端
-  // 回落入队。绝不能凭"旗看起来是忙的"就回 200(判官致命-1:200 空吞 = 用户文字无声蒸发)。
-  if (!hit.slot.input.push(msg)) return res.status(409).json({ error: 'no-active-turn' });
-  res.json({ ok: true, pid: hit.pid });
+  const result = acceptSteer(activeProcesses, request);
+  res.status(result.status).json(result.body);
 });
 
 
