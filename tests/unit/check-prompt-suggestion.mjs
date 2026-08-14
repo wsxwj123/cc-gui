@@ -60,6 +60,8 @@ const app = readFileSync(join(root, 'client/src/App.jsx'), 'utf8');
 
 // ── 4. 真 store 行为:按 sid 隔离 + 内容相等去重 ───────────────────────
 globalThis.localStorage = { getItem: () => null, setItem: () => {}, removeItem: () => {} };
+globalThis.addEventListener = () => {};
+globalThis.removeEventListener = () => {};
 globalThis.window = globalThis;
 globalThis.document = { addEventListener() {}, removeEventListener() {} };
 const { useStore } = await import('../../client/src/stores/sessionStore.js');

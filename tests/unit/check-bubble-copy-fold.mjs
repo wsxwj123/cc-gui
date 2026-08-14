@@ -63,7 +63,7 @@ assert.ok(/ref=\{bubbleRef\}/.test(src), '气泡根节点要挂 ref 供测量');
 assert.ok(/closest\?\.\('\[data-chat-scroll\]'\)/.test(src),
   '要按 data-chat-scroll 找本窗格滚动容器(分屏下不能用 window)');
 // 注意锚到元素本身:只搜字符串会被同名注释喂饱(变异验证时漏抓过)
-assert.ok(/<div ref=\{setContainerRef\}[^>]*data-chat-scroll/.test(app),
+assert.ok(/<div\s+[\s\S]{0,320}ref=\{setContainerRef\}[\s\S]{0,320}data-chat-scroll/.test(app),
   'App.jsx 的聊天滚动容器元素上必须带 data-chat-scroll');
 {
   const eff = src.slice(src.indexOf('const bubbleRef'), src.indexOf('const bubbleRef') + 1100);
