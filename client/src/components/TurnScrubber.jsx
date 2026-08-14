@@ -1,7 +1,8 @@
 import { useEffect, useLayoutEffect, useRef, useState, useCallback } from 'react';
+import { turnWaveWidth } from '../utils/turnWave.js';
 
 // 右侧竖向回合进度条(Claude Code/Codex 式线性波形 + macOS Dock 放大)。
-// 每个用户回合一条横线;hover 按【索引距离】向左拉长 + 浮窗显示该回合消息摘要,
+// 每个用户回合一条横线;hover 按指针的实际纵向像素距离向左拉长 + 浮窗显示该回合消息摘要,
 // 点击平滑滚动到该回合。
 //
 // 定位:作为 SessionDetail 根(position:relative)的 absolute 子元素,贴 right;
@@ -12,17 +13,17 @@ import { useEffect, useLayoutEffect, useRef, useState, useCallback } from 'react
 
 const SHOW_DELAY = 220;
 const HIDE_DELAY = 120;
-// 波形拉伸:按到悬停线的索引距离,近长远短。右端固定,视觉像振幅向内容区传播。
-const waveWidth = (d) => (d === 0 ? 16 : d === 1 ? 11 : d === 2 ? 8 : 5);
-
 export default function TurnScrubber({ containerRef, turns }) {
   const rootRef = useRef(null);                // 本组件根,取其 offsetParent 作定位基准
   const [box, setBox] = useState(null);        // { top, height } 相对根
   const [positions, setPositions] = useState([]); // 每个回合点 0~1
-  const [hoverIdx, setHoverIdx] = useState(null);
+  const [pointerY, setPointerY] = useState(null);
   const [tipIdx, setTipIdx] = useState(null);
   const showTimer = useRef(0);
   const hideTimer = useRef(0);
+  const pointerFrame = useRef(0);
+  const pendingPointerY = useRef(null);
+  const committedPointerY = useRef(null);
   // turns 经 ref 读取,使 measure 身份稳定 → ResizeObserver 不会每帧(流式每 token)重建。
   const turnsRef = useRef(turns);
   turnsRef.current = turns;
@@ -65,7 +66,11 @@ export default function TurnScrubber({ containerRef, turns }) {
     return () => { ro.disconnect(); window.removeEventListener('resize', measure); };
   }, [containerRef, measure]);
 
-  useEffect(() => () => { clearTimeout(showTimer.current); clearTimeout(hideTimer.current); }, []);
+  useEffect(() => () => {
+    clearTimeout(showTimer.current);
+    clearTimeout(hideTimer.current);
+    cancelAnimationFrame(pointerFrame.current);
+  }, []);
 
   // 平滑滚动到回合。不用 scrollIntoView/scrollTo 的 behavior:'smooth' —— 实测某些
   // webview(含本 app 的 WKWebView)对程序化平滑滚动不响应。用 rAF 手动缓动,处处可用。
@@ -89,29 +94,33 @@ export default function TurnScrubber({ containerRef, turns }) {
     requestAnimationFrame(step);
   };
 
-  const enterDot = (i) => {
-    setHoverIdx(i);
+  const enterLine = (i) => {
     clearTimeout(hideTimer.current);
     clearTimeout(showTimer.current);
     showTimer.current = setTimeout(() => setTipIdx(i), SHOW_DELAY);
   };
   const leaveBar = () => {
-    setHoverIdx(null);
+    cancelAnimationFrame(pointerFrame.current);
+    pointerFrame.current = 0;
+    pendingPointerY.current = null;
+    committedPointerY.current = null;
+    setPointerY(null);
     clearTimeout(showTimer.current);
     clearTimeout(hideTimer.current);
     hideTimer.current = setTimeout(() => setTipIdx(null), HIDE_DELAY);
   };
   const moveBar = (e) => {
     const rect = e.currentTarget.getBoundingClientRect();
-    const y = rect.height > 0 ? (e.clientY - rect.top) / rect.height : 0;
-    let nearest = null;
-    let best = Infinity;
-    positions.forEach((position, i) => {
-      if (position == null) return;
-      const distance = Math.abs(position - y);
-      if (distance < best) { best = distance; nearest = i; }
+    pendingPointerY.current = Math.max(0, Math.min(rect.height, e.clientY - rect.top));
+    if (pointerFrame.current) return;
+    pointerFrame.current = requestAnimationFrame(() => {
+      pointerFrame.current = 0;
+      const next = pendingPointerY.current;
+      if (next == null) return;
+      if (committedPointerY.current != null && Math.abs(next - committedPointerY.current) < 1) return;
+      committedPointerY.current = next;
+      setPointerY(next);
     });
-    setHoverIdx(nearest);
   };
 
   if (!box || turns.length < 2) return null;
@@ -119,7 +128,7 @@ export default function TurnScrubber({ containerRef, turns }) {
   return (
     <div
       ref={rootRef}
-      onMouseMove={moveBar}
+      onPointerMove={moveBar}
       onMouseLeave={leaveBar}
       style={{ position: 'absolute', right: 4, top: box.top, height: box.height, width: 18, zIndex: 45 }}
       className="max-md:hidden pointer-events-auto"
@@ -132,7 +141,7 @@ export default function TurnScrubber({ containerRef, turns }) {
         return (
         <button
           key={t.uuid || i}
-          onMouseEnter={() => enterDot(i)}
+          onMouseEnter={() => enterLine(i)}
           onClick={() => scrollToTurn(t.uuid)}
           style={{
             position: 'absolute', top: `${n * 100}%`, right: 0,
@@ -144,11 +153,11 @@ export default function TurnScrubber({ containerRef, turns }) {
           <span
             data-turn-wave
             style={{
-              width: waveWidth(hoverIdx == null ? 9 : Math.abs(i - hoverIdx)),
-              height: hoverIdx === i ? 3 : 2,
+              width: pointerY == null ? 6 : turnWaveWidth(Math.abs(pointerY - n * box.height)),
+              height: 2,
             }}
-            className={`block rounded-full transition-[width,height,background-color,opacity] duration-150 ease-out ${
-              hoverIdx === i ? 'bg-accent opacity-100' : 'bg-ink-faint/55 opacity-80 group-hover:bg-accent'
+            className={`block transition-[width,background-color,opacity] duration-75 ease-out ${
+              pointerY != null && Math.abs(pointerY - n * box.height) < 6 ? 'bg-accent opacity-100' : 'bg-ink-faint/55 opacity-80 group-hover:bg-accent'
             }`}
           />
         </button>
