@@ -65,10 +65,15 @@ assert.ok(/stopSingleTask\(parentSessionId \|\| agent\.sessionId, agentId\)/.tes
   'SubagentView 停止路由同样以母会话(本视图归属)为准');
 
 // ── 3) 分支入口:源会话在跑时先确认(选项 4a)────────────────────────
+// r10-11:侧栏入口(handleFork)随 SessionList 合并迁入 UnifiedSidebar.jsx,
+// 消息级入口(forkCurrentSession)仍在 App.jsx —— 两文件各 1 处,语义不减。
 const app = read('client', 'src', 'App.jsx');
-assert.equal((app.match(/confirmDialog\(FORK_RUNNING_CONFIRM/g) || []).length, 2,
-  '两个分支入口(侧栏 handleFork / 消息级 forkCurrentSession)都要提示');
-assert.ok(/runningSessionIds\.has\(session\.sessionId\)/.test(app),
+const sidebar = read('client', 'src', 'components', 'UnifiedSidebar.jsx');
+assert.equal((app.match(/confirmDialog\(FORK_RUNNING_CONFIRM/g) || []).length, 1,
+  '消息级分支入口(forkCurrentSession,App.jsx)要提示');
+assert.equal((sidebar.match(/confirmDialog\(FORK_RUNNING_CONFIRM/g) || []).length, 1,
+  '侧栏分支入口(handleFork,UnifiedSidebar.jsx)要提示');
+assert.ok(/runningSessionIds\.has\(session\.sessionId\)/.test(sidebar),
   '侧栏入口分支的是列表里那条会话 → 用 runningSessionIds 判在跑,不能用本窗格 streamingRef');
 assert.ok(/if \(streamingRef\.current \|\| backgroundPidRef\.current\) \{\s*\n\s*if \(!\(await confirmDialog\(FORK_RUNNING_CONFIRM/.test(app),
   '消息级入口分支的是本窗格会话 → streaming 与后台都要判(v0.2.191 转后台漏判律)');
