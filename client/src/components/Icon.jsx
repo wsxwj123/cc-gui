@@ -31,24 +31,15 @@ import {
   Undo2 as L_Undo2, User as L_User, Wrench as L_Wrench, X as L_X, XCircle as L_XCircle, Zap as L_Zap,
 } from 'lucide-react';
 
-let overrides = {};
-let version = 0;
-const subs = new Set();
-const subscribe = (fn) => { subs.add(fn); return () => subs.delete(fn); };
-const getSnapshot = () => version;
-
-/** 皮肤层调用:map = { 语义名: 资源 URL };传空对象清除全部替换。 */
-export function setIconOverrides(map) {
-  overrides = (map && typeof map === 'object') ? { ...map } : {};
-  version++;
-  for (const fn of subs) fn();
-}
-export function getIconOverrides() { return overrides; }
+// 注册表抽在 utils/iconOverrides.js(纯 js):皮肤引擎(skins.js,node 单测需可
+// import)不能依赖本 JSX 文件;这里转发导出保持既有 setIconOverrides 入口不变。
+import { subscribeIcons as subscribe, getIconsVersion as getSnapshot, getIconOverrides } from '../utils/iconOverrides.js';
+export { setIconOverrides, getIconOverrides } from '../utils/iconOverrides.js';
 
 function wrap(semantic, Orig) {
   function SkinnableIcon(props) {
     useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
-    const url = semantic ? overrides[semantic] : null;
+    const url = semantic ? getIconOverrides()[semantic] : null;
     if (!url) return <Orig {...props} />;
     const { size = 24, className, style, ...rest } = props;
     // lucide 专属 props 不外泄到 span(避免非法 DOM 属性告警)

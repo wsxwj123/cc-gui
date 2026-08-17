@@ -65,7 +65,10 @@ const iconSrc = readFileSync(new URL('../../client/src/components/Icon.jsx', imp
   assert.match(iconSrc, /backgroundColor: 'currentColor'/, 't4: 颜色跟随主题');
   assert.match(iconSrc, /maskImage: `url\("\$\{url\}"\)`/, 't4: CSS mask 渲染皮肤 SVG');
   assert.doesNotMatch(iconSrc, /dangerouslySetInnerHTML/, 't4: 零 innerHTML 注入面');
-  assert.match(iconSrc, /export function setIconOverrides\(map\)/, 't4: 覆盖入口');
+  // 注册表抽到 utils/iconOverrides.js(纯 js,皮肤引擎 node 可测),Icon.jsx 转发导出保持入口
+  assert.match(iconSrc, /export \{ setIconOverrides, getIconOverrides \} from '\.\.\/utils\/iconOverrides\.js'/, 't4: 覆盖入口(经纯 js 注册表转发)');
+  const reg = readFileSync(new URL('../../client/src/utils/iconOverrides.js', import.meta.url), 'utf8');
+  assert.match(reg, /export function setIconOverrides\(map\)/, 't4: 注册表实现在纯 js 模块');
   assert.match(iconSrc, /width: size, height: size/, 't4: 尺寸跟随原 size(等价包装)');
 }
 

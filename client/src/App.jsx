@@ -1,4 +1,4 @@
-import React, { useEffect, useLayoutEffect, useRef, useState, useCallback, useMemo } from 'react';
+import React, { useEffect, useLayoutEffect, useRef, useState, useCallback, useMemo, useSyncExternalStore } from 'react';
 import { createPortal } from 'react-dom';
 
 // Stable empty array reference for zustand selectors — prevents React error
@@ -68,6 +68,7 @@ import { extractMcpServerIssues, formatMcpServerNotice } from './utils/mcpStatus
 import { classifyRepairOutcome, classifyCheckOutcome, upsertRepairHint, removeRepairHint, loadRepairHints, persistRepairHints } from './utils/repairFlow.js';
 import { autoCompactTransition } from './utils/compactStatus.js';
 import { homeView, pickHomeProject, buildHomeDraft, homeGreetingParts, readHomeCustom } from './utils/home.js';
+import { subscribeSkin, getSkinVersion, getSkinState, reconcileSkinOnBoot, watchThemeForSkin } from './utils/skins.js';
 import { seedNewSessionDefaults } from './components/UnifiedSidebar.jsx';
 import {
   FolderOpen, MessageSquare, ChevronLeft, ChevronRight, ChevronDown,
@@ -1647,6 +1648,9 @@ function HomeState({ tabIndex = 0 }) {
   const projects = useStore((s) => s.projects);
   const selectedProject = useStore((s) => s.selectedProject);
   const displayName = useStore((s) => s.displayName); // r11-⑫ 称呼(多端共享)
+  // r11-③:皮肤切换(home.icon/greeting 接管)时重渲——readHomeCustom 每次渲染重读,
+  // 这里只负责触发渲染;无皮肤时 version 恒定零开销。
+  useSyncExternalStore(subscribeSkin, getSkinVersion, getSkinVersion);
   const [chosenHash, setChosenHash] = useState(null);
   const [text, setText] = useState('');
   const [projOpen, setProjOpen] = useState(false);
@@ -1785,6 +1789,34 @@ export const LOADING_OPTIONS = [
 // 深浅主题都保证文字可读。未设置背景时返回 null,与改动前外观完全一致(此时透出的是
 // body 的主题底色/晴空天空渐变,无需内置任何图片)。数据沿用 chatBackground 字段,老用户
 // 已设的背景无缝升级为全局,无迁移。
+// ─── r11-③ 皮肤背景层(app 级,单实例,最底) ─────────────────────
+// PLAN-skin §3:皮肤背景垫在一切之下;既有 GlobalBackgroundLayer/pane 背景在其上,
+// 两功能共存不合并。img 层按 manifest fit/position/blur,overlay 层 = 当前主题
+// --color-canvas × overlayOpacity(明暗切换遮罩自动换色,保证可读)。
+// 订阅走 skins.js 的 useSyncExternalStore(引擎态 module 级,零 store 耦合)。
+function SkinBackgroundLayer() {
+  useSyncExternalStore(subscribeSkin, getSkinVersion, getSkinVersion);
+  const bg = getSkinState().background;
+  if (!bg?.url) return null;
+  const fitStyle = bg.fit === 'tile'
+    ? { backgroundSize: 'auto', backgroundRepeat: 'repeat' }
+    : { backgroundSize: bg.fit || 'cover', backgroundRepeat: 'no-repeat' };
+  return (
+    <div className="absolute inset-0 -z-20 pointer-events-none overflow-hidden" aria-hidden="true" data-cgui-skin-bg>
+      <div
+        className="absolute inset-0"
+        style={{
+          backgroundImage: `url("${bg.url}")`,
+          backgroundPosition: bg.position || 'center',
+          ...fitStyle,
+          filter: bg.blur ? `blur(${bg.blur}px)` : undefined,
+        }}
+      />
+      <div className="absolute inset-0" style={{ background: `color-mix(in srgb, var(--color-canvas) ${Math.round((bg.overlayOpacity ?? 0.45) * 100)}%, transparent)` }} />
+    </div>
+  );
+}
+
 function GlobalBackgroundLayer() {
   const bg = useStore((s) => s.chatBackground);
   if (!bg || !bg.kind) return null;
@@ -9577,6 +9609,13 @@ export default function App() {
     return () => window.removeEventListener('cgui:ws-reconnected', hydrate);
   }, []);
 
+  // r11-③:皮肤启动对账(main.jsx 已同步重放缓存防 FOUC;此处拉 GET /api/skins 校对:
+  // id 失效静默清、manifest 有变以服务端为准)+ 明暗切换重跑应用循环的观察器。
+  useEffect(() => {
+    watchThemeForSkin();
+    reconcileSkinOnBoot();
+  }, []);
+
   // 停止链路 #3:回合间到达的子代理权威终态通知(server 无活跃 SSE 时经全局 WS
   // 广播 task-notification-bg → useWebSocket 转 window 事件)。按 tool_use_id 调
   // finalizeAgent 收尾(幂等:已终态条目 no-op),级联嵌套子代理一并收。
@@ -10012,6 +10051,8 @@ export default function App() {
 
   return (
     <div className="flex flex-col overflow-hidden relative isolate" style={{ width: 'var(--app-w, 100vw)', height: 'var(--app-h, 100dvh)' }}>
+      {/* r11-③ 皮肤背景层(-z-20 最底);既有全局背景(-z-10)与 pane 背景在其上共存。 */}
+      <SkinBackgroundLayer />
       {/* ③ 全局自定义背景层:垫在所有面板之下(root relative+isolate 兜住 -z-10)。 */}
       <GlobalBackgroundLayer />
       {/* Top bar — glass */}
