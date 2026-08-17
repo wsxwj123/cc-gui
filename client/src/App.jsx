@@ -1354,8 +1354,11 @@ export function SessionRowStatus({ sessionId, running, isSelected }) {
     completionTracker.observe(sessionId, !!running, !!isSelected);
   }, [sessionId, running, isSelected]);
   const kind = resolveSessionDot({ waiting, running: !!running, completedUnread: !!sessionId && completionTracker.has(sessionId) });
+  // r11-p3-2:无点行零留位(返回 null,标题顶格;允许与有点行不完全对齐——dsh 即如此)。
+  // hooks 全在上方,边沿观测不因 null 返回缺席。
+  if (!kind) return null;
   return (
-    <span className="w-[11px] shrink-0 flex items-center justify-center">
+    <span className="shrink-0 flex items-center justify-center">
       {kind === 'waiting' && <span className="session-dot session-dot-amber" aria-hidden />}
       {kind === 'running' && (
         <svg viewBox="0 0 10 10" width={10} height={10} shapeRendering="crispEdges" className="session-dot-run text-accent shrink-0" aria-hidden>
@@ -1478,30 +1481,33 @@ export function SessionItem({ session, isSelected, onSelect, onFork, onArchive, 
             subagentCount: session.subagents?.length,
             timeText: formatDate(session.lastActivity),
           })}
-          className={`sidebar-item w-full text-left pl-3 pr-[108px] md:pr-6 py-2 rounded-md mb-0.5 transition-colors cursor-pointer flex items-center gap-2 min-w-0 ${
+          className={`sidebar-item relative w-full text-left pl-3 pr-[108px] md:pr-6 py-2 rounded-md mb-0.5 transition-colors cursor-pointer flex items-center gap-1.5 min-w-0 ${
             isSelected ? 'active bg-canvas-warm' : 'hover:bg-canvas-warm/60'
           }`}
         >
-          {/* r11-⑪/p1-2:单行化——只显 状态点+标题(+置顶针角标),模型/消息数/子任务数/
-              时间收进原生 title tooltip(sessionRowTooltip);子代理折叠三角照旧。
-              标题吃满行宽:桌面只留 pr-6 最小留位,hover 操作组 absolute 覆盖时自带
-              不透明底+左缘渐变(操作时看按钮不看字);触屏无 hover 常显,保留 pr-[108px]
-              留位(5 键 gap-0 收窄形态)。窄栏/大字体下标题不再被常驻留位挤没(用户实报)。 */}
-          {/* r11-p2-3 行首结构:💬 占位图标彻底移除;两恒宽槽保证标题起点全列对齐。
-              ①三角槽:静置隐藏,hover 原位现身(桌面);触屏无 hover 常显;已展开常显
-              (否则收不回去)。展开/收起逻辑与旋转态样式原样。②状态槽:抽成可独立
-              替换的 SessionRowStatus(圆点视觉体系待后续规范,落其内部即可)。 */}
-          <span className="w-[17px] shrink-0 flex items-center justify-center">
-            {hasSubagents && (
-              <button
-                onClick={(e) => { e.stopPropagation(); setExpanded(!expanded); }}
-                className={`p-0.5 hover:bg-canvas-deep rounded transition-opacity ${expanded ? '' : 'md:opacity-0 md:group-hover:opacity-100'}`}
-                title={expanded ? '收起子任务' : '展开子任务'}
-              >
-                <ChevronRight size={12} className={`text-ink-faint transition-transform ${expanded ? 'rotate-90' : ''}`} />
-              </button>
-            )}
-          </span>
+          {/* r11-⑪:单行化——模型/消息数/子任务数/时间收进原生 title tooltip。
+              r11-p3-2 顶格(dsh 式):恒宽占位槽废除,标题顶格左对齐;状态点存在时才
+              内联在标题左侧(row gap-1.5 = 6px 间距),无点行零留位——允许列不完全
+              对齐(dsh 即如此)。子代理三角两形态:触屏/展开态=内联常显;桌面静置=
+              hover 时 absolute 覆盖行首左缘(带底色,不挤压标题)。 */}
+          {hasSubagents && (
+            <button
+              onClick={(e) => { e.stopPropagation(); setExpanded(!expanded); }}
+              className={`shrink-0 p-0.5 hover:bg-canvas-deep rounded ${expanded ? '' : 'md:hidden'}`}
+              title={expanded ? '收起子任务' : '展开子任务'}
+            >
+              <ChevronRight size={12} className={`text-ink-faint transition-transform ${expanded ? 'rotate-90' : ''}`} />
+            </button>
+          )}
+          {hasSubagents && !expanded && (
+            <button
+              onClick={(e) => { e.stopPropagation(); setExpanded(true); }}
+              className="hidden md:flex absolute left-0.5 top-1/2 -translate-y-1/2 z-10 p-0.5 rounded bg-canvas-warm items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
+              title="展开子任务"
+            >
+              <ChevronRight size={12} className="text-ink-faint" />
+            </button>
+          )}
           <SessionRowStatus sessionId={session.sessionId} running={running} isSelected={isSelected} />
           <span className="text-[13px] text-ink-soft truncate font-body min-w-0">
             {resolveSessionTitle(session, customTitle, autoTitle) || '(空会话)'}

@@ -55,14 +55,18 @@ import { sessionRowTooltip } from '../../client/src/utils/sessionTitle.js';
   // 子代理折叠三角与 hover 操作组照旧
   assert.match(item, /setExpanded\(!expanded\)/, 't2: 子代理折叠三角保留');
   assert.match(item, /ChevronRight/, 't2: 折叠三角图标保留');
-  // p2-3 行首结构:💬 彻底移除;三角静置隐藏 hover 现身(触屏常显/展开态常显);
-  // 两恒宽槽占位对齐;状态槽抽成可独立替换组件(圆点视觉规范后续落其内部)
+  // p2-3 行首:💬 彻底移除。p3-2 顶格(dsh 式):恒宽占位槽废除(哨兵a锚:恢复即红),
+  // 状态点存在才内联(6px 间距),无点零留位;三角双形态(触屏/展开内联常显,
+  // 桌面静置 hover 覆盖行首左缘 absolute 不挤压标题)。
   assert.doesNotMatch(item, /<MessageSquare/, 't2-p3: 💬 占位图标彻底移除(哨兵锚)');
-  assert.match(item, /\$\{expanded \? '' : 'md:opacity-0 md:group-hover:opacity-100'\}/, 't2-p3: 三角静置隐藏/hover 现身/展开常显(base 无隐藏=触屏常显)');
-  assert.match(item, /w-\[17px\] shrink-0 flex items-center justify-center/, 't2-p3: 三角槽恒宽占位(无子代理行留空对齐)');
-  assert.match(item, /<SessionRowStatus sessionId=\{session\.sessionId\} running=\{running\} isSelected=\{isSelected\} \/>/, 't2-p3: 状态槽走可替换组件(p2-3b 定稿签名)');
+  assert.doesNotMatch(item, /w-\[17px\]|w-\[11px\]/, 't2-p3-2: 恒宽占位槽清零(标题顶格,哨兵a锚)');
+  assert.match(item, /flex items-center gap-1\.5 min-w-0/, 't2-p3-2: 点-标题 6px 间距(gap-1.5)');
+  assert.match(item, /\$\{expanded \? '' : 'md:hidden'\}/, 't2-p3-2: 内联三角=触屏常显/展开态常显');
+  assert.match(item, /hidden md:flex absolute left-0\.5 top-1\/2 -translate-y-1\/2 z-10 p-0\.5 rounded bg-canvas-warm[^"]*group-hover:opacity-100/, 't2-p3-2: 桌面静置三角 hover 覆盖行首左缘(带底色)');
+  assert.match(item, /<SessionRowStatus sessionId=\{session\.sessionId\} running=\{running\} isSelected=\{isSelected\} \/>/, 't2-p3: 状态点组件内联(签名不变)');
   const comp = src.slice(src.indexOf('export function SessionRowStatus'), src.indexOf('export function StatusDot'));
-  assert.match(comp, /w-\[11px\] shrink-0/, 't2-p3: 状态槽恒宽(无状态行留空,标题起点对齐)');
+  assert.match(comp, /if \(!kind\) return null;/, 't2-p3-2: 无点行零留位(返回 null)');
+  assert.doesNotMatch(comp, /w-\[11px\]/, 't2-p3-2: 恒宽状态槽废除');
   // 判官p1建议:操作组左缘渐变层纯装饰,不拦标题尾部点击
   assert.match(item, /from-canvas-warm to-transparent pointer-events-none/, 't2-p1判官: 渐变层 pointer-events-none');
   for (const t of ['onTogglePin', 'startRename', 'onFork(session)', 'onArchive(session)', 'DeleteButton']) {
