@@ -8342,7 +8342,21 @@ function CustomProviderForm({ onSaved, editing, onCancel, onDirtyChange, customC
       const d = await r.json();
       if (!r.ok) throw new Error(d.error || '拉取失败');
       if (!d.models?.length) confirmDialog('该端点未返回模型,请直接在下方「模型」框手填模型 ID 再保存。');
-      else setModelsText(d.models.join('\n'));
+      else {
+        setModelsText(d.models.join('\n'));
+        // r11-⑩:目录预填 —— 拉到列表时对未手动声明过的模型套目录 meta(source:'catalog');
+        // 已有声明(用户 source:'user'/历史无 source,或此前的目录预填)一律不动,保存路径
+        // 服务端还会按最新目录兜一遍。
+        if (d.catalogMeta && typeof d.catalogMeta === 'object') {
+          setModelCaps((prev) => {
+            const next = { ...prev };
+            for (const [mid, pre] of Object.entries(d.catalogMeta)) {
+              if (!next[mid]) next[mid] = pre;
+            }
+            return next;
+          });
+        }
+      }
     } catch (e) {
       // 文案按 type 区分:
       // - openai 兼容:DeepSeek/OpenAI/Gemini 这些**官方端点**支持 /v1/models,

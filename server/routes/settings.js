@@ -11,6 +11,7 @@ import { createConnection } from 'node:net';
 import { startOpenAIProxy, setOpenAIUpstream, getProxyPort } from '../services/openai-proxy.js';
 import { startAnthropicProxy, setAnthropicUpstream, getAnthropicProxyPort } from '../services/anthropic-proxy.js';
 import { isOfficialAnthropic, isClaudeModel } from '../services/model-resolver.js';
+import { applyCatalogPrefill, catalogPrefillEntry } from '../utils/model-capabilities.js';
 
 const execFileP = promisify(execFile);
 const CC_SWITCH_DB = join(homedir(), '.cc-switch', 'cc-switch.db');
@@ -150,6 +151,10 @@ export function normalizeProviderModels(rawModels) {
       // 全选 = 等于不声明;空数组视为未声明(锁死全部档位应使用 reasoning:false 表达)
       if (eff.length && eff.length < EFFORT_LEVEL_IDS.length) entry.efforts = eff;
     }
+    // r11-⑩:来源标记透传。'catalog'=目录自动预填(可被新目录/用户编辑覆盖);
+    // 'user'=用户显式声明(含"回到全默认"的空声明墓碑条目——它有 source 键故被保留,
+    // 用于压住目录预填);历史无 source 条目视同用户声明(它们全是手动配置的)。
+    if (m.source === 'catalog' || m.source === 'user') entry.source = m.source;
     if (Object.keys(entry).length) meta[id] = entry;
   }
   return { ids, meta: Object.keys(meta).length ? meta : null };
@@ -1384,8 +1389,9 @@ router.post('/custom-providers', async (req, res) => {
       if (mp) entry.modelPrices = mp;
     }
     // r10-9: 每模型思考能力(可选)。只留 models 内的 id;全默认不写(向后兼容)。
+    // r11-⑩:随后对未声明的模型套目录预填(source:'catalog';用户声明永不覆盖)。
     {
-      const mm = sanitizeModelMeta(req.body?.modelMeta, cleanModels);
+      const mm = applyCatalogPrefill(cleanModels, sanitizeModelMeta(req.body?.modelMeta, cleanModels));
       if (mm) entry.modelMeta = mm;
     }
     const list = await readCustomProviders();
@@ -1469,6 +1475,12 @@ router.put('/custom-providers/:id', async (req, res) => {
         if (!nextModels.includes(mid)) delete list[idx].modelMeta[mid];
       }
       if (!Object.keys(list[idx].modelMeta).length) delete list[idx].modelMeta;
+    }
+    // r11-⑩:编辑保存后对未声明模型套目录预填(source:'catalog');source:'user'/
+    // 历史无 source 条目永不覆盖。两分支(显式传入/保留旧值)统一走同一预填口。
+    {
+      const merged = applyCatalogPrefill(nextModels, list[idx].modelMeta || null);
+      if (merged) list[idx].modelMeta = merged; else delete list[idx].modelMeta;
     }
     await writeCustomProviders(list);
     // If the TYPE changed and this provider was active on the OLD type's marker,
@@ -1811,7 +1823,13 @@ router.post('/custom-providers/fetch-models', async (req, res) => {
     const probed = await probeUpstreamModels(baseURL, apiKey);
     // 实抓到窗口且是已存 provider → 持久化 modelWindows(自动压缩联动的最权威数据源)。
     if (req.body?.id && probed.windows) persistModelWindows(req.body.id, probed.windows);
-    res.json({ models: probed.ids, windows: probed.windows || undefined });
+    // r11-⑩:附目录预填(表单拉到列表即见预填,保存路径再兜一遍;用户声明由前端合并时优先)。
+    const catalogMeta = {};
+    for (const mid of probed.ids || []) {
+      const pre = catalogPrefillEntry(mid);
+      if (pre) catalogMeta[mid] = pre;
+    }
+    res.json({ models: probed.ids, windows: probed.windows || undefined, catalogMeta: Object.keys(catalogMeta).length ? catalogMeta : undefined });
   } catch (err) {
     res.status(err.status || 502).json({ error: err.message });
   }
