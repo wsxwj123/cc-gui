@@ -51,6 +51,22 @@ export function distortPositions(base, pointerY, { factor = 3, sigma } = {}) {
   return out;
 }
 
+/**
+ * r11-⑬:指针纵坐标归一化到【布局像素】坐标系。
+ * 大/超大字体档把 documentElement.style.zoom 调 >1 时,e.clientY/getBoundingClientRect
+ * 是视觉像素,而 positions/box.height(offsetHeight/clientHeight)是布局像素——两坐标系
+ * 差一个 zoom 倍数,离顶越远偏越多(用户实测命中漂移根因)。布局高/视觉高之比
+ * (clientHeight/rect.height)天然 = 1/zoom,引擎无关。rect.height 为 0(未布局)时
+ * 不除,退回视觉差值。结果 clamp 到 [0, clientHeight]。
+ */
+export function normalizePointerY(clientY, rect, clientHeight) {
+  const raw = clientY - (rect?.top || 0);
+  const rh = rect?.height;
+  const ch = (Number.isFinite(clientHeight) && clientHeight > 0) ? clientHeight : (rh || 0);
+  const local = (Number.isFinite(rh) && rh > 0) ? raw * (ch / rh) : raw;
+  return Math.max(0, Math.min(ch || 0, local));
+}
+
 /** positions(px,升序,可含 null 洞)→ 可二分的紧凑索引 {fracs, idxs}。 */
 export function buildTurnIndex(positions) {
   const fracs = [];

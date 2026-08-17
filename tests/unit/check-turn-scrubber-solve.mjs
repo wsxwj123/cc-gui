@@ -6,7 +6,7 @@
 //   S2 distortPositions 直接返回 base → t2 中心×3 红
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { layoutCompactPositions, distortPositions, buildTurnIndex, nearestTurnIndex } from '../../client/src/utils/turnWave.js';
+import { layoutCompactPositions, distortPositions, buildTurnIndex, nearestTurnIndex, normalizePointerY } from '../../client/src/utils/turnWave.js';
 
 const approx = (a, b, eps = 1e-6) => Math.abs(a - b) <= eps;
 
@@ -88,6 +88,37 @@ const approx = (a, b, eps = 1e-6) => Math.abs(a - b) <= eps;
   assert.match(src, /role="slider"/, 't4: role=slider');
   assert.match(src, /ArrowDown|ArrowUp/, 't4: 键盘步进');
   assert.match(src, /cancelAnimationFrame\(pointerFrame\.current\)/, 't4: 卸载清理 rAF');
+}
+
+// t5 r11-⑬ zoom 归一化:大字体档 documentElement.style.zoom>1 时 clientY/rect 是
+// 视觉像素、positions 是布局像素;normalizePointerY 用 clientHeight/rect.height(=1/zoom)
+// 换算。模拟 zoom=1.3(rect.height = clientHeight×1.3)断言命中不漂。
+// 哨兵(验证过红):删归一化乘子(local = raw)→ 本节"第 k 根视觉中点命中 k"红。
+{
+  const clientHeight = 300;                 // 布局像素(offsetHeight/clientHeight)
+  const zoom = 1.3;
+  const rect = { top: 40, height: clientHeight * zoom }; // 视觉像素
+  const base = layoutCompactPositions(101, clientHeight, 8);
+  for (const k of [0, 25, 50, 75, 100]) {
+    // 第 k 根的视觉纵坐标 = rect.top + 布局坐标×zoom;归一化后必须精确回到布局坐标
+    // 并在基线坐标系命中第 k 根(鱼眼变形下的所见即所得归 t3 管,此处钉 zoom 换算)。
+    const clientY = rect.top + base[k] * zoom;
+    const y = normalizePointerY(clientY, rect, clientHeight);
+    assert.ok(Math.abs(y - base[k]) < 1e-6, `t5: zoom 下归一化回布局坐标(k=${k})`);
+    assert.equal(nearestTurnIndex(buildTurnIndex(base), y), k, `t5: zoom=1.3 第 ${k} 根命中不漂`);
+  }
+  // 前提自检:不归一化(旧算式=裸视觉差值)在中段必漂——证明本节断言有杀伤力
+  const rawMid = base[50] * zoom; // 视觉差值直接当布局坐标用
+  assert.notEqual(nearestTurnIndex(buildTurnIndex(base), rawMid), 50, 't5: 前提自检(不归一化在中段必漂)');
+  // clamp 与除零兜底
+  assert.equal(normalizePointerY(rect.top - 50, rect, clientHeight), 0, 't5: 上越界 clamp 0');
+  assert.equal(normalizePointerY(rect.top + rect.height + 50, rect, clientHeight), clientHeight, 't5: 下越界 clamp clientHeight');
+  assert.equal(normalizePointerY(140, { top: 40, height: 0 }, 260), 100, 't5: rect.height=0 兜底不除(退回视觉差值)');
+  assert.equal(normalizePointerY(140, { top: 40, height: 260 }, 260), 100, 't5: zoom=1 时恒等');
+  // 组件接线守卫:moveBar/clickBar 都走 normalizePointerY,裸视觉差值算式清零
+  const src = readFileSync(new URL('../../client/src/components/TurnScrubber.jsx', import.meta.url), 'utf8');
+  assert.equal((src.match(/normalizePointerY\(e\.clientY, rect, e\.currentTarget\.clientHeight\)/g) || []).length, 2, 't5: moveBar+clickBar 两处均走归一化');
+  assert.doesNotMatch(src, /Math\.min\(rect\.height, e\.clientY - rect\.top\)/, 't5: 旧视觉差值算式已清零');
 }
 
 console.log('check-turn-scrubber-solve: all passed');

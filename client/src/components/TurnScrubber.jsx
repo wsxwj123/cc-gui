@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, useCallback } from 'react';
-import { turnWaveWidth, layoutCompactPositions, distortPositions, buildTurnIndex, nearestTurnIndex } from '../utils/turnWave.js';
+import { turnWaveWidth, layoutCompactPositions, distortPositions, buildTurnIndex, nearestTurnIndex, normalizePointerY } from '../utils/turnWave.js';
 
 // 右侧竖向回合进度条(Claude Code/Codex 式线性波形 + macOS Dock 放大)。
 // hover 线条向左拉长 + 浮窗显示该回合消息摘要,点击平滑滚动到该回合。
@@ -120,8 +120,10 @@ export default function TurnScrubber({ containerRef, turns, onNavigate }) {
     hideTimer.current = setTimeout(() => setTipIdx(null), HIDE_DELAY);
   };
   const moveBar = (e) => {
+    // r11-⑬:clientY/rect 是视觉像素,positions/box.height 是布局像素;字体档 zoom>1 时
+    // 必须归一化(clientHeight/rect.height = 1/zoom),否则离顶越远命中偏移越大。
     const rect = e.currentTarget.getBoundingClientRect();
-    pendingPointerY.current = Math.max(0, Math.min(rect.height, e.clientY - rect.top));
+    pendingPointerY.current = normalizePointerY(e.clientY, rect, e.currentTarget.clientHeight);
     if (pointerFrame.current) return;
     pointerFrame.current = requestAnimationFrame(() => {
       pointerFrame.current = 0;
@@ -144,8 +146,8 @@ export default function TurnScrubber({ containerRef, turns, onNavigate }) {
   // 容器级 click:按当前渲染帧的变形坐标解算(指针下那根=点中那根)。
   const clickBar = (e) => {
     const rect = e.currentTarget.getBoundingClientRect();
-    const h = rect.height || 1;
-    const y = Math.max(0, Math.min(h, e.clientY - rect.top));
+    // r11-⑬:与 moveBar 同一归一化(布局像素),zoom≠1 时点击命中与悬停一致。
+    const y = normalizePointerY(e.clientY, rect, e.currentTarget.clientHeight);
     const anchor = committedPointerY.current ?? y;
     const idx = nearestTurnIndex(buildTurnIndex(distortPositions(base, anchor, FISHEYE)), y);
     const t = turns[idx];
