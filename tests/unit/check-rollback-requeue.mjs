@@ -52,9 +52,15 @@ assert.equal(after.filter((x) => x.text === '排队中的消息M').length, 1, '�
 
 // ── 源码守卫(机制1-3;JSX 进不了 node,钉关键判据)──
 const app = readFileSync(new URL('../../client/src/App.jsx', import.meta.url), 'utf8');
-// 守卫1:唯一入队点,且在 forceSend 豁免门内
-assert.equal((app.match(/enqueueMessage\(/g) || []).length, 1,
-  'App.jsx 只允许一个 enqueueMessage 调用点(新增调用点必须重新论证需求8)');
+// 守卫1:入队点白名单。原为唯一(handleSend 入队门内);r11-② 重新论证后放行第二处:
+// HomeState.submit 的**会话前**入队 —— 发生在 draft 尚未挂进任何窗格、该 draftId 也
+// 不可能有 streamingRef/backgroundPid 之时(先入队后 setPaneSession),不经过回滚/
+// forceSend/重发任何通道;随后由 drain(唯一消费口)弹给 handleSend,撞门重入队仍
+// 保留 queueId → 需求8(回滚重发不双入队)不受影响。除这两处外新增仍须重新论证。
+assert.equal((app.match(/enqueueMessage\(/g) || []).length, 2,
+  'App.jsx 只允许两个 enqueueMessage 调用点:handleSend 入队门内 + HomeState 会话前入队(新增调用点必须重新论证需求8)');
+assert.match(app, /st\.enqueueMessage\(`draft-\$\{project\.hash\}`, \{ text: t, queuedAt: Date\.now\(\) \}\);\n    st\.setPaneSession\(tabIndex, buildHomeDraft/,
+  'Home 的入队必须是会话前形态:先入队、后挂 draft 窗格(顺序反了=可能撞上已存在的流)');
 assert.match(app, /if \(!reattachPid && !opts\.forceSend && \(streamingRef\.current \|\| backgroundPidRef\.current\)\) \{/,
   '入队门必须豁免 forceSend(回滚/重做重发绝不入队)');
 // 守卫2:重发通道恒 forceSend
