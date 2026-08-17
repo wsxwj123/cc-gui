@@ -91,7 +91,7 @@ import { BG_BANNER_DELAY_MS, histSig, isCurrentStreamTurn, nextAttachTry, nextRe
 import { pruneByLiveSet } from './utils/levelPrune.js';
 import { classifyStopTargets } from './utils/stopTargets.js';
 import { advanceScrollTransaction, beginScrollTransaction, keyRequestsReading, resizeScrollTop, shouldPauseAutoScroll } from './utils/scroll.js';
-import { resolveSessionTitle } from './utils/sessionTitle.js';
+import { resolveSessionTitle, sessionRowTooltip } from './utils/sessionTitle.js';
 
 // ── Per-session shadow-git checkpoints ──────────────────────────
 // Session title with inline rename (click pencil → edit → Enter/blur saves,
@@ -1428,42 +1428,39 @@ export function SessionItem({ session, isSelected, onSelect, onFork, onArchive, 
           tabIndex={0}
           onClick={() => onSelect(session)}
           onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onSelect(session); } }}
-          className={`sidebar-item w-full text-left px-3 py-3 rounded-lg mb-0.5 transition-all cursor-pointer ${
+          title={sessionRowTooltip({
+            model: pinModel || session.model,
+            messageCount: session.messageCount,
+            subagentCount: session.subagents?.length,
+            timeText: formatDate(session.lastActivity),
+          })}
+          className={`sidebar-item w-full text-left pl-3 pr-[112px] py-2 rounded-md mb-0.5 transition-colors cursor-pointer flex items-center gap-2 min-w-0 ${
             isSelected ? 'active bg-canvas-warm' : 'hover:bg-canvas-warm/60'
           }`}
         >
-          <div className="flex items-start gap-2">
-            {hasSubagents ? (
-              <button
-                onClick={(e) => { e.stopPropagation(); setExpanded(!expanded); }}
-                className="shrink-0 mt-0.5 p-0.5 hover:bg-canvas-deep rounded"
-              >
-                <ChevronRight size={12} className={`text-ink-faint transition-transform ${expanded ? 'rotate-90' : ''}`} />
-              </button>
-            ) : (
-              <MessageSquare size={13} className="text-accent/40 shrink-0 mt-0.5" />
-            )}
-            <StatusDot running={running} lastActivity={session.lastActivity} className="mt-0.5" />
-            <div className="min-w-0 flex-1">
-              <div className="text-[13px] text-ink-soft line-clamp-2 font-body leading-snug pr-1">
-                {resolveSessionTitle(session, customTitle, autoTitle) || '(空会话)'}
-              </div>
-              {/* Bottom row leaves space on the right for the hover action bar. */}
-              <div className="flex items-center gap-2 gap-y-1 flex-wrap mt-1.5 pr-20">
-                {pinned && <Pin size={9} className="text-accent fill-accent shrink-0" />}
-                {(pinModel || session.model) && <ModelBadge model={(pinModel || session.model).replace(/\[1m\]/i, '')} compact />}
-                <span className="text-[10px] text-ink-faint font-mono shrink-0 whitespace-nowrap">{session.messageCount}</span>
-                {hasSubagents && (
-                  <span className="text-[10px] text-accent/60 font-mono shrink-0 whitespace-nowrap">+{session.subagents.length} 子任务</span>
-                )}
-                <span className="text-[10px] text-ink-ghost shrink-0 whitespace-nowrap">{formatDate(session.lastActivity)}</span>
-              </div>
-            </div>
-          </div>
+          {/* r11-⑪:单行化——只显 状态点+标题(+置顶针角标),模型/消息数/子任务数/时间
+              收进原生 title tooltip(sessionRowTooltip);子代理折叠三角照旧;右侧
+              pr-[112px] 给 hover 操作组留位(与项目行 pr-[80px] 同规,5 键更宽)。 */}
+          {hasSubagents ? (
+            <button
+              onClick={(e) => { e.stopPropagation(); setExpanded(!expanded); }}
+              className="shrink-0 p-0.5 hover:bg-canvas-deep rounded"
+            >
+              <ChevronRight size={12} className={`text-ink-faint transition-transform ${expanded ? 'rotate-90' : ''}`} />
+            </button>
+          ) : (
+            <MessageSquare size={13} className="text-accent/40 shrink-0" />
+          )}
+          <StatusDot running={running} lastActivity={session.lastActivity} />
+          <span className="text-[13px] text-ink-soft truncate font-body min-w-0">
+            {resolveSessionTitle(session, customTitle, autoTitle) || '(空会话)'}
+          </span>
+          {pinned && <Pin size={9} className="text-accent fill-accent shrink-0" />}
         </div>
       )}
+      {/* 操作组 top-2 锚定行区(非 top-1/2:外层 relative 含展开的子任务列表,居中会漂进列表) */}
       {!renaming && (
-      <div className={`absolute bottom-1.5 right-1.5 transition-opacity flex items-center gap-0.5 ${deleteArmed ? 'opacity-100' : 'opacity-100 md:opacity-0 md:group-hover:opacity-100'}`}>
+      <div className={`absolute top-2 right-1.5 transition-opacity flex items-center gap-0.5 ${deleteArmed ? 'opacity-100' : 'opacity-100 md:opacity-0 md:group-hover:opacity-100'}`}>
         <button
           onClick={(e) => { e.stopPropagation(); onTogglePin?.(session.sessionId); }}
           disabled={isDraft}
