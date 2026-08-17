@@ -1354,12 +1354,14 @@ html { --content-max: clamp(768px, calc(var(--app-w, 100vw) * 0.7), 1120px); }
 }
 /* Only ring when the textarea itself is focused — :focus-within would also
  * fire when the model/effort/add-dir buttons inside the capsule get focus,
- * making it look like the whole composer "scaled up" with a giant halo. */
+ * making it look like the whole composer "scaled up" with a giant halo.
+ * r11-p1-1:焦点态去 accent 橙描边(用户实报整圈亮橙)。扁平语义的中性弱化态:
+ * 1px ink-faint 细中性描边(深浅两态都可感知,键盘可达性焦点指示保留,只降视觉强度)。 */
 .chat-composer:has(textarea:focus) {
   box-shadow:
     inset 0 1px 0 var(--glass-specular),
     inset 0 -1px 0 var(--glass-shade),
-    0 0 0 2px var(--color-accent-muted),
+    0 0 0 1px var(--color-ink-faint),
     0 6px 18px -8px rgba(60, 40, 20, 0.18);
 }
 
