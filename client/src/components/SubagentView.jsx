@@ -227,7 +227,7 @@ export function SubagentView({ agentId, paneId, active = false, parentTitle, par
               </div>
               <div className="flex-1 min-w-0 flex flex-col items-end">
                 <div className="text-[13px] font-medium text-ink font-body mb-1.5">派发任务</div>
-                <div className="max-w-[85%] bg-canvas-warm border border-canvas-deep rounded-2xl px-4 py-2.5">
+                <div className="max-w-[85%] bg-canvas-warm border border-canvas-deep rounded-panel px-4 py-2.5">
                   <div className="text-[13.5px] text-ink font-body whitespace-pre-wrap max-h-[40vh] overflow-y-auto">{prompt}</div>
                 </div>
               </div>
@@ -286,7 +286,7 @@ export function SubagentView({ agentId, paneId, active = false, parentTitle, par
               followBottomRef.current = true;
               setAtBottom(true);
             }}
-            className="absolute bottom-3 left-1/2 -translate-x-1/2 z-10 bg-canvas border border-canvas-deep hover:bg-canvas-warm rounded-full p-2 shadow-sm transition-colors"
+            className="absolute bottom-3 left-1/2 -translate-x-1/2 z-10 bg-canvas border border-canvas-deep hover:bg-canvas-warm rounded-full p-2 shadow-panel transition-colors"
             title="回到底部"
             aria-label="回到底部"
           >

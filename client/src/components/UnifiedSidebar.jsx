@@ -1069,7 +1069,7 @@ export function UnifiedSidebar() {
       )}
       {addDialogOpen && createPortal(
         <div className="fixed inset-0 z-[80] bg-black/25 flex items-end md:items-center justify-center p-3">
-          <div className="w-full max-w-md rounded-2xl bg-canvas border border-canvas-deep shadow-2xl overflow-hidden">
+          <div className="w-full max-w-md rounded-panel bg-canvas border border-canvas-deep shadow-popover overflow-hidden">
             <div className="flex items-center justify-between px-4 py-3 border-b border-canvas-deep">
               <div className="text-[15px] font-display font-semibold text-ink">添加项目</div>
               <button onClick={() => setAddDialogOpen(false)} className="p-1.5 rounded-lg hover:bg-canvas-warm">
@@ -1089,7 +1089,7 @@ export function UnifiedSidebar() {
                 value={addPathInput}
                 onChange={(e) => { setAddPathInput(e.target.value); setAddError(''); }}
                 placeholder="~/Desktop/my-project"
-                className="w-full bg-canvas-warm border border-canvas-deep rounded-xl px-3 py-3 text-[16px] text-ink font-body focus:outline-none focus:border-accent/50"
+                className="w-full bg-canvas-warm border border-canvas-deep rounded-panel px-3 py-3 text-[16px] text-ink font-body focus:outline-none focus:border-accent/50"
               />
               {addError && <div className="mt-2 text-[12px] text-error font-body">{addError}</div>}
               <div className="mt-4 flex justify-end gap-2">
@@ -1152,7 +1152,7 @@ function WorktreePickerModal({
   const selProjPath = useStore((s) => s.selectedProject?.path);
   return (
     <div
-      className="fixed inset-0 z-[100] flex items-center justify-center bg-black/30 backdrop-blur-sm animate-fade-in"
+      className="fixed inset-0 z-[100] flex items-center justify-center bg-black/30 backdrop-blur-soft animate-fade-in"
       onClick={onClose}
     >
       <div

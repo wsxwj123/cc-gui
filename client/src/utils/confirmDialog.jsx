@@ -27,7 +27,7 @@ function ConfirmModal({ message, danger, confirmText, cancelText, checkbox, onRe
       onClick={() => resolve(false)}
     >
       <div
-        className="w-[min(420px,calc(var(--app-w,100vw)-2rem))] rounded-xl bg-canvas border border-canvas-deep shadow-2xl p-5 animate-glass-rise"
+        className="w-[min(420px,calc(var(--app-w,100vw)-2rem))] rounded-panel bg-canvas border border-canvas-deep shadow-popover p-5 animate-glass-rise"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="text-[13px] text-ink font-body whitespace-pre-wrap leading-relaxed mb-4">

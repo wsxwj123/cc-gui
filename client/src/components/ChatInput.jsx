@@ -184,7 +184,7 @@ export function EffortSelector({ permKey = null, hideLabel = false, tourAnchor =
         <ChevronDown size={10} className="text-ink-faint" />
       </button>
       {fellNotice && (
-        <div className="absolute top-full left-1/2 -translate-x-1/2 mt-1 z-[120] px-2.5 py-1 rounded-md bg-ink/90 text-canvas text-[11px] font-body whitespace-nowrap shadow-lg pointer-events-none">
+        <div className="absolute top-full left-1/2 -translate-x-1/2 mt-1 z-[120] px-2.5 py-1 rounded-md bg-ink/90 text-canvas text-[11px] font-body whitespace-nowrap shadow-popover pointer-events-none">
           {fellNotice}
         </div>
       )}
@@ -1118,10 +1118,10 @@ export function ChatInput({ onSend, onStop, onStopBackground, onAccelerate, canS
                     src={a.preview}
                     alt={a.name}
                     onClick={() => setZoomImage({ src: a.preview, name: a.name, path: a.path })}
-                    className="h-16 w-16 object-cover rounded-lg border border-canvas-deep shadow-sm cursor-zoom-in"
+                    className="h-16 w-16 object-cover rounded-lg border border-canvas-deep shadow-panel cursor-zoom-in"
                   />
                 ) : (
-                  <div className="h-16 w-36 rounded-lg border border-canvas-deep bg-canvas-warm shadow-sm px-2 py-2 flex items-center gap-2">
+                  <div className="h-16 w-36 rounded-lg border border-canvas-deep bg-canvas-warm shadow-panel px-2 py-2 flex items-center gap-2">
                     <FileText size={18} className="text-accent shrink-0" />
                     <div className="min-w-0">
                       <div className="text-[11px] text-ink font-body truncate" title={a.name}>{a.name}</div>

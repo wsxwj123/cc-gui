@@ -817,7 +817,7 @@ function TurnBubbleInner({ turn, onRetry, onRetryTool, onFork, retryActive }) {
 
           {/* 聊天模式:把 AI 内容套进左对齐白气泡(bg-canvas-warm,微信主题下=白,左上角小圆角
               贴头像);非聊天模式用 display:contents 让 wrapper 透明,完全维持原文档流布局。 */}
-          <div className={chatMode ? 'chat-ai-bubble inline-block align-top max-w-[85%] overflow-hidden bg-canvas-warm border border-canvas-deep rounded-2xl rounded-tl-md px-3.5 py-2 [&>*:first-child]:!mt-0 [&>*:last-child]:!mb-0' : 'contents'}>
+          <div className={chatMode ? 'chat-ai-bubble inline-block align-top max-w-[85%] overflow-hidden bg-canvas-warm border border-canvas-deep rounded-panel rounded-tl-md px-3.5 py-2 [&>*:first-child]:!mt-0 [&>*:last-child]:!mb-0' : 'contents'}>
           {/* Primary render path — preserves chronological order.
               We fold every RUN of consecutive tool_use blocks into a single
               ToolCallsGroup so the layout reads as: text → [round 1 tools] →

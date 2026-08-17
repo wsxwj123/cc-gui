@@ -222,7 +222,7 @@ export default function TurnScrubber({ containerRef, turns, onNavigate }) {
       {tipIdx != null && positions[tipIdx] != null && turns[tipIdx] && (
         <div
           style={{ position: 'absolute', top: positions[tipIdx], right: '100%', marginRight: 8, transform: 'translateY(-50%)', maxWidth: 260, width: 'max-content' }}
-          className="glass-popover rounded-lg px-3 py-2 shadow-lg pointer-events-none animate-fade-in"
+          className="glass-popover rounded-lg px-3 py-2 shadow-popover pointer-events-none animate-fade-in"
         >
           <div className="text-[10px] text-ink-faint font-mono mb-0.5 flex items-center gap-1.5">
             <span>回合 {tipIdx + 1}</span>

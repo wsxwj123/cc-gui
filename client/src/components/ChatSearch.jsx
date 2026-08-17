@@ -125,7 +125,7 @@ export default function ChatSearch({ containerRef, onClose }) {
   return (
     <div
       data-cgui-search-ui
-      className="absolute top-3 right-8 left-3 md:left-auto z-50 flex items-center gap-1.5 glass-popover rounded-lg pl-3 pr-1.5 py-1.5 shadow-lg animate-fade-in max-w-[calc(var(--app-w,100vw)-2.75rem)]"
+      className="absolute top-3 right-8 left-3 md:left-auto z-50 flex items-center gap-1.5 glass-popover rounded-lg pl-3 pr-1.5 py-1.5 shadow-popover animate-fade-in max-w-[calc(var(--app-w,100vw)-2.75rem)]"
     >
       <input
         ref={inputRef}

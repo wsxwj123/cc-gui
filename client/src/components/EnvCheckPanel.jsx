@@ -208,7 +208,7 @@ export default function EnvCheckPanel({ onDismiss, onRecheck, asModal = true }) 
 
   return (
     <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/30 p-4">
-      <div className="w-full max-w-[440px] max-h-[min(80vh,calc(var(--app-h,100dvh)-2rem))] overflow-y-auto glass-thick rounded-2xl p-5 shadow-xl animate-glass-rise">
+      <div className="w-full max-w-[440px] max-h-[min(80vh,calc(var(--app-h,100dvh)-2rem))] overflow-y-auto glass-thick rounded-panel p-5 shadow-popover animate-glass-rise">
         {body}
       </div>
     </div>

@@ -192,7 +192,7 @@ export default function BtwWindow({
 
   return (
     <div ref={rootRef} style={posStyle}
-      className="flex flex-col rounded-[1.625rem] border border-canvas-deep bg-canvas shadow-xl overflow-hidden animate-fade-up">
+      className="flex flex-col rounded-[1.625rem] border border-canvas-deep bg-canvas shadow-popover overflow-hidden animate-fade-up">
       {/* 头部(拖动手柄) */}
       <div
         onPointerDown={startDrag} onPointerMove={onDrag} onPointerUp={endDrag}

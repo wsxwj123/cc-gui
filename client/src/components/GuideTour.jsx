@@ -197,7 +197,7 @@ export function GuideTour({ open, onClose, hasProject }) {
       {pos && <div className="absolute inset-0 pointer-events-auto" onClick={onClose} />}
       {/* 说明卡 */}
       <div ref={tipRef} style={{ position: 'fixed', width: TIP_W, top: pos?.top ?? 0, left: pos?.left ?? 0, visibility: pos ? 'visible' : 'hidden', zIndex: 5 }}
-        className="bg-canvas border border-canvas-deep rounded-xl shadow-2xl p-4 animate-glass-rise pointer-events-auto">
+        className="bg-canvas border border-canvas-deep rounded-panel shadow-popover p-4 animate-glass-rise pointer-events-auto">
         <div className="flex items-center gap-2 mb-1.5">
           <span className="text-[13px] font-display font-semibold text-ink flex-1">{step.title}</span>
           <span className="text-[10px] text-ink-faint font-mono shrink-0">{i + 1}/{steps.length}</span>
