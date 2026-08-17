@@ -67,6 +67,152 @@ function normalizeMessagesForCompat(body) {
 
   const msgs = parsed.messages;
   let patched = 0;
+
+  // r9-fix: 丢弃空 text 块。CLI 取消/中断回合时会在 jsonl 里留下
+  // assistant(text:"") 的空轮(bf36c461 第 1239 行实测:user 收到
+  // task-notification 后回复被取消,留下一条 content 只含空 text 的
+  // assistant)。Kimi 的 anthropic 兼容端点看到 text:"" 就报 400
+  // "text content is empty"。修法:过滤掉所有空 text 块;若某条消息因此
+  // content 清空(纯空 text、无工具块),整条消息删掉——空消息对模型无语义,
+  // 留在这里只会被新 provider 拒收。非 text 块(工具/图像)一律保留,不影响
+  // tool_use↔tool_result 配对。
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    const m = msgs[i];
+    if (!m || !Array.isArray(m.content)) continue;
+    const orig = m.content;
+    const kept = orig.filter((c) => !(c && typeof c === 'object' && c.type === 'text' && (!c.text || String(c.text).trim() === '')));
+    if (kept.length === orig.length) continue;
+    if (kept.length === 0) { msgs.splice(i, 1); patched++; }
+    else { m.content = kept; patched++; }
+  }
+
+  // r9-fix: 跨协议 provider 切换时,历史里的 document 块(CLI 读 PDF/文档注入的
+  // isMeta context)会被原样发给新 provider。DeepSeek 等 OpenAI 兼容端点对
+  // document 块做 base64 解码没问题,但 Kimi 的 anthropic 兼容端点不认
+  // document 块 → 400 "Invalid request Error"(真机复现:opencode/deepseek 会话
+  // 切到 Kimi 必 400)。修法:把 document 块就地降级成 text 块,保留标题说明,
+  // 不丢内容(模型仍能看到文件名/来源),结构上回到纯 text/tool 类型。
+  let strippedDocs = 0;
+  for (let i = 0; i < msgs.length; i++) {
+    const m = msgs[i];
+    if (!m || !Array.isArray(m.content)) continue;
+    const out = [];
+    for (const c of m.content) {
+      if (!c || typeof c !== 'object' || c.type !== 'document') { out.push(c); continue; }
+      const src = c.source;
+      const title = c.title || (src && src.file_name) || 'document';
+      const media = (src && src.media_type) || 'unknown';
+      // base64 数据不转发(Kimi 用不上,还占请求体),只留一句占位让模型知道
+      // 这里原本有个文档。真实内容在会话历史/本地文件里,CLI 的 context 已带。
+      out.push({ type: 'text', text: `[document attachment: ${title} (${media}) — content omitted]` });
+      strippedDocs++;
+    }
+    m.content = out;
+  }
+  if (strippedDocs > 0) patched += strippedDocs;
+
+  // r9-fix: 合并相邻的连续 user 消息。CLI 在 OpenAI 协议(如 opencode/deepseek)
+  // 下读 PDF 时,会把同一轮 Read 工具的"tool_result"和"document"输出拆成两条
+  // 相邻 user 消息(resume 后仍是两条)。Kimi 的 anthropic 兼容端点对
+  // "tool_result 后紧跟另一条 user"做严格配对校验 → 400 "Invalid request Error"。
+  // Anthropic 规范允许连续 user 消息,合并无副作用;Kimi 需要它们合成一条。
+  for (let i = msgs.length - 1; i > 0; i--) {
+    if (msgs[i]?.role !== 'user' || msgs[i-1]?.role !== 'user') continue;
+    const a = msgs[i-1].content, b = msgs[i].content;
+    const aArr = Array.isArray(a), bArr = Array.isArray(b);
+    if (!aArr || !bArr) continue; // 只合并数组形式的(block 消息)
+    msgs[i-1].content = [...a, ...b];
+    msgs.splice(i, 1);
+    patched++;
+  }
+  // r9-fix: 合并相邻的**纯 tool_use** assistant 消息。真实历史里 CLI 会把一轮里的
+  // 多个工具调用拆成多条 assistant 消息(各含一个 tool_use),例如:
+  //   assistant(tool_use A) → assistant(tool_use B) → user(result A | result B)
+  // Kimi 的 anthropic 兼容端点转 OpenAI 时,要求每条 assistant(tool_calls) 的
+  // 结果紧跟其后 → 两个独立 assistant tool_use 会让第一个的结果错位 → 400
+  // "an assistant message with 'tool_calls' must be followed by tool messages
+  // responding to each 'tool_call_id'".修法:把相邻的纯 tool_use assistant 消息
+  // 合并成一条(Anthropic 规范允许单条 assistant 含多个 tool_use;实测 Kimi
+  // 接受单 assistant 多 tool_use + 合并 user)。只合并**不含 text 块**的 assistant,
+  // 避免把带正文的轮次捏在一起。
+  for (let i = msgs.length - 1; i > 0; i--) {
+    const cur = msgs[i], prev = msgs[i-1];
+    if (cur?.role !== 'assistant' || prev?.role !== 'assistant') continue;
+    const cArr = Array.isArray(cur.content), pArr = Array.isArray(prev.content);
+    if (!cArr || !pArr) continue;
+    const curTools = cArr.filter((b) => b?.type === 'tool_use');
+    const curText = cArr.filter((b) => b?.type === 'text');
+    const prevTools = pArr.filter((b) => b?.type === 'tool_use');
+    const prevText = pArr.filter((b) => b?.type === 'text');
+    // 两条都必须"只有 tool_use,没有 text"(纯调用轮)
+    if (curTools.length === 0 || curText.length > 0) continue;
+    if (prevTools.length === 0 || prevText.length > 0) continue;
+    prev.content = [...prevTools, ...curTools];
+    msgs.splice(i, 1);
+    patched++;
+  }
+  // r9-fix: 修复"文本 user 夹在 tool_use 和它的 tool_result 之间"的结构。
+  // 真实历史里会看到:assistant(tool_use) → user(纯文本"继续") → user(tool_result)。
+  // Anthropic 官方允许,但 Kimi 的 anthropic 兼容端点转 OpenAI 时要求 tool 消息
+  // 必须紧跟 tool_calls 消息 → 中间插文本就报 400
+  // "an assistant message with 'tool_calls' must be followed by tool messages
+  // responding to each 'tool_call_id'".修法:把挡在 tool_use 与其 tool_result 之间的
+  // 纯文本 user 消息**挪到** tool_result 之后,保持配对相邻。文本内容不丢,
+  // 只是位置后移(模型仍看得到)。
+  // ⚠️ 触发条件必须极保守:只有当 tool_use 的**下一条**就是纯文本 user(不含
+  // tool_result 的 text/string),且再往后的纯文本 user 之后紧跟着含对应
+  // tool_result 的 user 时才挪。中间一旦出现 assistant 或含 tool_result 的 user
+  // 就立即停 —— 绝不跨过任何 assistant 消息,否则会把别的 tool_use 一起挪走
+  // (真机踩过:assistant(tool_use A) → assistant(tool_use B) → user(result A)
+  // 的结构被误当成"夹文本",把 tool_use B 挪到错误位置,结构全乱)。
+  for (let i = 0; i < msgs.length; i++) {
+    const m = msgs[i];
+    if (m?.role !== 'assistant') continue;
+    const toolIds = (Array.isArray(m.content) ? m.content : [])
+      .filter((c) => c?.type === 'tool_use' && c.id).map((c) => c.id);
+    if (toolIds.length === 0) continue;
+    // 下一条必须是非 tool_result 的纯文本 user,否则不处理
+    const next = msgs[i + 1];
+    if (next?.role !== 'user') continue;
+    if (Array.isArray(next.content) && next.content.some((c) => c?.type === 'tool_result')) continue;
+    if (Array.isArray(next.content) && next.content.some((c) => c?.type === 'tool_use')) continue;
+    // 收集从 i+1 起的连续纯文本 user(允许 string 或纯 text 数组)
+    const textBlocks = [];
+    let j = i + 1;
+    while (j < msgs.length) {
+      const cand = msgs[j];
+      if (cand?.role !== 'user') break;
+      const blocks = Array.isArray(cand.content) ? cand.content : [];
+      if (blocks.some((c) => c?.type === 'tool_result')) {
+        // 这条是含 tool_result 的 user —— 若它含我们的 tool_result,把前面收的文本挪到它后
+        if (textBlocks.length > 0 && blocks.some((c) => c?.type === 'tool_result' && toolIds.includes(c.tool_use_id))) {
+          msgs.splice(i + 1, textBlocks.length);            // 摘掉纯文本块
+          const targetIdx = i + 1;                           // tool_result 所在 user 现在的位置
+          msgs.splice(targetIdx + 1, 0, ...textBlocks);      // 插到它之后
+          patched += textBlocks.length;
+        }
+        break;
+      }
+      const isPureText = typeof cand.content === 'string'
+        || (Array.isArray(cand.content) && cand.content.length > 0 && cand.content.every((c) => c?.type === 'text'));
+      if (!isPureText) break;
+      textBlocks.push(cand);
+      j++;
+    }
+  }
+
+  // 补丁前先收集全部"真实存在的 tool_result id"——在**任意**后续消息里能找到的
+  // tool_result 都不算缺失,补丁绝不能给它们插假的(真机踩过:assistant(tool_use A)
+  // → assistant(tool_use B) → user(result A) 的结构里,把 A 的 tool_result 在更后面
+  // 存在却被当"缺失"提前插假补丁 → Kimi 报 "tool call id Agent:0 is not found")。
+  const realResultIds = new Set();
+  for (const mm of msgs) {
+    if (mm?.role !== 'user' || !Array.isArray(mm.content)) continue;
+    for (const c of mm.content) {
+      if (c?.type === 'tool_result' && c.tool_use_id) realResultIds.add(c.tool_use_id);
+    }
+  }
+
   for (let i = 0; i < msgs.length; i++) {
     const m = msgs[i];
     if (m?.role !== 'assistant') continue;
@@ -80,7 +226,7 @@ function normalizeMessagesForCompat(body) {
     const nextResults = (next?.role === 'user' && Array.isArray(next.content))
       ? new Set(next.content.filter((c) => c?.type === 'tool_result' && c.tool_use_id).map((c) => c.tool_use_id))
       : new Set();
-    const missing = toolUses.filter((tu) => !nextResults.has(tu.id));
+    const missing = toolUses.filter((tu) => !nextResults.has(tu.id) && !realResultIds.has(tu.id));
     if (missing.length === 0) continue;
 
     // 补 tool_result:就近合并到下一条 user(如果它已经是 user 的话),否则插入新 user
