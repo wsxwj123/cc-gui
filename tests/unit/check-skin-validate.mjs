@@ -159,6 +159,8 @@ import {
   assert.equal(sanitizeSvg('<svg><foreignObject><body/></foreignObject></svg>').ok, false, 't5: foreignObject 拒');
   assert.equal(sanitizeSvg('<svg><image href="http://x/a.png"/></svg>').ok, false, 't5: image 标签拒(白名单外)');
   assert.equal(sanitizeSvg('<svg onload="alert(1)"><path/></svg>').ok, false, 't5: on* 事件属性拒');
+  // 判官b3挂账#1:HTML 允许 / 作属性分隔(<svg/onload=…>),旧正则只认 \s 前导会放行。
+  assert.equal(sanitizeSvg('<svg/onload="alert(1)"><rect/></svg>').ok, false, 't5: 斜杠分隔 on* 事件属性拒');
   assert.equal(sanitizeSvg('<svg><a href="javascript:x"><path/></a></svg>').ok, false, 't5: javascript: 拒');
   assert.equal(sanitizeSvg('<svg><use xlink:href="http://evil/x.svg#i"/></svg>').ok, false, 't5: 外链 href 拒');
   assert.ok(sanitizeSvg('<svg><use xlink:href="#local"/></svg>').ok, 't5: #fragment href 通过');

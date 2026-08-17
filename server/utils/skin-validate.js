@@ -418,7 +418,7 @@ export function sanitizeSvg(text, maxBytes = ZIP_LIMITS.maxSvgBytes) {
     if (!SVG_ALLOWED_TAGS.has(m[1].toLowerCase())) return { ok: false, reason: `forbidden_tag:${m[1].toLowerCase()}` };
   }
   // 事件属性 / javascript: / 外链 href
-  if (/\son[a-z]+\s*=/i.test(s)) return { ok: false, reason: 'event_attr' };
+  if (/[\s\/]on[a-z]+\s*=/i.test(s)) return { ok: false, reason: 'event_attr' };
   if (low.includes('javascript:')) return { ok: false, reason: 'javascript_url' };
   const hrefRe = /(?:xlink:)?href\s*=\s*["']([^"']*)["']/gi;
   while ((m = hrefRe.exec(s))) {
