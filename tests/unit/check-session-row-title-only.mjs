@@ -55,6 +55,16 @@ import { sessionRowTooltip } from '../../client/src/utils/sessionTitle.js';
   // 子代理折叠三角与 hover 操作组照旧
   assert.match(item, /setExpanded\(!expanded\)/, 't2: 子代理折叠三角保留');
   assert.match(item, /ChevronRight/, 't2: 折叠三角图标保留');
+  // p2-3 行首结构:💬 彻底移除;三角静置隐藏 hover 现身(触屏常显/展开态常显);
+  // 两恒宽槽占位对齐;状态槽抽成可独立替换组件(圆点视觉规范后续落其内部)
+  assert.doesNotMatch(item, /<MessageSquare/, 't2-p3: 💬 占位图标彻底移除(哨兵锚)');
+  assert.match(item, /\$\{expanded \? '' : 'md:opacity-0 md:group-hover:opacity-100'\}/, 't2-p3: 三角静置隐藏/hover 现身/展开常显(base 无隐藏=触屏常显)');
+  assert.match(item, /w-\[17px\] shrink-0 flex items-center justify-center/, 't2-p3: 三角槽恒宽占位(无子代理行留空对齐)');
+  assert.match(item, /<SessionRowStatus running=\{running\} lastActivity=\{session\.lastActivity\} \/>/, 't2-p3: 状态槽走可替换组件');
+  const comp = src.slice(src.indexOf('export function SessionRowStatus'), src.indexOf('export function StatusDot'));
+  assert.match(comp, /w-\[11px\] shrink-0/, 't2-p3: 状态槽恒宽(无状态行留空,标题起点对齐)');
+  // 判官p1建议:操作组左缘渐变层纯装饰,不拦标题尾部点击
+  assert.match(item, /from-canvas-warm to-transparent pointer-events-none/, 't2-p1判官: 渐变层 pointer-events-none');
   for (const t of ['onTogglePin', 'startRename', 'onFork(session)', 'onArchive(session)', 'DeleteButton']) {
     assert.ok(item.includes(t), `t2: hover 操作 ${t} 保留`);
   }

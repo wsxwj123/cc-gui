@@ -1341,6 +1341,18 @@ export function GlobalSearchResults({ q, onPick }) {
 // ─── Project List ──────────────────────────────────────────────
 // 侧栏运行状态符号:正在回复=旋转环;30min 内刚跑完=圈中对勾;更久的闲置=无符号。
 const RUNNING_DONE_WINDOW_MS = 30 * 60 * 1000;
+// r11-p2-3:会话行行首状态槽 —— 可独立替换的小组件(现 StatusDot 位)。静置只保留
+// 两种标记:运行中旋转环 / 近期活跃标(StatusDot 现语义),其余为空;槽恒定宽,
+// 无状态行留空占位,标题起点全列对齐不跳动。后续"彩色圆点体系"(绿/棕多态)的
+// 视觉规范只改本组件内部,调用方零改。
+export function SessionRowStatus({ running, lastActivity }) {
+  return (
+    <span className="w-[11px] shrink-0 flex items-center justify-center">
+      <StatusDot running={running} lastActivity={lastActivity} />
+    </span>
+  );
+}
+
 export function StatusDot({ running, lastActivity, className = '' }) {
   if (running) return <Loader2 size={11} className={`text-accent animate-spin shrink-0 ${className}`} />;
   const t = lastActivity ? new Date(lastActivity).getTime() : NaN;
@@ -1454,17 +1466,22 @@ export function SessionItem({ session, isSelected, onSelect, onFork, onArchive, 
               标题吃满行宽:桌面只留 pr-6 最小留位,hover 操作组 absolute 覆盖时自带
               不透明底+左缘渐变(操作时看按钮不看字);触屏无 hover 常显,保留 pr-[108px]
               留位(5 键 gap-0 收窄形态)。窄栏/大字体下标题不再被常驻留位挤没(用户实报)。 */}
-          {hasSubagents ? (
-            <button
-              onClick={(e) => { e.stopPropagation(); setExpanded(!expanded); }}
-              className="shrink-0 p-0.5 hover:bg-canvas-deep rounded"
-            >
-              <ChevronRight size={12} className={`text-ink-faint transition-transform ${expanded ? 'rotate-90' : ''}`} />
-            </button>
-          ) : (
-            <MessageSquare size={13} className="text-accent/40 shrink-0" />
-          )}
-          <StatusDot running={running} lastActivity={session.lastActivity} />
+          {/* r11-p2-3 行首结构:💬 占位图标彻底移除;两恒宽槽保证标题起点全列对齐。
+              ①三角槽:静置隐藏,hover 原位现身(桌面);触屏无 hover 常显;已展开常显
+              (否则收不回去)。展开/收起逻辑与旋转态样式原样。②状态槽:抽成可独立
+              替换的 SessionRowStatus(圆点视觉体系待后续规范,落其内部即可)。 */}
+          <span className="w-[17px] shrink-0 flex items-center justify-center">
+            {hasSubagents && (
+              <button
+                onClick={(e) => { e.stopPropagation(); setExpanded(!expanded); }}
+                className={`p-0.5 hover:bg-canvas-deep rounded transition-opacity ${expanded ? '' : 'md:opacity-0 md:group-hover:opacity-100'}`}
+                title={expanded ? '收起子任务' : '展开子任务'}
+              >
+                <ChevronRight size={12} className={`text-ink-faint transition-transform ${expanded ? 'rotate-90' : ''}`} />
+              </button>
+            )}
+          </span>
+          <SessionRowStatus running={running} lastActivity={session.lastActivity} />
           <span className="text-[13px] text-ink-soft truncate font-body min-w-0">
             {resolveSessionTitle(session, customTitle, autoTitle) || '(空会话)'}
           </span>
@@ -1476,7 +1493,8 @@ export function SessionItem({ session, isSelected, onSelect, onFork, onArchive, 
           同色)+左缘细渐变过渡,盖字无碍;触屏常显走行 pr 留位,收窄为 gap-0。 */}
       {!renaming && (
       <div data-cgui="session-actions" className={`absolute top-2 right-1.5 transition-opacity flex items-center gap-0 md:gap-0.5 md:bg-canvas-warm md:rounded-md ${deleteArmed ? 'opacity-100' : 'opacity-100 md:opacity-0 md:group-hover:opacity-100'}`}>
-        <span aria-hidden className="hidden md:block absolute right-full top-0 bottom-0 w-4 bg-gradient-to-l from-canvas-warm to-transparent" />
+        {/* pointer-events-none:渐变过渡层纯装饰,不拦标题尾部 16px 的行点击(判官p1建议) */}
+        <span aria-hidden className="hidden md:block absolute right-full top-0 bottom-0 w-4 bg-gradient-to-l from-canvas-warm to-transparent pointer-events-none" />
         <button
           onClick={(e) => { e.stopPropagation(); onTogglePin?.(session.sessionId); }}
           disabled={isDraft}
