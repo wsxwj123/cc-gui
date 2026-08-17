@@ -4380,6 +4380,18 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // Transient toast for "auto-stripped thinking blocks after provider switch".
   // { text, expires } — set by handleSend's pre-flight check, auto-cleared.
   const [providerSwitchNotice, setProviderSwitchNotice] = useState(null);
+  // r10-12:官方 400 空内容块的体检结果(sessionId → report)与一键清理进行态。
+  // keyed by sessionId,多 pane 实例各自监听同一 WS 事件也不串扰(纯数据无归属歧义)。
+  const [repairHints, setRepairHints] = useState({});
+  const [repairingSid, setRepairingSid] = useState(null);
+  useEffect(() => {
+    const onHint = (e) => {
+      const { sessionId, report } = e.detail || {};
+      if (sessionId && report) setRepairHints((prev) => ({ ...prev, [sessionId]: report }));
+    };
+    window.addEventListener('cgui:repair-hint', onHint);
+    return () => window.removeEventListener('cgui:repair-hint', onHint);
+  }, []);
   useEffect(() => {
     // sticky:需要用户看到并动手处理的提示(如"连不上会话流,切走再切回")不自动消失,
     // 只能手动关。其余仍是 5s 自消的瞬时通知。
@@ -6041,6 +6053,14 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             }]);
             continue;
           }
+          // r10-12:服务端旁路体检结果(官方 400 空内容块)。keyed by sessionId 存,
+          // 供错误行动卡显示统计;WS 兜底路径经 cgui:repair-hint 事件落同一 map。
+          if (event.type === 'repair-hint') {
+            if (event.sessionId && event.report) {
+              setRepairHints((prev) => ({ ...prev, [event.sessionId]: event.report }));
+            }
+            continue;
+          }
           // Surface CLI-side errors that previously got silently dropped:
           //   - type:"error"  (our server's stderr/spawn fail wrapper)
           //   - type:"result" with is_error:true (CLI's own error envelope,
@@ -6178,6 +6198,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             // 鉴权类报错(401 / api key 无效等)大概率是 provider 的 key 配错/过期,
             // 给错误块挂「检查 Provider 设置」动作(渲染在 visibleChat 的 turn 分支)。
             const isAuthError = /\b401\b|unauthorized|authenticat|api[ -_]?key|x-api-key/i.test(msg);
+            // r10-12:官方拒收历史空内容块(旧第三方会话切官方 400)→ 挂一键清理行动卡。
+            // 与服务端 matchOfficialEmptyBlockError 同判据;统计数字由 repair-hint 事件补充。
+            const isOfficialEmptyBlock = /text content blocks must be non-empty|must be non-empty/i.test(msg);
             // 低危#4:1M 推断被拒的显式提示。6bfc207 对「单次 ctxUsage 超名义窗口」的
             // 会话推断补 [1m] 发送;账户 1M 资格不足时该请求被 API 拒,落到这里显示裸
             // 报错。上方 5127 已自动切回捕获两种已知文案;其余含 1M/长上下文关键词的
@@ -6198,7 +6221,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
               toolCalls: [],
               blocks: [{ type: 'text', content: `❌ **${msg}**${oneMHint}` }],
               usage: null,
-              ...(isAuthError ? { errorAction: 'provider' } : {}),
+              ...(isAuthError ? { errorAction: 'provider' }
+                : isOfficialEmptyBlock ? { errorAction: 'repair-official' } : {}),
             }]);
             sawError = true;
             break;
@@ -8025,6 +8049,45 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                               onClick={() => window.dispatchEvent(new CustomEvent('cgui:open-provider'))}
                               className="px-3 py-1.5 rounded-lg border border-canvas-deep bg-canvas-warm text-[12px] text-accent font-body hover:border-accent/40 transition-colors">
                               检查 Provider 设置
+                            </button>
+                          </div>
+                        )}
+                        {/* r10-12:官方拒收历史空内容块 → 一键清理行动卡(清理端点自动备份原文件)。
+                            统计数字来自服务端旁路体检(repair-hint),未到达时显示通用文案。 */}
+                        {msg.errorAction === 'repair-official' && selectedSession?.sessionId && (
+                          <div className="px-4 pb-2 -mt-1">
+                            <div className="text-[12px] text-ink-muted font-body mb-1.5">
+                              {(() => {
+                                const rep = repairHints[selectedSession.sessionId];
+                                return rep
+                                  ? `检测到历史含官方不接受的空内容块(空text ${rep.emptyText || 0} 处/空thinking ${rep.emptyThinking || 0} 处)`
+                                  : '检测到历史可能含官方不接受的空内容块';
+                              })()}
+                            </div>
+                            <button
+                              disabled={repairingSid === selectedSession.sessionId}
+                              onClick={async () => {
+                                const sid = selectedSession.sessionId;
+                                const ph = selectedSession.projectHash;
+                                setRepairingSid(sid);
+                                try {
+                                  const r = await fetch(`/api/sessions/${sid}/repair-official-compat`, { method: 'POST' });
+                                  const d = await r.json().catch(() => ({}));
+                                  if (!r.ok) {
+                                    setProviderSwitchNotice({ text: `清理失败:${d.error || `HTTP ${r.status}`}`, sticky: true });
+                                    return;
+                                  }
+                                  const rep = d.report || {};
+                                  setProviderSwitchNotice({ text: d.changed
+                                    ? `已清理并备份(空text ${rep.emptyText || 0} 处/空thinking ${rep.emptyThinking || 0} 处/删除空行 ${rep.droppedLines || 0} 行),请重发消息。`
+                                    : '未发现需要清理的空内容块,原文件未改动。' });
+                                  if (ph) await fetchMessagesForTab(sid, ph, { silent: true });
+                                } catch (e) {
+                                  setProviderSwitchNotice({ text: `清理失败:${e.message}`, sticky: true });
+                                } finally { setRepairingSid(null); }
+                              }}
+                              className="px-3 py-1.5 rounded-lg border border-canvas-deep bg-canvas-warm text-[12px] text-accent font-body hover:border-accent/40 transition-colors disabled:opacity-50">
+                              {repairingSid === selectedSession.sessionId ? '清理中…' : '一键清理(自动备份原文件)'}
                             </button>
                           </div>
                         )}

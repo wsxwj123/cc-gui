@@ -25,8 +25,10 @@ import {
   getSessionMeta,
   getActiveSessions,
   attachmentTextHash,
+  findSessionFile,
 } from '../services/session-reader.js';
-import { claudeSpawn, cleanChildEnv, safeModelArg } from './chat.js';
+import { claudeSpawn, cleanChildEnv, safeModelArg, getActiveChatProcesses } from './chat.js';
+import { repairOfficialCompat } from '../utils/session-repair.js';
 import { mkdirSync, rmSync } from 'fs';
 import { resolveUnderHome, resolveWorkspacePath } from '../utils/safe-path.js';
 import { broadcast } from '../broadcast.js';
@@ -747,6 +749,40 @@ router.post('/sessions/:sessionId/strip-thinking', async (req, res) => {
     await writeJsonlAtomic(file, out.join('\n'));
     broadcastSessionFileChange(file);
     res.json({ strippedBlocks, touchedLines });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * POST /api/sessions/:sessionId/repair-official-compat
+ * r10-12:旧会话(第三方历史)切官方 400 "text content blocks must be non-empty"。
+ * 定位复用 findSessionFile(逐项目目录探 sid.jsonl,无需 projectHash)→ 备份
+ * `<file>.bak-<ts>` → repairOfficialCompat(只删空块/空行,parentUuid 链接骨)→
+ * 原子写 → 返回 report → 广播 file-change(前端转 cgui:sessions-changed)。
+ * 会话有在跑进程 → 409(先停再修,防修完被旧进程写回分叉);idle 常驻保活按
+ * trim/strip-thinking 先例 closePersistentForSession 自动关闭再修。
+ */
+router.post('/sessions/:sessionId/repair-official-compat', async (req, res) => {
+  try {
+    const sid = req.params.sessionId;
+    if (!safeId(sid)) return res.status(400).json({ error: 'invalid sessionId' });
+    const running = getActiveChatProcesses().some(
+      (p) => p.sessionId === sid && p.exitCode === null && !p.idle,
+    );
+    if (running) return res.status(409).json({ error: '会话正在运行,请先停止再清理' });
+    await closePersistentForSession(sid); // idle 常驻:关掉再改写(同 trim/strip-thinking)
+    const file = await findSessionFile(sid);
+    if (!file) return res.status(404).json({ error: 'session jsonl not found' });
+    const raw = await readFile(file, 'utf-8');
+    const { lines, report } = repairOfficialCompat(raw.split('\n'));
+    const changed = report.emptyText || report.emptyThinking || report.droppedLines || report.relinked;
+    if (changed) {
+      await writeFile(`${file}.bak-${Date.now()}`, raw, 'utf-8'); // 备份必须成功才动原文件
+      await writeJsonlAtomic(file, lines.join('\n'));
+      broadcastSessionFileChange(file);
+    }
+    res.json({ report, changed: !!changed });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

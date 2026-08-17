@@ -259,6 +259,11 @@ export function useWebSocket() {
               // 提交中的键不被覆盖(store 内 in-flight 记账),不打断用户手上操作。
               useStore.getState().applyRemoteSessionSync(data);
               break;
+            case 'repair-hint':
+              // r10-12:官方 400 空内容块的服务端体检结果。result 后 0ms finalize 会关 SSE,
+              // 异步体检多数经此 WS 兜底到达;SessionDetail 监听按 sessionId 入位(keyed 无串扰)。
+              window.dispatchEvent(new CustomEvent('cgui:repair-hint', { detail: data }));
+              break;
             case 'task-notification-bg':
               // 停止链路 #3:回合间(无活跃 SSE)到达的子代理权威终态通知,server 经全局
               // WS 兜底送达。App.jsx 顶层监听此事件按 tool_use_id 调 finalizeAgent(幂等,

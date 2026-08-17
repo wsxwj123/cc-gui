@@ -109,4 +109,15 @@ const parseAll = (lines) => lines.map((l) => JSON.parse(l));
   assert.equal(u1.parentUuid, null, 't7: 重指到 null 而非悬空 uuid');
 }
 
+// t8 仪表化判据:chat.js 的 matchOfficialEmptyBlockError(真实 400 文案/无关错误)
+{
+  const { matchOfficialEmptyBlockError } = await import('../../server/routes/chat.js');
+  assert.equal(matchOfficialEmptyBlockError(
+    'API Error: 400 {"type":"error","error":{"type":"invalid_request_error","message":"messages.5.content.0: text content blocks must be non-empty"}}',
+  ), true, 't8: 官方 400 文案应命中');
+  assert.equal(matchOfficialEmptyBlockError('Invalid signature in thinking block'), false, 't8: 无关错误不命中');
+  assert.equal(matchOfficialEmptyBlockError(''), false, 't8: 空串不命中');
+}
+
 console.log('check-session-repair: all passed');
+process.exit(0); // chat.js 顶层可能挂定时器,显式退出

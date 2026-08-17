@@ -3,6 +3,7 @@ import { spawn, execFileSync } from 'child_process';
 import { dirname, join as pathJoin, isAbsolute, parse as pathParse } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readFileSync, statSync, writeFileSync, unlinkSync, readdirSync, watch, existsSync, mkdirSync, rmSync } from 'node:fs';
+import { readFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { query } from '@anthropic-ai/claude-agent-sdk';
@@ -12,6 +13,7 @@ import { dropPendingForSession, requestElicitation, requestPermission, requestUs
 import { buildAlwaysAllowUpdates, buildDirAuthUpdates } from '../utils/permission-rules.js';
 import { stripInheritedProviderEnv } from '../utils/provider-env.js';
 import { resolveClaude } from '../utils/claude-resolver.js';
+import { repairOfficialCompat } from '../utils/session-repair.js';
 import { broadcast, clients } from '../broadcast.js';
 
 // T2: 回合完成 WS 通知。前端切走会话时 SSE fetch 已被 abort(I4 渲染隔离的
@@ -684,6 +686,27 @@ function deliverLine(slot, line) {
       } catch {}
     }
   }
+}
+
+// r10-12 仪表化:官方 400 "text content blocks must be non-empty" 检测(export 仅为可单测)。
+export function matchOfficialEmptyBlockError(text) {
+  return /text content blocks must be non-empty|must be non-empty/i.test(String(text || ''));
+}
+// 命中时对该会话 jsonl 跑 repairOfficialCompat 的只读体检(dry-run:纯函数不写盘),
+// 日志记一行结构化摘要(只数字无内容),并把 repairHint 发给前端:deliverLine(SSE 在线
+// 直达)+ 全局 WS 兜底(result 后 0ms finalize 会关流,同 task-notification-bg 模式)。
+async function emitRepairHint(slot, m) {
+  try {
+    const sessionId = m.session_id || slot.sessionId;
+    if (!sessionId) return;
+    const file = await findSessionFile(sessionId);
+    if (!file) return;
+    const raw = await readFile(file, 'utf-8');
+    const { report } = repairOfficialCompat(raw.split('\n'));
+    console.warn(`[chat] official-compat 体检 session=${sessionId} emptyText=${report.emptyText} emptyThinking=${report.emptyThinking} dropCandidates=${report.droppedLines}`);
+    deliverLine(slot, JSON.stringify({ type: 'repair-hint', sessionId, report }));
+    broadcast({ type: 'repair-hint', sessionId, report });
+  } catch {}
 }
 
 // level 信号广播:把服务端刚对完账的存活集喂给所有客户端,让它们剪掉自己那份僵尸卡。
@@ -1634,6 +1657,9 @@ router.post('/chat', async (req, res) => {
         if (m.type === 'result') {
           lastResultLine = line;
           slot.lastResultAt = Date.now(); // stop 端点优雅窗判据(见 /stop 注释)
+          // r10-12 仪表化:官方拒收空内容块的 400(文案在 result,cli-stream-json-error-shape)
+          // → 旁路 fire-and-forget 跑 jsonl 只读体检并发 repair-hint,不碰收尾时序。
+          if (m.is_error && matchOfficialEmptyBlockError(m.result)) void emitRepairHint(slot, m);
           // 关流延迟:子代理回合沿用 4s 去抖;开了输入预测时 suggestion 在 result 之后
           // 才到,必须给等待窗(SDK 不发时到点正常收尾)。都没有则立即关,零延迟。
           // 建议窗原来是 3s,与子代理窗两套时限:建议由 SDK 在 result 后另起一次模型调用
