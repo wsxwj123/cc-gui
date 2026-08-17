@@ -76,13 +76,40 @@ export function reconcileSteered(list, _unusedSigs, steerKeys) {
   return changed ? out : list;
 }
 
+// ②claim 残留（claiming 中间态 / hidden sendable 槽）复位为可见 needs-review 原条目。
+// hidden 槽在 finalize 时丢了原文本与附件（收进 claimDraft），这里按 claimDraft 还原；
+// steerId 一并还原，让后续对账的 UUID 正向命中仍能自动清掉"其实已送达"的条目。
+export function reclaimClaimItem(item) {
+  if (!item || (!item.claimDraft && item.steerState !== 'claiming')) return item;
+  const draft = item.claimDraft || null;
+  const { claimId, targetPaneId, claimDraft, hidden, ...rest } = item;
+  void claimId; void targetPaneId; void claimDraft; void hidden;
+  const restored = { ...rest, steerState: 'needs-review', attemptWasAmbiguous: true };
+  if (draft) {
+    if (typeof draft.queueText === 'string' && draft.queueText) restored.text = draft.queueText;
+    else if (!restored.text && typeof draft.text === 'string') restored.text = draft.text;
+    if (typeof draft.sourceQueueId === 'string' && draft.sourceQueueId) restored.queueId = draft.sourceQueueId;
+    if (typeof draft.steerId === 'string' && draft.steerId) restored.steerId = draft.steerId;
+    if (Array.isArray(draft.attachments) && draft.attachments.length) {
+      restored.opts = {
+        ...(restored.opts || {}),
+        meta: { ...(restored.opts?.meta || {}), attachments: draft.attachments, displayText: draft.text || '' },
+      };
+    }
+  }
+  return restored;
+}
+
 // 页面恢复后没有原 slot receipt；任何 unresolved 都先成为人工复核 barrier。
+// ②claim 残留（不论目标 pane 是否还在——pane id 计数器重启后重置，跨重启一律悬空）
+// 全部复位为可见 needs-review，绝不留 hidden 阻塞槽。
 export function stripSteerState(queueMap) {
   if (!queueMap || typeof queueMap !== 'object') return {};
   const out = {};
   for (const [sessionKey, list] of Object.entries(queueMap)) {
     if (!Array.isArray(list)) continue;
     out[sessionKey] = list.map((item) => {
+      if (item?.claimDraft || item?.steerState === 'claiming') return reclaimClaimItem(item);
       if (!isSteerBarrier(item) && !item?.steerId) return item;
       // ①"保留不发"是用户决定，跨重启保持，不翻回 needs-review。
       if (item?.steerState === 'kept') return item;

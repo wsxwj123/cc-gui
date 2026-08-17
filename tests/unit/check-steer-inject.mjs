@@ -100,11 +100,16 @@ assert.equal(firstDrainableIndex(review), -1, 'needs-review 必须继续作为�
 
 const restored = stripSteerState({
   a: [{ ...unknown, steerState: 'claiming', claimId: 'claim-a', targetPaneId: 'p0', claimDraft: { sendable: false } }],
-  b: [{ text: '', hidden: true, claimDraft: { sendable: true, text: 'draft' } }],
+  b: [{ text: '', hidden: true, claimDraft: { sendable: true, text: 'draft', queueText: 'draft 原文' } }],
 });
 assert.equal(restored.a[0].steerState, 'needs-review');
 assert.equal('claimDraft' in restored.a[0], false, '中断 pending draft 必须回滚');
-assert.equal(restored.b[0].claimDraft.sendable, true, '已最终提交的唯一 draft 必须恢复');
+// ②判官必修-2:跨重启的 claim 槽一律复位为可见 needs-review(pane id 计数器重启即重置,
+// 槽必悬空;旧断言把"跨重启保留 hidden 槽"测成预期,正是不可见永久阻塞的死锁)。
+assert.equal('claimDraft' in restored.b[0], false, 'sendable 槽跨重启不得保留(孤儿即死锁)');
+assert.equal(restored.b[0].steerState, 'needs-review', '复位为人工复核态');
+assert.equal(restored.b[0].hidden, undefined, '必须重新可见');
+assert.equal(restored.b[0].text, 'draft 原文', '原文从 claimDraft.queueText 还原');
 
 // claim 三阶段：原 item → 原 item + pending draft → hidden 空文本 sendable draft。
 useStore.setState({ messageQueue: {} });

@@ -2,7 +2,7 @@ import { create } from 'zustand';
 import { nextDockCode } from '../utils/artifactDock.js';
 import { mergeSyncedMap, syncableKey, pushLocalOnlyKeys, createInFlightCounter, shouldMarkMigrated } from '../utils/sessionSync.js';
 import { FONT_OPTIONS, readingFontCss } from '../utils/systemFonts.js';
-import { createQueueId, firstDrainableIndex, isSteerBarrier, reconcileSteered, stripSteerState } from '../utils/steerQueue.js';
+import { createQueueId, firstDrainableIndex, isSteerBarrier, reclaimClaimItem, reconcileSteered, stripSteerState } from '../utils/steerQueue.js';
 import { isValidContextResponse, shouldReplaceContextCache } from '../utils/contextCache.js';
 
 // Re-exported so existing importers (App.jsx) keep working; the list and its
@@ -1126,6 +1126,7 @@ export const useStore = create((set, get) => ({
       set({ paneSessions: next, paneMessages: nextMsgs, paneMessagesSid: nextSids, paneIds: ids, selectedSession: null, messages: [] });
       writeLs('cgui-selected-session', null);
       writeLs('cgui-pane-sessions', next);
+      get().reclaimOrphanClaimDrafts(); // ②旧 pane id 已被换掉,回收指向它的 claim 槽
       return;
     }
     const sessions = [...cur.paneSessions];
@@ -1161,6 +1162,7 @@ export const useStore = create((set, get) => ({
       selectedSession: sessions[0],
       messages: msgs[0] || [],
     });
+    get().reclaimOrphanClaimDrafts(); // ②被关 pane 的 id 已出列,回收指向它的 claim 槽
   },
   // Tab-index setter, clamped.
   setActiveTabIndex: (i) => {
@@ -1590,6 +1592,9 @@ export const useStore = create((set, get) => ({
         targetPaneId,
         text: attachments.length ? (item.opts?.meta?.displayText || '') : item.text,
         queueText: item.text,
+        // ②孤儿回收要能还原 steerId:finalize 的 draftSlot 会丢掉原条目全部字段,
+        // 复位后仍靠它做 UUID 落盘对账(其实已送达的条目自动清掉)。
+        steerId: item.steerId || null,
         attachments,
         sendable: false,
       };
@@ -1649,6 +1654,24 @@ export const useStore = create((set, get) => ({
       return { ...item, claimDraft: { ...current, ...patch } };
     })]));
     if (!found || !persistQueueSnapshot(nextQueue, true)) return s;
+    return { messageQueue: nextQueue };
+  }),
+  // ②孤儿回收:claim 槽的 targetPaneId 已不在当前 paneIds(关窗格/单窗格换新 id)时,
+  // 该槽永远无人认领 —— hidden 空文本槽既不可见也不可删,还永久阻塞 drain。复位为
+  // 可见 needs-review 原条目(①的出口接手)。closePane 两个分支收尾时调用。
+  reclaimOrphanClaimDrafts: () => set((s) => {
+    const valid = new Set(Array.isArray(s.paneIds) ? s.paneIds : []);
+    let changed = false;
+    const nextQueue = Object.fromEntries(Object.entries(s.messageQueue).map(([key, list]) => [
+      key,
+      (Array.isArray(list) ? list : []).map((item) => {
+        const pane = item?.claimDraft?.targetPaneId ?? item?.targetPaneId;
+        if ((!item?.claimDraft && item?.steerState !== 'claiming') || valid.has(pane)) return item;
+        changed = true;
+        return reclaimClaimItem(item);
+      }),
+    ]));
+    if (!changed || !persistQueueSnapshot(nextQueue, true)) return s;
     return { messageQueue: nextQueue };
   }),
   clearClaimDraft: (targetPaneId, claimId) => set((s) => {
