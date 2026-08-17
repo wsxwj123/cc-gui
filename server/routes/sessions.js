@@ -763,6 +763,26 @@ router.post('/sessions/:sessionId/strip-thinking', async (req, res) => {
  * 会话有在跑进程 → 409(先停再修,防修完被旧进程写回分叉);idle 常驻保活按
  * trim/strip-thinking 先例 closePersistentForSession 自动关闭再修。
  */
+/**
+ * GET /api/sessions/:sessionId/repair-official-compat — r11-⑤ 只读体检(dry-run)。
+ * 复用 repairOfficialCompat 纯函数但不落地:不备份、不写盘、不关常驻进程,
+ * 运行中也允许查(只读)。常驻入口「官方兼容体检与清理」随时可查靠它。
+ */
+router.get('/sessions/:sessionId/repair-official-compat', async (req, res) => {
+  try {
+    const sid = req.params.sessionId;
+    if (!safeId(sid)) return res.status(400).json({ error: 'invalid sessionId' });
+    const file = await findSessionFile(sid);
+    if (!file) return res.status(404).json({ error: 'session jsonl not found' });
+    const raw = await readFile(file, 'utf-8');
+    const { report } = repairOfficialCompat(raw.split('\n'));
+    const wouldChange = !!(report.emptyText || report.emptyThinking || report.droppedLines || report.relinked);
+    res.json({ report, wouldChange });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 router.post('/sessions/:sessionId/repair-official-compat', async (req, res) => {
   try {
     const sid = req.params.sessionId;

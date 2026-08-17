@@ -65,6 +65,7 @@ import { isSteered, firstSteerableIndex, isSteerBarrier, persistedSteerKeys } fr
 import { isInitBindingOrigin, migrateDraftQueue, paneMessagesOwned, resolveHistModel, resolveSelectorModel, resolveSendModel } from './utils/routing.js';
 import { nativeContextWindow, isBareClaudeAlias, pickCliContextWindow } from './utils/contextWindow.js';
 import { extractMcpServerIssues, formatMcpServerNotice } from './utils/mcpStatus.js';
+import { classifyRepairOutcome, classifyCheckOutcome, upsertRepairHint, removeRepairHint, loadRepairHints, persistRepairHints } from './utils/repairFlow.js';
 import {
   FolderOpen, MessageSquare, ChevronLeft, ChevronRight, ChevronDown,
   Search, Hash, Layers, BarChart3, ArrowLeft, Plus,
@@ -2355,6 +2356,114 @@ function SessionHeaderMore({ children, forceOpenSignal = 0 }) {
   );
 }
 
+// ─── r11-⑤ 官方兼容体检与清理(居中模态卡)─────────────────────────
+// 三态反馈全显式(⑤主诉根治,不再静默):
+//   · 会话运行中(POST 409)→ 明确提示「先停止再清理」;
+//   · 已清理(200 changed)→ 报告数字 + 提示重发,并发 toast;
+//   · 历史已干净(dry-run 零命中 / 200 !changed)→ 明说「历史已干净」。
+// 打开即跑只读体检(GET dry-run,不写盘,运行中也可查),数字写回 repairHints(localStorage
+// LRU 持久)。布局红线:.glass-popover + flex 列三段(头/正文滚动/底部操作 shrink-0),
+// 不用 sticky footer(带 transform 的模态里 sticky 会哑 —— memory 红线);不用 window.confirm
+// (Tauri 禁用;本卡无需确认,清理端点自动备份可回退)。
+function RepairCompatModal({ sessionId, projectHash, onClose, onHint, onCleaned, onNotice }) {
+  const [check, setCheck] = useState({ phase: 'checking' });
+  const [repair, setRepair] = useState(null); // null | {phase:'running'} | classifyRepairOutcome 输出
+  useEffect(() => {
+    let dead = false;
+    (async () => {
+      try {
+        const r = await fetch(`/api/sessions/${sessionId}/repair-official-compat`);
+        const d = await r.json().catch(() => ({}));
+        if (dead) return;
+        const out = classifyCheckOutcome(r.status, d);
+        setCheck({ phase: 'done', ...out });
+        if (out.kind === 'found') onHint?.(sessionId, out.report);
+      } catch (e) {
+        if (!dead) setCheck({ phase: 'done', kind: 'error', text: `体检失败：${e.message}` });
+      }
+    })();
+    return () => { dead = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionId]);
+  const runRepair = async () => {
+    setRepair({ phase: 'running' });
+    let out;
+    try {
+      const r = await fetch(`/api/sessions/${sessionId}/repair-official-compat`, { method: 'POST' });
+      const d = await r.json().catch(() => ({}));
+      out = classifyRepairOutcome(r.status, d);
+    } catch (e) {
+      out = { kind: 'error', text: `清理失败：${e.message}` };
+    }
+    setRepair(out);
+    if (out.kind === 'cleaned') {
+      onCleaned?.(sessionId, projectHash);
+      onNotice?.({ text: out.text });
+    } else if (out.kind === 'clean') {
+      onCleaned?.(sessionId, projectHash);
+    }
+  };
+  const rep = check.report;
+  const body = check.phase === 'checking' ? (
+    <div className="flex items-center gap-2 text-ink-muted"><Loader2 size={13} className="animate-spin shrink-0" />正在体检会话历史…</div>
+  ) : repair?.phase === 'running' ? (
+    <div className="flex items-center gap-2 text-ink-muted"><Loader2 size={13} className="animate-spin shrink-0" />清理中…（已自动备份原文件）</div>
+  ) : repair ? (
+    repair.kind === 'cleaned' ? (
+      <div className="flex items-start gap-2 text-emerald-600"><CheckCircle2 size={14} className="shrink-0 mt-0.5" /><span>{repair.text}</span></div>
+    ) : repair.kind === 'running' ? (
+      <div className="text-amber-600">{repair.text}</div>
+    ) : repair.kind === 'clean' ? (
+      <div className="flex items-start gap-2 text-emerald-600"><CheckCircle2 size={14} className="shrink-0 mt-0.5" /><span>{repair.text}</span></div>
+    ) : (
+      <div className="text-error">{repair.text}</div>
+    )
+  ) : check.kind === 'error' ? (
+    <div className="text-error">{check.text}</div>
+  ) : check.kind === 'clean' ? (
+    <div className="flex items-start gap-2 text-emerald-600"><CheckCircle2 size={14} className="shrink-0 mt-0.5" /><span>历史已干净，没有官方 API 不接受的空内容块。</span></div>
+  ) : (
+    <div>
+      <div className="mb-1.5">检测到历史含官方 API 不接受的空内容块：</div>
+      <ul className="text-[12px] text-ink-muted font-mono space-y-0.5 list-disc pl-4">
+        <li>空 text 块 {rep?.emptyText || 0} 处</li>
+        <li>空 thinking 块 {rep?.emptyThinking || 0} 处</li>
+        <li>需删除整行 {rep?.droppedLines || 0} 行（引用自动接骨）</li>
+      </ul>
+      <div className="mt-2 text-[11.5px] text-ink-faint">清理只删空块 / 空行，不改写任何正文；执行前自动备份原文件（.bak）。会话正在运行时须先停止。</div>
+    </div>
+  );
+  return createPortal(
+    <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/30 backdrop-blur-sm animate-fade-in" onClick={onClose}>
+      <div
+        className="glass-popover w-[440px] max-w-[calc(var(--app-w,100vw)-1.5rem)] max-h-[min(70vh,calc(var(--app-h,100dvh)-2rem))] flex flex-col py-1 animate-glass-rise"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="px-4 py-2.5 text-[11px] text-ink-faint uppercase tracking-wider font-body flex items-center justify-between border-b border-canvas-deep shrink-0">
+          <span className="flex items-center gap-1.5"><Activity size={12} />官方兼容体检与清理</span>
+          <button onClick={onClose} className="p-1 hover:bg-canvas-warm rounded"><X size={12} /></button>
+        </div>
+        <div className="flex-1 min-h-0 overflow-y-auto px-4 py-3 text-[12.5px] text-ink-soft font-body leading-relaxed">
+          {body}
+        </div>
+        <div className="border-t border-canvas-deep px-4 py-2.5 shrink-0 flex items-center justify-end gap-2">
+          <button onClick={onClose} className="px-3 py-1.5 rounded-lg text-[12px] text-ink-muted hover:bg-canvas-warm font-body transition-colors">关闭</button>
+          {check.phase === 'done' && check.kind === 'found' && repair?.kind !== 'cleaned' && repair?.kind !== 'clean' && (
+            <button
+              disabled={repair?.phase === 'running'}
+              onClick={runRepair}
+              className="btn-accent px-3 py-1.5 text-[12px] font-body disabled:opacity-50"
+            >
+              {repair?.phase === 'running' ? '清理中…' : '清理（自动备份原文件）'}
+            </button>
+          )}
+        </div>
+      </div>
+    </div>,
+    document.body,
+  );
+}
+
 // ─── Session Detail ────────────────────────────────────────────
 // React.memo:props 只有 tabIndex/mobileChrome(基元,稳定)。App 级状态变化(开面板、
 // 分屏数变化等)导致父组件重渲染时,同 props 直接跳过,不再 reconcile 这棵巨大的消息树
@@ -2970,18 +3079,36 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // Transient toast for "auto-stripped thinking blocks after provider switch".
   // { text, expires } — set by handleSend's pre-flight check, auto-cleared.
   const [providerSwitchNotice, setProviderSwitchNotice] = useState(null);
-  // r10-12:官方 400 空内容块的体检结果(sessionId → report)与一键清理进行态。
-  // keyed by sessionId,多 pane 实例各自监听同一 WS 事件也不串扰(纯数据无归属歧义)。
-  const [repairHints, setRepairHints] = useState({});
-  const [repairingSid, setRepairingSid] = useState(null);
+  // r10-12→r11-⑤:官方 400 空内容块的体检结果(sessionId → {report, at}),localStorage
+  // LRU(20 条)持久化 —— 刷新后错误行动卡仍能显示统计、常驻入口随时可唤出(⑤主诉
+  // "提示不落盘刷新即丢"根治)。keyed by sessionId,多 pane 实例各自监听同一 WS 事件
+  // 也不串扰(纯数据无归属歧义)。
+  const [repairHints, setRepairHints] = useState(() => loadRepairHints());
+  const applyRepairHint = useCallback((sessionId, report) => {
+    setRepairHints((prev) => {
+      const next = upsertRepairHint(prev, sessionId, report);
+      persistRepairHints(next);
+      return next;
+    });
+  }, []);
+  const dropRepairHint = useCallback((sessionId) => {
+    setRepairHints((prev) => {
+      const next = removeRepairHint(prev, sessionId);
+      persistRepairHints(next);
+      return next;
+    });
+  }, []);
+  // r11-⑤:居中体检/清理模态(null | {sessionId, projectHash})。错误行动卡与
+  // 会话 ⋮ 常驻入口「官方兼容体检与清理」共用同一模态。
+  const [repairModal, setRepairModal] = useState(null);
   useEffect(() => {
     const onHint = (e) => {
       const { sessionId, report } = e.detail || {};
-      if (sessionId && report) setRepairHints((prev) => ({ ...prev, [sessionId]: report }));
+      if (sessionId && report) applyRepairHint(sessionId, report);
     };
     window.addEventListener('cgui:repair-hint', onHint);
     return () => window.removeEventListener('cgui:repair-hint', onHint);
-  }, []);
+  }, [applyRepairHint]);
   useEffect(() => {
     // sticky:需要用户看到并动手处理的提示(如"连不上会话流,切走再切回")不自动消失,
     // 只能手动关。其余仍是 5s 自消的瞬时通知。
@@ -4649,9 +4776,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           // r10-12:服务端旁路体检结果(官方 400 空内容块)。keyed by sessionId 存,
           // 供错误行动卡显示统计;WS 兜底路径经 cgui:repair-hint 事件落同一 map。
           if (event.type === 'repair-hint') {
-            if (event.sessionId && event.report) {
-              setRepairHints((prev) => ({ ...prev, [event.sessionId]: event.report }));
-            }
+            if (event.sessionId && event.report) applyRepairHint(event.sessionId, event.report);
             continue;
           }
           // Surface CLI-side errors that previously got silently dropped:
@@ -6457,6 +6582,16 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                   if (s?.sessionId && s?.projectHash) fetchMessagesForTab(s.sessionId, s.projectHash, { silent: true });
                 }}
               />
+              {/* r11-⑤:常驻入口 —— 随时可对本会话跑只读体检/一键清理,不依赖报错瞬间。 */}
+              {selectedSession?.sessionId && (
+                <button
+                  onClick={() => setRepairModal({ sessionId: selectedSession.sessionId, projectHash: selectedSession.projectHash })}
+                  title="官方兼容体检与清理 — 检查历史是否含官方 API 不接受的空内容块,可一键清理（自动备份原文件）"
+                  className="p-1.5 rounded-lg transition-colors text-ink-muted hover:text-ink hover:bg-canvas-warm"
+                >
+                  <Activity size={14} />
+                </button>
+              )}
             </SessionHeaderMore>
           </div>
         </div>
@@ -6647,42 +6782,22 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                             </button>
                           </div>
                         )}
-                        {/* r10-12:官方拒收历史空内容块 → 一键清理行动卡(清理端点自动备份原文件)。
-                            统计数字来自服务端旁路体检(repair-hint),未到达时显示通用文案。 */}
+                        {/* r10-12→r11-⑤:官方拒收历史空内容块 → 行动卡改为唤出居中体检模态
+                            (三态反馈全显式,统计数字持久于 localStorage,刷新后仍可唤出)。 */}
                         {msg.errorAction === 'repair-official' && selectedSession?.sessionId && (
                           <div className="px-4 pb-2 -mt-1">
                             <div className="text-[12px] text-ink-muted font-body mb-1.5">
                               {(() => {
-                                const rep = repairHints[selectedSession.sessionId];
+                                const rep = repairHints[selectedSession.sessionId]?.report;
                                 return rep
                                   ? `检测到历史含官方不接受的空内容块(空text ${rep.emptyText || 0} 处/空thinking ${rep.emptyThinking || 0} 处)`
                                   : '检测到历史可能含官方不接受的空内容块';
                               })()}
                             </div>
                             <button
-                              disabled={repairingSid === selectedSession.sessionId}
-                              onClick={async () => {
-                                const sid = selectedSession.sessionId;
-                                const ph = selectedSession.projectHash;
-                                setRepairingSid(sid);
-                                try {
-                                  const r = await fetch(`/api/sessions/${sid}/repair-official-compat`, { method: 'POST' });
-                                  const d = await r.json().catch(() => ({}));
-                                  if (!r.ok) {
-                                    setProviderSwitchNotice({ text: `清理失败:${d.error || `HTTP ${r.status}`}`, sticky: true });
-                                    return;
-                                  }
-                                  const rep = d.report || {};
-                                  setProviderSwitchNotice({ text: d.changed
-                                    ? `已清理并备份(空text ${rep.emptyText || 0} 处/空thinking ${rep.emptyThinking || 0} 处/删除空行 ${rep.droppedLines || 0} 行),请重发消息。`
-                                    : '未发现需要清理的空内容块,原文件未改动。' });
-                                  if (ph) await fetchMessagesForTab(sid, ph, { silent: true });
-                                } catch (e) {
-                                  setProviderSwitchNotice({ text: `清理失败:${e.message}`, sticky: true });
-                                } finally { setRepairingSid(null); }
-                              }}
-                              className="px-3 py-1.5 rounded-lg border border-canvas-deep bg-canvas-warm text-[12px] text-accent font-body hover:border-accent/40 transition-colors disabled:opacity-50">
-                              {repairingSid === selectedSession.sessionId ? '清理中…' : '一键清理(自动备份原文件)'}
+                              onClick={() => setRepairModal({ sessionId: selectedSession.sessionId, projectHash: selectedSession.projectHash })}
+                              className="px-3 py-1.5 rounded-lg border border-canvas-deep bg-canvas-warm text-[12px] text-accent font-body hover:border-accent/40 transition-colors">
+                              体检与清理(自动备份原文件)…
                             </button>
                           </div>
                         )}
@@ -6817,6 +6932,20 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       )}
       </div>
 
+      {/* r11-⑤:居中体检/清理模态(portal 到 body;错误行动卡与 ⋮ 常驻入口共用)。 */}
+      {repairModal && (
+        <RepairCompatModal
+          sessionId={repairModal.sessionId}
+          projectHash={repairModal.projectHash}
+          onClose={() => setRepairModal(null)}
+          onHint={applyRepairHint}
+          onCleaned={(sid, ph) => {
+            dropRepairHint(sid); // 已清理/已干净 → 旧统计过时,连带清持久化条目
+            if (ph) fetchMessagesForTab(sid, ph, { silent: true });
+          }}
+          onNotice={(n) => setProviderSwitchNotice(n)}
+        />
+      )}
       <ChatInput
         onSend={handleSend}
         onStop={handleStop}
