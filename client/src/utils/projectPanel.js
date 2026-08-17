@@ -89,6 +89,34 @@ export function reducePinned(data) {
   };
 }
 
+// ── r11-①:钻入式两页态(项目页 ⇄ 会话页)────────────────────────────
+
+/**
+ * drillProject 初始值解析(含持久化 key 迁移):
+ *  - 新 key 'cgui-drill-project' 有值(含显式 null)→ 直接用(非法类型回落 null);
+ *  - 新 key 缺失(storedValue===undefined)→ 一次性读旧手风琴 key
+ *    'cgui-expanded-projects'(数组),取最后展开(≈最近操作)的项目;
+ *  - 都没有 → null(项目页)。
+ */
+export function initialDrillProject(storedValue, legacyList) {
+  if (storedValue !== undefined) {
+    return typeof storedValue === 'string' && storedValue ? storedValue : null;
+  }
+  const arr = Array.isArray(legacyList) ? legacyList.filter((x) => typeof x === 'string' && x) : [];
+  return arr.length ? arr[arr.length - 1] : null;
+}
+
+/**
+ * 两页态解析:drillHash 为空 → 项目页;能在行集中解析到项目 → 该项目的会话页;
+ * 解析不到(项目被隐藏/尚未拉到/panes 已关)→ 回落项目页但**不改状态**,
+ * fetchProjects 到位后自然恢复(渲染期不许写 store)。
+ */
+export function resolveDrillView(drillHash, rows) {
+  if (!drillHash) return { view: 'projects', project: null };
+  const project = (rows || []).find((p) => p && p.hash === drillHash) || null;
+  return project ? { view: 'sessions', project } : { view: 'projects', project: null };
+}
+
 /** 搜索时带出"组内有标题命中"的项目行:按已加载组预计算 hash 集。 */
 export function sessionQueryMatchHashes({ sessionsByProject = {}, query = '', titleOf = () => '' } = {}) {
   const q = String(query || '').toLowerCase();

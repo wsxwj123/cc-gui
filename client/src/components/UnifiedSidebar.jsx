@@ -7,18 +7,18 @@ import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react'
 import { createPortal } from 'react-dom';
 import {
   Plus, Search, FolderOpen, EyeOff, Trash2, Pin, X, GitBranch, GitMerge,
-  ChevronDown, ChevronRight, RefreshCw, Archive, Loader2,
+  ChevronDown, ChevronLeft, RefreshCw, Archive, Loader2,
 } from 'lucide-react';
 import { useStore } from '../stores/sessionStore.js';
 import { confirmDialog } from '../utils/confirmDialog.jsx';
 import { resolveSessionTitle } from '../utils/sessionTitle.js';
-import { composePanelProjects, composePanelSessions, sessionQueryMatchHashes } from '../utils/projectPanel.js';
+import { composePanelProjects, composePanelSessions, sessionQueryMatchHashes, resolveDrillView } from '../utils/projectPanel.js';
 import { pickDirectory, isTauri } from '../utils/pickDirectory.js';
 import { AnchoredPopover } from './SessionSelectors.jsx';
 // 循环 import(App.jsx ⇄ 本文件)安全性:这些都是 App.jsx 的模块级 function 声明
 // (提升,求值前可用)或组件渲染期才解引用的 live binding;本模块顶层不调用它们。
 import {
-  newDraftId, formatDate, formatPath, formatPathShort, finalizeSessionAgents,
+  newDraftId, formatPath, formatPathShort, finalizeSessionAgents,
   StatusDot, GlobalSearchResults, DeleteButton, SessionItem, FORK_RUNNING_CONFIRM,
   adoptFork, importGitState, GitInitBanner,
 } from '../App.jsx';
@@ -40,7 +40,7 @@ export function UnifiedSidebar() {
   const paneSessions = useStore((s) => s.paneSessions);
   const selectedSession = useStore((s) => s.selectedSession);
   const sessionsByProject = useStore((s) => s.sessionsByProject);
-  const expandedProjects = useStore((s) => s.expandedProjects);
+  const drillProject = useStore((s) => s.drillProject); // r11-①:当前钻入的项目 hash(null=项目页)
   const pinnedProjects = useStore((s) => s.pinnedProjects);
   const pinnedSessions = useStore((s) => s.pinnedSessions);
   const customTitles = useStore((s) => s.customTitles);
@@ -49,7 +49,6 @@ export function UnifiedSidebar() {
 
   const pinnedProjSet = useMemo(() => new Set(pinnedProjects || EMPTY_ARRAY), [pinnedProjects]);
   const pinnedSessSet = useMemo(() => new Set(pinnedSessions || EMPTY_ARRAY), [pinnedSessions]);
-  const expandedSet = useMemo(() => new Set(expandedProjects || EMPTY_ARRAY), [expandedProjects]);
   const titleOf = useCallback(
     (s) => resolveSessionTitle(s, customTitles[s.sessionId], autoTitles[s.sessionId]),
     [customTitles, autoTitles],
@@ -130,16 +129,22 @@ export function UnifiedSidebar() {
     return () => window.removeEventListener('cgui:worktree-visibility', h);
   }, []);
 
-  // ── 展开/懒加载:点项目行只展开(不选中);缺缓存的展开组拉一次 ────────────────
-  const toggleExpand = (hash) => {
+  // ── 钻入/返回(r11-①,两页态):点项目行=整面板切到该项目会话页(不选中会话);
+  //    返回=回项目页(selectedProject 不变)。离开会话页前落实该组待删(原「收起组
+  //    flush」的新时机,撤销条随页面切换消失,不落实=看着删了其实没删)。
+  const drillInto = (hash) => {
     const st = useStore.getState();
-    const isOpen = (st.expandedProjects || []).includes(hash);
-    if (isOpen) flushPendingForProject(hash); // G22:收起该项目 → 落实其待删会话
-    st.toggleProjectExpanded(hash);
-    if (!isOpen && !st.sessionsByProject[hash]) st.fetchSessionsForPanel(hash);
+    if (st.drillProject && st.drillProject !== hash) flushPendingForProject(st.drillProject);
+    st.setDrillProject(hash);
+    if (!st.sessionsByProject[hash]) st.fetchSessionsForPanel(hash);
   };
-  // 选中项目自动展开(点会话/分屏跟随切过来时组可见);用户手动收起后不强制重展,
-  // 直到 selectedProject 变化。
+  const drillBack = () => {
+    const st = useStore.getState();
+    if (st.drillProject) flushPendingForProject(st.drillProject);
+    st.setDrillProject(null);
+  };
+  // 选中项目自动钻入(点会话/分屏跟随切过来时页面跟随);用户手动返回项目页后不强制
+  // 重钻,直到 selectedProject 变化(effect deps 语义与旧版一致)。
   useEffect(() => {
     const hash = selectedProject?.hash;
     if (!hash) return;
@@ -147,7 +152,7 @@ export function UnifiedSidebar() {
     if (!useStore.getState().sessionsByProject[hash]) useStore.getState().fetchSessionsForPanel(hash);
   }, [selectedProject?.hash]);
 
-  // ── 刷新(watcher 多路,600ms 全局去抖):已展开组逐个刷 + 旧槽跟刷 + 未知项目冒出 ──
+  // ── 刷新(watcher 多路,600ms 全局去抖):钻入组刷新 + 旧槽跟刷 + 未知项目冒出 ──
   useEffect(() => {
     let timer = null;
     let projTimer = null;
@@ -155,7 +160,7 @@ export function UnifiedSidebar() {
       if (timer) clearTimeout(timer);
       timer = setTimeout(() => {
         const st = useStore.getState();
-        for (const hash of st.expandedProjects || []) st.fetchSessionsForPanel(hash);
+        if (st.drillProject) st.fetchSessionsForPanel(st.drillProject);
         // 旧槽保鲜:selectedProject 的 sessions 单值槽仍被权限卡门禁/@面板消费。
         if (st.selectedProject?.hash) st.fetchSessions(st.selectedProject.hash, { silent: true });
       }, 600);
@@ -193,6 +198,13 @@ export function UnifiedSidebar() {
     panes, pinned: pinnedProjSet, queryMatchHashes,
   }), [projects, hidden, showWorktreeProjects, q, panes, pinnedProjSet, queryMatchHashes]);
   const hiddenOnly = projects.length > 0 && rows.length === 0 && q === '' && hidden.size > 0;
+  // r11-①:钻入项目按【无 query 的行集】解析 —— 会话页内搜索过滤会话,不许把用户
+  // 从会话页踢回项目页;解析落空(项目被隐藏/尚未拉到/panes 已关)回落项目页且不改状态。
+  const rowsNoQuery = useMemo(() => composePanelProjects({
+    projects, hidden, showWorktrees: showWorktreeProjects, query: '',
+    panes, pinned: pinnedProjSet,
+  }), [projects, hidden, showWorktreeProjects, panes, pinnedProjSet]);
+  const { view, project: drilled } = resolveDrillView(drillProject, rowsNoQuery);
 
   // ── 面板级刷新:某项目会话变动后同刷 panel 缓存 + (若是选中项目)旧槽 ─────────
   const refreshProjectSessions = (projectHash) => {
@@ -576,6 +588,25 @@ export function UnifiedSidebar() {
     }
   };
 
+  // ── r11-①:项目行「在文件夹中显示」(POST /api/reveal-path,服务端校验 ∈ 已知项目集;
+  //    虚拟行(未落盘 draft)无实体目录保证,不显示该按钮)──────────────────────────
+  const revealProject = async (project, e) => {
+    e?.stopPropagation();
+    if (!project?.path || project.virtual) return;
+    try {
+      const r = await fetch('/api/reveal-path', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: project.path }),
+      });
+      if (!r.ok) {
+        const d = await r.json().catch(() => ({}));
+        confirmDialog('打开失败：' + (d.error || r.status));
+      }
+    } catch (err) {
+      confirmDialog('打开失败：' + err.message);
+    }
+  };
+
   // ── worktree picker(原 SessionList 逻辑,参数化 wtProject:哪个项目组打开的)────
   const [wtProject, setWtProject] = useState(null); // null=关闭;{hash,path,...}=为该项目打开
   const [worktreeList, setWorktreeList] = useState(null);
@@ -832,144 +863,165 @@ export function UnifiedSidebar() {
         {searchQuery.length >= 2 && (
           <GlobalSearchResults q={searchQuery} onPick={handlePickHit} />
         )}
-        {rows.map((project) => {
+        {/* ── r11-① 项目页:纯项目行(只显名称,完整路径进 title)。扁平规范首建:
+            小圆角/无阴影/发丝分隔/窄行高/低对比 hover。hover 按钮组 = 在文件夹中
+            显示 / 置顶 / 隐藏;「清理」移入会话页操作条(破坏性操作不放一级 hover)。
+            WKWebView 禁 button 嵌 button:行是 div role=button,操作键是 absolute
+            兄弟按钮组(沿用旧布局规避)。 ── */}
+        {view === 'projects' && rows.map((project) => {
           const hash = project.hash;
-          const expanded = expandedSet.has(hash);
           const isSelProj = selectedProject?.hash === hash;
+          return (
+            <div key={hash} className="relative group border-b border-canvas-deep/25">
+              <div
+                role="button"
+                tabIndex={0}
+                onClick={() => drillInto(hash)}
+                onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); drillInto(hash); } }}
+                title={formatPath(project.path)}
+                className={`w-full text-left pl-3 pr-[80px] py-2 rounded-md cursor-pointer transition-colors flex items-center gap-2 min-w-0 ${
+                  isSelProj ? 'bg-canvas-warm/50' : 'hover:bg-canvas-warm/35'
+                }`}
+              >
+                <StatusDot running={runningCwds.has(project.path)} lastActivity={project.lastActivity} />
+                <span className="text-[13px] text-ink-soft truncate font-body">
+                  {formatPathShort(project.path)}
+                </span>
+                {project.isWorktree && (
+                  <span className="text-[9px] px-1 py-0.5 bg-canvas-deep/60 text-ink-faint rounded font-mono shrink-0" title="Git worktree(独立工作树,非主仓目录)">⎇</span>
+                )}
+                {pinnedProjSet.has(hash) && <Pin size={9} className="text-accent fill-accent shrink-0" />}
+              </div>
+              <div className="absolute top-1/2 -translate-y-1/2 right-1.5 flex items-center gap-0.5">
+                {!project.virtual && (
+                  <button
+                    onClick={(e) => revealProject(project, e)}
+                    className="opacity-100 md:opacity-0 md:group-hover:opacity-100 transition-opacity p-1 hover:bg-canvas-deep/60 rounded-md"
+                    title="在文件夹中显示"
+                  >
+                    <FolderOpen size={12} className="text-ink-faint" />
+                  </button>
+                )}
+                <button
+                  onClick={(e) => { e.stopPropagation(); togglePinProject(hash); }}
+                  className={`transition-opacity p-1 hover:bg-canvas-deep/60 rounded-md ${pinnedProjSet.has(hash) ? 'opacity-100' : 'opacity-100 md:opacity-0 md:group-hover:opacity-100'}`}
+                  title={pinnedProjSet.has(hash) ? '取消置顶' : '置顶到列表最前'}
+                >
+                  <Pin size={12} className={pinnedProjSet.has(hash) ? 'text-accent fill-accent' : 'text-ink-faint'} />
+                </button>
+                <button
+                  onClick={(e) => { e.stopPropagation(); toggleHidden(hash); }}
+                  className="opacity-100 md:opacity-0 md:group-hover:opacity-100 transition-opacity p-1 hover:bg-canvas-deep/60 rounded-md"
+                  title="从侧栏隐藏（不删除本地文件，下次按 + 重新添加同路径即可恢复）"
+                >
+                  <EyeOff size={12} className="text-ink-faint" />
+                </button>
+              </div>
+            </div>
+          );
+        })}
+        {/* ── r11-① 会话页:返回行 + 项目名 + 操作条(新建/worktree/归档/清理)+
+            会话列表。r10 数据层(sessionsByProject 懒拉/置顶广播/虚拟节点)零改动。 ── */}
+        {view === 'sessions' && drilled && (() => {
+          const project = drilled;
+          const hash = project.hash;
           const rawSessions = sessionsByProject[hash];
           const showArchived = archivedOpen.has(hash);
-          const groupSessions = expanded && Array.isArray(rawSessions)
+          const groupSessions = Array.isArray(rawSessions)
             ? composePanelSessions({ sessions: rawSessions, pinned: pinnedSessSet, query: q, titleOf, showArchived })
               .filter((s) => !pendingIds.has(s.sessionId))
             : EMPTY_ARRAY;
           const activeCount = Array.isArray(rawSessions) ? rawSessions.filter((s) => !s.archived).length : null;
           const archivedCount = Array.isArray(rawSessions) ? rawSessions.filter((s) => !!s.archived).length : null;
+          const hasArchiveToggle = archivedCount != null && (activeCount > 0 || archivedCount > 0);
           return (
-            <div key={hash} className="mb-0.5">
-              <div className="relative group">
-                {/* 项目行:点击=展开/收起(展开≠选中)。WKWebView 禁 button 嵌 button:
-                    行是 div role=button,操作键是 absolute 兄弟按钮组(沿用旧布局规避)。 */}
-                <div
-                  role="button"
-                  tabIndex={0}
-                  onClick={() => toggleExpand(hash)}
-                  onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleExpand(hash); } }}
-                  className={`sidebar-item w-full text-left px-3 py-2.5 rounded-lg transition-all cursor-pointer ${
-                    isSelProj ? 'active bg-canvas-warm' : 'hover:bg-canvas-warm/60'
-                  }`}
-                >
-                  <div className="flex items-center gap-2">
-                    <ChevronRight size={12} className={`text-ink-faint shrink-0 transition-transform ${expanded ? 'rotate-90' : ''}`} />
-                    <FolderOpen size={13} className="text-warning/70 shrink-0" />
-                    <StatusDot running={runningCwds.has(project.path)} lastActivity={project.lastActivity} />
-                    <span className="text-[13px] text-ink-soft truncate font-body font-medium">
-                      {formatPathShort(project.path)}
-                    </span>
-                    {project.isWorktree && (
-                      <span className="text-[9px] px-1 py-0.5 bg-canvas-deep text-ink-faint rounded font-mono shrink-0" title="Git worktree(独立工作树,非主仓目录)">⎇</span>
-                    )}
-                  </div>
-                  <div className="text-[10px] text-ink-faint font-mono truncate ml-[21px] mt-0.5" title={formatPath(project.path)}>
-                    {formatPath(project.path)}
-                  </div>
-                  <div className="flex items-center gap-3 mt-0.5 ml-[21px]">
-                    {pinnedProjSet.has(hash) && <Pin size={9} className="text-accent fill-accent shrink-0" />}
-                    <span className="text-[10px] text-ink-faint font-mono">
-                      {project.virtual ? '未落盘' : `${project.sessionCount} 会话`}
-                    </span>
-                    <span className="text-[10px] text-ink-ghost">
-                      {formatDate(project.lastActivity)}
-                    </span>
-                  </div>
-                </div>
-                <div className="absolute top-1.5 right-1.5 flex items-center gap-0.5">
-                  <button
-                    onClick={(e) => { e.stopPropagation(); togglePinProject(hash); }}
-                    className={`transition-opacity p-1 hover:bg-canvas-deep rounded ${pinnedProjSet.has(hash) ? 'opacity-100' : 'opacity-100 md:opacity-0 md:group-hover:opacity-100'}`}
-                    title={pinnedProjSet.has(hash) ? '取消置顶' : '置顶到列表最前'}
-                  >
-                    <Pin size={12} className={pinnedProjSet.has(hash) ? 'text-accent fill-accent' : 'text-ink-faint'} />
-                  </button>
-                  <button
-                    onClick={(e) => { e.stopPropagation(); toggleHidden(hash); }}
-                    className="opacity-100 md:opacity-0 md:group-hover:opacity-100 transition-opacity p-1 hover:bg-canvas-deep rounded"
-                    title="从侧栏隐藏（不删除本地文件，下次按 + 重新添加同路径即可恢复）"
-                  >
-                    <EyeOff size={12} className="text-ink-faint" />
-                  </button>
-                  <button
-                    onClick={(e) => { e.stopPropagation(); purgeProject(project); }}
-                    className="opacity-100 md:opacity-0 md:group-hover:opacity-100 transition-opacity p-1 hover:bg-red-50 rounded"
-                    title="彻底清理该项目的 Claude 本地状态（会话历史/记忆等，不影响项目代码，不可恢复）"
-                  >
-                    <Trash2 size={12} className="text-ink-faint hover:text-red-600" />
-                  </button>
-                </div>
+            <div>
+              <div
+                role="button"
+                tabIndex={0}
+                onClick={drillBack}
+                onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); drillBack(); } }}
+                className="w-full flex items-center gap-1 px-2 py-1.5 rounded-md text-[12px] text-ink-muted hover:text-ink hover:bg-canvas-warm/35 cursor-pointer transition-colors font-body"
+              >
+                <ChevronLeft size={13} />返回项目列表
               </div>
-              {expanded && (
-                <div className="ml-3 pl-2 border-l border-canvas-deep/60 mb-1">
-                  {/* 组头操作行:新建 / worktree / 活跃-归档切换。data-tour 只挂选中项目组,
-                      避免多组重复锚点(GuideTour querySelector 取首个)。 */}
-                  <div className="flex items-center gap-1.5 px-1 py-1.5 flex-wrap">
-                    <button
-                      data-tour={isSelProj ? 'new-session' : undefined}
-                      onClick={() => handleNew(project)}
-                      className="btn-accent flex items-center gap-1 px-2 py-1 text-[11px] font-body whitespace-nowrap"
-                      title="新建会话"
-                    >
-                      <Plus size={11} />新建
-                    </button>
-                    <button
-                      data-tour={isSelProj ? 'new-worktree' : undefined}
-                      onClick={() => openWorktreePicker(project)}
-                      className="btn-glass flex items-center gap-1 px-2 py-1 text-[11px] font-body text-ink-soft whitespace-nowrap"
-                      title="在新 git worktree 中开会话（隔离）"
-                    >
-                      <GitBranch size={11} />worktree
-                    </button>
-                    {archivedCount != null && (activeCount > 0 || archivedCount > 0) && (
-                      <button
-                        onClick={() => toggleArchivedView(hash)}
-                        className={`ml-auto flex items-center gap-1 px-2 py-0.5 text-[10.5px] rounded font-body transition-colors ${
-                          showArchived ? 'bg-accent/15 text-accent' : 'text-ink-faint hover:text-ink-muted'
-                        }`}
-                        title={showArchived ? '回到活跃会话' : '查看已归档会话'}
-                      >
-                        <Archive size={10} />
-                        {showArchived ? `已归档 ${archivedCount}` : `归档 ${archivedCount}`}
-                      </button>
-                    )}
-                  </div>
-                  <GitInitBanner cwd={project.path} />
-                  {rawSessions === undefined ? (
-                    <div className="px-3 py-3 text-[11px] text-ink-faint font-body flex items-center gap-1.5">
-                      <Loader2 size={11} className="animate-spin" />加载会话…
-                    </div>
-                  ) : groupSessions.length === 0 ? (
-                    <div className="px-3 py-2.5 text-[11px] text-ink-faint font-body">
-                      {q ? '没有匹配的会话' : showArchived ? '没有已归档的会话' : '暂无会话,点上方「新建」开始'}
-                    </div>
-                  ) : groupSessions.map((session) => (
-                    <SessionItem
-                      key={session.sessionId}
-                      session={session}
-                      isSelected={focusSession?.sessionId === session.sessionId}
-                      onSelect={(s) => handleSelect(s, project)}
-                      onFork={(s) => handleFork(s, project)}
-                      onArchive={handleArchive}
-                      onDelete={handleDelete}
-                      forking={forking === session.sessionId}
-                      running={runningSessionIds.has(session.sessionId)}
-                      pinned={pinnedSessSet.has(session.sessionId)}
-                      onTogglePin={togglePinSession}
-                    />
-                  ))}
+              <div className="px-2 pt-1 pb-1.5 flex items-center gap-2 min-w-0">
+                <StatusDot running={runningCwds.has(project.path)} lastActivity={project.lastActivity} />
+                <span className="text-[13px] font-medium text-ink truncate font-body" title={formatPath(project.path)}>
+                  {formatPathShort(project.path)}
+                </span>
+                {project.isWorktree && (
+                  <span className="text-[9px] px-1 py-0.5 bg-canvas-deep/60 text-ink-faint rounded font-mono shrink-0" title="Git worktree(独立工作树,非主仓目录)">⎇</span>
+                )}
+                <span className="text-[10px] text-ink-faint font-mono ml-auto shrink-0">
+                  {project.virtual ? '未落盘' : `${project.sessionCount} 会话`}
+                </span>
+              </div>
+              <div className="flex items-center gap-1.5 px-2 py-1.5 flex-wrap border-b border-canvas-deep/25 mb-1">
+                <button
+                  data-tour="new-session"
+                  onClick={() => handleNew(project)}
+                  className="btn-accent flex items-center gap-1 px-2 py-1 text-[11px] font-body whitespace-nowrap"
+                  title="新建会话"
+                >
+                  <Plus size={11} />新建
+                </button>
+                <button
+                  data-tour="new-worktree"
+                  onClick={() => openWorktreePicker(project)}
+                  className="flex items-center gap-1 px-2 py-1 text-[11px] font-body text-ink-soft whitespace-nowrap rounded-md border border-canvas-deep/70 hover:bg-canvas-warm/50 transition-colors"
+                  title="在新 git worktree 中开会话（隔离）"
+                >
+                  <GitBranch size={11} />worktree
+                </button>
+                {hasArchiveToggle && (
+                  <button
+                    onClick={() => toggleArchivedView(hash)}
+                    className={`ml-auto flex items-center gap-1 px-2 py-0.5 text-[10.5px] rounded font-body transition-colors ${
+                      showArchived ? 'bg-accent/15 text-accent' : 'text-ink-faint hover:text-ink-muted'
+                    }`}
+                    title={showArchived ? '回到活跃会话' : '查看已归档会话'}
+                  >
+                    <Archive size={10} />
+                    {showArchived ? `已归档 ${archivedCount}` : `归档 ${archivedCount}`}
+                  </button>
+                )}
+                <button
+                  onClick={() => purgeProject(project)}
+                  className={`p-1 rounded-md hover:bg-red-50 transition-colors ${hasArchiveToggle ? '' : 'ml-auto'}`}
+                  title="彻底清理该项目的 Claude 本地状态（会话历史/记忆等，不影响项目代码，不可恢复）"
+                >
+                  <Trash2 size={12} className="text-ink-faint hover:text-red-600" />
+                </button>
+              </div>
+              <GitInitBanner cwd={project.path} />
+              {rawSessions === undefined ? (
+                <div className="px-3 py-3 text-[11px] text-ink-faint font-body flex items-center gap-1.5">
+                  <Loader2 size={11} className="animate-spin" />加载会话…
                 </div>
-              )}
+              ) : groupSessions.length === 0 ? (
+                <div className="px-3 py-2.5 text-[11px] text-ink-faint font-body">
+                  {q ? '没有匹配的会话' : showArchived ? '没有已归档的会话' : '暂无会话,点上方「新建」开始'}
+                </div>
+              ) : groupSessions.map((session) => (
+                <SessionItem
+                  key={session.sessionId}
+                  session={session}
+                  isSelected={focusSession?.sessionId === session.sessionId}
+                  onSelect={(s) => handleSelect(s, project)}
+                  onFork={(s) => handleFork(s, project)}
+                  onArchive={handleArchive}
+                  onDelete={handleDelete}
+                  forking={forking === session.sessionId}
+                  running={runningSessionIds.has(session.sessionId)}
+                  pinned={pinnedSessSet.has(session.sessionId)}
+                  onTogglePin={togglePinSession}
+                />
+              ))}
             </div>
           );
-        })}
-        {rows.length === 0 && (
+        })()}
+        {view === 'projects' && rows.length === 0 && (
           <div className="px-4 py-8 text-center">
             <p className="text-xs text-ink-faint font-body">
               {q ? '没有匹配的项目' : hiddenOnly ? '所有项目都已隐藏' : '没有找到项目'}

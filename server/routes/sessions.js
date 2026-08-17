@@ -337,6 +337,39 @@ router.get('/projects', async (req, res) => {
   }
 });
 
+/**
+ * POST /api/reveal-path { path } — r11-①:在系统文件管理器中定位项目文件夹。
+ * 校验 path ∈ 已知项目集(listProjects 的 path,含 worktree 项目),不接受任意路径;
+ * mac `open -R` 高亮该文件夹,win `explorer /select,`(成功也常以非零码退出,不当失败
+ * —— memory Win 三坑),其余平台 xdg-open 打开该目录。数组传参不拼命令串。
+ * 远程/手机访问时作用在服务器本机(与 /worktree/reveal 同预期)。
+ */
+router.post('/reveal-path', async (req, res) => {
+  try {
+    const p = String(req.body?.path || '');
+    if (!p) return res.status(400).json({ error: 'path required' });
+    const projects = await listProjects();
+    if (!projects.some((x) => x && x.path === p)) {
+      return res.status(400).json({ error: 'path is not a known project' });
+    }
+    const { execFile } = await import('child_process');
+    const { promisify } = await import('util');
+    const execFileP = promisify(execFile);
+    let cmd, args;
+    if (process.platform === 'darwin') { cmd = 'open'; args = ['-R', p]; }
+    else if (process.platform === 'win32') { cmd = 'explorer'; args = [`/select,${p}`]; }
+    else { cmd = 'xdg-open'; args = [p]; }
+    try {
+      await execFileP(cmd, args, { timeout: 10000 });
+    } catch (err) {
+      if (process.platform !== 'win32') throw err;
+    }
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // GET /api/projects/:hash/sessions — list sessions for a project
 router.get('/projects/:hash/sessions', async (req, res) => {
   try {
