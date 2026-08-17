@@ -90,35 +90,57 @@ const approx = (a, b, eps = 1e-6) => Math.abs(a - b) <= eps;
   assert.match(src, /cancelAnimationFrame\(pointerFrame\.current\)/, 't4: 卸载清理 rAF');
 }
 
-// t5 r11-⑬ zoom 归一化:大字体档 documentElement.style.zoom>1 时 clientY/rect 是
-// 视觉像素、positions 是布局像素;normalizePointerY 用 clientHeight/rect.height(=1/zoom)
-// 换算。模拟 zoom=1.3(rect.height = clientHeight×1.3)断言命中不漂。
-// 哨兵(验证过红):删归一化乘子(local = raw)→ 本节"第 k 根视觉中点命中 k"红。
+// t5 r11-p5-1 无量纲比例法:0.2.293 真机(WKWebView)回归证明 ⑬ 比值法依赖
+// 「clientHeight 与 rect.height 缩放语义关系」这一跨 API 引擎假设。fraction 法
+// (同一次 rect 的同一坐标系取比例 × 自家布局高)对引擎语义免疫——用【两种相反的
+// 引擎语义】各跑一遍矩阵,fraction 两种下都不漂;旧比值法在语义 B 下必炸(哨兵)。
+// 哨兵(均实际验证过红):S1 调用点回退旧 clientHeight 口径(跨 API 依赖复活)→ 接线守卫红;
+// S2 删 fraction [0,1] 夹紧 → 中心夹紧矩阵红。
+// (注:给足真布局高的 raw*(th/rh) 与 fraction*th 数学等价,函数级换式在纯语义矩阵下
+//  不红——真实杀伤面在跨 API 接线,故哨兵钉调用点与夹紧,「教训自检」断言钉住旧口径必漂。)
 {
-  const clientHeight = 300;                 // 布局像素(offsetHeight/clientHeight)
+  const H = 300;       // 自家布局态 box.height(positions 坐标系)
   const zoom = 1.3;
-  const rect = { top: 40, height: clientHeight * zoom }; // 视觉像素
-  const base = layoutCompactPositions(101, clientHeight, 8);
-  for (const k of [0, 25, 50, 75, 100]) {
-    // 第 k 根的视觉纵坐标 = rect.top + 布局坐标×zoom;归一化后必须精确回到布局坐标
-    // 并在基线坐标系命中第 k 根(鱼眼变形下的所见即所得归 t3 管,此处钉 zoom 换算)。
-    const clientY = rect.top + base[k] * zoom;
-    const y = normalizePointerY(clientY, rect, clientHeight);
-    assert.ok(Math.abs(y - base[k]) < 1e-6, `t5: zoom 下归一化回布局坐标(k=${k})`);
-    assert.equal(nearestTurnIndex(buildTurnIndex(base), y), k, `t5: zoom=1.3 第 ${k} 根命中不漂`);
+  const base = layoutCompactPositions(101, H, 8);
+  // 语义 A(Chromium 观测形态):CSSOM 视口随 zoom 缩放——rect 与 clientY 都是视觉像素。
+  const semA = { rect: { top: 40 * zoom, height: H * zoom }, clientYOf: (y) => 40 * zoom + y * zoom };
+  // 语义 B(WKWebView 推断形态):CSSOM 不随 zoom 缩放——rect 与 clientY 都是布局像素
+  // (若某内核在此语义下还把 clientHeight 报成视觉值,旧比值法的 th/rh 假设即破产;
+  //  fraction 法根本不读 clientHeight,天然免疫)。
+  const semB = { rect: { top: 40, height: H }, clientYOf: (y) => 40 + y };
+  for (const [name, sem] of [['A(缩放版)', semA], ['B(不缩放版)', semB]]) {
+    for (const k of [0, 25, 50, 75, 100]) {
+      const y = normalizePointerY(sem.clientYOf(base[k]), sem.rect, H);
+      assert.ok(Math.abs(y - base[k]) < 1e-6, `t5: 语义${name} k=${k} 归一化精确`);
+      assert.equal(nearestTurnIndex(buildTurnIndex(base), y), k, `t5: 语义${name} 第 ${k} 根命中不漂`);
+    }
+    // 鱼眼中心夹紧:任意指针(含越界)归一化后必落 [0, H] → 变形场中心永在条内,
+    // 鱼眼不会因中心出界而整体消失(0.2.293 真机症状)。
+    for (const cy of [-1e4, sem.rect.top - 50, sem.rect.top + sem.rect.height + 50, 1e4]) {
+      const y = normalizePointerY(cy, sem.rect, H);
+      assert.ok(y >= 0 && y <= H, `t5: 语义${name} 中心夹紧 [0,H](cy=${cy})`);
+      const out = distortPositions(base, y, { factor: 3 });
+      assert.ok(out.length === base.length && out[0] === base[0], `t5: 语义${name} 越界指针下鱼眼仍良构`);
+    }
   }
-  // 前提自检:不归一化(旧算式=裸视觉差值)在中段必漂——证明本节断言有杀伤力
-  const rawMid = base[50] * zoom; // 视觉差值直接当布局坐标用
-  assert.notEqual(nearestTurnIndex(buildTurnIndex(base), rawMid), 50, 't5: 前提自检(不归一化在中段必漂)');
+  // 旧比值法在语义 B + clientHeight 被引擎报成视觉值(H*zoom)时必漂——这正是
+  // fraction 法删掉 clientHeight 依赖的根据(教训自检,证明矩阵有杀伤力)。
+  const oldRatio = (clientY, rect, ch) => {
+    const raw = clientY - rect.top;
+    return Math.max(0, Math.min(ch, raw * (ch / rect.height)));
+  };
+  const oldY = oldRatio(semB.clientYOf(base[50]), semB.rect, H * zoom); // 引擎报视觉 clientHeight
+  assert.notEqual(nearestTurnIndex(buildTurnIndex(base), oldY), 50, 't5: 教训自检——旧比值法在跨 API 语义分歧下必漂');
   // clamp 与除零兜底
-  assert.equal(normalizePointerY(rect.top - 50, rect, clientHeight), 0, 't5: 上越界 clamp 0');
-  assert.equal(normalizePointerY(rect.top + rect.height + 50, rect, clientHeight), clientHeight, 't5: 下越界 clamp clientHeight');
-  assert.equal(normalizePointerY(140, { top: 40, height: 0 }, 260), 100, 't5: rect.height=0 兜底不除(退回视觉差值)');
-  assert.equal(normalizePointerY(140, { top: 40, height: 260 }, 260), 100, 't5: zoom=1 时恒等');
-  // 组件接线守卫:moveBar/clickBar 都走 normalizePointerY,裸视觉差值算式清零
+  assert.equal(normalizePointerY(140, { top: 40, height: 0 }, 260), 100, 't5: rect.height=0 兜底不除(退回视觉差值夹紧)');
+  assert.equal(normalizePointerY(1e4, { top: 40, height: 0 }, 260), 260, 't5: 兜底路径也夹紧');
+  assert.equal(normalizePointerY(140, { top: 40, height: 260 }, 260), 100, 't5: zoom=1 恒等');
+  // 组件接线守卫:moveBar/clickBar 走 fraction 法(目标高=自家 box.height),
+  // 每事件 DOM API(clientHeight)依赖清零
   const src = readFileSync(new URL('../../client/src/components/TurnScrubber.jsx', import.meta.url), 'utf8');
-  assert.equal((src.match(/normalizePointerY\(e\.clientY, rect, e\.currentTarget\.clientHeight\)/g) || []).length, 2, 't5: moveBar+clickBar 两处均走归一化');
-  assert.doesNotMatch(src, /Math\.min\(rect\.height, e\.clientY - rect\.top\)/, 't5: 旧视觉差值算式已清零');
+  assert.equal((src.match(/normalizePointerY\(e\.clientY, rect, box\.height\)/g) || []).length, 2, 't5: moveBar+clickBar 两处均走 box.height 口径');
+  assert.doesNotMatch(src, /e\.currentTarget\.clientHeight/, 't5: 每事件 clientHeight 依赖清零(跨 API 假设根除)');
+  assert.doesNotMatch(src, /Math\.min\(rect\.height, e\.clientY - rect\.top\)/, 't5: 旧视觉差值算式仍清零');
 }
 
 console.log('check-turn-scrubber-solve: all passed');

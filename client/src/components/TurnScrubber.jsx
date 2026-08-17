@@ -120,10 +120,10 @@ export default function TurnScrubber({ containerRef, turns, onNavigate }) {
     hideTimer.current = setTimeout(() => setTipIdx(null), HIDE_DELAY);
   };
   const moveBar = (e) => {
-    // r11-⑬:clientY/rect 是视觉像素,positions/box.height 是布局像素;字体档 zoom>1 时
-    // 必须归一化(clientHeight/rect.height = 1/zoom),否则离顶越远命中偏移越大。
+    // r11-p5-1:无量纲比例法——fraction 取自同一次 rect 的同一坐标系(引擎无关),
+    // 目标高用自家布局态 box.height(不查任何每事件 DOM API,WKWebView 真机回归根治)。
     const rect = e.currentTarget.getBoundingClientRect();
-    pendingPointerY.current = normalizePointerY(e.clientY, rect, e.currentTarget.clientHeight);
+    pendingPointerY.current = normalizePointerY(e.clientY, rect, box.height);
     if (pointerFrame.current) return;
     pointerFrame.current = requestAnimationFrame(() => {
       pointerFrame.current = 0;
@@ -146,8 +146,8 @@ export default function TurnScrubber({ containerRef, turns, onNavigate }) {
   // 容器级 click:按当前渲染帧的变形坐标解算(指针下那根=点中那根)。
   const clickBar = (e) => {
     const rect = e.currentTarget.getBoundingClientRect();
-    // r11-⑬:与 moveBar 同一归一化(布局像素),zoom≠1 时点击命中与悬停一致。
-    const y = normalizePointerY(e.clientY, rect, e.currentTarget.clientHeight);
+    // r11-p5-1:与 moveBar 同一比例法归一化(布局像素),点击命中与悬停一致。
+    const y = normalizePointerY(e.clientY, rect, box.height);
     const anchor = committedPointerY.current ?? y;
     const idx = nearestTurnIndex(buildTurnIndex(distortPositions(base, anchor, FISHEYE)), y);
     const t = turns[idx];

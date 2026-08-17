@@ -52,19 +52,28 @@ export function distortPositions(base, pointerY, { factor = 3, sigma } = {}) {
 }
 
 /**
- * r11-⑬:指针纵坐标归一化到【布局像素】坐标系。
- * 大/超大字体档把 documentElement.style.zoom 调 >1 时,e.clientY/getBoundingClientRect
- * 是视觉像素,而 positions/box.height(offsetHeight/clientHeight)是布局像素——两坐标系
- * 差一个 zoom 倍数,离顶越远偏越多(用户实测命中漂移根因)。布局高/视觉高之比
- * (clientHeight/rect.height)天然 = 1/zoom,引擎无关。rect.height 为 0(未布局)时
- * 不除,退回视觉差值。结果 clamp 到 [0, clientHeight]。
+ * r11-⑬→p5-1:指针纵坐标归一化到【布局像素】坐标系——无量纲比例法。
+ * 0.2.293 真机(WKWebView 大字体档)回归证明 ⑬ 的比值法
+ * `(clientY-rect.top)*(clientHeight/rect.height)` 依赖「clientHeight 与 rect.height
+ * 的缩放语义关系」这一跨 API 引擎假设(WebKit 与 Chromium 对 zoom 下两 API 的
+ * 缩放口径不一致)→ 归一化出界:命中错位+鱼眼中心跑出条外(全线条距离>衰减半径,
+ * 视觉=鱼眼消失)。
+ * 修法:fraction = (clientY - rect.top) / rect.height —— 分子分母取自【同一次
+ * getBoundingClientRect 的同一坐标系】(CSSOM 规定 client 坐标与 rect 同空间),
+ * 任何内核任何 zoom 下恒等于指针在条内的真实相对位置(0~1 夹紧);
+ * localY = fraction × targetHeight(调用方传自家布局态 box.height,不再查任何
+ * 每事件 DOM API)。引擎无关性由数学保证,不再依赖任何跨 API 缩放假设。
+ * rect.height<=0(未布局)兜底不除,退回视觉差值夹紧。
  */
-export function normalizePointerY(clientY, rect, clientHeight) {
-  const raw = clientY - (rect?.top || 0);
+export function normalizePointerY(clientY, rect, targetHeight) {
+  const th = (Number.isFinite(targetHeight) && targetHeight > 0) ? targetHeight : 0;
   const rh = rect?.height;
-  const ch = (Number.isFinite(clientHeight) && clientHeight > 0) ? clientHeight : (rh || 0);
-  const local = (Number.isFinite(rh) && rh > 0) ? raw * (ch / rh) : raw;
-  return Math.max(0, Math.min(ch || 0, local));
+  if (!(Number.isFinite(rh) && rh > 0)) {
+    const raw = clientY - (rect?.top || 0); // 未布局兜底:不除
+    return Math.max(0, Math.min(th, raw));
+  }
+  const fraction = Math.max(0, Math.min(1, (clientY - (rect.top || 0)) / rh));
+  return fraction * th;
 }
 
 /** positions(px,升序,可含 null 洞)→ 可二分的紧凑索引 {fracs, idxs}。 */
