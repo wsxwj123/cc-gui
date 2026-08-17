@@ -815,9 +815,13 @@ export function ChatInput({ onSend, onStop, onStopBackground, onAccelerate, canS
     // 优先于历史导航——先召回队列,队列空了再翻历史。
     if (e.key === 'ArrowUp' && !e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey && text.trim() === '') {
       // 已注入的条目跳过:它已经送达 CLI,召回到输入框等于给了一个撤不回来的撤回。
+      // ③判官必修-3:barrier(unknown/needs-review/claiming/accepted)同样跳过——否则 ↑ 会把
+      // "可能已送达"的条目无确认回填重发(且 removeFromQueue 拒删使队列还残留第三份);
+      // needs-review 的编辑必须走"取回"确认流程。'kept' 是用户决定不发,也不参与召回。
       let lastIdx = -1;
       for (let i = queueItems.length - 1; i >= 0; i--) {
-        if (!queueItems[i]?.hidden && !isSteered(queueItems[i])) { lastIdx = i; break; }
+        const q = queueItems[i];
+        if (!q?.hidden && !isSteered(q) && !isSteerBarrier(q) && q?.steerState !== 'kept') { lastIdx = i; break; }
       }
       if (lastIdx >= 0 && onEditFromQueue) {
         e.preventDefault();
