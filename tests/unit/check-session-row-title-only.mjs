@@ -55,18 +55,17 @@ import { sessionRowTooltip } from '../../client/src/utils/sessionTitle.js';
   // 子代理折叠三角与 hover 操作组照旧
   assert.match(item, /setExpanded\(!expanded\)/, 't2: 子代理折叠三角保留');
   assert.match(item, /ChevronRight/, 't2: 折叠三角图标保留');
-  // p2-3 行首:💬 彻底移除。p3-2 顶格(dsh 式):恒宽占位槽废除(哨兵a锚:恢复即红),
-  // 状态点存在才内联(6px 间距),无点零留位;三角双形态(触屏/展开内联常显,
-  // 桌面静置 hover 覆盖行首左缘 absolute 不挤压标题)。
+  // p2-3 行首:💬 彻底移除。p3-2b(dsh 实拍对齐):单一窄固定槽(10px+gap-1.5=16px 列)
+  // 恒渲染,有无标记全部标题同一左缘;大恒宽双槽(17px+11px)禁回潮(哨兵a锚);
+  // 子代理三角=absolute 覆盖槽位(触屏常显/桌面 hover 现身/展开常显,带底色)。
   assert.doesNotMatch(item, /<MessageSquare/, 't2-p3: 💬 占位图标彻底移除(哨兵锚)');
-  assert.doesNotMatch(item, /w-\[17px\]|w-\[11px\]/, 't2-p3-2: 恒宽占位槽清零(标题顶格,哨兵a锚)');
-  assert.match(item, /flex items-center gap-1\.5 min-w-0/, 't2-p3-2: 点-标题 6px 间距(gap-1.5)');
-  assert.match(item, /\$\{expanded \? '' : 'md:hidden'\}/, 't2-p3-2: 内联三角=触屏常显/展开态常显');
-  assert.match(item, /hidden md:flex absolute left-0\.5 top-1\/2 -translate-y-1\/2 z-10 p-0\.5 rounded bg-canvas-warm[^"]*group-hover:opacity-100/, 't2-p3-2: 桌面静置三角 hover 覆盖行首左缘(带底色)');
+  assert.doesNotMatch(item, /w-\[17px\]|w-\[11px\]/, 't2-p3-2: 旧大恒宽双槽禁回潮(哨兵a锚)');
+  assert.match(item, /flex items-center gap-1\.5 min-w-0/, 't2-p3-2b: 槽-标题 6px 间距(gap-1.5)');
+  assert.match(item, /absolute left-2 top-1\/2 -translate-y-1\/2 z-10 p-0\.5 rounded bg-canvas-warm[^"]*\$\{expanded \? '' : 'md:opacity-0 md:group-hover:opacity-100'\}/, 't2-p3-2b: 三角覆盖槽位(触屏常显/桌面 hover/展开常显)');
   assert.match(item, /<SessionRowStatus sessionId=\{session\.sessionId\} running=\{running\} isSelected=\{isSelected\} \/>/, 't2-p3: 状态点组件内联(签名不变)');
   const comp = src.slice(src.indexOf('export function SessionRowStatus'), src.indexOf('export function StatusDot'));
-  assert.match(comp, /if \(!kind\) return null;/, 't2-p3-2: 无点行零留位(返回 null)');
-  assert.doesNotMatch(comp, /w-\[11px\]/, 't2-p3-2: 恒宽状态槽废除');
+  assert.match(comp, /w-\[10px\] shrink-0 flex items-center justify-center/, 't2-p3-2b: 单一窄固定槽恒渲染(全列标题同左缘)');
+  assert.doesNotMatch(comp, /return null/, 't2-p3-2b: 槽不因无标记消失(对齐承诺)');
   // 判官p1建议:操作组左缘渐变层纯装饰,不拦标题尾部点击
   assert.match(item, /from-canvas-warm to-transparent pointer-events-none/, 't2-p1判官: 渐变层 pointer-events-none');
   for (const t of ['onTogglePin', 'startRename', 'onFork(session)', 'onArchive(session)', 'DeleteButton']) {

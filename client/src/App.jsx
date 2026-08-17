@@ -1354,11 +1354,10 @@ export function SessionRowStatus({ sessionId, running, isSelected }) {
     completionTracker.observe(sessionId, !!running, !!isSelected);
   }, [sessionId, running, isSelected]);
   const kind = resolveSessionDot({ waiting, running: !!running, completedUnread: !!sessionId && completionTracker.has(sessionId) });
-  // r11-p3-2:无点行零留位(返回 null,标题顶格;允许与有点行不完全对齐——dsh 即如此)。
-  // hooks 全在上方,边沿观测不因 null 返回缺席。
-  if (!kind) return null;
+  // r11-p3-2b(dsh 实拍):单一窄固定槽恒渲染(10px + row gap-1.5 = 16px 列),
+  // 有无标记全部行标题同一左缘;无标记时槽内为空。
   return (
-    <span className="shrink-0 flex items-center justify-center">
+    <span className="w-[10px] shrink-0 flex items-center justify-center">
       {kind === 'waiting' && <span className="session-dot session-dot-amber" aria-hidden />}
       {kind === 'running' && (
         <svg viewBox="0 0 10 10" width={10} height={10} shapeRendering="crispEdges" className="session-dot-run text-accent shrink-0" aria-hidden>
@@ -1486,26 +1485,16 @@ export function SessionItem({ session, isSelected, onSelect, onFork, onArchive, 
           }`}
         >
           {/* r11-⑪:单行化——模型/消息数/子任务数/时间收进原生 title tooltip。
-              r11-p3-2 顶格(dsh 式):恒宽占位槽废除,标题顶格左对齐;状态点存在时才
-              内联在标题左侧(row gap-1.5 = 6px 间距),无点行零留位——允许列不完全
-              对齐(dsh 即如此)。子代理三角两形态:触屏/展开态=内联常显;桌面静置=
-              hover 时 absolute 覆盖行首左缘(带底色,不挤压标题)。 */}
+              r11-p3-2b(dsh 实拍对齐):行首=单一窄固定槽(10px 点位 + gap-1.5 = 16px 列),
+              有无标记全部标题同一左缘对齐;子代理三角为 absolute 覆盖在槽位上
+              (触屏常显/桌面 hover 现身/展开态常显,带底色,运行点被覆盖仅在三角可见时)。 */}
           {hasSubagents && (
             <button
               onClick={(e) => { e.stopPropagation(); setExpanded(!expanded); }}
-              className={`shrink-0 p-0.5 hover:bg-canvas-deep rounded ${expanded ? '' : 'md:hidden'}`}
+              className={`absolute left-2 top-1/2 -translate-y-1/2 z-10 p-0.5 rounded bg-canvas-warm flex items-center justify-center transition-opacity ${expanded ? '' : 'md:opacity-0 md:group-hover:opacity-100'}`}
               title={expanded ? '收起子任务' : '展开子任务'}
             >
               <ChevronRight size={12} className={`text-ink-faint transition-transform ${expanded ? 'rotate-90' : ''}`} />
-            </button>
-          )}
-          {hasSubagents && !expanded && (
-            <button
-              onClick={(e) => { e.stopPropagation(); setExpanded(true); }}
-              className="hidden md:flex absolute left-0.5 top-1/2 -translate-y-1/2 z-10 p-0.5 rounded bg-canvas-warm items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
-              title="展开子任务"
-            >
-              <ChevronRight size={12} className="text-ink-faint" />
             </button>
           )}
           <SessionRowStatus sessionId={session.sessionId} running={running} isSelected={isSelected} />
