@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Trash2, Plus } from 'lucide-react';
+import { Trash2, Plus } from './Icon.jsx';
 import { confirmDialog } from '../utils/confirmDialog.jsx';
 
 // R3:Provider 表单里的「计价」编辑器 —— 用户为该 provider 的每个模型填实付单价。

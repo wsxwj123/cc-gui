@@ -1,5 +1,5 @@
 import React from 'react';
-import { X, ShieldAlert, ExternalLink } from 'lucide-react';
+import { X, ShieldAlert, ExternalLink } from './Icon.jsx';
 
 // L2: 首次启动检测到 macOS 未授予 GUI app 完全磁盘访问 → 弹引导。
 // 不强阻断,用户可"以后再说",但 AI 调用工具读 ~/Downloads/Documents 会失败。

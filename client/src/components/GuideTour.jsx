@@ -9,7 +9,7 @@
 //  · cgui:dock-rail-open:展开顶栏面板坞 rail
 // enter 先派发再找锚点(draft/菜单/rail 是异步渲染,给 3×150ms 重试),仍找不到才顺延跳过。
 import { useState, useEffect, useLayoutEffect, useMemo, useRef } from 'react';
-import { X, ArrowRight, ArrowLeft } from 'lucide-react';
+import { X, ArrowRight, ArrowLeft } from './Icon.jsx';
 
 // 面板 ×10 平铺(文案沿用),每步 enter=展开 rail(锚点 panel-<id> 仅 rail 展开时在 DOM)。
 const PANEL_STEPS = [

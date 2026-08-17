@@ -2,7 +2,7 @@
 //   进入多选模式 → 列表项出现勾选框 → 「删除所选(N)」→ confirmDialog 危险确认 → 并发调各自单删端点。
 // 后端零改动:各面板传入自己的 deleteOne(id)=>Promise(纯后端调用、失败 throw),删完由调用方统一刷新一次。
 import { useState, useCallback } from 'react';
-import { CheckSquare, Square } from 'lucide-react';
+import { CheckSquare, Square } from './Icon.jsx';
 import { confirmDialog } from '../utils/confirmDialog.jsx';
 
 export function useMultiSelect() {

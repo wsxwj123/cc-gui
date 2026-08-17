@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useRef } from 'react';
-import { Settings, Save, RefreshCw, AlertCircle, Check, Plus, Trash2, ChevronDown, ChevronRight, ShieldCheck, ShieldAlert, ExternalLink, Eye, EyeOff, Search, FolderOpen } from 'lucide-react';
+import { Settings, Save, RefreshCw, AlertCircle, Check, Plus, Trash2, ChevronDown, ChevronRight, ShieldCheck, ShieldAlert, ExternalLink, Eye, EyeOff, Search, FolderOpen } from './Icon.jsx';
 import { openExternalUrl } from '../utils/openExternal.js';
 import { isTauri } from '../utils/pickDirectory.js';
 import { confirmDialog } from '../utils/confirmDialog.jsx';

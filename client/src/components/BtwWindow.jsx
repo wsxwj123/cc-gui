@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { MessageSquare, Minus, Send, Trash2, Loader2 } from 'lucide-react';
+import { MessageSquare, Minus, Send, Trash2, Loader2 } from './Icon.jsx';
 import { MarkdownRenderer } from './MarkdownRenderer.jsx';
 import { confirmDialog } from '../utils/confirmDialog.jsx';
 

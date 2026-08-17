@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect, useLayoutEffect } from 'react';
 import { createPortal } from 'react-dom';
-import { User, Brain, Copy, Check, RotateCcw, Pencil, GitBranch, Archive, Scissors } from 'lucide-react';
+import { User, Brain, Copy, Check, RotateCcw, Pencil, GitBranch, Archive, Scissors } from './Icon.jsx';
 import { computeCost, formatCost, costTitle } from '../utils/pricing.js';
 import { copyText } from '../utils/clipboard.js';
 import { useStore } from '../stores/sessionStore.js';

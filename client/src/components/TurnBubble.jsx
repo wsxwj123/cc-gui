@@ -3,7 +3,7 @@ import {
   Brain, Copy, Check, ChevronDown, ChevronRight,
   Wrench, BookOpen, Pencil, Terminal, FileText, Search,
   Globe, Edit3, Loader2, RotateCcw, Bot, GitBranch
-} from 'lucide-react';
+} from './Icon.jsx';
 import { ModelBadge, ProviderAvatar } from './ModelBadge.jsx';
 import { MarkdownRenderer } from './MarkdownRenderer.jsx';
 import { BashCard } from './tools/BashCard.jsx';

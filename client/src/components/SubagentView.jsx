@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { Bot, ChevronDown, GitBranch, Loader2, Square, User } from 'lucide-react';
+import { Bot, ChevronDown, GitBranch, Loader2, Square, User } from './Icon.jsx';
 import { useStore } from '../stores/sessionStore.js';
 import { MarkdownRenderer } from './MarkdownRenderer.jsx';
 import { CoworkBlocks } from './TurnBubble.jsx';

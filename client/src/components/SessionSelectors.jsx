@@ -3,7 +3,7 @@
 // ChatInput,留在 App.jsx 会形成循环 import。逻辑原样搬运,不改行为。
 import React, { useState, useRef, useEffect, useLayoutEffect } from 'react';
 import { createPortal } from 'react-dom';
-import { ChevronDown, Check, X, Settings, Server, Loader2, Smartphone, Pencil } from 'lucide-react';
+import { ChevronDown, Check, X, Settings, Server, Loader2, Smartphone, Pencil } from './Icon.jsx';
 import { useStore } from '../stores/sessionStore.js';
 import { ModelBadge } from './ModelBadge.jsx';
 import { confirmDialog } from '../utils/confirmDialog.jsx';

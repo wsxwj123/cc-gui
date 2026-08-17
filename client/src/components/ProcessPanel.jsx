@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useRef } from 'react';
-import { Activity, Cpu, MapPin, RefreshCw, Zap, Square, Loader2 } from 'lucide-react';
+import { Activity, Cpu, MapPin, RefreshCw, Zap, Square, Loader2 } from './Icon.jsx';
 import { confirmDialog } from '../utils/confirmDialog.jsx';
 
 export function ProcessPanel() {

@@ -1,6 +1,6 @@
 import React, { useEffect } from 'react';
 import { createPortal } from 'react-dom';
-import { X, ExternalLink } from 'lucide-react';
+import { X, ExternalLink } from './Icon.jsx';
 
 // #7 全屏图片放大预览。portal 到 body(逃 transform 包含块,同 ArtifactPreview 全屏范式)。
 // src 为空 → 不渲染。Esc 关闭(capture + stopImmediatePropagation,防误触上层 Esc:

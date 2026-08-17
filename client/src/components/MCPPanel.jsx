@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useRef } from 'react';
 import { createPortal } from 'react-dom';
-import { Server, Package, FolderOpen, RefreshCw, Plug, Activity, Check, X, Plus, Pencil, Trash2, Zap, Download, ArrowLeft, LogIn, LogOut, Search, ChevronRight } from 'lucide-react';
+import { Server, Package, FolderOpen, RefreshCw, Plug, Activity, Check, X, Plus, Pencil, Trash2, Zap, Download, ArrowLeft, LogIn, LogOut, Search, ChevronRight } from './Icon.jsx';
 import { BUILTIN_PLUGINS } from '../utils/builtinPlugins.js';
 import { findBuiltinMcp } from '../utils/builtinMcpServers.js';
 import { McpForm } from './McpForm.jsx';

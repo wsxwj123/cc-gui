@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useRef } from 'react';
-import { AlertCircle, Loader2, ClipboardList, ShieldAlert, FormInput, MessageSquareWarning } from 'lucide-react';
+import { AlertCircle, Loader2, ClipboardList, ShieldAlert, FormInput, MessageSquareWarning } from './Icon.jsx';
 import { useStore } from '../stores/sessionStore.js';
 import { MarkdownRenderer } from './MarkdownRenderer.jsx';
 import { isDangerousCommand, respondPermission } from '../hooks/useWebSocket.js';

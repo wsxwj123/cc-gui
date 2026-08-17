@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Send, Loader2, Square, Terminal, Puzzle, Wrench, Gauge, ChevronDown, X, FileText, Paperclip, Shield, ShieldOff, ClipboardList, Check, Pencil, Smartphone, AtSign, MessagesSquare, Folder, CornerLeftUp, Sparkles, ArrowDownToLine, Zap, BellOff } from 'lucide-react';
+import { Send, Loader2, Square, Terminal, Puzzle, Wrench, Gauge, ChevronDown, X, FileText, Paperclip, Shield, ShieldOff, ClipboardList, Check, Pencil, Smartphone, AtSign, MessagesSquare, Folder, CornerLeftUp, Sparkles, ArrowDownToLine, Zap, BellOff } from './Icon.jsx';
 import { useStore, PERMISSION_MODES } from '../stores/sessionStore.js';
 import { PermissionPrompt } from './PermissionPrompt.jsx';
 import { TodoPanel } from './TodoPanel.jsx';

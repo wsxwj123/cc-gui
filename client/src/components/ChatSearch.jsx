@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
-import { ChevronUp, ChevronDown, X } from 'lucide-react';
+import { ChevronUp, ChevronDown, X } from './Icon.jsx';
 
 // 窗内检索浮层(Cmd/Ctrl+F)。高亮用 CSS Custom Highlight API(CSS.highlights +
 // Range),**完全不改 DOM** —— 否则边流式 re-render 边包 <mark> 会触发 React

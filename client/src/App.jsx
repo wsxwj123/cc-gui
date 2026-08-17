@@ -77,7 +77,7 @@ import {
   Archive, ArchiveRestore, Trash2, EyeOff, Columns2, Smartphone, Pencil, Type, Palette,
   Menu, SquarePen, Gauge, Cpu, CheckCircle2, BookText, Sparkles, HelpCircle, Pin,
   Download, ClipboardCopy, LayoutGrid, MoreHorizontal, Star, Target,
-} from 'lucide-react';
+} from './components/Icon.jsx';
 import { buildFontEntries, groupFonts, detectFonts, platformCandidates, queryLocalFontFamilies } from './utils/systemFonts.js';
 import { copyText } from './utils/clipboard.js';
 import { OFFICIAL_LOGIN_HINT, matchOfficialLoginError, notifyOauthMissing } from './utils/officialAuth.js';

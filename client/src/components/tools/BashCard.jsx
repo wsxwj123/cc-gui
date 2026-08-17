@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Terminal, ChevronDown, ChevronRight, Loader2 } from 'lucide-react';
+import { Terminal, ChevronDown, ChevronRight, Loader2 } from '../Icon.jsx';
 
 const PREVIEW_LINES = 8;
 

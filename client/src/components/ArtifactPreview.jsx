@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useId, useRef } from 'react';
 import { createPortal } from 'react-dom';
-import { Copy, Check, Code2, Eye, AlertTriangle, Maximize2, X, PanelRight, RefreshCw } from 'lucide-react';
+import { Copy, Check, Code2, Eye, AlertTriangle, Maximize2, X, PanelRight, RefreshCw } from './Icon.jsx';
 import { copyText } from '../utils/clipboard.js';
 import { useStore } from '../stores/sessionStore.js';
 import { useResizable, Splitter } from '../hooks/useResizable.jsx';

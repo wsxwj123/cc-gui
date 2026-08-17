@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useRef } from 'react';
-import { FileText, Edit3, Terminal, RefreshCw, ChevronDown, ChevronRight, ExternalLink, RotateCcw, Check, Eye, EyeOff } from 'lucide-react';
+import { FileText, Edit3, Terminal, RefreshCw, ChevronDown, ChevronRight, ExternalLink, RotateCcw, Check, Eye, EyeOff } from './Icon.jsx';
 import { useStore } from '../stores/sessionStore.js';
 import { DiffViewer } from './DiffViewer.jsx';
 import { confirmDialog } from '../utils/confirmDialog.jsx';

@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Cpu, Calendar, RefreshCw, FolderOpen, Download, FileText } from 'lucide-react';
+import { Cpu, Calendar, RefreshCw, FolderOpen, Download, FileText } from './Icon.jsx';
 import { ModelBadge, modelProvider } from './ModelBadge.jsx';
 import { ArtifactPreview } from './ArtifactPreview.jsx';
 import { aggregateCost, formatCost } from '../utils/pricing.js';

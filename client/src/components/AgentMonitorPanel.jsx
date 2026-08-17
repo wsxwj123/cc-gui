@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useRef } from 'react';
-import { Bot, Loader2, Square, Clock, RefreshCw, Terminal, ChevronDown, ChevronRight, Maximize2, PlayCircle } from 'lucide-react';
+import { Bot, Loader2, Square, Clock, RefreshCw, Terminal, ChevronDown, ChevronRight, Maximize2, PlayCircle } from './Icon.jsx';
 import { useStore } from '../stores/sessionStore.js';
 import { MarkdownRenderer } from './MarkdownRenderer.jsx';
 

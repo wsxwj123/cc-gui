@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { RefreshCw, Check, X, Download, Terminal, ChevronDown, ChevronRight, AlertTriangle } from 'lucide-react';
+import { RefreshCw, Check, X, Download, Terminal, ChevronDown, ChevronRight, AlertTriangle } from './Icon.jsx';
 
 // 统一环境检查面板:node(硬需求,app 能跑=必在)/ claude CLI(硬需求)/ python(可选,
 // 部分技能需要)。每项显示状态 + 缺失时一键在终端安装 + 重新检测。

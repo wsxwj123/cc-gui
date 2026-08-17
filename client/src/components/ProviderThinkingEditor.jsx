@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Trash2 } from 'lucide-react';
+import { Trash2 } from './Icon.jsx';
 import { EFFORT_ORDER } from '../utils/effortCaps.js';
 
 // r10-9:Provider 表单里的「思考能力」编辑器 —— 为每个模型声明是否支持思考、支持哪些档。

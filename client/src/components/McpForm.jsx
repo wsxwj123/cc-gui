@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { X, Plus, Trash2, RefreshCw, ExternalLink, ArrowLeft, Search, ChevronRight } from 'lucide-react';
+import { X, Plus, Trash2, RefreshCw, ExternalLink, ArrowLeft, Search, ChevronRight } from './Icon.jsx';
 import { BUILTIN_MCP_SERVERS, findBuiltinMcp } from '../utils/builtinMcpServers.js';
 import { openExternalUrl } from '../utils/openExternal.js';
 

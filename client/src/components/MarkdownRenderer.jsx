@@ -4,7 +4,7 @@ import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
 import 'katex/dist/katex.min.css'; // CJ-3:KaTeX 样式(katex 本体经 mermaid 已在依赖里)
-import { Copy, Check } from 'lucide-react';
+import { Copy, Check } from './Icon.jsx';
 import { copyText } from '../utils/clipboard.js';
 import { openExternalUrl } from '../utils/openExternal.js';
 import { ArtifactPreview, isPreviewable, CollapsibleCode } from './ArtifactPreview.jsx';

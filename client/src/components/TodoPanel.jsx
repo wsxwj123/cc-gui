@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Check, Circle, ClipboardList, Loader2, ChevronDown, ChevronRight, EyeOff } from 'lucide-react';
+import { Check, Circle, ClipboardList, Loader2, ChevronDown, ChevronRight, EyeOff } from './Icon.jsx';
 import { MarkdownRenderer } from './MarkdownRenderer.jsx';
 
 /**

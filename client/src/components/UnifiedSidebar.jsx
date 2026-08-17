@@ -8,7 +8,7 @@ import { createPortal } from 'react-dom';
 import {
   Plus, Search, FolderOpen, EyeOff, Trash2, Pin, X, GitBranch, GitMerge,
   ChevronDown, ChevronLeft, RefreshCw, Archive, Loader2,
-} from 'lucide-react';
+} from './Icon.jsx';
 import { useStore } from '../stores/sessionStore.js';
 import { confirmDialog } from '../utils/confirmDialog.jsx';
 import { resolveSessionTitle } from '../utils/sessionTitle.js';
