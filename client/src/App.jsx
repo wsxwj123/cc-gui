@@ -77,6 +77,7 @@ import {
 import { buildFontEntries, groupFonts, detectFonts, platformCandidates, queryLocalFontFamilies } from './utils/systemFonts.js';
 import { copyText } from './utils/clipboard.js';
 import { OFFICIAL_LOGIN_HINT, matchOfficialLoginError, notifyOauthMissing } from './utils/officialAuth.js';
+import { effortCapsFor, effortAllowed } from './utils/effortCaps.js';
 import { escRoute, idleEscAction, escYieldCardId, isEditableTarget } from './utils/escAction.js';
 import { waitingSessionKeys, countAttention, applyAttentionBadge } from './utils/attention.js';
 import { notifyWaiting } from './utils/desktopNotify.js';
@@ -5158,7 +5159,10 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       // TDZ)。pin 显式关 1m 时 syncContext1m 已清标记,不会误补。
       const _c1m = selectedSession?.sessionId && _stM.context1mBySession?.[selectedSession.sessionId];
       if (_c1m && currentModel && !/\[1m\]/i.test(currentModel)) currentModel = currentModel + '[1m]';
-      const effort = useStore.getState().getEffortFor(sessionQueueKey);
+      let effort = useStore.getState().getEffortFor(sessionQueueKey);
+      // r10-9:模型能力门控——模型声明不支持思考或该档不支持时不传 effort(不写 env,
+      // CLI 端零痕迹)。UI 已回落兜底,这里是发送侧防御(pin 残留/竞态)。
+      if (effort && !effortAllowed(effortCapsFor(useStore.getState().modelEffortMeta, currentModel), effort)) effort = '';
       // When resuming an existing session, cwd MUST be the EXACT string the
       // CLI was launched with — including Unicode chars (e.g. `/foo/肠骨轴`).
       // Reconstructing from the hash dir name is lossy: CLI maps every non-

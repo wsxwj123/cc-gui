@@ -7,6 +7,8 @@ import { confirmDialog } from '../utils/confirmDialog.jsx';
 import { ImageLightbox } from './ImageLightbox.jsx';
 import { AnchoredPopover } from './SessionSelectors.jsx';
 import { isSteered, firstSteerableIndex, isSteerBarrier } from '../utils/steerQueue.js';
+import { resolveSelectorModel } from '../utils/routing.js';
+import { effortCapsFor, effortAllowed, resolveEffortOnModelChange } from '../utils/effortCaps.js';
 
 // Permission mode metadata — mirrors `claude --permission-mode <choice>`。
 // P2.1:文案对齐官方六档语义(RESEARCH-mode-semantics §④b);bypass 中文名保持「放任」。
@@ -117,6 +119,8 @@ export const EFFORT_LEVELS = [
 ];
 
 // 修正批#1b:力度按钮(顶栏,作用于活跃窗格会话)。弹层走 AnchoredPopover。
+// r10-9:按当前模型自适应——reasoning:false 锁灰;efforts 声明只列支持档;切模型时
+// 当前档不支持回落最高可用档+toast;per-model 上次选择记忆(localStorage cgui-effort-<id>)。
 export function EffortSelector({ permKey = null, hideLabel = false, tourAnchor = false, drop = 'down' }) {
   // Per-SESSION effort:这条会话自己的力度,无 entry 回落全局默认。和模型/权限一样按
   // 会话隔离持久化,改它不影响其他会话。
@@ -125,28 +129,73 @@ export function EffortSelector({ permKey = null, hideLabel = false, tourAnchor =
   // 全局默认思考强度(settings 的 CLAUDE_CODE_EFFORT_LEVEL,/api/model 带回)。"默认"档
   // 的真实落点:设了全局 → CLI 吃全局值;没设 → 由模型/服务端自适应。文案照实显示。
   const defaultEffort = useStore((s) => s.defaultEffort || '');
-  const setEffort = (id) => useStore.getState().setEffortFor(permKey, id);
+  // r10-9:当前窗格模型的思考能力(无声明 = 全档,现状不变)。
+  const modelEffortMeta = useStore((s) => s.modelEffortMeta);
+  const selModel = useStore((s) => resolveSelectorModel(s, permKey));
+  const caps = effortCapsFor(modelEffortMeta, selModel);
+  const bareModelId = String(selModel || '').replace(/\[1m\]/i, '');
+  const setEffort = (id) => {
+    useStore.getState().setEffortFor(permKey, id);
+    // per-model 记忆:显式选择才写(空档也记——"该模型我就要默认")。
+    if (bareModelId) { try { localStorage.setItem(`cgui-effort-${bareModelId}`, id); } catch {} }
+  };
   const [open, setOpen] = useState(false);
+  const [fellNotice, setFellNotice] = useState(null); // 回落 toast(5s 自清)
   const wrapRef = useRef(null);
+  // 切模型 → 档位解算:同一 permKey 下模型变化才跑(切窗格/首挂载不动别的会话的档)。
+  const lastModelRef = useRef({ permKey, model: bareModelId });
+  useEffect(() => {
+    const prev = lastModelRef.current;
+    lastModelRef.current = { permKey, model: bareModelId };
+    if (!bareModelId || prev.permKey !== permKey || prev.model === bareModelId || !prev.model) return;
+    let remembered = null;
+    try { remembered = localStorage.getItem(`cgui-effort-${bareModelId}`); } catch {}
+    const r = resolveEffortOnModelChange(caps, effort, remembered);
+    if (!r.changed) return;
+    useStore.getState().setEffortFor(permKey, r.effort);
+    if (r.reason === 'fallback') {
+      const label = EFFORT_LEVELS.find((x) => x.id === r.effort)?.label || r.effort;
+      setFellNotice(`该模型不支持原档位,已回落「${label}」`);
+    } else if (r.reason === 'locked' && effort) {
+      setFellNotice('该模型不支持思考,已回落默认');
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [permKey, bareModelId]);
+  useEffect(() => {
+    if (!fellNotice) return;
+    const id = setTimeout(() => setFellNotice(null), 5000);
+    return () => clearTimeout(id);
+  }, [fellNotice]);
   const current = EFFORT_LEVELS.find((e) => e.id === effort) || EFFORT_LEVELS[0];
+  const locked = caps.reasoning === false;
+  const visibleLevels = EFFORT_LEVELS.filter((e) => e.id === '' || effortAllowed(caps, e.id));
 
   return (
     <div ref={wrapRef} className="relative" data-tour={tourAnchor ? 'effort-selector' : undefined}>
       <button onClick={() => setOpen(!open)}
-        className="flex items-center gap-1 px-2 py-1 rounded-md hover:bg-black/5 transition-colors"
-        title={openAIProtocol
+        className={`flex items-center gap-1 px-2 py-1 rounded-md transition-colors ${locked ? 'opacity-45 cursor-default' : 'hover:bg-black/5'}`}
+        title={locked
+          ? '该模型不支持思考'
+          : openAIProtocol
           ? `Effort: ${current.label}（OpenAI 兼容模式会映射为 reasoning_effort；不支持的端点自动降级）`
           : `Effort: ${current.label}`}>
         <Gauge size={12} className="text-ink-muted" />
-        {!hideLabel && <span className="text-[11px] font-body text-ink-muted whitespace-nowrap">{current.label}</span>}
+        {!hideLabel && <span className="text-[11px] font-body text-ink-muted whitespace-nowrap">{locked ? '不支持' : current.label}</span>}
         <ChevronDown size={10} className="text-ink-faint" />
       </button>
+      {fellNotice && (
+        <div className="absolute top-full left-1/2 -translate-x-1/2 mt-1 z-[120] px-2.5 py-1 rounded-md bg-ink/90 text-canvas text-[11px] font-body whitespace-nowrap shadow-lg pointer-events-none">
+          {fellNotice}
+        </div>
+      )}
       <AnchoredPopover anchorRef={wrapRef} open={open} onRequestClose={() => setOpen(false)} drop={drop}
         className="w-44 max-w-[calc(var(--app-w,100vw)-1.5rem)] py-1 max-h-[min(60vh,calc(var(--app-h,100dvh)-6rem))] overflow-y-auto">
           <div className="px-3 py-1.5 text-[10px] text-ink-faint uppercase tracking-wider font-body">
             {openAIProtocol ? '推理力度 (reasoning_effort)' : '推理力度 (--effort)'}
           </div>
-          {EFFORT_LEVELS.map((e) => {
+          {locked ? (
+            <div className="px-3 py-2 text-[11px] text-ink-faint font-body">该模型声明不支持思考,本会话不传思考档位。</div>
+          ) : visibleLevels.map((e) => {
             // "默认"档 desc 按真实落点显示:全局(settings 环境变量)设了值时 CLI 会吃它,
             // 并非"CLI 自己决定"——原静态文案在设了全局时是错的(用户实报困惑)。
             const desc = e.id !== '' ? e.desc

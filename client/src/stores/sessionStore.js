@@ -327,6 +327,7 @@ export const useStore = create((set, get) => ({
   messages: [],
   currentModel: null,
   availableModels: [],
+  modelEffortMeta: null, // r10-9:当前 provider 的 {modelId:{reasoning?,efforts?}},null=无声明全档可用
   // Live-detected backend (set by fetchProvider). When cc switch routes the
   // CLI's Claude-shaped API calls to deepseek/mimo/etc, this tells us the
   // real upstream so pricing.js can charge correctly. Defaults to anthropic.
@@ -1817,6 +1818,8 @@ export const useStore = create((set, get) => ({
       // 顶栏 ModelSelector 以 !currentModel 早退,会整个消失。
       if (data.model) set({ currentModel: data.model });
       set({ availableModels: Array.isArray(data.available) ? data.available : [] });
+      // r10-9:当前 provider 的每模型思考能力声明(EffortSelector 按当前模型自适应)。
+      set({ modelEffortMeta: (data.modelMeta && typeof data.modelMeta === 'object') ? data.modelMeta : null });
       // 手机批#3:providerName 一并写入(桌面由 ModelSelector 的 load 写;手机端不挂
       // ModelSelector,菜单里"当前 Provider"的显示靠这里)。
       if (data.provider != null) set({ providerName: data.provider });
