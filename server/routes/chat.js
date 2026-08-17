@@ -1724,8 +1724,10 @@ router.post('/chat/permission-mode', async (req, res) => {
 // ── 引导注入(无打断 steering)────────────────────────────────────────────────
 // 「忙」的判据:复用块(:1107)那一行【只把 s.idle 取反】,其余存活条件逐字照抄。
 //   复用块要的是 s.idle(回合间保活、等下一条消息)→ push 开【新回合】;
-//   这里要的是 !s.idle(回合正在跑)→ 通过 SDKUserMessage.priority='now' 明确要求当前回合
-//   在下一个可接收输入的边界读取；不再依赖 SDK 未声明的默认 priority。
+//   这里要的是 !s.idle(回合正在跑)→ 不传 priority:r7 真机实测【不传 = 消息在工具边界
+//   折叠进当前回合,1 init/1 result】。SDK 类型里的 priority?('now'|'next'|'later')零文档、
+//   未实测('later' 按类型语义才是另起回合),判官必修-5:未经真机 A/B 不得显式传值——
+//   传错档会动摇 r7 取证的两形态落盘与回合切分契约。
 // 与 v0.2.264 复活守卫自洽:主 agent 在 4s 去抖 finalize 之后续跑时,守卫(:1561)把
 // slot.idle 翻回 false 并置 revived —— 那正是"确实有一个在跑的回合",此时注入应当成立,
 // 所以判据用 s.idle(会随复活翻转)而不是 finishedAt/lastResultAt 这类不回退的时刻字段。
@@ -1776,7 +1778,7 @@ export function acceptSteer(procs, request) {
     type: 'user',
     message: { role: 'user', content: request.content },
     parent_tool_use_id: null,
-    priority: 'now',
+    // ⑤不传 priority(见 findBusySlot 上方注释):实测默认档即"同回合工具边界折叠"。
     uuid: request.uuid,
   };
   try {

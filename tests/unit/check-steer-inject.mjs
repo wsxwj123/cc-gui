@@ -46,7 +46,11 @@ assert.deepEqual(validateSteerRequest({ sessionId: ' session-a ', uuid: ' STEER-
   const first = acceptSteer(procs, request);
   assert.deepEqual(first, { status: 200, body: { ok: true, accepted: true, duplicate: false, pid: 'sdk-1' } });
   assert.equal(slot.input.pushed.length, 1);
-  assert.equal(slot.input.pushed[0].priority, 'now');
+  // ⑤判官必修-5:注入消息不得携带 priority 字段——SDK 该字段零文档未实测,r7 真机取证的
+  // 是【不传 = 工具边界折叠进当前回合】。变异哨兵:在 acceptSteer 的 msg 里加回
+  // priority:'now' 本断言必须变红(已实际验证过一次)。
+  assert.equal('priority' in slot.input.pushed[0], false, '注入消息禁止显式 priority(未实测语义)');
+  assert.equal(slot.input.pushed[0].parent_tool_use_id, null, 'parent_tool_use_id: null 保留');
   assert.equal(slot.input.pushed[0].uuid, 'steer-same-id');
   slot.idle = true;
   const duplicate = acceptSteer(procs, request);
