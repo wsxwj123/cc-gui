@@ -1,29 +1,30 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, useCallback } from 'react';
-import { turnWaveWidth, buildTurnIndex, nearestTurnIndex, decimationStep, shouldRenderTick } from '../utils/turnWave.js';
+import { turnWaveWidth, layoutCompactPositions, distortPositions, buildTurnIndex, nearestTurnIndex } from '../utils/turnWave.js';
 
 // 右侧竖向回合进度条(Claude Code/Codex 式线性波形 + macOS Dock 放大)。
-// 每个用户回合一条横线;hover 按指针的实际纵向像素距离向左拉长 + 浮窗显示该回合消息摘要,
-// 点击平滑滚动到该回合。
+// hover 线条向左拉长 + 浮窗显示该回合消息摘要,点击平滑滚动到该回合。
 //
-// r11-④ 高密度重做:交互从「每刻度独立 button 热区」改为「单容器解算最近回合」——
-// 容器一个 pointermove(rAF 节流),按 pointerY 对全量 positions 二分解最近回合索引,
-// tooltip/点击/波形放大全用该索引(157 回合时刻度间距≈4px<12px 热区,压盖致悬停命中
-// 错邻居,是重做根因)。刻度本身退役为纯视觉线(div);回合数超过 容器高/3px 时渲染
-// 抽稀(每 N 条画一条,首尾恒画,活动回合恒画),解算仍用全量 positions,交互精确到
-// 真实回合。可达性:容器 role=slider + 上下方向键步进。
+// r11-④(鱼眼版,对齐 dsh 效果):
+//  · 布局:全部回合**等距紧凑**(不再按消息滚动位置比例分布),整簇垂直居中、永不
+//    溢出容器(回合数×间距超高时整体压缩间距),所有回合始终全部渲染(无抽稀);
+//  · 鱼眼:pointermove 时指针附近间距局部拉开(中心×3,高斯衰减 ±3 根内明显),
+//    全簇重归一化 —— 总高/簇边界不变(distortPositions 纯函数,单测钉不变量);
+//  · 命中:tooltip/点击/键盘步进全部在**变形后坐标**上二分解最近回合(所见即所得:
+//    指针下那根 = 命中那根);波形宽度同样用变形后坐标距离;
+//  · 工程:rAF 节流;线条 transform 过渡 ≤80ms 跟手;pointerleave 回弹等距;
+//    卸载清理;role=slider + 上下键步进。
 //
 // 定位:作为 SessionDetail 根(position:relative)的 absolute 子元素,贴 right;
 // 高度/纵向起点用 containerRef.offsetTop / offsetHeight(布局 px,与 CSS zoom 无关)
 // —— 不用 fixed / getBoundingClientRect / window.innerWidth / --ui-zoom 换算,
 // 因此在 GUI app 的缩放下也精确贴右缘,不会跑到中间挡文本。
-// 点的纵向位置 = 该回合 DOM 节点 offsetTop / 内容 scrollHeight(0~1),与滚动无关。
 
 const SHOW_DELAY = 220;
 const HIDE_DELAY = 120;
+const FISHEYE = { factor: 3 }; // sigma 缺省 = 3×平均间距(distortPositions 内部)
 export default function TurnScrubber({ containerRef, turns, onNavigate }) {
   const rootRef = useRef(null);                // 本组件根,取其 offsetParent 作定位基准
   const [box, setBox] = useState(null);        // { top, height } 相对根
-  const [positions, setPositions] = useState([]); // 每个回合点 0~1
   const [pointerY, setPointerY] = useState(null);
   const [activeIdx, setActiveIdx] = useState(null); // 解算出的最近回合索引(hover/键盘共用)
   const activeIdxRef = useRef(null);                // rAF 回调里的同步判重(不吃 setState 时序)
@@ -33,39 +34,23 @@ export default function TurnScrubber({ containerRef, turns, onNavigate }) {
   const pointerFrame = useRef(0);
   const pendingPointerY = useRef(null);
   const committedPointerY = useRef(null);
-  // turns 经 ref 读取,使 measure 身份稳定 → ResizeObserver 不会每帧(流式每 token)重建。
-  const turnsRef = useRef(turns);
-  turnsRef.current = turns;
 
   const measure = useCallback(() => {
     const el = containerRef.current;
     if (!el) return;
     // box.top 必须是 containerRef 相对【本 scrubber 的 offsetParent】的偏移。此前直接用
     // el.offsetTop,但 containerRef 的 offsetParent(消息滚动列)与 scrubber 的 offsetParent
-    // (面板根)不是同一个 → 差了标题栏高度(实测 79px),整条进度轨上移、首点跑出消息区上方
-    // (#7)。累加 offsetTop 到 scrubber 的定位基准(布局 px,与 zoom 无关)。rootRef 首帧未挂载
-    // 时回落 el.offsetParent(旧行为),ResizeObserver 首个回调会带正确基准重算修正。
+    // (面板根)不是同一个 → 差了标题栏高度(实测 79px),整条进度轨上移(#7)。累加 offsetTop
+    // 到 scrubber 的定位基准(布局 px,与 zoom 无关)。rootRef 首帧未挂载时回落
+    // el.offsetParent(旧行为),ResizeObserver 首个回调会带正确基准重算修正。
     const base = rootRef.current?.offsetParent || el.offsetParent;
     let top = 0, node = el;
     while (node && node !== base) { top += node.offsetTop; node = node.offsetParent; }
-    setBox({ top, height: el.offsetHeight });
-    const total = el.scrollHeight || 1;
-    // 首末点映射进留边区间:首条 offsetTop≈0 → 原 top:0% + translate(-50%) 圆心落在轨道
-    // 顶边、上半被裁 → 视觉上"缺首点"(#5,既有 bug)。上下各留 pad 让首末点完整可见。
-    const pad = 0.02;
-    setPositions(turnsRef.current.map((t) => {
-      const node = el.querySelector(`[data-turn-uuid="${t.uuid}"]`);
-      if (!node) return null;
-      return Math.max(pad, Math.min(1 - pad, node.offsetTop / total));
-    }));
+    setBox((prev) => (prev && prev.top === top && prev.height === el.offsetHeight)
+      ? prev : { top, height: el.offsetHeight });
   }, [containerRef]);
 
-  // turns 变化(新增/裁剪回合)时重测一次;measure 本身稳定,不触发 observer 重建。
-  // 依赖用稳定签名(回合数 + 末尾 uuid)而非数组引用:userTurns 每帧新建,若依赖引用则
-  // 切焦点/流式每帧都跑 O(n) querySelector + 强制同步回流,×2 pane 阻塞列表高亮绘制(#9)。
-  const turnsSig = turns.length + ':' + (turns[turns.length - 1]?.uuid || '');
-  useLayoutEffect(() => { measure(); }, [measure, turnsSig]);
-
+  useLayoutEffect(() => { measure(); }, [measure]);
   useEffect(() => {
     const el = containerRef.current;
     if (!el) return;
@@ -80,6 +65,17 @@ export default function TurnScrubber({ containerRef, turns, onNavigate }) {
     clearTimeout(hideTimer.current);
     cancelAnimationFrame(pointerFrame.current);
   }, []);
+
+  // 等距紧凑基线(px)与当前(可能变形后)坐标。渲染/命中/波形全用同一份 positions,
+  // 保证所见即所得;无指针时 positions === base(等距原样)。
+  const base = useMemo(
+    () => layoutCompactPositions(turns.length, box?.height || 0),
+    [turns.length, box?.height],
+  );
+  const positions = useMemo(
+    () => (pointerY == null ? base : distortPositions(base, pointerY, FISHEYE)),
+    [base, pointerY],
+  );
 
   // 平滑滚动到回合。不用 scrollIntoView/scrollTo 的 behavior:'smooth' —— 实测某些
   // webview(含本 app 的 WKWebView)对程序化平滑滚动不响应。用 rAF 手动缓动,处处可用。
@@ -104,9 +100,6 @@ export default function TurnScrubber({ containerRef, turns, onNavigate }) {
     requestAnimationFrame(step);
   };
 
-  // 全量 positions 的紧凑二分索引(null 洞剔除;解算恒走它,与渲染抽稀无关)。
-  const turnIndex = useMemo(() => buildTurnIndex(positions), [positions]);
-
   // 索引变化 → 武装 tooltip(首次入场延迟 SHOW_DELAY;tooltip 已可见则即时跟随)。
   const armTip = (i) => {
     clearTimeout(hideTimer.current);
@@ -119,7 +112,7 @@ export default function TurnScrubber({ containerRef, turns, onNavigate }) {
     pointerFrame.current = 0;
     pendingPointerY.current = null;
     committedPointerY.current = null;
-    setPointerY(null);
+    setPointerY(null); // 回弹等距(positions 回落 base,transform 过渡自然收拢)
     activeIdxRef.current = null;
     setActiveIdx(null);
     clearTimeout(showTimer.current);
@@ -137,9 +130,10 @@ export default function TurnScrubber({ containerRef, turns, onNavigate }) {
       if (committedPointerY.current != null && Math.abs(next - committedPointerY.current) < 1) return;
       committedPointerY.current = next;
       setPointerY(next);
-      // 单容器解算:pointerY → 最近回合索引(tooltip/点击/波形放大统一用它)。
-      const h = containerRef.current?.offsetHeight || 0;
-      const idx = h > 0 ? nearestTurnIndex(turnIndex, next / h) : -1;
+      // 单容器解算:在【变形后坐标】上二分最近回合(与本帧渲染同一 distort 输入,
+      // 所见即所得),tooltip/点击/波形放大统一用该索引。
+      const distorted = distortPositions(base, next, FISHEYE);
+      const idx = nearestTurnIndex(buildTurnIndex(distorted), next);
       if (idx >= 0 && idx !== activeIdxRef.current) {
         activeIdxRef.current = idx;
         setActiveIdx(idx);
@@ -147,28 +141,25 @@ export default function TurnScrubber({ containerRef, turns, onNavigate }) {
       }
     });
   };
-  // 容器级 click:按点击点解算(不依赖 rAF 已提交的 pointerY,首次点击也准)。
+  // 容器级 click:按当前渲染帧的变形坐标解算(指针下那根=点中那根)。
   const clickBar = (e) => {
     const rect = e.currentTarget.getBoundingClientRect();
     const h = rect.height || 1;
     const y = Math.max(0, Math.min(h, e.clientY - rect.top));
-    const idx = nearestTurnIndex(turnIndex, y / h);
+    const anchor = committedPointerY.current ?? y;
+    const idx = nearestTurnIndex(buildTurnIndex(distortPositions(base, anchor, FISHEYE)), y);
     const t = turns[idx];
     if (idx >= 0 && t) scrollToTurn(t.uuid);
   };
-  // 键盘步进(role=slider):上下键在有位置的回合间移动并滚动到该回合。
+  // 键盘步进(role=slider):上下键逐回合移动并滚动到该回合。
   const keyBar = (e) => {
     const dir = e.key === 'ArrowDown' ? 1 : e.key === 'ArrowUp' ? -1 : 0;
-    if (!dir) return;
-    const { idxs } = turnIndex;
-    if (!idxs.length) return;
+    if (!dir || turns.length === 0) return;
     e.preventDefault();
     const cur = activeIdx ?? tipIdx;
-    const pos = cur == null ? -1 : idxs.indexOf(cur);
-    const nextPos = pos === -1
-      ? (dir > 0 ? 0 : idxs.length - 1)
-      : Math.max(0, Math.min(idxs.length - 1, pos + dir));
-    const idx = idxs[nextPos];
+    const idx = cur == null
+      ? (dir > 0 ? 0 : turns.length - 1)
+      : Math.max(0, Math.min(turns.length - 1, cur + dir));
     activeIdxRef.current = idx;
     setActiveIdx(idx);
     setTipIdx(idx);
@@ -177,13 +168,6 @@ export default function TurnScrubber({ containerRef, turns, onNavigate }) {
   };
 
   if (!box || turns.length < 2) return null;
-
-  // 抽稀:回合数 > 容器高/3px 时每 step 条画一条(首尾 + 活动回合恒画)。
-  const step = decimationStep(positions.length, box.height, 3);
-  // 波形中心锚定解算出的回合位置(抽稀时跟指针裸坐标会在无线处鼓包),无解算回落指针。
-  const waveCenter = activeIdx != null && positions[activeIdx] != null
-    ? positions[activeIdx] * box.height
-    : pointerY;
 
   return (
     <div
@@ -205,23 +189,25 @@ export default function TurnScrubber({ containerRef, turns, onNavigate }) {
     >
       {positions.map((n, i) => {
         const t = turns[i];
-        // positions 比 turns 晚一帧更新:切到更短会话/回滚裁剪那一帧 positions 仍是旧的
-        // 长数组,turns[i] 可能 undefined → 必须守卫,否则 .uuid 抛错整页白屏。
+        // positions 与 turns 同帧派生(turns.length),但守卫保留:极端时序下 turns[i]
+        // 为 undefined 则跳过,避免 .uuid 抛错整页白屏。
         if (n == null || !t) return null;
-        if (!shouldRenderTick(i, positions.length, step) && i !== activeIdx) return null;
         return (
         <div
           key={t.uuid || i}
           style={{
-            position: 'absolute', top: `${n * 100}%`, right: 0,
-            transform: 'translateY(-50%)',
+            position: 'absolute', top: 0, right: 0,
+            // 鱼眼间距变化走 transform 过渡(≤80ms,跟手不粘滞);离开回弹同一通道。
+            transform: `translateY(${n}px) translateY(-50%)`,
+            transition: 'transform 70ms ease-out',
           }}
           className="w-[18px] flex items-center justify-end pointer-events-none"
         >
           <span
             data-turn-wave
             style={{
-              width: waveCenter == null ? 6 : turnWaveWidth(Math.abs(waveCenter - n * box.height)),
+              // 波形距离用【变形后坐标】(鱼眼拉开后放大更明显)。
+              width: pointerY == null ? 6 : turnWaveWidth(Math.abs(pointerY - n)),
               height: 2,
             }}
             className={`block transition-[width,background-color,opacity] duration-75 ease-out ${
@@ -233,7 +219,7 @@ export default function TurnScrubber({ containerRef, turns, onNavigate }) {
       })}
       {tipIdx != null && positions[tipIdx] != null && turns[tipIdx] && (
         <div
-          style={{ position: 'absolute', top: `${positions[tipIdx] * 100}%`, right: '100%', marginRight: 8, transform: 'translateY(-50%)', maxWidth: 260, width: 'max-content' }}
+          style={{ position: 'absolute', top: positions[tipIdx], right: '100%', marginRight: 8, transform: 'translateY(-50%)', maxWidth: 260, width: 'max-content' }}
           className="glass-popover rounded-lg px-3 py-2 shadow-lg pointer-events-none animate-fade-in"
         >
           <div className="text-[10px] text-ink-faint font-mono mb-0.5 flex items-center gap-1.5">

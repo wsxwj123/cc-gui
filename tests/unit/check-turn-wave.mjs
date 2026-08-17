@@ -16,6 +16,9 @@ assert.doesNotMatch(scrubber, /rounded-full/, '波形不能保留胶囊圆点外
 assert.match(scrubber, /onPointerMove=\{moveBar\}/, '波形必须按实际 pointer Y 连续响应');
 assert.match(scrubber, /requestAnimationFrame\(\(\) =>/, 'pointer 更新必须以 rAF 节流');
 assert.match(scrubber, /Math\.abs\(next - committedPointerY\.current\) < 1/, '不足 1px 的 pointer 变化不能提交状态');
-assert.match(scrubber, /position: 'absolute', top: `\$\{n \* 100\}%`, right: 0/, '所有线必须固定右端');
+// r11-④(鱼眼版):布局从「比例 top%」改为「等距紧凑 + transform 变形坐标」,
+// 固定右端语义不变,定位断言随之更新(top:0 + translateY(px))。
+assert.match(scrubber, /position: 'absolute', top: 0, right: 0/, '所有线必须固定右端');
+assert.match(scrubber, /translateY\(\$\{n\}px\)/, '线条纵向定位必须走变形后坐标 translateY');
 
 console.log('PASS check-turn-wave');
