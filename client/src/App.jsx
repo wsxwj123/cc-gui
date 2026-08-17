@@ -1052,9 +1052,13 @@ function MainLayout({ sidebarCollapsed, selectedProject, rightPanel, setRightPan
     <div className="flex-1 flex min-h-0 gap-0 p-0 overflow-hidden">
       {!sidebarCollapsed && (
         <>
+          {/* r11-p4-1 通栏侧栏(dsh 式):顶天立地贴左缘——m-3 悬浮圆角卡撤销,零外边距
+              零圆角零入场卡动画;观感走 .sidebar-flank(纯色面+右缘发丝分隔,玻璃家族
+              经 token 自动恢复磨砂,同样通栏)。侧栏位于全宽顶栏之下,红绿灯安全距由
+              既有 topbar 承担(沿用,不另留)。内部 px-4/px-2 padding 经核与通栏兼容。 */}
           <aside
             style={{ width: sidebarWidth }}
-            className="glass-thick shrink-0 flex flex-col m-3 mr-0 rounded-panel overflow-hidden animate-glass-rise"
+            className="sidebar-flank shrink-0 flex flex-col overflow-hidden"
           >
             <div className="flex-1 min-h-0 overflow-hidden">
               <UnifiedSidebar />

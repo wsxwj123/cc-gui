@@ -1234,6 +1234,19 @@ html { --content-max: clamp(768px, calc(var(--app-w, 100vw) * 0.7), 1120px); }
   transform: translateZ(0);
 }
 
+/* r11-p4-1:桌面侧栏通栏形态(dsh 式)。布局归布局(App.jsx 去 m-3/圆角/入场卡动画),
+   观感归 token(本类只引用既有 token):扁平默认 = 纯色面(underlay 混画布)+右缘
+   0.5px 低对比发丝分隔(--glass-edge,各主题已配好的低对比边),零阴影零磨砂;
+   「玻璃拟态(经典)」家族经同一批 token 自动恢复透底/磨砂/内高光——同样通栏。
+   刻意不含 border-radius/margin/box-shadow 投影:通栏卡不是浮起卡。 */
+.sidebar-flank {
+  background: color-mix(in srgb, var(--glass-thick-bg) var(--surface-alpha), var(--glass-underlay));
+  border-right: 0.5px solid var(--glass-edge);
+  box-shadow: var(--shadow-bevel);
+  -webkit-backdrop-filter: var(--backdrop-glass);
+  backdrop-filter: var(--backdrop-glass);
+}
+
 /* r11-⑧:backdrop-blur 散写收敛。soft = 遮罩/卡片级轻磨砂(玻璃 4px),
    glass = 面板级磨砂(玻璃 18px);扁平默认均 none(纯色/纯遮罩,零 backdrop 开销)。 */
 .backdrop-blur-soft {
