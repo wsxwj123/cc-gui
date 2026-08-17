@@ -56,10 +56,10 @@ function SkinCard({ row, active, onChanged }) {
       </div>
       <div className="flex items-center gap-1 text-[10.5px] font-body">
         <span className="text-ink-faint mr-auto">{row.manifest?.tier === 2 ? 'T2 代码' : 'T1 声明'}{isBuiltin ? ' · 示例' : ''}</span>
-        <button onClick={() => apply(true)} className="px-1.5 py-0.5 rounded hover:bg-canvas-deep/60 text-ink-soft" title="试穿(不保存,刷新即回)">试穿</button>
-        <button onClick={() => apply(false)} className="px-1.5 py-0.5 rounded hover:bg-canvas-deep/60 text-accent" title="应用并记住">应用</button>
+        <button type="button" onClick={() => apply(true)} className="px-1.5 py-0.5 rounded hover:bg-canvas-deep/60 text-ink-soft" title="试穿(不保存,刷新即回)">试穿</button>
+        <button type="button" onClick={() => apply(false)} className="px-1.5 py-0.5 rounded hover:bg-canvas-deep/60 text-accent" title="应用并记住">应用</button>
         {!isBuiltin && (
-          <button onClick={remove} className="p-0.5 rounded hover:bg-canvas-deep/60" title="删除">
+          <button type="button" onClick={remove} className="p-0.5 rounded hover:bg-canvas-deep/60" title="删除">
             <Trash2 size={11} className="text-ink-faint" />
           </button>
         )}
@@ -76,8 +76,17 @@ function swatchOf(row) {
 }
 
 // ── 导入/生成器对话框(独立 portal 模态;flex 列三段,禁 sticky) ──
+// p2-2:portal 落 document.body(在主题弹层 wrapRef 之外)→ 根节点带
+// data-cgui-skin-dialog 标记,弹层的外点/Esc 判定据此让位;对话框自管 Esc
+// (capture+stopPropagation,不惊动会话级 Esc 监听)。全部按钮 type="button"
+// (防将来被嵌进 form 时隐式 submit,同 ChatInput 既有口径)。
 function SkinManagerDialog({ onClose, onChanged }) {
   const fileRef = useRef(null);
+  useEffect(() => {
+    const onEsc = (e) => { if (e.key === 'Escape') { e.stopPropagation(); onClose(); } };
+    window.addEventListener('keydown', onEsc, true);
+    return () => window.removeEventListener('keydown', onEsc, true);
+  }, [onClose]);
   const [tab, setTab] = useState('trio'); // trio | dsw | prompt
   const [name, setName] = useState('');
   const [css, setCss] = useState('');
@@ -138,7 +147,7 @@ function SkinManagerDialog({ onClose, onChanged }) {
   };
 
   return createPortal(
-    <div className="fixed inset-0 z-[220] flex items-center justify-center bg-black/40 backdrop-blur-soft animate-fade-in" onClick={onClose}>
+    <div data-cgui-skin-dialog className="fixed inset-0 z-[220] flex items-center justify-center bg-black/40 backdrop-blur-soft animate-fade-in" onClick={onClose}>
       <div
         className="glass-popover rounded-panel w-[560px] max-w-[calc(var(--app-w,100vw)-2rem)] max-h-[calc(var(--app-h,100dvh)-6rem)] flex flex-col animate-glass-rise"
         onClick={(e) => e.stopPropagation()}
@@ -147,20 +156,20 @@ function SkinManagerDialog({ onClose, onChanged }) {
         <div className="shrink-0 px-4 py-3 border-b border-canvas-deep/60 flex items-center gap-2">
           <Palette size={14} className="text-accent" />
           <span className="text-[13px] font-medium text-ink font-body flex-1">导入皮肤 / 生成器</span>
-          <button onClick={onClose} className="p-1 rounded hover:bg-canvas-deep/60"><X size={13} className="text-ink-faint" /></button>
+          <button type="button" onClick={onClose} className="p-1 rounded hover:bg-canvas-deep/60"><X size={13} className="text-ink-faint" /></button>
         </div>
         {/* 正文(flex-1 滚动) */}
         <div className="flex-1 min-h-0 overflow-y-auto px-4 py-3 space-y-3">
           <div className="flex items-center gap-1 p-0.5 rounded-panel bg-canvas-warm text-[11px] font-body">
             {[['trio', '三件套粘贴(T2)'], ['dsw', 'dsh 主题 JSON'], ['prompt', 'AI 提示词生成器']].map(([id, label]) => (
-              <button key={id} onClick={() => { setTab(id); setNotice(null); }}
+              <button type="button" key={id} onClick={() => { setTab(id); setNotice(null); }}
                 className={`flex-1 py-1.5 rounded-md transition-colors ${tab === id ? 'bg-accent text-on-accent' : 'text-ink-muted hover:text-ink'}`}>
                 {label}
               </button>
             ))}
           </div>
           <div className="flex items-center gap-2">
-            <button onClick={() => fileRef.current?.click()} disabled={busy}
+            <button type="button" onClick={() => fileRef.current?.click()} disabled={busy}
               className="btn-accent px-3 py-1.5 text-[12px] font-body disabled:opacity-40">导入 zip / .cguiskin…</button>
             <input ref={fileRef} type="file" accept=".zip,.cguiskin" className="hidden"
               onChange={(e) => { importZip(e.target.files?.[0]); e.target.value = ''; }} />
@@ -191,7 +200,7 @@ function SkinManagerDialog({ onClose, onChanged }) {
           {tab === 'prompt' && (
             <div className="text-[11px] text-ink-soft font-body leading-relaxed space-y-2">
               <p>一键组装完整提示词(变量白名单 {SKIN_TOKENS_CLIENT.length - SKIN_TOKENS_REJECTED_CLIENT.length} 项、图标语义名 {Object.keys(ICON_SEMANTICS).length} 项、锚点 {SKIN_ANCHORS.length} 项、skin.json schema、T1/T2 骨架、明暗规范与 {'{name}'} 说明),复制给任意 AI 直接产出皮肤。</p>
-              <button onClick={copyPrompt} className="btn-accent px-3 py-1.5 text-[12px] font-body flex items-center gap-1.5">
+              <button type="button" onClick={copyPrompt} className="btn-accent px-3 py-1.5 text-[12px] font-body flex items-center gap-1.5">
                 <Copy size={12} /> 复制完整提示词
               </button>
             </div>
@@ -206,13 +215,14 @@ function SkinManagerDialog({ onClose, onChanged }) {
         {tab !== 'prompt' && (
           <div className="shrink-0 px-4 py-2.5 border-t border-canvas-deep/60 flex items-center gap-2">
             {tab === 'trio' && (
-              <button onClick={tryOnTrio} disabled={busy || (!css.trim() && !js.trim() && !a11y.trim())}
+              <button type="button" onClick={tryOnTrio} disabled={busy || (!css.trim() && !js.trim() && !a11y.trim())}
                 className="px-3 py-1.5 text-[12px] font-body rounded-md border border-canvas-deep hover:bg-canvas-warm text-ink-soft disabled:opacity-40">
                 试穿(不落盘)
               </button>
             )}
             <div className="flex-1" />
             <button
+              type="button"
               onClick={() => saveInline(tab)}
               disabled={busy || !name.trim() || (tab === 'trio' ? (!css.trim() && !js.trim() && !a11y.trim()) : !dsw.trim())}
               className="btn-accent px-3.5 py-1.5 text-[12px] font-body disabled:opacity-40">
@@ -256,9 +266,9 @@ export function SkinSection() {
         <Sparkles size={12} className="text-ink-muted" />
         <span className="text-[11px] text-ink font-body font-medium flex-1">皮肤</span>
         {activeId && (
-          <button onClick={() => deactivateSkin()} className="text-[10.5px] text-ink-faint hover:text-ink font-body">停用</button>
+          <button type="button" onClick={() => deactivateSkin()} className="text-[10.5px] text-ink-faint hover:text-ink font-body">停用</button>
         )}
-        <button onClick={() => setManagerOpen(true)} className="text-[10.5px] text-accent font-body">导入 / 生成器…</button>
+        <button type="button" onClick={() => setManagerOpen(true)} className="text-[10.5px] text-accent font-body">导入 / 生成器…</button>
       </div>
       <div className="grid grid-cols-2 gap-1.5">
         {rows.map((row) => (

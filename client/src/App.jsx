@@ -509,11 +509,17 @@ function ThemeToggle() {
 
   useEffect(() => {
     if (!open) return;
-    const onDown = (e) => { if (wrapRef.current && !wrapRef.current.contains(e.target)) setOpen(false); };
+    // r11-p2-2 根因:皮肤「导入/生成器」对话框经 createPortal 挂 document.body,
+    // 天然在 wrapRef 之外 → 对话框内任意点击(AI 提示词按钮/textarea/复制)都命中
+    // "点在弹层外"判定 → 主题弹层关闭 → SkinSection 连带对话框整体卸载(用户实报
+    // "点提示词按钮设置面板退出")。对话框存在期间,弹层的外点/Esc 判定整体让位
+    // (对话框自己管自己的关闭:遮罩点击/Esc/×)。
+    const skinDialogOpen = () => !!document.querySelector('[data-cgui-skin-dialog]');
+    const onDown = (e) => { if (skinDialogOpen()) return; if (wrapRef.current && !wrapRef.current.contains(e.target)) setOpen(false); };
     // 修正批#3:补 Esc 关闭(所有弹层统一)。stopPropagation:关弹层的 Esc 不冒到 window 上的会话级监听(生成中单击即停)。
     // R1:keydown 挂 window 捕获(与灯箱/预览/文件树等 12 处浮层同款相位)。原来挂 document
     // 冒泡 → 晚于面板监听的 document 捕获,面板开着时这一击先关面板、弹层留着(层级颠倒)。
-    const onEsc = (e) => { if (e.key === 'Escape') { e.stopPropagation(); setOpen(false); } };
+    const onEsc = (e) => { if (e.key === 'Escape') { if (skinDialogOpen()) return; e.stopPropagation(); setOpen(false); } };
     document.addEventListener('mousedown', onDown);
     window.addEventListener('keydown', onEsc, true);
     return () => {

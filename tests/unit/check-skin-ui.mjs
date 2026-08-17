@@ -81,6 +81,17 @@ import { validateManifest, validateT2Script, ICON_SEMANTIC_NAMES } from '../../s
   // 弹层接线
   const app = readFileSync(new URL('../../client/src/App.jsx', import.meta.url), 'utf8');
   assert.match(app, /<SkinSection \/>/, 't3: 皮肤段落位主题弹层(入口落位再修订)');
+  // p2-2 根因守卫:portal 对话框在主题弹层 wrapRef 之外——对话框存在期间弹层的
+  // 外点/Esc 判定必须让位(否则点「AI 提示词」等任意对话框内容=关弹层连带卸载对话框)
+  assert.match(src, /<div data-cgui-skin-dialog /, 't3-p2: 对话框根节点带让位标记(哨兵锚)');
+  assert.match(app, /const skinDialogOpen = \(\) => !!document\.querySelector\('\[data-cgui-skin-dialog\]'\)/, 't3-p2: 弹层侧让位判定存在');
+  assert.match(app, /onDown = \(e\) => \{ if \(skinDialogOpen\(\)\) return;/, 't3-p2: 外点判定让位');
+  assert.match(app, /if \(skinDialogOpen\(\)\) return; e\.stopPropagation\(\); setOpen\(false\);/, 't3-p2: Esc 判定让位');
+  assert.match(src, /window\.addEventListener\('keydown', onEsc, true\)/, 't3-p2: 对话框自管 Esc(capture+stopPropagation)');
+  // 皮肤区按钮 type 清一色(防 form 隐式 submit,同面板既有口径)
+  const btnCount = (src.match(/<button/g) || []).length;
+  const typedCount = (src.match(/<button\s+type="button"|<button type="button"/g) || []).length;
+  assert.equal(typedCount, btnCount, `t3-p2: 全部 ${btnCount} 个按钮 type="button"(实际 ${typedCount})`);
   // import-inline 服务端接线:T2 保存必过静态校验、dsw 走映射器、名称必填
   const routes = readFileSync(new URL('../../server/routes/skins-packs.js', import.meta.url), 'utf8');
   const inline = routes.slice(routes.indexOf("'/skins/import-inline'"), routes.indexOf("'/skins/import'"));
