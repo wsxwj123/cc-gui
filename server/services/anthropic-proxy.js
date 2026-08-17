@@ -17,6 +17,7 @@
 
 import http from 'node:http';
 import { normalizeContextOverflow } from './openai-proxy.js';
+import { isCountTokensRequest, estimateInputTokens, parseUpstreamCountTokens, COUNT_TOKENS_UPSTREAM_TIMEOUT_MS } from '../utils/context-tokens.js';
 
 // Fixed loopback port (distinct from openai-proxy's 8788) so the URL written into
 // settings.json survives watchdog restarts. Ephemeral fallback if it's taken.
@@ -262,6 +263,38 @@ async function handle(req, clientRes) {
   let body = (req.method === 'POST' || req.method === 'PUT' || req.method === 'PATCH')
     ? await readBody(req)
     : undefined;
+
+  // r11-⑨:count_tokens —— 先透传当前 upstream(2s 短超时;anthropic 协议中转可能真支持),
+  // 上游 404/4xx/超时/网络错/响应缺 input_tokens → 本地估算回退(与 CLI 第三方本地估算
+  // 同口径的字符启发式)。目标:第三方精确上下文计算秒级成功,永不 8s 干等 504。
+  // 红线:只转发到当前 up.baseURL,不发往任何其他地址。
+  if (isCountTokensRequest(req.method, req.url)) {
+    const respond = (obj) => {
+      clientRes.writeHead(200, { 'Content-Type': 'application/json' });
+      clientRes.end(JSON.stringify(obj));
+    };
+    let parsedBody = {};
+    try { parsedBody = JSON.parse(body.toString('utf-8')) || {}; } catch {}
+    try {
+      const ac2 = new AbortController();
+      const t2 = setTimeout(() => ac2.abort(), COUNT_TOKENS_UPSTREAM_TIMEOUT_MS);
+      const ctHeaders = {
+        'content-type': req.headers['content-type'] || 'application/json',
+        'x-api-key': up.authToken,
+        'authorization': `Bearer ${up.authToken}`,
+        'anthropic-version': req.headers['anthropic-version'] || '2023-06-01',
+      };
+      if (req.headers['anthropic-beta']) ctHeaders['anthropic-beta'] = req.headers['anthropic-beta'];
+      const r = await fetch(up.baseURL + req.url, {
+        method: 'POST', headers: ctHeaders, body, signal: ac2.signal, redirect: 'manual',
+      }).finally(() => clearTimeout(t2));
+      if (r.ok) {
+        const upstreamCount = parseUpstreamCountTokens(await r.text());
+        if (upstreamCount) return respond(upstreamCount);
+      }
+    } catch { /* 超时/网络错 → 本地估算回退 */ }
+    return respond(estimateInputTokens(parsedBody));
+  }
 
   // 仅对 /v1/messages 做规范化(其他端点不动)
   if (body && req.url && req.url.includes('/v1/messages') && req.method === 'POST') {

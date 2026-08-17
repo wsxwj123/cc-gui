@@ -28,6 +28,34 @@ export function shouldReplaceContextCache(previous, next, requestEpoch) {
   return requestEpoch > (previous.requestEpoch || 0);
 }
 
+// ── r11-⑨:徽章弹层三级数据源 + 静默降级(产品原则:点开立刻显示组成,任何情况不弹报错)──
+
+/** 三级即时回退:上次精确结果缓存 > 本地估算组成 > 全新会话骨架。 */
+export function pickBreakdownTier({ cached, localTokens } = {}) {
+  if (cached) return 'cached';
+  return (localTokens || 0) > 0 ? 'local' : 'skeleton';
+}
+
+/**
+ * 精确计算结果落地(静默降级核心):成功 → 无感原位替换;失败/超时 → **保持已显示
+ * 的组成不动**,只标 exactUnavailable(弹层底部一行小字,不弹错误、不清数据、无红字)。
+ */
+export function applyExactResult(prevData, outcome) {
+  if (outcome?.ok && outcome.data) return { data: outcome.data, exactUnavailable: false };
+  return { data: prevData, exactUnavailable: true };
+}
+
+/** 「X 分钟前」标注(缓存精确结果的新鲜度)。非法时间返回空串。 */
+export function relativeAgeLabel(sampledAt, now = Date.now()) {
+  const t = Date.parse(sampledAt || '');
+  if (!Number.isFinite(t)) return '';
+  const s = Math.max(0, Math.floor((now - t) / 1000));
+  if (s < 60) return '刚刚';
+  if (s < 3600) return `${Math.floor(s / 60)} 分钟前`;
+  if (s < 86400) return `${Math.floor(s / 3600)} 小时前`;
+  return `${Math.floor(s / 86400)} 天前`;
+}
+
 export function contextErrorMessage(code) {
   const messages = {
     'invalid-context-request': '上下文请求参数无效',

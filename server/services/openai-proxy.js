@@ -12,6 +12,7 @@
 // effort but not translated. Bound to 127.0.0.1 only — no auth, never exposed.
 
 import http from 'node:http';
+import { isCountTokensRequest, estimateInputTokens } from '../utils/context-tokens.js';
 
 // Fixed loopback port so the ANTHROPIC_BASE_URL written into settings.json
 // stays valid across server restarts (watchdog). Falls back to an ephemeral
@@ -556,6 +557,18 @@ function readBody(req) {
 }
 
 async function handle(req, clientRes) {
+  // r11-⑨:count_tokens —— OpenAI 协议上游没有等价端点,且本函数原来把任何含
+  // /v1/messages 的 URL 都当生成请求转 chat/completions:count_tokens 会变成一次
+  // 【真实计费的生成调用】且响应缺 input_tokens(实证,精确计算必失败)。这里直接
+  // 本地估算返回(与 CLI 第三方本地估算同口径),请求体不转发到任何地址(红线;
+  // 对 OpenAI 协议"先透传上游"无意义 —— 端点在协议层就不存在,试探只会误打生成)。
+  if (isCountTokensRequest(req.method, req.url)) {
+    let parsedBody = {};
+    try { parsedBody = JSON.parse(await readBody(req)) || {}; } catch {}
+    clientRes.writeHead(200, { 'Content-Type': 'application/json' });
+    clientRes.end(JSON.stringify(estimateInputTokens(parsedBody)));
+    return;
+  }
   if (req.method !== 'POST' || !req.url.includes('/v1/messages')) {
     clientRes.writeHead(404); clientRes.end('not found'); return;
   }

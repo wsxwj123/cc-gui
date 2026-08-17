@@ -14,6 +14,7 @@ import { buildAlwaysAllowUpdates, buildDirAuthUpdates } from '../utils/permissio
 import { stripInheritedProviderEnv } from '../utils/provider-env.js';
 import { resolveClaude } from '../utils/claude-resolver.js';
 import { repairOfficialCompat } from '../utils/session-repair.js';
+import { contextTimeoutBudget } from '../utils/context-tokens.js';
 import { broadcast, clients } from '../broadcast.js';
 
 // T2: 回合完成 WS 通知。前端切走会话时 SSE fetch 已被 abort(I4 渲染隔离的
@@ -2585,6 +2586,13 @@ export function validateContextRequest(req) {
   if (values.projectHash && !CONTEXT_PROJECT_RE.test(values.projectHash)) return null;
   if (values.cwd && (values.cwd.length > 4096 || !values.cwd.trim())) return null;
   if (values.model && !MODEL_ARG_RE.test(values.model)) return null;
+  // r11-⑨:knownTokens(客户端已知的当前上下文规模)→ 快路超时预算自适应。可选参数:
+  // 缺省不进返回对象(既有调用方 deepEqual 契约不变);非法(非纯数字/超长)整体拒绝。
+  const kt = req.query?.knownTokens;
+  if (kt !== undefined) {
+    if (typeof kt !== 'string' || !/^\d{1,9}$/.test(kt)) return null;
+    values.knownTokens = parseInt(kt, 10);
+  }
   return { sessionId, ...values };
 }
 
@@ -2667,30 +2675,29 @@ router.get('/context/:sessionId', async (req, res) => {
   const { projectHash, cwd } = meta;
 
   // 快路(#26 常驻进程红利):目标会话的保活进程还在(流式中或 idle)→ 直调 SDK 控制
-  // 请求 getContextUsage(),毫秒返回、不 fork、不留 jsonl、不碰 TCC。进程不在(draft/
-  // 首轮前/已回收/旧会话)或直调失败 → 回落下面的 spawn /context 路径,行为不变。
+  // 请求 getContextUsage(),毫秒返回、不 fork、不留 jsonl、不碰 TCC。
+  // r11-⑨ 两段式:快路超时预算按会话规模自适应(基础 8s,每 100k 已知 tokens +2s,
+  // 上限 30s —— contextTimeoutBudget);快路超时/失败**不再直接 5xx**,一律回落下面的
+  // spawn 慢路径(async 等待,前端保持"计算中…"),只有慢路径也失败才报错(错误码分类:
+  // 超时=context-cli-timeout / 接口不可用=context-cli-unavailable / 输出无效=
+  // context-output-invalid)。进程不在(draft/首轮前/已回收/旧会话)照旧直接走慢路径。
   for (const slot of meta.slot ? [meta.slot] : []) {
     if (typeof slot.query?.getContextUsage !== 'function') continue;
     try {
       const timeoutError = new Error('context-sdk-timeout');
+      const budgetMs = contextTimeoutBudget(request.knownTokens);
       const usage = await Promise.race([
         slot.query.getContextUsage(),
-        // 8s(实测 warm ~1.5-3s,大上下文近满窗时 count_tokens 往返可超 5s):超时太短会白等
-        // 后再回落到更慢的 spawn(5-30s),反而更慢;放宽到 8s 让绝大多数大会话仍走快路。
-        new Promise((_, reject) => setTimeout(() => reject(timeoutError), 8000)),
+        new Promise((_, reject) => setTimeout(() => reject(timeoutError), budgetMs)),
       ]);
       if (usage?.totalTokens > 0 && (usage?.maxTokens > 0 || usage?.rawMaxTokens > 0)) {
         const payload = mapSdkContextUsage(usage);
-        if (!validContextPayload(payload)) {
-          return res.status(500).json({ ok: false, code: 'context-internal', error: '上下文计算失败' });
-        }
-        return res.json(payload);
+        if (validContextPayload(payload)) return res.json(payload);
+        // 映射异常 → 不报错,回落慢路径重算。
       }
-    } catch (error) {
-      if (error?.message === 'context-sdk-timeout') {
-        return res.status(504).json({ ok: false, code: 'context-sdk-timeout', error: '精确上下文计算超时，请稍后重试' });
-      }
-      return res.status(500).json({ ok: false, code: 'context-internal', error: '上下文计算失败' });
+    } catch {
+      // 快路超时/直调失败 → 静默回落慢路径(两段式;此前这里直接 504 是第三方
+      // "精确计算必超时"的用户可见形态)。
     }
   }
   try { if (!statSync(cwd).isDirectory()) throw new Error('nd'); }
