@@ -60,7 +60,17 @@ import { initialDrillProject, resolveDrillView } from '../../client/src/utils/pr
   assert.match(sidebar, /在文件夹中显示/, 't4: reveal 按钮在');
   assert.match(sidebar, /\/api\/reveal-path/, 't4: reveal 走已知项目校验端点');
   assert.match(sidebar, /project\.virtual/, 't4: 虚拟行不显示 reveal');
-  assert.match(sidebar, /彻底清理该项目的 Claude 本地状态/, 't4: 清理入口保留');
+  // r11-p3-4 语义变更(用户拍板):项目头🗑「彻底清理」按钮整体移除,前端不再有清理入口
+  // (POST /api/project/purge 端点保留待将来接回)。原"清理入口保留"断言反向。
+  assert.doesNotMatch(sidebar, /彻底清理该项目的 Claude 本地状态/, 't4: 清理按钮已移除(p3-4)');
+  assert.doesNotMatch(sidebar, /purgeProject\(project\)/, 't4: 清理调用点清零');
+  // p3-4 项目头图标化:文字按钮撤销(纯图标+title),名称 truncate 让位、按钮组 shrink-0
+  assert.doesNotMatch(sidebar, /－?<Plus size=\{1[12]\} \/>新建/, 't4-p3-4: 「新建」文字标签撤销(哨兵锚)');
+  assert.doesNotMatch(sidebar, />worktree<\/button>|<GitBranch size=\{1[12]\} \/>worktree/, 't4-p3-4: 「worktree」文字标签撤销');
+  assert.doesNotMatch(sidebar, /\{showArchived \? `已归档 \$\{archivedCount\}` : `归档 \$\{archivedCount\}`\}/, 't4-p3-4: 归档可见文字标签撤销(tooltip/角标呈现不受限)');
+  assert.match(sidebar, /flex-1 min-w-0"\n\s*title=\{`\$\{formatPath\(project\.path\)\}/, 't4-p3-4: 名称 truncate 优先让位(flex-1 min-w-0)+会话数并入 tooltip');
+  assert.match(sidebar, /flex items-center gap-0\.5 shrink-0/, 't4-p3-4: 按钮组 shrink-0 不换行不溢出');
+  assert.match(sidebar, /min-w-\[12px\] h-\[12px\][^"]*font-mono/, 't4-p3-4: 归档数角标');
   // 项目行只显名称:不再渲染 formatDate/独立路径行;完整路径进 title
   assert.match(sidebar, /title=\{formatPath\(project\.path\)\}/, 't4: 完整路径进 title');
   for (const fn of ['handleFork', 'handleArchive', 'handleDelete', 'togglePinSession', 'handleNew', 'openWorktreePicker']) {

@@ -572,27 +572,8 @@ export function UnifiedSidebar() {
     setSearchQuery('');
   };
 
-  // ── 项目清理(claude project purge,原 ProjectList 逻辑)──────────────────────
-  const purgeProject = async (project) => {
-    const ok = await confirmDialog(
-      `彻底清理该项目的 Claude 本地状态？\n\n${project.path}\n\n将删除该项目的全部会话历史、记忆、文件历史等 Claude 本地状态。不影响项目代码，操作不可恢复。`,
-      { danger: true },
-    );
-    if (!ok) return;
-    try {
-      const r = await fetch('/api/project/purge', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ cwd: project.path }),
-      });
-      const data = await r.json().catch(() => ({}));
-      if (!r.ok || !data.ok) throw new Error(data.error || data.stderr || `HTTP ${r.status}`);
-      if (useStore.getState().selectedProject?.hash === project.hash) useStore.getState().setSelectedProject(null);
-      fetchProjects();
-      useStore.getState().fetchSessionsForPanel(project.hash);
-    } catch (e) {
-      await confirmDialog(`清理失败：${e.message}`, { danger: false });
-    }
-  };
+  // r11-p3-4:「彻底清理项目」前端入口随项目头🗑按钮按用户指令整体移除
+  // (原 purgeProject 函数一并删;POST /api/project/purge 端点保留,恢复入口时直接接回)。
 
   // ── r11-①:项目行「在文件夹中显示」(POST /api/reveal-path,服务端校验 ∈ 已知项目集;
   //    虚拟行(未落盘 draft)无实体目录保证,不显示该按钮)──────────────────────────
@@ -955,56 +936,57 @@ export function UnifiedSidebar() {
               >
                 <ChevronLeft size={13} />返回项目列表
               </div>
-              <div className="px-2 pt-1 pb-1.5 flex items-center gap-2 min-w-0">
+              {/* r11-p3-4:项目头操作条图标化——文字按钮独占行撤销,纯图标并入名称行右侧;
+                  名称 truncate 优先让位(flex-1 min-w-0),按钮组 shrink-0 不换行不溢出;
+                  语义进 title tooltip;归档数改图标角标+tooltip;会话数并入名称 tooltip。
+                  🗑「彻底清理」按钮按用户指令整体移除(前端唯一入口,后端端点保留)。 */}
+              <div className="px-2 pt-1 pb-1.5 flex items-center gap-1.5 min-w-0 border-b border-canvas-deep/25 mb-1">
                 <StatusDot running={runningCwds.has(project.path)} lastActivity={project.lastActivity} />
-                <span className="text-[13px] font-medium text-ink truncate font-body" title={formatPath(project.path)}>
+                <span
+                  className="text-[13px] font-medium text-ink truncate font-body flex-1 min-w-0"
+                  title={`${formatPath(project.path)}${project.virtual ? '（未落盘）' : ` · ${project.sessionCount} 个会话`}`}
+                >
                   {formatPathShort(project.path)}
                 </span>
                 {project.isWorktree && (
                   <span className="text-[9px] px-1 py-0.5 bg-canvas-deep/60 text-ink-faint rounded font-mono shrink-0" title="Git worktree(独立工作树,非主仓目录)">⎇</span>
                 )}
-                <span className="text-[10px] text-ink-faint font-mono ml-auto shrink-0">
-                  {project.virtual ? '未落盘' : `${project.sessionCount} 会话`}
-                </span>
-              </div>
-              <div className="flex items-center gap-1.5 px-2 py-1.5 flex-wrap border-b border-canvas-deep/25 mb-1">
-                <button
-                  data-cgui="new-session-btn"
-                  data-tour="new-session"
-                  onClick={() => handleNew(project)}
-                  className="btn-accent flex items-center gap-1 px-2 py-1 text-[11px] font-body whitespace-nowrap"
-                  title="新建会话"
-                >
-                  <Plus size={11} />新建
-                </button>
-                <button
-                  data-cgui="new-worktree-btn"
-                  data-tour="new-worktree"
-                  onClick={() => openWorktreePicker(project)}
-                  className="flex items-center gap-1 px-2 py-1 text-[11px] font-body text-ink-soft whitespace-nowrap rounded-md border border-canvas-deep/70 hover:bg-canvas-warm/50 transition-colors"
-                  title="在新 git worktree 中开会话（隔离）"
-                >
-                  <GitBranch size={11} />worktree
-                </button>
-                {hasArchiveToggle && (
+                <div className="flex items-center gap-0.5 shrink-0">
                   <button
-                    onClick={() => toggleArchivedView(hash)}
-                    className={`ml-auto flex items-center gap-1 px-2 py-0.5 text-[10.5px] rounded font-body transition-colors ${
-                      showArchived ? 'bg-accent/15 text-accent' : 'text-ink-faint hover:text-ink-muted'
-                    }`}
-                    title={showArchived ? '回到活跃会话' : '查看已归档会话'}
+                    data-cgui="new-session-btn"
+                    data-tour="new-session"
+                    onClick={() => handleNew(project)}
+                    className="btn-accent p-1 flex items-center justify-center"
+                    title="新建会话"
                   >
-                    <Archive size={10} />
-                    {showArchived ? `已归档 ${archivedCount}` : `归档 ${archivedCount}`}
+                    <Plus size={12} />
                   </button>
-                )}
-                <button
-                  onClick={() => purgeProject(project)}
-                  className={`p-1 rounded-md hover:bg-red-50 transition-colors ${hasArchiveToggle ? '' : 'ml-auto'}`}
-                  title="彻底清理该项目的 Claude 本地状态（会话历史/记忆等，不影响项目代码，不可恢复）"
-                >
-                  <Trash2 size={12} className="text-ink-faint hover:text-red-600" />
-                </button>
+                  <button
+                    data-cgui="new-worktree-btn"
+                    data-tour="new-worktree"
+                    onClick={() => openWorktreePicker(project)}
+                    className="p-1 rounded-md text-ink-soft hover:bg-canvas-warm/50 transition-colors"
+                    title="在新 git worktree 中开会话（隔离工作树）"
+                  >
+                    <GitBranch size={12} />
+                  </button>
+                  {hasArchiveToggle && (
+                    <button
+                      onClick={() => toggleArchivedView(hash)}
+                      className={`relative p-1 rounded-md transition-colors ${
+                        showArchived ? 'bg-accent/15 text-accent' : 'text-ink-faint hover:text-ink-muted'
+                      }`}
+                      title={showArchived ? `回到活跃会话（已归档 ${archivedCount} 个）` : `查看已归档会话（${archivedCount} 个）`}
+                    >
+                      <Archive size={12} />
+                      {archivedCount > 0 && (
+                        <span className="absolute -top-0.5 -right-0.5 min-w-[12px] h-[12px] px-0.5 rounded-full bg-canvas-deep text-ink-muted text-[8px] leading-[12px] text-center font-mono">
+                          {archivedCount > 99 ? '99+' : archivedCount}
+                        </span>
+                      )}
+                    </button>
+                  )}
+                </div>
               </div>
               <GitInitBanner cwd={project.path} />
               {rawSessions === undefined ? (
