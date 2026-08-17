@@ -5,6 +5,7 @@ import React, { useState, useRef, useEffect, useLayoutEffect } from 'react';
 import { createPortal } from 'react-dom';
 import { ChevronDown, Check, X, Settings, Server, Loader2, Smartphone, Pencil } from './Icon.jsx';
 import { useStore } from '../stores/sessionStore.js';
+import { clampPopoverX, popoverMaxWidth } from '../utils/popover.js';
 import { ModelBadge } from './ModelBadge.jsx';
 import { confirmDialog } from '../utils/confirmDialog.jsx';
 import { mergeProviderLists, rowIsCurrent, SOURCE_BADGE } from '../utils/providerList.js';
@@ -37,7 +38,10 @@ export function ProviderSourceBadge({ p }) {
 // 折算(rect 是视觉px,fixed left/top 是布局px —— CtxBadge 同款修法)。
 // outside-click/Esc 关闭由本组件统一处理(portal 后内容不在锚点 wrap 内,调用方
 // 自己的 contains 判定会误关,调用方不要再挂自己的 document 监听)。
-export function AnchoredPopover({ anchorRef, open, onRequestClose, drop = 'down', align = 'left', className = '', children }) {
+// r11-p5-2 扩参(向后兼容,默认不变):gap = 锚点与弹层的纵向间距(px,默认 8);
+// clampSelector = 水平容器夹紧的选择器(如 '.sidebar-flank'):弹层右缘 ≤ 容器右缘-8、
+// 宽度上限 = 容器宽-16(窄侧栏),容器找不到回落纯视口夹紧。既有消费点不传 = 零行为变化。
+export function AnchoredPopover({ anchorRef, open, onRequestClose, drop = 'down', align = 'left', gap: gapProp = 8, clampSelector = null, className = '', children }) {
   const elRef = useRef(null);
   const [pos, setPos] = useState(null);
   const [bump, setBump] = useState(0);
@@ -47,20 +51,22 @@ export function AnchoredPopover({ anchorRef, open, onRequestClose, drop = 'down'
     const a = anchorRef?.current, el = elRef.current;
     if (!a || !el) return;
     const z = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--ui-zoom')) || 1;
-    const pad = 8 * z, gap = 8 * z;
+    const pad = 8 * z, gap = gapProp * z;
     const r = a.getBoundingClientRect();
     const m = el.getBoundingClientRect();
     const vw = window.innerWidth, vh = window.innerHeight;
+    const container = clampSelector ? document.querySelector(clampSelector)?.getBoundingClientRect() || null : null;
     let left = align === 'right' ? r.right - m.width : r.left;
     let top = drop === 'up' ? r.top - gap - m.height : r.bottom + gap;
     // 越界翻转:首选方向放不下且另一侧放得下 → 翻。
     if (drop === 'up' && top < pad && r.bottom + gap + m.height <= vh - pad) top = r.bottom + gap;
     if (drop === 'down' && top + m.height > vh - pad && r.top - gap - m.height >= pad) top = r.top - gap - m.height;
-    // 夹紧兜底(翻转后仍可能越界,如超高弹层)。
-    left = Math.min(Math.max(left, pad), Math.max(pad, vw - pad - m.width));
+    // 水平:容器边界夹紧(p5-2)→ 视口夹紧兜底;纵向视口夹紧兜底(翻转后仍可能越界)。
+    left = clampPopoverX({ left, width: m.width, pad, vw, container });
     top = Math.min(Math.max(top, pad), Math.max(pad, vh - pad - m.height));
-    setPos({ left: left / z, top: top / z });
-  }, [open, drop, align, bump]);
+    const mw = container ? popoverMaxWidth(container.width) : null;
+    setPos({ left: left / z, top: top / z, maxWidth: mw != null ? mw / z : null });
+  }, [open, drop, align, gapProp, clampSelector, bump]);
 
   // 内容尺寸变化(异步列表加载)→ 重新定位。
   useLayoutEffect(() => {
@@ -102,7 +108,7 @@ export function AnchoredPopover({ anchorRef, open, onRequestClose, drop = 'down'
   if (!open) return null;
   return createPortal(
     <div ref={elRef}
-      style={{ position: 'fixed', left: pos ? pos.left : 0, top: pos ? pos.top : 0, zIndex: 9999, visibility: pos ? 'visible' : 'hidden' }}
+      style={{ position: 'fixed', left: pos ? pos.left : 0, top: pos ? pos.top : 0, zIndex: 9999, visibility: pos ? 'visible' : 'hidden', ...(pos?.maxWidth != null ? { maxWidth: pos.maxWidth } : {}) }}
       className={`glass-popover animate-glass-rise ${className}`}>
       {children}
     </div>,

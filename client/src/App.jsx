@@ -1523,7 +1523,10 @@ export function SessionItem({ session, isSelected, onSelect, onFork, onArchive, 
         >
           <MoreHorizontal size={14} className="text-ink-muted" />
         </button>
-        <AnchoredPopover anchorRef={menuBtnRef} open={menuOpen} onRequestClose={() => setMenuOpen(false)} drop="down" align="right" className="w-44 py-1">
+        {/* r11-p5-2:gap=4 紧贴行下展开(默认态不覆盖本行标题;底部不足时沿用组件既有
+            翻转逻辑);clampSelector=侧栏容器——菜单右缘 ≤ 侧栏右缘-8,窄栏宽度上限
+            侧栏宽-16,不再溢出侧栏压到会话区。 */}
+        <AnchoredPopover anchorRef={menuBtnRef} open={menuOpen} onRequestClose={() => setMenuOpen(false)} drop="down" align="right" gap={4} clampSelector=".sidebar-flank" className="w-44 py-1">
           {[
             { icon: <Pin size={12} className={pinned ? 'text-accent fill-accent' : 'text-ink-faint'} />, label: pinned ? '取消置顶' : '置顶到列表最前', disabled: isDraft, run: () => onTogglePin?.(session.sessionId) },
             { icon: <Pencil size={12} className="text-ink-faint" />, label: '重命名', disabled: isDraft, run: () => startRename() },
