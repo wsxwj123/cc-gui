@@ -126,7 +126,7 @@ function PlanReviewCard({ req, onResolve, onApprove, processing, position, hydra
   return (
     // 审计批E1:卡壳 bg-white→bg-canvas、头带固定浅色 X-50/60→半透明 X-500/10 —— 深色
     // 主题下 text-ink 是浅色,压在固定浅底上不可读;半透明染色叠在主题 canvas 上明暗都成立。
-    <div className="flex flex-col max-h-[min(42vh,calc(var(--app-h,100dvh)*0.42))] rounded-panel bg-canvas border border-canvas-deep shadow-popover overflow-hidden animate-fade-up relative">
+    <div data-cgui="permission-card" className="flex flex-col max-h-[min(42vh,calc(var(--app-h,100dvh)*0.42))] rounded-panel bg-canvas border border-canvas-deep shadow-popover overflow-hidden animate-fade-up relative">
       <div className="px-4 py-2.5 flex items-center gap-2 border-b border-canvas-deep bg-blue-500/10">
         <div className="w-6 h-6 rounded-md bg-blue-100 flex items-center justify-center shrink-0">
           <ClipboardList size={13} className="text-blue-700" />

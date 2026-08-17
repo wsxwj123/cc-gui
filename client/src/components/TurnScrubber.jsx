@@ -173,6 +173,7 @@ export default function TurnScrubber({ containerRef, turns, onNavigate }) {
 
   return (
     <div
+      data-cgui="turn-scrubber"
       ref={rootRef}
       onPointerMove={moveBar}
       onMouseLeave={leaveBar}

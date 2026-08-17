@@ -837,7 +837,7 @@ export function UnifiedSidebar() {
 
   // ── 渲染 ───────────────────────────────────────────────────────────────────
   return (
-    <div data-tour="sidebar-list" className="relative flex flex-col h-full">
+    <div data-cgui="sidebar" data-tour="sidebar-list" className="relative flex flex-col h-full">
       <div className="px-4 pt-4 pb-3">
         <div className="flex items-center justify-between mb-3">
           <h2 className="text-[11px] font-medium uppercase tracking-widest text-ink-faint font-body">
@@ -845,6 +845,7 @@ export function UnifiedSidebar() {
           </h2>
           <button
             onClick={openAddProject}
+            data-cgui="add-project-btn"
             data-tour="add-project"
             className="p-1 hover:bg-canvas-warm rounded transition-colors"
             title="添加项目（系统文件选择器）"
@@ -859,6 +860,7 @@ export function UnifiedSidebar() {
             placeholder="搜索项目 / 会话 / 消息 (≥2 字符)..."
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
+            data-cgui="sidebar-search"
             className="w-full bg-canvas border border-canvas-sunken rounded-lg pl-8 pr-3 py-1.5 text-xs text-ink placeholder-ink-ghost focus:outline-none focus:border-accent/40 font-body"
           />
         </div>
@@ -880,6 +882,7 @@ export function UnifiedSidebar() {
               <div
                 role="button"
                 tabIndex={0}
+                data-cgui="project-row"
                 onClick={() => drillInto(hash)}
                 onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); drillInto(hash); } }}
                 title={formatPath(project.path)}
@@ -943,6 +946,7 @@ export function UnifiedSidebar() {
               <div
                 role="button"
                 tabIndex={0}
+                data-cgui="drill-back"
                 onClick={drillBack}
                 onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); drillBack(); } }}
                 className="w-full flex items-center gap-1 px-2 py-1.5 rounded-md text-[12px] text-ink-muted hover:text-ink hover:bg-canvas-warm/35 cursor-pointer transition-colors font-body"
@@ -963,6 +967,7 @@ export function UnifiedSidebar() {
               </div>
               <div className="flex items-center gap-1.5 px-2 py-1.5 flex-wrap border-b border-canvas-deep/25 mb-1">
                 <button
+                  data-cgui="new-session-btn"
                   data-tour="new-session"
                   onClick={() => handleNew(project)}
                   className="btn-accent flex items-center gap-1 px-2 py-1 text-[11px] font-body whitespace-nowrap"
@@ -971,6 +976,7 @@ export function UnifiedSidebar() {
                   <Plus size={11} />新建
                 </button>
                 <button
+                  data-cgui="new-worktree-btn"
                   data-tour="new-worktree"
                   onClick={() => openWorktreePicker(project)}
                   className="flex items-center gap-1 px-2 py-1 text-[11px] font-body text-ink-soft whitespace-nowrap rounded-md border border-canvas-deep/70 hover:bg-canvas-warm/50 transition-colors"

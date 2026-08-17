@@ -337,7 +337,7 @@ export function MessageBubble({ message, onRollback, onFork }) {
 
   if (isUser) {
     return (
-      <div className="group px-6 py-4 animate-fade-up" style={{ animationDuration: '0.25s' }}>
+      <div data-cgui="message-user" className="group px-6 py-4 animate-fade-up" style={{ animationDuration: '0.25s' }}>
         <div className="max-w-[var(--content-max)] mx-auto flex flex-row-reverse gap-3">
           <div className="shrink-0 mt-0.5">
             <UserAvatar />
@@ -406,7 +406,7 @@ export function MessageBubble({ message, onRollback, onFork }) {
   }
 
   return (
-    <div className="group px-6 py-4 animate-fade-up" style={{ animationDuration: '0.25s' }}>
+    <div data-cgui="message-assistant" className="group px-6 py-4 animate-fade-up" style={{ animationDuration: '0.25s' }}>
       <div className="max-w-[var(--content-max)] mx-auto flex gap-3">
         <div className="mt-0.5">
           <ProviderAvatar model={message.model} size={34} />

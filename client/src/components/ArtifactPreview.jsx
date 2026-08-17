@@ -536,6 +536,7 @@ export function ArtifactDock() {
     <>
       <Splitter onMouseDown={onDrag} axis="x" />
       <div
+        data-cgui="artifact-dock"
         style={{ width }}
         className="shrink-0 flex flex-col m-3 ml-0 rounded-panel overflow-hidden border border-[#3a342b] bg-[#1a1714] animate-glass-rise"
       >

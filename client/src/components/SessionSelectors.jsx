@@ -310,7 +310,7 @@ export function ProviderSwitcher({ hideLabel = false, tourAnchor = false, respon
   }, [respondOpenProvider]);
 
   return (
-    <div ref={wrapRef} className="relative" data-tour={tourAnchor ? 'provider-selector' : undefined}>
+    <div ref={wrapRef} className="relative" data-cgui="provider-selector" data-tour={tourAnchor ? 'provider-selector' : undefined}>
       <button onClick={() => setOpen(!open)}
         className="flex items-center gap-1 px-2 py-1 rounded-md hover:bg-canvas-deep transition-colors"
         title={`Provider: ${label} — 点击切换;增删改/测试在弹层底部「管理 Provider」`}>
@@ -464,7 +464,7 @@ export function ModelSelector({ compact = false, permKey = null, tourAnchor = fa
   if (!currentModel) return null;
 
   return (
-    <div ref={wrapRef} className="relative" data-tour={tourAnchor ? 'model-selector' : undefined}>
+    <div ref={wrapRef} className="relative" data-cgui="model-selector" data-tour={tourAnchor ? 'model-selector' : undefined}>
       <button onClick={() => setOpen(!open)}
         className={`flex items-center gap-1 px-2 py-1 rounded-md hover:bg-canvas-deep transition-colors ${compact ? '' : 'px-2.5'}`}
         title={`模型: ${currentModel}${providerHint !== 'anthropic' ? `（provider: ${provider || providerHint}）` : ''}`}>

@@ -524,6 +524,7 @@ function ThemeToggle() {
   return (
     <div ref={wrapRef} className="relative">
       <button onClick={() => setOpen((v) => !v)}
+        data-cgui="theme-btn"
         data-tour="theme-toggle"
         className="px-1.5 py-1 rounded-lg text-ink-muted hover:text-ink hover:bg-black/5 transition-colors flex flex-col items-center gap-0.5"
         title="主题与外观">
@@ -918,14 +919,14 @@ function PanelDock({ rightPanel, setRightPanel, updateNotice, jumpToUpdate, atte
   const activeMeta = rightPanel ? PANEL_MAP[rightPanel] : null;
   const DockIcon = activeMeta ? activeMeta.icon : LayoutGrid;
   return (
-    <span data-tour="panel-dock" className="inline-flex items-center gap-1">
+    <span data-cgui="panel-dock" data-tour="panel-dock" className="inline-flex items-center gap-1">
       {railOpen && (
         <span className="cgui-dock-rail inline-flex items-center gap-1 rounded-panel bg-black/5 px-1 py-0.5">
           {/* P2.3:分屏迁入坞 rail 首位(窗口级操作,与面板同属"工作区"语义)。 */}
           <span data-tour="dock-pane" className="inline-flex"><PaneCountPicker /></span>
           <span className="w-px h-4 bg-ink-ghost/30 mx-0.5" />
           {Object.entries(PANEL_MAP).map(([id, { icon: Icon, label }]) => (
-            <button key={id} data-tour={`panel-${id}`} onClick={() => setRightPanel(rightPanel === id ? null : id)}
+            <button key={id} data-cgui={id === 'settings' ? 'settings-btn' : undefined} data-tour={`panel-${id}`} onClick={() => setRightPanel(rightPanel === id ? null : id)}
               className={`px-1.5 py-1 rounded-lg transition-all flex flex-col items-center gap-0.5 ${rightPanel === id ? 'bg-accent-subtle text-accent' : 'text-ink-muted hover:text-ink hover:bg-black/5'}`}
               title={label}>
               <Icon size={15} />
@@ -1426,6 +1427,7 @@ export function SessionItem({ session, isSelected, onSelect, onFork, onArchive, 
         <div
           role="button"
           tabIndex={0}
+          data-cgui="session-row"
           onClick={() => onSelect(session)}
           onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onSelect(session); } }}
           title={sessionRowTooltip({
@@ -1460,7 +1462,7 @@ export function SessionItem({ session, isSelected, onSelect, onFork, onArchive, 
       )}
       {/* 操作组 top-2 锚定行区(非 top-1/2:外层 relative 含展开的子任务列表,居中会漂进列表) */}
       {!renaming && (
-      <div className={`absolute top-2 right-1.5 transition-opacity flex items-center gap-0.5 ${deleteArmed ? 'opacity-100' : 'opacity-100 md:opacity-0 md:group-hover:opacity-100'}`}>
+      <div data-cgui="session-actions" className={`absolute top-2 right-1.5 transition-opacity flex items-center gap-0.5 ${deleteArmed ? 'opacity-100' : 'opacity-100 md:opacity-0 md:group-hover:opacity-100'}`}>
         <button
           onClick={(e) => { e.stopPropagation(); onTogglePin?.(session.sessionId); }}
           disabled={isDraft}
@@ -1672,7 +1674,7 @@ function HomeState({ tabIndex = 0 }) {
     setTimeout(() => window.dispatchEvent(new CustomEvent('cgui:add-project')), 60);
   };
   return (
-    <div className="flex-1 flex items-center justify-center px-6">
+    <div data-cgui="home" className="flex-1 flex items-center justify-center px-6">
       <div className="w-full max-w-[560px] flex flex-col items-center">
         {custom?.icon ? (
           <img src={custom.icon} alt="" className="w-12 h-12 rounded-lg object-cover mb-4" />
@@ -1683,7 +1685,7 @@ function HomeState({ tabIndex = 0 }) {
         )}
         {/* r11-⑫:问候分段渲染——称呼段用主题 accent 细渐变(token,不硬编码色值),
             皮肤模板 {name} 占位符同路径;无称呼时占位符整段降级(homeGreetingParts)。 */}
-        <h2 className="text-[22px] font-display font-medium text-ink mb-5 tracking-tight">
+        <h2 data-cgui="home-greeting" className="text-[22px] font-display font-medium text-ink mb-5 tracking-tight">
           {homeGreetingParts(new Date().getHours(), custom?.greeting, displayName).map((p, i) => p.name ? (
             <span
               key={i}
@@ -1695,6 +1697,7 @@ function HomeState({ tabIndex = 0 }) {
         </h2>
         <div className="w-full rounded-lg border border-canvas-deep/70 bg-canvas-warm/60 focus-within:border-accent/50 transition-colors">
           <textarea
+            data-cgui="home-input"
             value={text}
             onChange={(e) => setText(e.target.value)}
             onKeyDown={(e) => {
@@ -2458,7 +2461,7 @@ function SessionHeaderMore({ children, forceOpenSignal = 0 }) {
     return () => { document.removeEventListener('mousedown', onDoc); window.removeEventListener('keydown', onEsc, true); };
   }, [open]);
   return (
-    <span ref={wrapRef} data-tour="session-menu" className="inline-flex items-center gap-1">
+    <span ref={wrapRef} data-cgui="session-menu" data-tour="session-menu" className="inline-flex items-center gap-1">
       {open && <span className="cgui-dock-rail inline-flex items-center gap-1 rounded-panel bg-black/5 px-1 py-0.5">{children}</span>}
       <button
         onClick={() => setOpen((v) => !v)}
@@ -6666,7 +6669,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
               <span className="text-[10px] text-ink-faint font-mono shrink-0 whitespace-nowrap">{messages.length + chatMessages.filter((m) => m.type !== 'btw').length} 条消息</span>
               {/* P1.2 徽章零态壳:有会话即渲染(不再 contextTokens>0 门控);统计/provider
                   hint/曾用模型收进弹层(badgeInfo),行内不再重复。 */}
-              <span data-tour="ctx-badge" className="inline-flex shrink-0">
+              <span data-cgui="badge-context" data-tour="ctx-badge" className="inline-flex shrink-0">
                 <ContextBreakdownButton
                   contextTokens={contextTokens}
                   contextWindow={contextWindow}
@@ -6881,6 +6884,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         onScroll={handleScroll}
         onWheel={handleScrollWheel}
         onPointerDown={handleScrollPointer}
+        data-cgui="message-list"
         data-chat-scroll
         className="h-full overflow-y-auto relative z-10"
       >
@@ -8950,7 +8954,7 @@ function MobileMenu({ setRightPanel, onClose, updateNotice = null }) {
 // cramming every control into a wrapped header.
 function MobileTopBar({ onMenu, onNew, title }) {
   return (
-    <header className="mobile-topbar glass-bar h-12 px-2 flex items-center gap-1 shrink-0 relative z-40">
+    <header data-cgui="topbar-mobile" className="mobile-topbar glass-bar h-12 px-2 flex items-center gap-1 shrink-0 relative z-40">
       <button onClick={onMenu} className="btn-glass p-2 shrink-0" title="会话">
         <Menu size={18} className="text-ink-muted" />
       </button>
@@ -10018,7 +10022,7 @@ export default function App() {
       {/* 排版规则(用户要求):所有内容放得下就一行;放不下时左簇(项目/标题)先截断
           让位(flex-1 min-w-0 + truncate),仍不够右簇整体换行且行内右对齐(justify-end)。
           原来左簇不收缩,默认窗宽+中字号就把右簇挤下去 → 打开必两行。 */}
-      <header className="glass-bar min-h-12 px-4 py-1 flex items-center gap-y-1 flex-wrap shrink-0 relative z-40">
+      <header data-cgui="topbar" className="glass-bar min-h-12 px-4 py-1 flex items-center gap-y-1 flex-wrap shrink-0 relative z-40">
         <div className="flex items-center gap-2 min-w-0 flex-1 basis-64">
           <button data-tour="sidebar-toggle" onClick={toggleSidebar} className="btn-glass p-1.5 transition-colors shrink-0" title={sidebarCollapsed ? '展开' : '收起'}>
             {sidebarCollapsed ? <ChevronRight size={15} className="text-ink-muted" /> : <ChevronLeft size={15} className="text-ink-muted" />}
