@@ -111,8 +111,12 @@ function SkinManagerDialog({ onClose, onChanged }) {
     const texts = { 'skin.css': css, 'client.js': js, 'a11y.css': a11y };
     const manifest = { format: 'cgui-skin/1', name: name.trim() || '粘贴试穿', tier: 2 };
     for (const [f, t] of Object.entries(texts)) { if (t.trim()) manifest[f.replace('.', '_')] = f; }
-    const r = await activateSkin({ id: 'builtin-tryon', manifest, t2Texts: texts }, { tryOn: true });
-    void r;
+    const { t2 } = await activateSkin({ id: 'builtin-tryon', manifest, t2Texts: texts }, { tryOn: true }) || {};
+    // p2-1:装载结果不再静默吞——脚本被静态校验拒载时如实报出(样式部分已生效)。
+    if (t2 && !t2.loaded && t2.reason === 'script_rejected') {
+      setNotice({ ok: false, text: `client.js 含被禁止的调用,未载入:${(t2.hits || []).join('、')}(样式部分已试穿)` });
+      return;
+    }
     setNotice({ ok: true, text: '已试穿(未保存;刷新或点停用即回)。满意后点「保存为皮肤」。' });
   };
   const saveInline = async (kind) => {

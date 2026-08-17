@@ -39,6 +39,21 @@ import { validateManifest, validateT2Script, ICON_SEMANTIC_NAMES } from '../../s
   assert.ok(validateT2Script(dev.t2Texts['client.js']).ok, 't2: 示例 client.js 过黑名单');
   assert.ok(dev.t2Texts['client.js'].includes('__cguiSkinDispose'), 't2: 示例注册卸载器(活文档)');
   assert.ok(dev.t2Texts['skin.css'].includes('data-cgui='), 't2: 示例样式用语义锚点');
+  // p2-1:示例必须"一眼不同"——四要素逐项钉死
+  assert.match(dev.name, /^示例·/, 't2: 命名体现示例性');
+  const css = dev.t2Texts['skin.css'];
+  assert.match(css, /\[data-cgui="send-btn"\][\s\S]*?border-radius: 999px !important/, 't2: ①按钮形态大改(胶囊描边)');
+  assert.doesNotMatch(css, /\.btn|\.glass|\.rounded|\.bg-/, 't2: ①禁 Tailwind 类名选择器(只走锚点)');
+  const iconVals = Object.values(dev.manifest.icons || {});
+  assert.ok(iconVals.length >= 2, 't2: ②≥2 个图标语义位替换');
+  assert.ok(iconVals.every((v) => v.startsWith('data:image/svg+xml')), 't2: ②自绘 SVG(data URI,走 iconOverrides mask 机制)');
+  for (const sem of Object.keys(dev.manifest.icons)) {
+    assert.ok(ICON_SEMANTIC_NAMES.includes(sem), `t2: ②语义名 ${sem} 在白名单`);
+  }
+  assert.match(css, /\[data-cgui="topbar"\][\s\S]*?border-bottom: 1px solid var\(--color-accent\)/, 't2: ③chrome 级改造(顶栏霓虹底线)');
+  assert.match(css, /\[data-cgui="sidebar"\][\s\S]*?repeating-linear-gradient/, 't2: ③chrome 级改造(侧栏扫描线)');
+  assert.ok(dev.manifest.light?.vars && dev.manifest.dark?.vars, 't2: ④明暗两态 vars 齐备');
+  assert.ok((css.match(/var\(--color-accent\)/g) || []).length >= 5, 't2: ④css 引用 accent 变量随明暗换色');
   // 示例 greeting 走 {name} 模板(与⑫衔接)
   assert.ok(BUILTIN_SKINS.some((s) => s.manifest.home?.greeting?.includes('{name}')), 't2: 示例含 {name} 问候模板');
   // 语义清单双端一致(注册表值 ⊆ 服务端白名单已在 icon 测钉;这里钉总量口径)

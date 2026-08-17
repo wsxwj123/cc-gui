@@ -117,9 +117,13 @@ export function applySkinDom(id, manifest, { root = document.documentElement } =
       ? { icon: ex.home.icon ? skinAssetUrl(id, ex.home.icon) : undefined, greeting: ex.home.greeting }
       : null;
   } catch {}
-  // 图标语义替换(服务端已清洗的 SVG,mask 渲染)
+  // 图标语义替换(mask 渲染):包内文件走资源端点(服务端已清洗);内置示例/本地预置
+  // 用 data:image/svg+xml URI 直通(mask 上下文不执行脚本,且仅自带内容走此形态——
+  // zip 导入的 manifest 里 data: 值过不了服务端文件名白名单,不会流到这里)。
   const iconMap = {};
-  for (const [sem, file] of Object.entries(ex.icons || {})) iconMap[sem] = skinAssetUrl(id, file);
+  for (const [sem, file] of Object.entries(ex.icons || {})) {
+    iconMap[sem] = file.startsWith('data:image/svg+xml') ? file : skinAssetUrl(id, file);
+  }
   setIconOverrides(iconMap);
   // 明暗双图预载(另一模式背景,切换不闪空)
   const other = manifest?.[mode === 'dark' ? 'light' : 'dark']?.background?.image;
@@ -237,12 +241,15 @@ export async function activateSkin(row, { tryOn = false } = {}) {
       if (st.themeFamily !== manifest.base) st.setTheme(manifest.base, st.themeTone || 'auto');
     } catch {}
   }
-  // t2Texts = 内置示例/粘贴试穿的本地三件套(不经资源端点);否则按 manifest 从服务端取
-  if (manifest.tier === 2) await loadT2(id, manifest, t2Texts || null);
+  // t2Texts = 内置示例/粘贴试穿的本地三件套(不经资源端点);否则按 manifest 从服务端取。
+  // 返回 T2 装载结果给 UI(拒载/门控不再被静默吞掉——p2-1 顺带修)。
+  let t2 = null;
+  if (manifest.tier === 2) t2 = await loadT2(id, manifest, t2Texts || null);
   if (!tryOn) {
     try { localStorage.setItem(LS_ID, id); } catch {}
     writeCache(id, manifest);
   }
+  return { t2 };
 }
 export function deactivateSkin({ forget = true } = {}) {
   clearSkinDom();
@@ -323,25 +330,76 @@ export const BUILTIN_SKINS = [
     },
   },
   {
+    // r11-p2-1:示例必须"一眼不同"(用户打回:旧版只有配色级差异)。霓虹终端 =
+    // ①按钮形态大改(胶囊描边+辉光,全走 data-cgui 锚点,零 Tailwind 类名选择器)
+    // ②send/new-session 两个图标语义位替换(包内自绘 SVG 经 data: URI,走 iconOverrides
+    //   的 CSS mask 机制,颜色仍随 currentColor)③chrome 级改造(顶栏霓虹底线+侧栏扫描线)
+    // ④配色带 light/dark 两态 vars,css 全部引用 var(--color-accent) 跟随明暗。
     id: 'builtin-dev',
-    name: '开发者示例(T2)',
+    name: '示例·霓虹终端(T2)',
     source: 'builtin',
-    manifest: { format: 'cgui-skin/1', name: '开发者示例(T2)', tier: 2, skin_css: 'skin.css', client_js: 'client.js', a11y_css: 'a11y.css' },
+    manifest: {
+      format: 'cgui-skin/1', name: '示例·霓虹终端(T2)', tier: 2,
+      skin_css: 'skin.css', client_js: 'client.js', a11y_css: 'a11y.css',
+      light: {
+        vars: {
+          '--color-accent': '#0B8A2D', '--color-accent-hover': '#086B22',
+          '--color-canvas': '#F4F9F4', '--color-canvas-warm': '#E9F3E9', '--color-canvas-deep': '#DBEADB',
+        },
+      },
+      dark: {
+        vars: {
+          '--color-accent': '#39FF14', '--color-accent-hover': '#7CFF5E',
+          '--color-canvas': '#0A0F0A', '--color-canvas-warm': '#101710', '--color-canvas-deep': '#1A241A',
+          '--color-ink': '#D8F5D0', '--color-ink-soft': '#B9E3B0',
+        },
+      },
+      home: { greeting: '终端就绪，{name}' },
+      icons: {
+        // 包内自绘 SVG(data: URI 形态,仅内置/试穿本地通道;zip 导入仍走文件名+清洗)
+        send: 'data:image/svg+xml;utf8,' + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 12 21 4l-6 8 6 8-18-8zm5 0h7" fill="none" stroke="black" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round"/></svg>'),
+        'new-session': 'data:image/svg+xml;utf8,' + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><rect x="2.5" y="4" width="19" height="16" rx="2.5" fill="none" stroke="black" stroke-width="2.2"/><path d="M6.5 9.5 10 12.5l-3.5 3M12.5 15.5H17" fill="none" stroke="black" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>'),
+      },
+    },
     t2Texts: {
       'skin.css': [
-        '/* T2 示例:样式一律用 data-cgui 语义锚点,不挂 Tailwind 类名(重构即碎)。 */',
-        '[data-cgui="send-btn"] { border-radius: 6px !important; }',
-        '[data-cgui="composer"] { border: 1px dashed var(--color-accent) !important; }',
+        '/* 霓虹终端(T2 示例):样式一律用 data-cgui 语义锚点,不挂 Tailwind 类名(重构即碎)。',
+        '   色值全部引用 var(--color-accent):随本皮肤 light/dark vars 自动换色。 */',
+        '/* ① 按钮形态大改:胶囊描边风(透明底+辉光) */',
+        '[data-cgui="send-btn"], [data-cgui="stop-btn"], [data-cgui="queue-btn"], [data-cgui="new-session-btn"] {',
+        '  border-radius: 999px !important;',
+        '  background: transparent !important;',
+        '  border: 1px solid var(--color-accent) !important;',
+        '  color: var(--color-accent) !important;',
+        '  box-shadow: 0 0 10px -2px var(--color-accent), inset 0 0 6px -3px var(--color-accent) !important;',
+        '}',
+        '[data-cgui="send-btn"] { text-shadow: 0 0 6px var(--color-accent); }',
+        '/* ③ chrome 级改造:顶栏霓虹底线 + 侧栏终端扫描线 + 输入区描边 */',
+        '[data-cgui="topbar"], [data-cgui="topbar-mobile"] {',
+        '  border-bottom: 1px solid var(--color-accent) !important;',
+        '  box-shadow: 0 1px 14px -4px var(--color-accent) !important;',
+        '}',
+        '[data-cgui="sidebar"] {',
+        '  background-image: repeating-linear-gradient(0deg, color-mix(in srgb, var(--color-accent) 6%, transparent) 0 1px, transparent 1px 3px) !important;',
+        '}',
+        '[data-cgui="composer"] {',
+        '  border: 1px solid var(--color-accent) !important;',
+        '  border-radius: 12px !important;',
+        '  box-shadow: 0 0 12px -4px var(--color-accent) !important;',
+        '}',
         '[data-cgui="session-row"]:hover { transform: translateX(2px); transition: transform .12s ease; }',
       ].join('\n'),
       'client.js': [
-        '// T2 示例:给 <html> 打标记,并注册卸载器(停用/换肤时被调用,三重卸载第一重)。',
-        "document.documentElement.setAttribute('data-skin-demo', '1');",
+        '// T2 示例:给 <html> 打标记(可配合 CSS 做全局态),并注册卸载器',
+        '// (停用/换肤时被调用,三重卸载第一重)。',
+        "document.documentElement.setAttribute('data-skin-demo', 'neon-terminal');",
         "window.__cguiSkinDispose = () => document.documentElement.removeAttribute('data-skin-demo');",
       ].join('\n'),
       'a11y.css': [
-        '/* 可及性补丁示例:高对比焦点环。 */',
-        '[data-cgui="send-btn"]:focus-visible { outline: 2px solid var(--color-accent) !important; outline-offset: 2px; }',
+        '/* 可及性补丁示例:高对比焦点环(锚点选择器)。 */',
+        '[data-cgui="send-btn"]:focus-visible, [data-cgui="new-session-btn"]:focus-visible {',
+        '  outline: 2px solid var(--color-accent) !important; outline-offset: 2px;',
+        '}',
       ].join('\n'),
     },
   },
