@@ -67,6 +67,22 @@ const trustedMeta = {
 assert.equal(contextHintsMatch(validateContextRequest(req), trustedMeta), true, '一致的会话提示应通过');
 assert.equal(contextHintsMatch(validateContextRequest({ ...req, query: { ...req.query, cwd: '/tmp/other' } }), trustedMeta), false,
   '客户端 cwd 不能覆盖服务端可信元数据');
+// ④判官必修-4:model 不参与 409 判定(变异哨兵:把 model 判等加回 contextHintsMatch,
+// 下面四条必须变红——已实际验证过一次)。
+assert.equal(validateContextRequest({ ...req, query: { ...req.query, model: 'claude-sonnet-4-6[1m]' } }) !== null, true,
+  '[1m] 后缀 model 必须过参数校验(MODEL_ARG_RE 含 [])');
+assert.equal(contextHintsMatch(
+  validateContextRequest({ ...req, query: { ...req.query, model: 'claude-sonnet-4-6[1m]' } }),
+  { ...trustedMeta, model: 'claude-sonnet-4-6' },
+), true, '1M 会话:client 带 [1m]、jsonl 裸 id,不得 409(徽章永久失效的主根因)');
+assert.equal(contextHintsMatch(validateContextRequest(req), { ...trustedMeta, model: null }), true,
+  '新会话 meta.model 为空:信任客户端,不得 409');
+assert.equal(contextHintsMatch(
+  validateContextRequest({ ...req, query: { ...req.query, model: 'switched-but-not-sent' } }), trustedMeta,
+), true, '切模型后未发送:model 不一致不再 409');
+assert.equal(contextHintsMatch(
+  validateContextRequest({ ...req, query: { ...req.query, projectHash: 'other-project' } }), trustedMeta,
+), false, 'projectHash 归属校验必须保留(删掉该判等本断言变红)');
 
 assert.equal(contextErrorMessage('context-session-mismatch'), '上下文请求与会话不匹配');
 assert.equal(contextErrorMessage('unknown'), '上下文计算失败', '未知内部错误不能透传异常正文');

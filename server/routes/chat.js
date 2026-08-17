@@ -2603,10 +2603,13 @@ function trustedContextMeta(sessionId) {
   return readHistoricalContextMeta(sessionId);
 }
 
+// ④判官必修-4:model 不参与 409 归属判定。正常场景就会不等——1M 会话 client 传
+// `xxx[1m]` 而 jsonl 的 model 永远是裸 id(API 回包不带 [1m]);切模型后未发送;新会话
+// meta.model 为 null——硬判等 = 徽章永久 409。model 只用于 spawn 回落的 --model 参数
+// (信客户端,MODEL_ARG_RE/safeModelArg 白名单仍拦注入)。projectHash/cwd 归属校验保留。
 export function contextHintsMatch(request, meta) {
   return (!request.projectHash || request.projectHash === meta.projectHash)
-    && (!request.cwd || request.cwd === meta.cwd)
-    && (!request.model || request.model === meta.model);
+    && (!request.cwd || request.cwd === meta.cwd);
 }
 
 export function validContextPayload(payload) {
@@ -2674,7 +2677,9 @@ router.get('/context/:sessionId', async (req, res) => {
     // 不落盘:/context 只是读当前上下文,fork 副本不该留在磁盘(否则也会冒出空白会话)。
     '--no-session-persistence',
   ];
-  const model = safeModelArg(meta.model);
+  // ④model 信客户端(旧行为):client 传的是会话当前模型(含 [1m] 时窗口才算得对),
+  // meta.model(jsonl 裸 id)只在客户端没传时兜底。safeModelArg 白名单不变。
+  const model = safeModelArg(request.model || meta.model);
   if (model) args.push('--model', model);
   let proc;
   try {
