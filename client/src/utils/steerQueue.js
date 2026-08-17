@@ -14,17 +14,29 @@ export function isSteered(item) {
   return !!(item?.steerId && item.steerState === 'accepted');
 }
 
-// FIFO 只看队首。任何 unresolved 条目都是 barrier，绝不能越过它发送后项。
+// ①'kept' = 用户显式决定"保留不发"：已 resolved，非 barrier；drain/steer 都跳过它
+// （不自动发送），也不拦它后面的条目（不拦队列）。
+const firstNonKeptIndex = (list) => {
+  if (!Array.isArray(list)) return -1;
+  for (let i = 0; i < list.length; i++) {
+    if (list[i]?.steerState !== 'kept') return i;
+  }
+  return -1;
+};
+
+// FIFO 只看（跳过 kept 后的）队首。任何 unresolved 条目都是 barrier，绝不能越过它发送后项。
 export function firstDrainableIndex(list) {
-  if (!Array.isArray(list) || !list.length) return -1;
-  const head = list[0];
-  return head?.text && !isSteerBarrier(head) ? 0 : -1;
+  const i = firstNonKeptIndex(list);
+  if (i < 0) return -1;
+  const head = list[i];
+  return head?.text && !isSteerBarrier(head) ? i : -1;
 }
 
 export function firstSteerableIndex(list) {
-  if (!Array.isArray(list) || !list.length) return -1;
-  const head = list[0];
-  return head?.text && !head.hidden && !isSteerBarrier(head) ? 0 : -1;
+  const i = firstNonKeptIndex(list);
+  if (i < 0) return -1;
+  const head = list[i];
+  return head?.text && !head.hidden && !isSteerBarrier(head) ? i : -1;
 }
 
 // 两种已验证落盘形态：真 user.uuid，或 reader 合成 queued_command.source_uuid 后的 steerUuid。
@@ -52,6 +64,9 @@ export function reconcileSteered(list, _unusedSigs, steerKeys) {
   for (const item of list) {
     if (!isSteerBarrier(item) && !item?.steerId) { out.push(item); continue; }
     if (steerLanded(item, null, steerKeys)) { changed = true; continue; }
+    // ①用户已决定"保留不发"：除 UUID 正向命中（上一行，说明其实已送达，条目清掉）外，
+    // 对账不得把它翻回 needs-review barrier——那会复活刚被用户解开的死锁。
+    if (item.steerState === 'kept') { out.push(item); continue; }
     if (item.steerState === 'needs-review') { out.push(item); continue; }
     changed = true;
     const { claimId, targetPaneId, claimDraft, ...rest } = item;
@@ -69,6 +84,8 @@ export function stripSteerState(queueMap) {
     if (!Array.isArray(list)) continue;
     out[sessionKey] = list.map((item) => {
       if (!isSteerBarrier(item) && !item?.steerId) return item;
+      // ①"保留不发"是用户决定，跨重启保持，不翻回 needs-review。
+      if (item?.steerState === 'kept') return item;
       const { claimId, targetPaneId, claimDraft, ...rest } = item;
       void claimId; void targetPaneId; void claimDraft;
       return { ...rest, steerState: 'needs-review', attemptWasAmbiguous: true };

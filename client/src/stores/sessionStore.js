@@ -1535,6 +1535,10 @@ export const useStore = create((set, get) => ({
     const current = list[index];
     let nextItem = current;
     if (outcome === 'accepted') nextItem = { ...current, steerState: 'accepted' };
+    // ①"保留不发"：resolved 终态。必须清 attemptWasAmbiguous（isSteerBarrier 也认它），
+    // 且分支要在 ambiguous 兜底之前——needs-review 条目 attemptWasAmbiguous 恒真，
+    // 放后面 'kept' 会被兜底分支吞掉。
+    else if (outcome === 'kept') nextItem = { ...current, steerState: 'kept', attemptWasAmbiguous: false };
     else if (outcome === 'ambiguous' || current.attemptWasAmbiguous) {
       nextItem = { ...current, steerState: 'needs-review', attemptWasAmbiguous: true };
     } else if (outcome === 'explicit-reject') {
@@ -1686,7 +1690,11 @@ export const useStore = create((set, get) => ({
   }),
   removeFromQueue: (sessionKey, index) => set((s) => {
     const list = s.messageQueue[sessionKey] || [];
-    if (index < 0 || index >= list.length || isSteerBarrier(list[index]) || list[index]?.claimDraft) return s;
+    if (index < 0 || index >= list.length || list[index]?.claimDraft) return s;
+    // ①needs-review 必须有删除逃生口（取回失败/附件丢失时这是唯一出路）；'kept' 本就非
+    // barrier。仍拒删在途确认态（unknown/accepted/claiming）——那些是"结果未定"，删了会
+    // 与对账竞态。确认弹窗在 ChatInput（store 不能 import confirmDialog，JSX 模块）。
+    if (isSteerBarrier(list[index]) && list[index].steerState !== 'needs-review') return s;
     const next = [...list.slice(0, index), ...list.slice(index + 1)];
     return { messageQueue: { ...s.messageQueue, [sessionKey]: next } };
   }),

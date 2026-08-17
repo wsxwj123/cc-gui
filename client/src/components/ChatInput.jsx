@@ -1312,6 +1312,7 @@ export function ChatInput({ onSend, onStop, onStopBackground, onAccelerate, canS
                     <span className="text-ink-soft block line-clamp-2 leading-snug" title={q.text}>{q.text}</span>
                     {q.steerState === 'unknown' && <span className="text-[10px] text-amber-700">正在确认并入结果…</span>}
                     {q.steerState === 'claiming' && <span className="text-[10px] text-amber-700">正在安全取回…</span>}
+                    {q.steerState === 'kept' && <span className="text-[10px] text-ink-faint">已保留，不会自动发送</span>}
                   </div>
                   <div className="shrink-0 flex items-center gap-0.5 opacity-60 group-hover:opacity-100 transition-opacity">
                     {q.steerState === 'needs-review' && (
@@ -1325,6 +1326,9 @@ export function ChatInput({ onSend, onStop, onStopBackground, onAccelerate, canS
                         </button>
                         <button
                           type="button"
+                          // ①判官必修-1:此前是无 onClick 的假按钮。置 'kept'(resolved 非 barrier):
+                          // 解除队首 barrier、不自动发送,chip 显示"已保留"。
+                          onClick={() => useStore.getState().settleSteer(permKey, q.queueId, 'kept')}
                           className="px-2 py-1 hover:bg-accent/15 rounded text-[10px] text-ink-faint"
                           aria-label="保留不发"
                         >
@@ -1341,9 +1345,21 @@ export function ChatInput({ onSend, onStop, onStopBackground, onAccelerate, canS
                         <Pencil size={11} className="text-accent" />
                       </button>
                     )}
-                    {onRemoveFromQueue && !isSteerBarrier(q) && (
+                    {/* ①删除出口:needs-review 也可删(取回失败/附件丢失时唯一出路),带确认;
+                        kept 非 barrier 本就放行,同样确认(消息可能其实已送达)。unknown/accepted/
+                        claiming 仍不可删(结果在途,删了与对账竞态)。 */}
+                    {onRemoveFromQueue && (!isSteerBarrier(q) || q.steerState === 'needs-review') && (
                       <button
-                        onClick={() => onRemoveFromQueue(i)}
+                        onClick={async () => {
+                          if (q.steerState === 'needs-review' || q.steerState === 'kept') {
+                            const ok = await confirmDialog(
+                              '删除后不可恢复。若这条消息其实已被模型接收，删除不影响已进行的回合。确认删除？',
+                              { danger: true },
+                            );
+                            if (!ok) return;
+                          }
+                          onRemoveFromQueue(i);
+                        }}
                         className="p-1 hover:bg-red-100 rounded"
                         title="从队列删除"
                       >
