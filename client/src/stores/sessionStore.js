@@ -189,6 +189,12 @@ export const THEME_FAMILIES = [
   { id: 'default', name: '默认',
     light: { id: '', bg: '#FFFFFF', bg2: '#ECECEE', fg: '#1A1A1A', accent: '#1A1A1A' },
     dark:  { id: '', bg: '#1A1A1B', bg2: '#121213', fg: '#F5F5F6', accent: '#A0A0A6' } },
+  // r11-⑧:全局默认扁平化后,原玻璃观感整体保留为独立主题家族。色值=默认主题
+  // (variant 块只恢复形状 token:圆角/阴影/磨砂/透底,见 index.css shape 恢复块);
+  // 28 套配色预设与形状正交:选其它任何家族一律扁平。
+  { id: 'glass', name: '玻璃拟态(经典)',
+    light: { id: 'glass-classic', bg: '#FFFFFF', bg2: '#ECECEE', fg: '#1A1A1A', accent: '#1A1A1A' },
+    dark:  { id: 'glass-classic-dark', bg: '#1A1A1B', bg2: '#121213', fg: '#F5F5F6', accent: '#A0A0A6' } },
   { id: 'claude', name: 'Claude',
     light: { id: 'claude-warm', bg: '#F2EDE3', bg2: '#E2DBCC', fg: '#1A1A1A', accent: '#D97757' },
     dark:  { id: 'claude-dark', bg: '#29251F', bg2: '#161412', fg: '#F5F0E8', accent: '#D97757' } },
