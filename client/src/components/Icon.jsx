@@ -34,7 +34,7 @@ import {
 // 注册表抽在 utils/iconOverrides.js(纯 js):皮肤引擎(skins.js,node 单测需可
 // import)不能依赖本 JSX 文件;这里转发导出保持既有 setIconOverrides 入口不变。
 import { subscribeIcons as subscribe, getIconsVersion as getSnapshot, getIconOverrides } from '../utils/iconOverrides.js';
-export { setIconOverrides, getIconOverrides } from '../utils/iconOverrides.js';
+export { setIconOverrides, getIconOverrides, ICON_SEMANTICS } from '../utils/iconOverrides.js';
 
 function wrap(semantic, Orig) {
   function SkinnableIcon(props) {
@@ -65,39 +65,6 @@ function wrap(semantic, Orig) {
   return SkinnableIcon;
 }
 
-/** lucide 组件名 → 皮肤语义名注册表(供提示词生成器/文档)。 */
-export const ICON_SEMANTICS = {
-  Send: "send",
-  Square: "stop",
-  MessageSquare: "new-session",
-  Settings: "settings",
-  Folder: "folder",
-  FolderOpen: "folder-open",
-  Search: "search",
-  Pin: "pin",
-  X: "close",
-  Copy: "copy",
-  RefreshCw: "refresh",
-  Pencil: "edit",
-  Trash2: "delete",
-  Archive: "archive",
-  GitBranch: "branch",
-  Terminal: "terminal",
-  FileText: "file",
-  Image: "image",
-  Globe: "globe",
-  Check: "check",
-  ChevronDown: "chevron-down",
-  ChevronRight: "chevron-right",
-  ChevronLeft: "chevron-left",
-  Plus: "plus",
-  Menu: "menu",
-  Sparkles: "sparkles",
-  Clock: "clock",
-  User: "user",
-  Bot: "bot",
-  AlertTriangle: "warning"
-};
 export const Activity = wrap(null, L_Activity);
 export const AlertCircle = wrap(null, L_AlertCircle);
 export const AlertTriangle = wrap("warning", L_AlertTriangle);

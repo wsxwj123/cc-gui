@@ -224,7 +224,7 @@ function writeCache(id, manifest) {
   try { localStorage.setItem(LS_CACHE, JSON.stringify({ id, manifest })); } catch {}
 }
 export async function activateSkin(row, { tryOn = false } = {}) {
-  const { id, manifest } = row || {};
+  const { id, manifest, t2Texts } = row || {};
   if (!id || !manifest) return;
   disposeT2();
   applySkinDom(id, manifest);
@@ -237,7 +237,8 @@ export async function activateSkin(row, { tryOn = false } = {}) {
       if (st.themeFamily !== manifest.base) st.setTheme(manifest.base, st.themeTone || 'auto');
     } catch {}
   }
-  if (manifest.tier === 2) await loadT2(id, manifest);
+  // t2Texts = 内置示例/粘贴试穿的本地三件套(不经资源端点);否则按 manifest 从服务端取
+  if (manifest.tier === 2) await loadT2(id, manifest, t2Texts || null);
   if (!tryOn) {
     try { localStorage.setItem(LS_ID, id); } catch {}
     writeCache(id, manifest);
@@ -261,11 +262,18 @@ export function bootReplaySkin() {
   } catch {}
 }
 
-/** 列表返回后校对(App 挂载后调):id 失效 → 静默清;manifest 有变 → 以服务端为准重应用。 */
+/** 列表返回后校对(App 挂载后调):id 失效 → 静默清;manifest 有变 → 以服务端为准重应用。
+ *  内置示例(builtin- 前缀)不在服务端库,按本地预置解析,不参与失效清除。 */
 export async function reconcileSkinOnBoot() {
   let id = null;
   try { id = localStorage.getItem(LS_ID); } catch {}
   if (!id) return;
+  if (id.startsWith('builtin-')) {
+    const b = BUILTIN_SKINS.find((s) => s.id === id);
+    if (b) await activateSkin(b);
+    else deactivateSkin();
+    return;
+  }
   try {
     const r = await fetch('/api/skins');
     const d = await r.json();
@@ -274,6 +282,70 @@ export async function reconcileSkinOnBoot() {
     await activateSkin({ id, manifest: row.manifest });
   } catch { /* 网络失败保持缓存重放的样子,下次再对账 */ }
 }
+
+// ── 内置示例皮肤(客户端预置,非服务端库;零第三方素材,纯变量/纯代码示例) ──
+// 刻意不做在线市场/分享入口;这三套只是「格式长什么样」的活文档,可试穿可应用。
+export const BUILTIN_SKINS = [
+  {
+    id: 'builtin-dawn',
+    name: '晨光(示例 · 亮)',
+    source: 'builtin',
+    manifest: {
+      format: 'cgui-skin/1', name: '晨光(示例 · 亮)', tier: 1, base: 'default',
+      shared: { vars: { '--radius-panel': '10px', '--radius-control': '8px' } },
+      light: {
+        vars: {
+          '--color-canvas': '#FBF8F3', '--color-canvas-warm': '#F3EEE4', '--color-canvas-deep': '#E9E1D2',
+          '--color-accent': '#B4654A', '--color-accent-hover': '#9A5039',
+          '--glass-edge': 'rgba(180,101,74,0.25)',
+        },
+      },
+      dark: { vars: { '--color-accent': '#D08B6F', '--color-accent-hover': '#E0A183' } },
+      home: { greeting: '早，{name}，从这里开始' },
+    },
+  },
+  {
+    id: 'builtin-dusk',
+    name: '夜航(示例 · 暗)',
+    source: 'builtin',
+    manifest: {
+      format: 'cgui-skin/1', name: '夜航(示例 · 暗)', tier: 1, base: 'default',
+      shared: { vars: { '--radius-panel': '6px', '--radius-control': '6px' } },
+      dark: {
+        vars: {
+          '--color-canvas': '#10141C', '--color-canvas-warm': '#171D28', '--color-canvas-deep': '#202836',
+          '--color-accent': '#6FA8DC', '--color-accent-hover': '#8FBCE8',
+          '--glass-edge': 'rgba(111,168,220,0.22)',
+        },
+      },
+      light: { vars: { '--color-accent': '#3D6E9E', '--color-accent-hover': '#2F5880' } },
+      home: { greeting: '夜航中，{name}' },
+    },
+  },
+  {
+    id: 'builtin-dev',
+    name: '开发者示例(T2)',
+    source: 'builtin',
+    manifest: { format: 'cgui-skin/1', name: '开发者示例(T2)', tier: 2, skin_css: 'skin.css', client_js: 'client.js', a11y_css: 'a11y.css' },
+    t2Texts: {
+      'skin.css': [
+        '/* T2 示例:样式一律用 data-cgui 语义锚点,不挂 Tailwind 类名(重构即碎)。 */',
+        '[data-cgui="send-btn"] { border-radius: 6px !important; }',
+        '[data-cgui="composer"] { border: 1px dashed var(--color-accent) !important; }',
+        '[data-cgui="session-row"]:hover { transform: translateX(2px); transition: transform .12s ease; }',
+      ].join('\n'),
+      'client.js': [
+        '// T2 示例:给 <html> 打标记,并注册卸载器(停用/换肤时被调用,三重卸载第一重)。',
+        "document.documentElement.setAttribute('data-skin-demo', '1');",
+        "window.__cguiSkinDispose = () => document.documentElement.removeAttribute('data-skin-demo');",
+      ].join('\n'),
+      'a11y.css': [
+        '/* 可及性补丁示例:高对比焦点环。 */',
+        '[data-cgui="send-btn"]:focus-visible { outline: 2px solid var(--color-accent) !important; outline-offset: 2px; }',
+      ].join('\n'),
+    },
+  },
+];
 
 // ── 明暗联动:data-theme / data-theme-system 变化 → 重跑应用循环 ──
 let observer = null;

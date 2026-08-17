@@ -14,3 +14,37 @@ export function setIconOverrides(map) {
   for (const fn of subs) fn();
 }
 export function getIconOverrides() { return overrides; }
+
+/** lucide 组件名 → 皮肤语义名注册表(供提示词生成器/文档;渲染层 Icon.jsx 转发导出)。 */
+export const ICON_SEMANTICS = {
+  Send: "send",
+  Square: "stop",
+  MessageSquare: "new-session",
+  Settings: "settings",
+  Folder: "folder",
+  FolderOpen: "folder-open",
+  Search: "search",
+  Pin: "pin",
+  X: "close",
+  Copy: "copy",
+  RefreshCw: "refresh",
+  Pencil: "edit",
+  Trash2: "delete",
+  Archive: "archive",
+  GitBranch: "branch",
+  Terminal: "terminal",
+  FileText: "file",
+  Image: "image",
+  Globe: "globe",
+  Check: "check",
+  ChevronDown: "chevron-down",
+  ChevronRight: "chevron-right",
+  ChevronLeft: "chevron-left",
+  Plus: "plus",
+  Menu: "menu",
+  Sparkles: "sparkles",
+  Clock: "clock",
+  User: "user",
+  Bot: "bot",
+  AlertTriangle: "warning"
+};

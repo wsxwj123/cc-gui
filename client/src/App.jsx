@@ -56,6 +56,7 @@ import { contextCanonicalKey, isValidContextResponse, pickBreakdownTier, applyEx
 import EnvCheckPanel from './components/EnvCheckPanel.jsx';
 import { ArtifactDock } from './components/ArtifactPreview.jsx';
 import { FullDiskAccessModal } from './components/FullDiskAccessModal.jsx';
+import { SkinSection } from './components/SkinPanel.jsx';
 import { ProviderPriceEditor } from './components/ProviderPriceEditor.jsx';
 import { BUILTIN_PROVIDERS, findBuiltin } from './utils/builtinProviders.js';
 import { computeCost, formatCost, setUserPrices, observeOfficialBilling } from './utils/pricing.js';
@@ -397,6 +398,7 @@ function FontPicker() {
 // P1.4 外观控件同源体(双入口):顶栏 ThemeToggle 弹层与 设置→外观 tab 共用这一个组件。
 // 状态单一数据源 —— 全部走 sessionStore(setTheme/setUiFontScale/…/localStorage),
 // 两处只是同一 store 的两个 view,不各自为政。
+// r11-③:皮肤段落位主题弹层内(入口落位再修订版);导入/生成器在段内弹独立对话框。
 function ThemeAppearanceBody() {
   const themeFamily = useStore((s) => s.themeFamily);
   const themeTone = useStore((s) => s.themeTone);
@@ -494,8 +496,8 @@ function ThemeAppearanceBody() {
       {/* ── 对话区背景(P2.3:随设置「外观」tab 删除迁入,主题弹层为外观唯一入口) ── */}
       <ChatBackgroundCard />
 
-      {/* P3 皮肤系统落位:皮肤包选择器/管理(--skin-bg-image 等)计划挂在本弹层
-          「配色外观」下方,与 THEME_FAMILIES 同级呈现(见 PLAN-skin-system.md)。 */}
+      {/* ── r11-③ 皮肤(选择器+导入/生成器入口;对话框独立弹出) ── */}
+      <SkinSection />
     </>
   );
 }

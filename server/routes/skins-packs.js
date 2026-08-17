@@ -15,7 +15,7 @@ import { randomUUID } from 'crypto';
 import { isPathInside } from '../utils/safe-path.js';
 import {
   parseTarListing, validateZipEntries, resolveRootPrefix, validateManifest,
-  imageDimensions, sanitizeSvg, validateT2Script, ZIP_LIMITS,
+  imageDimensions, sanitizeSvg, validateT2Script, convertDswVars, ZIP_LIMITS,
   skinIdFrom, SKIN_ID_RE, SKIN_ASSET_RE,
 } from '../utils/skin-validate.js';
 
@@ -210,6 +210,67 @@ export async function installSkinPackage(zipPath, { source = 'user', skinsDir = 
     await rm(tmp, { recursive: true, force: true }).catch(() => {});
   }
 }
+
+// POST /api/skins/import-inline — 裸内容导入(免 zip):
+//   kind:'trio' = T2 三件套 {name, css?, js?, a11y?}(「保存为皮肤」通道;试穿在客户端不落盘)
+//   kind:'dsw'  = dsh theme-gallery JSON {name, dswJson}(--dsw-* → cgui token 尽力映射)
+// 校验全复用:T2 走 validateT2Script,dsw 走 convertDswVars(值全套文法闸);
+// 落盘与 zip 导入同构(skin.json + meta.json + 文件,id/响应形状一致)。
+router.post('/skins/import-inline', async (req, res) => {
+  try {
+    const { kind, name, css, js, a11y, dswJson } = req.body || {};
+    const skinName = typeof name === 'string' ? name.trim().slice(0, 40) : '';
+    if (!skinName) return res.status(422).json({ error: 'manifest_invalid', message: '皮肤名称必填(1-40 字符)' });
+    const warnings = [];
+    const files = {};
+    let manifest;
+    if (kind === 'trio') {
+      const parts = { 'skin.css': css, 'client.js': js, 'a11y.css': a11y };
+      let any = false;
+      for (const [fname, text] of Object.entries(parts)) {
+        if (typeof text !== 'string' || !text.trim()) continue;
+        if (Buffer.byteLength(text, 'utf8') > 512 * 1024) {
+          return res.status(413).json({ error: 'asset_too_large', message: `${fname} 超过 512KB 上限` });
+        }
+        if (fname === 'client.js') {
+          const v = validateT2Script(text);
+          if (!v.ok) return res.status(422).json({ error: 'script_rejected', message: ERROR_MESSAGES.script_rejected, hits: v.hits });
+        }
+        files[fname] = text;
+        any = true;
+      }
+      if (!any) return res.status(422).json({ error: 'empty_skin', message: ERROR_MESSAGES.empty_skin });
+      manifest = { format: 'cgui-skin/1', name: skinName, tier: 2 };
+      for (const f of Object.keys(files)) manifest[f.replace('.', '_')] = f;
+    } else if (kind === 'dsw') {
+      let parsed = dswJson;
+      if (typeof parsed === 'string') {
+        try { parsed = JSON.parse(parsed); }
+        catch { return res.status(422).json({ error: 'manifest_invalid', message: 'dsh JSON 无法解析' }); }
+      }
+      const { vars, warnings: w } = convertDswVars(parsed);
+      warnings.push(...w);
+      if (!Object.keys(vars).length) return res.status(422).json({ error: 'empty_skin', message: '没有可映射的变量(不可映射项见 warnings)', warnings });
+      manifest = { format: 'cgui-skin/1', name: skinName, tier: 1, shared: { vars } };
+    } else {
+      return res.status(400).json({ error: 'manifest_invalid', message: 'kind 必须是 trio 或 dsw' });
+    }
+    const id = skinIdFrom(skinName);
+    const stage = join(tmpdir(), `cgui-skin-stage-${randomUUID()}`);
+    await mkdir(stage, { recursive: true });
+    for (const [fname, text] of Object.entries(files)) await writeFile(join(stage, fname), text, 'utf8');
+    await writeFile(join(stage, 'skin.json'), JSON.stringify(manifest, null, 2));
+    await writeFile(join(stage, 'meta.json'), JSON.stringify({ source: 'user', importedAt: Date.now() }));
+    await mkdir(SKINS_DIR, { recursive: true });
+    const dest = join(SKINS_DIR, id);
+    if (!isPathInside(dest, SKINS_DIR)) throw new Error('internal');
+    await rename(stage, dest);
+    res.status(201).json({ id, name: skinName, warnings, manifest });
+  } catch (err) {
+    console.error('[skins] import-inline failed:', err);
+    res.status(500).json({ error: 'internal', message: ERROR_MESSAGES.internal });
+  }
+});
 
 // POST /api/skins/import — zip 原始字节流(同 backgrounds.js 上传模式),
 // x-upload-name 仅用于扩展名判定与报错展示。
