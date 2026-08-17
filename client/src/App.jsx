@@ -1439,13 +1439,15 @@ export function SessionItem({ session, isSelected, onSelect, onFork, onArchive, 
             subagentCount: session.subagents?.length,
             timeText: formatDate(session.lastActivity),
           })}
-          className={`sidebar-item w-full text-left pl-3 pr-[112px] py-2 rounded-md mb-0.5 transition-colors cursor-pointer flex items-center gap-2 min-w-0 ${
+          className={`sidebar-item w-full text-left pl-3 pr-[108px] md:pr-6 py-2 rounded-md mb-0.5 transition-colors cursor-pointer flex items-center gap-2 min-w-0 ${
             isSelected ? 'active bg-canvas-warm' : 'hover:bg-canvas-warm/60'
           }`}
         >
-          {/* r11-⑪:单行化——只显 状态点+标题(+置顶针角标),模型/消息数/子任务数/时间
-              收进原生 title tooltip(sessionRowTooltip);子代理折叠三角照旧;右侧
-              pr-[112px] 给 hover 操作组留位(与项目行 pr-[80px] 同规,5 键更宽)。 */}
+          {/* r11-⑪/p1-2:单行化——只显 状态点+标题(+置顶针角标),模型/消息数/子任务数/
+              时间收进原生 title tooltip(sessionRowTooltip);子代理折叠三角照旧。
+              标题吃满行宽:桌面只留 pr-6 最小留位,hover 操作组 absolute 覆盖时自带
+              不透明底+左缘渐变(操作时看按钮不看字);触屏无 hover 常显,保留 pr-[108px]
+              留位(5 键 gap-0 收窄形态)。窄栏/大字体下标题不再被常驻留位挤没(用户实报)。 */}
           {hasSubagents ? (
             <button
               onClick={(e) => { e.stopPropagation(); setExpanded(!expanded); }}
@@ -1463,9 +1465,12 @@ export function SessionItem({ session, isSelected, onSelect, onFork, onArchive, 
           {pinned && <Pin size={9} className="text-accent fill-accent shrink-0" />}
         </div>
       )}
-      {/* 操作组 top-2 锚定行区(非 top-1/2:外层 relative 含展开的子任务列表,居中会漂进列表) */}
+      {/* 操作组 top-2 锚定行区(非 top-1/2:外层 relative 含展开的子任务列表,居中会漂进列表)。
+          p1-2:桌面 hover 覆盖标题尾部 → 自带不透明底(canvas-warm token,选中/hover 态近似
+          同色)+左缘细渐变过渡,盖字无碍;触屏常显走行 pr 留位,收窄为 gap-0。 */}
       {!renaming && (
-      <div data-cgui="session-actions" className={`absolute top-2 right-1.5 transition-opacity flex items-center gap-0.5 ${deleteArmed ? 'opacity-100' : 'opacity-100 md:opacity-0 md:group-hover:opacity-100'}`}>
+      <div data-cgui="session-actions" className={`absolute top-2 right-1.5 transition-opacity flex items-center gap-0 md:gap-0.5 md:bg-canvas-warm md:rounded-md ${deleteArmed ? 'opacity-100' : 'opacity-100 md:opacity-0 md:group-hover:opacity-100'}`}>
+        <span aria-hidden className="hidden md:block absolute right-full top-0 bottom-0 w-4 bg-gradient-to-l from-canvas-warm to-transparent" />
         <button
           onClick={(e) => { e.stopPropagation(); onTogglePin?.(session.sessionId); }}
           disabled={isDraft}

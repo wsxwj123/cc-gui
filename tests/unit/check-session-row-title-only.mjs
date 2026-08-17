@@ -45,7 +45,13 @@ import { sessionRowTooltip } from '../../client/src/utils/sessionTitle.js';
   assert.match(item, /subagentCount: session\.subagents\?\.length/, 't2: 子任务数进 tooltip');
   // 单行化:标题 truncate,双行 clamp 退场;行高收窄(py-2)
   assert.doesNotMatch(item, /line-clamp-2/, 't2: 双行 clamp 退场');
-  assert.match(item, /pl-3 pr-\[112px\] py-2 [^"]*flex items-center/, 't2: 单行窄行高+右侧操作组留位');
+  // p1-2:标题吃满行宽——桌面只留 pr-6 最小留位(常驻 pr-[112px] 挤没标题的形态禁止回潮),
+  // 触屏常显保留收窄留位;操作组桌面 hover 覆盖必须带不透明底+左缘渐变过渡。
+  assert.match(item, /pl-3 pr-\[108px\] md:pr-6 py-2 [^"]*flex items-center/, 't2: 桌面标题吃满行宽(md:pr-6)+触屏收窄留位(哨兵锚)');
+  assert.doesNotMatch(item, /pr-\[112px\]/, 't2: 旧常驻宽留位清零');
+  assert.match(item, /md:bg-canvas-warm md:rounded-md/, 't2: 操作组桌面覆盖自带不透明底(主题 token)');
+  assert.match(item, /bg-gradient-to-l from-canvas-warm to-transparent/, 't2: 左缘细渐变过渡');
+  assert.match(item, /gap-0 md:gap-0\.5/, 't2: 触屏常显按钮组收窄(gap-0)');
   // 子代理折叠三角与 hover 操作组照旧
   assert.match(item, /setExpanded\(!expanded\)/, 't2: 子代理折叠三角保留');
   assert.match(item, /ChevronRight/, 't2: 折叠三角图标保留');
