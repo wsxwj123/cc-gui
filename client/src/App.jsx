@@ -67,7 +67,7 @@ import { nativeContextWindow, isBareClaudeAlias, pickCliContextWindow } from './
 import { extractMcpServerIssues, formatMcpServerNotice } from './utils/mcpStatus.js';
 import { classifyRepairOutcome, classifyCheckOutcome, upsertRepairHint, removeRepairHint, loadRepairHints, persistRepairHints } from './utils/repairFlow.js';
 import { autoCompactTransition } from './utils/compactStatus.js';
-import { homeView, pickHomeProject, buildHomeDraft, homeGreeting, readHomeCustom } from './utils/home.js';
+import { homeView, pickHomeProject, buildHomeDraft, homeGreetingParts, readHomeCustom } from './utils/home.js';
 import { seedNewSessionDefaults } from './components/UnifiedSidebar.jsx';
 import {
   FolderOpen, MessageSquare, ChevronLeft, ChevronRight, ChevronDown,
@@ -1644,6 +1644,7 @@ function EmptyState({ tabIndex = 0 }) {
 function HomeState({ tabIndex = 0 }) {
   const projects = useStore((s) => s.projects);
   const selectedProject = useStore((s) => s.selectedProject);
+  const displayName = useStore((s) => s.displayName); // r11-⑫ 称呼(多端共享)
   const [chosenHash, setChosenHash] = useState(null);
   const [text, setText] = useState('');
   const [projOpen, setProjOpen] = useState(false);
@@ -1680,8 +1681,17 @@ function HomeState({ tabIndex = 0 }) {
             <Sparkles size={22} className="text-accent" />
           </div>
         )}
-        <h2 className="text-[20px] font-display font-medium text-ink mb-5 tracking-tight">
-          {homeGreeting(new Date().getHours(), custom?.greeting)}
+        {/* r11-⑫:问候分段渲染——称呼段用主题 accent 细渐变(token,不硬编码色值),
+            皮肤模板 {name} 占位符同路径;无称呼时占位符整段降级(homeGreetingParts)。 */}
+        <h2 className="text-[22px] font-display font-medium text-ink mb-5 tracking-tight">
+          {homeGreetingParts(new Date().getHours(), custom?.greeting, displayName).map((p, i) => p.name ? (
+            <span
+              key={i}
+              className="bg-gradient-to-r from-accent to-accent-hover bg-clip-text text-transparent font-semibold"
+            >{p.text}</span>
+          ) : (
+            <span key={i}>{p.text}</span>
+          ))}
         </h2>
         <div className="w-full rounded-lg border border-canvas-deep/70 bg-canvas-warm/60 focus-within:border-accent/50 transition-colors">
           <textarea
@@ -9543,7 +9553,7 @@ export default function App() {
   // 审计批A6:ws-reconnected 时重跑 —— 断线期间的 custom/auto-titles、context-1m
   // 广播已永久丢失,重连补拉一次收敛(与权限卡/列表对账同构;hydrate 均幂等)。
   useEffect(() => {
-    const hydrate = () => { useStore.getState().hydrateCustomTitles(); useStore.getState().hydrateAutoTitles(); useStore.getState().hydrateContext1m(); };
+    const hydrate = () => { useStore.getState().hydrateCustomTitles(); useStore.getState().hydrateAutoTitles(); useStore.getState().hydrateContext1m(); useStore.getState().hydrateDisplayName(); };
     hydrate();
     window.addEventListener('cgui:ws-reconnected', hydrate);
     return () => window.removeEventListener('cgui:ws-reconnected', hydrate);

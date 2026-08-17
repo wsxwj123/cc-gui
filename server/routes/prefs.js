@@ -364,6 +364,34 @@ router.put('/prefs/session-sync', async (req, res) => {
   }
 });
 
+// r11-⑫:称呼(displayName)——Home 问候「下午好，{称呼}」用。≤20 字符可空,
+// 存 prefs.json 多端共享(同 custom-titles 模式:GET 水合 + PUT + WS 广播收敛)。
+router.get('/prefs/display-name', async (_req, res) => {
+  const prefs = await loadPrefs();
+  res.json({ displayName: typeof prefs.displayName === 'string' ? prefs.displayName : '' });
+});
+
+// PUT /api/prefs/display-name { displayName: string } → 去首尾空白截 20;空串=清除。
+router.put('/prefs/display-name', async (req, res) => {
+  const { displayName } = req.body || {};
+  if (typeof displayName !== 'string') {
+    return res.status(400).json({ error: 'displayName 必须是字符串' });
+  }
+  const name = displayName.trim().slice(0, 20);
+  try {
+    await withPrefsQueue(async () => {
+      const prefs = await loadPrefs();
+      if (name) prefs.displayName = name;
+      else delete prefs.displayName;
+      await savePrefs(prefs);
+    });
+    broadcast({ type: 'display-name', displayName: name });
+    res.json({ ok: true, displayName: name });
+  } catch (e) {
+    res.status(500).json({ error: '写入称呼失败：' + e.message });
+  }
+});
+
 // 置顶(pin):项目 + 会话各一份 id 列表,服务端共享(同 hidden-projects 跨设备一致)。
 // 按 kind 单键合并,避免「置顶项目」的 PUT 覆盖掉「置顶会话」列表(反之亦然)。
 router.get('/prefs/pinned', async (_req, res) => {

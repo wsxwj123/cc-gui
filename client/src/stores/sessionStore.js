@@ -1086,6 +1086,32 @@ export const useStore = create((set, get) => ({
     set({ customTitles: next });
   },
 
+  // r11-⑫:称呼(prefs.displayName,服务端多端共享)。启动/重连水合 + WS 广播收敛;
+  // 写走 PUT(服务端截 20 去空白),本地乐观更新以服务端回包为准。
+  displayName: '',
+  hydrateDisplayName: async () => {
+    try {
+      const res = await fetch('/api/prefs/display-name');
+      const d = await res.json();
+      if (typeof d?.displayName === 'string') set({ displayName: d.displayName });
+    } catch {}
+  },
+  applyRemoteDisplayName: (name) => {
+    set({ displayName: typeof name === 'string' ? name : '' });
+  },
+  putDisplayName: async (name) => {
+    const next = typeof name === 'string' ? name.trim().slice(0, 20) : '';
+    set({ displayName: next });
+    try {
+      const res = await fetch('/api/prefs/display-name', {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ displayName: next }),
+      });
+      const d = await res.json();
+      if (res.ok && typeof d?.displayName === 'string') set({ displayName: d.displayName });
+    } catch {}
+  },
+
   // Record which provider a session last sent under (see lastProviderBySession).
   setLastProvider: (sessionId, providerHint) => {
     if (!sessionId || !providerHint) return;

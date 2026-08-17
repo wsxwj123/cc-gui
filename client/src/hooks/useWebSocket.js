@@ -250,6 +250,10 @@ export function useWebSocket() {
               // W4:AI 自动标题在任一端生成后,所有端实时收敛。
               useStore.getState().applyRemoteAutoTitles(data.titles || {});
               break;
+            case 'display-name':
+              // r11-⑫:称呼(prefs.displayName)任一端改动后全端收敛(Home 问候即时更新)。
+              useStore.getState().applyRemoteDisplayName(data.displayName);
+              break;
             case 'context-1m':
               // 1M 上下文会话标记(服务端持久化)在任一端改动后全端收敛。
               useStore.getState().applyRemoteContext1m(data.sessions || {});
