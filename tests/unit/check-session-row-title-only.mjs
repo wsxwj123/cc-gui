@@ -60,7 +60,7 @@ import { sessionRowTooltip } from '../../client/src/utils/sessionTitle.js';
   assert.doesNotMatch(item, /<MessageSquare/, 't2-p3: 💬 占位图标彻底移除(哨兵锚)');
   assert.match(item, /\$\{expanded \? '' : 'md:opacity-0 md:group-hover:opacity-100'\}/, 't2-p3: 三角静置隐藏/hover 现身/展开常显(base 无隐藏=触屏常显)');
   assert.match(item, /w-\[17px\] shrink-0 flex items-center justify-center/, 't2-p3: 三角槽恒宽占位(无子代理行留空对齐)');
-  assert.match(item, /<SessionRowStatus running=\{running\} lastActivity=\{session\.lastActivity\} \/>/, 't2-p3: 状态槽走可替换组件');
+  assert.match(item, /<SessionRowStatus sessionId=\{session\.sessionId\} running=\{running\} isSelected=\{isSelected\} \/>/, 't2-p3: 状态槽走可替换组件(p2-3b 定稿签名)');
   const comp = src.slice(src.indexOf('export function SessionRowStatus'), src.indexOf('export function StatusDot'));
   assert.match(comp, /w-\[11px\] shrink-0/, 't2-p3: 状态槽恒宽(无状态行留空,标题起点对齐)');
   // 判官p1建议:操作组左缘渐变层纯装饰,不拦标题尾部点击

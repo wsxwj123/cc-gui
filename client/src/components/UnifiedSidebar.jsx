@@ -14,6 +14,7 @@ import { confirmDialog } from '../utils/confirmDialog.jsx';
 import { resolveSessionTitle } from '../utils/sessionTitle.js';
 import { composePanelProjects, composePanelSessions, sessionQueryMatchHashes, resolveDrillView } from '../utils/projectPanel.js';
 import { pickDirectory, isTauri } from '../utils/pickDirectory.js';
+import { completionTracker } from '../utils/sessionDots.js';
 import { AnchoredPopover } from './SessionSelectors.jsx';
 // 循环 import(App.jsx ⇄ 本文件)安全性:这些都是 App.jsx 的模块级 function 声明
 // (提升,求值前可用)或组件渲染期才解引用的 live binding;本模块顶层不调用它们。
@@ -370,6 +371,7 @@ export function UnifiedSidebar() {
   const handleDelete = (session) => {
     const sid = session.sessionId;
     if (pendingDeletesRef.current.some((p) => p.session.sessionId === sid)) return;
+    completionTracker.forget(sid); // r11-p2-3b:会话移除即清"完成未读"边沿态(不留孤儿)
     const st = useStore.getState();
     const panes2 = [];
     (st.paneSessions || []).forEach((p, i) => {

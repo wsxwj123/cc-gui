@@ -1365,6 +1365,45 @@ html { --content-max: clamp(768px, calc(var(--app-w, 100vw) * 0.7), 1120px); }
     0 6px 18px -8px rgba(60, 40, 20, 0.18);
 }
 
+/* ── r11-p2-3b 会话行状态点(dsh 逆向定稿) ─────────────────────────
+   琥珀(等待用户)/绿(完成未读):10×10,:before 满尺寸圆 opacity .1 光晕 +
+   :after inset 20% 实心芯;色值明暗同值(定稿口径)。
+   运行中 = accent 色 3×3 点阵追逐(SVG 8 格,四档透明度台阶,负延迟预置相位);
+   prefers-reduced-motion 降级为静态点(dsh 未做,我们做)。 */
+.session-dot {
+  position: relative;
+  width: 10px;
+  height: 10px;
+  display: inline-block;
+}
+.session-dot::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: 9999px;
+  background: var(--dot-c);
+  opacity: 0.1;
+}
+.session-dot::after {
+  content: '';
+  position: absolute;
+  inset: 20%;
+  border-radius: 9999px;
+  background: var(--dot-c);
+}
+.session-dot-amber { --dot-c: rgb(245, 158, 11); }
+.session-dot-green { --dot-c: rgb(34, 197, 94); }
+@keyframes cguiDotChase {
+  0%, 12.4% { opacity: 1; }
+  12.5%, 24.9% { opacity: 0.6; }
+  25%, 37.4% { opacity: 0.35; }
+  37.5%, 100% { opacity: 0.15; }
+}
+.session-dot-run rect { animation: cguiDotChase 1s infinite; }
+@media (prefers-reduced-motion: reduce) {
+  .session-dot-run rect { animation: none; opacity: 0.8; }
+}
+
 /* ── Thinking block ──────────────────────────────────────────── */
 .thinking-block {
   background: linear-gradient(135deg, var(--color-canvas-warm) 0%, transparent 100%);

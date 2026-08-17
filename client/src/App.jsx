@@ -70,6 +70,7 @@ import { classifyRepairOutcome, classifyCheckOutcome, upsertRepairHint, removeRe
 import { autoCompactTransition } from './utils/compactStatus.js';
 import { homeView, pickHomeProject, buildHomeDraft, homeGreetingParts, readHomeCustom } from './utils/home.js';
 import { subscribeSkin, getSkinVersion, getSkinState, reconcileSkinOnBoot, watchThemeForSkin } from './utils/skins.js';
+import { resolveSessionDot, completionTracker, subscribeDots, getDotsVersion, RUN_MATRIX_CELLS, runCellDelayMs } from './utils/sessionDots.js';
 import { seedNewSessionDefaults } from './components/UnifiedSidebar.jsx';
 import {
   FolderOpen, MessageSquare, ChevronLeft, ChevronRight, ChevronDown,
@@ -1341,14 +1342,34 @@ export function GlobalSearchResults({ q, onPick }) {
 // ─── Project List ──────────────────────────────────────────────
 // 侧栏运行状态符号:正在回复=旋转环;30min 内刚跑完=圈中对勾;更久的闲置=无符号。
 const RUNNING_DONE_WINDOW_MS = 30 * 60 * 1000;
-// r11-p2-3:会话行行首状态槽 —— 可独立替换的小组件(现 StatusDot 位)。静置只保留
-// 两种标记:运行中旋转环 / 近期活跃标(StatusDot 现语义),其余为空;槽恒定宽,
-// 无状态行留空占位,标题起点全列对齐不跳动。后续"彩色圆点体系"(绿/棕多态)的
-// 视觉规范只改本组件内部,调用方零改。
-export function SessionRowStatus({ running, lastActivity }) {
+// r11-p2-3b:会话行行首状态点(dsh 逆向定稿)。一行一点,优先级
+// 等待用户(琥珀) > 运行中(accent 点阵追逐) > 完成未读(绿,边沿触发) > 空闲(无点);
+// 槽恒定宽占位,标题起点全列对齐。状态语义由 sessionDots.js 数据层仲裁;
+// aria 用 sr-only 文本补给屏幕阅读器。项目行 StatusDot 本次不动(待统一)。
+export function SessionRowStatus({ sessionId, running, isSelected }) {
+  // 等待用户 = 本会话存在 pendingPermissions 卡(权限/计划审查/AskUserQuestion 同池)
+  const waiting = useStore((s) => s.pendingPermissions.some((p) => p.sessionId === sessionId));
+  useSyncExternalStore(subscribeDots, getDotsVersion, getDotsVersion);
+  useEffect(() => {
+    completionTracker.observe(sessionId, !!running, !!isSelected);
+  }, [sessionId, running, isSelected]);
+  const kind = resolveSessionDot({ waiting, running: !!running, completedUnread: !!sessionId && completionTracker.has(sessionId) });
   return (
     <span className="w-[11px] shrink-0 flex items-center justify-center">
-      <StatusDot running={running} lastActivity={lastActivity} />
+      {kind === 'waiting' && <span className="session-dot session-dot-amber" aria-hidden />}
+      {kind === 'running' && (
+        <svg viewBox="0 0 10 10" width={10} height={10} shapeRendering="crispEdges" className="session-dot-run text-accent shrink-0" aria-hidden>
+          {RUN_MATRIX_CELLS.map(([x, y], i) => (
+            <rect key={i} x={x} y={y} width="2" height="2" fill="currentColor" style={{ animationDelay: `${runCellDelayMs(i)}ms` }} />
+          ))}
+        </svg>
+      )}
+      {kind === 'done' && <span className="session-dot session-dot-green" aria-hidden />}
+      {kind && (
+        <span className="sr-only">
+          {kind === 'waiting' ? '等待你确认' : kind === 'running' ? '运行中' : '已完成,未查看'}
+        </span>
+      )}
     </span>
   );
 }
@@ -1481,7 +1502,7 @@ export function SessionItem({ session, isSelected, onSelect, onFork, onArchive, 
               </button>
             )}
           </span>
-          <SessionRowStatus running={running} lastActivity={session.lastActivity} />
+          <SessionRowStatus sessionId={session.sessionId} running={running} isSelected={isSelected} />
           <span className="text-[13px] text-ink-soft truncate font-body min-w-0">
             {resolveSessionTitle(session, customTitle, autoTitle) || '(空会话)'}
           </span>
