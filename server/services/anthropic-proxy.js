@@ -60,7 +60,7 @@ function readBody(req) {
 // tool_result(content="" 或"(no result returned)"),让请求结构合法。补的内容
 // 不影响模型理解 — CLI 已经把真实 result(skill body)注入 system context,模型
 // 看得见。
-function normalizeMessagesForCompat(body) {
+export function normalizeMessagesForCompat(body) {
   let parsed;
   try { parsed = JSON.parse(body.toString('utf-8')); } catch { return body; }
   if (!parsed || !Array.isArray(parsed.messages)) return body;
@@ -138,12 +138,11 @@ function normalizeMessagesForCompat(body) {
   for (let i = msgs.length - 1; i > 0; i--) {
     const cur = msgs[i], prev = msgs[i-1];
     if (cur?.role !== 'assistant' || prev?.role !== 'assistant') continue;
-    const cArr = Array.isArray(cur.content), pArr = Array.isArray(prev.content);
-    if (!cArr || !pArr) continue;
-    const curTools = cArr.filter((b) => b?.type === 'tool_use');
-    const curText = cArr.filter((b) => b?.type === 'text');
-    const prevTools = pArr.filter((b) => b?.type === 'tool_use');
-    const prevText = pArr.filter((b) => b?.type === 'text');
+    if (!Array.isArray(cur.content) || !Array.isArray(prev.content)) continue;
+    const curTools = cur.content.filter((b) => b?.type === 'tool_use');
+    const curText = cur.content.filter((b) => b?.type === 'text');
+    const prevTools = prev.content.filter((b) => b?.type === 'tool_use');
+    const prevText = prev.content.filter((b) => b?.type === 'text');
     // 两条都必须"只有 tool_use,没有 text"(纯调用轮)
     if (curTools.length === 0 || curText.length > 0) continue;
     if (prevTools.length === 0 || prevText.length > 0) continue;
