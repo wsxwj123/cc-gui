@@ -78,6 +78,7 @@ import { buildFontEntries, groupFonts, detectFonts, platformCandidates, queryLoc
 import { copyText } from './utils/clipboard.js';
 import { OFFICIAL_LOGIN_HINT, matchOfficialLoginError, notifyOauthMissing } from './utils/officialAuth.js';
 import { effortCapsFor, effortAllowed } from './utils/effortCaps.js';
+import { ProviderThinkingEditor } from './components/ProviderThinkingEditor.jsx';
 import { escRoute, idleEscAction, escYieldCardId, isEditableTarget } from './utils/escAction.js';
 import { waitingSessionKeys, countAttention, applyAttentionBadge } from './utils/attention.js';
 import { notifyWaiting } from './utils/desktopNotify.js';
@@ -9346,6 +9347,8 @@ function CustomProviderForm({ onSaved, editing, onCancel, onDirtyChange, customC
   // R3:每模型实付单价(CNY/百万 token)。编辑器内部值是字符串(输入框原样),保存时转数字。
   // 形态 { [modelId]: { in, out, cacheRead, cacheWrite, plan } };空 = 全部回落内置官网价。
   const [modelPrices, setModelPrices] = useState({});
+  // r10-9:每模型思考能力声明({[id]:{reasoning?:false,efforts?:[]}};空对象条目=全默认,后端 sanitize 丢弃)。
+  const [modelCaps, setModelCaps] = useState({});
   const [busy, setBusy] = useState('');
   const isEdit = !!editing;
   const formRef = useRef(null);
@@ -9382,13 +9385,14 @@ function CustomProviderForm({ onSaved, editing, onCancel, onDirtyChange, customC
       setTierModels({ haiku: editing.tierModels?.haiku || '', sonnet: editing.tierModels?.sonnet || '', opus: editing.tierModels?.opus || '', fable: editing.tierModels?.fable || '' });
       setCtxWindow(editing.contextWindow ? String(editing.contextWindow) : '');
       setModelPrices(pricesToForm(editing.modelPrices));
+      setModelCaps(editing.modelMeta ? { ...editing.modelMeta } : {});
       setTestResult(null); // 切到另一个 provider 编辑时清掉上一个的测试结果横幅(否则误导)
       setBusy('');
       setOpen(true);
     })();
     return () => { stale = true; };
   }, [editing?.id]);
-  const reset = () => { setName(''); setType('openai'); setBaseURL(''); setApiKey(''); setModelsText(''); setDefaultModel(''); setTierModels({ haiku: '', sonnet: '', opus: '', fable: '' }); setCtxWindow(''); setModelPrices({}); setTestResult(null); setOpen(false); };
+  const reset = () => { setName(''); setType('openai'); setBaseURL(''); setApiKey(''); setModelsText(''); setDefaultModel(''); setTierModels({ haiku: '', sonnet: '', opus: '', fable: '' }); setCtxWindow(''); setModelPrices({}); setModelCaps({}); setTestResult(null); setOpen(false); };
   const close = () => { reset(); onCancel?.(); };
   const parseModels = () => modelsText.split(/[\n,]+/).map((s) => s.trim()).filter(Boolean);
   // BZ-2:有未保存内容时上报 dirty,父级据此阻止外部点击/Esc 关闭下拉(避免丢输入)。
@@ -9396,7 +9400,7 @@ function CustomProviderForm({ onSaved, editing, onCancel, onDirtyChange, customC
   // 下拉静默关掉、输入没了。modelPrices 只要有行就算 dirty(值全空也是用户选过模型的结果,
   // 丢掉同样是丢输入);编辑态本来就因预填的 name/baseURL 恒 dirty,这两项只在新增态起作用。
   const dirty = (open || isEdit) && !!(name.trim() || baseURL.trim() || apiKey.trim() || modelsText.trim()
-    || ctxWindow.trim() || Object.keys(modelPrices).length);
+    || ctxWindow.trim() || Object.keys(modelPrices).length || Object.keys(modelCaps).length);
   useEffect(() => { onDirtyChange?.(dirty); }, [dirty]);
   useEffect(() => () => onDirtyChange?.(false), []); // 卸载时清掉,避免残留 dirty 卡住关闭
   // BZ-1:测试连接 —— 给默认模型/列表第一个发最小请求,验证鉴权 + 模型可达。
@@ -9473,6 +9477,8 @@ function CustomProviderForm({ onSaved, editing, onCancel, onDirtyChange, customC
       body.contextWindow = ctxWindow.trim() ? Number(ctxWindow.trim()) : null;
       // R3:每模型单价(可选)。永远发全量 —— 删掉的行必须真的消失(后端整体覆盖)。
       body.modelPrices = pricesToWire(modelPrices);
+      // r10-9:每模型思考能力,全量覆盖(全默认条目由后端 sanitize 丢弃 = 不落盘)。
+      body.modelMeta = modelCaps;
       // Edit mode: a blank key means "keep the stored one" (the client never holds
       // the real key), so only send apiKey when the user actually typed a new one.
       if (!isEdit || apiKey.trim()) body.apiKey = apiKey;
@@ -9612,6 +9618,8 @@ function CustomProviderForm({ onSaved, editing, onCancel, onDirtyChange, customC
       {/* R3:每模型实付单价。中转站按服务商自定价、套餐按月计费,内置官网价都算不准;
           jsonl 又不记 baseURL/provider 事后反推不了 → 只能由用户填。填了就赢过所有内置来源。 */}
       <ProviderPriceEditor value={modelPrices} onChange={setModelPrices} models={parseModels()} inputCls={inputCls} />
+      {/* r10-9:每模型思考能力(可选)。强度选择器按声明自适应;未声明 = 全档(现状)。 */}
+      <ProviderThinkingEditor value={modelCaps} onChange={setModelCaps} models={parseModels()} inputCls={inputCls} />
       <div className="flex gap-2">
         <button onClick={fetchModels} disabled={!!busy}
           className="flex-1 px-3 py-2 text-[12px] border border-accent text-accent rounded-lg disabled:opacity-50">
