@@ -67,6 +67,8 @@ import { nativeContextWindow, isBareClaudeAlias, pickCliContextWindow } from './
 import { extractMcpServerIssues, formatMcpServerNotice } from './utils/mcpStatus.js';
 import { classifyRepairOutcome, classifyCheckOutcome, upsertRepairHint, removeRepairHint, loadRepairHints, persistRepairHints } from './utils/repairFlow.js';
 import { autoCompactTransition } from './utils/compactStatus.js';
+import { homeView, pickHomeProject, buildHomeDraft, homeGreeting, readHomeCustom } from './utils/home.js';
+import { seedNewSessionDefaults } from './components/UnifiedSidebar.jsx';
 import {
   FolderOpen, MessageSquare, ChevronLeft, ChevronRight, ChevronDown,
   Search, Hash, Layers, BarChart3, ArrowLeft, Plus,
@@ -1635,6 +1637,111 @@ function EmptyState({ tabIndex = 0 }) {
   );
 }
 
+// ─── r11-② Home:首页新建会话形态 ─────────────────────────────────
+// 无选中会话且已有项目时的主区形态:居中 图标+一句称呼+输入框+项目选择按钮
+// (最近项目下拉+「浏览新文件夹…」走既有 _addProject 流)。发送 = seedNewSessionDefaults
+// (与侧栏创建点同一 seed 链路)→ 消息入 draft 队列 → 挂 draft 到本窗格 —— SessionDetail
+// 挂载后的队列排空机制(drainKey 首轮 poll)自动把它经 handleSend 发出,全程走既有
+// 发送链路零旁路。扁平规范首建:小圆角/发丝描边/纯色面/无阴影。icon 与称呼读
+// readHomeCustom 占位(r11-③ 皮肤接管 home.icon/home.greeting),当前为内置默认。
+function HomeState({ tabIndex = 0 }) {
+  const projects = useStore((s) => s.projects);
+  const selectedProject = useStore((s) => s.selectedProject);
+  const [chosenHash, setChosenHash] = useState(null);
+  const [text, setText] = useState('');
+  const [projOpen, setProjOpen] = useState(false);
+  const projBtnRef = useRef(null);
+  const custom = readHomeCustom();
+  const project = pickHomeProject({ chosenHash, projects, selectedProject });
+  const recent = useMemo(() => [...(projects || [])]
+    .sort((a, b) => (b.lastActivity ? new Date(b.lastActivity).getTime() : -1)
+      - (a.lastActivity ? new Date(a.lastActivity).getTime() : -1))
+    .slice(0, 12), [projects]);
+  const submit = () => {
+    const t = text.trim();
+    if (!t || !project) return;
+    const st = useStore.getState();
+    seedNewSessionDefaults(project.hash); // 与侧栏新建同一 seed(力度继承/权限 default)
+    st.enqueueMessage(`draft-${project.hash}`, { text: t, queuedAt: Date.now() });
+    st.setPaneSession(tabIndex, buildHomeDraft(project, newDraftId())); // cwd=所选项目
+    st.setPaneMessages(tabIndex, []);
+  };
+  const browse = () => {
+    setProjOpen(false);
+    setChosenHash(null); // 新加的项目会成为 selectedProject,选择器自动跟随它
+    const st = useStore.getState();
+    if (st.sidebarCollapsed) st.toggleSidebar();
+    setTimeout(() => window.dispatchEvent(new CustomEvent('cgui:add-project')), 60);
+  };
+  return (
+    <div className="flex-1 flex items-center justify-center px-6">
+      <div className="w-full max-w-[560px] flex flex-col items-center">
+        {custom?.icon ? (
+          <img src={custom.icon} alt="" className="w-12 h-12 rounded-lg object-cover mb-4" />
+        ) : (
+          <div className="w-12 h-12 rounded-lg border border-canvas-deep/70 flex items-center justify-center mb-4">
+            <Sparkles size={22} className="text-accent" />
+          </div>
+        )}
+        <h2 className="text-[20px] font-display font-medium text-ink mb-5 tracking-tight">
+          {homeGreeting(new Date().getHours(), custom?.greeting)}
+        </h2>
+        <div className="w-full rounded-lg border border-canvas-deep/70 bg-canvas-warm/60 focus-within:border-accent/50 transition-colors">
+          <textarea
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); submit(); }
+            }}
+            rows={3}
+            autoFocus
+            placeholder={project ? '输入消息，开始一个新会话…' : '先选择一个项目'}
+            className="w-full bg-transparent px-3.5 pt-3 pb-1 text-[14px] text-ink font-body resize-none focus:outline-none placeholder-ink-ghost"
+          />
+          <div className="flex items-center gap-2 px-2 pb-2">
+            <div ref={projBtnRef} className="relative min-w-0">
+              <button
+                onClick={() => setProjOpen((v) => !v)}
+                className="flex items-center gap-1.5 px-2 py-1 rounded-md border border-canvas-deep/70 hover:bg-canvas-warm text-[12px] text-ink-soft font-body min-w-0 transition-colors"
+                title={project ? formatPath(project.path) : '选择项目'}
+              >
+                <FolderOpen size={12} className="text-ink-faint shrink-0" />
+                <span className="truncate max-w-[220px]">{project ? formatPathShort(project.path) : '选择项目'}</span>
+                <ChevronDown size={11} className="text-ink-faint shrink-0" />
+              </button>
+              <AnchoredPopover anchorRef={projBtnRef} open={projOpen} onRequestClose={() => setProjOpen(false)}
+                drop="up" align="left"
+                className="w-72 max-w-[calc(var(--app-w,100vw)-1.5rem)] py-1 max-h-64 overflow-y-auto">
+                {recent.map((p) => (
+                  <button
+                    key={p.hash}
+                    onClick={() => { setChosenHash(p.hash); setProjOpen(false); }}
+                    className={`w-full text-left px-2.5 py-1.5 text-[12px] font-body truncate hover:bg-canvas-warm ${project?.hash === p.hash ? 'text-accent' : 'text-ink-soft'}`}
+                    title={formatPath(p.path)}
+                  >
+                    {formatPathShort(p.path)}
+                  </button>
+                ))}
+                <button onClick={browse} className="w-full text-left px-2.5 py-1.5 text-[12px] font-body text-accent hover:bg-canvas-warm border-t border-canvas-deep/40 mt-1 pt-1.5">
+                  浏览新文件夹…
+                </button>
+              </AnchoredPopover>
+            </div>
+            <button
+              onClick={submit}
+              disabled={!text.trim() || !project}
+              className="ml-auto btn-accent px-3 py-1.5 text-[12.5px] font-body disabled:opacity-40"
+            >
+              发送
+            </button>
+          </div>
+        </div>
+        <div className="mt-3 text-[11.5px] text-ink-faint font-body">发送后在所选项目里创建新会话；历史会话在左侧列表。</div>
+      </div>
+    </div>
+  );
+}
+
 // ─── CLI-style spinner ─────────────────────────────────────────
 // Mimics claude-code terminal: a 6-point asterisk that cycles through Unicode
 // frames every ~100ms, paired with a verb that changes every ~3s.
@@ -2516,6 +2623,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // C2:用于把 AutoCompactBanner 限定在「当前聚焦的 pane」——分屏下非聚焦 pane 不应
   // 在你没看着时静默 /compact 改写历史。单窗格时 activeTabIndex 恒为 0 = 本 pane。
   const paneIsActive = useStore((s) => s.activeTabIndex) === tabIndex;
+  // r11-②:Home 显隐判定用(primitive selector,引用稳定)。
+  const projectCount = useStore((s) => (s.projects || EMPTY_ARRAY).length);
   const paneCount = useStore((s) => s.paneCount);
   // 交互工具(AskUserQuestion/授权/计划审查)挂起时,徽章旁给"等待你回应"提示。
   // 实测(opus 调研):挂起前该次调用的 usage 已全部送达、徽章数据没漏;静止是因为
@@ -6321,7 +6430,13 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // We only let the loading screen short-circuit the primary tab — tab 1
   // fetches with silent:true so it never sets the global flag, and tab 0
   // remains the one that owns the spinner.
-  if (!selectedSession) return <EmptyState tabIndex={tabIndex} />;
+  // r11-②:无选中会话时按 homeView 判定 —— 有项目进 Home(新建会话形态),
+  // 零项目保留既有 EmptyState(「添加一个项目开始」)。
+  if (!selectedSession) {
+    return homeView({ hasSession: false, projectCount }) === 'home'
+      ? <HomeState tabIndex={tabIndex} />
+      : <EmptyState tabIndex={tabIndex} />;
+  }
   if (loading && tabIndex === 0) return (
     <div className="flex-1 flex items-center justify-center bg-canvas">
       <div className="flex gap-1.5">

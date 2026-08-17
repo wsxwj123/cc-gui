@@ -25,6 +25,13 @@ const writeLs = (key, val) => {
 // 数组类字段:只防解析错不够,残留对象/字符串(旧版格式漂移/手改)会让 .filter/.map 崩(判官 B#4)。
 const readLsArr = (key) => { const v = readLs(key, []); return Array.isArray(v) ? v : []; };
 
+// r11-②:启动是否恢复上次会话(默认否 → 进 Home)。裸字符串旗标,非 JSON(与
+// SettingsPanel 的 RestoreLastSessionToggle 同一 key/口径)。
+const RESTORE_LAST_ON_BOOT = (() => {
+  try { return typeof localStorage !== 'undefined' && localStorage.getItem('cgui-restore-last-session') === '1'; }
+  catch { return false; }
+})();
+
 // Push one session-title change to the shared server store (fire-and-forget).
 // Server merges per-key and broadcasts the full map back over ws so the other
 // device updates live. Empty title clears the override.
@@ -400,10 +407,12 @@ export const useStore = create((set, get) => ({
   // permission (unless mode is bypassPermissions / acceptEdits).
   globalRead: readLs('cgui-global-read', true),
 
-  // UI state — selectedProject + selectedSession persisted so refresh
-  // restores the user's current conversation instead of dumping them on Empty.
+  // UI state — selectedProject persisted so refresh keeps the project context.
+  // r11-②:selectedSession 的启动恢复改为默认关闭 —— 启动/刷新进 Home(首页新建
+  // 会话形态),设置「启动时恢复上次会话」('cgui-restore-last-session'='1')保留旧
+  // 行为。仅门控启动读取;运行期写入照旧,开着开关的下次启动仍能恢复。
   selectedProject: readLs('cgui-selected-project', null),
-  selectedSession: readLs('cgui-selected-session', null),
+  selectedSession: RESTORE_LAST_ON_BOOT ? readLs('cgui-selected-session', null) : null,
 
   // Multi-pane state (Phase 2). paneCount = 1..6 panes visible side-by-side.
   // Pane 0 MIRRORS the legacy selectedSession / messages so existing reads
@@ -418,7 +427,10 @@ export const useStore = create((set, get) => ({
     return Number.isFinite(n) && n >= 1 && n <= 6 ? n : 1;
   })(),
   // paneSessions[0] always == selectedSession; index 1..5 are extra panes.
+  // r11-②:启动默认进 Home → 全窗格不恢复会话(与 selectedSession 同一开关门控;
+  // 只恢复 pane 0 不恢复其余会造成分屏半恢复的怪态)。
   paneSessions: (() => {
+    if (!RESTORE_LAST_ON_BOOT) return [null, null, null, null, null, null];
     const arr = readLs('cgui-pane-sessions', [null, null, null, null, null, null]);
     const padded = Array.isArray(arr) ? arr.slice(0, 6) : [];
     while (padded.length < 6) padded.push(null);

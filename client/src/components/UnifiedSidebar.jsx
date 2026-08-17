@@ -26,6 +26,22 @@ import {
 const EMPTY_ARRAY = Object.freeze([]);
 const EMPTY_OBJECT = Object.freeze({});
 
+// 新建会话继承「上一个活跃会话」的思考强度(权限恒 default)——原 SessionList 逻辑。
+// r11-②:提为模块级导出,Home(App.jsx)与本面板的 6 处创建点共用同一 seed 链路;
+// 全部经 getState() 取值,无组件闭包依赖。
+export const seedNewSessionDefaults = (draftProjectHash) => {
+  const st = useStore.getState();
+  const prev = st.splitMode ? st.paneSessions?.[st.activeTabIndex] : st.selectedSession;
+  const prevKey = prev ? (prev.sessionId || `draft-${prev.projectHash || 'none'}`) : null;
+  const draftKey = `draft-${draftProjectHash || 'none'}`;
+  if (prevKey && prevKey !== draftKey) {
+    st.setModelFor(draftKey, ''); // model 跟 provider 默认,不跟上条会话
+    st.setEffortFor(draftKey, st.getEffortFor(prevKey));
+  }
+  st.setActiveAgentFor(draftKey, '');
+  st.setPermissionMode('default', draftKey);
+};
+
 export function UnifiedSidebar() {
   // ── store(旧槽语义零改动;新面板数据走 sessionsByProject)─────────────────
   const projects = useStore((s) => s.projects);
@@ -232,19 +248,7 @@ export function UnifiedSidebar() {
       st.fetchMessages(session.sessionId, session.projectHash);
     }
   };
-  // 新建会话继承「上一个活跃会话」的思考强度(权限恒 default)——原 SessionList 逻辑原样。
-  const seedNewSessionDefaults = (draftProjectHash) => {
-    const st = useStore.getState();
-    const prev = splitMode ? st.paneSessions?.[activeTabIndex] : st.selectedSession;
-    const prevKey = prev ? (prev.sessionId || `draft-${prev.projectHash || 'none'}`) : null;
-    const draftKey = `draft-${draftProjectHash || 'none'}`;
-    if (prevKey && prevKey !== draftKey) {
-      st.setModelFor(draftKey, ''); // model 跟 provider 默认,不跟上条会话
-      st.setEffortFor(draftKey, st.getEffortFor(prevKey));
-    }
-    st.setActiveAgentFor(draftKey, '');
-    st.setPermissionMode('default', draftKey);
-  };
+  // seedNewSessionDefaults 已提为模块级导出(r11-②,Home 共用),行为不变。
   const handleNew = (project) => {
     if (!project) return;
     selectProjectIfNeeded(project);

@@ -43,6 +43,7 @@ const SETTINGS_INDEX = [
   { id: 'set-persistent-chat', tab: 'session', title: '会话常驻进程', keys: '常驻 复用 冷启动 进程 persistent 缓存' },
   { id: 'set-prompt-suggestions', tab: 'session', title: '输入预测', keys: '预测 建议 suggestion 输入' },
   { id: 'set-worktree-visibility', tab: 'session', title: '显示 worktree 项目', keys: 'worktree 工作树 项目 列表 隐藏 显示 分支' },
+  { id: 'set-restore-last', tab: 'session', title: '启动时恢复上次会话', keys: '启动 恢复 上次 会话 Home 首页 restore' },
   { id: 'set-max-budget', tab: 'session', title: '对话花费上限', keys: '花费 预算 budget 成本 上限 美元' },
   { id: 'set-cache-opt', tab: 'session', title: '缓存优化', keys: '缓存 cache 前缀 动态 系统提示' },
   { id: 'set-auto-compact', tab: 'session', title: '自动压缩窗口', keys: '压缩 compact token 上下文 窗口' },
@@ -1786,6 +1787,30 @@ function WorktreeVisibilityToggle() {
   );
 }
 
+// r11-②:启动恢复行为。默认启动进 Home(不自动恢复上次会话);打开此项恢复旧行为
+// (刷新/重启回到上次打开的会话)。仅影响启动时的读取,运行期会话选择照常持久。
+function RestoreLastSessionToggle() {
+  const [on, setOn] = useState(() => { try { return localStorage.getItem('cgui-restore-last-session') === '1'; } catch { return false; } });
+  const toggle = () => {
+    const v = !on;
+    setOn(v);
+    try { localStorage.setItem('cgui-restore-last-session', v ? '1' : '0'); } catch {}
+  };
+  return (
+    <div className="bg-canvas-warm border border-canvas-deep rounded-lg px-3 py-2.5 flex items-center gap-3">
+      <div className="min-w-0 flex-1">
+        <div className="text-xs text-ink font-body font-medium">启动时恢复上次会话</div>
+        <div className="text-[10.5px] text-ink-faint font-body">关闭(默认)时,启动/刷新进入 Home 首页(选择项目直接开新会话);打开后恢复旧行为,启动时回到上次打开的会话。下次启动生效。</div>
+      </div>
+      <button onClick={toggle}
+        className={`shrink-0 w-9 h-5 rounded-full transition-colors relative ${on ? 'bg-accent' : 'bg-ink-faint/30'}`}
+        title={on ? '已开启' : '已关闭'}>
+        <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-all ${on ? 'left-[18px]' : 'left-0.5'}`} />
+      </button>
+    </div>
+  );
+}
+
 function PromptSuggestionsToggle() {
   const on = useStore((s) => s.promptSuggestions);
   const setOn = useStore((s) => s.setPromptSuggestions);
@@ -2050,6 +2075,7 @@ function SessionTab({ settings, onSave, onEnvPatch, saving }) {
       <div id="set-persistent-chat"><PersistentChatToggle /></div>
       <div id="set-prompt-suggestions"><PromptSuggestionsToggle /></div>
       <div id="set-worktree-visibility"><WorktreeVisibilityToggle /></div>
+      <div id="set-restore-last"><RestoreLastSessionToggle /></div>
       <div id="set-max-budget"><MaxBudgetInput /></div>
       <div id="set-cache-opt"><ExcludeDynamicPromptToggle /></div>
       <div id="set-auto-compact"><AutoCompactWindowSelect settings={settings} onSave={onSave} saving={saving} /></div>
