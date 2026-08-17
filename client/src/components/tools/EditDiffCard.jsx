@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { FileText, ChevronDown, ChevronRight, Loader2, FilePlus2 } from 'lucide-react';
+import { FileText, ChevronDown, ChevronRight, Loader2, FilePlus2 } from '../Icon.jsx';
 import { DiffViewer } from '../DiffViewer.jsx';
 
 function unifiedDiff(filePath, oldStr, newStr, label = 'change') {

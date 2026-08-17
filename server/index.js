@@ -37,6 +37,7 @@ import downloadUpdateRoutes from './routes/download-update.js';
 import openUrlRoutes from './routes/open-url.js';
 import skillsRoutes from './routes/skills.js';
 import backgroundsRoutes from './routes/backgrounds.js';
+import skinsPacksRoutes from './routes/skins-packs.js';
 import screenshotRoutes from './routes/screenshot.js';
 import {
   authMiddleware, isLocalReq, isAuthorized, parseCookies, verifyToken,
@@ -411,6 +412,7 @@ app.use('/api', downloadUpdateRoutes);
 app.use('/api', openUrlRoutes);
 app.use('/api', skillsRoutes);
 app.use('/api', backgroundsRoutes);
+app.use('/api', skinsPacksRoutes); // r11-③ 皮肤包(/api/skins,避开既有 /api/skills)
 app.use('/api', screenshotRoutes);
 
 // Auto-load optional local-only routes only when explicitly requested. These

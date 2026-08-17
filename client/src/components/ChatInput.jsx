@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Send, Loader2, Square, Terminal, Puzzle, Wrench, Gauge, ChevronDown, X, FileText, Paperclip, Shield, ShieldOff, ClipboardList, Check, Pencil, Smartphone, AtSign, MessagesSquare, Folder, CornerLeftUp, Sparkles, ArrowDownToLine, Zap, BellOff } from 'lucide-react';
+import { Send, Loader2, Square, Terminal, Puzzle, Wrench, Gauge, ChevronDown, X, FileText, Paperclip, Shield, ShieldOff, ClipboardList, Check, Pencil, Smartphone, AtSign, MessagesSquare, Folder, CornerLeftUp, Sparkles, ArrowDownToLine, Zap, BellOff } from './Icon.jsx';
 import { useStore, PERMISSION_MODES } from '../stores/sessionStore.js';
 import { PermissionPrompt } from './PermissionPrompt.jsx';
 import { TodoPanel } from './TodoPanel.jsx';
@@ -68,7 +68,7 @@ export function PermissionModeSelector({ permKey, tourAnchor = false }) {
   const Icon = current.icon;
 
   return (
-    <div ref={wrapRef} className="relative" data-tour={tourAnchor ? 'mode-selector' : undefined}>
+    <div ref={wrapRef} className="relative" data-cgui="mode-selector" data-tour={tourAnchor ? 'mode-selector' : undefined}>
       <button onClick={() => setOpen(!open)}
         className="flex items-center gap-1 px-2 py-1 rounded-md hover:bg-black/5 transition-colors"
         title={`权限模式: ${current.label} — ${current.desc}`}>
@@ -171,7 +171,7 @@ export function EffortSelector({ permKey = null, hideLabel = false, tourAnchor =
   const visibleLevels = EFFORT_LEVELS.filter((e) => e.id === '' || effortAllowed(caps, e.id));
 
   return (
-    <div ref={wrapRef} className="relative" data-tour={tourAnchor ? 'effort-selector' : undefined}>
+    <div ref={wrapRef} className="relative" data-cgui="effort-selector" data-tour={tourAnchor ? 'effort-selector' : undefined}>
       <button onClick={() => setOpen(!open)}
         className={`flex items-center gap-1 px-2 py-1 rounded-md transition-colors ${locked ? 'opacity-45 cursor-default' : 'hover:bg-black/5'}`}
         title={locked
@@ -184,7 +184,7 @@ export function EffortSelector({ permKey = null, hideLabel = false, tourAnchor =
         <ChevronDown size={10} className="text-ink-faint" />
       </button>
       {fellNotice && (
-        <div className="absolute top-full left-1/2 -translate-x-1/2 mt-1 z-[120] px-2.5 py-1 rounded-md bg-ink/90 text-canvas text-[11px] font-body whitespace-nowrap shadow-lg pointer-events-none">
+        <div className="absolute top-full left-1/2 -translate-x-1/2 mt-1 z-[120] px-2.5 py-1 rounded-md bg-ink/90 text-canvas text-[11px] font-body whitespace-nowrap shadow-popover pointer-events-none">
           {fellNotice}
         </div>
       )}
@@ -1118,10 +1118,10 @@ export function ChatInput({ onSend, onStop, onStopBackground, onAccelerate, canS
                     src={a.preview}
                     alt={a.name}
                     onClick={() => setZoomImage({ src: a.preview, name: a.name, path: a.path })}
-                    className="h-16 w-16 object-cover rounded-lg border border-canvas-deep shadow-sm cursor-zoom-in"
+                    className="h-16 w-16 object-cover rounded-lg border border-canvas-deep shadow-panel cursor-zoom-in"
                   />
                 ) : (
-                  <div className="h-16 w-36 rounded-lg border border-canvas-deep bg-canvas-warm shadow-sm px-2 py-2 flex items-center gap-2">
+                  <div className="h-16 w-36 rounded-lg border border-canvas-deep bg-canvas-warm shadow-panel px-2 py-2 flex items-center gap-2">
                     <FileText size={18} className="text-accent shrink-0" />
                     <div className="min-w-0">
                       <div className="text-[11px] text-ink font-body truncate" title={a.name}>{a.name}</div>
@@ -1191,6 +1191,7 @@ export function ChatInput({ onSend, onStop, onStopBackground, onAccelerate, canS
             [权限模式▾][+附件][旁问⊙] … [发送 | 入队/转后台/停止](桌面/手机同一套)。
             Provider/模型/力度/远程在顶栏;权限按钮文案窄容器自动缩为图标(container query)。 */}
         <div
+          data-cgui="composer"
           className={`chat-composer glass-capsule px-4 pt-2.5 pb-2 ${dragging ? 'ring-2 ring-accent/60' : ''}`}
           onDragOver={(e) => { e.preventDefault(); setDragging(true); }}
           onDragLeave={() => setDragging(false)}
@@ -1205,6 +1206,7 @@ export function ChatInput({ onSend, onStop, onStopBackground, onAccelerate, canS
             className="hidden"
           />
           <textarea
+            data-cgui="composer-input"
             data-tour={paneIsActive ? 'composer' : undefined}
             ref={textareaRef}
             value={text}
@@ -1223,6 +1225,7 @@ export function ChatInput({ onSend, onStop, onStopBackground, onAccelerate, canS
             <PermissionModeSelector permKey={permKey} tourAnchor={paneIsActive} />
             <button
               type="button"
+              data-cgui="attach-btn"
               data-tour={paneIsActive ? 'attach' : undefined}
               onClick={() => fileInputRef.current?.click()}
               disabled={disabled || rcLocked}
@@ -1235,6 +1238,7 @@ export function ChatInput({ onSend, onStop, onStopBackground, onAccelerate, canS
             {onBtwOpen && (
               <button
                 type="button"
+                data-cgui="aside-btn"
                 data-tour={paneIsActive ? 'aside' : undefined}
                 onClick={onBtwOpen}
                 className="shrink-0 h-8 w-8 rounded-full hover:bg-black/5 text-ink-muted hover:text-accent flex items-center justify-center transition-colors relative"
@@ -1253,6 +1257,7 @@ export function ChatInput({ onSend, onStop, onStopBackground, onAccelerate, canS
             {isStreaming && (
               <>
                 <button
+                  data-cgui="queue-btn"
                   onClick={() => handleSend()}
                   disabled={!text.trim() && attachments.length === 0}
                   className="shrink-0 h-8 px-3 max-md:px-2.5 rounded-full bg-accent/10 hover:bg-accent/20 text-accent flex items-center justify-center gap-1 transition-colors disabled:opacity-50 text-[11px] font-medium"
@@ -1277,6 +1282,7 @@ export function ChatInput({ onSend, onStop, onStopBackground, onAccelerate, canS
                 为真、本按钮不显,避免把主回合前台子代理算进 N 而误停。 */}
             {!working && bgSubagentCount > 0 && onStopBackground && (
               <button
+                data-cgui="stop-background-btn"
                 onClick={() => onStopBackground(sessionId)}
                 className="shrink-0 h-8 px-2.5 rounded-md bg-canvas-warm border border-canvas-deep hover:bg-black/5 text-ink-soft flex items-center justify-center gap-1.5 max-md:gap-0 transition-colors text-[11px] font-medium"
                 title="停止本会话所有后台子代理与 teammate。run_in_background 启动的 Bash 长任务不在范围内，需在进程管理中单独停止。"
@@ -1289,6 +1295,7 @@ export function ChatInput({ onSend, onStop, onStopBackground, onAccelerate, canS
                 工作 —— 修复「等子代理或弹权限卡时停止按钮消失」。onStop 实现(停止链路)不动。 */}
             {working ? (
               <button
+                data-cgui="stop-btn"
                 onClick={onStop}
                 className="shrink-0 h-8 px-3 max-md:px-2.5 rounded-md bg-ink/90 hover:bg-ink text-canvas flex items-center justify-center gap-1.5 max-md:gap-0 transition-colors text-[11px] font-medium"
                 title="停止生成"
@@ -1298,6 +1305,7 @@ export function ChatInput({ onSend, onStop, onStopBackground, onAccelerate, canS
               </button>
             ) : (
               <button
+                data-cgui="send-btn"
                 onClick={() => handleSend()}
                 disabled={(!text.trim() && attachments.length === 0) || disabled || rcLocked}
                 className="btn-accent shrink-0 w-8 h-8 rounded-full flex items-center justify-center"

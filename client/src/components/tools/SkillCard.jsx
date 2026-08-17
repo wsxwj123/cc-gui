@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Loader2 } from 'lucide-react';
+import { Loader2 } from '../Icon.jsx';
 import { MarkdownRenderer } from '../MarkdownRenderer.jsx';
 
 // Skill 调用横幅 — 参考 opencode 的章节分隔样式:skill 名单独一行居中大字,

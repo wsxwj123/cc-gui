@@ -1,13 +1,13 @@
 import React from 'react';
-import { X, ShieldAlert, ExternalLink } from 'lucide-react';
+import { X, ShieldAlert, ExternalLink } from './Icon.jsx';
 
 // L2: 首次启动检测到 macOS 未授予 GUI app 完全磁盘访问 → 弹引导。
 // 不强阻断,用户可"以后再说",但 AI 调用工具读 ~/Downloads/Documents 会失败。
 // Windows/Linux 不弹(server 端 needsFullDiskAccess 已直返 false)。
 export function FullDiskAccessModal({ onOpenSettings, onDismiss }) {
   return (
-    <div className="fixed inset-0 z-[210] flex items-center justify-center bg-black/45 backdrop-blur-sm animate-fade-in">
-      <div className="glass-popover w-[500px] max-w-[calc(var(--app-w,100vw)-1.5rem)] max-h-[min(85vh,calc(var(--app-h,100dvh)-2rem))] overflow-y-auto rounded-2xl shadow-2xl animate-glass-rise">
+    <div className="fixed inset-0 z-[210] flex items-center justify-center bg-black/45 backdrop-blur-soft animate-fade-in">
+      <div className="glass-popover w-[500px] max-w-[calc(var(--app-w,100vw)-1.5rem)] max-h-[min(85vh,calc(var(--app-h,100dvh)-2rem))] overflow-y-auto rounded-panel shadow-popover animate-glass-rise">
         <div className="px-5 py-4 border-b border-canvas-deep flex items-center gap-3">
           <div className="w-8 h-8 rounded-lg bg-amber-100 flex items-center justify-center shrink-0">
             <ShieldAlert size={16} className="text-amber-700" />

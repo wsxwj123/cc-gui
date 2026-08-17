@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect, useLayoutEffect } from 'react';
 import { createPortal } from 'react-dom';
-import { User, Brain, Copy, Check, RotateCcw, Pencil, GitBranch, Archive, Scissors } from 'lucide-react';
+import { User, Brain, Copy, Check, RotateCcw, Pencil, GitBranch, Archive, Scissors } from './Icon.jsx';
 import { computeCost, formatCost, costTitle } from '../utils/pricing.js';
 import { copyText } from '../utils/clipboard.js';
 import { useStore } from '../stores/sessionStore.js';
@@ -189,7 +189,7 @@ function RollbackMenu({ message, onAction }) {
     <div
       ref={menuRef}
       style={{ position: 'fixed', left: coords.left, top: coords.top, width: coords.w || 256, transform: `translate(-100%, ${coords.ty})`, zIndex: 9999 }}
-      className="max-w-[calc(var(--app-w,100vw)-16px)] max-h-[min(80vh,calc(var(--app-h,100dvh)-2rem))] overflow-y-auto py-1 rounded-lg shadow-xl bg-canvas border border-canvas-deep animate-glass-rise"
+      className="max-w-[calc(var(--app-w,100vw)-16px)] max-h-[min(80vh,calc(var(--app-h,100dvh)-2rem))] overflow-y-auto py-1 rounded-lg shadow-popover bg-canvas border border-canvas-deep animate-glass-rise"
     >
       <div className="px-3 py-2 text-[10px] text-ink-faint uppercase tracking-wider font-body border-b border-canvas-deep">
         回滚此消息{hasSha ? '' : ' · 自动查找快照'}
@@ -337,7 +337,7 @@ export function MessageBubble({ message, onRollback, onFork }) {
 
   if (isUser) {
     return (
-      <div className="group px-6 py-4 animate-fade-up" style={{ animationDuration: '0.25s' }}>
+      <div data-cgui="message-user" className="group px-6 py-4 animate-fade-up" style={{ animationDuration: '0.25s' }}>
         <div className="max-w-[var(--content-max)] mx-auto flex flex-row-reverse gap-3">
           <div className="shrink-0 mt-0.5">
             <UserAvatar />
@@ -406,7 +406,7 @@ export function MessageBubble({ message, onRollback, onFork }) {
   }
 
   return (
-    <div className="group px-6 py-4 animate-fade-up" style={{ animationDuration: '0.25s' }}>
+    <div data-cgui="message-assistant" className="group px-6 py-4 animate-fade-up" style={{ animationDuration: '0.25s' }}>
       <div className="max-w-[var(--content-max)] mx-auto flex gap-3">
         <div className="mt-0.5">
           <ProviderAvatar model={message.model} size={34} />

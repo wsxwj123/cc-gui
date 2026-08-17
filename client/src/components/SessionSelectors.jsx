@@ -3,7 +3,7 @@
 // ChatInput,留在 App.jsx 会形成循环 import。逻辑原样搬运,不改行为。
 import React, { useState, useRef, useEffect, useLayoutEffect } from 'react';
 import { createPortal } from 'react-dom';
-import { ChevronDown, Check, X, Settings, Server, Loader2, Smartphone, Pencil } from 'lucide-react';
+import { ChevronDown, Check, X, Settings, Server, Loader2, Smartphone, Pencil } from './Icon.jsx';
 import { useStore } from '../stores/sessionStore.js';
 import { ModelBadge } from './ModelBadge.jsx';
 import { confirmDialog } from '../utils/confirmDialog.jsx';
@@ -310,7 +310,7 @@ export function ProviderSwitcher({ hideLabel = false, tourAnchor = false, respon
   }, [respondOpenProvider]);
 
   return (
-    <div ref={wrapRef} className="relative" data-tour={tourAnchor ? 'provider-selector' : undefined}>
+    <div ref={wrapRef} className="relative" data-cgui="provider-selector" data-tour={tourAnchor ? 'provider-selector' : undefined}>
       <button onClick={() => setOpen(!open)}
         className="flex items-center gap-1 px-2 py-1 rounded-md hover:bg-canvas-deep transition-colors"
         title={`Provider: ${label} — 点击切换;增删改/测试在弹层底部「管理 Provider」`}>
@@ -464,7 +464,7 @@ export function ModelSelector({ compact = false, permKey = null, tourAnchor = fa
   if (!currentModel) return null;
 
   return (
-    <div ref={wrapRef} className="relative" data-tour={tourAnchor ? 'model-selector' : undefined}>
+    <div ref={wrapRef} className="relative" data-cgui="model-selector" data-tour={tourAnchor ? 'model-selector' : undefined}>
       <button onClick={() => setOpen(!open)}
         className={`flex items-center gap-1 px-2 py-1 rounded-md hover:bg-canvas-deep transition-colors ${compact ? '' : 'px-2.5'}`}
         title={`模型: ${currentModel}${providerHint !== 'anthropic' ? `（provider: ${provider || providerHint}）` : ''}`}>

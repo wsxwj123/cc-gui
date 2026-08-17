@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useRef } from 'react';
 import { createPortal } from 'react-dom';
-import { Server, Package, FolderOpen, RefreshCw, Plug, Activity, Check, X, Plus, Pencil, Trash2, Zap, Download, ArrowLeft, LogIn, LogOut, Search, ChevronRight } from 'lucide-react';
+import { Server, Package, FolderOpen, RefreshCw, Plug, Activity, Check, X, Plus, Pencil, Trash2, Zap, Download, ArrowLeft, LogIn, LogOut, Search, ChevronRight } from './Icon.jsx';
 import { BUILTIN_PLUGINS } from '../utils/builtinPlugins.js';
 import { findBuiltinMcp } from '../utils/builtinMcpServers.js';
 import { McpForm } from './McpForm.jsx';
@@ -56,7 +56,7 @@ function PingButton({ name }) {
       </button>
       {/* 失败原因浮层:可见、可滚、手动关闭(不自动消失)—— 修"看不见报错" */}
       {state === 'err' && detail && (
-        <div className="absolute left-0 right-0 top-full mt-1 z-[60] max-h-56 overflow-auto rounded-lg border border-error/30 bg-canvas shadow-2xl p-2.5"
+        <div className="absolute left-0 right-0 top-full mt-1 z-[60] max-h-56 overflow-auto rounded-lg border border-error/30 bg-canvas shadow-popover p-2.5"
           onClick={(e) => e.stopPropagation()}>
           <div className="flex items-center justify-between mb-1.5">
             <span className="text-[11px] text-error font-body font-medium">连接失败原因</span>
@@ -79,7 +79,7 @@ function Toggle({ enabled, onToggle, loading }) {
       } ${loading ? 'opacity-50' : ''}`}
     >
       <div
-        className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow-sm transition-transform ${
+        className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow-panel transition-transform ${
           enabled ? 'translate-x-[18px]' : 'translate-x-0.5'
         }`}
       />
@@ -664,8 +664,8 @@ export function MCPPanel() {
       {/* 审计批E2:portal 到 body —— 面板 animate-glass-rise 残留 transform 会困住
           fixed 遮罩(盖不满全屏),portal 后恒为真全屏遮罩;点外关闭逻辑不变。 */}
       {pluginAddOpen && createPortal(
-        <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/40 backdrop-blur-sm animate-fade-in" onClick={() => setPluginAddOpen(false)}>
-          <div data-cgui-panel className="glass-popover w-[560px] max-w-[calc(var(--app-w,100vw)-1.5rem)] max-h-[min(90vh,calc(var(--app-h,100dvh)-2rem))] flex flex-col overflow-hidden rounded-2xl shadow-2xl animate-glass-rise"
+        <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/40 backdrop-blur-soft animate-fade-in" onClick={() => setPluginAddOpen(false)}>
+          <div data-cgui-panel className="glass-popover w-[560px] max-w-[calc(var(--app-w,100vw)-1.5rem)] max-h-[min(90vh,calc(var(--app-h,100dvh)-2rem))] flex flex-col overflow-hidden rounded-panel shadow-popover animate-glass-rise"
             onClick={(e) => e.stopPropagation()}>
             {/* flex 列三段:animate-glass-rise 收尾留 transform,其内 sticky 头在 WKWebView 失效
                 (长列表滚动时头部含关闭按钮会跟着滚走)→ 头/尾 shrink-0 + 正文 flex-1 滚动。 */}

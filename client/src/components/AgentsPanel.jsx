@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useRef } from 'react';
-import { Bot, RefreshCw, Save, Check, Plus, FileText, Download, Package, Trash2 } from 'lucide-react';
+import { Bot, RefreshCw, Save, Check, Plus, FileText, Download, Package, Trash2 } from './Icon.jsx';
 import { confirmDialog } from '../utils/confirmDialog.jsx';
 import { useMultiSelect, SelModeToggle, BatchBar, SelCheckbox } from './MultiSelect.jsx';
 

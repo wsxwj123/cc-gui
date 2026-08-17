@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useStore } from '../stores/sessionStore.js';
-import { Save, RefreshCw, Check, Lock, Trash2, ChevronLeft, Brain, BookText, Sparkles, Copy, ChevronDown, ChevronRight, Search } from 'lucide-react';
+import { Save, RefreshCw, Check, Lock, Trash2, ChevronLeft, Brain, BookText, Sparkles, Copy, ChevronDown, ChevronRight, Search } from './Icon.jsx';
 import { confirmDialog } from '../utils/confirmDialog.jsx';
 import { useMultiSelect, SelModeToggle, BatchBar, SelCheckbox } from './MultiSelect.jsx';
 import { copyText } from '../utils/clipboard.js';

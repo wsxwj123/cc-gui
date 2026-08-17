@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
-import { ChevronUp, ChevronDown, X } from 'lucide-react';
+import { ChevronUp, ChevronDown, X } from './Icon.jsx';
 
 // 窗内检索浮层(Cmd/Ctrl+F)。高亮用 CSS Custom Highlight API(CSS.highlights +
 // Range),**完全不改 DOM** —— 否则边流式 re-render 边包 <mark> 会触发 React
@@ -124,8 +124,9 @@ export default function ChatSearch({ containerRef, onClose }) {
 
   return (
     <div
+      data-cgui="chat-search"
       data-cgui-search-ui
-      className="absolute top-3 right-8 left-3 md:left-auto z-50 flex items-center gap-1.5 glass-popover rounded-lg pl-3 pr-1.5 py-1.5 shadow-lg animate-fade-in max-w-[calc(var(--app-w,100vw)-2.75rem)]"
+      className="absolute top-3 right-8 left-3 md:left-auto z-50 flex items-center gap-1.5 glass-popover rounded-lg pl-3 pr-1.5 py-1.5 shadow-popover animate-fade-in max-w-[calc(var(--app-w,100vw)-2.75rem)]"
     >
       <input
         ref={inputRef}

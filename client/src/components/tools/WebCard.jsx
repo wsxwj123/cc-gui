@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Globe, ChevronDown, ChevronRight, Loader2, ExternalLink } from 'lucide-react';
+import { Globe, ChevronDown, ChevronRight, Loader2, ExternalLink } from '../Icon.jsx';
 import { MarkdownRenderer } from '../MarkdownRenderer.jsx';
 import { openExternalUrl } from '../../utils/openExternal.js';
 

@@ -3,6 +3,7 @@ import ReactDOM from 'react-dom/client';
 import App from './App.jsx';
 import { ErrorBoundary } from './components/ErrorBoundary.jsx';
 import { THEME_FAMILIES, resolveTheme, applyReadingFont } from './stores/sessionStore.js';
+import { bootReplaySkin } from './utils/skins.js';
 import { initInputUndo } from './utils/inputUndo.js';
 import './index.css';
 
@@ -52,6 +53,10 @@ import './index.css';
       root.style.setProperty('--surface-alpha', sa + '%');
     }
   } catch {}
+
+  // r11-③:皮肤 FOUC 防护——激活皮肤的展开值缓存同步重放(vars+背景+图标,不等网络);
+  // App 挂载后 reconcileSkinOnBoot 拉列表校对(失效清/有变重应用)。
+  bootReplaySkin();
 })();
 
 // CK-12: 全局输入框撤销/重做(Cmd/Ctrl+Z / Cmd/Ctrl+Shift+Z)。

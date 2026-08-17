@@ -62,15 +62,49 @@
   --spacing-sidebar: 268px;
   --spacing-sessions: 312px;
 
-  /* ── Radius — Apple squircles ─────────────────────────────────
-     大档(lg/xl/2xl)收窄贴合 macOS 窗口外边界圆角(~11px):原 18/22/28
-     偏大,面板/卡片圆角比窗口本身还圆显得不协调。sm/md 已够小保留。
-     驱动 var(--radius-*) 与 Tailwind rounded-lg/xl/2xl 工具类(@theme token)。 */
-  --radius-sm: 7px;
-  --radius-md: 10px;
-  --radius-lg: 10px;
-  --radius-xl: 11px;
-  --radius-2xl: 12px;
+  /* ── Radius — r11-⑧ 全局扁平化:默认小圆角(6-8px) ─────────────
+     驱动 var(--radius-*) 与 Tailwind rounded-sm/md/lg/xl/2xl 工具类(@theme token)。
+     玻璃拟态(经典)主题家族(data-cgui-theme="glass-classic[-dark]")恢复原值
+     7/10/10/11/12(见下方 shape 恢复块)。 */
+  --radius-sm: 6px;
+  --radius-md: 7px;
+  --radius-lg: 7px;
+  --radius-xl: 8px;
+  --radius-2xl: 8px;
+
+  /* ── Shape tokens — r11-⑧ 形状 token 化(供 ③ 皮肤系统复用) ───
+     散写的 rounded-2xl / shadow / backdrop-blur 收敛到这些变量;默认值=扁平
+     (无阴影/发丝描边/面板纯色不磨砂),玻璃观感整体保留为「玻璃拟态(经典)」
+     主题家族(其 shape 块恢复全部现值)。命名与 --color- / --glass- 体系一致。
+     --radius-panel / --shadow-panel 等经 Tailwind v4 @theme 命名空间自动生成
+     rounded-panel / shadow-panel 工具类。注意:注释内严禁出现「星号+斜杠」
+     相邻序列(如通配写法),会提前闭合注释把后文变成垃圾声明,静默毒化
+     @theme 命名空间(build 不报错但工具类不生成,已实测踩过)。 */
+  --radius-panel: 8px;      /* 面板/卡片/弹层(rounded-xl/2xl 收敛点) */
+  --radius-control: 6px;    /* 控件:按钮/输入框(btn-accent/btn-glass) */
+}
+
+/* 形状 token(续,r11-⑧):shadow / backdrop / underlay 刻意放在【@theme 之外】的
+   plain :root —— Tailwind v4 会把 @theme 的 --shadow-* 值在构建期烘进生成的
+   shadow-* 工具类(--tw-shadow 内联),运行时主题块再覆写变量也不生效(实测)。
+   放 :root + 下方手写 .shadow-panel/.shadow-popover 工具类(引用 var,保留
+   --tw-* 组合链)才能被「玻璃拟态(经典)」运行时恢复。
+   扁平阴影用 0 0 #0000(等效无影)而非 none:值要能安全出现在 box-shadow
+   逗号列表(--tw-shadow 组合链)里,none 在列表中非法。 */
+:root {
+  --shadow-panel: 0 0 #0000;          /* 面板浮雕(玻璃:thick 三层阴影) */
+  --shadow-bevel: 0 0 #0000;          /* 内高光斜面(玻璃:specular/shade 内阴影) */
+  --shadow-bar: 0 0 #0000;            /* 顶栏内高光 */
+  --shadow-capsule: 0 0 #0000;        /* 输入胶囊投影 */
+  --shadow-popover: 0 4px 16px rgba(0, 0, 0, 0.10); /* 浮层仍需轻投影(可读性) */
+  --shadow-accent: 0 0 #0000;         /* accent 按钮投影 */
+  --shadow-accent-hover: 0 0 #0000;
+  --backdrop-glass: none;             /* 面板级磨砂(玻璃:blur(18px)) */
+  --backdrop-soft: none;              /* 遮罩/卡片级轻磨砂(玻璃:blur(4px)) */
+  /* 玻璃面板的"底色补齐":扁平 = 半透明玻璃色混到画布色上 → 面板纯色;
+     玻璃家族置 transparent 恢复透底。--surface-alpha(界面不透明度)仍生效:
+     调低时底色补齐同步变透,全局背景图照常透出。 */
+  --glass-underlay: color-mix(in srgb, var(--color-canvas) var(--surface-alpha), transparent);
 }
 
 /* Dark tokens — packed into a mixin selector so they can be triggered by
@@ -114,6 +148,50 @@
   --glass-shadow: 0 1px 1px rgba(0, 0, 0, 0.4), 0 14px 40px -16px rgba(0, 0, 0, 0.55);
   --scrollbar-thumb: rgba(255, 255, 255, 0.14);
   --scrollbar-thumb-hover: rgba(255, 255, 255, 0.26);
+}
+
+/* ── r11-⑧ 玻璃拟态(经典)— shape 恢复块 ─────────────────────────
+   THEME_FAMILIES 的「玻璃拟态(经典)」家族:色值即默认主题(light=@theme 原值,
+   dark=上方 data-theme 深色 mixin 原值,本块不重复声明色值),只恢复扁平化前的
+   全部形状现值(圆角/阴影/磨砂/透底)。28 套配色预设与此正交:其它任何主题下
+   一律扁平。哨兵锚:删本块任一恢复值 → check-flat-tokens 红。 */
+:root[data-cgui-theme="glass-classic"],
+:root[data-cgui-theme="glass-classic-dark"] {
+  --radius-sm: 7px;
+  --radius-md: 10px;
+  --radius-lg: 10px;
+  --radius-xl: 11px;
+  --radius-2xl: 12px;
+  --radius-panel: 12px;
+  --radius-control: 10px;
+  --shadow-panel:
+    inset 0 1px 0 var(--glass-specular),
+    inset 0 -1px 0 var(--glass-shade),
+    0 2px 4px rgba(0, 0, 0, 0.05),
+    0 12px 32px -12px rgba(20, 30, 60, 0.18);
+  --shadow-bevel:
+    inset 0 1px 0 var(--glass-specular),
+    inset 0 -1px 0 var(--glass-shade);
+  --shadow-bar: inset 0 1px 0 var(--glass-specular);
+  --shadow-capsule:
+    inset 0 1px 0 var(--glass-specular),
+    inset 0 -1px 0 var(--glass-shade),
+    0 4px 14px -6px rgba(20, 30, 60, 0.14);
+  --shadow-popover:
+    inset 0 1px 0 var(--glass-specular),
+    0 4px 12px rgba(0, 0, 0, 0.08),
+    0 18px 50px -14px rgba(20, 30, 60, 0.24);
+  --shadow-accent:
+    inset 0 1px 0 rgba(255, 255, 255, 0.22),
+    0 1px 1px rgba(120, 60, 30, 0.12),
+    0 6px 18px -6px rgba(180, 90, 50, 0.4);
+  --shadow-accent-hover:
+    inset 0 1px 0 rgba(255, 255, 255, 0.28),
+    0 1px 1px rgba(120, 60, 30, 0.18),
+    0 10px 26px -6px rgba(180, 90, 50, 0.5);
+  --backdrop-glass: blur(18px);
+  --backdrop-soft: blur(4px);
+  --glass-underlay: transparent;
 }
 
 /* ════════════════════════════════════════════════════════════════
@@ -1103,65 +1181,79 @@ html { --content-max: clamp(768px, calc(var(--app-w, 100vw) * 0.7), 1120px); }
    Kept very faint so the main chat panel reads as "the canvas" rather than
    a card with edges — avoids the "false elliptical halo" effect when
    popovers above it provide a high-contrast reference. */
+/* r11-⑧:玻璃面全部走 shape token。background 的第二混合臂 --glass-underlay:
+   扁平(默认)= 画布色补齐 → 面板纯色不磨砂;玻璃家族 = transparent 恢复透底。
+   阴影/磨砂经 --shadow-* / --backdrop-* token,扁平默认 none,发丝描边保留。 */
 .glass-base {
-  background: color-mix(in srgb, var(--glass-base-bg) var(--surface-alpha), transparent);
+  background: color-mix(in srgb, var(--glass-base-bg) var(--surface-alpha), var(--glass-underlay));
   border: none;
   box-shadow: none;
 }
 
 .glass-thick {
-  background: color-mix(in srgb, var(--glass-thick-bg) var(--surface-alpha), transparent);
+  background: color-mix(in srgb, var(--glass-thick-bg) var(--surface-alpha), var(--glass-underlay));
   border: 0.5px solid var(--glass-edge);
-  box-shadow:
-    inset 0 1px 0 var(--glass-specular),
-    inset 0 -1px 0 var(--glass-shade),
-    0 2px 4px rgba(0, 0, 0, 0.05),
-    0 12px 32px -12px rgba(20, 30, 60, 0.18);
+  box-shadow: var(--shadow-panel);
 }
 
 .glass-thin {
-  background: color-mix(in srgb, var(--glass-thin-bg) var(--surface-alpha), transparent);
+  background: color-mix(in srgb, var(--glass-thin-bg) var(--surface-alpha), var(--glass-underlay));
   border: 0.5px solid var(--glass-edge);
-  box-shadow:
-    inset 0 1px 0 var(--glass-specular),
-    inset 0 -1px 0 var(--glass-shade);
+  box-shadow: var(--shadow-bevel);
 }
 
-/* CHEAP BLUR — only on small chrome surfaces. */
+/* CHEAP BLUR — only on small chrome surfaces(扁平下 --backdrop-glass:none 整段关闭). */
 .glass-bar {
-  background: color-mix(in srgb, var(--glass-bar-bg) var(--surface-alpha), transparent);
-  -webkit-backdrop-filter: blur(18px);
-  backdrop-filter: blur(18px);
+  background: color-mix(in srgb, var(--glass-bar-bg) var(--surface-alpha), var(--glass-underlay));
+  -webkit-backdrop-filter: var(--backdrop-glass);
+  backdrop-filter: var(--backdrop-glass);
   border-bottom: 0.5px solid var(--glass-edge-outer);
-  box-shadow: inset 0 1px 0 var(--glass-specular);
+  box-shadow: var(--shadow-bar);
   transform: translateZ(0);
 }
 
 .glass-capsule {
-  background: color-mix(in srgb, var(--glass-thick-bg) var(--surface-alpha), transparent);
-  -webkit-backdrop-filter: blur(16px);
-  backdrop-filter: blur(16px);
+  background: color-mix(in srgb, var(--glass-thick-bg) var(--surface-alpha), var(--glass-underlay));
+  -webkit-backdrop-filter: var(--backdrop-glass);
+  backdrop-filter: var(--backdrop-glass);
   border: 0.5px solid var(--glass-edge);
   border-radius: 9999px;
-  box-shadow:
-    inset 0 1px 0 var(--glass-specular),
-    inset 0 -1px 0 var(--glass-shade),
-    0 4px 14px -6px rgba(20, 30, 60, 0.14);
+  box-shadow: var(--shadow-capsule);
   transform: translateZ(0);
 }
 
 .glass-popover {
   /* 100% opaque — dropdowns must be readable. Use solid canvas color in
      both light & dark mode (CSS variable adapts). Previous translucent
-     fill made options hard to read against busy chat backgrounds. */
+     fill made options hard to read against busy chat backgrounds.
+     r11-⑧ 红线:不透底语义在扁平与玻璃两态都成立(background 恒 canvas 纯色)。 */
   background: var(--color-canvas);
   border: 0.5px solid var(--glass-edge);
   border-radius: var(--radius-lg);
-  box-shadow:
-    inset 0 1px 0 var(--glass-specular),
-    0 4px 12px rgba(0, 0, 0, 0.08),
-    0 18px 50px -14px rgba(20, 30, 60, 0.24);
+  box-shadow: var(--shadow-popover);
   transform: translateZ(0);
+}
+
+/* r11-⑧:backdrop-blur 散写收敛。soft = 遮罩/卡片级轻磨砂(玻璃 4px),
+   glass = 面板级磨砂(玻璃 18px);扁平默认均 none(纯色/纯遮罩,零 backdrop 开销)。 */
+.backdrop-blur-soft {
+  -webkit-backdrop-filter: var(--backdrop-soft);
+  backdrop-filter: var(--backdrop-soft);
+}
+.backdrop-blur-glass {
+  -webkit-backdrop-filter: var(--backdrop-glass);
+  backdrop-filter: var(--backdrop-glass);
+}
+/* r11-⑧:shadow 收敛工具类(手写,非 @theme 生成——生成版会把值烘死在构建期,
+   运行时主题覆写失效)。保留 Tailwind --tw-* 组合链:与 ring-* 工具类共存时
+   focus/hover ring 仍可见(App.jsx 有 ring+shadow 共存点)。 */
+.shadow-panel {
+  --tw-shadow: var(--shadow-panel);
+  box-shadow: var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow);
+}
+.shadow-popover {
+  --tw-shadow: var(--shadow-popover);
+  box-shadow: var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow);
 }
 
 /* ── Typography helpers ──────────────────────────────────────── */
@@ -1443,28 +1535,26 @@ html { --content-max: clamp(768px, calc(var(--app-w, 100vw) * 0.7), 1120px); }
 .chip-success { background: rgba(48, 209, 88, 0.18); color: var(--color-success); }
 
 /* ── Buttons ─────────────────────────────────────────────────── */
+/* r11-⑧:按钮形状走 token(--radius-control / --shadow-*),扁平默认无浮雕。 */
 .btn-glass {
-  background: color-mix(in srgb, var(--glass-thin-bg) var(--surface-alpha), transparent);
+  background: color-mix(in srgb, var(--glass-thin-bg) var(--surface-alpha), var(--glass-underlay));
   border: 0.5px solid var(--glass-edge);
-  border-radius: var(--radius-md);
-  box-shadow: inset 0 1px 0 var(--glass-specular);
+  border-radius: var(--radius-control);
+  box-shadow: var(--shadow-bar);
   transition: background 0.18s ease, transform 0.12s ease;
 }
-.btn-glass:hover { background: color-mix(in srgb, var(--glass-base-bg) var(--surface-alpha), transparent); }
+.btn-glass:hover { background: color-mix(in srgb, var(--glass-base-bg) var(--surface-alpha), var(--glass-underlay)); }
 .btn-glass:active { transform: scale(0.98); }
 
 .btn-accent {
   background: var(--color-accent);
   color: var(--color-on-accent, white);
   border: none;
-  border-radius: var(--radius-md);
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.22),
-    0 1px 1px rgba(120, 60, 30, 0.12),
-    0 6px 18px -6px rgba(180, 90, 50, 0.4);
+  border-radius: var(--radius-control);
+  box-shadow: var(--shadow-accent);
   transition: transform 0.12s ease, box-shadow 0.18s ease, background 0.18s ease;
 }
-.btn-accent:hover { background: var(--color-accent-hover); box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.28), 0 1px 1px rgba(120, 60, 30, 0.18), 0 10px 26px -6px rgba(180, 90, 50, 0.5); }
+.btn-accent:hover { background: var(--color-accent-hover); box-shadow: var(--shadow-accent-hover); }
 .btn-accent:active { transform: scale(0.98); }
 .btn-accent:disabled {
   background: rgba(0, 0, 0, 0.08);

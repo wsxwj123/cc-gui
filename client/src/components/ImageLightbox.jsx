@@ -1,6 +1,6 @@
 import React, { useEffect } from 'react';
 import { createPortal } from 'react-dom';
-import { X, ExternalLink } from 'lucide-react';
+import { X, ExternalLink } from './Icon.jsx';
 
 // #7 全屏图片放大预览。portal 到 body(逃 transform 包含块,同 ArtifactPreview 全屏范式)。
 // src 为空 → 不渲染。Esc 关闭(capture + stopImmediatePropagation,防误触上层 Esc:
@@ -44,7 +44,7 @@ export function ImageLightbox({ src, name, path, onClose }) {
         src={src}
         alt={name || ''}
         onClick={(e) => e.stopPropagation()}
-        className="max-w-[min(92vw,calc(var(--app-w,100vw)-1rem))] max-h-[min(92vh,calc(var(--app-h,100dvh)-1rem))] object-contain rounded-lg shadow-2xl"
+        className="max-w-[min(92vw,calc(var(--app-w,100vw)-1rem))] max-h-[min(92vh,calc(var(--app-h,100dvh)-1rem))] object-contain rounded-lg shadow-popover"
       />
     </div>,
     document.body,

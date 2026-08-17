@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useRef } from 'react';
-import { Settings, Save, RefreshCw, AlertCircle, Check, Plus, Trash2, ChevronDown, ChevronRight, ShieldCheck, ShieldAlert, ExternalLink, Eye, EyeOff, Search, FolderOpen } from 'lucide-react';
+import { Settings, Save, RefreshCw, AlertCircle, Check, Plus, Trash2, ChevronDown, ChevronRight, ShieldCheck, ShieldAlert, ExternalLink, Eye, EyeOff, Search, FolderOpen } from './Icon.jsx';
 import { openExternalUrl } from '../utils/openExternal.js';
 import { isTauri } from '../utils/pickDirectory.js';
 import { confirmDialog } from '../utils/confirmDialog.jsx';
@@ -37,6 +37,7 @@ const SETTINGS_INDEX = [
   { id: 'gui-update', tab: 'general', title: 'GUI 版本与更新', keys: 'update 升级 版本 检查更新 下载' },
   { id: 'cc-update', tab: 'general', title: 'Claude Code CLI 更新 / 切换', keys: 'cli claude npm 原生 安装 版本 路径' },
   { id: 'set-fda', tab: 'general', title: '完全磁盘访问 (FDA)', keys: 'fda 磁盘 授权 权限 macos' },
+  { id: 'set-display-name', tab: 'general', title: '称呼', keys: '称呼 名字 昵称 问候 首页 name greeting' },
   { id: 'set-close-behavior', tab: 'general', title: '关闭窗口行为', keys: '关闭 最小化 退出 窗口' },
   { id: 'set-desktop-notify', tab: 'general', title: '桌面通知', keys: '通知 提醒 系统通知 notification 后台 等待' },
   { id: 'set-screenshot-hotkey', tab: 'general', title: '全局截图热键', keys: '截图 热键 快捷键 screenshot hotkey 屏幕录制' },
@@ -1734,6 +1735,31 @@ function PersistentChatToggle() {
 // 花费上限(SDK maxBudgetUsd,单位美元)。>0 时随每次发送传给 CLI:进程累计花费达到
 // 上限即停止本轮并提示。开启会话常驻时按同一常驻进程的多个回合累计;进程重开后重新计。
 // 置空 = 不限制(默认)。
+// r11-⑫:称呼——存服务端 prefs.json(displayName,≤20 字符可空,多端共享+WS 广播)。
+// Home 问候显示「{时段词}，{称呼}」;皮肤 home.greeting 模板经 {name} 占位符引用。
+function DisplayNameInput() {
+  const val = useStore((s) => s.displayName);
+  const putDisplayName = useStore((s) => s.putDisplayName);
+  const [draft, setDraft] = useState(val || '');
+  useEffect(() => { setDraft(val || ''); }, [val]);
+  const commit = () => { if (draft.trim().slice(0, 20) !== (val || '')) putDisplayName(draft); };
+  return (
+    <div className="bg-canvas-warm border border-canvas-deep rounded-lg px-3 py-2.5 flex items-center gap-3">
+      <div className="min-w-0 flex-1">
+        <div className="text-xs text-ink font-body font-medium">称呼</div>
+        <div className="text-[10.5px] text-ink-faint font-body">首页问候使用的名字（如「下午好，{'{称呼}'}」）。最多 20 字符，置空则显示默认文案；所有设备共享。</div>
+      </div>
+      <input
+        type="text" maxLength={20} placeholder="未设置"
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={commit}
+        onKeyDown={(e) => { if (e.key === 'Enter') e.currentTarget.blur(); }}
+        className="w-36 shrink-0 text-[12px] font-body bg-canvas-base border border-canvas-deep rounded px-2 py-1 text-ink focus:border-accent outline-none" />
+    </div>
+  );
+}
+
 function MaxBudgetInput() {
   const val = useStore((s) => s.maxBudgetUsd);
   const setVal = useStore((s) => s.setMaxBudgetUsd);
@@ -2051,6 +2077,7 @@ function GeneralTab({ settings }) {
       <div id="gui-update"><UpdateChecker /></div>
       <div id="cc-update"><CcUpdater /></div>
       <div id="set-fda"><FullDiskAccessCard /></div>
+      <div id="set-display-name"><DisplayNameInput /></div>
       <div id="set-close-behavior"><CloseBehaviorPicker /></div>
       <div id="set-desktop-notify"><DesktopNotifyToggle /></div>
       <div id="set-screenshot-hotkey"><ScreenshotHotkeyPicker /></div>

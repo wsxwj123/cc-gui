@@ -9,7 +9,7 @@
 //  · cgui:dock-rail-open:展开顶栏面板坞 rail
 // enter 先派发再找锚点(draft/菜单/rail 是异步渲染,给 3×150ms 重试),仍找不到才顺延跳过。
 import { useState, useEffect, useLayoutEffect, useMemo, useRef } from 'react';
-import { X, ArrowRight, ArrowLeft } from 'lucide-react';
+import { X, ArrowRight, ArrowLeft } from './Icon.jsx';
 
 // 面板 ×10 平铺(文案沿用),每步 enter=展开 rail(锚点 panel-<id> 仅 rail 展开时在 DOM)。
 const PANEL_STEPS = [
@@ -197,7 +197,7 @@ export function GuideTour({ open, onClose, hasProject }) {
       {pos && <div className="absolute inset-0 pointer-events-auto" onClick={onClose} />}
       {/* 说明卡 */}
       <div ref={tipRef} style={{ position: 'fixed', width: TIP_W, top: pos?.top ?? 0, left: pos?.left ?? 0, visibility: pos ? 'visible' : 'hidden', zIndex: 5 }}
-        className="bg-canvas border border-canvas-deep rounded-xl shadow-2xl p-4 animate-glass-rise pointer-events-auto">
+        className="bg-canvas border border-canvas-deep rounded-panel shadow-popover p-4 animate-glass-rise pointer-events-auto">
         <div className="flex items-center gap-2 mb-1.5">
           <span className="text-[13px] font-display font-semibold text-ink flex-1">{step.title}</span>
           <span className="text-[10px] text-ink-faint font-mono shrink-0">{i + 1}/{steps.length}</span>

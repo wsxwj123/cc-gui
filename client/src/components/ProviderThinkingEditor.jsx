@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Trash2 } from 'lucide-react';
+import { Trash2 } from './Icon.jsx';
 import { EFFORT_ORDER } from '../utils/effortCaps.js';
 
 // r10-9:Provider 表单里的「思考能力」编辑器 —— 为每个模型声明是否支持思考、支持哪些档。
@@ -16,9 +16,12 @@ export function ProviderThinkingEditor({ value, onChange, models, inputCls }) {
   const rows = Object.keys(value || {});
   const undeclared = (models || []).filter((m) => !rows.includes(m));
 
+  // r11-⑩:编辑器里的任何修改都盖 source:'user'(用户声明永不被目录预填覆盖;
+  // 含"全默认"空声明——留着 source:'user' 墓碑压住目录)。source:'catalog' 只由
+  // 服务端/fetch-models 预填产生,行上显示"目录预填,可修改"。
   const addRow = (id) => {
     if (!id || rows.includes(id)) return;
-    onChange({ ...value, [id]: {} });
+    onChange({ ...value, [id]: { source: 'user' } });
     setPick('');
   };
   const removeRow = (id) => {
@@ -27,7 +30,7 @@ export function ProviderThinkingEditor({ value, onChange, models, inputCls }) {
     onChange(next);
   };
   const setThink = (id, on) => {
-    onChange({ ...value, [id]: on ? {} : { reasoning: false } });
+    onChange({ ...value, [id]: on ? { source: 'user' } : { reasoning: false, source: 'user' } });
   };
   const toggleEffort = (id, effortId) => {
     const entry = value[id] || {};
@@ -35,7 +38,7 @@ export function ProviderThinkingEditor({ value, onChange, models, inputCls }) {
     const next = cur.includes(effortId) ? cur.filter((e) => e !== effortId) : [...cur, effortId];
     const ordered = EFFORT_ORDER.filter((e) => next.includes(e));
     // 全选/全不选 = 回到全默认(不声明档位);部分选中才写 efforts。
-    onChange({ ...value, [id]: (ordered.length === 0 || ordered.length === EFFORT_ORDER.length) ? {} : { efforts: ordered } });
+    onChange({ ...value, [id]: (ordered.length === 0 || ordered.length === EFFORT_ORDER.length) ? { source: 'user' } : { efforts: ordered, source: 'user' } });
   };
 
   return (
@@ -53,7 +56,10 @@ export function ProviderThinkingEditor({ value, onChange, models, inputCls }) {
         return (
           <div key={id} className="rounded-lg border border-canvas-deep bg-canvas-warm/60 px-2.5 py-2 space-y-1.5">
             <div className="flex items-center gap-2">
-              <span className="flex-1 text-[12px] font-mono text-ink truncate" title={id}>{id}</span>
+              <span className="flex-1 min-w-0 text-[12px] font-mono text-ink truncate" title={id}>{id}</span>
+              {entry.source === 'catalog' && (
+                <span className="text-[10px] text-ink-faint shrink-0" title="按模型家族目录自动预填的声明；任意修改后即视为手动声明，不再被目录覆盖">目录预填，可修改</span>
+              )}
               <label className="flex items-center gap-1 text-[11px] text-ink-muted cursor-pointer shrink-0">
                 <input type="checkbox" checked={think} onChange={(e) => setThink(id, e.target.checked)} className="accent-[var(--color-accent)]" />
                 支持思考

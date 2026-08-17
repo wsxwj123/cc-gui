@@ -189,6 +189,12 @@ export const THEME_FAMILIES = [
   { id: 'default', name: '默认',
     light: { id: '', bg: '#FFFFFF', bg2: '#ECECEE', fg: '#1A1A1A', accent: '#1A1A1A' },
     dark:  { id: '', bg: '#1A1A1B', bg2: '#121213', fg: '#F5F5F6', accent: '#A0A0A6' } },
+  // r11-⑧:全局默认扁平化后,原玻璃观感整体保留为独立主题家族。色值=默认主题
+  // (variant 块只恢复形状 token:圆角/阴影/磨砂/透底,见 index.css shape 恢复块);
+  // 28 套配色预设与形状正交:选其它任何家族一律扁平。
+  { id: 'glass', name: '玻璃拟态(经典)',
+    light: { id: 'glass-classic', bg: '#FFFFFF', bg2: '#ECECEE', fg: '#1A1A1A', accent: '#1A1A1A' },
+    dark:  { id: 'glass-classic-dark', bg: '#1A1A1B', bg2: '#121213', fg: '#F5F5F6', accent: '#A0A0A6' } },
   { id: 'claude', name: 'Claude',
     light: { id: 'claude-warm', bg: '#F2EDE3', bg2: '#E2DBCC', fg: '#1A1A1A', accent: '#D97757' },
     dark:  { id: 'claude-dark', bg: '#29251F', bg2: '#161412', fg: '#F5F0E8', accent: '#D97757' } },
@@ -1084,6 +1090,32 @@ export const useStore = create((set, get) => ({
     const next = (titles && typeof titles === 'object') ? titles : {};
     writeLs('cgui-custom-titles', next);
     set({ customTitles: next });
+  },
+
+  // r11-⑫:称呼(prefs.displayName,服务端多端共享)。启动/重连水合 + WS 广播收敛;
+  // 写走 PUT(服务端截 20 去空白),本地乐观更新以服务端回包为准。
+  displayName: '',
+  hydrateDisplayName: async () => {
+    try {
+      const res = await fetch('/api/prefs/display-name');
+      const d = await res.json();
+      if (typeof d?.displayName === 'string') set({ displayName: d.displayName });
+    } catch {}
+  },
+  applyRemoteDisplayName: (name) => {
+    set({ displayName: typeof name === 'string' ? name : '' });
+  },
+  putDisplayName: async (name) => {
+    const next = typeof name === 'string' ? name.trim().slice(0, 20) : '';
+    set({ displayName: next });
+    try {
+      const res = await fetch('/api/prefs/display-name', {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ displayName: next }),
+      });
+      const d = await res.json();
+      if (res.ok && typeof d?.displayName === 'string') set({ displayName: d.displayName });
+    } catch {}
   },
 
   // Record which provider a session last sent under (see lastProviderBySession).

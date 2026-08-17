@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { RefreshCw, Check, X, Download, Terminal, ChevronDown, ChevronRight, AlertTriangle } from 'lucide-react';
+import { RefreshCw, Check, X, Download, Terminal, ChevronDown, ChevronRight, AlertTriangle } from './Icon.jsx';
 
 // 统一环境检查面板:node(硬需求,app 能跑=必在)/ claude CLI(硬需求)/ python(可选,
 // 部分技能需要)。每项显示状态 + 缺失时一键在终端安装 + 重新检测。
@@ -208,7 +208,7 @@ export default function EnvCheckPanel({ onDismiss, onRecheck, asModal = true }) 
 
   return (
     <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/30 p-4">
-      <div className="w-full max-w-[440px] max-h-[min(80vh,calc(var(--app-h,100dvh)-2rem))] overflow-y-auto glass-thick rounded-2xl p-5 shadow-xl animate-glass-rise">
+      <div className="w-full max-w-[440px] max-h-[min(80vh,calc(var(--app-h,100dvh)-2rem))] overflow-y-auto glass-thick rounded-panel p-5 shadow-popover animate-glass-rise">
         {body}
       </div>
     </div>

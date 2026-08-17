@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { FileText, ChevronDown, ChevronRight, Loader2 } from 'lucide-react';
+import { FileText, ChevronDown, ChevronRight, Loader2 } from '../Icon.jsx';
 
 const PREVIEW_LINES = 10;
 const MAX_EXPANDED_LINES = 400;

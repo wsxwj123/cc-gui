@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useId, useRef } from 'react';
 import { createPortal } from 'react-dom';
-import { Copy, Check, Code2, Eye, AlertTriangle, Maximize2, X, PanelRight, RefreshCw } from 'lucide-react';
+import { Copy, Check, Code2, Eye, AlertTriangle, Maximize2, X, PanelRight, RefreshCw } from './Icon.jsx';
 import { copyText } from '../utils/clipboard.js';
 import { useStore } from '../stores/sessionStore.js';
 import { useResizable, Splitter } from '../hooks/useResizable.jsx';
@@ -130,7 +130,7 @@ export function PreviewErrorBadge({ errors, source }) {
       {open && (
         // flex 列三段(头/正文/底),不用 sticky —— webview 下 sticky 在带 transform 容器内失效。
         // 宽高 clamp 在容器内(min(固定, 100%)):小窗退化为占满内滚,不溢出。别用 vw/vh(webview zoom 分母坑)。
-        <div className="mb-1.5 w-[320px] max-w-full min-h-[90px] max-h-[min(280px,calc(100%-2rem))] pointer-events-auto flex flex-col rounded-lg border border-[#3a342b] bg-[#2b2722] shadow-2xl overflow-hidden">
+        <div className="mb-1.5 w-[320px] max-w-full min-h-[90px] max-h-[min(280px,calc(100%-2rem))] pointer-events-auto flex flex-col rounded-lg border border-[#3a342b] bg-[#2b2722] shadow-popover overflow-hidden">
           {/* 头部 shrink-0:标题 + 右上角「发给 AI」,不随列表滚动,小窗也永远可见。
               用 flex 列结构而非 sticky —— webview 下 sticky 在带 transform 容器内失效。 */}
           <div className="flex items-center justify-between gap-2 px-3 py-1.5 border-b border-[#3a342b] shrink-0">
@@ -154,7 +154,7 @@ export function PreviewErrorBadge({ errors, source }) {
       <button
         onClick={() => setOpen((o) => !o)}
         title="预览运行时报错"
-        className="pointer-events-auto flex items-center gap-1 px-2 py-1 rounded-md bg-[#2b2722]/95 border border-amber-500/40 text-[10px] font-mono text-amber-300 shadow-lg hover:bg-[#3a342b] transition-colors"
+        className="pointer-events-auto flex items-center gap-1 px-2 py-1 rounded-md bg-[#2b2722]/95 border border-amber-500/40 text-[10px] font-mono text-amber-300 shadow-popover hover:bg-[#3a342b] transition-colors"
       >
         <AlertTriangle size={11} /> {errors.length}
       </button>
@@ -444,7 +444,7 @@ export function ArtifactPreview({ lang, code, coexist = false, dockKey }) {
             <X size={16} />
           </button>
           <div
-            className="flex flex-col w-[92%] h-[92%] rounded-lg border border-[#3a342b] overflow-hidden shadow-2xl"
+            className="flex flex-col w-[92%] h-[92%] rounded-lg border border-[#3a342b] overflow-hidden shadow-popover"
             onClick={(e) => e.stopPropagation()}
           >
             {toolbar(true)}
@@ -536,8 +536,9 @@ export function ArtifactDock() {
     <>
       <Splitter onMouseDown={onDrag} axis="x" />
       <div
+        data-cgui="artifact-dock"
         style={{ width }}
-        className="shrink-0 flex flex-col m-3 ml-0 rounded-2xl overflow-hidden border border-[#3a342b] bg-[#1a1714] animate-glass-rise"
+        className="shrink-0 flex flex-col m-3 ml-0 rounded-panel overflow-hidden border border-[#3a342b] bg-[#1a1714] animate-glass-rise"
       >
         {toolbar(false)}
         <div className="flex-1 min-h-0 bg-[#1a1714]">
@@ -559,7 +560,7 @@ export function ArtifactDock() {
             <X size={16} />
           </button>
           <div
-            className="flex flex-col w-[92%] h-[92%] rounded-lg border border-[#3a342b] overflow-hidden shadow-2xl"
+            className="flex flex-col w-[92%] h-[92%] rounded-lg border border-[#3a342b] overflow-hidden shadow-popover"
             onClick={(e) => e.stopPropagation()}
           >
             {toolbar(true)}

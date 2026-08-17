@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Check, Circle, ClipboardList, Loader2, ChevronDown, ChevronRight, EyeOff } from 'lucide-react';
+import { Check, Circle, ClipboardList, Loader2, ChevronDown, ChevronRight, EyeOff } from './Icon.jsx';
 import { MarkdownRenderer } from './MarkdownRenderer.jsx';
 
 /**
@@ -67,7 +67,7 @@ function TodoChecklist({ todos, isStreaming = false }) {
   if (hiddenSig === sig) return <ShowBar label="显示任务清单" onClick={() => setHiddenSig(null)} />;
 
   return (
-    <div className="mb-2 rounded-xl border border-canvas-deep bg-canvas-warm/60 backdrop-blur-sm overflow-hidden">
+    <div data-cgui="todo-panel" className="mb-2 rounded-panel border border-canvas-deep bg-canvas-warm/60 backdrop-blur-soft overflow-hidden">
       {/* Header:折叠切换(整段可点)+ 右侧独立隐藏按钮(button 不可嵌套,故并列)。
           折叠时不画下边框,折叠后只剩"标题行 + 下一条"两行。 */}
       <div className={`w-full flex items-center gap-2 px-3 py-2 ${collapsed ? '' : 'border-b border-canvas-deep/60'}`}>
@@ -118,7 +118,7 @@ function PlanBlock({ plan }) {
   // 已隐藏:留一条可点"显示"小条恢复;批准新计划(plan 变)仍自动恢复完整卡。
   if (hiddenPlan === plan) return <ShowBar label="显示已批准的计划" onClick={() => setHiddenPlan(null)} />;
   return (
-    <div className="mb-2 rounded-xl border border-canvas-deep bg-canvas-warm/60 backdrop-blur-sm overflow-hidden">
+    <div data-cgui="todo-panel" className="mb-2 rounded-panel border border-canvas-deep bg-canvas-warm/60 backdrop-blur-soft overflow-hidden">
       <div className="w-full flex items-center gap-2 px-3 py-2">
         <button
           onClick={() => setOpen((o) => !o)}

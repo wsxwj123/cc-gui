@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { createPortal } from 'react-dom';
-import { Folder, FolderOpen, File, RefreshCw, AlertCircle, ChevronRight, ChevronDown, FileText, Image as ImageIcon, ExternalLink, Film, Pencil, Save, Undo2, Redo2, X, Check, Trash2, AtSign, MoreVertical, ListChecks, Square, CheckSquare, Eye, EyeOff, ClipboardCopy } from 'lucide-react';
+import { Folder, FolderOpen, File, RefreshCw, AlertCircle, ChevronRight, ChevronDown, FileText, Image as ImageIcon, ExternalLink, Film, Pencil, Save, Undo2, Redo2, X, Check, Trash2, AtSign, MoreVertical, ListChecks, Square, CheckSquare, Eye, EyeOff, ClipboardCopy } from './Icon.jsx';
 import { useStore } from '../stores/sessionStore.js';
 import { MarkdownRenderer } from './MarkdownRenderer.jsx';
 import { ArtifactPreview } from './ArtifactPreview.jsx';
@@ -495,7 +495,7 @@ export function FileExplorerPanel() {
           // (Chromium/WebView2 右键"没反应"的根因)。关闭已由上面的 onMouseDown(任意键)
           // 负责:右键另一行时 mousedown 关旧遮罩→contextmenu 落回行上开新菜单,天然切换。
           onContextMenu={(e) => e.preventDefault()}>
-          <div className="absolute glass-popover py-1 min-w-[180px] shadow-lg"
+          <div className="absolute glass-popover py-1 min-w-[180px] shadow-popover"
             style={{ left: ctxMenu.x, top: ctxMenu.y }}
             onMouseDown={(e) => e.stopPropagation()}>
             <button onClick={() => addPathToContext(ctxMenu.entry.path)}

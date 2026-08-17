@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { ChevronDown, ChevronRight, Terminal, FileText, Search, Globe, Wrench, Edit3 } from 'lucide-react';
+import { ChevronDown, ChevronRight, Terminal, FileText, Search, Globe, Wrench, Edit3 } from './Icon.jsx';
 
 const TOOL_ICONS = {
   Bash: Terminal,

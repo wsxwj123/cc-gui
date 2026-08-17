@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Search, ChevronDown, ChevronRight, Loader2, FileText } from 'lucide-react';
+import { Search, ChevronDown, ChevronRight, Loader2, FileText } from '../Icon.jsx';
 
 // Combined renderer for Grep + Glob. Input shape:
 //   Grep: { pattern, path?, glob?, output_mode?, head_limit?, ... }

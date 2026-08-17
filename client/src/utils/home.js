@@ -64,14 +64,53 @@ export function readHomeCustom() {
   } catch { return null; }
 }
 
+/** 时段词(内置问候共用)。 */
+function timeWord(hour) {
+  if (hour >= 5 && hour < 12) return '早上好';
+  if (hour >= 12 && hour < 18) return '下午好';
+  return '晚上好';
+}
+
+// r11-⑫:无称呼时 {name} 占位符整段优雅降级——连同紧邻分隔符一起摘除,
+// 两侧都有分隔时保留后侧一枚(「A，{name}，B」→「A，B」),不留孤立标点。
+const NAME_SEG_RE = /([\s，,、·:：]*)\{name\}([\s，,、·:：]*)/g;
+function degradeNameSegments(tpl) {
+  return tpl.replace(NAME_SEG_RE, (_, pre, post) => (pre && post ? post : '')).trim();
+}
+
 /**
- * 称呼:皮肤自定义(home.greeting,≤60 字符,r11-③ 接管数据来源)优先,
- * 否则按时段给内置默认。custom 传 null/空 = 无皮肤。
+ * 问候分段(hour, custom, name)→ [{ text, name?: true }]:
+ *  - custom = 皮肤 home.greeting 模板(≤60,r11-③ 接管数据来源),支持 {name} 占位符;
+ *    无称呼时占位符整段优雅降级,降级后为空则回落内置默认;
+ *  - 无 custom:有称呼 →「{时段词}，{称呼}」,无称呼 → 现状文案「{时段词}，从这里开始」;
+ *  - name 段单独成段(name:true),UI 用主题 accent 色渲染(精致化,不硬编码色值)。
  */
-export function homeGreeting(hour, custom) {
-  const c = typeof custom === 'string' ? custom.trim() : '';
-  if (c) return c.slice(0, 60);
-  if (hour >= 5 && hour < 12) return '早上好，从这里开始';
-  if (hour >= 12 && hour < 18) return '下午好，从这里开始';
-  return '晚上好，从这里开始';
+export function homeGreetingParts(hour, custom, name) {
+  const n = typeof name === 'string' ? name.trim().slice(0, 20) : '';
+  const c = typeof custom === 'string' ? custom.trim().slice(0, 60) : '';
+  if (c) {
+    if (!c.includes('{name}')) return [{ text: c }];
+    if (!n) {
+      const degraded = degradeNameSegments(c);
+      return degraded ? [{ text: degraded }] : homeGreetingParts(hour, null, '');
+    }
+    const parts = [];
+    const segs = c.split('{name}');
+    segs.forEach((s, i) => {
+      if (s) parts.push({ text: s });
+      if (i < segs.length - 1) parts.push({ text: n, name: true });
+    });
+    return parts.length ? parts : homeGreetingParts(hour, null, n);
+  }
+  const t = timeWord(hour);
+  if (!n) return [{ text: `${t}，从这里开始` }];
+  return [{ text: `${t}，` }, { text: n, name: true }];
+}
+
+/**
+ * 称呼:皮肤自定义(home.greeting)优先,否则按时段给内置默认;第三参为用户称呼
+ * (prefs.displayName,r11-⑫)。纯文本口径 = homeGreetingParts 拼接,两口径恒一致。
+ */
+export function homeGreeting(hour, custom, name) {
+  return homeGreetingParts(hour, custom, name).map((p) => p.text).join('');
 }

@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useRef } from 'react';
-import { Bot, Loader2, Square, Clock, RefreshCw, Terminal, ChevronDown, ChevronRight, Maximize2, PlayCircle } from 'lucide-react';
+import { Bot, Loader2, Square, Clock, RefreshCw, Terminal, ChevronDown, ChevronRight, Maximize2, PlayCircle } from './Icon.jsx';
 import { useStore } from '../stores/sessionStore.js';
 import { MarkdownRenderer } from './MarkdownRenderer.jsx';
 
@@ -855,7 +855,7 @@ export function AgentMonitorPanel() {
   };
 
   return (
-    <div className="h-full flex flex-col">
+    <div data-cgui="agent-monitor" className="h-full flex flex-col">
       <div className="px-4 py-3 border-b border-canvas-deep shrink-0">
         <div className="flex items-center justify-between">
           <span className="text-[10px] uppercase tracking-widest text-ink-faint font-body flex items-center gap-1.5">
