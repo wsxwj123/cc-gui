@@ -1,9 +1,16 @@
-import { useEffect, useLayoutEffect, useRef, useState, useCallback } from 'react';
-import { turnWaveWidth } from '../utils/turnWave.js';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, useCallback } from 'react';
+import { turnWaveWidth, buildTurnIndex, nearestTurnIndex, decimationStep, shouldRenderTick } from '../utils/turnWave.js';
 
 // 右侧竖向回合进度条(Claude Code/Codex 式线性波形 + macOS Dock 放大)。
 // 每个用户回合一条横线;hover 按指针的实际纵向像素距离向左拉长 + 浮窗显示该回合消息摘要,
 // 点击平滑滚动到该回合。
+//
+// r11-④ 高密度重做:交互从「每刻度独立 button 热区」改为「单容器解算最近回合」——
+// 容器一个 pointermove(rAF 节流),按 pointerY 对全量 positions 二分解最近回合索引,
+// tooltip/点击/波形放大全用该索引(157 回合时刻度间距≈4px<12px 热区,压盖致悬停命中
+// 错邻居,是重做根因)。刻度本身退役为纯视觉线(div);回合数超过 容器高/3px 时渲染
+// 抽稀(每 N 条画一条,首尾恒画,活动回合恒画),解算仍用全量 positions,交互精确到
+// 真实回合。可达性:容器 role=slider + 上下方向键步进。
 //
 // 定位:作为 SessionDetail 根(position:relative)的 absolute 子元素,贴 right;
 // 高度/纵向起点用 containerRef.offsetTop / offsetHeight(布局 px,与 CSS zoom 无关)
@@ -18,6 +25,8 @@ export default function TurnScrubber({ containerRef, turns, onNavigate }) {
   const [box, setBox] = useState(null);        // { top, height } 相对根
   const [positions, setPositions] = useState([]); // 每个回合点 0~1
   const [pointerY, setPointerY] = useState(null);
+  const [activeIdx, setActiveIdx] = useState(null); // 解算出的最近回合索引(hover/键盘共用)
+  const activeIdxRef = useRef(null);                // rAF 回调里的同步判重(不吃 setState 时序)
   const [tipIdx, setTipIdx] = useState(null);
   const showTimer = useRef(0);
   const hideTimer = useRef(0);
@@ -95,9 +104,14 @@ export default function TurnScrubber({ containerRef, turns, onNavigate }) {
     requestAnimationFrame(step);
   };
 
-  const enterLine = (i) => {
+  // 全量 positions 的紧凑二分索引(null 洞剔除;解算恒走它,与渲染抽稀无关)。
+  const turnIndex = useMemo(() => buildTurnIndex(positions), [positions]);
+
+  // 索引变化 → 武装 tooltip(首次入场延迟 SHOW_DELAY;tooltip 已可见则即时跟随)。
+  const armTip = (i) => {
     clearTimeout(hideTimer.current);
     clearTimeout(showTimer.current);
+    if (tipIdx != null) { setTipIdx(i); return; }
     showTimer.current = setTimeout(() => setTipIdx(i), SHOW_DELAY);
   };
   const leaveBar = () => {
@@ -106,6 +120,8 @@ export default function TurnScrubber({ containerRef, turns, onNavigate }) {
     pendingPointerY.current = null;
     committedPointerY.current = null;
     setPointerY(null);
+    activeIdxRef.current = null;
+    setActiveIdx(null);
     clearTimeout(showTimer.current);
     clearTimeout(hideTimer.current);
     hideTimer.current = setTimeout(() => setTipIdx(null), HIDE_DELAY);
@@ -121,47 +137,98 @@ export default function TurnScrubber({ containerRef, turns, onNavigate }) {
       if (committedPointerY.current != null && Math.abs(next - committedPointerY.current) < 1) return;
       committedPointerY.current = next;
       setPointerY(next);
+      // 单容器解算:pointerY → 最近回合索引(tooltip/点击/波形放大统一用它)。
+      const h = containerRef.current?.offsetHeight || 0;
+      const idx = h > 0 ? nearestTurnIndex(turnIndex, next / h) : -1;
+      if (idx >= 0 && idx !== activeIdxRef.current) {
+        activeIdxRef.current = idx;
+        setActiveIdx(idx);
+        armTip(idx);
+      }
     });
+  };
+  // 容器级 click:按点击点解算(不依赖 rAF 已提交的 pointerY,首次点击也准)。
+  const clickBar = (e) => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    const h = rect.height || 1;
+    const y = Math.max(0, Math.min(h, e.clientY - rect.top));
+    const idx = nearestTurnIndex(turnIndex, y / h);
+    const t = turns[idx];
+    if (idx >= 0 && t) scrollToTurn(t.uuid);
+  };
+  // 键盘步进(role=slider):上下键在有位置的回合间移动并滚动到该回合。
+  const keyBar = (e) => {
+    const dir = e.key === 'ArrowDown' ? 1 : e.key === 'ArrowUp' ? -1 : 0;
+    if (!dir) return;
+    const { idxs } = turnIndex;
+    if (!idxs.length) return;
+    e.preventDefault();
+    const cur = activeIdx ?? tipIdx;
+    const pos = cur == null ? -1 : idxs.indexOf(cur);
+    const nextPos = pos === -1
+      ? (dir > 0 ? 0 : idxs.length - 1)
+      : Math.max(0, Math.min(idxs.length - 1, pos + dir));
+    const idx = idxs[nextPos];
+    activeIdxRef.current = idx;
+    setActiveIdx(idx);
+    setTipIdx(idx);
+    const t = turns[idx];
+    if (t) scrollToTurn(t.uuid);
   };
 
   if (!box || turns.length < 2) return null;
+
+  // 抽稀:回合数 > 容器高/3px 时每 step 条画一条(首尾 + 活动回合恒画)。
+  const step = decimationStep(positions.length, box.height, 3);
+  // 波形中心锚定解算出的回合位置(抽稀时跟指针裸坐标会在无线处鼓包),无解算回落指针。
+  const waveCenter = activeIdx != null && positions[activeIdx] != null
+    ? positions[activeIdx] * box.height
+    : pointerY;
 
   return (
     <div
       ref={rootRef}
       onPointerMove={moveBar}
       onMouseLeave={leaveBar}
+      onClick={clickBar}
+      onKeyDown={keyBar}
+      tabIndex={0}
+      role="slider"
+      aria-orientation="vertical"
+      aria-label="回合导航"
+      aria-valuemin={1}
+      aria-valuemax={turns.length}
+      aria-valuenow={(activeIdx ?? 0) + 1}
+      aria-valuetext={`第 ${(activeIdx ?? 0) + 1} 回合`}
       style={{ position: 'absolute', right: 4, top: box.top, height: box.height, width: 18, zIndex: 45 }}
-      className="max-md:hidden pointer-events-auto"
+      className="max-md:hidden pointer-events-auto cursor-pointer focus:outline-none focus-visible:ring-1 focus-visible:ring-accent/50 rounded"
     >
       {positions.map((n, i) => {
         const t = turns[i];
         // positions 比 turns 晚一帧更新:切到更短会话/回滚裁剪那一帧 positions 仍是旧的
         // 长数组,turns[i] 可能 undefined → 必须守卫,否则 .uuid 抛错整页白屏。
         if (n == null || !t) return null;
+        if (!shouldRenderTick(i, positions.length, step) && i !== activeIdx) return null;
         return (
-        <button
+        <div
           key={t.uuid || i}
-          onMouseEnter={() => enterLine(i)}
-          onClick={() => scrollToTurn(t.uuid)}
           style={{
             position: 'absolute', top: `${n * 100}%`, right: 0,
             transform: 'translateY(-50%)',
           }}
-          className="w-[18px] h-3 cursor-pointer flex items-center justify-end group"
-          aria-label={`跳到第 ${i + 1} 个回合`}
+          className="w-[18px] flex items-center justify-end pointer-events-none"
         >
           <span
             data-turn-wave
             style={{
-              width: pointerY == null ? 6 : turnWaveWidth(Math.abs(pointerY - n * box.height)),
+              width: waveCenter == null ? 6 : turnWaveWidth(Math.abs(waveCenter - n * box.height)),
               height: 2,
             }}
             className={`block transition-[width,background-color,opacity] duration-75 ease-out ${
-              pointerY != null && Math.abs(pointerY - n * box.height) < 6 ? 'bg-accent opacity-100' : 'bg-ink-faint/55 opacity-80 group-hover:bg-accent'
+              activeIdx === i ? 'bg-accent opacity-100' : 'bg-ink-faint/55 opacity-80'
             }`}
           />
-        </button>
+        </div>
         );
       })}
       {tipIdx != null && positions[tipIdx] != null && turns[tipIdx] && (
