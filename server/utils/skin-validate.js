@@ -125,6 +125,9 @@ export function isTraversalPath(p) {
  * 整包清单校验(解压前快速失败层):
  * → { ok:true, entries } | { ok:false, code }(code ∈ INTERFACE §2.5)。
  * 目录条目计入 40;声明体积仅快速失败(实测字节闸在解压过程另计,盲审 #1)。
+ * maxDeclaredBytes 仅供单测把声明闸与实测闸隔离(生产两者同值 100MB);
+ * 实测取证:本机 bsdtar 对假 usize 会按声明值截断输出并报错(假头矢量被解包器
+ * 中和),实测闸是针对"其它 tar 行为/版本"的防御纵深,仍保留。
  */
 export function validateZipEntries(entries, limits = ZIP_LIMITS) {
   const list = Array.isArray(entries) ? entries : [];
@@ -136,7 +139,7 @@ export function validateZipEntries(entries, limits = ZIP_LIMITS) {
     if (isTraversalPath(e.path)) return { ok: false, code: 'path_traversal' };
     declared += e.size;
   }
-  if (declared > limits.maxUnpackedBytes) return { ok: false, code: 'zip_bomb_suspected' };
+  if (declared > (limits.maxDeclaredBytes ?? limits.maxUnpackedBytes)) return { ok: false, code: 'zip_bomb_suspected' };
   return { ok: true, entries: list };
 }
 
