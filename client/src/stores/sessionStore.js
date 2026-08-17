@@ -4,6 +4,7 @@ import { mergeSyncedMap, syncableKey, pushLocalOnlyKeys, createInFlightCounter, 
 import { FONT_OPTIONS, readingFontCss } from '../utils/systemFonts.js';
 import { createQueueId, firstDrainableIndex, isSteerBarrier, reclaimClaimItem, reconcileSteered, stripSteerState } from '../utils/steerQueue.js';
 import { isValidContextResponse, shouldReplaceContextCache } from '../utils/contextCache.js';
+import { reducePinned } from '../utils/projectPanel.js';
 
 // Re-exported so existing importers (App.jsx) keep working; the list and its
 // css-resolution logic now live in utils/systemFonts.js alongside the enumeration.
@@ -1743,6 +1744,38 @@ export const useStore = create((set, get) => ({
       set({ projects: [], error: err.message, listLoading: false });
     }
   },
+
+  // r10-11:单层项目折叠面板的数据层。sessionsByProject 是懒加载的 per-project 会话
+  // 缓存(展开才拉取),**独立于 store.sessions 单值槽**——PermissionPrompt 权限卡门禁/
+  // @面板/监控反查继续读旧槽,语义零改动。expandedProjects 持久到 localStorage。
+  sessionsByProject: {},
+  expandedProjects: readLsArr('cgui-expanded-projects'),
+  toggleProjectExpanded: (hash) => set((s) => {
+    if (!hash) return s;
+    const cur = s.expandedProjects || [];
+    const next = cur.includes(hash) ? cur.filter((h) => h !== hash) : [...cur, hash];
+    writeLs('cgui-expanded-projects', next);
+    return { expandedProjects: next };
+  }),
+  ensureProjectExpanded: (hash) => set((s) => {
+    if (!hash || (s.expandedProjects || []).includes(hash)) return s;
+    const next = [...(s.expandedProjects || []), hash];
+    writeLs('cgui-expanded-projects', next);
+    return { expandedProjects: next };
+  }),
+  fetchSessionsForPanel: async (projectHash) => {
+    if (!projectHash) return;
+    try {
+      const res = await fetch(`/api/projects/${encodeURIComponent(projectHash)}/sessions`);
+      const data = await res.json();
+      const list = Array.isArray(data) ? data : [];
+      set((s) => ({ sessionsByProject: { ...s.sessionsByProject, [projectHash]: list } }));
+    } catch { /* 面板刷新失败保留旧缓存,下次去抖刷新兜底 */ }
+  },
+  // 置顶(项目/会话,服务端共享):挂载 GET 与 WS 广播都经同一 reducer 入位。
+  pinnedProjects: [],
+  pinnedSessions: [],
+  applyPinned: (data) => set(reducePinned(data)),
 
   // Fetch sessions for a project.
   // `silent` = true means a background refresh (e.g. after a chat just

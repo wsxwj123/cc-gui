@@ -259,6 +259,10 @@ export function useWebSocket() {
               // 提交中的键不被覆盖(store 内 in-flight 记账),不打断用户手上操作。
               useStore.getState().applyRemoteSessionSync(data);
               break;
+            case 'pinned':
+              // r10-11:置顶(项目/会话)变更广播——折叠面板常驻不重挂载,靠它跨端收敛。
+              useStore.getState().applyPinned(data);
+              break;
             case 'repair-hint':
               // r10-12:官方 400 空内容块的服务端体检结果。result 后 0ms finalize 会关 SSE,
               // 异步体检多数经此 WS 兜底到达;SessionDetail 监听按 sessionId 入位(keyed 无串扰)。

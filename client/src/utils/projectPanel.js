@@ -78,6 +78,17 @@ export function composePanelSessions({
     .sort((a, b) => (pinnedSet.has(b.sessionId) ? 1 : 0) - (pinnedSet.has(a.sessionId) ? 1 : 0));
 }
 
+/**
+ * 置顶广播 reducer:GET /api/prefs/pinned 与 WS 'pinned' 广播共用的载荷守卫,
+ * 非法载荷回落空数组(不炸 UI)。返回值直接 set 进 store。
+ */
+export function reducePinned(data) {
+  return {
+    pinnedProjects: Array.isArray(data?.projects) ? data.projects.filter((x) => typeof x === 'string') : [],
+    pinnedSessions: Array.isArray(data?.sessions) ? data.sessions.filter((x) => typeof x === 'string') : [],
+  };
+}
+
 /** 搜索时带出"组内有标题命中"的项目行:按已加载组预计算 hash 集。 */
 export function sessionQueryMatchHashes({ sessionsByProject = {}, query = '', titleOf = () => '' } = {}) {
   const q = String(query || '').toLowerCase();

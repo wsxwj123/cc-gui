@@ -3,9 +3,11 @@
 // 变异哨兵(实际验证过红):
 //   S1 删虚拟节点合成(panes 循环)→ t3 红
 //   S2 删 lastActivity 降序(只留置顶排序)→ t2 红
+// 变异哨兵(11-b 追加,实际验证过红):
+//   S3 reducePinned 不过滤非字符串 → t7 红
 import assert from 'node:assert/strict';
 import {
-  composePanelProjects, composePanelSessions, sessionQueryMatchHashes, WORKTREE_PATH_RE,
+  composePanelProjects, composePanelSessions, sessionQueryMatchHashes, WORKTREE_PATH_RE, reducePinned,
 } from '../../client/src/utils/projectPanel.js';
 
 const P = (hash, path, extra = {}) => ({ hash, path, sessionCount: 1, lastActivity: null, ...extra });
@@ -116,6 +118,18 @@ const P = (hash, path, extra = {}) => ({ hash, path, sessionCount: 1, lastActivi
   });
   assert.deepEqual(rows.map((p) => p.hash), ['pa'], 't6: 会话命中带出项目行');
   assert.equal(sessionQueryMatchHashes({ sessionsByProject, query: '', titleOf }).size, 0, 't6: 空 query 空集');
+}
+
+// t7 置顶广播 reducer:合法载荷入位;非法载荷/脏元素回落干净数组(不炸 UI)
+{
+  assert.deepEqual(reducePinned({ projects: ['a'], sessions: ['s1'] }),
+    { pinnedProjects: ['a'], pinnedSessions: ['s1'] }, 't7: 正常载荷');
+  assert.deepEqual(reducePinned({ projects: 'junk', sessions: null }),
+    { pinnedProjects: [], pinnedSessions: [] }, 't7: 非数组回落空');
+  assert.deepEqual(reducePinned(null),
+    { pinnedProjects: [], pinnedSessions: [] }, 't7: 空载荷');
+  assert.deepEqual(reducePinned({ projects: ['a', 42, null], sessions: [{}] }),
+    { pinnedProjects: ['a'], pinnedSessions: [] }, 't7: 脏元素滤除');
 }
 
 console.log('check-project-panel: all passed');

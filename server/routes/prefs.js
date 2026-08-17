@@ -41,8 +41,7 @@ function withPrefsQueue(task) {
 
 // 会话删除时的 prefs GC:清掉四处按 sessionId 挂的残留(1M 标记/自动标题/自定义标题/
 // 置顶会话列表),否则 prefs.json 随删除只增不减,且被删 sid 的标记会污染未来复用同 id
-// 的水合。走 withPrefsQueue 与常规 PUT 串行;只对真有变化的类别广播(pinned 无广播类型,
-// 客户端只在挂载时拉取,残留 sid 无害)。
+// 的水合。走 withPrefsQueue 与常规 PUT 串行;只对真有变化的类别广播。
 export async function removeSessionFromPrefs(sessionId) {
   if (typeof sessionId !== 'string' || !sessionId) return;
   await withPrefsQueue(async () => {
@@ -74,6 +73,14 @@ export async function removeSessionFromPrefs(sessionId) {
     }
     if (!changed.context1m && !changed.autoTitles && !changed.customTitles && !pinnedChanged && !syncChanged) return;
     await savePrefs(prefs);
+    // r10-11:pinned 也有广播类型了,GC 掉被删会话的置顶时同步各端。
+    if (pinnedChanged) {
+      broadcast({
+        type: 'pinned',
+        projects: Array.isArray(prefs.pinned?.projects) ? prefs.pinned.projects : [],
+        sessions: Array.isArray(prefs.pinned?.sessions) ? prefs.pinned.sessions : [],
+      });
+    }
     if (changed.context1m) broadcast({ type: 'context-1m', sessions: prefs.context1m });
     if (changed.autoTitles) broadcast({ type: 'auto-titles', titles: prefs.autoTitles });
     if (changed.customTitles) broadcast({ type: 'custom-titles', titles: prefs.customTitles });
@@ -386,6 +393,15 @@ router.put('/prefs/pinned', async (req, res) => {
       await savePrefs(prefs);
       return cur;
     });
+    // r10-11:补 pinned 广播(挂账清理)——常驻折叠面板不再靠重挂载拉取,
+    // 手机/桌面任一端置顶后另一端即时收敛(applyPinned 同一 reducer 入位)。
+    try {
+      broadcast({
+        type: 'pinned',
+        projects: Array.isArray(p.projects) ? p.projects : [],
+        sessions: Array.isArray(p.sessions) ? p.sessions : [],
+      });
+    } catch {}
     res.json({
       ok: true,
       projects: Array.isArray(p.projects) ? p.projects : [],
