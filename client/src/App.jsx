@@ -3388,11 +3388,15 @@ function GitInitBanner({ cwd }) {
       <div className="min-w-0 overflow-hidden bg-amber-50 border-b border-amber-200 px-4 py-2 text-[12px] font-body text-amber-900 flex items-center gap-2">
         <GitBranch size={13} className="text-amber-700 shrink-0" />
         <span className="flex-1 min-w-0 break-words">
-          <b>这个 git 仓库还没有任何提交</b>。worktree 与基于 git 的回滚需要至少一个提交，建议先做一次基线提交。
+          {/* ⑦子文件夹场景(仓库根在上层)明说归属:不是"本文件夹未初始化",而是它属于
+              上层仓库、只差基线提交。init 走既有 already:true 路径,只补提交不重复 git init。 */}
+          {repoRoot && repoRoot !== cwd
+            ? <><b>本文件夹属于上层 git 仓库</b>，该仓库还没有任何提交。worktree 与基于 git 的回滚需要至少一个提交，建议先补一次基线提交。</>
+            : <><b>这个 git 仓库还没有任何提交</b>。worktree 与基于 git 的回滚需要至少一个提交，建议先做一次基线提交。</>}
           {/* 仓库根常常在项目目录的上层(用户实景:项目是空文件夹,仓库根是它的父目录),
               不说清楚的话用户不知道自己在给哪个仓库补提交。 */}
           {repoRoot && repoRoot !== cwd && (
-            <span className="block text-[10.5px] text-amber-700 mt-0.5 font-mono truncate" title={repoRoot}>仓库根：{repoRoot}</span>
+            <span className="block text-[10.5px] text-amber-700 mt-0.5 font-mono truncate" title={repoRoot}>上层仓库根：{repoRoot}</span>
           )}
         </span>
         <button
