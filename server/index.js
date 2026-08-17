@@ -10,7 +10,7 @@ import { createHash } from 'crypto';
 import sessionRoutes from './routes/sessions.js';
 import chatRoutes, { getInitCommands, mergeInitCommands } from './routes/chat.js';
 import processRoutes from './routes/processes.js';
-import settingsRoutes, { restoreOpenAIProvider, restoreAnthropicProvider } from './routes/settings.js';
+import settingsRoutes, { restoreOpenAIProvider, restoreAnthropicProvider, activeProviderModelMeta } from './routes/settings.js';
 import usageRoutes from './routes/usage.js';
 import subscriptionUsageRoutes from './routes/subscription-usage.js';
 import pricingRoutes from './routes/pricing.js';
@@ -515,7 +515,9 @@ app.get('/api/model', async (req, res) => {
       const s = JSON.parse(readFileSync(join(homedir(), '.claude', 'settings.json'), 'utf-8'));
       defaultEffort = s.env?.CLAUDE_CODE_EFFORT_LEVEL || '';
     } catch {}
-    res.json({ model: data.current, available: data.models, provider: data.provider, defaultEffort });
+    // r10-9:当前激活 provider 的每模型思考能力声明(null = 无声明,全档可用)。
+    const modelMeta = await activeProviderModelMeta();
+    res.json({ model: data.current, available: data.models, provider: data.provider, defaultEffort, modelMeta });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

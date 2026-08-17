@@ -130,10 +130,59 @@ async function writeActiveProviderId(id) {
 // returned by any GET — only used server-side at switch time.
 const CUSTOM_PROVIDERS_PATH = join(homedir(), '.claude-gui', 'custom-providers.json');
 
+// r10-9:思考强度按模型自适应的数据层。存储形态(custom-providers.json)的 models 条目
+// 兼容 string | {id, reasoning?:boolean, efforts?:string[]};读入口统一 normalize 成
+// models: string[](全部既有消费点零改动)+ modelMeta: {[id]:{reasoning?,efforts?}},
+// 写入口 denormalize 回混合条目落盘。全默认(reasoning≠false 且 efforts 全档/缺省)不留条目。
+export const EFFORT_LEVEL_IDS = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
+export function normalizeProviderModels(rawModels) {
+  const ids = [];
+  const meta = {};
+  for (const m of Array.isArray(rawModels) ? rawModels : []) {
+    if (typeof m === 'string') { if (m.trim()) ids.push(m.trim()); continue; }
+    if (!m || typeof m !== 'object' || typeof m.id !== 'string' || !m.id.trim()) continue;
+    const id = m.id.trim();
+    ids.push(id);
+    const entry = {};
+    if (m.reasoning === false) entry.reasoning = false;
+    if (Array.isArray(m.efforts)) {
+      const eff = [...new Set(m.efforts.filter((e) => EFFORT_LEVEL_IDS.includes(e)))];
+      // 全选 = 等于不声明;空数组视为未声明(锁死全部档位应使用 reasoning:false 表达)
+      if (eff.length && eff.length < EFFORT_LEVEL_IDS.length) entry.efforts = eff;
+    }
+    if (Object.keys(entry).length) meta[id] = entry;
+  }
+  return { ids, meta: Object.keys(meta).length ? meta : null };
+}
+export function denormalizeProviderModels(ids, meta) {
+  const list = Array.isArray(ids) ? ids : [];
+  if (!meta || typeof meta !== 'object') return list;
+  return list.map((id) => (meta[id] ? { id, ...meta[id] } : id));
+}
+// 输入校验(POST/PUT 的 body.modelMeta):只留 models 内的 id,结构过 normalize 同一套规则。
+export function sanitizeModelMeta(input, models) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return null;
+  const allowed = new Set(models || []);
+  const { meta } = normalizeProviderModels(
+    Object.entries(input)
+      .filter(([id]) => allowed.has(id))
+      .map(([id, v]) => ({ id, ...(v && typeof v === 'object' ? v : {}) })),
+  );
+  return meta;
+}
+
 async function readCustomProviders() {
   try {
     const d = JSON.parse(await readFile(CUSTOM_PROVIDERS_PATH, 'utf-8'));
-    return Array.isArray(d) ? d : [];
+    if (!Array.isArray(d)) return [];
+    // r10-9:读侧统一 normalize —— 下游一律拿到 string[] 的 models + 可选 modelMeta。
+    return d.map((p) => {
+      if (!p || !Array.isArray(p.models)) return p;
+      const { ids, meta } = normalizeProviderModels(p.models);
+      const next = { ...p, models: ids };
+      if (meta) next.modelMeta = meta; else delete next.modelMeta;
+      return next;
+    });
   } catch { return []; }
 }
 
@@ -142,11 +191,17 @@ async function readCustomProviders() {
 // (与 sessions.js writeJsonlAtomic 同模式,单文件只需一条链)。
 let _customProvidersQueue = Promise.resolve();
 async function writeCustomProviders(list) {
+  // r10-9:写侧 denormalize —— modelMeta 并回 models 混合条目落盘(存储形态见 normalize 注释)。
+  const wire = (Array.isArray(list) ? list : []).map((p) => {
+    if (!p || !p.modelMeta) return p;
+    const { modelMeta, ...rest } = p;
+    return { ...rest, models: denormalizeProviderModels(p.models, modelMeta) };
+  });
   const run = _customProvidersQueue.catch(() => {}).then(async () => {
     await mkdir(join(homedir(), '.claude-gui'), { recursive: true });
     const tmp = `${CUSTOM_PROVIDERS_PATH}.tmp-${randomUUID()}`;
     try {
-      await writeFile(tmp, JSON.stringify(list, null, 2));
+      await writeFile(tmp, JSON.stringify(wire, null, 2));
       await rename(tmp, CUSTOM_PROVIDERS_PATH);
     } catch (err) {
       // rename 前抛错会留 tmp-uuid 残留,兜底清掉(文件可能没写成,ENOENT 忽略)。
@@ -1283,6 +1338,7 @@ router.get('/custom-providers', async (_req, res) => {
       models: p.models || [], defaultModel: p.defaultModel || '',
       tierModels: p.tierModels || null, hasKey: !!p.apiKey,
       contextWindow: p.contextWindow || null, modelPrices: p.modelPrices || null,
+      modelMeta: p.modelMeta || null, // r10-9:每模型思考能力声明
     })),
   });
 });
@@ -1326,6 +1382,11 @@ router.post('/custom-providers', async (req, res) => {
     {
       const mp = sanitizeModelPrices(req.body?.modelPrices);
       if (mp) entry.modelPrices = mp;
+    }
+    // r10-9: 每模型思考能力(可选)。只留 models 内的 id;全默认不写(向后兼容)。
+    {
+      const mm = sanitizeModelMeta(req.body?.modelMeta, cleanModels);
+      if (mm) entry.modelMeta = mm;
     }
     const list = await readCustomProviders();
     // 幂等查重(用户新机实报:添加成功但后续 switch 失败被误报"保存失败"→重试 N 次
@@ -1397,6 +1458,17 @@ router.put('/custom-providers/:id', async (req, res) => {
         if (!nextModels.includes(list[idx].tierModels[tier])) delete list[idx].tierModels[tier];
       }
       if (!Object.keys(list[idx].tierModels).length) delete list[idx].tierModels;
+    }
+    // r10-9: modelMeta。显式传入则按 nextModels 校验覆盖(传 null/空 = 清除);不传保留旧值,
+    // 但剔除已不在 nextModels 的模型条目(同 tierModels 的防悬空语义)。
+    if (req.body?.modelMeta !== undefined) {
+      const mm = sanitizeModelMeta(req.body.modelMeta, nextModels);
+      if (mm) list[idx].modelMeta = mm; else delete list[idx].modelMeta;
+    } else if (list[idx].modelMeta) {
+      for (const mid of Object.keys(list[idx].modelMeta)) {
+        if (!nextModels.includes(mid)) delete list[idx].modelMeta[mid];
+      }
+      if (!Object.keys(list[idx].modelMeta).length) delete list[idx].modelMeta;
     }
     await writeCustomProviders(list);
     // If the TYPE changed and this provider was active on the OLD type's marker,
@@ -1649,6 +1721,17 @@ async function probeUpstreamModels(baseURL, apiKey) {
     + `很多 Anthropic 协议中转只支持 /v1/messages、没有模型列表,这是正常的 —— 请在「模型」框手动填模型名`
     + `(如 opus/sonnet/haiku、deepseek-v4-pro、glm-5.2 等)再保存。${lastBody ? `\n上游:${lastBody}` : ''}`,
   );
+}
+
+// r10-9:当前激活 provider 的每模型思考能力声明(GET /api/model 附带,前端强度选择器
+// 按当前模型自适应)。非 custom provider(官方/导入未激活)返回 null = 全档可用(现状)。
+export async function activeProviderModelMeta() {
+  try {
+    const id = await readActiveProviderId();
+    if (!id) return null;
+    const p = (await readCustomProviders()).find((x) => x.id === id);
+    return p?.modelMeta || null;
+  } catch { return null; }
 }
 
 // r10-10:切官方响应的登录态预检注入(纯函数,export 仅为可单测)。token 空 → 附
