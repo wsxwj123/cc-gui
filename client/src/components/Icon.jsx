@@ -24,7 +24,7 @@ import {
   Menu as L_Menu, MessageSquare as L_MessageSquare, MessageSquareWarning as L_MessageSquareWarning, MessagesSquare as L_MessagesSquare, Minus as L_Minus, Monitor as L_Monitor,
   Moon as L_Moon, MoreHorizontal as L_MoreHorizontal, MoreVertical as L_MoreVertical, Package as L_Package, Palette as L_Palette, PanelRight as L_PanelRight,
   Paperclip as L_Paperclip, Pencil as L_Pencil, Pin as L_Pin, PlayCircle as L_PlayCircle, Plug as L_Plug, Plus as L_Plus,
-  Puzzle as L_Puzzle, Redo2 as L_Redo2, RefreshCw as L_RefreshCw, RotateCcw as L_RotateCcw, Save as L_Save, Scissors as L_Scissors,
+  Puzzle as L_Puzzle, Redo2 as L_Redo2, RefreshCw as L_RefreshCw, RotateCcw as L_RotateCcw, RotateCw as L_RotateCw, Save as L_Save, Scissors as L_Scissors,
   Search as L_Search, Send as L_Send, Server as L_Server, Settings as L_Settings, Shield as L_Shield, ShieldAlert as L_ShieldAlert,
   ShieldCheck as L_ShieldCheck, ShieldOff as L_ShieldOff, Smartphone as L_Smartphone, Sparkles as L_Sparkles, Square as L_Square, SquarePen as L_SquarePen,
   Star as L_Star, Sun as L_Sun, Target as L_Target, Terminal as L_Terminal, Trash2 as L_Trash2, Type as L_Type,
@@ -153,6 +153,7 @@ export const Puzzle = wrap(null, L_Puzzle);
 export const Redo2 = wrap(null, L_Redo2);
 export const RefreshCw = wrap("refresh", L_RefreshCw);
 export const RotateCcw = wrap(null, L_RotateCcw);
+export const RotateCw = wrap(null, L_RotateCw);
 export const Save = wrap(null, L_Save);
 export const Scissors = wrap(null, L_Scissors);
 export const Search = wrap("search", L_Search);
