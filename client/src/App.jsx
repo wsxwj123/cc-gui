@@ -76,6 +76,7 @@ import {
 } from 'lucide-react';
 import { buildFontEntries, groupFonts, detectFonts, platformCandidates, queryLocalFontFamilies } from './utils/systemFonts.js';
 import { copyText } from './utils/clipboard.js';
+import { OFFICIAL_LOGIN_HINT, matchOfficialLoginError, notifyOauthMissing } from './utils/officialAuth.js';
 import { escRoute, idleEscAction, escYieldCardId, isEditableTarget } from './utils/escAction.js';
 import { waitingSessionKeys, countAttention, applyAttentionBadge } from './utils/attention.js';
 import { notifyWaiting } from './utils/desktopNotify.js';
@@ -6211,15 +6212,17 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             const oneMHint = isOneMReject
               ? '\n\n> 该会话被识别为 1M 上下文；若账户不支持,请在模型弹层关闭 1M 后重试。'
               : '';
+            // r10-10:官方订阅未登录/登录过期 → 错误行下补登录指引(与切官方预检横幅同一文案)。
+            const loginHint = matchOfficialLoginError(msg) ? `\n\n> ${OFFICIAL_LOGIN_HINT}。` : '';
             setChatMessages((prev) => [...prev, {
               uuid: 'chat-error-' + Date.now(),
               type: 'turn',
               timestamp: new Date().toISOString(),
               model: streamingModel,
-              text: [`❌ **${msg}**\n\n常见原因：\n- session 不在当前 cwd 对应的项目目录 → 新建会话\n- jsonl 被 trim 后损坏 → 新建会话\n- CLI 版本异常 → 终端跑 \`claude --help\` 验证${oneMHint}`],
+              text: [`❌ **${msg}**\n\n常见原因：\n- session 不在当前 cwd 对应的项目目录 → 新建会话\n- jsonl 被 trim 后损坏 → 新建会话\n- CLI 版本异常 → 终端跑 \`claude --help\` 验证${oneMHint}${loginHint}`],
               thinking: [],
               toolCalls: [],
-              blocks: [{ type: 'text', content: `❌ **${msg}**${oneMHint}` }],
+              blocks: [{ type: 'text', content: `❌ **${msg}**${oneMHint}${loginHint}` }],
               usage: null,
               ...(isAuthError ? { errorAction: 'provider' }
                 : isOfficialEmptyBlock ? { errorAction: 'repair-official' } : {}),
@@ -8382,6 +8385,7 @@ function ProviderManager({ initialEditId = null }) {
       });
       const d = await r.json();
       if (!r.ok) throw new Error(d.error || '切换失败');
+      notifyOauthMissing(d); // r10-10:切官方但未检测到订阅登录 → 全局横幅指引
       setActiveId(id);
       useStore.getState().clearModelOverrides?.();
       useStore.getState().fetchProvider?.();
@@ -9680,6 +9684,7 @@ function MobileProviderPage({ permKey, onPicked, onManage }) {
       });
       const d = await r.json();
       if (!r.ok) throw new Error(d.error || '切换失败');
+      notifyOauthMissing(d); // r10-10:切官方但未检测到订阅登录 → 全局横幅指引
       setActiveId(id);
       useStore.getState().clearModelOverrides?.();
       useStore.getState().fetchProvider?.();
@@ -10192,6 +10197,14 @@ export default function App() {
     setRightPanelRaw(target);
   }, []);
   const [tourOpen, setTourOpen] = useState(false); // CK-3 使用指引浮层
+  // r10-10:切官方但未检测到订阅登录 → 顶栏下横幅(可关)。由切换调用点的
+  // notifyOauthMissing 派发 cgui:oauth-missing 驱动;再次切换命中会重新弹出。
+  const [oauthMissing, setOauthMissing] = useState(false);
+  useEffect(() => {
+    const on = () => setOauthMissing(true);
+    window.addEventListener('cgui:oauth-missing', on);
+    return () => window.removeEventListener('cgui:oauth-missing', on);
+  }, []);
   // Auth gate: external clients with a password set must log in first. Loopback
   // (Mac) always reports authed, so this is a no-op locally.
   const [authLocked, setAuthLocked] = useState(false);
@@ -11001,6 +11014,15 @@ export default function App() {
     </div>
   );
 
+  // r10-10:官方订阅登录态预检横幅(切官方响应带 warning 时弹出,可关;桌面+手机共用)。
+  const oauthMissingBanner = oauthMissing && (
+    <div className="fixed top-12 inset-x-0 z-[290] bg-amber-500 text-white text-[12px] font-body px-4 py-2 flex items-center justify-center gap-3 flex-wrap shadow-lg">
+      <span>{OFFICIAL_LOGIN_HINT}</span>
+      <button onClick={() => setOauthMissing(false)}
+        className="px-2 py-0.5 rounded bg-white/20 hover:bg-white/30 transition-colors shrink-0">知道了</button>
+    </div>
+  );
+
   if (isMobile) {
     // CSS zoom scales fixed-size UI too. Keep the mobile root's layout box
     // divided by the zoom factor so "超大" text does not push the app outside
@@ -11038,6 +11060,7 @@ export default function App() {
         {/* 审计批A3/A4:版本告警横幅 + 非聚焦会话完成提醒,手机端同样渲染
             (toast 点击跳转走 paneSessions[0],手机单窗格语义一致)。 */}
         {bundleMismatchBanner}
+        {oauthMissingBanner}
         <CompletionToasts />
         {!cliInstalled && !cliCheckDismissed && (
           <EnvCheckPanel onRecheck={checkCli} onDismiss={dismissCliCheck} />
@@ -11124,6 +11147,7 @@ export default function App() {
       {/* 修正批#7:Provider 管理独立弹窗(桌面;手机走合并入口页内的导航流全屏页) */}
       <ProviderManagerModal open={providerMgrOpen} editId={providerMgrEditId} onClose={() => { setProviderMgrOpen(false); setProviderMgrEditId(null); }} />
       {bundleMismatchBanner}
+      {oauthMissingBanner}
       <CompletionToasts />
       {/* F1: 截图热键状态提示(截图中/成功/失败)。取消不显示。 */}
       {shotStatus && (

@@ -887,7 +887,10 @@ router.post('/provider/switch', async (req, res) => {
       await writeActiveProviderId(hit.id);
       await unlink(OPENAI_ACTIVE_PATH).catch(() => {});
       await unlink(ANTHROPIC_ACTIVE_PATH).catch(() => {});
-      return res.json({ ok: true, name: hit.name, via: 'official' });
+      // r10-10:切官方成功后预检订阅登录态(读钥匙串/credentials 的既有函数,只判空)。
+      // 空 → 附 warning 不阻断:切换本身已生效,发消息才会撞 Not logged in,提前给指引。
+      const oauthTok = await readClaudeOAuthToken().catch(() => '');
+      return res.json(withOauthWarning({ ok: true, name: hit.name, via: 'official' }, oauthTok));
     }
 
     // Third-party Anthropic-format provider (deepseek/mimo/relay): route through
@@ -1647,6 +1650,18 @@ async function probeUpstreamModels(baseURL, apiKey) {
     + `(如 opus/sonnet/haiku、deepseek-v4-pro、glm-5.2 等)再保存。${lastBody ? `\n上游:${lastBody}` : ''}`,
   );
 }
+
+// r10-10:切官方响应的登录态预检注入(纯函数,export 仅为可单测)。token 空 → 附
+// warning:'oauth-missing'(不阻断切换);非空 → 原样返回,绝不把 token 值放进响应。
+export function withOauthWarning(payload, token) {
+  return token ? payload : { ...payload, warning: 'oauth-missing' };
+}
+
+// r10-10:GET /api/official-auth-status — 订阅登录态查询(读 token 只判空,不回传值)。
+router.get('/official-auth-status', async (_req, res) => {
+  const tok = await readClaudeOAuthToken().catch(() => '');
+  res.json({ loggedIn: !!tok });
+});
 
 // Read the local Claude Code subscription OAuth token. macOS stores it in the
 // login keychain; some setups use ~/.claude/.credentials.json. Returns the

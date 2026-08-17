@@ -10,6 +10,7 @@ import { confirmDialog } from '../utils/confirmDialog.jsx';
 import { mergeProviderLists, rowIsCurrent, SOURCE_BADGE } from '../utils/providerList.js';
 import { resolveSelectorModel } from '../utils/routing.js';
 import { nativeContextWindow } from '../utils/contextWindow.js';
+import { notifyOauthMissing } from '../utils/officialAuth.js';
 
 const EMPTY_ARRAY = Object.freeze([]);
 
@@ -228,6 +229,7 @@ export function ProviderSwitchList({ onSwitched }) {
       });
       const d = await r.json();
       if (!r.ok) throw new Error(d.error || '切换失败');
+      notifyOauthMissing(d); // r10-10:切官方但未检测到订阅登录 → 全局横幅指引
       setActiveId(id);
       useStore.getState().clearModelOverrides?.();
       useStore.getState().fetchProvider?.();
