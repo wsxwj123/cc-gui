@@ -75,18 +75,30 @@
   /* ── Shape tokens — r11-⑧ 形状 token 化(供 ③ 皮肤系统复用) ───
      散写的 rounded-2xl / shadow / backdrop-blur 收敛到这些变量;默认值=扁平
      (无阴影/发丝描边/面板纯色不磨砂),玻璃观感整体保留为「玻璃拟态(经典)」
-     主题家族(其 shape 块恢复全部现值)。命名与 --color-*/--glass-* 体系一致。
-     --radius-panel/--shadow-panel 等经 Tailwind v4 @theme 命名空间自动生成
-     rounded-panel / shadow-panel 工具类。 */
+     主题家族(其 shape 块恢复全部现值)。命名与 --color- / --glass- 体系一致。
+     --radius-panel / --shadow-panel 等经 Tailwind v4 @theme 命名空间自动生成
+     rounded-panel / shadow-panel 工具类。注意:注释内严禁出现「星号+斜杠」
+     相邻序列(如通配写法),会提前闭合注释把后文变成垃圾声明,静默毒化
+     @theme 命名空间(build 不报错但工具类不生成,已实测踩过)。 */
   --radius-panel: 8px;      /* 面板/卡片/弹层(rounded-xl/2xl 收敛点) */
   --radius-control: 6px;    /* 控件:按钮/输入框(btn-accent/btn-glass) */
-  --shadow-panel: none;               /* 面板浮雕(玻璃:thick 三层阴影) */
-  --shadow-bevel: none;               /* 内高光斜面(玻璃:specular/shade 内阴影) */
-  --shadow-bar: none;                 /* 顶栏内高光 */
-  --shadow-capsule: none;             /* 输入胶囊投影 */
+}
+
+/* 形状 token(续,r11-⑧):shadow / backdrop / underlay 刻意放在【@theme 之外】的
+   plain :root —— Tailwind v4 会把 @theme 的 --shadow-* 值在构建期烘进生成的
+   shadow-* 工具类(--tw-shadow 内联),运行时主题块再覆写变量也不生效(实测)。
+   放 :root + 下方手写 .shadow-panel/.shadow-popover 工具类(引用 var,保留
+   --tw-* 组合链)才能被「玻璃拟态(经典)」运行时恢复。
+   扁平阴影用 0 0 #0000(等效无影)而非 none:值要能安全出现在 box-shadow
+   逗号列表(--tw-shadow 组合链)里,none 在列表中非法。 */
+:root {
+  --shadow-panel: 0 0 #0000;          /* 面板浮雕(玻璃:thick 三层阴影) */
+  --shadow-bevel: 0 0 #0000;          /* 内高光斜面(玻璃:specular/shade 内阴影) */
+  --shadow-bar: 0 0 #0000;            /* 顶栏内高光 */
+  --shadow-capsule: 0 0 #0000;        /* 输入胶囊投影 */
   --shadow-popover: 0 4px 16px rgba(0, 0, 0, 0.10); /* 浮层仍需轻投影(可读性) */
-  --shadow-accent: none;              /* accent 按钮投影 */
-  --shadow-accent-hover: none;
+  --shadow-accent: 0 0 #0000;         /* accent 按钮投影 */
+  --shadow-accent-hover: 0 0 #0000;
   --backdrop-glass: none;             /* 面板级磨砂(玻璃:blur(18px)) */
   --backdrop-soft: none;              /* 遮罩/卡片级轻磨砂(玻璃:blur(4px)) */
   /* 玻璃面板的"底色补齐":扁平 = 半透明玻璃色混到画布色上 → 面板纯色;
@@ -1231,6 +1243,17 @@ html { --content-max: clamp(768px, calc(var(--app-w, 100vw) * 0.7), 1120px); }
 .backdrop-blur-glass {
   -webkit-backdrop-filter: var(--backdrop-glass);
   backdrop-filter: var(--backdrop-glass);
+}
+/* r11-⑧:shadow 收敛工具类(手写,非 @theme 生成——生成版会把值烘死在构建期,
+   运行时主题覆写失效)。保留 Tailwind --tw-* 组合链:与 ring-* 工具类共存时
+   focus/hover ring 仍可见(App.jsx 有 ring+shadow 共存点)。 */
+.shadow-panel {
+  --tw-shadow: var(--shadow-panel);
+  box-shadow: var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow);
+}
+.shadow-popover {
+  --tw-shadow: var(--shadow-popover);
+  box-shadow: var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow);
 }
 
 /* ── Typography helpers ──────────────────────────────────────── */

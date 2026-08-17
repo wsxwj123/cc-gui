@@ -408,11 +408,11 @@ function ThemeAppearanceBody() {
   return (
     <>
       {/* ── Tone (light / dark / follow-system) ───────────── */}
-          <div className="flex items-center gap-1 p-1 rounded-xl bg-black/5">
+          <div className="flex items-center gap-1 p-1 rounded-panel bg-black/5">
             {TONES.map(({ id, label, Icon }) => (
               <button key={id} onClick={() => setTheme(themeFamily, id)}
                 className={`flex-1 flex items-center justify-center gap-1 py-1.5 rounded-lg text-[11px] font-body transition-colors ${
-                  themeTone === id ? 'bg-accent text-on-accent shadow-sm' : 'text-ink-muted hover:text-ink'}`}>
+                  themeTone === id ? 'bg-accent text-on-accent shadow-panel' : 'text-ink-muted hover:text-ink'}`}>
                 <Icon size={12} /> {label}
               </button>
             ))}
@@ -424,7 +424,7 @@ function ThemeAppearanceBody() {
               <Type size={12} className="text-ink-muted" />
               <span className="text-[11px] text-ink font-body font-medium">界面字体大小</span>
             </div>
-            <div className="flex items-center gap-1 rounded-xl bg-canvas-warm p-0.5">
+            <div className="flex items-center gap-1 rounded-panel bg-canvas-warm p-0.5">
               {[
                 { label: '小', value: 0.9 },
                 { label: '中', value: 1 },
@@ -434,7 +434,7 @@ function ThemeAppearanceBody() {
                 <button key={label} onClick={() => setUiFontScale(value)}
                   className={`flex-1 py-1.5 rounded-lg text-[11px] font-body transition-colors ${
                     Math.abs(uiFontScale - value) < 0.03
-                      ? 'bg-accent text-on-accent shadow-sm'
+                      ? 'bg-accent text-on-accent shadow-panel'
                       : 'text-ink-muted hover:text-ink'}`}>
                   {label}
                 </button>
@@ -537,7 +537,7 @@ function ThemeToggle() {
       {/* 修正批#3:限高单位改 --app-h(zoom 折算后的真实视口)。dvh 在 Chromium 系
           (dev/Windows WebView2)是布局px,大字号 zoom 下 ×1.45 视觉超屏(实测 976>800)。 */}
       {open && (
-        <div className="absolute right-0 top-full mt-2 z-[60] w-[300px] glass-popover rounded-2xl border border-canvas-deep shadow-xl p-3 space-y-3 max-h-[calc(var(--app-h,100dvh)-6rem)] overflow-y-auto max-md:fixed max-md:left-3 max-md:right-3 max-md:top-16 max-md:w-auto max-md:mt-0 max-md:max-h-[calc(var(--app-h,100dvh)*0.78)]">
+        <div className="absolute right-0 top-full mt-2 z-[60] w-[300px] glass-popover rounded-panel border border-canvas-deep shadow-popover p-3 space-y-3 max-h-[calc(var(--app-h,100dvh)-6rem)] overflow-y-auto max-md:fixed max-md:left-3 max-md:right-3 max-md:top-16 max-md:w-auto max-md:mt-0 max-md:max-h-[calc(var(--app-h,100dvh)*0.78)]">
           <ThemeAppearanceBody />
         </div>
       )}
@@ -920,7 +920,7 @@ function PanelDock({ rightPanel, setRightPanel, updateNotice, jumpToUpdate, atte
   return (
     <span data-tour="panel-dock" className="inline-flex items-center gap-1">
       {railOpen && (
-        <span className="cgui-dock-rail inline-flex items-center gap-1 rounded-xl bg-black/5 px-1 py-0.5">
+        <span className="cgui-dock-rail inline-flex items-center gap-1 rounded-panel bg-black/5 px-1 py-0.5">
           {/* P2.3:分屏迁入坞 rail 首位(窗口级操作,与面板同属"工作区"语义)。 */}
           <span data-tour="dock-pane" className="inline-flex"><PaneCountPicker /></span>
           <span className="w-px h-4 bg-ink-ghost/30 mx-0.5" />
@@ -1043,7 +1043,7 @@ function MainLayout({ sidebarCollapsed, selectedProject, rightPanel, setRightPan
         <>
           <aside
             style={{ width: sidebarWidth }}
-            className="glass-thick shrink-0 flex flex-col m-3 mr-0 rounded-2xl overflow-hidden animate-glass-rise"
+            className="glass-thick shrink-0 flex flex-col m-3 mr-0 rounded-panel overflow-hidden animate-glass-rise"
           >
             <div className="flex-1 min-h-0 overflow-hidden">
               <UnifiedSidebar />
@@ -1216,9 +1216,9 @@ function SplitMain({ activeTabIndex, setActiveTabIndex }) {
               className={soloPane
                 // 唯一窗格:无分屏头/边框,样式同旧单栏(始终走 SplitMain 以避免 1↔分屏切换
                 // 时整棵会话树 unmount/remount 卡顿)。
-                ? 'flex-1 flex flex-col relative m-3 rounded-2xl overflow-hidden min-w-0'
-                : `flex flex-col relative my-3 mx-1.5 rounded-2xl overflow-hidden transition-shadow ${
-                    focused ? 'ring-2 ring-accent/40 shadow-lg' : 'ring-1 ring-canvas-deep/40'
+                ? 'flex-1 flex flex-col relative m-3 rounded-panel overflow-hidden min-w-0'
+                : `flex flex-col relative my-3 mx-1.5 rounded-panel overflow-hidden transition-shadow ${
+                    focused ? 'ring-2 ring-accent/40 shadow-popover' : 'ring-1 ring-canvas-deep/40'
                   }`}
             >
               {!soloPane && (
@@ -1240,7 +1240,7 @@ function SplitMain({ activeTabIndex, setActiveTabIndex }) {
               ) : (
                 <div className="flex-1 flex items-center justify-center glass-base">
                   <div className="text-center px-4">
-                    <div className="w-12 h-12 rounded-2xl glass-thin flex items-center justify-center mx-auto mb-3">
+                    <div className="w-12 h-12 rounded-panel glass-thin flex items-center justify-center mx-auto mb-3">
                       <Layers size={20} className="text-accent" />
                     </div>
                     <p className="text-[12px] text-ink-muted font-body">点左侧任一会话填入本分屏</p>
@@ -1266,7 +1266,7 @@ function RightPanel({ panelId, onClose, width }) {
   // data-cgui-panel:面板容器标识。App 的 Esc 监听靠它判断「这一击落在面板里」
   // (面板内输入框的 Esc 不得外泄到会话级停止监听)。别删。
   return (
-    <div data-cgui-panel style={{ width }} className="glass-thick shrink-0 flex flex-col m-3 ml-0 rounded-2xl overflow-hidden animate-glass-rise">
+    <div data-cgui-panel style={{ width }} className="glass-thick shrink-0 flex flex-col m-3 ml-0 rounded-panel overflow-hidden animate-glass-rise">
       <div className="flex items-center justify-between px-4 py-3 border-b border-canvas-deep shrink-0">
         <div className="flex items-center gap-2">
           <Icon size={14} className="text-accent" />
@@ -1605,9 +1605,9 @@ function EmptyState({ tabIndex = 0 }) {
     st.setPaneMessages(tabIndex, []);
   };
   return (
-    <div className="mobile-empty-state flex-1 flex items-center justify-center glass-base m-3 rounded-2xl relative animate-glass-rise">
+    <div className="mobile-empty-state flex-1 flex items-center justify-center glass-base m-3 rounded-panel relative animate-glass-rise">
       <div className="text-center relative z-10">
-        <div className="w-20 h-20 rounded-3xl glass-thin flex items-center justify-center mx-auto mb-6">
+        <div className="w-20 h-20 rounded-panel glass-thin flex items-center justify-center mx-auto mb-6">
           <Layers size={32} className="text-accent" />
         </div>
         {hasProject ? (
@@ -2419,7 +2419,7 @@ function ExportSessionButton({ messages, title }) {
         导出
       </button>
       {open && (
-        <div className="absolute right-0 top-full mt-1 z-50 w-40 rounded-lg bg-canvas border border-canvas-deep shadow-xl overflow-hidden">
+        <div className="absolute right-0 top-full mt-1 z-50 w-40 rounded-lg bg-canvas border border-canvas-deep shadow-popover overflow-hidden">
           <button onClick={download}
             className="w-full flex items-center gap-2 px-3 py-2 text-[12px] text-ink-soft hover:bg-canvas-warm font-body text-left">
             <Download size={12} />下载 Markdown
@@ -2459,7 +2459,7 @@ function SessionHeaderMore({ children, forceOpenSignal = 0 }) {
   }, [open]);
   return (
     <span ref={wrapRef} data-tour="session-menu" className="inline-flex items-center gap-1">
-      {open && <span className="cgui-dock-rail inline-flex items-center gap-1 rounded-xl bg-black/5 px-1 py-0.5">{children}</span>}
+      {open && <span className="cgui-dock-rail inline-flex items-center gap-1 rounded-panel bg-black/5 px-1 py-0.5">{children}</span>}
       <button
         onClick={() => setOpen((v) => !v)}
         title="更多会话操作（导出 Markdown / Checkpoint 时间线）"
@@ -2549,7 +2549,7 @@ function RepairCompatModal({ sessionId, projectHash, onClose, onHint, onCleaned,
     </div>
   );
   return createPortal(
-    <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/30 backdrop-blur-sm animate-fade-in" onClick={onClose}>
+    <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/30 backdrop-blur-soft animate-fade-in" onClick={onClose}>
       <div
         className="glass-popover w-[440px] max-w-[calc(var(--app-w,100vw)-1.5rem)] max-h-[min(70vh,calc(var(--app-h,100dvh)-2rem))] flex flex-col py-1 animate-glass-rise"
         onClick={(e) => e.stopPropagation()}
@@ -7070,7 +7070,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
               userScrolledAwayRef.current = false;  // AZ3:显式回到底部 → 恢复跟随
               setAutoScroll(true);
             }}
-            className="bg-canvas border border-canvas-deep hover:bg-canvas-warm rounded-full p-2 shadow-sm transition-colors">
+            className="bg-canvas border border-canvas-deep hover:bg-canvas-warm rounded-full p-2 shadow-panel transition-colors">
             <ChevronRight size={14} className="text-ink-muted rotate-90" />
           </button>
         </div>
@@ -7403,9 +7403,9 @@ function ProviderManagerModal({ open, onClose, editId = null }) {
   }, [open, tryClose]);
   if (!open) return null;
   return (
-    <div className="fixed inset-0 z-[210] flex items-center justify-center bg-black/40 backdrop-blur-sm animate-fade-in" onClick={tryClose}>
+    <div className="fixed inset-0 z-[210] flex items-center justify-center bg-black/40 backdrop-blur-soft animate-fade-in" onClick={tryClose}>
       <div
-        className="glass-popover w-[720px] max-w-[calc(var(--app-w,100vw)-1.5rem)] max-h-[min(85vh,calc(var(--app-h,100dvh)-3rem))] rounded-2xl shadow-2xl animate-glass-rise overflow-hidden flex flex-col"
+        className="glass-popover w-[720px] max-w-[calc(var(--app-w,100vw)-1.5rem)] max-h-[min(85vh,calc(var(--app-h,100dvh)-3rem))] rounded-panel shadow-popover animate-glass-rise overflow-hidden flex flex-col"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between px-5 py-3 border-b border-canvas-deep shrink-0">
@@ -7831,12 +7831,12 @@ function LoginScreen({ onSuccess }) {
           type="password" autoFocus value={password}
           onChange={(e) => setPassword(e.target.value)}
           placeholder="访问密码"
-          className="w-full text-[15px] font-body rounded-xl border border-canvas-deep bg-canvas-warm px-4 py-3 text-ink focus:outline-none focus:border-accent"
+          className="w-full text-[15px] font-body rounded-panel border border-canvas-deep bg-canvas-warm px-4 py-3 text-ink focus:outline-none focus:border-accent"
         />
         {error && <span className="text-[12px] text-error font-body">{error}</span>}
         <button
           type="submit" disabled={busy || !password}
-          className="w-full py-3 rounded-xl bg-accent text-on-accent font-body font-medium text-[15px] disabled:opacity-50 transition-opacity"
+          className="w-full py-3 rounded-panel bg-accent text-on-accent font-body font-medium text-[15px] disabled:opacity-50 transition-opacity"
         >
           {busy ? '验证中…' : '进入'}
         </button>
@@ -7868,11 +7868,11 @@ function MobileMenuRow({ icon: Icon, label, value, onClick, danger = false, chev
 
 function MobileSegmented({ options, onChange }) {
   return (
-    <div className="flex items-center gap-1 rounded-xl bg-canvas-warm p-0.5">
+    <div className="flex items-center gap-1 rounded-panel bg-canvas-warm p-0.5">
       {options.map((o) => (
         <button key={String(o.value)} onClick={() => onChange(o.value)}
           className={`flex-1 flex items-center justify-center gap-1 py-2 rounded-lg text-[12px] font-body transition-colors ${
-            o.active ? 'bg-accent text-on-accent shadow-sm' : 'text-ink-muted hover:text-ink'}`}>
+            o.active ? 'bg-accent text-on-accent shadow-panel' : 'text-ink-muted hover:text-ink'}`}>
           {o.icon && <o.icon size={13} />}{o.label}
         </button>
       ))}
@@ -8770,7 +8770,7 @@ function MobileThemePage() {
         return (
           <button key={fam.id} onClick={() => setTheme(fam.id, themeTone)}
             style={{ backgroundColor: sw.bg, color: sw.fg, borderColor: active ? sw.accent : sw.bg2, borderWidth: active ? 2 : 1, boxShadow: active ? `0 0 0 3px ${sw.accent}22` : 'none' }}
-            className="text-left px-3 py-3 rounded-xl border flex items-center gap-2">
+            className="text-left px-3 py-3 rounded-panel border flex items-center gap-2">
             <div className="flex gap-0.5 shrink-0 items-stretch">
               <div className="w-3 h-7 rounded-sm" style={{ background: sw.accent }} />
               <div className="w-1.5 h-7 rounded-sm" style={{ background: sw.bg2 }} />
@@ -9008,7 +9008,7 @@ function CompletionToasts() {
     <div className="fixed top-[60px] left-1/2 -translate-x-1/2 z-[150] flex flex-col gap-2 items-center pointer-events-none">
       {toasts.map((t) => (
         <button key={t.id} onClick={() => jump(t)}
-          className="pointer-events-auto glass-popover max-w-[calc(var(--app-w,100vw)-2rem)] w-[440px] rounded-xl shadow-lg px-4 py-2.5 text-left animate-glass-rise hover:ring-2 hover:ring-accent/40 transition-shadow">
+          className="pointer-events-auto glass-popover max-w-[calc(var(--app-w,100vw)-2rem)] w-[440px] rounded-panel shadow-popover px-4 py-2.5 text-left animate-glass-rise hover:ring-2 hover:ring-accent/40 transition-shadow">
           <div className="flex items-center gap-2">
             <span className="w-2 h-2 rounded-full bg-success shrink-0" />
             {/* suffix 可覆盖默认文案(后台代理结束提醒复用同一浮条) */}
@@ -9052,8 +9052,8 @@ const SHORTCUT_GROUPS = [
 function ShortcutsPanel({ open, onClose }) {
   if (!open) return null;
   return (
-    <div className="fixed inset-0 z-[210] flex items-center justify-center bg-black/40 backdrop-blur-sm animate-fade-in" onClick={onClose}>
-      <div className="glass-popover w-[440px] max-w-[calc(var(--app-w,100vw)-1.5rem)] max-h-[min(80vh,calc(var(--app-h,100dvh)-2rem))] rounded-2xl shadow-2xl animate-glass-rise overflow-hidden flex flex-col" onClick={(e) => e.stopPropagation()}>
+    <div className="fixed inset-0 z-[210] flex items-center justify-center bg-black/40 backdrop-blur-soft animate-fade-in" onClick={onClose}>
+      <div className="glass-popover w-[440px] max-w-[calc(var(--app-w,100vw)-1.5rem)] max-h-[min(80vh,calc(var(--app-h,100dvh)-2rem))] rounded-panel shadow-popover animate-glass-rise overflow-hidden flex flex-col" onClick={(e) => e.stopPropagation()}>
         <div className="flex items-center justify-between px-5 py-3 border-b border-canvas-deep shrink-0">
           <div className="text-[14px] font-display font-semibold text-ink">键盘快捷键</div>
           <button onClick={onClose} className="p-1 rounded hover:bg-canvas-warm text-ink-faint hover:text-ink" title="关闭">
@@ -9942,7 +9942,7 @@ export default function App() {
   // 审计批A3:版本不一致横幅抽成共享块 —— 手机经局域网访问同一前端,旧 bundle 告警
   // 同样需要可见(原来只在桌面 return 里渲染,手机端旧前端会静默伪装成新版)。
   const bundleMismatchBanner = bundleMismatch && (
-    <div className="fixed top-0 inset-x-0 z-[300] bg-red-600 text-white text-[12px] font-body px-4 py-2 flex items-center justify-center gap-3 flex-wrap shadow-lg">
+    <div className="fixed top-0 inset-x-0 z-[300] bg-red-600 text-white text-[12px] font-body px-4 py-2 flex items-center justify-center gap-3 flex-wrap shadow-popover">
       <span>⚠️ 界面 v{bundleMismatch.bundle} 与服务端 v{bundleMismatch.server} 不一致。请依次尝试：① 完全退出 GUI 再打开（会自动换用新版服务并绕过缓存）② 仍出现则说明安装包内是旧前端，请重新下载安装</span>
       <button
         onClick={() => { sessionStorage.removeItem('cgui-ver-busted'); window.location.replace('/?r=' + bundleMismatch.server); }}
@@ -9953,7 +9953,7 @@ export default function App() {
 
   // r10-10:官方订阅登录态预检横幅(切官方响应带 warning 时弹出,可关;桌面+手机共用)。
   const oauthMissingBanner = oauthMissing && (
-    <div className="fixed top-12 inset-x-0 z-[290] bg-amber-500 text-white text-[12px] font-body px-4 py-2 flex items-center justify-center gap-3 flex-wrap shadow-lg">
+    <div className="fixed top-12 inset-x-0 z-[290] bg-amber-500 text-white text-[12px] font-body px-4 py-2 flex items-center justify-center gap-3 flex-wrap shadow-popover">
       <span>{OFFICIAL_LOGIN_HINT}</span>
       <button onClick={() => setOauthMissing(false)}
         className="px-2 py-0.5 rounded bg-white/20 hover:bg-white/30 transition-colors shrink-0">知道了</button>
@@ -10090,7 +10090,7 @@ export default function App() {
       {shotStatus && (
         <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-[210] max-w-[80vw]">
           <div
-            className={`flex items-center gap-2 px-4 py-2 rounded-full shadow-lg text-sm font-body ${
+            className={`flex items-center gap-2 px-4 py-2 rounded-full shadow-popover text-sm font-body ${
               shotStatus.kind === 'error'
                 ? 'bg-error text-white'
                 : shotStatus.kind === 'done'
@@ -10116,8 +10116,8 @@ export default function App() {
         <FullDiskAccessModal onOpenSettings={openFDASettings} onDismiss={dismissFDA} />
       )}
       {updateNotice && !updateModalDismissed && (
-        <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/40 backdrop-blur-sm animate-fade-in" onClick={() => setUpdateModalDismissed(true)}>
-          <div className="glass-popover w-[420px] max-w-[calc(var(--app-w,100vw)-1.5rem)] rounded-2xl shadow-2xl animate-glass-rise overflow-hidden" onClick={(e) => e.stopPropagation()}>
+        <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/40 backdrop-blur-soft animate-fade-in" onClick={() => setUpdateModalDismissed(true)}>
+          <div className="glass-popover w-[420px] max-w-[calc(var(--app-w,100vw)-1.5rem)] rounded-panel shadow-popover animate-glass-rise overflow-hidden" onClick={(e) => e.stopPropagation()}>
             <div className="px-5 py-4 flex items-start gap-3">
               <div className="w-9 h-9 rounded-lg bg-amber-100 flex items-center justify-center shrink-0 text-[18px]">🎉</div>
               <div className="flex-1 min-w-0">
