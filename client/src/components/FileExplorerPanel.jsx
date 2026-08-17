@@ -1,10 +1,12 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { createPortal } from 'react-dom';
-import { Folder, FolderOpen, File, RefreshCw, AlertCircle, ChevronRight, ChevronDown, FileText, Image as ImageIcon, ExternalLink, Film, Pencil, Save, Undo2, Redo2, X, Check, Trash2, AtSign, MoreVertical, ListChecks, Square, CheckSquare, Eye, EyeOff } from 'lucide-react';
+import { Folder, FolderOpen, File, RefreshCw, AlertCircle, ChevronRight, ChevronDown, FileText, Image as ImageIcon, ExternalLink, Film, Pencil, Save, Undo2, Redo2, X, Check, Trash2, AtSign, MoreVertical, ListChecks, Square, CheckSquare, Eye, EyeOff, ClipboardCopy } from 'lucide-react';
 import { useStore } from '../stores/sessionStore.js';
 import { MarkdownRenderer } from './MarkdownRenderer.jsx';
 import { ArtifactPreview } from './ArtifactPreview.jsx';
 import { useResizable, Splitter } from '../hooks/useResizable.jsx';
+import { copyText } from '../utils/clipboard.js';
+import { copyButtonKind, pickCopySource, canCopyImageBitmap, copyImageBitmap, COPY_TEXT_MAX_BYTES } from '../utils/fileCopy.js';
 
 const IMAGE_EXT = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'ico']);
 const VIDEO_EXT = new Set(['mp4', 'webm', 'mov', 'm4v', 'ogv']);
@@ -682,6 +684,50 @@ function PreviewBody({ preview, onAddToContext, onDelete, onClose }) {
   const undo = useCallback(() => setHist((h) => h.ptr > 0 ? { ...h, ptr: h.ptr - 1 } : h), []);
   const redo = useCallback(() => setHist((h) => h.ptr < h.stack.length - 1 ? { ...h, ptr: h.ptr + 1 } : h), []);
 
+  // r11-⑦:预览头「复制」——文本=复制全文(截断态回后端 raw 取完整文件,>5MB 拒绝并说明),
+  // 图片=复制位图(能力检测,不支持显式提示);pdf/音视频/word 等非文本非图片二进制不显示。
+  // 结果走面板内联条(自动消失),不用原生弹窗(Tauri 禁用 alert/confirm)。
+  const [copyNotice, setCopyNotice] = useState(null); // { kind:'ok'|'err', text }
+  const copyNoticeTimer = useRef(0);
+  useEffect(() => () => clearTimeout(copyNoticeTimer.current), []);
+  const flashCopy = useCallback((kind, text) => {
+    clearTimeout(copyNoticeTimer.current);
+    setCopyNotice({ kind, text });
+    copyNoticeTimer.current = setTimeout(() => setCopyNotice(null), 2500);
+  }, []);
+  const copyKind = copyButtonKind({
+    isImage, isVideo, isAudio, isPdf,
+    binary: preview.binary, loading: preview.loading, error: preview.error, editing,
+  });
+  const doCopy = useCallback(async () => {
+    if (copyKind === 'image') {
+      if (!canCopyImageBitmap()) { flashCopy('err', '当前环境不支持复制图片'); return; }
+      const r = await copyImageBitmap(rawUrl(preview.path), e);
+      flashCopy(r.ok ? 'ok' : 'err', r.ok ? '已复制图片'
+        : r.reason === 'unsupported' ? '当前环境不支持复制图片' : `复制失败：${r.reason}`);
+      return;
+    }
+    const src = pickCopySource(preview);
+    let text = src.text;
+    if (src.from === 'backend') {
+      // 截断预览只载了前 256KB —— 复制必须取完整文件;超 5MB 上限直接拒绝并说明。
+      if ((preview.size || 0) > COPY_TEXT_MAX_BYTES) {
+        flashCopy('err', `文件过大（${fmtSize(preview.size || 0)}），超过 5MB 复制上限，请用系统默认应用打开后复制`);
+        return;
+      }
+      try {
+        const r = await fetch(rawUrl(preview.path));
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        text = await r.text();
+      } catch (err) {
+        flashCopy('err', `读取全文失败：${err.message}`);
+        return;
+      }
+    }
+    const ok = await copyText(text);
+    flashCopy(ok ? 'ok' : 'err', ok ? '已复制' : '复制失败：剪贴板不可用');
+  }, [copyKind, preview, e, flashCopy]);
+
   const save = useCallback(async () => {
     setSaving(true);
     setSaveErr(null);
@@ -762,6 +808,16 @@ function PreviewBody({ preview, onAddToContext, onDelete, onClose }) {
                 className="flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded text-accent hover:bg-accent/10 transition-colors shrink-0"
                 title="在输入框 @ 引用此文件"><AtSign size={10} /><span className="max-md:hidden">添加到上下文</span></button>
             )}
+            {/* r11-⑦:复制 —— 文本复制全文(截断态取完整文件),图片复制位图;
+                pdf/音视频/其余二进制不显示(copyButtonKind 判定)。 */}
+            {copyKind && (
+              <button onClick={doCopy}
+                aria-label={copyKind === 'image' ? '复制图片' : '复制全文'}
+                className="flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded text-ink-faint hover:text-ink hover:bg-canvas-deep transition-colors shrink-0"
+                title={copyKind === 'image' ? '把图片位图复制到剪贴板' : '复制文件全文到剪贴板（截断预览也复制完整文件）'}>
+                <ClipboardCopy size={10} /><span className="max-md:hidden">{copyKind === 'image' ? '复制图片' : '复制全文'}</span>
+              </button>
+            )}
             {editable && (
               <button onClick={() => setEditing(true)} aria-label="编辑此文件"
                 className="flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded text-ink-faint hover:text-ink hover:bg-canvas-deep transition-colors shrink-0"
@@ -799,6 +855,13 @@ function PreviewBody({ preview, onAddToContext, onDelete, onClose }) {
       {saveErr && (
         <div className="px-3 py-1 text-[10px] text-red-600 bg-red-500/5 border-b border-canvas-deep flex items-center gap-1 shrink-0">
           <AlertCircle size={10} />保存失败：{saveErr}
+        </div>
+      )}
+      {copyNotice && (
+        <div className={`px-3 py-1 text-[10px] border-b border-canvas-deep flex items-center gap-1 shrink-0 animate-fade-in ${
+          copyNotice.kind === 'ok' ? 'text-emerald-600 bg-emerald-500/5' : 'text-red-600 bg-red-500/5'
+        }`}>
+          {copyNotice.kind === 'ok' ? <Check size={10} /> : <AlertCircle size={10} />}{copyNotice.text}
         </div>
       )}
       <div className="flex-1 overflow-auto">
