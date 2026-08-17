@@ -1751,8 +1751,8 @@ function HomeState({ tabIndex = 0 }) {
             <span key={i}>{p.text}</span>
           ))}
         </h2>
-        {/* r11-p1-1:焦点态中性弱化(border 深一档,非 accent 橙);可达性指示保留。 */}
-        <div className="w-full rounded-lg border border-canvas-deep/70 bg-canvas-warm/60 focus-within:border-ink-faint/60 transition-colors">
+        {/* r11-p3-1:聚焦零装饰(用户拍板)——无 focus-within 变色,聚焦与否外观一致。 */}
+        <div className="w-full rounded-lg border border-canvas-deep/70 bg-canvas-warm/60">
           <textarea
             data-cgui="home-input"
             value={text}

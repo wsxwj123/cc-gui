@@ -1352,18 +1352,10 @@ html { --content-max: clamp(768px, calc(var(--app-w, 100vw) * 0.7), 1120px); }
   border-radius: 1.625rem;
   transition: box-shadow 0.22s ease, border-color 0.22s ease;
 }
-/* Only ring when the textarea itself is focused — :focus-within would also
- * fire when the model/effort/add-dir buttons inside the capsule get focus,
- * making it look like the whole composer "scaled up" with a giant halo.
- * r11-p1-1:焦点态去 accent 橙描边(用户实报整圈亮橙)。扁平语义的中性弱化态:
- * 1px ink-faint 细中性描边(深浅两态都可感知,键盘可达性焦点指示保留,只降视觉强度)。 */
-.chat-composer:has(textarea:focus) {
-  box-shadow:
-    inset 0 1px 0 var(--glass-specular),
-    inset 0 -1px 0 var(--glass-shade),
-    0 0 0 1px var(--color-ink-faint),
-    0 6px 18px -8px rgba(60, 40, 20, 0.18);
-}
+/* r11-p3-1:输入框聚焦零装饰(用户明确拍板"不要任何描边")。原「textarea 聚焦时
+ * 给整个 composer 上 box-shadow 描边」的焦点块整体删除——聚焦与非聚焦外观完全
+ * 一致,光标闪烁即唯一指示。a11y 取舍(无可见焦点指示)由用户明确偏好拍板,
+ * 记录在案;恢复任何焦点装饰会被 check-focus-neutral 拦红。 */
 
 /* ── r11-p2-3b 会话行状态点(dsh 逆向定稿) ─────────────────────────
    琥珀(等待用户)/绿(完成未读):10×10,:before 满尺寸圆 opacity .1 光晕 +
