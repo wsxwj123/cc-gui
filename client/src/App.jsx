@@ -52,6 +52,7 @@ import { AgentsPanel } from './components/AgentsPanel.jsx';
 import { AgentMonitorPanel } from './components/AgentMonitorPanel.jsx';
 import { SubagentView } from './components/SubagentView.jsx';
 import BtwWindow from './components/BtwWindow.jsx';
+import { contextCanonicalKey, contextErrorMessage, isValidContextResponse } from './utils/contextCache.js';
 import EnvCheckPanel from './components/EnvCheckPanel.jsx';
 import { ArtifactDock } from './components/ArtifactPreview.jsx';
 import { FullDiskAccessModal } from './components/FullDiskAccessModal.jsx';
@@ -60,7 +61,7 @@ import { BUILTIN_PROVIDERS, findBuiltin } from './utils/builtinProviders.js';
 import { computeCost, formatCost, setUserPrices, observeOfficialBilling } from './utils/pricing.js';
 import { extractToolResultText, finalizePendingToolCalls, applyFinalizedToBlocks } from './utils/toolResult.js';
 import { rebuildTodosFromTaskCalls } from './utils/todos.js';
-import { isSteered, firstSteerableIndex, reconcileSteered, persistedUserSigs, persistedSteerKeys, steerLanded } from './utils/steerQueue.js';
+import { isSteered, firstSteerableIndex, isSteerBarrier, persistedSteerKeys } from './utils/steerQueue.js';
 import { isInitBindingOrigin, migrateDraftQueue, paneMessagesOwned, resolveHistModel, resolveSelectorModel, resolveSendModel } from './utils/routing.js';
 import { nativeContextWindow, isBareClaudeAlias, pickCliContextWindow } from './utils/contextWindow.js';
 import { extractMcpServerIssues, formatMcpServerNotice } from './utils/mcpStatus.js';
@@ -81,7 +82,7 @@ import { notifyWaiting } from './utils/desktopNotify.js';
 import { BG_BANNER_DELAY_MS, histSig, isCurrentStreamTurn, nextAttachTry, nextReattachGuard, resolveStreamHistCutoff, shouldRefreshHist } from './utils/reattach.js';
 import { pruneByLiveSet } from './utils/levelPrune.js';
 import { classifyStopTargets } from './utils/stopTargets.js';
-import { resizeScrollTop } from './utils/scroll.js';
+import { advanceScrollTransaction, beginScrollTransaction, keyRequestsReading, resizeScrollTop, shouldPauseAutoScroll } from './utils/scroll.js';
 import { resolveSessionTitle } from './utils/sessionTitle.js';
 
 // ── Per-session shadow-git checkpoints ──────────────────────────
@@ -3362,19 +3363,19 @@ function GitInitBanner({ cwd }) {
   // 且大目录的 add 可能跑几十秒 —— 说清楚在等什么,别让用户以为按钮没反应。
   if (status === 'busy') {
     return (
-      <div className="bg-amber-50 border-b border-amber-200 px-4 py-2 text-[12px] font-body text-amber-900 flex items-center gap-2">
+      <div className="min-w-0 overflow-hidden bg-amber-50 border-b border-amber-200 px-4 py-2 text-[12px] font-body text-amber-900 flex items-center gap-2">
         <GitBranch size={13} className="text-amber-700 shrink-0" />
-        <span className="flex-1">正在创建基线提交…目录较大时这一步（<code className="font-mono">git add</code>）可能需要几十秒。</span>
+        <span className="flex-1 min-w-0 break-words">正在创建基线提交…目录较大时这一步（<code className="font-mono">git add</code>）可能需要几十秒。</span>
       </div>
     );
   }
 
   if (status === 'done') {
     return (
-      <div className="bg-green-50 border-b border-green-200 px-4 py-2 text-[12px] font-body text-green-800 flex items-center gap-2">
+      <div className="min-w-0 overflow-hidden bg-green-50 border-b border-green-200 px-4 py-2 text-[12px] font-body text-green-800 flex items-center gap-2">
         <GitBranch size={13} className="text-green-700 shrink-0" />
         {/* 两条来路共用:非仓库(init + 基线提交)与零提交仓库(只补基线提交)。 */}
-        <span className="flex-1">已创建基线提交，AI 的修改可随时回滚。</span>
+        <span className="flex-1 min-w-0 break-words">已创建基线提交，AI 的修改可随时回滚。</span>
       </div>
     );
   }
@@ -3384,14 +3385,18 @@ function GitInitBanner({ cwd }) {
   // /api/git/init:already:true 时它只做 add + commit,正好是这里需要的基线提交。
   if (status === 'nocommit') {
     return (
-      <div className="bg-amber-50 border-b border-amber-200 px-4 py-2 text-[12px] font-body text-amber-900 flex items-center gap-2">
+      <div className="min-w-0 overflow-hidden bg-amber-50 border-b border-amber-200 px-4 py-2 text-[12px] font-body text-amber-900 flex items-center gap-2">
         <GitBranch size={13} className="text-amber-700 shrink-0" />
-        <span className="flex-1">
-          <b>这个 git 仓库还没有任何提交</b>。worktree 与基于 git 的回滚需要至少一个提交，建议先做一次基线提交。
+        <span className="flex-1 min-w-0 break-words">
+          {/* ⑦子文件夹场景(仓库根在上层)明说归属:不是"本文件夹未初始化",而是它属于
+              上层仓库、只差基线提交。init 走既有 already:true 路径,只补提交不重复 git init。 */}
+          {repoRoot && repoRoot !== cwd
+            ? <><b>本文件夹属于上层 git 仓库</b>，该仓库还没有任何提交。worktree 与基于 git 的回滚需要至少一个提交，建议先补一次基线提交。</>
+            : <><b>这个 git 仓库还没有任何提交</b>。worktree 与基于 git 的回滚需要至少一个提交，建议先做一次基线提交。</>}
           {/* 仓库根常常在项目目录的上层(用户实景:项目是空文件夹,仓库根是它的父目录),
               不说清楚的话用户不知道自己在给哪个仓库补提交。 */}
           {repoRoot && repoRoot !== cwd && (
-            <span className="block text-[10.5px] text-amber-700 mt-0.5 font-mono truncate" title={repoRoot}>仓库根：{repoRoot}</span>
+            <span className="block text-[10.5px] text-amber-700 mt-0.5 font-mono truncate" title={repoRoot}>上层仓库根：{repoRoot}</span>
           )}
         </span>
         <button
@@ -3412,11 +3417,11 @@ function GitInitBanner({ cwd }) {
 
   if (status === 'partial') {
     return (
-      <div className="bg-amber-50 border-b border-amber-200 px-4 py-2 text-[12px] font-body text-amber-900 flex items-start gap-2">
+      <div className="min-w-0 overflow-hidden bg-amber-50 border-b border-amber-200 px-4 py-2 text-[12px] font-body text-amber-900 flex items-start gap-2">
         <GitBranch size={13} className="text-amber-700 shrink-0 mt-0.5" />
         {/* 原文案写死"已 git init、目录含嵌入式仓库",但目录已是仓库时根本没 init 过,
             失败原因也可能是目录过大导致 add 超时(用户实测)。改为如实转述服务端原因。 */}
-        <span className="flex-1">
+        <span className="flex-1 min-w-0 break-words">
           <b>基线提交未完成</b>
           ：暂存或提交这一步失败（目录过大、含嵌入式 git 仓库等）。回滚仍可用（基于发送前的 checkpoint），但全量基线提交没有记录。
           {warning && <span className="block text-[10.5px] text-amber-700 mt-1 font-mono truncate" title={warning}>{warning.slice(0, 200)}</span>}
@@ -3428,23 +3433,25 @@ function GitInitBanner({ cwd }) {
   }
 
   return (
-    <div className="bg-amber-50 border-b border-amber-200 px-4 py-2 text-[12px] font-body text-amber-900 flex items-center gap-2">
-      <GitBranch size={13} className="text-amber-700 shrink-0" />
-      <span className="flex-1">
-        <b>这个目录不是 git 仓库</b>。建议先 init + 基线提交，方便回滚 AI 的修改。
-      </span>
-      <button
-        onClick={init}
-        className="px-2.5 py-1 rounded bg-amber-700 text-white text-[11px] font-medium hover:bg-amber-800 shrink-0"
-      >
-        立即初始化
-      </button>
-      <button
-        onClick={dismiss}
-        className="px-2 py-1 rounded text-amber-800 text-[11px] hover:bg-amber-100 shrink-0"
-      >
-        本会话忽略
-      </button>
+    <div className="min-w-0 bg-amber-50 border-b border-amber-200 px-4 py-2 text-[12px] font-body text-amber-900 flex flex-col gap-2">
+      <div className="min-w-0 flex items-start gap-2">
+        <GitBranch size={13} className="text-amber-700 shrink-0 mt-0.5" />
+        <span className="min-w-0 whitespace-normal">本文件夹未git初始化</span>
+      </div>
+      <div className="min-w-0 flex flex-wrap gap-1.5">
+        <button
+          onClick={init}
+          className="min-w-0 max-w-full flex-[1_1_7rem] px-2.5 py-1 rounded bg-amber-700 text-white text-[11px] font-medium hover:bg-amber-800 whitespace-nowrap"
+        >
+          立即初始化
+        </button>
+        <button
+          onClick={dismiss}
+          className="min-w-0 max-w-full flex-[1_1_7rem] px-2 py-1 rounded text-amber-800 text-[11px] hover:bg-amber-100 whitespace-nowrap"
+        >
+          本会话忽略
+        </button>
+      </div>
     </div>
   );
 }
@@ -3779,6 +3786,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   const paneMessages = useStore((s) => s.paneMessages);
   const paneMessagesSid = useStore((s) => s.paneMessagesSid);
   const selectedSession = (paneSessions && paneSessions[tabIndex]) || null;
+  const paneId = useStore((s) => s.paneIds?.[tabIndex] || `pane-${tabIndex}`);
   // 空窗格时 paneMessages[tabIndex] 为 undefined,`|| []` 每次渲染造新数组 → 进下方多个
   // useMemo/useEffect deps 致每帧重跑。复用模块级冻结空数组保持引用稳定。
   // 串扰窗口1守卫(主诉根因):切会话只换 paneSessions,paneMessages 要等 fetch 异步
@@ -3964,11 +3972,20 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   const userScrolledAwayRef = useRef(false);
   // 区分"程序触发的吸底写入"与"用户手势":吸底自己写 scrollTop 会触发 scroll 事件,
   // 不打这个标记就会被 handleScroll 误判成用户滚动。
-  const programmaticScrollRef = useRef(false);
+  const scrollTransactionRef = useRef(null);
+  const lastScrollTopRef = useRef(0);
   // 变化【前】的可滚动上限(scrollHeight - clientHeight)。容器宽度变化后消息重排、总高
   // 改变,靠它按比例把位置搬回去(见下方 setContainerRef 里的 ResizeObserver)。
   // 在 handleScroll 里顺手刷新,零额外开销。
   const scrollMaxRef = useRef(0);
+  const scrollOwnerKey = selectedSession?.sessionId ? `${paneId}:${selectedSession.sessionId}` : null;
+  useLayoutEffect(() => {
+    scrollTransactionRef.current = null;
+    lastScrollTopRef.current = 0;
+    scrollMaxRef.current = 0;
+    userScrolledAwayRef.current = false;
+    setAutoScroll(true);
+  }, [scrollOwnerKey]);
   const [chatMessages, setChatMessages] = useState([]);
   // Mirror of chatMessages. handleSend is a useCallback whose deps don't include
   // chatMessages, so its closure lags — a /btw answer arriving via async
@@ -4094,14 +4111,10 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // poll 会把它误判成「后台运行中」并闪黄条,甚至触发 auto-reattach 重连。记下已停的
   // pid,poll 与 reattach 都跳过它。CQ-15:指向模块级共享集合,使分屏各 pane 互相感知停止。
   const stoppedPidsRef = useRef(stoppedChatPids);
-  // Set by "⚡ 引导": tells the aborted in-flight send's finally to skip its own
-  // queue drain so we don't double-send — handleAccelerate drains directly, which
-  // also covers reattach streams (whose finally never drains).
-  // 设计甲之后 ⚡ 改成「无打断注入」(不 abort、不 POST /stop、不经 handleSend),但这面旗
-  // 仍然有活干:⚡ 的 peek→注入(await)→出队 之间若回合正好收尾,两条 drain 会抢先把同一条
-  // 排队消息弹出去重发 = 同文双发。⚡ 期间置起、自管 try/finally 复位(不再依赖某条被 abort
-  // 的流的 finally 来清 —— 那是它当年在空闲态点 ⚡ 后永久挂 true 的老 bug)。
-  const acceleratingRef = useRef(false);
+  // 引导消息的流式切口必须在所有发送入口之前声明：队列按钮与 Cmd/Ctrl+Enter 共用。
+  const steerAnchorRef = useRef({});
+  const streamingBlocksRef = useRef(EMPTY_ARRAY);
+  useEffect(() => { streamingBlocksRef.current = streamingBlocks; }, [streamingBlocks]);
   // H 转后台:用户主动把前台回合转后台(只断本端 SSE,进程照跑)。被 abort 的
   // handleSend finally 读它跳过排队消息外发——回合还在服务端跑,此刻外发会对同一
   // jsonl 双写。finally 末尾复位。
@@ -4230,38 +4243,6 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   useEffect(() => {
     if (streamOwnerKeyRef.current !== sessionQueueKey) setLiveContextUsage(null);
   }, [sessionQueueKey]);
-
-  // X2/I6:打开会话时后台对齐一次 /context(每会话每次运行只测一次)。覆盖两类
-  // 徽章空窗:①重启后内存实测为空;②会话以 /compact 收尾,compact 之后没有任何
-  // 带 usage 的回合(jsonl 路径无值可取,用户截图场景)。/context 不走主对话模型,
-  // 但会打多次 count_tokens(免费、有网络往返);回写后徽章与点开明细一致,且明细
-  // 缓存进 store 供弹层秒开(AA1)。
-  useEffect(() => {
-    const sid = selectedSession?.sessionId;
-    if (!sid || streamingRef.current) return;
-    const st = useStore.getState();
-    if (st.ctxMeasuredBySession[sid]) return;
-    const once = (window.__cguiCtxProbeOnce ||= new Set());
-    if (once.has(sid)) return;
-    once.add(sid);
-    const qs = new URLSearchParams({
-      cwd: selectedSession.projectPath || '',
-      projectHash: selectedSession.projectHash || '',
-      model: st.modelBySession[sid] || st.currentModel || '',
-    });
-    fetch(`/api/context/${sid}?${qs.toString()}`)
-      .then((r) => r.json())
-      .then((d) => {
-        if (d?.totalTokens > 0 && d?.windowTokens > 0) {
-          useStore.getState().setCtxMeasured(sid, { totalTokens: d.totalTokens, windowTokens: d.windowTokens });
-        }
-        useStore.getState().setCtxBreakdown(sid, d); // AA1:缓存明细供弹层秒开
-      })
-      // C3:失败要把 sid 从 once 集合删掉,否则首次探测失败(网络/500)后永不重试,
-      // "无 usage 回合 + compact 收尾"场景徽章永久空窗到刷新。与 __cguiCtxProbe 的
-      // finally 清理对齐。
-      .catch(() => { once.delete(sid); });
-  }, [selectedSession?.sessionId]);
 
   useEffect(() => {
     if (!selectedSession?.sessionId || !selectedSession?.projectHash) return;
@@ -4464,7 +4445,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         // 会把消息塞回空队列→死锁);pid 已消失,清了语义也对。
         // C1:本地流的 finally 正在收尾(streamingRef 已 false 但它自己马上要排空队列)→
         // 这里绝不能抢跑,否则两边各弹一条 = 乱序(详见 finalizeInFlightRef 定义处)。
-        if (!next && !streamingRef.current && !acceleratingRef.current && finalizeInFlightRef.current === 0) {
+        if (!next && !streamingRef.current && finalizeInFlightRef.current === 0) {
           const _sel = getLocalSession();
           const drainKey = _sel?.sessionId || `draft-${_sel?.projectHash || 'none'}`;
           const sameSession = pollSid ? drainKey === pollSid : _sel?.draftId === pollDraftId;
@@ -4477,7 +4458,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
               drainScheduled = false;
               // 落地前复查:这 50ms 里可能切了会话 / 新流起来了 —— 那就把消息留在队列里,
               // 交给该会话下一次进入或流收尾的排空,绝不错发进别的会话。
-              if (cancelled || streamingRef.current || backgroundPidRef.current || acceleratingRef.current) return;
+              if (cancelled || streamingRef.current || backgroundPidRef.current) return;
               if (finalizeInFlightRef.current > 0) return; // C1:这 50ms 里有流开始收尾 → 让它自己排空
               const s2 = getLocalSession();
               if ((s2?.sessionId || `draft-${s2?.projectHash || 'none'}`) !== drainKey) return;
@@ -4507,6 +4488,33 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     return () => clearTimeout(t);
   }, [backgroundOnly]);
 
+  const markScrollReading = useCallback(() => {
+    scrollTransactionRef.current = null;
+    userScrolledAwayRef.current = true;
+    setAutoScroll(false);
+  }, []);
+  const writeProgrammaticScroll = useCallback((el, target, kind = 'follow') => {
+    const transaction = beginScrollTransaction(kind, target);
+    scrollTransactionRef.current = transaction;
+    el.scrollTop = target;
+    requestAnimationFrame(() => {
+      if (scrollTransactionRef.current === transaction) {
+        scrollTransactionRef.current = null;
+      }
+    });
+  }, []);
+
+  useEffect(() => {
+    if (!paneIsActive || showAgentView) return undefined;
+    const onReadingKey = (event) => {
+      const target = event.target;
+      if (target && (/^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName) || target.isContentEditable)) return;
+      if (keyRequestsReading(event.key)) markScrollReading();
+    };
+    window.addEventListener('keydown', onReadingKey);
+    return () => window.removeEventListener('keydown', onReadingKey);
+  }, [markScrollReading, paneIsActive, showAgentView]);
+
   // Auto-scroll: coalesce frequent stream deltas into a single rAF tick so the
   // page doesn't visibly "flicker" with smooth-scroll animations on every
   // token. Use direct scrollTop write (cheaper than scrollIntoView + smooth,
@@ -4515,10 +4523,13 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     if (userScrolledAwayRef.current) return;  // AZ3:用户在看历史时不抢滚
     const id = requestAnimationFrame(() => {
       const el = containerRef.current;
-      if (el) { programmaticScrollRef.current = true; el.scrollTop = el.scrollHeight; }
+      if (el) {
+        const target = Math.max(0, el.scrollHeight - el.clientHeight);
+        writeProgrammaticScroll(el, target, 'follow');
+      }
     });
     return () => cancelAnimationFrame(id);
-  }, [messages, chatMessages, streamingText, streamingThinking, streamingToolCalls]);
+  }, [messages, chatMessages, streamingText, streamingThinking, streamingToolCalls, writeProgrammaticScroll]);
 
   // 重做工具的转圈指示器:一旦重跑的流式内容(文本/思考/工具)出现,就关掉指示器
   // ——此时重跑已就地以流式气泡呈现,指示器再转就是多余且会"完成后仍在转"。
@@ -4531,26 +4542,44 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
 
   // Persist scroll position per session so refresh keeps the user where they
   // were (not at top, not at bottom — wherever they were reading).
-  const scrollPersistKey = selectedSession?.sessionId
-    ? `cgui-scroll-${selectedSession.sessionId}`
-    : null;
+  const scrollPersistKey = scrollOwnerKey ? `cgui-scroll-${scrollOwnerKey}` : null;
 
   const handleScroll = () => {
     if (!containerRef.current) return;
+    const { scrollTop, scrollHeight, clientHeight } = containerRef.current;
+    const movedUp = shouldPauseAutoScroll({ previousTop: lastScrollTopRef.current, currentTop: scrollTop });
+    const previousTop = lastScrollTopRef.current;
+    const dynamicTarget = scrollTransactionRef.current?.kind === 'follow'
+      ? Math.max(0, scrollHeight - clientHeight)
+      : scrollTransactionRef.current?.target;
+    const transactionResult = advanceScrollTransaction(scrollTransactionRef.current, {
+      previousTop,
+      currentTop: scrollTop,
+      target: dynamicTarget,
+    });
+    scrollTransactionRef.current = transactionResult.transaction;
+    lastScrollTopRef.current = scrollTop;
     // 上限快照先于程序滚动的早退更新:宽度变化时要拿"变化前"的可滚动上限做等比还原,
     // 而程序吸底同样会改变它,漏记就会用过期基准算出错误位置。
-    scrollMaxRef.current = Math.max(0, containerRef.current.scrollHeight - containerRef.current.clientHeight);
-    // AZ3:程序触发的吸底写入会回弹一个 scroll 事件 → 跳过判定,别误判成用户滚动。
-    if (programmaticScrollRef.current) { programmaticScrollRef.current = false; return; }
-    const { scrollTop, scrollHeight, clientHeight } = containerRef.current;
+    scrollMaxRef.current = Math.max(0, scrollHeight - clientHeight);
+    // 用户向上滚的实际位移优先于尚未回弹的程序滚动标记。旧逻辑先吞掉程序事件，
+    // 触控板恰好在这个窗口起手时，第一段上滚也被吞掉，下一 token 又把视口拉回底部。
+    if (transactionResult.handled) return;
     const distFromBottom = scrollHeight - scrollTop - clientHeight;
-    // 迟滞:滚离 >200 上锁(暂停自动吸底),滚回贴底 <40 解锁;两阈值拉开消除边界抖动。
-    if (distFromBottom > 200) userScrolledAwayRef.current = true;
-    else if (distFromBottom < 40) userScrolledAwayRef.current = false;
+    const movedIntoReading = movedUp || transactionResult.userMovedAway;
+    if (transactionResult.expired) userScrolledAwayRef.current = distFromBottom > 40;
+    else if (movedIntoReading) userScrolledAwayRef.current = true;
+    // 向上位移立即上锁；贴底 <40 才解锁。保留迟滞只用于解锁，消除边界抖动。
+    if (!transactionResult.expired && !movedIntoReading && distFromBottom < 40) userScrolledAwayRef.current = false;
     setAutoScroll(distFromBottom < 120);  // 仅驱动「回到底部」按钮显隐
     if (scrollPersistKey) {
       try { localStorage.setItem(scrollPersistKey, String(scrollTop)); } catch {}
     }
+  };
+  const handleScrollWheel = (event) => { if (event.deltaY < 0) markScrollReading(); };
+  const handleScrollPointer = (event) => {
+    const rect = event.currentTarget.getBoundingClientRect();
+    if (event.clientX >= rect.right - 16) markScrollReading();
   };
 
   // Restore the saved scroll position when messages first load (or session changes).
@@ -4561,24 +4590,29 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     const el = containerRef.current;
     if (!el || !scrollPersistKey) return;
     // Only attempt restore once per session's messages-loaded state.
-    if (scrollRestoredRef.current === selectedSession?.sessionId) return;
+    if (scrollRestoredRef.current === scrollOwnerKey) return;
     if (messages.length === 0 && chatMessages.length === 0) return;
-    const saved = localStorage.getItem(scrollPersistKey);
+    const legacyKey = selectedSession?.sessionId ? `cgui-scroll-${selectedSession.sessionId}` : null;
+    const ownSaved = localStorage.getItem(scrollPersistKey);
+    const saved = ownSaved ?? (legacyKey ? localStorage.getItem(legacyKey) : null);
     if (saved !== null) {
       const top = Number(saved);
+      if (ownSaved === null) {
+        try { localStorage.setItem(scrollPersistKey, saved); } catch {}
+      }
       // Defer to next frame so DOM is laid out
       requestAnimationFrame(() => {
         if (el) {
-          programmaticScrollRef.current = true;
-          el.scrollTop = top;
+          const target = Math.min(Math.max(0, top), Math.max(0, el.scrollHeight - el.clientHeight));
+          writeProgrammaticScroll(el, target, 'restore');
           const away = el.scrollHeight - el.scrollTop - el.clientHeight >= 120;
           userScrolledAwayRef.current = away;  // AZ3:恢复的位置若不在底部则保持暂停吸底
           setAutoScroll(!away);
         }
       });
     }
-    scrollRestoredRef.current = selectedSession?.sessionId;
-  }, [messages.length, chatMessages.length, selectedSession?.sessionId, scrollPersistKey]);
+    scrollRestoredRef.current = scrollOwnerKey;
+  }, [messages.length, chatMessages.length, selectedSession?.sessionId, scrollOwnerKey, scrollPersistKey, writeProgrammaticScroll]);
 
   // #4 关右侧面板(监控/文件/…)后会话区空白、往上滑才找得回内容。
   // 关面板 = 本容器变宽 → 每条消息重新折行变矮 → 全文总高缩短。Blink/Gecko 有 scroll
@@ -4615,20 +4649,21 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             // 用户没在看历史 → 直接吸底,与吸底 effect 同一目标,不会互相拉扯。
             stickToBottom: !userScrolledAwayRef.current,
           });
-          // 差值不足 1px 就不写:避免无谓的 scroll 事件,也避免 programmaticScrollRef
-          // 被置真却等不到回弹事件 → 下一次真实用户滚动被当成程序滚动吞掉。
-          if (Math.abs(next - node.scrollTop) >= 1) { programmaticScrollRef.current = true; node.scrollTop = next; }
+          // 差值不足 1px 就不写:避免无谓的 scroll 事件和 transaction 生命周期。
+          if (Math.abs(next - node.scrollTop) >= 1) {
+            writeProgrammaticScroll(node, next, 'resize');
+          }
         }
       }
       scrollMaxRef.current = Math.max(0, node.scrollHeight - node.clientHeight);
     });
     ro.observe(node);
     scrollRoRef.current = ro;
-  }, []);
+  }, [writeProgrammaticScroll]);
 
   // Message queue plumbing (#3) — when user types during streaming, the message
-  // is queued and dispatched after the current chat finishes (or when the user
-  // clicks "⚡ 引导" to abort + send the queue immediately).
+  // is queued and dispatched after the current chat finishes. “⚡ 并入”只请求 priority-now，
+  // 不打断当前回合；队首持久 barrier 负责与排空互斥。
   // CRITICAL: never use `|| []` inside a zustand selector — that returns a
   // fresh array reference on every render and triggers React error #185
   // "Maximum update depth exceeded" (which blanks the whole page).
@@ -4637,6 +4672,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   const headerModel = modelBySession[sessionQueueKey] || currentModel;
   const messageQueueRaw = useStore((s) => s.messageQueue[sessionQueueKey]);
   const messageQueue = messageQueueRaw || EMPTY_ARRAY;
+  const claimDraft = messageQueue.find((item) => item?.claimDraft?.targetPaneId === paneId
+    && item.claimDraft.sendable)?.claimDraft || null;
 
   // 旁问浮窗展开信号:每次发起旁问 +1,BtwWindow 监听后展开(主输入框 /btw 次入口也走它)。
   const [btwOpenSignal, setBtwOpenSignal] = useState(0);
@@ -4719,41 +4756,37 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // 引导消息自动落在真实的并入位置、AI 回应成独立新块,终态本来就是对的;而流式期间提前
   // 画的那个气泡贴在上一条用户消息之后、悬在流式块上方 = 错序。所以对话流里它只在回合
   // 结束 reconcile 时从 jsonl 出现;在此之前,它留在队列区换个状态显示。
-  // 返回 command uuid = 已送达 CLI(调用方拿它把队列条目标成"已并入"),null = 没送到。
-  const steerCurrentTurn = useCallback(async (text, { meta = null } = {}) => {
+  const steerCurrentTurn = useCallback(async (text, { meta = null, steerId, sessionId } = {}) => {
     const body = String(text || '');
-    if (!body.trim()) return null;
-    const sel = getLocalSession();
-    const sid = sel?.sessionId;
-    if (!sid) return null; // draft 还没拿到真 sid → 服务端按 sessionId 找不到 slot
-    const cmdUuid = (globalThis.crypto?.randomUUID?.() || `steer-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`);
+    if (!body.trim() || !sessionId || !steerId) return { outcome: 'explicit-reject' };
     try {
       const r = await fetch('/api/chat/steer', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sessionId: sid, content: body, uuid: cmdUuid }),
-        // 本地路由同步返回;超时兜底防"后端挂死时消息卡在半空"(失败=消息留在队列里)。
+        body: JSON.stringify({ sessionId, content: body, uuid: steerId }),
         signal: AbortSignal.timeout(4000),
       });
-      if (!r.ok) return null;
-    } catch { return null; }
-    // 附件 sidecar:与普通发送同一套(按 textHash 索引),否则回合落盘后从 jsonl 重画的
-    // 气泡拿不到缩略图。
-    if (meta?.attachments?.length > 0) {
-      fetch(`/api/sessions/${sid}/attachments`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text: body, attachments: meta.attachments, displayText: meta.displayText || '' }),
-      }).catch(() => {});
-    }
-    return cmdUuid;
-  }, [getLocalSession]);
+      const response = await r.json().catch(() => null);
+      if (r.ok && response?.ok === true && response?.accepted === true) {
+        if (meta?.attachments?.length > 0) {
+          fetch(`/api/sessions/${sessionId}/attachments`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ text: body, attachments: meta.attachments, displayText: meta.displayText || '' }),
+          }).catch(() => {});
+        }
+        return { outcome: 'accepted', pid: response.pid, duplicate: response.duplicate === true };
+      }
+      const explicit = (r.status === 400 && ['invalid-steer-request', 'malformed-json'].includes(response?.code))
+        || (r.status === 409 && ['no-active-turn', 'steer-id-conflict'].includes(response?.code))
+        || (r.status === 413 && response?.code === 'request-too-large');
+      return { outcome: explicit ? 'explicit-reject' : 'ambiguous', code: response?.code };
+    } catch { return { outcome: 'ambiguous' }; }
+  }, []);
   const steerCurrentTurnRef = useRef(null);
   useEffect(() => { steerCurrentTurnRef.current = steerCurrentTurn; }, [steerCurrentTurn]);
 
   const handleSend = useCallback(async (prompt, opts = {}) => {
     const { reattachPid, appendSystemPrompt, hiddenUserMessage = false, meta } = opts;
-    // AZ3:真实发送(非 reattach)恢复自动吸底——满足"回车发送后无手动滚动则吸底到最新"。
-    if (!reattachPid) userScrolledAwayRef.current = false;
     // Intercept the /remote-control (alias /rc) command. It CANNOT be sent
     // through `claude -p` — slash commands are interactive-only and the CLI
     // rejects them ("isn't available in this environment"). Instead we launch
@@ -4830,15 +4863,47 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     // H 转后台:backgroundPid 有值=本会话回合仍在服务端跑(streamingRef 已被 detach 置 false)。
     // 也要入队——否则直发会 --resume 同一 jsonl 与后台回合双写(server 只复用 idle slot,
     // busy slot 会另起进程)。队列在后台回合完成时由 backgroundPid 轮询分支排空(见 poll)。
-    // 设计乙(用户实测后定稿):回合进行中直发【一律入队】,与 0.2.283 行为一致。
+    // 设计乙(用户实测后定稿):回合进行中裸 Enter 直发【一律入队】,与 0.2.283 行为一致。
     // 0.2.284 曾让手打消息默认走无打断注入(steer),用户实测打回:注入本身没问题(回合
     // 结束后从 jsonl 重排,位置与独立回应块都正确),但流式期间提前画的本地气泡会贴在上
     // 一条用户消息之后、悬在流式块上方 = 错序。故默认退回排队,注入改为【显式动作】——
     // 队列条目上的「⚡ 并入」按钮(handleAccelerate)。
     // forceSend(回滚/重做的重发 = 有意打断替换)照旧连这道门都不进。
     if (!reattachPid && !opts.forceSend && (streamingRef.current || backgroundPidRef.current)) {
-      useStore.getState().enqueueMessage(sessionQueueKey, { text: prompt, queuedAt: Date.now(), hidden: !!hiddenUserMessage, opts });
+      const queuedAt = Date.now();
+      const queued = useStore.getState().enqueueMessage(sessionQueueKey, { text: prompt, queuedAt, hidden: !!hiddenUserMessage, opts });
+      // Cmd/Ctrl+Enter:先入队保底，再调用 CLI/SDK 的实时输入队列。连接中、回合刚收尾或
+      // provider 不支持时，明确拒绝才回 queued；任何模糊结果都成为持久 barrier。
+      if (opts.steer && !hiddenUserMessage) {
+        const st = useStore.getState();
+        const prepared = st.prepareSteer(sessionQueueKey, queued.queueId);
+        if (!prepared) {
+          setProviderSwitchNotice({ text: '无法持久化并入状态，消息仍保留在队列中。' });
+          return;
+        }
+        const sid = getLocalSession()?.sessionId;
+        const result = await steerCurrentTurnRef.current?.(prepared.text, {
+          meta: prepared.opts?.meta,
+          steerId: prepared.steerId,
+          sessionId: sid,
+        }) || { outcome: 'ambiguous' };
+        useStore.getState().settleSteer(sessionQueueKey, prepared.queueId, result.outcome);
+        if (result.outcome === 'accepted') {
+          steerAnchorRef.current[prepared.steerId] = streamingBlocksRef.current.length;
+        } else if (result.outcome === 'ambiguous') {
+          setProviderSwitchNotice({ text: '并入结果无法确认，已暂停后续队列。' });
+        } else {
+          setProviderSwitchNotice({ text: '当前没有可并入的回合，消息仍在队列中。' });
+        }
+      }
       return;
+    }
+
+    // 只有真正开始新的空闲回合才恢复 following；忙碌 Enter 排队/并入不清阅读意图。
+    if (!reattachPid) {
+      userScrolledAwayRef.current = false;
+      scrollTransactionRef.current = null;
+      setAutoScroll(true);
     }
 
     // 本次真正起流的 generation。必须在任何 await、updateStreaming(true) 和用户消息写入前
@@ -5594,22 +5659,6 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             const sTxt = typeof event.suggestion === 'string' ? event.suggestion.trim() : '';
             if (sTxt) useStore.getState().setPromptSuggestionFor(streamSid || streamOwnerKeyRef.current, sTxt);
             setLiveStatus(null);
-          }
-
-          // 引导注入的状态精确化(纯文案)。{ type:'command_lifecycle', command_uuid, state }
-          // state: 'queued'(进 CLI 命令队列) → 'started'(在工具结果边界被折叠进本回合) →
-          // 'completed'。该事件【不在 sdk.d.ts 的类型里】,是实跑可见的未声明事件,按未知
-          // 类型宽松解析(只判存在性)。第三方 provider 未必发 —— 所以它只把队列条目的文案
-          // 从"已引导"精确到"已并入",【落地判定一律以回合收尾的持久化核对为准】
-          // (reconcileSteered),不依赖本事件。
-          if (event.type === 'command_lifecycle' && event.command_uuid && event.state !== 'queued') {
-            const _sq = useStore.getState();
-            const _qk = streamSid || streamOwnerKeyRef.current;
-            const _ql = (_qk && _sq.messageQueue[_qk]) || null;
-            if (_ql?.some((m) => m.steerId === event.command_uuid)) {
-              _sq.replaceQueue(_qk, _ql.map((m) => (m.steerId === event.command_uuid
-                ? { ...m, steerState: 'merged' } : m)));
-            }
           }
 
           // Token-level deltas (--include-partial-messages). This is the path that
@@ -6483,29 +6532,18 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           const t = Array.isArray(m.text) ? m.text.join('') : (m.text || '');
           return `${m.type}|${(t || '').slice(0, 80)}`;
         };
-        // 引导注入的落地判定(设计乙,取代旧的"气泡回捞"):注入过的消息留在队列里挂着
-        // "已并入"状态,回合收尾时拿持久化核对 ——
-        //   查到了 → CLI 真读了它,它已经是对话历史的一部分 → 从队列移除;
-        //   查不到 → 折叠之前回合就被停/进程死了,那条命令随 CLI 内存队列一起没了 →
-        //            翻回普通排队态,可编辑可删,也会被 drain 正常发出 = 一个字都不丢。
-        // 判据只看"落没落盘",不看 command_lifecycle(第三方 provider 未必发);对账核心
-        // roundLanded 一字未动,这里只是它旁边独立的一步。纯逻辑在 utils/steerQueue.js。
-        // R7-2:先用 steerId 精确匹配(persistedSteerKeys 收 user 消息的 uuid 与 steerUuid,
-        // 覆盖折叠/排到回合末两种落盘形态),命中不了才退回签名+steeredAt 时刻兜底 ——
-        // 只认签名会把折叠形态判成"没落盘" → 翻回队列 → drain 再发一遍 = 双发。
+        // 并入收尾只接受两种 JSONL UUID 正向证明；未命中不能证明未消费，转 needs-review
+        // 队首 barrier，绝不自动回 queued 或向新的当前 slot 重试。
         const reconcileSteeredQueue = (persisted) => {
           const st = useStore.getState();
           const list = st.messageQueue[finalizeSid];
-          if (!list?.length || !list.some(isSteered)) return;
-          const sigs = persistedUserSigs(persisted);
+          if (!list?.length || !list.some((item) => isSteerBarrier(item) || item?.steerId)) return;
           const keys = persistedSteerKeys(persisted);
-          const next = reconcileSteered(list, sigs, keys);
-          if (next === list) return;
-          st.replaceQueue(finalizeSid, next);
-          // 翻回普通排队态的条数(落地的那些是直接出队,不提示)
-          const back = list.filter((m) => isSteered(m) && !steerLanded(m, sigs, keys)).length;
-          if (back > 0) {
-            setProviderSwitchNotice({ text: `有 ${back} 条并入的消息本回合没有被读到（回合先结束了），已退回队列，可编辑后再发。` });
+          const reviewCount = list.filter((item) => item?.steerId
+            && !keys.has(String(item.steerId).toLowerCase())).length;
+          st.reconcileSteerQueue(finalizeSid, keys);
+          if (reviewCount > 0) {
+            setProviderSwitchNotice({ text: '并入结果无法确认，已暂停后续队列。' });
           }
         };
         // 一轮回复可能跨多条 assistant 消息(text → 工具 → text):jsonl 先写
@@ -6585,13 +6623,10 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         }
         // 判官必修-1:12 轮轮询耗尽会从循环【底部掉出】——producedReply 为真但 turn 没落盘
         // (手动停止、进程被杀、interrupt 早期)就是这条路径,而它恰恰是需求⑤点名的场景。
-        // 两个落地判定都写在 break 之前的分支里,掉出时一个都不执行 → 已注入条目永远挂着
-        // "已引导",不可编辑不可删不可召回,要等下一个回合收尾或重启才解卡。这里补一次兜底。
+        // 两个 UUID 对账点都写在 break 之前，轮询耗尽时也必须执行一次，令未命中项进入复核。
         // 守卫 = 循环内那两处的 isCurrentTurn 再加一条会话判等(循环里那两处本就跑在会话
         // 判等之后):切走/开新回合的 break 路径不该由这里善后,此刻 store 副本已是别的会话
-        // 的历史,拿它比签名会张冠李戴。走到两个判定分支再掉出的情况,条目已不带 steerId,
-        // 这里天然空跑。数据优先用最后一次 peek 到的持久化(store 副本停在回合开始前,更旧,
-        // 只会更倾向翻回 = 安全侧)。
+        // 的历史会串会话。数据优先用最后一次 peek 到的持久化；未命中只会保守暂停。
         if (isCurrentTurn() && getLocalSession()?.sessionId === finalizeSid) {
           reconcileSteeredQueue(lastPeeked || getLocalMessages());
         }
@@ -6627,35 +6662,6 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       }
       // Notify panels (UsagePanel) to refresh their stats.
       window.dispatchEvent(new CustomEvent('cgui:chat-done'));
-
-      // V1:回合结束后台自动跑一次 /context(fork 不落盘、纯本地计算),把实测的
-      // 分子/分母回写徽章 —— usage 事件只反映"上次 API 调用收到的输入",与 /context
-      // 的"下次发送的真实上下文"存在系统性差值(用户实测 117k vs 138k)。实测对齐后
-      // 徽章与点开的明细一致。best-effort、不阻塞;同会话并发探测去重。
-      try {
-        const _ok2 = streamOwnerKeyRef.current;
-        const probeSid = (_ok2 && !String(_ok2).startsWith('draft-')) ? _ok2 : getLocalSession()?.sessionId;
-        if (probeSid && (producedReply || isCompact) && !isClear && !window.__cguiCtxProbe?.[probeSid]) {
-          (window.__cguiCtxProbe ||= {})[probeSid] = true;
-          const _st3 = useStore.getState();
-          const probeModel = _st3.modelBySession[probeSid] || _st3.currentModel || '';
-          // projectHash/cwd 同样取归属会话元数据:selectedSession 是发起时闭包(= owner
-          // 会话),不摸 getLocalSession()(用户切走后会把探测打到别的项目目录,判官盲审#5)。
-          const probePh = selectedSession?.projectHash || '';
-          const probeCwd = selectedSession?.projectPath || selectedProject?.path || '';
-          const qs2 = new URLSearchParams({ cwd: probeCwd, projectHash: probePh, model: probeModel });
-          fetch(`/api/context/${probeSid}?${qs2.toString()}`)
-            .then((r) => r.json())
-            .then((d) => {
-              if (d?.totalTokens > 0 && d?.windowTokens > 0) {
-                useStore.getState().setCtxMeasured(probeSid, { totalTokens: d.totalTokens, windowTokens: d.windowTokens });
-              }
-              useStore.getState().setCtxBreakdown(probeSid, d); // AA1:缓存明细供弹层秒开
-            })
-            .catch(() => {})
-            .finally(() => { delete window.__cguiCtxProbe[probeSid]; });
-        }
-      } catch {}
 
       // 首轮后自动生成会话标题(B):一次性隔离 claude 调用,best-effort、不阻塞。
       // 仅当会话已有真实 sessionId、且既无自定义标题也无已生成的自动标题时触发,
@@ -6701,7 +6707,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       // 本地流被 detach 后由 backgroundPid 轮询接管成 reattach 流,结束时跳过排空 →
       // 排队消息永不自动发出(分屏几乎必现)。排空用本流归属会话 key(streamSid/ownerKey),
       // reattach 回来时正是该会话;shiftMessage 原子 pop + reattach 串行(reattachedPidRef
-      // 守卫)→ 不会与原 finally 双发。仍与 ⚡引导(acceleratingRef)互斥。
+      // 守卫)→ 不会与原 finally 双发。steer 在 HTTP 前已持久化为队首 barrier。
       // H 转后台:回合还在服务端跑,此刻外发排队消息会对同一会话双写(server 只复用
       // idle slot,busy slot 会另起进程 --resume 同一 jsonl)。跳过;回来 reattach 的
       // 流收尾时照常排空。
@@ -6711,7 +6717,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       // 【本窗格当前会话】—— 流式中切走会话时弹 A 的队 + 发进 B = 跨会话消息泄漏(A 的
       // 排队消息进了 B,A 的队还少了一条)。owner ≠ 当前会话时整段跳过,留给该会话
       // reattach 流的收尾排空(AZ10 原设计)。
-      if (!acceleratingRef.current && !backgroundedRef.current) {
+      if (!backgroundedRef.current) {
         const _ls = getLocalSession();
         const curKey = _ls?.sessionId || `draft-${_ls?.projectHash || 'none'}`;
         const queueKey = streamSid || streamOwnerKeyRef.current || curKey;
@@ -6722,7 +6728,6 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           setTimeout(() => handleSendRef.current?.(next.text, next.opts || (next.hidden ? { hiddenUserMessage: true } : {})), 50);
         }
       }
-      acceleratingRef.current = false;
       backgroundedRef.current = false;
       // 流归属 ref 生命周期收口:本流已结束,ref 不再代表任何在跑的流。不清会让非流式
       // 期间的读点(⚡/异步回调)拿到上一个流的会话 = 串扰。只清 ref 不动 streamOwnerKey
@@ -6944,19 +6949,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   }, [paneIsActive, tabIndex]);
 
   // ── 引导消息入流(设计丙 = Desktop 形态)────────────────────────────────
-  // 队列追踪结构(条目 + steerId/steeredAt + drain 跳过 + 回合收尾 reconcile)原样不动,
-  // 只改【呈现】:并入成功的条目不再挂在输入框上方的 chip 区,而是作为用户气泡画进对话流,
-  // 并把流式内容从切口处切成两段。理由:它是一句已经说出去、模型已经读到的话,属于对话;
-  // 挂在输入框上方会让用户以为"还没发出去"。
-  // 交接语义(与 reconcile 严格对称,不新增判据):
-  //   落地 → 条目出队 + 历史里已有 reader 合成的同一条消息 → 本地气泡消失,位置交还 jsonl;
-  //   没落地 → 条目翻回普通排队态(不再 isSteered)→ 气泡消失、chip 复现可编辑,一字不丢。
-  // 声明在 handleAccelerate 之【前】:那条回调要写 steerAnchorRef(本仓踩过 TDZ 白屏,
-  // 引用一律放在使用点上方)。
-  const steerAnchorRef = useRef({}); // { [steerId]: 点 ⚡ 那一刻已产出的流式块数 } = 切口
-  const streamingBlocksRef = useRef(EMPTY_ARRAY);
-  useEffect(() => { streamingBlocksRef.current = streamingBlocks; }, [streamingBlocks]);
-
+  // server 明确 accepted 的条目在流内画临时用户气泡；JSONL UUID 命中后交还历史，
+  // 未命中则转 needs-review 并回到队列面板，不做文本签名推断。
   // "⚡ 并入" — 把队列里第一条还没注入过的消息推进正在跑的回合(设计乙)。
   // 旧实现是 abort 本端 SSE + POST /stop + 当成新消息重发(= interrupt 重来),在
   // backgroundPid 态与 connecting 窗口下三个动作全落空、队首弹出又被入队门塞回队尾 =
@@ -6964,7 +6958,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // 注入成功后消息【留在队列区】换成"已并入"状态,不出队、不画气泡:
   //   · 它已送达 CLI,drain 再发就是双发(shiftMessage 跳过已注入条目,那条是红线);
   //   · 对话流里它由回合结束后的 jsonl 重排给出真实位置(用户实测确认终态正确);
-  //   · 回合收尾的 reconcileSteeredQueue 负责"落地了就出队 / 没落地就翻回可编辑"。
+  //   · 回合收尾的 reconcileSteeredQueue 负责"UUID 命中出队 / 未命中暂停复核"。
   const handleAccelerate = useCallback(async () => {
     // queueKey 与流收尾 drain 同口径(F1):入队侧(enqueueMessage)用的也是这个 pane key。
     const sel = getLocalSession();
@@ -6974,40 +6968,47 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     const idx = firstSteerableIndex(q);
     if (idx < 0) return;
     const head = q[idx];
-    // acceleratingRef 复活(判官建议-1):注入(await fetch)期间若回合正好收尾,drain 会
-    // 先 shiftMessage 把同一条弹出去重发 = 同文双发(此刻条目还没被标上 steerId,
-    // shiftMessage 的跳过判据还兜不住它)。这面旗就是为此存在的互斥闸(两条 drain 都读它),
-    // 自管 try/finally 复位,不依赖某条流的 finally 来清 —— 空闲态点 ⚡ 时没有任何 finally
-    // 会来读它(那正是它当年永久挂 true 的老 bug)。
-    acceleratingRef.current = true;
-    // 落地判定的时间基准(判官必修-2):在 POST 【之前】取 —— CLI 落盘只可能更晚,这样
-    // 「⚡ 之后落盘」的判据不会被自己的 await 窗口穿帮;历史上发过的同文旧记录则一律落在
-    // 这个时刻之前,不再被误认成"本次已落盘"(那等于静默丢字)。
-    const steeredAt = Date.now();
-    let steerId = null;
-    try {
-      steerId = await steerCurrentTurnRef.current?.(head.text, { meta: head.opts?.meta });
-    } finally {
-      acceleratingRef.current = false;
-    }
-    if (!steerId) {
-      setProviderSwitchNotice({ text: '当前没有可并入的回合（回合正在建立或已结束），消息仍在队列中，回合结束后会自动发出。' });
+    const st = useStore.getState();
+    const prepared = st.prepareSteer(queueKey, head.queueId);
+    if (!prepared) {
+      setProviderSwitchNotice({ text: '无法持久化并入状态，消息仍保留在队列中。' });
       return;
     }
-    // 切口位置(设计丙):记下"此刻已经产出了几个流式块"。气泡画在这一刀上,其后的
-    // 块开进新的回合容器 —— 与 Claude Desktop 一致(上一块之上、新回复在气泡下方开始)。
-    steerAnchorRef.current[steerId] = streamingBlocksRef.current.length;
-    // 原地标记而不是出队。按文本复查下标:注入这几百毫秒里队列可能被改动过。
-    const st = useStore.getState();
-    const now = st.messageQueue[queueKey] || [];
-    const at = now[idx]?.text === head.text ? idx : now.findIndex((m) => m?.text === head.text);
-    if (at < 0) return; // 用户在这期间把它删了 —— 消息已送达,不再凭空塞回去
-    st.replaceQueue(queueKey, now.map((m, i) => (i === at ? { ...m, steerId, steerState: 'sent', steeredAt } : m)));
+    const sid = sel?.sessionId;
+    const result = await steerCurrentTurnRef.current?.(prepared.text, {
+      meta: prepared.opts?.meta,
+      steerId: prepared.steerId,
+      sessionId: sid,
+    }) || { outcome: 'ambiguous' };
+    useStore.getState().settleSteer(queueKey, prepared.queueId, result.outcome);
+    if (result.outcome === 'accepted') {
+      steerAnchorRef.current[prepared.steerId] = streamingBlocksRef.current.length;
+    } else if (result.outcome === 'ambiguous') {
+      setProviderSwitchNotice({ text: '并入结果无法确认，已暂停后续队列。' });
+    } else {
+      setProviderSwitchNotice({ text: '当前没有可并入的回合，消息仍在队列中。' });
+    }
   }, [getLocalSession]);
 
   // 防同帧双气泡:jsonl 一旦把它写成历史(reader 合成的消息带 uuid/steerUuid),本地就不画。
   // 出队与历史刷新是同一次回合收尾,以 persisted 为准才能无缝交接、不闪双。
   const persistedSteerIds = useMemo(() => persistedSteerKeys(finalizedMessages), [finalizedMessages]);
+  useEffect(() => {
+    useStore.getState().reconcileSteerQueue(sessionQueueKey, persistedSteerIds);
+  }, [sessionQueueKey, persistedSteerIds]);
+  const refreshQueueEvidence = useCallback(async (queueId) => {
+    const before = getLocalSession();
+    if (!before?.sessionId || !before?.projectHash) return { matched: false, current: false, refreshed: false };
+    const refreshed = await fetchMessagesForTab(before.sessionId, before.projectHash, { silent: true });
+    const after = getLocalSession();
+    const current = after?.sessionId === before.sessionId && after?.projectHash === before.projectHash;
+    const persisted = current ? (useStore.getState().paneMessages[tabIndex] || []) : [];
+    const keys = persistedSteerKeys(persisted);
+    const item = (useStore.getState().messageQueue[sessionQueueKey] || []).find((entry) => entry?.queueId === queueId);
+    const matched = !!(item?.steerId && keys.has(String(item.steerId).toLowerCase()));
+    useStore.getState().reconcileSteerQueue(sessionQueueKey, keys);
+    return { matched, current, refreshed };
+  }, [fetchMessagesForTab, getLocalSession, sessionQueueKey, tabIndex]);
   const liveSteerItems = useMemo(
     () => messageQueue.filter((m) => isSteered(m) && !persistedSteerIds.has(m.steerId)),
     [messageQueue, persistedSteerIds]);
@@ -7734,6 +7735,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         <div className="absolute inset-0 z-40 flex flex-col bg-canvas">
           <SubagentView
             agentId={viewingAgentId}
+            paneId={paneId}
+            active={paneIsActive}
             parentSessionId={selectedSession?.sessionId || null}
             parentTitle={resolveSessionTitle(
               selectedSession,
@@ -7749,7 +7752,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         <ChatSearch containerRef={containerRef} onClose={() => setSearchOpen(false)} />
       )}
       {!showAgentView && (
-        <TurnScrubber containerRef={containerRef} turns={userTurns} />
+        <TurnScrubber containerRef={containerRef} turns={userTurns} onNavigate={markScrollReading} />
       )}
       {/* 旁问浮窗:右下角浮动小窗,把本会话 /btw 线程聚合成连续对话。z-46 高于子代理面板
           (z-40)故与之共存;suppressed=hasPendingInteraction 时让路授权/问题卡(收成浮标)。 */}
@@ -7979,7 +7982,14 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       <div className="flex-1 min-h-0 relative">
       {/* data-chat-scroll:气泡用 closest() 找到"自己所在窗格的滚动容器"(分屏时每个窗格
           一个,不能拿 window),据其可视高度决定长回复要不要补底部复制按钮。 */}
-      <div ref={setContainerRef} onScroll={handleScroll} data-chat-scroll className="h-full overflow-y-auto relative z-10">
+      <div
+        ref={setContainerRef}
+        onScroll={handleScroll}
+        onWheel={handleScrollWheel}
+        onPointerDown={handleScrollPointer}
+        data-chat-scroll
+        className="h-full overflow-y-auto relative z-10"
+      >
           {visibleMessages.length === 0 && visibleChat.filter((m) => m.type !== 'btw').length === 0 ? (
             <div className="mobile-draft-empty flex items-center justify-center h-full text-ink-muted text-sm font-body">
               {selectedSession?.draft ? '开始你的第一条消息 ↓' : '该会话没有可显示的消息'}
@@ -8135,7 +8145,10 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
               // every scrollable ancestor (incl. the root flex), shoving the
               // header off-screen and leaving a blank gap at the bottom (#16).
               const el = containerRef.current;
-              if (el) { programmaticScrollRef.current = true; el.scrollTop = el.scrollHeight; }
+              if (el) {
+                const target = Math.max(0, el.scrollHeight - el.clientHeight);
+                writeProgrammaticScroll(el, target, 'return-bottom');
+              }
               userScrolledAwayRef.current = false;  // AZ3:显式回到底部 → 恢复跟随
               setAutoScroll(true);
             }}
@@ -8167,6 +8180,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         backgroundWorking={backgroundOnly && bgBannerDue}
         queueLength={messageQueue.length}
         queueItems={messageQueue}
+        paneId={paneId}
+        claimDraft={claimDraft}
+        onRefreshQueueEvidence={refreshQueueEvidence}
         onRemoveFromQueue={(i) => useStore.getState().removeFromQueue(sessionQueueKey, i)}
         onEditFromQueue={(i) => {
           const item = messageQueue[i];
@@ -8488,25 +8504,61 @@ function ContextBreakdownButton({ contextTokens, contextWindow, contextPct, fmtT
   const [showMcp, setShowMcp] = useState(false);
   const wrapRef = useRef(null);
   const menuRef = useRef(null);
-  // AA1:后台探测(开会话/回合后)缓存的完整明细 —— 点开优先读它,秒显,不 spawn。
-  const cachedBreakdown = useStore((s) => s.ctxBreakdownBySession[sessionId]);
+  const requestRef = useRef(null);
+  const canonicalKey = useMemo(
+    () => contextCanonicalKey(sessionId, projectHash, cwd, model),
+    [sessionId, projectHash, cwd, model],
+  );
+  const cachedBreakdown = useStore((s) => s.ctxBreakdownBySession[canonicalKey]);
+  const contextCacheRevision = useStore((s) => s.contextCacheRevision);
+  const localBreakdown = {
+    model: model || '',
+    totalTokens: contextTokens || 0,
+    windowTokens: contextWindow || 0,
+    pct: contextPct || 0,
+    localOnly: true,
+    categories: [
+      { name: '当前上下文（本地统计）', tokens: contextTokens || 0, pct: contextPct || 0 },
+      { name: 'Free space', tokens: Math.max(0, (contextWindow || 0) - (contextTokens || 0)), pct: Math.max(0, 100 - (contextPct || 0)) },
+    ],
+    mcpServers: [],
+  };
+
+  const cancelRequest = useCallback(() => {
+    requestRef.current?.controller.abort();
+    requestRef.current = null;
+    setLoading(false);
+  }, []);
+
+  useEffect(() => {
+    cancelRequest();
+    if (open) {
+      setData(cachedBreakdown || localBreakdown);
+      setErr('');
+    }
+  // localBreakdown deliberately snapshots the current render when the identity changes.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [canonicalKey, contextCacheRevision]);
+
+  useEffect(() => () => cancelRequest(), [cancelRequest]);
 
   useEffect(() => {
     if (!open) return;
     const onDocClick = (e) => {
       if (wrapRef.current?.contains(e.target)) return;
       if (menuRef.current?.contains(e.target)) return;
+      cancelRequest();
       setOpen(false);
     };
     // R1:window 捕获(同 ThemeToggle,详见那里注释);stopPropagation 仍挡住会话级停止监听。
-    const onEsc = (e) => { if (e.key === 'Escape') { e.stopPropagation(); setOpen(false); } };
+    const onEsc = (e) => { if (e.key === 'Escape') { e.stopPropagation(); cancelRequest(); setOpen(false); } };
     document.addEventListener('click', onDocClick);
     window.addEventListener('keydown', onEsc, true);
     return () => {
       document.removeEventListener('click', onDocClick);
       window.removeEventListener('keydown', onEsc, true);
     };
-  }, [open]);
+  }, [open, cancelRequest]);
 
   // 渲染后兜底钳制(回滚菜单同款):left=rLeft 是左对齐到按钮,而徽章位于右上统计区,
   // 340px 浮层易冲出右缘;窄屏/zoom 下 max-w 只收宽不挪 left,仍可能右溢。量真实矩形,
@@ -8528,20 +8580,36 @@ function ContextBreakdownButton({ contextTokens, contextWindow, contextPct, fmtT
 
   const load = async () => {
     if (!sessionId) { setErr('发送一条消息后才能查看明细'); setData(null); return; }
+    if (requestRef.current?.canonicalKey === canonicalKey) return;
+    cancelRequest();
+    const requestEpoch = useStore.getState().nextContextRequestEpoch();
+    const controller = new AbortController();
+    requestRef.current = { canonicalKey, requestEpoch, controller };
     setLoading(true); setErr('');
     try {
       // V2:把会话当前模型传给 /context —— 否则 CLI 按 settings.json 默认模型
       // (如 haiku)计算窗口并显示,与会话实际模型不符。
       const qs = new URLSearchParams({ cwd: cwd || '', projectHash: projectHash || '', model: model || '' });
-      const r = await fetch(`/api/context/${sessionId}?${qs.toString()}`);
-      const d = await r.json();
-      if (!r.ok || d.error) throw new Error(d.error || '获取失败');
+      const r = await fetch(`/api/context/${sessionId}?${qs.toString()}`, { signal: controller.signal });
+      const d = await r.json().catch(() => null);
+      if (!r.ok) throw Object.assign(new Error('context-request-failed'), { code: d?.code });
+      if (!isValidContextResponse(d)) throw Object.assign(new Error('context-response-invalid'), { code: 'context-response-invalid' });
+      const current = requestRef.current;
+      if (!current || current.canonicalKey !== canonicalKey || current.requestEpoch !== requestEpoch) return;
       setData(d);
       // U3/V1:把 CLI 实测的分子+分母回写为本会话徽章的权威值,徽章与明细从此一致。
       if (d?.windowTokens > 0) useStore.getState().setCtxMeasured(sessionId, { totalTokens: d.totalTokens || 0, windowTokens: d.windowTokens });
-      useStore.getState().setCtxBreakdown(sessionId, d); // AA1:刷新缓存
-    } catch (e) { setErr(e.message); setData(null); }
-    setLoading(false);
+      useStore.getState().setCtxBreakdown(canonicalKey, d, requestEpoch);
+    } catch (e) {
+      if (e.name !== 'AbortError' && requestRef.current?.requestEpoch === requestEpoch) {
+        setErr(contextErrorMessage(e.code));
+      }
+    } finally {
+      if (requestRef.current?.requestEpoch === requestEpoch) {
+        requestRef.current = null;
+        setLoading(false);
+      }
+    }
   };
 
   const toggle = (e) => {
@@ -8556,9 +8624,12 @@ function ContextBreakdownButton({ contextTokens, contextWindow, contextPct, fmtT
       const rLeft = r.left / z, rTop = r.top / z, rBottom = r.bottom / z;
       const openBelow = (visH - rBottom) >= rTop;
       setCoords({ left: rLeft, top: openBelow ? rBottom + gap : rTop - gap, ty: openBelow ? '0' : '-100%' });
-      // AA1:有后台缓存的明细就秒显,不再每次 spawn /context(5~30s)。无缓存才现算。
-      if (cachedBreakdown?.categories?.length > 0) { setData(cachedBreakdown); setErr(''); }
-      else load();
+      // 点击永远只做本地渲染：有精确缓存就秒显缓存，否则先显 usage/jsonl 本地统计。
+      // `/context` 会触发 count_tokens 网络请求，只有用户点刷新按钮时才精确计算。
+      setData(cachedBreakdown || localBreakdown);
+      setErr('');
+    } else if (open) {
+      cancelRequest();
     }
     setOpen(!open);
   };
@@ -8579,7 +8650,11 @@ function ContextBreakdownButton({ contextTokens, contextWindow, contextPct, fmtT
       <div className="px-3 pb-2 flex items-center gap-2 border-b border-black/5">
         <span className="text-xs font-medium text-ink font-body">{info ? '会话信息' : '上下文用量'}</span>
         {data?.model && <span className="text-[10px] text-ink-faint font-mono truncate max-w-[130px]" title={data.model}>{data.model}</span>}
+        {data?.localOnly && !loading && !err && <span className="text-[9px] text-ink-faint font-body">本地统计</span>}
+        {loading && <span className="text-[9px] text-ink-faint font-body">正在精确计算…</span>}
+        {!loading && !err && data?.sampledAt && <span className="text-[9px] text-ink-faint font-body">精确统计 · {data.sampledAt}</span>}
         <button onClick={(e) => { e.stopPropagation(); load(); }} disabled={loading}
+          aria-label="精确计算上下文"
           className="ml-auto p-0.5 text-ink-faint hover:text-ink shrink-0" title="重新精确计算 /context（稍慢）">
           <RefreshCw size={11} className={loading ? 'animate-spin' : ''} />
         </button>
@@ -8641,7 +8716,7 @@ function ContextBreakdownButton({ contextTokens, contextWindow, contextPct, fmtT
       )}
 
       {loading && !data && <div className="px-3 py-6 text-center text-xs text-ink-faint">正在计算 /context…</div>}
-      {err && !data && <div className="px-3 py-4 text-xs text-amber-700">{err}</div>}
+      {err && <div className="px-3 py-2 text-[10px] text-amber-700">精确计算失败：{err}。当前仍显示已有统计。</div>}
 
       {data && (
         <div className="px-3 pt-2">

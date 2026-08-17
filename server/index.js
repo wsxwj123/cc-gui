@@ -756,6 +756,14 @@ app.get('/api/slash-commands', async (req, res) => {
 // fall through to Express's default 500 HTML page.
 app.use('/api', (err, req, res, next) => {
   if (res.headersSent) return next(err);
+  if (req.originalUrl?.startsWith('/api/chat/steer')) {
+    if (err?.type === 'entity.too.large' || err?.status === 413) {
+      return res.status(413).json({ ok: false, code: 'request-too-large', error: '消息内容过大' });
+    }
+    if (err?.type === 'entity.parse.failed' || (err instanceof SyntaxError && err?.status === 400)) {
+      return res.status(400).json({ ok: false, code: 'malformed-json', error: '请求 JSON 格式错误' });
+    }
+  }
   const status = err?.status || 500;
   res.status(status).json({ error: err?.message || 'internal error' });
 });

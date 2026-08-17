@@ -2,7 +2,8 @@ import { create } from 'zustand';
 import { nextDockCode } from '../utils/artifactDock.js';
 import { mergeSyncedMap, syncableKey, pushLocalOnlyKeys, createInFlightCounter, shouldMarkMigrated } from '../utils/sessionSync.js';
 import { FONT_OPTIONS, readingFontCss } from '../utils/systemFonts.js';
-import { firstDrainableIndex, stripSteerState } from '../utils/steerQueue.js';
+import { createQueueId, firstDrainableIndex, isSteerBarrier, reclaimClaimItem, reconcileSteered, stripSteerState } from '../utils/steerQueue.js';
+import { isValidContextResponse, shouldReplaceContextCache } from '../utils/contextCache.js';
 
 // Re-exported so existing importers (App.jsx) keep working; the list and its
 // css-resolution logic now live in utils/systemFonts.js alongside the enumeration.
@@ -299,6 +300,26 @@ function appendAgentBlock(blocks, type, delta) {
   return [...arr, { type, content: delta }];
 }
 
+const QUEUE_STORAGE_KEY = 'cgui-message-queue';
+const rawQueueSnapshot = readLs(QUEUE_STORAGE_KEY, {});
+const initialQueueMap = {};
+if (rawQueueSnapshot && typeof rawQueueSnapshot === 'object' && !Array.isArray(rawQueueSnapshot)) {
+  for (const [key, value] of Object.entries(rawQueueSnapshot)) {
+    if (Array.isArray(value)) initialQueueMap[key] = value;
+  }
+}
+const recoveredQueueMap = stripSteerState(initialQueueMap);
+
+const persistQueueSnapshot = (messageQueue, verify = false) => {
+  if (typeof localStorage === 'undefined') return true;
+  try {
+    const serialized = JSON.stringify(messageQueue);
+    localStorage.setItem(QUEUE_STORAGE_KEY, serialized);
+    return !verify || localStorage.getItem(QUEUE_STORAGE_KEY) === serialized;
+  } catch { return false; }
+};
+persistQueueSnapshot(recoveredQueueMap);
+
 export const useStore = create((set, get) => ({
   // Data
   projects: [],
@@ -364,11 +385,10 @@ export const useStore = create((set, get) => ({
   // 这是权威来源 —— 徽章的分子/分母与按事件 usage/模型名猜测不一致时,以实测为准
   // (回合结束后台自动探测一次 + 点徽章手动探测都会回写)。仅内存态,不持久化。
   ctxMeasuredBySession: {},
-  // AA1:缓存 /context 的完整分项明细 { [sessionId]: { categories, mcpServers, model,
-  // totalTokens, windowTokens, pct, ts } }。后台探测(开会话/回合后)拿到的 d 整体存进
-  // 来,点徽章弹层直接读缓存秒开 —— 不必再 spawn `claude -p /context`(冷启动+多次
-  // count_tokens 网络往返,5~30s)。仅内存态。
+  // /context 精确缓存按 canonical key 隔离；requestEpoch 只负责生成实例内唯一请求代次。
   ctxBreakdownBySession: {},
+  contextRequestEpoch: 0,
+  contextCacheRevision: 0,
   // Sessions currently handed off to phone remote control (sessionId → true).
   // While set, the GUI must NOT spawn `-p` turns for that session (both would
   // write the same jsonl). The composer locks and shows a reclaim banner.
@@ -472,17 +492,7 @@ export const useStore = create((set, get) => ({
   // 持久化(#6):队列只活内存时刷新/崩溃即丢(排队消息凭空消失)。init 从 localStorage
   // 读回,每次变更由文件尾 subscribe 镜像写入。崩溃后恢复 = 消息留在队列里等重发,
   // 不自动发送(自动发可能撞正在进行的回合)。
-  messageQueue: (() => {
-    const v = readLs('cgui-message-queue', {});
-    if (!v || typeof v !== 'object' || Array.isArray(v)) return {};
-    // 逐 key 滤掉非数组值:localStorage 可被旧版/手改写入畸形数据,顶层是对象不代表
-    // 每个 value 都是队列数组 —— 不滤的话 [...list, msg] 之类会在消费处抛错。
-    const out = {};
-    for (const [k, val] of Object.entries(v)) { if (Array.isArray(val)) out[k] = val; }
-    // 恢复时洗掉 steer 态:它是【进程内在飞】的状态,跨重启必然失效。带着"已并入"回来的
-    // 条目会被 drain 永久跳过 = 消息永久卡在队列里(见 utils/steerQueue.js)。
-    return stripSteerState(out);
-  })(),
+  messageQueue: recoveredQueueMap,
 
   // Pending CLI permission requests waiting on the user. Each entry:
   //   { id, toolName, toolInput, sessionId, cwd, hookEvent, createdAt }
@@ -811,22 +821,26 @@ export const useStore = create((set, get) => ({
       ? { ctxMeasuredBySession: { ...s.ctxMeasuredBySession, [sessionId]: { ...payload, ts: payload.ts || Date.now() } } }
       : s
   )),
-  // AA1:存 /context 完整明细供弹层秒开。要求有 categories(否则无明细可显)。
-  // 择优缓存:/context 是新 fork 出来的临时进程跑的,MCP 服务有时还没连上就快照(竞态),
-  // 偶尔会拿到"类别更少"的退化结果(如缺 MCP、或第三方下塌成只剩 Skills+Messages)。
-  // 后台探测多次,只要其中一次完整,就让它留住——退化结果不覆盖更完整的缓存。
-  // (用户显式点刷新走 load() 的 setData,直接显示那次结果,不受此影响。)
-  setCtxBreakdown: (sessionId, data) => set((s) => {
-    if (!sessionId || !Array.isArray(data?.categories) || data.categories.length === 0) return s;
-    // 拒绝不一致/空结果:/context 对刚压缩或瞬态会话偶尔返回 totalTokens=0 但 pct>0,
-    // 缓存后弹层会显示"0 / 200k (25%)"这种自相矛盾的头部(用户报告 #1)。丢弃不缓存。
-    if (!(data.totalTokens > 0)) return s;
-    const realCats = (cats) => cats.filter((c) => !/free space/i.test(c.name)).length;
-    const prev = s.ctxBreakdownBySession[sessionId];
-    // 仅当新结果类别数 >= 旧缓存时才覆盖;更少则视为退化快照,保留旧的更完整版本。
-    if (prev?.categories && realCats(data.categories) < realCats(prev.categories)) return s;
-    return { ctxBreakdownBySession: { ...s.ctxBreakdownBySession, [sessionId]: { ...data, ts: Date.now() } } };
+  nextContextRequestEpoch: () => {
+    let epoch = 0;
+    set((s) => { epoch = s.contextRequestEpoch + 1; return { contextRequestEpoch: epoch }; });
+    return epoch;
+  },
+  setCtxBreakdown: (canonicalKey, data, requestEpoch) => set((s) => {
+    if (!canonicalKey || !isValidContextResponse(data)) return s;
+    const previous = s.ctxBreakdownBySession[canonicalKey];
+    if (!shouldReplaceContextCache(previous, data, requestEpoch)) return s;
+    return {
+      ctxBreakdownBySession: {
+        ...s.ctxBreakdownBySession,
+        [canonicalKey]: { ...data, requestEpoch },
+      },
+    };
   }),
+  clearContextExactCache: () => set((s) => ({
+    ctxBreakdownBySession: {},
+    contextCacheRevision: s.contextCacheRevision + 1,
+  })),
   // When a draft session (keyed `draft-<projectHash>`) gets its real CLI session
   // id, carry its per-session model + permission pins over to the new key. Without
   // this the pins orphan under the draft key, so the model the user picked for a
@@ -1112,6 +1126,7 @@ export const useStore = create((set, get) => ({
       set({ paneSessions: next, paneMessages: nextMsgs, paneMessagesSid: nextSids, paneIds: ids, selectedSession: null, messages: [] });
       writeLs('cgui-selected-session', null);
       writeLs('cgui-pane-sessions', next);
+      get().reclaimOrphanClaimDrafts(); // ②旧 pane id 已被换掉,回收指向它的 claim 槽
       return;
     }
     const sessions = [...cur.paneSessions];
@@ -1147,6 +1162,7 @@ export const useStore = create((set, get) => ({
       selectedSession: sessions[0],
       messages: msgs[0] || [],
     });
+    get().reclaimOrphanClaimDrafts(); // ②被关 pane 的 id 已出列,回收指向它的 claim 槽
   },
   // Tab-index setter, clamped.
   setActiveTabIndex: (i) => {
@@ -1490,9 +1506,183 @@ export const useStore = create((set, get) => ({
   })),
 
   // ── Message queue helpers (#3) ──────────────────────────────
-  enqueueMessage: (sessionKey, msg) => set((s) => {
+  enqueueMessage: (sessionKey, msg) => {
+    const queued = { ...msg, queueId: msg?.queueId || createQueueId('queue') };
+    set((s) => {
+      const list = s.messageQueue[sessionKey] || [];
+      return { messageQueue: { ...s.messageQueue, [sessionKey]: [...list, queued] } };
+    });
+    return queued;
+  },
+  prepareSteer: (sessionKey, queueId) => {
+    let prepared = null;
+    set((s) => {
+      const list = s.messageQueue[sessionKey] || [];
+      const index = list.findIndex((item) => item?.queueId === queueId);
+      if (index < 0 || isSteerBarrier(list[index])) return s;
+      const stableQueueId = list[index].queueId || createQueueId('queue');
+      const steerId = list[index].steerId || createQueueId('steer');
+      prepared = { ...list[index], queueId: stableQueueId, steerId, steerState: 'unknown', attemptWasAmbiguous: false };
+      const nextList = list.map((item, i) => (i === index ? prepared : item));
+      const nextQueue = { ...s.messageQueue, [sessionKey]: nextList };
+      if (!persistQueueSnapshot(nextQueue, true)) { prepared = null; return s; }
+      return { messageQueue: nextQueue };
+    });
+    return prepared;
+  },
+  settleSteer: (sessionKey, queueId, outcome) => set((s) => {
     const list = s.messageQueue[sessionKey] || [];
-    return { messageQueue: { ...s.messageQueue, [sessionKey]: [...list, msg] } };
+    const index = list.findIndex((item) => item?.queueId === queueId);
+    if (index < 0) return s;
+    const current = list[index];
+    let nextItem = current;
+    if (outcome === 'accepted') nextItem = { ...current, steerState: 'accepted' };
+    // ①"保留不发"：resolved 终态。必须清 attemptWasAmbiguous（isSteerBarrier 也认它），
+    // 且分支要在 ambiguous 兜底之前——needs-review 条目 attemptWasAmbiguous 恒真，
+    // 放后面 'kept' 会被兜底分支吞掉。
+    else if (outcome === 'kept') nextItem = { ...current, steerState: 'kept', attemptWasAmbiguous: false };
+    else if (outcome === 'ambiguous' || current.attemptWasAmbiguous) {
+      nextItem = { ...current, steerState: 'needs-review', attemptWasAmbiguous: true };
+    } else if (outcome === 'explicit-reject') {
+      const { steerId, steerState, steeredAt, attemptWasAmbiguous, ...queued } = current;
+      void steerId; void steerState; void steeredAt; void attemptWasAmbiguous;
+      nextItem = queued;
+    }
+    if (nextItem === current) return s;
+    const nextQueue = { ...s.messageQueue, [sessionKey]: list.map((item, i) => (i === index ? nextItem : item)) };
+    if (!persistQueueSnapshot(nextQueue, true)) return s;
+    return { messageQueue: nextQueue };
+  }),
+  reconcileSteerQueue: (sessionKey, steerKeys) => set((s) => {
+    const list = s.messageQueue[sessionKey] || [];
+    const nextList = reconcileSteered(list, null, steerKeys);
+    if (nextList === list) return s;
+    const nextQueue = { ...s.messageQueue, [sessionKey]: nextList };
+    if (!persistQueueSnapshot(nextQueue, true)) return s;
+    return { messageQueue: nextQueue };
+  }),
+  beginQueueClaim: (sessionKey, queueId, targetPaneId) => {
+    const claimId = createQueueId('claim');
+    let claimed = false;
+    set((s) => {
+      const list = s.messageQueue[sessionKey] || [];
+      const index = list.findIndex((item) => item?.queueId === queueId && item.steerState === 'needs-review');
+      const paneHasDraft = Object.values(s.messageQueue).some((items) => Array.isArray(items)
+        && items.some((item) => item?.claimDraft?.targetPaneId === targetPaneId));
+      if (index < 0 || !targetPaneId || paneHasDraft) return s;
+      const nextItem = { ...list[index], steerState: 'claiming', claimId, targetPaneId };
+      const nextQueue = { ...s.messageQueue, [sessionKey]: list.map((item, i) => (i === index ? nextItem : item)) };
+      if (!persistQueueSnapshot(nextQueue, true)) return s;
+      claimed = true;
+      return { messageQueue: nextQueue };
+    });
+    return claimed ? claimId : null;
+  },
+  writePendingClaimDraft: (sessionKey, queueId, claimId, targetPaneId) => {
+    let written = false;
+    set((s) => {
+      const item = (s.messageQueue[sessionKey] || []).find((entry) => entry?.queueId === queueId
+        && entry.steerState === 'claiming' && entry.claimId === claimId && entry.targetPaneId === targetPaneId);
+      if (!item) return s;
+      const attachments = Array.isArray(item.opts?.meta?.attachments) ? item.opts.meta.attachments : [];
+      const claimDraft = {
+        sessionKey,
+        sourceQueueId: queueId,
+        claimId,
+        targetPaneId,
+        text: attachments.length ? (item.opts?.meta?.displayText || '') : item.text,
+        queueText: item.text,
+        // ②孤儿回收要能还原 steerId:finalize 的 draftSlot 会丢掉原条目全部字段,
+        // 复位后仍靠它做 UUID 落盘对账(其实已送达的条目自动清掉)。
+        steerId: item.steerId || null,
+        attachments,
+        sendable: false,
+      };
+      const nextQueue = {
+        ...s.messageQueue,
+        [sessionKey]: (s.messageQueue[sessionKey] || []).map((entry) => (
+          entry === item ? { ...entry, claimDraft } : entry
+        )),
+      };
+      if (!persistQueueSnapshot(nextQueue, true)) return s;
+      written = true;
+      return { messageQueue: nextQueue };
+    });
+    return written;
+  },
+  finalizeQueueClaim: (sessionKey, queueId, claimId, targetPaneId) => {
+    let finalized = false;
+    set((s) => {
+      const list = s.messageQueue[sessionKey] || [];
+      const item = list.find((entry) => entry?.queueId === queueId && entry.steerState === 'claiming'
+        && entry.claimId === claimId && entry.targetPaneId === targetPaneId);
+      const draft = item?.claimDraft;
+      if (!item || !draft || draft.sendable || draft.sessionKey !== sessionKey
+        || draft.sourceQueueId !== queueId || draft.claimId !== claimId || draft.queueText !== item.text) return s;
+      const draftSlot = {
+        text: '',
+        queuedAt: item.queuedAt,
+        hidden: true,
+        queueId: createQueueId('claim-draft'),
+        claimDraft: { ...draft, sendable: true },
+      };
+      const nextQueue = { ...s.messageQueue, [sessionKey]: list.map((entry) => (entry === item ? draftSlot : entry)) };
+      if (!persistQueueSnapshot(nextQueue, true)) return s;
+      finalized = true;
+      return { messageQueue: nextQueue };
+    });
+    return finalized;
+  },
+  rollbackQueueClaim: (sessionKey, queueId, claimId, targetPaneId) => set((s) => {
+    const list = s.messageQueue[sessionKey] || [];
+    const nextList = list.map((item) => {
+      if (item?.queueId !== queueId || item.claimId !== claimId || item.targetPaneId !== targetPaneId) return item;
+      const { claimId: _claimId, targetPaneId: _targetPaneId, claimDraft: _claimDraft, ...rest } = item;
+      void _claimId; void _targetPaneId; void _claimDraft;
+      return { ...rest, steerState: 'needs-review', attemptWasAmbiguous: true };
+    });
+    const nextQueue = { ...s.messageQueue, [sessionKey]: nextList };
+    if (!persistQueueSnapshot(nextQueue, true)) return s;
+    return { messageQueue: nextQueue };
+  }),
+  updateClaimDraft: (targetPaneId, claimId, patch) => set((s) => {
+    let found = false;
+    const nextQueue = Object.fromEntries(Object.entries(s.messageQueue).map(([key, list]) => [key, list.map((item) => {
+      const current = item?.claimDraft;
+      if (!current?.sendable || current.targetPaneId !== targetPaneId || current.claimId !== claimId) return item;
+      found = true;
+      return { ...item, claimDraft: { ...current, ...patch } };
+    })]));
+    if (!found || !persistQueueSnapshot(nextQueue, true)) return s;
+    return { messageQueue: nextQueue };
+  }),
+  // ②孤儿回收:claim 槽的 targetPaneId 已不在当前 paneIds(关窗格/单窗格换新 id)时,
+  // 该槽永远无人认领 —— hidden 空文本槽既不可见也不可删,还永久阻塞 drain。复位为
+  // 可见 needs-review 原条目(①的出口接手)。closePane 两个分支收尾时调用。
+  reclaimOrphanClaimDrafts: () => set((s) => {
+    const valid = new Set(Array.isArray(s.paneIds) ? s.paneIds : []);
+    let changed = false;
+    const nextQueue = Object.fromEntries(Object.entries(s.messageQueue).map(([key, list]) => [
+      key,
+      (Array.isArray(list) ? list : []).map((item) => {
+        const pane = item?.claimDraft?.targetPaneId ?? item?.targetPaneId;
+        if ((!item?.claimDraft && item?.steerState !== 'claiming') || valid.has(pane)) return item;
+        changed = true;
+        return reclaimClaimItem(item);
+      }),
+    ]));
+    if (!changed || !persistQueueSnapshot(nextQueue, true)) return s;
+    return { messageQueue: nextQueue };
+  }),
+  clearClaimDraft: (targetPaneId, claimId) => set((s) => {
+    let found = false;
+    const nextQueue = Object.fromEntries(Object.entries(s.messageQueue).map(([key, list]) => [key, list.filter((item) => {
+      const matches = item?.claimDraft?.targetPaneId === targetPaneId && item.claimDraft.claimId === claimId;
+      if (matches) found = true;
+      return !matches;
+    })]));
+    if (!found || !persistQueueSnapshot(nextQueue, true)) return s;
+    return { messageQueue: nextQueue };
   }),
   shiftMessage: (sessionKey) => {
     // 原子 pop(#7):取 head 与写回 rest 必须在同一次 setState 里 —— 先 getState 再
@@ -1523,7 +1713,11 @@ export const useStore = create((set, get) => ({
   }),
   removeFromQueue: (sessionKey, index) => set((s) => {
     const list = s.messageQueue[sessionKey] || [];
-    if (index < 0 || index >= list.length) return s;
+    if (index < 0 || index >= list.length || list[index]?.claimDraft) return s;
+    // ①needs-review 必须有删除逃生口（取回失败/附件丢失时这是唯一出路）；'kept' 本就非
+    // barrier。仍拒删在途确认态（unknown/accepted/claiming）——那些是"结果未定"，删了会
+    // 与对账竞态。确认弹窗在 ChatInput（store 不能 import confirmDialog，JSX 模块）。
+    if (isSteerBarrier(list[index]) && list[index].steerState !== 'needs-review') return s;
     const next = [...list.slice(0, index), ...list.slice(index + 1)];
     return { messageQueue: { ...s.messageQueue, [sessionKey]: next } };
   }),
@@ -1592,13 +1786,13 @@ export const useStore = create((set, get) => ({
       // pane: in split view a sibling pane showing the same reset session would
       // also re-fetch and go empty ("该会话没有可显示的消息" everywhere). Keep
       // whatever is there — a genuinely empty session still returns 200 + [].
-      if (!res.ok) { if (!silent) set({ loading: false }); return; }
+      if (!res.ok) { if (!silent) set({ loading: false }); return false; }
       const data = await res.json();
       // 端点现返回 { messages, usageTotals };兼容旧的裸数组形态(升级过渡期)。
       const messages = Array.isArray(data) ? data : (Array.isArray(data?.messages) ? data.messages : []);
       // 乱序守卫:响应落地时该 pane 已切走(sessionId 不再是发起时的)→ 整条丢弃,
       // 防慢响应覆盖新会话的消息/归属标记造成永久空白。所有调用点发起时两者相等。
-      if (get().paneSessions[tab]?.sessionId !== sessionId) { if (!silent) set({ loading: false }); return; }
+      if (get().paneSessions[tab]?.sessionId !== sessionId) { if (!silent) set({ loading: false }); return false; }
       get().setPaneMessages(tab, messages, sessionId);
       // 服务端算好的整会话用量聚合,SessionDetail 顶部用量条直接取用,
       // 避免前端对几千条历史消息每帧全量 reduce。
@@ -1606,9 +1800,11 @@ export const useStore = create((set, get) => ({
         set((s) => ({ usageTotalsBySession: { ...s.usageTotalsBySession, [sessionId]: data.usageTotals } }));
       }
       if (!silent) set({ loading: false });
+      return true;
     } catch (err) {
       // Network/parse failure — keep existing messages rather than blanking.
       if (!silent) set({ error: err.message, loading: false });
+      return false;
     }
   },
 
@@ -1659,12 +1855,10 @@ export const useStore = create((set, get) => ({
   },
 }));
 
-// messageQueue 持久化镜像(#6):引用变化即整体写 localStorage(init 在读回处)。
-// 放 subscribe 而非各 mutator 里写 —— enqueue/shift/clear/remove/migrateSessionKey
-// 五个写点全覆盖,新增写点也不会漏。
+// claim draft 作为 hidden、空 text 的队列槽，与普通队列项留在同一旧格式快照中。
 useStore.subscribe((s, prev) => {
   if (!prev) return; // 首次触发无 prev,无意义回写
-  if (s.messageQueue !== prev.messageQueue) writeLs('cgui-message-queue', s.messageQueue);
+  if (s.messageQueue !== prev.messageQueue) persistQueueSnapshot(s.messageQueue);
 });
 
 // When following the system, a preset family's fixed palette must flip with the
@@ -1675,5 +1869,11 @@ if (typeof window !== 'undefined' && window.matchMedia) {
   window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
     const s = useStore.getState();
     if (s.themeTone === 'auto') s.setTheme(s.themeFamily, 'auto');
+  });
+}
+
+if (typeof window !== 'undefined') {
+  window.addEventListener('cgui:provider-change', () => {
+    useStore.getState().clearContextExactCache();
   });
 }

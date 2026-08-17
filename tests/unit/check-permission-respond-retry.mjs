@@ -13,6 +13,8 @@ import assert from 'node:assert/strict';
 
 // 浏览器全局垫片(store/hook 模块加载所需)
 globalThis.localStorage = { getItem: () => null, setItem: () => {}, removeItem: () => {} };
+globalThis.addEventListener = () => {};
+globalThis.removeEventListener = () => {};
 globalThis.window = globalThis;
 globalThis.document = { addEventListener() {}, removeEventListener() {} };
 

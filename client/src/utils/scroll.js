@@ -16,6 +16,50 @@ export function clampScrollTop({ scrollTop, scrollHeight, clientHeight, stickToB
   return Math.min(Math.max(0, scrollTop || 0), max);
 }
 
+// 流式跟底与用户阅读意图的最小判据。只要 scrollTop 真正向上移动，就立刻暂停跟底；
+// 不能等用户已经离底数百像素才上锁，否则每个 token 的吸底写入会和触控板争抢位置。
+// 方向以 scrollTop 的实际变化为准，不依赖 wheel.deltaY（触控板/缩放下该值不可靠）。
+export function shouldPauseAutoScroll({ previousTop, currentTop }) {
+  if (!Number.isFinite(previousTop) || !Number.isFinite(currentTop)) return false;
+  return currentTop < previousTop - 0.5;
+}
+
+export function beginScrollTransaction(kind, target, startedAt = performance.now()) {
+  return { kind, target, startedAt, active: true };
+}
+
+export function advanceScrollTransaction(transaction, {
+  previousTop,
+  currentTop,
+  target = transaction?.target,
+  now = performance.now(),
+} = {}) {
+  if (!transaction?.active) return { transaction: null, handled: false, userMovedAway: false };
+  if (now - transaction.startedAt > 1000) {
+    return { transaction: null, handled: false, userMovedAway: false, expired: true };
+  }
+  if (Math.abs(currentTop - target) <= 1) {
+    return { transaction: null, handled: true, userMovedAway: false, reached: true };
+  }
+  const direction = Math.sign(target - previousTop);
+  const movement = currentTop - previousTop;
+  const movingToward = direction >= 0
+    ? movement >= -0.5 && currentTop <= target + 1
+    : movement <= 0.5 && currentTop >= target - 1;
+  if (movingToward) {
+    return {
+      transaction: { ...transaction, target },
+      handled: true,
+      userMovedAway: false,
+    };
+  }
+  return { transaction: null, handled: false, userMovedAway: movement < -0.5 };
+}
+
+export function keyRequestsReading(key) {
+  return key === 'PageUp' || key === 'ArrowUp' || key === 'Home';
+}
+
 // 容器【宽度】变化(开/关右侧面板、拖分屏宽、关窗格)后消息会重排,总高随之变化。
 // Blink/Gecko 有 scroll anchoring 会自动补偿 scrollTop,WKWebView(Tauri 的 webview,
 // 以及 iOS/macOS Safari)没有 —— scrollTop 原地不动而内容整体位移,视口就可能停在两条

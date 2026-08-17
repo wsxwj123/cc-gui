@@ -6,7 +6,7 @@ import { TodoPanel } from './TodoPanel.jsx';
 import { confirmDialog } from '../utils/confirmDialog.jsx';
 import { ImageLightbox } from './ImageLightbox.jsx';
 import { AnchoredPopover } from './SessionSelectors.jsx';
-import { isSteered, firstSteerableIndex } from '../utils/steerQueue.js';
+import { isSteered, firstSteerableIndex, isSteerBarrier } from '../utils/steerQueue.js';
 
 // Permission mode metadata — mirrors `claude --permission-mode <choice>`。
 // P2.1:文案对齐官方六档语义(RESEARCH-mode-semantics §④b);bypass 中文名保持「放任」。
@@ -187,7 +187,7 @@ const TYPE_LABELS = {
 const TODO_AGENT_TERMINAL = ['done', 'error', 'stopped'];
 const TODO_BG_TERMINAL = ['done', 'failed', 'killed', 'stopped', 'error'];
 
-export function ChatInput({ onSend, onStop, onStopBackground, onAccelerate, canSteer = false, onBackground, suggestion = null, onDismissSuggestion, disabled, isStreaming, backgroundWorking = false, queueLength = 0, queueItems = [], onRemoveFromQueue, onEditFromQueue, todos = null, plan = '', permKey = null, sessionId = null, tabIndex = null, onBtwOpen, btwUnread = 0 }) {
+export function ChatInput({ onSend, onStop, onStopBackground, onAccelerate, canSteer = false, onBackground, suggestion = null, onDismissSuggestion, disabled, isStreaming, backgroundWorking = false, queueLength = 0, queueItems = [], onRemoveFromQueue, onEditFromQueue, paneId = null, claimDraft = null, onRefreshQueueEvidence, todos = null, plan = '', permKey = null, sessionId = null, tabIndex = null, onBtwOpen, btwUnread = 0 }) {
   const [text, setText] = useState('');
   // 编辑重发态(#4):点击「重新编辑并发送」后进入。此时历史消息尚未被破坏,
   // 按 Esc 可整条取消(清空输入+通知上层撤销待回滚),给用户反悔余地。
@@ -221,7 +221,15 @@ export function ChatInput({ onSend, onStop, onStopBackground, onAccelerate, canS
   const navigatingHistoryRef = useRef(false);
   // 短交互定时器(高亮环褪去/延迟 focus/光标归位)统一登记,卸载 cleanup 全清。
   const timersRef = useRef(new Set());
-  useEffect(() => () => { for (const t of timersRef.current) clearTimeout(t); timersRef.current.clear(); }, []);
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      for (const t of timersRef.current) clearTimeout(t);
+      timersRef.current.clear();
+    };
+  }, []);
   const later = (fn, ms) => {
     const t = setTimeout(() => { timersRef.current.delete(t); fn(); }, ms);
     timersRef.current.add(t);
@@ -249,6 +257,8 @@ export function ChatInput({ onSend, onStop, onStopBackground, onAccelerate, canS
   // the hidden `--remote-control` pty owns the session file, so spawning a `-p`
   // turn here would double-write the same jsonl. Reclaim to unlock.
   const rcLocked = useStore((s) => (sessionId ? !!s.remoteControlled[sessionId] : false));
+  const composerStateRef = useRef(null);
+  composerStateRef.current = { text, attachments, disabled: !!disabled || rcLocked, permKey, paneId };
   // #12:任务清单转圈跟随"会话整体是否仍有工作":本地流式 || 本会话活跃子代理(含主会话
   // 停止后仍在跑的后台化子代理)|| 本会话 run_in_background 后台长任务(如模型训练)。
   // 主会话+子代理+后台任务全停才停转。selector 返回布尔,引用稳定不多渲。
@@ -319,12 +329,13 @@ export function ChatInput({ onSend, onStop, onStopBackground, onAccelerate, canS
   };
 
   useEffect(() => {
-    try { setText(localStorage.getItem(draftKey) || ''); }
+    try { setText(claimDraft?.sendable ? claimDraft.text : (localStorage.getItem(draftKey) || '')); }
     catch { setText(''); }
+    setAttachments(claimDraft?.sendable && Array.isArray(claimDraft.attachments) ? claimDraft.attachments : []);
     setHistoryCursor(-1);
     setEditingResend(false);
     draftBeforeHistoryRef.current = '';
-  }, [draftKey]);
+  }, [draftKey, claimDraft?.claimId, claimDraft?.sendable]);
 
   // 串扰#10b:key 变更帧跳过持久化 —— 切会话时本 effect 先于上面的 load effect 引发的
   // rerender 执行,会以【旧 text + 新 key】写一次 localStorage(A 的草稿写进 B 的 key,
@@ -334,10 +345,13 @@ export function ChatInput({ onSend, onStop, onStopBackground, onAccelerate, canS
   useEffect(() => {
     if (prevDraftKeyRef.current !== draftKey) { prevDraftKeyRef.current = draftKey; return; }
     try {
-      if (text) localStorage.setItem(draftKey, text);
+      if (claimDraft?.sendable) {
+        useStore.getState().updateClaimDraft(paneId, claimDraft.claimId, { text, attachments });
+        localStorage.removeItem(draftKey);
+      } else if (text) localStorage.setItem(draftKey, text);
       else localStorage.removeItem(draftKey);
     } catch {}
-  }, [draftKey, text]);
+  }, [draftKey, text, attachments, paneId, claimDraft?.claimId, claimDraft?.sendable]);
 
   // Pane-targeted composer fill ("重新编辑" rollback + queue edit). The event
   // carries targetKey = the originating pane's permKey; only the pane whose key
@@ -563,7 +577,7 @@ export function ChatInput({ onSend, onStop, onStopBackground, onAccelerate, canS
     // 已输入 / 的情况下列表永远空。count 由 commands/isAnthropic 派生,变化即触发更新。
   }, [text, filteredCommands.length]);
 
-  const handleSend = () => {
+  const handleSend = (submitOpts = {}) => {
     const trimmed = text.trim();
     // Allow send if there's text OR attachments (so "just describe this image" works).
     if (!trimmed && attachments.length === 0) return;
@@ -582,7 +596,8 @@ export function ChatInput({ onSend, onStop, onStopBackground, onAccelerate, canS
     const meta = attachments.length > 0
       ? { attachments: attachments.map((a) => ({ kind: a.kind, name: a.name, path: a.path, preview: a.preview, bytes: a.bytes })), displayText: trimmed }
       : undefined;
-    onSend(outbound, meta ? { meta } : undefined);
+    onSend(outbound, meta ? { ...submitOpts, meta } : submitOpts);
+    if (claimDraft?.sendable) useStore.getState().clearClaimDraft(paneId, claimDraft.claimId);
     setText('');
     setEditingResend(false);
     setHistoryCursor(-1);
@@ -592,6 +607,52 @@ export function ChatInput({ onSend, onStop, onStopBackground, onAccelerate, canS
     setAtState(null);
     try { localStorage.removeItem(draftKey); } catch {}
     textareaRef.current?.focus();
+  };
+
+  const claimQueueItem = async (item) => {
+    if (!item?.queueId || item.steerState !== 'needs-review' || !paneId || !permKey) return;
+    const evidence = await onRefreshQueueEvidence?.(item.queueId);
+    if (evidence?.matched || !mountedRef.current) return;
+    if (!evidence?.refreshed || !evidence.current) {
+      await confirmDialog('无法刷新会话历史，暂不取回这条消息。', { confirmText: '知道了', cancelText: '关闭' });
+      return;
+    }
+    const empty = () => {
+      const state = composerStateRef.current;
+      return mountedRef.current && state?.permKey === permKey && state?.paneId === paneId
+        && !state.disabled && !state.text.trim() && state.attachments.length === 0;
+    };
+    if (!empty()) {
+      await confirmDialog('请先处理当前草稿或解除输入框锁定，再取回这条消息。', { confirmText: '知道了', cancelText: '关闭' });
+      return;
+    }
+    const confirmed = await confirmDialog(
+      '原消息可能已被模型接收，再次发送可能重复。是否取回为新消息？',
+      { confirmText: '继续取回', cancelText: '取消' },
+    );
+    if (!confirmed || !empty()) return;
+    const attachmentsToRestore = Array.isArray(item.opts?.meta?.attachments) ? item.opts.meta.attachments : [];
+    try {
+      const checks = await Promise.all(attachmentsToRestore.map((attachment) => (
+        typeof attachment?.path === 'string' && attachment.path
+          ? fetch(`/api/files/read?path=${encodeURIComponent(attachment.path)}`, { method: 'HEAD' })
+          : Promise.resolve({ ok: false })
+      )));
+      if (checks.some((response) => !response.ok)) throw new Error('attachment-unavailable');
+    } catch {
+      await confirmDialog('附件无法完整恢复，消息仍保留在待复核队列。', { confirmText: '知道了', cancelText: '关闭' });
+      return;
+    }
+    const current = (useStore.getState().messageQueue[permKey] || []).find((entry) => entry?.queueId === item.queueId);
+    if (!empty() || current?.steerState !== 'needs-review' || current.text !== item.text) return;
+    const store = useStore.getState();
+    const claimId = store.beginQueueClaim(permKey, item.queueId, paneId);
+    if (!claimId) return;
+    if (!useStore.getState().writePendingClaimDraft(permKey, item.queueId, claimId, paneId)
+      || !useStore.getState().finalizeQueueClaim(permKey, item.queueId, claimId, paneId)) {
+      useStore.getState().rollbackQueueClaim(permKey, item.queueId, claimId, paneId);
+      await confirmDialog('取回未完成，消息仍保留在待复核队列。', { confirmText: '知道了', cancelText: '关闭' });
+    }
   };
 
   const selectCommand = (cmd) => {
@@ -754,9 +815,13 @@ export function ChatInput({ onSend, onStop, onStopBackground, onAccelerate, canS
     // 优先于历史导航——先召回队列,队列空了再翻历史。
     if (e.key === 'ArrowUp' && !e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey && text.trim() === '') {
       // 已注入的条目跳过:它已经送达 CLI,召回到输入框等于给了一个撤不回来的撤回。
+      // ③判官必修-3:barrier(unknown/needs-review/claiming/accepted)同样跳过——否则 ↑ 会把
+      // "可能已送达"的条目无确认回填重发(且 removeFromQueue 拒删使队列还残留第三份);
+      // needs-review 的编辑必须走"取回"确认流程。'kept' 是用户决定不发,也不参与召回。
       let lastIdx = -1;
       for (let i = queueItems.length - 1; i >= 0; i--) {
-        if (!queueItems[i]?.hidden && !isSteered(queueItems[i])) { lastIdx = i; break; }
+        const q = queueItems[i];
+        if (!q?.hidden && !isSteered(q) && !isSteerBarrier(q) && q?.steerState !== 'kept') { lastIdx = i; break; }
       }
       if (lastIdx >= 0 && onEditFromQueue) {
         e.preventDefault();
@@ -812,13 +877,15 @@ export function ChatInput({ onSend, onStop, onStopBackground, onAccelerate, canS
       }
     }
 
-    // 发送:裸 Enter 发送,Shift+Enter 换行(用户要求,标准聊天习惯;Cmd/Ctrl+Enter 仍兼容)。
+    // 发送语义对齐 CLI 输入队列:裸 Enter 正常提交(忙回合由上层排队),Shift+Enter 换行;
+    // 忙回合的 Cmd/Ctrl+Enter 显式请求无打断并入。空闲时 Cmd/Ctrl+Enter 仍是普通提交。
     // IME 合成期已在本函数顶部 return,中文候选回车不会误发。stopPropagation 阻止冒泡到 window
     // 上的 plan/权限卡片 Enter 监听(否则那个 Enter 会被吃掉去"批准计划")。
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       e.stopPropagation();
-      handleSend();
+      const mergeIntoCurrentTurn = isStreaming && (e.metaKey || e.ctrlKey);
+      handleSend({ steer: mergeIntoCurrentTurn });
     }
   };
 
@@ -1137,7 +1204,7 @@ export function ChatInput({ onSend, onStop, onStopBackground, onAccelerate, canS
             {isStreaming && (
               <>
                 <button
-                  onClick={handleSend}
+                  onClick={() => handleSend()}
                   disabled={!text.trim() && attachments.length === 0}
                   className="shrink-0 h-8 px-3 max-md:px-2.5 rounded-full bg-accent/10 hover:bg-accent/20 text-accent flex items-center justify-center gap-1 transition-colors disabled:opacity-50 text-[11px] font-medium"
                   title="入队（当前消息发送完后自动发出）"
@@ -1182,7 +1249,7 @@ export function ChatInput({ onSend, onStop, onStopBackground, onAccelerate, canS
               </button>
             ) : (
               <button
-                onClick={handleSend}
+                onClick={() => handleSend()}
                 disabled={(!text.trim() && attachments.length === 0) || disabled || rcLocked}
                 className="btn-accent shrink-0 w-8 h-8 rounded-full flex items-center justify-center"
                 title="发送"
@@ -1220,7 +1287,9 @@ export function ChatInput({ onSend, onStop, onStopBackground, onAccelerate, canS
             <div className="px-3 py-1.5 flex items-center gap-2 border-b border-accent/15">
               <Send size={11} className="text-accent shrink-0" />
               <span className="text-ink-soft flex-1">
-                <b>{queueItems.filter((q) => !q.hidden && !isSteered(q)).length}</b> 条消息已排队 · 当前回复完成后自动发出
+                {queueItems.some((q) => q.steerState === 'needs-review' || q.steerState === 'claiming')
+                  ? '并入结果无法确认，已暂停后续队列'
+                  : <><b>{queueItems.filter((q) => !q.hidden && !isSteered(q)).length}</b> 条消息已排队 · 当前回复完成后自动发出</>}
               </span>
               {onAccelerate && (
                 <button
@@ -1241,13 +1310,37 @@ export function ChatInput({ onSend, onStop, onStopBackground, onAccelerate, canS
                 // 画成用户气泡(R7-3)。两者都返回 null 而不是过滤数组 —— 编辑/删除回调按
                 // 下标操作 store,索引必须与 store 对齐。
                 q.hidden || isSteered(q) ? null :
-                <li key={`${q.queuedAt}-${i}`} className="px-3 py-1.5 flex items-start gap-2 group hover:bg-accent/5">
+                <li key={q.queueId || `${q.queuedAt}-${i}`} className="px-3 py-1.5 flex items-start gap-2 group hover:bg-accent/5">
                   <span className="text-[10px] text-ink-faint font-mono shrink-0 mt-0.5">#{i + 1}</span>
                   <div className="flex-1 min-w-0">
                     <span className="text-ink-soft block line-clamp-2 leading-snug" title={q.text}>{q.text}</span>
+                    {q.steerState === 'unknown' && <span className="text-[10px] text-amber-700">正在确认并入结果…</span>}
+                    {q.steerState === 'claiming' && <span className="text-[10px] text-amber-700">正在安全取回…</span>}
+                    {q.steerState === 'kept' && <span className="text-[10px] text-ink-faint">已保留，不会自动发送</span>}
                   </div>
                   <div className="shrink-0 flex items-center gap-0.5 opacity-60 group-hover:opacity-100 transition-opacity">
-                    {onEditFromQueue && !isSteered(q) && (
+                    {q.steerState === 'needs-review' && (
+                      <>
+                        <button
+                          onClick={() => claimQueueItem(q)}
+                          className="px-2 py-1 hover:bg-accent/15 rounded text-[10px] text-accent"
+                          aria-label="取回为新消息"
+                        >
+                          取回为新消息
+                        </button>
+                        <button
+                          type="button"
+                          // ①判官必修-1:此前是无 onClick 的假按钮。置 'kept'(resolved 非 barrier):
+                          // 解除队首 barrier、不自动发送,chip 显示"已保留"。
+                          onClick={() => useStore.getState().settleSteer(permKey, q.queueId, 'kept')}
+                          className="px-2 py-1 hover:bg-accent/15 rounded text-[10px] text-ink-faint"
+                          aria-label="保留不发"
+                        >
+                          保留不发
+                        </button>
+                      </>
+                    )}
+                    {onEditFromQueue && !isSteerBarrier(q) && (
                       <button
                         onClick={() => onEditFromQueue(i)}
                         className="p-1 hover:bg-accent/15 rounded"
@@ -1256,9 +1349,21 @@ export function ChatInput({ onSend, onStop, onStopBackground, onAccelerate, canS
                         <Pencil size={11} className="text-accent" />
                       </button>
                     )}
-                    {onRemoveFromQueue && !isSteered(q) && (
+                    {/* ①删除出口:needs-review 也可删(取回失败/附件丢失时唯一出路),带确认;
+                        kept 非 barrier 本就放行,同样确认(消息可能其实已送达)。unknown/accepted/
+                        claiming 仍不可删(结果在途,删了与对账竞态)。 */}
+                    {onRemoveFromQueue && (!isSteerBarrier(q) || q.steerState === 'needs-review') && (
                       <button
-                        onClick={() => onRemoveFromQueue(i)}
+                        onClick={async () => {
+                          if (q.steerState === 'needs-review' || q.steerState === 'kept') {
+                            const ok = await confirmDialog(
+                              '删除后不可恢复。若这条消息其实已被模型接收，删除不影响已进行的回合。确认删除？',
+                              { danger: true },
+                            );
+                            if (!ok) return;
+                          }
+                          onRemoveFromQueue(i);
+                        }}
                         className="p-1 hover:bg-red-100 rounded"
                         title="从队列删除"
                       >

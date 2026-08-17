@@ -1,7 +1,8 @@
 import { useEffect, useLayoutEffect, useRef, useState, useCallback } from 'react';
+import { turnWaveWidth } from '../utils/turnWave.js';
 
-// 右侧竖向回合进度条(仿 gemini-voyager + macOS Dock 放大)。
-// 每个用户回合一个点;hover 按【索引距离】做 dock 放大 + 浮窗显示该回合消息摘要,
+// 右侧竖向回合进度条(Claude Code/Codex 式线性波形 + macOS Dock 放大)。
+// 每个用户回合一条横线;hover 按指针的实际纵向像素距离向左拉长 + 浮窗显示该回合消息摘要,
 // 点击平滑滚动到该回合。
 //
 // 定位:作为 SessionDetail 根(position:relative)的 absolute 子元素,贴 right;
@@ -12,17 +13,17 @@ import { useEffect, useLayoutEffect, useRef, useState, useCallback } from 'react
 
 const SHOW_DELAY = 220;
 const HIDE_DELAY = 120;
-// Dock 放大:按到悬停点的索引距离,近大远小。
-const magnify = (d) => (d === 0 ? 1.9 : d === 1 ? 1.45 : d === 2 ? 1.15 : 1);
-
-export default function TurnScrubber({ containerRef, turns }) {
+export default function TurnScrubber({ containerRef, turns, onNavigate }) {
   const rootRef = useRef(null);                // 本组件根,取其 offsetParent 作定位基准
   const [box, setBox] = useState(null);        // { top, height } 相对根
   const [positions, setPositions] = useState([]); // 每个回合点 0~1
-  const [hoverIdx, setHoverIdx] = useState(null);
+  const [pointerY, setPointerY] = useState(null);
   const [tipIdx, setTipIdx] = useState(null);
   const showTimer = useRef(0);
   const hideTimer = useRef(0);
+  const pointerFrame = useRef(0);
+  const pendingPointerY = useRef(null);
+  const committedPointerY = useRef(null);
   // turns 经 ref 读取,使 measure 身份稳定 → ResizeObserver 不会每帧(流式每 token)重建。
   const turnsRef = useRef(turns);
   turnsRef.current = turns;
@@ -65,7 +66,11 @@ export default function TurnScrubber({ containerRef, turns }) {
     return () => { ro.disconnect(); window.removeEventListener('resize', measure); };
   }, [containerRef, measure]);
 
-  useEffect(() => () => { clearTimeout(showTimer.current); clearTimeout(hideTimer.current); }, []);
+  useEffect(() => () => {
+    clearTimeout(showTimer.current);
+    clearTimeout(hideTimer.current);
+    cancelAnimationFrame(pointerFrame.current);
+  }, []);
 
   // 平滑滚动到回合。不用 scrollIntoView/scrollTo 的 behavior:'smooth' —— 实测某些
   // webview(含本 app 的 WKWebView)对程序化平滑滚动不响应。用 rAF 手动缓动,处处可用。
@@ -76,6 +81,7 @@ export default function TurnScrubber({ containerRef, turns }) {
     const target = Math.max(0, node.offsetTop - 8);
     const start = el.scrollTop;
     const dist = target - start;
+    onNavigate?.();
     if (Math.abs(dist) < 2) return;
     const dur = 320;
     let t0 = null;
@@ -89,17 +95,33 @@ export default function TurnScrubber({ containerRef, turns }) {
     requestAnimationFrame(step);
   };
 
-  const enterDot = (i) => {
-    setHoverIdx(i);
+  const enterLine = (i) => {
     clearTimeout(hideTimer.current);
     clearTimeout(showTimer.current);
     showTimer.current = setTimeout(() => setTipIdx(i), SHOW_DELAY);
   };
   const leaveBar = () => {
-    setHoverIdx(null);
+    cancelAnimationFrame(pointerFrame.current);
+    pointerFrame.current = 0;
+    pendingPointerY.current = null;
+    committedPointerY.current = null;
+    setPointerY(null);
     clearTimeout(showTimer.current);
     clearTimeout(hideTimer.current);
     hideTimer.current = setTimeout(() => setTipIdx(null), HIDE_DELAY);
+  };
+  const moveBar = (e) => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    pendingPointerY.current = Math.max(0, Math.min(rect.height, e.clientY - rect.top));
+    if (pointerFrame.current) return;
+    pointerFrame.current = requestAnimationFrame(() => {
+      pointerFrame.current = 0;
+      const next = pendingPointerY.current;
+      if (next == null) return;
+      if (committedPointerY.current != null && Math.abs(next - committedPointerY.current) < 1) return;
+      committedPointerY.current = next;
+      setPointerY(next);
+    });
   };
 
   if (!box || turns.length < 2) return null;
@@ -107,6 +129,7 @@ export default function TurnScrubber({ containerRef, turns }) {
   return (
     <div
       ref={rootRef}
+      onPointerMove={moveBar}
       onMouseLeave={leaveBar}
       style={{ position: 'absolute', right: 4, top: box.top, height: box.height, width: 18, zIndex: 45 }}
       className="max-md:hidden pointer-events-auto"
@@ -119,16 +142,26 @@ export default function TurnScrubber({ containerRef, turns }) {
         return (
         <button
           key={t.uuid || i}
-          onMouseEnter={() => enterDot(i)}
+          onMouseEnter={() => enterLine(i)}
           onClick={() => scrollToTurn(t.uuid)}
           style={{
-            position: 'absolute', top: `${n * 100}%`, left: '50%',
-            transform: `translate(-50%, -50%) scale(${magnify(hoverIdx == null ? 9 : Math.abs(i - hoverIdx))})`,
-            transition: 'transform 0.12s ease, background-color 0.12s',
+            position: 'absolute', top: `${n * 100}%`, right: 0,
+            transform: 'translateY(-50%)',
           }}
-          className="w-[6px] h-[6px] rounded-full bg-ink-faint/50 hover:bg-accent cursor-pointer"
+          className="w-[18px] h-3 cursor-pointer flex items-center justify-end group"
           aria-label={`跳到第 ${i + 1} 个回合`}
-        />
+        >
+          <span
+            data-turn-wave
+            style={{
+              width: pointerY == null ? 6 : turnWaveWidth(Math.abs(pointerY - n * box.height)),
+              height: 2,
+            }}
+            className={`block transition-[width,background-color,opacity] duration-75 ease-out ${
+              pointerY != null && Math.abs(pointerY - n * box.height) < 6 ? 'bg-accent opacity-100' : 'bg-ink-faint/55 opacity-80 group-hover:bg-accent'
+            }`}
+          />
+        </button>
         );
       })}
       {tipIdx != null && positions[tipIdx] != null && turns[tipIdx] && (

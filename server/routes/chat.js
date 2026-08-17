@@ -1310,6 +1310,8 @@ router.post('/chat', async (req, res) => {
     cronToolIds: new Set(),
     cronHoldUntil: 0,
     cronPendingDelete: false,
+    // 同一 slot 内的 steer 本地接纳回执。随 slot 完整 dispose 释放；不做 TTL/跨进程复用。
+    steerReceipts: new Map(),
   };
   activeProcesses.set(procId, slot);
   slot.nulWatcher = startWinNulWatcher(workingDir);
@@ -1722,8 +1724,10 @@ router.post('/chat/permission-mode', async (req, res) => {
 // ── 引导注入(无打断 steering)────────────────────────────────────────────────
 // 「忙」的判据:复用块(:1107)那一行【只把 s.idle 取反】,其余存活条件逐字照抄。
 //   复用块要的是 s.idle(回合间保活、等下一条消息)→ push 开【新回合】;
-//   这里要的是 !s.idle(回合正在跑)→ push 被 CLI 在下一个工具结果边界折叠进【同一回合】
-//   (实测:1 个 init / 1 个 result,不传 priority = 默认档折叠;'later' 才另起回合)。
+//   这里要的是 !s.idle(回合正在跑)→ 不传 priority:r7 真机实测【不传 = 消息在工具边界
+//   折叠进当前回合,1 init/1 result】。SDK 类型里的 priority?('now'|'next'|'later')零文档、
+//   未实测('later' 按类型语义才是另起回合),判官必修-5:未经真机 A/B 不得显式传值——
+//   传错档会动摇 r7 取证的两形态落盘与回合切分契约。
 // 与 v0.2.264 复活守卫自洽:主 agent 在 4s 去抖 finalize 之后续跑时,守卫(:1561)把
 // slot.idle 翻回 false 并置 revived —— 那正是"确实有一个在跑的回合",此时注入应当成立,
 // 所以判据用 s.idle(会随复活翻转)而不是 finishedAt/lastResultAt 这类不回退的时刻字段。
@@ -1744,24 +1748,60 @@ export function findBusySlot(procs, sessionId) {
   return null;
 }
 
+const STEER_SESSION_RE = /^[A-Za-z0-9._-]{1,128}$/;
+const STEER_UUID_RE = /^(?:[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}|steer-[a-z0-9-]+)$/;
+
+export function validateSteerRequest(body) {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return null;
+  if (typeof body.sessionId !== 'string' || typeof body.uuid !== 'string' || typeof body.content !== 'string') return null;
+  const sessionId = body.sessionId.trim();
+  const uuid = body.uuid.trim().toLowerCase();
+  if (!STEER_SESSION_RE.test(sessionId) || uuid.length > 128 || !STEER_UUID_RE.test(uuid) || !body.content.trim()) return null;
+  return { sessionId, uuid, content: body.content };
+}
+
+export function acceptSteer(procs, request) {
+  for (const [pid, slot] of procs) {
+    if (!slot || slot.sessionId !== request.sessionId) continue;
+    const previous = slot.steerReceipts?.get(request.uuid);
+    if (previous === undefined) continue;
+    if (previous !== request.content) {
+      return { status: 409, body: { ok: false, code: 'steer-id-conflict', error: '并入标识冲突' } };
+    }
+    return { status: 200, body: { ok: true, accepted: true, duplicate: true, pid: String(pid) } };
+  }
+  const hit = findBusySlot(procs, request.sessionId);
+  if (!hit) {
+    return { status: 409, body: { ok: false, code: 'no-active-turn', error: '当前没有可并入的回合' } };
+  }
+  const msg = {
+    type: 'user',
+    message: { role: 'user', content: request.content },
+    parent_tool_use_id: null,
+    // ⑤不传 priority(见 findBusySlot 上方注释):实测默认档即"同回合工具边界折叠"。
+    uuid: request.uuid,
+  };
+  try {
+    if (!hit.slot.input.push(msg)) {
+      return { status: 409, body: { ok: false, code: 'no-active-turn', error: '当前没有可并入的回合' } };
+    }
+  } catch {
+    return { status: 500, body: { ok: false, code: 'steer-acceptance-unknown', error: '并入结果无法确认' } };
+  }
+  if (!(hit.slot.steerReceipts instanceof Map)) hit.slot.steerReceipts = new Map();
+  hit.slot.steerReceipts.set(request.uuid, request.content);
+  return { status: 200, body: { ok: true, accepted: true, duplicate: false, pid: String(hit.pid) } };
+}
+
 // 独立路由(照 /chat/permission-mode 形态:按 sessionId 找 slot → 直接对 slot 动作),
 // 完全绕开 POST /chat 的复用块与 tearingDown 等待/强杀段 —— 那两段一个字不动。
 router.post('/chat/steer', (req, res) => {
-  const { sessionId, content, uuid } = req.body || {};
-  if (!sessionId || typeof content !== 'string' || !content.trim()) {
-    return res.status(400).json({ error: 'sessionId 与 content 必填' });
+  const request = validateSteerRequest(req.body);
+  if (!request) {
+    return res.status(400).json({ ok: false, code: 'invalid-steer-request', error: '并入请求参数无效' });
   }
-  const hit = findBusySlot(activeProcesses, String(sessionId));
-  if (!hit) return res.status(409).json({ error: 'no-active-turn' });
-  // 形状与复用块 :1149 的 push 逐字一致,只多一个 uuid —— 带 uuid 时 SDK 会回吐
-  // command_lifecycle{queued|started|completed},前端据此驱动"已排队 → 已并入"角标。
-  const msg = { type: 'user', message: { role: 'user', content: String(content) } };
-  if (uuid) msg.uuid = String(uuid);
-  // push 返回 false = 队列已 close(finalize 的 else 分支/停止兜底刚关流,但 closing/idle/
-  // pumpEnded 三面旗还没落地)→ 这条消息没人会读到,必须当作"没有活回合"回 409,让客户端
-  // 回落入队。绝不能凭"旗看起来是忙的"就回 200(判官致命-1:200 空吞 = 用户文字无声蒸发)。
-  if (!hit.slot.input.push(msg)) return res.status(409).json({ error: 'no-active-turn' });
-  res.json({ ok: true, pid: hit.pid });
+  const result = acceptSteer(activeProcesses, request);
+  res.status(result.status).json(result.body);
 });
 
 
@@ -2472,20 +2512,6 @@ function parseContextMarkdown(md) {
   return out;
 }
 
-// 从会话 jsonl 读原始 cwd:`claude --resume <sid>` 要求进程 cwd 哈希到会话所在 project,
-// 否则 CLI 报 "No conversation found" → /context 落空("未获取到 /context 输出",用户报"当前无法获取")。
-// 前端传的 cwd(来自 session.projectPath)对某些会话为空 → 旧代码回落 homedir() 必然 mismatch。
-// jsonl 的消息行带权威 cwd,直接读它最可靠(与 provider 无关,官方/第三方同理)。
-function cwdFromSessionFile(projectHash, sessionId) {
-  if (!/^[A-Za-z0-9._-]+$/.test(projectHash) || !/^[A-Za-z0-9._-]+$/.test(sessionId)) return '';
-  try {
-    const txt = readFileSync(pathJoin(homedir(), '.claude', 'projects', projectHash, `${sessionId}.jsonl`), 'utf8');
-    const m = txt.match(/"cwd":"((?:[^"\\]|\\.)*)"/); // 首个带 cwd 的行
-    if (m) return JSON.parse(`"${m[1]}"`); // 反转义 JSON 字符串(路径含反斜杠时)
-  } catch {}
-  return '';
-}
-
 // 把 SDK getContextUsage() 的结构化返回映射成本端点历史(spawn+parse)口径的字段,
 // 前端徽章/明细零改动即兼容。窗口取 maxTokens(实测 CLI 内部 maxTokens===rawMaxTokens,
 // percentage=round(total/max*100),与 /context markdown 的"a / b (c%)"同口径);第三方
@@ -2499,7 +2525,8 @@ function mapSdkContextUsage(u) {
     byServer[s] = (byServer[s] || 0) + (t.tokens || 0);
   }
   return {
-    source: 'sdk', // 调试标记:毫秒级直调路径(vs 回落 spawn 路径无此字段)
+    source: 'sdk',
+    sampledAt: new Date().toISOString(),
     model: u.model || null,
     totalTokens: u.totalTokens || 0,
     windowTokens: max,
@@ -2516,37 +2543,132 @@ function mapSdkContextUsage(u) {
   };
 }
 
+const CONTEXT_SESSION_RE = /^[A-Za-z0-9._-]{1,128}$/;
+const CONTEXT_PROJECT_RE = /^[A-Za-z0-9._-]{1,4096}$/;
+
+export function validateContextRequest(req) {
+  const sessionId = typeof req.params?.sessionId === 'string' ? req.params.sessionId : '';
+  if (!CONTEXT_SESSION_RE.test(sessionId)) return null;
+  const values = {};
+  for (const name of ['projectHash', 'cwd', 'model']) {
+    const value = req.query?.[name];
+    if (value === undefined) { values[name] = ''; continue; }
+    if (typeof value !== 'string') return null;
+    values[name] = value;
+  }
+  if (values.projectHash && !CONTEXT_PROJECT_RE.test(values.projectHash)) return null;
+  if (values.cwd && (values.cwd.length > 4096 || !values.cwd.trim())) return null;
+  if (values.model && !MODEL_ARG_RE.test(values.model)) return null;
+  return { sessionId, ...values };
+}
+
+function readHistoricalContextMeta(sessionId) {
+  const projectsDir = pathJoin(homedir(), '.claude', 'projects');
+  let file = '';
+  let projectHash = '';
+  let dirs = [];
+  try { dirs = readdirSync(projectsDir); } catch {}
+  for (const dir of dirs) {
+    if (!CONTEXT_PROJECT_RE.test(dir)) continue;
+    const candidate = pathJoin(projectsDir, dir, `${sessionId}.jsonl`);
+    if (existsSync(candidate)) { file = candidate; projectHash = dir; break; }
+  }
+  if (!file) return null;
+  let raw = '';
+  try { raw = readFileSync(file, 'utf8'); } catch { return null; }
+  let cwd = '';
+  let model = null;
+  for (const line of raw.split('\n')) {
+    if (!line.trim()) continue;
+    try {
+      const record = JSON.parse(line);
+      if (!cwd && typeof record?.cwd === 'string' && record.cwd) cwd = record.cwd;
+      if (record?.type === 'assistant' && typeof record.message?.model === 'string'
+        && record.message.model && !record.message.model.startsWith('<')) model = record.message.model;
+    } catch {}
+  }
+  return { sessionId, projectHash, cwd, model };
+}
+
+function trustedContextMeta(sessionId) {
+  for (const slot of activeProcesses.values()) {
+    if (slot.sessionId !== sessionId || slot.exitCode !== null || slot.closing) continue;
+    const cwd = typeof slot.cwd === 'string' ? slot.cwd : '';
+    return {
+      sessionId,
+      projectHash: cwd ? cwd.replace(/[^A-Za-z0-9]/g, '-') : '',
+      cwd,
+      model: slot.currentModel || slot.model || null,
+      slot,
+    };
+  }
+  return readHistoricalContextMeta(sessionId);
+}
+
+// ④判官必修-4:model 不参与 409 归属判定。正常场景就会不等——1M 会话 client 传
+// `xxx[1m]` 而 jsonl 的 model 永远是裸 id(API 回包不带 [1m]);切模型后未发送;新会话
+// meta.model 为 null——硬判等 = 徽章永久 409。model 只用于 spawn 回落的 --model 参数
+// (信客户端,MODEL_ARG_RE/safeModelArg 白名单仍拦注入)。projectHash/cwd 归属校验保留。
+export function contextHintsMatch(request, meta) {
+  return (!request.projectHash || request.projectHash === meta.projectHash)
+    && (!request.cwd || request.cwd === meta.cwd);
+}
+
+export function validContextPayload(payload) {
+  const label = (value) => typeof value === 'string' && value.trim().length > 0 && value.trim().length <= 200;
+  const nonNegative = (value) => Number.isFinite(value) && value >= 0;
+  return payload && (payload.source === 'sdk' || payload.source === 'cli')
+    && typeof payload.sampledAt === 'string' && Number.isFinite(Date.parse(payload.sampledAt))
+    && (payload.model === null || (typeof payload.model === 'string' && payload.model.trim() && payload.model.length <= 256))
+    && Number.isInteger(payload.totalTokens) && payload.totalTokens >= 0
+    && Number.isInteger(payload.windowTokens) && payload.windowTokens > 0
+    && nonNegative(payload.pct)
+    && Array.isArray(payload.categories) && payload.categories.every((item) => item && label(item.name)
+      && Number.isInteger(item.tokens) && item.tokens >= 0 && nonNegative(item.pct))
+    && Array.isArray(payload.mcpServers) && payload.mcpServers.every((item) => item && label(item.server)
+      && Number.isInteger(item.tokens) && item.tokens >= 0);
+}
+
 router.get('/context/:sessionId', async (req, res) => {
-  const { sessionId } = req.params;
-  const projectHash = req.query.projectHash || '';
+  const request = validateContextRequest(req);
+  if (!request) return res.status(400).json({ ok: false, code: 'invalid-context-request', error: '上下文请求参数无效' });
+  const meta = trustedContextMeta(request.sessionId);
+  if (!meta) return res.status(404).json({ ok: false, code: 'context-session-not-found', error: '找不到对应会话' });
+  if (!contextHintsMatch(request, meta)) {
+    return res.status(409).json({ ok: false, code: 'context-session-mismatch', error: '上下文请求与会话不匹配' });
+  }
+  const { sessionId } = request;
+  const { projectHash, cwd } = meta;
 
   // 快路(#26 常驻进程红利):目标会话的保活进程还在(流式中或 idle)→ 直调 SDK 控制
   // 请求 getContextUsage(),毫秒返回、不 fork、不留 jsonl、不碰 TCC。进程不在(draft/
   // 首轮前/已回收/旧会话)或直调失败 → 回落下面的 spawn /context 路径,行为不变。
-  for (const slot of activeProcesses.values()) {
-    if (slot.sessionId !== sessionId || slot.exitCode !== null || slot.closing) continue;
+  for (const slot of meta.slot ? [meta.slot] : []) {
     if (typeof slot.query?.getContextUsage !== 'function') continue;
     try {
+      const timeoutError = new Error('context-sdk-timeout');
       const usage = await Promise.race([
         slot.query.getContextUsage(),
         // 8s(实测 warm ~1.5-3s,大上下文近满窗时 count_tokens 往返可超 5s):超时太短会白等
         // 后再回落到更慢的 spawn(5-30s),反而更慢;放宽到 8s 让绝大多数大会话仍走快路。
-        new Promise((_, rej) => setTimeout(() => rej(new Error('getContextUsage 超时')), 8000)),
+        new Promise((_, reject) => setTimeout(() => reject(timeoutError), 8000)),
       ]);
       if (usage?.totalTokens > 0 && (usage?.maxTokens > 0 || usage?.rawMaxTokens > 0)) {
-        return res.json(mapSdkContextUsage(usage));
+        const payload = mapSdkContextUsage(usage);
+        if (!validContextPayload(payload)) {
+          return res.status(500).json({ ok: false, code: 'context-internal', error: '上下文计算失败' });
+        }
+        return res.json(payload);
       }
-    } catch {} // 控制通道异常/进程正退出 → 回落 spawn
-    break; // 同会话至多一个活 slot;直调失败也不再试其他
+    } catch (error) {
+      if (error?.message === 'context-sdk-timeout') {
+        return res.status(504).json({ ok: false, code: 'context-sdk-timeout', error: '精确上下文计算超时，请稍后重试' });
+      }
+      return res.status(500).json({ ok: false, code: 'context-internal', error: '上下文计算失败' });
+    }
   }
-  // cwd 优先级:会话 jsonl 里的权威 cwd > 前端传的 > homedir 兜底。前端有时传空 cwd(session
-  // 无 projectPath),回落 homedir 会让 --resume 找不到会话 → /context 失败。jsonl cwd 保证匹配。
-  const cwd = cwdFromSessionFile(projectHash, sessionId) || req.query.cwd || homedir();
-  // V2:不带 --model 时 CLI 按 settings.json 默认模型(如 haiku)计算窗口与显示,
-  // 与会话实际模型不符(用户报告:点徽章显示 haiku)。前端把会话当前模型传进来。
-  const model = safeModelArg(req.query.model);
   try { if (!statSync(cwd).isDirectory()) throw new Error('nd'); }
-  catch { return res.status(400).json({ error: '工作目录无效' }); }
+  catch { return res.status(400).json({ ok: false, code: 'context-cwd-invalid', error: '会话工作目录无效' }); }
 
   const args = [
     '-p', '/context',
@@ -2557,12 +2679,18 @@ router.get('/context/:sessionId', async (req, res) => {
     // 不落盘:/context 只是读当前上下文,fork 副本不该留在磁盘(否则也会冒出空白会话)。
     '--no-session-persistence',
   ];
+  // ④model 信客户端(旧行为):client 传的是会话当前模型(含 [1m] 时窗口才算得对),
+  // meta.model(jsonl 裸 id)只在客户端没传时兜底。safeModelArg 白名单不变。
+  const model = safeModelArg(request.model || meta.model);
   if (model) args.push('--model', model);
   let proc;
   try {
-    proc = claudeSpawn(args, { cwd, stdio: ['ignore', 'pipe', 'pipe'], env: cleanChildEnv() });
-  } catch (e) { return res.status(500).json({ error: 'spawn claude failed: ' + e.message }); }
-  if (!proc.pid) { proc.on('error', () => {}); return res.status(500).json({ error: 'claude CLI not found' }); }
+    proc = claudeSpawn(args, { cwd, stdio: ['ignore', 'pipe', 'pipe'], env: cleanChildEnv(), shell: false });
+  } catch { return res.status(500).json({ ok: false, code: 'context-cli-unavailable', error: '无法启动上下文计算' }); }
+  if (!proc.pid) {
+    proc.on('error', () => {});
+    return res.status(500).json({ ok: false, code: 'context-cli-unavailable', error: '无法启动上下文计算' });
+  }
   // 同 /chat/title:stderr 是 pipe 但只读 stdout,必须排空,否则 stderr 超 ~64KB 子进程挂死到超时。
   proc.stderr?.resume();
 
@@ -2581,11 +2709,16 @@ router.get('/context/:sessionId', async (req, res) => {
     cleanupFork();
     if (!res.headersSent) res.status(code).json(payload);
   };
-  const timer = setTimeout(() => finish({
-    // X2:实测超时的常见根因不是 CLI 慢,而是 macOS TCC —— 重装/升级 GUI 后
-    // cdhash 变化,完全磁盘访问的旧授权"显示勾选实为失效",子进程 open() 被挂起。
-    error: '/context 超时。若反复出现：系统设置→隐私与安全性→完全磁盘访问 里把 Claude GUI 关掉再打开，然后重启应用（重装后旧授权会失效）。',
-  }, 504), 30000);
+  const timer = setTimeout(() => finish({ ok: false, code: 'context-cli-timeout', error: '精确上下文计算超时，请稍后重试' }, 504), 30000);
+  const abandon = () => {
+    if (done || res.writableEnded) return;
+    done = true;
+    clearTimeout(timer);
+    try { killProcessTree(proc); } catch {}
+    cleanupFork();
+  };
+  req.on('aborted', abandon);
+  res.on('close', abandon);
 
   proc.stdout.on('data', (c) => {
     out += c.toString();
@@ -2605,10 +2738,14 @@ router.get('/context/:sessionId', async (req, res) => {
         if (o.type === 'result' && typeof o.result === 'string' && o.result.includes('Context Usage')) md = o.result;
       } catch {}
     }
-    if (!md) return finish({ error: '未获取到 /context 输出' }, 502);
-    finish({ raw: md, ...parseContextMarkdown(md) });
+    if (!md) return finish({ ok: false, code: 'context-output-invalid', error: '未获得有效的上下文统计' }, 502);
+    const payload = { source: 'cli', sampledAt: new Date().toISOString(), ...parseContextMarkdown(md) };
+    if (!validContextPayload(payload)) {
+      return finish({ ok: false, code: 'context-output-invalid', error: '未获得有效的上下文统计' }, 502);
+    }
+    finish(payload);
   });
-  proc.on('error', (e) => finish({ error: e.message }, 500));
+  proc.on('error', () => finish({ ok: false, code: 'context-cli-unavailable', error: '无法启动上下文计算' }, 500));
 });
 
 export default router;

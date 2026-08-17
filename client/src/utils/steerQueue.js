@@ -1,134 +1,128 @@
-// 引导注入(steer)的队列态机 —— 设计乙。
-//
-// 语义:回合进行中直发 = 入队(默认行为,与 0.2.283 一致)。只有用户点队列条目上的
-// 「⚡ 并入」才 POST /api/chat/steer 把它推进正在跑的回合。注入成功后消息【留在队列区】
-// 换个状态显示,而不是弹出去画气泡 —— 对话流里它只在回合结束、从 jsonl 重排后出现在
-// 真实的并入位置(用户实测确认该终态正确)。
-//
-// 于是"已并入"的条目有两条硬性质:
-//   ① 排空(drain)必须跳过它 —— 它已经送达 CLI 了,drain 再发一次就是双发;
-//   ② 不可编辑/不可撤回 —— 已送达的东西撤不回来,给按钮就是骗人。
-// 而"送没送到"的唯一权威是**回合结束后的持久化核对**(下面 reconcileSteered),不是
-// command_lifecycle 事件 —— 后者第三方 provider 未必发,只配做文案上的精确化。
+const BARRIER_STATES = new Set(['unknown', 'accepted', 'needs-review', 'claiming']);
 
-// 这条队列消息是否已经注入出去了。判据用 steerId 而不是状态字符串:状态可能被
-// lifecycle 事件改写(sent → merged),但只要有 id 就代表"已送达,别再发第二遍"。
+export function createQueueId(prefix = 'queue') {
+  const uuid = globalThis.crypto?.randomUUID?.();
+  return uuid || `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 12)}`;
+}
+
+export function isSteerBarrier(item) {
+  return !!(item && (BARRIER_STATES.has(item.steerState) || item.attemptWasAmbiguous));
+}
+
+// 只有已被 server 明确接纳、仍等待 JSONL UUID 对账的条目才画实时并入气泡。
 export function isSteered(item) {
-  return !!(item && item.steerId);
+  return !!(item?.steerId && item.steerState === 'accepted');
 }
 
-// 队列里第一条【还能发】的消息的下标(-1 = 没有)。
-// hidden(计划续跑等系统消息)照旧参与 drain,只是不在 UI 上显示;已注入的必须跳过。
-export function firstDrainableIndex(list) {
+// ①'kept' = 用户显式决定"保留不发"：已 resolved，非 barrier；drain/steer 都跳过它
+// （不自动发送），也不拦它后面的条目（不拦队列）。
+const firstNonKeptIndex = (list) => {
   if (!Array.isArray(list)) return -1;
-  return list.findIndex((m) => m && m.text && !isSteered(m));
-}
-
-// 第一条可以点「⚡ 并入」的消息下标:用户可见(非 hidden)且还没注入过。
-export function firstSteerableIndex(list) {
-  if (!Array.isArray(list)) return -1;
-  return list.findIndex((m) => m && m.text && !m.hidden && !isSteered(m));
-}
-
-// 内容签名:与持久化记录比对用。CLI 落盘的是原文,但空白可能被规整,故压空白后截断。
-export function steerSig(text) {
-  return String(text || '').replace(/\s+/g, ' ').trim().slice(0, 80);
-}
-
-// 持久化消息里所有用户消息的签名 → 该签名【最晚】一次落盘的时刻(ms)。
-// 判官必修-2:只有签名集合不够 —— 用户历史上发过同文(「继续」这类高频短句)时,
-// 新的同文注入消息会命中那条【旧】记录被误判"已落盘"→ 静默出队 = 丢字。所以带上时刻,
-// 由 sigLanded 只认「⚡ 之后」写进去的记录。无 timestamp 的记录记 0(= 永远算旧,
-// 宁可翻回也不误出队)。
-export function persistedUserSigs(persisted) {
-  const out = new Map();
-  for (const m of (Array.isArray(persisted) ? persisted : [])) {
-    if (m?.type !== 'user') continue;
-    const t = Array.isArray(m.text) ? m.text.join('') : m.text;
-    const sig = steerSig(t);
-    if (!sig) continue;
-    const ts = m.timestamp ? Date.parse(m.timestamp) : NaN;
-    const at = Number.isFinite(ts) ? ts : 0;
-    if (at >= (out.get(sig) ?? -1)) out.set(sig, at);
+  for (let i = 0; i < list.length; i++) {
+    if (list[i]?.steerState !== 'kept') return i;
   }
-  return out;
+  return -1;
+};
+
+// FIFO 只看（跳过 kept 后的）队首。任何 unresolved 条目都是 barrier，绝不能越过它发送后项。
+export function firstDrainableIndex(list) {
+  const i = firstNonKeptIndex(list);
+  if (i < 0) return -1;
+  const head = list[i];
+  return head?.text && !isSteerBarrier(head) ? i : -1;
 }
 
-// 持久化消息里所有能指认"这条引导消息落盘了"的 id。两种落盘形态各出一个键(实测 CLI 2.1.226):
-//   形态 A(有工具边界,折叠进同一回合):磁盘上没有 user 行,只有 attachment{queued_command},
-//     reader 合成的消息带 steerUuid = 我们 push 时传的 command uuid;
-//   形态 B(纯文本回合,排到回合末另起新回合):真 user 行,其 uuid 就是那个 command uuid。
-// 两个字段都收进同一个集合,落地判定用 steerId 直接命中 —— 比签名精确,不受同文/空白规整影响。
+export function firstSteerableIndex(list) {
+  const i = firstNonKeptIndex(list);
+  if (i < 0) return -1;
+  const head = list[i];
+  return head?.text && !head.hidden && !isSteerBarrier(head) ? i : -1;
+}
+
+// 两种已验证落盘形态：真 user.uuid，或 reader 合成 queued_command.source_uuid 后的 steerUuid。
 export function persistedSteerKeys(persisted) {
   const out = new Set();
-  for (const m of (Array.isArray(persisted) ? persisted : [])) {
-    if (m?.type !== 'user') continue;
-    if (m.uuid) out.add(m.uuid);
-    if (m.steerUuid) out.add(m.steerUuid);
+  for (const message of (Array.isArray(persisted) ? persisted : [])) {
+    if (message?.type !== 'user') continue;
+    if (typeof message.uuid === 'string' && message.uuid) out.add(message.uuid.toLowerCase());
+    if (typeof message.steerUuid === 'string' && message.steerUuid) out.add(message.steerUuid.toLowerCase());
   }
   return out;
 }
 
-// 落盘时刻容差:steeredAt 在 POST 之前取,CLI 落盘只会更晚,容差只兜毫秒级抖动。
-// 放大它就是放大"历史同文被当成本次落盘"的窗口,别调大。
-export const STEER_LAND_TOLERANCE_MS = 1000;
-
-// 这条已注入的消息,在它被 ⚡ 出去【之后】真落盘了吗?
-// 方向硬定死:拿不准一律算【没落盘】(翻回队列 → 用户看得见、可重发),
-// 因为误判"落盘了"就是静默丢字,无痕、不可恢复。
-export function sigLanded(sigMap, text, steeredAt) {
-  const sig = steerSig(text);
-  if (!sig || !sigMap) return false;
-  // Set 是旧口径(只有"有没有"),没时刻信息 → 退化成老行为
-  const at = typeof sigMap.get === 'function' ? sigMap.get(sig) : (sigMap.has?.(sig) ? Infinity : undefined);
-  if (at === undefined) return false;
-  if (!steeredAt) return true; // 条目没记 ⚡ 时刻(旧数据)→ 退回老口径,不误翻回制造双发
-  return at >= steeredAt - STEER_LAND_TOLERANCE_MS;
+export function steerLanded(item, _unusedSigs, steerKeys) {
+  if (!item?.steerId || !steerKeys?.has) return false;
+  return steerKeys.has(String(item.steerId).toLowerCase());
 }
 
-// 单条已注入条目的落地判定。两级判据,顺序不可颠倒:
-//   ① steerId 精确命中(persistedSteerKeys)—— 权威,两种落盘形态都覆盖;
-//   ② 退回签名 + steeredAt 时刻兜底 —— 给没有 steerId 的旧数据,以及 id 因故对不上的情况。
-// 方向仍旧硬定死:两级都拿不准 = 没落盘(翻回队列可见可重发),误判"落盘了"是静默丢字。
-export function steerLanded(item, sigMap, steerKeys) {
-  if (!item) return false;
-  if (item.steerId && steerKeys?.has?.(item.steerId)) return true;
-  return sigLanded(sigMap, item.text, item.steeredAt);
-}
-
-// 回合收尾的落地判定(替代旧设计里的"气泡回捞"):对每个已注入的队列条目查持久化 ——
-//   查到了 → CLI 真读了它,从队列移除(它已是对话历史的一部分);
-//   查不到 → 折叠之前回合就被停/进程死了,那条命令随 CLI 内存队列一起没了 →
-//            退回普通排队态(steerId/steerState 清掉),用户可编辑、可删、也会被 drain
-//            正常发出。**一个字都不丢**,这就是撤掉气泡回捞后"无丢失"的承载点。
-// 未注入的条目原样不动。无变化时返回原数组引用(不打穿 React 的引用比较)。
-export function reconcileSteered(list, landedSigs, steerKeys) {
+// 收尾只接受 UUID 正向证明。未命中不等于“未消费”，因此转 needs-review 而非 queued。
+export function reconcileSteered(list, _unusedSigs, steerKeys) {
   if (!Array.isArray(list) || !list.length) return list;
-  if (!list.some(isSteered)) return list;
-  const sigs = (landedSigs instanceof Map || landedSigs instanceof Set) ? landedSigs : new Map();
+  if (!list.some((item) => isSteerBarrier(item) || item?.steerId)) return list;
+  let changed = false;
   const out = [];
-  for (const m of list) {
-    if (!isSteered(m)) { out.push(m); continue; }
-    if (steerLanded(m, sigs, steerKeys)) continue; // ⚡ 之后落盘(id 命中或签名+时刻)→ 出队
-    const { steerId, steerState, steeredAt, ...rest } = m; // eslint-disable-line no-unused-vars
-    out.push(rest); // 没落盘 → 翻回普通排队态
+  for (const item of list) {
+    if (!isSteerBarrier(item) && !item?.steerId) { out.push(item); continue; }
+    if (steerLanded(item, null, steerKeys)) { changed = true; continue; }
+    // ①用户已决定"保留不发"：除 UUID 正向命中（上一行，说明其实已送达，条目清掉）外，
+    // 对账不得把它翻回 needs-review barrier——那会复活刚被用户解开的死锁。
+    if (item.steerState === 'kept') { out.push(item); continue; }
+    if (item.steerState === 'needs-review') { out.push(item); continue; }
+    changed = true;
+    const { claimId, targetPaneId, claimDraft, ...rest } = item;
+    void claimId; void targetPaneId; void claimDraft;
+    out.push({ ...rest, steerState: 'needs-review', attemptWasAmbiguous: true });
   }
-  return out;
+  return changed ? out : list;
 }
 
-// localStorage 恢复时的清洗:steer 状态是【进程内在飞】的状态,跨重启必然失效 ——
-// 上个进程注入到一半就被关掉的条目,若带着"已并入"状态回来,drain 会永远跳过它 =
-// 消息永久卡死。恢复时一律退回普通排队态。
+// ②claim 残留（claiming 中间态 / hidden sendable 槽）复位为可见 needs-review 原条目。
+// hidden 槽在 finalize 时丢了原文本与附件（收进 claimDraft），这里按 claimDraft 还原；
+// steerId 一并还原，让后续对账的 UUID 正向命中仍能自动清掉"其实已送达"的条目。
+export function reclaimClaimItem(item) {
+  if (!item || (!item.claimDraft && item.steerState !== 'claiming')) return item;
+  const draft = item.claimDraft || null;
+  const { claimId, targetPaneId, claimDraft, hidden, ...rest } = item;
+  void claimId; void targetPaneId; void claimDraft; void hidden;
+  const restored = { ...rest, steerState: 'needs-review', attemptWasAmbiguous: true };
+  if (draft) {
+    if (typeof draft.queueText === 'string' && draft.queueText) restored.text = draft.queueText;
+    else if (!restored.text && typeof draft.text === 'string') restored.text = draft.text;
+    if (typeof draft.sourceQueueId === 'string' && draft.sourceQueueId) restored.queueId = draft.sourceQueueId;
+    if (typeof draft.steerId === 'string' && draft.steerId) restored.steerId = draft.steerId;
+    if (Array.isArray(draft.attachments) && draft.attachments.length) {
+      restored.opts = {
+        ...(restored.opts || {}),
+        meta: { ...(restored.opts?.meta || {}), attachments: draft.attachments, displayText: draft.text || '' },
+      };
+    }
+  }
+  return restored;
+}
+
+// 页面恢复后没有原 slot receipt；任何 unresolved 都先成为人工复核 barrier。
+// ②claim 残留（不论目标 pane 是否还在——pane id 计数器重启后重置，跨重启一律悬空）
+// 全部复位为可见 needs-review，绝不留 hidden 阻塞槽。
 export function stripSteerState(queueMap) {
   if (!queueMap || typeof queueMap !== 'object') return {};
   const out = {};
-  for (const [k, list] of Object.entries(queueMap)) {
+  for (const [sessionKey, list] of Object.entries(queueMap)) {
     if (!Array.isArray(list)) continue;
-    out[k] = list.map((m) => {
-      if (!isSteered(m)) return m;
-      const { steerId, steerState, steeredAt, ...rest } = m; // eslint-disable-line no-unused-vars
-      return rest;
+    out[sessionKey] = list.map((item) => {
+      if (item?.claimDraft || item?.steerState === 'claiming') return reclaimClaimItem(item);
+      if (!isSteerBarrier(item) && !item?.steerId) return item;
+      // ①"保留不发"是用户决定，跨重启保持，不翻回 needs-review。
+      if (item?.steerState === 'kept') return item;
+      const { claimId, targetPaneId, claimDraft, ...rest } = item;
+      void claimId; void targetPaneId; void claimDraft;
+      return { ...rest, steerState: 'needs-review', attemptWasAmbiguous: true };
     });
   }
   return out;
 }
+
+// 旧测试/调用点只需要一个不可用于自动删除的签名容器；保留导出避免扩大改动面。
+export function persistedUserSigs() { return new Map(); }
+export function steerSig(text) { return String(text || '').replace(/\s+/g, ' ').trim().slice(0, 80); }
+export function sigLanded() { return false; }
+export const STEER_LAND_TOLERANCE_MS = 1000;

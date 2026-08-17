@@ -129,6 +129,15 @@ try {
     assert.ok(!/setStatus\('norepo'\)[^\n]*catch/.test(banner) && !/catch[^\n]*setStatus\('norepo'\)/.test(banner),
       'fetch 失败路径绝不能映射成 norepo');
 
+    // ⑦判官必修-7:子文件夹场景(repoRoot ≠ cwd)横幅必须明说"属于上层仓库"并展示真实
+    // root,绝不能落进"本文件夹未git初始化"分支(服务端 --show-toplevel 已保证 isRepo:true,
+    // 本节§3 用真 git 钉死;这里钉前端呈现)。变异哨兵:删掉 nocommit 分支的上层仓库
+    // 条件文案,下面两条必须变红(已实际验证过一次)。
+    assert.match(banner, /repoRoot && repoRoot !== cwd\s*\? <><b>本文件夹属于上层 git 仓库<\/b>/,
+      '子文件夹 nocommit 横幅必须声明"本文件夹属于上层 git 仓库"');
+    assert.match(banner, />上层仓库根：\{repoRoot\}<\/span>/,
+      '子文件夹场景必须展示真实上层仓库根路径');
+
     // init 的异步回调归属:add 跑几十秒期间用户可能切项目,A 的结果不许写到 B 上
     // (成功 → B 挂上被钉态守卫锁死的假绿条;partial → 点重试会对 B 执行计划外的
     // add+commit)。归属取发起时闭包 initCwd,写 state 前比当前 statusCwdRef。
