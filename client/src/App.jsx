@@ -1436,7 +1436,8 @@ export function SessionItem({ session, isSelected, onSelect, onFork, onArchive, 
   const pinModel = useStore((s) => s.modelBySession[session.sessionId]);
   const [renaming, setRenaming] = useState(false);
   const [draft, setDraft] = useState('');
-  const [deleteArmed, setDeleteArmed] = useState(false); // #2 删除二次确认中 → 强制操作组可见
+  const [menuOpen, setMenuOpen] = useState(false); // r11-p3-3:⋯ 菜单(开着时操作钮保持可见)
+  const menuBtnRef = useRef(null);
   const hasSubagents = session.subagents?.length > 0;
   const isArchived = !!session.archived;
   const isDraft = !!session.draft || !session.sessionId;
@@ -1480,7 +1481,7 @@ export function SessionItem({ session, isSelected, onSelect, onFork, onArchive, 
             subagentCount: session.subagents?.length,
             timeText: formatDate(session.lastActivity),
           })}
-          className={`sidebar-item relative w-full text-left pl-3 pr-[108px] md:pr-6 py-2 rounded-md mb-0.5 transition-colors cursor-pointer flex items-center gap-1.5 min-w-0 ${
+          className={`sidebar-item relative w-full text-left pl-3 pr-8 md:pr-6 py-2 rounded-md mb-0.5 transition-colors cursor-pointer flex items-center gap-1.5 min-w-0 ${
             isSelected ? 'active bg-canvas-warm' : 'hover:bg-canvas-warm/60'
           }`}
         >
@@ -1504,47 +1505,48 @@ export function SessionItem({ session, isSelected, onSelect, onFork, onArchive, 
           {pinned && <Pin size={9} className="text-accent fill-accent shrink-0" />}
         </div>
       )}
-      {/* 操作组 top-2 锚定行区(非 top-1/2:外层 relative 含展开的子任务列表,居中会漂进列表)。
-          p1-2:桌面 hover 覆盖标题尾部 → 自带不透明底(canvas-warm token,选中/hover 态近似
-          同色)+左缘细渐变过渡,盖字无碍;触屏常显走行 pr 留位,收窄为 gap-0。 */}
+      {/* r11-p3-3(dsh 式):5 图标横排撤销,行尾只留 ⋯ 触发钮(hover/选中/菜单开时可见,
+          触屏常显),全部操作收进 AnchoredPopover 菜单。菜单是 portal 自管外点/Esc 的
+          既有组件;会话行不在任何自关弹层内,无 p2-2 型误关面(SkinManagerDialog 那类
+          让位机制不需要)。删除项走既有 confirmDialog。 */}
       {!renaming && (
-      <div data-cgui="session-actions" className={`absolute top-2 right-1.5 transition-opacity flex items-center gap-0 md:gap-0.5 md:bg-canvas-warm md:rounded-md ${deleteArmed ? 'opacity-100' : 'opacity-100 md:opacity-0 md:group-hover:opacity-100'}`}>
-        {/* pointer-events-none:渐变过渡层纯装饰,不拦标题尾部 16px 的行点击(判官p1建议) */}
-        <span aria-hidden className="hidden md:block absolute right-full top-0 bottom-0 w-4 bg-gradient-to-l from-canvas-warm to-transparent pointer-events-none" />
+      <div data-cgui="session-actions" className={`absolute top-1.5 right-1 flex items-center transition-opacity ${(menuOpen || isSelected) ? 'opacity-100' : 'opacity-100 md:opacity-0 md:group-hover:opacity-100'}`}>
         <button
-          onClick={(e) => { e.stopPropagation(); onTogglePin?.(session.sessionId); }}
-          disabled={isDraft}
-          className="p-1 hover:bg-canvas-deep rounded disabled:opacity-30"
-          title={pinned ? '取消置顶' : '置顶到列表最前'}
+          ref={menuBtnRef}
+          onClick={(e) => { e.stopPropagation(); setMenuOpen((v) => !v); }}
+          className={`p-1 rounded-md md:bg-canvas-warm hover:bg-canvas-deep/60 transition-colors ${menuOpen ? 'bg-canvas-deep/60' : ''}`}
+          title="会话操作"
         >
-          <Pin size={12} className={pinned ? 'text-accent fill-accent' : 'text-ink-faint'} />
+          <MoreHorizontal size={14} className="text-ink-muted" />
         </button>
-        <button
-          onClick={startRename}
-          disabled={isDraft}
-          className="p-1 hover:bg-canvas-deep rounded disabled:opacity-30"
-          title="重命名（自定义标题）"
-        >
-          <Pencil size={12} className="text-ink-faint" />
-        </button>
-        <button
-          onClick={(e) => { e.stopPropagation(); onFork(session); }}
-          disabled={forking}
-          className="p-1 hover:bg-canvas-deep rounded"
-          title="分支会话（复制完整上下文为新会话）"
-        >
-          <GitBranch size={12} className={forking ? 'text-accent animate-spin' : 'text-ink-faint'} />
-        </button>
-        <button
-          onClick={(e) => { e.stopPropagation(); onArchive(session); }}
-          className="p-1 hover:bg-canvas-deep rounded"
-          title={isArchived ? '取消归档' : '收纳（折叠到归档页）'}
-        >
-          {isArchived
-            ? <ArchiveRestore size={12} className="text-accent" />
-            : <Archive size={12} className="text-ink-faint" />}
-        </button>
-        <DeleteButton onConfirm={() => onDelete(session)} onArmedChange={setDeleteArmed} />
+        <AnchoredPopover anchorRef={menuBtnRef} open={menuOpen} onRequestClose={() => setMenuOpen(false)} drop="down" align="right" className="w-44 py-1">
+          {[
+            { icon: <Pin size={12} className={pinned ? 'text-accent fill-accent' : 'text-ink-faint'} />, label: pinned ? '取消置顶' : '置顶到列表最前', disabled: isDraft, run: () => onTogglePin?.(session.sessionId) },
+            { icon: <Pencil size={12} className="text-ink-faint" />, label: '重命名', disabled: isDraft, run: () => startRename() },
+            { icon: <GitBranch size={12} className={forking ? 'text-accent animate-spin' : 'text-ink-faint'} />, label: '分支会话', disabled: forking, run: () => onFork(session) },
+            { icon: isArchived ? <ArchiveRestore size={12} className="text-accent" /> : <Archive size={12} className="text-ink-faint" />, label: isArchived ? '取消归档' : '收纳到归档页', run: () => onArchive(session) },
+          ].map((it) => (
+            <button
+              key={it.label}
+              disabled={it.disabled}
+              onClick={(e) => { e.stopPropagation(); setMenuOpen(false); it.run(); }}
+              className="w-full flex items-center gap-2 px-2.5 py-1.5 text-left text-[12px] text-ink-soft font-body hover:bg-canvas-warm disabled:opacity-40 transition-colors"
+            >
+              {it.icon}{it.label}
+            </button>
+          ))}
+          <button
+            onClick={async (e) => {
+              e.stopPropagation();
+              setMenuOpen(false);
+              const ok = await confirmDialog('删除该会话的本地历史记录？操作不可恢复。', { danger: true, confirmText: '删除' });
+              if (ok) onDelete(session);
+            }}
+            className="w-full flex items-center gap-2 px-2.5 py-1.5 text-left text-[12px] text-error font-body hover:bg-error-subtle/60 border-t border-canvas-deep/40 mt-1 pt-1.5 transition-colors"
+          >
+            <Trash2 size={12} />删除会话
+          </button>
+        </AnchoredPopover>
       </div>
       )}
       {expanded && hasSubagents && (

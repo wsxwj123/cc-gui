@@ -45,16 +45,22 @@ import { sessionRowTooltip } from '../../client/src/utils/sessionTitle.js';
   assert.match(item, /subagentCount: session\.subagents\?\.length/, 't2: 子任务数进 tooltip');
   // 单行化:标题 truncate,双行 clamp 退场;行高收窄(py-2)
   assert.doesNotMatch(item, /line-clamp-2/, 't2: 双行 clamp 退场');
-  // p1-2:标题吃满行宽——桌面只留 pr-6 最小留位(常驻 pr-[112px] 挤没标题的形态禁止回潮),
-  // 触屏常显保留收窄留位;操作组桌面 hover 覆盖必须带不透明底+左缘渐变过渡。
-  assert.match(item, /pl-3 pr-\[108px\] md:pr-6 py-2 [^"]*flex items-center/, 't2: 桌面标题吃满行宽(md:pr-6)+触屏收窄留位(哨兵锚)');
-  assert.doesNotMatch(item, /pr-\[112px\]/, 't2: 旧常驻宽留位清零');
-  assert.match(item, /md:bg-canvas-warm md:rounded-md/, 't2: 操作组桌面覆盖自带不透明底(主题 token)');
-  assert.match(item, /bg-gradient-to-l from-canvas-warm to-transparent/, 't2: 左缘细渐变过渡');
-  assert.match(item, /gap-0 md:gap-0\.5/, 't2: 触屏常显按钮组收窄(gap-0)');
-  // 子代理折叠三角与 hover 操作组照旧
+  // p1-2→p3-3:标题吃满行宽(桌面 md:pr-6;触屏 pr-8 只留 ⋯ 常显位),
+  // 旧常驻宽留位与 5 图标横排禁回潮。
+  assert.match(item, /pl-3 pr-8 md:pr-6 py-2 [^"]*flex items-center/, 't2: 标题吃满行宽(桌面 pr-6/触屏 pr-8)');
+  assert.doesNotMatch(item, /pr-\[112px\]|pr-\[108px\]/, 't2: 旧常驻宽留位清零');
+  // 子代理折叠三角照旧;p3-3:5 图标横排撤销 → 行尾 ⋯ 触发钮 + AnchoredPopover 菜单
   assert.match(item, /setExpanded\(!expanded\)/, 't2: 子代理折叠三角保留');
   assert.match(item, /ChevronRight/, 't2: 折叠三角图标保留');
+  assert.match(item, /<MoreHorizontal size=\{14\}/, 't2-p3-3: 行尾 ⋯ 触发钮(哨兵b锚)');
+  assert.match(item, /\(menuOpen \|\| isSelected\) \? 'opacity-100' : 'opacity-100 md:opacity-0 md:group-hover:opacity-100'/, 't2-p3-3: hover/选中/菜单开可见,触屏常显');
+  assert.match(item, /<AnchoredPopover anchorRef=\{menuBtnRef\} open=\{menuOpen\}/, 't2-p3-3: 菜单走既有 AnchoredPopover(glass-popover/portal 自管外点)');
+  assert.match(item, /confirmDialog\('删除该会话的本地历史记录？操作不可恢复。', \{ danger: true/, 't2-p3-3: 删除走 confirmDialog(Tauri 红线)');
+  assert.doesNotMatch(item, /<DeleteButton/, 't2-p3-3: 行内 morph 删除钮退役(菜单内确认)');
+  assert.doesNotMatch(item, /bg-gradient-to-l from-canvas-warm/, 't2-p3-3: 旧横排渐变过渡层随横排退役');
+  // 横排禁回潮:操作容器内除 ⋯ 触发钮外无直接图标按钮(全部在菜单里)
+  const actions = item.slice(item.indexOf('data-cgui="session-actions"'), item.indexOf('<AnchoredPopover'));
+  assert.doesNotMatch(actions, /<Pin |<Pencil |<GitBranch |<Archive |<Trash2 /, 't2-p3-3: 5 图标横排禁回潮(哨兵b锚)');
   // p2-3 行首:💬 彻底移除。p3-2b(dsh 实拍对齐):单一窄固定槽(10px+gap-1.5=16px 列)
   // 恒渲染,有无标记全部标题同一左缘;大恒宽双槽(17px+11px)禁回潮(哨兵a锚);
   // 子代理三角=absolute 覆盖槽位(触屏常显/桌面 hover 现身/展开常显,带底色)。
@@ -66,10 +72,8 @@ import { sessionRowTooltip } from '../../client/src/utils/sessionTitle.js';
   const comp = src.slice(src.indexOf('export function SessionRowStatus'), src.indexOf('export function StatusDot'));
   assert.match(comp, /w-\[10px\] shrink-0 flex items-center justify-center/, 't2-p3-2b: 单一窄固定槽恒渲染(全列标题同左缘)');
   assert.doesNotMatch(comp, /return null/, 't2-p3-2b: 槽不因无标记消失(对齐承诺)');
-  // 判官p1建议:操作组左缘渐变层纯装饰,不拦标题尾部点击
-  assert.match(item, /from-canvas-warm to-transparent pointer-events-none/, 't2-p1判官: 渐变层 pointer-events-none');
-  for (const t of ['onTogglePin', 'startRename', 'onFork(session)', 'onArchive(session)', 'DeleteButton']) {
-    assert.ok(item.includes(t), `t2: hover 操作 ${t} 保留`);
+  for (const t of ['onTogglePin', 'startRename', 'onFork(session)', 'onArchive(session)', 'onDelete(session)']) {
+    assert.ok(item.includes(t), `t2: 全部会话操作 ${t} 收进菜单保留`);
   }
   // 置顶针角标仍在行内
   assert.match(item, /\{pinned && <Pin size=\{9\}/, 't2: 置顶针角标保留');
