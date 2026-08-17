@@ -66,6 +66,7 @@ import { isInitBindingOrigin, migrateDraftQueue, paneMessagesOwned, resolveHistM
 import { nativeContextWindow, isBareClaudeAlias, pickCliContextWindow } from './utils/contextWindow.js';
 import { extractMcpServerIssues, formatMcpServerNotice } from './utils/mcpStatus.js';
 import { classifyRepairOutcome, classifyCheckOutcome, upsertRepairHint, removeRepairHint, loadRepairHints, persistRepairHints } from './utils/repairFlow.js';
+import { autoCompactTransition } from './utils/compactStatus.js';
 import {
   FolderOpen, MessageSquare, ChevronLeft, ChevronRight, ChevronDown,
   Search, Hash, Layers, BarChart3, ArrowLeft, Plus,
@@ -4237,6 +4238,11 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             // U8:压缩边界后,压缩前写入的即时 usage 已是旧值,清掉 —— 否则它优先级
             // 高于 jsonl 的 lastUsage,徽章在压缩后纹丝不动(用户报告)。
             setLiveContextUsage(null);
+            // r11-⑥:对齐 CLI 自身渲染器 —— boundary 即压缩结束,收掉自动压缩动画行
+            // (只清压缩态,别的等待行如 api_retry 不受 boundary 影响)。
+            if (autoCompactTransition(event) === false) {
+              setLiveStatus((prev) => (prev?.compacting ? null : prev));
+            }
           }
 
           // 等待状态(G):SDK system status —— sdk.d.ts 实测结构
@@ -4245,7 +4251,13 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           // /compact 触发,原来只有 compact_boundary 一条分隔、压缩过程零反馈)。
           // requesting 每次 API 调用都发,太噪,不渲染;status:null=阶段结束,清行。
           if (event.type === 'system' && event.subtype === 'status') {
-            if (event.status === 'compacting') setLiveStatus({ text: '正在压缩上下文…' });
+            // r11-⑥:自动压缩复用手动压缩的同一动画组件(CompactProgressBar,渲染见
+            // liveStatus 行),文案标注「自动压缩」。起止全以真实事件为准(检测分支
+            // autoCompactTransition,取证见 utils/compactStatus.js),不做定时假动画。
+            // 手动 /compact(isCompact)不带 compacting 标记 —— 它的动画在 Connecting
+            // 占位块里(Compacting + 进度条),保持原行为不双份。
+            const _ac = autoCompactTransition(event);
+            if (_ac) setLiveStatus(isCompact ? { text: '正在压缩上下文…' } : { text: '正在自动压缩上下文…', compacting: true });
             else setLiveStatus(null);
             if (event.compact_result === 'failed' && event.compact_error) {
               setProviderSwitchNotice({ text: `上下文压缩失败:${String(event.compact_error).slice(0, 120)}` });
@@ -6900,9 +6912,14 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                   并存不互斥:那行说"正在产出什么",这行说"为什么在等"。缩进对齐正文列。 */}
               {liveVisible && isStreaming && liveStatus && (
                 <div className="px-6 -mt-1 pb-3 animate-fade-in">
-                  <div className="max-w-[var(--content-max)] mx-auto flex items-center gap-2 pl-[50px] text-[12px] text-ink-faint font-body">
-                    <Loader2 size={11} className="animate-spin shrink-0 text-amber-600" />
-                    <span>{liveStatus.text}</span>
+                  <div className="max-w-[var(--content-max)] mx-auto pl-[50px]">
+                    <div className="flex items-center gap-2 text-[12px] text-ink-faint font-body">
+                      <Loader2 size={11} className="animate-spin shrink-0 text-amber-600" />
+                      <span>{liveStatus.text}</span>
+                    </div>
+                    {/* r11-⑥:自动压缩进行中 —— 与手动压缩同一不确定态动画条
+                        (CompactProgressBar),起止随真实 status/compact_boundary 事件。 */}
+                    {liveStatus.compacting && <CompactProgressBar />}
                   </div>
                 </div>
               )}
