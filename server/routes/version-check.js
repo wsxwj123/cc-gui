@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { readFileSync, writeFileSync, existsSync, realpathSync, readdirSync } from 'fs';
-import { resolveClaudeAsync, listClaudeInstallsAsync, getClaudeOverride, setClaudeOverride, winLivePathDirsAsync, classifyShim } from '../utils/claude-resolver.js';
+import { resolveClaudeAsync, listClaudeInstallsAsync, getClaudeOverride, setClaudeOverride, getClaudeOverrideRaw, pauseClaudeOverride, winLivePathDirsAsync, classifyShim } from '../utils/claude-resolver.js';
 import { scanAllTools, nodeMeets, NODE_MIN_MAJOR } from '../utils/env-scanner.js';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
@@ -463,6 +463,26 @@ router.post('/claude-update', async (req, res) => {
   }
 });
 
+// r12-①c:重装成功后自动恢复钉选(export 仅为可单测)。判据:存在 paused override
+// 且 existsSync(path) 且 classifyShim(realpath) 非 broken 且版本探测成功 →
+// setClaudeOverride(path)(自动清 paused)+ resolver 强刷。任一判据不过保持 paused
+// 不动(幂等,下次触发再探)。路径永久失效不自动改钉别的安装(猜错更糟)——
+// 改钉走前端横幅的一键按钮(现有 PUT path 语义)。
+// Windows:探测复用 getClaudeVersion(内部已走 cmd.exe /c)与 classifyShim,零新裸 spawn。
+export async function tryRestorePausedOverride() {
+  const raw = getClaudeOverrideRaw();
+  if (!raw.paused || !raw.path) return null;
+  if (!existsSync(raw.path)) return null;
+  let real = raw.path;
+  try { real = realpathSync(raw.path); } catch {}
+  if (classifyShim(real)?.broken) return null;
+  const version = await getClaudeVersion(raw.path);
+  if (!version) return null;
+  setClaudeOverride(raw.path);
+  await resolveClaudeAsync({ refresh: true }); // 强刷,下次 spawn 立即用回钉选
+  return { path: raw.path, version };
+}
+
 /**
  * POST /api/claude-update/stream — CN-2:在 GUI 内显示更新进度。headless spawn 更新命令
  * (npm/native),把 stdout+stderr 以 NDJSON 逐行推给前端实时展示,不用开外部终端。
@@ -515,7 +535,19 @@ router.post('/claude-update/stream', async (req, res) => {
   child.stdout?.on('data', pump);
   child.stderr?.on('data', pump);
   child.on('error', (e) => { clearTimeout(killTimer); try { res.write(JSON.stringify({ type: 'error', error: e.message }) + '\n'); res.end(); } catch {} });
-  child.on('close', (code) => { clearTimeout(killTimer); try { res.write(JSON.stringify({ type: 'done', code }) + '\n'); res.end(); } catch {} });
+  child.on('close', async (code) => {
+    clearTimeout(killTimer);
+    // r12-①c 触发点一:更新成功 → 探测 paused 钉选是否已恢复健康,是则自动回钉并在
+    // NDJSON 流尾追加事件(前端展示"已自动恢复你的手动指定")。核心时序不变:
+    // clearTimeout 依旧首行;done 事件与 res.end() 照旧,只在中间追加恢复探测。
+    let restored = null;
+    if (code === 0) { try { restored = await tryRestorePausedOverride(); } catch {} }
+    try {
+      res.write(JSON.stringify({ type: 'done', code }) + '\n');
+      if (restored) res.write(JSON.stringify({ type: 'override-restored', path: restored.path, version: restored.version }) + '\n');
+      res.end();
+    } catch {}
+  });
   req.on('close', () => { clearTimeout(killTimer); killTree(); });
 });
 
@@ -544,6 +576,9 @@ router.post('/claude-install', async (req, res) => {
 // 列出机器上所有 claude 安装(不止当前用的那个)+ 各自版本 + 分类,并标出当前
 // 实际激活的是哪个(供设置页"切换用哪个 claude")。overridden = 用户是否已手动钉死。
 router.get('/claude-installs', async (_req, res) => {
+  // r12-①c 触发点二:覆盖终端内/GUI 外重装——扫描时同款恢复探测(幂等,失败保持 paused)。
+  let restored = null;
+  try { restored = await tryRestorePausedOverride(); } catch {}
   const list = await listClaudeInstallsAsync();
   const override = getClaudeOverride();
   // refresh:true 同 detectInstall:显式检查不吃 15s 负缓存(更新中断后误显未安装/无选中)。
@@ -571,7 +606,13 @@ router.get('/claude-installs', async (_req, res) => {
   // R8-2:手动指定的路径已失效(卸载/移动)→ 显式标注,前端渲染横幅给「清除指定 /
   // 重新选择」出口;此前 resolver 只静默回落,用户以为还在用指定的那个。只增字段。
   const overrideDead = !!override && !existsSync(override);
-  res.json({ installs, overridden: !!override, override, overrideDead, activeVia: active?.via || null });
+  // r12-①a:paused 态只增字段(老前端忽略)。
+  const rawOv = getClaudeOverrideRaw();
+  res.json({
+    installs, overridden: !!override, override, overrideDead, activeVia: active?.via || null,
+    overridePaused: rawOv.paused, overridePausedPath: rawOv.paused ? rawOv.path : '',
+    ...(restored ? { overrideRestored: true, overrideRestoredPath: restored.path } : {}),
+  });
 });
 
 // PUT /api/claude-active { path }
@@ -582,6 +623,16 @@ router.put('/claude-active', async (req, res) => {
   // spawn 用它——authed 局域网客户端可打瘫 GUI,配合本机可执行恶意文件可升级 RCE)。
   // 钉 claude 路径是桌面机主动作,与 permissions.js 权限检查接口同款门禁。
   if (!isLocalReq(req)) return res.status(403).json({ error: '该操作仅限本机执行' });
+  // r12-①a:{pause:true} = 暂停指定(可恢复)——不清 path 只置 paused,重装探测健康后
+  // 自动回钉(r12-①c)。path 必须已存在于 override,否则 400。老语义零影响:
+  // {path:''} 仍是彻底清除,{path:'新路径'} 正常钉选并清 paused 态。
+  if (req.body?.pause === true) {
+    const raw = getClaudeOverrideRaw();
+    if (!raw.path) return res.status(400).json({ error: '当前没有手动指定的 claude 路径,无可暂停' });
+    pauseClaudeOverride();
+    const active = await resolveClaudeAsync({ refresh: true });
+    return res.json({ ok: true, paused: true, path: raw.path, active: active?.path || '', via: active?.via || null });
+  }
   const p = typeof req.body?.path === 'string' ? req.body.path.trim() : '';
   if (p && !existsSync(p)) return res.status(400).json({ error: '该路径不存在或已失效' });
   // R8-1 补齐:坏壳包(bin 还是文本 stub)禁选 —— 钉死它之后所有 spawn 都会废。服务端
@@ -833,6 +884,8 @@ router.get('/env-check', async (req, res) => {
       installs: claudeInstalls,
       // R8-2:死 override 标注(环境检查面板据此显示横幅,与 cli-check/claude-installs 同口径)
       ...(claudeOverrideDead ? { overrideDead: true, override: claudeOverride } : {}),
+      // r12-①a:paused 态(EnvCheckPanel 恢复横幅数据源;只增字段)
+      ...(getClaudeOverrideRaw().paused ? { overridePaused: true, overridePausedPath: getClaudeOverrideRaw().path } : {}),
     },
     git: { ...withScan(git, scan.git), required: false },
     python: { ...withScan(python, scan.python), required: false },

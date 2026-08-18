@@ -34,11 +34,19 @@ const MISS_TTL_MS = 15_000;
 // (PATH→login-shell→npm-prefix→已知路径)会选中第一个命中的,用户可能想用另一个。
 // 存独立 JSON 文件、同步可读 —— resolver 在同步请求路径上,不能依赖异步 prefs 路由。
 const OVERRIDE_FILE = join(homedir(), '.claude-gui', 'claude-bin.json');
-function readOverride() {
+// r12-①a:格式扩为 {path, paused?, pausedAt?}。paused = 「暂停指定(可恢复)」——
+// 路径暂时失效(如 npm 更新中断留坏壳包)时不丢用户钉选,resolver 视同无 override
+// 回落自动,重装探测健康后自动回钉。旧格式 {path} 兼容读出 paused=false。
+function readOverrideRaw() {
   try {
-    const p = JSON.parse(readFileSync(OVERRIDE_FILE, 'utf-8'))?.path;
-    return (typeof p === 'string' && p) ? p : '';
-  } catch { return ''; }
+    const d = JSON.parse(readFileSync(OVERRIDE_FILE, 'utf-8'));
+    const path = (typeof d?.path === 'string') ? d.path : '';
+    return { path, paused: d?.paused === true && !!path, pausedAt: Number.isFinite(d?.pausedAt) ? d.pausedAt : null };
+  } catch { return { path: '', paused: false, pausedAt: null }; }
+}
+function readOverride() {
+  const { path, paused } = readOverrideRaw();
+  return (path && !paused) ? path : '';
 }
 
 function safeExec(file, args, timeout = 5000) {
@@ -465,16 +473,33 @@ export async function listClaudeInstallsAsync() {
   finally { _installsInflight = null; }
 }
 
-/** 读当前覆盖路径('' = 未设,走自动优先级)。 */
+/** 读当前【生效】覆盖路径('' = 未设或已暂停,走自动优先级)。 */
 export function getClaudeOverride() {
   return readOverride();
 }
 
-/** 钉死用哪个 claude;传空串清除回自动。写完清缓存,下次解析立即生效。 */
+/** r12-①a:读覆盖文件完整对象 {path, paused, pausedAt}(UI/自动恢复逻辑用)。 */
+export function getClaudeOverrideRaw() {
+  return readOverrideRaw();
+}
+
+/** 钉死用哪个 claude;传空串彻底清除回自动(含清 paused 态)。写完清缓存,下次解析立即生效。 */
 export function setClaudeOverride(path) {
   mkdirSync(dirname(OVERRIDE_FILE), { recursive: true });
   writeFileSync(OVERRIDE_FILE, JSON.stringify({ path: path || '' }, null, 2));
   _cache = null;
   _missAt = 0;
   _installsCache = null; // 切换/手动指定后立即反映到安装列表(active 归属会变)
+}
+
+/** r12-①a:暂停指定(可恢复)——保留 path 只置 paused;无 path 时 no-op 返回 false。 */
+export function pauseClaudeOverride() {
+  const raw = readOverrideRaw();
+  if (!raw.path) return false;
+  mkdirSync(dirname(OVERRIDE_FILE), { recursive: true });
+  writeFileSync(OVERRIDE_FILE, JSON.stringify({ path: raw.path, paused: true, pausedAt: Date.now() }, null, 2));
+  _cache = null;
+  _missAt = 0;
+  _installsCache = null;
+  return true;
 }

@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { existsSync } from 'fs';
-import { resolveClaude, getClaudeOverride } from '../utils/claude-resolver.js';
+import { resolveClaude, getClaudeOverride, getClaudeOverrideRaw } from '../utils/claude-resolver.js';
 
 const execFileP = promisify(execFile);
 const router = Router();
@@ -31,7 +31,10 @@ router.get('/cli-check', async (req, res) => {
   // R8-2:手动指定的 claude 路径已失效(文件没了)→ 显式告知(只增字段,老前端忽略)。
   // 此前 resolver 静默回落自动优先级,用户以为还在用指定的那个,实际跑的是回落安装。
   const override = getClaudeOverride();
-  const deadFields = (override && !existsSync(override)) ? { overrideDead: true, override } : {};
+  // r12-①a:paused 态只增字段(老前端忽略;paused 时生效 override 为空,不会同时 dead)。
+  const rawOv = getClaudeOverrideRaw();
+  const pausedFields = rawOv.paused ? { overridePaused: true, overridePausedPath: rawOv.path } : {};
+  const deadFields = { ...((override && !existsSync(override)) ? { overrideDead: true, override } : {}), ...pausedFields };
   const hit = resolveClaude();
   if (!hit) {
     return res.json({ installed: false, error: '所有检测策略均未找到 claude(PATH / login shell / npm 前缀 / 已知路径)', ...deadFields });
