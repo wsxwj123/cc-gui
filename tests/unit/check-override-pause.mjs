@@ -56,15 +56,18 @@ try {
   pauseClaudeOverride();
   assert.equal(await tryRestorePausedOverride(), null, 't2: 路径缺失不恢复');
   assert.equal(getClaudeOverrideRaw().paused, true, 't2: 缺失时保持 paused 不动(幂等)');
-  // paused + broken 壳(npm 包目录带 install.cjs、bin/claude.exe 是文本)→ 不动
+  // paused + broken 壳(npm 包目录带 install.cjs、bin/claude.exe 是文本)→ 不动。
+  // 壳 stub 刻意「会撒谎」:可执行且打印版本号 —— 若删掉 classifyShim broken 闸,
+  // 版本探测会被它骗过而错误恢复;本用例保证 broken 闸是唯一拦截者(哨兵②有效性)。
   const pkgDir = join(home, 'npm', 'node_modules', '@anthropic-ai', 'claude-code');
   mkdirSync(join(pkgDir, 'bin'), { recursive: true });
   writeFileSync(join(pkgDir, 'install.cjs'), '// shim installer');
-  writeFileSync(join(pkgDir, 'bin', 'claude.exe'), '#!/usr/bin/env node\n// text stub');
+  writeFileSync(join(pkgDir, 'bin', 'claude.exe'), '#!/bin/sh\necho "9.9.9 (Claude Code)"\n');
+  chmodSync(join(pkgDir, 'bin', 'claude.exe'), 0o755);
   const shimEntry = join(pkgDir, 'bin', 'claude.exe');
   setClaudeOverride(shimEntry);
   pauseClaudeOverride();
-  assert.equal(await tryRestorePausedOverride(), null, 't2: broken 壳不恢复');
+  assert.equal(await tryRestorePausedOverride(), null, 't2: broken 壳不恢复(即使 stub 能打印版本)');
   assert.equal(getClaudeOverrideRaw().paused, true, 't2: broken 时保持 paused');
   // paused + 路径健康(可执行、版本探测成功、非壳包)→ 自动恢复钉选并清 paused
   const good = join(home, 'good-claude');
