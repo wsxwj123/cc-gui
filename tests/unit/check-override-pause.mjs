@@ -98,6 +98,26 @@ try {
   assert.match(cc, /overridePaused: true, overridePausedPath: rawOv\.path/, 't3: cli-check 只增字段');
   assert.match(vc, /overridePaused: true, overridePausedPath: getClaudeOverrideRaw\(\)\.path/, 't3: env-check 只增字段');
 
+  // ── t3b ①b/①d 前端与文案守卫 ─────────────────────────────────
+  const env = readFileSync(new URL('../../client/src/components/EnvCheckPanel.jsx', import.meta.url), 'utf8');
+  assert.match(env, /暂停指定\(可恢复\)/, 't3b: EnvCheckPanel 主出口=暂停');
+  assert.match(env, /JSON\.stringify\(body\)/, 't3b: 统一 putClaudeActive');
+  assert.match(env, /pauseOverride = \(\) => putClaudeActive\(\{ pause: true \}\)/, 't3b: 暂停走 {pause:true}');
+  assert.match(env, /clearOverride = \(\) => putClaudeActive\(\{ path: '' \}\)/, 't3b: 彻底清除保留老语义');
+  assert.match(env, /item\?\.overridePaused && !item\?\.overrideDead/, 't3b: overridePaused 恢复横幅');
+  assert.match(env, /立即恢复/, 't3b: 立即恢复按钮');
+  assert.match(env, /改钉当前回落安装/, 't3b: 不自动改钉,一键按钮代替');
+  const sp = readFileSync(new URL('../../client/src/components/SettingsPanel.jsx', import.meta.url), 'utf8');
+  assert.match(sp, /暂停指定\(可恢复\)/, 't3b: SettingsPanel 同语义');
+  assert.match(sp, /body: JSON\.stringify\(\{ pause: true \}\)/, 't3b: SettingsPanel pause 接线');
+  assert.match(sp, /overridePaused && !overrideDead/, 't3b: SettingsPanel 恢复横幅');
+  assert.match(sp, /改钉当前活跃安装/, 't3b: 改钉一键按钮');
+  assert.match(sp, /ev\.type === 'override-restored'/, 't3b: 更新流回执消费');
+  assert.match(sp, /已自动恢复你的手动指定/, 't3b: 回执文案');
+  assert.match(sp, /改用终端更新\n?\s*<\/button>/, 't3b: ①d 失败态终端兜底可见');
+  assert.match(vc, /npm 源过慢是常见根因:确认代理已开后重试,或点「改用终端更新」走官方渠道/, 't3b: ①d 超时文案指引');
+  assert.doesNotMatch(vc, /npm config set registry|--registry/, 't3b: 不做一键换源(不碰 npm 配置)');
+
   console.log('check-override-pause: all passed');
 } finally {
   process.env.HOME = REAL_HOME;

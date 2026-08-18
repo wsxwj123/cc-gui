@@ -961,6 +961,9 @@ function CcUpdater() {
   const [installs, setInstalls] = useState(null); // 机器上检测到的所有 claude 安装(null=未加载)
   // R8-2:手动指定的 claude 路径已失效(文件没了,resolver 静默回落中)。{ override } | null。
   const [overrideDead, setOverrideDead] = useState(null);
+  // r12-①b:暂停中的手动指定({ path } | null)与扫描触发的自动恢复提示。
+  const [overridePaused, setOverridePaused] = useState(null);
+  const [restoredNote, setRestoredNote] = useState(null);
   // 「重新选择」动作滚动到下方安装切换区
   const installListRef = useRef(null);
 
@@ -969,8 +972,26 @@ function CcUpdater() {
       const d = await (await fetch('/api/claude-installs')).json();
       setInstalls(d.installs || []);
       setOverrideDead(d.overrideDead ? { override: d.override || '' } : null); // 旧后端无字段 → 不渲染横幅
+      setOverridePaused(d.overridePaused ? { path: d.overridePausedPath || '' } : null);
+      if (d.overrideRestored) setRestoredNote(d.overrideRestoredPath || '');
     }
     catch { setInstalls([]); }
+  };
+
+  // r12-①b:暂停指定(可恢复)——不丢用户钉选,重装探测健康后服务端自动回钉。
+  const pauseOverride = async () => {
+    setUpdating(true);
+    try {
+      const r = await fetch('/api/claude-active', {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pause: true }),
+      });
+      if (!r.ok) { const d = await r.json().catch(() => ({})); throw new Error(d.error || 'HTTP ' + r.status); }
+      await loadInstalls();
+      await check();
+    } catch (e) {
+      setResult({ ok: false, error: e.message || '暂停失败' });
+    }
+    setUpdating(false);
   };
 
   useEffect(() => {
@@ -1057,6 +1078,12 @@ function CcUpdater() {
           if (ev.type === 'log') setLogLines((p) => [...p.slice(-200), ev.line]);
           else if (ev.type === 'start') setLogLines((p) => [...p, `$ ${ev.command}`]);
           else if (ev.type === 'error') setResult({ ok: false, error: ev.error });
+          // r12-①c:更新流尾的自动回钉回执 → 日志一行 + 顶部回执横幅 + 刷新安装列表。
+          else if (ev.type === 'override-restored') {
+            setLogLines((p) => [...p, `✓ 已自动恢复你的手动指定:${ev.path}${ev.version ? ` (v${ev.version})` : ''}`]);
+            setRestoredNote(ev.path || '');
+            loadInstalls();
+          }
           else if (ev.type === 'done') {
             setResult(ev.code === 0
               ? { ok: true, done: true }
@@ -1236,16 +1263,58 @@ function CcUpdater() {
                 : ';且未找到可回落的安装';
             })()}
           </div>
-          <div className="flex items-center gap-2">
-            <button onClick={() => switchActive('')} disabled={updating}
+          <div className="flex items-center gap-2 flex-wrap">
+            {/* r12-①b:主出口=暂停(可恢复)。重装后原路径探测健康会自动回钉,不丢用户配置。 */}
+            <button onClick={pauseOverride} disabled={updating}
               className="px-2.5 py-1 text-[11.5px] rounded-md border border-warning/40 text-warning hover:bg-warning/15 disabled:opacity-50">
-              清除指定(转自动解析)
+              暂停指定(可恢复)
             </button>
             <button onClick={() => installListRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' })}
               className="px-2.5 py-1 text-[11.5px] rounded-md border border-warning/40 text-warning hover:bg-warning/15">
               重新选择
             </button>
+            <button onClick={() => switchActive('')} disabled={updating}
+              className="px-2 py-1 text-[11px] text-warning/80 hover:text-warning underline disabled:opacity-50"
+              title="彻底删除手动指定,永久回到自动解析(不再自动回钉)">
+              彻底清除
+            </button>
           </div>
+          <div className="text-[10.5px] text-warning/80">暂停后该路径重装恢复时会自动回钉;彻底清除则永久转自动解析。</div>
+        </div>
+      )}
+      {/* r12-①b:暂停中的手动指定(低调提示;等待重装恢复)。 */}
+      {overridePaused && !overrideDead && (
+        <div className="text-[12px] bg-canvas-warm border border-canvas-deep text-ink-muted rounded p-2.5 space-y-1.5">
+          <div className="leading-snug">
+            已暂停手动指定:<code className="font-mono break-all">{overridePaused.path}</code>(等待重装恢复;重装成功后自动回钉)
+          </div>
+          <div className="flex items-center gap-2 flex-wrap">
+            <button onClick={() => switchActive(overridePaused.path)} disabled={updating}
+              className="px-2.5 py-1 text-[11.5px] rounded-md border border-canvas-deep text-ink-soft hover:bg-canvas-deep/40 disabled:opacity-50"
+              title="立即探测该路径并恢复钉选(路径仍无效会提示失败)">
+              立即恢复
+            </button>
+            {(() => {
+              const act = Array.isArray(installs) ? installs.find((i) => i.active && !i.broken) : null;
+              return (act && act.path !== overridePaused.path)
+                ? <button onClick={() => switchActive(act.path)} disabled={updating}
+                    className="px-2.5 py-1 text-[11.5px] rounded-md border border-canvas-deep text-ink-soft hover:bg-canvas-deep/40 disabled:opacity-50"
+                    title={act.path}>
+                    改钉当前活跃安装
+                  </button>
+                : null;
+            })()}
+            <button onClick={() => switchActive('')} disabled={updating}
+              className="px-2 py-1 text-[11px] text-ink-faint hover:text-ink-muted underline disabled:opacity-50">
+              彻底清除
+            </button>
+          </div>
+        </div>
+      )}
+      {/* r12-①c:自动恢复回执(更新流/扫描任一触发点回钉成功后提示一次)。 */}
+      {restoredNote != null && (
+        <div className="text-[12px] text-emerald-700 bg-emerald-50 border border-emerald-200 rounded p-2 break-words">
+          ✓ 已自动恢复你的手动指定:<code className="font-mono break-all">{restoredNote}</code>
         </div>
       )}
       {/* 使用哪个 Claude:原生版/npm 版两个按钮常驻(不论是否安装)。点击时先重扫一遍
@@ -1338,7 +1407,14 @@ function CcUpdater() {
                 ? <>✓ 更新完成。点上方"检查更新"确认新版本。</>
                 : <>✓ 已在终端启动 <code className="font-mono break-all">{result.command}</code>。安装完成后会自动检测并切换(约 5 秒内)。</>}
             </div>
-          : <div className="text-[12px] text-error">更新失败:{result.error}</div>
+          : <div className="text-[12px] text-error">
+              更新失败:{result.error}
+              {/* r12-①d:失败态确保「改用终端更新」兜底可见(官方渠道,不碰 npm 配置) */}
+              <button onClick={doUpdateTerminal} disabled={updating}
+                className="ml-2 text-[11px] text-error/80 hover:text-error underline disabled:opacity-50">
+                改用终端更新
+              </button>
+            </div>
       )}
     </div>
   );

@@ -45,11 +45,13 @@ export default function EnvCheckPanel({ onDismiss, onRecheck, asModal = true }) 
   // 失败不静默(验收补齐3):该端点限本机执行,局域网端会 403 —— 吞掉错误则用户点了
   // 没反应、横幅还挂着。失败置 clearErr 渲染在横幅内,成功路径原样(重检刷新会清)。
   const [clearErr, setClearErr] = useState(null);
-  const clearOverride = async () => {
+  // r12-①b:统一的 override 操作(pause=true 暂停可恢复 / path 钉选或空串彻底清除)。
+  // 失败不静默(限本机端点,局域网端 403 会如实显示)。
+  const putClaudeActive = async (body) => {
     setClearErr(null);
     try {
       const r = await fetch('/api/claude-active', {
-        method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: '' }),
+        method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
       });
       if (!r.ok) {
         const d = await r.json().catch(() => ({}));
@@ -57,10 +59,12 @@ export default function EnvCheckPanel({ onDismiss, onRecheck, asModal = true }) 
       }
     } catch (e) {
       setClearErr(e.message || '请求失败');
-      return; // 清除没成功,不重检(状态未变,重检只会闪一下)
+      return; // 没成功,不重检(状态未变,重检只会闪一下)
     }
     check(true);
   };
+  const clearOverride = () => putClaudeActive({ path: '' });
+  const pauseOverride = () => putClaudeActive({ pause: true });
 
   // method:仅 claude 用 'npm' | 'native';其余 target 不传(后端按 target 自带命令)。
   const install = async (key, method) => {
@@ -120,14 +124,45 @@ export default function EnvCheckPanel({ onDismiss, onRecheck, asModal = true }) 
                     {item?.resolvedPath
                       ? <>;当前回落:<span className="font-mono break-all">{item.resolvedPath}</span>{item?.version ? `(v${item.version})` : ''}</>
                       : ';且未找到可回落的安装'}
-                    <button onClick={clearOverride}
+                    {/* r12-①b:主出口=暂停(可恢复,重装后原路径恢复会自动回钉);彻底清除降为次要出口 */}
+                    <button onClick={pauseOverride}
                       className="ml-1.5 px-1.5 py-0.5 rounded border border-warning/40 text-warning hover:bg-warning/15">
-                      清除指定
+                      暂停指定(可恢复)
                     </button>
-                    <span className="ml-1 text-ink-faint">如需改用其他安装,在设置→更新页选择。</span>
+                    <button onClick={clearOverride}
+                      className="ml-1 px-1 py-0.5 underline text-warning/80 hover:text-warning"
+                      title="彻底删除手动指定,永久回自动解析(不再自动回钉)">
+                      彻底清除
+                    </button>
+                    <span className="ml-1 text-ink-faint">暂停后重装恢复原路径会自动回钉;如需改用其他安装,在设置→更新页选择。</span>
                     {/* 403 时服务端 error 已是「该操作仅限本机执行」,原样透出即可 */}
                     {clearErr && (
-                      <span className="block mt-0.5 text-error">清除失败:{clearErr}</span>
+                      <span className="block mt-0.5 text-error">操作失败:{clearErr}</span>
+                    )}
+                  </div>
+                )}
+                {/* r12-①b:暂停中的手动指定(低调提示,等待重装恢复;服务端探测健康自动回钉) */}
+                {row.key === 'claude' && item?.overridePaused && !item?.overrideDead && (
+                  <div className="mt-1 px-2 py-1.5 rounded bg-canvas-warm border border-canvas-deep text-[10.5px] text-ink-muted font-body leading-snug">
+                    已暂停手动指定:<span className="font-mono break-all">{item.overridePausedPath}</span>(等待重装恢复,成功后自动回钉)
+                    <button onClick={() => putClaudeActive({ path: item.overridePausedPath })}
+                      className="ml-1.5 px-1.5 py-0.5 rounded border border-canvas-deep text-ink-soft hover:bg-canvas-deep/40"
+                      title="立即探测该路径并恢复钉选(路径仍无效会提示失败)">
+                      立即恢复
+                    </button>
+                    {item?.resolvedPath && item.resolvedPath !== item.overridePausedPath && (
+                      <button onClick={() => putClaudeActive({ path: item.resolvedPath })}
+                        className="ml-1 px-1.5 py-0.5 rounded border border-canvas-deep text-ink-soft hover:bg-canvas-deep/40"
+                        title={item.resolvedPath}>
+                        改钉当前回落安装
+                      </button>
+                    )}
+                    <button onClick={clearOverride}
+                      className="ml-1 px-1 py-0.5 underline text-ink-faint hover:text-ink-muted">
+                      彻底清除
+                    </button>
+                    {clearErr && (
+                      <span className="block mt-0.5 text-error">操作失败:{clearErr}</span>
                     )}
                   </div>
                 )}
