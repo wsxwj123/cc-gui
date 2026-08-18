@@ -24,6 +24,13 @@ import { validateManifest, validateT2Script, ICON_SEMANTIC_NAMES } from '../../s
   assert.ok(p.includes('window.__cguiSkinDispose'), 't1: T2 卸载器契约');
   assert.ok(p.includes('明暗规范'), 't1: 明暗规范段');
   assert.ok(p.includes('data-cgui'), 't1: 锚点选择器规范');
+  // r12-② t4:--app-h/--app-w 官方口径段落(zoom 不变量 px/client.js 同口径写 body+
+  // 跟踪 resize 与 zoom/卸载清理),含两条「禁止」(静态 dvh 自算/自引用 calc)。
+  assert.ok(p.includes('--app-h') && p.includes('--app-w'), 't4: 官方尺寸变量段落');
+  assert.ok(p.includes('innerHeight/zoom'), 't4: zoom 不变量口径');
+  assert.ok(p.includes('resize') && p.includes('卸载器中清理'), 't4: client.js 同口径+跟踪+清理');
+  assert.ok(p.includes('禁止在 CSS 用静态 calc(100dvh'), 't4: 禁静态 dvh 自算(哨兵锚)');
+  assert.ok(p.includes('禁止 --app-h: calc(var(--app-h)'), 't4: 禁自引用 calc');
 }
 
 // t2 内置示例:T1 两套 manifest 过服务端校验器(files 空集,纯变量);T2 示例过静态校验

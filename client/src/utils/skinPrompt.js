@@ -40,6 +40,12 @@ export function buildSkinPrompt() {
     '  必须注册卸载器:window.__cguiSkinDispose = () => { /* 还原你的全部改动 */ };',
     '- a11y.css 放高对比/焦点可见性补丁。',
     '',
+    '### 应用尺寸变量 --app-h / --app-w(必读)',
+    '- --app-h / --app-w 是根容器的官方尺寸变量:App 以 innerHeight/zoom(及 innerWidth/zoom)实时计算的 zoom 不变量 px,大字体档(html style zoom)下仍然正确。',
+    '- 皮肤若要改应用占位(悬浮窗口类效果),必须在 client.js 按同一口径计算并写到 body 作用域的自定义变量,且跟踪 window resize 与 html style(zoom)变化,卸载器中清理监听与变量。',
+    '- 禁止在 CSS 用静态 calc(100dvh - Npx) 自算应用高度:大字体 zoom 档下 dvh 与布局像素不同倍率,必漂。',
+    '- 禁止 --app-h: calc(var(--app-h) - N) 这类自引用覆盖:CSS 自定义属性循环引用会整体失效。',
+    '',
     '输出:T1 给出 skin.json 全文与资源清单;T2 给出三件套全文。',
   ].join('\n');
 }
