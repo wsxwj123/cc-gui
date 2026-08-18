@@ -523,7 +523,8 @@ router.post('/claude-update/stream', async (req, res) => {
   // 超时 8 分钟【必须杀进程】:原来只有注释声称超时、实际无定时器 —— 慢源下载挂死时
   // 流永不结束,用户关页面 req close 的 SIGTERM 又杀不到孙进程,留僵尸 + 半成品安装。
   const killTimer = setTimeout(() => {
-    try { res.write(JSON.stringify({ type: 'error', error: '更新超过 8 分钟未完成,已终止(网络过慢或源不可达;可开代理后重试,或改用终端更新)' }) + '\n'); } catch {}
+    // r12-①d:超时文案带可执行指引(npm 慢源是最常见根因;不做一键换源,避免碰 npm 配置)。
+    try { res.write(JSON.stringify({ type: 'error', error: '更新超过 8 分钟未完成,已终止。npm 源过慢是常见根因:确认代理已开后重试,或点「改用终端更新」走官方渠道。' }) + '\n'); } catch {}
     killTree();
   }, 8 * 60 * 1000);
   killTimer.unref?.();
