@@ -74,15 +74,18 @@ try {
   assert.ok(/overrideDead/.test(ep) && /claude-active/.test(ep),
     '环境面板消费 overrideDead 且提供清除动作(PUT claude-active)');
   // 验收补齐3:清除失败不得静默(局域网端 403 等)。非 2xx 必须抛出并落 clearErr 渲染。
-  const clearFn = ep.slice(ep.indexOf('const clearOverride'), ep.indexOf('const install ='));
-  assert.ok(/if \(!r\.ok\)/.test(clearFn), 'clearOverride 必须检查响应状态(403 不算成功)');
+  // r12-①b 换锚(语义不减):清除/暂停统一走 putClaudeActive,状态检查与置错在其内;
+  // clearOverride 仍必须经由它(one-liner 委托)。
+  const putFn = ep.slice(ep.indexOf('const putClaudeActive'), ep.indexOf('const install ='));
+  assert.ok(/if \(!r\.ok\)/.test(putFn), 'putClaudeActive 必须检查响应状态(403 不算成功)');
+  assert.ok(/clearOverride = \(\) => putClaudeActive\(\{ path: '' \}\)/.test(putFn), '清除动作必须经由统一守卫路径');
   // 精确钉 catch 块内的置错(开头的 setClearErr(null) 是清空,不算):catch (e) 之后
   // 必须把异常消息写进 clearErr —— 改回 catch{} 吞错时这里必红。
-  const catchAt = clearFn.indexOf('catch (e)');
-  assert.ok(catchAt > -1, 'clearOverride 必须捕获异常(带绑定,不许裸 catch 吞掉)');
-  assert.ok(/setClearErr\(e\.message/.test(clearFn.slice(catchAt)),
+  const catchAt = putFn.indexOf('catch (e)');
+  assert.ok(catchAt > -1, 'putClaudeActive 必须捕获异常(带绑定,不许裸 catch 吞掉)');
+  assert.ok(/setClearErr\(e\.message/.test(putFn.slice(catchAt)),
     'catch 内必须把错误消息置入 clearErr(变异哨兵:改回吞错这里红)');
-  assert.ok(/清除失败/.test(ep), '失败提示对用户可见');
+  assert.ok(/操作失败/.test(ep), '失败提示对用户可见');
 }
 
 console.log('✓ check-override-dead: 死判定/静默回落/清除幂等/活不误标/端点与前端守卫 全过');
