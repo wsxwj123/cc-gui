@@ -90,6 +90,14 @@ import { initialExpandedProjects, toggleExpanded } from '../../client/src/utils/
   assert.doesNotMatch(sb, /from 'lucide-react'/, 't5: 零裸 lucide(守卫)');
   const store = readFileSync(new URL('../../client/src/stores/sessionStore.js', import.meta.url), 'utf8');
   assert.match(store, /hydrateSidebarView|putSidebarView|applyRemoteSidebarView/, 't5: store 三件');
+
+  // t6(0.2.296 全端崩溃回归钉):useMemo 回调与 deps 数组在渲染时同步求值,
+  // flatSessions 引用 pendingIds → 声明必须在 pendingIds 之后,否则 TDZ
+  // (WebKit "Cannot access uninitialized variable")。钉源码声明顺序。
+  const declPending = sb.indexOf('const pendingIds = useMemo(');
+  const declFlat = sb.indexOf('const flatSessions = useMemo(');
+  assert.ok(declPending > 0 && declFlat > 0, 't6: 两声明都存在');
+  assert.ok(declFlat > declPending, 't6: flatSessions 声明必须在 pendingIds 之后(TDZ 回归钉)');
 }
 
 console.log('check-drill-sidebar: all passed (r13 折叠树)');
