@@ -267,7 +267,7 @@ export default function ImagePanel() {
 
       {/* 管理态 */}
       {form
-        ? <ProviderForm initial={form} onCancel={() => setForm(null)} onDone={(id) => { setForm(null); load(id); }} />
+        ? <ProviderForm key={form.id || 'new'} initial={form} onCancel={() => setForm(null)} onDone={(id) => { setForm(null); load(id); }} />
         : providers.length > 0 && (
           <div className="space-y-1">
             <div className={labelCls}>生图 provider（配置独立存放，不写入 ~/.claude/settings.json）</div>

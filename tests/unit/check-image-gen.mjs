@@ -5,7 +5,7 @@
 //
 // 隔离:HOME 指向 mktemp 目录(真实 ~/.claude-gui 一个字节不碰);端口只用 6702,退出即释放。
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync, symlinkSync, chmodSync, readdirSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -189,10 +189,74 @@ app.get('/fake/out.png', (_req, res) => { res.setHeader('Content-Type', 'image/p
 app.post('/boom/v1/images/generations', (req, res) => res.status(401).json({
   error: { message: `invalid key ${req.headers.authorization}` }, // 故意回显鉴权头
 }));
+
+// —— 判官必修①/②的假上游 ——
+// 只认 x-goog-api-key 的假 gemini:端点形态是"中转站"(127.0.0.1)→ 路由主用 Bearer,
+// 必须 401 后换 x-goog-api-key 重试才拿得到图。googAttempts 记录尝试顺序。
+const googAttempts = [];
+app.post('/goog/v1/models/:model', (req, res) => {
+  googAttempts.push(req.headers['x-goog-api-key'] ? 'goog' : (req.headers.authorization ? 'bearer' : 'none'));
+  if (!req.headers['x-goog-api-key']) return res.status(401).json({ error: 'API key required' });
+  res.json({ candidates: [{ content: { parts: [{ inlineData: { mimeType: 'image/png', data: PNG_B64 } }] } }] });
+});
+// 上游把图片链接指向"内网 + 非图片 Content-Type"(URL 却以 .png 结尾)
+app.post('/badct/v1/chat/completions', (_req, res) => res.json({
+  choices: [{ message: { content: '![x](http://127.0.0.1:6702/internal/creds.png)' } }],
+}));
+app.get('/internal/creds.png', (_req, res) => { res.setHeader('Content-Type', 'text/html'); res.end('<html>INTERNAL-SECRET-BODY</html>'); });
+// 图片链接 302 跳转(跟随即绕过内网检查)
+app.post('/redir/v1/chat/completions', (_req, res) => res.json({
+  choices: [{ message: { content: '![x](http://127.0.0.1:6702/redirect.png)' } }],
+}));
+app.get('/redirect.png', (_req, res) => res.redirect(302, 'http://127.0.0.1:6702/fake/out.png'));
+// 图片链接指向云元数据(链路本地地址)
+app.post('/meta/v1/chat/completions', (_req, res) => res.json({
+  choices: [{ message: { content: '![x](http://169.254.169.254/latest/meta-data/iam.png)' } }],
+}));
+// content-length 声明 200MB(真身只有几十字节)→ 读 body 前就该早退
+app.post('/huge/v1/chat/completions', (_req, res) => res.json({
+  choices: [{ message: { content: '![x](http://127.0.0.1:6702/huge.png)' } }],
+}));
+app.get('/huge.png', (_req, res) => {
+  res.writeHead(200, { 'Content-Type': 'image/png', 'Content-Length': String(200 * 1024 * 1024) });
+  res.end(Buffer.from(PNG_B64, 'base64'));
+});
+// b64 分支超限:直接吐一坨 92MB 的 base64 文本(> 64MB × 1.4 阈值)
+const BIG_B64_BYTES = 92 * 1024 * 1024;
+app.post('/bigb64/v1/images/generations', (_req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  res.write('{"data":[{"b64_json":"');
+  res.write(Buffer.alloc(BIG_B64_BYTES, 'A'));
+  res.end('"}]}');
+});
+// 出图过程中把保存目录弄坏:pre-check 已过,写盘那一刻才失败 → 钉住错误分类
+const RM_DIR = mkdtempSync(join(tmpdir(), 'cgui-img-rm-'));
+const RO_DIR = mkdtempSync(join(tmpdir(), 'cgui-img-ro-'));
+app.post('/rmdir/v1/images/generations', (_req, res) => {
+  rmSync(RM_DIR, { recursive: true, force: true });
+  res.json({ data: [{ b64_json: PNG_B64 }] });
+});
+app.post('/chmod/v1/images/generations', (_req, res) => {
+  chmodSync(RO_DIR, 0o500); // 只读目录 → writeFile 报 EACCES
+  res.json({ data: [{ b64_json: PNG_B64 }] });
+});
 app.use('/api', imageRouter);
 
-const server = app.listen(6702, '127.0.0.1');
-await new Promise((r) => server.once('listening', r));
+// 端口只许 6702,但隔壁分支的 E2E 也在用 → EADDRINUSE 退让重试,不当假失败。
+async function listenWithRetry(port, tries = 40) {
+  for (let i = 0; i < tries; i++) {
+    const s = app.listen(port, '127.0.0.1');
+    const r = await new Promise((resolve) => {
+      s.once('listening', () => resolve({ ok: true }));
+      s.once('error', (e) => resolve({ ok: false, err: e }));
+    });
+    if (r.ok) return s;
+    if (r.err?.code !== 'EADDRINUSE') throw r.err;
+    await new Promise((done) => setTimeout(done, 500));
+  }
+  throw new Error(`端口 ${port} 持续被占用(隔壁 worktree 的 E2E?),重试 ${tries} 次后放弃`);
+}
+const server = await listenWithRetry(6702);
 const BASE = 'http://127.0.0.1:6702';
 const api = async (method, path, body) => {
   const r = await fetch(`${BASE}${path}`, {
@@ -309,13 +373,126 @@ try {
 
   // 6.7 未知 provider
   assert.equal((await api('POST', '/api/image/generate', { providerId: 'nope', prompt: 'x' })).status, 404, 't6: 未知 provider 404');
+
+  // ── 7. gemini 认证头回落(路由那半) ──
+  // 纯函数只钉住了 altHeaders 的形状,重试这段路由代码此前一行没测:整块删掉全套仍绿。
+  {
+    const g = await mk('只认 goog 头的中转站', 'gemini', `${BASE}/goog/v1`);
+    const r = await api('POST', '/api/image/generate', { providerId: g.json.id, prompt: '换头重试' });
+    assert.equal(r.status, 200, `t7: 401 后换认证头重试应最终成功(${r.text})`);
+    assert.deepEqual(googAttempts, ['bearer', 'goog'], 't7: 尝试序列 = 先按端点形态用 Bearer,401 后回落 x-goog-api-key');
+    assert.ok(existsSync(r.json.file), 't7: 重试成功后正常落盘');
+    await api('DELETE', `/api/image-providers/${g.json.id}`);
+  }
+
+  // ── 8. SSRF:上游回的图片链接是攻击者可控性最高的一处 ──
+  {
+    const filesBefore = new Set(readdirSync(SAVE_DIR));
+    // 8.1 内网地址 + 非图片 Content-Type(URL 以 .png 结尾,后缀是攻击者写的,不能当证据)
+    const badct = await mk('回内网链接的', 'chat', `${BASE}/badct/v1`);
+    const r1 = await api('POST', '/api/image/generate', { providerId: badct.json.id, prompt: 'x' });
+    assert.equal(r1.status, 502, 't8: 非图片 Content-Type 的链接被拒');
+    assert.match(r1.json.error, /不是图片/, 't8: 报错说明是 Content-Type 问题');
+    assert.ok(!r1.text.includes('INTERNAL-SECRET-BODY'), 't8: 内网响应体没被回显');
+    assert.deepEqual([...readdirSync(SAVE_DIR)].filter((f) => !filesBefore.has(f)), [], 't8: 内网响应没被落盘成"图片"');
+
+    // 8.2 302 跳转不跟随(事后校验挡不住重定向)
+    const redir = await mk('会跳转的', 'chat', `${BASE}/redir/v1`);
+    const r2 = await api('POST', '/api/image/generate', { providerId: redir.json.id, prompt: 'x' });
+    assert.equal(r2.status, 502, 't8: 图片链接发生跳转 → 拒');
+    assert.match(r2.json.error, /跳转/, 't8: 报错点明跳转');
+
+    // 8.3 云元数据地址(链路本地)在下载前就被 SSRF 守卫拦下
+    const meta = await mk('指向元数据的', 'chat', `${BASE}/meta/v1`);
+    const r3 = await api('POST', '/api/image/generate', { providerId: meta.json.id, prompt: 'x' });
+    assert.ok(r3.status >= 400, 't8: 169.254.169.254 被拒');
+    assert.match(r3.json.error, /拒绝下载该链接/, 't8: 走的是下载前的 SSRF 守卫,不是事后校验');
+    assert.deepEqual([...readdirSync(SAVE_DIR)].filter((f) => !filesBefore.has(f)), [], 't8: 三种攻击一张图都没落盘');
+    for (const p of [badct, redir, meta]) await api('DELETE', `/api/image-providers/${p.json.id}`);
+  }
+
+  // ── 9. 体积上限:后端单进程扛全部会话,一坨大 body 就是全局 OOM ──
+  {
+    const huge = await mk('回超大图的', 'chat', `${BASE}/huge/v1`);
+    const r1 = await api('POST', '/api/image/generate', { providerId: huge.json.id, prompt: 'x' });
+    assert.equal(r1.status, 502, 't9: content-length 超限 → 502(读 body 前早退)');
+    assert.match(r1.json.error, /图片过大/, 't9: 人话错误');
+
+    const big = await mk('回超长 b64 的', 'openai', `${BASE}/bigb64/v1`);
+    const r2 = await api('POST', '/api/image/generate', { providerId: big.json.id, prompt: 'x' });
+    assert.equal(r2.status, 502, 't9: b64 超长 → 502');
+    assert.match(r2.json.error, /图片过大/, 't9: b64 分支同样给人话错误');
+    for (const p of [huge, big]) await api('DELETE', `/api/image-providers/${p.json.id}`);
+  }
+
+  // ── 10. 软链穿透:两层语义分别钉死 ──
+  // savePath 里预埋 `evil.png -> 目录外的文件`(把保存目录设成 ~/Downloads 再解压一个
+  // 带软链的 zip 就能触发)。纯函数只做字面计算【会放行】,必须由路由层的 realpath 复核拦下。
+  {
+    const outside = join(TMP_HOME, 'outside-secret.png');
+    writeFileSync(outside, 'OUTSIDE-SECRET-CONTENT');
+    const link = join(SAVE_DIR, 'evil.png');
+    symlinkSync(outside, link);
+    assert.equal(resolvePreviewPath(link, [SAVE_DIR]), link, 't10: 纯函数(零 IO)按字面放行 —— 所以不能只靠它');
+    const pv = await api('GET', `/api/image/preview?file=${encodeURIComponent(link)}`);
+    assert.equal(pv.status, 400, 't10: 路由层 realpath 复核拦下软链');
+    assert.ok(!pv.text.includes('OUTSIDE-SECRET-CONTENT'), 't10: 目录外文件内容没漏');
+    const rv = await api('POST', '/api/image/reveal', { file: link });
+    assert.equal(rv.status, 400, 't10: reveal 走同一道闸');
+    // 正常图片不被这层误伤(SAVE_DIR 本身在 macOS 上就是 /var → /private/var 的软链)
+    const okShot = await api('POST', '/api/image/generate', { providerId: oa.json.id, prompt: '软链复核不误伤' });
+    assert.equal((await fetch(`${BASE}${okShot.json.previewUrl}`)).status, 200, 't10: 真实图片仍可预览');
+  }
+
+  // ── 11. reveal 的路径闸(此前零覆盖)。只测拒绝路径:放行会真的弹出访达 ──
+  {
+    assert.equal((await api('POST', '/api/image/reveal', { file: `${SAVE_DIR}/../secret.png` })).status, 400, 't11: reveal 拒 `..` 穿透');
+    assert.equal((await api('POST', '/api/image/reveal', { file: join(TMP_HOME, 'outside-secret.png') })).status, 400, 't11: reveal 拒 savePath 之外');
+    assert.equal((await api('POST', '/api/image/reveal', { file: join(SAVE_DIR, 'x.txt') })).status, 400, 't11: reveal 拒非图片扩展名');
+    assert.equal((await api('POST', '/api/image/reveal', {})).status, 400, 't11: reveal 空入参');
+  }
+
+  // ── 12. 并发原子性:读-改-写整段必须在队列里 ──
+  // 修复前:5 个请求各自读到同一份旧 list、后写覆盖先写 → 只剩 1 条。
+  {
+    const before = (await api('GET', '/api/image-providers')).json.providers.length;
+    await Promise.all([1, 2, 3, 4, 5].map((i) => mk(`并发-${i}`, 'openai', `${BASE}/fake/v1`)));
+    const after = (await api('GET', '/api/image-providers')).json.providers;
+    assert.equal(after.length, before + 5, 't12: 并发 5 次创建一条都不能丢');
+    for (const i of [1, 2, 3, 4, 5]) assert.ok(after.some((p) => p.name === `并发-${i}`), `t12: 并发-${i} 在册`);
+    // 落盘文件权限 0600(明文 apiKey 不能同机可读)
+    assert.equal(statSync(cfgPath).mode & 0o777, 0o600, 't12: 配置文件 0600');
+  }
+
+  // ── 13. 落盘失败的错误分类:目录在"pre-check 之后、写盘之前"坏掉 ──
+  // (ENOSPC 磁盘满没法在测试里造,只覆盖 ENOENT/EACCES 两支;分类本身由这两支钉住)
+  {
+    const rmP = await mk('目录会被删', 'openai', `${BASE}/rmdir/v1`);
+    await api('PUT', `/api/image-providers/${rmP.json.id}`, {
+      name: '目录会被删', protocol: 'openai', baseURL: `${BASE}/rmdir/v1`, model: 'm', savePath: RM_DIR,
+    });
+    const r1 = await api('POST', '/api/image/generate', { providerId: rmP.json.id, prompt: 'x' });
+    assert.equal(r1.status, 400, 't13: 写盘时目录已消失 → 400');
+    assert.match(r1.json.error, /保存目录不存在/, 't13: ENOENT 分类');
+
+    const roP = await mk('目录会变只读', 'openai', `${BASE}/chmod/v1`);
+    await api('PUT', `/api/image-providers/${roP.json.id}`, {
+      name: '目录会变只读', protocol: 'openai', baseURL: `${BASE}/chmod/v1`, model: 'm', savePath: RO_DIR,
+    });
+    const r2 = await api('POST', '/api/image/generate', { providerId: roP.json.id, prompt: 'x' });
+    assert.equal(r2.status, 400, 't13: 写盘时目录变只读 → 400');
+    assert.match(r2.json.error, /没有写入权限/, 't13: EACCES 分类(不能笼统说"目录不存在",会误导用户去换目录)');
+    assert.doesNotMatch(r2.json.error, /不存在/, 't13: 两类错误必须区分开');
+  }
 } catch (e) {
   failure = e;
 } finally {
+  // 撒谎的 content-length 那条会留下半开连接,close() 会一直等它 → 显式断连。
+  server.closeAllConnections?.();
   server.close();
   await new Promise((r) => server.once('close', r));
-  rmSync(TMP_HOME, { recursive: true, force: true });
-  rmSync(SAVE_DIR, { recursive: true, force: true });
+  try { chmodSync(RO_DIR, 0o700); } catch {} // 改回可写才删得掉
+  for (const d of [TMP_HOME, SAVE_DIR, RM_DIR, RO_DIR]) rmSync(d, { recursive: true, force: true });
 }
 if (failure) throw failure;
 
