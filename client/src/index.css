@@ -1801,10 +1801,10 @@ html { --content-max: clamp(768px, calc(var(--app-w, 100vw) * 0.7), 1120px); }
   font-weight: 500;
   letter-spacing: 0.005em;
   color: var(--color-ink);
-  line-height: 1;
-  /* 衬线大写字形在 line-box 里视觉中心偏上约 1px(descender 空间空着),
-     align-items:center 后文字比 spark 偏高 → 微调下移对齐 spark 光学中心。 */
-  transform: translateY(1px);
+  /* r13-p2-11:line-height:1 + translateY(1px) 是给旧小写衬线字标调的,全大写
+     字标(CC-GUI)在此组合下底边被顶栏的 overflow 裁掉 1px。改回给足行高、
+     去掉位移:大写字形本就贴基线,flex 居中即光学居中。 */
+  line-height: 1.2;
 }
 
 @keyframes cgui-brand-breath {

@@ -138,9 +138,35 @@ const approx = (a, b, eps = 1e-6) => Math.abs(a - b) <= eps;
   // 组件接线守卫:moveBar/clickBar 走 fraction 法(目标高=自家 box.height),
   // 每事件 DOM API(clientHeight)依赖清零
   const src = readFileSync(new URL('../../client/src/components/TurnScrubber.jsx', import.meta.url), 'utf8');
-  assert.equal((src.match(/normalizePointerY\(e\.clientY, rect, box\.height\)/g) || []).length, 2, 't5: moveBar+clickBar 两处均走 box.height 口径');
+  // r13-p2-12:口径升级为 offsetY(见 t7);此处只钉"两处调用点同口径且都传 box.height"。
+  assert.equal((src.match(/pointerLocalY\(e, box\.height\)/g) || []).length, 2, 't5: moveBar+clickBar 两处均走 box.height 口径');
   assert.doesNotMatch(src, /e\.currentTarget\.clientHeight/, 't5: 每事件 clientHeight 依赖清零(跨 API 假设根除)');
   assert.doesNotMatch(src, /Math\.min\(rect\.height, e\.clientY - rect\.top\)/, 't5: 旧视觉差值算式仍清零');
 }
 
 console.log('check-turn-scrubber-solve: all passed');
+
+// t7(r13-p2-12):指针本地 y 走 offsetY —— 容器自身坐标系,零缩放换算。
+// 比例法(p5-1)要求 clientY 与 rect 同空间,WKWebView 的 zoom 下不成立(真机偏移);
+// offsetY 规范定义即"相对目标 padding box",与 positions 同空间,任何内核都不需换算。
+{
+  const { pointerLocalY } = await import('../../client/src/utils/turnWave.js');
+  const H = 600;
+  // 任意"内核语义"下 offsetY 都直接可用(不查 rect,不乘除任何缩放)
+  for (const y of [0, 1, 123.4, 599, 600]) {
+    assert.equal(pointerLocalY({ nativeEvent: { offsetY: y } }, H), Math.max(0, Math.min(H, y)),
+      `t7: offsetY=${y} 原样采用(夹紧到 [0,H])`);
+  }
+  assert.equal(pointerLocalY({ nativeEvent: { offsetY: -20 } }, H), 0, 't7: 负值夹紧');
+  assert.equal(pointerLocalY({ nativeEvent: { offsetY: 9999 } }, H), H, 't7: 超界夹紧');
+  // 无 offsetY 的引擎:回落比例法(仍可用,不崩)
+  const fallback = pointerLocalY({ clientY: 300 }, H, { top: 100, height: 200 });
+  assert.ok(fallback >= 0 && fallback <= H, 't7: 无 offsetY 时回落比例法且在界内');
+  // 接线守卫:两处调用点都必须走 offsetY 口径(回退到 clientY 比例法 = 真机复发)
+  const src = readFileSync(new URL('../../client/src/components/TurnScrubber.jsx', import.meta.url), 'utf8');
+  assert.equal((src.match(/pointerLocalY\(e, box\.height\)/g) || []).length, 2,
+    't7: moveBar 与 clickBar 都走 pointerLocalY(哨兵锚)');
+  assert.doesNotMatch(src, /normalizePointerY\(e\.clientY/, 't7: 调用点不得回退旧比例法');
+}
+
+console.log('check-turn-scrubber-solve: t7 (offsetY 口径) passed');

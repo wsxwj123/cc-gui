@@ -100,3 +100,21 @@ export function nearestTurnIndex(index, frac) {
   if (lo > 0 && Math.abs(fracs[lo - 1] - frac) <= Math.abs(fracs[lo] - frac)) lo -= 1;
   return idxs[lo];
 }
+
+/**
+ * r13-p2-12:指针 → 容器本地 y 的【零换算】口径。
+ * 背景:p5-1 的无量纲比例法虽然自洽,但 fraction 的分子 (clientY - rect.top) 仍要求
+ * clientY 与 rect 处在同一坐标系 —— WKWebView 在 html zoom 下并不满足(与弹层定位
+ * 那次同族:内核对 zoom 的坐标口径不一致),表现为回合多时鱼眼中心与指针相距越来越远
+ * (Chromium 正常、装机 App 偏移)。
+ * 根治:直接用 MouseEvent.offsetY —— 规范定义为"相对事件目标 padding box 的偏移",
+ * 天生就在容器自身的 CSS px 空间里,与 positions(translateY(npx))同空间,**不需要任何
+ * 缩放换算**。刻度全部 pointer-events:none,事件目标恒为容器,offsetY 不会指向子元素。
+ * 无 offsetY 的极端引擎回落 normalizePointerY(旧比例法)。
+ */
+export function pointerLocalY(e, height, rect) {
+  const h = (Number.isFinite(height) && height > 0) ? height : 0;
+  const raw = e?.nativeEvent?.offsetY ?? e?.offsetY;
+  if (Number.isFinite(raw)) return Math.max(0, Math.min(h, raw));
+  return normalizePointerY(e?.clientY ?? 0, rect || e?.currentTarget?.getBoundingClientRect?.(), h);
+}

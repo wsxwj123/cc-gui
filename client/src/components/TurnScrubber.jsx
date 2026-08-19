@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, useCallback } from 'react';
-import { turnWaveWidth, layoutCompactPositions, distortPositions, buildTurnIndex, nearestTurnIndex, normalizePointerY } from '../utils/turnWave.js';
+import { turnWaveWidth, layoutCompactPositions, distortPositions, buildTurnIndex, nearestTurnIndex, normalizePointerY, pointerLocalY } from '../utils/turnWave.js';
 
 // 右侧竖向回合进度条(Claude Code/Codex 式线性波形 + macOS Dock 放大)。
 // hover 线条向左拉长 + 浮窗显示该回合消息摘要,点击平滑滚动到该回合。
@@ -120,10 +120,9 @@ export default function TurnScrubber({ containerRef, turns, onNavigate }) {
     hideTimer.current = setTimeout(() => setTipIdx(null), HIDE_DELAY);
   };
   const moveBar = (e) => {
-    // r11-p5-1:无量纲比例法——fraction 取自同一次 rect 的同一坐标系(引擎无关),
-    // 目标高用自家布局态 box.height(不查任何每事件 DOM API,WKWebView 真机回归根治)。
-    const rect = e.currentTarget.getBoundingClientRect();
-    pendingPointerY.current = normalizePointerY(e.clientY, rect, box.height);
+    // r13-p2-12:改用 offsetY(容器自身坐标系,零缩放换算) —— 比例法在 WKWebView
+    // 的 zoom 下仍会漂(clientY 与 rect 不同空间),见 pointerLocalY 注释。
+    pendingPointerY.current = pointerLocalY(e, box.height);
     if (pointerFrame.current) return;
     pointerFrame.current = requestAnimationFrame(() => {
       pointerFrame.current = 0;
@@ -145,9 +144,8 @@ export default function TurnScrubber({ containerRef, turns, onNavigate }) {
   };
   // 容器级 click:按当前渲染帧的变形坐标解算(指针下那根=点中那根)。
   const clickBar = (e) => {
-    const rect = e.currentTarget.getBoundingClientRect();
-    // r11-p5-1:与 moveBar 同一比例法归一化(布局像素),点击命中与悬停一致。
-    const y = normalizePointerY(e.clientY, rect, box.height);
+    // r13-p2-12:与 moveBar 同一口径(offsetY),点击命中与悬停恒一致。
+    const y = pointerLocalY(e, box.height);
     const anchor = committedPointerY.current ?? y;
     const idx = nearestTurnIndex(buildTurnIndex(distortPositions(base, anchor, FISHEYE)), y);
     const t = turns[idx];
