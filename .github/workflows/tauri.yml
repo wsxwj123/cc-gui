@@ -79,14 +79,14 @@ jobs:
           if [ -z "$DMG" ]; then echo "no dmg found, skipping"; exit 0; fi
           NAME='使用说明:先拖入应用程序,再执行此文件中的命令.txt'
           cat > /tmp/quarantine-readme.txt <<'TXT'
-          Claude GUI 安装步骤
+          CC-GUI 安装步骤
 
-          1. 把 Claude GUI 拖进「应用程序」文件夹。
+          1. 把 CC-GUI 拖进「应用程序」文件夹。
           2. 打开「终端」(启动台搜索 Terminal),粘贴执行下面这行命令(无需 sudo):
 
-          xattr -dr com.apple.quarantine "/Applications/Claude GUI.app"
+          xattr -dr com.apple.quarantine "/Applications/CC-GUI.app"
 
-          3. 之后即可正常双击打开 Claude GUI。
+          3. 之后即可正常双击打开 CC-GUI。
 
           说明:本 app 未做 Apple 付费公证(notarization),macOS 会给下载的
           未公证 app 加隔离标记并阻止打开。上述命令仅移除该标记,不修改 app 本身。
@@ -141,17 +141,17 @@ jobs:
           cat > notes.md <<'EOF'
           未签名安装包,首次打开需手动放行。当前安装包会调用本机 Node.js 启动内置后端,运行机器需已安装 Node.js 20+ 和 Claude Code CLI。
 
-          - **macOS**:仅支持 Apple Silicon(M 系列芯片)。打开 `.dmg`,把 **Claude GUI** 拖进「应用程序」,然后在「终端」执行下面这行命令(无需 sudo),之后即可正常双击打开 app:
+          - **macOS**:仅支持 Apple Silicon(M 系列芯片)。打开 `.dmg`,把 **CC-GUI** 拖进「应用程序」,然后在「终端」执行下面这行命令(无需 sudo),之后即可正常双击打开 app:
 
             ```
-            xattr -dr com.apple.quarantine "/Applications/Claude GUI.app"
+            xattr -dr com.apple.quarantine "/Applications/CC-GUI.app"
             ```
 
             原因:本 app 未做 Apple 付费公证(notarization),macOS 给下载的未公证 app 加了隔离标记并阻止打开;该命令仅移除此标记。dmg 内附「使用说明」文本可随时查看此命令(macOS 15 起未公证脚本连右键打开都不放行,故不再提供双击脚本)。
           - **Windows**:`.exe`(NSIS)或 `.msi` 均可;SmartScreen 提示时点「更多信息 → 仍要运行」。
           - 若双击后无窗口,查看 `~/.claude-gui/tauri-startup.log` 获取启动错误。
           EOF
-          # Installer filenames contain spaces ("Claude GUI_x.y.z_…"), so read them
+          # Installer filenames (CC-GUI_x.y.z_…) may contain spaces, so read them
           # into an array (null-delimited) and pass quoted — an unquoted $FILES
           # word-splits on the space and gh can't find the file.
           # *.app.tar.gz / *.sig 是 updater 产物,随常规资产一起上传(latest.json 在下一步拼)。
@@ -159,7 +159,7 @@ jobs:
           printf 'Attaching: %s\n' "${FILES[@]}"
           gh release create "${{ github.ref_name }}" \
             --repo "${{ github.repository }}" \
-            --title "Claude GUI ${{ github.ref_name }}" \
+            --title "CC-GUI ${{ github.ref_name }}" \
             --notes-file notes.md \
             "${FILES[@]}"
 

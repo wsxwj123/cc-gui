@@ -53,17 +53,20 @@ function semverGt(a, b) {
 // 前端"一键下载并安装"按钮始终可用。直链模式即使 API 拒,Release 页面的资产
 // 文件仍可直接 GET(走 CDN,不计 API rate limit)。
 function buildFallbackAssets(version) {
-  return [
-    { name: `Claude.GUI_${version}_aarch64.dmg`,
-      url: `https://github.com/wsxwj123/claude-gui/releases/download/v${version}/Claude.GUI_${version}_aarch64.dmg`,
-      size: 0 },
-    { name: `Claude.GUI_${version}_x64-setup.exe`,
-      url: `https://github.com/wsxwj123/claude-gui/releases/download/v${version}/Claude.GUI_${version}_x64-setup.exe`,
-      size: 0 },
-    { name: `Claude.GUI_${version}_x64_en-US.msi`,
-      url: `https://github.com/wsxwj123/claude-gui/releases/download/v${version}/Claude.GUI_${version}_x64_en-US.msi`,
-      size: 0 },
-  ];
+  // r13-p2-23:资产名跟随 productName —— 0.2.303 改名 CC-GUI 后 CI 产物变成
+  // CC-GUI_x.y.z_*,而这里原本写死 Claude.GUI_*,应用内「一键下载并安装」必 404。
+  // Tauri 把产物名里的空格替换为 '.',CC-GUI 无空格故原样。旧版资产名保留为备选,
+  // 让装着旧版的用户仍能下到(GitHub 上历史 release 用的是旧名)。
+  const base = `https://github.com/wsxwj123/claude-gui/releases/download/v${version}`;
+  const suffixes = ['aarch64.dmg', 'x64-setup.exe', 'x64_en-US.msi'];
+  const out = [];
+  for (const stem of ['CC-GUI', 'Claude.GUI']) {
+    for (const sfx of suffixes) {
+      const name = `${stem}_${version}_${sfx}`;
+      out.push({ name, url: `${base}/${name}`, size: 0 });
+    }
+  }
+  return out;
 }
 
 const GH_HEADERS = { 'User-Agent': 'claude-gui-version-check', 'Accept': 'application/vnd.github+json' };
