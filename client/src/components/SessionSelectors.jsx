@@ -231,6 +231,47 @@ export function RemoteControlButton({ session }) {
   );
 }
 
+// r16-2:低额度红点。数据与用量面板那张额度卡同源(/api/provider-quota,服务端 60s
+// 缓存,几处订阅者共享同一份),只有**当前激活的 provider** 有数据 —— 服务端只查它。
+// 平时不占地方,只在余额低于阈值 / 用量超阈值时亮。
+function useProviderQuotaLow() {
+  const [low, setLow] = useState(false);
+  useEffect(() => {
+    let alive = true;
+    const load = () => fetch('/api/provider-quota').then((r) => r.json())
+      .then((d) => { if (alive) setLow(!!d?.low); }).catch(() => {});
+    load();
+    window.addEventListener('cgui:chat-done', load);
+    window.addEventListener('cgui:provider-change', load);
+    const id = setInterval(load, 120_000);
+    return () => {
+      alive = false;
+      window.removeEventListener('cgui:chat-done', load);
+      window.removeEventListener('cgui:provider-change', load);
+      clearInterval(id);
+    };
+  }, []);
+  return low;
+}
+
+// 点红点 = 跳用量面板(那里有完整的方向词/周期/重置时间)。stopPropagation 防止顺带
+// 触发外层按钮(顶栏那颗是 popover 开关的兄弟节点,列表那颗是切换行的兄弟节点)。
+function QuotaLowDot({ className = '', onJump }) {
+  return (
+    <button
+      type="button"
+      title="额度偏低 —— 点击查看用量面板"
+      aria-label="额度偏低,查看用量面板"
+      onClick={(e) => {
+        e.stopPropagation();
+        onJump?.();
+        window.dispatchEvent(new CustomEvent('cgui:open-panel', { detail: { id: 'usage' } }));
+      }}
+      className={`w-2 h-2 rounded-full bg-error shrink-0 ${className}`}
+    />
+  );
+}
+
 // 修正批#6:Provider 切换列表 —— 单一列表(mergeProviderLists,与管理页同一数据
 // 选择器):官方置顶、其余按名称序,来源用小徽章标注,不再按来源分组。
 // 点行即切,当前项打勾;增删改/测试/隐藏/导入在 设置→Provider(底部直达链)。
@@ -240,6 +281,7 @@ export function ProviderSwitchList({ onSwitched }) {
   const [customProviders, setCustomProviders] = useState([]);
   const [hiddenProviders, setHiddenProviders] = useState(new Set());
   const [switching, setSwitching] = useState(false);
+  const quotaLow = useProviderQuotaLow();
   // Optimistic current id(cc-switch db 的 is_current 我们不写,切换后本地标记)。
   const [activeId, setActiveId] = useState(null);
 
@@ -318,6 +360,7 @@ export function ProviderSwitchList({ onSwitched }) {
             <ProviderSourceBadge p={p} />
             {isCur(p) && <Check size={12} className="text-accent shrink-0" />}
           </button>
+          {isCur(p) && quotaLow && <QuotaLowDot className="mr-1.5" onJump={() => onSwitched?.()} />}
           {p.source !== 'official' && (
             <button onClick={() => openEdit(p)} title="编辑该 Provider"
               className="p-1 mr-1.5 text-ink-faint hover:text-accent shrink-0 opacity-0 group-hover/prov:opacity-100 group-focus-within/prov:opacity-100 transition-opacity max-md:hidden">
@@ -344,6 +387,7 @@ export function ProviderSwitcher({ hideLabel = false, tourAnchor = false, respon
   const provider = useStore((s) => s.providerName || '');
   const [open, setOpen] = useState(false);
   const wrapRef = useRef(null);
+  const quotaLow = useProviderQuotaLow();
   const label = provider || (providerHint === 'anthropic' ? 'Anthropic' : providerHint);
 
   useEffect(() => {
@@ -362,6 +406,8 @@ export function ProviderSwitcher({ hideLabel = false, tourAnchor = false, respon
         {!hideLabel && <span className="text-[11px] font-body text-ink-muted whitespace-nowrap max-w-[96px] truncate">{label}</span>}
         <ChevronDown size={10} className="text-ink-faint" />
       </button>
+      {/* r16-2:低额度红点(按钮的兄弟节点,不嵌套在 button 里) */}
+      {quotaLow && <QuotaLowDot className="absolute -top-0.5 -right-0.5" />}
       <AnchoredPopover anchorRef={wrapRef} open={open} onRequestClose={() => setOpen(false)} drop={drop}
         className="w-72 max-w-[calc(var(--app-w,100vw)-1.5rem)] py-1 max-h-[min(60vh,calc(var(--app-h,100dvh)-6rem))] overflow-y-auto">
         <div className="px-3 py-1.5 text-[10px] text-ink-faint uppercase tracking-wider font-body border-b border-canvas-deep">

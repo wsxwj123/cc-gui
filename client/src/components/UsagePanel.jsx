@@ -3,6 +3,7 @@ import { Cpu, Calendar, RefreshCw, FolderOpen, Download, FileText } from './Icon
 import { ModelBadge, modelProvider } from './ModelBadge.jsx';
 import { ArtifactPreview } from './ArtifactPreview.jsx';
 import { aggregateCost, formatCost } from '../utils/pricing.js';
+import { quotaItemText, quotaUsedPercent, quotaTone, resetTooltip } from '../utils/quotaFormat.js';
 import { useStore } from '../stores/sessionStore.js';
 
 // R4-a:面板的费用口径 = 消息气泡的口径,只有 aggregateCost / computeCost 一个出口。
@@ -138,6 +139,70 @@ function SubscriptionUsageCard() {
   );
 }
 
+// r16-2:第三方 provider 的额度/余额卡,与上面的订阅额度卡**互斥**(官方 provider 返回
+// official:true → 本卡不渲染,那张卡接管;第三方则反过来)。数据来自 /api/provider-quota
+// (服务端探测候选端点 + 60s 缓存)。刷新节奏抄订阅卡:120s 轮询 + chat-done 事件,另加
+// provider-change(切了 provider 额度当然要重查)。
+// 查不到额度时**明写原因**(note),不留空白 —— 留空用户会以为查询坏了。
+function ProviderQuotaCard() {
+  const [data, setData] = useState(null);
+  const load = () => fetch('/api/provider-quota').then((r) => r.json()).then(setData).catch(() => {});
+  useEffect(() => {
+    load();
+    const onRefresh = () => load();
+    window.addEventListener('cgui:chat-done', onRefresh);
+    window.addEventListener('cgui:provider-change', onRefresh);
+    const id = setInterval(load, 120_000);
+    return () => {
+      window.removeEventListener('cgui:chat-done', onRefresh);
+      window.removeEventListener('cgui:provider-change', onRefresh);
+      clearInterval(id);
+    };
+  }, []);
+  if (!data || data.official) return null;
+  const heading = `额度 · ${data.providerName || '当前 Provider'}`;
+  const title = (
+    <h3 className="text-[10px] font-medium uppercase tracking-widest text-ink-faint font-body mb-3">{heading}</h3>
+  );
+  const items = data.ok && Array.isArray(data.items) ? data.items : [];
+  if (!items.length) {
+    return (
+      <div>
+        {title}
+        <div className="text-[11px] text-ink-faint font-body bg-canvas-warm border border-canvas-deep rounded-lg p-3">
+          {data.note || '暂时查不到该 provider 的额度'}
+        </div>
+      </div>
+    );
+  }
+  return (
+    <div>
+      {title}
+      <div className="bg-canvas-warm border border-canvas-deep rounded-lg p-3 space-y-2">
+        {data.degraded && (
+          <div className="text-[10px] font-body leading-snug" style={{ color: '#d97706' }}>{data.note}</div>
+        )}
+        {items.map((it, i) => {
+          const used = quotaUsedPercent(it);
+          const tip = [used === null ? '' : `已用 ${Math.round(used)}%`, resetTooltip(it.resetAt)].filter(Boolean).join(' · ');
+          return (
+            <div key={`${it.label}-${i}`} title={tip || undefined}>
+              {/* 方向词(已用/剩余)与周期必须同时出现:三家接口方向不一致,只写数字必被读反 */}
+              <div className="text-xs text-ink-muted font-body mb-1">{quotaItemText(it, data.currency)}</div>
+              {used !== null && (
+                <div className="h-2 w-full rounded-full bg-canvas-deep overflow-hidden">
+                  <div className="h-full rounded-full transition-all duration-500"
+                    style={{ width: `${Math.min(100, Math.max(used, 1))}%`, background: quotaTone(used) }} />
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 // 使用报告(/insights)。点击后 server spawn `claude -p /insights` 生成 HTML 报告,
 // 返回内容用 ArtifactPreview(沙箱 iframe)内联预览,可停靠/全屏。生成较慢(数十秒)。
 function InsightsReportCard() {
@@ -238,6 +303,8 @@ export function UsagePanel() {
     <div className="px-4 py-4 space-y-5 overflow-y-auto h-full">
       {/* W7:官方订阅额度(非官方 provider 自动隐藏) */}
       <SubscriptionUsageCard />
+      {/* r16-2:第三方 provider 额度/余额(官方 provider 自动隐藏,与上面那张互斥) */}
+      <ProviderQuotaCard />
       {/* 使用报告(/insights)——按需生成 HTML 报告 */}
       <InsightsReportCard />
       {/* Total summary */}
