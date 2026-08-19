@@ -111,7 +111,7 @@ async function ensureOnboardingFlag() {
 // otherwise the picker reverts to the stale db value every time it remounts.
 const ACTIVE_PROVIDER_PATH = join(homedir(), '.claude-gui', 'active-provider.json');
 
-async function readActiveProviderId() {
+export async function readActiveProviderId() {
   try {
     const d = JSON.parse(await readFile(ACTIVE_PROVIDER_PATH, 'utf-8'));
     return typeof d?.id === 'string' ? d.id : null;
@@ -180,7 +180,7 @@ export function sanitizeModelMeta(input, models) {
   return meta;
 }
 
-async function readCustomProviders() {
+export async function readCustomProviders() {
   try {
     const d = JSON.parse(await readFile(CUSTOM_PROVIDERS_PATH, 'utf-8'));
     if (!Array.isArray(d)) return [];

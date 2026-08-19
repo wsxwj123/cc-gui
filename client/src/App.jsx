@@ -9515,6 +9515,17 @@ export default function App() {
     return () => window.removeEventListener('cgui:open-provider-manager', onOpenMgr);
   }, []);
 
+  // r16-2:任意组件经此事件打开右侧面板(低额度红点 → 用量面板)。id 必须是 PANEL_MAP
+  // 里的键,别的一律忽略。
+  useEffect(() => {
+    const onOpenPanel = (e) => {
+      const id = e?.detail?.id;
+      if (id && PANEL_MAP[id]) setRightPanel(id);
+    };
+    window.addEventListener('cgui:open-panel', onOpenPanel);
+    return () => window.removeEventListener('cgui:open-panel', onOpenPanel);
+  }, [setRightPanel]);
+
   // P1.4:任意组件经此事件打开设置面板并定位到指定设置组。与 jumpToUpdate 同一
   // __cguiSettingsJump 兜底。
   useEffect(() => {
