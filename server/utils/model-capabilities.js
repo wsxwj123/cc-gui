@@ -46,8 +46,11 @@ export const MODEL_CAPABILITY_CATALOG = [
   // ── OpenAI ───────────────────────────────────────────────
   // gpt-5 codex 系:reasoning_effort low/medium/high/xhigh(无 minimal;max 由代理折算)。
   { family: 'gpt-codex', re: /^gpt-5[\d.]*-codex/i, caps: { reasoning: true, efforts: ['low', 'medium', 'high', 'xhigh'] } },
-  // r15-3 撤销 `gpt-5-chat` 行(r15-2 加的,判 reasoning:false):与 584 条实测表对撞,
+  // r15-3 撤销 `gpt-5-chat` 行(r15-2 加的,判 reasoning:false):与 584 条数据表条目对撞,
   // 唯一"正则判死而表说能思考"的方向性冲突就是它 —— gpt-5.2-chat-latest 实测四档。
+  // ⚠️置信度口径:表是 pi-ai 某版的【快照】而非我们自己实测,同一族里它自己也不完全一致
+  //   (gpt-5-chat-latest 判非思考、gpt-5.2-chat-latest 却给四档)。撤行后表外的
+  //   gpt-5.1-chat-latest 会从"非思考"变成有档可选——方向仍是本轮既定的"宁可全档别判死"。
   // 传了 protocol 时表压过正则不出事,但正则恰恰只对【表里没有的模型】生效,那正是最容易
   // 判错的场景,且方向是本轮明令避免的"判死"。表里已有 8 条 *chat* 判 reasoning:false,
   // 覆盖足够;表外的新 chat 变体退回全档(无害)。

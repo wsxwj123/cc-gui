@@ -473,57 +473,82 @@ const runIsolated = (home) => JSON.parse(execFileSync(process.execPath, ['-e', C
 //   GET /providers → 照客户端 save() 组 body → PUT /custom-providers/:id → 读盘核对。
 {
   const home = mkdtempSync(join(tmpdir(), 'cgui-r15d-'));
-  const guiDir = join(home, '.claude-gui');
-  mkdirSync(guiDir, { recursive: true });
-  // 存量落盘形态:两条用户手配声明(一条限档、一条"全默认"墓碑)+ 若干裸模型 id。
-  const wire = [{
-    id: 'p1', name: 'OR', type: 'openai', baseURL: 'http://localhost:31999/v1', apiKey: 'k',
-    models: [
-      { id: 'openai/gpt-5.6-luna', efforts: ['max'], source: 'user' },
-      { id: 'openai/gpt-4o', source: 'user' },   // 用户墓碑:压住目录的 reasoning:false
-      'deepseek-v4-flash',                        // 目录/表判定 → catalog 条目
-      'anthropic/claude-opus-5',                  // 表内外都无 → 无条目
-    ],
-  }];
-  writeFileSync(join(guiDir, 'custom-providers.json'), JSON.stringify(wire));
-  const SETTINGS_HREF = new URL('../../server/routes/settings.js', import.meta.url).href;
-  const CHILD16 = `import(${JSON.stringify(SETTINGS_HREF)}).then(async (s) => {
-    const router = s.default;
-    const call = (method, url, body) => new Promise((resolve, reject) => {
-      const req = { method, url, body, headers: {}, query: {} };
-      const res = { statusCode: 200, status(c) { this.statusCode = c; return this; }, json(o) { resolve({ status: this.statusCode, body: o }); } };
-      router(req, res, (err) => reject(err || new Error('unhandled ' + method + ' ' + url)));
-    });
-    const got = await call('GET', '/providers');
-    const p = got.body.customProviders[0];
-    // 客户端 save() 的组包方式(App.jsx):modelMeta 就是表单状态,而表单状态直接来自
-    // 本接口下发的 modelMeta(setModelCaps(editing.modelMeta ? {...} : {}))。
-    const put = await call('PUT', '/custom-providers/p1', {
-      name: p.name, type: p.type, baseURL: p.baseURL, models: p.models,
-      defaultModel: null, tierModels: {}, contextWindow: null, modelPrices: null,
-      modelMeta: p.modelMeta || {},
-    });
-    process.stdout.write(JSON.stringify({ get: p.modelMeta, putStatus: put.status, putBody: put.body }));
-  });`;
-  const out = JSON.parse(execFileSync(process.execPath, ['-e', CHILD16], {
-    env: { ...process.env, HOME: home, USERPROFILE: home, ANTHROPIC_BASE_URL: 'http://127.0.0.1:8788' },
-    encoding: 'utf8',
-  }));
-  assert.equal(out.putStatus, 200, `t16: PUT 成功(${JSON.stringify(out.putBody)})`);
-  // GET 侧:用户声明逐字下发(编辑器据此渲染),catalog 判定一并可见
-  assert.deepEqual(out.get['openai/gpt-5.6-luna'], { efforts: ['max'], source: 'user' }, 't16: GET 下发用户限档声明');
-  assert.deepEqual(out.get['openai/gpt-4o'], { source: 'user' }, 't16: GET 下发用户墓碑(未被目录预填顶掉)');
-  assert.deepEqual(out.get['deepseek-v4-flash'], { efforts: ['high', 'max'], source: 'catalog' }, 't16: GET 下发目录判定');
-  // 落盘侧:一次"什么都没改的保存"之后,用户声明必须逐字不变(P0-b 修的就是这里)
-  const disk = JSON.parse(readFileSync(join(guiDir, 'custom-providers.json'), 'utf8'))[0];
-  const byId = Object.fromEntries(disk.models.map((m) => (typeof m === 'string' ? [m, {}] : [m.id, m])));
-  assert.deepEqual(byId['openai/gpt-5.6-luna'], { id: 'openai/gpt-5.6-luna', efforts: ['max'], source: 'user' },
-    't16: 往返后用户限档声明逐字不变');
-  assert.deepEqual(byId['openai/gpt-4o'], { id: 'openai/gpt-4o', source: 'user' }, 't16: 往返后用户墓碑仍在(否则目录判定会复活)');
-  assert.deepEqual(byId['deepseek-v4-flash'], { id: 'deepseek-v4-flash', efforts: ['high', 'max'], source: 'catalog' },
-    't16: catalog 条目正常落盘(机器所有,下轮可被目录刷新)');
-  assert.deepEqual(byId['anthropic/claude-opus-5'], {}, 't16: 无判定的模型仍是裸字符串');
-  rmSync(home, { recursive: true, force: true });
+  try {
+    const guiDir = join(home, '.claude-gui');
+    mkdirSync(guiDir, { recursive: true });
+    // 存量落盘形态:两条用户手配声明(一条限档、一条"全默认"墓碑)+ 若干裸模型 id。
+    const wire = [{
+      id: 'p1', name: 'OR', type: 'openai', baseURL: 'http://localhost:31999/v1', apiKey: 'k',
+      models: [
+        { id: 'openai/gpt-5.6-luna', efforts: ['max'], source: 'user' },
+        { id: 'openai/gpt-4o', source: 'user' },   // 用户墓碑:压住目录的 reasoning:false
+        'deepseek-v4-flash',                        // 目录/表判定 → catalog 条目
+        'anthropic/claude-opus-5',                  // 表内外都无 → 无条目
+      ],
+    }];
+    writeFileSync(join(guiDir, 'custom-providers.json'), JSON.stringify(wire));
+    const SETTINGS_HREF = new URL('../../server/routes/settings.js', import.meta.url).href;
+    const CHILD16 = `import(${JSON.stringify(SETTINGS_HREF)}).then(async (s) => {
+      const router = s.default;
+      const call = (method, url, body) => new Promise((resolve, reject) => {
+        const req = { method, url, body, headers: {}, query: {} };
+        const res = { statusCode: 200, status(c) { this.statusCode = c; return this; }, json(o) { resolve({ status: this.statusCode, body: o }); } };
+        router(req, res, (err) => reject(err || new Error('unhandled ' + method + ' ' + url)));
+      });
+      const got = await call('GET', '/providers');
+      const p = got.body.customProviders[0];
+      // 客户端 save() 的组包方式(App.jsx):modelMeta 就是表单状态,而表单状态直接来自
+      // 本接口下发的 modelMeta(setModelCaps(editing.modelMeta ? {...} : {}))。
+      const put = await call('PUT', '/custom-providers/p1', {
+        name: p.name, type: p.type, baseURL: p.baseURL, models: p.models,
+        defaultModel: null, tierModels: {}, contextWindow: null, modelPrices: null,
+        modelMeta: p.modelMeta || {},
+      });
+      process.stdout.write(JSON.stringify({ get: p.modelMeta, putStatus: put.status, putBody: put.body }));
+    });`;
+    const out = JSON.parse(execFileSync(process.execPath, ['-e', CHILD16], {
+      env: { ...process.env, HOME: home, USERPROFILE: home, ANTHROPIC_BASE_URL: 'http://127.0.0.1:8788' },
+      encoding: 'utf8',
+    }));
+    assert.equal(out.putStatus, 200, `t16: PUT 成功(${JSON.stringify(out.putBody)})`);
+    // GET 侧:用户声明逐字下发(编辑器据此渲染),catalog 判定一并可见
+    assert.deepEqual(out.get['openai/gpt-5.6-luna'], { efforts: ['max'], source: 'user' }, 't16: GET 下发用户限档声明');
+    assert.deepEqual(out.get['openai/gpt-4o'], { source: 'user' }, 't16: GET 下发用户墓碑(未被目录预填顶掉)');
+    assert.deepEqual(out.get['deepseek-v4-flash'], { efforts: ['high', 'max'], source: 'catalog' }, 't16: GET 下发目录判定');
+    // 落盘侧:一次"什么都没改的保存"之后,用户声明必须逐字不变(P0-b 修的就是这里)
+    const disk = JSON.parse(readFileSync(join(guiDir, 'custom-providers.json'), 'utf8'))[0];
+    const byId = Object.fromEntries(disk.models.map((m) => (typeof m === 'string' ? [m, {}] : [m.id, m])));
+    assert.deepEqual(byId['openai/gpt-5.6-luna'], { id: 'openai/gpt-5.6-luna', efforts: ['max'], source: 'user' },
+      't16: 往返后用户限档声明逐字不变');
+    assert.deepEqual(byId['openai/gpt-4o'], { id: 'openai/gpt-4o', source: 'user' }, 't16: 往返后用户墓碑仍在(否则目录判定会复活)');
+    assert.deepEqual(byId['deepseek-v4-flash'], { id: 'deepseek-v4-flash', efforts: ['high', 'max'], source: 'catalog' },
+      't16: catalog 条目正常落盘(机器所有,下轮可被目录刷新)');
+    assert.deepEqual(byId['anthropic/claude-opus-5'], {}, 't16: 无判定的模型仍是裸字符串');
+  } finally {
+    rmSync(home, { recursive: true, force: true });  // r15-3b:断言失败也要清,否则 $TMPDIR 积残留
+  }
+}
+
+// t17 r15-3b:判官复审的收尾三条 —— ①摘要计数算式(算错会静默上线,原先无断言);
+// ②手机端档位页必须与桌面同一份 caps 判据(此前六档全列不过滤,而跑回落 effect 的
+// 桌面 EffortSelector 在手机上根本不渲染 → 手机上选了不支持的档,发送时被静默摘空,
+// 正是本轮要根治的"界面说的≠实际发的");③移除按钮文案不得再说"回到全默认"
+// (真实行为是回到目录自动判定,对目录判死的模型点完会锁灰,不是全档)。
+{
+  const ed = readFileSync(new URL('../../client/src/components/ProviderThinkingEditor.jsx', import.meta.url), 'utf8');
+  assert.match(ed, /const catalogCount = Object\.keys\(value \|\| \{\}\)\.length - rows\.length;/,
+    't17: 摘要计数 = 全部条目 - 用户声明行(算错则摘要数字撒谎)');
+  assert.match(ed, /移除声明\(回到目录自动判定\)/, 't17: 移除按钮文案与真实行为一致');
+  assert.doesNotMatch(ed, /移除声明\(回到全默认\)/, 't17: 旧的误导文案已撤');
+
+  const app = readFileSync(new URL('../../client/src/App.jsx', import.meta.url), 'utf8');
+  const mob = app.slice(app.indexOf('function MobileEffortPage'), app.indexOf('function MobileEffortPage') + 2400);
+  assert.match(mob, /const caps = effortCapsFor\(modelEffortMeta, selModel\);/, 't17: 手机端取当前模型 caps');
+  assert.match(mob, /const levels = EFFORT_LEVELS\.filter\(\(e\) => e\.id === '' \|\| effortAllowed\(caps, e\.id\)\);/,
+    't17: 手机端按 caps 过滤档位(与桌面 visibleLevels 同口径)');
+  assert.match(mob, /\{levels\.map\(\(e\) => \{/, 't17: 手机端渲染过滤后的 levels 而非 EFFORT_LEVELS 全集');
+  assert.match(mob, /const locked = caps\.reasoning === false;/, 't17: 手机端有锁死态');
+  assert.match(mob, /当前模型不支持思考/, 't17: 锁死时给出与桌面一致的说明');
 }
 
 console.log('check-model-capabilities: all passed');

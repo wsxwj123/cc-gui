@@ -8144,12 +8144,26 @@ function MobileEffortPage({ permKey }) {
   // reasoning_effort 照常可选;「默认」档 desc 按真实落点显示(设了全局跟随全局)。
   const openAIProtocol = useStore((s) => (s.currentProvider?.protocol || 'anthropic') === 'openai');
   const defaultEffort = useStore((s) => s.defaultEffort || '');
+  // r15-3b:按当前模型的思考能力过滤档位,与桌面 EffortSelector 同一份判据。
+  // 此前手机端六档全列且不过滤,而桌面那颗跑回落 effect 的 EffortSelector 在手机上
+  // 根本不渲染(App.jsx 里 isMobile 提前 return)——于是手机上选了模型不支持的档,
+  // 发送时 handleSend 照样静默摘空 = 本轮要根治的"界面说的≠实际发的"在手机上原样存在。
+  // 这里只做【显示层过滤】不加回落:过滤后不合法的存量档在列表里没有对应项(不显示勾),
+  // 视觉上等同"默认档",而发送侧本来就把它摘成默认档 —— 显示与实际由此一致。
+  // 真正的持久化回落仍由桌面那颗 EffortSelector 负责(同一 store,切回桌面即修正)。
+  const modelEffortMeta = useStore((s) => s.modelEffortMeta);
+  const selModel = useStore((s) => resolveSelectorModel(s, permKey));
+  const caps = effortCapsFor(modelEffortMeta, selModel);
+  const locked = caps.reasoning === false;
+  const levels = EFFORT_LEVELS.filter((e) => e.id === '' || effortAllowed(caps, e.id));
   return (
     <div className="py-1">
       <div className="px-4 pt-2 pb-1 text-[11px] text-ink-faint font-body">
-        {openAIProtocol ? '推理力度 (reasoning_effort,不支持的端点自动降级) · ' : ''}作用于当前会话(每个会话独立记忆、互不影响)
+        {locked
+          ? '当前模型不支持思考,不会下发思考参数'
+          : `${openAIProtocol ? '推理力度 (reasoning_effort,不支持的端点自动降级) · ' : ''}作用于当前会话(每个会话独立记忆、互不影响)`}
       </div>
-      {EFFORT_LEVELS.map((e) => {
+      {levels.map((e) => {
         const desc = e.id !== '' ? e.desc
           : defaultEffort
             ? `跟随全局设置:${EFFORT_LEVELS.find((x) => x.id === defaultEffort)?.label || defaultEffort}`

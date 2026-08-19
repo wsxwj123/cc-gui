@@ -82,7 +82,7 @@ export function ProviderThinkingEditor({ value, onChange, models, inputCls }) {
                 <input type="checkbox" checked={think} onChange={(e) => setThink(id, e.target.checked)} className="accent-[var(--color-accent)]" />
                 支持思考
               </label>
-              <button onClick={() => removeRow(id)} title="移除声明(回到全默认)"
+              <button onClick={() => removeRow(id)} title="移除声明(回到目录自动判定)"
                 className="p-1 text-ink-faint hover:text-error shrink-0"><Trash2 size={12} /></button>
             </div>
             {think && (
