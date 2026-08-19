@@ -20,16 +20,20 @@ function CollapsibleUserText({ text }) {
   return (
     <div>
       <div className="relative">
+        {/* r13-p2-9:淡出改用 mask(让文字自身渐隐),不再叠一层"猜背景色"的渐变。
+            原来固定 from-canvas-warm,在气泡有自己底色的主题(青碧等)与皮肤下
+            = 绿底上一道白边。mask 不含任何颜色假设,所有主题/皮肤天然正确。 */}
         <div
           ref={ref}
           className="text-[15px] font-reading leading-relaxed whitespace-pre-wrap text-ink overflow-hidden"
-          style={collapsed ? { maxHeight: COLLAPSED_MAX_PX } : undefined}
+          style={collapsed ? {
+            maxHeight: COLLAPSED_MAX_PX,
+            WebkitMaskImage: 'linear-gradient(to bottom, #000 calc(100% - 40px), transparent 100%)',
+            maskImage: 'linear-gradient(to bottom, #000 calc(100% - 40px), transparent 100%)',
+          } : undefined}
         >
           {text}
         </div>
-        {collapsed && (
-          <div className="pointer-events-none absolute inset-x-0 bottom-0 h-10 bg-gradient-to-t from-canvas-warm to-transparent" />
-        )}
       </div>
       {overflowing && (
         <button

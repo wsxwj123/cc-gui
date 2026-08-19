@@ -8927,7 +8927,9 @@ function MobileMenu({ setRightPanel, onClose, updateNotice = null }) {
     const sel = st.selectedSession;
     const proj = st.selectedProject || (sel?.projectHash ? { hash: sel.projectHash, path: sel.projectPath } : null);
     if (!proj) { push('history'); return; }
-    st.setSelectedSession({ draft: true, draftId: newDraftId(), sessionId: null, projectHash: proj.hash, projectPath: proj.path, firstPrompt: '新会话' });
+    // r13-p2-8:统一进 Home(清会话 → homeView 判定为 home),项目由 selectedProject 预设。
+    if (st.selectedProject?.hash !== proj.hash && proj.path) st.setSelectedProject(proj);
+    st.setSelectedSession(null);
     useStore.setState({ messages: [] });
     st.setPaneMessages(0, []);
     onClose();
@@ -9261,7 +9263,9 @@ export default function App() {
         const proj = st.selectedProject || (sel?.projectHash ? { hash: sel.projectHash, path: sel.projectPath } : null);
         if (!proj) return; // 没有项目 → 交给浏览器默认(本地无害)
         e.preventDefault();
-        st.setPaneSession(idx, { draft: true, draftId: newDraftId(), sessionId: null, projectHash: proj.hash, projectPath: proj.path, firstPrompt: '新会话' });
+        // r13-p2-8:Cmd+N 同样进 Home(与侧栏「+」/新会话按钮一致口径)。
+        if (st.selectedProject?.hash !== proj.hash && proj.path) st.setSelectedProject(proj);
+        st.setPaneSession(idx, null);
         st.setPaneMessages(idx, []);
       }
     };
@@ -10135,10 +10139,10 @@ export default function App() {
           <span className="cgui-brand shrink-0 select-none" aria-label="cc-gui">
             <svg className="cgui-brand-spark" viewBox="0 0 32 32" fill="none" aria-hidden="true">
               <path d="M23.2 8.6A10 10 0 1 0 23.2 23.4" stroke="currentColor" strokeWidth="3.1" strokeLinecap="round" />
-              <path d="M19.4 13.2A5 5 0 1 0 19.4 18.8" stroke="currentColor" strokeWidth="3.1" strokeLinecap="round" opacity="0.55" />
+              <path d="M19.6 12.3A5 5 0 1 0 19.6 19.7" stroke="currentColor" strokeWidth="3.1" strokeLinecap="round" opacity="0.55" />
               <circle cx="26.6" cy="16" r="1.9" fill="currentColor" />
             </svg>
-            <span className="cgui-brand-name">cc-gui</span>
+            <span className="cgui-brand-name">CC-GUI</span>
           </span>
           {selectedProject && (
             <span className="chip font-mono truncate min-w-0 max-w-[160px]">

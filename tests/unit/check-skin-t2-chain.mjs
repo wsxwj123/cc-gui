@@ -53,12 +53,21 @@ const madeBlobs = [];
 URL.createObjectURL = (b) => { madeBlobs.push(b); return `blob:test-${++blobSeq}`; };
 URL.revokeObjectURL = () => {};
 
-const { loadT2, disposeT2, setDevSkinsEnabled, devSkinsEnabled, BUILTIN_SKINS, getSkinState } =
+const { loadT2, disposeT2, setDevSkinsEnabled, devSkinsEnabled, getSkinState } =
   await import('../../client/src/utils/skins.js');
 
-const dev = BUILTIN_SKINS.find((s) => s.id === 'builtin-dev');
-const manifest = dev.manifest;
-const texts = dev.t2Texts;
+// r13-p2-10:内置示例皮肤退役 → 夹具内联(不依赖出厂内容,覆盖面不减)。
+const manifest = {
+  format: 'cgui-skin/1', name: 'T2 夹具', tier: 2,
+  skin_css: 'skin.css', client_js: 'client.js', a11y_css: 'a11y.css',
+  light: { vars: { '--color-accent': '#0B8A2D' } },
+  dark: { vars: { '--color-accent': '#39FF14' } },
+};
+const texts = {
+  'skin.css': '[data-cgui="send-btn"] { border-radius: 999px !important; }\n[data-cgui="topbar"] { border-bottom: 1px solid var(--color-accent) !important; }\n[data-cgui="sidebar"] { background-image: repeating-linear-gradient(0deg, transparent 0 2px) !important; }',
+  'client.js': "document.documentElement.setAttribute('data-skin-demo','fixture');\nwindow.__cguiSkinDispose = () => document.documentElement.removeAttribute('data-skin-demo');",
+  'a11y.css': '[data-cgui="send-btn"]:focus-visible { outline: 2px solid var(--color-accent) !important; }',
+};
 
 // t1 总开关门控:默认关 → 不载零节点
 {

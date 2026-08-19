@@ -292,6 +292,32 @@ function findContinuationPrompt(head) {
  * List sessions for a project hash.
  * Filters out trivial sessions and groups subagent sessions under parents.
  */
+// ── r13-p2-6:会话列表的文件级解析缓存(展开项目卡顿根治)──────────────
+// listSessions 对项目下每个 jsonl 都整文件读一遍(收集 compact_boundary 与标题行);
+// 48 个会话实测 1.8-2.1s,每次展开项目都付一次。绝大多数文件在两次调用之间根本
+// 没变 → 按 (mtimeMs, size) 缓存解析结果,只有变化/新增的文件才重读。
+// 键=绝对路径;上限 800 条,超了按插入序淘汰(Map 天然有序)。
+const EDGES_CACHE = new Map();
+const EDGES_CACHE_MAX = 800;
+
+async function readEdgesCached(filePath, st, edgeSize, onRaw = null) {
+  const key = `${filePath}#${edgeSize}`;
+  const hit = EDGES_CACHE.get(key);
+  if (hit && hit.mtimeMs === st.mtimeMs && hit.size === st.size) return hit.val;
+  const boundaryUuids = [];
+  const titles = { customTitle: '', aiTitle: '' };
+  const edges = onRaw
+    ? await readJsonlEdges(filePath, edgeSize, (raw) => onRaw(raw, boundaryUuids, titles))
+    : await readJsonlEdges(filePath, edgeSize);
+  const val = { ...edges, boundaryUuids, titles };
+  if (EDGES_CACHE.size >= EDGES_CACHE_MAX) {
+    const oldest = EDGES_CACHE.keys().next().value;
+    EDGES_CACHE.delete(oldest);
+  }
+  EDGES_CACHE.set(key, { mtimeMs: st.mtimeMs, size: st.size, val });
+  return val;
+}
+
 export async function listSessions(projectHash) {
   const projectPath = join(PROJECTS_DIR, projectHash);
   const files = await readdir(projectPath);
@@ -315,6 +341,8 @@ export async function listSessions(projectHash) {
     const sessionId = file.replace('.jsonl', '');
 
     try {
+      // r13-p2-6:stat 提到读文件之前 —— 缓存键要用 mtime/size(下方原 stat 复用它)。
+      const st0 = await stat(filePath);
       // edgeSize 40 (was 10): real sessions stack custom-title / mode /
       // permission-mode / queue-operation×N / system / attachment×N before the
       // first textual user record (observed at index 27). A 10-line head pushed
@@ -328,18 +356,19 @@ export async function listSessions(projectHash) {
       // 对话,--resume 才新开文件并把 boundary 起的历史(uuid 原样)回放进新文件,
       // 所以"共享任一 boundary uuid"= 同一条对话链,这是唯一可靠的跨文件链接信号
       // (实测 logicalParentUuid 指向的记录在父文件中部而非尾部,尾部映射法 0 命中)。
-      const boundaryUuids = [];
       // 标题行同路收集(见 takeTitleLine):追加位置不定(手改在尾、ai-title 在头),
       // 走整文件回调比 head/tail 40 行窗口可靠,且零额外 I/O。
-      const titles = { customTitle: '', aiTitle: '' };
-      const { head, tail, totalLines } = await readJsonlEdges(filePath, 40, (raw) => {
-        takeTitleLine(raw, titles);
-        if (!raw.includes('"compact_boundary"')) return;
-        try {
-          const r = JSON.parse(raw);
-          if (isBoundaryRecord(r)) boundaryUuids.push(r.uuid);
-        } catch {}
-      });
+      const { head, tail, totalLines, boundaryUuids, titles } = await readEdgesCached(
+        filePath, st0, 40,
+        (raw, bUuids, tt) => {
+          takeTitleLine(raw, tt);
+          if (!raw.includes('"compact_boundary"')) return;
+          try {
+            const r = JSON.parse(raw);
+            if (isBoundaryRecord(r)) bUuids.push(r.uuid);
+          } catch {}
+        },
+      );
 
       // Extract metadata from first REAL user message (skips isMeta / pure
       // tool_result / local-command-echo records, aligned with getSessionMessages).
@@ -391,7 +420,7 @@ export async function listSessions(projectHash) {
       // — the user's #1 complaint was new sessions never appearing in history.
       if (totalLines < 3) continue;
 
-      const s = await stat(filePath);
+      const s = st0; // r13-p2-6:复用缓存判据用的 stat,免第二次系统调用
 
       // Archive marker — sibling `<sid>.jsonl.archived` flips visibility.
       let archived = false;
@@ -406,7 +435,8 @@ export async function listSessions(projectHash) {
       // 构建单条子代理条目(扁平 Task 子代理 与 workflow 起的 agent 共用)。extra 里带
       // workflowId(workflow agent 特有)等额外字段。
       const buildAgentEntry = async (agentPath, metaPath, extra = {}) => {
-        const agentEdges = await readJsonlEdges(agentPath, 5);
+        const as = await stat(agentPath); // r13-p2-6:提前 stat 供缓存判据(下方复用)
+        const agentEdges = await readEdgesCached(agentPath, as, 5);
         const agentFirstUser = agentEdges.head.find((r) => r.type === 'user');
         let agentPrompt = '';
         if (agentFirstUser?.message?.content) {
@@ -417,7 +447,6 @@ export async function listSessions(projectHash) {
             agentPrompt = t?.text?.slice(0, 100) || '';
           }
         }
-        const as = await stat(agentPath);
         // R1: sibling meta.json 带 toolUseId(=父会话 Task tool_use 的 id)。workflow agent 的
         // meta 没有 toolUseId(它不对应父流任何 Task 卡片),留空即可。
         let agentMeta = {};

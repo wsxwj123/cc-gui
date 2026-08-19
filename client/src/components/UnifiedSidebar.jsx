@@ -110,7 +110,7 @@ function SidebarViewMenu() {
   const pick = (patch) => { putSidebarView(patch); setOpen(false); };
   return (
     <>
-      <button ref={btnRef} onClick={() => setOpen((v) => !v)} aria-label="排序与分组" title="排序与分组"
+      <button ref={btnRef} data-tour="sidebar-view" onClick={() => setOpen((v) => !v)} aria-label="排序与分组" title="排序与分组"
         className={`p-1 rounded transition-colors ${open ? 'bg-canvas-warm' : 'hover:bg-canvas-warm'}`}>
         <SlidersHorizontal size={13} className="text-ink-faint" />
       </button>
@@ -365,20 +365,19 @@ export function UnifiedSidebar() {
     }
   };
   // seedNewSessionDefaults 已提为模块级导出(r11-②,Home 共用),行为不变。
+  // r13-p2-8:新建会话统一进 Home(图标+问候+输入框+项目选择器),不再直接开 draft
+  // 会话页。项目经 selectProjectIfNeeded 预设 → Home 的 pickHomeProject 即选中它,
+  // 发送时才由 buildHomeDraft 建 draft(档位继承 seedNewSessionDefaults 照旧)。
   const handleNew = (project) => {
     if (!project) return;
     selectProjectIfNeeded(project);
     seedNewSessionDefaults(project.hash);
-    const draft = {
-      draft: true, draftId: newDraftId(), sessionId: null,
-      projectHash: project.hash, projectPath: project.path, firstPrompt: '新会话',
-    };
     const st = useStore.getState();
     if (splitMode) {
-      st.setActiveTabSession(draft);
+      st.setActiveTabSession(null);
       st.setPaneMessages(activeTabIndex, []);
     } else {
-      st.setSelectedSession(draft);
+      st.setSelectedSession(null);
       useStore.setState({ messages: [] });
       st.setPaneMessages(0, []);
     }

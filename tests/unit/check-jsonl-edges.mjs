@@ -132,8 +132,12 @@ try {
     // listSessions 的中部收集(boundary + 标题行)必须先做子串预筛再 parse。
     // 批O 在同一个回调里加了 takeTitleLine(custom-title / ai-title),它自己第一句就是
     // includes 预筛;boundary 那半的预筛必须仍在 parse 之前。
-    assert.ok(/readJsonlEdges\(filePath, 40, \(raw\) => \{\s*(takeTitleLine\(raw, titles\);\s*)?if \(!raw\.includes\('"compact_boundary"'\)\) return;/.test(src),
+    // r13-p2-6:整文件回调挪进 readEdgesCached(mtime 缓存层),形参名 (raw, bUuids, tt);
+    // 语义不变 —— 仍是原始行字符串 + includes 预筛在 parse 之前。
+    assert.ok(/\(raw, bUuids, tt\) => \{\s*takeTitleLine\(raw, tt\);\s*if \(!raw\.includes\('"compact_boundary"'\)\) return;/.test(src),
       'boundary 回调必须先 raw.includes 预筛再 JSON.parse(收到的是原始行字符串)');
+    assert.ok(/const hit = EDGES_CACHE\.get\(key\);[\s\S]{0,200}mtimeMs === st\.mtimeMs && hit\.size === st\.size/.test(src),
+      'r13-p2-6:整文件读必须走 mtime+size 缓存(展开项目 1.8s→20ms 的根治点)');
     assert.ok(/function takeTitleLine\(raw, acc\) \{\s*if \(!raw\.includes\('"custom-title"'\) && !raw\.includes\('"ai-title"'\)\) return;/.test(src),
       '标题行收集同样必须先子串预筛(每条会话记录都会过这个回调,无脑 parse = 整文件解析)');
     // totalLines 有真实消费者(messageCount / "<3 行不列出"),不许被当死字段删掉

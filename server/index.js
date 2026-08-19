@@ -989,6 +989,22 @@ server.listen(PORT, HOST, () => {
   console.log(`  Bound to                   ${HOST}${exposure}`);
   console.log(`  Started at                 ${new Date().toLocaleString()}`);
   console.log('═'.repeat(60));
+  // r13-p2-6:后台预热会话列表缓存 —— 首屏展开项目不再等 1-2 秒解析。
+  // 逐个串行(不抢 I/O),失败静默;缓存本身按 mtime 判定,预热只是把冷启动前置。
+  (async () => {
+    try {
+      const { listProjects, listSessions } = await import('./services/session-reader.js');
+      const projects = await listProjects(); // 已按最近活动排序:先热最可能点开的
+      const queue = projects.slice(0, 16);
+      const worker = async () => {
+        while (queue.length) {
+          const p = queue.shift();
+          if (p?.hash) await listSessions(p.hash).catch(() => {});
+        }
+      };
+      await Promise.all([worker(), worker(), worker(), worker()]); // 并发 4,别抢满 I/O
+    } catch {}
+  })();
   // Re-arm the OpenAI translation proxy if a codex/opencode provider was active
   // before this (re)start, so settings.json's proxy URL keeps resolving.
   restoreOpenAIProvider().catch(() => {});

@@ -123,7 +123,7 @@ try {
     const reader = readFileSync(join(root, 'server/services/session-reader.js'), 'utf8');
     assert.ok(/customTitle: titles\.customTitle,\s*\n\s*aiTitle: titles\.aiTitle,/.test(reader),
       'listSessions 必须把两个标题分开暴露给前端');
-    assert.ok(/takeTitleLine\(raw, titles\);/.test(reader),
+    assert.ok(/takeTitleLine\(raw, tt\);/.test(reader),
       '标题行走 readJsonlEdges 已有的整文件回调收集(零额外 I/O),不要另开一遍读盘');
 
     const chat = readFileSync(join(root, 'server/routes/chat.js'), 'utf8');
