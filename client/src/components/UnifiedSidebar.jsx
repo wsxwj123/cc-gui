@@ -8,11 +8,12 @@ import { createPortal } from 'react-dom';
 import {
   Plus, Search, FolderOpen, EyeOff, Trash2, Pin, X, GitBranch, GitMerge,
   ChevronDown, ChevronRight, RefreshCw, Archive, Loader2, MoreHorizontal,
+  Check, SlidersHorizontal, GripVertical,
 } from './Icon.jsx';
 import { useStore } from '../stores/sessionStore.js';
 import { confirmDialog } from '../utils/confirmDialog.jsx';
 import { resolveSessionTitle } from '../utils/sessionTitle.js';
-import { composePanelProjects, composePanelSessions, sessionQueryMatchHashes } from '../utils/projectPanel.js';
+import { composePanelProjects, composePanelSessions, sessionQueryMatchHashes, sortProjectRows, flattenSessionRows, reorderManual } from '../utils/projectPanel.js';
 import { pickDirectory, isTauri } from '../utils/pickDirectory.js';
 import { completionTracker } from '../utils/sessionDots.js';
 import { AnchoredPopover } from './SessionSelectors.jsx';
@@ -91,6 +92,54 @@ function ProjectRowMenu({ project, pinned, showArchived, hasArchiveToggle, archi
           title="从侧栏隐藏（不删除本地文件，下次按 + 重新添加同路径即可恢复）">
           <EyeOff size={12} className="text-ink-faint" />从侧栏隐藏
         </button>
+      </AnchoredPopover>
+    </>
+  );
+}
+
+// r13-②:排序/分组弹层(dsh 图3 同构)。选择存 prefs.sidebarView(多端共享);
+// 手动排序在手机端置灰(拖拽为桌面 pointer 交互)。
+function SidebarViewMenu() {
+  const view = useStore((s) => s.sidebarView);
+  const putSidebarView = useStore((s) => s.putSidebarView);
+  const [open, setOpen] = useState(false);
+  const btnRef = useRef(null);
+  const desktop = typeof window !== 'undefined' && !!window.matchMedia?.('(min-width: 768px)')?.matches;
+  const head = 'px-2.5 pt-1.5 pb-0.5 text-[10px] uppercase tracking-widest text-ink-faint font-body';
+  const item = (on, disabled) => `w-full flex items-center gap-2 px-2.5 py-1.5 text-left text-[12px] font-body transition-colors ${disabled ? 'opacity-40 cursor-default' : 'hover:bg-canvas-warm'} ${on ? 'text-accent' : 'text-ink-soft'}`;
+  const pick = (patch) => { putSidebarView(patch); setOpen(false); };
+  return (
+    <>
+      <button ref={btnRef} onClick={() => setOpen((v) => !v)} aria-label="排序与分组" title="排序与分组"
+        className={`p-1 rounded transition-colors ${open ? 'bg-canvas-warm' : 'hover:bg-canvas-warm'}`}>
+        <SlidersHorizontal size={13} className="text-ink-faint" />
+      </button>
+      <AnchoredPopover anchorRef={btnRef} open={open} onRequestClose={() => setOpen(false)} drop="down" align="right" gap={4} clampSelector=".sidebar-flank" className="w-52 py-1">
+        <div className={head}>分组方式</div>
+        <button onClick={() => pick({ groupMode: 'project' })} className={item(view.groupMode === 'project')}>
+          {view.groupMode === 'project' ? <Check size={12} className="shrink-0" /> : <span className="w-3 shrink-0" />}按项目
+        </button>
+        <button onClick={() => pick({ groupMode: 'single' })} className={item(view.groupMode === 'single')}>
+          {view.groupMode === 'single' ? <Check size={12} className="shrink-0" /> : <span className="w-3 shrink-0" />}单列表(全部会话按时间)
+        </button>
+        {/* 单列表模式无项目可排 → 排序段隐藏 */}
+        {view.groupMode === 'project' && (
+          <>
+            <div className={`${head} border-t border-canvas-deep/40 mt-1`}>排序方式</div>
+            <button onClick={() => pick({ sortMode: 'recent' })} className={item(view.sortMode === 'recent')}>
+              {view.sortMode === 'recent' ? <Check size={12} className="shrink-0" /> : <span className="w-3 shrink-0" />}最近更新
+            </button>
+            <button
+              disabled={!desktop}
+              onClick={() => { if (desktop) pick({ sortMode: 'manual' }); }}
+              className={item(view.sortMode === 'manual', !desktop)}
+              title={desktop ? '项目行出现拖拽柄,可拖动重排(置顶恒最前)' : '手动排序需在桌面端拖拽'}
+            >
+              {view.sortMode === 'manual' ? <Check size={12} className="shrink-0" /> : <span className="w-3 shrink-0" />}手动排序
+              {!desktop && <span className="ml-auto text-[10px] text-ink-faint">桌面端拖拽</span>}
+            </button>
+          </>
+        )}
       </AnchoredPopover>
     </>
   );
@@ -265,6 +314,30 @@ export function UnifiedSidebar() {
     panes, pinned: pinnedProjSet, queryMatchHashes,
   }), [projects, hidden, showWorktreeProjects, q, panes, pinnedProjSet, queryMatchHashes]);
   const hiddenOnly = projects.length > 0 && rows.length === 0 && q === '' && hidden.size > 0;
+  // ── r13-②:排序(置顶恒前;manual 按 projectOrder 对账)与手动拖拽预览 ──
+  const view = useStore((s) => s.sidebarView);
+  const [drag, setDrag] = useState(null); // { hash, preview: string[] } | null(拖拽中本地预览,松手才 PUT)
+  useEffect(() => {
+    if (!drag) return;
+    const up = () => { useStore.getState().putSidebarView({ projectOrder: drag.preview }); setDrag(null); };
+    window.addEventListener('pointerup', up);
+    return () => window.removeEventListener('pointerup', up);
+  }, [drag]);
+  const sortedRows = useMemo(() => sortProjectRows(rows, {
+    sortMode: view.sortMode, order: drag ? drag.preview : view.projectOrder, pinned: pinnedProjSet,
+  }), [rows, view.sortMode, view.projectOrder, drag, pinnedProjSet]);
+  const nonPinnedHashes = useMemo(() => sortedRows.filter((p) => !pinnedProjSet.has(p.hash)).map((p) => p.hash), [sortedRows, pinnedProjSet]);
+  // 单列表模式:全部项目会话平铺 → 需要各组都已加载(懒拉全量;数据层零改动)
+  useEffect(() => {
+    if (view.groupMode !== 'single') return;
+    const st = useStore.getState();
+    for (const p of st.projects) if (!st.sessionsByProject[p.hash]) st.fetchSessionsForPanel(p.hash);
+  }, [view.groupMode, projects]);
+  const projByHash = useMemo(() => new Map((projects || []).map((p) => [p.hash, p])), [projects]);
+  const flatSessions = useMemo(() => (view.groupMode === 'single'
+    ? flattenSessionRows(sessionsByProject)
+      .filter((s) => !pendingIds.has(s.sessionId) && (!q || String(titleOf(s) || '').toLowerCase().includes(q)))
+    : EMPTY_ARRAY), [view.groupMode, sessionsByProject, pendingIds, q, titleOf]);
 
   // ── 面板级刷新:某项目会话变动后同刷 panel 缓存 + (若是选中项目)旧槽 ─────────
   const refreshProjectSessions = (projectHash) => {
@@ -869,15 +942,18 @@ export function UnifiedSidebar() {
           <h2 className="text-[11px] font-medium uppercase tracking-widest text-ink-faint font-body">
             项目
           </h2>
-          <button
-            onClick={openAddProject}
-            data-cgui="add-project-btn"
-            data-tour="add-project"
-            className="p-1 hover:bg-canvas-warm rounded transition-colors"
-            title="添加项目（系统文件选择器）"
-          >
-            <Plus size={14} className="text-ink-faint hover:text-accent" />
-          </button>
+          <div className="flex items-center gap-0.5">
+            <SidebarViewMenu />
+            <button
+              onClick={openAddProject}
+              data-cgui="add-project-btn"
+              data-tour="add-project"
+              className="p-1 hover:bg-canvas-warm rounded transition-colors"
+              title="添加项目（系统文件选择器）"
+            >
+              <Plus size={14} className="text-ink-faint hover:text-accent" />
+            </button>
+          </div>
         </div>
         <div className="relative">
           <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-ghost" />
@@ -902,7 +978,29 @@ export function UnifiedSidebar() {
             WKWebView 禁 button 嵌 button:行是 div role=button,操作键是 absolute
             兄弟按钮组(沿用既有规避)。r10 数据层(sessionsByProject 懒拉/置顶广播/
             虚拟节点)零改动。 ── */}
-        {rows.map((project) => {
+        {/* r13-② 单列表模式:项目行隐藏,全部会话跨项目平铺按时间(会话行样式不变)。 */}
+        {view.groupMode === 'single' && flatSessions.map((session) => {
+          const proj = projByHash.get(session.projectHash) || { hash: session.projectHash, path: session.projectPath || '' };
+          return (
+            <SessionItem
+              key={session.sessionId}
+              session={session}
+              isSelected={focusSession?.sessionId === session.sessionId}
+              onSelect={(s) => handleSelect(s, proj)}
+              onFork={(s) => handleFork(s, proj)}
+              onArchive={handleArchive}
+              onDelete={handleDelete}
+              forking={forking === session.sessionId}
+              running={runningSessionIds.has(session.sessionId)}
+              pinned={pinnedSessSet.has(session.sessionId)}
+              onTogglePin={togglePinSession}
+            />
+          );
+        })}
+        {view.groupMode === 'single' && flatSessions.length === 0 && (
+          <div className="px-3 py-2.5 text-[11px] text-ink-faint font-body">{q ? '没有匹配的会话' : '暂无会话'}</div>
+        )}
+        {view.groupMode !== 'single' && sortedRows.map((project) => {
           const hash = project.hash;
           const isSelProj = selectedProject?.hash === hash;
           const isOpen = expandedSet.has(hash);
@@ -925,6 +1023,12 @@ export function UnifiedSidebar() {
                   aria-expanded={isOpen}
                   onClick={() => toggleProject(hash)}
                   onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleProject(hash); } }}
+                  onPointerEnter={() => {
+                    // r13-②:拖拽中滑过其他非置顶行 → 本地预览重排(松手才落 prefs)
+                    if (drag && drag.hash !== hash && !pinnedProjSet.has(hash)) {
+                      setDrag((d) => d && ({ ...d, preview: reorderManual(d.preview, d.hash, d.preview.indexOf(hash)) }));
+                    }
+                  }}
                   title={`${formatPath(project.path)}${project.virtual ? '（未落盘）' : ''}`}
                   className={`w-full text-left pl-2 pr-[54px] py-2 rounded-md cursor-pointer transition-colors flex items-center gap-1.5 min-w-0 ${
                     isSelProj ? 'bg-canvas-warm/50' : 'hover:bg-canvas-warm/35'
@@ -941,6 +1045,17 @@ export function UnifiedSidebar() {
                   {pinnedProjSet.has(hash) && <Pin size={9} className="text-accent fill-accent shrink-0" />}
                 </div>
                 <div className="absolute top-1/2 -translate-y-1/2 right-1 flex items-center gap-0.5">
+                  {view.sortMode === 'manual' && !pinnedProjSet.has(hash) && (
+                    <button
+                      onPointerDown={(e) => { e.stopPropagation(); e.preventDefault(); setDrag({ hash, preview: nonPinnedHashes }); }}
+                      onClick={(e) => e.stopPropagation()}
+                      className="hidden md:flex opacity-0 group-hover:opacity-100 transition-opacity p-1 rounded-md cursor-grab active:cursor-grabbing"
+                      aria-label="拖拽排序"
+                      title="拖拽重排(置顶项目恒在最前)"
+                    >
+                      <GripVertical size={12} className="text-ink-faint" />
+                    </button>
+                  )}
                   <button
                     data-cgui="new-session-btn"
                     data-tour="new-session"
@@ -996,7 +1111,7 @@ export function UnifiedSidebar() {
             </div>
           );
         })}
-        {rows.length === 0 && (
+        {view.groupMode !== 'single' && rows.length === 0 && (
           <div className="px-4 py-8 text-center">
             <p className="text-xs text-ink-faint font-body">
               {q ? '没有匹配的项目' : hiddenOnly ? '所有项目都已隐藏' : '没有找到项目'}

@@ -53,4 +53,43 @@ import { initialExpandedProjects, toggleExpanded } from '../../client/src/utils/
   assert.doesNotMatch(sb, /彻底清理该项目的 Claude 本地状态/, 't3: p3-4 清理按钮移除态保持');
 }
 
+// t4 r13-② 分组/排序纯函数(哨兵:删置顶恒前 → 本节红)
+{
+  const { sortProjectRows, flattenSessionRows, reorderManual } = await import('../../client/src/utils/projectPanel.js');
+  const rows = [
+    { hash: 'a', lastActivity: '2026-01-01T00:00:00Z' },
+    { hash: 'b', lastActivity: '2026-03-01T00:00:00Z' },
+    { hash: 'c', lastActivity: '2026-02-01T00:00:00Z' },
+    { hash: 'p', lastActivity: '2025-01-01T00:00:00Z' },
+  ];
+  const pinned = new Set(['p']);
+  assert.deepEqual(sortProjectRows(rows, { sortMode: 'recent', pinned }).map((r) => r.hash), ['p', 'b', 'c', 'a'], 't4: recent=置顶恒前+活动降序(哨兵锚)');
+  assert.deepEqual(sortProjectRows(rows, { sortMode: 'manual', order: ['c', 'a'], pinned }).map((r) => r.hash), ['p', 'c', 'a', 'b'], 't4: manual=order 对账,新项目(b)追尾');
+  assert.deepEqual(sortProjectRows(rows, { sortMode: 'manual', order: ['gone', 'a'], pinned }).map((r) => r.hash), ['p', 'a', 'b', 'c'], 't4: order 未知项忽略(删除项目自动出列)');
+  const flat = flattenSessionRows({
+    h1: [{ sessionId: 's1', lastActivity: '2026-01-02T00:00:00Z' }, { sessionId: 's2', archived: true, lastActivity: '2026-05-01T00:00:00Z' }],
+    h2: [{ sessionId: 's3', lastActivity: '2026-01-03T00:00:00Z' }],
+  });
+  assert.deepEqual(flat.map((s) => s.sessionId), ['s3', 's1'], 't4: 单列表跨项目按时间降序,归档不进平铺');
+  assert.equal(flat[0].projectHash, 'h2', 't4: 平铺行带 projectHash 反查');
+  assert.deepEqual(reorderManual(['a', 'b', 'c'], 'c', 0), ['c', 'a', 'b'], 't4: 拖拽落位');
+}
+
+// t5 r13-② 接线:prefs 统一端点/WS/store/侧栏 UI
+{
+  const prefs = readFileSync(new URL('../../server/routes/prefs.js', import.meta.url), 'utf8');
+  assert.match(prefs, /router\.(get|put)\('\/prefs\/sidebar-view'/, 't5: prefs 端点');
+  assert.match(prefs, /broadcast\(\{ type: 'sidebar-view'/, 't5: WS 广播');
+  const sb = readFileSync(new URL('../../client/src/components/UnifiedSidebar.jsx', import.meta.url), 'utf8');
+  assert.match(sb, /<SidebarViewMenu \/>/, 't5: 侧栏头按钮');
+  assert.match(sb, /分组方式[\s\S]*?排序方式/, 't5: 弹层两段');
+  assert.match(sb, /桌面端拖拽/, 't5: 手机置灰注文案');
+  assert.match(sb, /view\.groupMode === 'single' && flatSessions\.map/, 't5: 单列表平铺分支');
+  assert.match(sb, /sortProjectRows\(rows, \{\s*sortMode: view\.sortMode, order: drag \? drag\.preview : view\.projectOrder, pinned: pinnedProjSet,/, 't5: 排序接线(拖拽预览优先)');
+  assert.match(sb, /putSidebarView\(\{ projectOrder: drag\.preview \}\)/, 't5: 松手才落 prefs');
+  assert.doesNotMatch(sb, /from 'lucide-react'/, 't5: 零裸 lucide(守卫)');
+  const store = readFileSync(new URL('../../client/src/stores/sessionStore.js', import.meta.url), 'utf8');
+  assert.match(store, /hydrateSidebarView|putSidebarView|applyRemoteSidebarView/, 't5: store 三件');
+}
+
 console.log('check-drill-sidebar: all passed (r13 折叠树)');

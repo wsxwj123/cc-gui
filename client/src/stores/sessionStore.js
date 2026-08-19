@@ -1092,6 +1092,28 @@ export const useStore = create((set, get) => ({
     set({ customTitles: next });
   },
 
+  // r13-②:侧栏分组/排序视图(prefs.sidebarView,多端共享;展开态留 localStorage)。
+  sidebarView: { groupMode: 'project', sortMode: 'recent', projectOrder: [] },
+  hydrateSidebarView: async () => {
+    try {
+      const d = await (await fetch('/api/prefs/sidebar-view')).json();
+      if (d && typeof d === 'object') set({ sidebarView: { groupMode: d.groupMode || 'project', sortMode: d.sortMode || 'recent', projectOrder: Array.isArray(d.projectOrder) ? d.projectOrder : [] } });
+    } catch {}
+  },
+  applyRemoteSidebarView: (v) => {
+    if (v && typeof v === 'object') set({ sidebarView: { groupMode: v.groupMode || 'project', sortMode: v.sortMode || 'recent', projectOrder: Array.isArray(v.projectOrder) ? v.projectOrder : [] } });
+  },
+  putSidebarView: async (patch) => {
+    set((s) => ({ sidebarView: { ...s.sidebarView, ...patch } })); // 乐观,回包/广播校准
+    try {
+      const r = await fetch('/api/prefs/sidebar-view', {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(patch),
+      });
+      const d = await r.json();
+      if (r.ok) set({ sidebarView: { groupMode: d.groupMode, sortMode: d.sortMode, projectOrder: d.projectOrder } });
+    } catch {}
+  },
+
   // r11-⑫:称呼(prefs.displayName,服务端多端共享)。启动/重连水合 + WS 广播收敛;
   // 写走 PUT(服务端截 20 去空白),本地乐观更新以服务端回包为准。
   displayName: '',

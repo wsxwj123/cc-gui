@@ -392,6 +392,45 @@ router.put('/prefs/display-name', async (req, res) => {
   }
 });
 
+// r13-②:侧栏分组/排序视图偏好(多端共享;展开态刻意留 localStorage per-device)。
+// { groupMode:'project'|'single', sortMode:'recent'|'manual', projectOrder:string[] }
+const GROUP_MODES = ['project', 'single'];
+const SORT_MODES = ['recent', 'manual'];
+function normalizeSidebarView(v) {
+  const o = (v && typeof v === 'object') ? v : {};
+  return {
+    groupMode: GROUP_MODES.includes(o.groupMode) ? o.groupMode : 'project',
+    sortMode: SORT_MODES.includes(o.sortMode) ? o.sortMode : 'recent',
+    projectOrder: Array.isArray(o.projectOrder) ? o.projectOrder.filter((h) => typeof h === 'string' && h) : [],
+  };
+}
+router.get('/prefs/sidebar-view', async (_req, res) => {
+  const prefs = await loadPrefs();
+  res.json(normalizeSidebarView(prefs.sidebarView));
+});
+// PUT:部分字段合并(只传要改的键);幂等,广播全量。
+router.put('/prefs/sidebar-view', async (req, res) => {
+  const patch = req.body || {};
+  if (patch.groupMode != null && !GROUP_MODES.includes(patch.groupMode)) return res.status(400).json({ error: 'groupMode 必须是 project/single' });
+  if (patch.sortMode != null && !SORT_MODES.includes(patch.sortMode)) return res.status(400).json({ error: 'sortMode 必须是 recent/manual' });
+  if (patch.projectOrder != null && !(Array.isArray(patch.projectOrder) && patch.projectOrder.every((h) => typeof h === 'string'))) {
+    return res.status(400).json({ error: 'projectOrder 必须是字符串数组' });
+  }
+  try {
+    const view = await withPrefsQueue(async () => {
+      const prefs = await loadPrefs();
+      const next = normalizeSidebarView({ ...normalizeSidebarView(prefs.sidebarView), ...patch });
+      prefs.sidebarView = next;
+      await savePrefs(prefs);
+      return next;
+    });
+    broadcast({ type: 'sidebar-view', ...view });
+    res.json({ ok: true, ...view });
+  } catch (e) {
+    res.status(500).json({ error: '写入侧栏视图偏好失败：' + e.message });
+  }
+});
+
 // 置顶(pin):项目 + 会话各一份 id 列表,服务端共享(同 hidden-projects 跨设备一致)。
 // 按 kind 单键合并,避免「置顶项目」的 PUT 覆盖掉「置顶会话」列表(反之亦然)。
 router.get('/prefs/pinned', async (_req, res) => {

@@ -115,6 +115,53 @@ export function toggleExpanded(list, hash) {
   return arr.includes(hash) ? arr.filter((h) => h !== hash) : [...arr, hash];
 }
 
+// ── r13-②:分组/排序(dsh 图3 同构)────────────────────────────────
+
+const tsOf = (p) => (p?.lastActivity ? new Date(p.lastActivity).getTime() : -1);
+
+/**
+ * 项目行排序(纯函数):置顶段恒最前(保持传入相对序);非置顶段按
+ *  - 'recent':最新会话活动时间降序;
+ *  - 'manual':按 order 数组索引;order 里不存在的(新项目)追加尾部(保持传入
+ *    相对序);order 里已删除的项目读时自然出列(无需清理)。
+ */
+export function sortProjectRows(rows, { sortMode = 'recent', order = [], pinned = new Set() } = {}) {
+  const list = Array.isArray(rows) ? [...rows] : [];
+  const pin = list.filter((p) => pinned.has(p.hash));
+  const rest = list.filter((p) => !pinned.has(p.hash));
+  if (sortMode === 'manual') {
+    const idx = new Map((Array.isArray(order) ? order : []).map((h, i) => [h, i]));
+    const known = rest.filter((p) => idx.has(p.hash)).sort((a, b) => idx.get(a.hash) - idx.get(b.hash));
+    const fresh = rest.filter((p) => !idx.has(p.hash));
+    return [...pin, ...known, ...fresh];
+  }
+  rest.sort((a, b) => tsOf(b) - tsOf(a));
+  return [...pin, ...rest];
+}
+
+/**
+ * 单列表平铺(纯函数):全部已加载项目的会话跨项目合并,按 lastActivity 降序;
+ * 每条带 projectHash(点击选中时反查项目)。归档会话不进平铺(与折叠树默认视图一致)。
+ */
+export function flattenSessionRows(sessionsByProject) {
+  const out = [];
+  for (const [projectHash, sessions] of Object.entries(sessionsByProject || {})) {
+    for (const s of sessions || []) {
+      if (s && !s.archived) out.push({ ...s, projectHash });
+    }
+  }
+  out.sort((a, b) => (b.lastActivity ? new Date(b.lastActivity).getTime() : -1) - (a.lastActivity ? new Date(a.lastActivity).getTime() : -1));
+  return out;
+}
+
+/** 手动拖拽落位(纯函数):把 hash 移到 targetIdx(非置顶段内),返回新顺序数组。 */
+export function reorderManual(hashes, fromHash, toIdx) {
+  const arr = (Array.isArray(hashes) ? hashes : []).filter((h) => h !== fromHash);
+  const i = Math.max(0, Math.min(arr.length, toIdx));
+  arr.splice(i, 0, fromHash);
+  return arr;
+}
+
 /** 搜索时带出"组内有标题命中"的项目行:按已加载组预计算 hash 集。 */
 export function sessionQueryMatchHashes({ sessionsByProject = {}, query = '', titleOf = () => '' } = {}) {
   const q = String(query || '').toLowerCase();

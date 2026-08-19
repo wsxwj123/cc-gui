@@ -174,7 +174,7 @@ export const ICON_SEMANTIC_NAMES = [
   'send', 'stop', 'new-session', 'settings', 'folder', 'folder-open', 'search', 'pin',
   'close', 'copy', 'refresh', 'edit', 'delete', 'archive', 'branch', 'terminal',
   'file', 'image', 'globe', 'check', 'chevron-down', 'chevron-right', 'chevron-left',
-  'plus', 'menu', 'sparkles', 'clock', 'user', 'bot', 'warning',
+  'plus', 'menu', 'sparkles', 'clock', 'user', 'bot', 'warning', 'sliders',
 ];
 
 function assetExt(name) {

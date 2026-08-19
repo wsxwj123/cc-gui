@@ -46,5 +46,6 @@ export const ICON_SEMANTICS = {
   Clock: "clock",
   User: "user",
   Bot: "bot",
-  AlertTriangle: "warning"
+  AlertTriangle: "warning",
+  SlidersHorizontal: "sliders"
 };

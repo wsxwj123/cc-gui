@@ -28,6 +28,7 @@ import {
   Search as L_Search, Send as L_Send, Server as L_Server, Settings as L_Settings, Shield as L_Shield, ShieldAlert as L_ShieldAlert,
   ShieldCheck as L_ShieldCheck, ShieldOff as L_ShieldOff, Smartphone as L_Smartphone, Sparkles as L_Sparkles, Square as L_Square, SquarePen as L_SquarePen,
   Star as L_Star, Sun as L_Sun, Target as L_Target, Terminal as L_Terminal, Trash2 as L_Trash2, Type as L_Type,
+  SlidersHorizontal as L_SlidersHorizontal, GripVertical as L_GripVertical,
   Undo2 as L_Undo2, User as L_User, Wrench as L_Wrench, X as L_X, XCircle as L_XCircle, Zap as L_Zap,
 } from 'lucide-react';
 
@@ -180,3 +181,5 @@ export const Wrench = wrap(null, L_Wrench);
 export const X = wrap("close", L_X);
 export const XCircle = wrap(null, L_XCircle);
 export const Zap = wrap(null, L_Zap);
+export const SlidersHorizontal = wrap("sliders", L_SlidersHorizontal);
+export const GripVertical = wrap(null, L_GripVertical);

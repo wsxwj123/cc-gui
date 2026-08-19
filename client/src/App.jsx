@@ -9660,7 +9660,7 @@ export default function App() {
   // 审计批A6:ws-reconnected 时重跑 —— 断线期间的 custom/auto-titles、context-1m
   // 广播已永久丢失,重连补拉一次收敛(与权限卡/列表对账同构;hydrate 均幂等)。
   useEffect(() => {
-    const hydrate = () => { useStore.getState().hydrateCustomTitles(); useStore.getState().hydrateAutoTitles(); useStore.getState().hydrateContext1m(); useStore.getState().hydrateDisplayName(); };
+    const hydrate = () => { useStore.getState().hydrateCustomTitles(); useStore.getState().hydrateAutoTitles(); useStore.getState().hydrateContext1m(); useStore.getState().hydrateDisplayName(); useStore.getState().hydrateSidebarView(); };
     hydrate();
     window.addEventListener('cgui:ws-reconnected', hydrate);
     return () => window.removeEventListener('cgui:ws-reconnected', hydrate);
