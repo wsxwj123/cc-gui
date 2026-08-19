@@ -19,8 +19,10 @@
 // 同协议内同 id 多来源(不同聚合商/直连+网关)取并集——同协议下差异小且方向为"多给档"。
 import fs from 'fs';
 import path from 'path';
+import { pathToFileURL } from 'url';
 const DIST = process.argv[2], OUT = process.argv[3];
-const { getSupportedThinkingLevels } = await import(path.join(DIST, 'models.js'));
+// Windows:动态 import 只认 URL,绝对路径 C:\... 会 ERR_UNSUPPORTED_ESM_URL_SCHEME。
+const { getSupportedThinkingLevels } = await import(pathToFileURL(path.join(DIST, 'models.js')).href);
 const D = path.join(DIST, 'providers/data/');
 // CLI 2.1.235 的 --effort 只认这五档(无 minimal/none),表里出现的 minimal 直接剔除。
 const CGUI_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
@@ -62,7 +64,7 @@ const mergeInto = (bag, id, entry) => {
   bag[id] = u.size === CGUI_EFFORTS.length ? null : { efforts: CGUI_EFFORTS.filter((e) => u.has(e)) };
 };
 for (const f of fs.readdirSync(D).filter((x) => x.endsWith('.json') && !x.startsWith('.'))) {
-  const j = JSON.parse(fs.readFileSync(D + f, 'utf8'));
+  const j = JSON.parse(fs.readFileSync(path.join(D, f), 'utf8'));
   for (const [api, models] of Object.entries(j)) {
     const proto = PROTO[api];
     if (!proto) continue;

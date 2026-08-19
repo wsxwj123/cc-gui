@@ -68,8 +68,17 @@ export const MODEL_CAPABILITY_CATALOG = [
 const THINKING_TABLE = (() => {
   try {
     const t = JSON.parse(readFileSync(new URL('../data/thinking-levels.json', import.meta.url), 'utf-8'));
-    return (t && typeof t.byId === 'object' && typeof t.byProto === 'object') ? t : null;
-  } catch { return null; }
+    if (t && typeof t.byId === 'object' && typeof t.byProto === 'object') return t;
+    console.warn('[thinking-levels] 数据表结构异常,已退回家族正则(档位判定会变宽松)');
+    return null;
+  } catch (e) {
+    // 不静默:表缺失时行为是"全部退回家族正则"= 档位变宽松,用户端看不出异常,
+    // 正是本轮修的那类隐身故障(功能在但悄悄不生效)。最常见成因是打包漏了
+    // server/data/(Tauri bundle.resources 只列了 "../server" 整目录,理应递归带上,
+    // 但 Windows 包无法本地验证)。留一行 warn 让 server.log 能查。
+    console.warn('[thinking-levels] 数据表不可用,已退回家族正则(档位判定会变宽松):', e?.code || e?.message);
+    return null;
+  }
 })();
 
 // 查表一次(单个 id)。返回:undefined=表里没有(继续往下查);null=命中且全档(**不再下探**);
