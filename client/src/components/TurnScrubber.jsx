@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, useCallback } from 'react';
-import { turnWaveWidth, layoutCompactPositions, distortPositions, buildTurnIndex, nearestTurnIndex, normalizePointerY, pointerLocalY } from '../utils/turnWave.js';
+import { turnWaveWidth, layoutCompactPositions, distortPositions, buildTurnIndex, nearestTurnIndex, normalizePointerY, pointerLocalY, calibrateFromProbes } from '../utils/turnWave.js';
 
 // 右侧竖向回合进度条(Claude Code/Codex 式线性波形 + macOS Dock 放大)。
 // hover 线条向左拉长 + 浮窗显示该回合消息摘要,点击平滑滚动到该回合。
@@ -34,6 +34,15 @@ export default function TurnScrubber({ containerRef, turns, onNavigate }) {
   const pointerFrame = useRef(0);
   const pendingPointerY = useRef(null);
   const committedPointerY = useRef(null);
+  // r13-p2-14:两点标定探针(与刻度同样的 translateY 定位),测布局px→client px 实际映射。
+  const probe0Ref = useRef(null);
+  const probeNRef = useRef(null);
+  const PROBE_SPAN = 100;
+  const readCalib = () => calibrateFromProbes(
+    probe0Ref.current?.getBoundingClientRect(),
+    probeNRef.current?.getBoundingClientRect(),
+    PROBE_SPAN,
+  );
 
   const measure = useCallback(() => {
     const el = containerRef.current;
@@ -120,9 +129,8 @@ export default function TurnScrubber({ containerRef, turns, onNavigate }) {
     hideTimer.current = setTimeout(() => setTipIdx(null), HIDE_DELAY);
   };
   const moveBar = (e) => {
-    // r13-p2-12:改用 offsetY(容器自身坐标系,零缩放换算) —— 比例法在 WKWebView
-    // 的 zoom 下仍会漂(clientY 与 rect 不同空间),见 pointerLocalY 注释。
-    pendingPointerY.current = pointerLocalY(e, box.height);
+    // r13-p2-14:两点标定换算(探针实测布局px↔client px 映射),见 pointerLocalY 注释。
+    pendingPointerY.current = pointerLocalY(e, box.height, readCalib());
     if (pointerFrame.current) return;
     pointerFrame.current = requestAnimationFrame(() => {
       pointerFrame.current = 0;
@@ -144,8 +152,8 @@ export default function TurnScrubber({ containerRef, turns, onNavigate }) {
   };
   // 容器级 click:按当前渲染帧的变形坐标解算(指针下那根=点中那根)。
   const clickBar = (e) => {
-    // r13-p2-12:与 moveBar 同一口径(offsetY),点击命中与悬停恒一致。
-    const y = pointerLocalY(e, box.height);
+    // r13-p2-14:与 moveBar 同一标定口径,点击命中与悬停恒一致。
+    const y = pointerLocalY(e, box.height, readCalib());
     const anchor = committedPointerY.current ?? y;
     const idx = nearestTurnIndex(buildTurnIndex(distortPositions(base, anchor, FISHEYE)), y);
     const t = turns[idx];
@@ -188,6 +196,9 @@ export default function TurnScrubber({ containerRef, turns, onNavigate }) {
       style={{ position: 'absolute', right: 4, top: box.top, height: box.height, width: 18, zIndex: 45 }}
       className="max-md:hidden pointer-events-auto cursor-pointer focus:outline-none focus-visible:ring-1 focus-visible:ring-accent/50 rounded"
     >
+      {/* r13-p2-14 标定探针:与刻度同一定位通道(translateY 布局px),零视觉、零事件 */}
+      <i ref={probe0Ref} aria-hidden="true" style={{ position: 'absolute', top: 0, right: 0, width: 1, height: 1, transform: 'translateY(0px)', pointerEvents: 'none', opacity: 0 }} />
+      <i ref={probeNRef} aria-hidden="true" style={{ position: 'absolute', top: 0, right: 0, width: 1, height: 1, transform: `translateY(${PROBE_SPAN}px)`, pointerEvents: 'none', opacity: 0 }} />
       {positions.map((n, i) => {
         const t = turns[i];
         // positions 与 turns 同帧派生(turns.length),但守卫保留:极端时序下 turns[i]

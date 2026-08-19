@@ -139,34 +139,43 @@ const approx = (a, b, eps = 1e-6) => Math.abs(a - b) <= eps;
   // 每事件 DOM API(clientHeight)依赖清零
   const src = readFileSync(new URL('../../client/src/components/TurnScrubber.jsx', import.meta.url), 'utf8');
   // r13-p2-12:口径升级为 offsetY(见 t7);此处只钉"两处调用点同口径且都传 box.height"。
-  assert.equal((src.match(/pointerLocalY\(e, box\.height\)/g) || []).length, 2, 't5: moveBar+clickBar 两处均走 box.height 口径');
+  assert.equal((src.match(/pointerLocalY\(e, box\.height, readCalib\(\)\)/g) || []).length, 2, 't5: moveBar+clickBar 两处均走 box.height 口径');
   assert.doesNotMatch(src, /e\.currentTarget\.clientHeight/, 't5: 每事件 clientHeight 依赖清零(跨 API 假设根除)');
   assert.doesNotMatch(src, /Math\.min\(rect\.height, e\.clientY - rect\.top\)/, 't5: 旧视觉差值算式仍清零');
 }
 
 console.log('check-turn-scrubber-solve: all passed');
 
-// t7(r13-p2-12):指针本地 y 走 offsetY —— 容器自身坐标系,零缩放换算。
-// 比例法(p5-1)要求 clientY 与 rect 同空间,WKWebView 的 zoom 下不成立(真机偏移);
-// offsetY 规范定义即"相对目标 padding box",与 positions 同空间,任何内核都不需换算。
+// t7(r13-p2-14):指针本地 y 走【两点标定】——探针实测「布局px → client px」映射。
+// 引擎实证(WebKit/Chromium 同一最小复现,zoom=1.2):
+//   clientY=320 rectTop=120 rectHeight=480 offsetHeight=400 → 真值 166.67
+//   offsetY 返回 200 = 视觉像素(≠布局像素)→ p2-12 用它当布局px 使鱼眼低 20%。
+// 标定法只用 clientY 与两枚同定位探针的 rect,不依赖任何 API 的缩放语义。
 {
-  const { pointerLocalY } = await import('../../client/src/utils/turnWave.js');
-  const H = 600;
-  // 任意"内核语义"下 offsetY 都直接可用(不查 rect,不乘除任何缩放)
-  for (const y of [0, 1, 123.4, 599, 600]) {
-    assert.equal(pointerLocalY({ nativeEvent: { offsetY: y } }, H), Math.max(0, Math.min(H, y)),
-      `t7: offsetY=${y} 原样采用(夹紧到 [0,H])`);
-  }
-  assert.equal(pointerLocalY({ nativeEvent: { offsetY: -20 } }, H), 0, 't7: 负值夹紧');
-  assert.equal(pointerLocalY({ nativeEvent: { offsetY: 9999 } }, H), H, 't7: 超界夹紧');
-  // 无 offsetY 的引擎:回落比例法(仍可用,不崩)
-  const fallback = pointerLocalY({ clientY: 300 }, H, { top: 100, height: 200 });
-  assert.ok(fallback >= 0 && fallback <= H, 't7: 无 offsetY 时回落比例法且在界内');
-  // 接线守卫:两处调用点都必须走 offsetY 口径(回退到 clientY 比例法 = 真机复发)
+  const { pointerLocalY, calibrateFromProbes } = await import('../../client/src/utils/turnWave.js');
+  const H = 400;
+  // zoom=1.2 场景:布局 0 → client 120;布局 100 → client 240
+  const cal = calibrateFromProbes({ top: 120 }, { top: 240 }, 100);
+  assert.equal(cal.perLayoutPx, 1.2, 't7: 标定出 1.2 视觉px/布局px');
+  assert.equal(cal.originClientY, 120, 't7: 原点为探针0 的 client top');
+  assert.ok(Math.abs(pointerLocalY({ clientY: 320 }, H, cal) - 166.67) < 0.01, 't7: 指针 client 320 → 布局 166.67(真值)');
+  // zoom=1 场景:映射恒等
+  const cal1 = calibrateFromProbes({ top: 100 }, { top: 200 }, 100);
+  assert.equal(pointerLocalY({ clientY: 300 }, H, cal1), 200, 't7: zoom=1 下恒等映射');
+  // 夹紧
+  assert.equal(pointerLocalY({ clientY: 0 }, H, cal), 0, 't7: 上越界夹紧');
+  assert.equal(pointerLocalY({ clientY: 9999 }, H, cal), H, 't7: 下越界夹紧');
+  // 无标定回落 fraction(不崩且在界内)
+  const fb = pointerLocalY({ clientY: 300, currentTarget: { getBoundingClientRect: () => ({ top: 100, height: 240 }) } }, H, null);
+  assert.ok(fb >= 0 && fb <= H, 't7: 无标定回落 fraction 且在界内');
+  assert.equal(calibrateFromProbes(null, { top: 1 }, 100), null, 't7: 探针缺失返回 null');
+  assert.equal(calibrateFromProbes({ top: 5 }, { top: 5 }, 100), null, 't7: 零跨度返回 null(防除零)');
+  // 接线守卫:两处调用点都带标定参数;禁止回退 offsetY 口径
   const src = readFileSync(new URL('../../client/src/components/TurnScrubber.jsx', import.meta.url), 'utf8');
-  assert.equal((src.match(/pointerLocalY\(e, box\.height\)/g) || []).length, 2,
-    't7: moveBar 与 clickBar 都走 pointerLocalY(哨兵锚)');
-  assert.doesNotMatch(src, /normalizePointerY\(e\.clientY/, 't7: 调用点不得回退旧比例法');
+  assert.equal((src.match(/pointerLocalY\(e, box\.height, readCalib\(\)\)/g) || []).length, 2,
+    't7: moveBar 与 clickBar 都走标定(哨兵锚)');
+  assert.match(src, /probe0Ref|probeNRef/, 't7: 探针 ref 在位');
+  assert.doesNotMatch(src, /offsetY/, 't7: 不得回退 offsetY(视觉像素)口径');
 }
 
-console.log('check-turn-scrubber-solve: t7 (offsetY 口径) passed');
+console.log('check-turn-scrubber-solve: t7 (两点标定) passed');

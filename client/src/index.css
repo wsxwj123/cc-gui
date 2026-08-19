@@ -1805,6 +1805,9 @@ html { --content-max: clamp(768px, calc(var(--app-w, 100vw) * 0.7), 1120px); }
      字标(CC-GUI)在此组合下底边被顶栏的 overflow 裁掉 1px。改回给足行高、
      去掉位移:大写字形本就贴基线,flex 居中即光学居中。 */
   line-height: 1.2;
+  /* 实测(canvas 字形度量):全大写字形视觉中心比图标中心高 0.86px → 下移对齐。
+     line-height 1.2 的下半 leading 约 1.9px,位移在 box 内不会被裁。 */
+  transform: translateY(0.86px);
 }
 
 @keyframes cgui-brand-breath {
