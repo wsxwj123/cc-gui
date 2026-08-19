@@ -4,7 +4,7 @@ import { mergeSyncedMap, syncableKey, pushLocalOnlyKeys, createInFlightCounter, 
 import { FONT_OPTIONS, readingFontCss } from '../utils/systemFonts.js';
 import { createQueueId, firstDrainableIndex, isSteerBarrier, reclaimClaimItem, reconcileSteered, stripSteerState } from '../utils/steerQueue.js';
 import { isValidContextResponse, shouldReplaceContextCache } from '../utils/contextCache.js';
-import { reducePinned, initialDrillProject } from '../utils/projectPanel.js';
+import { reducePinned, initialExpandedProjects, toggleExpanded } from '../utils/projectPanel.js';
 
 // Re-exported so existing importers (App.jsx) keep working; the list and its
 // css-resolution logic now live in utils/systemFonts.js alongside the enumeration.
@@ -1793,23 +1793,30 @@ export const useStore = create((set, get) => ({
   // 缓存(钻入才拉取),**独立于 store.sessions 单值槽**——PermissionPrompt 权限卡门禁/
   // @面板/监控反查继续读旧槽,语义零改动。
   sessionsByProject: {},
-  // r11-①:手风琴多展开(expandedProjects 数组)退役 → 钻入式单值 drillProject:
-  // 当前钻入其会话页的项目 hash,null=项目页。持久化 key 迁移:新 key
-  // 'cgui-drill-project';旧 key 'cgui-expanded-projects' 仅在新 key 缺失时一次性
-  // 读取(取最后展开=最近操作的项目作初始钻入),此后不再读写旧 key(残留无害)。
-  drillProject: initialDrillProject(readLs('cgui-drill-project', undefined), readLs('cgui-expanded-projects', [])),
-  setDrillProject: (hash) => set((s) => {
-    const next = typeof hash === 'string' && hash ? hash : null;
-    if (s.drillProject === next) return s;
-    writeLs('cgui-drill-project', next);
-    return { drillProject: next };
+  // r13-①:钻入式单值 drillProject 退役 → dsh 折叠树多展开 expandedProjects(数组,
+  // Set 语义)。持久化回 'cgui-expanded-projects';旧钻入键 'cgui-drill-project' 一次性
+  // 迁移(有值=该项目初始展开并删旧键,无值=全部折叠),此后不再读写旧键。
+  expandedProjects: (() => {
+    const { list, migrated } = initialExpandedProjects(readLs('cgui-expanded-projects', undefined), readLs('cgui-drill-project', undefined));
+    if (migrated) {
+      writeLs('cgui-expanded-projects', list);
+      try { localStorage.removeItem('cgui-drill-project'); } catch {}
+    }
+    return list;
+  })(),
+  toggleProjectExpanded: (hash) => set((s) => {
+    const next = toggleExpanded(s.expandedProjects, hash);
+    if (next === s.expandedProjects) return s;
+    writeLs('cgui-expanded-projects', next);
+    return { expandedProjects: next };
   }),
-  // 语义变更(r11-①):原「确保该项目组展开」→「钻入该项目的会话页」。调用点
-  // (选中跟随/添加项目/搜索命中/进 worktree)诉求一致:让该项目的会话列表可见。
+  // r13-①:语义回归「确保该项目组展开」(r11-① 期间曾改为钻入)。调用点
+  // (选中跟随/添加项目/搜索命中/进 worktree)诉求不变:让该项目的会话列表可见。
   ensureProjectExpanded: (hash) => set((s) => {
-    if (!hash || s.drillProject === hash) return s;
-    writeLs('cgui-drill-project', hash);
-    return { drillProject: hash };
+    if (!hash || s.expandedProjects.includes(hash)) return s;
+    const next = [...s.expandedProjects, hash];
+    writeLs('cgui-expanded-projects', next);
+    return { expandedProjects: next };
   }),
   fetchSessionsForPanel: async (projectHash) => {
     if (!projectHash) return;

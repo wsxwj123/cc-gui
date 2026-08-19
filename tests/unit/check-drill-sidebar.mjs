@@ -1,95 +1,56 @@
 #!/usr/bin/env node
-// 单测:r11-① 钻入式项目视图 —— 两页态解析 + 持久化 key 迁移(import 真函数)
-// + 侧栏/store/端点仪表化。
-// 变异哨兵(实际验证过红):
-//   S1 resolveDrillView 删「解析落空回落项目页」→ t2 红
-//   S2 initialDrillProject 删旧 key 迁移 → t1 红
+// 单测:r13-① dsh 折叠树(r11-① 钻入两页退役,本测随架构整体重写)。
+// 变异哨兵(实际验证过红):S1 initialExpandedProjects 删 drill 迁移分支 → t1 红。
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { initialDrillProject, resolveDrillView } from '../../client/src/utils/projectPanel.js';
+import { initialExpandedProjects, toggleExpanded } from '../../client/src/utils/projectPanel.js';
 
-// t1 初始值迁移矩阵:新 key 优先;缺失时取旧手风琴数组的最后展开;都缺 → null
+// t1 展开态迁移矩阵 + 折叠切换
 {
-  assert.equal(initialDrillProject('h1', ['a', 'b']), 'h1', 't1: 新 key 有值直接用');
-  assert.equal(initialDrillProject(null, ['a', 'b']), null, 't1: 新 key 显式 null(项目页)不迁移');
-  assert.equal(initialDrillProject('', ['a']), null, 't1: 空串回落 null');
-  assert.equal(initialDrillProject(42, ['a']), null, 't1: 非法类型回落 null');
-  assert.equal(initialDrillProject(undefined, ['a', 'b']), 'b', 't1: 旧 key 迁移取最后展开');
-  assert.equal(initialDrillProject(undefined, ['a', 7, '']), 'a', 't1: 旧数组滤非法项后取最后');
-  assert.equal(initialDrillProject(undefined, []), null, 't1: 旧 key 空数组 → null');
-  assert.equal(initialDrillProject(undefined, 'junk'), null, 't1: 旧 key 非数组 → null');
+  assert.deepEqual(initialExpandedProjects(undefined, 'h1'), { list: ['h1'], migrated: true }, 't1: 旧 drill 键有值→该项目初始展开(哨兵锚)');
+  assert.deepEqual(initialExpandedProjects(['a', 'b'], 'h1'), { list: ['h1'], migrated: true }, 't1: drill 态优先于陈旧手风琴数组');
+  assert.deepEqual(initialExpandedProjects(['a', 7, ''], undefined), { list: ['a'], migrated: false }, 't1: 新键数组过滤非法');
+  assert.deepEqual(initialExpandedProjects(undefined, undefined), { list: [], migrated: false }, 't1: 都缺→全部折叠');
+  assert.deepEqual(initialExpandedProjects('junk', null), { list: [], migrated: false }, 't1: 非法类型安全回落');
+  assert.deepEqual(toggleExpanded(['a'], 'b'), ['a', 'b'], 't1: 展开追尾');
+  assert.deepEqual(toggleExpanded(['a', 'b'], 'a'), ['b'], 't1: 收起移除');
+  assert.deepEqual(toggleExpanded(['a'], ''), ['a'], 't1: 空 hash no-op');
 }
 
-// t2 两页态解析:null=项目页;命中=会话页;落空回落项目页(不许伪装成会话页)
-{
-  const rows = [{ hash: 'a', path: '/x/a' }, { hash: 'w', path: '/x/w', virtual: true }];
-  assert.deepEqual(resolveDrillView(null, rows), { view: 'projects', project: null }, 't2: 未钻入=项目页');
-  assert.equal(resolveDrillView('a', rows).view, 'sessions', 't2: 命中=会话页');
-  assert.equal(resolveDrillView('a', rows).project.path, '/x/a', 't2: 透传项目对象');
-  assert.equal(resolveDrillView('w', rows).view, 'sessions', 't2: 虚拟行(未落盘 worktree draft)也可钻入');
-  const miss = resolveDrillView('gone', rows);
-  assert.equal(miss.view, 'projects', 't2: 解析落空必须回落项目页');
-  assert.equal(miss.project, null, 't2: 落空不返回幽灵项目');
-  assert.equal(resolveDrillView('a', []).view, 'projects', 't2: 行集为空(fetch 未到)回落项目页');
-}
-
-// t3 store 仪表化:drillProject 持久化新 key + 旧 key 只读迁移;ensureProjectExpanded
-//    改为钻入语义且 4 个旧调用点(跟随/添加项目/搜索命中/进 worktree)不减
+// t2 store 接线:持久化回 cgui-expanded-projects;旧键仅迁移读点+删除
 {
   const store = readFileSync(new URL('../../client/src/stores/sessionStore.js', import.meta.url), 'utf8');
-  assert.match(store, /writeLs\('cgui-drill-project'/, 't3: 持久化写新 key');
-  assert.match(store, /initialDrillProject\(readLs\('cgui-drill-project', undefined\), readLs\('cgui-expanded-projects', \[\]\)\)/, 't3: 迁移读取接线');
-  assert.doesNotMatch(store, /writeLs\('cgui-expanded-projects'/, 't3: 不再写旧 key');
-  assert.doesNotMatch(store, /toggleProjectExpanded/, 't3: 手风琴 toggle 退役');
-  const sidebar = readFileSync(new URL('../../client/src/components/UnifiedSidebar.jsx', import.meta.url), 'utf8');
-  assert.equal((sidebar.match(/ensureProjectExpanded\(/g) || []).length, 4, 't3: 钻入语义调用点(跟随/添加/命中/worktree)不减');
+  assert.match(store, /initialExpandedProjects\(readLs\('cgui-expanded-projects', undefined\), readLs\('cgui-drill-project', undefined\)\)/, 't2: 迁移读点');
+  assert.match(store, /localStorage\.removeItem\('cgui-drill-project'\)/, 't2: 迁移后删旧键');
+  assert.equal((store.match(/readLs\('cgui-drill-project'/g) || []).length, 1, 't2: 旧键仅一处迁移读点');
+  assert.doesNotMatch(store, /writeLs\('cgui-drill-project'/, 't2: 旧键不再写');
+  assert.match(store, /toggleProjectExpanded/, 't2: 折叠切换 action');
+  assert.match(store, /ensureProjectExpanded: \(hash\) => set\(\(s\) => \{\s*if \(!hash \|\| s\.expandedProjects\.includes\(hash\)\)/, 't2: ensureProjectExpanded 回归「确保展开」语义(调用点零改)');
+  assert.doesNotMatch(store, /setDrillProject|drillProject:/, 't2: 钻入单值槽退役');
 }
 
-// t4 侧栏两页态仪表化:项目行只显名称(路径进 title)+钻入;返回行;离开会话页 flush 待删;
-//    hover 组含「在文件夹中显示」;清理入口保留(移入会话页);会话操作全保留
+// t3 侧栏接线:返回行退役/折叠树/项目行两枚操作/能力一个不丢/会话行零回退
 {
-  const sidebar = readFileSync(new URL('../../client/src/components/UnifiedSidebar.jsx', import.meta.url), 'utf8');
-  assert.match(sidebar, /resolveDrillView\(drillProject, rowsNoQuery\)/, 't4: 两页态走纯函数解析(且不受 query 踢出)');
-  assert.match(sidebar, /view === 'projects' && rows\.map/, 't4: 项目页渲染');
-  assert.match(sidebar, /view === 'sessions' && drilled/, 't4: 会话页渲染');
-  assert.match(sidebar, /返回项目列表/, 't4: 返回行在');
-  const drillIntoBody = /const drillInto = [\s\S]*?\n  \};/.exec(sidebar)?.[0] || '';
-  assert.match(drillIntoBody, /flushPendingForProject/, 't4: 切换钻入项目落实待删');
-  const drillBackBody = /const drillBack = [\s\S]*?\n  \};/.exec(sidebar)?.[0] || '';
-  assert.match(drillBackBody, /flushPendingForProject/, 't4: 返回项目页落实待删');
-  assert.match(sidebar, /在文件夹中显示/, 't4: reveal 按钮在');
-  assert.match(sidebar, /\/api\/reveal-path/, 't4: reveal 走已知项目校验端点');
-  assert.match(sidebar, /project\.virtual/, 't4: 虚拟行不显示 reveal');
-  // r11-p3-4 语义变更(用户拍板):项目头🗑「彻底清理」按钮整体移除,前端不再有清理入口
-  // (POST /api/project/purge 端点保留待将来接回)。原"清理入口保留"断言反向。
-  assert.doesNotMatch(sidebar, /彻底清理该项目的 Claude 本地状态/, 't4: 清理按钮已移除(p3-4)');
-  assert.doesNotMatch(sidebar, /purgeProject\(project\)/, 't4: 清理调用点清零');
-  // p3-4 项目头图标化:文字按钮撤销(纯图标+title),名称 truncate 让位、按钮组 shrink-0
-  assert.doesNotMatch(sidebar, /－?<Plus size=\{1[12]\} \/>新建/, 't4-p3-4: 「新建」文字标签撤销(哨兵锚)');
-  assert.doesNotMatch(sidebar, />worktree<\/button>|<GitBranch size=\{1[12]\} \/>worktree/, 't4-p3-4: 「worktree」文字标签撤销');
-  assert.doesNotMatch(sidebar, /\{showArchived \? `已归档 \$\{archivedCount\}` : `归档 \$\{archivedCount\}`\}/, 't4-p3-4: 归档可见文字标签撤销(tooltip/角标呈现不受限)');
-  assert.match(sidebar, /flex-1 min-w-0"\n\s*title=\{`\$\{formatPath\(project\.path\)\}/, 't4-p3-4: 名称 truncate 优先让位(flex-1 min-w-0)+会话数并入 tooltip');
-  assert.match(sidebar, /flex items-center gap-0\.5 shrink-0/, 't4-p3-4: 按钮组 shrink-0 不换行不溢出');
-  assert.match(sidebar, /min-w-\[12px\] h-\[12px\][^"]*font-mono/, 't4-p3-4: 归档数角标');
-  // 项目行只显名称:不再渲染 formatDate/独立路径行;完整路径进 title
-  assert.match(sidebar, /title=\{formatPath\(project\.path\)\}/, 't4: 完整路径进 title');
-  for (const fn of ['handleFork', 'handleArchive', 'handleDelete', 'togglePinSession', 'handleNew', 'openWorktreePicker']) {
-    assert.ok(sidebar.includes(fn), `t4: 会话/组操作 ${fn} 保留`);
+  const sb = readFileSync(new URL('../../client/src/components/UnifiedSidebar.jsx', import.meta.url), 'utf8');
+  assert.doesNotMatch(sb, />返回项目列表/, 't3: 「返回项目列表」不再渲染(注释提及不计)');
+  assert.doesNotMatch(sb, /drillInto|drillBack|resolveDrillView/, 't3: drill 残留清零');
+  assert.match(sb, /aria-expanded=\{isOpen\}/, 't3: 项目行折叠语义(a11y)');
+  assert.match(sb, /ChevronRight size=\{12\} className=\{`text-ink-faint shrink-0 transition-transform \$\{isOpen \? 'rotate-90' : ''\}`\}/, 't3: 折叠 chevron');
+  assert.match(sb, /const toggleProject = \(hash\) => \{/, 't3: 折叠切换');
+  assert.match(sb, /if \(isOpen\) flushPendingForProject\(hash\);/, 't3: 收起组落实待删(时机等价迁移)');
+  // 项目行 hover 两枚:「+」新建 + 「⋯」菜单;菜单收纳全部既有能力
+  assert.match(sb, /data-cgui="new-session-btn"\s*\n\s*data-tour="new-session"/, 't3: 「+」新建(锚点/GuideTour 保留)');
+  assert.match(sb, /<ProjectRowMenu/, 't3: 「⋯」菜单挂载');
+  for (const cap of ['在文件夹中显示', '置顶到列表最前', '新建 worktree 会话', '已归档会话', '从侧栏隐藏']) {
+    assert.ok(sb.includes(cap), `t3: 能力不丢——${cap}`);
   }
-  assert.match(sidebar, /data-tour="new-session"/, 't4: GuideTour 新建锚点在(单实例,无条件)');
-  assert.match(sidebar, /data-tour="new-worktree"/, 't4: GuideTour worktree 锚点在');
+  assert.match(sb, /gap=\{4\} clampSelector="\.sidebar-flank"/, 't3: 菜单弹层沿 p5-2 口径');
+  assert.match(sb, /!project\.virtual && \(/, 't3: 虚拟行不显示 reveal(双关保留)');
+  assert.match(sb, /\/api\/reveal-path/, 't3: reveal 走已知项目校验端点');
+  assert.match(sb, /data-cgui="new-worktree-btn"/, 't3: worktree 锚点随菜单保留');
+  assert.match(sb, /<SessionItem/, 't3: 会话行组件原样复用(零回退)');
+  assert.match(sb, /for \(const h of st\.expandedProjects\) st\.fetchSessionsForPanel\(h\);/, 't3: 展开组保鲜(原单钻入组)');
+  assert.doesNotMatch(sb, /彻底清理该项目的 Claude 本地状态/, 't3: p3-4 清理按钮移除态保持');
 }
 
-// t5 服务端 reveal-path:已知项目集校验 + darwin open -R / win explorer /select 分支
-{
-  const sessions = readFileSync(new URL('../../server/routes/sessions.js', import.meta.url), 'utf8');
-  const route = /router\.post\('\/reveal-path'[\s\S]*?\n\}\);/.exec(sessions)?.[0];
-  assert.ok(route, 't5: 端点存在');
-  assert.match(route, /listProjects\(\)/, 't5: 校验来源=已知项目集');
-  assert.match(route, /path is not a known project/, 't5: 未知路径拒绝');
-  assert.match(route, /\['-R', p\]/, 't5: mac open -R 高亮');
-  assert.match(route, /\/select,\$\{p\}/, 't5: win explorer /select');
-  assert.match(route, /win32'\) throw err/, 't5: explorer 非零退出不当失败(仅 win 豁免)');
-}
-
-console.log('check-drill-sidebar: all passed');
+console.log('check-drill-sidebar: all passed (r13 折叠树)');

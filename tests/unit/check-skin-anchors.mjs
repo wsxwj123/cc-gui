@@ -11,7 +11,9 @@ const root = fileURLToPath(new URL('../..', import.meta.url));
 
 // t1 清单形态:≥40、唯一、命名规范、都有说明
 {
-  assert.ok(SKIN_ANCHOR_IDS.length >= 40, `t1: 首批 ≥40(实际 ${SKIN_ANCHOR_IDS.length})`);
+  // r13-①:drill-back 随钻入两页退役删除(skinAnchors.js 备案注释),40→39。
+  assert.ok(SKIN_ANCHOR_IDS.length >= 39, `t1: 首批 ≥39(实际 ${SKIN_ANCHOR_IDS.length})`);
+  assert.ok(!SKIN_ANCHOR_IDS.includes('drill-back'), 't1: drill-back 已按备案退役');
   assert.equal(new Set(SKIN_ANCHOR_IDS).size, SKIN_ANCHOR_IDS.length, 't1: id 唯一');
   for (const a of SKIN_ANCHORS) {
     assert.match(a.id, /^[a-z][a-z0-9-]*$/, `t1: id 命名规范 ${a.id}`);

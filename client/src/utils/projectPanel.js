@@ -89,32 +89,30 @@ export function reducePinned(data) {
   };
 }
 
-// ── r11-①:钻入式两页态(项目页 ⇄ 会话页)────────────────────────────
+// ── r13-①:dsh 折叠树(项目/会话二合一;r11-① 钻入式两页退役)────────
 
 /**
- * drillProject 初始值解析(含持久化 key 迁移):
- *  - 新 key 'cgui-drill-project' 有值(含显式 null)→ 直接用(非法类型回落 null);
- *  - 新 key 缺失(storedValue===undefined)→ 一次性读旧手风琴 key
- *    'cgui-expanded-projects'(数组),取最后展开(≈最近操作)的项目;
- *  - 都没有 → null(项目页)。
+ * 展开集初始值(含持久化 key 一次性迁移,纯函数零 IO):
+ *  - 旧钻入键 'cgui-drill-project' 有值 → 该项目初始展开(migrated:true,调用方
+ *    随后删旧键并写新键)。钻入态是最近真实状态,优先于可能陈旧的手风琴数组;
+ *  - 否则新键 'cgui-expanded-projects'(数组)有存值 → 过滤非法直接用;
+ *  - 都没有 → 全部折叠([])。
  */
-export function initialDrillProject(storedValue, legacyList) {
-  if (storedValue !== undefined) {
-    return typeof storedValue === 'string' && storedValue ? storedValue : null;
+export function initialExpandedProjects(storedList, legacyDrill) {
+  if (typeof legacyDrill === 'string' && legacyDrill) {
+    return { list: [legacyDrill], migrated: true };
   }
-  const arr = Array.isArray(legacyList) ? legacyList.filter((x) => typeof x === 'string' && x) : [];
-  return arr.length ? arr[arr.length - 1] : null;
+  if (storedList !== undefined) {
+    return { list: Array.isArray(storedList) ? storedList.filter((x) => typeof x === 'string' && x) : [], migrated: false };
+  }
+  return { list: [], migrated: false };
 }
 
-/**
- * 两页态解析:drillHash 为空 → 项目页;能在行集中解析到项目 → 该项目的会话页;
- * 解析不到(项目被隐藏/尚未拉到/panes 已关)→ 回落项目页但**不改状态**,
- * fetchProjects 到位后自然恢复(渲染期不许写 store)。
- */
-export function resolveDrillView(drillHash, rows) {
-  if (!drillHash) return { view: 'projects', project: null };
-  const project = (rows || []).find((p) => p && p.hash === drillHash) || null;
-  return project ? { view: 'sessions', project } : { view: 'projects', project: null };
+/** 展开集切换(纯函数):返回新数组(Set 语义,保持既有顺序,新增追尾)。 */
+export function toggleExpanded(list, hash) {
+  const arr = Array.isArray(list) ? list : [];
+  if (!hash) return arr;
+  return arr.includes(hash) ? arr.filter((h) => h !== hash) : [...arr, hash];
 }
 
 /** 搜索时带出"组内有标题命中"的项目行:按已加载组预计算 hash 集。 */

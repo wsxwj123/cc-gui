@@ -15,7 +15,8 @@ export const SKIN_ANCHORS = [
   { id: 'project-row', desc: '项目行(项目页)' },
   { id: 'session-row', desc: '会话行' },
   { id: 'session-actions', desc: '会话行 hover 操作组' },
-  { id: 'drill-back', desc: '会话页「返回项目列表」行' },
+  // r13-①备案:drill-back(会话页「返回项目列表」行)随钻入两页退役而删除。
+  // T2 皮肤若引用 [data-cgui="drill-back"] 只是选择器落空,不炸。
   { id: 'add-project-btn', desc: '添加项目按钮' },
   { id: 'new-session-btn', desc: '新建会话按钮' },
   { id: 'new-worktree-btn', desc: '新建 worktree 按钮' },
