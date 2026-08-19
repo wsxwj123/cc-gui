@@ -276,3 +276,33 @@ export async function scanAllTools({ refresh = false, deps } = {}) {
   try { return await _scanInflight; }
   finally { _scanInflight = null; }
 }
+
+/**
+ * r13-p2-22(改口径):npm 不做多路径扫描 —— Node 官方安装包自带 npm,扫路径是冗余。
+ * 真正有诊断价值的是它的【有效配置】:
+ *  · version:属于哪个 node 带的 npm;
+ *  · prefix :`npm i -g` 装到哪(claude 的 bin 会落在 <prefix>/bin);
+ *  · registry:决定 npm 渠道快慢(镜像源 vs 官方源)。
+ * 缺失(极少数场景:Linux 发行版把 nodejs/npm 拆包)时返回 found:false,面板据此提示。
+ * Windows:npm 是 npm.cmd(无 npm.exe),必须经 cmd.exe /c 执行。
+ */
+export async function probeNpm(deps = {}) {
+  const d = { ...defaultDeps, ...deps };
+  const run = async (args) => {
+    const out = d.platform === 'win32'
+      ? await d.execOut('cmd.exe', ['/c', 'npm', ...args])
+      : await d.execOut('npm', args);
+    return String(out || '').trim();
+  };
+  try {
+    const version = parseVersionOutput(await run(['--version']));
+    if (!version) return { found: false };
+    const [prefix, registry] = await Promise.all([
+      run(['prefix', '-g']).catch(() => ''),
+      run(['config', 'get', 'registry']).catch(() => ''),
+    ]);
+    return { found: true, version, prefix, registry };
+  } catch {
+    return { found: false };
+  }
+}

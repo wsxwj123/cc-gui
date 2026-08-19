@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { readFileSync, writeFileSync, existsSync, realpathSync, readdirSync, mkdirSync } from 'fs';
 import { resolveClaudeAsync, listClaudeInstallsAsync, getClaudeOverride, setClaudeOverride, getClaudeOverrideRaw, pauseClaudeOverride, winLivePathDirsAsync, classifyShim } from '../utils/claude-resolver.js';
-import { scanAllTools, nodeMeets, NODE_MIN_MAJOR } from '../utils/env-scanner.js';
+import { scanAllTools, nodeMeets, NODE_MIN_MAJOR, probeNpm } from '../utils/env-scanner.js';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import { tmpdir, homedir } from 'os';
@@ -1006,8 +1006,8 @@ async function detectGit() {
 router.get('/env-check', async (req, res) => {
   // ?refresh=1(面板"重新检测"):绕过全量扫描的 5 分钟缓存,装完软件立即可见。
   const refresh = req.query.refresh === '1' || req.query.refresh === 'true';
-  const [{ method, path: claudePath, via }, python, uv, git, scan] = await Promise.all([
-    detectInstall(), detectPython(), detectUv(), detectGit(), scanAllTools({ refresh }),
+  const [{ method, path: claudePath, via }, python, uv, git, scan, npmInfo] = await Promise.all([
+    detectInstall(), detectPython(), detectUv(), detectGit(), scanAllTools({ refresh }), probeNpm(),
   ]);
   // R8-2:死 override 判定(手动指定的 claude 路径文件已不存在)
   const claudeOverride = getClaudeOverride();
@@ -1054,6 +1054,9 @@ router.get('/env-check', async (req, res) => {
       ...(getClaudeOverrideRaw().paused ? { overridePaused: true, overridePausedPath: getClaudeOverrideRaw().path } : {}),
     },
     git: { ...withScan(git, scan.git), required: false },
+    // r13-p2-22:npm 不扫路径(Node 自带,扫是冗余),只报有效配置 ——
+    // 版本(哪个 node 带的)/全局前缀(claude 会装到哪)/registry(决定 npm 渠道快慢)。
+    npm: { ...npmInfo, required: false },
     python: { ...withScan(python, scan.python), required: false },
     uv: { ...withScan(uv, scan.uv), required: false },
     platform: process.platform === 'darwin' ? 'mac' : process.platform === 'win32' ? 'windows' : 'linux',

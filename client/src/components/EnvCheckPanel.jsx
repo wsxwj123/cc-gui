@@ -117,6 +117,21 @@ export default function EnvCheckPanel({ onDismiss, onRecheck, asModal = true }) 
                     {item.resolvedPath}
                   </div>
                 )}
+                {/* r13-p2-22:Node 行下附 npm 的有效配置 —— npm 随 Node 附带,故不单列一行;
+                    但它的全局前缀(claude 会装到哪)与 registry(npm 渠道快慢)有诊断价值。 */}
+                {row.key === 'node' && data?.npm && (
+                  data.npm.found ? (
+                    <div className="mt-0.5 text-[10px] text-ink-faint font-body leading-snug">
+                      npm <span className="font-mono">{data.npm.version}</span>
+                      {data.npm.prefix && <> · 全局装到 <span className="font-mono break-all">{data.npm.prefix}</span></>}
+                      {data.npm.registry && <> · 源 <span className="font-mono break-all">{String(data.npm.registry).replace(/^https?:\/\//, '').replace(/\/$/, '')}</span></>}
+                    </div>
+                  ) : (
+                    <div className="mt-0.5 text-[10px] text-warning font-body leading-snug">
+                      未检测到 npm(通常随 Node 附带)。npm 渠道安装 / 更新 Claude Code 将不可用,可改用原生渠道。
+                    </div>
+                  )
+                )}
                 {/* R8-2:手动指定的 claude 路径已失效(旧后端无此字段则不渲染,可选链兜底) */}
                 {row.key === 'claude' && item?.overrideDead && (
                   <div className="mt-1 px-2 py-1.5 rounded bg-warning/10 border border-warning/30 text-[10.5px] text-warning font-body leading-snug">
