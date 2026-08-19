@@ -2,17 +2,23 @@
 // 单测:r11-⑩ 思考档位目录法预填 —— 家族目录匹配矩阵 + 预填条目形态 +
 // applyCatalogPrefill 的"用户声明永不覆盖"语义 + normalize source 透传 + 接线守卫。
 // r15 追加:命名空间前缀(OpenRouter 形态)剥离复查 + activeProviderModelMeta 读侧兜底。
-// r15-2 追加:目录纠错(撤 kimi-k2 / deepseek-chat 两条错行、加 gpt-5*-chat)、
+// r15-2 追加:目录纠错(撤 kimi-k2 / deepseek-chat 两条错行)、
 //   GET /api/providers 下发 modelMeta(修编辑器保存清空用户声明)、
 //   ChatInput 能力表变化时的回落放宽、以及判官点名的 5 个测试缺口(t9-t12)。
+// r15-3 追加:撤 gpt-5-chat 正则行(t1)、畸形数据表不抛(t11)、生成脚本补丁层(t14)、
+//   ChatInput 三条漏判路径(t13)、编辑器 catalog 行折叠+墓碑删除(t15)、
+//   GET→save()→PUT 真往返(t16,驱动真 express router,隔离 HOME)。
 // 变异哨兵(实际验证过红):
 //  - lookupModelCapabilities 恒返回 null(目录命中仍 null)→ t1 红;
 //  - 删掉 id.split('/') 复查分支 → t6 红(openai/gpt-5.6-luna family undefined ≠ gpt-5);
 //  - activeProviderModelMeta 退回 `p?.modelMeta || null` → t5 红(调用点 2≠4),
 //    且 t8 行为侧实测返回 null(存量 provider 拿不到任何预填);
-//  - GET /api/providers 的 modelMeta 退回 `p.modelMeta || null` → t5 红;
-//  - 恢复 kimi-k2 / deepseek-chat 错行 → t1 红;删掉 gpt-5-chat 行 → t1 红;
-//  - ChatInput 早退退回 `prev.model === bareModelId` → t13 红。
+//  - GET /api/providers 的 modelMeta 退回 `p.modelMeta || null` → t5 红 + t16 红(往返丢声明);
+//  - 恢复 kimi-k2 / deepseek-chat / gpt-5-chat 错行 → t1 红;
+//  - THINKING_TABLE 守卫退回 `typeof t.byId === 'object'` → t11 红(byId:null 时抛);
+//  - ChatInput deps 去掉 effort / 早退退回 `prev.permKey !== permKey` return → t13 红;
+//  - 编辑器 rows 退回 Object.keys(value) 或 removeRow 退回纯 delete → t15 红;
+//  - 生成脚本删掉 MANUAL_OVERRIDES 应用行 → t14 红(产物断言当轮仍绿,故必须查脚本)。
 import assert from 'node:assert/strict';
 import { readFileSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -51,12 +57,18 @@ const { normalizeProviderModels, denormalizeProviderModels, sanitizeModelMeta, E
   assert.deepEqual(lookupModelCapabilities('gpt-5.2-codex').efforts, ['low', 'medium', 'high', 'xhigh'], 't1: codex 系档位(先于 gpt-5 通配)');
   assert.deepEqual(lookupModelCapabilities('o3-mini').efforts, ['low', 'medium', 'high'], 't1: o 系三档');
   assert.equal(lookupModelCapabilities('gpt-4o').reasoning, false, 't1: gpt-4 系非思考');
-  // r15-2 新增:gpt-5*-chat 是非推理 chat 变体,必须排在 ^gpt-5 通配之前才不被吞。
+  // r15-3 撤销 `gpt-5-chat` 行(r15-2 加的):与实测表对撞时,唯一"正则判死而表说能思考"
+  // 的冲突就是它(gpt-5.2-chat-latest 实测四档)。正则只对【表外模型】生效 —— 那正是最容易
+  // 判错的场景,方向还是本轮明令避免的"判死"。撤行后表外 chat 变体退回 gpt-5 家族(全档
+  // 方向,无害),表内的照旧由表判死。
   const chat5 = lookupModelCapabilities('gpt-5-chat-latest');
-  assert.equal(chat5?.family, 'gpt-5-chat', 't1: gpt-5-chat-latest 命中专行(先于 gpt-5)');
-  assert.equal(chat5.reasoning, false, 't1: gpt-5-chat-latest 非思考');
-  assert.equal(lookupModelCapabilities('gpt-5.2-chat').family, 'gpt-5-chat', 't1: 带代际号的 chat 变体同样命中');
-  assert.equal(lookupModelCapabilities('gpt-5.2-codex').family, 'gpt-codex', 't1: codex 不被 chat 行截胡');
+  assert.equal(chat5?.family, 'gpt-5', 't1(r15-3): chat 专行已撤,正则退回 gpt-5 家族');
+  assert.equal(chat5.reasoning, true, 't1(r15-3): 正则不再把 chat 变体判死(判死方向危险)');
+  assert.equal(lookupModelCapabilities('gpt-5-chat-latest', 'openai').reasoning, false,
+    't1(r15-3): 表内的 chat 变体照旧判非思考(带协议查表)');
+  assert.deepEqual(lookupModelCapabilities('gpt-5.2-chat-latest', 'openai').efforts, ['low', 'medium', 'high', 'xhigh'],
+    't1(r15-3): 撤行后 gpt-5.2-chat-latest 拿回实测四档(原正则会判它不能思考)');
+  assert.equal(lookupModelCapabilities('gpt-5.2-codex').family, 'gpt-codex', 't1: codex 家族优先级不变');
   assert.equal(lookupModelCapabilities('llama-3.3-70b'), null, 't1: 目录外返回 null');
   assert.equal(lookupModelCapabilities('claude-opus-4-8'), null, 't1: claude 系不进目录(全默认)');
   assert.equal(lookupModelCapabilities(''), null, 't1: 空串 null');
@@ -140,8 +152,8 @@ const { normalizeProviderModels, denormalizeProviderModels, sanitizeModelMeta, E
   // 两个 GET(/providers 与 /custom-providers)都得有 modelMeta,否则换个入口又丢一次
   assert.equal((settings.match(/^\s*modelMeta:/gm) || []).length, 2, 't5: 两个 provider 列表接口都下发 modelMeta');
   const editor = readFileSync(new URL('../../client/src/components/ProviderThinkingEditor.jsx', import.meta.url), 'utf8');
-  assert.match(editor, /目录预填，可修改/, 't5: 编辑器显示预填来源小字');
-  assert.match(editor, /entry\.source === 'catalog'/, 't5: 小字仅 catalog 条目显示');
+  // r15-3:catalog 条目不再逐行渲染(会把表单淹掉),改成一行摘要 —— 详见 t15。
+  assert.match(editor, /已按模型目录自动判定 \{catalogCount\} 个模型的思考能力/, 't5: 编辑器显示目录判定摘要(用户仍知道目录判了哪些)');
   assert.equal((editor.match(/source: 'user'/g) || []).length >= 4, true, 't5: 编辑器全部写入点盖 source:user(addRow/setThink×2/toggleEffort)');
   const app = readFileSync(new URL('../../client/src/App.jsx', import.meta.url), 'utf8');
   assert.match(app, /d\.catalogMeta/, 't5: 表单拉取列表合并目录预填');
@@ -167,7 +179,7 @@ const { normalizeProviderModels, denormalizeProviderModels, sanitizeModelMeta, E
   assert.equal(lookupModelCapabilities('~openai/gpt-latest'), null, 't6: gpt-latest 不得误命中 gpt-5/gpt-4');
   assert.equal(lookupModelCapabilities('meta/llama-3.3-70b'), null, 't6: 剥前缀后仍目录外 → null');
   assert.equal(lookupModelCapabilities('openai/'), null, 't6: 空尾段不炸且返回 null');
-  assert.equal(lookupModelCapabilities('openai/gpt-5-chat-latest')?.family, 'gpt-5-chat', 't6: 前缀 chat 变体命中新行');
+  assert.equal(lookupModelCapabilities('openai/gpt-5-chat-latest')?.family, 'gpt-5', 't6(r15-3): 前缀 chat 变体剥前缀后落 gpt-5 家族(chat 专行已撤)');
   // 复查产物与直查同构(含 family)
   assert.deepEqual(lookupModelCapabilities('openai/gpt-5.6-luna'), lookupModelCapabilities('gpt-5.6-luna'), 't6: 复查结果与直查同构');
   // 裸 id 既有行为逐条不变(t1 矩阵重放,防"剥前缀"顺手改坏无前缀分支)
@@ -177,7 +189,7 @@ const { normalizeProviderModels, denormalizeProviderModels, sanitizeModelMeta, E
     ['glm-5.2', 'glm'], ['qwen3-235b-a22b-instruct-2507', 'qwen-instruct'], ['qwen2.5-72b', 'qwen2'],
     ['qwen3-max', 'qwen'], ['minimax-m2', 'minimax'], ['mimo-v2.5-pro', 'mimo'],
     ['gpt-5.2-codex', 'gpt-codex'], ['gpt-5.2', 'gpt-5'], ['o3-mini', 'o-series'], ['gpt-4o', 'gpt-4'],
-    ['gpt-5-chat-latest', 'gpt-5-chat'],
+    ['gpt-5-chat-latest', 'gpt-5'],
   ]) {
     assert.equal(lookupModelCapabilities(id)?.family, family, `t6: 裸 id ${id} 家族不变`);
   }
@@ -326,6 +338,24 @@ const runIsolated = (home) => JSON.parse(execFileSync(process.execPath, ['-e', C
   assert.equal(r.regex?.family, 'gpt-4', 't11: 表缺失时仍走家族正则(不抛)');
   assert.equal(r.tableOnly, null, 't11: 只在表里、正则没有的模型(kimi-k2.6)退回 null = 全档,而不是崩');
   assert.deepEqual(r.prefill, { efforts: ['low', 'medium', 'high'], source: 'catalog' }, 't11: 预填照常产出正则口径');
+  // r15-3:畸形表(而非缺失)—— typeof null === 'object',守卫若只看 typeof 就会放行,
+  // 随后查表抛(GET /api/providers 无兜底 → 500 = provider 列表整个打不开)。
+  // 两种畸形各跑一遍:byId/byProto 为 null;byProto 的值不是对象(`in` 操作符会抛)。
+  for (const [label, table] of [
+    ['byId/byProto 为 null', { byId: null, byProto: null }],
+    ['byProto 值非对象', { byId: {}, byProto: { 'gpt-5.2': 'junk' } }],
+  ]) {
+    mkdirSync(join(dir, 'data'), { recursive: true });
+    writeFileSync(join(dir, 'data', 'thinking-levels.json'), JSON.stringify(table));
+    const o = execFileSync(process.execPath, ['-e',
+      `import(${JSON.stringify(modUrl)}).then((m) => process.stdout.write(JSON.stringify({`
+      + " byProto: m.lookupModelCapabilities('gpt-5.2', 'openai'),"
+      + " byId: m.lookupModelCapabilities('gpt-4o', 'openai') })));",
+    ], { encoding: 'utf8' });
+    const v = JSON.parse(o);
+    assert.equal(v.byProto?.family, 'gpt-5', `t11: 畸形表(${label})不抛,落回家族正则`);
+    assert.equal(v.byId?.reasoning, false, `t11: 畸形表(${label})另一条查询同样不抛`);
+  }
   rmSync(dir, { recursive: true, force: true });
 }
 
@@ -354,20 +384,31 @@ const runIsolated = (home) => JSON.parse(execFileSync(process.execPath, ['-e', C
 // 新能力表判定只到 high → 按钮仍显示「极高」而 App.jsx 发送前已把它静默摘空。
 {
   const ci = readFileSync(new URL('../../client/src/components/ChatInput.jsx', import.meta.url), 'utf8');
-  assert.match(ci, /const modelChanged = !!prev\.model && prev\.model !== bareModelId;/, 't13: 模型是否变化单独成量');
   assert.match(ci, /if \(!modelChanged && effortAllowed\(caps, effort \|\| ''\)\) return;/,
     't13: 早退放宽 —— 模型没变但当前档已不合法时仍跑回落');
-  assert.match(ci, /\}, \[permKey, bareModelId, modelEffortMeta\]\);/,
-    't13: modelEffortMeta 进 deps(能力表异步到达,不进 deps 则放宽永远触发不了)');
+  // r15-3:上一版只堵住三条触发路径里的一条。permKey 变化(切窗格 / draft→真 sid 迁移)
+  // 原本直接 return,跨设备同步(applyRemoteSessionSync 改写 effortBySession)则三个旧
+  // deps 全不动、effect 根本不跑 —— 这两类下按钮照样显示「极高」而发送前被静默摘空。
+  assert.match(ci, /\}, \[permKey, bareModelId, modelEffortMeta, effort\]\);/,
+    't13: deps = [permKey, bareModelId, modelEffortMeta, effort] —— effort 覆盖"档位被外部改成非法值"(跨设备同步)');
+  assert.match(ci, /const paneChanged = prev\.permKey !== permKey;/,
+    't13: permKey 变化拆成 paneChanged(只挡记忆,不再挡回落)');
+  assert.match(ci, /const modelChanged = !paneChanged && !!prev\.model && prev\.model !== bareModelId;/,
+    't13: 换窗格/会话时两次 model 不可比,不算换模型(记忆不参与)');
+  assert.doesNotMatch(ci.slice(ci.indexOf('const lastModelRef'), ci.indexOf('}, [permKey, bareModelId, modelEffortMeta, effort]')),
+    /prev\.permKey !== permKey\) return;/, 't13: 切窗格不再整段早退(否则新窗格的非法档没人拉回)');
   assert.match(ci, /if \(modelChanged\) \{ try \{ remembered = localStorage\.getItem/,
-    't13: per-model 记忆只在真换模型时参与(能力表路径只做"拉回合法档")');
-  assert.match(ci, /prev\.permKey !== permKey\) return;/, 't13: 切窗格仍原样早退(不动别的会话)');
+    't13: per-model 记忆只在真换模型时参与(能力表/同步路径只做"拉回合法档")');
+  assert.match(ci, /setEffortFor\(permKey, r\.effort\)/, 't13: 写入只针对当前 permKey(不动别的会话)');
   // 行为侧:升级瞬间的解算结果(xhigh 不在 gpt-5 家族档位里 → 回落最高可用档 high)
   const { effortCapsFor, effortAllowed, resolveEffortOnModelChange } = await import('../../client/src/utils/effortCaps.js');
   const caps = effortCapsFor({ 'gpt-5.2': catalogPrefillEntry('gpt-5.2') }, 'gpt-5.2');
   assert.equal(effortAllowed(caps, 'xhigh'), false, 't13: 升级后 xhigh 对该模型已非法(早退条件成立)');
   assert.deepEqual(resolveEffortOnModelChange(caps, 'xhigh', null), { effort: 'high', changed: true, reason: 'fallback' },
     't13: 回落到最高可用档并给 toast(reason=fallback)');
+  // effort 进 deps 的收敛依据:回落后的新档必合法 → 下一轮 effect 在早退那行 return(不循环)。
+  const fallen = resolveEffortOnModelChange(caps, 'xhigh', null).effort;
+  assert.equal(effortAllowed(caps, fallen), true, 't13: 回落结果合法 → effect 第二次即早退(effort 进 deps 不会自激)');
 }
 
 // t14 r15-2:手工补丁层 —— pi-ai 快照之后发布的模型(依据各家官方 API 文档,见生成脚本
@@ -383,6 +424,106 @@ const runIsolated = (home) => JSON.parse(execFileSync(process.execPath, ['-e', C
   // 补丁层不该误伤 pi-ai 已有的相邻型号
   assert.deepEqual(catalogPrefillEntry('glm-5.2', 'openai'), { efforts: ['low', 'medium', 'high', 'max'], source: 'catalog' },
     't14: glm-5.2 仍取 pi-ai 口径,未被 5.3 补丁波及');
+  // r15-3:上面全是【产物】断言 —— 谁删掉生成脚本里的补丁层而不重跑,这些照样绿,
+  // 直到下次刷新 pi-ai 快照时补丁静默消失。故同时钉住脚本本身。
+  const gen = readFileSync(new URL('../../scripts/gen-thinking-levels.mjs', import.meta.url), 'utf8');
+  assert.match(gen, /const MANUAL_OVERRIDES = \{/, 't14: 生成脚本保留手工补丁层');
+  for (const id of ['glm-5.3', 'z-ai/glm-5.3', 'qwen3.8-max', 'qwen3.8-max-preview', 'qwen/qwen3.8-max']) {
+    assert.ok(gen.includes(`'${id}':`), `t14: 补丁层含 ${id}`);
+  }
+  // 应用顺序:必须在 byId/byProto 组装完之后覆盖,且清掉同 id 的 byProto(否则协议分支截胡)
+  assert.match(gen, /for \(const \[id, e\] of Object\.entries\(MANUAL_OVERRIDES\)\) \{ byId\[id\] = e; delete byProto\[id\]; \}/,
+    't14: 补丁层在组装后覆盖 byId 并清同 id 的 byProto(重跑生成脚本仍生效)');
+  assert.ok(gen.indexOf('Object.entries(MANUAL_OVERRIDES)') < gen.indexOf('fs.writeFileSync(OUT'),
+    't14: 补丁应用早于写盘');
+}
+
+// t15 r15-3:编辑器 —— GET 开始下发预填后引入的两处用户可见回归
+//   ① 「移除声明」对 catalog 行静默失效(纯 delete 被服务端预填立刻补回,点了等于没点);
+//   ② 表单被目录行淹没(用户的 OpenRouter provider 364 个模型 → 几百行 × 5 复选框)。
+{
+  const editor = readFileSync(new URL('../../client/src/components/ProviderThinkingEditor.jsx', import.meta.url), 'utf8');
+  // ② 只渲染用户声明的行;catalog 折叠成一行只读摘要
+  assert.match(editor, /Object\.entries\(value \|\| \{\}\)\.filter\(\(\[, e\]\) => e\?\.source !== 'catalog'\)/,
+    't15: rows 只取用户声明条目(catalog 不逐行渲染)');
+  assert.doesNotMatch(editor, /const rows = Object\.keys\(value/, 't15: 不再 rows = Object.keys(value)(会把几百条 catalog 全渲染)');
+  assert.match(editor, /const catalogCount = /, 't15: 统计 catalog 条目数');
+  assert.match(editor, /\{catalogCount > 0 && \(/, 't15: catalog 折叠成摘要行(用户仍能知道目录判了多少个)');
+  // ① 移除按钮:catalog 条目写 source:'user' 墓碑,用户自己的行仍直接删
+  assert.match(editor, /if \(value\?\.\[id\]\?\.source === 'catalog'\) \{/, 't15: removeRow 区分 catalog 条目');
+  assert.match(editor, /onChange\(\{ \.\.\.value, \[id\]: \{ source: 'user' \} \}\);\n\s+return;/, 't15: catalog 行写墓碑而非 delete');
+  assert.match(editor, /const next = \{ \.\.\.value \};\n\s+delete next\[id\];/, 't15: 用户声明的行仍走 delete');
+  // 目录已判定的模型仍在"添加声明"候选里,且添加时以目录判定为初值(不重置成全档)
+  assert.match(editor, /onChange\(\{ \.\.\.value, \[id\]: \{ \.\.\.\(value\?\.\[id\] \|\| \{\}\), source: 'user' \} \}\);/,
+    't15: addRow 以目录判定为初值转成用户声明');
+  // 非阻断④:五档对齐后 EFFORT_LABELS 的 minimal 是死键
+  assert.doesNotMatch(editor, /minimal:/, 't15: EFFORT_LABELS 无 minimal 死键');
+  // 行为侧(①的真正依据):纯 delete 压不住服务端预填,墓碑压得住 —— 走保存路径的真函数
+  const models = ['gpt-4o'];
+  const afterDelete = applyCatalogPrefill(models, sanitizeModelMeta({}, models), 'openai');
+  assert.deepEqual(afterDelete['gpt-4o'], { reasoning: false, source: 'catalog' },
+    't15: 纯 delete 后保存 → 目录预填立刻补回(所以删除按钮必须写墓碑)');
+  const afterTombstone = applyCatalogPrefill(models, sanitizeModelMeta({ 'gpt-4o': { source: 'user' } }, models), 'openai');
+  assert.deepEqual(afterTombstone['gpt-4o'], { source: 'user' }, 't15: 墓碑压住目录 = 真的回到全默认');
+}
+
+// t16 r15-3:P0-b(GET /api/providers 下发 modelMeta)的真往返 —— 此前只有 t5 的源码文本
+// 断言,谁把 GET 换成裸 p.modelMeta,行为已变而测试仍绿。这里驱动**真 express router**
+// (不起 http server:router 本身就是 (req,res,next) 函数),隔离 HOME、真读写盘:
+//   GET /providers → 照客户端 save() 组 body → PUT /custom-providers/:id → 读盘核对。
+{
+  const home = mkdtempSync(join(tmpdir(), 'cgui-r15d-'));
+  const guiDir = join(home, '.claude-gui');
+  mkdirSync(guiDir, { recursive: true });
+  // 存量落盘形态:两条用户手配声明(一条限档、一条"全默认"墓碑)+ 若干裸模型 id。
+  const wire = [{
+    id: 'p1', name: 'OR', type: 'openai', baseURL: 'http://localhost:31999/v1', apiKey: 'k',
+    models: [
+      { id: 'openai/gpt-5.6-luna', efforts: ['max'], source: 'user' },
+      { id: 'openai/gpt-4o', source: 'user' },   // 用户墓碑:压住目录的 reasoning:false
+      'deepseek-v4-flash',                        // 目录/表判定 → catalog 条目
+      'anthropic/claude-opus-5',                  // 表内外都无 → 无条目
+    ],
+  }];
+  writeFileSync(join(guiDir, 'custom-providers.json'), JSON.stringify(wire));
+  const SETTINGS_HREF = new URL('../../server/routes/settings.js', import.meta.url).href;
+  const CHILD16 = `import(${JSON.stringify(SETTINGS_HREF)}).then(async (s) => {
+    const router = s.default;
+    const call = (method, url, body) => new Promise((resolve, reject) => {
+      const req = { method, url, body, headers: {}, query: {} };
+      const res = { statusCode: 200, status(c) { this.statusCode = c; return this; }, json(o) { resolve({ status: this.statusCode, body: o }); } };
+      router(req, res, (err) => reject(err || new Error('unhandled ' + method + ' ' + url)));
+    });
+    const got = await call('GET', '/providers');
+    const p = got.body.customProviders[0];
+    // 客户端 save() 的组包方式(App.jsx):modelMeta 就是表单状态,而表单状态直接来自
+    // 本接口下发的 modelMeta(setModelCaps(editing.modelMeta ? {...} : {}))。
+    const put = await call('PUT', '/custom-providers/p1', {
+      name: p.name, type: p.type, baseURL: p.baseURL, models: p.models,
+      defaultModel: null, tierModels: {}, contextWindow: null, modelPrices: null,
+      modelMeta: p.modelMeta || {},
+    });
+    process.stdout.write(JSON.stringify({ get: p.modelMeta, putStatus: put.status, putBody: put.body }));
+  });`;
+  const out = JSON.parse(execFileSync(process.execPath, ['-e', CHILD16], {
+    env: { ...process.env, HOME: home, USERPROFILE: home, ANTHROPIC_BASE_URL: 'http://127.0.0.1:8788' },
+    encoding: 'utf8',
+  }));
+  assert.equal(out.putStatus, 200, `t16: PUT 成功(${JSON.stringify(out.putBody)})`);
+  // GET 侧:用户声明逐字下发(编辑器据此渲染),catalog 判定一并可见
+  assert.deepEqual(out.get['openai/gpt-5.6-luna'], { efforts: ['max'], source: 'user' }, 't16: GET 下发用户限档声明');
+  assert.deepEqual(out.get['openai/gpt-4o'], { source: 'user' }, 't16: GET 下发用户墓碑(未被目录预填顶掉)');
+  assert.deepEqual(out.get['deepseek-v4-flash'], { efforts: ['high', 'max'], source: 'catalog' }, 't16: GET 下发目录判定');
+  // 落盘侧:一次"什么都没改的保存"之后,用户声明必须逐字不变(P0-b 修的就是这里)
+  const disk = JSON.parse(readFileSync(join(guiDir, 'custom-providers.json'), 'utf8'))[0];
+  const byId = Object.fromEntries(disk.models.map((m) => (typeof m === 'string' ? [m, {}] : [m.id, m])));
+  assert.deepEqual(byId['openai/gpt-5.6-luna'], { id: 'openai/gpt-5.6-luna', efforts: ['max'], source: 'user' },
+    't16: 往返后用户限档声明逐字不变');
+  assert.deepEqual(byId['openai/gpt-4o'], { id: 'openai/gpt-4o', source: 'user' }, 't16: 往返后用户墓碑仍在(否则目录判定会复活)');
+  assert.deepEqual(byId['deepseek-v4-flash'], { id: 'deepseek-v4-flash', efforts: ['high', 'max'], source: 'catalog' },
+    't16: catalog 条目正常落盘(机器所有,下轮可被目录刷新)');
+  assert.deepEqual(byId['anthropic/claude-opus-5'], {}, 't16: 无判定的模型仍是裸字符串');
+  rmSync(home, { recursive: true, force: true });
 }
 
 console.log('check-model-capabilities: all passed');

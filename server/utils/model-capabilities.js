@@ -46,9 +46,11 @@ export const MODEL_CAPABILITY_CATALOG = [
   // ── OpenAI ───────────────────────────────────────────────
   // gpt-5 codex 系:reasoning_effort low/medium/high/xhigh(无 minimal;max 由代理折算)。
   { family: 'gpt-codex', re: /^gpt-5[\d.]*-codex/i, caps: { reasoning: true, efforts: ['low', 'medium', 'high', 'xhigh'] } },
-  // r15-2 新增:gpt-5*-chat(gpt-5-chat-latest 等)是非推理的 chat 变体,不吃
-  // reasoning_effort。必须排在 ^gpt-5 通配之前,否则被它吞成"四档可选"。
-  { family: 'gpt-5-chat', re: /^gpt-5[\d.]*-chat/i, caps: { reasoning: false } },
+  // r15-3 撤销 `gpt-5-chat` 行(r15-2 加的,判 reasoning:false):与 584 条实测表对撞,
+  // 唯一"正则判死而表说能思考"的方向性冲突就是它 —— gpt-5.2-chat-latest 实测四档。
+  // 传了 protocol 时表压过正则不出事,但正则恰恰只对【表里没有的模型】生效,那正是最容易
+  // 判错的场景,且方向是本轮明令避免的"判死"。表里已有 8 条 *chat* 判 reasoning:false,
+  // 覆盖足够;表外的新 chat 变体退回全档(无害)。
   // gpt-5 系:reasoning_effort low/medium/high(原写 minimal 起,CLI 不接受 minimal 已删)。
   { family: 'gpt-5', re: /^gpt-5/i, caps: { reasoning: true, efforts: ['low', 'medium', 'high'] } },
   // o 系推理模型:low/medium/high 三档。
@@ -64,11 +66,22 @@ export const MODEL_CAPABILITY_CATALOG = [
 // 不同:deepseek/deepseek-v4-pro openai=[high,xhigh] 而 anthropic=[low,medium,high])。
 // 其余一律共用 byId —— 因为"表里没有某模型的 anthropic 条目"只说明上游没收录那个端点,
 // 不代表它经 anthropic 协议就没有档位;严格分表会让用户那些 anthropic 协议中转全部落空。
+//
+// ⚠️ 一处有意的不对称(加正则行前必读):生成脚本对"全档"的处理两表不同 ——
+//   byId 只写非全档条目(全档 = 不产条目),所以【表说全档】在 byId 里查不到 → 会继续
+//   下探家族正则,正则若判死就判死了(表压不住);
+//   byProto 条目缺某协议键即表示"该协议全档",tableLookup 命中 byProto 就**停止下探**,
+//   正则压不进来。
+// 即:表能压住正则的只有 byProto 分支与 byId 的非全档条目。新增正则行时别假设"表里有
+// 就轮不到我",要按表外模型的最坏情况判断(方向上宁可全档,别判死)。
+//
 // fail-safe:文件缺失/损坏 → THINKING_TABLE=null → 只走家族正则(绝不能让 /api/model 500)。
+// typeof null === 'object',所以两个键必须先做真值判断,否则 {"byId":null} 这种畸形文件
+// 会通过守卫、在查表时抛(GET /api/providers 没有错误兜底 → 500 = provider 列表打不开)。
 const THINKING_TABLE = (() => {
   try {
     const t = JSON.parse(readFileSync(new URL('../data/thinking-levels.json', import.meta.url), 'utf-8'));
-    if (t && typeof t.byId === 'object' && typeof t.byProto === 'object') return t;
+    if (t && t.byId && t.byProto && typeof t.byId === 'object' && typeof t.byProto === 'object') return t;
     console.warn('[thinking-levels] 数据表结构异常,已退回家族正则(档位判定会变宽松)');
     return null;
   } catch (e) {
@@ -86,8 +99,9 @@ const THINKING_TABLE = (() => {
 // 表示"该协议下全档",此时必须停在这儿,落到 byId 会把另一协议的档位错安上去。
 function tableLookup(id, protocol) {
   if (!THINKING_TABLE || !protocol) return undefined; // 不传 protocol = 只走正则(向后兼容)
+  // 值也要验形态:byProto 里塞个字符串/数组时 `protocol in pr` 会抛(in 不吃基本类型)。
   const pr = THINKING_TABLE.byProto[id];
-  if (pr) return (protocol in pr) ? pr[protocol] : null;
+  if (pr && typeof pr === 'object') return (protocol in pr) ? pr[protocol] : null;
   return (id in THINKING_TABLE.byId) ? THINKING_TABLE.byId[id] : undefined;
 }
 

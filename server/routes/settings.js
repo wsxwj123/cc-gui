@@ -809,71 +809,76 @@ function parseOpenAIProvider(settingsConfig) {
 // app_type) are OpenAI-compatible and routed through the embedded translation
 // proxy on switch. NEVER returns settings_config / API keys.
 router.get('/providers', async (_req, res) => {
-  // K4: 一次性导入后停止读 cc-switch.db,GUI 自己管 customProviders 即可。
-  const imported = await isCCSwitchImported();
-  const rows = withBuiltinOfficial(imported ? [] : await ccSwitchQuery(
-    "SELECT id, name, category, is_current, settings_config FROM providers WHERE app_type='claude' ORDER BY sort_index"
-  ));
-  const oaRows = imported ? [] : await ccSwitchQuery(
-    "SELECT id, name, app_type, settings_config FROM providers WHERE app_type IN ('codex','opencode') ORDER BY sort_index"
-  );
-  // A GUI switch is authoritative over the db's stale is_current; fall back to
-  // the db flag only when the GUI hasn't switched anything yet.
-  const activeId = await readActiveProviderId();
-  const isCur = (id, dbCurrent) => (activeId != null ? id === activeId : dbCurrent);
-  // User's multi-select overrides the cc-switch static models list (when set).
-  const sel = await readProviderModels();
-  const openai = [];
-  for (const r of oaRows) {
-    const p = parseOpenAIProvider(r.settings_config);
-    if (p) openai.push({ id: r.id, name: r.name, appType: r.app_type, format: 'openai', models: sel[r.id]?.length ? sel[r.id] : p.models, isCurrent: isCur(r.id, false) });
-  }
-  // GUI custom providers (never expose apiKey — only whether one is stored).
-  const customProviders = (await readCustomProviders()).map((p) => ({
-    id: p.id, name: p.name, type: p.type, baseURL: p.baseURL,
-    models: p.models || [], defaultModel: p.defaultModel || '', tierModels: p.tierModels || null,
-    // R3: 计价层(pricing.js setUserPrices)与编辑表单预填都读这里。apiKey 永不下发,
-    // 边界不变 —— 只多了两个用户自己填的配置字段。
-    // contextWindow 原先没回显 → 表单预填恒空 → 每次「更新」都把已存的窗口清掉(PUT 收到
-    // null 即删)。补上它顺带修掉这条:同一处遗漏,modelPrices 不补一样会被清空。
-    contextWindow: p.contextWindow || null, modelPrices: p.modelPrices || null,
-    // r15-2【数据丢失必修】modelMeta 原先不在这里下发,而 Provider 编辑器读的正是本接口
-    // (App.jsx load()→setCustomProviders→editing)→ setModelCaps(editing.modelMeta?…:{})
-    // 恒开成空 → 保存时恒发 body.modelMeta={} → PUT 见 {}!==undefined → sanitize 返回 null
-    // → delete list[idx].modelMeta。于是"改个名字/换个 key"就把用户手配的思考声明静默清空
-    // (catalog 条目随后被预填补回,source:'user'/历史无 source 的用户声明永久丢失)。
-    // 下发预填版而非裸值:顺带让存量 provider 在编辑器里看得见目录判定(那行"目录预填,
-    // 可修改"的小字此前永远显示不出来)。预填是纯函数、不写盘,用户声明永不被覆盖。
-    modelMeta: applyCatalogPrefill(p.models, p.modelMeta || null, p.type),
-    hasKey: !!p.apiKey, isCustom: true, isCurrent: isCur(p.id, false),
-  }));
-  // B 方案: claude 只读组的 models[] 从其 snapshot.env 的 _MODEL 值提取(切换/导入路径
-  // 同口径),否则档位下拉无选项。official 不给 models(它有真四档,不走 override)。
-  const claudeProviders = rows.map((r) => {
-    let models = [];
-    if (r.category !== 'official') {
-      try {
-        const env = JSON.parse(r.settings_config)?.env || {};
-        models = [...new Set(Object.entries(env)
-          .filter(([k, v]) => /_MODEL$/.test(k) && typeof v === 'string' && v)
-          .map(([, v]) => v))];
-      } catch {}
+  // 兜底:本 handler 里任一读盘/解析(cc-switch.db、custom-providers.json、思考能力数据表)
+  // 抛出都会被 express 5 转成 500 —— 那是整个 provider 列表打不开(设置面板首屏空白)。
+  // 给出可读的 JSON 错误,前端至少能显示原因而不是解析失败。
+  try {
+    // K4: 一次性导入后停止读 cc-switch.db,GUI 自己管 customProviders 即可。
+    const imported = await isCCSwitchImported();
+    const rows = withBuiltinOfficial(imported ? [] : await ccSwitchQuery(
+      "SELECT id, name, category, is_current, settings_config FROM providers WHERE app_type='claude' ORDER BY sort_index"
+    ));
+    const oaRows = imported ? [] : await ccSwitchQuery(
+      "SELECT id, name, app_type, settings_config FROM providers WHERE app_type IN ('codex','opencode') ORDER BY sort_index"
+    );
+    // A GUI switch is authoritative over the db's stale is_current; fall back to
+    // the db flag only when the GUI hasn't switched anything yet.
+    const activeId = await readActiveProviderId();
+    const isCur = (id, dbCurrent) => (activeId != null ? id === activeId : dbCurrent);
+    // User's multi-select overrides the cc-switch static models list (when set).
+    const sel = await readProviderModels();
+    const openai = [];
+    for (const r of oaRows) {
+      const p = parseOpenAIProvider(r.settings_config);
+      if (p) openai.push({ id: r.id, name: r.name, appType: r.app_type, format: 'openai', models: sel[r.id]?.length ? sel[r.id] : p.models, isCurrent: isCur(r.id, false) });
     }
-    return {
-      id: r.id, name: r.name, appType: 'claude', format: 'claude',
-      category: r.category || null, models,
-      isCurrent: isCur(r.id, r.is_current === 1),
-    };
-  });
-  res.json({
-    // rows 含合成的内置官方行 → available 恒 true(官方订阅任何时候都可切回),口径与列表一致。
-    available: rows.length > 0 || openai.length > 0 || customProviders.length > 0,
-    providers: claudeProviders,
-    openaiProviders: openai,
-    customProviders,
-    // 回显所有 override(前端编辑器初始化用);无文件 = {}。
-    overrides: await readProviderOverrides(),
-  });
+    // GUI custom providers (never expose apiKey — only whether one is stored).
+    const customProviders = (await readCustomProviders()).map((p) => ({
+      id: p.id, name: p.name, type: p.type, baseURL: p.baseURL,
+      models: p.models || [], defaultModel: p.defaultModel || '', tierModels: p.tierModels || null,
+      // R3: 计价层(pricing.js setUserPrices)与编辑表单预填都读这里。apiKey 永不下发,
+      // 边界不变 —— 只多了两个用户自己填的配置字段。
+      // contextWindow 原先没回显 → 表单预填恒空 → 每次「更新」都把已存的窗口清掉(PUT 收到
+      // null 即删)。补上它顺带修掉这条:同一处遗漏,modelPrices 不补一样会被清空。
+      contextWindow: p.contextWindow || null, modelPrices: p.modelPrices || null,
+      // r15-2【数据丢失必修】modelMeta 原先不在这里下发,而 Provider 编辑器读的正是本接口
+      // (App.jsx load()→setCustomProviders→editing)→ setModelCaps(editing.modelMeta?…:{})
+      // 恒开成空 → 保存时恒发 body.modelMeta={} → PUT 见 {}!==undefined → sanitize 返回 null
+      // → delete list[idx].modelMeta。于是"改个名字/换个 key"就把用户手配的思考声明静默清空
+      // (catalog 条目随后被预填补回,source:'user'/历史无 source 的用户声明永久丢失)。
+      // 下发预填版而非裸值:顺带让存量 provider 在编辑器里看得见目录判定(那行"目录预填,
+      // 可修改"的小字此前永远显示不出来)。预填是纯函数、不写盘,用户声明永不被覆盖。
+      modelMeta: applyCatalogPrefill(p.models, p.modelMeta || null, p.type),
+      hasKey: !!p.apiKey, isCustom: true, isCurrent: isCur(p.id, false),
+    }));
+    // B 方案: claude 只读组的 models[] 从其 snapshot.env 的 _MODEL 值提取(切换/导入路径
+    // 同口径),否则档位下拉无选项。official 不给 models(它有真四档,不走 override)。
+    const claudeProviders = rows.map((r) => {
+      let models = [];
+      if (r.category !== 'official') {
+        try {
+          const env = JSON.parse(r.settings_config)?.env || {};
+          models = [...new Set(Object.entries(env)
+            .filter(([k, v]) => /_MODEL$/.test(k) && typeof v === 'string' && v)
+            .map(([, v]) => v))];
+        } catch {}
+      }
+      return {
+        id: r.id, name: r.name, appType: 'claude', format: 'claude',
+        category: r.category || null, models,
+        isCurrent: isCur(r.id, r.is_current === 1),
+      };
+    });
+    res.json({
+      // rows 含合成的内置官方行 → available 恒 true(官方订阅任何时候都可切回),口径与列表一致。
+      available: rows.length > 0 || openai.length > 0 || customProviders.length > 0,
+      providers: claudeProviders,
+      openaiProviders: openai,
+      customProviders,
+      // 回显所有 override(前端编辑器初始化用);无文件 = {}。
+      overrides: await readProviderOverrides(),
+    });
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 // POST /api/provider/switch { id } — overwrite ~/.claude/settings.json with the
