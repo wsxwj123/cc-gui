@@ -10,7 +10,7 @@ export function buildSkinPrompt() {
   const icons = Object.values(ICON_SEMANTICS);
   const anchors = SKIN_ANCHORS.map((a) => `${a.id} — ${a.desc}`);
   return [
-    '为 Claude GUI 生成一套皮肤。两种层级任选:',
+    '为 cc-gui 生成一套皮肤。两种层级任选:',
     '',
     '## T1 声明层(推荐,安全):一个 zip(.cguiskin),内含 skin.json + 图片资源',
     'skin.json 骨架:',

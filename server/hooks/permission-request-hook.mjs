@@ -43,7 +43,7 @@ const main = async () => {
   // 连工具名都读不出来(stdin 不是 JSON / 形态变了)就别弹卡:那张卡会写着
   // "Claude 想使用 unknown",用户无从判断该不该批。同样是 fail-safe 方向 —— 拒绝。
   if (!input.tool_name) {
-    emit({ behavior: 'deny', message: 'Claude GUI 未能解析本次授权请求（缺少工具名），按拒绝处理。' });
+    emit({ behavior: 'deny', message: 'cc-gui 未能解析本次授权请求（缺少工具名），按拒绝处理。' });
     return;
   }
 
@@ -65,7 +65,7 @@ const main = async () => {
       signal: ctl.signal,
     });
     if (!r.ok) {
-      emit({ behavior: 'deny', message: `Claude GUI 授权端点返回 ${r.status}，本次操作按拒绝处理。` });
+      emit({ behavior: 'deny', message: `cc-gui 授权端点返回 ${r.status}，本次操作按拒绝处理。` });
       return;
     }
     let d = null;
@@ -78,12 +78,12 @@ const main = async () => {
       return;
     }
     if (!d) {
-      emit({ behavior: 'deny', message: 'Claude GUI 的授权响应无法解析，本次操作按拒绝处理。' });
+      emit({ behavior: 'deny', message: 'cc-gui 的授权响应无法解析，本次操作按拒绝处理。' });
       return;
     }
-    emit({ behavior: 'deny', message: d.reason || '用户在 Claude GUI 中拒绝了该操作。' });
+    emit({ behavior: 'deny', message: d.reason || '用户在 cc-gui 中拒绝了该操作。' });
   } catch (e) {
-    const why = ctl.signal.aborted ? `等待授权超过 ${Math.round(TIMEOUT_MS / 1000)} 秒` : `无法连接 Claude GUI (${e?.message || e})`;
+    const why = ctl.signal.aborted ? `等待授权超过 ${Math.round(TIMEOUT_MS / 1000)} 秒` : `无法连接 cc-gui (${e?.message || e})`;
     emit({ behavior: 'deny', message: `${why}，本次操作按拒绝处理。` });
   } finally {
     clearTimeout(timer);

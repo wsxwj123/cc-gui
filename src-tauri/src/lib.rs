@@ -1,4 +1,4 @@
-// Native shell for Claude GUI.
+// Native shell for cc-gui.
 //
 // The web app needs the Express backend (port 6677) alive: it spawns `claude`,
 // reads ~/.claude, watches files. So on launch we:
@@ -219,7 +219,7 @@ fn percent_encode(s: &str) -> String {
 // 内置极简启动页:打包进二进制的 data: URL,不依赖后端与磁盘文件。窗口创建即有
 // 内容可见;后端就绪后 navigate 到真实 UI 时整页替换。
 fn splash_url() -> String {
-    let html = r##"<!doctype html><html><head><meta charset="utf-8"><title>Claude GUI</title><style>
+    let html = r##"<!doctype html><html><head><meta charset="utf-8"><title>cc-gui</title><style>
 html,body{height:100%;margin:0}
 body{display:flex;align-items:center;justify-content:center;background:#faf9f5;color:#3d3929;font:14px -apple-system,"Segoe UI","Microsoft YaHei",sans-serif}
 @media (prefers-color-scheme:dark){body{background:#262624;color:#c2c0b6}}
@@ -356,16 +356,16 @@ mod path_tests {
         // 任意盘符(含外接盘映射成的盘符)都剥成普通绝对路径
         assert_eq!(strip_verbatim_str(r"\\?\C:\a\server\index.js"), r"C:\a\server\index.js");
         assert_eq!(strip_verbatim_str(r"\\?\D:\x"), r"D:\x");
-        assert_eq!(strip_verbatim_str(r"\\?\E:\Claude GUI\server\index.js"), r"E:\Claude GUI\server\index.js");
+        assert_eq!(strip_verbatim_str(r"\\?\E:\cc-gui\server\index.js"), r"E:\cc-gui\server\index.js");
         assert_eq!(strip_verbatim_str(r"\\?\G:\u\v"), r"G:\u\v");
         // 网络盘(UNC)还原成 \\server\share\…
         assert_eq!(strip_verbatim_str(r"\\?\UNC\srv\share\server\index.js"), r"\\srv\share\server\index.js");
         // 已是普通路径 / Mac POSIX 路径 / 外接盘 /Volumes:原样不动
         assert_eq!(strip_verbatim_str(r"D:\already\clean"), r"D:\already\clean");
-        assert_eq!(strip_verbatim_str("/Applications/Claude GUI.app/Contents/Resources/_up_/server/index.js"),
-                   "/Applications/Claude GUI.app/Contents/Resources/_up_/server/index.js");
-        assert_eq!(strip_verbatim_str("/Volumes/USB DISK/Claude GUI.app/server/index.js"),
-                   "/Volumes/USB DISK/Claude GUI.app/server/index.js");
+        assert_eq!(strip_verbatim_str("/Applications/cc-gui.app/Contents/Resources/_up_/server/index.js"),
+                   "/Applications/cc-gui.app/Contents/Resources/_up_/server/index.js");
+        assert_eq!(strip_verbatim_str("/Volumes/USB DISK/cc-gui.app/server/index.js"),
+                   "/Volumes/USB DISK/cc-gui.app/server/index.js");
     }
 }
 
@@ -892,7 +892,7 @@ pub fn run() {
                 "main",
                 WebviewUrl::External(splash_url().parse().unwrap()),
             )
-            .title("Claude GUI")
+            .title("cc-gui")
             .inner_size(win_w, win_h)
             .min_inner_size(900.0, 600.0)
             // 关闭 Tauri 原生文件拖放:默认启用会在 OS 层吃掉拖放事件,webview 的
@@ -906,7 +906,7 @@ pub fn run() {
                 Err(e) => {
                     log_startup(&format!("[tauri] FATAL: webview window creation failed: {e}"));
                     rfd::MessageDialog::new()
-                        .set_title("Claude GUI 无法启动")
+                        .set_title("cc-gui 无法启动")
                         .set_description(format!(
                             "窗口创建失败:{e}\n\n\
                              Windows 上常见原因是 WebView2 Runtime 缺失或损坏,\
@@ -1021,7 +1021,7 @@ pub fn run() {
                         let desc = if node_missing {
                             format!(
                                 "后台服务未能启动:未找到 Node.js。\n\n\
-                                 Claude GUI 需要 Node.js 20+ 运行。点「确定」打开官方下载页,\
+                                 cc-gui 需要 Node.js 20+ 运行。点「确定」打开官方下载页,\
                                  安装后重新打开本应用即可。\n\n\
                                  若已安装 node:请重启系统后再试 —— 安装时写入的 PATH \
                                  不会即时刷新到桌面启动的程序里。\n\n\
@@ -1040,7 +1040,7 @@ pub fn run() {
                             )
                         };
                         let res = rfd::MessageDialog::new()
-                            .set_title("Claude GUI 无法启动")
+                            .set_title("cc-gui 无法启动")
                             .set_description(desc)
                             .set_buttons(if node_missing { rfd::MessageButtons::OkCancel } else { rfd::MessageButtons::Ok })
                             .show();
@@ -1098,7 +1098,7 @@ pub fn run() {
                             // ask(默认):原生三按钮对话框。"是"=退出,"否"=最小化,"取消"=不动。
                             // 固定选择(不再询问)在 设置→概览→关闭行为 里改。
                             let choice = rfd::MessageDialog::new()
-                                .set_title("关闭 Claude GUI")
+                                .set_title("关闭 cc-gui")
                                 .set_description("退出会结束后台服务(6677)及其子进程。\n\n「是」退出 · 「否」最小化\n\n要固定选择不再询问:设置 → 概览 → 关闭行为")
                                 .set_buttons(rfd::MessageButtons::YesNoCancel)
                                 .show();

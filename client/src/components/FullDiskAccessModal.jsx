@@ -23,7 +23,7 @@ export function FullDiskAccessModal({ onOpenSettings, onDismiss }) {
             <div className="font-medium text-ink">一次性授权步骤(永久有效)</div>
             <ol className="list-decimal list-inside space-y-1 text-ink-muted">
               <li>点下方按钮打开 系统设置 → 完全磁盘访问</li>
-              <li>点 <span className="px-1 py-0.5 rounded bg-canvas-deep font-mono text-[11px]">+</span> 选 <span className="font-mono">/Applications/Claude GUI.app</span></li>
+              <li>点 <span className="px-1 py-0.5 rounded bg-canvas-deep font-mono text-[11px]">+</span> 选 <span className="font-mono">/Applications/cc-gui.app</span></li>
               <li>打开开关,**完全退出本 app**(右键 Dock 图标 → 退出),重新打开</li>
             </ol>
           </div>

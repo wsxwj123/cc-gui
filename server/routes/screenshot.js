@@ -125,7 +125,7 @@ router.post('/screenshot', async (_req, res) => {
   const body = { error: cmdError ? ('截图命令失败: ' + cmdError.message) : '截图为空,未生成图片' };
   if (platform === 'darwin') {
     body.needsScreenRecording = true;
-    body.error = '截图失败或为空图。若首次使用,请在 系统设置 → 隐私与安全性 → 屏幕录制 勾选 Claude GUI 后重新打开应用再试。';
+    body.error = '截图失败或为空图。若首次使用,请在 系统设置 → 隐私与安全性 → 屏幕录制 勾选 cc-gui 后重新打开应用再试。';
   }
   return res.status(500).json(body);
 });

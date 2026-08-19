@@ -85,7 +85,7 @@ export default function EnvCheckPanel({ onDismiss, onRecheck, asModal = true }) 
         <div className="text-[14px] font-medium text-ink font-body">环境检查</div>
       </div>
       <p className="text-[12px] text-ink-muted font-body leading-snug">
-        Claude GUI 需要以下组件。缺失项可点「安装」在终端里一键装,装完点「重新检测」。
+        cc-gui 需要以下组件。缺失项可点「安装」在终端里一键装,装完点「重新检测」。
       </p>
       <div className="space-y-2">
         {ROWS.map((row) => {

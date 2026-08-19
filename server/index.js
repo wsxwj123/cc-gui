@@ -252,7 +252,7 @@ app.use(cors((req, cb) => cb(null, {
     if (isAllowedBrowserOrigin(origin, req)) return originCb(null, true);
     // 拒了要留痕:曾因 403 不记来源,把 7 月的旧拦截噪音误当成隧道故障排查半天。
     console.warn('[cors] blocked origin=%s host=%s path=%s', origin, requestHostname(req) || '(无)', req.originalUrl);
-    const err = new Error('Cross-origin request blocked by Claude GUI');
+    const err = new Error('Cross-origin request blocked by cc-gui');
     err.status = 403; // surfaced as a clean 403 by the error handler below
     return originCb(err);
   },
@@ -984,7 +984,7 @@ server.listen(PORT, HOST, () => {
       ? ' (network-exposed, password protected)'
       : ' (network-exposed)';
   console.log('═'.repeat(60));
-  console.log(`  Claude GUI server READY   http://localhost:${PORT}`);
+  console.log(`  cc-gui server READY   http://localhost:${PORT}`);
   console.log(`  WebSocket                  ws://localhost:${PORT}/ws`);
   console.log(`  Bound to                   ${HOST}${exposure}`);
   console.log(`  Started at                 ${new Date().toLocaleString()}`);

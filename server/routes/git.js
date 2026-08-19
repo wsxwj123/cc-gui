@@ -81,7 +81,7 @@ router.post('/git/init', async (req, res) => {
   try {
     const cwd = safeCwd(req.body?.cwd || '');
     const commit = req.body?.commit !== false;
-    const message = String(req.body?.message || 'chore: initial commit (via Claude GUI)');
+    const message = String(req.body?.message || 'chore: initial commit (via cc-gui)');
 
     // Already a repo? No-op for init.
     let already = false;

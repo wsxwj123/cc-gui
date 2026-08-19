@@ -866,7 +866,7 @@ function UpdateAvailable({ state }) {
           <div className="text-[11px] text-emerald-700 break-all">{dl.path}</div>
           <div className="text-[11px] text-ink-muted">
             {dl.platform === 'darwin'
-              ? '把弹出的「Claude GUI.app」拖到「应用程序」即可。装完关闭旧版,运行新版。'
+              ? '把弹出的「cc-gui.app」拖到「应用程序」即可。装完关闭旧版,运行新版。'
               : dl.platform === 'win32'
               ? 'SmartScreen 提示时点「更多信息 → 仍要运行」。装完关闭旧版,运行新版。'
               : '装完关闭旧版,运行新版。'}
@@ -1620,7 +1620,7 @@ function ScreenshotHotkeyPicker() {
       <div className="text-[10.5px] text-ink-faint font-body mt-1.5 leading-snug">
         按下热键触发截图（macOS 框选区域或点击窗口，Windows 抓取主屏），截图自动加入当前会话输入框，完成后 GUI 回到前台。
         触发时不会抢占前台，避免盖住要截的目标窗口。修改后立即生效，无需重启。修改快捷键需按含 Cmd/Ctrl/Alt/Shift 的组合键，Esc 取消录制。
-        macOS 首次截图需在 系统设置 → 隐私与安全性 → 屏幕录制 勾选 Claude GUI。
+        macOS 首次截图需在 系统设置 → 隐私与安全性 → 屏幕录制 勾选 cc-gui。
       </div>
     </div>
   );
@@ -1669,7 +1669,7 @@ function FullDiskAccessCard() {
         <div className="border-t border-amber-200/60 px-3 py-2.5 space-y-2 bg-amber-50/40">
           <ol className="list-decimal list-inside space-y-0.5 text-[11px] text-ink-muted font-body">
             <li>点下方按钮打开 系统设置 → 完全磁盘访问</li>
-            <li>点 <span className="px-1 rounded bg-canvas-deep font-mono text-[10px]">+</span> 选 <span className="font-mono text-[10px]">/Applications/Claude GUI.app</span></li>
+            <li>点 <span className="px-1 rounded bg-canvas-deep font-mono text-[10px]">+</span> 选 <span className="font-mono text-[10px]">/Applications/cc-gui.app</span></li>
             <li>打开开关,完全退出本 app 后重新打开</li>
           </ol>
           <button onClick={openSettings}

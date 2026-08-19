@@ -81,3 +81,16 @@ const S = (over = {}) => ({ sessionId: 's1', firstPrompt: 'hi', archived: false,
 }
 
 console.log('check-sidebar-perf: all passed (r13-p2)');
+
+// t5 品牌去商标(r13-p2-5):顶栏标识与产品名不得使用第三方品牌字标/图形;
+// bundle identifier 必须保持不变(改了 = 用户 localStorage/WebKit 数据目录与端口全丢)。
+{
+  const app = readFileSync(new URL('../../client/src/App.jsx', import.meta.url), 'utf8');
+  const brand = app.slice(app.indexOf('cgui-brand shrink-0'), app.indexOf('cgui-brand shrink-0') + 1200);
+  assert.match(brand, /aria-label="cc-gui"/, 't5: 顶栏 aria 名为 cc-gui');
+  assert.match(brand, /cgui-brand-name">cc-gui</, 't5: 字标为 cc-gui');
+  assert.ok(!brand.includes('>Claude<'), 't5: 顶栏不再出现 Claude 字标');
+  const conf = JSON.parse(readFileSync(new URL('../../src-tauri/tauri.conf.json', import.meta.url), 'utf8'));
+  assert.equal(conf.productName, 'cc-gui', 't5: productName 已改');
+  assert.equal(conf.identifier, 'com.claudegui.desktop', 't5: identifier 必须原样保留(设置与数据目录依赖)');
+}
