@@ -26,7 +26,7 @@ const css = readFileSync(new URL('../../client/src/index.css', import.meta.url),
   assert.ok(i > 0, 't2: 类定义存在');
   const block = css.slice(i, css.indexOf('}', i) + 1);
   assert.match(block, /background: color-mix\(in srgb, var\(--glass-thick-bg\) var\(--surface-alpha\), var\(--glass-underlay\)\);/, 't2: 纯色面=underlay 混画布(扁平),玻璃家族 transparent 自动透底');
-  assert.match(block, /border-right: 0\.5px solid var\(--glass-edge\);/, 't2: 右缘发丝分隔(低对比 token)');
+  assert.match(block, /border-right: 1px solid var\(--flank-edge\);/, 't2: 右缘细线分隔(r13-p2-18 专用 token,--glass-edge 太淡分不清边界)');
   assert.doesNotMatch(block, /\n\s*border:\s/, 't2: 无四边边框(卡片边退役)');
   assert.match(block, /box-shadow: var\(--shadow-bevel\);/, 't2: 无投影(bevel 扁平=无影,玻璃家族=内高光)');
   assert.match(block, /backdrop-filter: var\(--backdrop-glass\);/, 't2: 磨砂走 token(扁平 none/玻璃家族恢复,同样通栏)');
@@ -39,3 +39,16 @@ const css = readFileSync(new URL('../../client/src/index.css', import.meta.url),
 }
 
 console.log('check-sidebar-flank: all passed');
+
+// r13-p2-17:右侧面板与代码停靠区同样通栏(dsh 式),悬浮圆角卡退役。
+{
+  const css = readFileSync(new URL('../../client/src/index.css', import.meta.url), 'utf8');
+  const block = css.slice(css.indexOf('.panel-flank {'), css.indexOf('.panel-flank {') + 400);
+  assert.match(block, /border-left: 1px solid var\(--flank-edge\)/, 'p2-17: 左缘发丝分隔(哨兵锚)');
+  assert.doesNotMatch(block, /border-radius|margin/, 'p2-17: 零圆角零外边距');
+  const app = readFileSync(new URL('../../client/src/App.jsx', import.meta.url), 'utf8');
+  assert.match(app, /data-cgui-panel[^>]*className="panel-flank/, 'p2-17: RightPanel 用通栏类');
+  assert.doesNotMatch(app, /m-3 ml-0 rounded-panel/, 'p2-17: 浮卡三件套清零');
+  const art = readFileSync(new URL('../../client/src/components/ArtifactPreview.jsx', import.meta.url), 'utf8');
+  assert.doesNotMatch(art, /m-3 ml-0 rounded-panel/, 'p2-17: 停靠区浮卡同样退役');
+}

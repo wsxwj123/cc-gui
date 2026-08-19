@@ -1241,7 +1241,42 @@ html { --content-max: clamp(768px, calc(var(--app-w, 100vw) * 0.7), 1120px); }
    刻意不含 border-radius/margin/box-shadow 投影:通栏卡不是浮起卡。 */
 .sidebar-flank {
   background: color-mix(in srgb, var(--glass-thick-bg) var(--surface-alpha), var(--glass-underlay));
-  border-right: 0.5px solid var(--glass-edge);
+  border-right: 1px solid var(--flank-edge);
+  box-shadow: var(--shadow-bevel);
+  -webkit-backdrop-filter: var(--backdrop-glass);
+  backdrop-filter: var(--backdrop-glass);
+}
+
+
+/* r13-p2-18:通栏分隔线专用 token —— --glass-edge 是"发丝级"(几乎看不见),
+   用户实测左右面板与画布分不清边界。这里按墨色定 12%/18%(明/暗)不透明度,
+   细但明确;皮肤可覆写(白名单 token)。 */
+:root { --flank-edge: color-mix(in srgb, var(--color-ink) 12%, transparent); }
+:root[data-theme="dark"], :root[data-theme="auto"]:where([data-theme-system="dark"]) {
+  --flank-edge: color-mix(in srgb, var(--color-ink) 18%, transparent);
+}
+
+/* r13-p2-18:顶栏控件统一高度 —— 面板坞按钮(图标+标签两行)34px,而
+   provider/model/力度/远程 只有 24.5-27px,一排高低不齐(导入皮肤后尤其明显)。
+   按语义锚点统一,零 JSX 改动;内部仍各自居中。 */
+:root { --topbar-control-h: 34px; }
+[data-cgui="provider-selector"] > button,
+[data-cgui="model-selector"] > button,
+[data-cgui="effort-selector"] > button,
+[data-cgui="panel-dock"] > button,
+[data-cgui="theme-btn"],
+header [data-tour="remote-control"] {
+  height: var(--topbar-control-h);
+  display: inline-flex;
+  align-items: center;
+}
+
+/* r13-p2-17:右侧面板通栏(dsh 式)——与 .sidebar-flank 同源,分隔线在左缘。
+   m-3 悬浮圆角卡退役:顶天立地贴右缘,零外边距零圆角零投影,观感全走 token
+   (玻璃拟态家族经同批 token 自动恢复透底/磨砂,同样通栏)。 */
+.panel-flank {
+  background: color-mix(in srgb, var(--glass-thick-bg) var(--surface-alpha), var(--glass-underlay));
+  border-left: 1px solid var(--flank-edge);
   box-shadow: var(--shadow-bevel);
   -webkit-backdrop-filter: var(--backdrop-glass);
   backdrop-filter: var(--backdrop-glass);

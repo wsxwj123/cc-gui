@@ -45,7 +45,7 @@ export function nextBadgeState(n) {
   lastApplied = count;
   return {
     count: count > 0 ? count : undefined,
-    title: count > 0 ? `cc-gui (${count})` : 'cc-gui',
+    title: count > 0 ? `CC-GUI (${count})` : 'CC-GUI',
   };
 }
 

@@ -36,11 +36,23 @@ export function applyBrandOptical(doc = document) {
   } catch { return null; }
 }
 
-/** 挂载:字体就绪后量一次,字体再变(fonts.ready 二次 resolve/窗口 resize)重量。 */
+/**
+ * 挂载:等【字标真正出现在 DOM 里】再量 —— main.jsx 执行时 React 还没渲染,
+ * 直接 query 恒为 null(0.2.303 补偿从未生效的原因)。策略:rAF 轮询至多 5s
+ * 直到量到为止;字体就绪(fonts.ready)与窗口 resize 再各量一次。
+ */
 export function watchBrandOptical() {
+  let stopped = false;
+  let tries = 0;
   const run = () => applyBrandOptical();
-  run();
-  try { document.fonts?.ready?.then(run); } catch {}
+  const poll = () => {
+    if (stopped) return;
+    const dy = run();
+    tries += 1;
+    if (dy == null && tries < 300) requestAnimationFrame(poll); // ~5s @60fps
+  };
+  poll();
+  try { document.fonts?.ready?.then(() => { if (!stopped) run(); }); } catch {}
   window.addEventListener('resize', run);
-  return () => window.removeEventListener('resize', run);
+  return () => { stopped = true; window.removeEventListener('resize', run); };
 }
