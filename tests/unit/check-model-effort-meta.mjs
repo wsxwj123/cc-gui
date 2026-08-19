@@ -91,7 +91,7 @@ const { normalizeProviderModels, denormalizeProviderModels, sanitizeModelMeta, E
   // 默认档('')恒保留(不强插档位)
   assert.deepEqual(resolveEffortOnModelChange(capsLtd, '', null),
     { effort: '', changed: false, reason: 'kept' }, 't6: 默认档保留');
-  assert.deepEqual(EFFORT_ORDER, ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'], 't6: 档位次序');
+  assert.deepEqual(EFFORT_ORDER, ['low', 'medium', 'high', 'xhigh', 'max'], 't6: 档位次序(r15-2 五档,无 minimal)');
 }
 
 console.log('check-model-effort-meta: all passed');

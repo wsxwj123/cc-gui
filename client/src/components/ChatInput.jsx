@@ -142,14 +142,23 @@ export function EffortSelector({ permKey = null, hideLabel = false, tourAnchor =
   const [open, setOpen] = useState(false);
   const [fellNotice, setFellNotice] = useState(null); // 回落 toast(5s 自清)
   const wrapRef = useRef(null);
-  // 切模型 → 档位解算:同一 permKey 下模型变化才跑(切窗格/首挂载不动别的会话的档)。
+  // 切模型 → 档位解算:同一 permKey 下模型变化才跑(切窗格不动别的会话的档)。
+  // r15-2:早退条件放宽 —— 原来"模型没变就 return",于是**能力表本身发生变化**的那一刻
+  // 漏判:存量会话存着 effort='xhigh'、模型没动,升级后 /api/model 首次带回 modelMeta
+  // (或用户在 provider 里改了声明)判定该模型只到 high → 按钮仍显示「极高」,而
+  // App.jsx 发送前的门控(effortAllowed)已把它静默摘成空 = 界面说极高、实际不传。
+  // 故:模型没变但当前档已不合法时也跑一次回落。切窗格(permKey 变)仍原样早退。
   const lastModelRef = useRef({ permKey, model: bareModelId });
   useEffect(() => {
     const prev = lastModelRef.current;
     lastModelRef.current = { permKey, model: bareModelId };
-    if (!bareModelId || prev.permKey !== permKey || prev.model === bareModelId || !prev.model) return;
+    if (!bareModelId || prev.permKey !== permKey) return;
+    const modelChanged = !!prev.model && prev.model !== bareModelId;
+    if (!modelChanged && effortAllowed(caps, effort || '')) return;
+    // per-model 记忆只在真的换了模型时参与(能力表变化那条路径要的是"把非法档拉回合法",
+    // 拿旧记忆去覆盖用户本会话刚选的档是另一回事)。
     let remembered = null;
-    try { remembered = localStorage.getItem(`cgui-effort-${bareModelId}`); } catch {}
+    if (modelChanged) { try { remembered = localStorage.getItem(`cgui-effort-${bareModelId}`); } catch {} }
     const r = resolveEffortOnModelChange(caps, effort, remembered);
     if (!r.changed) return;
     useStore.getState().setEffortFor(permKey, r.effort);
@@ -159,8 +168,10 @@ export function EffortSelector({ permKey = null, hideLabel = false, tourAnchor =
     } else if (r.reason === 'locked' && effort) {
       setFellNotice('该模型不支持思考,已回落默认');
     }
+    // modelEffortMeta 必须在 deps 里:能力表是异步到的(/api/model),不重跑就等于上面那条
+    // 放宽永远触发不了(模型没变 = 依赖没变 = effect 不执行)。
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [permKey, bareModelId]);
+  }, [permKey, bareModelId, modelEffortMeta]);
   useEffect(() => {
     if (!fellNotice) return;
     const id = setTimeout(() => setFellNotice(null), 5000);

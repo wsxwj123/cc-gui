@@ -2,7 +2,10 @@
 // 数据源:GET /api/model 的 modelMeta(当前激活 provider 的 {[modelId]:{reasoning?,efforts?}};
 // null/缺条目 = 无声明 = 全档可用,即官方与未声明模型维持现状)。
 
-export const EFFORT_ORDER = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
+// r15-2:五档,不含 minimal —— 依据是本机 CLI 2.1.235 的 `claude --help`,`--effort` 只接受
+// low/medium/high/xhigh/max。与 server EFFORT_LEVEL_IDS / chat.js VALID_EFFORTS /
+// ChatInput EFFORT_LEVELS 四处必须同一集合(单测钉住),漂了就会出现"算得出、传不过去"。
+export const EFFORT_ORDER = ['low', 'medium', 'high', 'xhigh', 'max'];
 
 // 当前模型的能力。查询剥 [1m] 后缀(1M 变体与本体同能力)。
 export function effortCapsFor(modelMeta, modelId) {

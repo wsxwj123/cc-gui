@@ -135,7 +135,11 @@ const CUSTOM_PROVIDERS_PATH = join(homedir(), '.claude-gui', 'custom-providers.j
 // 兼容 string | {id, reasoning?:boolean, efforts?:string[]};读入口统一 normalize 成
 // models: string[](全部既有消费点零改动)+ modelMeta: {[id]:{reasoning?,efforts?}},
 // 写入口 denormalize 回混合条目落盘。全默认(reasoning≠false 且 efforts 全档/缺省)不留条目。
-export const EFFORT_LEVEL_IDS = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
+// r15-2:五档,不含 minimal —— 依据是本机 CLI 2.1.235 的 `claude --help`,`--effort` 只接受
+// low/medium/high/xhigh/max(没有 minimal,也没有 none)。此前这里与 client 的 EFFORT_ORDER
+// 各带一个 minimal,而真正下发的两处(chat.js VALID_EFFORTS / ChatInput EFFORT_LEVELS)都
+// 没有:minimal 算得出来、显示不了、也传不过去。将来 CLI 支持了再一起加回。
+export const EFFORT_LEVEL_IDS = ['low', 'medium', 'high', 'xhigh', 'max'];
 export function normalizeProviderModels(rawModels) {
   const ids = [];
   const meta = {};
@@ -833,6 +837,14 @@ router.get('/providers', async (_req, res) => {
     // contextWindow 原先没回显 → 表单预填恒空 → 每次「更新」都把已存的窗口清掉(PUT 收到
     // null 即删)。补上它顺带修掉这条:同一处遗漏,modelPrices 不补一样会被清空。
     contextWindow: p.contextWindow || null, modelPrices: p.modelPrices || null,
+    // r15-2【数据丢失必修】modelMeta 原先不在这里下发,而 Provider 编辑器读的正是本接口
+    // (App.jsx load()→setCustomProviders→editing)→ setModelCaps(editing.modelMeta?…:{})
+    // 恒开成空 → 保存时恒发 body.modelMeta={} → PUT 见 {}!==undefined → sanitize 返回 null
+    // → delete list[idx].modelMeta。于是"改个名字/换个 key"就把用户手配的思考声明静默清空
+    // (catalog 条目随后被预填补回,source:'user'/历史无 source 的用户声明永久丢失)。
+    // 下发预填版而非裸值:顺带让存量 provider 在编辑器里看得见目录判定(那行"目录预填,
+    // 可修改"的小字此前永远显示不出来)。预填是纯函数、不写盘,用户声明永不被覆盖。
+    modelMeta: applyCatalogPrefill(p.models, p.modelMeta || null, p.type),
     hasKey: !!p.apiKey, isCustom: true, isCurrent: isCur(p.id, false),
   }));
   // B 方案: claude 只读组的 models[] 从其 snapshot.env 的 _MODEL 值提取(切换/导入路径
@@ -1390,8 +1402,9 @@ router.post('/custom-providers', async (req, res) => {
     }
     // r10-9: 每模型思考能力(可选)。只留 models 内的 id;全默认不写(向后兼容)。
     // r11-⑩:随后对未声明的模型套目录预填(source:'catalog';用户声明永不覆盖)。
+    // r15-2:带上 provider 协议(type)—— 少数模型两种协议档位不同(见数据表 byProto)。
     {
-      const mm = applyCatalogPrefill(cleanModels, sanitizeModelMeta(req.body?.modelMeta, cleanModels));
+      const mm = applyCatalogPrefill(cleanModels, sanitizeModelMeta(req.body?.modelMeta, cleanModels), type);
       if (mm) entry.modelMeta = mm;
     }
     const list = await readCustomProviders();
@@ -1479,7 +1492,7 @@ router.put('/custom-providers/:id', async (req, res) => {
     // r11-⑩:编辑保存后对未声明模型套目录预填(source:'catalog');source:'user'/
     // 历史无 source 条目永不覆盖。两分支(显式传入/保留旧值)统一走同一预填口。
     {
-      const merged = applyCatalogPrefill(nextModels, list[idx].modelMeta || null);
+      const merged = applyCatalogPrefill(nextModels, list[idx].modelMeta || null, type);
       if (merged) list[idx].modelMeta = merged; else delete list[idx].modelMeta;
     }
     await writeCustomProviders(list);
@@ -1747,7 +1760,7 @@ export async function activeProviderModelMeta() {
     // 上线、之后没再编辑过)的 modelMeta 恒空 → 前端 effortCapsFor 一律判"全档可用",
     // 整套自适应对老用户零生效。这里只改返回值、绝不写回 custom-providers.json
     // (用户数据只读);用户手动声明由 applyCatalogPrefill 内部保证永不被覆盖。
-    return applyCatalogPrefill(p.models, p.modelMeta || null);
+    return applyCatalogPrefill(p.models, p.modelMeta || null, p.type);
   } catch { return null; }
 }
 
@@ -1812,7 +1825,7 @@ function probeOfficialModels(token) {
 // 连接(有兜底)却正常(用户实报的矛盾现象根因)。baseURL 同步兜底。
 router.post('/custom-providers/fetch-models', async (req, res) => {
   try {
-    let { baseURL, apiKey } = req.body || {};
+    let { baseURL, apiKey, type } = req.body || {};
     if (req.body?.id) {
       const stored = (await readCustomProviders()).find((p) => p.id === req.body.id);
       if (stored) {
@@ -1820,6 +1833,8 @@ router.post('/custom-providers/fetch-models', async (req, res) => {
         // 用存储 key 时 baseURL 也强制取存储值:否则攻击者传 {id, baseURL:自己的服务器}
         // 让 server 把该 provider 的真实密钥发去攻击者端点。key 与 baseURL 必须同源。
         baseURL = stored.baseURL;
+        // r15-2:协议同样以存储值为准(与 baseURL 同源),表单还没保存的改动不影响预填口径。
+        type = stored.type || type;
       }
     }
     let base; try { base = new URL(baseURL); } catch { return res.status(400).json({ error: 'baseURL 非法' }); }
@@ -1831,7 +1846,7 @@ router.post('/custom-providers/fetch-models', async (req, res) => {
     // r11-⑩:附目录预填(表单拉到列表即见预填,保存路径再兜一遍;用户声明由前端合并时优先)。
     const catalogMeta = {};
     for (const mid of probed.ids || []) {
-      const pre = catalogPrefillEntry(mid);
+      const pre = catalogPrefillEntry(mid, type);
       if (pre) catalogMeta[mid] = pre;
     }
     res.json({ models: probed.ids, windows: probed.windows || undefined, catalogMeta: Object.keys(catalogMeta).length ? catalogMeta : undefined });
