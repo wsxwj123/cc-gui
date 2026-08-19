@@ -68,6 +68,7 @@ import { nativeContextWindow, isBareClaudeAlias, pickCliContextWindow } from './
 import { extractMcpServerIssues, formatMcpServerNotice } from './utils/mcpStatus.js';
 import { classifyRepairOutcome, classifyCheckOutcome, upsertRepairHint, removeRepairHint, loadRepairHints, persistRepairHints } from './utils/repairFlow.js';
 import { autoCompactTransition } from './utils/compactStatus.js';
+import { THEME_TABS, readThemeTab, writeThemeTab } from './utils/themeTabs.js';
 import { homeView, pickHomeProject, buildHomeDraft, homeGreetingParts, readHomeCustom } from './utils/home.js';
 import { subscribeSkin, getSkinVersion, getSkinState, reconcileSkinOnBoot, watchThemeForSkin } from './utils/skins.js';
 import { resolveSessionDot, completionTracker, subscribeDots, getDotsVersion, RUN_MATRIX_CELLS, runCellDelayMs } from './utils/sessionDots.js';
@@ -409,9 +410,12 @@ function ThemeAppearanceBody() {
   const setUiFontScale = useStore((s) => s.setUiFontScale);
   const effDark = themeTone === 'auto' ? systemPrefersDark() : themeTone === 'dark';
   const toneKey = effDark ? 'dark' : 'light';
+  // r13-p2-19:版块改 Windows 属性页式选项卡,默认「字体」;选择记本设备。
+  const [tab, setTabState] = useState(() => readThemeTab());
+  const setTab = (id) => { setTabState(id); writeThemeTab(id); };
   return (
     <>
-      {/* ── Tone (light / dark / follow-system) ───────────── */}
+      {/* ── Tone (light / dark / follow-system):全局开关,常驻页签上方 ───────── */}
           <div className="flex items-center gap-1 p-1 rounded-panel bg-black/5">
             {TONES.map(({ id, label, Icon }) => (
               <button key={id} onClick={() => setTheme(themeFamily, id)}
@@ -422,7 +426,24 @@ function ThemeAppearanceBody() {
             ))}
           </div>
 
-          {/* ── Font scale ────────────────────────────────────── */}
+          {/* ── r13-p2-19 选项卡条 ───────────────────────────── */}
+          <div role="tablist" aria-label="外观设置分类" className="flex items-center gap-0.5 border-b border-canvas-deep -mx-1 px-1">
+            {THEME_TABS.map((t) => (
+              <button
+                key={t.id}
+                role="tab"
+                aria-selected={tab === t.id}
+                onClick={() => setTab(t.id)}
+                className={`px-2.5 py-1.5 text-[11px] font-body transition-colors border-b-2 -mb-px ${
+                  tab === t.id ? 'border-accent text-ink font-medium' : 'border-transparent text-ink-muted hover:text-ink'}`}
+              >
+                {t.label}
+              </button>
+            ))}
+          </div>
+
+          {/* ── Font scale(字体页)────────────────────────────── */}
+          {tab === 'font' && (
           <div className="space-y-1.5">
             <div className="flex items-center gap-2">
               <Type size={12} className="text-ink-muted" />
@@ -445,8 +466,10 @@ function ThemeAppearanceBody() {
               ))}
             </div>
           </div>
+          )}
 
-          {/* ── Reading font (Claude message prose) ───────────── */}
+          {/* ── Reading font(字体页)──────────────────────────── */}
+          {tab === 'font' && (
           <div className="space-y-1.5">
             <div className="flex items-center gap-2">
               <Type size={12} className="text-ink-muted" />
@@ -454,8 +477,10 @@ function ThemeAppearanceBody() {
             </div>
             <FontPicker />
           </div>
+          )}
 
-          {/* ── Color family ──────────────────────────────────── */}
+          {/* ── Color family(配色页)─────────────────────────── */}
+          {tab === 'color' && (
           <div className="space-y-1.5">
             <div className="flex items-center gap-2">
               <Palette size={12} className="text-ink-muted" />
@@ -487,18 +512,15 @@ function ThemeAppearanceBody() {
               })}
             </div>
           </div>
+          )}
 
-      {/* 聊天模式:折叠思考/工具/子代理/技能,消息流只留对话文本 */}
-      <ChatModeToggle />
+      {/* 界面页:聊天模式 / 加载动画 / 对话区背景 */}
+      {tab === 'ui' && <ChatModeToggle />}
+      {tab === 'ui' && <LoadingStylePicker />}
+      {tab === 'ui' && <ChatBackgroundCard />}
 
-      {/* ── Loading 动画样式(仅挂载时渲染,30 个动画不常驻) ── */}
-      <LoadingStylePicker />
-
-      {/* ── 对话区背景(P2.3:随设置「外观」tab 删除迁入,主题弹层为外观唯一入口) ── */}
-      <ChatBackgroundCard />
-
-      {/* ── r11-③ 皮肤(选择器+导入/生成器入口;对话框独立弹出) ── */}
-      <SkinSection />
+      {/* 皮肤页(选择器+导入/生成器入口;对话框独立弹出) */}
+      {tab === 'skin' && <SkinSection />}
     </>
   );
 }
