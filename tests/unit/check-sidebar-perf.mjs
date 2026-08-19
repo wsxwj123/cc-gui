@@ -60,6 +60,12 @@ const S = (over = {}) => ({ sessionId: 's1', firstPrompt: 'hi', archived: false,
   // 既有消费点零新参(HomeState 等):topAlignRef 只出现在两处行菜单
   const hits = (sb.match(/topAlignRef=/g) || []).length;
   assert.equal(hits, 1, 't3: 侧栏内只有 ProjectRowMenu 透传一处');
+  // r13-p2-2 修:rect→style 换算必须用实测标定,不许按 --ui-zoom 硬除
+  // (WebKit/Chromium 对 zoom 下两者的口径不一致 —— p5-1 同族坑,真机偏上)。
+  assert.match(sel, /export function fixedCalibration/, 't3: 标定函数存在');
+  assert.match(sel, /const cal = fixedCalibration\(\);/, 't3: 定位走标定(哨兵锚)');
+  assert.match(sel, /top: \(top - cal\.oy\) \/ cal\.sy/, 't3: 纵向按实测换算');
+  assert.doesNotMatch(sel, /setPos\(\{ left: left \/ z, top: top \/ z/, 't3: 旧的按 zoom 硬除口径已退役');
 }
 
 // t4 主题展示名去商标(id 必须保留,否则用户已选主题与皮肤 base 失配)

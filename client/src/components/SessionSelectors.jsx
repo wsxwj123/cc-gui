@@ -41,6 +41,32 @@ export function ProviderSourceBadge({ p }) {
 // r11-p5-2 扩参(向后兼容,默认不变):gap = 锚点与弹层的纵向间距(px,默认 8);
 // clampSelector = 水平容器夹紧的选择器(如 '.sidebar-flank'):弹层右缘 ≤ 容器右缘-8、
 // 宽度上限 = 容器宽-16(窄侧栏),容器找不到回落纯视口夹紧。既有消费点不传 = 零行为变化。
+// r13-p2-2 修:position:fixed 的【style px ↔ getBoundingClientRect px】换算关系在
+// zoom 语境下随内核而异(WebKit 与 Chromium 口径不一致 —— 与 p5-1 刻度回归同族坑:
+// 跨 API 的缩放假设不可移植)。原来按 --ui-zoom 除,Chromium 对、WKWebView 偏上
+// (0.2.293「菜单挡住标题」与 0.2.298「菜单与行不对齐」同一根因)。
+// 这里不再假设:用一枚隐藏探针实测 style→rect 的 scale 与 offset(两点标定),
+// 之后所有定位按实测关系换算,任何内核任何 zoom 恒准。按 zoom 值缓存。
+let fixedCalib = null;
+let fixedCalibKey = '';
+export function fixedCalibration() {
+  const key = `${document.documentElement.style.zoom || '1'}`;
+  if (fixedCalib && fixedCalibKey === key) return fixedCalib;
+  const probe = document.createElement('div');
+  probe.style.cssText = 'position:fixed;left:0;top:0;width:10px;height:10px;visibility:hidden;pointer-events:none';
+  document.body.appendChild(probe);
+  const r0 = probe.getBoundingClientRect();
+  probe.style.left = '100px';
+  probe.style.top = '100px';
+  const r1 = probe.getBoundingClientRect();
+  probe.remove();
+  const sx = (r1.left - r0.left) / 100 || 1;
+  const sy = (r1.top - r0.top) / 100 || 1;
+  fixedCalib = { ox: r0.left, oy: r0.top, sx, sy };
+  fixedCalibKey = key;
+  return fixedCalib;
+}
+
 // r13-p2-2 扩参:topAlignRef = 所在行元素 ref。传了则弹层【顶缘与该行顶缘齐平】
 // (dsh 式:菜单贴着行的顶部展开,不再在行下方另起一段),放不下时回落视口夹紧;
 // 不传 = 既有行为逐字不变。
@@ -71,7 +97,13 @@ export function AnchoredPopover({ anchorRef, open, onRequestClose, drop = 'down'
     left = clampPopoverX({ left, width: m.width, pad, vw, container });
     top = Math.min(Math.max(top, pad), Math.max(pad, vh - pad - m.height));
     const mw = container ? popoverMaxWidth(container.width) : null;
-    setPos({ left: left / z, top: top / z, maxWidth: mw != null ? mw / z : null });
+    // rect 空间 → style 空间:用实测标定换算(见 fixedCalibration 注释),不再按 z 硬除。
+    const cal = fixedCalibration();
+    setPos({
+      left: (left - cal.ox) / cal.sx,
+      top: (top - cal.oy) / cal.sy,
+      maxWidth: mw != null ? mw / cal.sx : null,
+    });
   }, [open, drop, align, gapProp, clampSelector, topAlignRef, bump]);
 
   // 内容尺寸变化(异步列表加载)→ 重新定位。
