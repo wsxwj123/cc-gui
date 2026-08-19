@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { readFileSync, writeFileSync, existsSync, realpathSync, readdirSync } from 'fs';
+import { readFileSync, writeFileSync, existsSync, realpathSync, readdirSync, mkdirSync } from 'fs';
 import { resolveClaudeAsync, listClaudeInstallsAsync, getClaudeOverride, setClaudeOverride, getClaudeOverrideRaw, pauseClaudeOverride, winLivePathDirsAsync, classifyShim } from '../utils/claude-resolver.js';
 import { scanAllTools, nodeMeets, NODE_MIN_MAJOR } from '../utils/env-scanner.js';
 import { fileURLToPath } from 'url';
@@ -265,6 +265,48 @@ async function detectInstall() {
 
 // 按安装方式给出更新命令。native 用「绝对路径 + update」自更新,避免终端里裸 `claude`
 // 解析到另一个安装(用户的 shell PATH 和 GUI 的 PATH 顺序可能不同)。
+// ── r13-p2-20:更新渠道选择 ────────────────────────────────────────────
+// 背景纠错:R8-1 把 npm 安装的更新一律导向原生 `claude update`,理由是"npm 慢源
+// 半途而废"。用户实测反驳并复测确认:慢的是 registry.npmmirror.com 的元数据重定向
+// (660 B/s),真正拉包的 cdn.npmmirror.com 是 2.23 MB/s,比原生二进制源(经代理
+// 1.04 MB/s)快一倍 —— 对镜像源用户,npm 才是快的那条。
+// 故改为可选:'npm' / 'native' 两项(与安装方式一一对应,不设第三种状态)。
+// 未设过 = 跟随检测到的安装方式(内部空值,不在 UI 里占一格)。存 prefs.json。
+const PREFS_FILE = join(homedir(), '.claude-gui', 'prefs.json');
+export const UPDATE_CHANNELS = ['npm', 'native'];
+
+/** 返回用户显式选择的渠道;没选过返回 null(= 跟随安装方式)。 */
+export function readUpdateChannel() {
+  try {
+    const v = JSON.parse(readFileSync(PREFS_FILE, 'utf-8'))?.updateChannel;
+    return UPDATE_CHANNELS.includes(v) ? v : null;
+  } catch { return null; }
+}
+
+export function writeUpdateChannel(channel) {
+  if (!UPDATE_CHANNELS.includes(channel)) return false;
+  let prefs = {};
+  try { prefs = JSON.parse(readFileSync(PREFS_FILE, 'utf-8')) || {}; } catch {}
+  prefs.updateChannel = channel;
+  try {
+    mkdirSync(dirname(PREFS_FILE), { recursive: true });
+    writeFileSync(PREFS_FILE, JSON.stringify(prefs, null, 2));
+    return true;
+  } catch { return false; }
+}
+
+/** 渠道 + 安装方式 → 实际更新方式。未选过则跟随安装方式(npm 装的走 npm)。 */
+export function resolveUpdateMethod(channel, installMethod) {
+  if (channel === 'npm') return 'npm-registry';
+  if (channel === 'native') return 'native';
+  return installMethod === 'npm' ? 'npm-registry' : installMethod;
+}
+
+/** UI 展示用:当前生效的渠道(未显式选择时回落安装方式)。 */
+export function effectiveChannel(channel, installMethod) {
+  return channel || (installMethod === 'npm' ? 'npm' : 'native');
+}
+
 export function updateCmdFor(method, claudePath) { // export 仅为可单测
   switch (method) {
     // Y1:brew 渠道由社区维护、版本严重滞后(用户实测 latest 仅 1.5x,官方已 2.1.x),
@@ -278,6 +320,15 @@ export function updateCmdFor(method, claudePath) { // export 仅为可单测
     // 由原生自更新接管)。用绝对路径防终端 PATH 解析到另一个安装;Windows 上 npm 的入口
     // 是 claude.cmd(批处理)—— .bat 里直调另一个 .cmd 控制权不返回,必须 call(同
     // installCmdFor 注释的坑);mac/linux 单引号防路径含空格/$。
+    // r13-p2-20:'npm-registry' = 真的走 npm 更新(用户自己的 registry/镜像);
+    // 平台包(真二进制)由 optionalDependencies 带下来,装完自检版本。
+    // 'npm' 仍表示"npm 安装但走原生自更新"(渠道选 native 时命中)。
+    case 'npm-registry': {
+      const verify = process.platform === 'win32'
+        ? 'call npm install -g @anthropic-ai/claude-code@latest && call claude --version'
+        : 'npm install -g @anthropic-ai/claude-code@latest && claude --version';
+      return verify;
+    }
     case 'npm': {
       if (process.platform === 'win32') {
         return claudePath ? `call "${claudePath}" update` : 'call claude update';
@@ -434,7 +485,8 @@ router.get('/claude-version-check', async (req, res) => {
     latestVersion: latest,
     installed: true,
     method,                         // native | brew | npm | unknown
-    updateCommand: updateCmdFor(method, claudePath),
+    updateCommand: updateCmdFor(resolveUpdateMethod(readUpdateChannel(), method), claudePath),
+    updateChannel: effectiveChannel(readUpdateChannel(), method),
     hasUpdate: latest ? semverGt(latest, currentVersion) : false,
     // R8-1(只增字段):npm 安装的更新已不再走 npm,前端可展示原因。
     ...(method === 'npm' ? { updateNote: 'npm 渠道已被官方降级为原生安装器引导壳,更新经 claude update 走原生渠道。' } : {}),
@@ -449,7 +501,8 @@ router.get('/claude-version-check', async (req, res) => {
  */
 router.post('/claude-update', async (req, res) => {
   const { method, path: claudePath } = await detectInstall();
-  const cmd = updateCmdFor(method, claudePath);
+  // r13-p2-20:按用户选择的渠道解析(auto=跟随安装方式;npm 装的默认走 npm,镜像源更快)
+  const cmd = updateCmdFor(resolveUpdateMethod(readUpdateChannel(), method), claudePath);
   // M1: native 自更新直连 claude.ai 下载,墙内必须带代理;npm/brew 同样受益。
   const proxyUrl = await detectLocalProxy().catch(() => null);
   // Windows:运行中的 claude 锁住 claude.exe,npm/upgrade 覆盖时报 "could not write ...claude.exe"。
@@ -488,74 +541,186 @@ export async function tryRestorePausedOverride() {
  * (npm/native),把 stdout+stderr 以 NDJSON 逐行推给前端实时展示,不用开外部终端。
  * 注:npm -g 在个别 Unix 需 sudo 会 headless 挂起 —— 前端保留"改用终端"兜底。
  */
+// ── r13-p2-21:更新改为【服务端后台任务】,关面板/断连不再杀进程 ──────────
+// 用户实报:更新中关掉右侧面板,更新就停了,得重新点。根因=下方 req.on('close') 里
+// killTree —— SSE 一断就杀整棵进程树。现在:进程归服务端持有,SSE 只是"看进度的窗口",
+// 断开只摘监听;重开面板可续看(replay 已产生的日志);8 分钟超时仍杀(防挂死);
+// 用户想主动停有独立的 cancel 端点。
+const updateTask = {
+  child: null,
+  cmd: '',
+  status: 'idle',          // idle | running | done | error
+  code: null,
+  error: '',
+  log: [],                 // 最近 500 行
+  startedAt: 0,
+  finishedAt: 0,
+  restored: null,          // 自动回钉钉选的回执(r12-①c)
+  listeners: new Set(),    // 当前挂着的 SSE 响应
+};
+
+function taskPush(evt) {
+  if (evt.type === 'log') {
+    updateTask.log.push(evt.line);
+    if (updateTask.log.length > 500) updateTask.log.splice(0, updateTask.log.length - 500);
+  }
+  for (const res of updateTask.listeners) {
+    try { res.write(JSON.stringify(evt) + '\n'); } catch {}
+  }
+}
+
+function killUpdateTree() {
+  const child = updateTask.child;
+  if (!child?.pid) return;
+  if (process.platform === 'win32') {
+    try { execFile('taskkill', ['/PID', String(child.pid), '/T', '/F'], () => {}); } catch {}
+  } else {
+    try { process.kill(-child.pid, 'SIGKILL'); } catch { try { child.kill('SIGKILL'); } catch {} }
+  }
+}
+
 router.post('/claude-update/stream', async (req, res) => {
+  res.writeHead(200, { 'Content-Type': 'application/x-ndjson', 'Cache-Control': 'no-store' });
+
+  // 已有更新在跑 → 挂上去续看(回放已产生的日志),不重复起进程。
+  if (updateTask.status === 'running') {
+    res.write(JSON.stringify({ type: 'start', command: updateTask.cmd, attached: true }) + '\n');
+    for (const line of updateTask.log) res.write(JSON.stringify({ type: 'log', line }) + '\n');
+    updateTask.listeners.add(res);
+    req.on('close', () => { updateTask.listeners.delete(res); }); // 只摘监听,绝不杀进程
+    return;
+  }
+
   const { method, path: claudePath } = await detectInstall();
-  const cmd = updateCmdFor(method, claudePath);
+  const cmd = updateCmdFor(resolveUpdateMethod(readUpdateChannel(), method), claudePath);
   const proxyUrl = await detectLocalProxy().catch(() => null);
   const env = { ...process.env };
   if (proxyUrl) { env.HTTP_PROXY = env.HTTPS_PROXY = env.http_proxy = env.https_proxy = proxyUrl; }
-  res.writeHead(200, { 'Content-Type': 'application/x-ndjson', 'Cache-Control': 'no-store' });
-  res.write(JSON.stringify({ type: 'start', command: cmd, method, proxy: proxyUrl }) + '\n');
+
+  updateTask.cmd = cmd;
+  updateTask.status = 'running';
+  updateTask.code = null;
+  updateTask.error = '';
+  updateTask.log = [];
+  updateTask.restored = null;
+  updateTask.startedAt = Date.now();
+  updateTask.finishedAt = 0;
+  updateTask.listeners.add(res);
+  req.on('close', () => { updateTask.listeners.delete(res); }); // 关面板 = 只断窗口
+
+  taskPush({ type: 'start', command: cmd, method, proxy: proxyUrl });
+
   // Windows:先关常驻 claude 释放 claude.exe 锁(否则覆盖失败 "could not write");等 ~1.2s 让进程退出。
   if (process.platform === 'win32') {
     let closed = 0; try { closed = closeAllPersistentProcesses(); } catch {}
-    if (closed) { res.write(JSON.stringify({ type: 'log', line: `已关闭 ${closed} 个运行中的 claude 进程以释放 claude.exe(更新前置)` }) + '\n'); await new Promise((r) => setTimeout(r, 1200)); }
+    if (closed) { taskPush({ type: 'log', line: `已关闭 ${closed} 个运行中的 claude 进程以释放 claude.exe(更新前置)` }); await new Promise((r) => setTimeout(r, 1200)); }
   }
+
   let child;
   try {
-    // R8-1:detached(非 Win)让 shell 成为新进程组组长,超时/断连时可整组
-    // SIGKILL(-pid)—— 原来 child.kill() 只 SIGTERM 到 shell,npm/安装器孙进程
-    // 存活成僵尸(本机事故链:慢源 8 分钟超时后僵尸 npm 继续半写 bin 目录)。
+    // detached(非 Win)让 shell 成为新进程组组长,超时可整组 SIGKILL(-pid)。
     child = spawn(cmd, { shell: true, env, detached: process.platform !== 'win32' });
   } catch (e) {
-    res.write(JSON.stringify({ type: 'error', error: e.message }) + '\n'); return res.end();
+    updateTask.status = 'error';
+    updateTask.error = e.message;
+    updateTask.finishedAt = Date.now();
+    taskPush({ type: 'error', error: e.message });
+    for (const r of updateTask.listeners) { try { r.end(); } catch {} }
+    updateTask.listeners.clear();
+    return;
   }
-  // 可靠杀整棵进程树:Win 用 taskkill /T /F(按 PID 递归);*nix 杀进程组(-pid),
-  // 组不在了(已退出)回落单杀。幂等,超时/断连/收尾多次调用无害。
-  const killTree = () => {
-    if (!child.pid) return;
-    if (process.platform === 'win32') {
-      try { execFile('taskkill', ['/PID', String(child.pid), '/T', '/F'], () => {}); } catch {}
-    } else {
-      try { process.kill(-child.pid, 'SIGKILL'); } catch { try { child.kill('SIGKILL'); } catch {} }
-    }
-  };
-  // 超时 8 分钟【必须杀进程】:原来只有注释声称超时、实际无定时器 —— 慢源下载挂死时
-  // 流永不结束,用户关页面 req close 的 SIGTERM 又杀不到孙进程,留僵尸 + 半成品安装。
+  updateTask.child = child;
+
+  // 超时 8 分钟必须杀(挂死防护)。计时器归任务所有,与任何 SSE 连接无关。
   const killTimer = setTimeout(() => {
-    // r12-①d:超时文案带可执行指引(npm 慢源是最常见根因;不做一键换源,避免碰 npm 配置)。
-    try { res.write(JSON.stringify({ type: 'error', error: '更新超过 8 分钟未完成,已终止。npm 源过慢是常见根因:确认代理已开后重试,或点「改用终端更新」走官方渠道。' }) + '\n'); } catch {}
-    killTree();
+    updateTask.error = '更新超过 8 分钟未完成,已终止。npm 源过慢是常见根因:确认代理已开后重试,或点「改用终端更新」走官方渠道。';
+    taskPush({ type: 'error', error: updateTask.error });
+    killUpdateTree();
   }, 8 * 60 * 1000);
   killTimer.unref?.();
+
   const pump = (chunk) => {
-    String(chunk).split(/\r?\n/).forEach((line) => {
-      if (line.trim()) { try { res.write(JSON.stringify({ type: 'log', line }) + '\n'); } catch {} }
-    });
+    String(chunk).split(/\r?\n/).forEach((line) => { if (line.trim()) taskPush({ type: 'log', line }); });
   };
   child.stdout?.on('data', pump);
   child.stderr?.on('data', pump);
-  child.on('error', (e) => { clearTimeout(killTimer); try { res.write(JSON.stringify({ type: 'error', error: e.message }) + '\n'); res.end(); } catch {} });
+
+  child.on('error', (e) => {
+    clearTimeout(killTimer);
+    updateTask.status = 'error';
+    updateTask.error = e.message;
+    updateTask.finishedAt = Date.now();
+    updateTask.child = null;
+    taskPush({ type: 'error', error: e.message });
+    for (const r of updateTask.listeners) { try { r.end(); } catch {} }
+    updateTask.listeners.clear();
+  });
+
   child.on('close', async (code) => {
     clearTimeout(killTimer);
-    // r12-①c 触发点一:更新成功 → 探测 paused 钉选是否已恢复健康,是则自动回钉并在
-    // NDJSON 流尾追加事件(前端展示"已自动恢复你的手动指定")。核心时序不变:
-    // clearTimeout 依旧首行;done 事件与 res.end() 照旧,只在中间追加恢复探测。
+    // r12-①c:更新成功 → 探测 paused 钉选是否恢复健康,是则自动回钉。
     let restored = null;
     if (code === 0) { try { restored = await tryRestorePausedOverride(); } catch {} }
-    try {
-      res.write(JSON.stringify({ type: 'done', code }) + '\n');
-      if (restored) res.write(JSON.stringify({ type: 'override-restored', path: restored.path, version: restored.version }) + '\n');
-      res.end();
-    } catch {}
+    updateTask.status = code === 0 ? 'done' : 'error';
+    updateTask.code = code;
+    if (code !== 0 && !updateTask.error) updateTask.error = `更新进程退出码 ${code}(详见上方日志)`;
+    updateTask.restored = restored;
+    updateTask.finishedAt = Date.now();
+    updateTask.child = null;
+    taskPush({ type: 'done', code });
+    if (restored) taskPush({ type: 'override-restored', path: restored.path, version: restored.version });
+    for (const r of updateTask.listeners) { try { r.end(); } catch {} }
+    updateTask.listeners.clear();
   });
-  req.on('close', () => { clearTimeout(killTimer); killTree(); });
+});
+
+// GET /api/claude-update/status — 重开面板时对账:是否还在更新/上次结果与日志。
+router.get('/claude-update/status', (_req, res) => {
+  res.json({
+    status: updateTask.status,
+    running: updateTask.status === 'running',
+    command: updateTask.cmd,
+    code: updateTask.code,
+    error: updateTask.error,
+    startedAt: updateTask.startedAt,
+    finishedAt: updateTask.finishedAt,
+    restored: updateTask.restored,
+    log: updateTask.log.slice(-200),
+  });
+});
+
+// POST /api/claude-update/cancel — 用户主动终止(关面板不再等于取消,故给显式出口)。
+router.post('/claude-update/cancel', (_req, res) => {
+  if (updateTask.status !== 'running') return res.json({ ok: true, running: false });
+  updateTask.error = '已由用户终止';
+  killUpdateTree();
+  res.json({ ok: true, running: false, cancelled: true });
 });
 
 /**
  * POST /api/claude-install — 未安装时一键安装(mac/linux: 官方 install.sh;win: npm)。
  * 在可见终端运行,让官方安装器自行把 CLI 目录写入系统 PATH。
  */
+// GET/PUT /api/claude-update-channel — 更新渠道(npm | native)。
+// 未显式选择时跟随检测到的安装方式;镜像源用户 npm 通常远快于原生二进制源
+// (实测 cdn.npmmirror 2.23MB/s vs 原生源经代理 1.04MB/s)。
+router.get('/claude-update-channel', async (_req, res) => {
+  const { method } = await detectInstall();
+  const explicit = readUpdateChannel();
+  res.json({
+    channel: effectiveChannel(explicit, method),
+    explicit,
+    installMethod: method,
+    channels: UPDATE_CHANNELS,
+  });
+});
+router.put('/claude-update-channel', (req, res) => {
+  const ch = String(req.body?.channel || '');
+  if (!UPDATE_CHANNELS.includes(ch)) return res.status(400).json({ error: '渠道必须是 npm 或 native' });
+  if (!writeUpdateChannel(ch)) return res.status(500).json({ error: '写入失败' });
+  res.json({ ok: true, channel: ch });
+});
+
 router.post('/claude-install', async (req, res) => {
   const method = req.body?.method === 'npm' ? 'npm' : 'native';
   const proxyUrl = await detectLocalProxy().catch(() => null);

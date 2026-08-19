@@ -1059,8 +1059,13 @@ function CcUpdater() {
   // CN-2:在 GUI 内更新并实时显示进度(流式 NDJSON),不用开外部终端。
   const doUpdate = async () => {
     const cmd = state.updateCommand || 'claude upgrade';
-    if (!(await confirmDialog(`将在应用内运行【${cmd}】更新 Claude Code 到 v${state.latestVersion}（安装方式：${state.method || '未知'}），进度实时显示在下方。\n（墙内需已开系统代理;若卡住可点"改用终端"。）确定继续?`))) return;
+    if (!(await confirmDialog(`将在应用内运行【${cmd}】更新 Claude Code 到 v${state.latestVersion}（安装方式：${state.method || '未知'}），进度实时显示在下方。\n更新在后台进行:关掉这个面板不会中断,回来还能接着看进度。\n（墙内需已开系统代理;若卡住可点"改用终端"。）确定继续?`))) return;
     setUpdating(true); setResult(null); setLogLines([]);
+    return doUpdateStream();
+  };
+
+  // r13-p2-21:流消费单独成函数 —— 首次发起与「重开面板续看」共用同一条链路。
+  const doUpdateStream = async () => {
     try {
       const r = await fetch('/api/claude-update/stream', { method: 'POST' });
       if (!r.ok || !r.body) throw new Error('HTTP ' + r.status);
@@ -1126,6 +1131,40 @@ function CcUpdater() {
       if (!hit.active) await switchActive(hit.path); else await check();
       setResult({ ok: true, installedMethod: method });
     }, 5000);
+  };
+
+  // r13-p2-20:更新渠道(auto 跟随安装方式 / npm / native)。镜像源用户 npm 通常更快
+  // (实测 cdn.npmmirror 2.2MB/s vs 原生二进制源经代理 1.0MB/s),故不再一律导向原生。
+  const [channel, setChannel] = useState(null); // 生效渠道(未选过=跟随安装方式)
+  useEffect(() => {
+    fetch('/api/claude-update-channel').then((r) => r.json())
+      .then((d) => { if (d?.channel) setChannel(d.channel); }).catch(() => {});
+  }, []);
+  // r13-p2-21:更新已改服务端后台任务 —— 挂载时对账,若还在跑就自动续看(不用重点),
+  // 若已结束则直接展示结果与日志(关面板期间完成的也看得到)。
+  useEffect(() => {
+    let cancelled = false;
+    fetch('/api/claude-update/status').then((r) => r.json()).then((d) => {
+      if (cancelled || !d) return;
+      if (Array.isArray(d.log) && d.log.length) setLogLines(d.log.slice(-200));
+      if (d.running) { setUpdating(true); doUpdateStream({ attach: true }); return; }
+      if (d.status === 'done') setResult({ ok: true, done: true });
+      else if (d.status === 'error' && d.error) setResult({ ok: false, error: d.error });
+      if (d.restored?.path) setRestoredNote(d.restored.path);
+    }).catch(() => {});
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const pickChannel = async (ch) => {
+    setChannel(ch);
+    try {
+      await fetch('/api/claude-update-channel', {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ channel: ch }),
+      });
+      check(); // 命令随渠道变,重新取一次展示
+    } catch {}
   };
 
   const doInstall = async (method = 'npm', isSwitch = false) => {
@@ -1398,6 +1437,25 @@ function CcUpdater() {
           {logLines.length ? logLines.join('\n') : '启动中…'}{updating && <span className="animate-pulse"> ▌</span>}
         </pre>
       )}
+      {/* r13-p2-20:更新渠道选择 */}
+      <div className="flex items-center gap-2 flex-wrap">
+        <span className="text-[11px] text-ink-muted font-body shrink-0">更新渠道</span>
+        <div className="flex items-center gap-0.5 rounded-md bg-canvas-warm p-0.5">
+          {[
+            { id: 'npm', label: 'npm' },
+            { id: 'native', label: '原生' },
+          ].map((c) => (
+            <button key={c.id} onClick={() => pickChannel(c.id)}
+              className={`px-2 py-1 rounded text-[11px] font-body transition-colors ${
+                channel === c.id ? 'bg-accent text-on-accent' : 'text-ink-muted hover:text-ink'}`}>
+              {c.label}
+            </button>
+          ))}
+        </div>
+        <span className="text-[10.5px] text-ink-faint font-body">
+          默认跟随你的安装方式;npm 走本机 registry(镜像源通常更快),原生走官方安装器自更新。
+        </span>
+      </div>
       {result && (
         result.ok
           ? <div className="text-[12px] text-emerald-700 bg-emerald-50 border border-emerald-200 rounded p-2 break-words">

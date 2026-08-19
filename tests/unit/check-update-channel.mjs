@@ -1,0 +1,68 @@
+// r13-p2-20:更新渠道(npm / 原生 两项,与安装方式一一对应)。
+// 背景纠错:R8-1 把 npm 安装的更新一律导向原生 `claude update`,理由"npm 慢源"。
+// 用户实测反驳并复测:慢的是 registry 元数据重定向(660 B/s),真正拉包的
+// cdn.npmmirror 达 2.23 MB/s,比原生二进制源经代理(1.04 MB/s)快一倍。
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { UPDATE_CHANNELS, resolveUpdateMethod, effectiveChannel, updateCmdFor } from '../../server/routes/version-check.js';
+
+// t1 只有两项(不设第三种"自动"状态占 UI 格子)
+{
+  assert.deepEqual(UPDATE_CHANNELS, ['npm', 'native'], 't1: 两项与安装方式一一对应');
+}
+
+// t2 未选过 = 跟随安装方式
+{
+  assert.equal(effectiveChannel(null, 'npm'), 'npm', 't2: npm 装的默认走 npm');
+  assert.equal(effectiveChannel(null, 'native'), 'native', 't2: 原生装的默认走原生');
+  assert.equal(effectiveChannel(null, 'brew'), 'native', 't2: 其它方式回落原生');
+  assert.equal(effectiveChannel('native', 'npm'), 'native', 't2: 显式选择优先于安装方式');
+}
+
+// t3 解析为实际更新方式
+{
+  assert.equal(resolveUpdateMethod('npm', 'native'), 'npm-registry', 't3: 选 npm → 走 npm 装');
+  assert.equal(resolveUpdateMethod('native', 'npm'), 'native', 't3: 选原生 → 走原生自更新');
+  assert.equal(resolveUpdateMethod(null, 'npm'), 'npm-registry', 't3: 未选 + npm 安装 → npm');
+  assert.equal(resolveUpdateMethod(null, 'native'), 'native', 't3: 未选 + 原生安装 → 原生');
+}
+
+// t4 命令形态:npm 渠道必须真的走 npm 且装完自检版本(防只拉到引导壳)
+{
+  const cmd = updateCmdFor('npm-registry', '/x/claude');
+  assert.match(cmd, /npm install -g @anthropic-ai\/claude-code@latest/, 't4: 真的走 npm');
+  assert.match(cmd, /claude --version/, 't4: 装完自检版本(壳包不会自检通过)');
+  const native = updateCmdFor('native', '/x/claude');
+  assert.doesNotMatch(native, /npm install/, 't4: 原生渠道不碰 npm');
+}
+
+// t5 接线守卫:三个消费点都按渠道解析,不再写死安装方式
+{
+  const src = readFileSync(new URL('../../server/routes/version-check.js', import.meta.url), 'utf8');
+  const hits = (src.match(/resolveUpdateMethod\(readUpdateChannel\(\), method\)/g) || []).length;
+  assert.equal(hits, 3, 't5: version-check / update / update-stream 三处齐(哨兵锚)');
+  assert.match(src, /router\.(get|put)\('\/claude-update-channel'/, 't5: 渠道端点在位');
+}
+
+console.log('check-update-channel: all passed (r13-p2-20)');
+
+// t6(r13-p2-21):更新改服务端后台任务 —— 关面板/断连不得杀进程。
+{
+  const src = readFileSync(new URL('../../server/routes/version-check.js', import.meta.url), 'utf8');
+  const stream = src.slice(src.indexOf("router.post('/claude-update/stream'"), src.indexOf("router.get('/claude-update/status'"));
+  // 断连处理必须只摘监听,绝不 killTree(哨兵锚:改回 killUpdateTree 即红)
+  assert.match(stream, /req\.on\('close', \(\) => \{ updateTask\.listeners\.delete\(res\); \}\)/, 't6: 断连只摘监听');
+  assert.ok(!/req\.on\('close'[^)]*kill/i.test(stream), 't6: 断连不得杀进程(用户实报"关面板更新就停")');
+  // 已在跑 → 挂上去续看,不重复起进程
+  assert.match(stream, /if \(updateTask\.status === 'running'\)/, 't6: 复用在跑的任务');
+  assert.match(stream, /attached: true/, 't6: 续看标记');
+  // 超时仍必须杀(挂死防护)
+  assert.match(stream, /killUpdateTree\(\);\s*\}, 8 \* 60 \* 1000\)/, 't6: 8 分钟超时仍杀树');
+  // 对账与主动取消端点
+  assert.match(src, /router\.get\('\/claude-update\/status'/, 't6: 状态对账端点');
+  assert.match(src, /router\.post\('\/claude-update\/cancel'/, 't6: 主动取消端点(关面板不再等于取消)');
+  // 前端:挂载对账 + 续看复用同一流函数
+  const ui = readFileSync(new URL('../../client/src/components/SettingsPanel.jsx', import.meta.url), 'utf8');
+  assert.match(ui, /fetch\('\/api\/claude-update\/status'\)/, 't6: 前端挂载对账');
+  assert.match(ui, /doUpdateStream\(\{ attach: true \}\)/, 't6: 还在跑则自动续看');
+}

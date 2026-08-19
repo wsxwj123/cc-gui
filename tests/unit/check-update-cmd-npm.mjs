@@ -57,7 +57,18 @@ try {
     'utf8',
   );
   const fn = src.slice(src.indexOf('export function updateCmdFor'), src.indexOf('export function installCmdFor'));
-  assert.ok(!/npm install -g/.test(fn), 'updateCmdFor 内不得再有 npm install -g(安装命令 installCmdFor 不在此列)');
+  // r13-p2-20 推翻本条前提:R8-1 认为"npm 渠道必撞慢源"故禁 npm install。
+  // 用户实测反驳 + 复测确认(2026-08-19,同机 8s 采样):慢的是 registry 元数据
+  // 重定向(660 B/s),真正拉包的 cdn.npmmirror 达 2.23 MB/s,比原生二进制源经代理
+  // (1.04 MB/s)快一倍 —— 对镜像源用户 npm 才是快的那条。故 npm 不再被禁,改为
+  // 用户可选渠道(见 check-update-channel)。此处只保留边界:
+  //  ①'npm' 分支(= 渠道选原生时 npm 安装走原生自更新)仍不许出现 npm install;
+  //  ②'npm-registry' 分支(= 渠道选 npm)必须真的走 npm 且装完自检版本。
+  const npmBranch = fn.slice(fn.indexOf("case 'npm': {"), fn.indexOf("case 'native':"));
+  assert.ok(!/npm install -g/.test(npmBranch), "'npm' 分支(走原生自更新)不得出现 npm install -g");
+  const regBranch = fn.slice(fn.indexOf("case 'npm-registry': {"), fn.indexOf("case 'npm': {"));
+  assert.match(regBranch, /npm install -g @anthropic-ai\/claude-code@latest/, "'npm-registry' 分支必须真的走 npm");
+  assert.match(regBranch, /claude --version/, "'npm-registry' 装完必须自检版本(防只拉到引导壳)");
   assert.ok(/case 'npm'/.test(fn) && /update/.test(fn), 'npm 分支存在且走 update');
 }
 
