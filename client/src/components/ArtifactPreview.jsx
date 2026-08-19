@@ -538,7 +538,7 @@ export function ArtifactDock() {
       <div
         data-cgui="artifact-dock"
         style={{ width }}
-        className="shrink-0 flex flex-col m-3 ml-0 rounded-panel overflow-hidden border border-[#3a342b] bg-[#1a1714] animate-glass-rise"
+        className="shrink-0 flex flex-col overflow-hidden border-l-[0.5px] border-[#3a342b] bg-[#1a1714]"  /* r13-p2-17:与右侧面板同口径通栏(悬浮卡退役) */
       >
         {toolbar(false)}
         <div className="flex-1 min-h-0 bg-[#1a1714]">

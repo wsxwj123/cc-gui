@@ -45,11 +45,11 @@ const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 {
   resetBadgeState();
   const first = nextBadgeState(0);
-  assert.deepEqual(first, { count: undefined, title: 'cc-gui' }, '首次(0)要下发一次,把可能的残留角标清掉');
+  assert.deepEqual(first, { count: undefined, title: 'CC-GUI' }, '首次(0)要下发一次,把可能的残留角标清掉');
   assert.equal(nextBadgeState(0), null, '同一计数不重复下发(1.5s 轮询下多数轮次都不变)');
-  assert.deepEqual(nextBadgeState(2), { count: 2, title: 'cc-gui (2)' }, '变了才下发');
+  assert.deepEqual(nextBadgeState(2), { count: 2, title: 'CC-GUI (2)' }, '变了才下发');
   assert.equal(nextBadgeState(2), null);
-  assert.deepEqual(nextBadgeState(0), { count: undefined, title: 'cc-gui' },
+  assert.deepEqual(nextBadgeState(0), { count: undefined, title: 'CC-GUI' },
     '归零要清角标:count 必须是 undefined —— 传 0 在 macOS 上会显示一个 "0"');
   resetBadgeState();
 }

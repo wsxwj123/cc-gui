@@ -1281,7 +1281,7 @@ function RightPanel({ panelId, onClose, width }) {
   // data-cgui-panel:面板容器标识。App 的 Esc 监听靠它判断「这一击落在面板里」
   // (面板内输入框的 Esc 不得外泄到会话级停止监听)。别删。
   return (
-    <div data-cgui-panel style={{ width }} className="glass-thick shrink-0 flex flex-col m-3 ml-0 rounded-panel overflow-hidden animate-glass-rise">
+    <div data-cgui-panel style={{ width }} className="panel-flank shrink-0 flex flex-col overflow-hidden">
       <div className="flex items-center justify-between px-4 py-3 border-b border-canvas-deep shrink-0">
         <div className="flex items-center gap-2">
           <Icon size={14} className="text-accent" />
