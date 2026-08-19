@@ -1791,6 +1791,12 @@ html { --content-max: clamp(768px, calc(var(--app-w, 100vw) * 0.7), 1120px); }
      跟随 accent 星芒会发黑,与回复头像 ✻ 及官方参考不一致;深浅底上均可读 */
   color: #D97757;
   transform-origin: center;
+  /* 实测(canvas 字形度量):全大写字形视觉中心比图标中心高 0.86px。
+     把图标上移这一点点即对齐,且远离底部裁切边(字标一侧保持零位移)。 */
+  /* r13-p2-15:光学补偿由运行时按【实际渲染字体】度量算出(见 client/src/utils/brandMetrics.js)
+     —— 字标用的 Newsreader 走网络加载,加载成功与回落 Georgia 的度量不同,固定 px 必然
+     在其中一种情况下失准(用户连报两轮"裁切/没对齐"皆因此)。默认 0,量出来再写。 */
+  transform: translateY(var(--brand-optical-dy, 0px));
   animation: cgui-brand-breath 4.5s ease-in-out infinite;
 }
 
@@ -1804,10 +1810,10 @@ html { --content-max: clamp(768px, calc(var(--app-w, 100vw) * 0.7), 1120px); }
   /* r13-p2-11:line-height:1 + translateY(1px) 是给旧小写衬线字标调的,全大写
      字标(CC-GUI)在此组合下底边被顶栏的 overflow 裁掉 1px。改回给足行高、
      去掉位移:大写字形本就贴基线,flex 居中即光学居中。 */
-  line-height: 1.2;
-  /* 实测(canvas 字形度量):全大写字形视觉中心比图标中心高 0.86px → 下移对齐。
-     line-height 1.2 的下半 leading 约 1.9px,位移在 box 内不会被裁。 */
-  transform: translateY(0.86px);
+  line-height: 1.35; /* 余量再放宽:任何位移/内核差异都不会把字形挤到 box 边缘 */
+  /* r13-p2-15:字标本身【零位移】—— 顶栏的裁切边界正压在文字底缘,任何向下位移
+     都会把底边裁掉(0.86px 也一样)。光学对齐改为「移图标不移字」:见
+     .cgui-brand-spark 的 translateY(-0.86px)(向上远离裁切边,天然安全)。 */
 }
 
 @keyframes cgui-brand-breath {

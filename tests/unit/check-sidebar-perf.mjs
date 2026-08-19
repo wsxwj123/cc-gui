@@ -91,6 +91,26 @@ console.log('check-sidebar-perf: all passed (r13-p2)');
   assert.match(brand, /cgui-brand-name">CC-GUI</, 't5: 字标为 cc-gui');
   assert.ok(!brand.includes('>Claude<'), 't5: 顶栏不再出现 Claude 字标');
   const conf = JSON.parse(readFileSync(new URL('../../src-tauri/tauri.conf.json', import.meta.url), 'utf8'));
-  assert.equal(conf.productName, 'cc-gui', 't5: productName 已改');
+  assert.equal(conf.productName, 'CC-GUI', 't5: productName 已改(全大写,与顶栏字标一致)');
   assert.equal(conf.identifier, 'com.claudegui.desktop', 't5: identifier 必须原样保留(设置与数据目录依赖)');
+}
+
+// t6(r13-p2-15):字标光学补偿必须按【实际渲染字体】算 —— 字体走网络加载,
+// 加载成功(Newsreader)与回落(Georgia)度量不同,固定 px 必在其一失准。
+{
+  const { opticalDy } = await import('../../client/src/utils/brandMetrics.js');
+  // 典型:line box 25.65,字体 asc/desc 与实际字形 asc/desc(全大写无下伸)
+  const dy = opticalDy({ lineBoxH: 25.65, fontAscent: 14, fontDescent: 5, actualAscent: 13.33, actualDescent: 0.21 });
+  assert.ok(Math.abs(dy) > 0 && Math.abs(dy) < 3, 't6: 算出合理补偿量');
+  // 大写字形视觉中心在 line box 中心【之上】→ dy 为负(图标需上移)
+  assert.ok(dy < 0, 't6: 全大写字形中心偏上,补偿为负');
+  // 异常度量兜底为 0(不产生离谱位移)
+  assert.equal(opticalDy({ lineBoxH: 0, fontAscent: 0, fontDescent: 0, actualAscent: 0, actualDescent: 0 }), 0, 't6: 零度量兜底');
+  assert.equal(opticalDy({ lineBoxH: 20, fontAscent: 100, fontDescent: 100, actualAscent: 100, actualDescent: 0 }), 0, 't6: 离谱度量兜底');
+  const css = readFileSync(new URL('../../client/src/index.css', import.meta.url), 'utf8');
+  assert.match(css, /transform: translateY\(var\(--brand-optical-dy, 0px\)\)/, 't6: 图标走运行时变量(哨兵锚)');
+  const brandBlock = css.slice(css.indexOf('.cgui-brand-name {'), css.indexOf('@keyframes cgui-brand-breath'));
+  assert.doesNotMatch(brandBlock, /transform:/, 't6: 字标本身零位移(顶栏裁切边就在字底)');
+  const main = readFileSync(new URL('../../client/src/main.jsx', import.meta.url), 'utf8');
+  assert.match(main, /watchBrandOptical\(\)/, 't6: 启动时挂载测量');
 }

@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "cc-gui",
+  "productName": "CC-GUI",
   "version": "0.2.302",
   "identifier": "com.claudegui.desktop",
   "build": {

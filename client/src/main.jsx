@@ -1,6 +1,7 @@
 import React from 'react';
 import ReactDOM from 'react-dom/client';
 import App from './App.jsx';
+import { watchBrandOptical } from './utils/brandMetrics.js';
 import { ErrorBoundary } from './components/ErrorBoundary.jsx';
 import { THEME_FAMILIES, resolveTheme, applyReadingFont } from './stores/sessionStore.js';
 import { bootReplaySkin } from './utils/skins.js';
@@ -62,6 +63,7 @@ import './index.css';
 // CK-12: 全局输入框撤销/重做(Cmd/Ctrl+Z / Cmd/Ctrl+Shift+Z)。
 initInputUndo();
 
+watchBrandOptical(); // r13-p2-15:字标光学补偿(按实际字体度量,见 brandMetrics.js)
 ReactDOM.createRoot(document.getElementById('root')).render(
   <React.StrictMode>
     {/* 根边界:整棵树崩了也给错误块+重试,不再整页白屏 */}
