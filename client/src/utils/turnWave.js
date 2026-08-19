@@ -102,19 +102,31 @@ export function nearestTurnIndex(index, frac) {
 }
 
 /**
- * r13-p2-12:指针 → 容器本地 y 的【零换算】口径。
- * 背景:p5-1 的无量纲比例法虽然自洽,但 fraction 的分子 (clientY - rect.top) 仍要求
- * clientY 与 rect 处在同一坐标系 —— WKWebView 在 html zoom 下并不满足(与弹层定位
- * 那次同族:内核对 zoom 的坐标口径不一致),表现为回合多时鱼眼中心与指针相距越来越远
- * (Chromium 正常、装机 App 偏移)。
- * 根治:直接用 MouseEvent.offsetY —— 规范定义为"相对事件目标 padding box 的偏移",
- * 天生就在容器自身的 CSS px 空间里,与 positions(translateY(npx))同空间,**不需要任何
- * 缩放换算**。刻度全部 pointer-events:none,事件目标恒为容器,offsetY 不会指向子元素。
- * 无 offsetY 的极端引擎回落 normalizePointerY(旧比例法)。
+ * r13-p2-14:指针 → 刻度坐标系的【两点标定】换算(终版)。
+ * 实测(WebKit/Chromium 同源复现 + 真机):
+ *  · offsetY 返回【视觉像素】(zoom 后),直接当布局 px 用 → 鱼眼低 20%(p2-12 的错);
+ *  · clientY/getBoundingClientRect 是 client 坐标(同样是视觉像素)。
+ * 因此唯一可靠做法 = 用两枚与刻度【同样定位方式】的探针实测「布局 px → client px」
+ * 的实际映射(origin 与 scale),指针再按该映射反算 —— 不依赖任何 API 的缩放语义,
+ * 也不依赖 box.height 与真实渲染高度是否一致。
+ * cal = { originClientY, perLayoutPx };无标定时回落 fraction 法(仍比 offsetY 稳)。
  */
-export function pointerLocalY(e, height, rect) {
+export function pointerLocalY(e, height, cal) {
   const h = (Number.isFinite(height) && height > 0) ? height : 0;
-  const raw = e?.nativeEvent?.offsetY ?? e?.offsetY;
-  if (Number.isFinite(raw)) return Math.max(0, Math.min(h, raw));
-  return normalizePointerY(e?.clientY ?? 0, rect || e?.currentTarget?.getBoundingClientRect?.(), h);
+  const clientY = e?.clientY;
+  const per = cal?.perLayoutPx;
+  if (Number.isFinite(clientY) && Number.isFinite(per) && per > 0 && Number.isFinite(cal?.originClientY)) {
+    const y = (clientY - cal.originClientY) / per;
+    return Math.max(0, Math.min(h, y));
+  }
+  const rect = e?.currentTarget?.getBoundingClientRect?.();
+  return normalizePointerY(clientY ?? 0, rect, h);
+}
+
+/** 由两枚探针的 client 矩形推出映射:probe0 在布局 y=0,probeN 在布局 y=span。 */
+export function calibrateFromProbes(rect0, rectN, span) {
+  if (!rect0 || !rectN || !(span > 0)) return null;
+  const per = (rectN.top - rect0.top) / span;
+  if (!(per > 0)) return null;
+  return { originClientY: rect0.top, perLayoutPx: per };
 }
