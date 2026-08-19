@@ -58,6 +58,31 @@ export function resolveHistModel(messages, providerEpoch = 0) {
 }
 
 /**
+ * r16-1:「这个模型属不属于当前 provider」的白名单判据 —— 发送路径与显示路径共用。
+ * 此前只有发送路径(resolveSendModel)有,显示路径(resolveSelectorModel)没有,于是
+ * store 里任何来源的陈旧值(切 provider 竞速、fetchModel 的 `if (data.model)` 守卫
+ * 让服务端空响应保留旧值、跨设备同步、ws 重连水合)都会被原样显示,而下拉列表来自
+ * 新 provider 的 available → 症状即"顶栏显示 deepseek-v4-flash,点开列表里却没有"。
+ * 发送不受影响(它一直有校验),所以只错在显示。
+ *
+ * 语义与原实现逐字一致:
+ *  - 两个列表都空(未加载)→ 一律放行,绝不误杀(否则启动瞬间徽章空白);
+ *  - 比对剥 [1m] 后的裸 id(不破坏 1M 逻辑);
+ *  - 官方 Anthropic 下任何 claude-* 放行(availableModels 只是 settings env + 别名
+ *    枚举,不是完整目录;否则 pin 了 claude-sonnet-4-6 会被误杀)。
+ */
+export function makeProviderModelGuard({ availableModels, customModels, officialAnthropic }) {
+  const avail = Array.isArray(availableModels) ? availableModels : [];
+  const custom = Array.isArray(customModels) ? customModels : [];
+  if (avail.length === 0 && custom.length === 0) return () => true;
+  const ok = new Set([
+    ...avail.map((m) => bareModel(m?.id)),
+    ...custom.map((m) => bareModel(m)),
+  ].filter(Boolean));
+  return (m) => !!m && (ok.has(bareModel(m)) || (officialAnthropic && isClaudeId(m)));
+}
+
+/**
  * 选择器侧「当前模型」解析:模型下拉与 1M 开关显示/操作的那个模型。
  * 必须与徽章(App.jsx pin → 历史 → 全局 + context1m 兜底)和发送(resolveSendModel)同口径。
  * 旧实现只有 `pin || global`,两处后果:
@@ -74,16 +99,38 @@ export function resolveHistModel(messages, providerEpoch = 0) {
  */
 export function resolveSelectorModel(s, permKey) {
   if (!s) return '';
-  const pin = permKey ? s.modelBySession?.[permKey] : null;
-  const meta = (permKey && !s.providerEpoch)
+  // r16-1:pin 与历史都要过"属于当前 provider"这关(与发送路径同一判据);
+  // s.currentModel 是服务端按 settings.json 解析的结果,天然属于当前 provider,无条件信任
+  // —— 它兜底,所以校验失败时不会落空。
+  // 门槛比发送侧更宽一档:只要 availableModels 还没加载就整段跳过校验。
+  // (guard 自己的"未加载"判据是【两个列表都空】,而 customModels 从 localStorage 同步
+  //  读出、开机即非空 —— 只要用户加过一个自定义模型,开机那一小段白名单里就只有那一个
+  //  id,第三方用户的徽章会闪一下全局默认再跳回 pin。发送侧不能这么放宽:它宁可回落也
+  //  不能把不存在的模型发上去。)
+  const inProvider = (Array.isArray(s.availableModels) && s.availableModels.length)
+    ? makeProviderModelGuard({
+      availableModels: s.availableModels,
+      customModels: s.customModels,
+      officialAnthropic: (s.currentProvider?.providerHint || 'anthropic') === 'anthropic',
+    })
+    : () => true;
+  const rawPin = permKey ? s.modelBySession?.[permKey] : null;
+  const pin = inProvider(rawPin) ? rawPin : null;
+  const rawMeta = (permKey && !s.providerEpoch)
     ? [...(s.paneSessions || []), s.selectedSession].find((x) => x?.sessionId === permKey)?.model
     : null;
+  const meta = inProvider(rawMeta) ? rawMeta : null;
   const base = pin || meta || s.currentModel;
   const ctx1m = permKey ? !!s.context1mBySession?.[permKey] : false;
   return (base && ctx1m && !/\[1m\]/i.test(base)) ? `${base}[1m]` : base;
 }
 
 const bareModel = (m) => String(m || '').replace(/\[1m\]/i, '');
+// 官方 Anthropic 下的兜底豁免判据。**故意比服务端 model-resolver.js 的 isClaudeModel
+// 更严**:那个是 /claude/i 子串匹配(用于"这个 id 是不是外来残留"的宽松体检),这个是前缀
+// 锚定(用于"要不要跳过白名单直接放行"的授权判定)。宽松判据用在授权位会把
+// `anthropic.claude-v2` 这类也放行。两者门控条件也不同(那个按 provider==='Anthropic',
+// 这个按 currentProvider.providerHint),改任一处前先确认另一处的用途。
 const isClaudeId = (m) => /^claude-[a-z0-9.-]+(\[1m\])?$/i.test(String(m || ''));
 
 /**
@@ -102,11 +149,7 @@ export function resolveSendModel({ pin, hist, globalModel, availableModels, cust
   if (avail.length === 0 && custom.length === 0) {
     return pin || hist || globalModel;
   }
-  const ok = new Set([
-    ...avail.map((m) => bareModel(m?.id)),
-    ...custom.map((m) => bareModel(m)),
-  ].filter(Boolean));
-  const inProvider = (m) => m && (ok.has(bareModel(m)) || (officialAnthropic && isClaudeId(m)));
+  const inProvider = makeProviderModelGuard({ availableModels: avail, customModels: custom, officialAnthropic });
   if (inProvider(pin)) return pin;
   if (inProvider(hist)) return hist;
   if (inProvider(globalModel)) return globalModel;

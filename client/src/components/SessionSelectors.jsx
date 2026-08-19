@@ -642,8 +642,12 @@ export function ModelSelector({ compact = false, permKey = null, tourAnchor = fa
                 className="p-1 text-ink-faint hover:text-error shrink-0"><X size={12} /></button>
             </div>
           ))}
+          {/* r16-1:fetchedRows 的构造条件就是"既不在 available 也不在 custom",
+              所以选中它必须先登记成自定义模型 —— 否则这个 pin 落在白名单外,
+              显示 guard 会拒(徽章点了不动)、发送侧白名单也会把它丢掉(静默发成别的)。
+              与上方自定义输入框 handleCustomSubmit 同一写法。 */}
           {fetchedRows.map((m) => (
-            <button key={`f-${m.id}`} onClick={() => selectModel(m.id)}
+            <button key={`f-${m.id}`} onClick={() => { useStore.getState().addCustomModel(m.id); selectModel(m.id); }}
               className={`w-full text-left px-3 py-2 hover:bg-canvas-warm transition-colors flex items-center gap-2 ${
                 (currentModel === m.id || currentModel === `${m.id}[1m]`) ? 'bg-accent-subtle/50' : ''}`}>
               <div className="flex-1 min-w-0">

@@ -63,7 +63,7 @@ import { computeCost, formatCost, setUserPrices, observeOfficialBilling } from '
 import { extractToolResultText, finalizePendingToolCalls, applyFinalizedToBlocks } from './utils/toolResult.js';
 import { rebuildTodosFromTaskCalls } from './utils/todos.js';
 import { isSteered, firstSteerableIndex, isSteerBarrier, persistedSteerKeys } from './utils/steerQueue.js';
-import { isInitBindingOrigin, migrateDraftQueue, paneMessagesOwned, resolveHistModel, resolveSelectorModel, resolveSendModel } from './utils/routing.js';
+import { isInitBindingOrigin, makeProviderModelGuard, migrateDraftQueue, paneMessagesOwned, resolveHistModel, resolveSelectorModel, resolveSendModel } from './utils/routing.js';
 import { nativeContextWindow, isBareClaudeAlias, pickCliContextWindow } from './utils/contextWindow.js';
 import { extractMcpServerIssues, formatMcpServerNotice } from './utils/mcpStatus.js';
 import { classifyRepairOutcome, classifyCheckOutcome, upsertRepairHint, removeRepairHint, loadRepairHints, persistRepairHints } from './utils/repairFlow.js';
@@ -2868,7 +2868,24 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // 不带 [1m] 的 API 模型 id → 若该会话标记过 1M 且解析结果没带后缀,补回。pin 存在且
   // 不带 [1m](用户显式关掉)时 setModelFor 的 syncContext1m 已把标记清掉,不会误补。
   const context1mFlag = useStore((s) => !!(selectedSession?.sessionId && s.context1mBySession[selectedSession.sessionId]));
-  const resolvedModelBase = pinnedModel || historyModel || globalModel;
+  // r16-1:本组件这份解析链(pin→历史→全局)是 resolveSelectorModel 的手写强化版
+  // (历史那环会扫 messages),之前完全没有"属于当前 provider"的校验 —— 于是同一个残留
+  // 的旧 provider 模型,顶栏 chip 修好了、手机顶部条与上下文明细弹层仍会显示它。
+  // 这里只补校验、不改解析链结构(换成 routing.js 那份会削弱历史解析)。
+  // 三个 selector 取基元/数组引用,guard 用 useMemo 构造 —— 直接在 selector 里 new
+  // 函数会每次返回新引用,触发 Zustand 无限重渲(项目踩过:选择器新引用→React #185)。
+  const guardAvailable = useStore((s) => s.availableModels);
+  const guardCustom = useStore((s) => s.customModels);
+  const guardOfficial = useStore((s) => (s.currentProvider?.providerHint || 'anthropic') === 'anthropic');
+  const modelGuard = useMemo(
+    () => ((Array.isArray(guardAvailable) && guardAvailable.length)
+      ? makeProviderModelGuard({ availableModels: guardAvailable, customModels: guardCustom, officialAnthropic: guardOfficial })
+      : () => true), // available 未加载(开机窗口)一律放行,避免徽章闪一下全局默认
+    [guardAvailable, guardCustom, guardOfficial],
+  );
+  const resolvedModelBase = (modelGuard(pinnedModel) ? pinnedModel : null)
+    || (modelGuard(historyModel) ? historyModel : null)
+    || globalModel;
   const currentModel = (context1mFlag && resolvedModelBase && !/\[1m\]/i.test(resolvedModelBase))
     ? resolvedModelBase + '[1m]' : resolvedModelBase;
   // 徽章分母:后端解析的真实窗口(与压缩联动同源;官方/无解析=null 走本地兜底表)。
@@ -3634,7 +3651,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // "Maximum update depth exceeded" (which blanks the whole page).
   // (sessionQueueKey 已上移到组件顶部声明,避免 effect 依赖数组 TDZ)
   // Model shown in THIS pane's header — the session's own pick, else default.
-  const headerModel = modelBySession[sessionQueueKey] || currentModel;
+  // r16-1:本窗格 pin 同样要过白名单(它驱动手机顶部条与上下文明细弹层两个可见位置)。
+  const headerPinRaw = modelBySession[sessionQueueKey];
+  const headerModel = (modelGuard(headerPinRaw) ? headerPinRaw : null) || currentModel;
   const messageQueueRaw = useStore((s) => s.messageQueue[sessionQueueKey]);
   const messageQueue = messageQueueRaw || EMPTY_ARRAY;
   const claimDraft = messageQueue.find((item) => item?.claimDraft?.targetPaneId === paneId
@@ -8106,7 +8125,7 @@ function MobileModelPage({ permKey }) {
       {fetchedRows.map((m) => {
         const active = currentModel === m.id || currentModel === `${m.id}[1m]`;
         return (
-          <button key={`f-${m.id}`} onClick={() => pick(m.id)}
+          <button key={`f-${m.id}`} onClick={() => { useStore.getState().addCustomModel(m.id); pick(m.id); }}
             className="w-full flex items-center gap-3 px-4 py-3 text-left hover:bg-canvas-warm transition-colors">
             <div className="flex-1 min-w-0">
               <div className="text-[14px] font-body text-ink truncate">{m.name}</div>
@@ -8759,7 +8778,10 @@ function MobileProviderPage({ permKey, onPicked, onManage }) {
       setActiveId(id);
       useStore.getState().clearModelOverrides?.();
       useStore.getState().fetchProvider?.();
-      useStore.getState().fetchModel?.();
+      // r16-1:必须 await —— pickModel 会在 switchTo 返回后立刻 setModelFor(新 provider 的
+      // 模型),而显示侧白名单用的是 availableModels;不等它换成新 provider 的列表,新 pin
+      // 会被判成"不属于当前 provider"→ 徽章卡在旧模型上直到 /api/model 回来(失败则一直卡)。
+      await useStore.getState().fetchModel?.();
       window.dispatchEvent(new CustomEvent('cgui:provider-change'));
       ok = true;
     } catch (e) { confirmDialog('切换 provider 失败：' + e.message); }
