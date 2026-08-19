@@ -35,6 +35,23 @@ function toEntry(model) {
   if (lv.length === CGUI_EFFORTS.length) return null; // 全档 = 不产生条目
   return { efforts: CGUI_EFFORTS.filter((e) => lv.includes(e)) };
 }
+// ── 手工补丁层(pi-ai 快照之后发布的模型;来源=各家官方 API 文档,核对日期 2026-08-19)──
+// pi-ai 的表是发版快照,新模型出来后会缺条目。缺条目本身无害(落家族正则=全档,不锁死),
+// 但有官方档位依据的直接补上更准。重跑本脚本时这层始终生效,不会被 pi-ai 数据覆盖。
+// 依据:
+//   glm-5.3     —— Z.AI Core Parameters:"GLM-5.3 … only supports max, high, low",思考不可关
+//                  https://docs.z.ai/guides/overview/concept-param
+//   qwen3.8-max —— QwenCloud OpenAI Chat API:"Qwen3.8-Max and Qwen3.8-Max-Preview:
+//                  Options: low, medium, xhigh. Default: xhigh"
+//                  https://docs.qwencloud.com/api-reference/chat/openai-chat
+const MANUAL_OVERRIDES = {
+  'glm-5.3': { efforts: ['low', 'high', 'max'] },
+  'z-ai/glm-5.3': { efforts: ['low', 'high', 'max'] },
+  'qwen3.8-max': { efforts: ['low', 'medium', 'xhigh'] },
+  'qwen3.8-max-preview': { efforts: ['low', 'medium', 'xhigh'] },
+  'qwen/qwen3.8-max': { efforts: ['low', 'medium', 'xhigh'] },
+};
+
 const raw = { openai: {}, anthropic: {} };
 const mergeInto = (bag, id, entry) => {
   if (!(id in bag)) { bag[id] = entry; return; }
@@ -71,6 +88,7 @@ for (const id of Object.keys(byProto)) {
   if (e.openai === null) delete e.openai;      // null = 全档,省略即可
   if (e.anthropic === null) delete e.anthropic;
 }
-fs.writeFileSync(OUT, JSON.stringify({ source: '@earendil-works/pi-ai@0.82.1 (MIT)', byId, byProto }));
+for (const [id, e] of Object.entries(MANUAL_OVERRIDES)) { byId[id] = e; delete byProto[id]; }
+fs.writeFileSync(OUT, JSON.stringify({ source: '@earendil-works/pi-ai@0.82.1 (MIT) + 官方文档手工补丁', byId, byProto }));
 console.log('byId:', Object.keys(byId).length, '条 | byProto(协议相关):', Object.keys(byProto).length,
   '条 | 体积:', (fs.statSync(OUT).size / 1024).toFixed(1), 'KB');

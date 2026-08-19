@@ -370,4 +370,19 @@ const runIsolated = (home) => JSON.parse(execFileSync(process.execPath, ['-e', C
     't13: 回落到最高可用档并给 toast(reason=fallback)');
 }
 
+// t14 r15-2:手工补丁层 —— pi-ai 快照之后发布的模型(依据各家官方 API 文档,见生成脚本
+// 头部的来源注释)。缺条目本身无害(落正则=全档),但有官方依据的必须准;这里同时钉住
+// "补丁层不被 pi-ai 数据覆盖"这条生成语义(重跑生成脚本后仍应成立)。
+{
+  assert.deepEqual(catalogPrefillEntry('glm-5.3', 'openai'), { efforts: ['low', 'high', 'max'], source: 'catalog' },
+    't14: glm-5.3 三档(Z.AI 文档:only supports max, high, low)');
+  assert.deepEqual(catalogPrefillEntry('z-ai/glm-5.3', 'openai'), { efforts: ['low', 'high', 'max'], source: 'catalog' },
+    't14: glm-5.3 的 OpenRouter 形态同判定');
+  assert.deepEqual(catalogPrefillEntry('qwen3.8-max', 'openai'), { efforts: ['low', 'medium', 'xhigh'], source: 'catalog' },
+    't14: qwen3.8-max 三档(QwenCloud 文档:low/medium/xhigh,默认 xhigh)');
+  // 补丁层不该误伤 pi-ai 已有的相邻型号
+  assert.deepEqual(catalogPrefillEntry('glm-5.2', 'openai'), { efforts: ['low', 'medium', 'high', 'max'], source: 'catalog' },
+    't14: glm-5.2 仍取 pi-ai 口径,未被 5.3 补丁波及');
+}
+
 console.log('check-model-capabilities: all passed');
