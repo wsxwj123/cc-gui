@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { readFileSync, writeFileSync, existsSync, realpathSync, readdirSync, mkdirSync } from 'fs';
 import { resolveClaudeAsync, listClaudeInstallsAsync, getClaudeOverride, setClaudeOverride, getClaudeOverrideRaw, pauseClaudeOverride, winLivePathDirsAsync, classifyShim } from '../utils/claude-resolver.js';
 import { scanAllTools, nodeMeets, NODE_MIN_MAJOR, probeNpm } from '../utils/env-scanner.js';
+import { gfetch } from '../utils/github-fetch.js'; // r14-1:GitHub 直连失败/限流自动走本机代理
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import { tmpdir, homedir } from 'os';
@@ -76,7 +77,7 @@ const GH_HEADERS = { 'User-Agent': 'claude-gui-version-check', 'Accept': 'applic
 // 而 git **tag 一推上去就立刻存在**(不依赖 CI),所以退回看最大 semver tag,检测照常工作;
 // 下载链接用 tag 直链兜底(buildFallbackAssets),CI 发布 DMG 后即可下。
 async function fetchLatestTagSnap() {
-  const r = await fetch('https://api.github.com/repos/wsxwj123/claude-gui/tags?per_page=100', { headers: GH_HEADERS });
+  const r = await gfetch('https://api.github.com/repos/wsxwj123/claude-gui/tags?per_page=100', { headers: GH_HEADERS });
   if (!r.ok) { const err = new Error(`GitHub API ${r.status}`); err.status = r.status; throw err; }
   const arr = await r.json();
   const names = (Array.isArray(arr) ? arr : [])
@@ -88,8 +89,30 @@ async function fetchLatestTagSnap() {
   return { tagName: `v${raw}`, htmlUrl: `https://github.com/wsxwj123/claude-gui/releases/tag/v${raw}`, publishedAt: null, assets: [] };
 }
 
+/**
+ * r14-2:免代理的备用版本源 —— jsDelivr 的包元数据接口在墙内通常直连可达,
+ * 不需要任何代理。GitHub API 直连失败且本机代理也不可用时用它兜底,
+ * 至少让"有没有新版"这件事在任何网络下都问得出来(下载仍需 GitHub,
+ * 届时前端给手动下载指引)。返回形状与 fetchGitHubLatest 一致。
+ */
+async function fetchJsdelivrLatest() {
+  const r = await fetch('https://data.jsdelivr.com/v1/packages/gh/wsxwj123/claude-gui', {
+    headers: { 'User-Agent': 'claude-gui-version-check' },
+    signal: AbortSignal.timeout(12000),
+  });
+  if (!r.ok) throw new Error(`jsDelivr ${r.status}`);
+  const d = await r.json();
+  const versions = Array.isArray(d.versions) ? d.versions.map((v) => String(v.version || '')).filter(Boolean) : [];
+  if (!versions.length) throw new Error('jsDelivr 未返回版本');
+  // 该接口按语义化版本降序返回,取第一个;仍做一次 semver 兜底比较防顺序变化。
+  const latest = versions.reduce((a, b) => (semverGt(b, a) ? b : a), versions[0]);
+  return { tagName: `v${latest}`, htmlUrl: `https://github.com/wsxwj123/claude-gui/releases/tag/v${latest}`, publishedAt: null, assets: [], viaMirror: true };
+}
+
 async function fetchGitHubLatest() {
-  const r = await fetch('https://api.github.com/repos/wsxwj123/claude-gui/releases/latest', { headers: GH_HEADERS });
+  // r14-1:改走 gfetch —— 直连失败或匿名限流 403 时自动经本机代理重试。
+  // 原来是裸 fetch,而 Node fetch 不读系统代理 → 墙内机器恒"检测不到更新"。
+  const r = await gfetch('https://api.github.com/repos/wsxwj123/claude-gui/releases/latest', { headers: GH_HEADERS });
   if (r.status === 404) return await fetchLatestTagSnap(); // 无已发布 release → 退回看最新 tag
   if (!r.ok) {
     const err = new Error(`GitHub API ${r.status}`);
@@ -114,6 +137,7 @@ router.get('/version-check', async (req, res) => {
   }
 
   let snap;
+  let staleError = null; // r14-1:用了旧缓存时的失败原因(前端可提示"结果可能过期")
   const now = Date.now();
   // TTL 内复用缓存,避开 GitHub 60/hr rate limit
   if (cache && now - cachedAt < CACHE_TTL_MS) {
@@ -124,11 +148,26 @@ router.get('/version-check', async (req, res) => {
       cache = snap;
       cachedAt = now;
     } catch (err) {
-      // 403 / 网络失败 — 如果有旧缓存就用旧缓存(stale-while-error),没有就报错
-      if (cache) {
-        snap = cache;
-      } else {
-        return res.json({ currentVersion, error: err.message || 'fetch failed' });
+      // r14-2:GitHub(含本机代理回落)全败 → 免代理的 jsDelivr 兜底,
+      // 让"没开代理的机器"也能知道有没有新版。
+      try {
+        snap = await fetchJsdelivrLatest();
+        cache = snap;
+        cachedAt = now;
+      } catch { /* 镜像也失败 → 走下面的旧缓存/报错分支 */ }
+      if (!snap) {
+        // 403 / 网络失败 — 有旧缓存就用旧缓存(stale-while-error),没有就报错。
+        // r14-1:失败原因必须可见 —— 原来静默复用旧缓存,用户只看到"没反应",
+        // 分不清"真没新版"还是"连不上 GitHub"(墙内最常见)。
+        const why = /fetch failed|ENOTFOUND|ETIMEDOUT|ECONNREFUSED|network/i.test(String(err.message || ''))
+          ? '无法连接 GitHub 与备用源(墙内通常需要开启代理)'
+          : (err.status === 403 ? 'GitHub 接口限流(匿名 60 次/小时),稍后重试' : (err.message || 'fetch failed'));
+        if (cache) {
+          snap = cache;
+          staleError = why;
+        } else {
+          return res.json({ currentVersion, error: why });
+        }
       }
     }
   }
@@ -143,6 +182,7 @@ router.get('/version-check', async (req, res) => {
     currentVersion,
     latestVersion: latestRaw,
     hasUpdate,
+    ...(staleError ? { staleError } : {}),
     htmlUrl: snap.htmlUrl || `https://github.com/wsxwj123/claude-gui/releases/tag/v${latestRaw}`,
     publishedAt: snap.publishedAt,
     assets,
@@ -404,10 +444,43 @@ export function installCmdFor(proxyUrl = null, method = 'native') { // export �
 // PowerShell/系统代理设置,claude update / install.sh 直连 claude.ai 或 npm 经常
 // ETIMEDOUT。找到在听的端口就在更新/安装命令前 export,找不到返回 null(直连)。
 const COMMON_PROXY_PORTS = [7890, 7897, 1087, 8889, 8118, 10809];
+/** r14-2:读操作系统的代理设置(mac scutil --proxy;Windows 注册表 ProxyServer)。 */
+async function readSystemProxy() {
+  const { execFile } = await import('child_process');
+  const { promisify } = await import('util');
+  const run = promisify(execFile);
+  if (process.platform === 'darwin') {
+    const { stdout } = await run('scutil', ['--proxy'], { timeout: 3000 });
+    const get = (k) => (stdout.match(new RegExp(`${k}\\s*:\\s*(\\S+)`)) || [])[1];
+    if (get('HTTPSEnable') === '1' && get('HTTPSProxy')) return `http://${get('HTTPSProxy')}:${get('HTTPSPort') || 8080}`;
+    if (get('HTTPEnable') === '1' && get('HTTPProxy')) return `http://${get('HTTPProxy')}:${get('HTTPPort') || 8080}`;
+    return null;
+  }
+  if (process.platform === 'win32') {
+    // reg query 输出形如:ProxyEnable REG_DWORD 0x1 / ProxyServer REG_SZ 127.0.0.1:7890
+    const { stdout } = await run('reg', ['query', 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings'], { timeout: 3000 });
+    if (!/ProxyEnable\s+REG_DWORD\s+0x1/i.test(stdout)) return null;
+    const m = stdout.match(/ProxyServer\s+REG_SZ\s+(\S+)/i);
+    if (!m) return null;
+    const val = m[1];
+    // 可能是 "host:port" 或 "http=host:port;https=host:port"
+    const https = val.match(/https=([^;]+)/i)?.[1];
+    const http = val.match(/http=([^;]+)/i)?.[1];
+    const plain = /=/.test(val) ? null : val;
+    const target = https || http || plain;
+    return target ? `http://${target}` : null;
+  }
+  return null;
+}
+
 export async function detectLocalProxy() { // export:skills.js 直连 GitHub 失败时回落代理用
   // 用户已显式配置的优先(server 进程自己的 env)。
   const envProxy = process.env.HTTPS_PROXY || process.env.https_proxy || process.env.HTTP_PROXY || process.env.http_proxy;
   if (envProxy) return envProxy;
+  // r14-2:先读【系统代理设置】—— 用户"开了系统代理但不是 TUN"时,Node 的 fetch 不认它,
+  // 而端口探测又可能因端口非常见而落空。mac 用 scutil --proxy,Windows 读注册表。
+  const sys = await readSystemProxy().catch(() => null);
+  if (sys) return sys;
   const { createConnection } = await import('net');
   const probe = (port) => new Promise((resolve) => {
     const sock = createConnection({ host: '127.0.0.1', port, timeout: 300 });

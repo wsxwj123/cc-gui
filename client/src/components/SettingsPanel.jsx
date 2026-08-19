@@ -1287,7 +1287,17 @@ function CcUpdater() {
           <div className="text-[12px] text-success">✓ 已是最新版本</div>
         )
       )}
-      {state.status === 'err' && <div className="text-[12px] text-error">{state.error}</div>}
+      {/* r14-1:原来读 state.error,但 check() 写的是 message → 失败原因从来没显示过,
+          用户只看到按钮转一下就没反应。两者都读,并给可执行指引。 */}
+      {state.status === 'err' && (
+        <div className="text-[12px] text-error">
+          检查更新失败:{state.message || state.error || '未知原因'}
+        </div>
+      )}
+      {/* 用了旧缓存(本次拉取失败)时明示,避免"看起来是最新版"其实没查到 */}
+      {state.status === 'ok' && state.staleError && (
+        <div className="text-[11px] text-warning">结果可能过期:{state.staleError}</div>
+      )}
       {/* R8-2:死 override 横幅。手动指定的路径已失效时 resolver 静默回落自动优先级,
           用户以为还在用指定的那个 —— 显式提示 + 两个出口:清除指定(回自动)/重新选择
           (滚到下方安装切换区)。旧后端无 overrideDead 字段 → overrideDead 恒 null 不渲染。 */}
