@@ -40,6 +40,7 @@ import skillsRoutes from './routes/skills.js';
 import backgroundsRoutes from './routes/backgrounds.js';
 import skinsPacksRoutes from './routes/skins-packs.js';
 import screenshotRoutes from './routes/screenshot.js';
+import imageRoutes from './routes/image.js';
 import {
   authMiddleware, isLocalReq, isAuthorized, parseCookies, verifyToken,
   hasPassword, setPassword, setDefaultRandomPassword, clearPassword, verifyPassword, issueToken, updateConfig, loadConfig,
@@ -416,6 +417,7 @@ app.use('/api', skillsRoutes);
 app.use('/api', backgroundsRoutes);
 app.use('/api', skinsPacksRoutes); // r11-③ 皮肤包(/api/skins,避开既有 /api/skills)
 app.use('/api', screenshotRoutes);
+app.use('/api', imageRoutes); // r16-3 生图(/api/image-providers、/api/image/*),配置独立不碰 settings.json
 
 // Auto-load optional local-only routes only when explicitly requested. These
 // files are gitignored personal integrations; packaged/public builds must not

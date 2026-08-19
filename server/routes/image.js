@@ -1,0 +1,385 @@
+// r16-3 生图面板的后端:自定义生图 provider 的 CRUD + 出图 + 预览回源。
+//
+// 与文本 provider 完全分开:配置独立落 ~/.claude-gui/image-providers.json,
+// 【绝不写 ~/.claude/settings.json】(CLI 的 env 与生图无关,混进去只会污染会话)。
+// 协议差异全在 utils/image-protocols.js 的纯函数里,本文件只做 fetch / 落盘 / 错误呈现。
+import { Router } from 'express';
+import { realpathSync } from 'node:fs';
+import { isPathInside } from '../utils/safe-path.js';
+import { readFile, writeFile, mkdir, rename, unlink, stat, access } from 'fs/promises';
+import { existsSync, constants } from 'fs';
+import { join, isAbsolute } from 'path';
+import { homedir } from 'os';
+import { randomUUID } from 'crypto';
+import { extname } from 'path';
+import {
+  IMAGE_PROTOCOLS, IMAGE_CONTENT_TYPES, buildImageRequest, extractImage,
+  buildImageFileName, imageExtFromMime, resolvePreviewPath, redactKey,
+} from '../utils/image-protocols.js';
+import { assertPublicBaseURL } from './settings.js';
+
+const router = Router();
+
+// 路径按调用取(不在模块顶层固化):单测把 HOME 指向 mktemp 目录后再 import 也能生效,
+// 真实 HOME 一个字节都不碰。
+function imageProvidersPath() {
+  return join(homedir(), '.claude-gui', 'image-providers.json');
+}
+
+const GENERATE_TIMEOUT_MS = 120_000; // 生图比文本慢得多
+const DOWNLOAD_TIMEOUT_MS = 60_000; // 上游只回 URL 时下载原图
+// 判官必修②:下载/解码体积上限。后端是单进程、扛着全部会话与 WS,一个坏掉或恶意的
+// 中转站回一坨大 body 就是全局 OOM。
+const MAX_IMAGE_BYTES = 64 * 1024 * 1024;
+const MAX_UPSTREAM_ERR = 500; // 上游报错原文透传上限(剥 key 后)
+
+async function readImageProviders() {
+  try {
+    const d = JSON.parse(await readFile(imageProvidersPath(), 'utf-8'));
+    return Array.isArray(d) ? d : [];
+  } catch { return []; }
+}
+
+// 原子写:tmp 名带 uuid + rename 落地(半截 writeFile 不会留下坏文件)。
+// mode 0600:文件里有明文 apiKey,默认 0644 等于同机其他用户可读。
+async function atomicWriteProviders(list) {
+  const target = imageProvidersPath();
+  await mkdir(join(homedir(), '.claude-gui'), { recursive: true });
+  const tmp = `${target}.tmp-${randomUUID()}`;
+  try {
+    await writeFile(tmp, JSON.stringify(Array.isArray(list) ? list : [], null, 2), { mode: 0o600 });
+    await rename(tmp, target);
+  } catch (err) {
+    try { await unlink(tmp); } catch {}
+    throw err;
+  }
+}
+
+// 串行队列。**读也必须在队列里**:判官实测并发 5 次 POST 只剩 1 条(各自读到同一份旧
+// list、后写的覆盖先写的)。原实现只把"写"排队,读-改-写整体不是原子的,排队等于白排。
+// mutator 收到当前 list,返回 { list, result };抛错则不写盘(用于 404 之类)。
+let _imageProvidersQueue = Promise.resolve();
+function mutateImageProviders(mutator) {
+  const run = _imageProvidersQueue.catch(() => {}).then(async () => {
+    const list = await readImageProviders();
+    const out = await mutator(list);
+    await atomicWriteProviders(out.list);
+    return out.result;
+  });
+  _imageProvidersQueue = run;
+  return run.catch((e) => { throw e; });
+}
+
+// 保留直写口(测试与迁移用);常规 CRUD 一律走 mutateImageProviders。
+function writeImageProviders(list) {
+  const run = _imageProvidersQueue.catch(() => {}).then(() => atomicWriteProviders(list));
+  _imageProvidersQueue = run;
+  return run;
+}
+
+class HttpError extends Error {
+  constructor(status, message) { super(message); this.status = status; }
+}
+
+// 出参永远不含 apiKey —— 只回 hasKey(与文本 provider 同口径)。
+function publicView(p) {
+  return {
+    id: p.id, name: p.name, protocol: p.protocol, baseURL: p.baseURL,
+    model: p.model || '', size: p.size || '', savePath: p.savePath || '',
+    extra: p.extra || null, hasKey: !!p.apiKey,
+  };
+}
+
+// 保存目录:必须是绝对路径 + 存在 + 可写。人话错误,不抛栈。
+async function checkSavePath(savePath) {
+  if (typeof savePath !== 'string' || !savePath.trim()) return '保存路径必填，请选择一个保存目录';
+  if (!isAbsolute(savePath.trim())) return '保存路径必须是绝对路径';
+  try {
+    const st = await stat(savePath.trim());
+    if (!st.isDirectory()) return '保存路径不是一个目录，请重新选择';
+    await access(savePath.trim(), constants.W_OK);
+  } catch { return '保存目录不存在或不可写，请重新选择'; }
+  return null;
+}
+
+function sanitizeExtra(extra) {
+  if (extra === null || extra === undefined || extra === '') return null;
+  if (typeof extra === 'object' && !Array.isArray(extra)) return Object.keys(extra).length ? extra : null;
+  return undefined; // 非法形态:调用方转 400
+}
+
+// 表单入参校验(POST/PUT 共用)。返回 { error } 或 { value }。
+async function validateBody(body) {
+  const { name, protocol, baseURL, model, size, savePath } = body || {};
+  if (!name || typeof name !== 'string' || !name.trim()) return { error: '名称必填' };
+  if (!IMAGE_PROTOCOLS.includes(protocol)) return { error: `协议必须是 ${IMAGE_PROTOCOLS.join(' / ')}` };
+  let url; try { url = new URL(baseURL); } catch { return { error: 'baseURL 非法' }; }
+  if (!/^https?:$/.test(url.protocol)) return { error: 'baseURL 必须是 http(s)' };
+  // SSRF 守卫(与文本 provider 同口径):server 会带存储的 apiKey 主动请求这个地址。
+  try { await assertPublicBaseURL(baseURL); } catch (e) { return { error: e.message }; }
+  if (!model || typeof model !== 'string' || !model.trim()) return { error: '模型必填' };
+  const pathErr = await checkSavePath(savePath);
+  if (pathErr) return { error: pathErr };
+  const extra = sanitizeExtra(body?.extra);
+  if (extra === undefined) return { error: '附加参数必须是 JSON 对象' };
+  return {
+    value: {
+      name: name.trim(),
+      protocol,
+      baseURL: baseURL.trim().replace(/\/+$/, ''),
+      model: model.trim(),
+      size: typeof size === 'string' ? size.trim() : '',
+      savePath: savePath.trim(),
+      extra,
+    },
+  };
+}
+
+/** GET /api/image-providers — 列表(绝不含 apiKey)。 */
+router.get('/image-providers', async (_req, res) => {
+  res.json({ providers: (await readImageProviders()).map(publicView) });
+});
+
+/** POST /api/image-providers — 新增。 */
+router.post('/image-providers', async (req, res) => {
+  try {
+    const { error, value } = await validateBody(req.body);
+    if (error) return res.status(400).json({ error });
+    const entry = {
+      id: randomUUID(),
+      ...value,
+      apiKey: typeof req.body?.apiKey === 'string' ? req.body.apiKey.trim() : '',
+    };
+    const id = await mutateImageProviders((list) => {
+      list.push(entry);
+      return { list, result: entry.id };
+    });
+    res.json({ ok: true, id });
+  } catch (err) { res.status(err?.status || 500).json({ error: err.message }); }
+});
+
+/** PUT /api/image-providers/:id — 编辑。apiKey 留空 = 保留原 key(前端从不持有 key)。 */
+router.put('/image-providers/:id', async (req, res) => {
+  try {
+    const { error, value } = await validateBody(req.body);
+    if (error) return res.status(400).json({ error });
+    const apiKey = req.body?.apiKey;
+    const id = await mutateImageProviders((list) => {
+      const idx = list.findIndex((p) => p.id === req.params.id);
+      if (idx === -1) throw new HttpError(404, 'not found');
+      list[idx] = {
+        ...list[idx],
+        ...value,
+        id: list[idx].id,
+        apiKey: (typeof apiKey === 'string' && apiKey.trim()) ? apiKey.trim() : list[idx].apiKey,
+      };
+      return { list, result: list[idx].id };
+    });
+    res.json({ ok: true, id });
+  } catch (err) { res.status(err?.status || 500).json({ error: err.message }); }
+});
+
+/** DELETE /api/image-providers/:id — 删除(只删配置,不动已出的图)。 */
+router.delete('/image-providers/:id', async (req, res) => {
+  try {
+    await mutateImageProviders((list) => {
+      const next = list.filter((p) => p.id !== req.params.id);
+      if (next.length === list.length) throw new HttpError(404, 'not found');
+      return { list: next, result: true };
+    });
+    res.json({ ok: true });
+  } catch (err) { res.status(err?.status || 500).json({ error: err.message }); }
+});
+
+// 落盘:重名加序号(-1、-2……),不覆盖已有图。
+async function saveImage(dir, baseName, buf) {
+  const ext = extname(baseName);
+  const stem = baseName.slice(0, baseName.length - ext.length);
+  let name = baseName;
+  for (let i = 1; existsSync(join(dir, name)); i++) name = `${stem}-${i}${ext}`;
+  const full = join(dir, name);
+  await writeFile(full, buf);
+  return full;
+}
+
+/**
+ * POST /api/image/generate { providerId, prompt } → 组请求 → 取图 → 落盘 → 预览。
+ * 上游报错原文透传,但先经 redactKey 剥掉可能回显的密钥。
+ */
+router.post('/image/generate', async (req, res) => {
+  const started = Date.now();
+  try {
+    const { providerId, prompt } = req.body || {};
+    const provider = (await readImageProviders()).find((p) => p.id === providerId);
+    if (!provider) return res.status(404).json({ error: '未找到该生图 provider' });
+    const pathErr = await checkSavePath(provider.savePath);
+    if (pathErr) return res.status(400).json({ error: pathErr });
+
+    let spec;
+    try { spec = buildImageRequest(provider, prompt); }
+    catch (e) { return res.status(400).json({ error: e.message }); }
+    try { await assertPublicBaseURL(provider.baseURL); }
+    catch (e) { return res.status(e.status || 400).json({ error: e.message }); }
+
+    const post = (headers) => fetch(spec.url, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(spec.body),
+      signal: AbortSignal.timeout(GENERATE_TIMEOUT_MS),
+    });
+    let r;
+    try { r = await post(spec.headers); }
+    catch (e) {
+      const timedOut = e?.name === 'TimeoutError' || e?.name === 'AbortError';
+      return res.status(timedOut ? 504 : 502).json({
+        error: timedOut ? '生成超时（120 秒），上游没有返回' : `连接上游失败：${redactKey(e.message, provider.apiKey)}`,
+      });
+    }
+    // gemini 认证头按端点形态选(官方 x-goog-api-key / 中转站 Bearer),选错就 401/403
+    // → 用另一种原样重试一次,而不是一刀切押一种。
+    if (!r.ok && spec.altHeaders && (r.status === 401 || r.status === 403)) {
+      try { r = await post(spec.altHeaders); } catch { /* 保留首次响应 */ }
+    }
+    const raw = await r.text().catch(() => '');
+    const safeRaw = redactKey(raw, provider.apiKey).slice(0, MAX_UPSTREAM_ERR);
+    if (!r.ok) return res.status(502).json({ error: `上游返回 ${r.status}：${safeRaw || '(空响应)'}` });
+
+    let data;
+    try { data = JSON.parse(raw); }
+    catch { return res.status(502).json({ error: `上游响应不是 JSON：${safeRaw || '(空响应)'}` }); }
+    const picked = extractImage(provider.protocol, data);
+    if (!picked) return res.status(502).json({ error: `上游响应里没有找到图片：${safeRaw.slice(0, 300)}` });
+
+    let buf; let mime = picked.mime || '';
+    if (picked.base64) {
+      // 判官必修②:b64 分支同样要挡 —— base64 文本本身已进内存,再解一份 Buffer。
+      if (picked.base64.length > MAX_IMAGE_BYTES * 1.4) {
+        return res.status(502).json({ error: `图片过大（上限 ${MAX_IMAGE_BYTES / 1048576}MB）` });
+      }
+      buf = Buffer.from(picked.base64, 'base64');
+    } else {
+      // 判官必修①(SSRF):这个 URL 是【上游回什么就是什么】,攻击者可控性最高的一处 ——
+      // 而 baseURL 在上面刚过了 assertPublicBaseURL,这里原先一次都没过。实测能用
+      // http://127.0.0.1:.../x.png(Content-Type: text/html) 把内网响应落成"图片"。
+      try { await assertPublicBaseURL(picked.url); }
+      catch (e) { return res.status(e.status || 502).json({ error: `拒绝下载该链接：${e.message}` }); }
+      let img;
+      try {
+        img = await fetch(picked.url, {
+          signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS),
+          // 判官必修①:默认跟随重定向 = 事后校验白做(302 到内网照样下)。手动挡下 3xx。
+          redirect: 'manual',
+        });
+      } catch (e) { return res.status(502).json({ error: `下载生成的图片失败：${redactKey(e.message, provider.apiKey)}` }); }
+      if (img.status >= 300 && img.status < 400) {
+        return res.status(502).json({ error: '上游图片链接发生跳转，已拒绝（防止绕过内网地址检查）' });
+      }
+      if (!img.ok) return res.status(502).json({ error: `下载生成的图片失败：HTTP ${img.status}` });
+      const ct = img.headers.get('content-type') || '';
+      // 判官必修①:原先"Content-Type 不是图片但 URL 以 .png 结尾"也放行 —— 后缀是攻击者
+      // 写的,不能当证据。这里只认 Content-Type。
+      if (!/^image\//i.test(ct)) {
+        return res.status(502).json({ error: `上游返回的链接不是图片（Content-Type: ${ct || '未知'}）` });
+      }
+      // 判官必修②:无上限地 arrayBuffer() 一个坏掉/恶意的上游 = 单进程后端 OOM
+      // (实测 4×12MB 并发 → RSS 446MB,base64+JSON+Buffer 约 10x 放大)。
+      const declared = Number(img.headers.get('content-length') || 0);
+      if (Number.isFinite(declared) && declared > MAX_IMAGE_BYTES) {
+        return res.status(502).json({ error: `图片过大（${Math.round(declared / 1048576)}MB，上限 ${MAX_IMAGE_BYTES / 1048576}MB）` });
+      }
+      mime = ct;
+      buf = Buffer.from(await img.arrayBuffer());
+      if (buf.length > MAX_IMAGE_BYTES) {
+        return res.status(502).json({ error: `图片过大（上限 ${MAX_IMAGE_BYTES / 1048576}MB）` });
+      }
+    }
+    if (!buf.length) return res.status(502).json({ error: '上游返回了空图片' });
+
+    let file;
+    try { file = await saveImage(provider.savePath, buildImageFileName(prompt, imageExtFromMime(mime)), buf); }
+    catch (e) {
+      const msg = e?.code === 'ENOSPC' ? '磁盘空间不足，无法保存图片'
+        : e?.code === 'EACCES' || e?.code === 'EPERM' ? '保存目录没有写入权限，请重新选择'
+          : e?.code === 'ENOENT' ? '保存目录不存在，请重新选择'
+            : `保存失败（${e?.code || 'unknown'}）`;
+      return res.status(400).json({ error: msg });
+    }
+    res.json({
+      ok: true,
+      file,
+      previewUrl: `/api/image/preview?file=${encodeURIComponent(file)}`,
+      bytes: buf.length,
+      tookMs: Date.now() - started,
+    });
+  } catch (err) {
+    // 兜底也要剥 key:异常消息可能带上 URL/头部回显。
+    res.status(500).json({ error: redactKey(err.message, null) });
+  }
+});
+
+/**
+ * GET /api/image/preview?file=<abs> — 回源图片给前端预览。
+ * 只允许读【已配置 provider 的 savePath 之下】的图片:拒 `..` 段 + resolve 后前缀比对
+ * + 扩展名白名单(见 resolvePreviewPath),防路径穿透读到 ~/.ssh 之类。
+ */
+/**
+ * 判官必修③:resolvePreviewPath 是纯字面计算,不解软链 —— savePath 里预埋一个
+ * `evil.png -> /外部/id_rsa` 就能把任意文件读走(判官实测 200 + 明文)。触发门槛很低:
+ * 把 savePath 设成 ~/Downloads 再解压一个带软链的 zip 即可。本仓 safe-path.js 早就
+ * 防过同一招(共享目录里预埋的 symlink),这里补齐。
+ * IO 留在路由层是刻意的:image-protocols.js 头部声明了"零 IO 纯函数",不往里塞 fs。
+ * 返回 true = 真实路径仍落在某个 savePath 之下。文件不存在交给上层的 404 分支。
+ */
+function realPathInsideSaveDirs(full, savePaths) {
+  let real;
+  try { real = realpathSync(full); } catch { return true; } // 不存在 → 交给 stat 报 404
+  for (const root of savePaths) {
+    if (typeof root !== 'string' || !root) continue;
+    let realRoot;
+    try { realRoot = realpathSync(root); } catch { continue; }
+    if (real !== realRoot && isPathInside(real, realRoot)) return true;
+  }
+  return false;
+}
+
+router.get('/image/preview', async (req, res) => {
+  const list = await readImageProviders();
+  const saveDirs = list.map((p) => p.savePath);
+  const full = resolvePreviewPath(String(req.query.file || ''), saveDirs);
+  if (!full) return res.status(400).json({ error: '非法的预览路径' });
+  if (!realPathInsideSaveDirs(full, saveDirs)) return res.status(400).json({ error: '非法的预览路径' });
+  try { await stat(full); } catch { return res.status(404).json({ error: '文件不存在（可能已被移动或删除）' }); }
+  const ext = extname(full).slice(1).toLowerCase();
+  res.setHeader('Content-Type', IMAGE_CONTENT_TYPES[ext] || 'application/octet-stream');
+  res.setHeader('Cache-Control', 'no-store');
+  // dotfiles:'allow' —— 保存目录路径里可能有点开头的目录段(sendFile 默认整条拒)。
+  res.sendFile(full, { dotfiles: 'allow' });
+});
+
+/**
+ * POST /api/image/reveal { file } — 在访达/资源管理器里定位刚出的图。
+ * 与预览同一道闸(resolvePreviewPath):只认 savePath 之下的图片,不接受任意路径。
+ * 远程/手机访问时作用在【跑 server 的那台机器】(同 /api/reveal-path 的既有预期)。
+ */
+router.post('/image/reveal', async (req, res) => {
+  const list = await readImageProviders();
+  const revealDirs = list.map((p) => p.savePath);
+  const full = resolvePreviewPath(String(req.body?.file || ''), revealDirs);
+  if (full && !realPathInsideSaveDirs(full, revealDirs)) return res.status(400).json({ error: '非法的路径' });
+  if (!full) return res.status(400).json({ error: '非法的文件路径' });
+  try {
+    const { execFile } = await import('child_process');
+    const { promisify } = await import('util');
+    const execFileP = promisify(execFile);
+    let cmd, args;
+    if (process.platform === 'darwin') { cmd = 'open'; args = ['-R', full]; }
+    else if (process.platform === 'win32') { cmd = 'explorer'; args = [`/select,${full}`]; }
+    else { cmd = 'xdg-open'; args = [full.slice(0, full.lastIndexOf('/'))]; }
+    // explorer 成功也常以非零码退出(Windows 三坑),不当失败。
+    try { await execFileP(cmd, args, { timeout: 10000 }); }
+    catch (e) { if (process.platform !== 'win32') throw e; }
+    res.json({ ok: true });
+  } catch (err) { res.status(err?.status || 500).json({ error: err.message }); }
+});
+
+export default router;

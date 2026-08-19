@@ -50,6 +50,7 @@ import { FileReviewPanel } from './components/FileChangesPanel.jsx';
 import { MemoryPanel } from './components/MemoryPanel.jsx';
 import { AgentsPanel } from './components/AgentsPanel.jsx';
 import { AgentMonitorPanel } from './components/AgentMonitorPanel.jsx';
+import ImagePanel from './components/ImagePanel.jsx';
 import { SubagentView } from './components/SubagentView.jsx';
 import BtwWindow from './components/BtwWindow.jsx';
 import { contextCanonicalKey, isValidContextResponse, pickBreakdownTier, applyExactResult, relativeAgeLabel } from './utils/contextCache.js';
@@ -81,6 +82,7 @@ import {
   Archive, ArchiveRestore, Trash2, EyeOff, Columns2, Smartphone, Pencil, Type, Palette,
   Menu, SquarePen, Gauge, Cpu, CheckCircle2, BookText, Sparkles, HelpCircle, Pin,
   Download, ClipboardCopy, LayoutGrid, MoreHorizontal, Star, Target,
+  Image as ImageIcon,
 } from './components/Icon.jsx';
 import { buildFontEntries, groupFonts, detectFonts, platformCandidates, queryLocalFontFamilies } from './utils/systemFonts.js';
 import { copyText } from './utils/clipboard.js';
@@ -857,6 +859,8 @@ const PANEL_MAP = {
   mcp: { label: '工具（MCP 服务器 · 插件）', icon: Server, component: MCPPanel },
   skills: { label: 'Skill 市场（导入官方技能）', icon: Sparkles, component: SkillsPanel },
   memory: { label: 'CLAUDE.md 指令', icon: BookText, component: MemoryPanel },
+  // r16-3 生图:自定义生图 provider(独立配置,不写 ~/.claude/settings.json)
+  image: { label: '生图（自定义生图 provider）', icon: ImageIcon, component: ImagePanel },
   // 文案改名(用户指定,仅显示名,id/组件/事件不动):坞入口叫「设置」,本面板入口叫「通用」。
   settings: { label: '通用', icon: Settings, component: SettingsPanel },
 };
@@ -933,7 +937,7 @@ function PaneCountPicker() {
 // 点 rail 图标后不收起:方便连续切换面板。持久展开也根治了导引 panel 步骤间 rail 被点暗区/外部收起反复开合的闪烁。
 const PANEL_SHORT = {
   files: '文件', monitor: '监控', agents: 'Agent', usage: '用量', processes: '进程',
-  changes: '审查', mcp: '工具', skills: '技能', memory: '指令', settings: '通用',
+  changes: '审查', mcp: '工具', skills: '技能', memory: '指令', image: '生图', settings: '通用',
 };
 function PanelDock({ rightPanel, setRightPanel, updateNotice, jumpToUpdate, attentionCount = 0 }) {
   const [railOpen, setRailOpen] = useState(false);
