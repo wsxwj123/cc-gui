@@ -1,13 +1,13 @@
-# Claude GUI
+# CC-GUI
 
 English | [中文（主文档）](README.md)
 
-Claude GUI is a local graphical shell for the [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI: a Tauri desktop app, a browser UI, and a mobile-friendly layout. Once running, you can browse and continue Claude Code sessions, send messages, compare panes side by side, and reach it from your phone over a private network such as Tailscale.
+CC-GUI is a local graphical shell for the [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI: a Tauri desktop app, a browser UI, and a mobile-friendly layout. Once running, you can browse and continue Claude Code sessions, send messages, compare panes side by side, and reach it from your phone over a private network such as Tailscale.
 
 > Fully local — it collects no data; every session runs through the `claude` CLI on your own machine.
 
 <p align="center">
-  <img src="docs/screenshots/hero.png" alt="Claude GUI main window" width="880"><br>
+  <img src="docs/screenshots/hero.png" alt="CC-GUI main window" width="880"><br>
   <em>Main window: the top bar covers it all — model / thinking effort / permission mode / provider switching, plus panels for split-screen, files, review, monitoring, agents, usage, skills and MCP tools</em>
 </p>
 
@@ -78,9 +78,9 @@ Grab your platform from the [Releases page](https://github.com/wsxwj123/claude-g
 
 | Platform | File |
 |---|---|
-| Windows (installer) | `Claude GUI_*_x64-setup.exe` |
-| Windows (MSI) | `Claude GUI_*_x64_en-US.msi` |
-| macOS (Apple Silicon) | `Claude GUI_*_aarch64.dmg` |
+| Windows (installer) | `CC-GUI_*_x64-setup.exe` |
+| Windows (MSI) | `CC-GUI_*_x64_en-US.msi` |
+| macOS (Apple Silicon) | `CC-GUI_*_aarch64.dmg` |
 
 > Packages are unsigned / un-notarized:
 > - **macOS**: right-click the app → **Open** the first time to bypass Gatekeeper (Apple Silicon only; for Intel Macs build with the `x86_64-apple-darwin` target yourself).
@@ -150,13 +150,13 @@ Output lands in `src-tauri/target/release/bundle/` (`.dmg` on macOS, `.exe` / `.
 | Blank page / can't send | Confirm the `claude` CLI works and Node ≥ 20; delete `client/dist` and `npm run build` again |
 | Code changes not showing | From source you must `npm run build` again (or re-launch `gui.command` / `gui.bat`) |
 | macOS `gui.command` does nothing | Right-click → **Open** once to authorize, or `chmod +x gui.command` |
-| **macOS says "Claude GUI.app is damaged and can't be opened"** (and Privacy & Security has no **Open Anyway** button — common on macOS 15+) | Not actually damaged — Gatekeeper added a quarantine flag to the unsigned app. In Terminal: `sudo xattr -rd com.apple.quarantine "/Applications/Claude GUI.app"` then enter your login password and double-click again |
+| **macOS says "CC-GUI.app is damaged and can't be opened"** (and Privacy & Security has no **Open Anyway** button — common on macOS 15+) | Not actually damaged — Gatekeeper added a quarantine flag to the unsigned app. In Terminal: `sudo xattr -rd com.apple.quarantine "/Applications/CC-GUI.app"` then enter your login password and double-click again |
 
 ---
 
 ## Acknowledgments
 
-- **[cc-switch](https://github.com/farion1231/cc-switch)** by [farion1231](https://github.com/farion1231) — an excellent multi-provider configuration manager for Claude Code. Claude GUI's one-click "import from cc-switch" integrates with it, and its provider management influenced our design. Thank you!
+- **[cc-switch](https://github.com/farion1231/cc-switch)** by [farion1231](https://github.com/farion1231) — an excellent multi-provider configuration manager for Claude Code. CC-GUI's one-click "import from cc-switch" integrates with it, and its provider management influenced our design. Thank you!
 
 ---
 

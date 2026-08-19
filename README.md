@@ -1,4 +1,4 @@
-# Claude GUI
+# CC-GUI
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT"></a>
@@ -9,18 +9,18 @@
 
 <p align="center"><a href="README.en.md">English</a> | 中文</p>
 
-**Claude GUI 是 [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI 的本地图形外壳**:一个 Tauri 桌面应用 + 浏览器界面 + 手机友好布局。浏览并续接会话、分屏对比、图形化批准权限与计划,还能经 Tailscale 等私有网络在手机上接管正在跑的会话。
+**CC-GUI 是 [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI 的本地图形外壳**:一个 Tauri 桌面应用 + 浏览器界面 + 手机友好布局。浏览并续接会话、分屏对比、图形化批准权限与计划,还能经 Tailscale 等私有网络在手机上接管正在跑的会话。
 
-> **English**: Claude GUI is a fully local graphical shell for the Claude Code CLI — a Tauri desktop app, a browser UI, and a mobile-friendly layout. Zero telemetry: every session runs through the `claude` CLI on your own machine. Split-screen sessions with per-pane model/permission, third-party provider switching, graphical permission & plan-review cards, subagent visualization, skills marketplace, and phone takeover over a private network.
+> **English**: CC-GUI is a fully local graphical shell for the Claude Code CLI — a Tauri desktop app, a browser UI, and a mobile-friendly layout. Zero telemetry: every session runs through the `claude` CLI on your own machine. Split-screen sessions with per-pane model/permission, third-party provider switching, graphical permission & plan-review cards, subagent visualization, skills marketplace, and phone takeover over a private network.
 
 <p align="center">
-  <img src="docs/screenshots/hero.png" alt="Claude GUI 主界面" width="880"><br>
+  <img src="docs/screenshots/hero.png" alt="CC-GUI 主界面" width="880"><br>
   <em>主界面:顶栏一排即全部能力——模型 / 思考强度 / 权限模式 / Provider 切换,以及分屏、文件、审查、监控、Agent、用量、技能、MCP 工具等面板入口</em>
 </p>
 
 ---
 
-## 为什么是 Claude GUI
+## 为什么是 CC-GUI
 
 - **纯本地、零遥测** —— 不收集任何数据,所有会话都走你自己机器上的 `claude` 进程,没有云、没有账号、没有中间人
 - **分屏多会话** —— 多窗格并排,每个窗格独立的模型 / 权限模式 / 思考强度
@@ -111,9 +111,9 @@ GUI 只是 `claude` CLI 的外壳,**唯一硬性前置是装好 Claude Code CLI*
 
 | 平台 | 文件 |
 |---|---|
-| Windows 安装程序 | `Claude GUI_*_x64-setup.exe` |
-| Windows MSI | `Claude GUI_*_x64_en-US.msi` |
-| macOS(Apple Silicon) | `Claude GUI_*_aarch64.dmg` |
+| Windows 安装程序 | `CC-GUI_*_x64-setup.exe` |
+| Windows MSI | `CC-GUI_*_x64_en-US.msi` |
+| macOS(Apple Silicon) | `CC-GUI_*_aarch64.dmg` |
 
 > 安装包未签名 / 未公证:
 > - **macOS**:首次打开「右键图标 → 打开」绕过 Gatekeeper(仅支持 Apple Silicon,Intel Mac 需自行用 `x86_64-apple-darwin` target 构建)。
@@ -183,13 +183,13 @@ npm run tauri:build
 | 打开白屏 / 发不了消息 | 确认 `claude` CLI 能用、Node ≥ 20;删掉 `client/dist` 后重新 `npm run build` |
 | 改了代码不生效 | 源码方式下需重新 `npm run build`(或重新双击 `gui.command` / `gui.bat`) |
 | macOS 双击 `gui.command` 没反应 | 「右键 → 打开」授权一次;或终端 `chmod +x gui.command` |
-| **macOS 提示「Claude GUI.app 已损坏,无法打开」**(且「隐私与安全性」里没有「仍要打开」按钮,macOS 15 后常见) | 这不是真损坏,是 Gatekeeper 给未签名 app 加的 quarantine 标记。终端跑一次:`sudo xattr -rd com.apple.quarantine "/Applications/Claude GUI.app"` 输入登录密码后再双击即可 |
+| **macOS 提示「CC-GUI.app 已损坏,无法打开」**(且「隐私与安全性」里没有「仍要打开」按钮,macOS 15 后常见) | 这不是真损坏,是 Gatekeeper 给未签名 app 加的 quarantine 标记。终端跑一次:`sudo xattr -rd com.apple.quarantine "/Applications/CC-GUI.app"` 输入登录密码后再双击即可 |
 
 ---
 
 ## 致谢
 
-- **[cc-switch](https://github.com/farion1231/cc-switch)**(作者 [farion1231](https://github.com/farion1231))—— 优秀的 Claude Code 多 Provider 配置管理工具。Claude GUI 的「从 cc-switch 一键导入 Provider」功能与它对接,Provider 管理的设计也从中受益良多,特此感谢。
+- **[cc-switch](https://github.com/farion1231/cc-switch)**(作者 [farion1231](https://github.com/farion1231))—— 优秀的 Claude Code 多 Provider 配置管理工具。CC-GUI 的「从 cc-switch 一键导入 Provider」功能与它对接,Provider 管理的设计也从中受益良多,特此感谢。
 
 ---
 
