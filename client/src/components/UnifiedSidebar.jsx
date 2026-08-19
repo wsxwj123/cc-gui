@@ -334,10 +334,9 @@ export function UnifiedSidebar() {
     for (const p of st.projects) if (!st.sessionsByProject[p.hash]) st.fetchSessionsForPanel(p.hash);
   }, [view.groupMode, projects]);
   const projByHash = useMemo(() => new Map((projects || []).map((p) => [p.hash, p])), [projects]);
-  const flatSessions = useMemo(() => (view.groupMode === 'single'
-    ? flattenSessionRows(sessionsByProject)
-      .filter((s) => !pendingIds.has(s.sessionId) && (!q || String(titleOf(s) || '').toLowerCase().includes(q)))
-    : EMPTY_ARRAY), [view.groupMode, sessionsByProject, pendingIds, q, titleOf]);
+  // flatSessions 依赖 pendingIds(声明在删除挂起区,下方)——useMemo 回调与 deps 数组
+  // 都在渲染时同步求值,放这里会在 const 初始化前读取(TDZ 崩渲染),故声明移至
+  // pendingIds 之后(见删除挂起区尾)。0.2.296 全端崩溃根因,勿回移。
 
   // ── 面板级刷新:某项目会话变动后同刷 panel 缓存 + (若是选中项目)旧槽 ─────────
   const refreshProjectSessions = (projectHash) => {
@@ -554,6 +553,10 @@ export function UnifiedSidebar() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   const pendingIds = useMemo(() => new Set(pendingDeletes.map((p) => p.session.sessionId)), [pendingDeletes]);
+  const flatSessions = useMemo(() => (view.groupMode === 'single'
+    ? flattenSessionRows(sessionsByProject)
+      .filter((s) => !pendingIds.has(s.sessionId) && (!q || String(titleOf(s) || '').toLowerCase().includes(q)))
+    : EMPTY_ARRAY), [view.groupMode, sessionsByProject, pendingIds, q, titleOf]);
 
   // ── 添加项目(系统选择器/路径弹窗/cgui:add-project,原 ProjectList 逻辑原样)────
   const [addDialogOpen, setAddDialogOpen] = useState(false);
