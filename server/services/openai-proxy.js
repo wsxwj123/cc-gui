@@ -13,6 +13,7 @@
 
 import http from 'node:http';
 import { isCountTokensRequest, estimateInputTokens } from '../utils/context-tokens.js';
+import { lookupModelCapabilities, EFFORT_IDS } from '../utils/model-capabilities.js';
 
 // Fixed loopback port so the ANTHROPIC_BASE_URL written into settings.json
 // stays valid across server restarts (watchdog). Falls back to an ephemeral
@@ -215,10 +216,28 @@ function sanitizeToolInput(name, input) {
   return next;
 }
 
-function normalizeReasoningEffort(body) {
+// r15-4:'max' 的折算从"一刀切降成 xhigh"改为按目标模型的实测档位决定。
+// 旧行为的来历是 OpenAI codex 系(gpt-5*-codex 认 xhigh 不认 max),但一刀切套到所有
+// OpenAI 兼容端点就错了:DeepSeek 官方 reasoning_effort 只认 low/high/max,且把 xhigh
+// 映射回 high —— 于是中转站上「高」和「极限」发的是同一个东西,max 档白给。
+// 判据只信数据表(family==='table'),正则命中的"全档"是兜底猜测、不足以据此升档,
+// 故那些情况一律维持既有的 xhigh(保守,不改变未知模型的现状)。
+function translateMaxEffort(model) {
+  // [1m] 是 GUI 给 1M 上下文会话追加的后缀(App.jsx 发送前拼、chat.js 原样 --model 下发),
+  // 带着它查表必落空 → 整套折算对 1M 会话失效(客户端同一 lookup 在 effortCaps.js 早已剥)。
+  const hit = lookupModelCapabilities(String(model || '').replace(/\[1m\]/i, ''), 'openai');
+  if (hit?.family !== 'table') return 'xhigh';      // 表外 / 只被正则猜中 → 维持旧行为
+  if (hit.reasoning === false) return null;          // 表说该模型不思考 → 干脆不下发
+  if (!hit.efforts) return 'max';                    // 表说全档 → 它确实认 max
+  if (hit.efforts.includes('max')) return 'max';
+  if (hit.efforts.includes('xhigh')) return 'xhigh';
+  return [...EFFORT_IDS].reverse().find((e) => hit.efforts.includes(e)) || 'xhigh'; // 落该模型最高可用档
+}
+
+export function normalizeReasoningEffort(body) { // export 仅为可单测
   const raw = body?.effort || body?.reasoning_effort || body?.thinking?.effort;
   if (typeof raw !== 'string') return null;
-  if (raw === 'max') return 'xhigh';
+  if (raw === 'max') return translateMaxEffort(body?.model);
   if (['low', 'medium', 'high', 'xhigh', 'minimal', 'none'].includes(raw)) return raw;
   return null;
 }

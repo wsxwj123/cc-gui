@@ -34,7 +34,10 @@ function toEntry(model) {
   // 'off'(关思考)与 'minimal' 丢弃:CLI 的 --effort 都不接受。
   const lv = getSupportedThinkingLevels(model).filter((l) => CGUI_EFFORTS.includes(l));
   if (!lv.length) return { reasoning: false };
-  if (lv.length === CGUI_EFFORTS.length) return null; // 全档 = 不产生条目
+  // r15-4:全档也写显式条目。原先返回 null(=不产生条目)导致"表说全档"与"表里没有"
+  // 不可区分,于是 claude-opus-5/sonnet-5/gpt-5.6-luna 这 58 个全档模型在 openai-proxy
+  // 里落回家族正则、max 被降成 xhigh(正是要修的 bug)。写成五档全集不影响 modelMeta:
+  // catalogPrefillEntry 对"五档全"仍返回 null(全选=等于不声明),存储侧零变化。
   return { efforts: CGUI_EFFORTS.filter((e) => lv.includes(e)) };
 }
 // ── 手工补丁层(pi-ai 快照之后发布的模型;来源=各家官方 API 文档,核对日期 2026-08-19)──
@@ -61,7 +64,7 @@ const mergeInto = (bag, id, entry) => {
   if (a === null || entry === null) { bag[id] = null; return; }
   if (!a.efforts && !entry.efforts) return;
   const u = new Set([...(a.efforts || CGUI_EFFORTS), ...(entry.efforts || CGUI_EFFORTS)]);
-  bag[id] = u.size === CGUI_EFFORTS.length ? null : { efforts: CGUI_EFFORTS.filter((e) => u.has(e)) };
+  bag[id] = { efforts: CGUI_EFFORTS.filter((e) => u.has(e)) }; // r15-4:全档也显式写,不再用 null 表达
 };
 for (const f of fs.readdirSync(D).filter((x) => x.endsWith('.json') && !x.startsWith('.'))) {
   const j = JSON.parse(fs.readFileSync(path.join(D, f), 'utf8'));
@@ -83,13 +86,9 @@ for (const id of ids) {
   const hasO = id in raw.openai, hasA = id in raw.anthropic;
   if (hasO && hasA && !eq(o, a)) { byProto[id] = { openai: o, anthropic: a }; continue; }
   const v = hasO ? o : a;
-  if (v !== null && v !== undefined) byId[id] = v;
+  if (v !== undefined) byId[id] = v;
 }
-for (const id of Object.keys(byProto)) {
-  const e = byProto[id];
-  if (e.openai === null) delete e.openai;      // null = 全档,省略即可
-  if (e.anthropic === null) delete e.anthropic;
-}
+// r15-4:byProto 两侧一律写实条目(不再用缺键表达全档);读侧 tableLookup 的缺键分支保留作防御。
 for (const [id, e] of Object.entries(MANUAL_OVERRIDES)) { byId[id] = e; delete byProto[id]; }
 fs.writeFileSync(OUT, JSON.stringify({ source: '@earendil-works/pi-ai@0.82.1 (MIT) + 官方文档手工补丁', byId, byProto }));
 console.log('byId:', Object.keys(byId).length, '条 | byProto(协议相关):', Object.keys(byProto).length,

@@ -295,10 +295,16 @@ const runIsolated = (home) => JSON.parse(execFileSync(process.execPath, ['-e', C
   // ① 协议区分:同一 id 两种协议档位不同(byProto)
   assert.deepEqual(lookupModelCapabilities('deepseek/deepseek-v4-pro', 'openai').efforts, ['high', 'xhigh'], 't10: byProto openai 口径');
   assert.deepEqual(lookupModelCapabilities('deepseek/deepseek-v4-pro', 'anthropic').efforts, ['low', 'medium', 'high'], 't10: byProto anthropic 口径');
-  // byProto 条目缺某协议键 = 该协议全档,且**不得下探 byId/正则**(否则安上另一协议的档)
+  // r15-4:全档改为显式写五档条目(原先靠"缺键/null"表达,导致"表说全档"与"表里没有"
+  // 不可区分 → openai-proxy 里 claude-opus-5 等 58 个全档模型的 max 被降成 xhigh)。
+  // 两条语义要同时成立:①lookup 能读出五档全集(可表达);②catalogPrefillEntry 仍返回
+  // null(全选=等于不声明),即存储侧 modelMeta 零变化。
   const lunaOa = lookupModelCapabilities('openai/gpt-5.6-luna', 'openai');
-  assert.equal(lunaOa.efforts, null, 't10: byProto 缺 openai 键 = 该协议全档');
-  assert.equal(catalogPrefillEntry('openai/gpt-5.6-luna', 'openai'), null, 't10: 全档不产条目');
+  assert.deepEqual(lunaOa.efforts, ['low', 'medium', 'high', 'xhigh', 'max'], 't10: 全档在表里可表达为五档全集');
+  assert.equal(catalogPrefillEntry('openai/gpt-5.6-luna', 'openai'), null, 't10: 全档仍不产 modelMeta 条目(存储侧零变化)');
+  assert.deepEqual(lookupModelCapabilities('claude-opus-5', 'anthropic').efforts, ['low', 'medium', 'high', 'xhigh', 'max'],
+    't10: 主力全档模型(claude-opus-5)进表 —— 此前被生成脚本丢弃,openai-proxy 里 max 被降成 xhigh');
+  assert.equal(catalogPrefillEntry('claude-opus-5', 'anthropic'), null, 't10: 同上,存储侧仍不产条目');
   assert.deepEqual(lookupModelCapabilities('openai/gpt-5.6-luna', 'anthropic').efforts, ['low', 'medium', 'high', 'xhigh'], 't10: 同 id 的 anthropic 键仍生效');
   // ② 共用兜底:未进 byProto 的模型两协议同结论(用户的 anthropic 协议中转靠这条生效)
   for (const proto of ['openai', 'anthropic']) {
