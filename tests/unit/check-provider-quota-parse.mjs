@@ -33,6 +33,8 @@ const parse1 = (provider, body) => parseQuota(one(provider), [body]);
   assert.equal(kimi.vendor, 'kimi-coding');
   assert.deepEqual(kimi.urls, ['https://api.kimi.com/coding/v1/usages'], '/v1/usages 是复数');
   assert.equal(kimi.auth, 'bearer');
+  assert.deepEqual(one({ baseURL: 'https://api.kimi.com/coding/v1', type: 'anthropic' }).urls,
+    ['https://api.kimi.com/coding/v1/usages'], 'base 已以 /v1 结尾时不许拼成 /v1/v1(与 opencode 同一套防御)');
   // 同 host 但 path 不含 /coding → 不是 Kimi Code 那条线
   assert.deepEqual(pickCandidates({ baseURL: 'https://api.kimi.com/v1', type: 'anthropic' }), [],
     'api.kimi.com 非 /coding 路径没有实证端点 → 不瞎猜');
@@ -225,6 +227,12 @@ const parse1 = (provider, body) => parseQuota(one(provider), [body]);
   assert.equal(life.items[0].max, 10);
   assert.equal(parse1(p, { data: { limit: 10, limit_remaining: 2.5, limit_reset: 'monthly' } }).items[0].label, '月');
   assert.equal(parse1(p, {}), null);
+  // 有上限但读不到剩余量 → 整条降级成"查不到",不许渲染一行只有周期、没数字没方向词的空条目
+  assert.equal(parse1(p, { data: { limit: 10, limit_remaining: null, limit_reset: null } }), null,
+    'limit_remaining 缺失 → 不给半条数据(UI 会显示成一行光秃秃的"累计（终身）")');
+  // "两者为 null = 无上限"的判据是**两个键都在且都为 null**,不能把"根本没这两个键"当无限
+  assert.equal(parse1(p, { data: { label: 'sk-or-…', usage: 3.2 } }), null,
+    '响应里根本没有 limit/limit_remaining 键 → 不许自信地判成"无限"');
 }
 
 // ── One-API 兜底:1e8=无限(坑①)、单位不可靠(坑②)、total_usage 已 ×100 ────

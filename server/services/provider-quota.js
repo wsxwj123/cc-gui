@@ -57,6 +57,10 @@ export function windowLabel(w, fallback = '额度') {
 }
 
 // 只认 http(s):`new URL('ftp:/x')` 同样能过,不拦就会拿着 key 去请求非 HTTP 协议。
+// base 已以 /v1 结尾就直接拼,否则补一层 —— Kimi 与 opencode 两条线共用同一套防御,
+// 别拼成 /v1/v1。
+const v1 = (base, path) => (/\/v1$/.test(base) ? `${base}/${path}` : `${base}/v1/${path}`);
+
 function safeURL(baseURL) {
   if (typeof baseURL !== 'string' || !baseURL.trim()) return null;
   try {
@@ -80,7 +84,7 @@ export function pickCandidates(provider) {
 
   // Kimi Code(套餐):/v1/usages —— **复数**,官方文档未收录(证据是第三方插件实现)。
   if (host === 'api.kimi.com' && u.pathname.includes('/coding')) {
-    return [{ vendor: 'kimi-coding', auth: 'bearer', urls: [`${base}/v1/usages`] }];
+    return [{ vendor: 'kimi-coding', auth: 'bearer', urls: [v1(base, 'usages')] }];
   }
   // Moonshot(按量):余额端点在顶级 /v1,不跟用户填的 path 走。.cn 计人民币,.ai 计美元。
   if (host === 'api.moonshot.cn' || host === 'api.moonshot.ai') {
@@ -101,9 +105,8 @@ export function pickCandidates(provider) {
   if (host.includes('minimaxi.com') || host.includes('minimax.io')) {
     return [{ vendor: 'minimax', auth: 'bearer', urls: [`${origin}/v1/token_plan/remains`] }];
   }
-  // opencode:base 已以 /v1 结尾就直接拼 /usage,否则补 /v1 —— 别拼成 /v1/v1。
   if (host === 'opencode.ai') {
-    return [{ vendor: 'opencode', auth: 'bearer', urls: [/\/v1$/.test(base) ? `${base}/usage` : `${base}/v1/usage`] }];
+    return [{ vendor: 'opencode', auth: 'bearer', urls: [v1(base, 'usage')] }];
   }
   if (host.includes('siliconflow')) {
     return [{ vendor: 'siliconflow', auth: 'bearer', urls: [`${base}/user/info`] }];
@@ -241,16 +244,21 @@ function parseSiliconflow(j) {
 function parseOpenrouter(j, currency) {
   const d = j?.data;
   if (!d || typeof d !== 'object') return null;
-  if (d.limit == null && d.limit_remaining == null) {
+  // 「两者为 null = 无上限」的判据是**两个键都在且都为 null**。用 `== null` 会把"响应里
+  // 压根没这两个键"(字段改名/换了个上游)也判成无限 —— 那是拿"读不到"冒充"没上限"。
+  const has = (k) => Object.prototype.hasOwnProperty.call(d, k);
+  if (has('limit') && has('limit_remaining') && d.limit === null && d.limit_remaining === null) {
     return { kind: 'amount', currency, items: [item({ label: '额度', direction: 'left', unlimited: true })] };
   }
+  // 读不到剩余量就整条降级成"查不到"。只有 max 没有 value 会渲染出一行光秃秃的周期词
+  // (没数字、没方向词、没进度条),比明写"查不到"更像是坏了。
   const left = num(d.limit_remaining);
+  if (left === null) return null;
   const max = num(d.limit);
-  if (left === null && max === null) return null;
   const label = d.limit_reset == null ? '累计（终身）' : windowLabel(d.limit_reset, '额度');
   return {
     kind: 'amount', currency,
-    items: [item({ label, direction: 'left', value: left ?? undefined, max: max ?? undefined })],
+    items: [item({ label, direction: 'left', value: left, max: max ?? undefined })],
   };
 }
 
@@ -352,5 +360,6 @@ export function computeLow(payload, thresholds = DEFAULT_THRESHOLDS) {
 export function reasonNote(reason) {
   if (reason === 'auth') return '额度接口拒绝了当前密钥（可能未开通该接口或权限不足）';
   if (reason === 'network') return '额度接口请求失败（网络不可达或超时）';
+  if (reason === 'blocked') return '该 provider 的地址指向内网，已拒绝查询额度（SSRF 防护）';
   return '该 provider 不提供额度接口';
 }

@@ -5,15 +5,15 @@
 // 探测语义(规格):按序请求候选,**第一个 HTTP 200 且字段能解析成功**的才采纳;
 // 全失败不抛,回 {ok:false, reason}。解析失败必须静默降级(Kimi/opencode 的端点官方
 // 文档都没收录,不能弹错误、不能打红)。
-// 端到端:隔离 HOME 造 provider fixture,起后端只用 6702(check-permission-hook-bridge
-// 要求跑完 6702 无监听),假上游挂在同一个端口上 —— **绝不打真实第三方 API**。
+// 端到端:隔离 HOME 造 provider fixture,起后端只用 6703(check-permission-hook-bridge
+// 绑死 6702,不去抢它),假上游挂在同一个端口上 —— **绝不打真实第三方 API**。
 import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { probeQuota } from '../../server/services/provider-quota.js';
 
-const PORT = 6702; // 测试专用端口,绝不碰 6677/6699
+const PORT = 6703; // 测试专用端口(6702 被 check-permission-hook-bridge 绑死且无重试,别抢)
 const OK_MOONSHOT = { code: 0, data: { available_balance: 42 } };
 const OK_DEEPSEEK = { balance_infos: [{ currency: 'CNY', total_balance: '7.00' }] };
 
@@ -120,11 +120,16 @@ const PROVIDERS = [
     id: 'mimo-1', name: 'MiMo', type: 'openai',
     baseURL: 'https://api.xiaomimimo.com/v1', apiKey: 'dummy-not-a-real-key', models: ['mimo'],
   },
+  {
+    // SSRF:存量条目/DNS rebinding 能让 baseURL 指到内网。探测前必须再解析一次主机名。
+    id: 'intranet-1', name: '内网', type: 'openai',
+    baseURL: 'http://10.0.0.1/v1', apiKey: 'dummy-not-a-real-key', models: ['x'],
+  },
 ];
 await writeFile(join(guiDir, 'custom-providers.json'), JSON.stringify(PROVIDERS));
 
 const { default: express } = await import('express');
-const { default: quotaRouter } = await import('../../server/routes/provider-quota.js');
+const { default: quotaRouter, makeFetcher } = await import('../../server/routes/provider-quota.js');
 
 let upstreamHits = 0;
 let sawAuthHeader = false;
@@ -140,7 +145,7 @@ app.get('/relay/v1/dashboard/billing/usage', (_req, res) => {
   upstreamHits++;
   res.json({ object: 'list', total_usage: 9500 }); // 已用 ×100 → 95 → 余额 5
 });
-// 6702 是几个测试共用的专用端口(check-permission-hook-bridge 刚跑完可能还没完全放手)
+// 端口是几个测试共用的(隔壁跑完可能还没完全放手)
 // → listen 失败就退让重试,不让批量跑批出现假失败。
 const listen = async () => {
   for (let i = 0; ; i++) {
@@ -155,6 +160,13 @@ const listen = async () => {
     }
   }
 };
+// 认证头回显 + 超大响应体,给 makeFetcher 的直测用(智谱的裸 token 与响应上限
+// 在纯函数层测不到,只能打真的 HTTP)。
+let seenAuth = null;
+app.get('/echo-auth', (req, res) => { seenAuth = req.headers.authorization ?? null; res.json({ ok: true }); });
+app.get('/huge', (_req, res) => res.type('application/json').send(`{"pad":"${'x'.repeat(1_200_000)}"}`));
+// 重定向不跟随的探针:302 指回本机另一个端点,跟随了就会拿到 200。
+app.get('/redir', (_req, res) => res.redirect(302, `http://127.0.0.1:${PORT}/echo-auth`));
 const server = await listen();
 const get = async () => {
   const r = await fetch(`http://127.0.0.1:${PORT}/api/provider-quota`);
@@ -208,6 +220,31 @@ try {
   const ghost = await get();
   assert.equal(ghost.body.ok, false);
   assert.match(ghost.body.note, /未找到当前 provider 的配置/, '非官方但查不到配置 → 明写原因');
+
+  // ⑥ baseURL 指向内网 → 探测前就拦下(SSRF 守卫),一个请求都不发
+  await writeFile(join(guiDir, 'active-provider.json'), JSON.stringify({ id: 'intranet-1' }));
+  const blocked = await get();
+  assert.equal(blocked.body.ok, false);
+  assert.equal(blocked.body.reason, 'blocked', '私网地址必须被拒(存量条目/DNS rebinding 绕过写入端守卫)');
+  assert.match(blocked.body.note, /SSRF/, '明写原因,不假装成"没有额度接口"');
+  assert.equal(upstreamHits, 2, 'SSRF 被拒时零请求');
+
+  // ⑦ 路由把 candidate.auth 原样传下去:智谱是裸 token,写错就是 401 —— 纯函数层测不到这一位
+  const fetcher = makeFetcher('dummy-not-a-real-key');
+  await fetcher(`http://127.0.0.1:${PORT}/echo-auth`, { auth: 'raw' });
+  assert.equal(seenAuth, 'dummy-not-a-real-key', 'auth=raw → 裸 token,不许加 Bearer');
+  await fetcher(`http://127.0.0.1:${PORT}/echo-auth`, { auth: 'bearer' });
+  assert.equal(seenAuth, 'Bearer dummy-not-a-real-key', 'auth=bearer → 带 Bearer 前缀');
+
+  // ⑧ 不跟随重定向:守卫只解析了 baseURL 主机名,跟随 302 等于把内网探测面还回去
+  const red = await fetcher(`http://127.0.0.1:${PORT}/redir`, { auth: 'bearer' });
+  assert.equal(red.status, 302, '3xx 原样返回(跟随了就会是 200)→ 当作非 200 失败');
+  assert.equal(red.body, null);
+
+  // ⑨ 响应体上限:host 是用户自填的,不能让它往内存灌任意大小
+  const huge = await fetcher(`http://127.0.0.1:${PORT}/huge`, { auth: 'bearer' });
+  assert.equal(huge.status, 200);
+  assert.equal(huge.body, null, '超过 1MB 的响应直接判失败,不进内存也不解析');
 } finally {
   await new Promise((resolve) => server.close(resolve));
   await rm(home, { recursive: true, force: true });

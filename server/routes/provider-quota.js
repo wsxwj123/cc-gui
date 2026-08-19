@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { readFile } from 'fs/promises';
 import { homedir } from 'os';
 import { join } from 'path';
-import { readCustomProviders, readActiveProviderId } from './settings.js';
+import { readCustomProviders, readActiveProviderId, assertPublicBaseURL } from './settings.js';
 import {
   pickCandidates, authHeaders, probeQuota, computeLow, normalizeThresholds, reasonNote,
 } from '../services/provider-quota.js';
@@ -46,16 +46,39 @@ async function readThresholds() {
   } catch { return normalizeThresholds(null); }
 }
 
-// fetcher:8s 超时,返回 { status, body }。body 是解析后的 JSON(非 JSON 时给 null,
+// 响应体上限。这条路的 host 是**用户自填的**,不设上限就能在 8s 窗口里往内存灌任意大小。
+// 额度响应正常都在几 KB。
+const MAX_BODY = 1_000_000;
+// ponytail:只做截断不做流式解析 —— 超限直接当失败,没必要为它写增量 JSON 解析器。
+async function readCapped(res) {
+  const len = Number(res.headers.get('content-length'));
+  if (Number.isFinite(len) && len > MAX_BODY) { await res.body?.cancel?.().catch(() => {}); return null; }
+  if (!res.body) return '';
+  let size = 0;
+  const parts = [];
+  for await (const chunk of res.body) {
+    size += chunk.length;
+    if (size > MAX_BODY) return null; // 退出 for-await 会取消流,不会继续收
+    parts.push(chunk);
+  }
+  return Buffer.concat(parts).toString('utf8');
+}
+
+// fetcher:8s 超时,返回 { status, body }。body 是解析后的 JSON(非 JSON / 超限时给 null,
 // 交由解析层判失败)。**错误信息里不带任何 header/key**。
-function makeFetcher(apiKey) {
+// export 仅为单测:要钉住"路由把 candidate.auth 原样传下去"(智谱的裸 token 写错就是 401,
+// 而这一位在纯函数层测不到)。
+export function makeFetcher(apiKey) {
   return async (url, candidate) => {
     const r = await fetch(url, {
       headers: { ...authHeaders(candidate.auth, apiKey), Accept: 'application/json' },
       signal: AbortSignal.timeout(TIMEOUT_MS),
+      // 不跟随重定向:上面那道 SSRF 守卫只解析了 baseURL 的主机名,跟随 302 等于把内网
+      // 探测面又还回去(上游把我们重定向到 169.254.169.254 之类)。3xx 直接当非 200 失败。
+      redirect: 'manual',
     });
     let body = null;
-    try { body = JSON.parse(await r.text()); } catch { body = null; }
+    try { body = JSON.parse(await readCapped(r)); } catch { body = null; }
     return { status: r.status, body };
   };
 }
@@ -86,6 +109,16 @@ router.get('/provider-quota', async (_req, res) => {
     return res.json({ ...head, ok: false, reason: cooldown.reason || 'no-endpoint', note: cooldown.note });
   }
 
+  // SSRF 守卫。这里是全仓唯一"带存储 apiKey 打存储 baseURL"的新调用点 —— 写入端
+  // (probeUpstreamModels)早有同一道门,但存量条目与 DNS rebinding 会绕过它,故探测前
+  // 再解析一次主机名(环回放行:本机中转是合法场景;私网/链路本地一律拒)。
+  try {
+    await assertPublicBaseURL(provider.baseURL);
+  } catch {
+    cooldown = { providerId: provider.id, until: Date.now() + CACHE_MS, reason: 'blocked', note: reasonNote('blocked') };
+    return res.json({ ...head, ok: false, reason: 'blocked', note: cooldown.note });
+  }
+
   const all = pickCandidates(provider);
   // 命中过的端点提前:省掉每次重试前面的候选。
   const hit = endpointMemo.get(provider.id);
@@ -103,7 +136,7 @@ router.get('/provider-quota', async (_req, res) => {
       if (!result.ok) {
         endpointMemo.delete(provider.id);
         cooldown = { providerId: provider.id, until: Date.now() + CACHE_MS, reason: result.reason, note: reasonNote(result.reason) };
-        return null;
+        return { reason: result.reason }; // 直接带回失败原因:全局 cooldown 可能已被另一个 provider 的探测清空
       }
       endpointMemo.set(provider.id, result.endpoint);
       const data = {
@@ -112,16 +145,17 @@ router.get('/provider-quota', async (_req, res) => {
       };
       cache = { at: Date.now(), providerId: provider.id, data };
       cooldown = { providerId: null, until: 0, note: '' }; // 成功即解冷却
-      return data;
+      return { data };
     })();
     inflight = { providerId: provider.id, promise };
     promise.catch(() => {}).finally(() => { if (inflight?.promise === promise) inflight = null; });
   }
-  const data = await inflight.promise;
-  if (data) return res.json(data);
+  const out = await inflight.promise;
+  if (out.data) return res.json(out.data);
   // 探测失败:有旧数据就回放并标 degraded(不把陈旧数据伪装成新鲜),没有就回人话原因。
-  if (cache?.providerId === provider.id) return res.json({ ...cache.data, degraded: true, note: cooldown.note });
-  res.json({ ...head, ok: false, reason: cooldown.reason, note: cooldown.note });
+  const note = reasonNote(out.reason);
+  if (cache?.providerId === provider.id) return res.json({ ...cache.data, degraded: true, note });
+  res.json({ ...head, ok: false, reason: out.reason, note });
 });
 
 export default router;
