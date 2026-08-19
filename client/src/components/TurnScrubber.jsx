@@ -42,6 +42,7 @@ export default function TurnScrubber({ containerRef, turns, onNavigate }) {
     probe0Ref.current?.getBoundingClientRect(),
     probeNRef.current?.getBoundingClientRect(),
     PROBE_SPAN,
+    parseFloat(document.documentElement.style.zoom) || 1, // r14-3:指针是视觉像素,需按 zoom 折回布局空间
   );
 
   const measure = useCallback(() => {

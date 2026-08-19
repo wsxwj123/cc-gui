@@ -146,36 +146,32 @@ const approx = (a, b, eps = 1e-6) => Math.abs(a - b) <= eps;
 
 console.log('check-turn-scrubber-solve: all passed');
 
-// t7(r13-p2-14):指针本地 y 走【两点标定】——探针实测「布局px → client px」映射。
-// 引擎实证(WebKit/Chromium 同一最小复现,zoom=1.2):
-//   clientY=320 rectTop=120 rectHeight=480 offsetHeight=400 → 真值 166.67
-//   offsetY 返回 200 = 视觉像素(≠布局像素)→ p2-12 用它当布局px 使鱼眼低 20%。
-// 标定法只用 clientY 与两枚同定位探针的 rect,不依赖任何 API 的缩放语义。
+// t7(r14-3):指针换算必须同时正确于【两种内核的混合坐标口径】——真机取证定案。
+// WKWebView 两点悬停实测:鼠标 250→高亮 296、450→高亮 530,偏差比 1.17≈zoom(1.2)。
+// 根因:getBoundingClientRect 在 WebKit 返回布局坐标、Chromium 返回视觉坐标,
+// 而 MouseEvent.clientY 两内核都是视觉坐标 → 只标定 rect 空间必差一个 zoom。
 {
   const { pointerLocalY, calibrateFromProbes } = await import('../../client/src/utils/turnWave.js');
-  const H = 400;
-  // zoom=1.2 场景:布局 0 → client 120;布局 100 → client 240
-  const cal = calibrateFromProbes({ top: 120 }, { top: 240 }, 100);
-  assert.equal(cal.perLayoutPx, 1.2, 't7: 标定出 1.2 视觉px/布局px');
-  assert.equal(cal.originClientY, 120, 't7: 原点为探针0 的 client top');
-  assert.ok(Math.abs(pointerLocalY({ clientY: 320 }, H, cal) - 166.67) < 0.01, 't7: 指针 client 320 → 布局 166.67(真值)');
-  // zoom=1 场景:映射恒等
-  const cal1 = calibrateFromProbes({ top: 100 }, { top: 200 }, 100);
-  assert.equal(pointerLocalY({ clientY: 300 }, H, cal1), 200, 't7: zoom=1 下恒等映射');
-  // 夹紧
-  assert.equal(pointerLocalY({ clientY: 0 }, H, cal), 0, 't7: 上越界夹紧');
-  assert.equal(pointerLocalY({ clientY: 9999 }, H, cal), H, 't7: 下越界夹紧');
-  // 无标定回落 fraction(不崩且在界内)
-  const fb = pointerLocalY({ clientY: 300, currentTarget: { getBoundingClientRect: () => ({ top: 100, height: 240 }) } }, H, null);
-  assert.ok(fb >= 0 && fb <= H, 't7: 无标定回落 fraction 且在界内');
-  assert.equal(calibrateFromProbes(null, { top: 1 }, 100), null, 't7: 探针缺失返回 null');
-  assert.equal(calibrateFromProbes({ top: 5 }, { top: 5 }, 100), null, 't7: 零跨度返回 null(防除零)');
-  // 接线守卫:两处调用点都带标定参数;禁止回退 offsetY 口径
+  const H = 400, ZOOM = 1.2, TRUE_Y = 103.34, CLIENT_Y = 196;
+  // Chromium:探针 rect 跨度 = 100 × zoom = 120,原点为视觉坐标
+  const chromium = calibrateFromProbes({ top: 71.99 }, { top: 191.99 }, 100, ZOOM);
+  assert.ok(Math.abs(pointerLocalY({ clientY: CLIENT_Y }, H, chromium) - TRUE_Y) < 0.1, 't7: Chromium 语义得真值');
+  // WebKit:探针 rect 跨度 = 100(未缩放),原点为布局坐标(视觉 71.99 → 布局 59.99)
+  const webkit = calibrateFromProbes({ top: 59.99 }, { top: 159.99 }, 100, ZOOM);
+  assert.ok(Math.abs(pointerLocalY({ clientY: CLIENT_Y }, H, webkit) - TRUE_Y) < 0.1, 't7: WebKit 语义得同一真值(哨兵锚)');
+  // zoom=1 时两语义退化为同一件事
+  const plain = calibrateFromProbes({ top: 100 }, { top: 200 }, 100, 1);
+  assert.equal(pointerLocalY({ clientY: 300 }, H, plain), 200, 't7: zoom=1 恒等');
+  // 夹紧与兜底
+  assert.equal(pointerLocalY({ clientY: 0 }, H, chromium), 0, 't7: 上越界夹紧');
+  assert.equal(pointerLocalY({ clientY: 99999 }, H, chromium), H, 't7: 下越界夹紧');
+  assert.equal(calibrateFromProbes({ top: 5 }, { top: 5 }, 100, 1), null, 't7: 零跨度返回 null(防除零)');
+  assert.equal(pointerLocalY({}, H, chromium), 0, 't7: 无 clientY 不抛');
+  // 接线守卫:两调用点带标定,且标定必须把 zoom 传进去(漏传=WebKit 复发)
   const src = readFileSync(new URL('../../client/src/components/TurnScrubber.jsx', import.meta.url), 'utf8');
-  assert.equal((src.match(/pointerLocalY\(e, box\.height, readCalib\(\)\)/g) || []).length, 2,
-    't7: moveBar 与 clickBar 都走标定(哨兵锚)');
-  assert.match(src, /probe0Ref|probeNRef/, 't7: 探针 ref 在位');
-  assert.doesNotMatch(src, /offsetY/, 't7: 不得回退 offsetY(视觉像素)口径');
+  assert.equal((src.match(/pointerLocalY\(e, box\.height, readCalib\(\)\)/g) || []).length, 2, 't7: 两调用点走标定');
+  assert.match(src, /parseFloat\(document\.documentElement\.style\.zoom\) \|\| 1/, 't7: 标定必须带 zoom(哨兵锚)');
+  assert.doesNotMatch(src, /offsetY/, 't7: 不得回退 offsetY(视觉像素)');
 }
 
-console.log('check-turn-scrubber-solve: t7 (两点标定) passed');
+console.log('check-turn-scrubber-solve: t7 (双内核混合坐标) passed');

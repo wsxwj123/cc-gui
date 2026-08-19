@@ -102,31 +102,39 @@ export function nearestTurnIndex(index, frac) {
 }
 
 /**
- * r13-p2-14:指针 → 刻度坐标系的【两点标定】换算(终版)。
- * 实测(WebKit/Chromium 同源复现 + 真机):
- *  · offsetY 返回【视觉像素】(zoom 后),直接当布局 px 用 → 鱼眼低 20%(p2-12 的错);
- *  · clientY/getBoundingClientRect 是 client 坐标(同样是视觉像素)。
- * 因此唯一可靠做法 = 用两枚与刻度【同样定位方式】的探针实测「布局 px → client px」
- * 的实际映射(origin 与 scale),指针再按该映射反算 —— 不依赖任何 API 的缩放语义,
- * 也不依赖 box.height 与真实渲染高度是否一致。
- * cal = { originClientY, perLayoutPx };无标定时回落 fraction 法(仍比 offsetY 稳)。
+ * r14-3:指针 → 刻度坐标系换算(第四版,真机实测定案)。
+ * 真机取证(computer-use 在 WKWebView 里两点悬停实测):鼠标 250→高亮 296,
+ * 鼠标 450→高亮 530,偏差随位置线性增大,比值 1.17≈zoom(1.2)。
+ * 结论(此前三版全错在这):**两个内核对 zoom 的坐标口径不同,且是"混合"的**——
+ *   · getBoundingClientRect:WebKit 返回【布局坐标】(未缩放),Chromium 返回【视觉坐标】;
+ *   · MouseEvent.clientY :两个内核都返回【视觉坐标】。
+ * 所以只标定 rect 空间(p2-14)在 WebKit 下必然差一个 zoom;只用 rect 比值(p5-1)、
+ * 或直接用 offsetY(p2-12,也是视觉像素)同样错。
+ * 通用解:把两边都换算到布局空间 —— 指针除以 zoom;探针原点按"探针实测跨度 vs 已知
+ * 布局跨度"的比例折算(Chromium 跨度=100×zoom → 折算 1/zoom;WebKit 跨度=100 → 折算 1)。
+ *   localY = clientY / zoom − originRectTop × (span / spanRect)
+ * 两内核代入均得真值(Chromium 实测 103.3 与本式一致)。
  */
 export function pointerLocalY(e, height, cal) {
   const h = (Number.isFinite(height) && height > 0) ? height : 0;
   const clientY = e?.clientY;
-  const per = cal?.perLayoutPx;
-  if (Number.isFinite(clientY) && Number.isFinite(per) && per > 0 && Number.isFinite(cal?.originClientY)) {
-    const y = (clientY - cal.originClientY) / per;
+  if (!Number.isFinite(clientY)) return 0;
+  const zoom = (Number.isFinite(cal?.zoom) && cal.zoom > 0) ? cal.zoom : 1;
+  const spanRect = cal?.spanRect;
+  const span = cal?.span;
+  if (Number.isFinite(spanRect) && spanRect > 0 && Number.isFinite(span) && span > 0 && Number.isFinite(cal?.originRectTop)) {
+    const rectToLayout = span / spanRect;            // rect 单位 → 布局 px
+    const y = (clientY / zoom) - cal.originRectTop * rectToLayout;
     return Math.max(0, Math.min(h, y));
   }
   const rect = e?.currentTarget?.getBoundingClientRect?.();
-  return normalizePointerY(clientY ?? 0, rect, h);
+  return normalizePointerY(clientY, rect, h);
 }
 
-/** 由两枚探针的 client 矩形推出映射:probe0 在布局 y=0,probeN 在布局 y=span。 */
-export function calibrateFromProbes(rect0, rectN, span) {
+/** 由两枚探针的 client 矩形 + 当前 zoom 推出换算参数。probe0 在布局 y=0,probeN 在布局 y=span。 */
+export function calibrateFromProbes(rect0, rectN, span, zoom = 1) {
   if (!rect0 || !rectN || !(span > 0)) return null;
-  const per = (rectN.top - rect0.top) / span;
-  if (!(per > 0)) return null;
-  return { originClientY: rect0.top, perLayoutPx: per };
+  const spanRect = rectN.top - rect0.top;
+  if (!(spanRect > 0)) return null;
+  return { originRectTop: rect0.top, spanRect, span, zoom: (zoom > 0 ? zoom : 1) };
 }
