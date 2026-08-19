@@ -172,3 +172,30 @@ export function sessionQueryMatchHashes({ sessionsByProject = {}, query = '', ti
   }
   return out;
 }
+
+// ── r13-p2-1:列表身份保持(卡顿根治) ──────────────────────────────
+// watcher 每 600ms 刷新全部展开组;若回包无论内容变没变都换数组/对象身份,侧栏
+// 整棵树跟着重渲(流式期间持续发生)= 按钮迟滞与点击丢失的根因。这里逐条比对
+// 侧栏行【实际消费的字段】,未变的条目复用旧对象身份,整组零变化直接返回旧数组
+// (调用方据此跳过 set,订阅零通知)。
+const SESSION_ROW_FIELDS = ['sessionId', 'firstPrompt', 'archived', 'messageCount', 'model', 'lastActivity', 'projectPath', 'projectHash'];
+
+export function sameSessionRow(a, b) {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  for (const k of SESSION_ROW_FIELDS) if (a[k] !== b[k]) return false;
+  return (a.subagents?.length || 0) === (b.subagents?.length || 0);
+}
+
+/** 新回包 next 与现值 prev 合并:内容相同复用旧身份;整组相同返回 prev 本身。 */
+export function mergeSessionList(prev, next) {
+  const list = Array.isArray(next) ? next : [];
+  if (!Array.isArray(prev)) return list;
+  const byId = new Map(prev.map((s) => [s?.sessionId, s]));
+  const merged = list.map((n) => {
+    const old = byId.get(n?.sessionId);
+    return old && sameSessionRow(old, n) ? old : n;
+  });
+  if (merged.length === prev.length && merged.every((s, i) => s === prev[i])) return prev;
+  return merged;
+}

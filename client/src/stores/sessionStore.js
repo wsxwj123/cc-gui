@@ -4,7 +4,7 @@ import { mergeSyncedMap, syncableKey, pushLocalOnlyKeys, createInFlightCounter, 
 import { FONT_OPTIONS, readingFontCss } from '../utils/systemFonts.js';
 import { createQueueId, firstDrainableIndex, isSteerBarrier, reclaimClaimItem, reconcileSteered, stripSteerState } from '../utils/steerQueue.js';
 import { isValidContextResponse, shouldReplaceContextCache } from '../utils/contextCache.js';
-import { reducePinned, initialExpandedProjects, toggleExpanded } from '../utils/projectPanel.js';
+import { reducePinned, initialExpandedProjects, toggleExpanded, mergeSessionList } from '../utils/projectPanel.js';
 
 // Re-exported so existing importers (App.jsx) keep working; the list and its
 // css-resolution logic now live in utils/systemFonts.js alongside the enumeration.
@@ -185,6 +185,9 @@ async function postPermissionMode(sessionId, mode) {
 // Each family carries a light + dark variant. `id` is the data-cgui-theme
 // value (empty = default Apple-system palette driven purely by data-theme).
 // bg/bg2/fg/accent are preview swatch colors for the theme popover cards.
+// r13-p2-4:展示名一律用中性描述词,不借用商标/产品名(Claude/OpenCode/GitHub/微信
+// 等已改为色彩意象名)。id 保持不变 —— 已落 localStorage、prefs 与皮肤 manifest 的
+// base 字段,改 id 会让用户已选主题与已装皮肤失配。
 export const THEME_FAMILIES = [
   { id: 'default', name: '默认',
     light: { id: '', bg: '#FFFFFF', bg2: '#ECECEE', fg: '#1A1A1A', accent: '#1A1A1A' },
@@ -195,10 +198,10 @@ export const THEME_FAMILIES = [
   { id: 'glass', name: '玻璃拟态(经典)',
     light: { id: 'glass-classic', bg: '#FFFFFF', bg2: '#ECECEE', fg: '#1A1A1A', accent: '#1A1A1A' },
     dark:  { id: 'glass-classic-dark', bg: '#1A1A1B', bg2: '#121213', fg: '#F5F5F6', accent: '#A0A0A6' } },
-  { id: 'claude', name: 'Claude',
+  { id: 'claude', name: '暖陶',
     light: { id: 'claude-warm', bg: '#F2EDE3', bg2: '#E2DBCC', fg: '#1A1A1A', accent: '#D97757' },
     dark:  { id: 'claude-dark', bg: '#29251F', bg2: '#161412', fg: '#F5F0E8', accent: '#D97757' } },
-  { id: 'opencode', name: 'OpenCode',
+  { id: 'opencode', name: '炭橘',
     light: { id: 'opencode-light', bg: '#F0F0F0', bg2: '#EAEAEA', fg: '#1A1A1A', accent: '#D2691E' },
     dark:  { id: 'opencode-dark',  bg: '#141414', bg2: '#050505', fg: '#EEEEEE', accent: '#FAB283' } },
   { id: 'tokyonight', name: 'Tokyo Night',
@@ -228,13 +231,13 @@ export const THEME_FAMILIES = [
   { id: 'solarized', name: 'Solarized',
     light: { id: 'solarized-light', bg: '#F5EFD6', bg2: '#EEE8D5', fg: '#586E75', accent: '#268BD2' },
     dark:  { id: 'solarized-dark',  bg: '#073642', bg2: '#00212B', fg: '#93A1A1', accent: '#268BD2' } },
-  { id: 'github', name: 'GitHub',
+  { id: 'github', name: '素笺',
     light: { id: 'github-light', bg: '#F6F8FA', bg2: '#EAEEF2', fg: '#24292F', accent: '#0969DA' },
     dark:  { id: 'github-dark',  bg: '#161B22', bg2: '#010409', fg: '#E6EDF3', accent: '#58A6FF' } },
   { id: 'flexoki', name: 'Flexoki',
     light: { id: 'flexoki-light', bg: '#F2F0E5', bg2: '#E6E4D9', fg: '#100F0F', accent: '#205EA6' },
     dark:  { id: 'flexoki-dark',  bg: '#1C1B1A', bg2: '#0A0908', fg: '#CECDC3', accent: '#4385BE' } },
-  { id: 'wechat', name: '微信',
+  { id: 'wechat', name: '青碧',
     light: { id: 'wechat-light', bg: '#EDEDED', bg2: '#E3E3E3', fg: '#1A1A1A', accent: '#07C160' },
     dark:  { id: 'wechat-dark',  bg: '#1A1A1A', bg2: '#0D0D0D', fg: '#EDEDED', accent: '#07C160' } },
   { id: 'skyline', name: '晴空',
@@ -1846,7 +1849,14 @@ export const useStore = create((set, get) => ({
       const res = await fetch(`/api/projects/${encodeURIComponent(projectHash)}/sessions`);
       const data = await res.json();
       const list = Array.isArray(data) ? data : [];
-      set((s) => ({ sessionsByProject: { ...s.sessionsByProject, [projectHash]: list } }));
+      // r13-p2-1:内容不变则复用旧身份并跳过 set —— watcher 每 600ms 刷全部展开组,
+      // 无条件换身份会让侧栏整树随流式持续重渲(按钮卡顿/点击丢失根因)。
+      set((s) => {
+        const prev = s.sessionsByProject[projectHash];
+        const merged = mergeSessionList(prev, list);
+        if (merged === prev) return s;
+        return { sessionsByProject: { ...s.sessionsByProject, [projectHash]: merged } };
+      });
     } catch { /* 面板刷新失败保留旧缓存,下次去抖刷新兜底 */ }
   },
   // 置顶(项目/会话,服务端共享):挂载 GET 与 WS 广播都经同一 reducer 入位。

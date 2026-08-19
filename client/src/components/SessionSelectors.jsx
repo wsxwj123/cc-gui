@@ -41,7 +41,10 @@ export function ProviderSourceBadge({ p }) {
 // r11-p5-2 扩参(向后兼容,默认不变):gap = 锚点与弹层的纵向间距(px,默认 8);
 // clampSelector = 水平容器夹紧的选择器(如 '.sidebar-flank'):弹层右缘 ≤ 容器右缘-8、
 // 宽度上限 = 容器宽-16(窄侧栏),容器找不到回落纯视口夹紧。既有消费点不传 = 零行为变化。
-export function AnchoredPopover({ anchorRef, open, onRequestClose, drop = 'down', align = 'left', gap: gapProp = 8, clampSelector = null, className = '', children }) {
+// r13-p2-2 扩参:topAlignRef = 所在行元素 ref。传了则弹层【顶缘与该行顶缘齐平】
+// (dsh 式:菜单贴着行的顶部展开,不再在行下方另起一段),放不下时回落视口夹紧;
+// 不传 = 既有行为逐字不变。
+export function AnchoredPopover({ anchorRef, open, onRequestClose, drop = 'down', align = 'left', gap: gapProp = 8, clampSelector = null, topAlignRef = null, className = '', children }) {
   const elRef = useRef(null);
   const [pos, setPos] = useState(null);
   const [bump, setBump] = useState(0);
@@ -61,12 +64,15 @@ export function AnchoredPopover({ anchorRef, open, onRequestClose, drop = 'down'
     // 越界翻转:首选方向放不下且另一侧放得下 → 翻。
     if (drop === 'up' && top < pad && r.bottom + gap + m.height <= vh - pad) top = r.bottom + gap;
     if (drop === 'down' && top + m.height > vh - pad && r.top - gap - m.height >= pad) top = r.top - gap - m.height;
+    // r13-p2-2 顶对齐:与所在行顶缘齐平(优先于上面的上下展开/翻转结果)。
+    const rowEl = topAlignRef?.current;
+    if (rowEl) top = rowEl.getBoundingClientRect().top;
     // 水平:容器边界夹紧(p5-2)→ 视口夹紧兜底;纵向视口夹紧兜底(翻转后仍可能越界)。
     left = clampPopoverX({ left, width: m.width, pad, vw, container });
     top = Math.min(Math.max(top, pad), Math.max(pad, vh - pad - m.height));
     const mw = container ? popoverMaxWidth(container.width) : null;
     setPos({ left: left / z, top: top / z, maxWidth: mw != null ? mw / z : null });
-  }, [open, drop, align, gapProp, clampSelector, bump]);
+  }, [open, drop, align, gapProp, clampSelector, topAlignRef, bump]);
 
   // 内容尺寸变化(异步列表加载)→ 重新定位。
   useLayoutEffect(() => {

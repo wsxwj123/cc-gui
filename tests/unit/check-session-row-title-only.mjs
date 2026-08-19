@@ -28,7 +28,9 @@ import { sessionRowTooltip } from '../../client/src/utils/sessionTitle.js';
 // t2 源码守卫:SessionItem 行内三行附属已退场,tooltip 接线,单行 truncate
 {
   const src = readFileSync(new URL('../../client/src/App.jsx', import.meta.url), 'utf8');
-  const start = src.indexOf('export function SessionItem');
+  // r13-p2-1 memo 化后声明形态变了(export const SessionItem = React.memo(function ...)),
+  // 换锚不减语义:锚到组件名本身。
+  const start = src.indexOf('function SessionItem({');
   const end = src.indexOf('export const FORK_RUNNING_CONFIRM');
   assert.ok(start > 0 && end > start, 't2: SessionItem 区段可定位');
   const item = src.slice(start, end);

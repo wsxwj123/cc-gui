@@ -47,7 +47,7 @@ export const seedNewSessionDefaults = (draftProjectHash) => {
 // r13-①:项目行「⋯」菜单——hover 三枚(文件夹/置顶/隐藏)与原钻入头图标(worktree/归档)
 // 全部收纳于此,能力一个不丢。弹层沿 p5-2 口径(gap=4 + 侧栏容器夹紧);
 // 虚拟(未落盘)项目不显示「在文件夹中显示」(客户端+服务端双关既有语义)。
-function ProjectRowMenu({ project, pinned, showArchived, hasArchiveToggle, archivedCount, onReveal, onTogglePin, onHide, onWorktree, onToggleArchived }) {
+function ProjectRowMenu({ project, pinned, showArchived, hasArchiveToggle, archivedCount, rowRef = null, onReveal, onTogglePin, onHide, onWorktree, onToggleArchived }) {
   const [open, setOpen] = useState(false);
   const btnRef = useRef(null);
   const item = 'w-full flex items-center gap-2 px-2.5 py-1.5 text-left text-[12px] text-ink-soft font-body hover:bg-canvas-warm transition-colors';
@@ -63,7 +63,7 @@ function ProjectRowMenu({ project, pinned, showArchived, hasArchiveToggle, archi
       >
         <MoreHorizontal size={13} className="text-ink-muted" />
       </button>
-      <AnchoredPopover anchorRef={btnRef} open={open} onRequestClose={() => setOpen(false)} drop="down" align="right" gap={4} clampSelector=".sidebar-flank" className="w-48 py-1">
+      <AnchoredPopover anchorRef={btnRef} open={open} onRequestClose={() => setOpen(false)} drop="down" align="right" gap={4} clampSelector=".sidebar-flank" topAlignRef={rowRef} className="w-48 py-1">
         {!project.virtual && (
           <button onClick={run(onReveal)} className={item}>
             <FolderOpen size={12} className="text-ink-faint" />在文件夹中显示
@@ -553,6 +553,38 @@ export function UnifiedSidebar() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   const pendingIds = useMemo(() => new Set(pendingDeletes.map((p) => p.session.sessionId)), [pendingDeletes]);
+
+  // ── r13-p2-1:SessionItem 的稳定回调(memo 前提)────────────────────────────
+  // 直接写 onSelect={(s) => handleSelect(s, project)} 每次渲染都是新闭包,memo 恒失效。
+  // 这里用 ref 锁最新实现 + 按项目 hash 缓存 bound 对象:props 身份跨渲染稳定,
+  // 而项目数据经 projRef 每渲染刷新 → 回调拿到的永远是当前 project(不吃 stale 闭包)。
+  const cbRef = useRef({});
+  cbRef.current = { handleSelect, handleFork, handleArchive, handleDelete, togglePinSession };
+  const projRef = useRef(new Map());
+  const boundRef = useRef(new Map());
+  // 项目行元素 ref(按 hash 缓存,身份稳定):⋯ 菜单顶对齐要读所在行矩形。
+  const projRowRefs = useRef(new Map());
+  const projectRowRef = useCallback((hash) => {
+    let r = projRowRefs.current.get(hash);
+    if (!r) { r = { current: null }; projRowRefs.current.set(hash, r); }
+    return r;
+  }, []);
+  const bindRow = useCallback((project) => {
+    const hash = project?.hash || '';
+    projRef.current.set(hash, project);
+    let b = boundRef.current.get(hash);
+    if (!b) {
+      b = {
+        onSelect: (sess) => cbRef.current.handleSelect(sess, projRef.current.get(hash)),
+        onFork: (sess) => cbRef.current.handleFork(sess, projRef.current.get(hash)),
+        onArchive: (sess) => cbRef.current.handleArchive(sess),
+        onDelete: (sess) => cbRef.current.handleDelete(sess),
+        onTogglePin: (sid) => cbRef.current.togglePinSession(sid),
+      };
+      boundRef.current.set(hash, b);
+    }
+    return b;
+  }, []);
   const flatSessions = useMemo(() => (view.groupMode === 'single'
     ? flattenSessionRows(sessionsByProject)
       .filter((s) => !pendingIds.has(s.sessionId) && (!q || String(titleOf(s) || '').toLowerCase().includes(q)))
@@ -989,14 +1021,10 @@ export function UnifiedSidebar() {
               key={session.sessionId}
               session={session}
               isSelected={focusSession?.sessionId === session.sessionId}
-              onSelect={(s) => handleSelect(s, proj)}
-              onFork={(s) => handleFork(s, proj)}
-              onArchive={handleArchive}
-              onDelete={handleDelete}
+              {...bindRow(proj)}
               forking={forking === session.sessionId}
               running={runningSessionIds.has(session.sessionId)}
               pinned={pinnedSessSet.has(session.sessionId)}
-              onTogglePin={togglePinSession}
             />
           );
         })}
@@ -1020,6 +1048,7 @@ export function UnifiedSidebar() {
             <div key={hash} className="border-b border-canvas-deep/25">
               <div className="relative group">
                 <div
+                  ref={projectRowRef(hash)}
                   role="button"
                   tabIndex={0}
                   data-cgui="project-row"
@@ -1071,6 +1100,7 @@ export function UnifiedSidebar() {
                   </button>
                   <ProjectRowMenu
                     project={project}
+                    rowRef={projectRowRef(hash)}
                     pinned={pinnedProjSet.has(hash)}
                     showArchived={showArchived}
                     hasArchiveToggle={hasArchiveToggle}
@@ -1099,14 +1129,10 @@ export function UnifiedSidebar() {
                       key={session.sessionId}
                       session={session}
                       isSelected={focusSession?.sessionId === session.sessionId}
-                      onSelect={(s) => handleSelect(s, project)}
-                      onFork={(s) => handleFork(s, project)}
-                      onArchive={handleArchive}
-                      onDelete={handleDelete}
+                      {...bindRow(project)}
                       forking={forking === session.sessionId}
                       running={runningSessionIds.has(session.sessionId)}
                       pinned={pinnedSessSet.has(session.sessionId)}
-                      onTogglePin={togglePinSession}
                     />
                   ))}
                 </div>

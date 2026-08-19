@@ -1429,7 +1429,10 @@ export function DeleteButton({ onConfirm, onArmedChange }) {
   );
 }
 
-export function SessionItem({ session, isSelected, onSelect, onFork, onArchive, onDelete, forking, running, pinned, onTogglePin }) {
+// r13-p2-1:memo 化 —— 侧栏一次刷新会重渲全部会话行(展开多组时上百个),流式期间
+// 持续发生 = 按钮迟滞与点击丢失。props 全是 primitive + 身份稳定的 session/回调
+// (回调由 UnifiedSidebar 经 ref 绑定成跨渲染稳定身份,否则 memo 恒失效)。
+export const SessionItem = React.memo(function SessionItem({ session, isSelected, onSelect, onFork, onArchive, onDelete, forking, running, pinned, onTogglePin }) {
   const [expanded, setExpanded] = useState(false);
   const customTitle = useStore((s) => s.customTitles[session.sessionId]);
   const autoTitle = useStore((s) => s.autoTitles[session.sessionId]);
@@ -1442,6 +1445,7 @@ export function SessionItem({ session, isSelected, onSelect, onFork, onArchive, 
   const [draft, setDraft] = useState('');
   const [menuOpen, setMenuOpen] = useState(false); // r11-p3-3:⋯ 菜单(开着时操作钮保持可见)
   const menuBtnRef = useRef(null);
+  const rowRef = useRef(null); // r13-p2-2:⋯ 菜单顶对齐用(菜单顶缘与本行顶缘齐平)
   const hasSubagents = session.subagents?.length > 0;
   const isArchived = !!session.archived;
   const isDraft = !!session.draft || !session.sessionId;
@@ -1474,6 +1478,7 @@ export function SessionItem({ session, isSelected, onSelect, onFork, onArchive, 
         </div>
       ) : (
         <div
+          ref={rowRef}
           role="button"
           tabIndex={0}
           data-cgui="session-row"
@@ -1526,7 +1531,7 @@ export function SessionItem({ session, isSelected, onSelect, onFork, onArchive, 
         {/* r11-p5-2:gap=4 紧贴行下展开(默认态不覆盖本行标题;底部不足时沿用组件既有
             翻转逻辑);clampSelector=侧栏容器——菜单右缘 ≤ 侧栏右缘-8,窄栏宽度上限
             侧栏宽-16,不再溢出侧栏压到会话区。 */}
-        <AnchoredPopover anchorRef={menuBtnRef} open={menuOpen} onRequestClose={() => setMenuOpen(false)} drop="down" align="right" gap={4} clampSelector=".sidebar-flank" className="w-44 py-1">
+        <AnchoredPopover anchorRef={menuBtnRef} open={menuOpen} onRequestClose={() => setMenuOpen(false)} drop="down" align="right" gap={4} clampSelector=".sidebar-flank" topAlignRef={rowRef} className="w-44 py-1">
           {[
             { icon: <Pin size={12} className={pinned ? 'text-accent fill-accent' : 'text-ink-faint'} />, label: pinned ? '取消置顶' : '置顶到列表最前', disabled: isDraft, run: () => onTogglePin?.(session.sessionId) },
             { icon: <Pencil size={12} className="text-ink-faint" />, label: '重命名', disabled: isDraft, run: () => startRename() },
@@ -1577,7 +1582,7 @@ export function SessionItem({ session, isSelected, onSelect, onFork, onArchive, 
       )}
     </div>
   );
-}
+});
 
 // 分支正在运行的会话时的确认文案(侧栏分支按钮与消息级分叉共用)。分支 = 复制 jsonl,
 // 只拿得到当前已落盘的内容:进行中的回合还没写完,子代理更不会跟着过去(它们的
