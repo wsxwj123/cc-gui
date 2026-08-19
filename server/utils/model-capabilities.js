@@ -45,10 +45,7 @@ export const MODEL_CAPABILITY_CATALOG = [
   { family: 'gpt-4', re: /^gpt-4/i, caps: { reasoning: false } },
 ];
 
-/** 目录查询:命中 → { family, reasoning, efforts|null };目录外 → null。 */
-export function lookupModelCapabilities(modelId) {
-  if (typeof modelId !== 'string' || !modelId.trim()) return null;
-  const id = modelId.trim();
+function matchCatalog(id) {
   for (const row of MODEL_CAPABILITY_CATALOG) {
     if (row.re.test(id)) {
       return {
@@ -59,6 +56,24 @@ export function lookupModelCapabilities(modelId) {
     }
   }
   return null;
+}
+
+/**
+ * 目录查询:命中 → { family, reasoning, efforts|null };目录外 → null。
+ *
+ * r15:目录正则一律 ^ 锚定,而 OpenRouter 之类的 id 带命名空间前缀
+ * (openai/gpt-5.6-luna、moonshotai/kimi-k2.6、deepseek/deepseek-chat-v3.1),
+ * 直查 364 个模型命中 0 = 整套自适应对这些 provider 等于关着。故首轮全表未命中
+ * 且 id 含 '/' 时,取最后一段再查一轮(只在未命中时复查 → 已命中的优先级语义不变)。
+ * 期望:openai/gpt-5.6-luna 与 openai/gpt-5.5:batch → gpt-5 家族四档;
+ * moonshotai/kimi-k2.6 → reasoning:false;moonshotai/kimi-k2-thinking → 思考全档;
+ * anthropic/claude-opus-4.8 → null(目录无 claude 行,官方模型全档);
+ * ~openai/gpt-latest → null(不得误命中 gpt-5/gpt-4)。
+ */
+export function lookupModelCapabilities(modelId) {
+  if (typeof modelId !== 'string' || !modelId.trim()) return null;
+  const id = modelId.trim();
+  return matchCatalog(id) || (id.includes('/') ? matchCatalog(id.split('/').pop()) : null);
 }
 
 /**

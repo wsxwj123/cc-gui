@@ -1742,7 +1742,12 @@ export async function activeProviderModelMeta() {
     const id = await readActiveProviderId();
     if (!id) return null;
     const p = (await readCustomProviders()).find((x) => x.id === id);
-    return p?.modelMeta || null;
+    if (!p) return null;
+    // r15:读侧兜底预填。预填原先只跑在 POST/PUT 两处,存量 provider(写盘早于预填功能
+    // 上线、之后没再编辑过)的 modelMeta 恒空 → 前端 effortCapsFor 一律判"全档可用",
+    // 整套自适应对老用户零生效。这里只改返回值、绝不写回 custom-providers.json
+    // (用户数据只读);用户手动声明由 applyCatalogPrefill 内部保证永不被覆盖。
+    return applyCatalogPrefill(p.models, p.modelMeta || null);
   } catch { return null; }
 }
 
