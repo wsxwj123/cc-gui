@@ -89,7 +89,7 @@ export function ReleaseNotesModal({ open, initialVersion, initialNotes = null, o
                 <div className="text-[11px] font-body font-medium text-ink-muted uppercase tracking-wider">{g.title}</div>
               )}
               <div className="text-[12.5px] text-ink font-body leading-relaxed">
-                <MarkdownRenderer content={g.items.map((it) => `- ${it}`).join('\n')} />
+                <MarkdownRenderer content={(g.items || []).map((it) => `- ${it}`).join('\n')} />
               </div>
             </div>
           ))}

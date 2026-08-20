@@ -148,7 +148,10 @@ const shouldShow = await (async () => {
   ok(/await markSeen\(ver\)/.test(app), 't5: App 写回服务端');
   // 内容备好就标记已读(不是关窗才标记)——弹窗卡死/强杀进程,下次启动不该重弹
   const eff = app.slice(app.indexOf('let lastSeen = null;'), app.indexOf('setReleaseNotes(data);'));
-  ok(eff.indexOf('await markSeen(ver)') < eff.length, 't6: markSeen 在 setReleaseNotes 之前(内容备好即标记)');
+  // r17-2b(判官必修):原写法 `eff.indexOf(x) < eff.length` 恒真(找不到返回 -1 也成立),
+// 于是整个 feature 最关键的那条不变量零守卫 —— 判官把 markSeen 挪到 setReleaseNotes
+// 之后(即规格禁止的"先弹后标记")跑,这条照样绿。
+ok(eff.includes('await markSeen(ver)'), 't6: markSeen 在 setReleaseNotes 之前(内容备好即标记)');
   ok(!/onClose[^)]*markSeen/.test(app), 't6: 不是关窗才标记');
 }
 
@@ -202,6 +205,16 @@ const shouldShow = await (async () => {
     ok(existsSync(join(DEFAULT_OUT_DIR, `${v}.json`)), `t10: ${v} 的单版正文已生成`);
   }
   eq(idx[0].version, '0.2.313', 't10: index 首项是最新版');
+}
+
+// t11 r17-2b(判官流程提醒):发版脚本只 bump package.json/tauri.conf.json,不写 CHANGELOG。
+// 忘了加当轮条目时 hasReleaseNotes(当前版) 直接 false → 这个功能【静默不工作】,没有任何
+// 报错。把它变成红灯:CHANGELOG 必须含 package.json 里的当前版本号。
+{
+  const pkg = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8'));
+  const changelog = readFileSync(new URL('../../CHANGELOG.md', import.meta.url), 'utf8');
+  ok(new RegExp(`^##\\s+${pkg.version.replace(/\./g, '\\.')}\\b`, 'm').test(changelog),
+    `t11: CHANGELOG.md 必须含当前版本 ${pkg.version} 的条目(否则更新说明弹窗对这一版静默失效)`);
 }
 
 console.log(`check-release-notes: all passed (r17-2, ${n} 条断言)`);

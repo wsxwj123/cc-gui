@@ -10343,12 +10343,17 @@ export default function App() {
       {/* r17-2 层级门控:GUI 更新说明弹窗开着时,压住下层的 Claude/GUI 更新提示;叉掉或
           点「已知晓」后 releaseNotesOpen 转 false,本弹窗自动露出来。用布尔门而不是堆
           z-index —— 被压住的那层根本不渲染,不存在两层遮罩叠出的灰底。 */}
-      <ReleaseNotesModal
-        open={releaseNotesOpen}
-        initialVersion={typeof __BUILD_VERSION__ === 'string' ? __BUILD_VERSION__ : undefined}
-        initialNotes={releaseNotes}
-        onClose={() => setReleaseNotesOpen(false)}
-      />
+      {/* r17-2b(判官建议2):套一层 ErrorBoundary —— 更新说明是【构建期切片的静态内容】,
+          真崩了也只该崩这一个弹窗,不该把整个 App 打成错误页。配合 modal 内的
+          (g.items || []).map,把爆炸半径收进弹窗自己。 */}
+      <ErrorBoundary label="更新说明">
+        <ReleaseNotesModal
+          open={releaseNotesOpen}
+          initialVersion={typeof __BUILD_VERSION__ === 'string' ? __BUILD_VERSION__ : undefined}
+          initialNotes={releaseNotes}
+          onClose={() => setReleaseNotesOpen(false)}
+        />
+      </ErrorBoundary>
       {updateNotice && !updateModalDismissed && !releaseNotesOpen && (
         <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/40 backdrop-blur-soft animate-fade-in" onClick={() => setUpdateModalDismissed(true)}>
           <div className="glass-popover w-[420px] max-w-[calc(var(--app-w,100vw)-1.5rem)] rounded-panel shadow-popover animate-glass-rise overflow-hidden" onClick={(e) => e.stopPropagation()}>
