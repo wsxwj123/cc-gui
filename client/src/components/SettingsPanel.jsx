@@ -1315,6 +1315,13 @@ function CcUpdater() {
           检查更新失败:{state.error || '未知原因'}
         </div>
       )}
+      {/* r23-④:CLI 这条链路同样会静默改用 5 分钟旧缓存(version-check.js 的 catch),
+          于是双源全断时界面照显「✓ 已是最新版本」。r22 把这段从这里删了 —— 删对了一半:
+          该删的是"接错数据源"这件事,而不是"明示旧缓存"这个功能。服务端现在为
+          /api/claude-version-check 也产出 staleError,这段渲染重新有了真实数据源。 */}
+      {state.status === 'ok' && state.staleError && (
+        <div className="text-[11px] text-warning">结果可能过期:{state.staleError}</div>
+      )}
       {/* R8-2:死 override 横幅。手动指定的路径已失效时 resolver 静默回落自动优先级,
           用户以为还在用指定的那个 —— 显式提示 + 两个出口:清除指定(回自动)/重新选择
           (滚到下方安装切换区)。旧后端无 overrideDead 字段 → overrideDead 恒 null 不渲染。 */}

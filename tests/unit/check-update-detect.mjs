@@ -56,10 +56,26 @@ import { readFileSync } from 'node:fs';
   assert.match(uc, /检查失败:\{state\.message\}/, 't3: UpdateChecker 渲染读 message(check() 写的就是 message)');
   assert.match(uc, /state\.status === 'ok' && state\.staleError/, 't3: staleError 必须接在 UpdateChecker(它的唯一数据源)');
   assert.match(uc, /结果可能过期/, 't3: 旧缓存明示');
-  // CLI 更新器(数据源 /api/claude-version-check):不含 staleError,不许再塞回去
+  // CLI 更新器(数据源 /api/claude-version-check)
   const cc = cut('function CcUpdater()', 'function CloseBehaviorPicker()');
-  assert.ok(!/staleError/.test(cc), 't3: CcUpdater 不得出现 staleError —— 它的数据源永远不产出该字段,写了也是死渲染');
   assert.match(cc, /检查更新失败:\{state\.error/, 't3: CcUpdater 的失败原因读它自己真正写入的字段(error)');
+  // r23-④:r22 把这段从 CcUpdater 删掉时,连"明示旧缓存"这个功能一起删了 —— 而 CLI
+  // 那条链路的 catch 同样会静默改用 5 分钟旧缓存,于是双源全断时照显「✓ 已是最新版本」。
+  // 正确做法是让它自己的数据源也产出 staleError(见下面服务端断言),渲染补回来。
+  assert.match(cc, /state\.status === 'ok' && state\.staleError/,
+    't3: CcUpdater 也要渲染 staleError —— 它的数据源现在会产出(静默用旧缓存必须明示)');
+  assert.match(cc, /结果可能过期/, 't3: CLI 侧旧缓存明示');
+  // 服务端:两条链路的旧缓存分支都必须带 staleError(只在 GUI 那条带 = 只修了一半)
+  const cli = src.slice(
+    src.indexOf("router.get('/claude-version-check'"),
+    src.indexOf("router.post('/claude-update'"),
+  );
+  assert.ok(cli.length > 200, 't3: /claude-version-check 路由定位锚失效');
+  assert.match(cli, /if \(ccCache && ccCacheSrc === srcKey\) \{[\s\S]{0,400}?staleError =/,
+    't3: **走旧缓存的那一支**必须写 staleError(原来是静默复用 → 前端显示"已是最新版本")');
+  assert.match(cli, /\.\.\.\(staleError \? \{ staleError \} : \{\}\)/,
+    't3: 且必须真的进响应体(写了变量不发出去等于没写)');
+  assert.match(cli, /分钟前的结果/, 't3: 文案说清"这次没查成、看到的是几分钟前的结果"');
 }
 
 console.log('check-update-detect: all passed (r14-1)');

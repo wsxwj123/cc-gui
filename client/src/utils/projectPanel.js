@@ -64,6 +64,18 @@ export function composePanelProjects({
 }
 
 /**
+ * r23-①②:单列表(平铺)模式的可见项目集 —— 懒拉与渲染共用同一个来源。
+ * 只按 hidden 过滤,**不按 worktree 显示开关过滤**:那个开关管的是"侧栏要不要显示
+ * worktree 项目行",而分组模式本来就不显示 worktree 行;平铺再按它裁一刀,worktree
+ * 的会话在整个侧栏就没有任何入口了(本仓工作流每轮开一次性 worktree,必踩)。
+ * 无 query 参数是刻意的:query 过滤会与"搜会话标题依赖组已加载"成环(组没加载 →
+ * 标题不匹配 → 不加载),平铺的 query 过滤落在会话行那一层。
+ */
+export function singleModeVisibleProjects({ projects = [], hidden, panes = [], pinned } = {}) {
+  return composePanelProjects({ projects, hidden, showWorktrees: true, query: '', panes, pinned });
+}
+
+/**
  * 组内会话排序:归档过滤 + 标题搜索(titleOf 由调用方给,与渲染同一取值链)+
  * 置顶前置(稳定排序,组内保持服务端时序)。
  */
@@ -142,16 +154,33 @@ export function sortProjectRows(rows, { sortMode = 'recent', order = [], pinned 
 /**
  * 单列表平铺(纯函数):全部已加载项目的会话跨项目合并,按 lastActivity 降序;
  * 每条带 projectHash(点击选中时反查项目)。归档会话不进平铺(与折叠树默认视图一致)。
+ * r23-①:visibleHashes(可选,Set/数组)给定时只平铺可见项目的会话 —— sessionsByProject
+ * 是"曾经加载过"的缓存,隐藏项目不会被清掉(toggleHidden 不清缓存、expandedProjects 还
+ * 持久化在 localStorage、600ms watcher 继续刷),不过滤就等于隐藏对平铺模式无效。
  */
-export function flattenSessionRows(sessionsByProject) {
+export function flattenSessionRows(sessionsByProject, visibleHashes) {
+  const visible = visibleHashes instanceof Set ? visibleHashes
+    : (Array.isArray(visibleHashes) ? new Set(visibleHashes) : null); // 不传 = 不过滤(旧调用方语义不变)
   const out = [];
   for (const [projectHash, sessions] of Object.entries(sessionsByProject || {})) {
+    if (visible && !visible.has(projectHash)) continue;
     for (const s of sessions || []) {
       if (s && !s.archived) out.push({ ...s, projectHash });
     }
   }
   out.sort((a, b) => (b.lastActivity ? new Date(b.lastActivity).getTime() : -1) - (a.lastActivity ? new Date(a.lastActivity).getTime() : -1));
   return out;
+}
+
+// r23-③:空态文案(平铺与分组两处共用)。系统拒绝访问时**绝不能**伪装成"暂无会话"——
+// 用户的第一反应是"数据被 GUI 删了"(r17-4 立项根因)。原来只有分组模式那处读
+// accessError,平铺模式自己硬编了一句"暂无会话",403 落成空数组后正好走进它。
+export const ACCESS_DENIED_HINT = '无法读取会话目录（系统拒绝访问），会话文件没有丢失 —— 点此查看处理办法';
+
+/** 空态文案判定:拒访 > 搜索无果 > 调用方给的兜底(平铺/分组各自的措辞)。 */
+export function sessionEmptyHint({ accessError, query, fallback = '暂无会话' } = {}) {
+  if (accessError) return ACCESS_DENIED_HINT;
+  return query ? '没有匹配的会话' : fallback;
 }
 
 /** 手动拖拽落位(纯函数):把 hash 移到 targetIdx(非置顶段内),返回新顺序数组。 */

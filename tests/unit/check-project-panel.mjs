@@ -5,9 +5,14 @@
 //   S2 删 lastActivity 降序(只留置顶排序)→ t2 红
 // 变异哨兵(11-b 追加,实际验证过红):
 //   S3 reducePinned 不过滤非字符串 → t7 红
+// 变异哨兵(r23 追加,实际验证过红):
+//   S4 flattenSessionRows 忽略 visibleHashes → t8 红「隐藏项目的会话平铺进来了」
+//   S5 singleModeVisibleProjects 改回 showWorktrees:false → t8 红「worktree 会话没入口」
+//   S6 sessionEmptyHint 把 accessError 判断放到 query 之后 → t9 红
 import assert from 'node:assert/strict';
 import {
   composePanelProjects, composePanelSessions, sessionQueryMatchHashes, WORKTREE_PATH_RE, reducePinned,
+  flattenSessionRows, singleModeVisibleProjects, sessionEmptyHint, ACCESS_DENIED_HINT,
 } from '../../client/src/utils/projectPanel.js';
 
 const P = (hash, path, extra = {}) => ({ hash, path, sessionCount: 1, lastActivity: null, ...extra });
@@ -130,6 +135,50 @@ const P = (hash, path, extra = {}) => ({ hash, path, sessionCount: 1, lastActivi
     { pinnedProjects: [], pinnedSessions: [] }, 't7: 空载荷');
   assert.deepEqual(reducePinned({ projects: ['a', 42, null], sessions: [{}] }),
     { pinnedProjects: ['a'], pinnedSessions: [] }, 't7: 脏元素滤除');
+}
+
+// t8(r23-①②)单列表(平铺)模式:懒拉与渲染必须共用同一个可见集。
+//   ① 隐藏一个**已展开过**的项目后,它的会话仍在 sessionsByProject 缓存里
+//     (toggleHidden 不清缓存、expandedProjects 还持久化、600ms watcher 继续刷),
+//     平铺不按可见集过滤 = 隐藏对平铺模式完全无效(上一轮只改了拉取,渲染没动)。
+//   ② worktree 项目**不许**被「侧栏是否显示 worktree 行」这个显示开关裁掉:分组模式
+//     本来就不显示 worktree 行,平铺再裁一刀,那些会话在侧栏没有任何入口。
+{
+  const projects = [
+    P('vis', '/x/alpha', { lastActivity: '2026-01-01T00:00:00Z' }),
+    P('hid', '/x/secret', { lastActivity: '2026-01-02T00:00:00Z' }),
+    P('wt', '/x/repo-worktrees/r23', { isWorktree: true, lastActivity: '2026-01-03T00:00:00Z' }),
+  ];
+  const rows = singleModeVisibleProjects({ projects, hidden: ['hid'] });
+  const hashes = rows.map((p) => p.hash);
+  assert.ok(!hashes.includes('hid'), 't8: 可见集必须减掉隐藏项目');
+  assert.ok(hashes.includes('wt'),
+    't8: worktree 项目必须留在单列表可见集(它的会话没有第二个入口;别按显示开关裁)');
+  assert.ok(hashes.includes('vis'), 't8: 普通项目照常在');
+
+  // 渲染层:平铺只能吐出可见集里的会话(缓存里有隐藏项目的会话也一样)
+  const cached = {
+    vis: [{ sessionId: 'v1', lastActivity: '2026-01-01T00:00:00Z' }],
+    hid: [{ sessionId: 'h1', lastActivity: '2026-01-09T00:00:00Z' }], // 隐藏前展开过,缓存还在
+    wt: [{ sessionId: 'w1', lastActivity: '2026-01-03T00:00:00Z' }],
+  };
+  const flat = flattenSessionRows(cached, new Set(hashes)).map((s) => s.sessionId);
+  assert.ok(!flat.includes('h1'), 't8: 已隐藏项目的会话不许平铺进列表(缓存不会自己清)');
+  assert.deepEqual(flat, ['wt', 'vis'].map((h) => cached[h][0].sessionId), 't8: 可见会话按时间降序留下');
+  // 不传可见集 = 不过滤(分组模式等旧调用方语义不变)
+  assert.equal(flattenSessionRows(cached).length, 3, 't8: 不传 visibleHashes 时行为与改动前一致');
+}
+
+// t9(r23-③)空态文案:两处空态共用同一判定 —— 系统拒绝访问绝不能显示成「暂无会话」
+// (用户会以为数据被 GUI 删了,正是 r17-4 的立项根因;平铺模式此前硬编了那句)。
+{
+  assert.equal(sessionEmptyHint({ accessError: 'EPERM …', query: '登录', fallback: '暂无会话' }),
+    ACCESS_DENIED_HINT, 't9: 拒访优先于搜索无果与兜底');
+  assert.equal(sessionEmptyHint({ accessError: null, query: '登录', fallback: '暂无会话' }),
+    '没有匹配的会话', 't9: 有 query 时说搜索无果');
+  assert.equal(sessionEmptyHint({ accessError: null, query: '', fallback: '没有已归档的会话' }),
+    '没有已归档的会话', 't9: 无 query 用调用方兜底(分组/平铺各自措辞)');
+  assert.match(ACCESS_DENIED_HINT, /会话文件没有丢失/, 't9: 当场安抚:文件没丢');
 }
 
 console.log('check-project-panel: all passed');

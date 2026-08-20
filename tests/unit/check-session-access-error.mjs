@@ -90,9 +90,19 @@ const stripComments = (t) => t.replace(/^\s*\/\/.*$/gm, '').replace(/\/\*[\s\S]*
   // undefined = 还没拉到 → 转圈,空数组才走得到下面的空态提示。
   assert.match(src, /rawSessions === undefined \?/,
     '加载判据是 rawSessions === undefined(store 的 403 分支必须写占位才走得到空态)');
-  assert.match(src, /accessError\s*\n?\s*\? <span[^>]*>无法读取会话目录/,
-    '有错误时空态显示原因,而不是"暂无会话"');
-  assert.match(src, /会话文件没有丢失/, '侧栏也要当场安抚:文件没丢');
+  // r23-③:文案判定挪进纯函数 sessionEmptyHint(行为断言在 check-project-panel t9),
+  // 这里只钉住【两处空态都走它】—— 上一轮只有分组模式那处读 accessError,平铺模式自己
+  // 硬编「暂无会话」,403 落成空数组后正好走进去,拒访又被伪装回"没有会话"。
+  const { sessionEmptyHint, ACCESS_DENIED_HINT } = await import('../../client/src/utils/projectPanel.js');
+  assert.equal(sessionEmptyHint({ accessError: 'EACCES', query: '登录', fallback: '暂无会话' }),
+    ACCESS_DENIED_HINT, '有错误时空态显示原因,而不是"暂无会话"/"没有匹配的会话"');
+  assert.match(ACCESS_DENIED_HINT, /会话文件没有丢失/, '侧栏也要当场安抚:文件没丢');
+  assert.match(src, /accessError\s*\n?\s*\? <span[^>]*title=\{accessError\}>\{text\}<\/span>/,
+    '拒访那一支要带 title(hover 看平台化的处理办法)');
+  const uses = [...src.matchAll(/\{emptyHint\(/g)].length;
+  assert.equal(uses, 2, `空态共用一处判定:平铺与分组两处都要调 emptyHint(现有 ${uses} 处)`);
+  assert.ok(!/\{q \? '没有匹配的会话' : '暂无会话'\}/.test(src),
+    '平铺空态不许再自己硬编三元(那条路径读不到 accessError)');
 }
 
 console.log('check-session-access-error: all passed (r17-4 + r22 真跑 reducer)');
