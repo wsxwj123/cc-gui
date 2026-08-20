@@ -667,13 +667,12 @@ router.post('/claude-update/stream', async (req, res) => {
     return;
   }
 
-  const { method, path: claudePath } = await detectInstall();
-  const cmd = updateCmdFor(resolveUpdateMethod(readUpdateChannel(), method), claudePath);
-  const proxyUrl = await detectLocalProxy().catch(() => null);
-  const env = { ...process.env };
-  if (proxyUrl) { env.HTTP_PROXY = env.HTTPS_PROXY = env.http_proxy = env.https_proxy = proxyUrl; }
-
-  updateTask.cmd = cmd;
+  // r22-③:【先占位,再解析】。原来 status='running' 写在下面两个 await 之后,而
+  // detectInstall({refresh}) 走登录 shell、detectLocalProxy 要 scutil + 探 6 个端口,
+  // 都可达秒级 —— 同时到达的两个请求(手机端与桌面端各开一次面板、或用户连点两下)
+  // 会双双通过上面的 running 检查,spawn 出两个 `npm i -g` 写同一个目录:
+  // updateTask.child 被后者覆盖,前者成孤儿,8 分钟超时定时器也只管得住后一个。
+  updateTask.cmd = '';
   updateTask.status = 'running';
   updateTask.code = null;
   updateTask.error = '';
@@ -683,6 +682,28 @@ router.post('/claude-update/stream', async (req, res) => {
   updateTask.finishedAt = 0;
   updateTask.listeners.add(res);
   req.on('close', () => { updateTask.listeners.delete(res); }); // 关面板 = 只断窗口
+
+  let method, cmd, proxyUrl;
+  try {
+    const detected = await detectInstall();
+    method = detected.method;
+    cmd = updateCmdFor(resolveUpdateMethod(readUpdateChannel(), method), detected.path);
+    proxyUrl = await detectLocalProxy().catch(() => null);
+  } catch (e) {
+    // 占位后任何一步失败都必须还原状态,否则任务卡成"永远 running":后续所有请求
+    // 都只挂上来续看一个根本不存在的进程,用户再也更新不了(直到重启后端)。
+    updateTask.status = 'error';
+    updateTask.error = `检测安装方式失败:${e.message}`;
+    updateTask.finishedAt = Date.now();
+    taskPush({ type: 'error', error: updateTask.error });
+    for (const r of updateTask.listeners) { try { r.end(); } catch {} }
+    updateTask.listeners.clear();
+    return;
+  }
+  const env = { ...process.env };
+  if (proxyUrl) { env.HTTP_PROXY = env.HTTPS_PROXY = env.http_proxy = env.https_proxy = proxyUrl; }
+
+  updateTask.cmd = cmd;
 
   taskPush({ type: 'start', command: cmd, method, proxy: proxyUrl });
 
@@ -748,6 +769,24 @@ router.post('/claude-update/stream', async (req, res) => {
     for (const r of updateTask.listeners) { try { r.end(); } catch {} }
     updateTask.listeners.clear();
   });
+});
+
+/**
+ * POST /api/claude-update/attach — r22-③:【只续看,绝不 spawn】。
+ *
+ * 原来前端挂载对账后直接 POST /claude-update/stream 续看,而那是"会启动安装"的入口
+ * (doUpdateStream 的 {attach:true} 参数从头到尾没人读)。更新只要恰好在 GET /status
+ * 与这次 POST 之间跑完,服务端就看到 status!==running → 用户只是【打开了设置面板】,
+ * 就静默跑起 `npm install -g @anthropic-ai/claude-code@latest`,一句确认都没有
+ * (确认只在 doUpdate 里)。所以"续看"必须有自己的、不会起进程的入口。
+ */
+router.post('/claude-update/attach', (req, res) => {
+  res.writeHead(200, { 'Content-Type': 'application/x-ndjson', 'Cache-Control': 'no-store' });
+  if (updateTask.status !== 'running') { res.end(); return; } // 没在跑 = 空流收尾
+  res.write(JSON.stringify({ type: 'start', command: updateTask.cmd || '(正在检测安装方式…)', attached: true }) + '\n');
+  for (const line of updateTask.log) res.write(JSON.stringify({ type: 'log', line }) + '\n');
+  updateTask.listeners.add(res);
+  req.on('close', () => { updateTask.listeners.delete(res); }); // 只摘监听,绝不杀进程
 });
 
 // GET /api/claude-update/status — 重开面板时对账:是否还在更新/上次结果与日志。

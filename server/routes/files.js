@@ -16,6 +16,10 @@ const HOME = homedir();
 const PROTECTED_WRITE_RELPATHS = new Set([
   join('.claude-gui', 'network.json'),        // 鉴权(passwordHash/tokenSecret)
   join('.claude-gui', 'custom-providers.json'), // 明文 provider apiKey
+  // r22-②:生图 provider 同样明文存 apiKey(image.js 以 0600 落盘),此前漏在名单外 ——
+  // 任何已认证客户端(公开版默认监听 0.0.0.0,含手机端)GET /files/read 就能拿到明文密钥,
+  // 写端点还能把 baseURL 改到攻击者服务器,下次出图带着密钥打过去。
+  join('.claude-gui', 'image-providers.json'), // 明文生图 apiKey
   join('.claude', 'settings.json'),           // provider env/token
   join('.claude', 'settings.local.json'),
   join('.claude', '.credentials.json'),       // 官方 OAuth token

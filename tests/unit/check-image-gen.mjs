@@ -6,6 +6,7 @@
 // 隔离:HOME 指向 mktemp 目录(真实 ~/.claude-gui 一个字节不碰);端口只用 6702,退出即释放。
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync, symlinkSync, chmodSync, readdirSync, statSync } from 'node:fs';
+import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -240,12 +241,25 @@ app.post('/chmod/v1/images/generations', (_req, res) => {
   chmodSync(RO_DIR, 0o500); // 只读目录 → writeFile 报 EACCES
   res.json({ data: [{ b64_json: PNG_B64 }] });
 });
+// 【r22-⑤】上游把图片链接指向【本机另一个端口】,且那个端点回真正的 image/png ——
+// 事后的 Content-Type 检查对它完全无效,只有"下载前不豁免跨源回环"这道闸拦得住。
+app.post('/evil/v1/chat/completions', (_req, res) => res.json({
+  choices: [{ message: { content: '![x](http://127.0.0.1:6703/evil.png)' } }],
+}));
 app.use('/api', imageRouter);
 
-// 端口只许 6702,但隔壁分支的 E2E 也在用 → EADDRINUSE 退让重试,不当假失败。
-async function listenWithRetry(port, tries = 40) {
+// 那个"本机别的端口"的服务(6703)。evilHits 钉死"拒绝必须发生在 fetch 之前"。
+let evilHits = 0;
+const evilServer = createServer((_req, res) => {
+  evilHits += 1;
+  res.writeHead(200, { 'Content-Type': 'image/png' });
+  res.end(Buffer.from(PNG_B64, 'base64'));
+});
+
+// 端口只许 6702/6703,但隔壁分支的 E2E 也在用 → EADDRINUSE 退让重试,不当假失败。
+async function listenWithRetry(port, tries = 40, make = (p) => app.listen(p, '127.0.0.1')) {
   for (let i = 0; i < tries; i++) {
-    const s = app.listen(port, '127.0.0.1');
+    const s = make(port);
     const r = await new Promise((resolve) => {
       s.once('listening', () => resolve({ ok: true }));
       s.once('error', (e) => resolve({ ok: false, err: e }));
@@ -257,6 +271,7 @@ async function listenWithRetry(port, tries = 40) {
   throw new Error(`端口 ${port} 持续被占用(隔壁 worktree 的 E2E?),重试 ${tries} 次后放弃`);
 }
 const server = await listenWithRetry(6702);
+await listenWithRetry(6703, 40, (p) => evilServer.listen(p, '127.0.0.1'));
 const BASE = 'http://127.0.0.1:6702';
 const api = async (method, path, body) => {
   const r = await fetch(`${BASE}${path}`, {
@@ -407,8 +422,32 @@ try {
     const r3 = await api('POST', '/api/image/generate', { providerId: meta.json.id, prompt: 'x' });
     assert.ok(r3.status >= 400, 't8: 169.254.169.254 被拒');
     assert.match(r3.json.error, /拒绝下载该链接/, 't8: 走的是下载前的 SSRF 守卫,不是事后校验');
-    assert.deepEqual([...readdirSync(SAVE_DIR)].filter((f) => !filesBefore.has(f)), [], 't8: 三种攻击一张图都没落盘');
-    for (const p of [badct, redir, meta]) await api('DELETE', `/api/image-providers/${p.json.id}`);
+
+    // 8.4【r22-⑤】回环、但与用户自填的 baseURL【不同源】:上游把图片链接指到本机另一个
+    // 端口,那个端点回的是真 image/png —— 事后 Content-Type 检查一点用没有。修之前
+    // assertPublicBaseURL 对回环一律放行,这条会 200 并把内网响应落盘成图片。
+    const evil = await mk('把链接指到本机别的端口的', 'chat', `${BASE}/evil/v1`);
+    const r4 = await api('POST', '/api/image/generate', { providerId: evil.json.id, prompt: 'x' });
+    assert.ok(r4.status >= 400, `t8: 回环跨端口的图片链接必须被拒(实际 ${r4.status} ${r4.text})`);
+    assert.match(r4.json.error, /拒绝下载该链接/, 't8: 拒绝要发生在下载前的 SSRF 守卫,不是靠事后 Content-Type');
+    assert.equal(evilHits, 0, 't8: 服务端一次都不许打到那个端口(闸门在 fetch 之前)');
+
+    assert.deepEqual([...readdirSync(SAVE_DIR)].filter((f) => !filesBefore.has(f)), [], 't8: 四种攻击一张图都没落盘');
+    for (const p of [badct, redir, meta, evil]) await api('DELETE', `/api/image-providers/${p.json.id}`);
+
+    // 8.5 反向钉死:【同源】回环必须继续放行。回环豁免是刻意的(用户接本机 ComfyUI /
+    // one-api),信任的是"用户自己填的那个 host:port",不是"本机所有端口"。
+    // 一刀切禁回环会把这个正当用法砍掉,故这条与 8.4 必须同时绿。
+    const localRelay = await mk('本机中转(同源)', 'chat', `${BASE}/fake/v1`);
+    const r5 = await api('POST', '/api/image/generate', { providerId: localRelay.json.id, prompt: 'x' });
+    assert.equal(r5.status, 200, `t8: 同源回环的图片链接照常下载(${r5.text})`);
+    assert.ok(existsSync(r5.json.file), 't8: 同源回环正常落盘');
+    // localhost 与 127.0.0.1 是同一个服务:用户填 localhost、本机服务回 127.0.0.1 的
+    // 链接很常见,按字符串比 origin 会把这种正当用法误杀。
+    const aliasRelay = await mk('本机中转(localhost 别名)', 'chat', 'http://localhost:6702/fake/v1');
+    const r6 = await api('POST', '/api/image/generate', { providerId: aliasRelay.json.id, prompt: 'x' });
+    assert.equal(r6.status, 200, `t8: localhost ↔ 127.0.0.1 同端口视为同源,不许误杀(${r6.text})`);
+    for (const p of [localRelay, aliasRelay]) await api('DELETE', `/api/image-providers/${p.json.id}`);
   }
 
   // ── 9. 体积上限:后端单进程扛全部会话,一坨大 body 就是全局 OOM ──
@@ -491,6 +530,9 @@ try {
   server.closeAllConnections?.();
   server.close();
   await new Promise((r) => server.once('close', r));
+  evilServer.closeAllConnections?.();
+  evilServer.close();
+  await new Promise((r) => evilServer.once('close', r));
   try { chmodSync(RO_DIR, 0o700); } catch {} // 改回可写才删得掉
   for (const d of [TMP_HOME, SAVE_DIR, RM_DIR, RO_DIR]) rmSync(d, { recursive: true, force: true });
 }

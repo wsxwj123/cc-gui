@@ -954,6 +954,14 @@ function UpdateChecker() {
       {state.status === 'err' && (
         <div className="text-[12px] text-error">检查失败:{state.message}</div>
       )}
+      {/* r22-④:用了旧缓存(本次 GitHub 与备用源都没拉成)时必须明示。staleError 只由
+          /api/version-check 产出,喂的就是本组件 —— r14-1 却把这段接到了 CcUpdater
+          (数据源是 /api/claude-version-check,永远不含该字段)= 一段恒为假的渲染。
+          结果:墙内机器点「检查更新」两条源全断、只有 5 分钟旧缓存,界面照样显示
+          「✓ 已是最新版本」,用户完全不知道这次根本没查成功(正是 r14 声称修掉的症状)。 */}
+      {state.status === 'ok' && state.staleError && (
+        <div className="text-[11px] text-warning">结果可能过期:{state.staleError}</div>
+      )}
     </div>
   );
 }
@@ -1074,9 +1082,12 @@ function CcUpdater() {
   };
 
   // r13-p2-21:流消费单独成函数 —— 首次发起与「重开面板续看」共用同一条链路。
-  const doUpdateStream = async () => {
+  // r22-③:attach=true 走【只续看、绝不 spawn】的 /attach 入口。原来两者都打 /stream
+  // (会启动安装的那个),而这个参数根本没人读 —— 更新恰好在 GET /status 与这次 POST
+  // 之间跑完,用户只是打开设置面板就静默起了一次全局安装,毫无确认。
+  const doUpdateStream = async ({ attach = false } = {}) => {
     try {
-      const r = await fetch('/api/claude-update/stream', { method: 'POST' });
+      const r = await fetch(attach ? '/api/claude-update/attach' : '/api/claude-update/stream', { method: 'POST' });
       if (!r.ok || !r.body) throw new Error('HTTP ' + r.status);
       const reader = r.body.getReader();
       const dec = new TextDecoder();
@@ -1296,16 +1307,13 @@ function CcUpdater() {
           <div className="text-[12px] text-success">✓ 已是最新版本</div>
         )
       )}
-      {/* r14-1:原来读 state.error,但 check() 写的是 message → 失败原因从来没显示过,
-          用户只看到按钮转一下就没反应。两者都读,并给可执行指引。 */}
+      {/* 失败原因要可见(按钮转一下就没反应是最糟的形态)。本组件的数据源是
+          /api/claude-version-check,失败字段就是 error(check() 与 catch 都写它);
+          r14-1 注释里说的"读 error 写 message"是 UpdateChecker 的毛病,不是这里。 */}
       {state.status === 'err' && (
         <div className="text-[12px] text-error">
-          检查更新失败:{state.message || state.error || '未知原因'}
+          检查更新失败:{state.error || '未知原因'}
         </div>
-      )}
-      {/* 用了旧缓存(本次拉取失败)时明示,避免"看起来是最新版"其实没查到 */}
-      {state.status === 'ok' && state.staleError && (
-        <div className="text-[11px] text-warning">结果可能过期:{state.staleError}</div>
       )}
       {/* R8-2:死 override 横幅。手动指定的路径已失效时 resolver 静默回落自动优先级,
           用户以为还在用指定的那个 —— 显式提示 + 两个出口:清除指定(回自动)/重新选择
