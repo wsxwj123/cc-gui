@@ -12,7 +12,7 @@ import {
 // 全在 services/provider-quota.js,这里只做 IO:读配置 → 探测 → 缓存。
 //
 // apiKey 只在内存里流转:不落日志、不进响应体、不进错误信息、不拼进命令行(用 node fetch,
-// 不 spawn curl —— 那会把 key 暴露在进程表里)。
+// 不 spawn curl —— 那会把 key 暴露在进程表里)。r16-4 的 quotaKey 同一套约束。
 const router = Router();
 
 const TIMEOUT_MS = 8000;
@@ -132,7 +132,10 @@ router.get('/provider-quota', async (_req, res) => {
   // data 对象,否则各写各的缓存(fetchedAt 差几毫秒),缓存回放跟首份对不上。
   if (!inflight || inflight.providerId !== provider.id) {
     const promise = (async () => {
-      const result = await probeQuota(candidates, makeFetcher(provider.apiKey));
+      // r16-4:额度查询用 quotaKey,没配才回落 apiKey。有几家的额度接口认的不是推理 key
+      // (OpenRouter 账户余额要 management key、MiniMax 套餐额度可能要订阅密钥),
+      // 拿推理 key 打过去只会 401 或读到空数据。
+      const result = await probeQuota(candidates, makeFetcher(provider.quotaKey || provider.apiKey));
       if (!result.ok) {
         endpointMemo.delete(provider.id);
         cooldown = { providerId: provider.id, until: Date.now() + CACHE_MS, reason: result.reason, note: reasonNote(result.reason) };

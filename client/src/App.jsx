@@ -8403,6 +8403,11 @@ function CustomProviderForm({ onSaved, editing, onCancel, onDirtyChange, customC
   const [type, setType] = useState('openai');
   const [baseURL, setBaseURL] = useState('');
   const [apiKey, setApiKey] = useState('');
+  // r16-4:额度查询密钥(可选)。部分 provider 的额度接口认的不是推理 key(OpenRouter 账户
+  // 余额要 management key)。与 apiKey 同样从不回显明文 → 编辑态留空 = 不修改,
+  // 要删掉已存的密钥只能靠这个显式标记(它让保存时发出空串 = 清除)。
+  const [quotaKey, setQuotaKey] = useState('');
+  const [quotaKeyCleared, setQuotaKeyCleared] = useState(false);
   const [modelsText, setModelsText] = useState('');
   const [testResult, setTestResult] = useState(null); // BZ-1:{ ok, error } | null
   const [defaultModel, setDefaultModel] = useState('');  // AZ8:该 provider 默认模型(空=用列表第一个)
@@ -8419,6 +8424,8 @@ function CustomProviderForm({ onSaved, editing, onCancel, onDirtyChange, customC
   const [modelCaps, setModelCaps] = useState({});
   const [busy, setBusy] = useState('');
   const isEdit = !!editing;
+  // 后端只下发 hasQuotaKey 布尔(明文永不出服务端);点过「清除」后按未配置显示。
+  const savedQuotaKey = isEdit && !!editing?.hasQuotaKey && !quotaKeyCleared;
   const formRef = useRef(null);
   // 表单挂在列表顶部:点下方条目的「编辑」时列表往往已滚远,展开后把表单滚进视野。
   // block:'start' 而非 'nearest' —— 表单比滚动容器高,'nearest' 会因"已覆盖视口"
@@ -8448,6 +8455,7 @@ function CustomProviderForm({ onSaved, editing, onCancel, onDirtyChange, customC
       setType(editing.type || 'openai');
       setBaseURL(editing.baseURL || '');
       setApiKey('');
+      setQuotaKey(''); setQuotaKeyCleared(false);
       setModelsText((editing.models || []).join('\n'));
       setDefaultModel(editing.defaultModel || '');
       setTierModels({ haiku: editing.tierModels?.haiku || '', sonnet: editing.tierModels?.sonnet || '', opus: editing.tierModels?.opus || '', fable: editing.tierModels?.fable || '' });
@@ -8460,14 +8468,15 @@ function CustomProviderForm({ onSaved, editing, onCancel, onDirtyChange, customC
     })();
     return () => { stale = true; };
   }, [editing?.id]);
-  const reset = () => { setName(''); setType('openai'); setBaseURL(''); setApiKey(''); setModelsText(''); setDefaultModel(''); setTierModels({ haiku: '', sonnet: '', opus: '', fable: '' }); setCtxWindow(''); setModelPrices({}); setModelCaps({}); setTestResult(null); setOpen(false); };
+  const reset = () => { setName(''); setType('openai'); setBaseURL(''); setApiKey(''); setQuotaKey(''); setQuotaKeyCleared(false); setModelsText(''); setDefaultModel(''); setTierModels({ haiku: '', sonnet: '', opus: '', fable: '' }); setCtxWindow(''); setModelPrices({}); setModelCaps({}); setTestResult(null); setOpen(false); };
   const close = () => { reset(); onCancel?.(); };
   const parseModels = () => modelsText.split(/[\n,]+/).map((s) => s.trim()).filter(Boolean);
   // BZ-2:有未保存内容时上报 dirty,父级据此阻止外部点击/Esc 关闭下拉(避免丢输入)。
   // R5-d:ctxWindow / modelPrices 原先不在判据里 —— 只填了上下文窗口或单价就点下拉外面,
   // 下拉静默关掉、输入没了。modelPrices 只要有行就算 dirty(值全空也是用户选过模型的结果,
   // 丢掉同样是丢输入);编辑态本来就因预填的 name/baseURL 恒 dirty,这两项只在新增态起作用。
-  const dirty = (open || isEdit) && !!(name.trim() || baseURL.trim() || apiKey.trim() || modelsText.trim()
+  const dirty = (open || isEdit) && !!(name.trim() || baseURL.trim() || apiKey.trim() || quotaKey.trim()
+    || quotaKeyCleared || modelsText.trim()
     || ctxWindow.trim() || Object.keys(modelPrices).length || Object.keys(modelCaps).length);
   useEffect(() => { onDirtyChange?.(dirty); }, [dirty]);
   useEffect(() => () => onDirtyChange?.(false), []); // 卸载时清掉,避免残留 dirty 卡住关闭
@@ -8564,6 +8573,10 @@ function CustomProviderForm({ onSaved, editing, onCancel, onDirtyChange, customC
       // Edit mode: a blank key means "keep the stored one" (the client never holds
       // the real key), so only send apiKey when the user actually typed a new one.
       if (!isEdit || apiKey.trim()) body.apiKey = apiKey;
+      // r16-4:额度查询密钥同上 —— 只在用户真填了时才发。留空 = 保留已存值(后端见字段
+      // 缺失即不动),点过「清除」则显式发空串 = 删除已存值。填了新值时以新值为准。
+      if (quotaKey.trim()) body.quotaKey = quotaKey;
+      else if (isEdit && quotaKeyCleared) body.quotaKey = '';
       const r = await fetch(isEdit ? `/api/custom-providers/${editing.id}` : '/api/custom-providers', {
         method: isEdit ? 'PUT' : 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -8657,6 +8670,24 @@ function CustomProviderForm({ onSaved, editing, onCancel, onDirtyChange, customC
       <input className={inputCls} placeholder="名称(如 我的中转)" value={name} onChange={(e) => setName(e.target.value)} />
       <input className={`${inputCls} font-mono`} placeholder="Base URL (https://...)" value={baseURL} onChange={(e) => setBaseURL(e.target.value)} />
       <input className={`${inputCls} font-mono`} type="password" placeholder={isEdit ? 'API Key(留空 = 不修改)' : 'API Key'} value={apiKey} onChange={(e) => setApiKey(e.target.value)} />
+      {/* r16-4:额度查询密钥。仅额度查询用,不参与推理请求。已保存时不回显明文(与 API Key
+          同口径),留空即保留;要删除已存的密钥须点「清除」发出显式空串。 */}
+      <div>
+        <div className="flex items-center gap-2">
+          <input className={`${inputCls} font-mono`} type="password"
+            placeholder={savedQuotaKey ? '额度查询密钥(可选,留空 = 不修改)' : '额度查询密钥(可选)'}
+            value={quotaKey} onChange={(e) => setQuotaKey(e.target.value)} />
+          {savedQuotaKey && !quotaKey.trim() && (
+            <button type="button" onClick={() => setQuotaKeyCleared(true)}
+              className="shrink-0 px-2 py-2 text-[11px] text-ink-faint hover:text-ink border border-canvas-deep rounded-lg">清除</button>
+          )}
+        </div>
+        <p className="mt-1 text-[11px] text-ink-faint leading-relaxed">
+          {savedQuotaKey && !quotaKey.trim() ? '已保存密钥。' : ''}
+          {quotaKeyCleared ? '保存后清除已存密钥。' : ''}
+          留空时使用上方的 API 密钥查询额度。OpenRouter 需填写 management key 才能读取账户余额，否则仅能读取该密钥的花费上限；MiniMax 的套餐额度接口可能要求订阅密钥。其余 provider 无需填写。
+        </p>
+      </div>
       <div className="flex items-center gap-2">
         <textarea className={`${inputCls} font-mono min-h-[60px]`} placeholder="模型(每行一个,或逗号分隔)" value={modelsText} onChange={(e) => setModelsText(e.target.value)} />
       </div>
