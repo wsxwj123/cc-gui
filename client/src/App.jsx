@@ -1755,12 +1755,17 @@ function HomeState({ tabIndex = 0 }) {
       .then((d) => setHiddenHashes(readHiddenHashes(d)))
       .catch(() => {}); // 读失败回落「不过滤」,不是「全过滤」
   }, []);
-  // r23:解析与过滤都在 utils/home.js(纯函数,行为单测直接调),这里只做接线。
-  const visibleProjects = useMemo(() => visibleHomeProjects(projects, hiddenHashes), [projects, hiddenHashes]);
   // r24:聚焦窗格(activeTabIndex)当前会话所属的项目 —— 新建会话的默认 cwd 跟着你**正在看**
   // 的那个会话走,而不是侧栏的选中项(分屏时两者经常不是一个)。选出的是字符串/undefined,
   // 不会给 Zustand 造新引用。单屏也成立:paneSessions[0] 恒镜像 selectedSession。
+  // (声明必须在下面的 useMemo 之前:过滤要用它,写在后面就是 TDZ。)
   const focusedProjectHash = useStore((s) => s.paneSessions?.[s.activeTabIndex]?.projectHash) || null;
+  // r23:解析与过滤都在 utils/home.js(纯函数,行为单测直接调),这里只做接线。
+  // r25:聚焦项目豁免 hidden(同侧栏窗格豁免)—— 否则「隐藏了正在看的项目」会让它先被
+  // 滤掉,上面那条聚焦优先级形同虚设。
+  const visibleProjects = useMemo(
+    () => visibleHomeProjects(projects, hiddenHashes, focusedProjectHash),
+    [projects, hiddenHashes, focusedProjectHash]);
   // selectedProject 仍按原样传:用户显式打开的隐藏项目(侧栏窗格豁免同理)不该被踢掉。
   const project = pickHomeProject({ chosenHash, focusedProjectHash, projects: visibleProjects, selectedProject });
   const recent = useMemo(() => [...visibleProjects]

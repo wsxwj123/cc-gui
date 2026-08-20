@@ -32,6 +32,21 @@ const RESTORE_LAST_ON_BOOT = (() => {
   catch { return false; }
 })();
 
+// 分屏布局的两个持久化键**互相约束**:activeTabIndex 必须落在 [0, paneCount-1]。
+// 其余三个写入点(setPaneCount / closePane / setActiveTabIndex)都夹紧了,只有启动
+// 水合这处原来只校验 0..5 —— 陈旧存储(旧版开着 6 窗格、这次启动 paneCount=1)或手改
+// 存储会让聚焦索引指向一个不存在的窗格,而 Home 的默认目录正是读
+// paneSessions[activeTabIndex] → 新建会话开到另一个窗格的项目里(r25-②)。
+// 在这里夹一次,所有读 activeTabIndex 的地方(渲染/快捷键/setPaneSession)一并封死。
+const INITIAL_PANE_COUNT = (() => {
+  const n = parseInt(readLs('cgui-pane-count', 1), 10);
+  return Number.isFinite(n) && n >= 1 && n <= 6 ? n : 1;
+})();
+const INITIAL_ACTIVE_TAB = (() => {
+  const n = parseInt(readLs('cgui-active-tab-index', 0), 10);
+  return Number.isFinite(n) && n >= 0 ? Math.min(n, INITIAL_PANE_COUNT - 1) : 0;
+})();
+
 // Push one session-title change to the shared server store (fire-and-forget).
 // Server merges per-key and broadcasts the full map back over ws so the other
 // device updates live. Empty title clears the override.
@@ -431,10 +446,7 @@ export const useStore = create((set, get) => ({
   //
   // splitMode is derived (paneCount > 1) but exported for legacy code that
   // checks `if (splitMode)` for branching.
-  paneCount: (() => {
-    const n = parseInt(readLs('cgui-pane-count', 1), 10);
-    return Number.isFinite(n) && n >= 1 && n <= 6 ? n : 1;
-  })(),
+  paneCount: INITIAL_PANE_COUNT,
   // paneSessions[0] always == selectedSession; index 1..5 are extra panes.
   // r11-②:启动默认进 Home → 全窗格不恢复会话(与 selectedSession 同一开关门控;
   // 只恢复 pane 0 不恢复其余会造成分屏半恢复的怪态)。
@@ -462,10 +474,7 @@ export const useStore = create((set, get) => ({
   // React instance — and its live streaming state — paired with its session.
   // In-memory only; layout positions are restored from paneSessions on reload.
   paneIds: ['p0', 'p1', 'p2', 'p3', 'p4', 'p5'],
-  activeTabIndex: (() => {
-    const n = parseInt(readLs('cgui-active-tab-index', 0), 10);
-    return Number.isFinite(n) && n >= 0 && n <= 5 ? n : 0;
-  })(),
+  activeTabIndex: INITIAL_ACTIVE_TAB, // 已夹到 [0, paneCount-1](见 INITIAL_ACTIVE_TAB)
   // Background-process pids per session, surfaced for sidebar dots + top
   // badge. Populated by SessionDetail's backgroundPid poll. Shape:
   //   { [sessionId]: pid }
@@ -481,10 +490,9 @@ export const useStore = create((set, get) => ({
   })),
 
   // splitMode = 派生自 `paneCount > 1`,导出给按 `if (splitMode)` 分支的调用方(App.jsx 多处)。
-  splitMode: (() => {
-    const n = parseInt(readLs('cgui-pane-count', 1), 10);
-    return Number.isFinite(n) && n > 1;
-  })(),
+  // 取同一个 INITIAL_PANE_COUNT:原来这里重读一次存储且不夹上界,存了 8 就成了
+  // 「paneCount=1 而 splitMode=true」的自相矛盾态。
+  splitMode: INITIAL_PANE_COUNT > 1,
 
   // In-flight subagent state keyed by the parent Task tool_use.id. Each entry:
   //   { id, name, description, status, startedAt,
