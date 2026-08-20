@@ -14,7 +14,6 @@
 import http from 'node:http';
 import { isCountTokensRequest, estimateInputTokens } from '../utils/context-tokens.js';
 import { lookupModelCapabilities, EFFORT_IDS } from '../utils/model-capabilities.js';
-import { reportContextInjection } from '../utils/context-injection.js';
 
 // Fixed loopback port so the ANTHROPIC_BASE_URL written into settings.json
 // stays valid across server restarts (watchdog). Falls back to an ephemeral
@@ -602,10 +601,6 @@ async function handle(req, clientRes) {
   let body;
   try { body = JSON.parse(await readBody(req)); }
   catch { clientRes.writeHead(400); clientRes.end('bad json'); return; }
-
-  // r17-①:转换前的 body 与 anthropic-proxy 同构 → 同一个旁路提取。只广播分类/标签/
-  // 字符数,无正文;内部全吞异常,不影响下面的转换与转发。
-  reportContextInjection(body);
 
   const oaReq = buildOpenAIRequest(body);
   const wantStream = oaReq.stream;
