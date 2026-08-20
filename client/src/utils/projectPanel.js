@@ -175,12 +175,23 @@ export function flattenSessionRows(sessionsByProject, visibleHashes) {
 // r23-③:空态文案(平铺与分组两处共用)。系统拒绝访问时**绝不能**伪装成"暂无会话"——
 // 用户的第一反应是"数据被 GUI 删了"(r17-4 立项根因)。原来只有分组模式那处读
 // accessError,平铺模式自己硬编了一句"暂无会话",403 落成空数组后正好走进它。
-export const ACCESS_DENIED_HINT = '无法读取会话目录（系统拒绝访问），会话文件没有丢失 —— 点此查看处理办法';
+// r24:原文案结尾是「—— 点此查看处理办法」,而它渲染成一个纯 <span>,点了没有任何反应
+// (承诺了交互却没实现)。现在处理办法有两条真实出口:hover 看 title(平台化的 hint),
+// 以及 macOS 上紧随其后的「打开系统设置」按钮。文案不再承诺一个不存在的点击。
+export const ACCESS_DENIED_HINT = '无法读取会话目录（系统拒绝访问），会话文件没有丢失';
 
 /** 空态文案判定:拒访 > 搜索无果 > 调用方给的兜底(平铺/分组各自的措辞)。 */
-export function sessionEmptyHint({ accessError, query, fallback = '暂无会话' } = {}) {
+export function sessionEmptyHint({ accessError, query, fallback } = {}) {
   if (accessError) return ACCESS_DENIED_HINT;
   return query ? '没有匹配的会话' : fallback;
+}
+
+// r24:拒访空态给不给「打开系统设置」按钮。ponytail: 这两行本可以直接写在 JSX 的 && 里,
+// 提成纯函数是为了让门控**能被行为单测真调**(组件层没有 JSX 渲染环境,只做正则断言的话,
+// 平台门控失效正是那种"断言全绿而 Windows 用户被指去一个不存在的面板"的坑)。
+// canOpenSettings 来自后端 canOpenAccessSettings(),目前只有 macOS 为真。
+export function showAccessSettingsButton({ accessError, canOpenSettings } = {}) {
+  return !!accessError && !!canOpenSettings;
 }
 
 /** 手动拖拽落位(纯函数):把 hash 移到 targetIdx(非置顶段内),返回新顺序数组。 */

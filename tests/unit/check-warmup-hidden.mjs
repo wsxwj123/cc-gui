@@ -168,9 +168,13 @@ const hidden = new Set(['h-home', 'h-tmp', 'h-big', 'h-stale-1', 'h-stale-2']); 
     't8: 可见集由懒拉行集派生(单一来源)');
   assert.match(sidebar, /flattenSessionRows\(sessionsByProject, visibleHashes\)/,
     't8: 平铺渲染必须吃同一个可见集(只改拉取 = 只修了一半)');
+  // r24:过滤生效后**新出现**的空态 —— 平铺 + 全部项目都被隐藏,原来只剩一句「暂无会话」。
+  // 分组模式那边早有专门措辞(hiddenOnly),两处口径必须一致,否则又是一次"空列表骗人"。
+  assert.match(sidebar, /\{emptyHint\(hiddenOnly \? '所有项目都已隐藏' : '暂无会话'\)\}/,
+    't8: 平铺空态在"全被隐藏"时说实话(与分组模式同一措辞)');
   const app = readFileSync(new URL('../../client/src/App.jsx', import.meta.url), 'utf8');
-  assert.match(app, /pickHomeProject\(\{ chosenHash, projects: visibleProjects, selectedProject \}\)/,
-    't8: Home 默认项目取已过滤列表');
+  assert.match(app, /pickHomeProject\(\{ chosenHash, focusedProjectHash, projects: visibleProjects, selectedProject \}\)/,
+    't8: Home 默认项目取已过滤列表(r24 起还带聚焦窗格来源,优先级真值表见 check-home-state t2b)');
   assert.match(app, /visibleHomeProjects\(projects, hiddenHashes\)/, 't8: 过滤走共用纯函数');
   assert.match(app, /setHiddenHashes\(readHiddenHashes\(d\)\)/, 't8: 载荷解析走共用纯函数');
   const recentAt = app.indexOf('const recent = useMemo');

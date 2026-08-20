@@ -1860,18 +1860,21 @@ export const useStore = create((set, get) => ({
         // 身份复用同下:已经是空数组就不换身份,免得 600ms watcher 反复触发整树重渲。
         set((st) => {
           const merged = mergeSessionList(st.sessionsByProject[projectHash], []);
-          const sameErr = st.sessionsAccessError === data.hint;
+          // r24:canOpenSettings 与 hint 同来同走(侧栏空态的「打开系统设置」按钮按它门控)。
+          // 原来这里只取 hint 把它丢了 —— 后端明明回了,前端却无从判断该不该给按钮。
+          const canOpen = !!data.canOpenSettings;
+          const sameErr = st.sessionsAccessError === data.hint && st.sessionsAccessCanOpenSettings === canOpen;
           const sameList = merged === st.sessionsByProject[projectHash];
           if (sameErr && sameList) return st;
           return {
-            ...(sameErr ? null : { sessionsAccessError: data.hint }),
+            ...(sameErr ? null : { sessionsAccessError: data.hint, sessionsAccessCanOpenSettings: canOpen }),
             ...(sameList ? null : { sessionsByProject: { ...st.sessionsByProject, [projectHash]: merged } }),
           };
         });
         return;
       }
       const list = Array.isArray(data) ? data : [];
-      set((st) => (st.sessionsAccessError ? { sessionsAccessError: null } : st));
+      set((st) => (st.sessionsAccessError ? { sessionsAccessError: null, sessionsAccessCanOpenSettings: false } : st));
       // r13-p2-1:内容不变则复用旧身份并跳过 set —— watcher 每 600ms 刷全部展开组,
       // 无条件换身份会让侧栏整树随流式持续重渲(按钮卡顿/点击丢失根因)。
       set((s) => {
@@ -1885,6 +1888,10 @@ export const useStore = create((set, get) => ({
   // 置顶(项目/会话,服务端共享):挂载 GET 与 WS 广播都经同一 reducer 入位。
   // r17-4:会话目录不可读(完全磁盘访问未授予)时的人话提示;null = 正常。
   sessionsAccessError: null,
+  // r24:这个平台有没有「一键打开」的系统设置面板可跳(后端 canOpenAccessSettings,
+  // 目前只有 macOS)。侧栏空态据此决定给不给「打开系统设置」按钮 —— Windows/Linux
+  // 上按了无处可去,不显示。
+  sessionsAccessCanOpenSettings: false,
   pinnedProjects: [],
   pinnedSessions: [],
   applyPinned: (data) => set(reducePinned(data)),
@@ -1904,11 +1911,11 @@ export const useStore = create((set, get) => ({
       // 静默吞成 [] —— 与 fetchSessionsForPanel 口径不一致,权限被拒时旧槽照样显示成
       // "没有会话"。两个消费者必须同口径:置错误态 + 空列表。
       if (res.status === 403 && data?.code === 'no-disk-access') {
-        set(silent ? { sessions: [], sessionsAccessError: data.hint }
-          : { sessions: [], sessionsAccessError: data.hint, listLoading: false });
+        const access = { sessionsAccessError: data.hint, sessionsAccessCanOpenSettings: !!data.canOpenSettings };
+        set(silent ? { sessions: [], ...access } : { sessions: [], ...access, listLoading: false });
         return;
       }
-      set((st) => (st.sessionsAccessError ? { sessionsAccessError: null } : st));
+      set((st) => (st.sessionsAccessError ? { sessionsAccessError: null, sessionsAccessCanOpenSettings: false } : st));
       // Treat non-array response (e.g. {error:"..."} from a 500) as empty.
       // Without this, on 500 `data` would still be a non-array object — we
       // already coerce to [], but earlier bugs let stale `sessions` linger
