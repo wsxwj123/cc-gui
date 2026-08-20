@@ -2075,6 +2075,10 @@ export function GitInitBanner({ cwd }) {
   // can re-run the check after a successful init without remounting).
   const [kick, setKick] = useState(0);
   const [repoRoot, setRepoRoot] = useState(null);
+  // r20:被系统拒绝访问时的处理指引与「能否一键打开设置」由**服务端**给 —— 只有它知道
+  // process.platform。此前这段文案在前端硬编码 macOS 的「完全磁盘访问」路径,Windows
+  // 用户看到的是一个根本不存在的面板。
+  const [access, setAccess] = useState(null); // { hint, canOpenSettings }
   // 探测 effect 里要读当前 status 又不能把它放进 deps(那会自触发),用 ref 取。
   const statusRef = useRef(null);
   const statusCwdRef = useRef(null);
@@ -2100,6 +2104,7 @@ export function GitInitBanner({ cwd }) {
       // 服务端时没有 hasCommit 字段,回落到本次导入探测的结果。
       .then((s) => {
         setRepoRoot(typeof s?.root === 'string' ? s.root : null);
+        setAccess(s?.permissionDenied ? { hint: s.hint || '', canOpenSettings: !!s.canOpenSettings } : null);
         setStatus(s?.gitMissing ? 'nogit' : (s?.permissionDenied ? 'tcc' : (s?.isRepo === false ? 'norepo'
           : ((s?.hasCommit === false || importGitState.get(cwd) === 'repoNoCommit') ? 'nocommit' : 'repo'))));
       })
@@ -2113,12 +2118,16 @@ export function GitInitBanner({ cwd }) {
       <div className="bg-amber-50 border-b border-amber-200 px-4 py-2 text-[12px] font-body text-amber-900 flex items-center gap-2 flex-wrap">
         <Shield size={13} className="text-amber-600 shrink-0" />
         <span className="flex-1 min-w-[12rem]">
-          macOS 拒绝了对该文件夹的访问(重装/升级后授权会失效)。请到 系统设置 → 隐私与安全性 → <b>完全磁盘访问</b>,将 cc-gui 的开关<b>关掉再打开</b>(或重新添加),然后重启 GUI。
+          系统拒绝了对该文件夹的访问。{access?.hint}
         </span>
-        <button
-          onClick={() => { fetch('/api/system/open-fda-settings', { method: 'POST' }).catch(() => {}); }}
-          className="px-2 py-0.5 rounded bg-amber-100 hover:bg-amber-200 text-amber-900 text-[10px] font-medium shrink-0"
-        >打开系统设置</button>
+        {/* 「打开系统设置」只在真有面板可跳时出现(目前只有 macOS 的完全磁盘访问);
+            在 Windows / Linux 上按了也没地方去,不如不显示。 */}
+        {access?.canOpenSettings && (
+          <button
+            onClick={() => { fetch('/api/system/open-fda-settings', { method: 'POST' }).catch(() => {}); }}
+            className="px-2 py-0.5 rounded bg-amber-100 hover:bg-amber-200 text-amber-900 text-[10px] font-medium shrink-0"
+          >打开系统设置</button>
+        )}
         <button
           onClick={() => setKick((k) => k + 1)}
           className="px-2 py-0.5 rounded hover:bg-amber-100 text-amber-700 text-[10px] shrink-0"

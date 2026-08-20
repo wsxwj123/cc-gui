@@ -3,6 +3,7 @@ import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { stat } from 'fs/promises';
 import { resolveWorkspacePath } from '../utils/safe-path.js';
+import { ACCESS_DENIED_RE, accessDeniedHint, canOpenAccessSettings } from '../utils/access-hint.js';
 
 const execFileP = promisify(execFile);
 const router = Router();
@@ -30,20 +31,23 @@ export function classifyGitInitError(err) {
     return { code: 'git-missing', error: '未检测到 git，无法初始化仓库。', hint: '在 通用 → 环境 里安装 git，或到 git-scm.com 下载后重试。' };
   }
   const stderr = String(err?.stderr || '').split('\n')[0].slice(0, 200);
-  if (/operation not permitted|permission denied|不允许的操作/i.test(stderr)) {
+  if (ACCESS_DENIED_RE.test(stderr)) {
     return {
       code: 'no-disk-access',
       error: '初始化 git 仓库失败：系统拒绝访问该文件夹。',
-      hint: '打开「系统设置 → 隐私与安全性 → 完全磁盘访问」，把 cc-gui 的开关关掉再打开（或重新添加），重启 GUI 后重试。',
+      hint: accessDeniedHint(),
+      canOpenSettings: canOpenAccessSettings(),
       detail: stderr,
     };
   }
   if (err?.killed) {
-    // 超时不直接断言是权限问题(也可能是网络盘/外接盘),但把最常见的原因写在前面。
+    // 超时不断言就是权限问题(也可能是网络盘/外接盘没连上),所以措辞是"最常见的原因是",
+    // 后面跟平台对应的排查步骤。
     return {
       code: 'git-init-timeout',
       error: 'git init 超时（8 秒内未完成）。',
-      hint: '最常见的原因是系统未授予磁盘访问权限、git 进程被挡住：到「系统设置 → 隐私与安全性 → 完全磁盘访问」把 cc-gui 关掉再打开，重启 GUI 后重试。若该文件夹在网络盘或外接磁盘上，请确认它已挂载。',
+      hint: '最常见的原因是 git 进程被系统或安全软件挡住。' + accessDeniedHint(),
+      canOpenSettings: canOpenAccessSettings(),
     };
   }
   return { code: 'git-init-failed', error: 'git init 失败：' + (stderr || err?.message || '未知错误') };
@@ -98,7 +102,9 @@ router.get('/git/status', async (req, res) => {
         // 超时:信息不足,静默。
         return res.json({ isRepo: null });
       }
-      res.json({ isRepo: null, permissionDenied: true });
+      // r20:文案由服务端给(它才知道 process.platform);前端横幅只负责渲染,
+      // 不再把 macOS 的「完全磁盘访问」路径硬编码在 App.jsx 里。
+      res.json({ isRepo: null, permissionDenied: true, hint: accessDeniedHint(), canOpenSettings: canOpenAccessSettings() });
     }
   } catch (err) {
     res.status(400).json({ error: err.message });

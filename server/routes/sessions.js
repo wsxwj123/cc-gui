@@ -6,6 +6,7 @@ import { homedir, tmpdir } from 'os';
 import { randomUUID } from 'crypto';
 import { closePersistentForSession } from './chat.js';
 import { isRealUserQuestion } from './fork.js';
+import { accessDeniedHint, canOpenAccessSettings } from '../utils/access-hint.js';
 import { removeSessionFromPrefs } from './prefs.js';
 
 // Guard against path traversal: projectHash / sessionId arrive from request
@@ -386,7 +387,8 @@ router.get('/projects/:hash/sessions', async (req, res) => {
       return res.status(403).json({
         error: '无法读取会话目录（系统拒绝访问）',
         code: 'no-disk-access',
-        hint: '打开「系统设置 → 隐私与安全性 → 完全磁盘访问」，把 CC-GUI 加进去并勾选；已勾选的先取消再重新勾选，然后完全退出 App 再打开。会话文件本身没有丢失。',
+        hint: accessDeniedHint() + '会话文件本身没有丢失。',
+        canOpenSettings: canOpenAccessSettings(),
       });
     }
     res.status(500).json({ error: err.message });
