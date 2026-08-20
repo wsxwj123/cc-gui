@@ -1682,13 +1682,23 @@ async function tryFetchModels(url, apiKey) {
     { ...common, 'x-api-key': apiKey || '', 'anthropic-version': '2023-06-01' },
     { ...common, Authorization: `Bearer ${apiKey || ''}` },
   ];
-  let lastStatus = 0, lastBody = '';
+  let lastStatus = 0, lastBody = '', lastErr = '';
   for (const headers of headerSets) {
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), 10000);
     let r;
     try { r = await fetch(url, { headers, signal: ctrl.signal }); }
-    catch (e) { clearTimeout(timer); if (e.name === 'AbortError') throw new Error('拉取超时(10s)'); continue; }
+    catch (e) {
+      clearTimeout(timer);
+      if (e.name === 'AbortError') throw new Error('拉取超时(10s)');
+      // r17-5:原先这里直接 continue,把网络异常整条吃掉 —— 外层 status 保持 0,
+      // 用户只看到「返回 错误」四个字,连"域名解析不了"还是"连接被拒"都分不出来。
+      // undici 把真实成因放在 e.cause(如 getaddrinfo ENOTFOUND / ECONNREFUSED),
+      // e.message 只有笼统的 "fetch failed",所以两个都要取。
+      const cause = e?.cause?.code || e?.cause?.message || '';
+      lastErr = [e?.message, cause].filter(Boolean).join(' — ').slice(0, 200);
+      continue;
+    }
     clearTimeout(timer);
     if (r.ok) {
       const data = await r.json().catch(() => null);
@@ -1708,7 +1718,7 @@ async function tryFetchModels(url, apiKey) {
     lastStatus = r.status;
     lastBody = (await r.text().catch(() => '')).replace(/\s+/g, ' ').trim().slice(0, 160);
   }
-  return { status: lastStatus, body: lastBody };
+  return { status: lastStatus, body: lastBody, err: lastErr };
 }
 
 // SSRF 守卫:provider baseURL 用户可填任意 URL,server 会带【存储的 apiKey】主动
@@ -1770,18 +1780,27 @@ async function probeUpstreamModels(baseURL, apiKey) {
     if (/(^|\.)openrouter\.ai$/i.test(new URL(b).host)) candidates.push('https://openrouter.ai/api/v1/models');
   } catch {}
 
-  let lastStatus = 0, lastBody = '', lastUrl = '';
+  let lastStatus = 0, lastBody = '', lastUrl = '', lastErr = '';
   for (const url of [...new Set(candidates)]) {
     const res = await tryFetchModels(url, apiKey); // 超时直接向上抛
     if (res.ids) return res;                       // {ids, windows} 200(空数组也算成功,由前端提示手填)
-    lastStatus = res.status; lastBody = res.body; lastUrl = url;
+    lastStatus = res.status; lastBody = res.body; lastUrl = url; lastErr = res.err || lastErr;
   }
   // 区分鉴权失败 vs 没有 models 接口,后者明确引导手填(anthropic 中转常见)。
   if (lastStatus === 401 || lastStatus === 403) {
     throw new Error(`上游 ${lastUrl} 返回 ${lastStatus}(鉴权失败):请检查 API Key${lastBody ? `。${lastBody}` : ''}`);
   }
+  // r17-5:网络层就没通(status 0)时,别说成"该 provider 未提供模型列表接口" —— 那是
+  // 误导:根本没到达对方。把真实成因(DNS/连接/TLS)原样给出来。
+  if (!lastStatus) {
+    throw new Error(
+      `连不上 ${lastUrl}${lastErr ? `:${lastErr}` : ''}。`
+      + `\n这是网络层失败(请求没能到达对方),常见原因:本机 DNS 解析不了该域名、需要代理才能访问、`
+      + `或防火墙拦截。可先在终端验证:curl -sS -o /dev/null -w '%{http_code}' ${lastUrl}`,
+    );
+  }
   throw new Error(
-    `该 provider 未提供模型列表接口(${lastUrl} 返回 ${lastStatus || '错误'})。`
+    `该 provider 未提供模型列表接口(${lastUrl} 返回 ${lastStatus})。`
     + `很多 Anthropic 协议中转只支持 /v1/messages、没有模型列表,这是正常的 —— 请在「模型」框手动填模型名`
     + `(如 opus/sonnet/haiku、deepseek-v4-pro、glm-5.2 等)再保存。${lastBody ? `\n上游:${lastBody}` : ''}`,
   );
