@@ -6,7 +6,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vite build",
+    "release-notes:generate": "node ../scripts/gen-release-notes.mjs",
+    "build": "npm run release-notes:generate && vite build",
     "preview": "vite preview"
   },
   "dependencies": {

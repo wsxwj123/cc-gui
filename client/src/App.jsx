@@ -27,6 +27,8 @@ import { useWebSocket } from './hooks/useWebSocket.js';
 import { MessageBubble } from './components/MessageBubble.jsx';
 import { MarkdownRenderer } from './components/MarkdownRenderer.jsx';
 import { TurnBubble } from './components/TurnBubble.jsx';
+import { ReleaseNotesModal } from './components/ReleaseNotesModal.jsx';
+import { shouldShow as shouldShowReleaseNotes, hasReleaseNotes, loadVersionNotes, fetchLastSeen, markSeen } from './utils/releaseNotes.js';
 import TurnScrubber from './components/TurnScrubber.jsx';
 import { LoadingMark, useCyclingVerb, ElapsedTime } from './components/LoadingBits.jsx';
 import { ErrorBoundary } from './components/ErrorBoundary.jsx';
@@ -9748,6 +9750,45 @@ export default function App() {
     return () => { clearInterval(timer); window.removeEventListener('focus', onFocus); window.removeEventListener('cgui:recheck-updates', onRecheck); };
   }, []);
 
+  // r17-2:装完新版打开 GUI → 弹「更新说明」。内容全程离线(CHANGELOG.md 构建期切成
+  // bundle 内的 JSON,这里本地 import),不问 GitHub Release API。
+  const [releaseNotes, setReleaseNotes] = useState(null);        // 预加载好的当前版正文
+  const [releaseNotesOpen, setReleaseNotesOpen] = useState(false);
+  useEffect(() => {
+    let alive = true;
+    let idleId = 0;
+    let fallbackTimer = 0;
+    const ver = typeof __BUILD_VERSION__ === 'string' ? __BUILD_VERSION__ : '';
+    (async () => {
+      // 「已读版本」读服务端 prefs.json(不用 localStorage:绑 WebView 数据目录会丢)。
+      let lastSeen = null;
+      try { lastSeen = await fetchLastSeen(); } catch { return; }
+      if (!alive || !shouldShowReleaseNotes(ver, lastSeen) || !hasReleaseNotes(ver)) return;
+      let data = null;
+      try { data = await loadVersionNotes(ver); } catch { return; }
+      if (!alive) return;
+      // 内容备好就标记已读,不等关窗:弹窗中途卡死或用户强杀进程,下次启动不该重弹。
+      try { await markSeen(ver); } catch { /* 标记失败最多下次再弹一次,不该拦住展示 */ }
+      if (!alive) return;
+      setReleaseNotes(data);
+      // 不用固定 setTimeout 决定何时弹:等首屏渲染完(浏览器空闲)再弹,3s 兜底。
+      const show = () => { if (alive) setReleaseNotesOpen(true); };
+      if (typeof requestIdleCallback === 'function') idleId = requestIdleCallback(show, { timeout: 3000 });
+      else fallbackTimer = setTimeout(show, 800);
+    })();
+    return () => {
+      alive = false;
+      if (idleId && typeof cancelIdleCallback === 'function') cancelIdleCallback(idleId);
+      if (fallbackTimer) clearTimeout(fallbackTimer);
+    };
+  }, []);
+  // 手动入口:设置 → 通用 → GUI 版本与更新 的「查看更新说明」。不受"同版本只弹一次"限制。
+  useEffect(() => {
+    const onOpen = () => setReleaseNotesOpen(true);
+    window.addEventListener('cgui:open-release-notes', onOpen);
+    return () => window.removeEventListener('cgui:open-release-notes', onOpen);
+  }, []);
+
   // Q1: bundle↔server 版本握手。__BUILD_VERSION__ 由 vite 烤进 bundle;server 版本
   // 走 /api/health(no-store,永远新鲜)。不一致说明本页面是旧 bundle(WebView 缓存/
   // 代理/打包塞了旧 dist),先带 ?v= 强制换缓存键重载一次自愈;重载后仍不一致则是
@@ -9977,11 +10018,11 @@ export default function App() {
     try { if (localStorage.getItem('cgui-tour-seen')) return; } catch { return; }
     const envBlocking = !cliInstalled && !cliCheckDismissed;      // 环境检查大弹窗在显示
     const updateBlocking = !!updateNotice && !updateModalDismissed; // 更新大弹窗在显示
-    if (envBlocking || updateBlocking) return;                    // 让路,等其关闭后重跑
+    if (envBlocking || updateBlocking || releaseNotesOpen) return; // 让路,等其关闭后重跑
     const t = setTimeout(() => setTourOpen(true), 600);
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isMobile, tourOpen, cliInstalled, cliCheckDismissed, updateNotice, updateModalDismissed]);
+  }, [isMobile, tourOpen, cliInstalled, cliCheckDismissed, updateNotice, updateModalDismissed, releaseNotesOpen]);
   const closeTour = useCallback(() => {
     setTourOpen(false);
     try { localStorage.setItem('cgui-tour-seen', '1'); } catch {}
@@ -10354,7 +10395,21 @@ export default function App() {
       {needsFDA && !fdaDismissed && (
         <FullDiskAccessModal onOpenSettings={openFDASettings} onDismiss={dismissFDA} />
       )}
-      {updateNotice && !updateModalDismissed && (
+      {/* r17-2 层级门控:GUI 更新说明弹窗开着时,压住下层的 Claude/GUI 更新提示;叉掉或
+          点「已知晓」后 releaseNotesOpen 转 false,本弹窗自动露出来。用布尔门而不是堆
+          z-index —— 被压住的那层根本不渲染,不存在两层遮罩叠出的灰底。 */}
+      {/* r17-2b(判官建议2):套一层 ErrorBoundary —— 更新说明是【构建期切片的静态内容】,
+          真崩了也只该崩这一个弹窗,不该把整个 App 打成错误页。配合 modal 内的
+          (g.items || []).map,把爆炸半径收进弹窗自己。 */}
+      <ErrorBoundary label="更新说明">
+        <ReleaseNotesModal
+          open={releaseNotesOpen}
+          initialVersion={typeof __BUILD_VERSION__ === 'string' ? __BUILD_VERSION__ : undefined}
+          initialNotes={releaseNotes}
+          onClose={() => setReleaseNotesOpen(false)}
+        />
+      </ErrorBoundary>
+      {updateNotice && !updateModalDismissed && !releaseNotesOpen && (
         <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/40 backdrop-blur-soft animate-fade-in" onClick={() => setUpdateModalDismissed(true)}>
           <div className="glass-popover w-[420px] max-w-[calc(var(--app-w,100vw)-1.5rem)] rounded-panel shadow-popover animate-glass-rise overflow-hidden" onClick={(e) => e.stopPropagation()}>
             <div className="px-5 py-4 flex items-start gap-3">
