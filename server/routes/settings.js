@@ -1725,7 +1725,10 @@ async function tryFetchModels(url, apiKey) {
 // fetch 并把上游响应反射回来 → 攻击者把 baseURL 指向内网/云元数据(169.254.169.254)
 // 探测,或指向自己的服务器把用户 provider 密钥骗出。解析主机名后拒绝环回/私网/链路本地。
 // export:mcp.js 的 ping 对 MCP server URL 也用同一口径。
-export async function assertPublicBaseURL(baseURL) {
+// r22-⑤:allowLoopback 默认 true —— 现有调用点(provider 切换/拉模型/额度查询/MCP ping)
+// 校验的都是【用户自己填的】地址,接本机中转是刻意支持的场景,默认行为一个字不改。
+// 只有"第三方回什么就是什么"的值(如上游返回的图片链接)才传 false。
+export async function assertPublicBaseURL(baseURL, { allowLoopback = true } = {}) {
   let host;
   try { host = new URL(baseURL).hostname.replace(/^\[|\]$/g, ''); }
   catch { const e = new Error('baseURL 非法'); e.status = 400; throw e; }
@@ -1746,7 +1749,7 @@ export async function assertPublicBaseURL(baseURL) {
   // server 打环回只到达用户自己机器,不构成内网探测面;且编辑态强制 baseURL 与存储
   // key 同源,环回也骗不出已存密钥。私网/链路本地(真 SSRF 目标)仍拒绝。
   const isLoopback = (ip) => /^127\./.test(ip) || ip === '::1' || /^::ffff:127\./i.test(ip);
-  if (addrs.length && addrs.every((a) => isLoopback(a.address))) return;
+  if (allowLoopback && addrs.length && addrs.every((a) => isLoopback(a.address))) return;
   // ⚠️ 198.18.0.0/15 刻意【不】算私网:它是 RFC2544 基准测试网段,而 Clash TUN 增强模式
   // 拿它做 fake-IP,本机所有走代理的域名都解析成 198.18.x.x。把它算私网会让装了 TUN
   // 代理的用户连 provider 都切不了。真实内网不会用这个段。

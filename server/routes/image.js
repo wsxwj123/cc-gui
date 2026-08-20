@@ -261,7 +261,22 @@ router.post('/image/generate', async (req, res) => {
       // 判官必修①(SSRF):这个 URL 是【上游回什么就是什么】,攻击者可控性最高的一处 ——
       // 而 baseURL 在上面刚过了 assertPublicBaseURL,这里原先一次都没过。实测能用
       // http://127.0.0.1:.../x.png(Content-Type: text/html) 把内网响应落成"图片"。
-      try { await assertPublicBaseURL(picked.url); }
+      // r22-⑤:光调 assertPublicBaseURL 还不够 —— 它默认【放行回环】(用户接本机
+      // ComfyUI/one-api 是刻意支持的),所以上游回 http://127.0.0.1:<任意端口>/x.png
+      // 时服务端照样会去请求,唯一拦住的只有事后的 Content-Type 检查。链路本地(169.254)
+      // 与 302 跳转那两条是真拦住了,回环这条没有。
+      // 但也不能一刀切禁回环:那会砍掉本机推理服务这个正当用法。区分点是【信任的是谁】——
+      // 回环豁免属于用户自己填的那个 host:port,不属于"本机所有端口"。故同源才继承豁免,
+      // 上游把链接指到本机别的端口 = 拿服务端当跳板探内网,一律拒绝。
+      let sameOrigin = false;
+      try {
+        const u = new URL(picked.url); const b = new URL(provider.baseURL);
+        // localhost 与 127.0.0.1 指的是同一个服务(用户填 localhost、本机服务回
+        // 127.0.0.1 的链接很常见),端口相同即算同源;其余一律按 origin 严格比。
+        const lo = (h) => /^(localhost|127\.\d{1,3}\.\d{1,3}\.\d{1,3}|\[::1\]|::1)$/i.test(h);
+        sameOrigin = u.origin === b.origin || (lo(u.hostname) && lo(b.hostname) && u.port === b.port);
+      } catch {}
+      try { await assertPublicBaseURL(picked.url, { allowLoopback: sameOrigin }); }
       catch (e) { return res.status(e.status || 502).json({ error: `拒绝下载该链接：${e.message}` }); }
       let img;
       try {

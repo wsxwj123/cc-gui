@@ -1853,7 +1853,21 @@ export const useStore = create((set, get) => ({
       // r17-4:磁盘访问被系统拒绝时,后端回 403 + code:'no-disk-access'。这里必须把它
       // 与"真的没有会话"分开 —— 静默的空列表会让用户以为数据被删了(实测的真实反应)。
       if (res.status === 403 && data?.code === 'no-disk-access') {
-        set((st) => (st.sessionsAccessError === data.hint ? st : { sessionsAccessError: data.hint }));
+        // r22-①:必须**同时**把该组的列表落成空数组占位。侧栏首判是
+        // `rawSessions === undefined ? 转圈 : 空 ? 提示`,而这里是全仓唯一写
+        // sessionsByProject 的地方 —— 只置错误态就 return,该项目永远停在"加载会话…",
+        // 下面那句提示一行都显示不出来(比 403 之前回 500 兜成 [] 还糟)。
+        // 身份复用同下:已经是空数组就不换身份,免得 600ms watcher 反复触发整树重渲。
+        set((st) => {
+          const merged = mergeSessionList(st.sessionsByProject[projectHash], []);
+          const sameErr = st.sessionsAccessError === data.hint;
+          const sameList = merged === st.sessionsByProject[projectHash];
+          if (sameErr && sameList) return st;
+          return {
+            ...(sameErr ? null : { sessionsAccessError: data.hint }),
+            ...(sameList ? null : { sessionsByProject: { ...st.sessionsByProject, [projectHash]: merged } }),
+          };
+        });
         return;
       }
       const list = Array.isArray(data) ? data : [];
@@ -1886,6 +1900,15 @@ export const useStore = create((set, get) => ({
     try {
       const res = await fetch(`/api/projects/${encodeURIComponent(projectHash)}/sessions`);
       const data = await res.json();
+      // r22-①:同一个后端契约(403 + code:'no-disk-access')的第二个消费者。原来这里
+      // 静默吞成 [] —— 与 fetchSessionsForPanel 口径不一致,权限被拒时旧槽照样显示成
+      // "没有会话"。两个消费者必须同口径:置错误态 + 空列表。
+      if (res.status === 403 && data?.code === 'no-disk-access') {
+        set(silent ? { sessions: [], sessionsAccessError: data.hint }
+          : { sessions: [], sessionsAccessError: data.hint, listLoading: false });
+        return;
+      }
+      set((st) => (st.sessionsAccessError ? { sessionsAccessError: null } : st));
       // Treat non-array response (e.g. {error:"..."} from a 500) as empty.
       // Without this, on 500 `data` would still be a non-array object — we
       // already coerce to [], but earlier bugs let stale `sessions` linger
