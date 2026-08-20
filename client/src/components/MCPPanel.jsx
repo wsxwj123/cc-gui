@@ -390,20 +390,6 @@ export function MCPPanel() {
         </button>
       </div>
       {/* ── r16-5 选项卡条(与主题弹层 App.jsx:432 逐字同款)──────────────── */}
-      <div role="tablist" aria-label="工具设置分类" className="flex items-center gap-0.5 border-b border-canvas-deep -mx-1 px-1">
-        {TOOL_TABS.map((t) => (
-          <button
-            key={t.id}
-            role="tab"
-            aria-selected={tab === t.id}
-            onClick={() => setTab(t.id)}
-            className={`px-2.5 py-1.5 text-[11px] font-body transition-colors border-b-2 -mb-px ${
-              tab === t.id ? 'border-accent text-ink font-medium' : 'border-transparent text-ink-muted hover:text-ink'}`}
-          >
-            {t.label}
-          </button>
-        ))}
-      </div>
       {restartHint && (
         <div className="flex items-start gap-2 text-[11px] text-amber-700 bg-amber-500/10 border border-amber-500/30 rounded-lg px-3 py-2">
           <span className="flex-1">配置已保存到 claude code,将在每个会话的<b>下条消息</b>自动生效,无需重启会话。</span>
@@ -425,6 +411,24 @@ export function MCPPanel() {
           <pre className="text-[10px] text-ink-soft font-mono whitespace-pre-wrap break-all leading-snug max-h-40 overflow-auto">{probe.detail}</pre>
         </div>
       )}
+
+      {/* r16-5b(判官建议1):页签条放在两条全局横幅之下。横幅(重启提示/探测结果)对三页
+          都成立,夹在页签上方会被误读成只属于当前页。 */}
+      {/* r16-5b(判官建议3):负边距跟随本面板容器的 px-4(主题弹层是 px-1),否则下划线不与面板边缘齐平 */}
+      <div role="tablist" aria-label="工具设置分类" className="flex items-center gap-0.5 border-b border-canvas-deep -mx-4 px-4">
+        {TOOL_TABS.map((t) => (
+          <button
+            key={t.id}
+            role="tab"
+            aria-selected={tab === t.id}
+            onClick={() => setTab(t.id)}
+            className={`px-2.5 py-1.5 text-[11px] font-body transition-colors border-b-2 -mb-px ${
+              tab === t.id ? 'border-accent text-ink font-medium' : 'border-transparent text-ink-muted hover:text-ink'}`}
+          >
+            {t.label}
+          </button>
+        ))}
+      </div>
       {/* MCP Servers(r16-5:整块进「MCP 服务器」页,块内一行未动) */}
       {tab === 'mcp' && (
       <div>

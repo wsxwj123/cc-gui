@@ -73,8 +73,15 @@ const app = readFileSync(new URL('../../client/src/App.jsx', import.meta.url), '
   const norm = (s) => s.replace(/\s+/g, ' ').trim();
   const btn = (src) => norm(src.match(/className=\{`([^`]*border-b-2 -mb-px[^`]*)`\}/)[1]);
   assert.equal(btn(panel), btn(app), 't6: 页签按钮 className 与 App.jsx 主题弹层一致');
-  const bar = (src) => norm(src.match(/role="tablist"[^>]*className="([^"]+)"/)[1]);
-  assert.equal(bar(panel), bar(app), 't6: 页签条容器 className 一致');
+  // r16-5b:容器的负边距【故意不同】——它跟随各自外层容器的 padding 才能让下划线与面板
+  // 边缘齐平(主题弹层是 px-1、本面板是 px-4)。逐字比对会把"正确的适配"判成回归,
+  // 所以这里剥掉 -mx-N/px-N 再比其余部分;而按钮样式(上面那条)仍要求逐字一致。
+  const bar = (src) => norm(src.match(/role="tablist"[^>]*className="([^"]+)"/)[1])
+    .replace(/-?m[xy]-\d+\s*/g, '').replace(/\bp[xy]-\d+\s*/g, '').trim();
+  assert.equal(bar(panel), bar(app), 't6: 页签条容器 className 除负边距外与主题弹层一致');
+  const mx = (src) => (src.match(/role="tablist"[^>]*className="[^"]*?(-mx-\d+)\s+(px-\d+)/) || []).slice(1, 3);
+  assert.deepEqual(mx(panel), ['-mx-4', 'px-4'],
+    't6: 本面板容器是 px-4,负边距必须配套(抄成 -mx-1 则下划线不与面板边缘齐平)');
   assert.match(panel, /aria-selected=\{tab === t\.id\}/, 't6: 激活态无障碍属性照搬');
 }
 
