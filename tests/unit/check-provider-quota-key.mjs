@@ -198,8 +198,12 @@ try {
   // ③-e PUT 传新值 = 覆盖;长度上限照 apiKey 同标准(4096)
   await api('PUT', `/custom-providers/${withKeyId}`, { ...keepBody, quotaKey: `${QUOTA_KEY}-v2` });
   assert.equal((await onDisk(withKeyId)).quotaKey, `${QUOTA_KEY}-v2`, '传了新值就覆盖');
-  await api('PUT', `/custom-providers/${withKeyId}`, { ...keepBody, quotaKey: 'z'.repeat(5000) });
-  assert.equal((await onDisk(withKeyId)).quotaKey.length, 4096, '超长截断(与 apiKey 同标准)');
+  // r16-4b(判官建议2):超长不再静默截断 —— 截断后的密钥只会永远 401 且不给用户线索。
+  // 改成 400 明确拒绝,且【磁盘上的旧值必须原样保留】(拒绝的写入不能半途改坏已有配置)。
+  const tooLong = await api('PUT', `/custom-providers/${withKeyId}`, { ...keepBody, quotaKey: 'z'.repeat(5000) });
+  assert.equal(tooLong.status, 400, '超长 → 400 明确拒绝,不静默截断');
+  assert.match(tooLong.body?.error || '', /过长/, '错误文案说明原因');
+  assert.equal((await onDisk(withKeyId)).quotaKey, `${QUOTA_KEY}-v2`, '被拒的写入不得改坏磁盘上的旧值');
 
   // ③-f PUT 显式传空串 = 清除(填错了得删得掉);纯空白同理
   await api('PUT', `/custom-providers/${withKeyId}`, { ...keepBody, quotaKey: '   ' });

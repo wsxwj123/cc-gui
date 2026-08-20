@@ -8684,7 +8684,7 @@ function CustomProviderForm({ onSaved, editing, onCancel, onDirtyChange, customC
         </div>
         <p className="mt-1 text-[11px] text-ink-faint leading-relaxed">
           {savedQuotaKey && !quotaKey.trim() ? '已保存密钥。' : ''}
-          {quotaKeyCleared ? '保存后清除已存密钥。' : ''}
+          {quotaKeyCleared && !quotaKey.trim() ? '保存后清除已存密钥。' : ''}
           留空时使用上方的 API 密钥查询额度。OpenRouter 需填写 management key 才能读取账户余额，否则仅能读取该密钥的花费上限；MiniMax 的套餐额度接口可能要求订阅密钥。其余 provider 无需填写。
         </p>
       </div>

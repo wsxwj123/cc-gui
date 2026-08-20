@@ -134,7 +134,13 @@ const CUSTOM_PROVIDERS_PATH = join(homedir(), '.claude-gui', 'custom-providers.j
 // r16-4:可选的额度查询密钥 quotaKey。与 apiKey 同等对待 —— trim + 长度上限,只在
 // 服务端使用,任何 GET 都只下发 hasQuotaKey 布尔,绝不回传明文。缺该字段 = 未配置。
 const MAX_KEY_LEN = 4096;
-const cleanKey = (v) => (typeof v === 'string' ? v.trim().slice(0, MAX_KEY_LEN) : '');
+// r16-4b(判官建议2):超长不再静默截断。截断后的密钥只会永远 401、且不给用户任何线索,
+// 比明确报错更糟。返回 null = "提供了但非法",调用方回 400 并说明;'' = 未提供/空。
+const cleanKey = (v) => {
+  if (typeof v !== 'string') return '';
+  const t = v.trim();
+  return t.length > MAX_KEY_LEN ? null : t;
+};
 
 // r10-9:思考强度按模型自适应的数据层。存储形态(custom-providers.json)的 models 条目
 // 兼容 string | {id, reasoning?:boolean, efforts?:string[]};读入口统一 normalize 成
@@ -1391,7 +1397,9 @@ router.post('/custom-providers', async (req, res) => {
       models: cleanModels,
     };
     // r16-4:额度查询密钥(可选)。没填就不写这个键 —— 缺该字段 = 未配置,存量条目零影响。
-    if (cleanKey(quotaKey)) entry.quotaKey = cleanKey(quotaKey);
+    const qkNew = cleanKey(quotaKey);
+    if (qkNew === null) return res.status(400).json({ error: `额度查询密钥过长（上限 ${MAX_KEY_LEN} 字符）` });
+    if (qkNew) entry.quotaKey = qkNew;
     // AZ8: 可选的 per-provider 默认模型。只接受属于该 provider models[] 的 id;非法/不在
     // 列表内则不写(向后兼容:无此字段时切换/解析回退 models[0])。
     if (typeof defaultModel === 'string' && cleanModels.includes(defaultModel.trim())) {
@@ -1474,6 +1482,7 @@ router.put('/custom-providers/:id', async (req, res) => {
     // 与 apiKey 同语义);显式传空串 = 清除(表单的「清除」按钮,否则填错了删不掉)。
     if (quotaKey !== undefined) {
       const qk = cleanKey(quotaKey);
+      if (qk === null) return res.status(400).json({ error: `额度查询密钥过长（上限 ${MAX_KEY_LEN} 字符）` });
       if (qk) list[idx].quotaKey = qk; else delete list[idx].quotaKey;
     }
     // AZ8: 默认模型。显式传入(且在 models[] 内)则更新;传 null/'' 则清除;不传则保留旧值。
