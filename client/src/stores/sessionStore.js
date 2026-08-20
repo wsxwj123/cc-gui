@@ -594,6 +594,12 @@ export const useStore = create((set, get) => ({
   // draft-key)存,渲染方按自己的 sid 取,不会跨窗格串。
   promptSuggestionBySid: {},
 
+  // r17-①:本回合往上下文注入了什么(CLAUDE.md / skills / agents)。
+  // { [sessionId]: [{ kind, label, bytes }] } —— **只有分类/标签/字符数,永不含正文**。
+  // 数据来自本机代理读到的真实请求体,所以只有第三方 provider 有;官方订阅是 CLI 直连,
+  // 这里恒为空 → 前端整块不渲染。
+  contextInjectionBySid: {},
+
   // 聊天模式(全局,localStorage):开启后消息流只显示 AI 最终文本 + 用户消息,把
   // thinking / 工具 / 子代理 / skill 折叠成一行可点开的标记,像微信聊天。默认关。
   chatMode: (() => {
@@ -1374,6 +1380,21 @@ export const useStore = create((set, get) => ({
     const next = { ...cur };
     for (const k of hit) delete next[k];
     set({ promptSuggestionBySid: next });
+  },
+
+  // r17-①:注入物入位。一个回合可能发多次上游请求(重试/子代理),载荷通常一模一样 →
+  // 相同就直接返回,不触发多余渲染。载荷只含 kind/label/bytes,不做任何正文处理。
+  setContextInjectionFor: (sid, items) => {
+    if (!sid || !Array.isArray(items) || !items.length) return;
+    const next = items
+      .filter((it) => it && typeof it.label === 'string' && it.label)
+      .map((it) => ({ kind: String(it.kind || 'other'), label: it.label, bytes: Number(it.bytes) || 0 }));
+    if (!next.length) return;
+    const cur = get().contextInjectionBySid;
+    const prev = cur[sid];
+    if (prev && prev.length === next.length
+        && prev.every((p, i) => p.kind === next[i].kind && p.label === next[i].label && p.bytes === next[i].bytes)) return;
+    set({ contextInjectionBySid: { ...cur, [sid]: next } });
   },
 
   setExcludeDynamicSystemPrompt: (v) => {
