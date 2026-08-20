@@ -144,21 +144,15 @@ jobs:
           cat > notes.md <<'EOF'
           未签名安装包,首次打开需手动放行。当前安装包会调用本机 Node.js 启动内置后端,运行机器需已安装 Node.js 20+ 和 Claude Code CLI。
 
-          - **macOS**:仅支持 Apple Silicon(M 系列芯片)。**下载的 `.dmg` 本身也带隔离标记,直接双击会报「已损坏」**,所以要分两步:
-
-            **第一步**——先给 dmg 解除隔离(把路径换成你的实际下载位置),然后即可双击挂载、把 **CC-GUI** 拖进「应用程序」:
-
-            ```
-            xattr -dr com.apple.quarantine ~/Downloads/CC-GUI_*.dmg
-            ```
-
-            **第二步**——再给装好的 app 解除隔离,之后即可正常双击打开:
+          - **macOS**:仅支持 Apple Silicon(M 系列芯片)。打开 `.dmg`,把 **CC-GUI** 拖进「应用程序」,然后在「终端」执行下面这行命令,之后即可正常双击打开 app:
 
             ```
             xattr -dr com.apple.quarantine "/Applications/CC-GUI.app"
             ```
 
-            原因:本 app 未做 Apple 付费公证(notarization),macOS 给下载的未公证内容加隔离标记并阻止打开;上述命令仅移除该标记,不修改任何内容。两条都不需要 sudo。macOS 15 起未公证脚本连右键打开都不放行,故不提供双击脚本。
+            原因:本 app 未做 Apple 付费公证(notarization),macOS 给下载的未公证 app 加隔离标记并阻止打开;该命令仅移除此标记,不修改 app 本身,不需要 sudo。
+
+            少数情况下 `.dmg` 双击也会报「已损坏」(通过非浏览器渠道传输时更容易出现),同样处理即可:`xattr -dr com.apple.quarantine 你的.dmg 路径`。macOS 15 起未公证脚本连右键打开都不放行,故不提供双击脚本。
           - **Windows**:`.exe`(NSIS)或 `.msi` 均可;SmartScreen 提示时点「更多信息 → 仍要运行」。
           - 若双击后无窗口,查看 `~/.claude-gui/tauri-startup.log` 获取启动错误。
           EOF
