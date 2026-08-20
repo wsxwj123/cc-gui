@@ -154,6 +154,39 @@ const hidden = new Set(['h-home', 'h-tmp', 'h-big', 'h-stale-1', 'h-stale-2']); 
   assert.deepEqual(visibleHomeProjects(list, new Set(['h-work', 'h-home'])).map((p) => p.hash),
     list.map((p) => p.hash), 't8: 全隐藏 → 回落全量,不把 Home 变成死输入框');
 
+  // ④ r25-①:聚焦窗格的项目豁免 hidden(与侧栏 composePanelProjects 的 panes 豁免同口径)。
+  //    复现:会话开在窗格里 → 侧栏把它所属项目隐藏(那一行因窗格豁免仍在)→ 到 Home,
+  //    focusedProjectHash 算得出 'h-foc',但列表已经把它滤掉 → 回落侧栏选中的 'h-sel',
+  //    用户正看着 foc 却新建到了 sel 的目录(r24 立项要修的抱怨原样复发)。
+  //    ⚠️ 夹具区分度:豁免项 'h-foc' 与「豁免失效时会落到的」'h-sel' 是两个不同项目,
+  //    且 'h-foc' 活动时间最旧(回落链路的任何一支都不会碰巧选中它)。
+  {
+    const hiddenFocus = new Set(['h-foc']);
+    const projects = [
+      P('h-foc', '/w/foc', '2024-01-01T00:00:00Z'),   // 正在窗格里看的(被隐藏,最旧)
+      P('h-sel', '/w/sel', '2026-08-20T00:00:00Z'),   // 侧栏选中(未隐藏,最新)
+    ];
+    const sel = { hash: 'h-sel', path: '/w/sel' };
+    // 夹具自检:没有豁免时,这份输入落到的是 h-sel(证明下面那条断言真的在区分)
+    assert.deepEqual(visibleHomeProjects(projects, hiddenFocus).map((p) => p.hash), ['h-sel'],
+      't8: 夹具自检 —— 不豁免时被隐藏的聚焦项目确实被滤掉了');
+    assert.equal(
+      pickHomeProject({ focusedProjectHash: 'h-foc', projects: visibleHomeProjects(projects, hiddenFocus), selectedProject: sel }).hash,
+      'h-sel', 't8: 夹具自检 —— 不豁免时新建会落到 h-sel(=用户抱怨的错目录)');
+
+    const visible = visibleHomeProjects(projects, hiddenFocus, 'h-foc');
+    assert.deepEqual(visible.map((p) => p.hash), ['h-foc', 'h-sel'], 't8: 聚焦项目豁免 hidden,其余照常过滤');
+    assert.equal(
+      pickHomeProject({ focusedProjectHash: 'h-foc', projects: visible, selectedProject: sel }).hash,
+      'h-foc', 't8: 隐藏了正在看的项目,新建仍开在它的目录(窗格豁免与侧栏同口径)');
+    // 豁免只放行那一个:另一个被隐藏的项目不许跟着复活
+    assert.deepEqual(visibleHomeProjects(projects, new Set(['h-foc', 'h-sel']), 'h-foc').map((p) => p.hash),
+      ['h-foc'], 't8: 豁免只放行聚焦那一个(其余仍被过滤)');
+    // 无豁免参数 = 旧行为(旧调用方语义不变)
+    assert.deepEqual(visibleHomeProjects(projects, hiddenFocus, null).map((p) => p.hash), ['h-sel'],
+      't8: exemptHash 为空 → 过滤照旧');
+  }
+
   // 接线(只剩这几条源码级:组件内没法纯函数导入)
   const sidebar = readFileSync(new URL('../../client/src/components/UnifiedSidebar.jsx', import.meta.url), 'utf8');
   assert.match(sidebar, /const singleModeRows = useMemo/, 't8: 单列表懒拉有独立的已过滤行集');
@@ -175,7 +208,11 @@ const hidden = new Set(['h-home', 'h-tmp', 'h-big', 'h-stale-1', 'h-stale-2']); 
   const app = readFileSync(new URL('../../client/src/App.jsx', import.meta.url), 'utf8');
   assert.match(app, /pickHomeProject\(\{ chosenHash, focusedProjectHash, projects: visibleProjects, selectedProject \}\)/,
     't8: Home 默认项目取已过滤列表(r24 起还带聚焦窗格来源,优先级真值表见 check-home-state t2b)');
-  assert.match(app, /visibleHomeProjects\(projects, hiddenHashes\)/, 't8: 过滤走共用纯函数');
+  assert.match(app, /visibleHomeProjects\(projects, hiddenHashes, focusedProjectHash\)/,
+    't8: 过滤走共用纯函数,且真把聚焦项目当豁免传进去(不传 = ④ 的豁免在 UI 里是死的)');
+  // 声明顺序:focusedProjectHash 必须在 useMemo 之前,否则 TDZ 白屏(历史踩过)
+  assert.ok(app.indexOf('const focusedProjectHash = useStore') < app.indexOf('visibleHomeProjects(projects, hiddenHashes'),
+    't8: focusedProjectHash 声明在过滤 useMemo 之前(TDZ)');
   assert.match(app, /setHiddenHashes\(readHiddenHashes\(d\)\)/, 't8: 载荷解析走共用纯函数');
   const recentAt = app.indexOf('const recent = useMemo');
   assert.match(app.slice(recentAt, recentAt + 200), /visibleProjects/, 't8: 最近项目下拉同样取已过滤列表');

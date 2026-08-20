@@ -61,11 +61,18 @@ export function readHiddenHashes(payload) {
 /**
  * Home 可选项目列表:减去被隐藏的项目(默认项目会写进新会话 cwd,家目录/临时目录
  * 这类被用户隐藏的不该当上默认);全被隐藏时回落全量,不把 Home 变成死输入框。
+ *
+ * r25:exemptHash(聚焦窗格的项目)豁免 hidden —— 与侧栏 composePanelProjects 的 panes
+ * 豁免同一口径:「正在窗格里打开的项目即使被隐藏,那一行也照常在」。少了这一口,用户
+ * 隐藏了自己正开着的项目 P 之后,P 先在这里被滤掉 → pickHomeProject 的聚焦分支永远
+ * 命中不了 → 新建会话又开回侧栏选中的另一个目录(r24 立项要修的正是这个抱怨)。
+ * 「全隐藏 → 回落全量」保持原样:有豁免项时 vis 非空(=只剩它,与侧栏同口径),
+ * 没有豁免项时才回落全量。
  */
-export function visibleHomeProjects(projects, hiddenHashes) {
+export function visibleHomeProjects(projects, hiddenHashes, exemptHash) {
   const all = Array.isArray(projects) ? projects : [];
   const hidden = hiddenHashes instanceof Set ? hiddenHashes : new Set(hiddenHashes || []);
-  const vis = all.filter((p) => !hidden.has(p?.hash));
+  const vis = all.filter((p) => !hidden.has(p?.hash) || (!!exemptHash && p?.hash === exemptHash));
   return vis.length ? vis : all;
 }
 
