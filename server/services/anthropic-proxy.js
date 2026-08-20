@@ -18,7 +18,6 @@
 import http from 'node:http';
 import { normalizeContextOverflow } from './openai-proxy.js';
 import { isCountTokensRequest, estimateInputTokens, parseUpstreamCountTokens, COUNT_TOKENS_UPSTREAM_TIMEOUT_MS } from '../utils/context-tokens.js';
-import { reportContextInjection } from '../utils/context-injection.js';
 
 // Fixed loopback port (distinct from openai-proxy's 8788) so the URL written into
 // settings.json survives watchdog restarts. Ephemeral fallback if it's taken.
@@ -300,11 +299,6 @@ async function handle(req, clientRes) {
   // 仅对 /v1/messages 做规范化(其他端点不动)
   if (body && req.url && req.url.includes('/v1/messages') && req.method === 'POST') {
     body = normalizeMessagesForCompat(body);
-    // r17-①:旁路读出本回合的上下文注入物并广播(只广播分类/标签/字符数,无正文)。
-    // 全程 try/catch 在 reportContextInjection 内部,不碰 body,不影响下面的转发。
-    // ponytail: 这里多一次 JSON.parse(每回合一次,~ms 级);要省掉就得把
-    // normalizeMessagesForCompat 的解析结果外提,不值得为此改动已单测的转发路径。
-    reportContextInjection(body);
   }
 
   // Build a CLEAN header set. The CLI's incoming Authorization / x-api-key carries

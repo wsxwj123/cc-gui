@@ -2993,10 +2993,6 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // 选择器只返回字符串(基元),不会因新引用触发 React #185。
   const promptSuggestion = useStore((s) =>
     s.promptSuggestionBySid[selectedSession?.sessionId] || s.promptSuggestionBySid[sessionQueueKey] || '');
-  // r17-①:本回合往上下文注入了什么(CLAUDE.md / skills / agents)。只有第三方 provider
-  // 的请求经过本机代理才读得到;官方订阅 CLI 直连 → 恒空 → 整块不渲染(设计如此)。
-  // 回落 EMPTY_ARRAY(模块级冻结引用)防 zustand 新引用白屏 #185。
-  const contextInjection = useStore((s) => s.contextInjectionBySid[selectedSession?.sessionId] || EMPTY_ARRAY);
   // 等待状态行(G):SDK system status(auto-compact 压缩中)/api_retry(限流、5xx 自动
   // 重试)/rate_limit_event 的即时文案。{ text } —— message_start(新内容开始流)与回合
   // 收尾时清空。与 StreamingStatusLine 并存:那个描述"正在产出什么",这个描述"为什么在等"。
@@ -7253,26 +7249,6 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           }}
           onNotice={(n) => setProviderSwitchNotice(n)}
         />
-      )}
-      {/* r17-①:上下文注入物。只列分类,不列正文也不列数字(字符数只进 title)。
-          无数据(官方订阅/尚未发过请求)时整块不出现,不解释、不占位。 */}
-      {contextInjection.length > 0 && (
-        <div className="px-6 pb-1 shrink-0">
-          <div className="max-w-[var(--content-max)] mx-auto">
-            {contextInjection.map((it, i) => (
-              <div
-                key={`${it.kind}-${it.label}-${i}`}
-                title={`${it.label} · ${it.bytes} 字符`}
-                className="flex items-center gap-1.5 text-[11px] text-ink-faint font-body leading-[16px]"
-              >
-                <Layers size={10} className="shrink-0 opacity-60" />
-                <span>上下文注入</span>
-                <span className="opacity-50">·</span>
-                <span className="truncate">{it.label}</span>
-              </div>
-            ))}
-          </div>
-        </div>
       )}
       <ChatInput
         onSend={handleSend}
