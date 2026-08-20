@@ -954,11 +954,13 @@ function UpdateChecker() {
       {state.status === 'err' && (
         <div className="text-[12px] text-error">检查失败:{state.message}</div>
       )}
-      {/* r22-④:用了旧缓存(本次 GitHub 与备用源都没拉成)时必须明示。staleError 只由
-          /api/version-check 产出,喂的就是本组件 —— r14-1 却把这段接到了 CcUpdater
-          (数据源是 /api/claude-version-check,永远不含该字段)= 一段恒为假的渲染。
-          结果:墙内机器点「检查更新」两条源全断、只有 5 分钟旧缓存,界面照样显示
-          「✓ 已是最新版本」,用户完全不知道这次根本没查成功(正是 r14 声称修掉的症状)。 */}
+      {/* r22-④:用了旧缓存(本次 GitHub 与备用源都没拉成)时必须明示。本组件的数据源
+          /api/version-check 产出 staleError —— r14-1 当初把这段只接在了 CcUpdater 上,
+          而那时 /api/claude-version-check 还不产出该字段 = 一段恒为假的渲染,本组件这边
+          反而漏了。结果:墙内机器点「检查更新」两条源全断、只有 5 分钟旧缓存,界面照样
+          显示「✓ 已是最新版本」,用户完全不知道这次根本没查成功。
+          r23-④ 起 /api/claude-version-check 也产出 staleError,CcUpdater 那段(见下方
+          同名渲染)已重新有了真实数据源,两处都是活的。 */}
       {state.status === 'ok' && state.staleError && (
         <div className="text-[11px] text-warning">结果可能过期:{state.staleError}</div>
       )}

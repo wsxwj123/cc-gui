@@ -17,7 +17,7 @@ import { homeView, pickHomeProject, buildHomeDraft, homeGreeting } from '../../c
   assert.equal(homeView({ hasSession: false, projectCount: undefined }), 'empty', 't1: 项目数未知按零处理');
 }
 
-// t2 项目选择:显式选择 > 当前选中项目 > 最近活动 > 空
+// t2 项目选择:显式选择 > 聚焦窗格项目 > 侧栏选中项目 > 最近活动 > 空
 {
   const projects = [
     { hash: 'old', path: '/p/old', lastActivity: '2025-01-01T00:00:00Z' },
@@ -31,6 +31,39 @@ import { homeView, pickHomeProject, buildHomeDraft, homeGreeting } from '../../c
   assert.equal(
     pickHomeProject({ projects: [], selectedProject: { hash: 'x', path: '/p/x' } }).hash,
     'x', 't2: 列表暂缺但选中带 path 也可用(fetch 未到窗口)');
+}
+
+// t2b r24 优先级真值表:新建会话的默认 cwd 跟【聚焦窗格里那个会话】的项目走。
+//   用户报的场景:分屏 B 窗格开着项目 P 的会话、侧栏还停在 Q → 新建开到了 Q。
+// ⚠️ 夹具必须有区分度:聚焦项目 'foc' 的 lastActivity **最旧**,而 'fresh' 最新 ——
+//    这样一旦 focusedProjectHash 分支失效(被删/被排到 selectedProject 之后),
+//    落点会变成 'sel' 或 'fresh',断言当场变红,不会"恰好还是对的"而假绿。
+{
+  const projects = [
+    { hash: 'foc', path: '/p/foc', lastActivity: '2024-01-01T00:00:00Z' },  // 聚焦窗格的项目(最旧)
+    { hash: 'sel', path: '/p/sel', lastActivity: '2025-01-01T00:00:00Z' },  // 侧栏选中
+    { hash: 'fresh', path: '/p/fresh', lastActivity: '2026-08-20T00:00:00Z' }, // 最近活动(最新)
+  ];
+  const sel = { hash: 'sel', path: '/p/sel' };
+  // 夹具自检:去掉聚焦来源后,这两条各自会落到谁 —— 证明下面三条断言真的在区分优先级。
+  assert.equal(pickHomeProject({ projects }).hash, 'fresh', 't2b: 夹具自检 —— 无来源时落最近活动 fresh');
+  assert.equal(pickHomeProject({ projects, selectedProject: sel }).hash, 'sel', 't2b: 夹具自检 —— 只有侧栏时落 sel');
+
+  assert.equal(pickHomeProject({ chosenHash: 'fresh', focusedProjectHash: 'foc', projects, selectedProject: sel }).hash,
+    'fresh', 't2b: 用户在 Home 下拉里显式选的仍然最高(聚焦压不过它)');
+  assert.equal(pickHomeProject({ focusedProjectHash: 'foc', projects, selectedProject: sel }).hash,
+    'foc', 't2b: 聚焦窗格的项目压过侧栏选中(分屏时侧栏常停在另一个项目)');
+  assert.equal(pickHomeProject({ focusedProjectHash: 'foc', projects }).hash,
+    'foc', 't2b: 聚焦窗格的项目压过"最近活动最新"');
+
+  // 聚焦窗格的项目不在列表里(被隐藏 / projects 还没拉到):只有 hash 没有 path,
+  // 凑不出 buildHomeDraft 需要的 cwd → 不许凭空造项目,老实往下一优先级走。
+  assert.equal(pickHomeProject({ focusedProjectHash: 'ghost', projects, selectedProject: sel }).hash,
+    'sel', 't2b: 聚焦项目不在列表 → 回落侧栏选中');
+  assert.equal(pickHomeProject({ focusedProjectHash: 'ghost', projects }).hash,
+    'fresh', 't2b: 聚焦项目不在列表且无侧栏选中 → 回落最近活动');
+  assert.equal(pickHomeProject({ focusedProjectHash: 'ghost', projects: [] }), null,
+    't2b: 聚焦项目不在列表且列表为空 → null(绝不返回一个没有 path 的假项目)');
 }
 
 // t3 draft 创建参数:cwd 绑定 = 所选项目(projectHash+projectPath 逐字取自它)
@@ -69,6 +102,11 @@ import { homeView, pickHomeProject, buildHomeDraft, homeGreeting } from '../../c
   assert.match(app, /seedNewSessionDefaults\(project\.hash\)/, 't5: 与侧栏创建点同一 seed 链路');
   assert.match(app, /enqueueMessage\(`draft-\$\{project\.hash\}`/, 't5: 发送经 draft 队列(既有排空链路,零旁路)');
   assert.match(app, /buildHomeDraft\(project, newDraftId\(\)\)/, 't5: draft 经纯函数(cwd 绑定)创建');
+  // r24 接线:t2b 的优先级只在【真把聚焦窗格的项目喂进去】时才有意义 —— 这一句没了,
+  // focusedProjectHash 恒 undefined,纯函数测试照样全绿而功能是死的。
+  assert.match(app, /const focusedProjectHash = useStore\(\(s\) => s\.paneSessions\?\.\[s\.activeTabIndex\]\?\.projectHash\)/,
+    't5: 聚焦窗格项目 = paneSessions[activeTabIndex].projectHash(单屏 pane0 恒镜像 selectedSession)');
+  assert.match(app, /pickHomeProject\(\{ chosenHash, focusedProjectHash,/, 't5: 聚焦来源真的传进了 pickHomeProject');
   assert.match(app, /cgui:add-project/, 't5: 「浏览新文件夹」走既有 _addProject 流');
   const settings = readFileSync(new URL('../../client/src/components/SettingsPanel.jsx', import.meta.url), 'utf8');
   assert.match(settings, /RestoreLastSessionToggle/, 't5: 设置项「启动时恢复上次会话」在');

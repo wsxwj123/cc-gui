@@ -1757,8 +1757,12 @@ function HomeState({ tabIndex = 0 }) {
   }, []);
   // r23:解析与过滤都在 utils/home.js(纯函数,行为单测直接调),这里只做接线。
   const visibleProjects = useMemo(() => visibleHomeProjects(projects, hiddenHashes), [projects, hiddenHashes]);
+  // r24:聚焦窗格(activeTabIndex)当前会话所属的项目 —— 新建会话的默认 cwd 跟着你**正在看**
+  // 的那个会话走,而不是侧栏的选中项(分屏时两者经常不是一个)。选出的是字符串/undefined,
+  // 不会给 Zustand 造新引用。单屏也成立:paneSessions[0] 恒镜像 selectedSession。
+  const focusedProjectHash = useStore((s) => s.paneSessions?.[s.activeTabIndex]?.projectHash) || null;
   // selectedProject 仍按原样传:用户显式打开的隐藏项目(侧栏窗格豁免同理)不该被踢掉。
-  const project = pickHomeProject({ chosenHash, projects: visibleProjects, selectedProject });
+  const project = pickHomeProject({ chosenHash, focusedProjectHash, projects: visibleProjects, selectedProject });
   const recent = useMemo(() => [...visibleProjects]
     .sort((a, b) => (b.lastActivity ? new Date(b.lastActivity).getTime() : -1)
       - (a.lastActivity ? new Date(a.lastActivity).getTime() : -1))

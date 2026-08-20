@@ -14,14 +14,25 @@ export function homeView({ hasSession, projectCount }) {
 }
 
 /**
- * Home 的目标项目解析:用户显式选择(chosenHash)优先 → 当前选中项目 →
- * 最近活动项目 → 列表首个;都没有 → null(Home 禁发)。
+ * Home 的目标项目解析:用户显式选择(chosenHash)优先 → 聚焦窗格的会话所属项目 →
+ * 侧栏选中项目 → 最近活动项目;都没有 → null(Home 禁发)。
+ *
+ * r24:新增 focusedProjectHash(聚焦窗格当前会话的 projectHash)且压过 selectedProject。
+ * selectedProject 是**侧栏**的选中项 —— 分屏时点开 B 窗格看项目 P 的会话并不改它,侧栏
+ * 还停在 Q,新建会话就落到了你没在看的目录里(用户报的正是这个)。
+ * 容错口径与 selectedProject 那支**故意不同**:那支在列表暂缺时还能拿 selectedProject.path
+ * 兜底,而这里只有一个 hash、凑不出 buildHomeDraft 必需的 cwd(path),所以命中不了就直接
+ * 往下走(交给 selectedProject / 最近活动),绝不凭空造项目。
  */
-export function pickHomeProject({ chosenHash, projects, selectedProject } = {}) {
+export function pickHomeProject({ chosenHash, focusedProjectHash, projects, selectedProject } = {}) {
   const list = Array.isArray(projects) ? projects.filter((p) => p && p.hash && p.path) : [];
   if (chosenHash) {
     const hit = list.find((p) => p.hash === chosenHash);
     if (hit) return hit;
+  }
+  if (focusedProjectHash) {
+    const focused = list.find((p) => p.hash === focusedProjectHash);
+    if (focused) return focused;
   }
   if (selectedProject?.hash) {
     const sel = list.find((p) => p.hash === selectedProject.hash);

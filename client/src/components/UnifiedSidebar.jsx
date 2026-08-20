@@ -13,7 +13,7 @@ import {
 import { useStore } from '../stores/sessionStore.js';
 import { confirmDialog } from '../utils/confirmDialog.jsx';
 import { resolveSessionTitle } from '../utils/sessionTitle.js';
-import { composePanelProjects, composePanelSessions, sessionQueryMatchHashes, sortProjectRows, flattenSessionRows, singleModeVisibleProjects, sessionEmptyHint, reorderManual } from '../utils/projectPanel.js';
+import { composePanelProjects, composePanelSessions, sessionQueryMatchHashes, sortProjectRows, flattenSessionRows, singleModeVisibleProjects, sessionEmptyHint, showAccessSettingsButton, reorderManual } from '../utils/projectPanel.js';
 import { pickDirectory, isTauri } from '../utils/pickDirectory.js';
 import { completionTracker } from '../utils/sessionDots.js';
 import { AnchoredPopover } from './SessionSelectors.jsx';
@@ -149,6 +149,8 @@ export function UnifiedSidebar() {
   // r17-4:磁盘访问被系统拒绝时,空列表要说实话 —— 静默的「暂无会话」和真的没有
   // 会话长得一模一样,用户实测的第一反应是「数据被删了」。
   const accessError = useStore((st) => st.sessionsAccessError);
+  // r24:同一个 403 载荷里的平台位 —— 决定拒访提示后面给不给「打开系统设置」按钮。
+  const accessCanOpenSettings = useStore((st) => st.sessionsAccessCanOpenSettings);
   // ── store(旧槽语义零改动;新面板数据走 sessionsByProject)─────────────────
   const projects = useStore((s) => s.projects);
   const fetchProjects = useStore((s) => s.fetchProjects);
@@ -606,11 +608,24 @@ export function UnifiedSidebar() {
       .filter((s) => !pendingIds.has(s.sessionId) && (!q || String(titleOf(s) || '').toLowerCase().includes(q)))
     : EMPTY_ARRAY), [view.groupMode, sessionsByProject, visibleHashes, pendingIds, q, titleOf]);
   // r23-③:空态文案两处共用(平铺此前硬编「暂无会话」,把「系统拒绝访问」伪装成没有会话)。
+  // r24:拒访那一支补上真按钮 —— 原文案写着「点此查看处理办法」却是个纯 span,点了没反应。
+  // 按钮只在真有面板可跳的平台出现(showAccessSettingsButton,目前只有 macOS);
+  // 样式沿用 App.jsx git 横幅 tcc 分支那两枚小按钮,不另起一套。
   const emptyHint = (fallback) => {
     const text = sessionEmptyHint({ accessError, query: q, fallback });
-    return accessError
-      ? <span className="text-amber-700" title={accessError}>{text}</span>
-      : text;
+    if (!accessError) return text;
+    return (
+      <span className="text-amber-700" title={accessError}>
+        {text}
+        {showAccessSettingsButton({ accessError, canOpenSettings: accessCanOpenSettings }) && (
+          <button
+            onClick={() => { fetch('/api/system/open-fda-settings', { method: 'POST' }).catch(() => {}); }}
+            className="ml-1.5 px-2 py-0.5 rounded bg-amber-100 hover:bg-amber-200 text-amber-900 text-[10px] font-medium align-middle"
+            title="打开「系统设置 → 隐私与安全性 → 完全磁盘访问」；已勾选的先取消再重新勾选"
+          >打开系统设置</button>
+        )}
+      </span>
+    );
   };
 
   // ── 添加项目(系统选择器/路径弹窗/cgui:add-project,原 ProjectList 逻辑原样)────
@@ -1052,7 +1067,9 @@ export function UnifiedSidebar() {
           );
         })}
         {view.groupMode === 'single' && flatSessions.length === 0 && (
-          <div className="px-3 py-2.5 text-[11px] text-ink-faint font-body">{emptyHint('暂无会话')}</div>
+          // r24:平铺模式下"全部项目都被隐藏"是过滤生效后**新出现**的空态。兜底若还写
+          // 「暂无会话」,又是一次"空列表骗人"(分组模式那边早有专门措辞,见下方 hiddenOnly)。
+          <div className="px-3 py-2.5 text-[11px] text-ink-faint font-body">{emptyHint(hiddenOnly ? '所有项目都已隐藏' : '暂无会话')}</div>
         )}
         {view.groupMode !== 'single' && sortedRows.map((project) => {
           const hash = project.hash;
