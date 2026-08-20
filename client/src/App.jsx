@@ -1745,11 +1745,27 @@ function HomeState({ tabIndex = 0 }) {
   const [projOpen, setProjOpen] = useState(false);
   const projBtnRef = useRef(null);
   const custom = readHomeCustom();
-  const project = pickHomeProject({ chosenHash, projects, selectedProject });
-  const recent = useMemo(() => [...(projects || [])]
+  // r21:减去 hiddenProjects。Home 的默认项目**会写进新会话的 cwd**,取全量会让
+  // 用户在侧栏隐藏掉的目录(家目录、临时目录)当上默认工作目录,最近下拉里也会冒出来。
+  // 取法与 SettingsPanel 的项目下拉同一模式(窄端点现读);hidden 不在 store 里,
+  // ponytail: 挂载时读一次即可 —— HomeState 每次回到无会话态都重新挂载,够新。
+  const [hiddenHashes, setHiddenHashes] = useState(() => new Set());
+  useEffect(() => {
+    fetch('/api/prefs/hidden-projects').then((r) => r.json())
+      .then((d) => setHiddenHashes(new Set(Array.isArray(d?.hidden) ? d.hidden : [])))
+      .catch(() => {}); // 读失败回落「不过滤」,不是「全过滤」
+  }, []);
+  const visibleProjects = useMemo(() => {
+    const all = projects || [];
+    const vis = all.filter((p) => !hiddenHashes.has(p.hash));
+    return vis.length ? vis : all; // 全隐藏(侧栏「显示全部项目」那个态)时不把 Home 变成死输入框
+  }, [projects, hiddenHashes]);
+  // selectedProject 仍按原样传:用户显式打开的隐藏项目(侧栏窗格豁免同理)不该被踢掉。
+  const project = pickHomeProject({ chosenHash, projects: visibleProjects, selectedProject });
+  const recent = useMemo(() => [...visibleProjects]
     .sort((a, b) => (b.lastActivity ? new Date(b.lastActivity).getTime() : -1)
       - (a.lastActivity ? new Date(a.lastActivity).getTime() : -1))
-    .slice(0, 12), [projects]);
+    .slice(0, 12), [visibleProjects]);
   const submit = () => {
     const t = text.trim();
     if (!t || !project) return;

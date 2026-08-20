@@ -330,12 +330,20 @@ export function UnifiedSidebar() {
     sortMode: view.sortMode, order: drag ? drag.preview : view.projectOrder, pinned: pinnedProjSet,
   }), [rows, view.sortMode, view.projectOrder, drag, pinnedProjSet]);
   const nonPinnedHashes = useMemo(() => sortedRows.filter((p) => !pinnedProjSet.has(p.hash)).map((p) => p.hash), [sortedRows, pinnedProjSet]);
-  // 单列表模式:全部项目会话平铺 → 需要各组都已加载(懒拉全量;数据层零改动)
+  // 单列表模式:可见项目的会话平铺 → 需要各组都已加载(懒拉;数据层零改动)。
+  // r21:原来遍历 st.projects 全量 —— 本机 39 个里 35 个是隐藏的,白发 35 次请求,
+  // 且 flattenSessionRows 平铺的是「已加载的组」,隐藏项目的会话会一并冒进列表。
+  // 取 query 之前的行集:queryMatchHashes 读的是已加载组,按 query 过滤会成环
+  // (组没加载 → 标题不匹配 → 不加载),所以这里 query 恒 ''。
+  const singleModeRows = useMemo(() => composePanelProjects({
+    projects, hidden, showWorktrees: showWorktreeProjects, query: '', panes, pinned: pinnedProjSet,
+  }), [projects, hidden, showWorktreeProjects, panes, pinnedProjSet]);
   useEffect(() => {
     if (view.groupMode !== 'single') return;
     const st = useStore.getState();
-    for (const p of st.projects) if (!st.sessionsByProject[p.hash]) st.fetchSessionsForPanel(p.hash);
-  }, [view.groupMode, projects]);
+    // virtual = 未落盘的窗格 draft(worktree 新建),没有服务端会话可拉,跳过。
+    for (const p of singleModeRows) if (!p.virtual && !st.sessionsByProject[p.hash]) st.fetchSessionsForPanel(p.hash);
+  }, [view.groupMode, singleModeRows]);
   const projByHash = useMemo(() => new Map((projects || []).map((p) => [p.hash, p])), [projects]);
   // flatSessions 依赖 pendingIds(声明在删除挂起区,下方)——useMemo 回调与 deps 数组
   // 都在渲染时同步求值,放这里会在 const 初始化前读取(TDZ 崩渲染),故声明移至
