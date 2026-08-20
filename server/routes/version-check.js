@@ -539,6 +539,7 @@ router.get('/claude-version-check', async (req, res) => {
     });
   }
   let latest = '';
+  let staleError = null; // r23-④:这次没查成、显示的是旧缓存(前端必须明示,见下方 catch)
   const now = Date.now();
   // 缓存按"真源"分键:native 渠道与 npm 的版本可能不同,混用一个缓存会把 npm 的
   // 版本号错发给原生安装(正是"永远差一版"的放大器)。
@@ -552,14 +553,20 @@ router.get('/claude-version-check', async (req, res) => {
         : await fetchNpmLatest();
       ccCache = latest; ccCacheSrc = srcKey; ccCachedAt = now;
     } catch (err) {
-      if (ccCache && ccCacheSrc === srcKey) latest = ccCache;
-      else return res.json({ currentVersion, installed: true, method, error: err.message || '版本查询失败' });
+      if (ccCache && ccCacheSrc === srcKey) {
+        // r23-④:静默复用旧缓存 = 界面照显「✓ 已是最新版本」,用户根本不知道这次没查成
+        // (与 GUI 那条链路 r14-1 修掉的是同一个症状,CLI 这条一直原样留着)。
+        latest = ccCache;
+        const mins = Math.max(1, Math.round((now - ccCachedAt) / 60000));
+        staleError = `${err.message || '版本查询失败'}(这次没查成,显示的是 ${mins} 分钟前的结果)`;
+      } else return res.json({ currentVersion, installed: true, method, error: err.message || '版本查询失败' });
     }
   }
   res.json({
     currentVersion,
     latestVersion: latest,
     installed: true,
+    ...(staleError ? { staleError } : {}),
     method,                         // native | brew | npm | unknown
     updateCommand: updateCmdFor(resolveUpdateMethod(readUpdateChannel(), method), claudePath),
     updateChannel: effectiveChannel(readUpdateChannel(), method),

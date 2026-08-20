@@ -72,7 +72,7 @@ import { extractMcpServerIssues, formatMcpServerNotice } from './utils/mcpStatus
 import { classifyRepairOutcome, classifyCheckOutcome, upsertRepairHint, removeRepairHint, loadRepairHints, persistRepairHints } from './utils/repairFlow.js';
 import { autoCompactTransition } from './utils/compactStatus.js';
 import { THEME_TABS, readThemeTab, writeThemeTab } from './utils/themeTabs.js';
-import { homeView, pickHomeProject, buildHomeDraft, homeGreetingParts, readHomeCustom } from './utils/home.js';
+import { homeView, pickHomeProject, buildHomeDraft, homeGreetingParts, readHomeCustom, readHiddenHashes, visibleHomeProjects } from './utils/home.js';
 import { subscribeSkin, getSkinVersion, getSkinState, reconcileSkinOnBoot, watchThemeForSkin } from './utils/skins.js';
 import { resolveSessionDot, completionTracker, subscribeDots, getDotsVersion, RUN_MATRIX_CELLS, runCellDelayMs } from './utils/sessionDots.js';
 import { seedNewSessionDefaults } from './components/UnifiedSidebar.jsx';
@@ -1752,14 +1752,11 @@ function HomeState({ tabIndex = 0 }) {
   const [hiddenHashes, setHiddenHashes] = useState(() => new Set());
   useEffect(() => {
     fetch('/api/prefs/hidden-projects').then((r) => r.json())
-      .then((d) => setHiddenHashes(new Set(Array.isArray(d?.hidden) ? d.hidden : [])))
+      .then((d) => setHiddenHashes(readHiddenHashes(d)))
       .catch(() => {}); // 读失败回落「不过滤」,不是「全过滤」
   }, []);
-  const visibleProjects = useMemo(() => {
-    const all = projects || [];
-    const vis = all.filter((p) => !hiddenHashes.has(p.hash));
-    return vis.length ? vis : all; // 全隐藏(侧栏「显示全部项目」那个态)时不把 Home 变成死输入框
-  }, [projects, hiddenHashes]);
+  // r23:解析与过滤都在 utils/home.js(纯函数,行为单测直接调),这里只做接线。
+  const visibleProjects = useMemo(() => visibleHomeProjects(projects, hiddenHashes), [projects, hiddenHashes]);
   // selectedProject 仍按原样传:用户显式打开的隐藏项目(侧栏窗格豁免同理)不该被踢掉。
   const project = pickHomeProject({ chosenHash, projects: visibleProjects, selectedProject });
   const recent = useMemo(() => [...visibleProjects]

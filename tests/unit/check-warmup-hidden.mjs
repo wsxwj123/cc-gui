@@ -128,25 +128,51 @@ const hidden = new Set(['h-home', 'h-tmp', 'h-big', 'h-stale-1', 'h-stale-2']); 
   assert.match(inner, /readHiddenProjects\(\)/, 't7: prefs 读必须在 try 之内(抛了不许掀掉服务端启动)');
 }
 
-// t8 客户端同族漏网点:单列表懒拉与 Home 默认项目都必须减 hidden(源码级仪表化 ——
-//    两处都在组件内,没法纯函数导入;这里钉住接线不被回改)。
+// t8 客户端同族漏网点:单列表懒拉与 Home 默认项目都必须减 hidden。
+//    r23:原来八条断言全是对源码做正则 —— 判官的反例是 /api/prefs/hidden-projects 的
+//    响应字段若改名,App.jsx 里 `d?.hidden` 恒 undefined、Home 过滤彻底失效,而断言照样
+//    全绿。现在解析与过滤都在 utils/home.js 的纯函数里,**真调它**。
 {
+  const { readHiddenHashes, visibleHomeProjects, pickHomeProject } = await import('../../client/src/utils/home.js');
+  // ⚠️ 夹具必须有区分度:被隐藏的那个要是【不过滤就会被选中】的那个(家目录活动最新),
+  // 否则解析读错字段 → 名单恒空 → 过滤失效,而断言照样绿(判官反例正是这条)。
+  const list = [P('h-home', '/Users/x', '2026-08-20T10:00:00Z'), P('h-work', '/Users/x/work', '2026-08-20T09:00:00Z')];
+  assert.equal(pickHomeProject({ projects: list }).hash, 'h-home', 't8: 夹具自检 —— 不过滤时选中的是被隐藏的那个');
+
+  // ① 响应载荷 → 名单(字段名 `hidden` 是与服务端的契约;改名/改结构这条直接红)
+  assert.deepEqual([...readHiddenHashes({ hidden: ['a', 'b', 42, ''] })].sort(), ['a', 'b'],
+    't8: 按响应字段 hidden 解析,脏元素滤除');
+  const picked = pickHomeProject({ projects: visibleHomeProjects(list, readHiddenHashes({ hidden: ['h-home'] })) });
+  assert.equal(picked.hash, 'h-work', 't8: Home 默认项目(会写进新会话 cwd)不许落在被隐藏的目录上');
+
+  // ② 坏载荷回落「不过滤」,不是「全过滤」(Home 不能变成没项目可选的死输入框)
+  for (const bad of [null, {}, { hidden: 'h-home' }, { hiddenProjects: ['h-home'] }]) {
+    assert.equal(readHiddenHashes(bad).size, 0, `t8: 坏载荷回落空 Set → ${JSON.stringify(bad)}`);
+  }
+
+  // ③ 全隐藏时回落全量(侧栏「显示全部项目」那个态)
+  assert.deepEqual(visibleHomeProjects(list, new Set(['h-work', 'h-home'])).map((p) => p.hash),
+    list.map((p) => p.hash), 't8: 全隐藏 → 回落全量,不把 Home 变成死输入框');
+
+  // 接线(只剩这几条源码级:组件内没法纯函数导入)
   const sidebar = readFileSync(new URL('../../client/src/components/UnifiedSidebar.jsx', import.meta.url), 'utf8');
   assert.match(sidebar, /const singleModeRows = useMemo/, 't8: 单列表懒拉有独立的已过滤行集');
   assert.match(sidebar, /for \(const p of singleModeRows\)/, 't8: 单列表懒拉不再遍历全量 st.projects');
   assert.ok(!/for \(const p of st\.projects\)/.test(sidebar), 't8: 全量遍历已移除');
-  // 那个行集必须是 query 之前的(query 过滤会与「搜会话标题依赖组已加载」成环)
-  const memoAt = sidebar.indexOf('const singleModeRows = useMemo');
-  assert.match(sidebar.slice(memoAt, memoAt + 400), /query: ''/, "t8: 懒拉行集不含 query 过滤(否则成环)");
-
+  // 行集来自 singleModeVisibleProjects:query 恒空(与「搜会话标题依赖组已加载」成环)
+  // 与 worktree 不受显示开关裁切,都由该函数签名保证,行为断言见 check-project-panel t8。
+  assert.match(sidebar, /singleModeVisibleProjects\(\{ projects, hidden, panes, pinned: pinnedProjSet \}\)/,
+    't8: 懒拉行集走共用纯函数(无 query 参数 = 结构上不可能成环)');
+  // r23-①:上一轮只改了【拉取】,渲染仍平铺"所有已加载的组" → 隐藏对平铺模式无效。
+  assert.match(sidebar, /const visibleHashes = useMemo\(\(\) => new Set\(singleModeRows\.map/,
+    't8: 可见集由懒拉行集派生(单一来源)');
+  assert.match(sidebar, /flattenSessionRows\(sessionsByProject, visibleHashes\)/,
+    't8: 平铺渲染必须吃同一个可见集(只改拉取 = 只修了一半)');
   const app = readFileSync(new URL('../../client/src/App.jsx', import.meta.url), 'utf8');
   assert.match(app, /pickHomeProject\(\{ chosenHash, projects: visibleProjects, selectedProject \}\)/,
-    't8: Home 默认项目(会写进新会话 cwd)取已过滤列表');
-  const visAt = app.indexOf('const visibleProjects = useMemo');
-  assert.ok(visAt > 0, 't8: Home 有 visibleProjects');
-  const visBlock = app.slice(visAt, visAt + 400);
-  assert.match(visBlock, /filter\(\(p\) => !hiddenHashes\.has\(p\.hash\)\)/, 't8: Home 的可见列表按 hash 减 hidden');
-  assert.match(visBlock, /vis\.length \? vis : all/, 't8: 全隐藏时回落全量(不把 Home 变成死输入框)');
+    't8: Home 默认项目取已过滤列表');
+  assert.match(app, /visibleHomeProjects\(projects, hiddenHashes\)/, 't8: 过滤走共用纯函数');
+  assert.match(app, /setHiddenHashes\(readHiddenHashes\(d\)\)/, 't8: 载荷解析走共用纯函数');
   const recentAt = app.indexOf('const recent = useMemo');
   assert.match(app.slice(recentAt, recentAt + 200), /visibleProjects/, 't8: 最近项目下拉同样取已过滤列表');
 }

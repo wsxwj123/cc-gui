@@ -13,7 +13,7 @@ import {
 import { useStore } from '../stores/sessionStore.js';
 import { confirmDialog } from '../utils/confirmDialog.jsx';
 import { resolveSessionTitle } from '../utils/sessionTitle.js';
-import { composePanelProjects, composePanelSessions, sessionQueryMatchHashes, sortProjectRows, flattenSessionRows, reorderManual } from '../utils/projectPanel.js';
+import { composePanelProjects, composePanelSessions, sessionQueryMatchHashes, sortProjectRows, flattenSessionRows, singleModeVisibleProjects, sessionEmptyHint, reorderManual } from '../utils/projectPanel.js';
 import { pickDirectory, isTauri } from '../utils/pickDirectory.js';
 import { completionTracker } from '../utils/sessionDots.js';
 import { AnchoredPopover } from './SessionSelectors.jsx';
@@ -333,11 +333,17 @@ export function UnifiedSidebar() {
   // 单列表模式:可见项目的会话平铺 → 需要各组都已加载(懒拉;数据层零改动)。
   // r21:原来遍历 st.projects 全量 —— 本机 39 个里 35 个是隐藏的,白发 35 次请求,
   // 且 flattenSessionRows 平铺的是「已加载的组」,隐藏项目的会话会一并冒进列表。
-  // 取 query 之前的行集:queryMatchHashes 读的是已加载组,按 query 过滤会成环
-  // (组没加载 → 标题不匹配 → 不加载),所以这里 query 恒 ''。
-  const singleModeRows = useMemo(() => composePanelProjects({
-    projects, hidden, showWorktrees: showWorktreeProjects, query: '', panes, pinned: pinnedProjSet,
-  }), [projects, hidden, showWorktreeProjects, panes, pinnedProjSet]);
+  // r23-②:这里刻意**不受** showWorktreeProjects 管(singleModeVisibleProjects 恒
+  // showWorktrees:true)—— 那是「侧栏要不要显示 worktree 项目行」的显示开关,默认关;
+  // 拿它裁平铺,worktree 会话就没有任何入口了(分组模式本来也不显示 worktree 行)。
+  // 别顺手「统一」成 showWorktreeProjects。query 恒空的理由见该函数注释(成环)。
+  const singleModeRows = useMemo(
+    () => singleModeVisibleProjects({ projects, hidden, panes, pinned: pinnedProjSet }),
+    [projects, hidden, panes, pinnedProjSet],
+  );
+  // r23-①:懒拉与渲染共用同一个可见集 —— 上一轮只改了拉取,渲染仍平铺「所有已加载的
+  // 组」,而 toggleHidden 不清 sessionsByProject → 先展开再隐藏,平铺里照样全在。
+  const visibleHashes = useMemo(() => new Set(singleModeRows.map((p) => p.hash)), [singleModeRows]);
   useEffect(() => {
     if (view.groupMode !== 'single') return;
     const st = useStore.getState();
@@ -596,9 +602,16 @@ export function UnifiedSidebar() {
     return b;
   }, []);
   const flatSessions = useMemo(() => (view.groupMode === 'single'
-    ? flattenSessionRows(sessionsByProject)
+    ? flattenSessionRows(sessionsByProject, visibleHashes)
       .filter((s) => !pendingIds.has(s.sessionId) && (!q || String(titleOf(s) || '').toLowerCase().includes(q)))
-    : EMPTY_ARRAY), [view.groupMode, sessionsByProject, pendingIds, q, titleOf]);
+    : EMPTY_ARRAY), [view.groupMode, sessionsByProject, visibleHashes, pendingIds, q, titleOf]);
+  // r23-③:空态文案两处共用(平铺此前硬编「暂无会话」,把「系统拒绝访问」伪装成没有会话)。
+  const emptyHint = (fallback) => {
+    const text = sessionEmptyHint({ accessError, query: q, fallback });
+    return accessError
+      ? <span className="text-amber-700" title={accessError}>{text}</span>
+      : text;
+  };
 
   // ── 添加项目(系统选择器/路径弹窗/cgui:add-project,原 ProjectList 逻辑原样)────
   const [addDialogOpen, setAddDialogOpen] = useState(false);
@@ -1039,7 +1052,7 @@ export function UnifiedSidebar() {
           );
         })}
         {view.groupMode === 'single' && flatSessions.length === 0 && (
-          <div className="px-3 py-2.5 text-[11px] text-ink-faint font-body">{q ? '没有匹配的会话' : '暂无会话'}</div>
+          <div className="px-3 py-2.5 text-[11px] text-ink-faint font-body">{emptyHint('暂无会话')}</div>
         )}
         {view.groupMode !== 'single' && sortedRows.map((project) => {
           const hash = project.hash;
@@ -1132,9 +1145,7 @@ export function UnifiedSidebar() {
                     </div>
                   ) : groupSessions.length === 0 ? (
                     <div className="px-3 py-2.5 text-[11px] text-ink-faint font-body">
-                      {accessError
-                        ? <span className="text-amber-700" title={accessError}>无法读取会话目录（系统拒绝访问），会话文件没有丢失 —— 点此查看处理办法</span>
-                        : q ? '没有匹配的会话' : showArchived ? '没有已归档的会话' : '暂无会话,点行尾「+」新建'}
+                      {emptyHint(showArchived ? '没有已归档的会话' : '暂无会话,点行尾「+」新建')}
                     </div>
                   ) : groupSessions.map((session) => (
                     <SessionItem

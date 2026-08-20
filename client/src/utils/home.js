@@ -37,6 +37,28 @@ export function pickHomeProject({ chosenHash, projects, selectedProject } = {}) 
 }
 
 /**
+ * r21/r23:GET /api/prefs/hidden-projects 的响应 → hash Set。
+ * 读失败/字段缺失/类型不对一律回落**空 Set(不过滤)**,绝不能变成"全过滤"(Home 会
+ * 变成没有项目可选的死输入框)。响应字段名 `hidden` 是与服务端的契约,写在这里让它
+ * 被行为单测钉住 —— 原来这一句埋在 App.jsx 的 .then 里,字段改名 → d?.hidden 恒
+ * undefined → 过滤彻底失效,而对源码做正则的断言照样全绿。
+ */
+export function readHiddenHashes(payload) {
+  return new Set(Array.isArray(payload?.hidden) ? payload.hidden.filter((x) => typeof x === 'string' && x) : []);
+}
+
+/**
+ * Home 可选项目列表:减去被隐藏的项目(默认项目会写进新会话 cwd,家目录/临时目录
+ * 这类被用户隐藏的不该当上默认);全被隐藏时回落全量,不把 Home 变成死输入框。
+ */
+export function visibleHomeProjects(projects, hiddenHashes) {
+  const all = Array.isArray(projects) ? projects : [];
+  const hidden = hiddenHashes instanceof Set ? hiddenHashes : new Set(hiddenHashes || []);
+  const vis = all.filter((p) => !hidden.has(p?.hash));
+  return vis.length ? vis : all;
+}
+
+/**
  * Home 发送 → draft 会话参数(cwd 绑定所选项目;与侧栏 handleNew 的 draft 同构)。
  * draftId 由调用方传入(App.jsx newDraftId,保持 nonce 语义单一来源)。
  */
