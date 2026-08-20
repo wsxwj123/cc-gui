@@ -131,6 +131,17 @@ async function writeActiveProviderId(id) {
 // returned by any GET — only used server-side at switch time.
 const CUSTOM_PROVIDERS_PATH = join(homedir(), '.claude-gui', 'custom-providers.json');
 
+// r16-4:可选的额度查询密钥 quotaKey。与 apiKey 同等对待 —— trim + 长度上限,只在
+// 服务端使用,任何 GET 都只下发 hasQuotaKey 布尔,绝不回传明文。缺该字段 = 未配置。
+const MAX_KEY_LEN = 4096;
+// r16-4b(判官建议2):超长不再静默截断。截断后的密钥只会永远 401、且不给用户任何线索,
+// 比明确报错更糟。返回 null = "提供了但非法",调用方回 400 并说明;'' = 未提供/空。
+const cleanKey = (v) => {
+  if (typeof v !== 'string') return '';
+  const t = v.trim();
+  return t.length > MAX_KEY_LEN ? null : t;
+};
+
 // r10-9:思考强度按模型自适应的数据层。存储形态(custom-providers.json)的 models 条目
 // 兼容 string | {id, reasoning?:boolean, efforts?:string[]};读入口统一 normalize 成
 // models: string[](全部既有消费点零改动)+ modelMeta: {[id]:{reasoning?,efforts?}},
@@ -849,7 +860,7 @@ router.get('/providers', async (_req, res) => {
       // 下发预填版而非裸值:顺带让存量 provider 在编辑器里看得见目录判定(那行"目录预填,
       // 可修改"的小字此前永远显示不出来)。预填是纯函数、不写盘,用户声明永不被覆盖。
       modelMeta: applyCatalogPrefill(p.models, p.modelMeta || null, p.type),
-      hasKey: !!p.apiKey, isCustom: true, isCurrent: isCur(p.id, false),
+      hasKey: !!p.apiKey, hasQuotaKey: !!p.quotaKey, isCustom: true, isCurrent: isCur(p.id, false),
     }));
     // B 方案: claude 只读组的 models[] 从其 snapshot.env 的 _MODEL 值提取(切换/导入路径
     // 同口径),否则档位下拉无选项。official 不给 models(它有真四档,不走 override)。
@@ -1358,7 +1369,7 @@ router.get('/custom-providers', async (_req, res) => {
     providers: list.map((p) => ({
       id: p.id, name: p.name, type: p.type, baseURL: p.baseURL,
       models: p.models || [], defaultModel: p.defaultModel || '',
-      tierModels: p.tierModels || null, hasKey: !!p.apiKey,
+      tierModels: p.tierModels || null, hasKey: !!p.apiKey, hasQuotaKey: !!p.quotaKey,
       contextWindow: p.contextWindow || null, modelPrices: p.modelPrices || null,
       modelMeta: p.modelMeta || null, // r10-9:每模型思考能力声明
     })),
@@ -1368,7 +1379,7 @@ router.get('/custom-providers', async (_req, res) => {
 // POST /api/custom-providers { name, type, baseURL, apiKey, models } — add one.
 router.post('/custom-providers', async (req, res) => {
   try {
-    const { name, type, baseURL, apiKey, models, defaultModel } = req.body || {};
+    const { name, type, baseURL, apiKey, quotaKey, models, defaultModel } = req.body || {};
     if (!name || typeof name !== 'string') return res.status(400).json({ error: 'name 必填' });
     if (type !== 'openai' && type !== 'anthropic') return res.status(400).json({ error: 'type 必须是 openai 或 anthropic' });
     let url; try { url = new URL(baseURL); } catch { return res.status(400).json({ error: 'baseURL 非法' }); }
@@ -1385,6 +1396,10 @@ router.post('/custom-providers', async (req, res) => {
       apiKey: typeof apiKey === 'string' ? apiKey.trim() : '',
       models: cleanModels,
     };
+    // r16-4:额度查询密钥(可选)。没填就不写这个键 —— 缺该字段 = 未配置,存量条目零影响。
+    const qkNew = cleanKey(quotaKey);
+    if (qkNew === null) return res.status(400).json({ error: `额度查询密钥过长（上限 ${MAX_KEY_LEN} 字符）` });
+    if (qkNew) entry.quotaKey = qkNew;
     // AZ8: 可选的 per-provider 默认模型。只接受属于该 provider models[] 的 id;非法/不在
     // 列表内则不写(向后兼容:无此字段时切换/解析回退 models[0])。
     if (typeof defaultModel === 'string' && cleanModels.includes(defaultModel.trim())) {
@@ -1433,7 +1448,7 @@ router.put('/custom-providers/:id', async (req, res) => {
     const list = await readCustomProviders();
     const idx = list.findIndex((p) => p.id === req.params.id);
     if (idx === -1) return res.status(404).json({ error: 'not found' });
-    const { name, type, baseURL, apiKey, models, defaultModel, tierModels, contextWindow, modelPrices } = req.body || {};
+    const { name, type, baseURL, apiKey, quotaKey, models, defaultModel, tierModels, contextWindow, modelPrices } = req.body || {};
     if (!name || typeof name !== 'string') return res.status(400).json({ error: 'name 必填' });
     if (type !== 'openai' && type !== 'anthropic') return res.status(400).json({ error: 'type 必须是 openai 或 anthropic' });
     let url; try { url = new URL(baseURL); } catch { return res.status(400).json({ error: 'baseURL 非法' }); }
@@ -1463,6 +1478,13 @@ router.put('/custom-providers/:id', async (req, res) => {
       apiKey: (typeof apiKey === 'string' && apiKey.trim()) ? apiKey.trim() : prev.apiKey,
       models: nextModels,
     };
+    // r16-4:额度查询密钥。**不传 = 保留**(表单留空 = 不修改,客户端从不持有明文,
+    // 与 apiKey 同语义);显式传空串 = 清除(表单的「清除」按钮,否则填错了删不掉)。
+    if (quotaKey !== undefined) {
+      const qk = cleanKey(quotaKey);
+      if (qk === null) return res.status(400).json({ error: `额度查询密钥过长（上限 ${MAX_KEY_LEN} 字符）` });
+      if (qk) list[idx].quotaKey = qk; else delete list[idx].quotaKey;
+    }
     // AZ8: 默认模型。显式传入(且在 models[] 内)则更新;传 null/'' 则清除;不传则保留旧值。
     // 同时校验:旧 defaultModel 若已不在新 models[] 内,自动清除(避免指向被删模型)。
     if (defaultModel === null || defaultModel === '') {

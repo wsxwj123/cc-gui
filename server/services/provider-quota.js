@@ -111,7 +111,15 @@ export function pickCandidates(provider) {
   if (host.includes('siliconflow')) {
     return [{ vendor: 'siliconflow', auth: 'bearer', urls: [`${base}/user/info`] }];
   }
+  // OpenRouter 有两条端点、要两把不同的 key,按有无 quotaKey 分流:
+  //  ① 无 quotaKey → /api/v1/key。推理 key 就能读,但读到的是**该 key 自己的花费上限**,
+  //     未给 key 设上限时 limit/limit_remaining 全为 null(账户余额一个字都读不到)。
+  //  ② 有 quotaKey → /api/v1/credits。这是账户真实余额,只认 management key
+  //     (跟推理 key 不是一把,拿推理 key 打它是 401)。
   if (host === 'openrouter.ai') {
+    if (String(provider?.quotaKey || '').trim()) {
+      return [{ vendor: 'openrouter-credits', auth: 'bearer', urls: ['https://openrouter.ai/api/v1/credits'], currency: 'USD' }];
+    }
     return [{ vendor: 'openrouter', auth: 'bearer', urls: ['https://openrouter.ai/api/v1/key'], currency: 'USD' }];
   }
   if (NO_QUOTA_HOSTS.some((h) => host.includes(h))) return [];
@@ -262,6 +270,19 @@ function parseOpenrouter(j, currency) {
   };
 }
 
+// OpenRouter(management key 走 /credits):账户余额 = total_credits − total_usage。
+// 任一字段缺失/非有限数 → 整条降级成"查不到"。**绝不拿 0 冒充余额** —— 两个字段都读不到时
+// 0 − 0 = 0 会渲染成"余额 0",用户会以为欠费停机,比明写"查不到"坏得多。
+function parseOpenrouterCredits(j, currency) {
+  const total = num(j?.data?.total_credits);
+  const used = num(j?.data?.total_usage);
+  if (total === null || used === null) return null;
+  return {
+    kind: 'amount', currency,
+    items: [item({ label: '余额', direction: 'left', value: Math.round((total - used) * 100) / 100 })],
+  };
+}
+
 // One-API 系兜底:余额 = hard_limit_usd − total_usage/100(total_usage **已 ×100**)。
 // 两个坑:①无限额度返回 1e8,要识别成"无限"而不是显示一亿;②单位不可靠(站点侧
 // QuotaDisplayType 可配 USD/CNY/甚至 token 数,接口不回传口径)→ currency 恒 null。
@@ -291,6 +312,7 @@ export function parseQuota(candidate, bodies) {
     case 'opencode': return parseOpencode(b[0]);
     case 'siliconflow': return parseSiliconflow(b[0]);
     case 'openrouter': return parseOpenrouter(b[0], candidate.currency || 'USD');
+    case 'openrouter-credits': return parseOpenrouterCredits(b[0], candidate.currency || 'USD');
     case 'oneapi': return parseOneAPI(b);
     default: return null;
   }
