@@ -5,7 +5,7 @@
     {
       "title": "新增",
       "items": [
-        "自定义生图面板：支持 OpenAI / Gemini / chat 三种同步协议，出图自动落盘并预览；生图配置独立存放，不写入 `settings.json`",
+        "自定义生图面板：支持 OpenAI / Gemini / chat 三种同步协议；逐 Provider 填写接口地址、密钥、模型、尺寸与保存目录，出图自动落盘并在界面内预览，可在文件管理器中定位；生图配置独立存放于 `~/.claude-gui/image-providers.json`，不写入 `settings.json`。完整说明见 0.2.317 的「功能介绍」",
         "第三方 provider 的余额与额度显示：探测式查询，结果进用量面板新卡片，额度偏低时在入口标红点"
       ]
     },
