@@ -288,6 +288,12 @@ export function useWebSocket() {
               // 按 sessionId 入位;两条路径都到时内容相等,setPromptSuggestionFor 自去重。
               useStore.getState().setPromptSuggestionFor(data.sessionId, data.suggestion);
               break;
+            case 'context-injection':
+              // r17-①:本回合的上下文注入物(CLAUDE.md / skills / agents)。由本机代理
+              // 读真实请求体后广播 —— 只有第三方 provider 走代理,官方订阅 CLI 直连,
+              // 永远收不到这条 → 前端整块不渲染。载荷只有分类/标签/字符数,无正文。
+              useStore.getState().setContextInjectionFor(data.sessionId, data.items || []);
+              break;
             case 'background-tasks':
               // 批A:服务端按 CLI 的 background_tasks_changed(全量存活集快照)对完账后广播。
               // App.jsx 顶层监听:settled 的直接收尾,本会话不在集内的僵尸卡剪掉。纯 UI 收敛,
