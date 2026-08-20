@@ -926,14 +926,23 @@ function UpdateChecker() {
             </div>
           )}
         </div>
-        <button
-          onClick={check}
-          disabled={state.status === 'checking'}
-          className="px-3 py-1.5 text-[12px] bg-accent text-on-accent rounded-md hover:bg-accent/90 disabled:opacity-50 flex items-center gap-1.5 shrink-0"
-        >
-          <RefreshCw size={12} className={state.status === 'checking' ? 'animate-spin' : ''} />
-          {state.status === 'checking' ? '检查中…' : '检查更新'}
-        </button>
+        <div className="flex items-center gap-1.5 shrink-0">
+          {/* r17-2:更新说明的手动入口。内容来自 bundle 内的离线切片,随时可翻历史版本。 */}
+          <button
+            onClick={() => window.dispatchEvent(new CustomEvent('cgui:open-release-notes'))}
+            className="px-2.5 py-1.5 text-[12px] text-ink-muted hover:text-ink border border-canvas-deep rounded-md hover:bg-canvas-warm"
+          >
+            查看更新说明
+          </button>
+          <button
+            onClick={check}
+            disabled={state.status === 'checking'}
+            className="px-3 py-1.5 text-[12px] bg-accent text-on-accent rounded-md hover:bg-accent/90 disabled:opacity-50 flex items-center gap-1.5"
+          >
+            <RefreshCw size={12} className={state.status === 'checking' ? 'animate-spin' : ''} />
+            {state.status === 'checking' ? '检查中…' : '检查更新'}
+          </button>
+        </div>
       </div>
       {state.status === 'ok' && (
         state.hasUpdate ? (

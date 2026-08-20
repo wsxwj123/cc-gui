@@ -179,6 +179,28 @@ router.put('/prefs/hotkey', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// r17-2:「更新说明」弹窗已读到哪一版。落 prefs.json 而不是 localStorage —— localStorage
+// 绑 WebView 数据目录,端口漂移/换目录会整份丢,同一版本就会反复弹。同版本只弹一次的
+// 判定在前端(client/src/utils/releaseNotes.js 的 shouldShow),这里只负责持久化。
+router.get('/prefs/release-notes-seen', async (_req, res) => {
+  const prefs = await loadPrefs();
+  res.json({ lastSeen: typeof prefs.releaseNotesSeen === 'string' ? prefs.releaseNotesSeen : null });
+});
+router.put('/prefs/release-notes-seen', async (req, res) => {
+  const { version } = req.body || {};
+  if (typeof version !== 'string' || !/^\d+\.\d+\.\d+/.test(version)) {
+    return res.status(400).json({ error: 'version 必须是版本号字符串' });
+  }
+  try {
+    await withPrefsQueue(async () => {
+      const prefs = await loadPrefs();
+      prefs.releaseNotesSeen = version;
+      await savePrefs(prefs);
+    });
+    res.json({ ok: true, lastSeen: version });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // PUT /api/prefs/hidden-providers { hidden: string[] }
 router.put('/prefs/hidden-providers', async (req, res) => {
   const { hidden } = req.body || {};

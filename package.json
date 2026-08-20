@@ -10,7 +10,7 @@
     "server": "node server/index.js",
     "client": "cd client && npx vite --port 5173",
     "build": "node scripts/public-build.cjs build",
-    "build:local": "cd client && npx eslint src && npx vite build",
+    "build:local": "node scripts/gen-release-notes.mjs && cd client && npx eslint src && npx vite build",
     "build:tauri": "node scripts/require-public-build.cjs && npm run build:local",
     "audit:public": "node scripts/audit-public.cjs",
     "smoke:http": "node scripts/check-http-smoke.cjs",
