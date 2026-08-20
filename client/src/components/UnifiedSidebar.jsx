@@ -146,6 +146,9 @@ function SidebarViewMenu() {
 }
 
 export function UnifiedSidebar() {
+  // r17-4:磁盘访问被系统拒绝时,空列表要说实话 —— 静默的「暂无会话」和真的没有
+  // 会话长得一模一样,用户实测的第一反应是「数据被删了」。
+  const accessError = useStore((st) => st.sessionsAccessError);
   // ── store(旧槽语义零改动;新面板数据走 sessionsByProject)─────────────────
   const projects = useStore((s) => s.projects);
   const fetchProjects = useStore((s) => s.fetchProjects);
@@ -1121,7 +1124,9 @@ export function UnifiedSidebar() {
                     </div>
                   ) : groupSessions.length === 0 ? (
                     <div className="px-3 py-2.5 text-[11px] text-ink-faint font-body">
-                      {q ? '没有匹配的会话' : showArchived ? '没有已归档的会话' : '暂无会话,点行尾「+」新建'}
+                      {accessError
+                        ? <span className="text-amber-700" title={accessError}>无法读取会话目录（系统拒绝访问），会话文件没有丢失 —— 点此查看处理办法</span>
+                        : q ? '没有匹配的会话' : showArchived ? '没有已归档的会话' : '暂无会话,点行尾「+」新建'}
                     </div>
                   ) : groupSessions.map((session) => (
                     <SessionItem

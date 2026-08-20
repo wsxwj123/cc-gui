@@ -379,6 +379,16 @@ router.get('/projects/:hash/sessions', async (req, res) => {
     const sessions = await listSessions(req.params.hash);
     res.json(sessions);
   } catch (err) {
+    // r17-4:权限被拒要说实话。用户实测(另一台 Mac 未授予完全磁盘访问):终端里能读到
+    // 会话、GUI 里却一片"暂无会话",第一反应是"数据被删了"——静默的空列表和真的没有
+    // 会话长得一模一样,是最坏的一种失败。这里把 EPERM/EACCES 单独标出来交给前端。
+    if (err?.code === 'EPERM' || err?.code === 'EACCES') {
+      return res.status(403).json({
+        error: '无法读取会话目录（系统拒绝访问）',
+        code: 'no-disk-access',
+        hint: '打开「系统设置 → 隐私与安全性 → 完全磁盘访问」，把 CC-GUI 加进去并勾选；已勾选的先取消再重新勾选，然后完全退出 App 再打开。会话文件本身没有丢失。',
+      });
+    }
     res.status(500).json({ error: err.message });
   }
 });

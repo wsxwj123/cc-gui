@@ -1871,7 +1871,14 @@ export const useStore = create((set, get) => ({
     try {
       const res = await fetch(`/api/projects/${encodeURIComponent(projectHash)}/sessions`);
       const data = await res.json();
+      // r17-4:磁盘访问被系统拒绝时,后端回 403 + code:'no-disk-access'。这里必须把它
+      // 与"真的没有会话"分开 —— 静默的空列表会让用户以为数据被删了(实测的真实反应)。
+      if (res.status === 403 && data?.code === 'no-disk-access') {
+        set((st) => (st.sessionsAccessError === data.hint ? st : { sessionsAccessError: data.hint }));
+        return;
+      }
       const list = Array.isArray(data) ? data : [];
+      set((st) => (st.sessionsAccessError ? { sessionsAccessError: null } : st));
       // r13-p2-1:内容不变则复用旧身份并跳过 set —— watcher 每 600ms 刷全部展开组,
       // 无条件换身份会让侧栏整树随流式持续重渲(按钮卡顿/点击丢失根因)。
       set((s) => {
@@ -1883,6 +1890,8 @@ export const useStore = create((set, get) => ({
     } catch { /* 面板刷新失败保留旧缓存,下次去抖刷新兜底 */ }
   },
   // 置顶(项目/会话,服务端共享):挂载 GET 与 WS 广播都经同一 reducer 入位。
+  // r17-4:会话目录不可读(完全磁盘访问未授予)时的人话提示;null = 正常。
+  sessionsAccessError: null,
   pinnedProjects: [],
   pinnedSessions: [],
   applyPinned: (data) => set(reducePinned(data)),
