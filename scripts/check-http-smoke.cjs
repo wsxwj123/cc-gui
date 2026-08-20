@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 
 const { spawn } = require('node:child_process');
+const { existsSync } = require('node:fs');
+const { join } = require('node:path');
 
 const root = process.cwd();
 
@@ -10,7 +12,9 @@ function waitForReady(child, timeoutMs) {
     const timer = setTimeout(() => reject(new Error(`server did not become ready\n${output}`)), timeoutMs);
     const onData = (chunk) => {
       output += chunk.toString();
-      if (output.includes('Claude GUI server READY')) {
+      // 只认 'server READY'，不认品牌名：b366880 把 "Claude GUI"→"cc-gui" 全仓改名时
+      // 漏了这里，冒烟测试从此永远超时（服务端其实起来了）。品牌名会再变，横幅语义不会。
+      if (output.includes('server READY')) {
         clearTimeout(timer);
         resolve(output);
       }
@@ -75,6 +79,11 @@ async function main() {
     }
 
     const html = await fetchText(`${baseUrl}/`, 2500);
+    // 这是"跑之前先 build"的冒烟测试：`/` 由 client/dist 提供。没构建过时会拿到 404，
+    // 光报 "404" 看不出该做什么。
+    if (html.response.status === 404 && !existsSync(join(root, 'client', 'dist', 'index.html'))) {
+      throw new Error('client/dist 不存在，先跑 `npm run build`（本测试校验的是构建产物）');
+    }
     if (html.response.status !== 200) throw new Error(`/ failed: ${html.response.status}`);
     const scriptMatch = html.text.match(/src="(\/assets\/[^"]+\.js)"/);
     if (!scriptMatch) throw new Error('HTML did not reference a JS asset');
