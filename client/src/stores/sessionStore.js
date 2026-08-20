@@ -831,7 +831,9 @@ export const useStore = create((set, get) => ({
     // 1M 标记随 pin 一起清(切 provider 语义:旧 provider 的 1M 支持不可假设迁移),
     // 服务端全表同步清空,否则水合兜底会把 [1m] 又补回来。
     writeLs('cgui-context-1m', {});
-    set({ modelBySession: {}, providerEpoch: now, context1mBySession: {} });
+    // r17-1b(判官建议1):切 provider 时一并清掉上下文注入行 —— 它来自代理层的真实请求,
+    // 切到官方后不会再有新数据,旧行会一直挂着(规格要求官方下整块不显示)。
+    set({ modelBySession: {}, providerEpoch: now, context1mBySession: {}, contextInjectionBySid: {} });
     fetch('/api/prefs/context-1m', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },

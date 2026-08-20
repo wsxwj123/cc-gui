@@ -48,9 +48,27 @@ function classify(inner) {
   for (const r of RULES) {
     if (inner.startsWith(r.prefix)) return { kind: r.kind, label: r.label };
   }
-  // 只取首行、只取前 40 字:标签用来"看出是什么",不是用来复述正文。
-  const firstLine = inner.split('\n', 1)[0].trim().slice(0, OTHER_LABEL_MAX);
-  return { kind: 'other', label: firstLine };
+  // r17-1b(判官必修1):认不出的块【绝不能把首行原样带出来】。判官实测这不是"某天 CLI 变"
+  // 才会踩的假设 —— 用户自己贴一段 transcript 调试、那条消息恰以 <system-reminder> 开头,
+  // 首行就会被当成标签截 40 字送进 WS/store/UI。实测泄漏样本:含客户名+密钥+内网 IP 的
+  // 中文句、`The user opened /Users/xxx/work/…` 的真实路径。而且 .trim() 会吃掉前导空行,
+  // 取到的是第一个非空行而非样板句;40 这个预算按英文样板定,对中文就是一整句话。
+  //
+  // 现在只保留首行里【像 CLI 样板句的那一段纯 ASCII 字母】:含路径/中文/密钥/数字的一律
+  // 匹配不到 → 退回固定标签。这样既保住原初衷(CLI 换文案时仍能看出是个什么块),
+  // 又让任何用户内容都带不出来。
+  // 判据:CLI 样板句的特征是【多个空格分隔的纯英文单词】;而密钥/标识符/路径的特征是
+  // 连续无空格(SECRET-second-line-token-abc、/Users/x/y)。所以逐词扫,遇到第一个"不是
+  // 纯字母词"就停,并要求至少凑够 3 个词才采信 —— 凑不够一律退回固定标签。
+  const firstLine = inner.split('\n', 1)[0].trim();
+  const words = [];
+  for (const w of firstLine.split(/\s+/)) {
+    if (!/^[A-Za-z][A-Za-z,.']*$/.test(w)) break; // 含数字/连字符/下划线/非 ASCII → 停
+    words.push(w);
+    if (words.join(' ').length >= OTHER_LABEL_MAX) break;
+  }
+  const boilerplate = words.length >= 3 ? words.join(' ').slice(0, OTHER_LABEL_MAX) : '';
+  return { kind: 'other', label: boilerplate || '未知注入块' };
 }
 
 /**
@@ -63,6 +81,10 @@ export function extractContextInjection(body) {
   if (!body || typeof body !== 'object') return null;
   const sessionId = parseSessionIdFromMetadata(body.metadata);
   if (!sessionId) return null; // 没有会话钥匙就无处可挂,不广播
+  // r17-1b(判官建议2):载荷封顶。真实 CLI 只发 ~6 块,这两条纯属兜底 —— 上游若给出畸形
+  // 超大值(判官实测 2MB 的 session_id / 10 万个 block → 4.7MB 广播),会原样推给所有 WS
+  // 客户端(含局域网里的手机)。
+  if (sessionId.length > 64) return null;
 
   const first = Array.isArray(body.messages) ? body.messages[0] : null;
   const content = first && Array.isArray(first.content) ? first.content : null;
@@ -80,7 +102,7 @@ export function extractContextInjection(body) {
     if (!label) continue;
     items.push({ kind, label, bytes: block.text.length });
   }
-  return items.length ? { sessionId, items } : null;
+  return items.length ? { sessionId, items: items.slice(0, 20) } : null;
 }
 
 /**

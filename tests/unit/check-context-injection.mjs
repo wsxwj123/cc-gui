@@ -146,4 +146,46 @@ const eq = (a, b, msg) => { n += 1; assert.equal(a, b, msg); };
   }
 }
 
+// t11 r17-1b(判官必修2):两条护栏 —— 判官变异实测这两处改了 54 条断言全绿。
+// ① 必须 startsWith 而非 includes:改成 includes 后,"用户消息里任意位置出现该标签"
+//    也会被当成注入物,并从标签偏移处截 40 字 → 正文外泄。
+{
+  const body = {
+    metadata: { user_id: JSON.stringify({ session_id: 'S' }) },
+    messages: [{ content: [{ type: 'text', text: '这是用户自己写的一段话 <system-reminder>\nAvailable agent types for the Agent tool:\n</system-reminder>' }] }],
+  };
+  assert.equal(extractContextInjection(body), null,
+    't11: 标签不在开头 = 用户自己的消息,不得当成注入物(钉死 startsWith,不许换 includes)');
+}
+// ② 只扫 messages[0]:整个隐私论证的地基。最后一条 user 消息挂的是 tool_result 与
+//    file-modified / todo 类 reminder,首行含真实文件路径与待办正文。
+{
+  const body = {
+    metadata: { user_id: JSON.stringify({ session_id: 'S' }) },
+    messages: [
+      { content: [{ type: 'text', text: '<system-reminder>\nAs you answer the user\'s questions, you can use the following context:\n# claudeMd\n' }] },
+      { content: [{ type: 'text', text: '<system-reminder>\nThe file /Users/someone/private/secret-plan.md has been modified\n</system-reminder>' }] },
+    ],
+  };
+  const out = extractContextInjection(body);
+  assert.equal(out.items.length, 1, 't11: 只扫第一条 user 消息(钉死 messages[0],不许扩大扫描范围)');
+  assert.equal(out.items[0].kind, 'claude-md', 't11: 扫到的是第一条里的 CLAUDE.md');
+  assert.ok(!JSON.stringify(out).includes('secret-plan'), 't11: 后续消息里的文件路径不得出现在载荷里');
+}
+
+// t12 r17-1b(判官必修1):认不出的块不许把用户内容当标签带出来。
+// 判官实测这不需要"某天 CLI 变":用户贴一段 transcript 调试、首行恰是中文/密钥/路径就会漏。
+{
+  const mk = (t) => ({ metadata: { user_id: JSON.stringify({ session_id: 'S' }) },
+    messages: [{ content: [{ type: 'text', text: `<system-reminder>\n${t}\n</system-reminder>` }] }] });
+  const label = (t) => extractContextInjection(mk(t))?.items?.[0]?.label;
+  assert.equal(label('客户 ACME 密钥 sk-live-99 内网 10.1.2.3'), '未知注入块', 't12: 中文/密钥不外泄');
+  assert.equal(label('\n\nSECRET-second-line-token-abc'), '未知注入块', 't12: 前导空行后的密钥不外泄(trim 会吃掉空行)');
+  assert.equal(label('contact donny@acme.com about it'), '未知注入块', 't12: 邮箱不外泄');
+  assert.equal(label('Hello world'), '未知注入块', 't12: 词数不足不采信');
+  assert.equal(label('The user opened /Users/donny/work/secret.md'), 'The user opened', 't12: 路径被截断在纯字母词处');
+  assert.equal(label('The following deferred tools are now available via ToolSearch.'),
+    'The following deferred tools are now ava', 't12: 真正的 CLI 样板句仍保留(原初衷不丢)');
+}
+
 console.log(`context-injection: ${n} assertions OK`);
