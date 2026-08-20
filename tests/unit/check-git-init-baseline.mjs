@@ -133,8 +133,12 @@ try {
     // root,绝不能落进"本文件夹未git初始化"分支(服务端 --show-toplevel 已保证 isRepo:true,
     // 本节§3 用真 git 钉死;这里钉前端呈现)。变异哨兵:删掉 nocommit 分支的上层仓库
     // 条件文案,下面两条必须变红(已实际验证过一次)。
-    assert.match(banner, /repoRoot && repoRoot !== cwd\s*\? <><b>本文件夹属于上层 git 仓库<\/b>/,
-      '子文件夹 nocommit 横幅必须声明"本文件夹属于上层 git 仓库"');
+    // r17-3:横幅文案收短(侧栏窄容器里长句会竖排成一列),完整解释移进 title。
+    // 断言的【意图不变】——子文件夹场景必须声明归属,不能让用户以为是"本文件夹未初始化"。
+    assert.match(banner, /repoRoot && repoRoot !== cwd\s*\? <><b>属于上层 git 仓库<\/b>/,
+      '子文件夹 nocommit 横幅必须声明归属于上层仓库');
+    assert.match(banner, /title=\{repoRoot && repoRoot !== cwd\s*\?\s*'本文件夹属于上层 git 仓库/,
+      '完整说明移进 title 后仍须保留"本文件夹属于上层 git 仓库"的原话');
     assert.match(banner, />上层仓库根：\{repoRoot\}<\/span>/,
       '子文件夹场景必须展示真实上层仓库根路径');
 

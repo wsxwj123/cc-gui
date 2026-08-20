@@ -2214,34 +2214,44 @@ export function GitInitBanner({ cwd }) {
   // 在仓库里但一个提交都没有(git init 过、从没 commit)。判据是 /api/git/status 的
   // hasCommit(存量项目也算得出),importGitState 只兜底旧服务端。按钮走同一个
   // /api/git/init:already:true 时它只做 add + commit,正好是这里需要的基线提交。
+  // r17-3:原先是横向 flex + 两个 shrink-0 的按钮,在【侧栏】这种窄容器里会把文字区挤到
+  // 一个字宽,整段竖排成一列(用户实测截图)。改成纵向:文字独占一行,按钮另起一行右对齐。
+  // 同时把解释性长句收进 title —— 侧栏里要的是"要不要点",不是长篇理由。
   if (status === 'nocommit') {
     return (
-      <div className="min-w-0 overflow-hidden bg-amber-50 border-b border-amber-200 px-4 py-2 text-[12px] font-body text-amber-900 flex items-center gap-2">
-        <GitBranch size={13} className="text-amber-700 shrink-0" />
-        <span className="flex-1 min-w-0 break-words">
+      <div className="min-w-0 overflow-hidden bg-amber-50 border-b border-amber-200 px-4 py-2 text-[12px] font-body text-amber-900 flex flex-col gap-1.5">
+        <div className="flex items-start gap-2 min-w-0">
+        <GitBranch size={13} className="text-amber-700 shrink-0 mt-0.5" />
+        <span className="flex-1 min-w-0 break-words"
+          title={repoRoot && repoRoot !== cwd
+            ? '本文件夹属于上层 git 仓库，该仓库还没有任何提交。worktree 与基于 git 的回滚需要至少一个提交。'
+            : '这个 git 仓库还没有任何提交。worktree 与基于 git 的回滚需要至少一个提交。'}>
           {/* ⑦子文件夹场景(仓库根在上层)明说归属:不是"本文件夹未初始化",而是它属于
               上层仓库、只差基线提交。init 走既有 already:true 路径,只补提交不重复 git init。 */}
           {repoRoot && repoRoot !== cwd
-            ? <><b>本文件夹属于上层 git 仓库</b>，该仓库还没有任何提交。worktree 与基于 git 的回滚需要至少一个提交，建议先补一次基线提交。</>
-            : <><b>这个 git 仓库还没有任何提交</b>。worktree 与基于 git 的回滚需要至少一个提交，建议先做一次基线提交。</>}
+            ? <><b>属于上层 git 仓库</b>，尚无提交</>
+            : <><b>此仓库尚无提交</b></>}
           {/* 仓库根常常在项目目录的上层(用户实景:项目是空文件夹,仓库根是它的父目录),
               不说清楚的话用户不知道自己在给哪个仓库补提交。 */}
           {repoRoot && repoRoot !== cwd && (
             <span className="block text-[10.5px] text-amber-700 mt-0.5 font-mono truncate" title={repoRoot}>上层仓库根：{repoRoot}</span>
           )}
         </span>
-        <button
-          onClick={init}
-          className="px-2.5 py-1 rounded bg-amber-700 text-white text-[11px] font-medium hover:bg-amber-800 shrink-0"
-        >
-          创建基线提交
-        </button>
-        <button
-          onClick={dismiss}
-          className="px-2 py-1 rounded text-amber-800 text-[11px] hover:bg-amber-100 shrink-0"
-        >
-          本会话忽略
-        </button>
+        </div>
+        <div className="flex items-center justify-end gap-1.5 flex-wrap">
+          <button
+            onClick={dismiss}
+            className="px-2 py-1 rounded text-amber-800 text-[11px] hover:bg-amber-100 shrink-0"
+          >
+            本会话忽略
+          </button>
+          <button
+            onClick={init}
+            className="px-2.5 py-1 rounded bg-amber-700 text-white text-[11px] font-medium hover:bg-amber-800 shrink-0"
+          >
+            创建基线提交
+          </button>
+        </div>
       </div>
     );
   }

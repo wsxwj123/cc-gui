@@ -1722,12 +1722,24 @@ export async function assertPublicBaseURL(baseURL) {
   const { lookup } = await import('dns/promises');
   let addrs;
   try { addrs = await lookup(host, { all: true }); }
-  catch { const e = new Error('无法解析 baseURL 主机名'); e.status = 400; throw e; }
+  catch {
+    // r17-3:解析失败【放行】,不再 400。用户实测:换一台没装 TUN 代理的 Mac,切换
+    // kimi/deepseek/xiaomi 全部报「无法解析 baseURL 主机名」—— 而切换 provider 是纯
+    // 本地操作(只写 settings.json),不该卡在一次 DNS 上。
+    //
+    // 安全性:解析不了的主机名,后续请求必然也发不出去 → 构不成 SSRF 面;真正的攻击
+    // 会用【能解析且指向内网】的域名,那条路径下面照样拦。所以"解析失败就拒绝"既没
+    // 挡住攻击、又把没网/DNS 慢的正常用户挡在门外。
+    return;
+  }
   // 环回放行:本机中转(one-api / new-api / claude 自带的回环代理)是合法场景,
   // server 打环回只到达用户自己机器,不构成内网探测面;且编辑态强制 baseURL 与存储
   // key 同源,环回也骗不出已存密钥。私网/链路本地(真 SSRF 目标)仍拒绝。
   const isLoopback = (ip) => /^127\./.test(ip) || ip === '::1' || /^::ffff:127\./i.test(ip);
   if (addrs.length && addrs.every((a) => isLoopback(a.address))) return;
+  // ⚠️ 198.18.0.0/15 刻意【不】算私网:它是 RFC2544 基准测试网段,而 Clash TUN 增强模式
+  // 拿它做 fake-IP,本机所有走代理的域名都解析成 198.18.x.x。把它算私网会让装了 TUN
+  // 代理的用户连 provider 都切不了。真实内网不会用这个段。
   const isPrivate = (ip) => {
     if (/^127\.|^0\.|^10\.|^169\.254\.|^192\.168\.|^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./.test(ip)) return true;
     if (/^172\.(1[6-9]|2\d|3[01])\./.test(ip)) return true;
