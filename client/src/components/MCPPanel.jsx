@@ -5,6 +5,7 @@ import { BUILTIN_PLUGINS } from '../utils/builtinPlugins.js';
 import { findBuiltinMcp } from '../utils/builtinMcpServers.js';
 import { McpForm } from './McpForm.jsx';
 import { confirmDialog } from '../utils/confirmDialog.jsx';
+import { TOOL_TABS, readToolTab, writeToolTab } from '../utils/toolTabs.js';
 
 // /api/mcp/:name/ping 结果 → 展示文案(PingButton 与「添加后自动探测」共用)。
 // 失败时优先展示真实子进程 stderr(后端 spawn 抓的),这才是用户要看的"为什么连不上"。
@@ -99,6 +100,9 @@ export function MCPPanel() {
   const [restartHint, setRestartHint] = useState(false); // 增删改后提示生效时机
   // 添加后自动探测:null | { name, busy:true } | { name, detail }(失败详情,含子进程 stderr)
   const [probe, setProbe] = useState(null);
+  // r16-5:三块改选项卡(照搬主题弹层那套),默认 MCP 服务器;选择记本设备。
+  const [tab, setTabState] = useState(() => readToolTab());
+  const setTab = (id) => { setTabState(id); writeToolTab(id); };
   const mounted = useRef(true);
 
   // 新添加的 server 自动 ping 一次:失败立刻把真实原因(stderr)摆出来,不用等用户手动点测试。
@@ -385,6 +389,7 @@ export function MCPPanel() {
           <RefreshCw size={12} className={loading ? 'animate-spin' : ''} />刷新
         </button>
       </div>
+      {/* ── r16-5 选项卡条(与主题弹层 App.jsx:432 逐字同款)──────────────── */}
       {restartHint && (
         <div className="flex items-start gap-2 text-[11px] text-amber-700 bg-amber-500/10 border border-amber-500/30 rounded-lg px-3 py-2">
           <span className="flex-1">配置已保存到 claude code,将在每个会话的<b>下条消息</b>自动生效,无需重启会话。</span>
@@ -406,7 +411,26 @@ export function MCPPanel() {
           <pre className="text-[10px] text-ink-soft font-mono whitespace-pre-wrap break-all leading-snug max-h-40 overflow-auto">{probe.detail}</pre>
         </div>
       )}
-      {/* MCP Servers */}
+
+      {/* r16-5b(判官建议1):页签条放在两条全局横幅之下。横幅(重启提示/探测结果)对三页
+          都成立,夹在页签上方会被误读成只属于当前页。 */}
+      {/* r16-5b(判官建议3):负边距跟随本面板容器的 px-4(主题弹层是 px-1),否则下划线不与面板边缘齐平 */}
+      <div role="tablist" aria-label="工具设置分类" className="flex items-center gap-0.5 border-b border-canvas-deep -mx-4 px-4">
+        {TOOL_TABS.map((t) => (
+          <button
+            key={t.id}
+            role="tab"
+            aria-selected={tab === t.id}
+            onClick={() => setTab(t.id)}
+            className={`px-2.5 py-1.5 text-[11px] font-body transition-colors border-b-2 -mb-px ${
+              tab === t.id ? 'border-accent text-ink font-medium' : 'border-transparent text-ink-muted hover:text-ink'}`}
+          >
+            {t.label}
+          </button>
+        ))}
+      </div>
+      {/* MCP Servers(r16-5:整块进「MCP 服务器」页,块内一行未动) */}
+      {tab === 'mcp' && (
       <div>
         <h3 className="text-[10px] font-medium uppercase tracking-widest text-ink-faint font-body mb-3 flex items-center gap-1.5">
           <Server size={11} />
@@ -525,8 +549,10 @@ export function MCPPanel() {
           </div>
         )}
       </div>
+      )}
 
-      {/* Plugins */}
+      {/* Plugins(r16-5:整块进「插件」页,块内一行未动) */}
+      {tab === 'plugins' && (
       <div>
         <h3 className="text-[10px] font-medium uppercase tracking-widest text-ink-faint font-body mb-3 flex items-center gap-1.5">
           <Package size={11} />
@@ -622,9 +648,11 @@ export function MCPPanel() {
           </div>
         )}
       </div>
+      )}
 
-      {/* External */}
-      {external.length > 0 && (
+      {/* External(r16-5:整块进「外部项目」页,块内一行未动。原来是空就整块不渲染,
+          分页后那样会让这一页全白 —— 故补一句空态,与另外两页一致) */}
+      {tab === 'external' && (external.length > 0 ? (
         <div>
           <h3 className="text-[10px] font-medium uppercase tracking-widest text-ink-faint font-body mb-3 flex items-center gap-1.5">
             <FolderOpen size={11} />
@@ -649,7 +677,17 @@ export function MCPPanel() {
             ))}
           </div>
         </div>
-      )}
+      ) : (
+        <div>
+          <h3 className="text-[10px] font-medium uppercase tracking-widest text-ink-faint font-body mb-3 flex items-center gap-1.5">
+            <FolderOpen size={11} />
+            外部 MCP 项目
+          </h3>
+          <div className="text-xs text-ink-faint font-body py-3 text-center bg-canvas-warm border border-canvas-deep rounded-lg">
+            没有检测到外部 MCP 项目
+          </div>
+        </div>
+      ))}
 
       {form && (
         <McpForm
