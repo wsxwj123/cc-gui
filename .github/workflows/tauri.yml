@@ -81,6 +81,9 @@ jobs:
           cat > /tmp/quarantine-readme.txt <<'TXT'
           CC-GUI 安装步骤
 
+          (你能读到这份说明,说明 dmg 已经挂载成功了。若之前双击 dmg 报「已损坏」,
+           那是 dmg 本身的隔离标记,解法是先对 dmg 文件执行同样的 xattr 命令。)
+
           1. 把 CC-GUI 拖进「应用程序」文件夹。
           2. 打开「终端」(启动台搜索 Terminal),粘贴执行下面这行命令(无需 sudo):
 
@@ -141,13 +144,21 @@ jobs:
           cat > notes.md <<'EOF'
           未签名安装包,首次打开需手动放行。当前安装包会调用本机 Node.js 启动内置后端,运行机器需已安装 Node.js 20+ 和 Claude Code CLI。
 
-          - **macOS**:仅支持 Apple Silicon(M 系列芯片)。打开 `.dmg`,把 **CC-GUI** 拖进「应用程序」,然后在「终端」执行下面这行命令(无需 sudo),之后即可正常双击打开 app:
+          - **macOS**:仅支持 Apple Silicon(M 系列芯片)。**下载的 `.dmg` 本身也带隔离标记,直接双击会报「已损坏」**,所以要分两步:
+
+            **第一步**——先给 dmg 解除隔离(把路径换成你的实际下载位置),然后即可双击挂载、把 **CC-GUI** 拖进「应用程序」:
+
+            ```
+            xattr -dr com.apple.quarantine ~/Downloads/CC-GUI_*.dmg
+            ```
+
+            **第二步**——再给装好的 app 解除隔离,之后即可正常双击打开:
 
             ```
             xattr -dr com.apple.quarantine "/Applications/CC-GUI.app"
             ```
 
-            原因:本 app 未做 Apple 付费公证(notarization),macOS 给下载的未公证 app 加了隔离标记并阻止打开;该命令仅移除此标记。dmg 内附「使用说明」文本可随时查看此命令(macOS 15 起未公证脚本连右键打开都不放行,故不再提供双击脚本)。
+            原因:本 app 未做 Apple 付费公证(notarization),macOS 给下载的未公证内容加隔离标记并阻止打开;上述命令仅移除该标记,不修改任何内容。两条都不需要 sudo。macOS 15 起未公证脚本连右键打开都不放行,故不提供双击脚本。
           - **Windows**:`.exe`(NSIS)或 `.msi` 均可;SmartScreen 提示时点「更多信息 → 仍要运行」。
           - 若双击后无窗口,查看 `~/.claude-gui/tauri-startup.log` 获取启动错误。
           EOF
