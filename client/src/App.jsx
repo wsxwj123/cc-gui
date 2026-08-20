@@ -2174,7 +2174,11 @@ export function GitInitBanner({ cwd }) {
           setStatus('done');
         }
       } else {
-        confirmDialog('git init 失败：' + (data.error || r.status));
+        // r17-8:服务端现在把「超时 / git 没装 / 系统拒绝访问」分开报,并带一条能照着做的
+        // hint。data.error 本身已是完整句子,别再套一层"git init 失败："前缀。
+        confirmDialog(data.error
+          ? data.error + (data.hint ? '\n\n' + data.hint : '')
+          : 'git init 失败：HTTP ' + r.status);
         if (!mine()) return;
         setStatus(from);
       }

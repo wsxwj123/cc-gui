@@ -17,6 +17,39 @@ function safeCwd(p) {
 }
 
 /**
+ * r17-8:`git init` 失败形态判定(纯函数,输入是 execFile 的错误对象)。
+ * /git/status 早就把「超时 / git 没装 / 系统拒绝访问」分开报了,/git/init 却只把
+ * err.message 原样丢回前端 —— 实测这三种失败的 message 都是同一句
+ * "Command failed: git -C <path> init",killed 标志与 stderr 里的真正原因全被丢掉。
+ * 用户实测(另一台 Mac):点初始化转十几秒、没有任何能照着做的提示;刷新后横幅依旧
+ * 让他初始化(被掐断的 git init 留下半成品 .git,rev-parse 就说 not a git repository),
+ * 于是无限循环。这里按形态给出能照着做的下一步。
+ */
+export function classifyGitInitError(err) {
+  if (err?.code === 'ENOENT') {
+    return { code: 'git-missing', error: '未检测到 git，无法初始化仓库。', hint: '在 通用 → 环境 里安装 git，或到 git-scm.com 下载后重试。' };
+  }
+  const stderr = String(err?.stderr || '').split('\n')[0].slice(0, 200);
+  if (/operation not permitted|permission denied|不允许的操作/i.test(stderr)) {
+    return {
+      code: 'no-disk-access',
+      error: '初始化 git 仓库失败：系统拒绝访问该文件夹。',
+      hint: '打开「系统设置 → 隐私与安全性 → 完全磁盘访问」，把 cc-gui 的开关关掉再打开（或重新添加），重启 GUI 后重试。',
+      detail: stderr,
+    };
+  }
+  if (err?.killed) {
+    // 超时不直接断言是权限问题(也可能是网络盘/外接盘),但把最常见的原因写在前面。
+    return {
+      code: 'git-init-timeout',
+      error: 'git init 超时（8 秒内未完成）。',
+      hint: '最常见的原因是系统未授予磁盘访问权限、git 进程被挡住：到「系统设置 → 隐私与安全性 → 完全磁盘访问」把 cc-gui 关掉再打开，重启 GUI 后重试。若该文件夹在网络盘或外接磁盘上，请确认它已挂载。',
+    };
+  }
+  return { code: 'git-init-failed', error: 'git init 失败：' + (stderr || err?.message || '未知错误') };
+}
+
+/**
  * GET /api/git/status?cwd=... → { isRepo, root, branch, hasChanges, hasCommit }
  * `root` = 仓库根(`rev-parse --show-toplevel`)。cwd 是子文件夹时它与 cwd 不同,
  * 前端据此告诉用户"这个零提交仓库其实在上层哪个目录"。
@@ -91,7 +124,11 @@ router.post('/git/init', async (req, res) => {
     } catch {}
 
     if (!already) {
-      await execFileP('git', ['-C', cwd, 'init'], { timeout: 8000 });
+      try {
+        await execFileP('git', ['-C', cwd, 'init'], { timeout: 8000 });
+      } catch (err) {
+        return res.status(400).json(classifyGitInitError(err));
+      }
     }
 
     // Baseline commit phase. `add` may fail when the working tree contains
