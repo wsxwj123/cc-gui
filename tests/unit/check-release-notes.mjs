@@ -204,7 +204,12 @@ ok(eff.includes('await markSeen(ver)'), 't6: markSeen 在 setReleaseNotes 之前
     ok(idx.some((x) => x.version === v), `t10: index 含 ${v}`);
     ok(existsSync(join(DEFAULT_OUT_DIR, `${v}.json`)), `t10: ${v} 的单版正文已生成`);
   }
-  eq(idx[0].version, '0.2.313', 't10: index 首项是最新版');
+  // r17-2c:别写死版本号 —— 每次发版都会红。对着 package.json 断言,顺带钉住
+  // "当前版本必须排在 index 首位"(弹窗默认展示的就是首项)。
+  {
+    const pkgV = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8')).version;
+    eq(idx[0].version, pkgV, `t10: index 首项必须是当前版本 ${pkgV}`);
+  }
 }
 
 // t11 r17-2b(判官流程提醒):发版脚本只 bump package.json/tauri.conf.json,不写 CHANGELOG。
