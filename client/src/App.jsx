@@ -1761,7 +1761,7 @@ function HomeState({ tabIndex = 0 }) {
   const hiddenProjectsList = useStore((s) => s.hiddenProjects);
   useEffect(() => {
     fetch('/api/prefs/hidden-projects').then((r) => r.json())
-      .then((d) => useStore.getState().applyHiddenProjects(Array.isArray(d?.hidden) ? d.hidden : []))
+      .then((d) => useStore.getState().applyHiddenProjects([...readHiddenHashes(d)])) // 解析仍走共用纯函数
       .catch(() => {});
   }, []);
   const hiddenHashes = useMemo(() => new Set(hiddenProjectsList), [hiddenProjectsList]);
@@ -1842,7 +1842,7 @@ function HomeState({ tabIndex = 0 }) {
         {/* r26-B1:上次没发出去的排队消息(孤儿 draft 队列)。填入=进当前 Home
             输入框(本地 setText,不回流 messageQueue);丢弃=从孤儿表摘除。 */}
         {orphanEntries.length > 0 && (
-          <div data-cgui="orphan-draft-banner" className="w-full mb-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-[12px] font-body text-amber-900">
+          <div className="w-full mb-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-[12px] font-body text-amber-900">
             <div className="flex items-center gap-2 mb-1">
               <span className="flex-1 min-w-0">上次有 {orphanEntries.length} 条未发出的排队消息</span>
               <button

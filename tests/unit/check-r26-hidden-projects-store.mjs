@@ -41,7 +41,7 @@ const homeStart = app.indexOf('function HomeState(');
 const home = app.slice(homeStart, app.indexOf('function EmptyState', homeStart));
 assert.match(home, /useStore\(\(s\) => s\.hiddenProjects\)/, 'I2: Home 必须读 store.hiddenProjects');
 assert.doesNotMatch(home, /useState\(\(\) => new Set\(\)\)/, 'I2: Home 局部 useState 的 hiddenHashes 已退役');
-assert.match(home, /applyHiddenProjects\(Array\.isArray\(d\?\.hidden\)/, 'I2: Home 挂载拉 GET 水合 store(不私有)');
+assert.match(home, /applyHiddenProjects\(\[\.\.\.readHiddenHashes\(d\)\]\)/, 'I2: Home 挂载拉 GET 水合 store(解析走共用纯函数 readHiddenHashes,不私有)');
 assert.match(home, /new Set\(hiddenProjectsList\)/, 'I2: hiddenHashes 由 store 派生');
 
 console.log('PASS check-r26-hidden-projects-store');

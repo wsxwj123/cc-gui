@@ -56,7 +56,7 @@ const text = (parts) => parts.map((p) => p.text).join('');
 
   const app = readFileSync(new URL('../../client/src/App.jsx', import.meta.url), 'utf8');
   assert.match(app, /hydrateDisplayName\(\)/, 't2: 启动/重连水合');
-  assert.match(app, /homeGreetingParts\(new Date\(\)\.getHours\(\), custom\?\.greeting, displayName\)/, 't2: Home 问候接称呼+皮肤模板');
+  assert.match(app, /homeGreetingParts\(hour, custom\?\.greeting, displayName\)/, 't2: Home 问候接称呼+皮肤模板(r26-D13 起 hour 由 60s 定时器刷新)');
   assert.match(app, /from-accent to-accent-hover bg-clip-text/, 't2: 称呼段用主题 accent token 渐变(不硬编码色值)');
 
   const sp = readFileSync(new URL('../../client/src/components/SettingsPanel.jsx', import.meta.url), 'utf8');

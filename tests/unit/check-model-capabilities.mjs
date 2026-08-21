@@ -388,24 +388,30 @@ const runIsolated = (home) => JSON.parse(execFileSync(process.execPath, ['-e', C
 // t13 r15-2:ChatInput 回落早退放宽的接线守卫 —— 能力表变化那一刻必须能触发。
 // 原早退是"模型没变就 return",于是存量会话升级后:effort 存着 xhigh、模型没动、
 // 新能力表判定只到 high → 按钮仍显示「极高」而 App.jsx 发送前已把它静默摘空。
+// r26-F3 换锚:解算本体抽成 effortCaps.js 的 useEffortFallback(手机端共用),
+// 钉子同步移到钩子源码 + ChatInput 的挂载接线。
 {
   const ci = readFileSync(new URL('../../client/src/components/ChatInput.jsx', import.meta.url), 'utf8');
-  assert.match(ci, /if \(!modelChanged && effortAllowed\(caps, effort \|\| ''\)\) return;/,
+  const ec = readFileSync(new URL('../../client/src/utils/effortCaps.js', import.meta.url), 'utf8');
+  assert.match(ci, /useEffortFallback\(\{/, 't13: EffortSelector 挂载共用回落钩子(r26-F3 抽取)');
+  assert.match(ci, /memoryKey: effortMemKey/, 't13: per-model 记忆键注入钩子(F6 键形)');
+  assert.match(ec, /if \(!modelChanged && effortAllowed\(caps, effort \|\| ''\)\) return;/,
     't13: 早退放宽 —— 模型没变但当前档已不合法时仍跑回落');
   // r15-3:上一版只堵住三条触发路径里的一条。permKey 变化(切窗格 / draft→真 sid 迁移)
   // 原本直接 return,跨设备同步(applyRemoteSessionSync 改写 effortBySession)则三个旧
   // deps 全不动、effect 根本不跑 —— 这两类下按钮照样显示「极高」而发送前被静默摘空。
-  assert.match(ci, /\}, \[permKey, bareModelId, modelEffortMeta, effort\]\);/,
-    't13: deps = [permKey, bareModelId, modelEffortMeta, effort] —— effort 覆盖"档位被外部改成非法值"(跨设备同步)');
-  assert.match(ci, /const paneChanged = prev\.permKey !== permKey;/,
+  assert.match(ec, /\}, \[permKey, bareModelId, meta, effort, memoryKey\]\);/,
+    't13: deps 含 effort —— 覆盖"档位被外部改成非法值"(跨设备同步);meta=能力表,memoryKey=记忆键');
+  assert.match(ec, /const paneChanged = prev\.permKey !== permKey;/,
     't13: permKey 变化拆成 paneChanged(只挡记忆,不再挡回落)');
-  assert.match(ci, /const modelChanged = !paneChanged && !!prev\.model && prev\.model !== bareModelId;/,
+  assert.match(ec, /const modelChanged = !paneChanged && !!prev\.model && prev\.model !== bareModelId;/,
     't13: 换窗格/会话时两次 model 不可比,不算换模型(记忆不参与)');
-  assert.doesNotMatch(ci.slice(ci.indexOf('const lastModelRef'), ci.indexOf('}, [permKey, bareModelId, modelEffortMeta, effort]')),
+  assert.doesNotMatch(ec.slice(ec.indexOf('const lastModelRef'), ec.indexOf('}, [permKey, bareModelId, meta, effort, memoryKey]')),
     /prev\.permKey !== permKey\) return;/, 't13: 切窗格不再整段早退(否则新窗格的非法档没人拉回)');
-  assert.match(ci, /if \(modelChanged\) \{ try \{ remembered = localStorage\.getItem/,
+  assert.match(ec, /if \(modelChanged && memoryKey\) \{ try \{ remembered = localStorage\.getItem/,
     't13: per-model 记忆只在真换模型时参与(能力表/同步路径只做"拉回合法档")');
-  assert.match(ci, /setEffortFor\(permKey, r\.effort\)/, 't13: 写入只针对当前 permKey(不动别的会话)');
+  assert.match(ci, /setEffort: \(id\) => useStore\.getState\(\)\.setEffortFor\(permKey, id\)/,
+    't13: 写入只针对当前 permKey(不动别的会话)');
   // 行为侧:升级瞬间的解算结果(xhigh 不在 gpt-5 家族档位里 → 回落最高可用档 high)
   const { effortCapsFor, effortAllowed, resolveEffortOnModelChange } = await import('../../client/src/utils/effortCaps.js');
   const caps = effortCapsFor({ 'gpt-5.2': catalogPrefillEntry('gpt-5.2') }, 'gpt-5.2');
