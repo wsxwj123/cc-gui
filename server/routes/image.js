@@ -214,10 +214,14 @@ async function saveImage(dir, baseName, buf) {
  */
 router.post('/image/generate', async (req, res) => {
   const started = Date.now();
+  // r26-J3:兜底 catch 也要剥 key —— provider 在 try 里才查到,先把 key 提到外层作用域,
+  // 否则 catch 里 redactKey(msg, null) 只能靠形态兜底,明文 key 原样回显。
+  let apiKeyForRedact = '';
   try {
     const { providerId, prompt } = req.body || {};
     const provider = (await readImageProviders()).find((p) => p.id === providerId);
     if (!provider) return res.status(404).json({ error: '未找到该生图 provider' });
+    apiKeyForRedact = provider.apiKey || '';
     const pathErr = await checkSavePath(provider.savePath);
     if (pathErr) return res.status(400).json({ error: pathErr });
 
@@ -365,8 +369,9 @@ router.post('/image/generate', async (req, res) => {
       tookMs: Date.now() - started,
     });
   } catch (err) {
-    // 兜底也要剥 key:异常消息可能带上 URL/头部回显。
-    res.status(500).json({ error: redactKey(err.message, null) });
+    // 兜底也要剥 key:异常消息可能带上 URL/头部回显。r26-J3:传真实 apiKey(字面替换),
+    // 不再只靠 Bearer/api_key 形态兜底。
+    res.status(500).json({ error: redactKey(err.message, apiKeyForRedact) });
   }
 });
 
