@@ -9,9 +9,11 @@ import { Palette, Copy, Trash2, X, Sparkles, Check } from './Icon.jsx';
 import { confirmDialog } from '../utils/confirmDialog.jsx';
 import { copyText } from '../utils/clipboard.js';
 import {
-  BUILTIN_SKINS, activateSkin, deactivateSkin, getSkinState, subscribeSkin, getSkinVersion,
+  activateSkin, deactivateSkin, getSkinState, subscribeSkin, getSkinVersion,
   devSkinsEnabled, setDevSkinsEnabled, SKIN_TOKENS_CLIENT, SKIN_TOKENS_REJECTED_CLIENT,
 } from '../utils/skins.js';
+// r28:内置 gallery(注册表自注册进 BUILTIN_SKINS;面板直接读 BUILTIN_GALLERY 渲染)。
+import { BUILTIN_GALLERY } from '../builtin-skins/registry.js';
 import { ICON_SEMANTICS } from '../utils/iconOverrides.js';
 import { SKIN_ANCHORS } from '../utils/skinAnchors.js';
 import { buildSkinPrompt } from '../utils/skinPrompt.js';
@@ -32,8 +34,8 @@ async function ensureDevSkins() {
 }
 
 function SkinCard({ row, active, onChanged }) {
-  // r26-D9:isBuiltin(row.source==='builtin')死代码已删——服务端 source 只会是 'user',
-  // 客户端 BUILTIN_SKINS 已空,isBuiltin 恒 false(原「示例」后缀拼接与删按钮门控是死分支)。
+  // r28:内置皮肤不再混入本网格(独立 gallery 区块,见 BuiltinGallery),这里只渲染
+  // 服务端用户皮肤,删除按钮安全(DELETE /api/skins/<id> 不会打到 builtin- id)。
   const apply = async (tryOn) => {
     if (row.manifest?.tier === 2 && !(await ensureDevSkins())) return;
     await activateSkin(row, { tryOn });
@@ -72,6 +74,38 @@ function swatchOf(row) {
   const a = m.light?.vars?.['--color-accent'] || m.dark?.vars?.['--color-accent'] || m.shared?.vars?.['--color-accent'] || 'var(--color-accent)';
   const c = m.light?.vars?.['--color-canvas'] || m.dark?.vars?.['--color-canvas'] || 'var(--color-canvas-warm)';
   return `linear-gradient(135deg, ${c} 55%, ${a} 55%)`;
+}
+
+// r28:内置 gallery 卡片 —— 名称 + tagline/description + 应用/试穿,无删除(不在服务端库)。
+// 三套全是 T2,遵守「开发者皮肤(本机)」总开关:关闭时只显示提示,不提供应用/试穿。
+function BuiltinSkinCard({ row, active, devOn }) {
+  const m = row.manifest || {};
+  const tagline = m.tagline || m.description || '';
+  const apply = async (tryOn) => {
+    if (!devSkinsEnabled()) return; // 双保险:按钮已按 devOn 门控,这里再挡一次直调
+    await activateSkin(row, { tryOn });
+  };
+  return (
+    <div className={`rounded-panel border p-2 flex flex-col gap-1.5 ${active ? 'border-accent/60 bg-accent-subtle/40' : 'border-canvas-deep bg-canvas-warm/50'}`}>
+      <div className="flex items-center gap-1.5 min-w-0">
+        <span className="w-7 h-7 rounded shrink-0 border border-canvas-deep" style={{ background: swatchOf(row) }} />
+        <span className="text-[11.5px] text-ink font-body truncate flex-1" title={row.name}>{row.name}</span>
+        {active && <Check size={12} className="text-accent shrink-0" />}
+      </div>
+      {tagline && <div className="text-[10.5px] text-ink-faint font-body leading-snug line-clamp-2" title={tagline}>{tagline}</div>}
+      <div className="flex items-center gap-1 text-[10.5px] font-body">
+        <span className="text-ink-faint mr-auto">T2 内置</span>
+        {devOn ? (
+          <>
+            <button type="button" onClick={() => apply(true)} className="px-1.5 py-0.5 rounded hover:bg-canvas-deep/60 text-ink-soft" title="试穿(不保存,刷新即回)">试穿</button>
+            <button type="button" onClick={() => apply(false)} className="px-1.5 py-0.5 rounded hover:bg-canvas-deep/60 text-accent" title="应用并记住">应用</button>
+          </>
+        ) : (
+          <span className="text-ink-ghost">开启下方开发者皮肤开关后可应用</span>
+        )}
+      </div>
+    </div>
+  );
 }
 
 // r26-D10(契约 C-D10):dsw 框自动识别——粘贴内容 JSON.parse 后 format === 'cgui-skin/1'
@@ -279,7 +313,7 @@ export function SkinSection() {
     setDevOn(devSkinsEnabled());
   };
 
-  const rows = [...installed, ...BUILTIN_SKINS];
+  const rows = installed; // r28:内置皮肤不再混入此网格,独立 gallery 区块见下
   return (
     <div className="space-y-1.5" data-cgui-skin-section>
       <div className="flex items-center gap-2">
@@ -290,6 +324,17 @@ export function SkinSection() {
         )}
         <button type="button" onClick={() => setManagerOpen(true)} className="text-[10.5px] text-accent font-body">导入 / 生成器…</button>
       </div>
+      {/* r28:内置 gallery 区(服务端列表之外,与导入的用户皮肤同屏共存) */}
+      {BUILTIN_GALLERY.length > 0 && (
+        <div className="space-y-1.5" data-cgui-builtin-gallery>
+          <div className="text-[10.5px] text-ink-faint font-body">内置皮肤 —— 移植自 dsh gallery 的 T2 代码皮肤</div>
+          <div className="grid grid-cols-2 gap-1.5">
+            {BUILTIN_GALLERY.map((row) => (
+              <BuiltinSkinCard key={row.id} row={row} active={activeId === row.id} devOn={devOn} />
+            ))}
+          </div>
+        </div>
+      )}
       <div className="grid grid-cols-2 gap-1.5">
         {rows.map((row) => (
           <SkinCard key={row.id} row={row} active={activeId === row.id}

@@ -1,0 +1,14 @@
+/* Windows XP (Luna) — 可访问性修正（dsh xp a11y 同源结论）。
+ * 原审计：亮态主按钮 fill #316ac5 白字 = 5.25、hover #2558a8 = 6.91，达标；
+ * 暗态 fill #316ac5 = 5.25 达标，但暗态 hover #3d7ad8 对白字 = 4.22 < 4.5
+ * → skin.css 暗态发送钮 hover 下端已压到 #376ec2（≈5.04），本文件再钉 accent-hover。
+ * 暗态 #6da8e8 系仅作文字/描边高亮（深底对比充足），填充按钮一律走 #316ac5/#376ec2 系。 */
+body[data-cgui-xp] {
+  --color-accent: #316ac5;
+  --color-accent-hover: #2558a8;
+}
+:root[data-theme="dark"] body[data-cgui-xp],
+:root[data-theme="auto"]:where([data-theme-system="dark"]) body[data-cgui-xp] {
+  --color-accent: #6da8e8;
+  --color-accent-hover: #7fb0ec;
+}

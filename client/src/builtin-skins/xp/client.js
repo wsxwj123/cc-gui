@@ -1,0 +1,152 @@
+// Windows XP (Luna) — cgui T2 客户端脚本（dsh appearance-gallery xp apply() 移植）。
+// 职责：body 挂 data-cgui-xp 作用域标记、注入 Luna 标题栏/米色状态栏/侧栏任务栏绿色
+// 「开始」按钮/四色旗 favicon/窗口标题、给资源管理器选中行打 .cgui-xp-current 标记；
+// 通过 window.__cguiSkinDispose 注册完整卸载器（三重卸载第一重）。
+(function () {
+  var body = document.body;
+  var html = document.documentElement;
+  var originalTitle = document.title;
+  var SKIN_TITLE = 'Windows XP · Claude GUI 在线';
+
+  // 四色 Windows 旗（dsh xp 原版内联 SVG，无外部素材）
+  var FLAG_SVG = [
+    '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">',
+    '<rect x="0.5" y="0.5" width="15" height="15" fill="#f0f6fd"/>',
+    '<rect x="1.5" y="1.5" width="6.5" height="6.5" fill="#e33e2b"/>',
+    '<rect x="8" y="1.5" width="6.5" height="6.5" fill="#4baf4d"/>',
+    '<rect x="1.5" y="8" width="6.5" height="6.5" fill="#2d6fd6"/>',
+    '<rect x="8" y="8" width="6.5" height="6.5" fill="#f4b400"/>',
+    '</svg>'
+  ].join('');
+
+  body.setAttribute('data-cgui-xp', '');
+
+  // 悬浮窗口尺寸：按 App 官方口径（innerHeight/zoom 的 zoom 不变量 px）写
+  // body 作用域的 --app-h/--app-w，扣掉桌面边距(上30+下26=56、左右10+10=20)。
+  // 跟踪 resize 与 html style 上的 zoom 变化（字体档切换）；卸载器全清。
+  function fitDesk() {
+    var z = parseFloat(html.style.zoom) || 1;
+    body.style.setProperty('--app-h', (window.innerHeight / z - 56) + 'px');
+    body.style.setProperty('--app-w', (window.innerWidth / z - 20) + 'px');
+  }
+  fitDesk();
+  window.addEventListener('resize', fitDesk);
+  var deskObserver = new MutationObserver(fitDesk);
+  deskObserver.observe(html, { attributes: true, attributeFilter: ['style'] });
+
+  // Luna 标题栏：四色旗 + 标题 + 装饰性 –□×
+  var titlebar = document.createElement('div');
+  titlebar.className = 'cgui-xp-titlebar';
+  var icon = document.createElement('span');
+  icon.className = 'cgui-xp-titlebar-icon';
+  icon.innerHTML = FLAG_SVG;
+  var title = document.createElement('span');
+  title.className = 'cgui-xp-titlebar-title';
+  title.textContent = SKIN_TITLE;
+  titlebar.appendChild(icon);
+  titlebar.appendChild(title);
+  var glyphs = ['–', '□', '×'];
+  for (var i = 0; i < glyphs.length; i++) {
+    var btn = document.createElement('span');
+    btn.className = glyphs[i] === '×' ? 'cgui-xp-tb-close' : 'cgui-xp-tb-btn';
+    btn.setAttribute('aria-hidden', 'true');
+    btn.textContent = glyphs[i];
+    titlebar.appendChild(btn);
+  }
+
+  // 米色状态栏：（弹性）| 就绪 · Claude GUI 在线 | 大写 · 数字 · 滚动（凹陷键位格）
+  var statusbar = document.createElement('div');
+  statusbar.className = 'cgui-xp-statusbar';
+  var spacer = document.createElement('span');
+  spacer.className = 'cgui-xp-statusbar-spacer';
+  statusbar.appendChild(spacer);
+  var cells = [
+    { text: '就绪', key: false },
+    { text: 'Claude GUI 在线', key: false },
+    { text: '大写', key: true },
+    { text: '数字', key: true },
+    { text: '滚动', key: true }
+  ];
+  for (var j = 0; j < cells.length; j++) {
+    var cell = document.createElement('span');
+    cell.className = cells[j].key ? 'cgui-xp-statusbar-key' : 'cgui-xp-statusbar-cell';
+    cell.textContent = cells[j].text;
+    statusbar.appendChild(cell);
+  }
+
+  // 资源管理器选中行：cgui 会话行以 .active 表选中（无 aria-selected），
+  // 由观察器同步成皮肤自有标记 .cgui-xp-current 供 skin.css 上深蓝底白字。
+  function syncCurrentRow() {
+    var rows = document.querySelectorAll('[data-cgui="session-row"]');
+    for (var k = 0; k < rows.length; k++) {
+      if (rows[k].classList.contains('active')) rows[k].classList.add('cgui-xp-current');
+      else rows[k].classList.remove('cgui-xp-current');
+    }
+  }
+
+  // 侧栏任务栏：找到 [data-cgui="sidebar"] 就在其尾部挂任务栏条 + 绿色「开始」按钮
+  // （点击转发到设置入口 [data-cgui="settings-btn"]）；侧栏随路由重建时自动重挂。
+  var sidebarObserver = null;
+  var observedSidebar = null;
+  function installTaskbar() {
+    var sidebar = document.querySelector('[data-cgui="sidebar"]');
+    if (sidebar && !sidebar.querySelector('.cgui-xp-taskbar')) {
+      var bar = document.createElement('div');
+      bar.className = 'cgui-xp-taskbar';
+      var start = document.createElement('button');
+      start.type = 'button';
+      start.className = 'cgui-xp-start';
+      var startIcon = document.createElement('span');
+      startIcon.className = 'cgui-xp-start-icon';
+      startIcon.innerHTML = FLAG_SVG;
+      start.appendChild(startIcon);
+      start.appendChild(document.createTextNode('开始'));
+      start.addEventListener('click', function () {
+        var settings = document.querySelector('[data-cgui="settings-btn"]');
+        if (settings) settings.click();
+      });
+      bar.appendChild(start);
+      sidebar.appendChild(bar);
+    }
+    if (sidebar !== observedSidebar) {
+      if (sidebarObserver) { sidebarObserver.disconnect(); sidebarObserver = null; }
+      observedSidebar = sidebar;
+      if (sidebar) {
+        sidebarObserver = new MutationObserver(syncCurrentRow);
+        sidebarObserver.observe(sidebar, { childList: true, subtree: true, attributes: true, attributeFilter: ['class'] });
+      }
+    }
+    syncCurrentRow();
+  }
+  var rootObserver = new MutationObserver(installTaskbar);
+  rootObserver.observe(body, { childList: true, subtree: true });
+  installTaskbar();
+
+  // 四色旗 favicon + 窗口标题
+  var favicon = document.createElement('link');
+  favicon.rel = 'icon';
+  favicon.href = 'data:image/svg+xml;utf8,' + encodeURIComponent(FLAG_SVG);
+  document.head.appendChild(favicon);
+  document.title = SKIN_TITLE;
+
+  body.appendChild(titlebar);
+  body.appendChild(statusbar);
+
+  window.__cguiSkinDispose = function () {
+    rootObserver.disconnect();
+    if (sidebarObserver) sidebarObserver.disconnect();
+    deskObserver.disconnect();
+    window.removeEventListener('resize', fitDesk);
+    body.style.removeProperty('--app-h');
+    body.style.removeProperty('--app-w');
+    body.removeAttribute('data-cgui-xp');
+    titlebar.remove();
+    statusbar.remove();
+    favicon.remove();
+    var bars = document.querySelectorAll('.cgui-xp-taskbar');
+    for (var m = 0; m < bars.length; m++) bars[m].remove();
+    var marked = document.querySelectorAll('.cgui-xp-current');
+    for (var n = 0; n < marked.length; n++) marked[n].classList.remove('cgui-xp-current');
+    if (document.title === SKIN_TITLE) document.title = originalTitle;
+  };
+})();

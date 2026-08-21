@@ -1,0 +1,37 @@
+/* 鲸歌 Whale Song — 可访问性修正(dsh whale-song a11y 同源结论)。
+ * 原测:亮态主按钮白字 vs fill #4d8fd4 = 3.39、hover #5c9cdb 更低,未达 AA(4.5)。
+ * 修正:皮肤作用域内把 accent 压深 #3e74ac(白字 4.89)/hover #3373ba(4.88)——
+ * manifest 亮态 vars 保留原色供文字/描边高亮,本文件后注入同优先级再钉一遍作纵深;
+ * skin.css 的 send-btn 渐变下端已用压深色。暗态 accent #8ab4de 仅作暗底文字/描边
+ * (对比充足),填充按钮在 skin.css 用 #2f6fb8/#3f7cc6 系(白字对比达标)。
+ * 另:代码块底色半透明叠在背景画上对比不稳 → 实体化为不透明浅/深底(dsh 同项修正)。 */
+body[data-cgui-whale-song] {
+  --color-accent: #3e74ac;
+  --color-accent-hover: #3373ba;
+}
+:root[data-theme="dark"] body[data-cgui-whale-song],
+:root[data-theme="auto"]:where([data-theme-system="dark"]) body[data-cgui-whale-song] {
+  --color-accent: #8ab4de;
+  --color-accent-hover: #3970b2;
+}
+body[data-cgui-whale-song] pre {
+  background-color: #f4f8fd;
+}
+body[data-cgui-whale-song] code {
+  background-color: #e3ecf6;
+}
+body[data-cgui-whale-song] pre code {
+  background-color: transparent;
+}
+:root[data-theme="dark"] body[data-cgui-whale-song] pre,
+:root[data-theme="auto"]:where([data-theme-system="dark"]) body[data-cgui-whale-song] pre {
+  background-color: #0c1a3e;
+}
+:root[data-theme="dark"] body[data-cgui-whale-song] code,
+:root[data-theme="auto"]:where([data-theme-system="dark"]) body[data-cgui-whale-song] code {
+  background-color: #102147;
+}
+:root[data-theme="dark"] body[data-cgui-whale-song] pre code,
+:root[data-theme="auto"]:where([data-theme-system="dark"]) body[data-cgui-whale-song] pre code {
+  background-color: transparent;
+}
