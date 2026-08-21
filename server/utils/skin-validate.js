@@ -510,9 +510,14 @@ export function convertDswVars(input) {
 }
 
 // ── id 生成(slug + 6 位随机;CJK 退化回退 skin-;小写归一防 win 大小写不敏感撞名) ──
-export function skinIdFrom(name, rand) {
-  const slug = String(name || '').toLowerCase().normalize('NFKD')
+// r26-D6:slug 段算法抽成 slugOf 导出——skins-packs.js 按 slug 找同皮肤既有目录做
+// 覆盖式导入(同名=同一皮肤的语义声明,撞 slug 即互相覆盖,验收钉死该语义)。
+export function slugOf(name) {
+  return String(name || '').toLowerCase().normalize('NFKD')
     .replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40);
+}
+export function skinIdFrom(name, rand) {
+  const slug = slugOf(name);
   const suffix = String(rand || Math.random().toString(36).slice(2, 8)).toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 6) || 'r0';
   return (slug ? `${slug}-${suffix}` : `skin-${suffix}`);
 }
