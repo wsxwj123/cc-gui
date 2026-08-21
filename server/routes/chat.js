@@ -15,6 +15,7 @@ import { stripInheritedProviderEnv } from '../utils/provider-env.js';
 import { resolveClaude } from '../utils/claude-resolver.js';
 import { repairOfficialCompat } from '../utils/session-repair.js';
 import { contextTimeoutBudget } from '../utils/context-tokens.js';
+import { canonicalCwd } from '../utils/safe-path.js';
 import { broadcast, clients } from '../broadcast.js';
 
 // T2: 回合完成 WS 通知。前端切走会话时 SSE fetch 已被 abort(I4 渲染隔离的
@@ -2628,10 +2629,15 @@ function trustedContextMeta(sessionId) {
   for (const slot of activeProcesses.values()) {
     if (slot.sessionId !== sessionId || slot.exitCode !== null || slot.closing) continue;
     const cwd = typeof slot.cwd === 'string' ? slot.cwd : '';
+    // r26-B4:projectHash 由 canonicalCwd(slot.cwd) 派生而非原始字符串 —— CLI 落盘目录名
+    // 按解析后的真实路径编码,slot.cwd 可能是 symlink 别名形态(mac /tmp、win 大小写),
+    // 不归一则与客户端按真实路径算出的 projectHash 恒不等 → 永久 409。
+    const canonical = cwd ? canonicalCwd(cwd) : '';
     return {
       sessionId,
-      projectHash: cwd ? cwd.replace(/[^A-Za-z0-9]/g, '-') : '',
+      projectHash: canonical ? canonical.replace(/[^A-Za-z0-9]/g, '-') : '',
       cwd,
+      canonicalCwd: canonical,
       model: slot.currentModel || slot.model || null,
       slot,
     };
@@ -2644,8 +2650,12 @@ function trustedContextMeta(sessionId) {
 // meta.model 为 null——硬判等 = 徽章永久 409。model 只用于 spawn 回落的 --model 参数
 // (信客户端,MODEL_ARG_RE/safeModelArg 白名单仍拦注入)。projectHash/cwd 归属校验保留。
 export function contextHintsMatch(request, meta) {
+  // r26-B4:cwd 双侧归一化比对(canonicalCwd,见 safe-path.js)——symlink 别名/尾斜杠/
+  // win 大小写差异不再恒 409。归一化收敛不放宽:realpath 单射,不同目录归一后仍不等。
+  const reqCwd = request.cwd ? canonicalCwd(request.cwd) : '';
+  const metaCwd = meta.canonicalCwd || (meta.cwd ? canonicalCwd(meta.cwd) : '');
   return (!request.projectHash || request.projectHash === meta.projectHash)
-    && (!request.cwd || request.cwd === meta.cwd);
+    && (!reqCwd || reqCwd === metaCwd);
 }
 
 export function validContextPayload(payload) {
