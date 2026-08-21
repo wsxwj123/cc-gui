@@ -151,13 +151,27 @@ export function sortProjectRows(rows, { sortMode = 'recent', order = [], pinned 
   return [...pin, ...rest];
 }
 
+// r26-I4:平铺原来每条 `{ ...s, projectHash }` 现铺 —— watcher 每 600ms 刷新一次,
+// 每个会话对象都换新身份,下游 SessionItem 的 memo 全失效(整列表重渲)。这里用
+// WeakMap<原对象, 包装对象> 缓存:原对象引用没变就复用同一包装身份;mergeSessionList
+// 那层本来就保原对象身份(内容没变复用旧引用),两层接力后整条链身份稳定。
+// 注:一个会话对象只属于一个项目,WeakMap 键不带 projectHash 不会串。
+const flatWrapCache = new WeakMap();
+const wrapFlatRow = (s, projectHash) => {
+  let w = flatWrapCache.get(s);
+  if (!w || w.projectHash !== projectHash) {
+    w = { ...s, projectHash };
+    flatWrapCache.set(s, w);
+  }
+  return w;
+};
+
 /**
  * 单列表平铺(纯函数):全部已加载项目的会话跨项目合并,按 lastActivity 降序;
  * 每条带 projectHash(点击选中时反查项目)。归档会话不进平铺(与折叠树默认视图一致)。
  * r23-①:visibleHashes(可选,Set/数组)给定时只平铺可见项目的会话 —— sessionsByProject
  * 是"曾经加载过"的缓存,隐藏项目不会被清掉(toggleHidden 不清缓存、expandedProjects 还
  * 持久化在 localStorage、600ms watcher 继续刷),不过滤就等于隐藏对平铺模式无效。
- */
 export function flattenSessionRows(sessionsByProject, visibleHashes) {
   const visible = visibleHashes instanceof Set ? visibleHashes
     : (Array.isArray(visibleHashes) ? new Set(visibleHashes) : null); // 不传 = 不过滤(旧调用方语义不变)
@@ -165,7 +179,7 @@ export function flattenSessionRows(sessionsByProject, visibleHashes) {
   for (const [projectHash, sessions] of Object.entries(sessionsByProject || {})) {
     if (visible && !visible.has(projectHash)) continue;
     for (const s of sessions || []) {
-      if (s && !s.archived) out.push({ ...s, projectHash });
+      if (s && !s.archived) out.push(wrapFlatRow(s, projectHash));
     }
   }
   out.sort((a, b) => (b.lastActivity ? new Date(b.lastActivity).getTime() : -1) - (a.lastActivity ? new Date(a.lastActivity).getTime() : -1));
