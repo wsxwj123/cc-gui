@@ -381,15 +381,37 @@ function streamOpenAIToAnthropic(upstreamRes, clientRes, model) {
   // Block bookkeeping. Index 0 reserved for text once it starts; tool calls get
   // subsequent indices keyed by the OpenAI tool_call index.
   let textOpen = false;
+  let thinkingOpen = false; // r26-G11:thinking 块(上游 reasoning_content 翻译而来)
   let nextIndex = 0;
   const toolBlocks = new Map(); // openaiToolIndex → { anthropicIndex, id, name, jsonBuf }
   let finishReason = null;
   let usage = null;
   let buf = '';
 
+  const closeThinkingBlock = () => {
+    if (thinkingOpen !== false) {
+      sse(clientRes, 'content_block_stop', { type: 'content_block_stop', index: thinkingOpen });
+      thinkingOpen = false;
+    }
+  };
+  // r26-G11:thinking 与 text 互斥开关 —— 谁先到谁开;另一种内容到达时先关前者再开,
+  // content 与 reasoning 交错的序列因此保持相对序(deepseek 正常是先 reasoning 后
+  // content;交错只是防御性保证,绝不把后到的思考 prepend 到已发出的正文块里)。
+  const ensureThinkingBlock = () => {
+    ensureStarted();
+    if (thinkingOpen === false) {
+      closeTextBlock();
+      const idx = nextIndex++;
+      sse(clientRes, 'content_block_start', { type: 'content_block_start', index: idx,
+        content_block: { type: 'thinking', thinking: '' } });
+      thinkingOpen = idx;
+    }
+    return thinkingOpen;
+  };
   const ensureTextBlock = () => {
     ensureStarted();
     if (textOpen === false) {
+      closeThinkingBlock();
       const idx = nextIndex++;
       sse(clientRes, 'content_block_start', { type: 'content_block_start', index: idx,
         content_block: { type: 'text', text: '' } });
@@ -425,6 +447,15 @@ function streamOpenAIToAnthropic(upstreamRes, clientRes, model) {
     if (!choice) return;
     const delta = choice.delta || {};
 
+    // r26-G11:deepseek-reasoner 等上游的思考内容走 delta.reasoning_content,此前
+    // 没有分支被静默丢弃 → 翻成 anthropic thinking 流(thinking_delta,与 anthropic
+    // 路 thinking 块输出形态对齐)。放在 content 分支前:reasoning 正常先于正文到达。
+    if (typeof delta.reasoning_content === 'string' && delta.reasoning_content.length) {
+      const idx = ensureThinkingBlock();
+      sse(clientRes, 'content_block_delta', { type: 'content_block_delta', index: idx,
+        delta: { type: 'thinking_delta', thinking: delta.reasoning_content } });
+    }
+
     if (typeof delta.content === 'string' && delta.content.length) {
       const idx = ensureTextBlock();
       sse(clientRes, 'content_block_delta', { type: 'content_block_delta', index: idx,
@@ -439,6 +470,7 @@ function streamOpenAIToAnthropic(upstreamRes, clientRes, model) {
         if (!entry) {
           ensureStarted();
           closeTextBlock();
+          closeThinkingBlock(); // G11:工具块前思考块也要闭合(块序合法)
           const aIdx = nextIndex++;
           entry = {
             anthropicIndex: aIdx,
@@ -490,6 +522,7 @@ function streamOpenAIToAnthropic(upstreamRes, clientRes, model) {
     if (aborted) return;
     ensureStarted(); // 空但成功的流:仍补出合法(空)的 anthropic 收尾
     closeTextBlock();
+    closeThinkingBlock();
     for (const entry of toolBlocks.values()) {
       let input = {};
       try { input = JSON.parse(entry.jsonBuf || '{}'); } catch {}
@@ -525,6 +558,11 @@ function openAIToAnthropicMessage(json, model) {
   const choice = (json.choices || [])[0] || {};
   const m = choice.message || {};
   const content = [];
+  // r26-G11:非流式同样翻译 reasoning_content → thinking 块(置于正文前,与流式同序);
+  // 空/纯空白不下发(与 G5 请求方向的空 thinking 处置同口径)。
+  if (typeof m.reasoning_content === 'string' && m.reasoning_content.trim() !== '') {
+    content.push({ type: 'thinking', thinking: m.reasoning_content });
+  }
   if (m.content) content.push({ type: 'text', text: m.content });
   for (const tc of m.tool_calls || []) {
     let input = {};

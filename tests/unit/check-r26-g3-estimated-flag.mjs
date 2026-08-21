@@ -5,11 +5,29 @@
 // 真 HTTP 实测:openai proxy(6703)+ anthropic proxy(6704),跑完进程退出即释放。
 // 哨兵:S1 摘掉 estimated 字段 → t1/t2 红;S2 给精确路径也加上 → t3 红。
 import assert from 'node:assert/strict';
-import http from 'node:http';
+import net from 'node:net';
 
 const { startOpenAIProxy } = await import('../../server/services/openai-proxy.js');
 const { startAnthropicProxy, setAnthropicUpstream } = await import('../../server/services/anthropic-proxy.js');
 const { parseUpstreamCountTokens } = await import('../../server/utils/context-tokens.js');
+
+// 隔壁 worktree 可能也在跑测试:启动前等端口空闲(同 tests/acceptance/r26/lib.mjs
+// 的 listenWithRetry 口径)。
+const waitPortFree = async (port, tries = 40) => {
+  for (let i = 0; i < tries; i++) {
+    const free = await new Promise((resolve) => {
+      const s = net.createServer();
+      s.once('error', () => resolve(false));
+      s.once('listening', () => s.close(() => resolve(true)));
+      s.listen(port, '127.0.0.1');
+    });
+    if (free) return;
+    await new Promise((r) => setTimeout(r, 500));
+  }
+  throw new Error(`端口 ${port} 持续被占用,重试 ${tries} 次后放弃`);
+};
+await waitPortFree(6703);
+await waitPortFree(6704);
 
 const post = (port, body) =>
   fetch(`http://127.0.0.1:${port}/v1/messages/count_tokens?beta=true`, {
