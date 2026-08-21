@@ -4603,9 +4603,15 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
               // Retry triple — jsonl write timing varies. First attempt may
               // hit the brief window before the CLI flushes; later ones catch
               // up. silent so loading flag doesn't flicker.
+              // r29:侧栏渲染源是 sessionsByProject(fetchSessionsForPanel),只刷旧单值槽
+              // sessions 的话打包版(无文件 watcher)新会话永远不进项目会话列表;旧槽
+              // 仍被权限卡门禁/@面板/监控反查消费,两处都刷。
               if (hash) {
                 [400, 1200, 3000].forEach((ms) =>
-                  setTimeout(() => useStore.getState().fetchSessions(hash, { silent: true }), ms)
+                  setTimeout(() => {
+                    useStore.getState().fetchSessionsForPanel(hash);
+                    useStore.getState().fetchSessions(hash, { silent: true });
+                  }, ms)
                 );
               }
               // 首条消息补拍 checkpoint:handleSend 的 checkpointPromise 在 draft 态
@@ -5817,9 +5823,14 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       // a loading screen and wipe out the user's scroll position.
       const sel = getLocalSession();
       const hash = sel?.projectHash;
+      // r29:同 draft 转正处 —— 面板渲染源 sessionsByProject 与旧单值槽 sessions 都要刷,
+      // 否则打包版(无 watcher)回合结束后侧栏列表长期不更新。
       if (hash) {
         [500, 1500, 3500].forEach((ms) =>
-          setTimeout(() => useStore.getState().fetchSessions(hash, { silent: true }), ms)
+          setTimeout(() => {
+            useStore.getState().fetchSessionsForPanel(hash);
+            useStore.getState().fetchSessions(hash, { silent: true });
+          }, ms)
         );
       }
       // Notify panels (UsagePanel) to refresh their stats.

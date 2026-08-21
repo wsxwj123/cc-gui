@@ -297,7 +297,10 @@ export function UnifiedSidebar() {
     const isOpen = st.expandedProjects.includes(hash);
     if (isOpen) flushPendingForProject(hash);
     st.toggleProjectExpanded(hash);
-    if (!isOpen && !st.sessionsByProject[hash]) st.fetchSessionsForPanel(hash);
+    // r29:展开已缓存组也要 stale 刷新(不只未拉取才拉)——打包版无文件 watcher,
+    // 缓存可能是新会话诞生前的旧列表。fetchSessionsForPanel 内容不变时复用旧身份
+    // 不触发重渲,展开多打一脚无副作用。
+    if (!isOpen) st.fetchSessionsForPanel(hash);
   };
   // 选中项目自动展开(点会话/分屏跟随切过来时组跟随可见);用户手动折叠后不强制
   // 重展,直到 selectedProject 变化(effect deps 语义与旧版一致)。
