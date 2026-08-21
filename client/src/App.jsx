@@ -74,7 +74,7 @@ import { extractMcpServerIssues, formatMcpServerNotice } from './utils/mcpStatus
 import { classifyRepairOutcome, classifyCheckOutcome, upsertRepairHint, removeRepairHint, loadRepairHints, persistRepairHints } from './utils/repairFlow.js';
 import { autoCompactTransition } from './utils/compactStatus.js';
 import { THEME_TABS, readThemeTab, writeThemeTab } from './utils/themeTabs.js';
-import { homeView, pickHomeProject, buildHomeDraft, homeGreetingParts, readHomeCustom, readHiddenHashes, visibleHomeProjects } from './utils/home.js';
+import { homeView, pickHomeProject, buildHomeDraft, homeGreetingParts, readHomeCustom, readHiddenHashes, visibleHomeProjects, paneMountsSessionDetail } from './utils/home.js';
 import { subscribeSkin, getSkinVersion, getSkinState, reconcileSkinOnBoot, watchThemeForSkin } from './utils/skins.js';
 import { resolveSessionDot, completionTracker, subscribeDots, getDotsVersion, RUN_MATRIX_CELLS, runCellDelayMs } from './utils/sessionDots.js';
 import { seedNewSessionDefaults } from './components/UnifiedSidebar.jsx';
@@ -1280,7 +1280,9 @@ function SplitMain({ activeTabIndex, setActiveTabIndex }) {
                   </button>
                 </div>
               )}
-              {(soloPane || hasSession) ? (
+              {/* r29:聚焦的空窗格也挂 SessionDetail(走 Home 新建流);未聚焦空窗格
+                  保留静态占位。判定纯函数在 utils/home.js(paneMountsSessionDetail)。 */}
+              {paneMountsSessionDetail({ soloPane, hasSession, focused }) ? (
                 <ErrorBoundary label="会话区"><SessionDetail tabIndex={i} /></ErrorBoundary>
               ) : (
                 <div className="flex-1 flex items-center justify-center glass-base">

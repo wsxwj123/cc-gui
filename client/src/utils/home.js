@@ -14,6 +14,17 @@ export function homeView({ hasSession, projectCount }) {
 }
 
 /**
+ * r29:SplitMain 窗格内容门控。e924a45 把新建入口从「写 draft」改成「写 null」后,
+ * 旧门控 (soloPane || hasSession) 让 null 会话窗格永远挂静态占位,Home 进不来 ——
+ * 分屏下聚焦空白窗格点「+」不落会话。
+ * 口径:聚焦的空窗格也挂 SessionDetail(走上面的 homeView 判定进 Home);
+ * 未聚焦的空窗格保留静态占位(「点左侧任一会话填入本分屏」),别把两个窗格都变成 Home。
+ */
+export function paneMountsSessionDetail({ soloPane, hasSession, focused }) {
+  return !!(soloPane || hasSession || focused);
+}
+
+/**
  * Home 的目标项目解析:用户显式选择(chosenHash)优先 → 聚焦窗格的会话所属项目 →
  * 侧栏选中项目 → 最近活动项目;都没有 → null(Home 禁发)。
  *
