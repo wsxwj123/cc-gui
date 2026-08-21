@@ -73,6 +73,22 @@ export function classifyGitStatusError(err) {
 }
 
 /**
+ * r26-E4:stat(cwd) 失败按码分类(纯函数)。修前一切失败都 404「不存在」,
+ * EACCES/EPERM(系统拒绝访问)被误报成目录不存在 —— 用户去查路径拼写,
+ * 真正该做的只是授权限,方向完全相反。
+ * 403 body 形状是跨包契约 C-E4,逐字固定,PKG-2 的 GitInitBanner 按此放行读 body。
+ */
+export function classifyStatError(err) {
+  if (err?.code === 'ENOENT' || err?.code === 'ENOTDIR') {
+    return { status: 404, body: { error: 'cwd does not exist' } };
+  }
+  if (isAccessDenied(err)) {
+    return { status: 403, body: { code: 'no-disk-access', hint: accessDeniedHint(), canOpenSettings: canOpenAccessSettings() } };
+  }
+  return { status: 500, body: { error: String(err?.message || err) } };
+}
+
+/**
  * GET /api/git/status?cwd=... → { isRepo, root, branch, hasChanges, hasCommit }
  * `root` = 仓库根(`rev-parse --show-toplevel`)。cwd 是子文件夹时它与 cwd 不同,
  * 前端据此告诉用户"这个零提交仓库其实在上层哪个目录"。
@@ -80,7 +96,11 @@ export function classifyGitStatusError(err) {
 router.get('/git/status', async (req, res) => {
   try {
     const cwd = safeCwd(String(req.query.cwd || ''));
-    try { await stat(cwd); } catch { return res.status(404).json({ error: 'cwd does not exist' }); }
+    try { await stat(cwd); } catch (e) {
+      // r26-E4:按码分类,不再一切 404(拒访被误报成「不存在」)。
+      const { status, body } = classifyStatError(e);
+      return res.status(status).json(body);
+    }
     try {
       const top = await execFileP('git', ['-C', cwd, 'rev-parse', '--show-toplevel'], { timeout: 4000 });
       const root = top.stdout.trim();
