@@ -6,7 +6,7 @@ import { homedir, tmpdir } from 'os';
 import { randomUUID } from 'crypto';
 import { closePersistentForSession } from './chat.js';
 import { isRealUserQuestion } from './fork.js';
-import { accessDeniedHint, canOpenAccessSettings } from '../utils/access-hint.js';
+import { accessDeniedHint, canOpenAccessSettings, isAccessDenied } from '../utils/access-hint.js';
 import { removeSessionFromPrefs } from './prefs.js';
 
 // Guard against path traversal: projectHash / sessionId arrive from request
@@ -328,12 +328,33 @@ export function renderSegmentTranscript(parsedRecords, cap = 150 * 1024) {
   return text;
 }
 
+/**
+ * r26-E3(契约 C-E3):/projects 顶层目录被系统拒绝时的 403 响应体。
+ * 与 /projects/:hash/sessions 的 r17-4 契约同构;判据走 isAccessDenied
+ * (r26-E6:fs 结构化错误码为主、本地化文本为辅,不再漏日文/繁中 Windows)。
+ * @param {string} [platform] 仅供测试注入;默认 process.platform。
+ */
+export function projectsAccessDeniedBody(platform) {
+  return {
+    error: '无法读取项目目录（系统拒绝访问）',
+    code: 'no-disk-access',
+    hint: accessDeniedHint(platform) + '项目文件本身没有丢失。',
+    canOpenSettings: canOpenAccessSettings(platform),
+  };
+}
+
 // GET /api/projects — list all projects
 router.get('/projects', async (req, res) => {
   try {
     const projects = await listProjects();
     res.json(projects);
   } catch (err) {
+    // r26-E3:顶层 projects 目录被拒(未授完全磁盘访问/受控文件夹访问等)不能笼统 500
+    // 或静默空列表——用户会以为项目数据丢了。分类逻辑放路由层(listProjects 原样上抛,
+    // 见 session-reader.js listProjects 注释),与 r17-4 的会话级 403 同构。
+    if (isAccessDenied(err)) {
+      return res.status(403).json(projectsAccessDeniedBody());
+    }
     res.status(500).json({ error: err.message });
   }
 });
