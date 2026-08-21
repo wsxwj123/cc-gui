@@ -5,9 +5,22 @@ import { homedir } from 'os';
 
 const router = Router();
 const PROJECTS_DIR = join(homedir(), '.claude', 'projects');
+const PREFS_PATH = join(homedir(), '.claude-gui', 'prefs.json');
 
 const MAX_RESULTS = 60;
 const SNIPPET_RADIUS = 80;
+
+// r26-I3:全局搜索不过滤隐藏项目 = 隐藏项目的会话能被搜到、点进去,绕过侧栏的
+// 隐藏语义。窄读 prefs.json 的 hiddenProjects(prefs.js 的 loadPrefs 未导出;
+// 目录名即项目 hash,与 CLI 编码同规则)。读失败回落空集 = 不过滤,不阻断搜索。
+async function loadHiddenProjects() {
+  try {
+    const prefs = JSON.parse(await readFile(PREFS_PATH, 'utf-8'));
+    return new Set(Array.isArray(prefs.hiddenProjects) ? prefs.hiddenProjects.filter((x) => typeof x === 'string') : []);
+  } catch {
+    return new Set();
+  }
+}
 
 function makeSnippet(text, idx, q) {
   const start = Math.max(0, idx - SNIPPET_RADIUS);
@@ -31,10 +44,11 @@ router.get('/search', async (req, res) => {
   const hits = [];
 
   try {
+    const hidden = await loadHiddenProjects(); // r26-I3:隐藏项目整目录跳过(省 IO 且与点击入口同口径)
     const projects = await readdir(PROJECTS_DIR, { withFileTypes: true });
     // Sort newest first to bias recency.
     const projectDirs = projects
-      .filter((e) => e.isDirectory() && !e.name.startsWith('.'));
+      .filter((e) => e.isDirectory() && !e.name.startsWith('.') && !hidden.has(e.name));
 
     outer: for (const dir of projectDirs) {
       const projectDir = join(PROJECTS_DIR, dir.name);
