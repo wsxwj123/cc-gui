@@ -95,6 +95,17 @@ async function fetchLatestTagSnap() {
  * 至少让"有没有新版"这件事在任何网络下都问得出来(下载仍需 GitHub,
  * 届时前端给手动下载指引)。返回形状与 fetchGitHubLatest 一致。
  */
+// r26-C3:jsDelivr 的版本号取自 git tag,可能带 v 前缀(本仓 tag 就是 v0.2.x)。
+// 原样采用会拼出 `vv0.2.318` → htmlUrl 404。与 fetchLatestTagSnap(:88)同口径剥 v。
+// 纯函数抽出供单测(export 仅为可单测)。
+export function normalizeJsdelivrVersions(list) {
+  const versions = (Array.isArray(list) ? list : [])
+    .map((v) => String(v || '').replace(/^v/, ''))
+    .filter((n) => /^\d+\.\d+\.\d+$/.test(n));
+  if (!versions.length) return null;
+  return versions.reduce((a, b) => (semverGt(b, a) ? b : a), versions[0]);
+}
+
 async function fetchJsdelivrLatest() {
   const r = await fetch('https://data.jsdelivr.com/v1/packages/gh/wsxwj123/claude-gui', {
     headers: { 'User-Agent': 'claude-gui-version-check' },
@@ -103,9 +114,9 @@ async function fetchJsdelivrLatest() {
   if (!r.ok) throw new Error(`jsDelivr ${r.status}`);
   const d = await r.json();
   const versions = Array.isArray(d.versions) ? d.versions.map((v) => String(v.version || '')).filter(Boolean) : [];
-  if (!versions.length) throw new Error('jsDelivr 未返回版本');
   // 该接口按语义化版本降序返回,取第一个;仍做一次 semver 兜底比较防顺序变化。
-  const latest = versions.reduce((a, b) => (semverGt(b, a) ? b : a), versions[0]);
+  const latest = normalizeJsdelivrVersions(versions);
+  if (!latest) throw new Error('jsDelivr 未返回版本');
   return { tagName: `v${latest}`, htmlUrl: `https://github.com/wsxwj123/claude-gui/releases/tag/v${latest}`, publishedAt: null, assets: [], viaMirror: true };
 }
 
