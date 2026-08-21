@@ -32,7 +32,8 @@ async function ensureDevSkins() {
 }
 
 function SkinCard({ row, active, onChanged }) {
-  const isBuiltin = row.source === 'builtin';
+  // r26-D9:isBuiltin(row.source==='builtin')死代码已删——服务端 source 只会是 'user',
+  // 客户端 BUILTIN_SKINS 已空,isBuiltin 恒 false(原「示例」后缀拼接与删按钮门控是死分支)。
   const apply = async (tryOn) => {
     if (row.manifest?.tier === 2 && !(await ensureDevSkins())) return;
     await activateSkin(row, { tryOn });
@@ -55,14 +56,12 @@ function SkinCard({ row, active, onChanged }) {
         {active && <Check size={12} className="text-accent shrink-0" />}
       </div>
       <div className="flex items-center gap-1 text-[10.5px] font-body">
-        <span className="text-ink-faint mr-auto">{row.manifest?.tier === 2 ? 'T2 代码' : 'T1 声明'}{isBuiltin ? ' · 示例' : ''}</span>
+        <span className="text-ink-faint mr-auto">{row.manifest?.tier === 2 ? 'T2 代码' : 'T1 声明'}</span>
         <button type="button" onClick={() => apply(true)} className="px-1.5 py-0.5 rounded hover:bg-canvas-deep/60 text-ink-soft" title="试穿(不保存,刷新即回)">试穿</button>
         <button type="button" onClick={() => apply(false)} className="px-1.5 py-0.5 rounded hover:bg-canvas-deep/60 text-accent" title="应用并记住">应用</button>
-        {!isBuiltin && (
-          <button type="button" onClick={remove} className="p-0.5 rounded hover:bg-canvas-deep/60" title="删除">
-            <Trash2 size={11} className="text-ink-faint" />
-          </button>
-        )}
+        <button type="button" onClick={remove} className="p-0.5 rounded hover:bg-canvas-deep/60" title="删除">
+          <Trash2 size={11} className="text-ink-faint" />
+        </button>
       </div>
     </div>
   );
@@ -73,6 +72,19 @@ function swatchOf(row) {
   const a = m.light?.vars?.['--color-accent'] || m.dark?.vars?.['--color-accent'] || m.shared?.vars?.['--color-accent'] || 'var(--color-accent)';
   const c = m.light?.vars?.['--color-canvas'] || m.dark?.vars?.['--color-canvas'] || 'var(--color-canvas-warm)';
   return `linear-gradient(135deg, ${c} 55%, ${a} 55%)`;
+}
+
+// r26-D10(契约 C-D10):dsw 框自动识别——粘贴内容 JSON.parse 后 format === 'cgui-skin/1'
+// 则走 import-inline 的 kind:'skinjson' 通道(纯文本 T1 skin.json 导入;引用资产服务端必
+// asset_missing,纯 vars/home.greeting 形态可通过),否则按 dsh 主题 JSON 走 'dsw'。
+function detectInlineKind(text) {
+  try {
+    const parsed = JSON.parse(text);
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed) && parsed.format === 'cgui-skin/1') {
+      return 'skinjson';
+    }
+  } catch {}
+  return 'dsw';
 }
 
 // ── 导入/生成器对话框(独立 portal 模态;flex 列三段,禁 sticky) ──
@@ -131,7 +143,15 @@ function SkinManagerDialog({ onClose, onChanged }) {
   const saveInline = async (kind) => {
     setBusy(true); setNotice(null);
     try {
-      const body = kind === 'trio' ? { kind, name, css, js, a11y } : { kind, name, dswJson: dsw };
+      let body;
+      if (kind === 'trio') {
+        body = { kind, name, css, js, a11y };
+      } else if (detectInlineKind(dsw) === 'skinjson') {
+        // r26-D10(契约 C-D10):dsw 框内容是 cgui-skin/1 skin.json → kind:'skinjson' 通道
+        body = { kind: 'skinjson', name, skinJson: dsw };
+      } else {
+        body = { kind, name, dswJson: dsw };
+      }
       const r = await fetch('/api/skins/import-inline', {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
       });
@@ -192,9 +212,9 @@ function SkinManagerDialog({ onClose, onChanged }) {
           {tab === 'dsw' && (
             <>
               <div className="text-[10.5px] text-ink-faint font-body">
-                粘贴 dsh theme-gallery 导出的 JSON(--dsw-* 变量)。可确证的变量尽力映射为 cgui token,不可映射项在导入结果中列出。dsh skin-gallery 的 JS bundle 绑定 dsh 页面结构,不可直用——请按锚点清单改写为三件套。
+                粘贴 dsh theme-gallery 导出的 JSON(--dsw-* 变量)或 cgui-skin/1 skin.json(纯文本 T1 皮肤,自动识别)。dsh 变量可确证的尽力映射为 cgui token,不可映射项在导入结果中列出。dsh skin-gallery 的 JS bundle 绑定 dsh 页面结构,不可直用——请按锚点清单改写为三件套。
               </div>
-              <textarea value={dsw} onChange={(e) => setDsw(e.target.value)} placeholder='{"vars":{"--dsw-bg":"#101010", …}}' className={`${taCls} min-h-[140px]`} />
+              <textarea value={dsw} onChange={(e) => setDsw(e.target.value)} placeholder='粘贴 dsh 主题 JSON 或 cgui-skin/1 skin.json' className={`${taCls} min-h-[140px]`} />
             </>
           )}
           {tab === 'prompt' && (
