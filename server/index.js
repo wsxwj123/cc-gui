@@ -498,9 +498,22 @@ app.post('/api/network', async (req, res) => {
 
 // POST /api/network/password { password } | { clear:true } — change/remove the
 // access password independently of the host toggle.
+// r26-H2:局域网监听(0.0.0.0)下禁止清密码 —— 清掉的瞬间 LAN 全员免密放行(密码等价于
+// 全主机 RCE)。live 绑定或配置文件任一为 0.0.0.0 都拒:配置侧的 0.0.0.0 会在下次重启
+// 生效,现在清密码 = 给下一次启动埋免密暴露。要清必须先把监听地址改回 127.0.0.1。
 app.post('/api/network/password', (req, res) => {
   const { password, clear } = req.body || {};
-  if (clear) { clearPassword(); return res.json({ ok: true, hasPassword: false }); }
+  if (clear) {
+    const configHost = loadConfig().host === '0.0.0.0' ? '0.0.0.0' : '127.0.0.1';
+    if (lanMode || configHost === '0.0.0.0') {
+      return res.status(409).json({
+        error: '局域网监听模式下必须保留访问密码；要清密码请先把监听地址改回 127.0.0.1',
+        lanMode: true,
+      });
+    }
+    clearPassword();
+    return res.json({ ok: true, hasPassword: false });
+  }
   if (typeof password !== 'string' || password.length < 6) {
     return res.status(400).json({ error: '密码至少 6 位' });
   }
