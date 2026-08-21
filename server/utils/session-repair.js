@@ -2,7 +2,10 @@
 // 实证形态(bf36c461,全第三方历史):
 //   - assistant 行 content=[{type:'text',text:''}](deepseek 残缺回合)→ 官方直接 400;
 //   - assistant 行 content 数组里 {type:'thinking',thinking:''} 与其他块共存。
-// 规则(与 anthropic-proxy normalizeMessagesForCompat 的空块处置语义对齐,作用于 jsonl 行):
+// 规则(r26-G5 起与两路 proxy 的空块处置完全对齐——anthropic-proxy
+// normalizeMessagesForCompat 与 openai-proxy 翻译层均丢弃空 text 与空 thinking 块,
+// openai 路不再产出空 reasoning_content;非空 thinking 保留,deepseek 系上游要求
+// thinking 轮次回传。本文件把同一规则作用于 jsonl 行):
 //   R1 user/assistant 行 message.content 数组中删除空/纯空白 text 块;
 //   R2 同处删除空/纯空白 thinking 块;
 //   R3 某行 content 因此清空 → 删整行,parentUuid 链接骨(所有指向该行 uuid 的引用
