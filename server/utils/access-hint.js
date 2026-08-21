@@ -11,9 +11,30 @@
 // (/api/git/status 早就分类了,/api/git/init 却只回一句 Command failed)。
 // 判据与文案各留一份,新增调用点直接用,别再各写各的。
 
-/** git / fs 报「被系统拒绝」的各平台措辞。中文 Windows 与中文 macOS 的本地化文案都在内。 */
+/**
+ * git / fs 报「被系统拒绝」的各平台措辞。中文 Windows 与中文 macOS 的本地化文案都在内。
+ * r26-E6:补日文 Windows「アクセスが拒否されました」与繁中「存取被拒」形态。
+ * 这是【开放集合,尽力而为】的辅判据 —— 本地化文本永远列不全,新语言案例按用户
+ * 实报补充;语言无关的主判据在 isAccessDenied 里(fs 错误的结构化 code)。
+ */
 export const ACCESS_DENIED_RE =
-  /operation not permitted|permission denied|access is denied|拒绝访问|不允许的操作|权限不够/i;
+  /operation not permitted|permission denied|access is denied|拒绝访问|不允许的操作|权限不够|アクセスが拒否|アクセス許可がありません|存取被拒|存取權限不足|權限不足/i;
+
+/**
+ * r26-E6:统一判定「系统拒绝访问」—— 错误码为主、文本为辅。
+ *   主判据:fs 类错误自带结构化 code(EPERM/EACCES/EROFS),与系统语言无关,
+ *     根治「本地化报错文本是开放集合」的漏判问题(日文/繁中 Windows 曾落未知兜底)。
+ *     EROFS 计入:只读挂载与「系统拒绝」是同类可行动错误,平台指引里本就含
+ *     「确认未只读」的排查项。
+ *   辅判据:git stderr 这类没有 code 可给的失败,仍走本地化文本匹配(开放集合)。
+ * 调用方:git.js(E1/E4/init 分类)、sessions.js(PKG-3 的 E3)。签名以此为准。
+ */
+export function isAccessDenied(err) {
+  const code = err?.code;
+  if (code === 'EPERM' || code === 'EACCES' || code === 'EROFS') return true;
+  const text = String(err?.stderr || err?.message || '');
+  return ACCESS_DENIED_RE.test(text);
+}
 
 /**
  * 平台对应的处理指引。文案风格按项目约定:条件 + 祈使式精确陈述,不用营销腔。
