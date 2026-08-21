@@ -192,6 +192,18 @@ export function UnifiedSidebar() {
   const hiddenRef = useRef(hidden);
   hiddenRef.current = hidden;
   useEffect(() => { fetchProjects(); }, []);
+  // r27:启动补拉——水合恢复的展开组在启动路径上没有任何一脚拉取(诊断实证:只有
+  // selectedProject 组被拉;watcher 只在 sessions-changed/ws-reconnected 后跑,而首连
+  // 不发 ws-reconnected → 冷启动下非选中展开组永远转圈,只能手动折叠再展开)。
+  // projects 就绪即对全部已展开且未拉取的可见组补一脚(与 toggleProject 同一动作;
+  // !sessionsByProject[h] 幂等,projects 变化重跑也无害)。
+  useEffect(() => {
+    if (!projects.length) return;
+    const st = useStore.getState();
+    for (const h of watcherRefreshTargets(st.expandedProjects, st.hiddenProjects || hiddenRef.current)) {
+      if (!st.sessionsByProject[h]) st.fetchSessionsForPanel(h);
+    }
+  }, [projects]);
   useEffect(() => {
     fetch('/api/prefs/pinned').then((r) => r.json())
       .then((d) => useStore.getState().applyPinned(d))
@@ -1101,7 +1113,7 @@ export function UnifiedSidebar() {
             <SessionItem
               key={session.sessionId}
               session={session}
-              isSelected={focusSession?.sessionId === session.sessionId}
+              isSelected={!!session.sessionId && focusSession?.sessionId === session.sessionId}
               {...bindRow(proj)}
               forking={forking === session.sessionId}
               running={runningSessionIds.has(session.sessionId)}
@@ -1211,7 +1223,7 @@ export function UnifiedSidebar() {
                     <SessionItem
                       key={session.sessionId}
                       session={session}
-                      isSelected={focusSession?.sessionId === session.sessionId}
+                      isSelected={!!session.sessionId && focusSession?.sessionId === session.sessionId}
                       {...bindRow(project)}
                       forking={forking === session.sessionId}
                       running={runningSessionIds.has(session.sessionId)}
