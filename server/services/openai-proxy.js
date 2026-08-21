@@ -100,7 +100,10 @@ export function anthropicToOpenAIMessages(messages, system) {
       } else if (block.type === 'thinking') {
         // 历史 thinking 块不能丢:deepseek 系上游要求 thinking 轮次必须回传 reasoning_content,
         // 缺了同会话续聊报 400。收集后作 assistant 顶层字段,不进 content(正文/思考分离)。
-        thinkingParts.push(block.thinking || '');
+        // r26-G5:空 thinking(thinking.trim()==='')丢弃,不再产出空 reasoning_content —
+        // 与 anthropic-proxy/session-repair 的空块处置对齐(空 thinking 块到严格端点可能 400)。
+        const t = typeof block.thinking === 'string' ? block.thinking : '';
+        if (t.trim() !== '') thinkingParts.push(t);
       } else if (block.type === 'tool_use') {
         toolCalls.push({
           id: block.id,

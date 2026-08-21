@@ -78,11 +78,19 @@ export function normalizeMessagesForCompat(body) {
   // content 清空(纯空 text、无工具块),整条消息删掉——空消息对模型无语义,
   // 留在这里只会被新 provider 拒收。非 text 块(工具/图像)一律保留,不影响
   // tool_use↔tool_result 配对。
+  //
+  // r26-G5:空 thinking 块同滤(thinking.trim()==='' 丢弃)。此前本路只滤空 text
+  // 不滤空 thinking,而 session-repair.js 的 R2 早已删空 thinking、openai-proxy
+  // 会把空 thinking 翻成空 reasoning_content 下发 —— 三路不一致,空 thinking 块
+  // 泄漏到严格端点同样可能 400。现两路 proxy 与 session-repair 对齐:空 thinking
+  // 一律丢弃(非空 thinking 保留,deepseek 系上游要求 thinking 轮次回传)。
   for (let i = msgs.length - 1; i >= 0; i--) {
     const m = msgs[i];
     if (!m || !Array.isArray(m.content)) continue;
     const orig = m.content;
-    const kept = orig.filter((c) => !(c && typeof c === 'object' && c.type === 'text' && (!c.text || String(c.text).trim() === '')));
+    const kept = orig.filter((c) => !(c && typeof c === 'object'
+      && ((c.type === 'text' && (!c.text || String(c.text).trim() === ''))
+        || (c.type === 'thinking' && (!c.thinking || String(c.thinking).trim() === '')))));
     if (kept.length === orig.length) continue;
     if (kept.length === 0) { msgs.splice(i, 1); patched++; }
     else { m.content = kept; patched++; }
