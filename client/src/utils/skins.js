@@ -328,23 +328,26 @@ export function bootReplaySkin() {
 }
 
 /** 列表返回后校对(App 挂载后调):id 失效 → 静默清;manifest 有变 → 以服务端为准重应用。
- *  内置示例(builtin- 前缀)不在服务端库,按本地预置解析,不参与失效清除。 */
+ *  r26-D8:先查服务端列表再判 builtin- 分支——修前 builtin- 前缀直接进本地分支,
+ *  而 BUILTIN_SKINS 已退役为空 → 用户皮肤起名 "builtin xxx" 得的 builtin- 前缀 id
+ *  重启即被静默卸。现在服务端列表命中(含用户自起的 builtin- 前缀皮肤)优先激活;
+ *  查无且 builtin- 前缀才进本地退役分支(BUILTIN_SKINS 为空则 deactivate)。 */
 export async function reconcileSkinOnBoot() {
   let id = null;
   try { id = localStorage.getItem(LS_ID); } catch {}
   if (!id) return;
-  if (id.startsWith('builtin-')) {
-    const b = BUILTIN_SKINS.find((s) => s.id === id);
-    if (b) await activateSkin(b);
-    else deactivateSkin();
-    return;
-  }
   try {
     const r = await fetch('/api/skins');
     const d = await r.json();
     const row = (d.skins || []).find((s) => s.id === id);
-    if (!row) { deactivateSkin(); return; }
-    await activateSkin({ id, manifest: row.manifest });
+    if (row) { await activateSkin({ id, manifest: row.manifest }); return; }
+    // 服务端查无:builtin- 前缀进本地退役分支(BUILTIN_SKINS 已空 → deactivate),
+    // 非前缀 id 失效 → 静默清回默认
+    if (id.startsWith('builtin-')) {
+      const b = BUILTIN_SKINS.find((s) => s.id === id);
+      if (b) { await activateSkin(b); return; }
+    }
+    deactivateSkin(); return;
   } catch { /* 网络失败保持缓存重放的样子,下次再对账 */ }
 }
 
