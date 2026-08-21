@@ -294,6 +294,13 @@ export async function loadT2(id, manifest, texts = null, gen = null) {
   return { loaded: true };
 }
 
+// r31:app 自持的属性(主题/缩放/system 等 sessionStore 写入点)属 app 所有,皮肤不负责
+// 清理。disposeT2 的「新增属性摘除」分支(①/②的 removeAttribute)绝不许删这些 —— 否则
+// 皮肤存活期间用户换主题写的 data-theme / data-cgui-theme(或 --ui-zoom 等 style 内的
+// app 变量)会被当成「皮肤/第三方新增」误删,停用皮肤=把用户主题设置摘掉。style 由
+// clearVars(appliedVars)精确清皮肤变量,这里只豁免「整段不摘除」。
+const APP_ATTRS = new Set(['data-theme', 'data-cgui-theme', 'data-theme-system', 'style']);
+
 /** 卸载 T2:①皮肤自注册 disposer → ②标记节点逐项移除 → ③documentElement 属性按双快照 diff 还原。 */
 export function disposeT2() {
   const t2 = state.t2;
@@ -317,12 +324,16 @@ export function disposeT2() {
       const inLoaded = Object.prototype.hasOwnProperty.call(loadedSnap, name);
       const inPre = Object.prototype.hasOwnProperty.call(preSnap, name);
       const cur = root.getAttribute(name); // null = 当前不存在
+      // r31:app 自持属性(data-theme/data-cgui-theme/data-theme-system/style)豁免「摘除」——
+      // 这些是 app 加的不该由皮肤清理(皮肤存活期用户换主题写 data-theme 等,不能被当新增删)。
+      // 注意此处只豁免 removeAttribute;`if (inPre) setAttribute(preSnap)` 的还原路径仍照常
+      // (把 app 属性还原到装载前值是正确语义,不丢用户改动)。
       if (!inLoaded && !inPre) {
-        root.removeAttribute(name); // 存活期新增(皮肤脚本异步或第三方) → 摘除
+        if (!APP_ATTRS.has(name)) root.removeAttribute(name); // 存活期新增(皮肤脚本异步或第三方) → 摘除
       } else if (inLoaded && cur !== null && cur === loadedSnap[name]) {
         // 装载后没人动 → 还原到装载前(preSnap 无此键 = 装载期新增,摘除)
         if (inPre) root.setAttribute(name, preSnap[name]);
-        else root.removeAttribute(name);
+        else if (!APP_ATTRS.has(name)) root.removeAttribute(name);
       } else if (!inLoaded && inPre && cur === null) {
         root.setAttribute(name, preSnap[name]); // 皮肤装载期删掉且仍缺席 → 还原
       }
