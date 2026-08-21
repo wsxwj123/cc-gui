@@ -777,8 +777,15 @@ export function UnifiedSidebar() {
       const list = useStore.getState().sessions;
       const target = list.find((s) => s.sessionId === hit.sessionId);
       if (target) {
-        useStore.getState().setSelectedSession(target);
-        useStore.getState().fetchMessages(target.sessionId, target.projectHash);
+        // r26-I6:多窗格下不许恒抢 pane 0 —— 与 handleSelect 同款写聚焦窗格。
+        const st2 = useStore.getState();
+        if (st2.splitMode) {
+          st2.setActiveTabSession(target);
+          st2.fetchMessages(target.sessionId, target.projectHash, { tab: st2.activeTabIndex });
+        } else {
+          st2.setSelectedSession(target);
+          st2.fetchMessages(target.sessionId, target.projectHash);
+        }
       }
     }
     setSearchQuery('');
