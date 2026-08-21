@@ -2030,6 +2030,15 @@ export const useStore = create((set, get) => ({
   pinnedSessions: [],
   applyPinned: (data) => set(reducePinned(data)),
 
+  // r26-I2(契约 C-I2):隐藏项目列表入 store —— 服务端 PUT hidden-projects 后
+  // broadcast { type:'hidden-projects', hidden },WS reducer 经 applyHiddenProjects
+  // 收敛,多端实时同步(此前只在 Home 挂载时拉一次,他端改了本端不刷新)。
+  // Home 与侧栏(I7②,PKG-11)统一读这里,不自拉。
+  hiddenProjects: [],
+  applyHiddenProjects: (hidden) => set({
+    hiddenProjects: Array.isArray(hidden) ? hidden.filter((x) => typeof x === 'string' && x) : [],
+  }),
+
   // Fetch sessions for a project.
   // `silent` = true means a background refresh (e.g. after a chat just
   // finished) — don't flip the global `loading` flag, which causes

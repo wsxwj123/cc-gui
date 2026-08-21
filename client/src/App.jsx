@@ -1756,14 +1756,15 @@ function HomeState({ tabIndex = 0 }) {
   const custom = readHomeCustom();
   // r21:减去 hiddenProjects。Home 的默认项目**会写进新会话的 cwd**,取全量会让
   // 用户在侧栏隐藏掉的目录(家目录、临时目录)当上默认工作目录,最近下拉里也会冒出来。
-  // 取法与 SettingsPanel 的项目下拉同一模式(窄端点现读);hidden 不在 store 里,
-  // ponytail: 挂载时读一次即可 —— HomeState 每次回到无会话态都重新挂载,够新。
-  const [hiddenHashes, setHiddenHashes] = useState(() => new Set());
+  // r26-I2:hiddenProjects 入 store(WS 'hidden-projects' 广播收敛,他端改了本端
+  // 即时跟随);挂载时仍拉一次 GET 水合 store(读失败回落「不过滤」,不是「全过滤」)。
+  const hiddenProjectsList = useStore((s) => s.hiddenProjects);
   useEffect(() => {
     fetch('/api/prefs/hidden-projects').then((r) => r.json())
-      .then((d) => setHiddenHashes(readHiddenHashes(d)))
-      .catch(() => {}); // 读失败回落「不过滤」,不是「全过滤」
+      .then((d) => useStore.getState().applyHiddenProjects(Array.isArray(d?.hidden) ? d.hidden : []))
+      .catch(() => {});
   }, []);
+  const hiddenHashes = useMemo(() => new Set(hiddenProjectsList), [hiddenProjectsList]);
   // r24:聚焦窗格(activeTabIndex)当前会话所属的项目 —— 新建会话的默认 cwd 跟着你**正在看**
   // 的那个会话走,而不是侧栏的选中项(分屏时两者经常不是一个)。选出的是字符串/undefined,
   // 不会给 Zustand 造新引用。单屏也成立:paneSessions[0] 恒镜像 selectedSession。

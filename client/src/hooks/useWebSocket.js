@@ -280,6 +280,11 @@ export function useWebSocket() {
                 if (data.deletedId && getSkinState().id === data.deletedId) deactivateSkin();
               } catch {}
               break;
+            case 'hidden-projects':
+              // r26-I2(契约 C-I2):隐藏项目任一端改动后全端收敛。
+              // payload 形状固定 { type:'hidden-projects', hidden }。
+              useStore.getState().applyHiddenProjects(data.hidden);
+              break;
             case 'repair-hint':
               // r10-12:官方 400 空内容块的服务端体检结果。result 后 0ms finalize 会关 SSE,
               // 异步体检多数经此 WS 兜底到达;SessionDetail 监听按 sessionId 入位(keyed 无串扰)。
