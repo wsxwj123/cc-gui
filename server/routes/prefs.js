@@ -39,6 +39,19 @@ function withPrefsQueue(task) {
   return run;
 }
 
+// r26-C6:prefs 共享写函数。其它 route(如 version-check 的 writeUpdateChannel)的 prefs 写
+// 统一走这里 —— withPrefsQueue 串行化(与本文件所有 PUT 同一条队列,并发 read-merge-write
+// 不互踩)+ savePrefs 原子写(tmp+rename)。签名契约见 PLAN C-C6:PKG-6 按 updatePrefs(mutator)
+// 逐字消费。mutator 直接改传入的 prefs 对象,改完由这里统一落盘;mutator 抛错不会断队列链
+// (withPrefsQueue 已兜),错误原样抛回调用方。
+export async function updatePrefs(mutator) {
+  return withPrefsQueue(async () => {
+    const p = await loadPrefs();
+    await mutator(p);
+    await savePrefs(p);
+  });
+}
+
 // 会话删除时的 prefs GC:清掉四处按 sessionId 挂的残留(1M 标记/自动标题/自定义标题/
 // 置顶会话列表),否则 prefs.json 随删除只增不减,且被删 sid 的标记会污染未来复用同 id
 // 的水合。走 withPrefsQueue 与常规 PUT 串行;只对真有变化的类别广播。
@@ -106,6 +119,12 @@ router.put('/prefs/hidden-projects', async (req, res) => {
       prefs.hiddenProjects = hidden;
       await savePrefs(prefs);
     });
+    // r26-I2:补 WS 广播(照 pinned 同款)——此前手机端隐藏项目后桌面端要到下次拉取
+    // 才收敛。payload 契约 C-I2 逐字固定 {type:'hidden-projects', hidden},客户端
+    // (PKG-2 WS reducer → store.hiddenProjects;PKG-11 只读 store)按此形状消费。
+    try {
+      broadcast({ type: 'hidden-projects', hidden });
+    } catch {}
     res.json({ ok: true, hidden });
   } catch (e) {
     res.status(500).json({ error: '写入偏好失败：' + e.message });
@@ -399,7 +418,9 @@ router.put('/prefs/display-name', async (req, res) => {
   if (typeof displayName !== 'string') {
     return res.status(400).json({ error: 'displayName 必须是字符串' });
   }
-  const name = displayName.trim().slice(0, 20);
+  // r26-D12:按码点截断 —— String.prototype.slice 按 UTF-16 码元切,emoji(代理对)
+  // 会从中间劈开产出孤代理(渲染为  、且与前端码点截断长度不一致)。
+  const name = [...displayName.trim()].slice(0, 20).join('');
   try {
     await withPrefsQueue(async () => {
       const prefs = await loadPrefs();
