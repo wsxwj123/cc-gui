@@ -133,6 +133,7 @@ export function applySkinDom(id, manifest, { root = document.documentElement } =
 
 /** 停用:清 inline 变量 + 属性 + home/icons/背景/T2;回到主题原样。 */
 export function clearSkinDom({ root = document.documentElement } = {}) {
+  ++t2Gen; // r26-D1:停用使一切在途装载失效
   disposeT2();
   clearVars(root);
   root.removeAttribute('data-cgui-skin');
@@ -145,6 +146,11 @@ export function clearSkinDom({ root = document.documentElement } = {}) {
 }
 
 // ── T2 代码层(开发者皮肤;总开关 + 双端静态校验 + 三重卸载兜底) ──
+// r26-D1:装载代际 token——每次激活/停用递增。快速连切(或 StrictMode 双跑)时慢一拍
+// 的装载在任一 await 回来后比对代际,过期即弃(不插节点、不盖 state.t2),杜绝
+// 「显示 B 的皮、跑着 A 的脚本」串皮。
+let t2Gen = 0;
+
 export function validateT2Client(text) {
   if (typeof text !== 'string') return { ok: false, hits: ['not_text'] };
   const low = text.toLowerCase();
@@ -156,9 +162,14 @@ export function validateT2Client(text) {
  * 装载 T2 三件套(样式节点带 data-cgui-skin-style 标记;client.js 经 Blob-URL 经典
  * 脚本注入;激活前快照 documentElement 属性)。texts 可直接传入(粘贴试穿),否则
  * 按 manifest 从资源端点取。总开关关闭 → 静默不载(T1 部分照常)。
+ * gen = r26-D1 代际 token(activateSkin 领代传入;直调则自领),过期返回 superseded。
  */
-export async function loadT2(id, manifest, texts = null) {
+export async function loadT2(id, manifest, texts = null, gen = null) {
   if (!devSkinsEnabled()) return { loaded: false, reason: 'disabled' };
+  // r26-D1:调用方未领代则自领一代(直接调 loadT2 的路径);之后每个 await 回来
+  // 先比代,过期 = 已有更新的激活/停用,一律不插节点不盖 state(superseded)。
+  if (gen == null) gen = ++t2Gen;
+  const stale = () => gen !== t2Gen;
   disposeT2();
   const get = async (name) => {
     if (texts && typeof texts[name] === 'string') return texts[name];
@@ -168,12 +179,16 @@ export async function loadT2(id, manifest, texts = null) {
     return r.ok ? await r.text() : null;
   };
   const css = await get('skin.css');
+  if (stale()) return { loaded: false, reason: 'superseded' };
   const a11y = await get('a11y.css');
+  if (stale()) return { loaded: false, reason: 'superseded' };
   const js = await get('client.js');
+  if (stale()) return { loaded: false, reason: 'superseded' };
   if (js) {
     const v = validateT2Client(js);
     if (!v.ok) return { loaded: false, reason: 'script_rejected', hits: v.hits };
   }
+  // ── 以下为同一同步 tick(快照→插节点→state 赋值,无 await 即无竞态缝)──
   const attrSnapshot = {};
   for (const name of document.documentElement.getAttributeNames()) {
     attrSnapshot[name] = document.documentElement.getAttribute(name);
@@ -230,6 +245,7 @@ function writeCache(id, manifest) {
 export async function activateSkin(row, { tryOn = false } = {}) {
   const { id, manifest, t2Texts } = row || {};
   if (!id || !manifest) return;
+  const gen = ++t2Gen; // r26-D1:每次激活领一代,此前在途装载全部失效
   disposeT2();
   applySkinDom(id, manifest);
   state.tryOn = tryOn;
@@ -244,7 +260,7 @@ export async function activateSkin(row, { tryOn = false } = {}) {
   // t2Texts = 内置示例/粘贴试穿的本地三件套(不经资源端点);否则按 manifest 从服务端取。
   // 返回 T2 装载结果给 UI(拒载/门控不再被静默吞掉——p2-1 顺带修)。
   let t2 = null;
-  if (manifest.tier === 2) t2 = await loadT2(id, manifest, t2Texts || null);
+  if (manifest.tier === 2) t2 = await loadT2(id, manifest, t2Texts || null, gen);
   if (!tryOn) {
     try { localStorage.setItem(LS_ID, id); } catch {}
     writeCache(id, manifest);
