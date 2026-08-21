@@ -12,7 +12,7 @@
 // effort but not translated. Bound to 127.0.0.1 only — no auth, never exposed.
 
 import http from 'node:http';
-import { isCountTokensRequest, estimateInputTokens } from '../utils/context-tokens.js';
+import { isCountTokensRequest, estimateInputTokens, recordCountTokensOutcome } from '../utils/context-tokens.js';
 import { lookupModelCapabilities, lookupVisionCapability, EFFORT_IDS } from '../utils/model-capabilities.js';
 import { collectRealToolResultIds } from '../utils/tool-result-reconcile.js';
 
@@ -652,7 +652,10 @@ async function handle(req, clientRes) {
     // r26-G3(契约 C-G3):本地估算打标 estimated:true(响应顶层,不进 token 数字本身),
     // 前端据此标「(估算)」而非当精确值展示。本端点永远是估算(OpenAI 协议无
     // count_tokens 等价端点,见上注释),恒带标记。
-    clientRes.end(JSON.stringify({ ...estimateInputTokens(parsedBody), estimated: true }));
+    const estimatedBody = { ...estimateInputTokens(parsedBody), estimated: true };
+    // r31:估算结果入共享表(estimated:true),快路据其实时补标(见 context-tokens.js 说明)。
+    recordCountTokensOutcome({ model: parsedBody.model, estimated: true, inputTokens: estimatedBody.input_tokens });
+    clientRes.end(JSON.stringify(estimatedBody));
     return;
   }
   if (req.method !== 'POST' || !req.url.includes('/v1/messages')) {
