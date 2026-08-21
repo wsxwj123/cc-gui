@@ -268,13 +268,18 @@ function sweepWinNulFiles(dir) {
 function startWinNulWatcher(dir) {
   if (process.platform !== 'win32' || !dir) return null;
   try {
-    return watch(dir, { recursive: true }, (_evt, name) => {
+    const w = watch(dir, { recursive: true }, (_evt, name) => {
       if (!name) return;
       const base = String(name).split(/[\\/]/).pop();
       if (/^nul$/i.test(base)) {
         try { unlinkSync('\\\\?\\' + pathJoin(dir, name)); } catch {}
       }
     });
+    // r29:watch 句柄出错(cwd 被删/句柄耗尽)不设 error 监听会 throw 成
+    // uncaughtException → crash.log 被这类噪音淹没,真正的事故反而看不见。
+    // 静默关闭即可:删 NUL 是尽力而为的辅助,回合结束本来就会 close。
+    w.on('error', () => { try { w.close(); } catch {} });
+    return w;
   } catch { return null; }
 }
 

@@ -15,8 +15,11 @@ const src = readFileSync(new URL('../../client/src/components/UnifiedSidebar.jsx
   assert.match(src, /启动补拉/, 't1: 启动补拉 effect 存在(注释锚)');
   assert.match(src, /if \(!projects\.length\) return;\s*\n\s*const st = useStore\.getState\(\);\s*\n\s*for \(const h of watcherRefreshTargets\(st\.expandedProjects/, 't1: 遍历 expandedProjects 经 watcherRefreshTargets(与 watcher 同口径跳过 hidden)');
   assert.match(src, /if \(!st\.sessionsByProject\[h\]\) st\.fetchSessionsForPanel\(h\);\s*\n\s*}\s*\n\s*}, \[projects\]\)/, 't1: 幂等补拉且 deps=[projects]');
-  // 与 toggleProject 同动作对照(既有行没被动过)
-  assert.match(src, /if \(!isOpen && !st\.sessionsByProject\[hash\]\) st\.fetchSessionsForPanel\(hash\);/, 't1: toggleProject 补拉原样保留');
+  // 与 toggleProject 同动作对照。r29 起 toggleProject 是【展开即 stale 刷新】
+  // (不再只未缓存才拉 —— 打包版无 watcher,缓存可能是新会话诞生前的旧列表,
+  // 见 check-r29-newsession-list.mjs);本钉相应更新为新口径。
+  assert.match(src, /if \(!isOpen\) st\.fetchSessionsForPanel\(hash\);/, 't1: toggleProject 展开即拉(r29 stale 刷新闻径)');
+  assert.doesNotMatch(src, /if \(!isOpen && !st\.sessionsByProject\[hash\]\) st\.fetchSessionsForPanel\(hash\);/, 't1: 旧「未缓存才拉」门控已被 r29 取代');
 }
 
 // t2 isSelected 恒真加固:先判 sessionId 非空再比对(封死 undefined===undefined 路径)

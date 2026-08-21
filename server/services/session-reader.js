@@ -231,6 +231,22 @@ export async function listProjects(projectsDir = PROJECTS_DIR) {
   return projects;
 }
 
+// r29:已知无参控制命令的封闭集合(CLI 内置;内置解析优先于同名 skill,用户 skill
+// 无法遮蔽,故按名判定安全)。这些命令是纯 CLI 簿记/本地面板,不产生会话内容,
+// 作为会话【首条】出现 = 该会话是 /clear 轮换或误触发的空壳,不进列表。
+// 刻意不收:会产生真实模型回合的内置命令(/init /review /security-review 等)——
+// 它们裸开场也是真会话。比对口径:reconstructCommandPrompt 的 bareToName 返回
+// 恰为命令名(带斜杠),有 args 时是 "name args" 不会命中本集合。
+const BARE_CONTROL_COMMANDS = new Set([
+  '/agents', '/autocompact', '/bug', '/clear', '/color', '/compact', '/config',
+  '/context', '/cost', '/doctor', '/effort', '/exit', '/export', '/fast',
+  '/heapdump', '/help', '/hooks', '/ide', '/insights', '/login', '/logout',
+  '/mcp', '/memory', '/model', '/output-style', '/permissions',
+  '/privacy-settings', '/quit', '/recap', '/release-notes', '/reload-skills',
+  '/rename', '/resume', '/status', '/statusline', '/terminal-setup', '/theme',
+  '/todos', '/upgrade', '/usage', '/vim',
+]);
+
 /**
  * Find the first user record that carries a REAL prompt — same criteria the
  * message view (getSessionMessages) uses to decide what counts as a user bubble.
@@ -259,8 +275,13 @@ function findFirstRealUser(head) {
     const cmdPrompt = reconstructCommandPrompt(text, { bareToName: true });
     // Real prompt = a reconstructable /command, OR plain text that isn't a local
     // command echo. tool_result-only / empty-text records fall through.
-    if (cmdPrompt) return { record: r, text: cmdPrompt };
-    if (text && !isLocalCommandEcho(text)) return { record: r, text };
+    // r29:但裸无参【控制命令】(/clear /compact /context /cost /login /logout …,封闭集合
+    // 见下)不是真实首条 —— CI-5 的 bareToName 放行本意是 /skillname 开场,控制命令也走
+    // 同一分支被当真实,于是 CLI 2.1.x /clear 轮换出的新会话(头部唯一 user 记录就是
+    // /clear 命令回声)在列表里冒成一个空的「/clear」会话。有 args 的命令(/compact 主题)
+    // 与 /skillname 不在集合内,照旧放行。
+    if (cmdPrompt && !BARE_CONTROL_COMMANDS.has(cmdPrompt.toLowerCase())) return { record: r, text: cmdPrompt };
+    if (!cmdPrompt && text && !isLocalCommandEcho(text)) return { record: r, text };
   }
   // No real prompt in head, but a compact summary means this is a continued
   // conversation — keep it with a clean label instead of the verbose preamble.

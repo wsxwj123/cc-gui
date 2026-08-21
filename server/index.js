@@ -41,6 +41,7 @@ import backgroundsRoutes from './routes/backgrounds.js';
 import skinsPacksRoutes from './routes/skins-packs.js';
 import screenshotRoutes from './routes/screenshot.js';
 import imageRoutes from './routes/image.js';
+import clientLogRoutes, { rotateLogIfBig, writeCrashLog } from './routes/client-log.js';
 import {
   authMiddleware, isLocalReq, isAuthorized, parseCookies, verifyToken,
   hasPassword, setPassword, setDefaultRandomPassword, clearPassword, verifyPassword, issueToken, updateConfig, loadConfig,
@@ -418,6 +419,7 @@ app.use('/api', backgroundsRoutes);
 app.use('/api', skinsPacksRoutes); // r11-③ 皮肤包(/api/skins,避开既有 /api/skills)
 app.use('/api', screenshotRoutes);
 app.use('/api', imageRoutes); // r16-3 生图(/api/image-providers、/api/image/*),配置独立不碰 settings.json
+app.use('/api', clientLogRoutes); // r29 取证:前端错误上报落 client.log(挂在 authMiddleware 之后自动带鉴权)
 
 // Auto-load optional local-only routes only when explicitly requested. These
 // files are gitignored personal integrations; packaged/public builds must not
@@ -933,12 +935,21 @@ if (process.env.CGUI_DISABLE_FILE_WATCHER !== '1') {
   }
 }
 
+// r29 取证:启动时滚动取证日志(超 5MB 改名 .old 再开新,只留一代)。
+// server.log 不在此列 —— 它的 stderr 句柄由 Rust 侧持有,滚动在 spawn 前做。
+rotateLogIfBig(join(homedir(), '.claude-gui', 'crash.log'));
+rotateLogIfBig(join(homedir(), '.claude-gui', 'client.log'));
+
 // Don't let a single bad request kill the whole dev server. Log loudly,
 // but keep serving the GUI — concurrently kills both processes on exit.
+// r29 取证:console.error 之外同步落一行 JSON 到 ~/.claude-gui/crash.log
+// (时间戳/类型/stack 截 2KB) —— 公开版 server 死了原来零记录。
 process.on('uncaughtException', (err) => {
+  writeCrashLog('uncaughtException', err);
   console.error('[uncaughtException]', err);
 });
 process.on('unhandledRejection', (reason) => {
+  writeCrashLog('unhandledRejection', reason);
   console.error('[unhandledRejection]', reason);
 });
 
