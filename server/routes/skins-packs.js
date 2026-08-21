@@ -248,13 +248,16 @@ export async function installSkinPackage(zipPath, { source = 'user', skinsDir = 
 }
 
 // POST /api/skins/import-inline — 裸内容导入(免 zip):
-//   kind:'trio' = T2 三件套 {name, css?, js?, a11y?}(「保存为皮肤」通道;试穿在客户端不落盘)
-//   kind:'dsw'  = dsh theme-gallery JSON {name, dswJson}(--dsw-* → cgui token 尽力映射)
-// 校验全复用:T2 走 validateT2Script,dsw 走 convertDswVars(值全套文法闸);
-// 落盘与 zip 导入同构(skin.json + meta.json + 文件,id/响应形状一致)。
+//   kind:'trio'     = T2 三件套 {name, css?, js?, a11y?}(「保存为皮肤」通道;试穿在客户端不落盘)
+//   kind:'dsw'      = dsh theme-gallery JSON {name, dswJson}(--dsw-* → cgui token 尽力映射)
+//   kind:'skinjson' = cgui-skin/1 skin.json 文本 {name, skinJson}(r26-D10,契约 C-D10;
+//                     仅纯 vars/home.greeting 形态可通过,引用资产必 asset_missing)
+// 校验全复用:T2 走 validateT2Script,dsw 走 convertDswVars(值全套文法闸),skinjson 走
+// validateManifest(空 files 集);落盘与 zip 导入同构(skin.json + meta.json + 文件,
+// id/响应形状一致;同 slug 覆盖式去重 r26-D6)。
 router.post('/skins/import-inline', async (req, res) => {
   try {
-    const { kind, name, css, js, a11y, dswJson } = req.body || {};
+    const { kind, name, css, js, a11y, dswJson, skinJson } = req.body || {};
     const skinName = typeof name === 'string' ? name.trim().slice(0, 40) : '';
     if (!skinName) return res.status(422).json({ error: 'manifest_invalid', message: '皮肤名称必填(1-40 字符)' });
     const warnings = [];
@@ -288,8 +291,37 @@ router.post('/skins/import-inline', async (req, res) => {
       warnings.push(...w);
       if (!Object.keys(vars).length) return res.status(422).json({ error: 'empty_skin', message: '没有可映射的变量(不可映射项见 warnings)', warnings });
       manifest = { format: 'cgui-skin/1', name: skinName, tier: 1, shared: { vars } };
+    } else if (kind === 'skinjson') {
+      // r26-D10(契约 C-D10):粘贴 cgui-skin/1 skin.json 纯文本导入。skinJson 为文本
+      // 或已 parse 对象;以空 files 集走 validateManifest 全量校验——纯 vars/home.greeting
+      // 形态可通过,background/icons 引用资产必 asset_missing(无资产通道),
+      // preview/home.icon 引用按可选叶子 warning 丢弃(validateManifest 既有口径)。
+      let parsed = skinJson;
+      if (typeof parsed === 'string') {
+        try { parsed = JSON.parse(parsed); }
+        catch { return res.status(422).json({ error: 'manifest_invalid', message: 'skin.json 无法解析' }); }
+      }
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        // body 的 name 为权威(与 trio/dsw 同口径),覆盖进 parsed 再走全量校验
+        parsed = { ...parsed, name: skinName };
+      }
+      const vm = validateManifest(parsed, new Set());
+      if (!vm.ok) {
+        return res.status(HTTP_OF[vm.code] || 422).json({
+          error: vm.code,
+          message: ERROR_MESSAGES[vm.code] || vm.code,
+          ...(vm.details ? { details: vm.details } : {}),
+        });
+      }
+      // skinjson 通道只收 T1(契约:仅纯 vars/home.greeting 形态可通过)——
+      // tier:2 无包内文件等于空壳 T2,明确拒
+      if (vm.manifest.tier === 2) {
+        return res.status(422).json({ error: 'manifest_invalid', message: 'skinjson 通道仅支持 T1 皮肤(纯 vars/home.greeting 形态)', details: ['tier 2 请走三件套(trio)通道'] });
+      }
+      warnings.push(...vm.warnings);
+      manifest = vm.manifest;
     } else {
-      return res.status(400).json({ error: 'manifest_invalid', message: 'kind 必须是 trio 或 dsw' });
+      return res.status(400).json({ error: 'manifest_invalid', message: 'kind 必须是 trio、dsw 或 skinjson' });
     }
     // r26-D6:与 zip 通道同口径——同 slug 复用既有 id 覆盖
     const existingId = await findExistingSkinId(slugOf(skinName), SKINS_DIR);
