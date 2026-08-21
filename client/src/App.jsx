@@ -9156,7 +9156,10 @@ function MobileMenu({ setRightPanel, onClose, updateNotice = null }) {
   const activeSession = (paneSessions && paneSessions[activeTabIndex]) || selectedSession;
   const permKey = queueKeyFor(activeSession);
 
-  const currentModel = useStore((s) => s.modelBySession[permKey] || s.currentModel);
+  // r26-F2:手机菜单模型行走与桌面同一解析链 resolveSelectorModel(pin→元数据→全局,
+  // 每环过 provider 白名单 + context1m 后缀)——裸 `pin || global` 会把 guard 拒掉的
+  // 残留模型显示出来,与桌面徽章不一致。
+  const currentModel = useStore((s) => resolveSelectorModel(s, permKey)) || null;
   // 审计批C2:导出 Markdown 需要当前会话消息(手机单窗格=pane0/activeTabIndex)。
   const menuMessages = useStore((s) => (s.paneMessages && s.paneMessages[s.activeTabIndex]) || s.messages || EMPTY_ARRAY);
   const effort = useStore((s) => (permKey && permKey in (s.effortBySession || {})) ? s.effortBySession[permKey] : s.effort);
