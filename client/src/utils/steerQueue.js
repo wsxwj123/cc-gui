@@ -1,5 +1,29 @@
 const BARRIER_STATES = new Set(['unknown', 'accepted', 'needs-review', 'claiming']);
 
+// r26-B5:队列/pin/owner 键的单一构造点。draft 键必须带 draftId——旧形态
+// `draft-<projectHash>` 让同项目两个 draft 窗格共用一个队列(A 排队、B 的 drain 发出),
+// 且 draft→真 sid 迁移会把共享队列整个并进先 init 的一方。新形态:
+//   真会话 → sessionId;draft → `draft-<projectHash>-<draftId>`。
+// draftId 缺失(理论上的旧版残留 draft)落到 '-none' 尾段:宁可键相异失败安全,
+// 也绝不回到共享键。所有裸模板串一律改调本函数,杜绝口径再裂。
+export function queueKeyFor(sel) {
+  if (sel && sel.sessionId) return sel.sessionId;
+  return `draft-${sel?.projectHash || 'none'}-${sel?.draftId || 'none'}`;
+}
+
+// draft 队列键判定与 projectHash 段解析(孤儿回收按项目过滤用)。
+// draftId 形态恒为 `d<ts>-<seq>`(App.jsx newDraftId),据此从新形态键里剥出 hash;
+// 剥不掉的按旧形态 `draft-<hash>` 整段当 hash(旧键只会进孤儿表,归属不再猜测)。
+export function isDraftQueueKey(key) {
+  return typeof key === 'string' && key.startsWith('draft-');
+}
+export function draftQueueProjectHash(key) {
+  if (!isDraftQueueKey(key)) return null;
+  const rest = key.slice('draft-'.length);
+  const m = rest.match(/^(.*)-d\d+-\d+$/);
+  return (m ? m[1] : rest) || 'none';
+}
+
 export function createQueueId(prefix = 'queue') {
   const uuid = globalThis.crypto?.randomUUID?.();
   return uuid || `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 12)}`;
