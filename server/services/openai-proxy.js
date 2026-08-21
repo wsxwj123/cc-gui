@@ -592,7 +592,10 @@ async function handle(req, clientRes) {
     let parsedBody = {};
     try { parsedBody = JSON.parse(await readBody(req)) || {}; } catch {}
     clientRes.writeHead(200, { 'Content-Type': 'application/json' });
-    clientRes.end(JSON.stringify(estimateInputTokens(parsedBody)));
+    // r26-G3(契约 C-G3):本地估算打标 estimated:true(响应顶层,不进 token 数字本身),
+    // 前端据此标「(估算)」而非当精确值展示。本端点永远是估算(OpenAI 协议无
+    // count_tokens 等价端点,见上注释),恒带标记。
+    clientRes.end(JSON.stringify({ ...estimateInputTokens(parsedBody), estimated: true }));
     return;
   }
   if (req.method !== 'POST' || !req.url.includes('/v1/messages')) {

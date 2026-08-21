@@ -287,10 +287,12 @@ async function handle(req, clientRes) {
       }).finally(() => clearTimeout(t2));
       if (r.ok) {
         const upstreamCount = parseUpstreamCountTokens(await r.text());
+        // 精确路径(上游真支持 count_tokens):原样透传,**不加 estimated 标记**(互斥)。
         if (upstreamCount) return respond(upstreamCount);
       }
     } catch { /* 超时/网络错 → 本地估算回退 */ }
-    return respond(estimateInputTokens(parsedBody));
+    // r26-G3(契约 C-G3):估算回落打标 estimated:true(响应顶层),前端据此标「(估算)」。
+    return respond({ ...estimateInputTokens(parsedBody), estimated: true });
   }
 
   // 仅对 /v1/messages 做规范化(其他端点不动)
