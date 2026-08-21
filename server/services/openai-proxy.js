@@ -226,8 +226,11 @@ function translateMaxEffort(model) {
   // [1m] 是 GUI 给 1M 上下文会话追加的后缀(App.jsx 发送前拼、chat.js 原样 --model 下发),
   // 带着它查表必落空 → 整套折算对 1M 会话失效(客户端同一 lookup 在 effortCaps.js 早已剥)。
   const hit = lookupModelCapabilities(String(model || '').replace(/\[1m\]/i, ''), 'openai');
+  // r26-F5:reasoning===false 必须先于 family 判断 —— 正则判死的模型(如 gpt-4 系、qwen2
+  // 系,family 是正则家族名而非 'table')显式关思考永远优先于「维持旧行为 xhigh」,
+  // 否则非思考模型被下发 reasoning_effort=xhigh,上游可能报错或静默误解。
+  if (hit && hit.reasoning === false) return null;   // 显式关思考(表或正则)→ 干脆不下发
   if (hit?.family !== 'table') return 'xhigh';      // 表外 / 只被正则猜中 → 维持旧行为
-  if (hit.reasoning === false) return null;          // 表说该模型不思考 → 干脆不下发
   if (!hit.efforts) return 'max';                    // 表说全档 → 它确实认 max
   if (hit.efforts.includes('max')) return 'max';
   if (hit.efforts.includes('xhigh')) return 'xhigh';
