@@ -707,7 +707,16 @@ fn spawn_backend(app: &tauri::AppHandle, port: u16) -> Option<Child> {
             .unwrap_or_else(|_| ".".to_string());
         let log_dir = PathBuf::from(home).join(".claude-gui");
         let _ = std::fs::create_dir_all(&log_dir);
-        match OpenOptions::new().create(true).append(true).open(log_dir.join("server.log")) {
+        // r29 取证:server.log append-only 无滚动会无限涨 —— spawn 前超 5MB 改名
+        // server.log.old 再开新(与 server 侧 crash.log/client.log 同口径)。必须在
+        // 打开句柄之前做:Windows 上打开中的文件改名会失败。
+        let server_log = log_dir.join("server.log");
+        if let Ok(meta) = std::fs::metadata(&server_log) {
+            if meta.len() > 5 * 1024 * 1024 {
+                let _ = std::fs::rename(&server_log, log_dir.join("server.log.old"));
+            }
+        }
+        match OpenOptions::new().create(true).append(true).open(&server_log) {
             Ok(f) => { cmd.stderr(std::process::Stdio::from(f)); }
             Err(_) => { cmd.stderr(std::process::Stdio::null()); }
         }
@@ -994,6 +1003,40 @@ pub fn run() {
                             *handle.state::<Backend>().0.lock().unwrap() = Some(child);
                             selected_port = Some(port);
                             log_startup(&format!("[tauri] spawned backend on port {port}"));
+                            // r29 取证:server 死了 Tauri 壳无感知无记录(Windows 公开版
+                            // "用一段时间整个窗口消失"拿不到证据的根因之一)。起 5s 间隔
+                            // try_wait 监护线程:退出即把 时间戳+exit code/signal 追加进
+                            // tauri-startup.log 并 eprintln。不做自动重启(本期只取证)。
+                            // 正常关停路径 take 走 child 后,监护看到 None 静默退出。
+                            {
+                                let h = handle.clone();
+                                std::thread::spawn(move || loop {
+                                    std::thread::sleep(Duration::from_secs(5));
+                                    let state = h.state::<Backend>();
+                                    let mut guard = state.0.lock().unwrap();
+                                    let Some(child) = guard.as_mut() else { break };
+                                    match child.try_wait() {
+                                        Ok(Some(status)) => {
+                                            let msg = format!(
+                                                "[tauri] backend watchdog: server child pid={} port={port} exited ({status})",
+                                                child.id()
+                                            );
+                                            log_startup(&msg);
+                                            eprintln!("{msg}");
+                                            // 已退出并落盘:take 掉避免关停路径再 kill 一次。
+                                            let _ = guard.take();
+                                            break;
+                                        }
+                                        Ok(None) => {}
+                                        Err(e) => {
+                                            let msg = format!("[tauri] backend watchdog try_wait failed: {e}");
+                                            log_startup(&msg);
+                                            eprintln!("{msg}");
+                                            break;
+                                        }
+                                    }
+                                });
+                            }
                             break;
                         }
                         let _ = child.kill();

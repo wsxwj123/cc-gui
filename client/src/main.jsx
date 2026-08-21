@@ -63,6 +63,35 @@ import './index.css';
 // CK-12: 全局输入框撤销/重做(Cmd/Ctrl+Z / Cmd/Ctrl+Shift+Z)。
 initInputUndo();
 
+// r29 取证:renderer 崩溃原来零记录(公开版"用一段时间窗口消失"拿不到证据)。
+// window error / unhandledrejection → POST /api/client-log(server 追加落
+// ~/.claude-gui/client.log,同消息 5s 限流,body 截 2KB)。纯 fire-and-forget,
+// 任何失败静默吞掉 —— 上报通道绝不能反过来影响应用本身。
+(function initClientErrorReporting() {
+  const report = (kind, message, stack) => {
+    try {
+      fetch('/api/client-log', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          kind,
+          message: String(message || ''),
+          stack: String(stack || ''),
+          url: location.href,
+        }),
+      }).catch(() => {});
+    } catch {}
+  };
+  window.addEventListener('error', (e) => {
+    report('error', e.message,
+      (e.error && e.error.stack) || `${e.filename || ''}:${e.lineno || 0}:${e.colno || 0}`);
+  });
+  window.addEventListener('unhandledrejection', (e) => {
+    const r = e.reason;
+    report('unhandledrejection', (r && r.message) || String(r), (r && r.stack) || '');
+  });
+})();
+
 watchBrandOptical(); // r13-p2-15:字标光学补偿(按实际字体度量,见 brandMetrics.js)
 ReactDOM.createRoot(document.getElementById('root')).render(
   <React.StrictMode>
