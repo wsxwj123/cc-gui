@@ -45,6 +45,9 @@ export const SKIN_ANCHORS = [
   { id: 'turn-scrubber', desc: '右缘回合刻度条' },
   { id: 'chat-search', desc: '会话内搜索条' },
   { id: 'todo-panel', desc: '待办清单面板' },
+  { id: 'goal-bar', desc: 'goal 常驻条(composer 上方)' },
+  { id: 'goal-edit', desc: 'goal 常驻条「编辑」按钮' },
+  { id: 'goal-clear', desc: 'goal 常驻条「清除」按钮' },
   { id: 'agent-monitor', desc: '子代理监控面板' },
   { id: 'permission-card', desc: '权限确认卡片' },
   // ── Home ──

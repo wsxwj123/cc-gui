@@ -4,6 +4,7 @@ import { useStore, PERMISSION_MODES } from '../stores/sessionStore.js';
 import { PermissionPrompt } from './PermissionPrompt.jsx';
 import { TodoPanel } from './TodoPanel.jsx';
 import { confirmDialog } from '../utils/confirmDialog.jsx';
+import { GoalBar } from './GoalBar.jsx';
 import { ImageLightbox } from './ImageLightbox.jsx';
 import { AnchoredPopover } from './SessionSelectors.jsx';
 import { isSteered, firstSteerableIndex, isSteerBarrier } from '../utils/steerQueue.js';
@@ -247,7 +248,7 @@ const TYPE_LABELS = {
 const TODO_AGENT_TERMINAL = ['done', 'error', 'stopped'];
 const TODO_BG_TERMINAL = ['done', 'failed', 'killed', 'stopped', 'error'];
 
-export function ChatInput({ onSend, onStop, onStopBackground, onAccelerate, canSteer = false, onBackground, suggestion = null, onDismissSuggestion, disabled, isStreaming, backgroundWorking = false, queueLength = 0, queueItems = [], onRemoveFromQueue, onEditFromQueue, paneId = null, claimDraft = null, onRefreshQueueEvidence, todos = null, plan = '', permKey = null, sessionId = null, tabIndex = null, onBtwOpen, btwUnread = 0 }) {
+export function ChatInput({ onSend, onStop, onStopBackground, onAccelerate, canSteer = false, onBackground, suggestion = null, onDismissSuggestion, disabled, isStreaming, backgroundWorking = false, queueLength = 0, queueItems = [], onRemoveFromQueue, onEditFromQueue, paneId = null, claimDraft = null, onRefreshQueueEvidence, todos = null, plan = '', goal = null, permKey = null, sessionId = null, tabIndex = null, onBtwOpen, btwUnread = 0 }) {
   const [text, setText] = useState('');
   // 编辑重发态(#4):点击「重新编辑并发送」后进入。此时历史消息尚未被破坏,
   // 按 Esc 可整条取消(清空输入+通知上层撤销待回滚),给用户反悔余地。
@@ -1216,6 +1217,11 @@ export function ChatInput({ onSend, onStop, onStopBackground, onAccelerate, canS
             </button>
           </div>
         )}
+
+        {/* r30:goal 常驻条 —— 有生效中的 /goal 时显示在 composer 正上方。与任务清单/
+            已批准计划同列叠加(顺序:计划 → 任务清单 → 目标条 → 输入框)。key=permKey:
+            分屏各窗格各挂各的,切会话即重置编辑态。 */}
+        <GoalBar key={permKey || 'global'} goal={goal} onSend={onSend} />
 
         {/* 修正批#1b 两行 composer:上行整宽输入框,下行工具行
             [权限模式▾][+附件][旁问⊙] … [发送 | 入队/转后台/停止](桌面/手机同一套)。
