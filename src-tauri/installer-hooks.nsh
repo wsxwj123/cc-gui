@@ -13,8 +13,12 @@
 !macro NSIS_HOOK_PREINSTALL
   Push $0
 
-  ; 1) 主杀:按 image 名整树杀。productName="Claude GUI" 且未设 mainBinaryName,主程序即
-  ;    "Claude GUI.exe";/T 连带子进程(GUI→node→claude→MCP)。image 名带空格必须加引号。
+  ; 1) 主杀:按 image 名整树杀。productName="CC-GUI" 且未设 mainBinaryName,主程序即
+  ;    "CC-GUI.exe";/T 连带子进程(GUI→node→claude→MCP)。image 名带空格必须加引号。
+  ;    新旧名都杀(r26-A2):升级路径正是从改名前的旧版本来,旧机器上可能还跑着
+  ;    "Claude GUI.exe";杀不到 = 没残留,属正常,幂等无害。
+  nsExec::Exec 'taskkill /F /T /IM "CC-GUI.exe"'
+  Pop $0
   nsExec::Exec 'taskkill /F /T /IM "Claude GUI.exe"'
   Pop $0
 
@@ -37,7 +41,7 @@
 ;   1) 装旧版 Claude GUI 并启动,开一个会话(拉起后端 node、可能拉起 claude.exe),点关闭(最小化到托盘)。
 ;   2) 直接运行新版 setup.exe 覆盖安装 → 应不再报"无法 write"。
 ;   3) 装完在 PowerShell 跑 `Get-CimInstance Win32_Process | ?{ $_.CommandLine -like '*server*index.js*' }`,
-;      应无旧安装目录的残留 node;`Get-Process 'Claude GUI' -ErrorAction SilentlyContinue` 应为空。
+;      应无旧安装目录的残留 node;`Get-Process 'CC-GUI' -ErrorAction SilentlyContinue` 应为空。
 
 !macro NSIS_HOOK_POSTINSTALL
   Push $0
@@ -60,7 +64,7 @@
 
   cgui_node_missing:
     MessageBox MB_OKCANCEL|MB_ICONEXCLAMATION \
-      "Claude GUI 需要 Node.js 才能运行,但未检测到。$\r$\n$\r$\n点「确定」打开 Node.js 官方下载页,安装后再启动 Claude GUI。$\r$\n$\r$\n(若你确信已安装:可能是为当前用户/版本管理器安装,安装器检测不到,可忽略——重启电脑后启动即可。)" \
+      "CC-GUI 需要 Node.js 才能运行,但未检测到。$\r$\n$\r$\n点「确定」打开 Node.js 官方下载页,安装后再启动 CC-GUI。$\r$\n$\r$\n(若你确信已安装:可能是为当前用户/版本管理器安装,安装器检测不到,可忽略——重启电脑后启动即可。)" \
       IDOK cgui_open_node IDCANCEL cgui_node_ok
     cgui_open_node:
       ExecShell "open" "https://nodejs.org/en/download"
