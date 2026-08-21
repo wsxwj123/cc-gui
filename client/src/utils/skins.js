@@ -22,10 +22,72 @@ export const SKIN_TOKENS_CLIENT = [
   '--backdrop-glass', '--backdrop-soft',
 ];
 export const SKIN_TOKENS_REJECTED_CLIENT = ['--glass-shadow'];
-// T2 静态校验黑名单(与服务端 T2_SCRIPT_BLACKLIST 一致;客户端加载前再验一遍=纵深)。
+// T2 静态校验黑名单(r26-D5:纯子串升级为正则集,修前 `fetch (`(空格)/`window["fetch"]`/
+// `Function('…')` 全可绕)。与服务端 T2_SCRIPT_BLACKLIST 逐字一致(check-skin-client.mjs t1
+// 按 String 形态钉死);校验前先 toLowerCase,故正则一律小写形态。口径 = 防误导入、不防
+// 恶意代码:正则误伤一律朝拒载方向(安全向),已知误伤(prefetch(、匿名 function(){})
+// 钉在 check-r26-t2-blacklist.mjs / check-r26-t2-blacklist-client.mjs。
 export const T2_BLACKLIST_CLIENT = [
-  'fetch(', 'xmlhttprequest', 'websocket', 'import(', 'eval(', 'new function', 'navigator.sendbeacon',
+  /fetch\s*\(/,
+  /xmlhttprequest/,
+  /websocket\s*\(/,
+  /import\s*\(/,
+  /eval\s*\(/,
+  /new\s+function/,
+  /\bfunction\s*\(/,
+  /navigator\s*\.\s*sendbeacon/,
+  /\[\s*['"](?:fetch|eval|function|websocket)['"]\s*\]/,
 ];
+
+// ── 值文法校验(客户端版;r26-D11) ─────────────────────────────
+// bootReplaySkin 的 FOUC 缓存重放只读 localStorage——修前 expandSkin 的 pick 只查 token
+// 白名单 + ≤240 字符,篡改 localStorage 可注入 url(javascript:…) 形态值绕过服务端
+// validateSkinVar 的文法闸。以下常量与函数为 server/utils/skin-validate.js 中
+// validateSkinVar 纯函数部分的逐字复制(白名单引用换 CLIENT 变体;客户端复制不 import
+// server 文件,本文件顶部既有惯例),双端一致性由 check-r26-skin-var-parity.mjs
+// 跨文件 token × 值矩阵钉死。
+// 值文法(锚定 ^$,无 m flag;进正则前黑名单预筛)。
+const ALPHA_CLIENT = '(?:0|1(?:\\.0{1,4})?|0?\\.\\d{1,4})';
+const HEX_CLIENT = '#[0-9a-fA-F]{3}(?:[0-9a-fA-F])?(?:[0-9a-fA-F]{2})?(?:[0-9a-fA-F]{2})?';
+const RGB_CLIENT = `rgba?\\(\\s*\\d{1,3}\\s*,\\s*\\d{1,3}\\s*,\\s*\\d{1,3}\\s*(?:,\\s*${ALPHA_CLIENT}\\s*)?\\)`;
+const HSL_CLIENT = `hsla?\\(\\s*\\d{1,3}\\s*,\\s*\\d{1,3}%\\s*,\\s*\\d{1,3}%\\s*(?:,\\s*${ALPHA_CLIENT}\\s*)?\\)`;
+const COLOR_RE_CLIENT = new RegExp(`^(?:${HEX_CLIENT}|${RGB_CLIENT}|${HSL_CLIENT})$`);
+const LENGTH_RE_CLIENT = /^\d{1,2}(\.\d)?px$/;
+const SLEN_CLIENT = '-?\\d{1,3}(?:\\.\\d{1,2})?(?:px)?';
+const SCOLOR_CLIENT = `(?:${HEX_CLIENT}|${RGB_CLIENT}|${HSL_CLIENT})`;
+const ONE_SHADOW_CLIENT = `(?:inset\\s+)?${SLEN_CLIENT}\\s+${SLEN_CLIENT}(?:\\s+${SLEN_CLIENT}){0,2}\\s+${SCOLOR_CLIENT}`;
+const SHADOW_RE_CLIENT = new RegExp(`^${ONE_SHADOW_CLIENT}(?:\\s*,\\s*${ONE_SHADOW_CLIENT})*$`);
+const BACKDROP_RE_CLIENT = /^(?:none|blur\(\d{1,2}(\.\d)?px\))$/;
+
+// 黑名单预筛(toLowerCase 后):任一子串命中直接拒(大小写变体同闸)。
+const VALUE_BLACKLIST_CLIENT = ['url(', 'var(', ';', '}', '\\', '/*', '@'];
+
+function grammarForClient(token) {
+  if (token.startsWith('--color-') || token.startsWith('--glass-')) return COLOR_RE_CLIENT; // glass-shadow 在白名单层已拒
+  if (token.startsWith('--radius-')) return LENGTH_RE_CLIENT;
+  if (token.startsWith('--shadow-')) return SHADOW_RE_CLIENT;
+  if (token.startsWith('--backdrop-')) return BACKDROP_RE_CLIENT;
+  return null;
+}
+
+/** 单变量校验(客户端版):{ ok } | { ok:false, reason }。与服务端 validateSkinVar 同口径。 */
+export function validateSkinVarClient(token, value) {
+  if (!SKIN_TOKENS_CLIENT.includes(token)) return { ok: false, reason: 'not_in_whitelist' };
+  if (SKIN_TOKENS_REJECTED_CLIENT.includes(token)) return { ok: false, reason: 'rejected_v1' };
+  if (typeof value !== 'string') return { ok: false, reason: 'grammar' };
+  const v = value.trim();
+  const maxLen = grammarForClient(token) === SHADOW_RE_CLIENT ? 240 : 64;
+  if (!v || v.length > maxLen) return { ok: false, reason: 'too_long' };
+  const low = v.toLowerCase();
+  for (const bad of VALUE_BLACKLIST_CLIENT) {
+    if (low.includes(bad)) return { ok: false, reason: 'blacklist' };
+  }
+  const re = grammarForClient(token);
+  if (!re || !re.test(v)) return { ok: false, reason: 'grammar' };
+  // LENGTH 数值 ≤64 附加约束
+  if (re === LENGTH_RE_CLIENT && parseFloat(v) > 64) return { ok: false, reason: 'grammar' };
+  return { ok: true };
+}
 
 const LS_ID = 'cgui-skin-id';
 const LS_CACHE = 'cgui-skin-cache';
@@ -44,7 +106,7 @@ const state = {
   manifest: null,
   appliedVars: [],       // 已 setProperty 的 token 名(清除用)
   background: null,      // { url, overlayOpacity, fit, position, blur } | null
-  t2: null,              // { styleNodes:[], scriptNode, blobUrl, attrSnapshot } | null
+  t2: null,              // { styleNodes:[], scriptNode, blobUrl, attrSnapshot(preSnap), loadedSnap } | null
   tryOn: false,          // 试穿(不落 localStorage)
 };
 export const getSkinState = () => state;
@@ -72,8 +134,8 @@ export function expandSkin(manifest, mode) {
   const vars = {};
   const pick = (obj) => {
     for (const [k, v] of Object.entries(obj || {})) {
-      if (!SKIN_TOKENS_CLIENT.includes(k) || SKIN_TOKENS_REJECTED_CLIENT.includes(k)) continue;
-      if (typeof v === 'string' && v.length <= 240) vars[k] = v;
+      // r26-D11:值走全套闸(白名单+黑名单+文法)——FOUC 缓存重放不再旁路文法校验
+      if (validateSkinVarClient(k, v).ok) vars[k] = String(v).trim();
     }
   };
   pick(m.shared?.vars);
@@ -133,6 +195,7 @@ export function applySkinDom(id, manifest, { root = document.documentElement } =
 
 /** 停用:清 inline 变量 + 属性 + home/icons/背景/T2;回到主题原样。 */
 export function clearSkinDom({ root = document.documentElement } = {}) {
+  ++t2Gen; // r26-D1:停用使一切在途装载失效
   disposeT2();
   clearVars(root);
   root.removeAttribute('data-cgui-skin');
@@ -145,10 +208,16 @@ export function clearSkinDom({ root = document.documentElement } = {}) {
 }
 
 // ── T2 代码层(开发者皮肤;总开关 + 双端静态校验 + 三重卸载兜底) ──
+// r26-D1:装载代际 token——每次激活/停用递增。快速连切(或 StrictMode 双跑)时慢一拍
+// 的装载在任一 await 回来后比对代际,过期即弃(不插节点、不盖 state.t2),杜绝
+// 「显示 B 的皮、跑着 A 的脚本」串皮。
+let t2Gen = 0;
+
 export function validateT2Client(text) {
   if (typeof text !== 'string') return { ok: false, hits: ['not_text'] };
   const low = text.toLowerCase();
-  const hits = T2_BLACKLIST_CLIENT.filter((k) => low.includes(k));
+  // r26-D5:正则集判定,hits = 命中正则的 source 串(与服务端 validateT2Script 同形状)
+  const hits = T2_BLACKLIST_CLIENT.filter((re) => re.test(low)).map((re) => re.source);
   return hits.length ? { ok: false, hits } : { ok: true };
 }
 
@@ -156,9 +225,14 @@ export function validateT2Client(text) {
  * 装载 T2 三件套(样式节点带 data-cgui-skin-style 标记;client.js 经 Blob-URL 经典
  * 脚本注入;激活前快照 documentElement 属性)。texts 可直接传入(粘贴试穿),否则
  * 按 manifest 从资源端点取。总开关关闭 → 静默不载(T1 部分照常)。
+ * gen = r26-D1 代际 token(activateSkin 领代传入;直调则自领),过期返回 superseded。
  */
-export async function loadT2(id, manifest, texts = null) {
+export async function loadT2(id, manifest, texts = null, gen = null) {
   if (!devSkinsEnabled()) return { loaded: false, reason: 'disabled' };
+  // r26-D1:调用方未领代则自领一代(直接调 loadT2 的路径);之后每个 await 回来
+  // 先比代,过期 = 已有更新的激活/停用,一律不插节点不盖 state(superseded)。
+  if (gen == null) gen = ++t2Gen;
+  const stale = () => gen !== t2Gen;
   disposeT2();
   const get = async (name) => {
     if (texts && typeof texts[name] === 'string') return texts[name];
@@ -168,17 +242,23 @@ export async function loadT2(id, manifest, texts = null) {
     return r.ok ? await r.text() : null;
   };
   const css = await get('skin.css');
+  if (stale()) return { loaded: false, reason: 'superseded' };
   const a11y = await get('a11y.css');
+  if (stale()) return { loaded: false, reason: 'superseded' };
   const js = await get('client.js');
+  if (stale()) return { loaded: false, reason: 'superseded' };
   if (js) {
     const v = validateT2Client(js);
     if (!v.ok) return { loaded: false, reason: 'script_rejected', hits: v.hits };
   }
+  // ── 以下为同一同步 tick(快照→插节点→state 赋值,无 await 即无竞态缝)──
+  // r26-D2 二次快照法:attrSnapshot = preSnap(装载前),loadedSnap = 装载完成后同一
+  // tick 再拍一次;dispose 按两快照 diff 只还原皮肤改过的属性(见 disposeT2)。
   const attrSnapshot = {};
   for (const name of document.documentElement.getAttributeNames()) {
     attrSnapshot[name] = document.documentElement.getAttribute(name);
   }
-  const t2 = { styleNodes: [], scriptNode: null, blobUrl: null, attrSnapshot };
+  const t2 = { styleNodes: [], scriptNode: null, blobUrl: null, attrSnapshot, loadedSnap: null };
   for (const text of [css, a11y]) {
     if (!text) continue;
     const node = document.createElement('style');
@@ -197,11 +277,17 @@ export async function loadT2(id, manifest, texts = null) {
     document.head.appendChild(node);
     t2.scriptNode = node;
   }
+  // r26-D2:装载完成后同一同步 tick 二次快照(皮肤脚本同步执行的痕迹落在两快照差集里)
+  const loadedSnap = {};
+  for (const name of document.documentElement.getAttributeNames()) {
+    loadedSnap[name] = document.documentElement.getAttribute(name);
+  }
+  t2.loadedSnap = loadedSnap;
   state.t2 = t2;
   return { loaded: true };
 }
 
-/** 卸载 T2:①皮肤自注册 disposer → ②标记节点逐项移除 → ③documentElement 属性快照恢复。 */
+/** 卸载 T2:①皮肤自注册 disposer → ②标记节点逐项移除 → ③documentElement 属性按双快照 diff 还原。 */
 export function disposeT2() {
   const t2 = state.t2;
   try { window.__cguiSkinDispose?.(); } catch {}
@@ -212,12 +298,33 @@ export function disposeT2() {
   if (t2) {
     if (t2.blobUrl) { try { URL.revokeObjectURL(t2.blobUrl); } catch {} }
     const root = document.documentElement;
-    const snap = t2.attrSnapshot || {};
-    for (const name of root.getAttributeNames()) {
-      if (!(name in snap)) root.removeAttribute(name);
-    }
-    for (const [name, val] of Object.entries(snap)) {
-      if (root.getAttribute(name) !== val) root.setAttribute(name, val);
+    // r26-D2 二次快照 diff:只还原「皮肤改过且之后没人再动」的属性——皮肤存活期间
+    // 用户换主题(data-theme)/改字体透明度等不再被回滚。迭代域必须含 keys(preSnap):
+    // 皮肤装载期删除的属性 preSnap 有、loadedSnap 无,不进迭代就永不还原。
+    // cur === null(属性当前不存在)先摘出来单独判,绝不与 undefined 比(getAttribute
+    // 缺席返回 null,null === undefined 为 false 会把「被删掉」错判成「被改过」)。
+    const preSnap = t2.attrSnapshot || {};
+    const loadedSnap = t2.loadedSnap || preSnap; // 旧态兜底:无二次快照时退化为全量还原
+    const names = new Set([...root.getAttributeNames(), ...Object.keys(loadedSnap), ...Object.keys(preSnap)]);
+    for (const name of names) {
+      const inLoaded = Object.prototype.hasOwnProperty.call(loadedSnap, name);
+      const inPre = Object.prototype.hasOwnProperty.call(preSnap, name);
+      const cur = root.getAttribute(name); // null = 当前不存在
+      if (!inLoaded && !inPre) {
+        root.removeAttribute(name); // 存活期新增(皮肤脚本异步或第三方) → 摘除
+      } else if (inLoaded && cur !== null && cur === loadedSnap[name]) {
+        // 装载后没人动 → 还原到装载前(preSnap 无此键 = 装载期新增,摘除)
+        if (inPre) root.setAttribute(name, preSnap[name]);
+        else root.removeAttribute(name);
+      } else if (!inLoaded && inPre && cur === null) {
+        root.setAttribute(name, preSnap[name]); // 皮肤装载期删掉且仍缺席 → 还原
+      }
+      // else:第三方改过(cur≠loadedSnap)/皮肤删掉但第三方重设(cur≠null) → 一律保留现状。
+      // 已知残留面:皮肤脚本在 loadedSnap 之后异步(setInterval 等)自改的属性会被当用户
+      // 改动保留——T2 是受信开发者代码(总开关+确认弹窗),残留可接受。
+      // watchThemeForSkin 交互:明暗切换重跑 applySkinDom 会重写 root.style 内联变量 →
+      // style ≠ loadedSnap 被当「用户改动」保留,这不泄漏:clearSkinDom 顺序是
+      // disposeT2() → clearVars(),clearVars 按 appliedVars 精确 removeProperty 清干净。
     }
   }
   state.t2 = null;
@@ -230,6 +337,7 @@ function writeCache(id, manifest) {
 export async function activateSkin(row, { tryOn = false } = {}) {
   const { id, manifest, t2Texts } = row || {};
   if (!id || !manifest) return;
+  const gen = ++t2Gen; // r26-D1:每次激活领一代,此前在途装载全部失效
   disposeT2();
   applySkinDom(id, manifest);
   state.tryOn = tryOn;
@@ -244,7 +352,7 @@ export async function activateSkin(row, { tryOn = false } = {}) {
   // t2Texts = 内置示例/粘贴试穿的本地三件套(不经资源端点);否则按 manifest 从服务端取。
   // 返回 T2 装载结果给 UI(拒载/门控不再被静默吞掉——p2-1 顺带修)。
   let t2 = null;
-  if (manifest.tier === 2) t2 = await loadT2(id, manifest, t2Texts || null);
+  if (manifest.tier === 2) t2 = await loadT2(id, manifest, t2Texts || null, gen);
   if (!tryOn) {
     try { localStorage.setItem(LS_ID, id); } catch {}
     writeCache(id, manifest);
@@ -270,23 +378,26 @@ export function bootReplaySkin() {
 }
 
 /** 列表返回后校对(App 挂载后调):id 失效 → 静默清;manifest 有变 → 以服务端为准重应用。
- *  内置示例(builtin- 前缀)不在服务端库,按本地预置解析,不参与失效清除。 */
+ *  r26-D8:先查服务端列表再判 builtin- 分支——修前 builtin- 前缀直接进本地分支,
+ *  而 BUILTIN_SKINS 已退役为空 → 用户皮肤起名 "builtin xxx" 得的 builtin- 前缀 id
+ *  重启即被静默卸。现在服务端列表命中(含用户自起的 builtin- 前缀皮肤)优先激活;
+ *  查无且 builtin- 前缀才进本地退役分支(BUILTIN_SKINS 为空则 deactivate)。 */
 export async function reconcileSkinOnBoot() {
   let id = null;
   try { id = localStorage.getItem(LS_ID); } catch {}
   if (!id) return;
-  if (id.startsWith('builtin-')) {
-    const b = BUILTIN_SKINS.find((s) => s.id === id);
-    if (b) await activateSkin(b);
-    else deactivateSkin();
-    return;
-  }
   try {
     const r = await fetch('/api/skins');
     const d = await r.json();
     const row = (d.skins || []).find((s) => s.id === id);
-    if (!row) { deactivateSkin(); return; }
-    await activateSkin({ id, manifest: row.manifest });
+    if (row) { await activateSkin({ id, manifest: row.manifest }); return; }
+    // 服务端查无:builtin- 前缀进本地退役分支(BUILTIN_SKINS 已空 → deactivate),
+    // 非前缀 id 失效 → 静默清回默认
+    if (id.startsWith('builtin-')) {
+      const b = BUILTIN_SKINS.find((s) => s.id === id);
+      if (b) { await activateSkin(b); return; }
+    }
+    deactivateSkin(); return;
   } catch { /* 网络失败保持缓存重放的样子,下次再对账 */ }
 }
 
