@@ -13,6 +13,7 @@ import { extname, join } from 'path';
 import { homedir, tmpdir } from 'os';
 import { randomUUID } from 'crypto';
 import { isPathInside } from '../utils/safe-path.js';
+import { broadcast } from '../broadcast.js';
 import {
   parseTarListing, validateZipEntries, resolveRootPrefix, validateManifest,
   imageDimensions, sanitizeSvg, validateT2Script, convertDswVars, ZIP_LIMITS,
@@ -412,6 +413,10 @@ router.delete('/skins/:id', async (req, res) => {
   try { await stat(dir); } catch { return res.status(404).json({ error: 'not_found', message: ERROR_MESSAGES.not_found }); }
   try {
     await rm(dir, { recursive: true, force: true });
+    // r26-D7:删除成功广播(契约 C-D7 逐字 {type:'skins-changed', deletedId})——
+    // 多端场景另一端正在用该皮肤时静默回默认,不再等下次 reconcile 自愈。
+    // broadcast 自身逐客户端 catch,不抛;删成功即 200,广播失败不翻转结果。
+    broadcast({ type: 'skins-changed', deletedId: id });
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: 'internal', message: err.message });
