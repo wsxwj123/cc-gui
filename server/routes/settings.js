@@ -1747,11 +1747,36 @@ async function tryFetchModels(url, apiKey) {
 // r22-⑤:allowLoopback 默认 true —— 现有调用点(provider 切换/拉模型/额度查询/MCP ping)
 // 校验的都是【用户自己填的】地址,接本机中转是刻意支持的场景,默认行为一个字不改。
 // 只有"第三方回什么就是什么"的值(如上游返回的图片链接)才传 false。
+// r26-J15:公网强制 https —— http 会把 apiKey/quotaKey 明文发出,仅回环豁免(本机中转
+// 是合法场景)。回环判定:字面回环(127.x/::1/localhost)直接豁免;其余先看 DNS,
+// 解析得出且【全部】回环才豁免;解析失败无法证明回环 → http 一律拒(fail-closed,
+// 明文密钥不能赌;r17-3 的"解析失败放行"只对 https 成立)。
+// ⚠️ 残余风险(本轮刻意不闭合,见 PLAN-r26 J15):DNS 答单在【本守卫解析】与【fetch 实际
+// 连接】之间可被重答(DNS rebinding TOCTOU)—— 守卫时解析到公网 IP、连接时换成内网 IP
+// 的窗口仍在。彻底闭合需自定义 lookup 把解析结果钉进连接 agent,成本高;单用户本机工具
+// 的攻击面里,能控制用户 DNS 答单的攻击者已有更大得手面,故记为后续 backlog:连接钉 IP。
 export async function assertPublicBaseURL(baseURL, { allowLoopback = true } = {}) {
-  let host;
-  try { host = new URL(baseURL).hostname.replace(/^\[|\]$/g, ''); }
+  let url;
+  try { url = new URL(baseURL); }
   catch { const e = new Error('baseURL 非法'); e.status = 400; throw e; }
+  const host = url.hostname.replace(/^\[|\]$/g, '');
+  // 环回放行:本机中转(one-api / new-api / claude 自带的回环代理)是合法场景,
+  // server 打环回只到达用户自己机器,不构成内网探测面;且编辑态强制 baseURL 与存储
+  // key 同源,环回也骗不出已存密钥。私网/链路本地(真 SSRF 目标)仍拒绝。
+  const isLoopback = (ip) => /^127\./.test(ip) || ip === '::1' || /^::ffff:127\./i.test(ip);
   const { lookup } = await import('dns/promises');
+  // r26-J15:http 分支先行 —— 证明不了回环就拒,不落到下面 https 的"解析失败放行"。
+  if (url.protocol === 'http:') {
+    if (allowLoopback && (isLoopback(host) || host === 'localhost')) return;
+    let addrs = null;
+    try { addrs = await lookup(host, { all: true }); } catch { addrs = null; }
+    if (allowLoopback && addrs?.length && addrs.every((a) => isLoopback(a.address))) return;
+    const e = new Error('公网 baseURL 必须使用 https（http 仅允许本机回环地址，防明文密钥外泄）');
+    e.status = 400; throw e;
+  }
+  if (url.protocol !== 'https:') {
+    const e = new Error('baseURL 必须是 http(s)'); e.status = 400; throw e;
+  }
   let addrs;
   try { addrs = await lookup(host, { all: true }); }
   catch {
@@ -1761,13 +1786,9 @@ export async function assertPublicBaseURL(baseURL, { allowLoopback = true } = {}
     //
     // 安全性:解析不了的主机名,后续请求必然也发不出去 → 构不成 SSRF 面;真正的攻击
     // 会用【能解析且指向内网】的域名,那条路径下面照样拦。所以"解析失败就拒绝"既没
-    // 挡住攻击、又把没网/DNS 慢的正常用户挡在门外。
+    // 挡住攻击、又把没网/DNS 慢的正常用户挡在门外。(仅 https;http 上面已 fail-closed。)
     return;
   }
-  // 环回放行:本机中转(one-api / new-api / claude 自带的回环代理)是合法场景,
-  // server 打环回只到达用户自己机器,不构成内网探测面;且编辑态强制 baseURL 与存储
-  // key 同源,环回也骗不出已存密钥。私网/链路本地(真 SSRF 目标)仍拒绝。
-  const isLoopback = (ip) => /^127\./.test(ip) || ip === '::1' || /^::ffff:127\./i.test(ip);
   if (allowLoopback && addrs.length && addrs.every((a) => isLoopback(a.address))) return;
   // ⚠️ 198.18.0.0/15 刻意【不】算私网:它是 RFC2544 基准测试网段,而 Clash TUN 增强模式
   // 拿它做 fake-IP,本机所有走代理的域名都解析成 198.18.x.x。把它算私网会让装了 TUN
