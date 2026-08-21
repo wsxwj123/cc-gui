@@ -25,9 +25,10 @@ const inFlightResponds = new Map();
 // POST 会静默丢失 → CLI 永久挂起等应答、刷新后同一弹窗重现(死循环根因)。
 // 单次 8s 短超时(快失败快重试,超时还会让浏览器废弃死掉的池连接,下次拿新
 // TCP),失败后递增间隔无限重试。服务端 respond 幂等(alreadyResolved),重试
-// 绝不会把同一应答写两次进 CLI。终止条件三选一:
+// 绝不会把同一应答写两次进 CLI。终止条件四选一:
 //   送达成功(HTTP 2xx,含 alreadyResolved)/ 卡片已被他端解决(对账或
-//   resolved 广播撤卡)/ cancelRespond 明确取消。
+//   resolved 广播撤卡)/ cancelRespond 明确取消 / 403 nonce 终态(r27-review1,
+//   见下)。
 // 服务端 15min TTL 与进程退出 dropPendingForSession 都会让重试命中
 // alreadyResolved 收敛,不存在永久重试。
 export async function respondPermission(id, body) {
@@ -55,6 +56,19 @@ export async function respondPermission(id, body) {
           signal: AbortSignal.timeout(8_000),
         });
         if (r.ok) return true; // 含 alreadyResolved —— 都算送达
+        // r27-review1:403 = nonce 闸拒绝(r26-H1,终态)——nonce 与服务端 slot 逐字
+        // 比对,不符重试再多次也不会变对(典型:手机缓存了 H1 之前的旧前端,根本没
+        // 带 nonce)。原实现只有两个出口(r.ok / 卡片被撤),403 会掉进递增退避无限
+        // 重试:hadCard=false 的 auto-allow 要等 15min TTL 命中 alreadyResolved 才
+        // 收敛,期间 CLI 挂起;有卡路径卡片转圈卡死。终态处理:console 留痕 + 撤卡
+        // (组件侧无现成失败展示路径,不新造 UI;25s 对账会把服务端仍 pending 的卡
+        // 补回来,用户可重试,不会静默丢请求),return false 不进重试通道。
+        // (此端点 403 只有 nonce 一种;CORS/Host 门 403 同为终态,一并收敛。)
+        if (r.status === 403) {
+          try { console.warn('[cgui-perm] respond 403(nonce 无效,终态不再重试):', id); } catch {}
+          if (hadCard) useStore.getState().removePendingPermission(id);
+          return false;
+        }
       } catch { /* 半死连接/超时,落到重试 */ }
       // 1s/2s/4s/8s 封顶的递增间隔:连接刚抖一下时快速恢复,持续断开时不刷屏
       await new Promise((ok) => setTimeout(ok, Math.min(1_000 * 2 ** attempt, 8_000)));
