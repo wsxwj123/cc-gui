@@ -11,7 +11,13 @@
 //   R3 某行 content 因此清空 → 删整行,parentUuid 链接骨(所有指向该行 uuid 的引用
 //      重指到该行的 parentUuid)。引用字段清单(session-reader/sessions.js grep 实证):
 //      每行 parentUuid、summary 行 leafUuid、compact_boundary 行 logicalParentUuid。
-// 只删不改写内容;非 user/assistant 行与解析失败的行原样透传;幂等(二次跑 report 全零)。
+// 只删不改写内容;非 user/assistant 行与解析失败的行原样透传;幂等(二次跑 report 的
+// emptyText/emptyThinking/droppedLines/relinked 全零)。
+// r26-G7:原本就是空数组的 content[](非清块所致)只报不修——report.zeroBlocks 计数
+// (zeroBlocksByType 按 user/assistant 分桶),行原样保留。不自动删的理由:jsonl 行有
+// parentUuid 链,删行会让其子行变孤儿,接骨复杂度与收益(几行空壳)不配;若未来要做,
+// 应做「重指 parent 后删」的完整事务。zeroBlocks 是存量观察计数,二次跑仍会报出,
+// 不属于幂等"全零"口径。
 
 const isBlankText = (c) =>
   c && typeof c === 'object' && c.type === 'text'
@@ -22,10 +28,14 @@ const isBlankThinking = (c) =>
 
 /**
  * 纯函数:lines(字符串数组,jsonl 各行)→ { lines, report }。
- * report = { emptyText, emptyThinking, droppedLines, relinked }(只数字,不含正文)。
+ * report = { emptyText, emptyThinking, droppedLines, relinked, zeroBlocks,
+ *            zeroBlocksByType: { user, assistant } }(只数字,不含正文)。
  */
 export function repairOfficialCompat(lines) {
-  const report = { emptyText: 0, emptyThinking: 0, droppedLines: 0, relinked: 0 };
+  const report = {
+    emptyText: 0, emptyThinking: 0, droppedLines: 0, relinked: 0,
+    zeroBlocks: 0, zeroBlocksByType: { user: 0, assistant: 0 },
+  };
   // 第一遍:清块;因此清空的行记 uuid → parentUuid,先不落地。
   const entries = []; // { raw, obj|null, changed, dropped }
   const droppedParent = new Map(); // uuid → parentUuid(被删行)
@@ -36,6 +46,13 @@ export function repairOfficialCompat(lines) {
       && obj.message && Array.isArray(obj.message.content);
     if (!isMsg) { entries.push({ raw, obj }); continue; }
     const orig = obj.message.content;
+    // r26-G7:原本就空的 content[](非清块所致)——只报不修,计数后原样透传。
+    if (orig.length === 0) {
+      report.zeroBlocks++;
+      report.zeroBlocksByType[obj.type]++; // isMsg 已保证 type ∈ {user, assistant}
+      entries.push({ raw, obj });
+      continue;
+    }
     const kept = [];
     for (const c of orig) {
       if (isBlankText(c)) { report.emptyText++; continue; }
