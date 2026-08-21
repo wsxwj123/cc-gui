@@ -43,6 +43,11 @@ const WINDOW = 800; // 路径常量与其读写函数/说明通常在同一屏�
 // 已逐个核对过【不存任何凭据】的例外,加一条要写清理由 —— 这就是"新文件默认变红"的来源。
 const KEYLESS = new Map([
   ['active-provider.json', '只存 { id }(最后切换的 provider id);命中是因为 12 行外就是 CUSTOM_PROVIDERS_PATH 的注释'],
+  // r26-PKG-12:provider-quota.js 新增 J8/J10 注释代码后,prefs.json 字面量落进 makeFetcher(apiKey)
+  // 的 ±800 窗口 → 启发式误报。逐个核对:prefs.json 只存 displayName/sidebarView/pinned/
+  // hiddenProjects/customTitles/autoTitles/quotaThresholds/updateChannel 等界面偏好,
+  // 无任何凭据(prefs.js 全部写路径已核),故按本文件既有例外机制登记。
+  ['prefs.json', '只存界面偏好(thresholds/显示名/侧栏序等),无凭据;命中是因 makeFetcher(apiKey) 在同一屏内'],
 ]);
 
 const jsFiles = [];
