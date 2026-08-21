@@ -27,17 +27,21 @@ export const SKIN_TOKENS_REJECTED_CLIENT = ['--glass-shadow'];
 // 按 String 形态钉死);校验前先 toLowerCase,故正则一律小写形态。口径 = 防误导入、不防
 // 恶意代码:正则误伤一律朝拒载方向(安全向),已知误伤(prefetch(、匿名 function(){})
 // 钉在 check-r26-t2-blacklist.mjs / check-r26-t2-blacklist-client.mjs。
-// r27:规则带标识符左边界 lookbehind 防 prefetch(/myeval( 误伤;function 规则改抓
+// r27:规则带标识符左边界 防 prefetch(/myeval( 误伤;function 规则改抓
 // 「字符串实参」形态(Function("...") 构造器——lowercase 后与 function 关键字同形,
 // 普通 function 声明/表达式(标识符或 ) 开头)不命中。QQ2008 皮肤曾被旧规则误杀。
+// r31-Safari<16.4:原写法用 lookbehind(标识符左边界),但旧 WebKit 不支持 lookbehind,
+// 模块顶层字面量正则会在 import 时抛解析期 SyntaxError → main.jsx 顶层 import 本模块
+// 整页白屏。改为等价的无 lookbehind 写法 `(?:^|[^\w$])`(捕获式,布尔 .test() 逐点一致;
+// 仅当「fetch 前紧邻字符非 \w/$ 或串首」命中),hits 的 source 串变化由 check-r26 两测换锚。
 export const T2_BLACKLIST_CLIENT = [
-  /(?<![\w$])fetch\s*\(/,
+  /(?:^|[^\w$])fetch\s*\(/,
   /xmlhttprequest/,
-  /(?<![\w$])websocket\s*\(/,
-  /(?<![\w$])import\s*\(/,
-  /(?<![\w$])eval\s*\(/,
+  /(?:^|[^\w$])websocket\s*\(/,
+  /(?:^|[^\w$])import\s*\(/,
+  /(?:^|[^\w$])eval\s*\(/,
   /new\s+function/,
-  /(?<![\w$])function\s*\(\s*['"]/,
+  /(?:^|[^\w$])function\s*\(\s*['"]/,
   /navigator\s*\.\s*sendbeacon/,
   /\[\s*['"](?:fetch|eval|function|websocket)['"]\s*\]/,
 ];
