@@ -226,6 +226,9 @@ router.post('/image/generate', async (req, res) => {
       headers,
       body: JSON.stringify(spec.body),
       signal: AbortSignal.timeout(GENERATE_TIMEOUT_MS),
+      // r26-J1:与下方下载分支同口径 —— 不跟随重定向。生成 POST 带着 apiKey,跟随 302
+      // 会把请求(或响应读取)引到 assertPublicBaseURL 没验过的地址(鉴权跳转/网关劫持)。
+      redirect: 'manual',
     });
     let r;
     try { r = await post(spec.headers); }
@@ -239,6 +242,12 @@ router.post('/image/generate', async (req, res) => {
     // → 用另一种原样重试一次,而不是一刀切押一种。
     if (!r.ok && spec.altHeaders && (r.status === 401 || r.status === 403)) {
       try { r = await post(spec.altHeaders); } catch { /* 保留首次响应 */ }
+    }
+    // r26-J1:3xx 一律报错,不读 Location、不跟随(下载分支同款;API 端点的 302 通常是
+    // 鉴权跳转/网关劫持,跟随必错且会脱离刚验过的 origin)。
+    if (r.status >= 300 && r.status < 400) {
+      await r.body?.cancel?.().catch(() => {});
+      return res.status(502).json({ error: `上游返回了重定向（HTTP ${r.status}），已拒绝跟随（防止密钥被带到未校验的地址）` });
     }
     const raw = await r.text().catch(() => '');
     const safeRaw = redactKey(raw, provider.apiKey).slice(0, MAX_UPSTREAM_ERR);
