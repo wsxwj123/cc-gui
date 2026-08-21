@@ -445,15 +445,29 @@ export function sanitizeSvg(text, maxBytes = ZIP_LIMITS.maxSvgBytes) {
   return { ok: true, svg: s };
 }
 
-// ── ③T2 client.js 静态校验器(黑名单字样即拒载;FIX-SPEC §③.3 清单) ──
+// ── ③T2 client.js 静态校验器(黑名单形态即拒载;FIX-SPEC §③.3 清单) ──
+// r26-D5:纯子串升级为正则集——修前 `fetch (`(空格)/`window["fetch"]`/`Function('…')`
+// 全可绕。校验前先 toLowerCase,故正则一律小写形态。
+// 口径 = 防误导入、不防恶意代码(skinPrompt.js 同口径文案):正则误伤一律朝拒载方向
+// (安全向),已知误伤钉在 check-r26-t2-blacklist.mjs:`prefetch(` 命中 /fetch\s*\(/、
+// 匿名函数表达式 `function(){}` 命中 /\bfunction\s*\(/——作者改码(箭头函数)即可过。
+// 双端同表:客户端 skins.js T2_BLACKLIST_CLIENT 逐字一致(check-skin-client 钉死)。
 export const T2_SCRIPT_BLACKLIST = [
-  'fetch(', 'xmlhttprequest', 'websocket', 'import(', 'eval(', 'new function', 'navigator.sendbeacon',
+  /fetch\s*\(/,
+  /xmlhttprequest/,
+  /websocket\s*\(/,
+  /import\s*\(/,
+  /eval\s*\(/,
+  /new\s+function/,
+  /\bfunction\s*\(/,
+  /navigator\s*\.\s*sendbeacon/,
+  /\[\s*['"](?:fetch|eval|function|websocket)['"]\s*\]/,
 ];
-/** → { ok:true } | { ok:false, hits: string[] }。toLowerCase 全文扫描,命中即拒。 */
+/** → { ok:true } | { ok:false, hits: string[] }(命中正则的 source 串)。toLowerCase 全文扫描,命中即拒。 */
 export function validateT2Script(text) {
   if (typeof text !== 'string') return { ok: false, hits: ['not_text'] };
   const low = text.toLowerCase();
-  const hits = T2_SCRIPT_BLACKLIST.filter((k) => low.includes(k));
+  const hits = T2_SCRIPT_BLACKLIST.filter((re) => re.test(low)).map((re) => re.source);
   return hits.length ? { ok: false, hits } : { ok: true };
 }
 
