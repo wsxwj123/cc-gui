@@ -17,7 +17,9 @@ const PKG_PATH = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'pack
 // 删除白名单:文件名必须是 cc-gui 安装包(下载时 sanitize 后空格变 _,GitHub
 // 资产名用 .;重名追加 -N 后缀),且位于 ~/Downloads 内 —— 防止记录文件被篡改后
 // 该端点删除任意文件。
-const INSTALLER_NAME_RE = /^Claude[ ._]GUI[ ._-].*\.(dmg|exe|msi)$/i;
+// 新旧名并容:productName 改名 CC-GUI 后 CI 产物为 CC-GUI_*;旧名分支保留是因为
+// 用户 Downloads 里可能躺着改名前下载的旧包记录(r26-A1)。
+const INSTALLER_NAME_RE = /^(CC-GUI|Claude[ ._]GUI)[ ._-].*\.(dmg|exe|msi)$/i;
 
 function currentAppVersion() {
   try { return JSON.parse(readFileSync(PKG_PATH, 'utf-8')).version || ''; } catch { return ''; }
