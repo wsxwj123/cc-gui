@@ -1488,12 +1488,21 @@ router.put('/custom-providers/:id', async (req, res) => {
       apiKey: (typeof apiKey === 'string' && apiKey.trim()) ? apiKey.trim() : prev.apiKey,
       models: nextModels,
     };
+    // r26-H4①:baseURL 变更 = 端点换源,旧 quotaKey 与新端点不再同源 —— 保留它会把
+    // 额度查询密钥发去错配/攻击者端点(与 fetch-models「用存储 key 时 baseURL 强制取
+    // 存储值」的同源闸同语义)。本次保存未显式给新 quotaKey 时一律清掉并打标,前端据
+    // quotaKeyCleared 提示「端点已变更,额度查询密钥已清除,请重新确认」。
+    const baseChanged = list[idx].baseURL !== prev.baseURL;
+    let quotaKeyCleared = false;
     // r16-4:额度查询密钥。**不传 = 保留**(表单留空 = 不修改,客户端从不持有明文,
     // 与 apiKey 同语义);显式传空串 = 清除(表单的「清除」按钮,否则填错了删不掉)。
     if (quotaKey !== undefined) {
       const qk = cleanKey(quotaKey);
       if (qk === null) return res.status(400).json({ error: `额度查询密钥过长（上限 ${MAX_KEY_LEN} 字符）` });
       if (qk) list[idx].quotaKey = qk; else delete list[idx].quotaKey;
+    } else if (baseChanged && list[idx].quotaKey) {
+      delete list[idx].quotaKey;
+      quotaKeyCleared = true;
     }
     // AZ8: 默认模型。显式传入(且在 models[] 内)则更新;传 null/'' 则清除;不传则保留旧值。
     // 同时校验:旧 defaultModel 若已不在新 models[] 内,自动清除(避免指向被删模型)。
@@ -1554,7 +1563,7 @@ router.put('/custom-providers/:id', async (req, res) => {
     // 快照只管 UI 显示;CLI 认的是 settings.json 的 env,得重跑 switch 才写。
     // 少了这一步,用户在编辑表单里改默认模型/档位映射保存后毫无反应(#13)。
     const reapplied = await reapplyIfActive(prev.id);
-    res.json({ ok: true, id: prev.id, reapplied });
+    res.json({ ok: true, id: prev.id, reapplied, ...(quotaKeyCleared ? { quotaKeyCleared: true } : {}) });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
