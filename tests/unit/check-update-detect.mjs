@@ -105,11 +105,14 @@ console.log('check-update-detect: all passed (r14-1)');
     src.indexOf("router.get('/claude-update/status'"),
   );
   assert.ok(!/spawn\(/.test(attach), 't5: /attach 绝不 spawn(它就是为"打开面板别装东西"存在的)');
-  assert.match(attach, /if \(updateTask\.status !== 'running'\) \{ res\.end\(\); return; \}/,
-    't5: /attach 没在跑就空流收尾');
+  // (r26-C9) 换锚:没在跑时不再一律空流 —— done/error 态补一帧终态再收尾(前端
+  // doUpdateStream 既有 done 分支消化),idle 仍空流。锚钉「终态帧 + res.end() 收尾」两要素。
+  assert.match(attach, /if \(updateTask\.status !== 'running'\) \{[\s\S]{0,400}type: 'done', code: updateTask\.code[\s\S]{0,400}res\.end\(\);\s*return;/,
+    't5: /attach 没在跑时对 done/error 补终态帧再收尾(r26-C9),idle 空流');
   // 前端:挂载对账那条路径必须走 /attach,且参数真的被读了(原来 {attach:true} 被完全忽略)
   const ui = readFileSync(new URL('../../client/src/components/SettingsPanel.jsx', import.meta.url), 'utf8');
-  assert.match(ui, /const doUpdateStream = async \(\{ attach = false \} = \{\}\) =>/,
+  // (r26-C9) 换锚:签名新增 allowCrossChannel 回执参数(r26-C1 跨渠道确认),attach 参数语义不变。
+  assert.match(ui, /const doUpdateStream = async \(\{ attach = false, allowCrossChannel = false \} = \{\}\) =>/,
     't5: doUpdateStream 必须真的接收 attach 参数(此前签名是 async () => {},传了等于没传)');
   assert.match(ui, /fetch\(attach \? '\/api\/claude-update\/attach' : '\/api\/claude-update\/stream'/,
     't5: attach=true 走只续看的端点,false 才走会启动安装的那个');
@@ -160,7 +163,11 @@ console.log('check-update-detect: all passed (r14-1)');
   assert.match(src, /async function readSystemProxy\(\)/, 't4: 读系统代理设置');
   assert.match(src, /scutil/, 't4: macOS 走 scutil --proxy');
   assert.match(src, /HKCU\\\\Software\\\\Microsoft\\\\Windows\\\\CurrentVersion\\\\Internet Settings/, 't4: Windows 读注册表');
-  assert.match(src, /const sys = await readSystemProxy\(\)/, 't4: detectLocalProxy 先读系统设置(哨兵锚)');
+  // (r26-C2) 换锚:系统代理读取点改经可注入参数 readSystem(缺省 = readSystemProxy,
+  // 语义不变:仍先读系统设置),读取结果须先探活再采用。锚钉「缺省即 readSystemProxy」
+  // 与「读取点」两要素。
+  assert.match(src, /readSystem = readSystemProxy/, 't4: detectLocalProxy 缺省仍读系统代理设置(r26-C2 换锚)');
+  assert.match(src, /const sys = await readSystem\(\)\.catch\(\(\) => null\)/, 't4: detectLocalProxy 先读系统设置(哨兵锚)(r26-C2 换锚)');
   // 免代理兜底源:GitHub 全挂时仍能问出"有没有新版"
   assert.match(src, /async function fetchJsdelivrLatest\(\)/, 't4: 备用版本源');
   assert.match(src, /data\.jsdelivr\.com\/v1\/packages\/gh\//, 't4: jsDelivr 元数据接口(墙内免代理可达)');

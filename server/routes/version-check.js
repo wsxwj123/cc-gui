@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { readFileSync, writeFileSync, existsSync, realpathSync, readdirSync, mkdirSync } from 'fs';
+import { readFileSync, writeFileSync, existsSync, realpathSync, readdirSync } from 'fs';
 import { resolveClaudeAsync, listClaudeInstallsAsync, getClaudeOverride, setClaudeOverride, getClaudeOverrideRaw, pauseClaudeOverride, winLivePathDirsAsync, classifyShim } from '../utils/claude-resolver.js';
 import { scanAllTools, nodeMeets, NODE_MIN_MAJOR, probeNpm } from '../utils/env-scanner.js';
 import { gfetch } from '../utils/github-fetch.js'; // r14-1:GitHub 直连失败/限流自动走本机代理
@@ -7,8 +7,10 @@ import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import { tmpdir, homedir } from 'os';
 import { execFile, spawn } from 'child_process';
+import { createConnection } from 'net';
 import { promisify } from 'util';
 import { closeAllPersistentProcesses } from './chat.js';
+import { updatePrefs } from './prefs.js'; // r26-C6:prefs 写统一走共享队列(契约 C-C6)
 import { isLocalReq } from '../services/auth.js';
 
 const execFileP = promisify(execFile);
@@ -95,6 +97,17 @@ async function fetchLatestTagSnap() {
  * 至少让"有没有新版"这件事在任何网络下都问得出来(下载仍需 GitHub,
  * 届时前端给手动下载指引)。返回形状与 fetchGitHubLatest 一致。
  */
+// r26-C3:jsDelivr 的版本号取自 git tag,可能带 v 前缀(本仓 tag 就是 v0.2.x)。
+// 原样采用会拼出 `vv0.2.318` → htmlUrl 404。与 fetchLatestTagSnap(:88)同口径剥 v。
+// 纯函数抽出供单测(export 仅为可单测)。
+export function normalizeJsdelivrVersions(list) {
+  const versions = (Array.isArray(list) ? list : [])
+    .map((v) => String(v || '').replace(/^v/, ''))
+    .filter((n) => /^\d+\.\d+\.\d+$/.test(n));
+  if (!versions.length) return null;
+  return versions.reduce((a, b) => (semverGt(b, a) ? b : a), versions[0]);
+}
+
 async function fetchJsdelivrLatest() {
   const r = await fetch('https://data.jsdelivr.com/v1/packages/gh/wsxwj123/claude-gui', {
     headers: { 'User-Agent': 'claude-gui-version-check' },
@@ -103,9 +116,9 @@ async function fetchJsdelivrLatest() {
   if (!r.ok) throw new Error(`jsDelivr ${r.status}`);
   const d = await r.json();
   const versions = Array.isArray(d.versions) ? d.versions.map((v) => String(v.version || '')).filter(Boolean) : [];
-  if (!versions.length) throw new Error('jsDelivr 未返回版本');
   // 该接口按语义化版本降序返回,取第一个;仍做一次 semver 兜底比较防顺序变化。
-  const latest = versions.reduce((a, b) => (semverGt(b, a) ? b : a), versions[0]);
+  const latest = normalizeJsdelivrVersions(versions);
+  if (!latest) throw new Error('jsDelivr 未返回版本');
   return { tagName: `v${latest}`, htmlUrl: `https://github.com/wsxwj123/claude-gui/releases/tag/v${latest}`, publishedAt: null, assets: [], viaMirror: true };
 }
 
@@ -186,6 +199,9 @@ router.get('/version-check', async (req, res) => {
     htmlUrl: snap.htmlUrl || `https://github.com/wsxwj123/claude-gui/releases/tag/v${latestRaw}`,
     publishedAt: snap.publishedAt,
     assets,
+    // r26-C4:jsDelivr 镜像兜底源标记透传 —— 墙内用户拿到 assets 是 GitHub 直链,
+    // 下载必败;前端见 viaMirror 显示手动下载指引。只增字段,旧前端忽略。
+    ...(snap.viaMirror ? { viaMirror: true } : {}),
     // server 端 process.platform 比前端 navigator.userAgent 更可靠 — Tauri
     // WebView2/WKWebView 的 UA 在某些版本被改写过,前端单独靠 UA 选 asset
     // 可能 null → 按钮不渲染只剩手动链接(用户当前的体感问题)。
@@ -326,21 +342,37 @@ export function readUpdateChannel() {
   } catch { return null; }
 }
 
-export function writeUpdateChannel(channel) {
-  if (!UPDATE_CHANNELS.includes(channel)) return false;
-  let prefs = {};
-  try { prefs = JSON.parse(readFileSync(PREFS_FILE, 'utf-8')) || {}; } catch {}
-  prefs.updateChannel = channel;
+// r26-C6:写改走 prefs.js 的 updatePrefs 共享写函数(withPrefsQueue 串行化 + 原子写),
+// 不再裸 readFileSync/writeFileSync 直写 —— 原来与 prefs 路由的队列写互踩,并发
+// read-merge-write 丢一路(lost-update),且直写非原子(崩溃写一半 → 整份 prefs 损坏)。
+// 签名变 async,调用点(PUT /claude-update-channel)await。channel=null = 删除键(r26-C5)。
+export async function writeUpdateChannel(channel) {
+  if (channel !== null && !UPDATE_CHANNELS.includes(channel)) return false;
   try {
-    mkdirSync(dirname(PREFS_FILE), { recursive: true });
-    writeFileSync(PREFS_FILE, JSON.stringify(prefs, null, 2));
+    await updatePrefs((p) => {
+      if (channel === null) delete p.updateChannel; // 删除而非写 null,回到「跟随安装方式」
+      else p.updateChannel = channel;
+    });
     return true;
   } catch { return false; }
 }
 
-/** 渠道 + 安装方式 → 实际更新方式。未选过则跟随安装方式(npm 装的走 npm)。 */
-export function resolveUpdateMethod(channel, installMethod) {
-  if (channel === 'npm') return 'npm-registry';
+// r26-C1:跨渠道判据(纯函数,export 供单测)。仅「显式 npm 渠道 × 非 npm 安装」算
+// 跨渠道 —— 此时 `npm install -g` 会写进 npm 前缀的另一份安装,而 PATH 里先生效的
+// 仍是当前安装。native 渠道 × npm 安装走 claude 自更新是官方支持路径,不算跨渠道。
+export function isCrossChannel(channel, installMethod) {
+  return channel === 'npm' && installMethod !== 'npm';
+}
+
+/** 渠道 + 安装方式 → 实际更新方式。未选过则跟随安装方式(npm 装的走 npm)。
+ *  r26-C1:跨渠道组合(显式 npm 渠道 × 非 npm 安装)默认返回 null —— 不得静默给出
+ *  'npm-registry'(那会把更新写进另一份安装,自检命中 PATH 旧版假成功);
+ *  只有调用方带来显式确认回执(opts.allowCrossChannel === true,前端确认弹窗)才放行。 */
+export function resolveUpdateMethod(channel, installMethod, { allowCrossChannel = false } = {}) {
+  if (channel === 'npm') {
+    if (installMethod === 'npm') return 'npm-registry';
+    return allowCrossChannel ? 'npm-registry' : null;
+  }
   if (channel === 'native') return 'native';
   return installMethod === 'npm' ? 'npm-registry' : installMethod;
 }
@@ -348,6 +380,13 @@ export function resolveUpdateMethod(channel, installMethod) {
 /** UI 展示用:当前生效的渠道(未显式选择时回落安装方式)。 */
 export function effectiveChannel(channel, installMethod) {
   return channel || (installMethod === 'npm' ? 'npm' : 'native');
+}
+
+// r26-C7:latest 的「真源」必须按生效渠道选,不是按安装方式。用户显式选了渠道后
+// (如 npm 安装选 native 渠道),版本检查若仍按安装方式取 npm 源,看到的 latest 与
+// 更新命令实际拉的源不一致 —— 「永远差一版」的变体。纯函数抽出供单测。
+export function resolveSrcKey(channel, installMethod) {
+  return effectiveChannel(channel, installMethod) === 'native' ? 'native' : 'npm';
 }
 
 export function updateCmdFor(method, claudePath) { // export 仅为可单测
@@ -367,9 +406,14 @@ export function updateCmdFor(method, claudePath) { // export 仅为可单测
     // 平台包(真二进制)由 optionalDependencies 带下来,装完自检版本。
     // 'npm' 仍表示"npm 安装但走原生自更新"(渠道选 native 时命中)。
     case 'npm-registry': {
+      // r26-C1:自检钉到刚装的那个安装。裸 `claude --version` 走 PATH 解析,native
+      // 安装用户命中的是旧 native 版,0 退出码 → 「更新完成」但生效的是 npm 前缀里
+      // 没人用的新安装(假成功)。改为直接验证 npm 全局前缀里的新二进制。
+      // Windows .bat 捕获 `npm prefix -g` 输出需 for /f,过于脆弱 —— Win 保持
+      // call claude --version,跨渠道风险由前端 crossChannel 确认弹窗明示。
       const verify = process.platform === 'win32'
         ? 'call npm install -g @anthropic-ai/claude-code@latest && call claude --version'
-        : 'npm install -g @anthropic-ai/claude-code@latest && claude --version';
+        : 'npm install -g @anthropic-ai/claude-code@latest && "$(npm prefix -g)/bin/claude" --version';
       return verify;
     }
     case 'npm': {
@@ -473,22 +517,35 @@ async function readSystemProxy() {
   return null;
 }
 
-export async function detectLocalProxy() { // export:skills.js 直连 GitHub 失败时回落代理用
-  // 用户已显式配置的优先(server 进程自己的 env)。
+// r26-C2:短超时 TCP 探活(只探 connect,不发请求)。系统代理设置可能残留
+// (代理软件已关但系统设置没还原),读到不等于能用 —— 先探活再采用。
+// 纯函数抽出供单测(export 仅为可单测)。
+export function probeTcp(host, port, timeout = 400) {
+  return new Promise((resolve) => {
+    const sock = createConnection({ host, port, timeout });
+    sock.on('connect', () => { sock.destroy(); resolve(true); });
+    sock.on('error', () => { sock.destroy(); resolve(false); });
+    sock.on('timeout', () => { sock.destroy(); resolve(false); });
+  });
+}
+
+export async function detectLocalProxy({ readSystem = readSystemProxy } = {}) { // export:skills.js 直连 GitHub 失败时回落代理用
+  // 用户已显式配置的优先(server 进程自己的 env)。显式配置信任优先,不探活(既有语义)。
   const envProxy = process.env.HTTPS_PROXY || process.env.https_proxy || process.env.HTTP_PROXY || process.env.http_proxy;
   if (envProxy) return envProxy;
   // r14-2:先读【系统代理设置】—— 用户"开了系统代理但不是 TUN"时,Node 的 fetch 不认它,
   // 而端口探测又可能因端口非常见而落空。mac 用 scutil --proxy,Windows 读注册表。
-  const sys = await readSystemProxy().catch(() => null);
-  if (sys) return sys;
-  const { createConnection } = await import('net');
-  const probe = (port) => new Promise((resolve) => {
-    const sock = createConnection({ host: '127.0.0.1', port, timeout: 300 });
-    sock.on('connect', () => { sock.destroy(); resolve(port); });
-    sock.on('error', () => resolve(null));
-    sock.on('timeout', () => { sock.destroy(); resolve(null); });
-  });
-  const hits = await Promise.all(COMMON_PROXY_PORTS.map(probe));
+  // r26-C2:读到必须先探活 —— 残留的死代理(代理软件已退、设置没还原)直接采用会让
+  // 更新命令全部走死代理(用户看到「更新卡死」)。不通 → 落到端口探测 → 再不通直连。
+  // readSystem 可注入(单测 mock;本机造不出确定的「系统代理死端口」)。
+  const sys = await readSystem().catch(() => null);
+  if (sys) {
+    try {
+      const u = new URL(sys);
+      if (await probeTcp(u.hostname, Number(u.port) || 8080)) return sys;
+    } catch { /* 代理解析失败同样不落,继续端口探测 */ }
+  }
+  const hits = await Promise.all(COMMON_PROXY_PORTS.map(async (port) => (await probeTcp('127.0.0.1', port, 300)) ? port : null));
   const port = hits.find(Boolean);
   return port ? `http://127.0.0.1:${port}` : null;
 }
@@ -543,12 +600,15 @@ router.get('/claude-version-check', async (req, res) => {
   const now = Date.now();
   // 缓存按"真源"分键:native 渠道与 npm 的版本可能不同,混用一个缓存会把 npm 的
   // 版本号错发给原生安装(正是"永远差一版"的放大器)。
-  const srcKey = method === 'native' ? 'native' : 'npm';
+  // r26-C7:真源按【生效渠道】(显式选择优先,未选跟随安装方式)而非裸安装方式 ——
+  // 看到的 latest 与更新命令实际拉的源天然一致。
+  const channel = readUpdateChannel();
+  const srcKey = resolveSrcKey(channel, method);
   if (ccCache && ccCacheSrc === srcKey && now - ccCachedAt < CACHE_TTL_MS) {
     latest = ccCache;
   } else {
     try {
-      latest = method === 'native'
+      latest = srcKey === 'native'
         ? await fetchNativeLatest()
         : await fetchNpmLatest();
       ccCache = latest; ccCacheSrc = srcKey; ccCachedAt = now;
@@ -568,11 +628,13 @@ router.get('/claude-version-check', async (req, res) => {
     installed: true,
     ...(staleError ? { staleError } : {}),
     method,                         // native | brew | npm | unknown
-    updateCommand: updateCmdFor(resolveUpdateMethod(readUpdateChannel(), method), claudePath),
-    updateChannel: effectiveChannel(readUpdateChannel(), method),
+    // r26-C1:跨渠道时 resolveUpdateMethod 回 null → updateCommand 如实为 null,
+    // 前端按 crossChannel 弹确认,而不是直接跑一条会写进另一份安装的命令。
+    updateCommand: (() => { const m = resolveUpdateMethod(channel, method); return m ? updateCmdFor(m, claudePath) : null; })(),
+    updateChannel: effectiveChannel(channel, method),
+    // r26-C1:跨渠道标记(显式 npm 渠道 × 非 npm 安装),前端更新按钮据此弹确认。
+    crossChannel: isCrossChannel(channel, method),
     hasUpdate: latest ? semverGt(latest, currentVersion) : false,
-    // R8-1(只增字段):npm 安装的更新已不再走 npm,前端可展示原因。
-    ...(method === 'npm' ? { updateNote: 'npm 渠道已被官方降级为原生安装器引导壳,更新经 claude update 走原生渠道。' } : {}),
   });
 });
 
@@ -585,7 +647,18 @@ router.get('/claude-version-check', async (req, res) => {
 router.post('/claude-update', async (req, res) => {
   const { method, path: claudePath } = await detectInstall();
   // r13-p2-20:按用户选择的渠道解析(auto=跟随安装方式;npm 装的默认走 npm,镜像源更快)
-  const cmd = updateCmdFor(resolveUpdateMethod(readUpdateChannel(), method), claudePath);
+  // r26-C1:跨渠道(npm 渠道 × 非 npm 安装)裸调用拒绝执行 —— 命令会写进 npm 前缀的
+  // 另一份安装,PATH 先生效的仍是当前安装(假成功)。前端确认弹窗回执(allowCrossChannel)
+  // 才放行;否则给明确指引。
+  const channel = readUpdateChannel();
+  const resolved = resolveUpdateMethod(channel, method, { allowCrossChannel: req.body?.allowCrossChannel === true });
+  if (!resolved) {
+    return res.status(409).json({
+      ok: false, crossChannel: true,
+      error: '更新渠道(npm)与当前安装方式不一致:执行会写入 npm 全局前缀的另一份安装,而 PATH 里先生效的仍是当前安装。请把更新渠道改回「跟随安装方式」后重试。',
+    });
+  }
+  const cmd = updateCmdFor(resolved, claudePath);
   // M1: native 自更新直连 claude.ai 下载,墙内必须带代理;npm/brew 同样受益。
   const proxyUrl = await detectLocalProxy().catch(() => null);
   // Windows:运行中的 claude 锁住 claude.exe,npm/upgrade 覆盖时报 "could not write ...claude.exe"。
@@ -629,7 +702,8 @@ export async function tryRestorePausedOverride() {
 // killTree —— SSE 一断就杀整棵进程树。现在:进程归服务端持有,SSE 只是"看进度的窗口",
 // 断开只摘监听;重开面板可续看(replay 已产生的日志);8 分钟超时仍杀(防挂死);
 // 用户想主动停有独立的 cancel 端点。
-const updateTask = {
+// export 仅为可单测(r26-C9:attach 终态帧用例需要直接置 status/code)
+export const updateTask = {
   child: null,
   cmd: '',
   status: 'idle',          // idle | running | done | error
@@ -694,7 +768,14 @@ router.post('/claude-update/stream', async (req, res) => {
   try {
     const detected = await detectInstall();
     method = detected.method;
-    cmd = updateCmdFor(resolveUpdateMethod(readUpdateChannel(), method), detected.path);
+    // r26-C1:跨渠道裸调用解析回 null —— 不许静默起会写进另一份安装的 npm install;
+    // 前端确认回执(allowCrossChannel)才放行,否则走与检测失败相同的 error 收尾
+    // (前端流消费本就有 error 分支,直接复用)。
+    const resolved = resolveUpdateMethod(readUpdateChannel(), method, { allowCrossChannel: req.body?.allowCrossChannel === true });
+    if (!resolved) {
+      throw new Error('更新渠道(npm)与当前安装方式不一致:执行会写入 npm 全局前缀的另一份安装,而 PATH 里先生效的仍是当前安装。请把更新渠道改回「跟随安装方式」后重试。');
+    }
+    cmd = updateCmdFor(resolved, detected.path);
     proxyUrl = await detectLocalProxy().catch(() => null);
   } catch (e) {
     // 占位后任何一步失败都必须还原状态,否则任务卡成"永远 running":后续所有请求
@@ -789,7 +870,16 @@ router.post('/claude-update/stream', async (req, res) => {
  */
 router.post('/claude-update/attach', (req, res) => {
   res.writeHead(200, { 'Content-Type': 'application/x-ndjson', 'Cache-Control': 'no-store' });
-  if (updateTask.status !== 'running') { res.end(); return; } // 没在跑 = 空流收尾
+  if (updateTask.status !== 'running') {
+    // r26-C9:任务恰在 GET /status 与 POST /attach 之间结束时,空流会让用户永远看不到
+    // 结论 —— 补一帧终态再收尾(前端 doUpdateStream 本就有 done 分支,自动复用)。
+    // idle(从未跑过)不出帧:没有结论可补。
+    if (updateTask.status === 'done' || updateTask.status === 'error') {
+      res.write(JSON.stringify({ type: 'done', code: updateTask.code, status: updateTask.status, error: updateTask.error }) + '\n');
+    }
+    res.end();
+    return;
+  }
   res.write(JSON.stringify({ type: 'start', command: updateTask.cmd || '(正在检测安装方式…)', attached: true }) + '\n');
   for (const line of updateTask.log) res.write(JSON.stringify({ type: 'log', line }) + '\n');
   updateTask.listeners.add(res);
@@ -836,10 +926,15 @@ router.get('/claude-update-channel', async (_req, res) => {
     channels: UPDATE_CHANNELS,
   });
 });
-router.put('/claude-update-channel', (req, res) => {
-  const ch = String(req.body?.channel || '');
-  if (!UPDATE_CHANNELS.includes(ch)) return res.status(400).json({ error: '渠道必须是 npm 或 native' });
-  if (!writeUpdateChannel(ch)) return res.status(500).json({ error: '写入失败' });
+router.put('/claude-update-channel', async (req, res) => {
+  // r26-C5:null / 'auto' = 清除显式选择,回到「跟随安装方式」(writeUpdateChannel(null)
+  // 删除 prefs.updateChannel 键;GET 的 explicit:null 既有逻辑天然支持)。
+  const raw = req.body?.channel;
+  const ch = raw === null || raw === 'auto' ? null : String(raw || '');
+  if (ch !== null && !UPDATE_CHANNELS.includes(ch)) {
+    return res.status(400).json({ error: '渠道必须是 npm、native 或 null(跟随安装方式)' });
+  }
+  if (!(await writeUpdateChannel(ch))) return res.status(500).json({ error: '写入失败' });
   res.json({ ok: true, channel: ch });
 });
 

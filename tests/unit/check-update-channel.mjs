@@ -21,7 +21,11 @@ import { UPDATE_CHANNELS, resolveUpdateMethod, effectiveChannel, updateCmdFor } 
 
 // t3 解析为实际更新方式
 {
-  assert.equal(resolveUpdateMethod('npm', 'native'), 'npm-registry', 't3: 选 npm → 走 npm 装');
+  // (r26-C1) 换锚:跨渠道(显式 npm 渠道 × 非 npm 安装)裸解析必须回 null,不再静默
+  // 回 'npm-registry'(防装到另一份安装、自检命中 PATH 旧版假成功);显式确认回执
+  // allowCrossChannel 才放行。
+  assert.equal(resolveUpdateMethod('npm', 'native'), null, 't3: 跨渠道(npm×native)裸解析回 null(r26-C1)');
+  assert.equal(resolveUpdateMethod('npm', 'native', { allowCrossChannel: true }), 'npm-registry', 't3: 显式确认回执放行 npm 装(r26-C1)');
   assert.equal(resolveUpdateMethod('native', 'npm'), 'native', 't3: 选原生 → 走原生自更新');
   assert.equal(resolveUpdateMethod(null, 'npm'), 'npm-registry', 't3: 未选 + npm 安装 → npm');
   assert.equal(resolveUpdateMethod(null, 'native'), 'native', 't3: 未选 + 原生安装 → 原生');
@@ -31,7 +35,8 @@ import { UPDATE_CHANNELS, resolveUpdateMethod, effectiveChannel, updateCmdFor } 
 {
   const cmd = updateCmdFor('npm-registry', '/x/claude');
   assert.match(cmd, /npm install -g @anthropic-ai\/claude-code@latest/, 't4: 真的走 npm');
-  assert.match(cmd, /claude --version/, 't4: 装完自检版本(壳包不会自检通过)');
+  // (r26-C1) 换锚:自检钉到 npm 前缀里的新安装(posix);win 分支仍为 call claude --version。
+  assert.match(cmd, /("\$\(npm prefix -g\)\/bin\/claude"|call claude) --version/, 't4: 装完自检钉到刚装的安装(壳包不会自检通过)(r26-C1)');
   const native = updateCmdFor('native', '/x/claude');
   assert.doesNotMatch(native, /npm install/, 't4: 原生渠道不碰 npm');
 }
@@ -39,7 +44,8 @@ import { UPDATE_CHANNELS, resolveUpdateMethod, effectiveChannel, updateCmdFor } 
 // t5 接线守卫:三个消费点都按渠道解析,不再写死安装方式
 {
   const src = readFileSync(new URL('../../server/routes/version-check.js', import.meta.url), 'utf8');
-  const hits = (src.match(/resolveUpdateMethod\(readUpdateChannel\(\), method\)/g) || []).length;
+  // (r26-C1) 换锚:三处调用现带第三参回执/局部 channel 变量,锚放宽为两种实参形态。
+  const hits = (src.match(/resolveUpdateMethod\((readUpdateChannel\(\)|channel), method/g) || []).length;
   assert.equal(hits, 3, 't5: version-check / update / update-stream 三处齐(哨兵锚)');
   assert.match(src, /router\.(get|put)\('\/claude-update-channel'/, 't5: 渠道端点在位');
 }
