@@ -30,8 +30,9 @@ try {
   const start = src.indexOf("router.get('/claude-version-check'");
   const end = src.indexOf("router.post('/claude-update'");
   const routeBody = src.slice(start, end);
-  assert.match(routeBody, /resolveSrcKey\(readUpdateChannel\(\), method\)/,
-    'C7: 缓存分键必须按生效渠道(readUpdateChannel + method 经 resolveSrcKey)');
+  assert.match(routeBody, /const channel = readUpdateChannel\(\);/, 'C7: 路由先读显式渠道');
+  assert.match(routeBody, /resolveSrcKey\(channel, method\)/,
+    'C7: 缓存分键必须按生效渠道(显式渠道 + 安装方式经 resolveSrcKey)');
   assert.match(routeBody, /srcKey === 'native'\s*\?\s*await fetchNativeLatest\(\)/,
     'C7: fetch 选择必须与缓存分键同键(srcKey 驱动,而非裸 method)');
   assert.ok(!/method === 'native' \? 'native' : 'npm'/.test(routeBody),
