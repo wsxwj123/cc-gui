@@ -859,8 +859,13 @@ router.get('/claude-update-channel', async (_req, res) => {
   });
 });
 router.put('/claude-update-channel', async (req, res) => {
-  const ch = String(req.body?.channel || '');
-  if (!UPDATE_CHANNELS.includes(ch)) return res.status(400).json({ error: '渠道必须是 npm 或 native' });
+  // r26-C5:null / 'auto' = 清除显式选择,回到「跟随安装方式」(writeUpdateChannel(null)
+  // 删除 prefs.updateChannel 键;GET 的 explicit:null 既有逻辑天然支持)。
+  const raw = req.body?.channel;
+  const ch = raw === null || raw === 'auto' ? null : String(raw || '');
+  if (ch !== null && !UPDATE_CHANNELS.includes(ch)) {
+    return res.status(400).json({ error: '渠道必须是 npm、native 或 null(跟随安装方式)' });
+  }
   if (!(await writeUpdateChannel(ch))) return res.status(500).json({ error: '写入失败' });
   res.json({ ok: true, channel: ch });
 });

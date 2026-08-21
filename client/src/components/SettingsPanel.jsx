@@ -1158,9 +1158,15 @@ function CcUpdater() {
   // r13-p2-20:更新渠道(auto 跟随安装方式 / npm / native)。镜像源用户 npm 通常更快
   // (实测 cdn.npmmirror 2.2MB/s vs 原生二进制源经代理 1.0MB/s),故不再一律导向原生。
   const [channel, setChannel] = useState(null); // 生效渠道(未选过=跟随安装方式)
+  // r26-C5:显式选择(null=跟随)。选中态按 explicit 画 —— 跟随是真实可选状态,
+  // 选过 npm/native 后还能切回来(原来一旦选过就永远回不去)。
+  const [channelExplicit, setChannelExplicit] = useState(null);
   useEffect(() => {
     fetch('/api/claude-update-channel').then((r) => r.json())
-      .then((d) => { if (d?.channel) setChannel(d.channel); }).catch(() => {});
+      .then((d) => {
+        if (d?.channel) setChannel(d.channel);
+        setChannelExplicit(d?.explicit ?? null);
+      }).catch(() => {});
   }, []);
   // r13-p2-21:更新已改服务端后台任务 —— 挂载时对账,若还在跑就自动续看(不用重点),
   // 若已结束则直接展示结果与日志(关面板期间完成的也看得到)。
@@ -1179,7 +1185,7 @@ function CcUpdater() {
   }, []);
 
   const pickChannel = async (ch) => {
-    setChannel(ch);
+    setChannelExplicit(ch); // ch=null → 跟随安装方式(r26-C5)
     try {
       await fetch('/api/claude-update-channel', {
         method: 'PUT', headers: { 'Content-Type': 'application/json' },
@@ -1473,23 +1479,26 @@ function CcUpdater() {
           {logLines.length ? logLines.join('\n') : '启动中…'}{updating && <span className="animate-pulse"> ▌</span>}
         </pre>
       )}
-      {/* r13-p2-20:更新渠道选择 */}
+      {/* r13-p2-20:更新渠道选择;r26-C5:补「跟随安装方式」选项(映射 null,可切回) */}
       <div className="flex items-center gap-2 flex-wrap">
         <span className="text-[11px] text-ink-muted font-body shrink-0">更新渠道</span>
         <div className="flex items-center gap-0.5 rounded-md bg-canvas-warm p-0.5">
           {[
+            { id: null, label: '跟随安装方式(推荐)' },
             { id: 'npm', label: 'npm' },
             { id: 'native', label: '原生' },
           ].map((c) => (
-            <button key={c.id} onClick={() => pickChannel(c.id)}
+            <button key={String(c.id)} onClick={() => pickChannel(c.id)}
               className={`px-2 py-1 rounded text-[11px] font-body transition-colors ${
-                channel === c.id ? 'bg-accent text-on-accent' : 'text-ink-muted hover:text-ink'}`}>
+                channelExplicit === c.id ? 'bg-accent text-on-accent' : 'text-ink-muted hover:text-ink'}`}>
               {c.label}
             </button>
           ))}
         </div>
         <span className="text-[10.5px] text-ink-faint font-body">
-          默认跟随你的安装方式;npm 走本机 registry(镜像源通常更快),原生走官方安装器自更新。
+          {channelExplicit === null
+            ? `跟随安装方式:当前按${channel === 'npm' ? ' npm(本机 registry,镜像源通常更快)' : '原生(官方安装器自更新)'}渠道更新。`
+            : '显式指定更新来源;选回「跟随安装方式」即恢复按安装方式自动选择。'}
         </span>
       </div>
       {result && (
