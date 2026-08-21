@@ -1698,7 +1698,9 @@ export const useStore = create((set, get) => ({
     if (index < 0) return s;
     const current = list[index];
     let nextItem = current;
-    if (outcome === 'accepted') nextItem = { ...current, steerState: 'accepted' };
+    // r26-B3:accepted 记落盘宽限锚点 —— reattach 中途的历史刷新对账未命中时,
+    // 宽限期(RECONCILE_GRACE_MS)内不翻 needs-review(CLI 落盘有秒级延迟)。
+    if (outcome === 'accepted') nextItem = { ...current, steerState: 'accepted', acceptedAt: Date.now() };
     // ①"保留不发"：resolved 终态。必须清 attemptWasAmbiguous（isSteerBarrier 也认它），
     // 且分支要在 ambiguous 兜底之前——needs-review 条目 attemptWasAmbiguous 恒真，
     // 放后面 'kept' 会被兜底分支吞掉。

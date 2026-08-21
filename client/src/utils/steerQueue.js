@@ -80,6 +80,13 @@ export function steerLanded(item, _unusedSigs, steerKeys) {
 }
 
 // 收尾只接受 UUID 正向证明。未命中不等于“未消费”，因此转 needs-review 而非 queued。
+// r26-B3 落盘宽限:reattach/转后台中途的历史刷新会触发对账,而 CLI 落盘有 1-3s+
+// 延迟(实测 p90=17.4s)—— accepted 条目的 uuid 还没来得及进 jsonl 就被翻
+// needs-review(误报,且 needs-review 是 barrier 会卡死后续队列)。宽限期内保留
+// accepted 原样(记 missCount 供观测),超出宽限仍缺席才翻。锚点取
+// acceptedAt ?? queuedAt:旧数据无 acceptedAt,而其 queuedAt 必然老旧 → 立即翻,
+// 向后兼容;reattach 期间被 stripSteerState 之外路径重建的条目也有新鲜 queuedAt 兜底。
+export const RECONCILE_GRACE_MS = 20000;
 export function reconcileSteered(list, _unusedSigs, steerKeys) {
   if (!Array.isArray(list) || !list.length) return list;
   if (!list.some((item) => isSteerBarrier(item) || item?.steerId)) return list;
@@ -92,6 +99,15 @@ export function reconcileSteered(list, _unusedSigs, steerKeys) {
     // 对账不得把它翻回 needs-review barrier——那会复活刚被用户解开的死锁。
     if (item.steerState === 'kept') { out.push(item); continue; }
     if (item.steerState === 'needs-review') { out.push(item); continue; }
+    // r26-B3:accepted 且仍在落盘宽限期内 → 本轮未命中不翻(下一次刷新仍缺席才翻)。
+    if (item.steerState === 'accepted') {
+      const anchor = item.acceptedAt ?? item.queuedAt;
+      if (Number.isFinite(anchor) && Date.now() - anchor < RECONCILE_GRACE_MS) {
+        changed = true;
+        out.push({ ...item, missCount: (item.missCount || 0) + 1 });
+        continue;
+      }
+    }
     changed = true;
     const { claimId, targetPaneId, claimDraft, ...rest } = item;
     void claimId; void targetPaneId; void claimDraft;
