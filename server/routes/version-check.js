@@ -198,6 +198,9 @@ router.get('/version-check', async (req, res) => {
     htmlUrl: snap.htmlUrl || `https://github.com/wsxwj123/claude-gui/releases/tag/v${latestRaw}`,
     publishedAt: snap.publishedAt,
     assets,
+    // r26-C4:jsDelivr 镜像兜底源标记透传 —— 墙内用户拿到 assets 是 GitHub 直链,
+    // 下载必败;前端见 viaMirror 显示手动下载指引。只增字段,旧前端忽略。
+    ...(snap.viaMirror ? { viaMirror: true } : {}),
     // server 端 process.platform 比前端 navigator.userAgent 更可靠 — Tauri
     // WebView2/WKWebView 的 UA 在某些版本被改写过,前端单独靠 UA 选 asset
     // 可能 null → 按钮不渲染只剩手动链接(用户当前的体感问题)。

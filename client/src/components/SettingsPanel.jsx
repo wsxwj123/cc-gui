@@ -751,6 +751,17 @@ function UpdateAvailable({ state }) {
 
   return (
     <div className="text-[12px] bg-amber-50 border border-amber-200 text-amber-900 rounded p-2.5 space-y-2">
+      {/* r26-C4:版本信息来自 jsDelivr 镜像(viaMirror)= GitHub API/直连全败过,
+          下方 assets 直链大概率也下不动 —— 先给手动指引,不让用户点了白等。 */}
+      {state.viaMirror && (
+        <div className="text-[11px] text-amber-800 bg-amber-100/60 border border-amber-300 rounded p-2">
+          检测到镜像源(jsDelivr):自动下载可能失败,建议
+          <button
+            onClick={(e) => { e.preventDefault(); openExternalUrl(state.htmlUrl); }}
+            className="text-accent underline bg-transparent border-0 cursor-pointer p-0 mx-0.5 text-[11px]"
+          >手动到发布页下载</button>。
+        </div>
+      )}
       <div className="flex items-center gap-1.5">
         <span>新版本可用:</span>
         <b className="font-mono">v{state.latestVersion}</b>
