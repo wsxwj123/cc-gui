@@ -556,9 +556,13 @@ export function UnifiedSidebar() {
     clearInterval(p.timer);
     setPendingDeletes((arr) => arr.filter((x) => x.session.sessionId !== sid));
     const st = useStore.getState();
+    // r26-I10:删除时记下的 pane 下标在撤销时可能已不可见(期间关了窗格,paneCount
+    // 变小)——setPaneSession 只夹到硬上限 5,不夹 paneCount,会写进不可见槽(孤儿
+    // pane:会话回来了但用户看不见)。夹到 paneCount-1。
     p.panes.forEach((i) => {
-      st.setPaneSession(i, p.session);
-      st.fetchMessages(p.session.sessionId, p.session.projectHash, { tab: i, silent: true });
+      const idx = clampPaneIndex(i, st.paneCount);
+      st.setPaneSession(idx, p.session);
+      st.fetchMessages(p.session.sessionId, p.session.projectHash, { tab: idx, silent: true });
     });
   };
   // 收起项目组时立即落实该组的待删(撤销条随组收起消失,不落实=看着删了其实没删)。
