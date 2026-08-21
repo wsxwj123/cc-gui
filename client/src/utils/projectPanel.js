@@ -287,7 +287,9 @@ export function clampPaneIndex(i, paneCount) {
 // 整棵树跟着重渲(流式期间持续发生)= 按钮迟滞与点击丢失的根因。这里逐条比对
 // 侧栏行【实际消费的字段】,未变的条目复用旧对象身份,整组零变化直接返回旧数组
 // (调用方据此跳过 set,订阅零通知)。
-const SESSION_ROW_FIELDS = ['sessionId', 'firstPrompt', 'archived', 'messageCount', 'model', 'lastActivity', 'projectPath', 'projectHash'];
+// r26-I9:字段清单补 customTitle/aiTitle —— 标题改了但其它字段全同时,旧清单判「行相等」
+// 复用旧对象身份,新标题永远渲染不出来(改标题不重渲)。
+const SESSION_ROW_FIELDS = ['sessionId', 'firstPrompt', 'archived', 'messageCount', 'model', 'lastActivity', 'projectPath', 'projectHash', 'customTitle', 'aiTitle'];
 
 export function sameSessionRow(a, b) {
   if (a === b) return true;
