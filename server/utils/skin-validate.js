@@ -452,17 +452,20 @@ export function sanitizeSvg(text, maxBytes = ZIP_LIMITS.maxSvgBytes) {
 // (安全向),已知误伤钉在 check-r26-t2-blacklist.mjs:`prefetch(` 命中 /fetch\s*\(/、
 // 匿名函数表达式 `function(){}` 命中 /\bfunction\s*\(/——作者改码(箭头函数)即可过。
 // 双端同表:客户端 skins.js T2_BLACKLIST_CLIENT 逐字一致(check-skin-client 钉死)。
-// r27:规则带标识符左边界 lookbehind 防 prefetch(/myeval( 误伤;function 规则改抓
+// r27:规则带标识符左边界 防 prefetch(/myeval( 误伤;function 规则改抓
 // 「字符串实参」形态(Function("...") 构造器——lowercase 后与 function 关键字同形,
 // 普通 function 声明/表达式(标识符或 ) 开头)不命中。QQ2008 皮肤曾被旧规则误杀。
+// r31:双端同表(客户端 skins.js T2_BLACKLIST_CLIENT 逐字同构,check-skin-client t1 按
+// map(String) 钉死);原 lookbehind 写法改等价无 lookbehind 写法 `(?:^|[^\w$])` ——
+// 服务端跑 Node 本不受影响,但双端必须逐字一致,客户端为 Safari<16.4 去 lookbehind,故同改。
 export const T2_SCRIPT_BLACKLIST = [
-  /(?<![\w$])fetch\s*\(/,
+  /(?:^|[^\w$])fetch\s*\(/,
   /xmlhttprequest/,
-  /(?<![\w$])websocket\s*\(/,
-  /(?<![\w$])import\s*\(/,
-  /(?<![\w$])eval\s*\(/,
+  /(?:^|[^\w$])websocket\s*\(/,
+  /(?:^|[^\w$])import\s*\(/,
+  /(?:^|[^\w$])eval\s*\(/,
   /new\s+function/,
-  /(?<![\w$])function\s*\(\s*['"]/,
+  /(?:^|[^\w$])function\s*\(\s*['"]/,
   /navigator\s*\.\s*sendbeacon/,
   /\[\s*['"](?:fetch|eval|function|websocket)['"]\s*\]/,
 ];

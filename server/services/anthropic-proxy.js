@@ -17,7 +17,7 @@
 
 import http from 'node:http';
 import { normalizeContextOverflow } from './openai-proxy.js';
-import { isCountTokensRequest, estimateInputTokens, parseUpstreamCountTokens, COUNT_TOKENS_UPSTREAM_TIMEOUT_MS } from '../utils/context-tokens.js';
+import { isCountTokensRequest, estimateInputTokens, parseUpstreamCountTokens, COUNT_TOKENS_UPSTREAM_TIMEOUT_MS, recordCountTokensOutcome } from '../utils/context-tokens.js';
 import { collectRealToolResultIds } from '../utils/tool-result-reconcile.js';
 
 // Fixed loopback port (distinct from openai-proxy's 8788) so the URL written into
@@ -296,11 +296,17 @@ async function handle(req, clientRes) {
       if (r.ok) {
         const upstreamCount = parseUpstreamCountTokens(await r.text());
         // 精确路径(上游真支持 count_tokens):原样透传,**不加 estimated 标记**(互斥)。
+        // r31:精确结果也入共享结果表(estimated:false)供快路回查;返回行保持原样透传
+        // (r26-G3 t3 哨兵钉死这里不展开包装——展开就可能误带 estimated)。
+        if (upstreamCount) recordCountTokensOutcome({ model: parsedBody.model, estimated: false, inputTokens: upstreamCount.input_tokens });
         if (upstreamCount) return respond(upstreamCount);
       }
     } catch { /* 超时/网络错 → 本地估算回退 */ }
     // r26-G3(契约 C-G3):估算回落打标 estimated:true(响应顶层),前端据此标「(估算)」。
-    return respond({ ...estimateInputTokens(parsedBody), estimated: true });
+    // r31:估算结果入共享表(estimated:true),快路据其实时补标(见 context-tokens.js 说明)。
+    const estimatedBody = { ...estimateInputTokens(parsedBody), estimated: true };
+    recordCountTokensOutcome({ model: parsedBody.model, estimated: true, inputTokens: estimatedBody.input_tokens });
+    return respond(estimatedBody);
   }
 
   // 仅对 /v1/messages 做规范化(其他端点不动)

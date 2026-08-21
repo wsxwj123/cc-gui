@@ -65,3 +65,49 @@ export function contextTimeoutBudget(knownTokens) {
   const n = Number.isFinite(knownTokens) && knownTokens > 0 ? knownTokens : 0;
   return Math.min(30000, 8000 + 2000 * Math.floor(n / 100000));
 }
+
+// ── r31:共享最近 count_tokens 结果表 ─────────────────────────────────────────
+// 背景:第三方 provider 的 /context 快路经 SDK slot.query.getContextUsage() 拿数据,
+// SDK 不透传自定义字段,代理层在 count_tokens 响应顶层打标的 estimated:true 到不了前端
+// (被误标成「精确·SDK 实测」)。两个本地 proxy 与 chat.js 同在一个 server 进程,用这张
+// 内存档桥接:proxy 在返回响应前 record,快路拿到 usage 后按 model 在时间窗内回查,
+// 命中且 estimated 就把标记补进 usage 再进 mapSdkContextUsage。官方 provider 不走 proxy,
+// 永不写入,快路自然查不到、绝无误标(宁可不标也不错标)。
+const MAX_COUNT_TOKENS_OUTCOMES = 20;
+const COUNT_TOKENS_OUTCOME_TTL_MS = 10_000; // 保留窗:比快路 3s 回查窗宽松,命中率高
+const countTokensOutcomes = [];             // [{ at, model, estimated, inputTokens }],按时间升序
+
+/**
+ * 记录一次 count_tokens 结果(代理层返回响应前调用)。
+ * model:请求体里的模型名;estimated:该响应是否估算回落;inputTokens:响应的 input_tokens。
+ */
+export function recordCountTokensOutcome({ model, estimated, inputTokens }) {
+  const now = Date.now();
+  countTokensOutcomes.push({
+    at: now,
+    model: typeof model === 'string' ? model : '',
+    estimated: estimated === true,
+    inputTokens: Number.isFinite(inputTokens) ? inputTokens : 0,
+  });
+  // 只留最近 MAX 条或 TTL 内,闲置进程内存不涨。
+  while (countTokensOutcomes.length > MAX_COUNT_TOKENS_OUTCOMES) countTokensOutcomes.shift();
+  const cutoff = now - COUNT_TOKENS_OUTCOME_TTL_MS;
+  while (countTokensOutcomes.length && countTokensOutcomes[0].at < cutoff) countTokensOutcomes.shift();
+}
+
+/**
+ * 回查最近一次 count_tokens 结果(按 model)。默认只在 withinMs(3s)时间窗内查,
+ * 时间倒序找最新一条;该 model 的最新记录已超窗 → 返 null(过期不命中)。
+ * now 仅供测试注入"未来时刻"模拟过期;正常调用缺省 Date.now()。
+ */
+export function latestCountTokensOutcome(model, { withinMs = 3000, now = Date.now() } = {}) {
+  const m = typeof model === 'string' ? model : '';
+  const cutoff = now - withinMs;
+  for (let i = countTokensOutcomes.length - 1; i >= 0; i--) {
+    const r = countTokensOutcomes[i];
+    if (r.model !== m) continue;
+    if (r.at < cutoff) return null; // 该 model 最新一条都已超窗,更早的必不在窗内
+    return r;
+  }
+  return null;
+}

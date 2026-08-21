@@ -63,7 +63,7 @@ for (const bad of REJECT) {
 // ── hits 清单形状:返回正则 source(供 UI 展示)──
 {
   const r = validateT2Script('eval("x"); fetch("/y")');
-  assert.deepEqual(r.hits.sort(), ['(?<![\\w$])eval\\s*\\(', '(?<![\\w$])fetch\\s*\\('], 'hits = 命中正则的 source 串(r27 换锚:带 lookbehind 前缀)');
+  assert.deepEqual(r.hits.sort(), ['(?:^|[^\\w$])eval\\s*\\(', '(?:^|[^\\w$])fetch\\s*\\('], 'hits = 命中正则的 source 串(r31 去 lookbehind:等价 `(?:^|[^\\w$])` 前缀)');
 }
 
 console.log('PASS check-r26-t2-blacklist');

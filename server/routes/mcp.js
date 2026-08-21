@@ -1234,12 +1234,19 @@ router.post('/plugins/install', async (req, res) => {
     const isCustom = !!repo && marketplace !== OFFICIAL_MARKETPLACE;
     if (isCustom && !/^[A-Za-z0-9._\/-]{1,100}$/.test(repo)) throw new Error('invalid repo');
 
-    // r29:add/update 不再吞错(ensureMarketplace 失败直接 500 带 stderr 原文);
+    // r29:add/update 不得吞错(ensureMarketplace 失败带 stderr 原文抛出);
     // install 报「not found/out of date」时刷新市场重试一次,仍失败给完整因果链。
+    // r31:不再把「注册+刷新(update)」作为安装前的硬前提 —— update 失败(断网/代理拉不动
+    // GitHub/git 超时)会直接 500,挡住「本地缓存可装」的安装(r29 回归)。刷新交由
+    // installPluginWithRefresh 在 install 报 not-found/过期形态时按需刷新重试。
+    // 仅自定义源保留幂等 add 注册(未注册时 install 报 not found,由 installPluginWithRefresh
+    // 的刷新重试兜底注册+刷新);官方源默认已注册,无需预注册/预刷新。
     if (isCustom) {
-      await ensureMarketplace({ repo, marketplace });
-    } else {
-      await ensureOfficialMarketplace();
+      try {
+        await runClaude(['plugin', 'marketplace', 'add', repo], { timeout: 30000, extraEnv: await marketplaceProxyEnv() });
+      } catch (e) {
+        if (!isMarketplaceAddIdempotent(e)) throw new Error(`注册插件市场失败:${errText(e)}`);
+      }
     }
     await installPluginWithRefresh({
       name, marketplace,

@@ -69,6 +69,7 @@ import { extractToolResultText, finalizePendingToolCalls, applyFinalizedToBlocks
 import { rebuildTodosFromTaskCalls } from './utils/todos.js';
 import { isSteered, firstSteerableIndex, isSteerBarrier, persistedSteerKeys, queueKeyFor } from './utils/steerQueue.js';
 import { isInitBindingOrigin, isResetBindingOrigin, isCliNoContentPlaceholder, makeProviderModelGuard, migrateDraftQueue, paneMessagesOwned, resolveHistModel, resolveSelectorModel, resolveSendModel } from './utils/routing.js';
+import { parseGoalCommand } from './utils/goal.js';
 import { nativeContextWindow, isBareClaudeAlias, pickCliContextWindow } from './utils/contextWindow.js';
 import { extractMcpServerIssues, formatMcpServerNotice } from './utils/mcpStatus.js';
 import { classifyRepairOutcome, classifyCheckOutcome, upsertRepairHint, removeRepairHint, loadRepairHints, persistRepairHints } from './utils/repairFlow.js';
@@ -1804,9 +1805,12 @@ function HomeState({ tabIndex = 0 }) {
     const t = text.trim();
     if (!t || !project) return;
     const st = useStore.getState();
-    seedNewSessionDefaults(project.hash); // 与侧栏新建同一 seed(力度继承/权限 default)
+    // r31:先领 draftId 再 seed —— seed 要写到 `draft-<hash>-<draftId>`(窗格 permKey)才被
+    // 读到,否则落到旧形态 `draft-<hash>` 孤儿键,新建会话不继承思考强度。
+    const _did = newDraftId();
+    seedNewSessionDefaults(project.hash, _did); // 与侧栏新建同一 seed(力度继承/权限 default)
     // r26-B5:先造 draft 再入队 —— 队列键带 draftId,与同项目其他 draft 窗格隔离。
-    const _homeDraft = buildHomeDraft(project, newDraftId());
+    const _homeDraft = buildHomeDraft(project, _did);
     if (!_homeDraft) return; // 项目缺 path 造不出 draft(旧代码会入队后清空窗格,键还匹配不上)
     st.enqueueMessage(queueKeyFor(_homeDraft), { text: t, queuedAt: Date.now() });
     st.setPaneSession(tabIndex, _homeDraft); // cwd=所选项目
@@ -2895,6 +2899,28 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     }
     return null;
   }, [messages]);
+  // r31-goal-optimistic:发送侧乐观显示 —— 堵住「设 /goal 那一回合内常驻条不亮」的时序洞。
+  // 数据源仍以历史(上方 activeGoal)为准,但 /goal 真正发出后先用乐观态立即亮条,等历史里的
+  // goal 记录(同 condition,met:false)到达再切回历史驱动并清乐观态。per-pane:本组件实例天然
+  // 分屏隔离(key=permKey 挂 GoalBar);切会话即清乐观态,不跨会话泄漏。达成/判定的 reason
+  // 更新一律走历史,乐观态里不造(只带 condition)。
+  const [optimisticGoal, setOptimisticGoal] = useState(null);
+  // 历史里是否已出现本目标的生效记录(同 condition 且 met:false)。一旦到达,历史即权威。
+  const optimisticLanded = useMemo(() => (
+    !!optimisticGoal
+    && messages.some((m) => m?.type === 'goal' && m.condition === optimisticGoal.condition && !m.met)
+  ), [messages, optimisticGoal]);
+  // 显示值:乐观态未落榜时用乐观(补上"设目标回合"的空窗);否则一律以历史 activeGoal 为准。
+  const effectiveGoal = (optimisticGoal && !optimisticLanded) ? optimisticGoal : activeGoal;
+  // 历史到达 → 切回历史驱动,乐观态作废(纯清理,显示值上面已按 optimisticLanded 切换)。
+  useEffect(() => {
+    if (optimisticGoal
+      && messages.some((m) => m?.type === 'goal' && m.condition === optimisticGoal.condition && !m.met)) {
+      setOptimisticGoal(null);
+    }
+  }, [messages, optimisticGoal]);
+  // 切会话 → 乐观态清空(乐观只属于本次设置所在的会话窗格,别带到下一个会话)。
+  useEffect(() => { setOptimisticGoal(null); }, [selectedSession?.sessionId]);
   // C2:用于把 AutoCompactBanner 限定在「当前聚焦的 pane」——分屏下非聚焦 pane 不应
   // 在你没看着时静默 /compact 改写历史。单窗格时 activeTabIndex 恒为 0 = 本 pane。
   const paneIsActive = useStore((s) => s.activeTabIndex) === tabIndex;
@@ -4035,6 +4061,15 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         }
       }
       return;
+    }
+
+    // r31-goal-optimistic:/goal 真正发出(已过排队门,且非 reattach/隐藏回显)才亮乐观常驻条。
+    // 排队中返回不走此段 ⇒ 排队不亮;历史记录到达后切回历史驱动并清乐观态(见上方 effect)。
+    if (!reattachPid && !hiddenUserMessage) {
+      const _gc = parseGoalCommand(prompt);
+      if (_gc) setOptimisticGoal(
+        _gc.type === 'clear' ? null : { met: false, sentinel: true, condition: _gc.condition },
+      );
     }
 
     // 只有真正开始新的空闲回合才恢复 following；忙碌 Enter 排队/并入不清阅读意图。
@@ -7476,7 +7511,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         }}
         todos={currentTodos}
         plan={currentPlan}
-        goal={activeGoal}
+        goal={effectiveGoal}
         permKey={sessionQueueKey}
         sessionId={selectedSession?.sessionId || null}
         tabIndex={tabIndex}

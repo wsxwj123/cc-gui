@@ -856,8 +856,11 @@ router.get('/sessions/:sessionId/repair-official-compat', async (req, res) => {
  * 期间 CLI 追加的新行会被 repair 后的文件覆盖丢失。
  *   闸一(写前复查):备份写完、原子改写前,再次确认会话无在跑进程(与入口 409 同判据,
  *     由调用方注入 checkRunning);
- *   闸二(mtime+size 双判):读盘时记下 stat 的 mtimeMs+size,原子改写前再 stat 原路径
- *     ——变了说明窗口内有新写入 → 放弃 repair(.bak 留着、原文件逐字不动),报 stale。
+ *   闸二(mtime+size 双判):【r31 修正】stat 必须先于 readFile 拍基准 —— 旧实现先 read 再
+ *     stat,「读文件期间 CLI 追加的新行」会同时抬高 read 之后的 stat 基准,而 raw 里没有它,
+ *     改写前比对必通过 → 用旧内容覆盖 → 丢新行(备份也是旧内容,救不回)。先 stat 后 read,
+ *     基准才是「读前快照」:读期间有写入则 now 尺寸/时间变大 → 判 stale → 放弃 repair
+ *     (.bak 留着、原文件逐字不动)。
  *   不选应用层锁:CLI 直写文件不经过 JS 层锁,锁不住真正的写入方;mtime+size 双判才是
  *   对文件系统事实的判定。残余窗口(mtime 秒级粒度下同秒同尺寸写入)理论存在,判为
  *   可接受;409 语义让用户可重试。
@@ -888,8 +891,8 @@ export async function gcRepairBackups(file) {
 }
 
 export async function repairSessionFileGuarded(file, checkRunning) {
+  const before = await stat(file);           // r31:先拍基准(读前快照),再读,防读期间写入漏检
   const raw = await readFile(file, 'utf-8');
-  const before = await stat(file);
   const { lines, report } = repairOfficialCompat(raw.split('\n'));
   const changed = !!(report.emptyText || report.emptyThinking || report.droppedLines || report.relinked);
   if (!changed) return { status: 'ok', report, changed: false };

@@ -22,8 +22,8 @@ assert.ok(goalBar.includes("goal.condition || '(无条件文本)'"), 'condition 
 assert.ok(/目标进行中：/.test(goalBar), '常驻条显示"目标进行中"文案');
 assert.ok(/最近判定：/.test(goalBar), '常驻条 title 含"最近判定理由"');
 
-// 数据源:App 复用 activeGoal memo 作 goal 传入 ChatInput
-assert.ok(/goal=\{activeGoal\}/.test(app), 'App 复用 activeGoal memo 作为 goal 数据源');
+// 数据源:App 复用 activeGoal memo(经 effectiveGoal 乐观合并)作 goal 传入 ChatInput
+assert.ok(/goal=\{effectiveGoal\}/.test(app), 'App 用 effectiveGoal(activeGoal 叠加乐观态)作 goal 数据源');
 
 // ── 2. 编辑保存走既有发送链路(复用 onSend,不造第二条发送通道) ─────────
 assert.ok(/const startEdit = /.test(goalBar), '编辑态有 startEdit(进入编辑)');

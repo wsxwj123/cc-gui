@@ -95,7 +95,7 @@ const goalBarSrc = readFileSync(join(root, 'client/src/components/GoalBar.jsx'),
 assert.ok(/目标进行中：/.test(goalBarSrc), '常驻条要有"目标进行中"文案(从顶栏徽章迁入)');
 assert.ok(/最近判定：/.test(goalBarSrc), '常驻条 title 要含"最近判定理由"(迁自顶栏徽章 title)');
 assert.ok(/<GoalBar \/\>/.test(chat) || /<GoalBar[^>]+\/\>/.test(chat), 'ChatInput 要渲染常驻条 GoalBar');
-assert.ok(/goal=\{activeGoal\}/.test(app), 'App 要把 activeGoal 作为 goal 传给 ChatInput');
+assert.ok(/goal=\{effectiveGoal\}/.test(app), 'App 把 effectiveGoal(activeGoal+乐观态)作为 goal 传给 ChatInput');
 assert.ok(!/<span className="truncate">目标进行中：\{activeGoal\.condition/.test(app),
   '顶栏原"目标进行中"小徽章已退役,不得残留');
 assert.ok(/block\.type === 'text' && \/\^Stop hook feedback:\/\.test\(block\.text \|\| ''\)/.test(app),

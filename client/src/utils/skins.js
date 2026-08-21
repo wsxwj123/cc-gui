@@ -27,17 +27,21 @@ export const SKIN_TOKENS_REJECTED_CLIENT = ['--glass-shadow'];
 // 按 String 形态钉死);校验前先 toLowerCase,故正则一律小写形态。口径 = 防误导入、不防
 // 恶意代码:正则误伤一律朝拒载方向(安全向),已知误伤(prefetch(、匿名 function(){})
 // 钉在 check-r26-t2-blacklist.mjs / check-r26-t2-blacklist-client.mjs。
-// r27:规则带标识符左边界 lookbehind 防 prefetch(/myeval( 误伤;function 规则改抓
+// r27:规则带标识符左边界 防 prefetch(/myeval( 误伤;function 规则改抓
 // 「字符串实参」形态(Function("...") 构造器——lowercase 后与 function 关键字同形,
 // 普通 function 声明/表达式(标识符或 ) 开头)不命中。QQ2008 皮肤曾被旧规则误杀。
+// r31-Safari<16.4:原写法用 lookbehind(标识符左边界),但旧 WebKit 不支持 lookbehind,
+// 模块顶层字面量正则会在 import 时抛解析期 SyntaxError → main.jsx 顶层 import 本模块
+// 整页白屏。改为等价的无 lookbehind 写法 `(?:^|[^\w$])`(捕获式,布尔 .test() 逐点一致;
+// 仅当「fetch 前紧邻字符非 \w/$ 或串首」命中),hits 的 source 串变化由 check-r26 两测换锚。
 export const T2_BLACKLIST_CLIENT = [
-  /(?<![\w$])fetch\s*\(/,
+  /(?:^|[^\w$])fetch\s*\(/,
   /xmlhttprequest/,
-  /(?<![\w$])websocket\s*\(/,
-  /(?<![\w$])import\s*\(/,
-  /(?<![\w$])eval\s*\(/,
+  /(?:^|[^\w$])websocket\s*\(/,
+  /(?:^|[^\w$])import\s*\(/,
+  /(?:^|[^\w$])eval\s*\(/,
   /new\s+function/,
-  /(?<![\w$])function\s*\(\s*['"]/,
+  /(?:^|[^\w$])function\s*\(\s*['"]/,
   /navigator\s*\.\s*sendbeacon/,
   /\[\s*['"](?:fetch|eval|function|websocket)['"]\s*\]/,
 ];
@@ -290,6 +294,13 @@ export async function loadT2(id, manifest, texts = null, gen = null) {
   return { loaded: true };
 }
 
+// r31:app 自持的属性(主题/缩放/system 等 sessionStore 写入点)属 app 所有,皮肤不负责
+// 清理。disposeT2 的「新增属性摘除」分支(①/②的 removeAttribute)绝不许删这些 —— 否则
+// 皮肤存活期间用户换主题写的 data-theme / data-cgui-theme(或 --ui-zoom 等 style 内的
+// app 变量)会被当成「皮肤/第三方新增」误删,停用皮肤=把用户主题设置摘掉。style 由
+// clearVars(appliedVars)精确清皮肤变量,这里只豁免「整段不摘除」。
+const APP_ATTRS = new Set(['data-theme', 'data-cgui-theme', 'data-theme-system', 'style']);
+
 /** 卸载 T2:①皮肤自注册 disposer → ②标记节点逐项移除 → ③documentElement 属性按双快照 diff 还原。 */
 export function disposeT2() {
   const t2 = state.t2;
@@ -313,12 +324,16 @@ export function disposeT2() {
       const inLoaded = Object.prototype.hasOwnProperty.call(loadedSnap, name);
       const inPre = Object.prototype.hasOwnProperty.call(preSnap, name);
       const cur = root.getAttribute(name); // null = 当前不存在
+      // r31:app 自持属性(data-theme/data-cgui-theme/data-theme-system/style)豁免「摘除」——
+      // 这些是 app 加的不该由皮肤清理(皮肤存活期用户换主题写 data-theme 等,不能被当新增删)。
+      // 注意此处只豁免 removeAttribute;`if (inPre) setAttribute(preSnap)` 的还原路径仍照常
+      // (把 app 属性还原到装载前值是正确语义,不丢用户改动)。
       if (!inLoaded && !inPre) {
-        root.removeAttribute(name); // 存活期新增(皮肤脚本异步或第三方) → 摘除
+        if (!APP_ATTRS.has(name)) root.removeAttribute(name); // 存活期新增(皮肤脚本异步或第三方) → 摘除
       } else if (inLoaded && cur !== null && cur === loadedSnap[name]) {
         // 装载后没人动 → 还原到装载前(preSnap 无此键 = 装载期新增,摘除)
         if (inPre) root.setAttribute(name, preSnap[name]);
-        else root.removeAttribute(name);
+        else if (!APP_ATTRS.has(name)) root.removeAttribute(name);
       } else if (!inLoaded && inPre && cur === null) {
         root.setAttribute(name, preSnap[name]); // 皮肤装载期删掉且仍缺席 → 还原
       }
@@ -356,7 +371,11 @@ export async function activateSkin(row, { tryOn = false } = {}) {
   // 返回 T2 装载结果给 UI(拒载/门控不再被静默吞掉——p2-1 顺带修)。
   let t2 = null;
   if (manifest.tier === 2) t2 = await loadT2(id, manifest, t2Texts || null, gen);
-  if (!tryOn) {
+  // r31:只在实际仍是「当前代」时才落 LS_ID/缓存 —— 若在 await loadT2 期间又有新的激活
+  // (gen 已被 ++t2Gen 越代),本皮肤已被 superseded(loadT2 返回 reason:'superseded'),
+  // 绝不能把已被替代的皮写进 LS_ID,否则重启 bootReplaySkin 会回放到旧皮。
+  // tier-1 无 await,gen===t2Gen 恒真,行为不变;tier-2 被后来者越代才跳过。
+  if (!tryOn && gen === t2Gen) {
     try { localStorage.setItem(LS_ID, id); } catch {}
     writeCache(id, manifest);
   }

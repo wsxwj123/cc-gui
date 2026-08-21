@@ -14,7 +14,7 @@ import { buildAlwaysAllowUpdates, buildDirAuthUpdates } from '../utils/permissio
 import { stripInheritedProviderEnv } from '../utils/provider-env.js';
 import { resolveClaude } from '../utils/claude-resolver.js';
 import { repairOfficialCompat } from '../utils/session-repair.js';
-import { contextTimeoutBudget } from '../utils/context-tokens.js';
+import { contextTimeoutBudget, latestCountTokensOutcome } from '../utils/context-tokens.js';
 import { canonicalCwd } from '../utils/safe-path.js';
 import { broadcast, clients } from '../broadcast.js';
 
@@ -2545,6 +2545,28 @@ function parseContextMarkdown(md) {
   return out;
 }
 
+// r31:当前是否第三方 provider(settings.json env 带 ANTHROPIC_BASE_URL)。官方 OAuth
+// 不走本地 proxy,count_tokens 不经代理层,快路补标只在第三方下才有意义(否则同一
+// 模型名会被第三方记录误标)。
+function isThirdPartyProvider() {
+  try {
+    return !!JSON.parse(readFileSync(pathJoin(homedir(), '.claude', 'settings.json'), 'utf8'))?.env?.ANTHROPIC_BASE_URL;
+  } catch { return false; }
+}
+
+// r31:/context 快路补标 —— SDK getContextUsage() 不透传代理层自定义字段 estimated。
+// 若会话是第三方 provider(thirdParty=true),按 usage.model 在时间窗内回查最近一次
+// count_tokens 结果,命中且 estimated 就把标记补进 usage(再进 mapSdkContextUsage 透传
+// 到前端);查不到 / 官方 session 原样返回、不打标(宁可不标也不错标)。
+export function applyCountTokensEstimated(usage, thirdParty) {
+  if (!thirdParty || !usage || typeof usage !== 'object') return usage;
+  const model = typeof usage.model === 'string' ? usage.model : '';
+  if (!model) return usage;
+  const outcome = latestCountTokensOutcome(model);
+  if (outcome?.estimated) return { ...usage, estimated: true };
+  return usage;
+}
+
 // 把 SDK getContextUsage() 的结构化返回映射成本端点历史(spawn+parse)口径的字段,
 // 前端徽章/明细零改动即兼容。窗口取 maxTokens(实测 CLI 内部 maxTokens===rawMaxTokens,
 // percentage=round(total/max*100),与 /context markdown 的"a / b (c%)"同口径);第三方
@@ -2665,7 +2687,13 @@ export function contextHintsMatch(request, meta) {
   // win 大小写差异不再恒 409。归一化收敛不放宽:realpath 单射,不同目录归一后仍不等。
   const reqCwd = request.cwd ? canonicalCwd(request.cwd) : '';
   const metaCwd = meta.canonicalCwd || (meta.cwd ? canonicalCwd(meta.cwd) : '');
-  return (!request.projectHash || request.projectHash === meta.projectHash)
+  // r31:projectHash 双侧同口径归一(都 toLowerCase)再判等。meta.projectHash 由
+  // canonicalCwd(slot.cwd) 派生(win32 会小写化),而客户端 request.projectHash 来自磁盘
+  // 真实目录名(Windows 大小写保留)—— 不归一在 Windows 上必不等 → /context 恒 409。
+  // 目录名本就是路径编码,大小写不敏感比较是安全的;cwd 那条已是双侧 canonicalCwd,不重复归一。
+  const reqHash = typeof request.projectHash === 'string' ? request.projectHash.toLowerCase() : '';
+  const metaHash = typeof meta.projectHash === 'string' ? meta.projectHash.toLowerCase() : '';
+  return (!request.projectHash || reqHash === metaHash)
     && (!reqCwd || reqCwd === metaCwd);
 }
 
@@ -2712,7 +2740,11 @@ router.get('/context/:sessionId', async (req, res) => {
         new Promise((_, reject) => setTimeout(() => reject(timeoutError), budgetMs)),
       ]);
       if (usage?.totalTokens > 0 && (usage?.maxTokens > 0 || usage?.rawMaxTokens > 0)) {
-        const payload = mapSdkContextUsage(usage);
+        // r31:第三方 provider 的 count_tokens 估算标记由代理层写入共享结果表,SDK
+        // getContextUsage() 不透传自定义字段 → 快路按 model 回查,命中且 estimated 就
+        // 补进 usage 再映射;官方/查不到不打标(宁可不标也不错标)。
+        const patched = applyCountTokensEstimated(usage, isThirdPartyProvider());
+        const payload = mapSdkContextUsage(patched);
         if (validContextPayload(payload)) return res.json(payload);
         // 映射异常 → 不报错,回落慢路径重算。
       }

@@ -93,14 +93,23 @@ async function cleanupStage(stage) {
 
 /**
  * r26-D6 覆盖式去重:同 slug 视为同一皮肤(语义声明:「导入=换成新版」)。
- * skinsDir 里找 id === slug 或 id 以 `${slug}-` 开头的既有目录 → 复用其 id;
+ * skinsDir 里找 id === slug 或 id 为 `${slug}-<6位随机后缀>` 形态的既有目录 → 复用其 id;
  * 未命中/slug 为空(CJK 退化 skin- 随机后缀,无归属语义)→ null 走新 id。
+ * r31:后缀段必须是恰 6 位 [a-z0-9](与 skinIdFrom 的随机后缀形态一致)——旧实现只按
+ * `startsWith(slug + '-')` 判断,导入「whale」会误命中不同皮肤的「whale-song-abc123」
+ * (slug=whale-song),复用其 id 后整目录 rm 覆盖,用户已装的 whale-song 皮肤被误删。
  */
 export async function findExistingSkinId(slug, skinsDir = SKINS_DIR) {
   if (!slug) return null;
   let ids = [];
   try { ids = await readdir(skinsDir); } catch { return null; }
-  return ids.find((d) => SKIN_ID_RE.test(d) && (d === slug || d.startsWith(`${slug}-`))) || null;
+  return ids.find((d) => {
+    if (!SKIN_ID_RE.test(d)) return false;
+    if (d === slug) return true;
+    if (!d.startsWith(`${slug}-`)) return false;
+    // 随机后缀形态:slug 段可以含连字符(如 whale-song),后缀段必须恰 6 位 [a-z0-9]。
+    return /^[a-z0-9]{6}$/.test(d.slice(slug.length + 1));
+  }) || null;
 }
 
 async function dirBytes(dir) {

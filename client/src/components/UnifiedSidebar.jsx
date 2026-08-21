@@ -13,6 +13,7 @@ import {
 import { useStore } from '../stores/sessionStore.js';
 import { confirmDialog } from '../utils/confirmDialog.jsx';
 import { resolveSessionTitle } from '../utils/sessionTitle.js';
+import { queueKeyFor } from '../utils/steerQueue.js';
 import { composePanelProjects, composePanelSessions, sessionQueryMatchHashes, sortProjectRows, flattenSessionRows, singleModeVisibleProjects, sessionEmptyHint, showAccessSettingsButton, reorderManual, watcherRefreshTargets, clampPaneIndex, ACCESS_DENIED_HINT } from '../utils/projectPanel.js';
 import { pickDirectory, isTauri } from '../utils/pickDirectory.js';
 import { completionTracker } from '../utils/sessionDots.js';
@@ -31,11 +32,18 @@ const EMPTY_OBJECT = Object.freeze({});
 // 新建会话继承「上一个活跃会话」的思考强度(权限恒 default)——原 SessionList 逻辑。
 // r11-②:提为模块级导出,Home(App.jsx)与本面板的 6 处创建点共用同一 seed 链路;
 // 全部经 getState() 取值,无组件闭包依赖。
-export const seedNewSessionDefaults = (draftProjectHash) => {
+// r31:键一律走 queueKeyFor(r26-B5 起 draft 键带 draftId)——prev 是 draft 时也用它,
+// 不再手写旧形态 `draft-${hash}`(无 draftId 段)。新 draft 的 seed 写到
+// `draft-<hash>-<draftId>`(调用方传 draftId),否则与窗格 permKey 不相等,继承设置
+// 落到孤儿键 `draft-<hash>`,新会话读不到 → 「新建会话不再继承思考强度」。draftId
+// 未传(极旧路径)时退回旧形态兜底(不改变既有行为)。
+export const seedNewSessionDefaults = (draftProjectHash, draftId) => {
   const st = useStore.getState();
   const prev = st.splitMode ? st.paneSessions?.[st.activeTabIndex] : st.selectedSession;
-  const prevKey = prev ? (prev.sessionId || `draft-${prev.projectHash || 'none'}`) : null;
-  const draftKey = `draft-${draftProjectHash || 'none'}`;
+  const prevKey = prev ? queueKeyFor(prev) : null;
+  const draftKey = draftId != null
+    ? queueKeyFor({ projectHash: draftProjectHash || 'none', draftId })
+    : `draft-${draftProjectHash || 'none'}`;
   if (prevKey && prevKey !== draftKey) {
     st.setModelFor(draftKey, ''); // model 跟 provider 默认,不跟上条会话
     st.setEffortFor(draftKey, st.getEffortFor(prevKey));
@@ -194,6 +202,14 @@ export function UnifiedSidebar() {
   // hidden 过滤整轮失效)。
   const hiddenRef = useRef(hidden);
   hiddenRef.current = hidden;
+  // r31:本地 `hidden` 集以 store.hiddenProjects 为准(契约 C-I2/WS 'hidden-projects'
+  // 广播经 applyHiddenProjects 收敛)——手机端隐藏后 WS 广播 → store 变 → 本地集跟随,
+  // 桌面侧栏才即时隐藏该项目的子项(此前侧栏渲染用本地集、watcher 用 store,双轨分割,
+  // 对端改动只进了 store,侧栏视图不变)。store 为 null(水合前)时为「未知」,退回本地集。
+  const storeHiddenProjects = useStore((s) => s.hiddenProjects);
+  useEffect(() => {
+    if (storeHiddenProjects != null) setHidden(new Set(storeHiddenProjects));
+  }, [storeHiddenProjects]);
   useEffect(() => { fetchProjects(); }, []);
   // r27:启动补拉——水合恢复的展开组在启动路径上没有任何一脚拉取(诊断实证:只有
   // selectedProject 组被拉;watcher 只在 sessions-changed/ws-reconnected 后跑,而首连
@@ -239,7 +255,12 @@ export function UnifiedSidebar() {
     // r27:有会话正在窗格中打开的项目不可隐藏——隐藏后窗口还开着、数据路径全断,
     // 用户看到的就是"会话还在但项目消失了"的灵异状态。弹窗说明,不静默执行。
     const st = useStore.getState();
-    if (!hidden.has(hash)) {
+    // r31:以 store.hiddenProjects 为基(WS 已收敛,含对端刚隐藏的),不再用可能陈旧的
+    // 本地集 —— 否则桌面再隐藏/恢复一个会把对端刚隐藏的项目覆盖掉(PUT 全量覆盖,base
+    // 必须是全端收敛后的列表)。
+    const base = (st.hiddenProjects != null ? st.hiddenProjects : [...hiddenRef.current]);
+    const baseSet = new Set(base);
+    if (!baseSet.has(hash)) {
       const openHere = [...(st.paneSessions || []), st.selectedSession]
         .some((s) => s && s.projectHash === hash);
       if (openHere) {
@@ -247,12 +268,11 @@ export function UnifiedSidebar() {
         return;
       }
     }
-    setHidden((prev) => {
-      const next = new Set(prev);
-      if (next.has(hash)) next.delete(hash); else next.add(hash);
-      persistHidden(next);
-      return next;
-    });
+    const next = new Set(baseSet);
+    if (next.has(hash)) next.delete(hash); else next.add(hash);
+    st.applyHiddenProjects([...next]); // 更新 store(驱动本端视图 + 后续 WS 广播)
+    setHidden(next);                   // 本地兜底集同步(水合前 store null 时仍可渲染)
+    persistHidden(next);               // PUT 全量(store 派生,含对端隐藏,不覆盖)
   };
   const togglePinProject = (hash) => {
     const st = useStore.getState();
