@@ -408,6 +408,20 @@ export function ChatInput({ onSend, onStop, onStopBackground, onAccelerate, canS
     draftBeforeHistoryRef.current = '';
   }, [draftKey, claimDraft?.claimId, claimDraft?.sendable]);
 
+  // r26-B2③:切会话防串 —— 本 pane 名下的 sendable claim 若其来源会话不是当前 permKey
+  // (窗格切到了别的会话),释放回源会话队列(可见 needs-review):A 会话取回的草稿绝不
+  // 显示在 B 会话输入框。判据用 claimDraft.sessionKey 而非队列键 —— draft→真 sid 迁移
+  // (migrateSessionKey)会同步 sessionKey,同一会话的升级不触发释放。
+  useEffect(() => {
+    if (!paneId) return;
+    const st = useStore.getState();
+    for (const list of Object.values(st.messageQueue || {})) {
+      const hit = (Array.isArray(list) ? list : []).find((i) => i?.claimDraft?.sendable
+        && i.claimDraft.targetPaneId === paneId && i.claimDraft.sessionKey !== permKey);
+      if (hit) { st.releaseClaimDraft(paneId, hit.claimDraft.claimId); break; }
+    }
+  }, [permKey, paneId]);
+
   // 串扰#10b:key 变更帧跳过持久化 —— 切会话时本 effect 先于上面的 load effect 引发的
   // rerender 执行,会以【旧 text + 新 key】写一次 localStorage(A 的草稿写进 B 的 key,
   // 随即被 load 覆盖自愈;若两 effect 间卸载/崩溃则残留)。跳过该帧只堵错写,load 后
@@ -476,13 +490,18 @@ export function ChatInput({ onSend, onStop, onStopBackground, onAccelerate, canS
     const onClear = (e) => {
       const targetKey = e?.detail?.targetKey;
       if (targetKey && targetKey !== permKey) return;
+      // r26-B2①:清输入框 = 用户放弃这次取回编辑 → 把 hidden 占位槽还原为可见
+      // needs-review 条目(原文 queueText),否则队列被空文本槽永久卡死且无删除口。
+      if (claimDraft?.sendable && paneId) {
+        useStore.getState().releaseClaimDraft(paneId, claimDraft.claimId);
+      }
       setText('');
       setHistoryCursor(-1);
       draftBeforeHistoryRef.current = '';
     };
     window.addEventListener('cgui:composer-clear', onClear);
     return () => window.removeEventListener('cgui:composer-clear', onClear);
-  }, [permKey]);
+  }, [permKey, paneId, claimDraft?.claimId, claimDraft?.sendable]);
 
   // Read a File/Blob as a data URL.
   const fileToDataUrl = (file) => new Promise((resolve, reject) => {

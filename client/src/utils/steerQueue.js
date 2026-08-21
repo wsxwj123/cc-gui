@@ -103,18 +103,34 @@ export function reconcileSteered(list, _unusedSigs, steerKeys) {
 // ②claim 残留（claiming 中间态 / hidden sendable 槽）复位为可见 needs-review 原条目。
 // hidden 槽在 finalize 时丢了原文本与附件（收进 claimDraft），这里按 claimDraft 还原；
 // steerId 一并还原，让后续对账的 UUID 正向命中仍能自动清掉"其实已送达"的条目。
-export function reclaimClaimItem(item) {
+// r26-B2 文本优先级:
+//   · 无附件 → draft.text(用户在取回窗格里的最新编辑,非空时)优先于 draft.queueText
+//     (原始出站文本)——孤儿回收/复位不得丢用户编辑;
+//   · 有 attachments → 发送文本恒取 queueText:该形态下 draft.text 是 displayText
+//     展示文本,当发送文本还原会把展示文本发进会话;draft.text 只回填 displayText;
+//   · opts.discardEdits(releaseClaimDraft「用户显式清空输入框=放弃这次编辑」)→
+//     恒还原 queueText 原文,编辑文本随清空动作一并放弃。
+export function reclaimClaimItem(item, opts = {}) {
   if (!item || (!item.claimDraft && item.steerState !== 'claiming')) return item;
   const draft = item.claimDraft || null;
   const { claimId, targetPaneId, claimDraft, hidden, ...rest } = item;
   void claimId; void targetPaneId; void claimDraft; void hidden;
   const restored = { ...rest, steerState: 'needs-review', attemptWasAmbiguous: true };
   if (draft) {
-    if (typeof draft.queueText === 'string' && draft.queueText) restored.text = draft.queueText;
-    else if (!restored.text && typeof draft.text === 'string') restored.text = draft.text;
+    const hasAttachments = Array.isArray(draft.attachments) && draft.attachments.length > 0;
+    const queueText = typeof draft.queueText === 'string' && draft.queueText ? draft.queueText : null;
+    const editedText = typeof draft.text === 'string' && draft.text ? draft.text : null;
+    if (opts.discardEdits || hasAttachments) {
+      if (queueText) restored.text = queueText;
+      else if (!restored.text && editedText) restored.text = editedText;
+    } else if (editedText) {
+      restored.text = editedText;
+    } else if (queueText) {
+      restored.text = queueText;
+    }
     if (typeof draft.sourceQueueId === 'string' && draft.sourceQueueId) restored.queueId = draft.sourceQueueId;
     if (typeof draft.steerId === 'string' && draft.steerId) restored.steerId = draft.steerId;
-    if (Array.isArray(draft.attachments) && draft.attachments.length) {
+    if (hasAttachments) {
       restored.opts = {
         ...(restored.opts || {}),
         meta: { ...(restored.opts?.meta || {}), attachments: draft.attachments, displayText: draft.text || '' },

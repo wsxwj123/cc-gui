@@ -1000,7 +1000,10 @@ export const useStore = create((set, get) => ({
       // 与 routing.migrateDraftQueue 同口径:按 queuedAt 升序合并(无 queuedAt 按 0 兜底),
       // 不依赖拼接方向 —— 保证先发先入队的消息先出队,两条迁移路径行为一致。
       const merged = force ? mq[fromKey] : [...(mq[fromKey] || []), ...(mq[toKey] || [])].sort((a, b) => (a?.queuedAt || 0) - (b?.queuedAt || 0));
-      next[toKey] = merged;
+      // r26-B2③:claim 槽随队列迁移时同步 claimDraft.sessionKey —— 否则 ChatInput 的
+      // 「切会话释放 claim」判据(sessionKey !== 新 permKey)会把刚随 draft→真 sid 升级
+      // 搬过来的 claim 误判成"别人的"而释放,用户正在编辑的取回草稿被抽走。
+      next[toKey] = merged.map((it) => (it?.claimDraft ? { ...it, claimDraft: { ...it.claimDraft, sessionKey: toKey } } : it));
       delete next[fromKey];
       patch.messageQueue = next;
     }
@@ -1840,6 +1843,24 @@ export const useStore = create((set, get) => ({
       if (matches) found = true;
       return !matches;
     })]));
+    if (!found || !persistQueueSnapshot(nextQueue, true)) return s;
+    return { messageQueue: nextQueue };
+  }),
+  // r26-B2:显式放弃取回(清空输入框 / 切到别的会话)→ 把 hidden 占位槽还原为可见
+  // needs-review 条目,解死锁(占位槽沉到队首恒不可 drain,且 claimDraft 槽拒删,
+  // 没有这条路径队列永久卡死)。与孤儿回收的差别:这里是用户【主动放弃编辑】,
+  // 还原文本恒取 queueText 原文(discardEdits),编辑文本随清空动作一并放弃。
+  releaseClaimDraft: (targetPaneId, claimId) => set((s) => {
+    let found = false;
+    const nextQueue = Object.fromEntries(Object.entries(s.messageQueue).map(([key, list]) => [
+      key,
+      (Array.isArray(list) ? list : []).map((item) => {
+        const cd = item?.claimDraft;
+        if (!cd?.sendable || cd.targetPaneId !== targetPaneId || cd.claimId !== claimId) return item;
+        found = true;
+        return reclaimClaimItem(item, { discardEdits: true });
+      }),
+    ]));
     if (!found || !persistQueueSnapshot(nextQueue, true)) return s;
     return { messageQueue: nextQueue };
   }),
