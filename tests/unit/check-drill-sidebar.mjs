@@ -49,7 +49,8 @@ import { initialExpandedProjects, toggleExpanded } from '../../client/src/utils/
   assert.match(sb, /\/api\/reveal-path/, 't3: reveal 走已知项目校验端点');
   assert.match(sb, /data-cgui="new-worktree-btn"/, 't3: worktree 锚点随菜单保留');
   assert.match(sb, /<SessionItem/, 't3: 会话行组件原样复用(零回退)');
-  assert.match(sb, /for \(const h of st\.expandedProjects\) st\.fetchSessionsForPanel\(h\);/, 't3: 展开组保鲜(原单钻入组)');
+  // r26-I7② 换锚:展开组保鲜过 watcherRefreshTargets(跳过 hidden 展开组)。
+  assert.match(sb, /for \(const h of watcherRefreshTargets\(st\.expandedProjects, st\.hiddenProjects \|\| hiddenRef\.current\)\) st\.fetchSessionsForPanel\(h\);/, 't3: 展开组保鲜(r26-I7②:跳过 hidden 组)');
   assert.doesNotMatch(sb, /彻底清理该项目的 Claude 本地状态/, 't3: p3-4 清理按钮移除态保持');
 }
 
@@ -86,7 +87,8 @@ import { initialExpandedProjects, toggleExpanded } from '../../client/src/utils/
   assert.match(sb, /桌面端拖拽/, 't5: 手机置灰注文案');
   assert.match(sb, /view\.groupMode === 'single' && flatSessions\.map/, 't5: 单列表平铺分支');
   assert.match(sb, /sortProjectRows\(rows, \{\s*sortMode: view\.sortMode, order: drag \? drag\.preview : view\.projectOrder, pinned: pinnedProjSet,/, 't5: 排序接线(拖拽预览优先)');
-  assert.match(sb, /putSidebarView\(\{ projectOrder: drag\.preview \}\)/, 't5: 松手才落 prefs');
+  // r26-I1 换锚:松手 PUT 前把隐藏项目按原相对位次并回 preview(mergeHiddenOrder)。
+  assert.match(sb, /putSidebarView\(\{ projectOrder: mergeHiddenOrder\(preview, oldOrder\) \}\)/, 't5: 松手才落 prefs(r26-I1:并回隐藏项排位)');
   assert.doesNotMatch(sb, /from 'lucide-react'/, 't5: 零裸 lucide(守卫)');
   const store = readFileSync(new URL('../../client/src/stores/sessionStore.js', import.meta.url), 'utf8');
   assert.match(store, /hydrateSidebarView|putSidebarView|applyRemoteSidebarView/, 't5: store 三件');
