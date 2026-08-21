@@ -6893,7 +6893,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // 取值优先级逐字同链([1m] > resolvedWindow > /context 实测 > 按名推测)。
   const winSource = /\[1m\]/i.test(currentModel || '') ? `${winLabel}（[1m] 显式开关）`
     : resolvedWindow ? `${winLabel}（后端解析:provider 配置 / CLI 自报）`
-    : measuredCtx?.windowTokens ? `${winLabel}（/context 实测缓存）`
+    : measuredCtx?.windowTokens ? `${winLabel}（/context ${measuredCtx?.estimated ? '估算' : '实测'}缓存）`
     : `${winLabel}（按模型名内置推测）`;
   const badgeInfo = {
     headerModel, models, toolCallCount,
@@ -7840,7 +7840,8 @@ function ContextBreakdownButton({ contextTokens, contextWindow, contextPct, fmtT
       clearTimeout(justDoneTimer.current);
       justDoneTimer.current = setTimeout(() => setJustDone(false), 1200);
       // U3/V1:把 CLI 实测的分子+分母回写为本会话徽章的权威值,徽章与明细从此一致。
-      if (d?.windowTokens > 0) useStore.getState().setCtxMeasured(sessionId, { totalTokens: d.totalTokens || 0, windowTokens: d.windowTokens });
+      // r26-G3:estimated 透传 —— 估算路径的实测不是精确值,徽章脚注据此标「估算」。
+      if (d?.windowTokens > 0) useStore.getState().setCtxMeasured(sessionId, { totalTokens: d.totalTokens || 0, windowTokens: d.windowTokens, estimated: d.estimated === true });
       useStore.getState().setCtxBreakdown(canonicalKey, d, requestEpoch);
     } catch (e) {
       if (e.name !== 'AbortError' && requestRef.current?.requestEpoch === requestEpoch) {
@@ -7896,12 +7897,14 @@ function ContextBreakdownButton({ contextTokens, contextWindow, contextPct, fmtT
       <div className="px-3 pb-2 flex items-center gap-2 border-b border-black/5">
         <span className="text-xs font-medium text-ink font-body">{info ? '会话信息' : '上下文用量'}</span>
         {data?.model && <span className="text-[10px] text-ink-faint font-mono truncate max-w-[130px]" title={data.model}>{data.model}</span>}
-        {/* r11-⑨:数据来源与口径标注 —— 本地估算 / 精确(SDK·CLI 实测,第三方经代理) + 新鲜度 + 耗时。 */}
+        {/* r11-⑨:数据来源与口径标注 —— 本地估算 / 精确(SDK·CLI 实测,第三方经代理) + 新鲜度 + 耗时。
+            r26-G3(契约 C-G3):服务端估算路径回 estimated:true → 标「估算」,
+            估算不得冒充精确值展示。 */}
         {data?.localOnly && !loading && <span className="text-[9px] text-ink-faint font-body">本地估算</span>}
         {loading && <span className="text-[9px] text-ink-faint font-body">正在精确计算…</span>}
         {!loading && !data?.localOnly && data?.sampledAt && (
           <span className="text-[9px] text-ink-faint font-body" title={data.sampledAt}>
-            精确 · {data.source === 'sdk' ? 'SDK 实测' : 'CLI 实测'}{info?.providerHintLabel ? '（第三方经代理）' : ''} · {relativeAgeLabel(data.sampledAt)}
+            {data?.estimated ? '估算（约数）' : '精确'} · {data.source === 'sdk' ? 'SDK 实测' : 'CLI 实测'}{info?.providerHintLabel ? '（第三方经代理）' : ''} · {relativeAgeLabel(data.sampledAt)}
             {Number.isFinite(data._elapsedMs) ? ` · 耗时 ${(data._elapsedMs / 1000).toFixed(1)}s` : ''}
           </span>
         )}
