@@ -2545,7 +2545,7 @@ function parseContextMarkdown(md) {
 // percentage=round(total/max*100),与 /context markdown 的"a / b (c%)"同口径);第三方
 // provider 超窗时 pct 可 >100,照实返回不截断(前端有超窗提示)。isDeferred 分类(延迟
 // 加载、不占 totalTokens)原样保留 —— SDK 给的 name 已带 "(deferred)" 后缀,两路显示一致。
-function mapSdkContextUsage(u) {
+export function mapSdkContextUsage(u) {
   const max = u.maxTokens || u.rawMaxTokens || 0;
   const byServer = {};
   for (const t of u.mcpTools || []) {
@@ -2558,6 +2558,10 @@ function mapSdkContextUsage(u) {
     model: u.model || null,
     totalTokens: u.totalTokens || 0,
     windowTokens: max,
+    // r26-G3(契约 C-G3):usage 带 estimated 标记(估算回落由代理层打标,字段名逐字
+    // 按契约 'estimated')时透传到响应顶层,前端据此标「(估算)」;精确路径(真 usage)
+    // 不带此键,两态互斥。
+    ...(u.estimated ? { estimated: true } : {}),
     pct: Math.round(u.percentage ?? (max ? (u.totalTokens / max) * 100 : 0)),
     // 实测 SDK 的 isDeferred 分类 name 自带 " (deferred)" 后缀,与 markdown 表同名,原样透传。
     categories: (u.categories || []).map((c) => ({
