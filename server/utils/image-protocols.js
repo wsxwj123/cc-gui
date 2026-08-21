@@ -71,6 +71,8 @@ export function buildImageRequest(config, prompt) {
 
   if (protocol === 'gemini') {
     // POST {base}/models/{model}:generateContent。用户可能连 "models/" 前缀一起粘过来。
+    // r26-J5:model 进 URL path 必须编码 —— 含空格/斜杠的型号名不编码会把 URL 拼歪
+    // (路径注入:model 里的 '/' 会改变请求的实际路径段)。
     const bare = model.replace(/^models\//, '');
     const { generationConfig: extraGen, ...restExtra } = extra;
     const body = {
@@ -83,7 +85,7 @@ export function buildImageRequest(config, prompt) {
     const goog = { ...json, 'x-goog-api-key': key };
     const bearer = { ...json, Authorization: `Bearer ${key}` };
     return {
-      url: `${base}/models/${bare}:generateContent`,
+      url: `${base}/models/${encodeURIComponent(bare)}:generateContent`,
       headers: official ? goog : bearer,
       body,
       altHeaders: official ? bearer : goog,
