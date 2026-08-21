@@ -632,9 +632,9 @@ export function UnifiedSidebar() {
     return b;
   }, []);
   const flatSessions = useMemo(() => (view.groupMode === 'single'
-    ? flattenSessionRows(sessionsByProject, visibleHashes)
+    ? flattenSessionRows(sessionsByProject, visibleHashes, pinnedSessSet)
       .filter((s) => !pendingIds.has(s.sessionId) && (!q || String(titleOf(s) || '').toLowerCase().includes(q)))
-    : EMPTY_ARRAY), [view.groupMode, sessionsByProject, visibleHashes, pendingIds, q, titleOf]);
+    : EMPTY_ARRAY), [view.groupMode, sessionsByProject, visibleHashes, pinnedSessSet, pendingIds, q, titleOf]);
   // r23-③:空态文案两处共用(平铺此前硬编「暂无会话」,把「系统拒绝访问」伪装成没有会话)。
   // r24:拒访那一支补上真按钮 —— 原文案写着「点此查看处理办法」却是个纯 span,点了没反应。
   // 按钮只在真有面板可跳的平台出现(showAccessSettingsButton,目前只有 macOS);

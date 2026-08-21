@@ -172,10 +172,13 @@ const wrapFlatRow = (s, projectHash) => {
  * r23-①:visibleHashes(可选,Set/数组)给定时只平铺可见项目的会话 —— sessionsByProject
  * 是"曾经加载过"的缓存,隐藏项目不会被清掉(toggleHidden 不清缓存、expandedProjects 还
  * 持久化在 localStorage、600ms watcher 继续刷),不过滤就等于隐藏对平铺模式无效。
+ * r26-I8:pinned(可选,Set/数组 sessionId)给定时置顶会话前置 —— 与分组模式
+ * composePanelSessions 同语义;pinned 间仍按时间降序。不传 = 纯时间序(旧语义不变)。
  */
-export function flattenSessionRows(sessionsByProject, visibleHashes) {
+export function flattenSessionRows(sessionsByProject, visibleHashes, pinned) {
   const visible = visibleHashes instanceof Set ? visibleHashes
     : (Array.isArray(visibleHashes) ? new Set(visibleHashes) : null); // 不传 = 不过滤(旧调用方语义不变)
+  const pinnedSet = pinned == null ? null : (pinned instanceof Set ? pinned : new Set(pinned));
   const out = [];
   for (const [projectHash, sessions] of Object.entries(sessionsByProject || {})) {
     if (visible && !visible.has(projectHash)) continue;
@@ -183,7 +186,14 @@ export function flattenSessionRows(sessionsByProject, visibleHashes) {
       if (s && !s.archived) out.push(wrapFlatRow(s, projectHash));
     }
   }
-  out.sort((a, b) => (b.lastActivity ? new Date(b.lastActivity).getTime() : -1) - (a.lastActivity ? new Date(a.lastActivity).getTime() : -1));
+  const tsOfRow = (r) => (r.lastActivity ? new Date(r.lastActivity).getTime() : -1);
+  out.sort((a, b) => {
+    if (pinnedSet) {
+      const pin = (pinnedSet.has(b.sessionId) ? 1 : 0) - (pinnedSet.has(a.sessionId) ? 1 : 0);
+      if (pin) return pin; // r26-I8:置顶段恒最前
+    }
+    return tsOfRow(b) - tsOfRow(a);
+  });
   return out;
 }
 
