@@ -39,6 +39,19 @@ function withPrefsQueue(task) {
   return run;
 }
 
+// r26-C6:prefs 共享写函数。其它 route(如 version-check 的 writeUpdateChannel)的 prefs 写
+// 统一走这里 —— withPrefsQueue 串行化(与本文件所有 PUT 同一条队列,并发 read-merge-write
+// 不互踩)+ savePrefs 原子写(tmp+rename)。签名契约见 PLAN C-C6:PKG-6 按 updatePrefs(mutator)
+// 逐字消费。mutator 直接改传入的 prefs 对象,改完由这里统一落盘;mutator 抛错不会断队列链
+// (withPrefsQueue 已兜),错误原样抛回调用方。
+export async function updatePrefs(mutator) {
+  return withPrefsQueue(async () => {
+    const p = await loadPrefs();
+    await mutator(p);
+    await savePrefs(p);
+  });
+}
+
 // 会话删除时的 prefs GC:清掉四处按 sessionId 挂的残留(1M 标记/自动标题/自定义标题/
 // 置顶会话列表),否则 prefs.json 随删除只增不减,且被删 sid 的标记会污染未来复用同 id
 // 的水合。走 withPrefsQueue 与常规 PUT 串行;只对真有变化的类别广播。
