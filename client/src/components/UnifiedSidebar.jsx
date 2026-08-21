@@ -563,8 +563,15 @@ export function UnifiedSidebar() {
     setPendingDeletes((arr) => arr.filter((p) => p.session.projectHash !== projectHash));
     mine.forEach((p) => { clearInterval(p.timer); reallyDelete(p.session); });
   };
-  // beforeunload / 卸载兜底:剩余 pending 全部落实(keepalive fetch,进程随后端退出的
-  // 场景由服务端收口)。两处共用同一 flush,先摘列表保证幂等。
+  // beforeunload / 卸载兜底:剩余 pending 全部落实(keepalive fetch)。两处共用同一
+  // flush,先摘列表保证幂等。
+  // r26-I5:原来 DELETE 排在 stopSessionProcs(...).then 之后 —— 没有 keepalive 的
+  // stopSessionProcs 在页面卸载瞬间被浏览器掐死,then 永不执行,DELETE 根本发不出
+  // (会话没删掉,下次启动又冒出来)。前置核实结论:服务端 DELETE 会话路由自带兜底
+  // (sessions.js 删除分支在 unlink 前 await closePersistentForSession 停掉该会话全部
+  // 在跑/常驻进程),所以卸载路径跳过客户端停进程,直接发 keepalive DELETE ——
+  // keepalive 请求由浏览器代理完成,不依赖 JS 存活。正常路径(reallyDelete)不受影响,
+  // 那里先停进程再删仍是对的(删除响应快、撤销窗内进程即停)。
   const flushAllPending = () => {
     const all = pendingDeletesRef.current;
     if (!all.length) return;
@@ -572,10 +579,10 @@ export function UnifiedSidebar() {
     all.forEach((p) => {
       clearInterval(p.timer);
       useStore.getState().clearQueue?.(p.session.sessionId);
-      stopSessionProcs(p.session.sessionId).then(() => fetch(
+      fetch(
         `/api/sessions/${p.session.sessionId}?projectHash=${encodeURIComponent(p.session.projectHash)}`,
         { method: 'DELETE', keepalive: true },
-      )).catch(() => {});
+      ).catch(() => {});
     });
   };
   useEffect(() => {
