@@ -361,6 +361,13 @@ export function effectiveChannel(channel, installMethod) {
   return channel || (installMethod === 'npm' ? 'npm' : 'native');
 }
 
+// r26-C7:latest 的「真源」必须按生效渠道选,不是按安装方式。用户显式选了渠道后
+// (如 npm 安装选 native 渠道),版本检查若仍按安装方式取 npm 源,看到的 latest 与
+// 更新命令实际拉的源不一致 —— 「永远差一版」的变体。纯函数抽出供单测。
+export function resolveSrcKey(channel, installMethod) {
+  return effectiveChannel(channel, installMethod) === 'native' ? 'native' : 'npm';
+}
+
 export function updateCmdFor(method, claudePath) { // export 仅为可单测
   switch (method) {
     // Y1:brew 渠道由社区维护、版本严重滞后(用户实测 latest 仅 1.5x,官方已 2.1.x),
@@ -554,12 +561,14 @@ router.get('/claude-version-check', async (req, res) => {
   const now = Date.now();
   // 缓存按"真源"分键:native 渠道与 npm 的版本可能不同,混用一个缓存会把 npm 的
   // 版本号错发给原生安装(正是"永远差一版"的放大器)。
-  const srcKey = method === 'native' ? 'native' : 'npm';
+  // r26-C7:真源按【生效渠道】(显式选择优先,未选跟随安装方式)而非裸安装方式 ——
+  // 看到的 latest 与更新命令实际拉的源天然一致。
+  const srcKey = resolveSrcKey(readUpdateChannel(), method);
   if (ccCache && ccCacheSrc === srcKey && now - ccCachedAt < CACHE_TTL_MS) {
     latest = ccCache;
   } else {
     try {
-      latest = method === 'native'
+      latest = srcKey === 'native'
         ? await fetchNativeLatest()
         : await fetchNpmLatest();
       ccCache = latest; ccCacheSrc = srcKey; ccCachedAt = now;
