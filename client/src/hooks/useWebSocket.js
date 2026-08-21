@@ -2,6 +2,7 @@ import { useEffect, useRef } from 'react';
 import { useStore } from '../stores/sessionStore.js';
 import { resolveSessionTitle } from '../utils/sessionTitle.js';
 import { maybeNotify, permissionNotice } from '../utils/desktopNotify.js';
+import { getSkinState, deactivateSkin } from '../utils/skins.js';
 
 // G3:危险命令启发式 —— 删除类 + 网络/装包 + sudo。命中即强制弹窗,不被任何自动放行豁免。
 // 【权威判定在服务端 server/routes/chat.js 的 DANGEROUS_BASH】(canUseTool 内强拦,
@@ -270,6 +271,14 @@ export function useWebSocket() {
             case 'pinned':
               // r10-11:置顶(项目/会话)变更广播——折叠面板常驻不重挂载,靠它跨端收敛。
               useStore.getState().applyPinned(data);
+              break;
+            case 'skins-changed':
+              // r26-D7(契约 C-D7):皮肤在他端被删 → 若当前正用着它,静默回默认
+              // (否则图标 mask 404 变实心方块,要到下次 reconcile 才自愈)。
+              // payload 形状固定 { type:'skins-changed', deletedId }。
+              try {
+                if (data.deletedId && getSkinState().id === data.deletedId) deactivateSkin();
+              } catch {}
               break;
             case 'repair-hint':
               // r10-12:官方 400 空内容块的服务端体检结果。result 后 0ms finalize 会关 SSE,
