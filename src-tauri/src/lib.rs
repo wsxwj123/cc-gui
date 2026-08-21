@@ -829,6 +829,72 @@ fn gui_log_path_display(file_name: &str) -> String {
     format!("{home}{sep}.claude-gui{sep}{file_name}")
 }
 
+// ── r29 webview 自愈 ──────────────────────────────────────────────────────
+// 背景:用户实测 Windows 上 WebView2 渲染进程 OOM 崩溃,形态为整个窗口消失。
+// API 查证(本仓锁定 tauri 2.11.2 / wry 0.55.1,逐文件 grep 过源码而非凭记忆):
+//   · tauri 2.11.2 Builder 全部 on_* 钩子(app.rs):on_page_load /
+//     on_web_content_process_terminate / on_menu_event / on_tray_icon_event /
+//     on_window_event / on_webview_event —— 没有跨平台 on_process_failed;
+//   · 唯一等价物 on_web_content_process_terminate 文档明示
+//     "Linux / Windows / Android: Unsupported",仅 macOS/iOS 生效;
+//   · wry 0.55.1 的 WebView2 后端(webview2/mod.rs)完全没接 WebView2 的
+//     ProcessFailed 事件(全仓 grep "ProcessFailed" 零命中)——Windows 上要挂
+//     只能经 WebviewWindow::with_webview 拿 ICoreWebView2 再 add_ProcessFailed,
+//     那需要直接依赖 webview2-com(本轮禁令:不加新 crate)。故 Windows 渲染
+//     进程崩溃的"事件→重载"闭环暂无 API 可挂,是已知遗留(见提交说明)。
+// 在此约束下分两层做自愈:
+//   ① macOS/iOS:on_web_content_process_terminate —— WKWebView WebContent
+//      进程被 jetsam/崩溃杀掉时触发。事件详情落 tauri-startup.log(与后端
+//      监护线程同文件同格式)+ stderr,然后 reload 拉起新 content 进程
+//      恢复页面(content 进程死后 WKWebView 停在空白页,reload 是标准恢复)。
+//      10s 节流:持续 OOM 时不陷入"崩溃→重载→再崩溃"死循环,只记录不重载。
+//      绝不 panic:全程 let _ = / match,不用 unwrap/expect,主进程不跟着崩。
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+fn on_webview_process_terminated(webview: &tauri::Webview) {
+    use std::sync::atomic::{AtomicI64, Ordering};
+    const MIN_RELOAD_INTERVAL_MS: i64 = 10_000;
+    static LAST_RELOAD_MS: AtomicI64 = AtomicI64::new(0);
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    let label = webview.label().to_string();
+    let msg = format!(
+        "[tauri] webview watchdog: '{label}' web content process terminated (renderer crash/OOM)"
+    );
+    log_startup(&msg);
+    eprintln!("{msg}");
+    let last = LAST_RELOAD_MS.load(Ordering::Relaxed);
+    // 冷启动 now_ms 取不到(0)时 last=0、now-last=0 会误节流;负数同理放行。
+    if now_ms > 0 && now_ms - last < MIN_RELOAD_INTERVAL_MS {
+        log_startup(&format!(
+            "[tauri] webview watchdog: '{label}' not auto-reloading (throttled, last reload {}ms ago)",
+            now_ms - last
+        ));
+        return;
+    }
+    LAST_RELOAD_MS.store(now_ms, Ordering::Relaxed);
+    match webview.reload() {
+        Ok(_) => log_startup(&format!(
+            "[tauri] webview watchdog: '{label}' reloaded after process termination (self-heal ok)"
+        )),
+        Err(e) => log_startup(&format!(
+            "[tauri] webview watchdog: '{label}' reload after termination failed: {e} (main process stays up)"
+        )),
+    }
+}
+
+// ② Windows:WebView2 浏览器参数,GPU 崩溃形态的自愈。Chromium 默认 GPU 进程
+//    崩 ~6 次后永久停用 GPU 合成直到进程重启(页面黑/卡死,用户只能重开 app);
+//    --disable-gpu-process-crash-limit 去掉该上限,GPU 进程崩溃后无限自动重启。
+//    ⚠ wry 0.55.1(webview2/mod.rs:294)里 additional_browser_args 是整体替换
+//    默认参数而非追加,必须原样带上三条默认 --disable-features,否则
+//    msSmartScreenProtection 等被改回默认启用(本应用纯本地无遥测,必须保持禁用)。
+//    渲染进程崩溃(非 GPU)在 Windows 上无事件可挂,见上方 API 查证注释。
+#[cfg(target_os = "windows")]
+const WEBVIEW2_BROWSER_ARGS: &str =
+    "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --disable-gpu-process-crash-limit";
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // 诊断①:进程一进来先落一行日志。此前首条日志在窗口创建之后 —— 若窗口创建前就
@@ -847,7 +913,7 @@ pub fn run() {
         log_startup(&format!("[tauri] PANIC: {info}"));
         default_panic_hook(info);
     }));
-    tauri::Builder::default()
+    let builder = tauri::Builder::default()
         // 官方对话框插件:前端文件夹选择器走进程内原生对话框(秒开、置前)。
         // 权限见 capabilities/dialog.json(生产 remote 上下文须列全端口)。
         .plugin(tauri_plugin_dialog::init())
@@ -871,7 +937,13 @@ pub fn run() {
             }
         }))
         .manage(Backend(Mutex::new(None)))
-        .manage(BackendPort(Mutex::new(None)))
+        .manage(BackendPort(Mutex::new(None)));
+    // r29 自愈①:挂渲染进程终止钩子(macOS/iOS 生效;Windows 无此 API,见
+    // on_webview_process_terminated 注释里的查证)。cfg 门与 tauri 该方法自身的
+    // cfg(any(macos, ios)) 一致,其它平台不编译这段。
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    let builder = builder.on_web_content_process_terminate(on_webview_process_terminated);
+    builder
         // F1: 设置页实时重注册热键 + 截图完成后置前主窗。app 本地命令无需 capability 授权。
         .invoke_handler(tauri::generate_handler![set_screenshot_hotkey, focus_main_window, restart_app])
         .setup(|app| {
@@ -896,7 +968,7 @@ pub fn run() {
             // 诊断③:窗口创建失败不再经 `?` 静默上抛(最终 expect panic,双击的用户什么都
             // 看不到)。先落日志、再弹原生框说清最可能的原因(Windows 上多为 WebView2
             // Runtime 缺失/损坏),setup 在主线程跑,rfd 同步对话框可直接弹。
-            let window = match WebviewWindowBuilder::new(
+            let window_builder = WebviewWindowBuilder::new(
                 app,
                 "main",
                 WebviewUrl::External(splash_url().parse().unwrap()),
@@ -908,7 +980,16 @@ pub fn run() {
             // HTML5 ondrop 永远收不到文件(用户报"输入框拖不进 PDF/图片")。关掉后
             // 交给前端 ChatInput 的 handleDrop(HTML5 drag-drop)处理。
             .disable_drag_drop_handler()
-            .center()
+            .center();
+            // r29 自愈②(Windows):GPU 进程崩溃后自动重启(去掉 Chromium 的崩溃次数
+            // 上限),见 WEBVIEW2_BROWSER_ARGS 注释。非 Windows 平台该方法是 no-op,
+            // 这里用 cfg 只在 Windows 上接线并把所用参数落日志(取证可查)。
+            #[cfg(target_os = "windows")]
+            let window_builder = {
+                log_startup(&format!("[tauri] WebView2 additional browser args: {WEBVIEW2_BROWSER_ARGS}"));
+                window_builder.additional_browser_args(WEBVIEW2_BROWSER_ARGS)
+            };
+            let window = match window_builder
             .build()
             {
                 Ok(w) => w,
