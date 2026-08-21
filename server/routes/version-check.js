@@ -356,9 +356,22 @@ export async function writeUpdateChannel(channel) {
   } catch { return false; }
 }
 
-/** 渠道 + 安装方式 → 实际更新方式。未选过则跟随安装方式(npm 装的走 npm)。 */
-export function resolveUpdateMethod(channel, installMethod) {
-  if (channel === 'npm') return 'npm-registry';
+// r26-C1:跨渠道判据(纯函数,export 供单测)。仅「显式 npm 渠道 × 非 npm 安装」算
+// 跨渠道 —— 此时 `npm install -g` 会写进 npm 前缀的另一份安装,而 PATH 里先生效的
+// 仍是当前安装。native 渠道 × npm 安装走 claude 自更新是官方支持路径,不算跨渠道。
+export function isCrossChannel(channel, installMethod) {
+  return channel === 'npm' && installMethod !== 'npm';
+}
+
+/** 渠道 + 安装方式 → 实际更新方式。未选过则跟随安装方式(npm 装的走 npm)。
+ *  r26-C1:跨渠道组合(显式 npm 渠道 × 非 npm 安装)默认返回 null —— 不得静默给出
+ *  'npm-registry'(那会把更新写进另一份安装,自检命中 PATH 旧版假成功);
+ *  只有调用方带来显式确认回执(opts.allowCrossChannel === true,前端确认弹窗)才放行。 */
+export function resolveUpdateMethod(channel, installMethod, { allowCrossChannel = false } = {}) {
+  if (channel === 'npm') {
+    if (installMethod === 'npm') return 'npm-registry';
+    return allowCrossChannel ? 'npm-registry' : null;
+  }
   if (channel === 'native') return 'native';
   return installMethod === 'npm' ? 'npm-registry' : installMethod;
 }
@@ -392,9 +405,14 @@ export function updateCmdFor(method, claudePath) { // export 仅为可单测
     // 平台包(真二进制)由 optionalDependencies 带下来,装完自检版本。
     // 'npm' 仍表示"npm 安装但走原生自更新"(渠道选 native 时命中)。
     case 'npm-registry': {
+      // r26-C1:自检钉到刚装的那个安装。裸 `claude --version` 走 PATH 解析,native
+      // 安装用户命中的是旧 native 版,0 退出码 → 「更新完成」但生效的是 npm 前缀里
+      // 没人用的新安装(假成功)。改为直接验证 npm 全局前缀里的新二进制。
+      // Windows .bat 捕获 `npm prefix -g` 输出需 for /f,过于脆弱 —— Win 保持
+      // call claude --version,跨渠道风险由前端 crossChannel 确认弹窗明示。
       const verify = process.platform === 'win32'
         ? 'call npm install -g @anthropic-ai/claude-code@latest && call claude --version'
-        : 'npm install -g @anthropic-ai/claude-code@latest && claude --version';
+        : 'npm install -g @anthropic-ai/claude-code@latest && "$(npm prefix -g)/bin/claude" --version';
       return verify;
     }
     case 'npm': {
@@ -570,7 +588,8 @@ router.get('/claude-version-check', async (req, res) => {
   // 版本号错发给原生安装(正是"永远差一版"的放大器)。
   // r26-C7:真源按【生效渠道】(显式选择优先,未选跟随安装方式)而非裸安装方式 ——
   // 看到的 latest 与更新命令实际拉的源天然一致。
-  const srcKey = resolveSrcKey(readUpdateChannel(), method);
+  const channel = readUpdateChannel();
+  const srcKey = resolveSrcKey(channel, method);
   if (ccCache && ccCacheSrc === srcKey && now - ccCachedAt < CACHE_TTL_MS) {
     latest = ccCache;
   } else {
@@ -595,8 +614,12 @@ router.get('/claude-version-check', async (req, res) => {
     installed: true,
     ...(staleError ? { staleError } : {}),
     method,                         // native | brew | npm | unknown
-    updateCommand: updateCmdFor(resolveUpdateMethod(readUpdateChannel(), method), claudePath),
-    updateChannel: effectiveChannel(readUpdateChannel(), method),
+    // r26-C1:跨渠道时 resolveUpdateMethod 回 null → updateCommand 如实为 null,
+    // 前端按 crossChannel 弹确认,而不是直接跑一条会写进另一份安装的命令。
+    updateCommand: (() => { const m = resolveUpdateMethod(channel, method); return m ? updateCmdFor(m, claudePath) : null; })(),
+    updateChannel: effectiveChannel(channel, method),
+    // r26-C1:跨渠道标记(显式 npm 渠道 × 非 npm 安装),前端更新按钮据此弹确认。
+    crossChannel: isCrossChannel(channel, method),
     hasUpdate: latest ? semverGt(latest, currentVersion) : false,
   });
 });
@@ -610,7 +633,18 @@ router.get('/claude-version-check', async (req, res) => {
 router.post('/claude-update', async (req, res) => {
   const { method, path: claudePath } = await detectInstall();
   // r13-p2-20:按用户选择的渠道解析(auto=跟随安装方式;npm 装的默认走 npm,镜像源更快)
-  const cmd = updateCmdFor(resolveUpdateMethod(readUpdateChannel(), method), claudePath);
+  // r26-C1:跨渠道(npm 渠道 × 非 npm 安装)裸调用拒绝执行 —— 命令会写进 npm 前缀的
+  // 另一份安装,PATH 先生效的仍是当前安装(假成功)。前端确认弹窗回执(allowCrossChannel)
+  // 才放行;否则给明确指引。
+  const channel = readUpdateChannel();
+  const resolved = resolveUpdateMethod(channel, method, { allowCrossChannel: req.body?.allowCrossChannel === true });
+  if (!resolved) {
+    return res.status(409).json({
+      ok: false, crossChannel: true,
+      error: '更新渠道(npm)与当前安装方式不一致:执行会写入 npm 全局前缀的另一份安装,而 PATH 里先生效的仍是当前安装。请把更新渠道改回「跟随安装方式」后重试。',
+    });
+  }
+  const cmd = updateCmdFor(resolved, claudePath);
   // M1: native 自更新直连 claude.ai 下载,墙内必须带代理;npm/brew 同样受益。
   const proxyUrl = await detectLocalProxy().catch(() => null);
   // Windows:运行中的 claude 锁住 claude.exe,npm/upgrade 覆盖时报 "could not write ...claude.exe"。
@@ -719,7 +753,14 @@ router.post('/claude-update/stream', async (req, res) => {
   try {
     const detected = await detectInstall();
     method = detected.method;
-    cmd = updateCmdFor(resolveUpdateMethod(readUpdateChannel(), method), detected.path);
+    // r26-C1:跨渠道裸调用解析回 null —— 不许静默起会写进另一份安装的 npm install;
+    // 前端确认回执(allowCrossChannel)才放行,否则走与检测失败相同的 error 收尾
+    // (前端流消费本就有 error 分支,直接复用)。
+    const resolved = resolveUpdateMethod(readUpdateChannel(), method, { allowCrossChannel: req.body?.allowCrossChannel === true });
+    if (!resolved) {
+      throw new Error('更新渠道(npm)与当前安装方式不一致:执行会写入 npm 全局前缀的另一份安装,而 PATH 里先生效的仍是当前安装。请把更新渠道改回「跟随安装方式」后重试。');
+    }
+    cmd = updateCmdFor(resolved, detected.path);
     proxyUrl = await detectLocalProxy().catch(() => null);
   } catch (e) {
     // 占位后任何一步失败都必须还原状态,否则任务卡成"永远 running":后续所有请求

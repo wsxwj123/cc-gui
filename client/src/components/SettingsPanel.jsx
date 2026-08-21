@@ -1088,6 +1088,13 @@ function CcUpdater() {
 
   // CN-2:在 GUI 内更新并实时显示进度(流式 NDJSON),不用开外部终端。
   const doUpdate = async () => {
+    // r26-C1:跨渠道(显式 npm 渠道 × 非 npm 安装)先明示再确认 —— 裸跑会把更新
+    // 写进 npm 前缀的另一份安装,PATH 里先生效的仍是当前安装(假成功)。
+    if (state.crossChannel) {
+      if (!(await confirmDialog(`你选择的更新渠道(npm)与当前安装方式(${METHOD_LABEL[state.method] || state.method || '未知'})不一致:将安装到 npm 全局前缀,与当前安装是两份;PATH 里先生效的仍是当前安装(更新后这里显示的版本可能不变)。\n建议先把更新渠道改回「跟随安装方式」。仍要继续吗?`))) return;
+      setUpdating(true); setResult(null); setLogLines([]);
+      return doUpdateStream({ allowCrossChannel: true });
+    }
     const cmd = state.updateCommand || 'claude upgrade';
     if (!(await confirmDialog(`将在应用内运行【${cmd}】更新 Claude Code 到 v${state.latestVersion}（安装方式：${state.method || '未知'}），进度实时显示在下方。\n更新在后台进行:关掉这个面板不会中断,回来还能接着看进度。\n（墙内需已开系统代理;若卡住可点"改用终端"。）确定继续?`))) return;
     setUpdating(true); setResult(null); setLogLines([]);
@@ -1098,9 +1105,12 @@ function CcUpdater() {
   // r22-③:attach=true 走【只续看、绝不 spawn】的 /attach 入口。原来两者都打 /stream
   // (会启动安装的那个),而这个参数根本没人读 —— 更新恰好在 GET /status 与这次 POST
   // 之间跑完,用户只是打开设置面板就静默起了一次全局安装,毫无确认。
-  const doUpdateStream = async ({ attach = false } = {}) => {
+  const doUpdateStream = async ({ attach = false, allowCrossChannel = false } = {}) => {
     try {
-      const r = await fetch(attach ? '/api/claude-update/attach' : '/api/claude-update/stream', { method: 'POST' });
+      // r26-C1:跨渠道确认回执随请求体下发;服务端无回执的裸调用一律拒绝(409/error 帧)。
+      const r = await fetch(attach ? '/api/claude-update/attach' : '/api/claude-update/stream', allowCrossChannel
+        ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ allowCrossChannel: true }) }
+        : { method: 'POST' });
       if (!r.ok || !r.body) throw new Error('HTTP ' + r.status);
       const reader = r.body.getReader();
       const dec = new TextDecoder();
