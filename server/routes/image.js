@@ -311,6 +311,11 @@ router.post('/image/generate', async (req, res) => {
         return res.status(502).json({ error: `图片过大（上限 ${MAX_IMAGE_BYTES / 1048576}MB）` });
       }
       buf = Buffer.from(picked.base64, 'base64');
+      // r26-J13:字符串长度闸挡不住"编码前过小、解码后超限"(1.4 是粗估,非精确 4/3)——
+      // 解码后的真实字节数再过一次上限闸(与二进制下载通道同值)。
+      if (buf.length > MAX_IMAGE_BYTES) {
+        return res.status(413).json({ error: `图片过大（解码后 ${Math.round(buf.length / 1048576)}MB，上限 ${MAX_IMAGE_BYTES / 1048576}MB）` });
+      }
     } else {
       // 判官必修①(SSRF):这个 URL 是【上游回什么就是什么】,攻击者可控性最高的一处 ——
       // 而 baseURL 在上面刚过了 assertPublicBaseURL,这里原先一次都没过。实测能用
