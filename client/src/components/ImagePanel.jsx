@@ -176,10 +176,21 @@ export default function ImagePanel() {
     load();
   };
 
+  const [revealErr, setRevealErr] = useState('');
+
+  // r26-J6:系统打开失败(非 2xx / 网络异常)要内联提示 —— 原先 catch 静默吞掉,
+  // 用户点了「在访达中显示」毫无反应,分不清是没点上还是失败了。非阻断操作,
+  // 不弹 confirmDialog,在按钮旁给固定文案。
   const reveal = async (file) => {
-    await fetch('/api/image/reveal', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ file }),
-    }).catch(() => {});
+    setRevealErr('');
+    try {
+      const r = await fetch('/api/image/reveal', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ file }),
+      });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    } catch {
+      setRevealErr('打开失败：无法在系统文件管理器中显示该文件');
+    }
   };
 
   return (
@@ -242,6 +253,7 @@ export default function ImagePanel() {
               className="shrink-0 px-2 py-1 rounded border border-canvas-deep text-[11px] text-ink-soft font-body hover:bg-canvas-deep/60 flex items-center gap-1"
             ><ExternalLink size={11} />在访达中显示</button>
           </div>
+          {revealErr && <div className="text-[11px] text-error font-body">{revealErr}</div>}
         </div>
       )}
 
