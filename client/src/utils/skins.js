@@ -39,6 +39,56 @@ export const T2_BLACKLIST_CLIENT = [
   /\[\s*['"](?:fetch|eval|function|websocket)['"]\s*\]/,
 ];
 
+// ── 值文法校验(客户端版;r26-D11) ─────────────────────────────
+// bootReplaySkin 的 FOUC 缓存重放只读 localStorage——修前 expandSkin 的 pick 只查 token
+// 白名单 + ≤240 字符,篡改 localStorage 可注入 url(javascript:…) 形态值绕过服务端
+// validateSkinVar 的文法闸。以下常量与函数为 server/utils/skin-validate.js 中
+// validateSkinVar 纯函数部分的逐字复制(白名单引用换 CLIENT 变体;客户端复制不 import
+// server 文件,本文件顶部既有惯例),双端一致性由 check-r26-skin-var-parity.mjs
+// 跨文件 token × 值矩阵钉死。
+// 值文法(锚定 ^$,无 m flag;进正则前黑名单预筛)。
+const ALPHA_CLIENT = '(?:0|1(?:\\.0{1,4})?|0?\\.\\d{1,4})';
+const HEX_CLIENT = '#[0-9a-fA-F]{3}(?:[0-9a-fA-F])?(?:[0-9a-fA-F]{2})?(?:[0-9a-fA-F]{2})?';
+const RGB_CLIENT = `rgba?\\(\\s*\\d{1,3}\\s*,\\s*\\d{1,3}\\s*,\\s*\\d{1,3}\\s*(?:,\\s*${ALPHA_CLIENT}\\s*)?\\)`;
+const HSL_CLIENT = `hsla?\\(\\s*\\d{1,3}\\s*,\\s*\\d{1,3}%\\s*,\\s*\\d{1,3}%\\s*(?:,\\s*${ALPHA_CLIENT}\\s*)?\\)`;
+const COLOR_RE_CLIENT = new RegExp(`^(?:${HEX_CLIENT}|${RGB_CLIENT}|${HSL_CLIENT})$`);
+const LENGTH_RE_CLIENT = /^\d{1,2}(\.\d)?px$/;
+const SLEN_CLIENT = '-?\\d{1,3}(?:\\.\\d{1,2})?(?:px)?';
+const SCOLOR_CLIENT = `(?:${HEX_CLIENT}|${RGB_CLIENT}|${HSL_CLIENT})`;
+const ONE_SHADOW_CLIENT = `(?:inset\\s+)?${SLEN_CLIENT}\\s+${SLEN_CLIENT}(?:\\s+${SLEN_CLIENT}){0,2}\\s+${SCOLOR_CLIENT}`;
+const SHADOW_RE_CLIENT = new RegExp(`^${ONE_SHADOW_CLIENT}(?:\\s*,\\s*${ONE_SHADOW_CLIENT})*$`);
+const BACKDROP_RE_CLIENT = /^(?:none|blur\(\d{1,2}(\.\d)?px\))$/;
+
+// 黑名单预筛(toLowerCase 后):任一子串命中直接拒(大小写变体同闸)。
+const VALUE_BLACKLIST_CLIENT = ['url(', 'var(', ';', '}', '\\', '/*', '@'];
+
+function grammarForClient(token) {
+  if (token.startsWith('--color-') || token.startsWith('--glass-')) return COLOR_RE_CLIENT; // glass-shadow 在白名单层已拒
+  if (token.startsWith('--radius-')) return LENGTH_RE_CLIENT;
+  if (token.startsWith('--shadow-')) return SHADOW_RE_CLIENT;
+  if (token.startsWith('--backdrop-')) return BACKDROP_RE_CLIENT;
+  return null;
+}
+
+/** 单变量校验(客户端版):{ ok } | { ok:false, reason }。与服务端 validateSkinVar 同口径。 */
+export function validateSkinVarClient(token, value) {
+  if (!SKIN_TOKENS_CLIENT.includes(token)) return { ok: false, reason: 'not_in_whitelist' };
+  if (SKIN_TOKENS_REJECTED_CLIENT.includes(token)) return { ok: false, reason: 'rejected_v1' };
+  if (typeof value !== 'string') return { ok: false, reason: 'grammar' };
+  const v = value.trim();
+  const maxLen = grammarForClient(token) === SHADOW_RE_CLIENT ? 240 : 64;
+  if (!v || v.length > maxLen) return { ok: false, reason: 'too_long' };
+  const low = v.toLowerCase();
+  for (const bad of VALUE_BLACKLIST_CLIENT) {
+    if (low.includes(bad)) return { ok: false, reason: 'blacklist' };
+  }
+  const re = grammarForClient(token);
+  if (!re || !re.test(v)) return { ok: false, reason: 'grammar' };
+  // LENGTH 数值 ≤64 附加约束
+  if (re === LENGTH_RE_CLIENT && parseFloat(v) > 64) return { ok: false, reason: 'grammar' };
+  return { ok: true };
+}
+
 const LS_ID = 'cgui-skin-id';
 const LS_CACHE = 'cgui-skin-cache';
 const LS_DEV = 'cgui-dev-skins';
@@ -84,8 +134,8 @@ export function expandSkin(manifest, mode) {
   const vars = {};
   const pick = (obj) => {
     for (const [k, v] of Object.entries(obj || {})) {
-      if (!SKIN_TOKENS_CLIENT.includes(k) || SKIN_TOKENS_REJECTED_CLIENT.includes(k)) continue;
-      if (typeof v === 'string' && v.length <= 240) vars[k] = v;
+      // r26-D11:值走全套闸(白名单+黑名单+文法)——FOUC 缓存重放不再旁路文法校验
+      if (validateSkinVarClient(k, v).ok) vars[k] = String(v).trim();
     }
   };
   pick(m.shared?.vars);
