@@ -19,17 +19,33 @@ export const COUNT_TOKENS_UPSTREAM_TIMEOUT_MS = 2000;
  * 本地估算回退:与 CLI 第三方本地估算同口径的字符启发式 ——
  * JSON.stringify(messages+system+tools).length / 4 量级。
  * 响应形态凑官方 count_tokens:{ input_tokens }(CLI 只读这个字段,二进制实证)。
+ *
+ * r26-G4:image 块的 base64 data 不按字符计(一张图几十万物料,chars/4 会虚高到
+ * 几十万),按固定当量 ESTIMATED_TOKENS_PER_IMAGE 计(Anthropic 官方经验值约
+ * (w×h)/750,无尺寸信息时取中位常量);文本块照旧 chars/4。无图片输入时序列化
+ * 内容与旧口径逐字节一致(纯文本回归哨兵靠这点成立)。
  */
+export const ESTIMATED_TOKENS_PER_IMAGE = 1500;
+
 export function estimateInputTokens(body) {
   let size = 0;
+  let images = 0;
   try {
+    const messages = (body?.messages ?? []).map((m) => {
+      if (!m || !Array.isArray(m.content)) return m;
+      const kept = m.content.filter((b) => {
+        if (b && typeof b === 'object' && b.type === 'image') { images++; return false; }
+        return true;
+      });
+      return kept.length === m.content.length ? m : { ...m, content: kept };
+    });
     size = JSON.stringify({
-      messages: body?.messages ?? [],
+      messages,
       system: body?.system ?? '',
       tools: body?.tools ?? [],
     }).length;
-  } catch { size = 0; }
-  return { input_tokens: Math.max(0, Math.ceil(size / 4)) };
+  } catch { size = 0; images = 0; }
+  return { input_tokens: Math.max(0, Math.ceil(size / 4) + images * ESTIMATED_TOKENS_PER_IMAGE) };
 }
 
 /** 上游 200 响应体校验:必须带数字 input_tokens 才透传,否则回退估算(垃圾 200 不喂 CLI)。 */
