@@ -8,7 +8,7 @@ import { promisify } from 'util';
 import { syncMcpToAgents } from './agents.js';
 import { assertPublicBaseURL } from './settings.js';
 import { claudeCommand } from '../utils/claude-resolver.js';
-import { detectUv } from './version-check.js';
+import { detectUv, detectLocalProxy } from './version-check.js';
 import { searchRegistry } from '../services/mcp-registry.js';
 
 const execFileP = promisify(execFile);
@@ -82,7 +82,9 @@ async function probeStdioStderr(cfg, timeoutMs = 6000) {
 // All `claude ...` invocations go through execFile with an args array — no shell, no injection.
 // Async (not execFileSync) so a slow CLI cold start doesn't freeze the whole event loop —
 // and with it every other client's live SSE stream — for up to `timeout` ms.
-async function runClaude(args, { timeout = 10000 } = {}) {
+// extraEnv:附加子进程环境变量(marketplace 操作注代理用),合并进 process.env 之后,
+// 不覆盖 process.env 已有键的语义由调用方(marketplaceProxyEnv)保证。
+async function runClaude(args, { timeout = 10000, extraEnv = null } = {}) {
   // 路径解析统一走 claude-resolver(与检测面板/聊天链路同源,PATH 外安装位也可用);
   // Windows 的 .cmd/.bat 不是真正可执行文件,claudeCommand 已包好 cmd.exe /c。
   const { file, args: fullArgs } = claudeCommand(args);
@@ -94,7 +96,7 @@ async function runClaude(args, { timeout = 10000 } = {}) {
   const p = execFileP(file, fullArgs, {
     encoding: 'utf-8',
     timeout: isWin ? 0 : timeout,
-    env: { ...process.env },
+    env: { ...process.env, ...(extraEnv || {}) },
     maxBuffer: 8 * 1024 * 1024,
   });
   let timedOut = false, timer = null;
@@ -1065,7 +1067,7 @@ router.post('/plugins/:name/update', async (req, res) => {
       } catch { return null; }
     };
     const beforeVersion = await readVer(); // 更新前版本,用于判"其实没更新"
-    if (mk) { try { await runClaude(['plugin', 'marketplace', 'update', mk], { timeout: 30000 }); } catch {} }
+    if (mk) { try { await runClaude(['plugin', 'marketplace', 'update', mk], { timeout: 30000, extraEnv: await marketplaceProxyEnv() }); } catch {} }
     await runClaude(['plugin', 'update', name], { timeout: 90000 });
     invalidateMcpCache();
     const version = await readVer(); // 更新后版本(前端弹窗"已更新为 vX")
@@ -1093,11 +1095,81 @@ router.delete('/plugins/:name', async (req, res) => {
 
 // 官方插件一键安装。CM-5:marketplace 不仅要 add,还要 **update** 刷新本地缓存——否则
 // 缓存停在旧 commit(没有后加入的插件如 code-review)→ install 报 "not found / 本地副本过期"
-// (Windows 上常见,Mac 缓存恰新所以能装)。add 幂等(已存在忽略),update 是 git pull 较快。
+// (Windows 上常见,Mac 缓存恰新所以能装)。
+// r29:add/update 都不得 catch{} 吞错——update 失败(无代理拉不动 GitHub / git 问题 / 30s
+// 超时)时缓存停在旧 commit 或根本没有,install 必然 not found,用户只看到最终 install 的错,
+// 真实原因(市场刷新失败)被吞。故:add 仅忽略「已存在」类幂等报错,其余带上 stderr 原文抛出;
+// update 失败一律抛出。
 const OFFICIAL_MARKETPLACE = 'claude-plugins-official';
+
+function errText(err) {
+  return (err?.stderr?.toString() || err?.message || String(err || '')).trim();
+}
+// `marketplace add` 对已注册源的幂等报错(已存在不算失败)。export 仅为可单测。
+export function isMarketplaceAddIdempotent(err) {
+  return /already (added|exists|registered)|已存在|已经添加/i.test(errText(err));
+}
+// install 报「找不到/缓存过期」形态 → 值得刷新市场重试。export 仅为可单测。
+export function isMarketplaceStaleError(err) {
+  return /out of date|not found|marketplace update|本地副本/i.test(errText(err));
+}
+
+// r29:marketplace add/update 要拉 GitHub,Windows 无代理直连常拉不动 → 给子进程注代理 env。
+// 不覆盖用户已有 env(显式配置优先);探测不到代理返回 {}。export 仅为可单测。
+export async function marketplaceProxyEnv(detect = detectLocalProxy, baseEnv = process.env) {
+  const proxy = await detect().catch(() => null);
+  if (!proxy) return {};
+  const env = {};
+  for (const k of ['HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy']) {
+    if (!baseEnv[k]) env[k] = proxy;
+  }
+  return env;
+}
+
+// 注册(可选)+ 刷新 marketplace 缓存。失败带 stderr 原文抛出,不再静默。export 仅为可单测。
+export async function ensureMarketplace({ repo = null, marketplace, run = runClaude, detect = detectLocalProxy }) {
+  const opts = { timeout: 30000, extraEnv: await marketplaceProxyEnv(detect) };
+  if (repo) {
+    try {
+      await run(['plugin', 'marketplace', 'add', repo], opts);
+    } catch (e) {
+      if (!isMarketplaceAddIdempotent(e)) throw new Error(`注册插件市场失败:${errText(e)}`);
+    }
+  }
+  try {
+    await run(['plugin', 'marketplace', 'update', marketplace], opts);
+  } catch (e) {
+    throw new Error(`刷新插件市场「${marketplace}」失败:${errText(e)}`);
+  }
+}
+
 async function ensureOfficialMarketplace() {
-  try { await runClaude(['plugin', 'marketplace', 'add', 'anthropics/claude-plugins-official'], { timeout: 30000 }); } catch {}
-  try { await runClaude(['plugin', 'marketplace', 'update', OFFICIAL_MARKETPLACE], { timeout: 30000 }); } catch {}
+  await ensureMarketplace({ repo: 'anthropics/claude-plugins-official', marketplace: OFFICIAL_MARKETPLACE });
+}
+
+// r29:install 报「not found / out of date」形态 → 先刷新市场(刷新失败透出根因,不无谓重试),
+// 再重试 install 一次;仍失败抛出完整因果链 + 可执行指引。export 仅为可单测。
+export async function installPluginWithRefresh({ name, marketplace, repo = null, run = runClaude, detect = detectLocalProxy }) {
+  const target = `${name}@${marketplace}`;
+  const guide = `请检查网络/代理,或手动运行 claude plugin marketplace update ${marketplace} 后重试`;
+  try {
+    await run(['plugin', 'install', target], { timeout: 90000 });
+    return;
+  } catch (e) {
+    if (!isMarketplaceStaleError(e)) throw e;
+    const firstErr = errText(e);
+    try {
+      await ensureMarketplace({ repo, marketplace, run, detect });
+    } catch (ue) {
+      // 刷新本身就失败 = 根因在市场拉不动,直接给因果链(重试旧缓存无意义)。
+      throw new Error(`安装失败:${firstErr};已尝试刷新插件市场失败:${errText(ue)}。${guide}`);
+    }
+    try {
+      await run(['plugin', 'install', target], { timeout: 90000 });
+    } catch (e2) {
+      throw new Error(`安装失败:${errText(e2)};已尝试刷新插件市场并重试仍失败(首次错误:${firstErr})。${guide}`);
+    }
+  }
 }
 
 // GET /api/plugins/available?q=&fresh=1 — 全市场可装插件搜索(折叠式高级搜索)。
@@ -1162,23 +1234,17 @@ router.post('/plugins/install', async (req, res) => {
     const isCustom = !!repo && marketplace !== OFFICIAL_MARKETPLACE;
     if (isCustom && !/^[A-Za-z0-9._\/-]{1,100}$/.test(repo)) throw new Error('invalid repo');
 
+    // r29:add/update 不再吞错(ensureMarketplace 失败直接 500 带 stderr 原文);
+    // install 报「not found/out of date」时刷新市场重试一次,仍失败给完整因果链。
     if (isCustom) {
-      // 非官方源:先注册其 marketplace(幂等)+ update 刷新缓存。
-      try { await runClaude(['plugin', 'marketplace', 'add', repo], { timeout: 30000 }); } catch {}
-      try { await runClaude(['plugin', 'marketplace', 'update', marketplace], { timeout: 30000 }); } catch {}
+      await ensureMarketplace({ repo, marketplace });
     } else {
       await ensureOfficialMarketplace();
     }
-    try {
-      await runClaude(['plugin', 'install', `${name}@${marketplace}`], { timeout: 90000 });
-    } catch (e) {
-      // 仍失败且像"缓存过期/找不到"→ 强制再 update 一次后重试(兜底)。
-      const msg = (e.stderr?.toString() || e.message || '');
-      if (/out of date|not found|marketplace update|本地副本/i.test(msg)) {
-        try { await runClaude(['plugin', 'marketplace', 'update', marketplace], { timeout: 30000 }); } catch {}
-        await runClaude(['plugin', 'install', `${name}@${marketplace}`], { timeout: 90000 });
-      } else throw e;
-    }
+    await installPluginWithRefresh({
+      name, marketplace,
+      repo: isCustom ? repo : 'anthropics/claude-plugins-official',
+    });
     invalidateMcpCache();
     res.json({ ok: true, name });
   } catch (err) {
