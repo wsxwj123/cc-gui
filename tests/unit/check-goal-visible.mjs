@@ -87,8 +87,17 @@ rmSync(home, { recursive: true, force: true });
 assert.ok(/function GoalNotice\(\{ goal \}\)/.test(app), 'GoalNotice(消息流里的目标提示行)必须存在');
 assert.equal(app.split('<GoalNotice goal={msg} />').length - 1, 2,
   '历史列表(MessageList)与流式列表两处都要渲染 goal,漏一处就是"翻回去看不见"');
-assert.ok(/const activeGoal = useMemo\(/.test(app), '徽章必须由 activeGoal 派生');
-assert.ok(/目标进行中：/.test(app), '会话头部要有"目标进行中"徽章');
+assert.ok(/const activeGoal = useMemo\(/.test(app), '常驻条必须由 activeGoal 派生');
+// r30:顶栏小徽章退役,常驻条(GoalBar)移到 ChatInput 的 composer 正上方 —— "目标进行中"
+// 文案与 title 里的"最近判定"随之迁入 GoalBar,App.jsx 里不再直接渲染该行。
+const chat = readFileSync(join(root, 'client/src/components/ChatInput.jsx'), 'utf8');
+const goalBarSrc = readFileSync(join(root, 'client/src/components/GoalBar.jsx'), 'utf8');
+assert.ok(/目标进行中：/.test(goalBarSrc), '常驻条要有"目标进行中"文案(从顶栏徽章迁入)');
+assert.ok(/最近判定：/.test(goalBarSrc), '常驻条 title 要含"最近判定理由"(迁自顶栏徽章 title)');
+assert.ok(/<GoalBar \/\>/.test(chat) || /<GoalBar[^>]+\/\>/.test(chat), 'ChatInput 要渲染常驻条 GoalBar');
+assert.ok(/goal=\{activeGoal\}/.test(app), 'App 要把 activeGoal 作为 goal 传给 ChatInput');
+assert.ok(!/<span className="truncate">目标进行中：\{activeGoal\.condition/.test(app),
+  '顶栏原"目标进行中"小徽章已退役,不得残留');
 assert.ok(/block\.type === 'text' && \/\^Stop hook feedback:\/\.test\(block\.text \|\| ''\)/.test(app),
   '实时侧必须【按前缀】识别 Stop hook feedback,不得放行任意纯文本 user 事件(会引入噪音)');
 

@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Check, Circle, ClipboardList, Loader2, ChevronDown, ChevronRight, EyeOff } from './Icon.jsx';
 import { MarkdownRenderer } from './MarkdownRenderer.jsx';
+import { readTodoCollapsed, writeTodoCollapsed } from '../utils/todoCollapse.js';
 
 /**
  * 任务清单条,渲染在 composer 同一列内、紧贴输入框上方(作为输入框的"附着条",而非独立
@@ -38,7 +39,8 @@ function ShowBar({ label, onClick }) {
 }
 
 function TodoChecklist({ todos, isStreaming = false }) {
-  const [collapsed, setCollapsed] = useState(true);
+  // r30:默认折叠(用户从未碰过 = 折叠);手动切换的选择记本设备(cgui-todo-collapsed)。
+  const [collapsed, setCollapsed] = useState(() => readTodoCollapsed());
   // 隐藏态记录隐藏那一刻的"完整状态签名"(含 status):任务清单一旦有任何更新(内容或勾选
   // 变化)签名即变 → 自动重新显示 = "完全隐藏直到下次任务清单更新"。
   const sig = todos.map((t) => `${t.content || ''}${t.status || ''}`).join('');
@@ -72,7 +74,7 @@ function TodoChecklist({ todos, isStreaming = false }) {
           折叠时不画下边框,折叠后只剩"标题行 + 下一条"两行。 */}
       <div className={`w-full flex items-center gap-2 px-3 py-2 ${collapsed ? '' : 'border-b border-canvas-deep/60'}`}>
         <button
-          onClick={() => setCollapsed((c) => !c)}
+          onClick={() => setCollapsed((c) => { const n = !c; writeTodoCollapsed(n); return n; })}
           title={collapsed ? '展开任务清单' : '折叠(只留标题 + 下一条)'}
           className="flex items-center gap-2 flex-1 min-w-0 text-left hover:opacity-80 transition-opacity"
         >

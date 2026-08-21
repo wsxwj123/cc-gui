@@ -7039,17 +7039,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                   info={badgeInfo}
                 />
               </span>
-              {/* /goal 生效中:Stop 钩子会拦住"想停就停",不显式标出用户看不出为什么模型
-                  一直续跑。达成/清除后 activeGoal 自动为空,徽章随之消失。 */}
-              {activeGoal && (
-                <span className="text-[10px] text-ink-muted font-body shrink-0 max-w-[260px] flex items-center gap-1"
-                  title={`目标进行中：${activeGoal.condition || '(无条件文本)'}${activeGoal.reason ? `\n最近判定：${activeGoal.reason}` : ''}`}>
-                  <Target size={10} className="shrink-0" />
-                  {/* truncate 必须落在文本自己的块级 span 上:挂在 flex 容器上 text-overflow
-                      不生效(flex item 不是 inline 内容),条件长了会硬切没有省略号。 */}
-                  <span className="truncate">目标进行中：{activeGoal.condition || '(无条件文本)'}</span>
-                </span>
-              )}
+              {/* r30:顶栏原 /goal 徽章退役 —— 常驻条已移到 composer 正上方(GoalBar,
+                  见 ChatInput)。活动告警仍保留行内(收进"点开才见"=告警不可见)。 */}
               {/* 活动告警:需要用户立即注意,保留行内不进弹层(收进"点开才见"=告警不可见)。 */}
               {hasPendingInteraction && (
                 <span className="text-[10px] text-violet-600 font-body shrink-0 whitespace-nowrap animate-pulse"
@@ -7485,6 +7476,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         }}
         todos={currentTodos}
         plan={currentPlan}
+        goal={activeGoal}
         permKey={sessionQueueKey}
         sessionId={selectedSession?.sessionId || null}
         tabIndex={tabIndex}
