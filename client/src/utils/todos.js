@@ -25,6 +25,11 @@ export function rebuildTodosFromTaskCalls(toolCalls) {
     }
   }
   const tasks = new Map();
+  // r32-plan-flood:TaskCreate 的 result 解析不出 "Task #N"(真 id)时,旧实现落 autoId
+  // 自增 → Stop 钩子强制续跑每轮重提同一任务(same subject)会建出 N 条同内容条目。
+  // 为无真 id 的 TaskCreate 按 subject 去重:同 subject 复用同一个 auto 键(保留最新状态),
+  // 不同 subject 仍各得一个 auto 键;有真 id 的路径完全不动。
+  const autoKeyBySubject = new Map();
   let autoId = 0;
   let sawTask = false;
   for (const tc of toolCalls) {
@@ -34,8 +39,17 @@ export function rebuildTodosFromTaskCalls(toolCalls) {
       // "Task #N" 永远解析失败 → 全落 auto-key,TaskUpdate 的 taskId 对不上被静默丢。
       const raw = typeof tc.result === 'string' ? tc.result : (tc.result?.content || '');
       const rid = String(raw).match(/Task #(\d+)/)?.[1];
-      const id = rid || String(++autoId);
-      tasks.set(String(id), { content: tc.input.subject, status: 'pending', activeForm: tc.input.activeForm || '' });
+      if (rid) {
+        // 有真 id:按真 id 建项(路径不动)
+        tasks.set(String(rid), { content: tc.input.subject, status: 'pending', activeForm: tc.input.activeForm || '' });
+      } else {
+        // 无真 id:同 subject 去重(保留最新状态),否则同 subject 的 TaskCreate 落 autoId
+        // 自增、同一件事建出 N 条。
+        const subj = String(tc.input.subject);
+        let key = autoKeyBySubject.get(subj);
+        if (key == null) { key = String(++autoId); autoKeyBySubject.set(subj, key); }
+        tasks.set(key, { content: subj, status: 'pending', activeForm: tc.input.activeForm || '' });
+      }
     } else if (tc?.name === 'TaskUpdate' && tc.input?.taskId != null) {
       sawTask = true;
       const key = String(tc.input.taskId);

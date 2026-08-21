@@ -2458,9 +2458,12 @@ function CompactDivider() {
 function GoalNotice({ goal }) {
   const cond = goal.condition || '';
   const reason = goal.reason || '';
+  const notMetLabel = cond ? '目标未达成，已自动继续' : 'Stop 钩子拦下停止，已自动继续';
+  // r32-plan-flood:未达成提示被 reader 折叠成一条时带 count(>1),在这里补「×N」次数徽标;
+  // 达成的最后一条/met 状态不含 count,永不显示徽标。
   const label = goal.met
     ? (goal.sentinel ? '目标已清除' : `目标达成${goal.iterations ? `（${goal.iterations} 轮）` : ''}`)
-    : (goal.sentinel ? '目标已设置' : (cond ? '目标未达成，已自动继续' : 'Stop 钩子拦下停止，已自动继续'));
+    : (goal.sentinel ? '目标已设置' : (goal.count > 1 ? `${notMetLabel} ×${goal.count}` : notMetLabel));
   const detail = goal.met ? (reason || cond) : (goal.sentinel ? cond : (reason || cond));
   return (
     <div className="max-w-[var(--content-max)] mx-auto px-4 py-1.5 flex items-start gap-2">
