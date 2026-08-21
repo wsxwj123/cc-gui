@@ -36,9 +36,9 @@ export function repairOfficialCompat(lines) {
     emptyText: 0, emptyThinking: 0, droppedLines: 0, relinked: 0,
     zeroBlocks: 0, zeroBlocksByType: { user: 0, assistant: 0 },
   };
-  // 第一遍:清块;因此清空的行记 uuid → parentUuid,先不落地。
+  // 第一遍:清块;因此清空的行记 dropped 候选(uuid → parentUuid),先不落地。
   const entries = []; // { raw, obj|null, changed, dropped }
-  const droppedParent = new Map(); // uuid → parentUuid(被删行)
+  const droppedCandidates = []; // { uuid, parentUuid } 按出现顺序
   for (const raw of lines) {
     let obj = null;
     try { obj = JSON.parse(raw); } catch { entries.push({ raw, obj: null }); continue; }
@@ -64,7 +64,10 @@ export function repairOfficialCompat(lines) {
       // R3:整行删除(只有"因清块而空"才删;原本就空的 content 不动,保证幂等)。
       report.droppedLines++;
       if (typeof obj.uuid === 'string') {
-        droppedParent.set(obj.uuid, typeof obj.parentUuid === 'string' ? obj.parentUuid : null);
+        droppedCandidates.push({
+          uuid: obj.uuid,
+          parentUuid: typeof obj.parentUuid === 'string' ? obj.parentUuid : null,
+        });
       }
       entries.push({ raw, obj, dropped: true });
     } else {
@@ -72,9 +75,23 @@ export function repairOfficialCompat(lines) {
       entries.push({ raw, obj, changed: true });
     }
   }
+  // r26-G8:同 uuid 重复行(断线重发/补丁写入的真实形态)——优先指向仍存活(未被本次
+  // 修复摘除)的同名行:被删行的 uuid 若有存活同名行,不进 droppedParent,指向它的引用
+  // 保持原样(即指向活行)。同名行全灭才沿 parent 链上溯;多个全灭同名行时后者覆盖
+  // 前者(Map.set 语义),即指向最后出现的死行的 parent(保确定性)。
+  const aliveUuids = new Set();
+  for (const e of entries) {
+    if (!e.dropped && e.obj && typeof e.obj.uuid === 'string') aliveUuids.add(e.obj.uuid);
+  }
+  const droppedParent = new Map(); // uuid → parentUuid(被删行,且无存活同名行)
+  for (const d of droppedCandidates) {
+    if (!aliveUuids.has(d.uuid)) droppedParent.set(d.uuid, d.parentUuid);
+  }
   if (droppedParent.size === 0) {
+    // r26-G8:被摘行的 uuid 都有存活同名行时 droppedParent 为空——无需接骨,
+    // 但被摘行本身仍须从输出剔除(e.dropped 过滤不能省)。
     return {
-      lines: entries.map((e) => (e.changed ? JSON.stringify(e.obj) : e.raw)),
+      lines: entries.filter((e) => !e.dropped).map((e) => (e.changed ? JSON.stringify(e.obj) : e.raw)),
       report,
     };
   }
