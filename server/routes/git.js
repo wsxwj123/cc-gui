@@ -3,7 +3,7 @@ import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { stat } from 'fs/promises';
 import { resolveWorkspacePath } from '../utils/safe-path.js';
-import { ACCESS_DENIED_RE, accessDeniedHint, canOpenAccessSettings } from '../utils/access-hint.js';
+import { ACCESS_DENIED_RE, isAccessDenied, accessDeniedHint, canOpenAccessSettings } from '../utils/access-hint.js';
 
 const execFileP = promisify(execFile);
 const router = Router();
@@ -31,7 +31,9 @@ export function classifyGitInitError(err) {
     return { code: 'git-missing', error: '未检测到 git，无法初始化仓库。', hint: '在 通用 → 环境 里安装 git，或到 git-scm.com 下载后重试。' };
   }
   const stderr = String(err?.stderr || '').split('\n')[0].slice(0, 200);
-  if (ACCESS_DENIED_RE.test(stderr)) {
+  // r26-E6:主判据(code)+辅判据(文本)统一走 isAccessDenied;显式
+  // ACCESS_DENIED_RE.test(stderr) 保留为接线锚(check-git-init-error 钉着这句)。
+  if (isAccessDenied(err) || ACCESS_DENIED_RE.test(stderr)) {
     return {
       code: 'no-disk-access',
       error: '初始化 git 仓库失败：系统拒绝访问该文件夹。',
@@ -51,6 +53,23 @@ export function classifyGitInitError(err) {
     };
   }
   return { code: 'git-init-failed', error: 'git init 失败：' + (stderr || err?.message || '未知错误') };
+}
+
+/**
+ * r26-E1:/git/status 探测失败的形态判定(纯函数,输入是 execFile 的错误对象)。
+ * 修前 norepo/missing/killed 之外的【一切】错误都报 permissionDenied ——
+ * dubious ownership、.git 损坏、磁盘满全被误诊成「系统拒绝访问」,引导用户去开
+ * 完全磁盘访问(方向完全错)。现在只有 isAccessDenied 命中才走权限分支,其余落
+ * 'unknown'(对应响应的 gitError 分支,不再指去开权限)。
+ * kind 与路由响应分支一一对应,路由只是薄壳。
+ */
+export function classifyGitStatusError(err) {
+  const msg = String(err?.stderr || err?.message || '');
+  if (/not a git repository|不是.*git\s*仓库/i.test(msg)) return { kind: 'norepo' };
+  if (err?.code === 'ENOENT') return { kind: 'missing' };
+  if (err?.killed) return { kind: 'killed' };
+  if (isAccessDenied(err)) return { kind: 'denied' };
+  return { kind: 'unknown', detail: msg.split('\n')[0].slice(0, 200) };
 }
 
 /**
@@ -89,22 +108,28 @@ router.get('/git/status', async (req, res) => {
       // (macOS TCC 拒 Desktop 等受保护目录:有时 stderr 带 "Operation not
       // permitted",有时进程被直接掐死 stderr 全空)一律不能误报成"不是 repo"——
       // 那会引导用户去 init(同因失败,且对已是 repo 的目录是误导)。
-      const msg = String(e?.stderr || e?.message || '');
-      if (/not a git repository|不是.*git\s*仓库/i.test(msg)) {
+      const cls = classifyGitStatusError(e);
+      if (cls.kind === 'norepo') {
         return res.json({ isRepo: false });
       }
-      if (e?.code === 'ENOENT') {
+      if (cls.kind === 'missing') {
         // git 没装:之前静默(前端不挂横幅)→ 用户报"没装 git 时看不到任何 git 初始化提示"。
         // 改成显式上报 gitMissing,前端弹引导横幅(装了才能 init / 回滚)。
         return res.json({ isRepo: null, gitMissing: true });
       }
-      if (e?.killed) {
+      if (cls.kind === 'killed') {
         // 超时:信息不足,静默。
         return res.json({ isRepo: null });
       }
-      // r20:文案由服务端给(它才知道 process.platform);前端横幅只负责渲染,
-      // 不再把 macOS 的「完全磁盘访问」路径硬编码在 App.jsx 里。
-      res.json({ isRepo: null, permissionDenied: true, hint: accessDeniedHint(), canOpenSettings: canOpenAccessSettings() });
+      if (cls.kind === 'denied') {
+        // r20:文案由服务端给(它才知道 process.platform);前端横幅只负责渲染,
+        // 不再把 macOS 的「完全磁盘访问」路径硬编码在 App.jsx 里。
+        return res.json({ isRepo: null, permissionDenied: true, hint: accessDeniedHint(), canOpenSettings: canOpenAccessSettings() });
+      }
+      // r26-E1:非权限类失败(dubious ownership / .git 损坏 / 磁盘满…)不再误诊成
+      // 「系统拒绝访问」。跨包契约 C-E1:{isRepo:null, gitError:true, error, detail}
+      // 与 permissionDenied 分支互斥,PKG-2 的 GitInitBanner 按此加 gitError 映射。
+      return res.json({ isRepo: null, gitError: true, error: 'git 探测失败', detail: cls.detail });
     }
   } catch (err) {
     res.status(400).json({ error: err.message });
