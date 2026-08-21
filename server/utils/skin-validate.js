@@ -122,15 +122,30 @@ export function isTraversalPath(p) {
 }
 
 /**
+ * r26-D3:Finder 压缩杂质判定 —— __MACOSX/ 目录段与 ._ 开头的 AppleDouble 文件。
+ * 此类条目是 macOS 压缩的固定副产物,永不落盘(referenced 白名单兜底),因此
+ * 在条目数上限与安全闸之前剥离:junk 里的穿越形态也不再触发 path_traversal。
+ */
+export function isJunkEntry(p) {
+  const segs = String(p || '').split(/[/\\]/);
+  return segs.includes('__MACOSX') || segs.some((s) => s.startsWith('._'));
+}
+/** 路径数组剥杂质 → 新数组。 */
+export function stripJunkEntries(files) {
+  return (Array.isArray(files) ? files : []).filter((p) => !isJunkEntry(p));
+}
+
+/**
  * 整包清单校验(解压前快速失败层):
  * → { ok:true, entries } | { ok:false, code }(code ∈ INTERFACE §2.5)。
+ * r26-D3:__MACOSX/._ 杂质先剥离,不计入 40 条上限、不过安全闸(永不落盘);
  * 目录条目计入 40;声明体积仅快速失败(实测字节闸在解压过程另计,盲审 #1)。
  * maxDeclaredBytes 仅供单测把声明闸与实测闸隔离(生产两者同值 100MB);
  * 实测取证:本机 bsdtar 对假 usize 会按声明值截断输出并报错(假头矢量被解包器
  * 中和),实测闸是针对"其它 tar 行为/版本"的防御纵深,仍保留。
  */
 export function validateZipEntries(entries, limits = ZIP_LIMITS) {
-  const list = Array.isArray(entries) ? entries : [];
+  const list = (Array.isArray(entries) ? entries : []).filter((e) => !isJunkEntry(e && e.path));
   if (list.length > limits.maxEntries) return { ok: false, code: 'zip_entries_exceeded' };
   let declared = 0;
   for (const e of list) {
@@ -146,9 +161,10 @@ export function validateZipEntries(entries, limits = ZIP_LIMITS) {
 /**
  * 定位 manifest 与根前缀:根目录直放或整体嵌套一层(超一层 = manifest_missing)。
  * files = 文件型条目路径数组 → { prefix, byName: Map<包内相对名, 原路径> }。
+ * r26-D3:先剥 __MACOSX/._ 杂质(Finder 压缩必带),否则 tops.size 被顶成 2 必败。
  */
 export function resolveRootPrefix(files) {
-  const names = files.filter((p) => p && !p.endsWith('/'));
+  const names = stripJunkEntries(files).filter((p) => p && !p.endsWith('/'));
   const direct = names.find((p) => !p.includes('/') && p === 'skin.json');
   if (direct) return { prefix: '' };
   const tops = new Set(names.map((p) => p.split('/')[0]));
