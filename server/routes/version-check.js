@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { readFileSync, writeFileSync, existsSync, realpathSync, readdirSync, mkdirSync } from 'fs';
+import { readFileSync, writeFileSync, existsSync, realpathSync, readdirSync } from 'fs';
 import { resolveClaudeAsync, listClaudeInstallsAsync, getClaudeOverride, setClaudeOverride, getClaudeOverrideRaw, pauseClaudeOverride, winLivePathDirsAsync, classifyShim } from '../utils/claude-resolver.js';
 import { scanAllTools, nodeMeets, NODE_MIN_MAJOR, probeNpm } from '../utils/env-scanner.js';
 import { gfetch } from '../utils/github-fetch.js'; // r14-1:GitHub 直连失败/限流自动走本机代理
@@ -9,6 +9,7 @@ import { tmpdir, homedir } from 'os';
 import { execFile, spawn } from 'child_process';
 import { promisify } from 'util';
 import { closeAllPersistentProcesses } from './chat.js';
+import { updatePrefs } from './prefs.js'; // r26-C6:prefs 写统一走共享队列(契约 C-C6)
 import { isLocalReq } from '../services/auth.js';
 
 const execFileP = promisify(execFile);
@@ -337,14 +338,17 @@ export function readUpdateChannel() {
   } catch { return null; }
 }
 
-export function writeUpdateChannel(channel) {
-  if (!UPDATE_CHANNELS.includes(channel)) return false;
-  let prefs = {};
-  try { prefs = JSON.parse(readFileSync(PREFS_FILE, 'utf-8')) || {}; } catch {}
-  prefs.updateChannel = channel;
+// r26-C6:写改走 prefs.js 的 updatePrefs 共享写函数(withPrefsQueue 串行化 + 原子写),
+// 不再裸 readFileSync/writeFileSync 直写 —— 原来与 prefs 路由的队列写互踩,并发
+// read-merge-write 丢一路(lost-update),且直写非原子(崩溃写一半 → 整份 prefs 损坏)。
+// 签名变 async,调用点(PUT /claude-update-channel)await。channel=null = 删除键(r26-C5)。
+export async function writeUpdateChannel(channel) {
+  if (channel !== null && !UPDATE_CHANNELS.includes(channel)) return false;
   try {
-    mkdirSync(dirname(PREFS_FILE), { recursive: true });
-    writeFileSync(PREFS_FILE, JSON.stringify(prefs, null, 2));
+    await updatePrefs((p) => {
+      if (channel === null) delete p.updateChannel; // 删除而非写 null,回到「跟随安装方式」
+      else p.updateChannel = channel;
+    });
     return true;
   } catch { return false; }
 }
@@ -854,10 +858,10 @@ router.get('/claude-update-channel', async (_req, res) => {
     channels: UPDATE_CHANNELS,
   });
 });
-router.put('/claude-update-channel', (req, res) => {
+router.put('/claude-update-channel', async (req, res) => {
   const ch = String(req.body?.channel || '');
   if (!UPDATE_CHANNELS.includes(ch)) return res.status(400).json({ error: '渠道必须是 npm 或 native' });
-  if (!writeUpdateChannel(ch)) return res.status(500).json({ error: '写入失败' });
+  if (!(await writeUpdateChannel(ch))) return res.status(500).json({ error: '写入失败' });
   res.json({ ok: true, channel: ch });
 });
 
