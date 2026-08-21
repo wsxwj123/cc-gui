@@ -18,6 +18,7 @@
 import http from 'node:http';
 import { normalizeContextOverflow } from './openai-proxy.js';
 import { isCountTokensRequest, estimateInputTokens, parseUpstreamCountTokens, COUNT_TOKENS_UPSTREAM_TIMEOUT_MS } from '../utils/context-tokens.js';
+import { collectRealToolResultIds } from '../utils/tool-result-reconcile.js';
 
 // Fixed loopback port (distinct from openai-proxy's 8788) so the URL written into
 // settings.json survives watchdog restarts. Ephemeral fallback if it's taken.
@@ -205,13 +206,9 @@ export function normalizeMessagesForCompat(body) {
   // tool_result 都不算缺失,补丁绝不能给它们插假的(真机踩过:assistant(tool_use A)
   // → assistant(tool_use B) → user(result A) 的结构里,把 A 的 tool_result 在更后面
   // 存在却被当"缺失"提前插假补丁 → Kimi 报 "tool call id Agent:0 is not found")。
-  const realResultIds = new Set();
-  for (const mm of msgs) {
-    if (mm?.role !== 'user' || !Array.isArray(mm.content)) continue;
-    for (const c of mm.content) {
-      if (c?.type === 'tool_result' && c.tool_use_id) realResultIds.add(c.tool_use_id);
-    }
-  }
+  // r26-G2:收集逻辑抽成共用纯函数 collectRealToolResultIds(openai-proxy 同 import),
+  // 行为不变。
+  const realResultIds = collectRealToolResultIds(msgs);
 
   for (let i = 0; i < msgs.length; i++) {
     const m = msgs[i];

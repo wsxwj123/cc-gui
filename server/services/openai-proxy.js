@@ -14,6 +14,7 @@
 import http from 'node:http';
 import { isCountTokensRequest, estimateInputTokens } from '../utils/context-tokens.js';
 import { lookupModelCapabilities, EFFORT_IDS } from '../utils/model-capabilities.js';
+import { collectRealToolResultIds } from '../utils/tool-result-reconcile.js';
 
 // Fixed loopback port so the ANTHROPIC_BASE_URL written into settings.json
 // stays valid across server restarts (watchdog). Falls back to an ephemeral
@@ -172,22 +173,25 @@ export function anthropicToOpenAIMessages(messages, system) {
   //   user: <skill body>   ← 缺 tool message!
   // → DeepSeek 严格端点 400 拒绝。
   //
-  // 修法:转换完成后扫一遍 messages,任何 assistant.tool_calls 后没立即跟够 tool
-  // 配对,补一条 stub tool message(content="(tool result fed via system context)")。
+  // 修法:转换完成后扫一遍 messages,任何 assistant.tool_calls 缺真实结果的,
+  // 补一条 stub tool message(content="(tool result fed via system context)")。
   // 不影响模型理解 — 真 result 已在 system prompt 里,模型读得到。
+  //
+  // r26-G2:判定「缺不缺」改为全局扫描(与 anthropic-proxy 的 realResultIds 同方案,
+  // 共用 collectRealToolResultIds)。旧实现只扫 assistant 紧邻的连续 tool 段,并行
+  // tool_calls 的真实形态 assistant(A) → assistant(B) → tool(result A) 里 A 的结果
+  // 不在紧邻段 → 误判缺失插假桩 → 同一 tool_call_id 两条 tool 消息,严格端点报
+  // "tool call id is not found"。现在:realResultIds 集内的一律不插,只对真缺的插。
+  const realResultIds = collectRealToolResultIds(out);
   let patched = 0;
   for (let i = 0; i < out.length; i++) {
     const m = out[i];
     if (m?.role !== 'assistant' || !Array.isArray(m.tool_calls) || m.tool_calls.length === 0) continue;
-    // 收下一段连续 role:'tool' 已配对的 tool_call_id
-    const seen = new Set();
+    // 找插入点:紧邻的连续 tool 段尾(配对结构仍尽量保持相邻)
     let j = i + 1;
-    while (j < out.length && out[j]?.role === 'tool') {
-      if (out[j].tool_call_id) seen.add(out[j].tool_call_id);
-      j++;
-    }
+    while (j < out.length && out[j]?.role === 'tool') j++;
     const stubs = m.tool_calls
-      .filter((tc) => tc.id && !seen.has(tc.id))
+      .filter((tc) => tc.id && !realResultIds.has(tc.id))
       .map((tc) => ({ role: 'tool', tool_call_id: tc.id, content: '(tool result fed via system context)' }));
     if (stubs.length) {
       out.splice(j, 0, ...stubs);
