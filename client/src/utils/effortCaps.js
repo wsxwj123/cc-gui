@@ -7,6 +7,16 @@
 // ChatInput EFFORT_LEVELS 四处必须同一集合(单测钉住),漂了就会出现"算得出、传不过去"。
 export const EFFORT_ORDER = ['low', 'medium', 'high', 'xhigh', 'max'];
 
+// r26-F6:per-model 力度记忆键带 provider 段 —— 旧键 `cgui-effort-<modelId>` 不带
+// provider,同模型 id 在不同 provider 下力度记忆互相串。provider 取
+// currentProvider.providerHint(与 sessionStore lastProviderBySession 同口径)。
+// 旧键一次性忽略不迁移:旧键无 provider 段无法判定归属,记错的代价是一次重选,
+// 迁移逻辑的正确性风险高于收益。
+export function effortMemoryKey(providerHint, modelId) {
+  const bare = String(modelId || '').replace(/\[1m\]/i, '');
+  return `cgui-effort-${providerHint || 'anthropic'}-${bare}`;
+}
+
 // 当前模型的能力。查询剥 [1m] 后缀(1M 变体与本体同能力)。
 export function effortCapsFor(modelMeta, modelId) {
   const bare = String(modelId || '').replace(/\[1m\]/i, '');

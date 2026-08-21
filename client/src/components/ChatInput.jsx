@@ -8,7 +8,7 @@ import { ImageLightbox } from './ImageLightbox.jsx';
 import { AnchoredPopover } from './SessionSelectors.jsx';
 import { isSteered, firstSteerableIndex, isSteerBarrier } from '../utils/steerQueue.js';
 import { resolveSelectorModel } from '../utils/routing.js';
-import { effortCapsFor, effortAllowed, resolveEffortOnModelChange } from '../utils/effortCaps.js';
+import { effortCapsFor, effortAllowed, resolveEffortOnModelChange, effortMemoryKey } from '../utils/effortCaps.js';
 
 // Permission mode metadata — mirrors `claude --permission-mode <choice>`。
 // P2.1:文案对齐官方六档语义(RESEARCH-mode-semantics §④b);bypass 中文名保持「放任」。
@@ -134,10 +134,13 @@ export function EffortSelector({ permKey = null, hideLabel = false, tourAnchor =
   const selModel = useStore((s) => resolveSelectorModel(s, permKey));
   const caps = effortCapsFor(modelEffortMeta, selModel);
   const bareModelId = String(selModel || '').replace(/\[1m\]/i, '');
+  // r26-F6:per-model 记忆键带 provider 段(同模型 id 跨 provider 不串味)。
+  const providerHint = useStore((s) => s.currentProvider?.providerHint || 'anthropic');
+  const effortMemKey = effortMemoryKey(providerHint, bareModelId);
   const setEffort = (id) => {
     useStore.getState().setEffortFor(permKey, id);
     // per-model 记忆:显式选择才写(空档也记——"该模型我就要默认")。
-    if (bareModelId) { try { localStorage.setItem(`cgui-effort-${bareModelId}`, id); } catch {} }
+    if (bareModelId) { try { localStorage.setItem(effortMemKey, id); } catch {} }
   };
   const [open, setOpen] = useState(false);
   const [fellNotice, setFellNotice] = useState(null); // 回落 toast(5s 自清)
@@ -168,7 +171,7 @@ export function EffortSelector({ permKey = null, hideLabel = false, tourAnchor =
     // per-model 记忆只在真的换了模型时参与(能力表变化那条路径要的是"把非法档拉回合法",
     // 拿旧记忆去覆盖用户本会话刚选的档是另一回事)。
     let remembered = null;
-    if (modelChanged) { try { remembered = localStorage.getItem(`cgui-effort-${bareModelId}`); } catch {} }
+    if (modelChanged) { try { remembered = localStorage.getItem(effortMemKey); } catch {} }
     const r = resolveEffortOnModelChange(caps, effort, remembered);
     if (!r.changed) return;
     useStore.getState().setEffortFor(permKey, r.effort);
@@ -182,7 +185,7 @@ export function EffortSelector({ permKey = null, hideLabel = false, tourAnchor =
     // 放宽永远触发不了(模型没变 = 依赖没变 = effect 不执行)。effort 同理覆盖"档位被外部
     // 改成非法值"(跨设备同步 applyRemoteSessionSync 直接改写 effortBySession)。
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [permKey, bareModelId, modelEffortMeta, effort]);
+  }, [permKey, bareModelId, modelEffortMeta, effort, effortMemKey]);
   useEffect(() => {
     if (!fellNotice) return;
     const id = setTimeout(() => setFellNotice(null), 5000);
