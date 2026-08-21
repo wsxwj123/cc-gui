@@ -122,15 +122,30 @@ export function isTraversalPath(p) {
 }
 
 /**
+ * r26-D3:Finder 压缩杂质判定 —— __MACOSX/ 目录段与 ._ 开头的 AppleDouble 文件。
+ * 此类条目是 macOS 压缩的固定副产物,永不落盘(referenced 白名单兜底),因此
+ * 在条目数上限与安全闸之前剥离:junk 里的穿越形态也不再触发 path_traversal。
+ */
+export function isJunkEntry(p) {
+  const segs = String(p || '').split(/[/\\]/);
+  return segs.includes('__MACOSX') || segs.some((s) => s.startsWith('._'));
+}
+/** 路径数组剥杂质 → 新数组。 */
+export function stripJunkEntries(files) {
+  return (Array.isArray(files) ? files : []).filter((p) => !isJunkEntry(p));
+}
+
+/**
  * 整包清单校验(解压前快速失败层):
  * → { ok:true, entries } | { ok:false, code }(code ∈ INTERFACE §2.5)。
+ * r26-D3:__MACOSX/._ 杂质先剥离,不计入 40 条上限、不过安全闸(永不落盘);
  * 目录条目计入 40;声明体积仅快速失败(实测字节闸在解压过程另计,盲审 #1)。
  * maxDeclaredBytes 仅供单测把声明闸与实测闸隔离(生产两者同值 100MB);
  * 实测取证:本机 bsdtar 对假 usize 会按声明值截断输出并报错(假头矢量被解包器
  * 中和),实测闸是针对"其它 tar 行为/版本"的防御纵深,仍保留。
  */
 export function validateZipEntries(entries, limits = ZIP_LIMITS) {
-  const list = Array.isArray(entries) ? entries : [];
+  const list = (Array.isArray(entries) ? entries : []).filter((e) => !isJunkEntry(e && e.path));
   if (list.length > limits.maxEntries) return { ok: false, code: 'zip_entries_exceeded' };
   let declared = 0;
   for (const e of list) {
@@ -146,9 +161,10 @@ export function validateZipEntries(entries, limits = ZIP_LIMITS) {
 /**
  * 定位 manifest 与根前缀:根目录直放或整体嵌套一层(超一层 = manifest_missing)。
  * files = 文件型条目路径数组 → { prefix, byName: Map<包内相对名, 原路径> }。
+ * r26-D3:先剥 __MACOSX/._ 杂质(Finder 压缩必带),否则 tops.size 被顶成 2 必败。
  */
 export function resolveRootPrefix(files) {
-  const names = files.filter((p) => p && !p.endsWith('/'));
+  const names = stripJunkEntries(files).filter((p) => p && !p.endsWith('/'));
   const direct = names.find((p) => !p.includes('/') && p === 'skin.json');
   if (direct) return { prefix: '' };
   const tops = new Set(names.map((p) => p.split('/')[0]));
@@ -429,15 +445,29 @@ export function sanitizeSvg(text, maxBytes = ZIP_LIMITS.maxSvgBytes) {
   return { ok: true, svg: s };
 }
 
-// ── ③T2 client.js 静态校验器(黑名单字样即拒载;FIX-SPEC §③.3 清单) ──
+// ── ③T2 client.js 静态校验器(黑名单形态即拒载;FIX-SPEC §③.3 清单) ──
+// r26-D5:纯子串升级为正则集——修前 `fetch (`(空格)/`window["fetch"]`/`Function('…')`
+// 全可绕。校验前先 toLowerCase,故正则一律小写形态。
+// 口径 = 防误导入、不防恶意代码(skinPrompt.js 同口径文案):正则误伤一律朝拒载方向
+// (安全向),已知误伤钉在 check-r26-t2-blacklist.mjs:`prefetch(` 命中 /fetch\s*\(/、
+// 匿名函数表达式 `function(){}` 命中 /\bfunction\s*\(/——作者改码(箭头函数)即可过。
+// 双端同表:客户端 skins.js T2_BLACKLIST_CLIENT 逐字一致(check-skin-client 钉死)。
 export const T2_SCRIPT_BLACKLIST = [
-  'fetch(', 'xmlhttprequest', 'websocket', 'import(', 'eval(', 'new function', 'navigator.sendbeacon',
+  /fetch\s*\(/,
+  /xmlhttprequest/,
+  /websocket\s*\(/,
+  /import\s*\(/,
+  /eval\s*\(/,
+  /new\s+function/,
+  /\bfunction\s*\(/,
+  /navigator\s*\.\s*sendbeacon/,
+  /\[\s*['"](?:fetch|eval|function|websocket)['"]\s*\]/,
 ];
-/** → { ok:true } | { ok:false, hits: string[] }。toLowerCase 全文扫描,命中即拒。 */
+/** → { ok:true } | { ok:false, hits: string[] }(命中正则的 source 串)。toLowerCase 全文扫描,命中即拒。 */
 export function validateT2Script(text) {
   if (typeof text !== 'string') return { ok: false, hits: ['not_text'] };
   const low = text.toLowerCase();
-  const hits = T2_SCRIPT_BLACKLIST.filter((k) => low.includes(k));
+  const hits = T2_SCRIPT_BLACKLIST.filter((re) => re.test(low)).map((re) => re.source);
   return hits.length ? { ok: false, hits } : { ok: true };
 }
 
@@ -480,9 +510,14 @@ export function convertDswVars(input) {
 }
 
 // ── id 生成(slug + 6 位随机;CJK 退化回退 skin-;小写归一防 win 大小写不敏感撞名) ──
-export function skinIdFrom(name, rand) {
-  const slug = String(name || '').toLowerCase().normalize('NFKD')
+// r26-D6:slug 段算法抽成 slugOf 导出——skins-packs.js 按 slug 找同皮肤既有目录做
+// 覆盖式导入(同名=同一皮肤的语义声明,撞 slug 即互相覆盖,验收钉死该语义)。
+export function slugOf(name) {
+  return String(name || '').toLowerCase().normalize('NFKD')
     .replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40);
+}
+export function skinIdFrom(name, rand) {
+  const slug = slugOf(name);
   const suffix = String(rand || Math.random().toString(36).slice(2, 8)).toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 6) || 'r0';
   return (slug ? `${slug}-${suffix}` : `skin-${suffix}`);
 }

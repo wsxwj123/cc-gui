@@ -42,7 +42,11 @@ const text = (parts) => parts.map((p) => p.text).join('');
   const prefs = readFileSync(new URL('../../server/routes/prefs.js', import.meta.url), 'utf8');
   assert.match(prefs, /router\.get\('\/prefs\/display-name'/, 't2: GET 端点');
   assert.match(prefs, /router\.put\('\/prefs\/display-name'/, 't2: PUT 端点');
-  assert.match(prefs, /displayName\.trim\(\)\.slice\(0, 20\)/, 't2: 服务端去空白截 20');
+  // r26 换锚说明(r26-pkg6 交办):本行原锚 `/displayName\.trim\(\)\.slice\(0, 20\)/` 钉的是
+  // D12 修复前的旧写法(UTF-16 码元截断,会把 emoji 代理对从中间劈开)。r26-D12 服务端半
+  // (PKG-5)已把 prefs.js 改为码点截断 `[...displayName.trim()].slice(0, 20).join('')`,
+  // 旧锚恒红。此处只换匹配形态,正则语义(钉住「去空白 + 截 20」这道服务端闸)与断言目的不变。
+  assert.match(prefs, /\[\.\.\.displayName\.trim\(\)\]\.slice\(0, 20\)\.join\(''\)/, 't2: 服务端去空白按码点截 20(r26-D12)');
   assert.match(prefs, /broadcast\(\{ type: 'display-name', displayName: name \}\)/, 't2: WS 广播');
   assert.match(prefs, /else delete prefs\.displayName/, 't2: 空串=清除键(prefs 不留空值)');
 
@@ -56,7 +60,7 @@ const text = (parts) => parts.map((p) => p.text).join('');
 
   const app = readFileSync(new URL('../../client/src/App.jsx', import.meta.url), 'utf8');
   assert.match(app, /hydrateDisplayName\(\)/, 't2: 启动/重连水合');
-  assert.match(app, /homeGreetingParts\(new Date\(\)\.getHours\(\), custom\?\.greeting, displayName\)/, 't2: Home 问候接称呼+皮肤模板');
+  assert.match(app, /homeGreetingParts\(hour, custom\?\.greeting, displayName\)/, 't2: Home 问候接称呼+皮肤模板(r26-D13 起 hour 由 60s 定时器刷新)');
   assert.match(app, /from-accent to-accent-hover bg-clip-text/, 't2: 称呼段用主题 accent token 渐变(不硬编码色值)');
 
   const sp = readFileSync(new URL('../../client/src/components/SettingsPanel.jsx', import.meta.url), 'utf8');

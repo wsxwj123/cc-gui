@@ -71,6 +71,8 @@ export function buildImageRequest(config, prompt) {
 
   if (protocol === 'gemini') {
     // POST {base}/models/{model}:generateContent。用户可能连 "models/" 前缀一起粘过来。
+    // r26-J5:model 进 URL path 必须编码 —— 含空格/斜杠的型号名不编码会把 URL 拼歪
+    // (路径注入:model 里的 '/' 会改变请求的实际路径段)。
     const bare = model.replace(/^models\//, '');
     const { generationConfig: extraGen, ...restExtra } = extra;
     const body = {
@@ -83,7 +85,7 @@ export function buildImageRequest(config, prompt) {
     const goog = { ...json, 'x-goog-api-key': key };
     const bearer = { ...json, Authorization: `Bearer ${key}` };
     return {
-      url: `${base}/models/${bare}:generateContent`,
+      url: `${base}/models/${encodeURIComponent(bare)}:generateContent`,
       headers: official ? goog : bearer,
       body,
       altHeaders: official ? bearer : goog,
@@ -144,7 +146,9 @@ export function extractImage(protocol, data) {
     if (!text) return null;
     // data URL 先判:下面两条规则只认 http(s),`![](data:image/...;base64,…)` 这种
     // 只能靠这一条兜住;放最前面也顺带挡住"将来把 markdown 规则放宽成任意 URL"的回归。
-    const dataUrl = text.match(/data:image\/([a-z0-9.+-]+);base64,([A-Za-z0-9+/]+={0,2})/i);
+    // r26-J12:data 段允许 \s —— 部分上游把 base64 折行(PEM 风格 64 列换行)输出,
+    // 不含 \s 的正则碰到折行就整条漏识别;命中后剥空白再解码(下一行的 replace)。
+    const dataUrl = text.match(/data:image\/([a-z0-9.+-]+);base64,([A-Za-z0-9+/=\s]+)/i);
     if (dataUrl) return { mime: `image/${dataUrl[1].toLowerCase()}`, base64: dataUrl[2].replace(/\s+/g, '') };
     const md = text.match(/!\[[^\]]*\]\(\s*(https?:\/\/[^\s)]+)\s*\)/);
     if (md) return { mime: '', url: md[1] };

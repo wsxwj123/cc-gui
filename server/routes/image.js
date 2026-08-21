@@ -7,7 +7,7 @@ import { Router } from 'express';
 import { realpathSync } from 'node:fs';
 import { isPathInside } from '../utils/safe-path.js';
 import { readFile, writeFile, mkdir, rename, unlink, stat, access } from 'fs/promises';
-import { existsSync, constants } from 'fs';
+import { constants } from 'fs';
 import { join, isAbsolute } from 'path';
 import { homedir } from 'os';
 import { randomUUID } from 'crypto';
@@ -16,6 +16,7 @@ import {
   IMAGE_PROTOCOLS, IMAGE_CONTENT_TYPES, buildImageRequest, extractImage,
   buildImageFileName, imageExtFromMime, resolvePreviewPath, redactKey,
 } from '../utils/image-protocols.js';
+import { readCapped } from '../utils/read-capped.js';
 import { assertPublicBaseURL } from './settings.js';
 
 const router = Router();
@@ -32,6 +33,11 @@ const DOWNLOAD_TIMEOUT_MS = 60_000; // 上游只回 URL 时下载原图
 // 中转站回一坨大 body 就是全局 OOM。
 const MAX_IMAGE_BYTES = 64 * 1024 * 1024;
 const MAX_UPSTREAM_ERR = 500; // 上游报错原文透传上限(剥 key 后)
+// r26-J2:生成 POST 的响应体同样要有界(下载分支早有,这条原先裸 r.text())。
+// 上限取 b64 闸(64MB×1.4)上方一档 ×1.5:凡是能通过 b64 闸的合法响应都装得下,
+// 再大的响应横竖过不了 b64 闸,不如在读取前就按体积拒掉(不读完 = 内存没吃)。
+const MAX_RESPONSE_BYTES = Math.ceil(MAX_IMAGE_BYTES * 1.5) + 4096;
+const MAX_ERROR_BYTES = 256 * 1024;
 
 async function readImageProviders() {
   try {
@@ -192,14 +198,26 @@ router.delete('/image-providers/:id', async (req, res) => {
 });
 
 // 落盘:重名加序号(-1、-2……),不覆盖已有图。
-async function saveImage(dir, baseName, buf) {
+// r26-J4:existsSync 预检 + writeFile 是两步,并发下同 tick 同名会互相覆盖(检查时都
+// 不存在,然后各写各的)。改 flag:'wx' 原子创建,EEXIST 撞名加后缀重试(上限 100 次,
+// 与 download-update.js 既有模式同款)。
+// export 仅为单测:并发撞名双存活只能在函数级确定性构造(路由级要赌时间戳同秒)。
+export async function saveImage(dir, baseName, buf) {
   const ext = extname(baseName);
   const stem = baseName.slice(0, baseName.length - ext.length);
-  let name = baseName;
-  for (let i = 1; existsSync(join(dir, name)); i++) name = `${stem}-${i}${ext}`;
-  const full = join(dir, name);
-  await writeFile(full, buf);
-  return full;
+  for (let i = 0; i <= 100; i++) {
+    const name = i === 0 ? baseName : `${stem}-${i}${ext}`;
+    const full = join(dir, name);
+    try {
+      await writeFile(full, buf, { flag: 'wx' });
+      return full;
+    } catch (e) {
+      if (e?.code !== 'EEXIST') throw e; // 只兜撞名;ENOSPC/EACCES 等原样上抛给错误分类
+    }
+  }
+  const e = new Error('同名文件过多（超过 100 个），保存失败');
+  e.code = 'EEXIST';
+  throw e;
 }
 
 /**
@@ -208,10 +226,14 @@ async function saveImage(dir, baseName, buf) {
  */
 router.post('/image/generate', async (req, res) => {
   const started = Date.now();
+  // r26-J3:兜底 catch 也要剥 key —— provider 在 try 里才查到,先把 key 提到外层作用域,
+  // 否则 catch 里 redactKey(msg, null) 只能靠形态兜底,明文 key 原样回显。
+  let apiKeyForRedact = '';
   try {
     const { providerId, prompt } = req.body || {};
     const provider = (await readImageProviders()).find((p) => p.id === providerId);
     if (!provider) return res.status(404).json({ error: '未找到该生图 provider' });
+    apiKeyForRedact = provider.apiKey || '';
     const pathErr = await checkSavePath(provider.savePath);
     if (pathErr) return res.status(400).json({ error: pathErr });
 
@@ -226,6 +248,9 @@ router.post('/image/generate', async (req, res) => {
       headers,
       body: JSON.stringify(spec.body),
       signal: AbortSignal.timeout(GENERATE_TIMEOUT_MS),
+      // r26-J1:与下方下载分支同口径 —— 不跟随重定向。生成 POST 带着 apiKey,跟随 302
+      // 会把请求(或响应读取)引到 assertPublicBaseURL 没验过的地址(鉴权跳转/网关劫持)。
+      redirect: 'manual',
     });
     let r;
     try { r = await post(spec.headers); }
@@ -240,9 +265,38 @@ router.post('/image/generate', async (req, res) => {
     if (!r.ok && spec.altHeaders && (r.status === 401 || r.status === 403)) {
       try { r = await post(spec.altHeaders); } catch { /* 保留首次响应 */ }
     }
-    const raw = await r.text().catch(() => '');
+    // r26-J1:3xx 一律报错,不读 Location、不跟随(下载分支同款;API 端点的 302 通常是
+    // 鉴权跳转/网关劫持,跟随必错且会脱离刚验过的 origin)。
+    if (r.status >= 300 && r.status < 400) {
+      await r.body?.cancel?.().catch(() => {});
+      return res.status(502).json({ error: `上游返回了重定向（HTTP ${r.status}），已拒绝跟随（防止密钥被带到未校验的地址）` });
+    }
+    // r26-J2:错误分支限量读 256KB(超限带截断标记);上游回一坨大错误体不能 OOM 后端。
+    if (!r.ok) {
+      const errRaw = await readCapped(r, MAX_ERROR_BYTES).catch(() => '');
+      const truncated = errRaw === null;
+      const safeErr = redactKey(truncated ? '' : errRaw, provider.apiKey).slice(0, MAX_UPSTREAM_ERR);
+      return res.status(502).json({
+        error: `上游返回 ${r.status}：${safeErr || '(空响应)'}${truncated ? '（错误内容过大，已截断）' : ''}`,
+      });
+    }
+    // r26-J2:成功分支 content-length 预检 + 限量读 —— 上限外一律按体积报错,
+    // 而不是把整坨读进内存后再按「不是 JSON」报(读完 = 内存已经吃了)。
+    const declared = Number(r.headers.get('content-length') || 0);
+    if (Number.isFinite(declared) && declared > MAX_RESPONSE_BYTES) {
+      await r.body?.cancel?.().catch(() => {});
+      return res.status(502).json({
+        error: `上游响应体积过大（声明 ${Math.round(declared / 1048576)}MB，上限 ${Math.round(MAX_RESPONSE_BYTES / 1048576)}MB）`,
+      });
+    }
+    const capped = await readCapped(r, MAX_RESPONSE_BYTES).catch(() => '');
+    if (capped === null) {
+      return res.status(502).json({
+        error: `上游响应体积过大（超过 ${Math.round(MAX_RESPONSE_BYTES / 1048576)}MB 上限，已拒绝读取）`,
+      });
+    }
+    const raw = capped;
     const safeRaw = redactKey(raw, provider.apiKey).slice(0, MAX_UPSTREAM_ERR);
-    if (!r.ok) return res.status(502).json({ error: `上游返回 ${r.status}：${safeRaw || '(空响应)'}` });
 
     let data;
     try { data = JSON.parse(raw); }
@@ -257,6 +311,11 @@ router.post('/image/generate', async (req, res) => {
         return res.status(502).json({ error: `图片过大（上限 ${MAX_IMAGE_BYTES / 1048576}MB）` });
       }
       buf = Buffer.from(picked.base64, 'base64');
+      // r26-J13:字符串长度闸挡不住"编码前过小、解码后超限"(1.4 是粗估,非精确 4/3)——
+      // 解码后的真实字节数再过一次上限闸(与二进制下载通道同值)。
+      if (buf.length > MAX_IMAGE_BYTES) {
+        return res.status(413).json({ error: `图片过大（解码后 ${Math.round(buf.length / 1048576)}MB，上限 ${MAX_IMAGE_BYTES / 1048576}MB）` });
+      }
     } else {
       // 判官必修①(SSRF):这个 URL 是【上游回什么就是什么】,攻击者可控性最高的一处 ——
       // 而 baseURL 在上面刚过了 assertPublicBaseURL,这里原先一次都没过。实测能用
@@ -327,8 +386,9 @@ router.post('/image/generate', async (req, res) => {
       tookMs: Date.now() - started,
     });
   } catch (err) {
-    // 兜底也要剥 key:异常消息可能带上 URL/头部回显。
-    res.status(500).json({ error: redactKey(err.message, null) });
+    // 兜底也要剥 key:异常消息可能带上 URL/头部回显。r26-J3:传真实 apiKey(字面替换),
+    // 不再只靠 Bearer/api_key 形态兜底。
+    res.status(500).json({ error: redactKey(err.message, apiKeyForRedact) });
   }
 });
 

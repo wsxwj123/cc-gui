@@ -24,7 +24,7 @@ const parseAll = (lines) => lines.map((l) => JSON.parse(l));
   const a = parseAll(lines)[1];
   assert.equal(a.message.content.length, 1, 't1: 空 text 应删,tool_use 保留');
   assert.equal(a.message.content[0].type, 'tool_use');
-  assert.deepEqual(report, { emptyText: 1, emptyThinking: 0, droppedLines: 0, relinked: 0 });
+  assert.deepEqual(report, { emptyText: 1, emptyThinking: 0, droppedLines: 0, relinked: 0, zeroBlocks: 0, zeroBlocksByType: { user: 0, assistant: 0 } });
 }
 
 // t2 R2:空 thinking 块删除(实证 222 处形态:与其他块同行共存)
@@ -81,7 +81,7 @@ const parseAll = (lines) => lines.map((l) => JSON.parse(l));
   const strContent = L({ uuid: 'x1', parentUuid: null, type: 'user', message: { role: 'user', content: 'plain string' } });
   const { lines, report } = repairOfficialCompat([junk, title, strContent]);
   assert.deepEqual(lines, [junk, title, strContent], 't5: 三类行原样透传');
-  assert.deepEqual(report, { emptyText: 0, emptyThinking: 0, droppedLines: 0, relinked: 0 });
+  assert.deepEqual(report, { emptyText: 0, emptyThinking: 0, droppedLines: 0, relinked: 0, zeroBlocks: 0, zeroBlocksByType: { user: 0, assistant: 0 } });
 }
 
 // t6 幂等:二次跑 report 全零、行集不变;原本就空的 content 数组不删(非"因清而空")
@@ -94,7 +94,8 @@ const parseAll = (lines) => lines.map((l) => JSON.parse(l));
     preEmpty,
   ]);
   const second = repairOfficialCompat(first.lines);
-  assert.deepEqual(second.report, { emptyText: 0, emptyThinking: 0, droppedLines: 0, relinked: 0 }, 't6: 二次跑全零');
+  // r26-G7:zeroBlocks 是存量观察计数(只报不修),二次跑仍报出;"全零"口径只管修复类计数。
+  assert.deepEqual(second.report, { emptyText: 0, emptyThinking: 0, droppedLines: 0, relinked: 0, zeroBlocks: 1, zeroBlocksByType: { user: 0, assistant: 1 } }, 't6: 二次跑修复类计数全零');
   assert.deepEqual(second.lines, first.lines, 't6: 二次跑行集不变');
   assert.ok(first.lines.some((l) => l.includes('"a9"')), 't6: 原本就空的行不删');
 }

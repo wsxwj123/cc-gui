@@ -53,7 +53,7 @@ const stripComments = (t) => t.replace(/^\s*\/\/.*$/gm, '').replace(/\/\*[\s\S]*
   try {
     // 1) 面板槽(侧栏折叠树的数据源):403 必须同时落"错误态 + 空列表占位"。
     await st().fetchSessionsForPanel('hash-denied');
-    assert.equal(st().sessionsAccessError, HINT, '403 必须置错误态');
+    assert.equal(st().sessionsAccessErrorByProject['hash-denied']?.hint, HINT, '403 必须置错误态(r26-E2 起按 projectHash 隔离)');
     assert.notEqual(st().sessionsByProject['hash-denied'], undefined,
       '403 后该项目的会话列表不能还是 undefined —— 侧栏首判 rawSessions===undefined 直接转圈,'
       + '提示那一支永远不可达(比回 500 兜成 [] 还糟)');
@@ -67,41 +67,41 @@ const stripComments = (t) => t.replace(/^\s*\/\/.*$/gm, '').replace(/\/\*[\s\S]*
     // 3) 权限恢复后错误态必须清掉,列表照常写入。
     next = okList([{ sessionId: 's1', title: 'a' }]);
     await st().fetchSessionsForPanel('hash-denied');
-    assert.equal(st().sessionsAccessError, null, '恢复后必须清错误态(否则修好了还一直报错)');
+    assert.equal(st().sessionsAccessErrorByProject['hash-denied'], undefined, '恢复后必须清错误态(否则修好了还一直报错)');
     assert.equal(st().sessionsByProject['hash-denied'].length, 1, '恢复后正常写入会话');
 
     // 4) 同契约的第二个消费者(旧槽 fetchSessions,权限卡门禁/@面板仍在读)口径必须一致。
     next = DENIED;
     await st().fetchSessions('hash-denied');
-    assert.equal(st().sessionsAccessError, HINT, '旧槽同样要置错误态,不许静默吞成空列表');
+    assert.equal(st().sessionsAccessErrorByProject['hash-denied']?.hint, HINT, '旧槽同样要置错误态,不许静默吞成空列表');
     assert.deepEqual(st().sessions, [], '旧槽 403 时列表清空');
     assert.equal(st().listLoading, false, '旧槽 403 时不许把 loading 卡住');
     next = okList([{ sessionId: 's1' }]);
     await st().fetchSessions('hash-denied');
-    assert.equal(st().sessionsAccessError, null, '旧槽恢复后也要清错误态');
+    assert.equal(st().sessionsAccessErrorByProject['hash-denied'], undefined, '旧槽恢复后也要清错误态');
 
     // 5) r24:403 载荷里的 canOpenSettings 必须真的落进 store —— 侧栏「打开系统设置」
     //    按钮按它门控。原来这里只取 hint 把它丢了,后端明明回了前端也无从判断。
     //    两个消费者都要接:只接一个 = 换个入口进来按钮就凭空消失/凭空出现。
     next = denied(true);
     await st().fetchSessionsForPanel('hash-mac');
-    assert.equal(st().sessionsAccessCanOpenSettings, true, '面板槽:macOS(canOpenSettings:true)要存下来');
+    assert.equal(st().sessionsAccessErrorByProject['hash-mac']?.canOpenSettings, true, '面板槽:macOS(canOpenSettings:true)要存下来');
     next = denied(false);
     await st().fetchSessionsForPanel('hash-win');
-    assert.equal(st().sessionsAccessCanOpenSettings, false,
-      '面板槽:Windows/Linux(canOpenSettings:false)必须把 store 改回 false —— 不改就会拿上一次的 true 给出一个按了没反应的按钮');
+    assert.equal(st().sessionsAccessErrorByProject['hash-win']?.canOpenSettings, false,
+      '面板槽:Windows/Linux(canOpenSettings:false)必须存成 false —— 存 true 会给出一个按了没反应的按钮(r26-E2:按项目键隔离,不再存在"上一次的 true")');
     next = denied(true);
     await st().fetchSessions('hash-mac');
-    assert.equal(st().sessionsAccessCanOpenSettings, true, '旧槽:同一契约同一口径');
+    assert.equal(st().sessionsAccessErrorByProject['hash-mac']?.canOpenSettings, true, '旧槽:同一契约同一口径');
     next = denied(false);
     await st().fetchSessions('hash-win');
-    assert.equal(st().sessionsAccessCanOpenSettings, false, '旧槽:false 也要写回');
+    assert.equal(st().sessionsAccessErrorByProject['hash-win']?.canOpenSettings, false, '旧槽:false 也要写回');
     // 6) 权限修好后一并清掉(留着 true 会让下一次拒访前的空态出现悬空按钮)
     next = denied(true);
     await st().fetchSessions('hash-mac');
     next = okList([{ sessionId: 's1' }]);
     await st().fetchSessions('hash-mac');
-    assert.equal(st().sessionsAccessCanOpenSettings, false, '恢复正常后 canOpenSettings 跟着 hint 一起清');
+    assert.equal(st().sessionsAccessErrorByProject['hash-mac'], undefined, '恢复正常后 canOpenSettings 跟着 hint 一起清(整键删除)');
   } finally {
     globalThis.fetch = realFetch;
   }
@@ -110,8 +110,12 @@ const stripComments = (t) => t.replace(/^\s*\/\/.*$/gm, '').replace(/\/\*[\s\S]*
 // ── 侧栏:空态要说原因,不能还显示"暂无会话" ───────────────────────────
 {
   const src = read('../../client/src/components/UnifiedSidebar.jsx');
-  assert.match(src, /const accessError = useStore\(\(st\) => st\.sessionsAccessError\);/,
-    '侧栏要读错误态');
+  // r26-E2 换锚:错误态从全局单值改为按 projectHash 存(C-E2 契约,store 侧 PKG-2 产出)
+  // —— sessionsAccessErrorByProject: { [hash]: { hint, canOpenSettings } },缺省 undefined=正常。
+  assert.match(src, /const errByProject = useStore\(\(st\) => st\.sessionsAccessErrorByProject\) \|\| EMPTY_OBJECT;/,
+    '侧栏要读按项目的错误态(C-E2 契约字段)');
+  assert.ok(!/st\.sessionsAccessError\b/.test(src.replace(/sessionsAccessErrorByProject/g, '')),
+    '旧全局单值 sessionsAccessError 的引用必须清零(A 拒访染红 B 空态的根因)');
   // 上面那条 store 断言("403 也要写空数组")的存在理由就是这一句首判:
   // undefined = 还没拉到 → 转圈,空数组才走得到下面的空态提示。
   assert.match(src, /rawSessions === undefined \?/,
@@ -124,8 +128,8 @@ const stripComments = (t) => t.replace(/^\s*\/\/.*$/gm, '').replace(/\/\*[\s\S]*
   assert.equal(sessionEmptyHint({ accessError: 'EACCES', query: '登录', fallback: '暂无会话' }),
     ACCESS_DENIED_HINT, '有错误时空态显示原因,而不是"暂无会话"/"没有匹配的会话"');
   assert.match(ACCESS_DENIED_HINT, /会话文件没有丢失/, '侧栏也要当场安抚:文件没丢');
-  assert.match(src, /<span className="text-amber-700" title=\{accessError\}>/,
-    '拒访那一支要带 title(hover 看平台化的处理办法)');
+  assert.match(src, /<span className="text-amber-700" title=\{entry\.hint\}>/,
+    '拒访那一支要带 title(hover 看平台化的处理办法;r26-E2 后读按项目 entry)');
 
   // ── r24:「打开系统设置」按钮 —— 文案承诺的交互必须真的存在,且按平台门控 ──────
   // 门控判定本身是纯函数(行为断言真调它);组件里那句 JSX 没有渲染环境,只能源码断言,
@@ -139,10 +143,16 @@ const stripComments = (t) => t.replace(/^\s*\/\/.*$/gm, '').replace(/\/\*[\s\S]*
   assert.ok(!/点此查看处理办法/.test(ACCESS_DENIED_HINT),
     '文案不许再承诺一个不存在的点击(r23 那句「点此」渲染出来是个纯 span,点了没反应)');
   // 接线(源码级):按钮必须在门控里、必须真打开面板的端点。
-  assert.match(src, /showAccessSettingsButton\(\{ accessError, canOpenSettings: accessCanOpenSettings \}\) && \(/,
+  assert.match(src, /showAccessSettingsButton\(\{ accessError: entry\.hint, canOpenSettings: entry\.canOpenSettings \}\) && \(/,
     '接线:按钮受 showAccessSettingsButton 门控(去掉这层 Windows 就会冒出一个按了没反应的按钮)');
-  assert.match(src, /const accessCanOpenSettings = useStore\(\(st\) => st\.sessionsAccessCanOpenSettings\);/,
-    '接线:门控读的是 store 里那个真从 403 载荷存下来的平台位');
+  // r26-E2:门控的平台位读按项目 entry 的 canOpenSettings(同一 403 载荷存下来的),
+  // 不再是全局单值 sessionsAccessCanOpenSettings(已随旧字段一并退役)。
+  assert.ok(!/st\.sessionsAccessCanOpenSettings/.test(src),
+    '接线:旧全局平台位 sessionsAccessCanOpenSettings 的引用必须清零');
+  assert.match(src, /errByProject\[hash\]\)/,
+    '接线:分组空态按当前渲染组 hash 读错误态(A 的错误不染红 B)');
+  assert.match(src, /flatAccessEntry/,
+    '接线:平铺空态取可见项目里第一条拒访错误(无单一项目语境)');
   const btnAt = src.indexOf('showAccessSettingsButton({');
   assert.match(src.slice(btnAt, btnAt + 600), /fetch\('\/api\/system\/open-fda-settings', \{ method: 'POST' \}\)/,
     '接线:按钮点了要真调既有的一键打开端点(App.jsx/SettingsPanel 三处同一个)');

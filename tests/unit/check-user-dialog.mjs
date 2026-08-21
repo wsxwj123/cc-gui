@@ -98,12 +98,27 @@ const FIXTURE = {
   const base = `http://127.0.0.1:${server.address().port}/api`;
   const answer = async (body) => {
     const p = requestUserDialog({ ...FIXTURE, sessionId: 'sid-http' });
-    const id = lastOfType('permission:request').request.id;
+    // r26-H1:respond 必携 nonce(随 broadcast 下发),无/错 nonce 一律 403。
+    const { id, nonce } = lastOfType('permission:request').request;
     await fetch(`${base}/permissions/respond/${id}`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...body, nonce }),
     });
     return p;
   };
+
+  // r26-H1 哨兵:无 nonce 的 respond 不得送达(403),卡片也不被 settle。
+  {
+    const p = requestUserDialog({ ...FIXTURE, sessionId: 'sid-http' });
+    const { id } = lastOfType('permission:request').request;
+    const r = await fetch(`${base}/permissions/respond/${id}`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ decision: 'allow', content: { result: 'retry_fallback' } }),
+    });
+    assert.equal(r.status, 403, 'r26-H1: 无 nonce respond 必须 403');
+    dropPendingForSession('sid-http'); // 清掉这张卡,防泄漏到后面的用例
+    await p;
+  }
 
   assert.deepEqual(
     await answer({ decision: 'allow', content: { result: 'retry_fallback' } }),

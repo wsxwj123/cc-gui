@@ -1,5 +1,29 @@
 const BARRIER_STATES = new Set(['unknown', 'accepted', 'needs-review', 'claiming']);
 
+// r26-B5:队列/pin/owner 键的单一构造点。draft 键必须带 draftId——旧形态
+// `draft-<projectHash>` 让同项目两个 draft 窗格共用一个队列(A 排队、B 的 drain 发出),
+// 且 draft→真 sid 迁移会把共享队列整个并进先 init 的一方。新形态:
+//   真会话 → sessionId;draft → `draft-<projectHash>-<draftId>`。
+// draftId 缺失(理论上的旧版残留 draft)落到 '-none' 尾段:宁可键相异失败安全,
+// 也绝不回到共享键。所有裸模板串一律改调本函数,杜绝口径再裂。
+export function queueKeyFor(sel) {
+  if (sel && sel.sessionId) return sel.sessionId;
+  return `draft-${sel?.projectHash || 'none'}-${sel?.draftId || 'none'}`;
+}
+
+// draft 队列键判定与 projectHash 段解析(孤儿回收按项目过滤用)。
+// draftId 形态恒为 `d<ts>-<seq>`(App.jsx newDraftId),据此从新形态键里剥出 hash;
+// 剥不掉的按旧形态 `draft-<hash>` 整段当 hash(旧键只会进孤儿表,归属不再猜测)。
+export function isDraftQueueKey(key) {
+  return typeof key === 'string' && key.startsWith('draft-');
+}
+export function draftQueueProjectHash(key) {
+  if (!isDraftQueueKey(key)) return null;
+  const rest = key.slice('draft-'.length);
+  const m = rest.match(/^(.*)-d\d+-\d+$/);
+  return (m ? m[1] : rest) || 'none';
+}
+
 export function createQueueId(prefix = 'queue') {
   const uuid = globalThis.crypto?.randomUUID?.();
   return uuid || `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 12)}`;
@@ -56,6 +80,13 @@ export function steerLanded(item, _unusedSigs, steerKeys) {
 }
 
 // 收尾只接受 UUID 正向证明。未命中不等于“未消费”，因此转 needs-review 而非 queued。
+// r26-B3 落盘宽限:reattach/转后台中途的历史刷新会触发对账,而 CLI 落盘有 1-3s+
+// 延迟(实测 p90=17.4s)—— accepted 条目的 uuid 还没来得及进 jsonl 就被翻
+// needs-review(误报,且 needs-review 是 barrier 会卡死后续队列)。宽限期内保留
+// accepted 原样(记 missCount 供观测),超出宽限仍缺席才翻。锚点取
+// acceptedAt ?? queuedAt:旧数据无 acceptedAt,而其 queuedAt 必然老旧 → 立即翻,
+// 向后兼容;reattach 期间被 stripSteerState 之外路径重建的条目也有新鲜 queuedAt 兜底。
+export const RECONCILE_GRACE_MS = 20000;
 export function reconcileSteered(list, _unusedSigs, steerKeys) {
   if (!Array.isArray(list) || !list.length) return list;
   if (!list.some((item) => isSteerBarrier(item) || item?.steerId)) return list;
@@ -68,6 +99,15 @@ export function reconcileSteered(list, _unusedSigs, steerKeys) {
     // 对账不得把它翻回 needs-review barrier——那会复活刚被用户解开的死锁。
     if (item.steerState === 'kept') { out.push(item); continue; }
     if (item.steerState === 'needs-review') { out.push(item); continue; }
+    // r26-B3:accepted 且仍在落盘宽限期内 → 本轮未命中不翻(下一次刷新仍缺席才翻)。
+    if (item.steerState === 'accepted') {
+      const anchor = item.acceptedAt ?? item.queuedAt;
+      if (Number.isFinite(anchor) && Date.now() - anchor < RECONCILE_GRACE_MS) {
+        changed = true;
+        out.push({ ...item, missCount: (item.missCount || 0) + 1 });
+        continue;
+      }
+    }
     changed = true;
     const { claimId, targetPaneId, claimDraft, ...rest } = item;
     void claimId; void targetPaneId; void claimDraft;
@@ -79,18 +119,34 @@ export function reconcileSteered(list, _unusedSigs, steerKeys) {
 // ②claim 残留（claiming 中间态 / hidden sendable 槽）复位为可见 needs-review 原条目。
 // hidden 槽在 finalize 时丢了原文本与附件（收进 claimDraft），这里按 claimDraft 还原；
 // steerId 一并还原，让后续对账的 UUID 正向命中仍能自动清掉"其实已送达"的条目。
-export function reclaimClaimItem(item) {
+// r26-B2 文本优先级:
+//   · 无附件 → draft.text(用户在取回窗格里的最新编辑,非空时)优先于 draft.queueText
+//     (原始出站文本)——孤儿回收/复位不得丢用户编辑;
+//   · 有 attachments → 发送文本恒取 queueText:该形态下 draft.text 是 displayText
+//     展示文本,当发送文本还原会把展示文本发进会话;draft.text 只回填 displayText;
+//   · opts.discardEdits(releaseClaimDraft「用户显式清空输入框=放弃这次编辑」)→
+//     恒还原 queueText 原文,编辑文本随清空动作一并放弃。
+export function reclaimClaimItem(item, opts = {}) {
   if (!item || (!item.claimDraft && item.steerState !== 'claiming')) return item;
   const draft = item.claimDraft || null;
   const { claimId, targetPaneId, claimDraft, hidden, ...rest } = item;
   void claimId; void targetPaneId; void claimDraft; void hidden;
   const restored = { ...rest, steerState: 'needs-review', attemptWasAmbiguous: true };
   if (draft) {
-    if (typeof draft.queueText === 'string' && draft.queueText) restored.text = draft.queueText;
-    else if (!restored.text && typeof draft.text === 'string') restored.text = draft.text;
+    const hasAttachments = Array.isArray(draft.attachments) && draft.attachments.length > 0;
+    const queueText = typeof draft.queueText === 'string' && draft.queueText ? draft.queueText : null;
+    const editedText = typeof draft.text === 'string' && draft.text ? draft.text : null;
+    if (opts.discardEdits || hasAttachments) {
+      if (queueText) restored.text = queueText;
+      else if (!restored.text && editedText) restored.text = editedText;
+    } else if (editedText) {
+      restored.text = editedText;
+    } else if (queueText) {
+      restored.text = queueText;
+    }
     if (typeof draft.sourceQueueId === 'string' && draft.sourceQueueId) restored.queueId = draft.sourceQueueId;
     if (typeof draft.steerId === 'string' && draft.steerId) restored.steerId = draft.steerId;
-    if (Array.isArray(draft.attachments) && draft.attachments.length) {
+    if (hasAttachments) {
       restored.opts = {
         ...(restored.opts || {}),
         meta: { ...(restored.opts?.meta || {}), attachments: draft.attachments, displayText: draft.text || '' },

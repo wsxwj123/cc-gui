@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { readFile, writeFile, mkdir, copyFile, unlink, readdir, rename } from 'fs/promises';
+import { readFile, writeFile, mkdir, copyFile, unlink, readdir, rename, chmod } from 'fs/promises';
 import { existsSync } from 'fs';
 import { execFile, spawn } from 'child_process';
 import { promisify } from 'util';
@@ -209,6 +209,8 @@ export async function readCustomProviders() {
 // 原子写 + 串行队列:并发 create/edit/delete 各自读-改-写,半截 writeFile 或互相
 // 覆盖会丢 provider 条目。tmp 名带 uuid + rename 落地,写操作挂同一条 Promise 链
 // (与 sessions.js writeJsonlAtomic 同模式,单文件只需一条链)。
+// r26-H3:mode 0600 —— 文件里有明文 apiKey/quotaKey,默认 0644 等于同机其他用户可读
+// (与 image.js atomicWriteProviders 同口径)。tmp 新建即 0600,rename 后权限跟随。
 let _customProvidersQueue = Promise.resolve();
 async function writeCustomProviders(list) {
   // r10-9:写侧 denormalize —— modelMeta 并回 models 混合条目落盘(存储形态见 normalize 注释)。
@@ -221,7 +223,7 @@ async function writeCustomProviders(list) {
     await mkdir(join(homedir(), '.claude-gui'), { recursive: true });
     const tmp = `${CUSTOM_PROVIDERS_PATH}.tmp-${randomUUID()}`;
     try {
-      await writeFile(tmp, JSON.stringify(wire, null, 2));
+      await writeFile(tmp, JSON.stringify(wire, null, 2), { mode: 0o600 });
       await rename(tmp, CUSTOM_PROVIDERS_PATH);
     } catch (err) {
       // rename 前抛错会留 tmp-uuid 残留,兜底清掉(文件可能没写成,ENOENT 忽略)。
@@ -231,6 +233,14 @@ async function writeCustomProviders(list) {
   });
   _customProvidersQueue = run;
   return run;
+}
+
+// r26-H3:旧版本落盘的 custom-providers.json 可能是 0644 —— 启动时 best-effort 收 0600。
+// 只在真实服务端入口(server/index.js)调用,不在模块加载期跑:单测 import 本模块
+// 不应触碰真实 ~/.claude-gui 文件。Windows 无 POSIX 权限位语义,跳过。
+export async function ensureCustomProvidersMode() {
+  if (process.platform === 'win32') return;
+  try { await chmod(CUSTOM_PROVIDERS_PATH, 0o600); } catch { /* ENOENT(还没建过)等忽略 */ }
 }
 
 // BB6: validate a tierModels input against the provider's model list. Returns a
@@ -1478,12 +1488,21 @@ router.put('/custom-providers/:id', async (req, res) => {
       apiKey: (typeof apiKey === 'string' && apiKey.trim()) ? apiKey.trim() : prev.apiKey,
       models: nextModels,
     };
+    // r26-H4①:baseURL 变更 = 端点换源,旧 quotaKey 与新端点不再同源 —— 保留它会把
+    // 额度查询密钥发去错配/攻击者端点(与 fetch-models「用存储 key 时 baseURL 强制取
+    // 存储值」的同源闸同语义)。本次保存未显式给新 quotaKey 时一律清掉并打标,前端据
+    // quotaKeyCleared 提示「端点已变更,额度查询密钥已清除,请重新确认」。
+    const baseChanged = list[idx].baseURL !== prev.baseURL;
+    let quotaKeyCleared = false;
     // r16-4:额度查询密钥。**不传 = 保留**(表单留空 = 不修改,客户端从不持有明文,
     // 与 apiKey 同语义);显式传空串 = 清除(表单的「清除」按钮,否则填错了删不掉)。
     if (quotaKey !== undefined) {
       const qk = cleanKey(quotaKey);
       if (qk === null) return res.status(400).json({ error: `额度查询密钥过长（上限 ${MAX_KEY_LEN} 字符）` });
       if (qk) list[idx].quotaKey = qk; else delete list[idx].quotaKey;
+    } else if (baseChanged && list[idx].quotaKey) {
+      delete list[idx].quotaKey;
+      quotaKeyCleared = true;
     }
     // AZ8: 默认模型。显式传入(且在 models[] 内)则更新;传 null/'' 则清除;不传则保留旧值。
     // 同时校验:旧 defaultModel 若已不在新 models[] 内,自动清除(避免指向被删模型)。
@@ -1544,7 +1563,7 @@ router.put('/custom-providers/:id', async (req, res) => {
     // 快照只管 UI 显示;CLI 认的是 settings.json 的 env,得重跑 switch 才写。
     // 少了这一步,用户在编辑表单里改默认模型/档位映射保存后毫无反应(#13)。
     const reapplied = await reapplyIfActive(prev.id);
-    res.json({ ok: true, id: prev.id, reapplied });
+    res.json({ ok: true, id: prev.id, reapplied, ...(quotaKeyCleared ? { quotaKeyCleared: true } : {}) });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -1728,11 +1747,36 @@ async function tryFetchModels(url, apiKey) {
 // r22-⑤:allowLoopback 默认 true —— 现有调用点(provider 切换/拉模型/额度查询/MCP ping)
 // 校验的都是【用户自己填的】地址,接本机中转是刻意支持的场景,默认行为一个字不改。
 // 只有"第三方回什么就是什么"的值(如上游返回的图片链接)才传 false。
+// r26-J15:公网强制 https —— http 会把 apiKey/quotaKey 明文发出,仅回环豁免(本机中转
+// 是合法场景)。回环判定:字面回环(127.x/::1/localhost)直接豁免;其余先看 DNS,
+// 解析得出且【全部】回环才豁免;解析失败无法证明回环 → http 一律拒(fail-closed,
+// 明文密钥不能赌;r17-3 的"解析失败放行"只对 https 成立)。
+// ⚠️ 残余风险(本轮刻意不闭合,见 PLAN-r26 J15):DNS 答单在【本守卫解析】与【fetch 实际
+// 连接】之间可被重答(DNS rebinding TOCTOU)—— 守卫时解析到公网 IP、连接时换成内网 IP
+// 的窗口仍在。彻底闭合需自定义 lookup 把解析结果钉进连接 agent,成本高;单用户本机工具
+// 的攻击面里,能控制用户 DNS 答单的攻击者已有更大得手面,故记为后续 backlog:连接钉 IP。
 export async function assertPublicBaseURL(baseURL, { allowLoopback = true } = {}) {
-  let host;
-  try { host = new URL(baseURL).hostname.replace(/^\[|\]$/g, ''); }
+  let url;
+  try { url = new URL(baseURL); }
   catch { const e = new Error('baseURL 非法'); e.status = 400; throw e; }
+  const host = url.hostname.replace(/^\[|\]$/g, '');
+  // 环回放行:本机中转(one-api / new-api / claude 自带的回环代理)是合法场景,
+  // server 打环回只到达用户自己机器,不构成内网探测面;且编辑态强制 baseURL 与存储
+  // key 同源,环回也骗不出已存密钥。私网/链路本地(真 SSRF 目标)仍拒绝。
+  const isLoopback = (ip) => /^127\./.test(ip) || ip === '::1' || /^::ffff:127\./i.test(ip);
   const { lookup } = await import('dns/promises');
+  // r26-J15:http 分支先行 —— 证明不了回环就拒,不落到下面 https 的"解析失败放行"。
+  if (url.protocol === 'http:') {
+    if (allowLoopback && (isLoopback(host) || host === 'localhost')) return;
+    let addrs = null;
+    try { addrs = await lookup(host, { all: true }); } catch { addrs = null; }
+    if (allowLoopback && addrs?.length && addrs.every((a) => isLoopback(a.address))) return;
+    const e = new Error('公网 baseURL 必须使用 https（http 仅允许本机回环地址，防明文密钥外泄）');
+    e.status = 400; throw e;
+  }
+  if (url.protocol !== 'https:') {
+    const e = new Error('baseURL 必须是 http(s)'); e.status = 400; throw e;
+  }
   let addrs;
   try { addrs = await lookup(host, { all: true }); }
   catch {
@@ -1742,13 +1786,9 @@ export async function assertPublicBaseURL(baseURL, { allowLoopback = true } = {}
     //
     // 安全性:解析不了的主机名,后续请求必然也发不出去 → 构不成 SSRF 面;真正的攻击
     // 会用【能解析且指向内网】的域名,那条路径下面照样拦。所以"解析失败就拒绝"既没
-    // 挡住攻击、又把没网/DNS 慢的正常用户挡在门外。
+    // 挡住攻击、又把没网/DNS 慢的正常用户挡在门外。(仅 https;http 上面已 fail-closed。)
     return;
   }
-  // 环回放行:本机中转(one-api / new-api / claude 自带的回环代理)是合法场景,
-  // server 打环回只到达用户自己机器,不构成内网探测面;且编辑态强制 baseURL 与存储
-  // key 同源,环回也骗不出已存密钥。私网/链路本地(真 SSRF 目标)仍拒绝。
-  const isLoopback = (ip) => /^127\./.test(ip) || ip === '::1' || /^::ffff:127\./i.test(ip);
   if (allowLoopback && addrs.length && addrs.every((a) => isLoopback(a.address))) return;
   // ⚠️ 198.18.0.0/15 刻意【不】算私网:它是 RFC2544 基准测试网段,而 Clash TUN 增强模式
   // 拿它做 fake-IP,本机所有走代理的域名都解析成 198.18.x.x。把它算私网会让装了 TUN

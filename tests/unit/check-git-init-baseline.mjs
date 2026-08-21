@@ -123,7 +123,11 @@ try {
       /\[['"]busy['"], ['"]done['"], ['"]partial['"]\]\.includes\(statusRef\.current\)\) return/,
       '探测 effect 必须守住 busy/done/partial,不然 init 结果被重探测冲掉(用户只看到按钮回弹)',
     );
-    assert.match(banner, /r\.ok \? r\.json\(\) : Promise\.reject/, '非 2xx 响应不得当探测结果用');
+    assert.match(banner, /if \(r\.ok\) return r\.json\(\);/, '非 2xx 响应不得当探测结果用(ok 才直接用)');
+    // r26-E4:403 + no-disk-access 是唯一放行读 body 的例外(系统拒访 → tcc 横幅);
+    // 其余非 2xx 仍 reject 落 fail-safe。
+    assert.match(banner, /if \(r\.status === 403\)[\s\S]{0,300}return Promise\.reject/,
+      '除 403 no-disk-access 例外(E4)外,非 2xx 仍不得当探测结果用');
     assert.match(banner, /\.catch\(\(\) => \{ setRepoRoot\(null\); setStatus\('repo'\); \}\)/,
       '探测失败必须 fail-safe 到不显示横幅(绝不冒称"不是 git 仓库")');
     assert.ok(!/setStatus\('norepo'\)[^\n]*catch/.test(banner) && !/catch[^\n]*setStatus\('norepo'\)/.test(banner),
@@ -150,8 +154,8 @@ try {
     assert.match(initBody, /const initCwd = cwd;/, 'init 必须在发起时闭包捕获 cwd');
     assert.match(initBody, /statusCwdRef\.current === initCwd/, '归属校验必须比当前 ref 与发起时 cwd(别用渲染态闭包)');
     assert.equal(
-      (initBody.match(/if \(!mine\(\)\) return;/g) || []).length, 3,
-      '三条写结果 state 的路径(done/partial、非 2xx 回退、异常回退)都必须先过归属守卫',
+      (initBody.match(/if \(!mine\(\)\) return;/g) || []).length, 4,
+      '所有写结果 state 的路径(done/partial、r26-E5 横幅态、非 2xx 回退、异常回退)都必须先过归属守卫',
     );
   }
 

@@ -10,7 +10,7 @@ import { createHash } from 'crypto';
 import sessionRoutes from './routes/sessions.js';
 import chatRoutes, { getInitCommands, mergeInitCommands } from './routes/chat.js';
 import processRoutes from './routes/processes.js';
-import settingsRoutes, { restoreOpenAIProvider, restoreAnthropicProvider, activeProviderModelMeta } from './routes/settings.js';
+import settingsRoutes, { restoreOpenAIProvider, restoreAnthropicProvider, activeProviderModelMeta, ensureCustomProvidersMode } from './routes/settings.js';
 import usageRoutes from './routes/usage.js';
 import subscriptionUsageRoutes from './routes/subscription-usage.js';
 import providerQuotaRoutes from './routes/provider-quota.js';
@@ -498,9 +498,22 @@ app.post('/api/network', async (req, res) => {
 
 // POST /api/network/password { password } | { clear:true } — change/remove the
 // access password independently of the host toggle.
+// r26-H2:局域网监听(0.0.0.0)下禁止清密码 —— 清掉的瞬间 LAN 全员免密放行(密码等价于
+// 全主机 RCE)。live 绑定或配置文件任一为 0.0.0.0 都拒:配置侧的 0.0.0.0 会在下次重启
+// 生效,现在清密码 = 给下一次启动埋免密暴露。要清必须先把监听地址改回 127.0.0.1。
 app.post('/api/network/password', (req, res) => {
   const { password, clear } = req.body || {};
-  if (clear) { clearPassword(); return res.json({ ok: true, hasPassword: false }); }
+  if (clear) {
+    const configHost = loadConfig().host === '0.0.0.0' ? '0.0.0.0' : '127.0.0.1';
+    if (lanMode || configHost === '0.0.0.0') {
+      return res.status(409).json({
+        error: '局域网监听模式下必须保留访问密码；要清密码请先把监听地址改回 127.0.0.1',
+        lanMode: true,
+      });
+    }
+    clearPassword();
+    return res.json({ ok: true, hasPassword: false });
+  }
   if (typeof password !== 'string' || password.length < 6) {
     return res.status(400).json({ error: '密码至少 6 位' });
   }
@@ -994,7 +1007,8 @@ server.listen(PORT, HOST, () => {
   console.log(`  Started at                 ${new Date().toLocaleString()}`);
   console.log('═'.repeat(60));
   // r13-p2-6:后台预热会话列表缓存 —— 首屏展开项目不再等 1-2 秒解析。
-  // 逐个串行(不抢 I/O),失败静默;缓存本身按 mtime 判定,预热只是把冷启动前置。
+  // 并发 4 路限流预热(不是串行 —— 早先注释写错了),失败静默;缓存本身按 mtime 判定,
+  // 预热只是把冷启动前置。
   // r21:预热集减去 hiddenProjects 并封 cap —— 原来热的 16 个里 14 个是侧栏根本不显示
   // 的项目,而并发 4 恰好占满 libuv 默认线程池,把用户正在等的请求堵在后面。
   // R3:prefs 读必须留在这层 try 之内(readHiddenProjects 自身也不抛),别提到外面 ——
@@ -1014,6 +1028,8 @@ server.listen(PORT, HOST, () => {
       await Promise.all([worker(), worker(), worker(), worker()]); // 并发 4,别抢满 I/O
     } catch {}
   })();
+  // r26-H3:旧版落盘的 custom-providers.json 可能是 0644,启动时 best-effort 收 0600。
+  ensureCustomProvidersMode().catch(() => {});
   // Re-arm the OpenAI translation proxy if a codex/opencode provider was active
   // before this (re)start, so settings.json's proxy URL keeps resolving.
   restoreOpenAIProvider().catch(() => {});

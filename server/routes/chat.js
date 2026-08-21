@@ -15,6 +15,7 @@ import { stripInheritedProviderEnv } from '../utils/provider-env.js';
 import { resolveClaude } from '../utils/claude-resolver.js';
 import { repairOfficialCompat } from '../utils/session-repair.js';
 import { contextTimeoutBudget } from '../utils/context-tokens.js';
+import { canonicalCwd } from '../utils/safe-path.js';
 import { broadcast, clients } from '../broadcast.js';
 
 // T2: 回合完成 WS 通知。前端切走会话时 SSE fetch 已被 abort(I4 渲染隔离的
@@ -2544,7 +2545,7 @@ function parseContextMarkdown(md) {
 // percentage=round(total/max*100),与 /context markdown 的"a / b (c%)"同口径);第三方
 // provider 超窗时 pct 可 >100,照实返回不截断(前端有超窗提示)。isDeferred 分类(延迟
 // 加载、不占 totalTokens)原样保留 —— SDK 给的 name 已带 "(deferred)" 后缀,两路显示一致。
-function mapSdkContextUsage(u) {
+export function mapSdkContextUsage(u) {
   const max = u.maxTokens || u.rawMaxTokens || 0;
   const byServer = {};
   for (const t of u.mcpTools || []) {
@@ -2557,6 +2558,10 @@ function mapSdkContextUsage(u) {
     model: u.model || null,
     totalTokens: u.totalTokens || 0,
     windowTokens: max,
+    // r26-G3(契约 C-G3):usage 带 estimated 标记(估算回落由代理层打标,字段名逐字
+    // 按契约 'estimated')时透传到响应顶层,前端据此标「(估算)」;精确路径(真 usage)
+    // 不带此键,两态互斥。
+    ...(u.estimated ? { estimated: true } : {}),
     pct: Math.round(u.percentage ?? (max ? (u.totalTokens / max) * 100 : 0)),
     // 实测 SDK 的 isDeferred 分类 name 自带 " (deferred)" 后缀,与 markdown 表同名,原样透传。
     categories: (u.categories || []).map((c) => ({
@@ -2571,7 +2576,9 @@ function mapSdkContextUsage(u) {
 }
 
 const CONTEXT_SESSION_RE = /^[A-Za-z0-9._-]{1,128}$/;
-const CONTEXT_PROJECT_RE = /^[A-Za-z0-9._-]{1,4096}$/;
+// r26-G9:前置否定排掉纯点段('.'/'..'/'...')——原字符集允许 '.',防线只剩隐式约定。
+// '.foo'/'foo.bar' 等合法目录名不受影响。
+const CONTEXT_PROJECT_RE = /^(?!\.+$)[A-Za-z0-9._-]{1,4096}$/;
 
 export function validateContextRequest(req) {
   const sessionId = typeof req.params?.sessionId === 'string' ? req.params.sessionId : '';
@@ -2628,10 +2635,15 @@ function trustedContextMeta(sessionId) {
   for (const slot of activeProcesses.values()) {
     if (slot.sessionId !== sessionId || slot.exitCode !== null || slot.closing) continue;
     const cwd = typeof slot.cwd === 'string' ? slot.cwd : '';
+    // r26-B4:projectHash 由 canonicalCwd(slot.cwd) 派生而非原始字符串 —— CLI 落盘目录名
+    // 按解析后的真实路径编码,slot.cwd 可能是 symlink 别名形态(mac /tmp、win 大小写),
+    // 不归一则与客户端按真实路径算出的 projectHash 恒不等 → 永久 409。
+    const canonical = cwd ? canonicalCwd(cwd) : '';
     return {
       sessionId,
-      projectHash: cwd ? cwd.replace(/[^A-Za-z0-9]/g, '-') : '',
+      projectHash: canonical ? canonical.replace(/[^A-Za-z0-9]/g, '-') : '',
       cwd,
+      canonicalCwd: canonical,
       model: slot.currentModel || slot.model || null,
       slot,
     };
@@ -2644,8 +2656,12 @@ function trustedContextMeta(sessionId) {
 // meta.model 为 null——硬判等 = 徽章永久 409。model 只用于 spawn 回落的 --model 参数
 // (信客户端,MODEL_ARG_RE/safeModelArg 白名单仍拦注入)。projectHash/cwd 归属校验保留。
 export function contextHintsMatch(request, meta) {
+  // r26-B4:cwd 双侧归一化比对(canonicalCwd,见 safe-path.js)——symlink 别名/尾斜杠/
+  // win 大小写差异不再恒 409。归一化收敛不放宽:realpath 单射,不同目录归一后仍不等。
+  const reqCwd = request.cwd ? canonicalCwd(request.cwd) : '';
+  const metaCwd = meta.canonicalCwd || (meta.cwd ? canonicalCwd(meta.cwd) : '');
   return (!request.projectHash || request.projectHash === meta.projectHash)
-    && (!request.cwd || request.cwd === meta.cwd);
+    && (!reqCwd || reqCwd === metaCwd);
 }
 
 export function validContextPayload(payload) {

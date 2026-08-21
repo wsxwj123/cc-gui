@@ -2,6 +2,28 @@ import { homedir } from 'os';
 import { isAbsolute, relative, resolve, join, dirname, basename } from 'path';
 import { readdirSync, realpathSync } from 'fs';
 
+/**
+ * r26-B4:cwd 归一化比对(/context 409 归属判定用)。收敛不放宽:
+ *   1. 去首尾空白、去尾部分隔符(/ \\ 都剥,保留根 '/')——'/tmp' 与 '/tmp/' 同一目录;
+ *   2. realpathSync.native 解 symlink(mac /tmp→/private/tmp、/var→/private/var);
+ *      ENOENT/权限不足等失败回落原串(不抛),此时大小写/尾斜杠归一仍生效;
+ *   3. win32:分隔符统一 '\\' + toLowerCase(Windows 路径大小写不敏感,红线要求归一)。
+ * 不放宽论证:realpath 对已存在目录是单射——两个不同项目不可能归一到同一路径;
+ * 唯一"变宽"情形是 symlink 别名指向同一真实目录,而那本来就是同一个项目。
+ * realpath 是 µs 级 syscall,请求侧每次算即可,不需要缓存。
+ * @param {string} p 待归一化路径
+ * @param {string} [platform] 仅供测试注入;默认 process.platform。
+ */
+export function canonicalCwd(p, platform = process.platform) {
+  let s = String(p ?? '').trim();
+  if (!s) return '';
+  const stripped = s.replace(/[/\\]+$/, '');
+  s = stripped || (s.startsWith('\\') ? '\\' : '/'); // 全部分隔符 = 根,保留根
+  try { s = realpathSync.native(s); } catch { /* 不存在/无权限 → 回落归一化后的原串 */ }
+  if (platform === 'win32') s = s.replace(/\//g, '\\').toLowerCase();
+  return s;
+}
+
 export function isPathInside(child, parent) {
   const base = resolve(parent);
   const target = resolve(child);

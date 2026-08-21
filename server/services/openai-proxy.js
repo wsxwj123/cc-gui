@@ -13,7 +13,8 @@
 
 import http from 'node:http';
 import { isCountTokensRequest, estimateInputTokens } from '../utils/context-tokens.js';
-import { lookupModelCapabilities, EFFORT_IDS } from '../utils/model-capabilities.js';
+import { lookupModelCapabilities, lookupVisionCapability, EFFORT_IDS } from '../utils/model-capabilities.js';
+import { collectRealToolResultIds } from '../utils/tool-result-reconcile.js';
 
 // Fixed loopback port so the ANTHROPIC_BASE_URL written into settings.json
 // stays valid across server restarts (watchdog). Falls back to an ephemeral
@@ -56,16 +57,32 @@ function systemToText(system) {
 }
 
 // CI-4:已知无 vision 的 OpenAI 兼容上游(对 image_url 报 400 "unknown variant 'image_url'")。
-// 按 baseURL 命中,后续可扩展。命中时把 image block 剥成文本占位,避免整个请求 400 失败。
+// r26-G6:主判据改模型名能力表(lookupVisionCapability)——按 baseURL 正则判视觉会被
+// 同名部署/网关聚合 URL 误判漏判(聚合站 URL 不含 deepseek 字样、或官方 URL 跑无视觉
+// 模型)。baseURL 正则降级为「模型名查无记录」时的兜底,维持旧行为不变。
+// 命中时把 image block 剥成文本占位,避免整个请求 400 失败。
 const NO_VISION_HOSTS = /deepseek/i;
 const OPENCODE_HOST = /opencode/i;
 const DEEPSEEK_MODEL = /deepseek/i;
+// 判定结果按 `${baseURL}|${model}` 缓存(同会话内不变;setOpenAIUpstream 换上游后
+// key 自然失效重算)。
+let noVisionCache = { key: null, val: false };
 export function upstreamNoVision() {
   if (!upstream?.baseURL) return false;
-  if (NO_VISION_HOSTS.test(upstream.baseURL)) return true;
-  // opencode 走 OpenAI 协议,baseURL 不含 deepseek;但选 deepseek 系模型时上游同样无 vision,
-  // 历史 image 块原样转发会 400。按「opencode baseURL + deepseek 系 model」补判。
-  return OPENCODE_HOST.test(upstream.baseURL) && DEEPSEEK_MODEL.test(upstream.model || '');
+  const key = `${upstream.baseURL}|${upstream.model || ''}`;
+  if (key === noVisionCache.key) return noVisionCache.val;
+  let val;
+  // 主判据:模型名能力表(true=有视觉/false=无视觉/null=查无记录)
+  const v = lookupVisionCapability(upstream.model);
+  if (v !== null) {
+    val = !v;
+  } else {
+    // 兜底:模型查无记录 → 旧 baseURL 正则(原样保留,含 opencode+deepseek 系补判)
+    val = NO_VISION_HOSTS.test(upstream.baseURL)
+      || (OPENCODE_HOST.test(upstream.baseURL) && DEEPSEEK_MODEL.test(upstream.model || ''));
+  }
+  noVisionCache = { key, val };
+  return val;
 }
 
 export function anthropicToOpenAIMessages(messages, system) {
@@ -99,7 +116,10 @@ export function anthropicToOpenAIMessages(messages, system) {
       } else if (block.type === 'thinking') {
         // 历史 thinking 块不能丢:deepseek 系上游要求 thinking 轮次必须回传 reasoning_content,
         // 缺了同会话续聊报 400。收集后作 assistant 顶层字段,不进 content(正文/思考分离)。
-        thinkingParts.push(block.thinking || '');
+        // r26-G5:空 thinking(thinking.trim()==='')丢弃,不再产出空 reasoning_content —
+        // 与 anthropic-proxy/session-repair 的空块处置对齐(空 thinking 块到严格端点可能 400)。
+        const t = typeof block.thinking === 'string' ? block.thinking : '';
+        if (t.trim() !== '') thinkingParts.push(t);
       } else if (block.type === 'tool_use') {
         toolCalls.push({
           id: block.id,
@@ -172,22 +192,25 @@ export function anthropicToOpenAIMessages(messages, system) {
   //   user: <skill body>   ← 缺 tool message!
   // → DeepSeek 严格端点 400 拒绝。
   //
-  // 修法:转换完成后扫一遍 messages,任何 assistant.tool_calls 后没立即跟够 tool
-  // 配对,补一条 stub tool message(content="(tool result fed via system context)")。
+  // 修法:转换完成后扫一遍 messages,任何 assistant.tool_calls 缺真实结果的,
+  // 补一条 stub tool message(content="(tool result fed via system context)")。
   // 不影响模型理解 — 真 result 已在 system prompt 里,模型读得到。
+  //
+  // r26-G2:判定「缺不缺」改为全局扫描(与 anthropic-proxy 的 realResultIds 同方案,
+  // 共用 collectRealToolResultIds)。旧实现只扫 assistant 紧邻的连续 tool 段,并行
+  // tool_calls 的真实形态 assistant(A) → assistant(B) → tool(result A) 里 A 的结果
+  // 不在紧邻段 → 误判缺失插假桩 → 同一 tool_call_id 两条 tool 消息,严格端点报
+  // "tool call id is not found"。现在:realResultIds 集内的一律不插,只对真缺的插。
+  const realResultIds = collectRealToolResultIds(out);
   let patched = 0;
   for (let i = 0; i < out.length; i++) {
     const m = out[i];
     if (m?.role !== 'assistant' || !Array.isArray(m.tool_calls) || m.tool_calls.length === 0) continue;
-    // 收下一段连续 role:'tool' 已配对的 tool_call_id
-    const seen = new Set();
+    // 找插入点:紧邻的连续 tool 段尾(配对结构仍尽量保持相邻)
     let j = i + 1;
-    while (j < out.length && out[j]?.role === 'tool') {
-      if (out[j].tool_call_id) seen.add(out[j].tool_call_id);
-      j++;
-    }
+    while (j < out.length && out[j]?.role === 'tool') j++;
     const stubs = m.tool_calls
-      .filter((tc) => tc.id && !seen.has(tc.id))
+      .filter((tc) => tc.id && !realResultIds.has(tc.id))
       .map((tc) => ({ role: 'tool', tool_call_id: tc.id, content: '(tool result fed via system context)' }));
     if (stubs.length) {
       out.splice(j, 0, ...stubs);
@@ -226,8 +249,11 @@ function translateMaxEffort(model) {
   // [1m] 是 GUI 给 1M 上下文会话追加的后缀(App.jsx 发送前拼、chat.js 原样 --model 下发),
   // 带着它查表必落空 → 整套折算对 1M 会话失效(客户端同一 lookup 在 effortCaps.js 早已剥)。
   const hit = lookupModelCapabilities(String(model || '').replace(/\[1m\]/i, ''), 'openai');
+  // r26-F5:reasoning===false 必须先于 family 判断 —— 正则判死的模型(如 gpt-4 系、qwen2
+  // 系,family 是正则家族名而非 'table')显式关思考永远优先于「维持旧行为 xhigh」,
+  // 否则非思考模型被下发 reasoning_effort=xhigh,上游可能报错或静默误解。
+  if (hit && hit.reasoning === false) return null;   // 显式关思考(表或正则)→ 干脆不下发
   if (hit?.family !== 'table') return 'xhigh';      // 表外 / 只被正则猜中 → 维持旧行为
-  if (hit.reasoning === false) return null;          // 表说该模型不思考 → 干脆不下发
   if (!hit.efforts) return 'max';                    // 表说全档 → 它确实认 max
   if (hit.efforts.includes('max')) return 'max';
   if (hit.efforts.includes('xhigh')) return 'xhigh';
@@ -355,15 +381,37 @@ function streamOpenAIToAnthropic(upstreamRes, clientRes, model) {
   // Block bookkeeping. Index 0 reserved for text once it starts; tool calls get
   // subsequent indices keyed by the OpenAI tool_call index.
   let textOpen = false;
+  let thinkingOpen = false; // r26-G11:thinking 块(上游 reasoning_content 翻译而来)
   let nextIndex = 0;
   const toolBlocks = new Map(); // openaiToolIndex → { anthropicIndex, id, name, jsonBuf }
   let finishReason = null;
   let usage = null;
   let buf = '';
 
+  const closeThinkingBlock = () => {
+    if (thinkingOpen !== false) {
+      sse(clientRes, 'content_block_stop', { type: 'content_block_stop', index: thinkingOpen });
+      thinkingOpen = false;
+    }
+  };
+  // r26-G11:thinking 与 text 互斥开关 —— 谁先到谁开;另一种内容到达时先关前者再开,
+  // content 与 reasoning 交错的序列因此保持相对序(deepseek 正常是先 reasoning 后
+  // content;交错只是防御性保证,绝不把后到的思考 prepend 到已发出的正文块里)。
+  const ensureThinkingBlock = () => {
+    ensureStarted();
+    if (thinkingOpen === false) {
+      closeTextBlock();
+      const idx = nextIndex++;
+      sse(clientRes, 'content_block_start', { type: 'content_block_start', index: idx,
+        content_block: { type: 'thinking', thinking: '' } });
+      thinkingOpen = idx;
+    }
+    return thinkingOpen;
+  };
   const ensureTextBlock = () => {
     ensureStarted();
     if (textOpen === false) {
+      closeThinkingBlock();
       const idx = nextIndex++;
       sse(clientRes, 'content_block_start', { type: 'content_block_start', index: idx,
         content_block: { type: 'text', text: '' } });
@@ -399,6 +447,15 @@ function streamOpenAIToAnthropic(upstreamRes, clientRes, model) {
     if (!choice) return;
     const delta = choice.delta || {};
 
+    // r26-G11:deepseek-reasoner 等上游的思考内容走 delta.reasoning_content,此前
+    // 没有分支被静默丢弃 → 翻成 anthropic thinking 流(thinking_delta,与 anthropic
+    // 路 thinking 块输出形态对齐)。放在 content 分支前:reasoning 正常先于正文到达。
+    if (typeof delta.reasoning_content === 'string' && delta.reasoning_content.length) {
+      const idx = ensureThinkingBlock();
+      sse(clientRes, 'content_block_delta', { type: 'content_block_delta', index: idx,
+        delta: { type: 'thinking_delta', thinking: delta.reasoning_content } });
+    }
+
     if (typeof delta.content === 'string' && delta.content.length) {
       const idx = ensureTextBlock();
       sse(clientRes, 'content_block_delta', { type: 'content_block_delta', index: idx,
@@ -413,6 +470,7 @@ function streamOpenAIToAnthropic(upstreamRes, clientRes, model) {
         if (!entry) {
           ensureStarted();
           closeTextBlock();
+          closeThinkingBlock(); // G11:工具块前思考块也要闭合(块序合法)
           const aIdx = nextIndex++;
           entry = {
             anthropicIndex: aIdx,
@@ -464,6 +522,7 @@ function streamOpenAIToAnthropic(upstreamRes, clientRes, model) {
     if (aborted) return;
     ensureStarted(); // 空但成功的流:仍补出合法(空)的 anthropic 收尾
     closeTextBlock();
+    closeThinkingBlock();
     for (const entry of toolBlocks.values()) {
       let input = {};
       try { input = JSON.parse(entry.jsonBuf || '{}'); } catch {}
@@ -499,6 +558,11 @@ function openAIToAnthropicMessage(json, model) {
   const choice = (json.choices || [])[0] || {};
   const m = choice.message || {};
   const content = [];
+  // r26-G11:非流式同样翻译 reasoning_content → thinking 块(置于正文前,与流式同序);
+  // 空/纯空白不下发(与 G5 请求方向的空 thinking 处置同口径)。
+  if (typeof m.reasoning_content === 'string' && m.reasoning_content.trim() !== '') {
+    content.push({ type: 'thinking', thinking: m.reasoning_content });
+  }
   if (m.content) content.push({ type: 'text', text: m.content });
   for (const tc of m.tool_calls || []) {
     let input = {};
@@ -585,7 +649,10 @@ async function handle(req, clientRes) {
     let parsedBody = {};
     try { parsedBody = JSON.parse(await readBody(req)) || {}; } catch {}
     clientRes.writeHead(200, { 'Content-Type': 'application/json' });
-    clientRes.end(JSON.stringify(estimateInputTokens(parsedBody)));
+    // r26-G3(契约 C-G3):本地估算打标 estimated:true(响应顶层,不进 token 数字本身),
+    // 前端据此标「(估算)」而非当精确值展示。本端点永远是估算(OpenAI 协议无
+    // count_tokens 等价端点,见上注释),恒带标记。
+    clientRes.end(JSON.stringify({ ...estimateInputTokens(parsedBody), estimated: true }));
     return;
   }
   if (req.method !== 'POST' || !req.url.includes('/v1/messages')) {

@@ -2,6 +2,7 @@ import { useEffect, useRef } from 'react';
 import { useStore } from '../stores/sessionStore.js';
 import { resolveSessionTitle } from '../utils/sessionTitle.js';
 import { maybeNotify, permissionNotice } from '../utils/desktopNotify.js';
+import { getSkinState, deactivateSkin } from '../utils/skins.js';
 
 // G3:危险命令启发式 —— 删除类 + 网络/装包 + sudo。命中即强制弹窗,不被任何自动放行豁免。
 // 【权威判定在服务端 server/routes/chat.js 的 DANGEROUS_BASH】(canUseTool 内强拦,
@@ -24,9 +25,10 @@ const inFlightResponds = new Map();
 // POST 会静默丢失 → CLI 永久挂起等应答、刷新后同一弹窗重现(死循环根因)。
 // 单次 8s 短超时(快失败快重试,超时还会让浏览器废弃死掉的池连接,下次拿新
 // TCP),失败后递增间隔无限重试。服务端 respond 幂等(alreadyResolved),重试
-// 绝不会把同一应答写两次进 CLI。终止条件三选一:
+// 绝不会把同一应答写两次进 CLI。终止条件四选一:
 //   送达成功(HTTP 2xx,含 alreadyResolved)/ 卡片已被他端解决(对账或
-//   resolved 广播撤卡)/ cancelRespond 明确取消。
+//   resolved 广播撤卡)/ cancelRespond 明确取消 / 403 nonce 终态(r27-review1,
+//   见下)。
 // 服务端 15min TTL 与进程退出 dropPendingForSession 都会让重试命中
 // alreadyResolved 收敛,不存在永久重试。
 export async function respondPermission(id, body) {
@@ -37,17 +39,36 @@ export async function respondPermission(id, body) {
   // "卡片不存在"是常态,不能当"他端已解决"提前终止;只有本来有卡、后来
   // 被 resolved 广播/对账撤掉,才说明他端已解决。
   const hadCard = useStore.getState().pendingPermissions.some((p) => p.id === id);
+  // r26-H1(契约 C-H1):respond 必须携带一次性 nonce(服务端 slot 存有真值,错/缺 → 403)。
+  // 优先 body.nonce(PermissionPrompt 从卡片取);body 没带时从 store 卡片补
+  // X-CGUI-Nonce 头 —— 本机免密下 body 与头等价,头是兜「调用方忘带」的底。
+  const cardNonce = useStore.getState().pendingPermissions.find((p) => p.id === id)?.nonce;
+  const headers = { 'Content-Type': 'application/json' };
+  if (body?.nonce == null && cardNonce) headers['X-CGUI-Nonce'] = cardNonce;
   try {
     for (let attempt = 0; ; attempt++) {
       if (flight.cancelled) return false;
       try {
         const r = await fetch(`/api/permissions/respond/${id}`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers,
           body: JSON.stringify(body),
           signal: AbortSignal.timeout(8_000),
         });
         if (r.ok) return true; // 含 alreadyResolved —— 都算送达
+        // r27-review1:403 = nonce 闸拒绝(r26-H1,终态)——nonce 与服务端 slot 逐字
+        // 比对,不符重试再多次也不会变对(典型:手机缓存了 H1 之前的旧前端,根本没
+        // 带 nonce)。原实现只有两个出口(r.ok / 卡片被撤),403 会掉进递增退避无限
+        // 重试:hadCard=false 的 auto-allow 要等 15min TTL 命中 alreadyResolved 才
+        // 收敛,期间 CLI 挂起;有卡路径卡片转圈卡死。终态处理:console 留痕 + 撤卡
+        // (组件侧无现成失败展示路径,不新造 UI;25s 对账会把服务端仍 pending 的卡
+        // 补回来,用户可重试,不会静默丢请求),return false 不进重试通道。
+        // (此端点 403 只有 nonce 一种;CORS/Host 门 403 同为终态,一并收敛。)
+        if (r.status === 403) {
+          try { console.warn('[cgui-perm] respond 403(nonce 无效,终态不再重试):', id); } catch {}
+          if (hadCard) useStore.getState().removePendingPermission(id);
+          return false;
+        }
       } catch { /* 半死连接/超时,落到重试 */ }
       // 1s/2s/4s/8s 封顶的递增间隔:连接刚抖一下时快速恢复,持续断开时不刷屏
       await new Promise((ok) => setTimeout(ok, Math.min(1_000 * 2 ** attempt, 8_000)));
@@ -99,7 +120,9 @@ function handlePermissionRequest(req) {
   try { wl = req.sessionId ? JSON.parse(localStorage.getItem(`cgui-perm-wl-${req.sessionId}`) || '[]') : []; } catch {}
   if (Array.isArray(wl) && wl.includes(req.toolName) && !req.blockedPath) {
     if (import.meta.env?.DEV) console.log('[cgui-perm] auto-allow: whitelist', req.id, req.toolName);
-    respondPermission(req.id, { decision: 'allow' });
+    // r26-H1:auto-allow 也要带 nonce(broadcast 下发的 req.nonce),否则服务端 403、
+    // 白名单放行这条路径被 nonce 闸整体锁死。
+    respondPermission(req.id, { decision: 'allow', nonce: req.nonce });
     return;
   }
   if (import.meta.env?.DEV) console.log('[cgui-perm] → render popup', req.id, req.toolName);
@@ -270,6 +293,19 @@ export function useWebSocket() {
             case 'pinned':
               // r10-11:置顶(项目/会话)变更广播——折叠面板常驻不重挂载,靠它跨端收敛。
               useStore.getState().applyPinned(data);
+              break;
+            case 'skins-changed':
+              // r26-D7(契约 C-D7):皮肤在他端被删 → 若当前正用着它,静默回默认
+              // (否则图标 mask 404 变实心方块,要到下次 reconcile 才自愈)。
+              // payload 形状固定 { type:'skins-changed', deletedId }。
+              try {
+                if (data.deletedId && getSkinState().id === data.deletedId) deactivateSkin();
+              } catch {}
+              break;
+            case 'hidden-projects':
+              // r26-I2(契约 C-I2):隐藏项目任一端改动后全端收敛。
+              // payload 形状固定 { type:'hidden-projects', hidden }。
+              useStore.getState().applyHiddenProjects(data.hidden);
               break;
             case 'repair-hint':
               // r10-12:官方 400 空内容块的服务端体检结果。result 后 0ms finalize 会关 SSE,

@@ -13,10 +13,11 @@ import { extname, join } from 'path';
 import { homedir, tmpdir } from 'os';
 import { randomUUID } from 'crypto';
 import { isPathInside } from '../utils/safe-path.js';
+import { broadcast } from '../broadcast.js';
 import {
   parseTarListing, validateZipEntries, resolveRootPrefix, validateManifest,
   imageDimensions, sanitizeSvg, validateT2Script, convertDswVars, ZIP_LIMITS,
-  skinIdFrom, SKIN_ID_RE, SKIN_ASSET_RE,
+  skinIdFrom, slugOf, SKIN_ID_RE, SKIN_ASSET_RE,
 } from '../utils/skin-validate.js';
 
 const execFileP = promisify(execFile);
@@ -67,6 +68,39 @@ function failCode(code, extra = {}) {
   err.skinCode = code;
   Object.assign(err, extra);
   return err;
+}
+
+/**
+ * r26-D4:stage 目录搬入 skinsDir 的统一出口。rename 优先;EXDEV(tmp 与 home 跨卷,
+ * 如 Linux tmpfs /tmp)回落 mkdir+逐文件拷贝+rm stage。renameFn 仅供单测注入失败形态。
+ * 非 EXDEV 错误原样上抛不吞(清 stage 是调用方 catch 的职责)。
+ */
+export async function moveStageDir(stage, dest, renameFn = rename) {
+  try {
+    await renameFn(stage, dest);
+  } catch (e) {
+    if (e.code !== 'EXDEV') throw e;
+    await mkdir(dest, { recursive: true });
+    for (const n of await readdir(stage)) await writeFile(join(dest, n), await readFile(join(stage, n)));
+    await rm(stage, { recursive: true, force: true });
+  }
+}
+
+/** stage 创建后任何失败都必须清 stage(防 tmpdir 泄漏)——两条导入路径同口径。 */
+async function cleanupStage(stage) {
+  await rm(stage, { recursive: true, force: true }).catch(() => {});
+}
+
+/**
+ * r26-D6 覆盖式去重:同 slug 视为同一皮肤(语义声明:「导入=换成新版」)。
+ * skinsDir 里找 id === slug 或 id 以 `${slug}-` 开头的既有目录 → 复用其 id;
+ * 未命中/slug 为空(CJK 退化 skin- 随机后缀,无归属语义)→ null 走新 id。
+ */
+export async function findExistingSkinId(slug, skinsDir = SKINS_DIR) {
+  if (!slug) return null;
+  let ids = [];
+  try { ids = await readdir(skinsDir); } catch { return null; }
+  return ids.find((d) => SKIN_ID_RE.test(d) && (d === slug || d.startsWith(`${slug}-`))) || null;
 }
 
 async function dirBytes(dir) {
@@ -186,25 +220,27 @@ export async function installSkinPackage(zipPath, { source = 'user', skinsDir = 
     }
 
     // ── 原子搬入 ~/.claude-gui/skins/<id>/ ──
-    const id = skinIdFrom(manifest.name);
+    // r26-D6:同 slug 已存在 → 复用其 id 覆盖(rm 旧目录后 rename stage 进去)
+    const existingId = await findExistingSkinId(slugOf(manifest.name), skinsDir);
+    const id = existingId || skinIdFrom(manifest.name);
     const stage = join(tmpdir(), `cgui-skin-stage-${randomUUID()}`);
-    await mkdir(stage, { recursive: true });
-    for (const [name, srcInfo] of keep) {
-      if (srcInfo.content != null) await writeFile(join(stage, name), srcInfo.content, 'utf8');
-      else await writeFile(join(stage, name), await readFile(srcInfo.from));
+    try {
+      await mkdir(stage, { recursive: true });
+      for (const [name, srcInfo] of keep) {
+        if (srcInfo.content != null) await writeFile(join(stage, name), srcInfo.content, 'utf8');
+        else await writeFile(join(stage, name), await readFile(srcInfo.from));
+      }
+      await writeFile(join(stage, 'skin.json'), JSON.stringify(manifest, null, 2));
+      await writeFile(join(stage, 'meta.json'), JSON.stringify({ source, importedAt: Date.now() }));
+      await mkdir(skinsDir, { recursive: true });
+      const dest = join(skinsDir, id);
+      if (!isPathInside(dest, skinsDir)) throw failCode('internal');
+      if (existingId) await rm(dest, { recursive: true, force: true });
+      await moveStageDir(stage, dest);
+    } catch (e) {
+      await cleanupStage(stage);
+      throw e;
     }
-    await writeFile(join(stage, 'skin.json'), JSON.stringify(manifest, null, 2));
-    await writeFile(join(stage, 'meta.json'), JSON.stringify({ source, importedAt: Date.now() }));
-    await mkdir(skinsDir, { recursive: true });
-    const dest = join(skinsDir, id);
-    if (!isPathInside(dest, skinsDir)) throw failCode('internal');
-    await rename(stage, dest).catch(async (e) => {
-      // 跨设备 rename 失败兜底:极少见(tmp 与 home 不同卷),逐文件拷贝
-      if (e.code !== 'EXDEV') throw e;
-      await mkdir(dest, { recursive: true });
-      for (const n of await readdir(stage)) await writeFile(join(dest, n), await readFile(join(stage, n)));
-      await rm(stage, { recursive: true, force: true });
-    });
     return { id, name: manifest.name, warnings, manifest };
   } finally {
     await rm(tmp, { recursive: true, force: true }).catch(() => {});
@@ -212,13 +248,16 @@ export async function installSkinPackage(zipPath, { source = 'user', skinsDir = 
 }
 
 // POST /api/skins/import-inline — 裸内容导入(免 zip):
-//   kind:'trio' = T2 三件套 {name, css?, js?, a11y?}(「保存为皮肤」通道;试穿在客户端不落盘)
-//   kind:'dsw'  = dsh theme-gallery JSON {name, dswJson}(--dsw-* → cgui token 尽力映射)
-// 校验全复用:T2 走 validateT2Script,dsw 走 convertDswVars(值全套文法闸);
-// 落盘与 zip 导入同构(skin.json + meta.json + 文件,id/响应形状一致)。
+//   kind:'trio'     = T2 三件套 {name, css?, js?, a11y?}(「保存为皮肤」通道;试穿在客户端不落盘)
+//   kind:'dsw'      = dsh theme-gallery JSON {name, dswJson}(--dsw-* → cgui token 尽力映射)
+//   kind:'skinjson' = cgui-skin/1 skin.json 文本 {name, skinJson}(r26-D10,契约 C-D10;
+//                     仅纯 vars/home.greeting 形态可通过,引用资产必 asset_missing)
+// 校验全复用:T2 走 validateT2Script,dsw 走 convertDswVars(值全套文法闸),skinjson 走
+// validateManifest(空 files 集);落盘与 zip 导入同构(skin.json + meta.json + 文件,
+// id/响应形状一致;同 slug 覆盖式去重 r26-D6)。
 router.post('/skins/import-inline', async (req, res) => {
   try {
-    const { kind, name, css, js, a11y, dswJson } = req.body || {};
+    const { kind, name, css, js, a11y, dswJson, skinJson } = req.body || {};
     const skinName = typeof name === 'string' ? name.trim().slice(0, 40) : '';
     if (!skinName) return res.status(422).json({ error: 'manifest_invalid', message: '皮肤名称必填(1-40 字符)' });
     const warnings = [];
@@ -252,19 +291,58 @@ router.post('/skins/import-inline', async (req, res) => {
       warnings.push(...w);
       if (!Object.keys(vars).length) return res.status(422).json({ error: 'empty_skin', message: '没有可映射的变量(不可映射项见 warnings)', warnings });
       manifest = { format: 'cgui-skin/1', name: skinName, tier: 1, shared: { vars } };
+    } else if (kind === 'skinjson') {
+      // r26-D10(契约 C-D10):粘贴 cgui-skin/1 skin.json 纯文本导入。skinJson 为文本
+      // 或已 parse 对象;以空 files 集走 validateManifest 全量校验——纯 vars/home.greeting
+      // 形态可通过,background/icons 引用资产必 asset_missing(无资产通道),
+      // preview/home.icon 引用按可选叶子 warning 丢弃(validateManifest 既有口径)。
+      let parsed = skinJson;
+      if (typeof parsed === 'string') {
+        try { parsed = JSON.parse(parsed); }
+        catch { return res.status(422).json({ error: 'manifest_invalid', message: 'skin.json 无法解析' }); }
+      }
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        // body 的 name 为权威(与 trio/dsw 同口径),覆盖进 parsed 再走全量校验
+        parsed = { ...parsed, name: skinName };
+      }
+      const vm = validateManifest(parsed, new Set());
+      if (!vm.ok) {
+        return res.status(HTTP_OF[vm.code] || 422).json({
+          error: vm.code,
+          message: ERROR_MESSAGES[vm.code] || vm.code,
+          ...(vm.details ? { details: vm.details } : {}),
+        });
+      }
+      // skinjson 通道只收 T1(契约:仅纯 vars/home.greeting 形态可通过)——
+      // tier:2 无包内文件等于空壳 T2,明确拒
+      if (vm.manifest.tier === 2) {
+        return res.status(422).json({ error: 'manifest_invalid', message: 'skinjson 通道仅支持 T1 皮肤(纯 vars/home.greeting 形态)', details: ['tier 2 请走三件套(trio)通道'] });
+      }
+      warnings.push(...vm.warnings);
+      manifest = vm.manifest;
     } else {
-      return res.status(400).json({ error: 'manifest_invalid', message: 'kind 必须是 trio 或 dsw' });
+      return res.status(400).json({ error: 'manifest_invalid', message: 'kind 必须是 trio、dsw 或 skinjson' });
     }
-    const id = skinIdFrom(skinName);
+    // r26-D6:与 zip 通道同口径——同 slug 复用既有 id 覆盖
+    const existingId = await findExistingSkinId(slugOf(skinName), SKINS_DIR);
+    const id = existingId || skinIdFrom(skinName);
     const stage = join(tmpdir(), `cgui-skin-stage-${randomUUID()}`);
-    await mkdir(stage, { recursive: true });
-    for (const [fname, text] of Object.entries(files)) await writeFile(join(stage, fname), text, 'utf8');
-    await writeFile(join(stage, 'skin.json'), JSON.stringify(manifest, null, 2));
-    await writeFile(join(stage, 'meta.json'), JSON.stringify({ source: 'user', importedAt: Date.now() }));
-    await mkdir(SKINS_DIR, { recursive: true });
-    const dest = join(SKINS_DIR, id);
-    if (!isPathInside(dest, SKINS_DIR)) throw new Error('internal');
-    await rename(stage, dest);
+    try {
+      await mkdir(stage, { recursive: true });
+      for (const [fname, text] of Object.entries(files)) await writeFile(join(stage, fname), text, 'utf8');
+      await writeFile(join(stage, 'skin.json'), JSON.stringify(manifest, null, 2));
+      await writeFile(join(stage, 'meta.json'), JSON.stringify({ source: 'user', importedAt: Date.now() }));
+      await mkdir(SKINS_DIR, { recursive: true });
+      const dest = join(SKINS_DIR, id);
+      if (!isPathInside(dest, SKINS_DIR)) throw new Error('internal');
+      if (existingId) await rm(dest, { recursive: true, force: true });
+      // r26-D4:与 zip 通道同走 moveStageDir(EXDEV 跨卷逐文件拷贝兜底)
+      await moveStageDir(stage, dest);
+    } catch (e) {
+      // r26-D4:stage 创建后任何失败清 stage(修前 rename 失败即泄漏 tmpdir)
+      await cleanupStage(stage);
+      throw e;
+    }
     res.status(201).json({ id, name: skinName, warnings, manifest });
   } catch (err) {
     console.error('[skins] import-inline failed:', err);
@@ -367,6 +445,10 @@ router.delete('/skins/:id', async (req, res) => {
   try { await stat(dir); } catch { return res.status(404).json({ error: 'not_found', message: ERROR_MESSAGES.not_found }); }
   try {
     await rm(dir, { recursive: true, force: true });
+    // r26-D7:删除成功广播(契约 C-D7 逐字 {type:'skins-changed', deletedId})——
+    // 多端场景另一端正在用该皮肤时静默回默认,不再等下次 reconcile 自愈。
+    // broadcast 自身逐客户端 catch,不抛;删成功即 200,广播失败不翻转结果。
+    broadcast({ type: 'skins-changed', deletedId: id });
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: 'internal', message: err.message });

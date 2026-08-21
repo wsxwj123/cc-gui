@@ -199,11 +199,13 @@ const hidden = new Set(['h-home', 'h-tmp', 'h-big', 'h-stale-1', 'h-stale-2']); 
   // r23-①:上一轮只改了【拉取】,渲染仍平铺"所有已加载的组" → 隐藏对平铺模式无效。
   assert.match(sidebar, /const visibleHashes = useMemo\(\(\) => new Set\(singleModeRows\.map/,
     't8: 可见集由懒拉行集派生(单一来源)');
-  assert.match(sidebar, /flattenSessionRows\(sessionsByProject, visibleHashes\)/,
+  // r26-I8 换锚:平铺渲染追加第三参 pinnedSessSet(置顶前置),可见集口径不变。
+  assert.match(sidebar, /flattenSessionRows\(sessionsByProject, visibleHashes, pinnedSessSet\)/,
     't8: 平铺渲染必须吃同一个可见集(只改拉取 = 只修了一半)');
   // r24:过滤生效后**新出现**的空态 —— 平铺 + 全部项目都被隐藏,原来只剩一句「暂无会话」。
   // 分组模式那边早有专门措辞(hiddenOnly),两处口径必须一致,否则又是一次"空列表骗人"。
-  assert.match(sidebar, /\{emptyHint\(hiddenOnly \? '所有项目都已隐藏' : '暂无会话'\)\}/,
+  // r26-E2 换锚:平铺空态追加第二参 flatAccessEntry(按项目错误态),措辞口径不变。
+  assert.match(sidebar, /\{emptyHint\(hiddenOnly \? '所有项目都已隐藏' : '暂无会话', flatAccessEntry\)\}/,
     't8: 平铺空态在"全被隐藏"时说实话(与分组模式同一措辞)');
   const app = readFileSync(new URL('../../client/src/App.jsx', import.meta.url), 'utf8');
   assert.match(app, /pickHomeProject\(\{ chosenHash, focusedProjectHash, projects: visibleProjects, selectedProject \}\)/,
@@ -213,7 +215,7 @@ const hidden = new Set(['h-home', 'h-tmp', 'h-big', 'h-stale-1', 'h-stale-2']); 
   // 声明顺序:focusedProjectHash 必须在 useMemo 之前,否则 TDZ 白屏(历史踩过)
   assert.ok(app.indexOf('const focusedProjectHash = useStore') < app.indexOf('visibleHomeProjects(projects, hiddenHashes'),
     't8: focusedProjectHash 声明在过滤 useMemo 之前(TDZ)');
-  assert.match(app, /setHiddenHashes\(readHiddenHashes\(d\)\)/, 't8: 载荷解析走共用纯函数');
+  assert.match(app, /applyHiddenProjects\(\[\.\.\.readHiddenHashes\(d\)\]\)/, 't8: 载荷解析走共用纯函数(r26-I2 起写入 store.hiddenProjects,WS 广播收敛)');
   const recentAt = app.indexOf('const recent = useMemo');
   assert.match(app.slice(recentAt, recentAt + 200), /visibleProjects/, 't8: 最近项目下拉同样取已过滤列表');
 }

@@ -59,8 +59,8 @@ const app = readFileSync(new URL('../../client/src/App.jsx', import.meta.url), '
 // 保留 queueId → 需求8(回滚重发不双入队)不受影响。除这两处外新增仍须重新论证。
 assert.equal((app.match(/enqueueMessage\(/g) || []).length, 2,
   'App.jsx 只允许两个 enqueueMessage 调用点:handleSend 入队门内 + HomeState 会话前入队(新增调用点必须重新论证需求8)');
-assert.match(app, /st\.enqueueMessage\(`draft-\$\{project\.hash\}`, \{ text: t, queuedAt: Date\.now\(\) \}\);\n    st\.setPaneSession\(tabIndex, buildHomeDraft/,
-  'Home 的入队必须是会话前形态:先入队、后挂 draft 窗格(顺序反了=可能撞上已存在的流)');
+assert.match(app, /st\.enqueueMessage\(queueKeyFor\(_homeDraft\), \{ text: t, queuedAt: Date\.now\(\) \}\);\n    st\.setPaneSession\(tabIndex, _homeDraft\)/,
+  'Home 的入队必须是会话前形态:先入队、后挂 draft 窗格(顺序反了=可能撞上已存在的流);r26-B5 起队列键走 queueKeyFor(draft) 带 draftId');
 assert.match(app, /if \(!reattachPid && !opts\.forceSend && \(streamingRef\.current \|\| backgroundPidRef\.current\)\) \{/,
   '入队门必须豁免 forceSend(回滚/重做重发绝不入队)');
 // 守卫2:重发通道恒 forceSend

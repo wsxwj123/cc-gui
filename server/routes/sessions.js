@@ -1,12 +1,12 @@
 import { Router } from 'express';
 import { readdir, stat, readFile, writeFile, rename, open, mkdir, unlink } from 'fs/promises';
-import { join, dirname, isAbsolute, resolve } from 'path';
+import { join, dirname, basename, isAbsolute, resolve } from 'path';
 import { isLocalReq } from '../services/auth.js';
 import { homedir, tmpdir } from 'os';
 import { randomUUID } from 'crypto';
 import { closePersistentForSession } from './chat.js';
 import { isRealUserQuestion } from './fork.js';
-import { accessDeniedHint, canOpenAccessSettings } from '../utils/access-hint.js';
+import { accessDeniedHint, canOpenAccessSettings, isAccessDenied } from '../utils/access-hint.js';
 import { removeSessionFromPrefs } from './prefs.js';
 
 // Guard against path traversal: projectHash / sessionId arrive from request
@@ -328,12 +328,33 @@ export function renderSegmentTranscript(parsedRecords, cap = 150 * 1024) {
   return text;
 }
 
+/**
+ * r26-E3(契约 C-E3):/projects 顶层目录被系统拒绝时的 403 响应体。
+ * 与 /projects/:hash/sessions 的 r17-4 契约同构;判据走 isAccessDenied
+ * (r26-E6:fs 结构化错误码为主、本地化文本为辅,不再漏日文/繁中 Windows)。
+ * @param {string} [platform] 仅供测试注入;默认 process.platform。
+ */
+export function projectsAccessDeniedBody(platform) {
+  return {
+    error: '无法读取项目目录（系统拒绝访问）',
+    code: 'no-disk-access',
+    hint: accessDeniedHint(platform) + '项目文件本身没有丢失。',
+    canOpenSettings: canOpenAccessSettings(platform),
+  };
+}
+
 // GET /api/projects — list all projects
 router.get('/projects', async (req, res) => {
   try {
     const projects = await listProjects();
     res.json(projects);
   } catch (err) {
+    // r26-E3:顶层 projects 目录被拒(未授完全磁盘访问/受控文件夹访问等)不能笼统 500
+    // 或静默空列表——用户会以为项目数据丢了。分类逻辑放路由层(listProjects 原样上抛,
+    // 见 session-reader.js listProjects 注释),与 r17-4 的会话级 403 同构。
+    if (isAccessDenied(err)) {
+      return res.status(403).json(projectsAccessDeniedBody());
+    }
     res.status(500).json({ error: err.message });
   }
 });
@@ -807,6 +828,8 @@ router.post('/sessions/:sessionId/strip-thinking', async (req, res) => {
  * 原子写 → 返回 report → 广播 file-change(前端转 cgui:sessions-changed)。
  * 会话有在跑进程 → 409(先停再修,防修完被旧进程写回分叉);idle 常驻保活按
  * trim/strip-thinking 先例 closePersistentForSession 自动关闭再修。
+ * r26-G1:写盘走 repairSessionFileGuarded 的 TOCTOU 双闸(写前复查在跑进程 +
+ * mtime/size 双判),窗口期内有新活动 → 409 请用户重试,原文件不动。
  */
 /**
  * GET /api/sessions/:sessionId/repair-official-compat — r11-⑤ 只读体检(dry-run)。
@@ -828,26 +851,81 @@ router.get('/sessions/:sessionId/repair-official-compat', async (req, res) => {
   }
 });
 
+/**
+ * r26-G1:repair 写盘的 TOCTOU 双闸。根因:入口 409 检查到 rename 落盘之间有窗口,
+ * 期间 CLI 追加的新行会被 repair 后的文件覆盖丢失。
+ *   闸一(写前复查):备份写完、原子改写前,再次确认会话无在跑进程(与入口 409 同判据,
+ *     由调用方注入 checkRunning);
+ *   闸二(mtime+size 双判):读盘时记下 stat 的 mtimeMs+size,原子改写前再 stat 原路径
+ *     ——变了说明窗口内有新写入 → 放弃 repair(.bak 留着、原文件逐字不动),报 stale。
+ *   不选应用层锁:CLI 直写文件不经过 JS 层锁,锁不住真正的写入方;mtime+size 双判才是
+ *   对文件系统事实的判定。残余窗口(mtime 秒级粒度下同秒同尺寸写入)理论存在,判为
+ *   可接受;409 语义让用户可重试。
+ * 抽出为可测函数:file 任意路径(单测 /tmp 自建 jsonl,严禁碰真实 ~/.claude/projects),
+ * checkRunning 注入。返回:
+ *   { status:'ok', report, changed } | { status:'running' } | { status:'stale', report }
+ */
+/**
+ * r26-G10:repair 备份 GC。每次 repair 产 `<file>.bak-<ts>`,只增不减;成功修复后
+ * 同会话的 .bak-<ts> 按名内时间戳降序保留最新 BAK_KEEP 份,其余 unlink(失败静默
+ * ——GC 失败不值得让修复本身报错)。只认 `<basename>.bak-<数字>` 形态:
+ * trim/strip-thinking 的 `<sid>.jsonl.bak`(无时间戳,有独立清理通道)与他会话的
+ * 备份一概不碰。
+ */
+export const BAK_KEEP = 5;
+export async function gcRepairBackups(file) {
+  try {
+    const dir = dirname(file);
+    const prefix = basename(file) + '.bak-';
+    const baks = (await readdir(dir))
+      .filter((n) => n.startsWith(prefix) && /^\d+$/.test(n.slice(prefix.length)))
+      .map((n) => ({ n, ts: Number(n.slice(prefix.length)) }))
+      .sort((a, b) => b.ts - a.ts);
+    for (const { n } of baks.slice(BAK_KEEP)) {
+      try { await unlink(join(dir, n)); } catch {}
+    }
+  } catch {}
+}
+
+export async function repairSessionFileGuarded(file, checkRunning) {
+  const raw = await readFile(file, 'utf-8');
+  const before = await stat(file);
+  const { lines, report } = repairOfficialCompat(raw.split('\n'));
+  const changed = !!(report.emptyText || report.emptyThinking || report.droppedLines || report.relinked);
+  if (!changed) return { status: 'ok', report, changed: false };
+  if (checkRunning()) return { status: 'running' };
+  await writeFile(`${file}.bak-${Date.now()}`, raw, 'utf-8'); // 备份必须成功才动原文件
+  const now = await stat(file);
+  if (now.mtimeMs !== before.mtimeMs || now.size !== before.size) {
+    return { status: 'stale', report }; // .bak 留着,原文件逐字未动
+  }
+  await writeJsonlAtomic(file, lines.join('\n'));
+  await gcRepairBackups(file); // r26-G10:修复成功后收敛历史 .bak-<ts>
+  return { status: 'ok', report, changed: true };
+}
+
 router.post('/sessions/:sessionId/repair-official-compat', async (req, res) => {
   try {
     const sid = req.params.sessionId;
     if (!safeId(sid)) return res.status(400).json({ error: 'invalid sessionId' });
-    const running = getActiveChatProcesses().some(
+    const isRunning = () => getActiveChatProcesses().some(
       (p) => p.sessionId === sid && p.exitCode === null && !p.idle,
     );
-    if (running) return res.status(409).json({ error: '会话正在运行,请先停止再清理' });
+    if (isRunning()) return res.status(409).json({ error: '会话正在运行,请先停止再清理' });
     await closePersistentForSession(sid); // idle 常驻:关掉再改写(同 trim/strip-thinking)
     const file = await findSessionFile(sid);
     if (!file) return res.status(404).json({ error: 'session jsonl not found' });
-    const raw = await readFile(file, 'utf-8');
-    const { lines, report } = repairOfficialCompat(raw.split('\n'));
-    const changed = report.emptyText || report.emptyThinking || report.droppedLines || report.relinked;
-    if (changed) {
-      await writeFile(`${file}.bak-${Date.now()}`, raw, 'utf-8'); // 备份必须成功才动原文件
-      await writeJsonlAtomic(file, lines.join('\n'));
-      broadcastSessionFileChange(file);
+    const outcome = await repairSessionFileGuarded(file, isRunning);
+    if (outcome.status === 'running') {
+      // 闸一:窗口期内进程起来了(用户重新发了消息)——与入口 409 同文案。
+      return res.status(409).json({ error: '会话正在运行,请先停止再清理' });
     }
-    res.json({ report, changed: !!changed });
+    if (outcome.status === 'stale') {
+      // 闸二:窗口期内文件被写过(CLI 落盘延迟)——409 让用户重试,原文件没动。
+      return res.status(409).json({ code: 'repair-stale', error: '会话刚有新活动，请重试' });
+    }
+    if (outcome.changed) broadcastSessionFileChange(file);
+    res.json({ report: outcome.report, changed: outcome.changed });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
