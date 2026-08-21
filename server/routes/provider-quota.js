@@ -20,8 +20,9 @@ const router = Router();
 const TIMEOUT_MS = 8000;
 const CACHE_MS = 60_000; // 与 subscription-usage.js 同款:60s 结果缓存 + 失败冷却
 
-// 最后一次成功的数据(按 provider id),失败时回放并标 degraded —— 不把陈旧数据伪装成新鲜。
-let cache = null; // { at, providerId, keyTag, data }
+// 最后一次成功的数据(按槽位身份 = providerId+baseURL 指纹,J8),失败时回放并标
+// degraded —— 不把陈旧数据伪装成新鲜。多槽:改去 B 端点再改回 A,A 的缓存还在。
+const cacheBySlot = new Map(); // slotKey → { at, keyTag, data }
 
 // r16-4b(判官建议1):缓存与冷却原先只按 providerId 判 —— 用户刚补上额度密钥保存,
 // 立即查却不打上游、仍回放旧的"查不到",而卡片轮询是 120s。这恰好是本功能最该生效的
@@ -32,14 +33,23 @@ function keyTagOf(provider) {
   if (!k) return 'none';
   return (provider?.quotaKey ? 'q:' : 'a:') + createHash('sha256').update(k).digest('hex').slice(0, 8);
 }
-// 失败冷却**必须带 provider id**:切了 provider 就是另一把 key、另一套端点,拿 A 的
-// 失败去冷却 B 会让刚切过去的 provider 一分钟查不出东西(还会挂上 A 的错误文案)。
-let cooldown = { providerId: null, until: 0, note: '' };
-// 探测命中的端点(按 provider id),避免每次都从头试候选。
+// r26-J8:缓存/冷却/memo 的身份键必须含 baseURL 指纹 —— 用户编辑端点后(同 providerId、
+// 同 key)原先仍吃旧端点的缓存/冷却。指纹只用于内存分键,不做安全判定,截断碰撞的代价
+// 只是多打一次额度请求。
+function urlTagOf(provider) {
+  return createHash('sha1').update(String(provider?.baseURL || '')).digest('hex').slice(0, 8);
+}
+function slotKeyOf(provider) {
+  return `${provider?.id}|${urlTagOf(provider)}`;
+}
+// 失败冷却**必须带槽位身份**(providerId+baseURL 指纹):切了 provider 或改了端点就是另一把
+// key、另一套端点,拿 A 的失败去冷却 B 会让刚切过去的 provider 一分钟查不出东西(还会挂上 A 的错误文案)。
+const cooldownBySlot = new Map(); // slotKey → { keyTag, until, reason, note }
+// 探测命中的端点(按槽位身份),避免每次都从头试候选。
 const endpointMemo = new Map();
 // 在飞的探测。订阅者有三处(用量面板的卡 + 顶栏红点 + provider 切换列表),chat-done 是
 // 同一刻广播的 —— 不合并就是同一秒对第三方发三份完全一样的请求。
-let inflight = null; // { providerId, promise }
+let inflight = null; // { slotKey, promise }
 
 // 当前 provider 是否官方:与 subscription-usage.js 同判据(settings.json 的
 // ANTHROPIC_BASE_URL 为空或指向 api.anthropic.com)。官方时本卡整卡不渲染。
@@ -103,13 +113,16 @@ router.get('/provider-quota', async (_req, res) => {
   const head = { official: false, providerId: provider.id, providerName: provider.name || provider.id };
   const now = Date.now();
   const keyTag = keyTagOf(provider);
-  const cacheHit = cache && cache.providerId === provider.id && cache.keyTag === keyTag;
-  if (cacheHit && now - cache.at < CACHE_MS) return res.json(cache.data);
+  const slotKey = slotKeyOf(provider); // r26-J8:身份 = providerId + baseURL 指纹
+  const cached = cacheBySlot.get(slotKey);
+  const cacheHit = cached && cached.keyTag === keyTag ? cached : null;
+  if (cacheHit && now - cacheHit.at < CACHE_MS) return res.json(cacheHit.data);
   // 失败冷却:全失败后 CACHE_MS 内不再打真接口("标记无额度接口,本次不再重试")。
   // 有旧数据回放 + degraded,没有就回上次原因。
-  if (cooldown.providerId === provider.id && cooldown.keyTag === keyTag && now < cooldown.until) {
-    if (cacheHit) return res.json({ ...cache.data, degraded: true, note: cooldown.note });
-    return res.json({ ...head, ok: false, reason: cooldown.reason || 'no-endpoint', note: cooldown.note });
+  const cd = cooldownBySlot.get(slotKey);
+  if (cd && cd.keyTag === keyTag && now < cd.until) {
+    if (cacheHit) return res.json({ ...cacheHit.data, degraded: true, note: cd.note });
+    return res.json({ ...head, ok: false, reason: cd.reason || 'no-endpoint', note: cd.note });
   }
 
   // SSRF 守卫。这里是全仓唯一"带存储 apiKey 打存储 baseURL"的新调用点 —— 写入端
@@ -118,49 +131,49 @@ router.get('/provider-quota', async (_req, res) => {
   try {
     await assertPublicBaseURL(provider.baseURL);
   } catch {
-    cooldown = { providerId: provider.id, keyTag, until: Date.now() + CACHE_MS, reason: 'blocked', note: reasonNote('blocked') };
-    return res.json({ ...head, ok: false, reason: 'blocked', note: cooldown.note });
+    cooldownBySlot.set(slotKey, { keyTag, until: Date.now() + CACHE_MS, reason: 'blocked', note: reasonNote('blocked') });
+    return res.json({ ...head, ok: false, reason: 'blocked', note: reasonNote('blocked') });
   }
 
   const all = pickCandidates(provider);
   // 命中过的端点提前:省掉每次重试前面的候选。
-  const hit = endpointMemo.get(provider.id);
+  const hit = endpointMemo.get(slotKey);
   const candidates = hit ? [...all.filter((c) => c.vendor === hit), ...all.filter((c) => c.vendor !== hit)] : all;
   if (!candidates.length) {
-    cooldown = { providerId: provider.id, keyTag, until: Date.now() + CACHE_MS, reason: 'no-endpoint', note: reasonNote('no-endpoint') };
-    return res.json({ ...head, ok: false, reason: 'no-endpoint', note: cooldown.note });
+    cooldownBySlot.set(slotKey, { keyTag, until: Date.now() + CACHE_MS, reason: 'no-endpoint', note: reasonNote('no-endpoint') });
+    return res.json({ ...head, ok: false, reason: 'no-endpoint', note: reasonNote('no-endpoint') });
   }
 
   // 合并的是**整段"探测→建响应→写缓存"**,不只是那次 fetch:并发的几份必须拿到同一个
   // data 对象,否则各写各的缓存(fetchedAt 差几毫秒),缓存回放跟首份对不上。
-  if (!inflight || inflight.providerId !== provider.id) {
+  if (!inflight || inflight.slotKey !== slotKey) {
     const promise = (async () => {
       // r16-4:额度查询用 quotaKey,没配才回落 apiKey。有几家的额度接口认的不是推理 key
       // (OpenRouter 账户余额要 management key、MiniMax 套餐额度可能要订阅密钥),
       // 拿推理 key 打过去只会 401 或读到空数据。
       const result = await probeQuota(candidates, makeFetcher(provider.quotaKey || provider.apiKey));
       if (!result.ok) {
-        endpointMemo.delete(provider.id);
-        cooldown = { providerId: provider.id, keyTag, until: Date.now() + CACHE_MS, reason: result.reason, note: reasonNote(result.reason) };
-        return { reason: result.reason }; // 直接带回失败原因:全局 cooldown 可能已被另一个 provider 的探测清空
+        endpointMemo.delete(slotKey);
+        cooldownBySlot.set(slotKey, { keyTag, until: Date.now() + CACHE_MS, reason: result.reason, note: reasonNote(result.reason) });
+        return { reason: result.reason }; // 直接带回失败原因:冷却可能已被另一个槽位的探测清掉
       }
-      endpointMemo.set(provider.id, result.endpoint);
+      endpointMemo.set(slotKey, result.endpoint);
       const data = {
         ...head, ok: true, kind: result.kind, currency: result.currency, items: result.items,
         low: computeLow(result, await readThresholds()), fetchedAt: Date.now(),
       };
-      cache = { at: Date.now(), providerId: provider.id, keyTag, data };
-      cooldown = { providerId: null, until: 0, note: '' }; // 成功即解冷却
+      cacheBySlot.set(slotKey, { at: Date.now(), keyTag, data });
+      cooldownBySlot.delete(slotKey); // 成功即解冷却
       return { data };
     })();
-    inflight = { providerId: provider.id, promise };
+    inflight = { slotKey, promise };
     promise.catch(() => {}).finally(() => { if (inflight?.promise === promise) inflight = null; });
   }
   const out = await inflight.promise;
   if (out.data) return res.json(out.data);
   // 探测失败:有旧数据就回放并标 degraded(不把陈旧数据伪装成新鲜),没有就回人话原因。
   const note = reasonNote(out.reason);
-  if (cacheHit) return res.json({ ...cache.data, degraded: true, note });
+  if (cacheHit) return res.json({ ...cacheHit.data, degraded: true, note });
   res.json({ ...head, ok: false, reason: out.reason, note });
 });
 
