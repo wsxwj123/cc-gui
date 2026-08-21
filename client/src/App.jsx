@@ -2155,6 +2155,11 @@ export function GitInitBanner({ cwd }) {
   // process.platform。此前这段文案在前端硬编码 macOS 的「完全磁盘访问」路径,Windows
   // 用户看到的是一个根本不存在的面板。
   const [access, setAccess] = useState(null); // { hint, canOpenSettings }
+  // r26-E1:git 探测的非拒访失败(dubious ownership / .git 损坏 / 磁盘满等)——
+  // 服务端回 { isRepo:null, gitError:true, error, detail }。既不是仓库态也不是
+  // 权限态:显示「探测失败 + 重新检测」,绝不挂初始化引导(误诊会把用户指去开
+  // 完全磁盘访问,或对着真仓库反复点初始化)。
+  const [gitErr, setGitErr] = useState(null); // { error, detail }
   // 探测 effect 里要读当前 status 又不能把它放进 deps(那会自触发),用 ref 取。
   const statusRef = useRef(null);
   const statusCwdRef = useRef(null);
@@ -2172,7 +2177,19 @@ export function GitInitBanner({ cwd }) {
     setStatus('unknown');
     fetch(`/api/git/status?cwd=${encodeURIComponent(cwd)}`)
       // 非 2xx(隧道/代理拦截、后端 400)不当探测结果用:下面的映射只接受真答案。
-      .then((r) => (r.ok ? r.json() : Promise.reject(new Error('HTTP ' + r.status))))
+      // r26-E4 例外:403 是「cwd 存在但系统拒访」(stat 撞 EACCES/EPERM),body 带
+      // { code:'no-disk-access', hint, canOpenSettings } —— 单独放行读 body,
+      // 映射成 permissionDenied 走 tcc 横幅;其他非 2xx 照旧 reject(不显示横幅)。
+      .then(async (r) => {
+        if (r.ok) return r.json();
+        if (r.status === 403) {
+          const d = await r.json().catch(() => ({}));
+          if (d?.code === 'no-disk-access') {
+            return { permissionDenied: true, hint: d.hint || '', canOpenSettings: !!d.canOpenSettings };
+          }
+        }
+        return Promise.reject(new Error('HTTP ' + r.status));
+      })
       // T3: permissionDenied = macOS 没给本 app 磁盘权限(git 在 Desktop 等目录
       // 被 TCC 拒)。此时既不是 repo 也不该引导 init —— 显示权限引导横幅。
       // isRepo:true 但零提交 → 'nocommit'(给「创建基线提交」按钮)。以服务端 hasCommit
@@ -2181,8 +2198,9 @@ export function GitInitBanner({ cwd }) {
       .then((s) => {
         setRepoRoot(typeof s?.root === 'string' ? s.root : null);
         setAccess(s?.permissionDenied ? { hint: s.hint || '', canOpenSettings: !!s.canOpenSettings } : null);
-        setStatus(s?.gitMissing ? 'nogit' : (s?.permissionDenied ? 'tcc' : (s?.isRepo === false ? 'norepo'
-          : ((s?.hasCommit === false || importGitState.get(cwd) === 'repoNoCommit') ? 'nocommit' : 'repo'))));
+        setGitErr(s?.gitError ? { error: s.error || '', detail: s.detail || '' } : null);
+        setStatus(s?.gitMissing ? 'nogit' : (s?.gitError ? 'giterror' : (s?.permissionDenied ? 'tcc' : (s?.isRepo === false ? 'norepo'
+          : ((s?.hasCommit === false || importGitState.get(cwd) === 'repoNoCommit') ? 'nocommit' : 'repo')))));
       })
       // fail-safe:探测失败(断网 / 手机隧道被拦 / 非 2xx)一律**不显示任何 git 横幅**。
       // 绝不冒称"不是 git 仓库"—— 那会让用户对着一个其实是仓库的目录反复点初始化。
@@ -2204,6 +2222,22 @@ export function GitInitBanner({ cwd }) {
             className="px-2 py-0.5 rounded bg-amber-100 hover:bg-amber-200 text-amber-900 text-[10px] font-medium shrink-0"
           >打开系统设置</button>
         )}
+        <button
+          onClick={() => setKick((k) => k + 1)}
+          className="px-2 py-0.5 rounded hover:bg-amber-100 text-amber-700 text-[10px] shrink-0"
+        >重新检测</button>
+      </div>
+    );
+  }
+
+  if (status === 'giterror') {
+    // r26-E1:探测失败横幅 —— 只给「重新检测」,不挂初始化引导、不指去开权限。
+    return (
+      <div className="bg-amber-50 border-b border-amber-200 px-4 py-2 text-[12px] font-body text-amber-900 flex items-center gap-2 flex-wrap">
+        <GitBranch size={13} className="text-amber-600 shrink-0" />
+        <span className="flex-1 min-w-[12rem] break-words">
+          git 状态探测失败{gitErr?.detail ? `：${gitErr.detail}` : (gitErr?.error ? `：${gitErr.error}` : '')}
+        </span>
         <button
           onClick={() => setKick((k) => k + 1)}
           className="px-2 py-0.5 rounded hover:bg-amber-100 text-amber-700 text-[10px] shrink-0"
