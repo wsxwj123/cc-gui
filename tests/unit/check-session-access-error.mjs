@@ -53,7 +53,7 @@ const stripComments = (t) => t.replace(/^\s*\/\/.*$/gm, '').replace(/\/\*[\s\S]*
   try {
     // 1) 面板槽(侧栏折叠树的数据源):403 必须同时落"错误态 + 空列表占位"。
     await st().fetchSessionsForPanel('hash-denied');
-    assert.equal(st().sessionsAccessError, HINT, '403 必须置错误态');
+    assert.equal(st().sessionsAccessErrorByProject['hash-denied']?.hint, HINT, '403 必须置错误态(r26-E2 起按 projectHash 隔离)');
     assert.notEqual(st().sessionsByProject['hash-denied'], undefined,
       '403 后该项目的会话列表不能还是 undefined —— 侧栏首判 rawSessions===undefined 直接转圈,'
       + '提示那一支永远不可达(比回 500 兜成 [] 还糟)');
@@ -67,41 +67,41 @@ const stripComments = (t) => t.replace(/^\s*\/\/.*$/gm, '').replace(/\/\*[\s\S]*
     // 3) 权限恢复后错误态必须清掉,列表照常写入。
     next = okList([{ sessionId: 's1', title: 'a' }]);
     await st().fetchSessionsForPanel('hash-denied');
-    assert.equal(st().sessionsAccessError, null, '恢复后必须清错误态(否则修好了还一直报错)');
+    assert.equal(st().sessionsAccessErrorByProject['hash-denied'], undefined, '恢复后必须清错误态(否则修好了还一直报错)');
     assert.equal(st().sessionsByProject['hash-denied'].length, 1, '恢复后正常写入会话');
 
     // 4) 同契约的第二个消费者(旧槽 fetchSessions,权限卡门禁/@面板仍在读)口径必须一致。
     next = DENIED;
     await st().fetchSessions('hash-denied');
-    assert.equal(st().sessionsAccessError, HINT, '旧槽同样要置错误态,不许静默吞成空列表');
+    assert.equal(st().sessionsAccessErrorByProject['hash-denied']?.hint, HINT, '旧槽同样要置错误态,不许静默吞成空列表');
     assert.deepEqual(st().sessions, [], '旧槽 403 时列表清空');
     assert.equal(st().listLoading, false, '旧槽 403 时不许把 loading 卡住');
     next = okList([{ sessionId: 's1' }]);
     await st().fetchSessions('hash-denied');
-    assert.equal(st().sessionsAccessError, null, '旧槽恢复后也要清错误态');
+    assert.equal(st().sessionsAccessErrorByProject['hash-denied'], undefined, '旧槽恢复后也要清错误态');
 
     // 5) r24:403 载荷里的 canOpenSettings 必须真的落进 store —— 侧栏「打开系统设置」
     //    按钮按它门控。原来这里只取 hint 把它丢了,后端明明回了前端也无从判断。
     //    两个消费者都要接:只接一个 = 换个入口进来按钮就凭空消失/凭空出现。
     next = denied(true);
     await st().fetchSessionsForPanel('hash-mac');
-    assert.equal(st().sessionsAccessCanOpenSettings, true, '面板槽:macOS(canOpenSettings:true)要存下来');
+    assert.equal(st().sessionsAccessErrorByProject['hash-mac']?.canOpenSettings, true, '面板槽:macOS(canOpenSettings:true)要存下来');
     next = denied(false);
     await st().fetchSessionsForPanel('hash-win');
-    assert.equal(st().sessionsAccessCanOpenSettings, false,
-      '面板槽:Windows/Linux(canOpenSettings:false)必须把 store 改回 false —— 不改就会拿上一次的 true 给出一个按了没反应的按钮');
+    assert.equal(st().sessionsAccessErrorByProject['hash-win']?.canOpenSettings, false,
+      '面板槽:Windows/Linux(canOpenSettings:false)必须存成 false —— 存 true 会给出一个按了没反应的按钮(r26-E2:按项目键隔离,不再存在"上一次的 true")');
     next = denied(true);
     await st().fetchSessions('hash-mac');
-    assert.equal(st().sessionsAccessCanOpenSettings, true, '旧槽:同一契约同一口径');
+    assert.equal(st().sessionsAccessErrorByProject['hash-mac']?.canOpenSettings, true, '旧槽:同一契约同一口径');
     next = denied(false);
     await st().fetchSessions('hash-win');
-    assert.equal(st().sessionsAccessCanOpenSettings, false, '旧槽:false 也要写回');
+    assert.equal(st().sessionsAccessErrorByProject['hash-win']?.canOpenSettings, false, '旧槽:false 也要写回');
     // 6) 权限修好后一并清掉(留着 true 会让下一次拒访前的空态出现悬空按钮)
     next = denied(true);
     await st().fetchSessions('hash-mac');
     next = okList([{ sessionId: 's1' }]);
     await st().fetchSessions('hash-mac');
-    assert.equal(st().sessionsAccessCanOpenSettings, false, '恢复正常后 canOpenSettings 跟着 hint 一起清');
+    assert.equal(st().sessionsAccessErrorByProject['hash-mac'], undefined, '恢复正常后 canOpenSettings 跟着 hint 一起清(整键删除)');
   } finally {
     globalThis.fetch = realFetch;
   }

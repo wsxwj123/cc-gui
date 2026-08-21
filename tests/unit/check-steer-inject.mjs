@@ -113,7 +113,7 @@ assert.equal('claimDraft' in restored.a[0], false, '中断 pending draft 必须�
 assert.equal('claimDraft' in restored.b[0], false, 'sendable 槽跨重启不得保留(孤儿即死锁)');
 assert.equal(restored.b[0].steerState, 'needs-review', '复位为人工复核态');
 assert.equal(restored.b[0].hidden, undefined, '必须重新可见');
-assert.equal(restored.b[0].text, 'draft 原文', '原文从 claimDraft.queueText 还原');
+assert.equal(restored.b[0].text, 'draft', 'r26-B2 起:无附件时 draft.text(用户编辑)优先于 queueText 还原');
 
 // claim 三阶段：原 item → 原 item + pending draft → hidden 空文本 sendable draft。
 useStore.setState({ messageQueue: {} });
