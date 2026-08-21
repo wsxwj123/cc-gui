@@ -13,7 +13,7 @@
 
 import http from 'node:http';
 import { isCountTokensRequest, estimateInputTokens } from '../utils/context-tokens.js';
-import { lookupModelCapabilities, EFFORT_IDS } from '../utils/model-capabilities.js';
+import { lookupModelCapabilities, lookupVisionCapability, EFFORT_IDS } from '../utils/model-capabilities.js';
 import { collectRealToolResultIds } from '../utils/tool-result-reconcile.js';
 
 // Fixed loopback port so the ANTHROPIC_BASE_URL written into settings.json
@@ -57,16 +57,32 @@ function systemToText(system) {
 }
 
 // CI-4:已知无 vision 的 OpenAI 兼容上游(对 image_url 报 400 "unknown variant 'image_url'")。
-// 按 baseURL 命中,后续可扩展。命中时把 image block 剥成文本占位,避免整个请求 400 失败。
+// r26-G6:主判据改模型名能力表(lookupVisionCapability)——按 baseURL 正则判视觉会被
+// 同名部署/网关聚合 URL 误判漏判(聚合站 URL 不含 deepseek 字样、或官方 URL 跑无视觉
+// 模型)。baseURL 正则降级为「模型名查无记录」时的兜底,维持旧行为不变。
+// 命中时把 image block 剥成文本占位,避免整个请求 400 失败。
 const NO_VISION_HOSTS = /deepseek/i;
 const OPENCODE_HOST = /opencode/i;
 const DEEPSEEK_MODEL = /deepseek/i;
+// 判定结果按 `${baseURL}|${model}` 缓存(同会话内不变;setOpenAIUpstream 换上游后
+// key 自然失效重算)。
+let noVisionCache = { key: null, val: false };
 export function upstreamNoVision() {
   if (!upstream?.baseURL) return false;
-  if (NO_VISION_HOSTS.test(upstream.baseURL)) return true;
-  // opencode 走 OpenAI 协议,baseURL 不含 deepseek;但选 deepseek 系模型时上游同样无 vision,
-  // 历史 image 块原样转发会 400。按「opencode baseURL + deepseek 系 model」补判。
-  return OPENCODE_HOST.test(upstream.baseURL) && DEEPSEEK_MODEL.test(upstream.model || '');
+  const key = `${upstream.baseURL}|${upstream.model || ''}`;
+  if (key === noVisionCache.key) return noVisionCache.val;
+  let val;
+  // 主判据:模型名能力表(true=有视觉/false=无视觉/null=查无记录)
+  const v = lookupVisionCapability(upstream.model);
+  if (v !== null) {
+    val = !v;
+  } else {
+    // 兜底:模型查无记录 → 旧 baseURL 正则(原样保留,含 opencode+deepseek 系补判)
+    val = NO_VISION_HOSTS.test(upstream.baseURL)
+      || (OPENCODE_HOST.test(upstream.baseURL) && DEEPSEEK_MODEL.test(upstream.model || ''));
+  }
+  noVisionCache = { key, val };
+  return val;
 }
 
 export function anthropicToOpenAIMessages(messages, system) {

@@ -121,6 +121,40 @@ function matchCatalog(id) {
   return null;
 }
 
+// ── 视觉能力目录(r26-G6)──────────────────────────────────────────────────
+// 用途:openai-proxy 的剥图判定(upstreamNoVision)主判据 —— 按 baseURL 正则判视觉
+// 能力会被同名部署/网关聚合 URL 误判漏判,模型名才是能力的真实载体。
+// 与思考目录同原则:只收有把握的形态,查无记录 → null(调用方回落旧 baseURL 正则,
+// 维持现状),拿不准的一律不进表(判错成 vision:true 会把 deepseek 这类无视觉上游
+// 的历史图片原样转发 → 400,方向性损失)。
+const VISION_CAPABILITY_CATALOG = [
+  // DeepSeek 官方 API 全系无图像输入(CI-4 实证:image_url 报 400 unknown variant)。
+  { re: /^deepseek/i, vision: false },
+  // 以下为多模态公开事实明确的家族(判错成 false 只是多剥一次图,有占位文本兜底)。
+  { re: /^claude-/i, vision: true },   // claude 3 起全系视觉
+  { re: /^gpt-4o/i, vision: true },
+  { re: /^gpt-4\.1/i, vision: true },
+  { re: /^gpt-5/i, vision: true },
+  { re: /^gemini/i, vision: true },
+  { re: /^qwen[\w.-]*-vl/i, vision: true }, // qwen 视觉系
+];
+
+/**
+ * 视觉能力查询:命中 → true/false;查无记录 → null(调用方按既有兜底处理,不猜)。
+ * 命名空间前缀与 lookupModelCapabilities 同口径:剥到最后一段重试一次。
+ */
+export function lookupVisionCapability(modelId) {
+  if (typeof modelId !== 'string' || !modelId.trim()) return null;
+  const id = modelId.trim();
+  const tail = id.includes('/') ? id.split('/').pop() : '';
+  for (const key of tail ? [id, tail] : [id]) {
+    for (const row of VISION_CAPABILITY_CATALOG) {
+      if (row.re.test(key)) return row.vision;
+    }
+  }
+  return null;
+}
+
 /**
  * 目录查询:命中 → { family, reasoning, efforts|null };查不到 → null。
  *
