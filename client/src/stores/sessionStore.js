@@ -2,7 +2,7 @@ import { create } from 'zustand';
 import { nextDockCode } from '../utils/artifactDock.js';
 import { mergeSyncedMap, syncableKey, pushLocalOnlyKeys, createInFlightCounter, shouldMarkMigrated } from '../utils/sessionSync.js';
 import { FONT_OPTIONS, readingFontCss } from '../utils/systemFonts.js';
-import { createQueueId, firstDrainableIndex, isSteerBarrier, reclaimClaimItem, reconcileSteered, stripSteerState } from '../utils/steerQueue.js';
+import { createQueueId, firstDrainableIndex, isSteerBarrier, reclaimClaimItem, reconcileSteered, stripSteerState, queueKeyFor, isDraftQueueKey, draftQueueProjectHash } from '../utils/steerQueue.js';
 import { isValidContextResponse, shouldReplaceContextCache } from '../utils/contextCache.js';
 import { reducePinned, initialExpandedProjects, toggleExpanded, mergeSessionList } from '../utils/projectPanel.js';
 
@@ -342,6 +342,41 @@ if (rawQueueSnapshot && typeof rawQueueSnapshot === 'object' && !Array.isArray(r
 }
 const recoveredQueueMap = stripSteerState(initialQueueMap);
 
+// ── r26-B1:孤儿 draft 队列启动回收 ─────────────────────────────
+// 「已入队、服务端进程还没起」的窗口内刷新 → 消息留在 draft-* 队列里;draft 窗格
+// 默认不还原(RESTORE_LAST_ON_BOOT=false)→ 队列成无 UI 孤儿;下次同项目新发消息时
+// drain 会把它当首条自动发出。这里【不静默删】(队列语义=用户点过发送的输入):
+// 无存活 draft 窗格对应的 draft-* 键整表移入 orphanDraftQueues(保留原文),
+// 从 messageQueue 摘除 → drain 状态式判据永远够不着它们。Home 挂载时按项目过滤
+// 展示「填入输入框 / 丢弃」。旧形态 `draft-<hash>` 键(B5 之前)无法安全归属到
+// 任何一个 draft,同批进孤儿表,不做猜测性归属。
+const ORPHAN_QUEUE_STORAGE_KEY = 'cgui-orphan-draft-queues';
+const liveDraftQueueKeysAtBoot = (() => {
+  const keys = new Set();
+  if (!RESTORE_LAST_ON_BOOT) return keys; // 默认形态:启动无任何存活 draft 窗格
+  try {
+    for (const p of readLs('cgui-pane-sessions', [])) {
+      if (p && !p.sessionId) keys.add(queueKeyFor(p));
+    }
+    const sel0 = readLs('cgui-selected-session', null);
+    if (sel0 && !sel0.sessionId) keys.add(queueKeyFor(sel0));
+  } catch {}
+  return keys;
+})();
+const initialOrphanDraftQueues = (() => {
+  // 上次会话留下的孤儿表(用户没处置完就关了页面)继续保留,与新扫出的合并。
+  const prev = readLs(ORPHAN_QUEUE_STORAGE_KEY, {});
+  const out = (prev && typeof prev === 'object' && !Array.isArray(prev)) ? { ...prev } : {};
+  for (const key of Object.keys(recoveredQueueMap)) {
+    if (!isDraftQueueKey(key) || liveDraftQueueKeysAtBoot.has(key)) continue;
+    out[key] = { projectHash: draftQueueProjectHash(key), items: recoveredQueueMap[key] };
+    delete recoveredQueueMap[key];
+  }
+  return out;
+})();
+const persistOrphanDraftQueues = (map) => writeLs(ORPHAN_QUEUE_STORAGE_KEY, map);
+persistOrphanDraftQueues(initialOrphanDraftQueues);
+
 const persistQueueSnapshot = (messageQueue, verify = false) => {
   if (typeof localStorage === 'undefined') return true;
   try {
@@ -524,6 +559,49 @@ export const useStore = create((set, get) => ({
   // 读回,每次变更由文件尾 subscribe 镜像写入。崩溃后恢复 = 消息留在队列里等重发,
   // 不自动发送(自动发可能撞正在进行的回合)。
   messageQueue: recoveredQueueMap,
+
+  // r26-B1:孤儿 draft 队列 { [queueKey]: { projectHash, items[] } }。
+  // 启动时从 messageQueue 里摘出的无主 draft 排队消息(见模块顶部回收段)。
+  // 保留数据等用户处置:Home 横幅按 projectHash 过滤展示,「填入输入框」逐条
+  // 摘除、「丢弃」整键移除 —— 两条路都从此表出清,绝不回流 messageQueue。
+  orphanDraftQueues: initialOrphanDraftQueues,
+  // 丢弃单个孤儿键(整键消息全丢)。persist 同步,刷新不复活。
+  discardOrphanDraftQueue: (queueKey) => set((s) => {
+    if (!s.orphanDraftQueues?.[queueKey]) return s;
+    const next = { ...s.orphanDraftQueues };
+    delete next[queueKey];
+    persistOrphanDraftQueues(next);
+    return { orphanDraftQueues: next };
+  }),
+  // 「全部丢弃」只清当前项目可见集(跨项目隔离:不把别的项目的孤儿一并抹掉)。
+  discardOrphanDraftQueuesFor: (projectHash) => set((s) => {
+    const cur = s.orphanDraftQueues || {};
+    const next = Object.fromEntries(Object.entries(cur)
+      .filter(([, v]) => v?.projectHash !== projectHash));
+    if (Object.keys(next).length === Object.keys(cur).length) return s;
+    persistOrphanDraftQueues(next);
+    return { orphanDraftQueues: next };
+  }),
+  // 「填入输入框」:从孤儿表摘出该条(返回它),键空即删。一次只填一条,
+  // 填入即从孤儿表摘除(防连点重复填入)。
+  takeOrphanDraftMessage: (queueKey, queueId) => {
+    let taken = null;
+    set((s) => {
+      const entry = s.orphanDraftQueues?.[queueKey];
+      if (!entry) return s;
+      const items = (entry.items || []).filter((it) => {
+        if (!taken && it?.queueId === queueId) { taken = it; return false; }
+        return true;
+      });
+      const next = { ...s.orphanDraftQueues };
+      if (items.length) next[queueKey] = { ...entry, items };
+      else delete next[queueKey];
+      if (!taken) return s;
+      persistOrphanDraftQueues(next);
+      return { orphanDraftQueues: next };
+    });
+    return taken;
+  },
 
   // Pending CLI permission requests waiting on the user. Each entry:
   //   { id, toolName, toolInput, sessionId, cwd, hookEvent, createdAt }

@@ -1770,6 +1770,22 @@ function HomeState({ tabIndex = 0 }) {
     [projects, hiddenHashes, focusedProjectHash]);
   // selectedProject 仍按原样传:用户显式打开的隐藏项目(侧栏窗格豁免同理)不该被踢掉。
   const project = pickHomeProject({ chosenHash, focusedProjectHash, projects: visibleProjects, selectedProject });
+  // r26-B1:孤儿 draft 排队消息回收横幅。只展示【当前选中项目】的孤儿(按条目
+  // projectHash 过滤 —— 别的项目的孤儿不渲染也不可操作,防把 A 项目的排队消息
+  // 填进 B 项目会话)。切换项目时过滤条件变,横幅内容自动跟随。
+  const orphanDraftQueues = useStore((s) => s.orphanDraftQueues);
+  const orphanEntries = useMemo(() => {
+    if (!project?.hash) return [];
+    return Object.entries(orphanDraftQueues || {})
+      .filter(([, v]) => v?.projectHash === project.hash)
+      .flatMap(([queueKey, v]) => (Array.isArray(v?.items) ? v.items : [])
+        .map((item, i) => ({ queueKey, item, rowKey: item?.queueId || `${queueKey}#${i}` })));
+  }, [orphanDraftQueues, project?.hash]);
+  const fillOrphan = (queueKey, item) => {
+    // 一次只填一条,填入即从孤儿表摘除(防连点重复填入)。
+    const taken = useStore.getState().takeOrphanDraftMessage(queueKey, item?.queueId);
+    if (taken?.text) setText(taken.text);
+  };
   const recent = useMemo(() => [...visibleProjects]
     .sort((a, b) => (b.lastActivity ? new Date(b.lastActivity).getTime() : -1)
       - (a.lastActivity ? new Date(a.lastActivity).getTime() : -1))
@@ -1815,6 +1831,32 @@ function HomeState({ tabIndex = 0 }) {
             <span key={i}>{p.text}</span>
           ))}
         </h2>
+        {/* r26-B1:上次没发出去的排队消息(孤儿 draft 队列)。填入=进当前 Home
+            输入框(本地 setText,不回流 messageQueue);丢弃=从孤儿表摘除。 */}
+        {orphanEntries.length > 0 && (
+          <div data-cgui="orphan-draft-banner" className="w-full mb-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-[12px] font-body text-amber-900">
+            <div className="flex items-center gap-2 mb-1">
+              <span className="flex-1 min-w-0">上次有 {orphanEntries.length} 条未发出的排队消息</span>
+              <button
+                onClick={() => useStore.getState().discardOrphanDraftQueuesFor(project?.hash)}
+                className="px-2 py-0.5 rounded hover:bg-amber-100 text-amber-700 text-[10px] shrink-0"
+              >全部丢弃</button>
+            </div>
+            {orphanEntries.map(({ queueKey, item, rowKey }) => (
+              <div key={rowKey} className="flex items-center gap-2 py-0.5 border-t border-amber-200/50 first:border-t-0">
+                <span className="flex-1 min-w-0 truncate" title={item?.text || ''}>{item?.text || '（空消息）'}</span>
+                <button
+                  onClick={() => fillOrphan(queueKey, item)}
+                  className="px-2 py-0.5 rounded bg-amber-100 hover:bg-amber-200 text-amber-900 text-[10px] font-medium shrink-0"
+                >填入输入框</button>
+                <button
+                  onClick={() => useStore.getState().takeOrphanDraftMessage(queueKey, item?.queueId)}
+                  className="px-2 py-0.5 rounded hover:bg-amber-100 text-amber-700 text-[10px] shrink-0"
+                >丢弃</button>
+              </div>
+            ))}
+          </div>
+        )}
         {/* r11-p3-1:聚焦零装饰(用户拍板)——无 focus-within 变色,聚焦与否外观一致。 */}
         <div className="w-full rounded-lg border border-canvas-deep/70 bg-canvas-warm/60">
           <textarea
