@@ -582,8 +582,6 @@ router.get('/claude-version-check', async (req, res) => {
     updateCommand: updateCmdFor(resolveUpdateMethod(readUpdateChannel(), method), claudePath),
     updateChannel: effectiveChannel(readUpdateChannel(), method),
     hasUpdate: latest ? semverGt(latest, currentVersion) : false,
-    // R8-1(只增字段):npm 安装的更新已不再走 npm,前端可展示原因。
-    ...(method === 'npm' ? { updateNote: 'npm 渠道已被官方降级为原生安装器引导壳,更新经 claude update 走原生渠道。' } : {}),
   });
 });
 
