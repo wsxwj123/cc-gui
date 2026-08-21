@@ -4,7 +4,7 @@ import { mergeSyncedMap, syncableKey, pushLocalOnlyKeys, createInFlightCounter, 
 import { FONT_OPTIONS, readingFontCss } from '../utils/systemFonts.js';
 import { createQueueId, firstDrainableIndex, isSteerBarrier, reclaimClaimItem, reconcileSteered, stripSteerState, queueKeyFor, isDraftQueueKey, draftQueueProjectHash } from '../utils/steerQueue.js';
 import { isValidContextResponse, shouldReplaceContextCache } from '../utils/contextCache.js';
-import { reducePinned, initialExpandedProjects, toggleExpanded, mergeSessionList } from '../utils/projectPanel.js';
+import { reducePinned, initialExpandedProjects, toggleExpanded, mergeSessionList, mergeHiddenOrder } from '../utils/projectPanel.js';
 
 // Re-exported so existing importers (App.jsx) keep working; the list and its
 // css-resolution logic now live in utils/systemFonts.js alongside the enumeration.
@@ -1200,10 +1200,20 @@ export const useStore = create((set, get) => ({
     if (v && typeof v === 'object') set({ sidebarView: { groupMode: v.groupMode || 'project', sortMode: v.sortMode || 'recent', projectOrder: Array.isArray(v.projectOrder) ? v.projectOrder : [] } });
   },
   putSidebarView: async (patch) => {
-    set((s) => ({ sidebarView: { ...s.sidebarView, ...patch } })); // 乐观,回包/广播校准
+    // r26-I1:含 projectOrder 的写入先并回再落库 —— 调用方(拖拽松手)给的 preview 只含
+    // 可见非置顶 hash,整体覆盖会把「不可见但在旧 order 里」的项目(隐藏/被过滤)排位
+    // 静默抹掉。并回是唯一真相源,集中在 store 这层:组件层不再自行并回(防双重并回),
+    // 任何未来的 projectOrder 写入点也自动受益。mergeHiddenOrder 纯函数按旧 order 的
+    // 原相对位次插回 missing(不读 hiddenProjects——旧 order 里缺谁补谁,与
+    // sortProjectRows「已删项目读时自然出列」的存量语义一致)。其它字段写入不受影响。
+    let out = patch;
+    if (Array.isArray(patch?.projectOrder)) {
+      out = { ...patch, projectOrder: mergeHiddenOrder(patch.projectOrder, get().sidebarView?.projectOrder) };
+    }
+    set((s) => ({ sidebarView: { ...s.sidebarView, ...out } })); // 乐观,回包/广播校准
     try {
       const r = await fetch('/api/prefs/sidebar-view', {
-        method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(patch),
+        method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(out),
       });
       const d = await r.json();
       if (r.ok) set({ sidebarView: { groupMode: d.groupMode, sortMode: d.sortMode, projectOrder: d.projectOrder } });

@@ -151,24 +151,49 @@ export function sortProjectRows(rows, { sortMode = 'recent', order = [], pinned 
   return [...pin, ...rest];
 }
 
+// r26-I4:平铺原来每条 `{ ...s, projectHash }` 现铺 —— watcher 每 600ms 刷新一次,
+// 每个会话对象都换新身份,下游 SessionItem 的 memo 全失效(整列表重渲)。这里用
+// WeakMap<原对象, 包装对象> 缓存:原对象引用没变就复用同一包装身份;mergeSessionList
+// 那层本来就保原对象身份(内容没变复用旧引用),两层接力后整条链身份稳定。
+// 注:一个会话对象只属于一个项目,WeakMap 键不带 projectHash 不会串。
+const flatWrapCache = new WeakMap();
+const wrapFlatRow = (s, projectHash) => {
+  let w = flatWrapCache.get(s);
+  if (!w || w.projectHash !== projectHash) {
+    w = { ...s, projectHash };
+    flatWrapCache.set(s, w);
+  }
+  return w;
+};
+
 /**
  * 单列表平铺(纯函数):全部已加载项目的会话跨项目合并,按 lastActivity 降序;
  * 每条带 projectHash(点击选中时反查项目)。归档会话不进平铺(与折叠树默认视图一致)。
  * r23-①:visibleHashes(可选,Set/数组)给定时只平铺可见项目的会话 —— sessionsByProject
  * 是"曾经加载过"的缓存,隐藏项目不会被清掉(toggleHidden 不清缓存、expandedProjects 还
  * 持久化在 localStorage、600ms watcher 继续刷),不过滤就等于隐藏对平铺模式无效。
+ * r26-I8:pinned(可选,Set/数组 sessionId)给定时置顶会话前置 —— 与分组模式
+ * composePanelSessions 同语义;pinned 间仍按时间降序。不传 = 纯时间序(旧语义不变)。
  */
-export function flattenSessionRows(sessionsByProject, visibleHashes) {
+export function flattenSessionRows(sessionsByProject, visibleHashes, pinned) {
   const visible = visibleHashes instanceof Set ? visibleHashes
     : (Array.isArray(visibleHashes) ? new Set(visibleHashes) : null); // 不传 = 不过滤(旧调用方语义不变)
+  const pinnedSet = pinned == null ? null : (pinned instanceof Set ? pinned : new Set(pinned));
   const out = [];
   for (const [projectHash, sessions] of Object.entries(sessionsByProject || {})) {
     if (visible && !visible.has(projectHash)) continue;
     for (const s of sessions || []) {
-      if (s && !s.archived) out.push({ ...s, projectHash });
+      if (s && !s.archived) out.push(wrapFlatRow(s, projectHash));
     }
   }
-  out.sort((a, b) => (b.lastActivity ? new Date(b.lastActivity).getTime() : -1) - (a.lastActivity ? new Date(a.lastActivity).getTime() : -1));
+  const tsOfRow = (r) => (r.lastActivity ? new Date(r.lastActivity).getTime() : -1);
+  out.sort((a, b) => {
+    if (pinnedSet) {
+      const pin = (pinnedSet.has(b.sessionId) ? 1 : 0) - (pinnedSet.has(a.sessionId) ? 1 : 0);
+      if (pin) return pin; // r26-I8:置顶段恒最前
+    }
+    return tsOfRow(b) - tsOfRow(a);
+  });
   return out;
 }
 
@@ -202,6 +227,34 @@ export function reorderManual(hashes, fromHash, toIdx) {
   return arr;
 }
 
+/**
+ * r26-I1:拖拽松手 PUT 前,把「当前不可见(隐藏/被过滤)但在旧 order 里」的 hash
+ * 按原相对位次并回 preview(纯函数)。拖拽 preview 只含可见非置顶 hash,直接整体
+ * 覆盖 PUT 会把隐藏项目的排位静默抹掉(取消隐藏后掉到队尾)。
+ *  - preview:本次拖拽后的可见 hash 序列(用户的新意图,相对序原样保留);
+ *  - oldOrder:现存全量 order;
+ *  - 每个 missing 插回锚点 = oldOrder 中它前方最近的、已在 result 中的元素
+ *    (missing 按 oldOrder 顺序处理,同段后续 missing 的锚可以是刚插入的 missing
+ *    自身 → 旧相对序自然保持);无锚(全部前驱都不可见)插头部,headPtr 指针保序;
+ *  - preview 已含的 hash(如刚取消隐藏被拖动的项目)不属于 missing,不重复插入。
+ */
+export function mergeHiddenOrder(preview, oldOrder) {
+  const result = [...(Array.isArray(preview) ? preview : [])];
+  const old = Array.isArray(oldOrder) ? oldOrder : [];
+  const survivors = new Set(result);
+  const missing = old.filter((h) => !survivors.has(h));
+  let headPtr = 0; // 无锚 missing 的头部插入指针(保持 missing 间相对序)
+  for (const h of missing) {
+    let anchor = null;
+    for (let j = old.indexOf(h) - 1; j >= 0; j--) {
+      if (result.includes(old[j])) { anchor = old[j]; break; }
+    }
+    if (anchor !== null) result.splice(result.indexOf(anchor) + 1, 0, h);
+    else { result.splice(headPtr, 0, h); headPtr++; }
+  }
+  return result;
+}
+
 /** 搜索时带出"组内有标题命中"的项目行:按已加载组预计算 hash 集。 */
 export function sessionQueryMatchHashes({ sessionsByProject = {}, query = '', titleOf = () => '' } = {}) {
   const q = String(query || '').toLowerCase();
@@ -213,12 +266,30 @@ export function sessionQueryMatchHashes({ sessionsByProject = {}, query = '', ti
   return out;
 }
 
+/**
+ * r26-I7②:watcher(600ms)刷新目标 = 展开组去掉 hidden(纯函数)。隐藏项目的展开组
+ * 留在展开集里(本地持久化,取消隐藏即复原),但不该再随 watcher 每 600ms 白发请求
+ * —— 且隐藏组的拉取错误还会污染按项目的错误态。hidden 可为 Set/数组/undefined。
+ */
+export function watcherRefreshTargets(expanded, hidden) {
+  const hiddenSet = hidden instanceof Set ? hidden : new Set(hidden || []);
+  return (Array.isArray(expanded) ? expanded : []).filter((h) => !hiddenSet.has(h));
+}
+
+/** r26-I10:撤销删除恢复窗格时把目标下标夹到当前可见 pane 范围内(纯函数)。 */
+export function clampPaneIndex(i, paneCount) {
+  const max = Math.max(0, (paneCount | 0 || 1) - 1);
+  return Math.max(0, Math.min(max, i | 0));
+}
+
 // ── r13-p2-1:列表身份保持(卡顿根治) ──────────────────────────────
 // watcher 每 600ms 刷新全部展开组;若回包无论内容变没变都换数组/对象身份,侧栏
 // 整棵树跟着重渲(流式期间持续发生)= 按钮迟滞与点击丢失的根因。这里逐条比对
 // 侧栏行【实际消费的字段】,未变的条目复用旧对象身份,整组零变化直接返回旧数组
 // (调用方据此跳过 set,订阅零通知)。
-const SESSION_ROW_FIELDS = ['sessionId', 'firstPrompt', 'archived', 'messageCount', 'model', 'lastActivity', 'projectPath', 'projectHash'];
+// r26-I9:字段清单补 customTitle/aiTitle —— 标题改了但其它字段全同时,旧清单判「行相等」
+// 复用旧对象身份,新标题永远渲染不出来(改标题不重渲)。
+const SESSION_ROW_FIELDS = ['sessionId', 'firstPrompt', 'archived', 'messageCount', 'model', 'lastActivity', 'projectPath', 'projectHash', 'customTitle', 'aiTitle'];
 
 export function sameSessionRow(a, b) {
   if (a === b) return true;

@@ -13,7 +13,7 @@ import {
 import { useStore } from '../stores/sessionStore.js';
 import { confirmDialog } from '../utils/confirmDialog.jsx';
 import { resolveSessionTitle } from '../utils/sessionTitle.js';
-import { composePanelProjects, composePanelSessions, sessionQueryMatchHashes, sortProjectRows, flattenSessionRows, singleModeVisibleProjects, sessionEmptyHint, showAccessSettingsButton, reorderManual } from '../utils/projectPanel.js';
+import { composePanelProjects, composePanelSessions, sessionQueryMatchHashes, sortProjectRows, flattenSessionRows, singleModeVisibleProjects, sessionEmptyHint, showAccessSettingsButton, reorderManual, watcherRefreshTargets, clampPaneIndex, ACCESS_DENIED_HINT } from '../utils/projectPanel.js';
 import { pickDirectory, isTauri } from '../utils/pickDirectory.js';
 import { completionTracker } from '../utils/sessionDots.js';
 import { AnchoredPopover } from './SessionSelectors.jsx';
@@ -148,9 +148,15 @@ function SidebarViewMenu() {
 export function UnifiedSidebar() {
   // r17-4:磁盘访问被系统拒绝时,空列表要说实话 —— 静默的「暂无会话」和真的没有
   // 会话长得一模一样,用户实测的第一反应是「数据被删了」。
-  const accessError = useStore((st) => st.sessionsAccessError);
-  // r24:同一个 403 载荷里的平台位 —— 决定拒访提示后面给不给「打开系统设置」按钮。
-  const accessCanOpenSettings = useStore((st) => st.sessionsAccessCanOpenSettings);
+  // r26-E2(C-E2 契约,PKG-2 产出):错误态按 projectHash 存 ——
+  // sessionsAccessErrorByProject: { [hash]: { hint, canOpenSettings } };
+  // 缺省 undefined = 正常。旧全局单值(sessionsAccessError)已退役:A 项目拒访会把
+  // B 项目空态染红,B 任何一次成功又把 A 的错误清掉(600ms watcher 抖动)。
+  const errByProject = useStore((st) => st.sessionsAccessErrorByProject) || EMPTY_OBJECT;
+  // r26-E3(C-E3 延伸契约,PKG-2 产出):顶层 projects 目录整体拒访(如 ~/.claude 没
+  // 开磁盘权限)时 fetchProjects 置 projectsAccessError 单值({hint, canOpenSettings}),
+  // 项目空态渲染点只读它,不自拉。undefined = 正常。
+  const projectsAccessError = useStore((st) => st.projectsAccessError);
   // ── store(旧槽语义零改动;新面板数据走 sessionsByProject)─────────────────
   const projects = useStore((s) => s.projects);
   const fetchProjects = useStore((s) => s.fetchProjects);
@@ -181,6 +187,10 @@ export function UnifiedSidebar() {
 
   // ── 挂载拉取:项目列表 / 置顶(reducer 入位,WS 广播后续收敛)/ 隐藏列表 ─────
   const [hidden, setHidden] = useState(() => new Set());
+  // r26-I7②:watcher(下方 effect,[] 依赖)要读最新 hidden —— ref 镜像组件本地集;
+  // 契约 C-I2 落地后(store.hiddenProjects,PKG-2 产出)以 store 为准,本地集兜底。
+  const hiddenRef = useRef(hidden);
+  hiddenRef.current = hidden;
   useEffect(() => { fetchProjects(); }, []);
   useEffect(() => {
     fetch('/api/prefs/pinned').then((r) => r.json())
@@ -281,7 +291,8 @@ export function UnifiedSidebar() {
       timer = setTimeout(() => {
         const st = useStore.getState();
         // r13-①:全部展开组保鲜(原为单一钻入组)。
-        for (const h of st.expandedProjects) st.fetchSessionsForPanel(h);
+        // r26-I7②:隐藏项目的展开组跳过(不白发请求、其错误不污染按项目错误态)。
+        for (const h of watcherRefreshTargets(st.expandedProjects, st.hiddenProjects || hiddenRef.current)) st.fetchSessionsForPanel(h);
         // 旧槽保鲜:selectedProject 的 sessions 单值槽仍被权限卡门禁/@面板消费。
         if (st.selectedProject?.hash) st.fetchSessions(st.selectedProject.hash, { silent: true });
       }, 600);
@@ -324,6 +335,9 @@ export function UnifiedSidebar() {
   const [drag, setDrag] = useState(null); // { hash, preview: string[] } | null(拖拽中本地预览,松手才 PUT)
   useEffect(() => {
     if (!drag) return;
+    // r26-I1:preview 只含可见非置顶 hash —— 隐藏项目的排位并回已下沉到 store 层
+    // (putSidebarView 收到 projectOrder 写入时统一过 mergeHiddenOrder,唯一真相源),
+    // 组件层直传 preview,不自行并回(防双重并回)。
     const up = () => { useStore.getState().putSidebarView({ projectOrder: drag.preview }); setDrag(null); };
     window.addEventListener('pointerup', up);
     return () => window.removeEventListener('pointerup', up);
@@ -535,9 +549,13 @@ export function UnifiedSidebar() {
     clearInterval(p.timer);
     setPendingDeletes((arr) => arr.filter((x) => x.session.sessionId !== sid));
     const st = useStore.getState();
+    // r26-I10:删除时记下的 pane 下标在撤销时可能已不可见(期间关了窗格,paneCount
+    // 变小)——setPaneSession 只夹到硬上限 5,不夹 paneCount,会写进不可见槽(孤儿
+    // pane:会话回来了但用户看不见)。夹到 paneCount-1。
     p.panes.forEach((i) => {
-      st.setPaneSession(i, p.session);
-      st.fetchMessages(p.session.sessionId, p.session.projectHash, { tab: i, silent: true });
+      const idx = clampPaneIndex(i, st.paneCount);
+      st.setPaneSession(idx, p.session);
+      st.fetchMessages(p.session.sessionId, p.session.projectHash, { tab: idx, silent: true });
     });
   };
   // 收起项目组时立即落实该组的待删(撤销条随组收起消失,不落实=看着删了其实没删)。
@@ -547,8 +565,15 @@ export function UnifiedSidebar() {
     setPendingDeletes((arr) => arr.filter((p) => p.session.projectHash !== projectHash));
     mine.forEach((p) => { clearInterval(p.timer); reallyDelete(p.session); });
   };
-  // beforeunload / 卸载兜底:剩余 pending 全部落实(keepalive fetch,进程随后端退出的
-  // 场景由服务端收口)。两处共用同一 flush,先摘列表保证幂等。
+  // beforeunload / 卸载兜底:剩余 pending 全部落实(keepalive fetch)。两处共用同一
+  // flush,先摘列表保证幂等。
+  // r26-I5:原来 DELETE 排在 stopSessionProcs(...).then 之后 —— 没有 keepalive 的
+  // stopSessionProcs 在页面卸载瞬间被浏览器掐死,then 永不执行,DELETE 根本发不出
+  // (会话没删掉,下次启动又冒出来)。前置核实结论:服务端 DELETE 会话路由自带兜底
+  // (sessions.js 删除分支在 unlink 前 await closePersistentForSession 停掉该会话全部
+  // 在跑/常驻进程),所以卸载路径跳过客户端停进程,直接发 keepalive DELETE ——
+  // keepalive 请求由浏览器代理完成,不依赖 JS 存活。正常路径(reallyDelete)不受影响,
+  // 那里先停进程再删仍是对的(删除响应快、撤销窗内进程即停)。
   const flushAllPending = () => {
     const all = pendingDeletesRef.current;
     if (!all.length) return;
@@ -556,10 +581,10 @@ export function UnifiedSidebar() {
     all.forEach((p) => {
       clearInterval(p.timer);
       useStore.getState().clearQueue?.(p.session.sessionId);
-      stopSessionProcs(p.session.sessionId).then(() => fetch(
+      fetch(
         `/api/sessions/${p.session.sessionId}?projectHash=${encodeURIComponent(p.session.projectHash)}`,
         { method: 'DELETE', keepalive: true },
-      )).catch(() => {});
+      ).catch(() => {});
     });
   };
   useEffect(() => {
@@ -604,20 +629,31 @@ export function UnifiedSidebar() {
     return b;
   }, []);
   const flatSessions = useMemo(() => (view.groupMode === 'single'
-    ? flattenSessionRows(sessionsByProject, visibleHashes)
+    ? flattenSessionRows(sessionsByProject, visibleHashes, pinnedSessSet)
       .filter((s) => !pendingIds.has(s.sessionId) && (!q || String(titleOf(s) || '').toLowerCase().includes(q)))
-    : EMPTY_ARRAY), [view.groupMode, sessionsByProject, visibleHashes, pendingIds, q, titleOf]);
+    : EMPTY_ARRAY), [view.groupMode, sessionsByProject, visibleHashes, pinnedSessSet, pendingIds, q, titleOf]);
   // r23-③:空态文案两处共用(平铺此前硬编「暂无会话」,把「系统拒绝访问」伪装成没有会话)。
   // r24:拒访那一支补上真按钮 —— 原文案写着「点此查看处理办法」却是个纯 span,点了没反应。
   // 按钮只在真有面板可跳的平台出现(showAccessSettingsButton,目前只有 macOS);
   // 样式沿用 App.jsx git 横幅 tcc 分支那两枚小按钮,不另起一套。
-  const emptyHint = (fallback) => {
-    const text = sessionEmptyHint({ accessError, query: q, fallback });
-    if (!accessError) return text;
+  // r26-E2:entry 按「当前渲染组的 projectHash」从 sessionsAccessErrorByProject 取
+  // ({hint, canOpenSettings} | undefined)—— A 项目的拒访不再染红 B 项目的空态。
+  // 平铺空态没有单一项目语境:取可见项目里第一条拒访错误(存在即说明「暂无会话」
+  // 可能是假象,与 r23-③「绝不能伪装成没有会话」同根因)。
+  const flatAccessEntry = useMemo(() => {
+    for (const p of singleModeRows) {
+      const e = errByProject[p.hash];
+      if (e) return e;
+    }
+    return undefined;
+  }, [singleModeRows, errByProject]);
+  const emptyHint = (fallback, entry) => {
+    const text = sessionEmptyHint({ accessError: entry?.hint, query: q, fallback });
+    if (!entry) return text;
     return (
-      <span className="text-amber-700" title={accessError}>
+      <span className="text-amber-700" title={entry.hint}>
         {text}
-        {showAccessSettingsButton({ accessError, canOpenSettings: accessCanOpenSettings }) && (
+        {showAccessSettingsButton({ accessError: entry.hint, canOpenSettings: entry.canOpenSettings }) && (
           <button
             onClick={() => { fetch('/api/system/open-fda-settings', { method: 'POST' }).catch(() => {}); }}
             className="ml-1.5 px-2 py-0.5 rounded bg-amber-100 hover:bg-amber-200 text-amber-900 text-[10px] font-medium align-middle"
@@ -754,8 +790,15 @@ export function UnifiedSidebar() {
       const list = useStore.getState().sessions;
       const target = list.find((s) => s.sessionId === hit.sessionId);
       if (target) {
-        useStore.getState().setSelectedSession(target);
-        useStore.getState().fetchMessages(target.sessionId, target.projectHash);
+        // r26-I6:多窗格下不许恒抢 pane 0 —— 与 handleSelect 同款写聚焦窗格。
+        const st2 = useStore.getState();
+        if (st2.splitMode) {
+          st2.setActiveTabSession(target);
+          st2.fetchMessages(target.sessionId, target.projectHash, { tab: st2.activeTabIndex });
+        } else {
+          st2.setSelectedSession(target);
+          st2.fetchMessages(target.sessionId, target.projectHash);
+        }
       }
     }
     setSearchQuery('');
@@ -1069,7 +1112,7 @@ export function UnifiedSidebar() {
         {view.groupMode === 'single' && flatSessions.length === 0 && (
           // r24:平铺模式下"全部项目都被隐藏"是过滤生效后**新出现**的空态。兜底若还写
           // 「暂无会话」,又是一次"空列表骗人"(分组模式那边早有专门措辞,见下方 hiddenOnly)。
-          <div className="px-3 py-2.5 text-[11px] text-ink-faint font-body">{emptyHint(hiddenOnly ? '所有项目都已隐藏' : '暂无会话')}</div>
+          <div className="px-3 py-2.5 text-[11px] text-ink-faint font-body">{emptyHint(hiddenOnly ? '所有项目都已隐藏' : '暂无会话', flatAccessEntry)}</div>
         )}
         {view.groupMode !== 'single' && sortedRows.map((project) => {
           const hash = project.hash;
@@ -1162,7 +1205,7 @@ export function UnifiedSidebar() {
                     </div>
                   ) : groupSessions.length === 0 ? (
                     <div className="px-3 py-2.5 text-[11px] text-ink-faint font-body">
-                      {emptyHint(showArchived ? '没有已归档的会话' : '暂无会话,点行尾「+」新建')}
+                      {emptyHint(showArchived ? '没有已归档的会话' : '暂无会话,点行尾「+」新建', errByProject[hash])}
                     </div>
                   ) : groupSessions.map((session) => (
                     <SessionItem
@@ -1182,9 +1225,26 @@ export function UnifiedSidebar() {
         })}
         {view.groupMode !== 'single' && rows.length === 0 && (
           <div className="px-4 py-8 text-center">
-            <p className="text-xs text-ink-faint font-body">
-              {q ? '没有匹配的项目' : hiddenOnly ? '所有项目都已隐藏' : '没有找到项目'}
-            </p>
+            {/* r26-E3(C-E3 延伸契约):顶层 projects 目录整体被拒访(EACCES/EPERM)时,
+                「没有找到项目」同样是伪装 —— 显示真实原因,与组内会话空态同一套提示
+                (琥珀色 hint + macOS「打开系统设置」按钮)。store.projectsAccessError
+                由 PKG-2 的 fetchProjects 403 分支产出,这里只读不自拉;undefined=正常。 */}
+            {!q && !hiddenOnly && projectsAccessError ? (
+              <p className="text-xs text-amber-700 font-body" title={projectsAccessError.hint}>
+                {projectsAccessError.hint || ACCESS_DENIED_HINT}
+                {projectsAccessError.canOpenSettings && (
+                  <button
+                    onClick={() => { fetch('/api/system/open-fda-settings', { method: 'POST' }).catch(() => {}); }}
+                    className="ml-1.5 px-2 py-0.5 rounded bg-amber-100 hover:bg-amber-200 text-amber-900 text-[10px] font-medium align-middle"
+                    title="打开「系统设置 → 隐私与安全性 → 完全磁盘访问」；已勾选的先取消再重新勾选"
+                  >打开系统设置</button>
+                )}
+              </p>
+            ) : (
+              <p className="text-xs text-ink-faint font-body">
+                {q ? '没有匹配的项目' : hiddenOnly ? '所有项目都已隐藏' : '没有找到项目'}
+              </p>
+            )}
             {!q && !hiddenOnly && (
               <button
                 onClick={openAddProject}

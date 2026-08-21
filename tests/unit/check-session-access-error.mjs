@@ -110,8 +110,12 @@ const stripComments = (t) => t.replace(/^\s*\/\/.*$/gm, '').replace(/\/\*[\s\S]*
 // ── 侧栏:空态要说原因,不能还显示"暂无会话" ───────────────────────────
 {
   const src = read('../../client/src/components/UnifiedSidebar.jsx');
-  assert.match(src, /const accessError = useStore\(\(st\) => st\.sessionsAccessError\);/,
-    '侧栏要读错误态');
+  // r26-E2 换锚:错误态从全局单值改为按 projectHash 存(C-E2 契约,store 侧 PKG-2 产出)
+  // —— sessionsAccessErrorByProject: { [hash]: { hint, canOpenSettings } },缺省 undefined=正常。
+  assert.match(src, /const errByProject = useStore\(\(st\) => st\.sessionsAccessErrorByProject\) \|\| EMPTY_OBJECT;/,
+    '侧栏要读按项目的错误态(C-E2 契约字段)');
+  assert.ok(!/st\.sessionsAccessError\b/.test(src.replace(/sessionsAccessErrorByProject/g, '')),
+    '旧全局单值 sessionsAccessError 的引用必须清零(A 拒访染红 B 空态的根因)');
   // 上面那条 store 断言("403 也要写空数组")的存在理由就是这一句首判:
   // undefined = 还没拉到 → 转圈,空数组才走得到下面的空态提示。
   assert.match(src, /rawSessions === undefined \?/,
@@ -124,8 +128,8 @@ const stripComments = (t) => t.replace(/^\s*\/\/.*$/gm, '').replace(/\/\*[\s\S]*
   assert.equal(sessionEmptyHint({ accessError: 'EACCES', query: '登录', fallback: '暂无会话' }),
     ACCESS_DENIED_HINT, '有错误时空态显示原因,而不是"暂无会话"/"没有匹配的会话"');
   assert.match(ACCESS_DENIED_HINT, /会话文件没有丢失/, '侧栏也要当场安抚:文件没丢');
-  assert.match(src, /<span className="text-amber-700" title=\{accessError\}>/,
-    '拒访那一支要带 title(hover 看平台化的处理办法)');
+  assert.match(src, /<span className="text-amber-700" title=\{entry\.hint\}>/,
+    '拒访那一支要带 title(hover 看平台化的处理办法;r26-E2 后读按项目 entry)');
 
   // ── r24:「打开系统设置」按钮 —— 文案承诺的交互必须真的存在,且按平台门控 ──────
   // 门控判定本身是纯函数(行为断言真调它);组件里那句 JSX 没有渲染环境,只能源码断言,
@@ -139,10 +143,16 @@ const stripComments = (t) => t.replace(/^\s*\/\/.*$/gm, '').replace(/\/\*[\s\S]*
   assert.ok(!/点此查看处理办法/.test(ACCESS_DENIED_HINT),
     '文案不许再承诺一个不存在的点击(r23 那句「点此」渲染出来是个纯 span,点了没反应)');
   // 接线(源码级):按钮必须在门控里、必须真打开面板的端点。
-  assert.match(src, /showAccessSettingsButton\(\{ accessError, canOpenSettings: accessCanOpenSettings \}\) && \(/,
+  assert.match(src, /showAccessSettingsButton\(\{ accessError: entry\.hint, canOpenSettings: entry\.canOpenSettings \}\) && \(/,
     '接线:按钮受 showAccessSettingsButton 门控(去掉这层 Windows 就会冒出一个按了没反应的按钮)');
-  assert.match(src, /const accessCanOpenSettings = useStore\(\(st\) => st\.sessionsAccessCanOpenSettings\);/,
-    '接线:门控读的是 store 里那个真从 403 载荷存下来的平台位');
+  // r26-E2:门控的平台位读按项目 entry 的 canOpenSettings(同一 403 载荷存下来的),
+  // 不再是全局单值 sessionsAccessCanOpenSettings(已随旧字段一并退役)。
+  assert.ok(!/st\.sessionsAccessCanOpenSettings/.test(src),
+    '接线:旧全局平台位 sessionsAccessCanOpenSettings 的引用必须清零');
+  assert.match(src, /errByProject\[hash\]\)/,
+    '接线:分组空态按当前渲染组 hash 读错误态(A 的错误不染红 B)');
+  assert.match(src, /flatAccessEntry/,
+    '接线:平铺空态取可见项目里第一条拒访错误(无单一项目语境)');
   const btnAt = src.indexOf('showAccessSettingsButton({');
   assert.match(src.slice(btnAt, btnAt + 600), /fetch\('\/api\/system\/open-fda-settings', \{ method: 'POST' \}\)/,
     '接线:按钮点了要真调既有的一键打开端点(App.jsx/SettingsPanel 三处同一个)');
