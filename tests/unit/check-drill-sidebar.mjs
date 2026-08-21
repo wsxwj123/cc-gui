@@ -87,8 +87,8 @@ import { initialExpandedProjects, toggleExpanded } from '../../client/src/utils/
   assert.match(sb, /桌面端拖拽/, 't5: 手机置灰注文案');
   assert.match(sb, /view\.groupMode === 'single' && flatSessions\.map/, 't5: 单列表平铺分支');
   assert.match(sb, /sortProjectRows\(rows, \{\s*sortMode: view\.sortMode, order: drag \? drag\.preview : view\.projectOrder, pinned: pinnedProjSet,/, 't5: 排序接线(拖拽预览优先)');
-  // r26-I1 换锚:松手 PUT 前把隐藏项目按原相对位次并回 preview(mergeHiddenOrder)。
-  assert.match(sb, /putSidebarView\(\{ projectOrder: mergeHiddenOrder\(preview, oldOrder\) \}\)/, 't5: 松手才落 prefs(r26-I1:并回隐藏项排位)');
+  // r26-I1 二次换锚:并回下沉到 store 层(putSidebarView 唯一真相源),组件直传 preview。
+  assert.match(sb, /putSidebarView\(\{ projectOrder: drag\.preview \}\)/, 't5: 松手才落 prefs(r26-I1:并回在 store 层)');
   assert.doesNotMatch(sb, /from 'lucide-react'/, 't5: 零裸 lucide(守卫)');
   const store = readFileSync(new URL('../../client/src/stores/sessionStore.js', import.meta.url), 'utf8');
   assert.match(store, /hydrateSidebarView|putSidebarView|applyRemoteSidebarView/, 't5: store 三件');
