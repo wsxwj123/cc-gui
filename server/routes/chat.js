@@ -2665,7 +2665,13 @@ export function contextHintsMatch(request, meta) {
   // win 大小写差异不再恒 409。归一化收敛不放宽:realpath 单射,不同目录归一后仍不等。
   const reqCwd = request.cwd ? canonicalCwd(request.cwd) : '';
   const metaCwd = meta.canonicalCwd || (meta.cwd ? canonicalCwd(meta.cwd) : '');
-  return (!request.projectHash || request.projectHash === meta.projectHash)
+  // r31:projectHash 双侧同口径归一(都 toLowerCase)再判等。meta.projectHash 由
+  // canonicalCwd(slot.cwd) 派生(win32 会小写化),而客户端 request.projectHash 来自磁盘
+  // 真实目录名(Windows 大小写保留)—— 不归一在 Windows 上必不等 → /context 恒 409。
+  // 目录名本就是路径编码,大小写不敏感比较是安全的;cwd 那条已是双侧 canonicalCwd,不重复归一。
+  const reqHash = typeof request.projectHash === 'string' ? request.projectHash.toLowerCase() : '';
+  const metaHash = typeof meta.projectHash === 'string' ? meta.projectHash.toLowerCase() : '';
+  return (!request.projectHash || reqHash === metaHash)
     && (!reqCwd || reqCwd === metaCwd);
 }
 
