@@ -10,7 +10,7 @@ import { createHash } from 'crypto';
 import sessionRoutes from './routes/sessions.js';
 import chatRoutes, { getInitCommands, mergeInitCommands } from './routes/chat.js';
 import processRoutes from './routes/processes.js';
-import settingsRoutes, { restoreOpenAIProvider, restoreAnthropicProvider, activeProviderModelMeta } from './routes/settings.js';
+import settingsRoutes, { restoreOpenAIProvider, restoreAnthropicProvider, activeProviderModelMeta, ensureCustomProvidersMode } from './routes/settings.js';
 import usageRoutes from './routes/usage.js';
 import subscriptionUsageRoutes from './routes/subscription-usage.js';
 import providerQuotaRoutes from './routes/provider-quota.js';
@@ -1027,6 +1027,8 @@ server.listen(PORT, HOST, () => {
       await Promise.all([worker(), worker(), worker(), worker()]); // 并发 4,别抢满 I/O
     } catch {}
   })();
+  // r26-H3:旧版落盘的 custom-providers.json 可能是 0644,启动时 best-effort 收 0600。
+  ensureCustomProvidersMode().catch(() => {});
   // Re-arm the OpenAI translation proxy if a codex/opencode provider was active
   // before this (re)start, so settings.json's proxy URL keeps resolving.
   restoreOpenAIProvider().catch(() => {});

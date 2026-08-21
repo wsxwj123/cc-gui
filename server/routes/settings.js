@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { readFile, writeFile, mkdir, copyFile, unlink, readdir, rename } from 'fs/promises';
+import { readFile, writeFile, mkdir, copyFile, unlink, readdir, rename, chmod } from 'fs/promises';
 import { existsSync } from 'fs';
 import { execFile, spawn } from 'child_process';
 import { promisify } from 'util';
@@ -209,6 +209,8 @@ export async function readCustomProviders() {
 // 原子写 + 串行队列:并发 create/edit/delete 各自读-改-写,半截 writeFile 或互相
 // 覆盖会丢 provider 条目。tmp 名带 uuid + rename 落地,写操作挂同一条 Promise 链
 // (与 sessions.js writeJsonlAtomic 同模式,单文件只需一条链)。
+// r26-H3:mode 0600 —— 文件里有明文 apiKey/quotaKey,默认 0644 等于同机其他用户可读
+// (与 image.js atomicWriteProviders 同口径)。tmp 新建即 0600,rename 后权限跟随。
 let _customProvidersQueue = Promise.resolve();
 async function writeCustomProviders(list) {
   // r10-9:写侧 denormalize —— modelMeta 并回 models 混合条目落盘(存储形态见 normalize 注释)。
@@ -221,7 +223,7 @@ async function writeCustomProviders(list) {
     await mkdir(join(homedir(), '.claude-gui'), { recursive: true });
     const tmp = `${CUSTOM_PROVIDERS_PATH}.tmp-${randomUUID()}`;
     try {
-      await writeFile(tmp, JSON.stringify(wire, null, 2));
+      await writeFile(tmp, JSON.stringify(wire, null, 2), { mode: 0o600 });
       await rename(tmp, CUSTOM_PROVIDERS_PATH);
     } catch (err) {
       // rename 前抛错会留 tmp-uuid 残留,兜底清掉(文件可能没写成,ENOENT 忽略)。
@@ -231,6 +233,14 @@ async function writeCustomProviders(list) {
   });
   _customProvidersQueue = run;
   return run;
+}
+
+// r26-H3:旧版本落盘的 custom-providers.json 可能是 0644 —— 启动时 best-effort 收 0600。
+// 只在真实服务端入口(server/index.js)调用,不在模块加载期跑:单测 import 本模块
+// 不应触碰真实 ~/.claude-gui 文件。Windows 无 POSIX 权限位语义,跳过。
+export async function ensureCustomProvidersMode() {
+  if (process.platform === 'win32') return;
+  try { await chmod(CUSTOM_PROVIDERS_PATH, 0o600); } catch { /* ENOENT(还没建过)等忽略 */ }
 }
 
 // BB6: validate a tierModels input against the provider's model list. Returns a
