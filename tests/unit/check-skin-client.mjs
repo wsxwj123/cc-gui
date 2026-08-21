@@ -14,7 +14,9 @@ import { SKIN_TOKENS, SKIN_TOKENS_REJECTED_V1, T2_SCRIPT_BLACKLIST } from '../..
 {
   assert.deepEqual(SKIN_TOKENS_CLIENT, SKIN_TOKENS, 't1: token 白名单与服务端逐字一致');
   assert.deepEqual(SKIN_TOKENS_REJECTED_CLIENT, SKIN_TOKENS_REJECTED_V1, 't1: v1 拒收清单一致');
-  assert.deepEqual(T2_BLACKLIST_CLIENT, T2_SCRIPT_BLACKLIST, 't1: T2 黑名单一致(纵深复验同口径)');
+  // r26-D5 换锚:黑名单升级为正则集,双端按 String 形态(/source/flags)逐字比对。
+  // C-D5 串行锁步:PKG-7 服务端表先落,PKG-8 同步客户端表后本断言转绿。
+  assert.deepEqual(T2_BLACKLIST_CLIENT.map(String), T2_SCRIPT_BLACKLIST.map(String), 't1: T2 黑名单一致(纵深复验同口径)');
 }
 
 // t2 expandSkin:shared 先、模式块后覆盖;白名单外/拒收丢弃;背景默认值补齐
