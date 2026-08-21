@@ -146,7 +146,13 @@ function SubscriptionUsageCard() {
 // 查不到额度时**明写原因**(note),不留空白 —— 留空用户会以为查询坏了。
 function ProviderQuotaCard() {
   const [data, setData] = useState(null);
-  const load = () => fetch('/api/provider-quota').then((r) => r.json()).then(setData).catch(() => {});
+  // r26-J9:自家 /api/provider-quota 失败(网络异常/非 2xx)要显示错误卡 + 重试,
+  // 不能 catch 后 data 留 null 整卡消失 —— 用户会以为这张卡本来就不存在。
+  const [loadFailed, setLoadFailed] = useState(false);
+  const load = () => fetch('/api/provider-quota')
+    .then((r) => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
+    .then((d) => { setData(d); setLoadFailed(false); })
+    .catch(() => setLoadFailed(true));
   useEffect(() => {
     load();
     const onRefresh = () => load();
@@ -159,6 +165,24 @@ function ProviderQuotaCard() {
       clearInterval(id);
     };
   }, []);
+  // 失败卡只在【确实失败】时显示;官方 provider(official:true)照旧整卡不渲染。
+  if (loadFailed && (!data || !data.official)) {
+    return (
+      <div>
+        <h3 className="text-[10px] font-medium uppercase tracking-widest text-ink-faint font-body mb-3">
+          {`额度 · ${data?.providerName || '当前 Provider'}`}
+        </h3>
+        <div className="text-[11px] text-ink-faint font-body bg-canvas-warm border border-canvas-deep rounded-lg p-3 flex items-center gap-2">
+          <span className="flex-1">额度查询失败{data?.note ? `：${data.note}` : '（网络异常或服务端错误）'}</span>
+          <button
+            type="button"
+            onClick={load}
+            className="shrink-0 px-2 py-1 rounded border border-canvas-deep text-[11px] text-ink-soft hover:bg-canvas-deep/60 flex items-center gap-1"
+          ><RefreshCw size={11} />重试</button>
+        </div>
+      </div>
+    );
+  }
   if (!data || data.official) return null;
   const heading = `额度 · ${data.providerName || '当前 Provider'}`;
   const title = (

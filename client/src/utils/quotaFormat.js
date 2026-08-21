@@ -22,7 +22,13 @@ function fmtNum(n) {
 export function quotaItemText(item, currency = null) {
   if (!item) return '';
   const label = item.label || '额度';
-  if (item.unlimited) return `${label} · 无限`;
+  // r26-J7:「无限」按 limitKind 说真话 —— OpenRouter 读到的是"这把 key 没设花费上限",
+  // 账户余额要 management key 才查得到;笼统显示「无限」会让用户以为账户钱花不完。
+  if (item.unlimited) {
+    if (item.limitKind === 'none') return `${label} · 该密钥未设花费上限；账户余额需额度查询密钥`;
+    if (item.limitKind === 'unknown') return `${label} · 上限未知`;
+    return `${label} · 无限`; // One-API 系 1e8 哨兵:站点侧真·未限量
+  }
   const dir = directionWord(item.direction);
   if (typeof item.percent === 'number') return `${label} · ${dir} ${item.percent}%`;
   if (typeof item.value !== 'number') return label;

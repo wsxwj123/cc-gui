@@ -145,6 +145,9 @@ const item = (o) => {
   if (typeof o.max === 'number') it.max = o.max;
   it.resetAt = o.resetAt ?? null;
   it.unlimited = !!o.unlimited;
+  // r26-J7:上限口径三态('set' 有上限 / 'none' 密钥未设上限 / 'unknown' 读不到),
+  // 前端按它区分文案,不再把"未设上限"笼统显示成「无限」。
+  if (o.limitKind) it.limitKind = o.limitKind;
   return it;
 };
 
@@ -247,8 +250,10 @@ function parseSiliconflow(j) {
   return { kind: 'amount', currency: null, items: [item({ label: '余额', direction: 'left', value: v })] };
 }
 
-// OpenRouter:limit 与 limit_remaining 同为 null = 没有上限 → 标"无限",**不显示百分比**
-// (没有分母)。limit_reset 为 null 时是**终身累计**上限,绝不能标"本月"。
+// OpenRouter:limit 与 limit_remaining 同为 null = 该密钥未设花费上限 —— r26-J7:这不是
+// 「无限额度」,只是【这把 key 没设 cap】;账户余额一个字都读不到(要 management key 走
+// /credits)。标 limitKind:'none' 让前端说实话,**不显示百分比**(没有分母)。
+// limit_reset 为 null 时是**终身累计**上限,绝不能标"本月"。
 function parseOpenrouter(j, currency) {
   const d = j?.data;
   if (!d || typeof d !== 'object') return null;
@@ -256,7 +261,7 @@ function parseOpenrouter(j, currency) {
   // 压根没这两个键"(字段改名/换了个上游)也判成无限 —— 那是拿"读不到"冒充"没上限"。
   const has = (k) => Object.prototype.hasOwnProperty.call(d, k);
   if (has('limit') && has('limit_remaining') && d.limit === null && d.limit_remaining === null) {
-    return { kind: 'amount', currency, items: [item({ label: '额度', direction: 'left', unlimited: true })] };
+    return { kind: 'amount', currency, items: [item({ label: '额度', direction: 'left', unlimited: true, limitKind: 'none' })] };
   }
   // 读不到剩余量就整条降级成"查不到"。只有 max 没有 value 会渲染出一行光秃秃的周期词
   // (没数字、没方向词、没进度条),比明写"查不到"更像是坏了。
@@ -266,7 +271,7 @@ function parseOpenrouter(j, currency) {
   const label = d.limit_reset == null ? '累计（终身）' : windowLabel(d.limit_reset, '额度');
   return {
     kind: 'amount', currency,
-    items: [item({ label, direction: 'left', value: left, max: max ?? undefined })],
+    items: [item({ label, direction: 'left', value: left, max: max ?? undefined, limitKind: 'set' })],
   };
 }
 
@@ -376,6 +381,39 @@ export function computeLow(payload, thresholds = DEFAULT_THRESHOLDS) {
     if (typeof it.max === 'number' && it.max > 0) return (it.value / it.max) * 100 <= t.leftPercent;
     return it.value <= (currency === 'USD' ? t.usd : t.cny);
   });
+}
+
+// r26-J10:红点滞回 —— 用量占比 ≥90% 亮、降到 <85% 才灭(单点阈值在边界抖动会让红点闪)。
+// 亮/灭按【方向跨阈才翻转】:prevOn 时看灭阈,否则看亮阈。带宽 5 个百分点。
+export const QUOTA_ALERT_ON = 0.9;
+export const QUOTA_ALERT_OFF = 0.85;
+
+/**
+ * 带滞回的红点判定。prevOn = 该槽位上一次的红点状态(按 providerId+baseURL 指纹分键,
+ * 状态残留在 provider 切换后不串)。亮阈按条目方向取:'used' 用 usedPercent,'left'
+ * 用 leftPercent(= 剩余 ≤ leftPercent% 亮);灭阈 = 亮阈 − 滞回带宽
+ * (QUOTA_ALERT_ON − QUOTA_ALERT_OFF)。默认两阈同为 90%/85% 已用口径。
+ * 钱类(无分母的绝对余额)不做滞回:耗尽风险不该等回落确认,保持单点阈值。
+ */
+export function computeAlert(payload, thresholds = DEFAULT_THRESHOLDS, prevOn = false) {
+  const t = normalizeThresholds(thresholds);
+  const currency = payload?.currency;
+  const band = QUOTA_ALERT_ON - QUOTA_ALERT_OFF; // 滞回带宽(已用占比 5 个百分点)
+  for (const it of arr(payload?.items)) {
+    if (!it || it.unlimited) continue;
+    if (typeof it.percent === 'number' || (typeof it.value === 'number' && typeof it.max === 'number' && it.max > 0)) {
+      // 统一折算成「已用占比」(0..1)再比阈
+      const f = typeof it.percent === 'number'
+        ? (it.direction === 'used' ? it.percent / 100 : 1 - it.percent / 100)
+        : (it.direction === 'used' ? it.value / it.max : 1 - it.value / it.max);
+      const on = it.direction === 'used' ? t.usedPercent / 100 : 1 - t.leftPercent / 100;
+      const off = Math.max(0, on - band);
+      if (prevOn ? f >= off : f >= on) return true;
+      continue;
+    }
+    if (typeof it.value === 'number' && it.value <= (currency === 'USD' ? t.usd : t.cny)) return true;
+  }
+  return false;
 }
 
 // ok:false 时给人话原因(留空白用户会以为查询坏了)。
