@@ -145,6 +145,9 @@ const item = (o) => {
   if (typeof o.max === 'number') it.max = o.max;
   it.resetAt = o.resetAt ?? null;
   it.unlimited = !!o.unlimited;
+  // r26-J7:上限口径三态('set' 有上限 / 'none' 密钥未设上限 / 'unknown' 读不到),
+  // 前端按它区分文案,不再把"未设上限"笼统显示成「无限」。
+  if (o.limitKind) it.limitKind = o.limitKind;
   return it;
 };
 
@@ -247,8 +250,10 @@ function parseSiliconflow(j) {
   return { kind: 'amount', currency: null, items: [item({ label: '余额', direction: 'left', value: v })] };
 }
 
-// OpenRouter:limit 与 limit_remaining 同为 null = 没有上限 → 标"无限",**不显示百分比**
-// (没有分母)。limit_reset 为 null 时是**终身累计**上限,绝不能标"本月"。
+// OpenRouter:limit 与 limit_remaining 同为 null = 该密钥未设花费上限 —— r26-J7:这不是
+// 「无限额度」,只是【这把 key 没设 cap】;账户余额一个字都读不到(要 management key 走
+// /credits)。标 limitKind:'none' 让前端说实话,**不显示百分比**(没有分母)。
+// limit_reset 为 null 时是**终身累计**上限,绝不能标"本月"。
 function parseOpenrouter(j, currency) {
   const d = j?.data;
   if (!d || typeof d !== 'object') return null;
@@ -256,7 +261,7 @@ function parseOpenrouter(j, currency) {
   // 压根没这两个键"(字段改名/换了个上游)也判成无限 —— 那是拿"读不到"冒充"没上限"。
   const has = (k) => Object.prototype.hasOwnProperty.call(d, k);
   if (has('limit') && has('limit_remaining') && d.limit === null && d.limit_remaining === null) {
-    return { kind: 'amount', currency, items: [item({ label: '额度', direction: 'left', unlimited: true })] };
+    return { kind: 'amount', currency, items: [item({ label: '额度', direction: 'left', unlimited: true, limitKind: 'none' })] };
   }
   // 读不到剩余量就整条降级成"查不到"。只有 max 没有 value 会渲染出一行光秃秃的周期词
   // (没数字、没方向词、没进度条),比明写"查不到"更像是坏了。
@@ -266,7 +271,7 @@ function parseOpenrouter(j, currency) {
   const label = d.limit_reset == null ? '累计（终身）' : windowLabel(d.limit_reset, '额度');
   return {
     kind: 'amount', currency,
-    items: [item({ label, direction: 'left', value: left, max: max ?? undefined })],
+    items: [item({ label, direction: 'left', value: left, max: max ?? undefined, limitKind: 'set' })],
   };
 }
 

@@ -218,7 +218,8 @@ const parse1 = (provider, body) => parseQuota(one(provider), [body]);
   const unl = parse1(p, { data: { label: 'sk-or-…', usage: 3.2, limit: null, limit_remaining: null } });
   assert.equal(unl.items[0].unlimited, true, 'limit 与 limit_remaining 同为 null = 无上限');
   assert.equal(unl.items[0].percent, undefined, '无上限就没有分母,不许给百分比');
-  assert.equal(quotaItemText(unl.items[0], unl.currency), '额度 · 无限');
+  assert.equal(quotaItemText(unl.items[0], unl.currency), '额度 · 该密钥未设花费上限；账户余额需额度查询密钥',
+    'r26-J7 换锚:双 null = 密钥未设上限,说实话而非「无限」');
 
   const life = parse1(p, { data: { limit: 10, limit_remaining: 2.5, limit_reset: null } });
   assert.equal(life.items[0].label, '累计（终身）', 'limit_reset=null 是终身累计上限');
