@@ -1,6 +1,7 @@
 // r10-9:思考强度按模型自适应——能力查询与切模型回落(纯函数,单测钉住)。
 // 数据源:GET /api/model 的 modelMeta(当前激活 provider 的 {[modelId]:{reasoning?,efforts?}};
 // null/缺条目 = 无声明 = 全档可用,即官方与未声明模型维持现状)。
+import { useEffect, useRef } from 'react';
 
 // r15-2:五档,不含 minimal —— 依据是本机 CLI 2.1.235 的 `claude --help`,`--effort` 只接受
 // low/medium/high/xhigh/max。与 server EFFORT_LEVEL_IDS / chat.js VALID_EFFORTS /
@@ -50,4 +51,34 @@ export function resolveEffortOnModelChange(caps, current, remembered) {
   const supported = caps.efforts || EFFORT_ORDER;
   const highest = [...EFFORT_ORDER].reverse().find((e) => supported.includes(e)) || '';
   return { effort: highest, changed: true, reason: 'fallback' };
+}
+
+// r26-F3:「当前档不被新模型支持时回落」的挂载钩子 —— 从 ChatInput EffortSelector
+// 抽出,桌面顶栏与手机 MobileEffortPage 两端共用同一套判据(此前手机端只有显示层
+// 过滤,没有持久化回落:选了不支持的档,界面说极高、发送静默摘空)。
+// 语义逐字保留原 effect:
+//   · permKey 变化(切窗格/会话/draft→真 sid)= 不算"换模型",但照样跑合法性检查;
+//   · per-model 记忆只在真换了模型时参与(能力表变化路径要的是"拉回合法",不是拿
+//     旧记忆覆盖用户刚选的档);
+//   · meta(能力表)与 effort 在 deps 里:能力表异步到达 / 跨设备同步改档都触发重估。
+// setEffort 由调用方注入(写哪个键它知道);onNotice 可选(桌面弹 toast,手机静默)。
+export function useEffortFallback({ permKey, bareModelId, meta, effort, memoryKey, setEffort, onNotice }) {
+  const lastModelRef = useRef({ permKey, model: bareModelId });
+  useEffect(() => {
+    const prev = lastModelRef.current;
+    lastModelRef.current = { permKey, model: bareModelId };
+    if (!bareModelId) return;
+    const caps = effortCapsFor(meta, bareModelId);
+    // 换了窗格/会话时两次的 model 不可比(是两个会话各自的模型),不算"换模型"。
+    const paneChanged = prev.permKey !== permKey;
+    const modelChanged = !paneChanged && !!prev.model && prev.model !== bareModelId;
+    if (!modelChanged && effortAllowed(caps, effort || '')) return;
+    let remembered = null;
+    if (modelChanged && memoryKey) { try { remembered = localStorage.getItem(memoryKey); } catch {} }
+    const r = resolveEffortOnModelChange(caps, effort, remembered);
+    if (!r.changed) return;
+    setEffort(r.effort);
+    onNotice?.(r);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [permKey, bareModelId, meta, effort, memoryKey]);
 }

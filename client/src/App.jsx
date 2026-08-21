@@ -91,7 +91,7 @@ import {
 import { buildFontEntries, groupFonts, detectFonts, platformCandidates, queryLocalFontFamilies } from './utils/systemFonts.js';
 import { copyText } from './utils/clipboard.js';
 import { OFFICIAL_LOGIN_HINT, matchOfficialLoginError, notifyOauthMissing } from './utils/officialAuth.js';
-import { effortCapsFor, effortAllowed } from './utils/effortCaps.js';
+import { effortCapsFor, effortAllowed, effortMemoryKey, useEffortFallback } from './utils/effortCaps.js';
 import { ProviderThinkingEditor } from './components/ProviderThinkingEditor.jsx';
 import { UnifiedSidebar } from './components/UnifiedSidebar.jsx';
 import { escRoute, idleEscAction, escYieldCardId, isEditableTarget } from './utils/escAction.js';
@@ -8329,6 +8329,16 @@ function MobileEffortPage({ permKey }) {
   const caps = effortCapsFor(modelEffortMeta, selModel);
   const locked = caps.reasoning === false;
   const levels = EFFORT_LEVELS.filter((e) => e.id === '' || effortAllowed(caps, e.id));
+  // r26-F3②③:手机端补齐桌面那半套 —— ①onClick 写同键同语义的 per-model 记忆
+  // (cgui-effort-<provider>-<modelId>,F6 键形);②挂载同一回落钩子(当前档不被
+  // 新模型支持时持久化回落,静默不弹 toast —— 桌面那颗在手机上不渲染,没人兜底)。
+  const providerHint = useStore((s) => s.currentProvider?.providerHint || 'anthropic');
+  const bareModelId = String(selModel || '').replace(/\[1m\]/i, '');
+  useEffortFallback({
+    permKey, bareModelId, meta: modelEffortMeta, effort,
+    memoryKey: effortMemoryKey(providerHint, bareModelId),
+    setEffort: (id) => useStore.getState().setEffortFor(permKey, id),
+  });
   return (
     <div className="py-1">
       <div className="px-4 pt-2 pb-1 text-[11px] text-ink-faint font-body">
@@ -8342,7 +8352,10 @@ function MobileEffortPage({ permKey }) {
             ? `跟随全局设置:${EFFORT_LEVELS.find((x) => x.id === defaultEffort)?.label || defaultEffort}`
             : '未设全局,由模型自适应';
         return (
-        <button key={e.id || 'default'} onClick={() => useStore.getState().setEffortFor(permKey, e.id)}
+        <button key={e.id || 'default'} onClick={() => {
+          useStore.getState().setEffortFor(permKey, e.id);
+          if (bareModelId) { try { localStorage.setItem(effortMemoryKey(providerHint, bareModelId), e.id); } catch {} }
+        }}
           className="w-full flex items-center gap-3 px-4 py-3 text-left hover:bg-canvas-warm transition-colors">
           <div className="flex-1 min-w-0">
             <div className="text-[14px] font-body text-ink">{e.label}</div>
@@ -9163,7 +9176,13 @@ function MobileMenu({ setRightPanel, onClose, updateNotice = null }) {
   // 审计批C2:导出 Markdown 需要当前会话消息(手机单窗格=pane0/activeTabIndex)。
   const menuMessages = useStore((s) => (s.paneMessages && s.paneMessages[s.activeTabIndex]) || s.messages || EMPTY_ARRAY);
   const effort = useStore((s) => (permKey && permKey in (s.effortBySession || {})) ? s.effortBySession[permKey] : s.effort);
-  const effortLabel = (EFFORT_LEVELS.find((e) => e.id === effort) || EFFORT_LEVELS[0]).label;
+  // r26-F3①:菜单行 effortLabel 过 caps —— 当前档不被该模型支持时显示回落后的档位,
+  // 与分页列表(只列支持档)、发送侧(不支持的档摘空)三方一致。
+  const menuEffortMeta = useStore((s) => s.modelEffortMeta);
+  const menuCaps = effortCapsFor(menuEffortMeta, currentModel);
+  const effortLabel = (effortAllowed(menuCaps, effort || '')
+    ? (EFFORT_LEVELS.find((e) => e.id === effort) || EFFORT_LEVELS[0])
+    : EFFORT_LEVELS[0]).label;
 
   // New chat: prefer the selected project; fall back to the open session's
   // project so ✎ isn't a dead no-op. With no project at all, drop into the

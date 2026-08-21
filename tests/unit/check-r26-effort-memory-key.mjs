@@ -19,12 +19,13 @@ assert.equal(effortMemoryKey('deepseek', 'm1[1m]'), effortMemoryKey('deepseek', 
 assert.equal(effortMemoryKey(undefined, 'm1'), 'cgui-effort-anthropic-m1', 'F6: 缺省 provider 回落 anthropic');
 assert.equal(effortMemoryKey('deepseek', 'm1'), 'cgui-effort-deepseek-m1', 'F6: 键形态 cgui-effort-<provider>-<modelId>');
 
-// ④⑤ ChatInput 源码锚
+// ④⑤ ChatInput 写 + effortCaps 钩子读(r26-F3 抽取后读侧在钩子里,键由调用方注入)
 const src = readFileSync(new URL('../../client/src/components/ChatInput.jsx', import.meta.url), 'utf8');
-const writeHit = (src.match(/localStorage\.setItem\(effortMemKey/g) || []).length;
-const readHit = (src.match(/localStorage\.getItem\(effortMemKey/g) || []).length;
-assert.equal(writeHit, 1, 'F6: 写记忆必须走 effortMemKey(恰好一处)');
-assert.equal(readHit, 1, 'F6: 读记忆必须走 effortMemKey(恰好一处)');
+assert.equal((src.match(/localStorage\.setItem\(effortMemKey/g) || []).length, 1,
+  'F6: 写记忆必须走 effortMemKey(恰好一处)');
+assert.match(src, /memoryKey: effortMemKey/, 'F6: 读侧键注入回落钩子(useEffortFallback)');
+const capsSrc = readFileSync(new URL('../../client/src/utils/effortCaps.js', import.meta.url), 'utf8');
+assert.match(capsSrc, /localStorage\.getItem\(memoryKey\)/, 'F6: 钩子内读记忆走注入的 memoryKey');
 assert.doesNotMatch(src, /localStorage\.(set|get)Item\(`cgui-effort-\$\{/,
   'F6: 旧键形态(无 provider 段)不得再读写');
 

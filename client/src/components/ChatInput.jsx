@@ -8,7 +8,7 @@ import { ImageLightbox } from './ImageLightbox.jsx';
 import { AnchoredPopover } from './SessionSelectors.jsx';
 import { isSteered, firstSteerableIndex, isSteerBarrier } from '../utils/steerQueue.js';
 import { resolveSelectorModel } from '../utils/routing.js';
-import { effortCapsFor, effortAllowed, resolveEffortOnModelChange, effortMemoryKey } from '../utils/effortCaps.js';
+import { effortCapsFor, effortAllowed, effortMemoryKey, useEffortFallback } from '../utils/effortCaps.js';
 
 // Permission mode metadata — mirrors `claude --permission-mode <choice>`。
 // P2.1:文案对齐官方六档语义(RESEARCH-mode-semantics §④b);bypass 中文名保持「放任」。
@@ -159,33 +159,19 @@ export function EffortSelector({ permKey = null, hideLabel = false, tourAnchor =
   //      effect 根本不跑。
   // 故:permKey 变化改为"只挡 per-model 记忆",不再挡回落;effort 进 deps 覆盖 ③。
   // 不会循环:档位合法时下面那行 return 是 no-op,回落后的新档必合法 → 第二次即 return。
-  const lastModelRef = useRef({ permKey, model: bareModelId });
-  useEffect(() => {
-    const prev = lastModelRef.current;
-    lastModelRef.current = { permKey, model: bareModelId };
-    if (!bareModelId) return;
-    // 换了窗格/会话时两次的 model 不可比(是两个会话各自的模型),不算"换模型"。
-    const paneChanged = prev.permKey !== permKey;
-    const modelChanged = !paneChanged && !!prev.model && prev.model !== bareModelId;
-    if (!modelChanged && effortAllowed(caps, effort || '')) return;
-    // per-model 记忆只在真的换了模型时参与(能力表变化那条路径要的是"把非法档拉回合法",
-    // 拿旧记忆去覆盖用户本会话刚选的档是另一回事)。
-    let remembered = null;
-    if (modelChanged) { try { remembered = localStorage.getItem(effortMemKey); } catch {} }
-    const r = resolveEffortOnModelChange(caps, effort, remembered);
-    if (!r.changed) return;
-    useStore.getState().setEffortFor(permKey, r.effort);
-    if (r.reason === 'fallback') {
-      const label = EFFORT_LEVELS.find((x) => x.id === r.effort)?.label || r.effort;
-      setFellNotice(`该模型不支持原档位,已回落「${label}」`);
-    } else if (r.reason === 'locked' && effort) {
-      setFellNotice('该模型不支持思考,已回落默认');
-    }
-    // modelEffortMeta 必须在 deps 里:能力表是异步到的(/api/model),不重跑就等于上面那条
-    // 放宽永远触发不了(模型没变 = 依赖没变 = effect 不执行)。effort 同理覆盖"档位被外部
-    // 改成非法值"(跨设备同步 applyRemoteSessionSync 直接改写 effortBySession)。
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [permKey, bareModelId, modelEffortMeta, effort, effortMemKey]);
+  // r26-F3:解算本体抽成 useEffortFallback(effortCaps.js),手机 MobileEffortPage 共用。
+  useEffortFallback({
+    permKey, bareModelId, meta: modelEffortMeta, effort, memoryKey: effortMemKey,
+    setEffort: (id) => useStore.getState().setEffortFor(permKey, id),
+    onNotice: (r) => {
+      if (r.reason === 'fallback') {
+        const label = EFFORT_LEVELS.find((x) => x.id === r.effort)?.label || r.effort;
+        setFellNotice(`该模型不支持原档位,已回落「${label}」`);
+      } else if (r.reason === 'locked' && effort) {
+        setFellNotice('该模型不支持思考,已回落默认');
+      }
+    },
+  });
   useEffect(() => {
     if (!fellNotice) return;
     const id = setTimeout(() => setFellNotice(null), 5000);
