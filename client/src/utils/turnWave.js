@@ -6,17 +6,21 @@ export function turnWaveWidth(distance) {
 // ── r11-④(鱼眼版):等距紧凑布局 + 指针鱼眼变形 + 单容器解算 ──────────
 // 根因(实证):157 回合时按文档比例分布的刻度间距≈4px < 每刻度 12px 热区,压盖致悬停
 // 命中错邻居。重做(对齐 dsh 效果):
-//  · 布局:全部回合等距紧凑、整簇垂直居中、永不溢出(超高时整体压缩间距),恒全量渲染;
+//  · 布局:全部回合等距紧凑、整簇垂直居中、簇高限 60%（r27,超高时在限高内压缩间距,
+//    上下各留 ≥20% 不顶标题行/输入框）,恒全量渲染;
 //  · 鱼眼:pointermove 时指针附近间距局部拉开(中心×factor,高斯衰减 ±3 根内明显),
 //    再全簇重归一化 —— 总高/簇边界不变;
 //  · 命中:tooltip/点击/键盘步进全部在变形后坐标上二分解最近回合(所见即所得)。
 
 /** 等距紧凑布局:count 个回合在 height 内等距分布,整簇垂直居中;
- *  count×preferredGap 超高时压缩间距,保证首尾恒在 [0, height] 内。返回 px 数组。 */
+ *  r27:簇高限 60%（上限内间距不足才压缩）——回合再多也不压满整列,
+ *  上下各留 ≥20%,不再顶标题行/输入框;首尾恒在 [0, height] 内。返回 px 数组。 */
+export const SCRUBBER_MAX_CLUSTER_RATIO = 0.6;
 export function layoutCompactPositions(count, height, preferredGap = 8) {
   if (!Number.isFinite(height) || height <= 0 || count <= 0) return [];
   if (count === 1) return [height / 2];
-  const gap = Math.min(preferredGap, height / (count - 1));
+  const maxClusterH = height * SCRUBBER_MAX_CLUSTER_RATIO;
+  const gap = Math.min(preferredGap, maxClusterH / (count - 1));
   const clusterH = gap * (count - 1);
   const start = (height - clusterH) / 2;
   return Array.from({ length: count }, (_, i) => start + i * gap);

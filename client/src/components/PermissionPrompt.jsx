@@ -866,7 +866,7 @@ export function PermissionPrompt({ sessionId = null, onExecutePlan = null, hydra
           if (wl.includes(it.toolName) && !it.blockedPath) {
             // 白名单命中:放行但不入表。越界请求(blockedPath)不吃白名单,必须弹卡。
             // 共享提交器自带重试到送达 + in-flight 去重(双实例 hydrate 也不双发)。
-            respondPermission(it.id, { decision: 'allow' });
+            respondPermission(it.id, { decision: 'allow', nonce: it.nonce });
           } else {
             add(it);
           }
@@ -943,9 +943,12 @@ export function PermissionPrompt({ sessionId = null, onExecutePlan = null, hydra
     // 或被用户改过的工具入参。仅在提供时附带,保持旧 deny 路径不变。
     // extra:{ always } / { authorizeDir } —— 服务端 makeCanUseTool 据此构造
     // updatedPermissions(写规则 / 授权目录)。
+    // r26-H1:nonce 随 permission:request 广播/loopback pending 补拉到达(store 透传,
+    // 契约 C-H1),respond 必须回带,服务端逐字比对,缺失/不符一律 403。
     const ok = await respondPermission(req.id, {
       decision,
       reason,
+      nonce: req.nonce,
       ...(updatedInput !== undefined ? { updatedInput } : {}),
       ...(extra || {}),
     });

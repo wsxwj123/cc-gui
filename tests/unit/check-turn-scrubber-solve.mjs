@@ -20,7 +20,9 @@ const approx = (a, b, eps = 1e-6) => Math.abs(a - b) <= eps;
   assert.equal(dense.length, 500, 't1: 全部回合始终渲染(无抽稀)');
   assert.ok(dense[0] >= 0 && dense[499] <= 400, 't1: 永不溢出容器');
   const dg = dense.slice(1).map((v, i) => v - dense[i]);
-  assert.ok(dg.every((g) => approx(g, 400 / 499)), 't1: 超高时整体压缩为等距');
+  assert.ok(dg.every((g) => approx(g, 240 / 499)), 't1: 超高时在限高(60%)内压缩为等距(r27)');
+  // r27 簇限高居中:回合再多,簇高 ≤ 60%、上下各留 ≥20%,不顶标题行/输入框
+  assert.ok(approx(dense[499] - dense[0], 240) && approx(dense[0], 80), 't1: 簇高限 60% 且整簇居中(哨兵:删限高回退旧口径则红)');
   assert.deepEqual(layoutCompactPositions(1, 400), [200], 't1: 单点居中');
   assert.deepEqual(layoutCompactPositions(0, 400), [], 't1: 空集');
   assert.deepEqual(layoutCompactPositions(5, 0), [], 't1: 高度未知安全返回');
@@ -28,7 +30,7 @@ const approx = (a, b, eps = 1e-6) => Math.abs(a - b) <= eps;
 
 // t2 鱼眼不变量矩阵
 {
-  const base = layoutCompactPositions(41, 400, 8); // 间距 8,簇高 320
+  const base = layoutCompactPositions(41, 400, 8); // r27:限高 60%=240 → 间距 6,簇高 240
   const mid = base[20];
   const out = distortPositions(base, mid, { factor: 3 });
   // 总高守恒/簇边界不变(首尾钉死)

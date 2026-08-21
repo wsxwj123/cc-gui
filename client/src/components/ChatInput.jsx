@@ -8,7 +8,7 @@ import { ImageLightbox } from './ImageLightbox.jsx';
 import { AnchoredPopover } from './SessionSelectors.jsx';
 import { isSteered, firstSteerableIndex, isSteerBarrier } from '../utils/steerQueue.js';
 import { resolveSelectorModel } from '../utils/routing.js';
-import { effortCapsFor, effortAllowed, resolveEffortOnModelChange } from '../utils/effortCaps.js';
+import { effortCapsFor, effortAllowed, effortMemoryKey, useEffortFallback } from '../utils/effortCaps.js';
 
 // Permission mode metadata — mirrors `claude --permission-mode <choice>`。
 // P2.1:文案对齐官方六档语义(RESEARCH-mode-semantics §④b);bypass 中文名保持「放任」。
@@ -134,10 +134,13 @@ export function EffortSelector({ permKey = null, hideLabel = false, tourAnchor =
   const selModel = useStore((s) => resolveSelectorModel(s, permKey));
   const caps = effortCapsFor(modelEffortMeta, selModel);
   const bareModelId = String(selModel || '').replace(/\[1m\]/i, '');
+  // r26-F6:per-model 记忆键带 provider 段(同模型 id 跨 provider 不串味)。
+  const providerHint = useStore((s) => s.currentProvider?.providerHint || 'anthropic');
+  const effortMemKey = effortMemoryKey(providerHint, bareModelId);
   const setEffort = (id) => {
     useStore.getState().setEffortFor(permKey, id);
     // per-model 记忆:显式选择才写(空档也记——"该模型我就要默认")。
-    if (bareModelId) { try { localStorage.setItem(`cgui-effort-${bareModelId}`, id); } catch {} }
+    if (bareModelId) { try { localStorage.setItem(effortMemKey, id); } catch {} }
   };
   const [open, setOpen] = useState(false);
   const [fellNotice, setFellNotice] = useState(null); // 回落 toast(5s 自清)
@@ -156,33 +159,19 @@ export function EffortSelector({ permKey = null, hideLabel = false, tourAnchor =
   //      effect 根本不跑。
   // 故:permKey 变化改为"只挡 per-model 记忆",不再挡回落;effort 进 deps 覆盖 ③。
   // 不会循环:档位合法时下面那行 return 是 no-op,回落后的新档必合法 → 第二次即 return。
-  const lastModelRef = useRef({ permKey, model: bareModelId });
-  useEffect(() => {
-    const prev = lastModelRef.current;
-    lastModelRef.current = { permKey, model: bareModelId };
-    if (!bareModelId) return;
-    // 换了窗格/会话时两次的 model 不可比(是两个会话各自的模型),不算"换模型"。
-    const paneChanged = prev.permKey !== permKey;
-    const modelChanged = !paneChanged && !!prev.model && prev.model !== bareModelId;
-    if (!modelChanged && effortAllowed(caps, effort || '')) return;
-    // per-model 记忆只在真的换了模型时参与(能力表变化那条路径要的是"把非法档拉回合法",
-    // 拿旧记忆去覆盖用户本会话刚选的档是另一回事)。
-    let remembered = null;
-    if (modelChanged) { try { remembered = localStorage.getItem(`cgui-effort-${bareModelId}`); } catch {} }
-    const r = resolveEffortOnModelChange(caps, effort, remembered);
-    if (!r.changed) return;
-    useStore.getState().setEffortFor(permKey, r.effort);
-    if (r.reason === 'fallback') {
-      const label = EFFORT_LEVELS.find((x) => x.id === r.effort)?.label || r.effort;
-      setFellNotice(`该模型不支持原档位,已回落「${label}」`);
-    } else if (r.reason === 'locked' && effort) {
-      setFellNotice('该模型不支持思考,已回落默认');
-    }
-    // modelEffortMeta 必须在 deps 里:能力表是异步到的(/api/model),不重跑就等于上面那条
-    // 放宽永远触发不了(模型没变 = 依赖没变 = effect 不执行)。effort 同理覆盖"档位被外部
-    // 改成非法值"(跨设备同步 applyRemoteSessionSync 直接改写 effortBySession)。
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [permKey, bareModelId, modelEffortMeta, effort]);
+  // r26-F3:解算本体抽成 useEffortFallback(effortCaps.js),手机 MobileEffortPage 共用。
+  useEffortFallback({
+    permKey, bareModelId, meta: modelEffortMeta, effort, memoryKey: effortMemKey,
+    setEffort: (id) => useStore.getState().setEffortFor(permKey, id),
+    onNotice: (r) => {
+      if (r.reason === 'fallback') {
+        const label = EFFORT_LEVELS.find((x) => x.id === r.effort)?.label || r.effort;
+        setFellNotice(`该模型不支持原档位,已回落「${label}」`);
+      } else if (r.reason === 'locked' && effort) {
+        setFellNotice('该模型不支持思考,已回落默认');
+      }
+    },
+  });
   useEffect(() => {
     if (!fellNotice) return;
     const id = setTimeout(() => setFellNotice(null), 5000);
@@ -408,6 +397,20 @@ export function ChatInput({ onSend, onStop, onStopBackground, onAccelerate, canS
     draftBeforeHistoryRef.current = '';
   }, [draftKey, claimDraft?.claimId, claimDraft?.sendable]);
 
+  // r26-B2③:切会话防串 —— 本 pane 名下的 sendable claim 若其来源会话不是当前 permKey
+  // (窗格切到了别的会话),释放回源会话队列(可见 needs-review):A 会话取回的草稿绝不
+  // 显示在 B 会话输入框。判据用 claimDraft.sessionKey 而非队列键 —— draft→真 sid 迁移
+  // (migrateSessionKey)会同步 sessionKey,同一会话的升级不触发释放。
+  useEffect(() => {
+    if (!paneId) return;
+    const st = useStore.getState();
+    for (const list of Object.values(st.messageQueue || {})) {
+      const hit = (Array.isArray(list) ? list : []).find((i) => i?.claimDraft?.sendable
+        && i.claimDraft.targetPaneId === paneId && i.claimDraft.sessionKey !== permKey);
+      if (hit) { st.releaseClaimDraft(paneId, hit.claimDraft.claimId); break; }
+    }
+  }, [permKey, paneId]);
+
   // 串扰#10b:key 变更帧跳过持久化 —— 切会话时本 effect 先于上面的 load effect 引发的
   // rerender 执行,会以【旧 text + 新 key】写一次 localStorage(A 的草稿写进 B 的 key,
   // 随即被 load 覆盖自愈;若两 effect 间卸载/崩溃则残留)。跳过该帧只堵错写,load 后
@@ -476,13 +479,18 @@ export function ChatInput({ onSend, onStop, onStopBackground, onAccelerate, canS
     const onClear = (e) => {
       const targetKey = e?.detail?.targetKey;
       if (targetKey && targetKey !== permKey) return;
+      // r26-B2①:清输入框 = 用户放弃这次取回编辑 → 把 hidden 占位槽还原为可见
+      // needs-review 条目(原文 queueText),否则队列被空文本槽永久卡死且无删除口。
+      if (claimDraft?.sendable && paneId) {
+        useStore.getState().releaseClaimDraft(paneId, claimDraft.claimId);
+      }
       setText('');
       setHistoryCursor(-1);
       draftBeforeHistoryRef.current = '';
     };
     window.addEventListener('cgui:composer-clear', onClear);
     return () => window.removeEventListener('cgui:composer-clear', onClear);
-  }, [permKey]);
+  }, [permKey, paneId, claimDraft?.claimId, claimDraft?.sendable]);
 
   // Read a File/Blob as a data URL.
   const fileToDataUrl = (file) => new Promise((resolve, reject) => {

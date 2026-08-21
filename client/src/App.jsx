@@ -11,7 +11,9 @@ const titleAttempted = new Set();
 // (setModel 热切补发、reattach 回放 earlyLines)不重复提示;进程重建(新 pid)后 MCP
 // 会重连,状态可能已变,重新评估。模块级(非组件 state):分屏多 pane / 重挂载共享。
 const mcpNoticeSeenPids = new Set();
-// Draft 会话唯一标识。draft key(`draft-<projectHash>`)按项目生成,同项目先后两个 draft
+// Draft 会话唯一标识。draft key(r26-B5 起为 `draft-<projectHash>-<draftId>`,统一走
+// steerQueue.queueKeyFor)按项目+draftId 生成,同项目两个 draft 不再共享队列键。
+// 旧形态 `draft-<projectHash>` 按项目生成,同项目先后两个 draft
 // 完全同构无法区分 → 会话A(draft)流式中 init 在途时用户新建 draft B,init 到达会把 A 的
 // session_id 绑到 B 的 pane(getLocalSession() 只判"是 draft"),B 首条消息就 --resume 进
 // 会话A(用户实报串扰)。每个 draft 发一个 nonce,init 绑定前比对"发起流的 draft"===当前。
@@ -65,7 +67,7 @@ import { BUILTIN_PROVIDERS, findBuiltin } from './utils/builtinProviders.js';
 import { computeCost, formatCost, setUserPrices, observeOfficialBilling } from './utils/pricing.js';
 import { extractToolResultText, finalizePendingToolCalls, applyFinalizedToBlocks } from './utils/toolResult.js';
 import { rebuildTodosFromTaskCalls } from './utils/todos.js';
-import { isSteered, firstSteerableIndex, isSteerBarrier, persistedSteerKeys } from './utils/steerQueue.js';
+import { isSteered, firstSteerableIndex, isSteerBarrier, persistedSteerKeys, queueKeyFor } from './utils/steerQueue.js';
 import { isInitBindingOrigin, makeProviderModelGuard, migrateDraftQueue, paneMessagesOwned, resolveHistModel, resolveSelectorModel, resolveSendModel } from './utils/routing.js';
 import { nativeContextWindow, isBareClaudeAlias, pickCliContextWindow } from './utils/contextWindow.js';
 import { extractMcpServerIssues, formatMcpServerNotice } from './utils/mcpStatus.js';
@@ -89,7 +91,7 @@ import {
 import { buildFontEntries, groupFonts, detectFonts, platformCandidates, queryLocalFontFamilies } from './utils/systemFonts.js';
 import { copyText } from './utils/clipboard.js';
 import { OFFICIAL_LOGIN_HINT, matchOfficialLoginError, notifyOauthMissing } from './utils/officialAuth.js';
-import { effortCapsFor, effortAllowed } from './utils/effortCaps.js';
+import { effortCapsFor, effortAllowed, effortMemoryKey, useEffortFallback } from './utils/effortCaps.js';
 import { ProviderThinkingEditor } from './components/ProviderThinkingEditor.jsx';
 import { UnifiedSidebar } from './components/UnifiedSidebar.jsx';
 import { escRoute, idleEscAction, escYieldCardId, isEditableTarget } from './utils/escAction.js';
@@ -222,9 +224,9 @@ function CheckpointButton({ sessionId, cwd, projectHash, onRestored, openSignal 
             const st = useStore.getState();
             (st.paneSessions || []).forEach((p, i) => {
               if (p?.sessionId === sessionId) {
-                const draftKey = `draft-${p.projectHash || 'none'}`;
-                st.migrateSessionKey(sessionId, draftKey, true);
-                st.setPaneSession(i, { ...p, sessionId: null, draft: true, draftId: newDraftId() });
+                const _nd = newDraftId(); // r26-B5:迁移目标键必须带将创建 draft 的 draftId
+                st.migrateSessionKey(sessionId, queueKeyFor({ projectHash: p.projectHash, draftId: _nd }), true);
+                st.setPaneSession(i, { ...p, sessionId: null, draft: true, draftId: _nd });
               }
             });
           }
@@ -1742,19 +1744,27 @@ function HomeState({ tabIndex = 0 }) {
   useSyncExternalStore(subscribeSkin, getSkinVersion, getSkinVersion);
   const [chosenHash, setChosenHash] = useState(null);
   const [text, setText] = useState('');
+  // r26-D13:问候时段词随时间刷新 —— Home 挂着过夜,原来只在渲染时取小时,
+  // 早上还显示「晚上好」。低频定时器(每分钟 tick,跨时段才引起文案变化)。
+  const [hour, setHour] = useState(() => new Date().getHours());
+  useEffect(() => {
+    const id = setInterval(() => setHour(new Date().getHours()), 60000);
+    return () => clearInterval(id);
+  }, []);
   const [projOpen, setProjOpen] = useState(false);
   const projBtnRef = useRef(null);
   const custom = readHomeCustom();
   // r21:减去 hiddenProjects。Home 的默认项目**会写进新会话的 cwd**,取全量会让
   // 用户在侧栏隐藏掉的目录(家目录、临时目录)当上默认工作目录,最近下拉里也会冒出来。
-  // 取法与 SettingsPanel 的项目下拉同一模式(窄端点现读);hidden 不在 store 里,
-  // ponytail: 挂载时读一次即可 —— HomeState 每次回到无会话态都重新挂载,够新。
-  const [hiddenHashes, setHiddenHashes] = useState(() => new Set());
+  // r26-I2:hiddenProjects 入 store(WS 'hidden-projects' 广播收敛,他端改了本端
+  // 即时跟随);挂载时仍拉一次 GET 水合 store(读失败回落「不过滤」,不是「全过滤」)。
+  const hiddenProjectsList = useStore((s) => s.hiddenProjects);
   useEffect(() => {
     fetch('/api/prefs/hidden-projects').then((r) => r.json())
-      .then((d) => setHiddenHashes(readHiddenHashes(d)))
-      .catch(() => {}); // 读失败回落「不过滤」,不是「全过滤」
+      .then((d) => useStore.getState().applyHiddenProjects([...readHiddenHashes(d)])) // 解析仍走共用纯函数
+      .catch(() => {});
   }, []);
+  const hiddenHashes = useMemo(() => new Set(hiddenProjectsList), [hiddenProjectsList]);
   // r24:聚焦窗格(activeTabIndex)当前会话所属的项目 —— 新建会话的默认 cwd 跟着你**正在看**
   // 的那个会话走,而不是侧栏的选中项(分屏时两者经常不是一个)。选出的是字符串/undefined,
   // 不会给 Zustand 造新引用。单屏也成立:paneSessions[0] 恒镜像 selectedSession。
@@ -1768,6 +1778,22 @@ function HomeState({ tabIndex = 0 }) {
     [projects, hiddenHashes, focusedProjectHash]);
   // selectedProject 仍按原样传:用户显式打开的隐藏项目(侧栏窗格豁免同理)不该被踢掉。
   const project = pickHomeProject({ chosenHash, focusedProjectHash, projects: visibleProjects, selectedProject });
+  // r26-B1:孤儿 draft 排队消息回收横幅。只展示【当前选中项目】的孤儿(按条目
+  // projectHash 过滤 —— 别的项目的孤儿不渲染也不可操作,防把 A 项目的排队消息
+  // 填进 B 项目会话)。切换项目时过滤条件变,横幅内容自动跟随。
+  const orphanDraftQueues = useStore((s) => s.orphanDraftQueues);
+  const orphanEntries = useMemo(() => {
+    if (!project?.hash) return [];
+    return Object.entries(orphanDraftQueues || {})
+      .filter(([, v]) => v?.projectHash === project.hash)
+      .flatMap(([queueKey, v]) => (Array.isArray(v?.items) ? v.items : [])
+        .map((item, i) => ({ queueKey, item, rowKey: item?.queueId || `${queueKey}#${i}` })));
+  }, [orphanDraftQueues, project?.hash]);
+  const fillOrphan = (queueKey, item) => {
+    // 一次只填一条,填入即从孤儿表摘除(防连点重复填入)。
+    const taken = useStore.getState().takeOrphanDraftMessage(queueKey, item?.queueId);
+    if (taken?.text) setText(taken.text);
+  };
   const recent = useMemo(() => [...visibleProjects]
     .sort((a, b) => (b.lastActivity ? new Date(b.lastActivity).getTime() : -1)
       - (a.lastActivity ? new Date(a.lastActivity).getTime() : -1))
@@ -1777,8 +1803,11 @@ function HomeState({ tabIndex = 0 }) {
     if (!t || !project) return;
     const st = useStore.getState();
     seedNewSessionDefaults(project.hash); // 与侧栏新建同一 seed(力度继承/权限 default)
-    st.enqueueMessage(`draft-${project.hash}`, { text: t, queuedAt: Date.now() });
-    st.setPaneSession(tabIndex, buildHomeDraft(project, newDraftId())); // cwd=所选项目
+    // r26-B5:先造 draft 再入队 —— 队列键带 draftId,与同项目其他 draft 窗格隔离。
+    const _homeDraft = buildHomeDraft(project, newDraftId());
+    if (!_homeDraft) return; // 项目缺 path 造不出 draft(旧代码会入队后清空窗格,键还匹配不上)
+    st.enqueueMessage(queueKeyFor(_homeDraft), { text: t, queuedAt: Date.now() });
+    st.setPaneSession(tabIndex, _homeDraft); // cwd=所选项目
     st.setPaneMessages(tabIndex, []);
   };
   const browse = () => {
@@ -1801,7 +1830,7 @@ function HomeState({ tabIndex = 0 }) {
         {/* r11-⑫:问候分段渲染——称呼段用主题 accent 细渐变(token,不硬编码色值),
             皮肤模板 {name} 占位符同路径;无称呼时占位符整段降级(homeGreetingParts)。 */}
         <h2 data-cgui="home-greeting" className="text-[22px] font-display font-medium text-ink mb-5 tracking-tight">
-          {homeGreetingParts(new Date().getHours(), custom?.greeting, displayName).map((p, i) => p.name ? (
+          {homeGreetingParts(hour, custom?.greeting, displayName).map((p, i) => p.name ? (
             <span
               key={i}
               className="bg-gradient-to-r from-accent to-accent-hover bg-clip-text text-transparent font-semibold"
@@ -1810,6 +1839,32 @@ function HomeState({ tabIndex = 0 }) {
             <span key={i}>{p.text}</span>
           ))}
         </h2>
+        {/* r26-B1:上次没发出去的排队消息(孤儿 draft 队列)。填入=进当前 Home
+            输入框(本地 setText,不回流 messageQueue);丢弃=从孤儿表摘除。 */}
+        {orphanEntries.length > 0 && (
+          <div className="w-full mb-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-[12px] font-body text-amber-900">
+            <div className="flex items-center gap-2 mb-1">
+              <span className="flex-1 min-w-0">上次有 {orphanEntries.length} 条未发出的排队消息</span>
+              <button
+                onClick={() => useStore.getState().discardOrphanDraftQueuesFor(project?.hash)}
+                className="px-2 py-0.5 rounded hover:bg-amber-100 text-amber-700 text-[10px] shrink-0"
+              >全部丢弃</button>
+            </div>
+            {orphanEntries.map(({ queueKey, item, rowKey }) => (
+              <div key={rowKey} className="flex items-center gap-2 py-0.5 border-t border-amber-200/50 first:border-t-0">
+                <span className="flex-1 min-w-0 truncate" title={item?.text || ''}>{item?.text || '（空消息）'}</span>
+                <button
+                  onClick={() => fillOrphan(queueKey, item)}
+                  className="px-2 py-0.5 rounded bg-amber-100 hover:bg-amber-200 text-amber-900 text-[10px] font-medium shrink-0"
+                >填入输入框</button>
+                <button
+                  onClick={() => useStore.getState().takeOrphanDraftMessage(queueKey, item?.queueId)}
+                  className="px-2 py-0.5 rounded hover:bg-amber-100 text-amber-700 text-[10px] shrink-0"
+                >丢弃</button>
+              </div>
+            ))}
+          </div>
+        )}
         {/* r11-p3-1:聚焦零装饰(用户拍板)——无 focus-within 变色,聚焦与否外观一致。 */}
         <div className="w-full rounded-lg border border-canvas-deep/70 bg-canvas-warm/60">
           <textarea
@@ -2101,6 +2156,11 @@ export function GitInitBanner({ cwd }) {
   // process.platform。此前这段文案在前端硬编码 macOS 的「完全磁盘访问」路径,Windows
   // 用户看到的是一个根本不存在的面板。
   const [access, setAccess] = useState(null); // { hint, canOpenSettings }
+  // r26-E1:git 探测的非拒访失败(dubious ownership / .git 损坏 / 磁盘满等)——
+  // 服务端回 { isRepo:null, gitError:true, error, detail }。既不是仓库态也不是
+  // 权限态:显示「探测失败 + 重新检测」,绝不挂初始化引导(误诊会把用户指去开
+  // 完全磁盘访问,或对着真仓库反复点初始化)。
+  const [gitErr, setGitErr] = useState(null); // { error, detail }
   // 探测 effect 里要读当前 status 又不能把它放进 deps(那会自触发),用 ref 取。
   const statusRef = useRef(null);
   const statusCwdRef = useRef(null);
@@ -2118,7 +2178,19 @@ export function GitInitBanner({ cwd }) {
     setStatus('unknown');
     fetch(`/api/git/status?cwd=${encodeURIComponent(cwd)}`)
       // 非 2xx(隧道/代理拦截、后端 400)不当探测结果用:下面的映射只接受真答案。
-      .then((r) => (r.ok ? r.json() : Promise.reject(new Error('HTTP ' + r.status))))
+      // r26-E4 例外:403 是「cwd 存在但系统拒访」(stat 撞 EACCES/EPERM),body 带
+      // { code:'no-disk-access', hint, canOpenSettings } —— 单独放行读 body,
+      // 映射成 permissionDenied 走 tcc 横幅;其他非 2xx 照旧 reject(不显示横幅)。
+      .then(async (r) => {
+        if (r.ok) return r.json();
+        if (r.status === 403) {
+          const d = await r.json().catch(() => ({}));
+          if (d?.code === 'no-disk-access') {
+            return { permissionDenied: true, hint: d.hint || '', canOpenSettings: !!d.canOpenSettings };
+          }
+        }
+        return Promise.reject(new Error('HTTP ' + r.status));
+      })
       // T3: permissionDenied = macOS 没给本 app 磁盘权限(git 在 Desktop 等目录
       // 被 TCC 拒)。此时既不是 repo 也不该引导 init —— 显示权限引导横幅。
       // isRepo:true 但零提交 → 'nocommit'(给「创建基线提交」按钮)。以服务端 hasCommit
@@ -2127,8 +2199,9 @@ export function GitInitBanner({ cwd }) {
       .then((s) => {
         setRepoRoot(typeof s?.root === 'string' ? s.root : null);
         setAccess(s?.permissionDenied ? { hint: s.hint || '', canOpenSettings: !!s.canOpenSettings } : null);
-        setStatus(s?.gitMissing ? 'nogit' : (s?.permissionDenied ? 'tcc' : (s?.isRepo === false ? 'norepo'
-          : ((s?.hasCommit === false || importGitState.get(cwd) === 'repoNoCommit') ? 'nocommit' : 'repo'))));
+        setGitErr(s?.gitError ? { error: s.error || '', detail: s.detail || '' } : null);
+        setStatus(s?.gitMissing ? 'nogit' : (s?.gitError ? 'giterror' : (s?.permissionDenied ? 'tcc' : (s?.isRepo === false ? 'norepo'
+          : ((s?.hasCommit === false || importGitState.get(cwd) === 'repoNoCommit') ? 'nocommit' : 'repo')))));
       })
       // fail-safe:探测失败(断网 / 手机隧道被拦 / 非 2xx)一律**不显示任何 git 横幅**。
       // 绝不冒称"不是 git 仓库"—— 那会让用户对着一个其实是仓库的目录反复点初始化。
@@ -2150,6 +2223,22 @@ export function GitInitBanner({ cwd }) {
             className="px-2 py-0.5 rounded bg-amber-100 hover:bg-amber-200 text-amber-900 text-[10px] font-medium shrink-0"
           >打开系统设置</button>
         )}
+        <button
+          onClick={() => setKick((k) => k + 1)}
+          className="px-2 py-0.5 rounded hover:bg-amber-100 text-amber-700 text-[10px] shrink-0"
+        >重新检测</button>
+      </div>
+    );
+  }
+
+  if (status === 'giterror') {
+    // r26-E1:探测失败横幅 —— 只给「重新检测」,不挂初始化引导、不指去开权限。
+    return (
+      <div className="bg-amber-50 border-b border-amber-200 px-4 py-2 text-[12px] font-body text-amber-900 flex items-center gap-2 flex-wrap">
+        <GitBranch size={13} className="text-amber-600 shrink-0" />
+        <span className="flex-1 min-w-[12rem] break-words">
+          git 状态探测失败{gitErr?.detail ? `：${gitErr.detail}` : (gitErr?.error ? `：${gitErr.error}` : '')}
+        </span>
         <button
           onClick={() => setKick((k) => k + 1)}
           className="px-2 py-0.5 rounded hover:bg-amber-100 text-amber-700 text-[10px] shrink-0"
@@ -2204,6 +2293,13 @@ export function GitInitBanner({ cwd }) {
         } else {
           setStatus('done');
         }
+      } else if (data.canOpenSettings) {
+        // r26-E5:init 因系统拒访失败时,服务端已回 canOpenSettings —— 纯文本弹窗没有
+        // 「打开系统设置」按钮,用户看完只能手动翻系统设置。改置 tcc 横幅态,复用既有
+        // 横幅渲染与按钮(与 :2145 的口径一致:有面板可跳才给按钮)。
+        if (!mine()) return;
+        setAccess({ hint: data.hint || '', canOpenSettings: true });
+        setStatus('tcc');
       } else {
         // r17-8:服务端现在把「超时 / git 没装 / 系统拒绝访问」分开报,并带一条能照着做的
         // hint。data.error 本身已是完整句子,别再套一层"git init 失败："前缀。
@@ -2779,9 +2875,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // 空数组(模块级 EMPTY_ARRAY,引用稳定,防 zustand 新引用白屏 #185)。
   const messagesOwned = paneMessagesOwned(paneMessagesSid && paneMessagesSid[tabIndex], selectedSession?.sessionId);
   const messages = messagesOwned ? ((paneMessages && paneMessages[tabIndex]) || EMPTY_ARRAY) : EMPTY_ARRAY;
-  // 本会话的队列/pin/owner key(草稿用 draft-<hash>)。必须在所有引用它的 effect 之前声明,
+  // 本会话的队列/pin/owner key(草稿用 draft-<hash>-<draftId>,r26-B5)。必须在所有引用它的 effect 之前声明,
   // 否则 effect 依赖数组在渲染期先求值会命中 TDZ(Cannot access before initialization)。
-  const sessionQueueKey = selectedSession?.sessionId || `draft-${selectedSession?.projectHash || 'none'}`;
+  const sessionQueueKey = queueKeyFor(selectedSession);
   // /goal 当前是否还挂着:取历史里【最后一条】goal 记录。达成与手动清除都写 met:true
   // (CLI 的写入函数只有这一种表达),所以"最后一条 met=false"⇔"目标仍在生效"。
   // 清除规则 = 纯派生,没有任何需要手动置空的时机:
@@ -2892,7 +2988,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   //      没 pin 的会话(含回滚后新建的)统统掉回默认
   //   3. 全局 currentModel —— 最后兜底(草稿、全新会话)
   const pinnedModel = useStore((s) => {
-    const k = selectedSession?.sessionId || `draft-${selectedSession?.projectHash || 'none'}`;
+    const k = queueKeyFor(selectedSession);
     return s.modelBySession[k] || null;
   });
   const globalModel = useStore((s) => s.currentModel);
@@ -2934,9 +3030,11 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       : () => true), // available 未加载(开机窗口)一律放行,避免徽章闪一下全局默认
     [guardAvailable, guardCustom, guardOfficial],
   );
+  // r26-F1:兜底链每一环都过同一 modelGuard —— globalModel 原来是裸兜底,guard 拒了
+  // 也照显示(当前 provider 不支持的残留模型)。guard 拒 → null,显示层落固定文案。
   const resolvedModelBase = (modelGuard(pinnedModel) ? pinnedModel : null)
     || (modelGuard(historyModel) ? historyModel : null)
-    || globalModel;
+    || (modelGuard(globalModel) ? globalModel : null);
   const currentModel = (context1mFlag && resolvedModelBase && !/\[1m\]/i.test(resolvedModelBase))
     ? resolvedModelBase + '[1m]' : resolvedModelBase;
   // 徽章分母:后端解析的真实窗口(与压缩联动同源;官方/无解析=null 走本地兜底表)。
@@ -3480,7 +3578,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         // 这里绝不能抢跑,否则两边各弹一条 = 乱序(详见 finalizeInFlightRef 定义处)。
         if (!next && !streamingRef.current && finalizeInFlightRef.current === 0) {
           const _sel = getLocalSession();
-          const drainKey = _sel?.sessionId || `draft-${_sel?.projectHash || 'none'}`;
+          const drainKey = queueKeyFor(_sel);
           const sameSession = pollSid ? drainKey === pollSid : _sel?.draftId === pollDraftId;
           const head = (useStore.getState().messageQueue[drainKey] || [])[0];
           const sawPidFinish = !!lastSeenPidRef.current; // 本 pane 看着这个回合跑完的
@@ -3494,7 +3592,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
               if (cancelled || streamingRef.current || backgroundPidRef.current) return;
               if (finalizeInFlightRef.current > 0) return; // C1:这 50ms 里有流开始收尾 → 让它自己排空
               const s2 = getLocalSession();
-              if ((s2?.sessionId || `draft-${s2?.projectHash || 'none'}`) !== drainKey) return;
+              if (queueKeyFor(s2) !== drainKey) return;
               const q = useStore.getState().shiftMessage(drainKey);
               if (q?.text) handleSendRef.current?.(q.text, q.opts || (q.hidden ? { hiddenUserMessage: true } : {}));
             }, 50);
@@ -3704,7 +3802,10 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // Model shown in THIS pane's header — the session's own pick, else default.
   // r16-1:本窗格 pin 同样要过白名单(它驱动手机顶部条与上下文明细弹层两个可见位置)。
   const headerPinRaw = modelBySession[sessionQueueKey];
-  const headerModel = (modelGuard(headerPinRaw) ? headerPinRaw : null) || currentModel;
+  // r26-F1:全链被 guard 拒(曾有值但都不属于当前 provider)→ 显示固定文案「默认模型」,
+  // 绝不显示残留旧模型 id;开机窗口(任何值都没加载过)仍按原样隐藏徽章,不多一条闪显。
+  const headerModel = (modelGuard(headerPinRaw) ? headerPinRaw : null) || currentModel
+    || ((pinnedModel || historyModel || globalModel) ? '默认模型' : null);
   const messageQueueRaw = useStore((s) => s.messageQueue[sessionQueueKey]);
   const messageQueue = messageQueueRaw || EMPTY_ARRAY;
   const claimDraft = messageQueue.find((item) => item?.claimDraft?.targetPaneId === paneId
@@ -4416,10 +4517,10 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             if (selIsOrigin) {
               // Carry the draft's per-session model/permission pins to the real
               // session id so a model picked for a brand-new chat doesn't revert.
-              useStore.getState().migrateSessionKey(`draft-${sel.projectHash || 'none'}`, event.session_id);
+              useStore.getState().migrateSessionKey(queueKeyFor(sel), event.session_id);
               // I4:草稿流拿到真 sessionId,把流归属 key 一并升级,否则 setSelectedSession
               // 把当前会话 key 变成真 id 后,渲染层会判定"流不属于当前会话"而误隐藏本条流。
-              if (streamOwnerKeyRef.current === `draft-${sel.projectHash || 'none'}`) {
+              if (streamOwnerKeyRef.current === queueKeyFor(sel)) {
                 setStreamOwner(event.session_id);
               }
               // opus/sonnet 双审计:draft-key 升级成真 sid 后,两处本地态还挂着旧键,必须一并迁:
@@ -4428,7 +4529,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
               // (btw 无 jsonl 孪生=内容丢失);②ChatInput 的 localStorage 草稿(cgui-draft:<key>)——
               // draftKey 变更 effect 会读新键(必空)把正在打的下一条消息清掉,先把旧值复制过去。
               {
-                const _dk0 = `draft-${sel.projectHash || 'none'}`;
+                const _dk0 = queueKeyFor(sel);
                 setChatMessages((prev) => (prev.some((m) => m.ownerKey === _dk0)
                   ? prev.map((m) => (m.ownerKey === _dk0 ? { ...m, ownerKey: event.session_id } : m))
                   : prev));
@@ -4469,7 +4570,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
               // migrateSessionKey 不执行,残留队列会被下一个同项目 draft 继承串发;
               // selIsOrigin=true 时已迁空,此处 no-op。pin 不迁(见 routing.js 注释)。
               try {
-                const _dk = `draft-${selectedSession?.projectHash || 'none'}`;
+                const _dk = queueKeyFor(selectedSession);
                 const _next = migrateDraftQueue(useStore.getState().messageQueue, _dk, event.session_id);
                 if (_next) useStore.setState({ messageQueue: _next });
               } catch {}
@@ -4477,7 +4578,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
               // draft 期历史存旧键,不迁则首条历史滞留旧键且污染该项目下一个 draft。取发起时闭包
               // selectedSession(sel 是当前选中,用户已切走时会错迁别的项目)。selIsOrigin=true 时旧键已删,此处幂等 no-op。
               try {
-                const _hk = `draft-${selectedSession?.projectHash || 'none'}`;
+                const _hk = queueKeyFor(selectedSession);
                 const _hv = localStorage.getItem(`cgui-input-history:${_hk}`);
                 if (_hv && _hv !== '[]') { localStorage.setItem(`cgui-input-history:${event.session_id}`, _hv); localStorage.removeItem(`cgui-input-history:${_hk}`); }
               } catch {}
@@ -5185,9 +5286,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             if (/No conversation found/i.test(msg) && !opts.freshRetry && prompt) {
               const _s = getLocalSession();
               if (_s?.sessionId) {
-                const draftKey = `draft-${_s.projectHash || 'none'}`;
-                useStore.getState().migrateSessionKey?.(_s.sessionId, draftKey);
-                setSelectedSession({ ..._s, sessionId: null, draft: true, draftId: newDraftId() });
+                const _nd = newDraftId(); // r26-B5:draft 键带 draftId,迁移目标与将创建的 draft 同键
+                useStore.getState().migrateSessionKey?.(_s.sessionId, queueKeyFor({ projectHash: _s.projectHash, draftId: _nd }));
+                setSelectedSession({ ..._s, sessionId: null, draft: true, draftId: _nd });
               }
               setProviderSwitchNotice({ text: '原会话历史已失效，已自动新建会话并重发本条。' });
               setTimeout(() => handleSendRef.current?.(prompt, { ...opts, freshRetry: true }), 80);
@@ -5780,7 +5881,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       // reattach 流的收尾排空(AZ10 原设计)。
       if (!backgroundedRef.current) {
         const _ls = getLocalSession();
-        const curKey = _ls?.sessionId || `draft-${_ls?.projectHash || 'none'}`;
+        const curKey = queueKeyFor(_ls);
         const queueKey = streamSid || streamOwnerKeyRef.current || curKey;
         const next = queueKey === curKey ? useStore.getState().shiftMessage(queueKey) : null;
         if (next?.text) {
@@ -5894,7 +5995,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       // 子代理条目 sessionId 就是该键,不补会扫不到残留。
       // 收尾挂到 /stop 响应上(晚几毫秒):选择性停止会保留跨回合后台子代理,它们没被停、
       // 进程还活着,标 stopped 就是假终态。请求失败/无字段 → 回落全量收尾(原行为)。
-      const _bsid = selectedSession?.sessionId || (selectedSession?.projectHash ? `draft-${selectedSession.projectHash}` : null);
+      const _bsid = selectedSession?.sessionId || (selectedSession?.projectHash ? queueKeyFor(selectedSession) : null);
       fetch(`/api/chat/${backgroundPid}/stop`, { method: 'POST', signal: AbortSignal.timeout(8000) })
         .then((r) => r.json()).catch(() => null)
         .then((d) => finalizeSessionAgents(_bsid, 'stopped', d?.keptToolUseIds));
@@ -6023,7 +6124,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   const handleAccelerate = useCallback(async () => {
     // queueKey 与流收尾 drain 同口径(F1):入队侧(enqueueMessage)用的也是这个 pane key。
     const sel = getLocalSession();
-    const queueKey = sel?.sessionId || `draft-${sel?.projectHash || 'none'}`;
+    const queueKey = queueKeyFor(sel);
     const q = useStore.getState().messageQueue[queueKey] || [];
     // 第一条【用户可见且没注入过】的消息(隐藏项=计划续跑等系统消息,不给引导入口)。
     const idx = firstSteerableIndex(q);
@@ -6284,7 +6385,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     if (mode === 'edit' && (originalText || hasAttach)) {
       // Target THIS pane's composer only (key == its sessionQueueKey). The old
       // untargeted store write + broadcast filled EVERY split pane's input box.
-      const targetKey = sel?.sessionId || `draft-${sel?.projectHash || 'none'}`;
+      const targetKey = queueKeyFor(sel);
       window.dispatchEvent(new CustomEvent('cgui:composer-fill', { detail: { text: originalText, targetKey, editMode: true, attachments: hasAttach ? msg.attachments : undefined } }));
       // 非破坏式(#4):只回填输入框 + 记录待回滚目标,绝不在此刻 trim/截断/还原文件。
       // 等用户真正点发送时(handleSend 拦截)才回退;按 Esc 取消则历史毫发无损。
@@ -6367,7 +6468,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           // 下一轮 getModelFor / getPermissionModeFor(`draft-...`) 会回退到全局默认
           // → 用户切到"接受编辑"后回滚到首条 → 模式被重置为"默认"(Bug #8)。
           // 把 pin 迁移到 draft key,保留用户的会话级设置。
-          const draftKey = `draft-${sel.projectHash || 'none'}`;
+          // r26-B5:draft 键带将创建 draft 的 draftId(与 setSelectedSession 的 draftId 同一个)。
+          const _nd = newDraftId();
+          const draftKey = queueKeyFor({ projectHash: sel.projectHash, draftId: _nd });
           // force=true:当前会话的模型/模式选择必须覆盖 draft 残留,否则回滚首条后
           // 模型被重置(#5)。
           useStore.getState().migrateSessionKey(sel.sessionId, draftKey, true);
@@ -6375,7 +6478,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             ...sel,
             sessionId: null,
             draft: true,
-            draftId: newDraftId(),
+            draftId: _nd,
           });
         }
       } catch { trimFailed = true; }
@@ -6458,7 +6561,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   useEffect(() => {
     const onCancel = (e) => {
       const targetKey = e?.detail?.targetKey;
-      const myKey = selectedSession?.sessionId || `draft-${selectedSession?.projectHash || 'none'}`;
+      const myKey = queueKeyFor(selectedSession);
       if (targetKey && targetKey !== myKey) return;
       setPendingEditRollback(null);
     };
@@ -6790,7 +6893,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // 取值优先级逐字同链([1m] > resolvedWindow > /context 实测 > 按名推测)。
   const winSource = /\[1m\]/i.test(currentModel || '') ? `${winLabel}（[1m] 显式开关）`
     : resolvedWindow ? `${winLabel}（后端解析:provider 配置 / CLI 自报）`
-    : measuredCtx?.windowTokens ? `${winLabel}（/context 实测缓存）`
+    : measuredCtx?.windowTokens ? `${winLabel}（/context ${measuredCtx?.estimated ? '估算' : '实测'}缓存）`
     : `${winLabel}（按模型名内置推测）`;
   const badgeInfo = {
     headerModel, models, toolCallCount,
@@ -7043,8 +7146,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
               onClick={() => {
                 const _s = getLocalSession();
                 if (_s) {
-                  useStore.getState().migrateSessionKey?.(_s.sessionId || '', `draft-${_s.projectHash || 'none'}`);
-                  setSelectedSession({ ..._s, sessionId: null, draft: true, draftId: newDraftId() });
+                  const _nd = newDraftId(); // r26-B5:迁移目标键与将创建 draft 同 draftId
+                  useStore.getState().migrateSessionKey?.(_s.sessionId || '', queueKeyFor({ projectHash: _s.projectHash, draftId: _nd }));
+                  setSelectedSession({ ..._s, sessionId: null, draft: true, draftId: _nd });
                 }
                 setChatMessages([]);
                 // 转 draft 必清 pane 历史归属(claimPaneMessages 契约自守是兜底,这里是正路)
@@ -7736,7 +7840,8 @@ function ContextBreakdownButton({ contextTokens, contextWindow, contextPct, fmtT
       clearTimeout(justDoneTimer.current);
       justDoneTimer.current = setTimeout(() => setJustDone(false), 1200);
       // U3/V1:把 CLI 实测的分子+分母回写为本会话徽章的权威值,徽章与明细从此一致。
-      if (d?.windowTokens > 0) useStore.getState().setCtxMeasured(sessionId, { totalTokens: d.totalTokens || 0, windowTokens: d.windowTokens });
+      // r26-G3:estimated 透传 —— 估算路径的实测不是精确值,徽章脚注据此标「估算」。
+      if (d?.windowTokens > 0) useStore.getState().setCtxMeasured(sessionId, { totalTokens: d.totalTokens || 0, windowTokens: d.windowTokens, estimated: d.estimated === true });
       useStore.getState().setCtxBreakdown(canonicalKey, d, requestEpoch);
     } catch (e) {
       if (e.name !== 'AbortError' && requestRef.current?.requestEpoch === requestEpoch) {
@@ -7792,12 +7897,14 @@ function ContextBreakdownButton({ contextTokens, contextWindow, contextPct, fmtT
       <div className="px-3 pb-2 flex items-center gap-2 border-b border-black/5">
         <span className="text-xs font-medium text-ink font-body">{info ? '会话信息' : '上下文用量'}</span>
         {data?.model && <span className="text-[10px] text-ink-faint font-mono truncate max-w-[130px]" title={data.model}>{data.model}</span>}
-        {/* r11-⑨:数据来源与口径标注 —— 本地估算 / 精确(SDK·CLI 实测,第三方经代理) + 新鲜度 + 耗时。 */}
+        {/* r11-⑨:数据来源与口径标注 —— 本地估算 / 精确(SDK·CLI 实测,第三方经代理) + 新鲜度 + 耗时。
+            r26-G3(契约 C-G3):服务端估算路径回 estimated:true → 标「估算」,
+            估算不得冒充精确值展示。 */}
         {data?.localOnly && !loading && <span className="text-[9px] text-ink-faint font-body">本地估算</span>}
         {loading && <span className="text-[9px] text-ink-faint font-body">正在精确计算…</span>}
         {!loading && !data?.localOnly && data?.sampledAt && (
           <span className="text-[9px] text-ink-faint font-body" title={data.sampledAt}>
-            精确 · {data.source === 'sdk' ? 'SDK 实测' : 'CLI 实测'}{info?.providerHintLabel ? '（第三方经代理）' : ''} · {relativeAgeLabel(data.sampledAt)}
+            {data?.estimated ? '估算（约数）' : '精确'} · {data.source === 'sdk' ? 'SDK 实测' : 'CLI 实测'}{info?.providerHintLabel ? '（第三方经代理）' : ''} · {relativeAgeLabel(data.sampledAt)}
             {Number.isFinite(data._elapsedMs) ? ` · 耗时 ${(data._elapsedMs / 1000).toFixed(1)}s` : ''}
           </span>
         )}
@@ -8226,6 +8333,16 @@ function MobileEffortPage({ permKey }) {
   const caps = effortCapsFor(modelEffortMeta, selModel);
   const locked = caps.reasoning === false;
   const levels = EFFORT_LEVELS.filter((e) => e.id === '' || effortAllowed(caps, e.id));
+  // r26-F3②③:手机端补齐桌面那半套 —— ①onClick 写同键同语义的 per-model 记忆
+  // (cgui-effort-<provider>-<modelId>,F6 键形);②挂载同一回落钩子(当前档不被
+  // 新模型支持时持久化回落,静默不弹 toast —— 桌面那颗在手机上不渲染,没人兜底)。
+  const providerHint = useStore((s) => s.currentProvider?.providerHint || 'anthropic');
+  const bareModelId = String(selModel || '').replace(/\[1m\]/i, '');
+  useEffortFallback({
+    permKey, bareModelId, meta: modelEffortMeta, effort,
+    memoryKey: effortMemoryKey(providerHint, bareModelId),
+    setEffort: (id) => useStore.getState().setEffortFor(permKey, id),
+  });
   return (
     <div className="py-1">
       <div className="px-4 pt-2 pb-1 text-[11px] text-ink-faint font-body">
@@ -8239,7 +8356,10 @@ function MobileEffortPage({ permKey }) {
             ? `跟随全局设置:${EFFORT_LEVELS.find((x) => x.id === defaultEffort)?.label || defaultEffort}`
             : '未设全局,由模型自适应';
         return (
-        <button key={e.id || 'default'} onClick={() => useStore.getState().setEffortFor(permKey, e.id)}
+        <button key={e.id || 'default'} onClick={() => {
+          useStore.getState().setEffortFor(permKey, e.id);
+          if (bareModelId) { try { localStorage.setItem(effortMemoryKey(providerHint, bareModelId), e.id); } catch {} }
+        }}
           className="w-full flex items-center gap-3 px-4 py-3 text-left hover:bg-canvas-warm transition-colors">
           <div className="flex-1 min-w-0">
             <div className="text-[14px] font-body text-ink">{e.label}</div>
@@ -9051,13 +9171,22 @@ function MobileMenu({ setRightPanel, onClose, updateNotice = null }) {
   const selectedSession = useStore((s) => s.selectedSession);
   const selectedProject = useStore((s) => s.selectedProject);
   const activeSession = (paneSessions && paneSessions[activeTabIndex]) || selectedSession;
-  const permKey = activeSession?.sessionId || `draft-${activeSession?.projectHash || 'none'}`;
+  const permKey = queueKeyFor(activeSession);
 
-  const currentModel = useStore((s) => s.modelBySession[permKey] || s.currentModel);
+  // r26-F2:手机菜单模型行走与桌面同一解析链 resolveSelectorModel(pin→元数据→全局,
+  // 每环过 provider 白名单 + context1m 后缀)——裸 `pin || global` 会把 guard 拒掉的
+  // 残留模型显示出来,与桌面徽章不一致。
+  const currentModel = useStore((s) => resolveSelectorModel(s, permKey)) || null;
   // 审计批C2:导出 Markdown 需要当前会话消息(手机单窗格=pane0/activeTabIndex)。
   const menuMessages = useStore((s) => (s.paneMessages && s.paneMessages[s.activeTabIndex]) || s.messages || EMPTY_ARRAY);
   const effort = useStore((s) => (permKey && permKey in (s.effortBySession || {})) ? s.effortBySession[permKey] : s.effort);
-  const effortLabel = (EFFORT_LEVELS.find((e) => e.id === effort) || EFFORT_LEVELS[0]).label;
+  // r26-F3①:菜单行 effortLabel 过 caps —— 当前档不被该模型支持时显示回落后的档位,
+  // 与分页列表(只列支持档)、发送侧(不支持的档摘空)三方一致。
+  const menuEffortMeta = useStore((s) => s.modelEffortMeta);
+  const menuCaps = effortCapsFor(menuEffortMeta, currentModel);
+  const effortLabel = (effortAllowed(menuCaps, effort || '')
+    ? (EFFORT_LEVELS.find((e) => e.id === effort) || EFFORT_LEVELS[0])
+    : EFFORT_LEVELS[0]).label;
 
   // New chat: prefer the selected project; fall back to the open session's
   // project so ✎ isn't a dead no-op. With no project at all, drop into the
@@ -9363,7 +9492,7 @@ export default function App() {
   // 修正批#1b:顶栏选择器(Provider/模型/力度/远程)作用于「活跃窗格」的会话——
   // 未分屏 = selectedSession;分屏 = 聚焦格。返回既有对象引用,选择器稳定。
   const headerPane = useStore((s) => (s.paneSessions && s.paneSessions[s.activeTabIndex || 0]) || s.selectedSession);
-  const headerPermKey = headerPane ? (headerPane.sessionId || `draft-${headerPane.projectHash || 'none'}`) : null;
+  const headerPermKey = headerPane ? queueKeyFor(headerPane) : null;
   const [rightPanel, setRightPanelRaw] = useState(null);
   // 修正批#7:原 T5#1 "离开设置面板丢 Provider 表单输入"守卫已删——表单随 Provider tab
   // 迁出设置,脏数据守卫改由 ProviderManagerModal 的关闭路径(Esc/点外/X)承担。
@@ -9443,7 +9572,7 @@ export default function App() {
         const st = useStore.getState();
         const idx = st.activeTabIndex || 0;
         const sel = (st.paneSessions && st.paneSessions[idx]) || st.selectedSession;
-        const targetKey = sel?.sessionId || `draft-${sel?.projectHash || 'none'}`;
+        const targetKey = queueKeyFor(sel);
         const name = String(d.path || 'screenshot.png').split(/[/\\]+/).pop();
         window.dispatchEvent(new CustomEvent('cgui:composer-fill', {
           detail: {

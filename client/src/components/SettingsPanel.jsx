@@ -751,6 +751,17 @@ function UpdateAvailable({ state }) {
 
   return (
     <div className="text-[12px] bg-amber-50 border border-amber-200 text-amber-900 rounded p-2.5 space-y-2">
+      {/* r26-C4:版本信息来自 jsDelivr 镜像(viaMirror)= GitHub API/直连全败过,
+          下方 assets 直链大概率也下不动 —— 先给手动指引,不让用户点了白等。 */}
+      {state.viaMirror && (
+        <div className="text-[11px] text-amber-800 bg-amber-100/60 border border-amber-300 rounded p-2">
+          检测到镜像源(jsDelivr):自动下载可能失败,建议
+          <button
+            onClick={(e) => { e.preventDefault(); openExternalUrl(state.htmlUrl); }}
+            className="text-accent underline bg-transparent border-0 cursor-pointer p-0 mx-0.5 text-[11px]"
+          >手动到发布页下载</button>。
+        </div>
+      )}
       <div className="flex items-center gap-1.5">
         <span>新版本可用:</span>
         <b className="font-mono">v{state.latestVersion}</b>
@@ -1077,6 +1088,13 @@ function CcUpdater() {
 
   // CN-2:在 GUI 内更新并实时显示进度(流式 NDJSON),不用开外部终端。
   const doUpdate = async () => {
+    // r26-C1:跨渠道(显式 npm 渠道 × 非 npm 安装)先明示再确认 —— 裸跑会把更新
+    // 写进 npm 前缀的另一份安装,PATH 里先生效的仍是当前安装(假成功)。
+    if (state.crossChannel) {
+      if (!(await confirmDialog(`你选择的更新渠道(npm)与当前安装方式(${METHOD_LABEL[state.method] || state.method || '未知'})不一致:将安装到 npm 全局前缀,与当前安装是两份;PATH 里先生效的仍是当前安装(更新后这里显示的版本可能不变)。\n建议先把更新渠道改回「跟随安装方式」。仍要继续吗?`))) return;
+      setUpdating(true); setResult(null); setLogLines([]);
+      return doUpdateStream({ allowCrossChannel: true });
+    }
     const cmd = state.updateCommand || 'claude upgrade';
     if (!(await confirmDialog(`将在应用内运行【${cmd}】更新 Claude Code 到 v${state.latestVersion}（安装方式：${state.method || '未知'}），进度实时显示在下方。\n更新在后台进行:关掉这个面板不会中断,回来还能接着看进度。\n（墙内需已开系统代理;若卡住可点"改用终端"。）确定继续?`))) return;
     setUpdating(true); setResult(null); setLogLines([]);
@@ -1087,9 +1105,12 @@ function CcUpdater() {
   // r22-③:attach=true 走【只续看、绝不 spawn】的 /attach 入口。原来两者都打 /stream
   // (会启动安装的那个),而这个参数根本没人读 —— 更新恰好在 GET /status 与这次 POST
   // 之间跑完,用户只是打开设置面板就静默起了一次全局安装,毫无确认。
-  const doUpdateStream = async ({ attach = false } = {}) => {
+  const doUpdateStream = async ({ attach = false, allowCrossChannel = false } = {}) => {
     try {
-      const r = await fetch(attach ? '/api/claude-update/attach' : '/api/claude-update/stream', { method: 'POST' });
+      // r26-C1:跨渠道确认回执随请求体下发;服务端无回执的裸调用一律拒绝(409/error 帧)。
+      const r = await fetch(attach ? '/api/claude-update/attach' : '/api/claude-update/stream', allowCrossChannel
+        ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ allowCrossChannel: true }) }
+        : { method: 'POST' });
       if (!r.ok || !r.body) throw new Error('HTTP ' + r.status);
       const reader = r.body.getReader();
       const dec = new TextDecoder();
@@ -1158,9 +1179,15 @@ function CcUpdater() {
   // r13-p2-20:更新渠道(auto 跟随安装方式 / npm / native)。镜像源用户 npm 通常更快
   // (实测 cdn.npmmirror 2.2MB/s vs 原生二进制源经代理 1.0MB/s),故不再一律导向原生。
   const [channel, setChannel] = useState(null); // 生效渠道(未选过=跟随安装方式)
+  // r26-C5:显式选择(null=跟随)。选中态按 explicit 画 —— 跟随是真实可选状态,
+  // 选过 npm/native 后还能切回来(原来一旦选过就永远回不去)。
+  const [channelExplicit, setChannelExplicit] = useState(null);
   useEffect(() => {
     fetch('/api/claude-update-channel').then((r) => r.json())
-      .then((d) => { if (d?.channel) setChannel(d.channel); }).catch(() => {});
+      .then((d) => {
+        if (d?.channel) setChannel(d.channel);
+        setChannelExplicit(d?.explicit ?? null);
+      }).catch(() => {});
   }, []);
   // r13-p2-21:更新已改服务端后台任务 —— 挂载时对账,若还在跑就自动续看(不用重点),
   // 若已结束则直接展示结果与日志(关面板期间完成的也看得到)。
@@ -1179,7 +1206,7 @@ function CcUpdater() {
   }, []);
 
   const pickChannel = async (ch) => {
-    setChannel(ch);
+    setChannelExplicit(ch); // ch=null → 跟随安装方式(r26-C5)
     try {
       await fetch('/api/claude-update-channel', {
         method: 'PUT', headers: { 'Content-Type': 'application/json' },
@@ -1473,23 +1500,26 @@ function CcUpdater() {
           {logLines.length ? logLines.join('\n') : '启动中…'}{updating && <span className="animate-pulse"> ▌</span>}
         </pre>
       )}
-      {/* r13-p2-20:更新渠道选择 */}
+      {/* r13-p2-20:更新渠道选择;r26-C5:补「跟随安装方式」选项(映射 null,可切回) */}
       <div className="flex items-center gap-2 flex-wrap">
         <span className="text-[11px] text-ink-muted font-body shrink-0">更新渠道</span>
         <div className="flex items-center gap-0.5 rounded-md bg-canvas-warm p-0.5">
           {[
+            { id: null, label: '跟随安装方式(推荐)' },
             { id: 'npm', label: 'npm' },
             { id: 'native', label: '原生' },
           ].map((c) => (
-            <button key={c.id} onClick={() => pickChannel(c.id)}
+            <button key={String(c.id)} onClick={() => pickChannel(c.id)}
               className={`px-2 py-1 rounded text-[11px] font-body transition-colors ${
-                channel === c.id ? 'bg-accent text-on-accent' : 'text-ink-muted hover:text-ink'}`}>
+                channelExplicit === c.id ? 'bg-accent text-on-accent' : 'text-ink-muted hover:text-ink'}`}>
               {c.label}
             </button>
           ))}
         </div>
         <span className="text-[10.5px] text-ink-faint font-body">
-          默认跟随你的安装方式;npm 走本机 registry(镜像源通常更快),原生走官方安装器自更新。
+          {channelExplicit === null
+            ? `跟随安装方式:当前按${channel === 'npm' ? ' npm(本机 registry,镜像源通常更快)' : '原生(官方安装器自更新)'}渠道更新。`
+            : '显式指定更新来源;选回「跟随安装方式」即恢复按安装方式自动选择。'}
         </span>
       </div>
       {result && (
@@ -1907,12 +1937,21 @@ function PersistentChatToggle() {
 // 置空 = 不限制(默认)。
 // r11-⑫:称呼——存服务端 prefs.json(displayName,≤20 字符可空,多端共享+WS 广播)。
 // Home 问候显示「{时段词}，{称呼}」;皮肤 home.greeting 模板经 {name} 占位符引用。
+// r26-D12:称呼按码点截断 —— UTF-16 的 slice 会把 emoji 代理对从中间劈开(孤代理)。
+// 与服务端 prefs.js 的 `[...displayName.trim()].slice(0, 20).join('')` 同口径(等长)。
+// 注:PLAN C-D12 原定辅助放 client utils 共用;本包文件白名单只含本文件,故就地
+// 模块级定义,需要跨文件复用时再提取(交付报告已注明)。
+function truncateByCodePoints(s, n) {
+  return [...String(s)].slice(0, n).join('');
+}
+
 function DisplayNameInput() {
   const val = useStore((s) => s.displayName);
   const putDisplayName = useStore((s) => s.putDisplayName);
   const [draft, setDraft] = useState(val || '');
   useEffect(() => { setDraft(val || ''); }, [val]);
-  const commit = () => { if (draft.trim().slice(0, 20) !== (val || '')) putDisplayName(draft); };
+  // 提交比较同样按码点口径,避免 emoji 称呼每次 blur 都误判「有变化」多发一次 PUT。
+  const commit = () => { if (truncateByCodePoints(draft.trim(), 20) !== (val || '')) putDisplayName(draft); };
   return (
     <div className="bg-canvas-warm border border-canvas-deep rounded-lg px-3 py-2.5 flex items-center gap-3">
       <div className="min-w-0 flex-1">
@@ -1922,7 +1961,7 @@ function DisplayNameInput() {
       <input
         type="text" maxLength={20} placeholder="未设置"
         value={draft}
-        onChange={(e) => setDraft(e.target.value)}
+        onChange={(e) => setDraft(truncateByCodePoints(e.target.value, 20))}
         onBlur={commit}
         onKeyDown={(e) => { if (e.key === 'Enter') e.currentTarget.blur(); }}
         className="w-36 shrink-0 text-[12px] font-body bg-canvas-base border border-canvas-deep rounded px-2 py-1 text-ink focus:border-accent outline-none" />

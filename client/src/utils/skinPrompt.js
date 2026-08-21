@@ -37,6 +37,7 @@ export function buildSkinPrompt() {
     `- 锚点清单(${anchors.length} 个):`,
     ...anchors.map((a) => `  · ${a}`),
     '- client.js 为经典脚本(Blob-URL 注入);禁 fetch/XMLHttpRequest/WebSocket/import()/eval/new Function/sendBeacon(静态校验,命中拒载);',
+    '  静态校验的口径是防误导入,不防恶意代码;只导入你完全信任的皮肤。',
     '  必须注册卸载器:window.__cguiSkinDispose = () => { /* 还原你的全部改动 */ };',
     '- a11y.css 放高对比/焦点可见性补丁。',
     '',

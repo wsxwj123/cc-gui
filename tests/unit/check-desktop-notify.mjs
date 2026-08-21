@@ -211,8 +211,10 @@ const plan = (o) => planNotification({ enabled: true, focused: false, ...o });
   assert.equal((handler.match(/addPendingPermission\(/g) || []).length, 0,
     'handlePermissionRequest 里不许再直接入表 —— 绕过 addCard 就没有通知');
   assert.equal((handler.match(/addCard\(req\)/g) || []).length, 2, '危险命令卡与普通卡两条入表分支都要走 addCard');
-  assert.ok(/respondPermission\(req\.id, \{ decision: 'allow' \}\);\s*\n\s*return;/.test(handler),
-    '白名单自动放行分支不入表也不发通知(用户不需要知道 = 纯噪音)');
+  // r26-H1 换锚:auto-allow 必须带 broadcast 下发的 req.nonce(服务端 nonce 闸),语义不变
+  // (不入表、不发通知)。
+  assert.ok(/respondPermission\(req\.id, \{ decision: 'allow', nonce: req\.nonce \}\);\s*\n\s*return;/.test(handler),
+    '白名单自动放行分支不入表也不发通知(用户不需要知道 = 纯噪音);r26-H1 起带 nonce');
 
   const app = readFileSync(join(root, 'client/src/App.jsx'), 'utf8');
   assert.ok(/import \{ notifyWaiting \} from '\.\/utils\/desktopNotify\.js'/.test(app));

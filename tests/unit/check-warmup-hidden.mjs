@@ -215,7 +215,7 @@ const hidden = new Set(['h-home', 'h-tmp', 'h-big', 'h-stale-1', 'h-stale-2']); 
   // 声明顺序:focusedProjectHash 必须在 useMemo 之前,否则 TDZ 白屏(历史踩过)
   assert.ok(app.indexOf('const focusedProjectHash = useStore') < app.indexOf('visibleHomeProjects(projects, hiddenHashes'),
     't8: focusedProjectHash 声明在过滤 useMemo 之前(TDZ)');
-  assert.match(app, /setHiddenHashes\(readHiddenHashes\(d\)\)/, 't8: 载荷解析走共用纯函数');
+  assert.match(app, /applyHiddenProjects\(\[\.\.\.readHiddenHashes\(d\)\]\)/, 't8: 载荷解析走共用纯函数(r26-I2 起写入 store.hiddenProjects,WS 广播收敛)');
   const recentAt = app.indexOf('const recent = useMemo');
   assert.match(app.slice(recentAt, recentAt + 200), /visibleProjects/, 't8: 最近项目下拉同样取已过滤列表');
 }

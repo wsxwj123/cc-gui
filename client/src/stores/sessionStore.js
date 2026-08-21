@@ -2,7 +2,7 @@ import { create } from 'zustand';
 import { nextDockCode } from '../utils/artifactDock.js';
 import { mergeSyncedMap, syncableKey, pushLocalOnlyKeys, createInFlightCounter, shouldMarkMigrated } from '../utils/sessionSync.js';
 import { FONT_OPTIONS, readingFontCss } from '../utils/systemFonts.js';
-import { createQueueId, firstDrainableIndex, isSteerBarrier, reclaimClaimItem, reconcileSteered, stripSteerState } from '../utils/steerQueue.js';
+import { createQueueId, firstDrainableIndex, isSteerBarrier, reclaimClaimItem, reconcileSteered, stripSteerState, queueKeyFor, isDraftQueueKey, draftQueueProjectHash } from '../utils/steerQueue.js';
 import { isValidContextResponse, shouldReplaceContextCache } from '../utils/contextCache.js';
 import { reducePinned, initialExpandedProjects, toggleExpanded, mergeSessionList } from '../utils/projectPanel.js';
 
@@ -342,6 +342,41 @@ if (rawQueueSnapshot && typeof rawQueueSnapshot === 'object' && !Array.isArray(r
 }
 const recoveredQueueMap = stripSteerState(initialQueueMap);
 
+// ── r26-B1:孤儿 draft 队列启动回收 ─────────────────────────────
+// 「已入队、服务端进程还没起」的窗口内刷新 → 消息留在 draft-* 队列里;draft 窗格
+// 默认不还原(RESTORE_LAST_ON_BOOT=false)→ 队列成无 UI 孤儿;下次同项目新发消息时
+// drain 会把它当首条自动发出。这里【不静默删】(队列语义=用户点过发送的输入):
+// 无存活 draft 窗格对应的 draft-* 键整表移入 orphanDraftQueues(保留原文),
+// 从 messageQueue 摘除 → drain 状态式判据永远够不着它们。Home 挂载时按项目过滤
+// 展示「填入输入框 / 丢弃」。旧形态 `draft-<hash>` 键(B5 之前)无法安全归属到
+// 任何一个 draft,同批进孤儿表,不做猜测性归属。
+const ORPHAN_QUEUE_STORAGE_KEY = 'cgui-orphan-draft-queues';
+const liveDraftQueueKeysAtBoot = (() => {
+  const keys = new Set();
+  if (!RESTORE_LAST_ON_BOOT) return keys; // 默认形态:启动无任何存活 draft 窗格
+  try {
+    for (const p of readLs('cgui-pane-sessions', [])) {
+      if (p && !p.sessionId) keys.add(queueKeyFor(p));
+    }
+    const sel0 = readLs('cgui-selected-session', null);
+    if (sel0 && !sel0.sessionId) keys.add(queueKeyFor(sel0));
+  } catch {}
+  return keys;
+})();
+const initialOrphanDraftQueues = (() => {
+  // 上次会话留下的孤儿表(用户没处置完就关了页面)继续保留,与新扫出的合并。
+  const prev = readLs(ORPHAN_QUEUE_STORAGE_KEY, {});
+  const out = (prev && typeof prev === 'object' && !Array.isArray(prev)) ? { ...prev } : {};
+  for (const key of Object.keys(recoveredQueueMap)) {
+    if (!isDraftQueueKey(key) || liveDraftQueueKeysAtBoot.has(key)) continue;
+    out[key] = { projectHash: draftQueueProjectHash(key), items: recoveredQueueMap[key] };
+    delete recoveredQueueMap[key];
+  }
+  return out;
+})();
+const persistOrphanDraftQueues = (map) => writeLs(ORPHAN_QUEUE_STORAGE_KEY, map);
+persistOrphanDraftQueues(initialOrphanDraftQueues);
+
 const persistQueueSnapshot = (messageQueue, verify = false) => {
   if (typeof localStorage === 'undefined') return true;
   try {
@@ -525,8 +560,54 @@ export const useStore = create((set, get) => ({
   // 不自动发送(自动发可能撞正在进行的回合)。
   messageQueue: recoveredQueueMap,
 
+  // r26-B1:孤儿 draft 队列 { [queueKey]: { projectHash, items[] } }。
+  // 启动时从 messageQueue 里摘出的无主 draft 排队消息(见模块顶部回收段)。
+  // 保留数据等用户处置:Home 横幅按 projectHash 过滤展示,「填入输入框」逐条
+  // 摘除、「丢弃」整键移除 —— 两条路都从此表出清,绝不回流 messageQueue。
+  orphanDraftQueues: initialOrphanDraftQueues,
+  // 丢弃单个孤儿键(整键消息全丢)。persist 同步,刷新不复活。
+  discardOrphanDraftQueue: (queueKey) => set((s) => {
+    if (!s.orphanDraftQueues?.[queueKey]) return s;
+    const next = { ...s.orphanDraftQueues };
+    delete next[queueKey];
+    persistOrphanDraftQueues(next);
+    return { orphanDraftQueues: next };
+  }),
+  // 「全部丢弃」只清当前项目可见集(跨项目隔离:不把别的项目的孤儿一并抹掉)。
+  discardOrphanDraftQueuesFor: (projectHash) => set((s) => {
+    const cur = s.orphanDraftQueues || {};
+    const next = Object.fromEntries(Object.entries(cur)
+      .filter(([, v]) => v?.projectHash !== projectHash));
+    if (Object.keys(next).length === Object.keys(cur).length) return s;
+    persistOrphanDraftQueues(next);
+    return { orphanDraftQueues: next };
+  }),
+  // 「填入输入框」:从孤儿表摘出该条(返回它),键空即删。一次只填一条,
+  // 填入即从孤儿表摘除(防连点重复填入)。
+  takeOrphanDraftMessage: (queueKey, queueId) => {
+    let taken = null;
+    set((s) => {
+      const entry = s.orphanDraftQueues?.[queueKey];
+      if (!entry) return s;
+      const items = (entry.items || []).filter((it) => {
+        if (!taken && it?.queueId === queueId) { taken = it; return false; }
+        return true;
+      });
+      const next = { ...s.orphanDraftQueues };
+      if (items.length) next[queueKey] = { ...entry, items };
+      else delete next[queueKey];
+      if (!taken) return s;
+      persistOrphanDraftQueues(next);
+      return { orphanDraftQueues: next };
+    });
+    return taken;
+  },
+
   // Pending CLI permission requests waiting on the user. Each entry:
-  //   { id, toolName, toolInput, sessionId, cwd, hookEvent, createdAt }
+  //   { id, toolName, toolInput, sessionId, cwd, hookEvent, createdAt, nonce? }
+  // r26-H1(契约 C-H1):nonce 随 permission:request 广播/loopback 补拉透传入卡
+  // (addPendingPermission 展开原对象,不剥字段),respond 时由 PermissionPrompt
+  // 回带 body.nonce / useWebSocket 补 X-CGUI-Nonce 头。
   // Populated by useWebSocket on `permission:request`. Removed when
   // /respond is called OR `permission:resolved` arrives (e.g. CLI exited).
   pendingPermissions: [],
@@ -922,7 +1003,10 @@ export const useStore = create((set, get) => ({
       // 与 routing.migrateDraftQueue 同口径:按 queuedAt 升序合并(无 queuedAt 按 0 兜底),
       // 不依赖拼接方向 —— 保证先发先入队的消息先出队,两条迁移路径行为一致。
       const merged = force ? mq[fromKey] : [...(mq[fromKey] || []), ...(mq[toKey] || [])].sort((a, b) => (a?.queuedAt || 0) - (b?.queuedAt || 0));
-      next[toKey] = merged;
+      // r26-B2③:claim 槽随队列迁移时同步 claimDraft.sessionKey —— 否则 ChatInput 的
+      // 「切会话释放 claim」判据(sessionKey !== 新 permKey)会把刚随 draft→真 sid 升级
+      // 搬过来的 claim 误判成"别人的"而释放,用户正在编辑的取回草稿被抽走。
+      next[toKey] = merged.map((it) => (it?.claimDraft ? { ...it, claimDraft: { ...it.claimDraft, sessionKey: toKey } } : it));
       delete next[fromKey];
       patch.messageQueue = next;
     }
@@ -1617,7 +1701,9 @@ export const useStore = create((set, get) => ({
     if (index < 0) return s;
     const current = list[index];
     let nextItem = current;
-    if (outcome === 'accepted') nextItem = { ...current, steerState: 'accepted' };
+    // r26-B3:accepted 记落盘宽限锚点 —— reattach 中途的历史刷新对账未命中时,
+    // 宽限期(RECONCILE_GRACE_MS)内不翻 needs-review(CLI 落盘有秒级延迟)。
+    if (outcome === 'accepted') nextItem = { ...current, steerState: 'accepted', acceptedAt: Date.now() };
     // ①"保留不发"：resolved 终态。必须清 attemptWasAmbiguous（isSteerBarrier 也认它），
     // 且分支要在 ambiguous 兜底之前——needs-review 条目 attemptWasAmbiguous 恒真，
     // 放后面 'kept' 会被兜底分支吞掉。
@@ -1765,6 +1851,24 @@ export const useStore = create((set, get) => ({
     if (!found || !persistQueueSnapshot(nextQueue, true)) return s;
     return { messageQueue: nextQueue };
   }),
+  // r26-B2:显式放弃取回(清空输入框 / 切到别的会话)→ 把 hidden 占位槽还原为可见
+  // needs-review 条目,解死锁(占位槽沉到队首恒不可 drain,且 claimDraft 槽拒删,
+  // 没有这条路径队列永久卡死)。与孤儿回收的差别:这里是用户【主动放弃编辑】,
+  // 还原文本恒取 queueText 原文(discardEdits),编辑文本随清空动作一并放弃。
+  releaseClaimDraft: (targetPaneId, claimId) => set((s) => {
+    let found = false;
+    const nextQueue = Object.fromEntries(Object.entries(s.messageQueue).map(([key, list]) => [
+      key,
+      (Array.isArray(list) ? list : []).map((item) => {
+        const cd = item?.claimDraft;
+        if (!cd?.sendable || cd.targetPaneId !== targetPaneId || cd.claimId !== claimId) return item;
+        found = true;
+        return reclaimClaimItem(item, { discardEdits: true });
+      }),
+    ]));
+    if (!found || !persistQueueSnapshot(nextQueue, true)) return s;
+    return { messageQueue: nextQueue };
+  }),
   shiftMessage: (sessionKey) => {
     // 原子 pop(#7):取 head 与写回 rest 必须在同一次 setState 里 —— 先 getState 再
     // setState 的两步写法下,并发调用方(流收尾 drain / ⚡引导)会各读到同一个 head,
@@ -1817,12 +1921,29 @@ export const useStore = create((set, get) => ({
     try {
       const res = await fetch('/api/projects');
       const data = await res.json();
+      // r26-E3(契约 C-E3):顶层 projects 目录被系统拒访 → 403 + no-disk-access。
+      // 与单项目会话列表(E2)同契约,但 projects 是顶层单列表,按 hash 存无意义
+      // → 单值 projectsAccessError。侧栏项目空态(PKG-11)只读本字段渲染提示。
+      if (res.status === 403 && data?.code === 'no-disk-access') {
+        set({
+          projects: [],
+          projectsAccessError: { hint: data.hint || '', canOpenSettings: !!data.canOpenSettings },
+          listLoading: false,
+        });
+        return;
+      }
       const projects = Array.isArray(data) ? data : [];
-      set({ projects, listLoading: false });
+      set((st) => ({
+        projects,
+        listLoading: false,
+        ...(st.projectsAccessError ? { projectsAccessError: null } : {}),
+      }));
     } catch (err) {
       set({ projects: [], error: err.message, listLoading: false });
     }
   },
+  // r26-E3:顶层 projects 目录 403 的错误态;null = 正常。
+  projectsAccessError: null,
 
   // r10-11:单层项目折叠面板的数据层。sessionsByProject 是懒加载的 per-project 会话
   // 缓存(钻入才拉取),**独立于 store.sessions 单值槽**——PermissionPrompt 权限卡门禁/
@@ -1868,21 +1989,31 @@ export const useStore = create((set, get) => ({
         // 身份复用同下:已经是空数组就不换身份,免得 600ms watcher 反复触发整树重渲。
         set((st) => {
           const merged = mergeSessionList(st.sessionsByProject[projectHash], []);
-          // r24:canOpenSettings 与 hint 同来同走(侧栏空态的「打开系统设置」按钮按它门控)。
-          // 原来这里只取 hint 把它丢了 —— 后端明明回了,前端却无从判断该不该给按钮。
+          // r26-E2:错误态按 projectHash 隔离存 —— 旧全局单值会让 A 项目的拒访染红
+          // B 项目的空态,且 B 任意一次成功又把 A 的错误清掉(随 watcher 抖动)。
+          // 置:仅置本项目键;清:仅本项目成功时删本键(见下方成功分支)。
           const canOpen = !!data.canOpenSettings;
-          const sameErr = st.sessionsAccessError === data.hint && st.sessionsAccessCanOpenSettings === canOpen;
+          const curMap = st.sessionsAccessErrorByProject || {};
+          const curErr = curMap[projectHash];
+          const sameErr = curErr?.hint === data.hint && !!curErr?.canOpenSettings === canOpen;
           const sameList = merged === st.sessionsByProject[projectHash];
           if (sameErr && sameList) return st;
           return {
-            ...(sameErr ? null : { sessionsAccessError: data.hint, sessionsAccessCanOpenSettings: canOpen }),
+            ...(sameErr ? null : { sessionsAccessErrorByProject: { ...curMap, [projectHash]: { hint: data.hint, canOpenSettings: canOpen } } }),
             ...(sameList ? null : { sessionsByProject: { ...st.sessionsByProject, [projectHash]: merged } }),
           };
         });
         return;
       }
       const list = Array.isArray(data) ? data : [];
-      set((st) => (st.sessionsAccessError ? { sessionsAccessError: null, sessionsAccessCanOpenSettings: false } : st));
+      // r26-E2:本项目成功 → 只清本项目的错误键,不动他键。
+      set((st) => {
+        const curMap = st.sessionsAccessErrorByProject || {};
+        if (!curMap[projectHash]) return st;
+        const nextMap = { ...curMap };
+        delete nextMap[projectHash];
+        return { sessionsAccessErrorByProject: nextMap };
+      });
       // r13-p2-1:内容不变则复用旧身份并跳过 set —— watcher 每 600ms 刷全部展开组,
       // 无条件换身份会让侧栏整树随流式持续重渲(按钮卡顿/点击丢失根因)。
       set((s) => {
@@ -1894,15 +2025,22 @@ export const useStore = create((set, get) => ({
     } catch { /* 面板刷新失败保留旧缓存,下次去抖刷新兜底 */ }
   },
   // 置顶(项目/会话,服务端共享):挂载 GET 与 WS 广播都经同一 reducer 入位。
-  // r17-4:会话目录不可读(完全磁盘访问未授予)时的人话提示;null = 正常。
-  sessionsAccessError: null,
-  // r24:这个平台有没有「一键打开」的系统设置面板可跳(后端 canOpenAccessSettings,
-  // 目前只有 macOS)。侧栏空态据此决定给不给「打开系统设置」按钮 —— Windows/Linux
-  // 上按了无处可去,不显示。
-  sessionsAccessCanOpenSettings: false,
+  // r26-E2:会话目录不可读(403 no-disk-access)的错误态【按 projectHash 隔离】——
+  // { [hash]: { hint, canOpenSettings } },缺省 undefined = 正常。侧栏按渲染组 hash 读。
+  // (旧全局单值 sessionsAccessError 已删除:A 拒访染红 B 空态 / B 成功误清 A 的抖动。)
+  sessionsAccessErrorByProject: {},
   pinnedProjects: [],
   pinnedSessions: [],
   applyPinned: (data) => set(reducePinned(data)),
+
+  // r26-I2(契约 C-I2):隐藏项目列表入 store —— 服务端 PUT hidden-projects 后
+  // broadcast { type:'hidden-projects', hidden },WS reducer 经 applyHiddenProjects
+  // 收敛,多端实时同步(此前只在 Home 挂载时拉一次,他端改了本端不刷新)。
+  // Home 与侧栏(I7②,PKG-11)统一读这里,不自拉。
+  hiddenProjects: [],
+  applyHiddenProjects: (hidden) => set({
+    hiddenProjects: Array.isArray(hidden) ? hidden.filter((x) => typeof x === 'string' && x) : [],
+  }),
 
   // Fetch sessions for a project.
   // `silent` = true means a background refresh (e.g. after a chat just
@@ -1918,12 +2056,20 @@ export const useStore = create((set, get) => ({
       // r22-①:同一个后端契约(403 + code:'no-disk-access')的第二个消费者。原来这里
       // 静默吞成 [] —— 与 fetchSessionsForPanel 口径不一致,权限被拒时旧槽照样显示成
       // "没有会话"。两个消费者必须同口径:置错误态 + 空列表。
+      // r26-E2:错误态按 projectHash 隔离(与 fetchSessionsForPanel 同一张 map)。
       if (res.status === 403 && data?.code === 'no-disk-access') {
-        const access = { sessionsAccessError: data.hint, sessionsAccessCanOpenSettings: !!data.canOpenSettings };
+        const access = { sessionsAccessErrorByProject: { ...(get().sessionsAccessErrorByProject || {}), [projectHash]: { hint: data.hint, canOpenSettings: !!data.canOpenSettings } } };
         set(silent ? { sessions: [], ...access } : { sessions: [], ...access, listLoading: false });
         return;
       }
-      set((st) => (st.sessionsAccessError ? { sessionsAccessError: null, sessionsAccessCanOpenSettings: false } : st));
+      // r26-E2:本项目成功 → 只删本 hash 键,不动他键。
+      set((st) => {
+        const curMap = st.sessionsAccessErrorByProject || {};
+        if (!curMap[projectHash]) return st;
+        const nextMap = { ...curMap };
+        delete nextMap[projectHash];
+        return { sessionsAccessErrorByProject: nextMap };
+      });
       // Treat non-array response (e.g. {error:"..."} from a 500) as empty.
       // Without this, on 500 `data` would still be a non-array object — we
       // already coerce to [], but earlier bugs let stale `sessions` linger

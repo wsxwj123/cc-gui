@@ -178,9 +178,10 @@ import {
     assert.equal(validateT2Script(`const a = 1; ${bad};`).ok, false, `t6: ${bad} 拒载`);
   }
   assert.equal(validateT2Script('FETCH("/x")').ok, false, 't6: 大小写变体同拒(toLowerCase)');
-  assert.equal(T2_SCRIPT_BLACKLIST.length, 7, 't6: 黑名单七字样(FIX-SPEC 清单)');
+  // r26-D5 换锚:子串七字样 → 正则九形态(形态矩阵全量见 check-r26-t2-blacklist.mjs)
+  assert.equal(T2_SCRIPT_BLACKLIST.length, 9, 't6: r26-D5 黑名单九形态(正则集)');
   const r = validateT2Script('eval("x"); fetch("/y")');
-  assert.deepEqual(r.hits.sort(), ['eval(', 'fetch('], 't6: 命中清单可报给用户');
+  assert.deepEqual(r.hits.sort(), ['eval\\s*\\(', 'fetch\\s*\\('], 't6: 命中清单=正则 source 串,可报给用户');
 }
 
 // t7 dsw 尽力映射 + id 生成

@@ -139,14 +139,18 @@ function decodeProjectHash(hash) {
 
 /**
  * List all projects with session counts.
+ * r26-E3:projectsDir 参数仅供测试注入(单测用 /tmp 自建目录验证 EACCES 行为,
+ * 严禁触碰真实 ~/.claude/projects);生产调用一律缺省。
+ * 注意:顶层 readdir 的 EACCES/EPERM 不上捞兜住——原样抛给路由层,由 /projects
+ * 路由经 isAccessDenied 分类成 403(sessions.js,与 r17-4 契约同构)。
  */
-export async function listProjects() {
-  const entries = await readdir(PROJECTS_DIR, { withFileTypes: true });
+export async function listProjects(projectsDir = PROJECTS_DIR) {
+  const entries = await readdir(projectsDir, { withFileTypes: true });
   const projects = [];
 
   for (const entry of entries) {
     if (!entry.isDirectory()) continue;
-    const projectPath = join(PROJECTS_DIR, entry.name);
+    const projectPath = join(projectsDir, entry.name);
     try {
       const files = await readdir(projectPath);
       const jsonlFiles = files.filter((f) => f.endsWith('.jsonl'));

@@ -167,23 +167,32 @@ const lastOfType = (t) => [...seen].reverse().find((e) => e.type === t);
     serverName: 'probe', message: '填一下', sessionId: 'sid-http',
     requestedSchema: { type: 'object', properties: { name: { type: 'string' } }, required: ['name'] },
   });
-  const id = lastOfType('permission:request').request.id;
+  // r26-H1:respond 必携 nonce(随 broadcast 下发,与 slot 逐字一致),无/错 nonce 一律 403。
+  const reqMsg = lastOfType('permission:request').request;
+  const { id, nonce } = reqMsg;
 
   const listed = await (await fetch(`${base}/permissions/pending`)).json();
   assert.ok(listed.items.some((x) => x.id === id && x.kind === 'elicitation'), '刷新补拉能看到表单卡');
 
-  await fetch(`${base}/permissions/respond/${id}`, {
+  const noNonce = await fetch(`${base}/permissions/respond/${id}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ decision: 'allow', content: { name: '小明' } }),
+  });
+  assert.equal(noNonce.status, 403, 'r26-H1: 无 nonce respond 必须 403');
+  await fetch(`${base}/permissions/respond/${id}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ decision: 'allow', content: { name: '小明' }, nonce }),
   });
   assert.deepEqual(await p, { action: 'accept', content: { name: '小明' } }, 'content 必须原样到达 MCP');
 
   // 拒绝按钮:同一条通道,只是没有 content
   const p2 = requestElicitation({ serverName: 'probe', message: 'x', sessionId: 'sid-http' });
-  const id2 = lastOfType('permission:request').request.id;
-  await fetch(`${base}/permissions/respond/${id2}`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ decision: 'deny' }),
+  const req2 = lastOfType('permission:request').request;
+  await fetch(`${base}/permissions/respond/${req2.id}`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ decision: 'deny', nonce: req2.nonce }),
   });
   assert.deepEqual(await p2, { action: 'decline' }, '界面上的拒绝 = decline(不是 cancel)');
 
