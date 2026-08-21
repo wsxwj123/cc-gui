@@ -148,9 +148,15 @@ function SidebarViewMenu() {
 export function UnifiedSidebar() {
   // r17-4:磁盘访问被系统拒绝时,空列表要说实话 —— 静默的「暂无会话」和真的没有
   // 会话长得一模一样,用户实测的第一反应是「数据被删了」。
-  const accessError = useStore((st) => st.sessionsAccessError);
-  // r24:同一个 403 载荷里的平台位 —— 决定拒访提示后面给不给「打开系统设置」按钮。
-  const accessCanOpenSettings = useStore((st) => st.sessionsAccessCanOpenSettings);
+  // r26-E2(C-E2 契约,PKG-2 产出):错误态按 projectHash 存 ——
+  // sessionsAccessErrorByProject: { [hash]: { hint, canOpenSettings } };
+  // 缺省 undefined = 正常。旧全局单值(sessionsAccessError)已退役:A 项目拒访会把
+  // B 项目空态染红,B 任何一次成功又把 A 的错误清掉(600ms watcher 抖动)。
+  const errByProject = useStore((st) => st.sessionsAccessErrorByProject) || EMPTY_OBJECT;
+  // r26-E3(C-E3 延伸契约,PKG-2 产出):顶层 projects 目录整体拒访(如 ~/.claude 没
+  // 开磁盘权限)时 fetchProjects 置 projectsAccessError 单值({hint, canOpenSettings}),
+  // 项目空态渲染点只读它,不自拉。undefined = 正常。
+  const projectsAccessError = useStore((st) => st.projectsAccessError);
   // ── store(旧槽语义零改动;新面板数据走 sessionsByProject)─────────────────
   const projects = useStore((s) => s.projects);
   const fetchProjects = useStore((s) => s.fetchProjects);
@@ -643,13 +649,24 @@ export function UnifiedSidebar() {
   // r24:拒访那一支补上真按钮 —— 原文案写着「点此查看处理办法」却是个纯 span,点了没反应。
   // 按钮只在真有面板可跳的平台出现(showAccessSettingsButton,目前只有 macOS);
   // 样式沿用 App.jsx git 横幅 tcc 分支那两枚小按钮,不另起一套。
-  const emptyHint = (fallback) => {
-    const text = sessionEmptyHint({ accessError, query: q, fallback });
-    if (!accessError) return text;
+  // r26-E2:entry 按「当前渲染组的 projectHash」从 sessionsAccessErrorByProject 取
+  // ({hint, canOpenSettings} | undefined)—— A 项目的拒访不再染红 B 项目的空态。
+  // 平铺空态没有单一项目语境:取可见项目里第一条拒访错误(存在即说明「暂无会话」
+  // 可能是假象,与 r23-③「绝不能伪装成没有会话」同根因)。
+  const flatAccessEntry = useMemo(() => {
+    for (const p of singleModeRows) {
+      const e = errByProject[p.hash];
+      if (e) return e;
+    }
+    return undefined;
+  }, [singleModeRows, errByProject]);
+  const emptyHint = (fallback, entry) => {
+    const text = sessionEmptyHint({ accessError: entry?.hint, query: q, fallback });
+    if (!entry) return text;
     return (
-      <span className="text-amber-700" title={accessError}>
+      <span className="text-amber-700" title={entry.hint}>
         {text}
-        {showAccessSettingsButton({ accessError, canOpenSettings: accessCanOpenSettings }) && (
+        {showAccessSettingsButton({ accessError: entry.hint, canOpenSettings: entry.canOpenSettings }) && (
           <button
             onClick={() => { fetch('/api/system/open-fda-settings', { method: 'POST' }).catch(() => {}); }}
             className="ml-1.5 px-2 py-0.5 rounded bg-amber-100 hover:bg-amber-200 text-amber-900 text-[10px] font-medium align-middle"
@@ -1108,7 +1125,7 @@ export function UnifiedSidebar() {
         {view.groupMode === 'single' && flatSessions.length === 0 && (
           // r24:平铺模式下"全部项目都被隐藏"是过滤生效后**新出现**的空态。兜底若还写
           // 「暂无会话」,又是一次"空列表骗人"(分组模式那边早有专门措辞,见下方 hiddenOnly)。
-          <div className="px-3 py-2.5 text-[11px] text-ink-faint font-body">{emptyHint(hiddenOnly ? '所有项目都已隐藏' : '暂无会话')}</div>
+          <div className="px-3 py-2.5 text-[11px] text-ink-faint font-body">{emptyHint(hiddenOnly ? '所有项目都已隐藏' : '暂无会话', flatAccessEntry)}</div>
         )}
         {view.groupMode !== 'single' && sortedRows.map((project) => {
           const hash = project.hash;
@@ -1201,7 +1218,7 @@ export function UnifiedSidebar() {
                     </div>
                   ) : groupSessions.length === 0 ? (
                     <div className="px-3 py-2.5 text-[11px] text-ink-faint font-body">
-                      {emptyHint(showArchived ? '没有已归档的会话' : '暂无会话,点行尾「+」新建')}
+                      {emptyHint(showArchived ? '没有已归档的会话' : '暂无会话,点行尾「+」新建', errByProject[hash])}
                     </div>
                   ) : groupSessions.map((session) => (
                     <SessionItem
