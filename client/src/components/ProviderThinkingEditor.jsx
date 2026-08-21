@@ -93,6 +93,9 @@ export function ProviderThinkingEditor({ value, onChange, models, inputCls }) {
                     {EFFORT_LABELS[e]}
                   </label>
                 ))}
+                {/* r26-F4:全不选的语义是「不限制任何档位」(回到全默认),不是「全禁」——
+                    与直觉相反,必须明写;要禁用思考用「支持思考」开关。 */}
+                <span className="text-[10px] text-ink-faint">全部不勾选 = 不限制任何档位；要禁用思考请用上方「支持思考」开关</span>
               </div>
             )}
           </div>
