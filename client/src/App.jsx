@@ -2258,6 +2258,13 @@ export function GitInitBanner({ cwd }) {
         } else {
           setStatus('done');
         }
+      } else if (data.canOpenSettings) {
+        // r26-E5:init 因系统拒访失败时,服务端已回 canOpenSettings —— 纯文本弹窗没有
+        // 「打开系统设置」按钮,用户看完只能手动翻系统设置。改置 tcc 横幅态,复用既有
+        // 横幅渲染与按钮(与 :2145 的口径一致:有面板可跳才给按钮)。
+        if (!mine()) return;
+        setAccess({ hint: data.hint || '', canOpenSettings: true });
+        setStatus('tcc');
       } else {
         // r17-8:服务端现在把「超时 / git 没装 / 系统拒绝访问」分开报,并带一条能照着做的
         // hint。data.error 本身已是完整句子,别再套一层"git init 失败："前缀。
