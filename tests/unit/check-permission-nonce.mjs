@@ -3,7 +3,8 @@
 // 哨兵:①无 nonce respond 必 403;②错 nonce 必 403 且响应体不泄露正确值;
 // ③对 nonce(body)通过且挂起方收到 allow;④X-CGUI-Nonce 头通道同样通过;
 // ⑤loopback GET pending 含 nonce 且与 broadcast 逐字一致;
-// ⑥非 loopback(remoteAddress 伪装成 LAN)GET pending 不含 nonce 键;
+// ⑥非 loopback(remoteAddress 伪装成 LAN)GET pending 【换锚 r31】:一律含 nonce 且与
+//   broadcast 逐字一致(旧「非 loopback 不含 nonce」锚已废弃,原因见 ⑥ 注释);
 // ⑦slot 关闭后旧 nonce 不能二次 settle(无第二条 allow 广播)。
 // 端口:6703,跑完关干净。Run: node tests/unit/check-permission-nonce.mjs
 import assert from 'node:assert/strict';
@@ -77,12 +78,14 @@ try {
   ok(localItem, 'loopback GET pending 应列出挂起请求');
   ok(localItem.nonce === nonce, 'loopback GET pending 的 nonce 必须与 broadcast 逐字一致');
 
-  // ⑥ 非 loopback GET pending:不含 nonce 键(泄漏哨兵)
+  // ⑥ 非 loopback(remoteAddress 伪装成 LAN)GET pending:【换锚】r31 起对所有已认证请求
+  //    一律带 nonce(见 check-r31-nonce-pending.mjs)。旧实现的「非 loopback 不含 nonce」锚
+  //    已废弃:该接口上游经 authMiddleware,能到这里就已认证;broadcast 也早把 nonce 推给
+  //    所有已认证连接,剥离只打坏 LAN 客户端刷新后的合法补拉(死循环),不增加安全性。
   const pendLan = await (await fetch(`${LAN}/api/permissions/pending`)).json();
   const lanItem = pendLan.items.find((it) => it.id === id);
   ok(lanItem, '非 loopback GET pending 仍应列出请求本体');
-  ok(!('nonce' in lanItem), '非 loopback GET pending 绝不含 nonce 键');
-  ok(!JSON.stringify(pendLan).includes(nonce), '非 loopback 响应整body不得出现 nonce 值');
+  ok(lanItem.nonce === nonce, '非 loopback(已认证)GET pending 必须带 nonce 且与 broadcast 逐字一致');
 
   // ① 无 nonce respond → 403,挂起方不得收到 allow
   const noNonce = await post(BASE, `/api/permissions/respond/${id}`, { decision: 'allow' });

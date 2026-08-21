@@ -20,7 +20,7 @@ const pending = new Map();
  * POST /respond {decision:'allow'} 仿冒用户授权。现在每个 slot 创建时生成
  * crypto.randomUUID() nonce,只经两条通道下发:
  *   ① permission:request 的 WS broadcast(broadcast 副本带 nonce,slot.request 本体不带);
- *   ② GET /pending 对 loopback 来源的回补(WS 断连重连后补拉用;非 loopback 一律不带)。
+ *   ② GET /pending 对所有【已认证】请求的回补(WS 断连重连/刷新补拉用;不区分 loopback/LAN)。
  * respond 必须携带与 slot 逐字一致的 nonce(body.nonce 或 X-CGUI-Nonce 头,头优先)。
  * X-CGUI-Nonce 自定义头的附加价值:浏览器跨域 fetch 带自定义头必触发 preflight,
  * 服务端不配 CORS 即天然拒绝 —— 网页仿冒这条面彻底封死。
@@ -29,6 +29,10 @@ const pending = new Map();
  * 威胁模型声明(边界):本设计防【盲打】——跨域网页 CSRF、不知道 nonce 的本机脚本、
  * 端口扫描式攻击。【不防】主动连 WS 监听 broadcast 的本机恶意进程(WS 本机默认可连,
  * nonce 会推给它)——该进程已能读 ~/.claude 下一切文件,超出本防线责任面。
+ * r31:GET /pending 不再用 isLocalReq 对非本机剥离 nonce —— 该接口上游经 authMiddleware,
+ * 能到这里就已认证;而 broadcast 早已把 nonce 推给所有已认证连接。剥离不增加任何安全性
+ * (能连上已认证 WS 的进程本就看得见 nonce),只会打坏 LAN 客户端刷新后的合法补拉
+ * (卡片无 nonce → 该端 respond 必 403 → 前端 403 终态撤卡 → 25s 对账又把卡补回 → 死循环)。
  */
 function mintNonce() {
   return randomUUID();
@@ -80,7 +84,7 @@ function requestCard(fields, { signal, translate }) {
       },
     });
     const slot = pending.get(id);
-    // nonce 只进 broadcast 副本,不进 slot.request —— GET /pending 按来源决定带不带。
+    // nonce 只进 broadcast 副本,不进 slot.request —— GET /pending 对已认证请求一律带。
     broadcast({ type: 'permission:request', request: { ...request, nonce: slot.nonce } });
     if (signal?.aborted) onAbort();
     else { try { signal?.addEventListener('abort', onAbort, { once: true }); } catch {} }
@@ -282,14 +286,13 @@ router.post('/permissions/respond/:id', (req, res) => {
 /**
  * GET /api/permissions/pending — for a freshly-loaded client that missed the
  * WS broadcast (refresh while a permission was waiting).
- * r26-H1:nonce 只对 loopback 来源附带(WS 断连重连后的回补通道);非 loopback
- * (LAN/经隧道)拿到的列表绝不含 nonce,枚举到 id 也仿冒不了 respond。
+ * r31:对所有已认证请求一律带 nonce(见文件头威胁模型)。旧实现用 isLocalReq 对非本机
+ * 剥离,导致 LAN 客户端刷新补拉后卡片无 nonce → respond 403 → 撤卡 → 对账补回 → 死循环。
  */
 router.get('/permissions/pending', (req, res) => {
-  const withNonce = isLocalReq(req);
   const list = [];
   for (const slot of pending.values()) {
-    list.push(withNonce ? { ...slot.request, nonce: slot.nonce } : slot.request);
+    list.push({ ...slot.request, nonce: slot.nonce });
   }
   res.json({ items: list });
 });
