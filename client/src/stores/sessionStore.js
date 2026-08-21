@@ -2047,7 +2047,12 @@ export const useStore = create((set, get) => ({
   // broadcast { type:'hidden-projects', hidden },WS reducer 经 applyHiddenProjects
   // 收敛,多端实时同步(此前只在 Home 挂载时拉一次,他端改了本端不刷新)。
   // Home 与侧栏(I7②,PKG-11)统一读这里,不自拉。
-  hiddenProjects: [],
+  // r27-review2:初始值 [] → null(水合前=「未知」,不是「已知空」)。store 只在
+  // HomeState 挂载 GET 与 WS 广播两处水合,冷启动直进会话页(不挂 HomeState)时
+  // 恒为 [] —— 侧栏 `st.hiddenProjects || hiddenRef.current` 因 [] truthy 永不走
+  // 本地兜底,watcher 跳过 hidden 组(I7②)与启动补拉(r27)的 hidden 过滤整轮失效。
+  // 消费端须用 `??`(null 才兜底)或容忍 null(App 的 new Set(null)=空集,安全)。
+  hiddenProjects: null,
   applyHiddenProjects: (hidden) => set({
     hiddenProjects: Array.isArray(hidden) ? hidden.filter((x) => typeof x === 'string' && x) : [],
   }),

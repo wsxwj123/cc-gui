@@ -18,7 +18,7 @@ import { watcherRefreshTargets } from '../../client/src/utils/projectPanel.js';
 //    契约,PKG-2 产出)兜底组件本地集,不自拉
 {
   const sb = readFileSync(new URL('../../client/src/components/UnifiedSidebar.jsx', import.meta.url), 'utf8');
-  assert.match(sb, /for \(const h of watcherRefreshTargets\(st\.expandedProjects, st\.hiddenProjects \|\| hiddenRef\.current\)\) st\.fetchSessionsForPanel\(h\);/, 't2: watcher 跳过 hidden 展开组');
+  assert.match(sb, /for \(const h of watcherRefreshTargets\(st\.expandedProjects, st\.hiddenProjects \?\? hiddenRef\.current\)\) st\.fetchSessionsForPanel\(h\);/, 't2: watcher 跳过 hidden 展开组(r27-review2:?? —— store 水合前 null 才兜底,[] 不再骗过 ||)');
   assert.doesNotMatch(sb, /for \(const h of st\.expandedProjects\) st\.fetchSessionsForPanel/, 't2: 旧的无过滤循环已退役');
 }
 

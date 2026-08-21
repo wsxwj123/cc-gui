@@ -20,8 +20,9 @@ globalThis.localStorage = {
 const { useStore } = await import('../../client/src/stores/sessionStore.js');
 const st = () => useStore.getState();
 
-// ① store 行为
-assert.deepEqual(st().hiddenProjects, [], 'I2: 初始空表');
+// ① store 行为(r27-review2:初始值 [] → null —— 水合前=「未知」而非「已知空」,
+//    侧栏用 `??` 区分;水合后仍为数组,下述契约不变)
+assert.equal(st().hiddenProjects, null, 'I2: 初始 null(水合前未知,r27-review2)');
 st().applyHiddenProjects(['h1', 'h2']);
 assert.deepEqual(st().hiddenProjects, ['h1', 'h2'], 'I2: 广播收敛入位');
 st().applyHiddenProjects(['h3', 123, '', null]); // 脏数据过滤

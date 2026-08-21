@@ -189,6 +189,9 @@ export function UnifiedSidebar() {
   const [hidden, setHidden] = useState(() => new Set());
   // r26-I7②:watcher(下方 effect,[] 依赖)要读最新 hidden —— ref 镜像组件本地集;
   // 契约 C-I2 落地后(store.hiddenProjects,PKG-2 产出)以 store 为准,本地集兜底。
+  // r27-review2:store 水合前为 null(未知,非空集),必须用 `??` —— `||` 会被
+  // 水合前的 [] 骗成永不兜底(冷启动直进会话页、HomeState 不挂载时 store 恒空,
+  // hidden 过滤整轮失效)。
   const hiddenRef = useRef(hidden);
   hiddenRef.current = hidden;
   useEffect(() => { fetchProjects(); }, []);
@@ -200,7 +203,7 @@ export function UnifiedSidebar() {
   useEffect(() => {
     if (!projects.length) return;
     const st = useStore.getState();
-    for (const h of watcherRefreshTargets(st.expandedProjects, st.hiddenProjects || hiddenRef.current)) {
+    for (const h of watcherRefreshTargets(st.expandedProjects, st.hiddenProjects ?? hiddenRef.current)) {
       if (!st.sessionsByProject[h]) st.fetchSessionsForPanel(h);
     }
   }, [projects]);
@@ -304,7 +307,7 @@ export function UnifiedSidebar() {
         const st = useStore.getState();
         // r13-①:全部展开组保鲜(原为单一钻入组)。
         // r26-I7②:隐藏项目的展开组跳过(不白发请求、其错误不污染按项目错误态)。
-        for (const h of watcherRefreshTargets(st.expandedProjects, st.hiddenProjects || hiddenRef.current)) st.fetchSessionsForPanel(h);
+        for (const h of watcherRefreshTargets(st.expandedProjects, st.hiddenProjects ?? hiddenRef.current)) st.fetchSessionsForPanel(h);
         // 旧槽保鲜:selectedProject 的 sessions 单值槽仍被权限卡门禁/@面板消费。
         if (st.selectedProject?.hash) st.fetchSessions(st.selectedProject.hash, { silent: true });
       }, 600);

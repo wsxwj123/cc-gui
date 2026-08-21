@@ -50,7 +50,7 @@ import { initialExpandedProjects, toggleExpanded } from '../../client/src/utils/
   assert.match(sb, /data-cgui="new-worktree-btn"/, 't3: worktree 锚点随菜单保留');
   assert.match(sb, /<SessionItem/, 't3: 会话行组件原样复用(零回退)');
   // r26-I7② 换锚:展开组保鲜过 watcherRefreshTargets(跳过 hidden 展开组)。
-  assert.match(sb, /for \(const h of watcherRefreshTargets\(st\.expandedProjects, st\.hiddenProjects \|\| hiddenRef\.current\)\) st\.fetchSessionsForPanel\(h\);/, 't3: 展开组保鲜(r26-I7②:跳过 hidden 组)');
+  assert.match(sb, /for \(const h of watcherRefreshTargets\(st\.expandedProjects, st\.hiddenProjects \?\? hiddenRef\.current\)\) st\.fetchSessionsForPanel\(h\);/, 't3: 展开组保鲜(r26-I7②:跳过 hidden 组;r27-review2 起 ?? 兜底)');
   assert.doesNotMatch(sb, /彻底清理该项目的 Claude 本地状态/, 't3: p3-4 清理按钮移除态保持');
 }
 
