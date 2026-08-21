@@ -181,7 +181,7 @@ import {
   // r26-D5 换锚:子串七字样 → 正则九形态(形态矩阵全量见 check-r26-t2-blacklist.mjs)
   assert.equal(T2_SCRIPT_BLACKLIST.length, 9, 't6: r26-D5 黑名单九形态(正则集)');
   const r = validateT2Script('eval("x"); fetch("/y")');
-  assert.deepEqual(r.hits.sort(), ['eval\\s*\\(', 'fetch\\s*\\('], 't6: 命中清单=正则 source 串,可报给用户');
+  assert.deepEqual(r.hits.sort(), ['(?<![\\w$])eval\\s*\\(', '(?<![\\w$])fetch\\s*\\('], 't6: 命中清单=正则 source 串,可报给用户(r27 换锚:带 lookbehind 前缀)');
 }
 
 // t7 dsw 尽力映射 + id 生成

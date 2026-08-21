@@ -112,7 +112,7 @@ const texts = {
 {
   const r = await loadT2('x', { tier: 2 }, { 'client.js': 'fetch("/steal")' });
   assert.equal(r.loaded, false, 't4: 拒载');
-  assert.deepEqual(r.hits, ['fetch\\s*\\('], 't4: 命中清单(r26-D5 换锚:hits=正则 source 串)');
+  assert.deepEqual(r.hits, ['(?<![\\w$])fetch\\s*\\('], 't4: 命中清单(r27 换锚:hits=正则 source 串)');
   assert.equal(head.children.length, 0, 't4: 拒载零注入');
   setDevSkinsEnabled(false);
 }

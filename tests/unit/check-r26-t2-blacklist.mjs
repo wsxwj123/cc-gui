@@ -3,8 +3,7 @@
 //   正例全拒:fetch( / fetch ( / window["fetch"] / Function('return 1') / new Function /
 //     WebSocket ( / globalThis 形态属性访问以外的主形态;
 //   反例放行:「// fetch data」注释里出现 fetch 但没调用;
-//   已知误伤(钉死防「修复」反弹,口径=防误不防恶):prefetch( 命中 /fetch\s*\(/、
-//     匿名函数表达式 function(){} 命中 /\bfunction\s*\(/;
+//   r27 误伤修复:prefetch(/匿名 function(){} 已放行(左边界+字符串实参形态);防反弹哨兵保留。
 //   既有七字样形态(大小写变体)仍全拒(回归哨兵)。
 // 客户端同表(skins.js T2_BLACKLIST_CLIENT)由 PKG-8 落地,check-skin-client.mjs t1
 // 以 String 形态比对双端(C-D5 串行锁步)。
@@ -55,16 +54,16 @@ for (const bad of REJECT) {
 
 // ── 已知误伤(防误不防恶口径,钉为已知行为防反弹)──
 {
-  assert.equal(validateT2Script('prefetch("/x")').ok, false,
-    '已知误伤:prefetch( 命中 /fetch\\s*\\(/(拒载方向安全,作者改码可过)');
-  assert.equal(validateT2Script('setTimeout(function() {}, 100)').ok, false,
-    '已知误伤:匿名 function() 表达式命中 /\\bfunction\\s*\\(/(与 Function 构造器同形,口径内)');
+  assert.equal(validateT2Script('prefetch("/x")').ok, true,
+    'r27 起放行:lookbehind 左边界,prefetch( 不命中');
+  assert.equal(validateT2Script('setTimeout(function() {}, 100)').ok, true,
+    'r27 起放行:匿名 function() 是合法 JS,规则只抓 function(\" 字符串实参构造器形态');
 }
 
 // ── hits 清单形状:返回正则 source(供 UI 展示)──
 {
   const r = validateT2Script('eval("x"); fetch("/y")');
-  assert.deepEqual(r.hits.sort(), ['eval\\s*\\(', 'fetch\\s*\\('], 'hits = 命中正则的 source 串');
+  assert.deepEqual(r.hits.sort(), ['(?<![\\w$])eval\\s*\\(', '(?<![\\w$])fetch\\s*\\('], 'hits = 命中正则的 source 串(r27 换锚:带 lookbehind 前缀)');
 }
 
 console.log('PASS check-r26-t2-blacklist');

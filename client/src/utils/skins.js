@@ -27,14 +27,17 @@ export const SKIN_TOKENS_REJECTED_CLIENT = ['--glass-shadow'];
 // 按 String 形态钉死);校验前先 toLowerCase,故正则一律小写形态。口径 = 防误导入、不防
 // 恶意代码:正则误伤一律朝拒载方向(安全向),已知误伤(prefetch(、匿名 function(){})
 // 钉在 check-r26-t2-blacklist.mjs / check-r26-t2-blacklist-client.mjs。
+// r27:规则带标识符左边界 lookbehind 防 prefetch(/myeval( 误伤;function 规则改抓
+// 「字符串实参」形态(Function("...") 构造器——lowercase 后与 function 关键字同形,
+// 普通 function 声明/表达式(标识符或 ) 开头)不命中。QQ2008 皮肤曾被旧规则误杀。
 export const T2_BLACKLIST_CLIENT = [
-  /fetch\s*\(/,
+  /(?<![\w$])fetch\s*\(/,
   /xmlhttprequest/,
-  /websocket\s*\(/,
-  /import\s*\(/,
-  /eval\s*\(/,
+  /(?<![\w$])websocket\s*\(/,
+  /(?<![\w$])import\s*\(/,
+  /(?<![\w$])eval\s*\(/,
   /new\s+function/,
-  /\bfunction\s*\(/,
+  /(?<![\w$])function\s*\(\s*['"]/,
   /navigator\s*\.\s*sendbeacon/,
   /\[\s*['"](?:fetch|eval|function|websocket)['"]\s*\]/,
 ];

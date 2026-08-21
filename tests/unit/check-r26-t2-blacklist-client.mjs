@@ -62,16 +62,16 @@ for (const bad of REJECT) {
 
 // ── 已知误伤(防误不防恶口径,钉为已知行为防反弹)──
 {
-  assert.equal(validateT2Client('prefetch("/x")').ok, false,
-    '已知误伤:prefetch( 命中 /fetch\\s*\\(/(拒载方向安全,作者改码可过)');
-  assert.equal(validateT2Client('setTimeout(function() {}, 100)').ok, false,
-    '已知误伤:匿名 function() 表达式命中 /\\bfunction\\s*\\(/');
+  assert.equal(validateT2Client('prefetch("/x")').ok, true,
+    'r27 起放行:lookbehind 左边界,prefetch( 不命中');
+  assert.equal(validateT2Client('setTimeout(function() {}, 100)').ok, true,
+    'r27 起放行:匿名 function() 是合法 JS,规则只抓 function(\" 字符串实参构造器形态');
 }
 
 // ── hits 清单形状:返回正则 source(与服务端 validateT2Script 同形状)──
 {
   const r = validateT2Client('eval("x"); fetch("/y")');
-  assert.deepEqual(r.hits.sort(), ['eval\\s*\\(', 'fetch\\s*\\('], 'hits = 命中正则的 source 串');
+  assert.deepEqual(r.hits.sort(), ['(?<![\\w$])eval\\s*\\(', '(?<![\\w$])fetch\\s*\\('], 'hits = 命中正则的 source 串(r27 换锚:带 lookbehind 前缀)');
 }
 
 console.log('PASS check-r26-t2-blacklist-client');
