@@ -702,7 +702,8 @@ export async function tryRestorePausedOverride() {
 // killTree —— SSE 一断就杀整棵进程树。现在:进程归服务端持有,SSE 只是"看进度的窗口",
 // 断开只摘监听;重开面板可续看(replay 已产生的日志);8 分钟超时仍杀(防挂死);
 // 用户想主动停有独立的 cancel 端点。
-const updateTask = {
+// export 仅为可单测(r26-C9:attach 终态帧用例需要直接置 status/code)
+export const updateTask = {
   child: null,
   cmd: '',
   status: 'idle',          // idle | running | done | error
@@ -869,7 +870,16 @@ router.post('/claude-update/stream', async (req, res) => {
  */
 router.post('/claude-update/attach', (req, res) => {
   res.writeHead(200, { 'Content-Type': 'application/x-ndjson', 'Cache-Control': 'no-store' });
-  if (updateTask.status !== 'running') { res.end(); return; } // 没在跑 = 空流收尾
+  if (updateTask.status !== 'running') {
+    // r26-C9:任务恰在 GET /status 与 POST /attach 之间结束时,空流会让用户永远看不到
+    // 结论 —— 补一帧终态再收尾(前端 doUpdateStream 本就有 done 分支,自动复用)。
+    // idle(从未跑过)不出帧:没有结论可补。
+    if (updateTask.status === 'done' || updateTask.status === 'error') {
+      res.write(JSON.stringify({ type: 'done', code: updateTask.code, status: updateTask.status, error: updateTask.error }) + '\n');
+    }
+    res.end();
+    return;
+  }
   res.write(JSON.stringify({ type: 'start', command: updateTask.cmd || '(正在检测安装方式…)', attached: true }) + '\n');
   for (const line of updateTask.log) res.write(JSON.stringify({ type: 'log', line }) + '\n');
   updateTask.listeners.add(res);
