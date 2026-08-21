@@ -236,6 +236,17 @@ export function UnifiedSidebar() {
     }).catch(() => {});
   };
   const toggleHidden = (hash) => {
+    // r27:有会话正在窗格中打开的项目不可隐藏——隐藏后窗口还开着、数据路径全断,
+    // 用户看到的就是"会话还在但项目消失了"的灵异状态。弹窗说明,不静默执行。
+    const st = useStore.getState();
+    if (!hidden.has(hash)) {
+      const openHere = [...(st.paneSessions || []), st.selectedSession]
+        .some((s) => s && s.projectHash === hash);
+      if (openHere) {
+        confirmDialog('该项目有会话正在窗格中打开。请先把这些窗格关掉（或切换到别的会话），再隐藏该项目。', { confirmText: '知道了' });
+        return;
+      }
+    }
     setHidden((prev) => {
       const next = new Set(prev);
       if (next.has(hash)) next.delete(hash); else next.add(hash);
