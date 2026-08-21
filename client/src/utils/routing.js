@@ -21,6 +21,30 @@ export function isInitBindingOrigin(startedAsDraft, startDraftId, currentSel) {
 }
 
 /**
+ * r29:conversation_reset 换绑判定(CLI 2.1.x /clear = 轮换新会话语义)。
+ * /clear 的流由【真会话】发起(startedAsDraft=false),isInitBindingOrigin 恒 false,
+ *  subsequent init(新 sid)永远绑不上 → 窗格挂在旧会话上,新会话成了"没清成"。
+ * 口径:本流见过 conversation_reset(记下的旧 sid)且当前选中仍是那个旧会话,
+ * 才允许把窗格换绑到 init 带来的新 sid。用户已切走(sel 变了)不抢绑 —— 与
+ * isInitBindingOrigin 同一安全失败哲学:绑不上只是列表里多一条会话,串扰才是事故。
+ * @param {string|null} resetFromSid 本流 conversation_reset 事件携带的旧 session_id
+ * @param {{sessionId?:string}|null} currentSel init 到达时刻的选中会话
+ */
+export function isResetBindingOrigin(resetFromSid, currentSel) {
+  return !!(resetFromSid && currentSel && currentSel.sessionId === resetFromSid);
+}
+
+/**
+ * r29:CLI 2.1.x 二进制内置的占位串 "(no content)"(/clear 等空结果回合会把它当
+ * assistant 文本增量吐进流)。/clear 场景下它视同空串 —— 否则回合收尾会把占位串
+ * 当正常回复画成气泡,走不到 ✅「会话已清空」分支(占位串不是用户可见内容)。
+ * 只在 isClear 判定下使用:正常回合里模型真说出 "(no content)" 不该被吞。
+ */
+export function isCliNoContentPlaceholder(text) {
+  return String(text || '').trim() === '(no content)';
+}
+
+/**
  * draft 队列迁移:A 流式期间排进 messageQueue[draftKey] 的消息只可能属于 A
  * (其他 draft 没有在跑的流,消息直接发出不入队),init 拿到真 sid 后必须迁走 ——
  * 否则用户切走(不绑定)时残留队列会被下一个同项目 draft(key 相同)继承串发(fable 审计)。

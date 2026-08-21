@@ -68,7 +68,7 @@ import { computeCost, formatCost, setUserPrices, observeOfficialBilling } from '
 import { extractToolResultText, finalizePendingToolCalls, applyFinalizedToBlocks } from './utils/toolResult.js';
 import { rebuildTodosFromTaskCalls } from './utils/todos.js';
 import { isSteered, firstSteerableIndex, isSteerBarrier, persistedSteerKeys, queueKeyFor } from './utils/steerQueue.js';
-import { isInitBindingOrigin, makeProviderModelGuard, migrateDraftQueue, paneMessagesOwned, resolveHistModel, resolveSelectorModel, resolveSendModel } from './utils/routing.js';
+import { isInitBindingOrigin, isResetBindingOrigin, isCliNoContentPlaceholder, makeProviderModelGuard, migrateDraftQueue, paneMessagesOwned, resolveHistModel, resolveSelectorModel, resolveSendModel } from './utils/routing.js';
 import { nativeContextWindow, isBareClaudeAlias, pickCliContextWindow } from './utils/contextWindow.js';
 import { extractMcpServerIssues, formatMcpServerNotice } from './utils/mcpStatus.js';
 import { classifyRepairOutcome, classifyCheckOutcome, upsertRepairHint, removeRepairHint, loadRepairHints, persistRepairHints } from './utils/repairFlow.js';
@@ -4458,6 +4458,11 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       };
       // 本流是否收到过 done 事件(正常收尾)。
       let sawDoneEvent = false;
+      // r29:CLI 2.1.x 的 /clear 已是「轮换新会话」语义 —— 流里先发
+      // conversation_reset(session_id=旧,new_conversation_id=新)再发 init(新 sid)。
+      // 记下旧 sid,init 到达时允许窗格换绑(见 isResetBindingOrigin)。
+      // 老 CLI 无此事件,本变量恒 null,行为零变化(兼容口径)。
+      let conversationResetFrom = null;
       // 本流是否被服务端明确告知「已被新连接接管」(detached 事件)。以前靠"无 done 却
       // 正常结束"猜,而掐断 SSE 是同一形态 —— 猜错就把 reattach 闩死。现在只认服务端明说。
       let sawTakeover = false;
@@ -4480,6 +4485,16 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           }
           let event;
           try { event = JSON.parse(line.slice(6)); } catch { continue; }
+
+          // r29:/clear 轮换(CLI 2.1.x):旧会话归档、本流后续 init 属于新会话。
+          // 立即清本 pane 的流式本地消息(旧会话残影不属于新会话);窗格换绑在
+          // init 到达时做 —— 新 sid 以 init 的 session_id 为准(既有绑定路径的权威
+          // 口径;事件缺 session_id 时用本流归属 streamSid 兜底)。老 CLI 无此事件。
+          if (event.type === 'conversation_reset') {
+            conversationResetFrom = event.session_id || streamSid || null;
+            setChatMessages([]);
+            continue;
+          }
 
           // Capture the new session id when starting from a draft.
           // IMPORTANT: go through `setSelectedSession` setter so the new id is
@@ -4514,6 +4529,38 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             // 判定逻辑在 utils/routing.js(纯函数,test:routing 覆盖串扰家族全部场景)。
             const startedAsDraft = !selectedSession?.sessionId;
             const selIsOrigin = isInitBindingOrigin(startedAsDraft, selectedSession?.draftId, sel);
+            // r29:/clear 轮换换绑(独立于 draft-origin 块,不迁输入历史/草稿 —— 那些
+            // 属于旧会话)。队列/流归属随窗格走:这个窗格的会话现在是新会话。
+            const resetIsOrigin = !selIsOrigin && isResetBindingOrigin(conversationResetFrom, sel);
+            if (resetIsOrigin) {
+              conversationResetFrom = null; // 一次性消费:换绑后本流后续 init 不再触发
+              useStore.getState().migrateSessionKey(queueKeyFor(sel), event.session_id);
+              if (streamOwnerKeyRef.current === queueKeyFor(sel)) {
+                setStreamOwner(event.session_id);
+              }
+              // 清历史 + 归属守卫直接认领新 sid(旧会话历史不属于新会话;
+              // setPaneMessages 同写 arr+sid+pane0 镜像,无需再 claimPaneMessages)。
+              useStore.getState().setPaneMessages(tabIndex, [], event.session_id);
+              // 新会话对象:身份/路径/模型继承,标题类字段清零(旧会话的标题不属于它,
+              // 侧栏刷新后由 jsonl 重新解析)。
+              setSelectedSession({
+                ...sel,
+                draft: false,
+                sessionId: event.session_id,
+                firstPrompt: '',
+                customTitle: '',
+                aiTitle: '',
+                messageCount: 0,
+                archived: false,
+              });
+              // 侧栏列表刷新:旧会话保留(已归档语义)、新会话出现。打包版无 watcher,
+              // 靠这一脚;面板槽与旧槽同刷(同 r29-newsession 口径)。
+              const _rh = sel?.projectHash;
+              if (_rh) {
+                useStore.getState().fetchSessionsForPanel(_rh);
+                useStore.getState().fetchSessions(_rh, { silent: true });
+              }
+            }
             if (selIsOrigin) {
               // Carry the draft's per-session model/permission pins to the real
               // session id so a model picked for a brand-new chat doesn't revert.
@@ -5467,6 +5514,13 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       // 回合结束(流关闭/done):立刻收尾刷一次,不等下一个节流窗,也不等 finally 的落盘轮询。
       refreshHistIfDue(true);
 
+      // r29:CLI 2.1.x 的 /clear 不再回空流 —— 二进制内置占位串 "(no content)" 会
+      // 作为 assistant 文本增量吐进来(累积在 accumulatedText)。isClear 下视同空串,
+      // 否则上面"有内容"分支会把占位串画成气泡,永远走不到 ✅「会话已清空」。
+      // 只清文本:thinking/toolCalls 本就该为空,不动以免误伤。
+      if (isClear && isCliNoContentPlaceholder(accumulatedText)) {
+        accumulatedText = '';
+      }
       if (accumulatedText || accumulatedThinking || currentToolCalls.length > 0) {
         producedReply = true;
         // reattach 不 push 本地副本:accumulatedText 只是 detach 之后被重放的那半截,
