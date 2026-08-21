@@ -1744,6 +1744,13 @@ function HomeState({ tabIndex = 0 }) {
   useSyncExternalStore(subscribeSkin, getSkinVersion, getSkinVersion);
   const [chosenHash, setChosenHash] = useState(null);
   const [text, setText] = useState('');
+  // r26-D13:问候时段词随时间刷新 —— Home 挂着过夜,原来只在渲染时取小时,
+  // 早上还显示「晚上好」。低频定时器(每分钟 tick,跨时段才引起文案变化)。
+  const [hour, setHour] = useState(() => new Date().getHours());
+  useEffect(() => {
+    const id = setInterval(() => setHour(new Date().getHours()), 60000);
+    return () => clearInterval(id);
+  }, []);
   const [projOpen, setProjOpen] = useState(false);
   const projBtnRef = useRef(null);
   const custom = readHomeCustom();
@@ -1822,7 +1829,7 @@ function HomeState({ tabIndex = 0 }) {
         {/* r11-⑫:问候分段渲染——称呼段用主题 accent 细渐变(token,不硬编码色值),
             皮肤模板 {name} 占位符同路径;无称呼时占位符整段降级(homeGreetingParts)。 */}
         <h2 data-cgui="home-greeting" className="text-[22px] font-display font-medium text-ink mb-5 tracking-tight">
-          {homeGreetingParts(new Date().getHours(), custom?.greeting, displayName).map((p, i) => p.name ? (
+          {homeGreetingParts(hour, custom?.greeting, displayName).map((p, i) => p.name ? (
             <span
               key={i}
               className="bg-gradient-to-r from-accent to-accent-hover bg-clip-text text-transparent font-semibold"
