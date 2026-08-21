@@ -2572,7 +2572,9 @@ function mapSdkContextUsage(u) {
 }
 
 const CONTEXT_SESSION_RE = /^[A-Za-z0-9._-]{1,128}$/;
-const CONTEXT_PROJECT_RE = /^[A-Za-z0-9._-]{1,4096}$/;
+// r26-G9:前置否定排掉纯点段('.'/'..'/'...')——原字符集允许 '.',防线只剩隐式约定。
+// '.foo'/'foo.bar' 等合法目录名不受影响。
+const CONTEXT_PROJECT_RE = /^(?!\.+$)[A-Za-z0-9._-]{1,4096}$/;
 
 export function validateContextRequest(req) {
   const sessionId = typeof req.params?.sessionId === 'string' ? req.params.sessionId : '';
