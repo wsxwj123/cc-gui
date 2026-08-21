@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { readdir, stat, readFile, writeFile, rename, open, mkdir, unlink } from 'fs/promises';
-import { join, dirname, isAbsolute, resolve } from 'path';
+import { join, dirname, basename, isAbsolute, resolve } from 'path';
 import { isLocalReq } from '../services/auth.js';
 import { homedir, tmpdir } from 'os';
 import { randomUUID } from 'crypto';
@@ -865,6 +865,28 @@ router.get('/sessions/:sessionId/repair-official-compat', async (req, res) => {
  * checkRunning 注入。返回:
  *   { status:'ok', report, changed } | { status:'running' } | { status:'stale', report }
  */
+/**
+ * r26-G10:repair 备份 GC。每次 repair 产 `<file>.bak-<ts>`,只增不减;成功修复后
+ * 同会话的 .bak-<ts> 按名内时间戳降序保留最新 BAK_KEEP 份,其余 unlink(失败静默
+ * ——GC 失败不值得让修复本身报错)。只认 `<basename>.bak-<数字>` 形态:
+ * trim/strip-thinking 的 `<sid>.jsonl.bak`(无时间戳,有独立清理通道)与他会话的
+ * 备份一概不碰。
+ */
+export const BAK_KEEP = 5;
+export async function gcRepairBackups(file) {
+  try {
+    const dir = dirname(file);
+    const prefix = basename(file) + '.bak-';
+    const baks = (await readdir(dir))
+      .filter((n) => n.startsWith(prefix) && /^\d+$/.test(n.slice(prefix.length)))
+      .map((n) => ({ n, ts: Number(n.slice(prefix.length)) }))
+      .sort((a, b) => b.ts - a.ts);
+    for (const { n } of baks.slice(BAK_KEEP)) {
+      try { await unlink(join(dir, n)); } catch {}
+    }
+  } catch {}
+}
+
 export async function repairSessionFileGuarded(file, checkRunning) {
   const raw = await readFile(file, 'utf-8');
   const before = await stat(file);
@@ -878,6 +900,7 @@ export async function repairSessionFileGuarded(file, checkRunning) {
     return { status: 'stale', report }; // .bak 留着,原文件逐字未动
   }
   await writeJsonlAtomic(file, lines.join('\n'));
+  await gcRepairBackups(file); // r26-G10:修复成功后收敛历史 .bak-<ts>
   return { status: 'ok', report, changed: true };
 }
 
