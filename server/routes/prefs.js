@@ -412,7 +412,9 @@ router.put('/prefs/display-name', async (req, res) => {
   if (typeof displayName !== 'string') {
     return res.status(400).json({ error: 'displayName 必须是字符串' });
   }
-  const name = displayName.trim().slice(0, 20);
+  // r26-D12:按码点截断 —— String.prototype.slice 按 UTF-16 码元切,emoji(代理对)
+  // 会从中间劈开产出孤代理(渲染为  、且与前端码点截断长度不一致)。
+  const name = [...displayName.trim()].slice(0, 20).join('');
   try {
     await withPrefsQueue(async () => {
       const prefs = await loadPrefs();
