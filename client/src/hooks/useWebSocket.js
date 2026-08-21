@@ -38,13 +38,19 @@ export async function respondPermission(id, body) {
   // "卡片不存在"是常态,不能当"他端已解决"提前终止;只有本来有卡、后来
   // 被 resolved 广播/对账撤掉,才说明他端已解决。
   const hadCard = useStore.getState().pendingPermissions.some((p) => p.id === id);
+  // r26-H1(契约 C-H1):respond 必须携带一次性 nonce(服务端 slot 存有真值,错/缺 → 403)。
+  // 优先 body.nonce(PermissionPrompt 从卡片取);body 没带时从 store 卡片补
+  // X-CGUI-Nonce 头 —— 本机免密下 body 与头等价,头是兜「调用方忘带」的底。
+  const cardNonce = useStore.getState().pendingPermissions.find((p) => p.id === id)?.nonce;
+  const headers = { 'Content-Type': 'application/json' };
+  if (body?.nonce == null && cardNonce) headers['X-CGUI-Nonce'] = cardNonce;
   try {
     for (let attempt = 0; ; attempt++) {
       if (flight.cancelled) return false;
       try {
         const r = await fetch(`/api/permissions/respond/${id}`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers,
           body: JSON.stringify(body),
           signal: AbortSignal.timeout(8_000),
         });
@@ -100,7 +106,9 @@ function handlePermissionRequest(req) {
   try { wl = req.sessionId ? JSON.parse(localStorage.getItem(`cgui-perm-wl-${req.sessionId}`) || '[]') : []; } catch {}
   if (Array.isArray(wl) && wl.includes(req.toolName) && !req.blockedPath) {
     if (import.meta.env?.DEV) console.log('[cgui-perm] auto-allow: whitelist', req.id, req.toolName);
-    respondPermission(req.id, { decision: 'allow' });
+    // r26-H1:auto-allow 也要带 nonce(broadcast 下发的 req.nonce),否则服务端 403、
+    // 白名单放行这条路径被 nonce 闸整体锁死。
+    respondPermission(req.id, { decision: 'allow', nonce: req.nonce });
     return;
   }
   if (import.meta.env?.DEV) console.log('[cgui-perm] → render popup', req.id, req.toolName);

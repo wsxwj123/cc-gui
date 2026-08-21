@@ -604,7 +604,10 @@ export const useStore = create((set, get) => ({
   },
 
   // Pending CLI permission requests waiting on the user. Each entry:
-  //   { id, toolName, toolInput, sessionId, cwd, hookEvent, createdAt }
+  //   { id, toolName, toolInput, sessionId, cwd, hookEvent, createdAt, nonce? }
+  // r26-H1(契约 C-H1):nonce 随 permission:request 广播/loopback 补拉透传入卡
+  // (addPendingPermission 展开原对象,不剥字段),respond 时由 PermissionPrompt
+  // 回带 body.nonce / useWebSocket 补 X-CGUI-Nonce 头。
   // Populated by useWebSocket on `permission:request`. Removed when
   // /respond is called OR `permission:resolved` arrives (e.g. CLI exited).
   pendingPermissions: [],
