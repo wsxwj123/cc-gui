@@ -360,7 +360,11 @@ export async function activateSkin(row, { tryOn = false } = {}) {
   // 返回 T2 装载结果给 UI(拒载/门控不再被静默吞掉——p2-1 顺带修)。
   let t2 = null;
   if (manifest.tier === 2) t2 = await loadT2(id, manifest, t2Texts || null, gen);
-  if (!tryOn) {
+  // r31:只在实际仍是「当前代」时才落 LS_ID/缓存 —— 若在 await loadT2 期间又有新的激活
+  // (gen 已被 ++t2Gen 越代),本皮肤已被 superseded(loadT2 返回 reason:'superseded'),
+  // 绝不能把已被替代的皮写进 LS_ID,否则重启 bootReplaySkin 会回放到旧皮。
+  // tier-1 无 await,gen===t2Gen 恒真,行为不变;tier-2 被后来者越代才跳过。
+  if (!tryOn && gen === t2Gen) {
     try { localStorage.setItem(LS_ID, id); } catch {}
     writeCache(id, manifest);
   }
