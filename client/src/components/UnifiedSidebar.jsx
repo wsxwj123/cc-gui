@@ -13,7 +13,7 @@ import {
 import { useStore } from '../stores/sessionStore.js';
 import { confirmDialog } from '../utils/confirmDialog.jsx';
 import { resolveSessionTitle } from '../utils/sessionTitle.js';
-import { composePanelProjects, composePanelSessions, sessionQueryMatchHashes, sortProjectRows, flattenSessionRows, singleModeVisibleProjects, sessionEmptyHint, showAccessSettingsButton, reorderManual, mergeHiddenOrder, watcherRefreshTargets, clampPaneIndex } from '../utils/projectPanel.js';
+import { composePanelProjects, composePanelSessions, sessionQueryMatchHashes, sortProjectRows, flattenSessionRows, singleModeVisibleProjects, sessionEmptyHint, showAccessSettingsButton, reorderManual, mergeHiddenOrder, watcherRefreshTargets, clampPaneIndex, ACCESS_DENIED_HINT } from '../utils/projectPanel.js';
 import { pickDirectory, isTauri } from '../utils/pickDirectory.js';
 import { completionTracker } from '../utils/sessionDots.js';
 import { AnchoredPopover } from './SessionSelectors.jsx';
@@ -1238,9 +1238,26 @@ export function UnifiedSidebar() {
         })}
         {view.groupMode !== 'single' && rows.length === 0 && (
           <div className="px-4 py-8 text-center">
-            <p className="text-xs text-ink-faint font-body">
-              {q ? '没有匹配的项目' : hiddenOnly ? '所有项目都已隐藏' : '没有找到项目'}
-            </p>
+            {/* r26-E3(C-E3 延伸契约):顶层 projects 目录整体被拒访(EACCES/EPERM)时,
+                「没有找到项目」同样是伪装 —— 显示真实原因,与组内会话空态同一套提示
+                (琥珀色 hint + macOS「打开系统设置」按钮)。store.projectsAccessError
+                由 PKG-2 的 fetchProjects 403 分支产出,这里只读不自拉;undefined=正常。 */}
+            {!q && !hiddenOnly && projectsAccessError ? (
+              <p className="text-xs text-amber-700 font-body" title={projectsAccessError.hint}>
+                {projectsAccessError.hint || ACCESS_DENIED_HINT}
+                {projectsAccessError.canOpenSettings && (
+                  <button
+                    onClick={() => { fetch('/api/system/open-fda-settings', { method: 'POST' }).catch(() => {}); }}
+                    className="ml-1.5 px-2 py-0.5 rounded bg-amber-100 hover:bg-amber-200 text-amber-900 text-[10px] font-medium align-middle"
+                    title="打开「系统设置 → 隐私与安全性 → 完全磁盘访问」；已勾选的先取消再重新勾选"
+                  >打开系统设置</button>
+                )}
+              </p>
+            ) : (
+              <p className="text-xs text-ink-faint font-body">
+                {q ? '没有匹配的项目' : hiddenOnly ? '所有项目都已隐藏' : '没有找到项目'}
+              </p>
+            )}
             {!q && !hiddenOnly && (
               <button
                 onClick={openAddProject}
