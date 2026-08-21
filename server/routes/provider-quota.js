@@ -4,6 +4,7 @@ import { readFile } from 'fs/promises';
 import { homedir } from 'os';
 import { join } from 'path';
 import { readCustomProviders, readActiveProviderId, assertPublicBaseURL } from './settings.js';
+import { readCapped } from '../utils/read-capped.js';
 import {
   pickCandidates, authHeaders, probeQuota, computeLow, normalizeThresholds, reasonNote,
 } from '../services/provider-quota.js';
@@ -59,21 +60,10 @@ async function readThresholds() {
 
 // 响应体上限。这条路的 host 是**用户自填的**,不设上限就能在 8s 窗口里往内存灌任意大小。
 // 额度响应正常都在几 KB。
+// r26-J2:限量读实现抽到 server/utils/read-capped.js 共用(生图路由同款);本处限值不变。
 const MAX_BODY = 1_000_000;
 // ponytail:只做截断不做流式解析 —— 超限直接当失败,没必要为它写增量 JSON 解析器。
-async function readCapped(res) {
-  const len = Number(res.headers.get('content-length'));
-  if (Number.isFinite(len) && len > MAX_BODY) { await res.body?.cancel?.().catch(() => {}); return null; }
-  if (!res.body) return '';
-  let size = 0;
-  const parts = [];
-  for await (const chunk of res.body) {
-    size += chunk.length;
-    if (size > MAX_BODY) return null; // 退出 for-await 会取消流,不会继续收
-    parts.push(chunk);
-  }
-  return Buffer.concat(parts).toString('utf8');
-}
+const readBody = (res) => readCapped(res, MAX_BODY);
 
 // fetcher:8s 超时,返回 { status, body }。body 是解析后的 JSON(非 JSON / 超限时给 null,
 // 交由解析层判失败)。**错误信息里不带任何 header/key**。
@@ -89,7 +79,7 @@ export function makeFetcher(apiKey) {
       redirect: 'manual',
     });
     let body = null;
-    try { body = JSON.parse(await readCapped(r)); } catch { body = null; }
+    try { body = JSON.parse(await readBody(r)); } catch { body = null; }
     return { status: r.status, body };
   };
 }

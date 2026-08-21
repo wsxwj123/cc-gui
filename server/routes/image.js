@@ -16,6 +16,7 @@ import {
   IMAGE_PROTOCOLS, IMAGE_CONTENT_TYPES, buildImageRequest, extractImage,
   buildImageFileName, imageExtFromMime, resolvePreviewPath, redactKey,
 } from '../utils/image-protocols.js';
+import { readCapped } from '../utils/read-capped.js';
 import { assertPublicBaseURL } from './settings.js';
 
 const router = Router();
@@ -32,6 +33,11 @@ const DOWNLOAD_TIMEOUT_MS = 60_000; // 上游只回 URL 时下载原图
 // 中转站回一坨大 body 就是全局 OOM。
 const MAX_IMAGE_BYTES = 64 * 1024 * 1024;
 const MAX_UPSTREAM_ERR = 500; // 上游报错原文透传上限(剥 key 后)
+// r26-J2:生成 POST 的响应体同样要有界(下载分支早有,这条原先裸 r.text())。
+// 上限取 b64 闸(64MB×1.4)上方一档 ×1.5:凡是能通过 b64 闸的合法响应都装得下,
+// 再大的响应横竖过不了 b64 闸,不如在读取前就按体积拒掉(不读完 = 内存没吃)。
+const MAX_RESPONSE_BYTES = Math.ceil(MAX_IMAGE_BYTES * 1.5) + 4096;
+const MAX_ERROR_BYTES = 256 * 1024;
 
 async function readImageProviders() {
   try {
@@ -249,9 +255,32 @@ router.post('/image/generate', async (req, res) => {
       await r.body?.cancel?.().catch(() => {});
       return res.status(502).json({ error: `上游返回了重定向（HTTP ${r.status}），已拒绝跟随（防止密钥被带到未校验的地址）` });
     }
-    const raw = await r.text().catch(() => '');
+    // r26-J2:错误分支限量读 256KB(超限带截断标记);上游回一坨大错误体不能 OOM 后端。
+    if (!r.ok) {
+      const errRaw = await readCapped(r, MAX_ERROR_BYTES).catch(() => '');
+      const truncated = errRaw === null;
+      const safeErr = redactKey(truncated ? '' : errRaw, provider.apiKey).slice(0, MAX_UPSTREAM_ERR);
+      return res.status(502).json({
+        error: `上游返回 ${r.status}：${safeErr || '(空响应)'}${truncated ? '（错误内容过大，已截断）' : ''}`,
+      });
+    }
+    // r26-J2:成功分支 content-length 预检 + 限量读 —— 上限外一律按体积报错,
+    // 而不是把整坨读进内存后再按「不是 JSON」报(读完 = 内存已经吃了)。
+    const declared = Number(r.headers.get('content-length') || 0);
+    if (Number.isFinite(declared) && declared > MAX_RESPONSE_BYTES) {
+      await r.body?.cancel?.().catch(() => {});
+      return res.status(502).json({
+        error: `上游响应体积过大（声明 ${Math.round(declared / 1048576)}MB，上限 ${Math.round(MAX_RESPONSE_BYTES / 1048576)}MB）`,
+      });
+    }
+    const capped = await readCapped(r, MAX_RESPONSE_BYTES).catch(() => '');
+    if (capped === null) {
+      return res.status(502).json({
+        error: `上游响应体积过大（超过 ${Math.round(MAX_RESPONSE_BYTES / 1048576)}MB 上限，已拒绝读取）`,
+      });
+    }
+    const raw = capped;
     const safeRaw = redactKey(raw, provider.apiKey).slice(0, MAX_UPSTREAM_ERR);
-    if (!r.ok) return res.status(502).json({ error: `上游返回 ${r.status}：${safeRaw || '(空响应)'}` });
 
     let data;
     try { data = JSON.parse(raw); }
