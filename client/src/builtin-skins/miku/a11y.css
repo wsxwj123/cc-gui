@@ -1,0 +1,33 @@
+/* 初音未来 · 电子歌姬 — 可访问性修正（dsh miku a11y 同源结论移植）。
+ * dsh 原测（脚本核算，AA ≥ 4.5:1）：
+ *  1) 亮态主按钮白字 vs fill #2e9bff = 2.90、hover #4da3ff ≈ 2.7，未达 AA →
+ *     亮态 accent 压深 #2271ba（5.08）、hover #1971c4（4.98）；发送钮渐变另一站
+ *     #5b3fc0（≈8.4）/hover #4a30a8（≈9.6）均在 AA 之上。
+ *  2) 暗态主按钮 hover 皮肤值 #2e9bff 对白字 = 2.90 未达 AA → 暗态 hover 压深
+ *     #2271ba（5.08）；暗态 fill #1e6fd9 = 4.85 达 AA 保持。
+ * manifest 亮/暗 vars 已按此值声明，本文件在皮肤作用域内再钉一遍作纵深
+ * （后注入同优先级覆盖），并直接钉死发送钮渐变两站防上游 token 漂移。 */
+body[data-cgui-miku] {
+  --color-accent: #2271ba;
+  --color-accent-hover: #1971c4;
+}
+:root[data-theme="dark"] body[data-cgui-miku],
+:root[data-theme="auto"]:where([data-theme-system="dark"]) body[data-cgui-miku] {
+  --color-accent: #58a9ff;
+  --color-accent-hover: #8cc6ff;
+}
+/* 发送钮填充钉档（白字对比逐项过 AA，数值来源见头注） */
+body[data-cgui-miku] [data-cgui="send-btn"] {
+  background: linear-gradient(135deg, #2271ba 0%, #5b3fc0 100%) !important;
+}
+body[data-cgui-miku] [data-cgui="send-btn"]:hover:not(:disabled) {
+  background: linear-gradient(135deg, #1971c4 0%, #4a30a8 100%) !important;
+}
+:root[data-theme="dark"] body[data-cgui-miku] [data-cgui="send-btn"],
+:root[data-theme="auto"]:where([data-theme-system="dark"]) body[data-cgui-miku] [data-cgui="send-btn"] {
+  background: linear-gradient(135deg, #1e6fd9 0%, #4a30a8 100%) !important;
+}
+:root[data-theme="dark"] body[data-cgui-miku] [data-cgui="send-btn"]:hover:not(:disabled),
+:root[data-theme="auto"]:where([data-theme-system="dark"]) body[data-cgui-miku] [data-cgui="send-btn"]:hover:not(:disabled) {
+  background: linear-gradient(135deg, #2271ba 0%, #3d2a90 100%) !important;
+}

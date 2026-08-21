@@ -1,0 +1,86 @@
+{
+  "format": "cgui-skin/1",
+  "name": "Windows XP (Luna)",
+  "author": "dsh-web-ui xp 移植",
+  "version": "1.0.0",
+  "license": "BSD-3-Clause",
+  "tier": 2,
+  "base": "default",
+  "tagline": "Luna 蓝窗口条 · 绿色开始按钮 · Bliss 蓝天桌面",
+  "description": "Windows XP (Luna) 复古主题：蓝色渐变窗口条带窗口按钮、米色状态栏（大写/数字/滚动指示灯）、侧栏任务栏上的绿色「开始」按钮、资源管理器风格会话行和 Bliss 蓝天桌面，全局直角。",
+  "shared": {
+    "vars": {
+      "--radius-sm": "0px",
+      "--radius-md": "0px",
+      "--radius-lg": "0px",
+      "--radius-xl": "0px",
+      "--radius-2xl": "0px",
+      "--radius-panel": "0px",
+      "--radius-control": "0px",
+      "--shadow-panel": "0 4px 14px rgba(0,0,0,0.4)",
+      "--shadow-popover": "0 8px 24px rgba(0,0,0,0.4)",
+      "--shadow-bar": "0 2px 8px rgba(0,0,0,0.3)",
+      "--shadow-bevel": "inset 0 1px 0 rgba(255,255,255,0.8)"
+    }
+  },
+  "light": {
+    "vars": {
+      "--color-canvas": "#ffffff",
+      "--color-canvas-warm": "#f6f4ec",
+      "--color-canvas-deep": "#ece9d8",
+      "--color-canvas-sunken": "#e2dfcb",
+      "--color-ink": "#000000",
+      "--color-ink-soft": "#3d4a5c",
+      "--color-ink-muted": "#5d6b7e",
+      "--color-ink-faint": "#7f8d9f",
+      "--color-ink-ghost": "#9aa8ba",
+      "--color-accent": "#316ac5",
+      "--color-accent-hover": "#2558a8",
+      "--color-accent-subtle": "rgba(49,106,197,0.14)",
+      "--color-accent-muted": "rgba(49,106,197,0.32)",
+      "--color-success": "#3d9f43",
+      "--color-error": "#e33e2b",
+      "--color-error-subtle": "rgba(227,62,43,0.10)",
+      "--color-warning": "#b07600",
+      "--glass-base-bg": "rgba(255,255,255,0.94)",
+      "--glass-thick-bg": "rgba(236,233,216,0.96)",
+      "--glass-thin-bg": "rgba(246,244,236,0.88)",
+      "--glass-bar-bg": "rgba(236,233,216,0.95)",
+      "--glass-edge": "rgba(10,36,106,0.25)",
+      "--glass-edge-outer": "rgba(10,36,106,0.38)"
+    }
+  },
+  "dark": {
+    "vars": {
+      "--color-canvas": "#0d0f12",
+      "--color-canvas-warm": "#15171b",
+      "--color-canvas-deep": "#1b1d21",
+      "--color-canvas-sunken": "#202227",
+      "--color-ink": "#e8eaed",
+      "--color-ink-soft": "#c8ccd2",
+      "--color-ink-muted": "#9aa0a8",
+      "--color-ink-faint": "#6f747e",
+      "--color-ink-ghost": "#565b64",
+      "--color-accent": "#6da8e8",
+      "--color-accent-hover": "#7fb0ec",
+      "--color-accent-subtle": "rgba(109,168,232,0.16)",
+      "--color-accent-muted": "rgba(109,168,232,0.36)",
+      "--color-success": "#2fbf71",
+      "--color-error": "#ff5252",
+      "--color-error-subtle": "rgba(255,82,82,0.12)",
+      "--color-warning": "#d69a3a",
+      "--glass-base-bg": "rgba(13,15,18,0.92)",
+      "--glass-thick-bg": "rgba(27,29,33,0.96)",
+      "--glass-thin-bg": "rgba(27,29,33,0.85)",
+      "--glass-bar-bg": "rgba(28,30,34,0.95)",
+      "--glass-edge": "rgba(160,190,230,0.20)",
+      "--glass-edge-outer": "rgba(160,190,230,0.30)"
+    }
+  },
+  "home": {
+    "greeting": "{name}，Windows XP 已就绪"
+  },
+  "skin_css": "skin.css",
+  "client_js": "client.js",
+  "a11y_css": "a11y.css"
+}

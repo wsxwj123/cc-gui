@@ -1,0 +1,270 @@
+/* 初音未来 · 电子歌姬 — dsh appearance-gallery miku 皮肤移植到 cgui T2。
+ * 作用域：body[data-cgui-miku]（client.js 挂载时设、卸载器删——属性不在时全部规则惰性）。
+ * 结构映射：dsh [id=root]→#root、dsh [class*=sidebarCol]→[data-cgui="sidebar"]、
+ * 明暗跟随 cgui 约定（:root[data-theme="dark"] / auto+system-dark），配色照抄 dsh miku 原值。
+ * 标志性元素：蓝(#2e9bff)→紫(#9b5dff)→洋红(#ff4da6)渐变、音符/波形装饰、01 徽标、
+ * 毛玻璃面板透背景（半透明渐变 + backdrop blur，桌面渐变与音符从面板下透出来）。 */
+
+/* ── ① 电子歌姬桌面：亮蓝天空渐变 + 紫/洋红光晕（dsh body 背景同值扩展）──
+   --app-h/--app-w 由 client.js 按 innerHeight/zoom 的 zoom 不变量 px 实算
+   （跟踪 resize 与字体 zoom 变化），CSS 端只消费，不做任何 dvh/vw 静态换算。 */
+body[data-cgui-miku] {
+  box-sizing: border-box;
+  padding: 34px 8px 32px;
+  background-color: #eef5ff;
+  background-image:
+    radial-gradient(circle at 16% 10%, rgba(46,155,255,.14), transparent 40%),
+    radial-gradient(circle at 84% 22%, rgba(155,93,255,.16), transparent 36%),
+    radial-gradient(circle at 58% 94%, rgba(255,77,166,.12), transparent 44%),
+    radial-gradient(circle at 30% 55%, rgba(57,197,187,.08), transparent 42%),
+    linear-gradient(168deg, #f2f8ff 0%, #e4f0ff 46%, #d4e8ff 100%);
+}
+:root[data-theme="dark"] body[data-cgui-miku],
+:root[data-theme="auto"]:where([data-theme-system="dark"]) body[data-cgui-miku] {
+  background-color: #0a1430;
+  background-image:
+    radial-gradient(circle at 16% 10%, rgba(46,155,255,.12), transparent 42%),
+    radial-gradient(circle at 84% 22%, rgba(155,93,255,.14), transparent 38%),
+    radial-gradient(circle at 58% 94%, rgba(255,77,166,.10), transparent 45%),
+    radial-gradient(circle at 30% 55%, rgba(57,197,187,.06), transparent 42%),
+    linear-gradient(168deg, #041110 0%, #0a1430 48%, #101f42 100%);
+}
+
+/* ── ② 悬浮窗 = 毛玻璃面板透背景（dsh #root 半透明渐变同值 + 磨砂）── */
+body[data-cgui-miku] #root {
+  position: relative;
+  z-index: 1;
+  height: var(--app-h, calc(100dvh - 66px));
+  background: linear-gradient(rgba(250,255,254,.60) 0%, rgba(253,255,255,.45) 110px, rgba(255,255,255,.38) 100%);
+  -webkit-backdrop-filter: blur(14px) saturate(1.25);
+  backdrop-filter: blur(14px) saturate(1.25);
+  border: 1px solid #9cc6ff;
+  border-radius: var(--radius-panel, 10px);
+  overflow: hidden;
+  box-shadow: 0 8px 28px rgba(16,42,90,.28), inset 0 1px rgba(255,255,255,.90);
+}
+:root[data-theme="dark"] body[data-cgui-miku] #root,
+:root[data-theme="auto"]:where([data-theme-system="dark"]) body[data-cgui-miku] #root {
+  background: linear-gradient(rgba(10,20,48,.55) 0%, rgba(12,26,58,.42) 110px, rgba(13,26,56,.36) 100%);
+  border-color: #24447c;
+  box-shadow: 0 8px 28px rgba(0,0,0,.55), inset 0 1px rgba(255,255,255,.05);
+}
+
+/* ── ③ 歌姬标题栏：蓝→紫→洋红签名渐变（dsh mikuTitlebar 同值），
+   音符图标 + 01 徽标 + 装饰性 –□× 由 client.js 注入 ── */
+.cgui-miku-titlebar {
+  position: fixed; top: 0; left: 0; right: 0; height: 30px; z-index: 100000;
+  display: flex; align-items: center; gap: 8px; padding: 0 8px;
+  color: #fff; font: 700 12px/30px "PingFang SC", "Microsoft YaHei", sans-serif;
+  text-shadow: 0 1px 1px rgba(6,22,48,.40);
+  user-select: none; -webkit-user-select: none;
+  -webkit-backdrop-filter: blur(10px); backdrop-filter: blur(10px);
+  background:
+    linear-gradient(rgba(255,255,255,.22), rgba(255,255,255,.06) 60%),
+    linear-gradient(90deg, rgba(30,111,217,.55) 0%, rgba(46,155,255,.45) 40%, rgba(155,93,255,.42) 68%, rgba(255,77,166,.42) 100%);
+  box-shadow: inset 0 1px rgba(255,255,255,.35);
+}
+/* 桌面端给 mac 红绿灯让位 */
+@media (min-width: 768px) { .cgui-miku-titlebar { padding-left: 78px; } }
+:root[data-theme="dark"] .cgui-miku-titlebar,
+:root[data-theme="auto"]:where([data-theme-system="dark"]) .cgui-miku-titlebar {
+  background:
+    linear-gradient(rgba(255,255,255,.10), rgba(255,255,255,.02) 60%),
+    linear-gradient(90deg, rgba(13,43,86,.60) 0%, rgba(30,79,158,.50) 45%, rgba(122,63,208,.46) 72%, rgba(208,41,138,.46) 100%);
+  box-shadow: inset 0 1px rgba(255,255,255,.10);
+}
+.cgui-miku-titlebar-icon,
+.cgui-miku-titlebar-badge {
+  flex: none; display: inline-flex; align-items: center;
+  filter: drop-shadow(0 1px 1px rgba(6,22,48,.40));
+}
+.cgui-miku-titlebar-title { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cgui-miku-titlebar-btn {
+  flex: none; display: inline-flex; justify-content: center; align-items: center;
+  width: 22px; height: 18px; margin-left: 2px; font-size: 10px; line-height: 1;
+  color: #fff; background: rgba(255,255,255,.12); border: 1px solid rgba(255,255,255,.20);
+  border-radius: 3px; box-shadow: inset 0 1px rgba(255,255,255,.28);
+  transition: background-color .12s, background-image .12s, border-color .12s;
+}
+.cgui-miku-titlebar-btn:hover { background: rgba(255,255,255,.32); border-color: rgba(255,255,255,.48); }
+/* 关闭钮 hover = 洋红（dsh 同款：歌姬应援色收尾） */
+.cgui-miku-titlebar-btn:last-child:hover {
+  background: linear-gradient(#ffb3d9, #ff4da6); border-color: #e0298a;
+  box-shadow: inset 0 1px rgba(255,255,255,.40);
+}
+.cgui-miku-titlebar-btn:active { background: rgba(255,255,255,.45); box-shadow: inset 0 1px 2px rgba(10,30,66,.30); }
+
+/* ── ④ 状态栏：毛玻璃浅蓝 + 音乐波形（dsh mikuStatusbar 同值）── */
+.cgui-miku-statusbar {
+  position: fixed; bottom: 0; left: 0; right: 0; height: 26px; z-index: 100000;
+  box-sizing: border-box; display: flex; align-items: center; gap: 6px; padding: 2px 8px;
+  color: #0d2b56; font: 11px/1 "PingFang SC", "Microsoft YaHei", sans-serif;
+  user-select: none; -webkit-user-select: none;
+  -webkit-backdrop-filter: blur(10px); backdrop-filter: blur(10px);
+  background: linear-gradient(rgba(232,242,255,.55), rgba(212,232,255,.40));
+  box-shadow: inset 0 1px rgba(255,255,255,.60);
+}
+:root[data-theme="dark"] .cgui-miku-statusbar,
+:root[data-theme="auto"]:where([data-theme-system="dark"]) .cgui-miku-statusbar {
+  color: #c2d4f0;
+  background: linear-gradient(rgba(22,41,78,.55), rgba(29,49,96,.40));
+  box-shadow: inset 0 1px rgba(255,255,255,.05);
+}
+.cgui-miku-statusbar-wave {
+  flex: none; display: inline-flex; align-items: center;
+  color: #1e6fd9; filter: drop-shadow(0 1px 1px rgba(6,22,48,.20));
+  animation: cgui-miku-wave-bob 1.6s ease-in-out infinite;
+}
+:root[data-theme="dark"] .cgui-miku-statusbar-wave,
+:root[data-theme="auto"]:where([data-theme-system="dark"]) .cgui-miku-statusbar-wave { color: #58a9ff; }
+@keyframes cgui-miku-wave-bob {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-1.5px); }
+}
+.cgui-miku-statusbar-cell {
+  flex: none; height: 17px; padding: 0 8px; line-height: 17px; white-space: nowrap;
+  color: #0d2b56; background: rgba(255,255,255,.80); border: 1px solid #9cc6ff;
+  border-radius: 3px; box-shadow: inset 0 1px rgba(255,255,255,.95);
+}
+:root[data-theme="dark"] .cgui-miku-statusbar-cell,
+:root[data-theme="auto"]:where([data-theme-system="dark"]) .cgui-miku-statusbar-cell {
+  color: #c2d4f0; background: rgba(10,22,46,.50); border-color: #24447c;
+  box-shadow: inset 0 1px rgba(255,255,255,.05);
+}
+.cgui-miku-statusbar-spacer { flex: 1; }
+
+/* ── ⑤ 漂浮音符层（client.js 注入；dsh 背景画里的音符改写为可卸载 DOM 装饰）。
+   z-index 0 压在毛玻璃 #root 之下——音符从半透明面板里透出来，复刻
+   「音符点缀在半透明面板之间」的原画构图；pointer-events 全关，零交互面。 */
+.cgui-miku-notes {
+  position: fixed; inset: 0; z-index: 0;
+  pointer-events: none; overflow: hidden;
+}
+.cgui-miku-note {
+  position: absolute; display: inline-flex;
+  opacity: .55; filter: drop-shadow(0 2px 3px rgba(16,42,90,.18));
+  animation: cgui-miku-note-float 7s ease-in-out infinite;
+}
+:root[data-theme="dark"] .cgui-miku-note,
+:root[data-theme="auto"]:where([data-theme-system="dark"]) .cgui-miku-note { opacity: .45; }
+@keyframes cgui-miku-note-float {
+  0%, 100% { transform: translateY(0) rotate(-4deg); }
+  50% { transform: translateY(-14px) rotate(5deg); }
+}
+
+/* ── ⑥ 侧栏 / 顶栏 / 输入区 / 气泡：半透明玻璃，透桌面渐变（dsh 各 Col 同思路）── */
+body[data-cgui-miku] [data-cgui="sidebar"] {
+  background: linear-gradient(rgba(246,251,255,.55) 0%, rgba(234,244,255,.42) 45%, rgba(228,240,255,.34) 100%) !important;
+  border-right-color: #9cc6ff !important;
+}
+:root[data-theme="dark"] body[data-cgui-miku] [data-cgui="sidebar"],
+:root[data-theme="auto"]:where([data-theme-system="dark"]) body[data-cgui-miku] [data-cgui="sidebar"] {
+  background: linear-gradient(rgba(13,26,58,.42) 0%, rgba(11,22,50,.34) 45%, rgba(10,20,44,.28) 100%) !important;
+  border-right-color: #24447c !important;
+}
+body[data-cgui-miku] [data-cgui="topbar"],
+body[data-cgui-miku] [data-cgui="topbar-mobile"] {
+  background: linear-gradient(rgba(232,242,255,.60), rgba(212,232,255,.45)) !important;
+  -webkit-backdrop-filter: blur(10px); backdrop-filter: blur(10px);
+  border-bottom: 1px solid rgba(156,198,255,.60) !important;
+}
+:root[data-theme="dark"] body[data-cgui-miku] [data-cgui="topbar"],
+:root[data-theme="dark"] body[data-cgui-miku] [data-cgui="topbar-mobile"],
+:root[data-theme="auto"]:where([data-theme-system="dark"]) body[data-cgui-miku] [data-cgui="topbar"],
+:root[data-theme="auto"]:where([data-theme-system="dark"]) body[data-cgui-miku] [data-cgui="topbar-mobile"] {
+  background: linear-gradient(rgba(20,34,72,.60), rgba(13,26,56,.45)) !important;
+  border-bottom: 1px solid rgba(53,96,172,.50) !important;
+}
+/* 消息列表透明化：让桌面渐变与音符从玻璃下透上来 */
+body[data-cgui-miku] [data-cgui="message-list"] { background: transparent !important; }
+/* 用户气泡 = 歌姬浅蓝（dsh --dsw-specific-bubble 同值） */
+body[data-cgui-miku] [data-cgui="message-user"] {
+  background: rgba(228,240,255,.85) !important;
+  border: 1px solid #b3d6ff !important;
+  color: #1d2f52 !important;
+}
+:root[data-theme="dark"] body[data-cgui-miku] [data-cgui="message-user"],
+:root[data-theme="auto"]:where([data-theme-system="dark"]) body[data-cgui-miku] [data-cgui="message-user"] {
+  background: rgba(22,42,82,.80) !important;
+  border-color: #22407a !important;
+  color: #c2d4f0 !important;
+}
+/* 输入区 = 磨砂白面板 + 蓝描边（dsh --dsw-specific-input-major 同思路） */
+body[data-cgui-miku] [data-cgui="composer"] {
+  background: rgba(255,255,255,.55) !important;
+  -webkit-backdrop-filter: blur(8px); backdrop-filter: blur(8px);
+  border: 1px solid rgba(156,198,255,.65) !important;
+  box-shadow: inset 0 1px 2px rgba(10,30,66,.08) !important;
+}
+:root[data-theme="dark"] body[data-cgui-miku] [data-cgui="composer"],
+:root[data-theme="auto"]:where([data-theme-system="dark"]) body[data-cgui-miku] [data-cgui="composer"] {
+  background: rgba(14,28,60,.50) !important;
+  border-color: rgba(88,169,255,.35) !important;
+  box-shadow: inset 0 1px 2px rgba(0,0,0,.30) !important;
+}
+
+/* ── ⑦ 发送主钮 = 蓝→紫渐变（a11y 压深后的 AA 安全档，见 a11y 注释）── */
+body[data-cgui-miku] [data-cgui="send-btn"] {
+  color: #fff !important;
+  background: linear-gradient(135deg, #2271ba 0%, #5b3fc0 100%) !important;
+  border: 1px solid #1a5a96 !important;
+  box-shadow: 0 2px 10px rgba(46,155,255,.40), inset 0 1px rgba(255,255,255,.30) !important;
+}
+body[data-cgui-miku] [data-cgui="send-btn"]:hover:not(:disabled) {
+  background: linear-gradient(135deg, #1971c4 0%, #4a30a8 100%) !important;
+  box-shadow: 0 2px 14px rgba(46,155,255,.55), inset 0 1px rgba(255,255,255,.35) !important;
+}
+:root[data-theme="dark"] body[data-cgui-miku] [data-cgui="send-btn"],
+:root[data-theme="auto"]:where([data-theme-system="dark"]) body[data-cgui-miku] [data-cgui="send-btn"] {
+  background: linear-gradient(135deg, #1e6fd9 0%, #4a30a8 100%) !important;
+  border-color: #3560ac !important;
+}
+:root[data-theme="dark"] body[data-cgui-miku] [data-cgui="send-btn"]:hover:not(:disabled),
+:root[data-theme="auto"]:where([data-theme-system="dark"]) body[data-cgui-miku] [data-cgui="send-btn"]:hover:not(:disabled) {
+  background: linear-gradient(135deg, #2271ba 0%, #3d2a90 100%) !important;
+}
+
+/* ── ⑧ Home 问候 = 蓝→紫→洋红渐变文字（签名收尾，dsh 标题栏渐变同源）── */
+body[data-cgui-miku] [data-cgui="home-greeting"] {
+  background: linear-gradient(90deg, #1e6fd9 0%, #2e9bff 40%, #9b5dff 70%, #ff4da6 100%);
+  -webkit-background-clip: text; background-clip: text;
+  color: transparent; -webkit-text-fill-color: transparent;
+}
+:root[data-theme="dark"] body[data-cgui-miku] [data-cgui="home-greeting"],
+:root[data-theme="auto"]:where([data-theme-system="dark"]) body[data-cgui-miku] [data-cgui="home-greeting"] {
+  background: linear-gradient(90deg, #58a9ff 0%, #8cc6ff 40%, #b48cff 70%, #ff7ec2 100%);
+  -webkit-background-clip: text; background-clip: text;
+}
+
+/* ── ⑨ 滚动条（dsh 同款细轨圆头）、选区、链接（已读 = 紫，歌姬彩蛋）── */
+body[data-cgui-miku] ::-webkit-scrollbar { width: 10px; height: 10px; }
+body[data-cgui-miku] ::-webkit-scrollbar-track { background: #e9f2ff; }
+body[data-cgui-miku] ::-webkit-scrollbar-thumb { background: #b4d4ff; border: 2px solid #e9f2ff; border-radius: 5px; }
+body[data-cgui-miku] ::-webkit-scrollbar-thumb:hover { background: #7ab8ff; }
+body[data-cgui-miku] ::-webkit-scrollbar-corner { background: #e9f2ff; }
+:root[data-theme="dark"] body[data-cgui-miku] ::-webkit-scrollbar-track,
+:root[data-theme="dark"] body[data-cgui-miku] ::-webkit-scrollbar-corner,
+:root[data-theme="auto"]:where([data-theme-system="dark"]) body[data-cgui-miku] ::-webkit-scrollbar-track,
+:root[data-theme="auto"]:where([data-theme-system="dark"]) body[data-cgui-miku] ::-webkit-scrollbar-corner { background: #0e1c3c; }
+:root[data-theme="dark"] body[data-cgui-miku] ::-webkit-scrollbar-thumb,
+:root[data-theme="auto"]:where([data-theme-system="dark"]) body[data-cgui-miku] ::-webkit-scrollbar-thumb { background: #274568; border-color: #0e1c3c; }
+:root[data-theme="dark"] body[data-cgui-miku] ::-webkit-scrollbar-thumb:hover,
+:root[data-theme="auto"]:where([data-theme-system="dark"]) body[data-cgui-miku] ::-webkit-scrollbar-thumb:hover { background: #35537c; }
+body[data-cgui-miku] ::selection { color: #fff; background: #2e9bff; }
+body[data-cgui-miku] a { color: #1e6fd9; }
+body[data-cgui-miku] a:visited { color: #8f5bd8; }
+:root[data-theme="dark"] body[data-cgui-miku] a,
+:root[data-theme="auto"]:where([data-theme-system="dark"]) body[data-cgui-miku] a { color: #58a9ff; }
+:root[data-theme="dark"] body[data-cgui-miku] a:visited,
+:root[data-theme="auto"]:where([data-theme-system="dark"]) body[data-cgui-miku] a:visited { color: #b48cff; }
+
+/* ── ⑩ 字体（dsh --dsw-font-family 同序）── */
+body[data-cgui-miku] {
+  font-family: "PingFang SC", "Microsoft YaHei", "Hiragino Sans GB", "Helvetica Neue", "Segoe UI", sans-serif;
+}
+
+/* 降噪：音符漂浮与波形起伏尊重系统减动画 */
+@media (prefers-reduced-motion: reduce) {
+  .cgui-miku-note, .cgui-miku-statusbar-wave { animation: none !important; }
+  .cgui-miku-titlebar-btn { transition: none !important; }
+}

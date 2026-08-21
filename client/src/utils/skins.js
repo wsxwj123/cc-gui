@@ -384,7 +384,8 @@ export function bootReplaySkin() {
  *  r26-D8:先查服务端列表再判 builtin- 分支——修前 builtin- 前缀直接进本地分支,
  *  而 BUILTIN_SKINS 已退役为空 → 用户皮肤起名 "builtin xxx" 得的 builtin- 前缀 id
  *  重启即被静默卸。现在服务端列表命中(含用户自起的 builtin- 前缀皮肤)优先激活;
- *  查无且 builtin- 前缀才进本地退役分支(BUILTIN_SKINS 为空则 deactivate)。 */
+ *  查无且 builtin- 前缀才进本地 gallery 分支(命中 BUILTIN_SKINS → 本地激活,
+ *  r28 起由 registry.js 自注册填充、带 t2Texts;未命中 → deactivate)。 */
 export async function reconcileSkinOnBoot() {
   let id = null;
   try { id = localStorage.getItem(LS_ID); } catch {}
@@ -394,8 +395,8 @@ export async function reconcileSkinOnBoot() {
     const d = await r.json();
     const row = (d.skins || []).find((s) => s.id === id);
     if (row) { await activateSkin({ id, manifest: row.manifest }); return; }
-    // 服务端查无:builtin- 前缀进本地退役分支(BUILTIN_SKINS 已空 → deactivate),
-    // 非前缀 id 失效 → 静默清回默认
+    // 服务端查无:builtin- 前缀进本地 gallery 分支(注册表命中 → activateSkin,
+    // 内置皮肤永不在服务端列表里,绝不能误判成「失效皮肤」清掉),否则失效静默清
     if (id.startsWith('builtin-')) {
       const b = BUILTIN_SKINS.find((s) => s.id === id);
       if (b) { await activateSkin(b); return; }
@@ -404,13 +405,19 @@ export async function reconcileSkinOnBoot() {
   } catch { /* 网络失败保持缓存重放的样子,下次再对账 */ }
 }
 
-// ── 内置示例皮肤(客户端预置,非服务端库;零第三方素材,纯变量/纯代码示例) ──
-// 刻意不做在线市场/分享入口;这三套只是「格式长什么样」的活文档,可试穿可应用。
-// r13-p2-10:内置示例皮肤(晨光/夜航/霓虹终端)已退役 —— 用户实测「和主题没有任何
-// 区别」,示例价值不抵占位噪音。皮肤一律靠导入:zip 包 / 三件套粘贴 / dsh 主题 JSON
-// 转换(三条通道与 AI 提示词生成器都在设置→皮肤,能力未变)。空数组保留是为了
-// reconcileSkinOnBoot 的 builtin- 分支与既有消费点零改动(旧 builtin 激活态会自然清除)。
+// ── 内置皮肤 gallery(客户端预置,非服务端库) ──────────────────
+// r13-p2-10:旧内置示例(晨光/夜航/霓虹终端)因「和主题没有区别」退役。
+// r28:以三套移植自 dsh theme-gallery 的真 T2 皮肤(miku / xp / whale-song)复活
+// 内置 gallery —— 数据唯一真相源 = client/src/builtin-skins/registry.js(vite ?raw
+// 收四件套文本进 bundle)。skins.js 须保持 node 单测可 import 的纯模块(?raw 在 node
+// 下不可执行),故不正向 import registry,改由 registry 反向调 registerBuiltinSkins
+// 注入;面板/对账/FOUC/明暗联动一律只读本数组,导出形状不变(数组,元素 = activateSkin
+// 的 row 契约 { id, name, source:'builtin', manifest, t2Texts })。
 export const BUILTIN_SKINS = [];
+/** registry.js 自注册入口:原地填充 BUILTIN_SKINS(保持引用不变,消费点零改动)。 */
+export function registerBuiltinSkins(rows) {
+  BUILTIN_SKINS.splice(0, BUILTIN_SKINS.length, ...(Array.isArray(rows) ? rows : []));
+}
 
 // ── 明暗联动:data-theme / data-theme-system 变化 → 重跑应用循环 ──
 let observer = null;
