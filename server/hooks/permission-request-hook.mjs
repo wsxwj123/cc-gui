@@ -16,6 +16,11 @@
  *
  * fail-safe:GUI 不可达 / 超时 / 非 2xx / 响应不可解析 —— 一律 deny。后台代理无人
  * 值守,放行等于静默绕过整个权限体系;宁可拒绝一次让用户重派,不可默认放行。
+ *
+ * r26-H1 说明:respond 端点已加一次性 nonce 鉴权(随 WS broadcast 下发给前端,
+ * 详见 server/routes/permissions.js)。本 hook 【不受影响也无需改造】:它从不调用
+ * /respond —— 它的应答通道是 /request 那条被服务端挂起的 HTTP 响应本身,裁决由
+ * 前端(已持有 nonce)发起,经服务端 settle 后顺这条挂起的连接送回来。
  */
 
 // 端口由派发方写进 hook 命令行(GUI 端口可能是 6677..6687 中的任意一个)。

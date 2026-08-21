@@ -14,6 +14,26 @@ const router = Router();
  */
 const pending = new Map();
 
+/**
+ * r26-H1:respond 一次性 nonce(防仿冒授权)。
+ * 修前本机免密 + respond 无凭证 + pending 可枚举 = 同机任意进程/跨域网页都能
+ * POST /respond {decision:'allow'} 仿冒用户授权。现在每个 slot 创建时生成
+ * crypto.randomUUID() nonce,只经两条通道下发:
+ *   ① permission:request 的 WS broadcast(broadcast 副本带 nonce,slot.request 本体不带);
+ *   ② GET /pending 对 loopback 来源的回补(WS 断连重连后补拉用;非 loopback 一律不带)。
+ * respond 必须携带与 slot 逐字一致的 nonce(body.nonce 或 X-CGUI-Nonce 头,头优先)。
+ * X-CGUI-Nonce 自定义头的附加价值:浏览器跨域 fetch 带自定义头必触发 preflight,
+ * 服务端不配 CORS 即天然拒绝 —— 网页仿冒这条面彻底封死。
+ * nonce 不单次作废:同一 pending 允许重试(网络抖动),slot 关闭即自然失效。
+ *
+ * 威胁模型声明(边界):本设计防【盲打】——跨域网页 CSRF、不知道 nonce 的本机脚本、
+ * 端口扫描式攻击。【不防】主动连 WS 监听 broadcast 的本机恶意进程(WS 本机默认可连,
+ * nonce 会推给它)——该进程已能读 ~/.claude 下一切文件,超出本防线责任面。
+ */
+function mintNonce() {
+  return randomUUID();
+}
+
 // 把决定送回等待方(HTTP res 或进程内 resolve 皆可),并从表里移除。
 // settled 原子标志:res close(挂起的 hook 连接断开)与 respond 几乎同时到达时,
 // 两边都可能拿到 slot —— 只允许先到的 settle 生效,第二次直接 noop,否则卡片会
@@ -53,12 +73,15 @@ function requestCard(fields, { signal, translate }) {
     };
     pending.set(id, {
       request,
+      nonce: mintNonce(),
       resolve: (payload) => {
         try { signal?.removeEventListener('abort', onAbort); } catch {}
         resolve(translate(payload || {}));
       },
     });
-    broadcast({ type: 'permission:request', request });
+    const slot = pending.get(id);
+    // nonce 只进 broadcast 副本,不进 slot.request —— GET /pending 按来源决定带不带。
+    broadcast({ type: 'permission:request', request: { ...request, nonce: slot.nonce } });
     if (signal?.aborted) onAbort();
     else { try { signal?.addEventListener('abort', onAbort, { once: true }); } catch {} }
   });
@@ -136,8 +159,9 @@ export function requestPermission({ toolName, toolInput, sessionId, cwd, blocked
       ...(decisionReason ? { decisionReason } : {}),
       ...(toolUseID ? { toolUseID } : {}),
     };
-    pending.set(id, { request, resolve });
-    broadcast({ type: 'permission:request', request });
+    const nonce = mintNonce();
+    pending.set(id, { request, nonce, resolve });
+    broadcast({ type: 'permission:request', request: { ...request, nonce } });
   });
 }
 
@@ -195,10 +219,11 @@ router.post('/permissions/request', (req, res) => {
     ...(req.body?.bgAgent === true ? { bgAgent: true } : {}),
   };
 
-  pending.set(id, { request, res });
+  const nonce = mintNonce();
+  pending.set(id, { request, nonce, res });
 
   // Push to all clients so the GUI can render a popup.
-  broadcast({ type: 'permission:request', request });
+  broadcast({ type: 'permission:request', request: { ...request, nonce } });
 
   // If client disconnects before resolving (e.g. server restarted, response
   // socket died), drop the entry so the map doesn't leak.
@@ -231,6 +256,12 @@ router.post('/permissions/respond/:id', (req, res) => {
   // and the frontend treated the 404 as a failure. Already-resolved vs.
   // never-existed are indistinguishable here; unify to a harmless idempotent ok.
   if (!slot) return res.json({ ok: true, alreadyResolved: true });
+  // r26-H1:respond 必携 nonce(X-CGUI-Nonce 头优先,body.nonce 兜底),与 slot 逐字比对。
+  // 拒绝文案保持恒定,绝不回显/暗示正确值。
+  const presented = req.get('X-CGUI-Nonce') || req.body?.nonce;
+  if (typeof presented !== 'string' || presented !== slot.nonce) {
+    return res.status(403).json({ error: 'nonce 无效或请求已过期' });
+  }
   const decision = req.body?.decision === 'allow' ? 'allow' : 'deny';
   const reason = req.body?.reason || null;
   const updatedInput = req.body?.updatedInput;
@@ -251,10 +282,15 @@ router.post('/permissions/respond/:id', (req, res) => {
 /**
  * GET /api/permissions/pending — for a freshly-loaded client that missed the
  * WS broadcast (refresh while a permission was waiting).
+ * r26-H1:nonce 只对 loopback 来源附带(WS 断连重连后的回补通道);非 loopback
+ * (LAN/经隧道)拿到的列表绝不含 nonce,枚举到 id 也仿冒不了 respond。
  */
 router.get('/permissions/pending', (req, res) => {
+  const withNonce = isLocalReq(req);
   const list = [];
-  for (const { request } of pending.values()) list.push(request);
+  for (const slot of pending.values()) {
+    list.push(withNonce ? { ...slot.request, nonce: slot.nonce } : slot.request);
+  }
   res.json({ items: list });
 });
 
