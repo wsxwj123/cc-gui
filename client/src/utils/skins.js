@@ -44,7 +44,7 @@ const state = {
   manifest: null,
   appliedVars: [],       // 已 setProperty 的 token 名(清除用)
   background: null,      // { url, overlayOpacity, fit, position, blur } | null
-  t2: null,              // { styleNodes:[], scriptNode, blobUrl, attrSnapshot } | null
+  t2: null,              // { styleNodes:[], scriptNode, blobUrl, attrSnapshot(preSnap), loadedSnap } | null
   tryOn: false,          // 试穿(不落 localStorage)
 };
 export const getSkinState = () => state;
@@ -189,11 +189,13 @@ export async function loadT2(id, manifest, texts = null, gen = null) {
     if (!v.ok) return { loaded: false, reason: 'script_rejected', hits: v.hits };
   }
   // ── 以下为同一同步 tick(快照→插节点→state 赋值,无 await 即无竞态缝)──
+  // r26-D2 二次快照法:attrSnapshot = preSnap(装载前),loadedSnap = 装载完成后同一
+  // tick 再拍一次;dispose 按两快照 diff 只还原皮肤改过的属性(见 disposeT2)。
   const attrSnapshot = {};
   for (const name of document.documentElement.getAttributeNames()) {
     attrSnapshot[name] = document.documentElement.getAttribute(name);
   }
-  const t2 = { styleNodes: [], scriptNode: null, blobUrl: null, attrSnapshot };
+  const t2 = { styleNodes: [], scriptNode: null, blobUrl: null, attrSnapshot, loadedSnap: null };
   for (const text of [css, a11y]) {
     if (!text) continue;
     const node = document.createElement('style');
@@ -212,11 +214,17 @@ export async function loadT2(id, manifest, texts = null, gen = null) {
     document.head.appendChild(node);
     t2.scriptNode = node;
   }
+  // r26-D2:装载完成后同一同步 tick 二次快照(皮肤脚本同步执行的痕迹落在两快照差集里)
+  const loadedSnap = {};
+  for (const name of document.documentElement.getAttributeNames()) {
+    loadedSnap[name] = document.documentElement.getAttribute(name);
+  }
+  t2.loadedSnap = loadedSnap;
   state.t2 = t2;
   return { loaded: true };
 }
 
-/** 卸载 T2:①皮肤自注册 disposer → ②标记节点逐项移除 → ③documentElement 属性快照恢复。 */
+/** 卸载 T2:①皮肤自注册 disposer → ②标记节点逐项移除 → ③documentElement 属性按双快照 diff 还原。 */
 export function disposeT2() {
   const t2 = state.t2;
   try { window.__cguiSkinDispose?.(); } catch {}
@@ -227,12 +235,33 @@ export function disposeT2() {
   if (t2) {
     if (t2.blobUrl) { try { URL.revokeObjectURL(t2.blobUrl); } catch {} }
     const root = document.documentElement;
-    const snap = t2.attrSnapshot || {};
-    for (const name of root.getAttributeNames()) {
-      if (!(name in snap)) root.removeAttribute(name);
-    }
-    for (const [name, val] of Object.entries(snap)) {
-      if (root.getAttribute(name) !== val) root.setAttribute(name, val);
+    // r26-D2 二次快照 diff:只还原「皮肤改过且之后没人再动」的属性——皮肤存活期间
+    // 用户换主题(data-theme)/改字体透明度等不再被回滚。迭代域必须含 keys(preSnap):
+    // 皮肤装载期删除的属性 preSnap 有、loadedSnap 无,不进迭代就永不还原。
+    // cur === null(属性当前不存在)先摘出来单独判,绝不与 undefined 比(getAttribute
+    // 缺席返回 null,null === undefined 为 false 会把「被删掉」错判成「被改过」)。
+    const preSnap = t2.attrSnapshot || {};
+    const loadedSnap = t2.loadedSnap || preSnap; // 旧态兜底:无二次快照时退化为全量还原
+    const names = new Set([...root.getAttributeNames(), ...Object.keys(loadedSnap), ...Object.keys(preSnap)]);
+    for (const name of names) {
+      const inLoaded = Object.prototype.hasOwnProperty.call(loadedSnap, name);
+      const inPre = Object.prototype.hasOwnProperty.call(preSnap, name);
+      const cur = root.getAttribute(name); // null = 当前不存在
+      if (!inLoaded && !inPre) {
+        root.removeAttribute(name); // 存活期新增(皮肤脚本异步或第三方) → 摘除
+      } else if (inLoaded && cur !== null && cur === loadedSnap[name]) {
+        // 装载后没人动 → 还原到装载前(preSnap 无此键 = 装载期新增,摘除)
+        if (inPre) root.setAttribute(name, preSnap[name]);
+        else root.removeAttribute(name);
+      } else if (!inLoaded && inPre && cur === null) {
+        root.setAttribute(name, preSnap[name]); // 皮肤装载期删掉且仍缺席 → 还原
+      }
+      // else:第三方改过(cur≠loadedSnap)/皮肤删掉但第三方重设(cur≠null) → 一律保留现状。
+      // 已知残留面:皮肤脚本在 loadedSnap 之后异步(setInterval 等)自改的属性会被当用户
+      // 改动保留——T2 是受信开发者代码(总开关+确认弹窗),残留可接受。
+      // watchThemeForSkin 交互:明暗切换重跑 applySkinDom 会重写 root.style 内联变量 →
+      // style ≠ loadedSnap 被当「用户改动」保留,这不泄漏:clearSkinDom 顺序是
+      // disposeT2() → clearVars(),clearVars 按 appliedVars 精确 removeProperty 清干净。
     }
   }
   state.t2 = null;
