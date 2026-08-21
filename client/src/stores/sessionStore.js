@@ -1969,21 +1969,31 @@ export const useStore = create((set, get) => ({
         // 身份复用同下:已经是空数组就不换身份,免得 600ms watcher 反复触发整树重渲。
         set((st) => {
           const merged = mergeSessionList(st.sessionsByProject[projectHash], []);
-          // r24:canOpenSettings 与 hint 同来同走(侧栏空态的「打开系统设置」按钮按它门控)。
-          // 原来这里只取 hint 把它丢了 —— 后端明明回了,前端却无从判断该不该给按钮。
+          // r26-E2:错误态按 projectHash 隔离存 —— 旧全局单值会让 A 项目的拒访染红
+          // B 项目的空态,且 B 任意一次成功又把 A 的错误清掉(随 watcher 抖动)。
+          // 置:仅置本项目键;清:仅本项目成功时删本键(见下方成功分支)。
           const canOpen = !!data.canOpenSettings;
-          const sameErr = st.sessionsAccessError === data.hint && st.sessionsAccessCanOpenSettings === canOpen;
+          const curMap = st.sessionsAccessErrorByProject || {};
+          const curErr = curMap[projectHash];
+          const sameErr = curErr?.hint === data.hint && !!curErr?.canOpenSettings === canOpen;
           const sameList = merged === st.sessionsByProject[projectHash];
           if (sameErr && sameList) return st;
           return {
-            ...(sameErr ? null : { sessionsAccessError: data.hint, sessionsAccessCanOpenSettings: canOpen }),
+            ...(sameErr ? null : { sessionsAccessErrorByProject: { ...curMap, [projectHash]: { hint: data.hint, canOpenSettings: canOpen } } }),
             ...(sameList ? null : { sessionsByProject: { ...st.sessionsByProject, [projectHash]: merged } }),
           };
         });
         return;
       }
       const list = Array.isArray(data) ? data : [];
-      set((st) => (st.sessionsAccessError ? { sessionsAccessError: null, sessionsAccessCanOpenSettings: false } : st));
+      // r26-E2:本项目成功 → 只清本项目的错误键,不动他键。
+      set((st) => {
+        const curMap = st.sessionsAccessErrorByProject || {};
+        if (!curMap[projectHash]) return st;
+        const nextMap = { ...curMap };
+        delete nextMap[projectHash];
+        return { sessionsAccessErrorByProject: nextMap };
+      });
       // r13-p2-1:内容不变则复用旧身份并跳过 set —— watcher 每 600ms 刷全部展开组,
       // 无条件换身份会让侧栏整树随流式持续重渲(按钮卡顿/点击丢失根因)。
       set((s) => {
@@ -1995,12 +2005,10 @@ export const useStore = create((set, get) => ({
     } catch { /* 面板刷新失败保留旧缓存,下次去抖刷新兜底 */ }
   },
   // 置顶(项目/会话,服务端共享):挂载 GET 与 WS 广播都经同一 reducer 入位。
-  // r17-4:会话目录不可读(完全磁盘访问未授予)时的人话提示;null = 正常。
-  sessionsAccessError: null,
-  // r24:这个平台有没有「一键打开」的系统设置面板可跳(后端 canOpenAccessSettings,
-  // 目前只有 macOS)。侧栏空态据此决定给不给「打开系统设置」按钮 —— Windows/Linux
-  // 上按了无处可去,不显示。
-  sessionsAccessCanOpenSettings: false,
+  // r26-E2:会话目录不可读(403 no-disk-access)的错误态【按 projectHash 隔离】——
+  // { [hash]: { hint, canOpenSettings } },缺省 undefined = 正常。侧栏按渲染组 hash 读。
+  // (旧全局单值 sessionsAccessError 已删除:A 拒访染红 B 空态 / B 成功误清 A 的抖动。)
+  sessionsAccessErrorByProject: {},
   pinnedProjects: [],
   pinnedSessions: [],
   applyPinned: (data) => set(reducePinned(data)),
@@ -2019,12 +2027,20 @@ export const useStore = create((set, get) => ({
       // r22-①:同一个后端契约(403 + code:'no-disk-access')的第二个消费者。原来这里
       // 静默吞成 [] —— 与 fetchSessionsForPanel 口径不一致,权限被拒时旧槽照样显示成
       // "没有会话"。两个消费者必须同口径:置错误态 + 空列表。
+      // r26-E2:错误态按 projectHash 隔离(与 fetchSessionsForPanel 同一张 map)。
       if (res.status === 403 && data?.code === 'no-disk-access') {
-        const access = { sessionsAccessError: data.hint, sessionsAccessCanOpenSettings: !!data.canOpenSettings };
+        const access = { sessionsAccessErrorByProject: { ...(get().sessionsAccessErrorByProject || {}), [projectHash]: { hint: data.hint, canOpenSettings: !!data.canOpenSettings } } };
         set(silent ? { sessions: [], ...access } : { sessions: [], ...access, listLoading: false });
         return;
       }
-      set((st) => (st.sessionsAccessError ? { sessionsAccessError: null, sessionsAccessCanOpenSettings: false } : st));
+      // r26-E2:本项目成功 → 只删本 hash 键,不动他键。
+      set((st) => {
+        const curMap = st.sessionsAccessErrorByProject || {};
+        if (!curMap[projectHash]) return st;
+        const nextMap = { ...curMap };
+        delete nextMap[projectHash];
+        return { sessionsAccessErrorByProject: nextMap };
+      });
       // Treat non-array response (e.g. {error:"..."} from a 500) as empty.
       // Without this, on 500 `data` would still be a non-array object — we
       // already coerce to [], but earlier bugs let stale `sessions` linger
