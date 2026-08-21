@@ -52,7 +52,9 @@ const endpointMemo = new Map();
 const alertBySlot = new Map(); // slotKey → boolean
 // 在飞的探测。订阅者有三处(用量面板的卡 + 顶栏红点 + provider 切换列表),chat-done 是
 // 同一刻广播的 —— 不合并就是同一秒对第三方发三份完全一样的请求。
-let inflight = null; // { slotKey, promise }
+// r26-J11:按槽位分槽(Map<slotKey, Promise>)—— 单槽时快速切换 provider 会把别家的
+// 在飞探测顶掉,切回来又重探一遍(互踩),分槽后各家等各家的。
+const inflightBySlot = new Map();
 
 // 当前 provider 是否官方:与 subscription-usage.js 同判据(settings.json 的
 // ANTHROPIC_BASE_URL 为空或指向 api.anthropic.com)。官方时本卡整卡不渲染。
@@ -149,7 +151,7 @@ router.get('/provider-quota', async (_req, res) => {
 
   // 合并的是**整段"探测→建响应→写缓存"**,不只是那次 fetch:并发的几份必须拿到同一个
   // data 对象,否则各写各的缓存(fetchedAt 差几毫秒),缓存回放跟首份对不上。
-  if (!inflight || inflight.slotKey !== slotKey) {
+  if (!inflightBySlot.has(slotKey)) {
     const promise = (async () => {
       // r16-4:额度查询用 quotaKey,没配才回落 apiKey。有几家的额度接口认的不是推理 key
       // (OpenRouter 账户余额要 management key、MiniMax 套餐额度可能要订阅密钥),
@@ -173,10 +175,10 @@ router.get('/provider-quota', async (_req, res) => {
       cooldownBySlot.delete(slotKey); // 成功即解冷却
       return { data };
     })();
-    inflight = { slotKey, promise };
-    promise.catch(() => {}).finally(() => { if (inflight?.promise === promise) inflight = null; });
+    inflightBySlot.set(slotKey, promise);
+    promise.catch(() => {}).finally(() => { if (inflightBySlot.get(slotKey) === promise) inflightBySlot.delete(slotKey); });
   }
-  const out = await inflight.promise;
+  const out = await inflightBySlot.get(slotKey);
   if (out.data) return res.json(out.data);
   // 探测失败:有旧数据就回放并标 degraded(不把陈旧数据伪装成新鲜),没有就回人话原因。
   const note = reasonNote(out.reason);
