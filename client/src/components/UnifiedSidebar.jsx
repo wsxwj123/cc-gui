@@ -181,6 +181,10 @@ export function UnifiedSidebar() {
 
   // ── 挂载拉取:项目列表 / 置顶(reducer 入位,WS 广播后续收敛)/ 隐藏列表 ─────
   const [hidden, setHidden] = useState(() => new Set());
+  // r26-I7②:watcher(下方 effect,[] 依赖)要读最新 hidden —— ref 镜像组件本地集;
+  // 契约 C-I2 落地后(store.hiddenProjects,PKG-2 产出)以 store 为准,本地集兜底。
+  const hiddenRef = useRef(hidden);
+  hiddenRef.current = hidden;
   useEffect(() => { fetchProjects(); }, []);
   useEffect(() => {
     fetch('/api/prefs/pinned').then((r) => r.json())
@@ -281,7 +285,8 @@ export function UnifiedSidebar() {
       timer = setTimeout(() => {
         const st = useStore.getState();
         // r13-①:全部展开组保鲜(原为单一钻入组)。
-        for (const h of st.expandedProjects) st.fetchSessionsForPanel(h);
+        // r26-I7②:隐藏项目的展开组跳过(不白发请求、其错误不污染按项目错误态)。
+        for (const h of watcherRefreshTargets(st.expandedProjects, st.hiddenProjects || hiddenRef.current)) st.fetchSessionsForPanel(h);
         // 旧槽保鲜:selectedProject 的 sessions 单值槽仍被权限卡门禁/@面板消费。
         if (st.selectedProject?.hash) st.fetchSessions(st.selectedProject.hash, { silent: true });
       }, 600);

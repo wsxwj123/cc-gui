@@ -256,6 +256,22 @@ export function sessionQueryMatchHashes({ sessionsByProject = {}, query = '', ti
   return out;
 }
 
+/**
+ * r26-I7②:watcher(600ms)刷新目标 = 展开组去掉 hidden(纯函数)。隐藏项目的展开组
+ * 留在展开集里(本地持久化,取消隐藏即复原),但不该再随 watcher 每 600ms 白发请求
+ * —— 且隐藏组的拉取错误还会污染按项目的错误态。hidden 可为 Set/数组/undefined。
+ */
+export function watcherRefreshTargets(expanded, hidden) {
+  const hiddenSet = hidden instanceof Set ? hidden : new Set(hidden || []);
+  return (Array.isArray(expanded) ? expanded : []).filter((h) => !hiddenSet.has(h));
+}
+
+/** r26-I10:撤销删除恢复窗格时把目标下标夹到当前可见 pane 范围内(纯函数)。 */
+export function clampPaneIndex(i, paneCount) {
+  const max = Math.max(0, (paneCount | 0 || 1) - 1);
+  return Math.max(0, Math.min(max, i | 0));
+}
+
 // ── r13-p2-1:列表身份保持(卡顿根治) ──────────────────────────────
 // watcher 每 600ms 刷新全部展开组;若回包无论内容变没变都换数组/对象身份,侧栏
 // 整棵树跟着重渲(流式期间持续发生)= 按钮迟滞与点击丢失的根因。这里逐条比对
