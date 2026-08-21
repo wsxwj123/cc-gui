@@ -100,7 +100,7 @@ import { homeView, pickHomeProject, buildHomeDraft, homeGreeting } from '../../c
   assert.match(app, /<HomeState tabIndex=\{tabIndex\} \/>/, 't5: Home 挂在无会话分支');
   assert.match(app, /<EmptyState tabIndex=\{tabIndex\} \/>/, 't5: 零项目 EmptyState 保留');
   assert.match(app, /seedNewSessionDefaults\(project\.hash\)/, 't5: 与侧栏创建点同一 seed 链路');
-  assert.match(app, /enqueueMessage\(`draft-\$\{project\.hash\}`/, 't5: 发送经 draft 队列(既有排空链路,零旁路)');
+  assert.match(app, /enqueueMessage\(queueKeyFor\(_homeDraft\)/, 't5: 发送经 draft 队列(既有排空链路,零旁路);r26-B5 起键带 draftId(queueKeyFor)');
   assert.match(app, /buildHomeDraft\(project, newDraftId\(\)\)/, 't5: draft 经纯函数(cwd 绑定)创建');
   // r24 接线:t2b 的优先级只在【真把聚焦窗格的项目喂进去】时才有意义 —— 这一句没了,
   // focusedProjectHash 恒 undefined,纯函数测试照样全绿而功能是死的。
