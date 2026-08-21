@@ -7,7 +7,7 @@ import { Router } from 'express';
 import { realpathSync } from 'node:fs';
 import { isPathInside } from '../utils/safe-path.js';
 import { readFile, writeFile, mkdir, rename, unlink, stat, access } from 'fs/promises';
-import { existsSync, constants } from 'fs';
+import { constants } from 'fs';
 import { join, isAbsolute } from 'path';
 import { homedir } from 'os';
 import { randomUUID } from 'crypto';
@@ -198,14 +198,26 @@ router.delete('/image-providers/:id', async (req, res) => {
 });
 
 // 落盘:重名加序号(-1、-2……),不覆盖已有图。
-async function saveImage(dir, baseName, buf) {
+// r26-J4:existsSync 预检 + writeFile 是两步,并发下同 tick 同名会互相覆盖(检查时都
+// 不存在,然后各写各的)。改 flag:'wx' 原子创建,EEXIST 撞名加后缀重试(上限 100 次,
+// 与 download-update.js 既有模式同款)。
+// export 仅为单测:并发撞名双存活只能在函数级确定性构造(路由级要赌时间戳同秒)。
+export async function saveImage(dir, baseName, buf) {
   const ext = extname(baseName);
   const stem = baseName.slice(0, baseName.length - ext.length);
-  let name = baseName;
-  for (let i = 1; existsSync(join(dir, name)); i++) name = `${stem}-${i}${ext}`;
-  const full = join(dir, name);
-  await writeFile(full, buf);
-  return full;
+  for (let i = 0; i <= 100; i++) {
+    const name = i === 0 ? baseName : `${stem}-${i}${ext}`;
+    const full = join(dir, name);
+    try {
+      await writeFile(full, buf, { flag: 'wx' });
+      return full;
+    } catch (e) {
+      if (e?.code !== 'EEXIST') throw e; // 只兜撞名;ENOSPC/EACCES 等原样上抛给错误分类
+    }
+  }
+  const e = new Error('同名文件过多（超过 100 个），保存失败');
+  e.code = 'EEXIST';
+  throw e;
 }
 
 /**
