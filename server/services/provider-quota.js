@@ -383,6 +383,39 @@ export function computeLow(payload, thresholds = DEFAULT_THRESHOLDS) {
   });
 }
 
+// r26-J10:红点滞回 —— 用量占比 ≥90% 亮、降到 <85% 才灭(单点阈值在边界抖动会让红点闪)。
+// 亮/灭按【方向跨阈才翻转】:prevOn 时看灭阈,否则看亮阈。带宽 5 个百分点。
+export const QUOTA_ALERT_ON = 0.9;
+export const QUOTA_ALERT_OFF = 0.85;
+
+/**
+ * 带滞回的红点判定。prevOn = 该槽位上一次的红点状态(按 providerId+baseURL 指纹分键,
+ * 状态残留在 provider 切换后不串)。亮阈按条目方向取:'used' 用 usedPercent,'left'
+ * 用 leftPercent(= 剩余 ≤ leftPercent% 亮);灭阈 = 亮阈 − 滞回带宽
+ * (QUOTA_ALERT_ON − QUOTA_ALERT_OFF)。默认两阈同为 90%/85% 已用口径。
+ * 钱类(无分母的绝对余额)不做滞回:耗尽风险不该等回落确认,保持单点阈值。
+ */
+export function computeAlert(payload, thresholds = DEFAULT_THRESHOLDS, prevOn = false) {
+  const t = normalizeThresholds(thresholds);
+  const currency = payload?.currency;
+  const band = QUOTA_ALERT_ON - QUOTA_ALERT_OFF; // 滞回带宽(已用占比 5 个百分点)
+  for (const it of arr(payload?.items)) {
+    if (!it || it.unlimited) continue;
+    if (typeof it.percent === 'number' || (typeof it.value === 'number' && typeof it.max === 'number' && it.max > 0)) {
+      // 统一折算成「已用占比」(0..1)再比阈
+      const f = typeof it.percent === 'number'
+        ? (it.direction === 'used' ? it.percent / 100 : 1 - it.percent / 100)
+        : (it.direction === 'used' ? it.value / it.max : 1 - it.value / it.max);
+      const on = it.direction === 'used' ? t.usedPercent / 100 : 1 - t.leftPercent / 100;
+      const off = Math.max(0, on - band);
+      if (prevOn ? f >= off : f >= on) return true;
+      continue;
+    }
+    if (typeof it.value === 'number' && it.value <= (currency === 'USD' ? t.usd : t.cny)) return true;
+  }
+  return false;
+}
+
 // ok:false 时给人话原因(留空白用户会以为查询坏了)。
 export function reasonNote(reason) {
   if (reason === 'auth') return '额度接口拒绝了当前密钥（可能未开通该接口或权限不足）';

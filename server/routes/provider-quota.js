@@ -6,7 +6,7 @@ import { join } from 'path';
 import { readCustomProviders, readActiveProviderId, assertPublicBaseURL } from './settings.js';
 import { readCapped } from '../utils/read-capped.js';
 import {
-  pickCandidates, authHeaders, probeQuota, computeLow, normalizeThresholds, reasonNote,
+  pickCandidates, authHeaders, probeQuota, computeAlert, normalizeThresholds, reasonNote,
 } from '../services/provider-quota.js';
 
 // r16-2:第三方 provider 的余额/额度。官方订阅走 /api/subscription-usage(那张卡在
@@ -47,6 +47,9 @@ function slotKeyOf(provider) {
 const cooldownBySlot = new Map(); // slotKey → { keyTag, until, reason, note }
 // 探测命中的端点(按槽位身份),避免每次都从头试候选。
 const endpointMemo = new Map();
+// r26-J10:红点滞回状态(亮/灭),按槽位身份分键 —— 切 provider/换端点后上家的
+// 亮灭状态不串到下家。
+const alertBySlot = new Map(); // slotKey → boolean
 // 在飞的探测。订阅者有三处(用量面板的卡 + 顶栏红点 + provider 切换列表),chat-done 是
 // 同一刻广播的 —— 不合并就是同一秒对第三方发三份完全一样的请求。
 let inflight = null; // { slotKey, promise }
@@ -158,9 +161,13 @@ router.get('/provider-quota', async (_req, res) => {
         return { reason: result.reason }; // 直接带回失败原因:冷却可能已被另一个槽位的探测清掉
       }
       endpointMemo.set(slotKey, result.endpoint);
+      // r26-J10:红点带滞回 —— 占比 ≥90% 才亮、降到 <85% 才灭,边界抖动不闪。
+      const thresholds = await readThresholds();
+      const low = computeAlert(result, thresholds, alertBySlot.get(slotKey) || false);
+      alertBySlot.set(slotKey, low);
       const data = {
         ...head, ok: true, kind: result.kind, currency: result.currency, items: result.items,
-        low: computeLow(result, await readThresholds()), fetchedAt: Date.now(),
+        low, fetchedAt: Date.now(),
       };
       cacheBySlot.set(slotKey, { at: Date.now(), keyTag, data });
       cooldownBySlot.delete(slotKey); // 成功即解冷却
