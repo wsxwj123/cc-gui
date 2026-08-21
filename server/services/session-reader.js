@@ -787,6 +787,54 @@ export function dedupReplayedRecords(rawRecords) {
   });
 }
 
+/**
+ * 同计划卡折叠(r32-plan-flood,根因见 getSessionMessages 顶部说明):/goal 的会话级
+ * Stop 钩子每轮强制续跑,CLI 每轮把同一份【已批准计划】以 ExitPlanMode 重提一次
+ * (input.plan 逐字相同)。这条条都是各自独立的 message.id/uuid,dedupReplayedRecords
+ * 按 uuid/message.id 认不出 → 消息流冒出 N 张相同计划卡。这里对【已构建的 messages】拍平:
+ * 同一会话历史里 ExitPlanMode.input.plan 逐字相同的,只保留第一条,后续重复块去掉;
+ * 若去掉后该 turn 无其余可渲染内容(text/thinking/其余 toolCalls),整条 turn 省去。
+ *   · 折叠粒度 = 只去掉重复的计划块,不误伤同一条 assistant 记录里的其他内容块
+ *     (该 turn 的 text/thinking/非 ExitPlanMode toolCalls 全部保留);
+ *   · 保留第一条而非最后一条:计划卡应在它最初被提出的位置出现(批准/驳回动作紧邻其后),
+ *     后续强制续跑重提的是同一份已批准计划的机械重复,保留最后一条会把卡挪到最近一次
+ *     重复处,语义上是错的;
+ *   · 不同计划绝不动:input.plan 不同 → 签名不同 → 各自成卡,互不影响。
+ */
+export function foldRepeatedPlanCards(messages) {
+  const seenPlan = new Set();
+  const out = [];
+  for (const m of messages) {
+    if (m?.type !== 'turn') { out.push(m); continue; }
+    const toolCalls = Array.isArray(m.toolCalls) ? m.toolCalls : [];
+    const isPlan = (tc) => tc?.name === 'ExitPlanMode'
+      && typeof tc?.input?.plan === 'string' && tc.input.plan.trim();
+    let anyDropped = false;
+    const keptToolCalls = [];
+    const droppedIds = new Set();
+    for (const tc of toolCalls) {
+      if (isPlan(tc)) {
+        const sig = tc.input.plan;
+        if (seenPlan.has(sig)) { anyDropped = true; droppedIds.add(tc.id); continue; }
+        seenPlan.add(sig);
+      }
+      keptToolCalls.push(tc);
+    }
+    if (!anyDropped) { out.push(m); continue; }
+    // 同步去掉 blocks 里对应的 tool_use 块,保留其余内容块
+    const blocks = (Array.isArray(m.blocks) ? m.blocks : []).filter(
+      (b) => !(b?.type === 'tool_use' && b?.toolCall && droppedIds.has(b.toolCall.id))
+    );
+    // 若去掉重复计划卡后无任何可渲染内容,整条省去(普通工具回合无其余可渲染内容时同理)。
+    const hasRenderable = keptToolCalls.length > 0
+      || (Array.isArray(m.text) && m.text.length > 0)
+      || (Array.isArray(m.thinking) && m.thinking.length > 0);
+    if (hasRenderable) out.push({ ...m, toolCalls: keptToolCalls, blocks });
+    // else: 整条 turn 直接省略
+  }
+  return out;
+}
+
 export async function getSessionMessages(sessionId, projectHash) {
   let filePath = join(PROJECTS_DIR, projectHash, `${sessionId}.jsonl`);
   if (!existsSync(filePath)) {
@@ -1046,6 +1094,10 @@ export async function getSessionMessages(sessionId, projectHash) {
   }
 
   flushTurn();
+  // r32-plan-flood:同计划卡折叠(见 foldRepeatedPlanCards 注释)。放在消息构建之后、
+  // usageTotals 之前:折叠只影响 messages 的呈现,不影响按 record 汇总的真实用量
+  // (每次底层 API 调用都是真实消耗,不能因计划卡冗余而少算)。
+  const foldedMessages = foldRepeatedPlanCards(messages);
   // 聚合四字段。apiCalls = 去重后的底层 API 调用次数,供前端明细展示/排查。
   const usageTotals = { input: 0, output: 0, cacheRead: 0, cacheCreation: 0, apiCalls: sessionUsageById.size };
   for (const u of sessionUsageById.values()) {
@@ -1054,7 +1106,7 @@ export async function getSessionMessages(sessionId, projectHash) {
     usageTotals.cacheRead += u.cache_read_input_tokens || 0;
     usageTotals.cacheCreation += u.cache_creation_input_tokens || 0;
   }
-  return { messages, usageTotals };
+  return { messages: foldedMessages, usageTotals };
 }
 
 /**
