@@ -1918,12 +1918,29 @@ export const useStore = create((set, get) => ({
     try {
       const res = await fetch('/api/projects');
       const data = await res.json();
+      // r26-E3(契约 C-E3):顶层 projects 目录被系统拒访 → 403 + no-disk-access。
+      // 与单项目会话列表(E2)同契约,但 projects 是顶层单列表,按 hash 存无意义
+      // → 单值 projectsAccessError。侧栏项目空态(PKG-11)只读本字段渲染提示。
+      if (res.status === 403 && data?.code === 'no-disk-access') {
+        set({
+          projects: [],
+          projectsAccessError: { hint: data.hint || '', canOpenSettings: !!data.canOpenSettings },
+          listLoading: false,
+        });
+        return;
+      }
       const projects = Array.isArray(data) ? data : [];
-      set({ projects, listLoading: false });
+      set((st) => ({
+        projects,
+        listLoading: false,
+        ...(st.projectsAccessError ? { projectsAccessError: null } : {}),
+      }));
     } catch (err) {
       set({ projects: [], error: err.message, listLoading: false });
     }
   },
+  // r26-E3:顶层 projects 目录 403 的错误态;null = 正常。
+  projectsAccessError: null,
 
   // r10-11:单层项目折叠面板的数据层。sessionsByProject 是懒加载的 per-project 会话
   // 缓存(钻入才拉取),**独立于 store.sessions 单值槽**——PermissionPrompt 权限卡门禁/
