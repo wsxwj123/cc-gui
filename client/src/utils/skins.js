@@ -22,9 +22,21 @@ export const SKIN_TOKENS_CLIENT = [
   '--backdrop-glass', '--backdrop-soft',
 ];
 export const SKIN_TOKENS_REJECTED_CLIENT = ['--glass-shadow'];
-// T2 静态校验黑名单(与服务端 T2_SCRIPT_BLACKLIST 一致;客户端加载前再验一遍=纵深)。
+// T2 静态校验黑名单(r26-D5:纯子串升级为正则集,修前 `fetch (`(空格)/`window["fetch"]`/
+// `Function('…')` 全可绕)。与服务端 T2_SCRIPT_BLACKLIST 逐字一致(check-skin-client.mjs t1
+// 按 String 形态钉死);校验前先 toLowerCase,故正则一律小写形态。口径 = 防误导入、不防
+// 恶意代码:正则误伤一律朝拒载方向(安全向),已知误伤(prefetch(、匿名 function(){})
+// 钉在 check-r26-t2-blacklist.mjs / check-r26-t2-blacklist-client.mjs。
 export const T2_BLACKLIST_CLIENT = [
-  'fetch(', 'xmlhttprequest', 'websocket', 'import(', 'eval(', 'new function', 'navigator.sendbeacon',
+  /fetch\s*\(/,
+  /xmlhttprequest/,
+  /websocket\s*\(/,
+  /import\s*\(/,
+  /eval\s*\(/,
+  /new\s+function/,
+  /\bfunction\s*\(/,
+  /navigator\s*\.\s*sendbeacon/,
+  /\[\s*['"](?:fetch|eval|function|websocket)['"]\s*\]/,
 ];
 
 const LS_ID = 'cgui-skin-id';
@@ -154,7 +166,8 @@ let t2Gen = 0;
 export function validateT2Client(text) {
   if (typeof text !== 'string') return { ok: false, hits: ['not_text'] };
   const low = text.toLowerCase();
-  const hits = T2_BLACKLIST_CLIENT.filter((k) => low.includes(k));
+  // r26-D5:正则集判定,hits = 命中正则的 source 串(与服务端 validateT2Script 同形状)
+  const hits = T2_BLACKLIST_CLIENT.filter((re) => re.test(low)).map((re) => re.source);
   return hits.length ? { ok: false, hits } : { ok: true };
 }
 
