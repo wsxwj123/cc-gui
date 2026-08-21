@@ -835,6 +835,66 @@ export function foldRepeatedPlanCards(messages) {
   return out;
 }
 
+/**
+ * goal 未达成提示折叠(r32-plan-flood):Stop 钩子每轮判定未达成就写一条 goal_status
+ * (met:false 无 sentinel,带 reason),消息流原本 N 条「目标未达成，已自动继续」。
+ * 把同一段"未达成就"(同一 condition、中间无 met:true/sentinel 段界)里的这类记录折叠成
+ * 一条 + 次数徽标;达成的最后一条(met:true)永远保留单显。中间的普通 turn 是真实工作
+ * 回合(模型被强制续跑期间的实际输出),不打断这段、也不被折叠 —— 只折冗余的目标状态
+ * 提示,不动对话内容。
+ *   · 实现位置(reader 而非前端):goal_status 只进 transcript 不进 stream-json,折叠发生
+ *     在历史消息构建处,历史列表与流式列表的 goal 分支共用同一消息,一处折叠两处生效,
+ *     无需在客户端再造一套折叠逻辑(且前端折叠无法被 getSessionMessages 级单测覆盖)。
+ *   · "reason 相同或相近":同一目标追读期的 condition 恒同,reason 差异只是钩子反馈文案的
+ *     细节,归并到一条(带 ×N)不再连画 N 行;避免把不同目标(condition 不同 / 被
+ *     met:true 或 sentinel 隔断)合并。
+ * 为不破坏 activeGoal 状态机:折叠后仍保留第一条记录的 met/met/condition/reason,
+ * 仅追加 count(单条不折叠、保持原样)。
+ */
+export function foldRepeatedGoalNotices(messages) {
+  // 逐 goal 消息定段:同 condition 的未达成记录归同一段(中间的非 goal 消息不断段);
+  // met:true 或 sentinel(设置/清除)记录 = 段界,本身永不折叠。
+  const segOf = new Map();    // message index -> segment id(仅未达成记录)
+  const condOf = new Map();   // segment id -> condition
+  let segNext = 0;
+  let open = null;            // { seg }
+  for (let i = 0; i < messages.length; i++) {
+    const m = messages[i];
+    if (m?.type !== 'goal') { continue; }
+    const isNotMet = !m.met && !m.sentinel;
+    if (!isNotMet) { open = null; continue; }
+    const cond = m.condition || '';
+    if (open && condOf.get(open.seg) === cond) {
+      segOf.set(i, open.seg);
+    } else {
+      segNext++;
+      open = { seg: segNext };
+      condOf.set(segNext, cond);
+      segOf.set(i, segNext);
+    }
+  }
+  // 统计每段条数 + 段首 index
+  const countOf = new Map();
+  const firstOf = new Map();
+  for (const [i, seg] of segOf) {
+    countOf.set(seg, (countOf.get(seg) || 0) + 1);
+    if (!firstOf.has(seg)) firstOf.set(seg, i);
+  }
+  const out = [];
+  for (let i = 0; i < messages.length; i++) {
+    const m = messages[i];
+    const seg = segOf.get(i);
+    if (seg != null) {
+      if (firstOf.get(seg) !== i) continue;             // 折叠重复,去掉
+      const c = countOf.get(seg) || 1;
+      out.push(c > 1 ? { ...m, count: c } : m);          // 单条未达成保持原样
+    } else {
+      out.push(m);
+    }
+  }
+  return out;
+}
+
 export async function getSessionMessages(sessionId, projectHash) {
   let filePath = join(PROJECTS_DIR, projectHash, `${sessionId}.jsonl`);
   if (!existsSync(filePath)) {
@@ -1098,6 +1158,9 @@ export async function getSessionMessages(sessionId, projectHash) {
   // usageTotals 之前:折叠只影响 messages 的呈现,不影响按 record 汇总的真实用量
   // (每次底层 API 调用都是真实消耗,不能因计划卡冗余而少算)。
   const foldedMessages = foldRepeatedPlanCards(messages);
+  // r32-plan-flood:goal 未达成提示折叠(见 foldRepeatedGoalNotices 注释)—— 在计划卡折叠
+  // 之后串接,两者只影响 messages 的呈现,不影响按 record 汇总的真实用量。
+  const finalMessages = foldRepeatedGoalNotices(foldedMessages);
   // 聚合四字段。apiCalls = 去重后的底层 API 调用次数,供前端明细展示/排查。
   const usageTotals = { input: 0, output: 0, cacheRead: 0, cacheCreation: 0, apiCalls: sessionUsageById.size };
   for (const u of sessionUsageById.values()) {
@@ -1106,7 +1169,7 @@ export async function getSessionMessages(sessionId, projectHash) {
     usageTotals.cacheRead += u.cache_read_input_tokens || 0;
     usageTotals.cacheCreation += u.cache_creation_input_tokens || 0;
   }
-  return { messages: foldedMessages, usageTotals };
+  return { messages: finalMessages, usageTotals };
 }
 
 /**
