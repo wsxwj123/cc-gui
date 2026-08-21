@@ -7,6 +7,7 @@ import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import { tmpdir, homedir } from 'os';
 import { execFile, spawn } from 'child_process';
+import { createConnection } from 'net';
 import { promisify } from 'util';
 import { closeAllPersistentProcesses } from './chat.js';
 import { updatePrefs } from './prefs.js'; // r26-C6:prefs 写统一走共享队列(契约 C-C6)
@@ -516,22 +517,35 @@ async function readSystemProxy() {
   return null;
 }
 
-export async function detectLocalProxy() { // export:skills.js 直连 GitHub 失败时回落代理用
-  // 用户已显式配置的优先(server 进程自己的 env)。
+// r26-C2:短超时 TCP 探活(只探 connect,不发请求)。系统代理设置可能残留
+// (代理软件已关但系统设置没还原),读到不等于能用 —— 先探活再采用。
+// 纯函数抽出供单测(export 仅为可单测)。
+export function probeTcp(host, port, timeout = 400) {
+  return new Promise((resolve) => {
+    const sock = createConnection({ host, port, timeout });
+    sock.on('connect', () => { sock.destroy(); resolve(true); });
+    sock.on('error', () => { sock.destroy(); resolve(false); });
+    sock.on('timeout', () => { sock.destroy(); resolve(false); });
+  });
+}
+
+export async function detectLocalProxy({ readSystem = readSystemProxy } = {}) { // export:skills.js 直连 GitHub 失败时回落代理用
+  // 用户已显式配置的优先(server 进程自己的 env)。显式配置信任优先,不探活(既有语义)。
   const envProxy = process.env.HTTPS_PROXY || process.env.https_proxy || process.env.HTTP_PROXY || process.env.http_proxy;
   if (envProxy) return envProxy;
   // r14-2:先读【系统代理设置】—— 用户"开了系统代理但不是 TUN"时,Node 的 fetch 不认它,
   // 而端口探测又可能因端口非常见而落空。mac 用 scutil --proxy,Windows 读注册表。
-  const sys = await readSystemProxy().catch(() => null);
-  if (sys) return sys;
-  const { createConnection } = await import('net');
-  const probe = (port) => new Promise((resolve) => {
-    const sock = createConnection({ host: '127.0.0.1', port, timeout: 300 });
-    sock.on('connect', () => { sock.destroy(); resolve(port); });
-    sock.on('error', () => resolve(null));
-    sock.on('timeout', () => { sock.destroy(); resolve(null); });
-  });
-  const hits = await Promise.all(COMMON_PROXY_PORTS.map(probe));
+  // r26-C2:读到必须先探活 —— 残留的死代理(代理软件已退、设置没还原)直接采用会让
+  // 更新命令全部走死代理(用户看到「更新卡死」)。不通 → 落到端口探测 → 再不通直连。
+  // readSystem 可注入(单测 mock;本机造不出确定的「系统代理死端口」)。
+  const sys = await readSystem().catch(() => null);
+  if (sys) {
+    try {
+      const u = new URL(sys);
+      if (await probeTcp(u.hostname, Number(u.port) || 8080)) return sys;
+    } catch { /* 代理解析失败同样不落,继续端口探测 */ }
+  }
+  const hits = await Promise.all(COMMON_PROXY_PORTS.map(async (port) => (await probeTcp('127.0.0.1', port, 300)) ? port : null));
   const port = hits.find(Boolean);
   return port ? `http://127.0.0.1:${port}` : null;
 }
