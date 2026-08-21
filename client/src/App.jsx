@@ -3029,9 +3029,11 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       : () => true), // available 未加载(开机窗口)一律放行,避免徽章闪一下全局默认
     [guardAvailable, guardCustom, guardOfficial],
   );
+  // r26-F1:兜底链每一环都过同一 modelGuard —— globalModel 原来是裸兜底,guard 拒了
+  // 也照显示(当前 provider 不支持的残留模型)。guard 拒 → null,显示层落固定文案。
   const resolvedModelBase = (modelGuard(pinnedModel) ? pinnedModel : null)
     || (modelGuard(historyModel) ? historyModel : null)
-    || globalModel;
+    || (modelGuard(globalModel) ? globalModel : null);
   const currentModel = (context1mFlag && resolvedModelBase && !/\[1m\]/i.test(resolvedModelBase))
     ? resolvedModelBase + '[1m]' : resolvedModelBase;
   // 徽章分母:后端解析的真实窗口(与压缩联动同源;官方/无解析=null 走本地兜底表)。
@@ -3799,7 +3801,10 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // Model shown in THIS pane's header — the session's own pick, else default.
   // r16-1:本窗格 pin 同样要过白名单(它驱动手机顶部条与上下文明细弹层两个可见位置)。
   const headerPinRaw = modelBySession[sessionQueueKey];
-  const headerModel = (modelGuard(headerPinRaw) ? headerPinRaw : null) || currentModel;
+  // r26-F1:全链被 guard 拒(曾有值但都不属于当前 provider)→ 显示固定文案「默认模型」,
+  // 绝不显示残留旧模型 id;开机窗口(任何值都没加载过)仍按原样隐藏徽章,不多一条闪显。
+  const headerModel = (modelGuard(headerPinRaw) ? headerPinRaw : null) || currentModel
+    || ((pinnedModel || historyModel || globalModel) ? '默认模型' : null);
   const messageQueueRaw = useStore((s) => s.messageQueue[sessionQueueKey]);
   const messageQueue = messageQueueRaw || EMPTY_ARRAY;
   const claimDraft = messageQueue.find((item) => item?.claimDraft?.targetPaneId === paneId
