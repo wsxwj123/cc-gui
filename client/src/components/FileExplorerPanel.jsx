@@ -7,6 +7,7 @@ import { ArtifactPreview } from './ArtifactPreview.jsx';
 import { useResizable, Splitter } from '../hooks/useResizable.jsx';
 import { copyText } from '../utils/clipboard.js';
 import { copyButtonKind, pickCopySource, canCopyImageBitmap, copyImageBitmap, COPY_TEXT_MAX_BYTES } from '../utils/fileCopy.js';
+import { queueKeyFor } from '../utils/steerQueue.js';
 
 const IMAGE_EXT = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'ico']);
 const VIDEO_EXT = new Set(['mp4', 'webm', 'mov', 'm4v', 'ogv']);
@@ -320,11 +321,16 @@ export function FileExplorerPanel() {
   const addPathToContext = useCallback((path) => {
     let rel = rootPath && path.startsWith(rootPath) ? path.slice(rootPath.length).replace(/^[/\\]+/, '') : path;
     rel = rel.replace(/\\/g, '/');
-    // targetKey 与 SessionDetail 的 sessionQueueKey 同构,分屏时只填活跃 pane 的输入框
-    const targetKey = activeSession?.sessionId || `draft-${activeSession?.projectHash || 'none'}`;
+    // targetKey 与 SessionDetail 的 permKey 同构(r26-B5 起统一走 queueKeyFor):
+    //   真会话 → sessionId;draft → `draft-<projectHash>-<draftId>`。
+    // 修前手写 `draft-${projectHash}`(无 draftId 段)——同项目两个 draft 窗格共享一个键,
+    // 且与该 pane 的 permKey(draft-<hash>-<draftId>)不相等 → ChatInput onFill 的
+    // `targetKey !== permKey` 守门把它挡掉,draft 窗格「添加到上下文」点了没反应。
+    // queueKeyFor 对真会话返回 sessionId,行为不变。
+    const targetKey = queueKeyFor(activeSession);
     window.dispatchEvent(new CustomEvent('cgui:composer-fill', { detail: { text: `@${rel} `, append: true, targetKey } }));
     setCtxMenu(null);
-  }, [rootPath, activeSession?.sessionId, activeSession?.projectHash]);
+  }, [rootPath, activeSession?.sessionId, activeSession?.projectHash, activeSession?.draftId]);
 
   const deletePath = useCallback(({ path, name, parentPath, isRoot }) => {
     setCtxMenu(null);
