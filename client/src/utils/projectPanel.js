@@ -202,6 +202,34 @@ export function reorderManual(hashes, fromHash, toIdx) {
   return arr;
 }
 
+/**
+ * r26-I1:拖拽松手 PUT 前,把「当前不可见(隐藏/被过滤)但在旧 order 里」的 hash
+ * 按原相对位次并回 preview(纯函数)。拖拽 preview 只含可见非置顶 hash,直接整体
+ * 覆盖 PUT 会把隐藏项目的排位静默抹掉(取消隐藏后掉到队尾)。
+ *  - preview:本次拖拽后的可见 hash 序列(用户的新意图,相对序原样保留);
+ *  - oldOrder:现存全量 order;
+ *  - 每个 missing 插回锚点 = oldOrder 中它前方最近的、已在 result 中的元素
+ *    (missing 按 oldOrder 顺序处理,同段后续 missing 的锚可以是刚插入的 missing
+ *    自身 → 旧相对序自然保持);无锚(全部前驱都不可见)插头部,headPtr 指针保序;
+ *  - preview 已含的 hash(如刚取消隐藏被拖动的项目)不属于 missing,不重复插入。
+ */
+export function mergeHiddenOrder(preview, oldOrder) {
+  const result = [...(Array.isArray(preview) ? preview : [])];
+  const old = Array.isArray(oldOrder) ? oldOrder : [];
+  const survivors = new Set(result);
+  const missing = old.filter((h) => !survivors.has(h));
+  let headPtr = 0; // 无锚 missing 的头部插入指针(保持 missing 间相对序)
+  for (const h of missing) {
+    let anchor = null;
+    for (let j = old.indexOf(h) - 1; j >= 0; j--) {
+      if (result.includes(old[j])) { anchor = old[j]; break; }
+    }
+    if (anchor !== null) result.splice(result.indexOf(anchor) + 1, 0, h);
+    else { result.splice(headPtr, 0, h); headPtr++; }
+  }
+  return result;
+}
+
 /** 搜索时带出"组内有标题命中"的项目行:按已加载组预计算 hash 集。 */
 export function sessionQueryMatchHashes({ sessionsByProject = {}, query = '', titleOf = () => '' } = {}) {
   const q = String(query || '').toLowerCase();

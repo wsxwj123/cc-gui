@@ -13,7 +13,7 @@ import {
 import { useStore } from '../stores/sessionStore.js';
 import { confirmDialog } from '../utils/confirmDialog.jsx';
 import { resolveSessionTitle } from '../utils/sessionTitle.js';
-import { composePanelProjects, composePanelSessions, sessionQueryMatchHashes, sortProjectRows, flattenSessionRows, singleModeVisibleProjects, sessionEmptyHint, showAccessSettingsButton, reorderManual } from '../utils/projectPanel.js';
+import { composePanelProjects, composePanelSessions, sessionQueryMatchHashes, sortProjectRows, flattenSessionRows, singleModeVisibleProjects, sessionEmptyHint, showAccessSettingsButton, reorderManual, mergeHiddenOrder, watcherRefreshTargets, clampPaneIndex } from '../utils/projectPanel.js';
 import { pickDirectory, isTauri } from '../utils/pickDirectory.js';
 import { completionTracker } from '../utils/sessionDots.js';
 import { AnchoredPopover } from './SessionSelectors.jsx';
@@ -324,7 +324,23 @@ export function UnifiedSidebar() {
   const [drag, setDrag] = useState(null); // { hash, preview: string[] } | null(拖拽中本地预览,松手才 PUT)
   useEffect(() => {
     if (!drag) return;
-    const up = () => { useStore.getState().putSidebarView({ projectOrder: drag.preview }); setDrag(null); };
+    const up = () => {
+      const preview = drag.preview;
+      setDrag(null);
+      // r26-I1:preview 只含可见非置顶 hash,整体覆盖 PUT 会把隐藏项目的排位抹掉。
+      // 松手时把「不可见但在旧 order 里」的 hash 按原相对位次并回(mergeHiddenOrder
+      // 纯函数);PUT 前重取一次最新 sidebar-view 收窄并发窗(手机端可能同时改 order,
+      // 取不到就回落内存里的旧 order)。
+      const st = useStore.getState();
+      const memOrder = Array.isArray(st.sidebarView?.projectOrder) ? st.sidebarView.projectOrder : [];
+      fetch('/api/prefs/sidebar-view')
+        .then((r) => r.json())
+        .catch(() => null)
+        .then((d) => {
+          const oldOrder = Array.isArray(d?.projectOrder) ? d.projectOrder : memOrder;
+          st.putSidebarView({ projectOrder: mergeHiddenOrder(preview, oldOrder) });
+        });
+    };
     window.addEventListener('pointerup', up);
     return () => window.removeEventListener('pointerup', up);
   }, [drag]);
