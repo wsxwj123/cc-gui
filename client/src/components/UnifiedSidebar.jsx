@@ -194,6 +194,14 @@ export function UnifiedSidebar() {
   // hidden 过滤整轮失效)。
   const hiddenRef = useRef(hidden);
   hiddenRef.current = hidden;
+  // r31:本地 `hidden` 集以 store.hiddenProjects 为准(契约 C-I2/WS 'hidden-projects'
+  // 广播经 applyHiddenProjects 收敛)——手机端隐藏后 WS 广播 → store 变 → 本地集跟随,
+  // 桌面侧栏才即时隐藏该项目的子项(此前侧栏渲染用本地集、watcher 用 store,双轨分割,
+  // 对端改动只进了 store,侧栏视图不变)。store 为 null(水合前)时为「未知」,退回本地集。
+  const storeHiddenProjects = useStore((s) => s.hiddenProjects);
+  useEffect(() => {
+    if (storeHiddenProjects != null) setHidden(new Set(storeHiddenProjects));
+  }, [storeHiddenProjects]);
   useEffect(() => { fetchProjects(); }, []);
   // r27:启动补拉——水合恢复的展开组在启动路径上没有任何一脚拉取(诊断实证:只有
   // selectedProject 组被拉;watcher 只在 sessions-changed/ws-reconnected 后跑,而首连
@@ -239,7 +247,12 @@ export function UnifiedSidebar() {
     // r27:有会话正在窗格中打开的项目不可隐藏——隐藏后窗口还开着、数据路径全断,
     // 用户看到的就是"会话还在但项目消失了"的灵异状态。弹窗说明,不静默执行。
     const st = useStore.getState();
-    if (!hidden.has(hash)) {
+    // r31:以 store.hiddenProjects 为基(WS 已收敛,含对端刚隐藏的),不再用可能陈旧的
+    // 本地集 —— 否则桌面再隐藏/恢复一个会把对端刚隐藏的项目覆盖掉(PUT 全量覆盖,base
+    // 必须是全端收敛后的列表)。
+    const base = (st.hiddenProjects != null ? st.hiddenProjects : [...hiddenRef.current]);
+    const baseSet = new Set(base);
+    if (!baseSet.has(hash)) {
       const openHere = [...(st.paneSessions || []), st.selectedSession]
         .some((s) => s && s.projectHash === hash);
       if (openHere) {
@@ -247,12 +260,11 @@ export function UnifiedSidebar() {
         return;
       }
     }
-    setHidden((prev) => {
-      const next = new Set(prev);
-      if (next.has(hash)) next.delete(hash); else next.add(hash);
-      persistHidden(next);
-      return next;
-    });
+    const next = new Set(baseSet);
+    if (next.has(hash)) next.delete(hash); else next.add(hash);
+    st.applyHiddenProjects([...next]); // 更新 store(驱动本端视图 + 后续 WS 广播)
+    setHidden(next);                   // 本地兜底集同步(水合前 store null 时仍可渲染)
+    persistHidden(next);               // PUT 全量(store 派生,含对端隐藏,不覆盖)
   };
   const togglePinProject = (hash) => {
     const st = useStore.getState();
