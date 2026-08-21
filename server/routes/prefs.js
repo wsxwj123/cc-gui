@@ -119,6 +119,12 @@ router.put('/prefs/hidden-projects', async (req, res) => {
       prefs.hiddenProjects = hidden;
       await savePrefs(prefs);
     });
+    // r26-I2:补 WS 广播(照 pinned 同款)——此前手机端隐藏项目后桌面端要到下次拉取
+    // 才收敛。payload 契约 C-I2 逐字固定 {type:'hidden-projects', hidden},客户端
+    // (PKG-2 WS reducer → store.hiddenProjects;PKG-11 只读 store)按此形状消费。
+    try {
+      broadcast({ type: 'hidden-projects', hidden });
+    } catch {}
     res.json({ ok: true, hidden });
   } catch (e) {
     res.status(500).json({ error: '写入偏好失败：' + e.message });
