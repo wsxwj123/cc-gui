@@ -69,6 +69,27 @@ function failCode(code, extra = {}) {
   return err;
 }
 
+/**
+ * r26-D4:stage 目录搬入 skinsDir 的统一出口。rename 优先;EXDEV(tmp 与 home 跨卷,
+ * 如 Linux tmpfs /tmp)回落 mkdir+逐文件拷贝+rm stage。renameFn 仅供单测注入失败形态。
+ * 非 EXDEV 错误原样上抛不吞(清 stage 是调用方 catch 的职责)。
+ */
+export async function moveStageDir(stage, dest, renameFn = rename) {
+  try {
+    await renameFn(stage, dest);
+  } catch (e) {
+    if (e.code !== 'EXDEV') throw e;
+    await mkdir(dest, { recursive: true });
+    for (const n of await readdir(stage)) await writeFile(join(dest, n), await readFile(join(stage, n)));
+    await rm(stage, { recursive: true, force: true });
+  }
+}
+
+/** stage 创建后任何失败都必须清 stage(防 tmpdir 泄漏)——两条导入路径同口径。 */
+async function cleanupStage(stage) {
+  await rm(stage, { recursive: true, force: true }).catch(() => {});
+}
+
 async function dirBytes(dir) {
   let total = 0;
   let names = [];
@@ -188,23 +209,22 @@ export async function installSkinPackage(zipPath, { source = 'user', skinsDir = 
     // ── 原子搬入 ~/.claude-gui/skins/<id>/ ──
     const id = skinIdFrom(manifest.name);
     const stage = join(tmpdir(), `cgui-skin-stage-${randomUUID()}`);
-    await mkdir(stage, { recursive: true });
-    for (const [name, srcInfo] of keep) {
-      if (srcInfo.content != null) await writeFile(join(stage, name), srcInfo.content, 'utf8');
-      else await writeFile(join(stage, name), await readFile(srcInfo.from));
+    try {
+      await mkdir(stage, { recursive: true });
+      for (const [name, srcInfo] of keep) {
+        if (srcInfo.content != null) await writeFile(join(stage, name), srcInfo.content, 'utf8');
+        else await writeFile(join(stage, name), await readFile(srcInfo.from));
+      }
+      await writeFile(join(stage, 'skin.json'), JSON.stringify(manifest, null, 2));
+      await writeFile(join(stage, 'meta.json'), JSON.stringify({ source, importedAt: Date.now() }));
+      await mkdir(skinsDir, { recursive: true });
+      const dest = join(skinsDir, id);
+      if (!isPathInside(dest, skinsDir)) throw failCode('internal');
+      await moveStageDir(stage, dest);
+    } catch (e) {
+      await cleanupStage(stage);
+      throw e;
     }
-    await writeFile(join(stage, 'skin.json'), JSON.stringify(manifest, null, 2));
-    await writeFile(join(stage, 'meta.json'), JSON.stringify({ source, importedAt: Date.now() }));
-    await mkdir(skinsDir, { recursive: true });
-    const dest = join(skinsDir, id);
-    if (!isPathInside(dest, skinsDir)) throw failCode('internal');
-    await rename(stage, dest).catch(async (e) => {
-      // 跨设备 rename 失败兜底:极少见(tmp 与 home 不同卷),逐文件拷贝
-      if (e.code !== 'EXDEV') throw e;
-      await mkdir(dest, { recursive: true });
-      for (const n of await readdir(stage)) await writeFile(join(dest, n), await readFile(join(stage, n)));
-      await rm(stage, { recursive: true, force: true });
-    });
     return { id, name: manifest.name, warnings, manifest };
   } finally {
     await rm(tmp, { recursive: true, force: true }).catch(() => {});
@@ -257,14 +277,21 @@ router.post('/skins/import-inline', async (req, res) => {
     }
     const id = skinIdFrom(skinName);
     const stage = join(tmpdir(), `cgui-skin-stage-${randomUUID()}`);
-    await mkdir(stage, { recursive: true });
-    for (const [fname, text] of Object.entries(files)) await writeFile(join(stage, fname), text, 'utf8');
-    await writeFile(join(stage, 'skin.json'), JSON.stringify(manifest, null, 2));
-    await writeFile(join(stage, 'meta.json'), JSON.stringify({ source: 'user', importedAt: Date.now() }));
-    await mkdir(SKINS_DIR, { recursive: true });
-    const dest = join(SKINS_DIR, id);
-    if (!isPathInside(dest, SKINS_DIR)) throw new Error('internal');
-    await rename(stage, dest);
+    try {
+      await mkdir(stage, { recursive: true });
+      for (const [fname, text] of Object.entries(files)) await writeFile(join(stage, fname), text, 'utf8');
+      await writeFile(join(stage, 'skin.json'), JSON.stringify(manifest, null, 2));
+      await writeFile(join(stage, 'meta.json'), JSON.stringify({ source: 'user', importedAt: Date.now() }));
+      await mkdir(SKINS_DIR, { recursive: true });
+      const dest = join(SKINS_DIR, id);
+      if (!isPathInside(dest, SKINS_DIR)) throw new Error('internal');
+      // r26-D4:与 zip 通道同走 moveStageDir(EXDEV 跨卷逐文件拷贝兜底)
+      await moveStageDir(stage, dest);
+    } catch (e) {
+      // r26-D4:stage 创建后任何失败清 stage(修前 rename 失败即泄漏 tmpdir)
+      await cleanupStage(stage);
+      throw e;
+    }
     res.status(201).json({ id, name: skinName, warnings, manifest });
   } catch (err) {
     console.error('[skins] import-inline failed:', err);
