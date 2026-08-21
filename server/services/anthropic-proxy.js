@@ -18,6 +18,7 @@
 import http from 'node:http';
 import { normalizeContextOverflow } from './openai-proxy.js';
 import { isCountTokensRequest, estimateInputTokens, parseUpstreamCountTokens, COUNT_TOKENS_UPSTREAM_TIMEOUT_MS } from '../utils/context-tokens.js';
+import { collectRealToolResultIds } from '../utils/tool-result-reconcile.js';
 
 // Fixed loopback port (distinct from openai-proxy's 8788) so the URL written into
 // settings.json survives watchdog restarts. Ephemeral fallback if it's taken.
@@ -77,11 +78,19 @@ export function normalizeMessagesForCompat(body) {
   // content 清空(纯空 text、无工具块),整条消息删掉——空消息对模型无语义,
   // 留在这里只会被新 provider 拒收。非 text 块(工具/图像)一律保留,不影响
   // tool_use↔tool_result 配对。
+  //
+  // r26-G5:空 thinking 块同滤(thinking.trim()==='' 丢弃)。此前本路只滤空 text
+  // 不滤空 thinking,而 session-repair.js 的 R2 早已删空 thinking、openai-proxy
+  // 会把空 thinking 翻成空 reasoning_content 下发 —— 三路不一致,空 thinking 块
+  // 泄漏到严格端点同样可能 400。现两路 proxy 与 session-repair 对齐:空 thinking
+  // 一律丢弃(非空 thinking 保留,deepseek 系上游要求 thinking 轮次回传)。
   for (let i = msgs.length - 1; i >= 0; i--) {
     const m = msgs[i];
     if (!m || !Array.isArray(m.content)) continue;
     const orig = m.content;
-    const kept = orig.filter((c) => !(c && typeof c === 'object' && c.type === 'text' && (!c.text || String(c.text).trim() === '')));
+    const kept = orig.filter((c) => !(c && typeof c === 'object'
+      && ((c.type === 'text' && (!c.text || String(c.text).trim() === ''))
+        || (c.type === 'thinking' && (!c.thinking || String(c.thinking).trim() === '')))));
     if (kept.length === orig.length) continue;
     if (kept.length === 0) { msgs.splice(i, 1); patched++; }
     else { m.content = kept; patched++; }
@@ -205,13 +214,9 @@ export function normalizeMessagesForCompat(body) {
   // tool_result 都不算缺失,补丁绝不能给它们插假的(真机踩过:assistant(tool_use A)
   // → assistant(tool_use B) → user(result A) 的结构里,把 A 的 tool_result 在更后面
   // 存在却被当"缺失"提前插假补丁 → Kimi 报 "tool call id Agent:0 is not found")。
-  const realResultIds = new Set();
-  for (const mm of msgs) {
-    if (mm?.role !== 'user' || !Array.isArray(mm.content)) continue;
-    for (const c of mm.content) {
-      if (c?.type === 'tool_result' && c.tool_use_id) realResultIds.add(c.tool_use_id);
-    }
-  }
+  // r26-G2:收集逻辑抽成共用纯函数 collectRealToolResultIds(openai-proxy 同 import),
+  // 行为不变。
+  const realResultIds = collectRealToolResultIds(msgs);
 
   for (let i = 0; i < msgs.length; i++) {
     const m = msgs[i];
@@ -290,10 +295,12 @@ async function handle(req, clientRes) {
       }).finally(() => clearTimeout(t2));
       if (r.ok) {
         const upstreamCount = parseUpstreamCountTokens(await r.text());
+        // 精确路径(上游真支持 count_tokens):原样透传,**不加 estimated 标记**(互斥)。
         if (upstreamCount) return respond(upstreamCount);
       }
     } catch { /* 超时/网络错 → 本地估算回退 */ }
-    return respond(estimateInputTokens(parsedBody));
+    // r26-G3(契约 C-G3):估算回落打标 estimated:true(响应顶层),前端据此标「(估算)」。
+    return respond({ ...estimateInputTokens(parsedBody), estimated: true });
   }
 
   // 仅对 /v1/messages 做规范化(其他端点不动)
