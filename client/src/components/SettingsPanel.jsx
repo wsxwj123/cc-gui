@@ -1937,12 +1937,21 @@ function PersistentChatToggle() {
 // 置空 = 不限制(默认)。
 // r11-⑫:称呼——存服务端 prefs.json(displayName,≤20 字符可空,多端共享+WS 广播)。
 // Home 问候显示「{时段词}，{称呼}」;皮肤 home.greeting 模板经 {name} 占位符引用。
+// r26-D12:称呼按码点截断 —— UTF-16 的 slice 会把 emoji 代理对从中间劈开(孤代理)。
+// 与服务端 prefs.js 的 `[...displayName.trim()].slice(0, 20).join('')` 同口径(等长)。
+// 注:PLAN C-D12 原定辅助放 client utils 共用;本包文件白名单只含本文件,故就地
+// 模块级定义,需要跨文件复用时再提取(交付报告已注明)。
+function truncateByCodePoints(s, n) {
+  return [...String(s)].slice(0, n).join('');
+}
+
 function DisplayNameInput() {
   const val = useStore((s) => s.displayName);
   const putDisplayName = useStore((s) => s.putDisplayName);
   const [draft, setDraft] = useState(val || '');
   useEffect(() => { setDraft(val || ''); }, [val]);
-  const commit = () => { if (draft.trim().slice(0, 20) !== (val || '')) putDisplayName(draft); };
+  // 提交比较同样按码点口径,避免 emoji 称呼每次 blur 都误判「有变化」多发一次 PUT。
+  const commit = () => { if (truncateByCodePoints(draft.trim(), 20) !== (val || '')) putDisplayName(draft); };
   return (
     <div className="bg-canvas-warm border border-canvas-deep rounded-lg px-3 py-2.5 flex items-center gap-3">
       <div className="min-w-0 flex-1">
@@ -1952,7 +1961,7 @@ function DisplayNameInput() {
       <input
         type="text" maxLength={20} placeholder="未设置"
         value={draft}
-        onChange={(e) => setDraft(e.target.value)}
+        onChange={(e) => setDraft(truncateByCodePoints(e.target.value, 20))}
         onBlur={commit}
         onKeyDown={(e) => { if (e.key === 'Enter') e.currentTarget.blur(); }}
         className="w-36 shrink-0 text-[12px] font-body bg-canvas-base border border-canvas-deep rounded px-2 py-1 text-ink focus:border-accent outline-none" />
