@@ -13,6 +13,7 @@ import {
 import { useStore } from '../stores/sessionStore.js';
 import { confirmDialog } from '../utils/confirmDialog.jsx';
 import { resolveSessionTitle } from '../utils/sessionTitle.js';
+import { queueKeyFor } from '../utils/steerQueue.js';
 import { composePanelProjects, composePanelSessions, sessionQueryMatchHashes, sortProjectRows, flattenSessionRows, singleModeVisibleProjects, sessionEmptyHint, showAccessSettingsButton, reorderManual, watcherRefreshTargets, clampPaneIndex, ACCESS_DENIED_HINT } from '../utils/projectPanel.js';
 import { pickDirectory, isTauri } from '../utils/pickDirectory.js';
 import { completionTracker } from '../utils/sessionDots.js';
@@ -31,11 +32,18 @@ const EMPTY_OBJECT = Object.freeze({});
 // 新建会话继承「上一个活跃会话」的思考强度(权限恒 default)——原 SessionList 逻辑。
 // r11-②:提为模块级导出,Home(App.jsx)与本面板的 6 处创建点共用同一 seed 链路;
 // 全部经 getState() 取值,无组件闭包依赖。
-export const seedNewSessionDefaults = (draftProjectHash) => {
+// r31:键一律走 queueKeyFor(r26-B5 起 draft 键带 draftId)——prev 是 draft 时也用它,
+// 不再手写旧形态 `draft-${hash}`(无 draftId 段)。新 draft 的 seed 写到
+// `draft-<hash>-<draftId>`(调用方传 draftId),否则与窗格 permKey 不相等,继承设置
+// 落到孤儿键 `draft-<hash>`,新会话读不到 → 「新建会话不再继承思考强度」。draftId
+// 未传(极旧路径)时退回旧形态兜底(不改变既有行为)。
+export const seedNewSessionDefaults = (draftProjectHash, draftId) => {
   const st = useStore.getState();
   const prev = st.splitMode ? st.paneSessions?.[st.activeTabIndex] : st.selectedSession;
-  const prevKey = prev ? (prev.sessionId || `draft-${prev.projectHash || 'none'}`) : null;
-  const draftKey = `draft-${draftProjectHash || 'none'}`;
+  const prevKey = prev ? queueKeyFor(prev) : null;
+  const draftKey = draftId != null
+    ? queueKeyFor({ projectHash: draftProjectHash || 'none', draftId })
+    : `draft-${draftProjectHash || 'none'}`;
   if (prevKey && prevKey !== draftKey) {
     st.setModelFor(draftKey, ''); // model 跟 provider 默认,不跟上条会话
     st.setEffortFor(draftKey, st.getEffortFor(prevKey));

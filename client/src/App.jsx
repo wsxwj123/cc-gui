@@ -1805,9 +1805,12 @@ function HomeState({ tabIndex = 0 }) {
     const t = text.trim();
     if (!t || !project) return;
     const st = useStore.getState();
-    seedNewSessionDefaults(project.hash); // 与侧栏新建同一 seed(力度继承/权限 default)
+    // r31:先领 draftId 再 seed —— seed 要写到 `draft-<hash>-<draftId>`(窗格 permKey)才被
+    // 读到,否则落到旧形态 `draft-<hash>` 孤儿键,新建会话不继承思考强度。
+    const _did = newDraftId();
+    seedNewSessionDefaults(project.hash, _did); // 与侧栏新建同一 seed(力度继承/权限 default)
     // r26-B5:先造 draft 再入队 —— 队列键带 draftId,与同项目其他 draft 窗格隔离。
-    const _homeDraft = buildHomeDraft(project, newDraftId());
+    const _homeDraft = buildHomeDraft(project, _did);
     if (!_homeDraft) return; // 项目缺 path 造不出 draft(旧代码会入队后清空窗格,键还匹配不上)
     st.enqueueMessage(queueKeyFor(_homeDraft), { text: t, queuedAt: Date.now() });
     st.setPaneSession(tabIndex, _homeDraft); // cwd=所选项目
