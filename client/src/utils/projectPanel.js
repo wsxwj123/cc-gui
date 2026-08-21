@@ -172,6 +172,7 @@ const wrapFlatRow = (s, projectHash) => {
  * r23-①:visibleHashes(可选,Set/数组)给定时只平铺可见项目的会话 —— sessionsByProject
  * 是"曾经加载过"的缓存,隐藏项目不会被清掉(toggleHidden 不清缓存、expandedProjects 还
  * 持久化在 localStorage、600ms watcher 继续刷),不过滤就等于隐藏对平铺模式无效。
+ */
 export function flattenSessionRows(sessionsByProject, visibleHashes) {
   const visible = visibleHashes instanceof Set ? visibleHashes
     : (Array.isArray(visibleHashes) ? new Set(visibleHashes) : null); // 不传 = 不过滤(旧调用方语义不变)
