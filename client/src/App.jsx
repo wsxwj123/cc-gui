@@ -3308,6 +3308,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       const text = typeof r.content === 'string'
         ? r.content
         : (Array.isArray(r.content) ? r.content.map((c) => c?.text || '').join('') : '');
+      // 停止/中断补的合成终态不是真实批准,不能据此显示“已批准的计划”。
+      if (r.interrupted || r.synthetic) return '';
       if (r.isError && !/用户已批准此计划/.test(text)) return '';
       const plan = toolCall.input?.plan ?? toolCall.input?.content ?? '';
       return typeof plan === 'string' ? plan.trim() : '';

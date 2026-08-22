@@ -57,6 +57,38 @@ const mkTurn = (uuid, toolCalls, text = [], thinking = []) => ({
   assert.deepEqual(planNames(byUuid.t5), ['PLAN_C'], '回合内重复计划只留 1 张');
 }
 
+// ── ①b 已批准结果必须保留(即使批准发生在后续重复卡上)─────────────────────
+{
+  const p1 = plan('p1', PLAN_A); p1.result = { content: '用户拒绝', isError: true };
+  const p2 = plan('p2', PLAN_A); p2.result = { content: 'ok', isError: false };
+  const p3 = plan('p3', PLAN_A); p3.result = { content: '用户已批准此计划', isError: true };
+  const mod = await import(`${root}/server/services/session-reader.js`);
+  const folded = mod.foldRepeatedPlanCards([
+    mkTurn('a', [p1]),
+    mkTurn('b', [p2]),
+    mkTurn('c', [p3]),
+  ]);
+  const planCards = folded.flatMap((m) => (m.toolCalls || [])).filter((tc) => tc.name === 'ExitPlanMode');
+  assert.equal(planCards.length, 1, '首张未批准、后续同计划已批准时,折叠后仍只保留 1 张');
+  assert.equal(mod.isApprovedPlanToolCall(planCards[0]), true, '保留卡必须携带已批准结果,currentPlan 才能显示');
+  assert.equal(planCards[0].result.content, 'ok', '优先拿第一个已批准结果(SDK allow 非错误)');
+
+  // 旧 hook 路径:后继重复卡是 isError=true 但文案含“用户已批准此计划”,同样要保留。
+  const p4 = plan('p4', PLAN_A); p4.result = { content: '用户已批准此计划', isError: true };
+  const foldedOld = mod.foldRepeatedPlanCards([
+    mkTurn('d', [plan('p5', PLAN_A)]),
+    mkTurn('e', [p4]),
+  ]);
+  const oldPlanCards = foldedOld.flatMap((m) => (m.toolCalls || [])).filter((tc) => tc.name === 'ExitPlanMode');
+  assert.equal(oldPlanCards.length, 1);
+  assert.equal(mod.isApprovedPlanToolCall(oldPlanCards[0]), true, '旧 hook 批准文案也要被识别为已批准');
+
+  // 停止/中断补的合成终态不是真实批准,不能误判为已批准。
+  const p6 = plan('p6', PLAN_A);
+  p6.result = { content: '', isError: false, interrupted: true, synthetic: true };
+  assert.equal(mod.isApprovedPlanToolCall(p6), false, '合成中断终态不得视为已批准');
+}
+
 // ── ② 真 getSessionMessages 跑 15 轮同计划重提 ──────────────────────────────
 {
   const rec = (o) => JSON.stringify({ sessionId: SID, timestamp: '2026-08-03T09:21:06.292Z', ...o });
