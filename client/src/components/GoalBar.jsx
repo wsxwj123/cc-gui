@@ -1,5 +1,5 @@
-import React, { useState } from 'react';
-import { Target, Pencil, Trash2, Check, X } from './Icon.jsx';
+import React, { useState, useEffect } from 'react';
+import { Target, Pencil, Trash2, Check, X, EyeOff } from './Icon.jsx';
 import { confirmDialog } from '../utils/confirmDialog.jsx';
 
 /**
@@ -17,8 +17,12 @@ import { confirmDialog } from '../utils/confirmDialog.jsx';
 export function GoalBar({ goal, onSend }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState('');
+  const [hidden, setHidden] = useState(false);
+  // 新目标/状态变化时恢复显示,避免本地隐藏卡住下一条目标。
+  useEffect(() => { setHidden(false); }, [goal?.condition, goal?.met, goal?.sentinel]);
 
   if (!goal) return null;
+  if (hidden) return null;
   const condition = goal.condition || '(无条件文本)';
   const reason = goal.reason || '';
   // 常驻条要覆盖目标完整生命周期:进行中 / 已达成 / 已清除,避免只在消息流里出现、
@@ -97,6 +101,12 @@ export function GoalBar({ goal, onSend }) {
                 <Trash2 size={11} />
               </button>
             </>
+          )}
+          {!isActive && (
+            <button onClick={() => setHidden(true)} title="隐藏目标条"
+              className="shrink-0 p-1 rounded hover:bg-canvas-deep/40 text-ink-muted hover:text-ink transition-colors">
+              <EyeOff size={13} />
+            </button>
           )}
         </>
       )}

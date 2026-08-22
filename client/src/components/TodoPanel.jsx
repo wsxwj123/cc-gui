@@ -8,10 +8,11 @@ import { useStore } from '../stores/sessionStore.js';
 // 同一份已批准计划只允许一张卡,且优先显示在用户正在看的窗格里。
 const activePlanTexts = new Map(); // plan -> { id, tabIndex }
 let planInstanceSeq = 0;
-function usePlanSingleton(plan, tabIndex = null) {
+function usePlanSingleton(plan, tabIndex = null, planKey = 'global') {
   const idRef = useRef(null);
   if (idRef.current == null) idRef.current = ++planInstanceSeq;
-  const key = plan || '';
+  // key 必须包含会话/窗格标识,避免不同会话的同名计划互相串。
+  const key = `${planKey}|${plan || ''}`;
   const activeTabIndex = useStore((s) => s.activeTabIndex);
   const isActivePane = tabIndex == null || tabIndex === activeTabIndex;
   const current = activePlanTexts.get(key);
@@ -35,7 +36,7 @@ function usePlanSingleton(plan, tabIndex = null) {
  * 两个按钮:折叠(只留"任务清单"标题行 + "下一条")/ 隐藏(整块消失,直到下次任务清单
  * 更新)。任务全部完成时自动折叠。
  */
-export function TodoPanel({ todos, plan = '', isStreaming = false, tabIndex = null }) {
+export function TodoPanel({ todos, plan = '', isStreaming = false, tabIndex = null, planKey = 'global' }) {
   const hasTodos = Array.isArray(todos) && todos.length > 0;
   const cleanPlan = String(plan || '').trim();
   if (!hasTodos && !cleanPlan) return null;
@@ -43,7 +44,7 @@ export function TodoPanel({ todos, plan = '', isStreaming = false, tabIndex = nu
   // 隐藏清单不影响计划,隐藏计划不影响清单。
   return (
     <>
-      {cleanPlan && <PlanBlock plan={cleanPlan} tabIndex={tabIndex} />}
+      {cleanPlan && <PlanBlock plan={cleanPlan} tabIndex={tabIndex} planKey={planKey} />}
       {hasTodos && <TodoChecklist todos={todos} isStreaming={isStreaming} />}
     </>
   );
@@ -138,8 +139,8 @@ function TodoChecklist({ todos, isStreaming = false }) {
  * 下次批准新计划(文本不同)自动恢复,与 TodoChecklist 的 hiddenSig 同一套语义。
  * markdown 只在展开时渲染,避免长计划在折叠态也参与输入区的高频重渲。
  */
-function PlanBlock({ plan, tabIndex = null }) {
-  const owner = usePlanSingleton(plan, tabIndex);
+function PlanBlock({ plan, tabIndex = null, planKey = 'global' }) {
+  const owner = usePlanSingleton(plan, tabIndex, planKey);
   const [open, setOpen] = useState(false);
   const [hiddenPlan, setHiddenPlan] = useState(null);
   // 同一份计划只保留第一张可见卡,防重复叠加;第一张是正常可交互组件。
