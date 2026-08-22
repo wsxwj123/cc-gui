@@ -1,39 +1,24 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState } from 'react';
 import { Target, Pencil, Trash2, Check, X } from './Icon.jsx';
 import { confirmDialog } from '../utils/confirmDialog.jsx';
 
-// 防御:同一会话/permKey 只允许挂载一份 GoalBar,防止分屏/异常挂载导致目标条重复叠加。
-const activeGoalOwners = new Map();
-let goalInstanceSeq = 0;
-function useGoalBarOwner(barKey = 'global') {
-  const idRef = useRef(null);
-  if (idRef.current == null) idRef.current = ++goalInstanceSeq;
-  const key = barKey || 'global';
-  if (!activeGoalOwners.has(key)) activeGoalOwners.set(key, idRef.current);
-  const owner = activeGoalOwners.get(key) === idRef.current;
-  useEffect(() => () => {
-    if (activeGoalOwners.get(key) === idRef.current) activeGoalOwners.delete(key);
-  }, [key]);
-  return owner;
-}
-
 /**
- * goal 常驻条(dsh 同款):渲染在 composer 正上方,会话有生效中的 /goal 时显示。
- * 数据源 = SessionDetail 的 activeGoal memo(取历史最后一条 goal,met:true 即消失),
+ * goal 常驻条(dsh 同款):渲染在 composer 正上方,会话有 /goal 相关记录时显示。
+ * 数据源 = SessionDetail 的 activeGoal memo(取历史最后一条 goal,含达成/清除状态),
  * 经 props.goal 传入。三态:
- *   · 常态:🎯 图标 + 目标条件文本(truncate)+「编辑」「清除」两枚操作图标;
+ *   · 进行中:🎯 图标 + 目标条件文本(truncate)+「编辑」「清除」两枚操作图标;
+ *   · 已达成:保留最近状态,常驻输入框上方;
+ *   · 已清除:保留最近状态,常驻输入框上方;
  *   · 编辑:就地变可编辑文本框(预填当前 condition),保存走既有发送链路发
  *           `/goal <新文本>`(复用 onSend,不造第二条通道),取消不发送;
  *   · 清除:confirmDialog 确认后发 `/goal clear`(WKWebView 禁用原生 confirm)。
  * 分屏时各窗格各渲染各的 —— goal 已是 per-pane 数据,key 按 permKey 挂载即天然隔离。
  */
-export function GoalBar({ goal, onSend, barKey = 'global' }) {
-  const owner = useGoalBarOwner(barKey);
+export function GoalBar({ goal, onSend }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState('');
 
   if (!goal) return null;
-  if (!owner) return null;
   const condition = goal.condition || '(无条件文本)';
   const reason = goal.reason || '';
   // 常驻条要覆盖目标完整生命周期:进行中 / 已达成 / 已清除,避免只在消息流里出现、
