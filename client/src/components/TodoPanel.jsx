@@ -3,6 +3,23 @@ import { Check, Circle, ClipboardList, Loader2, ChevronDown, ChevronRight, EyeOf
 import { MarkdownRenderer } from './MarkdownRenderer.jsx';
 import { readTodoCollapsed, writeTodoCollapsed } from '../utils/todoCollapse.js';
 
+// 全局按“计划全文”去重:同一份已批准计划只允许一个 PlanBlock 渲染。
+// 之前按 permKey 去重拦不住来源不明的重复实例,这里直接用 plan 文本作为唯一键,
+// 无论挂载来源/分屏/异常路径,只要同一份计划,都只保留第一张可见卡。
+const activePlanTexts = new Map();
+let planInstanceSeq = 0;
+function usePlanSingleton(plan) {
+  const idRef = useRef(null);
+  if (idRef.current == null) idRef.current = ++planInstanceSeq;
+  const key = plan || '';
+  if (!activePlanTexts.has(key)) activePlanTexts.set(key, idRef.current);
+  const owner = activePlanTexts.get(key) === idRef.current;
+  useEffect(() => () => {
+    if (activePlanTexts.get(key) === idRef.current) activePlanTexts.delete(key);
+  }, [key]);
+  return owner;
+}
+
 /**
  * 任务清单条,渲染在 composer 同一列内、紧贴输入框上方(作为输入框的"附着条",而非独立
  * 悬浮面板)。每次 TaskCreate/TaskUpdate 重建完整清单,最新一份为准 —— 见 currentTodos。
@@ -115,8 +132,11 @@ function TodoChecklist({ todos, isStreaming = false }) {
  * markdown 只在展开时渲染,避免长计划在折叠态也参与输入区的高频重渲。
  */
 function PlanBlock({ plan }) {
+  const owner = usePlanSingleton(plan);
   const [open, setOpen] = useState(false);
   const [hiddenPlan, setHiddenPlan] = useState(null);
+  // 同一份计划只保留第一张可见卡,防重复叠加;第一张是正常可交互组件。
+  if (!owner) return null;
   // 已隐藏:留一条可点"显示"小条恢复;批准新计划(plan 变)仍自动恢复完整卡。
   if (hiddenPlan === plan) return <ShowBar label="显示已批准的计划" onClick={() => setHiddenPlan(null)} />;
   return (
