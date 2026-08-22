@@ -3,6 +3,23 @@ import { Check, Circle, ClipboardList, Loader2, ChevronDown, ChevronRight, EyeOf
 import { MarkdownRenderer } from './MarkdownRenderer.jsx';
 import { readTodoCollapsed, writeTodoCollapsed } from '../utils/todoCollapse.js';
 
+// 防御:同一会话/同一 permKey 下,「已批准的计划」常驻块只允许挂载一份。
+// 当前正常源码只有 ChatInput 一个 TodoPanel;若因分屏、旧缓存、异常挂载导致同一
+// 会话出现多个 PlanBlock,只保留第一个可见,避免计划卡无限叠加把输入框挤出屏幕。
+const activePlanOwners = new Map();
+let planInstanceSeq = 0;
+function usePlanBlockOwner(planKey = 'global') {
+  const idRef = useRef(null);
+  if (idRef.current == null) idRef.current = ++planInstanceSeq;
+  const key = planKey || 'global';
+  if (!activePlanOwners.has(key)) activePlanOwners.set(key, idRef.current);
+  const owner = activePlanOwners.get(key) === idRef.current;
+  useEffect(() => () => {
+    if (activePlanOwners.get(key) === idRef.current) activePlanOwners.delete(key);
+  }, [key]);
+  return owner;
+}
+
 /**
  * 任务清单条,渲染在 composer 同一列内、紧贴输入框上方(作为输入框的"附着条",而非独立
  * 悬浮面板)。每次 TaskCreate/TaskUpdate 重建完整清单,最新一份为准 —— 见 currentTodos。
@@ -11,7 +28,7 @@ import { readTodoCollapsed, writeTodoCollapsed } from '../utils/todoCollapse.js'
  * 两个按钮:折叠(只留"任务清单"标题行 + "下一条")/ 隐藏(整块消失,直到下次任务清单
  * 更新)。任务全部完成时自动折叠。
  */
-export function TodoPanel({ todos, plan = '', isStreaming = false }) {
+export function TodoPanel({ todos, plan = '', isStreaming = false, planKey = 'global' }) {
   const hasTodos = Array.isArray(todos) && todos.length > 0;
   const cleanPlan = String(plan || '').trim();
   if (!hasTodos && !cleanPlan) return null;
@@ -19,7 +36,7 @@ export function TodoPanel({ todos, plan = '', isStreaming = false }) {
   // 隐藏清单不影响计划,隐藏计划不影响清单。
   return (
     <>
-      {cleanPlan && <PlanBlock plan={cleanPlan} />}
+      {cleanPlan && <PlanBlock plan={cleanPlan} planKey={planKey} />}
       {hasTodos && <TodoChecklist todos={todos} isStreaming={isStreaming} />}
     </>
   );
@@ -114,9 +131,12 @@ function TodoChecklist({ todos, isStreaming = false }) {
  * 下次批准新计划(文本不同)自动恢复,与 TodoChecklist 的 hiddenSig 同一套语义。
  * markdown 只在展开时渲染,避免长计划在折叠态也参与输入区的高频重渲。
  */
-function PlanBlock({ plan }) {
+function PlanBlock({ plan, planKey = 'global' }) {
+  const owner = usePlanBlockOwner(planKey);
   const [open, setOpen] = useState(false);
   const [hiddenPlan, setHiddenPlan] = useState(null);
+  // 同一会话只显示第一块;重复挂载的其余实例直接不渲染,防叠加。
+  if (!owner) return null;
   // 已隐藏:留一条可点"显示"小条恢复;批准新计划(plan 变)仍自动恢复完整卡。
   if (hiddenPlan === plan) return <ShowBar label="显示已批准的计划" onClick={() => setHiddenPlan(null)} />;
   return (
