@@ -38,7 +38,7 @@ import { useMultiSelect, SelModeToggle, BatchBar, SelCheckbox } from './componen
 import { pickDirectory, isTauri } from './utils/pickDirectory.js';
 import ChatSearch from './components/ChatSearch.jsx';
 import { confirmDialog } from './utils/confirmDialog.jsx';
-import { ChatInput, EffortSelector, EFFORT_LEVELS, markAutoUnavailable } from './components/ChatInput.jsx';
+import { ChatInput, EffortSelector, EFFORT_LEVELS, markAutoUnavailable, PermissionModeSelector } from './components/ChatInput.jsx';
 import { ModelBadge, ProviderAvatar } from './components/ModelBadge.jsx';
 import { RemoteControlButton, ProviderSwitcher, ModelSelector, ProviderSourceBadge, AnchoredPopover } from './components/SessionSelectors.jsx';
 import { mergeProviderLists, rowIsCurrent } from './utils/providerList.js';
@@ -1812,6 +1812,9 @@ function HomeState({ tabIndex = 0 }) {
     // r26-B5:先造 draft 再入队 —— 队列键带 draftId,与同项目其他 draft 窗格隔离。
     const _homeDraft = buildHomeDraft(project, _did);
     if (!_homeDraft) return; // 项目缺 path 造不出 draft(旧代码会入队后清空窗格,键还匹配不上)
+    // 首页权限模式选择器(无会话时操作的是全局 mode)落到这条新 draft 的 permKey 上。
+    const _homeMode = st.permissionMode || 'default';
+    st.setPermissionMode(_homeMode, queueKeyFor(_homeDraft));
     st.enqueueMessage(queueKeyFor(_homeDraft), { text: t, queuedAt: Date.now() });
     st.setPaneSession(tabIndex, _homeDraft); // cwd=所选项目
     st.setPaneMessages(tabIndex, []);
@@ -1886,6 +1889,7 @@ function HomeState({ tabIndex = 0 }) {
             className="w-full bg-transparent px-3.5 pt-3 pb-1 text-[14px] text-ink font-body resize-none focus:outline-none placeholder-ink-ghost"
           />
           <div className="flex items-center gap-2 px-2 pb-2">
+            <PermissionModeSelector />
             <div ref={projBtnRef} className="relative min-w-0">
               <button
                 onClick={() => setProjOpen((v) => !v)}

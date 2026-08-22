@@ -44,7 +44,7 @@ import { paneMountsSessionDetail, homeView } from '../../client/src/utils/home.j
 // t4 Home 提交落点:draft 写进 Home 所在的那个 pane(分屏下不串到别的窗格)
 {
   const app = readFileSync(new URL('../../client/src/App.jsx', import.meta.url), 'utf8');
-  const submit = app.slice(app.indexOf('const submit = () => {'), app.indexOf('const submit = () => {') + 800);
+  const submit = app.slice(app.indexOf('const submit = () => {'), app.indexOf('const submit = () => {') + 1200);
   assert.match(submit, /st\.setPaneSession\(tabIndex, _homeDraft\)/, 't4: Home 提交把 draft 写进本 pane');
   assert.match(submit, /st\.setPaneMessages\(tabIndex, \[\]\)/, 't4: 同 pane 清消息');
 }
