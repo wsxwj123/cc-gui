@@ -26,10 +26,9 @@ export function GoalBar({ goal, onSend, permKey = 'global' }) {
   useEffect(() => {
     if (!goalFp) return;
     const saved = (() => { try { return localStorage.getItem(hideKey); } catch { return null; } })();
-    if (saved === goalFp) setHidden(true);
-    else if (saved) {
+    setHidden(saved === goalFp);
+    if (saved && saved !== goalFp) {
       try { localStorage.removeItem(hideKey); } catch {}
-      setHidden(false);
     }
   }, [hideKey, goalFp]);
 

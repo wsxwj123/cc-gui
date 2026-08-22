@@ -2,30 +2,6 @@ import React, { useState, useEffect, useRef } from 'react';
 import { Check, Circle, ClipboardList, Loader2, ChevronDown, ChevronRight, EyeOff } from './Icon.jsx';
 import { MarkdownRenderer } from './MarkdownRenderer.jsx';
 import { readTodoCollapsed, writeTodoCollapsed } from '../utils/todoCollapse.js';
-import { useStore } from '../stores/sessionStore.js';
-
-// 按“会话标识|计划全文”去重,并且只有当前活动窗格的 PlanBlock 才拥有渲染权:
-// 同一会话的同一份计划只允许一张卡,但必须显示在用户正在看的窗格里。
-const activePlanTexts = new Map(); // `${planKey}|${plan}` -> { id, tabIndex }
-let planInstanceSeq = 0;
-function usePlanSingleton(plan, tabIndex = null, planKey = 'global') {
-  const idRef = useRef(null);
-  if (idRef.current == null) idRef.current = ++planInstanceSeq;
-  const key = `${planKey}|${plan || ''}`;
-  const activeTabIndex = useStore((s) => s.activeTabIndex);
-  const isActivePane = tabIndex == null || tabIndex === activeTabIndex;
-  const current = activePlanTexts.get(key);
-  // 活动窗格优先持有;非活动窗格不抢。
-  if (isActivePane && (!current || current.tabIndex !== tabIndex)) {
-    activePlanTexts.set(key, { id: idRef.current, tabIndex });
-  }
-  const owner = !!activePlanTexts.get(key) && activePlanTexts.get(key).id === idRef.current;
-  useEffect(() => () => {
-    const rec = activePlanTexts.get(key);
-    if (rec && rec.id === idRef.current) activePlanTexts.delete(key);
-  }, [key]);
-  return owner;
-}
 
 /**
  * 任务清单条,渲染在 composer 同一列内、紧贴输入框上方(作为输入框的"附着条",而非独立
@@ -35,7 +11,7 @@ function usePlanSingleton(plan, tabIndex = null, planKey = 'global') {
  * 两个按钮:折叠(只留"任务清单"标题行 + "下一条")/ 隐藏(整块消失,直到下次任务清单
  * 更新)。任务全部完成时自动折叠。
  */
-export function TodoPanel({ todos, plan = '', isStreaming = false, planKey = 'global', tabIndex = null }) {
+export function TodoPanel({ todos, plan = '', isStreaming = false }) {
   const hasTodos = Array.isArray(todos) && todos.length > 0;
   const cleanPlan = String(plan || '').trim();
   if (!hasTodos && !cleanPlan) return null;
@@ -43,7 +19,7 @@ export function TodoPanel({ todos, plan = '', isStreaming = false, planKey = 'gl
   // 隐藏清单不影响计划,隐藏计划不影响清单。
   return (
     <>
-      {cleanPlan && <PlanBlock plan={cleanPlan} planKey={planKey} tabIndex={tabIndex} />}
+      {cleanPlan && <PlanBlock plan={cleanPlan} />}
       {hasTodos && <TodoChecklist todos={todos} isStreaming={isStreaming} />}
     </>
   );
@@ -138,12 +114,9 @@ function TodoChecklist({ todos, isStreaming = false }) {
  * 下次批准新计划(文本不同)自动恢复,与 TodoChecklist 的 hiddenSig 同一套语义。
  * markdown 只在展开时渲染,避免长计划在折叠态也参与输入区的高频重渲。
  */
-function PlanBlock({ plan, planKey = 'global', tabIndex = null }) {
-  const owner = usePlanSingleton(plan, tabIndex, planKey);
+function PlanBlock({ plan }) {
   const [open, setOpen] = useState(false);
   const [hiddenPlan, setHiddenPlan] = useState(null);
-  // 同一份计划只保留第一张可见卡,防重复叠加;第一张是正常可交互组件。
-  if (!owner) return null;
   // 已隐藏:留一条可点"显示"小条恢复;批准新计划(plan 变)仍自动恢复完整卡。
   if (hiddenPlan === plan) return <ShowBar label="显示已批准的计划" onClick={() => setHiddenPlan(null)} />;
   return (

@@ -1183,7 +1183,7 @@ export function ChatInput({ onSend, onStop, onStopBackground, onAccelerate, canS
         {/* 任务清单 — 紧贴输入框上方(同一列内),作为输入框的附着条而非独立悬浮面板。
             折叠/隐藏/全完成自动折叠见 TodoPanel。key=permKey:折叠/隐藏是组件本地态,按会话
             重挂以免跨会话串扰(每个会话独立的折叠/隐藏状态)。 */}
-        <TodoPanel key={permKey || 'global'} planKey={permKey || 'global'} tabIndex={tabIndex} todos={todos} plan={plan} isStreaming={isStreaming || agentsWorking || bgWorking} />
+        <TodoPanel key={`todo-${permKey || 'global'}`} todos={todos} plan={plan} isStreaming={isStreaming || agentsWorking || bgWorking} />
 
         {/* 输入预测(A):回合末模型预测的下一条输入。点击建议文本直接发送;
             铅笔=填入输入框编辑;X=忽略。新回合开始/发送时上层自动清掉。 */}
@@ -1221,7 +1221,7 @@ export function ChatInput({ onSend, onStop, onStopBackground, onAccelerate, canS
         {/* r30:goal 常驻条 —— 有生效中的 /goal 时显示在 composer 正上方。与任务清单/
             已批准计划同列叠加(顺序:计划 → 任务清单 → 目标条 → 输入框)。key=permKey:
             分屏各窗格各挂各的,切会话即重置编辑态。 */}
-        <GoalBar key={permKey || 'global'} permKey={permKey || 'global'} goal={goal} onSend={onSend} />
+        <GoalBar key={`goal-${permKey || 'global'}`} permKey={permKey || 'global'} goal={goal} onSend={onSend} />
 
         {/* 修正批#1b 两行 composer:上行整宽输入框,下行工具行
             [权限模式▾][+附件][旁问⊙] … [发送 | 入队/转后台/停止](桌面/手机同一套)。
