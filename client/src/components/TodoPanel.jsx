@@ -4,14 +4,13 @@ import { MarkdownRenderer } from './MarkdownRenderer.jsx';
 import { readTodoCollapsed, writeTodoCollapsed } from '../utils/todoCollapse.js';
 import { useStore } from '../stores/sessionStore.js';
 
-// 按“计划全文”全局去重,但只有当前活动窗格的 PlanBlock 才拥有渲染权:
-// 同一份已批准计划只允许一张卡,且优先显示在用户正在看的窗格里。
-const activePlanTexts = new Map(); // plan -> { id, tabIndex }
+// 按“会话标识|计划全文”去重,并且只有当前活动窗格的 PlanBlock 才拥有渲染权:
+// 同一会话的同一份计划只允许一张卡,但必须显示在用户正在看的窗格里。
+const activePlanTexts = new Map(); // `${planKey}|${plan}` -> { id, tabIndex }
 let planInstanceSeq = 0;
 function usePlanSingleton(plan, tabIndex = null, planKey = 'global') {
   const idRef = useRef(null);
   if (idRef.current == null) idRef.current = ++planInstanceSeq;
-  // key 必须包含会话/窗格标识,避免不同会话的同名计划互相串。
   const key = `${planKey}|${plan || ''}`;
   const activeTabIndex = useStore((s) => s.activeTabIndex);
   const isActivePane = tabIndex == null || tabIndex === activeTabIndex;
@@ -36,7 +35,7 @@ function usePlanSingleton(plan, tabIndex = null, planKey = 'global') {
  * 两个按钮:折叠(只留"任务清单"标题行 + "下一条")/ 隐藏(整块消失,直到下次任务清单
  * 更新)。任务全部完成时自动折叠。
  */
-export function TodoPanel({ todos, plan = '', isStreaming = false, tabIndex = null, planKey = 'global' }) {
+export function TodoPanel({ todos, plan = '', isStreaming = false, planKey = 'global', tabIndex = null }) {
   const hasTodos = Array.isArray(todos) && todos.length > 0;
   const cleanPlan = String(plan || '').trim();
   if (!hasTodos && !cleanPlan) return null;
@@ -44,7 +43,7 @@ export function TodoPanel({ todos, plan = '', isStreaming = false, tabIndex = nu
   // 隐藏清单不影响计划,隐藏计划不影响清单。
   return (
     <>
-      {cleanPlan && <PlanBlock plan={cleanPlan} tabIndex={tabIndex} planKey={planKey} />}
+      {cleanPlan && <PlanBlock plan={cleanPlan} planKey={planKey} tabIndex={tabIndex} />}
       {hasTodos && <TodoChecklist todos={todos} isStreaming={isStreaming} />}
     </>
   );
@@ -139,7 +138,7 @@ function TodoChecklist({ todos, isStreaming = false }) {
  * 下次批准新计划(文本不同)自动恢复,与 TodoChecklist 的 hiddenSig 同一套语义。
  * markdown 只在展开时渲染,避免长计划在折叠态也参与输入区的高频重渲。
  */
-function PlanBlock({ plan, tabIndex = null, planKey = 'global' }) {
+function PlanBlock({ plan, planKey = 'global', tabIndex = null }) {
   const owner = usePlanSingleton(plan, tabIndex, planKey);
   const [open, setOpen] = useState(false);
   const [hiddenPlan, setHiddenPlan] = useState(null);

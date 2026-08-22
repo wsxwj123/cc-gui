@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Target, Pencil, Trash2, Check, X, EyeOff } from './Icon.jsx';
+import { Target, Pencil, Trash2, Check, X, EyeOff, ChevronRight } from './Icon.jsx';
 import { confirmDialog } from '../utils/confirmDialog.jsx';
 
 /**
@@ -14,15 +14,37 @@ import { confirmDialog } from '../utils/confirmDialog.jsx';
  *   · 清除:confirmDialog 确认后发 `/goal clear`(WKWebView 禁用原生 confirm)。
  * 分屏时各窗格各渲染各的 —— goal 已是 per-pane 数据,key 按 permKey 挂载即天然隔离。
  */
-export function GoalBar({ goal, onSend }) {
+export function GoalBar({ goal, onSend, permKey = 'global' }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState('');
-  const [hidden, setHidden] = useState(false);
-  // 新目标/状态变化时恢复显示,避免本地隐藏卡住下一条目标。
-  useEffect(() => { setHidden(false); }, [goal?.condition, goal?.met, goal?.sentinel]);
+  const hideKey = `cgui-goal-hidden:${permKey || 'global'}`;
+  const goalFp = goal ? `${goal.condition}|${goal.met}|${goal.sentinel}` : '';
+  const [hidden, setHidden] = useState(() => {
+    try { return !!goalFp && localStorage.getItem(hideKey) === goalFp; } catch { return false; }
+  });
+  // 持久化隐藏状态时绑定“哪一条目标被隐藏”;新目标出现后自动清除旧隐藏并显示。
+  useEffect(() => {
+    if (!goalFp) return;
+    const saved = (() => { try { return localStorage.getItem(hideKey); } catch { return null; } })();
+    if (saved === goalFp) setHidden(true);
+    else if (saved) {
+      try { localStorage.removeItem(hideKey); } catch {}
+      setHidden(false);
+    }
+  }, [hideKey, goalFp]);
 
   if (!goal) return null;
-  if (hidden) return null;
+  if (hidden) {
+    return (
+      <button
+        onClick={() => { setHidden(false); try { localStorage.removeItem(hideKey); } catch {} }}
+        className="mb-2 w-full flex items-center gap-1.5 px-3 py-1 text-[10px] text-ink-faint hover:text-ink-muted transition-colors"
+      >
+        <ChevronRight size={11} className="shrink-0" />
+        <span>显示目标条</span>
+      </button>
+    );
+  }
   const condition = goal.condition || '(无条件文本)';
   const reason = goal.reason || '';
   // 常驻条要覆盖目标完整生命周期:进行中 / 已达成 / 已清除,避免只在消息流里出现、
@@ -53,6 +75,10 @@ export function GoalBar({ goal, onSend }) {
     );
     if (!ok) return;
     onSend('/goal clear');
+  };
+  const hideGoal = () => {
+    setHidden(true);
+    try { localStorage.setItem(hideKey, goalFp); } catch {}
   };
 
   return (
@@ -103,7 +129,7 @@ export function GoalBar({ goal, onSend }) {
             </>
           )}
           {!isActive && (
-            <button onClick={() => setHidden(true)} title="隐藏目标条"
+            <button onClick={hideGoal} title="隐藏目标条"
               className="shrink-0 p-1 rounded hover:bg-canvas-deep/40 text-ink-muted hover:text-ink transition-colors">
               <EyeOff size={13} />
             </button>
