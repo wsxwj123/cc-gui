@@ -2,20 +2,27 @@ import React, { useState, useEffect, useRef } from 'react';
 import { Check, Circle, ClipboardList, Loader2, ChevronDown, ChevronRight, EyeOff } from './Icon.jsx';
 import { MarkdownRenderer } from './MarkdownRenderer.jsx';
 import { readTodoCollapsed, writeTodoCollapsed } from '../utils/todoCollapse.js';
+import { useStore } from '../stores/sessionStore.js';
 
-// 全局按“计划全文”去重:同一份已批准计划只允许一个 PlanBlock 渲染。
-// 之前按 permKey 去重拦不住来源不明的重复实例,这里直接用 plan 文本作为唯一键,
-// 无论挂载来源/分屏/异常路径,只要同一份计划,都只保留第一张可见卡。
-const activePlanTexts = new Map();
+// 按“计划全文”全局去重,但只有当前活动窗格的 PlanBlock 才拥有渲染权:
+// 同一份已批准计划只允许一张卡,且优先显示在用户正在看的窗格里。
+const activePlanTexts = new Map(); // plan -> { id, tabIndex }
 let planInstanceSeq = 0;
-function usePlanSingleton(plan) {
+function usePlanSingleton(plan, tabIndex = null) {
   const idRef = useRef(null);
   if (idRef.current == null) idRef.current = ++planInstanceSeq;
   const key = plan || '';
-  if (!activePlanTexts.has(key)) activePlanTexts.set(key, idRef.current);
-  const owner = activePlanTexts.get(key) === idRef.current;
+  const activeTabIndex = useStore((s) => s.activeTabIndex);
+  const isActivePane = tabIndex == null || tabIndex === activeTabIndex;
+  const current = activePlanTexts.get(key);
+  // 活动窗格优先持有;非活动窗格不抢。
+  if (isActivePane && (!current || current.tabIndex !== tabIndex)) {
+    activePlanTexts.set(key, { id: idRef.current, tabIndex });
+  }
+  const owner = !!activePlanTexts.get(key) && activePlanTexts.get(key).id === idRef.current;
   useEffect(() => () => {
-    if (activePlanTexts.get(key) === idRef.current) activePlanTexts.delete(key);
+    const rec = activePlanTexts.get(key);
+    if (rec && rec.id === idRef.current) activePlanTexts.delete(key);
   }, [key]);
   return owner;
 }
@@ -28,7 +35,7 @@ function usePlanSingleton(plan) {
  * 两个按钮:折叠(只留"任务清单"标题行 + "下一条")/ 隐藏(整块消失,直到下次任务清单
  * 更新)。任务全部完成时自动折叠。
  */
-export function TodoPanel({ todos, plan = '', isStreaming = false }) {
+export function TodoPanel({ todos, plan = '', isStreaming = false, tabIndex = null }) {
   const hasTodos = Array.isArray(todos) && todos.length > 0;
   const cleanPlan = String(plan || '').trim();
   if (!hasTodos && !cleanPlan) return null;
@@ -36,7 +43,7 @@ export function TodoPanel({ todos, plan = '', isStreaming = false }) {
   // 隐藏清单不影响计划,隐藏计划不影响清单。
   return (
     <>
-      {cleanPlan && <PlanBlock plan={cleanPlan} />}
+      {cleanPlan && <PlanBlock plan={cleanPlan} tabIndex={tabIndex} />}
       {hasTodos && <TodoChecklist todos={todos} isStreaming={isStreaming} />}
     </>
   );
@@ -131,8 +138,8 @@ function TodoChecklist({ todos, isStreaming = false }) {
  * 下次批准新计划(文本不同)自动恢复,与 TodoChecklist 的 hiddenSig 同一套语义。
  * markdown 只在展开时渲染,避免长计划在折叠态也参与输入区的高频重渲。
  */
-function PlanBlock({ plan }) {
-  const owner = usePlanSingleton(plan);
+function PlanBlock({ plan, tabIndex = null }) {
+  const owner = usePlanSingleton(plan, tabIndex);
   const [open, setOpen] = useState(false);
   const [hiddenPlan, setHiddenPlan] = useState(null);
   // 同一份计划只保留第一张可见卡,防重复叠加;第一张是正常可交互组件。

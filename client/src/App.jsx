@@ -2919,8 +2919,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     !!optimisticGoal
     && messages.some((m) => m?.type === 'goal' && m.condition === optimisticGoal.condition && !m.met)
   ), [messages, optimisticGoal]);
-  // 显示值:乐观态未落榜时用乐观(补上"设目标回合"的空窗);否则一律以历史 activeGoal 为准。
-  const effectiveGoal = (optimisticGoal && !optimisticLanded) ? optimisticGoal : activeGoal;
+  // 显示值:乐观态未落榜时用乐观(补上"设目标回合"的空窗);历史已到达但 activeGoal
+  // 仍为空(流式期间历史尚未被本窗格持有/刷新)时也继续用乐观,避免目标条中途消失。
+  const effectiveGoal = (optimisticGoal && (!optimisticLanded || !activeGoal)) ? optimisticGoal : activeGoal;
   // 历史到达 → 切回历史驱动,乐观态作废(纯清理,显示值上面已按 optimisticLanded 切换)。
   useEffect(() => {
     if (optimisticGoal
@@ -3329,7 +3330,12 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       return '';
     };
     // 串扰窗口2:流式缓冲按归属门控(同 currentTodos),不属于当前会话就不扫。
+    // 先扫 streamingToolCalls 原始数组(流中结果可能先在这里回填),再扫 blocks。
     const liveBlocks = liveVisible ? streamingBlocks : EMPTY_ARRAY;
+    for (let j = (liveVisible ? streamingToolCalls : EMPTY_ARRAY).length - 1; j >= 0; j--) {
+      const plan = readApprovedPlan(streamingToolCalls[j]);
+      if (plan) return plan;
+    }
     for (let i = liveBlocks.length - 1; i >= 0; i--) {
       const b = liveBlocks[i];
       if (b?.type === 'tool_use') {
@@ -3346,7 +3352,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       if (plan) return plan;
     }
     return '';
-  }, [streamingBlocks, visibleChat, messages, liveVisible]);
+  }, [streamingBlocks, streamingToolCalls, visibleChat, messages, liveVisible]);
 
   // When the file watcher reports a write to THIS session's jsonl (e.g. a
   // detached background stream from another tab/session is still writing),

@@ -59,8 +59,8 @@ assert.ok(sendSetIdx > gateIdx, 'setOptimisticGoal 在排队门之后(排队中�
 assert.ok(/optimisticLanded[\s\S]{0,240}messages\.some\(\(m\) => m\?\.type === 'goal' && m\.condition === optimisticGoal\.condition && !m\.met\)/.test(app),
   'optimisticLanded 判定历史已到达本目标的生效记录(同 condition 且 met:false)');
 
-// effectiveGoal 回落:乐观未落榜用乐观,已落榜/无乐观用历史 activeGoal。
-assert.ok(/const effectiveGoal = \(optimisticGoal && !optimisticLanded\) \? optimisticGoal : activeGoal/.test(app),
-  'effectiveGoal 未落榜用乐观,否则以历史 activeGoal 为准');
+// effectiveGoal:乐观未落榜或历史尚未持有 activeGoal 时继续显示乐观态。
+assert.ok(/const effectiveGoal = \(optimisticGoal && \(!optimisticLanded \|\| !activeGoal\)\) \? optimisticGoal : activeGoal/.test(app),
+  'effectiveGoal:乐观未落榜或历史尚未持有 activeGoal 时继续显示乐观态');
 
 console.log('✓ check-r31-goal-optimistic: /goal 发出即亮 + 记录到达无缝 + clear 即隐 + 普通消息不误亮 + 排队中不亮 全过');
