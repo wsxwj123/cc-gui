@@ -1,6 +1,21 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Target, Pencil, Trash2, Check, X } from './Icon.jsx';
 import { confirmDialog } from '../utils/confirmDialog.jsx';
+
+// 防御:同一会话/permKey 只允许挂载一份 GoalBar,防止分屏/异常挂载导致目标条重复叠加。
+const activeGoalOwners = new Map();
+let goalInstanceSeq = 0;
+function useGoalBarOwner(barKey = 'global') {
+  const idRef = useRef(null);
+  if (idRef.current == null) idRef.current = ++goalInstanceSeq;
+  const key = barKey || 'global';
+  if (!activeGoalOwners.has(key)) activeGoalOwners.set(key, idRef.current);
+  const owner = activeGoalOwners.get(key) === idRef.current;
+  useEffect(() => () => {
+    if (activeGoalOwners.get(key) === idRef.current) activeGoalOwners.delete(key);
+  }, [key]);
+  return owner;
+}
 
 /**
  * goal 常驻条(dsh 同款):渲染在 composer 正上方,会话有生效中的 /goal 时显示。
@@ -12,14 +27,26 @@ import { confirmDialog } from '../utils/confirmDialog.jsx';
  *   · 清除:confirmDialog 确认后发 `/goal clear`(WKWebView 禁用原生 confirm)。
  * 分屏时各窗格各渲染各的 —— goal 已是 per-pane 数据,key 按 permKey 挂载即天然隔离。
  */
-export function GoalBar({ goal, onSend }) {
+export function GoalBar({ goal, onSend, barKey = 'global' }) {
+  const owner = useGoalBarOwner(barKey);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState('');
 
   if (!goal) return null;
+  if (!owner) return null;
   const condition = goal.condition || '(无条件文本)';
   const reason = goal.reason || '';
-  const title = `目标进行中：${condition}${reason ? `\n最近判定：${reason}` : ''}`;
+  // 常驻条要覆盖目标完整生命周期:进行中 / 已达成 / 已清除,避免只在消息流里出现、
+  // 一滚动就看不到。
+  const isActive = !goal.met;
+  const isAchieved = !!goal.met && !goal.sentinel;
+  const isCleared = !!goal.met && !!goal.sentinel;
+  const stateLabel = isCleared ? '目标已清除' : isAchieved ? '目标已达成' : '目标进行中';
+  const stateSuffix = isAchieved && goal.iterations ? `（${goal.iterations} 轮）` : '';
+  const title = isActive
+    ? `目标进行中：${condition}${reason ? `\n最近判定：${reason}` : ''}`
+    : `${stateLabel}：${condition}${reason ? `\n${reason}` : ''}`;
+  const stateColor = isAchieved ? 'text-success' : isCleared ? 'text-ink-faint' : 'text-ink';
 
   const startEdit = () => { setDraft(goal.condition || ''); setEditing(true); };
   const cancelEdit = () => { setEditing(false); setDraft(''); };
@@ -41,7 +68,7 @@ export function GoalBar({ goal, onSend }) {
 
   return (
     <div data-cgui="goal-bar" className="mb-2 rounded-full border border-canvas-deep bg-canvas-warm/60 backdrop-blur-soft px-3 py-1.5 flex items-center gap-2">
-      {editing ? (
+      {editing && isActive ? (
         <>
           <Target size={13} className="text-accent shrink-0" />
           <input
@@ -68,20 +95,24 @@ export function GoalBar({ goal, onSend }) {
         </>
       ) : (
         <>
-          <Target size={13} className="text-accent shrink-0" />
+          <Target size={13} className={`shrink-0 ${stateColor}`} />
           <span title={title} className="flex-1 min-w-0 text-[12px] text-ink-muted font-body truncate">
-            <span className="text-ink">目标进行中：</span>{condition}
+            <span className={stateColor}>{isActive ? '目标进行中：' : `${stateLabel}${stateSuffix}：`}</span>{condition}
           </span>
-          <button onClick={startEdit} title="编辑目标条件"
-            data-cgui="goal-edit"
-            className="shrink-0 p-1 rounded hover:bg-canvas-deep/40 text-ink-muted hover:text-accent transition-colors">
-            <Pencil size={11} />
-          </button>
-          <button onClick={handleClear} title="清除目标（发送 /goal clear）"
-            data-cgui="goal-clear"
-            className="shrink-0 p-1 rounded hover:bg-canvas-deep/40 text-ink-muted hover:text-red-500 transition-colors">
-            <Trash2 size={11} />
-          </button>
+          {isActive && (
+            <>
+              <button onClick={startEdit} title="编辑目标条件"
+                data-cgui="goal-edit"
+                className="shrink-0 p-1 rounded hover:bg-canvas-deep/40 text-ink-muted hover:text-accent transition-colors">
+                <Pencil size={11} />
+              </button>
+              <button onClick={handleClear} title="清除目标（发送 /goal clear）"
+                data-cgui="goal-clear"
+                className="shrink-0 p-1 rounded hover:bg-canvas-deep/40 text-ink-muted hover:text-red-500 transition-colors">
+                <Trash2 size={11} />
+              </button>
+            </>
+          )}
         </>
       )}
     </div>

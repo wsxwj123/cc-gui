@@ -2888,9 +2888,11 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // 否则 effect 依赖数组在渲染期先求值会命中 TDZ(Cannot access before initialization)。
   const sessionQueueKey = queueKeyFor(selectedSession);
   // /goal 当前是否还挂着:取历史里【最后一条】goal 记录。达成与手动清除都写 met:true
-  // (CLI 的写入函数只有这一种表达),所以"最后一条 met=false"⇔"目标仍在生效"。
+  // (CLI 的写入函数只有这一种表达)。用户需求:目标条要像计划卡一样常驻输入框上方,
+  // 不能只在消息流里出现、一滚动就消失。因此这里取最后一条 goal 作为常驻条数据,
+  // 即使 met:true(达成/清除)也保留最近状态,由 GoalBar 组件按 met/sentinel 显示
+  // “目标进行中 / 目标已达成 / 目标已清除”。
   // 清除规则 = 纯派生,没有任何需要手动置空的时机:
-  //   · 达成 / `/goal clear` → 末条 met:true → 本 memo 返回 null,徽章消失;
   //   · 切会话 / 切窗格 → messages 是 per-pane 的另一份 → 天然按 sid 隔离;
   //   · 回合结束刷新历史 → 新记录追加在末尾,状态跟着最后一条走。
   // 唯一数据源是历史(messages),不掺流式的 chatMessages:两个来源就有"谁更晚"的判定,
@@ -2898,7 +2900,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // 由消息流里的 Stop hook feedback 提示行承担,下一回合起徽章接手。
   const activeGoal = useMemo(() => {
     for (let i = messages.length - 1; i >= 0; i--) {
-      if (messages[i]?.type === 'goal') return messages[i].met ? null : messages[i];
+      if (messages[i]?.type === 'goal') return messages[i];
     }
     return null;
   }, [messages]);

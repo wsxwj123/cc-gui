@@ -1221,7 +1221,7 @@ export function ChatInput({ onSend, onStop, onStopBackground, onAccelerate, canS
         {/* r30:goal 常驻条 —— 有生效中的 /goal 时显示在 composer 正上方。与任务清单/
             已批准计划同列叠加(顺序:计划 → 任务清单 → 目标条 → 输入框)。key=permKey:
             分屏各窗格各挂各的,切会话即重置编辑态。 */}
-        <GoalBar key={permKey || 'global'} goal={goal} onSend={onSend} />
+        <GoalBar key={permKey || 'global'} barKey={permKey || 'global'} goal={goal} onSend={onSend} />
 
         {/* 修正批#1b 两行 composer:上行整宽输入框,下行工具行
             [权限模式▾][+附件][旁问⊙] … [发送 | 入队/转后台/停止](桌面/手机同一套)。
