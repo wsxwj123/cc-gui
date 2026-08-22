@@ -84,9 +84,8 @@ assert.equal(GOAL_SET_STDOUT.replace(/^Goal set:\s*/, ''), goals[0].condition,
 rmSync(home, { recursive: true, force: true });
 
 // ── 2. 实时侧 + 渲染侧源码守卫 ─────────────────────────────────────────
-assert.ok(/function GoalNotice\(\{ goal \}\)/.test(app), 'GoalNotice(消息流里的目标提示行)必须存在');
-assert.equal(app.split('<GoalNotice goal={msg} />').length - 1, 2,
-  '历史列表(MessageList)与流式列表两处都要渲染 goal,漏一处就是"翻回去看不见"');
+assert.equal(app.split('<GoalNotice goal={msg} />').length - 1, 0,
+  '目标提示不再进消息流(历史/流式两处都不渲染),只由输入框上方的常驻目标条展示');
 assert.ok(/const activeGoal = useMemo\(/.test(app), '常驻条必须由 activeGoal 派生');
 // r30:顶栏小徽章退役,常驻条(GoalBar)移到 ChatInput 的 composer 正上方 —— "目标进行中"
 // 文案与 title 里的"最近判定"随之迁入 GoalBar,App.jsx 里不再直接渲染该行。

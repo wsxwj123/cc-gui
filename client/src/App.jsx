@@ -2530,7 +2530,7 @@ const MessageList = React.memo(function MessageList({ messages, onRetryTurn, onR
       {msg.type === 'compact'
         ? <CompactDivider />
         : msg.type === 'goal'
-        ? <GoalNotice goal={msg} />
+        ? null
         : msg.type === 'denial'
         ? <DenialNotice denial={msg} />
         : msg.type === 'turn'
@@ -7298,7 +7298,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                   {msg.type === 'compact'
                     ? <CompactDivider />
                     : msg.type === 'goal'
-                    ? <GoalNotice goal={msg} />
+                    ? null
                     : msg.type === 'denial'
                     ? <DenialNotice denial={msg} />
                     : msg.type === 'turn'
