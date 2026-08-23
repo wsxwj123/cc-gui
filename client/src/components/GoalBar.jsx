@@ -1,6 +1,7 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import { Target, Pencil, Trash2, Check, X, EyeOff, ChevronRight } from './Icon.jsx';
 import { confirmDialog } from '../utils/confirmDialog.jsx';
+import { forgetHiddenGoalIdentity, isGoalIdentityHidden, rememberHiddenGoalIdentity, resolveGoalHiddenState } from '../utils/goal.js';
 
 /**
  * goal 常驻条(dsh 同款):渲染在 composer 正上方,会话有 /goal 相关记录时显示。
@@ -19,24 +20,20 @@ export function GoalBar({ goal, onSend, permKey = 'global' }) {
   const [draft, setDraft] = useState('');
   const hideKey = `cgui-goal-hidden:${permKey || 'global'}`;
   const goalFp = goal ? `${goal.condition}|${goal.met}|${goal.sentinel}` : '';
-  const [hidden, setHidden] = useState(() => {
-    try { return !!goalFp && localStorage.getItem(hideKey) === goalFp; } catch { return false; }
-  });
-  // 持久化隐藏状态时绑定“哪一条目标被隐藏”;新目标出现后自动清除旧隐藏并显示。
-  useEffect(() => {
-    if (!goalFp) return;
-    const saved = (() => { try { return localStorage.getItem(hideKey); } catch { return null; } })();
-    setHidden(saved === goalFp);
-    if (saved && saved !== goalFp) {
-      try { localStorage.removeItem(hideKey); } catch {}
-    }
-  }, [hideKey, goalFp]);
+  const [hiddenState, setHiddenState] = useState(null);
+  let persistedHidden = false;
+  try { persistedHidden = isGoalIdentityHidden(localStorage, hideKey, goalFp); } catch {}
+  // 本地瞬时态也显式绑定会话+身份；从隐藏 A 切到 B 的首帧同步读取 B，绝不继承 A 的 true。
+  const hidden = resolveGoalHiddenState(hiddenState, hideKey, goalFp, persistedHidden);
 
   if (!goal) return null;
   if (hidden) {
     return (
       <button
-        onClick={() => { setHidden(false); try { localStorage.removeItem(hideKey); } catch {} }}
+        onClick={() => {
+          setHiddenState({ key: hideKey, identity: goalFp, hidden: false });
+          try { forgetHiddenGoalIdentity(localStorage, hideKey, goalFp); } catch {}
+        }}
         className="mb-2 w-full flex items-center gap-1.5 px-3 py-1 text-[10px] text-ink-faint hover:text-ink-muted transition-colors"
       >
         <ChevronRight size={11} className="shrink-0" />
@@ -76,8 +73,8 @@ export function GoalBar({ goal, onSend, permKey = 'global' }) {
     onSend('/goal clear');
   };
   const hideGoal = () => {
-    setHidden(true);
-    try { localStorage.setItem(hideKey, goalFp); } catch {}
+    setHiddenState({ key: hideKey, identity: goalFp, hidden: true });
+    try { rememberHiddenGoalIdentity(localStorage, hideKey, goalFp); } catch {}
   };
 
   return (

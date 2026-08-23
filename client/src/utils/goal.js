@@ -33,3 +33,63 @@ export function migrateOptimisticGoalOwner(state, fromOwnerKey, toOwnerKey) {
   if (!state || !fromOwnerKey || !toOwnerKey || state.ownerKey !== fromOwnerKey) return state;
   return { ...state, ownerKey: toOwnerKey };
 }
+
+export const MAX_HIDDEN_GOAL_IDENTITIES = 32;
+
+// 旧格式是同一 key 下的单个 fingerprint；新格式是 JSON 字符串数组。
+// 读取时同时兼容两者，并从尾部保留最近身份，避免异常/旧数据无限膨胀。
+export function parseHiddenGoalIdentities(raw, limit = MAX_HIDDEN_GOAL_IDENTITIES) {
+  if (typeof raw !== 'string' || !raw) return [];
+  let values;
+  try {
+    const parsed = JSON.parse(raw);
+    values = Array.isArray(parsed) ? parsed : [raw];
+  } catch {
+    values = [raw];
+  }
+  const unique = [];
+  for (const value of values) {
+    if (typeof value !== 'string' || !value || unique.includes(value)) continue;
+    unique.push(value);
+  }
+  const cap = Math.max(1, Number(limit) || MAX_HIDDEN_GOAL_IDENTITIES);
+  return unique.slice(-cap);
+}
+
+export function readHiddenGoalIdentities(storage, key, limit = MAX_HIDDEN_GOAL_IDENTITIES) {
+  if (!storage || !key) return [];
+  try { return parseHiddenGoalIdentities(storage.getItem(key), limit); } catch { return []; }
+}
+
+export function isGoalIdentityHidden(storage, key, identity) {
+  return !!identity && readHiddenGoalIdentities(storage, key).includes(identity);
+}
+
+// 点击隐藏/显示后的本地瞬时态也必须带会话+身份；切到另一目标的首帧不能沿用旧 boolean。
+export function resolveGoalHiddenState(transient, key, identity, persistedHidden = false) {
+  if (transient?.key === key && transient?.identity === identity) return !!transient.hidden;
+  return !!persistedHidden;
+}
+
+export function rememberHiddenGoalIdentity(storage, key, identity, limit = MAX_HIDDEN_GOAL_IDENTITIES) {
+  if (!storage || !key || !identity) return false;
+  const previous = readHiddenGoalIdentities(storage, key, limit).filter((value) => value !== identity);
+  const next = [...previous, identity].slice(-Math.max(1, Number(limit) || MAX_HIDDEN_GOAL_IDENTITIES));
+  try {
+    const serialized = JSON.stringify(next);
+    storage.setItem(key, serialized);
+    return storage.getItem(key) === serialized;
+  } catch { return false; }
+}
+
+export function forgetHiddenGoalIdentity(storage, key, identity) {
+  if (!storage || !key || !identity) return false;
+  const previous = readHiddenGoalIdentities(storage, key);
+  const next = previous.filter((value) => value !== identity);
+  if (next.length === previous.length) return false;
+  try {
+    if (next.length) storage.setItem(key, JSON.stringify(next));
+    else storage.removeItem(key);
+    return true;
+  } catch { return false; }
+}
