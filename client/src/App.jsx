@@ -81,7 +81,7 @@ import { subscribeSkin, getSkinVersion, getSkinState, reconcileSkinOnBoot, watch
 import { resolveSessionDot, completionTracker, subscribeDots, getDotsVersion, RUN_MATRIX_CELLS, runCellDelayMs } from './utils/sessionDots.js';
 import { seedNewSessionDefaults } from './components/UnifiedSidebar.jsx';
 import { PendingAttachmentList } from './components/PendingAttachmentList.jsx';
-import { attachmentBlockReason, attachmentMetaForPersistence, buildAttachmentMessage, pendingAttachment, uploadAttachmentFile } from './utils/attachments.js';
+import { attachmentBlockReason, attachmentMetaForPersistence, buildAttachmentMessage, flushPendingAttachmentSidecar, pendingAttachment, uploadAttachmentFile } from './utils/attachments.js';
 import {
   FolderOpen, MessageSquare, ChevronLeft, ChevronRight, ChevronDown,
   Search, Hash, Layers, BarChart3, ArrowLeft, Plus,
@@ -4741,12 +4741,18 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
               });
               // L4: draft 期间暂存的 attachments 元数据现在能写到正确 sessionId 的 sidecar
               if (pendingAttachmentRef.current) {
-                const payload = pendingAttachmentRef.current;
-                pendingAttachmentRef.current = null;
-                fetch(`/api/sessions/${event.session_id}/attachments`, {
-                  method: 'POST', headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify(payload),
-                }).catch(() => {});
+                // 起始实现先清 ref 再 fire-and-forget，非 2xx/断网会永久丢 sidecar。
+                // Home 首条附件扩大了该路径的数据面：最多自动重试 3 次，成功才清；
+                // 仍失败则保留 ref 并给可见提示，不另造 outbox/HTTP 协议。
+                void (async () => {
+                  for (let attempt = 0; attempt < 3; attempt += 1) {
+                    if (await flushPendingAttachmentSidecar(pendingAttachmentRef, event.session_id)) return;
+                    if (attempt < 2) await new Promise((resolve) => setTimeout(resolve, 400 * (attempt + 1)));
+                  }
+                  if (pendingAttachmentRef.current) {
+                    setProviderSwitchNotice({ text: '附件卡片暂未保存，数据已保留；当前会话再次初始化时会重试。' });
+                  }
+                })();
               }
             }
             // 以下两件事是"会话 A 已真实诞生"的事实处理,与"当前选中是谁"无关——用户已切走

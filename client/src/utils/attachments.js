@@ -82,6 +82,23 @@ export function attachmentMetaForPersistence(meta, maxPreviewChars = MAX_PERSIST
   };
 }
 
+export async function flushPendingAttachmentSidecar(pendingRef, sessionId, { fetchImpl = fetch } = {}) {
+  const payload = pendingRef?.current;
+  if (!payload) return true;
+  if (!sessionId) return false;
+  try {
+    const response = await fetchImpl(`/api/sessions/${sessionId}/attachments`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (!response?.ok) return false;
+    // 请求在途时若出现更新载荷，只清本次成功写入的那一份，绝不误清更新值。
+    if (pendingRef.current === payload) pendingRef.current = null;
+    return true;
+  } catch { return false; }
+}
+
 let nextUploadId = 0;
 export function pendingAttachment(file) {
   nextUploadId += 1;
