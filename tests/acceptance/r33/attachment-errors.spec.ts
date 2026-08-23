@@ -31,23 +31,66 @@ test.describe('r33 attachment failure and queue recovery', () => {
     await expect(page.getByTestId('home-send')).toBeEnabled();
     await page.getByTestId('home-send').click();
 
-    const envelopes = await page.evaluate(() => Object.values(localStorage).flatMap((raw) => {
+    const envelopes = await page.evaluate(() => {
+      const rawQueue = localStorage.getItem('cgui-message-queue');
+      if (rawQueue === null) return [];
       try {
-        const value = JSON.parse(raw);
-        const candidates = Array.isArray(value) ? value : [value];
-        return candidates.filter((candidate) => candidate && typeof candidate === 'object');
+        const queuesBySession: unknown = JSON.parse(rawQueue);
+        if (
+          !queuesBySession
+          || typeof queuesBySession !== 'object'
+          || Array.isArray(queuesBySession)
+        ) {
+          return [];
+        }
+        return Object.values(queuesBySession).flatMap((sessionQueue) => (
+          Array.isArray(sessionQueue) ? sessionQueue : []
+        ));
       } catch {
         return [];
       }
-    }));
-    const queued = envelopes.find((candidate) => {
-      const value = candidate as { text?: unknown; queuedAt?: unknown; opts?: { meta?: unknown } };
-      return typeof value.text === 'string'
-        && value.queuedAt !== undefined
-        && value.opts !== undefined
-        && value.opts.meta !== undefined;
     });
-    expect(queued).toBeDefined();
+    const queued = envelopes.find((candidate) => {
+      if (!candidate || typeof candidate !== 'object') return false;
+      const value = candidate as {
+        text?: unknown;
+        queuedAt?: unknown;
+        opts?: {
+          meta?: {
+            attachments?: unknown;
+            displayText?: unknown;
+          } | null;
+        } | null;
+      };
+      const meta = value.opts?.meta;
+      return typeof value.text === 'string'
+        && value.text.length > 0
+        && typeof value.queuedAt === 'number'
+        && Number.isFinite(value.queuedAt)
+        && value.queuedAt > 0
+        && meta !== null
+        && typeof meta === 'object'
+        && !Array.isArray(meta)
+        && Array.isArray(meta.attachments)
+        && meta.attachments.some((item) => (
+          !!item
+          && typeof item === 'object'
+          && (item as { name?: unknown }).name === 'queued-meta.txt'
+        ))
+        && meta.displayText === '';
+    });
+    expect(queued).toEqual(expect.objectContaining({
+      text: expect.any(String),
+      queuedAt: expect.any(Number),
+      opts: expect.objectContaining({
+        meta: expect.objectContaining({
+          attachments: expect.arrayContaining([
+            expect.objectContaining({ name: 'queued-meta.txt' }),
+          ]),
+          displayText: '',
+        }),
+      }),
+    }));
     await expect(page.getByTestId('message-card').first()).toContainText('queued-meta.txt');
   });
 

@@ -30,7 +30,7 @@ test.describe('r33 plan reconciliation', () => {
       exact: true,
     }).click();
     await expect(plans).toHaveCount(1);
-    await expect(plans).toContainText(firstCardText.trim());
+    await expect.poll(() => plans.innerText()).toContain(firstCardText.trim());
     await expect(plans).toContainText(textFixture('R33_APPROVAL_VISIBLE_TEXT'));
     const observedCounts = await planCardCountSamples(page);
     expect(observedCounts.length).toBeGreaterThan(0);
