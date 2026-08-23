@@ -9,7 +9,7 @@
 //   S2 App.jsx 门控退回 (soloPane || hasSession) → t2 红
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { paneMountsSessionDetail, homeView } from '../../client/src/utils/home.js';
+import { enqueueHomeDraft, paneMountsSessionDetail, homeView } from '../../client/src/utils/home.js';
 
 // t1 门控真值表
 {
@@ -43,10 +43,18 @@ import { paneMountsSessionDetail, homeView } from '../../client/src/utils/home.j
 
 // t4 Home 提交落点:draft 写进 Home 所在的那个 pane(分屏下不串到别的窗格)
 {
-  const app = readFileSync(new URL('../../client/src/App.jsx', import.meta.url), 'utf8');
-  const submit = app.slice(app.indexOf('const submit = () => {'), app.indexOf('const submit = () => {') + 1200);
-  assert.match(submit, /st\.setPaneSession\(tabIndex, _homeDraft\)/, 't4: Home 提交把 draft 写进本 pane');
-  assert.match(submit, /st\.setPaneMessages\(tabIndex, \[\]\)/, 't4: 同 pane 清消息');
+  const calls = [];
+  const draft = { draft: true, projectHash: 'p', projectPath: '/p' };
+  const store = {
+    enqueueMessage: () => ({ queueId: 'q1' }),
+    setPaneSession: (tab, value) => calls.push(['session', tab, value]),
+    setPaneMessages: (tab, value) => calls.push(['messages', tab, value]),
+  };
+  enqueueHomeDraft({ store, sessionKey: 'draft-p-d1', envelope: { text: 'x', queuedAt: 1 }, tabIndex: 1, draft });
+  assert.deepEqual(calls, [
+    ['session', 1, draft],
+    ['messages', 1, []],
+  ], 't4: Home 成功入队后只写入提交所在 pane');
 }
 
 console.log('✓ check-r29-split-pane: 聚焦空窗格进 Home + 未聚焦占位保留 + 新建入口写 null + Home 落本 pane');

@@ -71,9 +71,9 @@ assert.ok(app.includes('goal: { met: false, sentinel: true, condition: _gc.condi
 // 排队中不亮:setOptimisticGoal 必须出现在排队门(流式中直接 return)之后 ——
 // 即"真正起流"路径才亮,排队/reattach 不回。门里调 enqueueMessage,门后才写乐观态。
 const gateIdx = app.indexOf('if (!reattachPid && !opts.forceSend && (streamingRef.current');
-const enqIdx = app.indexOf('enqueueMessage');
+const enqIdx = app.indexOf('enqueueMessage', gateIdx);
 const sendSetIdx = app.indexOf('if (_gc) setOptimisticGoalState(');
-assert.ok(gateIdx >= 0 && enqIdx >= 0 && enqIdx < gateIdx, '排队门含 enqueueMessage(排队确实走此分支)');
+assert.ok(gateIdx >= 0 && enqIdx > gateIdx && enqIdx < sendSetIdx, '排队门含 enqueueMessage(排队确实走此分支)');
 assert.ok(sendSetIdx > gateIdx, 'setOptimisticGoal 在排队门之后(排队中不亮,真正发出才亮)');
 
 // 记录到达后无缝:optimisticLanded 以"历史出现同 condition 且 !met"为切换开关。
