@@ -1,7 +1,7 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Target, Pencil, Trash2, Check, X, EyeOff, ChevronRight } from './Icon.jsx';
 import { confirmDialog } from '../utils/confirmDialog.jsx';
-import { forgetHiddenGoalIdentity, isGoalIdentityHidden, rememberHiddenGoalIdentity, resolveGoalHiddenState } from '../utils/goal.js';
+import { forgetHiddenGoalIdentity, goalIdentity, isGoalIdentityHidden, legacyGoalIdentities, migrateHiddenGoalIdentity, rememberHiddenGoalIdentity, resolveGoalHiddenState } from '../utils/goal.js';
 
 /**
  * goal 常驻条(dsh 同款):渲染在 composer 正上方,会话有 /goal 相关记录时显示。
@@ -19,12 +19,17 @@ export function GoalBar({ goal, onSend, permKey = 'global' }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState('');
   const hideKey = `cgui-goal-hidden:${permKey || 'global'}`;
-  const goalFp = goal ? `${goal.condition}|${goal.met}|${goal.sentinel}` : '';
+  const goalFp = goalIdentity(goal);
+  const legacyGoalFps = legacyGoalIdentities(goal);
   const [hiddenState, setHiddenState] = useState(null);
   let persistedHidden = false;
-  try { persistedHidden = isGoalIdentityHidden(localStorage, hideKey, goalFp); } catch {}
+  try { persistedHidden = isGoalIdentityHidden(localStorage, hideKey, goalFp, legacyGoalFps); } catch {}
   // 本地瞬时态也显式绑定会话+身份；从隐藏 A 切到 B 的首帧同步读取 B，绝不继承 A 的 true。
   const hidden = resolveGoalHiddenState(hiddenState, hideKey, goalFp, persistedHidden);
+  useEffect(() => {
+    if (!goalFp) return;
+    try { migrateHiddenGoalIdentity(localStorage, hideKey, goalFp, legacyGoalFps); } catch {}
+  }, [hideKey, goalFp]); // legacy aliases 由稳定 goalFp 唯一决定，不作为数组依赖制造重复 effect
 
   if (!goal) return null;
   if (hidden) {
@@ -32,7 +37,10 @@ export function GoalBar({ goal, onSend, permKey = 'global' }) {
       <button
         onClick={() => {
           setHiddenState({ key: hideKey, identity: goalFp, hidden: false });
-          try { forgetHiddenGoalIdentity(localStorage, hideKey, goalFp); } catch {}
+          try {
+            forgetHiddenGoalIdentity(localStorage, hideKey, goalFp);
+            for (const legacy of legacyGoalFps) forgetHiddenGoalIdentity(localStorage, hideKey, legacy);
+          } catch {}
         }}
         className="mb-2 w-full flex items-center gap-1.5 px-3 py-1 text-[10px] text-ink-faint hover:text-ink-muted transition-colors"
       >

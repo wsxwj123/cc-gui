@@ -36,6 +36,26 @@ export function migrateOptimisticGoalOwner(state, fromOwnerKey, toOwnerKey) {
 
 export const MAX_HIDDEN_GOAL_IDENTITIES = 32;
 
+export function goalIdentity(goal) {
+  const condition = typeof goal === 'string' ? goal : goal?.condition;
+  const normalized = String(condition || '').trim();
+  return normalized ? `condition:${JSON.stringify(normalized)}` : '';
+}
+
+// 147b213 曾把 met/sentinel 拼进 fingerprint。它们是同一目标生命周期的状态而非身份；
+// 这里列出四种旧值用于无损迁移。CLI 没有贯穿 goal_status 的真实 goal UUID，因此最小
+// 稳定身份只能是 condition；同 condition 重新设定明确沿用原隐藏偏好。
+export function legacyGoalIdentities(goal) {
+  const condition = String((typeof goal === 'string' ? goal : goal?.condition) || '').trim();
+  if (!condition) return [];
+  return [
+    `${condition}|false|true`,
+    `${condition}|false|false`,
+    `${condition}|true|false`,
+    `${condition}|true|true`,
+  ];
+}
+
 // 旧格式是同一 key 下的单个 fingerprint；新格式是 JSON 字符串数组。
 // 读取时同时兼容两者，并从尾部保留最近身份，避免异常/旧数据无限膨胀。
 export function parseHiddenGoalIdentities(raw, limit = MAX_HIDDEN_GOAL_IDENTITIES) {
@@ -61,8 +81,28 @@ export function readHiddenGoalIdentities(storage, key, limit = MAX_HIDDEN_GOAL_I
   try { return parseHiddenGoalIdentities(storage.getItem(key), limit); } catch { return []; }
 }
 
-export function isGoalIdentityHidden(storage, key, identity) {
-  return !!identity && readHiddenGoalIdentities(storage, key).includes(identity);
+export function isGoalIdentityHidden(storage, key, identity, aliases = []) {
+  if (!identity) return false;
+  const hidden = readHiddenGoalIdentities(storage, key);
+  return [identity, ...(Array.isArray(aliases) ? aliases : [])].some((value) => hidden.includes(value));
+}
+
+export function migrateHiddenGoalIdentity(storage, key, identity, aliases = [], limit = MAX_HIDDEN_GOAL_IDENTITIES) {
+  if (!storage || !key || !identity) return false;
+  const aliasSet = new Set(Array.isArray(aliases) ? aliases : []);
+  const previous = readHiddenGoalIdentities(storage, key, limit);
+  if (!previous.some((value) => aliasSet.has(value))) return false;
+  const next = [];
+  for (const value of previous) {
+    const normalized = aliasSet.has(value) ? identity : value;
+    if (!next.includes(normalized)) next.push(normalized);
+  }
+  const bounded = next.slice(-Math.max(1, Number(limit) || MAX_HIDDEN_GOAL_IDENTITIES));
+  try {
+    const serialized = JSON.stringify(bounded);
+    storage.setItem(key, serialized);
+    return storage.getItem(key) === serialized;
+  } catch { return false; }
 }
 
 // 点击隐藏/显示后的本地瞬时态也必须带会话+身份；切到另一目标的首帧不能沿用旧 boolean。
