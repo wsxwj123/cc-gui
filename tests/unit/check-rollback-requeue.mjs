@@ -59,8 +59,10 @@ const app = readFileSync(new URL('../../client/src/App.jsx', import.meta.url), '
 // 保留 queueId → 需求8(回滚重发不双入队)不受影响。除这两处外新增仍须重新论证。
 assert.equal((app.match(/enqueueMessage\(/g) || []).length, 1,
   'App.jsx 只允许 handleSend 入队门内这一处直接调用;Home 必须走 enqueueHomeDraft 编排入口');
-assert.match(app, /enqueueHomeDraft\(\{[\s\S]*?sessionKey: queueKeyFor\(_homeDraft\),/,
-  'Home 必须把带 draftId 的 queueKeyFor(draft) 交给原子编排入口');
+assert.match(app, /const homeDraftArgs = \{[\s\S]*?sessionKey: queueKeyFor\(_homeDraft\),/,
+  'Home 必须把带 draftId 的 queueKeyFor(draft) 收敛进原子编排参数');
+assert.match(app, /enqueueHomeDraft\(homeDraftArgs\)/,
+  '普通 Home 发送必须走原子编排入口');
 assert.match(app, /if \(!reattachPid && !opts\.forceSend && \(streamingRef\.current \|\| backgroundPidRef\.current\)\) \{/,
   '入队门必须豁免 forceSend(回滚/重做重发绝不入队)');
 // 守卫2:重发通道恒 forceSend

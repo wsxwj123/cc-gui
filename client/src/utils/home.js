@@ -114,6 +114,30 @@ export function enqueueHomeDraft({ store, sessionKey, envelope, tabIndex, draft 
   return queued;
 }
 
+export function homeDraftFromOrphan(item) {
+  const meta = item?.opts?.meta;
+  const restoredAttachments = Array.isArray(meta?.attachments)
+    ? meta.attachments.filter((attachment) => attachment?.path).map((attachment, index) => ({
+      ...attachment,
+      id: attachment.id || `restored-${item?.queueId || 'orphan'}-${index}`,
+      status: 'uploaded',
+    }))
+    : [];
+  return {
+    text: typeof meta?.displayText === 'string' ? meta.displayText : String(item?.text || ''),
+    attachments: restoredAttachments,
+  };
+}
+
+// 孤儿“填入”只是复制到编辑态；重发时先完成新队列持久化与 pane 建立，再删除旧副本。
+// 两步之间崩溃最多留下重复副本，不存在零持久副本窗口。
+export function enqueueRestoredHomeDraft({ store, orphanQueueKey, orphanQueueId, ...homeArgs }) {
+  const queued = enqueueHomeDraft({ store, ...homeArgs });
+  if (!queued) return null;
+  if (orphanQueueKey && orphanQueueId) store.takeOrphanDraftMessage(orphanQueueKey, orphanQueueId);
+  return queued;
+}
+
 /**
  * 皮肤自定义读取接口(占位):r11-③ 皮肤系统接管数据来源后往
  * window.__cguiHomeCustom 写 { icon?: string(资源 URL), greeting?: string }。

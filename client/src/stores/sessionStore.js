@@ -374,7 +374,14 @@ const initialOrphanDraftQueues = (() => {
   }
   return out;
 })();
-const persistOrphanDraftQueues = (map) => writeLs(ORPHAN_QUEUE_STORAGE_KEY, map);
+const persistOrphanDraftQueues = (map, verify = false) => {
+  if (typeof localStorage === 'undefined') return true;
+  try {
+    const serialized = JSON.stringify(map);
+    localStorage.setItem(ORPHAN_QUEUE_STORAGE_KEY, serialized);
+    return !verify || localStorage.getItem(ORPHAN_QUEUE_STORAGE_KEY) === serialized;
+  } catch { return false; }
+};
 persistOrphanDraftQueues(initialOrphanDraftQueues);
 
 const persistQueueSnapshot = (messageQueue, verify = false) => {
@@ -589,15 +596,16 @@ export const useStore = create((set, get) => ({
     set((s) => {
       const entry = s.orphanDraftQueues?.[queueKey];
       if (!entry) return s;
+      let candidate = null;
       const items = (entry.items || []).filter((it) => {
-        if (!taken && it?.queueId === queueId) { taken = it; return false; }
+        if (!candidate && it?.queueId === queueId) { candidate = it; return false; }
         return true;
       });
       const next = { ...s.orphanDraftQueues };
       if (items.length) next[queueKey] = { ...entry, items };
       else delete next[queueKey];
-      if (!taken) return s;
-      persistOrphanDraftQueues(next);
+      if (!candidate || !persistOrphanDraftQueues(next, true)) return s;
+      taken = candidate;
       return { orphanDraftQueues: next };
     });
     return taken;

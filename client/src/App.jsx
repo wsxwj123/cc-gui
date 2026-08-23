@@ -76,7 +76,7 @@ import { extractMcpServerIssues, formatMcpServerNotice } from './utils/mcpStatus
 import { classifyRepairOutcome, classifyCheckOutcome, upsertRepairHint, removeRepairHint, loadRepairHints, persistRepairHints } from './utils/repairFlow.js';
 import { autoCompactTransition } from './utils/compactStatus.js';
 import { THEME_TABS, readThemeTab, writeThemeTab } from './utils/themeTabs.js';
-import { homeView, pickHomeProject, buildHomeDraft, enqueueHomeDraft, homeGreetingParts, readHomeCustom, readHiddenHashes, visibleHomeProjects, paneMountsSessionDetail } from './utils/home.js';
+import { homeView, pickHomeProject, buildHomeDraft, enqueueHomeDraft, enqueueRestoredHomeDraft, homeDraftFromOrphan, homeGreetingParts, readHomeCustom, readHiddenHashes, visibleHomeProjects, paneMountsSessionDetail } from './utils/home.js';
 import { subscribeSkin, getSkinVersion, getSkinState, reconcileSkinOnBoot, watchThemeForSkin } from './utils/skins.js';
 import { resolveSessionDot, completionTracker, subscribeDots, getDotsVersion, RUN_MATRIX_CELLS, runCellDelayMs } from './utils/sessionDots.js';
 import { seedNewSessionDefaults } from './components/UnifiedSidebar.jsx';
@@ -1752,6 +1752,7 @@ function HomeState({ tabIndex = 0 }) {
   const [text, setText] = useState('');
   const [attachments, setAttachments] = useState([]);
   const [attachmentError, setAttachmentError] = useState('');
+  const [restoredOrphan, setRestoredOrphan] = useState(null);
   const homeFileInputRef = useRef(null);
   // r26-D13:问候时段词随时间刷新 —— Home 挂着过夜,原来只在渲染时取小时,
   // 早上还显示「晚上好」。低频定时器(每分钟 tick,跨时段才引起文案变化)。
@@ -1799,9 +1800,12 @@ function HomeState({ tabIndex = 0 }) {
         .map((item, i) => ({ queueKey, item, rowKey: item?.queueId || `${queueKey}#${i}` })));
   }, [orphanDraftQueues, project?.hash]);
   const fillOrphan = (queueKey, item) => {
-    // 一次只填一条,填入即从孤儿表摘除(防连点重复填入)。
-    const taken = useStore.getState().takeOrphanDraftMessage(queueKey, item?.queueId);
-    if (taken?.text) setText(taken.text);
+    // 复制到 Home 编辑态但保留持久孤儿；新队列成功落盘后才删旧副本。
+    const restored = homeDraftFromOrphan(item);
+    setText(restored.text);
+    setAttachments(restored.attachments);
+    setAttachmentError('');
+    setRestoredOrphan({ queueKey, queueId: item?.queueId });
   };
   const recent = useMemo(() => [...visibleProjects]
     .sort((a, b) => (b.lastActivity ? new Date(b.lastActivity).getTime() : -1)
@@ -1847,7 +1851,7 @@ function HomeState({ tabIndex = 0 }) {
     const _homeMode = st.permissionMode || 'default';
     st.setPermissionMode(_homeMode, queueKeyFor(_homeDraft));
     // 队列信封是首页与正常输入框共用的公开形态；先持久化成功，才能切换 pane。
-    const queued = enqueueHomeDraft({
+    const homeDraftArgs = {
       store: st,
       sessionKey: queueKeyFor(_homeDraft),
       envelope: {
@@ -1857,7 +1861,14 @@ function HomeState({ tabIndex = 0 }) {
       },
       tabIndex,
       draft: _homeDraft,
-    });
+    };
+    const queued = restoredOrphan
+      ? enqueueRestoredHomeDraft({
+        ...homeDraftArgs,
+        orphanQueueKey: restoredOrphan.queueKey,
+        orphanQueueId: restoredOrphan.queueId,
+      })
+      : enqueueHomeDraft(homeDraftArgs);
     if (!queued) {
       setAttachmentError('无法保存待发消息：本地存储空间不足。附件仍保留，请移除部分附件后重试。');
       return;
