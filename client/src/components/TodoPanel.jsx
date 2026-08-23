@@ -11,7 +11,7 @@ import { readTodoCollapsed, writeTodoCollapsed } from '../utils/todoCollapse.js'
  * 两个按钮:折叠(只留"任务清单"标题行 + "下一条")/ 隐藏(整块消失,直到下次任务清单
  * 更新)。任务全部完成时自动折叠。
  */
-export function TodoPanel({ todos, plan = '', isStreaming = false }) {
+export function TodoPanel({ todos, plan = '', isStreaming = false, planKey = 'global' }) {
   const hasTodos = Array.isArray(todos) && todos.length > 0;
   const cleanPlan = String(plan || '').trim();
   if (!hasTodos && !cleanPlan) return null;
@@ -19,7 +19,7 @@ export function TodoPanel({ todos, plan = '', isStreaming = false }) {
   // 隐藏清单不影响计划,隐藏计划不影响清单。
   return (
     <>
-      {cleanPlan && <PlanBlock plan={cleanPlan} />}
+      {cleanPlan && <PlanBlock plan={cleanPlan} planKey={planKey} />}
       {hasTodos && <TodoChecklist todos={todos} isStreaming={isStreaming} />}
     </>
   );
@@ -114,11 +114,32 @@ function TodoChecklist({ todos, isStreaming = false }) {
  * 下次批准新计划(文本不同)自动恢复,与 TodoChecklist 的 hiddenSig 同一套语义。
  * markdown 只在展开时渲染,避免长计划在折叠态也参与输入区的高频重渲。
  */
-function PlanBlock({ plan }) {
+function PlanBlock({ plan, planKey = 'global' }) {
+  const hideKey = `cgui-plan-hidden:${planKey || 'global'}`;
   const [open, setOpen] = useState(false);
-  const [hiddenPlan, setHiddenPlan] = useState(null);
+  const [hiddenPlan, setHiddenPlan] = useState(() => {
+    try { return localStorage.getItem(hideKey) === plan ? plan : null; } catch { return null; }
+  });
+  // 持久化隐藏状态:同一条计划切会话仍保持隐藏;新计划到达时自动显示。
+  useEffect(() => {
+    let saved = null;
+    try { saved = localStorage.getItem(hideKey); } catch {}
+    if (saved === plan) setHiddenPlan(plan);
+    else if (saved) {
+      try { localStorage.removeItem(hideKey); } catch {}
+      setHiddenPlan(null);
+    }
+  }, [hideKey, plan]);
+  const hidePlan = () => {
+    setHiddenPlan(plan);
+    try { localStorage.setItem(hideKey, plan); } catch {}
+  };
+  const showPlan = () => {
+    setHiddenPlan(null);
+    try { localStorage.removeItem(hideKey); } catch {}
+  };
   // 已隐藏:留一条可点"显示"小条恢复;批准新计划(plan 变)仍自动恢复完整卡。
-  if (hiddenPlan === plan) return <ShowBar label="显示已批准的计划" onClick={() => setHiddenPlan(null)} />;
+  if (hiddenPlan === plan) return <ShowBar label="显示已批准的计划" onClick={showPlan} />;
   return (
     <div data-cgui="todo-panel" className="mb-2 rounded-panel border border-canvas-deep bg-canvas-warm/60 backdrop-blur-soft overflow-hidden">
       <div className="w-full flex items-center gap-2 px-3 py-2">
@@ -137,7 +158,7 @@ function PlanBlock({ plan }) {
           )}
         </button>
         <button
-          onClick={() => setHiddenPlan(plan)}
+          onClick={hidePlan}
           title="隐藏计划(批准新计划时自动再现)"
           className="shrink-0 p-1 rounded hover:bg-canvas-deep/40 text-ink-faint hover:text-ink-muted transition-colors"
         >

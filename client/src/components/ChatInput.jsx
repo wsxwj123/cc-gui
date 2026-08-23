@@ -1183,7 +1183,7 @@ export function ChatInput({ onSend, onStop, onStopBackground, onAccelerate, canS
         {/* 任务清单 — 紧贴输入框上方(同一列内),作为输入框的附着条而非独立悬浮面板。
             折叠/隐藏/全完成自动折叠见 TodoPanel。key=permKey:折叠/隐藏是组件本地态,按会话
             重挂以免跨会话串扰(每个会话独立的折叠/隐藏状态)。 */}
-        <TodoPanel key={`todo-${permKey || 'global'}`} todos={todos} plan={plan} isStreaming={isStreaming || agentsWorking || bgWorking} />
+        <TodoPanel key={`todo-${permKey || 'global'}`} planKey={permKey || 'global'} todos={todos} plan={plan} isStreaming={isStreaming || agentsWorking || bgWorking} />
 
         {/* 输入预测(A):回合末模型预测的下一条输入。点击建议文本直接发送;
             铅笔=填入输入框编辑;X=忽略。新回合开始/发送时上层自动清掉。 */}
