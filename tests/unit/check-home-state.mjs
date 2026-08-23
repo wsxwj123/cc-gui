@@ -6,7 +6,7 @@
 //   S2 homeView 删零项目分支(恒 home)→ t1 红
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { homeView, pickHomeProject, buildHomeDraft, homeGreeting } from '../../client/src/utils/home.js';
+import { homeView, pickHomeProject, buildHomeDraft, enqueueHomeDraft, homeGreeting } from '../../client/src/utils/home.js';
 
 // t1 显隐判定矩阵:选中会话=会话页;无会话+有项目=Home;无会话+零项目=EmptyState
 {
@@ -100,7 +100,7 @@ import { homeView, pickHomeProject, buildHomeDraft, homeGreeting } from '../../c
   assert.match(app, /<HomeState tabIndex=\{tabIndex\} \/>/, 't5: Home 挂在无会话分支');
   assert.match(app, /<EmptyState tabIndex=\{tabIndex\} \/>/, 't5: 零项目 EmptyState 保留');
   assert.match(app, /seedNewSessionDefaults\(project\.hash, _did\)/, 't5: 与侧栏创建点同一 seed 链路;r31 起 seed 带 draftId(键落 draft-<hash>-<draftId>)');
-  assert.match(app, /enqueueMessage\(queueKeyFor\(_homeDraft\)/, 't5: 发送经 draft 队列(既有排空链路,零旁路);r26-B5 起键带 draftId(queueKeyFor)');
+  assert.match(app, /enqueueHomeDraft\(\{/, 't5: Home 发送经可白盒验证的队列编排入口');
   assert.match(app, /buildHomeDraft\(project, _did\)/, 't5: draft 经纯函数(cwd 绑定)创建;r31 与 seed 共用同一 draftId(三键对齐)');
   // r24 接线:t2b 的优先级只在【真把聚焦窗格的项目喂进去】时才有意义 —— 这一句没了,
   // focusedProjectHash 恒 undefined,纯函数测试照样全绿而功能是死的。
@@ -113,6 +113,25 @@ import { homeView, pickHomeProject, buildHomeDraft, homeGreeting } from '../../c
   assert.match(settings, /set-restore-last/, 't5: 设置项已注册进 session tab 索引');
   const sidebar = readFileSync(new URL('../../client/src/components/UnifiedSidebar.jsx', import.meta.url), 'utf8');
   assert.match(sidebar, /export const seedNewSessionDefaults/, 't5: seed 提为模块级导出(单一实现)');
+}
+
+// t6 Home 首发原子顺序:队列持久化成功后才挂 pane;失败时 UI 会话保持原位。
+{
+  const calls = [];
+  const draft = buildHomeDraft({ hash: 'h', path: '/p' }, 'd1');
+  const envelope = { text: 'hello', queuedAt: 1, opts: { meta: { attachments: [] } } };
+  const store = {
+    enqueueMessage: (key, value) => { calls.push(['enqueue', key, value]); return { ...value, queueId: 'q1' }; },
+    setPaneSession: (tab, value) => calls.push(['pane', tab, value]),
+    setPaneMessages: (tab, value) => calls.push(['messages', tab, value]),
+  };
+  assert.equal(enqueueHomeDraft({ store, sessionKey: 'draft-h-d1', envelope, tabIndex: 0, draft })?.queueId, 'q1');
+  assert.deepEqual(calls.map(([name]) => name), ['enqueue', 'pane', 'messages'], 't6: enqueue 必须先于 pane');
+
+  calls.length = 0;
+  store.enqueueMessage = () => null;
+  assert.equal(enqueueHomeDraft({ store, sessionKey: 'draft-h-d1', envelope, tabIndex: 0, draft }), null);
+  assert.deepEqual(calls, [], 't6: quota/持久化失败不挂 pane');
 }
 
 console.log('check-home-state: all passed');

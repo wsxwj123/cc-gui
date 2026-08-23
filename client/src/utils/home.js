@@ -103,6 +103,17 @@ export function buildHomeDraft(project, draftId) {
   };
 }
 
+// 首页首条必须先成为可恢复的队列信封，成功后才允许 pane 换绑；quota 失败返回 null，
+// pane 与附件编辑态都保持原位。store 由调用方注入，顺序与失败短路可直接白盒验证。
+export function enqueueHomeDraft({ store, sessionKey, envelope, tabIndex, draft }) {
+  if (!store || !sessionKey || !draft || !envelope) return null;
+  const queued = store.enqueueMessage(sessionKey, envelope);
+  if (!queued) return null;
+  store.setPaneSession(tabIndex, draft);
+  store.setPaneMessages(tabIndex, []);
+  return queued;
+}
+
 /**
  * 皮肤自定义读取接口(占位):r11-③ 皮肤系统接管数据来源后往
  * window.__cguiHomeCustom 写 { icon?: string(资源 URL), greeting?: string }。

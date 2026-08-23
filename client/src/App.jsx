@@ -76,10 +76,12 @@ import { extractMcpServerIssues, formatMcpServerNotice } from './utils/mcpStatus
 import { classifyRepairOutcome, classifyCheckOutcome, upsertRepairHint, removeRepairHint, loadRepairHints, persistRepairHints } from './utils/repairFlow.js';
 import { autoCompactTransition } from './utils/compactStatus.js';
 import { THEME_TABS, readThemeTab, writeThemeTab } from './utils/themeTabs.js';
-import { homeView, pickHomeProject, buildHomeDraft, homeGreetingParts, readHomeCustom, readHiddenHashes, visibleHomeProjects, paneMountsSessionDetail } from './utils/home.js';
+import { homeView, pickHomeProject, buildHomeDraft, enqueueHomeDraft, homeGreetingParts, readHomeCustom, readHiddenHashes, visibleHomeProjects, paneMountsSessionDetail } from './utils/home.js';
 import { subscribeSkin, getSkinVersion, getSkinState, reconcileSkinOnBoot, watchThemeForSkin } from './utils/skins.js';
 import { resolveSessionDot, completionTracker, subscribeDots, getDotsVersion, RUN_MATRIX_CELLS, runCellDelayMs } from './utils/sessionDots.js';
 import { seedNewSessionDefaults } from './components/UnifiedSidebar.jsx';
+import { PendingAttachmentList } from './components/PendingAttachmentList.jsx';
+import { attachmentBlockReason, buildAttachmentMessage, pendingAttachment, uploadAttachmentFile } from './utils/attachments.js';
 import {
   FolderOpen, MessageSquare, ChevronLeft, ChevronRight, ChevronDown,
   Search, Hash, Layers, BarChart3, ArrowLeft, Plus,
@@ -88,7 +90,7 @@ import {
   Archive, ArchiveRestore, Trash2, EyeOff, Columns2, Smartphone, Pencil, Type, Palette,
   Menu, SquarePen, Gauge, Cpu, CheckCircle2, BookText, Sparkles, HelpCircle, Pin,
   Download, ClipboardCopy, LayoutGrid, MoreHorizontal, Star, Target,
-  Image as ImageIcon,
+  Image as ImageIcon, Paperclip,
 } from './components/Icon.jsx';
 import { buildFontEntries, groupFonts, detectFonts, platformCandidates, queryLocalFontFamilies } from './utils/systemFonts.js';
 import { copyText } from './utils/clipboard.js';
@@ -1748,6 +1750,9 @@ function HomeState({ tabIndex = 0 }) {
   useSyncExternalStore(subscribeSkin, getSkinVersion, getSkinVersion);
   const [chosenHash, setChosenHash] = useState(null);
   const [text, setText] = useState('');
+  const [attachments, setAttachments] = useState([]);
+  const [attachmentError, setAttachmentError] = useState('');
+  const homeFileInputRef = useRef(null);
   // r26-D13:问候时段词随时间刷新 —— Home 挂着过夜,原来只在渲染时取小时,
   // 早上还显示「晚上好」。低频定时器(每分钟 tick,跨时段才引起文案变化)。
   const [hour, setHour] = useState(() => new Date().getHours());
@@ -1802,9 +1807,34 @@ function HomeState({ tabIndex = 0 }) {
     .sort((a, b) => (b.lastActivity ? new Date(b.lastActivity).getTime() : -1)
       - (a.lastActivity ? new Date(a.lastActivity).getTime() : -1))
     .slice(0, 12), [visibleProjects]);
+  const uploadHomeAttachment = async (file, existingId = null) => {
+    const pending = existingId
+      ? { id: existingId, file, name: file?.name || 'file', bytes: file?.size || 0, status: 'uploading' }
+      : pendingAttachment(file);
+    setAttachmentError('');
+    setAttachments((prev) => existingId
+      ? prev.map((item) => (item.id === existingId ? pending : item))
+      : [...prev, pending]);
+    try {
+      const uploaded = await uploadAttachmentFile(file);
+      setAttachments((prev) => prev.map((item) => (
+        item.id === pending.id ? { ...uploaded, id: pending.id, file } : item
+      )));
+    } catch (error) {
+      const message = `上传失败：${error.message || '未知错误'}`;
+      setAttachmentError(message);
+      setAttachments((prev) => prev.map((item) => (
+        item.id === pending.id ? { ...pending, status: 'failed', error: message } : item
+      )));
+    }
+  };
+  const removeHomeAttachment = (attachment) => {
+    setAttachments((prev) => prev.filter((item) => item !== attachment));
+    setAttachmentError('');
+  };
   const submit = () => {
-    const t = text.trim();
-    if (!t || !project) return;
+    const built = buildAttachmentMessage(text, attachments);
+    if (!built || !project) return;
     const st = useStore.getState();
     // r31:先领 draftId 再 seed —— seed 要写到 `draft-<hash>-<draftId>`(窗格 permKey)才被
     // 读到,否则落到旧形态 `draft-<hash>` 孤儿键,新建会话不继承思考强度。
@@ -1816,9 +1846,18 @@ function HomeState({ tabIndex = 0 }) {
     // 首页权限模式选择器(无会话时操作的是全局 mode)落到这条新 draft 的 permKey 上。
     const _homeMode = st.permissionMode || 'default';
     st.setPermissionMode(_homeMode, queueKeyFor(_homeDraft));
-    st.enqueueMessage(queueKeyFor(_homeDraft), { text: t, queuedAt: Date.now() });
-    st.setPaneSession(tabIndex, _homeDraft); // cwd=所选项目
-    st.setPaneMessages(tabIndex, []);
+    // 队列信封是首页与正常输入框共用的公开形态；先持久化成功，才能切换 pane。
+    const queued = enqueueHomeDraft({
+      store: st,
+      sessionKey: queueKeyFor(_homeDraft),
+      envelope: { text: built.prompt, queuedAt: Date.now(), opts: { meta: built.meta } },
+      tabIndex,
+      draft: _homeDraft,
+    });
+    if (!queued) {
+      setAttachmentError('无法保存待发消息：本地存储空间不足。附件仍保留，请移除部分附件后重试。');
+      return;
+    }
   };
   const browse = () => {
     setProjOpen(false);
@@ -1876,7 +1915,27 @@ function HomeState({ tabIndex = 0 }) {
           </div>
         )}
         {/* r11-p3-1:聚焦零装饰(用户拍板)——无 focus-within 变色,聚焦与否外观一致。 */}
+        <PendingAttachmentList
+          attachments={attachments}
+          onRemove={removeHomeAttachment}
+          onRetry={(attachment) => uploadHomeAttachment(attachment.file, attachment.id)}
+        />
+        {attachmentError && (
+          <div data-testid="attachment-error" role="alert" className="w-full mb-2 px-2 text-[11px] text-error font-body leading-snug">
+            {attachmentError}
+          </div>
+        )}
         <div className="w-full rounded-lg border border-canvas-deep/70 bg-canvas-warm/60">
+          <input
+            ref={homeFileInputRef}
+            type="file"
+            multiple
+            className="hidden"
+            onChange={(event) => {
+              for (const file of Array.from(event.target.files || [])) uploadHomeAttachment(file);
+              event.target.value = '';
+            }}
+          />
           <textarea
             data-cgui="home-input"
             value={text}
@@ -1891,8 +1950,19 @@ function HomeState({ tabIndex = 0 }) {
           />
           <div className="flex items-center gap-2 px-2 pb-2">
             <PermissionModeSelector />
+            <button
+              type="button"
+              data-testid="home-attachment-add"
+              onClick={() => homeFileInputRef.current?.click()}
+              className="h-7 w-7 rounded-md hover:bg-black/5 text-ink-muted hover:text-accent flex items-center justify-center transition-colors"
+              title="添加附件（可多选）"
+              aria-label="添加附件"
+            >
+              <Paperclip size={13} />
+            </button>
             <div ref={projBtnRef} className="relative min-w-0">
               <button
+                data-testid="project-selector"
                 onClick={() => setProjOpen((v) => !v)}
                 className="flex items-center gap-1.5 px-2 py-1 rounded-md border border-canvas-deep/70 hover:bg-canvas-warm text-[12px] text-ink-soft font-body min-w-0 transition-colors"
                 title={project ? formatPath(project.path) : '选择项目'}
@@ -1907,6 +1977,8 @@ function HomeState({ tabIndex = 0 }) {
                 {recent.map((p) => (
                   <button
                     key={p.hash}
+                    role="option"
+                    aria-selected={project?.hash === p.hash}
                     onClick={() => { setChosenHash(p.hash); setProjOpen(false); }}
                     className={`w-full text-left px-2.5 py-1.5 text-[12px] font-body truncate hover:bg-canvas-warm ${project?.hash === p.hash ? 'text-accent' : 'text-ink-soft'}`}
                     title={formatPath(p.path)}
@@ -1920,8 +1992,9 @@ function HomeState({ tabIndex = 0 }) {
               </AnchoredPopover>
             </div>
             <button
+              data-testid="home-send"
               onClick={submit}
-              disabled={!text.trim() || !project}
+              disabled={!!attachmentBlockReason(attachments) || (!text.trim() && attachments.length === 0) || !project}
               className="ml-auto btn-accent px-3 py-1.5 text-[12.5px] font-body disabled:opacity-40"
             >
               发送
@@ -3948,7 +4021,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   useEffect(() => { steerCurrentTurnRef.current = steerCurrentTurn; }, [steerCurrentTurn]);
 
   const handleSend = useCallback(async (prompt, opts = {}) => {
-    const { reattachPid, appendSystemPrompt, hiddenUserMessage = false, meta } = opts;
+    const { reattachPid, appendSystemPrompt, hiddenUserMessage = false, meta, onEnqueueFailure } = opts;
     // Intercept the /remote-control (alias /rc) command. It CANNOT be sent
     // through `claude -p` — slash commands are interactive-only and the CLI
     // rejects them ("isn't available in this environment"). Instead we launch
@@ -4033,7 +4106,15 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     // forceSend(回滚/重做的重发 = 有意打断替换)照旧连这道门都不进。
     if (!reattachPid && !opts.forceSend && (streamingRef.current || backgroundPidRef.current)) {
       const queuedAt = Date.now();
-      const queued = useStore.getState().enqueueMessage(sessionQueueKey, { text: prompt, queuedAt, hidden: !!hiddenUserMessage, opts });
+      const queueOpts = { ...opts };
+      delete queueOpts.onEnqueueFailure;
+      const queued = useStore.getState().enqueueMessage(sessionQueueKey, { text: prompt, queuedAt, hidden: !!hiddenUserMessage, opts: queueOpts });
+      if (!queued) {
+        const message = '无法保存待发消息：本地存储空间不足。附件与草稿仍保留，请处理后重试。';
+        onEnqueueFailure?.(message);
+        setProviderSwitchNotice({ text: message });
+        return;
+      }
       // Cmd/Ctrl+Enter:先入队保底，再调用 CLI/SDK 的实时输入队列。连接中、回合刚收尾或
       // provider 不支持时，明确拒绝才回 queued；任何模糊结果都成为持久 barrier。
       if (opts.steer && !hiddenUserMessage) {

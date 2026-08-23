@@ -10,6 +10,8 @@ import { AnchoredPopover } from './SessionSelectors.jsx';
 import { isSteered, firstSteerableIndex, isSteerBarrier } from '../utils/steerQueue.js';
 import { resolveSelectorModel } from '../utils/routing.js';
 import { effortCapsFor, effortAllowed, effortMemoryKey, useEffortFallback } from '../utils/effortCaps.js';
+import { attachmentBlockReason, buildAttachmentMessage, pendingAttachment, uploadAttachmentFile } from '../utils/attachments.js';
+import { PendingAttachmentList } from './PendingAttachmentList.jsx';
 
 // Permission mode metadata — mirrors `claude --permission-mode <choice>`。
 // P2.1:文案对齐官方六档语义(RESEARCH-mode-semantics §④b);bypass 中文名保持「放任」。
@@ -70,7 +72,7 @@ export function PermissionModeSelector({ permKey, tourAnchor = false }) {
 
   return (
     <div ref={wrapRef} className="relative" data-cgui="mode-selector" data-tour={tourAnchor ? 'mode-selector' : undefined}>
-      <button onClick={() => setOpen(!open)}
+      <button onClick={() => setOpen(!open)} data-testid="permission-mode-selector"
         className="flex items-center gap-1 px-2 py-1 rounded-md hover:bg-black/5 transition-colors"
         title={`权限模式: ${current.label} — ${current.desc}`}>
         <Icon size={12} className={current.tone} />
@@ -85,6 +87,8 @@ export function PermissionModeSelector({ permKey, tourAnchor = false }) {
           const MIcon = meta.icon;
           return (
             <button key={m}
+              role="option"
+              aria-selected={permissionMode === m}
               onClick={() => {
                 // plan 与 agent 不再互斥:内置 agent 的 tools 已含 ExitPlanMode,
                 // agent 主控本体在 plan 模式下能正常出计划卡片(headless 实证)。
@@ -261,6 +265,7 @@ export function ChatInput({ onSend, onStop, onStopBackground, onAccelerate, canS
   const [isAnthropic, setIsAnthropic] = useState(true);
   // Pending attachments: { kind, path, preview?, name, bytes }
   const [attachments, setAttachments] = useState([]);
+  const [attachmentError, setAttachmentError] = useState('');
   const [dragging, setDragging] = useState(false);
   const [zoomImage, setZoomImage] = useState(null); // #7 单击放大的图片附件
   // @ 引用选择器(Tutti 式上下文引用):光标前出现 `@xxx` 时弹出,文件 tab 插入
@@ -493,44 +498,25 @@ export function ChatInput({ onSend, onStop, onStopBackground, onAccelerate, canS
     return () => window.removeEventListener('cgui:composer-clear', onClear);
   }, [permKey, paneId, claimDraft?.claimId, claimDraft?.sendable]);
 
-  // Read a File/Blob as a data URL.
-  const fileToDataUrl = (file) => new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(reader.result);
-    reader.onerror = () => reject(reader.error);
-    reader.readAsDataURL(file);
-  });
-
-  const uploadAttachment = async (file) => {
+  const uploadAttachment = async (file, existingId = null) => {
+    const pending = existingId
+      ? { id: existingId, file, name: file?.name || 'file', bytes: file?.size || 0, status: 'uploading' }
+      : pendingAttachment(file);
+    setAttachmentError('');
+    setAttachments((prev) => existingId
+      ? prev.map((item) => (item.id === existingId ? pending : item))
+      : [...prev, pending]);
     try {
-      // CN-3:把 File 当原始 body 直接发(流式,不经 base64/JSON)——避开 25mb 限制 + 内存膨胀,
-      // 大文件也能传。mime 走 Content-Type、文件名走 X-Upload-Name 头。
-      const res = await fetch('/api/upload', {
-        method: 'POST',
-        headers: {
-          'Content-Type': file.type || 'application/octet-stream',
-          'X-Upload-Name': encodeURIComponent(file.name || 'file'),
-        },
-        body: file,
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        confirmDialog('上传失败: ' + (data.error || res.status));
-        return;
-      }
-      // 仅图片生成缩略预览(小);大文件/非图片不读 dataUrl,免内存膨胀。
-      const isImage = data.kind === 'image' || file.type.startsWith('image/');
-      let preview = null;
-      if (isImage) { try { preview = await fileToDataUrl(file); } catch {} }
-      setAttachments((prev) => [...prev, {
-        kind: data.kind || (isImage ? 'image' : 'text'),
-        path: data.path,
-        preview,
-        name: file.name || data.path.split(/[/\\]+/).pop(),
-        bytes: data.bytes,
-      }]);
+      const uploaded = await uploadAttachmentFile(file);
+      setAttachments((prev) => prev.map((item) => (
+        item.id === pending.id ? { ...uploaded, id: pending.id, file } : item
+      )));
     } catch (err) {
-      confirmDialog('上传失败: ' + err.message);
+      const message = `上传失败：${err.message || '未知错误'}`;
+      setAttachmentError(message);
+      setAttachments((prev) => prev.map((item) => (
+        item.id === pending.id ? { ...pending, status: 'failed', error: message } : item
+      )));
     }
   };
 
@@ -566,8 +552,9 @@ export function ChatInput({ onSend, onStop, onStopBackground, onAccelerate, canS
     e.target.value = '';
   };
 
-  const removeAttachment = (path) => {
-    setAttachments((prev) => prev.filter((a) => a.path !== path));
+  const removeAttachment = (attachment) => {
+    setAttachments((prev) => prev.filter((item) => item !== attachment));
+    setAttachmentError('');
   };
 
   const handleTextChange = (e) => {
@@ -658,31 +645,24 @@ export function ChatInput({ onSend, onStop, onStopBackground, onAccelerate, canS
   }, [text, filteredCommands.length]);
 
   const handleSend = (submitOpts = {}) => {
-    const trimmed = text.trim();
-    // Allow send if there's text OR attachments (so "just describe this image" works).
-    if (!trimmed && attachments.length === 0) return;
+    const built = buildAttachmentMessage(text, attachments);
+    if (!built) return;
     if (disabled || rcLocked) return;
-    // Append attachment paths to the prompt using Claude Code's file-reference
-    // shape. It lets the CLI decide whether a path is text, image, PDF, etc.
-    const attachmentRefs = attachments.length > 0
-      ? '\n\n附件:\n' + attachments.map((a) => (
-        `@${a.path}`
-      )).join('\n')
-      : '';
-    const outbound = (trimmed || '请查看这些附件') + attachmentRefs;
-    if (trimmed) saveHistoryEntry(trimmed);
-    // L3: 气泡显示 trimmed(纯文本)+ 附件卡片;CLI 收 outbound(带 @path)。
-    // attachments 经 meta 传到消息记录,MessageBubble 据此渲染缩略图/文件名。
-    const meta = attachments.length > 0
-      ? { attachments: attachments.map((a) => ({ kind: a.kind, name: a.name, path: a.path, preview: a.preview, bytes: a.bytes })), displayText: trimmed }
-      : undefined;
-    onSend(outbound, meta ? { ...submitOpts, meta } : submitOpts);
+    if (built.displayText) saveHistoryEntry(built.displayText);
+    let enqueueFailure = '';
+    onSend(built.prompt, {
+      ...submitOpts,
+      ...(built.meta ? { meta: built.meta } : {}),
+      onEnqueueFailure: (message) => { enqueueFailure = message; setAttachmentError(message); },
+    });
+    if (enqueueFailure) return;
     if (claimDraft?.sendable) useStore.getState().clearClaimDraft(paneId, claimDraft.claimId);
     setText('');
     setEditingResend(false);
     setHistoryCursor(-1);
     draftBeforeHistoryRef.current = '';
     setAttachments([]);
+    setAttachmentError('');
     setShowCommands(false);
     setAtState(null);
     try { localStorage.removeItem(draftKey); } catch {}
@@ -1140,40 +1120,15 @@ export function ChatInput({ onSend, onStop, onStopBackground, onAccelerate, canS
           </div>
         )}
         {/* Attachments — sit above the composer when present */}
-        {attachments.length > 0 && (
-          <div className="flex flex-wrap gap-2 mb-2 px-2">
-            {attachments.map((a) => (
-              <div key={a.path} className="relative group/att">
-                {a.kind === 'image' ? (
-                  <img
-                    src={a.preview}
-                    alt={a.name}
-                    onClick={() => setZoomImage({ src: a.preview, name: a.name, path: a.path })}
-                    className="h-16 w-16 object-cover rounded-lg border border-canvas-deep shadow-panel cursor-zoom-in"
-                  />
-                ) : (
-                  <div className="h-16 w-36 rounded-lg border border-canvas-deep bg-canvas-warm shadow-panel px-2 py-2 flex items-center gap-2">
-                    <FileText size={18} className="text-accent shrink-0" />
-                    <div className="min-w-0">
-                      <div className="text-[11px] text-ink font-body truncate" title={a.name}>{a.name}</div>
-                      <div className="text-[9px] text-ink-faint font-mono">{Math.ceil((a.bytes || 0) / 1024)} KB</div>
-                    </div>
-                  </div>
-                )}
-                <button
-                  onClick={() => removeAttachment(a.path)}
-                  className="absolute -top-1.5 -right-1.5 w-5 h-5 rounded-full bg-canvas-deep text-ink-soft hover:bg-error hover:text-white flex items-center justify-center transition-colors opacity-0 group-hover/att:opacity-100"
-                  title="移除"
-                >
-                  <X size={11} />
-                </button>
-                {a.kind === 'image' && (
-                  <span className="absolute bottom-0 left-0 right-0 text-[9px] text-white bg-black/60 px-1 py-px rounded-b-lg truncate text-center">
-                    {a.name}
-                  </span>
-                )}
-              </div>
-            ))}
+        <PendingAttachmentList
+          attachments={attachments}
+          onRemove={removeAttachment}
+          onRetry={(attachment) => uploadAttachment(attachment.file, attachment.id)}
+          onPreview={(attachment) => setZoomImage({ src: attachment.preview, name: attachment.name, path: attachment.path })}
+        />
+        {attachmentError && (
+          <div data-testid="attachment-error" role="alert" className="mb-2 px-2 text-[11px] text-error font-body leading-snug">
+            {attachmentError}
           </div>
         )}
 
@@ -1295,7 +1250,7 @@ export function ChatInput({ onSend, onStop, onStopBackground, onAccelerate, canS
                 <button
                   data-cgui="queue-btn"
                   onClick={() => handleSend()}
-                  disabled={!text.trim() && attachments.length === 0}
+                  disabled={!!attachmentBlockReason(attachments) || (!text.trim() && attachments.length === 0)}
                   className="shrink-0 h-8 px-3 max-md:px-2.5 rounded-full bg-accent/10 hover:bg-accent/20 text-accent flex items-center justify-center gap-1 transition-colors disabled:opacity-50 text-[11px] font-medium"
                   title="入队（当前消息发送完后自动发出）"
                 >
@@ -1343,7 +1298,7 @@ export function ChatInput({ onSend, onStop, onStopBackground, onAccelerate, canS
               <button
                 data-cgui="send-btn"
                 onClick={() => handleSend()}
-                disabled={(!text.trim() && attachments.length === 0) || disabled || rcLocked}
+                disabled={!!attachmentBlockReason(attachments) || (!text.trim() && attachments.length === 0) || disabled || rcLocked}
                 className="btn-accent shrink-0 w-8 h-8 rounded-full flex items-center justify-center"
                 title="发送"
               >

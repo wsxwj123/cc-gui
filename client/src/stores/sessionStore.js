@@ -1683,11 +1683,17 @@ export const useStore = create((set, get) => ({
   // ── Message queue helpers (#3) ──────────────────────────────
   enqueueMessage: (sessionKey, msg) => {
     const queued = { ...msg, queueId: msg?.queueId || createQueueId('queue') };
+    let persisted = false;
     set((s) => {
       const list = s.messageQueue[sessionKey] || [];
-      return { messageQueue: { ...s.messageQueue, [sessionKey]: [...list, queued] } };
+      const nextQueue = { ...s.messageQueue, [sessionKey]: [...list, queued] };
+      // 先写并回读核验，再提交内存态。quota/禁写时返回 null，调用方不得切 pane、
+      // 清附件或降级成纯文本；此前 subscriber 事后静默 catch 会伪装“已入队”。
+      if (!persistQueueSnapshot(nextQueue, true)) return s;
+      persisted = true;
+      return { messageQueue: nextQueue };
     });
-    return queued;
+    return persisted ? queued : null;
   },
   prepareSteer: (sessionKey, queueId) => {
     let prepared = null;
