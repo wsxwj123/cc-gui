@@ -82,21 +82,160 @@ export function attachmentMetaForPersistence(meta, maxPreviewChars = MAX_PERSIST
   };
 }
 
-export async function flushPendingAttachmentSidecar(pendingRef, sessionId, { fetchImpl = fetch } = {}) {
-  const payload = pendingRef?.current;
-  if (!payload) return true;
-  if (!sessionId) return false;
-  try {
-    const response = await fetchImpl(`/api/sessions/${sessionId}/attachments`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
+export const ATTACHMENT_SIDECAR_OUTBOX_KEY = 'cgui-attachment-sidecar-outbox:v1';
+
+export function attachmentSidecarPayloadForPersistence(payload) {
+  if (!payload || !Array.isArray(payload.attachments)) return payload;
+  const bounded = attachmentMetaForPersistence({
+    attachments: payload.attachments,
+    displayText: payload.displayText || '',
+  });
+  return {
+    ...payload,
+    attachments: bounded.attachments,
+    displayText: bounded.displayText,
+  };
+}
+
+// 附件 sidecar 的本地 outbox 是恢复真相源。所有读改写经过同一 mutationTail，flush
+// 则按 session 串行；成功响应删除条目时重新读取最新快照，因此另一 session 同时入队/出队
+// 不会被旧快照覆盖。服务端按消息 textHash 写 sidecar，同一条目的重试天然幂等。
+export function createAttachmentSidecarOutbox({
+  storage = typeof localStorage === 'undefined' ? null : localStorage,
+  fetchImpl = (...args) => fetch(...args),
+  now = () => Date.now(),
+  makeId = null,
+} = {}) {
+  let sequence = 0;
+  let mutationTail = Promise.resolve();
+  const sessionTails = new Map();
+
+  const read = () => {
+    if (!storage) return [];
+    try {
+      const parsed = JSON.parse(storage.getItem(ATTACHMENT_SIDECAR_OUTBOX_KEY) || '[]');
+      return Array.isArray(parsed) ? parsed : [];
+    } catch { return []; }
+  };
+
+  const mutate = (buildNext) => {
+    const run = mutationTail.catch(() => {}).then(() => {
+      if (!storage) return { ok: false, retained: false, error: 'storage-unavailable' };
+      const current = read();
+      const built = buildNext(current);
+      const next = built?.next || current;
+      try {
+        const serialized = JSON.stringify(next);
+        storage.setItem(ATTACHMENT_SIDECAR_OUTBOX_KEY, serialized);
+        if (storage.getItem(ATTACHMENT_SIDECAR_OUTBOX_KEY) !== serialized) {
+          return { ok: false, retained: false, error: 'persist-unverified' };
+        }
+        return { ok: true, retained: true, value: built?.value };
+      } catch (error) {
+        return { ok: false, retained: false, error: 'persist-failed', cause: error };
+      }
     });
-    if (!response?.ok) return false;
-    // 请求在途时若出现更新载荷，只清本次成功写入的那一份，绝不误清更新值。
-    if (pendingRef.current === payload) pendingRef.current = null;
-    return true;
-  } catch { return false; }
+    mutationTail = run.then(() => undefined, () => undefined);
+    return run;
+  };
+
+  const stage = async ({ ownerKey = null, sessionId = null, payload }) => {
+    if ((!ownerKey && !sessionId) || !payload?.attachments?.length) {
+      return { ok: false, retained: false, error: 'invalid-entry' };
+    }
+    const boundedPayload = attachmentSidecarPayloadForPersistence(payload);
+    const createdAt = now();
+    const id = makeId
+      ? makeId({ ownerKey, sessionId, payload: boundedPayload, createdAt })
+      : `attachment-sidecar-${createdAt}-${typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : ++sequence}`;
+    return mutate((current) => {
+      const existing = current.find((entry) => entry?.id === id);
+      if (existing) return { next: current, value: existing };
+      const entry = { id, ownerKey, sessionId, payload: boundedPayload, createdAt };
+      return { next: [...current, entry], value: entry };
+    });
+  };
+
+  const bindOwner = (ownerKey, sessionId) => {
+    if (!ownerKey || !sessionId) return Promise.resolve({ ok: false, retained: false, error: 'invalid-binding' });
+    return mutate((current) => ({
+      next: current.map((entry) => (entry?.ownerKey === ownerKey && !entry?.sessionId
+        ? { ...entry, sessionId }
+        : entry)),
+    }));
+  };
+
+  const flushSession = (sessionId) => {
+    if (!sessionId) return Promise.resolve({ ok: false, retained: true, error: 'missing-session' });
+    const previous = sessionTails.get(sessionId) || Promise.resolve();
+    const run = previous.catch(() => {}).then(async () => {
+      for (;;) {
+        await mutationTail;
+        const entry = read().find((item) => item?.sessionId === sessionId);
+        if (!entry) return { ok: true, retained: false };
+        let response;
+        try {
+          response = await fetchImpl(`/api/sessions/${sessionId}/attachments`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(entry.payload),
+          });
+        } catch (cause) {
+          return { ok: false, retained: true, error: 'network', cause };
+        }
+        if (!response?.ok) {
+          return { ok: false, retained: true, error: 'http', status: response?.status };
+        }
+        const removed = await mutate((current) => ({
+          next: current.filter((item) => item?.id !== entry.id),
+        }));
+        if (!removed.ok) {
+          // POST 已成功但清账失败时保留条目，下次按同一 textHash 幂等重放。
+          return { ...removed, retained: true };
+        }
+      }
+    });
+    sessionTails.set(sessionId, run);
+    void run.finally(() => {
+      if (sessionTails.get(sessionId) === run) sessionTails.delete(sessionId);
+    });
+    return run;
+  };
+
+  const flushAll = async () => {
+    await mutationTail;
+    const sessionIds = [...new Set(read().map((entry) => entry?.sessionId).filter(Boolean))];
+    const results = await Promise.all(sessionIds.map((sessionId) => flushSession(sessionId)));
+    return results.find((result) => !result.ok) || { ok: true, retained: false };
+  };
+
+  const stageAndFlush = async (entry) => {
+    const staged = await stage(entry);
+    if (!staged.ok || !entry.sessionId) return staged;
+    return flushSession(entry.sessionId);
+  };
+
+  const bindAndFlush = async (ownerKey, sessionId) => {
+    const bound = await bindOwner(ownerKey, sessionId);
+    if (!bound.ok) return bound;
+    return flushSession(sessionId);
+  };
+
+  return { read, stage, bindOwner, flushSession, flushAll, stageAndFlush, bindAndFlush };
+}
+
+const attachmentSidecarOutbox = createAttachmentSidecarOutbox();
+
+export const persistAttachmentSidecar = (entry) => attachmentSidecarOutbox.stageAndFlush(entry);
+export const bindAttachmentSidecars = (ownerKey, sessionId) => attachmentSidecarOutbox.bindAndFlush(ownerKey, sessionId);
+export const retryAttachmentSidecars = (sessionId = null) => (
+  sessionId ? attachmentSidecarOutbox.flushSession(sessionId) : attachmentSidecarOutbox.flushAll()
+);
+
+export function attachmentSidecarNotice(result) {
+  if (!result || result.ok) return null;
+  if (result.retained) return '附件卡片暂未同步，已保存在本机恢复队列；将在挂载或下次发送时自动重试。';
+  return '附件卡片未能写入本地恢复队列（本地存储空间不足或不可用）；消息仍会发送，但刷新后卡片可能无法恢复。';
 }
 
 let nextUploadId = 0;

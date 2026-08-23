@@ -81,7 +81,7 @@ import { subscribeSkin, getSkinVersion, getSkinState, reconcileSkinOnBoot, watch
 import { resolveSessionDot, completionTracker, subscribeDots, getDotsVersion, RUN_MATRIX_CELLS, runCellDelayMs } from './utils/sessionDots.js';
 import { seedNewSessionDefaults } from './components/UnifiedSidebar.jsx';
 import { PendingAttachmentList } from './components/PendingAttachmentList.jsx';
-import { attachmentBlockReason, attachmentMetaForPersistence, buildAttachmentMessage, flushPendingAttachmentSidecar, pendingAttachment, uploadAttachmentFile } from './utils/attachments.js';
+import { attachmentBlockReason, attachmentMetaForPersistence, attachmentSidecarNotice, bindAttachmentSidecars, buildAttachmentMessage, pendingAttachment, persistAttachmentSidecar, retryAttachmentSidecars, uploadAttachmentFile } from './utils/attachments.js';
 import {
   FolderOpen, MessageSquare, ChevronLeft, ChevronRight, ChevronDown,
   Search, Hash, Layers, BarChart3, ArrowLeft, Plus,
@@ -3290,8 +3290,6 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // (handleSend 定义早于 handleRollback,且需避免闭包读到旧值)。
   const [pendingEditRollback, setPendingEditRollbackState] = useState(null);
   const pendingEditRef = useRef(null);
-  // L4: 当 handleSend 时还是 draft(没真 sessionId),先把待写 sidecar 暂存,init 拿到 sid 后落盘。
-  const pendingAttachmentRef = useRef(null);
   const setPendingEditRollback = useCallback((v) => { pendingEditRef.current = v; setPendingEditRollbackState(v); }, []);
   const handleRollbackRef = useRef(null);
   const activeProcRef = useRef(null);
@@ -3636,6 +3634,16 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     const id = setTimeout(() => setProviderSwitchNotice(null), 5000);
     return () => clearTimeout(id);
   }, [providerSwitchNotice]);
+  const reportAttachmentSidecarResult = useCallback((result) => {
+    const text = attachmentSidecarNotice(result);
+    if (text) setProviderSwitchNotice({ text });
+  }, []);
+  // 窗格卸载/应用重启后，重新进入真实会话即重放该 session 的持久 sidecar。
+  useEffect(() => {
+    const sid = selectedSession?.sessionId;
+    if (!sid) return;
+    void retryAttachmentSidecars(sid).then(reportAttachmentSidecarResult);
+  }, [selectedSession?.sessionId, reportAttachmentSidecarResult]);
   // G4:上下文超模型窗口时 /compact 失败(整段发上去做摘要→请求体也超限→413)。
   // 这种错不能自动重试,弹一个带操作按钮的横幅引导用户:切 1M / 新建 / 回滚裁剪。
   const [ctxOverflow, setCtxOverflow] = useState(null);
@@ -4023,10 +4031,10 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       const response = await r.json().catch(() => null);
       if (r.ok && response?.ok === true && response?.accepted === true) {
         if (meta?.attachments?.length > 0) {
-          fetch(`/api/sessions/${sessionId}/attachments`, {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ text: body, attachments: meta.attachments, displayText: meta.displayText || '' }),
-          }).catch(() => {});
+          void persistAttachmentSidecar({
+            sessionId,
+            payload: { text: body, attachments: meta.attachments, displayText: meta.displayText || '' },
+          }).then(reportAttachmentSidecarResult);
         }
         return { outcome: 'accepted', pid: response.pid, duplicate: response.duplicate === true };
       }
@@ -4035,7 +4043,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         || (r.status === 413 && response?.code === 'request-too-large');
       return { outcome: explicit ? 'explicit-reject' : 'ambiguous', code: response?.code };
     } catch { return { outcome: 'ambiguous' }; }
-  }, []);
+  }, [reportAttachmentSidecarResult]);
   const steerCurrentTurnRef = useRef(null);
   useEffect(() => { steerCurrentTurnRef.current = steerCurrentTurn; }, [steerCurrentTurn]);
 
@@ -4236,19 +4244,16 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       attachments: meta?.attachments,
       displayText: meta?.displayText,
     }]);
-    // L4: 持久化 attachments 到 sidecar (按 textHash 索引)。已有真 sid 立即写;
-    // draft 状态暂存到 ref,init 事件拿到 sid 后由那里 flush。
+    // L4:所有附件 sidecar 先进入持久 outbox，再尝试 POST。draft 先以会话 ownerKey
+    // 记账，init 拿到真实 sid 后统一绑定；真实 session 发送也走同一条可靠链。
     if (meta?.attachments?.length > 0) {
       const payload = { text: prompt, attachments: meta.attachments, displayText: meta.displayText || '' };
       const sid = selectedSession?.sessionId;
-      if (sid) {
-        fetch(`/api/sessions/${sid}/attachments`, {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload),
-        }).catch(() => {});
-      } else {
-        pendingAttachmentRef.current = payload;
-      }
+      void persistAttachmentSidecar({
+        ownerKey: sid ? null : sessionQueueKey,
+        sessionId: sid || null,
+        payload,
+      }).then(reportAttachmentSidecarResult);
     }
 
     // Fire-and-forget git checkpoint. Failures (not a git repo etc.) are
@@ -4743,21 +4748,10 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                 draft: false,
                 sessionId: event.session_id,
               });
-              // L4: draft 期间暂存的 attachments 元数据现在能写到正确 sessionId 的 sidecar
-              if (pendingAttachmentRef.current) {
-                // 起始实现先清 ref 再 fire-and-forget，非 2xx/断网会永久丢 sidecar。
-                // Home 首条附件扩大了该路径的数据面：最多自动重试 3 次，成功才清；
-                // 仍失败则保留 ref 并给可见提示，不另造 outbox/HTTP 协议。
-                void (async () => {
-                  for (let attempt = 0; attempt < 3; attempt += 1) {
-                    if (await flushPendingAttachmentSidecar(pendingAttachmentRef, event.session_id)) return;
-                    if (attempt < 2) await new Promise((resolve) => setTimeout(resolve, 400 * (attempt + 1)));
-                  }
-                  if (pendingAttachmentRef.current) {
-                    setProviderSwitchNotice({ text: '附件卡片暂未保存，数据已保留；当前会话再次初始化时会重试。' });
-                  }
-                })();
-              }
+              // draft outbox 按 ownerKey 原子升级到真实 sid；随后按 session 串行重放。
+              // 组件此刻卸载也不影响条目，成功 2xx 前持久记录始终在 localStorage。
+              void bindAttachmentSidecars(_draftOwnerKey, event.session_id)
+                .then(reportAttachmentSidecarResult);
             }
             // 以下两件事是"会话 A 已真实诞生"的事实处理,与"当前选中是谁"无关——用户已切走
             // (selIsOrigin=false)时也照做:标题该生成、列表该出现 A。数据全取发起时闭包
@@ -6122,7 +6116,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         finalizeInFlightRef.current = Math.max(0, finalizeInFlightRef.current - 1);
       }
     }
-  }, [selectedSession, selectedProject, streamingModel, isStreaming, sessionQueueKey, sendBtw]);
+  }, [selectedSession, selectedProject, streamingModel, isStreaming, sessionQueueKey, sendBtw, reportAttachmentSidecarResult]);
 
   // Ref to handleSend so the finally-block drain doesn't form a circular closure dep.
   const handleSendRef = useRef(null);
@@ -9659,6 +9653,9 @@ function ShortcutsPanel({ open, onClose }) {
 // ─── Main App ──────────────────────────────────────────────────
 export default function App() {
   useWebSocket();
+  // 应用重启后恢复所有已绑定真实 session 的附件 sidecar。失败项仍在持久 outbox，
+  // SessionDetail 挂载和后续发送还会按 session 重试。
+  useEffect(() => { void retryAttachmentSidecars(); }, []);
   // R4-b:记下"官方 provider 当前是怎么计费的"(OAuth 订阅 / API key 按量)。历史消息里
   // 没有当时的鉴权方式,拿此刻的顶替会让切一次 provider 就把订阅期的 Claude 消息按 API
   // 单价重算(判官实测 ¥4,690 → ¥498,876)。这里是全局唯一观察点,跟随 store 的刷新节奏。
