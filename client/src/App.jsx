@@ -106,6 +106,7 @@ import { pruneByLiveSet } from './utils/levelPrune.js';
 import { classifyStopTargets } from './utils/stopTargets.js';
 import { advanceScrollTransaction, beginScrollTransaction, keyRequestsReading, resizeScrollTop, shouldPauseAutoScroll } from './utils/scroll.js';
 import { resolveSessionTitle, sessionRowTooltip } from './utils/sessionTitle.js';
+import { listboxKeyAction, listboxOpenIndex } from './utils/listboxKeyboard.js';
 
 // ── Per-session shadow-git checkpoints ──────────────────────────
 // Session title with inline rename (click pencil → edit → Enter/blur saves,
@@ -1763,6 +1764,9 @@ function HomeState({ tabIndex = 0 }) {
   }, []);
   const [projOpen, setProjOpen] = useState(false);
   const projBtnRef = useRef(null);
+  const projTriggerRef = useRef(null);
+  const projectOptionRefs = useRef([]);
+  const [activeProjectIndex, setActiveProjectIndex] = useState(0);
   const custom = readHomeCustom();
   // r21:减去 hiddenProjects。Home 的默认项目**会写进新会话的 cwd**,取全量会让
   // 用户在侧栏隐藏掉的目录(家目录、临时目录)当上默认工作目录,最近下拉里也会冒出来。
@@ -1811,6 +1815,35 @@ function HomeState({ tabIndex = 0 }) {
     .sort((a, b) => (b.lastActivity ? new Date(b.lastActivity).getTime() : -1)
       - (a.lastActivity ? new Date(a.lastActivity).getTime() : -1))
     .slice(0, 12), [visibleProjects]);
+  const focusProjectOption = (index) => {
+    if (index < 0) return;
+    setActiveProjectIndex(index);
+    requestAnimationFrame(() => projectOptionRefs.current[index]?.focus());
+  };
+  const openProjectListbox = (key = '') => {
+    const index = listboxOpenIndex(recent.findIndex((p) => p.hash === project?.hash), recent.length, key);
+    setProjOpen(true);
+    focusProjectOption(index);
+  };
+  const closeProjectListbox = (restoreFocus = false) => {
+    setProjOpen(false);
+    if (restoreFocus) requestAnimationFrame(() => projTriggerRef.current?.focus());
+  };
+  const selectProjectIndex = (index) => {
+    const selected = recent[index];
+    if (!selected) return;
+    setChosenHash(selected.hash);
+    closeProjectListbox(true);
+  };
+  const onProjectListboxKeyDown = (event) => {
+    const action = listboxKeyAction(event.key, activeProjectIndex, recent.length);
+    if (!action.handled) return;
+    event.preventDefault();
+    event.stopPropagation();
+    if (action.close) closeProjectListbox(true);
+    else if (action.select) selectProjectIndex(action.nextIndex);
+    else focusProjectOption(action.nextIndex);
+  };
   const uploadHomeAttachment = async (file, existingId = null) => {
     const pending = existingId
       ? { id: existingId, file, name: file?.name || 'file', bytes: file?.size || 0, status: 'uploading' }
@@ -1977,10 +2010,17 @@ function HomeState({ tabIndex = 0 }) {
             </button>
             <div ref={projBtnRef} className="relative min-w-0">
               <button
+                ref={projTriggerRef}
                 data-testid="project-selector"
                 aria-haspopup="listbox"
                 aria-expanded={projOpen}
-                onClick={() => setProjOpen((v) => !v)}
+                onClick={() => (projOpen ? closeProjectListbox() : openProjectListbox())}
+                onKeyDown={(event) => {
+                  if (['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) {
+                    event.preventDefault();
+                    openProjectListbox(event.key);
+                  }
+                }}
                 className="flex items-center gap-1.5 px-2 py-1 rounded-md border border-canvas-deep/70 hover:bg-canvas-warm text-[12px] text-ink-soft font-body min-w-0 transition-colors"
                 title={project ? formatPath(project.path) : '选择项目'}
               >
@@ -1988,16 +2028,20 @@ function HomeState({ tabIndex = 0 }) {
                 <span className="truncate max-w-[220px]">{project ? formatPathShort(project.path) : '选择项目'}</span>
                 <ChevronDown size={11} className="text-ink-faint shrink-0" />
               </button>
-              <AnchoredPopover anchorRef={projBtnRef} open={projOpen} onRequestClose={() => setProjOpen(false)}
+              <AnchoredPopover anchorRef={projBtnRef} open={projOpen}
+                onRequestClose={(reason) => closeProjectListbox(reason === 'escape')}
                 drop="up" align="left"
                 className="w-72 max-w-[calc(var(--app-w,100vw)-1.5rem)] py-1 max-h-64 overflow-y-auto">
-                <div role="listbox" aria-label="选择项目">
-                  {recent.map((p) => (
+                <div role="listbox" aria-label="选择项目" onKeyDown={onProjectListboxKeyDown}>
+                  {recent.map((p, index) => (
                     <button
                       key={p.hash}
+                      ref={(node) => { projectOptionRefs.current[index] = node; }}
                       role="option"
                       aria-selected={project?.hash === p.hash}
-                      onClick={() => { setChosenHash(p.hash); setProjOpen(false); }}
+                      tabIndex={activeProjectIndex === index ? 0 : -1}
+                      onFocus={() => setActiveProjectIndex(index)}
+                      onClick={() => selectProjectIndex(index)}
                       className={`w-full text-left px-2.5 py-1.5 text-[12px] font-body truncate hover:bg-canvas-warm ${project?.hash === p.hash ? 'text-accent' : 'text-ink-soft'}`}
                       title={formatPath(p.path)}
                     >

@@ -12,6 +12,7 @@ import { resolveSelectorModel } from '../utils/routing.js';
 import { effortCapsFor, effortAllowed, effortMemoryKey, useEffortFallback } from '../utils/effortCaps.js';
 import { attachmentBlockReason, buildAttachmentMessage, pendingAttachment, uploadAttachmentFile } from '../utils/attachments.js';
 import { PendingAttachmentList } from './PendingAttachmentList.jsx';
+import { listboxKeyAction, listboxOpenIndex } from '../utils/listboxKeyboard.js';
 
 // Permission mode metadata — mirrors `claude --permission-mode <choice>`。
 // P2.1:文案对齐官方六档语义(RESEARCH-mode-semantics §④b);bypass 中文名保持「放任」。
@@ -67,12 +68,54 @@ export function PermissionModeSelector({ permKey, tourAnchor = false }) {
   const visibleModes = useVisiblePermissionModes(permKey);
   const [open, setOpen] = useState(false);
   const wrapRef = useRef(null);
+  const triggerRef = useRef(null);
+  const optionRefs = useRef([]);
+  const [activeIndex, setActiveIndex] = useState(0);
   const current = MODE_META[permissionMode] || MODE_META.default;
   const Icon = current.icon;
+  const focusOption = (index) => {
+    if (index < 0) return;
+    setActiveIndex(index);
+    requestAnimationFrame(() => optionRefs.current[index]?.focus());
+  };
+  const openListbox = (key = '') => {
+    const index = listboxOpenIndex(visibleModes.indexOf(permissionMode), visibleModes.length, key);
+    setOpen(true);
+    focusOption(index);
+  };
+  const closeListbox = (restoreFocus = false) => {
+    setOpen(false);
+    if (restoreFocus) requestAnimationFrame(() => triggerRef.current?.focus());
+  };
+  const selectIndex = (index) => {
+    const mode = visibleModes[index];
+    if (!mode) return;
+    // plan 与 agent 不再互斥:内置 agent 的 tools 已含 ExitPlanMode,
+    // agent 主控本体在 plan 模式下能正常出计划卡片(headless 实证)。
+    setPermissionMode(mode, permKey);
+    closeListbox(true);
+  };
+  const onListboxKeyDown = (event) => {
+    const action = listboxKeyAction(event.key, activeIndex, visibleModes.length);
+    if (!action.handled) return;
+    event.preventDefault();
+    event.stopPropagation();
+    if (action.close) closeListbox(true);
+    else if (action.select) selectIndex(action.nextIndex);
+    else focusOption(action.nextIndex);
+  };
 
   return (
     <div ref={wrapRef} className="relative" data-cgui="mode-selector" data-tour={tourAnchor ? 'mode-selector' : undefined}>
-      <button onClick={() => setOpen(!open)} data-testid="permission-mode-selector"
+      <button ref={triggerRef}
+        onClick={() => (open ? closeListbox() : openListbox())}
+        onKeyDown={(event) => {
+          if (['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) {
+            event.preventDefault();
+            openListbox(event.key);
+          }
+        }}
+        data-testid="permission-mode-selector"
         aria-haspopup="listbox" aria-expanded={open}
         className="flex items-center gap-1 px-2 py-1 rounded-md hover:bg-black/5 transition-colors"
         title={`权限模式: ${current.label} — ${current.desc}`}>
@@ -80,23 +123,22 @@ export function PermissionModeSelector({ permKey, tourAnchor = false }) {
         <span className={`cgui-perm-label text-[11px] font-body whitespace-nowrap ${current.tone}`}>{current.label}</span>
         <ChevronDown size={10} className="text-ink-faint" />
       </button>
-      <AnchoredPopover anchorRef={wrapRef} open={open} onRequestClose={() => setOpen(false)} drop="up"
+      <AnchoredPopover anchorRef={wrapRef} open={open}
+        onRequestClose={(reason) => closeListbox(reason === 'escape')} drop="up"
         className="w-64 max-w-[calc(var(--app-w,100vw)-1.5rem)] py-1 max-h-[min(60vh,calc(var(--app-h,100dvh)-6rem))] overflow-y-auto">
         <div className="px-3 py-1.5 text-[10px] text-ink-faint uppercase tracking-wider font-body">权限模式 (--permission-mode)</div>
-        <div role="listbox" aria-label="权限模式">
-          {visibleModes.map((m) => {
+        <div role="listbox" aria-label="权限模式" onKeyDown={onListboxKeyDown}>
+          {visibleModes.map((m, index) => {
             const meta = MODE_META[m];
             const MIcon = meta.icon;
             return (
               <button key={m}
+                ref={(node) => { optionRefs.current[index] = node; }}
                 role="option"
                 aria-selected={permissionMode === m}
-                onClick={() => {
-                  // plan 与 agent 不再互斥:内置 agent 的 tools 已含 ExitPlanMode,
-                  // agent 主控本体在 plan 模式下能正常出计划卡片(headless 实证)。
-                  setPermissionMode(m, permKey);
-                  setOpen(false);
-                }}
+                tabIndex={activeIndex === index ? 0 : -1}
+                onFocus={() => setActiveIndex(index)}
+                onClick={() => selectIndex(index)}
                 className={`w-full text-left px-3 py-2 flex items-start gap-2 ${permissionMode === m ? 'bg-accent/12' : ''} hover:bg-black/5`}>
                 <MIcon size={13} className={`${meta.tone} mt-0.5 shrink-0`} />
                 <div className="flex-1 min-w-0">

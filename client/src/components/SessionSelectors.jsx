@@ -128,12 +128,12 @@ export function AnchoredPopover({ anchorRef, open, onRequestClose, drop = 'down'
     const onDown = (e) => {
       if (elRef.current?.contains(e.target)) return;
       if (anchorRef?.current?.contains(e.target)) return;
-      onRequestClose?.();
+      onRequestClose?.('outside');
     };
     // stopPropagation:关弹层的 Esc 不冒到 window 上的会话级监听(生成中单击即停)。
     // R1:相位挂 window 捕获(与灯箱/预览/文件树等浮层同款)。原来挂 document 冒泡 → 晚于
     // 右侧面板监听的 document 捕获,面板开着时这一击先关面板、弹层留着(层级颠倒)。
-    const onEsc = (e) => { if (e.key === 'Escape') { e.stopPropagation(); onRequestClose?.(); } };
+    const onEsc = (e) => { if (e.key === 'Escape') { e.stopPropagation(); onRequestClose?.('escape'); } };
     document.addEventListener('mousedown', onDown);
     window.addEventListener('keydown', onEsc, true);
     return () => {
