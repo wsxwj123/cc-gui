@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { Check, Circle, ClipboardList, Loader2, ChevronDown, ChevronRight, EyeOff } from './Icon.jsx';
 import { MarkdownRenderer } from './MarkdownRenderer.jsx';
 import { readTodoCollapsed, writeTodoCollapsed } from '../utils/todoCollapse.js';
+import { normalizePlanText, planIdentityKey } from '../utils/plan.js';
 
 /**
  * 任务清单条,渲染在 composer 同一列内、紧贴输入框上方(作为输入框的"附着条",而非独立
@@ -11,15 +12,26 @@ import { readTodoCollapsed, writeTodoCollapsed } from '../utils/todoCollapse.js'
  * 两个按钮:折叠(只留"任务清单"标题行 + "下一条")/ 隐藏(整块消失,直到下次任务清单
  * 更新)。任务全部完成时自动折叠。
  */
-export function TodoPanel({ todos, plan = '', isStreaming = false, planKey = 'global' }) {
+export function TodoPanel({ todos, plan = '', plans = null, isStreaming = false, planKey = 'global' }) {
   const hasTodos = Array.isArray(todos) && todos.length > 0;
   const cleanPlan = String(plan || '').trim();
-  if (!hasTodos && !cleanPlan) return null;
+  const visiblePlans = Array.isArray(plans)
+    ? plans.filter((item) => normalizePlanText(item?.plan))
+    : (cleanPlan ? [{ signature: normalizePlanText(cleanPlan), plan: cleanPlan, approved: true }] : []);
+  if (!hasTodos && visiblePlans.length === 0) return null;
   // 计划卡与任务清单是两张独立并列的卡(兄弟节点),各自带外壳、各管各的隐藏 ——
   // 隐藏清单不影响计划,隐藏计划不影响清单。
   return (
     <>
-      {cleanPlan && <PlanBlock plan={cleanPlan} planKey={planKey} />}
+      {visiblePlans.map((item) => (
+        <PlanBlock
+          key={item.signature}
+          plan={item.plan}
+          signature={item.signature}
+          approved={item.approved === true}
+          planKey={planKey}
+        />
+      ))}
       {hasTodos && <TodoChecklist todos={todos} isStreaming={isStreaming} />}
     </>
   );
@@ -114,43 +126,59 @@ function TodoChecklist({ todos, isStreaming = false }) {
  * 下次批准新计划(文本不同)自动恢复,与 TodoChecklist 的 hiddenSig 同一套语义。
  * markdown 只在展开时渲染,避免长计划在折叠态也参与输入区的高频重渲。
  */
-function PlanBlock({ plan, planKey = 'global' }) {
-  const hideKey = `cgui-plan-hidden:${planKey || 'global'}`;
+function PlanBlock({ plan, signature = normalizePlanText(plan), approved = true, planKey = 'global' }) {
+  const hideKey = `cgui-plan-hidden:${planKey || 'global'}:${planIdentityKey(signature)}`;
+  const legacyHideKey = `cgui-plan-hidden:${planKey || 'global'}`;
   const [open, setOpen] = useState(false);
   const [hiddenPlan, setHiddenPlan] = useState(() => {
-    try { return localStorage.getItem(hideKey) === plan ? plan : null; } catch { return null; }
+    try {
+      return localStorage.getItem(hideKey) === signature || localStorage.getItem(legacyHideKey) === plan
+        ? signature : null;
+    } catch { return null; }
   });
   // 持久化隐藏状态:同一条计划切会话仍保持隐藏;新计划到达时自动显示。
   useEffect(() => {
     let saved = null;
-    try { saved = localStorage.getItem(hideKey); } catch {}
-    if (saved === plan) setHiddenPlan(plan);
-    else if (saved) {
-      try { localStorage.removeItem(hideKey); } catch {}
-      setHiddenPlan(null);
-    }
-  }, [hideKey, plan]);
+    let legacySaved = null;
+    try {
+      saved = localStorage.getItem(hideKey);
+      legacySaved = localStorage.getItem(legacyHideKey);
+      if (saved !== signature && legacySaved === plan) {
+        localStorage.setItem(hideKey, signature);
+        localStorage.removeItem(legacyHideKey);
+        saved = signature;
+      }
+    } catch {}
+    setHiddenPlan(saved === signature ? signature : null);
+  }, [hideKey, legacyHideKey, plan, signature]);
   const hidePlan = () => {
-    setHiddenPlan(plan);
-    try { localStorage.setItem(hideKey, plan); } catch {}
+    setHiddenPlan(signature);
+    try {
+      localStorage.setItem(hideKey, signature);
+      if (localStorage.getItem(legacyHideKey) === plan) localStorage.removeItem(legacyHideKey);
+    } catch {}
   };
   const showPlan = () => {
     setHiddenPlan(null);
-    try { localStorage.removeItem(hideKey); } catch {}
+    try { localStorage.removeItem(hideKey); localStorage.removeItem(legacyHideKey); } catch {}
   };
   // 已隐藏:留一条可点"显示"小条恢复;批准新计划(plan 变)仍自动恢复完整卡。
-  if (hiddenPlan === plan) return <ShowBar label="显示已批准的计划" onClick={showPlan} />;
+  if (hiddenPlan === signature) return <ShowBar label="显示计划" onClick={showPlan} />;
   return (
-    <div data-cgui="todo-panel" className="mb-2 rounded-panel border border-canvas-deep bg-canvas-warm/60 backdrop-blur-soft overflow-hidden">
+    <div data-cgui="todo-panel" data-testid="plan-card" className="mb-2 rounded-panel border border-canvas-deep bg-canvas-warm/60 backdrop-blur-soft overflow-hidden">
       <div className="w-full flex items-center gap-2 px-3 py-2">
         <button
           onClick={() => setOpen((o) => !o)}
-          title={open ? '收起计划全文' : '展开查看已批准的计划全文'}
+          title={open ? '收起计划全文' : '展开查看计划全文'}
+          data-testid="plan-toggle"
+          aria-expanded={open}
           className="flex items-center gap-2 flex-1 min-w-0 text-left hover:opacity-80 transition-opacity"
         >
           {open ? <ChevronDown size={13} className="text-ink-faint shrink-0" /> : <ChevronRight size={13} className="text-ink-faint shrink-0" />}
           <ClipboardList size={13} className="text-accent shrink-0" />
-          <span className="text-[11px] font-body font-medium text-ink shrink-0">已批准的计划</span>
+          <span className="text-[11px] font-body font-medium text-ink shrink-0">
+            {approved ? '✅ 计划已批准' : '计划待审查'}
+          </span>
           {!open && (
             <span className="text-[10px] text-ink-faint truncate">
               {plan.split('\n')[0].replace(/^#+\s*/, '')}
@@ -160,6 +188,8 @@ function PlanBlock({ plan, planKey = 'global' }) {
         <button
           onClick={hidePlan}
           title="隐藏计划(批准新计划时自动再现)"
+          data-testid="plan-hide"
+          aria-label="隐藏计划"
           className="shrink-0 p-1 rounded hover:bg-canvas-deep/40 text-ink-faint hover:text-ink-muted transition-colors"
         >
           <EyeOff size={13} />

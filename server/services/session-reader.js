@@ -3,6 +3,13 @@ import { existsSync } from 'fs';
 import { join, basename } from 'path';
 import { homedir } from 'os';
 import { createHash } from 'crypto';
+import {
+  isApprovedPlanToolCall,
+  mergeEquivalentPlanToolCall,
+  planSignature,
+} from '../../client/src/utils/plan.js';
+
+export { isApprovedPlanToolCall };
 import { parseJsonl, readJsonlEdges } from '../utils/jsonl-parser.js';
 
 // L4: 附件元数据 sidecar。cc CLI 的 jsonl 由 CLI 写,GUI 无法注入 attachments 字段,
@@ -789,23 +796,10 @@ export function dedupReplayedRecords(rawRecords) {
 
 /**
  * 判断 ExitPlanMode 的 toolCall 是否携带“已批准”结果。
- * 与前端 currentPlan/TurnBubble 的判据保持一致:
+ * 实现在前后端共用的 plan.js；这里保留导出以兼容 reader 调用方。
  *   - SDK 引擎批准 = allow, tool_result 非错误;
  *   - 旧 hook 路径批准 = deny 收尾, 但 result 文案含“用户已批准此计划”。
  */
-export function isApprovedPlanToolCall(tc) {
-  if (tc?.name !== 'ExitPlanMode') return false;
-  const r = tc?.result;
-  if (!r) return false;
-  // 客户端停止/中断补的合成终态不是真实批准。
-  if (r.interrupted || r.synthetic) return false;
-  if (!r.isError) return true;
-  const text = typeof r.content === 'string'
-    ? r.content
-    : (Array.isArray(r.content) ? r.content.map((c) => c?.text || '').join('') : '');
-  return /用户已批准此计划/.test(text);
-}
-
 /**
  * 同计划卡折叠(r32-plan-flood,根因见 getSessionMessages 顶部说明):/goal 的会话级
  * Stop 钩子每轮强制续跑,CLI 每轮把同一份【已批准计划】以 ExitPlanMode 重提一次
@@ -829,21 +823,19 @@ export function foldRepeatedPlanCards(messages) {
   for (const m of messages) {
     if (m?.type !== 'turn') { out.push(m); continue; }
     const toolCalls = Array.isArray(m.toolCalls) ? m.toolCalls : [];
-    const isPlan = (tc) => tc?.name === 'ExitPlanMode'
-      && typeof tc?.input?.plan === 'string' && tc.input.plan.trim();
+    const isPlan = (tc) => !!planSignature(tc);
     let anyDropped = false;
     const keptToolCalls = [];
     const droppedIds = new Set();
     for (const tc of toolCalls) {
       if (isPlan(tc)) {
-        const sig = tc.input.plan;
+        const sig = planSignature(tc);
         const kept = seenPlan.get(sig);
         if (kept) {
           anyDropped = true; droppedIds.add(tc.id);
           // 后来的重复卡若带有批准结果而保留卡没有,把批准结果补到保留卡上。
-          if (!isApprovedPlanToolCall(kept) && isApprovedPlanToolCall(tc)) {
-            kept.result = tc.result;
-          }
+          const merged = mergeEquivalentPlanToolCall(kept, tc);
+          if (merged !== kept) kept.result = merged.result;
           continue;
         }
         seenPlan.set(sig, tc);

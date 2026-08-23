@@ -70,6 +70,7 @@ import { rebuildTodosFromTaskCalls } from './utils/todos.js';
 import { isSteered, firstSteerableIndex, isSteerBarrier, persistedSteerKeys, queueKeyFor } from './utils/steerQueue.js';
 import { isInitBindingOrigin, isResetBindingOrigin, isCliNoContentPlaceholder, makeProviderModelGuard, migrateDraftQueue, paneMessagesOwned, resolveHistModel, resolveSelectorModel, resolveSendModel } from './utils/routing.js';
 import { migrateOptimisticGoalOwner, optimisticGoalForOwner, parseGoalCommand } from './utils/goal.js';
+import { isApprovedPlanToolCall, migrateSessionVisibilityOwner, planTextOfToolCall, reconcilePlanToolCalls } from './utils/plan.js';
 import { nativeContextWindow, isBareClaudeAlias, pickCliContextWindow } from './utils/contextWindow.js';
 import { extractMcpServerIssues, formatMcpServerNotice } from './utils/mcpStatus.js';
 import { classifyRepairOutcome, classifyCheckOutcome, upsertRepairHint, removeRepairHint, loadRepairHints, persistRepairHints } from './utils/repairFlow.js';
@@ -3309,55 +3310,29 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     return rebuildTodosFromTaskCalls(flat);
   }, [streamingBlocks, visibleChat, messages, liveVisible]);
 
-  // 最近一份【已批准】的 ExitPlanMode 计划全文,常驻在任务清单条顶部(默认折叠一行,
-  // 展开可随时回看批准了什么)。与 G1/G2 收口不冲突:未批准/被拒的计划仍只在审批弹窗
-  // (PlanReviewCard)出现,这里只认批准信号——SDK 引擎批准=allow → result 非错误;
-  // 旧 hook 路径批准=deny 收尾但 result 文案含"用户已批准此计划"(同 TurnBubble O1)。
-  const currentPlan = useMemo(() => {
-    const readApprovedPlan = (toolCall) => {
-      if (toolCall?.name !== 'ExitPlanMode') return '';
-      const r = toolCall.result;
-      if (!r) return '';
-      const text = typeof r.content === 'string'
-        ? r.content
-        : (Array.isArray(r.content) ? r.content.map((c) => c?.text || '').join('') : '');
-      // 停止/中断补的合成终态不是真实批准,不能据此显示“已批准的计划”。
-      if (r.interrupted || r.synthetic) return '';
-      if (r.isError && !/用户已批准此计划/.test(text)) return '';
-      const plan = toolCall.input?.plan ?? toolCall.input?.content ?? '';
-      return typeof plan === 'string' ? plan.trim() : '';
-    };
-    const scanToolCalls = (toolCalls) => {
-      if (!Array.isArray(toolCalls)) return '';
-      for (let j = toolCalls.length - 1; j >= 0; j--) {
-        const plan = readApprovedPlan(toolCalls[j]);
-        if (plan) return plan;
-      }
-      return '';
-    };
-    // 串扰窗口2:流式缓冲按归属门控(同 currentTodos),不属于当前会话就不扫。
-    // 先扫 streamingToolCalls 原始数组(流中结果可能先在这里回填),再扫 blocks。
-    const liveBlocks = liveVisible ? streamingBlocks : EMPTY_ARRAY;
-    for (let j = (liveVisible ? streamingToolCalls : EMPTY_ARRAY).length - 1; j >= 0; j--) {
-      const plan = readApprovedPlan(streamingToolCalls[j]);
-      if (plan) return plan;
+  // ExitPlanMode 计划常驻在任务清单条顶部(默认折叠一行)。persisted / local-finished /
+  // streaming 三类来源统一进纯规则：同签名保留首卡，后续只补批准结果；不同计划各自保留。
+  // 未批准计划也先显示，批准后在原卡上更新状态，实时转历史不消失也不新增第二张。
+  const currentPlans = useMemo(() => {
+    const toolCalls = [];
+    // 来源顺序就是“首卡”顺序：历史 → 本地已完成 → 当前流。后续等价来源只补批准结果。
+    for (const message of messages) {
+      if (Array.isArray(message?.toolCalls)) toolCalls.push(...message.toolCalls);
     }
-    for (let i = liveBlocks.length - 1; i >= 0; i--) {
-      const b = liveBlocks[i];
-      if (b?.type === 'tool_use') {
-        const plan = readApprovedPlan(b.toolCall);
-        if (plan) return plan;
+    for (const message of visibleChat) {
+      if (Array.isArray(message?.toolCalls)) toolCalls.push(...message.toolCalls);
+    }
+    if (liveVisible) {
+      toolCalls.push(...streamingToolCalls);
+      for (const block of streamingBlocks) {
+        if (block?.type === 'tool_use' && block.toolCall) toolCalls.push(block.toolCall);
       }
     }
-    for (let i = visibleChat.length - 1; i >= 0; i--) {
-      const plan = scanToolCalls(visibleChat[i]?.toolCalls);
-      if (plan) return plan;
-    }
-    for (let i = messages.length - 1; i >= 0; i--) {
-      const plan = scanToolCalls(messages[i]?.toolCalls);
-      if (plan) return plan;
-    }
-    return '';
+    return reconcilePlanToolCalls(toolCalls).map(({ signature, toolCall }) => ({
+      signature,
+      plan: planTextOfToolCall(toolCall),
+      approved: isApprovedPlanToolCall(toolCall),
+    }));
   }, [streamingBlocks, streamingToolCalls, visibleChat, messages, liveVisible]);
 
   // When the file watcher reports a write to THIS session's jsonl (e.g. a
@@ -4630,6 +4605,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
               setOptimisticGoalState((prev) => migrateOptimisticGoalOwner(
                 prev, _draftOwnerKey, event.session_id,
               ));
+              try { migrateSessionVisibilityOwner(localStorage, _draftOwnerKey, event.session_id); } catch {}
               // Carry the draft's per-session model/permission pins to the real
               // session id so a model picked for a brand-new chat doesn't revert.
               useStore.getState().migrateSessionKey(_draftOwnerKey, event.session_id);
@@ -7541,7 +7517,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           window.dispatchEvent(new CustomEvent('cgui:composer-fill', { detail: { text: item.text, targetKey: sessionQueueKey } }));
         }}
         todos={currentTodos}
-        plan={currentPlan}
+        plans={currentPlans}
         goal={effectiveGoal}
         permKey={sessionQueueKey}
         sessionId={selectedSession?.sessionId || null}

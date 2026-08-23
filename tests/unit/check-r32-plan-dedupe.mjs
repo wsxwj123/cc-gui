@@ -12,6 +12,13 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import {
+  isApprovedPlanToolCall as isApprovedPlanToolCallPure,
+  migrateSessionVisibilityOwner,
+  normalizePlanText,
+  planIdentityKey,
+  reconcilePlanToolCalls,
+} from '../../client/src/utils/plan.js';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 // HOME 必须在 import 之前设 —— session-reader 在模块作用域 join(homedir(), ...)。
@@ -24,9 +31,56 @@ mkdirSync(join(home, '.claude', 'projects', HASH), { recursive: true });
 const COND = '你必须用中文写出"任务完成"';
 const PLAN_A = '第一步先摸清需求;\n第二步给出方案;\n第三步开始实施。';
 const PLAN_B = '完全不同的计划:直接执行,不解释。';
+const plan = (id, text) => ({ type: 'tool_use', id, name: 'ExitPlanMode', input: { plan: text } });
+
+// ── ⓪ 全链共用签名与来源归并规则 ───────────────────────────────────────
+assert.equal(normalizePlanText(`  ${PLAN_A.replace(/\n/g, '\r\n')}  `), PLAN_A,
+  '等价签名只统一 CRLF/LF 与首尾空白');
+assert.notEqual(normalizePlanText('# 标题\n\n- A'), normalizePlanText('# 标题\n- A'),
+  '内部 Markdown 空行不同必须保留为不同计划');
+assert.notEqual(normalizePlanText('步骤  A'), normalizePlanText('步骤 A'),
+  '内部空白不得被过度归一化');
+
+{
+  const persisted = plan('source-persisted', `  ${PLAN_A.replace(/\n/g, '\r\n')}\r\n`);
+  const localFinished = plan('source-local', PLAN_A);
+  localFinished.result = { content: 'ok', isError: false };
+  const streaming = plan('source-streaming', PLAN_A);
+  const markdownVariant = plan('source-variant', '# 标题\n\n- A');
+  const reconciled = reconcilePlanToolCalls([persisted, localFinished, streaming, markdownVariant]);
+  assert.equal(reconciled.length, 2, 'persisted/local-finished/streaming 等价来源全链只留首卡');
+  assert.equal(reconciled[0].toolCall.id, 'source-persisted', '首卡身份与内容位置保留');
+  assert.equal(isApprovedPlanToolCallPure(reconciled[0].toolCall), true, '后续批准结果合并进首卡');
+  assert.equal(reconciled[1].toolCall.id, 'source-variant', '内部 Markdown 不同的计划不合并');
+}
+
+{
+  class MemoryStorage {
+    constructor(entries) { this.values = new Map(entries); }
+    get length() { return this.values.size; }
+    key(index) { return [...this.values.keys()][index] ?? null; }
+    getItem(key) { return this.values.has(key) ? this.values.get(key) : null; }
+    setItem(key, value) { this.values.set(key, String(value)); }
+    removeItem(key) { this.values.delete(key); }
+  }
+  const sigA = normalizePlanText(PLAN_A);
+  const sigB = normalizePlanText(PLAN_B);
+  const storage = new MemoryStorage([
+    ['cgui-goal-hidden:draft-a', 'goal-fingerprint'],
+    [`cgui-plan-hidden:draft-a:${planIdentityKey(sigA)}`, sigA],
+    [`cgui-plan-hidden:draft-a:${planIdentityKey(sigB)}`, sigB],
+    ['cgui-plan-hidden:session-b:foreign', '别的会话'],
+  ]);
+  assert.equal(migrateSessionVisibilityOwner(storage, 'draft-a', 'session-a'), true,
+    'draft→real 迁移目标/计划可见性 owner');
+  assert.equal(storage.getItem('cgui-goal-hidden:session-a'), 'goal-fingerprint');
+  assert.equal(storage.getItem(`cgui-plan-hidden:session-a:${planIdentityKey(sigA)}`), sigA);
+  assert.equal(storage.getItem(`cgui-plan-hidden:session-a:${planIdentityKey(sigB)}`), sigB);
+  assert.equal(storage.getItem('cgui-goal-hidden:draft-a'), null, '写入核验成功后移除 draft 旧键');
+  assert.equal(storage.getItem('cgui-plan-hidden:session-b:foreign'), '别的会话', '其他会话状态不迁');
+}
 
 // ── ① 纯 foldRepeatedPlanCards ────────────────────────────────────────────
-const plan = (id, text) => ({ type: 'tool_use', id, name: 'ExitPlanMode', input: { plan: text } });
 const mkTurn = (uuid, toolCalls, text = [], thinking = []) => ({
   type: 'turn', uuid, toolCalls, text, thinking,
   blocks: toolCalls.map((tc) => ({ type: 'tool_use', toolCall: tc })),
