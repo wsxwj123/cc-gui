@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { Check, Circle, ClipboardList, Loader2, ChevronDown, ChevronRight, EyeOff } from './Icon.jsx';
 import { MarkdownRenderer } from './MarkdownRenderer.jsx';
 import { readTodoCollapsed, writeTodoCollapsed } from '../utils/todoCollapse.js';
-import { normalizePlanText, planIdentityKey } from '../utils/plan.js';
+import { normalizePlanText, planIdentityKey, visiblePlanItems } from '../utils/plan.js';
 
 /**
  * 任务清单条,渲染在 composer 同一列内、紧贴输入框上方(作为输入框的"附着条",而非独立
@@ -14,10 +14,7 @@ import { normalizePlanText, planIdentityKey } from '../utils/plan.js';
  */
 export function TodoPanel({ todos, plan = '', plans = null, isStreaming = false, planKey = 'global' }) {
   const hasTodos = Array.isArray(todos) && todos.length > 0;
-  const cleanPlan = String(plan || '').trim();
-  const visiblePlans = Array.isArray(plans)
-    ? plans.filter((item) => normalizePlanText(item?.plan))
-    : (cleanPlan ? [{ signature: normalizePlanText(cleanPlan), plan: cleanPlan, approved: true }] : []);
+  const visiblePlans = visiblePlanItems(plans, plan);
   if (!hasTodos && visiblePlans.length === 0) return null;
   // 计划卡与任务清单是两张独立并列的卡(兄弟节点),各自带外壳、各管各的隐藏 ——
   // 隐藏清单不影响计划,隐藏计划不影响清单。

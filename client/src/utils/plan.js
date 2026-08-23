@@ -52,6 +52,16 @@ export function reconcilePlanToolCalls(toolCalls) {
   return reconciled;
 }
 
+// TodoPanel 的输入兼容层：新链路传复数 plans；旧调用方仍可传 singular plan。
+// 复数输入存在时不回退 singular，避免旧 prop 在真实计划列表为空/切换时制造幽灵卡。
+export function visiblePlanItems(plans, plan = '') {
+  if (Array.isArray(plans)) {
+    return plans.filter((item) => normalizePlanText(item?.plan));
+  }
+  const cleanPlan = normalizePlanText(plan);
+  return cleanPlan ? [{ signature: cleanPlan, plan: cleanPlan, approved: true }] : [];
+}
+
 // localStorage key 保持短小；完整签名仍作为 value 校验，hash 碰撞时只会安全地“不隐藏”。
 export function planIdentityKey(signature) {
   let hash = 2166136261;
