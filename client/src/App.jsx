@@ -1978,6 +1978,8 @@ function HomeState({ tabIndex = 0 }) {
             <div ref={projBtnRef} className="relative min-w-0">
               <button
                 data-testid="project-selector"
+                aria-haspopup="listbox"
+                aria-expanded={projOpen}
                 onClick={() => setProjOpen((v) => !v)}
                 className="flex items-center gap-1.5 px-2 py-1 rounded-md border border-canvas-deep/70 hover:bg-canvas-warm text-[12px] text-ink-soft font-body min-w-0 transition-colors"
                 title={project ? formatPath(project.path) : '选择项目'}
@@ -1989,18 +1991,20 @@ function HomeState({ tabIndex = 0 }) {
               <AnchoredPopover anchorRef={projBtnRef} open={projOpen} onRequestClose={() => setProjOpen(false)}
                 drop="up" align="left"
                 className="w-72 max-w-[calc(var(--app-w,100vw)-1.5rem)] py-1 max-h-64 overflow-y-auto">
-                {recent.map((p) => (
-                  <button
-                    key={p.hash}
-                    role="option"
-                    aria-selected={project?.hash === p.hash}
-                    onClick={() => { setChosenHash(p.hash); setProjOpen(false); }}
-                    className={`w-full text-left px-2.5 py-1.5 text-[12px] font-body truncate hover:bg-canvas-warm ${project?.hash === p.hash ? 'text-accent' : 'text-ink-soft'}`}
-                    title={formatPath(p.path)}
-                  >
-                    {formatPathShort(p.path)}
-                  </button>
-                ))}
+                <div role="listbox" aria-label="选择项目">
+                  {recent.map((p) => (
+                    <button
+                      key={p.hash}
+                      role="option"
+                      aria-selected={project?.hash === p.hash}
+                      onClick={() => { setChosenHash(p.hash); setProjOpen(false); }}
+                      className={`w-full text-left px-2.5 py-1.5 text-[12px] font-body truncate hover:bg-canvas-warm ${project?.hash === p.hash ? 'text-accent' : 'text-ink-soft'}`}
+                      title={formatPath(p.path)}
+                    >
+                      {formatPathShort(p.path)}
+                    </button>
+                  ))}
+                </div>
                 <button onClick={browse} className="w-full text-left px-2.5 py-1.5 text-[12px] font-body text-accent hover:bg-canvas-warm border-t border-canvas-deep/40 mt-1 pt-1.5">
                   浏览新文件夹…
                 </button>

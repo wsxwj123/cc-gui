@@ -73,6 +73,7 @@ export function PermissionModeSelector({ permKey, tourAnchor = false }) {
   return (
     <div ref={wrapRef} className="relative" data-cgui="mode-selector" data-tour={tourAnchor ? 'mode-selector' : undefined}>
       <button onClick={() => setOpen(!open)} data-testid="permission-mode-selector"
+        aria-haspopup="listbox" aria-expanded={open}
         className="flex items-center gap-1 px-2 py-1 rounded-md hover:bg-black/5 transition-colors"
         title={`权限模式: ${current.label} — ${current.desc}`}>
         <Icon size={12} className={current.tone} />
@@ -82,29 +83,31 @@ export function PermissionModeSelector({ permKey, tourAnchor = false }) {
       <AnchoredPopover anchorRef={wrapRef} open={open} onRequestClose={() => setOpen(false)} drop="up"
         className="w-64 max-w-[calc(var(--app-w,100vw)-1.5rem)] py-1 max-h-[min(60vh,calc(var(--app-h,100dvh)-6rem))] overflow-y-auto">
         <div className="px-3 py-1.5 text-[10px] text-ink-faint uppercase tracking-wider font-body">权限模式 (--permission-mode)</div>
-        {visibleModes.map((m) => {
-          const meta = MODE_META[m];
-          const MIcon = meta.icon;
-          return (
-            <button key={m}
-              role="option"
-              aria-selected={permissionMode === m}
-              onClick={() => {
-                // plan 与 agent 不再互斥:内置 agent 的 tools 已含 ExitPlanMode,
-                // agent 主控本体在 plan 模式下能正常出计划卡片(headless 实证)。
-                setPermissionMode(m, permKey);
-                setOpen(false);
-              }}
-              className={`w-full text-left px-3 py-2 flex items-start gap-2 ${permissionMode === m ? 'bg-accent/12' : ''} hover:bg-black/5`}>
-              <MIcon size={13} className={`${meta.tone} mt-0.5 shrink-0`} />
-              <div className="flex-1 min-w-0">
-                <div className="text-xs font-medium text-ink font-body">{meta.label}</div>
-                <div className="text-[10px] text-ink-faint font-body">{meta.desc}</div>
-              </div>
-              {permissionMode === m && <div className="w-1.5 h-1.5 rounded-full bg-accent mt-1.5 shrink-0" />}
-            </button>
-          );
-        })}
+        <div role="listbox" aria-label="权限模式">
+          {visibleModes.map((m) => {
+            const meta = MODE_META[m];
+            const MIcon = meta.icon;
+            return (
+              <button key={m}
+                role="option"
+                aria-selected={permissionMode === m}
+                onClick={() => {
+                  // plan 与 agent 不再互斥:内置 agent 的 tools 已含 ExitPlanMode,
+                  // agent 主控本体在 plan 模式下能正常出计划卡片(headless 实证)。
+                  setPermissionMode(m, permKey);
+                  setOpen(false);
+                }}
+                className={`w-full text-left px-3 py-2 flex items-start gap-2 ${permissionMode === m ? 'bg-accent/12' : ''} hover:bg-black/5`}>
+                <MIcon size={13} className={`${meta.tone} mt-0.5 shrink-0`} />
+                <div className="flex-1 min-w-0">
+                  <div className="text-xs font-medium text-ink font-body">{meta.label}</div>
+                  <div className="text-[10px] text-ink-faint font-body">{meta.desc}</div>
+                </div>
+                {permissionMode === m && <div className="w-1.5 h-1.5 rounded-full bg-accent mt-1.5 shrink-0" />}
+              </button>
+            );
+          })}
+        </div>
       </AnchoredPopover>
     </div>
   );
