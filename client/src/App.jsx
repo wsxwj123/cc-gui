@@ -81,7 +81,7 @@ import { subscribeSkin, getSkinVersion, getSkinState, reconcileSkinOnBoot, watch
 import { resolveSessionDot, completionTracker, subscribeDots, getDotsVersion, RUN_MATRIX_CELLS, runCellDelayMs } from './utils/sessionDots.js';
 import { seedNewSessionDefaults } from './components/UnifiedSidebar.jsx';
 import { PendingAttachmentList } from './components/PendingAttachmentList.jsx';
-import { attachmentBlockReason, buildAttachmentMessage, pendingAttachment, uploadAttachmentFile } from './utils/attachments.js';
+import { attachmentBlockReason, attachmentMetaForPersistence, buildAttachmentMessage, pendingAttachment, uploadAttachmentFile } from './utils/attachments.js';
 import {
   FolderOpen, MessageSquare, ChevronLeft, ChevronRight, ChevronDown,
   Search, Hash, Layers, BarChart3, ArrowLeft, Plus,
@@ -1850,7 +1850,11 @@ function HomeState({ tabIndex = 0 }) {
     const queued = enqueueHomeDraft({
       store: st,
       sessionKey: queueKeyFor(_homeDraft),
-      envelope: { text: built.prompt, queuedAt: Date.now(), opts: { meta: built.meta } },
+      envelope: {
+        text: built.prompt,
+        queuedAt: Date.now(),
+        opts: { meta: attachmentMetaForPersistence(built.meta) },
+      },
       tabIndex,
       draft: _homeDraft,
     });

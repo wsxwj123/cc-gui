@@ -62,6 +62,26 @@ export function buildAttachmentMessage(text, attachments) {
   return { prompt, meta, displayText: trimmed };
 }
 
+// localStorage 队列只保存有界 preview。Home 页面仍持有完整内存预览；超过总预算的图片
+// 在恢复/首卡中退化为带 name/path/bytes 的文件卡，绝不把 4MiB 图片膨胀后的 data URL
+// 写进队列。预算按整条消息累计，而非“每附件”，多文件也有明确上限。
+export const MAX_PERSISTED_ATTACHMENT_PREVIEW_CHARS = 96 * 1024;
+
+export function attachmentMetaForPersistence(meta, maxPreviewChars = MAX_PERSISTED_ATTACHMENT_PREVIEW_CHARS) {
+  if (!meta || !Array.isArray(meta.attachments)) return meta;
+  const budget = Math.max(0, Number(maxPreviewChars) || 0);
+  let used = 0;
+  return {
+    ...meta,
+    attachments: meta.attachments.map((attachment) => {
+      const preview = typeof attachment?.preview === 'string' ? attachment.preview : null;
+      const keepPreview = !!preview && used + preview.length <= budget;
+      if (keepPreview) used += preview.length;
+      return { ...attachment, preview: keepPreview ? preview : null };
+    }),
+  };
+}
+
 let nextUploadId = 0;
 export function pendingAttachment(file) {
   nextUploadId += 1;

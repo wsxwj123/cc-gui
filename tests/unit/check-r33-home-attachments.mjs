@@ -4,7 +4,9 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
+  MAX_PERSISTED_ATTACHMENT_PREVIEW_CHARS,
   attachmentBlockReason,
+  attachmentMetaForPersistence,
   buildAttachmentMessage,
   pendingAttachment,
   uploadAttachmentFile,
@@ -38,6 +40,35 @@ const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
     /文件太大/,
     '上传失败必须抛给 UI，不能伪装成已上传',
   );
+}
+
+// 4MiB 图片的 data URL 约 5.6M 字符：Home 内存 meta 保留原图，队列克隆剥离超预算
+// preview，同时 name/path/bytes/kind 完整可恢复。
+{
+  const fourMiB = Buffer.alloc(4 * 1024 * 1024, 0xab);
+  const preview = `data:image/png;base64,${fourMiB.toString('base64')}`;
+  const original = {
+    displayText: '',
+    attachments: [{ kind: 'image', name: 'large.png', path: '/tmp/large.png', bytes: fourMiB.length, preview }],
+  };
+  const persistedMeta = attachmentMetaForPersistence(original);
+  assert.equal(original.attachments[0].preview, preview, '普通 composer/Home 当前内存预览不被突变');
+  assert.equal(persistedMeta.attachments[0].preview, null, '超预算 preview 不进队列');
+  assert.deepEqual(
+    { ...persistedMeta.attachments[0], preview: undefined },
+    { kind: 'image', name: 'large.png', path: '/tmp/large.png', bytes: fourMiB.length, preview: undefined },
+    '恢复所需附件字段完整保留',
+  );
+  assert.ok(JSON.stringify(persistedMeta).length < MAX_PERSISTED_ATTACHMENT_PREVIEW_CHARS + 1024,
+    '持久快照 preview 有明确总上限');
+
+  const small = 'data:image/png;base64,' + 'a'.repeat(60 * 1024);
+  const multi = attachmentMetaForPersistence({ attachments: [
+    { path: '/tmp/1', preview: small },
+    { path: '/tmp/2', preview: small },
+  ] });
+  assert.equal(multi.attachments[0].preview, small, '预算内缩略图保留');
+  assert.equal(multi.attachments[1].preview, null, '多附件按整条消息总预算截断');
 }
 
 // 多文件 / attachment-only / 上传中与失败门禁共用同一消息构造器。
@@ -84,12 +115,14 @@ const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 // 真 store：quota 写失败不改内存；恢复后持久化公开信封 {text,queuedAt,opts:{meta}}。
 {
   class QuotaStorage {
-    constructor() { this.values = new Map(); this.failQueueWrites = false; }
+    constructor() { this.values = new Map(); this.failQueueWrites = false; this.maxQueueChars = Infinity; }
     get length() { return this.values.size; }
     key(index) { return [...this.values.keys()][index] ?? null; }
     getItem(key) { return this.values.has(key) ? this.values.get(key) : null; }
     setItem(key, value) {
-      if (this.failQueueWrites && key === 'cgui-message-queue') throw new DOMException('quota', 'QuotaExceededError');
+      if (key === 'cgui-message-queue' && (this.failQueueWrites || String(value).length > this.maxQueueChars)) {
+        throw new DOMException('quota', 'QuotaExceededError');
+      }
       this.values.set(key, String(value));
     }
     removeItem(key) { this.values.delete(key); }
@@ -110,6 +143,25 @@ const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
   assert.equal(persisted.text, envelope.text);
   assert.equal(persisted.queuedAt, envelope.queuedAt);
   assert.deepEqual(persisted.opts.meta, envelope.opts.meta);
+
+  // 同一个真实 store + 4MiB preview：原 envelope 会超过模拟 quota；Home 持久化克隆可入队。
+  const hugePreview = `data:image/png;base64,${Buffer.alloc(4 * 1024 * 1024, 0xcd).toString('base64')}`;
+  const rawMeta = { displayText: '', attachments: [{
+    kind: 'image', name: 'quota.png', path: '/tmp/quota.png', bytes: 4 * 1024 * 1024, preview: hugePreview,
+  }] };
+  storage.maxQueueChars = 200 * 1024;
+  assert.ok(JSON.stringify(rawMeta).length > storage.maxQueueChars, '夹具确实会触发 quota');
+  const boundedEnvelope = {
+    text: '请查看这些附件\n\n附件:\n@/tmp/quota.png',
+    queuedAt: 21,
+    opts: { meta: attachmentMetaForPersistence(rawMeta) },
+  };
+  assert.ok(useStore.getState().enqueueMessage('draft-large-image', boundedEnvelope), '有界 meta 可真实入队');
+  const largePersisted = JSON.parse(storage.getItem('cgui-message-queue'))['draft-large-image'][0];
+  assert.equal(largePersisted.opts.meta.attachments[0].preview, null);
+  assert.equal(largePersisted.opts.meta.attachments[0].name, 'quota.png');
+  assert.equal(largePersisted.opts.meta.attachments[0].path, '/tmp/quota.png');
+  assert.equal(largePersisted.opts.meta.attachments[0].bytes, 4 * 1024 * 1024);
 }
 
 // 稳定 selector 是接口接线哨兵；核心上传/队列行为均由上面的真实函数与 store 覆盖。
