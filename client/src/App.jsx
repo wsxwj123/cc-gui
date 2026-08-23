@@ -69,7 +69,7 @@ import { extractToolResultText, finalizePendingToolCalls, applyFinalizedToBlocks
 import { rebuildTodosFromTaskCalls } from './utils/todos.js';
 import { isSteered, firstSteerableIndex, isSteerBarrier, persistedSteerKeys, queueKeyFor } from './utils/steerQueue.js';
 import { isInitBindingOrigin, isResetBindingOrigin, isCliNoContentPlaceholder, makeProviderModelGuard, migrateDraftQueue, paneMessagesOwned, resolveHistModel, resolveSelectorModel, resolveSendModel } from './utils/routing.js';
-import { parseGoalCommand } from './utils/goal.js';
+import { migrateOptimisticGoalOwner, optimisticGoalForOwner, parseGoalCommand } from './utils/goal.js';
 import { nativeContextWindow, isBareClaudeAlias, pickCliContextWindow } from './utils/contextWindow.js';
 import { extractMcpServerIssues, formatMcpServerNotice } from './utils/mcpStatus.js';
 import { classifyRepairOutcome, classifyCheckOutcome, upsertRepairHint, removeRepairHint, loadRepairHints, persistRepairHints } from './utils/repairFlow.js';
@@ -2913,7 +2913,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // goal 记录(同 condition,met:false)到达再切回历史驱动并清乐观态。per-pane:本组件实例天然
   // 分屏隔离(key=permKey 挂 GoalBar);切会话即清乐观态,不跨会话泄漏。达成/判定的 reason
   // 更新一律走历史,乐观态里不造(只带 condition)。
-  const [optimisticGoal, setOptimisticGoal] = useState(null);
+  const [optimisticGoalState, setOptimisticGoalState] = useState(null);
+  const optimisticGoal = optimisticGoalForOwner(optimisticGoalState, sessionQueueKey);
   // 历史里是否已出现本目标的生效记录(同 condition 且 met:false)。一旦到达,历史即权威。
   const optimisticLanded = useMemo(() => (
     !!optimisticGoal
@@ -2926,11 +2927,16 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   useEffect(() => {
     if (optimisticGoal
       && messages.some((m) => m?.type === 'goal' && m.condition === optimisticGoal.condition && !m.met)) {
-      setOptimisticGoal(null);
+      setOptimisticGoalState(null);
     }
   }, [messages, optimisticGoal]);
-  // 切会话 → 乐观态清空(乐观只属于本次设置所在的会话窗格,别带到下一个会话)。
-  useEffect(() => { setOptimisticGoal(null); }, [selectedSession?.sessionId]);
+  // 切会话时渲染期 owner 门已同步挡住旧目标；effect 只回收确属旧 owner 的状态。
+  // draft→real 的 init 会在 pane 换绑同一批更新里先迁 owner，不能被这里误清而闪失。
+  useEffect(() => {
+    setOptimisticGoalState((prev) => (
+      prev && prev.ownerKey !== sessionQueueKey ? null : prev
+    ));
+  }, [sessionQueueKey]);
   // C2:用于把 AutoCompactBanner 限定在「当前聚焦的 pane」——分屏下非聚焦 pane 不应
   // 在你没看着时静默 /compact 改写历史。单窗格时 activeTabIndex 恒为 0 = 本 pane。
   const paneIsActive = useStore((s) => s.activeTabIndex) === tabIndex;
@@ -4084,8 +4090,10 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     // 排队中返回不走此段 ⇒ 排队不亮;历史记录到达后切回历史驱动并清乐观态(见上方 effect)。
     if (!reattachPid && !hiddenUserMessage) {
       const _gc = parseGoalCommand(prompt);
-      if (_gc) setOptimisticGoal(
-        _gc.type === 'clear' ? null : { met: false, sentinel: true, condition: _gc.condition },
+      if (_gc) setOptimisticGoalState(
+        _gc.type === 'clear'
+          ? null
+          : { ownerKey: sessionQueueKey, goal: { met: false, sentinel: true, condition: _gc.condition } },
       );
     }
 
@@ -4616,12 +4624,18 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
               }
             }
             if (selIsOrigin) {
+              const _draftOwnerKey = queueKeyFor(sel);
+              // 乐观目标与 pane 的 draft→real 换绑同批迁移。若状态不属于该 draft，
+              // 纯函数保持原引用，异步 init 不会把别的会话目标抢到本 session。
+              setOptimisticGoalState((prev) => migrateOptimisticGoalOwner(
+                prev, _draftOwnerKey, event.session_id,
+              ));
               // Carry the draft's per-session model/permission pins to the real
               // session id so a model picked for a brand-new chat doesn't revert.
-              useStore.getState().migrateSessionKey(queueKeyFor(sel), event.session_id);
+              useStore.getState().migrateSessionKey(_draftOwnerKey, event.session_id);
               // I4:草稿流拿到真 sessionId,把流归属 key 一并升级,否则 setSelectedSession
               // 把当前会话 key 变成真 id 后,渲染层会判定"流不属于当前会话"而误隐藏本条流。
-              if (streamOwnerKeyRef.current === queueKeyFor(sel)) {
+              if (streamOwnerKeyRef.current === _draftOwnerKey) {
                 setStreamOwner(event.session_id);
               }
               // opus/sonnet 双审计:draft-key 升级成真 sid 后,两处本地态还挂着旧键,必须一并迁:
@@ -4630,7 +4644,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
               // (btw 无 jsonl 孪生=内容丢失);②ChatInput 的 localStorage 草稿(cgui-draft:<key>)——
               // draftKey 变更 effect 会读新键(必空)把正在打的下一条消息清掉,先把旧值复制过去。
               {
-                const _dk0 = queueKeyFor(sel);
+                const _dk0 = _draftOwnerKey;
                 setChatMessages((prev) => (prev.some((m) => m.ownerKey === _dk0)
                   ? prev.map((m) => (m.ownerKey === _dk0 ? { ...m, ownerKey: event.session_id } : m))
                   : prev));

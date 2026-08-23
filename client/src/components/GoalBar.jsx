@@ -81,7 +81,7 @@ export function GoalBar({ goal, onSend, permKey = 'global' }) {
   };
 
   return (
-    <div data-cgui="goal-bar" className="mb-2 rounded-full border border-canvas-deep bg-canvas-warm/60 backdrop-blur-soft px-3 py-1.5 flex items-center gap-2">
+    <div data-cgui="goal-bar" data-testid="goal-bar" className="mb-2 rounded-full border border-canvas-deep bg-canvas-warm/60 backdrop-blur-soft px-3 py-1.5 flex items-center gap-2">
       {editing && isActive ? (
         <>
           <Target size={13} className="text-accent shrink-0" />
@@ -127,12 +127,11 @@ export function GoalBar({ goal, onSend, permKey = 'global' }) {
               </button>
             </>
           )}
-          {!isActive && (
-            <button onClick={hideGoal} title="隐藏目标条"
-              className="shrink-0 p-1 rounded hover:bg-canvas-deep/40 text-ink-muted hover:text-ink transition-colors">
-              <EyeOff size={13} />
-            </button>
-          )}
+          <button onClick={hideGoal} title="隐藏目标条" aria-label="隐藏目标条"
+            data-testid="goal-hide"
+            className="shrink-0 p-1 rounded hover:bg-canvas-deep/40 text-ink-muted hover:text-ink transition-colors">
+            <EyeOff size={13} />
+          </button>
         </>
       )}
     </div>
