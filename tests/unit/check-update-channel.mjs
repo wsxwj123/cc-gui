@@ -66,9 +66,17 @@ console.log('check-update-channel: all passed (r13-p2-20)');
   // 会直接毁掉用户的安装(Windows 实报)。改为 8 分钟只提示、60 分钟极限兜底才杀。
   assert.match(stream, /const clearUpdateTimers = startUpdateTimers\(\)/, 't6: 定时器走 startUpdateTimers');
   assert.ok(!/8 \* 60 \* 1000/.test(stream), 't6: stream 里不得再有 8 分钟强杀定时器(哨兵锚:改回即红)');
+  // 更硬的锚:整个 stream 路由里不得出现任何杀进程调用 —— 只挡 8 分钟那个字面量的话,
+  // 后人另加一条 setTimeout(kill, N) 照样溜过去。终止只许发生在 cancel 端点与兜底定时器。
+  assert.ok(!/kill(UpdateTree)?\(/.test(stream), 't6: stream 路由内不得直接杀进程');
   // 对账与主动取消端点
   assert.match(src, /router\.get\('\/claude-update\/status'/, 't6: 状态对账端点');
   assert.match(src, /router\.post\('\/claude-update\/cancel'/, 't6: 主动取消端点(关面板不再等于取消)');
+  // r34:取消是超时不再自动杀之后【唯一】的终止口,必须真的杀(此前零覆盖)
+  assert.match(src, /router\.post\('\/claude-update\/cancel'[\s\S]{0,600}killUpdateTree\(\)/, 't6: cancel 端点真杀进程树');
+  // r34-③:正向计数锚 —— 三个"把代理喂给子进程/终端脚本"的注入点都必须走探活版本。
+  // 反向断言(不许出现 detectLocalProxy().catch)挡不住换名/换写法的回退。
+  assert.equal((src.match(/detectLiveProxy\(\)/g) || []).length, 3 + 1, 't6: 三个注入点 + 一处定义,全走探活代理');
   // 前端:挂载对账 + 续看复用同一流函数
   const ui = readFileSync(new URL('../../client/src/components/SettingsPanel.jsx', import.meta.url), 'utf8');
   assert.match(ui, /fetch\('\/api\/claude-update\/status'\)/, 't6: 前端挂载对账');

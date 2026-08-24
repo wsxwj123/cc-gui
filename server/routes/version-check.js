@@ -552,19 +552,35 @@ export async function detectLocalProxy({ readSystem = readSystemProxy } = {}) { 
 
 // r34-③:【注入前必须探活】。detectLocalProxy 的第一分支(server 自己的 HTTP(S)_PROXY
 // env)按"显式配置信任优先"不探活 —— 但那份 env 可能是代理软件退出后残留的死地址,
-// 不验活就写进子进程 env,整条更新/安装全走死代理 = 用户看到"卡死/超时"。
-// r31 给插件安装的 marketplaceProxyEnv 已按同口径处理过,更新这条路当时没跟上。
-// 探不通 → 返回 null(直连),绝不因为"探测器自己出错"就改注入。export 仅为可单测。
+// 带着它跑更新 = 走一个不存在的出口,挂到兜底被杀。
+// 对照:r31 的 marketplaceProxyEnv 只做了"不覆盖用户已有 env",既不探活也不删死代理;
+// 那条路(marketplace add/update)失败即返回,不像更新会一直挂着,所以当时没做到这一步。
+//
+// 【只对回环地址判死】:企业/局域网代理(proxy.corp:80、TUN 网关)探不通的原因太多
+// (ACL、只认 CONNECT、探测源不同),而 r34 之后"判死"是有牙的(会把代理从子进程 env 里
+// 删掉)—— 误杀一个能用的代理,用户直连必然挂满 60 分钟兜底,比不探活更糟。
+// 故:非回环一律原样信任;解析不了/探测器自己炸 = 无法证伪,同样信任。export 仅为可单测。
 export async function liveProxy(proxyUrl, probe = probeTcp) {
   if (!proxyUrl) return null;
   try {
     const u = new URL(proxyUrl);
-    return (await probe(u.hostname, Number(u.port) || 8080)) ? proxyUrl : null;
-  } catch { return null; }
+    const host = u.hostname.replace(/^\[|\]$/g, ''); // IPv6 字面量带方括号,剥掉再探
+    if (!/^(127\.|::1$|localhost$)/.test(host)) return proxyUrl;
+    return (await probe(host, Number(u.port) || (u.protocol === 'https:' ? 443 : 80))) ? proxyUrl : null;
+  } catch { return proxyUrl; }
 }
-/** 探活通过才返回的代理 —— 所有"把代理喂给子进程/终端脚本"的调用点都用这个。 */
+/**
+ * 探活通过才返回的代理。用在"把代理喂给子进程 env / 终端脚本"的调用点:
+ * /claude-update、/claude-update/stream(内联,要额外报告死代理)、/claude-install、
+ * /env-check/install。仍用原值的两处是刻意的:/claude-version-check 的 proxy 字段透传给
+ * Tauri updater(它自己下载、自己超时),httpGetText 的 curl 回退(15s 上限,失败即止)。
+ */
 export async function detectLiveProxy() {
   return liveProxy(await detectLocalProxy().catch(() => null));
+}
+/** 代理地址可能带 user:pass@,进日志/回执前遮罩(只遮 userinfo,主机端口要能看)。 */
+export function maskProxy(url) {
+  return String(url || '').replace(/\/\/[^/@]*@/, '//***@');
 }
 
 function launchInTerminal(cmd, title, proxyUrl = null) {
@@ -727,6 +743,7 @@ export const updateTask = {
   status: 'idle',          // idle | running | done | error
   code: null,
   error: '',
+  cancelRequested: false,  // r34-②:spawn 前的取消(那时还没有 child 可杀),spawn 前兑现
   log: [],                 // 最近 500 行
   startedAt: 0,
   finishedAt: 0,
@@ -764,7 +781,7 @@ function killUpdateTree() {
 export const UPDATE_SLOW_NOTICE_MS = 8 * 60 * 1000;
 export const UPDATE_HARD_LIMIT_MS = 60 * 60 * 1000;
 export const UPDATE_SLOW_NOTICE_LINE = '⚠️ 更新已运行 8 分钟,仍在进行中(不会自动终止)。npm 源较慢时 81MB 的平台包可能需要 30-60 分钟,建议继续等待;确实要停可点「取消更新」—— 取消可能留下半成品安装,重新运行一次更新即可补齐。';
-export const UPDATE_HARD_LIMIT_ERROR = '更新已超过 60 分钟仍未完成,判定为挂死并终止。若 claude 因此不可用:重新运行一次更新即可补齐缺失文件,不必手动清理。';
+export const UPDATE_HARD_LIMIT_ERROR = '更新已超过 60 分钟仍未完成,判定为挂死并终止。npm 源过慢是常见根因:确认代理已开后重试,或点「改用终端更新」走官方渠道。若 claude 因此不可用:重新运行一次更新即可补齐缺失文件,不必手动清理。';
 // 慢提示(不杀)+ 极限兜底(杀)。返回清理函数,正常完成/失败收尾时调用。
 // 延时可注入仅为可单测(单测不可能真等 8 分钟);export 仅为可单测。
 export function startUpdateTimers({
@@ -813,6 +830,7 @@ router.post('/claude-update/stream', async (req, res) => {
   updateTask.status = 'running';
   updateTask.code = null;
   updateTask.error = '';
+  updateTask.cancelRequested = false;
   updateTask.log = [];
   updateTask.restored = null;
   updateTask.startedAt = Date.now();
@@ -850,16 +868,36 @@ router.post('/claude-update/stream', async (req, res) => {
   }
   const env = { ...process.env };
   if (proxyUrl) { env.HTTP_PROXY = env.HTTPS_PROXY = env.http_proxy = env.https_proxy = proxyUrl; }
+  else if (deadProxy) {
+    // r34-③修:【判死必须删 env】。detectLocalProxy 的第一分支读的就是 server 自己的
+    // HTTP(S)_PROXY —— 判死后只是"不注入"的话,`{...process.env}` 原样把那份死代理带给
+    // npm,照走死出口:挂满兜底时长再被杀,正好落回本轮要根治的半装损坏。
+    // npm 另有自己的 npm_config_* 口径,一并删(.npmrc 里的配置管不到,故日志不说"直连")。
+    for (const k of ['HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy', 'npm_config_proxy', 'npm_config_https_proxy']) delete env[k];
+  }
 
   updateTask.cmd = cmd;
 
-  taskPush({ type: 'start', command: cmd, method, proxy: proxyUrl });
-  if (deadProxy) taskPush({ type: 'log', line: `检测到代理 ${deadProxy} 不可达,本次更新直连。` });
+  taskPush({ type: 'start', command: cmd, method, proxy: proxyUrl && maskProxy(proxyUrl) });
+  if (deadProxy) taskPush({ type: 'log', line: `检测到代理 ${maskProxy(deadProxy)} 不可达,本次更新不再注入代理(.npmrc 里的代理配置本进程管不到)。` });
 
   // Windows:先关常驻 claude 释放 claude.exe 锁(否则覆盖失败 "could not write");等 ~1.2s 让进程退出。
   if (process.platform === 'win32') {
     let closed = 0; try { closed = closeAllPersistentProcesses(); } catch {}
     if (closed) { taskPush({ type: 'log', line: `已关闭 ${closed} 个运行中的 claude 进程以释放 claude.exe(更新前置)` }); await new Promise((r) => setTimeout(r, 1200)); }
+  }
+
+  // r34-②:从占位 running 到这里有 2-15 秒(detectInstall 走登录 shell + 探活 + Win 那 1.2s
+  // 等待)。这段窗口里点取消,killUpdateTree 看到 child=null 直接 return —— 用户拿到
+  // 「已取消」的回执,进程却照常起来跑。所以取消要落成标志,在 spawn 前兑现。
+  if (updateTask.cancelRequested) {
+    updateTask.status = 'error';
+    updateTask.error = withRecoveryHint('已由用户终止(更新进程尚未启动,未做任何改动)', cmd);
+    updateTask.finishedAt = Date.now();
+    taskPush({ type: 'error', error: updateTask.error });
+    for (const r of updateTask.listeners) { try { r.end(); } catch {} }
+    updateTask.listeners.clear();
+    return;
   }
 
   let child;
@@ -909,7 +947,10 @@ router.post('/claude-update/stream', async (req, res) => {
     updateTask.restored = restored;
     updateTask.finishedAt = Date.now();
     updateTask.child = null;
-    taskPush({ type: 'done', code });
+    // r34-③:done 必须带上原因。前端 done 分支无条件覆盖 result,不带 error 的话
+    // 取消/兜底超时刚推的那条 error 帧会被「命令退出码 null」盖掉,恢复指引全丢。
+    // (形状与 /attach 的终态帧一致。)
+    taskPush({ type: 'done', code, error: updateTask.error });
     if (restored) taskPush({ type: 'override-restored', path: restored.path, version: restored.version });
     for (const r of updateTask.listeners) { try { r.end(); } catch {} }
     updateTask.listeners.clear();
@@ -961,10 +1002,14 @@ router.get('/claude-update/status', (_req, res) => {
 // POST /api/claude-update/cancel — 用户主动终止(关面板不再等于取消,故给显式出口)。
 // r34-①:超时不再自动杀 → 这里是唯一的"用户显式决定"的终止口,保留杀的能力。
 router.post('/claude-update/cancel', (_req, res) => {
-  if (updateTask.status !== 'running') return res.json({ ok: true, running: false });
+  if (updateTask.status !== 'running') return res.json({ ok: true, running: false, cancelled: false });
   updateTask.error = withRecoveryHint('已由用户终止', updateTask.cmd);
+  // r34-②:进程还没起(检测/探活窗口)时杀不到东西 —— 记标志,由 spawn 前的检查兑现,
+  // 回执如实告诉前端是"立刻杀了"还是"记下了待兑现",别再一律回 cancelled:true。
+  const hadChild = !!updateTask.child?.pid;
+  updateTask.cancelRequested = true;
   killUpdateTree();
-  res.json({ ok: true, running: false, cancelled: true });
+  res.json({ ok: true, running: false, cancelled: true, deferred: !hadChild });
 });
 
 /**

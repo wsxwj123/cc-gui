@@ -115,7 +115,9 @@ try {
   assert.match(sp, /ev\.type === 'override-restored'/, 't3b: 更新流回执消费');
   assert.match(sp, /已自动恢复你的手动指定/, 't3b: 回执文案');
   assert.match(sp, /改用终端更新\n?\s*<\/button>/, 't3b: ①d 失败态终端兜底可见');
-  // r34:8 分钟不再终止(强杀会毁掉半装完的 npm 包),文案改成"仍在跑"的预期管理 + 恢复指引
+  // r34:8 分钟不再终止(强杀会毁掉半装完的 npm 包),文案改成"仍在跑"的预期管理;
+  // 但旧文案给的两个出口(代理/改用终端)必须保留 —— 挪到 60 分钟兜底那条上。
+  assert.match(vc, /npm 源过慢是常见根因:确认代理已开后重试,或点「改用终端更新」走官方渠道/, 't3b: ①d 超时文案指引');
   assert.match(vc, /npm 源较慢时 81MB 的平台包可能需要 30-60 分钟/, 't3b: ①d 慢提示给出真实耗时预期');
   assert.match(vc, /重新运行一次更新即可补齐/, 't3b: ①d 中断后给恢复指引');
   assert.doesNotMatch(vc, /npm config set registry|--registry/, 't3b: 不做一键换源(不碰 npm 配置)');
