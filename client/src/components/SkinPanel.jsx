@@ -33,13 +33,30 @@ async function ensureDevSkins() {
   return ok;
 }
 
+// r40:T2 装载失败原因可见化 —— 修前 activateSkin 返回的 { loaded:false, reason } 在
+// 卡片路径被整个丢掉,用户看到的是「点了没反应」。纯映射(单测直取跑矩阵),返回
+// null = 不提示:成功不提示,superseded(已被用户随后的另一次激活取代)不提示。
+function t2FailureText(t2) {
+  if (!t2 || t2.loaded) return null;
+  if (t2.reason === 'disabled') return '皮肤的代码层未载入:需先开启下方「开发者皮肤(本机)」开关。颜色变量部分已应用。';
+  if (t2.reason === 'script_rejected') return `皮肤的 client.js 未通过安全校验,代码层未载入(命中:${(t2.hits || []).join('、')})。样式与颜色部分已应用。`;
+  if (t2.reason === 'superseded') return null;
+  return `皮肤的代码层未载入(${t2.reason || '未知原因'})。样式与颜色部分已应用。`;
+}
+// 提示形态照抄本仓既有通知式用法:confirmDialog(文案, { confirmText: '知道了' })。
+async function reportT2Failure(t2) {
+  const text = t2FailureText(t2);
+  if (text) await confirmDialog(text, { confirmText: '知道了' });
+}
+
 function SkinCard({ row, active, onChanged }) {
   // r28:内置皮肤不再混入本网格(独立 gallery 区块,见 BuiltinGallery),这里只渲染
   // 服务端用户皮肤,删除按钮安全(DELETE /api/skins/<id> 不会打到 builtin- id)。
   const apply = async (tryOn) => {
     if (row.manifest?.tier === 2 && !(await ensureDevSkins())) return;
-    await activateSkin(row, { tryOn });
+    const { t2 } = await activateSkin(row, { tryOn }) || {};
     onChanged?.();
+    await reportT2Failure(t2);
   };
   const remove = async () => {
     const ok = await confirmDialog(`删除皮肤「${row.name}」？文件将从本机皮肤库移除。`, { danger: true, confirmText: '删除' });
@@ -83,7 +100,8 @@ function BuiltinSkinCard({ row, active, devOn }) {
   const tagline = m.tagline || m.description || '';
   const apply = async (tryOn) => {
     if (!devSkinsEnabled()) return; // 双保险:按钮已按 devOn 门控,这里再挡一次直调
-    await activateSkin(row, { tryOn });
+    const { t2 } = await activateSkin(row, { tryOn }) || {};
+    await reportT2Failure(t2);
   };
   return (
     <div className={`rounded-panel border p-2 flex flex-col gap-1.5 ${active ? 'border-accent/60 bg-accent-subtle/40' : 'border-canvas-deep bg-canvas-warm/50'}`}>
