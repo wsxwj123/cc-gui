@@ -28,3 +28,10 @@ export const BUILTIN_PLUGINS = [
   { id: 'superpowers',          name: 'Superpowers',         desc: 'obra 出品工作流技能合集:头脑风暴/写计划/TDD/系统调试等(第三方源;skill 随插件装到 ~/.claude/plugins,以 superpowers:xxx 命名,不进 ~/.claude/skills)', repo: 'obra/superpowers-marketplace', marketplace: 'superpowers-marketplace',
     usage: '插件内 skill 以 superpowers: 前缀调用,如 /superpowers:brainstorming。不会出现在 Skill 面板列表,可在插件条目展开查看清单。' },
 ];
+
+export function pluginInstallErrorMessage(error, fallback = '安装失败') {
+  if (error && typeof error === 'object' && !Array.isArray(error)) {
+    return String(error.message || '').trim() || fallback;
+  }
+  return String(error || '').trim() || fallback;
+}

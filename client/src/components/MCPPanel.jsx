@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { Server, Package, FolderOpen, RefreshCw, Plug, Activity, Check, X, Plus, Pencil, Trash2, Zap, Download, ArrowLeft, LogIn, LogOut, Search, ChevronRight } from './Icon.jsx';
-import { BUILTIN_PLUGINS } from '../utils/builtinPlugins.js';
+import { BUILTIN_PLUGINS, pluginInstallErrorMessage } from '../utils/builtinPlugins.js';
 import { findBuiltinMcp } from '../utils/builtinMcpServers.js';
 import { McpForm } from './McpForm.jsx';
 import { confirmDialog } from '../utils/confirmDialog.jsx';
@@ -285,7 +285,7 @@ export function MCPPanel() {
         body: JSON.stringify({ name: id, ...(plugin.repo ? { repo: plugin.repo } : {}), ...(plugin.marketplace ? { marketplace: plugin.marketplace } : {}) }),
       });
       const d = await r.json();
-      if (!r.ok) throw new Error(d.error || '安装失败');
+      if (!r.ok) throw new Error(pluginInstallErrorMessage(d.error));
       await fetchData(); // 刷新已安装列表
       setInstallingPlugin(null); // 先停 spinner 再弹窗
       // 与插件更新一致:安装成功弹窗提示(新会话生效);有 usage 的追加用法说明。

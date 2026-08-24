@@ -8,7 +8,7 @@ import { promisify } from 'util';
 import { syncMcpToAgents } from './agents.js';
 import { assertPublicBaseURL } from './settings.js';
 import { claudeCommand } from '../utils/claude-resolver.js';
-import { detectUv, detectLocalProxy } from './version-check.js';
+import { detectUv, detectLocalProxy, probeTcp } from './version-check.js';
 import { searchRegistry } from '../services/mcp-registry.js';
 
 const execFileP = promisify(execFile);
@@ -82,9 +82,14 @@ async function probeStdioStderr(cfg, timeoutMs = 6000) {
 // All `claude ...` invocations go through execFile with an args array — no shell, no injection.
 // Async (not execFileSync) so a slow CLI cold start doesn't freeze the whole event loop —
 // and with it every other client's live SSE stream — for up to `timeout` ms.
-// extraEnv:附加子进程环境变量(marketplace 操作注代理用),合并进 process.env 之后,
-// 不覆盖 process.env 已有键的语义由调用方(marketplaceProxyEnv)保证。
-async function runClaude(args, { timeout = 10000, extraEnv = null } = {}) {
+// env:完整子进程环境副本。插件路径用它剔除死代理而不修改父进程 process.env;
+// 其余调用仍可用 extraEnv 做增量合并。
+async function runClaude(args, {
+  timeout = 10000,
+  extraEnv = null,
+  env = null,
+  killTreeOnTimeout = false,
+} = {}) {
   // 路径解析统一走 claude-resolver(与检测面板/聊天链路同源,PATH 外安装位也可用);
   // Windows 的 .cmd/.bat 不是真正可执行文件,claudeCommand 已包好 cmd.exe /c。
   const { file, args: fullArgs } = claudeCommand(args);
@@ -95,17 +100,22 @@ async function runClaude(args, { timeout = 10000, extraEnv = null } = {}) {
   // 非 Win claude 是直接子进程,内建超时直接杀它无孤儿。
   const p = execFileP(file, fullArgs, {
     encoding: 'utf-8',
-    timeout: isWin ? 0 : timeout,
-    env: { ...process.env, ...(extraEnv || {}) },
+    timeout: (isWin || killTreeOnTimeout) ? 0 : timeout,
+    env: env ? { ...env } : { ...process.env, ...(extraEnv || {}) },
     maxBuffer: 8 * 1024 * 1024,
+    // 插件 CLI 可能再拉起 git/包装器；独立进程组才能在 120 秒边界清掉整棵树。
+    detached: killTreeOnTimeout && !isWin,
   });
   let timedOut = false, timer = null;
-  if (isWin && timeout > 0) {
+  if ((isWin || killTreeOnTimeout) && timeout > 0) {
     const child = p.child;
     timer = setTimeout(() => {
       timedOut = true;
       if (child?.pid != null) {
-        try { spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], { stdio: 'ignore' }); } catch {}
+        try {
+          if (isWin) spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], { stdio: 'ignore' });
+          else process.kill(-child.pid, 'SIGKILL');
+        } catch { try { child.kill('SIGKILL'); } catch {} }
       }
     }, timeout);
   }
@@ -1067,7 +1077,14 @@ router.post('/plugins/:name/update', async (req, res) => {
       } catch { return null; }
     };
     const beforeVersion = await readVer(); // 更新前版本,用于判"其实没更新"
-    if (mk) { try { await runClaude(['plugin', 'marketplace', 'update', mk], { timeout: 30000, extraEnv: await marketplaceProxyEnv() }); } catch {} }
+    if (mk) {
+      try {
+        await runClaude(['plugin', 'marketplace', 'update', mk], {
+          timeout: PLUGIN_CLI_TIMEOUT_MS,
+          env: await marketplaceProxyEnv(),
+        });
+      } catch {}
+    }
     await runClaude(['plugin', 'update', name], { timeout: 90000 });
     invalidateMcpCache();
     const version = await readVer(); // 更新后版本(前端弹窗"已更新为 vX")
@@ -1101,6 +1118,14 @@ router.delete('/plugins/:name', async (req, res) => {
 // 真实原因(市场刷新失败)被吞。故:add 仅忽略「已存在」类幂等报错,其余带上 stderr 原文抛出;
 // update 失败一律抛出。
 const OFFICIAL_MARKETPLACE = 'claude-plugins-official';
+export const PLUGIN_CLI_TIMEOUT_MS = 120000;
+const PLUGIN_PROXY_KEYS = ['HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy'];
+
+function pluginEnvWithoutProxy(baseEnv = process.env) {
+  const env = { ...baseEnv };
+  for (const key of PLUGIN_PROXY_KEYS) delete env[key];
+  return env;
+}
 
 function errText(err) {
   return (err?.stderr?.toString() || err?.message || String(err || '')).trim();
@@ -1114,32 +1139,118 @@ export function isMarketplaceStaleError(err) {
   return /out of date|not found|marketplace update|本地副本/i.test(errText(err));
 }
 
-// r29:marketplace add/update 要拉 GitHub,Windows 无代理直连常拉不动 → 给子进程注代理 env。
-// 不覆盖用户已有 env(显式配置优先);探测不到代理返回 {}。export 仅为可单测。
-export async function marketplaceProxyEnv(detect = detectLocalProxy, baseEnv = process.env) {
-  const proxy = await detect().catch(() => null);
-  if (!proxy) return {};
-  const env = {};
-  for (const k of ['HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy']) {
-    if (!baseEnv[k]) env[k] = proxy;
+// 代理 URL 只探 TCP 可连接性，不发送应用请求；解析失败、端口不可达都视为不可用。
+export async function probePluginProxy(proxyUrl, probe = probeTcp) {
+  try {
+    const raw = String(proxyUrl || '').trim();
+    if (!raw) return false;
+    const url = new URL(/^[a-z][a-z\d+.-]*:\/\//i.test(raw) ? raw : `http://${raw}`);
+    const defaults = { 'http:': 80, 'https:': 443, 'socks:': 1080, 'socks5:': 1080 };
+    const port = Number(url.port) || defaults[url.protocol];
+    if (!url.hostname || !port || port > 65535) return false;
+    return await probe(url.hostname, port, 600);
+  } catch {
+    return false;
+  }
+}
+
+// marketplace/add/update/install 共用的安全环境副本。四个继承代理逐一探活：死值只从
+// 子进程副本删除，不修改父 env；可达值原样保留。自动探测结果也要可达，且只补空键。
+export async function marketplaceProxyEnv(
+  detect = detectLocalProxy,
+  baseEnv = process.env,
+  probe = probePluginProxy,
+) {
+  const env = { ...baseEnv };
+  for (const key of PLUGIN_PROXY_KEYS) {
+    const inherited = env[key];
+    if (!inherited || !(await probe(inherited))) delete env[key];
+  }
+  const detected = await Promise.resolve().then(() => detect({ baseEnv: env })).catch(() => null);
+  if (detected && await probe(detected)) {
+    for (const key of PLUGIN_PROXY_KEYS) {
+      if (!env[key]) env[key] = detected;
+    }
   }
   return env;
 }
 
+class PluginCliError extends Error {
+  constructor(details, cause = null) {
+    super(details.message, cause ? { cause } : undefined);
+    this.name = 'PluginCliError';
+    this.details = details;
+  }
+}
+
+function pluginCliError(stage, error, messagePrefix = '') {
+  if (error instanceof PluginCliError) {
+    if (!messagePrefix) return error;
+    return new PluginCliError({ ...error.details, message: `${messagePrefix}${error.details.message}` }, error);
+  }
+  const timedOut = error?.killed === true || error?.timedOut === true || error?.code === 'ETIMEDOUT';
+  const message = `${messagePrefix}${errText(error) || 'Claude CLI 执行失败'}`.slice(0, 5000);
+  return new PluginCliError({
+    stage,
+    code: timedOut ? 'CLI_TIMEOUT' : 'CLI_EXIT_NONZERO',
+    retryable: timedOut,
+    timeoutMs: PLUGIN_CLI_TIMEOUT_MS,
+    message,
+    killed: error?.killed === true,
+    timedOut,
+    cliExitCode: error?.code ?? null,
+    signal: error?.signal ?? null,
+  }, error);
+}
+
+function proxyPreflightError(error) {
+  return new PluginCliError({
+    stage: 'proxy-preflight',
+    code: 'PROXY_UNREACHABLE',
+    retryable: true,
+    timeoutMs: PLUGIN_CLI_TIMEOUT_MS,
+    message: `代理连通性检查失败:${errText(error) || '无法生成安全子进程环境'}`.slice(0, 5000),
+    killed: false,
+    timedOut: false,
+    cliExitCode: null,
+    signal: null,
+  }, error);
+}
+
+async function runPluginCli(stage, args, { run = runClaude, env }) {
+  try {
+    return await run(args, {
+      timeout: PLUGIN_CLI_TIMEOUT_MS,
+      env,
+      killTreeOnTimeout: true,
+    });
+  } catch (error) {
+    throw pluginCliError(stage, error);
+  }
+}
+
 // 注册(可选)+ 刷新 marketplace 缓存。失败带 stderr 原文抛出,不再静默。export 仅为可单测。
-export async function ensureMarketplace({ repo = null, marketplace, run = runClaude, detect = detectLocalProxy }) {
-  const opts = { timeout: 30000, extraEnv: await marketplaceProxyEnv(detect) };
+export async function ensureMarketplace({
+  repo = null,
+  marketplace,
+  run = runClaude,
+  detect = detectLocalProxy,
+  env = null,
+  baseEnv = process.env,
+  probe = probePluginProxy,
+}) {
+  const childEnv = env || await marketplaceProxyEnv(detect, baseEnv, probe);
   if (repo) {
     try {
-      await run(['plugin', 'marketplace', 'add', repo], opts);
+      await runPluginCli('marketplace-add', ['plugin', 'marketplace', 'add', repo], { run, env: childEnv });
     } catch (e) {
-      if (!isMarketplaceAddIdempotent(e)) throw new Error(`注册插件市场失败:${errText(e)}`);
+      if (!isMarketplaceAddIdempotent(e)) throw pluginCliError('marketplace-add', e, '注册插件市场失败:');
     }
   }
   try {
-    await run(['plugin', 'marketplace', 'update', marketplace], opts);
+    await runPluginCli('marketplace-update', ['plugin', 'marketplace', 'update', marketplace], { run, env: childEnv });
   } catch (e) {
-    throw new Error(`刷新插件市场「${marketplace}」失败:${errText(e)}`);
+    throw pluginCliError('marketplace-update', e, `刷新插件市场「${marketplace}」失败:`);
   }
 }
 
@@ -1149,25 +1260,48 @@ async function ensureOfficialMarketplace() {
 
 // r29:install 报「not found / out of date」形态 → 先刷新市场(刷新失败透出根因,不无谓重试),
 // 再重试 install 一次;仍失败抛出完整因果链 + 可执行指引。export 仅为可单测。
-export async function installPluginWithRefresh({ name, marketplace, repo = null, run = runClaude, detect = detectLocalProxy }) {
+export async function installPluginWithRefresh({
+  name,
+  marketplace,
+  repo = null,
+  run = runClaude,
+  detect = detectLocalProxy,
+  env = null,
+  baseEnv = process.env,
+  probe = probePluginProxy,
+  directEnv = null,
+}) {
   const target = `${name}@${marketplace}`;
   const guide = `请检查网络/代理,或手动运行 claude plugin marketplace update ${marketplace} 后重试`;
+  // 先尝试完全离线的本地缓存安装。此步不做代理探活，也不把代理传给 CLI，避免
+  // CLI 即使命中缓存仍发出后台网络请求；只有缓存缺失、确需刷新时才探活并保留可达代理。
+  const firstEnv = env || directEnv || pluginEnvWithoutProxy(baseEnv);
   try {
-    await run(['plugin', 'install', target], { timeout: 90000 });
+    await runPluginCli('plugin-install', ['plugin', 'install', target], { run, env: firstEnv });
     return;
   } catch (e) {
     if (!isMarketplaceStaleError(e)) throw e;
     const firstErr = errText(e);
-    try {
-      await ensureMarketplace({ repo, marketplace, run, detect });
-    } catch (ue) {
-      // 刷新本身就失败 = 根因在市场拉不动,直接给因果链(重试旧缓存无意义)。
-      throw new Error(`安装失败:${firstErr};已尝试刷新插件市场失败:${errText(ue)}。${guide}`);
+    let childEnv = env;
+    if (!childEnv) {
+      try {
+        childEnv = await marketplaceProxyEnv(detect, baseEnv, probe);
+      } catch (error) {
+        throw proxyPreflightError(error);
+      }
     }
     try {
-      await run(['plugin', 'install', target], { timeout: 90000 });
+      await ensureMarketplace({ repo, marketplace, run, detect, env: childEnv, baseEnv, probe });
+    } catch (ue) {
+      // 刷新本身就失败 = 根因在市场拉不动,直接给因果链(重试旧缓存无意义)。
+      throw pluginCliError(ue?.details?.stage || 'marketplace-update', ue,
+        `安装失败:${firstErr};已尝试刷新插件市场失败。${guide}；`);
+    }
+    try {
+      await runPluginCli('plugin-install', ['plugin', 'install', target], { run, env: childEnv });
     } catch (e2) {
-      throw new Error(`安装失败:${errText(e2)};已尝试刷新插件市场并重试仍失败(首次错误:${firstErr})。${guide}`);
+      throw pluginCliError('plugin-install', e2,
+        `安装失败:已尝试刷新插件市场并重试仍失败(首次错误:${firstErr})。${guide}；`);
     }
   }
 }
@@ -1234,6 +1368,8 @@ router.post('/plugins/install', async (req, res) => {
     const isCustom = !!repo && marketplace !== OFFICIAL_MARKETPLACE;
     if (isCustom && !/^[A-Za-z0-9._\/-]{1,100}$/.test(repo)) throw new Error('invalid repo');
 
+    let childEnv = null;
+
     // r29:add/update 不得吞错(ensureMarketplace 失败带 stderr 原文抛出);
     // install 报「not found/out of date」时刷新市场重试一次,仍失败给完整因果链。
     // r31:不再把「注册+刷新(update)」作为安装前的硬前提 —— update 失败(断网/代理拉不动
@@ -1243,19 +1379,33 @@ router.post('/plugins/install', async (req, res) => {
     // 的刷新重试兜底注册+刷新);官方源默认已注册,无需预注册/预刷新。
     if (isCustom) {
       try {
-        await runClaude(['plugin', 'marketplace', 'add', repo], { timeout: 30000, extraEnv: await marketplaceProxyEnv() });
+        childEnv = await marketplaceProxyEnv();
+      } catch (error) {
+        throw proxyPreflightError(error);
+      }
+      try {
+        await runPluginCli('marketplace-add', ['plugin', 'marketplace', 'add', repo], {
+          run: runClaude,
+          env: childEnv,
+        });
       } catch (e) {
-        if (!isMarketplaceAddIdempotent(e)) throw new Error(`注册插件市场失败:${errText(e)}`);
+        if (!isMarketplaceAddIdempotent(e)) throw pluginCliError('marketplace-add', e, '注册插件市场失败:');
       }
     }
     await installPluginWithRefresh({
       name, marketplace,
-      repo: isCustom ? repo : 'anthropics/claude-plugins-official',
+      // 自定义源上方已成功/幂等 add，刷新时无需再次启动 CLI 重复注册；官方源没有
+      // 预 add，not-found 后仍保留官方 repo 作为恢复兜底。
+      repo: isCustom ? null : 'anthropics/claude-plugins-official',
+      env: childEnv,
     });
     invalidateMcpCache();
     res.json({ ok: true, name });
   } catch (err) {
-    res.status(500).json({ error: (err.stderr?.toString() || err.message || '').trim() || '安装失败' });
+    const failure = err instanceof PluginCliError
+      ? err.details
+      : pluginCliError('plugin-install', err, '安装失败:').details;
+    res.status(failure.code === 'CLI_TIMEOUT' ? 504 : 500).json({ error: failure });
   }
 });
 
