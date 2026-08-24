@@ -3,8 +3,11 @@ import assert from 'node:assert/strict';
 import {
   ATTACHMENT_SIDECAR_OUTBOX_KEY,
   MAX_PERSISTED_ATTACHMENT_PREVIEW_CHARS,
+  attachmentSidecarNotice,
   createAttachmentSidecarOutbox,
+  recoverAttachmentSidecarBindings,
 } from '../../client/src/utils/attachments.js';
+import { useStore } from '../../client/src/stores/sessionStore.js';
 
 class MemoryStorage {
   constructor(limit = Infinity) {
@@ -15,6 +18,22 @@ class MemoryStorage {
   setItem(key, value) {
     if (String(value).length > this.limit) throw new Error('QuotaExceededError');
     this.values.set(key, String(value));
+  }
+}
+
+class GrowthQuotaStorage extends MemoryStorage {
+  constructor() {
+    super();
+    this.rejectGrowth = false;
+    this.writes = 0;
+  }
+  setItem(key, value) {
+    this.writes += 1;
+    const previous = this.getItem(key);
+    if (this.rejectGrowth && previous !== null && String(value).length > previous.length) {
+      throw new Error('QuotaExceededError');
+    }
+    super.setItem(key, value);
   }
 }
 
@@ -68,6 +87,59 @@ assert.equal(draftOutbox.read()[0].sessionId, null);
 assert.equal((await draftOutbox.bindAndFlush('draft-project-d1', 'real-draft')).ok, true);
 assert.equal(draftUrl, '/api/sessions/real-draft/attachments');
 assert.equal(draftOutbox.read().length, 0);
+
+// 恢复映射到达时若补写 UUID 会让快照增长并触发 quota，必须跳过绑定写、直接 POST；
+// 成功后删除是缩小快照，仍可安全落盘。
+const growthQuotaStorage = new GrowthQuotaStorage();
+let quotaBindPosts = 0;
+const growthQuota = createAttachmentSidecarOutbox({
+  storage: growthQuotaStorage,
+  fetchImpl: async (url) => {
+    quotaBindPosts += 1;
+    assert.equal(url, '/api/sessions/44444444-4444-4444-4444-444444444444/attachments');
+    return { ok: true };
+  },
+});
+await growthQuota.stage({ ownerKey: 'draft--work-project-quota', payload: payload('quota-bind.png') });
+growthQuotaStorage.rejectGrowth = true;
+const directQuotaResult = await recoverAttachmentSidecarBindings([{
+  ownerKey: 'draft--work-project-quota',
+  sessionId: '44444444-4444-4444-4444-444444444444',
+}], { bindImpl: growthQuota.flushOwner, ownerKeys: growthQuota.ownerKeys() });
+assert.equal(directQuotaResult.ok, true, '绑定增长受 quota 限制时仍直接 POST');
+assert.equal(quotaBindPosts, 1);
+assert.equal(growthQuota.read().length, 0, '2xx 后才删除原 owner 条目');
+
+// 非2xx保留原 owner 条目并形成可见文案；sessionStore 接收聚合失败而非 void 丢弃。
+const retainedStorage = new GrowthQuotaStorage();
+let retainedFetches = 0;
+const retained = createAttachmentSidecarOutbox({
+  storage: retainedStorage,
+  fetchImpl: async () => { retainedFetches += 1; return { ok: false, status: 503 }; },
+});
+await retained.stage({ ownerKey: 'draft--work-project-retained', payload: payload('retained.png') });
+retainedStorage.rejectGrowth = true;
+const retainedResult = await recoverAttachmentSidecarBindings([{
+  ownerKey: 'draft--work-project-retained', sessionId: 'real-retained',
+}], { bindImpl: retained.flushOwner, ownerKeys: retained.ownerKeys() });
+assert.deepEqual(
+  { ok: retainedResult.ok, retained: retainedResult.retained, error: retainedResult.error },
+  { ok: false, retained: true, error: 'http' },
+);
+assert.equal(retained.read().length, 1, 'POST失败保留原 owner 条目');
+assert.match(attachmentSidecarNotice(retainedResult), /已保存在本机恢复队列/);
+useStore.getState().reportAttachmentRecovery(retainedResult);
+assert.match(useStore.getState().attachmentRecoveryNotice?.text || '', /已保存在本机恢复队列/,
+  'sessionStore 将恢复失败提升为全局可见状态');
+useStore.getState().dismissAttachmentRecoveryNotice();
+
+// 无 owner 匹配不得调用 fetch，也不得 setItem（尤其不能在空 outbox 上反复写 []）。
+const fetchesBeforeNoMatch = retainedFetches;
+const writesBeforeNoMatch = retainedStorage.writes;
+const noMatchResult = await retained.flushOwner('draft--work-project-missing', 'real-missing');
+assert.equal(noMatchResult.matched, 0);
+assert.equal(retainedFetches, fetchesBeforeNoMatch, '无匹配恢复不发POST');
+assert.equal(retainedStorage.writes, writesBeforeNoMatch, '无匹配恢复只读不写');
 
 // 两个独立 manager 共享同一 storage 时，RMW 队尾也必须共享，不能各自覆盖旧快照。
 const sharedManagerStorage = new MemoryStorage();

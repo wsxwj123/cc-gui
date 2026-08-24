@@ -5,7 +5,7 @@ import { FONT_OPTIONS, readingFontCss } from '../utils/systemFonts.js';
 import { createQueueId, firstDrainableIndex, isSteerBarrier, reclaimClaimItem, reconcileSteered, stripSteerState, queueKeyFor, isDraftQueueKey, draftQueueProjectHash } from '../utils/steerQueue.js';
 import { isValidContextResponse, shouldReplaceContextCache } from '../utils/contextCache.js';
 import { reducePinned, initialExpandedProjects, toggleExpanded, mergeSessionList, mergeHiddenOrder } from '../utils/projectPanel.js';
-import { draftSidecarBindingsForSessions, recoverAttachmentSidecarBindings } from '../utils/attachments.js';
+import { attachmentSidecarNotice, draftSidecarBindingsForSessions, recoverAttachmentSidecarBindings } from '../utils/attachments.js';
 
 const recoverDraftSidecarsFromSessions = (sessions, projectHash) => (
   recoverAttachmentSidecarBindings(draftSidecarBindingsForSessions(sessions, projectHash))
@@ -535,6 +535,14 @@ export const useStore = create((set, get) => ({
   removeCompletionToast: (id) => set((s) => ({
     completionToasts: s.completionToasts.filter((x) => x.id !== id),
   })),
+  // 跨重启 draft→real sidecar 恢复发生在 session 列表水合层，不属于任一仍挂载的
+  // composer；失败必须进入全局可见状态，不能被 fire-and-forget 的 Promise 吞掉。
+  attachmentRecoveryNotice: null,
+  reportAttachmentRecovery: (result) => {
+    const text = attachmentSidecarNotice(result);
+    if (text) set({ attachmentRecoveryNotice: { id: Date.now(), text } });
+  },
+  dismissAttachmentRecoveryNotice: () => set({ attachmentRecoveryNotice: null }),
 
   // splitMode = 派生自 `paneCount > 1`,导出给按 `if (splitMode)` 分支的调用方(App.jsx 多处)。
   // 取同一个 INITIAL_PANE_COUNT:原来这里重读一次存储且不夹上界,存了 8 就成了
@@ -2037,7 +2045,7 @@ export const useStore = create((set, get) => ({
       const list = Array.isArray(data) ? data : [];
       // 服务端在 CLI init 时持久记录 draftId→sessionId。列表水合即重放这份恢复索引，
       // 因此 App/后端一起重启也能绑定 init 前已落本地、但组件来不及处理的 outbox。
-      void recoverDraftSidecarsFromSessions(list, projectHash);
+      void recoverDraftSidecarsFromSessions(list, projectHash).then(get().reportAttachmentRecovery);
       // r26-E2:本项目成功 → 只清本项目的错误键,不动他键。
       set((st) => {
         const curMap = st.sessionsAccessErrorByProject || {};
@@ -2113,7 +2121,7 @@ export const useStore = create((set, get) => ({
       // because the spread didn't include the key. The explicit `sessions: []`
       // below guarantees the list is reset for every project switch.
       const sessions = Array.isArray(data) ? data : [];
-      void recoverDraftSidecarsFromSessions(sessions, projectHash);
+      void recoverDraftSidecarsFromSessions(sessions, projectHash).then(get().reportAttachmentRecovery);
       set(silent ? { sessions } : { sessions, listLoading: false });
     } catch (err) {
       set(silent ? { sessions: [] } : { sessions: [], error: err.message, listLoading: false });

@@ -9639,6 +9639,25 @@ function CompletionToasts() {
   );
 }
 
+function AttachmentRecoveryNotice() {
+  const notice = useStore((s) => s.attachmentRecoveryNotice);
+  const dismiss = useStore((s) => s.dismissAttachmentRecoveryNotice);
+  if (!notice) return null;
+  return (
+    <div className="fixed top-[60px] right-4 z-[151] pointer-events-none max-w-[calc(var(--app-w,100vw)-2rem)]" role="status">
+      <div className="pointer-events-auto glass-popover w-[420px] max-w-full rounded-panel shadow-popover px-4 py-2.5 animate-glass-rise ring-1 ring-error/25">
+        <div className="flex items-start gap-2">
+          <span className="w-2 h-2 mt-1.5 rounded-full bg-error shrink-0" />
+          <span className="text-[12px] leading-relaxed text-ink font-body flex-1">{notice.text}</span>
+          <button type="button" onClick={dismiss} className="text-ink-faint shrink-0 hover:text-ink" aria-label="关闭附件恢复提示">
+            <X size={13} />
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ─── 快捷键速查(Cmd/Ctrl+/)────────────────────────────────────
 // 纯静态清单,单实例挂在 App 顶层(非 per-pane 组件,不涉及窗格状态)。
 const SHORTCUT_GROUPS = [
@@ -10678,6 +10697,7 @@ export default function App() {
         {bundleMismatchBanner}
         {oauthMissingBanner}
         <CompletionToasts />
+        <AttachmentRecoveryNotice />
         {!cliInstalled && !cliCheckDismissed && (
           <EnvCheckPanel onRecheck={checkCli} onDismiss={dismissCliCheck} />
         )}
@@ -10767,6 +10787,7 @@ export default function App() {
       {bundleMismatchBanner}
       {oauthMissingBanner}
       <CompletionToasts />
+      <AttachmentRecoveryNotice />
       {/* F1: 截图热键状态提示(截图中/成功/失败)。取消不显示。 */}
       {shotStatus && (
         <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-[210] max-w-[80vw]">

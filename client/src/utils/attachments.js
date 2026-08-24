@@ -172,41 +172,71 @@ export function createAttachmentSidecarOutbox({
     }));
   };
 
-  const flushSession = (sessionId) => {
+  const withSessionLock = (sessionId, work) => {
     if (!sessionId) return Promise.resolve({ ok: false, retained: true, error: 'missing-session' });
     const previous = sessionTails.get(sessionId) || Promise.resolve();
-    const run = previous.catch(() => {}).then(async () => {
-      for (;;) {
-        await currentMutationTail();
-        const entry = read().find((item) => item?.sessionId === sessionId);
-        if (!entry) return { ok: true, retained: false };
-        let response;
-        try {
-          response = await fetchImpl(`/api/sessions/${sessionId}/attachments`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(entry.payload),
-          });
-        } catch (cause) {
-          return { ok: false, retained: true, error: 'network', cause };
-        }
-        if (!response?.ok) {
-          return { ok: false, retained: true, error: 'http', status: response?.status };
-        }
-        const removed = await mutate((current) => ({
-          next: current.filter((item) => item?.id !== entry.id),
-        }));
-        if (!removed.ok) {
-          // POST 已成功但清账失败时保留条目，下次按同一 textHash 幂等重放。
-          return { ...removed, retained: true };
-        }
-      }
-    });
+    const run = previous.catch(() => {}).then(work);
     sessionTails.set(sessionId, run);
     void run.finally(() => {
       if (sessionTails.get(sessionId) === run) sessionTails.delete(sessionId);
     });
     return run;
+  };
+
+  const postEntry = async (entry, sessionId) => {
+    let response;
+    try {
+      response = await fetchImpl(`/api/sessions/${sessionId}/attachments`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(entry.payload),
+      });
+    } catch (cause) {
+      return { ok: false, retained: true, error: 'network', cause };
+    }
+    if (!response?.ok) {
+      return { ok: false, retained: true, error: 'http', status: response?.status };
+    }
+    const removed = await mutate((current) => ({
+      next: current.filter((item) => item?.id !== entry.id),
+    }));
+    if (!removed.ok) {
+      // POST 已成功但清账失败时保留条目，下次按同一 textHash 幂等重放。
+      return { ...removed, retained: true };
+    }
+    return { ok: true, retained: false };
+  };
+
+  const flushSession = (sessionId) => withSessionLock(sessionId, async () => {
+    for (;;) {
+      await currentMutationTail();
+      const entry = read().find((item) => item?.sessionId === sessionId);
+      if (!entry) return { ok: true, retained: false };
+      const posted = await postEntry(entry, sessionId);
+      if (!posted.ok) return posted;
+    }
+  });
+
+  // draft 恢复不能先把 UUID 扩写进 localStorage：接近 quota 时，绑定写入会失败，
+  // 旧实现因此连本可成功的 POST 都不会发。这里以 ownerKey 直接发送；2xx 后才做
+  // 缩小快照的删除。无匹配项只读不写，服务端 textHash 继续保证重放幂等。
+  const flushOwner = (ownerKey, sessionId) => {
+    if (!ownerKey || !sessionId) {
+      return Promise.resolve({ ok: false, retained: true, matched: 0, error: 'invalid-binding' });
+    }
+    return withSessionLock(sessionId, async () => {
+      let matched = 0;
+      for (;;) {
+        await currentMutationTail();
+        const entry = read().find((item) => (
+          item?.ownerKey === ownerKey && (!item?.sessionId || item.sessionId === sessionId)
+        ));
+        if (!entry) return { ok: true, retained: false, matched };
+        matched += 1;
+        const posted = await postEntry(entry, sessionId);
+        if (!posted.ok) return { ...posted, matched };
+      }
+    });
   };
 
   const flushAll = async () => {
@@ -228,23 +258,41 @@ export function createAttachmentSidecarOutbox({
     return flushSession(sessionId);
   };
 
-  return { read, stage, bindOwner, flushSession, flushAll, stageAndFlush, bindAndFlush };
+  const ownerKeys = () => new Set(read().map((entry) => entry?.ownerKey).filter(Boolean));
+
+  return { read, ownerKeys, stage, bindOwner, flushOwner, flushSession, flushAll, stageAndFlush, bindAndFlush };
 }
 
 const attachmentSidecarOutbox = createAttachmentSidecarOutbox();
 
 export const persistAttachmentSidecar = (entry) => attachmentSidecarOutbox.stageAndFlush(entry);
-export const bindAttachmentSidecars = (ownerKey, sessionId) => attachmentSidecarOutbox.bindAndFlush(ownerKey, sessionId);
+export const bindAttachmentSidecars = (ownerKey, sessionId) => attachmentSidecarOutbox.flushOwner(ownerKey, sessionId);
+export const pendingAttachmentSidecarOwnerKeys = () => attachmentSidecarOutbox.ownerKeys();
 export const retryAttachmentSidecars = (sessionId = null) => (
   sessionId ? attachmentSidecarOutbox.flushSession(sessionId) : attachmentSidecarOutbox.flushAll()
 );
 
-export async function recoverAttachmentSidecarBindings(bindings, { bindImpl = bindAttachmentSidecars } = {}) {
+export async function recoverAttachmentSidecarBindings(bindings, {
+  bindImpl = bindAttachmentSidecars,
+  ownerKeys = pendingAttachmentSidecarOwnerKeys(),
+} = {}) {
   const unique = new Map();
   for (const binding of Array.isArray(bindings) ? bindings : []) {
-    if (binding?.ownerKey && binding?.sessionId) unique.set(`${binding.ownerKey}\0${binding.sessionId}`, binding);
+    if (binding?.ownerKey && binding?.sessionId && ownerKeys?.has(binding.ownerKey)) {
+      unique.set(`${binding.ownerKey}\0${binding.sessionId}`, binding);
+    }
   }
-  return Promise.all([...unique.values()].map(({ ownerKey, sessionId }) => bindImpl(ownerKey, sessionId)));
+  const results = await Promise.all([...unique.values()].map(async ({ ownerKey, sessionId }) => {
+    try {
+      return await bindImpl(ownerKey, sessionId);
+    } catch (cause) {
+      return { ok: false, retained: true, error: 'unexpected', cause };
+    }
+  }));
+  const failed = results.find((result) => !result?.ok);
+  return failed
+    ? { ...failed, ok: false, matched: results.length, results }
+    : { ok: true, retained: false, matched: results.length, results };
 }
 
 export function draftSidecarBindingsForSessions(sessions, projectHash) {

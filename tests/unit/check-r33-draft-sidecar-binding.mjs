@@ -42,7 +42,7 @@ await switchedOutbox.stage({ ownerKey: 'draft--work-project-d-origin', payload }
 const currentPane = { draft: true, draftId: 'd-other', projectHash: '-other', sessionId: null };
 assert.notEqual(currentPane.draftId, startedDraft.draftId, '夹具确认 init 时当前 pane 已不是发起 draft');
 assert.equal((await bindDraftAttachmentSidecarsOnInit(startedDraft, '11111111-1111-1111-1111-111111111111', {
-  bindImpl: switchedOutbox.bindAndFlush,
+  bindImpl: switchedOutbox.flushOwner,
 })).ok, true);
 assert.equal(switchedPost.url, '/api/sessions/11111111-1111-1111-1111-111111111111/attachments');
 assert.deepEqual(switchedPost.body, payload);
@@ -78,10 +78,11 @@ assert.deepEqual(recoveredBindings, [{
   ownerKey: 'draft--work-project-d-origin',
   sessionId: '22222222-2222-2222-2222-222222222222',
 }]);
-const results = await recoverAttachmentSidecarBindings(recoveredBindings, {
-  bindImpl: afterRestart.bindAndFlush,
+const recovery = await recoverAttachmentSidecarBindings(recoveredBindings, {
+  bindImpl: afterRestart.flushOwner,
+  ownerKeys: afterRestart.ownerKeys(),
 });
-assert.equal(results[0].ok, true);
+assert.equal(recovery.results[0].ok, true);
 assert.equal(restartPost.url, '/api/sessions/22222222-2222-2222-2222-222222222222/attachments');
 assert.deepEqual(restartPost.body, payload);
 assert.equal(afterRestart.read().length, 0, '新 manager 从持久映射恢复未绑定 outbox');
@@ -92,8 +93,26 @@ const noInit = createAttachmentSidecarOutbox({ storage: noInitStorage, fetchImpl
 await noInit.stage({ ownerKey: 'draft--work-project-d-origin', payload });
 assert.equal(noInit.read()[0].sessionId, null);
 assert.equal((await bindDraftAttachmentSidecarsOnInit(startedDraft, '33333333-3333-3333-3333-333333333333', {
-  bindImpl: noInit.bindAndFlush,
+  bindImpl: noInit.flushOwner,
 })).ok, true, '同一持久 draft 重发取得 init 后恢复旧条目');
 assert.equal(noInit.read().length, 0);
+
+// session 列表最多可有 256 条映射；恢复前必须按真实 outbox owner 过滤，空项不写。
+let filteredCalls = 0;
+const manyBindings = draftSidecarBindingsForSessions(Array.from({ length: 256 }, (_, index) => ({
+  draftId: `d-${index}`,
+  sessionId: `real-${index}`,
+})), '-work-project');
+const filtered = await recoverAttachmentSidecarBindings(manyBindings, {
+  ownerKeys: new Set(['draft--work-project-d-73']),
+  bindImpl: async (ownerKey, sessionId) => {
+    filteredCalls += 1;
+    assert.equal(ownerKey, 'draft--work-project-d-73', 'ownerKey 同时包含 projectHash 与 draftId');
+    assert.equal(sessionId, 'real-73');
+    return { ok: true, retained: false };
+  },
+});
+assert.equal(filteredCalls, 1, '256条恢复映射只处理真实存在的outbox owner');
+assert.equal(filtered.matched, 1);
 
 console.log('✓ check-r33-draft-sidecar-binding: 切pane init、跨重启映射与init前退出重发恢复全过');
