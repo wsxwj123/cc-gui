@@ -17,6 +17,7 @@ import { repairOfficialCompat } from '../utils/session-repair.js';
 import { contextTimeoutBudget, latestCountTokensOutcome } from '../utils/context-tokens.js';
 import { canonicalCwd } from '../utils/safe-path.js';
 import { broadcast, clients } from '../broadcast.js';
+import { recordDraftSessionBinding } from '../services/draft-session-bindings.js';
 
 // T2: 回合完成 WS 通知。前端切走会话时 SSE fetch 已被 abort(I4 渲染隔离的
 // 切会话 effect),完成信号唯一可靠的来源是服务端。每个进程只广播一次;三条
@@ -1573,6 +1574,22 @@ router.post('/chat', async (req, res) => {
         const line = JSON.stringify(m);
         if (!slot.sessionId && m.type === 'system' && m.subtype === 'init' && m.session_id) {
           slot.sessionId = m.session_id;
+          // draftId 由发起客户端生成，session_id 由 CLI init 权威给出。在 init 透传给
+          // 客户端之前持久记录映射；这样 pane 已切走或整个 App 重启后，已有 sessions
+          // 列表仍能把本地未绑定附件 outbox 迁到真实会话，不依赖 server slot 内存寿命。
+          if (slot.draftId) {
+            try {
+              await recordDraftSessionBinding({
+                draftId: slot.draftId,
+                sessionId: slot.sessionId,
+                projectHash: String(slot.cwd || '').replace(/[^A-Za-z0-9]/g, '-'),
+              });
+            } catch (error) {
+              // 不因旁路恢复索引写失败中断真实模型回合；当前 SSE 客户端仍可直接绑定。
+              // 明确记录失败而非静默吞掉，重启恢复缺失时可从日志定位根因。
+              console.error('[chat] draft-session binding persist failed:', error?.message || error);
+            }
+          }
         }
         // F1:init 带的权威命令/技能表喂给 /api/slash-commands(含打包进二进制、磁盘扫不到的
         // 内置 skill)。与上一个 if 分开写:那条有 !slot.sessionId 前置,复用回合(resume)时

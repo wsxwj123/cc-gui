@@ -529,9 +529,9 @@ export function probeTcp(host, port, timeout = 400) {
   });
 }
 
-export async function detectLocalProxy({ readSystem = readSystemProxy } = {}) { // export:skills.js 直连 GitHub 失败时回落代理用
+export async function detectLocalProxy({ readSystem = readSystemProxy, baseEnv = process.env } = {}) { // export:skills.js 直连 GitHub 失败时回落代理用
   // 用户已显式配置的优先(server 进程自己的 env)。显式配置信任优先,不探活(既有语义)。
-  const envProxy = process.env.HTTPS_PROXY || process.env.https_proxy || process.env.HTTP_PROXY || process.env.http_proxy;
+  const envProxy = baseEnv.HTTPS_PROXY || baseEnv.https_proxy || baseEnv.HTTP_PROXY || baseEnv.http_proxy;
   if (envProxy) return envProxy;
   // r14-2:先读【系统代理设置】—— 用户"开了系统代理但不是 TUN"时,Node 的 fetch 不认它,
   // 而端口探测又可能因端口非常见而落空。mac 用 scutil --proxy,Windows 读注册表。

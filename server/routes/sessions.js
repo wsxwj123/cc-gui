@@ -33,9 +33,15 @@ import { repairOfficialCompat } from '../utils/session-repair.js';
 import { mkdirSync, rmSync } from 'fs';
 import { resolveUnderHome, resolveWorkspacePath } from '../utils/safe-path.js';
 import { broadcast } from '../broadcast.js';
+import { mergeDraftBindingsBestEffort } from '../services/draft-session-bindings.js';
+import { createAttachmentSidecarStore } from '../services/attachment-sidecar-store.js';
 
 // L4: 附件元数据 sidecar — 写入位置与 session-reader 一致。
 const ATTACHMENTS_DIR = join(homedir(), '.claude-gui', 'attachments');
+const attachmentSidecarStore = createAttachmentSidecarStore({
+  directory: ATTACHMENTS_DIR,
+  hashText: attachmentTextHash,
+});
 
 const router = Router();
 
@@ -398,7 +404,10 @@ router.get('/projects/:hash/sessions', async (req, res) => {
     if (!safeId(req.params.hash)) {
       return res.status(400).json({ error: 'invalid hash' });
     }
-    const sessions = await listSessions(req.params.hash);
+    // 核心列表先独立完成；draft 恢复索引是 best-effort 旁路，损坏/不可读不得落入
+    // 外层项目权限错误分支（否则索引 EACCES 会被误报成会话目录无权限）。
+    const coreSessions = await listSessions(req.params.hash);
+    const sessions = await mergeDraftBindingsBestEffort(coreSessions, req.params.hash);
     res.json(sessions);
   } catch (err) {
     // r17-4:权限被拒要说实话。用户实测(另一台 Mac 未授予完全磁盘访问):终端里能读到
@@ -517,18 +526,9 @@ router.post('/sessions/:sessionId/attachments', async (req, res) => {
     if (typeof text !== 'string' || !Array.isArray(attachments)) {
       return res.status(400).json({ error: 'text + attachments[] required' });
     }
-    await mkdir(ATTACHMENTS_DIR, { recursive: true });
-    const p = join(ATTACHMENTS_DIR, `${sid}.json`);
-    let cur = {};
-    try { cur = JSON.parse(await readFile(p, 'utf-8')) || {}; } catch {}
-    const key = attachmentTextHash(text);
-    cur[key] = {
-      attachments: attachments.map((a) => ({
-        kind: a.kind, name: a.name, path: a.path, preview: a.preview, bytes: a.bytes,
-      })),
-      displayText: typeof displayText === 'string' ? displayText : '',
-    };
-    await writeFile(p, JSON.stringify(cur, null, 2));
+    // 同 session 的独立 HTTP 请求共用一条服务端 Promise 队列：锁内重读最新文件、
+    // 合并 textHash 后写唯一临时文件并 rename。不同 session 使用不同队列，可并行。
+    await attachmentSidecarStore.write(sid, { text, attachments, displayText });
     res.json({ ok: true });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });

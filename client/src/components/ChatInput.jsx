@@ -10,6 +10,9 @@ import { AnchoredPopover } from './SessionSelectors.jsx';
 import { isSteered, firstSteerableIndex, isSteerBarrier } from '../utils/steerQueue.js';
 import { resolveSelectorModel } from '../utils/routing.js';
 import { effortCapsFor, effortAllowed, effortMemoryKey, useEffortFallback } from '../utils/effortCaps.js';
+import { attachmentBlockReason, buildAttachmentMessage, pendingAttachment, uploadAttachmentFile } from '../utils/attachments.js';
+import { PendingAttachmentList } from './PendingAttachmentList.jsx';
+import { listboxKeyAction, listboxOpenIndex } from '../utils/listboxKeyboard.js';
 
 // Permission mode metadata — mirrors `claude --permission-mode <choice>`。
 // P2.1:文案对齐官方六档语义(RESEARCH-mode-semantics §④b);bypass 中文名保持「放任」。
@@ -65,42 +68,88 @@ export function PermissionModeSelector({ permKey, tourAnchor = false }) {
   const visibleModes = useVisiblePermissionModes(permKey);
   const [open, setOpen] = useState(false);
   const wrapRef = useRef(null);
+  const triggerRef = useRef(null);
+  const optionRefs = useRef([]);
+  const [activeIndex, setActiveIndex] = useState(0);
   const current = MODE_META[permissionMode] || MODE_META.default;
   const Icon = current.icon;
+  const focusOption = (index) => {
+    if (index < 0) return;
+    setActiveIndex(index);
+    requestAnimationFrame(() => optionRefs.current[index]?.focus());
+  };
+  const openListbox = (key = '') => {
+    const index = listboxOpenIndex(visibleModes.indexOf(permissionMode), visibleModes.length, key);
+    setOpen(true);
+    focusOption(index);
+  };
+  const closeListbox = (restoreFocus = false) => {
+    setOpen(false);
+    if (restoreFocus) requestAnimationFrame(() => triggerRef.current?.focus());
+  };
+  const selectIndex = (index) => {
+    const mode = visibleModes[index];
+    if (!mode) return;
+    // plan 与 agent 不再互斥:内置 agent 的 tools 已含 ExitPlanMode,
+    // agent 主控本体在 plan 模式下能正常出计划卡片(headless 实证)。
+    setPermissionMode(mode, permKey);
+    closeListbox(true);
+  };
+  const onListboxKeyDown = (event) => {
+    const action = listboxKeyAction(event.key, activeIndex, visibleModes.length);
+    if (!action.handled) return;
+    event.preventDefault();
+    event.stopPropagation();
+    if (action.close) closeListbox(true);
+    else if (action.select) selectIndex(action.nextIndex);
+    else focusOption(action.nextIndex);
+  };
 
   return (
     <div ref={wrapRef} className="relative" data-cgui="mode-selector" data-tour={tourAnchor ? 'mode-selector' : undefined}>
-      <button onClick={() => setOpen(!open)}
+      <button ref={triggerRef}
+        onClick={() => (open ? closeListbox() : openListbox())}
+        onKeyDown={(event) => {
+          if (['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) {
+            event.preventDefault();
+            openListbox(event.key);
+          }
+        }}
+        data-testid="permission-mode-selector"
+        aria-haspopup="listbox" aria-expanded={open}
         className="flex items-center gap-1 px-2 py-1 rounded-md hover:bg-black/5 transition-colors"
         title={`权限模式: ${current.label} — ${current.desc}`}>
         <Icon size={12} className={current.tone} />
         <span className={`cgui-perm-label text-[11px] font-body whitespace-nowrap ${current.tone}`}>{current.label}</span>
         <ChevronDown size={10} className="text-ink-faint" />
       </button>
-      <AnchoredPopover anchorRef={wrapRef} open={open} onRequestClose={() => setOpen(false)} drop="up"
+      <AnchoredPopover anchorRef={wrapRef} open={open}
+        onRequestClose={(reason) => closeListbox(reason === 'escape')} drop="up"
         className="w-64 max-w-[calc(var(--app-w,100vw)-1.5rem)] py-1 max-h-[min(60vh,calc(var(--app-h,100dvh)-6rem))] overflow-y-auto">
         <div className="px-3 py-1.5 text-[10px] text-ink-faint uppercase tracking-wider font-body">权限模式 (--permission-mode)</div>
-        {visibleModes.map((m) => {
-          const meta = MODE_META[m];
-          const MIcon = meta.icon;
-          return (
-            <button key={m}
-              onClick={() => {
-                // plan 与 agent 不再互斥:内置 agent 的 tools 已含 ExitPlanMode,
-                // agent 主控本体在 plan 模式下能正常出计划卡片(headless 实证)。
-                setPermissionMode(m, permKey);
-                setOpen(false);
-              }}
-              className={`w-full text-left px-3 py-2 flex items-start gap-2 ${permissionMode === m ? 'bg-accent/12' : ''} hover:bg-black/5`}>
-              <MIcon size={13} className={`${meta.tone} mt-0.5 shrink-0`} />
-              <div className="flex-1 min-w-0">
-                <div className="text-xs font-medium text-ink font-body">{meta.label}</div>
-                <div className="text-[10px] text-ink-faint font-body">{meta.desc}</div>
-              </div>
-              {permissionMode === m && <div className="w-1.5 h-1.5 rounded-full bg-accent mt-1.5 shrink-0" />}
-            </button>
-          );
-        })}
+        <div role="listbox" aria-label="权限模式" onKeyDown={onListboxKeyDown}>
+          {visibleModes.map((m, index) => {
+            const meta = MODE_META[m];
+            const MIcon = meta.icon;
+            return (
+              <button key={m}
+                ref={(node) => { optionRefs.current[index] = node; }}
+                role="option"
+                aria-selected={permissionMode === m}
+                tabIndex={activeIndex === index ? 0 : -1}
+                onFocus={() => setActiveIndex(index)}
+                onClick={() => selectIndex(index)}
+                className={`w-full text-left px-3 py-2 flex items-start gap-2 ${permissionMode === m ? 'bg-accent/12' : ''} hover:bg-black/5`}>
+                <MIcon size={13} className={`${meta.tone} mt-0.5 shrink-0`} />
+                <div className="flex-1 min-w-0">
+                  <div className="text-xs font-medium text-ink font-body">{meta.label}</div>
+                  <div className="text-[10px] text-ink-faint font-body">{meta.desc}</div>
+                </div>
+                {permissionMode === m && <div className="w-1.5 h-1.5 rounded-full bg-accent mt-1.5 shrink-0" />}
+              </button>
+            );
+          })}
+        </div>
       </AnchoredPopover>
     </div>
   );
@@ -248,7 +297,7 @@ const TYPE_LABELS = {
 const TODO_AGENT_TERMINAL = ['done', 'error', 'stopped'];
 const TODO_BG_TERMINAL = ['done', 'failed', 'killed', 'stopped', 'error'];
 
-export function ChatInput({ onSend, onStop, onStopBackground, onAccelerate, canSteer = false, onBackground, suggestion = null, onDismissSuggestion, disabled, isStreaming, backgroundWorking = false, queueLength = 0, queueItems = [], onRemoveFromQueue, onEditFromQueue, paneId = null, claimDraft = null, onRefreshQueueEvidence, todos = null, plan = '', goal = null, permKey = null, sessionId = null, tabIndex = null, onBtwOpen, btwUnread = 0 }) {
+export function ChatInput({ onSend, onStop, onStopBackground, onAccelerate, canSteer = false, onBackground, suggestion = null, onDismissSuggestion, disabled, isStreaming, backgroundWorking = false, queueLength = 0, queueItems = [], onRemoveFromQueue, onEditFromQueue, paneId = null, claimDraft = null, onRefreshQueueEvidence, todos = null, plan = '', plans = null, goal = null, permKey = null, sessionId = null, tabIndex = null, onBtwOpen, btwUnread = 0 }) {
   const [text, setText] = useState('');
   // 编辑重发态(#4):点击「重新编辑并发送」后进入。此时历史消息尚未被破坏,
   // 按 Esc 可整条取消(清空输入+通知上层撤销待回滚),给用户反悔余地。
@@ -261,6 +310,7 @@ export function ChatInput({ onSend, onStop, onStopBackground, onAccelerate, canS
   const [isAnthropic, setIsAnthropic] = useState(true);
   // Pending attachments: { kind, path, preview?, name, bytes }
   const [attachments, setAttachments] = useState([]);
+  const [attachmentError, setAttachmentError] = useState('');
   const [dragging, setDragging] = useState(false);
   const [zoomImage, setZoomImage] = useState(null); // #7 单击放大的图片附件
   // @ 引用选择器(Tutti 式上下文引用):光标前出现 `@xxx` 时弹出,文件 tab 插入
@@ -493,44 +543,25 @@ export function ChatInput({ onSend, onStop, onStopBackground, onAccelerate, canS
     return () => window.removeEventListener('cgui:composer-clear', onClear);
   }, [permKey, paneId, claimDraft?.claimId, claimDraft?.sendable]);
 
-  // Read a File/Blob as a data URL.
-  const fileToDataUrl = (file) => new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(reader.result);
-    reader.onerror = () => reject(reader.error);
-    reader.readAsDataURL(file);
-  });
-
-  const uploadAttachment = async (file) => {
+  const uploadAttachment = async (file, existingId = null) => {
+    const pending = existingId
+      ? { id: existingId, file, name: file?.name || 'file', bytes: file?.size || 0, status: 'uploading' }
+      : pendingAttachment(file);
+    setAttachmentError('');
+    setAttachments((prev) => existingId
+      ? prev.map((item) => (item.id === existingId ? pending : item))
+      : [...prev, pending]);
     try {
-      // CN-3:把 File 当原始 body 直接发(流式,不经 base64/JSON)——避开 25mb 限制 + 内存膨胀,
-      // 大文件也能传。mime 走 Content-Type、文件名走 X-Upload-Name 头。
-      const res = await fetch('/api/upload', {
-        method: 'POST',
-        headers: {
-          'Content-Type': file.type || 'application/octet-stream',
-          'X-Upload-Name': encodeURIComponent(file.name || 'file'),
-        },
-        body: file,
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        confirmDialog('上传失败: ' + (data.error || res.status));
-        return;
-      }
-      // 仅图片生成缩略预览(小);大文件/非图片不读 dataUrl,免内存膨胀。
-      const isImage = data.kind === 'image' || file.type.startsWith('image/');
-      let preview = null;
-      if (isImage) { try { preview = await fileToDataUrl(file); } catch {} }
-      setAttachments((prev) => [...prev, {
-        kind: data.kind || (isImage ? 'image' : 'text'),
-        path: data.path,
-        preview,
-        name: file.name || data.path.split(/[/\\]+/).pop(),
-        bytes: data.bytes,
-      }]);
+      const uploaded = await uploadAttachmentFile(file);
+      setAttachments((prev) => prev.map((item) => (
+        item.id === pending.id ? { ...uploaded, id: pending.id, file } : item
+      )));
     } catch (err) {
-      confirmDialog('上传失败: ' + err.message);
+      const message = `上传失败：${err.message || '未知错误'}`;
+      setAttachmentError(message);
+      setAttachments((prev) => prev.map((item) => (
+        item.id === pending.id ? { ...pending, status: 'failed', error: message } : item
+      )));
     }
   };
 
@@ -566,8 +597,9 @@ export function ChatInput({ onSend, onStop, onStopBackground, onAccelerate, canS
     e.target.value = '';
   };
 
-  const removeAttachment = (path) => {
-    setAttachments((prev) => prev.filter((a) => a.path !== path));
+  const removeAttachment = (attachment) => {
+    setAttachments((prev) => prev.filter((item) => item !== attachment));
+    setAttachmentError('');
   };
 
   const handleTextChange = (e) => {
@@ -658,31 +690,24 @@ export function ChatInput({ onSend, onStop, onStopBackground, onAccelerate, canS
   }, [text, filteredCommands.length]);
 
   const handleSend = (submitOpts = {}) => {
-    const trimmed = text.trim();
-    // Allow send if there's text OR attachments (so "just describe this image" works).
-    if (!trimmed && attachments.length === 0) return;
+    const built = buildAttachmentMessage(text, attachments);
+    if (!built) return;
     if (disabled || rcLocked) return;
-    // Append attachment paths to the prompt using Claude Code's file-reference
-    // shape. It lets the CLI decide whether a path is text, image, PDF, etc.
-    const attachmentRefs = attachments.length > 0
-      ? '\n\n附件:\n' + attachments.map((a) => (
-        `@${a.path}`
-      )).join('\n')
-      : '';
-    const outbound = (trimmed || '请查看这些附件') + attachmentRefs;
-    if (trimmed) saveHistoryEntry(trimmed);
-    // L3: 气泡显示 trimmed(纯文本)+ 附件卡片;CLI 收 outbound(带 @path)。
-    // attachments 经 meta 传到消息记录,MessageBubble 据此渲染缩略图/文件名。
-    const meta = attachments.length > 0
-      ? { attachments: attachments.map((a) => ({ kind: a.kind, name: a.name, path: a.path, preview: a.preview, bytes: a.bytes })), displayText: trimmed }
-      : undefined;
-    onSend(outbound, meta ? { ...submitOpts, meta } : submitOpts);
+    if (built.displayText) saveHistoryEntry(built.displayText);
+    let enqueueFailure = '';
+    onSend(built.prompt, {
+      ...submitOpts,
+      ...(built.meta ? { meta: built.meta } : {}),
+      onEnqueueFailure: (message) => { enqueueFailure = message; setAttachmentError(message); },
+    });
+    if (enqueueFailure) return;
     if (claimDraft?.sendable) useStore.getState().clearClaimDraft(paneId, claimDraft.claimId);
     setText('');
     setEditingResend(false);
     setHistoryCursor(-1);
     draftBeforeHistoryRef.current = '';
     setAttachments([]);
+    setAttachmentError('');
     setShowCommands(false);
     setAtState(null);
     try { localStorage.removeItem(draftKey); } catch {}
@@ -1140,40 +1165,15 @@ export function ChatInput({ onSend, onStop, onStopBackground, onAccelerate, canS
           </div>
         )}
         {/* Attachments — sit above the composer when present */}
-        {attachments.length > 0 && (
-          <div className="flex flex-wrap gap-2 mb-2 px-2">
-            {attachments.map((a) => (
-              <div key={a.path} className="relative group/att">
-                {a.kind === 'image' ? (
-                  <img
-                    src={a.preview}
-                    alt={a.name}
-                    onClick={() => setZoomImage({ src: a.preview, name: a.name, path: a.path })}
-                    className="h-16 w-16 object-cover rounded-lg border border-canvas-deep shadow-panel cursor-zoom-in"
-                  />
-                ) : (
-                  <div className="h-16 w-36 rounded-lg border border-canvas-deep bg-canvas-warm shadow-panel px-2 py-2 flex items-center gap-2">
-                    <FileText size={18} className="text-accent shrink-0" />
-                    <div className="min-w-0">
-                      <div className="text-[11px] text-ink font-body truncate" title={a.name}>{a.name}</div>
-                      <div className="text-[9px] text-ink-faint font-mono">{Math.ceil((a.bytes || 0) / 1024)} KB</div>
-                    </div>
-                  </div>
-                )}
-                <button
-                  onClick={() => removeAttachment(a.path)}
-                  className="absolute -top-1.5 -right-1.5 w-5 h-5 rounded-full bg-canvas-deep text-ink-soft hover:bg-error hover:text-white flex items-center justify-center transition-colors opacity-0 group-hover/att:opacity-100"
-                  title="移除"
-                >
-                  <X size={11} />
-                </button>
-                {a.kind === 'image' && (
-                  <span className="absolute bottom-0 left-0 right-0 text-[9px] text-white bg-black/60 px-1 py-px rounded-b-lg truncate text-center">
-                    {a.name}
-                  </span>
-                )}
-              </div>
-            ))}
+        <PendingAttachmentList
+          attachments={attachments}
+          onRemove={removeAttachment}
+          onRetry={(attachment) => uploadAttachment(attachment.file, attachment.id)}
+          onPreview={(attachment) => setZoomImage({ src: attachment.preview, name: attachment.name, path: attachment.path })}
+        />
+        {attachmentError && (
+          <div data-testid="attachment-error" role="alert" className="mb-2 px-2 text-[11px] text-error font-body leading-snug">
+            {attachmentError}
           </div>
         )}
 
@@ -1183,7 +1183,7 @@ export function ChatInput({ onSend, onStop, onStopBackground, onAccelerate, canS
         {/* 任务清单 — 紧贴输入框上方(同一列内),作为输入框的附着条而非独立悬浮面板。
             折叠/隐藏/全完成自动折叠见 TodoPanel。key=permKey:折叠/隐藏是组件本地态,按会话
             重挂以免跨会话串扰(每个会话独立的折叠/隐藏状态)。 */}
-        <TodoPanel key={permKey || 'global'} todos={todos} plan={plan} isStreaming={isStreaming || agentsWorking || bgWorking} />
+        <TodoPanel key={`todo-${permKey || 'global'}`} planKey={permKey || 'global'} todos={todos} plan={plan} plans={plans} isStreaming={isStreaming || agentsWorking || bgWorking} />
 
         {/* 输入预测(A):回合末模型预测的下一条输入。点击建议文本直接发送;
             铅笔=填入输入框编辑;X=忽略。新回合开始/发送时上层自动清掉。 */}
@@ -1221,7 +1221,7 @@ export function ChatInput({ onSend, onStop, onStopBackground, onAccelerate, canS
         {/* r30:goal 常驻条 —— 有生效中的 /goal 时显示在 composer 正上方。与任务清单/
             已批准计划同列叠加(顺序:计划 → 任务清单 → 目标条 → 输入框)。key=permKey:
             分屏各窗格各挂各的,切会话即重置编辑态。 */}
-        <GoalBar key={permKey || 'global'} goal={goal} onSend={onSend} />
+        <GoalBar key={`goal-${permKey || 'global'}`} permKey={permKey || 'global'} goal={goal} onSend={onSend} />
 
         {/* 修正批#1b 两行 composer:上行整宽输入框,下行工具行
             [权限模式▾][+附件][旁问⊙] … [发送 | 入队/转后台/停止](桌面/手机同一套)。
@@ -1295,7 +1295,7 @@ export function ChatInput({ onSend, onStop, onStopBackground, onAccelerate, canS
                 <button
                   data-cgui="queue-btn"
                   onClick={() => handleSend()}
-                  disabled={!text.trim() && attachments.length === 0}
+                  disabled={!!attachmentBlockReason(attachments) || (!text.trim() && attachments.length === 0)}
                   className="shrink-0 h-8 px-3 max-md:px-2.5 rounded-full bg-accent/10 hover:bg-accent/20 text-accent flex items-center justify-center gap-1 transition-colors disabled:opacity-50 text-[11px] font-medium"
                   title="入队（当前消息发送完后自动发出）"
                 >
@@ -1343,7 +1343,7 @@ export function ChatInput({ onSend, onStop, onStopBackground, onAccelerate, canS
               <button
                 data-cgui="send-btn"
                 onClick={() => handleSend()}
-                disabled={(!text.trim() && attachments.length === 0) || disabled || rcLocked}
+                disabled={!!attachmentBlockReason(attachments) || (!text.trim() && attachments.length === 0) || disabled || rcLocked}
                 className="btn-accent shrink-0 w-8 h-8 rounded-full flex items-center justify-center"
                 title="发送"
               >

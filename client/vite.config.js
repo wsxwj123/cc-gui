@@ -18,6 +18,14 @@ export default defineConfig({
   },
   server: {
     port: 5173,
+    // client/src/utils/plan.js 复用仓库根 server/utils/plan.js —— 共享纯规则必须住在
+    // Tauri 会打包的 server 资源树里(反过来 server 导 client/src 在安装包里会 ENOENT)。
+    // 该 import 跨出 vite root(client/),dev 走 /@fs/,默认 fs.allow 只含 root → 403
+    // 断模块图 = 白屏。显式指定 allow 会【替换】Vite 的默认 root 放行(root 不会自动加回,
+    // 漏掉 '.' 连 index.html 都 403 = dev 整体不可用,判官实测),所以 root 必须自己列上;
+    // 跨根只放行被 import 的那个目录,不放整个仓库根(否则 dev 下 /@fs 可读
+    // CLAUDE.local.md / LEARNINGS.md / .devflow 等)。生产 build 不经这道门。
+    fs: { allow: ['.', '../server/utils'] },
     proxy: {
       '/api': 'http://localhost:6677',
       '/ws': {

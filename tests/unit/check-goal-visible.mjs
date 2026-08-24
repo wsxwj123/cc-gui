@@ -84,9 +84,8 @@ assert.equal(GOAL_SET_STDOUT.replace(/^Goal set:\s*/, ''), goals[0].condition,
 rmSync(home, { recursive: true, force: true });
 
 // ── 2. 实时侧 + 渲染侧源码守卫 ─────────────────────────────────────────
-assert.ok(/function GoalNotice\(\{ goal \}\)/.test(app), 'GoalNotice(消息流里的目标提示行)必须存在');
-assert.equal(app.split('<GoalNotice goal={msg} />').length - 1, 2,
-  '历史列表(MessageList)与流式列表两处都要渲染 goal,漏一处就是"翻回去看不见"');
+assert.equal(app.split('<GoalNotice goal={msg} />').length - 1, 0,
+  '目标提示不再进消息流(历史/流式两处都不渲染),只由输入框上方的常驻目标条展示');
 assert.ok(/const activeGoal = useMemo\(/.test(app), '常驻条必须由 activeGoal 派生');
 // r30:顶栏小徽章退役,常驻条(GoalBar)移到 ChatInput 的 composer 正上方 —— "目标进行中"
 // 文案与 title 里的"最近判定"随之迁入 GoalBar,App.jsx 里不再直接渲染该行。
@@ -101,31 +100,32 @@ assert.ok(!/<span className="truncate">目标进行中：\{activeGoal\.condition
 assert.ok(/block\.type === 'text' && \/\^Stop hook feedback:\/\.test\(block\.text \|\| ''\)/.test(app),
   '实时侧必须【按前缀】识别 Stop hook feedback,不得放行任意纯文本 user 事件(会引入噪音)');
 
-// ── 3. 复刻徽章状态机:达成/清除后不许残留 ────────────────────────────
-// 下面是 activeGoal 的复刻实现。复刻件会漂移,所以先把 App.jsx 里的判据逐字锁住:
-// 谁改了那一行,这里就红,必须同步改复刻件和用例,状态机不会悄悄失效。
-assert.ok(
-  app.includes("if (messages[i]?.type === 'goal') return messages[i].met ? null : messages[i];"),
-  'activeGoal 的判据("最后一条 goal 的 met")必须与下方复刻件逐字一致');
-{
-  // 与 App.jsx 的 activeGoal 同一判据:取最后一条 goal,met 即无活动目标。
-  const activeGoal = (msgs) => {
-    for (let i = msgs.length - 1; i >= 0; i--) {
-      if (msgs[i]?.type === 'goal') return msgs[i].met ? null : msgs[i];
-    }
-    return null;
-  };
-  const set = { type: 'goal', met: false, sentinel: true, condition: COND };
-  const notYet = { type: 'goal', met: false, sentinel: false, condition: COND, reason: 'r' };
-  const done = { type: 'goal', met: true, sentinel: false, condition: COND, reason: 'r', iterations: 2 };
-  const cleared = { type: 'goal', met: true, sentinel: true, condition: COND };
-  const turn = { type: 'turn' };
-  assert.equal(activeGoal([turn]), null, '没设过目标 → 无徽章');
-  assert.equal(activeGoal([set, turn])?.condition, COND, '设了目标 → 挂徽章');
-  assert.equal(activeGoal([set, turn, notYet, turn])?.reason, 'r', '未达成(续跑中)→ 徽章仍在,带最近判定');
-  assert.equal(activeGoal([set, turn, notYet, turn, done]), null, '达成 → 徽章立即消失,不残留');
-  assert.equal(activeGoal([set, turn, cleared]), null, '/goal clear 手动清除(met:true+sentinel)→ 徽章消失');
-  assert.equal(activeGoal([set, done, set])?.condition, COND, '同一会话再设新目标 → 徽章回来');
-}
+  // ── 3. 复刻徽章状态机:常驻条保留最后一条 goal(含达成/清除状态)──
+  // 用户要求目标条像计划卡一样常驻输入框上方,不能一滚动/一完成就消失,
+  // 因此 activeGoal 取“最后一条 goal”而非“最后一条未达成 goal”。
+  // 复刻件与 App.jsx 判据同步修改。
+  assert.ok(
+    app.includes("if (messages[i]?.type === 'goal') return messages[i];"),
+    'activeGoal 的判据(取最后一条 goal)必须与下方复刻件逐字一致');
+  {
+    // 与 App.jsx 的 activeGoal 同一判据:取最后一条 goal,无论 met/sentinel。
+    const activeGoal = (msgs) => {
+      for (let i = msgs.length - 1; i >= 0; i--) {
+        if (msgs[i]?.type === 'goal') return msgs[i];
+      }
+      return null;
+    };
+    const set = { type: 'goal', met: false, sentinel: true, condition: COND };
+    const notYet = { type: 'goal', met: false, sentinel: false, condition: COND, reason: 'r' };
+    const done = { type: 'goal', met: true, sentinel: false, condition: COND, reason: 'r', iterations: 2 };
+    const cleared = { type: 'goal', met: true, sentinel: true, condition: COND };
+    const turn = { type: 'turn' };
+    assert.equal(activeGoal([turn]), null, '没设过目标 → 无常驻条');
+    assert.equal(activeGoal([set, turn])?.condition, COND, '设了目标 → 常驻条显示');
+    assert.equal(activeGoal([set, turn, notYet, turn])?.reason, 'r', '未达成(续跑中)→ 常驻条仍在,带最近判定');
+    assert.equal(activeGoal([set, turn, notYet, turn, done])?.met, true, '达成 → 常驻条保留“已达成”状态,不消失');
+    assert.equal(activeGoal([set, turn, cleared])?.sentinel, true, '/goal clear 后常驻条仍保留“已清除”状态');
+    assert.equal(activeGoal([set, done, set])?.condition, COND, '同一会话再设新目标 → 常驻条回到新目标');
+  }
 
 console.log('✓ check-goal-visible: goal_status 进流 + 回显过滤未破坏 + 徽章状态机全过');

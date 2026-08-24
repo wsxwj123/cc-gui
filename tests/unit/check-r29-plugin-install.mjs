@@ -15,10 +15,14 @@
 //   S3 marketplaceProxyEnv 改成无条件覆盖 baseEnv → t7c 红(用户已有 HTTPS_PROXY 被盖)
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { pluginInstallErrorMessage } from '../../client/src/utils/builtinPlugins.js';
 
 const {
-  ensureMarketplace, installPluginWithRefresh, marketplaceProxyEnv,
+  ensureMarketplace, installPluginWithRefresh, marketplaceProxyEnv, probePluginProxy,
+  PLUGIN_CLI_TIMEOUT_MS,
   isMarketplaceAddIdempotent, isMarketplaceStaleError,
+  isRetryablePluginNetworkError, sanitizePluginErrorText,
+  sanitizePluginPublicValue, serializePluginPublicError, stripPluginAnsi,
 } = await import('../../server/routes/mcp.js');
 
 const MK = 'claude-plugins-official';
@@ -85,6 +89,26 @@ const noProxy = async () => null;
   assert.equal(installN, 2, 't3: install 恰两次');
 }
 
+// t3b 第三方无 repo 的 stale 回退只能 update 目标市场，不能借用 official repo。
+{
+  let installN = 0;
+  const calls = [];
+  const run = async (args) => {
+    calls.push(args.join(' '));
+    if (args[1] === 'install' && installN++ === 0) throw cliErr('plugin not found in marketplace; local copy is out of date');
+    return '';
+  };
+  await installPluginWithRefresh({
+    name: 'third-party-plugin', marketplace: 'third-party-marketplace', run,
+    detect: noProxy, baseEnv: {}, probe: async () => false,
+  });
+  assert.deepEqual(calls, [
+    'plugin install third-party-plugin@third-party-marketplace',
+    'plugin marketplace update third-party-marketplace',
+    'plugin install third-party-plugin@third-party-marketplace',
+  ], 't3b: 第三方无repo只刷新目标市场并重试，不add official');
+}
+
 // t4 刷新成功但重试仍失败 → 完整因果链文案 + 可执行指引
 {
   const { run } = mockRun({
@@ -138,48 +162,426 @@ const noProxy = async () => null;
   assert.equal(calls.filter((c) => c.includes('marketplace update')).length, 0, 't6: 非缓存过期形态不刷新市场');
 }
 
+// t6b 缓存直装不应为了代理预检触网；首次 install 使用无代理环境，成功即结束。
+{
+  let detectCalls = 0;
+  let probeCalls = 0;
+  const inherited = {
+    HTTP_PROXY: 'http://reachable-but-rejecting:8080',
+    HTTPS_PROXY: 'http://reachable-but-rejecting:8080',
+    KEEP: 'yes',
+  };
+  const { calls, run } = mockRun();
+  await installPluginWithRefresh({
+    name: 'cached', marketplace: MK, run,
+    baseEnv: inherited,
+    detect: async () => { detectCalls++; return null; },
+    probe: async () => { probeCalls++; return true; },
+  });
+  assert.equal(calls.length, 1, 't6b: 缓存命中只执行一次 install');
+  assert.equal(calls[0].opts.env.HTTP_PROXY, undefined, 't6b: 首次离线 install 不继承代理');
+  assert.equal(calls[0].opts.env.HTTPS_PROXY, undefined, 't6b: 首次离线 install 不继承代理');
+  assert.equal(calls[0].opts.env.KEEP, 'yes', 't6b: 非代理环境保持');
+  assert.equal(detectCalls, 0, 't6b: 缓存命中不运行自动代理探测');
+  assert.equal(probeCalls, 0, 't6b: 缓存命中不发代理探活连接');
+  assert.deepEqual(inherited, {
+    HTTP_PROXY: 'http://reachable-but-rejecting:8080',
+    HTTPS_PROXY: 'http://reachable-but-rejecting:8080',
+    KEEP: 'yes',
+  }, 't6b: 不修改父环境');
+}
+
 // t7 代理 env 注入(mock detectLocalProxy)
 {
-  // t7a 探到代理 → 四键注入(baseEnv 显式传空,本机 shell 可能已带小写 proxy env)
+  // t7a 探到且探活成功的代理 → 四键注入(baseEnv 显式传空)
   const proxy = 'http://127.0.0.1:7899';
-  const env7a = await marketplaceProxyEnv(async () => proxy, {});
+  const liveProbe = async (value) => value === proxy || value === 'http://corp:8080';
+  const env7a = await marketplaceProxyEnv(async () => proxy, {}, liveProbe);
   assert.equal(env7a.HTTP_PROXY, proxy);
   assert.equal(env7a.HTTPS_PROXY, proxy);
   assert.equal(env7a.http_proxy, proxy);
   assert.equal(env7a.https_proxy, proxy);
 
-  // t7a' 接线:ensureMarketplace 把代理 env 传给 run 的 opts.extraEnv;
-  // 对本进程未占用的键必须注入(已被进程 env 占用的键按不覆盖语义跳过)。
+  // t7a' 接线:ensureMarketplace 把安全环境副本传给 run 的 opts.env。
   const { calls, run } = mockRun();
-  await ensureMarketplace({ marketplace: MK, run, detect: async () => proxy });
+  await ensureMarketplace({ marketplace: MK, run, detect: async () => proxy, baseEnv: {}, probe: liveProbe });
   const updOpts = calls.find((c) => c.args.includes('update'))?.opts;
-  assert.ok(updOpts && typeof updOpts.extraEnv === 'object', "t7a': marketplace update 调用带 extraEnv");
+  assert.ok(updOpts && typeof updOpts.env === 'object', "t7a': marketplace update 调用带安全env");
   for (const k of ['HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy']) {
-    if (!process.env[k]) assert.equal(updOpts.extraEnv[k], proxy, `t7a': 未占用键 ${k} 应注入代理`);
+    assert.equal(updOpts.env[k], proxy, `t7a': 空键 ${k} 应注入代理`);
   }
+  assert.equal(updOpts.timeout, PLUGIN_CLI_TIMEOUT_MS, "t7a': marketplace update 使用统一120秒预算");
 
-  // t7b 探测不到/探测抛错 → extraEnv 空对象,不炸主流程
-  assert.deepEqual(await marketplaceProxyEnv(noProxy, {}), {});
-  assert.deepEqual(await marketplaceProxyEnv(async () => { throw new Error('probe boom'); }, {}), {});
+  // t7b 探测不到/探测抛错 → 安全env为空,不炸主流程
+  assert.deepEqual(await marketplaceProxyEnv(noProxy, {}, liveProbe), {});
+  assert.deepEqual(await marketplaceProxyEnv(async () => { throw new Error('probe boom'); }, {}, liveProbe), {});
 
-  // t7c 用户已有 env 不被覆盖
-  const merged = await marketplaceProxyEnv(async () => 'http://127.0.0.1:7899', { HTTPS_PROXY: 'http://corp:8080' });
-  assert.ok(!('HTTPS_PROXY' in merged), 't7c: 已有 HTTPS_PROXY 不覆盖');
+  // t7c 可达继承值原样保留，自动代理只补空键；父 env 不被修改。
+  const parent = { HTTPS_PROXY: 'http://corp:8080', OTHER: 'keep' };
+  const merged = await marketplaceProxyEnv(async () => proxy, parent, liveProbe);
+  assert.equal(merged.HTTPS_PROXY, 'http://corp:8080', 't7c: 已有可达 HTTPS_PROXY 原样保留');
   assert.equal(merged.HTTP_PROXY, 'http://127.0.0.1:7899', 't7c: 缺的键仍注入');
+  assert.deepEqual(parent, { HTTPS_PROXY: 'http://corp:8080', OTHER: 'keep' }, 't7c: 不修改父env');
+
+  // t7d 四种继承值逐一探活，死值不进子进程环境，可达值保留。
+  const probes = [];
+  const inherited = {
+    HTTP_PROXY: 'http://dead-a:1',
+    HTTPS_PROXY: 'http://live-b:2',
+    http_proxy: 'http://dead-c:3',
+    https_proxy: 'http://live-d:4',
+  };
+  const sanitized = await marketplaceProxyEnv(
+    async () => null,
+    inherited,
+    async (value) => { probes.push(value); return value.includes('live'); },
+  );
+  assert.deepEqual(probes, Object.values(inherited), 't7d: 四键逐一探活');
+  assert.equal(sanitized.HTTP_PROXY, undefined);
+  assert.equal(sanitized.http_proxy, undefined);
+  assert.equal(sanitized.HTTPS_PROXY, inherited.HTTPS_PROXY);
+  assert.equal(sanitized.https_proxy, inherited.https_proxy);
+  assert.deepEqual(Object.keys(inherited), ['HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy'], 't7d: 父env键未删');
+
+  let detectedBaseEnv = null;
+  await marketplaceProxyEnv(
+    ({ baseEnv }) => { detectedBaseEnv = baseEnv; return null; },
+    { HTTP_PROXY: 'http://dead-a:1', KEEP: 'yes' },
+    async () => false,
+  );
+  assert.deepEqual(detectedBaseEnv, { KEEP: 'yes' }, 't7d: 自动探测基于已剔除死值的副本');
+
+  // t7e URL 探活只传 host/port/短超时给 TCP probe。
+  assert.equal(await probePluginProxy('http://proxy.test:8443', async (host, port, timeout) => {
+    assert.deepEqual({ host, port, timeout }, { host: 'proxy.test', port: 8443, timeout: 600 });
+    return true;
+  }), true);
 }
 
-// t8 接线哨兵(源码级):吞错模式不得回归、代理注入接线、Windows 红线(无 sh -lc)
+// t8 接线哨兵(源码级):吞错模式不得回归、安全env接线、Windows 红线(无 sh -lc)
 {
   const src = readFileSync(new URL('../../server/routes/mcp.js', import.meta.url), 'utf8');
-  assert.match(src, /import \{ detectUv, detectLocalProxy \} from '\.\/version-check\.js'/, 't8: 只读 import detectLocalProxy');
+  assert.match(src, /import \{ detectUv, detectLocalProxy, probeTcp \} from '\.\/version-check\.js'/,
+    't8: 复用现有TCP探活');
   assert.match(src, /export async function marketplaceProxyEnv/, 't8: 代理 env 助手存在');
-  assert.match(src, /extraEnv: await marketplaceProxyEnv\(detect\)/, 't8: ensureMarketplace 给 marketplace 操作注代理');
+  assert.match(src, /env \|\| await marketplaceProxyEnv\(detect, baseEnv, probe\)/, 't8: ensureMarketplace 构造安全env');
   // ensureOfficialMarketplace 旧吞错形态(两行 try{...}catch{})不得回归
   const ensureBody = src.slice(src.indexOf('async function ensureOfficialMarketplace'));
   assert.ok(!ensureBody.slice(0, ensureBody.indexOf('}')).includes('catch {}'), 't8: ensureOfficialMarketplace 不得再 catch{} 吞错');
   assert.match(src, /await installPluginWithRefresh\(/, 't8: install 路由接重试逻辑');
-  assert.match(src, /env: \{ \.\.\.process\.env, \.\.\.\(extraEnv \|\| \{\}\) \}/, 't8: runClaude 合并 extraEnv');
+  assert.match(src, /env: env \? \{ \.\.\.env \} : \{ \.\.\.process\.env, \.\.\.\(extraEnv \|\| \{\}\) \}/,
+    't8: runClaude 可接受完整安全env副本');
   assert.ok(!src.includes('sh -lc'), 't8: Windows 红线 —— 不得用 sh -lc');
+
+  assert.equal(pluginInstallErrorMessage({ message: '代理不可达' }), '代理不可达',
+    't8: MCPPanel 展示结构化 error.message，不得变成 [object Object]');
+  assert.equal(pluginInstallErrorMessage('旧版字符串错误'), '旧版字符串错误', 't8: 兼容旧字符串错误');
+  assert.equal(pluginInstallErrorMessage({ stage: 'plugin-install' }), '安装失败', 't8: 缺message回退');
+}
+
+// t9 结构化阶段、超时元数据与刷新因果链。
+{
+  const timeoutError = Object.assign(new Error('command timed out'), {
+    killed: true, code: 'ETIMEDOUT', signal: 'SIGTERM',
+  });
+  await assert.rejects(
+    () => installPluginWithRefresh({
+      name: 'x', marketplace: MK, run: async () => { throw timeoutError; },
+      detect: noProxy, baseEnv: {}, probe: async () => false,
+    }),
+    (error) => {
+      assert.deepEqual({
+        stage: error.details?.stage,
+        code: error.details?.code,
+        retryable: error.details?.retryable,
+        timeoutMs: error.details?.timeoutMs,
+        killed: error.details?.killed,
+        timedOut: error.details?.timedOut,
+        cliExitCode: error.details?.cliExitCode,
+        signal: error.details?.signal,
+      }, {
+        stage: 'plugin-install', code: 'CLI_TIMEOUT', retryable: true,
+        timeoutMs: 120000, killed: true, timedOut: true,
+        cliExitCode: 'ETIMEDOUT', signal: 'SIGTERM',
+      });
+      return true;
+    },
+  );
+
+  const calls = [];
+  const updateFails = async (args, opts) => {
+    calls.push({ args, opts });
+    if (args[1] === 'install') throw cliErr('plugin not found in marketplace');
+    if (args[2] === 'update') throw Object.assign(cliErr('git fetch failed'), { code: 19, killed: false, signal: null });
+    return '';
+  };
+  await assert.rejects(
+    () => installPluginWithRefresh({
+      name: 'x', marketplace: MK, repo: REPO, run: updateFails,
+      detect: noProxy, baseEnv: {}, probe: async () => false,
+    }),
+    (error) => error.details?.stage === 'marketplace-update'
+      && error.details?.code === 'CLI_EXIT_NONZERO'
+      && error.details?.cliExitCode === 19
+      && /首次|安装失败/.test(error.details?.message || ''),
+    't9: not-found→update失败以marketplace-update为终态并保留首次安装因果',
+  );
+  assert.ok(calls.every(({ opts }) => opts.timeout === 120000), 't9: add/update/install统一120秒');
+  assert.ok(calls.every(({ opts }) => opts.killTreeOnTimeout === true), 't9: 三阶段超时均终止整棵子进程树');
+}
+
+// t10 CLI 错误在 PluginCliError 边界统一脱敏/限长，网络非零只按窄白名单可重试。
+{
+  const secrets = ['url-user', 'url-pass', 'bearer-token', 'query-token', 'api-secret', 'json-auth', 'json-token', 'kv-pass'];
+  const raw = [
+    'R33_SAFE_CONTEXT marketplace-add',
+    `url=https://${secrets[0]}:${secrets[1]}@example.invalid/repo?access_token=${secrets[3]}&api_key=${secrets[4]}`,
+    `Authorization: Bearer ${secrets[2]}`,
+    JSON.stringify({ authorization: `Bearer ${secrets[5]}`, token: secrets[6] }),
+    `password=${secrets[7]}`,
+    'bounded-context '.repeat(1000),
+  ].join('\n');
+  const sanitized = sanitizePluginErrorText(raw);
+  assert.ok(sanitized.includes('R33_SAFE_CONTEXT'), 't10: 保留安全诊断上下文');
+  assert.ok(sanitized.includes('[REDACTED]'), 't10: 敏感值替换为占位');
+  assert.ok(secrets.every((secret) => !sanitized.includes(secret)), 't10: URL/header/query/JSON/kv秘密全部移除');
+  assert.ok(sanitized.length <= 4096, 't10: 单字段最多4096字符');
+
+  const run = async () => { throw cliErr(raw); };
+  await assert.rejects(
+    () => installPluginWithRefresh({ name: 'x', marketplace: MK, run, baseEnv: {} }),
+    (error) => error.details?.stage === 'plugin-install'
+      && error.details.message.includes('R33_SAFE_CONTEXT')
+      && error.details.message.length <= 4096
+      && secrets.every((secret) => !JSON.stringify(error.details).includes(secret)),
+    't10: 真实PluginCliError details同样脱敏且有界',
+  );
+
+  for (const message of [
+    'recv failure: connection reset by peer',
+    'connect ECONNREFUSED 127.0.0.1:443',
+    'getaddrinfo ENOTFOUND example.invalid',
+    'TLS handshake failed',
+    'temporary failure in name resolution',
+    'network timeout while fetching',
+  ]) assert.equal(isRetryablePluginNetworkError(cliErr(message)), true, `t10: 网络错误应可重试: ${message}`);
+  for (const message of [
+    'permission denied for repository',
+    'invalid marketplace name',
+    'plugin not found in marketplace',
+  ]) assert.equal(isRetryablePluginNetworkError(cliErr(message)), false, `t10: 终态错误不可重试: ${message}`);
+}
+
+// t11 所有/plugins路由共用的公开序列化边界：敏感键直接替换、文本凭证完整遮盖、整体有界。
+{
+  const secrets = [
+    'AUTH_SECRET', 'JSON_AUTH_SECRET', 'QUOTED SECRET', 'SINGLE SECRET',
+    'BASIC_SECRET', 'TWO WORD SECRET', 'NESTED_PASSWORD', 'NESTED_CREDENTIAL',
+    'NESTED_ACCESS_TOKEN', 'NESTED_API_KEY',
+  ];
+  const text = [
+    'R33_SAFE_CONTEXT plugin route failed',
+    `auth=${secrets[0]}`,
+    JSON.stringify({ auth: secrets[1] }),
+    `Bearer "${secrets[2]}"`,
+    `Bearer '${secrets[3]}'`,
+    `Authorization: Basic ${secrets[4]}`,
+    `password='${secrets[5]}'`,
+  ].join('\n');
+  const safeText = sanitizePluginErrorText(text);
+  assert.ok(safeText.includes('R33_SAFE_CONTEXT'), 't11: 文本脱敏保留安全上下文');
+  assert.ok(secrets.slice(0, 6).every((secret) => !safeText.includes(secret)), 't11: auth/scheme/引号KV均完整遮盖');
+
+  const nested = sanitizePluginPublicValue({
+    message: `${text}\n${'bounded context '.repeat(2000)}`,
+    outer: {
+      password: secrets[6],
+      credential: secrets[7],
+      accessToken: secrets[8],
+      apiKey: secrets[9],
+      context: 'safe nested context',
+    },
+  });
+  assert.equal(nested.outer.password, '[REDACTED]');
+  assert.equal(nested.outer.credential, '[REDACTED]');
+  assert.equal(nested.outer.accessToken, '[REDACTED]');
+  assert.equal(nested.outer.apiKey, '[REDACTED]');
+  assert.equal(nested.outer.context, 'safe nested context');
+
+  const legacy = serializePluginPublicError(nested, { fallback: '操作失败' });
+  const legacyJson = JSON.stringify(legacy.body);
+  assert.equal(legacy.status, 500);
+  assert.equal(typeof legacy.body.error, 'object', 't11: 旧object错误形态保持object');
+  assert.ok(Buffer.byteLength(legacyJson, 'utf8') <= 16 * 1024, 't11: 完整公开响应不超过16KiB');
+  assert.ok(secrets.every((secret) => !legacyJson.includes(secret)), 't11: 递归公开响应不含秘密');
+
+  const structured = serializePluginPublicError(cliErr(`R33_SAFE_CONTEXT ${text}`), {
+    structured: true,
+    stage: 'plugin-install',
+    fallback: '安装失败',
+  });
+  assert.equal(structured.body.error.stage, 'plugin-install');
+  assert.equal(structured.body.error.code, 'CLI_EXIT_NONZERO');
+  assert.ok(Buffer.byteLength(JSON.stringify(structured.body), 'utf8') <= 16 * 1024);
+
+  for (const terminal of [
+    'permission denied EACCES EPERM; ECONNREFUSED timed out',
+    'HTTP 401 unauthorized; HTTP 403 forbidden; DNS lookup failed',
+    'invalid argument --scope; socket hang up',
+    'plugin not found; connection reset',
+    'marketplace not found; network timeout',
+  ]) assert.equal(isRetryablePluginNetworkError(cliErr(terminal)), false, `t11: 终态优先否决: ${terminal}`);
+  assert.equal(isRetryablePluginNetworkError(cliErr('ECONNREFUSED; DNS lookup failed; socket hang up')), true,
+    't11: 纯瞬态网络错误仍可重试');
+}
+
+// t12 ANSI/C1 必须在文本规则前完整剥离；敏感键按语义后缀识别，不误伤普通单词。
+{
+  const secrets = ['CSI_SECRET', 'OSC_BEL_SECRET', 'OSC_ST_SECRET', 'C1_SECRET'];
+  const raw = [
+    `\u001b[31mproxyAuthorization\u001b[0m=${secrets[0]}`,
+    `\u001b]8;;https://example.invalid\u0007clientCredential\u001b]8;;\u0007=${secrets[1]}`,
+    `\u001b]0;hidden-title\u001b\\credentials=${secrets[2]}`,
+    `\u009b31mcredentials\u009b0m=${secrets[3]}`,
+    'monkey=safe-monkey-context',
+  ].join('\n');
+  const stripped = stripPluginAnsi(raw);
+  assert.ok(!/[\u001b\u0080-\u009f]/.test(stripped), 't12: ESC 与 C1 控制符全部剥离');
+  const sanitized = sanitizePluginErrorText(raw);
+  assert.ok(secrets.every((secret) => !sanitized.includes(secret)), 't12: 着色/OSC/C1 包裹后的敏感键仍脱敏');
+  assert.ok(sanitized.includes('monkey=safe-monkey-context'), 't12: 普通 monkey 键不因 key 字符后缀误遮');
+
+  const nested = sanitizePluginPublicValue({
+    proxyAuthorization: 'PROXY_SECRET',
+    clientCredential: 'CLIENT_SECRET',
+    service_credentials: 'CREDENTIALS_SECRET',
+    apiKey: 'KEY_SECRET',
+    monkey: 'safe nested monkey',
+  });
+  assert.equal(nested.proxyAuthorization, '[REDACTED]');
+  assert.equal(nested.clientCredential, '[REDACTED]');
+  assert.equal(nested.service_credentials, '[REDACTED]');
+  assert.equal(nested.apiKey, '[REDACTED]');
+  assert.equal(nested.monkey, 'safe nested monkey');
+
+  // t12-回归(C-1):全小写/全大写【连写】敏感键必须脱敏。51a4a71 改成"按词切分只看最后
+  // 一个词"后,无分隔符的连写键(apikey/APIKEY/accesstoken/secretkey/authtoken/passwd)
+  // 判不出 → ?apikey= 这类 git/npm 回显 URL 里的凭证重新明文泄漏。变异:删掉 flat 连写
+  // 兜底 → 下面六条 include('SECRET') 立即为真(泄漏)。
+  for (const [i, key] of ['apikey', 'APIKEY', 'accesstoken', 'secretkey', 'authtoken', 'passwd'].entries()) {
+    const secret = `FLATSECRET${i}`;
+    assert.ok(!sanitizePluginErrorText(`${key}=${secret}`).includes(secret),
+      `t12: 连写敏感键必须脱敏: ${key}=`);
+    assert.ok(!sanitizePluginErrorText(`?${key}=${secret}`).includes(secret),
+      `t12: URL 查询里的连写敏感键必须脱敏: ?${key}=`);
+  }
+  // 假阳性守卫:monkey/donkey/hockey 以 key 结尾但不是密钥,连写兜底必须放行。
+  for (const benign of ['monkey', 'donkey', 'hockey']) {
+    assert.ok(sanitizePluginErrorText(`${benign}=safe-${benign}`).includes(`safe-${benign}`),
+      `t12: 普通词 ${benign} 不因 key 后缀被误遮`);
+  }
+  // 建议2:零宽/软连字符混入的对象键(整键送进判定)也要按归一后的语义脱敏。
+  const ZWSP = '\u200B'; const SHY = '\u00AD'; // zero-width space, soft hyphen
+  const kApikey = `api${ZWSP}key`; const kAuth = `au${SHY}th`; const kMonkey = `mon${ZWSP}key`;
+  const zw = sanitizePluginPublicValue({ [kApikey]: 'ZW1', [kAuth]: 'ZW2', [kMonkey]: 'zwmonkey' });
+  assert.equal(zw[kApikey], '[REDACTED]', 't12: 零宽混入的 apikey 归一后仍脱敏');
+  assert.equal(zw[kAuth], '[REDACTED]', 't12: 软连字符混入的 auth 归一后仍脱敏');
+  assert.equal(zw[kMonkey], 'zwmonkey', 't12: 零宽混入的 monkey 归一后仍不误遮');
+  // 同批不可见字符打在【自由文本】路径也必须失效:键捕获类不含零宽,`au<ZWSP>th=`
+  // 会被劈成 `th=` 漏检、`mon<ZWSP>key=` 反被劈成 `key=` 误遮、`Bear<ZWSP>er` 绕过
+  // Bearer 规则。修法=sanitizePluginErrorText 入口把不可见字符与控制符一并剥掉。
+  // 变异:从 sanitizePluginErrorText 入口剥除类里去掉零宽/软连字符段 → 下面四条立即红。
+  assert.ok(!sanitizePluginErrorText(`au${ZWSP}th=FREETEXT_ZW1`).includes('FREETEXT_ZW1'),
+    't12: 自由文本里零宽劈开的 auth 仍脱敏');
+  assert.ok(!sanitizePluginErrorText(`Bear${ZWSP}er FREETEXT_ZW2`).includes('FREETEXT_ZW2'),
+    't12: 零宽劈开的 Bearer 值仍脱敏');
+  assert.ok(!sanitizePluginErrorText(`"pass${SHY}word": "FREETEXT_ZW3"`).includes('FREETEXT_ZW3'),
+    't12: 软连字符劈开的 password 仍脱敏');
+  assert.ok(sanitizePluginErrorText(`mon${ZWSP}key=safe-zw-monkey`).includes('safe-zw-monkey'),
+    't12: 零宽劈开的 monkey 归一后仍不误遮');
+  // 判官 F-2:ZWSP/SHY 之外的同构不可见字符(变体选择符/蒙文分隔符/ALM/CGJ,含增补面
+  // 变体选择符)同样能劈键。剥除类升级为 Unicode 格式类全类 \p{Cf} + 变体选择符并集。
+  // 变异:把剥除类退回逐字符枚举(去掉 \p{Cf}/VS 段)→ 下面五条立即红。
+  const VS1 = String.fromCharCode(0xFE00); const MVS = String.fromCharCode(0x180E);
+  const ALM = String.fromCharCode(0x061C); const CGJ = String.fromCharCode(0x034F);
+  const AVS = String.fromCodePoint(0xE0100);
+  for (const [tag, ch] of [['VS1', VS1], ['MVS', MVS], ['ALM', ALM], ['CGJ', CGJ], ['AVS', AVS]]) {
+    assert.ok(!sanitizePluginErrorText(`au${ch}th=INVLEAK_${tag}`).includes(`INVLEAK_${tag}`),
+      `t12: ${tag} 劈开的 auth 仍脱敏`);
+  }
+  const vsObj = sanitizePluginPublicValue({ [`api${VS1}key`]: 'INVOBJ' });
+  assert.equal(vsObj[`api${VS1}key`], '[REDACTED]', 't12: 变体选择符混入的对象键仍脱敏');
+  assert.ok(sanitizePluginErrorText(`mon${MVS}key=safe-mvs`).includes('safe-mvs'),
+    't12: 蒙文分隔符劈开的 monkey 仍不误遮');
+  // 判官 R-1:蒙文自由变体选择符 FVS1-4(180B-180D/180F 属 Mn 不在 \p{Cf})是最后一个
+  // 真零宽官方功能字符家族。变异:从剥除类去掉 180B-180F 段 → 下面断言红。
+  for (const cp of [0x180B, 0x180D, 0x180F]) {
+    const FVS = String.fromCharCode(cp);
+    assert.ok(!sanitizePluginErrorText(`au${FVS}th=FVSLEAK`).includes('FVSLEAK'),
+      `t12: FVS U+${cp.toString(16)} 劈开的 auth 仍脱敏`);
+  }
+  const fvsObj = sanitizePluginPublicValue({ [`mon${String.fromCharCode(0x180B)}key`]: 'safe-fvs' });
+  assert.equal(Object.values(fvsObj)[0], 'safe-fvs', 't12: FVS 劈开的对象键 monkey 归一后不误遮');
+}
+
+// t12b stripPluginAnsi 有界化(I-1):无终止符的字符串控制序列此前用惰性 [\s\S]*? 对每个
+// 起点重扫全串 = 二次复杂度,400KB 恶意 stderr 可阻塞事件循环 ~65s 挂死后端。改有界否定
+// 字符类后,合法 ANSI 输出逐字不变,大输入线性。变异:把 {0,8192} 换回 [\s\S]*? → 计时红。
+{
+  const big = '\x1B]x'.repeat((2 * 1024 * 1024 / 3) | 0); // ~2MB 全是 OSC-open、无终止符
+  const t0 = process.hrtime.bigint();
+  stripPluginAnsi(big);
+  const ms = Number(process.hrtime.bigint() - t0) / 1e6;
+  // 上界给慢 CI runner 留 ~30 倍余量(本机实测 ~31ms;旧惰性版同规模 >60s,量级差三个 0,
+  // 1000ms 仍能可靠区分线性与平方)。
+  assert.ok(ms < 1000, `t12b: 2MB 病态输入必须 <1000ms(实测 ${ms.toFixed(1)}ms;旧惰性版同规模 >60s)`);
+}
+
+// t12c 保尾截断的切口劈键(判官 F-3):16KB slice 落在键值中间时,残尾没有键可判,
+// 脱敏正则失配 → 值尾巴明文透出;且这发生在脱敏之【前】,是截断自己引入的泄漏窗口。
+// 修法=切口对齐到下一行边界(键值同行,整行一起丢);全文无换行时丢首 256 字符兜底。
+// 变异:rawPluginErrorText 退回裸 slice(-16384) → 前两条立即红。
+{
+  const NL = String.fromCharCode(10);
+  // 切口恰把 `Authorization: Bearer …` 劈开:cut 以 "er SECRET_STRADDLE" 开头(无键残尾)
+  const tail16k = (`er SECRET_STRADDLE${NL}` + `z${NL}`.repeat(9000)).slice(0, 16384);
+  const straddled = JSON.stringify(serializePluginPublicError(cliErr(`Authorization: Bear${tail16k}`)).body);
+  assert.ok(!straddled.includes('SECRET_STRADDLE'), 't12c: 切口劈开的 Bearer 值不得透出');
+  // 全文无换行形态:靠丢首 256 字符兜底
+  const flat16k = (`ey=SECRET_NONEWLINE ` + 'z'.repeat(20000)).slice(0, 16384);
+  const flat = JSON.stringify(serializePluginPublicError(cliErr(`apik${flat16k}`)).body);
+  assert.ok(!flat.includes('SECRET_NONEWLINE'), 't12c: 无换行时切口残尾也不得透出');
+  // 对齐只丢首个残行,其后内容照常保留(截断语义不变)
+  const kept = JSON.stringify(serializePluginPublicError(cliErr(
+    'x'.repeat(20000) + NL + 'marker-after-cut 后续正常内容' + NL + `z${NL}`.repeat(50))).body);
+  assert.ok(kept.includes('marker-after-cut'), 't12c: 行对齐后紧随切口的完整行必须保留');
+}
+
+// t13 带名称的 not-found 与输入/选项错误是终态，即使 stderr 同时含网络瞬态词。
+{
+  for (const terminal of [
+    'Plugin "x" not found in marketplace; connection reset',
+    "Marketplace 'third' not found; network timeout",
+    'invalid marketplace name; socket hang up',
+    'invalid option --scope; ECONNRESET',
+    'unknown option --scope; ECONNRESET',
+  ]) assert.equal(isRetryablePluginNetworkError(cliErr(terminal)), false, `t13: named/invalid 终态优先否决: ${terminal}`);
+  assert.equal(isRetryablePluginNetworkError(cliErr('connection reset; network timeout')), true,
+    't13: 纯网络瞬态仍可重试');
+}
+
+// t14 CLI stderr 的 ANSI 着色不得绕开终态否决:`4\x1B[0m03` 这类序列把 403 劈成两半,
+// 未剥控制序列时 \b403\b 匹配不上 → 认证失败被当网络抖动无限重试(暴力重试真凭证)。
+{
+  for (const colored of [
+    'remote: 4\x1B[0m03 Forbidden',
+    '\x1B[31m401\x1B[0m Unauthorized; socket hang up',
+    'per\x1B[1mmission denied\x1B[0m; ECONNRESET',
+    'Plugin \x1B[1m"x"\x1B[0m not found in marketplace; connection reset',
+  ]) assert.equal(isRetryablePluginNetworkError(cliErr(colored)), false,
+    `t14: ANSI 着色的终态错误仍须否决重试: ${JSON.stringify(colored)}`);
+  assert.equal(isRetryablePluginNetworkError(cliErr('\x1B[33mECONNRESET\x1B[0m; retrying')), true,
+    't14: 剥色后网络瞬态照旧可重试(不是一刀切否决)');
 }
 
 console.log('✓ check-r29-plugin-install: update 透出 + add 幂等 + not-found 重试/因果链 + 代理注入 + 哨兵');

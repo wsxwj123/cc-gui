@@ -5,6 +5,11 @@ import { FONT_OPTIONS, readingFontCss } from '../utils/systemFonts.js';
 import { createQueueId, firstDrainableIndex, isSteerBarrier, reclaimClaimItem, reconcileSteered, stripSteerState, queueKeyFor, isDraftQueueKey, draftQueueProjectHash } from '../utils/steerQueue.js';
 import { isValidContextResponse, shouldReplaceContextCache } from '../utils/contextCache.js';
 import { reducePinned, initialExpandedProjects, toggleExpanded, mergeSessionList, mergeHiddenOrder } from '../utils/projectPanel.js';
+import { attachmentSidecarNotice, draftSidecarBindingsForSessions, recoverAttachmentSidecarBindings } from '../utils/attachments.js';
+
+const recoverDraftSidecarsFromSessions = (sessions, projectHash) => (
+  recoverAttachmentSidecarBindings(draftSidecarBindingsForSessions(sessions, projectHash))
+);
 
 // Re-exported so existing importers (App.jsx) keep working; the list and its
 // css-resolution logic now live in utils/systemFonts.js alongside the enumeration.
@@ -374,7 +379,14 @@ const initialOrphanDraftQueues = (() => {
   }
   return out;
 })();
-const persistOrphanDraftQueues = (map) => writeLs(ORPHAN_QUEUE_STORAGE_KEY, map);
+const persistOrphanDraftQueues = (map, verify = false) => {
+  if (typeof localStorage === 'undefined') return true;
+  try {
+    const serialized = JSON.stringify(map);
+    localStorage.setItem(ORPHAN_QUEUE_STORAGE_KEY, serialized);
+    return !verify || localStorage.getItem(ORPHAN_QUEUE_STORAGE_KEY) === serialized;
+  } catch { return false; }
+};
 persistOrphanDraftQueues(initialOrphanDraftQueues);
 
 const persistQueueSnapshot = (messageQueue, verify = false) => {
@@ -523,6 +535,14 @@ export const useStore = create((set, get) => ({
   removeCompletionToast: (id) => set((s) => ({
     completionToasts: s.completionToasts.filter((x) => x.id !== id),
   })),
+  // 跨重启 draft→real sidecar 恢复发生在 session 列表水合层，不属于任一仍挂载的
+  // composer；失败必须进入全局可见状态，不能被 fire-and-forget 的 Promise 吞掉。
+  attachmentRecoveryNotice: null,
+  reportAttachmentRecovery: (result) => {
+    const text = attachmentSidecarNotice(result);
+    if (text) set({ attachmentRecoveryNotice: { id: Date.now(), text } });
+  },
+  dismissAttachmentRecoveryNotice: () => set({ attachmentRecoveryNotice: null }),
 
   // splitMode = 派生自 `paneCount > 1`,导出给按 `if (splitMode)` 分支的调用方(App.jsx 多处)。
   // 取同一个 INITIAL_PANE_COUNT:原来这里重读一次存储且不夹上界,存了 8 就成了
@@ -589,15 +609,16 @@ export const useStore = create((set, get) => ({
     set((s) => {
       const entry = s.orphanDraftQueues?.[queueKey];
       if (!entry) return s;
+      let candidate = null;
       const items = (entry.items || []).filter((it) => {
-        if (!taken && it?.queueId === queueId) { taken = it; return false; }
+        if (!candidate && it?.queueId === queueId) { candidate = it; return false; }
         return true;
       });
       const next = { ...s.orphanDraftQueues };
       if (items.length) next[queueKey] = { ...entry, items };
       else delete next[queueKey];
-      if (!taken) return s;
-      persistOrphanDraftQueues(next);
+      if (!candidate || !persistOrphanDraftQueues(next, true)) return s;
+      taken = candidate;
       return { orphanDraftQueues: next };
     });
     return taken;
@@ -1683,11 +1704,17 @@ export const useStore = create((set, get) => ({
   // ── Message queue helpers (#3) ──────────────────────────────
   enqueueMessage: (sessionKey, msg) => {
     const queued = { ...msg, queueId: msg?.queueId || createQueueId('queue') };
+    let persisted = false;
     set((s) => {
       const list = s.messageQueue[sessionKey] || [];
-      return { messageQueue: { ...s.messageQueue, [sessionKey]: [...list, queued] } };
+      const nextQueue = { ...s.messageQueue, [sessionKey]: [...list, queued] };
+      // 先写并回读核验，再提交内存态。quota/禁写时返回 null，调用方不得切 pane、
+      // 清附件或降级成纯文本；此前 subscriber 事后静默 catch 会伪装“已入队”。
+      if (!persistQueueSnapshot(nextQueue, true)) return s;
+      persisted = true;
+      return { messageQueue: nextQueue };
     });
-    return queued;
+    return persisted ? queued : null;
   },
   prepareSteer: (sessionKey, queueId) => {
     let prepared = null;
@@ -2016,6 +2043,9 @@ export const useStore = create((set, get) => ({
         return;
       }
       const list = Array.isArray(data) ? data : [];
+      // 服务端在 CLI init 时持久记录 draftId→sessionId。列表水合即重放这份恢复索引，
+      // 因此 App/后端一起重启也能绑定 init 前已落本地、但组件来不及处理的 outbox。
+      void recoverDraftSidecarsFromSessions(list, projectHash).then(get().reportAttachmentRecovery);
       // r26-E2:本项目成功 → 只清本项目的错误键,不动他键。
       set((st) => {
         const curMap = st.sessionsAccessErrorByProject || {};
@@ -2091,6 +2121,7 @@ export const useStore = create((set, get) => ({
       // because the spread didn't include the key. The explicit `sessions: []`
       // below guarantees the list is reset for every project switch.
       const sessions = Array.isArray(data) ? data : [];
+      void recoverDraftSidecarsFromSessions(sessions, projectHash).then(get().reportAttachmentRecovery);
       set(silent ? { sessions } : { sessions, listLoading: false });
     } catch (err) {
       set(silent ? { sessions: [] } : { sessions: [], error: err.message, listLoading: false });

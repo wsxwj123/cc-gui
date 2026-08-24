@@ -38,7 +38,7 @@ import { useMultiSelect, SelModeToggle, BatchBar, SelCheckbox } from './componen
 import { pickDirectory, isTauri } from './utils/pickDirectory.js';
 import ChatSearch from './components/ChatSearch.jsx';
 import { confirmDialog } from './utils/confirmDialog.jsx';
-import { ChatInput, EffortSelector, EFFORT_LEVELS, markAutoUnavailable } from './components/ChatInput.jsx';
+import { ChatInput, EffortSelector, EFFORT_LEVELS, markAutoUnavailable, PermissionModeSelector } from './components/ChatInput.jsx';
 import { ModelBadge, ProviderAvatar } from './components/ModelBadge.jsx';
 import { RemoteControlButton, ProviderSwitcher, ModelSelector, ProviderSourceBadge, AnchoredPopover } from './components/SessionSelectors.jsx';
 import { mergeProviderLists, rowIsCurrent } from './utils/providerList.js';
@@ -69,16 +69,19 @@ import { extractToolResultText, finalizePendingToolCalls, applyFinalizedToBlocks
 import { rebuildTodosFromTaskCalls } from './utils/todos.js';
 import { isSteered, firstSteerableIndex, isSteerBarrier, persistedSteerKeys, queueKeyFor } from './utils/steerQueue.js';
 import { isInitBindingOrigin, isResetBindingOrigin, isCliNoContentPlaceholder, makeProviderModelGuard, migrateDraftQueue, paneMessagesOwned, resolveHistModel, resolveSelectorModel, resolveSendModel } from './utils/routing.js';
-import { parseGoalCommand } from './utils/goal.js';
+import { migrateOptimisticGoalOwner, optimisticGoalForOwner, parseGoalCommand } from './utils/goal.js';
+import { approvedPlanItems, migrateSessionVisibilityOwner } from './utils/plan.js';
 import { nativeContextWindow, isBareClaudeAlias, pickCliContextWindow } from './utils/contextWindow.js';
 import { extractMcpServerIssues, formatMcpServerNotice } from './utils/mcpStatus.js';
 import { classifyRepairOutcome, classifyCheckOutcome, upsertRepairHint, removeRepairHint, loadRepairHints, persistRepairHints } from './utils/repairFlow.js';
 import { autoCompactTransition } from './utils/compactStatus.js';
 import { THEME_TABS, readThemeTab, writeThemeTab } from './utils/themeTabs.js';
-import { homeView, pickHomeProject, buildHomeDraft, homeGreetingParts, readHomeCustom, readHiddenHashes, visibleHomeProjects, paneMountsSessionDetail } from './utils/home.js';
+import { homeView, pickHomeProject, buildHomeDraft, enqueueHomeDraft, enqueueRestoredHomeDraft, homeDraftFromOrphan, homeGreetingParts, readHomeCustom, readHiddenHashes, visibleHomeProjects, paneMountsSessionDetail } from './utils/home.js';
 import { subscribeSkin, getSkinVersion, getSkinState, reconcileSkinOnBoot, watchThemeForSkin } from './utils/skins.js';
 import { resolveSessionDot, completionTracker, subscribeDots, getDotsVersion, RUN_MATRIX_CELLS, runCellDelayMs } from './utils/sessionDots.js';
 import { seedNewSessionDefaults } from './components/UnifiedSidebar.jsx';
+import { PendingAttachmentList } from './components/PendingAttachmentList.jsx';
+import { attachmentBlockReason, attachmentMetaForPersistence, attachmentSidecarNotice, bindDraftAttachmentSidecarsOnInit, buildAttachmentMessage, pendingAttachment, persistAttachmentSidecar, retryAttachmentSidecars, uploadAttachmentFile } from './utils/attachments.js';
 import {
   FolderOpen, MessageSquare, ChevronLeft, ChevronRight, ChevronDown,
   Search, Hash, Layers, BarChart3, ArrowLeft, Plus,
@@ -86,8 +89,8 @@ import {
   Sun, Moon, Monitor, Bot, Camera, History, Loader2, Shield, FolderTree,
   Archive, ArchiveRestore, Trash2, EyeOff, Columns2, Smartphone, Pencil, Type, Palette,
   Menu, SquarePen, Gauge, Cpu, CheckCircle2, BookText, Sparkles, HelpCircle, Pin,
-  Download, ClipboardCopy, LayoutGrid, MoreHorizontal, Star, Target,
-  Image as ImageIcon,
+  Download, ClipboardCopy, LayoutGrid, MoreHorizontal, Star,
+  Image as ImageIcon, Paperclip,
 } from './components/Icon.jsx';
 import { buildFontEntries, groupFonts, detectFonts, platformCandidates, queryLocalFontFamilies } from './utils/systemFonts.js';
 import { copyText } from './utils/clipboard.js';
@@ -103,6 +106,7 @@ import { pruneByLiveSet } from './utils/levelPrune.js';
 import { classifyStopTargets } from './utils/stopTargets.js';
 import { advanceScrollTransaction, beginScrollTransaction, keyRequestsReading, resizeScrollTop, shouldPauseAutoScroll } from './utils/scroll.js';
 import { resolveSessionTitle, sessionRowTooltip } from './utils/sessionTitle.js';
+import { listboxKeyAction, listboxOpenIndex } from './utils/listboxKeyboard.js';
 
 // ── Per-session shadow-git checkpoints ──────────────────────────
 // Session title with inline rename (click pencil → edit → Enter/blur saves,
@@ -1747,6 +1751,10 @@ function HomeState({ tabIndex = 0 }) {
   useSyncExternalStore(subscribeSkin, getSkinVersion, getSkinVersion);
   const [chosenHash, setChosenHash] = useState(null);
   const [text, setText] = useState('');
+  const [attachments, setAttachments] = useState([]);
+  const [attachmentError, setAttachmentError] = useState('');
+  const [restoredOrphan, setRestoredOrphan] = useState(null);
+  const homeFileInputRef = useRef(null);
   // r26-D13:问候时段词随时间刷新 —— Home 挂着过夜,原来只在渲染时取小时,
   // 早上还显示「晚上好」。低频定时器(每分钟 tick,跨时段才引起文案变化)。
   const [hour, setHour] = useState(() => new Date().getHours());
@@ -1756,6 +1764,9 @@ function HomeState({ tabIndex = 0 }) {
   }, []);
   const [projOpen, setProjOpen] = useState(false);
   const projBtnRef = useRef(null);
+  const projTriggerRef = useRef(null);
+  const projectOptionRefs = useRef([]);
+  const [activeProjectIndex, setActiveProjectIndex] = useState(0);
   const custom = readHomeCustom();
   // r21:减去 hiddenProjects。Home 的默认项目**会写进新会话的 cwd**,取全量会让
   // 用户在侧栏隐藏掉的目录(家目录、临时目录)当上默认工作目录,最近下拉里也会冒出来。
@@ -1793,17 +1804,74 @@ function HomeState({ tabIndex = 0 }) {
         .map((item, i) => ({ queueKey, item, rowKey: item?.queueId || `${queueKey}#${i}` })));
   }, [orphanDraftQueues, project?.hash]);
   const fillOrphan = (queueKey, item) => {
-    // 一次只填一条,填入即从孤儿表摘除(防连点重复填入)。
-    const taken = useStore.getState().takeOrphanDraftMessage(queueKey, item?.queueId);
-    if (taken?.text) setText(taken.text);
+    // 复制到 Home 编辑态但保留持久孤儿；新队列成功落盘后才删旧副本。
+    const restored = homeDraftFromOrphan(item);
+    setText(restored.text);
+    setAttachments(restored.attachments);
+    setAttachmentError('');
+    setRestoredOrphan({ queueKey, queueId: item?.queueId });
   };
   const recent = useMemo(() => [...visibleProjects]
     .sort((a, b) => (b.lastActivity ? new Date(b.lastActivity).getTime() : -1)
       - (a.lastActivity ? new Date(a.lastActivity).getTime() : -1))
     .slice(0, 12), [visibleProjects]);
+  const focusProjectOption = (index) => {
+    if (index < 0) return;
+    setActiveProjectIndex(index);
+    requestAnimationFrame(() => projectOptionRefs.current[index]?.focus());
+  };
+  const openProjectListbox = (key = '') => {
+    const index = listboxOpenIndex(recent.findIndex((p) => p.hash === project?.hash), recent.length, key);
+    setProjOpen(true);
+    focusProjectOption(index);
+  };
+  const closeProjectListbox = (restoreFocus = false) => {
+    setProjOpen(false);
+    if (restoreFocus) requestAnimationFrame(() => projTriggerRef.current?.focus());
+  };
+  const selectProjectIndex = (index) => {
+    const selected = recent[index];
+    if (!selected) return;
+    setChosenHash(selected.hash);
+    closeProjectListbox(true);
+  };
+  const onProjectListboxKeyDown = (event) => {
+    const action = listboxKeyAction(event.key, activeProjectIndex, recent.length);
+    if (!action.handled) return;
+    event.preventDefault();
+    event.stopPropagation();
+    if (action.close) closeProjectListbox(true);
+    else if (action.select) selectProjectIndex(action.nextIndex);
+    else focusProjectOption(action.nextIndex);
+  };
+  const uploadHomeAttachment = async (file, existingId = null) => {
+    const pending = existingId
+      ? { id: existingId, file, name: file?.name || 'file', bytes: file?.size || 0, status: 'uploading' }
+      : pendingAttachment(file);
+    setAttachmentError('');
+    setAttachments((prev) => existingId
+      ? prev.map((item) => (item.id === existingId ? pending : item))
+      : [...prev, pending]);
+    try {
+      const uploaded = await uploadAttachmentFile(file);
+      setAttachments((prev) => prev.map((item) => (
+        item.id === pending.id ? { ...uploaded, id: pending.id, file } : item
+      )));
+    } catch (error) {
+      const message = `上传失败：${error.message || '未知错误'}`;
+      setAttachmentError(message);
+      setAttachments((prev) => prev.map((item) => (
+        item.id === pending.id ? { ...pending, status: 'failed', error: message } : item
+      )));
+    }
+  };
+  const removeHomeAttachment = (attachment) => {
+    setAttachments((prev) => prev.filter((item) => item !== attachment));
+    setAttachmentError('');
+  };
   const submit = () => {
-    const t = text.trim();
-    if (!t || !project) return;
+    const built = buildAttachmentMessage(text, attachments);
+    if (!built || !project) return;
     const st = useStore.getState();
     // r31:先领 draftId 再 seed —— seed 要写到 `draft-<hash>-<draftId>`(窗格 permKey)才被
     // 读到,否则落到旧形态 `draft-<hash>` 孤儿键,新建会话不继承思考强度。
@@ -1812,9 +1880,32 @@ function HomeState({ tabIndex = 0 }) {
     // r26-B5:先造 draft 再入队 —— 队列键带 draftId,与同项目其他 draft 窗格隔离。
     const _homeDraft = buildHomeDraft(project, _did);
     if (!_homeDraft) return; // 项目缺 path 造不出 draft(旧代码会入队后清空窗格,键还匹配不上)
-    st.enqueueMessage(queueKeyFor(_homeDraft), { text: t, queuedAt: Date.now() });
-    st.setPaneSession(tabIndex, _homeDraft); // cwd=所选项目
-    st.setPaneMessages(tabIndex, []);
+    // 首页权限模式选择器(无会话时操作的是全局 mode)落到这条新 draft 的 permKey 上。
+    const _homeMode = st.permissionMode || 'default';
+    st.setPermissionMode(_homeMode, queueKeyFor(_homeDraft));
+    // 队列信封是首页与正常输入框共用的公开形态；先持久化成功，才能切换 pane。
+    const homeDraftArgs = {
+      store: st,
+      sessionKey: queueKeyFor(_homeDraft),
+      envelope: {
+        text: built.prompt,
+        queuedAt: Date.now(),
+        opts: { meta: attachmentMetaForPersistence(built.meta) },
+      },
+      tabIndex,
+      draft: _homeDraft,
+    };
+    const queued = restoredOrphan
+      ? enqueueRestoredHomeDraft({
+        ...homeDraftArgs,
+        orphanQueueKey: restoredOrphan.queueKey,
+        orphanQueueId: restoredOrphan.queueId,
+      })
+      : enqueueHomeDraft(homeDraftArgs);
+    if (!queued) {
+      setAttachmentError('无法保存待发消息：本地存储空间不足。附件仍保留，请移除部分附件后重试。');
+      return;
+    }
   };
   const browse = () => {
     setProjOpen(false);
@@ -1872,7 +1963,27 @@ function HomeState({ tabIndex = 0 }) {
           </div>
         )}
         {/* r11-p3-1:聚焦零装饰(用户拍板)——无 focus-within 变色,聚焦与否外观一致。 */}
+        <PendingAttachmentList
+          attachments={attachments}
+          onRemove={removeHomeAttachment}
+          onRetry={(attachment) => uploadHomeAttachment(attachment.file, attachment.id)}
+        />
+        {attachmentError && (
+          <div data-testid="attachment-error" role="alert" className="w-full mb-2 px-2 text-[11px] text-error font-body leading-snug">
+            {attachmentError}
+          </div>
+        )}
         <div className="w-full rounded-lg border border-canvas-deep/70 bg-canvas-warm/60">
+          <input
+            ref={homeFileInputRef}
+            type="file"
+            multiple
+            className="hidden"
+            onChange={(event) => {
+              for (const file of Array.from(event.target.files || [])) uploadHomeAttachment(file);
+              event.target.value = '';
+            }}
+          />
           <textarea
             data-cgui="home-input"
             value={text}
@@ -1886,9 +1997,30 @@ function HomeState({ tabIndex = 0 }) {
             className="w-full bg-transparent px-3.5 pt-3 pb-1 text-[14px] text-ink font-body resize-none focus:outline-none placeholder-ink-ghost"
           />
           <div className="flex items-center gap-2 px-2 pb-2">
+            <PermissionModeSelector />
+            <button
+              type="button"
+              data-testid="home-attachment-add"
+              onClick={() => homeFileInputRef.current?.click()}
+              className="h-7 w-7 rounded-md hover:bg-black/5 text-ink-muted hover:text-accent flex items-center justify-center transition-colors"
+              title="添加附件（可多选）"
+              aria-label="添加附件"
+            >
+              <Paperclip size={13} />
+            </button>
             <div ref={projBtnRef} className="relative min-w-0">
               <button
-                onClick={() => setProjOpen((v) => !v)}
+                ref={projTriggerRef}
+                data-testid="project-selector"
+                aria-haspopup="listbox"
+                aria-expanded={projOpen}
+                onClick={() => (projOpen ? closeProjectListbox() : openProjectListbox())}
+                onKeyDown={(event) => {
+                  if (['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) {
+                    event.preventDefault();
+                    openProjectListbox(event.key);
+                  }
+                }}
                 className="flex items-center gap-1.5 px-2 py-1 rounded-md border border-canvas-deep/70 hover:bg-canvas-warm text-[12px] text-ink-soft font-body min-w-0 transition-colors"
                 title={project ? formatPath(project.path) : '选择项目'}
               >
@@ -1896,27 +2028,36 @@ function HomeState({ tabIndex = 0 }) {
                 <span className="truncate max-w-[220px]">{project ? formatPathShort(project.path) : '选择项目'}</span>
                 <ChevronDown size={11} className="text-ink-faint shrink-0" />
               </button>
-              <AnchoredPopover anchorRef={projBtnRef} open={projOpen} onRequestClose={() => setProjOpen(false)}
+              <AnchoredPopover anchorRef={projBtnRef} open={projOpen}
+                onRequestClose={(reason) => closeProjectListbox(reason === 'escape')}
                 drop="up" align="left"
                 className="w-72 max-w-[calc(var(--app-w,100vw)-1.5rem)] py-1 max-h-64 overflow-y-auto">
-                {recent.map((p) => (
-                  <button
-                    key={p.hash}
-                    onClick={() => { setChosenHash(p.hash); setProjOpen(false); }}
-                    className={`w-full text-left px-2.5 py-1.5 text-[12px] font-body truncate hover:bg-canvas-warm ${project?.hash === p.hash ? 'text-accent' : 'text-ink-soft'}`}
-                    title={formatPath(p.path)}
-                  >
-                    {formatPathShort(p.path)}
-                  </button>
-                ))}
+                <div role="listbox" aria-label="选择项目" onKeyDown={onProjectListboxKeyDown}>
+                  {recent.map((p, index) => (
+                    <button
+                      key={p.hash}
+                      ref={(node) => { projectOptionRefs.current[index] = node; }}
+                      role="option"
+                      aria-selected={project?.hash === p.hash}
+                      tabIndex={activeProjectIndex === index ? 0 : -1}
+                      onFocus={() => setActiveProjectIndex(index)}
+                      onClick={() => selectProjectIndex(index)}
+                      className={`w-full text-left px-2.5 py-1.5 text-[12px] font-body truncate hover:bg-canvas-warm ${project?.hash === p.hash ? 'text-accent' : 'text-ink-soft'}`}
+                      title={formatPath(p.path)}
+                    >
+                      {formatPathShort(p.path)}
+                    </button>
+                  ))}
+                </div>
                 <button onClick={browse} className="w-full text-left px-2.5 py-1.5 text-[12px] font-body text-accent hover:bg-canvas-warm border-t border-canvas-deep/40 mt-1 pt-1.5">
                   浏览新文件夹…
                 </button>
               </AnchoredPopover>
             </div>
             <button
+              data-testid="home-send"
               onClick={submit}
-              disabled={!text.trim() || !project}
+              disabled={!!attachmentBlockReason(attachments) || (!text.trim() && attachments.length === 0) || !project}
               className="ml-auto btn-accent px-3 py-1.5 text-[12.5px] font-body disabled:opacity-40"
             >
               发送
@@ -2449,32 +2590,9 @@ function CompactDivider() {
   );
 }
 
-// /goal(会话级 Stop 钩子)的消息流提示。四种形态见 session-reader 的 goal 分支;
-// 另有第五种只在流式出现:`Stop hook feedback:` 那条 user 事件(唯一实时可见的续跑证据),
-// 由下面的流式分支合成 met:false + sentinel:false 的等价条目。
-// 一律弱化成一行提示,不做成气泡:它是过程信息,不是对话内容。
-// condition 为空 = 该 feedback 不是 /goal 的 `[条件]: 理由` 形态(用户自配的 Stop 钩子
-// 也走同一前缀),此时不冒称"目标",按通用钩子措辞。
-function GoalNotice({ goal }) {
-  const cond = goal.condition || '';
-  const reason = goal.reason || '';
-  const notMetLabel = cond ? '目标未达成，已自动继续' : 'Stop 钩子拦下停止，已自动继续';
-  // r32-plan-flood:未达成提示被 reader 折叠成一条时带 count(>1),在这里补「×N」次数徽标;
-  // 达成的最后一条/met 状态不含 count,永不显示徽标。
-  const label = goal.met
-    ? (goal.sentinel ? '目标已清除' : `目标达成${goal.iterations ? `（${goal.iterations} 轮）` : ''}`)
-    : (goal.sentinel ? '目标已设置' : (goal.count > 1 ? `${notMetLabel} ×${goal.count}` : notMetLabel));
-  const detail = goal.met ? (reason || cond) : (goal.sentinel ? cond : (reason || cond));
-  return (
-    <div className="max-w-[var(--content-max)] mx-auto px-4 py-1.5 flex items-start gap-2">
-      <Target size={11} className={`shrink-0 mt-0.5 ${goal.met && !goal.sentinel ? 'text-success' : 'text-ink-faint'}`} />
-      <div className="min-w-0 text-[11px] font-body leading-snug">
-        <span className={goal.met && !goal.sentinel ? 'text-success' : 'text-ink-muted'}>{label}</span>
-        {detail && <span className="text-ink-faint">：{detail}</span>}
-      </div>
-    </div>
-  );
-}
+// r30 起 goal 提示不再进消息流(两处 msg.type === 'goal' 都渲染 null),状态与
+// r32 的「未达成 ×N」折叠次数一并由 composer 上方的常驻条 GoalBar 承担。原先的
+// GoalNotice 组件已零引用,随本轮删除,免得"改了却看不见"。
 
 // 自动拒绝的判定来源(SDK decision_reason_type)。该字段是【开放集】不是枚举,
 // 未列出的取值不显示来源、只显示原因文本(降级而不是显示原始英文标识符)。
@@ -2530,7 +2648,7 @@ const MessageList = React.memo(function MessageList({ messages, onRetryTurn, onR
       {msg.type === 'compact'
         ? <CompactDivider />
         : msg.type === 'goal'
-        ? <GoalNotice goal={msg} />
+        ? null
         : msg.type === 'denial'
         ? <DenialNotice denial={msg} />
         : msg.type === 'turn'
@@ -2888,9 +3006,11 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // 否则 effect 依赖数组在渲染期先求值会命中 TDZ(Cannot access before initialization)。
   const sessionQueueKey = queueKeyFor(selectedSession);
   // /goal 当前是否还挂着:取历史里【最后一条】goal 记录。达成与手动清除都写 met:true
-  // (CLI 的写入函数只有这一种表达),所以"最后一条 met=false"⇔"目标仍在生效"。
+  // (CLI 的写入函数只有这一种表达)。用户需求:目标条要像计划卡一样常驻输入框上方,
+  // 不能只在消息流里出现、一滚动就消失。因此这里取最后一条 goal 作为常驻条数据,
+  // 即使 met:true(达成/清除)也保留最近状态,由 GoalBar 组件按 met/sentinel 显示
+  // “目标进行中 / 目标已达成 / 目标已清除”。
   // 清除规则 = 纯派生,没有任何需要手动置空的时机:
-  //   · 达成 / `/goal clear` → 末条 met:true → 本 memo 返回 null,徽章消失;
   //   · 切会话 / 切窗格 → messages 是 per-pane 的另一份 → 天然按 sid 隔离;
   //   · 回合结束刷新历史 → 新记录追加在末尾,状态跟着最后一条走。
   // 唯一数据源是历史(messages),不掺流式的 chatMessages:两个来源就有"谁更晚"的判定,
@@ -2898,7 +3018,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // 由消息流里的 Stop hook feedback 提示行承担,下一回合起徽章接手。
   const activeGoal = useMemo(() => {
     for (let i = messages.length - 1; i >= 0; i--) {
-      if (messages[i]?.type === 'goal') return messages[i].met ? null : messages[i];
+      if (messages[i]?.type === 'goal') return messages[i];
     }
     return null;
   }, [messages]);
@@ -2907,23 +3027,30 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // goal 记录(同 condition,met:false)到达再切回历史驱动并清乐观态。per-pane:本组件实例天然
   // 分屏隔离(key=permKey 挂 GoalBar);切会话即清乐观态,不跨会话泄漏。达成/判定的 reason
   // 更新一律走历史,乐观态里不造(只带 condition)。
-  const [optimisticGoal, setOptimisticGoal] = useState(null);
+  const [optimisticGoalState, setOptimisticGoalState] = useState(null);
+  const optimisticGoal = optimisticGoalForOwner(optimisticGoalState, sessionQueueKey);
   // 历史里是否已出现本目标的生效记录(同 condition 且 met:false)。一旦到达,历史即权威。
   const optimisticLanded = useMemo(() => (
     !!optimisticGoal
     && messages.some((m) => m?.type === 'goal' && m.condition === optimisticGoal.condition && !m.met)
   ), [messages, optimisticGoal]);
-  // 显示值:乐观态未落榜时用乐观(补上"设目标回合"的空窗);否则一律以历史 activeGoal 为准。
-  const effectiveGoal = (optimisticGoal && !optimisticLanded) ? optimisticGoal : activeGoal;
+  // 显示值:乐观态未落榜时用乐观(补上"设目标回合"的空窗);历史已到达但 activeGoal
+  // 仍为空(流式期间历史尚未被本窗格持有/刷新)时也继续用乐观,避免目标条中途消失。
+  const effectiveGoal = (optimisticGoal && (!optimisticLanded || !activeGoal)) ? optimisticGoal : activeGoal;
   // 历史到达 → 切回历史驱动,乐观态作废(纯清理,显示值上面已按 optimisticLanded 切换)。
   useEffect(() => {
     if (optimisticGoal
       && messages.some((m) => m?.type === 'goal' && m.condition === optimisticGoal.condition && !m.met)) {
-      setOptimisticGoal(null);
+      setOptimisticGoalState(null);
     }
   }, [messages, optimisticGoal]);
-  // 切会话 → 乐观态清空(乐观只属于本次设置所在的会话窗格,别带到下一个会话)。
-  useEffect(() => { setOptimisticGoal(null); }, [selectedSession?.sessionId]);
+  // 切会话时渲染期 owner 门已同步挡住旧目标；effect 只回收确属旧 owner 的状态。
+  // draft→real 的 init 会在 pane 换绑同一批更新里先迁 owner，不能被这里误清而闪失。
+  useEffect(() => {
+    setOptimisticGoalState((prev) => (
+      prev && prev.ownerKey !== sessionQueueKey ? null : prev
+    ));
+  }, [sessionQueueKey]);
   // C2:用于把 AutoCompactBanner 限定在「当前聚焦的 pane」——分屏下非聚焦 pane 不应
   // 在你没看着时静默 /compact 改写历史。单窗格时 activeTabIndex 恒为 0 = 本 pane。
   const paneIsActive = useStore((s) => s.activeTabIndex) === tabIndex;
@@ -3184,8 +3311,6 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // (handleSend 定义早于 handleRollback,且需避免闭包读到旧值)。
   const [pendingEditRollback, setPendingEditRollbackState] = useState(null);
   const pendingEditRef = useRef(null);
-  // L4: 当 handleSend 时还是 draft(没真 sessionId),先把待写 sidecar 暂存,init 拿到 sid 后落盘。
-  const pendingAttachmentRef = useRef(null);
   const setPendingEditRollback = useCallback((v) => { pendingEditRef.current = v; setPendingEditRollbackState(v); }, []);
   const handleRollbackRef = useRef(null);
   const activeProcRef = useRef(null);
@@ -3296,49 +3421,26 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     return rebuildTodosFromTaskCalls(flat);
   }, [streamingBlocks, visibleChat, messages, liveVisible]);
 
-  // 最近一份【已批准】的 ExitPlanMode 计划全文,常驻在任务清单条顶部(默认折叠一行,
-  // 展开可随时回看批准了什么)。与 G1/G2 收口不冲突:未批准/被拒的计划仍只在审批弹窗
-  // (PlanReviewCard)出现,这里只认批准信号——SDK 引擎批准=allow → result 非错误;
-  // 旧 hook 路径批准=deny 收尾但 result 文案含"用户已批准此计划"(同 TurnBubble O1)。
-  const currentPlan = useMemo(() => {
-    const readApprovedPlan = (toolCall) => {
-      if (toolCall?.name !== 'ExitPlanMode') return '';
-      const r = toolCall.result;
-      if (!r) return '';
-      const text = typeof r.content === 'string'
-        ? r.content
-        : (Array.isArray(r.content) ? r.content.map((c) => c?.text || '').join('') : '');
-      if (r.isError && !/用户已批准此计划/.test(text)) return '';
-      const plan = toolCall.input?.plan ?? toolCall.input?.content ?? '';
-      return typeof plan === 'string' ? plan.trim() : '';
-    };
-    const scanToolCalls = (toolCalls) => {
-      if (!Array.isArray(toolCalls)) return '';
-      for (let j = toolCalls.length - 1; j >= 0; j--) {
-        const plan = readApprovedPlan(toolCalls[j]);
-        if (plan) return plan;
-      }
-      return '';
-    };
-    // 串扰窗口2:流式缓冲按归属门控(同 currentTodos),不属于当前会话就不扫。
-    const liveBlocks = liveVisible ? streamingBlocks : EMPTY_ARRAY;
-    for (let i = liveBlocks.length - 1; i >= 0; i--) {
-      const b = liveBlocks[i];
-      if (b?.type === 'tool_use') {
-        const plan = readApprovedPlan(b.toolCall);
-        if (plan) return plan;
+  // 已批准的 ExitPlanMode 计划常驻在任务清单条顶部(默认折叠一行)。persisted /
+  // local-finished / streaming 三类来源统一进纯规则：同签名保留首卡，后续只补批准结果；
+  // 不同计划各自保留。未决/被驳回的计划不出常驻卡(见 approvedPlanItems 注释)。
+  const currentPlans = useMemo(() => {
+    const toolCalls = [];
+    // 来源顺序就是“首卡”顺序：历史 → 本地已完成 → 当前流。后续等价来源只补批准结果。
+    for (const message of messages) {
+      if (Array.isArray(message?.toolCalls)) toolCalls.push(...message.toolCalls);
+    }
+    for (const message of visibleChat) {
+      if (Array.isArray(message?.toolCalls)) toolCalls.push(...message.toolCalls);
+    }
+    if (liveVisible) {
+      toolCalls.push(...streamingToolCalls);
+      for (const block of streamingBlocks) {
+        if (block?.type === 'tool_use' && block.toolCall) toolCalls.push(block.toolCall);
       }
     }
-    for (let i = visibleChat.length - 1; i >= 0; i--) {
-      const plan = scanToolCalls(visibleChat[i]?.toolCalls);
-      if (plan) return plan;
-    }
-    for (let i = messages.length - 1; i >= 0; i--) {
-      const plan = scanToolCalls(messages[i]?.toolCalls);
-      if (plan) return plan;
-    }
-    return '';
-  }, [streamingBlocks, visibleChat, messages, liveVisible]);
+    return approvedPlanItems(toolCalls);
+  }, [streamingBlocks, streamingToolCalls, visibleChat, messages, liveVisible]);
 
   // When the file watcher reports a write to THIS session's jsonl (e.g. a
   // detached background stream from another tab/session is still writing),
@@ -3549,6 +3651,16 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     const id = setTimeout(() => setProviderSwitchNotice(null), 5000);
     return () => clearTimeout(id);
   }, [providerSwitchNotice]);
+  const reportAttachmentSidecarResult = useCallback((result) => {
+    const text = attachmentSidecarNotice(result);
+    if (text) setProviderSwitchNotice({ text });
+  }, []);
+  // 窗格卸载/应用重启后，重新进入真实会话即重放该 session 的持久 sidecar。
+  useEffect(() => {
+    const sid = selectedSession?.sessionId;
+    if (!sid) return;
+    void retryAttachmentSidecars(sid).then(reportAttachmentSidecarResult);
+  }, [selectedSession?.sessionId, reportAttachmentSidecarResult]);
   // G4:上下文超模型窗口时 /compact 失败(整段发上去做摘要→请求体也超限→413)。
   // 这种错不能自动重试,弹一个带操作按钮的横幅引导用户:切 1M / 新建 / 回滚裁剪。
   const [ctxOverflow, setCtxOverflow] = useState(null);
@@ -3936,10 +4048,10 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       const response = await r.json().catch(() => null);
       if (r.ok && response?.ok === true && response?.accepted === true) {
         if (meta?.attachments?.length > 0) {
-          fetch(`/api/sessions/${sessionId}/attachments`, {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ text: body, attachments: meta.attachments, displayText: meta.displayText || '' }),
-          }).catch(() => {});
+          void persistAttachmentSidecar({
+            sessionId,
+            payload: { text: body, attachments: meta.attachments, displayText: meta.displayText || '' },
+          }).then(reportAttachmentSidecarResult);
         }
         return { outcome: 'accepted', pid: response.pid, duplicate: response.duplicate === true };
       }
@@ -3948,12 +4060,12 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         || (r.status === 413 && response?.code === 'request-too-large');
       return { outcome: explicit ? 'explicit-reject' : 'ambiguous', code: response?.code };
     } catch { return { outcome: 'ambiguous' }; }
-  }, []);
+  }, [reportAttachmentSidecarResult]);
   const steerCurrentTurnRef = useRef(null);
   useEffect(() => { steerCurrentTurnRef.current = steerCurrentTurn; }, [steerCurrentTurn]);
 
   const handleSend = useCallback(async (prompt, opts = {}) => {
-    const { reattachPid, appendSystemPrompt, hiddenUserMessage = false, meta } = opts;
+    const { reattachPid, appendSystemPrompt, hiddenUserMessage = false, meta, onEnqueueFailure } = opts;
     // Intercept the /remote-control (alias /rc) command. It CANNOT be sent
     // through `claude -p` — slash commands are interactive-only and the CLI
     // rejects them ("isn't available in this environment"). Instead we launch
@@ -4038,7 +4150,17 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     // forceSend(回滚/重做的重发 = 有意打断替换)照旧连这道门都不进。
     if (!reattachPid && !opts.forceSend && (streamingRef.current || backgroundPidRef.current)) {
       const queuedAt = Date.now();
-      const queued = useStore.getState().enqueueMessage(sessionQueueKey, { text: prompt, queuedAt, hidden: !!hiddenUserMessage, opts });
+      const queueOpts = { ...opts };
+      delete queueOpts.onEnqueueFailure;
+      // 只剥进队列这份克隆的整图预览(内存预览不动),否则超 localStorage 配额被硬拒。
+      if (queueOpts.meta) queueOpts.meta = attachmentMetaForPersistence(queueOpts.meta);
+      const queued = useStore.getState().enqueueMessage(sessionQueueKey, { text: prompt, queuedAt, hidden: !!hiddenUserMessage, opts: queueOpts });
+      if (!queued) {
+        const message = '无法保存待发消息：本地存储空间不足。附件与草稿仍保留，请处理后重试。';
+        onEnqueueFailure?.(message);
+        setProviderSwitchNotice({ text: message });
+        return;
+      }
       // Cmd/Ctrl+Enter:先入队保底，再调用 CLI/SDK 的实时输入队列。连接中、回合刚收尾或
       // provider 不支持时，明确拒绝才回 queued；任何模糊结果都成为持久 barrier。
       if (opts.steer && !hiddenUserMessage) {
@@ -4070,8 +4192,10 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     // 排队中返回不走此段 ⇒ 排队不亮;历史记录到达后切回历史驱动并清乐观态(见上方 effect)。
     if (!reattachPid && !hiddenUserMessage) {
       const _gc = parseGoalCommand(prompt);
-      if (_gc) setOptimisticGoal(
-        _gc.type === 'clear' ? null : { met: false, sentinel: true, condition: _gc.condition },
+      if (_gc) setOptimisticGoalState(
+        _gc.type === 'clear'
+          ? null
+          : { ownerKey: sessionQueueKey, goal: { met: false, sentinel: true, condition: _gc.condition } },
       );
     }
 
@@ -4139,19 +4263,16 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       attachments: meta?.attachments,
       displayText: meta?.displayText,
     }]);
-    // L4: 持久化 attachments 到 sidecar (按 textHash 索引)。已有真 sid 立即写;
-    // draft 状态暂存到 ref,init 事件拿到 sid 后由那里 flush。
+    // L4:所有附件 sidecar 先进入持久 outbox，再尝试 POST。draft 先以会话 ownerKey
+    // 记账，init 拿到真实 sid 后统一绑定；真实 session 发送也走同一条可靠链。
     if (meta?.attachments?.length > 0) {
       const payload = { text: prompt, attachments: meta.attachments, displayText: meta.displayText || '' };
       const sid = selectedSession?.sessionId;
-      if (sid) {
-        fetch(`/api/sessions/${sid}/attachments`, {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload),
-        }).catch(() => {});
-      } else {
-        pendingAttachmentRef.current = payload;
-      }
+      void persistAttachmentSidecar({
+        ownerKey: sid ? null : sessionQueueKey,
+        sessionId: sid || null,
+        payload,
+      }).then(reportAttachmentSidecarResult);
     }
 
     // Fire-and-forget git checkpoint. Failures (not a git repo etc.) are
@@ -4568,6 +4689,13 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             // session_id 抢绑到无辜的新 draft B 上,B 的下一条消息就串进 A。两个泄漏路径都堵:
             // 判定逻辑在 utils/routing.js(纯函数,test:routing 覆盖串扰家族全部场景)。
             const startedAsDraft = !selectedSession?.sessionId;
+            // sidecar 归属发起这条流的 draft，不归属 init 到达时屏幕上正显示的 pane。
+            // 因而绑定必须独立于 selIsOrigin：切 pane/关原 pane 后仍按闭包中的 draft owner
+            // 升级；UI 会话对象是否换绑继续由下面的严格 origin 守卫决定，二者不混用。
+            if (startedAsDraft) {
+              void bindDraftAttachmentSidecarsOnInit(selectedSession, event.session_id)
+                .then(reportAttachmentSidecarResult);
+            }
             const selIsOrigin = isInitBindingOrigin(startedAsDraft, selectedSession?.draftId, sel);
             // r29:/clear 轮换换绑(独立于 draft-origin 块,不迁输入历史/草稿 —— 那些
             // 属于旧会话)。队列/流归属随窗格走:这个窗格的会话现在是新会话。
@@ -4602,12 +4730,19 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
               }
             }
             if (selIsOrigin) {
+              const _draftOwnerKey = queueKeyFor(sel);
+              // 乐观目标与 pane 的 draft→real 换绑同批迁移。若状态不属于该 draft，
+              // 纯函数保持原引用，异步 init 不会把别的会话目标抢到本 session。
+              setOptimisticGoalState((prev) => migrateOptimisticGoalOwner(
+                prev, _draftOwnerKey, event.session_id,
+              ));
+              try { migrateSessionVisibilityOwner(localStorage, _draftOwnerKey, event.session_id); } catch {}
               // Carry the draft's per-session model/permission pins to the real
               // session id so a model picked for a brand-new chat doesn't revert.
-              useStore.getState().migrateSessionKey(queueKeyFor(sel), event.session_id);
+              useStore.getState().migrateSessionKey(_draftOwnerKey, event.session_id);
               // I4:草稿流拿到真 sessionId,把流归属 key 一并升级,否则 setSelectedSession
               // 把当前会话 key 变成真 id 后,渲染层会判定"流不属于当前会话"而误隐藏本条流。
-              if (streamOwnerKeyRef.current === queueKeyFor(sel)) {
+              if (streamOwnerKeyRef.current === _draftOwnerKey) {
                 setStreamOwner(event.session_id);
               }
               // opus/sonnet 双审计:draft-key 升级成真 sid 后,两处本地态还挂着旧键,必须一并迁:
@@ -4616,7 +4751,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
               // (btw 无 jsonl 孪生=内容丢失);②ChatInput 的 localStorage 草稿(cgui-draft:<key>)——
               // draftKey 变更 effect 会读新键(必空)把正在打的下一条消息清掉,先把旧值复制过去。
               {
-                const _dk0 = queueKeyFor(sel);
+                const _dk0 = _draftOwnerKey;
                 setChatMessages((prev) => (prev.some((m) => m.ownerKey === _dk0)
                   ? prev.map((m) => (m.ownerKey === _dk0 ? { ...m, ownerKey: event.session_id } : m))
                   : prev));
@@ -4639,15 +4774,6 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                 draft: false,
                 sessionId: event.session_id,
               });
-              // L4: draft 期间暂存的 attachments 元数据现在能写到正确 sessionId 的 sidecar
-              if (pendingAttachmentRef.current) {
-                const payload = pendingAttachmentRef.current;
-                pendingAttachmentRef.current = null;
-                fetch(`/api/sessions/${event.session_id}/attachments`, {
-                  method: 'POST', headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify(payload),
-                }).catch(() => {});
-              }
             }
             // 以下两件事是"会话 A 已真实诞生"的事实处理,与"当前选中是谁"无关——用户已切走
             // (selIsOrigin=false)时也照做:标题该生成、列表该出现 A。数据全取发起时闭包
@@ -6012,7 +6138,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         finalizeInFlightRef.current = Math.max(0, finalizeInFlightRef.current - 1);
       }
     }
-  }, [selectedSession, selectedProject, streamingModel, isStreaming, sessionQueueKey, sendBtw]);
+  }, [selectedSession, selectedProject, streamingModel, isStreaming, sessionQueueKey, sendBtw, reportAttachmentSidecarResult]);
 
   // Ref to handleSend so the finally-block drain doesn't form a circular closure dep.
   const handleSendRef = useRef(null);
@@ -7294,7 +7420,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                   {msg.type === 'compact'
                     ? <CompactDivider />
                     : msg.type === 'goal'
-                    ? <GoalNotice goal={msg} />
+                    ? null
                     : msg.type === 'denial'
                     ? <DenialNotice denial={msg} />
                     : msg.type === 'turn'
@@ -7513,7 +7639,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           window.dispatchEvent(new CustomEvent('cgui:composer-fill', { detail: { text: item.text, targetKey: sessionQueueKey } }));
         }}
         todos={currentTodos}
-        plan={currentPlan}
+        plans={currentPlans}
         goal={effectiveGoal}
         permKey={sessionQueueKey}
         sessionId={selectedSession?.sessionId || null}
@@ -9488,6 +9614,25 @@ function CompletionToasts() {
   );
 }
 
+function AttachmentRecoveryNotice() {
+  const notice = useStore((s) => s.attachmentRecoveryNotice);
+  const dismiss = useStore((s) => s.dismissAttachmentRecoveryNotice);
+  if (!notice) return null;
+  return (
+    <div className="fixed top-[60px] right-4 z-[151] pointer-events-none max-w-[calc(var(--app-w,100vw)-2rem)]" role="status">
+      <div className="pointer-events-auto glass-popover w-[420px] max-w-full rounded-panel shadow-popover px-4 py-2.5 animate-glass-rise ring-1 ring-error/25">
+        <div className="flex items-start gap-2">
+          <span className="w-2 h-2 mt-1.5 rounded-full bg-error shrink-0" />
+          <span className="text-[12px] leading-relaxed text-ink font-body flex-1">{notice.text}</span>
+          <button type="button" onClick={dismiss} className="text-ink-faint shrink-0 hover:text-ink" aria-label="关闭附件恢复提示">
+            <X size={13} />
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ─── 快捷键速查(Cmd/Ctrl+/)────────────────────────────────────
 // 纯静态清单,单实例挂在 App 顶层(非 per-pane 组件,不涉及窗格状态)。
 const SHORTCUT_GROUPS = [
@@ -9549,6 +9694,9 @@ function ShortcutsPanel({ open, onClose }) {
 // ─── Main App ──────────────────────────────────────────────────
 export default function App() {
   useWebSocket();
+  // 应用重启后恢复所有已绑定真实 session 的附件 sidecar。失败项仍在持久 outbox，
+  // SessionDetail 挂载和后续发送还会按 session 重试。
+  useEffect(() => { void retryAttachmentSidecars(); }, []);
   // R4-b:记下"官方 provider 当前是怎么计费的"(OAuth 订阅 / API key 按量)。历史消息里
   // 没有当时的鉴权方式,拿此刻的顶替会让切一次 provider 就把订阅期的 Claude 消息按 API
   // 单价重算(判官实测 ¥4,690 → ¥498,876)。这里是全局唯一观察点,跟随 store 的刷新节奏。
@@ -10524,6 +10672,7 @@ export default function App() {
         {bundleMismatchBanner}
         {oauthMissingBanner}
         <CompletionToasts />
+        <AttachmentRecoveryNotice />
         {!cliInstalled && !cliCheckDismissed && (
           <EnvCheckPanel onRecheck={checkCli} onDismiss={dismissCliCheck} />
         )}
@@ -10613,6 +10762,7 @@ export default function App() {
       {bundleMismatchBanner}
       {oauthMissingBanner}
       <CompletionToasts />
+      <AttachmentRecoveryNotice />
       {/* F1: 截图热键状态提示(截图中/成功/失败)。取消不显示。 */}
       {shotStatus && (
         <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-[210] max-w-[80vw]">
