@@ -1047,7 +1047,7 @@ router.put('/plugins/:name/enable', async (req, res) => {
     invalidateMcpCache();
     res.json({ ok: true, name, enabled: true });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    return sendPluginPublicError(res, err, { fallback: '启用失败' });
   }
 });
 
@@ -1059,7 +1059,7 @@ router.put('/plugins/:name/disable', async (req, res) => {
     invalidateMcpCache();
     res.json({ ok: true, name, enabled: false });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    return sendPluginPublicError(res, err, { fallback: '停用失败' });
   }
 });
 
@@ -1093,7 +1093,7 @@ router.post('/plugins/:name/update', async (req, res) => {
     const changed = (version != null && beforeVersion != null) ? (version !== beforeVersion) : undefined;
     res.json({ ok: true, name, version, changed, note: '已更新,新会话生效' });
   } catch (err) {
-    res.status(500).json({ error: (err.stderr?.toString() || err.message || '').trim() || '更新失败' });
+    return sendPluginPublicError(res, err, { fallback: '更新失败' });
   }
 });
 
@@ -1106,7 +1106,7 @@ router.delete('/plugins/:name', async (req, res) => {
     invalidateMcpCache();
     res.json({ ok: true, name });
   } catch (err) {
-    res.status(500).json({ error: (err.stderr?.toString() || err.message || '').trim() || '卸载失败' });
+    return sendPluginPublicError(res, err, { fallback: '卸载失败' });
   }
 });
 
@@ -1122,7 +1122,8 @@ const OFFICIAL_MARKETPLACE_REPO = 'anthropics/claude-plugins-official';
 export const PLUGIN_CLI_TIMEOUT_MS = 120000;
 const PLUGIN_PROXY_KEYS = ['HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy'];
 const PLUGIN_ERROR_FIELD_LIMIT = 4096;
-const PLUGIN_SECRET_KEY = '(?:authorization|proxy-authorization|token|access_token|api[_-]?key|key|secret|password)';
+const PLUGIN_PUBLIC_RESPONSE_LIMIT = 16 * 1024;
+const PLUGIN_SECRET_KEY = '(?:auth(?:orization)?|proxy-authorization|credential|[a-z\d_.-]*(?:token|key|secret|password))';
 
 function pluginEnvWithoutProxy(baseEnv = process.env) {
   const env = { ...baseEnv };
@@ -1134,19 +1135,33 @@ function pluginEnvWithoutProxy(baseEnv = process.env) {
 // every caller (including non-GUI clients) receives the same bounded, safe diagnostic.
 export function sanitizePluginErrorText(value, limit = PLUGIN_ERROR_FIELD_LIMIT) {
   let text = String(value ?? '');
+  text = text.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '');
   text = text.replace(/\b([a-z][a-z\d+.-]*:\/\/)([^/\s@]+)@/gi, '$1[REDACTED]@');
-  text = text.replace(/\b(Bearer)\s+[^\s"',}\]]+/gi, '$1 [REDACTED]');
+  text = text.replace(/\b((?:Proxy-)?Authorization\s*:\s*)[^\r\n]+/gi, '$1[REDACTED]');
+  text = text.replace(/\b(Bearer|Basic)\s+(?:"[^"]*"|'[^']*'|[^\s"',;}\]]+)/gi, '$1 [REDACTED]');
   text = text.replace(new RegExp(`([?&]${PLUGIN_SECRET_KEY}=)([^&#\\s]*)`, 'gi'), '$1[REDACTED]');
-  text = text.replace(new RegExp(`(["']?${PLUGIN_SECRET_KEY}["']?\\s*:\\s*)(["'])(.*?)\\2`, 'gi'), '$1$2[REDACTED]$2');
-  text = text.replace(new RegExp(`(\\b${PLUGIN_SECRET_KEY}\\b\\s*[:=]\\s*)(?!\\[REDACTED\\])([^\\s,;&}\\]]+)`, 'gi'), '$1[REDACTED]');
+  text = text.replace(new RegExp(`(["']?${PLUGIN_SECRET_KEY}["']?\\s*[:=]\\s*)(["'])(.*?)\\2`, 'gi'), '$1$2[REDACTED]$2');
+  text = text.replace(new RegExp(`(\\b${PLUGIN_SECRET_KEY}\\b["']?\\s*[:=]\\s*)(?!\\[REDACTED\\])([^\\r\\n,;&}\\]]+)`, 'gi'), '$1[REDACTED]');
   return text.trim().slice(0, Math.max(0, Math.min(Number(limit) || PLUGIN_ERROR_FIELD_LIMIT, PLUGIN_ERROR_FIELD_LIMIT)));
 }
 
-function sanitizePluginDetails(details) {
-  if (typeof details === 'string') return sanitizePluginErrorText(details);
-  if (Array.isArray(details)) return details.map(sanitizePluginDetails);
-  if (!details || typeof details !== 'object') return details;
-  return Object.fromEntries(Object.entries(details).map(([key, value]) => [key, sanitizePluginDetails(value)]));
+function isPluginSensitiveKey(key) {
+  const normalized = String(key || '').replace(/[^a-z\d]/gi, '').toLowerCase();
+  return normalized === 'auth'
+    || normalized === 'authorization'
+    || normalized === 'credential'
+    || /(?:token|key|secret|password)$/.test(normalized);
+}
+
+export function sanitizePluginPublicValue(value, key = '') {
+  if (isPluginSensitiveKey(key)) return '[REDACTED]';
+  if (typeof value === 'string') return sanitizePluginErrorText(value);
+  if (Array.isArray(value)) return value.map((entry) => sanitizePluginPublicValue(entry));
+  if (!value || typeof value !== 'object') return value;
+  return Object.fromEntries(Object.entries(value).map(([childKey, childValue]) => [
+    String(childKey).slice(0, 128),
+    sanitizePluginPublicValue(childValue, childKey),
+  ]));
 }
 
 function rawPluginErrorText(err) {
@@ -1169,6 +1184,9 @@ export function isMarketplaceStaleError(err) {
 // and marketplace/plugin not-found errors deliberately stay terminal.
 export function isRetryablePluginNetworkError(err) {
   const text = rawPluginErrorText(err);
+  if (/\b(?:EACCES|EPERM)\b|permission denied|\b(?:401|403)\b|unauthorized|forbidden|invalid argument|\b(?:plugin|marketplace)\s+not found\b/i.test(text)) {
+    return false;
+  }
   return /\b(?:ECONNRESET|ECONNREFUSED|ENETUNREACH|EHOSTUNREACH|EAI_AGAIN|ENOTFOUND|ETIMEDOUT)\b|connection (?:reset|refused|timed out)|request timed out|socket hang up|network is unreachable|temporary failure in name resolution|DNS (?:lookup|resolution|query) (?:failed|failure)|(?:TLS|SSL) (?:handshake|connection) (?:failed|failure|error)|temporar(?:y|ily) (?:network (?:failure|error)|unavailable)|(?:network|operation) timeout/i.test(text);
 }
 
@@ -1210,7 +1228,7 @@ export async function marketplaceProxyEnv(
 
 class PluginCliError extends Error {
   constructor(details) {
-    const safeDetails = sanitizePluginDetails(details);
+    const safeDetails = sanitizePluginPublicValue(details);
     super(safeDetails.message);
     this.name = 'PluginCliError';
     this.details = safeDetails;
@@ -1249,6 +1267,77 @@ function proxyPreflightError(error) {
     cliExitCode: null,
     signal: null,
   });
+}
+
+function firstPluginPublicText(value) {
+  if (typeof value === 'string' && value.trim()) return value;
+  if (Array.isArray(value)) {
+    for (const entry of value) {
+      const found = firstPluginPublicText(entry);
+      if (found) return found;
+    }
+  } else if (value && typeof value === 'object') {
+    for (const entry of Object.values(value)) {
+      const found = firstPluginPublicText(entry);
+      if (found) return found;
+    }
+  }
+  return '';
+}
+
+function boundPluginPublicError(value, fallback) {
+  const safeValue = sanitizePluginPublicValue(value);
+  if (Buffer.byteLength(JSON.stringify({ error: safeValue }), 'utf8') <= PLUGIN_PUBLIC_RESPONSE_LIMIT) {
+    return safeValue;
+  }
+  if (safeValue && typeof safeValue === 'object' && !Array.isArray(safeValue)
+      && typeof safeValue.stage === 'string' && typeof safeValue.code === 'string') {
+    return sanitizePluginPublicValue({
+      stage: safeValue.stage,
+      code: safeValue.code,
+      retryable: !!safeValue.retryable,
+      timeoutMs: safeValue.timeoutMs,
+      message: safeValue.message || fallback,
+      killed: !!safeValue.killed,
+      timedOut: !!safeValue.timedOut,
+      cliExitCode: safeValue.cliExitCode ?? null,
+      signal: safeValue.signal ?? null,
+    });
+  }
+  return sanitizePluginErrorText(firstPluginPublicText(safeValue) || fallback);
+}
+
+// The sole serializer for public /plugins failures. Install keeps its structured contract;
+// legacy plugin routes keep their historical string/object shape, but all paths are redacted
+// and bounded before Express serializes the response.
+export function serializePluginPublicError(error, {
+  structured = false,
+  stage = 'plugin-install',
+  fallback = '插件操作失败',
+} = {}) {
+  let publicError;
+  if (structured) {
+    publicError = error instanceof PluginCliError
+      ? error.details
+      : pluginCliError(stage, error, `${fallback}:`).details;
+  } else if (error instanceof PluginCliError) {
+    publicError = error.details;
+  } else if (error && typeof error === 'object' && !(error instanceof Error)
+      && !Buffer.isBuffer(error)) {
+    publicError = error;
+  } else {
+    publicError = errText(error) || fallback;
+  }
+  const boundedError = boundPluginPublicError(publicError, fallback);
+  return {
+    status: structured && boundedError?.code === 'CLI_TIMEOUT' ? 504 : 500,
+    body: { error: boundedError },
+  };
+}
+
+function sendPluginPublicError(res, error, options) {
+  const failure = serializePluginPublicError(error, options);
+  return res.status(failure.status).json(failure.body);
 }
 
 async function runPluginCli(stage, args, { run = runClaude, env }) {
@@ -1387,7 +1476,7 @@ router.get('/plugins/available', async (req, res) => {
       cachedAt: availablePluginsCache?.at || null,
     });
   } catch (err) {
-    res.status(500).json({ error: (err.stderr?.toString() || err.message || '').trim() || '获取插件列表失败' });
+    return sendPluginPublicError(res, err, { fallback: '获取插件列表失败' });
   }
 });
 
@@ -1439,10 +1528,11 @@ router.post('/plugins/install', async (req, res) => {
     invalidateMcpCache();
     res.json({ ok: true, name });
   } catch (err) {
-    const failure = err instanceof PluginCliError
-      ? err.details
-      : pluginCliError('plugin-install', err, '安装失败:').details;
-    res.status(failure.code === 'CLI_TIMEOUT' ? 504 : 500).json({ error: failure });
+    return sendPluginPublicError(res, err, {
+      structured: true,
+      stage: 'plugin-install',
+      fallback: '安装失败',
+    });
   }
 });
 

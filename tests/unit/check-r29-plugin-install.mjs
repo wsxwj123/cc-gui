@@ -22,6 +22,7 @@ const {
   PLUGIN_CLI_TIMEOUT_MS,
   isMarketplaceAddIdempotent, isMarketplaceStaleError,
   isRetryablePluginNetworkError, sanitizePluginErrorText,
+  sanitizePluginPublicValue, serializePluginPublicError,
 } = await import('../../server/routes/mcp.js');
 
 const MK = 'claude-plugins-official';
@@ -369,6 +370,69 @@ const noProxy = async () => null;
     'invalid marketplace name',
     'plugin not found in marketplace',
   ]) assert.equal(isRetryablePluginNetworkError(cliErr(message)), false, `t10: 终态错误不可重试: ${message}`);
+}
+
+// t11 所有/plugins路由共用的公开序列化边界：敏感键直接替换、文本凭证完整遮盖、整体有界。
+{
+  const secrets = [
+    'AUTH_SECRET', 'JSON_AUTH_SECRET', 'QUOTED SECRET', 'SINGLE SECRET',
+    'BASIC_SECRET', 'TWO WORD SECRET', 'NESTED_PASSWORD', 'NESTED_CREDENTIAL',
+    'NESTED_ACCESS_TOKEN', 'NESTED_API_KEY',
+  ];
+  const text = [
+    'R33_SAFE_CONTEXT plugin route failed',
+    `auth=${secrets[0]}`,
+    JSON.stringify({ auth: secrets[1] }),
+    `Bearer "${secrets[2]}"`,
+    `Bearer '${secrets[3]}'`,
+    `Authorization: Basic ${secrets[4]}`,
+    `password='${secrets[5]}'`,
+  ].join('\n');
+  const safeText = sanitizePluginErrorText(text);
+  assert.ok(safeText.includes('R33_SAFE_CONTEXT'), 't11: 文本脱敏保留安全上下文');
+  assert.ok(secrets.slice(0, 6).every((secret) => !safeText.includes(secret)), 't11: auth/scheme/引号KV均完整遮盖');
+
+  const nested = sanitizePluginPublicValue({
+    message: `${text}\n${'bounded context '.repeat(2000)}`,
+    outer: {
+      password: secrets[6],
+      credential: secrets[7],
+      accessToken: secrets[8],
+      apiKey: secrets[9],
+      context: 'safe nested context',
+    },
+  });
+  assert.equal(nested.outer.password, '[REDACTED]');
+  assert.equal(nested.outer.credential, '[REDACTED]');
+  assert.equal(nested.outer.accessToken, '[REDACTED]');
+  assert.equal(nested.outer.apiKey, '[REDACTED]');
+  assert.equal(nested.outer.context, 'safe nested context');
+
+  const legacy = serializePluginPublicError(nested, { fallback: '操作失败' });
+  const legacyJson = JSON.stringify(legacy.body);
+  assert.equal(legacy.status, 500);
+  assert.equal(typeof legacy.body.error, 'object', 't11: 旧object错误形态保持object');
+  assert.ok(Buffer.byteLength(legacyJson, 'utf8') <= 16 * 1024, 't11: 完整公开响应不超过16KiB');
+  assert.ok(secrets.every((secret) => !legacyJson.includes(secret)), 't11: 递归公开响应不含秘密');
+
+  const structured = serializePluginPublicError(cliErr(`R33_SAFE_CONTEXT ${text}`), {
+    structured: true,
+    stage: 'plugin-install',
+    fallback: '安装失败',
+  });
+  assert.equal(structured.body.error.stage, 'plugin-install');
+  assert.equal(structured.body.error.code, 'CLI_EXIT_NONZERO');
+  assert.ok(Buffer.byteLength(JSON.stringify(structured.body), 'utf8') <= 16 * 1024);
+
+  for (const terminal of [
+    'permission denied EACCES EPERM; ECONNREFUSED timed out',
+    'HTTP 401 unauthorized; HTTP 403 forbidden; DNS lookup failed',
+    'invalid argument --scope; socket hang up',
+    'plugin not found; connection reset',
+    'marketplace not found; network timeout',
+  ]) assert.equal(isRetryablePluginNetworkError(cliErr(terminal)), false, `t11: 终态优先否决: ${terminal}`);
+  assert.equal(isRetryablePluginNetworkError(cliErr('ECONNREFUSED; DNS lookup failed; socket hang up')), true,
+    't11: 纯瞬态网络错误仍可重试');
 }
 
 console.log('✓ check-r29-plugin-install: update 透出 + add 幂等 + not-found 重试/因果链 + 代理注入 + 哨兵');
