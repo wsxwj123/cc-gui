@@ -71,4 +71,15 @@ function fnBody(name) {
   assert.match(dispose, /cancelAnimationFrame\(/, 't4: 卸载器没取消在飞的 rAF(卸载后仍跑一帧)');
 }
 
+// t5(r41): syncCurrentRow 的 add/remove 必须带 contains 守卫 —— 旧版系统 WebKit 对
+// no-op classList 写入也重写 class 属性,观察器回调里无守卫的同步 = 微任务无限循环整页
+// 冻死(用户机 sample 原生栈实锤:100% 时间在 MutationObserver→classList.remove→
+// setAttribute→再通知的闭环里)。变异:守卫改回无条件 add/remove → 下面断言红。
+assert.ok(/wantCurrent && !hasCurrent\) rows\[k\]\.classList\.add/.test(src),
+  't5: add 必须带「不在才加」守卫');
+assert.ok(/!wantCurrent && hasCurrent\) rows\[k\]\.classList\.remove/.test(src),
+  't5: remove 必须带「在才删」守卫');
+assert.ok(!/else rows\[k\]\.classList\.remove/.test(src),
+  't5: 不得存在无守卫的 else remove(冻死根因形态)');
+
 console.log('check-r39-xp-observer-cost: all passed');

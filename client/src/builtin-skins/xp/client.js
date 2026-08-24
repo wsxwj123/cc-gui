@@ -82,8 +82,14 @@
     if (!observedSidebar) return;
     var rows = observedSidebar.querySelectorAll('[data-cgui="session-row"]');
     for (var k = 0; k < rows.length; k++) {
-      if (rows[k].classList.contains('active')) rows[k].classList.add('cgui-xp-current');
-      else rows[k].classList.remove('cgui-xp-current');
+      // 状态已一致时必须【零写入】:旧版系统 WebKit(用户机 Sequoia 实锤,sample 栈证)对
+      // no-op 的 classList.add/remove 也会重写 class 属性 → 触发本函数所属的 sidebar
+      // 观察器 → 再同步一轮 → 微任务无限循环,整页冻死(Chrome/新 WebKit 无此行为,
+      // 复现不出)。contains 守卫让稳态轮次不产生任何 mutation,循环自断。
+      var wantCurrent = rows[k].classList.contains('active');
+      var hasCurrent = rows[k].classList.contains('cgui-xp-current');
+      if (wantCurrent && !hasCurrent) rows[k].classList.add('cgui-xp-current');
+      else if (!wantCurrent && hasCurrent) rows[k].classList.remove('cgui-xp-current');
     }
   }
 
