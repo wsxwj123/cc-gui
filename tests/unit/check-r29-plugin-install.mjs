@@ -499,6 +499,20 @@ const noProxy = async () => null;
     't12: 软连字符劈开的 password 仍脱敏');
   assert.ok(sanitizePluginErrorText(`mon${ZWSP}key=safe-zw-monkey`).includes('safe-zw-monkey'),
     't12: 零宽劈开的 monkey 归一后仍不误遮');
+  // 判官 F-2:ZWSP/SHY 之外的同构不可见字符(变体选择符/蒙文分隔符/ALM/CGJ,含增补面
+  // 变体选择符)同样能劈键。剥除类升级为 Unicode 格式类全类 \p{Cf} + 变体选择符并集。
+  // 变异:把剥除类退回逐字符枚举(去掉 \p{Cf}/VS 段)→ 下面五条立即红。
+  const VS1 = String.fromCharCode(0xFE00); const MVS = String.fromCharCode(0x180E);
+  const ALM = String.fromCharCode(0x061C); const CGJ = String.fromCharCode(0x034F);
+  const AVS = String.fromCodePoint(0xE0100);
+  for (const [tag, ch] of [['VS1', VS1], ['MVS', MVS], ['ALM', ALM], ['CGJ', CGJ], ['AVS', AVS]]) {
+    assert.ok(!sanitizePluginErrorText(`au${ch}th=INVLEAK_${tag}`).includes(`INVLEAK_${tag}`),
+      `t12: ${tag} 劈开的 auth 仍脱敏`);
+  }
+  const vsObj = sanitizePluginPublicValue({ [`api${VS1}key`]: 'INVOBJ' });
+  assert.equal(vsObj[`api${VS1}key`], '[REDACTED]', 't12: 变体选择符混入的对象键仍脱敏');
+  assert.ok(sanitizePluginErrorText(`mon${MVS}key=safe-mvs`).includes('safe-mvs'),
+    't12: 蒙文分隔符劈开的 monkey 仍不误遮');
 }
 
 // t12b stripPluginAnsi 有界化(I-1):无终止符的字符串控制序列此前用惰性 [\s\S]*? 对每个
@@ -509,7 +523,29 @@ const noProxy = async () => null;
   const t0 = process.hrtime.bigint();
   stripPluginAnsi(big);
   const ms = Number(process.hrtime.bigint() - t0) / 1e6;
-  assert.ok(ms < 100, `t12b: 2MB 病态输入必须 <100ms(实测 ${ms.toFixed(1)}ms;旧惰性版同规模 >60s)`);
+  // 上界给慢 CI runner 留 ~30 倍余量(本机实测 ~31ms;旧惰性版同规模 >60s,量级差三个 0,
+  // 1000ms 仍能可靠区分线性与平方)。
+  assert.ok(ms < 1000, `t12b: 2MB 病态输入必须 <1000ms(实测 ${ms.toFixed(1)}ms;旧惰性版同规模 >60s)`);
+}
+
+// t12c 保尾截断的切口劈键(判官 F-3):16KB slice 落在键值中间时,残尾没有键可判,
+// 脱敏正则失配 → 值尾巴明文透出;且这发生在脱敏之【前】,是截断自己引入的泄漏窗口。
+// 修法=切口对齐到下一行边界(键值同行,整行一起丢);全文无换行时丢首 256 字符兜底。
+// 变异:rawPluginErrorText 退回裸 slice(-16384) → 前两条立即红。
+{
+  const NL = String.fromCharCode(10);
+  // 切口恰把 `Authorization: Bearer …` 劈开:cut 以 "er SECRET_STRADDLE" 开头(无键残尾)
+  const tail16k = (`er SECRET_STRADDLE${NL}` + `z${NL}`.repeat(9000)).slice(0, 16384);
+  const straddled = JSON.stringify(serializePluginPublicError(cliErr(`Authorization: Bear${tail16k}`)).body);
+  assert.ok(!straddled.includes('SECRET_STRADDLE'), 't12c: 切口劈开的 Bearer 值不得透出');
+  // 全文无换行形态:靠丢首 256 字符兜底
+  const flat16k = (`ey=SECRET_NONEWLINE ` + 'z'.repeat(20000)).slice(0, 16384);
+  const flat = JSON.stringify(serializePluginPublicError(cliErr(`apik${flat16k}`)).body);
+  assert.ok(!flat.includes('SECRET_NONEWLINE'), 't12c: 无换行时切口残尾也不得透出');
+  // 对齐只丢首个残行,其后内容照常保留(截断语义不变)
+  const kept = JSON.stringify(serializePluginPublicError(cliErr(
+    'x'.repeat(20000) + NL + 'marker-after-cut 后续正常内容' + NL + `z${NL}`.repeat(50))).body);
+  assert.ok(kept.includes('marker-after-cut'), 't12c: 行对齐后紧随切口的完整行必须保留');
 }
 
 // t13 带名称的 not-found 与输入/选项错误是终态，即使 stderr 同时含网络瞬态词。

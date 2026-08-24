@@ -53,19 +53,20 @@ const clientPlan = await readFile(new URL('client/src/utils/plan.js', root), 'ut
 assert.match(clientPlan, /from\s+'\.\.\/\.\.\/\.\.\/server\/utils\/plan\.js'/,
   'client wrapper 必须复用 server/utils/plan.js,不得各造一份规则');
 
-// ── 2. vite dev 必须放行被跨根 import 的那个目录,否则 403 白屏;但只放行它 ──────
-// 放行范围收窄到 ../server/utils(不是整个仓库根 '..'):后者会让 dev 下 /@fs 可读
-// CLAUDE.local.md / LEARNINGS.md / .devflow 等敏感文件。client/src/utils/plan.js 的
-// import 落在 ../server/utils 内,足够;这条断言同时挡"放太宽"和"没放"两个方向。
+// ── 2. vite dev 必须放行 root('.') + 被跨根 import 的那个目录;且只放行这两个 ──────
+// 显式 fs.allow 会【替换】Vite 默认的 root 放行:漏 '.' 连 index.html 都 403 = dev 整体
+// 不可用(判官实测);放 '..'(整个仓库根)则 dev 下 /@fs 可读 CLAUDE.local.md /
+// LEARNINGS.md / .devflow 等敏感文件。恰好 ['.', '../server/utils'] 同时挡三个方向:
+// 没放共享目录(白屏)、没放 root(全站 403)、放太宽(仓库根泄漏)。
 const viteConfig = await readFile(new URL('client/vite.config.js', root), 'utf8');
 const serverBlock = viteConfig.slice(viteConfig.indexOf('server: {'));
 assert.ok(viteConfig.includes('server: {'), 'vite.config.js 必须有 server 配置块');
 const allowMatch = serverBlock.match(/fs\s*:\s*\{[^}]*allow\s*:\s*\[([^\]]*)\]/);
 assert.ok(allowMatch, 'vite dev server 必须配置 fs.allow(否则跨根 import 走 /@fs/ 被 403 = 白屏)');
 const allowEntries = [...allowMatch[1].matchAll(/'([^']*)'|"([^"]*)"/g)].map((m) => m[1] ?? m[2]);
-assert.deepEqual(allowEntries, ['../server/utils'],
-  "fs.allow 必须恰好放行 ../server/utils —— 既覆盖共享模块 import,又不把整个仓库根暴露给 dev /@fs");
+assert.deepEqual(allowEntries, ['.', '../server/utils'],
+  "fs.allow 必须恰好是 ['.', '../server/utils'] —— root 缺席=全站 403,共享目录缺席=白屏,'..'=仓库根暴露给 dev /@fs");
 // 被 import 的文件确实落在放行目录内(否则 dev 仍 403)。
 assert.match(clientPlan, /server\/utils\/plan\.js/, '共享 import 必须落在 ../server/utils 放行范围内');
 
-console.log('✓ check-r33-packaged-plan-boundary: server 树零跨界 import(全量遍历)+ vite dev 精确放行 ../server/utils');
+console.log('✓ check-r33-packaged-plan-boundary: server 树零跨界 import(全量遍历)+ vite dev 精确放行 root+../server/utils');

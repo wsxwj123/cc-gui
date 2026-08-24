@@ -1153,8 +1153,9 @@ export function stripPluginAnsi(value) {
 
 function isPluginSensitiveKey(key) {
   // 先剥零宽/控制字符,否则 `to<ZWSP>ken=` 会把敏感词劈开、绕过下面的按词判定。
-  // 覆盖:控制符 + DEL、软连字符、零宽空格/连接符/方向标记、word joiner、BOM。
-  const raw = String(key || '').replace(/[\x00-\x1F\x7F\u00AD\u200B-\u200F\u2060\uFEFF]/g, '');
+  // 覆盖:控制符 + DEL、Unicode 格式类全类(Cf:软连字符/零宽/方向标记/BOM 等)、
+  // CGJ、变体选择符(基本面 FE00-FE0F + 增补面 E0100-E01EF)——枚举漏一个就是绕过。
+  const raw = String(key || '').replace(/[\x00-\x1F\x7F\p{Cf}\u034F\uFE00-\uFE0F\u{E0100}-\u{E01EF}]/gu, '');
   const words = raw
     .replace(/([a-z\d])([A-Z])/g, '$1 $2')
     .replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2')
@@ -1173,7 +1174,7 @@ export function sanitizePluginErrorText(value, limit = PLUGIN_ERROR_FIELD_LIMIT)
   // 控制符之外,零宽/软连字符也必须在下面所有键捕获/凭证正则之前剥掉,类与
   // isPluginSensitiveKey 对齐(保留 \t\n\r:行式正则依赖行边界)。否则 `au<ZWSP>th=`
   // 把键劈开后双向失灵:敏感值漏检、`mon<ZWSP>key=` 反被误遮、`Bear<ZWSP>er` 绕过。
-  text = text.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f\u00ad\u200b-\u200f\u2060\ufeff]/g, '');
+  text = text.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f\p{Cf}\u034f\ufe00-\ufe0f\u{e0100}-\u{e01ef}]/gu, '');
   text = text.replace(/\b([a-z][a-z\d+.-]*:\/\/)([^/\s@]+)@/gi, '$1[REDACTED]@');
   text = text.replace(/\b((?:Proxy-)?Authorization\s*:\s*)[^\r\n]+/gi, '$1[REDACTED]');
   text = text.replace(/\b(Bearer|Basic)\s+(?:"[^"]*"|'[^']*'|[^\s"',;}\]]+)/gi, '$1 [REDACTED]');
@@ -1208,7 +1209,13 @@ function rawPluginErrorText(err) {
   // 保尾截断:即便正则已有界,超长 stderr 仍会拖慢逐条 replace。凭证/错误码通常在尾部;
   // 最终输出还会被 PLUGIN_ERROR_FIELD_LIMIT(4096)再截,这里 16KB 只为封住处理成本。
   const text = err?.stderr?.toString() || err?.message || String(err || '');
-  return text.length > 16384 ? text.slice(-16384) : text;
+  if (text.length <= 16384) return text;
+  // 切口可能把键值劈在中间:残尾没有键可判,脱敏正则失配 → 值尾巴裸露(判官实测)。
+  // 对齐到下一行边界再交给脱敏(键值同行,整行一起丢);全文无换行时丢首 256 字符兜底
+  // (>256 的裸值残尾属已接受残余,见 t12c)。
+  const cut = text.slice(-16384);
+  const nl = cut.search(/[\r\n]/);
+  return (nl >= 0 && nl < cut.length - 1) ? cut.slice(nl + 1) : cut.slice(256);
 }
 
 function errText(err) {
