@@ -1118,8 +1118,11 @@ router.delete('/plugins/:name', async (req, res) => {
 // 真实原因(市场刷新失败)被吞。故:add 仅忽略「已存在」类幂等报错,其余带上 stderr 原文抛出;
 // update 失败一律抛出。
 const OFFICIAL_MARKETPLACE = 'claude-plugins-official';
+const OFFICIAL_MARKETPLACE_REPO = 'anthropics/claude-plugins-official';
 export const PLUGIN_CLI_TIMEOUT_MS = 120000;
 const PLUGIN_PROXY_KEYS = ['HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy'];
+const PLUGIN_ERROR_FIELD_LIMIT = 4096;
+const PLUGIN_SECRET_KEY = '(?:authorization|proxy-authorization|token|access_token|api[_-]?key|key|secret|password)';
 
 function pluginEnvWithoutProxy(baseEnv = process.env) {
   const env = { ...baseEnv };
@@ -1127,8 +1130,31 @@ function pluginEnvWithoutProxy(baseEnv = process.env) {
   return env;
 }
 
+// CLI stderr may echo repository/proxy credentials. Redact at the backend error boundary so
+// every caller (including non-GUI clients) receives the same bounded, safe diagnostic.
+export function sanitizePluginErrorText(value, limit = PLUGIN_ERROR_FIELD_LIMIT) {
+  let text = String(value ?? '');
+  text = text.replace(/\b([a-z][a-z\d+.-]*:\/\/)([^/\s@]+)@/gi, '$1[REDACTED]@');
+  text = text.replace(/\b(Bearer)\s+[^\s"',}\]]+/gi, '$1 [REDACTED]');
+  text = text.replace(new RegExp(`([?&]${PLUGIN_SECRET_KEY}=)([^&#\\s]*)`, 'gi'), '$1[REDACTED]');
+  text = text.replace(new RegExp(`(["']?${PLUGIN_SECRET_KEY}["']?\\s*:\\s*)(["'])(.*?)\\2`, 'gi'), '$1$2[REDACTED]$2');
+  text = text.replace(new RegExp(`(\\b${PLUGIN_SECRET_KEY}\\b\\s*[:=]\\s*)(?!\\[REDACTED\\])([^\\s,;&}\\]]+)`, 'gi'), '$1[REDACTED]');
+  return text.trim().slice(0, Math.max(0, Math.min(Number(limit) || PLUGIN_ERROR_FIELD_LIMIT, PLUGIN_ERROR_FIELD_LIMIT)));
+}
+
+function sanitizePluginDetails(details) {
+  if (typeof details === 'string') return sanitizePluginErrorText(details);
+  if (Array.isArray(details)) return details.map(sanitizePluginDetails);
+  if (!details || typeof details !== 'object') return details;
+  return Object.fromEntries(Object.entries(details).map(([key, value]) => [key, sanitizePluginDetails(value)]));
+}
+
+function rawPluginErrorText(err) {
+  return err?.stderr?.toString() || err?.message || String(err || '');
+}
+
 function errText(err) {
-  return (err?.stderr?.toString() || err?.message || String(err || '')).trim();
+  return sanitizePluginErrorText(rawPluginErrorText(err));
 }
 // `marketplace add` 对已注册源的幂等报错(已存在不算失败)。export 仅为可单测。
 export function isMarketplaceAddIdempotent(err) {
@@ -1137,6 +1163,13 @@ export function isMarketplaceAddIdempotent(err) {
 // install 报「找不到/缓存过期」形态 → 值得刷新市场重试。export 仅为可单测。
 export function isMarketplaceStaleError(err) {
   return /out of date|not found|marketplace update|本地副本/i.test(errText(err));
+}
+
+// Only transient transport failures are retryable. Authentication, permission, invalid input,
+// and marketplace/plugin not-found errors deliberately stay terminal.
+export function isRetryablePluginNetworkError(err) {
+  const text = rawPluginErrorText(err);
+  return /\b(?:ECONNRESET|ECONNREFUSED|ENETUNREACH|EHOSTUNREACH|EAI_AGAIN|ENOTFOUND|ETIMEDOUT)\b|connection (?:reset|refused|timed out)|request timed out|socket hang up|network is unreachable|temporary failure in name resolution|DNS (?:lookup|resolution|query) (?:failed|failure)|(?:TLS|SSL) (?:handshake|connection) (?:failed|failure|error)|temporar(?:y|ily) (?:network (?:failure|error)|unavailable)|(?:network|operation) timeout/i.test(text);
 }
 
 // 代理 URL 只探 TCP 可连接性，不发送应用请求；解析失败、端口不可达都视为不可用。
@@ -1176,31 +1209,32 @@ export async function marketplaceProxyEnv(
 }
 
 class PluginCliError extends Error {
-  constructor(details, cause = null) {
-    super(details.message, cause ? { cause } : undefined);
+  constructor(details) {
+    const safeDetails = sanitizePluginDetails(details);
+    super(safeDetails.message);
     this.name = 'PluginCliError';
-    this.details = details;
+    this.details = safeDetails;
   }
 }
 
 function pluginCliError(stage, error, messagePrefix = '') {
   if (error instanceof PluginCliError) {
     if (!messagePrefix) return error;
-    return new PluginCliError({ ...error.details, message: `${messagePrefix}${error.details.message}` }, error);
+    return new PluginCliError({ ...error.details, message: `${messagePrefix}${error.details.message}` });
   }
   const timedOut = error?.killed === true || error?.timedOut === true || error?.code === 'ETIMEDOUT';
-  const message = `${messagePrefix}${errText(error) || 'Claude CLI 执行失败'}`.slice(0, 5000);
+  const message = `${messagePrefix}${errText(error) || 'Claude CLI 执行失败'}`;
   return new PluginCliError({
     stage,
     code: timedOut ? 'CLI_TIMEOUT' : 'CLI_EXIT_NONZERO',
-    retryable: timedOut,
+    retryable: timedOut || isRetryablePluginNetworkError(error),
     timeoutMs: PLUGIN_CLI_TIMEOUT_MS,
     message,
     killed: error?.killed === true,
     timedOut,
     cliExitCode: error?.code ?? null,
     signal: error?.signal ?? null,
-  }, error);
+  });
 }
 
 function proxyPreflightError(error) {
@@ -1209,12 +1243,12 @@ function proxyPreflightError(error) {
     code: 'PROXY_UNREACHABLE',
     retryable: true,
     timeoutMs: PLUGIN_CLI_TIMEOUT_MS,
-    message: `代理连通性检查失败:${errText(error) || '无法生成安全子进程环境'}`.slice(0, 5000),
+    message: `代理连通性检查失败:${errText(error) || '无法生成安全子进程环境'}`,
     killed: false,
     timedOut: false,
     cliExitCode: null,
     signal: null,
-  }, error);
+  });
 }
 
 async function runPluginCli(stage, args, { run = runClaude, env }) {
@@ -1255,7 +1289,7 @@ export async function ensureMarketplace({
 }
 
 async function ensureOfficialMarketplace() {
-  await ensureMarketplace({ repo: 'anthropics/claude-plugins-official', marketplace: OFFICIAL_MARKETPLACE });
+  await ensureMarketplace({ repo: OFFICIAL_MARKETPLACE_REPO, marketplace: OFFICIAL_MARKETPLACE });
 }
 
 // r29:install 报「not found / out of date」形态 → 先刷新市场(刷新失败透出根因,不无谓重试),
@@ -1263,7 +1297,7 @@ async function ensureOfficialMarketplace() {
 export async function installPluginWithRefresh({
   name,
   marketplace,
-  repo = null,
+  repo,
   run = runClaude,
   detect = detectLocalProxy,
   env = null,
@@ -1272,6 +1306,9 @@ export async function installPluginWithRefresh({
   directEnv = null,
 }) {
   const target = `${name}@${marketplace}`;
+  const refreshRepo = repo === undefined
+    ? (marketplace === OFFICIAL_MARKETPLACE ? OFFICIAL_MARKETPLACE_REPO : null)
+    : repo;
   const guide = `请检查网络/代理,或手动运行 claude plugin marketplace update ${marketplace} 后重试`;
   // 先尝试完全离线的本地缓存安装。此步不做代理探活，也不把代理传给 CLI，避免
   // CLI 即使命中缓存仍发出后台网络请求；只有缓存缺失、确需刷新时才探活并保留可达代理。
@@ -1291,7 +1328,7 @@ export async function installPluginWithRefresh({
       }
     }
     try {
-      await ensureMarketplace({ repo, marketplace, run, detect, env: childEnv, baseEnv, probe });
+      await ensureMarketplace({ repo: refreshRepo, marketplace, run, detect, env: childEnv, baseEnv, probe });
     } catch (ue) {
       // 刷新本身就失败 = 根因在市场拉不动,直接给因果链(重试旧缓存无意义)。
       throw pluginCliError(ue?.details?.stage || 'marketplace-update', ue,
@@ -1394,9 +1431,9 @@ router.post('/plugins/install', async (req, res) => {
     }
     await installPluginWithRefresh({
       name, marketplace,
-      // 自定义源上方已成功/幂等 add，刷新时无需再次启动 CLI 重复注册；官方源没有
-      // 预 add，not-found 后仍保留官方 repo 作为恢复兜底。
-      repo: isCustom ? null : 'anthropics/claude-plugins-official',
+      // 显式自定义 repo 已在上方成功/幂等 add，刷新时只 update；未传 repo 时由 helper
+      // 仅为 official marketplace 补官方 repo，第三方市场不会误加官方源。
+      ...(isCustom ? { repo: null } : {}),
       env: childEnv,
     });
     invalidateMcpCache();

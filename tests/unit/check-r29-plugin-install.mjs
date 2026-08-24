@@ -21,6 +21,7 @@ const {
   ensureMarketplace, installPluginWithRefresh, marketplaceProxyEnv, probePluginProxy,
   PLUGIN_CLI_TIMEOUT_MS,
   isMarketplaceAddIdempotent, isMarketplaceStaleError,
+  isRetryablePluginNetworkError, sanitizePluginErrorText,
 } = await import('../../server/routes/mcp.js');
 
 const MK = 'claude-plugins-official';
@@ -85,6 +86,26 @@ const noProxy = async () => null;
     'plugin install code-review@claude-plugins-official',
   ], 't3: not found → add(幂等)+update 刷新后重试 install 一次');
   assert.equal(installN, 2, 't3: install 恰两次');
+}
+
+// t3b 第三方无 repo 的 stale 回退只能 update 目标市场，不能借用 official repo。
+{
+  let installN = 0;
+  const calls = [];
+  const run = async (args) => {
+    calls.push(args.join(' '));
+    if (args[1] === 'install' && installN++ === 0) throw cliErr('plugin not found in marketplace; local copy is out of date');
+    return '';
+  };
+  await installPluginWithRefresh({
+    name: 'third-party-plugin', marketplace: 'third-party-marketplace', run,
+    detect: noProxy, baseEnv: {}, probe: async () => false,
+  });
+  assert.deepEqual(calls, [
+    'plugin install third-party-plugin@third-party-marketplace',
+    'plugin marketplace update third-party-marketplace',
+    'plugin install third-party-plugin@third-party-marketplace',
+  ], 't3b: 第三方无repo只刷新目标市场并重试，不add official');
 }
 
 // t4 刷新成功但重试仍失败 → 完整因果链文案 + 可执行指引
@@ -306,6 +327,48 @@ const noProxy = async () => null;
   );
   assert.ok(calls.every(({ opts }) => opts.timeout === 120000), 't9: add/update/install统一120秒');
   assert.ok(calls.every(({ opts }) => opts.killTreeOnTimeout === true), 't9: 三阶段超时均终止整棵子进程树');
+}
+
+// t10 CLI 错误在 PluginCliError 边界统一脱敏/限长，网络非零只按窄白名单可重试。
+{
+  const secrets = ['url-user', 'url-pass', 'bearer-token', 'query-token', 'api-secret', 'json-auth', 'json-token', 'kv-pass'];
+  const raw = [
+    'R33_SAFE_CONTEXT marketplace-add',
+    `url=https://${secrets[0]}:${secrets[1]}@example.invalid/repo?access_token=${secrets[3]}&api_key=${secrets[4]}`,
+    `Authorization: Bearer ${secrets[2]}`,
+    JSON.stringify({ authorization: `Bearer ${secrets[5]}`, token: secrets[6] }),
+    `password=${secrets[7]}`,
+    'bounded-context '.repeat(1000),
+  ].join('\n');
+  const sanitized = sanitizePluginErrorText(raw);
+  assert.ok(sanitized.includes('R33_SAFE_CONTEXT'), 't10: 保留安全诊断上下文');
+  assert.ok(sanitized.includes('[REDACTED]'), 't10: 敏感值替换为占位');
+  assert.ok(secrets.every((secret) => !sanitized.includes(secret)), 't10: URL/header/query/JSON/kv秘密全部移除');
+  assert.ok(sanitized.length <= 4096, 't10: 单字段最多4096字符');
+
+  const run = async () => { throw cliErr(raw); };
+  await assert.rejects(
+    () => installPluginWithRefresh({ name: 'x', marketplace: MK, run, baseEnv: {} }),
+    (error) => error.details?.stage === 'plugin-install'
+      && error.details.message.includes('R33_SAFE_CONTEXT')
+      && error.details.message.length <= 4096
+      && secrets.every((secret) => !JSON.stringify(error.details).includes(secret)),
+    't10: 真实PluginCliError details同样脱敏且有界',
+  );
+
+  for (const message of [
+    'recv failure: connection reset by peer',
+    'connect ECONNREFUSED 127.0.0.1:443',
+    'getaddrinfo ENOTFOUND example.invalid',
+    'TLS handshake failed',
+    'temporary failure in name resolution',
+    'network timeout while fetching',
+  ]) assert.equal(isRetryablePluginNetworkError(cliErr(message)), true, `t10: 网络错误应可重试: ${message}`);
+  for (const message of [
+    'permission denied for repository',
+    'invalid marketplace name',
+    'plugin not found in marketplace',
+  ]) assert.equal(isRetryablePluginNetworkError(cliErr(message)), false, `t10: 终态错误不可重试: ${message}`);
 }
 
 console.log('✓ check-r29-plugin-install: update 透出 + add 幂等 + not-found 重试/因果链 + 代理注入 + 哨兵');
