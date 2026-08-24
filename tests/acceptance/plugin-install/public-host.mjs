@@ -22,6 +22,28 @@ import { startGuiHost } from './gui-host.mjs';
 const EXPECTED_CLI_VERSION = '2.1.240';
 const PROXY_KEYS = ['HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy'];
 const SYSTEM_PATH = [path.dirname(process.execPath), '/usr/local/bin', '/usr/bin', '/bin', '/usr/sbin', '/sbin'].join(path.delimiter);
+export const FAKE_SECRET_CANARIES = Object.freeze([
+  'r33-url-user-canary',
+  'r33-url-password-canary',
+  'r33-bearer-canary',
+  'r33-query-token-canary',
+  'r33-api-key-canary',
+  'r33-key-canary',
+  'r33-json-auth-canary',
+  'r33-json-token-canary',
+]);
+
+const SECRET_FAILURE_STDERR = [
+  'R33_SAFE_CONTEXT plugin marketplace request failed',
+  `url=https://${FAKE_SECRET_CANARIES[0]}:${FAKE_SECRET_CANARIES[1]}@example.invalid/repo.git?token=${FAKE_SECRET_CANARIES[3]}&api_key=${FAKE_SECRET_CANARIES[4]}&key=${FAKE_SECRET_CANARIES[5]}`,
+  `Authorization: Bearer ${FAKE_SECRET_CANARIES[2]}`,
+  JSON.stringify({
+    authorization: `Bearer ${FAKE_SECRET_CANARIES[6]}`,
+    token: FAKE_SECRET_CANARIES[7],
+    context: 'upstream rejected plugin operation',
+  }),
+  'R33_BOUNDED_CONTEXT '.repeat(2_000),
+].join('\n');
 
 export class TestInfraError extends Error {
   constructor(message, kind = 'TEST_INFRA') {
@@ -124,12 +146,26 @@ appendFileSync(process.env.R33_CLI_RECORD_FILE, JSON.stringify({ args, env: sele
 
 const isAdd = args[0] === 'plugin' && args[1] === 'marketplace' && args[2] === 'add';
 const isUpdate = args[0] === 'plugin' && args[1] === 'marketplace' && args[2] === 'update';
+const isInstall = args[0] === 'plugin' && args[1] === 'install';
 const mode = process.env.R33_CLI_WRAPPER_MODE || 'record';
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 if ((mode === 'slow-add' && isAdd) || (mode === 'slow-update' && isUpdate)) await delay(35_000);
 if (mode === 'timeout-update' && isUpdate) {
   await delay(125_000);
   process.exit(124);
+}
+if ((mode === 'secret-add' && isAdd) || (mode === 'secret-install' && isInstall)) {
+  process.stderr.write('R33_SAFE_STAGE ' + (isAdd ? 'marketplace-add' : 'plugin-install') + '\\n');
+  process.stderr.write(${JSON.stringify(SECRET_FAILURE_STDERR)});
+  process.exit(47);
+}
+if (mode === 'network-reset-update' && isUpdate) {
+  process.stderr.write('R33_SAFE_CONTEXT marketplace update failed: recv failure: connection reset by peer\\n');
+  process.exit(48);
+}
+if (mode === 'permission-update' && isUpdate) {
+  process.stderr.write('R33_SAFE_CONTEXT marketplace update failed: permission denied for repository\\n');
+  process.exit(49);
 }
 
 const child = spawn(process.env.R33_REAL_CLAUDE_BIN, args, { env: process.env, stdio: 'inherit' });
@@ -212,7 +248,7 @@ async function startRejectingProxy() {
   };
 }
 
-async function startForwardingProxy(expectedHost) {
+async function startForwardingProxy(expectedHost, listenHost = '127.0.0.1') {
   let requestCount = 0;
   let connectionCount = 0;
   const server = http.createServer((request, response) => {
@@ -244,19 +280,41 @@ async function startForwardingProxy(expectedHost) {
     });
     request.pipe(upstream);
   });
+  server.on('connect', (request, clientSocket, head) => {
+    const separator = request.url.lastIndexOf(':');
+    const targetHost = separator >= 0 ? request.url.slice(0, separator) : request.url;
+    const targetPort = separator >= 0 ? Number(request.url.slice(separator + 1)) : 443;
+    if (targetHost !== expectedHost || !Number.isInteger(targetPort)) {
+      clientSocket.end('HTTP/1.1 502 Bad Gateway\r\n\r\n');
+      return;
+    }
+    requestCount += 1;
+    const upstream = net.connect(targetPort, targetHost, () => {
+      clientSocket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
+      if (head.length) upstream.write(head);
+      clientSocket.pipe(upstream).pipe(clientSocket);
+    });
+    upstream.on('error', () => clientSocket.destroy());
+    clientSocket.on('error', () => upstream.destroy());
+  });
   server.on('connection', () => { connectionCount += 1; });
   try {
     await new Promise((resolve, reject) => {
       server.once('error', reject);
-      server.listen(0, '127.0.0.1', resolve);
+      server.listen(0, listenHost, resolve);
     });
   } catch (error) {
+    if (listenHost === '::1' && ['EAFNOSUPPORT', 'EADDRNOTAVAIL'].includes(error.code)) {
+      throw new TestInfraError(`IPv6 loopback unavailable: ${error.code}`);
+    }
+    if (listenHost === '::1') throw error;
     throw new TestInfraError(`forwarding proxy fixture unavailable: ${error.code || error.message}`);
   }
   const address = server.address();
   if (!address || typeof address !== 'object') throw new TestInfraError('forwarding proxy fixture has no port');
+  const urlHost = listenHost.includes(':') ? `[${listenHost}]` : listenHost;
   return {
-    url: `http://127.0.0.1:${address.port}`,
+    url: `http://${urlHost}:${address.port}`,
     requests: () => requestCount,
     connections: () => connectionCount,
     close: () => new Promise((resolve) => server.close(resolve)),
@@ -848,6 +906,11 @@ export class PluginAcceptanceHost {
 
   async createForwardingProxy() {
     this.forwardingProxy = await startForwardingProxy('r33-proxy-target.invalid');
+    return this.forwardingProxy;
+  }
+
+  async createIpv6ForwardingProxy() {
+    this.forwardingProxy = await startForwardingProxy('r33-proxy-target.invalid', '::1');
     return this.forwardingProxy;
   }
 

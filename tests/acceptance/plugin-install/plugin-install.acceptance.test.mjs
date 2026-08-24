@@ -3,6 +3,7 @@ import test from 'node:test';
 import {
   assertCliStageRecorded,
   assertSuccess,
+  FAKE_SECRET_CANARIES,
   runAcceptanceCase,
   TestInfraError,
   unusedLoopbackProxyUrl,
@@ -54,6 +55,37 @@ async function assertDefaultAvailableContract(host) {
 function assertNoUnexpectedInstalls(before, after) {
   const added = after.filter((identity) => !before.includes(identity));
   assert.deepEqual(added, [], `unexpected plugin identities were installed: ${JSON.stringify(added)}`);
+}
+
+function collectPublicStrings(value, path = '$', output = []) {
+  if (typeof value === 'string') output.push({ path, value });
+  else if (Array.isArray(value)) value.forEach((entry, index) => collectPublicStrings(entry, `${path}[${index}]`, output));
+  else if (value && typeof value === 'object') {
+    for (const [key, entry] of Object.entries(value)) collectPublicStrings(entry, `${path}.${key}`, output);
+  }
+  return output;
+}
+
+function assertSanitizedFailure(host, result, expectedStage) {
+  assert.equal(result.response.ok, false, `${expectedStage} secret failure unexpectedly succeeded`);
+  const error = host.errorFrom(result.body);
+  assert.equal(error.stage, expectedStage);
+  assert.equal(error.code, 'CLI_EXIT_NONZERO');
+  assert.equal(typeof error.message, 'string');
+  assert.ok(error.message.trim().length > 0, `${expectedStage} lost all useful context`);
+
+  const publicStrings = collectPublicStrings(result.body);
+  assert.ok(publicStrings.length > 0, `${expectedStage} response has no public text`);
+  const publicText = publicStrings.map(({ value }) => value).join('\n');
+  FAKE_SECRET_CANARIES.forEach((secret, index) => {
+    assert.equal(publicText.includes(secret), false, `${expectedStage} leaked secret canary #${index + 1}`);
+  });
+  assert.ok(publicText.includes('R33_SAFE_CONTEXT'), `${expectedStage} removed useful sanitized context`);
+  assert.ok(publicText.includes(expectedStage), `${expectedStage} removed the operation label`);
+  for (const { path, value } of publicStrings) {
+    assert.ok(value.length <= 4_096, `${expectedStage} public field ${path} exceeds 4096 characters`);
+  }
+  assert.ok(publicText.length <= 16_384, `${expectedStage} public error exceeds 16384 characters`);
 }
 
 test('PLUG-AVAIL-001 [network] GUI emits 12 unique default payloads present in backend and CLI available JSON', { timeout: NETWORK_TIMEOUT }, async (t) => {
@@ -186,6 +218,19 @@ test('PLUG-PROXY-LIVE-001 [offline] a reachable proxy is preserved and used', { 
   });
 });
 
+test('PLUG-PROXY-IPV6-001 [offline] a reachable IPv6 proxy is probed and preserved for real CLI', { timeout: OFFLINE_TIMEOUT }, async (t) => {
+  await runAcceptanceCase(t, {}, async (host) => {
+    const proxy = await host.createIpv6ForwardingProxy();
+    const beforeConnections = proxy.connections();
+    await host.restartBackend({ HTTP_PROXY: proxy.url });
+    const payload = await host.requireValidatedLocalPayload();
+    assertSuccess(await host.submitInstall(payload));
+    const records = await host.cliRecords();
+    assert.ok(records.some((record) => record.env.HTTP_PROXY === proxy.url), 'live IPv6 HTTP_PROXY was cleared');
+    assert.ok(proxy.connections() > beforeConnections, 'live IPv6 proxy did not observe a reachability connection');
+  });
+});
+
 test('PLUG-ERR-ADD-001 [offline] marketplace add failure has a complete structured error', { timeout: OFFLINE_TIMEOUT }, async (t) => {
   await runAcceptanceCase(t, {}, async (host) => {
     const before = await host.installedIdentities();
@@ -213,6 +258,48 @@ test('PLUG-ERR-INSTALL-001 [offline] plugin install failure has a complete struc
       timeoutMs: 120_000,
     });
     assertNoUnexpectedInstalls(before, await host.installedIdentities());
+  });
+});
+
+test('PLUG-SEC-001 [offline] add and install failures redact secrets and bound public errors', { timeout: OFFLINE_TIMEOUT }, async (t) => {
+  await runAcceptanceCase(t, { wrapperMode: 'secret-add' }, async (host) => {
+    const before = await host.installedIdentities();
+    const payload = await host.requireValidatedLocalPayload();
+
+    const addFailure = await host.submitInstall(payload);
+    assertSanitizedFailure(host, addFailure, 'marketplace-add');
+    assertNoUnexpectedInstalls(before, await host.installedIdentities());
+
+    await host.restartBackend({ R33_CLI_WRAPPER_MODE: 'secret-install' });
+    const installFailure = await host.submitInstall(payload);
+    assertSanitizedFailure(host, installFailure, 'plugin-install');
+    assertNoUnexpectedInstalls(before, await host.installedIdentities());
+  });
+});
+
+test('PLUG-ERR-RETRY-001 [offline] update network reset is retryable but permission denial is not', { timeout: OFFLINE_TIMEOUT }, async (t) => {
+  await runAcceptanceCase(t, { wrapperMode: 'network-reset-update' }, async (host) => {
+    const payload = await host.prepareStaleMarketplace();
+    const startedAt = Date.now();
+    const networkFailure = await host.submitInstall(payload);
+    assert.equal(networkFailure.response.ok, false, 'connection reset update unexpectedly succeeded');
+    host.assertStructuredError(host.errorFrom(networkFailure.body), {
+      stage: 'marketplace-update',
+      code: 'CLI_EXIT_NONZERO',
+      retryable: true,
+      timeoutMs: 120_000,
+    });
+    assert.ok(Date.now() - startedAt < 30_000, 'connection reset was misclassified through the timeout path');
+
+    await host.restartBackend({ R33_CLI_WRAPPER_MODE: 'permission-update' });
+    const permissionFailure = await host.submitInstall(payload);
+    assert.equal(permissionFailure.response.ok, false, 'permission-denied update unexpectedly succeeded');
+    host.assertStructuredError(host.errorFrom(permissionFailure.body), {
+      stage: 'marketplace-update',
+      code: 'CLI_EXIT_NONZERO',
+      retryable: false,
+      timeoutMs: 120_000,
+    });
   });
 });
 
@@ -265,5 +352,36 @@ test('PLUG-THIRD-001 [offline] third-party install preserves name, marketplace, 
       records.some((record) => record.args[0] === 'plugin' && record.args[1] === 'install' && record.args.includes(expectedIdentity)),
       `CLI did not receive the third-party identity ${expectedIdentity}`,
     );
+  });
+});
+
+test('PLUG-THIRD-STALE-001 [offline] no-repo third-party stale install updates only its marketplace', { timeout: OFFLINE_TIMEOUT }, async (t) => {
+  await runAcceptanceCase(t, {}, async (host) => {
+    const payload = await host.prepareStaleMarketplace();
+    assert.deepEqual(Object.keys(payload).sort(), ['marketplace', 'name']);
+    assertSuccess(await host.submitInstall(payload));
+    await host.assertInstalled({ id: payload.name, marketplace: payload.marketplace });
+
+    const records = await host.cliRecords();
+    const marketplaceAdds = records.filter((record) => record.args[0] === 'plugin'
+      && record.args[1] === 'marketplace'
+      && record.args[2] === 'add');
+    assert.equal(marketplaceAdds.length, 0, 'no-repo third-party fallback invoked marketplace add');
+
+    const marketplaceUpdates = records.filter((record) => record.args[0] === 'plugin'
+      && record.args[1] === 'marketplace'
+      && record.args[2] === 'update');
+    assert.equal(marketplaceUpdates.length, 1, 'stale third-party install must update exactly one marketplace');
+    assert.equal(marketplaceUpdates[0].args[3], payload.marketplace, 'stale fallback updated the wrong marketplace');
+    assert.ok(
+      records.every((record) => !record.args.includes('claude-plugins-official')),
+      'third-party stale fallback invoked the official marketplace',
+    );
+
+    const expectedIdentity = `${payload.name}@${payload.marketplace}`;
+    const installAttempts = records.filter((record) => record.args[0] === 'plugin'
+      && record.args[1] === 'install'
+      && record.args.includes(expectedIdentity));
+    assert.equal(installAttempts.length, 2, 'stale third-party install was not retried exactly once');
   });
 });
