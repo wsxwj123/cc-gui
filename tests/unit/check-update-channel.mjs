@@ -62,8 +62,10 @@ console.log('check-update-channel: all passed (r13-p2-20)');
   // 已在跑 → 挂上去续看,不重复起进程
   assert.match(stream, /if \(updateTask\.status === 'running'\)/, 't6: 复用在跑的任务');
   assert.match(stream, /attached: true/, 't6: 续看标记');
-  // 超时仍必须杀(挂死防护)
-  assert.match(stream, /killUpdateTree\(\);\s*\}, 8 \* 60 \* 1000\)/, 't6: 8 分钟超时仍杀树');
+  // r34:8 分钟【不再杀】—— `npm i -g` 非原子,强杀落在"旧包已删、新包没解压完"的窗口
+  // 会直接毁掉用户的安装(Windows 实报)。改为 8 分钟只提示、60 分钟极限兜底才杀。
+  assert.match(stream, /const clearUpdateTimers = startUpdateTimers\(\)/, 't6: 定时器走 startUpdateTimers');
+  assert.ok(!/8 \* 60 \* 1000/.test(stream), 't6: stream 里不得再有 8 分钟强杀定时器(哨兵锚:改回即红)');
   // 对账与主动取消端点
   assert.match(src, /router\.get\('\/claude-update\/status'/, 't6: 状态对账端点');
   assert.match(src, /router\.post\('\/claude-update\/cancel'/, 't6: 主动取消端点(关面板不再等于取消)');

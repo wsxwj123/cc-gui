@@ -550,6 +550,23 @@ export async function detectLocalProxy({ readSystem = readSystemProxy } = {}) { 
   return port ? `http://127.0.0.1:${port}` : null;
 }
 
+// r34-③:【注入前必须探活】。detectLocalProxy 的第一分支(server 自己的 HTTP(S)_PROXY
+// env)按"显式配置信任优先"不探活 —— 但那份 env 可能是代理软件退出后残留的死地址,
+// 不验活就写进子进程 env,整条更新/安装全走死代理 = 用户看到"卡死/超时"。
+// r31 给插件安装的 marketplaceProxyEnv 已按同口径处理过,更新这条路当时没跟上。
+// 探不通 → 返回 null(直连),绝不因为"探测器自己出错"就改注入。export 仅为可单测。
+export async function liveProxy(proxyUrl, probe = probeTcp) {
+  if (!proxyUrl) return null;
+  try {
+    const u = new URL(proxyUrl);
+    return (await probe(u.hostname, Number(u.port) || 8080)) ? proxyUrl : null;
+  } catch { return null; }
+}
+/** 探活通过才返回的代理 —— 所有"把代理喂给子进程/终端脚本"的调用点都用这个。 */
+export async function detectLiveProxy() {
+  return liveProxy(await detectLocalProxy().catch(() => null));
+}
+
 function launchInTerminal(cmd, title, proxyUrl = null) {
   const stamp = `cgui-cc-${process.pid}-${Math.round(process.hrtime()[1])}`;
   if (process.platform === 'darwin') {
@@ -642,7 +659,7 @@ router.get('/claude-version-check', async (req, res) => {
  * POST /api/claude-update — 按检测到的安装方式运行匹配的更新命令。
  * native→claude update,brew→brew upgrade,npm→也走 claude update(npm 包 ≥2.1.227
  * 是原生安装器引导壳,npm i -g 只会拉壳不出可用 CLI,见 updateCmdFor)。
- * 超时 8 分钟,到点对整棵进程树 SIGKILL(见 /claude-update/stream),不留僵尸。
+ * 终端路径没有任何超时定时器(也正因如此从没毁过用户的安装,见 startUpdateTimers)。
  */
 router.post('/claude-update', async (req, res) => {
   const { method, path: claudePath } = await detectInstall();
@@ -660,7 +677,8 @@ router.post('/claude-update', async (req, res) => {
   }
   const cmd = updateCmdFor(resolved, claudePath);
   // M1: native 自更新直连 claude.ai 下载,墙内必须带代理;npm/brew 同样受益。
-  const proxyUrl = await detectLocalProxy().catch(() => null);
+  // r34-③:探活通过的才往终端脚本里 export —— 死代理会让终端更新同样"卡死"。
+  const proxyUrl = await detectLiveProxy();
   // Windows:运行中的 claude 锁住 claude.exe,npm/upgrade 覆盖时报 "could not write ...claude.exe"。
   // 更新前先关掉 GUI 自己的常驻 claude 进程释放文件锁(终端里 npm 先下载,给进程退出留足时间)。
   if (process.platform === 'win32') { try { closeAllPersistentProcesses(); } catch {} }
@@ -700,8 +718,8 @@ export async function tryRestorePausedOverride() {
 // ── r13-p2-21:更新改为【服务端后台任务】,关面板/断连不再杀进程 ──────────
 // 用户实报:更新中关掉右侧面板,更新就停了,得重新点。根因=下方 req.on('close') 里
 // killTree —— SSE 一断就杀整棵进程树。现在:进程归服务端持有,SSE 只是"看进度的窗口",
-// 断开只摘监听;重开面板可续看(replay 已产生的日志);8 分钟超时仍杀(防挂死);
-// 用户想主动停有独立的 cancel 端点。
+// 断开只摘监听;重开面板可续看(replay 已产生的日志);r34-①:8 分钟只提示不杀、
+// 60 分钟极限兜底才杀;用户想主动停有独立的 cancel 端点。
 // export 仅为可单测(r26-C9:attach 终态帧用例需要直接置 status/code)
 export const updateTask = {
   child: null,
@@ -736,6 +754,44 @@ function killUpdateTree() {
   }
 }
 
+// ── r34-①:【超时不再杀】────────────────────────────────────────────────
+// 用户实报(Windows):GUI 内更新一中断,claude.cmd 消失、node_modules 里只剩半解压的
+// 包,得整个重下;终端更新从来不出事。根因就是这里的 8 分钟强杀:
+//   `npm install -g` 非原子 —— 先删旧 bin 链/旧包,再解压 81MB 平台包。慢源(npmmirror
+//   对平台包 16-20KB/s)下 8 分钟远不够,强杀必然落在「旧的已删、新的没好」的窗口。
+//   即:这个"防挂死保护"本身就是损坏的制造者。终端路径没有定时器,所以从不出事。
+// 现在:8 分钟只提示(任务继续跑),只有用户显式取消、或超过 60 分钟(真挂死)才终止。
+export const UPDATE_SLOW_NOTICE_MS = 8 * 60 * 1000;
+export const UPDATE_HARD_LIMIT_MS = 60 * 60 * 1000;
+export const UPDATE_SLOW_NOTICE_LINE = '⚠️ 更新已运行 8 分钟,仍在进行中(不会自动终止)。npm 源较慢时 81MB 的平台包可能需要 30-60 分钟,建议继续等待;确实要停可点「取消更新」—— 取消可能留下半成品安装,重新运行一次更新即可补齐。';
+export const UPDATE_HARD_LIMIT_ERROR = '更新已超过 60 分钟仍未完成,判定为挂死并终止。若 claude 因此不可用:重新运行一次更新即可补齐缺失文件,不必手动清理。';
+// 慢提示(不杀)+ 极限兜底(杀)。返回清理函数,正常完成/失败收尾时调用。
+// 延时可注入仅为可单测(单测不可能真等 8 分钟);export 仅为可单测。
+export function startUpdateTimers({
+  push = taskPush, kill = killUpdateTree, task = updateTask,
+  noticeMs = UPDATE_SLOW_NOTICE_MS, hardMs = UPDATE_HARD_LIMIT_MS,
+} = {}) {
+  // 提示走 log 帧:前端 doUpdateStream 只渲染 log/start/error/done,自造帧类型会被静默丢弃。
+  const notice = setTimeout(() => { push({ type: 'log', line: UPDATE_SLOW_NOTICE_LINE }); }, noticeMs);
+  const hard = setTimeout(() => {
+    task.error = withRecoveryHint(UPDATE_HARD_LIMIT_ERROR, task.cmd);
+    push({ type: 'error', error: task.error });
+    kill();
+  }, hardMs);
+  notice.unref?.(); hard.unref?.();
+  return () => { clearTimeout(notice); clearTimeout(hard); };
+}
+
+// r34-②:npm 渠道的中断(取消/极限超时/spawn 失败/非零退出)都可能留下半成品安装。
+// 恢复办法就是"再跑一次更新"(npm 会补齐缺失文件),不需要用户手动清理 —— 所以
+// 错误文案统一带上这句,别让用户以为安装已经死透只能重装系统级的东西。
+export function isNpmRegistryCmd(cmd) {
+  return /npm\s+install\s+-g\s+@anthropic-ai\/claude-code/.test(String(cmd || ''));
+}
+export function withRecoveryHint(error, cmd) {
+  return isNpmRegistryCmd(cmd) ? `${error}\n若此次中断导致 claude 不可用:重新运行一次更新即可补齐缺失文件。` : error;
+}
+
 router.post('/claude-update/stream', async (req, res) => {
   res.writeHead(200, { 'Content-Type': 'application/x-ndjson', 'Cache-Control': 'no-store' });
 
@@ -764,7 +820,7 @@ router.post('/claude-update/stream', async (req, res) => {
   updateTask.listeners.add(res);
   req.on('close', () => { updateTask.listeners.delete(res); }); // 关面板 = 只断窗口
 
-  let method, cmd, proxyUrl;
+  let method, cmd, proxyUrl, deadProxy = null;
   try {
     const detected = await detectInstall();
     method = detected.method;
@@ -776,7 +832,11 @@ router.post('/claude-update/stream', async (req, res) => {
       throw new Error('更新渠道(npm)与当前安装方式不一致:执行会写入 npm 全局前缀的另一份安装,而 PATH 里先生效的仍是当前安装。请把更新渠道改回「跟随安装方式」后重试。');
     }
     cmd = updateCmdFor(resolved, detected.path);
-    proxyUrl = await detectLocalProxy().catch(() => null);
+    // r34-③:探活通过才注入。死代理(软件已退、env/系统设置没还原)注进去 = 整条更新
+    // 走一个不存在的出口,表现成"更新卡死"。探不通就直连,并在流里说明。
+    const rawProxy = await detectLocalProxy().catch(() => null);
+    proxyUrl = await liveProxy(rawProxy);
+    if (rawProxy && !proxyUrl) deadProxy = rawProxy;
   } catch (e) {
     // 占位后任何一步失败都必须还原状态,否则任务卡成"永远 running":后续所有请求
     // 都只挂上来续看一个根本不存在的进程,用户再也更新不了(直到重启后端)。
@@ -794,6 +854,7 @@ router.post('/claude-update/stream', async (req, res) => {
   updateTask.cmd = cmd;
 
   taskPush({ type: 'start', command: cmd, method, proxy: proxyUrl });
+  if (deadProxy) taskPush({ type: 'log', line: `检测到代理 ${deadProxy} 不可达,本次更新直连。` });
 
   // Windows:先关常驻 claude 释放 claude.exe 锁(否则覆盖失败 "could not write");等 ~1.2s 让进程退出。
   if (process.platform === 'win32') {
@@ -807,22 +868,18 @@ router.post('/claude-update/stream', async (req, res) => {
     child = spawn(cmd, { shell: true, env, detached: process.platform !== 'win32' });
   } catch (e) {
     updateTask.status = 'error';
-    updateTask.error = e.message;
+    updateTask.error = withRecoveryHint(e.message, cmd);
     updateTask.finishedAt = Date.now();
-    taskPush({ type: 'error', error: e.message });
+    taskPush({ type: 'error', error: updateTask.error });
     for (const r of updateTask.listeners) { try { r.end(); } catch {} }
     updateTask.listeners.clear();
     return;
   }
   updateTask.child = child;
 
-  // 超时 8 分钟必须杀(挂死防护)。计时器归任务所有,与任何 SSE 连接无关。
-  const killTimer = setTimeout(() => {
-    updateTask.error = '更新超过 8 分钟未完成,已终止。npm 源过慢是常见根因:确认代理已开后重试,或点「改用终端更新」走官方渠道。';
-    taskPush({ type: 'error', error: updateTask.error });
-    killUpdateTree();
-  }, 8 * 60 * 1000);
-  killTimer.unref?.();
+  // r34-①:8 分钟只提示不杀;60 分钟极限兜底才杀(见 startUpdateTimers 的事故说明)。
+  // 计时器归任务所有,与任何 SSE 连接无关;正常/异常收尾都要 clearUpdateTimers()。
+  const clearUpdateTimers = startUpdateTimers();
 
   const pump = (chunk) => {
     String(chunk).split(/\r?\n/).forEach((line) => { if (line.trim()) taskPush({ type: 'log', line }); });
@@ -831,24 +888,24 @@ router.post('/claude-update/stream', async (req, res) => {
   child.stderr?.on('data', pump);
 
   child.on('error', (e) => {
-    clearTimeout(killTimer);
+    clearUpdateTimers();
     updateTask.status = 'error';
-    updateTask.error = e.message;
+    updateTask.error = withRecoveryHint(e.message, updateTask.cmd);
     updateTask.finishedAt = Date.now();
     updateTask.child = null;
-    taskPush({ type: 'error', error: e.message });
+    taskPush({ type: 'error', error: updateTask.error });
     for (const r of updateTask.listeners) { try { r.end(); } catch {} }
     updateTask.listeners.clear();
   });
 
   child.on('close', async (code) => {
-    clearTimeout(killTimer);
+    clearUpdateTimers();
     // r12-①c:更新成功 → 探测 paused 钉选是否恢复健康,是则自动回钉。
     let restored = null;
     if (code === 0) { try { restored = await tryRestorePausedOverride(); } catch {} }
     updateTask.status = code === 0 ? 'done' : 'error';
     updateTask.code = code;
-    if (code !== 0 && !updateTask.error) updateTask.error = `更新进程退出码 ${code}(详见上方日志)`;
+    if (code !== 0 && !updateTask.error) updateTask.error = withRecoveryHint(`更新进程退出码 ${code}(详见上方日志)`, updateTask.cmd);
     updateTask.restored = restored;
     updateTask.finishedAt = Date.now();
     updateTask.child = null;
@@ -902,9 +959,10 @@ router.get('/claude-update/status', (_req, res) => {
 });
 
 // POST /api/claude-update/cancel — 用户主动终止(关面板不再等于取消,故给显式出口)。
+// r34-①:超时不再自动杀 → 这里是唯一的"用户显式决定"的终止口,保留杀的能力。
 router.post('/claude-update/cancel', (_req, res) => {
   if (updateTask.status !== 'running') return res.json({ ok: true, running: false });
-  updateTask.error = '已由用户终止';
+  updateTask.error = withRecoveryHint('已由用户终止', updateTask.cmd);
   killUpdateTree();
   res.json({ ok: true, running: false, cancelled: true });
 });
@@ -940,7 +998,7 @@ router.put('/claude-update-channel', async (req, res) => {
 
 router.post('/claude-install', async (req, res) => {
   const method = req.body?.method === 'npm' ? 'npm' : 'native';
-  const proxyUrl = await detectLocalProxy().catch(() => null);
+  const proxyUrl = await detectLiveProxy(); // r34-③:探活通过才注入(死代理 = 安装卡死)
   const cmd = installCmdFor(proxyUrl, method);
   // 代理注入位置按 method 分:
   //  · npm / 任意平台的 curl:进程读 HTTP_PROXY 环境变量 → 交给 launchInTerminal 在脚本里 set/export。
@@ -1284,7 +1342,7 @@ router.post('/env-check/install', async (req, res) => {
   const target = String(req.body?.target || '');
   const method = req.body?.method === 'npm' ? 'npm' : null; // CI-2:claude 可选 npm 安装
   try {
-    const proxyUrl = await detectLocalProxy().catch(() => null);
+    const proxyUrl = await detectLiveProxy(); // r34-③:探活通过才注入
     const cmd = envInstallCmd(target, proxyUrl, method);
     if (!cmd) return res.status(400).json({ ok: false, error: 'unknown target: ' + target });
     // win + uv:代理已注入 PS 命令内,不让 .bat 再 set(对 irm 无效且重复)。其余照旧由

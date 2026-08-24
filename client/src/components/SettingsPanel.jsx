@@ -1147,6 +1147,15 @@ function CcUpdater() {
     setUpdating(false);
   };
 
+  // r34-①:更新不再有 8 分钟自动强杀(强杀落在「旧包已删、新包没解压完」的窗口会直接
+  // 毁掉安装)。代价是必须给用户一个显式的终止口 —— 服务端 cancel 端点本来就在,只是
+  // 一直没有入口。确认文案必须说清"取消可能留下半成品",否则用户点完不知道要重跑一次。
+  const doUpdateCancel = async () => {
+    if (!(await confirmDialog('终止正在进行的更新?\n下载/解压到一半被终止可能留下半成品安装(claude 暂时不可用),重新运行一次更新即可补齐。', { danger: true }))) return;
+    try { await fetch('/api/claude-update/cancel', { method: 'POST' }); }
+    catch (e) { setResult({ ok: false, error: e.message || '终止请求失败' }); }
+  };
+
   // 兜底:headless 卡住(如 npm -g 需 sudo)时改用外部终端。
   const doUpdateTerminal = async () => {
     setUpdating(true); setResult(null);
@@ -1330,6 +1339,11 @@ function CcUpdater() {
               <button onClick={doUpdateTerminal} disabled={updating}
                 className="text-[11px] text-amber-800/80 hover:text-amber-900 underline disabled:opacity-50"
                 title="若应用内更新卡住(如 npm 需 sudo),改用外部终端">改用终端</button>
+              {updating && (
+                <button onClick={doUpdateCancel}
+                  className="text-[11px] text-error hover:underline"
+                  title="终止本次更新(可能留下半成品安装,重跑一次更新即可补齐)">取消更新</button>
+              )}
             </div>
           </div>
         ) : (
