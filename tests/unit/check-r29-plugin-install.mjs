@@ -487,6 +487,18 @@ const noProxy = async () => null;
   assert.equal(zw[kApikey], '[REDACTED]', 't12: 零宽混入的 apikey 归一后仍脱敏');
   assert.equal(zw[kAuth], '[REDACTED]', 't12: 软连字符混入的 auth 归一后仍脱敏');
   assert.equal(zw[kMonkey], 'zwmonkey', 't12: 零宽混入的 monkey 归一后仍不误遮');
+  // 同批不可见字符打在【自由文本】路径也必须失效:键捕获类不含零宽,`au<ZWSP>th=`
+  // 会被劈成 `th=` 漏检、`mon<ZWSP>key=` 反被劈成 `key=` 误遮、`Bear<ZWSP>er` 绕过
+  // Bearer 规则。修法=sanitizePluginErrorText 入口把不可见字符与控制符一并剥掉。
+  // 变异:从 sanitizePluginErrorText 入口剥除类里去掉零宽/软连字符段 → 下面四条立即红。
+  assert.ok(!sanitizePluginErrorText(`au${ZWSP}th=FREETEXT_ZW1`).includes('FREETEXT_ZW1'),
+    't12: 自由文本里零宽劈开的 auth 仍脱敏');
+  assert.ok(!sanitizePluginErrorText(`Bear${ZWSP}er FREETEXT_ZW2`).includes('FREETEXT_ZW2'),
+    't12: 零宽劈开的 Bearer 值仍脱敏');
+  assert.ok(!sanitizePluginErrorText(`"pass${SHY}word": "FREETEXT_ZW3"`).includes('FREETEXT_ZW3'),
+    't12: 软连字符劈开的 password 仍脱敏');
+  assert.ok(sanitizePluginErrorText(`mon${ZWSP}key=safe-zw-monkey`).includes('safe-zw-monkey'),
+    't12: 零宽劈开的 monkey 归一后仍不误遮');
 }
 
 // t12b stripPluginAnsi 有界化(I-1):无终止符的字符串控制序列此前用惰性 [\s\S]*? 对每个

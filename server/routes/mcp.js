@@ -1170,7 +1170,10 @@ function isPluginSensitiveKey(key) {
 
 export function sanitizePluginErrorText(value, limit = PLUGIN_ERROR_FIELD_LIMIT) {
   let text = stripPluginAnsi(value);
-  text = text.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '');
+  // 控制符之外,零宽/软连字符也必须在下面所有键捕获/凭证正则之前剥掉,类与
+  // isPluginSensitiveKey 对齐(保留 \t\n\r:行式正则依赖行边界)。否则 `au<ZWSP>th=`
+  // 把键劈开后双向失灵:敏感值漏检、`mon<ZWSP>key=` 反被误遮、`Bear<ZWSP>er` 绕过。
+  text = text.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f\u00ad\u200b-\u200f\u2060\ufeff]/g, '');
   text = text.replace(/\b([a-z][a-z\d+.-]*:\/\/)([^/\s@]+)@/gi, '$1[REDACTED]@');
   text = text.replace(/\b((?:Proxy-)?Authorization\s*:\s*)[^\r\n]+/gi, '$1[REDACTED]');
   text = text.replace(/\b(Bearer|Basic)\s+(?:"[^"]*"|'[^']*'|[^\s"',;}\]]+)/gi, '$1 [REDACTED]');
