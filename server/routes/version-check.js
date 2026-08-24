@@ -385,8 +385,30 @@ export function effectiveChannel(channel, installMethod) {
 // r26-C7:latest 的「真源」必须按生效渠道选,不是按安装方式。用户显式选了渠道后
 // (如 npm 安装选 native 渠道),版本检查若仍按安装方式取 npm 源,看到的 latest 与
 // 更新命令实际拉的源不一致 —— 「永远差一版」的变体。纯函数抽出供单测。
+// r36:端点已不用它选【比较源】(见 compareSrcKey);保留导出与语义供既有单测引用。
 export function resolveSrcKey(channel, installMethod) {
   return effectiveChannel(channel, installMethod) === 'native' ? 'native' : 'npm';
+}
+
+// r36-①:「要不要提醒更新」的比较源必须按【在用二进制自己的渠道】取,与显式渠道无关。
+// r26-C7 让比较源跟显式渠道走,于是 currentVersion(在用二进制的版本)被拿去比另一渠道的
+// latest —— 两渠道发布有时间差,原生装的已是原生最新仍红点提醒(用户实报),反之亦然。
+// 渠道从此只管「更新走哪条管线 + 用哪个渠道的 claude」(见 pickChannelInstall),不参与比较。
+// 一元签名是刻意的:渠道参数物理上进不来,想塞回去必须改签名。
+export function compareSrcKey(installMethod) {
+  return installMethod === 'npm' ? 'npm' : 'native';
+}
+
+// r36-②:选渠道 = 同时把 GUI 实际用的 claude 钉到该渠道的安装。挑选逻辑抽成纯函数
+// (classify 可注入,单测不碰真实文件系统)。broken 壳包跳过 —— 钉死它之后所有 spawn 都会废
+// (PUT /claude-active 同判)。目标渠道没有安装返回 null,由调用方保持现状并如实回执。
+export function pickChannelInstall(channel, installs, classify = classifyClaudePath) {
+  if (channel !== 'npm' && channel !== 'native') return null;
+  for (const it of installs || []) {
+    if (!it || it.broken) continue;
+    if (classify(it.real || it.path) === channel) return it;
+  }
+  return null;
 }
 
 export function updateCmdFor(method, claudePath) { // export 仅为可单测
@@ -626,7 +648,7 @@ router.get('/claude-version-check', async (req, res) => {
     // (杀毒实时扫描、npm shim 里 node 冷启动 >8s)= 已装但探测失败,别误报"未安装"诱导重装。
     if (claudePath) {
       return res.json({
-        currentVersion: null, installed: true, method,
+        currentVersion: null, installed: true, method, path: claudePath,
         error: '已检测到 Claude 但读取版本超时(可能被杀毒扫描拦截),稍后重试',
       });
     }
@@ -641,10 +663,12 @@ router.get('/claude-version-check', async (req, res) => {
   const now = Date.now();
   // 缓存按"真源"分键:native 渠道与 npm 的版本可能不同,混用一个缓存会把 npm 的
   // 版本号错发给原生安装(正是"永远差一版"的放大器)。
-  // r26-C7:真源按【生效渠道】(显式选择优先,未选跟随安装方式)而非裸安装方式 ——
-  // 看到的 latest 与更新命令实际拉的源天然一致。
+  // r36-①:真源改按【在用二进制的安装方式】取(compareSrcKey),不再跟显式渠道走。
+  // currentVersion 来自在用的那个二进制,latest 必须来自同一渠道才能比 —— r26-C7 让它跟
+  // 显式渠道走,等于拿 A 渠道的最新版比 B 渠道的二进制,发布时间差直接造出假的"有更新"。
+  // 渠道仍决定更新走哪条管线(updateCommand/crossChannel 照旧按渠道算)。
   const channel = readUpdateChannel();
-  const srcKey = resolveSrcKey(channel, method);
+  const srcKey = compareSrcKey(method);
   if (ccCache && ccCacheSrc === srcKey && now - ccCachedAt < CACHE_TTL_MS) {
     latest = ccCache;
   } else {
@@ -669,6 +693,7 @@ router.get('/claude-version-check', async (req, res) => {
     installed: true,
     ...(staleError ? { staleError } : {}),
     method,                         // native | brew | npm | unknown
+    path: claudePath,               // r36-③:检测对象(前端显示"在比的是哪个二进制")
     // r26-C1:跨渠道时 resolveUpdateMethod 回 null → updateCommand 如实为 null,
     // 前端按 crossChannel 弹确认,而不是直接跑一条会写进另一份安装的命令。
     updateCommand: (() => { const m = resolveUpdateMethod(channel, method); return m ? updateCmdFor(m, claudePath) : null; })(),
@@ -1050,6 +1075,17 @@ router.put('/claude-update-channel', async (req, res) => {
     return res.status(400).json({ error: '渠道必须是 npm、native 或 null(跟随安装方式)' });
   }
   if (!(await writeUpdateChannel(ch))) return res.status(500).json({ error: '写入失败' });
+  // r36-②:选渠道 = 总开关 —— 顺带把 GUI 实际使用的 claude 钉到该渠道的安装。否则"选了 npm
+  // 渠道"却仍在跑原生二进制,版本提示、更新命令、聊天 spawn 三处各说各话。
+  // ch=null(跟随安装方式)不动 override:用户可能手动钉过别的安装,清渠道不该连带清掉。
+  // 该渠道没有安装 → 保持现状并如实回执(前端提示 + 现有安装入口),这里不新增安装逻辑。
+  if (ch) {
+    const hit = pickChannelInstall(ch, await listClaudeInstallsAsync());
+    if (!hit) return res.json({ ok: true, channel: ch, channelInstallMissing: true });
+    // setClaudeOverride 内部清 resolver 缓存,下次 spawn/版本检查立即用它(无需重启)。
+    setClaudeOverride(hit.path);
+    return res.json({ ok: true, channel: ch, activePath: hit.path });
+  }
   res.json({ ok: true, channel: ch });
 });
 
