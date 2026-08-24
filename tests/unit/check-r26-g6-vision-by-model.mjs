@@ -42,8 +42,11 @@ assert.equal(lookupVisionCapability(''), null, 't4: 空模型安全');
 // image block(纯色图各答对)。变异:删掉/下移 vision 例外行 → 下面全部红。
 for (const id of [
   'deepseek-v4-flash-vision-exp',
-  'deepseek-v4-flash-vision-exp[1m]',        // GUI 配置里的 1M 后缀形态
-  'openrouter/deepseek-v4-flash-vision-exp', // 命名空间前缀剥尾段
+  'deepseek-v4-flash-vision-exp[1m]',          // GUI 配置里的 1M 后缀形态
+  'openrouter/deepseek-v4-flash-vision-exp',   // 命名空间前缀剥尾段
+  // org 恰为 deepseek 的聚合商形态:全 id 会先撞一刀切,例外行必须自己吃下含 / 的全 id
+  // (剥尾段重试轮不到)。变异:例外行字符类去掉 / → 本条红。
+  'deepseek/deepseek-v4-flash-vision-exp',
 ]) {
   assert.equal(lookupVisionCapability(id), true, `t6: ${id} 判有视觉`);
 }
