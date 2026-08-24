@@ -76,8 +76,11 @@
 
   // 资源管理器选中行：cgui 会话行以 .active 表选中（无 aria-selected），
   // 由观察器同步成皮肤自有标记 .cgui-xp-current 供 skin.css 上深蓝底白字。
+  // r39：查询范围收窄到 observedSidebar（会话行只可能在侧栏内）——原来扫全文档，
+  // 真实会话上万节点时每次同步都是一次全树遍历。
   function syncCurrentRow() {
-    var rows = document.querySelectorAll('[data-cgui="session-row"]');
+    if (!observedSidebar) return;
+    var rows = observedSidebar.querySelectorAll('[data-cgui="session-row"]');
     for (var k = 0; k < rows.length; k++) {
       if (rows[k].classList.contains('active')) rows[k].classList.add('cgui-xp-current');
       else rows[k].classList.remove('cgui-xp-current');
@@ -89,6 +92,10 @@
   var sidebarObserver = null;
   var observedSidebar = null;
   function installTaskbar() {
+    // r39 稳态廉价早退：侧栏还在原处且任务栏已挂 → 什么都不查直接回。rootObserver 盯的是
+    // 整个 body，流式输出一秒几十批变化，稳态下不早退就等于每批都全树查一遍（卡死根因）。
+    // 侧栏被路由重建（isConnected=false）或任务栏被 React 抹掉时，判据自然落空走重路径。
+    if (observedSidebar && observedSidebar.isConnected && observedSidebar.querySelector('.cgui-xp-taskbar')) return;
     var sidebar = document.querySelector('[data-cgui="sidebar"]');
     if (sidebar && !sidebar.querySelector('.cgui-xp-taskbar')) {
       var bar = document.createElement('div');
@@ -118,7 +125,12 @@
     }
     syncCurrentRow();
   }
-  var rootObserver = new MutationObserver(installTaskbar);
+  // r39 合帧：一帧内多批 DOM 变化只跑一次早退检查（原来是每批同步跑一次安装流程）。
+  var rootRaf = 0;
+  var rootObserver = new MutationObserver(function () {
+    if (rootRaf) return;
+    rootRaf = requestAnimationFrame(function () { rootRaf = 0; installTaskbar(); });
+  });
   rootObserver.observe(body, { childList: true, subtree: true });
   installTaskbar();
 
@@ -134,6 +146,7 @@
 
   window.__cguiSkinDispose = function () {
     rootObserver.disconnect();
+    if (rootRaf) { cancelAnimationFrame(rootRaf); rootRaf = 0; }
     if (sidebarObserver) sidebarObserver.disconnect();
     deskObserver.disconnect();
     window.removeEventListener('resize', fitDesk);
