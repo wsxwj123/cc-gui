@@ -684,7 +684,7 @@ router.get('/claude-version-check', async (req, res) => {
         latest = ccCache;
         const mins = Math.max(1, Math.round((now - ccCachedAt) / 60000));
         staleError = `${err.message || '版本查询失败'}(这次没查成,显示的是 ${mins} 分钟前的结果)`;
-      } else return res.json({ currentVersion, installed: true, method, error: err.message || '版本查询失败' });
+      } else return res.json({ currentVersion, installed: true, method, path: claudePath, error: err.message || '版本查询失败' });
     }
   }
   res.json({
@@ -1080,6 +1080,9 @@ router.put('/claude-update-channel', async (req, res) => {
   // ch=null(跟随安装方式)不动 override:用户可能手动钉过别的安装,清渠道不该连带清掉。
   // 该渠道没有安装 → 保持现状并如实回执(前端提示 + 现有安装入口),这里不新增安装逻辑。
   if (ch) {
+    // 安全边界:钉选候选【封闭】于本机扫描列表(listClaudeInstallsAsync),不接受请求体
+    // 路径,broken 壳包已滤 —— /claude-active 的 isLocalReq 门禁针对的"任意路径→RCE"
+    // 通路在此不存在,且渠道本就是给远程(手机)设置项,故不加本机门禁。
     const hit = pickChannelInstall(ch, await listClaudeInstallsAsync());
     if (!hit) return res.json({ ok: true, channel: ch, channelInstallMissing: true });
     // setClaudeOverride 内部清 resolver 缓存,下次 spawn/版本检查立即用它(无需重启)。

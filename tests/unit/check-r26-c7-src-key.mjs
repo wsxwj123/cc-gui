@@ -36,7 +36,7 @@ try {
   assert.match(routeBody, /const channel = readUpdateChannel\(\);/, 'C7: 路由仍读显式渠道(算 updateCommand/crossChannel 用)');
   assert.match(routeBody, /srcKey === 'native'\s*\?\s*await fetchNativeLatest\(\)/,
     'C7: fetch 选择必须与缓存分键同键(srcKey 驱动,而非另取一个源)');
-  assert.ok(!/ccCacheSrc = (?!srcKey)/.test(routeBody),
+  assert.ok(!/ccCacheSrc\s*=(?!=)(?!\s*srcKey)/.test(routeBody),
     'C7: 缓存分键只能写 srcKey(两处各取各的源 = 把 npm 版本号错发给原生安装)');
 } finally {
   cleanupDirs(TMP_HOME);
