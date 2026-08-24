@@ -10734,7 +10734,9 @@ export default function App() {
           <ModelSelector compact permKey={headerPermKey} tourAnchor />
           <EffortSelector permKey={headerPermKey} tourAnchor />
           <span data-tour="remote-control" className="inline-flex">
-            <RemoteControlButton session={headerPane} />
+            {/* r39:顶栏按钮一律竖排(图标上/文字下),与「主题」「设置」同高 —— 原来是
+                横排单行,比左右邻居矮一截(用户实报)。手机菜单里那处仍走横排形态。 */}
+            <RemoteControlButton session={headerPane} stacked />
           </span>
           <ThemeToggle />
           {/* 面板坞:分屏 + 10 个面板 + 更新提醒收纳于此(点击展开 rail)。 */}

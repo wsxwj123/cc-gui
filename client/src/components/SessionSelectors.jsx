@@ -161,7 +161,9 @@ export function AnchoredPopover({ anchorRef, open, onRequestClose, drop = 'down'
 // the GUI keeps syncing via jsonl. While active, the composer is locked to
 // avoid two processes writing the same session file. Clicking again reclaims.
 // Disabled until the session exists (a sessionId is needed to --resume).
-export function RemoteControlButton({ session }) {
+// stacked:顶栏用的竖排形态(图标上/文字下),与相邻的「主题」「设置」按钮同结构同高
+// (px-1.5 py-1 + 15px 图标 + 9px 标签)。不传时保持横排小按钮,供手机菜单那行复用。
+export function RemoteControlButton({ session, stacked }) {
   const [busy, setBusy] = useState(false);
   const sid = session?.sessionId || null;
   const cwd = session?.projectPath || null;
@@ -221,12 +223,20 @@ export function RemoteControlButton({ session }) {
           : isOfficial
             ? '在手机上同账号控制此会话（用 Claude App 接管，需官方 Anthropic 端点 + claude.ai 订阅登录）'
             : '当前 provider 非官方 Anthropic，远程控制不可用。'}
-      className={`flex items-center gap-1 px-2 py-1 rounded-md transition-colors text-[11px] font-body ${
-        active ? 'bg-success/15 text-success' : 'hover:bg-canvas-deep text-ink-muted'
-      } disabled:opacity-40 disabled:cursor-not-allowed`}
+      className={`transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${
+        stacked
+          ? 'px-1.5 py-1 rounded-lg flex flex-col items-center gap-0.5'
+          : 'px-2 py-1 rounded-md flex items-center gap-1 text-[11px] font-body'
+      } ${active
+        ? 'bg-success/15 text-success'
+        : stacked ? 'text-ink-muted hover:text-ink hover:bg-black/5' : 'hover:bg-canvas-deep text-ink-muted'}`}
     >
-      {busy ? <Loader2 size={13} className="animate-spin" /> : <Smartphone size={13} />}
-      {active ? '已激活' : '远程'}
+      {busy
+        ? <Loader2 size={stacked ? 15 : 13} className="animate-spin" />
+        : <Smartphone size={stacked ? 15 : 13} />}
+      {stacked
+        ? <span className="text-[9px] leading-none font-body">{active ? '已激活' : '远程'}</span>
+        : (active ? '已激活' : '远程')}
     </button>
   );
 }

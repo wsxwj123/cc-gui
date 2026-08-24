@@ -243,6 +243,52 @@ body[data-cgui-xp] [data-cgui="topbar-mobile"] input {
   color: #e8eaed !important; background: #14161a; border-color: #4a4e55;
 }
 
+/* ── ⑥b 弹层 = XP 米灰窗口 + 深字（根治⑥的「顶栏全白字」溢进弹层） ──
+   ⑥ 的 `[data-cgui="topbar"] *` 把顶栏所有后代刷白。主题弹层/分屏弹层是顶栏按钮的 DOM
+   后代（主题/分屏弹层是 absolute、没 portal 出去；Model/Provider/Effort 三弹层 portal 到
+   body 不受 ⑥ 白字波及，走下面基础条统一配色），于是浅底弹层上一片白字 —— 用户实报「主题与外观」
+   四个页签几乎看不见。修法不是逐处补字色，而是给弹层整体配一组自洽的底色+文字色：
+   米灰窗口底 + 深字；顶栏内弹层的后代统一 `color: inherit`（选择器多一节 .glass-popover，
+   压过⑥的白字，无需 !important）。带内联 style 色的元素（配色卡片按 sw.fg 上色）
+   本就压过任何选择器，不受影响。 */
+body[data-cgui-xp] .glass-popover {
+  color: #000000;
+  background: #ece9d8;
+  border: 1px solid #0831d9;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+}
+:root[data-theme="dark"] body[data-cgui-xp] .glass-popover,
+:root[data-theme="auto"]:where([data-theme-system="dark"]) body[data-cgui-xp] .glass-popover {
+  color: #e8eaed;
+  background: #1c1e22;
+  border-color: #000000;
+  box-shadow: 0 12px 32px rgba(0,0,0,0.6);
+}
+/* 弹层自身的字色要显式压过⑥:上面那条 `body[data-cgui-xp] .glass-popover` 与
+   ⑥ 同为 (0,2,1),平手时靠源码次序决胜——皮肤 <style> 何时注入不该是可读性的前提。
+   这条 (0,3,1) 稳赢;暗态由上面 :root[data-theme=dark] 那条 (0,4,1) 接管,故不必重写。 */
+body[data-cgui-xp] [data-cgui="topbar"] .glass-popover,
+body[data-cgui-xp] [data-cgui="topbar-mobile"] .glass-popover {
+  color: #000000;
+}
+body[data-cgui-xp] [data-cgui="topbar"] .glass-popover *,
+body[data-cgui-xp] [data-cgui="topbar-mobile"] .glass-popover * {
+  color: inherit;
+}
+/* 弹层内的选中项（明暗档/字号档等 accent 底）统一成 XP 选区蓝 + 白字，与会话行选中同款：
+   accent 明暗两态一深一浅（#316ac5 / #6da8e8），跟着弹层深/浅字走必有一态不达标；
+   钉死成 #316ac5 白字（5.3:1）。background-image:none 撤掉⑦的银色高光，免得蓝底被冲淡。 */
+body[data-cgui-xp] .glass-popover .bg-accent {
+  background-color: #316ac5;
+  background-image: none;
+}
+body[data-cgui-xp] [data-cgui="topbar"] .glass-popover .bg-accent,
+body[data-cgui-xp] [data-cgui="topbar"] .glass-popover .bg-accent *,
+body[data-cgui-xp] [data-cgui="topbar-mobile"] .glass-popover .bg-accent,
+body[data-cgui-xp] [data-cgui="topbar-mobile"] .glass-popover .bg-accent * {
+  color: #ffffff;
+}
+
 /* ── ⑦ 经典银色按钮（通用高光叠加，hover 琥珀，active 凹陷；禁用态还原） ── */
 body[data-cgui-xp] button {
   background-image: linear-gradient(rgba(255,255,255,0.6), rgba(255,255,255,0.15) 45%, transparent);
