@@ -33,6 +33,7 @@ import { repairOfficialCompat } from '../utils/session-repair.js';
 import { mkdirSync, rmSync } from 'fs';
 import { resolveUnderHome, resolveWorkspacePath } from '../utils/safe-path.js';
 import { broadcast } from '../broadcast.js';
+import { mergeDraftBindingsIntoSessions } from '../services/draft-session-bindings.js';
 
 // L4: 附件元数据 sidecar — 写入位置与 session-reader 一致。
 const ATTACHMENTS_DIR = join(homedir(), '.claude-gui', 'attachments');
@@ -398,7 +399,10 @@ router.get('/projects/:hash/sessions', async (req, res) => {
     if (!safeId(req.params.hash)) {
       return res.status(400).json({ error: 'invalid hash' });
     }
-    const sessions = await listSessions(req.params.hash);
+    const sessions = await mergeDraftBindingsIntoSessions(
+      await listSessions(req.params.hash),
+      req.params.hash,
+    );
     res.json(sessions);
   } catch (err) {
     // r17-4:权限被拒要说实话。用户实测(另一台 Mac 未授予完全磁盘访问):终端里能读到

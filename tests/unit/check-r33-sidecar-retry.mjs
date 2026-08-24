@@ -69,6 +69,17 @@ assert.equal((await draftOutbox.bindAndFlush('draft-project-d1', 'real-draft')).
 assert.equal(draftUrl, '/api/sessions/real-draft/attachments');
 assert.equal(draftOutbox.read().length, 0);
 
+// 两个独立 manager 共享同一 storage 时，RMW 队尾也必须共享，不能各自覆盖旧快照。
+const sharedManagerStorage = new MemoryStorage();
+const managerOne = createAttachmentSidecarOutbox({ storage: sharedManagerStorage, now: () => 150 });
+const managerTwo = createAttachmentSidecarOutbox({ storage: sharedManagerStorage, now: () => 151 });
+await Promise.all([
+  managerOne.stage({ sessionId: 'manager-one', payload: payload('m1.png') }),
+  managerTwo.stage({ sessionId: 'manager-two', payload: payload('m2.png') }),
+]);
+assert.deepEqual(new Set(managerOne.read().map((entry) => entry.sessionId)), new Set(['manager-one', 'manager-two']),
+  '双独立 manager 并发入队不覆盖');
+
 // 同 session 串行；不同 session 可并行。每次成功删除都读最新快照，不覆盖并发条目。
 const concurrentStorage = new MemoryStorage();
 let activeA = 0;

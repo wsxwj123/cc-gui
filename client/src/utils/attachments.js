@@ -1,3 +1,5 @@
+import { queueKeyFor } from './steerQueue.js';
+
 function filePreviewDataUrl(file) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -83,6 +85,9 @@ export function attachmentMetaForPersistence(meta, maxPreviewChars = MAX_PERSIST
 }
 
 export const ATTACHMENT_SIDECAR_OUTBOX_KEY = 'cgui-attachment-sidecar-outbox:v1';
+// 同一页面可有多个 outbox manager（测试注入、热重载、未来多挂载点）。以 storage
+// 对象为键共享 RMW 队尾，避免各 manager 拿独立旧快照后互相覆盖。
+const attachmentStorageMutationTails = new WeakMap();
 
 export function attachmentSidecarPayloadForPersistence(payload) {
   if (!payload || !Array.isArray(payload.attachments)) return payload;
@@ -107,8 +112,10 @@ export function createAttachmentSidecarOutbox({
   makeId = null,
 } = {}) {
   let sequence = 0;
-  let mutationTail = Promise.resolve();
   const sessionTails = new Map();
+  const currentMutationTail = () => (
+    storage ? (attachmentStorageMutationTails.get(storage) || Promise.resolve()) : Promise.resolve()
+  );
 
   const read = () => {
     if (!storage) return [];
@@ -119,7 +126,7 @@ export function createAttachmentSidecarOutbox({
   };
 
   const mutate = (buildNext) => {
-    const run = mutationTail.catch(() => {}).then(() => {
+    const run = currentMutationTail().catch(() => {}).then(() => {
       if (!storage) return { ok: false, retained: false, error: 'storage-unavailable' };
       const current = read();
       const built = buildNext(current);
@@ -135,7 +142,7 @@ export function createAttachmentSidecarOutbox({
         return { ok: false, retained: false, error: 'persist-failed', cause: error };
       }
     });
-    mutationTail = run.then(() => undefined, () => undefined);
+    if (storage) attachmentStorageMutationTails.set(storage, run.then(() => undefined, () => undefined));
     return run;
   };
 
@@ -170,7 +177,7 @@ export function createAttachmentSidecarOutbox({
     const previous = sessionTails.get(sessionId) || Promise.resolve();
     const run = previous.catch(() => {}).then(async () => {
       for (;;) {
-        await mutationTail;
+        await currentMutationTail();
         const entry = read().find((item) => item?.sessionId === sessionId);
         if (!entry) return { ok: true, retained: false };
         let response;
@@ -203,7 +210,7 @@ export function createAttachmentSidecarOutbox({
   };
 
   const flushAll = async () => {
-    await mutationTail;
+    await currentMutationTail();
     const sessionIds = [...new Set(read().map((entry) => entry?.sessionId).filter(Boolean))];
     const results = await Promise.all(sessionIds.map((sessionId) => flushSession(sessionId)));
     return results.find((result) => !result.ok) || { ok: true, retained: false };
@@ -231,6 +238,31 @@ export const bindAttachmentSidecars = (ownerKey, sessionId) => attachmentSidecar
 export const retryAttachmentSidecars = (sessionId = null) => (
   sessionId ? attachmentSidecarOutbox.flushSession(sessionId) : attachmentSidecarOutbox.flushAll()
 );
+
+export async function recoverAttachmentSidecarBindings(bindings, { bindImpl = bindAttachmentSidecars } = {}) {
+  const unique = new Map();
+  for (const binding of Array.isArray(bindings) ? bindings : []) {
+    if (binding?.ownerKey && binding?.sessionId) unique.set(`${binding.ownerKey}\0${binding.sessionId}`, binding);
+  }
+  return Promise.all([...unique.values()].map(({ ownerKey, sessionId }) => bindImpl(ownerKey, sessionId)));
+}
+
+export function draftSidecarBindingsForSessions(sessions, projectHash) {
+  if (!projectHash || !Array.isArray(sessions)) return [];
+  return sessions
+    .filter((session) => session?.draftId && session?.sessionId)
+    .map((session) => ({
+      ownerKey: queueKeyFor({ projectHash, draftId: session.draftId }),
+      sessionId: session.sessionId,
+    }));
+}
+
+export function bindDraftAttachmentSidecarsOnInit(startedSession, sessionId, { bindImpl = bindAttachmentSidecars } = {}) {
+  if (startedSession?.sessionId || !startedSession?.draftId || !sessionId) {
+    return Promise.resolve({ ok: false, retained: true, error: 'not-draft-init' });
+  }
+  return bindImpl(queueKeyFor(startedSession), sessionId);
+}
 
 export function attachmentSidecarNotice(result) {
   if (!result || result.ok) return null;

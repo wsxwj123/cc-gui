@@ -5,6 +5,11 @@ import { FONT_OPTIONS, readingFontCss } from '../utils/systemFonts.js';
 import { createQueueId, firstDrainableIndex, isSteerBarrier, reclaimClaimItem, reconcileSteered, stripSteerState, queueKeyFor, isDraftQueueKey, draftQueueProjectHash } from '../utils/steerQueue.js';
 import { isValidContextResponse, shouldReplaceContextCache } from '../utils/contextCache.js';
 import { reducePinned, initialExpandedProjects, toggleExpanded, mergeSessionList, mergeHiddenOrder } from '../utils/projectPanel.js';
+import { draftSidecarBindingsForSessions, recoverAttachmentSidecarBindings } from '../utils/attachments.js';
+
+const recoverDraftSidecarsFromSessions = (sessions, projectHash) => (
+  recoverAttachmentSidecarBindings(draftSidecarBindingsForSessions(sessions, projectHash))
+);
 
 // Re-exported so existing importers (App.jsx) keep working; the list and its
 // css-resolution logic now live in utils/systemFonts.js alongside the enumeration.
@@ -2030,6 +2035,9 @@ export const useStore = create((set, get) => ({
         return;
       }
       const list = Array.isArray(data) ? data : [];
+      // 服务端在 CLI init 时持久记录 draftId→sessionId。列表水合即重放这份恢复索引，
+      // 因此 App/后端一起重启也能绑定 init 前已落本地、但组件来不及处理的 outbox。
+      void recoverDraftSidecarsFromSessions(list, projectHash);
       // r26-E2:本项目成功 → 只清本项目的错误键,不动他键。
       set((st) => {
         const curMap = st.sessionsAccessErrorByProject || {};
@@ -2105,6 +2113,7 @@ export const useStore = create((set, get) => ({
       // because the spread didn't include the key. The explicit `sessions: []`
       // below guarantees the list is reset for every project switch.
       const sessions = Array.isArray(data) ? data : [];
+      void recoverDraftSidecarsFromSessions(sessions, projectHash);
       set(silent ? { sessions } : { sessions, listLoading: false });
     } catch (err) {
       set(silent ? { sessions: [] } : { sessions: [], error: err.message, listLoading: false });

@@ -1,0 +1,76 @@
+import { mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
+import { homedir } from 'node:os';
+import { dirname, join } from 'node:path';
+import { randomUUID } from 'node:crypto';
+
+export const DRAFT_SESSION_BINDINGS_MAX = 256;
+export const DRAFT_SESSION_BINDINGS_FILE = join(homedir(), '.claude-gui', 'draft-session-bindings.json');
+
+export function createDraftSessionBindingsStore({
+  file = DRAFT_SESSION_BINDINGS_FILE,
+  fs = { mkdir, readFile, rename, unlink, writeFile },
+  now = () => Date.now(),
+  makeTempId = () => randomUUID(),
+} = {}) {
+  let writeTail = Promise.resolve();
+
+  const read = async () => {
+    try {
+      const parsed = JSON.parse(await fs.readFile(file, 'utf8'));
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+    } catch (error) {
+      if (error?.code === 'ENOENT') return {};
+      throw error;
+    }
+  };
+
+  const record = ({ draftId, sessionId, projectHash }) => {
+    if (!draftId || !sessionId || !projectHash) return Promise.reject(new Error('draftId/sessionId/projectHash required'));
+    const run = writeTail.catch(() => {}).then(async () => {
+      const current = await read();
+      const next = {
+        ...current,
+        [draftId]: { sessionId, projectHash, at: now() },
+      };
+      const bounded = Object.fromEntries(Object.entries(next)
+        .sort(([, a], [, b]) => Number(b?.at || 0) - Number(a?.at || 0))
+        .slice(0, DRAFT_SESSION_BINDINGS_MAX));
+      await fs.mkdir(dirname(file), { recursive: true });
+      const temp = `${file}.tmp-${makeTempId()}`;
+      try {
+        await fs.writeFile(temp, JSON.stringify(bounded), 'utf8');
+        await fs.rename(temp, file);
+      } catch (error) {
+        try { await fs.unlink(temp); } catch {}
+        throw error;
+      }
+      return bounded[draftId];
+    });
+    writeTail = run.then(() => undefined, () => undefined);
+    return run;
+  };
+
+  const mergeIntoSessions = async (sessions, projectHash) => {
+    const list = Array.isArray(sessions) ? sessions : [];
+    const bindings = await read();
+    const bySession = new Map();
+    for (const [draftId, binding] of Object.entries(bindings)) {
+      if (binding?.projectHash === projectHash && binding?.sessionId) {
+        bySession.set(binding.sessionId, draftId);
+      }
+    }
+    return list.map((session) => {
+      const draftId = bySession.get(session?.sessionId);
+      return draftId ? { ...session, draftId } : session;
+    });
+  };
+
+  return { read, record, mergeIntoSessions };
+}
+
+const draftSessionBindingsStore = createDraftSessionBindingsStore();
+
+export const recordDraftSessionBinding = (binding) => draftSessionBindingsStore.record(binding);
+export const mergeDraftBindingsIntoSessions = (sessions, projectHash) => (
+  draftSessionBindingsStore.mergeIntoSessions(sessions, projectHash)
+);

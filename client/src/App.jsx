@@ -81,7 +81,7 @@ import { subscribeSkin, getSkinVersion, getSkinState, reconcileSkinOnBoot, watch
 import { resolveSessionDot, completionTracker, subscribeDots, getDotsVersion, RUN_MATRIX_CELLS, runCellDelayMs } from './utils/sessionDots.js';
 import { seedNewSessionDefaults } from './components/UnifiedSidebar.jsx';
 import { PendingAttachmentList } from './components/PendingAttachmentList.jsx';
-import { attachmentBlockReason, attachmentMetaForPersistence, attachmentSidecarNotice, bindAttachmentSidecars, buildAttachmentMessage, pendingAttachment, persistAttachmentSidecar, retryAttachmentSidecars, uploadAttachmentFile } from './utils/attachments.js';
+import { attachmentBlockReason, attachmentMetaForPersistence, attachmentSidecarNotice, bindDraftAttachmentSidecarsOnInit, buildAttachmentMessage, pendingAttachment, persistAttachmentSidecar, retryAttachmentSidecars, uploadAttachmentFile } from './utils/attachments.js';
 import {
   FolderOpen, MessageSquare, ChevronLeft, ChevronRight, ChevronDown,
   Search, Hash, Layers, BarChart3, ArrowLeft, Plus,
@@ -4714,6 +4714,13 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             // session_id 抢绑到无辜的新 draft B 上,B 的下一条消息就串进 A。两个泄漏路径都堵:
             // 判定逻辑在 utils/routing.js(纯函数,test:routing 覆盖串扰家族全部场景)。
             const startedAsDraft = !selectedSession?.sessionId;
+            // sidecar 归属发起这条流的 draft，不归属 init 到达时屏幕上正显示的 pane。
+            // 因而绑定必须独立于 selIsOrigin：切 pane/关原 pane 后仍按闭包中的 draft owner
+            // 升级；UI 会话对象是否换绑继续由下面的严格 origin 守卫决定，二者不混用。
+            if (startedAsDraft) {
+              void bindDraftAttachmentSidecarsOnInit(selectedSession, event.session_id)
+                .then(reportAttachmentSidecarResult);
+            }
             const selIsOrigin = isInitBindingOrigin(startedAsDraft, selectedSession?.draftId, sel);
             // r29:/clear 轮换换绑(独立于 draft-origin 块,不迁输入历史/草稿 —— 那些
             // 属于旧会话)。队列/流归属随窗格走:这个窗格的会话现在是新会话。
@@ -4792,10 +4799,6 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                 draft: false,
                 sessionId: event.session_id,
               });
-              // draft outbox 按 ownerKey 原子升级到真实 sid；随后按 session 串行重放。
-              // 组件此刻卸载也不影响条目，成功 2xx 前持久记录始终在 localStorage。
-              void bindAttachmentSidecars(_draftOwnerKey, event.session_id)
-                .then(reportAttachmentSidecarResult);
             }
             // 以下两件事是"会话 A 已真实诞生"的事实处理,与"当前选中是谁"无关——用户已切走
             // (selIsOrigin=false)时也照做:标题该生成、列表该出现 A。数据全取发起时闭包
