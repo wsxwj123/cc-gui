@@ -42,7 +42,8 @@ export function createAttachmentSidecarStore({
       };
       const temp = `${file}.tmp-${makeTempId()}`;
       try {
-        await fs.writeFile(temp, JSON.stringify(next, null, 2), 'utf8');
+        // 内容含附件绝对路径与 preview 片段:按用户私有落盘,不跟随 umask 放宽。
+        await fs.writeFile(temp, JSON.stringify(next, null, 2), { encoding: 'utf8', mode: 0o600 });
         await fs.rename(temp, file);
       } catch (error) {
         try { await fs.unlink(temp); } catch {}

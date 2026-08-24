@@ -118,6 +118,17 @@ export function GoalBar({ goal, onSend, permKey = 'global' }) {
           <span title={title} className="flex-1 min-w-0 text-[12px] text-ink-muted font-body truncate">
             <span className={stateColor}>{isActive ? '目标进行中：' : `${stateLabel}${stateSuffix}：`}</span>{condition}
           </span>
+          {/* r32 的「未达成 ×N」折叠徽标:reader 把同一段未达成判定折叠成一条并带 count,
+              目标提示已不再进消息流,故次数落在常驻条上。met/已清除的记录不带 count。 */}
+          {goal.count > 1 && (
+            <span
+              data-testid="goal-hook-count"
+              title={`本会话目标钩子已拦截 ${goal.count} 次停止`}
+              className="shrink-0 px-1.5 rounded-full bg-canvas-deep/60 text-[10px] leading-[1.4] text-ink-faint font-body tabular-nums"
+            >
+              ×{goal.count}
+            </span>
+          )}
           {isActive && (
             <>
               <button onClick={startEdit} title="编辑目标条件"

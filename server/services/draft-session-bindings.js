@@ -57,7 +57,8 @@ export function createDraftSessionBindingsStore({
       await fs.mkdir(dirname(file), { recursive: true });
       const temp = `${file}.tmp-${makeTempId()}`;
       try {
-        await fs.writeFile(temp, JSON.stringify(bounded), 'utf8');
+        // 内容含会话/项目标识:按用户私有落盘,不跟随 umask 放宽。
+        await fs.writeFile(temp, JSON.stringify(bounded), { encoding: 'utf8', mode: 0o600 });
         await fs.rename(temp, file);
       } catch (error) {
         try { await fs.unlink(temp); } catch {}

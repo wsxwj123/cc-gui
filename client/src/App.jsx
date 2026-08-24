@@ -70,7 +70,7 @@ import { rebuildTodosFromTaskCalls } from './utils/todos.js';
 import { isSteered, firstSteerableIndex, isSteerBarrier, persistedSteerKeys, queueKeyFor } from './utils/steerQueue.js';
 import { isInitBindingOrigin, isResetBindingOrigin, isCliNoContentPlaceholder, makeProviderModelGuard, migrateDraftQueue, paneMessagesOwned, resolveHistModel, resolveSelectorModel, resolveSendModel } from './utils/routing.js';
 import { migrateOptimisticGoalOwner, optimisticGoalForOwner, parseGoalCommand } from './utils/goal.js';
-import { isApprovedPlanToolCall, migrateSessionVisibilityOwner, planTextOfToolCall, reconcilePlanToolCalls } from './utils/plan.js';
+import { approvedPlanItems, migrateSessionVisibilityOwner } from './utils/plan.js';
 import { nativeContextWindow, isBareClaudeAlias, pickCliContextWindow } from './utils/contextWindow.js';
 import { extractMcpServerIssues, formatMcpServerNotice } from './utils/mcpStatus.js';
 import { classifyRepairOutcome, classifyCheckOutcome, upsertRepairHint, removeRepairHint, loadRepairHints, persistRepairHints } from './utils/repairFlow.js';
@@ -89,7 +89,7 @@ import {
   Sun, Moon, Monitor, Bot, Camera, History, Loader2, Shield, FolderTree,
   Archive, ArchiveRestore, Trash2, EyeOff, Columns2, Smartphone, Pencil, Type, Palette,
   Menu, SquarePen, Gauge, Cpu, CheckCircle2, BookText, Sparkles, HelpCircle, Pin,
-  Download, ClipboardCopy, LayoutGrid, MoreHorizontal, Star, Target,
+  Download, ClipboardCopy, LayoutGrid, MoreHorizontal, Star,
   Image as ImageIcon, Paperclip,
 } from './components/Icon.jsx';
 import { buildFontEntries, groupFonts, detectFonts, platformCandidates, queryLocalFontFamilies } from './utils/systemFonts.js';
@@ -2590,32 +2590,9 @@ function CompactDivider() {
   );
 }
 
-// /goal(会话级 Stop 钩子)的消息流提示。四种形态见 session-reader 的 goal 分支;
-// 另有第五种只在流式出现:`Stop hook feedback:` 那条 user 事件(唯一实时可见的续跑证据),
-// 由下面的流式分支合成 met:false + sentinel:false 的等价条目。
-// 一律弱化成一行提示,不做成气泡:它是过程信息,不是对话内容。
-// condition 为空 = 该 feedback 不是 /goal 的 `[条件]: 理由` 形态(用户自配的 Stop 钩子
-// 也走同一前缀),此时不冒称"目标",按通用钩子措辞。
-function GoalNotice({ goal }) {
-  const cond = goal.condition || '';
-  const reason = goal.reason || '';
-  const notMetLabel = cond ? '目标未达成，已自动继续' : 'Stop 钩子拦下停止，已自动继续';
-  // r32-plan-flood:未达成提示被 reader 折叠成一条时带 count(>1),在这里补「×N」次数徽标;
-  // 达成的最后一条/met 状态不含 count,永不显示徽标。
-  const label = goal.met
-    ? (goal.sentinel ? '目标已清除' : `目标达成${goal.iterations ? `（${goal.iterations} 轮）` : ''}`)
-    : (goal.sentinel ? '目标已设置' : (goal.count > 1 ? `${notMetLabel} ×${goal.count}` : notMetLabel));
-  const detail = goal.met ? (reason || cond) : (goal.sentinel ? cond : (reason || cond));
-  return (
-    <div className="max-w-[var(--content-max)] mx-auto px-4 py-1.5 flex items-start gap-2">
-      <Target size={11} className={`shrink-0 mt-0.5 ${goal.met && !goal.sentinel ? 'text-success' : 'text-ink-faint'}`} />
-      <div className="min-w-0 text-[11px] font-body leading-snug">
-        <span className={goal.met && !goal.sentinel ? 'text-success' : 'text-ink-muted'}>{label}</span>
-        {detail && <span className="text-ink-faint">：{detail}</span>}
-      </div>
-    </div>
-  );
-}
+// r30 起 goal 提示不再进消息流(两处 msg.type === 'goal' 都渲染 null),状态与
+// r32 的「未达成 ×N」折叠次数一并由 composer 上方的常驻条 GoalBar 承担。原先的
+// GoalNotice 组件已零引用,随本轮删除,免得"改了却看不见"。
 
 // 自动拒绝的判定来源(SDK decision_reason_type)。该字段是【开放集】不是枚举,
 // 未列出的取值不显示来源、只显示原因文本(降级而不是显示原始英文标识符)。
@@ -3444,9 +3421,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     return rebuildTodosFromTaskCalls(flat);
   }, [streamingBlocks, visibleChat, messages, liveVisible]);
 
-  // ExitPlanMode 计划常驻在任务清单条顶部(默认折叠一行)。persisted / local-finished /
-  // streaming 三类来源统一进纯规则：同签名保留首卡，后续只补批准结果；不同计划各自保留。
-  // 未批准计划也先显示，批准后在原卡上更新状态，实时转历史不消失也不新增第二张。
+  // 已批准的 ExitPlanMode 计划常驻在任务清单条顶部(默认折叠一行)。persisted /
+  // local-finished / streaming 三类来源统一进纯规则：同签名保留首卡，后续只补批准结果；
+  // 不同计划各自保留。未决/被驳回的计划不出常驻卡(见 approvedPlanItems 注释)。
   const currentPlans = useMemo(() => {
     const toolCalls = [];
     // 来源顺序就是“首卡”顺序：历史 → 本地已完成 → 当前流。后续等价来源只补批准结果。
@@ -3462,11 +3439,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         if (block?.type === 'tool_use' && block.toolCall) toolCalls.push(block.toolCall);
       }
     }
-    return reconcilePlanToolCalls(toolCalls).map(({ signature, toolCall }) => ({
-      signature,
-      plan: planTextOfToolCall(toolCall),
-      approved: isApprovedPlanToolCall(toolCall),
-    }));
+    return approvedPlanItems(toolCalls);
   }, [streamingBlocks, streamingToolCalls, visibleChat, messages, liveVisible]);
 
   // When the file watcher reports a write to THIS session's jsonl (e.g. a
@@ -4179,6 +4152,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       const queuedAt = Date.now();
       const queueOpts = { ...opts };
       delete queueOpts.onEnqueueFailure;
+      // 只剥进队列这份克隆的整图预览(内存预览不动),否则超 localStorage 配额被硬拒。
+      if (queueOpts.meta) queueOpts.meta = attachmentMetaForPersistence(queueOpts.meta);
       const queued = useStore.getState().enqueueMessage(sessionQueueKey, { text: prompt, queuedAt, hidden: !!hiddenUserMessage, opts: queueOpts });
       if (!queued) {
         const message = '无法保存待发消息：本地存储空间不足。附件与草稿仍保留，请处理后重试。';

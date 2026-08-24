@@ -32,4 +32,3 @@ export function mergeEquivalentPlanToolCall(first, later) {
   }
   return first;
 }
-

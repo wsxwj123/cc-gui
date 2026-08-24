@@ -7,7 +7,7 @@
 // 本文件:① 纯 foldRepeatedGoalNotices(段界/不同条件/单条原样/按条件归段);
 //        ② 真 getSessionMessages 跑 12 轮未达成 + 达成,验证计数。
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -98,4 +98,21 @@ const COND_B = '另一个目标:把数字加到 100';
   rmSync(home, { recursive: true, force: true });
 }
 
-console.log('✓ check-r32-goal-notice-fold: 未达成提示折叠成一条 + 次数徽标;达成单显;不同条件不合并');
+// ── ③ 渲染接线:count 必须真能被用户看见 ─────────────────────────────────
+// r33 修:count 原本只有零引用的死组件 GoalNotice 会读(goal 提示自 r30 起已不进消息流,
+// 两处 msg.type === 'goal' 都渲染 null)—— 服务端算了、测试测了,界面永远显示不出来。
+// 现在落在 composer 上方的常驻条 GoalBar 上,与 activeGoal 同一条数据链。
+{
+  const app = readFileSync(join(root, 'client/src/App.jsx'), 'utf8');
+  const goalBar = readFileSync(join(root, 'client/src/components/GoalBar.jsx'), 'utf8');
+  assert.equal(app.includes('function GoalNotice'), false,
+    '死组件 GoalNotice 必须删除,不得让 ×N 徽标退回到渲染不出来的地方');
+  assert.match(goalBar, /goal\.count > 1/, 'GoalBar 必须按 count>1 显示折叠次数(单条不显示徽标)');
+  assert.match(goalBar, /×\{goal\.count\}/, 'GoalBar 要渲染「×N」徽标本体');
+  assert.match(goalBar, /本会话目标钩子已拦截 \$\{goal\.count\} 次停止/, '徽标 title 说明这个 N 是什么');
+  // 数据链:reader 折叠 → activeGoal(取最后一条 goal) → effectiveGoal → GoalBar 的 goal prop。
+  assert.match(app, /const activeGoal = useMemo\(/, 'count 经 activeGoal 抵达常驻条');
+  assert.match(app, /goal=\{effectiveGoal\}/, 'effectiveGoal 交给 ChatInput → GoalBar');
+}
+
+console.log('✓ check-r32-goal-notice-fold: 未达成提示折叠成一条 + 次数徽标(落在 GoalBar 上);达成单显;不同条件不合并');

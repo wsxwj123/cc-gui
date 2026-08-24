@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { Check, Circle, ClipboardList, Loader2, ChevronDown, ChevronRight, EyeOff } from './Icon.jsx';
 import { MarkdownRenderer } from './MarkdownRenderer.jsx';
 import { readTodoCollapsed, writeTodoCollapsed } from '../utils/todoCollapse.js';
-import { normalizePlanText, planIdentityKey, visiblePlanItems } from '../utils/plan.js';
+import { normalizePlanText, planIdentityKey, pruneHiddenPlanIdentities, visiblePlanItems } from '../utils/plan.js';
 
 /**
  * 任务清单条,渲染在 composer 同一列内、紧贴输入框上方(作为输入框的"附着条",而非独立
@@ -153,6 +153,7 @@ function PlanBlock({ plan, signature = normalizePlanText(plan), approved = true,
     try {
       localStorage.setItem(hideKey, signature);
       if (localStorage.getItem(legacyHideKey) === plan) localStorage.removeItem(legacyHideKey);
+      pruneHiddenPlanIdentities(localStorage, planKey || 'global', hideKey);
     } catch {}
   };
   const showPlan = () => {
@@ -174,7 +175,7 @@ function PlanBlock({ plan, signature = normalizePlanText(plan), approved = true,
           {open ? <ChevronDown size={13} className="text-ink-faint shrink-0" /> : <ChevronRight size={13} className="text-ink-faint shrink-0" />}
           <ClipboardList size={13} className="text-accent shrink-0" />
           <span className="text-[11px] font-body font-medium text-ink shrink-0">
-            {approved ? '✅ 计划已批准' : '计划待审查'}
+            {approved ? '已批准的计划' : '计划待审查'}
           </span>
           {!open && (
             <span className="text-[10px] text-ink-faint truncate">

@@ -1207,7 +1207,9 @@ export function isMarketplaceStaleError(err) {
 // Only transient transport failures are retryable. Authentication, permission, invalid input,
 // and marketplace/plugin not-found errors deliberately stay terminal.
 export function isRetryablePluginNetworkError(err) {
-  const text = rawPluginErrorText(err);
+  // CLI stderr 带 ANSI 着色:`4\x1B[0m03` 这类序列会把 403 劈开,让"认证/权限终局"的
+  // 否决判据整条失效 → 401/403 被当成网络抖动无限重试。先剥控制序列再判。
+  const text = stripPluginAnsi(rawPluginErrorText(err));
   if (/\b(?:EACCES|EPERM)\b|permission denied|\b(?:401|403)\b|unauthorized|forbidden|\b(?:invalid (?:argument|option|name|marketplace|plugin|scope)|unknown option)\b|\b(?:plugin|marketplace)(?:\s+(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s;:,]+))?\s+not found\b/i.test(text)) {
     return false;
   }
@@ -1595,7 +1597,7 @@ router.get('/plugins/:name/contents', async (req, res) => {
     let hasMcp = false;
     try { await stat(join(root, '.mcp.json')); hasMcp = true; } catch {}
     res.json({ name, bare: name.split('@')[0], skills, commands, agents, hasMcp });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) { return sendPluginPublicError(res, err, { fallback: '读取插件内容失败' }); }
 });
 
 // POST /api/mcp/preview-tools — **添加前**按表单草稿配置连 server 预览工具清单(不落任何配置)。
@@ -1612,7 +1614,7 @@ router.post('/mcp/preview-tools', async (req, res) => {
     const env = (b.env && typeof b.env === 'object') ? b.env : {};
     const { tools, note } = await listToolsFromCfg({ command, args, env });
     res.json({ tools, note: note || '' });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { return sendPluginPublicError(res, e, { fallback: '预览工具清单失败' }); }
 });
 
 // GET /api/mcp/registry-search?q=<关键词> — 搜索官方 MCP 注册表,返回可预填添加表单的条目。

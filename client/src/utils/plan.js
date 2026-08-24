@@ -35,6 +35,19 @@ export function reconcilePlanToolCalls(toolCalls) {
   return reconciled;
 }
 
+// 输入框上方【只常驻已批准的计划】。未决计划归 PlanReviewCard 审批弹窗(同一份内容
+// 出两遍是重复);被驳回的计划不再留卡 —— 否则一轮协商 4-5 版就是 4-5 张永久叠着的
+// "计划待审查",正是 r32 修掉的计划卡洪水换了个形状回来。
+export function approvedPlanItems(toolCalls) {
+  return reconcilePlanToolCalls(toolCalls)
+    .filter(({ toolCall }) => isApprovedPlanToolCall(toolCall))
+    .map(({ signature, toolCall }) => ({
+      signature,
+      plan: planTextOfToolCall(toolCall),
+      approved: true,
+    }));
+}
+
 // TodoPanel 的输入兼容层：新链路传复数 plans；旧调用方仍可传 singular plan。
 // 复数输入存在时不回退 singular，避免旧 prop 在真实计划列表为空/切换时制造幽灵卡。
 export function visiblePlanItems(plans, plan = '') {
@@ -54,6 +67,32 @@ export function planIdentityKey(signature) {
     hash = Math.imul(hash, 16777619);
   }
   return (hash >>> 0).toString(36);
+}
+
+export const MAX_HIDDEN_PLAN_IDENTITIES = 32;
+
+// 每隐藏一份计划就留一个 `cgui-plan-hidden:<owner>:<hash>` 键，value 是【计划全文】
+// (hash 碰撞时安全地"不隐藏")。无上界时，长会话反复隐藏会把 5MB 配额吃掉；而入队现在
+// 是"写不进就硬拒"，配额一满连带发不出消息。照 goal 的 32 条上界淘汰最旧。
+// ponytail: "最旧"取 storage.key() 的枚举序 —— WKWebView/WebView2 都是插入序；即便某个
+// 实现不保证，被淘汰的也只是一条隐藏偏好(那份计划重新显示出来)，没有数据损失。
+export function pruneHiddenPlanIdentities(storage, ownerKey, keepKey = '', limit = MAX_HIDDEN_PLAN_IDENTITIES) {
+  if (!storage || !ownerKey) return 0;
+  const prefix = `cgui-plan-hidden:${ownerKey}:`;
+  const cap = Math.max(1, Number(limit) || MAX_HIDDEN_PLAN_IDENTITIES);
+  const keys = [];
+  try {
+    for (let index = 0; index < storage.length; index += 1) {
+      const key = storage.key(index);
+      if (key?.startsWith(prefix) && key !== keepKey) keys.push(key);
+    }
+  } catch { return 0; }
+  const excess = keys.length + (keepKey ? 1 : 0) - cap;
+  let removed = 0;
+  for (let index = 0; index < excess; index += 1) {
+    try { storage.removeItem(keys[index]); removed += 1; } catch {}
+  }
+  return removed;
 }
 
 // draft→real 与 pane 换绑前迁移按会话键存的 UI 可见性。storage 由调用方注入，

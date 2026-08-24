@@ -478,6 +478,20 @@ const noProxy = async () => null;
     't13: 纯网络瞬态仍可重试');
 }
 
+// t14 CLI stderr 的 ANSI 着色不得绕开终态否决:`4\x1B[0m03` 这类序列把 403 劈成两半,
+// 未剥控制序列时 \b403\b 匹配不上 → 认证失败被当网络抖动无限重试(暴力重试真凭证)。
+{
+  for (const colored of [
+    'remote: 4\x1B[0m03 Forbidden',
+    '\x1B[31m401\x1B[0m Unauthorized; socket hang up',
+    'per\x1B[1mmission denied\x1B[0m; ECONNRESET',
+    'Plugin \x1B[1m"x"\x1B[0m not found in marketplace; connection reset',
+  ]) assert.equal(isRetryablePluginNetworkError(cliErr(colored)), false,
+    `t14: ANSI 着色的终态错误仍须否决重试: ${JSON.stringify(colored)}`);
+  assert.equal(isRetryablePluginNetworkError(cliErr('\x1B[33mECONNRESET\x1B[0m; retrying')), true,
+    't14: 剥色后网络瞬态照旧可重试(不是一刀切否决)');
+}
+
 console.log('✓ check-r29-plugin-install: update 透出 + add 幂等 + not-found 重试/因果链 + 代理注入 + 哨兵');
 // mcp.js 模块顶层有 setTimeout 预热(会 spawn claude CLI),显式退出避免测试进程挂 8s。
 process.exit(0);
