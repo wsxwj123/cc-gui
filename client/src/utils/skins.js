@@ -269,7 +269,7 @@ function skinTrace(step, extra) {
 //                            无 = 被原生层/遮罩截走)。
 // 30s 窗口后自动清理,皮肤卸载(disposeT2)同步清理,不留残余。
 const PROBE_WINDOW_MS = 30000;
-const PROBE_BEAT_MS = 5000;
+const PROBE_BEAT_MS = 6000; // 判官建议2:避开 client-log 服务端 5s 同消息限流边界
 const PROBE_BEATS = 6;
 let skinProbes = null;
 /** 清干净三根探针(interval / pointerdown 监听 / 未触发的 rAF / 30s 兜底定时器)。幂等。 */
@@ -389,6 +389,9 @@ export async function loadT2(id, manifest, texts = null, gen = null) {
     const node = document.createElement('script');
     node.setAttribute('data-cgui-skin-style', id);
     node.src = t2.blobUrl;
+    // 判官建议4:load 事件在脚本【执行完】才触发——皮肤脚本同步死循环则此步永不出现,
+    // 把"脚本执行死"与"样式重算死"的日志签名彻底分开(否则渲染帧偶尔抢先会重合)。
+    node.onload = () => skinTrace('loadT2:script-executed', { id, gen });
     document.head.appendChild(node);
     t2.scriptNode = node;
     skinTrace('loadT2:script-appended', { id, gen });

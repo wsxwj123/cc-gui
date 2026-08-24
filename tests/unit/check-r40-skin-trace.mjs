@@ -236,7 +236,7 @@ const texts = {
   assert.equal(rafs.length, 1, 't7: ①渲染管线探针(rAF)已挂');
   const beat = timers.intervals.at(-1);
   const stop = timers.timeouts.at(-1);
-  assert.equal(beat.ms, 5000, 't7: ②主线程心跳 5s 一拍');
+  assert.equal(beat.ms, 6000, 't7: ②主线程心跳 6s 一拍(避开服务端 5s 同消息限流)');
   assert.equal(stop.ms, 30000, 't7: 30s 自动清理窗口');
   const pd = listeners.filter((l) => l.type === 'pointerdown');
   assert.equal(pd.length, 1, 't7: ③点击到达探针已挂');
