@@ -1123,7 +1123,9 @@ export const PLUGIN_CLI_TIMEOUT_MS = 120000;
 const PLUGIN_PROXY_KEYS = ['HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy'];
 const PLUGIN_ERROR_FIELD_LIMIT = 4096;
 const PLUGIN_PUBLIC_RESPONSE_LIMIT = 16 * 1024;
-const PLUGIN_SECRET_KEY = '(?:auth(?:orization)?|proxy-authorization|credential|[a-z\d_.-]*(?:token|key|secret|password))';
+const PLUGIN_SECRET_KEY_SUFFIXES = new Set([
+  'auth', 'authorization', 'credential', 'credentials', 'token', 'key', 'secret', 'password',
+]);
 
 function pluginEnvWithoutProxy(baseEnv = process.env) {
   const env = { ...baseEnv };
@@ -1133,24 +1135,46 @@ function pluginEnvWithoutProxy(baseEnv = process.env) {
 
 // CLI stderr may echo repository/proxy credentials. Redact at the backend error boundary so
 // every caller (including non-GUI clients) receives the same bounded, safe diagnostic.
-export function sanitizePluginErrorText(value, limit = PLUGIN_ERROR_FIELD_LIMIT) {
+export function stripPluginAnsi(value) {
   let text = String(value ?? '');
+  // String controls first: OSC may end in BEL or ST; DCS/SOS/PM/APC end in ST.
+  text = text.replace(/(?:\x1B\]|\x9D)[\s\S]*?(?:\x07|\x1B\\|\x9C)/g, '');
+  text = text.replace(/(?:\x1B[P^_X]|[\x90\x98\x9E\x9F])[\s\S]*?(?:\x1B\\|\x9C)/g, '');
+  // CSI has both the 7-bit ESC [ and single-byte C1 forms.
+  text = text.replace(/(?:\x1B\[|\x9B)[0-?]*[ -/]*[@-~]/g, '');
+  text = text.replace(/\x1B[@-_]/g, '');
+  return text.replace(/[\x80-\x9F]/g, '');
+}
+
+function isPluginSensitiveKey(key) {
+  const words = String(key || '')
+    .replace(/([a-z\d])([A-Z])/g, '$1 $2')
+    .replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2')
+    .split(/[^A-Za-z\d]+/)
+    .filter(Boolean);
+  return words.length > 0 && PLUGIN_SECRET_KEY_SUFFIXES.has(words.at(-1).toLowerCase());
+}
+
+export function sanitizePluginErrorText(value, limit = PLUGIN_ERROR_FIELD_LIMIT) {
+  let text = stripPluginAnsi(value);
   text = text.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '');
   text = text.replace(/\b([a-z][a-z\d+.-]*:\/\/)([^/\s@]+)@/gi, '$1[REDACTED]@');
   text = text.replace(/\b((?:Proxy-)?Authorization\s*:\s*)[^\r\n]+/gi, '$1[REDACTED]');
   text = text.replace(/\b(Bearer|Basic)\s+(?:"[^"]*"|'[^']*'|[^\s"',;}\]]+)/gi, '$1 [REDACTED]');
-  text = text.replace(new RegExp(`([?&]${PLUGIN_SECRET_KEY}=)([^&#\\s]*)`, 'gi'), '$1[REDACTED]');
-  text = text.replace(new RegExp(`(["']?${PLUGIN_SECRET_KEY}["']?\\s*[:=]\\s*)(["'])(.*?)\\2`, 'gi'), '$1$2[REDACTED]$2');
-  text = text.replace(new RegExp(`(\\b${PLUGIN_SECRET_KEY}\\b["']?\\s*[:=]\\s*)(?!\\[REDACTED\\])([^\\r\\n,;&}\\]]+)`, 'gi'), '$1[REDACTED]');
+  text = text.replace(/([?&])([^=&#\s]+)=([^&#\s]*)/g, (match, marker, key) => (
+    isPluginSensitiveKey(key) ? `${marker}${key}=[REDACTED]` : match
+  ));
+  text = text.replace(/(["']?)([A-Za-z][A-Za-z\d_.-]*)\1(\s*[:=]\s*)(["'])(.*?)\4/g,
+    (match, keyQuote, key, separator, valueQuote) => (
+      isPluginSensitiveKey(key)
+        ? `${keyQuote}${key}${keyQuote}${separator}${valueQuote}[REDACTED]${valueQuote}`
+        : match
+    ));
+  text = text.replace(/\b([A-Za-z][A-Za-z\d_.-]*)(\s*[:=]\s*)(?!\[REDACTED\])([^\r\n,;&}\]]+)/g,
+    (match, key, separator) => (
+      isPluginSensitiveKey(key) ? `${key}${separator}[REDACTED]` : match
+    ));
   return text.trim().slice(0, Math.max(0, Math.min(Number(limit) || PLUGIN_ERROR_FIELD_LIMIT, PLUGIN_ERROR_FIELD_LIMIT)));
-}
-
-function isPluginSensitiveKey(key) {
-  const normalized = String(key || '').replace(/[^a-z\d]/gi, '').toLowerCase();
-  return normalized === 'auth'
-    || normalized === 'authorization'
-    || normalized === 'credential'
-    || /(?:token|key|secret|password)$/.test(normalized);
 }
 
 export function sanitizePluginPublicValue(value, key = '') {
@@ -1184,7 +1208,7 @@ export function isMarketplaceStaleError(err) {
 // and marketplace/plugin not-found errors deliberately stay terminal.
 export function isRetryablePluginNetworkError(err) {
   const text = rawPluginErrorText(err);
-  if (/\b(?:EACCES|EPERM)\b|permission denied|\b(?:401|403)\b|unauthorized|forbidden|invalid argument|\b(?:plugin|marketplace)\s+not found\b/i.test(text)) {
+  if (/\b(?:EACCES|EPERM)\b|permission denied|\b(?:401|403)\b|unauthorized|forbidden|\b(?:invalid (?:argument|option|name|marketplace|plugin|scope)|unknown option)\b|\b(?:plugin|marketplace)(?:\s+(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s;:,]+))?\s+not found\b/i.test(text)) {
     return false;
   }
   return /\b(?:ECONNRESET|ECONNREFUSED|ENETUNREACH|EHOSTUNREACH|EAI_AGAIN|ENOTFOUND|ETIMEDOUT)\b|connection (?:reset|refused|timed out)|request timed out|socket hang up|network is unreachable|temporary failure in name resolution|DNS (?:lookup|resolution|query) (?:failed|failure)|(?:TLS|SSL) (?:handshake|connection) (?:failed|failure|error)|temporar(?:y|ily) (?:network (?:failure|error)|unavailable)|(?:network|operation) timeout/i.test(text);

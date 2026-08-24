@@ -22,7 +22,7 @@ const {
   PLUGIN_CLI_TIMEOUT_MS,
   isMarketplaceAddIdempotent, isMarketplaceStaleError,
   isRetryablePluginNetworkError, sanitizePluginErrorText,
-  sanitizePluginPublicValue, serializePluginPublicError,
+  sanitizePluginPublicValue, serializePluginPublicError, stripPluginAnsi,
 } = await import('../../server/routes/mcp.js');
 
 const MK = 'claude-plugins-official';
@@ -433,6 +433,49 @@ const noProxy = async () => null;
   ]) assert.equal(isRetryablePluginNetworkError(cliErr(terminal)), false, `t11: 终态优先否决: ${terminal}`);
   assert.equal(isRetryablePluginNetworkError(cliErr('ECONNREFUSED; DNS lookup failed; socket hang up')), true,
     't11: 纯瞬态网络错误仍可重试');
+}
+
+// t12 ANSI/C1 必须在文本规则前完整剥离；敏感键按语义后缀识别，不误伤普通单词。
+{
+  const secrets = ['CSI_SECRET', 'OSC_BEL_SECRET', 'OSC_ST_SECRET', 'C1_SECRET'];
+  const raw = [
+    `\u001b[31mproxyAuthorization\u001b[0m=${secrets[0]}`,
+    `\u001b]8;;https://example.invalid\u0007clientCredential\u001b]8;;\u0007=${secrets[1]}`,
+    `\u001b]0;hidden-title\u001b\\credentials=${secrets[2]}`,
+    `\u009b31mcredentials\u009b0m=${secrets[3]}`,
+    'monkey=safe-monkey-context',
+  ].join('\n');
+  const stripped = stripPluginAnsi(raw);
+  assert.ok(!/[\u001b\u0080-\u009f]/.test(stripped), 't12: ESC 与 C1 控制符全部剥离');
+  const sanitized = sanitizePluginErrorText(raw);
+  assert.ok(secrets.every((secret) => !sanitized.includes(secret)), 't12: 着色/OSC/C1 包裹后的敏感键仍脱敏');
+  assert.ok(sanitized.includes('monkey=safe-monkey-context'), 't12: 普通 monkey 键不因 key 字符后缀误遮');
+
+  const nested = sanitizePluginPublicValue({
+    proxyAuthorization: 'PROXY_SECRET',
+    clientCredential: 'CLIENT_SECRET',
+    service_credentials: 'CREDENTIALS_SECRET',
+    apiKey: 'KEY_SECRET',
+    monkey: 'safe nested monkey',
+  });
+  assert.equal(nested.proxyAuthorization, '[REDACTED]');
+  assert.equal(nested.clientCredential, '[REDACTED]');
+  assert.equal(nested.service_credentials, '[REDACTED]');
+  assert.equal(nested.apiKey, '[REDACTED]');
+  assert.equal(nested.monkey, 'safe nested monkey');
+}
+
+// t13 带名称的 not-found 与输入/选项错误是终态，即使 stderr 同时含网络瞬态词。
+{
+  for (const terminal of [
+    'Plugin "x" not found in marketplace; connection reset',
+    "Marketplace 'third' not found; network timeout",
+    'invalid marketplace name; socket hang up',
+    'invalid option --scope; ECONNRESET',
+    'unknown option --scope; ECONNRESET',
+  ]) assert.equal(isRetryablePluginNetworkError(cliErr(terminal)), false, `t13: named/invalid 终态优先否决: ${terminal}`);
+  assert.equal(isRetryablePluginNetworkError(cliErr('connection reset; network timeout')), true,
+    't13: 纯网络瞬态仍可重试');
 }
 
 console.log('✓ check-r29-plugin-install: update 透出 + add 幂等 + not-found 重试/因果链 + 代理注入 + 哨兵');
