@@ -1125,7 +1125,10 @@ const PLUGIN_ERROR_FIELD_LIMIT = 4096;
 const PLUGIN_PUBLIC_RESPONSE_LIMIT = 16 * 1024;
 const PLUGIN_SECRET_KEY_SUFFIXES = new Set([
   'auth', 'authorization', 'credential', 'credentials', 'token', 'key', 'secret', 'password',
+  'passwd', 'pwd', 'apikey', 'accesskey',
 ]);
+// 全小写/全大写连写(monkey/donkey…)以 `key` 结尾却不是密钥;连写兜底的白名单。
+const PLUGIN_NOT_SECRET_WORDS = new Set(['monkey', 'donkey', 'turkey', 'hockey', 'jockey', 'whiskey']);
 
 function pluginEnvWithoutProxy(baseEnv = process.env) {
   const env = { ...baseEnv };
@@ -1138,8 +1141,10 @@ function pluginEnvWithoutProxy(baseEnv = process.env) {
 export function stripPluginAnsi(value) {
   let text = String(value ?? '');
   // String controls first: OSC may end in BEL or ST; DCS/SOS/PM/APC end in ST.
-  text = text.replace(/(?:\x1B\]|\x9D)[\s\S]*?(?:\x07|\x1B\\|\x9C)/g, '');
-  text = text.replace(/(?:\x1B[P^_X]|[\x90\x98\x9E\x9F])[\s\S]*?(?:\x1B\\|\x9C)/g, '');
+  // 有界否定字符类替代惰性 [\s\S]*?:无终止符时后者对每个起点重扫全串(二次复杂度),
+  // 400KB 恶意输入可阻塞事件循环挂死后端。字符串控制序列合法长度远小于 8192。
+  text = text.replace(/(?:\x1B\]|\x9D)[^\x07\x1B\x9C]{0,8192}(?:\x07|\x1B\\|\x9C)/g, '');
+  text = text.replace(/(?:\x1B[P^_X]|[\x90\x98\x9E\x9F])[^\x1B\x9C]{0,8192}(?:\x1B\\|\x9C)/g, '');
   // CSI has both the 7-bit ESC [ and single-byte C1 forms.
   text = text.replace(/(?:\x1B\[|\x9B)[0-?]*[ -/]*[@-~]/g, '');
   text = text.replace(/\x1B[@-_]/g, '');
@@ -1147,12 +1152,20 @@ export function stripPluginAnsi(value) {
 }
 
 function isPluginSensitiveKey(key) {
-  const words = String(key || '')
+  // 先剥零宽/控制字符,否则 `to<ZWSP>ken=` 会把敏感词劈开、绕过下面的按词判定。
+  // 覆盖:控制符 + DEL、软连字符、零宽空格/连接符/方向标记、word joiner、BOM。
+  const raw = String(key || '').replace(/[\x00-\x1F\x7F\u00AD\u200B-\u200F\u2060\uFEFF]/g, '');
+  const words = raw
     .replace(/([a-z\d])([A-Z])/g, '$1 $2')
     .replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2')
     .split(/[^A-Za-z\d]+/)
     .filter(Boolean);
-  return words.length > 0 && PLUGIN_SECRET_KEY_SUFFIXES.has(words.at(-1).toLowerCase());
+  if (words.length > 0 && PLUGIN_SECRET_KEY_SUFFIXES.has(words.at(-1).toLowerCase())) return true;
+  // 连写兜底(旧版语义):apikey/APIKEY/accesstoken/secretkey/authtoken/passwd… 无分隔符,
+  // 按词切分只剩一个整词命不中后缀集 → 这里按后缀正则再兜一层。monkey 等假阳性先排除。
+  const flat = raw.replace(/[^a-z\d]/gi, '').toLowerCase();
+  if (PLUGIN_NOT_SECRET_WORDS.has(flat)) return false;
+  return /(?:token|key|secret|password|passwd|credential)s?$/.test(flat);
 }
 
 export function sanitizePluginErrorText(value, limit = PLUGIN_ERROR_FIELD_LIMIT) {
@@ -1189,7 +1202,10 @@ export function sanitizePluginPublicValue(value, key = '') {
 }
 
 function rawPluginErrorText(err) {
-  return err?.stderr?.toString() || err?.message || String(err || '');
+  // 保尾截断:即便正则已有界,超长 stderr 仍会拖慢逐条 replace。凭证/错误码通常在尾部;
+  // 最终输出还会被 PLUGIN_ERROR_FIELD_LIMIT(4096)再截,这里 16KB 只为封住处理成本。
+  const text = err?.stderr?.toString() || err?.message || String(err || '');
+  return text.length > 16384 ? text.slice(-16384) : text;
 }
 
 function errText(err) {

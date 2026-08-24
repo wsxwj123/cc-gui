@@ -463,6 +463,41 @@ const noProxy = async () => null;
   assert.equal(nested.service_credentials, '[REDACTED]');
   assert.equal(nested.apiKey, '[REDACTED]');
   assert.equal(nested.monkey, 'safe nested monkey');
+
+  // t12-回归(C-1):全小写/全大写【连写】敏感键必须脱敏。51a4a71 改成"按词切分只看最后
+  // 一个词"后,无分隔符的连写键(apikey/APIKEY/accesstoken/secretkey/authtoken/passwd)
+  // 判不出 → ?apikey= 这类 git/npm 回显 URL 里的凭证重新明文泄漏。变异:删掉 flat 连写
+  // 兜底 → 下面六条 include('SECRET') 立即为真(泄漏)。
+  for (const [i, key] of ['apikey', 'APIKEY', 'accesstoken', 'secretkey', 'authtoken', 'passwd'].entries()) {
+    const secret = `FLATSECRET${i}`;
+    assert.ok(!sanitizePluginErrorText(`${key}=${secret}`).includes(secret),
+      `t12: 连写敏感键必须脱敏: ${key}=`);
+    assert.ok(!sanitizePluginErrorText(`?${key}=${secret}`).includes(secret),
+      `t12: URL 查询里的连写敏感键必须脱敏: ?${key}=`);
+  }
+  // 假阳性守卫:monkey/donkey/hockey 以 key 结尾但不是密钥,连写兜底必须放行。
+  for (const benign of ['monkey', 'donkey', 'hockey']) {
+    assert.ok(sanitizePluginErrorText(`${benign}=safe-${benign}`).includes(`safe-${benign}`),
+      `t12: 普通词 ${benign} 不因 key 后缀被误遮`);
+  }
+  // 建议2:零宽/软连字符混入的对象键(整键送进判定)也要按归一后的语义脱敏。
+  const ZWSP = '\u200B'; const SHY = '\u00AD'; // zero-width space, soft hyphen
+  const kApikey = `api${ZWSP}key`; const kAuth = `au${SHY}th`; const kMonkey = `mon${ZWSP}key`;
+  const zw = sanitizePluginPublicValue({ [kApikey]: 'ZW1', [kAuth]: 'ZW2', [kMonkey]: 'zwmonkey' });
+  assert.equal(zw[kApikey], '[REDACTED]', 't12: 零宽混入的 apikey 归一后仍脱敏');
+  assert.equal(zw[kAuth], '[REDACTED]', 't12: 软连字符混入的 auth 归一后仍脱敏');
+  assert.equal(zw[kMonkey], 'zwmonkey', 't12: 零宽混入的 monkey 归一后仍不误遮');
+}
+
+// t12b stripPluginAnsi 有界化(I-1):无终止符的字符串控制序列此前用惰性 [\s\S]*? 对每个
+// 起点重扫全串 = 二次复杂度,400KB 恶意 stderr 可阻塞事件循环 ~65s 挂死后端。改有界否定
+// 字符类后,合法 ANSI 输出逐字不变,大输入线性。变异:把 {0,8192} 换回 [\s\S]*? → 计时红。
+{
+  const big = '\x1B]x'.repeat((2 * 1024 * 1024 / 3) | 0); // ~2MB 全是 OSC-open、无终止符
+  const t0 = process.hrtime.bigint();
+  stripPluginAnsi(big);
+  const ms = Number(process.hrtime.bigint() - t0) / 1e6;
+  assert.ok(ms < 100, `t12b: 2MB 病态输入必须 <100ms(实测 ${ms.toFixed(1)}ms;旧惰性版同规模 >60s)`);
 }
 
 // t13 带名称的 not-found 与输入/选项错误是终态，即使 stderr 同时含网络瞬态词。

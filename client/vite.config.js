@@ -20,9 +20,10 @@ export default defineConfig({
     port: 5173,
     // client/src/utils/plan.js 复用仓库根 server/utils/plan.js —— 共享纯规则必须住在
     // Tauri 会打包的 server 资源树里(反过来 server 导 client/src 在安装包里会 ENOENT)。
-    // 该 import 跨出 vite root(client/),dev 走 /@fs/,默认 fs.allow 只含 root →
-    // 403 断模块图 = 白屏。放行上一级(仓库根)。生产 build 不经这道门,故只在 dev 缺。
-    fs: { allow: ['..'] },
+    // 该 import 跨出 vite root(client/),dev 走 /@fs/,默认 fs.allow 只含 root → 403
+    // 断模块图 = 白屏。只放行被 import 的那个目录,不放整个仓库根(否则 dev 下
+    // /@fs 可读 CLAUDE.local.md / LEARNINGS.md / .devflow 等)。生产 build 不经这道门。
+    fs: { allow: ['../server/utils'] },
     proxy: {
       '/api': 'http://localhost:6677',
       '/ws': {

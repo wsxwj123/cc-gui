@@ -54,7 +54,7 @@ export function createDraftSessionBindingsStore({
       const bounded = Object.fromEntries(Object.entries(next)
         .sort(([, a], [, b]) => Number(b?.at || 0) - Number(a?.at || 0))
         .slice(0, DRAFT_SESSION_BINDINGS_MAX));
-      await fs.mkdir(dirname(file), { recursive: true });
+      await fs.mkdir(dirname(file), { recursive: true, mode: 0o700 });
       const temp = `${file}.tmp-${makeTempId()}`;
       try {
         // 内容含会话/项目标识:按用户私有落盘,不跟随 umask 放宽。

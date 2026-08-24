@@ -14,7 +14,7 @@ export function createAttachmentSidecarStore({
   const write = (sessionId, { text, attachments, displayText = '' }) => {
     const previous = sessionTails.get(sessionId) || Promise.resolve();
     const run = previous.catch(() => {}).then(async () => {
-      await fs.mkdir(directory, { recursive: true });
+      await fs.mkdir(directory, { recursive: true, mode: 0o700 });
       const file = join(directory, `${sessionId}.json`);
       let current;
       try {
