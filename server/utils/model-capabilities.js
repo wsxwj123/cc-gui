@@ -128,7 +128,12 @@ function matchCatalog(id) {
 // 维持现状),拿不准的一律不进表(判错成 vision:true 会把 deepseek 这类无视觉上游
 // 的历史图片原样转发 → 400,方向性损失)。
 const VISION_CAPABILITY_CATALOG = [
-  // DeepSeek 官方 API 全系无图像输入(CI-4 实证:image_url 报 400 unknown variant)。
+  // r37:DeepSeek 识图系(deepseek-v4-flash-vision-exp 等,2026-08 上线)。必须排在下面
+  // 全系 false 的一刀切【之前】(目录首命中即返回);实测其 openai 端点已收 image_url、
+  // anthropic 端点收 image block(各答对纯色图),CI-4 的"全系 400"对识图系已过时。
+  // 不锚定结尾:兼容 -exp 变体与 [1m] 后缀形态。
+  { re: /^deepseek[\w.-]*vision/i, vision: true },
+  // DeepSeek 其余模型无图像输入(CI-4 实证:image_url 报 400 unknown variant)。
   { re: /^deepseek/i, vision: false },
   // 以下为多模态公开事实明确的家族(判错成 false 只是多剥一次图,有占位文本兜底)。
   { re: /^claude-/i, vision: true },   // claude 3 起全系视觉
