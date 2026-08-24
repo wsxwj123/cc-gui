@@ -2,12 +2,13 @@
 
 ## 范围与公共契约
 
-本清单锁定 18 条独立黑盒验收结果，目标是修复“GUI 默认插件全部安装失败”，并防止超时、代理、缓存、错误映射、秘密泄露和第三方 payload/stale 回归。测试不 import 产品内部模块，只观察真实构建 GUI、公开 HTTP、Claude CLI 2.1.240 和隔离文件系统结果。
+本清单锁定 20 条独立黑盒验收结果，目标是修复“GUI 默认插件全部安装失败”，并防止超时、代理、缓存、错误映射、秘密泄露和第三方 payload/stale 回归。测试不 import 产品内部模块，只观察真实构建 GUI、公开 HTTP、Claude CLI 2.1.240 和隔离文件系统结果。
 
 - 后端由绝对 `R33_BACKEND_BIN` 启动，参数为 `R33_BACKEND_ARGS`（默认 `["server/index.js"]`），cwd 为目标 worktree，测试注入动态 `PORT`；健康检查为 `GET /api/health`。
 - `GET /api/plugins/available?fresh=1` 必须返回 `{total,items,cachedAt}`；`total` 是全集数量，`items` 可分页。每项公开字段为 `{pluginId,name,description,marketplace,installed}`；默认 12 的逐项核验使用 GUI 已公开调用的 `q=<name>` 查询，避免把首屏分页误当全集。
 - 唯一身份映射为 `id=name`、`marketplace=marketplace`；GUI 安装请求为 `POST /api/plugins/install`。默认卡公开 body 是合法的 `{name}`，server 负责映射到 `claude-plugins-official`；第三方 body 至少保留 `{name,marketplace}`，若公开 payload 含 `repo` 也必须原样保留。
 - 失败目标为顶层 `error:{stage,code,retryable,timeoutMs,message}`；当前顶层 `error` 字符串会被错误用例判红。
+- 插件管理的固定公开 HTTP 模板为：`GET /api/plugins/available`、`POST /api/plugins/install`、`POST /api/plugins/{pluginId}/update`、`DELETE /api/plugins/{pluginId}`、`PUT /api/plugins/{pluginId}/enable`、`PUT /api/plugins/{pluginId}/disable`。install 继续锁定结构化错误；其余旧路由可返回安全的 string 或 object 错误，但不得吞掉可理解的失败信息。
 - “默认 12 项”不从 available 的虚构标记推断：测试启动真实 `client/dist`，在公开“工具 → 插件 → 添加”弹层中逐一点击 12 张 Anthropic 官方精选卡片，拦截真实 POST payload，再与后端 items 及真实 `claude plugin list --available --json` 逐项交叉核对。名称不手抄。
 
 测试文件：
@@ -24,11 +25,11 @@
 - 临时后端和 GUI 宿主仅监听动态分配的 `127.0.0.1` 端口；GUI 宿主只静态提供真实 `client/dist` 并转发 `/api` 到同一临时后端。
 - 子进程使用环境白名单，不继承凭证、token、SSH agent 或宿主代理。
 - CLI 外壳只记录 argv、隔离路径、PID 和四个 proxy 键，随后执行真实 CLI；slow 用例只增加等待，不伪造成功。
-- 安全与重试分类用例允许 CLI 外壳输出固定虚假 canary stderr 并非零退出，但绝不注入成功结果。公开响应中任何字符串字段都不得出现 canary 原文；单字段最多 4096 字符，全部公开文本合计最多 16384 字符。
+- 安全与重试分类用例允许 CLI 外壳输出固定虚假 canary stderr 并非零退出，但绝不注入成功结果。公开响应中任何字符串字段都不得出现 canary 原文；单字段最多 4096 字符，完整响应体最多 16384 字符。覆盖 auth、带单双引号 Bearer、Basic、带空格 password、嵌套 password/credential/accessToken/apiKey 及超长文本。
 - GUI 探针对安装 POST 返回公开成功响应，目的仅为连续观察 12 个真实 payload，不执行插件安装；真正的安装用例随后把捕获 payload 提交到真实后端。
 - 清理前校验路径必须位于系统临时目录的 `cgui-plugin-r33-*` 下；绝不读取、修改或删除真实 `~/.claude`。
 
-## 18 条行为矩阵
+## 20 条行为矩阵
 
 | ID | 档位 | 操作 | 预期 | 修复前分类 |
 | --- | --- | --- | --- | --- |
@@ -46,7 +47,9 @@
 | PLUG-ERR-ADD-001 | 离线 | 提交不存在的 marketplace payload | 非 2xx；`marketplace-add / CLI_EXIT_NONZERO / false / 120000`；无额外安装 | 诊断红 |
 | PLUG-ERR-INSTALL-001 | 离线 | 合法 marketplace 下安装不存在 name | 非 2xx；`plugin-install / CLI_EXIT_NONZERO / false / 120000`；无额外安装 | 诊断红 |
 | PLUG-SEC-001 | 离线 | add/install 失败 stderr 注入 URL userinfo、Bearer、query token/api_key/key、JSON authorization/token 及超长安全上下文 | error 任意公开字段无秘密原文；保留 stage/code 和安全上下文；长度受限；无安装副作用 | 诊断红 |
+| PLUG-SEC-ROUTES-001 | 离线 | 六个真实公开插件路由的 CLI 命令分别非零退出，并注入 auth/Bearer/Basic/password/嵌套敏感键及超长 stderr | 六个响应均非成功且非 404；递归所有字符串无 canary，敏感值消失或被遮，保留安全上下文；install 结构化，旧路由兼容安全 string/object；完整响应有界 | 诊断红 |
 | PLUG-ERR-RETRY-001 | 离线 | stale update 分别注入 connection reset 与 permission denied 的真实失败 stderr/exit | 两者均结构化；网络错误 `retryable=true` 且非 timeout；权限错误 `retryable=false` | 诊断红 |
+| PLUG-ERR-TERMINAL-001 | 离线 | 同一真实 stale→update 链依次返回 permission/EACCES/EPERM、401/403、invalid argument、plugin/marketplace not found，并分别混入 ECONNREFUSED/timeout/DNS/socket hang up；最后返回纯瞬态网络错误 | 五类混合终止错误均 `retryable=false`；纯瞬态网络错误 `retryable=true`；全部保留 `marketplace-update / CLI_EXIT_NONZERO / 120000` | 诊断红 |
 | PLUG-ERR-TIMEOUT-001 | 长时 | 使用同一 smart-HTTP git A→B stale 前置，update 外壳等待 125 秒 | 约 120 秒返回 `marketplace-update / CLI_TIMEOUT / true / 120000`；子进程已终止 | 诊断红 |
 | PLUG-THIRD-001 | 离线 | 提交由真实 CLI 自检过的本地第三方 `{name,marketplace,repo}` payload | CLI marketplace argv 原样保留 repo，install argv 与 CLI list 均保留 `name@marketplace` | 回归门禁，不预判红 |
 | PLUG-THIRD-STALE-001 | 离线 | smart-HTTP 第三方市场 A→B 后仅提交 `{name,marketplace}` | 不 add official；只 update 目标第三方市场一次，再重试同一插件并成功 | 诊断红 |
@@ -80,13 +83,24 @@ R33_ADD_FAILURE_PAYLOAD_JSON
 R33_INSTALL_FAILURE_PAYLOAD_JSON
 ```
 
+六类插件路由若由外部宿主改写，只允许通过以下固定模板覆盖，`{pluginId}` 由测试按 URL 规则编码：
+
+```text
+R33_AVAILABLE_URL
+R33_INSTALL_URL
+R33_UPDATE_URL
+R33_UNINSTALL_URL
+R33_ENABLE_URL
+R33_DISABLE_URL
+```
+
 ## TEST_INFRA 规则
 
 - 后端/CLI 绝对路径、本地 payload、`client/dist`、Playwright loader、系统 Chrome 或 loopback 权限缺失：`TEST_INFRA`。IPv6 用例仅在监听 `::1` 返回 `EAFNOSUPPORT`/`EADDRNOTAVAIL` 时记 TEST_INFRA；代理可达后产品未保留或未探活必须判红。
 - `R33_RUN_NETWORK` 未设为 `1`：三条真实 marketplace 用例记 `TEST_INFRA_NETWORK`。PLUG-AVAIL 的公开准备步骤固定使用真实 CLI 添加 `https://github.com/anthropics/claude-plugins-official.git`；失败同样记网络基础设施缺口。
 - `R33_RUN_LONG` 未设为 `1`：120 秒用例记 `TEST_INFRA_LONG`。
 - CLI 不是 2.1.240、本地 marketplace fixture 无法被真实 CLI add/install、网络 DNS/TLS/限流失败：均为基础设施问题，不得伪造成产品绿，也不得混入诊断红。
-- 缺宿主时，18 条应全部 skip，进程退出码仍为 0；任何语法、fixture 或探针未捕获错误必须令进程非 0。
+- 缺宿主时，20 条应全部 skip，进程退出码仍为 0；任何语法、fixture 或探针未捕获错误必须令进程非 0。
 
 ## 运行命令
 
@@ -100,7 +114,7 @@ node --check tests/acceptance/plugin-install/plugin-install.acceptance.test.mjs
 node --test tests/acceptance/plugin-install/plugin-install.acceptance.test.mjs
 ```
 
-运行 14 条无外网用例：设置基础宿主和本地 payload 后执行同一 `node --test` 命令；三条网络和一条长时用例会明确 skip。
+运行 16 条无外网用例：设置基础宿主和本地 payload 后执行同一 `node --test` 命令；三条网络和一条长时用例会明确 skip。
 
 加入真实网络用例：
 
@@ -126,7 +140,7 @@ R33_RUN_NETWORK=1 R33_RUN_LONG=1 node --test tests/acceptance/plugin-install/plu
 - 默认 12 项真实首装：约 4–12 分钟；缓存回归另需 20–60 秒。
 - 长时 timeout：约 125–140 秒；完整 nightly 预计 8–20 分钟。
 
-完成时必须有 18 条独立结果、无真实配置或凭证访问、无遗留后端/GUI/CLI 子进程；网络/长时未跑必须保留明确 TEST_INFRA 标记。
+完成时必须有 20 条独立结果、无真实配置或凭证访问、无遗留后端/GUI/CLI 子进程；网络/长时未跑必须保留明确 TEST_INFRA 标记。
 
 ## HEAD ddeb9b2 修复前证据
 
@@ -141,3 +155,8 @@ R33_RUN_NETWORK=1 R33_RUN_LONG=1 node --test tests/acceptance/plugin-install/plu
 - `PLUG-ERR-RETRY-001`：红。真实 stale 链进入 `marketplace-update / CLI_EXIT_NONZERO / 120000`，但 connection reset 被映射为 `retryable=false`；修复后同一结果继续用 permission denied 锁定 `false` 反例。
 - `PLUG-THIRD-STALE-001`：红。仅 `{name,marketplace}` 的第三方 stale 请求错误触发了一次 marketplace add；锁定目标是不 add official、只 update 目标第三方并重试一次。
 - `PLUG-PROXY-IPV6-001`：绿，约 3 秒。真实 `::1` 代理收到产品探活连接，CLI 记录保留同一 IPv6 代理，且真实本地插件安装成功；因此不能人为记成修前红。只有系统监听 `::1` 返回 `EAFNOSUPPORT`/`EADDRNOTAVAIL` 才是 TEST_INFRA。
+
+## HEAD a832e4e 第二轮复审门禁证据
+
+- `PLUG-SEC-ROUTES-001`：红，约 6.5 秒。六个公开路由及各自 CLI 命令均已实际命中；install 的结构化断言已通过，随后 update 响应仍泄露第一枚固定虚假 route canary。测试报告只显示 canary 编号，不回显原文。
+- `PLUG-ERR-TERMINAL-001`：红，约 8.4 秒。纯瞬态反例和五种混合 stale→update 失败均已实际执行；纯瞬态保持 `retryable=true`，首个同时含 permission/EACCES/EPERM 与瞬态提示的结果也被错误标为 `true`，终止错误未取得优先级。

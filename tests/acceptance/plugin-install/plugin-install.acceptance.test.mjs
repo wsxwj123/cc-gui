@@ -4,6 +4,7 @@ import {
   assertCliStageRecorded,
   assertSuccess,
   FAKE_SECRET_CANARIES,
+  ROUTE_SECRET_CANARIES,
   runAcceptanceCase,
   TestInfraError,
   unusedLoopbackProxyUrl,
@@ -86,6 +87,35 @@ function assertSanitizedFailure(host, result, expectedStage) {
     assert.ok(value.length <= 4_096, `${expectedStage} public field ${path} exceeds 4096 characters`);
   }
   assert.ok(publicText.length <= 16_384, `${expectedStage} public error exceeds 16384 characters`);
+}
+
+function assertSafeRouteFailure(host, observation) {
+  const { label, result, structured } = observation;
+  assert.notEqual(result.response.status, 404, `${label} public route is unavailable`);
+  assert.equal(result.response.ok, false, `${label} returned success after its CLI command failed`);
+  assert.ok(result.body && typeof result.body === 'object' && !Array.isArray(result.body), `${label} did not return JSON`);
+  const error = result.body.error;
+  if (structured) {
+    const structuredError = host.errorFrom(result.body);
+    assert.equal(structuredError.stage, 'plugin-install', `${label} lost plugin-install stage`);
+    assert.equal(structuredError.code, 'CLI_EXIT_NONZERO', `${label} lost CLI exit code`);
+  } else {
+    assert.ok(
+      typeof error === 'string' || (error && typeof error === 'object' && !Array.isArray(error)),
+      `${label} has no compatible public error`,
+    );
+  }
+
+  const publicStrings = collectPublicStrings(result.body);
+  const publicText = publicStrings.map(({ value }) => value).join('\n');
+  ROUTE_SECRET_CANARIES.forEach((secret, index) => {
+    assert.equal(publicText.includes(secret), false, `${label} leaked route secret canary #${index + 1}`);
+  });
+  assert.ok(publicText.includes('R33_SAFE_CONTEXT'), `${label} removed all understandable failure context`);
+  for (const { path, value } of publicStrings) {
+    assert.ok(value.length <= 4_096, `${label} public field ${path} exceeds 4096 characters`);
+  }
+  assert.ok(result.text.length <= 16_384, `${label} complete public response exceeds 16384 characters`);
 }
 
 test('PLUG-AVAIL-001 [network] GUI emits 12 unique default payloads present in backend and CLI available JSON', { timeout: NETWORK_TIMEOUT }, async (t) => {
@@ -277,6 +307,66 @@ test('PLUG-SEC-001 [offline] add and install failures redact secrets and bound p
   });
 });
 
+test('PLUG-SEC-ROUTES-001 [offline] every public plugin route redacts and bounds CLI failures', { timeout: OFFLINE_TIMEOUT }, async (t) => {
+  await runAcceptanceCase(t, { wrapperMode: 'route-secrets' }, async (host) => {
+    const payload = await host.requireValidatedLocalPayload();
+    const add = await host.cli(['plugin', 'marketplace', 'add', payload.repo]);
+    assert.equal(add.code, 0, 'route security fixture marketplace was not prepared');
+    const identity = `${payload.name}@${payload.marketplace}`;
+    const routeCases = [
+      {
+        label: 'update',
+        expectedCommand: 'update',
+        invoke: () => host.submitPluginOperation('R33_UPDATE_URL', 'POST', identity),
+      },
+      {
+        label: 'uninstall',
+        expectedCommand: 'uninstall',
+        invoke: () => host.submitPluginOperation('R33_UNINSTALL_URL', 'DELETE', identity),
+      },
+      {
+        label: 'enable',
+        expectedCommand: 'enable',
+        invoke: () => host.submitPluginOperation('R33_ENABLE_URL', 'PUT', identity),
+      },
+      {
+        label: 'disable',
+        expectedCommand: 'disable',
+        invoke: () => host.submitPluginOperation('R33_DISABLE_URL', 'PUT', identity),
+      },
+      {
+        label: 'install',
+        expectedCommand: 'install',
+        structured: true,
+        invoke: () => host.submitInstall({ name: payload.name, marketplace: payload.marketplace }),
+      },
+      {
+        label: 'available',
+        expectedCommand: null,
+        invoke: () => host.requestAvailable(),
+      },
+    ];
+
+    const observations = [];
+    for (const routeCase of routeCases) {
+      const before = (await host.cliRecords()).length;
+      const result = await routeCase.invoke();
+      const records = (await host.cliRecords()).slice(before);
+      assert.ok(records.some((record) => record.args[0] === 'plugin'), `${routeCase.label} did not invoke the CLI wrapper`);
+      if (routeCase.expectedCommand) {
+        assert.ok(
+          records.some((record) => record.args[1] === routeCase.expectedCommand),
+          `${routeCase.label} did not invoke claude plugin ${routeCase.expectedCommand}`,
+        );
+      }
+      observations.push({ ...routeCase, result });
+    }
+    [...observations]
+      .sort((left, right) => Number(right.structured) - Number(left.structured))
+      .forEach((observation) => assertSafeRouteFailure(host, observation));
+  });
+});
+
 test('PLUG-ERR-RETRY-001 [offline] update network reset is retryable but permission denial is not', { timeout: OFFLINE_TIMEOUT }, async (t) => {
   await runAcceptanceCase(t, { wrapperMode: 'network-reset-update' }, async (host) => {
     const payload = await host.prepareStaleMarketplace();
@@ -300,6 +390,34 @@ test('PLUG-ERR-RETRY-001 [offline] update network reset is retryable but permiss
       retryable: false,
       timeoutMs: 120_000,
     });
+  });
+});
+
+test('PLUG-ERR-TERMINAL-001 [offline] terminal update errors outrank mixed transient hints', { timeout: OFFLINE_TIMEOUT }, async (t) => {
+  await runAcceptanceCase(t, { wrapperMode: 'terminal-permission-update' }, async (host) => {
+    const payload = await host.prepareStaleMarketplace();
+    const cases = [
+      ['transient-update', true, 'pure transient network'],
+      ['terminal-permission-update', false, 'permission/EACCES/EPERM'],
+      ['terminal-auth-update', false, '401/403'],
+      ['terminal-argument-update', false, 'invalid argument'],
+      ['terminal-plugin-not-found-update', false, 'plugin not found'],
+      ['terminal-marketplace-not-found-update', false, 'marketplace not found'],
+    ];
+    const observations = [];
+    for (const [mode, retryable, label] of cases) {
+      await host.restartBackend({ R33_CLI_WRAPPER_MODE: mode });
+      observations.push({ label, retryable, result: await host.submitInstall(payload) });
+    }
+    for (const { label, retryable, result } of observations) {
+      assert.equal(result.response.ok, false, `${label} update unexpectedly succeeded`);
+      host.assertStructuredError(host.errorFrom(result.body), {
+        stage: 'marketplace-update',
+        code: 'CLI_EXIT_NONZERO',
+        retryable,
+        timeoutMs: 120_000,
+      });
+    }
   });
 });
 

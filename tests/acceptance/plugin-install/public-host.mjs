@@ -32,6 +32,18 @@ export const FAKE_SECRET_CANARIES = Object.freeze([
   'r33-json-auth-canary',
   'r33-json-token-canary',
 ]);
+export const ROUTE_SECRET_CANARIES = Object.freeze([
+  'AUTH_SECRET',
+  'JSON_AUTH_SECRET',
+  'QUOTED_SECRET',
+  'SINGLE_SECRET',
+  'BASIC_SECRET',
+  'TWO WORD SECRET',
+  'NESTED_PASSWORD_SECRET',
+  'NESTED_CREDENTIAL_SECRET',
+  'NESTED_ACCESS_TOKEN_SECRET',
+  'NESTED_API_KEY_SECRET',
+]);
 
 const SECRET_FAILURE_STDERR = [
   'R33_SAFE_CONTEXT plugin marketplace request failed',
@@ -44,6 +56,35 @@ const SECRET_FAILURE_STDERR = [
   }),
   'R33_BOUNDED_CONTEXT '.repeat(2_000),
 ].join('\n');
+
+const ROUTE_SECURITY_STDERR = [
+  'R33_SAFE_CONTEXT requested plugin operation failed',
+  `auth=${ROUTE_SECRET_CANARIES[0]}`,
+  JSON.stringify({ auth: ROUTE_SECRET_CANARIES[1] }),
+  `Bearer "${ROUTE_SECRET_CANARIES[2]}"`,
+  `Bearer '${ROUTE_SECRET_CANARIES[3]}'`,
+  `Authorization: Basic ${ROUTE_SECRET_CANARIES[4]}`,
+  `password='${ROUTE_SECRET_CANARIES[5]}'`,
+  JSON.stringify({
+    outer: {
+      password: ROUTE_SECRET_CANARIES[6],
+      credential: ROUTE_SECRET_CANARIES[7],
+      accessToken: ROUTE_SECRET_CANARIES[8],
+      apiKey: ROUTE_SECRET_CANARIES[9],
+    },
+  }),
+  'R33_ROUTE_BOUNDED_CONTEXT '.repeat(2_000),
+].join('\n');
+
+const TRANSIENT_FAILURE_CONTEXT = 'ECONNREFUSED; timed out; DNS lookup failed; socket hang up';
+const TERMINAL_UPDATE_FAILURES = Object.freeze({
+  'terminal-permission-update': `permission denied EACCES EPERM; ${TRANSIENT_FAILURE_CONTEXT}`,
+  'terminal-auth-update': `HTTP 401 unauthorized; HTTP 403 forbidden; ${TRANSIENT_FAILURE_CONTEXT}`,
+  'terminal-argument-update': `invalid argument --scope; ${TRANSIENT_FAILURE_CONTEXT}`,
+  'terminal-plugin-not-found-update': `plugin not found; ${TRANSIENT_FAILURE_CONTEXT}`,
+  'terminal-marketplace-not-found-update': `marketplace not found; ${TRANSIENT_FAILURE_CONTEXT}`,
+  'transient-update': TRANSIENT_FAILURE_CONTEXT,
+});
 
 export class TestInfraError extends Error {
   constructor(message, kind = 'TEST_INFRA') {
@@ -166,6 +207,15 @@ if (mode === 'network-reset-update' && isUpdate) {
 if (mode === 'permission-update' && isUpdate) {
   process.stderr.write('R33_SAFE_CONTEXT marketplace update failed: permission denied for repository\\n');
   process.exit(49);
+}
+if (mode === 'route-secrets' && args[0] === 'plugin') {
+  process.stderr.write(${JSON.stringify(ROUTE_SECURITY_STDERR)});
+  process.exit(50);
+}
+const terminalFailure = ${JSON.stringify(TERMINAL_UPDATE_FAILURES)}[mode];
+if (terminalFailure && isUpdate) {
+  process.stderr.write('R33_SAFE_CONTEXT marketplace update failed: ' + terminalFailure + '\\n');
+  process.exit(51);
 }
 
 const child = spawn(process.env.R33_REAL_CLAUDE_BIN, args, { env: process.env, stdio: 'inherit' });
@@ -611,19 +661,36 @@ export class PluginAcceptanceHost {
     const defaults = {
       R33_AVAILABLE_URL: 'http://127.0.0.1:{port}/api/plugins/available?fresh=1',
       R33_INSTALL_URL: 'http://127.0.0.1:{port}/api/plugins/install',
+      R33_UPDATE_URL: 'http://127.0.0.1:{port}/api/plugins/{pluginId}/update',
+      R33_UNINSTALL_URL: 'http://127.0.0.1:{port}/api/plugins/{pluginId}',
+      R33_ENABLE_URL: 'http://127.0.0.1:{port}/api/plugins/{pluginId}/enable',
+      R33_DISABLE_URL: 'http://127.0.0.1:{port}/api/plugins/{pluginId}/disable',
     };
     return renderUrl(process.env[name] || defaults[name] || requiredEnv(name), this.port);
   }
 
-  async requestAvailable() {
-    const response = await fetch(this.url('R33_AVAILABLE_URL'));
-    let body;
+  pluginOperationUrl(name, pluginId) {
+    return this.url(name).replaceAll('{pluginId}', encodeURIComponent(pluginId));
+  }
+
+  async requestJson(url, { method = 'GET', body } = {}) {
+    const response = await fetch(url, {
+      method,
+      headers: body === undefined ? undefined : { 'content-type': 'application/json' },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    const text = await response.text();
+    let parsed;
     try {
-      body = await response.json();
+      parsed = JSON.parse(text);
     } catch {
-      body = null;
+      parsed = null;
     }
-    return { response, body };
+    return { response, body: parsed, text };
+  }
+
+  async requestAvailable() {
+    return this.requestJson(this.url('R33_AVAILABLE_URL'));
   }
 
   async fetchAvailableRaw() {
@@ -740,18 +807,11 @@ export class PluginAcceptanceHost {
   }
 
   async submitInstall(payload) {
-    const response = await fetch(this.url('R33_INSTALL_URL'), {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(payload),
-    });
-    let body;
-    try {
-      body = await response.json();
-    } catch {
-      body = null;
-    }
-    return { response, body };
+    return this.requestJson(this.url('R33_INSTALL_URL'), { method: 'POST', body: payload });
+  }
+
+  async submitPluginOperation(urlName, method, pluginId) {
+    return this.requestJson(this.pluginOperationUrl(urlName, pluginId), { method, body: {} });
   }
 
   errorFrom(body) {
