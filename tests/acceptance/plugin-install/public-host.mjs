@@ -44,6 +44,18 @@ export const ROUTE_SECRET_CANARIES = Object.freeze([
   'NESTED_ACCESS_TOKEN_SECRET',
   'NESTED_API_KEY_SECRET',
 ]);
+export const ANSI_SECRET_CANARIES = Object.freeze([
+  'ANSI_SECRET',
+  'ANSI_CSI_SECRET',
+  'ANSI_OSC_SECRET',
+  'ANSI_C1_SECRET',
+  'PROXY_AUTHORIZATION_SECRET',
+  'CLIENT_CREDENTIAL_SECRET',
+  'CREDENTIALS_SECRET',
+  'NESTED_PROXY_AUTHORIZATION_SECRET',
+  'NESTED_CLIENT_CREDENTIAL_SECRET',
+  'NESTED_CREDENTIALS_SECRET',
+]);
 
 const SECRET_FAILURE_STDERR = [
   'R33_SAFE_CONTEXT plugin marketplace request failed',
@@ -76,6 +88,25 @@ const ROUTE_SECURITY_STDERR = [
   'R33_ROUTE_BOUNDED_CONTEXT '.repeat(2_000),
 ].join('\n');
 
+const ANSI_SECURITY_STDERR = [
+  'R33_SAFE_CONTEXT ANSI-decorated plugin operation failed',
+  `\u001b[31mpassword\u001b[0m=${ANSI_SECRET_CANARIES[0]}`,
+  `\u001b[38;5;196mproxyAuthorization\u001b[0m=${ANSI_SECRET_CANARIES[1]}`,
+  `\u001b]8;;https://example.invalid\u0007clientCredential\u001b]8;;\u0007=${ANSI_SECRET_CANARIES[2]}`,
+  `\u009b31mcredentials\u009b0m=${ANSI_SECRET_CANARIES[3]}`,
+  `proxyAuthorization=${ANSI_SECRET_CANARIES[4]}`,
+  `clientCredential=${ANSI_SECRET_CANARIES[5]}`,
+  `credentials=${ANSI_SECRET_CANARIES[6]}`,
+  JSON.stringify({
+    outer: {
+      proxyAuthorization: ANSI_SECRET_CANARIES[7],
+      clientCredential: ANSI_SECRET_CANARIES[8],
+      credentials: ANSI_SECRET_CANARIES[9],
+    },
+  }),
+  'R33_ANSI_BOUNDED_CONTEXT '.repeat(2_000),
+].join('\n');
+
 const TRANSIENT_FAILURE_CONTEXT = 'ECONNREFUSED; timed out; DNS lookup failed; socket hang up';
 const TERMINAL_UPDATE_FAILURES = Object.freeze({
   'terminal-permission-update': `permission denied EACCES EPERM; ${TRANSIENT_FAILURE_CONTEXT}`,
@@ -83,6 +114,10 @@ const TERMINAL_UPDATE_FAILURES = Object.freeze({
   'terminal-argument-update': `invalid argument --scope; ${TRANSIENT_FAILURE_CONTEXT}`,
   'terminal-plugin-not-found-update': `plugin not found; ${TRANSIENT_FAILURE_CONTEXT}`,
   'terminal-marketplace-not-found-update': `marketplace not found; ${TRANSIENT_FAILURE_CONTEXT}`,
+  'named-plugin-not-found-update': 'Plugin "x" not found in marketplace; connection reset',
+  'named-marketplace-not-found-update': "Marketplace 'third' not found; network timeout",
+  'invalid-marketplace-name-update': 'invalid marketplace name; socket hang up',
+  'unknown-option-update': 'unknown option --scope; ECONNRESET',
   'transient-update': TRANSIENT_FAILURE_CONTEXT,
 });
 
@@ -211,6 +246,10 @@ if (mode === 'permission-update' && isUpdate) {
 if (mode === 'route-secrets' && args[0] === 'plugin') {
   process.stderr.write(${JSON.stringify(ROUTE_SECURITY_STDERR)});
   process.exit(50);
+}
+if (mode === 'ansi-route-secrets' && args[0] === 'plugin') {
+  process.stderr.write(${JSON.stringify(ANSI_SECURITY_STDERR)});
+  process.exit(52);
 }
 const terminalFailure = ${JSON.stringify(TERMINAL_UPDATE_FAILURES)}[mode];
 if (terminalFailure && isUpdate) {

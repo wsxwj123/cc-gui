@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
+  ANSI_SECRET_CANARIES,
   assertCliStageRecorded,
   assertSuccess,
   FAKE_SECRET_CANARIES,
@@ -89,7 +90,7 @@ function assertSanitizedFailure(host, result, expectedStage) {
   assert.ok(publicText.length <= 16_384, `${expectedStage} public error exceeds 16384 characters`);
 }
 
-function assertSafeRouteFailure(host, observation) {
+function assertSafeRouteFailure(host, observation, canaries = ROUTE_SECRET_CANARIES) {
   const { label, result, structured } = observation;
   assert.notEqual(result.response.status, 404, `${label} public route is unavailable`);
   assert.equal(result.response.ok, false, `${label} returned success after its CLI command failed`);
@@ -108,7 +109,7 @@ function assertSafeRouteFailure(host, observation) {
 
   const publicStrings = collectPublicStrings(result.body);
   const publicText = publicStrings.map(({ value }) => value).join('\n');
-  ROUTE_SECRET_CANARIES.forEach((secret, index) => {
+  canaries.forEach((secret, index) => {
     assert.equal(publicText.includes(secret), false, `${label} leaked route secret canary #${index + 1}`);
   });
   assert.ok(publicText.includes('R33_SAFE_CONTEXT'), `${label} removed all understandable failure context`);
@@ -116,6 +117,62 @@ function assertSafeRouteFailure(host, observation) {
     assert.ok(value.length <= 4_096, `${label} public field ${path} exceeds 4096 characters`);
   }
   assert.ok(result.text.length <= 16_384, `${label} complete public response exceeds 16384 characters`);
+}
+
+async function observePluginRouteFailures(host) {
+  const payload = await host.requireValidatedLocalPayload();
+  const add = await host.cli(['plugin', 'marketplace', 'add', payload.repo]);
+  assert.equal(add.code, 0, 'route security fixture marketplace was not prepared');
+  const identity = `${payload.name}@${payload.marketplace}`;
+  const routeCases = [
+    {
+      label: 'update',
+      expectedCommand: 'update',
+      invoke: () => host.submitPluginOperation('R33_UPDATE_URL', 'POST', identity),
+    },
+    {
+      label: 'uninstall',
+      expectedCommand: 'uninstall',
+      invoke: () => host.submitPluginOperation('R33_UNINSTALL_URL', 'DELETE', identity),
+    },
+    {
+      label: 'enable',
+      expectedCommand: 'enable',
+      invoke: () => host.submitPluginOperation('R33_ENABLE_URL', 'PUT', identity),
+    },
+    {
+      label: 'disable',
+      expectedCommand: 'disable',
+      invoke: () => host.submitPluginOperation('R33_DISABLE_URL', 'PUT', identity),
+    },
+    {
+      label: 'install',
+      expectedCommand: 'install',
+      structured: true,
+      invoke: () => host.submitInstall({ name: payload.name, marketplace: payload.marketplace }),
+    },
+    {
+      label: 'available',
+      expectedCommand: null,
+      invoke: () => host.requestAvailable(),
+    },
+  ];
+
+  const observations = [];
+  for (const routeCase of routeCases) {
+    const before = (await host.cliRecords()).length;
+    const result = await routeCase.invoke();
+    const records = (await host.cliRecords()).slice(before);
+    assert.ok(records.some((record) => record.args[0] === 'plugin'), `${routeCase.label} did not invoke the CLI wrapper`);
+    if (routeCase.expectedCommand) {
+      assert.ok(
+        records.some((record) => record.args[1] === routeCase.expectedCommand),
+        `${routeCase.label} did not invoke claude plugin ${routeCase.expectedCommand}`,
+      );
+    }
+    observations.push({ ...routeCase, result });
+  }
+  return [...observations].sort((left, right) => Number(right.structured) - Number(left.structured));
 }
 
 test('PLUG-AVAIL-001 [network] GUI emits 12 unique default payloads present in backend and CLI available JSON', { timeout: NETWORK_TIMEOUT }, async (t) => {
@@ -309,61 +366,15 @@ test('PLUG-SEC-001 [offline] add and install failures redact secrets and bound p
 
 test('PLUG-SEC-ROUTES-001 [offline] every public plugin route redacts and bounds CLI failures', { timeout: OFFLINE_TIMEOUT }, async (t) => {
   await runAcceptanceCase(t, { wrapperMode: 'route-secrets' }, async (host) => {
-    const payload = await host.requireValidatedLocalPayload();
-    const add = await host.cli(['plugin', 'marketplace', 'add', payload.repo]);
-    assert.equal(add.code, 0, 'route security fixture marketplace was not prepared');
-    const identity = `${payload.name}@${payload.marketplace}`;
-    const routeCases = [
-      {
-        label: 'update',
-        expectedCommand: 'update',
-        invoke: () => host.submitPluginOperation('R33_UPDATE_URL', 'POST', identity),
-      },
-      {
-        label: 'uninstall',
-        expectedCommand: 'uninstall',
-        invoke: () => host.submitPluginOperation('R33_UNINSTALL_URL', 'DELETE', identity),
-      },
-      {
-        label: 'enable',
-        expectedCommand: 'enable',
-        invoke: () => host.submitPluginOperation('R33_ENABLE_URL', 'PUT', identity),
-      },
-      {
-        label: 'disable',
-        expectedCommand: 'disable',
-        invoke: () => host.submitPluginOperation('R33_DISABLE_URL', 'PUT', identity),
-      },
-      {
-        label: 'install',
-        expectedCommand: 'install',
-        structured: true,
-        invoke: () => host.submitInstall({ name: payload.name, marketplace: payload.marketplace }),
-      },
-      {
-        label: 'available',
-        expectedCommand: null,
-        invoke: () => host.requestAvailable(),
-      },
-    ];
+    const observations = await observePluginRouteFailures(host);
+    observations.forEach((observation) => assertSafeRouteFailure(host, observation));
+  });
+});
 
-    const observations = [];
-    for (const routeCase of routeCases) {
-      const before = (await host.cliRecords()).length;
-      const result = await routeCase.invoke();
-      const records = (await host.cliRecords()).slice(before);
-      assert.ok(records.some((record) => record.args[0] === 'plugin'), `${routeCase.label} did not invoke the CLI wrapper`);
-      if (routeCase.expectedCommand) {
-        assert.ok(
-          records.some((record) => record.args[1] === routeCase.expectedCommand),
-          `${routeCase.label} did not invoke claude plugin ${routeCase.expectedCommand}`,
-        );
-      }
-      observations.push({ ...routeCase, result });
-    }
-    [...observations]
-      .sort((left, right) => Number(right.structured) - Number(left.structured))
-      .forEach((observation) => assertSafeRouteFailure(host, observation));
+test('PLUG-SEC-ANSI-001 [offline] ANSI-obfuscated and derived secret keys are redacted on every plugin route', { timeout: OFFLINE_TIMEOUT }, async (t) => {
+  await runAcceptanceCase(t, { wrapperMode: 'ansi-route-secrets' }, async (host) => {
+    const observations = await observePluginRouteFailures(host);
+    observations.forEach((observation) => assertSafeRouteFailure(host, observation, ANSI_SECRET_CANARIES));
   });
 });
 
@@ -403,6 +414,33 @@ test('PLUG-ERR-TERMINAL-001 [offline] terminal update errors outrank mixed trans
       ['terminal-argument-update', false, 'invalid argument'],
       ['terminal-plugin-not-found-update', false, 'plugin not found'],
       ['terminal-marketplace-not-found-update', false, 'marketplace not found'],
+    ];
+    const observations = [];
+    for (const [mode, retryable, label] of cases) {
+      await host.restartBackend({ R33_CLI_WRAPPER_MODE: mode });
+      observations.push({ label, retryable, result: await host.submitInstall(payload) });
+    }
+    for (const { label, retryable, result } of observations) {
+      assert.equal(result.response.ok, false, `${label} update unexpectedly succeeded`);
+      host.assertStructuredError(host.errorFrom(result.body), {
+        stage: 'marketplace-update',
+        code: 'CLI_EXIT_NONZERO',
+        retryable,
+        timeoutMs: 120_000,
+      });
+    }
+  });
+});
+
+test('PLUG-ERR-NAMED-TERMINAL-001 [offline] named terminal update errors outrank network wording', { timeout: OFFLINE_TIMEOUT }, async (t) => {
+  await runAcceptanceCase(t, { wrapperMode: 'named-plugin-not-found-update' }, async (host) => {
+    const payload = await host.prepareStaleMarketplace();
+    const cases = [
+      ['transient-update', true, 'pure transient network'],
+      ['named-plugin-not-found-update', false, 'quoted plugin not found in marketplace'],
+      ['named-marketplace-not-found-update', false, 'quoted marketplace not found'],
+      ['invalid-marketplace-name-update', false, 'invalid marketplace name'],
+      ['unknown-option-update', false, 'unknown option'],
     ];
     const observations = [];
     for (const [mode, retryable, label] of cases) {
