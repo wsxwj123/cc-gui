@@ -7,7 +7,7 @@ import {
   isApprovedPlanToolCall,
   mergeEquivalentPlanToolCall,
   planSignature,
-} from '../../client/src/utils/plan.js';
+} from '../utils/plan.js';
 
 export { isApprovedPlanToolCall };
 import { parseJsonl, readJsonlEdges } from '../utils/jsonl-parser.js';

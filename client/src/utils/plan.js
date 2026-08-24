@@ -1,37 +1,20 @@
-// ExitPlanMode 的 persisted / local-finished / streaming 三类来源共用同一套纯规则。
-// 等价性刻意很窄：只统一 CRLF→LF，再去首尾空白；内部 Markdown、大小写与空白原样保留。
-export function normalizePlanText(value) {
-  return typeof value === 'string' ? value.replace(/\r\n/g, '\n').trim() : '';
-}
+// 共享核心必须位于 Tauri 会打包的 server 资源树。此前 server 反向导入 client/src，
+// 源码测试可用、安装包却没有 client/src，导致后端启动即 ERR_MODULE_NOT_FOUND。
+import {
+  isApprovedPlanToolCall,
+  mergeEquivalentPlanToolCall,
+  normalizePlanText,
+  planSignature,
+  planTextOfToolCall,
+} from '../../../server/utils/plan.js';
 
-export function planTextOfToolCall(toolCall) {
-  if (toolCall?.name !== 'ExitPlanMode') return '';
-  return normalizePlanText(toolCall.input?.plan ?? toolCall.input?.content ?? '');
-}
-
-export function planSignature(toolCall) {
-  return planTextOfToolCall(toolCall);
-}
-
-export function isApprovedPlanToolCall(toolCall) {
-  if (toolCall?.name !== 'ExitPlanMode') return false;
-  const result = toolCall?.result;
-  if (!result || result.interrupted || result.synthetic) return false;
-  if (!result.isError) return true;
-  const text = typeof result.content === 'string'
-    ? result.content
-    : (Array.isArray(result.content) ? result.content.map((part) => part?.text || '').join('') : '');
-  return /用户已批准此计划/.test(text);
-}
-
-// 保留首卡；只有后卡带来首卡尚无的“已批准”结果时才合并 result。
-export function mergeEquivalentPlanToolCall(first, later) {
-  if (!first || !later || planSignature(first) !== planSignature(later)) return first;
-  if (!isApprovedPlanToolCall(first) && isApprovedPlanToolCall(later)) {
-    return { ...first, result: later.result };
-  }
-  return first;
-}
+export {
+  isApprovedPlanToolCall,
+  mergeEquivalentPlanToolCall,
+  normalizePlanText,
+  planSignature,
+  planTextOfToolCall,
+};
 
 export function reconcilePlanToolCalls(toolCalls) {
   const reconciled = [];
