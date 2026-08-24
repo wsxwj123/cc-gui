@@ -214,6 +214,96 @@ export function clearSkinDom({ root = document.documentElement } = {}) {
   bump();
 }
 
+// ── r40 取证插桩(皮肤加载链;纯附加,不改任何既有行为语义) ──────────
+// 背景:用户机器(Tauri WKWebView)上 T2 皮肤「模板层生效、skin.css/client.js 两层不
+// 上身且界面卡死不动」,三路复现全部失败 → 缺现场数据。这里给加载链每一步「先发再做」
+// 地上报一行到既有 POST /api/client-log(落 ~/.claude-gui/client.log):日志停在哪一步,
+// 下一步就是凶手。三条红线:①只插上报,既有步序/早退/快照/代际一字不动;②全同步
+// (不引入 await,不破坏「快照→插节点→state 赋值同一 tick」不变量);③任何异常一律
+// 吞掉 —— 取证绝不许反过来影响功能。
+// 通道:navigator.sendBeacon 优先(卡死/关页时仍能送出),Blob 必须标 application/json,
+// 否则 express.json 不解析 → 服务端 400,证据白丢;sendBeacon 不可用/被拒时 fetch
+// keepalive 兜底。服务端对「同 message」有 5s 限流,故重复步点(心跳)在载荷里带 n,
+// 便于区分「被限流丢行」与「真的没发生」。
+let skinTraceEnvSent = false;
+function skinTrace(step, extra) {
+  try {
+    // 首次上报前补一行环境(UA/视口/zoom/主题)——定位「只有这台机器复现」的环境差异。
+    // 递归一层即止(标志先置位),保证环境行必定排在第一条步点之前。
+    if (!skinTraceEnvSent) {
+      skinTraceEnvSent = true;
+      let env = {};
+      try {
+        env = {
+          ua: navigator?.userAgent || '',
+          w: window?.innerWidth,
+          h: window?.innerHeight,
+          zoom: document?.documentElement?.style?.zoom || '',
+          theme: document?.documentElement?.getAttribute('data-theme') || '',
+        };
+      } catch {}
+      skinTrace('skin:env', env);
+    }
+    // 载荷落在 stack 字段:client-log 路由只持久化 ts/iso/kind/message/stack/url,
+    // 顶层多写的字段会被服务端整个丢掉(实测),故步点细节序列化进 stack。
+    const body = JSON.stringify({
+      kind: 'skin-trace', message: String(step), stack: JSON.stringify(extra || {}),
+    });
+    let sent = false;
+    try { sent = !!navigator.sendBeacon('/api/client-log', new Blob([body], { type: 'application/json' })); } catch {}
+    if (!sent) {
+      try {
+        fetch('/api/client-log', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body, keepalive: true,
+        }).catch(() => {});
+      } catch {}
+    }
+  } catch {}
+}
+
+// r40 探针:装载完成后的「冻结现场分型」(用户新线索 = 点试穿后整个 GUI 任何按钮都点
+// 不动、必须 Cmd+Q,且冻结帧里皮肤零视觉)。三根探针各答一问:
+//   post-load:first-frame —— 渲染管线还出不出帧(永不触发 = 渲染管线死);
+//   post-load:heartbeat   —— 主线程还活不活着(停在第 N 次 = 卡死时刻);
+//   post-load:pointerdown —— 点击有没有到达 JS(有 = 事件到了但 UI 不响应,
+//                            无 = 被原生层/遮罩截走)。
+// 30s 窗口后自动清理,皮肤卸载(disposeT2)同步清理,不留残余。
+const PROBE_WINDOW_MS = 30000;
+const PROBE_BEAT_MS = 6000; // 判官建议2:避开 client-log 服务端 5s 同消息限流边界
+const PROBE_BEATS = 6;
+let skinProbes = null;
+/** 清干净三根探针(interval / pointerdown 监听 / 未触发的 rAF / 30s 兜底定时器)。幂等。 */
+function disposeSkinProbes() {
+  const p = skinProbes;
+  skinProbes = null;
+  if (!p) return;
+  try { clearInterval(p.beat); } catch {}
+  try { clearTimeout(p.stop); } catch {}
+  try { cancelAnimationFrame(p.raf); } catch {}
+  try { window.removeEventListener('pointerdown', p.onPointerDown, { capture: true }); } catch {}
+}
+function armSkinProbes(base) {
+  disposeSkinProbes(); // 一次只留一组
+  const p = {};
+  skinProbes = p;
+  try { p.raf = requestAnimationFrame(() => skinTrace('post-load:first-frame', base)); } catch {}
+  try {
+    let n = 0;
+    p.beat = setInterval(() => {
+      n += 1;
+      skinTrace('post-load:heartbeat', { ...base, n, t: Math.round(performance?.now?.() || 0) });
+      if (n >= PROBE_BEATS) { try { clearInterval(p.beat); } catch {} p.beat = null; }
+    }, PROBE_BEAT_MS);
+  } catch {}
+  try {
+    p.onPointerDown = (e) => skinTrace('post-load:pointerdown', {
+      ...base, x: e?.clientX, y: e?.clientY, target: e?.target?.tagName,
+    });
+    window.addEventListener('pointerdown', p.onPointerDown, { capture: true });
+  } catch {}
+  try { p.stop = setTimeout(disposeSkinProbes, PROBE_WINDOW_MS); } catch {}
+}
+
 // ── T2 代码层(开发者皮肤;总开关 + 双端静态校验 + 三重卸载兜底) ──
 // r26-D1:装载代际 token——每次激活/停用递增。快速连切(或 StrictMode 双跑)时慢一拍
 // 的装载在任一 await 回来后比对代际,过期即弃(不插节点、不盖 state.t2),杜绝
@@ -235,12 +325,19 @@ export function validateT2Client(text) {
  * gen = r26-D1 代际 token(activateSkin 领代传入;直调则自领),过期返回 superseded。
  */
 export async function loadT2(id, manifest, texts = null, gen = null) {
-  if (!devSkinsEnabled()) return { loaded: false, reason: 'disabled' };
+  // r40 取证:每步「先发再做」——下一步同步卡死时,日志停在哪一步就是凶手。
+  const devEnabled = devSkinsEnabled();
+  skinTrace('loadT2:enter', { id, gen, devEnabled, tier: manifest?.tier, hasTexts: !!texts });
+  if (!devEnabled) {
+    skinTrace('loadT2:abort', { id, gen, reason: 'disabled' });
+    return { loaded: false, reason: 'disabled' };
+  }
   // r26-D1:调用方未领代则自领一代(直接调 loadT2 的路径);之后每个 await 回来
   // 先比代,过期 = 已有更新的激活/停用,一律不插节点不盖 state(superseded)。
   if (gen == null) gen = ++t2Gen;
   const stale = () => gen !== t2Gen;
   disposeT2();
+  skinTrace('loadT2:disposed', { id, gen });
   const get = async (name) => {
     if (texts && typeof texts[name] === 'string') return texts[name];
     const key = name.replace('.', '_');
@@ -249,14 +346,24 @@ export async function loadT2(id, manifest, texts = null, gen = null) {
     return r.ok ? await r.text() : null;
   };
   const css = await get('skin.css');
-  if (stale()) return { loaded: false, reason: 'superseded' };
+  if (stale()) { skinTrace('loadT2:abort', { id, gen, reason: 'superseded', at: 'skin.css' }); return { loaded: false, reason: 'superseded' }; }
   const a11y = await get('a11y.css');
-  if (stale()) return { loaded: false, reason: 'superseded' };
+  if (stale()) { skinTrace('loadT2:abort', { id, gen, reason: 'superseded', at: 'a11y.css' }); return { loaded: false, reason: 'superseded' }; }
   const js = await get('client.js');
-  if (stale()) return { loaded: false, reason: 'superseded' };
+  if (stale()) { skinTrace('loadT2:abort', { id, gen, reason: 'superseded', at: 'client.js' }); return { loaded: false, reason: 'superseded' }; }
+  skinTrace('loadT2:texts-ready', {
+    id, gen, cssLen: css ? css.length : 0, a11yLen: a11y ? a11y.length : 0, jsLen: js ? js.length : 0,
+  });
   if (js) {
+    // 校验器是 ReDoS 嫌疑位:enter 先发,done 带耗时——只有 enter 没有 done = 卡在正则。
+    skinTrace('loadT2:validator-enter', { id, gen, jsLen: js.length });
+    const t0 = Date.now();
     const v = validateT2Client(js);
-    if (!v.ok) return { loaded: false, reason: 'script_rejected', hits: v.hits };
+    skinTrace('loadT2:validator-done', { id, gen, ms: Date.now() - t0, ok: v.ok, hits: v.hits });
+    if (!v.ok) {
+      skinTrace('loadT2:abort', { id, gen, reason: 'script_rejected', hits: v.hits });
+      return { loaded: false, reason: 'script_rejected', hits: v.hits };
+    }
   }
   // ── 以下为同一同步 tick(快照→插节点→state 赋值,无 await 即无竞态缝)──
   // r26-D2 二次快照法:attrSnapshot = preSnap(装载前),loadedSnap = 装载完成后同一
@@ -274,6 +381,7 @@ export async function loadT2(id, manifest, texts = null, gen = null) {
     document.head.appendChild(node);
     t2.styleNodes.push(node);
   }
+  skinTrace('loadT2:styles-appended', { id, gen, n: t2.styleNodes.length });
   if (js) {
     // Blob-URL 经典脚本(对齐 dsh 执行模型);皮肤脚本用 window.__cguiSkinDispose 注册卸载器。
     const blob = new Blob([js], { type: 'text/javascript' });
@@ -281,8 +389,12 @@ export async function loadT2(id, manifest, texts = null, gen = null) {
     const node = document.createElement('script');
     node.setAttribute('data-cgui-skin-style', id);
     node.src = t2.blobUrl;
+    // 判官建议4:load 事件在脚本【执行完】才触发——皮肤脚本同步死循环则此步永不出现,
+    // 把"脚本执行死"与"样式重算死"的日志签名彻底分开(否则渲染帧偶尔抢先会重合)。
+    node.onload = () => skinTrace('loadT2:script-executed', { id, gen });
     document.head.appendChild(node);
     t2.scriptNode = node;
+    skinTrace('loadT2:script-appended', { id, gen });
   }
   // r26-D2:装载完成后同一同步 tick 二次快照(皮肤脚本同步执行的痕迹落在两快照差集里)
   const loadedSnap = {};
@@ -291,6 +403,8 @@ export async function loadT2(id, manifest, texts = null, gen = null) {
   }
   t2.loadedSnap = loadedSnap;
   state.t2 = t2;
+  skinTrace('loadT2:done', { id, gen });
+  armSkinProbes({ id, gen }); // 装载后 30s 冻结现场分型(异常全吞,disposeT2/超时自清)
   return { loaded: true };
 }
 
@@ -304,6 +418,9 @@ const APP_ATTRS = new Set(['data-theme', 'data-cgui-theme', 'data-theme-system',
 /** 卸载 T2:①皮肤自注册 disposer → ②标记节点逐项移除 → ③documentElement 属性按双快照 diff 还原。 */
 export function disposeT2() {
   const t2 = state.t2;
+  // r40:先把取证探针(心跳/pointerdown 监听/rAF/30s 兜底)同步清干净 —— 皮肤卸载后
+  // 不留残余。皮肤自持的 window.__cguiSkinDispose 归皮肤所有,这里不包装、不替换。
+  disposeSkinProbes();
   try { window.__cguiSkinDispose?.(); } catch {}
   try { window.__cguiSkinDispose = undefined; } catch {}
   for (const node of document.querySelectorAll('[data-cgui-skin-style]')) {
@@ -356,6 +473,7 @@ export async function activateSkin(row, { tryOn = false } = {}) {
   const { id, manifest, t2Texts } = row || {};
   if (!id || !manifest) return;
   const gen = ++t2Gen; // r26-D1:每次激活领一代,此前在途装载全部失效
+  skinTrace('activate:start', { id, gen, tier: manifest.tier, source: row.source || null, tryOn });
   disposeT2();
   applySkinDom(id, manifest);
   state.tryOn = tryOn;
