@@ -14,14 +14,33 @@ export function createDraftSessionBindingsStore({
 } = {}) {
   let writeTail = Promise.resolve();
 
-  const read = async () => {
+  const quarantineMalformed = async (error) => {
+    const quarantined = `${file}.corrupt-${now()}`;
     try {
-      const parsed = JSON.parse(await fs.readFile(file, 'utf8'));
-      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+      await fs.rename(file, quarantined);
+      console.warn(`[draft-session-bindings] malformed index quarantined: ${quarantined}`);
+    } catch (renameError) {
+      console.warn('[draft-session-bindings] malformed index could not be quarantined:', renameError?.message || renameError);
+    }
+    void error;
+    return {};
+  };
+
+  const read = async () => {
+    let raw;
+    try {
+      raw = await fs.readFile(file, 'utf8');
     } catch (error) {
       if (error?.code === 'ENOENT') return {};
       throw error;
     }
+    let parsed;
+    try { parsed = JSON.parse(raw); }
+    catch (error) { return quarantineMalformed(error); }
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return quarantineMalformed(new Error('binding index root must be an object'));
+    }
+    return parsed;
   };
 
   const record = ({ draftId, sessionId, projectHash }) => {
@@ -74,3 +93,18 @@ export const recordDraftSessionBinding = (binding) => draftSessionBindingsStore.
 export const mergeDraftBindingsIntoSessions = (sessions, projectHash) => (
   draftSessionBindingsStore.mergeIntoSessions(sessions, projectHash)
 );
+
+// 恢复索引是可选旁路，绝不能把核心 listSessions 的成功改写成项目 403/500。
+// 权限错误只记录索引自身路径，不冒充 ~/.claude/projects 的访问错误。
+export async function mergeDraftBindingsBestEffort(
+  sessions,
+  projectHash,
+  { mergeImpl = mergeDraftBindingsIntoSessions, diagnose = console.warn } = {},
+) {
+  try {
+    return await mergeImpl(sessions, projectHash);
+  } catch (error) {
+    diagnose?.(`[draft-session-bindings] optional merge skipped (${error?.code || 'error'}): ${error?.message || error}`);
+    return sessions;
+  }
+}
