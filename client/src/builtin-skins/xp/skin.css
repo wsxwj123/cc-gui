@@ -245,7 +245,8 @@ body[data-cgui-xp] [data-cgui="topbar-mobile"] input {
 
 /* ── ⑥b 弹层 = XP 米灰窗口 + 深字（根治⑥的「顶栏全白字」溢进弹层） ──
    ⑥ 的 `[data-cgui="topbar"] *` 把顶栏所有后代刷白。主题弹层/分屏弹层是顶栏按钮的 DOM
-   后代（absolute 定位，没 portal 出去），于是浅底弹层上一片白字 —— 用户实报「主题与外观」
+   后代（主题/分屏弹层是 absolute、没 portal 出去；Model/Provider/Effort 三弹层 portal 到
+   body 不受 ⑥ 白字波及，走下面基础条统一配色），于是浅底弹层上一片白字 —— 用户实报「主题与外观」
    四个页签几乎看不见。修法不是逐处补字色，而是给弹层整体配一组自洽的底色+文字色：
    米灰窗口底 + 深字；顶栏内弹层的后代统一 `color: inherit`（选择器多一节 .glass-popover，
    压过⑥的白字，无需 !important）。带内联 style 色的元素（配色卡片按 sw.fg 上色）
