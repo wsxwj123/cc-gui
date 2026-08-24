@@ -1154,8 +1154,9 @@ export function stripPluginAnsi(value) {
 function isPluginSensitiveKey(key) {
   // 先剥零宽/控制字符,否则 `to<ZWSP>ken=` 会把敏感词劈开、绕过下面的按词判定。
   // 覆盖:控制符 + DEL、Unicode 格式类全类(Cf:软连字符/零宽/方向标记/BOM 等)、
-  // CGJ、变体选择符(基本面 FE00-FE0F + 增补面 E0100-E01EF)——枚举漏一个就是绕过。
-  const raw = String(key || '').replace(/[\x00-\x1F\x7F\p{Cf}\u034F\uFE00-\uFE0F\u{E0100}-\u{E01EF}]/gu, '');
+  // CGJ、变体选择符全三段(蒙文 180B-180F + 基本面 FE00-FE0F + 增补面 E0100-E01EF)
+  // ——枚举漏一个就是绕过(180B-180D/180F 是 Mn 不在 Cf 内,判官 R-1 实测劈键)。
+  const raw = String(key || '').replace(/[\x00-\x1F\x7F\p{Cf}\u034F\u180B-\u180F\uFE00-\uFE0F\u{E0100}-\u{E01EF}]/gu, '');
   const words = raw
     .replace(/([a-z\d])([A-Z])/g, '$1 $2')
     .replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2')
@@ -1174,7 +1175,7 @@ export function sanitizePluginErrorText(value, limit = PLUGIN_ERROR_FIELD_LIMIT)
   // 控制符之外,零宽/软连字符也必须在下面所有键捕获/凭证正则之前剥掉,类与
   // isPluginSensitiveKey 对齐(保留 \t\n\r:行式正则依赖行边界)。否则 `au<ZWSP>th=`
   // 把键劈开后双向失灵:敏感值漏检、`mon<ZWSP>key=` 反被误遮、`Bear<ZWSP>er` 绕过。
-  text = text.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f\p{Cf}\u034f\ufe00-\ufe0f\u{e0100}-\u{e01ef}]/gu, '');
+  text = text.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f\p{Cf}\u034f\u180b-\u180f\ufe00-\ufe0f\u{e0100}-\u{e01ef}]/gu, '');
   text = text.replace(/\b([a-z][a-z\d+.-]*:\/\/)([^/\s@]+)@/gi, '$1[REDACTED]@');
   text = text.replace(/\b((?:Proxy-)?Authorization\s*:\s*)[^\r\n]+/gi, '$1[REDACTED]');
   text = text.replace(/\b(Bearer|Basic)\s+(?:"[^"]*"|'[^']*'|[^\s"',;}\]]+)/gi, '$1 [REDACTED]');

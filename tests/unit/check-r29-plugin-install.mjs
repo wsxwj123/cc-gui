@@ -513,6 +513,15 @@ const noProxy = async () => null;
   assert.equal(vsObj[`api${VS1}key`], '[REDACTED]', 't12: 变体选择符混入的对象键仍脱敏');
   assert.ok(sanitizePluginErrorText(`mon${MVS}key=safe-mvs`).includes('safe-mvs'),
     't12: 蒙文分隔符劈开的 monkey 仍不误遮');
+  // 判官 R-1:蒙文自由变体选择符 FVS1-4(180B-180D/180F 属 Mn 不在 \p{Cf})是最后一个
+  // 真零宽官方功能字符家族。变异:从剥除类去掉 180B-180F 段 → 下面断言红。
+  for (const cp of [0x180B, 0x180D, 0x180F]) {
+    const FVS = String.fromCharCode(cp);
+    assert.ok(!sanitizePluginErrorText(`au${FVS}th=FVSLEAK`).includes('FVSLEAK'),
+      `t12: FVS U+${cp.toString(16)} 劈开的 auth 仍脱敏`);
+  }
+  const fvsObj = sanitizePluginPublicValue({ [`mon${String.fromCharCode(0x180B)}key`]: 'safe-fvs' });
+  assert.equal(Object.values(fvsObj)[0], 'safe-fvs', 't12: FVS 劈开的对象键 monkey 归一后不误遮');
 }
 
 // t12b stripPluginAnsi 有界化(I-1):无终止符的字符串控制序列此前用惰性 [\s\S]*? 对每个
