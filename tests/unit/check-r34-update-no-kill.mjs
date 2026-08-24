@@ -15,8 +15,9 @@
 //   ⑥源码守卫(字符串断言):8 分钟那条路径上不得再出现 killUpdateTree();
 //   ⑦判死后必须把代理从子进程 env 里删掉(只"不注入"= {...process.env} 照样带过去);
 //   ⑧spawn 前的取消要有标志兑现;done 帧要带 error;取消按钮要接线。
-// 活端口用 6703;死端口取"刚 listen 完就关掉"的临时端口(固定端口可能被本项目 dev
-// server 占用造成假红,写法照 check-r26-c2-proxy-probe.mjs)。跑完关干净。
+// 端口一律取临时口(listen(0) 拿活口;起完立刻关拿死口),写法照 check-r26-c2-proxy-probe.mjs:
+// 6703/6704 被十几个用例硬编码抢(check-permission-nonce、check-r29-crashlog 等还没有
+// 退让重试),再钉死端口就是在制造假红。跑完关干净。
 // Run: node tests/unit/check-r34-update-no-kill.mjs
 import assert from 'node:assert/strict';
 import { createServer } from 'node:net';
@@ -24,8 +25,7 @@ import { readFileSync } from 'node:fs';
 import { makeTmpHome, cleanupDirs } from '../acceptance/r26/lib.mjs';
 
 const TMP_HOME = makeTmpHome('r34-unit'); // version-check 顶层固化 PREFS_FILE,先隔离 HOME
-const LIVE_PORT = 6703;
-// 「确定没人听」的端口:起 server 拿到端口号后立刻关(固定 6704 会被 dev server 占 → 假红)
+// 「确定没人听」的端口:起 server 拿到端口号后立刻关
 async function closedPort() {
   const s = createServer();
   await new Promise((r) => s.listen(0, '127.0.0.1', r));
@@ -108,6 +108,11 @@ try {
   // ②兜底文案要保留旧版给的两个出口(代理/改用终端),别只剩"已终止"
   assert.ok(/确认代理已开后重试,或点「改用终端更新」走官方渠道/.test(UPDATE_HARD_LIMIT_ERROR),
     'r34-②: 兜底文案要给出重试/换终端两个出口');
+  // B2:恢复指引只能由 withRecoveryHint 按渠道追加 —— 写进常量会对 native(原子替换,
+  // 不可能半装)也说"claude 可能不可用",且与追加句重复。
+  assert.ok(!/若 claude 因此不可用/.test(UPDATE_HARD_LIMIT_ERROR), 'r34-B2: 常量里不得自带恢复指引');
+  assert.equal(withRecoveryHint(UPDATE_HARD_LIMIT_ERROR, 'claude upgrade'), UPDATE_HARD_LIMIT_ERROR,
+    'r34-B2: native 渠道的兜底文案里不出现"可能不可用/补齐"的话');
 
   // ④恢复指引只挂在 npm 渠道(native `claude upgrade` 是原子替换,没有半成品问题)
   assert.equal(isNpmRegistryCmd(NPM_CMD), true, 'r34-④: 识别 npm-registry 更新命令');
@@ -129,9 +134,21 @@ try {
       'r34-⑤: 回环代理不可达必须判死(变异哨兵 —— 删掉探活分流这里必红)');
 
     liveServer = createServer();
-    await new Promise((r) => liveServer.listen(LIVE_PORT, '127.0.0.1', r));
-    const liveUrl = `http://127.0.0.1:${LIVE_PORT}`;
+    await new Promise((r) => liveServer.listen(0, '127.0.0.1', r)); // 临时口,别抢 6703/6704
+    const livePort = liveServer.address().port;
+    const liveUrl = `http://127.0.0.1:${livePort}`;
     assert.equal(await liveProxy(liveUrl), liveUrl, 'r34-⑤: 探活通过才注入');
+
+    // B1:无 scheme 的写法 curl/npm 都认,但裸 new URL 处理不了 —— 落到"证不了死就信任"
+    // 就等于把死代理原样注回去,回到 60 分钟挂死。两种形态都要能判死:
+    assert.equal(await liveProxy(`127.0.0.1:${DEAD_PORT}`), null,
+      'r34-B1: 无 scheme 的回环死代理(new URL 直接抛)必须判死');
+    assert.equal(await liveProxy(`localhost:${DEAD_PORT}`), null,
+      'r34-B1: localhost:port 会被当成 scheme 解析"成功"但 hostname 为空,同样要判死');
+    assert.equal(await liveProxy(`127.0.0.1:${livePort}`), `127.0.0.1:${livePort}`,
+      'r34-B1: 无 scheme 的活代理照常信任(补 http:// 只为解析,不改返回值)');
+    assert.equal(await liveProxy('not a url', async () => false), 'not a url',
+      'r34-B1: 补了 scheme 仍解析不了 = 无法证伪,信任');
 
     // 误杀防线:判死之后会把代理从子进程 env 里删掉,所以"证不了死"的一律信任 ——
     // 误杀一个能用的代理 = 用户直连挂满 60 分钟兜底,比不探活更糟。
@@ -142,8 +159,8 @@ try {
     assert.equal(probed, false, 'r34-⑤: 非回环压根不该发探测');
     assert.equal(await liveProxy('http://10.0.0.8:3128', spy), 'http://10.0.0.8:3128',
       'r34-⑤: 局域网代理同样信任');
-    assert.equal(await liveProxy('127.0.0.1:7890', spy), '127.0.0.1:7890',
-      'r34-⑤: 无 scheme 解析不了 ≠ 死代理,不得判死');
+    assert.equal(await liveProxy('proxy.corp.example:8080', spy), 'proxy.corp.example:8080',
+      'r34-⑤: 无 scheme 的非回环补完 scheme 仍是非回环,照样信任');
     assert.equal(await liveProxy(liveUrl, async () => { throw new Error('boom'); }), liveUrl,
       'r34-⑤: 探测器自己炸也不能判死(无法证伪 → 信任)');
 
@@ -196,8 +213,12 @@ try {
 
     // ⑧spawn 前窗口的取消要真兑现(那时 child 还是 null,killUpdateTree 杀不到东西)
     assert.ok(/cancelRequested: false/.test(src), 'r34-⑧: 任务对象要有 cancelRequested');
-    assert.ok(/if \(updateTask\.cancelRequested\) \{[\s\S]{0,400}return;/.test(src),
-      'r34-⑧: spawn 前必须检查取消标志并直接收尾');
+    const preSpawn = src.slice(src.indexOf('if (updateTask.cancelRequested) {'), src.indexOf('let child;'));
+    assert.ok(/return;/.test(preSpawn), 'r34-⑧: spawn 前必须检查取消标志并直接收尾');
+    // B3:进程压根没起 → 不可能有半成品,再追加"若 claude 因此不可用"是自相矛盾。
+    // 只看代码行:注释里提到函数名不算调用(第一版就被自己的注释绊了)。
+    assert.ok(!/withRecoveryHint/.test(preSpawn.replace(/\/\/.*$/gm, '')), 'r34-B3: spawn 前取消不套恢复指引');
+    assert.ok(/未做任何改动/.test(preSpawn), 'r34-B3: 明说没动过任何东西');
     const cancelIdx = src.indexOf("router.post('/claude-update/cancel'");
     const cancelBody = src.slice(cancelIdx, cancelIdx + 700);
     assert.ok(/killUpdateTree\(\)/.test(cancelBody), 'r34-⑧: cancel 是 r34 后唯一终止口,必须真杀');
