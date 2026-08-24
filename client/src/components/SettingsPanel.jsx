@@ -986,6 +986,9 @@ function CcUpdater() {
   // status: idle | checking | ok | err ; updating: false | true
   const [state, setState] = useState({ status: 'idle' });
   const [updating, setUpdating] = useState(false);
+  // r34-⑥:updating 是本面板的通用忙标志(switchActive / pauseOverride / 安装都置真),
+  // 拿它当"更新进程在跑"用会让取消按钮乱现乱隐。更新流单独一个标志。
+  const [updateRunning, setUpdateRunning] = useState(false);
   const [result, setResult] = useState(null);
   const [logLines, setLogLines] = useState([]);   // CN-2 更新实时日志
   const [installs, setInstalls] = useState(null); // 机器上检测到的所有 claude 安装(null=未加载)
@@ -1091,12 +1094,12 @@ function CcUpdater() {
     // r26-C1:跨渠道(显式 npm 渠道 × 非 npm 安装)先明示再确认 —— 裸跑会把更新
     // 写进 npm 前缀的另一份安装,PATH 里先生效的仍是当前安装(假成功)。
     if (state.crossChannel) {
-      if (!(await confirmDialog(`你选择的更新渠道(npm)与当前安装方式(${METHOD_LABEL[state.method] || state.method || '未知'})不一致:将安装到 npm 全局前缀,与当前安装是两份;PATH 里先生效的仍是当前安装(更新后这里显示的版本可能不变)。\n建议先把更新渠道改回「跟随安装方式」。仍要继续吗?`))) return;
+      if (!(await confirmDialog(`你选择的更新渠道(npm)与当前安装方式(${METHOD_LABEL[state.method] || state.method || '未知'})不一致:将安装到 npm 全局前缀,与当前安装是两份;PATH 里先生效的仍是当前安装(更新后这里显示的版本可能不变)。\n建议先把更新渠道改回「跟随安装方式」。\n更新期间请勿在 GUI 内发消息(Windows 会重新锁住 claude.exe,导致覆盖失败)。仍要继续吗?`))) return;
       setUpdating(true); setResult(null); setLogLines([]);
       return doUpdateStream({ allowCrossChannel: true });
     }
     const cmd = state.updateCommand || 'claude upgrade';
-    if (!(await confirmDialog(`将在应用内运行【${cmd}】更新 Claude Code 到 v${state.latestVersion}（安装方式：${state.method || '未知'}），进度实时显示在下方。\n更新在后台进行:关掉这个面板不会中断,回来还能接着看进度。\n（墙内需已开系统代理;若卡住可点"改用终端"。）确定继续?`))) return;
+    if (!(await confirmDialog(`将在应用内运行【${cmd}】更新 Claude Code 到 v${state.latestVersion}（安装方式：${state.method || '未知'}），进度实时显示在下方。\n更新在后台进行:关掉这个面板不会中断,回来还能接着看进度。\n更新期间请勿在 GUI 内发消息(Windows 会重新锁住 claude.exe,导致覆盖失败)。\n（墙内需已开系统代理;若卡住可点"改用终端"。）确定继续?`))) return;
     setUpdating(true); setResult(null); setLogLines([]);
     return doUpdateStream();
   };
@@ -1106,6 +1109,7 @@ function CcUpdater() {
   // (会启动安装的那个),而这个参数根本没人读 —— 更新恰好在 GET /status 与这次 POST
   // 之间跑完,用户只是打开设置面板就静默起了一次全局安装,毫无确认。
   const doUpdateStream = async ({ attach = false, allowCrossChannel = false } = {}) => {
+    setUpdateRunning(true);
     try {
       // r26-C1:跨渠道确认回执随请求体下发;服务端无回执的裸调用一律拒绝(409/error 帧)。
       const r = await fetch(attach ? '/api/claude-update/attach' : '/api/claude-update/stream', allowCrossChannel
@@ -1133,9 +1137,11 @@ function CcUpdater() {
             loadInstalls();
           }
           else if (ev.type === 'done') {
+            // r34-③:done 无条件覆盖 result —— 取消/兜底超时刚推的 error(含恢复指引)
+            // 会被「命令退出码 null」盖掉。服务端已在 done 帧带上 error,优先用它。
             setResult(ev.code === 0
               ? { ok: true, done: true }
-              : { ok: false, error: `命令退出码 ${ev.code}（见下方日志)` });
+              : { ok: false, error: ev.error || `命令退出码 ${ev.code}（见下方日志)` });
             // 更新成功后让顶栏红色「更新」按钮立刻重查并熄灭(原来要重启 GUI 才消)。
             if (ev.code === 0) window.dispatchEvent(new CustomEvent('cgui:recheck-updates'));
           }
@@ -1145,6 +1151,21 @@ function CcUpdater() {
       setResult({ ok: false, error: e.message || '请求失败' });
     }
     setUpdating(false);
+    setUpdateRunning(false);
+  };
+
+  // r34-①:更新不再有 8 分钟自动强杀(强杀落在「旧包已删、新包没解压完」的窗口会直接
+  // 毁掉安装)。代价是必须给用户一个显式的终止口 —— 服务端 cancel 端点本来就在,只是
+  // 一直没有入口。确认文案必须说清"取消可能留下半成品",否则用户点完不知道要重跑一次。
+  const doUpdateCancel = async () => {
+    if (!(await confirmDialog('终止正在进行的更新?\n下载/解压到一半被终止可能留下半成品安装(claude 暂时不可用),重新运行一次更新即可补齐。', { danger: true }))) return;
+    try {
+      const d = await (await fetch('/api/claude-update/cancel', { method: 'POST' })).json();
+      // r34-②:回执要读 —— 服务端可能根本没在跑(cancelled:false),或进程还没起
+      // (deferred:true,取消已记下、spawn 前兑现)。以前一律当"已终止"是在撒谎。
+      if (!d?.cancelled) setResult({ ok: false, error: '没有正在进行的更新(可能已经结束)。' });
+      else if (d.deferred) setLogLines((p) => [...p, '已记下取消:更新进程尚未启动,将在启动前中止(不会有半成品)。']);
+    } catch (e) { setResult({ ok: false, error: e.message || '终止请求失败' }); }
   };
 
   // 兜底:headless 卡住(如 npm -g 需 sudo)时改用外部终端。
@@ -1494,11 +1515,22 @@ function CcUpdater() {
           更新提示只针对当前使用的版本;另一版本过时不提示。
         </div>
       </div>
-      {/* CN-2 实时进度日志 */}
-      {(updating || logLines.length > 0) && (
-        <pre className="text-[10px] leading-snug font-mono text-ink-soft bg-canvas border border-canvas-deep rounded p-2 max-h-40 overflow-auto whitespace-pre-wrap break-all">
-          {logLines.length ? logLines.join('\n') : '启动中…'}{updating && <span className="animate-pulse"> ▌</span>}
-        </pre>
+      {/* CN-2 实时进度日志。r34-⑥:取消按钮挂在这里 —— 半装状态下 claude 检测不到会走
+          「未安装」分支,而更新提示条只在「已装且有新版」分支渲染,最需要取消的窗口里
+          按钮反而不在。日志块两个分支都可达,且只有更新真在跑时才出现。 */}
+      {(updateRunning || logLines.length > 0) && (
+        <div className="space-y-1">
+          {updateRunning && (
+            <div className="flex justify-end">
+              <button onClick={doUpdateCancel}
+                className="text-[11px] text-error hover:underline"
+                title="终止本次更新(可能留下半成品安装,重跑一次更新即可补齐)">取消更新</button>
+            </div>
+          )}
+          <pre className="text-[10px] leading-snug font-mono text-ink-soft bg-canvas border border-canvas-deep rounded p-2 max-h-40 overflow-auto whitespace-pre-wrap break-all">
+            {logLines.length ? logLines.join('\n') : '启动中…'}{updateRunning && <span className="animate-pulse"> ▌</span>}
+          </pre>
+        </div>
       )}
       {/* r13-p2-20:更新渠道选择;r26-C5:补「跟随安装方式」选项(映射 null,可切回) */}
       <div className="flex items-center gap-2 flex-wrap">
