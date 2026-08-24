@@ -1094,7 +1094,7 @@ function CcUpdater() {
     // r26-C1:跨渠道(显式 npm 渠道 × 非 npm 安装)先明示再确认 —— 裸跑会把更新
     // 写进 npm 前缀的另一份安装,PATH 里先生效的仍是当前安装(假成功)。
     if (state.crossChannel) {
-      if (!(await confirmDialog(`你选择的更新渠道(npm)与当前安装方式(${METHOD_LABEL[state.method] || state.method || '未知'})不一致:将安装到 npm 全局前缀,与当前安装是两份;PATH 里先生效的仍是当前安装(更新后这里显示的版本可能不变)。\n建议先把更新渠道改回「跟随安装方式」。\n更新期间请勿在 GUI 内发消息(Windows 会重新锁住 claude.exe,导致覆盖失败)。仍要继续吗?`))) return;
+      if (!(await confirmDialog(`你选择的更新渠道(npm)与当前安装方式(${METHOD_LABEL[state.method] || state.method || '未知'})不一致:将安装到 npm 全局前缀,与当前安装是两份;PATH 里先生效的仍是当前安装(更新后这里显示的版本可能不变)。\n更新将安装 npm 渠道的最新版,该版本号可能与上方显示的版本号不同(上方比对的是当前安装所属渠道)。\n建议先把更新渠道改回「跟随安装方式」。\n更新期间请勿在 GUI 内发消息(Windows 会重新锁住 claude.exe,导致覆盖失败)。仍要继续吗?`))) return;
       setUpdating(true); setResult(null); setLogLines([]);
       return doUpdateStream({ allowCrossChannel: true });
     }
@@ -1226,14 +1226,22 @@ function CcUpdater() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // r36-②:选渠道 = 服务端同时把 GUI 使用的 claude 钉到该渠道的安装;该渠道未安装时
+  // 回执 channelInstallMissing,此处如实提示(不静默,否则用户以为已切过去)。
+  const [channelNote, setChannelNote] = useState('');
   const pickChannel = async (ch) => {
     setChannelExplicit(ch); // ch=null → 跟随安装方式(r26-C5)
+    setChannelNote('');
     try {
-      await fetch('/api/claude-update-channel', {
+      const d = await (await fetch('/api/claude-update-channel', {
         method: 'PUT', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ channel: ch }),
-      });
+      })).json();
+      if (d?.channelInstallMissing) {
+        setChannelNote(`本机未检测到${ch === 'npm' ? ' npm ' : '原生'}渠道的 claude 安装,继续使用当前安装。若需切换,请在下方安装列表选择或以该方式安装。`);
+      }
       check(); // 命令随渠道变,重新取一次展示
+      loadInstalls(); // 钉选可能已变更,刷新"当前使用"标记
     } catch {}
   };
 
@@ -1306,6 +1314,13 @@ function CcUpdater() {
           </button>
         )}
       </div>
+      {/* r36-③:检测对象 —— 版本比对与更新提醒都以这个二进制所属渠道为准,显式写出来,
+          免得用户在多份安装之间猜"这个版本号说的是哪一个"。 */}
+      {state.installed !== false && state.path && (
+        <div className="text-[10.5px] text-ink-faint font-body break-all">
+          检测对象:{METHOD_LABEL[state.method] || state.method || '未知方式'} · <code className="font-mono">{state.path}</code>
+        </div>
+      )}
       {state.installed === false && (
         <>
           <div className="text-[11px] text-ink-faint leading-snug">
@@ -1551,9 +1566,13 @@ function CcUpdater() {
         <span className="text-[10.5px] text-ink-faint font-body">
           {channelExplicit === null
             ? `跟随安装方式:当前按${channel === 'npm' ? ' npm(本机 registry,镜像源通常更快)' : '原生(官方安装器自更新)'}渠道更新。`
-            : '显式指定更新来源;选回「跟随安装方式」即恢复按安装方式自动选择。'}
+            : '显式指定更新来源,并使用该渠道的 claude 安装;选回「跟随安装方式」即恢复按安装方式自动选择。'}
         </span>
       </div>
+      {/* r36-②:所选渠道本机没有对应安装时的如实回执(服务端保持现有安装不变)。 */}
+      {channelNote && (
+        <div className="text-[11px] text-warning">{channelNote}</div>
+      )}
       {result && (
         result.ok
           ? <div className="text-[12px] text-emerald-700 bg-emerald-50 border border-emerald-200 rounded p-2 break-words">
