@@ -34,9 +34,14 @@ import { mkdirSync, rmSync } from 'fs';
 import { resolveUnderHome, resolveWorkspacePath } from '../utils/safe-path.js';
 import { broadcast } from '../broadcast.js';
 import { mergeDraftBindingsIntoSessions } from '../services/draft-session-bindings.js';
+import { createAttachmentSidecarStore } from '../services/attachment-sidecar-store.js';
 
 // L4: 附件元数据 sidecar — 写入位置与 session-reader 一致。
 const ATTACHMENTS_DIR = join(homedir(), '.claude-gui', 'attachments');
+const attachmentSidecarStore = createAttachmentSidecarStore({
+  directory: ATTACHMENTS_DIR,
+  hashText: attachmentTextHash,
+});
 
 const router = Router();
 
@@ -521,18 +526,9 @@ router.post('/sessions/:sessionId/attachments', async (req, res) => {
     if (typeof text !== 'string' || !Array.isArray(attachments)) {
       return res.status(400).json({ error: 'text + attachments[] required' });
     }
-    await mkdir(ATTACHMENTS_DIR, { recursive: true });
-    const p = join(ATTACHMENTS_DIR, `${sid}.json`);
-    let cur = {};
-    try { cur = JSON.parse(await readFile(p, 'utf-8')) || {}; } catch {}
-    const key = attachmentTextHash(text);
-    cur[key] = {
-      attachments: attachments.map((a) => ({
-        kind: a.kind, name: a.name, path: a.path, preview: a.preview, bytes: a.bytes,
-      })),
-      displayText: typeof displayText === 'string' ? displayText : '',
-    };
-    await writeFile(p, JSON.stringify(cur, null, 2));
+    // 同 session 的独立 HTTP 请求共用一条服务端 Promise 队列：锁内重读最新文件、
+    // 合并 textHash 后写唯一临时文件并 rename。不同 session 使用不同队列，可并行。
+    await attachmentSidecarStore.write(sid, { text, attachments, displayText });
     res.json({ ok: true });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
