@@ -37,6 +37,26 @@ assert.equal(lookupVisionCapability('openrouter/deepseek-chat'), false, 't4: 带
 assert.equal(lookupVisionCapability('totally-unknown-9'), null, 't4: 查无记录 → null(不猜)');
 assert.equal(lookupVisionCapability(''), null, 't4: 空模型安全');
 
+// t6(r37,修前必红):DeepSeek 识图系必须压过全系 false 的一刀切(目录首命中即返回,
+// 例外行必须排在一刀切之前)。上游已实测:openai 端点收 image_url、anthropic 端点收
+// image block(纯色图各答对)。变异:删掉/下移 vision 例外行 → 下面全部红。
+for (const id of [
+  'deepseek-v4-flash-vision-exp',
+  'deepseek-v4-flash-vision-exp[1m]',          // GUI 配置里的 1M 后缀形态
+  'openrouter/deepseek-v4-flash-vision-exp',   // 命名空间前缀剥尾段
+  // org 恰为 deepseek 的聚合商形态:全 id 会先撞一刀切,例外行必须自己吃下含 / 的全 id
+  // (剥尾段重试轮不到)。变异:例外行字符类去掉 / → 本条红。
+  'deepseek/deepseek-v4-flash-vision-exp',
+]) {
+  assert.equal(lookupVisionCapability(id), true, `t6: ${id} 判有视觉`);
+}
+assert.equal(judge('https://api.deepseek.com/v1', 'deepseek-v4-flash-vision-exp'), false,
+  't6: deepseek 识图模型即使走官方 deepseek URL 也不剥图(修前被一刀切剥掉)');
+assert.equal(judge('http://127.0.0.1:8798/opencode', 'deepseek-v4-flash-vision-exp'), false,
+  't6: opencode 聚合下的 deepseek 识图模型不剥图(修前 baseURL 兜底也会剥)');
+assert.equal(lookupVisionCapability('deepseek-v4-flash'), false,
+  't6: 非识图的 deepseek 模型仍判无视觉(例外不扩大)');
+
 // t5 缓存:同 key 不重算(换 upstream 后 key 失效重算 —— 由 t1↔t2 交叉驱动已隐含验证,
 // 这里钉「同 key 第二次调用结果一致且不受中间状态污染」)
 {
