@@ -150,7 +150,7 @@ function ProviderForm({ initial, onDone, onCancel }) {
               type="button"
               onClick={loadModels}
               disabled={fetchingModels || (!form.id && !form.baseURL.trim())}
-              title={!form.id && !form.baseURL.trim() ? '先填写接口地址（baseURL）' : '按接口地址与密钥拉取可用模型'}
+              title={!form.id && !form.baseURL.trim() ? '先填写接口地址（baseURL）' : form.id ? '使用已保存的接口地址与密钥拉取（表单中未保存的修改不生效）' : '按接口地址与密钥拉取可用模型'}
               className="shrink-0 px-2 rounded-md border border-canvas-deep text-[11.5px] text-ink-soft font-body hover:bg-canvas-deep/60 disabled:opacity-50 flex items-center gap-1"
             >
               {fetchingModels ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />}拉取模型

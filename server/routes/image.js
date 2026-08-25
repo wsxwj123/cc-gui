@@ -235,7 +235,9 @@ async function fetchGeminiModels(baseURL, apiKey) {
       : `连不上 ${spec.url}${cause || e?.message ? `:${[e?.message, cause].filter(Boolean).join(' — ')}` : ''}`);
   }
   if (!resp.ok && (resp.status === 401 || resp.status === 403)) {
-    try { resp = await get(spec.altHeaders); } catch { /* 保留首次响应 */ }
+    // 判官r50:重试成功时消费掉首个 401/403 的响应体,及时释放连接(不等 GC)。
+    const first = resp;
+    try { resp = await get(spec.altHeaders); await first.body?.cancel?.(); } catch { /* 保留首次响应 */ }
   }
   // 读 body 一律走 readCapped:下游 host 是用户自填的,无界读 = 单进程后端 OOM(r26-J2 口径)。
   if (!resp.ok) {
@@ -254,9 +256,9 @@ async function fetchGeminiModels(baseURL, apiKey) {
   const ids = [];
   for (const m of arr) {
     // 官方回 models/{id};中转站有回裸 id 或 openai 形态 {id} 的,一并认。
-    const raw = typeof m === 'string' ? m : (m?.name || m?.id);
-    if (typeof raw !== 'string' || !raw) continue;
-    const id = raw.replace(/^models\//, '');
+    const entry = typeof m === 'string' ? m : (m?.name || m?.id);
+    if (typeof entry !== 'string' || !entry) continue;
+    const id = entry.replace(/^models\//, '');
     if (id && !ids.includes(id)) ids.push(id);
   }
   return ids;
