@@ -55,6 +55,7 @@ import { MemoryPanel } from './components/MemoryPanel.jsx';
 import { AgentsPanel } from './components/AgentsPanel.jsx';
 import { AgentMonitorPanel } from './components/AgentMonitorPanel.jsx';
 import ImagePanel from './components/ImagePanel.jsx';
+import { ModelPickModal, mergeModelLines, stripJunkModels } from './components/ModelPickModal.jsx';
 import { SubagentView } from './components/SubagentView.jsx';
 import BtwWindow from './components/BtwWindow.jsx';
 import { contextCanonicalKey, isValidContextResponse, pickBreakdownTier, applyExactResult, relativeAgeLabel } from './utils/contextCache.js';
@@ -8840,6 +8841,8 @@ function CustomProviderForm({ onSaved, editing, onCancel, onDirtyChange, customC
   const [quotaKey, setQuotaKey] = useState('');
   const [quotaKeyCleared, setQuotaKeyCleared] = useState(false);
   const [modelsText, setModelsText] = useState('');
+  // r52:「拉取模型」的候选(非空 = 勾选弹窗打开)。目录只作候选,勾中的才进模型框。
+  const [pickCandidates, setPickCandidates] = useState(null);
   const [testResult, setTestResult] = useState(null); // BZ-1:{ ok, error } | null
   const [defaultModel, setDefaultModel] = useState('');  // AZ8:该 provider 默认模型(空=用列表第一个)
   // BB6:档位映射 —— 子代理/标题/compact 用的 haiku/sonnet/opus/fable alias 各自映射到该
@@ -8940,7 +8943,11 @@ function CustomProviderForm({ onSaved, editing, onCancel, onDirtyChange, customC
       if (!r.ok) throw new Error(d.error || '拉取失败');
       if (!d.models?.length) confirmDialog('该端点未返回模型,请直接在下方「模型」框手填模型 ID 再保存。');
       else {
-        setModelsText(d.models.join('\n'));
+        // r52:拉取结果不再直灌进模型框(中转站目录动辄几百条,全量灌入等于把噪音当配置)。
+        // 过滤掉嵌入/语音/视频/重排这类噪音后开勾选弹窗,确认的才 merge 进模型框(只增不减)。
+        const candidates = stripJunkModels(d.models);
+        if (!candidates.length) confirmDialog('该端点返回的模型均为嵌入 / 语音 / 视频 / 重排类,不适用于对话。请在下方「模型」框手填模型 ID 再保存。');
+        else setPickCandidates(candidates);
         // r11-⑩:目录预填 —— 拉到列表时对未手动声明过的模型套目录 meta(source:'catalog');
         // 已有声明(用户 source:'user'/历史无 source,或此前的目录预填)一律不动,保存路径
         // 服务端还会按最新目录兜一遍。
@@ -9188,6 +9195,15 @@ function CustomProviderForm({ onSaved, editing, onCancel, onDirtyChange, customC
             ? `✓ 连接成功 —— 模型「${testResult.model}」可正常响应`
             : <span className="break-all whitespace-pre-wrap">✗ 连接失败:{testResult.error}</span>}
         </div>
+      )}
+      {/* r52:拉取结果的勾选弹窗。确认后 merge 进模型框(原有行一律保留),弹窗只是文本域的编辑器。 */}
+      {pickCandidates && (
+        <ModelPickModal
+          candidates={pickCandidates}
+          existing={parseModels()}
+          onClose={() => setPickCandidates(null)}
+          onConfirm={(ids) => { setModelsText(mergeModelLines(parseModels(), ids).join('\n')); setPickCandidates(null); }}
+        />
       )}
     </div>
   );

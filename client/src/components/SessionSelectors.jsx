@@ -12,6 +12,7 @@ import { mergeProviderLists, rowIsCurrent, SOURCE_BADGE } from '../utils/provide
 import { resolveSelectorModel } from '../utils/routing.js';
 import { nativeContextWindow } from '../utils/contextWindow.js';
 import { notifyOauthMissing } from '../utils/officialAuth.js';
+import { ModelPickModal, mergeModelLines, stripJunkModels } from './ModelPickModal.jsx';
 
 const EMPTY_ARRAY = Object.freeze([]);
 
@@ -451,6 +452,11 @@ export function ModelSelector({ compact = false, permKey = null, tourAnchor = fa
   // survives closing/reopening the picker — instead of vanishing with this
   // component's local state every time it unmounts.
   const fetched = useStore((s) => s.fetchedByProvider[provider]) || EMPTY_ARRAY;
+  // r52:当前激活的**自定义** provider(custom-providers.json 里的那条,含 id/models)。
+  // null = 官方或 cc-switch 导入项 —— 那两类没有可写回的白名单,行为一字不动。
+  const [customProv, setCustomProv] = useState(null);
+  const [pickCandidates, setPickCandidates] = useState(null);
+  const isCustomProvider = !!customProv;
   const doFetch = async () => {
     setFetching(true); setFetchNote('');
     try {
@@ -459,9 +465,37 @@ export function ModelSelector({ compact = false, permKey = null, tourAnchor = fa
       if (!r.ok) throw new Error(d.error || '拉取失败');
       const models = Array.isArray(d.models) ? d.models : [];
       useStore.getState().setFetchedModels(provider, models);
-      setFetchNote(d.note || (models.length ? `已拉取 ${models.length} 个` : '未返回模型'));
+      // 自定义 provider:目录只作候选 —— 显示的永远是用户勾选过的白名单,故拉完开勾选弹窗,
+      // 确认的才写回该 provider 的 models(持久化,重开弹层仍在)。
+      if (isCustomProvider) {
+        const candidates = stripJunkModels(models);
+        if (candidates.length) { setPickCandidates(candidates); setFetchNote(''); }
+        else setFetchNote(d.note || '未返回可用模型');
+      } else {
+        setFetchNote(d.note || (models.length ? `已拉取 ${models.length} 个` : '未返回模型'));
+      }
     } catch (e) { setFetchNote('拉取失败：' + e.message); }
     setFetching(false);
+  };
+  // 勾选确认:merge 进该 provider 的 models 并 PUT 持久化(只增不减)。PUT 会同步激活
+  // provider 的模型快照,故 provider-change 事件后本组件重读 /api/model 即见新模型。
+  const applyPick = async (ids) => {
+    const prov = customProv;
+    setPickCandidates(null);
+    if (!prov || !ids.length) return;
+    const nextModels = mergeModelLines(prov.models || [], ids);
+    try {
+      const r = await fetch(`/api/custom-providers/${prov.id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: prov.name, type: prov.type, baseURL: prov.baseURL, models: nextModels }),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(d.error || '保存失败');
+      setCustomProv({ ...prov, models: nextModels });
+      setFetchNote(`已添加 ${nextModels.length - (prov.models || []).length} 个模型`);
+      window.dispatchEvent(new CustomEvent('cgui:provider-change'));
+    } catch (e) { setFetchNote('保存失败：' + e.message); }
   };
 
   useEffect(() => {
@@ -496,6 +530,12 @@ export function ModelSelector({ compact = false, permKey = null, tourAnchor = fa
             .catch(() => {});
         }
       }).catch(() => {});
+      // r52:当前 provider 是不是"自定义"(GUI 自建、models 白名单可写回)。是 → 列表只显
+      // 白名单、「拉取最新」走勾选弹窗;不是(官方/导入) → 一切照旧。
+      fetch('/api/providers').then((r) => r.json()).then((d) => {
+        if (cancelled) return;
+        setCustomProv((d.customProviders || []).find((p) => p.isCurrent) || null);
+      }).catch(() => {});
     };
     load();
     const onProviderChange = () => load();
@@ -517,7 +557,10 @@ export function ModelSelector({ compact = false, permKey = null, tourAnchor = fa
   const customRows = customModels
     .filter((id) => !availableModels.some((m) => m.id === id))
     .map((id) => ({ id, name: id.replace(/\[1m\]/i, ''), tier: '自定义', source: 'custom', context1m: /\[1m\]/i.test(id) }));
-  const fetchedRows = fetched
+  // r52:自定义 provider 下**不并入**实时目录 —— 显示的就是用户勾选进白名单的那些
+  // (勾选才显示是本轮的核心诉求;并入全量目录等于把白名单顶掉)。官方 Anthropic 与
+  // cc-switch 导入项照旧并入(它们没有可勾选的白名单,内置清单又可能落后于最新发布)。
+  const fetchedRows = (isCustomProvider ? EMPTY_ARRAY : fetched)
     .filter((id) => !availableModels.some((m) => m.id === id) && !customModels.includes(id))
     .filter((id) => match(id, id))
     .map((id) => ({ id, name: id }));
@@ -716,6 +759,16 @@ export function ModelSelector({ compact = false, permKey = null, tourAnchor = fa
           {/* 修正批#5:原底部「自定义模型 ID」块已上移到固定头(用户在长列表下找不到)。 */}
           </div>
       </AnchoredPopover>
+      {/* r52:自定义 provider 的「拉取最新」勾选弹窗(portal 到 body,不受弹层夹紧影响)。 */}
+      {pickCandidates && (
+        <ModelPickModal
+          candidates={pickCandidates}
+          existing={customProv?.models || EMPTY_ARRAY}
+          title={`选择要添加的模型（${customProv?.name || provider}）`}
+          onClose={() => setPickCandidates(null)}
+          onConfirm={applyPick}
+        />
+      )}
     </div>
   );
 }
