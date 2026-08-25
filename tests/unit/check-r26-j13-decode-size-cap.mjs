@@ -54,6 +54,19 @@ const api = async (method, path, body) => {
 const mk = (name, base) => api('POST', '/api/image-providers', {
   name, protocol: 'openai', baseURL: base, apiKey: 'sk-test-j13', model: 'm', savePath: SAVE_DIR,
 });
+// r51:出图已任务化 —— POST 秒回 { jobId },成败落在 /api/image/history 的条目里。
+// status 返回【任务终态】('done' / 'error'),不是 HTTP 码;体积闸的人话错误在 json.error。
+const gen = async (body) => {
+  const submit = await api('POST', '/api/image/generate', body);
+  if (submit.status !== 200 || !submit.json?.jobId) return submit;
+  for (let i = 0; i < 600; i++) {
+    const h = await api('GET', '/api/image/history');
+    const e = (h.json?.history || []).find((x) => x.id === submit.json.jobId);
+    if (e && e.status !== 'running') return { status: e.status, json: e };
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  throw new Error('出图任务 30s 内未落终态');
+};
 
 let n = 0;
 let failure = null;
@@ -66,16 +79,16 @@ try {
   // ① 解码后超限 → 413 + 体积错误(解码闸哨兵)
   const over = await mk('解码后超限', `${BASE}/over/v1`);
   assert.equal(over.status, 200, '夹具:provider 建好');
-  const g1 = await api('POST', '/api/image/generate', { providerId: over.json.id, prompt: 'x' });
-  assert.equal(g1.status, 413, `J13: 解码后超限必须 413(实际 ${g1.status})`);
+  const g1 = await gen({ providerId: over.json.id, prompt: 'x' });
+  assert.equal(g1.status, 'error', `J13: 解码后超限必须失败(实际 ${g1.status})`);
   assert.match(g1.json?.error || '', /图片过大/, `J13: 人话错误(实际:${g1.json?.error})`);
   assert.equal(readdirSync(SAVE_DIR).length, 0, 'J13: 超限图不得落盘');
   n += 3;
 
   // ② 63MB 合法图正常出图(防误伤哨兵)
   const okP = await mk('合法大图', `${BASE}/ok/v1`);
-  const g2 = await api('POST', '/api/image/generate', { providerId: okP.json.id, prompt: 'x' });
-  assert.equal(g2.status, 200, `J13: 闸下大图正常出图(实际 ${g2.status} ${g2.json?.error || ''})`);
+  const g2 = await gen({ providerId: okP.json.id, prompt: 'x' });
+  assert.equal(g2.status, 'done', `J13: 闸下大图正常出图(实际 ${g2.status} ${g2.json?.error || ''})`);
   assert.equal(g2.json.bytes, 63 * 1024 * 1024, 'J13: 字节数完整');
   assert.equal(readdirSync(SAVE_DIR).length, 1, 'J13: 合法图正常落盘');
   n += 3;

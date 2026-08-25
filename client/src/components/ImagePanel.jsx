@@ -4,10 +4,11 @@
 // provider 表单。保存路径是配置的一部分且必填:Tauri 下走原生文件夹选择器,
 // 浏览器访问时退化成手输绝对路径。
 // 模态红线:删除走 confirmDialog(Tauri 禁原生 confirm)。
-import { useCallback, useEffect, useState } from 'react';
-import { Image, Plus, Trash2, Pencil, FolderOpen, Loader2, Sparkles, ExternalLink, X, Check, RefreshCw } from './Icon.jsx';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { Image, Plus, Trash2, Pencil, FolderOpen, Loader2, Sparkles, ExternalLink, X, Check, RefreshCw, RotateCcw } from './Icon.jsx';
 import { confirmDialog } from '../utils/confirmDialog.jsx';
 import { pickDirectory, isTauri } from '../utils/pickDirectory.js';
+import { ImageLightbox } from './ImageLightbox.jsx';
 
 const inputCls = 'w-full bg-canvas-warm border border-canvas-deep rounded-md px-2.5 py-1.5 text-[12px] text-ink font-body focus:outline-none focus:border-accent/50';
 const labelCls = 'text-[10.5px] text-ink-faint font-body';
@@ -27,6 +28,21 @@ const SIZE_OPTIONS = [
   '1920x1080', '2048x1152', '2048x2048', '2560x1440', '3840x2160', '2160x3840', '4096x4096',
   '1K', '2K', '4K', '1:1', '16:9', '9:16', '4:3', '3:4', '21:9',
 ];
+
+// 提示词草稿:出图是后台任务,面板关掉再打开输入框里的内容必须还在。
+const PROMPT_DRAFT_KEY = 'cgui-image-prompt-draft';
+const TASK_VIEW_KEY = 'cgui-image-tasklist-view'; // grid | list,重开面板保留
+const POLL_MS = 1500; // 有任务在跑时的历史轮询间隔
+const STATUS_LABEL = { running: '生成中', done: '已完成', error: '失败', interrupted: '已中断' };
+function readPromptDraft() {
+  try { return localStorage.getItem(PROMPT_DRAFT_KEY) || ''; } catch { return ''; }
+}
+function readTaskView() {
+  try { return localStorage.getItem(TASK_VIEW_KEY) === 'list' ? 'list' : 'grid'; } catch { return 'grid'; }
+}
+const shortTime = (ms) => (ms ? new Date(ms).toLocaleString() : '');
+// 已耗时:轮询每 1.5s 换一次 history 引用 → 重渲染时自然走秒,不额外起计时器。
+const elapsedSec = (h) => Math.max(0, Math.round((Date.now() - (h.startedAt || Date.now())) / 1000));
 
 // 拉取失败的三类可行动文案(与服务端 type 一一对应)。
 const FETCH_HINTS = {
@@ -201,12 +217,16 @@ function ProviderForm({ initial, onDone, onCancel }) {
 export default function ImagePanel() {
   const [providers, setProviders] = useState([]);
   const [selId, setSelId] = useState('');
-  const [prompt, setPrompt] = useState('');
-  const [busy, setBusy] = useState(false);
+  const [prompt, setPrompt] = useState(readPromptDraft);
+  const [submitting, setSubmitting] = useState(false); // 只是"受理请求"这一瞬,生成态看历史
   const [err, setErr] = useState('');
-  const [history, setHistory] = useState([]); // 本次会话内的出图记录(不落盘,刷新即清)
-  const [current, setCurrent] = useState(null);
+  const [history, setHistory] = useState([]); // 服务端持久化历史(≤100 条,新在前)
+  const [currentId, setCurrentId] = useState('');
+  const [zoom, setZoom] = useState(null);
+  const [tab, setTab] = useState('gen'); // gen | jobs —— 局部态,切 tab 不重挂面板,轮询照跑
+  const [taskView, setTaskView] = useState(readTaskView); // grid | list
   const [form, setForm] = useState(null); // null = 不在表单态
+  const promptRef = useRef(null);
 
   const load = useCallback(async (preferId) => {
     try {
@@ -219,12 +239,63 @@ export default function ImagePanel() {
   }, []);
   useEffect(() => { load(); }, [load]);
 
+  // 提示词草稿:每次输入即写 localStorage,重开面板/刷新都填回原文(用户要求生成后也不清空)。
+  const setPromptDraft = useCallback((v) => {
+    setPrompt(v);
+    try { localStorage.setItem(PROMPT_DRAFT_KEY, v); } catch { /* 隐私模式/配额满:草稿丢了不影响出图 */ }
+  }, []);
+
+  const setTaskViewPref = useCallback((v) => {
+    setTaskView(v);
+    try { localStorage.setItem(TASK_VIEW_KEY, v); } catch { /* 存不下就只在本次会话生效 */ }
+  }, []);
+
+  // 输入框随内容长高(上限 240px,再多则框内滚动)。挂载恢复草稿、点「恢复」回填都会
+  // 改 prompt → 这个 effect 一并覆盖,不必各处手动调。
+  const fitPrompt = useCallback(() => {
+    const el = promptRef.current;
+    if (!el) return;
+    el.style.height = 'auto';
+    // 判官r51必修:display:none(在任务列表页点「恢复」时)下 scrollHeight 恒 0,写 0px
+    // 会让切回生图页后输入框塌成一条缝 —— 隐藏时不测高,交给 deps 里的 tab 切回补跑。
+    if (el.value && el.scrollHeight === 0) { el.style.height = ''; return; }
+    el.style.height = (el.value ? Math.min(el.scrollHeight, 240) : 64) + 'px';
+  }, []);
+  useEffect(() => { fitPrompt(); }, [prompt, tab, fitPrompt]);
+
+  const loadHistory = useCallback(async () => {
+    try {
+      const r = await fetch('/api/image/history');
+      const d = await r.json();
+      const list = Array.isArray(d.history) ? d.history : [];
+      setHistory(list);
+      // 面板重开时的当前预览:优先保持已选中那条,否则取最近一条已完成的。
+      setCurrentId((cur) => (list.some((h) => h.id === cur) ? cur : (list.find((h) => h.status === 'done')?.id || '')));
+    } catch { /* 后端未就绪:下次轮询/重开面板再拉 */ }
+  }, []);
+  useEffect(() => { loadHistory(); }, [loadHistory]);
+
+  const running = history.filter((h) => h.status === 'running');
+  const hasRunning = running.length > 0;
+  // 轮询:有任务在跑就 1.5s 拉一次,全部落终态自动停。卸载只清 interval —— 任务在服务端
+  // 跑,关面板不影响它。
+  useEffect(() => {
+    if (!hasRunning) return undefined;
+    const timer = setInterval(loadHistory, POLL_MS);
+    return () => clearInterval(timer);
+  }, [hasRunning, loadHistory]);
+
   const selected = providers.find((p) => p.id === selId) || null;
-  const canGenerate = !!selected && !!selected.savePath && !!prompt.trim() && !busy;
+  // 有任务在跑【不】禁用生成:服务端支持并发(上限 3),点一次就多一个任务。
+  // submitting 只挡请求发出的那一瞬(防双击重复提交)。
+  const canGenerate = !!selected && !!selected.savePath && !!prompt.trim() && !submitting;
+  const current = history.find((h) => h.id === currentId) || null;
+  // 任务列表:running 排最上,其余保持时间倒序(sort 稳定,组内次序不变)。
+  const ordered = [...history].sort((a, b) => (a.status === 'running' ? 0 : 1) - (b.status === 'running' ? 0 : 1));
 
   const generate = async () => {
     if (!canGenerate) return;
-    setBusy(true); setErr('');
+    setSubmitting(true); setErr('');
     try {
       const r = await fetch('/api/image/generate', {
         method: 'POST',
@@ -233,13 +304,12 @@ export default function ImagePanel() {
       });
       const d = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(d.error || `生成失败（${r.status}）`);
-      const entry = { ...d, prompt, providerName: selected.name };
-      setHistory((h) => [entry, ...h].slice(0, 24));
-      setCurrent(entry);
+      if (!d.jobId) throw new Error('服务端未返回任务标识');
+      await loadHistory(); // 拿到 running 条目 → 轮询自动起
     } catch (e) {
       setErr(e.message);
     } finally {
-      setBusy(false);
+      setSubmitting(false);
     }
   };
 
@@ -253,7 +323,7 @@ export default function ImagePanel() {
   const [revealErr, setRevealErr] = useState('');
 
   // r26-J6:系统打开失败(非 2xx / 网络异常)要内联提示 —— 原先 catch 静默吞掉,
-  // 用户点了「在访达中显示」毫无反应,分不清是没点上还是失败了。非阻断操作,
+  // 用户点了「在文件夹中显示」毫无反应,分不清是没点上还是失败了。非阻断操作,
   // 不弹 confirmDialog,在按钮旁给固定文案。
   const reveal = async (file) => {
     setRevealErr('');
@@ -267,10 +337,42 @@ export default function ImagePanel() {
     }
   };
 
+  // 两种视图共用的条目操作,避免两处各写一份走样。
+  const taskActions = (h) => (
+    <>
+      {h.status === 'done' && h.file && (
+        <button
+          type="button"
+          onClick={() => reveal(h.file)}
+          title="在文件夹中显示"
+          className="px-1.5 py-0.5 rounded border border-canvas-deep text-[10px] text-ink-soft font-body hover:bg-canvas-deep/60 flex items-center gap-1"
+        ><ExternalLink size={10} />在文件夹中显示</button>
+      )}
+      <button
+        type="button"
+        onClick={() => setPromptDraft(h.prompt || '')}
+        title="把该条提示词填回输入框"
+        className="px-1.5 py-0.5 rounded border border-canvas-deep text-[10px] text-ink-soft font-body hover:bg-canvas-deep/60 flex items-center gap-1"
+      ><RotateCcw size={10} />恢复</button>
+    </>
+  );
+
   return (
     <div className="h-full overflow-y-auto px-4 py-4 space-y-4">
+      {/* 选项卡:生图 / 任务列表(切换只是前端局部态,轮询与后台任务都不受影响) */}
+      <div className="flex items-center gap-1 p-0.5 rounded-panel bg-canvas-warm text-[11px] font-body">
+        {[['gen', '生图'], ['jobs', `任务列表${hasRunning ? ` ·${running.length}` : ''}`]].map(([id, label]) => (
+          <button
+            type="button"
+            key={id}
+            onClick={() => setTab(id)}
+            className={`flex-1 py-1.5 rounded-md transition-colors ${tab === id ? 'bg-accent text-on-accent' : 'text-ink-muted hover:text-ink'}`}
+          >{label}</button>
+        ))}
+      </div>
+
       {/* 出图区 */}
-      <div className="space-y-2">
+      <div className={`space-y-2 ${tab === 'gen' ? '' : 'hidden'}`}>
         <div className="flex items-center gap-2">
           <select
             className={`${inputCls} flex-1`}
@@ -289,9 +391,11 @@ export default function ImagePanel() {
           ><Plus size={13} /></button>
         </div>
         <textarea
-          className={`${inputCls} resize-y min-h-[64px]`}
+          ref={promptRef}
+          className={`${inputCls} resize-none overflow-y-auto`}
+          style={{ height: 64 }}
           value={prompt}
-          onChange={(e) => setPrompt(e.target.value)}
+          onChange={(e) => setPromptDraft(e.target.value)}
           placeholder="描述你想要的画面…"
         />
         <div className="flex items-center gap-2">
@@ -301,9 +405,14 @@ export default function ImagePanel() {
             onClick={generate}
             className="px-3 py-1.5 rounded-md bg-accent text-on-accent text-[12px] font-body disabled:opacity-50 flex items-center gap-1"
           >
-            {busy ? <Loader2 size={12} className="animate-spin" /> : <Sparkles size={12} />}
-            {busy ? '生成中…（最长 120 秒）' : '生成'}
+            {submitting ? <Loader2 size={12} className="animate-spin" /> : <Sparkles size={12} />}
+            生成
           </button>
+          {hasRunning && (
+            <span className="text-[11px] text-ink-faint font-body">
+              {running.length} 个任务在后台运行，可继续发起新任务（同时最多 3 个）；关闭面板不影响，进度在「任务列表」页。
+            </span>
+          )}
           {selected && !selected.savePath && (
             <span className="text-[11px] text-error font-body">该 provider 未设置保存路径，请先编辑并选择保存目录。</span>
           )}
@@ -314,45 +423,107 @@ export default function ImagePanel() {
         {err && <div className="text-[11px] text-error font-body break-all">{err}</div>}
       </div>
 
-      {/* 预览区 */}
-      {current && (
-        <div className="space-y-1.5">
-          <img src={current.previewUrl} alt={current.prompt} className="w-full rounded-panel border border-canvas-deep" />
-          <div className="text-[11px] text-ink-soft font-body break-all">{current.prompt}</div>
+      {/* 预览区(当前已完成的那张)。不显示提示词全文:长提示词会把面板顶爆,
+          识别靠任务列表里的截断显示,全文在 Lightbox 标题或「恢复」回输入框看。 */}
+      {current && current.status === 'done' && (
+        <div className={`space-y-1.5 ${tab === 'gen' ? '' : 'hidden'}`}>
+          <img
+            src={current.previewUrl}
+            alt={current.prompt}
+            onClick={() => setZoom({ src: current.previewUrl, name: current.prompt, path: current.file })}
+            className="w-full rounded-panel border border-canvas-deep cursor-zoom-in"
+          />
           <div className="flex items-center gap-2">
             <span className="text-[10.5px] text-ink-faint font-mono break-all flex-1">{current.file}</span>
             <button
               type="button"
               onClick={() => reveal(current.file)}
               className="shrink-0 px-2 py-1 rounded border border-canvas-deep text-[11px] text-ink-soft font-body hover:bg-canvas-deep/60 flex items-center gap-1"
-            ><ExternalLink size={11} />在访达中显示</button>
+            ><ExternalLink size={11} />在文件夹中显示</button>
           </div>
           {revealErr && <div className="text-[11px] text-error font-body">{revealErr}</div>}
         </div>
       )}
 
-      {/* 本次会话内的历史缩略图 */}
-      {history.length > 1 && (
-        <div className="space-y-1">
-          <div className={labelCls}>本次会话（{history.length}）</div>
-          <div className="grid grid-cols-4 gap-1.5">
-            {history.map((h) => (
+      {/* 任务列表页:持久化历史(≤100 条)。running 排最上,error/interrupted 的报错写在图块里。 */}
+      <div className={`space-y-2 ${tab === 'jobs' ? '' : 'hidden'}`}>
+        <div className="flex items-center gap-2">
+          <div className={`${labelCls} flex-1`}>共 {history.length} 条，最多保留 100 条</div>
+          <div className="flex items-center gap-0.5 p-0.5 rounded-md bg-canvas-warm text-[10.5px] font-body">
+            {[['grid', '网格'], ['list', '列表']].map(([id, label]) => (
               <button
-                key={h.file}
                 type="button"
-                onClick={() => setCurrent(h)}
-                title={h.prompt}
-                className={`aspect-square rounded overflow-hidden border ${current?.file === h.file ? 'border-accent' : 'border-canvas-deep'}`}
-              >
-                <img src={h.previewUrl} alt={h.prompt} className="w-full h-full object-cover" />
-              </button>
+                key={id}
+                onClick={() => setTaskViewPref(id)}
+                className={`px-2 py-0.5 rounded transition-colors ${taskView === id ? 'bg-accent text-on-accent' : 'text-ink-muted hover:text-ink'}`}
+              >{label}</button>
             ))}
           </div>
         </div>
-      )}
+        {!history.length && <div className="text-[11px] text-ink-faint font-body">还没有生成记录。</div>}
+        {revealErr && <div className="text-[11px] text-error font-body">{revealErr}</div>}
+        <div className={taskView === 'grid' ? 'grid grid-cols-2 gap-2' : 'space-y-1.5'}>
+          {ordered.map((h) => (taskView === 'grid' ? (
+            <div key={h.id} className={`rounded-panel border overflow-hidden ${h.id === currentId ? 'border-accent' : 'border-canvas-deep'}`}>
+              {h.status === 'done' && h.previewUrl ? (
+                <img
+                  src={h.previewUrl}
+                  alt={h.prompt}
+                  onClick={() => { setCurrentId(h.id); setZoom({ src: h.previewUrl, name: h.prompt, path: h.file }); }}
+                  className="w-full aspect-square object-cover cursor-zoom-in"
+                />
+              ) : (
+                <div className="w-full aspect-square bg-canvas-warm flex flex-col items-center justify-center gap-1 px-2 text-center">
+                  {h.status === 'running' ? (
+                    <>
+                      <Loader2 size={16} className="animate-spin text-ink-faint" />
+                      <span className="text-[10px] text-ink-faint font-body">生成中 · {elapsedSec(h)}s</span>
+                    </>
+                  ) : (
+                    <span className="text-[10px] text-error font-body break-all line-clamp-5">{h.error || STATUS_LABEL[h.status] || h.status}</span>
+                  )}
+                </div>
+              )}
+              <div className="px-1.5 py-1 space-y-1">
+                <div className="text-[10.5px] text-ink font-body truncate" title={h.prompt}>{h.prompt}</div>
+                <div className="text-[9.5px] text-ink-faint font-body truncate">{STATUS_LABEL[h.status] || h.status} · {shortTime(h.startedAt)}</div>
+                <div className="flex items-center gap-1">{taskActions(h)}</div>
+              </div>
+            </div>
+          ) : (
+            <div key={h.id} className={`flex items-center gap-2 rounded-md border px-2 py-1.5 ${h.id === currentId ? 'border-accent' : 'border-canvas-deep'}`}>
+              {h.status === 'done' && h.previewUrl ? (
+                <img
+                  src={h.previewUrl}
+                  alt={h.prompt}
+                  onClick={() => { setCurrentId(h.id); setZoom({ src: h.previewUrl, name: h.prompt, path: h.file }); }}
+                  className="shrink-0 w-9 h-9 rounded object-cover border border-canvas-deep cursor-zoom-in"
+                />
+              ) : (
+                <div className="shrink-0 w-9 h-9 rounded border border-canvas-deep flex items-center justify-center">
+                  {h.status === 'running'
+                    ? <Loader2 size={12} className="animate-spin text-ink-faint" />
+                    : <Image size={12} className="text-ink-faint" />}
+                </div>
+              )}
+              <div className="min-w-0 flex-1">
+                <div className="text-[11.5px] text-ink font-body truncate" title={h.prompt}>{h.prompt}</div>
+                <div className="text-[10px] text-ink-faint font-body truncate">
+                  {h.status === 'running' ? `生成中 · ${elapsedSec(h)}s` : (STATUS_LABEL[h.status] || h.status)}
+                  {h.status !== 'done' && h.error ? ` · ${h.error}` : ''}
+                  {h.startedAt ? ` · ${shortTime(h.startedAt)}` : ''}
+                </div>
+              </div>
+              <div className="shrink-0 flex items-center gap-1">{taskActions(h)}</div>
+            </div>
+          )))}
+        </div>
+      </div>
 
-      {/* 管理态 */}
-      {form
+      <ImageLightbox src={zoom?.src} name={zoom?.name} path={zoom?.path} onClose={() => setZoom(null)} />
+
+      {/* 管理态(属「生图」页) */}
+      {tab === 'gen' && (form
         ? <ProviderForm key={form.id || 'new'} initial={form} onCancel={() => setForm(null)} onDone={(id) => { setForm(null); load(id); }} />
         : providers.length > 0 && (
           <div className="space-y-1">
@@ -386,7 +557,7 @@ export default function ImagePanel() {
               </div>
             ))}
           </div>
-        )}
+        ))}
     </div>
   );
 }

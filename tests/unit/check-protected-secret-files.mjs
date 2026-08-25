@@ -48,6 +48,10 @@ const KEYLESS = new Map([
   // hiddenProjects/customTitles/autoTitles/quotaThresholds/updateChannel 等界面偏好,
   // 无任何凭据(prefs.js 全部写路径已核),故按本文件既有例外机制登记。
   ['prefs.json', '只存界面偏好(thresholds/显示名/侧栏序等),无凭据;命中是因 makeFetcher(apiKey) 在同一屏内'],
+  // r51:出图历史(任务状态 + 提示词 + 落盘路径 + 已 redact 的错误文案)。条目由固定字段
+  // 构造,不含 apiKey;上游错误进条目前一律过 redactKey(check-r51-image-jobs t3 钉死
+  // "历史里不许有明文 key")。命中是因为它与 image-providers 的读写函数在同一屏内。
+  ['image-history.json', '只存出图任务状态/提示词/文件路径,错误文案已 redact,无凭据'],
 ]);
 
 const jsFiles = [];

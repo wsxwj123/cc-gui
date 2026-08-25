@@ -283,6 +283,22 @@ const api = async (method, path, body) => {
   let json = null; try { json = JSON.parse(text); } catch {}
   return { status: r.status, text, json };
 };
+// r51:出图已任务化 —— POST 秒回 { jobId },真正的成败落在 /api/image/history 的条目里。
+// 提交后轮询到终态,返回 { status, json, text }:
+//   status = 【任务终态】'done' / 'error'(不是 HTTP 码,提交过了前置校验就恒 200);
+//   json   = 该历史条目(file / previewUrl / bytes / tookMs / error 都在里面);
+//   前置校验失败(provider 不存在、保存目录不可用……)仍是同步 HTTP 错误,原样返回。
+const gen = async (body) => {
+  const submit = await api('POST', '/api/image/generate', body);
+  if (submit.status !== 200 || !submit.json?.jobId) return submit;
+  for (let i = 0; i < 400; i++) {
+    const h = await api('GET', '/api/image/history');
+    const e = (h.json?.history || []).find((x) => x.id === submit.json.jobId);
+    if (e && e.status !== 'running') return { status: e.status, json: e, text: JSON.stringify(e) };
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  throw new Error('出图任务 20s 内未落终态');
+};
 
 let failure = null;
 try {
@@ -319,8 +335,8 @@ try {
 
   // 6.2 出图:三协议各跑一次,落盘 + 预览
   for (const [label, id] of [['openai', oa.json.id], ['gemini', gm.json.id], ['chat', ct.json.id]]) {
-    const g = await api('POST', '/api/image/generate', { providerId: id, prompt: `测试 ${label} 出图` });
-    assert.equal(g.status, 200, `t6: ${label} 出图成功(${g.text})`);
+    const g = await gen({ providerId: id, prompt: `测试 ${label} 出图` });
+    assert.equal(g.status, 'done', `t6: ${label} 出图成功(${g.text})`);
     assert.ok(g.json.file.startsWith(SAVE_DIR), `t6: ${label} 落盘到配置的 savePath`);
     assert.ok(existsSync(g.json.file), `t6: ${label} 文件真的存在`);
     assert.equal(readFileSync(g.json.file).length, Buffer.from(PNG_B64, 'base64').length, `t6: ${label} 图片字节完整`);
@@ -332,8 +348,8 @@ try {
     assert.equal(pv.headers.get('content-type'), 'image/png', `t6: ${label} 预览 Content-Type`);
   }
   // 重名加序号:同一秒内连出两张不会互相覆盖
-  const a1 = await api('POST', '/api/image/generate', { providerId: oa.json.id, prompt: '同名' });
-  const a2 = await api('POST', '/api/image/generate', { providerId: oa.json.id, prompt: '同名' });
+  const a1 = await gen({ providerId: oa.json.id, prompt: '同名' });
+  const a2 = await gen({ providerId: oa.json.id, prompt: '同名' });
   assert.notEqual(a1.json.file, a2.json.file, 't6: 重名加序号,不覆盖已有图');
 
   // 6.3 预览路径穿透:savePath 之外的文件一律 400(即便真的存在)
@@ -351,8 +367,8 @@ try {
 
   // 6.4 上游报错:原文透传但先剥 key
   const boom = await mk('会报错的', 'openai', `${BASE}/boom/v1`);
-  const bad = await api('POST', '/api/image/generate', { providerId: boom.json.id, prompt: '炸' });
-  assert.equal(bad.status, 502, 't6: 上游 401 → 502');
+  const bad = await gen({ providerId: boom.json.id, prompt: '炸' });
+  assert.equal(bad.status, 'error', 't6: 上游 401 → 任务落 error');
   assert.ok(bad.json.error.includes('invalid key'), 't6: 上游报错原文透传');
   assert.ok(!bad.text.includes(KEY), `t6: 报错里的 key 被剥掉(实际:${bad.json.error})`);
 
@@ -368,7 +384,7 @@ try {
   }
   rmSync(goneDir, { recursive: true, force: true });
   const hitsBefore = upstreamHits;
-  const noDir = await api('POST', '/api/image/generate', { providerId: gone.json.id, prompt: 'x' });
+  const noDir = await gen({ providerId: gone.json.id, prompt: 'x' });
   assert.equal(noDir.status, 400, 't6: 目录不存在 → 400');
   assert.match(noDir.json.error, /保存目录不存在或不可写/, 't6: 人话错误');
   assert.ok(!/at .*\.js:\d+/.test(noDir.text), 't6: 不返回调用栈');
@@ -387,14 +403,14 @@ try {
   assert.equal((await api('DELETE', `/api/image-providers/${boom.json.id}`)).status, 404, 't6: 重复删除 404');
 
   // 6.7 未知 provider
-  assert.equal((await api('POST', '/api/image/generate', { providerId: 'nope', prompt: 'x' })).status, 404, 't6: 未知 provider 404');
+  assert.equal((await gen({ providerId: 'nope', prompt: 'x' })).status, 404, 't6: 未知 provider 404');
 
   // ── 7. gemini 认证头回落(路由那半) ──
   // 纯函数只钉住了 altHeaders 的形状,重试这段路由代码此前一行没测:整块删掉全套仍绿。
   {
     const g = await mk('只认 goog 头的中转站', 'gemini', `${BASE}/goog/v1`);
-    const r = await api('POST', '/api/image/generate', { providerId: g.json.id, prompt: '换头重试' });
-    assert.equal(r.status, 200, `t7: 401 后换认证头重试应最终成功(${r.text})`);
+    const r = await gen({ providerId: g.json.id, prompt: '换头重试' });
+    assert.equal(r.status, 'done', `t7: 401 后换认证头重试应最终成功(${r.text})`);
     assert.deepEqual(googAttempts, ['bearer', 'goog'], 't7: 尝试序列 = 先按端点形态用 Bearer,401 后回落 x-goog-api-key');
     assert.ok(existsSync(r.json.file), 't7: 重试成功后正常落盘');
     await api('DELETE', `/api/image-providers/${g.json.id}`);
@@ -405,30 +421,30 @@ try {
     const filesBefore = new Set(readdirSync(SAVE_DIR));
     // 8.1 内网地址 + 非图片 Content-Type(URL 以 .png 结尾,后缀是攻击者写的,不能当证据)
     const badct = await mk('回内网链接的', 'chat', `${BASE}/badct/v1`);
-    const r1 = await api('POST', '/api/image/generate', { providerId: badct.json.id, prompt: 'x' });
-    assert.equal(r1.status, 502, 't8: 非图片 Content-Type 的链接被拒');
+    const r1 = await gen({ providerId: badct.json.id, prompt: 'x' });
+    assert.equal(r1.status, 'error', 't8: 非图片 Content-Type 的链接被拒');
     assert.match(r1.json.error, /不是图片/, 't8: 报错说明是 Content-Type 问题');
     assert.ok(!r1.text.includes('INTERNAL-SECRET-BODY'), 't8: 内网响应体没被回显');
     assert.deepEqual([...readdirSync(SAVE_DIR)].filter((f) => !filesBefore.has(f)), [], 't8: 内网响应没被落盘成"图片"');
 
     // 8.2 302 跳转不跟随(事后校验挡不住重定向)
     const redir = await mk('会跳转的', 'chat', `${BASE}/redir/v1`);
-    const r2 = await api('POST', '/api/image/generate', { providerId: redir.json.id, prompt: 'x' });
-    assert.equal(r2.status, 502, 't8: 图片链接发生跳转 → 拒');
+    const r2 = await gen({ providerId: redir.json.id, prompt: 'x' });
+    assert.equal(r2.status, 'error', 't8: 图片链接发生跳转 → 拒');
     assert.match(r2.json.error, /跳转/, 't8: 报错点明跳转');
 
     // 8.3 云元数据地址(链路本地)在下载前就被 SSRF 守卫拦下
     const meta = await mk('指向元数据的', 'chat', `${BASE}/meta/v1`);
-    const r3 = await api('POST', '/api/image/generate', { providerId: meta.json.id, prompt: 'x' });
-    assert.ok(r3.status >= 400, 't8: 169.254.169.254 被拒');
+    const r3 = await gen({ providerId: meta.json.id, prompt: 'x' });
+    assert.equal(r3.status, 'error', 't8: 169.254.169.254 被拒');
     assert.match(r3.json.error, /拒绝下载该链接/, 't8: 走的是下载前的 SSRF 守卫,不是事后校验');
 
     // 8.4【r22-⑤】回环、但与用户自填的 baseURL【不同源】:上游把图片链接指到本机另一个
     // 端口,那个端点回的是真 image/png —— 事后 Content-Type 检查一点用没有。修之前
     // assertPublicBaseURL 对回环一律放行,这条会 200 并把内网响应落盘成图片。
     const evil = await mk('把链接指到本机别的端口的', 'chat', `${BASE}/evil/v1`);
-    const r4 = await api('POST', '/api/image/generate', { providerId: evil.json.id, prompt: 'x' });
-    assert.ok(r4.status >= 400, `t8: 回环跨端口的图片链接必须被拒(实际 ${r4.status} ${r4.text})`);
+    const r4 = await gen({ providerId: evil.json.id, prompt: 'x' });
+    assert.equal(r4.status, 'error', `t8: 回环跨端口的图片链接必须被拒(实际 ${r4.status} ${r4.text})`);
     assert.match(r4.json.error, /拒绝下载该链接/, 't8: 拒绝要发生在下载前的 SSRF 守卫,不是靠事后 Content-Type');
     assert.equal(evilHits, 0, 't8: 服务端一次都不许打到那个端口(闸门在 fetch 之前)');
 
@@ -439,27 +455,27 @@ try {
     // one-api),信任的是"用户自己填的那个 host:port",不是"本机所有端口"。
     // 一刀切禁回环会把这个正当用法砍掉,故这条与 8.4 必须同时绿。
     const localRelay = await mk('本机中转(同源)', 'chat', `${BASE}/fake/v1`);
-    const r5 = await api('POST', '/api/image/generate', { providerId: localRelay.json.id, prompt: 'x' });
-    assert.equal(r5.status, 200, `t8: 同源回环的图片链接照常下载(${r5.text})`);
+    const r5 = await gen({ providerId: localRelay.json.id, prompt: 'x' });
+    assert.equal(r5.status, 'done', `t8: 同源回环的图片链接照常下载(${r5.text})`);
     assert.ok(existsSync(r5.json.file), 't8: 同源回环正常落盘');
     // localhost 与 127.0.0.1 是同一个服务:用户填 localhost、本机服务回 127.0.0.1 的
     // 链接很常见,按字符串比 origin 会把这种正当用法误杀。
     const aliasRelay = await mk('本机中转(localhost 别名)', 'chat', 'http://localhost:6702/fake/v1');
-    const r6 = await api('POST', '/api/image/generate', { providerId: aliasRelay.json.id, prompt: 'x' });
-    assert.equal(r6.status, 200, `t8: localhost ↔ 127.0.0.1 同端口视为同源,不许误杀(${r6.text})`);
+    const r6 = await gen({ providerId: aliasRelay.json.id, prompt: 'x' });
+    assert.equal(r6.status, 'done', `t8: localhost ↔ 127.0.0.1 同端口视为同源,不许误杀(${r6.text})`);
     for (const p of [localRelay, aliasRelay]) await api('DELETE', `/api/image-providers/${p.json.id}`);
   }
 
   // ── 9. 体积上限:后端单进程扛全部会话,一坨大 body 就是全局 OOM ──
   {
     const huge = await mk('回超大图的', 'chat', `${BASE}/huge/v1`);
-    const r1 = await api('POST', '/api/image/generate', { providerId: huge.json.id, prompt: 'x' });
-    assert.equal(r1.status, 502, 't9: content-length 超限 → 502(读 body 前早退)');
+    const r1 = await gen({ providerId: huge.json.id, prompt: 'x' });
+    assert.equal(r1.status, 'error', 't9: content-length 超限 → 任务落 error(读 body 前早退)');
     assert.match(r1.json.error, /图片过大/, 't9: 人话错误');
 
     const big = await mk('回超长 b64 的', 'openai', `${BASE}/bigb64/v1`);
-    const r2 = await api('POST', '/api/image/generate', { providerId: big.json.id, prompt: 'x' });
-    assert.equal(r2.status, 502, 't9: b64 超长 → 502');
+    const r2 = await gen({ providerId: big.json.id, prompt: 'x' });
+    assert.equal(r2.status, 'error', 't9: b64 超长 → 任务落 error');
     assert.match(r2.json.error, /图片过大/, 't9: b64 分支同样给人话错误');
     for (const p of [huge, big]) await api('DELETE', `/api/image-providers/${p.json.id}`);
   }
@@ -479,7 +495,7 @@ try {
     const rv = await api('POST', '/api/image/reveal', { file: link });
     assert.equal(rv.status, 400, 't10: reveal 走同一道闸');
     // 正常图片不被这层误伤(SAVE_DIR 本身在 macOS 上就是 /var → /private/var 的软链)
-    const okShot = await api('POST', '/api/image/generate', { providerId: oa.json.id, prompt: '软链复核不误伤' });
+    const okShot = await gen({ providerId: oa.json.id, prompt: '软链复核不误伤' });
     assert.equal((await fetch(`${BASE}${okShot.json.previewUrl}`)).status, 200, 't10: 真实图片仍可预览');
   }
 
@@ -510,16 +526,16 @@ try {
     await api('PUT', `/api/image-providers/${rmP.json.id}`, {
       name: '目录会被删', protocol: 'openai', baseURL: `${BASE}/rmdir/v1`, model: 'm', savePath: RM_DIR,
     });
-    const r1 = await api('POST', '/api/image/generate', { providerId: rmP.json.id, prompt: 'x' });
-    assert.equal(r1.status, 400, 't13: 写盘时目录已消失 → 400');
+    const r1 = await gen({ providerId: rmP.json.id, prompt: 'x' });
+    assert.equal(r1.status, 'error', 't13: 写盘时目录已消失 → 任务落 error');
     assert.match(r1.json.error, /保存目录不存在/, 't13: ENOENT 分类');
 
     const roP = await mk('目录会变只读', 'openai', `${BASE}/chmod/v1`);
     await api('PUT', `/api/image-providers/${roP.json.id}`, {
       name: '目录会变只读', protocol: 'openai', baseURL: `${BASE}/chmod/v1`, model: 'm', savePath: RO_DIR,
     });
-    const r2 = await api('POST', '/api/image/generate', { providerId: roP.json.id, prompt: 'x' });
-    assert.equal(r2.status, 400, 't13: 写盘时目录变只读 → 400');
+    const r2 = await gen({ providerId: roP.json.id, prompt: 'x' });
+    assert.equal(r2.status, 'error', 't13: 写盘时目录变只读 → 任务落 error');
     assert.match(r2.json.error, /没有写入权限/, 't13: EACCES 分类(不能笼统说"目录不存在",会误导用户去换目录)');
     assert.doesNotMatch(r2.json.error, /不存在/, 't13: 两类错误必须区分开');
   }
