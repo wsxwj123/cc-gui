@@ -74,6 +74,32 @@ function failCode(code, extra = {}) {
 }
 
 /**
+ * r45:清单被拒时给出【可行动原因】。校验规则本体(validateManifest)一字不动,这里只把
+ * 「拒了」翻成「为什么拒、下一步该做什么」——前端 report() 只展示 message,原来统一显示
+ * 「skin.json 校验失败」,用户拿 dsh 项目文件夹来导入时完全无从下手。三类:
+ *   a) 缺 format 且形如 dsh 皮肤库清单(id/accent/bodyAttr/order 这类键命中 ≥2 个)——
+ *      最常见的误导入;dsh 皮肤代码绑定 dsh 页面结构,不是改个字段就能用;
+ *   b) 缺 format 但不像 dsh —— 只报缺标记;
+ *   c) 其余 —— 现有具体校验点(字段名)拼进 message。
+ * 命中 ≥2 个键才算 dsh 形:单个 id/order 在别的清单里也常见,两个以上才具备判别力。
+ */
+export function manifestRejectMessage(raw, vm) {
+  const base = ERROR_MESSAGES[vm.code] || vm.code;
+  const details = Array.isArray(vm.details) ? vm.details.filter(Boolean) : [];
+  const isObj = raw && typeof raw === 'object' && !Array.isArray(raw);
+  if (vm.code === 'unsupported_format') return vm.format ? `${base}(包内 format 为 ${vm.format})` : base;
+  if (vm.code === 'manifest_invalid' && isObj && !(typeof raw.format === 'string' && raw.format)) {
+    const dshKeys = ['id', 'accent', 'bodyAttr', 'order'].filter((k) => raw[k] !== undefined);
+    if (dshKeys.length >= 2) {
+      return `该 skin.json 是 dsh 皮肤库格式(含 ${dshKeys.join('/')} 字段),与本应用不通用:`
+        + 'dsh 皮肤代码绑定 dsh 页面结构。需按「AI 提示词生成器」产出 cgui 皮肤,或做一次移植改写。';
+    }
+    return 'skin.json 缺少 format:\'cgui-skin/1\' 标记,无法识别为本应用的皮肤包。';
+  }
+  return details.length ? `${base}:${details.join(';')}` : base;
+}
+
+/**
  * r26-D4:stage 目录搬入 skinsDir 的统一出口。rename 优先;EXDEV(tmp 与 home 跨卷,
  * 如 Linux tmpfs /tmp)回落 mkdir+逐文件拷贝+rm stage。renameFn 仅供单测注入失败形态。
  * 非 EXDEV 错误原样上抛不吞(清 stage 是调用方 catch 的职责)。
@@ -149,9 +175,9 @@ async function installUnpacked(tmp, fileEntries, { source, skinsDir, limits }) {
   const files = new Set(fileEntries.filter((p) => p.startsWith(root.prefix)).map(rel).filter(Boolean));
   let manifestRaw;
   try { manifestRaw = JSON.parse(await readFile(join(tmp, root.prefix, 'skin.json'), 'utf8')); }
-  catch { throw failCode('manifest_invalid', { details: ['skin.json 非法 JSON'] }); }
+  catch { throw failCode('manifest_invalid', { details: ['skin.json 非法 JSON'], message: 'skin.json 不是合法 JSON,无法解析' }); }
   const vm = validateManifest(manifestRaw, files);
-  if (!vm.ok) throw failCode(vm.code, { details: vm.details, name: vm.name });
+  if (!vm.ok) throw failCode(vm.code, { details: vm.details, name: vm.name, message: manifestRejectMessage(manifestRaw, vm) });
   const { manifest, warnings, referenced } = vm;
 
   // ── 资源层:仅被引用文件落盘;图片字节/像素闸;SVG 清洗;T2 静态校验 ──
@@ -394,7 +420,7 @@ router.post('/skins/import-inline', async (req, res) => {
       if (!vm.ok) {
         return res.status(HTTP_OF[vm.code] || 422).json({
           error: vm.code,
-          message: ERROR_MESSAGES[vm.code] || vm.code,
+          message: manifestRejectMessage(parsed, vm),   // r45:粘贴通道同口径给可行动原因
           ...(vm.details ? { details: vm.details } : {}),
         });
       }
