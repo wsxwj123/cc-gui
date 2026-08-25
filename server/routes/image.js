@@ -8,12 +8,12 @@ import { realpathSync } from 'node:fs';
 import { isPathInside } from '../utils/safe-path.js';
 import { readFile, writeFile, mkdir, rename, unlink, stat, access } from 'fs/promises';
 import { constants } from 'fs';
-import { join, isAbsolute } from 'path';
+import { join, isAbsolute, basename } from 'path';
 import { homedir } from 'os';
 import { randomUUID } from 'crypto';
 import { extname } from 'path';
 import {
-  IMAGE_PROTOCOLS, IMAGE_CONTENT_TYPES, buildImageRequest, extractImage,
+  IMAGE_PROTOCOLS, IMAGE_CONTENT_TYPES, I2I_MODES, buildImageRequest, extractImage,
   buildImageFileName, imageExtFromMime, resolvePreviewPath, redactKey,
   geminiModelsRequest,
 } from '../utils/image-protocols.js';
@@ -28,7 +28,9 @@ function imageProvidersPath() {
   return join(homedir(), '.claude-gui', 'image-providers.json');
 }
 
-const GENERATE_TIMEOUT_MS = 120_000; // 生图比文本慢得多
+// 生图比文本慢得多。允许被环境变量下调:单测要在秒级验证「上游超时 ≠ 用户取消」
+// (两者抛出的异常形态相同),不设该变量时恒为 120s,产品行为一字不变。
+const GENERATE_TIMEOUT_MS = Number(process.env.CGUI_IMAGE_GENERATE_TIMEOUT_MS) || 120_000;
 const DOWNLOAD_TIMEOUT_MS = 60_000; // 上游只回 URL 时下载原图
 // 判官必修②:下载/解码体积上限。后端是单进程、扛着全部会话与 WS,一个坏掉或恶意的
 // 中转站回一坨大 body 就是全局 OOM。
@@ -39,6 +41,14 @@ const MAX_UPSTREAM_ERR = 500; // 上游报错原文透传上限(剥 key 后)
 // 再大的响应横竖过不了 b64 闸,不如在读取前就按体积拒掉(不读完 = 内存没吃)。
 const MAX_RESPONSE_BYTES = Math.ceil(MAX_IMAGE_BYTES * 1.5) + 4096;
 const MAX_ERROR_BYTES = 256 * 1024;
+// r54 图生图:参考图张数与单张体积上限。
+// 15MB 不是拍脑袋 —— 请求整体走 express.json({limit:'25mb'})(server/index.js),
+// base64 比原图大约 1.34x,单张 15MB 编码后约 20MB,是能被受理的最大一档;再大只会被
+// body 解析层 413 掉,报不出人话。总体积超限时前端按 413 给可行动文案。
+const MAX_REFS = 6;
+const MAX_REF_BYTES = 15 * 1024 * 1024;
+// 上传形态只收这三种(与前端 accept 一致);history 形态的扩展名白名单在 resolvePreviewPath 里。
+const REF_UPLOAD_MIMES = ['image/png', 'image/jpeg', 'image/webp'];
 
 async function readImageProviders() {
   try {
@@ -161,6 +171,10 @@ function readHistory(limit = MAX_HISTORY) {
 // 不看历史文件里的 running(那是别的进程留下的,已被启动清障改写)。
 const MAX_CONCURRENT_JOBS = 3;
 let activeJobs = 0;
+// r54 取消:jobId → AbortController(登记 = 本进程里还在跑;runner 的 finally 里删)。
+const jobControllers = new Map();
+// 被用户取消的 jobId。abort 抛出的异常与超时同形态,只有这个标志位能把两者分开。
+const cancelledJobs = new Set();
 
 class HttpError extends Error {
   constructor(status, message) { super(message); this.status = status; }
@@ -173,6 +187,8 @@ function publicView(p) {
     model: p.model || '', size: p.size || '', savePath: p.savePath || '',
     // r52:模型白名单(用户勾选的候选,供「模型」输入框的候选列表用)。存量条目无此字段 → 空数组。
     models: Array.isArray(p.models) ? p.models : [],
+    // r54:图生图形态(仅 openai 协议有意义)。存量条目无此字段 → 默认官方 edits 端点。
+    i2iMode: p.i2iMode === 'generations-image' ? 'generations-image' : 'edits',
     extra: p.extra || null, hasKey: !!p.apiKey,
   };
 }
@@ -233,8 +249,12 @@ async function validateBody(body) {
   // r52:模型白名单可选。不传 = 不改动已存值(与 apiKey 同语义:客户端没发就别动)。
   const mv = validateModels(body?.models);
   if (mv.error) return { error: mv.error };
+  // r54:图生图形态。不传 = 默认官方 edits(存量条目同此默认)。
+  const i2iMode = body?.i2iMode === undefined || body?.i2iMode === null || body?.i2iMode === '' ? 'edits' : body.i2iMode;
+  if (!I2I_MODES.includes(i2iMode)) return { error: `图生图形态必须是 ${I2I_MODES.join(' / ')}` };
   return {
     value: {
+      i2iMode,
       name: name.trim(),
       protocol,
       baseURL: baseURL.trim().replace(/\/+$/, ''),
@@ -442,17 +462,23 @@ export async function saveImage(dir, baseName, buf) {
  * 只把原先的 `return res.status(x).json({error})` 换成「把同一句文案写进历史条目」。
  */
 async function runImageJob({ jobId, provider, prompt, spec, startedAt }) {
-  // 任务已经和请求脱钩:写历史失败也没人能接这个 promise,就地吞掉。
-  const fail = (error) => updateHistoryEntry(jobId, {
+  // r54 取消:per-job controller 登记在 jobControllers(有登记 = 本进程里还在跑)。
+  const controller = new AbortController();
+  jobControllers.set(jobId, controller);
+  // r54:手动 abort 与 AbortSignal.timeout 抛出的异常【形态相同】(都是 AbortError/
+  // TimeoutError 一类),靠 e.name 分不出"用户取消"还是"上游超时"。判据只能在 controller
+  // 侧:cancelledJobs 里有它 = 是我们主动掐的,状态已由 cancel 端点写成 cancelled,
+  // 这里就不再覆写任何错误文案(超时仍走下面的原文案,一字未改)。
+  const fail = (error) => (cancelledJobs.has(jobId) ? Promise.resolve() : updateHistoryEntry(jobId, {
     status: 'error', error, tookMs: Date.now() - startedAt,
-  }).catch(() => {});
+  }).catch(() => {}));
   const started = startedAt;
   try {
     const post = (headers) => fetch(spec.url, {
       method: 'POST',
       headers,
-      body: JSON.stringify(spec.body),
-      signal: AbortSignal.timeout(GENERATE_TIMEOUT_MS),
+      body: spec.form || JSON.stringify(spec.body), // form 非空 = multipart(图生图 edits 形态)
+      signal: AbortSignal.any([controller.signal, AbortSignal.timeout(GENERATE_TIMEOUT_MS)]),
       // r26-J1:与下方下载分支同口径 —— 不跟随重定向。生成 POST 带着 apiKey,跟随 302
       // 会把请求(或响应读取)引到 assertPublicBaseURL 没验过的地址(鉴权跳转/网关劫持)。
       redirect: 'manual',
@@ -462,7 +488,7 @@ async function runImageJob({ jobId, provider, prompt, spec, startedAt }) {
     catch (e) {
       const timedOut = e?.name === 'TimeoutError' || e?.name === 'AbortError';
       return fail(
-        timedOut ? '生成超时（120 秒），上游没有返回' : `连接上游失败：${redactKey(e.message, provider.apiKey)}`,
+        timedOut ? `生成超时（${GENERATE_TIMEOUT_MS / 1000} 秒），上游没有返回` : `连接上游失败：${redactKey(e.message, provider.apiKey)}`,
       );
     }
     // gemini 认证头按端点形态选(官方 x-goog-api-key / 中转站 Bearer),选错就 401/403
@@ -539,7 +565,7 @@ async function runImageJob({ jobId, provider, prompt, spec, startedAt }) {
       let img;
       try {
         img = await fetch(picked.url, {
-          signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS),
+          signal: AbortSignal.any([controller.signal, AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS)]),
           // 判官必修①:默认跟随重定向 = 事后校验白做(302 到内网照样下)。手动挡下 3xx。
           redirect: 'manual',
         });
@@ -577,24 +603,84 @@ async function runImageJob({ jobId, provider, prompt, spec, startedAt }) {
             : `保存失败（${e?.code || 'unknown'}）`;
       return fail(msg);
     }
-    await updateHistoryEntry(jobId, {
-      status: 'done',
-      file,
-      previewUrl: `/api/image/preview?file=${encodeURIComponent(file)}`,
-      bytes: buf.length,
-      tookMs: Date.now() - started,
-    }).catch(() => {});
+    // 取消是终态:图恰好在 abort 前拿到也不把条目翻回 done(用户看到的必须是他点的那个结果)。
+    if (!cancelledJobs.has(jobId)) {
+      await updateHistoryEntry(jobId, {
+        status: 'done',
+        file,
+        previewUrl: `/api/image/preview?file=${encodeURIComponent(file)}`,
+        bytes: buf.length,
+        tookMs: Date.now() - started,
+      }).catch(() => {});
+    }
   } catch (err) {
     // 兜底也要剥 key:异常消息可能带上 URL/头部回显。r26-J3:传真实 apiKey(字面替换),
     // 不再只靠 Bearer/api_key 形态兜底。
     await fail(redactKey(err.message, provider.apiKey || ''));
   } finally {
     activeJobs -= 1; // 无论成败都要还名额,否则跑几次就再也发不出新任务
+    jobControllers.delete(jobId);
+    cancelledJobs.delete(jobId);
   }
 }
 
 /**
- * POST /api/image/generate { providerId, prompt } → 受理任务,秒回 { jobId }。
+ * r54 图生图:参考图入参解析。前置同步做 —— 任一张不合格一律 400,不进后台任务
+ * (「填错了」要即时可见,不该沉进历史里等用户去翻)。
+ * 返回 { error } 或 { refs, meta }:
+ *  - refs 给协议层(含 base64,只在内存里活到请求发出);
+ *  - meta 写进历史条目,【绝不含 base64】—— 历史文件是整条读给前端的,塞图片等于把
+ *    ~/.claude-gui/image-history.json 撑成几十 MB 并且每次轮询都全量回传。
+ * history 形态与「预览 / 在文件夹中显示」共用同一道闸(resolvePreviewPath 拒 `..` 段 +
+ * 前缀比对 + 扩展名白名单,realPathInsideSaveDirs 再解一次软链复检):只许引用 savePath
+ * 之下的图,防 `../../.ssh/id_rsa` 被当参考图读走再发给上游。
+ */
+async function resolveRefs(input, saveDirs) {
+  if (input === undefined || input === null || input === '') return { refs: [], meta: null };
+  if (!Array.isArray(input)) return { error: '参考图必须是数组' };
+  if (!input.length) return { refs: [], meta: null };
+  if (input.length > MAX_REFS) return { error: `参考图最多 ${MAX_REFS} 张` };
+  const refs = [];
+  const meta = [];
+  for (const r of input) {
+    if (!r || typeof r !== 'object') return { error: '参考图条目格式不正确' };
+    if (r.kind === 'history') {
+      const full = resolvePreviewPath(String(r.file || ''), saveDirs);
+      if (!full || !realPathInsideSaveDirs(full, saveDirs)) {
+        return { error: '参考图路径非法：只能引用已生成的图片（保存目录之内）' };
+      }
+      let buf;
+      try {
+        const st = await stat(full);
+        if (st.size > MAX_REF_BYTES) return { error: `参考图过大（单张上限 ${MAX_REF_BYTES / 1048576}MB）` };
+        buf = await readFile(full);
+      } catch { return { error: '参考图文件不存在（可能已被移动或删除）' }; }
+      const ext = extname(full).slice(1).toLowerCase();
+      refs.push({ kind: 'history', name: basename(full), mime: IMAGE_CONTENT_TYPES[ext] || 'image/png', base64: buf.toString('base64') });
+      meta.push({ kind: 'history', file: full });
+      continue;
+    }
+    if (r.kind !== 'upload') return { error: '参考图类型必须是 upload 或 history' };
+    const mime = String(r.mime || '').toLowerCase();
+    if (!REF_UPLOAD_MIMES.includes(mime)) return { error: `参考图格式仅支持 ${REF_UPLOAD_MIMES.join(' / ')}` };
+    if (typeof r.dataB64 !== 'string' || !r.dataB64) return { error: '参考图内容为空' };
+    // 容忍整条 dataURI(前端只发 base64 段,但客户端写法走样时不该变成一坨乱码发给上游)。
+    const b64 = r.dataB64.startsWith('data:') ? r.dataB64.slice(r.dataB64.indexOf(',') + 1) : r.dataB64;
+    // 先按文本长度粗筛再解码:避免为了报"过大"先把一坨大 base64 解成 Buffer(内存已经吃了)。
+    if (b64.length > MAX_REF_BYTES * 1.4) return { error: `参考图过大（单张上限 ${MAX_REF_BYTES / 1048576}MB）` };
+    const buf = Buffer.from(b64, 'base64');
+    if (!buf.length) return { error: '参考图内容为空或不是合法的 base64' };
+    if (buf.length > MAX_REF_BYTES) return { error: `参考图过大（单张上限 ${MAX_REF_BYTES / 1048576}MB）` };
+    const name = String(r.name || 'image.png').slice(0, 80).replace(/[\\/\r\n"]+/g, '_');
+    // 重新编码 = 顺手把折行/杂字符规整掉(发给上游的必须是干净 base64)。
+    refs.push({ kind: 'upload', name, mime, base64: buf.toString('base64') });
+    meta.push({ kind: 'upload', name });
+  }
+  return { refs, meta };
+}
+
+/**
+ * POST /api/image/generate { providerId, prompt, refs? } → 受理任务,秒回 { jobId }。
  * 生成主体进 runImageJob 后台跑,状态与结果只经 GET /api/image/history 取。
  * 前置校验(provider / savePath / 请求组装 / SSRF)仍同步做:这些错误是"填错了",
  * 要即时可见,不该沉进后台历史里等用户去翻。
@@ -606,14 +692,19 @@ router.post('/image/generate', async (req, res) => {
   let counted = false; // 已占并发名额但任务还没起来 → 出错要还回去,否则名额永久漏光
   try {
     const { providerId, prompt } = req.body || {};
-    const provider = (await readImageProviders()).find((p) => p.id === providerId);
+    const all = await readImageProviders();
+    const provider = all.find((p) => p.id === providerId);
     if (!provider) return res.status(404).json({ error: '未找到该生图 provider' });
     apiKeyForRedact = provider.apiKey || '';
     const pathErr = await checkSavePath(provider.savePath);
     if (pathErr) return res.status(400).json({ error: pathErr });
 
+    // 参考图(图生图):校验失败一律前置 400,不进后台任务。
+    const resolved = await resolveRefs(req.body?.refs, all.map((p) => p.savePath));
+    if (resolved.error) return res.status(400).json({ error: resolved.error });
+
     let spec;
-    try { spec = buildImageRequest(provider, prompt); }
+    try { spec = buildImageRequest(provider, prompt, resolved.refs); }
     catch (e) { return res.status(400).json({ error: e.message }); }
     try { await assertPublicBaseURL(provider.baseURL); }
     catch (e) { return res.status(e.status || 400).json({ error: e.message }); }
@@ -636,6 +727,8 @@ router.post('/image/generate', async (req, res) => {
       size: provider.size || '',
       status: 'running',
       startedAt,
+      // 只写摘要(kind + 文件名/路径),不写 base64 —— 历史文件不存图片内容。
+      ...(resolved.meta ? { refs: resolved.meta } : {}),
     });
     // 立即返回:前端不再挂长连接。WKWebView 对 fetch 有约 60s 资源超时,而服务端最长等
     // 上游 120s —— 慢生成(4K 等)时前端先被掐断报 "Load failed",服务端其实已经出图。
@@ -645,6 +738,80 @@ router.post('/image/generate', async (req, res) => {
   } catch (err) {
     if (counted) activeJobs -= 1;
     res.status(500).json({ error: redactKey(err.message, apiKeyForRedact) });
+  }
+});
+
+/**
+ * POST /api/image/jobs/:id/cancel — 取消一个还在跑的生成任务。
+ *  - 仍在跑 → 打取消标志 + abort 上游请求 + 条目落 status:'cancelled' → { ok:true };
+ *    并发名额由 runner 的 finally 归还(与正常结束同一条路径)。
+ *  - 已终态 / 不存在 → { ok:false, error }(200,幂等 —— 用户手快点两下不该看到报错)。
+ * 只作用于点名的那一个 jobId:controller 是 per-job 的,不存在"取消一个停一片"。
+ */
+router.post('/image/jobs/:id/cancel', async (req, res) => {
+  const id = String(req.params.id || '');
+  const controller = jobControllers.get(id);
+  // 有登记 = 本进程里还在跑(runner 的 finally 会删掉)。
+  if (!controller) return res.json({ ok: false, error: '该任务已结束或不存在' });
+  // 先打标志再 abort:runner 的 fail() 同步读它,顺序反了会先写成 error 再被看见。
+  cancelledJobs.add(id);
+  try { controller.abort(); } catch { /* 已 abort:幂等 */ }
+  await withHistory((list) => {
+    const e = list.find((x) => x && x.id === id);
+    if (!e) return { list: null, result: false }; // 条目已被裁掉:标志位照旧挡住 error 覆写
+    e.status = 'cancelled';
+    e.error = '';
+    e.tookMs = Date.now() - (e.startedAt || Date.now());
+    return { list, result: true };
+  }).catch(() => {});
+  res.json({ ok: true });
+});
+
+/**
+ * POST /api/image/history/delete { ids:[…], deleteFile?:boolean } — 删除历史记录(单删与
+ * 批量同一个端点,单删就是数组只有一个元素)。
+ *  - running 条目先走取消(复用上面那条链路:标志位 + abort),名额仍由 runner 的 finally 归还;
+ *  - 条目移除在 withHistory 串行队列内完成 → 与并发的任务更新不会互相覆盖,原子落盘;
+ *  - deleteFile 时【只 unlink 单个文件】,且每个文件必须过与预览同款的两道闸
+ *    (resolvePreviewPath + realPathInsideSaveDirs)。守卫不过 = 跳过并记进 skipped:
+ *    历史条目的 file 是一个可被改写的 JSON 字段,不能凭它对任意路径下删除动作。
+ *    没有、也不许有任何目录级/递归删除。
+ */
+router.post('/image/history/delete', async (req, res) => {
+  const raw = Array.isArray(req.body?.ids) ? req.body.ids : null;
+  if (!raw) return res.status(400).json({ error: '请求格式不正确:ids 必须是数组' });
+  const ids = [...new Set(raw.filter((x) => typeof x === 'string' && x))].slice(0, MAX_HISTORY);
+  if (!ids.length) return res.status(400).json({ error: '请先选择要删除的记录' });
+  const deleteFile = req.body?.deleteFile === true;
+  // 还在跑的先掐掉:否则删完条目任务还在后台跑,写回时找不到条目(白跑一趟且占着名额)。
+  for (const id of ids) {
+    const controller = jobControllers.get(id);
+    if (!controller) continue;
+    cancelledJobs.add(id);
+    try { controller.abort(); } catch { /* 已 abort:幂等 */ }
+  }
+  const saveDirs = (await readImageProviders()).map((p) => p.savePath);
+  try {
+    const result = await withHistory(async (list) => {
+      const wanted = new Set(ids);
+      const targets = list.filter((e) => e && wanted.has(e.id));
+      const next = list.filter((e) => !(e && wanted.has(e.id)));
+      const skipped = [];
+      let filesDeleted = 0;
+      if (deleteFile) {
+        for (const e of targets) {
+          if (!e.file) continue;
+          const full = resolvePreviewPath(String(e.file), saveDirs);
+          if (!full || !realPathInsideSaveDirs(full, saveDirs)) { skipped.push(e.file); continue; }
+          try { await unlink(full); filesDeleted += 1; }
+          catch (err) { if (err?.code !== 'ENOENT') skipped.push(e.file); } // 文件早没了不算失败
+        }
+      }
+      return { list: next, result: { removed: targets.length, filesDeleted, skipped } };
+    });
+    res.json({ ok: true, ...result });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 
