@@ -171,6 +171,9 @@ const forward = (req, res, u) => {
 };
 // r57:客户端对 http 上游有两种走法 —— undici 8 发绝对 URI 请求行,undici 7 一律先
 // CONNECT 开隧道(实测 8→7 降版后本文件整体挂死:mock 只认绝对 URI,CONNECT 无人应答)。
+// 判官r57建议1(降版已知代价留痕):undici7 对 http 上游一律 CONNECT,保守企业代理常拒非 443
+// 隧道 → 「http 上游 + 企业代理」组合可能从 8 可用变 7 不可用;生图上游几乎全 https、
+// http 多为本机中转不过企业代理,暴露面小,接受该代价换 Node20 地板兼容。
 // 两种都得认,否则这套 mock 绑死在某个 undici 大版本上。隧道里跑的是明文 HTTP,
 // 交给内嵌 server 正常解析,复用同一条转发逻辑(x-via-proxy 照旧注入,记账口径不变)。
 const tunnel = http.createServer((req, res) => {

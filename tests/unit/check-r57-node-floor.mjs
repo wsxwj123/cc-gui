@@ -150,8 +150,8 @@ if (failure) throw failure;
   assert.equal(count(src, /nodeFloorHint\(/g), 4, 't3: 判据函数 1 处定义 + 三处外联各 1 处调用');
 
   // I2:生成分支的 catch 与拉模型分支同款,把 cause 拼进文案
-  assert.equal(count(src, /e\?\.cause\?\.code \|\| e\?\.cause\?\.message/g), 2,
-    't3: 生成分支与拉模型分支都取 cause(抄齐,不是只有拉模型有)');
+  assert.equal(count(src, /e\?\.cause\?\.code \|\| e\?\.cause\?\.message/g), 3,
+    't3: 拉模型/生成/下载三处外联的 catch 全取 cause(判官r57建议2补齐下载分支)');
 
   // S1:dispatchOpts 必须在 runner 的 try 内 —— try 之外抛错会绕过 finally 的名额归还
   const start = src.indexOf('async function runImageJob');

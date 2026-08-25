@@ -684,7 +684,11 @@ async function runImageJob({ jobId, provider, prompt, spec, startedAt }) {
           redirect: 'manual',
           ...proxy,
         });
-      } catch (e) { return fail(nodeFloorHint(e) || `下载生成的图片失败：${redactKey(e.message, provider.apiKey)}`); }
+      } catch (e) {
+        // 判官r57建议2:与生成分支同款拼 cause(代理死/DNS 失败时不再只报裸 fetch failed)。
+        const cause = e?.cause?.code || e?.cause?.message || '';
+        return fail(nodeFloorHint(e) || `下载生成的图片失败：${redactKey(e.message, provider.apiKey)}${cause ? `（${cause}）` : ''}`);
+      }
       if (img.status >= 300 && img.status < 400) {
         return fail('上游图片链接发生跳转，已拒绝（防止绕过内网地址检查）');
       }
