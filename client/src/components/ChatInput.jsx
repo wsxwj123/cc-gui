@@ -22,7 +22,7 @@ export const MODE_META = {
   plan:              { label: '规划', desc: '只读研究并给出方案，批准前不改任何文件；批准计划后自动切到执行档', icon: ClipboardList, tone: 'text-blue-600' },
   auto:              { label: '自动', desc: '由后台安全分类器逐动作审查，通过即执行、有风险才询问；少弹窗但非零风险', icon: Zap,           tone: 'text-emerald-600' },
   dontAsk:           { label: '不打扰', desc: '只读操作与已勾选自动执行的 MCP 直接执行；其余操作一律拒绝且不弹窗。适合让它自己跑完不被打断', icon: BellOff,       tone: 'text-violet-600' },
-  bypassPermissions: { label: '放任', desc: '跳过全部权限检查与提示（危险，仅建议在隔离环境使用）', icon: ShieldOff,     tone: 'text-red-500' },
+  bypassPermissions: { label: '放任', desc: '跳过全部权限确认卡，工具直接执行；AI 的提问卡（AskUserQuestion）仍会弹出（危险，仅建议在隔离环境使用）', icon: ShieldOff,     tone: 'text-red-500' },
 };
 
 // ── auto 档可用性(T3 两层门控) ──────────────────────────────────
