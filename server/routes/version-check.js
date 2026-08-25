@@ -634,6 +634,9 @@ function launchInTerminal(cmd, title, proxyUrl = null) {
   // r49a-⑤:终端也是子进程,继承 server 自己的 env。探活判死的代理只是"不写进脚本"
   // 拦不住继承(用户视角:终端里的更新一样卡死);探活通过的那个由脚本自己 export,
   // 删继承值不影响它。与流式通道同一处清理。
+  // 判官r49a:mac 例外——Terminal.app 由 launchd 拉起,不继承 `open` 的 env,此处清理
+  // 在 mac 上实际无效(其 shell env 来自 login shell,本就不含 server 的死代理);
+  // 真实收益在 Windows `cmd start` 与部分 Linux 终端的直接继承。保留统一清理不分平台。
   const env = withoutProxyEnv();
   if (process.platform === 'darwin') {
     const file = join(tmpdir(), `${stamp}.command`);

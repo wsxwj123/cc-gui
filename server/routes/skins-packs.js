@@ -15,7 +15,7 @@ import { randomUUID } from 'crypto';
 import { isPathInside } from '../utils/safe-path.js';
 import { broadcast } from '../broadcast.js';
 import {
-  parseTarListing, validateZipEntries, resolveRootPrefix, validateManifest,
+  parseTarListing, validateZipEntries, resolveRootPrefix, stripJunkEntries, validateManifest,
   imageDimensions, sanitizeSvg, validateT2Script, convertDswVars, ZIP_LIMITS,
   skinIdFrom, slugOf, SKIN_ID_RE, SKIN_ASSET_RE,
 } from '../utils/skin-validate.js';
@@ -277,7 +277,9 @@ export function isSafeSkinRelPath(p, limits = DIR_LIMITS) {
  */
 export async function installSkinDirectory(files, { source = 'user', skinsDir = SKINS_DIR, limits = ZIP_LIMITS, dirLimits = DIR_LIMITS } = {}) {
   if (!Array.isArray(files) || !files.length) throw failCode('dir_invalid');
-  if (files.length > dirLimits.maxFiles) throw failCode('dir_entries_exceeded');
+  // 判官r49a:计数取剥杂质后口径,与 zip 通道(validateZipEntries)一致——
+  // 同一个包"40 真实 + 2 杂质"不许 dir 拒而 zip 放。
+  if (stripJunkEntries(files.map((f) => f && f.path)).length > dirLimits.maxFiles) throw failCode('dir_entries_exceeded');
   const decoded = [];
   let total = 0;
   for (const f of files) {
