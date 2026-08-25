@@ -194,6 +194,9 @@ async function postPermissionMode(sessionId, mode, prevMode) {
         let body = null;
         try { body = await r.json(); } catch {}
         if (r.status === 409 || (r.ok && body && body.ok === false)) {
+          // 判官r49b:409 在途期间用户又切了新档(latestMode 已变)→ 回滚会覆盖用户第二次意图。
+          // 有更新的目标就转而补发它,只有目标未变时才回滚收场。
+          if (flight.latestMode !== target) { attempt = 0; continue; }
           useStore.getState().rollbackPermissionMode(sessionId, flight.prevMode,
             body?.error || body?.failed?.[0]?.error || '权限档位切换被拒绝');
           return;

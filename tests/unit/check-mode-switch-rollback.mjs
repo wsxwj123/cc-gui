@@ -91,5 +91,38 @@ assert.equal((inputSrc.match(/s\.permissionModeNotice/g) || []).length, 1,
 assert.ok(/clearPermissionModeNotice/.test(inputSrc), '提示要能自清,不许永久占屏');
 assert.ok(/modeNotice\.key === permKey/.test(inputSrc), '只在出问题的那个窗格显示');
 
-console.log('✓ check-mode-switch-rollback: 409 回滚+原文+不重试 / 无旧档删条 / 闲置不空转 / 部分失败报警 全部通过');
+// ⑤ 409 在途竞态(判官r49b重要项):等 409 期间用户又切了新档 → 不许回滚覆盖第二次
+// 意图,必须转而补发最新档。原实现 409 直接 return,把在途合并进 latestMode 的 plan
+// 一并吞掉且回滚成 prevMode —— 用户第二次选择凭空消失。
+calls.length = 0;
+useStore.getState().clearPermissionModeNotice();
+modeReply = reply(200, { ok: true, attempted: 1, delivered: 1, failed: [] });
+useStore.getState().setPermissionMode('acceptEdits', 'sid-m5'); // 铺垫旧档
+await wait(30);
+let releaseGate;
+const gate = new Promise((r) => { releaseGate = r; });
+let gated = true;
+modeReply = () => {
+  if (gated) {
+    gated = false; // 只有第一发(auto)被闸住回 409;补发(plan)走 200
+    return gate.then(() => ({ ok: false, status: 409, json: async () => ({
+      ok: false, attempted: 1, delivered: 0, error: GUARD_ERROR,
+      failed: [{ sessionId: 'sid-m5', error: GUARD_ERROR }] }) }));
+  }
+  return Promise.resolve({ ok: true, status: 200,
+    json: async () => ({ ok: true, attempted: 1, delivered: 1, failed: [] }) });
+};
+useStore.getState().setPermissionMode('auto', 'sid-m5');  // 第一发,在途被闸
+await wait(30);
+useStore.getState().setPermissionMode('plan', 'sid-m5');  // 在途期间的第二次切档
+await wait(30);
+releaseGate();                                            // 409 此刻才到达
+await wait(120);
+assert.equal(useStore.getState().getPermissionModeFor('sid-m5'), 'plan',
+  '⑤409 到达时已有更新的目标档,不许回滚覆盖用户第二次选择');
+const m5 = modeCalls('sid-m5');
+assert.equal(m5.length, 3, '⑤铺垫+auto+补发 plan 恰好三发(409 不回滚也不算终态,要补发)');
+assert.equal(JSON.parse(m5[2].opts.body).mode, 'plan', '⑤补发的必须是最新档 plan');
+
+console.log('✓ check-mode-switch-rollback: 409 回滚+原文+不重试 / 无旧档删条 / 闲置不空转 / 部分失败报警 / 在途竞态补发 全部通过');
 process.exit(0);
