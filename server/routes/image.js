@@ -58,6 +58,18 @@ function dispatchOpts(proxyUrl) {
   return agent ? { dispatcher: agent } : {};
 }
 
+// r57 兜底:第三方 fetch 实现的 Node 地板一旦高于 app 地板(20),import 会成功、启动不报警,
+// 但 fetch() 第一句就抛 TypeError(undici@8 调 Promise.withResolvers,Node 22+ 才有)——
+// 三处外联全死,还被归类成"连接上游失败"让用户白查网络。依赖侧已把 undici 锁回 ^7
+// (engines >=20.18.1,与 app 地板对齐),这条判据只为将来再踩时如实点名真因。
+// 注:AbortSignal.any 需 Node ≥20.3,在 app 地板之内,无需同类兜底。
+// export 仅为单测:真踩地板的形态只能靠伪造 TypeError 复现。
+export function nodeFloorHint(e) {
+  return e instanceof TypeError && /withResolvers|not a function/.test(e?.message || '')
+    ? '当前 Node 版本过低（生图需 Node ≥20.18），请升级 Node 后重试'
+    : null;
+}
+
 // 路径按调用取(不在模块顶层固化):单测把 HOME 指向 mktemp 目录后再 import 也能生效,
 // 真实 HOME 一个字节都不碰。
 function imageProvidersPath() {
@@ -419,6 +431,8 @@ async function fetchGeminiModels(baseURL, apiKey, proxyUrl) {
   let resp;
   try { resp = await get(spec.headers); }
   catch (e) {
+    const floor = nodeFloorHint(e);
+    if (floor) throw new ModelsError('network', floor);
     const timedOut = e?.name === 'TimeoutError' || e?.name === 'AbortError';
     const cause = e?.cause?.code || e?.cause?.message || '';
     throw new ModelsError('network', timedOut
@@ -550,9 +564,11 @@ async function runImageJob({ jobId, provider, prompt, spec, startedAt }) {
     status: 'error', error, tookMs: Date.now() - startedAt,
   }).catch(() => {}));
   const started = startedAt;
-  // r56:本 provider 配了代理就整条链路都走它(生成 POST 与下面的图片下载)。
-  const proxy = dispatchOpts(provider.proxyUrl);
   try {
+    // r56:本 provider 配了代理就整条链路都走它(生成 POST 与下面的图片下载)。
+    // r57:这行必须在 try 内 —— try 之外的任何抛错都绕过 finally,并发名额与 controller
+    // 双泄漏,3 次之后永久 429(生图彻底发不出去)。
+    const proxy = dispatchOpts(provider.proxyUrl);
     // r56 实测坑:undici 包的 fetch 【不认】Node 内建的 FormData(它只认自己那份实现),
     // 拿到内建 FormData 会退化成 String(body) = 字面量 "[object FormData]" 且
     // Content-Type 变 text/plain —— 图生图 edits 形态会静默发出一坨垃圾,上游 400。
@@ -581,8 +597,12 @@ async function runImageJob({ jobId, provider, prompt, spec, startedAt }) {
     try { r = await post(spec.headers); }
     catch (e) {
       const timedOut = e?.name === 'TimeoutError' || e?.name === 'AbortError';
+      // r57:代理没起/配错时 undici 只给一句 "fetch failed",真因(ECONNREFUSED 等)在
+      // e.cause 里 —— 与拉模型分支(fetchGeminiModels)同口径拼进去,别让用户对着它猜。
+      const cause = e?.cause?.code || e?.cause?.message || '';
       return fail(
-        timedOut ? `生成超时（${GENERATE_TIMEOUT_MS / 1000} 秒），上游没有返回` : `连接上游失败：${redactKey(e.message, provider.apiKey)}`,
+        timedOut ? `生成超时（${GENERATE_TIMEOUT_MS / 1000} 秒），上游没有返回`
+          : nodeFloorHint(e) || `连接上游失败：${redactKey([e?.message, cause].filter(Boolean).join(' — '), provider.apiKey)}`,
       );
     }
     // gemini 认证头按端点形态选(官方 x-goog-api-key / 中转站 Bearer),选错就 401/403
@@ -664,7 +684,7 @@ async function runImageJob({ jobId, provider, prompt, spec, startedAt }) {
           redirect: 'manual',
           ...proxy,
         });
-      } catch (e) { return fail(`下载生成的图片失败：${redactKey(e.message, provider.apiKey)}`); }
+      } catch (e) { return fail(nodeFloorHint(e) || `下载生成的图片失败：${redactKey(e.message, provider.apiKey)}`); }
       if (img.status >= 300 && img.status < 400) {
         return fail('上游图片链接发生跳转，已拒绝（防止绕过内网地址检查）');
       }
