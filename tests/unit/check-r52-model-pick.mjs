@@ -290,7 +290,8 @@ const read = (p) => readFileSync(join(REPO, p), 'utf8');
   );
   assert.match(src, /stopImmediatePropagation/, 't3.1【相位】截断同相位其余 Esc 处理');
   // 宿主让行用的标记 + 压过 AnchoredPopover 的内联 zIndex:9999
-  assert.match(src, /data-cgui-modelpick/, 't3.1: 弹窗根挂 data-cgui-modelpick(供宿主查询式让行)');
+  // 匹配**属性**而非注释里的同名字样:变异实测「删掉属性只留注释」曾骗过宽松写法。
+  assert.match(src, /data-cgui-modelpick=/, 't3.1: 弹窗根挂 data-cgui-modelpick 属性(供宿主查询式让行)');
   const z = src.match(/z-\[(\d+)\]/);
   assert.ok(z && Number(z[1]) > 9999, `t3.1: z 值须压过弹层的内联 zIndex:9999(当前 ${z?.[1]})`);
 }
