@@ -44,7 +44,7 @@
     var z = parseFloat(html.style.zoom) || 1;
     body.style.setProperty('--app-h', (window.innerHeight / z - 56) + 'px');
     body.style.setProperty('--app-w', (window.innerWidth / z - 20) + 'px');
-      alignTitlebar();
+    alignTitlebar();
   }
   fitDesk();
   window.addEventListener('resize', fitDesk);
