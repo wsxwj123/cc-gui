@@ -18,9 +18,45 @@ import {
   geminiModelsRequest,
 } from '../utils/image-protocols.js';
 import { readCapped } from '../utils/read-capped.js';
+// r56 按 provider 生图代理:生图链路的三处外联(生成 POST / 图片下载 / 拉模型)统一
+// 改走 undici 的 fetch(它是 Node 全局 fetch 的同源实现,AbortSignal / redirect:'manual' /
+// 读流语义相同),不传 dispatcher 就是直连,传了才走代理。刻意【不】按"有无代理二选一"
+// 用两种 fetch:同一条安全链路挂两套网络栈,以后任何一处改动都要验两遍。
+// ⚠️ 唯一实测不等价处:本包的 fetch 不认 Node 内建的 FormData(见下面 runImageJob 里的
+// multipart 预序列化),别把 FormData 直接交给它。
+import { fetch as undiciFetch, ProxyAgent } from 'undici';
 import { assertPublicBaseURL, probeUpstreamModels } from './settings.js';
 
 const router = Router();
+
+// 代理池:同一个 proxyUrl 复用一个 ProxyAgent(每次新建 = 每次新连接池,连接不复用)。
+// 上限 8 条,超了淘汰最久未用的那条并关掉它的连接池(Map 迭代序 = 插入序,命中时
+// 删了再插 = 挪到队尾,于是队头恒为最久未用)。
+const MAX_PROXY_AGENTS = 8;
+const proxyAgents = new Map();
+function proxyAgentFor(proxyUrl) {
+  const key = typeof proxyUrl === 'string' ? proxyUrl.trim() : '';
+  if (!key) return null;
+  const hit = proxyAgents.get(key);
+  if (hit) { proxyAgents.delete(key); proxyAgents.set(key, hit); return hit; }
+  let agent;
+  try { agent = new ProxyAgent(key); }
+  catch { return null; } // 代理地址已在保存时校验过;这里再坏也只是回落直连,不让生成整个崩掉
+  proxyAgents.set(key, agent);
+  if (proxyAgents.size > MAX_PROXY_AGENTS) {
+    const oldest = proxyAgents.keys().next().value;
+    const dead = proxyAgents.get(oldest);
+    proxyAgents.delete(oldest);
+    try { dead?.close?.()?.catch?.(() => {}); } catch { /* 关不掉就交给 GC */ }
+  }
+  return agent;
+}
+
+/** provider → fetch 选项片段:配了代理就带 dispatcher,没配就是空对象(与原先逐字一致)。 */
+function dispatchOpts(proxyUrl) {
+  const agent = proxyAgentFor(proxyUrl);
+  return agent ? { dispatcher: agent } : {};
+}
 
 // 路径按调用取(不在模块顶层固化):单测把 HOME 指向 mktemp 目录后再 import 也能生效,
 // 真实 HOME 一个字节都不碰。
@@ -189,6 +225,9 @@ function publicView(p) {
     models: Array.isArray(p.models) ? p.models : [],
     // r54:图生图形态(仅 openai 协议有意义)。存量条目无此字段 → 默认官方 edits 端点。
     i2iMode: p.i2iMode === 'generations-image' ? 'generations-image' : 'edits',
+    // r56:本 provider 的正向代理地址。保存时已禁掉内嵌账号密码,故【不是敏感值】,
+    // 可以整条回给前端(不回传就没法在编辑表单里显示已配的代理)。
+    proxyUrl: typeof p.proxyUrl === 'string' ? p.proxyUrl : '',
     extra: p.extra || null, hasKey: !!p.apiKey,
   };
 }
@@ -212,6 +251,28 @@ function validateModels(models) {
     if (!out.includes(id)) out.push(id);
   }
   return { models: out };
+}
+
+/**
+ * r56 代理地址校验。返回 { error } / { proxyUrl } / {}(未传 = 保持原值,与 apiKey 同语义)。
+ *  - 空串 = 清除(改回直连);
+ *  - 必须 http(s) 形态;
+ *  - 【禁内嵌账号密码】:代理凭据会被原样存进 image-providers.json 并出现在 publicView /
+ *    错误信息里(redactKey 只剥 apiKey,认不出代理密码)。本机代理端口不需要认证,
+ *    真需要认证的远端代理请用不落密码的形态;
+ *  - 【放行回环】:Clash / 本机代理端口正是这个字段的主用途,不套 assertPublicBaseURL
+ *    (那是防"服务端拿着密钥去打内网",而代理地址是用户自己指定的出口)。
+ */
+function validateProxyUrl(raw) {
+  if (raw === undefined || raw === null) return {};
+  if (typeof raw !== 'string') return { error: '代理地址必须是字符串' };
+  const s = raw.trim();
+  if (!s) return { proxyUrl: '' };
+  let u;
+  try { u = new URL(s); } catch { return { error: '代理地址非法，请填写形如 http://127.0.0.1:7897 的地址' }; }
+  if (!/^https?:$/.test(u.protocol)) return { error: '代理地址必须是 http(s)' };
+  if (u.username || u.password) return { error: '代理地址不支持内嵌账号密码，请使用本机免认证代理端口' };
+  return { proxyUrl: s };
 }
 
 // 保存目录:必须是绝对路径 + 存在 + 可写。人话错误,不抛栈。
@@ -252,6 +313,9 @@ async function validateBody(body) {
   // r54:图生图形态。不传 = 默认官方 edits(存量条目同此默认)。
   const i2iMode = body?.i2iMode === undefined || body?.i2iMode === null || body?.i2iMode === '' ? 'edits' : body.i2iMode;
   if (!I2I_MODES.includes(i2iMode)) return { error: `图生图形态必须是 ${I2I_MODES.join(' / ')}` };
+  // r56:代理地址可选。不传 = 不动已存值;空串 = 清除。
+  const pv = validateProxyUrl(body?.proxyUrl);
+  if (pv.error) return { error: pv.error };
   return {
     value: {
       i2iMode,
@@ -263,6 +327,7 @@ async function validateBody(body) {
       savePath: savePath.trim(),
       extra,
       ...(mv.models ? { models: mv.models } : {}),
+      ...(pv.proxyUrl === undefined ? {} : { proxyUrl: pv.proxyUrl }),
     },
   };
 }
@@ -343,12 +408,13 @@ function classifyModelsError(msg) {
 // gemini 的模型列表:GET {base}/models。认证头按端点形态选,401/403 换另一组重试一次
 // (与出图链路的 altHeaders 同口径)。**不按能力过滤** —— 响应里没有可靠的"能否生图"
 // 标记,过滤只会把可用模型误杀,全量返回由用户挑。
-async function fetchGeminiModels(baseURL, apiKey) {
+async function fetchGeminiModels(baseURL, apiKey, proxyUrl) {
   await assertPublicBaseURL(baseURL);
   const spec = geminiModelsRequest(baseURL, apiKey);
   // redirect:manual —— 请求带着 apiKey,跟随 3xx 会把密钥带到没验过的地址(同出图链路)。
-  const get = (headers) => fetch(spec.url, {
+  const get = (headers) => undiciFetch(spec.url, {
     headers, signal: AbortSignal.timeout(FETCH_MODELS_TIMEOUT_MS), redirect: 'manual',
+    ...dispatchOpts(proxyUrl),
   });
   let resp;
   try { resp = await get(spec.headers); }
@@ -405,12 +471,20 @@ router.post('/image-providers/fetch-models', async (req, res) => {
   let apiKeyForRedact = '';
   try {
     let { baseURL, apiKey, protocol } = req.body || {};
+    // r56:代理与 baseURL 同口径 —— 编辑态用【存储值】,新建表单态才用请求体里的值
+    // (校验同保存路径:非 http(s)/带凭据一律拒,不给一个没验过的出口)。
+    let proxyUrl = '';
     if (req.body?.id) {
       const stored = (await readImageProviders()).find((p) => p.id === req.body.id);
       if (!stored) return res.status(404).json({ ok: false, type: 'unsupported', message: '未找到该生图 provider' });
       if (!apiKey || !String(apiKey).trim()) apiKey = stored.apiKey;
       baseURL = stored.baseURL; // ← 防密钥外传:请求体的 baseURL 一律忽略
       protocol = stored.protocol || protocol;
+      proxyUrl = typeof stored.proxyUrl === 'string' ? stored.proxyUrl : '';
+    } else {
+      const pv = validateProxyUrl(req.body?.proxyUrl);
+      if (pv.error) return res.status(400).json({ ok: false, type: 'unsupported', message: pv.error });
+      proxyUrl = pv.proxyUrl || '';
     }
     apiKeyForRedact = typeof apiKey === 'string' ? apiKey : '';
     if (typeof baseURL !== 'string' || !baseURL.trim()) {
@@ -423,8 +497,11 @@ router.post('/image-providers/fetch-models', async (req, res) => {
     }
     // openai / chat 的 baseURL 语义与文本 provider 相同 → 复用同一条探测链路(候选 URL、
     // 双 header 轮询、SSRF 守卫都在里面);gemini 是另一套端点形态,单独走。
+    // ⚠️ 已知边界:probeUpstreamModels 在 settings.js 且与文本 provider 共用(其本体
+    // 有"一个字不改"的红线),故 openai/chat 的【拉模型】这一次请求仍是直连,不经代理;
+    // 生成与图片下载(真正会被墙掐断的两处)以及 gemini 拉模型都已过代理。
     const models = protocol === 'gemini'
-      ? await fetchGeminiModels(baseURL, apiKey)
+      ? await fetchGeminiModels(baseURL, apiKey, proxyUrl)
       : ((await probeUpstreamModels(baseURL, apiKey)).ids || []);
     res.json({ ok: true, models });
   } catch (err) {
@@ -473,12 +550,29 @@ async function runImageJob({ jobId, provider, prompt, spec, startedAt }) {
     status: 'error', error, tookMs: Date.now() - startedAt,
   }).catch(() => {}));
   const started = startedAt;
+  // r56:本 provider 配了代理就整条链路都走它(生成 POST 与下面的图片下载)。
+  const proxy = dispatchOpts(provider.proxyUrl);
   try {
-    const post = (headers) => fetch(spec.url, {
+    // r56 实测坑:undici 包的 fetch 【不认】Node 内建的 FormData(它只认自己那份实现),
+    // 拿到内建 FormData 会退化成 String(body) = 字面量 "[object FormData]" 且
+    // Content-Type 变 text/plain —— 图生图 edits 形态会静默发出一坨垃圾,上游 400。
+    // 故 multipart 在这里先用【Node 自己的序列化器】压成字节并取出它写的 boundary,
+    // 再交给 undici 发:请求字节与原先全局 fetch 发出去的逐字一致(同一个序列化器),
+    // 且 image-protocols.js 仍用原生 FormData(零新依赖)。
+    // ponytail: 多一份 body 副本在内存里;参考图总量本就被 express.json 的 25MB 卡死,
+    // 真要流式再说(要么等 undici 支持内建 FormData,要么换成 undici 自己的 FormData)。
+    let formBody = null; let formType = null;
+    if (spec.form) {
+      const packed = new Response(spec.form);
+      formType = packed.headers.get('content-type'); // multipart/form-data; boundary=…
+      formBody = Buffer.from(await packed.arrayBuffer());
+    }
+    const post = (headers) => undiciFetch(spec.url, {
       method: 'POST',
-      headers,
-      body: spec.form || JSON.stringify(spec.body), // form 非空 = multipart(图生图 edits 形态)
+      headers: formType ? { ...headers, 'Content-Type': formType } : headers,
+      body: formBody || JSON.stringify(spec.body), // form 非空 = multipart(图生图 edits 形态)
       signal: AbortSignal.any([controller.signal, AbortSignal.timeout(GENERATE_TIMEOUT_MS)]),
+      ...proxy,
       // r26-J1:与下方下载分支同口径 —— 不跟随重定向。生成 POST 带着 apiKey,跟随 302
       // 会把请求(或响应读取)引到 assertPublicBaseURL 没验过的地址(鉴权跳转/网关劫持)。
       redirect: 'manual',
@@ -564,10 +658,11 @@ async function runImageJob({ jobId, provider, prompt, spec, startedAt }) {
       catch (e) { return fail(`拒绝下载该链接：${e.message}`); }
       let img;
       try {
-        img = await fetch(picked.url, {
+        img = await undiciFetch(picked.url, {
           signal: AbortSignal.any([controller.signal, AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS)]),
           // 判官必修①:默认跟随重定向 = 事后校验白做(302 到内网照样下)。手动挡下 3xx。
           redirect: 'manual',
+          ...proxy,
         });
       } catch (e) { return fail(`下载生成的图片失败：${redactKey(e.message, provider.apiKey)}`); }
       if (img.status >= 300 && img.status < 400) {
