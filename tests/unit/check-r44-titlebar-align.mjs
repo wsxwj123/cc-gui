@@ -85,4 +85,14 @@ for (const skin of ['xp', 'miku']) {
   // ── d:取证不得把整张皮肤送进黑名单(sendBeacon/fetch 即拒载)──
   assert.equal(validateT2Script(src).ok, true, `d1[${skin}]: client.js 仍过 T2 静态黑名单`);
 }
+// t6(r46): 侧栏开合平移 logo 但无 topbar 子树 mutation、无 window resize —— 必须有
+// ResizeObserver 盯 topbar 自身尺寸(用户实报根因)。变异:删 ResizeObserver 段 → 红。
+for (const skin of ['xp', 'miku']) {
+  const src = readFileSync(new URL(`../../client/src/builtin-skins/${skin}/client.js`, import.meta.url), 'utf-8');
+  assert.ok(/new ResizeObserver\(/.test(src), `t6[${skin}]: 必须有 ResizeObserver`);
+  assert.ok(/topbarRo\.observe\(topbar\)/.test(src), `t6[${skin}]: ResizeObserver 必须盯 topbar`);
+  assert.ok(/topbarRo\.disconnect\(\); topbarRo = null;/.test(src), `t6[${skin}]: dispose 清 ResizeObserver`);
+  assert.ok(/window\.ResizeObserver/.test(src), `t6[${skin}]: 特性检测(老引擎兜底)`);
+}
+
 console.log('check-r44-titlebar-align: all passed');

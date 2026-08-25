@@ -62,6 +62,7 @@
   var topbarObserver = null;
   var observedTopbar = null;
   var topbarRaf = 0;
+  var topbarRo = null;       // ResizeObserver:侧栏开合等布局位移不改 topbar 子树、不触发 resize,只有它能醒
 
   // 取证:皮肤脚本经 Blob-URL 以经典脚本注入,拿不到 skins.js 的模块作用域;又不能自带
   // 上报通道 —— T2 静态黑名单按小写全文扫,信标与网络请求两类调用一律拒载(连注释里
@@ -114,6 +115,18 @@
       topbarRaf = requestAnimationFrame(function () { topbarRaf = 0; alignTitlebar(); });
     });
     topbarObserver.observe(topbar, { childList: true, subtree: true });
+    // r46:侧栏展开/收起会平移 logo(topbar 宽度变化)但不产生 topbar 子树 mutation、也不触发
+    // window resize —— 用户实报「侧栏展开态永远不对齐」的根因。ResizeObserver 盯 topbar 自身
+    // 尺寸,恰好把这类布局位移全兜住;回调与 MutationObserver 共用 rAF 合帧与幂等守卫,
+    // titlebar 不在 topbar 内 → 写 padding 不改 topbar 尺寸,零回环。
+    if (window.ResizeObserver) {
+      if (topbarRo) topbarRo.disconnect();
+      topbarRo = new ResizeObserver(function () {
+        if (topbarRaf) return;
+        topbarRaf = requestAnimationFrame(function () { topbarRaf = 0; alignTitlebar(); });
+      });
+      topbarRo.observe(topbar);
+    }
   }
   function armAlign() {
     alignTitlebar();
@@ -130,6 +143,7 @@
     settleLeft = 0;
     if (topbarRaf) { cancelAnimationFrame(topbarRaf); topbarRaf = 0; }
     if (topbarObserver) { topbarObserver.disconnect(); topbarObserver = null; }
+    if (topbarRo) { topbarRo.disconnect(); topbarRo = null; }
     observedTopbar = null;
   }
   function fitDesk() {
