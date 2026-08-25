@@ -1656,6 +1656,14 @@ router.post('/chat', async (req, res) => {
           broadcastLiveTasks(slot, liveIds, settled, added);
         }
         deliverLine(slot, line);
+        // r49b②:CLI 在 init 里自报本进程的生效档位。与本 slot 的 GUI 请求档对账,不一致
+        // (guard 拒了 auto/plan)就补发一条系统行让界面当场现形——此前这种降级悄无声息,
+        // 用户以为在跑自动档、实际是逐步确认。只读 + 发一行,不碰任何时序与 slot 生命周期。
+        if (m.type === 'system' && m.subtype === 'init') {
+          slot.effectiveMode = m.permissionMode;
+          const mismatch = permissionModeMismatch(slot.guiMode, m.permissionMode);
+          if (mismatch) deliverLine(slot, JSON.stringify({ type: 'system', subtype: 'mode_mismatch', ...mismatch }));
+        }
         // Bug 修复(子代理后主 agent 续跑「看起来停了」):中间 result 已被 4s 去抖 finalize 转 idle,
         // 但主 agent 又续跑了新回合(子代理完 → 续开回合去弹计划/权限卡,期间第三方 provider TTFT
         // 可达 60-90s 远超 4s 窗)。把 idle 的 slot 标回活跃 → /agents/active 不再报 idle → 前端
@@ -1745,30 +1753,68 @@ router.get('/model-window', (req, res) => {
   res.json({ window: resolveDisplayWindow(String(req.query.model || '')) });
 });
 
-router.post('/chat/permission-mode', async (req, res) => {
-  const { sessionId, mode } = req.body || {};
-  if (!sessionId || !mode || !VALID_PERMISSION_MODES.has(mode)) {
-    return res.status(400).json({ error: 'sessionId 与合法 mode 必填' });
-  }
+// r49b①:热切逐 slot 记结果。CLI 2.1.240 的 guardPermissionModeChange 会拒掉一部分切换
+// (auto 受模型门控、bypass 未带 dangerously-skip 启动),原来整段包在 `catch {}` 里吞掉,
+// 响应里成功与被拒长得一模一样 → 界面停在一个根本没生效的档上。被拒的 slot 一个字段都不改:
+// canUseTool 继续按【旧档】裁决,绝不按没生效的新档放行。
+// 纯逻辑,tests/unit/check-mode-switch-failure.mjs 真 import(mock slot.query,不打真实 CLI)。
+export async function applyPermissionModeToSlots(procs, sessionId, mode) {
   const sdkMode = mode === 'plan' ? 'plan' : mode === 'auto' ? 'auto' : 'default';
+  let attempted = 0;
   let delivered = 0;
-  for (const slot of activeProcesses.values()) {
+  const failed = [];
+  for (const slot of procs.values()) {
     if (slot.sessionId !== sessionId || slot.exitCode !== null || !slot.query) continue;
+    attempted++;
     try {
       await slot.query.setPermissionMode(sdkMode);
       slot.guiMode = mode;
       slot.permissionMode = mode;
       slot.sdkMode = sdkMode; // #26:常驻复用的 plan 热切判据与此保持同步
       delivered++;
-    } catch {}
+    } catch (e) {
+      failed.push({ sessionId: slot.sessionId, error: e?.message || String(e) });
+    }
   }
+  return { attempted, delivered, failed };
+}
+
+// r49b②:init 回报的生效档位 vs GUI 请求档。GUI 六档 → SDK 三值本就是多对一
+// (default/acceptEdits/dontAsk/bypassPermissions 全落 'default',放行与弹窗由 canUseTool
+// 按 guiMode 自己裁决),所以 init 报 'default' 对这四档都是正常结果,报警会天天误报。
+// 只有 auto/plan 在 SDK 层有专属值,拿不到就是真没生效(CLI guard 拒了)。
+// 不维护"哪些模型支持 auto"的名单——名单会变,init 回报是唯一真相源。
+// 纯函数,tests/unit/check-mode-mismatch.mjs 真 import(六档 × init 值矩阵)。
+export function permissionModeMismatch(guiMode, effective) {
+  if (typeof effective !== 'string' || !effective) return null; // 旧版 CLI 不带该字段:不凭空判定
+  if (guiMode !== 'auto' && guiMode !== 'plan') return null;
+  return effective === guiMode ? null : { requested: guiMode, effective };
+}
+
+router.post('/chat/permission-mode', async (req, res) => {
+  const { sessionId, mode } = req.body || {};
+  if (!sessionId || !mode || !VALID_PERMISSION_MODES.has(mode)) {
+    return res.status(400).json({ error: 'sessionId 与合法 mode 必填' });
+  }
+  const { attempted, delivered, failed } = await applyPermissionModeToSlots(activeProcesses, sessionId, mode);
   // A1 切档重裁:对该会话已 pending 的卡按【新档】重新自动裁决(判定与 canUseTool 共用
   // autoDecide 同一份)。allow/deny 走既有 settle 幂等路径,null 的卡保持等待用户。
   // 原客户端"切放任批量放行"effect 与各 mode 抢答分支的职责全部由这里接管。
-  try {
-    resolvePendingForSession(sessionId, (r) => autoDecide(mode, r.toolName, r.toolInput, r.blockedPath || null));
-  } catch {}
-  res.json({ ok: true, delivered });
+  // r49b①:全部被拒时跳过——档位没生效,按新档重裁 = 按幻觉档放行/拒绝。
+  if (delivered > 0 || attempted === 0) {
+    try {
+      resolvePendingForSession(sessionId, (r) => autoDecide(mode, r.toolName, r.toolInput, r.blockedPath || null));
+    } catch {}
+  }
+  // 有进程却一个都没收下 = 切档失败,如实回 409 带 CLI 原文(前端据此回滚档位并显示原因);
+  // attempted 0(会话闲置)不是失败,照常 200。
+  if (attempted > 0 && delivered === 0) {
+    return res.status(409).json({
+      ok: false, attempted, delivered: 0, failed,
+      error: failed[0]?.error || '权限档位切换被 CLI 拒绝',
+    });
+  }
+  res.json({ ok: true, attempted, delivered, failed });
 });
 
 // ── 引导注入(无打断 steering)────────────────────────────────────────────────

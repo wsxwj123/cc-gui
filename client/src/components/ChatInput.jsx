@@ -66,6 +66,14 @@ export function PermissionModeSelector({ permKey, tourAnchor = false }) {
   const permissionMode = useStore((s) => (permKey ? (s.permissionModeBySession[permKey] || s.permissionMode) : s.permissionMode));
   const setPermissionMode = useStore((s) => s.setPermissionMode);
   const visibleModes = useVisiblePermissionModes(permKey);
+  // r49b①:切档被 CLI 拒绝时,档位已回滚,这里把原因说出来(6s 自清,形态同思考力度回落 toast)。
+  const modeNotice = useStore((s) => s.permissionModeNotice);
+  const myNotice = modeNotice && modeNotice.key === permKey ? modeNotice : null;
+  useEffect(() => {
+    if (!myNotice) return;
+    const id = setTimeout(() => useStore.getState().clearPermissionModeNotice(), 6000);
+    return () => clearTimeout(id);
+  }, [myNotice]);
   const [open, setOpen] = useState(false);
   const wrapRef = useRef(null);
   const triggerRef = useRef(null);
@@ -123,6 +131,11 @@ export function PermissionModeSelector({ permKey, tourAnchor = false }) {
         <span className={`cgui-perm-label text-[11px] font-body whitespace-nowrap ${current.tone}`}>{current.label}</span>
         <ChevronDown size={10} className="text-ink-faint" />
       </button>
+      {myNotice && (
+        <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-1 z-[120] px-2.5 py-1 rounded-md bg-ink/90 text-canvas text-[11px] font-body max-w-[18rem] shadow-popover pointer-events-none">
+          档位未切换:{myNotice.text}
+        </div>
+      )}
       <AnchoredPopover anchorRef={wrapRef} open={open}
         onRequestClose={(reason) => closeListbox(reason === 'escape')} drop="up"
         className="w-64 max-w-[calc(var(--app-w,100vw)-1.5rem)] py-1 max-h-[min(60vh,calc(var(--app-h,100dvh)-6rem))] overflow-y-auto">
