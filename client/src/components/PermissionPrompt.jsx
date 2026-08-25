@@ -678,6 +678,11 @@ function PermissionCard({ req, onResolve, onWhitelistAndAllow, onAlwaysAllow, on
   // always=写 settings.json 的 permissions.allow 规则(经服务端 updatedPermissions,
   // CLI 落盘,终端与 GUI 共用)。危险命令不提供 always(服务端同样忽略,保 G3 强拦)。
   const [remember, setRemember] = useState('none');
+  // 这张卡没有 key,React 把上一张的实例复用给下一个请求 → remember 不复位:选过一次
+  // 「始终允许」后,之后每张卡的 Enter/允许都按 always 提交,一路攒出几十条永久规则
+  // (用户实报四五十条)。每张新卡一律回到「仅此次」;要连续永久授权就每张显式再选
+  // ——安全语义优先于省点击。
+  useEffect(() => { setRemember('none'); }, [req.id]);
   const dangerous = isDangerousCommand(req);
   // 与服务端 noAlways 对齐(chat.js:510):plan 档的写类/Bash 同样不写持久规则——
   // 客户端若不藏,用户选了「始终允许」会被服务端静默丢弃(调研附带发现)。
@@ -694,6 +699,11 @@ function PermissionCard({ req, onResolve, onWhitelistAndAllow, onAlwaysAllow, on
     else if (remember === 'always' && !noAlways) onAlwaysAllow(req);
     else onResolve(req, 'allow');
   };
+  // 后果写在按钮上:下拉框在按钮另一头,光看它容易忽略这一击会落进 settings.json 的
+  // 永久规则。判据与 doAllow 逐字同构(含 noAlways),免得文案与行为漂移。
+  const allowLabel = remember === 'session' ? '允许并本会话记住 ↵'
+    : (remember === 'always' && !noAlways) ? '允许并写入规则 ↵'
+      : '允许 ↵';
   // Enter = allow, Esc = deny — only when this is the top card.
   useEffect(() => {
     if (!hydrate) return; // BK-1:键盘只在主实例绑,避免子代理视图重复 respond
@@ -785,7 +795,7 @@ function PermissionCard({ req, onResolve, onWhitelistAndAllow, onAlwaysAllow, on
           title="Enter"
         >
           {processing && <Loader2 size={11} className="animate-spin" />}
-          允许 ↵
+          {allowLabel}
         </button>
       </div>
     </div>
