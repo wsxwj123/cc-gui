@@ -11,8 +11,10 @@ import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 
 const REAL_HOME = process.env.HOME;
+const REAL_PROFILE = process.env.USERPROFILE;
 const home = mkdtempSync(join(tmpdir(), 'cgui-override-test-'));
 process.env.HOME = home;   // os.homedir() 在 POSIX 上优先读 $HOME,必须在 import 前设好
+process.env.USERPROFILE = home; // Windows 上 homedir() 读 %USERPROFILE%,不同设沙箱失效
 
 const { setClaudeOverride, getClaudeOverride, resolveClaude } =
   await import('../../server/utils/claude-resolver.js');
@@ -55,6 +57,7 @@ try {
   setClaudeOverride('');
 } finally {
   process.env.HOME = REAL_HOME;
+  if (REAL_PROFILE === undefined) delete process.env.USERPROFILE; else process.env.USERPROFILE = REAL_PROFILE;
   rmSync(home, { recursive: true, force: true });
 }
 

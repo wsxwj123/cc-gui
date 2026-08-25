@@ -25,102 +25,9 @@
   // body 作用域的 --app-h/--app-w，扣掉桌面边距(上30+下26=56、左右10+10=20)。
   // 跟踪 resize 与 html style 上的 zoom 变化（字体档切换）；卸载器全清。
 
-  // ── 标题栏图标与应用头部 CC-GUI logo【机械对齐】(r45 引擎无关化)────────────
-  // 定值内边距在不同缩放/布局下必偏(r44 已证伪);r44 改成的「gBCR ÷ CSS zoom」在用户机
-  // (系统 WebKit,zoom 1.2)仍偏 —— 那是拿「gBCR 给的是布局 px」当假设在换算,不同引擎
-  // 口径不同就换算错。这里不再假设任何口径,改【实测换算系数】:offsetWidth 恒为布局 px,
-  // gBCR.width 按引擎当下的实际口径给数,两者之商 = 该引擎该时刻的真实系数(口径一致时
-  // 自然退化为 1)。target/current 取原始 gBCR.left(同口径相减),修正量 ÷ 系数换回布局 px。
-  var alignRaf = 0;
-  var settleTimer = 0;
-  var settleLeft = 12;      // settle 轮询余额:250ms × 12 ≈ 3s 后自停,不留常驻定时器
-  var topbarObserver = null;
-  var observedTopbar = null;
-  var topbarRaf = 0;
-  var topbarRo = null;       // ResizeObserver:侧栏开合等布局位移不改 topbar 子树、不触发 resize,只有它能醒
-
-  // 取证:皮肤脚本经 Blob-URL 以经典脚本注入,拿不到 skins.js 的模块作用域;又不能自带
-  // 上报通道 —— T2 静态黑名单按小写全文扫,信标与网络请求两类调用一律拒载(连注释里
-  // 写全形态都会命中),内联一个就是整张皮肤不上身。故走 skins.js 挂出的全局桥
-  // window.__cguiSkinTrace(桥不在则静默不发,异常全吞)。
-  function trace(data) {
-    try { if (window.__cguiSkinTrace) window.__cguiSkinTrace('skin:align', data); } catch (e) {}
-  }
-
-  function alignTitlebar() {
-    if (!titlebar || !titlebar.isConnected || !icon) return;
-    var brand = document.querySelector('[data-cgui="topbar"] .cgui-brand') || document.querySelector('.cgui-brand');
-    if (!brand) return;
-    var scale = titlebar.offsetWidth ? (titlebar.getBoundingClientRect().width / titlebar.offsetWidth) : 1;
-    if (!(scale > 0)) scale = 1;
-    var target = brand.getBoundingClientRect().left;
-    var current = icon.getBoundingClientRect().left;
-    if (target <= 0 || Math.abs(target - current) < 1) return;
-    // 判官建议1:优先读自己写过的 element style(恒为布局 px,免疫任何 computed 口径),首轮才回落 computed。
-    var pad = parseFloat(titlebar.style.paddingLeft) || parseFloat(getComputedStyle(titlebar).paddingLeft) || 0;
-    var next = Math.round(pad + (target - current) / scale);
-    if (next >= 6) {
-      titlebar.style.paddingLeft = next + 'px';
-      trace({ target: target, current: current, scale: scale, pad: pad, next: next });
-    }
-  }
-
-  // 触发加固:一次性测量在用户机实证会 miss(测的那一刻 topbar 还没到终态)。除
-  // install/首帧 rAF/fitDesk(resize+字号缩放)外再补三路,幂等守卫(差<1px 直接 return)
-  // 保证对齐之后每一轮都是零写入零成本。
-  // settle 轮询:250ms 一跳、跳满 12 次自停的 setTimeout 链(不是 setInterval,不常驻)。
-  function settleTick() {
-    settleLeft -= 1;
-    watchTopbar();
-    alignTitlebar();
-    settleTimer = settleLeft > 0 ? setTimeout(settleTick, 250) : 0;
-  }
-  // topbar 结构观察器:收起/展开侧栏这类结构变化会横移 logo,那时 resize 不发生、settle 已停。
-  // 【零回环论证】observe 的是 [data-cgui="topbar"] 子树;alignTitlebar 的唯一写入是
-  // titlebar.style.paddingLeft,而 titlebar 是本脚本 appendChild 到 body 的节点,不在 topbar
-  // 子树内 —— 写入永远落不进被观察范围,回调不可能自触发(r41 教训:观察器回调写自己观察
-  // 的东西 = 微任务无限循环冻页)。读 brand/icon 的 gBCR 只读不写,同样不产生 mutation。
-  function watchTopbar() {
-    var topbar = document.querySelector('[data-cgui="topbar"]');
-    if (!topbar || topbar === observedTopbar) return;   // 还没挂载 / 已经盯着它:不重复接
-    if (topbarObserver) topbarObserver.disconnect();     // 路由重建了 topbar → 改盯新节点
-    observedTopbar = topbar;
-    topbarObserver = new MutationObserver(function () {
-      if (topbarRaf) return;                             // 一帧内多批变化只重校一次
-      topbarRaf = requestAnimationFrame(function () { topbarRaf = 0; alignTitlebar(); });
-    });
-    topbarObserver.observe(topbar, { childList: true, subtree: true });
-    // r46:侧栏展开/收起会平移 logo(topbar 宽度变化)但不产生 topbar 子树 mutation、也不触发
-    // window resize —— 用户实报「侧栏展开态永远不对齐」的根因。ResizeObserver 盯 topbar 自身
-    // 尺寸,恰好把这类布局位移全兜住;回调与 MutationObserver 共用 rAF 合帧与幂等守卫,
-    // titlebar 不在 topbar 内 → 写 padding 不改 topbar 尺寸,零回环。
-    if (window.ResizeObserver) {
-      if (topbarRo) topbarRo.disconnect();
-      topbarRo = new ResizeObserver(function () {
-        if (topbarRaf) return;
-        topbarRaf = requestAnimationFrame(function () { topbarRaf = 0; alignTitlebar(); });
-      });
-      topbarRo.observe(topbar);
-    }
-  }
-  function armAlign() {
-    alignTitlebar();
-    alignRaf = requestAnimationFrame(alignTitlebar);
-    settleTimer = setTimeout(settleTick, 250);
-    watchTopbar();
-    // 字体加载完成会横移 logo。Promise 撤不回,故卸载后靠 alignTitlebar 首行的
-    // titlebar.isConnected 判空转,不留副作用。
-    try { if (document.fonts && document.fonts.ready) document.fonts.ready.then(alignTitlebar, function () {}); } catch (e) {}
-  }
-  function disposeAlign() {
-    cancelAnimationFrame(alignRaf);
-    if (settleTimer) { clearTimeout(settleTimer); settleTimer = 0; }
-    settleLeft = 0;
-    if (topbarRaf) { cancelAnimationFrame(topbarRaf); topbarRaf = 0; }
-    if (topbarObserver) { topbarObserver.disconnect(); topbarObserver = null; }
-    if (topbarRo) { topbarRo.disconnect(); topbarRo = null; }
-    observedTopbar = null;
-  }
+  // 标题栏图标与应用头部 logo 的【机械对齐】机器(r42 定值 → r44 差值 → r45 实测系数 →
+  // r46 侧栏触发器)在 r47 被裁定为解错题、停止武装,r49a 整段删除:标题栏顶格靠左由
+  // skin.css 的基础 padding 直接给出,不需要任何测量/观察器/轮询。别再加回来。
   function fitDesk() {
     var z = parseFloat(html.style.zoom) || 1;
     body.style.setProperty('--app-h', (window.innerHeight / z - 56) + 'px');
@@ -246,10 +153,8 @@
 
   body.appendChild(titlebar);
   body.appendChild(statusbar);
-  // r47:用户裁定标题栏【顶格靠左】(基础 padding 即位),对齐 logo 的整套校准机器退役不再武装。
 
   window.__cguiSkinDispose = function () {
-    disposeAlign();
     rootObserver.disconnect();
     if (rootRaf) { cancelAnimationFrame(rootRaf); rootRaf = 0; }
     if (sidebarObserver) sidebarObserver.disconnect();

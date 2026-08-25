@@ -15,6 +15,7 @@ import { crc32 } from 'node:zlib';
 import {
   installSkinDirectory, installSkinPackage, isSafeSkinRelPath, DIR_LIMITS, SKINS_DIR,
 } from '../../server/routes/skins-packs.js';
+import { ZIP_LIMITS } from '../../server/utils/skin-validate.js';
 
 const scratch = mkdtempSync(join(tmpdir(), 'cgui-r43-'));
 const dirSkins = join(scratch, 'skins-dir');
@@ -57,9 +58,12 @@ const rejects = (files, code, label, opts = {}) =>
   assert.equal(isSafeSkinRelPath(null), false, 'm8: 非字符串拒');
   // 生产限额口径(客户端下限文案与服务端同源,见下方前端哨兵)
   assert.deepEqual(DIR_LIMITS, {
-    maxFiles: 64, maxFileBytes: 20 * 1024 * 1024, maxTotalBytes: 30 * 1024 * 1024,
+    maxFiles: 40, maxFileBytes: 20 * 1024 * 1024, maxTotalBytes: 30 * 1024 * 1024,
     maxDepth: 3, maxPathLen: 128,
   }, 'm9: DIR_LIMITS 生产值');
+  // r49a-⑤:文件夹通道与 zip 通道同一条数闸(两条通道跑同一段 installUnpacked,
+  // 上限不同 = 同一个包换个导入方式一个过一个拒)。
+  assert.equal(DIR_LIMITS.maxFiles, ZIP_LIMITS.maxEntries, 'm9: 文件夹条数闸与 zip 对齐');
 }
 
 // ── ② 导入通道:合法四件套成功,产物结构与 zip 通道一致 ──────────

@@ -99,6 +99,7 @@ const one = (provider) => {
 // ── 端到端:隔离 HOME + 真路由 + 本地假上游(只占 6703) ────────────────────
 const home = await mkdtemp(join(tmpdir(), 'cgui-quotakey-'));
 process.env.HOME = home; // 必须在 import 路由之前:两个路径常量在模块加载期就绑好了
+process.env.USERPROFILE = home; // Windows 上 homedir() 读 %USERPROFILE%,不同设沙箱失效
 await mkdir(join(home, '.claude-gui'), { recursive: true });
 
 const { default: express } = await import('express');

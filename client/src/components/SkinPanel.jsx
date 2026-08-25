@@ -25,9 +25,12 @@ const taCls = `${inputCls} font-mono text-[11px] resize-y min-h-[72px]`;
 // r43 文件夹导入:特性检测(老 iOS Safari 等无 webkitdirectory,则不渲染该入口)+
 // 客户端下限(与 server/routes/skins-packs.js 的 DIR_LIMITS 同口径;服务端仍独立硬校验)。
 const CAN_PICK_DIR = typeof document !== 'undefined' && 'webkitdirectory' in document.createElement('input');
-const DIR_MAX_FILES = 64;
+const DIR_MAX_FILES = 40;
 const DIR_MAX_FILE_BYTES = 20 * 1024 * 1024;
 const DIR_MAX_TOTAL_BYTES = 30 * 1024 * 1024;
+// r49a-①:Windows 资源管理器副产物(不以点开头,躲得过下面的 .DS_Store 过滤)。
+// 名单与 server/utils/skin-validate.js 的 WIN_JUNK_RE 同表:改一处必须同步另一处。
+const WIN_JUNK_RE = /^(thumbs\.db|desktop\.ini|ehthumbs\.db)$/i;
 // base64 走 FileReader 的 data URL(不手写分块 btoa):结果形如 data:<mime>;base64,<payload>。
 function fileToB64(file) {
   return new Promise((resolve, reject) => {
@@ -204,7 +207,7 @@ function SkinManagerDialog({ onClose, onChanged }) {
     const topDir = picked[0].webkitRelativePath ? picked[0].webkitRelativePath.split('/')[0] : '';
     const entries = picked
       .map((f) => ({ f, path: f.webkitRelativePath ? f.webkitRelativePath.split('/').slice(1).join('/') : f.name }))
-      .filter((e) => e.path && !e.path.split('/').some((s) => s.startsWith('.')));
+      .filter((e) => e.path && !e.path.split('/').some((s) => s.startsWith('.') || WIN_JUNK_RE.test(s)));
     const hasManifest = entries.some((e) => e.path === 'skin.json' || /^[^/]+\/skin\.json$/.test(e.path));
     const total = entries.reduce((n, e) => n + e.f.size, 0);
     const oversize = entries.find((e) => e.f.size > DIR_MAX_FILE_BYTES);

@@ -15,6 +15,7 @@ import { fileURLToPath } from 'node:url';
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const home = mkdtempSync(join(tmpdir(), 'cgui-r32-goal-'));
 process.env.HOME = home;
+process.env.USERPROFILE = home; // Windows 上 homedir() 读 %USERPROFILE%,不同设沙箱失效
 const HASH = 'r32-goal-fix-project';
 const SID = 'r32-goal-flood-session';
 mkdirSync(join(home, '.claude', 'projects', HASH), { recursive: true });

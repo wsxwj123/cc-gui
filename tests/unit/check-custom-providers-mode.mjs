@@ -14,6 +14,7 @@ const ok = (v, m) => { assert.ok(v, m); n += 1; };
 
 const home = await mkdtemp(join(tmpdir(), 'cgui-h3-'));
 process.env.HOME = home; // 必须先于 import:路径常量在模块加载期绑定
+process.env.USERPROFILE = home; // Windows 上 homedir() 读 %USERPROFILE%,不同设沙箱失效
 
 const express = (await import('express')).default;
 const settingsRoutes = (await import('../../server/routes/settings.js')).default;

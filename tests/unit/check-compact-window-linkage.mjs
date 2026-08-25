@@ -17,10 +17,12 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
 const REAL_HOME = process.env.HOME;
+const REAL_PROFILE = process.env.USERPROFILE;
 const home = mkdtempSync(join(tmpdir(), 'cgui-acw-test-'));
 mkdirSync(join(home, '.claude'), { recursive: true });
 mkdirSync(join(home, '.claude-gui'), { recursive: true });
 process.env.HOME = home;   // os.homedir() 在 POSIX 上优先读 $HOME
+process.env.USERPROFILE = home; // Windows 上 homedir() 读 %USERPROFILE%,不同设沙箱失效
 
 const { resolveCompactWindowSettings } = await import('../../server/routes/chat.js');
 
@@ -138,5 +140,6 @@ try {
   console.log('check-compact-window-linkage: all assertions passed');
 } finally {
   process.env.HOME = REAL_HOME;
+  if (REAL_PROFILE === undefined) delete process.env.USERPROFILE; else process.env.USERPROFILE = REAL_PROFILE;
   rmSync(home, { recursive: true, force: true });
 }

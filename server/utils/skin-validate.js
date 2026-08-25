@@ -121,14 +121,20 @@ export function isTraversalPath(p) {
   return segs.some((s) => s === '..');
 }
 
+// r49a-①:Windows 资源管理器副产物,与 macOS 的 __MACOSX/._ 同性质(用户看不见、
+// 永不落盘)。不剥的话「一个嵌套目录 + 一个 Thumbs.db」的包会被 resolveRootPrefix
+// 数出 2 个顶层 → 整包 manifest_missing。名单与 client/src/components/SkinPanel.jsx
+// 的 WIN_JUNK_RE 同表:改一处必须同步另一处(check-r49-win-junk.mjs t5 钉死)。
+const WIN_JUNK_RE = /^(thumbs\.db|desktop\.ini|ehthumbs\.db)$/i;
 /**
- * r26-D3:Finder 压缩杂质判定 —— __MACOSX/ 目录段与 ._ 开头的 AppleDouble 文件。
- * 此类条目是 macOS 压缩的固定副产物,永不落盘(referenced 白名单兜底),因此
- * 在条目数上限与安全闸之前剥离:junk 里的穿越形态也不再触发 path_traversal。
+ * r26-D3:Finder 压缩杂质判定 —— __MACOSX/ 目录段与 ._ 开头的 AppleDouble 文件,
+ * 外加上面的 Windows 名单。此类条目是压缩工具的固定副产物,永不落盘(referenced
+ * 白名单兜底),因此在条目数上限与安全闸之前剥离:junk 里的穿越形态也不再触发
+ * path_traversal。
  */
 export function isJunkEntry(p) {
   const segs = String(p || '').split(/[/\\]/);
-  return segs.includes('__MACOSX') || segs.some((s) => s.startsWith('._'));
+  return segs.includes('__MACOSX') || segs.some((s) => s.startsWith('._') || WIN_JUNK_RE.test(s));
 }
 /** 路径数组剥杂质 → 新数组。 */
 export function stripJunkEntries(files) {

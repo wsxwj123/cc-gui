@@ -109,6 +109,7 @@ const OK_DEEPSEEK = { balance_infos: [{ currency: 'CNY', total_balance: '7.00' }
 // ── 端到端:隔离 HOME + 真路由 + 本地假上游(同一个 6702 端口) ─────────────
 const home = await mkdtemp(join(tmpdir(), 'cgui-quota-'));
 process.env.HOME = home;
+process.env.USERPROFILE = home; // Windows 上 homedir() 读 %USERPROFILE%,不同设沙箱失效
 const guiDir = join(home, '.claude-gui');
 await mkdir(guiDir, { recursive: true });
 const PROVIDERS = [

@@ -85,6 +85,10 @@ export function attachmentMetaForPersistence(meta, maxPreviewChars = MAX_PERSIST
 }
 
 export const ATTACHMENT_SIDECAR_OUTBOX_KEY = 'cgui-attachment-sidecar-outbox:v1';
+// r49a-③:outbox 是"发不出去就留着重试"的队列,只进不出。绑定一旦失效(projectHash
+// 两侧口径不一致等)条目永远清不掉,localStorage 被撑满后连主题/字号这些偏好都写不进去。
+// 64 条 FIFO 封顶:附件卡片是可重发的旁路数据,丢最旧的一条远好过写死整个 localStorage。
+export const ATTACHMENT_SIDECAR_OUTBOX_MAX = 64;
 // 同一页面可有多个 outbox manager（测试注入、热重载、未来多挂载点）。以 storage
 // 对象为键共享 RMW 队尾，避免各 manager 拿独立旧快照后互相覆盖。
 const attachmentStorageMutationTails = new WeakMap();
@@ -159,7 +163,9 @@ export function createAttachmentSidecarOutbox({
       const existing = current.find((entry) => entry?.id === id);
       if (existing) return { next: current, value: existing };
       const entry = { id, ownerKey, sessionId, payload: boundedPayload, createdAt };
-      return { next: [...current, entry], value: entry };
+      // 超限丢最旧(见 ATTACHMENT_SIDECAR_OUTBOX_MAX);只在入队处封顶,绑定/清账路径
+      // 都只做减法,不会把队列顶大。
+      return { next: [...current, entry].slice(-ATTACHMENT_SIDECAR_OUTBOX_MAX), value: entry };
     });
   };
 

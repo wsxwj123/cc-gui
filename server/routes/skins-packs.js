@@ -244,8 +244,10 @@ async function installUnpacked(tmp, fileEntries, { source, skinsDir, limits }) {
 }
 
 // r43 文件夹导入闸(服务端硬校验,不信客户端)。
+// r49a-⑤:maxFiles 与 ZIP_LIMITS.maxEntries 对齐取 40 —— 两条通道最终跑同一段
+// installUnpacked,上限不同等于同一个包换个导入方式一个过一个拒。
 export const DIR_LIMITS = {
-  maxFiles: 64,
+  maxFiles: 40,
   maxFileBytes: 20 * 1024 * 1024,
   maxTotalBytes: 30 * 1024 * 1024,
   maxDepth: 3,       // 段数上限(如 a/b/c.png)

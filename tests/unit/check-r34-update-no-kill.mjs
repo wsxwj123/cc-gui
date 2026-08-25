@@ -40,7 +40,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 let liveServer = null;
 try {
   const {
-    startUpdateTimers, withRecoveryHint, isNpmRegistryCmd, liveProxy, maskProxy,
+    startUpdateTimers, withRecoveryHint, isNpmRegistryCmd, liveProxy, maskProxy, withoutProxyEnv,
     UPDATE_SLOW_NOTICE_MS, UPDATE_HARD_LIMIT_MS, UPDATE_SLOW_NOTICE_LINE, UPDATE_HARD_LIMIT_ERROR,
   } = await import('../../server/routes/version-check.js');
   const DEAD_PORT = await closedPort();
@@ -175,6 +175,18 @@ try {
     assert.deepEqual(seen, ['::1', 7890], 'r34-⑤: IPv6 字面量要剥掉方括号再探');
   }
 
+  // r49a-⑤ withoutProxyEnv 纯函数:六个代理键删净,其余原样,不改父 env
+  {
+    const parent = {
+      HTTP_PROXY: 'http://127.0.0.1:1', HTTPS_PROXY: 'http://127.0.0.1:1',
+      http_proxy: 'http://127.0.0.1:1', https_proxy: 'http://127.0.0.1:1',
+      npm_config_proxy: 'http://127.0.0.1:1', npm_config_https_proxy: 'http://127.0.0.1:1',
+      PATH: '/usr/bin', KEEP: 'yes',
+    };
+    assert.deepEqual(withoutProxyEnv(parent), { PATH: '/usr/bin', KEEP: 'yes' }, 'r49a-⑤: 六个代理键全删');
+    assert.equal(Object.keys(parent).length, 8, 'r49a-⑤: 不修改父 env');
+  }
+
   // ⑩代理地址进日志/回执前遮罩 userinfo(主机端口保留,便于用户对照)
   assert.equal(maskProxy('http://user:pw@127.0.0.1:7890'), 'http://***@127.0.0.1:7890', 'r34-⑩: 遮罩 user:pass');
   assert.equal(maskProxy('http://127.0.0.1:7890'), 'http://127.0.0.1:7890', 'r34-⑩: 无 userinfo 原样');
@@ -199,12 +211,22 @@ try {
 
     // ⑦【致命】判死之后必须把代理从子进程 env 里删掉。只"不注入"的话,rawProxy 多半就来自
     // server 自己的 env,{...process.env} 原样带给 npm —— 探活等于零效果,日志还撒谎说直连。
-    const envBlock = src.slice(src.indexOf('const env = { ...process.env };'), src.indexOf('updateTask.cmd = cmd;'));
-    assert.ok(/else if \(deadProxy\)/.test(envBlock), 'r34-⑦: 判死要有独立分支处理 env');
+    // r49a-⑤:键表收敛成 withoutProxyEnv 一份,流式通道与终端脚本通道共用(两份必漂)。
+    const helper = src.slice(src.indexOf('const PROXY_ENV_KEYS'), src.indexOf('function launchInTerminal'));
     for (const k of ['HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy', 'npm_config_proxy', 'npm_config_https_proxy']) {
-      assert.ok(new RegExp(`'${k}'`).test(envBlock), `r34-⑦: 判死后必须从子进程 env 删掉 ${k}`);
+      assert.ok(new RegExp(`'${k}'`).test(helper), `r34-⑦: 判死后必须从子进程 env 删掉 ${k}`);
     }
-    assert.ok(/delete env\[k\]/.test(envBlock), 'r34-⑦: 真的 delete,不是只跳过注入');
+    assert.ok(/delete env\[k\]/.test(helper), 'r34-⑦: 真的 delete,不是只跳过注入');
+    const envBlock = src.slice(src.indexOf('let env = { ...process.env };'), src.indexOf('updateTask.cmd = cmd;'));
+    assert.ok(/else if \(deadProxy\)/.test(envBlock), 'r34-⑦: 判死要有独立分支处理 env');
+    assert.ok(/env = withoutProxyEnv\(env\)/.test(envBlock), 'r34-⑦: 判死分支换成删净的副本');
+
+    // r49a-⑤:终端脚本通道同一处理。子终端继承的是 server 自己的 env —— 死代理只是
+    // "不写进脚本"的话,继承那份照样生效(用户视角:终端里的更新同样卡死)。
+    const term = src.slice(src.indexOf('function launchInTerminal'), src.indexOf('GET /api/claude-version-check'));
+    assert.ok(/const env = withoutProxyEnv\(\)/.test(term), 'r49a-⑤: 终端脚本用删净代理的 env');
+    assert.equal((term.match(/spawn\([^)]*, env \}\)/g) || []).length, 3,
+      'r49a-⑤: mac/win/linux 三条 spawn 都要传这份 env(漏一条就是该平台继续吃死代理)');
     assert.ok(!/不可达,本次更新直连/.test(src),
       'r34-⑦: 不许说"直连" —— .npmrc 里的代理配置本进程管不到,话不能说满');
     assert.ok(/不再注入代理/.test(src), 'r34-⑦: 日志按事实说"不再注入代理"');

@@ -16,8 +16,10 @@ import { fileURLToPath } from 'node:url';
 // HOME 隔离:chatCompatKey 会 stat ~/.claude/settings.json 等(只读 mtime,不写),
 // 指到空 tmp 让 mtime 恒 0,断言只关心字段增减不受本机文件影响。
 const REAL_HOME = process.env.HOME;
+const REAL_PROFILE = process.env.USERPROFILE;
 const home = mkdtempSync(join(tmpdir(), 'cgui-compat-test-'));
 process.env.HOME = home;
+process.env.USERPROFILE = home; // Windows 上 homedir() 读 %USERPROFILE%,不同设沙箱失效
 
 const { chatCompatKey, resolveCompactWindowSettings } = await import('../../server/routes/chat.js');
 import { mkdirSync, writeFileSync } from 'node:fs';
@@ -132,6 +134,7 @@ try {
   }
 } finally {
   process.env.HOME = REAL_HOME;
+  if (REAL_PROFILE === undefined) delete process.env.USERPROFILE; else process.env.USERPROFILE = REAL_PROFILE;
   rmSync(home, { recursive: true, force: true });
 }
 
