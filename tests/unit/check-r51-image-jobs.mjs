@@ -292,8 +292,12 @@ if (failure) throw failure;
   assert.match(src, /clearInterval/, 't7: 卸载/终态时清轮询 interval(只停轮询,不停后台任务)');
   assert.match(src, /jobId/, 't7: 生成走 jobId 形态');
   assert.match(src, /恢复/, 't7:「恢复」按钮在位');
-  assert.match(src, /onClick=\{\(\) => \{ setPromptDraft\(h\.prompt \|\| ''\); setTab\('gen'\); \}\}/,
+  // r59:回填改走撤销通道(restorePrompt → applyProgrammaticText,见 check-r59-undo-baseline),
+  // 本锚等强迁移 —— 仍钉死「填回输入框 + 自动切回生图页」,只是填的动作换了实现。
+  assert.match(src, /onClick=\{\(\) => \{ restorePrompt\(h\.prompt \|\| ''\); setTab\('gen'\); \}\}/,
     't7:「恢复」把该条提示词填回输入框并自动切回生图选项卡(用户实测反馈:不许停留在任务列表)');
+  assert.match(src, /const restorePrompt = useCallback\(\(v\) => \{[\s\S]*?setPromptDraft\(v\)[\s\S]*?\}, \[setPromptDraft\]\);/,
+    't7: restorePrompt 最终仍把值落到 prompt 状态与草稿(受控值 + localStorage 链路不断)');
   assert.match(src, /应用重启|interrupted/, 't7: interrupted 条目如实显示');
   // 并行:生成按钮不因已有任务在跑而禁用(只挡请求发出那一瞬的双击)
   const canGenLine = src.split('\n').find((l) => l.includes('const canGenerate ='));

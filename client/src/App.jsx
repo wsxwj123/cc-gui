@@ -36,6 +36,7 @@ import { LoadingMark, useCyclingVerb, ElapsedTime } from './components/LoadingBi
 import { ErrorBoundary } from './components/ErrorBoundary.jsx';
 import { useMultiSelect, SelModeToggle, BatchBar, SelCheckbox } from './components/MultiSelect.jsx';
 import { pickDirectory, isTauri } from './utils/pickDirectory.js';
+import { applyProgrammaticText } from './utils/inputUndo.js';
 import ChatSearch from './components/ChatSearch.jsx';
 import { confirmDialog } from './utils/confirmDialog.jsx';
 import { ChatInput, EffortSelector, EFFORT_LEVELS, markAutoUnavailable, MODE_META, PermissionModeSelector } from './components/ChatInput.jsx';
@@ -8844,6 +8845,9 @@ function CustomProviderForm({ onSaved, editing, onCancel, onDirtyChange, customC
   const [quotaKey, setQuotaKey] = useState('');
   const [quotaKeyCleared, setQuotaKeyCleared] = useState(false);
   const [modelsText, setModelsText] = useState('');
+  // r59:模型框 DOM 引用 —— 勾选确认的合并结果经 applyProgrammaticText 写入,否则纯
+  // setState 不产生 input 事件,合并进来的几十行 ⌘Z 撤不回(用户实报)。
+  const modelsRef = useRef(null);
   // r52:「拉取模型」的候选(非空 = 勾选弹窗打开)。目录只作候选,勾中的才进模型框。
   const [pickCandidates, setPickCandidates] = useState(null);
   const [testResult, setTestResult] = useState(null); // BZ-1:{ ok, error } | null
@@ -9130,7 +9134,7 @@ function CustomProviderForm({ onSaved, editing, onCancel, onDirtyChange, customC
         </p>
       </div>
       <div className="flex items-center gap-2">
-        <textarea className={`${inputCls} font-mono min-h-[60px]`} placeholder="模型(每行一个,或逗号分隔)" value={modelsText} onChange={(e) => setModelsText(e.target.value)} />
+        <textarea ref={modelsRef} className={`${inputCls} font-mono min-h-[60px]`} placeholder="模型(每行一个,或逗号分隔)" value={modelsText} onChange={(e) => setModelsText(e.target.value)} />
       </div>
       {/* AZ8:默认模型 —— 切到此 provider 且未指定模型时用它(否则永远用列表第一个),
           子代理 model-less 解析也回退到它。选项来自上方「模型」框。 */}
@@ -9205,7 +9209,13 @@ function CustomProviderForm({ onSaved, editing, onCancel, onDirtyChange, customC
           candidates={pickCandidates}
           existing={parseModels()}
           onClose={() => setPickCandidates(null)}
-          onConfirm={(ids) => { setModelsText(mergeModelLines(parseModels(), ids).join('\n')); setPickCandidates(null); }}
+          onConfirm={(ids) => {
+            const merged = mergeModelLines(parseModels(), ids).join('\n');
+            // r59:经撤销通道写入(旧值先入栈 + 派发 input 带动 onChange),合并结果可 ⌘Z 撤回。
+            if (modelsRef.current) applyProgrammaticText(modelsRef.current, merged);
+            else setModelsText(merged); // 框未挂载(理论上不可能)时不丢用户的勾选
+            setPickCandidates(null);
+          }}
         />
       )}
     </div>
