@@ -1,10 +1,13 @@
 #!/usr/bin/env node
-// r55:权限卡「记住」下拉的选择跨卡粘滞 → 永久规则批量泄漏。
-// PermissionCard 没有 key,React 把上一张卡的实例复用给下一个请求,remember state
-// 不复位:用户只选过一次「始终允许」,之后每张卡的 Enter/允许都按 always 提交,
-// 一路攒出几十条 settings.json 永久规则(用户实报四五十条)。
+// r55/r56:权限弹窗的卡片本地 state 跨卡粘滞 → 永久规则批量泄漏等。
+// 起因:PermissionCard 没有 key,React 把上一张卡的实例复用给下一个请求,remember
+// state 不复位 —— 用户只选过一次「始终允许」,之后每张卡的 Enter/允许都按 always
+// 提交,一路攒出几十条 settings.json 永久规则(用户实报四五十条)。
+// r55 用「按 req.id 复位的 effect」单点补 remember;r56 升级为渲染点统一给六张卡加
+// key=请求 id —— 卸载重挂天然清掉全部本地 state 与 <details> 等非受控 DOM 态,那个
+// 复位 effect 随之删除(它已永无触发场景)。
 // 钉住两件事:
-//   ① 每张新卡按 req.id 复位成 'none'(仅此次);
+//   ① 渲染点六张卡全部带 key={mine[0].id};
 //   ② 允许按钮三态文案(允许 ↵ / 允许并本会话记住 ↵ / 允许并写入规则 ↵),
 //      判据与 doAllow 一致 —— 提交前永远看得见这一击的真实后果。
 // JSX 进不了 node,故从源码抠出表达式真跑,不是纯字符串 grep。
@@ -14,12 +17,15 @@ import { readFileSync } from 'node:fs';
 
 const src = readFileSync(new URL('../../client/src/components/PermissionPrompt.jsx', import.meta.url), 'utf8');
 
-// ── ① 按请求复位 ──────────────────────────────────────────────
-assert.match(
-  src,
-  /useEffect\(\s*\(\)\s*=>\s*\{\s*setRemember\('none'\);?\s*\}\s*,\s*\[\s*req\.id\s*\]\s*\)/,
-  'r55-①: 必须有按 req.id 复位 remember 的 effect(体内 setRemember(\'none\')、deps 只认 req.id);删了它 = 上一张卡的「始终允许」带进下一张,每次允许都写永久规则',
-);
+// ── ① 渲染点六张卡一张不落带 key ──────────────────────────────
+// 只认渲染点写法(组件名后紧跟 key={mine[0].id}),组件定义处的同名字符串不算数。
+for (const card of ['ElicitCard', 'RefusalDialogCard', 'PlanReviewCard', 'AskQuestionCard', 'BoundaryCard', 'PermissionCard']) {
+  assert.match(
+    src,
+    new RegExp(`<${card}\\s+key=\\{mine\\[0\\]\\.id\\}`),
+    `r56-①: ${card} 渲染点必须带 key={mine[0].id};删了 key = 同类型请求连续出现时 React 复用上一张卡的实例,上一张的本地 state(权限「记住」选项 / 计划修改意见 / 问题选择 / 目录永久授权勾选)和 <details> 展开态原样带进下一张卡并被提交`,
+  );
+}
 
 // ── ② 允许按钮文案三态,且与 doAllow 同判据 ────────────────────
 const m = src.match(/const allowLabel =([\s\S]*?);\n/);
@@ -43,4 +49,4 @@ assert.match(
 assert.match(src, /if \(remember === 'session'\) onWhitelistAndAllow\(req\);/, 'r55: doAllow 分发逻辑不许动');
 assert.match(src, /else if \(remember === 'always' && !noAlways\) onAlwaysAllow\(req\);/, 'r55: doAllow 分发逻辑不许动');
 
-console.log('✓ check-r55-perm-sticky: 权限卡 remember 按 req.id 复位 + 允许按钮三态文案');
+console.log('✓ check-r55-perm-sticky: 六张卡渲染点带 key=请求 id + 允许按钮三态文案');

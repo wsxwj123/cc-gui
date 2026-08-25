@@ -678,11 +678,6 @@ function PermissionCard({ req, onResolve, onWhitelistAndAllow, onAlwaysAllow, on
   // always=写 settings.json 的 permissions.allow 规则(经服务端 updatedPermissions,
   // CLI 落盘,终端与 GUI 共用)。危险命令不提供 always(服务端同样忽略,保 G3 强拦)。
   const [remember, setRemember] = useState('none');
-  // 这张卡没有 key,React 把上一张的实例复用给下一个请求 → remember 不复位:选过一次
-  // 「始终允许」后,之后每张卡的 Enter/允许都按 always 提交,一路攒出几十条永久规则
-  // (用户实报四五十条)。每张新卡一律回到「仅此次」;要连续永久授权就每张显式再选
-  // ——安全语义优先于省点击。
-  useEffect(() => { setRemember('none'); }, [req.id]);
   const dangerous = isDangerousCommand(req);
   // 与服务端 noAlways 对齐(chat.js:510):plan 档的写类/Bash 同样不写持久规则——
   // 客户端若不藏,用户选了「始终允许」会被服务端静默丢弃(调研附带发现)。
@@ -690,8 +685,7 @@ function PermissionCard({ req, onResolve, onWhitelistAndAllow, onAlwaysAllow, on
   const planNoAlways = guiMode === 'plan' && (PLAN_WRITE_CLASS.has(req.toolName) || req.toolName === 'Bash');
   // 后台代理的卡片走 PermissionRequest hook,裁决只回 decision/updatedInput —— always
   // 会被静默丢弃(写规则是 SDK canUseTool 的 updatedPermissions 专属),可点却不生效 = 骗人。
-  // 并进 noAlways 而不是只藏 option:doAllow 也读这个值,分开写迟早漂移(卡片实例会被
-  // React 复用,remember='always' 能从上一张普通卡带过来,只藏 option 拦不住)。
+  // 并进 noAlways 而不是只藏 option:doAllow 也读这个值,判据分开写迟早漂移。
   // "本会话内允许"是前端白名单 + WS 自动放行,对后台代理照常有效,保留。
   const noAlways = dangerous || planNoAlways || !!req.bgAgent;
   const doAllow = () => {
@@ -1053,9 +1047,10 @@ export function PermissionPrompt({ sessionId = null, onExecutePlan = null, hydra
           {mine.length} 个待处理请求 · 上面的先处理
         </div>
       )}
-      {/* key=请求 id:两张卡都带用户输入的本地 state。不给 key 时 React 会把上一张卡的
-          实例复用给下一个请求(同类型同位置),上一张表单填的值会原样带进新表单并被提交
-          给 MCP 服务器。 */}
+      {/* key=请求 id,六张卡一张不落:同类型请求连续出现时(计划打回后重新给计划、连续两次
+          提问、连续两张越界卡),不给 key 的话 React 会把上一张卡的实例复用给下一个请求,
+          上一张的本地 state —— 计划修改意见、问题选择、权限「记住」选项、目录永久授权勾选
+          —— 连同 <details> 的展开态(非受控 DOM 态)会原样带进新卡并被提交。 */}
       {mine[0].kind === 'elicitation' ? (
         <ElicitCard
           key={mine[0].id}
@@ -1080,6 +1075,7 @@ export function PermissionPrompt({ sessionId = null, onExecutePlan = null, hydra
         />
       ) : mine[0].toolName === 'ExitPlanMode' ? (
         <PlanReviewCard
+          key={mine[0].id}
           req={mine[0]}
           onResolve={resolve}
           onApprove={approvePlan}
@@ -1090,6 +1086,7 @@ export function PermissionPrompt({ sessionId = null, onExecutePlan = null, hydra
         />
       ) : mine[0].toolName === 'AskUserQuestion' ? (
         <AskQuestionCard
+          key={mine[0].id}
           req={mine[0]}
           onAnswer={answerQuestion}
           processing={busyId === mine[0].id}
@@ -1099,6 +1096,7 @@ export function PermissionPrompt({ sessionId = null, onExecutePlan = null, hydra
         />
       ) : mine[0].blockedPath ? (
         <BoundaryCard
+          key={mine[0].id}
           req={mine[0]}
           onResolve={resolve}
           onAuthorizeDir={authorizeDir}
@@ -1109,6 +1107,7 @@ export function PermissionPrompt({ sessionId = null, onExecutePlan = null, hydra
         />
       ) : (
         <PermissionCard
+          key={mine[0].id}
           req={mine[0]}
           onResolve={resolve}
           onWhitelistAndAllow={whitelistAndAllow}
