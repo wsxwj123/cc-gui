@@ -20,6 +20,7 @@ import { join } from 'node:path';
 // HOME 必须在 import session-reader 之前改 —— 它在模块作用域 join(homedir(), ...)。
 const home = mkdtempSync(join(tmpdir(), 'cgui-steer-home-'));
 process.env.HOME = home;
+process.env.USERPROFILE = home; // Windows 上 homedir() 读 %USERPROFILE%,不同设沙箱失效
 const HASH = 'test-project-hash';
 mkdirSync(join(home, '.claude', 'projects', HASH), { recursive: true });
 

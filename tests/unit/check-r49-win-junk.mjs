@@ -1,0 +1,97 @@
+#!/usr/bin/env node
+// r49a-①【单测】:Windows 资源管理器副产物(Thumbs.db / desktop.ini / ehthumbs.db)
+// 与 macOS 的 __MACOSX/._ 同性质 —— 用户看不见、永不落盘,却会把 resolveRootPrefix 的
+// 顶层集合顶成 2 个,让「一个嵌套目录 + 一个 Thumbs.db」的 Windows 压缩包整包
+// manifest_missing(用户视角:zip 里明明有 skin.json 却报"不是皮肤包")。
+// 修前红:t2 报 null(tops={myskin,Thumbs.db})、t4 抛 manifest_missing。
+// 变异:isJunkEntry 删掉 WIN_JUNK_RE 那一支 → t1/t2/t4 红;客户端名单删掉 → t5 红。
+// Run: node tests/unit/check-r49-win-junk.mjs
+import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync, readdirSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import {
+  isJunkEntry, stripJunkEntries, resolveRootPrefix, validateZipEntries, ZIP_LIMITS,
+} from '../../server/utils/skin-validate.js';
+import { installSkinDirectory } from '../../server/routes/skins-packs.js';
+
+const scratch = mkdtempSync(join(tmpdir(), 'cgui-r49-winjunk-'));
+const skinsDir = join(scratch, 'skins');
+process.on('exit', () => { try { rmSync(scratch, { recursive: true, force: true }); } catch {} });
+
+// ── t1 名单判定(大小写不敏感;只整段匹配,不误伤同前缀的正常文件名)──
+{
+  for (const p of ['Thumbs.db', 'thumbs.db', 'THUMBS.DB', 'desktop.ini', 'Desktop.ini',
+    'ehthumbs.db', 'myskin/Thumbs.db', 'myskin\\desktop.ini', 'a/b/ehthumbs.db']) {
+    assert.ok(isJunkEntry(p), `t1: ${p} 应判 Windows 杂质`);
+  }
+  for (const p of ['skin.json', 'myskin/thumbs.dbx', 'mythumbs.db', 'desktop.ini.png',
+    'thumbs.db.css', 'myskin/desktop.json']) {
+    assert.ok(!isJunkEntry(p), `t1: ${p} 不得误判为杂质`);
+  }
+  assert.deepEqual(
+    stripJunkEntries(['Thumbs.db', 'myskin/skin.json', 'myskin/desktop.ini', 'myskin/bg.png']),
+    ['myskin/skin.json', 'myskin/bg.png'], 't1: 剥离后只剩真实条目',
+  );
+}
+
+// ── t2 根前缀:顶层夹带 Thumbs.db 仍判单根(修前 tops.size=2 → null)──
+{
+  const root = resolveRootPrefix(['Thumbs.db', 'myskin/skin.json', 'myskin/bg.png', 'myskin/Thumbs.db']);
+  assert.ok(root && root.prefix === 'myskin/', 't2: 带 Windows 杂质仍命中 myskin/');
+  const direct = resolveRootPrefix(['skin.json', 'bg.png', 'desktop.ini']);
+  assert.ok(direct && direct.prefix === '', 't2: 根目录直放 + desktop.ini 照常识别');
+  // 反向钉:过滤不放宽,两个真实顶层目录仍拒。
+  assert.equal(resolveRootPrefix(['a/skin.json', 'b/skin.json']), null, 't2: 两个真实顶层目录仍拒');
+}
+
+// ── t3 杂质不计入 40 条上限(与 __MACOSX 同待遇)──
+{
+  const entries = [];
+  for (let i = 0; i < 40; i++) entries.push({ mode: '-rw-r--r--', type: '-', size: 10, path: `myskin/f${i}.png` });
+  entries.push({ mode: '-rw-r--r--', type: '-', size: 10, path: 'Thumbs.db' });
+  entries.push({ mode: '-rw-r--r--', type: '-', size: 10, path: 'myskin/desktop.ini' });
+  const v = validateZipEntries(entries, ZIP_LIMITS);
+  assert.ok(v.ok, 't3: 40 真实 + 2 Windows 杂质仍合法');
+  assert.equal(v.entries.length, 40, 't3: 返回条目已剥杂质');
+}
+
+// ── t4 端到端(文件夹导入通道,真函数落盘到 scratch)──
+{
+  const b64 = (s) => Buffer.from(s, 'utf8').toString('base64');
+  const out = await installSkinDirectory([
+    { path: 'Thumbs.db', dataB64: b64('junk') },
+    { path: 'myskin/skin.json', dataB64: b64(JSON.stringify({ format: 'cgui-skin/1', name: 'win junk skin', tier: 2 })) },
+    { path: 'myskin/skin.css', dataB64: b64('[data-cgui="app"]{--x:1}') },
+    { path: 'myskin/desktop.ini', dataB64: b64('[.ShellClassInfo]') },
+  ], { skinsDir });
+  assert.equal(out.name, 'win junk skin', 't4: 夹带 Windows 杂质的包导入成功(修前 manifest_missing)');
+  const kept = readdirSync(join(skinsDir, out.id)).sort();
+  assert.deepEqual(kept, ['meta.json', 'skin.css', 'skin.json'], 't4: 杂质零落盘');
+}
+
+// ── t4b dir 通道计数口径 = 剥杂质后(判官r49a建议2):同一个包"满额真实 + 杂质"
+// zip 放(t3 已证)则 dir 也必须放。修前红:files.length 含杂质 → dir_entries_exceeded。
+{
+  const b64 = (s) => Buffer.from(s, 'utf8').toString('base64');
+  const files = [
+    { path: 'myskin/skin.json', dataB64: b64(JSON.stringify({ format: 'cgui-skin/1', name: 'win junk full', tier: 2 })) },
+    { path: 'myskin/skin.css', dataB64: b64('[data-cgui="app"]{--x:2}') },
+    { path: 'Thumbs.db', dataB64: b64('junk') },
+    { path: 'myskin/desktop.ini', dataB64: b64('[.ShellClassInfo]') },
+  ];
+  // 注入 maxFiles=2:真实恰好满额,原始条目 4 > 2 —— 按剥前计数必拒。
+  const out = await installSkinDirectory(files, { skinsDir, dirLimits: { maxFiles: 2, maxFileBytes: 20 * 1024 * 1024, maxTotalBytes: 30 * 1024 * 1024, maxDepth: 3, maxPathLen: 128 } });
+  assert.equal(out.name, 'win junk full', 't4b: 满额真实 + 2 杂质在 dir 通道也放行(计数剥杂质后)');
+}
+
+// ── t5 双端同表哨兵:客户端过滤与服务端名单必须是同一份正则字面量 ──
+{
+  const server = readFileSync(new URL('../../server/utils/skin-validate.js', import.meta.url), 'utf8');
+  const panel = readFileSync(new URL('../../client/src/components/SkinPanel.jsx', import.meta.url), 'utf8');
+  const LITERAL = '/^(thumbs\\.db|desktop\\.ini|ehthumbs\\.db)$/i';
+  assert.ok(server.includes(LITERAL), 't5: 服务端名单字面量在位');
+  assert.ok(panel.includes(LITERAL), 't5: 客户端名单字面量与服务端同表(改一处必须同步另一处)');
+}
+
+console.log('✓ check-r49-win-junk: Windows 杂质双端同表,单根判定与导入不再被顶掉');

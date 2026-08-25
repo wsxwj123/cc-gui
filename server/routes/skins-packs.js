@@ -15,7 +15,7 @@ import { randomUUID } from 'crypto';
 import { isPathInside } from '../utils/safe-path.js';
 import { broadcast } from '../broadcast.js';
 import {
-  parseTarListing, validateZipEntries, resolveRootPrefix, validateManifest,
+  parseTarListing, validateZipEntries, resolveRootPrefix, stripJunkEntries, validateManifest,
   imageDimensions, sanitizeSvg, validateT2Script, convertDswVars, ZIP_LIMITS,
   skinIdFrom, slugOf, SKIN_ID_RE, SKIN_ASSET_RE,
 } from '../utils/skin-validate.js';
@@ -244,8 +244,10 @@ async function installUnpacked(tmp, fileEntries, { source, skinsDir, limits }) {
 }
 
 // r43 文件夹导入闸(服务端硬校验,不信客户端)。
+// r49a-⑤:maxFiles 与 ZIP_LIMITS.maxEntries 对齐取 40 —— 两条通道最终跑同一段
+// installUnpacked,上限不同等于同一个包换个导入方式一个过一个拒。
 export const DIR_LIMITS = {
-  maxFiles: 64,
+  maxFiles: 40,
   maxFileBytes: 20 * 1024 * 1024,
   maxTotalBytes: 30 * 1024 * 1024,
   maxDepth: 3,       // 段数上限(如 a/b/c.png)
@@ -275,7 +277,9 @@ export function isSafeSkinRelPath(p, limits = DIR_LIMITS) {
  */
 export async function installSkinDirectory(files, { source = 'user', skinsDir = SKINS_DIR, limits = ZIP_LIMITS, dirLimits = DIR_LIMITS } = {}) {
   if (!Array.isArray(files) || !files.length) throw failCode('dir_invalid');
-  if (files.length > dirLimits.maxFiles) throw failCode('dir_entries_exceeded');
+  // 判官r49a:计数取剥杂质后口径,与 zip 通道(validateZipEntries)一致——
+  // 同一个包"40 真实 + 2 杂质"不许 dir 拒而 zip 放。
+  if (stripJunkEntries(files.map((f) => f && f.path)).length > dirLimits.maxFiles) throw failCode('dir_entries_exceeded');
   const decoded = [];
   let total = 0;
   for (const f of files) {

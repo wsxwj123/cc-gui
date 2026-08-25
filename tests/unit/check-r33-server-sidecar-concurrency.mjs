@@ -8,6 +8,7 @@ import { createAttachmentSidecarStore } from '../../server/services/attachment-s
 
 const home = await mkdtemp(join(tmpdir(), 'cgui-r33-sidecar-http-'));
 process.env.HOME = home; // routes 模块路径常量在 import 时读取 homedir
+process.env.USERPROFILE = home; // Windows 上 homedir() 读 %USERPROFILE%,不同设沙箱失效
 const express = (await import('express')).default;
 const sessionsRoutes = (await import(`../../server/routes/sessions.js?r33-sidecar=${Date.now()}`)).default;
 const { attachmentTextHash } = await import('../../server/services/session-reader.js');

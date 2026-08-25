@@ -1582,7 +1582,10 @@ router.post('/chat', async (req, res) => {
               await recordDraftSessionBinding({
                 draftId: slot.draftId,
                 sessionId: slot.sessionId,
-                projectHash: String(slot.cwd || '').replace(/[^A-Za-z0-9]/g, '-'),
+                // r49a-③:与 trustedContextMeta(:2686)同口径先归一再编码 —— slot.cwd 可能是
+                // symlink 别名/大小写漂移的形态,直接编码得到的 hash 与读侧(磁盘真实目录名)
+                // 恒不等,恢复索引永远命中不了。读侧另有 toLowerCase 兜住 win32 小写化。
+                projectHash: canonicalCwd(slot.cwd || '').replace(/[^A-Za-z0-9]/g, '-'),
               });
             } catch (error) {
               // 不因旁路恢复索引写失败中断真实模型回合；当前 SSE 客户端仍可直接绑定。

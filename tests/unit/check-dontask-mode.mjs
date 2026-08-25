@@ -20,9 +20,11 @@ const root = fileURLToPath(new URL('../..', import.meta.url));
 // 用例才不依赖本机真实勾选状态(必须在 import chat.js 之前设好)。
 const fakeHome = mkdtempSync(join(tmpdir(), 'cgui-dontask-home-'));
 const realHome = process.env.HOME;
+const realProfile = process.env.USERPROFILE;
 mkdirSync(join(fakeHome, '.claude', 'gui'), { recursive: true });
 writeFileSync(join(fakeHome, '.claude', 'gui', 'mcp-autoapprove.json'), JSON.stringify(['paper-search']));
 process.env.HOME = fakeHome;
+process.env.USERPROFILE = fakeHome; // Windows 上 homedir() 读 %USERPROFILE%,不同设沙箱失效
 
 try {
   const { autoDecide } = await import('../../server/routes/chat.js');
@@ -92,5 +94,6 @@ try {
   console.log('✓ check-dontask-mode: 四路裁决 / 越界与危险命令不放宽 / 不透传 SDK / 前后端档位清单 全部通过');
 } finally {
   if (realHome === undefined) delete process.env.HOME; else process.env.HOME = realHome;
+  if (realProfile === undefined) delete process.env.USERPROFILE; else process.env.USERPROFILE = realProfile;
   rmSync(fakeHome, { recursive: true, force: true });
 }

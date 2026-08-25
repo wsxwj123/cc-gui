@@ -223,20 +223,20 @@ const noProxy = async () => null;
   assert.equal(merged.HTTP_PROXY, 'http://127.0.0.1:7899', 't7c: 缺的键仍注入');
   assert.deepEqual(parent, { HTTPS_PROXY: 'http://corp:8080', OTHER: 'keep' }, 't7c: 不修改父env');
 
-  // t7d 四种继承值逐一探活，死值不进子进程环境，可达值保留。
+  // t7d 四种继承值逐一探活，死值不进子进程环境，可达值保留（回环地址口径）。
   const probes = [];
   const inherited = {
-    HTTP_PROXY: 'http://dead-a:1',
-    HTTPS_PROXY: 'http://live-b:2',
-    http_proxy: 'http://dead-c:3',
-    https_proxy: 'http://live-d:4',
+    HTTP_PROXY: 'http://127.0.0.1:1',
+    HTTPS_PROXY: 'http://127.0.0.1:2',
+    http_proxy: 'http://localhost:3',
+    https_proxy: 'http://localhost:4',
   };
   const sanitized = await marketplaceProxyEnv(
     async () => null,
     inherited,
-    async (value) => { probes.push(value); return value.includes('live'); },
+    async (value) => { probes.push(value); return value.endsWith('2') || value.endsWith('4'); },
   );
-  assert.deepEqual(probes, Object.values(inherited), 't7d: 四键逐一探活');
+  assert.deepEqual(probes, Object.values(inherited), 't7d: 四个回环键逐一探活');
   assert.equal(sanitized.HTTP_PROXY, undefined);
   assert.equal(sanitized.http_proxy, undefined);
   assert.equal(sanitized.HTTPS_PROXY, inherited.HTTPS_PROXY);
@@ -246,23 +246,43 @@ const noProxy = async () => null;
   let detectedBaseEnv = null;
   await marketplaceProxyEnv(
     ({ baseEnv }) => { detectedBaseEnv = baseEnv; return null; },
-    { HTTP_PROXY: 'http://dead-a:1', KEEP: 'yes' },
+    { HTTP_PROXY: 'http://127.0.0.1:1', KEEP: 'yes' },
     async () => false,
   );
   assert.deepEqual(detectedBaseEnv, { KEEP: 'yes' }, 't7d: 自动探测基于已剔除死值的副本');
 
-  // t7e URL 探活只传 host/port/短超时给 TCP probe。
-  assert.equal(await probePluginProxy('http://proxy.test:8443', async (host, port, timeout) => {
-    assert.deepEqual({ host, port, timeout }, { host: 'proxy.test', port: 8443, timeout: 600 });
+  // r49a-②：非回环代理（企业 proxy.corp、TUN 网关）一律信任，不探不删 —— 与
+  // version-check.js liveProxy 同判据：探不通的原因太多（ACL、只认 CONNECT、探测源
+  // 不同），误杀一个能用的代理直接让插件市场整条链路走直连挂死，比不探活更糟。
+  // 这里刻意【不注入 probe】，跑真实 probePluginProxy：非回环压根不发探测（零网络），
+  // 注入假 probe 等于把被测判据本身换掉，证不了这条。
+  const corp = { HTTP_PROXY: 'http://proxy.corp:8080', https_proxy: 'socks5://10.0.0.1:1080' };
+  assert.deepEqual(await marketplaceProxyEnv(async () => null, corp), corp,
+    't7f: 非回环代理原样保留(修前探不通被删)');
+  // 回环死值仍删(判死的牙没拔):127.0.0.1:1 是特权端口，本机不可能在听 → 真 TCP 探测必拒。
+  assert.deepEqual(await marketplaceProxyEnv(async () => null, { HTTP_PROXY: 'http://127.0.0.1:1', KEEP: 'y' }),
+    { KEEP: 'y' }, 't7f: 回环死代理仍被删');
+
+  // t7e URL 探活只对回环发 TCP probe，超时 2000ms（600ms 对本机代理软件冷启动偏紧）。
+  assert.equal(await probePluginProxy('http://127.0.0.1:8443', async (host, port, timeout) => {
+    assert.deepEqual({ host, port, timeout }, { host: '127.0.0.1', port: 8443, timeout: 2000 });
     return true;
   }), true);
+  assert.equal(await probePluginProxy('http://[::1]:8443', async (host) => {
+    assert.equal(host, '::1', 't7e: IPv6 字面量剥方括号再探');
+    return true;
+  }), true);
+  assert.equal(await probePluginProxy('http://proxy.test:8443', async () => {
+    throw new Error('t7e: 非回环不该调用探测器');
+  }), true, 't7e: 非回环直接判可用');
+  assert.equal(await probePluginProxy('', async () => true), false, 't7e: 空值仍判不可用');
 }
 
 // t8 接线哨兵(源码级):吞错模式不得回归、安全env接线、Windows 红线(无 sh -lc)
 {
   const src = readFileSync(new URL('../../server/routes/mcp.js', import.meta.url), 'utf8');
-  assert.match(src, /import \{ detectUv, detectLocalProxy, probeTcp \} from '\.\/version-check\.js'/,
-    't8: 复用现有TCP探活');
+  assert.match(src, /import \{ detectUv, detectLocalProxy, probeTcp, isLoopbackProxyHost \} from '\.\/version-check\.js'/,
+    't8: 复用现有TCP探活与回环判据(r49a-②:判死口径只此一份,不许在 mcp.js 复制正则)');
   assert.match(src, /export async function marketplaceProxyEnv/, 't8: 代理 env 助手存在');
   assert.match(src, /env \|\| await marketplaceProxyEnv\(detect, baseEnv, probe\)/, 't8: ensureMarketplace 构造安全env');
   // ensureOfficialMarketplace 旧吞错形态(两行 try{...}catch{})不得回归

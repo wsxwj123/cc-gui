@@ -572,6 +572,12 @@ export async function detectLocalProxy({ readSystem = readSystemProxy, baseEnv =
   return port ? `http://127.0.0.1:${port}` : null;
 }
 
+// 「只对回环地址判死」判据(论证见下方 liveProxy)。host 需已剥 IPv6 字面量的方括号。
+// export:mcp.js 的插件代理探活(probePluginProxy)必须同一口径,判据只此一份。
+export function isLoopbackProxyHost(host) {
+  return /^(127\.|::1$|localhost$)/.test(String(host || ''));
+}
+
 // r34-③:【注入前必须探活】。detectLocalProxy 的第一分支(server 自己的 HTTP(S)_PROXY
 // env)按"显式配置信任优先"不探活 —— 但那份 env 可能是代理软件退出后残留的死地址,
 // 带着它跑更新 = 走一个不存在的出口,挂到兜底被杀。
@@ -595,7 +601,7 @@ export async function liveProxy(proxyUrl, probe = probeTcp) {
   if (!u) return proxyUrl; // 真解析不了 = 无法证伪,信任
   try {
     const host = u.hostname.replace(/^\[|\]$/g, ''); // IPv6 字面量带方括号,剥掉再探
-    if (!/^(127\.|::1$|localhost$)/.test(host)) return proxyUrl;
+    if (!isLoopbackProxyHost(host)) return proxyUrl;
     return (await probe(host, Number(u.port) || (u.protocol === 'https:' ? 443 : 80))) ? proxyUrl : null;
   } catch { return proxyUrl; }
 }
@@ -613,25 +619,42 @@ export function maskProxy(url) {
   return String(url || '').replace(/\/\/[^/@]*@/, '//***@');
 }
 
+// r34-③修:【判死必须删 env】。判死后只是"不注入"的话,`{...process.env}` 会把那份死代理
+// 原样带给子进程,照走死出口 —— 探活等于零效果。npm 另有自己的 npm_config_* 口径,一并删
+// (.npmrc 里的配置管不到,故日志不说"直连")。键表只此一份:流式通道与终端脚本通道共用。
+const PROXY_ENV_KEYS = ['HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy', 'npm_config_proxy', 'npm_config_https_proxy'];
+export function withoutProxyEnv(baseEnv = process.env) {
+  const env = { ...baseEnv };
+  for (const k of PROXY_ENV_KEYS) delete env[k];
+  return env;
+}
+
 function launchInTerminal(cmd, title, proxyUrl = null) {
   const stamp = `cgui-cc-${process.pid}-${Math.round(process.hrtime()[1])}`;
+  // r49a-⑤:终端也是子进程,继承 server 自己的 env。探活判死的代理只是"不写进脚本"
+  // 拦不住继承(用户视角:终端里的更新一样卡死);探活通过的那个由脚本自己 export,
+  // 删继承值不影响它。与流式通道同一处清理。
+  // 判官r49a:mac 例外——Terminal.app 由 launchd 拉起,不继承 `open` 的 env,此处清理
+  // 在 mac 上实际无效(其 shell env 来自 login shell,本就不含 server 的死代理);
+  // 真实收益在 Windows `cmd start` 与部分 Linux 终端的直接继承。保留统一清理不分平台。
+  const env = withoutProxyEnv();
   if (process.platform === 'darwin') {
     const file = join(tmpdir(), `${stamp}.command`);
     const proxyLine = proxyUrl ? `export HTTP_PROXY='${proxyUrl}' HTTPS_PROXY='${proxyUrl}' http_proxy='${proxyUrl}' https_proxy='${proxyUrl}'\necho "(代理: ${proxyUrl})"\n` : '';
     writeFileSync(file, `#!/bin/bash\necho "▶ ${title}"\n${proxyLine}${cmd}\nstatus=$?\necho\nif [ $status -eq 0 ]; then echo "✅ 完成,可关闭本窗口"; else echo "❌ 失败(退出码 $status)"; fi\n`, { mode: 0o755 });
-    spawn('open', [file], { detached: true, stdio: 'ignore' }).unref();
+    spawn('open', [file], { detached: true, stdio: 'ignore', env }).unref();
   } else if (process.platform === 'win32') {
     const file = join(tmpdir(), `${stamp}.bat`);
     const proxyLine = proxyUrl ? `set HTTP_PROXY=${proxyUrl}\r\nset HTTPS_PROXY=${proxyUrl}\r\necho (代理: ${proxyUrl})\r\n` : '';
     writeFileSync(file, `@echo off\r\necho ▶ ${title}\r\n${proxyLine}${cmd}\r\necho.\r\necho ===== 完成,按任意键关闭 =====\r\npause >nul\r\n`);
     // start '' <file> — 空标题占位,避免把文件路径当成窗口标题
-    spawn('cmd', ['/c', 'start', '', file], { detached: true, stdio: 'ignore', windowsHide: false }).unref();
+    spawn('cmd', ['/c', 'start', '', file], { detached: true, stdio: 'ignore', windowsHide: false, env }).unref();
   } else {
     const file = join(tmpdir(), `${stamp}.sh`);
     writeFileSync(file, `#!/bin/bash\necho "▶ ${title}"\n${cmd}\necho\nread -p "完成,回车关闭…"\n`, { mode: 0o755 });
     // 常见终端模拟器逐个尝试(best-effort)
     const term = process.env.TERMINAL || 'x-terminal-emulator';
-    spawn(term, ['-e', `bash "${file}"`], { detached: true, stdio: 'ignore' }).unref();
+    spawn(term, ['-e', `bash "${file}"`], { detached: true, stdio: 'ignore', env }).unref();
   }
 }
 
@@ -901,14 +924,14 @@ router.post('/claude-update/stream', async (req, res) => {
     updateTask.listeners.clear();
     return;
   }
-  const env = { ...process.env };
+  let env = { ...process.env };
   if (proxyUrl) { env.HTTP_PROXY = env.HTTPS_PROXY = env.http_proxy = env.https_proxy = proxyUrl; }
   else if (deadProxy) {
     // r34-③修:【判死必须删 env】。detectLocalProxy 的第一分支读的就是 server 自己的
     // HTTP(S)_PROXY —— 判死后只是"不注入"的话,`{...process.env}` 原样把那份死代理带给
-    // npm,照走死出口:挂满兜底时长再被杀,正好落回本轮要根治的半装损坏。
-    // npm 另有自己的 npm_config_* 口径,一并删(.npmrc 里的配置管不到,故日志不说"直连")。
-    for (const k of ['HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy', 'npm_config_proxy', 'npm_config_https_proxy']) delete env[k];
+    // npm,照走死出口:挂满兜底时长再被杀,正好落回本轮要根治的半装损坏。键表见
+    // withoutProxyEnv(终端脚本通道共用同一份)。
+    env = withoutProxyEnv(env);
   }
 
   updateTask.cmd = cmd;

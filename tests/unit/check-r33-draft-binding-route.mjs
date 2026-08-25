@@ -7,6 +7,7 @@ import { join } from 'node:path';
 
 const home = await mkdtemp(join(tmpdir(), 'cgui-r33-binding-route-'));
 process.env.HOME = home;
+process.env.USERPROFILE = home; // Windows 上 homedir() 读 %USERPROFILE%,不同设沙箱失效
 const projectHash = '-work-project';
 const sessionId = '11111111-1111-1111-1111-111111111111';
 const projectDir = join(home, '.claude', 'projects', projectHash);

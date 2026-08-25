@@ -8,7 +8,7 @@ import { promisify } from 'util';
 import { syncMcpToAgents } from './agents.js';
 import { assertPublicBaseURL } from './settings.js';
 import { claudeCommand } from '../utils/claude-resolver.js';
-import { detectUv, detectLocalProxy, probeTcp } from './version-check.js';
+import { detectUv, detectLocalProxy, probeTcp, isLoopbackProxyHost } from './version-check.js';
 import { searchRegistry } from '../services/mcp-registry.js';
 
 const execFileP = promisify(execFile);
@@ -1243,7 +1243,12 @@ export function isRetryablePluginNetworkError(err) {
   return /\b(?:ECONNRESET|ECONNREFUSED|ENETUNREACH|EHOSTUNREACH|EAI_AGAIN|ENOTFOUND|ETIMEDOUT)\b|connection (?:reset|refused|timed out)|request timed out|socket hang up|network is unreachable|temporary failure in name resolution|DNS (?:lookup|resolution|query) (?:failed|failure)|(?:TLS|SSL) (?:handshake|connection) (?:failed|failure|error)|temporar(?:y|ily) (?:network (?:failure|error)|unavailable)|(?:network|operation) timeout/i.test(text);
 }
 
-// 代理 URL 只探 TCP 可连接性，不发送应用请求；解析失败、端口不可达都视为不可用。
+// 「这个代理值得带给子进程吗」。r49a-②:与 version-check.js 的 liveProxy 同设计 ——
+// 【只对回环地址判死】。企业/局域网代理(proxy.corp:80、TUN 网关)探不通的原因太多
+// (ACL、只认 CONNECT、探测源不同),而这里判死是有牙的(会把代理从子进程 env 删掉),
+// 误杀一个能用的代理 = 插件市场整条链路改走直连挂死,比不探活更糟。故非回环一律信任;
+// 回环才发 TCP 探测(本机代理软件退了就是真死),超时 2000ms —— 600ms 对冷启动偏紧。
+// 解析失败/端口非法仍判不可用(原语义):那种值给谁都是坏的。
 export async function probePluginProxy(proxyUrl, probe = probeTcp) {
   try {
     const raw = String(proxyUrl || '').trim();
@@ -1252,7 +1257,9 @@ export async function probePluginProxy(proxyUrl, probe = probeTcp) {
     const defaults = { 'http:': 80, 'https:': 443, 'socks:': 1080, 'socks5:': 1080 };
     const port = Number(url.port) || defaults[url.protocol];
     if (!url.hostname || !port || port > 65535) return false;
-    return await probe(url.hostname, port, 600);
+    const host = url.hostname.replace(/^\[|\]$/g, ''); // IPv6 字面量带方括号,剥掉再探
+    if (!isLoopbackProxyHost(host)) return true;
+    return await probe(host, port, 2000);
   } catch {
     return false;
   }

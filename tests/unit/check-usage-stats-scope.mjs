@@ -38,6 +38,7 @@ const msg = (id, model, input, output, stopReason = 'end_turn') => ({
 const partial = (id, model, input) => msg(id, model, input, 0, null);
 async function statsFor(home, tag) {
   process.env.HOME = home;
+  process.env.USERPROFILE = home; // Windows 上 homedir() 读 %USERPROFILE%,不同设沙箱失效
   const { getUsageStats } = await import(`../../server/services/usage-stats.js?case=${tag}`);
   return getUsageStats();
 }

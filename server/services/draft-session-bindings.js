@@ -74,8 +74,13 @@ export function createDraftSessionBindingsStore({
     const list = Array.isArray(sessions) ? sessions : [];
     const bindings = await read();
     const bySession = new Map();
+    // r49a-③:双侧 toLowerCase 再比(同 chat.js contextHintsMatch 的 r31 修法)。写侧由
+    // canonicalCwd(win32 会小写化)派生,读侧来自磁盘真实目录名(Windows 保留大小写)——
+    // 不归一在 Windows 上必不等 = 恢复索引永远命中不了。目录名本就是路径编码,
+    // 大小写不敏感比较是安全的。
+    const wanted = String(projectHash || '').toLowerCase();
     for (const [draftId, binding] of Object.entries(bindings)) {
-      if (binding?.projectHash === projectHash && binding?.sessionId) {
+      if (wanted && String(binding?.projectHash || '').toLowerCase() === wanted && binding?.sessionId) {
         bySession.set(binding.sessionId, draftId);
       }
     }
