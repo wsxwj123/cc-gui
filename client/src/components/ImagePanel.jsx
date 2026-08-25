@@ -256,9 +256,12 @@ export default function ImagePanel() {
     const el = promptRef.current;
     if (!el) return;
     el.style.height = 'auto';
+    // 判官r51必修:display:none(在任务列表页点「恢复」时)下 scrollHeight 恒 0,写 0px
+    // 会让切回生图页后输入框塌成一条缝 —— 隐藏时不测高,交给 deps 里的 tab 切回补跑。
+    if (el.value && el.scrollHeight === 0) { el.style.height = ''; return; }
     el.style.height = (el.value ? Math.min(el.scrollHeight, 240) : 64) + 'px';
   }, []);
-  useEffect(() => { fitPrompt(); }, [prompt, fitPrompt]);
+  useEffect(() => { fitPrompt(); }, [prompt, tab, fitPrompt]);
 
   const loadHistory = useCallback(async () => {
     try {
