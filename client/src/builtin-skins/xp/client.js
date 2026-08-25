@@ -55,7 +55,8 @@
     var target = brand.getBoundingClientRect().left;
     var current = icon.getBoundingClientRect().left;
     if (target <= 0 || Math.abs(target - current) < 1) return;
-    var pad = parseFloat(getComputedStyle(titlebar).paddingLeft) || 0;
+    // 判官建议1:优先读自己写过的 element style(恒为布局 px,免疫任何 computed 口径),首轮才回落 computed。
+    var pad = parseFloat(titlebar.style.paddingLeft) || parseFloat(getComputedStyle(titlebar).paddingLeft) || 0;
     var next = Math.round(pad + (target - current) / scale);
     if (next >= 6) {
       titlebar.style.paddingLeft = next + 'px';
@@ -110,6 +111,7 @@
     var z = parseFloat(html.style.zoom) || 1;
     body.style.setProperty('--app-h', (window.innerHeight / z - 56) + 'px');
     body.style.setProperty('--app-w', (window.innerWidth / z - 20) + 'px');
+    watchTopbar(); // 判官建议2:3s settle 窗后 topbar 被换节点也能重新挂上观察器
     alignTitlebar();
   }
   fitDesk();
