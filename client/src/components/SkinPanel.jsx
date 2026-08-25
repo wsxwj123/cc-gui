@@ -331,7 +331,7 @@ export function SkinSection() {
     setDevOn(devSkinsEnabled());
   };
 
-  const rows = installed; // r28:内置皮肤不再混入此网格,独立 gallery 区块见下
+  const rows = installed; // r42:导入皮肤与内置卡合并渲染进同一个 2 列网格(见下),避免各留孤行
   return (
     <div className="space-y-1.5" data-cgui-skin-section>
       <div className="flex items-center gap-2">
@@ -342,22 +342,23 @@ export function SkinSection() {
         )}
         <button type="button" onClick={() => setManagerOpen(true)} className="text-[10.5px] text-accent font-body">导入 / 生成器…</button>
       </div>
-      {/* r28:内置 gallery 区(服务端列表之外,与导入的用户皮肤同屏共存) */}
-      {BUILTIN_GALLERY.length > 0 && (
-        <div className="space-y-1.5" data-cgui-builtin-gallery>
+      {/* r28:内置 gallery 区(服务端列表之外,与导入的用户皮肤同屏共存)。
+          r42:内置与导入合并进同一个网格 —— 两个独立网格会各自留奇数孤行
+          (3 张内置=2+1、1 张导入=1,视觉上两行只有单卡),卡片自带
+          「T2 内置 / T2 代码」徽标足以区分来源。 */}
+      <div className="space-y-1.5" data-cgui-builtin-gallery>
+        {BUILTIN_GALLERY.length > 0 && (
           <div className="text-[10.5px] text-ink-faint font-body">内置皮肤 —— 移植自 dsh gallery 的 T2 代码皮肤</div>
-          <div className="grid grid-cols-2 gap-1.5">
-            {BUILTIN_GALLERY.map((row) => (
-              <BuiltinSkinCard key={row.id} row={row} active={activeId === row.id} devOn={devOn} />
-            ))}
-          </div>
+        )}
+        <div className="grid grid-cols-2 gap-1.5">
+          {BUILTIN_GALLERY.map((row) => (
+            <BuiltinSkinCard key={row.id} row={row} active={activeId === row.id} devOn={devOn} />
+          ))}
+          {rows.map((row) => (
+            <SkinCard key={row.id} row={row} active={activeId === row.id}
+              onChanged={(removed) => { if (removed) refresh(); }} />
+          ))}
         </div>
-      )}
-      <div className="grid grid-cols-2 gap-1.5">
-        {rows.map((row) => (
-          <SkinCard key={row.id} row={row} active={activeId === row.id}
-            onChanged={(removed) => { if (removed) refresh(); }} />
-        ))}
       </div>
       <label className="flex items-center gap-2 pt-0.5 cursor-pointer select-none">
         <input type="checkbox" checked={devOn} onChange={toggleDev} className="accent-[var(--color-accent)]" />
