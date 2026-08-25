@@ -5,7 +5,7 @@
 // 浏览器访问时退化成手输绝对路径。
 // 模态红线:删除走 confirmDialog(Tauri 禁原生 confirm)。
 import { useCallback, useEffect, useState } from 'react';
-import { Image, Plus, Trash2, Pencil, FolderOpen, Loader2, Sparkles, ExternalLink, X, Check } from './Icon.jsx';
+import { Image, Plus, Trash2, Pencil, FolderOpen, Loader2, Sparkles, ExternalLink, X, Check, RefreshCw } from './Icon.jsx';
 import { confirmDialog } from '../utils/confirmDialog.jsx';
 import { pickDirectory, isTauri } from '../utils/pickDirectory.js';
 
@@ -20,11 +20,62 @@ const PROTOCOLS = [
 
 const EMPTY_FORM = { id: '', name: '', protocol: 'openai', baseURL: '', apiKey: '', model: '', size: '', savePath: '', extra: '' };
 
+// 尺寸候选:三类形态并存(显式宽x高 / K 档 / 纯比例 token),各服务认哪些值以其文档为准。
+// datalist 按已输入前缀过滤,候选多不妨碍手输。
+const SIZE_OPTIONS = [
+  'auto', '1024x1024', '1536x1024', '1024x1536', '1792x1024', '1024x1792',
+  '1920x1080', '2048x1152', '2048x2048', '2560x1440', '3840x2160', '2160x3840', '4096x4096',
+  '1K', '2K', '4K', '1:1', '16:9', '9:16', '4:3', '3:4', '21:9',
+];
+
+// 拉取失败的三类可行动文案(与服务端 type 一一对应)。
+const FETCH_HINTS = {
+  auth: '鉴权失败：密钥无效或该接口不接受此密钥，请检查密钥后重试。',
+  network: '网络不通：请求未能到达该地址，请检查接口地址、本机网络与代理设置。',
+  unsupported: '该服务未提供模型列表接口，请在「模型」框手动填写模型名。',
+};
+
 function ProviderForm({ initial, onDone, onCancel }) {
   const [form, setForm] = useState(initial);
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState('');
+  const [models, setModels] = useState([]);
+  const [fetchingModels, setFetchingModels] = useState(false);
+  const [modelsMsg, setModelsMsg] = useState('');
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
+
+  // 拉模型:编辑态只传 id(服务端强制用存储的 baseURL 与密钥,请求体里的 baseURL 被忽略);
+  // 新建态传表单里的地址与密钥。密钥留空也发 —— 部分中转站的模型列表接口不鉴权。
+  const loadModels = async () => {
+    setFetchingModels(true);
+    setModelsMsg('');
+    try {
+      const body = form.id ? { id: form.id, protocol: form.protocol }
+        : { baseURL: form.baseURL.trim(), protocol: form.protocol };
+      if (form.apiKey.trim()) body.apiKey = form.apiKey.trim();
+      const r = await fetch('/api/image-providers/fetch-models', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok || !d.ok) {
+        setModels([]);
+        setModelsMsg(`${FETCH_HINTS[d.type] || `拉取失败（HTTP ${r.status}）。`}${d.message ? `\n${d.message}` : ''}`);
+        return;
+      }
+      const list = d.models || [];
+      setModels(list);
+      setModelsMsg(list.length
+        ? `拉到 ${list.length} 个模型，点击模型框从候选列表中选择，也可继续手动输入。`
+        : '该服务返回了空的模型列表，请在「模型」框手动填写模型名。');
+    } catch (e) {
+      setModels([]);
+      setModelsMsg(`拉取失败：${e.message}`);
+    } finally {
+      setFetchingModels(false);
+    }
+  };
 
   const choosePath = async () => {
     setErr('');
@@ -89,12 +140,35 @@ function ProviderForm({ initial, onDone, onCancel }) {
         <label className="space-y-1"><span className={labelCls}>密钥{form.id ? '（留空保留原密钥）' : ''}</span>
           <input className={inputCls} type="password" value={form.apiKey} onChange={set('apiKey')} placeholder="sk-…" autoComplete="off" />
         </label>
-        <label className="space-y-1"><span className={labelCls}>模型</span>
-          <input className={inputCls} value={form.model} onChange={set('model')} placeholder="gpt-image-2" />
-        </label>
+        <div className="space-y-1"><span className={labelCls}>模型</span>
+          <div className="flex gap-1.5">
+            <input className={inputCls} list="cgui-image-model-options" value={form.model} onChange={set('model')} placeholder="gpt-image-2" />
+            <datalist id="cgui-image-model-options">
+              {models.map((m) => <option key={m} value={m} />)}
+            </datalist>
+            <button
+              type="button"
+              onClick={loadModels}
+              disabled={fetchingModels || (!form.id && !form.baseURL.trim())}
+              title={!form.id && !form.baseURL.trim() ? '先填写接口地址（baseURL）' : form.id ? '使用已保存的接口地址与密钥拉取（表单中未保存的修改不生效）' : '按接口地址与密钥拉取可用模型'}
+              className="shrink-0 px-2 rounded-md border border-canvas-deep text-[11.5px] text-ink-soft font-body hover:bg-canvas-deep/60 disabled:opacity-50 flex items-center gap-1"
+            >
+              {fetchingModels ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />}拉取模型
+            </button>
+          </div>
+        </div>
       </div>
-      <label className="space-y-1 block"><span className={labelCls}>尺寸 / 分辨率（仅 OpenAI 协议随请求下发；其他协议的尺寸参数写进下方附加参数）</span>
-        <input className={inputCls} value={form.size} onChange={set('size')} placeholder="1024x1024" />
+      {modelsMsg && <div className="text-[10px] text-ink-faint font-body leading-snug whitespace-pre-wrap break-all">{modelsMsg}</div>}
+      <label className="space-y-1 block"><span className={labelCls}>尺寸 / 分辨率</span>
+        <input className={inputCls} list="cgui-image-size-options" value={form.size} onChange={set('size')} placeholder="1024x1024" />
+        <datalist id="cgui-image-size-options">
+          {SIZE_OPTIONS.map((s) => <option key={s} value={s} />)}
+        </datalist>
+        <span className="text-[10px] text-ink-faint font-body leading-snug block">
+          {form.protocol === 'openai'
+            ? '随请求发送；服务不支持所选尺寸时会报错。'
+            : '该协议无原生尺寸字段，此值不发送；需在附加参数（extra）中按服务文档设置。'}
+        </span>
       </label>
       <div className="space-y-1">
         <span className={labelCls}>保存路径（必填，出图后自动落盘到此目录）</span>

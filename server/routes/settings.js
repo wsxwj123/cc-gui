@@ -1806,7 +1806,9 @@ export async function assertPublicBaseURL(baseURL, { allowLoopback = true } = {}
   }
 }
 
-async function probeUpstreamModels(baseURL, apiKey) {
+// export 仅为复用:生图 provider(routes/image.js)的 openai/chat 协议与文本 provider
+// 的 baseURL 语义相同,拉模型走同一条探测链路。函数本体一个字不改。
+export async function probeUpstreamModels(baseURL, apiKey) {
   // SSRF 守卫放在这里 = 所有调用点(fetch-models 请求值 / provider/fetch-models 存储
   // baseURL / active provider settings.json baseURL)一次全覆盖,不漏 sibling caller。
   await assertPublicBaseURL(baseURL);
