@@ -3,7 +3,7 @@
 // zip + 三件套粘贴 + dsh JSON 三条导入通道、AI 提示词生成器、「开发者皮肤(本机)」
 // 总开关(默认关,首次启用 confirmDialog 明示权限;永无分享/市场入口)。
 // 模态红线:flex 列三段(禁 sticky footer)、confirmDialog(Tauri 禁原生 confirm)。
-import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { createPortal } from 'react-dom';
 import { Palette, Copy, Trash2, X, Sparkles, Check } from './Icon.jsx';
 import { confirmDialog } from '../utils/confirmDialog.jsx';
@@ -21,6 +21,22 @@ import { buildSkinPrompt } from '../utils/skinPrompt.js';
 
 const inputCls = 'w-full bg-canvas-warm border border-canvas-deep rounded-md px-2.5 py-1.5 text-[12px] text-ink font-body focus:outline-none focus:border-accent/50';
 const taCls = `${inputCls} font-mono text-[11px] resize-y min-h-[72px]`;
+
+// r43 文件夹导入:特性检测(老 iOS Safari 等无 webkitdirectory,则不渲染该入口)+
+// 客户端下限(与 server/routes/skins-packs.js 的 DIR_LIMITS 同口径;服务端仍独立硬校验)。
+const CAN_PICK_DIR = typeof document !== 'undefined' && 'webkitdirectory' in document.createElement('input');
+const DIR_MAX_FILES = 64;
+const DIR_MAX_FILE_BYTES = 20 * 1024 * 1024;
+const DIR_MAX_TOTAL_BYTES = 30 * 1024 * 1024;
+// base64 走 FileReader 的 data URL(不手写分块 btoa):结果形如 data:<mime>;base64,<payload>。
+function fileToB64(file) {
+  return new Promise((resolve, reject) => {
+    const fr = new FileReader();
+    fr.onload = () => resolve(String(fr.result).split(',')[1] || '');
+    fr.onerror = () => reject(fr.error || new Error('文件读取失败'));
+    fr.readAsDataURL(file);
+  });
+}
 
 // 首次启用开发者皮肤的确认(总开关默认关;公开版同门槛同警示)。
 async function ensureDevSkins() {
@@ -146,6 +162,7 @@ function detectInlineKind(text) {
 // (防将来被嵌进 form 时隐式 submit,同 ChatInput 既有口径)。
 function SkinManagerDialog({ onClose, onChanged }) {
   const fileRef = useRef(null);
+  const dirRef = useRef(null);
   useEffect(() => {
     const onEsc = (e) => { if (e.key === 'Escape') { e.stopPropagation(); onClose(); } };
     window.addEventListener('keydown', onEsc, true);
@@ -172,6 +189,37 @@ function SkinManagerDialog({ onClose, onChanged }) {
         method: 'POST',
         headers: { 'x-upload-name': encodeURIComponent(file.name) },
         body: file,
+      });
+      const d = await r.json();
+      report(d, '导入失败');
+      if (r.ok) onChanged?.();
+    } catch (e) { setNotice({ ok: false, text: `导入失败:${e.message}` }); }
+    setBusy(false);
+  };
+  // r43 文件夹导入:webkitRelativePath = 「<顶层目录>/包内相对路径」,剥掉顶层目录段;
+  // 点开头的文件(.DS_Store 等 Finder 副产物)直接丢弃,不占文件数配额。
+  const importDir = async (fileList) => {
+    const picked = Array.from(fileList || []);
+    if (!picked.length) return;
+    const topDir = picked[0].webkitRelativePath ? picked[0].webkitRelativePath.split('/')[0] : '';
+    const entries = picked
+      .map((f) => ({ f, path: f.webkitRelativePath ? f.webkitRelativePath.split('/').slice(1).join('/') : f.name }))
+      .filter((e) => e.path && !e.path.split('/').some((s) => s.startsWith('.')));
+    const hasManifest = entries.some((e) => e.path === 'skin.json' || /^[^/]+\/skin\.json$/.test(e.path));
+    const total = entries.reduce((n, e) => n + e.f.size, 0);
+    const oversize = entries.find((e) => e.f.size > DIR_MAX_FILE_BYTES);
+    let reject = null;
+    if (!hasManifest) reject = '所选文件夹内没有 skin.json,不是可导入的皮肤包。';
+    else if (entries.length > DIR_MAX_FILES) reject = `所选文件夹含 ${entries.length} 个文件,超过 ${DIR_MAX_FILES} 个上限。`;
+    else if (oversize) reject = `文件 ${oversize.path} 超过单文件 20MB 上限。`;
+    else if (total > DIR_MAX_TOTAL_BYTES) reject = '所选文件夹总体积超过 30MB 上限。';
+    if (reject) { setNotice({ ok: false, text: reject }); return; }
+    setBusy(true); setNotice(null);
+    try {
+      const files = [];
+      for (const e of entries) files.push({ path: e.path, dataB64: await fileToB64(e.f) });
+      const r = await fetch('/api/skins/import-dir', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: topDir, files }),
       });
       const d = await r.json();
       report(d, '导入失败');
@@ -213,8 +261,10 @@ function SkinManagerDialog({ onClose, onChanged }) {
     } catch (e) { setNotice({ ok: false, text: `保存失败:${e.message}` }); }
     setBusy(false);
   };
+  // r43①:提示词全文在页面内直接可读(复制按钮下方只读展示区),与复制同一份文本。
+  const promptText = useMemo(() => buildSkinPrompt(), []);
   const copyPrompt = async () => {
-    await copyText(buildSkinPrompt());
+    await copyText(promptText);
     setNotice({ ok: true, text: '提示词已复制。粘贴给任意 AI,产出 skin.json/三件套后回来导入。' });
   };
 
@@ -240,12 +290,20 @@ function SkinManagerDialog({ onClose, onChanged }) {
               </button>
             ))}
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
             <button type="button" onClick={() => fileRef.current?.click()} disabled={busy}
               className="btn-accent px-3 py-1.5 text-[12px] font-body disabled:opacity-40">导入 zip / .cguiskin…</button>
             <input ref={fileRef} type="file" accept=".zip,.cguiskin" className="hidden"
               onChange={(e) => { importZip(e.target.files?.[0]); e.target.value = ''; }} />
-            <span className="text-[10.5px] text-ink-faint font-body">T1/T2 皮肤包(≤30MB)。导入素材版权由使用者自行负责,仅限个人使用。</span>
+            {CAN_PICK_DIR && (
+              <>
+                <button type="button" onClick={() => dirRef.current?.click()} disabled={busy}
+                  className="px-3 py-1.5 text-[12px] font-body rounded-md border border-canvas-deep hover:bg-canvas-warm text-ink-soft disabled:opacity-40">导入文件夹…</button>
+                <input ref={dirRef} type="file" webkitdirectory="" directory="" multiple className="hidden"
+                  onChange={(e) => { importDir(e.target.files); e.target.value = ''; }} />
+              </>
+            )}
+            <span className="text-[10.5px] text-ink-faint font-body">T1/T2 皮肤包(zip/.cguiskin/文件夹,≤30MB)。导入素材版权由使用者自行负责,仅限个人使用。</span>
           </div>
           {tab !== 'prompt' && (
             <input value={name} onChange={(e) => setName(e.target.value)} maxLength={40}
@@ -275,6 +333,8 @@ function SkinManagerDialog({ onClose, onChanged }) {
               <button type="button" onClick={copyPrompt} className="btn-accent px-3 py-1.5 text-[12px] font-body flex items-center gap-1.5">
                 <Copy size={12} /> 复制完整提示词
               </button>
+              {/* 全文只读展示:不想复制走的人可以直接在这里读完整提示词 */}
+              <pre className="bg-canvas-warm border border-canvas-deep rounded-md px-2.5 py-2 font-mono text-[10.5px] text-ink-soft max-h-[260px] overflow-y-auto whitespace-pre-wrap break-words">{promptText}</pre>
             </div>
           )}
           {notice && (

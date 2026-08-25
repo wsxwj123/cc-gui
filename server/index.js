@@ -261,7 +261,10 @@ app.use(cors((req, cb) => cb(null, {
   },
 })));
 // Bumped from default 100kb to 25mb so dragged-in screenshots fit in the JSON body.
-app.use(express.json({ limit: '25mb' }));
+// r43:皮肤文件夹导入把 30MB 目录 base64 进 JSON(≈40MB),必须让路给该路由自己挂的
+// 45mb 解析器(routes/skins-packs.js);全局限额对其余所有路径原样不动。
+const jsonParser = express.json({ limit: '25mb' });
+app.use((req, res, next) => (req.path === '/api/skins/import-dir' ? next() : jsonParser(req, res, next)));
 
 // Password gate for external clients (no-op for 127.0.0.1 / no-password). Must
 // sit before the API routes so an unauthorized phone gets 401 on every call
