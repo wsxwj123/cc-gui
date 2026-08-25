@@ -156,6 +156,12 @@ function readHistory(limit = MAX_HISTORY) {
   return withHistory((list) => ({ list: null, result: list.slice(0, limit) }));
 }
 
+// 并发上限:每个在跑的任务最多持有一张 25MB 级的图片缓冲(b64 文本 + Buffer),
+// 不设上限的话用户连点几十次就能把单进程后端的内存打爆。计数是内存量(本进程在跑的),
+// 不看历史文件里的 running(那是别的进程留下的,已被启动清障改写)。
+const MAX_CONCURRENT_JOBS = 3;
+let activeJobs = 0;
+
 class HttpError extends Error {
   constructor(status, message) { super(message); this.status = status; }
 }
@@ -555,6 +561,8 @@ async function runImageJob({ jobId, provider, prompt, spec, startedAt }) {
     // 兜底也要剥 key:异常消息可能带上 URL/头部回显。r26-J3:传真实 apiKey(字面替换),
     // 不再只靠 Bearer/api_key 形态兜底。
     await fail(redactKey(err.message, provider.apiKey || ''));
+  } finally {
+    activeJobs -= 1; // 无论成败都要还名额,否则跑几次就再也发不出新任务
   }
 }
 
@@ -568,6 +576,7 @@ router.post('/image/generate', async (req, res) => {
   // r26-J3:兜底 catch 也要剥 key —— provider 在 try 里才查到,先把 key 提到外层作用域,
   // 否则 catch 里 redactKey(msg, null) 只能靠形态兜底,明文 key 原样回显。
   let apiKeyForRedact = '';
+  let counted = false; // 已占并发名额但任务还没起来 → 出错要还回去,否则名额永久漏光
   try {
     const { providerId, prompt } = req.body || {};
     const provider = (await readImageProviders()).find((p) => p.id === providerId);
@@ -582,6 +591,13 @@ router.post('/image/generate', async (req, res) => {
     try { await assertPublicBaseURL(provider.baseURL); }
     catch (e) { return res.status(e.status || 400).json({ error: e.message }); }
 
+    // 并发闸:检查与自增之间没有 await,单线程下这一对是原子的(中间插一个 await
+    // 就会出现两个请求都读到 2 然后都放行的窗口)。
+    if (activeJobs >= MAX_CONCURRENT_JOBS) {
+      return res.status(429).json({ error: `同时生成的任务已达 ${MAX_CONCURRENT_JOBS} 个上限，请等待任一任务完成` });
+    }
+    activeJobs += 1;
+    counted = true;
     const jobId = randomUUID();
     const startedAt = Date.now();
     await addHistoryEntry({
@@ -598,8 +614,9 @@ router.post('/image/generate', async (req, res) => {
     // 上游 120s —— 慢生成(4K 等)时前端先被掐断报 "Load failed",服务端其实已经出图。
     res.json({ ok: true, jobId });
     // fire-and-forget:任务与这次请求彻底脱钩,面板关掉/刷新都照跑。
-    runImageJob({ jobId, provider, prompt, spec, startedAt });
+    runImageJob({ jobId, provider, prompt, spec, startedAt }); // 名额由 runner 的 finally 归还
   } catch (err) {
+    if (counted) activeJobs -= 1;
     res.status(500).json({ error: redactKey(err.message, apiKeyForRedact) });
   }
 });

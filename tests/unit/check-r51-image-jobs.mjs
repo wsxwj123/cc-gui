@@ -41,6 +41,10 @@ app.use(express.json({ limit: '2mb' }));
 app.post('/slow/v1/images/generations', (_req, res) => {
   setTimeout(() => res.json({ data: [{ b64_json: PNG_B64 }] }), 3000);
 });
+// 中速上游:1s —— 与 3s 的慢上游并存,用来钉死"先完成的先 done,互不影响"。
+app.post('/mid/v1/images/generations', (_req, res) => {
+  setTimeout(() => res.json({ data: [{ b64_json: PNG_B64 }] }), 1000);
+});
 app.post('/fast/v1/images/generations', (_req, res) => res.json({ data: [{ b64_json: PNG_B64 }] }));
 // 把密钥回显进错误正文的上游:失败 job 的 error 存进历史前必须过 redactKey。
 app.post('/leak/v1/images/generations', (req, res) => res.status(401)
@@ -126,6 +130,42 @@ try {
     assert.equal(typeof done.entry.tookMs, 'number', 't1: 条目记下耗时');
     assert.ok(!done.text.includes(KEY), 't1: 历史响应不含 apiKey');
     assert.ok(existsSync(HISTORY_FILE), 't1: 历史落盘到 ~/.claude-gui/image-history.json');
+  }
+
+  // ───────────── 1b. 并行多任务 + 并发上限 3(第 4 个 429) ─────────────
+  {
+    const slowId = await mkProvider('慢上游(并行)', '/slow/v1'); // 3s
+    const midId = await mkProvider('中速上游', '/mid/v1'); // 1s
+    const post = async (pid, prompt) => api('POST', '/api/image/generate', { providerId: pid, prompt });
+    const j1 = await post(slowId, '并行-慢');
+    const j2 = await post(midId, '并行-中1');
+    const j3 = await post(midId, '并行-中2');
+    for (const [i, j] of [j1, j2, j3].entries()) assert.ok(j.json?.jobId, `t1b: 第 ${i + 1} 个任务受理(${j.text})`);
+
+    const { list } = await historyOf();
+    const runningIds = list.filter((e) => e.status === 'running').map((e) => e.id);
+    for (const j of [j1, j2, j3]) assert.ok(runningIds.includes(j.json.jobId), 't1b: 三个任务各自 running 共存');
+
+    const j4 = await post(midId, '并行-第四个');
+    assert.equal(j4.status, 429, `t1b【并发上限】:已有 3 个 running 时第 4 个必须 429(实际 ${j4.status} ${j4.text})`);
+    assert.match(j4.json?.error || '', /上限/, 't1b: 429 给出可行动文案');
+    assert.ok(!(await historyOf()).list.some((e) => e.prompt === '并行-第四个'), 't1b: 被拒的请求不写历史条目');
+
+    // 先完先 done:中速(1s)先落 done,慢的(3s)还在 running,互不影响
+    const mid1 = await waitFor(async () => {
+      const cur = await historyOf(j2.json.jobId);
+      return cur.entry && cur.entry.status !== 'running' ? cur : null;
+    });
+    assert.equal(mid1.entry.status, 'done', 't1b: 先完成的任务先落 done');
+    assert.equal(mid1.list.find((e) => e.id === j1.json.jobId).status, 'running', 't1b: 慢任务不受影响,仍在跑');
+
+    // 名额归还:两个中速任务完事后,还没跑完的只剩 1 个 → 又能发新任务了
+    await waitFor(async () => (await historyOf(j3.json.jobId)).entry?.status !== 'running');
+    const j5 = await post(midId, '并行-名额归还');
+    assert.equal(j5.status, 200, `t1b: 任务结束要归还并发名额(实际 ${j5.status} ${j5.text})`);
+    for (const j of [j1, j5]) {
+      await waitFor(async () => (await historyOf(j.json.jobId)).entry?.status !== 'running');
+    }
   }
 
   // ───────────── 2. 历史上限 100 条(裁尾) ─────────────
@@ -233,6 +273,9 @@ if (failure) throw failure;
   assert.match(runner, /MAX_IMAGE_BYTES/, 't6: 图片体积闸在 runner 内');
   assert.match(runner, /Content-Type: \$\{ct/, 't6: 下载分支只认 Content-Type 的判据仍在');
 
+  assert.match(src, /MAX_CONCURRENT_JOBS = 3/, 't6: 并发上限 3 放在常量里(便于调整)');
+  assert.match(src, /activeJobs >= MAX_CONCURRENT_JOBS[\s\S]{0,200}429/, 't6: 超过上限的提交返回 429');
+  assert.match(src, /finally \{\n\s*activeJobs -= 1;/, 't6: 任务结束必归还名额(finally,不是只在成功分支)');
   assert.match(src, /image-history\.json/, 't6: 历史文件落 ~/.claude-gui/image-history.json');
   assert.match(src, /slice\(0, MAX_HISTORY\)/, 't6: 写盘处按上限裁尾');
   assert.match(src, /'\/image\/history'/, 't6: GET /image/history 端点在位');
@@ -251,6 +294,30 @@ if (failure) throw failure;
   assert.match(src, /恢复/, 't7:「恢复」按钮在位');
   assert.match(src, /onClick=\{\(\) => setPromptDraft\(h\.prompt/, 't7:「恢复」把该条提示词填回输入框(并同步草稿)');
   assert.match(src, /应用重启|interrupted/, 't7: interrupted 条目如实显示');
+  // 并行:生成按钮不因已有任务在跑而禁用(只挡请求发出那一瞬的双击)
+  const canGenLine = src.split('\n').find((l) => l.includes('const canGenerate ='));
+  assert.ok(canGenLine, 't7: 找得到 canGenerate 定义');
+  assert.match(canGenLine, /!submitting/, 't7: 只用 submitting 防双击');
+  assert.ok(!/hasRunning|\bbusy\b/.test(canGenLine), `t7:「生成」不许被"有任务在跑"禁用(实际:${canGenLine.trim()})`);
+  // 双 tab + 任务图块
+  assert.match(src, /'生图'/, 't7:「生图」tab 在位');
+  assert.match(src, /任务列表/, 't7:「任务列表」tab 在位');
+  assert.match(src, /useState\('gen'\)/, 't7: tab 是前端局部态(默认停在生图页)');
+  assert.match(src, /生成中 · \$\{elapsedSec\(h\)\}s/, 't7: running 图块显示已耗时');
+  assert.match(src, /animate-spin[\s\S]{0,200}elapsedSec/, 't7: running 图块转圈在位');
+  assert.match(src, /text-error[^>]*>\{h\.error/, 't7: error/interrupted 的报错文字渲染在图块内部');
+  // 「在文件夹中显示」:平台中性文案 + 复用既有 reveal 端点
+  assert.match(src, /在文件夹中显示/, 't7: reveal 按钮用平台中性文案');
+  assert.ok(!src.includes('在访达中显示'), 't7: 不写死 macOS 措辞');
+  assert.match(src, /reveal\(h\.file\)/, 't7: 任务条目可在文件夹中显示');
+  assert.match(src, /\/api\/image\/reveal/, 't7: 复用既有 reveal 端点');
+  // 网格 / 列表视图切换,选择存 localStorage
+  assert.match(src, /cgui-image-tasklist-view/, 't7: 视图选择的 localStorage 键在位');
+  assert.match(src, /\['grid', '网格'\], \['list', '列表'\]/, 't7: 网格/列表切换钮在位');
+  assert.match(src, /localStorage\.setItem\(TASK_VIEW_KEY/, 't7: 切换后写盘(重开保留)');
+  assert.match(src, /taskView === 'grid' \? 'grid grid-cols-2/, 't7: 网格式一行两块');
+  // 预览区不再显示提示词全文
+  assert.ok(!/>\{current\.prompt\}</.test(src), 't7: 预览区去掉提示词全文行(长提示词顶爆界面)');
   // 自适应高度:截断式调高 + 依赖 prompt 的 effect(挂载恢复草稿、点「恢复」回填都会跑到)
   assert.match(src, /Math\.min\(el\.scrollHeight, 240\)/, 't7: 提示词框按内容调高,上限 240px');
   assert.match(src, /el\.style\.height = 'auto'/, 't7: 调高前先归零(否则只增不减)');
