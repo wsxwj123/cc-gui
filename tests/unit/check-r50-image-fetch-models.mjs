@@ -238,9 +238,14 @@ if (failure) throw failure;
   assert.match(src, /鉴权失败/, 't4: auth 文案');
   assert.match(src, /手动填写模型名|手填/, 't4: unsupported 引导手填');
   // ④ 尺寸候选(三类形态并存)+ per-protocol 小字
+  // r56 起全量候选表搬到 client/src/utils/imageSizeCaps.js(能力表按模型过滤要拿它当输入,
+  // 且纯函数模块才能被单测直接 import);面板改成 import 它。断言原样不放松:同一份清单
+  // 逐项还在,只是换了个落点,外加一条"面板确实读的是它"。
+  const sizeSrc = readFileSync(join(REPO, 'client/src/utils/imageSizeCaps.js'), 'utf8');
   for (const v of ['auto', '1024x1024', '1920x1080', '2048x2048', '3840x2160', '4096x4096', '1K', '2K', '4K', '1:1', '16:9', '9:16', '4:3', '3:4', '21:9']) {
-    assert.ok(src.includes(`'${v}'`), `t4: 尺寸候选含 ${v}`);
+    assert.ok(sizeSrc.includes(`'${v}'`), `t4: 尺寸候选含 ${v}`);
   }
+  assert.match(src, /import \{[^}]*SIZE_OPTIONS[^}]*\} from '\.\.\/utils\/imageSizeCaps\.js'/, 't4: 面板的候选来自这份清单');
   assert.ok(src.includes('随请求发送'), 't4: openai 协议的尺寸小字在位');
   assert.ok(src.includes('该协议无原生尺寸字段'), 't4: gemini/chat 协议的尺寸小字在位');
   assert.ok(src.includes('附加参数（extra）') || src.includes('附加参数(extra)'), 't4: 小字指向附加参数');

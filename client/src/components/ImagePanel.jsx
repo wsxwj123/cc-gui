@@ -10,6 +10,8 @@ import { confirmDialog } from '../utils/confirmDialog.jsx';
 import { pickDirectory, isTauri } from '../utils/pickDirectory.js';
 import { ImageLightbox } from './ImageLightbox.jsx';
 import { ModelPickModal, mergeModelLines, stripJunkModels } from './ModelPickModal.jsx';
+// r56 尺寸候选按模型家族过滤(能力表在 utils/imageSizeCaps.js,未知模型回落全量)。
+import { SIZE_OPTIONS, sizeCapFor, sizeOptionsFor } from '../utils/imageSizeCaps.js';
 
 const inputCls = 'w-full bg-canvas-warm border border-canvas-deep rounded-md px-2.5 py-1.5 text-[12px] text-ink font-body focus:outline-none focus:border-accent/50';
 const labelCls = 'text-[10.5px] text-ink-faint font-body';
@@ -27,15 +29,8 @@ const I2I_MODES = [
 ];
 
 // r52:models = 用户勾选的模型白名单(落盘在 provider 上),「模型」输入框的候选列表读它。
-const EMPTY_FORM = { id: '', name: '', protocol: 'openai', baseURL: '', apiKey: '', model: '', models: [], size: '', savePath: '', extra: '', i2iMode: 'edits' };
-
-// 尺寸候选:三类形态并存(显式宽x高 / K 档 / 纯比例 token),各服务认哪些值以其文档为准。
-// datalist 按已输入前缀过滤,候选多不妨碍手输。
-const SIZE_OPTIONS = [
-  'auto', '1024x1024', '1536x1024', '1024x1536', '1792x1024', '1024x1792',
-  '1920x1080', '2048x1152', '2048x2048', '2560x1440', '3840x2160', '2160x3840', '4096x4096',
-  '1K', '2K', '4K', '1:1', '16:9', '9:16', '4:3', '3:4', '21:9',
-];
+// r56:proxyUrl = 本 provider 的正向代理地址(可选,留空直连)。
+const EMPTY_FORM = { id: '', name: '', protocol: 'openai', baseURL: '', apiKey: '', model: '', models: [], size: '', savePath: '', extra: '', i2iMode: 'edits', proxyUrl: '' };
 
 // 提示词草稿:出图是后台任务,面板关掉再打开输入框里的内容必须还在。
 const PROMPT_DRAFT_KEY = 'cgui-image-prompt-draft';
@@ -72,6 +67,8 @@ function ProviderForm({ initial, onDone, onCancel }) {
   const [fetchingModels, setFetchingModels] = useState(false);
   const [modelsMsg, setModelsMsg] = useState('');
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
+  // r56:命中能力表才有小字说明(未命中 = 走全量候选,不提示)。随「模型」输入实时变。
+  const sizeCap = sizeCapFor(form.model);
 
   // 拉模型:编辑态只传 id(服务端强制用存储的 baseURL 与密钥,请求体里的 baseURL 被忽略);
   // 新建态传表单里的地址与密钥。密钥留空也发 —— 部分中转站的模型列表接口不鉴权。
@@ -79,8 +76,9 @@ function ProviderForm({ initial, onDone, onCancel }) {
     setFetchingModels(true);
     setModelsMsg('');
     try {
+      // 新建态把表单里的代理一并发过去(编辑态服务端一律用存储值,与 baseURL 同口径)。
       const body = form.id ? { id: form.id, protocol: form.protocol }
-        : { baseURL: form.baseURL.trim(), protocol: form.protocol };
+        : { baseURL: form.baseURL.trim(), protocol: form.protocol, proxyUrl: (form.proxyUrl || '').trim() };
       if (form.apiKey.trim()) body.apiKey = form.apiKey.trim();
       const r = await fetch('/api/image-providers/fetch-models', {
         method: 'POST',
@@ -95,11 +93,12 @@ function ProviderForm({ initial, onDone, onCancel }) {
       // r52:拉取结果是候选,不是配置 —— 过滤掉嵌入/语音/视频/重排类噪音后开勾选弹窗,
       // 勾中的才 merge 进 form.models(保存时随 provider 落盘)。
       const list = stripJunkModels(d.models || [], 'image');
+      // 拉取成功 = 地址与密钥这条链路通了(拉列表不计费,可当免费的连通性检查)。
       if (list.length) {
         setPickCandidates(list);
-        setModelsMsg(`拉到 ${list.length} 个模型，请勾选要添加的模型；保存后候选列表持久生效。`);
+        setModelsMsg(`连接正常，拉到 ${list.length} 个模型，请勾选要添加的模型；保存后候选列表持久生效。`);
       } else {
-        setModelsMsg('该服务返回了空的模型列表，请在「模型」框手动填写模型名。');
+        setModelsMsg('连接正常，但该服务返回了空的模型列表，请在「模型」框手动填写模型名。');
       }
     } catch (e) {
       setModelsMsg(`拉取失败：${e.message}`);
@@ -131,6 +130,7 @@ function ProviderForm({ initial, onDone, onCancel }) {
         name: form.name, protocol: form.protocol, baseURL: form.baseURL, model: form.model,
         models: form.models || [], size: form.size, savePath: form.savePath, extra,
         i2iMode: form.i2iMode || 'edits',
+        proxyUrl: (form.proxyUrl || '').trim(), // 空串 = 清除(改回直连)
       };
       // apiKey 留空 = 保留服务端已存的 key(前端从不持有 key,不能被空字段抹掉)。
       if (form.apiKey.trim()) body.apiKey = form.apiKey.trim();
@@ -193,14 +193,21 @@ function ProviderForm({ initial, onDone, onCancel }) {
       {modelsMsg && <div className="text-[10px] text-ink-faint font-body leading-snug whitespace-pre-wrap break-all">{modelsMsg}</div>}
       <label className="space-y-1 block"><span className={labelCls}>尺寸 / 分辨率</span>
         <input className={inputCls} list="cgui-image-size-options" value={form.size} onChange={set('size')} placeholder="1024x1024" />
+        {/* r56:候选随「模型」输入实时收窄 —— 命中已知家族用其官方支持范围,未知模型回落全量。
+            只影响候选显示,手输的值一律照发(发送逻辑零改动)。 */}
         <datalist id="cgui-image-size-options">
-          {SIZE_OPTIONS.map((s) => <option key={s} value={s} />)}
+          {(sizeOptionsFor(form.model) ?? SIZE_OPTIONS).map((s) => <option key={s} value={s} />)}
         </datalist>
         <span className="text-[10px] text-ink-faint font-body leading-snug block">
           {form.protocol === 'openai'
             ? '随请求发送；服务不支持所选尺寸时会报错。'
             : '该协议无原生尺寸字段，此值不发送；需在附加参数（extra）中按服务文档设置。'}
         </span>
+        {sizeCap && (
+          <span className="text-[10px] text-ink-faint font-body leading-snug block">
+            候选已按 {sizeCap.family} 的官方支持范围过滤；手动输入不受限制。
+          </span>
+        )}
       </label>
       {/* r54:图生图形态。两种协议形态官方不兼容 —— OpenAI 有 /images/edits 端点,
           方舟(Seedream)没有,图生图靠 generations 的 image 字段。选错则上游 404/400。 */}
@@ -228,6 +235,14 @@ function ProviderForm({ initial, onDone, onCancel }) {
           </div>
         )}
       </div>
+      {/* r56:按 provider 的正向代理。生图链路(生成 / 拉取模型 / 图片下载)是服务端发起的,
+          不读系统代理设置,被墙的域名只能靠这个字段指定出口。 */}
+      <label className="space-y-1 block"><span className={labelCls}>代理地址（可选）</span>
+        <input className={inputCls} value={form.proxyUrl || ''} onChange={set('proxyUrl')} placeholder="http://127.0.0.1:7897" autoComplete="off" />
+        <span className="text-[10px] text-ink-faint font-body leading-snug block">
+          留空直连。填写后本 provider 的生成、拉取模型、图片下载均经此代理（如 Clash 本机端口）；地址不支持内嵌账号密码。
+        </span>
+      </label>
       <label className="space-y-1 block"><span className={labelCls}>附加参数（可选，JSON 对象，原样并入请求体）</span>
         <textarea className={`${inputCls} font-mono text-[11px] resize-y min-h-[52px]`} value={form.extra} onChange={set('extra')} placeholder='{"quality": "high"}' />
       </label>
@@ -801,6 +816,7 @@ export default function ImagePanel() {
                     ...EMPTY_FORM, id: p.id, name: p.name, protocol: p.protocol, baseURL: p.baseURL,
                     model: p.model, models: p.models || [], size: p.size, savePath: p.savePath,
                     extra: p.extra ? JSON.stringify(p.extra, null, 2) : '', i2iMode: p.i2iMode || 'edits',
+                    proxyUrl: p.proxyUrl || '',
                   })}
                   className="shrink-0 p-1 rounded hover:bg-canvas-deep/60 text-ink-soft"
                 ><Pencil size={12} /></button>
