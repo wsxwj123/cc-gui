@@ -331,7 +331,7 @@ export function SkinSection() {
     setDevOn(devSkinsEnabled());
   };
 
-  const rows = installed; // r28:内置皮肤不再混入此网格,独立 gallery 区块见下
+  const rows = installed; // r42:导入皮肤与内置卡合并渲染进同一个 2 列网格(见下),避免各留孤行
   return (
     <div className="space-y-1.5" data-cgui-skin-section>
       <div className="flex items-center gap-2">
