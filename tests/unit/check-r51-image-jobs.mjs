@@ -137,10 +137,13 @@ try {
     const pid = await mkProvider('快上游', '/fast/v1');
     const r = await api('POST', '/api/image/generate', { providerId: pid, prompt: '第 101 条' });
     assert.ok(r.json?.jobId, `t2: 受理(${r.text})`);
+    // 判据落在【文件】上:读端也按 limit 切,只看响应会把"写盘不裁尾"放过去(文件无界长)。
+    const onDisk = JSON.parse(readFileSync(HISTORY_FILE, 'utf8'));
+    assert.equal(onDisk.length, 100, `t2【上限】:写第 101 条后文件里仍是 100 条(实际 ${onDisk.length})`);
+    assert.equal(onDisk[0].id, r.json.jobId, 't2: 新条目在首位');
+    assert.ok(!onDisk.some((e) => e.id === 'old-99'), 't2: 最旧的一条被裁掉');
     const { list } = await historyOf();
-    assert.equal(list.length, 100, `t2【上限】:写第 101 条后仍是 100 条(实际 ${list.length})`);
-    assert.equal(list[0].id, r.json.jobId, 't2: 新条目在首位');
-    assert.ok(!list.some((e) => e.id === 'old-99'), 't2: 最旧的一条被裁掉');
+    assert.equal(list.length, 100, `t2: 响应同样是 100 条(实际 ${list.length})`);
     await waitFor(async () => (await historyOf(r.json.jobId)).entry?.status !== 'running');
   }
 
