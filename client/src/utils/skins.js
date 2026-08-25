@@ -260,6 +260,11 @@ function skinTrace(step, extra) {
     }
   } catch {}
 }
+// r45 取证桥:T2 皮肤脚本经 Blob-URL 以经典脚本注入,拿不到本模块作用域;又不能自带
+// 上报通道 —— T2_BLACKLIST_CLIENT 逐字禁 navigator.sendBeacon 与 fetch(,内联一个
+// 就是整张皮肤被拒载。故把 skinTrace 挂成全局,皮肤侧 window.__cguiSkinTrace?.(...)
+// 取证(桥不在时皮肤静默不发)。只读用途,不改任何既有行为。
+try { window.__cguiSkinTrace = skinTrace; } catch {}
 
 // r40 探针:装载完成后的「冻结现场分型」(用户新线索 = 点试穿后整个 GUI 任何按钮都点
 // 不动、必须 Cmd+Q,且冻结帧里皮肤零视觉)。三根探针各答一问:
