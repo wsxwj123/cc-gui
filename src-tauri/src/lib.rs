@@ -895,6 +895,54 @@ fn on_webview_process_terminated(webview: &tauri::Webview) {
 const WEBVIEW2_BROWSER_ARGS: &str =
     "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --disable-gpu-process-crash-limit";
 
+// r53: macOS 默认菜单会把 ⌘Z 吃掉。Tauri 2 未设菜单时自动挂 Menu::default(),其
+// Edit 子菜单带 Undo(⌘Z)/Redo(⇧⌘Z);macOS 的按键分发里菜单 keyEquivalent 优先于
+// webview,⌘Z 走原生 undo:(对 React 受控输入无效),DOM keydown 根本不触发,前端
+// 全局输入撤销(client/src/utils/inputUndo.js)全哑。dev 浏览器无原生菜单,所以只在
+// 装机版复现。
+// 修复=自建菜单,Edit 段刻意不含 undo/redo —— ⌘Z/⇧⌘Z 无人认领即原样落到网页层。
+// cut/copy/paste/select_all 必须保留:WKWebView 的 ⌘X/⌘C/⌘V/⌘A 依赖这些菜单项加速键。
+// 只在 macOS 挂;Windows/Linux 本无默认菜单栏,设了反而多出一条(视觉回归)。
+#[cfg(target_os = "macos")]
+fn build_app_menu<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+) -> tauri::Result<tauri::menu::Menu<R>> {
+    use tauri::menu::{AboutMetadata, MenuBuilder, SubmenuBuilder, WINDOW_SUBMENU_ID};
+    let pkg = app.package_info();
+    let about = AboutMetadata {
+        name: Some(pkg.name.clone()),
+        version: Some(pkg.version.to_string()),
+        ..Default::default()
+    };
+    let app_menu = SubmenuBuilder::new(app, pkg.name.clone())
+        .about(Some(about))
+        .separator()
+        .services()
+        .separator()
+        .hide()
+        .hide_others()
+        .show_all()
+        .separator()
+        .quit()
+        .build()?;
+    // ⚠ 这里不要加 .undo()/.redo() —— 加回去 = 本修复失效(⌘Z 又被菜单吃掉)。
+    let edit_menu = SubmenuBuilder::new(app, "Edit")
+        .cut()
+        .copy()
+        .paste()
+        .select_all()
+        .build()?;
+    let window_menu = SubmenuBuilder::with_id(app, WINDOW_SUBMENU_ID, "Window")
+        .minimize()
+        .maximize()
+        .separator()
+        .close_window()
+        .build()?;
+    MenuBuilder::new(app)
+        .items(&[&app_menu, &edit_menu, &window_menu])
+        .build()
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // 诊断①:进程一进来先落一行日志。此前首条日志在窗口创建之后 —— 若窗口创建前就
@@ -943,6 +991,9 @@ pub fn run() {
     // cfg(any(macos, ios)) 一致,其它平台不编译这段。
     #[cfg(any(target_os = "macos", target_os = "ios"))]
     let builder = builder.on_web_content_process_terminate(on_webview_process_terminated);
+    // r53: 用自建菜单替换 Tauri 默认菜单,放走 ⌘Z(详见 build_app_menu 注释)。
+    #[cfg(target_os = "macos")]
+    let builder = builder.menu(build_app_menu);
     builder
         // F1: 设置页实时重注册热键 + 截图完成后置前主窗。app 本地命令无需 capability 授权。
         .invoke_handler(tauri::generate_handler![set_screenshot_hotkey, focus_main_window, restart_app])
