@@ -60,4 +60,10 @@ const rs = readFileSync(new URL('../../src-tauri/src/lib.rs', import.meta.url), 
   }
 }
 
+// t4(判官r53建议1):View→fullscreen 在位(ctrl+⌘F 键盘全屏),且挂进 items。
+{
+  assert.ok(/\.fullscreen\(\)/.test(rs), 't4: View 段含 fullscreen');
+  assert.ok(/&view_menu/.test(rs), 't4: view_menu 已挂进菜单 items');
+}
+
 console.log('check-r53-menu-undo: all passed');

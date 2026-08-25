@@ -932,6 +932,10 @@ fn build_app_menu<R: tauri::Runtime>(
         .paste()
         .select_all()
         .build()?;
+    // 判官r53:补回默认菜单里的 View→Enter Full Screen(ctrl+⌘F 键盘全屏靠它)。
+    let view_menu = SubmenuBuilder::new(app, "View")
+        .fullscreen()
+        .build()?;
     let window_menu = SubmenuBuilder::with_id(app, WINDOW_SUBMENU_ID, "Window")
         .minimize()
         .maximize()
@@ -939,7 +943,7 @@ fn build_app_menu<R: tauri::Runtime>(
         .close_window()
         .build()?;
     MenuBuilder::new(app)
-        .items(&[&app_menu, &edit_menu, &window_menu])
+        .items(&[&app_menu, &edit_menu, &view_menu, &window_menu])
         .build()
 }
 
