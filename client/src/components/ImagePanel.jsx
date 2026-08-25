@@ -4,10 +4,11 @@
 // provider 表单。保存路径是配置的一部分且必填:Tauri 下走原生文件夹选择器,
 // 浏览器访问时退化成手输绝对路径。
 // 模态红线:删除走 confirmDialog(Tauri 禁原生 confirm)。
-import { useCallback, useEffect, useState } from 'react';
-import { Image, Plus, Trash2, Pencil, FolderOpen, Loader2, Sparkles, ExternalLink, X, Check, RefreshCw } from './Icon.jsx';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { Image, Plus, Trash2, Pencil, FolderOpen, Loader2, Sparkles, ExternalLink, X, Check, RefreshCw, RotateCcw } from './Icon.jsx';
 import { confirmDialog } from '../utils/confirmDialog.jsx';
 import { pickDirectory, isTauri } from '../utils/pickDirectory.js';
+import { ImageLightbox } from './ImageLightbox.jsx';
 
 const inputCls = 'w-full bg-canvas-warm border border-canvas-deep rounded-md px-2.5 py-1.5 text-[12px] text-ink font-body focus:outline-none focus:border-accent/50';
 const labelCls = 'text-[10.5px] text-ink-faint font-body';
@@ -27,6 +28,15 @@ const SIZE_OPTIONS = [
   '1920x1080', '2048x1152', '2048x2048', '2560x1440', '3840x2160', '2160x3840', '4096x4096',
   '1K', '2K', '4K', '1:1', '16:9', '9:16', '4:3', '3:4', '21:9',
 ];
+
+// 提示词草稿:出图是后台任务,面板关掉再打开输入框里的内容必须还在。
+const PROMPT_DRAFT_KEY = 'cgui-image-prompt-draft';
+const POLL_MS = 1500; // 有任务在跑时的历史轮询间隔
+const STATUS_LABEL = { running: '生成中', done: '已完成', error: '失败', interrupted: '已中断' };
+function readPromptDraft() {
+  try { return localStorage.getItem(PROMPT_DRAFT_KEY) || ''; } catch { return ''; }
+}
+const shortTime = (ms) => (ms ? new Date(ms).toLocaleString() : '');
 
 // 拉取失败的三类可行动文案(与服务端 type 一一对应)。
 const FETCH_HINTS = {
@@ -201,12 +211,14 @@ function ProviderForm({ initial, onDone, onCancel }) {
 export default function ImagePanel() {
   const [providers, setProviders] = useState([]);
   const [selId, setSelId] = useState('');
-  const [prompt, setPrompt] = useState('');
-  const [busy, setBusy] = useState(false);
+  const [prompt, setPrompt] = useState(readPromptDraft);
+  const [submitting, setSubmitting] = useState(false); // 只是"受理请求"这一瞬,生成态看历史
   const [err, setErr] = useState('');
-  const [history, setHistory] = useState([]); // 本次会话内的出图记录(不落盘,刷新即清)
-  const [current, setCurrent] = useState(null);
+  const [history, setHistory] = useState([]); // 服务端持久化历史(≤100 条,新在前)
+  const [currentId, setCurrentId] = useState('');
+  const [zoom, setZoom] = useState(null);
   const [form, setForm] = useState(null); // null = 不在表单态
+  const promptRef = useRef(null);
 
   const load = useCallback(async (preferId) => {
     try {
@@ -219,12 +231,52 @@ export default function ImagePanel() {
   }, []);
   useEffect(() => { load(); }, [load]);
 
+  // 提示词草稿:每次输入即写 localStorage,重开面板/刷新都填回原文(用户要求生成后也不清空)。
+  const setPromptDraft = useCallback((v) => {
+    setPrompt(v);
+    try { localStorage.setItem(PROMPT_DRAFT_KEY, v); } catch { /* 隐私模式/配额满:草稿丢了不影响出图 */ }
+  }, []);
+
+  // 输入框随内容长高(上限 240px,再多则框内滚动)。挂载恢复草稿、点「恢复」回填都会
+  // 改 prompt → 这个 effect 一并覆盖,不必各处手动调。
+  const fitPrompt = useCallback(() => {
+    const el = promptRef.current;
+    if (!el) return;
+    el.style.height = 'auto';
+    el.style.height = (el.value ? Math.min(el.scrollHeight, 240) : 64) + 'px';
+  }, []);
+  useEffect(() => { fitPrompt(); }, [prompt, fitPrompt]);
+
+  const loadHistory = useCallback(async () => {
+    try {
+      const r = await fetch('/api/image/history');
+      const d = await r.json();
+      const list = Array.isArray(d.history) ? d.history : [];
+      setHistory(list);
+      // 面板重开时的当前预览:优先保持已选中那条,否则取最近一条已完成的。
+      setCurrentId((cur) => (list.some((h) => h.id === cur) ? cur : (list.find((h) => h.status === 'done')?.id || '')));
+    } catch { /* 后端未就绪:下次轮询/重开面板再拉 */ }
+  }, []);
+  useEffect(() => { loadHistory(); }, [loadHistory]);
+
+  const running = history.filter((h) => h.status === 'running');
+  const hasRunning = running.length > 0;
+  // 轮询:有任务在跑就 1.5s 拉一次,全部落终态自动停。卸载只清 interval —— 任务在服务端
+  // 跑,关面板不影响它。
+  useEffect(() => {
+    if (!hasRunning) return undefined;
+    const timer = setInterval(loadHistory, POLL_MS);
+    return () => clearInterval(timer);
+  }, [hasRunning, loadHistory]);
+
   const selected = providers.find((p) => p.id === selId) || null;
+  const busy = submitting || hasRunning;
   const canGenerate = !!selected && !!selected.savePath && !!prompt.trim() && !busy;
+  const current = history.find((h) => h.id === currentId) || null;
 
   const generate = async () => {
     if (!canGenerate) return;
-    setBusy(true); setErr('');
+    setSubmitting(true); setErr('');
     try {
       const r = await fetch('/api/image/generate', {
         method: 'POST',
@@ -233,13 +285,12 @@ export default function ImagePanel() {
       });
       const d = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(d.error || `生成失败（${r.status}）`);
-      const entry = { ...d, prompt, providerName: selected.name };
-      setHistory((h) => [entry, ...h].slice(0, 24));
-      setCurrent(entry);
+      if (!d.jobId) throw new Error('服务端未返回任务标识');
+      await loadHistory(); // 拿到 running 条目 → 轮询自动起
     } catch (e) {
       setErr(e.message);
     } finally {
-      setBusy(false);
+      setSubmitting(false);
     }
   };
 
@@ -289,9 +340,11 @@ export default function ImagePanel() {
           ><Plus size={13} /></button>
         </div>
         <textarea
-          className={`${inputCls} resize-y min-h-[64px]`}
+          ref={promptRef}
+          className={`${inputCls} resize-none overflow-y-auto`}
+          style={{ height: 64 }}
           value={prompt}
-          onChange={(e) => setPrompt(e.target.value)}
+          onChange={(e) => setPromptDraft(e.target.value)}
           placeholder="描述你想要的画面…"
         />
         <div className="flex items-center gap-2">
@@ -302,8 +355,11 @@ export default function ImagePanel() {
             className="px-3 py-1.5 rounded-md bg-accent text-on-accent text-[12px] font-body disabled:opacity-50 flex items-center gap-1"
           >
             {busy ? <Loader2 size={12} className="animate-spin" /> : <Sparkles size={12} />}
-            {busy ? '生成中…（最长 120 秒）' : '生成'}
+            {busy ? '生成中…' : '生成'}
           </button>
+          {hasRunning && (
+            <span className="text-[11px] text-ink-faint font-body">任务在后台运行，关闭面板不影响；重新打开可看到进度。</span>
+          )}
           {selected && !selected.savePath && (
             <span className="text-[11px] text-error font-body">该 provider 未设置保存路径，请先编辑并选择保存目录。</span>
           )}
@@ -315,9 +371,14 @@ export default function ImagePanel() {
       </div>
 
       {/* 预览区 */}
-      {current && (
+      {current && current.status === 'done' && (
         <div className="space-y-1.5">
-          <img src={current.previewUrl} alt={current.prompt} className="w-full rounded-panel border border-canvas-deep" />
+          <img
+            src={current.previewUrl}
+            alt={current.prompt}
+            onClick={() => setZoom({ src: current.previewUrl, name: current.prompt, path: current.file })}
+            className="w-full rounded-panel border border-canvas-deep cursor-zoom-in"
+          />
           <div className="text-[11px] text-ink-soft font-body break-all">{current.prompt}</div>
           <div className="flex items-center gap-2">
             <span className="text-[10.5px] text-ink-faint font-mono break-all flex-1">{current.file}</span>
@@ -331,25 +392,54 @@ export default function ImagePanel() {
         </div>
       )}
 
-      {/* 本次会话内的历史缩略图 */}
-      {history.length > 1 && (
+      {/* 历史(服务端持久化,最多 100 条) */}
+      {history.length > 0 && (
         <div className="space-y-1">
-          <div className={labelCls}>本次会话（{history.length}）</div>
-          <div className="grid grid-cols-4 gap-1.5">
-            {history.map((h) => (
+          <div className={labelCls}>历史（{history.length}，最多保留 100 条）</div>
+          {history.map((h) => (
+            <div
+              key={h.id}
+              className={`flex items-center gap-2 rounded-md border px-2 py-1.5 ${h.id === currentId ? 'border-accent' : 'border-canvas-deep'}`}
+            >
+              {h.status === 'done' && h.previewUrl ? (
+                <img
+                  src={h.previewUrl}
+                  alt={h.prompt}
+                  onClick={() => setZoom({ src: h.previewUrl, name: h.prompt, path: h.file })}
+                  className="shrink-0 w-9 h-9 rounded object-cover border border-canvas-deep cursor-zoom-in"
+                />
+              ) : (
+                <div className="shrink-0 w-9 h-9 rounded border border-canvas-deep flex items-center justify-center">
+                  {h.status === 'running'
+                    ? <Loader2 size={12} className="animate-spin text-ink-faint" />
+                    : <Image size={12} className="text-ink-faint" />}
+                </div>
+              )}
               <button
-                key={h.file}
                 type="button"
-                onClick={() => setCurrent(h)}
+                onClick={() => h.status === 'done' && setCurrentId(h.id)}
                 title={h.prompt}
-                className={`aspect-square rounded overflow-hidden border ${current?.file === h.file ? 'border-accent' : 'border-canvas-deep'}`}
+                className="min-w-0 flex-1 text-left"
               >
-                <img src={h.previewUrl} alt={h.prompt} className="w-full h-full object-cover" />
+                <div className="text-[11.5px] text-ink font-body truncate">{h.prompt}</div>
+                <div className="text-[10px] text-ink-faint font-body truncate">
+                  {STATUS_LABEL[h.status] || h.status}
+                  {h.status !== 'done' && h.error ? ` · ${h.error}` : ''}
+                  {h.startedAt ? ` · ${shortTime(h.startedAt)}` : ''}
+                </div>
               </button>
-            ))}
-          </div>
+              <button
+                type="button"
+                title="把该条提示词填回输入框"
+                onClick={() => setPromptDraft(h.prompt || '')}
+                className="shrink-0 px-1.5 py-1 rounded border border-canvas-deep text-[11px] text-ink-soft font-body hover:bg-canvas-deep/60 flex items-center gap-1"
+              ><RotateCcw size={11} />恢复</button>
+            </div>
+          ))}
         </div>
       )}
+
+      <ImageLightbox src={zoom?.src} name={zoom?.name} path={zoom?.path} onClose={() => setZoom(null)} />
 
       {/* 管理态 */}
       {form

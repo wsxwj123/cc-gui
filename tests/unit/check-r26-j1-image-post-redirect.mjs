@@ -61,6 +61,20 @@ const api = async (method, path, body) => {
   });
   return { status: r.status, json: await r.json().catch(() => null) };
 };
+// r51:出图已任务化 —— POST 秒回 { jobId },成败落在 /api/image/history 的条目里。
+// 这里提交后轮询到终态,返回 { status, json }:status 是【任务终态】('done' / 'error'),
+// 不是 HTTP 码(提交只要过了前置校验就恒 200);前置校验失败仍是同步 HTTP 错误,原样返回。
+const gen = async (body) => {
+  const submit = await api('POST', '/api/image/generate', body);
+  if (submit.status !== 200 || !submit.json?.jobId) return submit;
+  for (let i = 0; i < 300; i++) {
+    const h = await api('GET', '/api/image/history');
+    const e = (h.json?.history || []).find((x) => x.id === submit.json.jobId);
+    if (e && e.status !== 'running') return { status: e.status, json: e };
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  throw new Error('出图任务 15s 内未落终态');
+};
 
 let n = 0;
 const ok = (v, m) => { assert.ok(v, m); n += 1; };
@@ -74,8 +88,8 @@ try {
   for (const code of [302, 301, 307]) {
     const p = await mk(`回${code}的上游`, `${BASE}/r${code}/v1`);
     assert.equal(p.status, 200, `夹具:${code} provider 建好`);
-    const g = await api('POST', '/api/image/generate', { providerId: p.json.id, prompt: 'x' });
-    assert.equal(g.status, 502, `J1: 上游 ${code} 必须报错(实际 ${g.status} —— 重定向被跟随)`);
+    const g = await gen({ providerId: p.json.id, prompt: 'x' });
+    assert.equal(g.status, 'error', `J1: 上游 ${code} 必须报错(实际 ${g.status} —— 重定向被跟随)`);
     assert.match(g.json?.error || '', /跳转|重定向|redirect/i, `J1: 报错必须点明跳转(实际:${g.json?.error})`);
     n += 2;
   }
@@ -84,8 +98,8 @@ try {
 
   // ③ 正常 200 不受影响(防误伤哨兵)
   const good = await mk('正常上游', `${BASE}/ok/v1`);
-  const g2 = await api('POST', '/api/image/generate', { providerId: good.json.id, prompt: 'x' });
-  ok(g2.status === 200, `J1: 正常出图不受 redirect:'manual' 影响(实际 ${g2.status})`);
+  const g2 = await gen({ providerId: good.json.id, prompt: 'x' });
+  ok(g2.status === 'done', `J1: 正常出图不受 redirect:'manual' 影响(实际 ${g2.status})`);
   ok(readdirSync(SAVE_DIR).length === 1, 'J1: 正常请求正常落盘');
 
   // ④ 源码钉住:生成 POST 带 redirect:'manual'(防回归)

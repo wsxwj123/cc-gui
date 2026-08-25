@@ -48,18 +48,22 @@ async function readImageProviders() {
 }
 
 // 原子写:tmp 名带 uuid + rename 落地(半截 writeFile 不会留下坏文件)。
-// mode 0600:文件里有明文 apiKey,默认 0644 等于同机其他用户可读。
-async function atomicWriteProviders(list) {
-  const target = imageProvidersPath();
+// mode 0600:providers 文件里有明文 apiKey,默认 0644 等于同机其他用户可读
+// (历史文件不存 key,但同目录同口径写,不必区分)。
+async function atomicWriteJson(target, data) {
   await mkdir(join(homedir(), '.claude-gui'), { recursive: true });
   const tmp = `${target}.tmp-${randomUUID()}`;
   try {
-    await writeFile(tmp, JSON.stringify(Array.isArray(list) ? list : [], null, 2), { mode: 0o600 });
+    await writeFile(tmp, JSON.stringify(data, null, 2), { mode: 0o600 });
     await rename(tmp, target);
   } catch (err) {
     try { await unlink(tmp); } catch {}
     throw err;
   }
+}
+
+async function atomicWriteProviders(list) {
+  await atomicWriteJson(imageProvidersPath(), Array.isArray(list) ? list : []);
 }
 
 // 串行队列。**读也必须在队列里**:判官实测并发 5 次 POST 只剩 1 条(各自读到同一份旧
@@ -82,6 +86,74 @@ function writeImageProviders(list) {
   const run = _imageProvidersQueue.catch(() => {}).then(() => atomicWriteProviders(list));
   _imageProvidersQueue = run;
   return run;
+}
+
+// ─────────────────────────── 出图历史(任务化的落盘层) ───────────────────────────
+// 生图是后台任务:前端面板关掉/刷新都不影响它跑完,状态只认这个文件。
+// 条目绝不含 apiKey(与 providers 文件不同,这份是给前端整条读走的)。
+function imageHistoryPath() {
+  return join(homedir(), '.claude-gui', 'image-history.json');
+}
+const MAX_HISTORY = 100;
+
+async function readHistoryFile() {
+  try {
+    const d = JSON.parse(await readFile(imageHistoryPath(), 'utf-8'));
+    return Array.isArray(d) ? d : [];
+  } catch { return []; } // 文件不存在/损坏 → 空历史,不崩
+}
+
+// 启动清障:上一个进程被杀时留下的 running 条目在本进程里永远不会有人再更新它,
+// 不改写就成了永久的"生成中"僵尸。进程内只做一次 —— 之后的 running 都是本进程的活任务。
+let _historySwept = false;
+function sweepInterrupted(list) {
+  if (_historySwept) return false;
+  _historySwept = true;
+  let changed = false;
+  for (const e of list) {
+    if (e && e.status === 'running') {
+      e.status = 'interrupted';
+      e.error = '应用重启，生成中断';
+      changed = true;
+    }
+  }
+  return changed;
+}
+
+// 串行队列(同 providers 口径):多个 job 并发更新各自条目,读-改-写整体必须原子,
+// 否则后写的会把先写的整条盖掉。mutator 返回 { list, result };list 为 null = 只读。
+let _imageHistoryQueue = Promise.resolve();
+function withHistory(mutator) {
+  const run = _imageHistoryQueue.catch(() => {}).then(async () => {
+    const list = await readHistoryFile();
+    const swept = sweepInterrupted(list);
+    const out = await mutator(list);
+    const next = out.list || (swept ? list : null);
+    if (next) await atomicWriteJson(imageHistoryPath(), next.slice(0, MAX_HISTORY)); // ← 上限裁尾(新在前)
+    return out.result;
+  });
+  _imageHistoryQueue = run;
+  return run.catch((e) => { throw e; });
+}
+
+function addHistoryEntry(entry) {
+  return withHistory((list) => {
+    list.unshift(entry);
+    return { list, result: entry.id };
+  });
+}
+
+function updateHistoryEntry(id, patch) {
+  return withHistory((list) => {
+    const idx = list.findIndex((e) => e && e.id === id);
+    if (idx === -1) return { list: null, result: false }; // 条目已被裁掉:任务照跑,不复活它
+    list[idx] = { ...list[idx], ...patch };
+    return { list, result: true };
+  });
+}
+
+function readHistory(limit = MAX_HISTORY) {
+  return withHistory((list) => ({ list: null, result: list.slice(0, limit) }));
 }
 
 class HttpError extends Error {
@@ -332,28 +404,17 @@ export async function saveImage(dir, baseName, buf) {
 }
 
 /**
- * POST /api/image/generate { providerId, prompt } → 组请求 → 取图 → 落盘 → 预览。
- * 上游报错原文透传,但先经 redactKey 剥掉可能回显的密钥。
+ * 出图任务主体。异步跑,不占着 HTTP 连接 —— 安全链路(下载链接的 SSRF 复检、
+ * redirect:'manual' 拒 3xx、redactKey、限量读、体积闸)整体自路由搬进来一字未改,
+ * 只把原先的 `return res.status(x).json({error})` 换成「把同一句文案写进历史条目」。
  */
-router.post('/image/generate', async (req, res) => {
-  const started = Date.now();
-  // r26-J3:兜底 catch 也要剥 key —— provider 在 try 里才查到,先把 key 提到外层作用域,
-  // 否则 catch 里 redactKey(msg, null) 只能靠形态兜底,明文 key 原样回显。
-  let apiKeyForRedact = '';
+async function runImageJob({ jobId, provider, prompt, spec, startedAt }) {
+  // 任务已经和请求脱钩:写历史失败也没人能接这个 promise,就地吞掉。
+  const fail = (error) => updateHistoryEntry(jobId, {
+    status: 'error', error, tookMs: Date.now() - startedAt,
+  }).catch(() => {});
+  const started = startedAt;
   try {
-    const { providerId, prompt } = req.body || {};
-    const provider = (await readImageProviders()).find((p) => p.id === providerId);
-    if (!provider) return res.status(404).json({ error: '未找到该生图 provider' });
-    apiKeyForRedact = provider.apiKey || '';
-    const pathErr = await checkSavePath(provider.savePath);
-    if (pathErr) return res.status(400).json({ error: pathErr });
-
-    let spec;
-    try { spec = buildImageRequest(provider, prompt); }
-    catch (e) { return res.status(400).json({ error: e.message }); }
-    try { await assertPublicBaseURL(provider.baseURL); }
-    catch (e) { return res.status(e.status || 400).json({ error: e.message }); }
-
     const post = (headers) => fetch(spec.url, {
       method: 'POST',
       headers,
@@ -367,9 +428,9 @@ router.post('/image/generate', async (req, res) => {
     try { r = await post(spec.headers); }
     catch (e) {
       const timedOut = e?.name === 'TimeoutError' || e?.name === 'AbortError';
-      return res.status(timedOut ? 504 : 502).json({
-        error: timedOut ? '生成超时（120 秒），上游没有返回' : `连接上游失败：${redactKey(e.message, provider.apiKey)}`,
-      });
+      return fail(
+        timedOut ? '生成超时（120 秒），上游没有返回' : `连接上游失败：${redactKey(e.message, provider.apiKey)}`,
+      );
     }
     // gemini 认证头按端点形态选(官方 x-goog-api-key / 中转站 Bearer),选错就 401/403
     // → 用另一种原样重试一次,而不是一刀切押一种。
@@ -380,52 +441,46 @@ router.post('/image/generate', async (req, res) => {
     // 鉴权跳转/网关劫持,跟随必错且会脱离刚验过的 origin)。
     if (r.status >= 300 && r.status < 400) {
       await r.body?.cancel?.().catch(() => {});
-      return res.status(502).json({ error: `上游返回了重定向（HTTP ${r.status}），已拒绝跟随（防止密钥被带到未校验的地址）` });
+      return fail(`上游返回了重定向（HTTP ${r.status}），已拒绝跟随（防止密钥被带到未校验的地址）`);
     }
     // r26-J2:错误分支限量读 256KB(超限带截断标记);上游回一坨大错误体不能 OOM 后端。
     if (!r.ok) {
       const errRaw = await readCapped(r, MAX_ERROR_BYTES).catch(() => '');
       const truncated = errRaw === null;
       const safeErr = redactKey(truncated ? '' : errRaw, provider.apiKey).slice(0, MAX_UPSTREAM_ERR);
-      return res.status(502).json({
-        error: `上游返回 ${r.status}：${safeErr || '(空响应)'}${truncated ? '（错误内容过大，已截断）' : ''}`,
-      });
+      return fail(`上游返回 ${r.status}：${safeErr || '(空响应)'}${truncated ? '（错误内容过大，已截断）' : ''}`);
     }
     // r26-J2:成功分支 content-length 预检 + 限量读 —— 上限外一律按体积报错,
     // 而不是把整坨读进内存后再按「不是 JSON」报(读完 = 内存已经吃了)。
     const declared = Number(r.headers.get('content-length') || 0);
     if (Number.isFinite(declared) && declared > MAX_RESPONSE_BYTES) {
       await r.body?.cancel?.().catch(() => {});
-      return res.status(502).json({
-        error: `上游响应体积过大（声明 ${Math.round(declared / 1048576)}MB，上限 ${Math.round(MAX_RESPONSE_BYTES / 1048576)}MB）`,
-      });
+      return fail(`上游响应体积过大（声明 ${Math.round(declared / 1048576)}MB，上限 ${Math.round(MAX_RESPONSE_BYTES / 1048576)}MB）`);
     }
     const capped = await readCapped(r, MAX_RESPONSE_BYTES).catch(() => '');
     if (capped === null) {
-      return res.status(502).json({
-        error: `上游响应体积过大（超过 ${Math.round(MAX_RESPONSE_BYTES / 1048576)}MB 上限，已拒绝读取）`,
-      });
+      return fail(`上游响应体积过大（超过 ${Math.round(MAX_RESPONSE_BYTES / 1048576)}MB 上限，已拒绝读取）`);
     }
     const raw = capped;
     const safeRaw = redactKey(raw, provider.apiKey).slice(0, MAX_UPSTREAM_ERR);
 
     let data;
     try { data = JSON.parse(raw); }
-    catch { return res.status(502).json({ error: `上游响应不是 JSON：${safeRaw || '(空响应)'}` }); }
+    catch { return fail(`上游响应不是 JSON：${safeRaw || '(空响应)'}`); }
     const picked = extractImage(provider.protocol, data);
-    if (!picked) return res.status(502).json({ error: `上游响应里没有找到图片：${safeRaw.slice(0, 300)}` });
+    if (!picked) return fail(`上游响应里没有找到图片：${safeRaw.slice(0, 300)}`);
 
     let buf; let mime = picked.mime || '';
     if (picked.base64) {
       // 判官必修②:b64 分支同样要挡 —— base64 文本本身已进内存,再解一份 Buffer。
       if (picked.base64.length > MAX_IMAGE_BYTES * 1.4) {
-        return res.status(502).json({ error: `图片过大（上限 ${MAX_IMAGE_BYTES / 1048576}MB）` });
+        return fail(`图片过大（上限 ${MAX_IMAGE_BYTES / 1048576}MB）`);
       }
       buf = Buffer.from(picked.base64, 'base64');
       // r26-J13:字符串长度闸挡不住"编码前过小、解码后超限"(1.4 是粗估,非精确 4/3)——
       // 解码后的真实字节数再过一次上限闸(与二进制下载通道同值)。
       if (buf.length > MAX_IMAGE_BYTES) {
-        return res.status(413).json({ error: `图片过大（解码后 ${Math.round(buf.length / 1048576)}MB，上限 ${MAX_IMAGE_BYTES / 1048576}MB）` });
+        return fail(`图片过大（解码后 ${Math.round(buf.length / 1048576)}MB，上限 ${MAX_IMAGE_BYTES / 1048576}MB）`);
       }
     } else {
       // 判官必修①(SSRF):这个 URL 是【上游回什么就是什么】,攻击者可控性最高的一处 ——
@@ -447,7 +502,7 @@ router.post('/image/generate', async (req, res) => {
         sameOrigin = u.origin === b.origin || (lo(u.hostname) && lo(b.hostname) && u.port === b.port);
       } catch {}
       try { await assertPublicBaseURL(picked.url, { allowLoopback: sameOrigin }); }
-      catch (e) { return res.status(e.status || 502).json({ error: `拒绝下载该链接：${e.message}` }); }
+      catch (e) { return fail(`拒绝下载该链接：${e.message}`); }
       let img;
       try {
         img = await fetch(picked.url, {
@@ -455,30 +510,30 @@ router.post('/image/generate', async (req, res) => {
           // 判官必修①:默认跟随重定向 = 事后校验白做(302 到内网照样下)。手动挡下 3xx。
           redirect: 'manual',
         });
-      } catch (e) { return res.status(502).json({ error: `下载生成的图片失败：${redactKey(e.message, provider.apiKey)}` }); }
+      } catch (e) { return fail(`下载生成的图片失败：${redactKey(e.message, provider.apiKey)}`); }
       if (img.status >= 300 && img.status < 400) {
-        return res.status(502).json({ error: '上游图片链接发生跳转，已拒绝（防止绕过内网地址检查）' });
+        return fail('上游图片链接发生跳转，已拒绝（防止绕过内网地址检查）');
       }
-      if (!img.ok) return res.status(502).json({ error: `下载生成的图片失败：HTTP ${img.status}` });
+      if (!img.ok) return fail(`下载生成的图片失败：HTTP ${img.status}`);
       const ct = img.headers.get('content-type') || '';
       // 判官必修①:原先"Content-Type 不是图片但 URL 以 .png 结尾"也放行 —— 后缀是攻击者
       // 写的,不能当证据。这里只认 Content-Type。
       if (!/^image\//i.test(ct)) {
-        return res.status(502).json({ error: `上游返回的链接不是图片（Content-Type: ${ct || '未知'}）` });
+        return fail(`上游返回的链接不是图片（Content-Type: ${ct || '未知'}）`);
       }
       // 判官必修②:无上限地 arrayBuffer() 一个坏掉/恶意的上游 = 单进程后端 OOM
       // (实测 4×12MB 并发 → RSS 446MB,base64+JSON+Buffer 约 10x 放大)。
       const declared = Number(img.headers.get('content-length') || 0);
       if (Number.isFinite(declared) && declared > MAX_IMAGE_BYTES) {
-        return res.status(502).json({ error: `图片过大（${Math.round(declared / 1048576)}MB，上限 ${MAX_IMAGE_BYTES / 1048576}MB）` });
+        return fail(`图片过大（${Math.round(declared / 1048576)}MB，上限 ${MAX_IMAGE_BYTES / 1048576}MB）`);
       }
       mime = ct;
       buf = Buffer.from(await img.arrayBuffer());
       if (buf.length > MAX_IMAGE_BYTES) {
-        return res.status(502).json({ error: `图片过大（上限 ${MAX_IMAGE_BYTES / 1048576}MB）` });
+        return fail(`图片过大（上限 ${MAX_IMAGE_BYTES / 1048576}MB）`);
       }
     }
-    if (!buf.length) return res.status(502).json({ error: '上游返回了空图片' });
+    if (!buf.length) return fail('上游返回了空图片');
 
     let file;
     try { file = await saveImage(provider.savePath, buildImageFileName(prompt, imageExtFromMime(mime)), buf); }
@@ -487,19 +542,79 @@ router.post('/image/generate', async (req, res) => {
         : e?.code === 'EACCES' || e?.code === 'EPERM' ? '保存目录没有写入权限，请重新选择'
           : e?.code === 'ENOENT' ? '保存目录不存在，请重新选择'
             : `保存失败（${e?.code || 'unknown'}）`;
-      return res.status(400).json({ error: msg });
+      return fail(msg);
     }
-    res.json({
-      ok: true,
+    await updateHistoryEntry(jobId, {
+      status: 'done',
       file,
       previewUrl: `/api/image/preview?file=${encodeURIComponent(file)}`,
       bytes: buf.length,
       tookMs: Date.now() - started,
-    });
+    }).catch(() => {});
   } catch (err) {
     // 兜底也要剥 key:异常消息可能带上 URL/头部回显。r26-J3:传真实 apiKey(字面替换),
     // 不再只靠 Bearer/api_key 形态兜底。
+    await fail(redactKey(err.message, provider.apiKey || ''));
+  }
+}
+
+/**
+ * POST /api/image/generate { providerId, prompt } → 受理任务,秒回 { jobId }。
+ * 生成主体进 runImageJob 后台跑,状态与结果只经 GET /api/image/history 取。
+ * 前置校验(provider / savePath / 请求组装 / SSRF)仍同步做:这些错误是"填错了",
+ * 要即时可见,不该沉进后台历史里等用户去翻。
+ */
+router.post('/image/generate', async (req, res) => {
+  // r26-J3:兜底 catch 也要剥 key —— provider 在 try 里才查到,先把 key 提到外层作用域,
+  // 否则 catch 里 redactKey(msg, null) 只能靠形态兜底,明文 key 原样回显。
+  let apiKeyForRedact = '';
+  try {
+    const { providerId, prompt } = req.body || {};
+    const provider = (await readImageProviders()).find((p) => p.id === providerId);
+    if (!provider) return res.status(404).json({ error: '未找到该生图 provider' });
+    apiKeyForRedact = provider.apiKey || '';
+    const pathErr = await checkSavePath(provider.savePath);
+    if (pathErr) return res.status(400).json({ error: pathErr });
+
+    let spec;
+    try { spec = buildImageRequest(provider, prompt); }
+    catch (e) { return res.status(400).json({ error: e.message }); }
+    try { await assertPublicBaseURL(provider.baseURL); }
+    catch (e) { return res.status(e.status || 400).json({ error: e.message }); }
+
+    const jobId = randomUUID();
+    const startedAt = Date.now();
+    await addHistoryEntry({
+      id: jobId,
+      prompt: String(prompt || '').trim(),
+      providerId: provider.id,
+      providerName: provider.name || '',
+      model: provider.model || '',
+      size: provider.size || '',
+      status: 'running',
+      startedAt,
+    });
+    // 立即返回:前端不再挂长连接。WKWebView 对 fetch 有约 60s 资源超时,而服务端最长等
+    // 上游 120s —— 慢生成(4K 等)时前端先被掐断报 "Load failed",服务端其实已经出图。
+    res.json({ ok: true, jobId });
+    // fire-and-forget:任务与这次请求彻底脱钩,面板关掉/刷新都照跑。
+    runImageJob({ jobId, provider, prompt, spec, startedAt });
+  } catch (err) {
     res.status(500).json({ error: redactKey(err.message, apiKeyForRedact) });
+  }
+});
+
+/**
+ * GET /api/image/history?limit= — 出图历史(含 running 条目),新在前,上限 100 条。
+ * 前端靠它做"重开面板恢复状态"与轮询;条目本就不存 apiKey,响应无 key 可漏。
+ */
+router.get('/image/history', async (req, res) => {
+  const n = Number(req.query.limit);
+  const limit = Number.isFinite(n) && n > 0 ? Math.min(Math.floor(n), MAX_HISTORY) : MAX_HISTORY;
+  try {
+    res.json({ history: await readHistory(limit) });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 
