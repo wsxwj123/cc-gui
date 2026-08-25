@@ -83,7 +83,7 @@ function ProviderForm({ initial, onDone, onCancel }) {
       }
       // r52:拉取结果是候选,不是配置 —— 过滤掉嵌入/语音/视频/重排类噪音后开勾选弹窗,
       // 勾中的才 merge 进 form.models(保存时随 provider 落盘)。
-      const list = stripJunkModels(d.models || []);
+      const list = stripJunkModels(d.models || [], 'image');
       if (list.length) {
         setPickCandidates(list);
         setModelsMsg(`拉到 ${list.length} 个模型，请勾选要添加的模型；保存后候选列表持久生效。`);

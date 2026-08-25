@@ -469,7 +469,9 @@ export function ModelSelector({ compact = false, permKey = null, tourAnchor = fa
       // 确认的才写回该 provider 的 models(持久化,重开弹层仍在)。
       if (isCustomProvider) {
         const candidates = stripJunkModels(models);
-        if (candidates.length) { setPickCandidates(candidates); setFetchNote(''); }
+        // 先关掉下层弹层再开勾选弹窗:AnchoredPopover 的内联 zIndex:9999 会压盖勾选弹窗,
+        // 且它的 window 捕获 Esc 注册更早会抢跑(第一击关错层)。关掉它两个问题一起消失。
+        if (candidates.length) { setOpen(false); setPickCandidates(candidates); setFetchNote(''); }
         else setFetchNote(d.note || '未返回可用模型');
       } else {
         setFetchNote(d.note || (models.length ? `已拉取 ${models.length} 个` : '未返回模型'));

@@ -7954,6 +7954,9 @@ function ProviderManagerModal({ open, onClose, editId = null }) {
     if (!open) return;
     const onEsc = (e) => {
       if (e.key !== 'Escape') return;
+      // r52:模型勾选弹窗开着时这一击归它(同为 window 捕获,注册更早的本监听会抢跑 →
+      // 不让行就是跳过弹窗直接关掉整个管理弹窗,勾选与未保存表单一起丢)。同 data-cgui-confirm 手法。
+      if (document.querySelector('[data-cgui-modelpick]')) return;
       e.stopPropagation();
       tryClose();
     };
@@ -9986,6 +9989,10 @@ export default function App() {
     const onEsc = (e) => {
       if (e.isComposing || e.keyCode === 229) return; // IME 组字中的 Esc = 取消候选词
       if (e.key !== 'Escape' || e.repeat) return;
+      // r52:模型勾选弹窗开着时整块让行 —— 它 portal 在面板外,焦点在它的搜索框时下面的
+      // isEditableTarget 分支会把这一击截走(弹窗收不到 = Esc 哑),焦点在按钮上则直接关掉
+      // 整个面板(生图面板连同勾选与未保存表单一起没)。同 data-cgui-confirm 的让行手法。
+      if (document.querySelector('[data-cgui-modelpick]')) return;
       // R2:焦点在面板内的输入框/文本域/下拉/富文本里时,这一击是"取消本次编辑/退出输入",
       // 不是"关掉整个面板" —— 不守卫的话在设置里改到一半按 Esc,面板连同未保存的编辑一起没了。
       // 判据统一走 escAction.js 的 isEditableTarget。

@@ -3,11 +3,16 @@
 
 // 中转站的 /v1/models 噪音极大(嵌入/语音/视频/重排模型混在里面)。只过滤**拉取候选**,
 // 手输永不受限 —— 这些关键词也可能出现在正经生图/文本模型名里,拦手输会挡住合法用法。
+// 噪音的定义随场景变:flux / video 在对话场景是噪音,在**生图**场景恰恰是模型本体
+// (FLUX 全家、视频生成),按聊天清单过滤会把生图中转的列表滤成空,还谎报"服务返回了空列表"。
 export const JUNK_MODEL_RE = /embedding|tts|whisper|video|flux|rerank/i;
+export const IMAGE_JUNK_MODEL_RE = /embedding|tts|whisper|rerank/i;
 
-export function stripJunkModels(ids) {
+// scene: 'chat'(默认,既有调用方口径不变)| 'image'
+export function stripJunkModels(ids, scene = 'chat') {
   if (!Array.isArray(ids)) return [];
-  return ids.filter((id) => typeof id === 'string' && id.trim() && !JUNK_MODEL_RE.test(id));
+  const re = scene === 'image' ? IMAGE_JUNK_MODEL_RE : JUNK_MODEL_RE;
+  return ids.filter((id) => typeof id === 'string' && id.trim() && !re.test(id));
 }
 
 // 子串过滤,不区分大小写(不做 fuzzy:模型 id 是精确串,模糊匹配只会把噪音排前面)。

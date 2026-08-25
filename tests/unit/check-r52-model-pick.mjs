@@ -115,6 +115,28 @@ const { filterModels, selectAllTargets, mergeModelLines, stripJunkModels, JUNK_M
   assert.deepEqual(stripJunkModels(null), [], 't1.4: 非数组入参返回空数组');
 }
 
+// 1.5 场景口径:生图路径不许误杀 FLUX / 视频类(它们正是生图模型),聊天路径全表照旧
+{
+  assert.deepEqual(
+    stripJunkModels(['flux.1-dev', 'flux-pro-1.1', 'sora-video-001'], 'image'),
+    ['flux.1-dev', 'flux-pro-1.1', 'sora-video-001'],
+    't1.5【生图口径】:flux / video 是生图模型本体,必须保留',
+  );
+  assert.deepEqual(
+    stripJunkModels(['flux.1-dev', 'text-embedding-3-large', 'tts-1', 'whisper-1', 'bge-reranker-v2'], 'image'),
+    ['flux.1-dev'],
+    't1.5【生图口径】:embedding / tts / whisper / rerank 仍要过滤',
+  );
+  assert.deepEqual(
+    stripJunkModels(['flux.1-dev', 'gpt-5.2'], 'chat'), ['gpt-5.2'],
+    't1.5【聊天口径】:flux 仍被过滤(对话场景用不上)',
+  );
+  assert.deepEqual(
+    stripJunkModels(['flux.1-dev', 'gpt-5.2']), ['gpt-5.2'],
+    't1.5: 默认口径 = 聊天(既有调用方不传场景,行为不变)',
+  );
+}
+
 // ─────────────────── 2. 生图 provider 的 models 白名单字段(端到端) ───────────────────
 const express = (await import('express')).default;
 const imageRouter = (await import('../../server/routes/image.js')).default;
@@ -256,6 +278,39 @@ const read = (p) => readFileSync(join(REPO, p), 'utf8');
   );
   assert.ok(!/window\.(confirm|alert)\s*\(/.test(src), 't3.1【模态红线】不许用原生 confirm/alert');
   assert.match(src, /disabled=\{[^}]*checked\.size/, 't3.1: 0 选中时确认按钮 disabled');
+  // Esc 相位:仓内浮层惯例 = window 捕获 + 截断(document 冒泡排在相位链最末,会被
+  // 弹层/面板/管理弹窗的 window 捕获全员抢跑 → Esc 关错层、勾选连同未保存表单一起丢)。
+  assert.match(
+    src, /window\.addEventListener\('keydown',\s*\w+,\s*true\)/,
+    't3.1【相位】Esc 挂 window 捕获(对齐 ImageLightbox),不挂 document 冒泡',
+  );
+  assert.ok(
+    !/document\.addEventListener\('keydown'/.test(src),
+    't3.1【相位】不许再挂 document 键盘监听',
+  );
+  assert.match(src, /stopImmediatePropagation/, 't3.1【相位】截断同相位其余 Esc 处理');
+  // 宿主让行用的标记 + 压过 AnchoredPopover 的内联 zIndex:9999
+  assert.match(src, /data-cgui-modelpick/, 't3.1: 弹窗根挂 data-cgui-modelpick(供宿主查询式让行)');
+  const z = src.match(/z-\[(\d+)\]/);
+  assert.ok(z && Number(z[1]) > 9999, `t3.1: z 值须压过弹层的内联 zIndex:9999(当前 ${z?.[1]})`);
+}
+
+// 3.1b 三个宿主的 Esc 让行/避让(判官必修 1)
+{
+  const app = read('client/src/App.jsx');
+  const sel = read('client/src/components/SessionSelectors.jsx');
+  assert.equal(
+    (app.match(/\[data-cgui-modelpick\]/g) || []).length, 2,
+    't3.1b: App 侧两个宿主(Provider 管理弹窗 Esc、右侧面板 Esc 守卫)各查一次标记让行',
+  );
+  assert.match(
+    app, /if \(document\.querySelector\('\[data-cgui-modelpick\]'\)\) return;[\s\S]{0,200}tryClose\(\)/,
+    't3.1b: Provider 管理弹窗的 Esc 在 tryClose 前让行(否则跳过弹窗直接整窗关闭,勾选丢)',
+  );
+  assert.match(
+    sel, /setOpen\(false\);\s*setPickCandidates\(candidates\)|setPickCandidates\(candidates\);\s*setOpen\(false\)/,
+    't3.1b: 开勾选弹窗时先关掉下层 AnchoredPopover(消掉 z 压盖与 Esc 竞争)',
+  );
 }
 
 // 3.2 文本 provider 表单:fetchModels 走弹窗,不再直写全量到 modelsText
@@ -292,6 +347,10 @@ const read = (p) => readFileSync(join(REPO, p), 'utf8');
   assert.match(src, /\{\(form\.models \|\| \[\]\)\.map\(/, 't3.4: datalist 渲染 form.models');
   assert.ok(!/\{models\.map\(/.test(src), 't3.4: 不再渲染会话级拉取结果');
   assert.match(src, /ModelPickModal/, 't3.4: 「拉取模型」开勾选弹窗');
+  assert.match(
+    src, /stripJunkModels\([^)]*,\s*'image'\)/,
+    "t3.4【生图口径】过滤走 'image' 场景(否则 FLUX 全家被误杀,还谎报「服务返回了空的模型列表」)",
+  );
   assert.match(src, /mergeModelLines\(/, 't3.4: 勾选结果 merge 进 form.models');
   assert.match(src, /models: form\.models/, 't3.4: 保存时把白名单写进 provider');
 }

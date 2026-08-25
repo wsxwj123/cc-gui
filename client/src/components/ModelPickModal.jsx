@@ -20,16 +20,21 @@ export function ModelPickModal({ candidates = [], existing = [], onConfirm, onCl
   const existingSet = useMemo(() => new Set(existing || []), [existing]);
   const filtered = useMemo(() => filterModels(candidates, query), [candidates, query]);
 
-  // Esc:先清搜索,搜索已空则关闭。stopPropagation —— 本弹窗吃掉这次 Esc,不让它冒到
-  // 会话级监听(单击 Esc 即停整回合)。
+  // Esc:先清搜索,搜索已空则关闭。
+  // 相位必须是 window 捕获 + stopImmediatePropagation(与 ImageLightbox 同款):仓内浮层
+  // (弹层 AnchoredPopover / Provider 管理弹窗 / 右侧面板守卫)全挂 window|document 捕获,
+  // 挂 document 冒泡就排在相位链最末 —— 被全员抢跑:弹层关错层、面板连同未保存表单一起关、
+  // 焦点在本弹窗输入框时事件还会被面板守卫截走变哑键。宿主侧另有 data-cgui-modelpick 让行
+  // (同相位、注册更早的监听抢不过 stopImmediatePropagation,只能靠宿主主动查标记避让)。
   useEffect(() => {
     const onKey = (e) => {
       if (e.key !== 'Escape') return;
-      e.stopPropagation();
+      e.stopImmediatePropagation();
+      e.preventDefault();
       if (query) setQuery(''); else onClose?.();
     };
-    document.addEventListener('keydown', onKey);
-    return () => document.removeEventListener('keydown', onKey);
+    window.addEventListener('keydown', onKey, true);
+    return () => window.removeEventListener('keydown', onKey, true);
   }, [query, onClose]);
 
   const toggle = (id) => setChecked((prev) => {
@@ -45,7 +50,10 @@ export function ModelPickModal({ candidates = [], existing = [], onConfirm, onCl
   });
 
   return createPortal(
-    <div className="fixed inset-0 z-[300] flex items-center justify-center bg-black/40 backdrop-blur-soft animate-fade-in px-4"
+    // data-cgui-modelpick:宿主(Provider 管理弹窗 / 右侧面板 Esc 守卫)据此让行,与既有
+    // data-cgui-confirm 同手法。z 值压过 AnchoredPopover 的内联 zIndex:9999(否则被弹层盖住)。
+    <div data-cgui-modelpick="1"
+      className="fixed inset-0 z-[10050] flex items-center justify-center bg-black/40 backdrop-blur-soft animate-fade-in px-4"
       onClick={() => onClose?.()}>
       <div data-cgui-panel
         className="glass-popover w-[520px] max-w-[calc(var(--app-w,100vw)-1.5rem)] max-h-[min(80vh,calc(var(--app-h,100dvh)-2rem))] flex flex-col overflow-hidden rounded-panel shadow-popover animate-glass-rise"
