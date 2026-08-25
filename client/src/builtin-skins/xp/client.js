@@ -24,10 +24,27 @@
   // 悬浮窗口尺寸：按 App 官方口径（innerHeight/zoom 的 zoom 不变量 px）写
   // body 作用域的 --app-h/--app-w，扣掉桌面边距(上30+下26=56、左右10+10=20)。
   // 跟踪 resize 与 html style 上的 zoom 变化（字体档切换）；卸载器全清。
+
+  // 标题栏图标与应用头部 CC-GUI logo【机械对齐】:定值内边距在不同缩放/布局下必偏
+  // (用户机 zoom 1.2 实证)。运行时量 logo 与图标的实际位置做差值校正,幂等(差<1px 跳过);
+  // 只写 titlebar 自身 style,无观察器盯它,零回环。fitDesk(resize/字号缩放)时重校。
+  function alignTitlebar() {
+    if (!titlebar || !titlebar.isConnected || !icon) return;
+    var brand = document.querySelector('[data-cgui="topbar"] .cgui-brand') || document.querySelector('.cgui-brand');
+    if (!brand) return;
+    var z = parseFloat(html.style.zoom) || 1;
+    var target = brand.getBoundingClientRect().left / z;
+    var current = icon.getBoundingClientRect().left / z;
+    if (target <= 0 || Math.abs(target - current) < 1) return;
+    var pad = parseFloat(getComputedStyle(titlebar).paddingLeft) || 0;
+    var next = Math.round(pad + (target - current));
+    if (next >= 6) titlebar.style.paddingLeft = next + 'px';
+  }
   function fitDesk() {
     var z = parseFloat(html.style.zoom) || 1;
     body.style.setProperty('--app-h', (window.innerHeight / z - 56) + 'px');
     body.style.setProperty('--app-w', (window.innerWidth / z - 20) + 'px');
+    alignTitlebar();
   }
   fitDesk();
   window.addEventListener('resize', fitDesk);
@@ -149,8 +166,11 @@
 
   body.appendChild(titlebar);
   body.appendChild(statusbar);
+  alignTitlebar();
+  var alignRaf = requestAnimationFrame(alignTitlebar);
 
   window.__cguiSkinDispose = function () {
+    cancelAnimationFrame(alignRaf);
     rootObserver.disconnect();
     if (rootRaf) { cancelAnimationFrame(rootRaf); rootRaf = 0; }
     if (sidebarObserver) sidebarObserver.disconnect();
