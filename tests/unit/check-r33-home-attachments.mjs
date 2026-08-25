@@ -177,4 +177,17 @@ const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
   assert.ok(bubble.includes('data-testid="message-card"'));
 }
 
+// r60(用户实报):首页输入框粘贴/拖放文件必须与聊天框同逻辑成为附件,不许退化成路径文本。
+{
+  const { readFileSync } = await import('node:fs');
+  const src = readFileSync(new URL('../../client/src/App.jsx', import.meta.url), 'utf8');
+  const i = src.indexOf('data-cgui="home-input"');
+  const seg = src.slice(i, i + 1600);
+  if (!/onPaste=\{/.test(seg)) throw new Error('r60: 首页输入框缺 onPaste 附件处理');
+  if (!/kind === 'file'/.test(seg) || !/uploadHomeAttachment\(f\)/.test(seg)) throw new Error('r60: 粘贴文件须走 uploadHomeAttachment');
+  if (!/handledFile\) e\.preventDefault\(\)/.test(seg)) throw new Error('r60: 粘贴文件后须 preventDefault(防路径文本落入)');
+  if (!/onDrop=\{/.test(seg) || !/dataTransfer/.test(seg)) throw new Error('r60: 拖放文件同样入附件');
+  console.log('✓ r60: 首页输入框粘贴/拖放附件与聊天框对齐');
+}
+
 console.log('✓ check-r33-home-attachments: 共用上传/消息构造 + 多文件/仅附件 + 门禁/失败 + quota 原子入队 + pane 顺序全过');

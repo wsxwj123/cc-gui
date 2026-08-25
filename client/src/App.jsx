@@ -1993,6 +1993,25 @@ function HomeState({ tabIndex = 0 }) {
             onKeyDown={(e) => {
               if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); submit(); }
             }}
+            // 与聊天输入框逻辑一致(ChatInput handlePaste 同款):粘贴/拖放文件直接成附件,
+            // 不再退化成路径文本;普通文本粘贴不受影响。
+            onPaste={(e) => {
+              const items = e.clipboardData?.items;
+              if (!items) return;
+              let handledFile = false;
+              for (const item of items) {
+                if (item.kind === 'file') {
+                  const f = item.getAsFile();
+                  if (f) { uploadHomeAttachment(f); handledFile = true; }
+                }
+              }
+              if (handledFile) e.preventDefault();
+            }}
+            onDragOver={(e) => e.preventDefault()}
+            onDrop={(e) => {
+              e.preventDefault();
+              for (const f of Array.from(e.dataTransfer?.files || [])) uploadHomeAttachment(f);
+            }}
             rows={3}
             autoFocus
             placeholder={project ? '输入消息，开始一个新会话…' : '先选择一个项目'}
