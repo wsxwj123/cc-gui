@@ -57,12 +57,26 @@ export function geminiModelsRequest(baseURL, apiKey) {
   };
 }
 
+// r54 图生图:参考图形态 { name, mime, base64 }(路由层已完成读盘/解码/校验,本文件仍零 IO)。
+// dataURI 走小写 mime —— 方舟明确要求 `data:image/<小写格式>;base64,<编码>`。
+export const I2I_MODES = ['edits', 'generations-image'];
+function refDataUri(ref) {
+  return `data:${String(ref.mime || 'image/png').toLowerCase()};base64,${ref.base64}`;
+}
+function normRefs(refs) {
+  return Array.isArray(refs) ? refs.filter((r) => r && typeof r.base64 === 'string' && r.base64) : [];
+}
+
 /**
- * 组装一次生图请求。纯函数:输入 config+prompt,输出 { url, headers, body, altHeaders }。
+ * 组装一次生图请求。纯函数:输入 config+prompt(+参考图),输出
+ * { url, headers, body, form, altHeaders }。form 非空 = multipart 形态(此时 body 为 null,
+ * 且 headers 不带 Content-Type —— 交给 fetch 自己写 boundary)。
  * altHeaders 仅 gemini 非空(认证头回落),其余为 null。
- * config: { protocol, baseURL, apiKey, model, size, extra }
+ * config: { protocol, baseURL, apiKey, model, size, extra, i2iMode }
+ *
+ * 红线:refs 为空时,各协议构造出的请求与加本功能之前逐字一致(纯文生图零回归)。
  */
-export function buildImageRequest(config, prompt) {
+export function buildImageRequest(config, prompt, refs) {
   const cfg = config || {};
   const protocol = cfg.protocol;
   const base = String(cfg.baseURL || '').trim().replace(/\/+$/, '');
@@ -75,16 +89,46 @@ export function buildImageRequest(config, prompt) {
   if (!model) throw new Error('模型未配置');
   if (!text) throw new Error('提示词不能为空');
   const json = { 'Content-Type': 'application/json' };
+  const list = normRefs(refs);
 
   if (protocol === 'openai') {
+    // 图生图两种形态(provider 的 i2iMode 决定,表单只在本协议显示):
+    //  - edits(默认):OpenAI 官方 POST {base}/images/edits,multipart。选 multipart 而非
+    //    JSON 形态是因为 JSON 的 size 枚举受限(仅 auto/1024 系),multipart 与 generations
+    //    同款支持任意 WxH。
+    //  - generations-image:方舟/Seedream 没有 edits 端点,图生图 = generations 加 image 字段。
+    if (list.length && cfg.i2iMode !== 'generations-image') {
+      const form = new FormData();
+      form.append('model', model);
+      form.append('prompt', text);
+      if (cfg.size) form.append('size', String(cfg.size));
+      for (const r of list) {
+        // image[] 重复字段 = 官方多参考图形态(gpt-image 系最多 16 张)。
+        form.append('image[]', new Blob([Buffer.from(r.base64, 'base64')], { type: r.mime || 'image/png' }), r.name || 'image.png');
+      }
+      // extra 是用户自填的透传参数;multipart 里只能是字符串,对象/数组按 JSON 文本发。
+      for (const [k, v] of Object.entries(extra)) {
+        form.append(k, v !== null && typeof v === 'object' ? JSON.stringify(v) : String(v));
+      }
+      return {
+        url: `${base}/images/edits`,
+        headers: { Authorization: `Bearer ${key}` }, // ← 不带 Content-Type:boundary 由 fetch 写
+        body: null,
+        form,
+        altHeaders: null,
+      };
+    }
     // POST {base}/images/generations。size 只有本协议有原生字段;gpt-image 系恒返 b64
     // 且【不支持 response_format 参数】(传了会 400),所以这里不主动带它,由取图侧兼容两种。
     const body = { model, prompt: text, n: 1 };
     if (cfg.size) body.size = String(cfg.size);
+    // 方舟形态:image 收 string[](URL 或 dataURI),4.x 最多 14 张。
+    if (list.length) body.image = list.map(refDataUri);
     return {
       url: `${base}/images/generations`,
       headers: { ...json, Authorization: `Bearer ${key}` },
       body: { ...body, ...extra },
+      form: null,
       altHeaders: null,
     };
   }
@@ -95,8 +139,10 @@ export function buildImageRequest(config, prompt) {
     // (路径注入:model 里的 '/' 会改变请求的实际路径段)。
     const bare = model.replace(/^models\//, '');
     const { generationConfig: extraGen, ...restExtra } = extra;
+    // 官方示例顺序:文本 part 在前、inline_data 图 part 在后。
+    const parts = [{ text }, ...list.map((r) => ({ inline_data: { mime_type: r.mime || 'image/png', data: r.base64 } }))];
     const body = {
-      contents: [{ parts: [{ text }] }],
+      contents: [{ parts }],
       generationConfig: { responseModalities: ['IMAGE'], ...(extraGen && typeof extraGen === 'object' ? extraGen : {}) },
       ...restExtra,
     };
@@ -108,15 +154,21 @@ export function buildImageRequest(config, prompt) {
       url: `${base}/models/${encodeURIComponent(bare)}:generateContent`,
       headers: official ? goog : bearer,
       body,
+      form: null,
       altHeaders: official ? bearer : goog,
     };
   }
 
   // chat:中转站最常见的"用对话接口出图"。图在回复正文里(markdown / 裸链 / data URL)。
+  // 带参考图时 content 换成多模态分片(image_url 是官方语义上的输入),无参考图仍是纯字符串。
+  const content = list.length
+    ? [{ type: 'text', text }, ...list.map((r) => ({ type: 'image_url', image_url: { url: refDataUri(r) } }))]
+    : text;
   return {
     url: `${base}/chat/completions`,
     headers: { ...json, Authorization: `Bearer ${key}` },
-    body: { model, messages: [{ role: 'user', content: text }], ...extra },
+    body: { model, messages: [{ role: 'user', content }], ...extra },
+    form: null,
     altHeaders: null,
   };
 }

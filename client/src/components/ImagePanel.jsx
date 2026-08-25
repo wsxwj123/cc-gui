@@ -20,8 +20,14 @@ const PROTOCOLS = [
   { id: 'chat', label: '对话接口出图（/chat/completions）' },
 ];
 
+// r54:图生图形态,仅 openai 协议有意义(其余协议的参考图形态是唯一的,没得选)。
+const I2I_MODES = [
+  { id: 'edits', label: 'OpenAI 官方（/images/edits）' },
+  { id: 'generations-image', label: 'Seedream · 方舟（generations 带 image 字段）' },
+];
+
 // r52:models = 用户勾选的模型白名单(落盘在 provider 上),「模型」输入框的候选列表读它。
-const EMPTY_FORM = { id: '', name: '', protocol: 'openai', baseURL: '', apiKey: '', model: '', models: [], size: '', savePath: '', extra: '' };
+const EMPTY_FORM = { id: '', name: '', protocol: 'openai', baseURL: '', apiKey: '', model: '', models: [], size: '', savePath: '', extra: '', i2iMode: 'edits' };
 
 // 尺寸候选:三类形态并存(显式宽x高 / K 档 / 纯比例 token),各服务认哪些值以其文档为准。
 // datalist 按已输入前缀过滤,候选多不妨碍手输。
@@ -35,7 +41,12 @@ const SIZE_OPTIONS = [
 const PROMPT_DRAFT_KEY = 'cgui-image-prompt-draft';
 const TASK_VIEW_KEY = 'cgui-image-tasklist-view'; // grid | list,重开面板保留
 const POLL_MS = 1500; // 有任务在跑时的历史轮询间隔
-const STATUS_LABEL = { running: '生成中', done: '已完成', error: '失败', interrupted: '已中断' };
+const STATUS_LABEL = { running: '生成中', done: '已完成', error: '失败', interrupted: '已中断', cancelled: '已取消' };
+// r54 参考图:张数与单张体积上限,与服务端 MAX_REFS / MAX_REF_BYTES 同值(前端先拦,
+// 省一次大 body 往返;真正的闸在服务端)。
+const MAX_REFS = 6;
+const MAX_REF_BYTES = 15 * 1024 * 1024;
+const REF_ACCEPT = 'image/png,image/jpeg,image/webp';
 function readPromptDraft() {
   try { return localStorage.getItem(PROMPT_DRAFT_KEY) || ''; } catch { return ''; }
 }
@@ -119,6 +130,7 @@ function ProviderForm({ initial, onDone, onCancel }) {
       const body = {
         name: form.name, protocol: form.protocol, baseURL: form.baseURL, model: form.model,
         models: form.models || [], size: form.size, savePath: form.savePath, extra,
+        i2iMode: form.i2iMode || 'edits',
       };
       // apiKey 留空 = 保留服务端已存的 key(前端从不持有 key,不能被空字段抹掉)。
       if (form.apiKey.trim()) body.apiKey = form.apiKey.trim();
@@ -190,6 +202,18 @@ function ProviderForm({ initial, onDone, onCancel }) {
             : '该协议无原生尺寸字段，此值不发送；需在附加参数（extra）中按服务文档设置。'}
         </span>
       </label>
+      {/* r54:图生图形态。两种协议形态官方不兼容 —— OpenAI 有 /images/edits 端点,
+          方舟(Seedream)没有,图生图靠 generations 的 image 字段。选错则上游 404/400。 */}
+      {form.protocol === 'openai' && (
+        <label className="space-y-1 block"><span className={labelCls}>图生图形态（带参考图时使用）</span>
+          <select className={inputCls} value={form.i2iMode || 'edits'} onChange={set('i2iMode')}>
+            {I2I_MODES.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}
+          </select>
+          <span className="text-[10px] text-ink-faint font-body leading-snug block">
+            OpenAI 官方形态发往 /images/edits，参考图以 multipart 上传；方舟形态仍发往 /images/generations，参考图以 image 字段随请求体发送。不带参考图时两者请求一致。
+          </span>
+        </label>
+      )}
       <div className="space-y-1">
         <span className={labelCls}>保存路径（必填，出图后自动落盘到此目录）</span>
         <div className="flex gap-1.5">
@@ -243,7 +267,14 @@ export default function ImagePanel() {
   const [tab, setTab] = useState('gen'); // gen | jobs —— 局部态,切 tab 不重挂面板,轮询照跑
   const [taskView, setTaskView] = useState(readTaskView); // grid | list
   const [form, setForm] = useState(null); // null = 不在表单态
+  // r54 参考图(图生图)。刻意【不进 localStorage 草稿】:一张图就能把 5MB 配额撑爆,
+  // 重开面板参考图清空可接受(提示词照旧保留)。
+  const [refs, setRefs] = useState([]);
+  // r54 删除:selectMode = 批量选择开关,selectedIds = 勾中的 jobId 集合。
+  const [selectMode, setSelectMode] = useState(false);
+  const [selectedIds, setSelectedIds] = useState(() => new Set());
   const promptRef = useRef(null);
+  const refFileRef = useRef(null);
 
   const load = useCallback(async (preferId) => {
     try {
@@ -310,15 +341,67 @@ export default function ImagePanel() {
   // 任务列表:running 排最上,其余保持时间倒序(sort 稳定,组内次序不变)。
   const ordered = [...history].sort((a, b) => (a.status === 'running' ? 0 : 1) - (b.status === 'running' ? 0 : 1));
 
+  // 参考图选择:单张与张数都先在前端拦一道(超限直接报错不发),真正的闸在服务端。
+  const addRefFiles = async (files) => {
+    setErr('');
+    const picked = Array.from(files || []);
+    if (!picked.length) return;
+    if (refs.length + picked.length > MAX_REFS) {
+      setErr(`参考图最多 ${MAX_REFS} 张，当前已有 ${refs.length} 张`);
+      return;
+    }
+    const next = [];
+    for (const f of picked) {
+      if (f.size > MAX_REF_BYTES) {
+        setErr(`「${f.name}」超过单张上限 ${MAX_REF_BYTES / 1048576}MB，请换用更小的图片`);
+        return;
+      }
+      const dataUrl = await new Promise((resolve, reject) => {
+        const fr = new FileReader();
+        fr.onload = () => resolve(String(fr.result || ''));
+        fr.onerror = () => reject(new Error(`读取「${f.name}」失败`));
+        fr.readAsDataURL(f);
+      }).catch((e) => { setErr(e.message); return ''; });
+      if (!dataUrl) return;
+      next.push({
+        kind: 'upload',
+        name: f.name,
+        mime: f.type || 'image/png',
+        dataB64: dataUrl.slice(dataUrl.indexOf(',') + 1),
+        preview: dataUrl,
+      });
+    }
+    setRefs((cur) => [...cur, ...next].slice(0, MAX_REFS));
+  };
+
+  // 「以此图修改」:引用已生成的图 —— 只传 file 路径,不把图片内容回传一遍。
+  const addHistoryRef = (h) => {
+    setErr('');
+    setTab('gen');
+    setRefs((cur) => {
+      if (cur.some((r) => r.kind === 'history' && r.file === h.file)) return cur;
+      if (cur.length >= MAX_REFS) { setErr(`参考图最多 ${MAX_REFS} 张`); return cur; }
+      return [...cur, { kind: 'history', file: h.file, name: h.file.split(/[/\\]/).pop(), preview: h.previewUrl }];
+    });
+  };
+
   const generate = async () => {
     if (!canGenerate) return;
     setSubmitting(true); setErr('');
     try {
+      const payload = { providerId: selId, prompt };
+      if (refs.length) {
+        payload.refs = refs.map((r) => (r.kind === 'history'
+          ? { kind: 'history', file: r.file }
+          : { kind: 'upload', name: r.name, mime: r.mime, dataB64: r.dataB64 }));
+      }
       const r = await fetch('/api/image/generate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ providerId: selId, prompt }),
+        body: JSON.stringify(payload),
       });
+      // 413 来自请求体解析层(参考图总体积超过 25MB),响应不是 JSON,得单独给人话。
+      if (r.status === 413) throw new Error('参考图总体积过大，请减少参考图数量或换用更小的图片');
       const d = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(d.error || `生成失败（${r.status}）`);
       if (!d.jobId) throw new Error('服务端未返回任务标识');
@@ -354,9 +437,73 @@ export default function ImagePanel() {
     }
   };
 
+  // 取消生成中的任务:只作用于点名的那一个 jobId。不弹确认 —— 取消可重发,不是破坏性操作。
+  const cancelJob = async (id) => {
+    setErr('');
+    try {
+      const r = await fetch(`/api/image/jobs/${encodeURIComponent(id)}/cancel`, { method: 'POST' });
+      const d = await r.json().catch(() => ({}));
+      if (!d.ok && d.error) setErr(d.error);
+    } catch {
+      setErr('取消失败：请求未能到达后端');
+    }
+    loadHistory();
+  };
+
+  // 删除记录(单删与批量同一条路径)。确认框带「同时删除本地图片文件」勾选框,默认不勾 ——
+  // 删记录与删磁盘上的图是两件事,后者不可撤销,必须用户显式勾选。
+  const deleteEntries = async (ids) => {
+    if (!ids.length) return;
+    const runningCount = history.filter((h) => ids.includes(h.id) && h.status === 'running').length;
+    const answer = await confirmDialog(
+      `删除 ${ids.length} 条生成记录？${runningCount ? `\n其中 ${runningCount} 条仍在生成中，将先取消再删除。` : ''}`,
+      { danger: true, confirmText: '删除', checkbox: { label: '同时删除本地图片文件（不可恢复）' } },
+    );
+    if (!answer?.confirmed) return;
+    setErr('');
+    try {
+      const r = await fetch('/api/image/history/delete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ids, deleteFile: !!answer.checked }),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok || !d.ok) throw new Error(d.error || `删除失败（${r.status}）`);
+      if (d.skipped?.length) setErr(`${d.skipped.length} 个图片文件未删除：文件路径不在生图 provider 的保存目录之内。`);
+    } catch (e) {
+      setErr(e.message);
+    }
+    setSelectedIds(new Set());
+    setSelectMode(false);
+    // 当前预览若指向被删条目,loadHistory 会自动回退到最近一条已完成的(或清空)。
+    await loadHistory();
+  };
+
+  const toggleSelected = (id) => setSelectedIds((cur) => {
+    const next = new Set(cur);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    return next;
+  });
+
   // 两种视图共用的条目操作,避免两处各写一份走样。
   const taskActions = (h) => (
     <>
+      {h.status === 'running' && (
+        <button
+          type="button"
+          onClick={() => cancelJob(h.id)}
+          title="停止该生成任务"
+          className="px-1.5 py-0.5 rounded border border-canvas-deep text-[10px] text-ink-soft font-body hover:bg-canvas-deep/60 flex items-center gap-1"
+        ><X size={10} />取消</button>
+      )}
+      {h.status === 'done' && h.file && (
+        <button
+          type="button"
+          onClick={() => addHistoryRef(h)}
+          title="把这张图作为参考图，在它的基础上继续修改"
+          className="px-1.5 py-0.5 rounded border border-canvas-deep text-[10px] text-ink-soft font-body hover:bg-canvas-deep/60 flex items-center gap-1"
+        ><Image size={10} />以此图修改</button>
+      )}
       {h.status === 'done' && h.file && (
         <button
           type="button"
@@ -371,6 +518,12 @@ export default function ImagePanel() {
         title="把该条提示词填回输入框并切到生图页"
         className="px-1.5 py-0.5 rounded border border-canvas-deep text-[10px] text-ink-soft font-body hover:bg-canvas-deep/60 flex items-center gap-1"
       ><RotateCcw size={10} />恢复</button>
+      <button
+        type="button"
+        onClick={() => deleteEntries([h.id])}
+        title="删除这条记录"
+        className="px-1.5 py-0.5 rounded border border-canvas-deep text-[10px] text-error font-body hover:bg-canvas-deep/60 flex items-center gap-1"
+      ><Trash2 size={10} />删除</button>
     </>
   );
 
@@ -407,6 +560,42 @@ export default function ImagePanel() {
             className="shrink-0 p-1.5 rounded-md border border-canvas-deep text-ink-soft hover:bg-canvas-deep/60"
           ><Plus size={13} /></button>
         </div>
+        {/* r54 参考图条:有参考图时按图生图形态发请求,提示词描述的是「要改成什么样」。 */}
+        <div className="space-y-1">
+          <div className="flex items-center gap-2">
+            <span className={labelCls}>参考图（可选，最多 {MAX_REFS} 张，单张 {MAX_REF_BYTES / 1048576}MB 以内）</span>
+            <button
+              type="button"
+              onClick={() => refFileRef.current?.click()}
+              disabled={refs.length >= MAX_REFS}
+              className="px-1.5 py-0.5 rounded border border-canvas-deep text-[10px] text-ink-soft font-body hover:bg-canvas-deep/60 disabled:opacity-50 flex items-center gap-1"
+            ><Plus size={10} />添加参考图</button>
+            <input
+              ref={refFileRef}
+              type="file"
+              accept={REF_ACCEPT}
+              multiple
+              className="hidden"
+              onChange={(e) => { addRefFiles(e.target.files); e.target.value = ''; }}
+            />
+          </div>
+          {refs.length > 0 && (
+            <div className="flex flex-wrap items-center gap-1.5">
+              {refs.map((r, i) => (
+                <span key={`${r.kind}-${r.file || r.name}-${i}`} className="flex items-center gap-1 pl-1 pr-1.5 py-0.5 rounded-md border border-canvas-deep bg-canvas-warm/60">
+                  <img src={r.preview} alt={r.name} className="w-6 h-6 rounded object-cover" />
+                  <span className="text-[10px] text-ink-soft font-body max-w-[110px] truncate" title={r.name}>{r.name}</span>
+                  <button
+                    type="button"
+                    onClick={() => setRefs((cur) => cur.filter((_, j) => j !== i))}
+                    title="移除该参考图"
+                    className="p-0.5 rounded hover:bg-canvas-deep/60 text-ink-faint"
+                  ><X size={10} /></button>
+                </span>
+              ))}
+            </div>
+          )}
+        </div>
         <textarea
           ref={promptRef}
           className={`${inputCls} resize-none overflow-y-auto`}
@@ -425,6 +614,9 @@ export default function ImagePanel() {
             {submitting ? <Loader2 size={12} className="animate-spin" /> : <Sparkles size={12} />}
             生成
           </button>
+          {refs.length > 0 && (
+            <span className="text-[11px] text-ink-faint font-body">图生图（{refs.length} 张参考）</span>
+          )}
           {hasRunning && (
             <span className="text-[11px] text-ink-faint font-body">
               {running.length} 个任务在后台运行，可继续发起新任务（同时最多 3 个）；关闭面板不影响，进度在「任务列表」页。
@@ -464,8 +656,30 @@ export default function ImagePanel() {
 
       {/* 任务列表页:持久化历史(≤100 条)。running 排最上,error/interrupted 的报错写在图块里。 */}
       <div className={`space-y-2 ${tab === 'jobs' ? '' : 'hidden'}`}>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 flex-wrap">
           <div className={`${labelCls} flex-1`}>共 {history.length} 条，最多保留 100 条</div>
+          {/* r54 批量删除:「选择」开关 → 每条出现勾选框 + 全选 + 删除所选(选中 0 条时禁用)。 */}
+          <button
+            type="button"
+            onClick={() => { setSelectMode((v) => !v); setSelectedIds(new Set()); }}
+            disabled={!history.length}
+            className={`px-2 py-0.5 rounded-md border text-[10.5px] font-body disabled:opacity-50 ${selectMode ? 'border-accent text-ink' : 'border-canvas-deep text-ink-soft hover:bg-canvas-deep/60'}`}
+          >{selectMode ? '退出选择' : '选择'}</button>
+          {selectMode && (
+            <>
+              <button
+                type="button"
+                onClick={() => setSelectedIds((cur) => (cur.size === history.length ? new Set() : new Set(history.map((h) => h.id))))}
+                className="px-2 py-0.5 rounded-md border border-canvas-deep text-[10.5px] text-ink-soft font-body hover:bg-canvas-deep/60"
+              >{selectedIds.size === history.length && history.length ? '取消全选' : '全选'}</button>
+              <button
+                type="button"
+                onClick={() => deleteEntries([...selectedIds])}
+                disabled={!selectedIds.size}
+                className="px-2 py-0.5 rounded-md border border-canvas-deep text-[10.5px] text-error font-body hover:bg-canvas-deep/60 disabled:opacity-50 flex items-center gap-1"
+              ><Trash2 size={10} />删除所选（{selectedIds.size}）</button>
+            </>
+          )}
           <div className="flex items-center gap-0.5 p-0.5 rounded-md bg-canvas-warm text-[10.5px] font-body">
             {[['grid', '网格'], ['list', '列表']].map(([id, label]) => (
               <button
@@ -502,13 +716,36 @@ export default function ImagePanel() {
                 </div>
               )}
               <div className="px-1.5 py-1 space-y-1">
-                <div className="text-[10.5px] text-ink font-body truncate" title={h.prompt}>{h.prompt}</div>
-                <div className="text-[9.5px] text-ink-faint font-body truncate">{STATUS_LABEL[h.status] || h.status} · {shortTime(h.startedAt)}</div>
+                <div className="flex items-start gap-1">
+                  {selectMode && (
+                    <input
+                      type="checkbox"
+                      checked={selectedIds.has(h.id)}
+                      onChange={() => toggleSelected(h.id)}
+                      title="选中以批量删除"
+                      className="mt-0.5 shrink-0 accent-red-600"
+                    />
+                  )}
+                  <div className="text-[10.5px] text-ink font-body truncate flex-1" title={h.prompt}>{h.prompt}</div>
+                </div>
+                <div className="text-[9.5px] text-ink-faint font-body truncate">
+                  {h.refs?.length ? <span className="mr-1 px-1 rounded bg-canvas-deep/60 text-ink-soft">图生图</span> : null}
+                  {STATUS_LABEL[h.status] || h.status} · {shortTime(h.startedAt)}
+                </div>
                 <div className="flex items-center gap-1">{taskActions(h)}</div>
               </div>
             </div>
           ) : (
             <div key={h.id} className={`flex items-center gap-2 rounded-md border px-2 py-1.5 ${h.id === currentId ? 'border-accent' : 'border-canvas-deep'}`}>
+              {selectMode && (
+                <input
+                  type="checkbox"
+                  checked={selectedIds.has(h.id)}
+                  onChange={() => toggleSelected(h.id)}
+                  title="选中以批量删除"
+                  className="shrink-0 accent-red-600"
+                />
+              )}
               {h.status === 'done' && h.previewUrl ? (
                 <img
                   src={h.previewUrl}
@@ -526,6 +763,7 @@ export default function ImagePanel() {
               <div className="min-w-0 flex-1">
                 <div className="text-[11.5px] text-ink font-body truncate" title={h.prompt}>{h.prompt}</div>
                 <div className="text-[10px] text-ink-faint font-body truncate">
+                  {h.refs?.length ? <span className="mr-1 px-1 rounded bg-canvas-deep/60 text-ink-soft">图生图</span> : null}
                   {h.status === 'running' ? `生成中 · ${elapsedSec(h)}s` : (STATUS_LABEL[h.status] || h.status)}
                   {h.status !== 'done' && h.error ? ` · ${h.error}` : ''}
                   {h.startedAt ? ` · ${shortTime(h.startedAt)}` : ''}
@@ -539,8 +777,9 @@ export default function ImagePanel() {
 
       <ImageLightbox src={zoom?.src} name={zoom?.name} path={zoom?.path} onClose={() => setZoom(null)} />
 
-      {/* 管理态(属「生图」页) */}
-      {tab === 'gen' && (form
+      {/* 管理态(属「生图」页)。r54:用 hidden 类切换而非条件渲染 —— 条件渲染会在切到
+          任务列表时卸载表单,编辑到一半的未保存字段全丢(与上面双 tab 同法)。 */}
+      <div className={tab === 'gen' ? '' : 'hidden'}>{(form
         ? <ProviderForm key={form.id || 'new'} initial={form} onCancel={() => setForm(null)} onDone={(id) => { setForm(null); load(id); }} />
         : providers.length > 0 && (
           <div className="space-y-1">
@@ -561,7 +800,7 @@ export default function ImagePanel() {
                   onClick={() => setForm({
                     ...EMPTY_FORM, id: p.id, name: p.name, protocol: p.protocol, baseURL: p.baseURL,
                     model: p.model, models: p.models || [], size: p.size, savePath: p.savePath,
-                    extra: p.extra ? JSON.stringify(p.extra, null, 2) : '',
+                    extra: p.extra ? JSON.stringify(p.extra, null, 2) : '', i2iMode: p.i2iMode || 'edits',
                   })}
                   className="shrink-0 p-1 rounded hover:bg-canvas-deep/60 text-ink-soft"
                 ><Pencil size={12} /></button>
@@ -575,6 +814,7 @@ export default function ImagePanel() {
             ))}
           </div>
         ))}
+      </div>
     </div>
   );
 }

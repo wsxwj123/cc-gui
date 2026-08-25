@@ -47,8 +47,12 @@ const FORM_KEY = 'sk-r50-form-key-998877665544';
   assert.ok(m, 't2: 能定位 buildImageRequest 源码块');
   assert.equal(
     createHash('sha256').update(m[0]).digest('hex'),
-    '2461686b0a8404076e185e1155c3f217b5aa6fc791abd70ec19954f499f7b415',
-    't2: buildImageRequest 一字未改(生成链路红线);若确需改动,连同 check-image-gen 的断言一起复核后再更新此基线',
+    // r54 图生图按规格改了本函数(加 refs 形参与四协议分流),基线随之更新一次。
+    // 「纯文生图零回归」的真牙已搬到 check-r54-image-refs.mjs 的 t0:三种协议在【无 refs】
+    // 时的 {url, headers, body} 用 deepEqual 逐字钉死 —— 比源码哈希更强(哈希只挡改动,
+    // deepEqual 挡的是行为)。改这里前先看那三条锚。
+    'baf47d12a64dd185e067cf447b6e9e448b11d7371f1f869e1b91223d617bc952',
+    't2: buildImageRequest 一字未改(生成链路红线);若确需改动,连同 check-image-gen 与 check-r54-image-refs 的断言一起复核后再更新此基线',
   );
 }
 
