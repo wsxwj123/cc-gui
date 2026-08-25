@@ -49,7 +49,6 @@ body[data-cgui-xp] .cgui-xp-titlebar {
   box-shadow: inset 0 1px rgba(255,255,255,0.45);
 }
 /* 桌面端给 mac 红绿灯让位 */
-@media (min-width: 768px) { body[data-cgui-xp] .cgui-xp-titlebar { padding-left: 63px; } } /* r42:图标与下方 CC-GUI logo(x=75)对齐,实测校准(59 时差 4px) */
 :root[data-theme="dark"] body[data-cgui-xp] .cgui-xp-titlebar,
 :root[data-theme="auto"]:where([data-theme-system="dark"]) body[data-cgui-xp] .cgui-xp-titlebar {
   background: linear-gradient(#3a3f45 0%, #22262b 55%, #101216 100%);

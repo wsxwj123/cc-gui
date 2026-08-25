@@ -125,8 +125,6 @@
     var z = parseFloat(html.style.zoom) || 1;
     body.style.setProperty('--app-h', (window.innerHeight / z - 56) + 'px');
     body.style.setProperty('--app-w', (window.innerWidth / z - 20) + 'px');
-    watchTopbar(); // 判官建议2:3s settle 窗后 topbar 被换节点也能重新挂上观察器
-    alignTitlebar();
   }
   fitDesk();
   window.addEventListener('resize', fitDesk);
@@ -248,7 +246,7 @@
 
   body.appendChild(titlebar);
   body.appendChild(statusbar);
-  armAlign();
+  // r47:用户裁定标题栏【顶格靠左】(基础 padding 即位),对齐 logo 的整套校准机器退役不再武装。
 
   window.__cguiSkinDispose = function () {
     disposeAlign();
