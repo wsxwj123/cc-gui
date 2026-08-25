@@ -12,6 +12,8 @@ import { ImageLightbox } from './ImageLightbox.jsx';
 import { ModelPickModal, mergeModelLines, stripJunkModels } from './ModelPickModal.jsx';
 // r56 尺寸候选按模型家族过滤(能力表在 utils/imageSizeCaps.js,未知模型回落全量)。
 import { SIZE_OPTIONS, sizeCapFor, sizeOptionsFor } from '../utils/imageSizeCaps.js';
+// r58 上传参考图的 MIME:File.type 为空(Win 缺注册表映射)时按扩展名认,别一律说成 png。
+import { refMime } from '../utils/refMime.js';
 
 const inputCls = 'w-full bg-canvas-warm border border-canvas-deep rounded-md px-2.5 py-1.5 text-[12px] text-ink font-body focus:outline-none focus:border-accent/50';
 const labelCls = 'text-[10.5px] text-ink-faint font-body';
@@ -42,6 +44,9 @@ const STATUS_LABEL = { running: '生成中', done: '已完成', error: '失败',
 const MAX_REFS = 6;
 const MAX_REF_BYTES = 15 * 1024 * 1024;
 const REF_ACCEPT = 'image/png,image/jpeg,image/webp';
+// r58: upload 参考图的 preview 是 objectURL(见 addRefFiles),移除/卸载时必须 revoke,
+// 否则那张图的内存一直挂在文档上;history 参考图的 preview 是服务端 URL,撤它没有意义。
+const revokeRefPreview = (r) => { if (r?.kind === 'upload' && r.preview) URL.revokeObjectURL(r.preview); };
 function readPromptDraft() {
   try { return localStorage.getItem(PROMPT_DRAFT_KEY) || ''; } catch { return ''; }
 }
@@ -290,6 +295,11 @@ export default function ImagePanel() {
   const [selectedIds, setSelectedIds] = useState(() => new Set());
   const promptRef = useRef(null);
   const refFileRef = useRef(null);
+  // r58: 关面板时把还挂着的 objectURL 撤掉。用 ref 镜像 refs 是为了让卸载 effect 的依赖
+  // 数组保持空 —— 依赖 refs 的话每次增删都会跑一遍清理,把当前正在显示的预览撤没。
+  const refsRef = useRef([]);
+  useEffect(() => { refsRef.current = refs; }, [refs]);
+  useEffect(() => () => { refsRef.current.forEach(revokeRefPreview); }, []);
 
   const load = useCallback(async (preferId) => {
     try {
@@ -369,6 +379,7 @@ export default function ImagePanel() {
     for (const f of picked) {
       if (f.size > MAX_REF_BYTES) {
         setErr(`「${f.name}」超过单张上限 ${MAX_REF_BYTES / 1048576}MB，请换用更小的图片`);
+        next.forEach(revokeRefPreview); // 半路失败:这一批已建的 objectURL 谁也用不到了
         return;
       }
       const dataUrl = await new Promise((resolve, reject) => {
@@ -377,13 +388,16 @@ export default function ImagePanel() {
         fr.onerror = () => reject(new Error(`读取「${f.name}」失败`));
         fr.readAsDataURL(f);
       }).catch((e) => { setErr(e.message); return ''; });
-      if (!dataUrl) return;
+      if (!dataUrl) { next.forEach(revokeRefPreview); return; }
       next.push({
         kind: 'upload',
         name: f.name,
-        mime: f.type || 'image/png',
+        mime: refMime(f),
         dataB64: dataUrl.slice(dataUrl.indexOf(',') + 1),
-        preview: dataUrl,
+        // preview 用 objectURL 而不是整份 dataURL:后者与 dataB64 是同一份 base64 的两个
+        // 副本,6×15MB 时渲染进程凭空多背 ~240MB(Win 上 OOM 白屏,wry 还没接 ProcessFailed
+        // 不会自愈)。objectURL 只是个句柄,代价是生命周期得自己管 → revokeRefPreview。
+        preview: URL.createObjectURL(f),
       });
     }
     setRefs((cur) => [...cur, ...next].slice(0, MAX_REFS));
@@ -484,7 +498,12 @@ export default function ImagePanel() {
       });
       const d = await r.json().catch(() => ({}));
       if (!r.ok || !d.ok) throw new Error(d.error || `删除失败（${r.status}）`);
-      if (d.skipped?.length) setErr(`${d.skipped.length} 个图片文件未删除：文件路径不在生图 provider 的保存目录之内。`);
+      // 两种"没删掉"成因与解法完全不同,必须分开说:守卫拒 = 去改配置(保存路径),
+      // unlink 抛错 = 去关掉占着文件的程序(Windows 上看图程序/缩略图缓存常占着)。
+      const notes = [];
+      if (d.skipped?.length) notes.push(`${d.skipped.length} 个图片文件未删除：文件路径不在生图 provider 的保存目录之内。`);
+      if (d.failed?.length) notes.push(`${d.failed.length} 个图片文件删除失败：文件可能正被其他程序占用，请关闭后重试。`);
+      if (notes.length) setErr(notes.join(' '));
     } catch (e) {
       setErr(e.message);
     }
@@ -602,7 +621,7 @@ export default function ImagePanel() {
                   <span className="text-[10px] text-ink-soft font-body max-w-[110px] truncate" title={r.name}>{r.name}</span>
                   <button
                     type="button"
-                    onClick={() => setRefs((cur) => cur.filter((_, j) => j !== i))}
+                    onClick={() => { revokeRefPreview(r); setRefs((cur) => cur.filter((_, j) => j !== i)); }}
                     title="移除该参考图"
                     className="p-0.5 rounded hover:bg-canvas-deep/60 text-ink-faint"
                   ><X size={10} /></button>

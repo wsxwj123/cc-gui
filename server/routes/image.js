@@ -895,6 +895,11 @@ router.post('/image/jobs/:id/cancel', async (req, res) => {
  *    (resolvePreviewPath + realPathInsideSaveDirs)。守卫不过 = 跳过并记进 skipped:
  *    历史条目的 file 是一个可被改写的 JSON 字段,不能凭它对任意路径下删除动作。
  *    没有、也不许有任何目录级/递归删除。
+ *  - r58 归因分两路:skipped = 守卫拒(路径不在保存目录之内),failed = unlink 真抛错
+ *    (Windows 上文件被看图程序/缩略图缓存占着就是 EBUSY/EPERM)。两者成因与解法完全不同,
+ *    混成一个数组会让前端把"文件被占用"说成"路径不对",用户被指去改配置。
+ *    失败那条【记录留着不删】:记录与文件同生死 —— 记录先没了会变成文件还在磁盘上、
+ *    用户既看不见也删不掉,只能自己去文件夹翻。整条留着 = 关掉占用的程序再点一次就好。
  */
 router.post('/image/history/delete', async (req, res) => {
   const raw = Array.isArray(req.body?.ids) ? req.body.ids : null;
@@ -914,8 +919,9 @@ router.post('/image/history/delete', async (req, res) => {
     const result = await withHistory(async (list) => {
       const wanted = new Set(ids);
       const targets = list.filter((e) => e && wanted.has(e.id));
-      const next = list.filter((e) => !(e && wanted.has(e.id)));
       const skipped = [];
+      const failed = [];
+      const keep = new Set(); // unlink 抛错的条目:这一轮不删记录,等用户解除占用后重删
       let filesDeleted = 0;
       if (deleteFile) {
         for (const e of targets) {
@@ -923,10 +929,16 @@ router.post('/image/history/delete', async (req, res) => {
           const full = resolvePreviewPath(String(e.file), saveDirs);
           if (!full || !realPathInsideSaveDirs(full, saveDirs)) { skipped.push(e.file); continue; }
           try { await unlink(full); filesDeleted += 1; }
-          catch (err) { if (err?.code !== 'ENOENT') skipped.push(e.file); } // 文件早没了不算失败
+          catch (err) {
+            if (err?.code === 'ENOENT') continue; // 文件早没了:不是失败,记录照删
+            failed.push({ file: e.file, code: err?.code || '' });
+            keep.add(e.id);
+          }
         }
       }
-      return { list: next, result: { removed: targets.length, filesDeleted, skipped } };
+      // 先 unlink 后算 next:失败的条目要原样留在列表里(keep)。
+      const next = list.filter((e) => !(e && wanted.has(e.id) && !keep.has(e.id)));
+      return { list: next, result: { removed: targets.length - keep.size, filesDeleted, skipped, failed } };
     });
     res.json({ ok: true, ...result });
   } catch (err) {
