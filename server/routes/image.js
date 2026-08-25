@@ -171,8 +171,31 @@ function publicView(p) {
   return {
     id: p.id, name: p.name, protocol: p.protocol, baseURL: p.baseURL,
     model: p.model || '', size: p.size || '', savePath: p.savePath || '',
+    // r52:模型白名单(用户勾选的候选,供「模型」输入框的候选列表用)。存量条目无此字段 → 空数组。
+    models: Array.isArray(p.models) ? p.models : [],
     extra: p.extra || null, hasKey: !!p.apiKey,
   };
+}
+
+// r52:白名单上限 —— 单条 128 字符(模型 id 再长也够),总数 200(中转站目录动辄几百条,
+// 全量灌进来对用户无意义,且这份数组每次读配置都要解析)。
+const MAX_MODEL_ID_LEN = 128;
+const MAX_MODELS = 200;
+
+// 返回 { error } 或 { models }(未传 models 时返回 {} = 保持不变)。
+function validateModels(models) {
+  if (models === undefined || models === null) return {};
+  if (!Array.isArray(models)) return { error: '模型列表必须是数组' };
+  if (models.length > MAX_MODELS) return { error: `模型列表最多 ${MAX_MODELS} 条,请先取消部分勾选` };
+  const out = [];
+  for (const m of models) {
+    if (typeof m !== 'string') return { error: '模型列表只能包含字符串' };
+    const id = m.trim();
+    if (!id) continue;
+    if (id.length > MAX_MODEL_ID_LEN) return { error: `模型名过长(上限 ${MAX_MODEL_ID_LEN} 字符)` };
+    if (!out.includes(id)) out.push(id);
+  }
+  return { models: out };
 }
 
 // 保存目录:必须是绝对路径 + 存在 + 可写。人话错误,不抛栈。
@@ -207,6 +230,9 @@ async function validateBody(body) {
   if (pathErr) return { error: pathErr };
   const extra = sanitizeExtra(body?.extra);
   if (extra === undefined) return { error: '附加参数必须是 JSON 对象' };
+  // r52:模型白名单可选。不传 = 不改动已存值(与 apiKey 同语义:客户端没发就别动)。
+  const mv = validateModels(body?.models);
+  if (mv.error) return { error: mv.error };
   return {
     value: {
       name: name.trim(),
@@ -216,6 +242,7 @@ async function validateBody(body) {
       size: typeof size === 'string' ? size.trim() : '',
       savePath: savePath.trim(),
       extra,
+      ...(mv.models ? { models: mv.models } : {}),
     },
   };
 }

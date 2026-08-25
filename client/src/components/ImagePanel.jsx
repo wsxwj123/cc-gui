@@ -9,6 +9,7 @@ import { Image, Plus, Trash2, Pencil, FolderOpen, Loader2, Sparkles, ExternalLin
 import { confirmDialog } from '../utils/confirmDialog.jsx';
 import { pickDirectory, isTauri } from '../utils/pickDirectory.js';
 import { ImageLightbox } from './ImageLightbox.jsx';
+import { ModelPickModal, mergeModelLines, stripJunkModels } from './ModelPickModal.jsx';
 
 const inputCls = 'w-full bg-canvas-warm border border-canvas-deep rounded-md px-2.5 py-1.5 text-[12px] text-ink font-body focus:outline-none focus:border-accent/50';
 const labelCls = 'text-[10.5px] text-ink-faint font-body';
@@ -19,7 +20,8 @@ const PROTOCOLS = [
   { id: 'chat', label: '对话接口出图（/chat/completions）' },
 ];
 
-const EMPTY_FORM = { id: '', name: '', protocol: 'openai', baseURL: '', apiKey: '', model: '', size: '', savePath: '', extra: '' };
+// r52:models = 用户勾选的模型白名单(落盘在 provider 上),「模型」输入框的候选列表读它。
+const EMPTY_FORM = { id: '', name: '', protocol: 'openai', baseURL: '', apiKey: '', model: '', models: [], size: '', savePath: '', extra: '' };
 
 // 尺寸候选:三类形态并存(显式宽x高 / K 档 / 纯比例 token),各服务认哪些值以其文档为准。
 // datalist 按已输入前缀过滤,候选多不妨碍手输。
@@ -55,7 +57,7 @@ function ProviderForm({ initial, onDone, onCancel }) {
   const [form, setForm] = useState(initial);
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState('');
-  const [models, setModels] = useState([]);
+  const [pickCandidates, setPickCandidates] = useState(null); // r52:非空 = 勾选弹窗打开
   const [fetchingModels, setFetchingModels] = useState(false);
   const [modelsMsg, setModelsMsg] = useState('');
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
@@ -76,17 +78,19 @@ function ProviderForm({ initial, onDone, onCancel }) {
       });
       const d = await r.json().catch(() => ({}));
       if (!r.ok || !d.ok) {
-        setModels([]);
         setModelsMsg(`${FETCH_HINTS[d.type] || `拉取失败（HTTP ${r.status}）。`}${d.message ? `\n${d.message}` : ''}`);
         return;
       }
-      const list = d.models || [];
-      setModels(list);
-      setModelsMsg(list.length
-        ? `拉到 ${list.length} 个模型，点击模型框从候选列表中选择，也可继续手动输入。`
-        : '该服务返回了空的模型列表，请在「模型」框手动填写模型名。');
+      // r52:拉取结果是候选,不是配置 —— 过滤掉嵌入/语音/视频/重排类噪音后开勾选弹窗,
+      // 勾中的才 merge 进 form.models(保存时随 provider 落盘)。
+      const list = stripJunkModels(d.models || [], 'image');
+      if (list.length) {
+        setPickCandidates(list);
+        setModelsMsg(`拉到 ${list.length} 个模型，请勾选要添加的模型；保存后候选列表持久生效。`);
+      } else {
+        setModelsMsg('该服务返回了空的模型列表，请在「模型」框手动填写模型名。');
+      }
     } catch (e) {
-      setModels([]);
       setModelsMsg(`拉取失败：${e.message}`);
     } finally {
       setFetchingModels(false);
@@ -114,7 +118,7 @@ function ProviderForm({ initial, onDone, onCancel }) {
     try {
       const body = {
         name: form.name, protocol: form.protocol, baseURL: form.baseURL, model: form.model,
-        size: form.size, savePath: form.savePath, extra,
+        models: form.models || [], size: form.size, savePath: form.savePath, extra,
       };
       // apiKey 留空 = 保留服务端已存的 key(前端从不持有 key,不能被空字段抹掉)。
       if (form.apiKey.trim()) body.apiKey = form.apiKey.trim();
@@ -160,7 +164,7 @@ function ProviderForm({ initial, onDone, onCancel }) {
           <div className="flex gap-1.5">
             <input className={inputCls} list="cgui-image-model-options" value={form.model} onChange={set('model')} placeholder="gpt-image-2" />
             <datalist id="cgui-image-model-options">
-              {models.map((m) => <option key={m} value={m} />)}
+              {(form.models || []).map((m) => <option key={m} value={m} />)}
             </datalist>
             <button
               type="button"
@@ -210,6 +214,19 @@ function ProviderForm({ initial, onDone, onCancel }) {
         </button>
         <button type="button" onClick={onCancel} className="px-3 py-1.5 rounded-md border border-canvas-deep text-[12px] text-ink-soft font-body">取消</button>
       </div>
+      {/* r52:拉取结果的勾选弹窗。确认后并进白名单(原有项一律保留),随「保存」落盘。 */}
+      {pickCandidates && (
+        <ModelPickModal
+          candidates={pickCandidates}
+          existing={form.models || []}
+          onClose={() => setPickCandidates(null)}
+          onConfirm={(ids) => {
+            setForm((f) => ({ ...f, models: mergeModelLines(f.models || [], ids) }));
+            setPickCandidates(null);
+            setModelsMsg('已加入候选列表，点击「模型」输入框即可选择；点「保存」后持久生效。');
+          }}
+        />
+      )}
     </div>
   );
 }
@@ -543,7 +560,7 @@ export default function ImagePanel() {
                   title="编辑"
                   onClick={() => setForm({
                     ...EMPTY_FORM, id: p.id, name: p.name, protocol: p.protocol, baseURL: p.baseURL,
-                    model: p.model, size: p.size, savePath: p.savePath,
+                    model: p.model, models: p.models || [], size: p.size, savePath: p.savePath,
                     extra: p.extra ? JSON.stringify(p.extra, null, 2) : '',
                   })}
                   className="shrink-0 p-1 rounded hover:bg-canvas-deep/60 text-ink-soft"
