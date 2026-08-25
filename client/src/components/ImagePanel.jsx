@@ -14,6 +14,8 @@ import { ModelPickModal, mergeModelLines, stripJunkModels } from './ModelPickMod
 import { SIZE_OPTIONS, sizeCapFor, sizeOptionsFor } from '../utils/imageSizeCaps.js';
 // r58 上传参考图的 MIME:File.type 为空(Win 缺注册表映射)时按扩展名认,别一律说成 png。
 import { refMime } from '../utils/refMime.js';
+// r59 程序化写入走撤销通道,否则「恢复」覆盖掉的提示词 ⌘Z 撤不回。
+import { applyProgrammaticText } from '../utils/inputUndo.js';
 
 const inputCls = 'w-full bg-canvas-warm border border-canvas-deep rounded-md px-2.5 py-1.5 text-[12px] text-ink font-body focus:outline-none focus:border-accent/50';
 const labelCls = 'text-[10.5px] text-ink-faint font-body';
@@ -318,6 +320,15 @@ export default function ImagePanel() {
     try { localStorage.setItem(PROMPT_DRAFT_KEY, v); } catch { /* 隐私模式/配额满:草稿丢了不影响出图 */ }
   }, []);
 
+  // r59:点「恢复」是程序化写入 —— 纯 setState 不产生 input 事件,被覆盖掉的原提示词
+  // ⌘Z 撤不回。经 applyProgrammaticText 写(旧值先入栈 + 派发 input 带动 onChange →
+  // setPromptDraft 照常写草稿)。框未挂载时退回直接 setState,不丢回填。
+  const restorePrompt = useCallback((v) => {
+    const el = promptRef.current;
+    if (el) applyProgrammaticText(el, v);
+    else setPromptDraft(v);
+  }, [setPromptDraft]);
+
   const setTaskViewPref = useCallback((v) => {
     setTaskView(v);
     try { localStorage.setItem(TASK_VIEW_KEY, v); } catch { /* 存不下就只在本次会话生效 */ }
@@ -548,7 +559,7 @@ export default function ImagePanel() {
       )}
       <button
         type="button"
-        onClick={() => { setPromptDraft(h.prompt || ''); setTab('gen'); }}
+        onClick={() => { restorePrompt(h.prompt || ''); setTab('gen'); }}
         title="把该条提示词填回输入框并切到生图页"
         className="px-1.5 py-0.5 rounded border border-canvas-deep text-[10px] text-ink-soft font-body hover:bg-canvas-deep/60 flex items-center gap-1"
       ><RotateCcw size={10} />恢复</button>

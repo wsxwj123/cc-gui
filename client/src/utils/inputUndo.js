@@ -30,6 +30,14 @@ function getState(el) {
   return s;
 }
 
+// r59:基线必须赶在用户敲第一个字符之前建立。以前只在 input 回调里惰性建栈,此刻
+// el.value 已含首字母 → 基线 = 「首字母」,idx>0 守卫让撤销永远退不到空(用户实报
+// 「⌘Z 后还留一个字母」)。已有记录时零动作,不会覆盖打字中的历史。
+export function seedBaseline(el) {
+  if (!isEditable(el) || hist.has(el)) return;
+  getState(el); // 此刻的值 = 真基线
+}
+
 function commit(el) {
   const s = getState(el);
   const val = el.value;
@@ -55,7 +63,26 @@ function apply(el, value) {
   el.__undoApplying = false;
 }
 
+// r59:程序化写入通道(勾选弹窗「确认」合并模型、点「恢复」回填提示词……)。React
+// setState 直接改受控值不产生 DOM input 事件 → 撤销栈里没这一步,用户 ⌘Z 无处可退。
+// 走这里:先把「写入前的旧值」钉进栈,再原生 setter 写 + 派发 input(刻意不设
+// __undoApplying —— 这一笔要被 input 监听正常记下,才能撤了再重做)。
+export function applyProgrammaticText(el, value) {
+  if (!el) return;
+  seedBaseline(el);
+  setNativeValue(el, value);
+  // 判官r59建议2:写入后聚焦该框 —— 用户可立即 ⌘Z 撤回这笔程序化写入,免"先点回框"。
+  try { el.focus(); } catch { /* 垫片/离屏元素无 focus 时静默 */ }
+  try { el.setSelectionRange(value.length, value.length); } catch { /* password 等不支持 */ }
+}
+
 export function initInputUndo() {
+  // 聚焦那一刻的值才是「原值」:先建栈,再让用户打字(见 seedBaseline)。
+  document.addEventListener('focusin', (e) => seedBaseline(e.target), true);
+  // 兜底:脚本先聚焦 / 无 focusin 路径(本模块挂载时框已聚焦)。beforeinput 早于值改变,
+  // 此刻取到的仍是旧值;已有记录则零动作。
+  document.addEventListener('beforeinput', (e) => seedBaseline(e.target), true);
+
   // 打字时去抖落还原点。捕获阶段确保先于组件自身逻辑拿到。
   document.addEventListener('input', (e) => {
     const el = e.target;
