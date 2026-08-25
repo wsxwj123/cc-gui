@@ -160,14 +160,17 @@ export const PERMISSION_MODES = ['default', 'acceptEdits', 'plan', 'auto', 'dont
 // latestMode,在途 settle 后发现目标档已变再补发一次最新档。(cancelled 标志方案召不回
 // 已发出的 fetch:快速连切 bypass→default 时旧 bypass 请求可在半死连接上迟到反超,
 // slot.guiMode 错成 bypass、pending 被按 bypass 重裁全放行。串行化让新档必然在旧档
-// settle 之后才发出,服务端按到达序处理即最终一致。)服务端对合法 body 恒 200(无活跃
-// 进程也 ok/delivered:0),重试只在网络失败时发生,必然收敛。
+// settle 之后才发出,服务端按到达序处理即最终一致。)服务端对合法 body 只有三种终态:
+// 200(送达,或会话闲置本无进程可送)、400(参数非法)、409(CLI guard 全拒),重试只在
+// 网络失败时发生,必然收敛。
 // ponytail: 客户端 8s abort 后请求仍可能被服务端迟处理,残余乱序窗口极窄;真踩到再上服务端单调 seq。
-const modePostFlights = new Map(); // sessionId → { latestMode }
-async function postPermissionMode(sessionId, mode) {
+// r49b①:prevMode = 本次 flight 发起【前】该会话的档位(undefined = 原本没有会话级档位)。
+// 服务端回 409(全部 slot 被 CLI guard 拒)时按它回滚,免得界面停在没生效的档上。
+const modePostFlights = new Map(); // sessionId → { latestMode, prevMode }
+async function postPermissionMode(sessionId, mode, prevMode) {
   const inflight = modePostFlights.get(sessionId);
   if (inflight) { inflight.latestMode = mode; return; } // 在途循环 settle 后补发最新档
-  const flight = { latestMode: mode };
+  const flight = { latestMode: mode, prevMode };
   modePostFlights.set(sessionId, flight);
   try {
     let attempt = 0;
@@ -185,6 +188,25 @@ async function postPermissionMode(sessionId, mode) {
           body: JSON.stringify({ sessionId, mode: target }),
           signal: AbortSignal.timeout(8_000),
         });
+        // r49b①:服务端不再对切档失败谎报 200。409 = 该会话所有在跑进程都被 CLI 的
+        // guardPermissionModeChange 拒了(auto 受模型门控、bypass 未带 dangerously-skip
+        // 启动),这是终态:重试自愈不了,回滚档位并把 CLI 原文透给用户。
+        let body = null;
+        try { body = await r.json(); } catch {}
+        if (r.status === 409 || (r.ok && body && body.ok === false)) {
+          // 判官r49b:409 在途期间用户又切了新档(latestMode 已变)→ 回滚会覆盖用户第二次意图。
+          // 有更新的目标就转而补发它,只有目标未变时才回滚收场。
+          if (flight.latestMode !== target) { attempt = 0; continue; }
+          useStore.getState().rollbackPermissionMode(sessionId, flight.prevMode,
+            body?.error || body?.failed?.[0]?.error || '权限档位切换被拒绝');
+          return;
+        }
+        // 部分成功(有 slot 收下了):不回滚,但失败原文照报。
+        if (r.ok && body?.failed?.length) {
+          useStore.getState().setPermissionModeNotice(sessionId, body.failed[0].error);
+        }
+        // 收敛判据【不能】要求 delivered>0:会话闲置时 attempted:0、本就无进程可送达,
+        // 那不是失败,当成未送达会一路空转到 5 分钟上限。
         delivered = r.ok || r.status === 400; // 400=参数非法,重试无法自愈,视为终态
       } catch { /* 半死连接/超时,落到重试 */ }
       if (delivered) {
@@ -426,6 +448,9 @@ export const useStore = create((set, get) => ({
   // (bypass) shows B's mode, not A's. Keyed by sessionId, or `draft-<hash>`
   // for unsent drafts (mirrors sessionQueueKey).
   permissionModeBySession: readLs('cgui-perm-mode-by-session', {}),
+  // r49b①:切档被 CLI 拒绝/部分失败时的即时反馈 { key, text }(text = CLI 错误原文)。
+  // 只保留最新一条:档位选择器按 key 认领并在几秒后自清,不落盘。
+  permissionModeNotice: null,
   // Same per-session pattern for model + effort (#9). currentModel/effort stay
   // as the GLOBAL default (resolved from settings.json / WS); these maps hold
   // each session's explicit override. A session with no entry uses the default.
@@ -747,6 +772,8 @@ export const useStore = create((set, get) => ({
   // global default (used before any session is active).
   setPermissionMode: (m, key) => {
     const mode = PERMISSION_MODES.includes(m) ? m : 'default';
+    // r49b①:切换【前】的会话级档位,供 CLI 拒绝时回滚(必须在写 map 之前读)。
+    const prev = key ? get().permissionModeBySession[key] : undefined;
     if (key) {
       const map = { ...get().permissionModeBySession, [key]: mode };
       writeLs('cgui-perm-mode-by-session', map);
@@ -764,9 +791,21 @@ export const useStore = create((set, get) => ({
     // A1 裁决单点化后,这条 POST 是"切档生效 + 服务端对 pending 重裁"的唯一通道,
     // 不能再 fire-and-forget 静默丢 → 送达为止重试(postPermissionMode)。
     if (key && !String(key).startsWith('draft-')) {
-      postPermissionMode(key, mode);
+      postPermissionMode(key, mode, prev);
     }
   },
+  // r49b①:切档被 CLI 拒绝 → 回到切换前的档位 + 把原文挂到该会话上(档位选择器旁显示)。
+  // prev===undefined 表示原本没有会话级档位:回滚是【删掉这一条】回全局默认,不是写死某档。
+  // 偏好同步一并纠正,否则服务端还存着那个被拒的档,下次同步又把它推回来。
+  rollbackPermissionMode: (key, prev, text) => {
+    const map = { ...get().permissionModeBySession };
+    if (prev === undefined) delete map[key]; else map[key] = prev;
+    writeLs('cgui-perm-mode-by-session', map);
+    set({ permissionModeBySession: map, permissionModeNotice: text ? { key, text } : null });
+    if (syncableKey(key)) putSessionSync('permissionMode', key, prev || get().permissionMode || 'default');
+  },
+  setPermissionModeNotice: (key, text) => set({ permissionModeNotice: text ? { key, text } : null }),
+  clearPermissionModeNotice: () => set({ permissionModeNotice: null }),
   // Resolve the effective mode for a session key. An explicit per-session pick
   // wins; otherwise fall back to the last-used global mode (persisted to
   // localStorage) so the user's choice STICKS across page reloads and into new

@@ -38,7 +38,7 @@ import { useMultiSelect, SelModeToggle, BatchBar, SelCheckbox } from './componen
 import { pickDirectory, isTauri } from './utils/pickDirectory.js';
 import ChatSearch from './components/ChatSearch.jsx';
 import { confirmDialog } from './utils/confirmDialog.jsx';
-import { ChatInput, EffortSelector, EFFORT_LEVELS, markAutoUnavailable, PermissionModeSelector } from './components/ChatInput.jsx';
+import { ChatInput, EffortSelector, EFFORT_LEVELS, markAutoUnavailable, MODE_META, PermissionModeSelector } from './components/ChatInput.jsx';
 import { ModelBadge, ProviderAvatar } from './components/ModelBadge.jsx';
 import { RemoteControlButton, ProviderSwitcher, ModelSelector, ProviderSourceBadge, AnchoredPopover } from './components/SessionSelectors.jsx';
 import { mergeProviderLists, rowIsCurrent } from './utils/providerList.js';
@@ -2621,6 +2621,31 @@ function DenialNotice({ denial }) {
   );
 }
 
+// r49b②:CLI init 自报的生效档位与本会话请求档不一致时的提示行(服务端对账后经
+// { type:'system', subtype:'mode_mismatch' } 送来)。客观陈述两侧档位,并给一键改用——
+// 不猜"哪些模型支持自动档"(名单会变),CLI 回报什么就说什么。
+function ModeMismatchNotice({ notice, permKey }) {
+  const setPermissionMode = useStore((s) => s.setPermissionMode);
+  const label = (m) => MODE_META[m]?.label || m;
+  return (
+    <div className="max-w-[var(--content-max)] mx-auto px-4 py-1.5 flex items-start gap-2">
+      <Shield size={11} className="shrink-0 mt-0.5 text-amber-600" />
+      <div className="min-w-0 text-[11px] font-body leading-snug text-ink-muted">
+        权限档位未生效:请求 {label(notice.requested)},实际 {label(notice.effective)}
+        {notice.requested === 'auto' && <span className="text-ink-faint">;当前模型可能不支持自动档</span>}
+      </div>
+      {MODE_META[notice.effective] && (
+        <button
+          onClick={() => setPermissionMode(notice.effective, permKey)}
+          className="shrink-0 px-2 py-0.5 rounded border border-canvas-deep text-[10px] text-accent font-body hover:border-accent/40 transition-colors"
+          title="把界面档位改成 CLI 实际生效的那一档">
+          改用 {label(notice.effective)}
+        </button>
+      )}
+    </div>
+  );
+}
+
 // AZ11/AZ2 性能根治:历史消息列表抽成 memo 子组件。流式只更新 chatMessages/
 // streamingText(不动 messages),memo 命中 → 2万节点的历史列表在每个 token 不再
 // 重渲染;点功能按钮使 SessionDetail 重渲时同样跳过(根治"流式时/点按钮全局卡、
@@ -3514,7 +3539,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         // 下方 localOnly)与未落盘的停止半截回复(interrupted:停止场景
         // "末条用户消息已落盘"≠"整轮落盘",半截 assistant 可能没写进 jsonl,整清=丢内容;
         // 已落盘的(tkey 命中)照清防双渲染)。审计#7。
-        if (lastUser && known.has(tkey(lastUser))) return prev.filter((m) => m.type === 'btw' || m.type === 'denial' || (m.interrupted && !known.has(tkey(m))));
+        if (lastUser && known.has(tkey(lastUser))) return prev.filter((m) => m.type === 'btw' || m.type === 'denial' || m.type === 'mode-mismatch' || (m.interrupted && !known.has(tkey(m))));
         return prev.filter((m) => !known.has(tkey(m)));
       });
     };
@@ -3548,7 +3573,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       const known = new Set(messages.map(tkey));
       const lastUser = [...prev].reverse().find((m) => m.type === 'user');
       // 保留 btw / denial 与未落盘的停止半截回复(同上面 reconcile,审计#7)。
-      if (lastUser && known.has(tkey(lastUser))) return prev.filter((m) => m.type === 'btw' || m.type === 'denial' || (m.interrupted && !known.has(tkey(m))));
+      if (lastUser && known.has(tkey(lastUser))) return prev.filter((m) => m.type === 'btw' || m.type === 'denial' || m.type === 'mode-mismatch' || (m.interrupted && !known.has(tkey(m))));
       const next = prev.filter((m) => !known.has(tkey(m)));
       return next.length === prev.length ? prev : next;
     });
@@ -4908,6 +4933,20 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
               message: String(event.message || event.decision_reason || '').slice(0, 300),
             }]));
           }
+          // r49b②:CLI init 回报的生效档位与请求档不一致(guard 拒了 auto/plan)——
+          // 服务端对账后发这条系统行。按「请求档+实际档」去重(同一组合只留一行),
+          // ownerKey 走流归属,和自动拒绝提示同一套门控。
+          if (event.type === 'system' && event.subtype === 'mode_mismatch') {
+            const mUuid = `mode-mismatch-${event.requested}-${event.effective}`;
+            setChatMessages((prev) => (prev.some((m) => m.uuid === mUuid) ? prev : [...prev, {
+              uuid: mUuid,
+              type: 'mode-mismatch',
+              ownerKey: streamOwnerSid(),
+              timestamp: new Date().toISOString(),
+              requested: event.requested,
+              effective: event.effective,
+            }]));
+          }
           // 等待状态(G):API 可重试错误(限流/5xx/超时),SDK 自动退避重试 ——
           // { type:'system', subtype:'api_retry', attempt, max_retries, retry_delay_ms,
           //   error_status: number|null }(null=无 HTTP 响应的连接错误)。
@@ -6002,7 +6041,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             if (isCurrentTurn()) reconcileSteeredQueue(getLocalMessages()); // 已注入条目的落地判定
             setChatMessages((prev) => {
               if (!isCurrentTurn()) return prev; // await 期间开了新回合 → 不清在途消息
-              const localOnly = (m) => m.type === 'btw' || m.type === 'denial';
+              const localOnly = (m) => m.type === 'btw' || m.type === 'denial' || m.type === 'mode-mismatch';
               return prev.some(localOnly) ? prev.filter(localOnly) : [];
             });
             break;
@@ -7423,6 +7462,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                     ? null
                     : msg.type === 'denial'
                     ? <DenialNotice denial={msg} />
+                    : msg.type === 'mode-mismatch'
+                    ? <ModeMismatchNotice notice={msg} permKey={sessionQueueKey} />
                     : msg.type === 'turn'
                     ? <>
                         <TurnBubble turn={msg} onRetry={handleRetryTurn} onRetryTool={(toolCall) => handleRetryTool(msg, toolCall)} retryActive={retryActiveUuid === msg.uuid} />
