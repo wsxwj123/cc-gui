@@ -15,9 +15,10 @@ import { extname } from 'path';
 import {
   IMAGE_PROTOCOLS, IMAGE_CONTENT_TYPES, buildImageRequest, extractImage,
   buildImageFileName, imageExtFromMime, resolvePreviewPath, redactKey,
+  geminiModelsRequest,
 } from '../utils/image-protocols.js';
 import { readCapped } from '../utils/read-capped.js';
-import { assertPublicBaseURL } from './settings.js';
+import { assertPublicBaseURL, probeUpstreamModels } from './settings.js';
 
 const router = Router();
 
@@ -195,6 +196,114 @@ router.delete('/image-providers/:id', async (req, res) => {
     });
     res.json({ ok: true });
   } catch (err) { res.status(err?.status || 500).json({ error: err.message }); }
+});
+
+const FETCH_MODELS_TIMEOUT_MS = 10_000; // 与文本 provider 的拉取口径一致
+// 模型列表的读取上限:大目录(OpenRouter 那类几百个模型)约 1MB 量级,2MB 够用;
+// 超限一律按"读不了"处理,不把一坨大 body 读进单进程后端。
+const MAX_MODELS_BYTES = 2 * 1024 * 1024;
+
+// 失败三分类:auth(密钥不对)/ network(请求没到达对方)/ unsupported(该服务没有列表接口),
+// 前端据此给可行动文案。probeUpstreamModels 只抛中文 Error(红线:不改其本体),
+// 故按其固定措辞归类。
+class ModelsError extends Error {
+  constructor(type, message) { super(message); this.type = type; }
+}
+function classifyModelsError(msg) {
+  if (/鉴权失败|\b40[13]\b/.test(msg)) return 'auth';
+  if (/连不上|超时|网络层失败/.test(msg)) return 'network';
+  return 'unsupported';
+}
+
+// gemini 的模型列表:GET {base}/models。认证头按端点形态选,401/403 换另一组重试一次
+// (与出图链路的 altHeaders 同口径)。**不按能力过滤** —— 响应里没有可靠的"能否生图"
+// 标记,过滤只会把可用模型误杀,全量返回由用户挑。
+async function fetchGeminiModels(baseURL, apiKey) {
+  await assertPublicBaseURL(baseURL);
+  const spec = geminiModelsRequest(baseURL, apiKey);
+  // redirect:manual —— 请求带着 apiKey,跟随 3xx 会把密钥带到没验过的地址(同出图链路)。
+  const get = (headers) => fetch(spec.url, {
+    headers, signal: AbortSignal.timeout(FETCH_MODELS_TIMEOUT_MS), redirect: 'manual',
+  });
+  let resp;
+  try { resp = await get(spec.headers); }
+  catch (e) {
+    const timedOut = e?.name === 'TimeoutError' || e?.name === 'AbortError';
+    const cause = e?.cause?.code || e?.cause?.message || '';
+    throw new ModelsError('network', timedOut
+      ? `拉取超时(${FETCH_MODELS_TIMEOUT_MS / 1000}s):${spec.url}`
+      : `连不上 ${spec.url}${cause || e?.message ? `:${[e?.message, cause].filter(Boolean).join(' — ')}` : ''}`);
+  }
+  if (!resp.ok && (resp.status === 401 || resp.status === 403)) {
+    try { resp = await get(spec.altHeaders); } catch { /* 保留首次响应 */ }
+  }
+  // 读 body 一律走 readCapped:下游 host 是用户自填的,无界读 = 单进程后端 OOM(r26-J2 口径)。
+  if (!resp.ok) {
+    const body = ((await readCapped(resp, MAX_ERROR_BYTES).catch(() => '')) || '').replace(/\s+/g, ' ').trim().slice(0, 160);
+    if (resp.status === 401 || resp.status === 403) {
+      throw new ModelsError('auth', `上游 ${spec.url} 返回 ${resp.status}(鉴权失败):请检查密钥${body ? `。${body}` : ''}`);
+    }
+    throw new ModelsError('unsupported',
+      `该服务未提供模型列表接口(${spec.url} 返回 ${resp.status})，请在「模型」框手动填写模型名。${body ? `\n上游:${body}` : ''}`);
+  }
+  const raw = await readCapped(resp, MAX_MODELS_BYTES).catch(() => '');
+  if (raw === null) throw new ModelsError('unsupported', `模型列表响应过大（超过 ${MAX_MODELS_BYTES / 1048576}MB），已拒绝读取`);
+  let data = null;
+  try { data = JSON.parse(raw); } catch { data = null; }
+  const arr = Array.isArray(data?.models) ? data.models : (Array.isArray(data?.data) ? data.data : []);
+  const ids = [];
+  for (const m of arr) {
+    // 官方回 models/{id};中转站有回裸 id 或 openai 形态 {id} 的,一并认。
+    const raw = typeof m === 'string' ? m : (m?.name || m?.id);
+    if (typeof raw !== 'string' || !raw) continue;
+    const id = raw.replace(/^models\//, '');
+    if (id && !ids.includes(id)) ids.push(id);
+  }
+  return ids;
+}
+
+/**
+ * POST /api/image-providers/fetch-models { id? | (baseURL, protocol), apiKey? }
+ * → { ok:true, models:[id…] } / { ok:false, type:'auth'|'network'|'unsupported', message }
+ *
+ * 两态:
+ *  - 带 id(编辑态):读存储 provider,**baseURL 强制取存储值**、协议同理;apiKey 取请求体
+ *    非空值,否则用存储 key。请求体里的 baseURL 一律忽略 —— 否则 {id, baseURL:攻击者地址}
+ *    会让服务端把该 provider 的真实密钥发去攻击者端点(key 与 baseURL 必须同源;
+ *    与 settings.js 的 custom-providers/fetch-models 同口径)。
+ *  - 不带 id(新建表单态):用表单值,SSRF 守卫在下游探测函数内。
+ * 出错信息透传前一律过 redactKey,响应任何路径都不含 apiKey。
+ */
+router.post('/image-providers/fetch-models', async (req, res) => {
+  let apiKeyForRedact = '';
+  try {
+    let { baseURL, apiKey, protocol } = req.body || {};
+    if (req.body?.id) {
+      const stored = (await readImageProviders()).find((p) => p.id === req.body.id);
+      if (!stored) return res.status(404).json({ ok: false, type: 'unsupported', message: '未找到该生图 provider' });
+      if (!apiKey || !String(apiKey).trim()) apiKey = stored.apiKey;
+      baseURL = stored.baseURL; // ← 防密钥外传:请求体的 baseURL 一律忽略
+      protocol = stored.protocol || protocol;
+    }
+    apiKeyForRedact = typeof apiKey === 'string' ? apiKey : '';
+    if (typeof baseURL !== 'string' || !baseURL.trim()) {
+      return res.status(400).json({ ok: false, type: 'unsupported', message: '请先填写接口地址（baseURL）' });
+    }
+    let u;
+    try { u = new URL(baseURL); } catch { return res.status(400).json({ ok: false, type: 'unsupported', message: 'baseURL 非法' }); }
+    if (!/^https?:$/.test(u.protocol)) {
+      return res.status(400).json({ ok: false, type: 'unsupported', message: 'baseURL 必须是 http(s)' });
+    }
+    // openai / chat 的 baseURL 语义与文本 provider 相同 → 复用同一条探测链路(候选 URL、
+    // 双 header 轮询、SSRF 守卫都在里面);gemini 是另一套端点形态,单独走。
+    const models = protocol === 'gemini'
+      ? await fetchGeminiModels(baseURL, apiKey)
+      : ((await probeUpstreamModels(baseURL, apiKey)).ids || []);
+    res.json({ ok: true, models });
+  } catch (err) {
+    const message = redactKey(err?.message || '拉取模型失败', apiKeyForRedact);
+    res.status(err?.status || 502).json({ ok: false, type: err?.type || classifyModelsError(message), message });
+  }
 });
 
 // 落盘:重名加序号(-1、-2……),不覆盖已有图。

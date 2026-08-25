@@ -38,6 +38,26 @@ function isOfficialGemini(baseURL) {
 }
 
 /**
+ * gemini 的模型列表请求(纯函数):GET {base}/models。认证头与出图同口径 ——
+ * 官方端点用 x-goog-api-key、中转站用 Bearer;选错就 401,调用方拿 altHeaders 重试一次。
+ * 返回 { url, headers, altHeaders }。
+ */
+export function geminiModelsRequest(baseURL, apiKey) {
+  const base = String(baseURL || '').trim().replace(/\/+$/, '');
+  const key = typeof apiKey === 'string' ? apiKey : '';
+  // 带真实 User-Agent:node fetch 默认 UA 会被部分 WAF 当机器人挡掉(同 settings.js 的先例)。
+  const common = { 'User-Agent': 'claude-gui', Accept: 'application/json' };
+  const goog = { ...common, 'x-goog-api-key': key };
+  const bearer = { ...common, Authorization: `Bearer ${key}` };
+  const official = isOfficialGemini(base);
+  return {
+    url: `${base}/models`,
+    headers: official ? goog : bearer,
+    altHeaders: official ? bearer : goog,
+  };
+}
+
+/**
  * 组装一次生图请求。纯函数:输入 config+prompt,输出 { url, headers, body, altHeaders }。
  * altHeaders 仅 gemini 非空(认证头回落),其余为 null。
  * config: { protocol, baseURL, apiKey, model, size, extra }
