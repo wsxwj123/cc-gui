@@ -350,8 +350,8 @@ export default function ImagePanel() {
       )}
       <button
         type="button"
-        onClick={() => setPromptDraft(h.prompt || '')}
-        title="把该条提示词填回输入框"
+        onClick={() => { setPromptDraft(h.prompt || ''); setTab('gen'); }}
+        title="把该条提示词填回输入框并切到生图页"
         className="px-1.5 py-0.5 rounded border border-canvas-deep text-[10px] text-ink-soft font-body hover:bg-canvas-deep/60 flex items-center gap-1"
       ><RotateCcw size={10} />恢复</button>
     </>
