@@ -537,38 +537,38 @@ export default function ImagePanel() {
         <button
           type="button"
           onClick={() => cancelJob(h.id)}
-          title="停止该生成任务"
-          className="px-1.5 py-0.5 rounded border border-canvas-deep text-[10px] text-ink-soft font-body hover:bg-canvas-deep/60 flex items-center gap-1"
-        ><X size={10} />取消</button>
+          title="取消：停止该生成任务"
+          className="px-1.5 py-1 rounded border border-canvas-deep text-ink-soft hover:bg-canvas-deep/60 flex items-center"
+        ><X size={13} /></button>
       )}
       {h.status === 'done' && h.file && (
         <button
           type="button"
           onClick={() => addHistoryRef(h)}
-          title="把这张图作为参考图，在它的基础上继续修改"
-          className="px-1.5 py-0.5 rounded border border-canvas-deep text-[10px] text-ink-soft font-body hover:bg-canvas-deep/60 flex items-center gap-1"
-        ><Image size={10} />以此图修改</button>
+          title="以此图修改：把这张图作为参考图，在它的基础上继续修改"
+          className="px-1.5 py-1 rounded border border-canvas-deep text-ink-soft hover:bg-canvas-deep/60 flex items-center"
+        ><Image size={13} /></button>
       )}
       {h.status === 'done' && h.file && (
         <button
           type="button"
           onClick={() => reveal(h.file)}
           title="在文件夹中显示"
-          className="px-1.5 py-0.5 rounded border border-canvas-deep text-[10px] text-ink-soft font-body hover:bg-canvas-deep/60 flex items-center gap-1"
-        ><ExternalLink size={10} />在文件夹中显示</button>
+          className="px-1.5 py-1 rounded border border-canvas-deep text-ink-soft hover:bg-canvas-deep/60 flex items-center"
+        ><ExternalLink size={13} /></button>
       )}
       <button
         type="button"
         onClick={() => { restorePrompt(h.prompt || ''); setTab('gen'); }}
-        title="把该条提示词填回输入框并切到生图页"
-        className="px-1.5 py-0.5 rounded border border-canvas-deep text-[10px] text-ink-soft font-body hover:bg-canvas-deep/60 flex items-center gap-1"
-      ><RotateCcw size={10} />恢复</button>
+        title="恢复：把该条提示词填回输入框并切到生图页"
+        className="px-1.5 py-1 rounded border border-canvas-deep text-ink-soft hover:bg-canvas-deep/60 flex items-center"
+      ><RotateCcw size={13} /></button>
       <button
         type="button"
         onClick={() => deleteEntries([h.id])}
-        title="删除这条记录"
-        className="px-1.5 py-0.5 rounded border border-canvas-deep text-[10px] text-error font-body hover:bg-canvas-deep/60 flex items-center gap-1"
-      ><Trash2 size={10} />删除</button>
+        title="删除：删除这条记录"
+        className="px-1.5 py-1 rounded border border-canvas-deep text-error hover:bg-canvas-deep/60 flex items-center"
+      ><Trash2 size={13} /></button>
     </>
   );
 
