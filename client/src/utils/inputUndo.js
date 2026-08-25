@@ -71,6 +71,8 @@ export function applyProgrammaticText(el, value) {
   if (!el) return;
   seedBaseline(el);
   setNativeValue(el, value);
+  // 判官r59建议2:写入后聚焦该框 —— 用户可立即 ⌘Z 撤回这笔程序化写入,免"先点回框"。
+  try { el.focus(); } catch { /* 垫片/离屏元素无 focus 时静默 */ }
   try { el.setSelectionRange(value.length, value.length); } catch { /* password 等不支持 */ }
 }
 
