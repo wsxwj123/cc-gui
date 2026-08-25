@@ -35,6 +35,7 @@
     "express": "^5.1.0",
     "glob": "^11.0.0",
     "node-pty": "^1.1.0",
+    "undici": "^8.10.0",
     "ws": "^8.18.0"
   },
   "devDependencies": {
