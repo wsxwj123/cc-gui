@@ -3,13 +3,13 @@
 // 本文件只做 I/O 编排:流式收包 → bsdtar 清单校验 → 解压(实测字节闸)→ manifest
 // 校验 → 资源闸(字节/像素/SVG 清洗/T2 静态校验)→ 原子搬入 ~/.claude-gui/skins/<id>/。
 // 文件名避开已存在的 skills.js(Claude 技能),端点用 /api/skins。
-import { Router } from 'express';
+import express, { Router } from 'express';
 import { mkdir, unlink, stat, readFile, writeFile, readdir, rename, rm } from 'fs/promises';
 import { createWriteStream, existsSync } from 'fs';
 import { pipeline } from 'stream/promises';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
-import { extname, join } from 'path';
+import { dirname, extname, join } from 'path';
 import { homedir, tmpdir } from 'os';
 import { randomUUID } from 'crypto';
 import { isPathInside } from '../utils/safe-path.js';
@@ -38,6 +38,8 @@ const CONTENT_TYPES = {
   json: 'application/json; charset=utf-8',
 };
 const ERROR_MESSAGES = {
+  dir_invalid: '导入数据格式不正确:files 需为非空数组',
+  dir_entries_exceeded: '文件夹内文件数超过 64 个上限',
   not_zip: '导入文件不是有效的 zip 或 .cguiskin 压缩包',
   zip_too_large: '皮肤包超过 30MB 上限',
   zip_entries_exceeded: '压缩包内条目数超过 40 个上限',
@@ -58,6 +60,7 @@ const ERROR_MESSAGES = {
   internal: '导入失败,详见服务端日志',
 };
 const HTTP_OF = {
+  dir_invalid: 400, dir_entries_exceeded: 400,
   not_zip: 400, zip_too_large: 413, zip_entries_exceeded: 400, zip_bomb_suspected: 400,
   path_traversal: 400, manifest_missing: 400, unsupported_format: 400, manifest_invalid: 422,
   asset_missing: 422, asset_type: 400, asset_too_large: 413, image_too_large_px: 413,
@@ -126,6 +129,155 @@ async function dirBytes(dir) {
 }
 
 /**
+ * r43:「已展开的目录 → 皮肤」共享管线。zip 通道(解包后)与文件夹导入通道(写入临时目录后)
+ * 跑的是同一段代码 —— 逐字来自 r11 的 installSkinPackage 内联段,仅位置移动、零语义改动:
+ * 定位 manifest → validateManifest → 资源闸(图片字节/像素、SVG 清洗、T2 静态校验、CSS 上限)
+ * → stage 落盘 → 搬入 skinsDir/<id>(同 slug 覆盖)。
+ * tmp = 已展开的临时目录(清理由调用方 finally 负责);fileEntries = 目录内文件相对路径数组
+ * (可含一层根前缀,resolveRootPrefix 处理);穿越守卫的包含根仍是 tmp(与 zip 通道原口径一致)。
+ */
+async function installUnpacked(tmp, fileEntries, { source, skinsDir, limits }) {
+  // ── 定位 manifest(根目录直放或嵌套一层)──
+  const root = resolveRootPrefix(fileEntries);
+  if (!root) {
+    // CodeFace theme.json 分支:契约要求实抓 schema 核定映射、不许凭猜写(INTERFACE §1.6);
+    // 本批禁网络无法核定 → 明确报不支持,不做臆测转换(缺口记录在交付报告)。
+    const hasCodeface = fileEntries.some((p) => p.split('/').pop() === 'theme.json');
+    throw failCode('manifest_missing', hasCodeface ? { message: 'CodeFace theme.json 转换需在联网环境核定映射表后支持,当前请转为 skin.json' } : {});
+  }
+  const rel = (p) => p.slice(root.prefix.length);
+  const files = new Set(fileEntries.filter((p) => p.startsWith(root.prefix)).map(rel).filter(Boolean));
+  let manifestRaw;
+  try { manifestRaw = JSON.parse(await readFile(join(tmp, root.prefix, 'skin.json'), 'utf8')); }
+  catch { throw failCode('manifest_invalid', { details: ['skin.json 非法 JSON'] }); }
+  const vm = validateManifest(manifestRaw, files);
+  if (!vm.ok) throw failCode(vm.code, { details: vm.details, name: vm.name });
+  const { manifest, warnings, referenced } = vm;
+
+  // ── 资源层:仅被引用文件落盘;图片字节/像素闸;SVG 清洗;T2 静态校验 ──
+  const keep = new Map(); // 目标名 → { from, content? }
+  for (const name of referenced) {
+    const src = join(tmp, root.prefix, name);
+    if (!isPathInside(src, tmp)) throw failCode('path_traversal');
+    const ext = extname(name).slice(1).toLowerCase();
+    const st = await stat(src).catch(() => null);
+    if (!st) throw failCode('asset_missing', { name });
+    if (ext === 'svg') {
+      const r = sanitizeSvg(await readFile(src, 'utf8'));
+      if (!r.ok) throw failCode('svg_rejected', { name, reason: r.reason });
+      keep.set(name, { content: r.svg });
+    } else if (ext === 'css') {
+      if (st.size > 512 * 1024) throw failCode('asset_too_large', { name });
+      keep.set(name, { from: src });
+    } else if (ext === 'js') {
+      const text = await readFile(src, 'utf8');
+      const r = validateT2Script(text);
+      if (!r.ok) throw failCode('script_rejected', { name, hits: r.hits });
+      keep.set(name, { from: src });
+    } else {
+      if (st.size > limits.maxAssetBytes) throw failCode('asset_too_large', { name });
+      const headBuf = await readFile(src).then((b) => b.subarray(0, 256 * 1024));
+      const dims = imageDimensions(headBuf, ext);
+      if (!dims) throw failCode('image_invalid', { name });
+      if (dims.w > limits.maxImagePx || dims.h > limits.maxImagePx) {
+        throw failCode('image_too_large_px', { name, w: dims.w, h: dims.h });
+      }
+      keep.set(name, { from: src });
+    }
+  }
+  // skin.css/codeface.css 未被引用(T1)时按契约给 css_ignored warning
+  if (manifest.tier !== 2) {
+    for (const f of ['skin.css', 'codeface.css']) {
+      if (files.has(f)) warnings.push({ code: 'css_ignored', key: f, message: `包内 ${f} 已忽略:T1 皮肤不支持自定义 CSS` });
+    }
+  }
+
+  // ── 原子搬入 ~/.claude-gui/skins/<id>/ ──
+  // r26-D6:同 slug 已存在 → 复用其 id 覆盖(rm 旧目录后 rename stage 进去)
+  const existingId = await findExistingSkinId(slugOf(manifest.name), skinsDir);
+  const id = existingId || skinIdFrom(manifest.name);
+  const stage = join(tmpdir(), `cgui-skin-stage-${randomUUID()}`);
+  try {
+    await mkdir(stage, { recursive: true });
+    for (const [name, srcInfo] of keep) {
+      if (srcInfo.content != null) await writeFile(join(stage, name), srcInfo.content, 'utf8');
+      else await writeFile(join(stage, name), await readFile(srcInfo.from));
+    }
+    await writeFile(join(stage, 'skin.json'), JSON.stringify(manifest, null, 2));
+    await writeFile(join(stage, 'meta.json'), JSON.stringify({ source, importedAt: Date.now() }));
+    await mkdir(skinsDir, { recursive: true });
+    const dest = join(skinsDir, id);
+    if (!isPathInside(dest, skinsDir)) throw failCode('internal');
+    if (existingId) await rm(dest, { recursive: true, force: true });
+    await moveStageDir(stage, dest);
+  } catch (e) {
+    await cleanupStage(stage);
+    throw e;
+  }
+  return { id, name: manifest.name, warnings, manifest };
+}
+
+// r43 文件夹导入闸(服务端硬校验,不信客户端)。
+export const DIR_LIMITS = {
+  maxFiles: 64,
+  maxFileBytes: 20 * 1024 * 1024,
+  maxTotalBytes: 30 * 1024 * 1024,
+  maxDepth: 3,       // 段数上限(如 a/b/c.png)
+  maxPathLen: 128,
+};
+/**
+ * 包内相对路径合法性(纯函数,单测跑矩阵)。拒绝:非字符串/空、超长、反斜杠、控制字符、
+ * 绝对路径、盘符、`..` 与 `.` 段、空段(含 `//` 与末尾 `/`)、段数超 maxDepth。
+ */
+export function isSafeSkinRelPath(p, limits = DIR_LIMITS) {
+  if (typeof p !== 'string' || !p) return false;
+  if (p.length > limits.maxPathLen) return false;
+  if (p.includes('\\')) return false;                     // 反斜杠(Win 分隔符/UNC 形态)
+  // 控制字符(含 NUL):按码点判,不在正则里写不可见转义
+  if ([...p].some((c) => c.codePointAt(0) < 32 || c.codePointAt(0) === 127)) return false;
+  if (p.startsWith('/')) return false;                    // 绝对路径
+  if (/^[A-Za-z]:/.test(p)) return false;                 // 盘符
+  const segs = p.split('/');
+  if (segs.length > limits.maxDepth) return false;        // 深度
+  return segs.every((s) => s && s !== '.' && s !== '..');
+}
+
+/**
+ * r43 文件夹导入管线:客户端逐文件 base64 → 服务端硬校验(路径/数量/单文件/总量/skin.json
+ * 在位)→ 写入临时目录 → 走与 zip 完全相同的 installUnpacked。成功/失败形状与
+ * installSkinPackage 一致(skinCode 错);skinsDir/limits 仅供单测注入。
+ */
+export async function installSkinDirectory(files, { source = 'user', skinsDir = SKINS_DIR, limits = ZIP_LIMITS, dirLimits = DIR_LIMITS } = {}) {
+  if (!Array.isArray(files) || !files.length) throw failCode('dir_invalid');
+  if (files.length > dirLimits.maxFiles) throw failCode('dir_entries_exceeded');
+  const decoded = [];
+  let total = 0;
+  for (const f of files) {
+    const p = f && f.path;
+    if (!isSafeSkinRelPath(p, dirLimits)) throw failCode('path_traversal');
+    const buf = Buffer.from(typeof f.dataB64 === 'string' ? f.dataB64 : '', 'base64');
+    if (buf.length > dirLimits.maxFileBytes) throw failCode('asset_too_large', { name: p });
+    total += buf.length;
+    if (total > dirLimits.maxTotalBytes) throw failCode('zip_too_large');
+    decoded.push({ path: p, buf });
+  }
+  const paths = decoded.map((d) => d.path);
+  if (!resolveRootPrefix(paths)) throw failCode('manifest_missing');
+  const tmp = join(tmpdir(), `cgui-skin-dir-${randomUUID()}`);
+  try {
+    for (const { path: p, buf } of decoded) {
+      const dest = join(tmp, p);
+      if (!isPathInside(dest, tmp)) throw failCode('path_traversal'); // 校验已挡,兜底纵深
+      await mkdir(dirname(dest), { recursive: true });
+      await writeFile(dest, buf);
+    }
+    return await installUnpacked(tmp, paths, { source, skinsDir, limits });
+  } finally {
+    await rm(tmp, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+/**
  * 导入管线单函数(PLAN §5 付费衔接口:本地导入 source:'user',将来下发同函数)。
  * zipPath = 已收好的临时 zip。成功 → { id, name, warnings, manifest };失败抛 skinCode 错。
  * skinsDir/limits 仅供单测注入(默认生产值;测试用 scratch 目录,不碰真实 home)。
@@ -172,85 +324,9 @@ export async function installSkinPackage(zipPath, { source = 'user', skinsDir = 
     // 解压完成后终检(短包在首个轮询前就结束,必须补一次)
     if (await dirBytes(tmp) > limits.maxUnpackedBytes) throw failCode('zip_bomb_suspected');
 
-    // ── 定位 manifest(根目录直放或嵌套一层)──
+    // ── 解包完成后的共享管线(r43 抽出;文件夹导入通道走同一函数)──
     const fileEntries = entries.filter((e) => e.type === '-').map((e) => e.path);
-    const root = resolveRootPrefix(fileEntries);
-    if (!root) {
-      // CodeFace theme.json 分支:契约要求实抓 schema 核定映射、不许凭猜写(INTERFACE §1.6);
-      // 本批禁网络无法核定 → 明确报不支持,不做臆测转换(缺口记录在交付报告)。
-      const hasCodeface = fileEntries.some((p) => p.split('/').pop() === 'theme.json');
-      throw failCode('manifest_missing', hasCodeface ? { message: 'CodeFace theme.json 转换需在联网环境核定映射表后支持,当前请转为 skin.json' } : {});
-    }
-    const rel = (p) => p.slice(root.prefix.length);
-    const files = new Set(fileEntries.filter((p) => p.startsWith(root.prefix)).map(rel).filter(Boolean));
-    let manifestRaw;
-    try { manifestRaw = JSON.parse(await readFile(join(tmp, root.prefix, 'skin.json'), 'utf8')); }
-    catch { throw failCode('manifest_invalid', { details: ['skin.json 非法 JSON'] }); }
-    const vm = validateManifest(manifestRaw, files);
-    if (!vm.ok) throw failCode(vm.code, { details: vm.details, name: vm.name });
-    const { manifest, warnings, referenced } = vm;
-
-    // ── 资源层:仅被引用文件落盘;图片字节/像素闸;SVG 清洗;T2 静态校验 ──
-    const keep = new Map(); // 目标名 → { from, content? }
-    for (const name of referenced) {
-      const src = join(tmp, root.prefix, name);
-      if (!isPathInside(src, tmp)) throw failCode('path_traversal');
-      const ext = extname(name).slice(1).toLowerCase();
-      const st = await stat(src).catch(() => null);
-      if (!st) throw failCode('asset_missing', { name });
-      if (ext === 'svg') {
-        const r = sanitizeSvg(await readFile(src, 'utf8'));
-        if (!r.ok) throw failCode('svg_rejected', { name, reason: r.reason });
-        keep.set(name, { content: r.svg });
-      } else if (ext === 'css') {
-        if (st.size > 512 * 1024) throw failCode('asset_too_large', { name });
-        keep.set(name, { from: src });
-      } else if (ext === 'js') {
-        const text = await readFile(src, 'utf8');
-        const r = validateT2Script(text);
-        if (!r.ok) throw failCode('script_rejected', { name, hits: r.hits });
-        keep.set(name, { from: src });
-      } else {
-        if (st.size > limits.maxAssetBytes) throw failCode('asset_too_large', { name });
-        const headBuf = await readFile(src).then((b) => b.subarray(0, 256 * 1024));
-        const dims = imageDimensions(headBuf, ext);
-        if (!dims) throw failCode('image_invalid', { name });
-        if (dims.w > limits.maxImagePx || dims.h > limits.maxImagePx) {
-          throw failCode('image_too_large_px', { name, w: dims.w, h: dims.h });
-        }
-        keep.set(name, { from: src });
-      }
-    }
-    // skin.css/codeface.css 未被引用(T1)时按契约给 css_ignored warning
-    if (manifest.tier !== 2) {
-      for (const f of ['skin.css', 'codeface.css']) {
-        if (files.has(f)) warnings.push({ code: 'css_ignored', key: f, message: `包内 ${f} 已忽略:T1 皮肤不支持自定义 CSS` });
-      }
-    }
-
-    // ── 原子搬入 ~/.claude-gui/skins/<id>/ ──
-    // r26-D6:同 slug 已存在 → 复用其 id 覆盖(rm 旧目录后 rename stage 进去)
-    const existingId = await findExistingSkinId(slugOf(manifest.name), skinsDir);
-    const id = existingId || skinIdFrom(manifest.name);
-    const stage = join(tmpdir(), `cgui-skin-stage-${randomUUID()}`);
-    try {
-      await mkdir(stage, { recursive: true });
-      for (const [name, srcInfo] of keep) {
-        if (srcInfo.content != null) await writeFile(join(stage, name), srcInfo.content, 'utf8');
-        else await writeFile(join(stage, name), await readFile(srcInfo.from));
-      }
-      await writeFile(join(stage, 'skin.json'), JSON.stringify(manifest, null, 2));
-      await writeFile(join(stage, 'meta.json'), JSON.stringify({ source, importedAt: Date.now() }));
-      await mkdir(skinsDir, { recursive: true });
-      const dest = join(skinsDir, id);
-      if (!isPathInside(dest, skinsDir)) throw failCode('internal');
-      if (existingId) await rm(dest, { recursive: true, force: true });
-      await moveStageDir(stage, dest);
-    } catch (e) {
-      await cleanupStage(stage);
-      throw e;
-    }
-    return { id, name: manifest.name, warnings, manifest };
+    return await installUnpacked(tmp, fileEntries, { source, skinsDir, limits });
   } finally {
     await rm(tmp, { recursive: true, force: true }).catch(() => {});
   }
@@ -397,6 +473,25 @@ router.post('/skins/import', async (req, res) => {
     });
   } finally {
     await unlink(tmpZip).catch(() => {});
+  }
+});
+
+// POST /api/skins/import-dir — 文件夹导入(r43):客户端把选中目录逐文件 base64 塞进
+// JSON({ name, files:[{path,dataB64}] };name 仅备查,皮肤名以 skin.json 为准,与 zip 同)。
+// 解析器单独挂大限:30MB 二进制 base64 后约 40MB,全局 25mb 解析器会先拦(index.js 对
+// 本路径让路,全局限额本身不动)。校验/落盘全在 installSkinDirectory,与 zip 共用管线。
+router.post('/skins/import-dir', express.json({ limit: '45mb' }), async (req, res) => {
+  try {
+    const out = await installSkinDirectory(req.body?.files, { source: 'user' });
+    res.status(201).json(out);
+  } catch (err) {
+    const code = err.skinCode || 'internal';
+    if (code === 'internal') console.error('[skins] import-dir failed:', err);
+    res.status(HTTP_OF[code] || 500).json({
+      error: code,
+      message: err.message || ERROR_MESSAGES[code],
+      ...(err.details ? { details: err.details } : {}),
+    });
   }
 });
 
