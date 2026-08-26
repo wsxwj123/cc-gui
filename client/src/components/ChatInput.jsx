@@ -11,7 +11,7 @@ import { isSteered, firstSteerableIndex, isSteerBarrier } from '../utils/steerQu
 import { resolveSelectorModel } from '../utils/routing.js';
 import { effortCapsFor, effortAllowed, effortMemoryKey, useEffortFallback } from '../utils/effortCaps.js';
 import { attachmentBlockReason, buildAttachmentMessage, pendingAttachment, uploadAttachmentFile } from '../utils/attachments.js';
-import { lookupVisionCapability } from '../../../server/utils/vision-capability.js';
+import { attachmentNoVision } from '../../../server/utils/vision-capability.js';
 import { PendingAttachmentList } from './PendingAttachmentList.jsx';
 import { listboxKeyAction, listboxOpenIndex } from '../utils/listboxKeyboard.js';
 
@@ -373,16 +373,14 @@ export function ChatInput({ onSend, onStop, onStopBackground, onAccelerate, canS
   const permissionMode = useStore((s) => (permKey ? (s.permissionModeBySession[permKey] || s.permissionMode) : s.permissionMode));
   const setPermissionMode = useStore((s) => s.setPermissionMode);
   // CI-4/r63:发图黄条判据 —— 与服务端 openai-proxy 的剥图口径对齐。旧判据
-  // /deepseek/i.test(providerHint||baseUrl) 双向皆错:openai 协议下 baseUrl 是回环代理
-  // (127.0.0.1:8788)恒不命中 → 真被剥图时不提示;anthropic 协议 api.deepseek.com/anthropic
-  // 恒命中 → 透传路 image 全量保留却误报"不支持"。
-  // 新口径:仅 openai 协议(只有经 openai-proxy 才存在剥图)+ 会话实际模型(与顶栏显示
-  // 同一 resolveSelectorModel 口径,而非切换时刻的 provider.model)查视觉能力表,
-  // false=确认无视觉才提示;null=查无记录不误报(服务端兜底剥图时仍有占位文本可见)。
-  const noVision = useStore((s) => {
-    if ((s.currentProvider || {}).protocol !== 'openai') return false;
-    return lookupVisionCapability(resolveSelectorModel(s, permKey)) === false;
-  });
+  // (providerHint/baseUrl 含 deepseek 字样即命中)双向皆错:openai 协议下 baseUrl 是
+  // 回环代理(127.0.0.1:8788)恒不命中 → 真被剥图时不提示;anthropic 协议
+  // api.deepseek.com/anthropic 恒命中 → 透传路 image 全量保留却误报"不支持"。
+  // (注释刻意不写旧正则字面量:t10 源断言按字面量咬 revert。)
+  // 新口径:仅 openai 协议 + 会话实际模型(与顶栏显示同一 resolveSelectorModel 口径,
+  // 而非切换时刻的 provider.model)查视觉能力表 —— 判据本体在 attachmentNoVision
+  // (纯函数,check-r63 单测 t10 四方向钉死 + 本文件接线源级断言,revert 即红)。
+  const noVision = useStore((s) => attachmentNoVision((s.currentProvider || {}).protocol, resolveSelectorModel(s, permKey)));
   // While the session is handed off to phone remote control, lock the composer:
   // the hidden `--remote-control` pty owns the session file, so spawning a `-p`
   // turn here would double-write the same jsonl. Reclaim to unlock.

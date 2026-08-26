@@ -7,8 +7,11 @@
 // 会话实际模型(顶栏切换 → --model → body.model)脱钩,误判方向双向都有。
 // 哨兵:S1 tool_result 分支改回拍平 → t1/t2/t5/t7/t9 红;
 //       S2 判定忽略请求 model 参数(回读 upstream.model)→ t4/t5/t6/t9 红;
-//       S3 noVision 时 tool_result 内图片不剥(原样转发)→ t4 红。
+//       S3 noVision 时 tool_result 内图片不剥(原样转发)→ t4 红;
+//       S4 前端黄条判据 revert 回 /deepseek/i.test(providerHint||baseUrl) 或删
+//          openai 协议门控/绕开 attachmentNoVision 内联重写 → t10 红(实测过红)。
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 // 命名空间 import:buildOpenAIRequest 的导出(仅为可单测)缺失时在 t9 给行为级报错,
 // 不让 import 语法错掩盖 t1-t8 的真实红绿(与 check-openai-proxy-thinking.mjs 同手法)。
 import * as proxy from '../../server/services/openai-proxy.js';
@@ -121,5 +124,30 @@ setOpenAIUpstream({ baseURL: 'https://relay.example.com/v1', apiKey: 'test-key',
 }
 
 setOpenAIUpstream(null); // 收尾:不污染同进程后续测试
+
+// ── t10(前端黄条判据,修法3):四方向纯函数 + ChatInput 接线源级断言 ──
+// 旧判据 /deepseek/i.test(providerHint||baseUrl) 双向皆错:openai 协议下 baseUrl 是
+// 回环代理恒不命中(真剥图不提示),anthropic 协议 api.deepseek.com/anthropic 恒命中
+// (透传不剥图却误报)。判据抽为 attachmentNoVision 纯函数;源断言防"绕开纯函数
+// 内联重写/整体 revert"(源级断言先例:check-1m-toggle.mjs)。
+{
+  const { attachmentNoVision } = await import('../../server/utils/vision-capability.js');
+  assert.equal(attachmentNoVision('openai', 'deepseek-v4-flash'), true,
+    't10: openai 协议 + 表判无视觉 → 提示(旧判据 baseUrl=回环恒不命中,此方向漏报)');
+  assert.equal(attachmentNoVision('anthropic', 'deepseek-v4-flash'), false,
+    't10: anthropic 协议透传不剥图 → 不提示(旧判据对 api.deepseek.com 误报)');
+  assert.equal(attachmentNoVision('openai', 'deepseek-v4-flash-vision-exp'), false,
+    't10: openai 协议 + 识图模型 → 不提示');
+  assert.equal(attachmentNoVision('openai', 'totally-unknown-9'), false,
+    't10: 查无记录(null)不误报');
+  assert.equal(attachmentNoVision(undefined, 'deepseek-v4-flash'), false,
+    't10: protocol 缺失(provider 未加载)不提示');
+
+  const src = readFileSync(new URL('../../client/src/components/ChatInput.jsx', import.meta.url), 'utf8');
+  assert.ok(src.includes('attachmentNoVision('),
+    't10: ChatInput 黄条必须经 attachmentNoVision 判定(绕开纯函数内联重写 → 红)');
+  assert.ok(!src.includes('/deepseek/i'),
+    't10: ChatInput 不得残留旧判据 /deepseek/i 正则(revert 回 providerHint/baseUrl 判 → 红)');
+}
 
 console.log('check-r63-vision-toolresult: all passed');

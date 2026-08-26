@@ -5,7 +5,8 @@
 // 维持现状),拿不准的一律不进表(判错成 vision:true 会把 deepseek 这类无视觉上游
 // 的历史图片原样转发 → 400,方向性损失)。
 //
-// r63:从 model-capabilities.js 抽出(那边 re-export,服务端既有 import 路径不变)。
+// r63:从 model-capabilities.js 抽出,消费方(openai-proxy / ChatInput / 单测)直连本模块
+// (不留 re-export:check-model-capabilities t11 按「单文件拷走」验证数据表缺失 fail-safe)。
 // 原因:前端黄条警告(ChatInput)需要与服务端同一份判定口径,而 model-capabilities.js
 // 顶层 import node:fs(思考数据表)无法进 vite bundle —— 本文件必须保持零 node 依赖
 // 的纯函数(client 引 server 纯模块先例:client/src/utils/plan.js → server/utils/plan.js)。
@@ -42,4 +43,14 @@ export function lookupVisionCapability(modelId) {
     }
   }
   return null;
+}
+
+/**
+ * r63:发图黄条判据(ChatInput 唯一调用点,抽纯函数供单测钉牙)。
+ * 仅 openai 协议提示 —— 只有经 openai-proxy 才存在剥图,anthropic 协议透传路
+ * image 全量保留(实测),提示即误报;能力表 false=确认无视觉才提示,
+ * null=查无记录不误报(服务端兜底剥图时仍有占位文本可见)。
+ */
+export function attachmentNoVision(protocol, modelId) {
+  return protocol === 'openai' && lookupVisionCapability(modelId) === false;
 }
