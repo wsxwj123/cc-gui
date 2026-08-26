@@ -291,11 +291,18 @@ jobs:
           done
 
       # 镜像预热(I2):发布完成后主动触发 npmmirror 拉取,把同步窗口从"被动等"变"主动催"。
+      # 必须用 PUT /-/package/<pkg>/syncs —— 这是 npmmirror 唯一的同步触发接口。
+      # 曾经写成 GET 包元数据,实测完全不触发同步:v0.2.354 发布 8 小时后两个平台分包
+      # 在 npmmirror 上仍是 404,Windows 用户走镜像源装只拿到主包,报"没找到当前平台的安装包"。
       # 预热失败不许把 job 弄红 —— 包已经发出去了,镜像迟早会同步。
       - name: Warm npmmirror
         if: steps.npmtoken.outputs.has == 'true'
         continue-on-error: true
         run: |
-          curl -sS -o /dev/null "https://registry.npmmirror.com/@wsxwj123%2fcc-gui-darwin-arm64"
-          curl -sS -o /dev/null "https://registry.npmmirror.com/@wsxwj123%2fcc-gui-win32-x64"
+          for pkg in cc-gui cc-gui-darwin-arm64 cc-gui-win32-x64; do
+            echo -n "sync ${pkg}: "
+            curl -sS -X PUT --max-time 30 \
+              "https://registry.npmmirror.com/-/package/@wsxwj123%2F${pkg}/syncs" || true
+            echo
+          done
           curl -sS -o /dev/null "https://registry.npmmirror.com/@wsxwj123%2fcc-gui"

@@ -169,7 +169,7 @@ Output lands in `src-tauri/target/release/bundle/` (`.dmg` on macOS, `.exe` / `.
 | **macOS says "CC-GUI.app is damaged and can't be opened"** (and Privacy & Security has no **Open Anyway** button — common on macOS 15+) | Not actually damaged — Gatekeeper added a quarantine flag to the unsigned app. In Terminal (no sudo needed): `/usr/bin/xattr -dr com.apple.quarantine "/Applications/CC-GUI.app"`, then double-click again |
 | **`.dmg` won't mount, says "damaged"** (rare; more likely when the file arrived over a non-browser channel) | Clear quarantine on the dmg itself (adjust the path; no sudo needed): `/usr/bin/xattr -dr com.apple.quarantine ~/Downloads/CC-GUI_*.dmg`, then double-click to mount |
 | `xattr` says `option -r not recognized` | A Python `xattr` (from pyenv / conda) shadows the system one on PATH. Use the absolute path `/usr/bin/xattr -dr ...` |
-| `npm i -g @wsxwj123/cc-gui` installs an older version | Registry mirrors can lag a release by ~15 minutes. Retry later, add `--registry=https://registry.npmjs.org`, or use Option B |
+| `npm i -g @wsxwj123/cc-gui` fails with "platform package not found" | Registry mirrors sync on demand, so a fresh release's platform packages may lag or be missing entirely. Install once from the official registry: `npm i -g @wsxwj123/cc-gui@latest --registry=https://registry.npmjs.org`, or use Option B |
 | `cc-gui` collides with another command | Use `npx @wsxwj123/cc-gui` — identical behaviour |
 
 ---

@@ -136,7 +136,7 @@ cc-gui
 
 升级 `npm i -g @wsxwj123/cc-gui@latest`,完全退出 CC-GUI 后再跑一次 `cc-gui` 即换到新版(只升不降)。卸载 `npm rm -g @wsxwj123/cc-gui`。其它系统 / 架构暂不支持,会给出明确提示。
 
-> 刚发版的十几分钟内国内镜像可能还没同步到最新版,稍等再装,或改用方式 B。
+> 镜像源(npmmirror 等)是按需同步的,新版本可能滞后甚至暂缺。若报「没找到当前平台的安装包」,加 `--registry=https://registry.npmjs.org` 用官方源装一次即可。
 
 ### 方式 B:下载安装包(开箱即用)
 
@@ -219,7 +219,7 @@ npm run tauri:build
 | **`.dmg` 双击报「已损坏」**(少数情况,经非浏览器渠道传输时更易出现;从 GitHub 直接下载通常不会) | 对 dmg 文件本身解除隔离(路径换成实际下载位置,不需要 sudo):`/usr/bin/xattr -dr com.apple.quarantine ~/Downloads/CC-GUI_*.dmg`,然后即可双击挂载 |
 | **macOS 提示「CC-GUI.app 已损坏,无法打开」**(且「隐私与安全性」里没有「仍要打开」按钮,macOS 15 后常见) | 同上,是 Gatekeeper 给未公证 app 加的 quarantine 标记,不是真损坏。装进「应用程序」后终端跑一次:`/usr/bin/xattr -dr com.apple.quarantine "/Applications/CC-GUI.app"` 再双击即可(不需要 sudo) |
 | 跑 xattr 报 `option -r not recognized` | 系统的 `xattr` 被 Python 版同名命令(pyenv / conda 自带)抢了 PATH。写绝对路径 `/usr/bin/xattr -dr ...` 即可 |
-| `npm i -g @wsxwj123/cc-gui` 装到的不是最新版 | 国内镜像同步有十几分钟延迟。等一会重装,或 `npm i -g @wsxwj123/cc-gui@latest --registry=https://registry.npmjs.org`,也可直接走方式 B 下载 |
+| `npm i -g @wsxwj123/cc-gui` 报「没找到当前平台的安装包」 | 镜像源按需同步,平台分包可能滞后或暂缺。用官方源装一次:`npm i -g @wsxwj123/cc-gui@latest --registry=https://registry.npmjs.org`,也可直接走方式 B 下载 |
 | `cc-gui` 命令与本机其它工具重名 | 改用 `npx @wsxwj123/cc-gui`,逻辑完全相同 |
 
 ---

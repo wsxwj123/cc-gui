@@ -25,7 +25,7 @@ npm i -g @wsxwj123/cc-gui@latest
 之后完全退出 CC-GUI（macOS 按 Cmd+Q，注意关闭窗口只是最小化到托盘），再执行 `cc-gui` 即自动换到新版并打开。启动器只升不降：若应用内自动更新已装到更高版本，`cc-gui` 只会打开应用，不会降级。
 
 - macOS 升级后若读不到会话记录：到 系统设置 → 隐私与安全性 → 完全磁盘访问，把 CC-GUI 重新勾选一次（macOS 对未签名应用的既有行为，从官网下载覆盖升级同样如此）。
-- 刚发版的十几分钟内国内镜像可能尚未同步，稍后再试，或到 [GitHub Release](https://github.com/wsxwj123/claude-gui/releases) 手动下载。
+- 镜像源（npmmirror 等）按需同步，新版本的平台分包可能滞后甚至暂缺；若报「没找到当前平台的安装包」，加 `--registry=https://registry.npmjs.org` 用官方源装一次即可，或到 [GitHub Release](https://github.com/wsxwj123/claude-gui/releases) 手动下载。
 
 ## 说明
 
