@@ -210,3 +210,92 @@ jobs:
              }}' > latest.json
           cat latest.json
           gh release upload "$TAG" latest.json --repo "$REPO" --clobber
+
+  # r63:npm 分发通道 —— 把 CI 产物组装成主包 + 平台分包并发布到 npm 官方 registry。
+  # 与 release 平级、无依赖边:npm 侧任何失败在拓扑上都不可能阻断 GitHub Release;
+  # 不设 job 级 continue-on-error,发布失败必须让本 job 显红(独立告警,BRIEF 要求)。
+  publish-npm:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    # runner 写死 ubuntu:组装只是拷文件+生成 json,不需要 mac,也避开 bsdtar/GNU tar 差异
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 20
+          # 由 setup-node 生成 .npmrc 并对接 NODE_AUTH_TOKEN,token 从不出现在命令行参数里
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Download all installers
+        uses: actions/download-artifact@v8
+        with:
+          path: dist-artifacts
+
+      # token 守卫:只做空值判断,不打印变量值。未配置(fork 仓库等)= 警告 + 跳过,job 仍绿。
+      - name: Check NPM_TOKEN
+        id: npmtoken
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ -z "$NPM_TOKEN" ]; then
+            msg="::warning::NPM_TOKEN 未配置，跳过 npm 发布"
+            echo "$msg"
+            echo "has=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "has=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Assemble npm packages
+        if: steps.npmtoken.outputs.has == 'true'
+        run: |
+          set -euo pipefail
+          node scripts/build-npm-packages.mjs \
+            --artifacts dist-artifacts --out npm-dist \
+            --version "${GITHUB_REF_NAME#v}" | tee assemble.log
+          tail -n 1 assemble.log > npm-packages.json
+
+      # 私有产物守卫(I7):.local-assembly 只会出现在非 CI 组装的目录里,出现即拒发
+      - name: Refuse local assembly
+        if: steps.npmtoken.outputs.has == 'true'
+        run: |
+          if [ -f npm-dist/.local-assembly ]; then
+            echo "拒绝发布本地组装产物"
+            exit 1
+          fi
+
+      # 逐包发布,顺序 = 组装脚本 packages 数组(平台包在前、主包最后,主包一发布其
+      # optionalDependencies 必然已在)。每包先 npm view 探测(A7 三分支):已存在跳过
+      # (job 可安全重跑);仅 stderr 明确含 404 才发布;其它错误(网络抖动/5xx)直接失败
+      # 并原样打印 —— 否则会被 npm 回一个与真实原因无关的 E403,重跑时人必误判。
+      - name: Publish to npm
+        if: steps.npmtoken.outputs.has == 'true'
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          ver=$(node -e 'console.log(require("./npm-packages.json").version)')
+          node -e 'for (const p of require("./npm-packages.json").packages) console.log(p.name + "\t" + p.dir)' \
+          | while IFS=$'\t' read -r name dir; do
+            if npm view "${name}@${ver}" version >/dev/null 2>view-err.txt; then
+              echo "已存在，跳过：${name}@${ver}"
+            elif grep -qE 'E404|404' view-err.txt; then
+              npm publish "$dir" --access public
+            else
+              echo "npm view 失败(非 404),中止发布:"
+              cat view-err.txt
+              exit 1
+            fi
+          done
+
+      # 镜像预热(I2):发布完成后主动触发 npmmirror 拉取,把同步窗口从"被动等"变"主动催"。
+      # 预热失败不许把 job 弄红 —— 包已经发出去了,镜像迟早会同步。
+      - name: Warm npmmirror
+        if: steps.npmtoken.outputs.has == 'true'
+        continue-on-error: true
+        run: |
+          curl -sS -o /dev/null "https://registry.npmmirror.com/@wsxwj123%2fcc-gui-darwin-arm64"
+          curl -sS -o /dev/null "https://registry.npmmirror.com/@wsxwj123%2fcc-gui-win32-x64"
+          curl -sS -o /dev/null "https://registry.npmmirror.com/@wsxwj123%2fcc-gui"
