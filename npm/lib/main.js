@@ -373,9 +373,10 @@ function main() {
   else runWindows(payload);
 }
 
-// 可测性出口:单测置 CGUI_LAUNCHER_TEST=1 后 require 本文件拿纯函数,不执行主流程。
-// 正常被 bin/cc-gui.js require 时该变量不存在,行为不变。
-if (process.env.CGUI_LAUNCHER_TEST === '1') {
+// 可测性出口:单测置 CGUI_LAUNCHER_TEST=r63-unit-exports 后 require 本文件拿纯函数,
+// 不执行主流程。值取冷僻串而非 '1'(判官建议 6:用户环境误设 =1 之类常见值时,
+// cc-gui 不得静默 no-op 退 0)。正常被 bin/cc-gui.js require 时行为不变。
+if (process.env.CGUI_LAUNCHER_TEST === 'r63-unit-exports') {
   module.exports = { semverGt, readVersionFile, PLATFORMS, STALE_RE };
 } else {
   try {

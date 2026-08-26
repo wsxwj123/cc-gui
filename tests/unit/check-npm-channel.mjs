@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // r63【单测】npm 分发通道纯函数(import 真函数,不 mock):
-//   启动器侧(npm/lib/main.js,CGUI_LAUNCHER_TEST=1 出口):semverGt 只升不降判据、
+//   启动器侧(npm/lib/main.js,CGUI_LAUNCHER_TEST 出口):semverGt 只升不降判据、
 //     平台映射表、陈旧残留目录名正则;
 //   server 侧(server/routes/version-check.js):pickNewestMirrorSnap 取大语义、
 //     isInstalledViaNpm marker 前缀判真、resolveUserNpmRegistry 归一化与回落、
@@ -17,7 +17,7 @@ import { makeTmpHome } from '../acceptance/r26/lib.mjs';
 makeTmpHome('r63-npm-unit'); // version-check 顶层固化 HOME 相关路径,先隔离
 
 const require = createRequire(import.meta.url);
-process.env.CGUI_LAUNCHER_TEST = '1';
+process.env.CGUI_LAUNCHER_TEST = 'r63-unit-exports';
 const launcher = require('../../npm/lib/main.js');
 const vc = await import('../../server/routes/version-check.js');
 const vcSrc = readFileSync(new URL('../../server/routes/version-check.js', import.meta.url), 'utf8');
