@@ -64,30 +64,54 @@ function systemToText(system) {
 const NO_VISION_HOSTS = /deepseek/i;
 const OPENCODE_HOST = /opencode/i;
 const DEEPSEEK_MODEL = /deepseek/i;
-// 判定结果按 `${baseURL}|${model}` 缓存(同会话内不变;setOpenAIUpstream 换上游后
-// key 自然失效重算)。
+// 判定结果按 `${baseURL}|${model}` 缓存(单条即可:同会话内 model 基本不变,变了按新
+// key 重算,正则代价可忽略;setOpenAIUpstream 换上游后 key 自然失效重算)。
 let noVisionCache = { key: null, val: false };
-export function upstreamNoVision() {
+// r63:优先用本次请求体里的 model(body.model)。顶栏换模型只走 --model(纯前端 store),
+// 不重调 /api/provider/switch → 模块级 upstream.model 停在切换时刻的 models[0],按它
+// 判定与会话实际模型脱钩(该放行的被剥、该剥的放行,双向误判)。requestModel 缺失
+// (旧调用点零参 / body 无 model)时回落 upstream.model,行为与旧版逐字一致。
+export function upstreamNoVision(requestModel) {
   if (!upstream?.baseURL) return false;
-  const key = `${upstream.baseURL}|${upstream.model || ''}`;
+  const model = (typeof requestModel === 'string' && requestModel.trim())
+    ? requestModel.trim() : (upstream.model || '');
+  const key = `${upstream.baseURL}|${model}`;
   if (key === noVisionCache.key) return noVisionCache.val;
   let val;
   // 主判据:模型名能力表(true=有视觉/false=无视觉/null=查无记录)
-  const v = lookupVisionCapability(upstream.model);
+  const v = lookupVisionCapability(model);
   if (v !== null) {
     val = !v;
   } else {
     // 兜底:模型查无记录 → 旧 baseURL 正则(原样保留,含 opencode+deepseek 系补判)
     val = NO_VISION_HOSTS.test(upstream.baseURL)
-      || (OPENCODE_HOST.test(upstream.baseURL) && DEEPSEEK_MODEL.test(upstream.model || ''));
+      || (OPENCODE_HOST.test(upstream.baseURL) && DEEPSEEK_MODEL.test(model));
   }
   noVisionCache = { key, val };
   return val;
 }
 
-export function anthropicToOpenAIMessages(messages, system) {
+// 图片剥除占位文本(noVision 上游):顶层 image 分支与 tool_result 内嵌分支共用同一句。
+const NO_VISION_PLACEHOLDER = '[图片已忽略:当前 provider 不支持视觉输入]';
+// anthropic image block → OpenAI image_url part;无法识别的 source 形态返回 null。
+function imageBlockToPart(block) {
+  const source = block?.source || {};
+  if (source.type === 'base64' && source.data) {
+    return {
+      type: 'image_url',
+      image_url: { url: `data:${source.media_type || 'image/png'};base64,${source.data}` },
+    };
+  }
+  if (source.type === 'url' && source.url) {
+    return { type: 'image_url', image_url: { url: source.url } };
+  }
+  return null;
+}
+
+// r63:第三参 model = 本次请求体的 model(见 upstreamNoVision 注释);旧双参调用不变。
+export function anthropicToOpenAIMessages(messages, system, model) {
   const out = [];
-  const noVision = upstreamNoVision();
+  const noVision = upstreamNoVision(model);
   const sys = systemToText(system);
   if (sys) out.push({ role: 'system', content: sys });
 
@@ -130,24 +154,34 @@ export function anthropicToOpenAIMessages(messages, system) {
         const c = block.content;
         let text;
         if (typeof c === 'string') text = c;
-        else if (Array.isArray(c)) text = c.map((p) => (typeof p === 'string' ? p : p?.text || '')).join('\n');
+        else if (Array.isArray(c)) {
+          // r63:GUI 发图真实形态 = `@路径` → 模型调 Read → 图片在 tool_result content
+          // 的 image block 里(顶层 image 分支 GUI 链路走不到)。此前这里无条件拍平成
+          // p?.text||''(image 无 .text → 空串)→ 图片在任何配置下都到不了上游。
+          // OpenAI 协议 role:'tool' 的 content 必须是字符串,图塞不进 tool 消息 —— 通行
+          // 做法:tool 消息留占位文字,图提到 imageParts,随本条 anthropic 消息末尾的
+          // user 多模态消息送达(仍在全部 tool 消息之后,不破坏严格端点「assistant.
+          // tool_calls 后必须紧跟全部 tool 消息」的配对约束,见下方 toolResults 先行注释)。
+          // 剥图判定与顶层 image 分支同一口径(noVision),占位文本同一句。
+          text = c.map((p) => {
+            if (p && typeof p === 'object' && p.type === 'image') {
+              if (noVision) return NO_VISION_PLACEHOLDER;
+              const part = imageBlockToPart(p);
+              if (part) { imageParts.push(part); return '(图片内容见下一条 user 消息)'; }
+            }
+            return typeof p === 'string' ? p : p?.text || '';
+          }).join('\n');
+        }
         else text = c == null ? '' : JSON.stringify(c);
         toolResults.push({ role: 'tool', tool_call_id: block.tool_use_id, content: text });
       } else if (block.type === 'image') {
         if (noVision) {
           // CI-4:deepseek 等无 vision 上游不认 image_url → 剥成文本占位,模型据此说明
           // "看不到图片",整个请求不再 400(前端也会提前提示,这里是兜底)。
-          textParts.push('[图片已忽略:当前 provider 不支持视觉输入]');
+          textParts.push(NO_VISION_PLACEHOLDER);
         } else {
-          const source = block.source || {};
-          if (source.type === 'base64' && source.data) {
-            imageParts.push({
-              type: 'image_url',
-              image_url: { url: `data:${source.media_type || 'image/png'};base64,${source.data}` },
-            });
-          } else if (source.type === 'url' && source.url) {
-            imageParts.push({ type: 'image_url', image_url: { url: source.url } });
-          }
+          const part = imageBlockToPart(block);
+          if (part) imageParts.push(part);
         }
       }
     }
@@ -280,10 +314,11 @@ function anthropicToolsToOpenAI(tools) {
   }));
 }
 
-function buildOpenAIRequest(body) {
+export function buildOpenAIRequest(body) { // export 仅为可单测(r63 接线哨兵)
   const req = {
     model: body.model,
-    messages: anthropicToOpenAIMessages(body.messages, body.system),
+    // r63:透传 body.model —— 视觉判定按本次请求实际模型(而非切换时刻的 upstream.model)
+    messages: anthropicToOpenAIMessages(body.messages, body.system, body.model),
     stream: body.stream !== false,
   };
   if (body.max_tokens) req.max_tokens = body.max_tokens;
