@@ -238,10 +238,10 @@ jobs:
       - name: Check NPM_TOKEN
         id: npmtoken
         env:
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_TOKEN: ${{ secrets.CCGUI }}
         run: |
           if [ -z "$NPM_TOKEN" ]; then
-            msg="::warning::NPM_TOKEN 未配置，跳过 npm 发布"
+            msg="::warning::npm 令牌(secret CCGUI)未配置，跳过 npm 发布"
             echo "$msg"
             echo "has=false" >> "$GITHUB_OUTPUT"
           else
@@ -273,7 +273,7 @@ jobs:
       - name: Publish to npm
         if: steps.npmtoken.outputs.has == 'true'
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NODE_AUTH_TOKEN: ${{ secrets.CCGUI }}
         run: |
           set -euo pipefail
           ver=$(node -e 'console.log(require("./npm-packages.json").version)')
