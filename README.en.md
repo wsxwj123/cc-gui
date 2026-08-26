@@ -72,7 +72,23 @@ Without this the GUI opens but cannot send messages.
 
 ## 2. Install (pick one)
 
-### Option A: Download an installer (easiest)
+### Option A: One-line npm install (best when GitHub is slow or blocked)
+
+The installer bytes ship inside per-platform npm packages, so installing talks to **npm only — never GitHub**. Requires Node.js 20+.
+
+```bash
+npm i -g @wsxwj123/cc-gui
+cc-gui
+```
+
+The first `cc-gui` run installs and launches the app:
+
+- **macOS (Apple Silicon)**: installs to `~/Applications/CC-GUI.app`. Files unpacked by npm carry no quarantine flag, so **no `xattr` step and no "damaged app" prompt**.
+- **Windows (x64)**: silently runs the bundled official installer (per-user, no admin prompt), with a Start Menu entry and normal uninstall.
+
+Upgrade with `npm i -g @wsxwj123/cc-gui@latest`, fully quit CC-GUI, then run `cc-gui` again (it only ever moves forward, never downgrades). Uninstall with `npm rm -g @wsxwj123/cc-gui`. Other platforms are not supported yet and say so explicitly.
+
+### Option B: Download an installer (easiest)
 
 Grab your platform from the [Releases page](https://github.com/wsxwj123/claude-gui/releases/latest):
 
@@ -86,7 +102,7 @@ Grab your platform from the [Releases page](https://github.com/wsxwj123/claude-g
 > - **macOS**: right-click the app → **Open** the first time to bypass Gatekeeper (Apple Silicon only; for Intel Macs build with the `x86_64-apple-darwin` target yourself).
 > - **Windows**: on the SmartScreen prompt click **More info → Run anyway**.
 
-### Option B: Run from source (latest features, recommended)
+### Option C: Run from source (latest features)
 
 **1. Install tooling**
 
@@ -122,7 +138,7 @@ Then open **http://localhost:6677**.
 
 ## 3. Use it from your phone
 
-1. Run the GUI on your computer (Option B).
+1. Run the GUI on your computer (Option C).
 2. Join the machine to your private network with [Tailscale](https://tailscale.com) (or similar).
 3. On your phone, open `http://<computer-tailscale-address>:6677`.
 4. Use the browser's "Add to Home Screen" for a near-native, full-screen experience.
@@ -150,7 +166,11 @@ Output lands in `src-tauri/target/release/bundle/` (`.dmg` on macOS, `.exe` / `.
 | Blank page / can't send | Confirm the `claude` CLI works and Node ≥ 20; delete `client/dist` and `npm run build` again |
 | Code changes not showing | From source you must `npm run build` again (or re-launch `gui.command` / `gui.bat`) |
 | macOS `gui.command` does nothing | Right-click → **Open** once to authorize, or `chmod +x gui.command` |
-| **macOS says "CC-GUI.app is damaged and can't be opened"** (and Privacy & Security has no **Open Anyway** button — common on macOS 15+) | Not actually damaged — Gatekeeper added a quarantine flag to the unsigned app. In Terminal: `sudo xattr -rd com.apple.quarantine "/Applications/CC-GUI.app"` then enter your login password and double-click again |
+| **macOS says "CC-GUI.app is damaged and can't be opened"** (and Privacy & Security has no **Open Anyway** button — common on macOS 15+) | Not actually damaged — Gatekeeper added a quarantine flag to the unsigned app. In Terminal (no sudo needed): `/usr/bin/xattr -dr com.apple.quarantine "/Applications/CC-GUI.app"`, then double-click again |
+| **`.dmg` won't mount, says "damaged"** (rare; more likely when the file arrived over a non-browser channel) | Clear quarantine on the dmg itself (adjust the path; no sudo needed): `/usr/bin/xattr -dr com.apple.quarantine ~/Downloads/CC-GUI_*.dmg`, then double-click to mount |
+| `xattr` says `option -r not recognized` | A Python `xattr` (from pyenv / conda) shadows the system one on PATH. Use the absolute path `/usr/bin/xattr -dr ...` |
+| `npm i -g @wsxwj123/cc-gui` installs an older version | Registry mirrors can lag a release by ~15 minutes. Retry later, add `--registry=https://registry.npmjs.org`, or use Option B |
+| `cc-gui` collides with another command | Use `npx @wsxwj123/cc-gui` — identical behaviour |
 
 ---
 

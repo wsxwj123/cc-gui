@@ -3,6 +3,7 @@
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT"></a>
   <a href="https://github.com/wsxwj123/claude-gui/releases/latest"><img src="https://img.shields.io/github/v/release/wsxwj123/claude-gui" alt="Release"></a>
+  <a href="https://www.npmjs.com/package/@wsxwj123/cc-gui"><img src="https://img.shields.io/npm/v/%40wsxwj123%2Fcc-gui" alt="npm"></a>
   <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Windows-lightgrey" alt="Platform">
   <a href="https://github.com/wsxwj123/claude-gui/stargazers"><img src="https://img.shields.io/github/stars/wsxwj123/claude-gui?style=social" alt="Stars"></a>
 </p>
@@ -117,9 +118,27 @@ GUI 只是 `claude` CLI 的外壳,**唯一硬性前置是装好 Claude Code CLI*
 
 ---
 
-## 二、安装使用(两种方式,任选其一)
+## 二、安装使用(三种方式,任选其一)
 
-### 方式 A:下载安装包(开箱即用)
+### 方式 A:npm 一键安装(网络受限时首选)
+
+安装包字节随 npm 平台分包一起下载,**全程只连 npm,不需要访问 GitHub**;国内配好 npm 镜像源即可正常安装。需要本机已有 Node.js 20+。
+
+```bash
+npm i -g @wsxwj123/cc-gui
+cc-gui
+```
+
+首次运行 `cc-gui` 完成安装并打开应用:
+
+- **macOS(Apple Silicon)**:应用装到 `~/Applications/CC-GUI.app`。npm 解包不带隔离标记,**无需 `xattr` 放行,也不会弹「已损坏」**。
+- **Windows(x64)**:静默运行包内官方安装器(用户级,无管理员弹窗),带开始菜单项、可正常卸载。
+
+升级 `npm i -g @wsxwj123/cc-gui@latest`,完全退出 CC-GUI 后再跑一次 `cc-gui` 即换到新版(只升不降)。卸载 `npm rm -g @wsxwj123/cc-gui`。其它系统 / 架构暂不支持,会给出明确提示。
+
+> 刚发版的十几分钟内国内镜像可能还没同步到最新版,稍等再装,或改用方式 B。
+
+### 方式 B:下载安装包(开箱即用)
 
 到 [Releases 页面](https://github.com/wsxwj123/claude-gui/releases/latest) 下载对应平台:
 
@@ -133,7 +152,7 @@ GUI 只是 `claude` CLI 的外壳,**唯一硬性前置是装好 Claude Code CLI*
 > - **macOS**:首次打开「右键图标 → 打开」绕过 Gatekeeper(仅支持 Apple Silicon,Intel Mac 需自行用 `x86_64-apple-darwin` target 构建)。
 > - **Windows**:弹 SmartScreen 时点「更多信息 → 仍要运行」。
 
-### 方式 B:从源码运行(拿到最新功能,推荐)
+### 方式 C:从源码运行(拿到最新功能)
 
 **1. 装环境**
 
@@ -169,7 +188,7 @@ npm start                    # 启动服务,默认 6677 端口
 
 ## 三、在手机上使用
 
-1. 在电脑上按「方式 B」把 GUI 跑起来。
+1. 在电脑上按「方式 C」把 GUI 跑起来。
 2. 用 [Tailscale](https://tailscale.com)(或其他私有网络)把这台电脑接入你的私有网。
 3. 手机浏览器打开 `http://<电脑的Tailscale地址>:6677`。
 4. 用浏览器的「添加到主屏幕」,获得接近原生 App 的全屏体验。
@@ -197,8 +216,11 @@ npm run tauri:build
 | 打开白屏 / 发不了消息 | 确认 `claude` CLI 能用、Node ≥ 20;删掉 `client/dist` 后重新 `npm run build` |
 | 改了代码不生效 | 源码方式下需重新 `npm run build`(或重新双击 `gui.command` / `gui.bat`) |
 | macOS 双击 `gui.command` 没反应 | 「右键 → 打开」授权一次;或终端 `chmod +x gui.command` |
-| **`.dmg` 双击报「已损坏」**(少数情况,经非浏览器渠道传输时更易出现;从 GitHub 直接下载通常不会) | 对 dmg 文件本身解除隔离(路径换成实际下载位置,不需要 sudo):`xattr -dr com.apple.quarantine ~/Downloads/CC-GUI_*.dmg`,然后即可双击挂载 |
-| **macOS 提示「CC-GUI.app 已损坏,无法打开」**(且「隐私与安全性」里没有「仍要打开」按钮,macOS 15 后常见) | 同上,是 Gatekeeper 给未公证 app 加的 quarantine 标记,不是真损坏。装进「应用程序」后终端跑一次:`xattr -dr com.apple.quarantine "/Applications/CC-GUI.app"` 再双击即可(不需要 sudo) |
+| **`.dmg` 双击报「已损坏」**(少数情况,经非浏览器渠道传输时更易出现;从 GitHub 直接下载通常不会) | 对 dmg 文件本身解除隔离(路径换成实际下载位置,不需要 sudo):`/usr/bin/xattr -dr com.apple.quarantine ~/Downloads/CC-GUI_*.dmg`,然后即可双击挂载 |
+| **macOS 提示「CC-GUI.app 已损坏,无法打开」**(且「隐私与安全性」里没有「仍要打开」按钮,macOS 15 后常见) | 同上,是 Gatekeeper 给未公证 app 加的 quarantine 标记,不是真损坏。装进「应用程序」后终端跑一次:`/usr/bin/xattr -dr com.apple.quarantine "/Applications/CC-GUI.app"` 再双击即可(不需要 sudo) |
+| 跑 xattr 报 `option -r not recognized` | 系统的 `xattr` 被 Python 版同名命令(pyenv / conda 自带)抢了 PATH。写绝对路径 `/usr/bin/xattr -dr ...` 即可 |
+| `npm i -g @wsxwj123/cc-gui` 装到的不是最新版 | 国内镜像同步有十几分钟延迟。等一会重装,或 `npm i -g @wsxwj123/cc-gui@latest --registry=https://registry.npmjs.org`,也可直接走方式 B 下载 |
+| `cc-gui` 命令与本机其它工具重名 | 改用 `npx @wsxwj123/cc-gui`,逻辑完全相同 |
 
 ---
 
