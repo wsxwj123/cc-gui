@@ -10,7 +10,9 @@
 //     npmLagsBehind/npmChannelUnknown 时必须缺席。
 // Run: node tests/unit/check-npm-channel.mjs
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import path from 'node:path';
+import { tmpdir } from 'node:os';
+import { readFileSync, mkdtempSync, mkdirSync, readdirSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { makeTmpHome } from '../acceptance/r26/lib.mjs';
 
@@ -19,6 +21,7 @@ makeTmpHome('r63-npm-unit'); // version-check 顶层固化 HOME 相关路径,先
 const require = createRequire(import.meta.url);
 process.env.CGUI_LAUNCHER_TEST = 'r63-unit-exports';
 const launcher = require('../../npm/lib/main.js');
+const launcherSrc = readFileSync(new URL('../../npm/lib/main.js', import.meta.url), 'utf8');
 const vc = await import('../../server/routes/version-check.js');
 const vcSrc = readFileSync(new URL('../../server/routes/version-check.js', import.meta.url), 'utf8');
 
@@ -71,6 +74,46 @@ t('陈旧残留正则:只认 .cc-gui-{npm,old,lock}-<纯数字pid>', () => {
 t('readVersionFile 读不到/坏 JSON → null(视为未安装,不抛)', () => {
   assert.equal(launcher.readVersionFile('/nonexistent/zzz/package.json'), null);
 });
+
+// ── 启动器:sweepStale 旧版备份保护(05.5 安全审计修订 —— 重要 1) ──
+// 回滚双失败时程序承诺"旧版完整保存在 .cc-gui-old-<pid>,手动改名即可恢复";
+// 用户最自然的下一步就是再跑一次 cc-gui,而 sweepStale 是那一趟的第一件事。
+// 应用本体不在 = 这份备份是唯一恢复源,不许被清掉。
+{
+  const mkCase = (names, withApp) => {
+    const d = mkdtempSync(path.join(tmpdir(), 'cgui-sweep-'));
+    for (const n of names) mkdirSync(path.join(d, n), { recursive: true });
+    if (withApp) mkdirSync(path.join(d, 'CC-GUI.app'), { recursive: true });
+    launcher.sweepStale(d);
+    return readdirSync(d).sort();
+  };
+  const DEAD = 999999; // 超出 macOS pid 上限,process.kill(pid,0) 必然 ESRCH
+
+  t('sweepStale:应用不存在时,死 pid 的 -old- 备份必须留着(唯一恢复源)', () => {
+    assert.deepEqual(mkCase([`.cc-gui-old-${DEAD}`], false), [`.cc-gui-old-${DEAD}`]);
+  });
+  t('sweepStale:应用不存在也照清 -npm-/-lock-(它们不是恢复源,留着纯占地方)', () => {
+    assert.deepEqual(mkCase([`.cc-gui-npm-${DEAD}`, `.cc-gui-lock-${DEAD}`, `.cc-gui-old-${DEAD}`], false),
+      [`.cc-gui-old-${DEAD}`]);
+  });
+  t('sweepStale:应用在位时 -old- 是冗余的 20MB,照清不误', () => {
+    assert.deepEqual(mkCase([`.cc-gui-old-${DEAD}`], true), ['CC-GUI.app']);
+  });
+  t('sweepStale:活 pid 的 -old- 任何情况都不动(别人正在装)', () => {
+    assert.deepEqual(mkCase([`.cc-gui-old-${process.pid}`], true), ['.cc-gui-old-' + process.pid, 'CC-GUI.app']);
+  });
+  t('sweepStale:名字不匹配的目录一律不碰', () => {
+    const keep = ['.cc-gui-backup', '.cc-gui-old-abc', 'MyApp.app'];
+    assert.deepEqual(mkCase(keep, false), keep.slice().sort());
+  });
+  t('runMac 装成功后复扫一次(源码锚:被保护的孤儿备份不许永久残留)', () => {
+    const after = launcherSrc.indexOf('if (result) fail(result.code, result.msg);');
+    const sweeps = [...launcherSrc.matchAll(/^\s*sweepStale\(appsDir\);/gm)].map((m) => m.index);
+    assert.ok(after > 0, 'runMac 结构变了,本条锚点失效');
+    assert.equal(sweeps.length, 2, 'sweepStale 必须调两次:装前一次(保护)+ 装成功后一次(回收)');
+    assert.ok(sweeps[1] > after, '第二次复扫必须在安装成功之后,否则备份保护形同虚设');
+  });
+}
 
 // ── server:pickNewestMirrorSnap ─────────────────────────────
 const snapOf = (tag, src) => ({ tagName: tag, mirrorSource: src });
