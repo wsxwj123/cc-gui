@@ -1107,12 +1107,15 @@ function CcUpdater() {
   // r62:更新任务状态 → UI 的唯一落点(挂载对账与断流续看后的对账共用,别各写一份)。
   const applyUpdateStatus = (d) => {
     if (!d) return;
-    if (d.status === 'done') setResult({ ok: true, done: true });
+    // 判官r62-P2③:对账拿到 done 也要熄更新红点(断流续看后这条路径概率升高)。
+    if (d.status === 'done') { setResult({ ok: true, done: true }); try { window.dispatchEvent(new Event('cgui:recheck-updates')); } catch { /* 非窗口环境 */ } }
     else if (d.status === 'error' && d.error) setResult({ ok: false, error: d.error });
     if (d.restored?.path) setRestoredNote(d.restored.path);
   };
 
   // r62:断流自动续看的次数上限(防 attach 也一断就重连的死循环)。
+  // 口径=【每轮更新总额】:成功续上不回充,只在用户新发起一轮更新时归零——是刻意取舍不是 bug
+  // (15s 心跳已消除主要断因,3 次总额只兜极端网络)。
   const UPDATE_STREAM_MAX_RECONNECT = 3;
   const reconnectRef = useRef(0);
 

@@ -96,4 +96,21 @@ try {
   cleanupDirs(TMP_HOME);
 }
 
+// 判官r62-P2①:心跳清理回归守卫 —— res close 后 interval 必须停(否则常驻 daemon 上
+// 每次开面板都永久残留一个 15s 定时器+整个 res 闭包 = 无界内存泄漏;unref 兜不住)。
+{
+  const { EventEmitter } = await import('node:events');
+  const { startStreamHeartbeat } = await import('../../server/routes/version-check.js');
+  const fake = new EventEmitter();
+  let writes = 0;
+  fake.write = () => { writes += 1; };
+  startStreamHeartbeat(fake, 20);
+  await new Promise((r) => setTimeout(r, 70));
+  assert.ok(writes >= 2, `r62-P2①: 心跳在跑(实际 ${writes})`);
+  fake.emit('close');
+  const at = writes;
+  await new Promise((r) => setTimeout(r, 70));
+  assert.equal(writes, at, 'r62-P2①: close 后 interval 必须停止(write 计数不再增长)');
+}
+
 console.log('PASS check-r62-update-stream');
