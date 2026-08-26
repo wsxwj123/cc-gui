@@ -1,0 +1,16 @@
+{
+  "name": "@wsxwj123/cc-gui",
+  "version": "0.0.0",
+  "description": "CC-GUI — Claude Code 桌面客户端安装器",
+  "license": "MIT",
+  "bin": { "cc-gui": "bin/cc-gui.js" },
+  "engines": { "node": ">=20" },
+  "files": ["bin/", "lib/", "README.md", "LICENSE"],
+  "optionalDependencies": {
+    "@wsxwj123/cc-gui-darwin-arm64": "0.0.0",
+    "@wsxwj123/cc-gui-win32-x64": "0.0.0"
+  },
+  "repository": { "type": "git", "url": "git+https://github.com/wsxwj123/claude-gui.git" },
+  "homepage": "https://github.com/wsxwj123/claude-gui",
+  "publishConfig": { "access": "public", "registry": "https://registry.npmjs.org/" }
+}
