@@ -83,7 +83,7 @@ import { subscribeSkin, getSkinVersion, getSkinState, reconcileSkinOnBoot, watch
 import { resolveSessionDot, completionTracker, subscribeDots, getDotsVersion, RUN_MATRIX_CELLS, runCellDelayMs } from './utils/sessionDots.js';
 import { seedNewSessionDefaults } from './components/UnifiedSidebar.jsx';
 import { PendingAttachmentList } from './components/PendingAttachmentList.jsx';
-import { attachmentBlockReason, attachmentMetaForPersistence, attachmentSidecarNotice, bindDraftAttachmentSidecarsOnInit, buildAttachmentMessage, pendingAttachment, persistAttachmentSidecar, retryAttachmentSidecars, uploadAttachmentFile } from './utils/attachments.js';
+import { attachmentBlockReason, attachmentMetaForPersistence, attachmentSidecarNotice, bindDraftAttachmentSidecarsOnInit, buildAttachmentMessage, pendingAttachment, persistAttachmentSidecar, resendPayloadForMessage, retryAttachmentSidecars, uploadAttachmentFile } from './utils/attachments.js';
 import {
   FolderOpen, MessageSquare, ChevronLeft, ChevronRight, ChevronDown,
   Search, Hash, Layers, BarChart3, ArrowLeft, Plus,
@@ -6671,13 +6671,16 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     // primary visible signal they expect from "重新编辑".
     // 附件消息:回填纯文本(displayText,去掉 @path 附件标签)而非含 @path 的 outbound(msg.text),
     // 并把原附件卡片数据一并带回,让输入框恢复成缩略图/文件名卡片(可删可再加),不再显示裸路径。
+    // r63:composerText 仅供本 edit 分支回填输入框。message/both 的自动重发不得复用它 ——
+    // 一变量两用曾把剥掉 @path 的文本直接发给 CLI(丢附件,回归 90a93f5),重发改走
+    // resendPayloadForMessage(见函数底部)取完整 outbound + meta。
     const hasAttach = Array.isArray(msg.attachments) && msg.attachments.length > 0;
-    const originalText = (hasAttach && msg.displayText !== undefined) ? msg.displayText : (msg.text || '');
-    if (mode === 'edit' && (originalText || hasAttach)) {
+    const composerText = (hasAttach && msg.displayText !== undefined) ? msg.displayText : (msg.text || '');
+    if (mode === 'edit' && (composerText || hasAttach)) {
       // Target THIS pane's composer only (key == its sessionQueueKey). The old
       // untargeted store write + broadcast filled EVERY split pane's input box.
       const targetKey = queueKeyFor(sel);
-      window.dispatchEvent(new CustomEvent('cgui:composer-fill', { detail: { text: originalText, targetKey, editMode: true, attachments: hasAttach ? msg.attachments : undefined } }));
+      window.dispatchEvent(new CustomEvent('cgui:composer-fill', { detail: { text: composerText, targetKey, editMode: true, attachments: hasAttach ? msg.attachments : undefined } }));
       // 非破坏式(#4):只回填输入框 + 记录待回滚目标,绝不在此刻 trim/截断/还原文件。
       // 等用户真正点发送时(handleSend 拦截)才回退;按 Esc 取消则历史毫发无损。
       setPendingEditRollback({ msg, targetKey });
@@ -6828,12 +6831,28 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     if (mode === 'edit') return; // composer was filled at the top of this branch
     // mode === 'message' | 'both': 直接重发原文,等价于"重做本轮"。只有"编辑后重发"(edit)
     // 才回输入框等用户手改。两者区别仅在文件:'both' 已在上面还原快照,'message' 不动文件。
-    if (originalText && handleSendRef.current) {
+    // r63:重发用完整 outbound(msg.text,含 @path)+ 原 meta。守卫判 resendPrompt 而非剥附件
+    // 后的 composerText —— 纯附件消息 displayText 为空,旧守卫会让整条消息裁掉后不重发。
+    const { prompt: resendPrompt, meta: resendMeta } = resendPayloadForMessage(msg);
+    if (resendPrompt && handleSendRef.current) {
       // Bug8:走 resendReplacing —— forceSend 绕过入队门 + 发前轮询本地 ref 等停止落地(≤4s)。
       if (typeof resendText === 'object' && resendText) {
-        resendReplacing(resendText.prompt || originalText, resendText.options || {});
+        resendReplacing(resendText.prompt || resendPrompt, resendText.options || {});
       } else {
-        resendReplacing(resendText || originalText);
+        if (resendMeta?.attachments?.length) {
+          // r63-根因C:附件本体在 tmp 有 7 天 TTL(upload.js sweep),旧消息的文件可能已被清理。
+          // fire-and-forget 如实提示(绝不 await:不阻塞重发时序),不做恢复 —— 前端已无原
+          // File 对象,CLI 读不到时也会自行报错,这里只负责别让用户以为模型看到了附件。
+          fetch('/api/upload/check', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ paths: resendMeta.attachments.map((a) => a?.path).filter(Boolean) }),
+          }).then((r) => r.json()).then((d) => {
+            if (Array.isArray(d?.missing) && d.missing.length) {
+              setProviderSwitchNotice({ text: `${d.missing.length} 个附件文件已被临时目录清理(超过 7 天),本次重发模型将读不到它们。` });
+            }
+          }).catch(() => {});
+        }
+        resendReplacing(resendText || resendPrompt, resendMeta ? { meta: resendMeta } : {});
       }
     }
   }, [chatMessages, messages, fetchMessagesForTab, setLocalMessages, setSelectedSession, getLocalSession, resendReplacing]);
