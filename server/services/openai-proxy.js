@@ -13,7 +13,8 @@
 
 import http from 'node:http';
 import { isCountTokensRequest, estimateInputTokens, recordCountTokensOutcome } from '../utils/context-tokens.js';
-import { lookupModelCapabilities, lookupVisionCapability, EFFORT_IDS } from '../utils/model-capabilities.js';
+import { lookupModelCapabilities, EFFORT_IDS } from '../utils/model-capabilities.js';
+import { lookupVisionCapability } from '../utils/vision-capability.js';
 import { collectRealToolResultIds } from '../utils/tool-result-reconcile.js';
 
 // Fixed loopback port so the ANTHROPIC_BASE_URL written into settings.json

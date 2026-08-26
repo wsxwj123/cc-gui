@@ -11,6 +11,7 @@ import { isSteered, firstSteerableIndex, isSteerBarrier } from '../utils/steerQu
 import { resolveSelectorModel } from '../utils/routing.js';
 import { effortCapsFor, effortAllowed, effortMemoryKey, useEffortFallback } from '../utils/effortCaps.js';
 import { attachmentBlockReason, buildAttachmentMessage, pendingAttachment, uploadAttachmentFile } from '../utils/attachments.js';
+import { lookupVisionCapability } from '../../../server/utils/vision-capability.js';
 import { PendingAttachmentList } from './PendingAttachmentList.jsx';
 import { listboxKeyAction, listboxOpenIndex } from '../utils/listboxKeyboard.js';
 
@@ -371,11 +372,16 @@ export function ChatInput({ onSend, onStop, onStopBackground, onAccelerate, canS
   // no key is supplied (shouldn't happen in normal render).
   const permissionMode = useStore((s) => (permKey ? (s.permissionModeBySession[permKey] || s.permissionMode) : s.permissionMode));
   const setPermissionMode = useStore((s) => s.setPermissionMode);
-  // CI-4:当前 provider 是否无视觉(deepseek 等)。发图会被上游 400(`unknown variant 'image_url'`),
-  // 这里提前提示用户;后端 openai-proxy 也会把图剥成文本占位兜底。
+  // CI-4/r63:发图黄条判据 —— 与服务端 openai-proxy 的剥图口径对齐。旧判据
+  // /deepseek/i.test(providerHint||baseUrl) 双向皆错:openai 协议下 baseUrl 是回环代理
+  // (127.0.0.1:8788)恒不命中 → 真被剥图时不提示;anthropic 协议 api.deepseek.com/anthropic
+  // 恒命中 → 透传路 image 全量保留却误报"不支持"。
+  // 新口径:仅 openai 协议(只有经 openai-proxy 才存在剥图)+ 会话实际模型(与顶栏显示
+  // 同一 resolveSelectorModel 口径,而非切换时刻的 provider.model)查视觉能力表,
+  // false=确认无视觉才提示;null=查无记录不误报(服务端兜底剥图时仍有占位文本可见)。
   const noVision = useStore((s) => {
-    const p = s.currentProvider || {};
-    return /deepseek/i.test(p.providerHint || '') || /deepseek/i.test(p.baseUrl || '');
+    if ((s.currentProvider || {}).protocol !== 'openai') return false;
+    return lookupVisionCapability(resolveSelectorModel(s, permKey)) === false;
   });
   // While the session is handed off to phone remote control, lock the composer:
   // the hidden `--remote-control` pty owns the session file, so spawning a `-p`
@@ -1171,10 +1177,10 @@ export function ChatInput({ onSend, onStop, onStopBackground, onAccelerate, canS
         )}
 
 
-        {/* CI-4:无视觉 provider 下挂了图片 → 提前提示(后端会剥图,不至于 400,但用户该知道) */}
+        {/* CI-4/r63:无视觉模型下挂了图片 → 提前提示(后端会剥图,不至于 400,但用户该知道) */}
         {noVision && attachments.some((a) => a.kind === 'image') && (
           <div className="mb-2 px-2 text-[11px] text-amber-700 font-body leading-snug">
-            ⚠️ 当前 provider 不支持图片(无视觉能力),发送时图片会被忽略、只发文本/文件；需要看图请切换到支持视觉的 provider。
+            ⚠️ 当前模型不支持图片(无视觉能力),发送时图片会被忽略、只发文本/文件；需要识图请切换到支持视觉的模型。
           </div>
         )}
         {/* Attachments — sit above the composer when present */}
