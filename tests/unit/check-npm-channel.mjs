@@ -10,7 +10,9 @@
 //     npmLagsBehind/npmChannelUnknown 时必须缺席。
 // Run: node tests/unit/check-npm-channel.mjs
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import path from 'node:path';
+import { tmpdir } from 'node:os';
+import { readFileSync, writeFileSync, chmodSync, mkdtempSync, mkdirSync, readdirSync, existsSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { makeTmpHome } from '../acceptance/r26/lib.mjs';
 
@@ -19,6 +21,7 @@ makeTmpHome('r63-npm-unit'); // version-check 顶层固化 HOME 相关路径,先
 const require = createRequire(import.meta.url);
 process.env.CGUI_LAUNCHER_TEST = 'r63-unit-exports';
 const launcher = require('../../npm/lib/main.js');
+const launcherSrc = readFileSync(new URL('../../npm/lib/main.js', import.meta.url), 'utf8');
 const vc = await import('../../server/routes/version-check.js');
 const vcSrc = readFileSync(new URL('../../server/routes/version-check.js', import.meta.url), 'utf8');
 
@@ -71,6 +74,132 @@ t('陈旧残留正则:只认 .cc-gui-{npm,old,lock}-<纯数字pid>', () => {
 t('readVersionFile 读不到/坏 JSON → null(视为未安装,不抛)', () => {
   assert.equal(launcher.readVersionFile('/nonexistent/zzz/package.json'), null);
 });
+
+// ── 启动器:sweepStale 旧版备份保护(05.5 安全审计修订 —— 重要 1) ──
+// 回滚双失败时程序承诺"旧版完整保存在 .cc-gui-old-<pid>,手动改名即可恢复";
+// 用户最自然的下一步就是再跑一次 cc-gui,而 sweepStale 是那一趟的第一件事。
+// 应用本体不在 = 这份备份是唯一恢复源,不许被清掉。
+{
+  const mkCase = (names, withApp) => {
+    const d = mkdtempSync(path.join(tmpdir(), 'cgui-sweep-'));
+    for (const n of names) mkdirSync(path.join(d, n), { recursive: true });
+    if (withApp) mkdirSync(path.join(d, 'CC-GUI.app'), { recursive: true });
+    launcher.sweepStale(d);
+    return readdirSync(d).sort();
+  };
+  const DEAD = 999999; // 超出 macOS pid 上限,process.kill(pid,0) 必然 ESRCH
+
+  t('sweepStale:应用不存在时,死 pid 的 -old- 备份必须留着(唯一恢复源)', () => {
+    assert.deepEqual(mkCase([`.cc-gui-old-${DEAD}`], false), [`.cc-gui-old-${DEAD}`]);
+  });
+  t('sweepStale:应用不存在也照清 -npm-/-lock-(它们不是恢复源,留着纯占地方)', () => {
+    assert.deepEqual(mkCase([`.cc-gui-npm-${DEAD}`, `.cc-gui-lock-${DEAD}`, `.cc-gui-old-${DEAD}`], false),
+      [`.cc-gui-old-${DEAD}`]);
+  });
+  t('sweepStale:应用在位时 -old- 是冗余的 20MB,照清不误', () => {
+    assert.deepEqual(mkCase([`.cc-gui-old-${DEAD}`], true), ['CC-GUI.app']);
+  });
+  t('sweepStale:活 pid 的 -old- 任何情况都不动(别人正在装)', () => {
+    assert.deepEqual(mkCase([`.cc-gui-old-${process.pid}`], true), ['.cc-gui-old-' + process.pid, 'CC-GUI.app']);
+  });
+  t('sweepStale:名字不匹配的目录一律不碰', () => {
+    const keep = ['.cc-gui-backup', '.cc-gui-old-abc', 'MyApp.app'];
+    assert.deepEqual(mkCase(keep, false), keep.slice().sort());
+  });
+  t('runMac 装成功后复扫一次(源码锚:被保护的孤儿备份不许永久残留)', () => {
+    const after = launcherSrc.indexOf('if (result) fail(result.code, result.msg);');
+    const sweeps = [...launcherSrc.matchAll(/^\s*sweepStale\(appsDir\);/gm)].map((m) => m.index);
+    assert.ok(after > 0, 'runMac 结构变了,本条锚点失效');
+    assert.equal(sweeps.length, 2, 'sweepStale 必须调两次:装前一次(保护)+ 装成功后一次(回收)');
+    assert.ok(sweeps[1] > after, '第二次复扫必须在安装成功之后,否则备份保护形同虚设');
+  });
+}
+
+// ── 启动器:Windows 应用运行检测(05.5 安全审计修订 —— 重要 2) ──
+// NSIS 静默安装的 PREINSTALL 钩子会 taskkill /F /T 把运行中的 CC-GUI 连同 node 后端、
+// claude CLI 一起强杀。必须先检测、按 mac 同款码 5 拒绝,而不是静默推平用户的长任务。
+// 真调 winAppRunning:把 %SystemRoot% 指到临时目录,在 <它>/System32/tasklist.exe 放假 tasklist
+// (启动器走绝对路径,不再吃 PATH —— 打桩方式必须跟着走,否则测的是别的东西)。mac 上也能跑到全部分支。
+{
+  const ROOT0 = process.env.SystemRoot;
+  const stub = (body) => {
+    const d = mkdtempSync(path.join(tmpdir(), 'cgui-sysroot-'));
+    mkdirSync(path.join(d, 'System32'), { recursive: true });
+    const exe = path.join(d, 'System32', 'tasklist.exe');
+    writeFileSync(exe, '#!/bin/sh\nprintf %s "$*" > "' + d + '/argv"\n' + body);
+    chmodSync(exe, 0o755);
+    process.env.SystemRoot = d;
+    return d;
+  };
+  // winAppRunning 的 fail-open 分支要往 stdout 打一行,收下来断言,顺带别污染测试输出
+  const capture = (fn) => {
+    const orig = process.stdout.write.bind(process.stdout);
+    let out = '';
+    process.stdout.write = (s) => { out += s; return true; };
+    try { return { ret: fn(), out }; } finally { process.stdout.write = orig; }
+  };
+
+  try {
+    t('winAppRunning:tasklist 输出含 CC-GUI.exe → true(正在运行)', () => {
+      const d = stub('echo "CC-GUI.exe   4242 Console   1   180,000 K"\n');
+      const { ret, out } = capture(() => launcher.winAppRunning());
+      assert.equal(ret, true, '应用明明在跑却判成没跑 → 下一步就是 NSIS 强杀它');
+      assert.equal(out, '', '命中时不该打 fail-open 提示');
+      assert.equal(readFileSync(path.join(d, 'argv'), 'utf8'), '/FI IMAGENAME eq CC-GUI.exe /NH',
+        'tasklist 参数必须按契约拼(过滤器写错会恒判"没在跑",检测形同虚设)');
+    });
+    t('winAppRunning:tasklist 说没有匹配任务 → false(照常安装)', () => {
+      stub('echo "信息: 没有运行的任务匹配指定标准。"\n');
+      const { ret, out } = capture(() => launcher.winAppRunning());
+      assert.equal(ret, false, '没在跑还拦着不让装 = 纯骚扰');
+      assert.equal(out, '', 'tasklist 正常工作时不该打"无法确认"');
+    });
+    t('winAppRunning:tasklist 非 0 退出 → fail-open,打提示并继续', () => {
+      stub('exit 1\n');
+      const { ret, out } = capture(() => launcher.winAppRunning());
+      assert.equal(ret, false);
+      assert.equal(out, '无法确认 CC-GUI 是否正在运行，继续安装。\n', '与 mac 的 pgrep fail-open 同一句');
+    });
+    t('winAppRunning:tasklist 根本不存在 → fail-open,不抛(老/裁剪版 Windows)', () => {
+      process.env.SystemRoot = mkdtempSync(path.join(tmpdir(), 'cgui-empty-'));
+      const { ret, out } = capture(() => launcher.winAppRunning());
+      assert.equal(ret, false, '检测工具缺失就把用户永久拦死 = 比不检测更糟');
+      assert.equal(out, '无法确认 CC-GUI 是否正在运行，继续安装。\n');
+    });
+    t('winAppRunning:只认 %SystemRoot%\\System32 的绝对路径,不吃 PATH/当前目录(防同名 exe 劫持)', () => {
+      const d = stub('echo "CC-GUI.exe   4242 Console   1   180,000 K"\n');
+      const PATH0 = process.env.PATH;
+      const cwd0 = process.cwd();
+      const hijack = mkdtempSync(path.join(tmpdir(), 'cgui-hijack-'));
+      writeFileSync(path.join(hijack, 'tasklist.exe'), '#!/bin/sh\ntouch "' + hijack + '/PWNED"\n');
+      chmodSync(path.join(hijack, 'tasklist.exe'), 0o755);
+      try {
+        process.env.PATH = hijack + ':' + PATH0;
+        process.chdir(hijack); // Windows 裸名 spawn 会先搜当前目录 —— 这里就是那个劫持面
+        assert.equal(capture(() => launcher.winAppRunning()).ret, true);
+      } finally { process.chdir(cwd0); process.env.PATH = PATH0; }
+      assert.ok(!existsSync(path.join(hijack, 'PWNED')), '跑的是当前目录/PATH 里的同名 exe,不是系统 tasklist');
+      assert.equal(readFileSync(path.join(d, 'argv'), 'utf8'), '/FI IMAGENAME eq CC-GUI.exe /NH', '跑的应是系统那份');
+    });
+  } finally { process.env.SystemRoot = ROOT0; if (ROOT0 === undefined) delete process.env.SystemRoot; }
+
+  t('winAppRunning 走绝对路径拼装(源码锚:裸名 spawn 在 Windows 先搜当前目录 = 可劫持)', () => {
+    assert.match(launcherSrc, /path\.join\(process\.env\.SystemRoot \|\| 'C:\\\\Windows', 'System32', 'tasklist\.exe'\)/);
+    assert.ok(!/spawnSync\('tasklist'/.test(launcherSrc), '裸名 tasklist 又回来了');
+  });
+  t('runWindows:检测到在跑 → 码 5 + 契约文案,且必须在跑安装器之前(源码锚)', () => {
+    const gate = launcherSrc.indexOf('if (winAppRunning()) {');
+    const msg = launcherSrc.indexOf("fail(5, '检测到 CC-GUI 正在运行，请先退出应用后重试。');");
+    const install = launcherSrc.indexOf("spawnSync(payload, ['/S']");
+    assert.ok(gate > 0, 'runWindows 里没有运行检测闸门 = 静默强杀运行中的应用');
+    assert.ok(msg > gate && msg < install, '码 5 拒绝必须落在闸门内、且在 NSIS 启动之前');
+    assert.ok(install > gate, '先装再检测等于没检测');
+  });
+  t('runWindows:检测排在 S4 只升不降之后(同版本只是打开窗口,不该被要求退出应用)', () => {
+    assert.ok(launcherSrc.indexOf('winLaunch(installedDir);') < launcherSrc.indexOf('if (winAppRunning()) {'),
+      '判据顺序与 mac 不一致:同版本时报"请先退出"是纯骚扰');
+  });
+}
 
 // ── server:pickNewestMirrorSnap ─────────────────────────────
 const snapOf = (tag, src) => ({ tagName: tag, mirrorSource: src });

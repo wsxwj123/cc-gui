@@ -92,12 +92,17 @@ function macInstalledVersion(appRoot) {
 
 // §2.2 陈旧残留自清:名字严格匹配 STALE_RE 且 pid 已死(ESRCH)才删;
 // EPERM(活着但无权限)跳过;任何异常吞掉继续 —— 清理失败不该阻断安装。
+// 旧版备份保护(05.5 安全审计修订):应用本体不在时,`-old-` 是回滚双失败文案
+// 里承诺"手动改名即可恢复"的唯一恢复源,这一趟不许清 —— 用户照提示去找必须还在。
+// 应用就位后(装成功/本来就在)它才真是冗余的 20MB,那时再清(runMac 装成功后复扫一次)。
 const STALE_RE = /^\.cc-gui-(npm|old|lock)-(\d+)$/;
 function sweepStale(appsDir) {
   try {
+    const appAlive = fs.existsSync(path.join(appsDir, 'CC-GUI.app'));
     for (const name of fs.readdirSync(appsDir)) {
       const m = STALE_RE.exec(name);
       if (!m) continue;
+      if (m[1] === 'old' && !appAlive) continue; // 唯一残存的旧版,不清
       let dead = false;
       try { process.kill(parseInt(m[2], 10), 0); } catch (e) { dead = e && e.code === 'ESRCH'; }
       if (dead) rmQuiet(path.join(appsDir, name));
@@ -269,6 +274,9 @@ function runMac(payload) {
   }
   if (result) fail(result.code, result.msg);
 
+  // 装成功 → 应用已就位,首趟被保护的孤儿 `-old-` 此刻才真正冗余,复扫一次回收(否则永久残留 20MB)
+  sweepStale(appsDir);
+
   // S6 成功:写 marker → 报告 → 打开
   writeMarker(appRoot);
   process.stdout.write('已安装到 ' + appRoot + '\n');
@@ -289,6 +297,26 @@ function winCandidates() {
 
 function winInstalledDirVersion(dir) {
   return readVersionFile(path.join(dir, 'resources', '_up_', 'package.json'));
+}
+
+// §2.4 Windows 应用运行检测(05.5 安全审计修订):NSIS 的 PREINSTALL 钩子会
+// `taskkill /F /T` 把运行中的 CC-GUI 连同整棵子进程树(node 后端 → claude CLI → MCP)强杀。
+// 用户敲 cc-gui 的心智是"打开应用",不该因此丢掉正在跑的长任务 —— 与 mac 对称,先拒绝、
+// 把"要不要退出应用"交还用户。tasklist 不可用/异常 → fail-open 同 mac。
+// 走绝对路径(与本文件 /usr/bin/tar 等约定一致):裸名 spawn 在 Windows 会先搜当前工作目录,
+// 用户在含恶意 tasklist.exe 的目录里敲 cc-gui 就被劫持。
+function winAppRunning() {
+  const exe = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'tasklist.exe');
+  try {
+    const r = spawnSync(exe, ['/FI', 'IMAGENAME eq CC-GUI.exe', '/NH'],
+      { encoding: 'utf8', windowsHide: true });
+    if (r.error) throw r.error;
+    if (r.status !== 0) throw new Error('tasklist exit ' + r.status);
+    return String(r.stdout || '').indexOf('CC-GUI.exe') >= 0;
+  } catch {
+    process.stdout.write('无法确认 CC-GUI 是否正在运行，继续安装。\n');
+    return false;
+  }
 }
 
 function winLaunch(dir) {
@@ -315,6 +343,11 @@ function runWindows(payload) {
   if (installed && !semverGt(VERSION, installed)) {
     process.stdout.write('CC-GUI v' + installed + ' 已是最新，正在打开…\n');
     winLaunch(installedDir);
+  }
+
+  // S5b 应用正在运行(判据顺序与 mac 一致:S4 只升不降在前,同版本只是把窗口带到前台,不骚扰)
+  if (winAppRunning()) {
+    fail(5, '检测到 CC-GUI 正在运行，请先退出应用后重试。');
   }
 
   // S6:静默安装(仅传 /S,目录交给 NSIS 沿用/决定);安装原子性由 NSIS 承担。
@@ -377,7 +410,7 @@ function main() {
 // 不执行主流程。值取冷僻串而非 '1'(判官建议 6:用户环境误设 =1 之类常见值时,
 // cc-gui 不得静默 no-op 退 0)。正常被 bin/cc-gui.js require 时行为不变。
 if (process.env.CGUI_LAUNCHER_TEST === 'r63-unit-exports') {
-  module.exports = { semverGt, readVersionFile, PLATFORMS, STALE_RE };
+  module.exports = { semverGt, readVersionFile, PLATFORMS, STALE_RE, sweepStale, winAppRunning };
 } else {
   try {
     main();
