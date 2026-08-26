@@ -96,7 +96,7 @@ function run(command, args) {
 
 const mode = process.argv[2] || 'build';
 const command = mode === 'tauri'
-  ? ['cargo', ['tauri', 'build']]
+  ? ['cargo', ['tauri', 'build', ...process.argv.slice(3)]]
   : mode === 'build'
     ? ['npm', ['run', 'build:local']]
     : null;
