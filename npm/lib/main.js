@@ -299,6 +299,23 @@ function winInstalledDirVersion(dir) {
   return readVersionFile(path.join(dir, 'resources', '_up_', 'package.json'));
 }
 
+// §2.4 Windows 应用运行检测(05.5 安全审计修订):NSIS 的 PREINSTALL 钩子会
+// `taskkill /F /T` 把运行中的 CC-GUI 连同整棵子进程树(node 后端 → claude CLI → MCP)强杀。
+// 用户敲 cc-gui 的心智是"打开应用",不该因此丢掉正在跑的长任务 —— 与 mac 对称,先拒绝、
+// 把"要不要退出应用"交还用户。tasklist 不可用/异常 → fail-open 同 mac。
+function winAppRunning() {
+  try {
+    const r = spawnSync('tasklist', ['/FI', 'IMAGENAME eq CC-GUI.exe', '/NH'],
+      { encoding: 'utf8', windowsHide: true });
+    if (r.error) throw r.error;
+    if (r.status !== 0) throw new Error('tasklist exit ' + r.status);
+    return String(r.stdout || '').indexOf('CC-GUI.exe') >= 0;
+  } catch {
+    process.stdout.write('无法确认 CC-GUI 是否正在运行，继续安装。\n');
+    return false;
+  }
+}
+
 function winLaunch(dir) {
   const exe = path.join(dir, 'CC-GUI.exe');
   if (!fs.existsSync(exe)) {
@@ -323,6 +340,11 @@ function runWindows(payload) {
   if (installed && !semverGt(VERSION, installed)) {
     process.stdout.write('CC-GUI v' + installed + ' 已是最新，正在打开…\n');
     winLaunch(installedDir);
+  }
+
+  // S5b 应用正在运行(判据顺序与 mac 一致:S4 只升不降在前,同版本只是把窗口带到前台,不骚扰)
+  if (winAppRunning()) {
+    fail(5, '检测到 CC-GUI 正在运行，请先退出应用后重试。');
   }
 
   // S6:静默安装(仅传 /S,目录交给 NSIS 沿用/决定);安装原子性由 NSIS 承担。
@@ -385,7 +407,7 @@ function main() {
 // 不执行主流程。值取冷僻串而非 '1'(判官建议 6:用户环境误设 =1 之类常见值时,
 // cc-gui 不得静默 no-op 退 0)。正常被 bin/cc-gui.js require 时行为不变。
 if (process.env.CGUI_LAUNCHER_TEST === 'r63-unit-exports') {
-  module.exports = { semverGt, readVersionFile, PLATFORMS, STALE_RE, sweepStale };
+  module.exports = { semverGt, readVersionFile, PLATFORMS, STALE_RE, sweepStale, winAppRunning };
 } else {
   try {
     main();

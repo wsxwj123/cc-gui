@@ -12,7 +12,7 @@
 import assert from 'node:assert/strict';
 import path from 'node:path';
 import { tmpdir } from 'node:os';
-import { readFileSync, mkdtempSync, mkdirSync, readdirSync } from 'node:fs';
+import { readFileSync, writeFileSync, chmodSync, mkdtempSync, mkdirSync, readdirSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { makeTmpHome } from '../acceptance/r26/lib.mjs';
 
@@ -112,6 +112,70 @@ t('readVersionFile 读不到/坏 JSON → null(视为未安装,不抛)', () => {
     assert.ok(after > 0, 'runMac 结构变了,本条锚点失效');
     assert.equal(sweeps.length, 2, 'sweepStale 必须调两次:装前一次(保护)+ 装成功后一次(回收)');
     assert.ok(sweeps[1] > after, '第二次复扫必须在安装成功之后,否则备份保护形同虚设');
+  });
+}
+
+// ── 启动器:Windows 应用运行检测(05.5 安全审计修订 —— 重要 2) ──
+// NSIS 静默安装的 PREINSTALL 钩子会 taskkill /F /T 把运行中的 CC-GUI 连同 node 后端、
+// claude CLI 一起强杀。必须先检测、按 mac 同款码 5 拒绝,而不是静默推平用户的长任务。
+// 真调 winAppRunning:在 PATH 前面放一个假 tasklist(mac 上也能跑到全部分支)。
+{
+  const PATH0 = process.env.PATH;
+  const stub = (body) => {
+    const d = mkdtempSync(path.join(tmpdir(), 'cgui-tasklist-'));
+    writeFileSync(path.join(d, 'tasklist'), '#!/bin/sh\nprintf %s "$*" > "' + d + '/argv"\n' + body);
+    chmodSync(path.join(d, 'tasklist'), 0o755);
+    process.env.PATH = d + ':' + PATH0;
+    return d;
+  };
+  // winAppRunning 的 fail-open 分支要往 stdout 打一行,收下来断言,顺带别污染测试输出
+  const capture = (fn) => {
+    const orig = process.stdout.write.bind(process.stdout);
+    let out = '';
+    process.stdout.write = (s) => { out += s; return true; };
+    try { return { ret: fn(), out }; } finally { process.stdout.write = orig; }
+  };
+
+  try {
+    t('winAppRunning:tasklist 输出含 CC-GUI.exe → true(正在运行)', () => {
+      const d = stub('echo "CC-GUI.exe   4242 Console   1   180,000 K"\n');
+      const { ret, out } = capture(() => launcher.winAppRunning());
+      assert.equal(ret, true, '应用明明在跑却判成没跑 → 下一步就是 NSIS 强杀它');
+      assert.equal(out, '', '命中时不该打 fail-open 提示');
+      assert.equal(readFileSync(path.join(d, 'argv'), 'utf8'), '/FI IMAGENAME eq CC-GUI.exe /NH',
+        'tasklist 参数必须按契约拼(过滤器写错会恒判"没在跑",检测形同虚设)');
+    });
+    t('winAppRunning:tasklist 说没有匹配任务 → false(照常安装)', () => {
+      stub('echo "信息: 没有运行的任务匹配指定标准。"\n');
+      const { ret, out } = capture(() => launcher.winAppRunning());
+      assert.equal(ret, false, '没在跑还拦着不让装 = 纯骚扰');
+      assert.equal(out, '', 'tasklist 正常工作时不该打"无法确认"');
+    });
+    t('winAppRunning:tasklist 非 0 退出 → fail-open,打提示并继续', () => {
+      stub('exit 1\n');
+      const { ret, out } = capture(() => launcher.winAppRunning());
+      assert.equal(ret, false);
+      assert.equal(out, '无法确认 CC-GUI 是否正在运行，继续安装。\n', '与 mac 的 pgrep fail-open 同一句');
+    });
+    t('winAppRunning:tasklist 根本不存在 → fail-open,不抛(老/裁剪版 Windows)', () => {
+      process.env.PATH = mkdtempSync(path.join(tmpdir(), 'cgui-empty-'));
+      const { ret, out } = capture(() => launcher.winAppRunning());
+      assert.equal(ret, false, '检测工具缺失就把用户永久拦死 = 比不检测更糟');
+      assert.equal(out, '无法确认 CC-GUI 是否正在运行，继续安装。\n');
+    });
+  } finally { process.env.PATH = PATH0; }
+
+  t('runWindows:检测到在跑 → 码 5 + 契约文案,且必须在跑安装器之前(源码锚)', () => {
+    const gate = launcherSrc.indexOf('if (winAppRunning()) {');
+    const msg = launcherSrc.indexOf("fail(5, '检测到 CC-GUI 正在运行，请先退出应用后重试。');");
+    const install = launcherSrc.indexOf("spawnSync(payload, ['/S']");
+    assert.ok(gate > 0, 'runWindows 里没有运行检测闸门 = 静默强杀运行中的应用');
+    assert.ok(msg > gate && msg < install, '码 5 拒绝必须落在闸门内、且在 NSIS 启动之前');
+    assert.ok(install > gate, '先装再检测等于没检测');
+  });
+  t('runWindows:检测排在 S4 只升不降之后(同版本只是打开窗口,不该被要求退出应用)', () => {
+    assert.ok(launcherSrc.indexOf('winLaunch(installedDir);') < launcherSrc.indexOf('if (winAppRunning()) {'),
+      '判据顺序与 mac 不一致:同版本时报"请先退出"是纯骚扰');
   });
 }
 
