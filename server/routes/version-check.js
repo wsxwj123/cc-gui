@@ -867,8 +867,25 @@ export function withRecoveryHint(error, cmd) {
   return isNpmRegistryCmd(cmd) ? `${error}\n若此次中断导致 claude 不可用:重新运行一次更新即可补齐缺失文件。` : error;
 }
 
+// ── r62:长流保活心跳 ─────────────────────────────────────────────────────
+// 用户实报:原生安装器更新真成功了(版本已到位),面板仍红字「更新失败:Load failed」。
+// 根因不在更新,在连接:WKWebView(NSURLSession)对请求有约 60s **无活动**超时,而原生
+// 安装器下载大包时长时间零输出 → 流被内核掐断 → 前端 reader.read() 抛 TypeError。
+// 15s 一帧 ping 让连接始终"有活动";前端 switch 不认识的 type 本就忽略,是纯加帧。
+// 间隔用对象持有仅为可单测(单测不可能真等 15s;同 updateTask 的可注入惯例)。
+export const heartbeat = { ms: 15000 };
+export function startStreamHeartbeat(res, ms = heartbeat.ms) {
+  const timer = setInterval(() => { try { res.write('{"type":"ping"}\n'); } catch {} }, ms);
+  timer.unref?.();
+  const stop = () => clearInterval(timer);
+  res.on('close', stop);   // 客户端断开
+  res.on('finish', stop);  // 任务收尾 res.end()
+  return stop;
+}
+
 router.post('/claude-update/stream', async (req, res) => {
   res.writeHead(200, { 'Content-Type': 'application/x-ndjson', 'Cache-Control': 'no-store' });
+  startStreamHeartbeat(res); // r62:静默期保活(下面所有分支都可能长时间零输出)
 
   // 已有更新在跑 → 挂上去续看(回放已产生的日志),不重复起进程。
   if (updateTask.status === 'running') {
@@ -1028,6 +1045,7 @@ router.post('/claude-update/stream', async (req, res) => {
  */
 router.post('/claude-update/attach', (req, res) => {
   res.writeHead(200, { 'Content-Type': 'application/x-ndjson', 'Cache-Control': 'no-store' });
+  startStreamHeartbeat(res); // r62:续看通道同样会长时间零输出,同样会被 60s 无活动掐断
   if (updateTask.status !== 'running') {
     // r26-C9:任务恰在 GET /status 与 POST /attach 之间结束时,空流会让用户永远看不到
     // 结论 —— 补一帧终态再收尾(前端 doUpdateStream 本就有 done 分支,自动复用)。
