@@ -4,6 +4,7 @@ import { openExternalUrl } from '../utils/openExternal.js';
 import { isTauri } from '../utils/pickDirectory.js';
 import { confirmDialog } from '../utils/confirmDialog.jsx';
 import { desktopNotifyEnabled, NOTIFY_PREF_KEY } from '../utils/desktopNotify.js';
+import { copyText } from '../utils/clipboard.js';
 import { useStore } from '../stores/sessionStore.js';
 import EnvCheckPanel from './EnvCheckPanel.jsx';
 
@@ -630,6 +631,52 @@ function describeAssetTarget(asset, serverPlatform) {
   return null;
 }
 
+// r63:npm 装法(viaNpm)时置于更新卡片最顶部的升级指引块。两个互斥形态,判据只看
+// npmUpgradeCommand 字段在不在("该不该给命令"由后端一处判完,前端不重算):
+//   形态 1(字段存在):升级命令 + 复制按钮 —— npm 通道确实能装到这个版本;
+//   形态 2(字段缺席,npmLagsBehind/npmChannelUnknown):不渲染命令,给手动下载指引 ——
+//   此刻跑那条命令拿到的还是旧版,给无效指令比什么都不说更糟(F1)。
+function NpmUpgradeHint({ state }) {
+  const [copied, setCopied] = useState(false);
+  if (state.viaNpm !== true) return null;
+  const copyCmd = async () => {
+    // 复制内容 = npmUpgradeCommand 原文,不拼接、不加前后缀
+    if (await copyText(state.npmUpgradeCommand)) {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    }
+  };
+  if (state.npmUpgradeCommand) {
+    return (
+      <div className="text-[11px] text-amber-800 bg-amber-100/60 border border-amber-300 rounded p-2 space-y-1.5">
+        <div>你是用 npm 安装的，升级请执行：</div>
+        <div className="flex items-center gap-2">
+          <code className="font-mono bg-amber-50 border border-amber-200 rounded px-1.5 py-1 flex-1 select-all">
+            {state.npmUpgradeCommand}
+          </code>
+          <button
+            onClick={copyCmd}
+            className="px-2 py-1 text-[11px] bg-amber-700 text-white rounded hover:bg-amber-800 shrink-0"
+          >
+            {copied ? '已复制' : '复制命令'}
+          </button>
+        </div>
+        <div>装完后完全退出 CC-GUI（macOS 按 Cmd+Q），再执行 cc-gui 重新打开。</div>
+      </div>
+    );
+  }
+  return (
+    <div className="text-[11px] text-amber-800 bg-amber-100/60 border border-amber-300 rounded p-2 space-y-1">
+      <div>
+        {state.npmChannelUnknown
+          ? '暂时查询不到 npm 通道的最新版本（可能是 registry 不可达）。'
+          : `GitHub 已发布${state.githubLatestVersion ? ` v${state.githubLatestVersion}` : ''}，npm 通道还没同步到这个版本。`}
+      </div>
+      <div>可以过一会儿再来看，或直接到 Release 页手动下载安装。</div>
+    </div>
+  );
+}
+
 function UpdateAvailable({ state }) {
   // status: idle | downloading | done | err
   const [dl, setDl] = useState({ status: 'idle' });
@@ -751,6 +798,9 @@ function UpdateAvailable({ state }) {
 
   return (
     <div className="text-[12px] bg-amber-50 border border-amber-200 text-amber-900 rounded p-2.5 space-y-2">
+      {/* r63:npm 装法的升级指引,置于卡片最顶部(viaMirror 提示之前)。不隐藏、不禁用
+          任何现有按钮 —— 启动器只升不降,两条升级路径不冲突。 */}
+      <NpmUpgradeHint state={state} />
       {/* r26-C4:版本信息来自 jsDelivr 镜像(viaMirror)= GitHub API/直连全败过,
           下方 assets 直链大概率也下不动 —— 先给手动指引,不让用户点了白等。 */}
       {state.viaMirror && (
