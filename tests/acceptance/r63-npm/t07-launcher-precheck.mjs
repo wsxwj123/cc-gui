@@ -60,12 +60,15 @@ else {
 }
 
 if (process.platform !== 'darwin' || process.arch !== 'arm64') skip('S2 平台包缺失', '本机非 darwin/arm64,真机跑此条需 Apple Silicon');
-else await t('S2 平台包缺失 → 码 4 + 两条可执行的出路(重装 / 等镜像同步)', () => {
+else await t('S2 平台包缺失 → 码 4 + 两条可执行的出路(重装 / 换官方源)', () => {
   const r = node([inst.bin], { env: { ...process.env, HOME: inst.home }, cwd: inst.dir });
   assert.equal(r.code, 4, '实际:\n' + r.all);
   assert.ok(r.stderr.includes(`没找到当前平台的安装包（${MACPKG}）`), '实际:\n' + r.stderr);
   assert.ok(r.stderr.includes('npm i -g @wsxwj123/cc-gui@latest'), '得给出重装命令');
-  assert.ok(r.stderr.includes('国内镜像还没同步到这个版本'), '镜像同步窗口内"重装"是无效指令,必须说第二种可能');
+  // 镜像按需同步、可能一直缺,"过一会儿再试"是无效指令 —— 第二条出路必须是能立刻执行的命令
+  assert.ok(r.stderr.includes('镜像源上还没有这个版本的平台包'), '必须点明第二种可能:镜像源缺平台包');
+  assert.ok(r.stderr.includes('--registry=https://registry.npmjs.org'),
+    '光说"是镜像的锅"没用,得给出换官方源的确切命令');
 });
 
 done('t07 启动器前置判定');

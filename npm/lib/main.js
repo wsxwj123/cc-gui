@@ -288,15 +288,36 @@ function runMac(payload) {
 
 // ───────────────────────── Windows ─────────────────────────
 // 候选目录基于 %LOCALAPPDATA%(Tauri NSIS 默认 currentUser 落点;perMachine 目录不可能命中,
-// 已按 A3 删除)。版本文件相对路径 resources\_up_\package.json 待 M0-b 真机取证收敛。
-
+// 已按 A3 删除)。
+//
+// 版本文件路径与主程序名均为 2026-08-26 Windows 真机取证结果(此前是推测,全错):
+//   %LOCALAPPDATA%\CC-GUI\
+//     _up_\package.json      ← 资源直接展开在安装根,**没有** resources\ 这一层(mac 才有
+//                                Contents/Resources/);曾按 mac 类推写成 resources\_up_\,
+//                                导致已装应用永远探测不到 → 装完报"没找到安装目录"
+//     claude-gui.exe          ← 主程序名 = Cargo 包名(src-tauri/Cargo.toml 的 name),
+//                                **不是** productName;productName(CC-GUI)只决定安装目录
+//                                与显示名。mac 侧同理:Contents/MacOS/claude-gui
+//     uninstall.exe
 function winCandidates() {
   const local = process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local');
   return [path.join(local, 'CC-GUI'), path.join(local, 'Programs', 'CC-GUI')];
 }
 
 function winInstalledDirVersion(dir) {
-  return readVersionFile(path.join(dir, 'resources', '_up_', 'package.json'));
+  return readVersionFile(path.join(dir, '_up_', 'package.json'));
+}
+
+// 主程序名优先取 Cargo 包名对应的 claude-gui.exe;万一将来改了包名,回落到"目录里唯一
+// 不是卸载器的 exe"(与 mac 侧遍历 Contents/MacOS 的做法对称,不把名字写死在一处)。
+const WIN_MAIN_EXE = 'claude-gui.exe';
+function winMainExe(dir) {
+  const preferred = path.join(dir, WIN_MAIN_EXE);
+  if (fs.existsSync(preferred)) return preferred;
+  let names = [];
+  try { names = fs.readdirSync(dir); } catch { return preferred; }
+  const found = names.find((n) => /\.exe$/i.test(n) && !/^uninstall/i.test(n));
+  return found ? path.join(dir, found) : preferred;
 }
 
 // §2.4 Windows 应用运行检测(05.5 安全审计修订):NSIS 的 PREINSTALL 钩子会
@@ -308,11 +329,11 @@ function winInstalledDirVersion(dir) {
 function winAppRunning() {
   const exe = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'tasklist.exe');
   try {
-    const r = spawnSync(exe, ['/FI', 'IMAGENAME eq CC-GUI.exe', '/NH'],
+    const r = spawnSync(exe, ['/FI', 'IMAGENAME eq ' + WIN_MAIN_EXE, '/NH'],
       { encoding: 'utf8', windowsHide: true });
     if (r.error) throw r.error;
     if (r.status !== 0) throw new Error('tasklist exit ' + r.status);
-    return String(r.stdout || '').indexOf('CC-GUI.exe') >= 0;
+    return String(r.stdout || '').indexOf(WIN_MAIN_EXE) >= 0;
   } catch {
     process.stdout.write('无法确认 CC-GUI 是否正在运行，继续安装。\n');
     return false;
@@ -320,9 +341,9 @@ function winAppRunning() {
 }
 
 function winLaunch(dir) {
-  const exe = path.join(dir, 'CC-GUI.exe');
+  const exe = winMainExe(dir);
   if (!fs.existsSync(exe)) {
-    fail(4, '安装目录里没找到 CC-GUI.exe：' + dir + '\n' +
+    fail(4, '安装目录里没找到 ' + WIN_MAIN_EXE + '：' + dir + '\n' +
       '请重新安装：npm i -g @wsxwj123/cc-gui@latest，或从 GitHub Release 下载安装包。');
   }
   try {

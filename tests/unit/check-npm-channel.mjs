@@ -25,6 +25,15 @@ const launcherSrc = readFileSync(new URL('../../npm/lib/main.js', import.meta.ur
 const vc = await import('../../server/routes/version-check.js');
 const vcSrc = readFileSync(new URL('../../server/routes/version-check.js', import.meta.url), 'utf8');
 
+// Windows 主程序名 = mainBinaryName ?? Cargo 包名(**不是** productName)。从事实源推导,
+// 别从实现里抄 —— 2026-08-26 前这里锁的是 productName 拼的 "CC-GUI.exe",测试全绿而
+// 真机上根本没有这个进程,运行检测恒判"没在跑"、启动直接找不到 exe。
+const WIN_MAIN_EXE = (() => {
+  const cargo = readFileSync(new URL('../../src-tauri/Cargo.toml', import.meta.url), 'utf8');
+  const conf = JSON.parse(readFileSync(new URL('../../src-tauri/tauri.conf.json', import.meta.url), 'utf8'));
+  return (conf.mainBinaryName || (cargo.match(/^\s*name\s*=\s*"([^"]+)"/m) || [])[1]) + '.exe';
+})();
+
 let failed = 0;
 function t(name, fn) {
   try { fn(); console.log('ok   - ' + name); }
@@ -140,13 +149,13 @@ t('readVersionFile 读不到/坏 JSON → null(视为未安装,不抛)', () => {
   };
 
   try {
-    t('winAppRunning:tasklist 输出含 CC-GUI.exe → true(正在运行)', () => {
-      const d = stub('echo "CC-GUI.exe   4242 Console   1   180,000 K"\n');
+    t(`winAppRunning:tasklist 输出含 ${WIN_MAIN_EXE} → true(正在运行)`, () => {
+      const d = stub(`echo "${WIN_MAIN_EXE}   4242 Console   1   180,000 K"\n`);
       const { ret, out } = capture(() => launcher.winAppRunning());
       assert.equal(ret, true, '应用明明在跑却判成没跑 → 下一步就是 NSIS 强杀它');
       assert.equal(out, '', '命中时不该打 fail-open 提示');
-      assert.equal(readFileSync(path.join(d, 'argv'), 'utf8'), '/FI IMAGENAME eq CC-GUI.exe /NH',
-        'tasklist 参数必须按契约拼(过滤器写错会恒判"没在跑",检测形同虚设)');
+      assert.equal(readFileSync(path.join(d, 'argv'), 'utf8'), `/FI IMAGENAME eq ${WIN_MAIN_EXE} /NH`,
+        'tasklist 过滤器必须是真实主程序名(写成 productName 会恒判"没在跑",检测形同虚设)');
     });
     t('winAppRunning:tasklist 说没有匹配任务 → false(照常安装)', () => {
       stub('echo "信息: 没有运行的任务匹配指定标准。"\n');
@@ -167,7 +176,7 @@ t('readVersionFile 读不到/坏 JSON → null(视为未安装,不抛)', () => {
       assert.equal(out, '无法确认 CC-GUI 是否正在运行，继续安装。\n');
     });
     t('winAppRunning:只认 %SystemRoot%\\System32 的绝对路径,不吃 PATH/当前目录(防同名 exe 劫持)', () => {
-      const d = stub('echo "CC-GUI.exe   4242 Console   1   180,000 K"\n');
+      const d = stub(`echo "${WIN_MAIN_EXE}   4242 Console   1   180,000 K"\n`);
       const PATH0 = process.env.PATH;
       const cwd0 = process.cwd();
       const hijack = mkdtempSync(path.join(tmpdir(), 'cgui-hijack-'));
@@ -179,7 +188,7 @@ t('readVersionFile 读不到/坏 JSON → null(视为未安装,不抛)', () => {
         assert.equal(capture(() => launcher.winAppRunning()).ret, true);
       } finally { process.chdir(cwd0); process.env.PATH = PATH0; }
       assert.ok(!existsSync(path.join(hijack, 'PWNED')), '跑的是当前目录/PATH 里的同名 exe,不是系统 tasklist');
-      assert.equal(readFileSync(path.join(d, 'argv'), 'utf8'), '/FI IMAGENAME eq CC-GUI.exe /NH', '跑的应是系统那份');
+      assert.equal(readFileSync(path.join(d, 'argv'), 'utf8'), `/FI IMAGENAME eq ${WIN_MAIN_EXE} /NH`, '跑的应是系统那份');
     });
   } finally { process.env.SystemRoot = ROOT0; if (ROOT0 === undefined) delete process.env.SystemRoot; }
 

@@ -13,13 +13,14 @@
 !macro NSIS_HOOK_PREINSTALL
   Push $0
 
-  ; 1) 主杀:按 image 名整树杀。productName="CC-GUI" 且未设 mainBinaryName,主程序即
-  ;    "CC-GUI.exe";/T 连带子进程(GUI→node→claude→MCP)。image 名带空格必须加引号。
-  ;    新旧名都杀(r26-A2):升级路径正是从改名前的旧版本来,旧机器上可能还跑着
-  ;    "Claude GUI.exe";杀不到 = 没残留,属正常,幂等无害。
-  nsExec::Exec 'taskkill /F /T /IM "CC-GUI.exe"'
-  Pop $0
-  nsExec::Exec 'taskkill /F /T /IM "Claude GUI.exe"'
+  ; 1) 主杀:按 image 名整树杀,/T 连带子进程(GUI→node→claude→MCP)。
+  ;    进程名 = Cargo 包名(src-tauri/Cargo.toml 的 name = claude-gui),**不是** productName
+  ;    —— 未设 mainBinaryName 时 Tauri 用 Cargo 包名做二进制名,productName(CC-GUI)只决定
+  ;    安装目录与显示名。2026-08-26 Windows 真机取证:安装目录里就是 claude-gui.exe。
+  ;    此前这里杀的是 "CC-GUI.exe" 与旧名 "Claude GUI.exe",两个名字机器上从来不存在
+  ;    (Cargo 包名自 918cdcd 建壳起没改过),整条主杀一直空转 —— 覆盖安装报"无法 write"
+  ;    时真正起作用的只有下面第 2 步。杀不到 = 没残留,属正常,幂等无害。
+  nsExec::Exec 'taskkill /F /T /IM "claude-gui.exe"'
   Pop $0
 
   ; 2) 孤儿兜底:若 Tauri 的 NSIS 模板在本钩子之前已强杀主进程(不带 /T),node 会成孤儿、
@@ -41,7 +42,8 @@
 ;   1) 装旧版 Claude GUI 并启动,开一个会话(拉起后端 node、可能拉起 claude.exe),点关闭(最小化到托盘)。
 ;   2) 直接运行新版 setup.exe 覆盖安装 → 应不再报"无法 write"。
 ;   3) 装完在 PowerShell 跑 `Get-CimInstance Win32_Process | ?{ $_.CommandLine -like '*server*index.js*' }`,
-;      应无旧安装目录的残留 node;`Get-Process 'CC-GUI' -ErrorAction SilentlyContinue` 应为空。
+;      应无旧安装目录的残留 node;`Get-Process 'claude-gui' -ErrorAction SilentlyContinue`
+;      应为空(进程名是 claude-gui,不是 CC-GUI —— 见上面第 1 步的说明)。
 
 !macro NSIS_HOOK_POSTINSTALL
   Push $0

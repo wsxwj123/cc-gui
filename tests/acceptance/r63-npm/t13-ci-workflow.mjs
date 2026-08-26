@@ -34,7 +34,10 @@ await t('【反向】job 级不设 continue-on-error(发布失败必须显红告
 });
 
 await t('NPM_TOKEN 缺失 → 只警告不失败(维护者 fork 后不会莫名其妙红一片)', () => {
-  assert.ok(JOB.includes('::warning::NPM_TOKEN 未配置，跳过 npm 发布'), '缺这条 warning 注解:\n' + JOB);
+  // 不锁死 secret 名(它改过一次:NPM_TOKEN → CCGUI,当时漏改这里,测试一直红着没人看)。
+  // 锁语义:令牌缺失要留下 warning 注解,且明说跳过 npm 发布。
+  assert.match(JOB, /::warning::[^\n]*未配置[^\n]*跳过 npm 发布/,
+    '缺 warning 注解(令牌缺失必须留痕,否则维护者不知道 npm 那半边没发):\n' + JOB);
   assert.ok(/outputs\.\w+\s*==\s*'true'/.test(JOB), '后续步骤必须靠 step output 门控,不能无脑往下走');
 });
 
