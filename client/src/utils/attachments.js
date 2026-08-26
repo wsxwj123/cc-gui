@@ -64,6 +64,18 @@ export function buildAttachmentMessage(text, attachments) {
   return { prompt, meta, displayText: trimmed };
 }
 
+// r63:回滚(仅回退消息/回退消息和文件/重做整轮)自动重发的负载。必须发完整 outbound
+// (msg.text,含"附件:@path"段)并带原 meta —— 不得复用 edit 回填用的 displayText(剥掉了
+// @path),否则 CLI 收不到文件、气泡无卡片、sidecar textHash 对不上(回归 90a93f5 的根因)。
+// prompt === msg.text ⇒ 与原消息 sidecar 条目同 hash,meta 即使在途丢失刷新也能 rehydrate。
+export function resendPayloadForMessage(msg) {
+  const hasAttach = Array.isArray(msg?.attachments) && msg.attachments.length > 0;
+  return {
+    prompt: msg?.text || '',
+    meta: hasAttach ? { attachments: msg.attachments, displayText: msg.displayText || '' } : undefined,
+  };
+}
+
 // localStorage 队列只保存有界 preview。Home 页面仍持有完整内存预览；超过总预算的图片
 // 在恢复/首卡中退化为带 name/path/bytes 的文件卡，绝不把 4MiB 图片膨胀后的 data URL
 // 写进队列。预算按整条消息累计，而非“每附件”，多文件也有明确上限。

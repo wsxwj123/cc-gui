@@ -1,8 +1,8 @@
 import { Router } from 'express';
 import { writeFile, mkdir, readdir, stat, unlink } from 'fs/promises';
-import { createWriteStream } from 'fs';
+import { createWriteStream, existsSync } from 'fs';
 import { pipeline } from 'stream/promises';
-import { extname, join } from 'path';
+import { dirname, extname, join, resolve } from 'path';
 import { tmpdir } from 'os';
 import { randomUUID } from 'crypto';
 
@@ -149,6 +149,21 @@ router.post('/upload', async (req, res) => {
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
+});
+
+// r63-根因C:回滚重发前查附件本体是否还在(上传目录 7 天 TTL + macOS 自身清 /var/folders),
+// 前端据 missing 如实提示"文件已被清理"。只回答 UPLOAD_DIR(cgui-attachments)内的路径 ——
+// 该目录是本路由唯一写入位置;目录外一律不判存在性,不当任意路径探针。
+router.post('/upload/check', (req, res) => {
+  const paths = (Array.isArray(req.body?.paths) ? req.body.paths : [])
+    .filter((p) => typeof p === 'string' && p)
+    .slice(0, 64);
+  const missing = paths.filter((p) => {
+    const full = resolve(p);
+    if (dirname(full) !== UPLOAD_DIR) return false; // 目录外不判,宁可漏报不误报
+    try { return !existsSync(full); } catch { return false; }
+  });
+  res.json({ missing });
 });
 
 export default router;
