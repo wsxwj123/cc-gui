@@ -18,7 +18,9 @@ import { readFileSync } from 'node:fs';
   assert.match(routeBody, /\.\.\.\(snap\.viaMirror \? \{ viaMirror: true \} : \{\}\)/,
     'C4: 响应必须条件透传 viaMirror(snap 带才有、不带没有 —— 字段有无哨兵)');
   // 镜像源仍在产出 viaMirror(上游字段防丢)
-  assert.match(src, /assets: \[\], viaMirror: true \}/, 'C4: fetchJsdelivrLatest 仍产出 viaMirror:true');
+  // (r63) 换锚:fetchJsdelivrLatest 的返回追加了 mirrorSource:'jsdelivr'(排障用新增字段),
+  // viaMirror:true 语义不变,锚放宽以容纳其后的新字段。
+  assert.match(src, /assets: \[\], viaMirror: true[,}]/, 'C4: fetchJsdelivrLatest 仍产出 viaMirror:true');
 }
 
 // ②字段有无语义行为佐证:与响应组装同形的条件展开,带/不带两态
