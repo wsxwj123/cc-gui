@@ -6,7 +6,8 @@
 //       S2 删掉兜底分支 → t3 红;S3 视觉表判反 → t1/t2 红。
 import assert from 'node:assert/strict';
 import { setOpenAIUpstream, upstreamNoVision } from '../../server/services/openai-proxy.js';
-import { lookupVisionCapability } from '../../server/utils/model-capabilities.js';
+// r63:lookupVisionCapability 抽到独立纯模块(前端复用),import 路径随迁
+import { lookupVisionCapability } from '../../server/utils/vision-capability.js';
 
 const judge = (baseURL, model) => { setOpenAIUpstream({ baseURL, apiKey: 'k', model }); return upstreamNoVision(); };
 
