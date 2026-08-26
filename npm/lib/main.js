@@ -299,9 +299,41 @@ function runMac(payload) {
 //                                **不是** productName;productName(CC-GUI)只决定安装目录
 //                                与显示名。mac 侧同理:Contents/MacOS/claude-gui
 //     uninstall.exe
+// 权威落点在注册表,不在 %LOCALAPPDATA%:Tauri 的 installer.nsi 装完写
+//   WriteRegStr SHCTX "Software\Microsoft\Windows\CurrentVersion\Uninstall\CC-GUI" \
+//                     "InstallLocation" "$\"$INSTDIR$\""
+// 而升级时它自己也从注册表读回上次的目录(RestorePreviousInstallLocation)决定装哪 ——
+// 即"装过一次就跟着走"。用户若把应用装在 D 盘,安装会成功而固定候选一个都不命中,
+// 复核就会误报"没找到安装目录"(与 0.2.355 修掉的那个报错长得一样,原因不同)。
+// 键名不依赖 publisher(那是 Software\<MANUFACTURER>\CC-GUI,manufacturer 由 identifier
+// 推导、不稳),卸载项的键名由 productName 定死,更可靠。值带转义双引号,要剥。
+// reg.exe 走绝对路径:裸名 spawn 在 Windows 先搜当前工作目录,可被同名 exe 劫持(同 tasklist)。
+// (不加 process.platform 守卫:与 winAppRunning 一致,靠 stub 的 %SystemRoot%\System32\reg.exe
+//  在 mac 上跑单测;非 Windows 真跑时本函数根本不会被调到 —— winCandidates 只在 runWindows 用。)
+function winRegisteredDir() {
+  const reg = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'reg.exe');
+  const key = 'Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\CC-GUI';
+  for (const hive of ['HKCU', 'HKLM']) {
+    try {
+      const r = spawnSync(reg, ['query', hive + '\\' + key, '/v', 'InstallLocation'],
+        { encoding: 'utf8', windowsHide: true });
+      if (r.error || r.status !== 0) continue;
+      const m = String(r.stdout || '').match(/InstallLocation\s+REG_[A-Z_]+\s+(.+)/);
+      if (!m) continue;
+      const dir = m[1].trim().replace(/^"+|"+$/g, '').trim();
+      if (dir) return dir;
+    } catch {}
+  }
+  return null;
+}
+
 function winCandidates() {
   const local = process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local');
-  return [path.join(local, 'CC-GUI'), path.join(local, 'Programs', 'CC-GUI')];
+  const fixed = [path.join(local, 'CC-GUI'), path.join(local, 'Programs', 'CC-GUI')];
+  const registered = winRegisteredDir();
+  // 注册表那条排第一(它才是安装器认的目录);与固定候选重复时不重复列出。
+  if (!registered || fixed.some((d) => d.toLowerCase() === registered.toLowerCase())) return fixed;
+  return [registered, ...fixed];
 }
 
 function winInstalledDirVersion(dir) {
@@ -433,7 +465,8 @@ function main() {
 // 不执行主流程。值取冷僻串而非 '1'(判官建议 6:用户环境误设 =1 之类常见值时,
 // cc-gui 不得静默 no-op 退 0)。正常被 bin/cc-gui.js require 时行为不变。
 if (process.env.CGUI_LAUNCHER_TEST === 'r63-unit-exports') {
-  module.exports = { semverGt, readVersionFile, PLATFORMS, STALE_RE, sweepStale, winAppRunning };
+  module.exports = { semverGt, readVersionFile, PLATFORMS, STALE_RE, sweepStale, winAppRunning,
+    winRegisteredDir, winCandidates, winMainExe };
 } else {
   try {
     main();

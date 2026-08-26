@@ -192,6 +192,122 @@ t('readVersionFile 读不到/坏 JSON → null(视为未安装,不抛)', () => {
     });
   } finally { process.env.SystemRoot = ROOT0; if (ROOT0 === undefined) delete process.env.SystemRoot; }
 
+// ── 启动器:Windows 安装目录以注册表为准(0.2.356) ──
+// Tauri 的 installer.nsi 装完把 $INSTDIR 写进卸载项的 InstallLocation,升级时它自己又从
+// 注册表读回来决定装哪("装过一次就跟着走")。所以固定的 %LOCALAPPDATA% 两条只是"从没装过"
+// 时的默认;把应用装在 D 盘的用户,安装会成功而固定候选一条都不命中 → 复核误报"没找到
+// 安装目录"(与 0.2.355 修掉的报错长得一样,原因不同)。
+// 打桩:%SystemRoot%/System32/reg.exe 换成假 reg;它的 stdout 由 JS 写进文件再 cat 出来,
+// 免掉在 shell 字面量里转义 Windows 路径反斜杠的地狱。
+{
+  const ROOT0 = process.env.SystemRoot;
+  const LOCAL0 = process.env.LOCALAPPDATA;
+  // hkcu/hklm: null = 该 hive 查不到(reg 退 1);字符串 = reg query 的完整 stdout
+  const stubReg = ({ hkcu = null, hklm = null }) => {
+    const d = mkdtempSync(path.join(tmpdir(), 'cgui-sysroot-reg-'));
+    mkdirSync(path.join(d, 'System32'), { recursive: true });
+    if (hkcu !== null) writeFileSync(path.join(d, 'hkcu.txt'), hkcu);
+    if (hklm !== null) writeFileSync(path.join(d, 'hklm.txt'), hklm);
+    const exe = path.join(d, 'System32', 'reg.exe');
+    writeFileSync(exe, [
+      '#!/bin/sh',
+      'printf "%s\\n" "$*" >> "' + d + '/argv"',
+      'case "$*" in',
+      '  *HKCU*) f="' + d + '/hkcu.txt";;',
+      '  *HKLM*) f="' + d + '/hklm.txt";;',
+      '  *) exit 1;;',
+      'esac',
+      '[ -f "$f" ] || exit 1',
+      'cat "$f"',
+    ].join('\n') + '\n');
+    chmodSync(exe, 0o755);
+    process.env.SystemRoot = d;
+    return d;
+  };
+  // NSIS 写的是带引号的值(WriteRegStr ... "$\"$INSTDIR$\""),真机 reg query 就长这样
+  const regOut = (dir) => '\nHKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\CC-GUI\n' +
+    '    InstallLocation    REG_SZ    "' + dir + '"\n\n';
+  // 固定候选依赖 %LOCALAPPDATA%,钉死它才能断言"第一条是注册表那条"
+  const FAKE_LOCAL = path.join(path.sep, 'fake', 'Local');
+  const FIXED = [path.join(FAKE_LOCAL, 'CC-GUI'), path.join(FAKE_LOCAL, 'Programs', 'CC-GUI')];
+
+  try {
+    process.env.LOCALAPPDATA = FAKE_LOCAL;
+
+    t('winRegisteredDir:读到 InstallLocation → 剥掉 NSIS 写入的双引号', () => {
+      stubReg({ hkcu: regOut('D:\\Apps\\CC-GUI') });
+      assert.equal(launcher.winRegisteredDir(), 'D:\\Apps\\CC-GUI',
+        '不剥引号,后面所有 path.join 都会拼出带引号的废路径');
+    });
+
+    t('winCandidates:注册表目录排第一,固定候选殿后(装在 D 盘也能复核到)', () => {
+      stubReg({ hkcu: regOut('D:\\Apps\\CC-GUI') });
+      const c = launcher.winCandidates();
+      assert.equal(c[0], 'D:\\Apps\\CC-GUI', '注册表才是安装器认的目录,必须先查');
+      assert.deepEqual(c.slice(1), FIXED, '固定候选不能丢:注册表被清过的机器还得靠它');
+    });
+
+    t('winCandidates:注册表值就是默认目录 → 不重复列(错误信息别把同一条打两遍)', () => {
+      stubReg({ hkcu: regOut(FIXED[0]) });
+      assert.deepEqual(launcher.winCandidates(), FIXED);
+    });
+
+    t('winRegisteredDir:HKCU 查不到 → 继续查 HKLM(perMachine / MSI 装的落这儿)', () => {
+      const d = stubReg({ hkcu: null, hklm: regOut('C:\\Program Files\\CC-GUI') });
+      assert.equal(launcher.winRegisteredDir(), 'C:\\Program Files\\CC-GUI');
+      const argv = readFileSync(path.join(d, 'argv'), 'utf8');
+      assert.ok(argv.includes('HKCU') && argv.includes('HKLM'), '两个 hive 都要查,实际:\n' + argv);
+    });
+
+    t('winRegisteredDir:两个 hive 都没有 → null,候选回落固定两条', () => {
+      stubReg({});
+      assert.equal(launcher.winRegisteredDir(), null);
+      assert.deepEqual(launcher.winCandidates(), FIXED);
+    });
+
+    t('winRegisteredDir:reg.exe 根本不存在 → 不抛,回落(裁剪版 Windows / 权限受限)', () => {
+      process.env.SystemRoot = mkdtempSync(path.join(tmpdir(), 'cgui-empty-reg-'));
+      assert.equal(launcher.winRegisteredDir(), null, '查不到注册表就把用户拦死 = 比不查更糟');
+      assert.deepEqual(launcher.winCandidates(), FIXED);
+    });
+
+    t('winRegisteredDir:输出里没有 InstallLocation 行 → null(别把表头/DisplayName 当路径)', () => {
+      stubReg({ hkcu: '\nHKEY_CURRENT_USER\\Software\\...\\CC-GUI\n    DisplayName    REG_SZ    CC-GUI\n' });
+      assert.equal(launcher.winRegisteredDir(), null);
+    });
+
+    t('winRegisteredDir:只认 %SystemRoot%\\System32 的绝对路径(防当前目录同名 reg.exe 劫持)', () => {
+      const d = stubReg({ hkcu: regOut('D:\\Apps\\CC-GUI') });
+      const PATH0 = process.env.PATH;
+      const cwd0 = process.cwd();
+      const hijack = mkdtempSync(path.join(tmpdir(), 'cgui-hijack-reg-'));
+      writeFileSync(path.join(hijack, 'reg.exe'), '#!/bin/sh\ntouch "' + hijack + '/PWNED"\n');
+      chmodSync(path.join(hijack, 'reg.exe'), 0o755);
+      try {
+        process.env.PATH = hijack + ':' + PATH0;
+        process.chdir(hijack); // Windows 裸名 spawn 会先搜当前目录 —— 这就是那个劫持面
+        assert.equal(launcher.winRegisteredDir(), 'D:\\Apps\\CC-GUI');
+      } finally { process.chdir(cwd0); process.env.PATH = PATH0; }
+      assert.ok(!existsSync(path.join(hijack, 'PWNED')), '跑的是当前目录里的假 reg.exe');
+      assert.ok(readFileSync(path.join(d, 'argv'), 'utf8').includes('InstallLocation'), '跑的应是系统那份');
+    });
+  } finally {
+    process.env.SystemRoot = ROOT0; if (ROOT0 === undefined) delete process.env.SystemRoot;
+    process.env.LOCALAPPDATA = LOCAL0; if (LOCAL0 === undefined) delete process.env.LOCALAPPDATA;
+  }
+
+  t('winRegisteredDir 走绝对路径拼装(源码锚,同 tasklist)', () => {
+    assert.match(launcherSrc, /path\.join\(process\.env\.SystemRoot \|\| 'C:\\\\Windows', 'System32', 'reg\.exe'\)/);
+    assert.ok(!/spawnSync\('reg'/.test(launcherSrc), '裸名 reg 又回来了');
+  });
+  t('winCandidates 把注册表排在固定候选之前(源码锚:顺序反了等于没修)', () => {
+    const fn = launcherSrc.slice(launcherSrc.indexOf('function winCandidates'));
+    assert.ok(fn.indexOf('winRegisteredDir()') < fn.indexOf('return [registered'),
+      'winCandidates 必须先取注册表再拼候选表');
+    assert.match(fn, /return \[registered, \.\.\.fixed\]/, '注册表那条必须排第一');
+  });
+}
+
   t('winAppRunning 走绝对路径拼装(源码锚:裸名 spawn 在 Windows 先搜当前目录 = 可劫持)', () => {
     assert.match(launcherSrc, /path\.join\(process\.env\.SystemRoot \|\| 'C:\\\\Windows', 'System32', 'tasklist\.exe'\)/);
     assert.ok(!/spawnSync\('tasklist'/.test(launcherSrc), '裸名 tasklist 又回来了');
