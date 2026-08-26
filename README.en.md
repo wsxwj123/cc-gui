@@ -86,7 +86,29 @@ The first `cc-gui` run installs and launches the app:
 - **macOS (Apple Silicon)**: installs to `~/Applications/CC-GUI.app`. Files unpacked by npm carry no quarantine flag, so **no `xattr` step and no "damaged app" prompt**.
 - **Windows (x64)**: silently runs the bundled official installer (per-user, no admin prompt), with a Start Menu entry and normal uninstall.
 
-Upgrade with `npm i -g @wsxwj123/cc-gui@latest`, fully quit CC-GUI, then run `cc-gui` again (it only ever moves forward, never downgrades). Uninstall with `npm rm -g @wsxwj123/cc-gui`. Other platforms are not supported yet and say so explicitly.
+**Upgrade**: `npm i -g @wsxwj123/cc-gui@latest`, fully quit CC-GUI, then run `cc-gui` again. It only ever moves forward — if the app's own updater already installed a newer build, `cc-gui` just opens it instead of downgrading.
+
+**Uninstall** takes two steps; the first alone leaves the app installed.
+
+**Step 1 — remove the npm package** (launcher + installer bytes, platform package included):
+
+```bash
+npm rm -g @wsxwj123/cc-gui
+```
+
+**Step 2 — remove the app itself.** The npm package is only an installer, so removing it does not touch an already-installed app:
+
+- **macOS**: fully quit CC-GUI (Cmd+Q), then move `~/Applications/CC-GUI.app` to the Trash.
+- **Windows**: Settings → Apps → Installed apps → **CC-GUI** → Uninstall (or run the uninstaller in `%LOCALAPPDATA%\CC-GUI`).
+
+Your data is kept either way:
+
+| Directory | What it is | On uninstall |
+|---|---|---|
+| `~/.claude-gui/` (Windows: `%USERPROFILE%\.claude-gui`) | CC-GUI's own config (providers, skins, network settings) | Delete it if you want a clean slate |
+| `~/.claude/` | **The Claude Code CLI's own directory** (session history, skills, settings) | **Leave it alone** — deleting it breaks `claude` in your terminal too |
+
+Other platforms are not supported yet and say so explicitly.
 
 ### Option B: Download an installer (easiest)
 

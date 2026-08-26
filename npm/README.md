@@ -31,4 +31,21 @@ npm i -g @wsxwj123/cc-gui@latest
 
 - 若 `cc-gui` 命令与本机其它工具重名，可用 `npx @wsxwj123/cc-gui` 执行同一逻辑。
 - GitHub Release 始终是一等下载渠道，npm 通道不可用时请直接下载安装包。
-- 卸载：`npm rm -g @wsxwj123/cc-gui`；macOS 应用本体删除 `~/Applications/CC-GUI.app` 即可，Windows 在系统卸载列表中卸载 CC-GUI。
+
+## 卸载
+
+分两步，只做第一步删不掉应用：
+
+```sh
+npm rm -g @wsxwj123/cc-gui
+```
+
+这一步删掉启动器和安装包字节（平台分包一并删除），但**不会动已经装好的应用**——npm 包只是安装器。第二步删应用本体：
+
+- **macOS**：完全退出 CC-GUI（Cmd+Q），把 `~/Applications/CC-GUI.app` 拖进废纸篓。
+- **Windows**：设置 → 应用 → 已安装的应用 → 找到 **CC-GUI** → 卸载（或到安装目录 `%LOCALAPPDATA%\CC-GUI` 运行卸载程序）。
+
+个人数据默认保留：
+
+- `~/.claude-gui/`（Windows `%USERPROFILE%\.claude-gui`）是 CC-GUI 自己的配置（Provider、皮肤、网络设置等），不想留就删掉。
+- `~/.claude/` 是 **Claude Code CLI 的目录**（会话记录、技能、settings），**卸载 CC-GUI 时不要删** —— 删了终端里的 `claude` 一起受影响。

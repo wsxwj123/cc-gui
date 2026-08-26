@@ -134,7 +134,29 @@ cc-gui
 - **macOS(Apple Silicon)**:应用装到 `~/Applications/CC-GUI.app`。npm 解包不带隔离标记,**无需 `xattr` 放行,也不会弹「已损坏」**。
 - **Windows(x64)**:静默运行包内官方安装器(用户级,无管理员弹窗),带开始菜单项、可正常卸载。
 
-升级 `npm i -g @wsxwj123/cc-gui@latest`,完全退出 CC-GUI 后再跑一次 `cc-gui` 即换到新版(只升不降)。卸载 `npm rm -g @wsxwj123/cc-gui`。其它系统 / 架构暂不支持,会给出明确提示。
+**升级**:`npm i -g @wsxwj123/cc-gui@latest` → 完全退出 CC-GUI → 再跑一次 `cc-gui`(只升不降:应用内自动更新已装到更高版本时,`cc-gui` 只打开不降级)。
+
+**卸载**分两步,只做第一步删不掉应用:
+
+**第 1 步 —— 删 npm 包**(启动器 + 安装包字节,平台分包一并删除):
+
+```bash
+npm rm -g @wsxwj123/cc-gui
+```
+
+**第 2 步 —— 删应用本体**。npm 包只是安装器,删掉它不会动已经装好的应用:
+
+- **macOS**:完全退出 CC-GUI(Cmd+Q),把 `~/Applications/CC-GUI.app` 拖进废纸篓
+- **Windows**:设置 → 应用 → 已安装的应用 → 找到 **CC-GUI** → 卸载(或到安装目录 `%LOCALAPPDATA%\CC-GUI` 运行卸载程序)
+
+个人数据默认保留:
+
+| 目录 | 是什么 | 卸载时 |
+|---|---|---|
+| `~/.claude-gui/`(Windows `%USERPROFILE%\.claude-gui`) | CC-GUI 自己的配置(Provider、皮肤、网络设置等) | 不想留就删 |
+| `~/.claude/` | **Claude Code CLI 的目录**(会话记录、技能、settings) | **别删** —— 那是 CLI 的家,删了终端里的 `claude` 一起遭殃 |
+
+其它系统 / 架构暂不支持,会给出明确提示。
 
 > 镜像源(npmmirror 等)是按需同步的,新版本可能滞后甚至暂缺。若报「没找到当前平台的安装包」,加 `--registry=https://registry.npmjs.org` 用官方源装一次即可。
 
