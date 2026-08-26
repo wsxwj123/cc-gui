@@ -303,9 +303,12 @@ function winInstalledDirVersion(dir) {
 // `taskkill /F /T` 把运行中的 CC-GUI 连同整棵子进程树(node 后端 → claude CLI → MCP)强杀。
 // 用户敲 cc-gui 的心智是"打开应用",不该因此丢掉正在跑的长任务 —— 与 mac 对称,先拒绝、
 // 把"要不要退出应用"交还用户。tasklist 不可用/异常 → fail-open 同 mac。
+// 走绝对路径(与本文件 /usr/bin/tar 等约定一致):裸名 spawn 在 Windows 会先搜当前工作目录,
+// 用户在含恶意 tasklist.exe 的目录里敲 cc-gui 就被劫持。
 function winAppRunning() {
+  const exe = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'tasklist.exe');
   try {
-    const r = spawnSync('tasklist', ['/FI', 'IMAGENAME eq CC-GUI.exe', '/NH'],
+    const r = spawnSync(exe, ['/FI', 'IMAGENAME eq CC-GUI.exe', '/NH'],
       { encoding: 'utf8', windowsHide: true });
     if (r.error) throw r.error;
     if (r.status !== 0) throw new Error('tasklist exit ' + r.status);

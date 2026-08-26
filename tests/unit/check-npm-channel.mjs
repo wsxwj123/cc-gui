@@ -12,7 +12,7 @@
 import assert from 'node:assert/strict';
 import path from 'node:path';
 import { tmpdir } from 'node:os';
-import { readFileSync, writeFileSync, chmodSync, mkdtempSync, mkdirSync, readdirSync } from 'node:fs';
+import { readFileSync, writeFileSync, chmodSync, mkdtempSync, mkdirSync, readdirSync, existsSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { makeTmpHome } from '../acceptance/r26/lib.mjs';
 
@@ -118,14 +118,17 @@ t('readVersionFile 读不到/坏 JSON → null(视为未安装,不抛)', () => {
 // ── 启动器:Windows 应用运行检测(05.5 安全审计修订 —— 重要 2) ──
 // NSIS 静默安装的 PREINSTALL 钩子会 taskkill /F /T 把运行中的 CC-GUI 连同 node 后端、
 // claude CLI 一起强杀。必须先检测、按 mac 同款码 5 拒绝,而不是静默推平用户的长任务。
-// 真调 winAppRunning:在 PATH 前面放一个假 tasklist(mac 上也能跑到全部分支)。
+// 真调 winAppRunning:把 %SystemRoot% 指到临时目录,在 <它>/System32/tasklist.exe 放假 tasklist
+// (启动器走绝对路径,不再吃 PATH —— 打桩方式必须跟着走,否则测的是别的东西)。mac 上也能跑到全部分支。
 {
-  const PATH0 = process.env.PATH;
+  const ROOT0 = process.env.SystemRoot;
   const stub = (body) => {
-    const d = mkdtempSync(path.join(tmpdir(), 'cgui-tasklist-'));
-    writeFileSync(path.join(d, 'tasklist'), '#!/bin/sh\nprintf %s "$*" > "' + d + '/argv"\n' + body);
-    chmodSync(path.join(d, 'tasklist'), 0o755);
-    process.env.PATH = d + ':' + PATH0;
+    const d = mkdtempSync(path.join(tmpdir(), 'cgui-sysroot-'));
+    mkdirSync(path.join(d, 'System32'), { recursive: true });
+    const exe = path.join(d, 'System32', 'tasklist.exe');
+    writeFileSync(exe, '#!/bin/sh\nprintf %s "$*" > "' + d + '/argv"\n' + body);
+    chmodSync(exe, 0o755);
+    process.env.SystemRoot = d;
     return d;
   };
   // winAppRunning 的 fail-open 分支要往 stdout 打一行,收下来断言,顺带别污染测试输出
@@ -158,13 +161,32 @@ t('readVersionFile 读不到/坏 JSON → null(视为未安装,不抛)', () => {
       assert.equal(out, '无法确认 CC-GUI 是否正在运行，继续安装。\n', '与 mac 的 pgrep fail-open 同一句');
     });
     t('winAppRunning:tasklist 根本不存在 → fail-open,不抛(老/裁剪版 Windows)', () => {
-      process.env.PATH = mkdtempSync(path.join(tmpdir(), 'cgui-empty-'));
+      process.env.SystemRoot = mkdtempSync(path.join(tmpdir(), 'cgui-empty-'));
       const { ret, out } = capture(() => launcher.winAppRunning());
       assert.equal(ret, false, '检测工具缺失就把用户永久拦死 = 比不检测更糟');
       assert.equal(out, '无法确认 CC-GUI 是否正在运行，继续安装。\n');
     });
-  } finally { process.env.PATH = PATH0; }
+    t('winAppRunning:只认 %SystemRoot%\\System32 的绝对路径,不吃 PATH/当前目录(防同名 exe 劫持)', () => {
+      const d = stub('echo "CC-GUI.exe   4242 Console   1   180,000 K"\n');
+      const PATH0 = process.env.PATH;
+      const cwd0 = process.cwd();
+      const hijack = mkdtempSync(path.join(tmpdir(), 'cgui-hijack-'));
+      writeFileSync(path.join(hijack, 'tasklist.exe'), '#!/bin/sh\ntouch "' + hijack + '/PWNED"\n');
+      chmodSync(path.join(hijack, 'tasklist.exe'), 0o755);
+      try {
+        process.env.PATH = hijack + ':' + PATH0;
+        process.chdir(hijack); // Windows 裸名 spawn 会先搜当前目录 —— 这里就是那个劫持面
+        assert.equal(capture(() => launcher.winAppRunning()).ret, true);
+      } finally { process.chdir(cwd0); process.env.PATH = PATH0; }
+      assert.ok(!existsSync(path.join(hijack, 'PWNED')), '跑的是当前目录/PATH 里的同名 exe,不是系统 tasklist');
+      assert.equal(readFileSync(path.join(d, 'argv'), 'utf8'), '/FI IMAGENAME eq CC-GUI.exe /NH', '跑的应是系统那份');
+    });
+  } finally { process.env.SystemRoot = ROOT0; if (ROOT0 === undefined) delete process.env.SystemRoot; }
 
+  t('winAppRunning 走绝对路径拼装(源码锚:裸名 spawn 在 Windows 先搜当前目录 = 可劫持)', () => {
+    assert.match(launcherSrc, /path\.join\(process\.env\.SystemRoot \|\| 'C:\\\\Windows', 'System32', 'tasklist\.exe'\)/);
+    assert.ok(!/spawnSync\('tasklist'/.test(launcherSrc), '裸名 tasklist 又回来了');
+  });
   t('runWindows:检测到在跑 → 码 5 + 契约文案,且必须在跑安装器之前(源码锚)', () => {
     const gate = launcherSrc.indexOf('if (winAppRunning()) {');
     const msg = launcherSrc.indexOf("fail(5, '检测到 CC-GUI 正在运行，请先退出应用后重试。');");
