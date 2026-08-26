@@ -185,6 +185,21 @@ export async function resolveUserNpmRegistry() { // export 仅为可单测
   return url;
 }
 
+// 分支 B 的 npm 通道查询缓存(判官建议 5):与 GitHub 缓存同 5min TTL,免得每次
+// "检查更新"都实查 registry(网络差时白等 8s)。按 registryUrl 键控,用户改源即失效;
+// 查询失败不缓存(下次重查)。
+let npmGuiSnapCache = null; // { url, snap, at }
+async function fetchNpmChannelGuiLatestCached() {
+  const url = await resolveUserNpmRegistry();
+  const now = Date.now();
+  if (npmGuiSnapCache && npmGuiSnapCache.url === url && now - npmGuiSnapCache.at < CACHE_TTL_MS) {
+    return npmGuiSnapCache.snap;
+  }
+  const snap = await fetchNpmChannelGuiLatest(url);
+  npmGuiSnapCache = { url, snap, at: now };
+  return snap;
+}
+
 // 两个镜像 snap 取版本号最大的那个;相等时返回 npmmirror 侧(国内用户下载链路一致)。
 // 【调用点硬约束】只允许在非 npm 装法的兜底链(resolveGitHubSnap)里使用 —— npm 装法的
 // latestVersion 绝不经过它,否则 GitHub 更高的版本会重新胜出,F1 假命令死循环复活。
@@ -276,7 +291,7 @@ router.get('/version-check', async (req, res) => {
     // 分支 B(F1 核心):给 npm 用户显示的"最新版本"必须是他跑升级命令实际能装到的版本。
     // npm 通道与 GitHub 链并行发起,互不阻塞;GitHub 结果只作参考值,不参与 hasUpdate。
     const [npmR, ghR] = await Promise.allSettled([
-      resolveUserNpmRegistry().then((reg) => fetchNpmChannelGuiLatest(reg)),
+      fetchNpmChannelGuiLatestCached(),
       resolveGitHubSnap(),
     ]);
     const gh = ghR.status === 'fulfilled' ? ghR.value : { snap: null, error: String(ghR.reason?.message || ghR.reason || 'fetch failed') };
