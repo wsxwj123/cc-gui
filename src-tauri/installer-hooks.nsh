@@ -63,6 +63,10 @@
   StrCmp $0 "0" cgui_node_ok cgui_node_missing
 
   cgui_node_missing:
+    ; r63:静默安装(/S)下 MessageBox 不会被 NSIS 自动抑制,会挂在一个用户永远看不见的
+    ; 模态框上 —— npm 启动器的 setup.exe /S 和应用内 passive 自动更新都走静默路径,
+    ; 必须显式跳过(检测不到 node 时运行时另有原生报错框兜底,提示不丢)。
+    IfSilent cgui_node_ok
     MessageBox MB_OKCANCEL|MB_ICONEXCLAMATION \
       "CC-GUI 需要 Node.js 才能运行,但未检测到。$\r$\n$\r$\n点「确定」打开 Node.js 官方下载页,安装后再启动 CC-GUI。$\r$\n$\r$\n(若你确信已安装:可能是为当前用户/版本管理器安装,安装器检测不到,可忽略——重启电脑后启动即可。)" \
       IDOK cgui_open_node IDCANCEL cgui_node_ok
