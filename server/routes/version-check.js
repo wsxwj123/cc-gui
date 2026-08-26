@@ -167,7 +167,7 @@ async function fetchNpmChannelGuiLatest(registryUrl) {
 // 直接查它是唯一零猜测的口径;取不到回落 npmmirror(行为退化为只查镜像,不会更差)。
 let npmRegistryCache = null;
 let npmRegistryCachedAt = 0;
-async function resolveUserNpmRegistry() {
+export async function resolveUserNpmRegistry() { // export 仅为可单测
   const now = Date.now();
   if (npmRegistryCache && now - npmRegistryCachedAt < CACHE_TTL_MS) return npmRegistryCache;
   let url = '';

@@ -90,12 +90,13 @@ function macInstalledVersion(appRoot) {
   return readVersionFile(path.join(appRoot, MAC_VERSION_REL));
 }
 
-// §2.2 陈旧残留自清:名字严格匹配 ^\.cc-gui-(npm|old|lock)-\d+$ 且 pid 已死(ESRCH)才删;
+// §2.2 陈旧残留自清:名字严格匹配 STALE_RE 且 pid 已死(ESRCH)才删;
 // EPERM(活着但无权限)跳过;任何异常吞掉继续 —— 清理失败不该阻断安装。
+const STALE_RE = /^\.cc-gui-(npm|old|lock)-(\d+)$/;
 function sweepStale(appsDir) {
   try {
     for (const name of fs.readdirSync(appsDir)) {
-      const m = /^\.cc-gui-(npm|old|lock)-(\d+)$/.exec(name);
+      const m = STALE_RE.exec(name);
       if (!m) continue;
       let dead = false;
       try { process.kill(parseInt(m[2], 10), 0); } catch (e) { dead = e && e.code === 'ESRCH'; }
@@ -372,11 +373,17 @@ function main() {
   else runWindows(payload);
 }
 
-try {
-  main();
-} catch (e) {
-  // 通用兜底(码 1):不吞任何异常,原样带出错误信息
-  process.stderr.write('CC-GUI 启动失败：' + (e && e.message || e) + '\n' +
-    '请到 https://github.com/wsxwj123/claude-gui/issues 反馈，附上上面这行信息。\n');
-  process.exit(1);
+// 可测性出口:单测置 CGUI_LAUNCHER_TEST=1 后 require 本文件拿纯函数,不执行主流程。
+// 正常被 bin/cc-gui.js require 时该变量不存在,行为不变。
+if (process.env.CGUI_LAUNCHER_TEST === '1') {
+  module.exports = { semverGt, readVersionFile, PLATFORMS, STALE_RE };
+} else {
+  try {
+    main();
+  } catch (e) {
+    // 通用兜底(码 1):不吞任何异常,原样带出错误信息
+    process.stderr.write('CC-GUI 启动失败：' + (e && e.message || e) + '\n' +
+      '请到 https://github.com/wsxwj123/claude-gui/issues 反馈，附上上面这行信息。\n');
+    process.exit(1);
+  }
 }
