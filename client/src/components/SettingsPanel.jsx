@@ -1104,12 +1104,26 @@ function CcUpdater() {
     return doUpdateStream();
   };
 
+  // r62:更新任务状态 → UI 的唯一落点(挂载对账与断流续看后的对账共用,别各写一份)。
+  const applyUpdateStatus = (d) => {
+    if (!d) return;
+    if (d.status === 'done') setResult({ ok: true, done: true });
+    else if (d.status === 'error' && d.error) setResult({ ok: false, error: d.error });
+    if (d.restored?.path) setRestoredNote(d.restored.path);
+  };
+
+  // r62:断流自动续看的次数上限(防 attach 也一断就重连的死循环)。
+  const UPDATE_STREAM_MAX_RECONNECT = 3;
+  const reconnectRef = useRef(0);
+
   // r13-p2-21:流消费单独成函数 —— 首次发起与「重开面板续看」共用同一条链路。
   // r22-③:attach=true 走【只续看、绝不 spawn】的 /attach 入口。原来两者都打 /stream
   // (会启动安装的那个),而这个参数根本没人读 —— 更新恰好在 GET /status 与这次 POST
   // 之间跑完,用户只是打开设置面板就静默起了一次全局安装,毫无确认。
   const doUpdateStream = async ({ attach = false, allowCrossChannel = false } = {}) => {
     setUpdateRunning(true);
+    if (!attach) reconnectRef.current = 0; // 新一轮更新,重连额度归零
+    let sawFinal = false; // 本条流是否给出了结论(done/error)
     try {
       // r26-C1:跨渠道确认回执随请求体下发;服务端无回执的裸调用一律拒绝(409/error 帧)。
       const r = await fetch(attach ? '/api/claude-update/attach' : '/api/claude-update/stream', allowCrossChannel
@@ -1129,7 +1143,7 @@ function CcUpdater() {
           let ev; try { ev = JSON.parse(ln); } catch { continue; }
           if (ev.type === 'log') setLogLines((p) => [...p.slice(-200), ev.line]);
           else if (ev.type === 'start') setLogLines((p) => [...p, `$ ${ev.command}`]);
-          else if (ev.type === 'error') setResult({ ok: false, error: ev.error });
+          else if (ev.type === 'error') { sawFinal = true; setResult({ ok: false, error: ev.error }); }
           // r12-①c:更新流尾的自动回钉回执 → 日志一行 + 顶部回执横幅 + 刷新安装列表。
           else if (ev.type === 'override-restored') {
             setLogLines((p) => [...p, `✓ 已自动恢复你的手动指定:${ev.path}${ev.version ? ` (v${ev.version})` : ''}`]);
@@ -1137,6 +1151,7 @@ function CcUpdater() {
             loadInstalls();
           }
           else if (ev.type === 'done') {
+            sawFinal = true;
             // r34-③:done 无条件覆盖 result —— 取消/兜底超时刚推的 error(含恢复指引)
             // 会被「命令退出码 null」盖掉。服务端已在 done 帧带上 error,优先用它。
             setResult(ev.code === 0
@@ -1147,7 +1162,21 @@ function CcUpdater() {
           }
         }
       }
+      // r62:attach 流没给结论(更新已完成退出、服务端已回 idle)→ 走既有对账拿结果,
+      // 否则用户停在"正在更新"永远等不到回执。
+      if (attach && !sawFinal) {
+        try { applyUpdateStatus(await (await fetch('/api/claude-update/status')).json()); } catch {}
+      }
     } catch (e) {
+      // r62:断流 ≠ 更新失败。WKWebView 约 60s 无活动就掐断请求,而原生安装器下大包时
+      // 长时间零输出 —— 用户看到「更新失败:Load failed」,实际更新照常跑完并成功。
+      // 进程归服务端持有,先自动改走【只续看、绝不 spawn】的 attach 通道对账,连不上
+      // 3 次才认输报错(「改用终端更新」兜底照旧)。
+      if (reconnectRef.current < UPDATE_STREAM_MAX_RECONNECT) {
+        reconnectRef.current += 1;
+        setLogLines((p) => [...p, `连接中断,正在续看更新进度…(第 ${reconnectRef.current}/${UPDATE_STREAM_MAX_RECONNECT} 次)`]);
+        return doUpdateStream({ attach: true });
+      }
       setResult({ ok: false, error: e.message || '请求失败' });
     }
     setUpdating(false);
@@ -1218,9 +1247,7 @@ function CcUpdater() {
       if (cancelled || !d) return;
       if (Array.isArray(d.log) && d.log.length) setLogLines(d.log.slice(-200));
       if (d.running) { setUpdating(true); doUpdateStream({ attach: true }); return; }
-      if (d.status === 'done') setResult({ ok: true, done: true });
-      else if (d.status === 'error' && d.error) setResult({ ok: false, error: d.error });
-      if (d.restored?.path) setRestoredNote(d.restored.path);
+      applyUpdateStatus(d);
     }).catch(() => {});
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
