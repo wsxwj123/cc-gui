@@ -171,6 +171,8 @@ console.log('check-update-detect: all passed (r14-1)');
   // 免代理兜底源:GitHub 全挂时仍能问出"有没有新版"
   assert.match(src, /async function fetchJsdelivrLatest\(\)/, 't4: 备用版本源');
   assert.match(src, /data\.jsdelivr\.com\/v1\/packages\/gh\//, 't4: jsDelivr 元数据接口(墙内免代理可达)');
-  assert.match(src, /snap = await fetchJsdelivrLatest\(\);/, 't4: GitHub 全败后接管');
+  // (r63) 换锚:jsDelivr 单点兜底改为 npmmirror ∥ jsDelivr 并行取大(PLAN §2.2 ③),
+  // 语义不变:GitHub 全败后仍由免代理镜像接管,jsDelivr 仍在兜底链里。
+  assert.match(src, /Promise\.allSettled\(\[\s*fetchNpmChannelGuiLatest\('https:\/\/registry\.npmmirror\.com'\),\s*fetchJsdelivrLatest\(\),/, 't4: GitHub 全败后接管(r63 两源并行取大)');
   assert.match(src, /无法连接 GitHub 与备用源/, 't4: 两条路都断才报错,文案说清');
 }

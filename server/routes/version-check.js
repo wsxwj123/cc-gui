@@ -4,7 +4,7 @@ import { resolveClaudeAsync, listClaudeInstallsAsync, getClaudeOverride, setClau
 import { scanAllTools, nodeMeets, NODE_MIN_MAJOR, probeNpm } from '../utils/env-scanner.js';
 import { gfetch } from '../utils/github-fetch.js'; // r14-1:GitHub 直连失败/限流自动走本机代理
 import { fileURLToPath } from 'url';
-import { dirname, join } from 'path';
+import { dirname, join, resolve, sep } from 'path';
 import { tmpdir, homedir } from 'os';
 import { execFile, spawn } from 'child_process';
 import { createConnection } from 'net';
@@ -119,7 +119,7 @@ async function fetchJsdelivrLatest() {
   // 该接口按语义化版本降序返回,取第一个;仍做一次 semver 兜底比较防顺序变化。
   const latest = normalizeJsdelivrVersions(versions);
   if (!latest) throw new Error('jsDelivr 未返回版本');
-  return { tagName: `v${latest}`, htmlUrl: `https://github.com/wsxwj123/claude-gui/releases/tag/v${latest}`, publishedAt: null, assets: [], viaMirror: true };
+  return { tagName: `v${latest}`, htmlUrl: `https://github.com/wsxwj123/claude-gui/releases/tag/v${latest}`, publishedAt: null, assets: [], viaMirror: true, mirrorSource: 'jsdelivr' };
 }
 
 async function fetchGitHubLatest() {
@@ -143,50 +143,169 @@ async function fetchGitHubLatest() {
   };
 }
 
+// ── r63:npm 分发通道版本源(CC-GUI 自身,与下方 claude CLI 的更新渠道无关) ──
+// 命名硬约束:本函数必须叫 fetchNpmChannelGuiLatest —— 文件下方已有的 fetchNpmLatest()
+// 查的是【claude CLI】在 npm 上的最新版,两者不得混用、不得复用、不得重命名对方。
+async function fetchNpmChannelGuiLatest(registryUrl) {
+  const base = String(registryUrl || '').replace(/\/+$/, '');
+  // 裸 fetch,不走 gfetch、不注入本机代理:用户的 registry 本来就是他能直连的那个,
+  // 走代理只会更慢或更容易失败(INTERFACE §4.1)。
+  const r = await fetch(`${base}/@wsxwj123%2fcc-gui`, {
+    headers: { 'Accept': 'application/vnd.npm.install-v1+json', 'User-Agent': 'claude-gui-version-check' },
+    signal: AbortSignal.timeout(8000),
+  });
+  if (!r.ok) throw new Error(`npm registry ${r.status}`);
+  const d = await r.json();
+  const latest = d && d['dist-tags'] ? String(d['dist-tags'].latest || '') : '';
+  if (!/^\d+\.\d+\.\d+$/.test(latest)) throw new Error('npm registry 未返回合法 dist-tags.latest');
+  let host = 'npm';
+  try { host = new URL(base).host; } catch { /* base 非法时保底 host,不炸 */ }
+  return { tagName: `v${latest}`, htmlUrl: `https://github.com/wsxwj123/claude-gui/releases/tag/v${latest}`, publishedAt: null, assets: [], viaMirror: true, mirrorSource: `npm:${host}` };
+}
+
+// 取用户本机 npm registry(npm config get registry):用户执行 `npm i -g` 走的就是它,
+// 直接查它是唯一零猜测的口径;取不到回落 npmmirror(行为退化为只查镜像,不会更差)。
+let npmRegistryCache = null;
+let npmRegistryCachedAt = 0;
+async function resolveUserNpmRegistry() {
+  const now = Date.now();
+  if (npmRegistryCache && now - npmRegistryCachedAt < CACHE_TTL_MS) return npmRegistryCache;
+  let url = '';
+  try {
+    // Windows 上 npm 是 npm.cmd,execFile 不能直接执行,经 cmd.exe /c(与 getClaudeVersion 同款)
+    const r = process.platform === 'win32'
+      ? await execFileP('cmd.exe', ['/c', 'npm', 'config', 'get', 'registry'], { timeout: 8000 })
+      : await execFileP('npm', ['config', 'get', 'registry'], { timeout: 8000 });
+    url = String(r.stdout || '').trim();
+  } catch { url = ''; }
+  if (!/^https?:\/\/\S+$/.test(url)) url = 'https://registry.npmmirror.com';
+  url = url.replace(/\/+$/, '');
+  npmRegistryCache = url;
+  npmRegistryCachedAt = now;
+  return url;
+}
+
+// 两个镜像 snap 取版本号最大的那个;相等时返回 npmmirror 侧(国内用户下载链路一致)。
+// 【调用点硬约束】只允许在非 npm 装法的兜底链(resolveGitHubSnap)里使用 —— npm 装法的
+// latestVersion 绝不经过它,否则 GitHub 更高的版本会重新胜出,F1 假命令死循环复活。
+// 纯函数,export 仅为可单测。
+export function pickNewestMirrorSnap(snaps) {
+  const valid = (Array.isArray(snaps) ? snaps : []).filter(
+    (s) => s && typeof s.tagName === 'string' && /^v?\d+\.\d+\.\d+$/.test(s.tagName)
+  );
+  if (!valid.length) return null;
+  return valid.reduce((a, b) => {
+    const va = a.tagName.replace(/^v/, '');
+    const vb = b.tagName.replace(/^v/, '');
+    if (semverGt(vb, va)) return b;
+    if (semverGt(va, vb)) return a;
+    return a.mirrorSource === 'jsdelivr' ? b : a; // 相等 → npmmirror 侧胜出
+  });
+}
+
+// npm 装法判据(INTERFACE §4.4):marker 存在且当前 server 目录落在 marker.appPath 之下。
+// 只有 marker 会误报(用户后来改用 dmg 装到 /Applications,marker 还在),前缀校验自证。
+// 纯函数,export 仅为可单测。
+export function isInstalledViaNpm(marker, serverDir) {
+  if (!marker || typeof marker !== 'object' || typeof marker.appPath !== 'string' || !marker.appPath) return false;
+  let app = resolve(marker.appPath);
+  let dir = resolve(String(serverDir || ''));
+  if (process.platform === 'win32') {
+    app = app.toLowerCase();
+    dir = dir.toLowerCase();
+  }
+  return dir.startsWith(app + sep);
+}
+
+// marker 读取:文件不存在/无权限/坏 JSON 一律 null → viaNpm false,绝不让接口报错或变慢。
+function readNpmInstallMarker() {
+  try {
+    const obj = JSON.parse(readFileSync(join(homedir(), '.claude-gui', 'npm-install.json'), 'utf-8'));
+    return obj && typeof obj === 'object' ? obj : null;
+  } catch { return null; }
+}
+
+// GitHub 主链 + 镜像兜底(原 route 内联逻辑原样抽出;r63 把 jsDelivr 单点兜底改为
+// npmmirror ∥ jsDelivr 并行取大)。返回 { snap, staleError } 或 { snap:null, error }。
+async function resolveGitHubSnap() {
+  const now = Date.now();
+  // TTL 内复用缓存,避开 GitHub 60/hr rate limit
+  if (cache && now - cachedAt < CACHE_TTL_MS) return { snap: cache, staleError: null };
+  try {
+    const snap = await fetchGitHubLatest();
+    cache = snap;
+    cachedAt = now;
+    return { snap, staleError: null };
+  } catch (err) {
+    // r14-2:GitHub(含本机代理回落)全败 → 免代理镜像兜底,让"没开代理的机器"也能知道
+    // 有没有新版。r63:npmmirror(查 @wsxwj123/cc-gui 的 dist-tags)与 jsDelivr 并行,
+    // pickNewestMirrorSnap 取版本号最大 —— 仅此兜底链使用取大语义。
+    const settled = await Promise.allSettled([
+      fetchNpmChannelGuiLatest('https://registry.npmmirror.com'),
+      fetchJsdelivrLatest(),
+    ]);
+    const picked = pickNewestMirrorSnap(settled.map((s) => (s.status === 'fulfilled' ? s.value : null)));
+    if (picked) {
+      cache = picked;
+      cachedAt = now;
+      return { snap: picked, staleError: null };
+    }
+    // 403 / 网络失败 — 有旧缓存就用旧缓存(stale-while-error),没有就报错。
+    // r14-1:失败原因必须可见 —— 原来静默复用旧缓存,用户只看到"没反应",
+    // 分不清"真没新版"还是"连不上 GitHub"(墙内最常见)。
+    const why = /fetch failed|ENOTFOUND|ETIMEDOUT|ECONNREFUSED|network/i.test(String(err.message || ''))
+      ? '无法连接 GitHub 与备用源(墙内通常需要开启代理)'
+      : (err.status === 403 ? 'GitHub 接口限流(匿名 60 次/小时),稍后重试' : (err.message || 'fetch failed'));
+    if (cache) return { snap: cache, staleError: why };
+    return { snap: null, error: why };
+  }
+}
+
 router.get('/version-check', async (req, res) => {
   const currentVersion = getCurrentVersion();
+  // r63:npm 装法判定(纯本地读文件,不发网络请求)。viaNpm 在所有响应分支都出现。
+  const viaNpm = isInstalledViaNpm(readNpmInstallMarker(), __dirname);
   if (!currentVersion) {
-    return res.json({ currentVersion: null, error: '无法读取本地版本(package.json)' });
+    return res.json({ currentVersion: null, viaNpm, error: '无法读取本地版本(package.json)' });
   }
 
   let snap;
   let staleError = null; // r14-1:用了旧缓存时的失败原因(前端可提示"结果可能过期")
-  const now = Date.now();
-  // TTL 内复用缓存,避开 GitHub 60/hr rate limit
-  if (cache && now - cachedAt < CACHE_TTL_MS) {
-    snap = cache;
-  } else {
-    try {
-      snap = await fetchGitHubLatest();
-      cache = snap;
-      cachedAt = now;
-    } catch (err) {
-      // r14-2:GitHub(含本机代理回落)全败 → 免代理的 jsDelivr 兜底,
-      // 让"没开代理的机器"也能知道有没有新版。
-      try {
-        snap = await fetchJsdelivrLatest();
-        cache = snap;
-        cachedAt = now;
-      } catch { /* 镜像也失败 → 走下面的旧缓存/报错分支 */ }
-      if (!snap) {
-        // 403 / 网络失败 — 有旧缓存就用旧缓存(stale-while-error),没有就报错。
-        // r14-1:失败原因必须可见 —— 原来静默复用旧缓存,用户只看到"没反应",
-        // 分不清"真没新版"还是"连不上 GitHub"(墙内最常见)。
-        const why = /fetch failed|ENOTFOUND|ETIMEDOUT|ECONNREFUSED|network/i.test(String(err.message || ''))
-          ? '无法连接 GitHub 与备用源(墙内通常需要开启代理)'
-          : (err.status === 403 ? 'GitHub 接口限流(匿名 60 次/小时),稍后重试' : (err.message || 'fetch failed'));
-        if (cache) {
-          snap = cache;
-          staleError = why;
-        } else {
-          return res.json({ currentVersion, error: why });
-        }
+  const extra = {}; // r63:npm 装法专属字段(githubLatestVersion/npmLagsBehind/npmChannelUnknown)
+  if (viaNpm) {
+    // 分支 B(F1 核心):给 npm 用户显示的"最新版本"必须是他跑升级命令实际能装到的版本。
+    // npm 通道与 GitHub 链并行发起,互不阻塞;GitHub 结果只作参考值,不参与 hasUpdate。
+    const [npmR, ghR] = await Promise.allSettled([
+      resolveUserNpmRegistry().then((reg) => fetchNpmChannelGuiLatest(reg)),
+      resolveGitHubSnap(),
+    ]);
+    const gh = ghR.status === 'fulfilled' ? ghR.value : { snap: null, error: String(ghR.reason?.message || ghR.reason || 'fetch failed') };
+    const ghVer = gh.snap ? String(gh.snap.tagName || '').replace(/^v/, '') : '';
+    if (npmR.status === 'fulfilled') {
+      snap = npmR.value; // latestVersion / hasUpdate 的唯一判据
+      if (ghVer) {
+        extra.githubLatestVersion = ghVer;
+        if (semverGt(ghVer, snap.tagName.replace(/^v/, ''))) extra.npmLagsBehind = true;
       }
+    } else {
+      // npm 通道查不出来 → 回落 GitHub 口径显示版本,但 UI 不给升级命令(npmChannelUnknown)
+      extra.npmChannelUnknown = true;
+      if (!gh.snap) {
+        return res.json({ currentVersion, viaNpm, ...extra, error: gh.error || '无法连接 GitHub 与备用源(墙内通常需要开启代理)' });
+      }
+      snap = gh.snap;
+      staleError = gh.staleError;
     }
+  } else {
+    // 分支 A:非 npm 装法,现状口径不变
+    const gh = await resolveGitHubSnap();
+    if (!gh.snap) return res.json({ currentVersion, viaNpm, error: gh.error });
+    snap = gh.snap;
+    staleError = gh.staleError;
   }
 
   const latestRaw = snap.tagName.replace(/^v/, '');
-  if (!latestRaw) return res.json({ currentVersion, error: 'GitHub 未返回 tag_name' });
+  if (!latestRaw) return res.json({ currentVersion, viaNpm, error: 'GitHub 未返回 tag_name' });
   const hasUpdate = semverGt(latestRaw, currentVersion);
   // assets 为空(403 期间也可能拿到不完整数据)时用 tag 直链兜底
   const assets = snap.assets.length > 0 ? snap.assets : buildFallbackAssets(latestRaw);
@@ -202,6 +321,15 @@ router.get('/version-check', async (req, res) => {
     // r26-C4:jsDelivr 镜像兜底源标记透传 —— 墙内用户拿到 assets 是 GitHub 直链,
     // 下载必败;前端见 viaMirror 显示手动下载指引。只增字段,旧前端忽略。
     ...(snap.viaMirror ? { viaMirror: true } : {}),
+    // r63:本次答案来自哪个镜像源('npmmirror'|'jsdelivr'|'npm:<host>'),便于排障
+    ...(snap.viaMirror && snap.mirrorSource ? { mirrorSource: snap.mirrorSource } : {}),
+    // r63:npm 装法标记(总是出现)+ 升级命令。命令只在"跑了确实能装到这个版本"时出现
+    // (npmLagsBehind / npmChannelUnknown 时缺席),"该不该给命令"由后端一处判完,前端只看
+    // 字段在不在,不重算。
+    viaNpm,
+    ...(viaNpm && !extra.npmLagsBehind && !extra.npmChannelUnknown
+      ? { npmUpgradeCommand: 'npm i -g @wsxwj123/cc-gui@latest' } : {}),
+    ...extra,
     // server 端 process.platform 比前端 navigator.userAgent 更可靠 — Tauri
     // WebView2/WKWebView 的 UA 在某些版本被改写过,前端单独靠 UA 选 asset
     // 可能 null → 按钮不渲染只剩手动链接(用户当前的体感问题)。
