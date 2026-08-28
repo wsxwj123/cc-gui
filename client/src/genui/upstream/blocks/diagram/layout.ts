@@ -16,7 +16,8 @@
  * @module @changfenhuang/dsh-genui/client/blocks/diagram/layout
  */
 import type { GenuiDiagram, GenuiDiagramEdge, GenuiDiagramKind, GenuiDiagramNode } from '../../spec.ts'
-import { Box } from './geometry.ts'
+// CGUI-PATCH: Box 是 interface，值导入在裸 node 下报缺少导出
+import type { Box } from './geometry.ts'
 
 export interface LayoutNode {
   node: GenuiDiagramNode

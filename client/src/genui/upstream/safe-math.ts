@@ -41,14 +41,17 @@ const FUNCTIONS: Record<string, (...args: number[]) => number> = {
 }
 
 class ParseError extends Error {
-  constructor(message: string, readonly pos: number) {
-    super(`SafeMath parse error at ${pos}: ${message}`)
-  }
+  // CGUI-PATCH: 参数属性拆成显式字段 —— 裸 node strip-only 不支持参数属性
+  readonly pos: number
+  constructor(message: string, pos: number) { super(`SafeMath parse error at ${pos}: ${message}`); this.pos = pos }
 }
 
 class SafeMathParser {
   private i = 0
-  constructor(private readonly src: string, private readonly vars: Record<string, number>) {}
+  // CGUI-PATCH: 参数属性拆成显式字段 —— 裸 node strip-only 不支持参数属性
+  private readonly src: string
+  private readonly vars: Record<string, number>
+  constructor(src: string, vars: Record<string, number>) { this.src = src; this.vars = vars }
 
   parse(): (x: number) => number {
     const node = this.parseExpr()
