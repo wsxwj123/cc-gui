@@ -14,6 +14,7 @@ import { GenuiBlock } from '../genui/upstream/GenuiBlock.tsx';
 import { resolveGenuiSpec } from '../genui/upstream/fence-render.tsx';
 import { describeJsonFailure } from '../genui/upstream/fence-repair.ts';
 import { GENUI_LIMITS } from '../genui/upstream/guard.ts';
+import { genuiStateKey } from '../genui/upstream/interaction-store.ts';
 
 // 语言标记判定(PLAN §1.8:照抄 ArtifactPreview 的 normLang —— 取第一个空白分隔词 + 小写)。
 // 一行同时认两个标记(决策 3);大小写不敏感;```cgui-ui title=x 只取第一个词。
@@ -95,8 +96,12 @@ const SETTLED_STYLE = { '--genui-reveal': 'none' };
  * @param {string}  lang     围栏语言标记(原文形态,内部归一)
  * @param {boolean} settled  本条消息是否已定稿。**props 透传,不查 DOM**(PLAN §1.4):
  *                           DOM 探测在 React 19 并发渲染下时序不可靠,props 是渲染输入。
+ * @param {string}  queueKey 本窗格的队列键(`queueKeyFor(selectedSession)`),交互态键的
+ *                           会话分量(PLAN §1.2.2 A1)。⚠️ M6 落 `GenuiActionProvider`
+ *                           后从 context 取;在那之前恒为 ''(键仍稳定 = 重挂不丢状态,
+ *                           只是分屏两个窗格里**逐字节相同**的围栏会共用一条状态)。
  */
-export function GenuiFence({ raw, lang = 'cgui-ui', settled = false }) {
+export function GenuiFence({ raw, lang = 'cgui-ui', settled = false, queueKey = '' }) {
   const normLang = normGenuiLang(lang);
   // 解析结果按 [原文, 是否定稿] 记忆:流式每 chunk 都会重渲,不 memo 就是每帧重跑一遍
   // 修复+白名单遍历。settled 进 deps 是因为二级补全只在定稿后开(§1.4)。
@@ -108,9 +113,9 @@ export function GenuiFence({ raw, lang = 'cgui-ui', settled = false }) {
       // (§5.8),此时"渲染成功的块"并不存在,genui-block 也就不该留在 DOM 里(§9.1)。
       <ErrorBoundary label="该界面">
         <div data-testid="genui-block" style={settled ? SETTLED_STYLE : undefined}>
-          {/* stateKey 暂缺:交互态持久化的键算法(§1.2.2 A1-A4)归 M5,那一轮从
-              GenuiActionProvider 取 queueKey 后补上。缺它只是"刷新不恢复",不影响渲染。 */}
-          <GenuiBlock spec={fence.spec} />
+          {/* 交互态的持久键(§1.2.2 A1)。只在 spec 分支算:空体/超大/解析失败三条降级路
+              一个状态条目都不该产生。指纹取**围栏原文**,与解析结果无关。 */}
+          <GenuiBlock spec={fence.spec} stateKey={genuiStateKey(queueKey, raw)} settled={settled} />
         </div>
       </ErrorBoundary>
     );
