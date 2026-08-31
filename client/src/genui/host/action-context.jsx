@@ -7,7 +7,8 @@
 import { useEffect, useMemo, useRef } from 'react';
 import { useStore } from '../../stores/sessionStore.js';
 import { GenuiActionContext } from '../upstream/action-context.ts';
-import { buildActionMessage, flushSend } from './action-send.js';
+import { assertSendable } from './action-guard.js';
+import { buildActionMessage, flushSend, pickComponent } from './action-send.js';
 
 /**
  * Provider 本身。可交互面传能力对象,**只读面显式传 `value={null}`**。
@@ -43,6 +44,16 @@ export function useGenuiActionCapability({ queueKey, handleSendRef, messageQueue
     queueKey,
     queuedIds,
     send: (actionId, action, payload) => {
+      // L4 送达前断言(PLAN §1.3.3)。这里是全部触发点汇聚的**唯一**送达口:任何组件、
+      // 任何日后新增的触发点都要经过它,断言过不了就一条都不发。
+      // 拒发按「发送失败」处置(不是静默丢弃):组件保持可交互、显示失败徽章,
+      // 用户看得见自己那一下没生效(INTERFACE §3.5 那条"不得静默丢弃")。
+      const rejected = assertSendable(action, pickComponent(payload || {}));
+      if (rejected !== null) {
+        // 只记理由代号,不记动作名与 payload —— 违规值本身可能就是注入载荷(§5.9)。
+        console.warn('[genui] 拒发 action:送达前断言未过(' + rejected + ')');
+        return { state: 'failed', truncated: false };
+      }
       const { text, truncated } = buildActionMessage(action, payload);
       const opts = { meta: { genuiActionId: actionId } };
       const state = flushSend({
