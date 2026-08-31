@@ -151,7 +151,11 @@ export async function startApp(workerIndex) {
     await waitPortFree(port);   // 全占满了才等,正常跑不到这一步
   }
   const home = fs.mkdtempSync(path.join(os.tmpdir(), `cgui-r64-home-${port}-`));
-  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), `cgui-r64-proj-${port}-`));
+  // realpath 是必须的:macOS 上 /var 是指向 /private/var 的软链,mkdtemp 返回 /var/... ,
+  // 而子进程里的 process.cwd() 拿到的是解析后的 /private/var/... —— 两者编码出**不同**的
+  // projects 目录名,于是假 CLI 落盘的会话记录应用侧读不到,刷新后侧栏「暂无会话」,
+  // 所有带 page.reload() 的用例(B40/B41/B73)全红。在源头解析一次,下游全都对齐。
+  const cwd = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), `cgui-r64-proj-${port}-`)));
   const bin = path.join(home, 'fakebin');
   fs.mkdirSync(path.join(home, '.claude', 'projects', encodeProjectDir(cwd)), { recursive: true });
   fs.mkdirSync(bin, { recursive: true });
