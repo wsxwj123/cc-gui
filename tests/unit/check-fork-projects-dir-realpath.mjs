@@ -81,6 +81,10 @@ try {
   // ── ③ 不存在的 hash 仍 400(realpath 失败路径不变) ──
   const miss = await post({ sessionId: SID, projectHash: '-no-such' });
   assert.equal(miss.status, 400, 'nonexistent hash still 400');
+
+  // ── ④ `..` 上跳仍 400:纯点号能过 PROJECT_HASH_RE,只靠包含校验拦,基准归一后不得放行 ──
+  const dotdot = await post({ sessionId: SID, projectHash: '..' });
+  assert.equal(dotdot.status, 400, '`..` traversal must still be rejected');
 } finally {
   server.close();
   process.env.HOME = origHome;
