@@ -370,7 +370,14 @@ export async function waitTurnEnd(page, timeout = 25_000) {
 export async function messageCount(page, scope) {
   const list = (scope || page).locator(MSG_LIST).first();
   if (!(await list.count())) return 0;
-  return list.evaluate((el) => el.children.length);
+  // 只数**真实消息行**。消息容器里还挂着几行瞬态状态("正在预测下一步输入…"、
+  // 流式状态行、等待说明),它们出现/消失会让裸 children.length 自己跳动 ——
+  // 于是"操作前后消息数不变"这种反向断言会被它们污染成假红(B80/B81 栽过)。
+  // 判据:瞬态行都带转圈图标、或压根没有文本。
+  // ponytail: 契约 §9 没给"每条消息"的锚,只能这样近似;真给了锚就换成数锚。
+  return list.evaluate((el) => [...el.children].filter(
+    (c) => !c.querySelector('.animate-spin') && (c.textContent || '').trim() !== '',
+  ).length);
 }
 
 /** 队列条上的计数;§9.3 规定无可见排队条目时整条 queue-bar 不存在,所以缺席就算 0。 */
