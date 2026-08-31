@@ -496,6 +496,16 @@ export const test = base.extend({
     await page.addInitScript(() => {
       try { localStorage.setItem('cgui-tour-seen', '1'); } catch { /* 隐私模式下忽略 */ }
     });
+    // 第四层遮罩:「发现新版本」大弹窗(z-200)。它由版本检查的结果驱动、
+    // 关闭态只存在组件 state 里(没有可预置的存储位),所以从数据源头掐掉:
+    // 把两个版本检查接口固定回"没有更新"。这两个接口与 genui 契约无关,
+    // 不属任何一条用例的被测对象;固定它同时也消掉了"今天上游发了新版就多一层弹窗"的抖动。
+    for (const api of ['**/api/version-check', '**/api/claude-version-check']) {
+      await page.route(api, (route) => route.fulfill({
+        status: 200, contentType: 'application/json',
+        body: JSON.stringify({ hasUpdate: false, localBuild: true }),
+      }));
+    }
     const logs = [];
     const requests = [];
     page.on('console', (m) => logs.push(`${m.type()}: ${m.text()}`));
