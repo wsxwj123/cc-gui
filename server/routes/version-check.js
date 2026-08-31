@@ -343,7 +343,7 @@ router.get('/version-check', async (req, res) => {
     // 字段在不在,不重算。
     viaNpm,
     ...(viaNpm && !extra.npmLagsBehind && !extra.npmChannelUnknown
-      ? { npmUpgradeCommand: 'npm i -g @wsxwj123/cc-gui@latest' } : {}),
+      ? { npmUpgradeCommand: 'npx @wsxwj123/cc-gui@latest' } : {}),
     ...extra,
     // server 端 process.platform 比前端 navigator.userAgent 更可靠 — Tauri
     // WebView2/WKWebView 的 UA 在某些版本被改写过,前端单独靠 UA 选 asset

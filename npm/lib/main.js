@@ -12,7 +12,9 @@ const { execFileSync, spawn, spawnSync } = require('child_process');
 const PKG_ROOT = path.join(__dirname, '..');
 const VERSION = JSON.parse(fs.readFileSync(path.join(PKG_ROOT, 'package.json'), 'utf8')).version;
 const REPO_RELEASES = 'https://github.com/wsxwj123/claude-gui/releases';
-const REINSTALL_CMD = 'npm i -g @wsxwj123/cc-gui@latest';
+// r65:重装命令用 npx 形态 —— 官方 .pkg 装的 node 全局目录属 root,npm i -g 必报
+// EACCES;npx 落 npx 缓存,复制即可用,不必先解决权限问题。
+const REINSTALL_CMD = 'npx @wsxwj123/cc-gui@latest';
 
 // §1.5 平台 → 分包 / 载荷映射(唯一事实源);体积下限见 §2.2 S3(A4 口径)。
 const PLATFORMS = {
@@ -376,7 +378,7 @@ function winLaunch(dir) {
   const exe = winMainExe(dir);
   if (!fs.existsSync(exe)) {
     fail(4, '安装目录里没找到 ' + WIN_MAIN_EXE + '：' + dir + '\n' +
-      '请重新安装：npm i -g @wsxwj123/cc-gui@latest，或从 GitHub Release 下载安装包。');
+      '请重新安装：npx @wsxwj123/cc-gui@latest，或从 GitHub Release 下载安装包。');
   }
   try {
     // 不经 shell 直接 spawn 绝对路径;detached+unref 让终端立刻归还用户

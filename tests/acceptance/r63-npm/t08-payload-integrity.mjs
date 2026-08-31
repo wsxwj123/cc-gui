@@ -26,7 +26,7 @@ await t('载荷文件根本不存在 → 码 4 + 打出载荷绝对路径', () =
   assert.equal(r.code, 4, '实际:\n' + r.all);
   assert.ok(r.stderr.includes('安装包文件缺失或不完整：'), '实际:\n' + r.stderr);
   assert.ok(r.stderr.includes('CC-GUI.app.tar.gz'), 'stderr 要指出是哪个文件,不然用户无从下手');
-  assert.ok(r.stderr.includes('npm i -g @wsxwj123/cc-gui@latest'), '得给重装命令');
+  assert.ok(r.stderr.includes('npx @wsxwj123/cc-gui@latest'), '得给重装命令');
 });
 
 for (const bytes of [0, 1, 1024, MAC_MIN - 1]) {

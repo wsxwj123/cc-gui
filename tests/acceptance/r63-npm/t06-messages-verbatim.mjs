@@ -13,7 +13,7 @@ const src = bin + '\n' + read(P.lib, 'npm/lib/main.js');
 const CASES = {
   'S0 Node 版本过低(必须在薄壳里)': ['CC-GUI 需要 Node.js 20 或更高版本，当前是 v', '请升级 Node.js 后重试：https://nodejs.org/en/download'],
   'S1 平台不支持': ['CC-GUI 暂不支持当前系统：', '目前支持：macOS（Apple Silicon）与 Windows（x64）。'],
-  'S2 平台包缺失': ['没找到当前平台的安装包（', '安装时跳过了可选依赖', 'npm i -g @wsxwj123/cc-gui@latest',
+  'S2 平台包缺失': ['没找到当前平台的安装包（', '安装时跳过了可选依赖', 'npx @wsxwj123/cc-gui@latest',
     'npm cache clean --force', '镜像源上还没有这个版本的平台包',
     // 镜像按需同步、可能一直缺,所以必须给出可执行的自救命令,不能只让用户"过一会儿再试"
     '--registry=https://registry.npmjs.org', 'https://github.com/wsxwj123/claude-gui/releases'],
@@ -35,7 +35,7 @@ const CASES = {
   '【待双平台】Windows 复核失败': ['安装器已退出但没找到安装目录（已检查：'],
   // exe 名不写死:主程序名 = mainBinaryName ?? Cargo 包名(claude-gui),不是 productName。
   '【待双平台】Windows 已装应用不完整': ["安装目录里没找到 ' + WIN_MAIN_EXE + '：",
-    '请重新安装：npm i -g @wsxwj123/cc-gui@latest，或从 GitHub Release 下载安装包。'],
+    '请重新安装：npx @wsxwj123/cc-gui@latest，或从 GitHub Release 下载安装包。'],
 };
 
 for (const [name, frags] of Object.entries(CASES)) {

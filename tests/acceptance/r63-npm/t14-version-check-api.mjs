@@ -62,7 +62,7 @@ await t('npm 装法下:命令字段与"命令此刻有没有用"严格对应', (
   const b = live.body;
   const shouldHave = !b.npmLagsBehind && !b.npmChannelUnknown;
   assert.equal('npmUpgradeCommand' in b, shouldHave, '"该不该给命令"必须后端一处判完,前端只看字段在不在');
-  if (shouldHave) assert.equal(b.npmUpgradeCommand, 'npm i -g @wsxwj123/cc-gui@latest');
+  if (shouldHave) assert.equal(b.npmUpgradeCommand, 'npx @wsxwj123/cc-gui@latest');
 });
 
 await t('【零影响】claude CLI 的更新检查不得沾上 npm 通道字段', async () => {
