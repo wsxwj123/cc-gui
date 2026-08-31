@@ -9,7 +9,9 @@ import { dirname, join } from 'node:path';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const src = readFileSync(join(root, 'client/src/components/ArtifactPreview.jsx'), 'utf8');
-const md = readFileSync(join(root, 'client/src/components/MarkdownRenderer.jsx'), 'utf8');
+// r64 M3:markdown 代码块(CodeBlock)从 MarkdownRenderer.jsx 抽到了 components/CodeBlock.jsx
+// (断 genui 循环依赖,PLAN r64 §1.7)。消费端换了文件,"只能有一份折叠逻辑"这条不变。
+const md = readFileSync(join(root, 'client/src/components/CodeBlock.jsx'), 'utf8');
 const count = (s, sub) => s.split(sub).length - 1;
 
 const start = src.indexOf('export function CollapsibleCode(');
@@ -44,8 +46,8 @@ assert.ok(/\$\{collapsible \? '' : 'rounded-b-lg'\}/.test(body), '不可折叠�
 // ── 4. 两个消费端都从共用组件拿到,没有谁绕开自己写折叠 ────────────────
 assert.equal(count(src, '<CollapsibleCode'), 1, 'artifact 代码视图必须用共用组件(PreviewBody 内联档)');
 assert.equal(count(md, '<CollapsibleCode'), 1, 'markdown 代码块必须用共用组件');
-assert.ok(/import \{ ArtifactPreview, isPreviewable, CollapsibleCode \}/.test(md),
-  'MarkdownRenderer 从 ArtifactPreview 引共用组件(防两处折叠逻辑漂移)');
-assert.ok(!/展开剩余/.test(md), 'MarkdownRenderer 里不许再出现第二份折叠 UI');
+assert.ok(/import \{ CollapsibleCode, CopyButton \} from '\.\/ArtifactPreview\.jsx'/.test(md),
+  'CodeBlock 从 ArtifactPreview 引共用组件(防两处折叠逻辑漂移)');
+assert.ok(!/展开剩余/.test(md), 'CodeBlock 里不许再出现第二份折叠 UI');
 
 console.log('✓ check-code-fold-top-collapse: 展开态顶部收起(共用组件一处改,两个消费端同得)');

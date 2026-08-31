@@ -1,53 +1,13 @@
-import React, { useState, useMemo, useRef, useEffect } from 'react';
+import React, { useMemo } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
 import 'katex/dist/katex.min.css'; // CJ-3:KaTeX 样式(katex 本体经 mermaid 已在依赖里)
-import { Copy, Check } from './Icon.jsx';
-import { copyText } from '../utils/clipboard.js';
 import { openExternalUrl } from '../utils/openExternal.js';
-import { ArtifactPreview, isPreviewable, CollapsibleCode } from './ArtifactPreview.jsx';
+import { ArtifactPreview, isPreviewable } from './ArtifactPreview.jsx';
+import { CodeBlock } from './CodeBlock.jsx';
 import { dockKeyFor } from '../utils/artifactDock.js';
-
-function CopyButton({ text }) {
-  const [copied, setCopied] = useState(false);
-  const timerRef = useRef(null);
-  useEffect(() => () => clearTimeout(timerRef.current), []);
-  return (
-    <button
-      onClick={async () => {
-        if (await copyText(text)) {
-          clearTimeout(timerRef.current); // 连点复制:清旧 timer,保住新状态的完整时长
-          setCopied(true);
-          timerRef.current = setTimeout(() => setCopied(false), 1500);
-        }
-      }}
-      className="flex items-center gap-1 text-[10px] text-[#9a8e78] hover:text-[#cabba0] transition-colors"
-    >
-      {copied ? <Check size={10} /> : <Copy size={10} />}
-      {copied ? '已复制' : '复制'}
-    </button>
-  );
-}
-
-// Code block with copy + collapse: long blocks show the first 5 lines and a
-// toggle to expand the rest (keeps long tool output / files from flooding chat).
-// 折叠逻辑抽到 ArtifactPreview 的 CollapsibleCode 共用(artifact 代码视图同款,防漂移)。
-function CodeBlock({ lang, code }) {
-  return (
-    <div className="relative group my-3">
-      <div className="flex items-center justify-between px-3.5 py-1.5 bg-[#2b2722] rounded-t-lg border border-[#3a342b] border-b-0">
-        <span className="text-[11px] font-mono text-[#9a8e78]">{lang || 'code'}</span>
-        <CopyButton text={code} />
-      </div>
-      <CollapsibleCode
-        code={code}
-        className="bg-[#211e19] border border-[#3a342b] border-t-0 p-4 overflow-x-auto text-[13px] leading-relaxed font-mono text-[#e8e2d6]"
-      />
-    </div>
-  );
-}
 
 // 围栏代码渲染。抽成函数以便注入 dockKeyPrefix(#3 稳定停靠身份的前缀);node 由
 // react-markdown 透传(passNode),node.position.start.offset 是本块在源文本中的起始偏移。
