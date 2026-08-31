@@ -82,8 +82,20 @@ ok('MessageBubble:三个锚都在,且 body 由 open 门控(收起态不渲染)',
   // 契约收紧处:收起时该元素**不得存在于 DOM**。条件渲染才做得到,CSS 隐藏不算。
   assert.match(bubble, /\{open && \(\s*<div data-testid="genui-action-message-body"/);
   // 折叠入口挂在用户消息分支里,且走识别函数而不是就地写死前缀
-  assert.match(bubble, /if \(isActionMessage\(message\.text\)\)/);
+  assert.match(bubble, /if \(message\.genuiAction \|\| isActionMessage\(message\.text\)\)/);
   assert.ok(bubble.includes('<GenuiActionFold text={message.text} />'));
+});
+
+// ── 6. 服务端历史标记:只加标记不加过滤,且前缀与前端逐字一致 ─────────────────
+const reader = readFileSync(join(root, 'server/services/session-reader.js'), 'utf8');
+ok('session-reader:前缀与前端常量逐字一致,两条历史路径都打标记', () => {
+  const m = reader.match(/const GENUI_ACTION_PREFIX = '([^']*)';/);
+  assert.ok(m, 'session-reader 里找不到 GENUI_ACTION_PREFIX');
+  assert.equal(m[1], ACTION_MESSAGE_PREFIX, '服务端前缀与 ACTION_MESSAGE_PREFIX 漂移了');
+  // 普通 user 行 + queued_command(忙时排队并入)两条历史路径,少一条历史回读就展成整段
+  assert.equal((reader.match(/genuiAction: true/g) || []).length, 2);
+  // R12 红线:只加标记不加过滤 —— 消息必须照常返回,不许在这里被 continue 掉
+  assert.ok(!/isGenuiAction\([^)]*\)\)\s*continue/.test(reader), 'action 消息被过滤掉了');
 });
 
 console.log(`\n✅ genui action 折叠:${n} 组断言全过`);

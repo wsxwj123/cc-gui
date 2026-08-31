@@ -381,7 +381,9 @@ export function MessageBubble({ message, onRollback, onFork }) {
   if (isUser) {
     // genui action 消息折叠(M7)。用户消息只有 MessageBubble 一个渲染点(历史卡、
     // 实时气泡、引导气泡都走它),折在这里就全覆盖。
-    if (isActionMessage(message.text)) {
+    // 两个判据同一条前缀规则:`genuiAction` 是 session-reader 读 jsonl 时打的标记
+    // (历史回读走它),前缀识别兜住实时发送与引导气泡这些没经过 session-reader 的路径。
+    if (message.genuiAction || isActionMessage(message.text)) {
       return <GenuiActionFold text={message.text} />;
     }
     return (
