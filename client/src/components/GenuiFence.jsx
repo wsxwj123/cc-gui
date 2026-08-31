@@ -103,6 +103,42 @@ function DegradedFence({ raw, lang, notice = null, tone = 'error' }) {
   );
 }
 
+// 来源标识(INTERFACE §6 末行 / §9.1)。genui 接入宿主皮肤后,模型画的界面与原生 UI
+// 在视觉上不可区分 —— 这一条标识是唯一的区分点,所以它**没有开关、没有关闭键、不随
+// 任何设置消失**:JSX 里无条件渲染,不读 store,内部不放 button(否则就有了关闭的口子)。
+// 用 span 而不是 div:即使将来有人把它挪进某行文字里也不破坏排版。
+const BADGE_STYLE = {
+  display: 'inline-flex',
+  alignItems: 'center',
+  gap: 4,
+  margin: '0 0 6px',
+  padding: '2px 7px',
+  borderRadius: 999,
+  fontSize: 10.5,
+  lineHeight: 1.5,
+  letterSpacing: '0.02em',
+  whiteSpace: 'nowrap',
+  color: 'var(--color-ink-muted)',
+  background: 'color-mix(in srgb, var(--color-ink-faint) 12%, transparent)',
+  border: '1px solid color-mix(in srgb, var(--color-ink-faint) 30%, transparent)',
+};
+const BADGE_DOT_STYLE = {
+  width: 5,
+  height: 5,
+  borderRadius: '50%',
+  background: 'var(--color-accent)',
+  flexShrink: 0,
+};
+/** 块内恒在的来源标识。无 props、无状态、无分支 —— 它不该有任何"不出现"的路径。 */
+function GenuiBadge() {
+  return (
+    <span data-testid="genui-badge" data-cgui="genui-badge" style={BADGE_STYLE}>
+      <span style={BADGE_DOT_STYLE} aria-hidden />
+      模型生成界面
+    </span>
+  );
+}
+
 // 定稿后关掉入场动画。回合末围栏子树会连续重挂两次(dockKeyPrefix 换两轮),每次重挂
 // 都重播一遍逐条渐显 = 用户看到"回复完成后整块界面又抖一次"。GenuiBlock.module.css 的
 // .reveal 把 animation 走 var(--genui-reveal, …),这里给个 none 就按下了;自定义属性
@@ -121,6 +157,7 @@ const SETTLED_STYLE = { '--genui-reveal': 'none' };
  */
 export function GenuiFence({ raw, lang = 'cgui-ui', settled = false }) {
   const queueKey = useGenuiAction()?.queueKey ?? '';
+  if (typeof console !== 'undefined') console.log('[b73dbg]', JSON.stringify({ queueKey, settled, key: genuiStateKey(queueKey, raw), len: raw.length }));
   const normLang = normGenuiLang(lang);
   // 解析结果按 [原文, 是否定稿] 记忆:流式每 chunk 都会重渲,不 memo 就是每帧重跑一遍
   // 修复+白名单遍历。settled 进 deps 是因为二级补全只在定稿后开(§1.4)。
@@ -132,6 +169,8 @@ export function GenuiFence({ raw, lang = 'cgui-ui', settled = false }) {
       // (§5.8),此时"渲染成功的块"并不存在,genui-block 也就不该留在 DOM 里(§9.1)。
       <ErrorBoundary label="该界面">
         <div data-cgui="genui-block" data-testid="genui-block" style={settled ? SETTLED_STYLE : undefined}>
+          {/* 来源标识挂在块根内、正文之前:一个围栏一处,与 genui-block 一一对应(§9.1)。 */}
+          <GenuiBadge />
           {/* 交互态的持久键(§1.2.2 A1)。只在 spec 分支算:空体/超大/解析失败三条降级路
               一个状态条目都不该产生。指纹取**围栏原文**,与解析结果无关。 */}
           <GenuiBlock spec={fence.spec} stateKey={genuiStateKey(queueKey, raw)} settled={settled} />
