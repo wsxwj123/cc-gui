@@ -8,6 +8,8 @@ import { memo, useEffect, useId, useMemo, useRef, useState, type ReactNode } fro
 // CGUI-PATCH: 四个宿主组件改由 genui/host/primitives.jsx 提供(PLAN §1.7)。
 // 按 §2.0.1-2,upstream/ 不许直接 import components/ 或 utils/,宿主件一律经 host/ 转手。
 import { CodeBlock, DiffBlock, JsonTree, writeClipboard } from '../../host/primitives.jsx'
+// CGUI-PATCH: 主题变更订阅(PLAN §1.6-4)。mermaid 把明暗算进了 JS,不订阅就不跟主题。
+import { useHostThemeEpoch } from '../../host/host-theme.ts'
 import css from '../GenuiBlock.module.css'
 import { GENUI_LIMITS } from '../guard.ts'
 import { PlotBlock } from '../PlotBlock.tsx'
@@ -293,6 +295,9 @@ export const MermaidNode = memo(function MermaidNode({ node }: { node: GenuiMerm
   const [html, setHtml] = useState<string | null>(null)
   const [failed, setFailed] = useState(false)
   const code = node.code.slice(0, GENUI_LIMITS.maxMermaid)
+  // CGUI-PATCH: 主题在 <html> 上换属性、不经 React,这个组件默认不会重渲 ⟹ 切到深色后
+  // 已经画好的图会停在旧主题直到刷新(INTERFACE §6 点名不许)。epoch 进 deps 即重画。
+  const themeEpoch = useHostThemeEpoch()
   useEffect(() => {
     let alive = true
     void import('../mermaid-lazy.ts').then(async m => {
@@ -304,7 +309,7 @@ export const MermaidNode = memo(function MermaidNode({ node }: { node: GenuiMerm
       }
     })
     return () => { alive = false }
-  }, [code])
+  }, [code, themeEpoch])
   if (failed) return <div className={css.mermaidFallback}><pre>{code}</pre><div className={css.mermaidErr}>图语法有误，已降级显示源码</div></div>
   if (html === null) return <div className={css.mermaidFallback}><pre>{code}</pre><div className={css.mermaidHint}>渲染中…</div></div>
   return <div className={css.mermaid} dangerouslySetInnerHTML={{ __html: html }} data-genui-mermaid />

@@ -10,6 +10,9 @@
  * @module @changfenhuang/dsh-genui/client/blocks/diagram/theme
  */
 import type { GenuiDiagramTheme, GenuiDiagramVariant } from '../../spec.ts'
+// CGUI-PATCH: 明暗两套调色板保留(它是成套的编辑级语义配色,拆散接宿主 accent 会毁掉
+// 图本身的设计意图),只把"选哪套"接到宿主的 data-theme 上(PLAN §1.6 / §6.3)。
+import { hostPrefersDark } from '../../../host/host-theme.ts'
 
 export interface DiagramPalette {
   paper: string
@@ -51,7 +54,13 @@ const DARK: DiagramPalette = {
 
 /** Resolve the active palette from variant + optional theme overrides. */
 export function resolvePalette(variant: GenuiDiagramVariant | undefined, theme: GenuiDiagramTheme | undefined): DiagramPalette {
-  const base = variant === 'dark' ? DARK : LIGHT
+  // CGUI-PATCH: 只有 spec 显式写了 'light' / 'dark' 才钉死(模型的显式选择优先);
+  // 缺省与 'editorial' 跟宿主明暗走 —— 这正是本文件头注释说的"defaults to light
+  // unless the host theme is dark",上游只是没有可用的宿主探测源。
+  // 上游原式 `variant === 'dark' ? DARK : LIGHT` 在深色主题下恒得浅色纸面。
+  const base = variant === 'dark' ? DARK
+    : variant === 'light' ? LIGHT
+      : (hostPrefersDark() ? DARK : LIGHT)
   if (theme === undefined) return base
   return {
     paper: theme.paper ?? base.paper,

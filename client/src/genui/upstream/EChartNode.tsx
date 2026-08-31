@@ -16,11 +16,54 @@ import css from './GenuiBlock.module.css'
 import { createChart as lazyCreateChart, type EChartsInstance } from './echarts-lazy.ts'
 import { CHART_COLORS } from './blocks/charts.tsx'
 import type { GenuiEChart } from './spec.ts'
+// CGUI-PATCH: 主题变更订阅(PLAN §1.6-4)。
+import { useHostThemeEpoch } from '../host/host-theme.ts'
+
+/** 规范颜色形态:zrender(ECharts 自己的颜色解析器)吃得下的两种写法。 */
+const NORMALIZED_COLOR = /^(?:#[0-9a-f]{3,8}|rgba?\([\d.,\s]+\))$/i
+
+/** 复用的离屏取值元素。必须挂在 document.body 上 —— WebKit 对游离元素的
+ * getComputedStyle 返回空(SPIKE V7 的 `used()` 就是这个写法,真 WKWebView 跑通)。 */
+let colorProbe: HTMLElement | null = null
+
+/**
+ * CGUI-PATCH(PLAN §1.6.1 坑 A):把声明串求值成具体颜色。
+ *
+ * `getComputedStyle(root).getPropertyValue('--x')` 对**自定义属性**返回的是替换后的
+ * **声明串**,不是计算出的颜色(V7 实测拿到 `color-mix(in srgb, #1A1A1A 12%, transparent)`
+ * 与空格分隔的 `hsl(210 78% 45%)`)。CSS 侧无所谓 —— 浏览器自己会解析;但本文件把
+ * readToken 的返回值**直接塞进 ECharts option**,那条路不经 CSS 解析,走 zrender 自己的
+ * 解析器。一旦解析不了,症状是"折线/柱状有色、ECharts 没色"(charts.tsx / PlotBlock.tsx
+ * 走 inline var() 照常工作),极难定位。
+ *
+ * 别名层的规矩(只写终值形态)管得住我们自己写的值,管不住**用户皮肤**——皮肤可以给
+ * --color-accent 写合法但空格分隔的 `hsl(210 40% 50%)`,它经 var() 流进别名。所以这里
+ * 让浏览器替我们求值再读回,形态不合规就返回 null 由调用方退回 fallback:
+ * 颜色可能不跟主题,但绝不会是空/黑。
+ *
+ * ponytail: 每次重建 option 跑 14 次 getComputedStyle,与一次 ECharts 重绘相比可忽略;
+ * 真成热点再按「主题 + token」记忆化。
+ */
+function usedColor(decl: string): string | null {
+  if (typeof document === 'undefined' || document.body === null) return null
+  if (colorProbe === null || !colorProbe.isConnected) {
+    colorProbe = document.createElement('span')
+    colorProbe.setAttribute('aria-hidden', 'true')
+    colorProbe.style.cssText = 'position:fixed;left:-100000px;top:0;pointer-events:none'
+    document.body.appendChild(colorProbe)
+  }
+  // 先清空:CSSOM 对非法值是静默忽略(保留旧值),清空后仍为空 = 浏览器都不认这个写法。
+  colorProbe.style.color = ''
+  colorProbe.style.color = decl
+  if (colorProbe.style.color === '') return null
+  const used = getComputedStyle(colorProbe).color.trim()
+  return NORMALIZED_COLOR.test(used) ? used : null
+}
 
 /** Read a CSS custom property from the document root (host theme token). */
 function readToken(name: string, fallback: string): string {
   const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim()
-  return v || fallback
+  return (v === '' ? null : usedColor(v)) ?? fallback
 }
 
 /** Resolve the host accent and label colors for ECharts theming. */
@@ -164,6 +207,9 @@ export function EChartNode({ node }: { node: GenuiEChart }) {
   const ref = useRef<HTMLDivElement | null>(null)
   const [status, setStatus] = useState<'loading' | 'ready' | 'error'>('loading')
   const instanceRef = useRef<EChartsInstance | null>(null)
+  // CGUI-PATCH: 主题变更订阅(PLAN §1.6-4)。presetOption 把颜色算进了 option 对象,
+  // 不订阅的话切主题后 ECharts 的轴/文字/边框停在旧主题(chart / plot 走 CSS 会跟)。
+  const themeEpoch = useHostThemeEpoch()
 
   useEffect(() => {
     let alive = true
@@ -215,7 +261,7 @@ export function EChartNode({ node }: { node: GenuiEChart }) {
     const option = node.option ?? presetOption(node)
     instanceRef.current.setOption(option, true)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [node, status])
+  }, [node, status, themeEpoch])
 
   if (status === 'error') {
     return (

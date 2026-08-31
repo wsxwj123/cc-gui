@@ -16,32 +16,41 @@
  * @module @changfenhuang/dsh-genui/client/mermaid-core
  */
 import { assertSafeSvg, ensureFlowchartKind, repairMermaidSource } from './mermaid-safe.ts'
+// CGUI-PATCH: 上游按 documentElement.style.colorScheme 判明暗,本仓从不设该属性
+// (SPIKE V7:34 个主题变体实测恒为空串)⟹ 照抄的话 genui 的 mermaid 恒定浅色。
+import { hostPrefersDark } from '../host/host-theme.ts'
 
 let mermaidPromise: Promise<typeof import('mermaid')> | null = null
+
+/** CGUI-PATCH: 上次 initialize 用的明暗。mermaidPromise 是单例、initialize 只跑一次,
+ * 切主题后已加载的 mermaid 不会重新主题化,所以要记住这个值好在渲染前比对。 */
+let initializedDark: boolean | null = null
+
+/** CGUI-PATCH: initialize 的参数抽出来,首次加载与切主题后的重新主题化共用一份。 */
+function initMermaid(api: typeof import('mermaid').default, dark: boolean): void {
+  api.initialize({
+    startOnLoad: false,
+    // Strict default: mermaid escapes/sanitizes; we never enable htmlLabels.
+    securityLevel: 'strict',
+    theme: dark ? 'dark' : 'neutral',
+    // Fail loudly: with suppressErrorRendering false (the default) mermaid
+    // renders an "error" diagram on parse/draw failure — the caller then
+    // receives a normal-looking SVG whose text is the raw engine error
+    // ("Syntax error in text / mermaid version …"), which lands on the page
+    // with no exception ever thrown. Suppressing the error diagram makes
+    // every failure throw so the caller shows its own fallback instead.
+    suppressErrorRendering: true,
+  })
+  initializedDark = dark
+}
 
 /** Monotonic render id (replaces Math.random): no collisions, no entropy. */
 let renderSeq = 0
 
 function loadMermaid(): Promise<typeof import('mermaid')> {
   mermaidPromise ??= import('mermaid').then(async m => {
-    const api = m.default
-    // Follow the host theme: boot-theme sets colorScheme on <html>; a
-    // dark-forced diagram on a light chat looked broken.
-    const dark = typeof document !== 'undefined'
-      && document.documentElement.style.colorScheme === 'dark'
-    api.initialize({
-      startOnLoad: false,
-      // Strict default: mermaid escapes/sanitizes; we never enable htmlLabels.
-      securityLevel: 'strict',
-      theme: dark ? 'dark' : 'neutral',
-      // Fail loudly: with suppressErrorRendering false (the default) mermaid
-      // renders an "error" diagram on parse/draw failure — the caller then
-      // receives a normal-looking SVG whose text is the raw engine error
-      // ("Syntax error in text / mermaid version …"), which lands on the page
-      // with no exception ever thrown. Suppressing the error diagram makes
-      // every failure throw so the caller shows its own fallback instead.
-      suppressErrorRendering: true,
-    })
+    // Follow the host theme: a dark-forced diagram on a light chat looked broken.
+    initMermaid(m.default, hostPrefersDark())
     return m
   })
   return mermaidPromise
@@ -102,6 +111,10 @@ export async function renderMermaid(code: string): Promise<string> {
     throw new Error(`mermaid kind '${kind}' is not allowed`)
   }
   const m = await loadMermaid()
+  // CGUI-PATCH: 切主题后重新主题化。initialize 只在首次加载时跑过一次,不比对的话
+  // 已经加载过 mermaid 的会话切到深色后,新画的图仍是浅色主题(旧图由调用侧重渲带走)。
+  const dark = hostPrefersDark()
+  if (dark !== initializedDark) initMermaid(m.default, dark)
   const container = document.createElement('div')
   try {
     try {

@@ -14,6 +14,8 @@ import { GENUI_LIMITS } from '../../guard.ts'
 import { resolveLayout } from './layout.ts'
 import { routeEdge, labelGeometry, type Box } from './geometry.ts'
 import { resolvePalette, nodeTreatment, edgeStroke, inkAt } from './theme.ts'
+// CGUI-PATCH: 主题变更订阅(PLAN §1.6-4)。调色板是在 JS 里选的,不订阅切主题不重算。
+import { useHostThemeEpoch } from '../../../host/host-theme.ts'
 
 const FONT_SANS = "'Geist', -apple-system, 'Segoe UI', sans-serif"
 const FONT_MONO = "'Geist Mono', ui-monospace, 'SF Mono', monospace"
@@ -205,7 +207,10 @@ function nextUid(): string {
 /** The `diagram` node renderer. */
 export function DiagramNode({ node }: { node: GenuiDiagram }) {
   const uid = useMemo(nextUid, [])
-  const palette = useMemo(() => resolvePalette(node.variant, node.theme), [node.variant, node.theme])
+  // CGUI-PATCH: themeEpoch 进 deps —— 没有它,切主题后 useMemo 直接命中缓存,
+  // 图停在旧调色板直到 spec 变化。
+  const themeEpoch = useHostThemeEpoch()
+  const palette = useMemo(() => resolvePalette(node.variant, node.theme), [node.variant, node.theme, themeEpoch])
   const layout = useMemo(() => resolveLayout(node, buildParentMap(node.edges ?? [])), [node])
 
   const byId = useMemo(() => new Map(layout.nodes.map(l => [l.node.id, l.box])), [layout])
