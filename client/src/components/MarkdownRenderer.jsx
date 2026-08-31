@@ -7,7 +7,8 @@ import 'katex/dist/katex.min.css'; // CJ-3:KaTeX 样式(katex 本体经 mermaid 
 import { openExternalUrl } from '../utils/openExternal.js';
 import { ArtifactPreview, isPreviewable } from './ArtifactPreview.jsx';
 import { CodeBlock } from './CodeBlock.jsx';
-import { GenuiFence, isGenuiLang } from './GenuiFence.jsx';
+import { isGenuiLang } from './GenuiFence.jsx';
+import { GenuiFenceGate } from './GenuiFenceGate.jsx';
 import { dockKeyFor } from '../utils/artifactDock.js';
 
 // 围栏代码渲染。抽成函数以便注入 dockKeyPrefix(#3 稳定停靠身份的前缀);node 由
@@ -29,7 +30,8 @@ function renderCode({ children, className, node, dockKeyPrefix, isStreaming, ...
     // 之前只是顺序上的明确 —— 这两个标记不在可预览集合里,html/svg/mermaid 的既有预览
     // 行为一字不变(INTERFACE §1.1 并存要求)。
     // isStreaming 由调用点透传(TurnBubble 的 isLive/isLiveStream),不传即已定稿。
-    if (isGenuiLang(lang)) return <GenuiFence raw={codeStr} lang={lang} settled={!isStreaming} />;
+    // 经 GenuiFenceGate 而不是直接 GenuiFence:设置里的渲染开关关掉时退回普通代码块(§4.1)。
+    if (isGenuiLang(lang)) return <GenuiFenceGate raw={codeStr} lang={lang} settled={!isStreaming} />;
     // html/svg/mermaid 代码块给「代码/预览」切换;其余语言走普通代码块。
     if (isPreviewable(lang)) {
       const dockKey = dockKeyFor(dockKeyPrefix, node?.position?.start?.offset);
