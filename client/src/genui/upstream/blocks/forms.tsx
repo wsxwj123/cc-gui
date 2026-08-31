@@ -402,8 +402,11 @@ export function SelectNode({ node, onAction, answers, uiKey }: {
  *  the user never has to click elsewhere for the value to reach the model.
  *  Enter during IME composition never submits. `inputType: 'password'`
  *  stays masked; its value is never persisted and never joins submit
- *  collection (secrets stay out of localStorage), while its own `action`
- *  still delivers on explicit user submit. */
+ *  collection (secrets stay out of localStorage).
+ *
+ *  CGUI-PATCH:上游最后一句原是"its own `action` still delivers on explicit user
+ *  submit" —— 那正是缺口 B。现在 password 的值 blur / Enter / submit 聚合 / 落盘
+ *  四条路全不通,没有任何一条出口通向模型、日志或磁盘(INTERFACE §5.6)。 */
 export function InputNode({ node, onAction, answers, uiKey }: {
   node: GenuiInput
   onAction?: GenuiBlockProps['onAction']
@@ -427,6 +430,15 @@ export function InputNode({ node, onAction, answers, uiKey }: {
   // so the very first unedited blur also stays silent.
   const lastSent = useRef<string | null>(value)
   const send = (submit: boolean): void => {
+    // CGUI-PATCH(缺口 B / PLAN §5.3 补丁 2 / INTERFACE §5.6):password 的值没有任何
+    // 一条出口。上游只堵了"不落盘"与"不进 submit 聚合",漏了输入框**自己的 action**
+    // ——模型写 {"type":"input","inputType":"password","label":"请输入 API Key",
+    // "action":"save_key"},用户敲一下回车(甚至只是移开焦点)明文就进了会话消息,
+    // 进而进 CLI 会话记录([安全 §7.3])。上游注释把这叫 "explicit user submit",
+    // 口径明显偏松:被注入的模型可以把任何字段标成 password 骗输入,而"用户按了回车"
+    // 不构成对**外发**的知情同意。blur 与 Enter 一并禁掉,比"只禁 blur、保留 Enter"
+    // 干净 —— 密码框渲染、可输入、可掩码显示,但永不回传。
+    if (secret) return
     if (action !== undefined && onAction !== undefined) {
       lastSent.current = value
       onAction(action, { type: 'input', value, ...(id !== undefined ? { id } : {}), ...(submit ? { submit: true } : {}) })
