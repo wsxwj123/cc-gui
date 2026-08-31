@@ -4591,6 +4591,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           maxBudgetUsd: useStore.getState().maxBudgetUsd || undefined,
           // 输入预测(A):server 据此启用 SDK promptSuggestions 并在 result 后留等待窗。
           promptSuggestions: suggestOnClient,
+          // r66:genui 渲染开关同时门控"教不教模型这套围栏语法"。关掉时 server 不把
+          // 教学段注入系统提示(开关也计入常驻进程复用键,翻完开关不会复用旧系统提示)。
+          genui: useStore.getState().genuiRender !== false,
         }),
       });
       const respJson = await res.json();

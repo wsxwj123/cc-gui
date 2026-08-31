@@ -16,6 +16,7 @@ import { resolveClaude } from '../utils/claude-resolver.js';
 import { repairOfficialCompat } from '../utils/session-repair.js';
 import { contextTimeoutBudget, latestCountTokensOutcome } from '../utils/context-tokens.js';
 import { canonicalCwd } from '../utils/safe-path.js';
+import { GENUI_SECTION_TEXT } from '../utils/genui-section.js';
 import { broadcast, clients } from '../broadcast.js';
 import { recordDraftSessionBinding } from '../services/draft-session-bindings.js';
 
@@ -955,7 +956,7 @@ export function resolveExcludeDyn(v) {
 // 数值或 null)计入键:官方(恒 null)与第三方同窗模型间照旧热切,异窗切换 key 变 →
 // 走既有 teardown+冷启,压缩线随新 spawn 重算。指纹由调用点用与 spawn 完全相同的
 // resolveCompactWindowSettings(model) 的同一次结果取出,恒一致、不重复 IO。
-export function chatCompatKey({ workingDir, effort, appendSystemPrompt, promptSuggestions, excludeDynamicSystemPrompt, globalRead, dirs, maxBudgetUsd, acw }) { // export 仅为可单测
+export function chatCompatKey({ workingDir, effort, appendSystemPrompt, promptSuggestions, excludeDynamicSystemPrompt, globalRead, dirs, maxBudgetUsd, acw, genui }) { // export 仅为可单测
   let settingsMtime = 0;
   try { settingsMtime = statSync(pathJoin(homedir(), '.claude', 'settings.json')).mtimeMs; } catch {}
   // 禁用工具清单变更也不能复用旧进程(disallowedTools 是 query 级选项,起时定死)→ 计入 mtime。
@@ -978,6 +979,9 @@ export function chatCompatKey({ workingDir, effort, appendSystemPrompt, promptSu
     gr: globalRead !== false, dirs, settingsMtime, disToolsMtime, projSettingsMtime, mcpStampMtime,
     budget: maxBudgetUsd || null, // 花费上限变化不能复用旧进程(query 级选项,起时定死)
     acw: acw ?? null, // 压缩窗口指纹(MCT 数值或 null):异窗模型切换必须冷启重算压缩线
+    // r66:genui 教学段进没进系统提示。系统提示 spawn 时定死,不计入键则用户翻完
+    // 渲染开关会复用旧进程、旧系统提示照常生效 = 开关是摆设。
+    genui: genui !== false,
   });
 }
 
@@ -1069,6 +1073,23 @@ export function composeAppendSystemPrompt(appendSystemPrompt) {
   return userAppend ? `${userAppend}\n\n${PLAN_GUIDE}` : PLAN_GUIDE;
 }
 
+// r66:genui 教学段拼进系统提示 append。**只服务 GUI 会话** —— 唯一调用点是
+// POST /chat 的 spawn 块;bots 自己起 worker(bots.local.js/spawn-worker.sh)不经这里,
+// Telegram/微信渲染不了围栏,天然拿不到这段。
+//
+// 门控:genui===false(前端渲染开关关掉)才不注入;缺省/未传一律注入(开关默认开,
+// 老客户端不传该字段时行为 = 开)。开关同时进 chatCompatKey,否则翻完开关会复用
+// 挂着旧系统提示的常驻进程,开关成摆设。
+//
+// 拼在 8000 截断【之后】是刻意的:那道截断防的是用户写的超长 appendSystemPrompt,
+// 而这段是我们自己的定长常量(~2.9KB)。被超长用户 append 挤成半句 = 教了一半语法,
+// 比完全不教更糟。
+export function composeGenuiAppend(appendText, genui) { // export 仅为可单测
+  const base = (typeof appendText === 'string' ? appendText : '').slice(0, 8000);
+  if (genui === false) return base;
+  return base ? `${base}\n\n${GENUI_SECTION_TEXT}` : GENUI_SECTION_TEXT;
+}
+
 router.post('/chat', async (req, res) => {
   const {
     prompt, sessionId, cwd,
@@ -1082,6 +1103,7 @@ router.post('/chat', async (req, res) => {
     excludeDynamicSystemPrompt,
     keepAlive,
     maxBudgetUsd,
+    genui,
   } = req.body;
   if (!prompt) return res.status(400).json({ error: 'prompt is required' });
   // 花费上限(美元):>0 才生效。SDK 透传 CLI --max-budget-usd,进程累计花费达到
@@ -1158,6 +1180,7 @@ router.post('/chat', async (req, res) => {
     excludeDynamicSystemPrompt, globalRead, dirs: [...dirSet].sort(),
     maxBudgetUsd: budget,
     acw: acwSettings?.env?.CLAUDE_CODE_MAX_CONTEXT_TOKENS ?? null,
+    genui,
   });
   if (sessionId) {
     for (const [alivePid, s] of activeProcesses) {
@@ -1351,8 +1374,9 @@ router.post('/chat', async (req, res) => {
   input.push({ type: 'user', message: { role: 'user', content: String(prompt) } });
 
   const appendText = composeAppendSystemPrompt(appendSystemPrompt);
-  const systemPrompt = appendText
-    ? { type: 'preset', preset: 'claude_code', append: appendText.slice(0, 8000) }
+  const fullAppend = composeGenuiAppend(appendText, genui);
+  const systemPrompt = fullAppend
+    ? { type: 'preset', preset: 'claude_code', append: fullAppend }
     : { type: 'preset', preset: 'claude_code' };
   // 缓存优化(对应 CLI --exclude-dynamic-system-prompt-sections):把工作目录 / auto-memory /
   // git 状态等每轮变化的动态段移出系统提示、由 SDK 改注入首条用户消息,使系统提示静态可缓存,
