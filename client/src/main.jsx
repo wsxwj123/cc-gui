@@ -7,6 +7,9 @@ import { THEME_FAMILIES, resolveTheme, applyReadingFont } from './stores/session
 import { bootReplaySkin } from './utils/skins.js';
 import { initInputUndo } from './utils/inputUndo.js';
 import './index.css';
+// genui 窄屏降级。放全局入口而不是随 GenuiFence 走:它按 data-genui-* 属性挂钩,
+// 与围栏组件何时被加载无关,且 index.css 之后引入才排在同源同特异性规则的后面。
+import './genui/genui-responsive.css';
 
 // ── Theme bootstrap ──────────────────────────────────────────────
 // Apply the chosen (family, tone) on <html> BEFORE React mounts so we never

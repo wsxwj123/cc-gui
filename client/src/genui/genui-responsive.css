@@ -1,0 +1,48 @@
+/* genui 窄屏降级(r64 M10 / INTERFACE §6 末四条)。
+ *
+ * 为什么单独一张普通 CSS、不写进 GenuiBlock.module.css:
+ *   上游那张是 CSS Module,类名在构建期加哈希(实测形态 `_table_1r17i_318`),
+ *   本文件按 `data-genui-*` 属性选择器挂钩,与哈希无关;上游整体升级时这张表不用跟着改。
+ *   属性钩子沿用上游既有惯例(data-genui-echart / -plot / -scene3d 早就在),
+ *   本轮只补了 data-genui-grid 与 data-genui-row 两个(render-node.tsx,带 CGUI-PATCH)。
+ *
+ * 断点取 767px:与全仓手机断点一字不差(index.css 的 phone app shell、App.jsx 的
+ * useIsMobile 都是 max-width:767px)。契约要求的是「< 640px」,767 是它的超集,
+ * 一个断点同时满足契约与仓内惯例,不再引第二个宽度值进来。
+ *
+ * 实测(390×780 真机视口)已经**不需要**在这里管的两件事,别再补:
+ *   - table 横滚:上游 .tableWrap 自带 overflow-x:auto + max-width:100% + min-width:0,
+ *     实测 canScrollX=true 且页面自身无横向滚动条。
+ *   - 图表/3D 宽度:echart / plot / scene3d / chart 实测宽度都恰好等于块宽,零溢出。 */
+
+@media (max-width: 767px) {
+  /* ① 多列网格转单列。列数是 render-node.tsx 写死的内联 grid-template-columns,
+     内联样式只有 !important 压得动 —— 这是本文件唯一一处,不是为了提权图省事。 */
+  [data-genui] [data-genui-grid] {
+    grid-template-columns: 1fr !important;
+  }
+
+  /* ①-附带 转单列后要把「列分隔线」收掉。上游 `.grid > .stat` 用 border-left 当列分隔
+     (首列免除),一列一行时它就成了每格左边一条无意义的竖线(实测 stat 网格可见)。
+     整张 GenuiBlock.module.css 里 border-left 只出现在那一条规则上,所以对网格直系子元素
+     一律清掉是安全的,不会误伤别的边框。这里不补 border-top:那会给本来没有分隔线的
+     text/card 等子元素凭空加线。 */
+  [data-genui] [data-genui-grid] > * {
+    border-left: none;
+  }
+
+  /* ② 横排允许换行。不换行时窄屏下按钮会被挤成一列一个字(实测 5 个按钮从
+     118×43 塌成 56×130),且整行 scrollWidth 溢出容器。
+     row 不做 ① 的分隔线处理:换行后每一行内部仍是并排,左边框依旧是对的。 */
+  [data-genui] [data-genui-row] {
+    flex-wrap: wrap;
+  }
+
+  /* ③ 滑块触控高度。input[type=range] 默认只有 ~19px 高,手指点不准;
+     min-height 而不是 height —— 它同时压得住 PlotBlock 里写死的 height:4px
+     (min-height 在层叠里对 height 有钳制权),又不会把更高的实现改矮。
+     40px 对齐验收线(B127 ≥40px),比仓内圆钮惯例 38px 略高一档。 */
+  [data-genui] input[type="range"] {
+    min-height: 40px;
+  }
+}

@@ -79,7 +79,9 @@ function renderNodeInner(
     }
     case 'row': {
       return (
-        <div key={key} className={css.row + (node.wrap ? ` ${css.wrap}` : '')}>
+        // CGUI-PATCH: 挂 data-genui-row —— 窄屏降级样式(genui-responsive.css)要在这里
+        // 强制换行,而 CSS Module 的类名带哈希、外部样式表选不中(同 data-genui-echart 等既有做法)。
+        <div key={key} className={css.row + (node.wrap ? ` ${css.wrap}` : '')} data-genui-row>
           {node.items.map((c, i) => renderNode(c, i, onAction, depth + 1, answers, uiKey))}
           {node.spacer && <div className={css.spacer} />}
         </div>
@@ -94,7 +96,9 @@ function renderNodeInner(
     }
     case 'grid': {
       return (
-        <div key={key} className={css.grid} style={{ gridTemplateColumns: `repeat(${Math.max(1, node.cols)}, minmax(0, 1fr))` }}>
+        // CGUI-PATCH: 同上挂 data-genui-grid。列数是**内联样式**,窄屏转单列那条规则
+        // 只能用 !important 压过它(内联样式没有别的压法),见 genui-responsive.css。
+        <div key={key} className={css.grid} data-genui-grid style={{ gridTemplateColumns: `repeat(${Math.max(1, node.cols)}, minmax(0, 1fr))` }}>
           {node.items.map((c, i) => renderNode(c, i, onAction, depth + 1, answers, uiKey))}
         </div>
       )
