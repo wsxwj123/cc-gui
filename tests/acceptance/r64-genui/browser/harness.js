@@ -229,6 +229,10 @@ export function seedSession(app, assistantText, opts = {}) {
   const common = { isSidechain: false, userType: 'external', cwd: app.cwd, sessionId: sid,
     version: '2.1.227', gitBranch: '' };
   const lines = [
+    // 同一颗雷:产品把"少于 3 行"的 transcript 当空会话滤掉(session-reader),
+    // 真 CLI 的记录首个 user 之前本就有元数据行。只写 user+assistant 两行的话,
+    // 这条占位会话进不了侧栏。
+    { type: 'summary', summary: marker, leafUuid: u },
     { ...common, parentUuid: null, type: 'user', uuid: u, timestamp: now(),
       message: { role: 'user', content: `${marker} 画个界面` } },
     { ...common, parentUuid: u, type: 'assistant', uuid: a, timestamp: now(),
