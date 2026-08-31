@@ -1,14 +1,17 @@
 import { Router } from 'express';
 import { homedir } from 'os';
 import { join, sep } from 'path';
-import { createReadStream, createWriteStream, existsSync } from 'fs';
+import { createReadStream, createWriteStream, existsSync, realpathSync } from 'fs';
 import { realpath } from 'fs/promises';
 import { randomUUID } from 'crypto';
 import readline from 'readline';
 
 const router = Router();
 
-const PROJECTS_DIR = join(homedir(), '.claude', 'projects');
+// 与下方包含校验的 realpath(dir) 同基准:HOME 在软链路径(macOS /var→/private/var)时,
+// 不归一会让 startsWith 恒假 → fork 恒 400。目录不存在则保持原值(后续 realpath(dir) 同样失败,行为不变)。
+let PROJECTS_DIR = join(homedir(), '.claude', 'projects');
+try { PROJECTS_DIR = realpathSync(PROJECTS_DIR); } catch {}
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 // projectHash 是 Claude Code 把路径里的 '/' 换成 '-' 形成的目录名，只允许这些字符。
 const PROJECT_HASH_RE = /^-?[A-Za-z0-9._-]{1,300}$/;
