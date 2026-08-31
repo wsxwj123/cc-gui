@@ -66,10 +66,21 @@ const NOTICE_BASE = {
   whiteSpace: 'pre-wrap',
 };
 // 两档说明条:解析失败是错(红),规格过大只是"换个显示方式"(中性灰),别把后者也刷成红的。
-// 配色暂用字面值,主题映射统一在 M9 那一轮接 token。
+// CGUI-PATCH:字面色换成宿主主题变量(原注释说的"M9 那一轮接 token")。原来的 #f87171 是
+// 给深色底调的浅红,浅色主题下对比度不够;--color-error 本身就是明暗两套(index.css 里
+// 浅色 #DC2626 / 深色 #EF4444),跟着主题走。底色与描边用 color-mix 从同一个 token 兑出来,
+// 不再各写一个 rgba —— 换主题时只有一处要改。
 const NOTICE_TONE = {
-  error: { background: 'rgba(239, 68, 68, 0.14)', border: '1px solid rgba(239, 68, 68, 0.4)', color: '#f87171' },
-  info: { background: 'rgba(127, 127, 127, 0.12)', border: '1px solid rgba(127, 127, 127, 0.35)', color: 'inherit' },
+  error: {
+    background: 'color-mix(in srgb, var(--color-error) 14%, transparent)',
+    border: '1px solid color-mix(in srgb, var(--color-error) 40%, transparent)',
+    color: 'var(--color-error)',
+  },
+  info: {
+    background: 'color-mix(in srgb, var(--color-ink-faint) 12%, transparent)',
+    border: '1px solid color-mix(in srgb, var(--color-ink-faint) 35%, transparent)',
+    color: 'var(--color-ink-muted)',
+  },
 };
 
 /** 降级形态:说明条(可选)+ 原始代码块。genui-source 恒在,genui-notice 只在有话说时在。 */

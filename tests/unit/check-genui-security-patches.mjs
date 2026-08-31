@@ -107,6 +107,13 @@ const SOH = String.fromCharCode(1);
   const iNoNode = fence.indexOf("fence.kind === 'no-node'");
   assert.ok(iNoNode !== -1 && iNoNode < fence.indexOf('describeJsonFailure(raw)'),
     'no-node 要在红条之前就 return,别掉进 JSON 解析失败那条文案里');
+  // 说明条配色接宿主主题变量,不留字面色:原来的 #f87171 是给深色底调的浅红,
+  // 浅色主题下对比度不够;--color-error 本身是明暗两套(index.css)。
+  const tone = fence.slice(fence.indexOf('const NOTICE_TONE'), fence.indexOf('function DegradedFence'));
+  assert.ok(/var\(--color-error\)/.test(tone), '红条要用 --color-error');
+  assert.ok(/var\(--color-ink-(faint|muted)\)/.test(tone), '中性说明条要用 --color-ink-* 而不是写死的灰');
+  assert.ok(!/#[0-9a-fA-F]{3,8}|rgba?\(/.test(tone),
+    '说明条配色里不许再留任何字面色值(换主题时只有一处要改)');
 }
 
 // ── 4. 灰字「N 个不支持的组件已忽略」(§9.1 的两半)────────────────────────────────
