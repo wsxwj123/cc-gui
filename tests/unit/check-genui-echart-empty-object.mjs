@@ -29,6 +29,11 @@ const one = (node) => repairGenuiSpec({ items: [node] })?.items?.[0];
   assert.deepEqual(m.option.grid, {}, 'grid:{} 保留');
   assert.deepEqual(m.option.xAxis, {}, 'xAxis:{} 保留');
   assert.deepEqual(m.option.yAxis, {}, 'yAxis:{} 保留');
+
+  // tooltip:{} 走"原生空保留"后,父层仍强制 renderMode —— 钉住"richText 注入在
+  // 父层、发生在子层空壳判定之后"的顺序;将来有人把注入挪进子层,这里报警。
+  const t = one({ type: 'echart', option: { tooltip: {}, series: [{ type: 'bar', data: [1] }] } });
+  assert.deepEqual(t.option.tooltip, { renderMode: 'richText' }, 'tooltip:{} 保留且被强制 richText');
 }
 
 // ── 2. 原本就空的数组保留(数组分支同款缺陷)──────────────────────────────────
