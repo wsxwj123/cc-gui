@@ -18,7 +18,7 @@ async function busyTurnWithFence(page, app, body = BTN) {
 test('B57+B58+B59 流式中点按钮：立即“已排队”、队列 +1、不打断当前回合', async ({ page, app }) => {
   await busyTurnWithFence(page, app);
   const before = await queueCount(page);
-  await page.getByRole('button', { name: '触发' }).click();
+  await page.getByTestId(TID.block).first().getByRole('button', { name: '触发' }).click();
   await expect(feedback(page)).toContainText(COPY.queued, { timeout: 3000 });
   expect(await queueCount(page)).toBe(before + 1);
   await expect(marks(page), '排队期间不该已经发出去').toHaveCount(0);
@@ -28,7 +28,7 @@ test('B57+B58+B59 流式中点按钮：立即“已排队”、队列 +1、不�
 
 test('B60 回合结束：队列里那条自动发出，用户不用再点', async ({ page, app }) => {
   await busyTurnWithFence(page, app);
-  await page.getByRole('button', { name: '触发' }).click();
+  await page.getByTestId(TID.block).first().getByRole('button', { name: '触发' }).click();
   await expect(feedback(page)).toContainText(COPY.queued);
   ctl.release(app);
   await waitTurnEnd(page);        // 等回合真收尾再读队列,否则是在收尾中途做一次性快照
@@ -40,7 +40,7 @@ test('B60 回合结束：队列里那条自动发出，用户不用再点', asyn
 
 test('B61 排队中从队列里删掉：这条不再发出', async ({ page, app }) => {
   await busyTurnWithFence(page, app);
-  await page.getByRole('button', { name: '触发' }).click();
+  await page.getByTestId(TID.block).first().getByRole('button', { name: '触发' }).click();
   await expect(feedback(page)).toContainText(COPY.queued);
   await page.getByTestId(TID.queueItem).first().getByTestId(TID.queueItemDelete).click();
   ctl.release(app);
@@ -75,7 +75,7 @@ test('B62 入队失败（本地存储配额满）：显示“发送失败”而�
   expect(exhausted,
     '没能把 localStorage 撑满 —— 本条的前提(写盘失败)根本没造出来,'
     + '这时候不管实现回什么都不能算数。先把探针修好再谈断言。').toBe(true);
-  const btn = page.getByRole('button', { name: '触发' });
+  const btn = page.getByTestId(TID.block).first().getByRole('button', { name: '触发' });
   await btn.click();
   await expect(feedback(page)).toContainText(COPY.sendFailed, { timeout: 5000 });
   await expect(feedback(page)).not.toContainText(COPY.queued);
@@ -85,14 +85,14 @@ test('B62 入队失败（本地存储配额满）：显示“发送失败”而�
 
 test('B63 排队期间回合结束：“已排队”反馈在发出之前仍然可见', async ({ page, app }) => {
   await busyTurnWithFence(page, app);
-  await page.getByRole('button', { name: '触发' }).click();
+  await page.getByTestId(TID.block).first().getByRole('button', { name: '触发' }).click();
   await expect(feedback(page)).toContainText(COPY.queued);
   await expect(feedback(page)).toContainText(COPY.queued);   // 回合还没结束,反馈得一直在
 });
 
 test('B64 【硬断言】点击后 300ms 内回合结束：消息必须仍然发出', async ({ page, app }) => {
   await busyTurnWithFence(page, app);
-  await page.getByRole('button', { name: '触发' }).click();
+  await page.getByTestId(TID.block).first().getByRole('button', { name: '触发' }).click();
   await page.waitForTimeout(120);          // 卡在"界面正要因回合定稿而重建"的窗口里
   ctl.release(app);
   await expect(marks(page), '这一刻的消息绝不能被吞掉').toHaveCount(1, { timeout: 20_000 });
@@ -100,7 +100,7 @@ test('B64 【硬断言】点击后 300ms 内回合结束：消息必须仍然发
 
 test('B65 消息真的发出去之后：“已排队”反馈消失', async ({ page, app }) => {
   await busyTurnWithFence(page, app);
-  await page.getByRole('button', { name: '触发' }).click();
+  await page.getByTestId(TID.block).first().getByRole('button', { name: '触发' }).click();
   await expect(feedback(page)).toContainText(COPY.queued);
   ctl.release(app);
   await expect(marks(page)).toHaveCount(1, { timeout: 20_000 });
@@ -109,7 +109,7 @@ test('B65 消息真的发出去之后：“已排队”反馈消失', async ({ p
 
 test('B66 从队列条里删掉：“已排队”反馈消失', async ({ page, app }) => {
   await busyTurnWithFence(page, app);
-  await page.getByRole('button', { name: '触发' }).click();
+  await page.getByTestId(TID.block).first().getByRole('button', { name: '触发' }).click();
   await expect(feedback(page)).toContainText(COPY.queued);
   await page.getByTestId(TID.queueItem).first().getByTestId(TID.queueItemDelete).click();
   await expect(page.getByTestId(TID.feedback)).toHaveCount(0);
@@ -118,7 +118,7 @@ test('B66 从队列条里删掉：“已排队”反馈消失', async ({ page, a
 
 test('B67 排队期间刷新页面：队列还在，“已排队”反馈也重新出现', async ({ page, app }) => {
   await busyTurnWithFence(page, app);
-  await page.getByRole('button', { name: '触发' }).click();
+  await page.getByTestId(TID.block).first().getByRole('button', { name: '触发' }).click();
   await expect(feedback(page)).toContainText(COPY.queued);
   await page.reload();
   await expect(page.getByTestId(TID.queueItem)).toHaveCount(1, { timeout: 20_000 });
@@ -133,7 +133,7 @@ test('B68 会话忙但这条围栏早已定稿：仍然显示“已排队”（�
   ctl.script(app, '第二回合正文'); ctl.hold(app);            // 再起一个不结束的回合
   await box.fill('第二问'); await box.press('Enter');
   await page.waitForTimeout(1500);
-  await page.getByRole('button', { name: '触发' }).click();
+  await page.getByTestId(TID.block).first().getByRole('button', { name: '触发' }).click();
   await expect(feedback(page)).toContainText(COPY.queued, { timeout: 5000 });
   ctl.release(app);
 });
@@ -146,7 +146,7 @@ test('B69 会话空闲：显示“已发送”，消息立即发出', async ({ p
   // 这时候点下去会话其实是忙的 —— 实现给「已排队」是对的,是夹具没等到时机。
   await waitTurnEnd(page);
   const before = await messageCount(page);
-  await page.getByRole('button', { name: '触发' }).click();
+  await page.getByTestId(TID.block).first().getByRole('button', { name: '触发' }).click();
   await expect(feedback(page)).toContainText(COPY.sent, { timeout: 5000 });
   await expect(marks(page)).toHaveCount(1, { timeout: 10_000 });
   expect(await messageCount(page)).toBeGreaterThan(before);

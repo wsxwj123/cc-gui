@@ -156,7 +156,7 @@ test('B77 “已排队”不属于交互状态：发出去就消失，跟保留�
   const box = await bootUI(page, app);
   await modelSays(page, app, fence({ items: [{ type: 'button', label: '触发', action: 'go' }] }), { box, hold: true });
   await page.getByTestId(TID.block).first().waitFor({ timeout: 20_000 });
-  await page.getByRole('button', { name: '触发' }).click();
+  await page.getByTestId(TID.block).first().getByRole('button', { name: '触发' }).click();
   await expect(page.getByTestId(TID.feedback)).toBeVisible();
   ctl.release(app);
   await expect(page.getByTestId(TID.actionMsg)).toHaveCount(1, { timeout: 20_000 });

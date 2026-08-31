@@ -18,7 +18,10 @@ const CTL = process.env.CGUI_FAKE_CLAUDE_DIR || path.join(process.env.HOME || '.
 const argv = process.argv.slice(2);
 const argOf = (n) => { const i = argv.indexOf(n); return i >= 0 ? argv[i + 1] : undefined; };
 
-if (argv.includes('--version') || argv.includes('-v')) { console.log('2.1.227 (fake)'); process.exit(0); }
+// 自报一个高于任何真实上游的版本号:版本比较永不判定"有新版",
+// 「🎉 发现新版本」那层 z-200 弹窗就不会异步弹出来砸中在飞的点击。
+// (它只由内存 state 门控,没有可预置的存储位,所以只能从比较的输入端掐。)
+if (argv.includes('--version') || argv.includes('-v')) { console.log('99.0.0 (Claude Code)'); process.exit(0); }
 
 const sid = argOf('--session-id') || argOf('--resume') || crypto.randomUUID();
 const cwd = process.cwd();
