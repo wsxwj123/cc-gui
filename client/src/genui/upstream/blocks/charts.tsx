@@ -20,9 +20,17 @@ export const CHART_COLORS = [
   'var(--dsw-static-deepseek-300)',
 ]
 
-/** Series color: explicit color wins; multi-series auto-assign from the palette. */
-const seriesColor = (i: number, n: number, c?: string): string | undefined =>
-  c ?? (n > 1 ? CHART_COLORS[i % CHART_COLORS.length] : undefined)
+/**
+ * Series color: explicit color wins, otherwise assign from the fixed palette.
+ *
+ * CGUI-PATCH(INTERFACE §6):去掉 `n > 1` 那道门。原来单序列的柱/折线拿不到色板色,
+ * 回落 CSS 里的 `--dsl-g-accent` —— 那是**主题强调色**,换个主题家族就变。契约写死
+ * 「序列色只随浅/深翻转,不随主题家族变」,回落到 accent 正好违反它。色板是明暗两套的
+ * 固定值(host/genui-tokens.css,与画布对比度已由 check-genui-palette 逐主题看住)。
+ * `n` 保留在签名里只为读起来对称,判定不再用它。
+ */
+const seriesColor = (i: number, n: number, c?: string): string =>
+  c ?? CHART_COLORS[i % CHART_COLORS.length]!
 
 /**
  * Sortable numeric value of a cell. Human-written table cells are rarely
@@ -188,7 +196,7 @@ export const BarsNode = memo(function BarsNode({ chart }: { chart: GenuiChart })
                         className={css.groupedFill}
                         style={{
                           height: `${h}%`,
-                          background: seriesColor(si, grouped.length, s.color) ?? 'var(--dsw-alias-state-business-primary, #4f8ef7)',
+                          background: seriesColor(si, grouped.length, s.color),
                         }}
                       />
                     </div>
@@ -222,7 +230,9 @@ export const BarsNode = memo(function BarsNode({ chart }: { chart: GenuiChart })
           return (
             <div key={i} className={css.barCol} title={`${d.label}: ${String(d.value)}`}>
               <span className={css.barValue}>{String(d.value)}</span>
-              <div data-testid="genui-series" className={css.barFill} style={{ height: `${h}%`, ...(d.color !== undefined ? { background: d.color } : {}) }} />
+              {/* CGUI-PATCH(§6):单序列柱也从固定色板取色。原来只在 d.color 存在时才写 inline,
+                  否则回落 CSS 的 --dsl-g-accent(主题强调色)—— 换主题家族就变,违反契约。 */}
+              <div data-testid="genui-series" className={css.barFill} style={{ height: `${h}%`, background: seriesColor(i, data.length, d.color) }} />
             </div>
           )
         })}
@@ -276,7 +286,9 @@ export const LineChartNode = memo(function LineChartNode({ chart }: { chart: Gen
         {data.map((datum, i) => {
           const [x, y] = pt(i, Number(datum.value) || 0)
           return (
-            <circle key={i} cx={x} cy={y} r={3} className={css.lineDot} fill={datum.color ?? undefined}>
+            // CGUI-PATCH(§6):点色走 inline style 而不是 fill 属性 —— 表现属性优先级低于
+            // CSS 规则,`.lineDot { fill: … }` 会把 fill 属性整个盖掉(逐点 color 一直是哑的)。
+            <circle key={i} cx={x} cy={y} r={3} className={css.lineDot} style={{ fill: seriesColor(0, 1, datum.color) }}>
               <title>{`${datum.label}: ${String(datum.value)}`}</title>
             </circle>
           )
@@ -318,7 +330,7 @@ export const DonutNode = memo(function DonutNode({ chart }: { chart: GenuiChart 
               data-testid="genui-series"
               cx="60" cy="60" r={R} fill="none" strokeWidth="14"
               className={css.donutSeg}
-              style={{ stroke: seriesColor(i, data.length, d.color) ?? 'var(--dsw-alias-state-business-primary, #4f8ef7)' }}
+              style={{ stroke: seriesColor(i, data.length, d.color) }}
               strokeDasharray={`${len} ${C - len}`}
               strokeDashoffset={-offset}
               transform="rotate(-90 60 60)"
@@ -335,7 +347,7 @@ export const DonutNode = memo(function DonutNode({ chart }: { chart: GenuiChart 
       <div className={css.donutLegend}>
         {data.map((d, i) => (
           <span key={i} className={css.legendItem}>
-            <span className={css.legendSwatch} style={{ background: seriesColor(i, data.length, d.color) ?? 'var(--dsw-alias-state-business-primary, #4f8ef7)' }} />
+            <span className={css.legendSwatch} style={{ background: seriesColor(i, data.length, d.color) }} />
             {d.label} · {String(d.value)}
           </span>
         ))}
