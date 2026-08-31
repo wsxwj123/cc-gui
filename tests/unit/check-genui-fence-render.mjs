@@ -15,7 +15,12 @@ import { describeJsonFailure } from '../../client/src/genui/upstream/fence-repai
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const read = (p) => readFileSync(join(root, p), 'utf8');
-const fence = read('client/src/components/GenuiFence.jsx');
+// M12a:判定逻辑从 GenuiFence.jsx 搬去 host/fence-classify.ts —— 裸 node 加载不了 .jsx,
+// 而验收契约模块必须 import 得到它(PLAN §2.0.2)。围栏管线 = 这两个文件,断言按各自
+// 归属分开写:形态/文案/顺序在 .ts,JSX 结构与可测锚在 .jsx。
+const fenceJsx = read('client/src/components/GenuiFence.jsx');
+const fenceTs = read('client/src/genui/host/fence-classify.ts');
+const fence = `${fenceJsx}\n${fenceTs}`;
 const md = read('client/src/components/MarkdownRenderer.jsx');
 const turn = read('client/src/components/TurnBubble.jsx');
 const at = (hay, needle, what) => {
@@ -44,30 +49,36 @@ const at = (hay, needle, what) => {
     + '(流式每 chunk 两次 JSON.stringify,超大子树直接卡死主线程)');
 }
 
-// ── 3. 降级安全网:三条降级路都渲染 DegradedFence(原始代码块恒在)────────────────
+// ── 3. 降级安全网:非 spec 的每一种形态都渲染 DegradedFence(原始代码块恒在)────────
 {
-  assert.ok(/data-testid="genui-source"[\s\S]{0,120}<CodeBlock/.test(fence),
+  assert.ok(/data-testid="genui-source"[\s\S]{0,120}<CodeBlock/.test(fenceJsx),
     'genui-source 必须包着原始代码块(INTERFACE §5 总原则②:不让用户对着空白发呆)');
   for (const [kind, why] of [
-    ["fence.kind === 'oversize'", '超大围栏'],
-    ["fence.kind === 'empty'", '空围栏体'],
-  ]) assert.ok(fence.includes(kind), `${why}要有自己的降级分支`);
-  // 解析不出来的那条是兜底 return,必须也是 DegradedFence
-  const branches = fence.match(/<DegradedFence/g) || [];
-  assert.ok(branches.length >= 4,
-    `超大/空体/流式半截/定稿失败 四条降级路各要一处 DegradedFence(实际 ${branches.length})`);
+    ["kind: 'oversize'", '超大围栏'],
+    ["kind: 'empty'", '空围栏体'],
+    ["kind: 'no-node'", '一个组件都没活下来'],
+    ["kind: 'unparsed'", '解析不出来'],
+  ]) assert.ok(fenceTs.includes(kind), `${why}要有自己的形态`);
+  // 四条降级路合并成**一条**兜底 return:spec 是唯一渲染组件树的分支,其余一律 DegradedFence
+  // (分支合并前是四个各写一遍的 return,文案也各写一遍 —— 文案是可测项,不能两处各一份)。
+  const iSpec = at(fenceJsx, "fence.kind === 'spec'", 'spec 分支');
+  assert.ok(fenceJsx.slice(iSpec).includes('<DegradedFence'),
+    'spec 之后的兜底 return 必须是 DegradedFence(走不通的每一条路都留着原始代码块)');
+  assert.equal((fenceJsx.match(/<GenuiBlock/g) || []).length, 1, '只有 spec 一条路渲染组件树');
+  assert.ok(/notice=\{fence\.notice\}/.test(fenceJsx),
+    '说明条文案取 classifyFence 的回传,不许在 JSX 里另写一份(文案是可断言项)');
 }
 
 // ── 4. 可测锚:该在的在、不该在的不在(INTERFACE §9.1)─────────────────────────────
 {
   // genui-block 只出现在 spec 分支,且在 ErrorBoundary **里面**:
   // 组件抛异常时整块换成灰卡,此刻"渲染成功的块"并不存在,块锚也就不该留在 DOM 里。
-  const iBoundary = at(fence, '<ErrorBoundary', 'ErrorBoundary');
-  const iBlock = at(fence, 'data-testid="genui-block"', 'genui-block 锚');
+  const iBoundary = at(fenceJsx, '<ErrorBoundary', 'ErrorBoundary');
+  const iBlock = at(fenceJsx, 'data-testid="genui-block"', 'genui-block 锚');
   assert.ok(iBoundary < iBlock, 'ErrorBoundary 必须在 genui-block 外层');
-  assert.ok(fence.slice(iBlock, at(fence, "fence.kind === 'oversize'", '超大分支')).includes('<GenuiBlock'),
+  assert.ok(fenceJsx.slice(iBlock, at(fenceJsx, '<DegradedFence', '降级分支')).includes('<GenuiBlock'),
     'genui-block 锚只许挂在渲染成功那一支上');
-  assert.equal((fence.match(/data-testid="genui-block"/g) || []).length, 1, 'genui-block 每围栏至多一处');
+  assert.equal((fenceJsx.match(/data-testid="genui-block"/g) || []).length, 1, 'genui-block 每围栏至多一处');
   assert.ok(read('client/src/genui/upstream/ErrorBoundary.tsx').includes('data-testid="genui-render-failed"'),
     'ErrorBoundary 的灰卡要挂 genui-render-failed');
 }
@@ -78,8 +89,8 @@ const at = (hay, needle, what) => {
     assert.ok(fence.includes(frag), `说明条文案缺片段:${frag}`);
   }
   // 流式期的半截 JSON 不是错误:先 return 掉,不走到红条那一行
-  const iGuard = at(fence, 'if (!settled) return <DegradedFence', '流式期静默降级');
-  assert.ok(iGuard < at(fence, 'describeJsonFailure(raw)', '红条'),
+  const iGuard = at(fenceTs, 'if (!settled) return { kind:', '流式期静默降级');
+  assert.ok(iGuard < at(fenceTs, 'describeJsonFailure(raw)', '红条'),
     '流式期必须在算红条之前就 return —— 用户还在看模型打字,不该弹错误(§5.1 第 1 行)');
   // describeJsonFailure 对"合法 JSON 但不是界面规格"返回 null,那一路同样要有话说
   assert.equal(describeJsonFailure('[1,2,3]'), null, '前提:合法 JSON 时它返回 null');
@@ -94,7 +105,8 @@ const at = (hay, needle, what) => {
     'MarkdownRenderer 的 children 空值守卫:围栏开头 1-2 帧不得显示字面量 undefined');
   assert.ok(!/String\(children\)\.replace/.test(md.replace("children == null ? '' : String(children).replace(/\\n$/, '')", '')),
     '不许留下没走守卫的 String(children) 旧写法');
-  assert.ok(/kind: 'empty'[\s\S]{0,80}\n/.test(fence) && fence.indexOf("kind: 'empty'") < fence.indexOf('resolveGenuiSpec('),
+  const classifyBody = fenceTs.slice(at(fenceTs, 'export function classifyFence', 'classifyFence'));
+  assert.ok(classifyBody.indexOf("kind: 'empty'") < classifyBody.indexOf('resolveGenuiSpec('),
     '空体在解析之前就返回:不解析、不算指纹、不读写状态存储');
 }
 

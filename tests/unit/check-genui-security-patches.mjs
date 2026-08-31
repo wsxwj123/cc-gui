@@ -93,20 +93,21 @@ const SOH = String.fromCharCode(1);
 
 // ── 3. 一个可渲染组件都没有 ⟹ 退回代码块,不渲染空卡(§5.2 末段;M4 挂账)──────────
 {
+  // M12a:判定逻辑搬去 host/fence-classify.ts(裸 node 要 import 得到,PLAN §2.0.2);
+  // JSX 只剩渲染。断言按归属分开,意思一字不变。
   const fence = read('client/src/components/GenuiFence.jsx');
-  const body = fence.slice(fence.indexOf('export function classifyFence'));
+  const classify = read('client/src/genui/host/fence-classify.ts');
+  const body = classify.slice(classify.indexOf('export function classifyFence'));
   assert.ok(/kept === 0[\s\S]{0,60}kind: 'no-node'/.test(body),
     '空卡守卫要按 guard 回传的 kept 判(与灰字的 dropped 同源),不许在这里另算一遍节点数');
   assert.ok(body.indexOf('resolveGenuiSpec(') < body.indexOf('kept === 0'),
     '守卫在解析之后:得先有 spec 才谈得上有没有节点');
   // 降级形态:代码块恒在,且**不出说明条** —— JSON 是好的,说"解析失败"是撒谎;
   // 灰字也没有承载它的块(§9.1「全部节点都被丢弃时必须不存在」)。
-  const branch = /if \(fence\.kind === 'no-node'\) return <DegradedFence raw=\{raw\} lang=\{normLang\} \/>;/;
-  assert.ok(branch.test(fence),
-    'no-node 分支必须是"只给代码块、不带 notice"的 DegradedFence');
-  const iNoNode = fence.indexOf("fence.kind === 'no-node'");
-  assert.ok(iNoNode !== -1 && iNoNode < fence.indexOf('describeJsonFailure(raw)'),
-    'no-node 要在红条之前就 return,别掉进 JSON 解析失败那条文案里');
+  assert.ok(/kind: 'no-node', notice: null/.test(body),
+    'no-node 必须不带 notice:JSON 是好的,弹"解析失败"是撒谎');
+  assert.ok(/notice=\{fence\.notice\}/.test(fence),
+    'JSX 的说明条只认 classifyFence 的回传,不许自己判形态再补一条文案');
   // 说明条配色接宿主主题变量,不留字面色:原来的 #f87171 是给深色底调的浅红,
   // 浅色主题下对比度不够;--color-error 本身是明暗两套(index.css)。
   const tone = fence.slice(fence.indexOf('const NOTICE_TONE'), fence.indexOf('function DegradedFence'));

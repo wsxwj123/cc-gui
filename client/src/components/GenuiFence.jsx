@@ -11,51 +11,17 @@ import React, { useMemo } from 'react';
 import { CodeBlock } from './CodeBlock.jsx';
 import { ErrorBoundary } from '../genui/upstream/ErrorBoundary.tsx';
 import { GenuiBlock } from '../genui/upstream/GenuiBlock.tsx';
-import { resolveGenuiSpec } from '../genui/upstream/fence-render.tsx';
-import { describeJsonFailure } from '../genui/upstream/fence-repair.ts';
-import { GENUI_LIMITS } from '../genui/upstream/guard.ts';
 import { useGenuiAction } from '../genui/upstream/action-context.ts';
 import { genuiStateKey } from '../genui/upstream/interaction-store.ts';
+// 判定逻辑(语言标记 / 字节门 / 四种形态 / 说明条文案)全在 host/fence-classify.ts。
+// 这个文件只剩 JSX —— 裸 node 加载不了 `.jsx`(PLAN §2.0.2),而验收契约模块必须
+// import 得到那段逻辑,所以它不能留在这里。再导出是为了不动既有调用方
+// (MarkdownRenderer 读 isGenuiLang,浏览器用例读 classifyFence)。
+import {
+  classifyFence, fenceByteLength, isGenuiLang, normGenuiLang,
+} from '../genui/host/fence-classify.ts';
 
-// 语言标记判定(PLAN §1.8:照抄 ArtifactPreview 的 normLang —— 取第一个空白分隔词 + 小写)。
-// 一行同时认两个标记(决策 3);大小写不敏感;```cgui-ui title=x 只取第一个词。
-const GENUI_LANGS = new Set(['cgui-ui', 'dsh-ui']);
-export function normGenuiLang(lang) {
-  return String(lang || '').trim().split(/\s+/)[0].toLowerCase();
-}
-export function isGenuiLang(lang) {
-  return GENUI_LANGS.has(normGenuiLang(lang));
-}
-
-/**
- * 围栏原文的 UTF-8 字节数。上限是**字节**不是字符(INTERFACE §1.3),中文围栏按字符算
- * 会放进来三倍大的东西。
- */
-export function fenceByteLength(raw) {
-  return new TextEncoder().encode(raw).length;
-}
-
-/**
- * 把围栏归到四种形态之一。纯函数、不碰 React,单测直接调。
- * 形态决定渲染分支,分支决定可测锚(INTERFACE §9.1),所以判定和渲染分开写。
- */
-export function classifyFence(raw, settled) {
-  // ① 空体(§1.4.1-2):流式期每个围栏开头必经的 1-2 帧。不解析、不算指纹、不读写状态存储。
-  //    (字面量 "undefined" 那半由 MarkdownRenderer 的 children 守卫治,这里只管"空体不产生状态")
-  if (raw.trim() === '') return { kind: 'empty' };
-  // ② 字节上限门(§5.3 补丁1 / INTERFACE §5.7)。原文只增不减,所以越过阈值后恒为超限,
-  //    天然满足"不得反复抖动"。
-  const bytes = fenceByteLength(raw);
-  if (bytes > GENUI_LIMITS.maxFenceBytes) return { kind: 'oversize', kb: Math.round(bytes / 1024) };
-  const spec = resolveGenuiSpec(raw, { settled });
-  if (spec === null) return { kind: 'unparsed' };
-  // ③ 空卡守卫(§5.2 末段,M4 挂账的缺陷)。JSON 解析出来了、结构也对,但一个节点都没
-  //    活下来(类型全不在白名单 / 必填字段全非法)。此时渲染出来是一张**空卡**,比留着
-  //    原文更糟:用户既看不到模型写了什么,也不知道出了什么事。口径取 guard 回传的
-  //    kept(全树存活数),与灰字的 dropped 同源,不另算一遍。
-  if (spec.kept === 0) return { kind: 'no-node' };
-  return { kind: 'spec', spec };
-}
+export { classifyFence, fenceByteLength, isGenuiLang, normGenuiLang };
 
 const NOTICE_BASE = {
   margin: '0 0 6px',
@@ -179,32 +145,15 @@ export function GenuiFence({ raw, lang = 'cgui-ui', settled = false }) {
       </ErrorBoundary>
     );
   }
-  if (fence.kind === 'oversize') {
-    return (
-      <DegradedFence
-        raw={raw}
-        lang={normLang}
-        tone="info"
-        notice={`界面规格过大（${fence.kb} KB），已按代码块显示`}
-      />
-    );
-  }
-  // 空体:空代码块,不报错、不出红条(§5.1)。
-  if (fence.kind === 'empty') return <DegradedFence raw="" lang={normLang} />;
-  // 一个可渲染组件都没有:同样只给代码块,且**不出任何说明条**(§5.2 末段)——
-  // JSON 是好的,说"解析失败"是撒谎;灰字「N 个已忽略」也没有承载它的块(§9.1)。
-  if (fence.kind === 'no-node') return <DegradedFence raw={raw} lang={normLang} />;
-  // 剩下 unparsed。流式期的半截 JSON **不是错误**(用户还在看模型打字),只给代码块;
-  // 定稿后仍解析不出来才配一条红条(§5.1)。
-  if (!settled) return <DegradedFence raw={raw} lang={normLang} />;
-  // describeJsonFailure 只描述 JSON 语法错;合法 JSON 但不是界面规格(数组/字符串/
-  // 没有 items)时它返回 null,那一路同样走红条(§5.1 末两行),补一句人话。
-  const detail = describeJsonFailure(raw) ?? '（围栏体不是合法的界面规格：根对象需要 items 数组）';
+  // 其余四种形态一律降级成代码块,说明条给不给、给哪一档语气,由 classifyFence 一处
+  // 定夺(空体/空卡不出条、超大出灰条、定稿后修不好出红条 —— §5.1 / §5.2 / §5.7)。
+  // 空体渲染的是**空**代码块:原文只有空白,照着贴等于贴一片空行。
   return (
     <DegradedFence
-      raw={raw}
+      raw={fence.kind === 'empty' ? '' : raw}
       lang={normLang}
-      notice={`⚠️ cgui-ui 围栏 JSON 解析失败${detail} —— 围栏保持为代码块；请让模型检查并修复 JSON 后重发。`}
+      tone={fence.tone}
+      notice={fence.notice}
     />
   );
 }

@@ -19,30 +19,21 @@ import { type CSSProperties, type Key, type ReactNode } from 'react'
 import { CodeBlock } from '../host/primitives.jsx'
 import { ErrorBoundary } from './ErrorBoundary.tsx'
 import { GenuiBlock } from './GenuiBlock.tsx'
-import { repairGenuiSpec } from './guard.ts'
 import { genuiStateKey } from './interaction-store.ts'
-import { parsePartialGenuiSpec } from './parse-partial.ts'
 import type { GenuiSpec } from './spec.ts'
-import { completeFenceJson, describeJsonFailure, repairFenceJson } from './fence-repair.ts'
+import { describeJsonFailure } from './fence-repair.ts'
+// CGUI-PATCH: `resolveGenuiSpec` 与 `GenuiFenceContext` 搬去 host/fence-classify.ts。
+// 理由是结构性的:裸 node 加载不了 `.tsx`(PLAN §2.0.2),而验收契约模块必须能 import
+// 它。这里改成再导出,调用方与行为一字不变。
+import { resolveGenuiSpec, type GenuiFenceContext } from '../host/fence-classify.ts'
+export { resolveGenuiSpec }
+export type { GenuiFenceContext }
 
-/**
- * Context a fence renderer receives beside the raw source and React key.
- *
- * CGUI-PATCH: 上游的 `source`(宿主给的结构身份 id+order)整个去掉,换成一个布尔
- * `settled`。CC-GUI 拿得到更直接的信号 —— `TurnBubble` 的 `isLiveStream`,经
- * `MarkdownRenderer` 的 `isStreaming` prop 透传下来(PLAN §1.4)。不查 DOM:
- * DOM 探测在 React 19 并发渲染下时序不可靠,而 props 是渲染输入。
- */
-export interface GenuiFenceContext {
-  /**
-   * 本窗格的队列键(`queueKeyFor(selectedSession)`),交互态键的会话分量。
-   * CGUI-PATCH: 上游是裸 `sessionId`,草稿会话没有它 ⟹ 两个草稿窗格串状态(PLAN §1.2.2 A1)。
-   * 缺省 = 不持久化(与上游"无 session 不持久化"同义)。
-   */
-  readonly queueKey?: string
-  /** True once the message finished streaming (upstream: `source !== undefined`). */
-  readonly settled?: boolean
-}
+// CGUI-PATCH: `GenuiFenceContext` 的定义搬到 host/fence-classify.ts(见文件头 import),
+// 语义不变:上游的 `source`(宿主给的结构身份 id+order)整个去掉,换成一个布尔 `settled`。
+// CC-GUI 拿得到更直接的信号 —— `TurnBubble` 的 `isLiveStream`,经 `MarkdownRenderer` 的
+// `isStreaming` prop 透传下来(PLAN §1.4)。不查 DOM:DOM 探测在 React 19 并发渲染下时序
+// 不可靠,而 props 是渲染输入。
 
 const FENCE_ERROR_STYLE: CSSProperties = {
   margin: '0 0 6px',
@@ -88,37 +79,6 @@ function FenceFallback({ raw, fenceKey, settled }: { raw: string; fenceKey: Key;
       <CodeBlock key={fenceKey} code={`${raw}\n`} lang="cgui-ui" />
     </div>
   )
-}
-
-/**
- * Resolve a raw fence body to a guarded spec.
- *
- * - Tier-1 repair (quote escape + trailing commas): safe at any time —
- *   adopted only when the whole body parses, so a still-growing streaming
- *   half keeps falling back to the code block, never flashing a banner.
- * - Tier-2 completion (missing quotes/brackets): settled renders only —
- *   `context.settled` is true exclusively once the message finished, so
- *   streaming halves are never completed early.
- */
-export function resolveGenuiSpec(raw: string, context?: GenuiFenceContext): GenuiSpec | null {
-  const parsed = parsePartialGenuiSpec(raw)
-  let spec = parsed === null ? null : repairGenuiSpec(parsed)
-  if (spec === null) {
-    const repaired = repairFenceJson(raw)
-    if (repaired !== null) {
-      const reparsed = parsePartialGenuiSpec(repaired.text)
-      spec = reparsed === null ? null : repairGenuiSpec(reparsed)
-    }
-    // CGUI-PATCH: 二级补全的门 `context.source !== undefined` → `context.settled === true`(§1.4)
-    if (spec === null && context?.settled === true) {
-      const completed = completeFenceJson(raw)
-      if (completed !== null) {
-        const reparsed = parsePartialGenuiSpec(completed.text)
-        spec = reparsed === null ? null : repairGenuiSpec(reparsed)
-      }
-    }
-  }
-  return spec
 }
 
 /** The inline GenuiBlock tree for a resolved spec. */

@@ -39,4 +39,26 @@ assert.equal(mods['safe-math.ts'].compileMathExpr('x*2')(3), 6, 'SafeMathParser 
 assert.equal(mods['safe-math.ts'].compileMathExpr('a*x', { vars: { a: 4 } })(2), 8, 'vars 字段同上');
 assert.equal(mods['safe-math.ts'].compileMathExpr('constructor'), null, 'ParseError 抛得出来(未知标识符)');
 
-console.log('✅ genui 契约模块裸 node 可加载(5 个模块 / 3 个 CGUI-PATCH 全在)');
+// M12a:契约模块本身也进哨兵 —— 上面 5 个模块单独能加载 ≠ contract.mjs 能加载
+// (它还牵着 host/fence-classify.ts、host/action-send.js;哪天谁往里 import 一个
+// `.tsx`,验收测试整片红,而这里能提前一步告诉你是哪一条 import 干的)。
+{
+  const url = new URL(`file://${join(root, 'client/src/genui/contract.mjs')}`);
+  let contract;
+  try {
+    contract = await import(url.href);
+  } catch (e) {
+    assert.fail(`裸 node 加载 contract.mjs 失败(是不是 import 到 .tsx / .jsx 了?): ${e.code ?? ''} ${e.message}`);
+  }
+  for (const fn of ['matchFenceLang', 'parseSpec', 'buildActionText', 'evalPlotExpr']) {
+    assert.equal(typeof contract[fn], 'function', `契约模块缺导出:${fn}`);
+  }
+  // 各走一条真实路径,证明它接的是真管线而不是空壳
+  assert.equal(contract.matchFenceLang('CGUI-UI title=x'), true);
+  assert.equal(contract.matchFenceLang('json'), false);
+  assert.equal(contract.parseSpec('{"items":[{"type":"text","content":"a"}]}').ok, true);
+  assert.equal(contract.evalPlotExpr('sin(x)', { x: 0 }), 0);
+  assert.ok(contract.buildActionText({ action: 'go', component: { type: 'button' } }).startsWith('[genui-action]'));
+}
+
+console.log('✅ genui 契约模块裸 node 可加载(5 个模块 / 3 个 CGUI-PATCH / contract.mjs 全在)');

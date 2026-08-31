@@ -179,8 +179,11 @@ const SID = 'sess-aaa';
 // ── 9. 键只在 spec 分支算(空体/超大/解析失败不产生状态条目)────────────────────────
 {
   const iKey = at(fence, 'genuiStateKey(queueKey, raw)', 'stateKey 接线');
+  // M12a:四条降级路合并成一条兜底 `<DegradedFence>` return(判定逻辑搬去
+  // host/fence-classify.ts),所以"降级分支"的锚从 oversize 换成 DegradedFence,
+  // 断言的意思不变:stateKey 只在 spec 分支算,降级路一个状态条目都不产生。
   assert.ok(at(fence, "fence.kind === 'spec'", 'spec 分支') < iKey
-    && iKey < at(fence, "fence.kind === 'oversize'", '超大分支'),
+    && iKey < at(fence, '<DegradedFence', '降级分支'),
     '键只在渲染成功那一支上算:空体/超大/解析失败三条降级路一个状态条目都不该产生');
   assert.ok(/<GenuiBlock spec=\{fence\.spec\} stateKey=\{genuiStateKey\(queueKey, raw\)\} settled=\{settled\}/.test(fence),
     'GenuiBlock 要同时收 stateKey 与 settled;指纹取围栏原文 raw,不取解析后的 spec');
