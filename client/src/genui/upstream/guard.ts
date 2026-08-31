@@ -108,6 +108,49 @@ function str(v: unknown, cap: number): string | undefined {
 }
 
 /**
+ * CGUI-PATCH(PLAN §1.3.3 L1 / INTERFACE §2.9):标识符字段的形态封闭。
+ *
+ * action 是全案唯一一条「模型输出 → 用户权限」的写通道:用户点一下,渲染器就**以用户
+ * 身份**往会话里发一条消息,而这条消息里会回传模型撰写的动作名。字符集封闭到
+ * `[A-Za-z0-9_.:-]` 之后,里面没有空格、引号、换行、尖括号、中文 —— 无法伪造消息边界、
+ * 无法写出可读的祈使句。
+ *
+ * 上游只做 `str(v.action, 200)`(截断),截断留下 200 个攻击者字符;这里改成**整个节点
+ * 丢弃** —— 界面上根本没有这个按钮,就没有可点的控件,通道不存在。
+ */
+export const GENUI_IDENT_RE = /^[A-Za-z0-9_.:-]{1,64}$/
+
+/** 单个标识符是否合规。非字符串(数字/对象/数组/null)一律视同不合规(§2.9 末行)。 */
+export function isGenuiIdent(v: unknown): boolean {
+  return typeof v === 'string' && GENUI_IDENT_RE.test(v)
+}
+
+/**
+ * 会随 action 事件回传给模型的标识符字段。`resetAction` 与 `groups` 不在 INTERFACE
+ * §2.9 的字面清单里,但它们**同样进外发消息**(`submit-reset` 的动作名与 `groups`
+ * 数组,INTERFACE §3.2 表),漏掉就是主锁上的一个洞,所以按同一套规则办。
+ */
+const IDENT_FIELDS = ['action', 'resetAction', 'id', 'group'] as const
+
+/**
+ * 节点携带的标识符字段是否全部合规。**缺失 = 合规**(§5.10:缺失不是错误,不计入
+ * 「已忽略」);present-but-invalid = 整个节点丢弃。
+ *
+ * 检查放在 `repairNode` 顶端而不是 17 个 `opt('action', …)` 站点上,是因为那 17 处只
+ * 覆盖"这个类型认识 action"的情况:模型把注入载荷挂在 `card`/`text` 这类不读 action
+ * 的类型上,逐站点校验一个都拦不住(t04 最后一条用例正是这个形态)。一道门覆盖全部
+ * 类型,也覆盖将来新加的字段。
+ */
+function identifiersOk(v: Record<string, unknown>): boolean {
+  for (const k of IDENT_FIELDS) {
+    if (v[k] !== undefined && !isGenuiIdent(v[k])) return false
+  }
+  // `groups` 是 group 名的数组;非数组走既有的"该字段丢弃"路径,不牵连整个节点。
+  if (Array.isArray(v.groups) && !v.groups.every(isGenuiIdent)) return false
+  return true
+}
+
+/**
  * Color field: the value lands in an inline `style` (background/stroke) or
  * THREE.Color. Arbitrary CSS values are an exfiltration channel — a model
  * (or a hostile spec) could emit `url(https://attacker/track?...)` and the
@@ -226,6 +269,8 @@ function repairNode(value: unknown, ctx: RepairCtx, depth: number): GenuiNode | 
   if (v === undefined) return null
   const type = v.type
   if (typeof type !== 'string') return null
+  // CGUI-PATCH(PLAN §1.3.3 L1):标识符形态不合规 ⟹ 整个节点丢弃,不是截断后照常渲染。
+  if (!identifiersOk(v)) return null
   switch (type) {
     case 'text': {
       const content = str(v.content, GENUI_LIMITS.maxString) ?? str(v.text, GENUI_LIMITS.maxString)
