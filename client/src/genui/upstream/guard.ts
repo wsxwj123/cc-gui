@@ -1191,7 +1191,9 @@ function sanitizeEChartOption(v: unknown, depth: number, budget: EChartSanitizeB
       const s = sanitizeEChartOption(v[i], depth + 1, budget)
       if (s !== undefined) arr.push(s)
     }
-    return arr.length > 0 ? arr : undefined
+    // CGUI-PATCH(上游缺陷):原本就空的数组保留 —— `data: []` 是合法 ECharts 写法;
+    // 只有"有元素但全被过滤"才丢弃,不给被拦内容留空壳。对象分支同款,见函数尾。
+    return arr.length > 0 || v.length === 0 ? arr : undefined
   }
   const o = obj(v)
   if (o === undefined) return undefined
@@ -1222,7 +1224,10 @@ function sanitizeEChartOption(v: unknown, depth: number, budget: EChartSanitizeB
     }
     out[key] = s
   }
-  return Object.keys(out).length > 0 ? out : undefined
+  // CGUI-PATCH(上游缺陷):原本就空的对象保留 —— `yAxis:{}` / `grid:{}` 是"用默认
+  // 配置"的合法常见写法,丢掉后 ECharts 抛 `yAxis "0" not found`、整图渲染失败;
+  // 只有"有键但全被过滤"(如 {tooltip:{formatter:'<script>…'}})才照旧整个丢弃。
+  return Object.keys(out).length > 0 || Object.keys(o).length === 0 ? out : undefined
 }
 
 /**
