@@ -8,7 +8,7 @@
 // 但这个函数本身是零依赖纯函数,把它原样切到临时 .ts 里就能让 node 的类型擦除吃下去
 // ——测的是**真源码**,不是抄一份(抄一份正是我第一次误判该 bug 的原因)。
 import assert from 'node:assert/strict';
-import { readFileSync, writeFileSync, mkdtempSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdtempSync, rmSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -20,9 +20,14 @@ assert.notEqual(start, -1, '找不到 parseSortableNumber —— 上游同步后
 const rest = src.slice(start + 10);
 const end = start + 10 + rest.search(/\n(export |const |function )/);
 const dir = mkdtempSync(join(tmpdir(), 'cgui-sortnum-'));
-const file = join(dir, 'psn.ts');
-writeFileSync(file, src.slice(start, end));
-const { parseSortableNumber: num } = await import(pathToFileURL(file).href);
+let num;
+try {
+  const file = join(dir, 'psn.ts');
+  writeFileSync(file, src.slice(start, end));
+  ({ parseSortableNumber: num } = await import(pathToFileURL(file).href));
+} finally {
+  rmSync(dir, { recursive: true, force: true });   // 临时目录不留(模块已加载进内存)
+}
 
 // ── 1. 正例:数字 + 数量级后缀的既有行为一个不许变 ────────────────────────────
 {

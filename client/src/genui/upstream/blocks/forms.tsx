@@ -384,6 +384,7 @@ export function SelectNode({ node, onAction, answers, uiKey }: {
         onChange={e => {
           const v = e.currentTarget.value
           setValue(v)
+          // CGUI-PATCH: 带 id 进 fields、无 id 进 ui —— 无 id 的下拉也要活过重挂(§3.6)。
           keepValue(answers, id, uiKey, v)
           send(v)
         }}
@@ -529,6 +530,7 @@ export function TextareaNode({ node, onAction, answers, uiKey }: {
         onChange={e => {
           const v = e.currentTarget.value
           setValue(v)
+          // CGUI-PATCH: 同上,无 id 的多行输入也要活过重挂(§3.6)。
           keepValue(answers, id, uiKey, v)
         }}
         onBlur={() => {
