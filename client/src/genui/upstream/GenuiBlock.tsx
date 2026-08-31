@@ -6,7 +6,8 @@
  * durable localStorage persistence, action debounce); the per-family
  * components live in src/client/blocks/*.
  */
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+// CGUI-PATCH: 去掉 useRef —— 在飞定时器不再挂在组件里(见 pendingActions)。
+import { memo, useCallback, useEffect, useMemo, useState } from 'react'
 import { useGenuiAction } from './action-context.ts'
 import css from './GenuiBlock.module.css'
 import { loadBlockState, saveBlockState } from './interaction-store.ts'
@@ -17,34 +18,41 @@ import type { GenuiSpec } from './spec.ts'
 export const GENUI_ACTION_DEBOUNCE_MS = 300
 
 /**
+ * CGUI-PATCH(PLAN §1.2.6):在飞的去抖定时器移出组件,放模块级 Map,**卸载不清理**。
+ *
+ * 上游把定时器挂在组件里、unmount 时 `clearTimeout` 全部在飞定时器(是 clear 不是
+ * flush)。而回合末围栏子树连挂两次,正撞 300ms 去抖窗口:用户在回合结束前 300ms 内
+ * 点的按钮 —— 消息既没发也没入队,且完全静默。这恰是最常触发的时间窗(用户看模型
+ * 快写完了才去点)。定时器留在模块级则天然只有一份,重挂不吞;比"unmount 时 flush"
+ * 更简单 —— flush 要处理"两次重挂 = 两次 flush"的重复发送。
+ *
+ * 键是 `${stateKey}:${action}`(不是裸 action):Map 现在是全局的,两个块用同一个
+ * 动作名会互相取消。ponytail: 条目触发后自删,峰值 = 同时在飞的点击数(个位数),不淘汰。
+ */
+const pendingActions = new Map<string, ReturnType<typeof setTimeout>>()
+
+/**
  * Wrap the harness action callback with the per-action trailing debounce.
  * Absent provider = v1 behavior (components are display-only, callback
- * stays undefined). Pending timers are cleared on unmount so a click that
- * never fired does not leak into the next mount.
+ * stays undefined). 闭包捕获点击那一刻的 `onAction` —— 归属固定在发起时,
+ * 之后重挂换上来的新 handler 不参与这一次发送(PLAN §1.2.6 / §1.3.2 B2)。
  */
-function useDebouncedAction(onAction: GenuiBlockProps['onAction'] | undefined): GenuiBlockProps['onAction'] {
-  const pending = useRef<Map<string, ReturnType<typeof setTimeout>> | null>(null)
-  useEffect(() => {
-    return () => {
-      const timers = pending.current
-      if (timers === null) return
-      for (const timer of timers.values()) clearTimeout(timer)
-      timers.clear()
-    }
-  }, [])
+function useDebouncedAction(
+  onAction: GenuiBlockProps['onAction'] | undefined,
+  stateKey: string | undefined,
+): GenuiBlockProps['onAction'] {
   return useMemo(() => {
     if (onAction === undefined) return undefined
-    const timers = new Map<string, ReturnType<typeof setTimeout>>()
-    pending.current = timers
     return (action: string, payload: Record<string, unknown>): void => {
-      const existing = timers.get(action)
+      const key = `${stateKey ?? ''}:${action}`
+      const existing = pendingActions.get(key)
       if (existing !== undefined) clearTimeout(existing)
-      timers.set(action, setTimeout(() => {
-        timers.delete(action)
+      pendingActions.set(key, setTimeout(() => {
+        pendingActions.delete(key)
         onAction(action, payload)
       }, GENUI_ACTION_DEBOUNCE_MS))
     }
-  }, [onAction])
+  }, [onAction, stateKey])
 }
 
 /**
@@ -71,7 +79,7 @@ function specEquivalent(a: GenuiSpec, b: GenuiSpec): boolean {
  */
 export const GenuiBlock = memo(function GenuiBlock({ spec, stateKey, settled = false }: GenuiBlockProps) {
   const gap = spec.gap ?? 16
-  const onAction = useDebouncedAction(useGenuiAction())
+  const onAction = useDebouncedAction(useGenuiAction(), stateKey)
   // v2.5/v2.6 answers registry: grouped radios record selections + question
   // metadata here; `submit` nodes grade locally (locked until 重新作答) or
   // collect into one action. Block-local state survives re-renders (streaming
