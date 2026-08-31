@@ -12,7 +12,30 @@
  * source fallback instead of injecting the markup. Cheap linear scan over
  * the SVG string; happens once per diagram.
  */
-const SVG_INJECTION = /<script|[\s"']on[a-z]+\s*=|javascript:/i
+/*
+ * CGUI-PATCH(PLAN §5.3 补丁 4):上游 `[\s"']on[a-z]+\s*=` 的**前置字符类**是个洞 ——
+ * `<img/onerror=x>` 里 `onerror` 前面是 `/`,不在 `[\s"']` 里,整条溜过去。这是本函数
+ * "弱于 DOMPurify"的那一条,去掉前置要求补死。
+ *
+ * 代价按 PLAN 接受:标签文字里出现 `xxon<字母>=`(如 `A[condition=true]`、`done=1`)
+ * 会误杀。误杀 = 降级显示 mermaid 源码,无害。
+ *
+ * ⚠️ **本条与 PLAN 的清单有出入,是取证后的有意偏离**:PLAN 还要求补
+ * `<foreignObject|<image|<use|<style`,实测这四个 mermaid 自己就会输出,补上去等于
+ * 把 mermaid 关掉,不是 PLAN 预期的"少量误杀"(取证:本仓 client/node_modules/mermaid
+ * 11.15.0):
+ *   - `<style>`:dist/mermaid.core.mjs:1200-1202 `createElement("style")` +
+ *     `svg.insertBefore(style1, firstChild)`,在 render 主路径上**无条件**插进每一张
+ *     SVG ⟹ 补上 = 100% 的图全部降级,mermaid 组件等于不存在;
+ *   - `<foreignObject>`:33 处输出点,且 mermaid 把它显式加进自己的 DOMPurify 白名单
+ *     (`DOMPURIFY_TAGS = ["foreignobject"]`),flowchart 的 htmlLabels 默认就是它 ⟹
+ *     补上 = 最常用的流程图全灭;
+ *   - `<image>` 9 处、`<use>` 3 处输出点 ⟹ 补上 = 相应图种全灭。
+ * 替代:补 `<iframe|<object|<embed`(实测 mermaid 输出点为 0;`putIntoIFrame` 只在
+ * `securityLevel:'sandbox'` 走,本仓恒为 'strict')与 `data:text\/html`。这三个标签正是
+ * 「HTML 走私进 SVG」的落点,补回了原本指望 `<foreignObject` 拦的那一类,且零误杀。
+ */
+const SVG_INJECTION = /<script|<iframe|<object|<embed|on[a-z]+\s*=|javascript:|data:text\/html/i
 
 /** Throws when `svg` carries script, event-handler attributes, or
  * `javascript:` URIs. Exported for tests; `renderMermaid` is the only caller
