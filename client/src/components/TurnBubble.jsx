@@ -6,6 +6,7 @@ import {
 } from './Icon.jsx';
 import { ModelBadge, ProviderAvatar } from './ModelBadge.jsx';
 import { MarkdownRenderer } from './MarkdownRenderer.jsx';
+import { GenuiActionProvider } from '../genui/host/action-context.jsx';
 import { BashCard } from './tools/BashCard.jsx';
 import { EditDiffCard } from './tools/EditDiffCard.jsx';
 import { ReadCard } from './tools/ReadCard.jsx';
@@ -52,7 +53,10 @@ function getSkillDocReadName(toolCall) {
 function ToolCallWithRetry({ toolCall, onRetryTool, hoverOnly = false, children }) {
   return (
     <div className={`space-y-1 ${hoverOnly ? 'group/tcretry' : ''}`}>
-      {children}
+      {/* B4 显式只读退出(PLAN §1.3.2):工具结果卡片是模型输出的**回显**,不是用户的
+          操作面。所有 tools/* 富卡片都经这里,一处退出全覆盖;不靠"碰巧拿不到 Provider"
+          —— 卡片就在窗格里,Provider 挂窗格根之后它们反而会变成可交互。 */}
+      <GenuiActionProvider value={null}>{children}</GenuiActionProvider>
       {onRetryTool && (
         <div className={`flex justify-end ${hoverOnly ? 'opacity-0 group-hover/tcretry:opacity-100 max-md:opacity-60 transition-opacity' : ''}`}>
           <button

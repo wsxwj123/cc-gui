@@ -2,6 +2,7 @@ import React, { useEffect, useState, useRef } from 'react';
 import { AlertCircle, Loader2, ClipboardList, ShieldAlert, FormInput, MessageSquareWarning } from './Icon.jsx';
 import { useStore } from '../stores/sessionStore.js';
 import { MarkdownRenderer } from './MarkdownRenderer.jsx';
+import { GenuiActionProvider } from '../genui/host/action-context.jsx';
 import { isDangerousCommand, respondPermission } from '../hooks/useWebSocket.js';
 import { isEditableTarget } from '../utils/escAction.js';
 import { elicitFields, elicitMissing, buildElicitContent, initialElicitValues } from '../utils/elicitSchema.js';
@@ -141,7 +142,11 @@ function PlanReviewCard({ req, onResolve, onApprove, processing, position, hydra
         )}
       </div>
       <div className="px-4 py-3 flex-1 min-h-0 overflow-y-auto bg-canvas-warm/40">
-        <MarkdownRenderer content={plan || '(空计划)'} />
+        {/* B4 显式只读退出(PLAN §1.3.2 / INTERFACE §3.4):权限确认弹层是只读面 —— 这里
+            渲染的是**待批准的计划正文**,不是用户的操作面。带 action 的控件呈禁用态。 */}
+        <GenuiActionProvider value={null}>
+          <MarkdownRenderer content={plan || '(空计划)'} />
+        </GenuiActionProvider>
       </div>
       {showRefine && (
         <div className="px-4 py-2.5 border-t border-canvas-deep bg-amber-500/10 space-y-2">
