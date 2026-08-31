@@ -55,7 +55,8 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
     const { error } = this.state
     if (error === null) return this.props.children
     return (
-      <div style={fallbackStyle} role="alert" data-genui-error>
+      // CGUI-PATCH: 加可测锚 genui-render-failed(INTERFACE §9.1)。只加属性,行为不变。
+      <div style={fallbackStyle} role="alert" data-genui-error data-testid="genui-render-failed">
         <span style={{ fontWeight: 600 }}>
           ⚠️ {this.props.label ?? '此界面'}渲染失败（已隔离，不影响其他内容）
         </span>

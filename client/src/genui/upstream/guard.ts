@@ -23,6 +23,11 @@ import { wrapSingleComponentRoot } from './spec.ts'
 
 /** Hard resource limits enforced by repair (and mirrored at render time). */
 export const GENUI_LIMITS = {
+  // CGUI-PATCH: 围栏原文字节上限。上游全仓没有 raw 长度门,而流式期每 chunk 都要
+  // JSON.stringify 两次(memo 比较器 + stateKey),超大子树 = 主线程卡死。
+  // 新增上限一律并进这张表(PLAN §5.3 补丁 0),不散落在各文件里。
+  /** Maximum size in bytes of a fence body before it degrades to a code block. */
+  maxFenceBytes: 128 * 1024,
   /** Maximum nesting depth of the component tree. */
   maxDepth: 8,
   /** Maximum total nodes across the whole spec. */

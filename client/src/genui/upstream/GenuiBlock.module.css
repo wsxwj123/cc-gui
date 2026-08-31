@@ -947,8 +947,11 @@ button.ftNameBtn[aria-expanded] { cursor: pointer; }
   to { opacity: 1; transform: translateY(0); }
 }
 
+/* CGUI-PATCH: 动画走一层变量,好让宿主在消息定稿后关掉它(GenuiFence 的 SETTLED_STYLE
+   设 --genui-reveal: none)。回合末围栏子树会连续重挂两次,不关就重播两遍逐条渐显。
+   默认值与上游一字不差,不设变量时行为不变。 */
 .reveal {
-  animation: genuiReveal 0.45s cubic-bezier(0.22, 1, 0.36, 1) backwards;
+  animation: var(--genui-reveal, genuiReveal 0.45s cubic-bezier(0.22, 1, 0.36, 1) backwards);
 }
 
 /* "✓ 已触发" confirmation chip: appears next to the button without layout
