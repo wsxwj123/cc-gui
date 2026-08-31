@@ -266,7 +266,9 @@ export function EChartNode({ node }: { node: GenuiEChart }) {
   if (status === 'error') {
     return (
       <div data-testid="genui-node-echart" className={css.echartFallback} data-genui-echart>
-        <div className={css.echartErr}>ECharts 渲染失败</div>
+        {/* CGUI-PATCH(INTERFACE §5.5):引擎加载失败的文案契约逐字规定为「图表加载失败」。
+          * 上游写的是「ECharts 渲染失败」——既不是契约字面,也把"引擎没下来"说成了"渲染错了"。 */}
+        <div className={css.echartErr}>图表加载失败</div>
         {node.title !== undefined && <div className={css.echartHint}>{node.title}</div>}
       </div>
     )
