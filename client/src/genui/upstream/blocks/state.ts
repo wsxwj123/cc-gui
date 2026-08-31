@@ -22,6 +22,12 @@ export interface GenuiBlockProps {
    * localStorage and restores on refresh / re-render of the same content.
    */
   stateKey?: string | undefined
+  /**
+   * CGUI-PATCH(PLAN §1.2.2 A3):本条消息是否已定稿。交互态**恒**同步写内存层,
+   * 落盘镜像只在定稿后写 —— 流式期每 chunk 一个新指纹,边写边镜像会拿空状态
+   * 塞满 200 条 LRU 把真状态挤出去。缺省 false = 按"还在流"处理(只写内存)。
+   */
+  settled?: boolean | undefined
 }
 
 /** Per-question metadata registered by grouped radios for local grading. */

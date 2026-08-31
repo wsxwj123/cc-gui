@@ -69,7 +69,7 @@ function specEquivalent(a: GenuiSpec, b: GenuiSpec): boolean {
  * Render a GenUI spec as an inline block. Falls back to nothing when the spec
  * carries no items (the fence renderer already refused non-specs before us).
  */
-export const GenuiBlock = memo(function GenuiBlock({ spec, stateKey }: GenuiBlockProps) {
+export const GenuiBlock = memo(function GenuiBlock({ spec, stateKey, settled = false }: GenuiBlockProps) {
   const gap = spec.gap ?? 16
   const onAction = useDebouncedAction(useGenuiAction())
   // v2.5/v2.6 answers registry: grouped radios record selections + question
@@ -127,22 +127,32 @@ export const GenuiBlock = memo(function GenuiBlock({ spec, stateKey }: GenuiBloc
     }),
     [answers, fields, secretFields, meta, locked, round, setAnswer, setField, registerSecretField, registerMeta, clear],
   )
-  // Durable save (debounced 300ms — typing in a field fires per keystroke).
-  // Secret field values are stripped before writing: passwords never persist.
+  // Durable save. Secret field values are stripped before writing: passwords never persist.
+  //
+  // CGUI-PATCH(PLAN §1.2.2 A2/A3):写透两句,顺序即语义。
+  //   ① 内存层**同步**写(上游是 300ms 防抖写 localStorage):回合末围栏子树连挂两次,
+  //      用户点完 1ms 后就被重挂时防抖还没落盘 —— 内存里必须已经有了。
+  //   ② deps 含 stateKey ⟹ 键一变就把**当前**状态写到新键上(A2-②)。流式期每 chunk
+  //      换一次键,用户在第 50 个 chunk 点的选择、第 100 个 chunk 才定稿,中间再无
+  //      状态变更;没有这条,定稿按最后那个键去读就是空 = 静默清零。这条**不能**放进
+  //      防抖里:定时器会被下一个 chunk 的清理钩子清掉,永远轮不到落。
+  //   ③ localStorage 只在定稿后镜像(A3),流式期一个字节都不写。
   useEffect(() => {
     if (stateKey === undefined) return
-    const timer = setTimeout(() => {
-      const safeFields = Object.fromEntries(
-        Object.entries(fields).filter(([id]) => !secretFields.has(id)),
-      )
-      saveBlockState(stateKey, {
-        answers,
-        locked,
-        ...(Object.keys(safeFields).length > 0 ? { fields: safeFields } : {}),
-      })
-    }, 300)
+    const safeFields = Object.fromEntries(
+      Object.entries(fields).filter(([id]) => !secretFields.has(id)),
+    )
+    const next = {
+      answers,
+      locked,
+      ...(Object.keys(safeFields).length > 0 ? { fields: safeFields } : {}),
+    }
+    saveBlockState(stateKey, next)
+    if (!settled) return
+    // 落盘仍防抖:输入框逐字符触发,不该逐字符 JSON.stringify 整张表。
+    const timer = setTimeout(() => saveBlockState(stateKey, next, true), 300)
     return () => clearTimeout(timer)
-  }, [stateKey, answers, locked, fields, secretFields])
+  }, [stateKey, answers, locked, fields, secretFields, settled])
   return (
     <div className={css.block} data-genui>
       {spec.title !== undefined && <div className={css.banner}>{spec.title}</div>}
@@ -163,4 +173,6 @@ export const GenuiBlock = memo(function GenuiBlock({ spec, stateKey }: GenuiBloc
       </div>
     </div>
   )
-}, (prev, next) => prev.stateKey === next.stateKey && specEquivalent(prev.spec, next.spec))
+// CGUI-PATCH: `settled` 进比较器 —— 定稿是"该镜像落盘了"的信号,漏比就永远不落盘。
+}, (prev, next) => prev.stateKey === next.stateKey && prev.settled === next.settled
+  && specEquivalent(prev.spec, next.spec))

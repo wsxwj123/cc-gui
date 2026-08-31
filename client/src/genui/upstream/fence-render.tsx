@@ -1,6 +1,6 @@
 /**
  * The cgui-ui fence render pipeline. `MarkdownRenderer` hands a fence body here
- * with a session-scoped context (sessionId + whether the message has settled)
+ * with a session-scoped context (queueKey + whether the message has settled)
  * and gets back either the GenuiBlock tree or a degraded code block.
  *
  * Two entry points, differing only in what an unrepairable body yields:
@@ -20,7 +20,7 @@ import { CodeBlock } from '../host/primitives.jsx'
 import { ErrorBoundary } from './ErrorBoundary.tsx'
 import { GenuiBlock } from './GenuiBlock.tsx'
 import { repairGenuiSpec } from './guard.ts'
-import { fenceStateKey } from './interaction-store.ts'
+import { genuiStateKey } from './interaction-store.ts'
 import { parsePartialGenuiSpec } from './parse-partial.ts'
 import type { GenuiSpec } from './spec.ts'
 import { completeFenceJson, describeJsonFailure, repairFenceJson } from './fence-repair.ts'
@@ -34,8 +34,12 @@ import { completeFenceJson, describeJsonFailure, repairFenceJson } from './fence
  * DOM 探测在 React 19 并发渲染下时序不可靠,而 props 是渲染输入。
  */
 export interface GenuiFenceContext {
-  /** Owning session route; absent outside a session-scoped render. */
-  readonly sessionId?: string
+  /**
+   * 本窗格的队列键(`queueKeyFor(selectedSession)`),交互态键的会话分量。
+   * CGUI-PATCH: 上游是裸 `sessionId`,草稿会话没有它 ⟹ 两个草稿窗格串状态(PLAN §1.2.2 A1)。
+   * 缺省 = 不持久化(与上游"无 session 不持久化"同义)。
+   */
+  readonly queueKey?: string
   /** True once the message finished streaming (upstream: `source !== undefined`). */
   readonly settled?: boolean
 }
@@ -118,22 +122,22 @@ export function resolveGenuiSpec(raw: string, context?: GenuiFenceContext): Genu
 }
 
 /** The inline GenuiBlock tree for a resolved spec. */
-function renderInlineFence(key: Key, context: GenuiFenceContext | undefined, spec: GenuiSpec): ReactNode {
-  const sessionId = context?.sessionId
+function renderInlineFence(key: Key, context: GenuiFenceContext | undefined, spec: GenuiSpec, raw: string): ReactNode {
+  const queueKey = context?.queueKey
   return (
     // CGUI-PATCH: 上游用 `source.id` 当身份(定稿瞬间从文档 key 换成 source.id,
-    // 那次换身份正是[上游 §4.3]落差二的成因)。CC-GUI 没有 source,身份就是文档 key。
+    // 那次换身份正是[上游 §4.3]落差二的成因)。CC-GUI 的 React 元素身份仍是文档 key
+    // (重挂无法避免,§1.2.2 已裁定不动共用管线),**交互态身份**则与它脱钩,见下面的 stateKey。
     // Repaired specs render SILENTLY: once the UI renders, no amber note
     // tells the user something was wrong — only an unrecoverable body keeps
     // the red diagnostic.
     <ErrorBoundary key={key} label="该界面">
       <GenuiBlock
         spec={spec}
-        // 交互态的持久键。⚠️ 这里仍是**上游算法**(session + 文档 key + spec 指纹);
-        // PLAN §1.2.2-A1 的 `g:{queueKey}:{djb2(raw)}` 与内存 Map 写透属 M5,本轮不做。
-        stateKey={sessionId === undefined
-          ? undefined
-          : fenceStateKey(sessionId, String(key), JSON.stringify(spec))}
+        // CGUI-PATCH(PLAN §1.2.2 A1):交互态的持久键换成 `g:{queueKey}:{djb2(围栏原文)}`
+        // —— 两段都不随挂载变化,回合末连挂两次仍读得回同一条状态。
+        stateKey={queueKey === undefined ? undefined : genuiStateKey(queueKey, raw)}
+        settled={context?.settled === true}
       />
     </ErrorBoundary>
   )
@@ -150,7 +154,7 @@ function renderInlineFence(key: Key, context: GenuiFenceContext | undefined, spe
 export function renderResolvedFenceNode(raw: string, key: Key, context?: GenuiFenceContext): ReactNode | null {
   const spec = resolveGenuiSpec(raw, context)
   if (spec === null) return null
-  return renderInlineFence(key, context, spec)
+  return renderInlineFence(key, context, spec, raw)
 }
 
 /**
@@ -163,5 +167,5 @@ export function renderResolvedFenceNode(raw: string, key: Key, context?: GenuiFe
 export function renderGenuiFence(raw: string, key: Key, context?: GenuiFenceContext): ReactNode {
   const spec = resolveGenuiSpec(raw, context)
   if (spec === null) return <FenceFallback key={key} fenceKey={key} raw={raw} settled={context?.settled === true} />
-  return renderInlineFence(key, context, spec)
+  return renderInlineFence(key, context, spec, raw)
 }
