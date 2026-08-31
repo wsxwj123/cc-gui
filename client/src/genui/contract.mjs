@@ -14,7 +14,8 @@
  * 会让整个契约模块加载失败。往这里加函数前先确认它不在 `.tsx` / `.jsx` 里。
  */
 import { classifyFence, isGenuiLang } from './host/fence-classify.ts';
-import { buildActionMessage } from './host/action-send.js';
+import { buildActionMessage, pickComponent } from './host/action-send.js';
+import { assertSendable } from './host/action-guard.js';
 import { compileMathExpr } from './upstream/safe-math.ts';
 
 /** §1.1:``` 后面那一整串是不是 genui 围栏标记。非字符串一律 false,不抛。 */
@@ -51,13 +52,19 @@ export function parseSpec(fenceBody, opts) {
 }
 
 /**
- * §3.2:替用户发出的那条消息全文。动作名非法时返回空串 —— 那种节点在守卫层就被整个
- * 丢弃了(§2.9),走到这里说明有人绕过了守卫,失败安全的做法是不发。
+ * §3.2:替用户发出的那条消息全文。
+ *
+ * 顺序与真实送达路径**一样**:先过 L4 送达前断言(host/action-guard.js),再构造消息。
+ * useGenuiActionCapability.send 就是这么走的 —— 断言不过一条都不发。契约函数照抄这个
+ * 顺序,而不是直接调构造器:直接调等于测一条线上不存在的路径,而"非法动作名不得产出
+ * 可用消息"(§5.10 不变量 1)正是靠这道断言兜住的。
  *
  * @param {{ action: string, component: object }} evt
- * @returns {string}
+ * @returns {string} 断言未过时返回空串(契约允许"抛错或返回空")
  */
 export function buildActionText(evt) {
+  const component = pickComponent(evt?.component || {});
+  if (assertSendable(evt?.action, component) !== null) return '';
   return buildActionMessage(evt?.action, evt?.component).text;
 }
 
