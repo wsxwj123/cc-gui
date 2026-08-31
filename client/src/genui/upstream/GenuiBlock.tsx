@@ -225,6 +225,16 @@ export const GenuiBlock = memo(function GenuiBlock({ spec, stateKey, settled = f
           </div>
         ))}
       </div>
+      {/* CGUI-PATCH(INTERFACE §5.2 / §9.1):被 guard 丢掉的节点不再静默消失。
+          N 取 guard 回传的 dropped(未知类型、必填字段非法、非法 action 名、被拒的
+          媒体地址、超预算裁剪,同一个口径),零丢弃时**整个元素不存在** —— 契约里
+          "必须不存在"那半是靠这里成立的,不能改成渲染一个空的灰字。
+          "全部节点都被丢弃"那种情形轮不到这里:围栏在 GenuiFence 就退回代码块了。 */}
+      {spec.dropped !== undefined && spec.dropped > 0 && (
+        <div className={css.ignored} data-testid="genui-ignored">
+          {spec.dropped} 个不支持的组件已忽略
+        </div>
+      )}
     </div>
     </GenuiFeedbackProvider>
   )

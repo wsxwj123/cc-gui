@@ -1299,3 +1299,14 @@ button.ftNameBtn[aria-expanded] { cursor: pointer; }
 .panelResizeHandleActive {
   background: color-mix(in srgb, var(--dsw-alias-state-business-primary, #4f8ef7) 35%, transparent);
 }
+
+/* CGUI-PATCH(INTERFACE §5.2 / §9.1):块底部的「N 个不支持的组件已忽略」灰字。
+   上游把被拦下的节点静默丢掉,用户和开发者都看不见([安全 §9.2-6])——防护做到了,
+   诊断没有。用既有的 tertiary 标签色与 meta 字号,跟着主题走,不引入新的色值。 */
+.ignored {
+  margin-top: var(--dsl-g-gap-md);
+  font-size: var(--dsl-g-font-meta);
+  line-height: 1.5;
+  color: var(--dsw-alias-label-tertiary);
+  letter-spacing: 0.02em;
+}
