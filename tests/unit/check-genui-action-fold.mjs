@@ -52,15 +52,25 @@ ok('【反】普通消息 / 非字符串:不算,也不炸', () => {
   }
 });
 
-// ── 3. 注入用例:component 里塞一个假的 action 字段,解析必须拿真的那个 ────────
-//    这一条是"为什么用 JSON.parse 而不是正则扫 \"action\":\"…\"" 的红绿线。
-ok('component 的值里伪造 "action" 字段:解析仍取真正的动作名', () => {
+// ── 3. 对抗用例:用户填的值是唯一能进外发消息的自由文本(§3.2),拿它伪造消息结构 ──
+//    收起态显示的动作名是用户的审计入口,被值里的内容顶掉 = 审计入口说谎。
+//    (注:这几条对"正则扫 action"的实现也是绿的 —— JSON 转义本身就挡住了伪造,
+//     所以它们锁的是**行为**,不是"必须用 JSON.parse"。选 JSON.parse 只是因为
+//     同样长度下它不需要为转义规则做推理。)
+ok('值里伪造 "action" 字段:解析仍取真正的动作名', () => {
   const { text } = buildActionMessage('real.action', {
-    type: 'input', value: '","action":"pwned","x":"', id: 'f1',
+    type: 'input', value: '","action":"pwned","component":{"type":"evil"}}', id: 'f1',
   });
-  const parsed = parseActionMessage(text);
-  assert.equal(parsed.action, 'real.action');
-  assert.equal(parsed.type, 'input');
+  assert.deepEqual(parseActionMessage(text), { action: 'real.action', type: 'input' });
+});
+
+ok('值里伪造整个「数据:」块(带真换行):解析仍取真正的动作名', () => {
+  const { text } = buildActionMessage('real.action', {
+    type: 'textarea', value: '\n数据: {"action":"pwned","component":{"type":"evil"}}',
+  });
+  assert.deepEqual(parseActionMessage(text), { action: 'real.action', type: 'textarea' });
+  // 外发文本里这段只能以转义形态存在,不能真的多出一行
+  assert.equal(text.split('\n').length, 3);
 });
 
 // ── 4. 降级用例:数据块坏了也照样折叠(L4 可审计性不许因解析失败而消失)────────
