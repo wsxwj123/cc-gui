@@ -28,6 +28,7 @@ import { useStore, THEME_FAMILIES, FONT_OPTIONS, systemPrefersDark } from './sto
 import { useWebSocket } from './hooks/useWebSocket.js';
 import { MessageBubble } from './components/MessageBubble.jsx';
 import { MarkdownRenderer } from './components/MarkdownRenderer.jsx';
+import { GenuiActionProvider, useGenuiActionCapability } from './genui/host/action-context.jsx';
 import { TurnBubble } from './components/TurnBubble.jsx';
 import { ReleaseNotesModal } from './components/ReleaseNotesModal.jsx';
 import { shouldShow as shouldShowReleaseNotes, hasReleaseNotes, loadVersionNotes, fetchLastSeen, markSeen } from './utils/releaseNotes.js';
@@ -4111,7 +4112,10 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   useEffect(() => { steerCurrentTurnRef.current = steerCurrentTurn; }, [steerCurrentTurn]);
 
   const handleSend = useCallback(async (prompt, opts = {}) => {
-    const { reattachPid, appendSystemPrompt, hiddenUserMessage = false, meta, onEnqueueFailure } = opts;
+    // onQueued 是 onEnqueueFailure 的对称件(PLAN §1.2.4):发送方回报三态,调用方不用
+    // 靠 isStreaming 猜忙不忙 —— isStreaming 说的是"本条 turn 还在产出",而入队判据是
+    // "会话忙不忙"(下面那道门读 streamingRef/backgroundPidRef),两者并不等价。
+    const { reattachPid, appendSystemPrompt, hiddenUserMessage = false, meta, onEnqueueFailure, onQueued } = opts;
     // Intercept the /remote-control (alias /rc) command. It CANNOT be sent
     // through `claude -p` — slash commands are interactive-only and the CLI
     // rejects them ("isn't available in this environment"). Instead we launch
@@ -4198,6 +4202,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       const queuedAt = Date.now();
       const queueOpts = { ...opts };
       delete queueOpts.onEnqueueFailure;
+      delete queueOpts.onQueued;   // 回调进不了 localStorage,与 onEnqueueFailure 同理
       // 只剥进队列这份克隆的整图预览(内存预览不动),否则超 localStorage 配额被硬拒。
       if (queueOpts.meta) queueOpts.meta = attachmentMetaForPersistence(queueOpts.meta);
       const queued = useStore.getState().enqueueMessage(sessionQueueKey, { text: prompt, queuedAt, hidden: !!hiddenUserMessage, opts: queueOpts });
@@ -4207,6 +4212,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         setProviderSwitchNotice({ text: message });
         return;
       }
+      onQueued?.(queued);
       // Cmd/Ctrl+Enter:先入队保底，再调用 CLI/SDK 的实时输入队列。连接中、回合刚收尾或
       // provider 不支持时，明确拒绝才回 queued；任何模糊结果都成为持久 barrier。
       if (opts.steer && !hiddenUserMessage) {
@@ -6204,6 +6210,16 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   const handleSendRef = useRef(null);
   useEffect(() => { handleSendRef.current = handleSend; }, [handleSend]);
 
+  // genui action 回路(PLAN §1.3.2):本窗格的发送能力,挂在下面的窗格根上。
+  // 必须声明在 handleSendRef **之后** —— 它是 const,提前引用就是 TDZ 白屏
+  // (LEARNINGS「跨组件引用未声明 const → 生产白屏」)。
+  // 归属不符时直接进**捕获到的那个键**自己的队列(INTERFACE §3.4),不经 handleSend 的窗格闭包。
+  const genuiEnqueue = useCallback((key, text, opts) => !!useStore.getState()
+    .enqueueMessage(key, { text, queuedAt: Date.now(), opts }), []);
+  const genuiAction = useGenuiActionCapability({
+    queueKey: sessionQueueKey, handleSendRef, messageQueue, enqueueTo: genuiEnqueue,
+  });
+
   // Bug8:回滚 / 重做 / 编辑重发的重发通道。这三条是【有意打断替换】,与用户手打的新消息
   // 语义相反,必须绕过发送门(forceSend)——否则重发撞上"回合进行中"就被当成排队消息,
   // 界面上就是"AI 被断掉 + 队列里多一条一模一样的"(旧行为),或者(设计甲后)被注入进
@@ -7467,6 +7483,10 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
 
       {/* wrapper:让"回到底部"按钮锚定消息区底部(而非猜输入框高度的 bottom-24)——
           输入框高度可变(多行/任务清单/附件),固定偏移总有挡住输入框的时候 */}
+      {/* genui action Provider 挂**窗格根**(PLAN §1.3.2)。往下一层挂到 MessageList 上是
+          错的:那里只有已定稿消息,流式气泡与 visibleChat 是它的兄弟节点,流式期的围栏就会
+          拿不到能力 = 按钮全只读且"点了没反应、无报错"。Provider 不产生 DOM 节点。 */}
+      <GenuiActionProvider value={genuiAction}>
       <div className="flex-1 min-h-0 relative">
       {/* data-chat-scroll:气泡用 closest() 找到"自己所在窗格的滚动容器"(分屏时每个窗格
           一个,不能拿 window),据其可视高度决定长回复要不要补底部复制按钮。 */}
@@ -7673,6 +7693,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         </div>
       )}
       </div>
+      </GenuiActionProvider>
 
       {/* r11-⑤:居中体检/清理模态(portal 到 body;错误行动卡与 ⋮ 常驻入口共用)。 */}
       {repairModal && (

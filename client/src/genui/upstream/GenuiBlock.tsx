@@ -6,30 +6,17 @@
  * durable localStorage persistence, action debounce); the per-family
  * components live in src/client/blocks/*.
  */
-// CGUI-PATCH: 去掉 useRef —— 在飞定时器不再挂在组件里(见 pendingActions)。
+// CGUI-PATCH: 去掉 useRef —— 在飞定时器不再挂在组件里(见 action-debounce.ts)。
 import { memo, useCallback, useEffect, useMemo, useState } from 'react'
-import { useGenuiAction } from './action-context.ts'
+import { scheduleAction } from './action-debounce.ts'
+import { genuiActionId, useGenuiAction } from './action-context.ts'
 import css from './GenuiBlock.module.css'
 import { loadBlockState, saveBlockState } from './interaction-store.ts'
 import { renderNode } from './blocks/render-node.tsx'
 import type { AnswersState, GenuiBlockProps, QuestionMeta } from './blocks/state.ts'
 import type { GenuiSpec } from './spec.ts'
 
-export const GENUI_ACTION_DEBOUNCE_MS = 300
-
-/**
- * CGUI-PATCH(PLAN §1.2.6):在飞的去抖定时器移出组件,放模块级 Map,**卸载不清理**。
- *
- * 上游把定时器挂在组件里、unmount 时 `clearTimeout` 全部在飞定时器(是 clear 不是
- * flush)。而回合末围栏子树连挂两次,正撞 300ms 去抖窗口:用户在回合结束前 300ms 内
- * 点的按钮 —— 消息既没发也没入队,且完全静默。这恰是最常触发的时间窗(用户看模型
- * 快写完了才去点)。定时器留在模块级则天然只有一份,重挂不吞;比"unmount 时 flush"
- * 更简单 —— flush 要处理"两次重挂 = 两次 flush"的重复发送。
- *
- * 键是 `${stateKey}:${action}`(不是裸 action):Map 现在是全局的,两个块用同一个
- * 动作名会互相取消。ponytail: 条目触发后自删,峰值 = 同时在飞的点击数(个位数),不淘汰。
- */
-const pendingActions = new Map<string, ReturnType<typeof setTimeout>>()
+export { GENUI_ACTION_DEBOUNCE_MS } from './action-debounce.ts'
 
 /**
  * Wrap the harness action callback with the per-action trailing debounce.
@@ -39,20 +26,14 @@ const pendingActions = new Map<string, ReturnType<typeof setTimeout>>()
  */
 function useDebouncedAction(
   onAction: GenuiBlockProps['onAction'] | undefined,
-  stateKey: string | undefined,
+  debounceScope: string,
 ): GenuiBlockProps['onAction'] {
   return useMemo(() => {
     if (onAction === undefined) return undefined
     return (action: string, payload: Record<string, unknown>): void => {
-      const key = `${stateKey ?? ''}:${action}`
-      const existing = pendingActions.get(key)
-      if (existing !== undefined) clearTimeout(existing)
-      pendingActions.set(key, setTimeout(() => {
-        pendingActions.delete(key)
-        onAction(action, payload)
-      }, GENUI_ACTION_DEBOUNCE_MS))
+      scheduleAction(`${debounceScope}:${action}`, () => onAction(action, payload))
     }
-  }, [onAction, stateKey])
+  }, [onAction, debounceScope])
 }
 
 /**
@@ -79,7 +60,16 @@ function specEquivalent(a: GenuiSpec, b: GenuiSpec): boolean {
  */
 export const GenuiBlock = memo(function GenuiBlock({ spec, stateKey, settled = false }: GenuiBlockProps) {
   const gap = spec.gap ?? 16
-  const onAction = useDebouncedAction(useGenuiAction(), stateKey)
+  // CGUI-PATCH:context 值现在是"本窗格的发送能力"(§1.3.2),不是裸回调。null = 只读面
+  // (显式 `value={null}`)或窗格外 —— dispatch 保持 undefined,带 action 的控件渲染成禁用态。
+  const capability = useGenuiAction()
+  const dispatch = useMemo(() => {
+    if (capability === null) return undefined
+    return (action: string, payload: Record<string, unknown>): void => {
+      capability.send(genuiActionId(stateKey, action), action, payload)
+    }
+  }, [capability, stateKey])
+  const onAction = useDebouncedAction(dispatch, stateKey ?? '')
   // v2.5/v2.6 answers registry: grouped radios record selections + question
   // metadata here; `submit` nodes grade locally (locked until 重新作答) or
   // collect into one action. Block-local state survives re-renders (streaming

@@ -164,19 +164,16 @@ const SID = 'sess-aaa';
 // ── 8. 去抖定时器在模块级、卸载不清理(§1.2.6)──────────────────────────────────
 // 上游 unmount 时 clearTimeout 全部在飞定时器(clear 非 flush),回合末连挂两次正撞
 // 300ms 窗口 → 用户在回合结束前 300ms 内点的按钮既没发也没入队,且完全静默。
+// r64 M6:定时器表已搬进 `upstream/action-debounce.ts`(纯 .ts,行为级假时钟单测见
+// check-genui-action-debounce.mjs)。这里只留 GenuiBlock 侧"没把它挪回组件"的守卫。
 {
-  const iMap = at(block, 'const pendingActions = new Map', '模块级定时器表');
-  const iComponent = at(block, 'export const GenuiBlock = memo', 'GenuiBlock 组件');
-  const iHook = at(block, 'function useDebouncedAction', 'useDebouncedAction');
-  assert.ok(iMap < iHook && iMap < iComponent, '定时器表必须在模块级,不在组件里(重挂就换一份 = 白搭)');
-  assert.ok(!/pendingActions\.clear\(\)/.test(block), '不许清空在飞定时器表');
-  assert.ok(!/return \(\) => \{[\s\S]{0,240}pendingActions/.test(block),
-    '不许在卸载钩子里碰在飞定时器:点了就一定要发出去');
+  assert.ok(!/new Map<string, ReturnType<typeof setTimeout>>/.test(block),
+    '定时器表不许再回到 GenuiBlock:重挂就换一份 = 白搭');
   assert.ok(!/useRef\(/.test(block), '定时器不许再挂回组件实例(useRef)');
-  assert.ok(/const key = `\$\{stateKey \?\? ''\}:\$\{action\}`/.test(block),
-    '键必须是 `${stateKey}:${action}`:表已是全局的,裸 action 会让两个块互相取消(§1.2.6)');
-  assert.ok(/useDebouncedAction\(useGenuiAction\(\), stateKey\)/.test(block), 'stateKey 要传进去');
-  assert.ok(/pendingActions\.delete\(key\)/.test(block), '触发后自删,否则表只增不减');
+  assert.ok(!/return \(\) => \{[\s\S]{0,240}(clearTimeout|scheduleAction)/.test(block),
+    '不许在卸载钩子里碰在飞定时器:点了就一定要发出去');
+  assert.ok(/scheduleAction\(`\$\{debounceScope\}:\$\{action\}`/.test(block),
+    '去抖走模块级 scheduleAction,键带作用域前缀(裸 action 会让两个会话互相取消)');
 }
 
 // ── 9. 键只在 spec 分支算(空体/超大/解析失败不产生状态条目)────────────────────────
