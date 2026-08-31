@@ -798,6 +798,9 @@
 .copyChip:hover { border-color: var(--dsl-g-accent); }
 .copyChip:active { transform: translateY(1px); }
 .copyChipDone { border-color: var(--dsw-alias-state-success-primary, #3ecf8e); color: var(--dsw-alias-state-success-primary, #3ecf8e); }
+/* CGUI-PATCH(INTERFACE §2.4):按钮旁的"将复制 N 字"。按钮是 inline-block,
+   同一行紧跟一段行内灰字即可,不需要额外的行容器。 */
+.copyCount { margin-left: var(--dsl-g-gap-xs); font-size: var(--dsl-g-font-meta); color: var(--dsw-alias-label-tertiary); }
 
 /* ---------- mermaid ---------- */
 

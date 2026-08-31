@@ -290,6 +290,10 @@ export const CopyNode = memo(function CopyNode({ node }: { node: GenuiCopy }) {
       >
         {copied ? '✓ 已复制' : (node.label ?? '复制')}
       </button>
+      {/* CGUI-PATCH(INTERFACE §2.4 copy 行):按钮旁必须显示将复制的字符数。
+       * 取 node.text.length —— guard 已按 maxCopyText 截断过,这里的长度就是
+       * 真正会进剪贴板的长度,不是模型原文长度。 */}
+      <span className={css.copyCount}>将复制 {node.text.length} 字</span>
       <span className={css.visuallyHidden} role="status">{copied ? '已复制到剪贴板' : ''}</span>
     </>
   )
