@@ -239,6 +239,13 @@ const SID = 'sess-aaa';
     'AccordionNode 的孩子路径要带分节序号 ${i}');
   assert.ok(!/renderNode\([^)]*answers, uiKey\)/.test(adv),
     '不许再把容器自己的 uiKey 原样当孩子的 path(那就是撞键)');
+  // 存储键分开还不够:两页同位子节点的 React key 同为 i、父面板又是同一个 div ⟹
+  // React 复用组件实例、**不重挂**,InputNode 的本地 useState 原样带进下一页
+  // (根本不经过存储层 —— 上面那些键断言全绿也测不到,真机是"乙页显示甲页的字")。
+  // 面板挂上 key={active} 让切页即换子树。行为级实证见 r64 M5 复核记录:
+  // 未修版乙页显示 TAB-A(串),修复版乙页空、两页各自 TAB-A/TAB-B 往返不丢。
+  assert.ok(/<div key=\{active\} className=\{css\.col\} role="tabpanel"/.test(adv),
+    'TabsNode 的面板必须带 key={active}:否则两页同位的输入框被 React 复用,串值不经存储层');
   // 路径拼出来长什么样:同一 tabs 的两页同位输入格必须不同键
   const childPath = (parent, idx) => (parent === '' ? String(idx) : `${parent}.${idx}`);
   const tabsAt = '0';                                   // tabs 节点自己在根下第 0 位

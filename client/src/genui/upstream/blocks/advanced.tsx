@@ -163,9 +163,13 @@ export function TabsNode({ tabs, onAction, depth = 0, answers, uiKey }: {
         ))}
       </div>
       {current !== undefined && (
-        <div className={css.col} role="tabpanel" id={`${uid}-panel-${active}`} aria-labelledby={`${uid}-tab-${active}`}>
-          {/* CGUI-PATCH: 路径要带**页签序号** —— 直接传 uiKey 的话,两页同位的输入格
-              算出同一个键(`${uiKey}.0`),在第一页填的字会出现在第二页。 */}
+        // CGUI-PATCH: 面板带 key={active} —— 存储键分开还不够。两页同位的子节点
+        // React key 同为 i、父元素又是同一个面板 div ⟹ React 认为是"同一个组件换了
+        // props",复用实例、**不重挂**,InputNode 的本地 useState 原样带进下一页
+        // (根本不经过存储层,所以键算法的单测全绿也测不到)。给面板挂上页签序号,
+        // 切页即换子树 ⟹ 各自重挂、各自从自己的 uiKey 读回。
+        <div key={active} className={css.col} role="tabpanel" id={`${uid}-panel-${active}`} aria-labelledby={`${uid}-tab-${active}`}>
+          {/* 路径同样要带页签序号:直接传 uiKey 的话两页同位算出同一个键。 */}
           {current.items.map((c, i) => renderNode(c, i, onAction, depth + 1, answers, `${uiKey ?? ''}.${active}`))}
         </div>
       )}
