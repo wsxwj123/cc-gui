@@ -468,9 +468,12 @@ export const QuizNode = memo(function QuizNode({ node, onAction, answers, uiKey 
                 setSelected(i)
                 if (uiKey !== undefined) answers?.setUi(uiKey, String(i))
                 if (action !== undefined && onAction !== undefined) {
+                  // CGUI-PATCH(INTERFACE §3.2 quiz 行「不含 question」):不带 question。
+                  // L2 白名单(host/action-send.js)已经保证它出不去,这里再塞一遍纯属
+                  // 多余的跨层携带 —— 模型撰写的散文本就不该离开渲染层,少一处经手
+                  // 少一处将来被别的消费方顺手用掉的可能。
                   onAction(action, {
                     type: 'quiz',
-                    question: node.question,
                     answer: opt.label,
                     correct: opt.correct === true,
                   })
