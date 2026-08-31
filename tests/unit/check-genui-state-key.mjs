@@ -259,4 +259,38 @@ const SID = 'sess-aaa';
     'submit 绝不能收集 ui —— 那是内部路径键,外发即污染 payload');
 }
 
+// ── 13. 挂载时的 spec 默认值不许冲掉用户编辑(§3.6)────────────────────────────
+// 形态:每次重挂,组件的 mount effect 都把 spec 默认值重新注册一遍 ⟹ 存储里的
+// EDIT 被 DEFAULT 压掉。屏幕上当时还对(组件 state 里是 EDIT),下一次重挂就丢。
+{
+  const mk = () => { const st = { fields: {}, ui: {} };
+    return { st, a: { fields: st.fields, ui: st.ui,
+      setField: (k, v) => { st.fields[k] = v; }, setUi: (k, v) => { st.ui[k] = v; } } }; };
+  // 组件挂载时那两句(带门):没存过才注册默认值
+  const mount = (a, id, uiKey, def, guarded) => {
+    if (def !== undefined && def.trim() !== '' && (!guarded || keptValue(a, id, uiKey) === undefined)) {
+      keepValue(a, id, uiKey, def);
+    }
+  };
+  for (const [id, uiKey] of [['kept', '0'], [undefined, '0']]) {
+    const { a } = mk();
+    mount(a, id, uiKey, 'DEFAULT', true);
+    assert.equal(keptValue(a, id, uiKey), 'DEFAULT', '首次挂载:没存过 → 注册 spec 默认值');
+    keepValue(a, id, uiKey, 'EDIT');                       // 用户改了
+    mount(a, id, uiKey, 'DEFAULT', true);                  // 回合末重挂一
+    mount(a, id, uiKey, 'DEFAULT', true);                  // 重挂二(dockKeyPrefix 换两轮)
+    assert.equal(keptValue(a, id, uiKey), 'EDIT',
+      `${id === undefined ? '无 id' : '带 id'}:重挂两次后存储里必须还是用户编辑的值,不许被 spec 默认值冲掉`);
+  }
+  // 反例:去掉门就是被冲掉 —— 这条门存在的理由
+  { const { a } = mk();
+    keepValue(a, 'kept', '0', 'EDIT');
+    mount(a, 'kept', '0', 'DEFAULT', false);
+    assert.equal(keptValue(a, 'kept', '0'), 'DEFAULT', '前提:无条件回写确实会冲掉编辑值'); }
+  // 源码锁:四个挂载回写点都要带这道门(input / textarea / select / slider)
+  const forms = read('client/src/genui/upstream/blocks/forms.tsx');
+  assert.equal((forms.match(/keptValue\(answers, id, uiKey\) === undefined/g) || []).length, 4,
+    'input/textarea/select/slider 四处挂载回写都要先问"存过没有"');
+}
+
 console.log('check-genui-state-key: all passed');

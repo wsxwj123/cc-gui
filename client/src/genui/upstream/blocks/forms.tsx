@@ -262,7 +262,9 @@ export function SliderNode({ node, onAction, answers, uiKey }: {
   useEffect(() => {
     if (mounted.current) return
     mounted.current = true
-    keepValue(answers, id, uiKey, String(initial))
+    // CGUI-PATCH: 同上。initial 在有存值时本就等于存值,加这道门只是把口径统一,
+    // 免得日后有人改了 initial 的推导又把存值冲掉。
+    if (keptValue(answers, id, uiKey) === undefined) keepValue(answers, id, uiKey, String(initial))
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
   const send = (v: number): void => {
@@ -362,8 +364,9 @@ export function SelectNode({ node, onAction, answers, uiKey }: {
   useEffect(() => {
     if (mounted.current) return
     mounted.current = true
-    if (defaultValue !== null && id !== undefined) {
-      answers?.setField(id, defaultValue)
+    // CGUI-PATCH: 同上;顺带把无 id 的下拉也纳入(原来只 setField 带 id 的那一半)。
+    if (defaultValue !== null && keptValue(answers, id, uiKey) === undefined) {
+      keepValue(answers, id, uiKey, defaultValue)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
@@ -434,7 +437,12 @@ export function InputNode({ node, onAction, answers, uiKey }: {
   useEffect(() => {
     if (mounted.current) return
     mounted.current = true
-    if (!secret && node.value !== undefined && node.value.trim() !== '') {
+    // CGUI-PATCH: 只在**没有存过值**时才注册 spec 默认值。无条件回写的话,
+    // 回合末重挂会拿默认值把用户编辑过的值冲掉(屏幕上靠组件 state 侥幸还对,
+    // 存储里已经是默认值了 ⟹ 下一次重挂/重开就丢,违 INTERFACE §3.6)。
+    // 与上游 RadioNode「restored answer wins」同一条口径。
+    if (!secret && node.value !== undefined && node.value.trim() !== ''
+      && keptValue(answers, id, uiKey) === undefined) {
       keepValue(answers, id, uiKey, node.value)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -503,7 +511,9 @@ export function TextareaNode({ node, onAction, answers, uiKey }: {
   useEffect(() => {
     if (mounted.current) return
     mounted.current = true
-    if (node.value !== undefined && node.value.trim() !== '') {
+    // CGUI-PATCH: 同 InputNode —— 存过值就不许拿默认值覆盖(§3.6)。
+    if (node.value !== undefined && node.value.trim() !== ''
+      && keptValue(answers, id, uiKey) === undefined) {
       keepValue(answers, id, uiKey, node.value)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
