@@ -403,6 +403,18 @@ export async function openGenuiSettings(page) {
 }
 
 /**
+ * 关设置。**别直接 press('Escape')**:openGenuiSettings 结束时焦点还在搜索框里,
+ * 面板的 Esc 守卫会把输入框内的那一下 Esc 吃掉(语义是"清空搜索框"),面板根本不关;
+ * 紧接着的下一次 Cmd/Ctrl+0 就成了"再开一次"= 把它关掉,后面的断言便跑在一个
+ * 已经关掉的面板上 —— 时序不同还会时红时绿。先把焦点挪出输入框再按 Esc。
+ */
+export async function closeSettings(page) {
+  await page.evaluate(() => { const el = document.activeElement; if (el && el.blur) el.blur(); });
+  await page.keyboard.press('Escape');
+  await page.getByTestId(TID.settingsSection).waitFor({ state: 'detached', timeout: 5000 }).catch(() => {});
+}
+
+/**
  * 会话行的操作菜单(§9.7 两步入口):
  *   选中该会话行(选中即恒显,不需要 hover)→ session-actions-btn → 菜单打开 → session-actions-<action>
  * action ∈ pin / rename / fork / archive / delete,**按功能名**拼,不照中文文字。
