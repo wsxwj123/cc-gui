@@ -98,15 +98,15 @@ export const TableNode = memo(function TableNode({ node, answers, uiKey }: {
       return (as < bs ? -1 : as > bs ? 1 : 0) * sort.dir
     })
   const clickHeader = (i: number): void => {
-    setSort(prev => {
-      const next: { col: number; dir: 1 | -1 } | null = prev !== null && prev.col === i
-        ? prev.dir === 1 ? { col: i, dir: -1 } : null
-        : { col: i, dir: 1 }
-      // '0' 那一档:setUi 把空串当删除,所以"没排序"用 'none' 显式记,
-      // 否则点第三下(回到未排序)会被下次重挂恢复成第二下的降序。
-      if (uiKey !== undefined) answers?.setUi(uiKey, next === null ? 'none' : `${next.col}:${next.dir}`)
-      return next
-    })
+    // CGUI-PATCH: next 在更新函数**外面**算 —— setUi 是另一个组件的 setState,
+    // 塞进 updater 里就是"在更新函数里调度更新"(React 明令 updater 必须纯)。
+    const next: { col: number; dir: 1 | -1 } | null = sort !== null && sort.col === i
+      ? sort.dir === 1 ? { col: i, dir: -1 } : null
+      : { col: i, dir: 1 }
+    setSort(next)
+    // "没排序"用 'none' 显式记:setUi 把空串当"回到默认"删条目,
+    // 否则点第三下(回到未排序)会被下次重挂恢复成第二下的降序。
+    if (uiKey !== undefined) answers?.setUi(uiKey, next === null ? 'none' : `${next.col}:${next.dir}`)
   }
   const numeric = numericColumns(rows, columns.length)
   return (

@@ -377,14 +377,13 @@ export const FileTreeNode = memo(function FileTreeNode({ node, answers, uiKey }:
   })
   const pathKey = (depth: number, i: number): string => `${depth}-${i}`
   const toggle = (k: string): void => {
-    setCollapsed(prev => {
-      const next = new Set(prev)
-      if (next.has(k)) next.delete(k)
-      else next.add(k)
-      // 全展开时写 '[]' 而不是空串 —— setUi 把空串当"回到默认"删条目。
-      if (uiKey !== undefined) answers?.setUi(uiKey, JSON.stringify([...next]))
-      return next
-    })
+    // CGUI-PATCH: 同 TableNode —— setUi 不能塞进 setState 的更新函数里(updater 必须纯)。
+    const next = new Set(collapsed)
+    if (next.has(k)) next.delete(k)
+    else next.add(k)
+    setCollapsed(next)
+    // 全展开时写 '[]' 而不是空串:setUi 把空串当"回到默认"删条目。
+    if (uiKey !== undefined) answers?.setUi(uiKey, JSON.stringify([...next]))
   }
   const renderNode = (n: GenuiFileTreeNode, depth: number, i: number): ReactNode => {
     if (depth > GENUI_LIMITS.maxTreeDepth) return null
