@@ -2212,7 +2212,7 @@ function LastUpdateAgo({ getAt }) {
   return <span className="text-[12px] text-ink-faint shrink-0 tabular-nums">· 上次更新 {txt}</span>;
 }
 
-function StreamingStatusLine({ thinking, text, toolCalls, streamStart, lastUpdateAt = null }) {
+function StreamingStatusLine({ thinking, text, toolCalls, streamStart, lastUpdateAt = null, sawModelOutput = true }) {
   const verb = useCyclingVerb();
   let label = null;
   // Latest unresolved tool call (no result yet) → "Bash(ls)"
@@ -2235,7 +2235,11 @@ function StreamingStatusLine({ thinking, text, toolCalls, streamStart, lastUpdat
     // pendingTool 全空 → 原来这里隐藏整行,用户看到"橙色动态文本时有时无"(#10)。
     // 官方靠 delta 立即填充故无感。回退显示动态词,与官方观感一致;回合结束(isStreaming
     // false)整块卸载,不会滞留。
-    label = verb;
+    // r65:reattach 接管一个"还没吐任何产出"的回合(连接窗)时,这里若显示循环动词会
+    // 与"正在思考"同形、看不出还没连上。sawModelOutput 为 false(本流未见过任何
+    // content_block_start/delta/assistant 快照)时显示 Connecting;任一产出信号到达即落回
+    // 动词。仅 reattach 状态行传此标志,首发路径默认 true 维持原样。
+    label = sawModelOutput ? verb : 'Connecting';
   }
   // 统一动效(用户反馈"跳动动画→静态头像"割裂):动画载体收敛到回复气泡的
   // ✻ 头像位(TurnBubble 的 ProviderAvatar thinking 态),状态行只保留纯文字,
@@ -3377,6 +3381,11 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // 自己的流式气泡/Connecting 占位 —— 内容由历史卡(jsonl)单一来源负责,重放事件只当
   // 刷新触发器。口径与理由见 utils/reattach.js。
   const [reattachStream, setReattachStream] = useState(false);
+  // r65:本流(本回合)是否观察到过任何模型产出(content_block_start / 任意
+  // content_block_delta 含孤儿 / assistant 快照)。仅供 reattach 状态行区分"接管旧进程但
+  // 确实还一无所有"(连接窗 → Connecting)与"内容正在流"(→ 循环动词/正文)。message_start
+  // 不置位(不代表可见产出,CLI 终端此态也仍显示等待)。每次发送起点重置为 false。
+  const [sawModelOutput, setSawModelOutput] = useState(false);
   const loadedSidRef = useRef(null); // I4:本窗格已加载历史的 sessionId,切会话时据此强制重载
   // 编辑重发待回滚(#4):点击「重新编辑并发送」时只回填输入框、记录目标消息,不做
   // 任何破坏性操作;真正发送时才回退,ESC 取消则原样保留。ref 供 handleSend 读取
@@ -4292,7 +4301,10 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
 
     const isCompact = /^\/compact\b/.test(String(prompt || '').trim());
     const isClear = /^\/clear\b/.test(String(prompt || '').trim());
-    streamStartRef.current = Date.now(); // CJ-4:本回合计时起点
+    // CJ-4:本回合计时起点。r65:reattach 接管的是一个【早已在跑】的回合,无条件重置为
+    // now 会让耗时从 0 重新计(用户明明已等了几秒)。改取该会话的 detach 时刻(切走/转后台/
+    // 上一段流收尾时记的,恒 ≤ now),使耗时接续、不跳回 0;无记录才回落 now。首发仍取 now。
+    streamStartRef.current = (reattachPid && detachTsBySidRef.current[selectedSession?.sessionId]) || Date.now();
     updateStreaming(true);
     // I4:本次流的归属会话(draft 时是 draft-key,init 收到真 id 后会在下面升级)。
     setStreamOwner(sessionQueueKey);
@@ -4311,6 +4323,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     setStreamingThinking('');
     setStreamingToolCalls([]);
     setStreamingBlocks([]);
+    setSawModelOutput(false); // r65:本流产出信号复位(reattach 与首发都从"尚未见产出"起算)
     setLiveStatus(null);
     // 输入预测(A):新回合开始,上一回合的建议作废(reattach 是同一回合的续播,不清)。
     // 只清本会话的两个 key,别的会话的建议不受影响(store 是全局 map)。
@@ -4441,6 +4454,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     let accumulatedThinking = '';
     let currentToolCalls = [];
     let orderedBlocks = [];  // [{ type, blockIndex, content?, toolCall? }, ...]
+    // r65:本流是否见过任何模型产出。本地闩住只翻一次 state,免每片 delta 重复 setState。
+    let sawOutput = false;
+    const markSawOutput = () => { if (!sawOutput) { sawOutput = true; setSawModelOutput(true); } };
     let streamClosedNoticed = false; // CG-2:子代理打穿 canUseTool 通道的兜底提示,每轮只提示一次
     const taskIdToToolUse = {};  // task_started 建立 task_id→tool_use_id 映射,供只带 task_id 的 task_updated 用
     let turnAborted = false;     // 用户主动停止(catch 到 AbortError)才 true;供 finally 区分"正常完成"(不收后台化子代理)与"停止"(收 stopped)
@@ -5186,6 +5202,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
               // 时机)。工具循环的每次调用结束即刷新徽章,不必等整轮 result。
               setLiveContextUsage({ ...ev.usage, _ts: Date.now() });
             } else if (ev.type === 'content_block_start') {
+              markSawOutput(); // r65:主回合有块开始(text/thinking/tool_use)= 已有产出,离开 Connecting
               const cb = ev.content_block || {};
               if (cb.type === 'text') {
                 const orderIdx = orderedBlocks.length;
@@ -5218,6 +5235,10 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             } else if (ev.type === 'content_block_delta') {
               const block = blocks[ev.index];
               const delta = ev.delta || {};
+              // r65:任何 delta(text/thinking/input_json)都是产出信号 —— 必须在丢弃孤儿
+              // delta 之前置位。mid-content reattach 的首片 delta 正是孤儿(其 block_start 在
+              // detach 前已被消费、不在 earlyLines),它毫秒级到达,据此立刻离开 Connecting。
+              markSawOutput();
               if (!block) continue;
               if (delta.type === 'text_delta' && block.type === 'text') {
                 accumulatedText += delta.text || '';
@@ -5308,6 +5329,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
               }
               continue;
             }
+            // r65:非 partial 的第三方(mimo 等)不发 delta,整条 assistant 快照即其全部产出;据此置位。
+            markSawOutput();
             for (const block of (Array.isArray(event.message.content) ? event.message.content : [])) {
               if (block.type === 'text') {
                 // Only replace if we haven't been streaming this block already.
@@ -7657,6 +7680,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                   toolCalls={streamingToolCalls}
                   streamStart={streamStartRef.current}
                   lastUpdateAt={getHistFreshAt}
+                  sawModelOutput={sawModelOutput}
                 />
               )}
               {/* 等待状态行(G):压缩中/API 重试/限流等待的明确说明。与 StreamingStatusLine
