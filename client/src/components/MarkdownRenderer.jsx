@@ -12,7 +12,10 @@ import { dockKeyFor } from '../utils/artifactDock.js';
 // 围栏代码渲染。抽成函数以便注入 dockKeyPrefix(#3 稳定停靠身份的前缀);node 由
 // react-markdown 透传(passNode),node.position.start.offset 是本块在源文本中的起始偏移。
 function renderCode({ children, className, node, dockKeyPrefix, ...props }) {
-  const codeStr = String(children).replace(/\n$/, '');
+  // children 空值守卫:围栏刚开头(```lang 已到、正文一个字都还没到)时 react-markdown 给的
+  // children 是 undefined,String(undefined) 会把字面量 "undefined" 当代码显示出来。
+  // 这是既有瑕疵(今天任何语言的围栏在流式首帧都会闪一下),修在这个共用点一次覆盖所有语言。
+  const codeStr = children == null ? '' : String(children).replace(/\n$/, '');
   // 块级判定:有 language-xxx 类名(带语言的围栏),或内容含换行。
   // 行内代码按 markdown 定义恒为单行,故"含换行"必是围栏代码块 —— 这一条专门兜住
   // **没标语言的围栏块**(纯 ``` ),否则它无 language- 类名会被误当行内,多行被压成
