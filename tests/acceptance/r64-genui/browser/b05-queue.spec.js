@@ -1,5 +1,5 @@
 // B5 流式期排队(INTERFACE §3.5)。判据是"会话忙不忙",不是"这条消息还在不在写"。
-import { test, expect, TID, COPY, ctl, bootUI, modelSays, fence, queueCount, messageCount } from './harness.js';
+import { test, expect, TID, COPY, ctl, bootUI, modelSays, fence, queueCount, messageCount, waitTurnEnd } from './harness.js';
 
 const BTN = fence({ items: [{ type: 'button', label: '触发', action: 'go' }] });
 const marks = (page) => page.getByTestId(TID.actionMsg);
@@ -31,6 +31,7 @@ test('B60 回合结束：队列里那条自动发出，用户不用再点', asyn
   await page.getByRole('button', { name: '触发' }).click();
   await expect(feedback(page)).toContainText(COPY.queued);
   ctl.release(app);
+  await waitTurnEnd(page);        // 等回合真收尾再读队列,否则是在收尾中途做一次性快照
   await expect(marks(page)).toHaveCount(1, { timeout: 20_000 });
   expect(await queueCount(page)).toBe(0);
   // §9.3:没有可见排队条目时整条 queue-bar 不存在
@@ -49,11 +50,31 @@ test('B61 排队中从队列里删掉：这条不再发出', async ({ page, app 
 
 test('B62 入队失败（本地存储配额满）：显示“发送失败”而不是“已排队”，组件仍可交互', async ({ page, app }) => {
   await busyTurnWithFence(page, app);
-  // 把 localStorage 撑满,让入队写盘失败
-  await page.evaluate(() => {
-    const chunk = 'x'.repeat(512 * 1024);
-    try { for (let i = 0; i < 200; i++) localStorage.setItem('__fill_' + i, chunk); } catch { /* 撑满即可 */ }
+  // 把 localStorage 真正撑到"连一条队列记录都写不下"。
+  // 原来只用 512KB 大块填,填到抛异常就停 —— 但那只说明"塞不下 512KB",
+  // 队列记录只有几百字节,照样写得进去,于是实现回「已排队」是对的、断言落空。
+  // 正确做法:块大小逐级减半,直到连 64 字节都写不进去,再**验证前提确实成立**才往下断言。
+  const exhausted = await page.evaluate(() => {
+    let n = 0;
+    // 按块大小逐级递减地填,每级填到抛异常为止。兜底预算**每级各自计时**——
+    // 用跨级共享的预算(不管是条数还是时间)都会被大块阶段吃光,
+    // 小块阶段一进来就被兜底跳出,最后那几百字节永远填不上,队列照样写得进去。
+    for (const size of [512 * 1024, 32 * 1024, 1024, 64, 1]) {
+      const chunk = 'x'.repeat(size);
+      const deadline = Date.now() + 5000;   // 每级独立预算
+      while (Date.now() < deadline) {
+        try { localStorage.setItem('__fill_' + (n++), chunk); } catch { break; }
+      }
+    }
+    // 核验前提用**队列快照那个量级**(几百字节),不要用 1 个字符:
+    // Chromium 填满之后仍会给 1 字符留一丝余量(实测 1 字符还能写、400 字节已经写不进),
+    // 拿 1 字符去验会误判成"还没满",于是断言建立在错误前提上。
+    try { localStorage.setItem('__probe', 'y'.repeat(400)); localStorage.removeItem('__probe'); return false; }
+    catch { return true; }
   });
+  expect(exhausted,
+    '没能把 localStorage 撑满 —— 本条的前提(写盘失败)根本没造出来,'
+    + '这时候不管实现回什么都不能算数。先把探针修好再谈断言。').toBe(true);
   const btn = page.getByRole('button', { name: '触发' });
   await btn.click();
   await expect(feedback(page)).toContainText(COPY.sendFailed, { timeout: 5000 });
@@ -121,6 +142,9 @@ test('B69 会话空闲：显示“已发送”，消息立即发出', async ({ p
   const box = await bootUI(page, app);
   await modelSays(page, app, BTN, { box });
   await page.getByTestId(TID.block).first().waitFor();
+  // 本条的前提是"会话**空闲**"。modelSays 只等到提示词出现,那时回合往往还没收尾,
+  // 这时候点下去会话其实是忙的 —— 实现给「已排队」是对的,是夹具没等到时机。
+  await waitTurnEnd(page);
   const before = await messageCount(page);
   await page.getByRole('button', { name: '触发' }).click();
   await expect(feedback(page)).toContainText(COPY.sent, { timeout: 5000 });

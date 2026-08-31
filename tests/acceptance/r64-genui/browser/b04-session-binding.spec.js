@@ -151,9 +151,24 @@ const SURFACES = [
   ['B54 旁问浮窗', async (page, app, box) => {
     await modelSays(page, app, '正文', { box, prompt: 'RO-BTW' });
     ctl.script(app, READONLY_FENCE);
-    await clickSafe(page, page.getByRole('button', { name: /旁问|顺便问/ }).first());
-    await page.locator('textarea').last().fill('顺便问一句');
-    await page.locator('textarea').last().press('Enter');
+    // 旁问入口用仓内既有的锚,不靠按钮文字(带角标时可访问名会变)。
+    // 注意它是**开关**:点一次展开、再点一次收起,初始态不保证。所以点完看输入框有没有出来,
+    // 没出来就再点一次(等于原本是展开态、被我们点收起了)。
+    const btwInput = page.getByPlaceholder(/继续旁问/);
+    for (let i = 0; i < 3 && !(await btwInput.count()); i++) {
+      await clickSafe(page, page.locator('[data-cgui="aside-btn"]').first());
+      // 等久一点:并发跑的时候浮窗入场动画会慢,等太短会误判成"没开",
+      // 于是下一次点击反而把已经展开的窗又收了回去。
+      await btwInput.waitFor({ timeout: 8000 }).catch(() => {});
+    }
+    // 原来用 textarea.last() 定位,打偏了 —— 点到的不是浮窗自己的输入框。
+    // 浮窗的输入框有独一份的占位文字「继续旁问…」,用它把作用域收窄到浮窗内部。
+    await btwInput.waitFor({ timeout: 6000 }).catch(() => {
+      throw new Error('旁问浮窗没打开(开关点了两次都没出现输入框),'
+        + '或它的输入框占位文字变了(原为「继续旁问…（Enter 发送）」)。');
+    });
+    await btwInput.fill('顺便问一句');
+    await btwInput.press('Enter');
   }],
   ['B55 文件预览', async (page, app, box) => {
     ctl.tools(app, [{ name: 'Read', input: { file_path: '/tmp/ui.md' }, result: READONLY_FENCE }]);
