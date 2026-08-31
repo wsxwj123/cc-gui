@@ -166,7 +166,7 @@ npm rm -g @wsxwj123/cc-gui
 
 其它系统 / 架构暂不支持,会给出明确提示。
 
-> 镜像源(npmmirror 等)是按需同步的,新版本可能滞后甚至暂缺。若报「没找到当前平台的安装包」,加 `--registry=https://registry.npmjs.org` 用官方源装一次即可。
+> 镜像源(npmmirror 等)是按需同步的,新版本可能滞后甚至暂缺。若报「没找到当前平台的安装包」,用官方源装一次即可:`npx --registry=https://registry.npmjs.org @wsxwj123/cc-gui@latest`。
 
 ### 方式 B:下载安装包(开箱即用)
 
@@ -250,7 +250,7 @@ npm run tauri:build
 | **macOS 提示「CC-GUI.app 已损坏,无法打开」**(且「隐私与安全性」里没有「仍要打开」按钮,macOS 15 后常见) | 同上,是 Gatekeeper 给未公证 app 加的 quarantine 标记,不是真损坏。装进「应用程序」后终端跑一次:`/usr/bin/xattr -dr com.apple.quarantine "/Applications/CC-GUI.app"` 再双击即可(不需要 sudo) |
 | 跑 xattr 报 `option -r not recognized` | 系统的 `xattr` 被 Python 版同名命令(pyenv / conda 自带)抢了 PATH。写绝对路径 `/usr/bin/xattr -dr ...` 即可 |
 | `npm i -g` 报 `EACCES: permission denied` | 官方 .pkg 装的 node 全局目录(`/usr/local/lib/node_modules`)属 root,装任何全局包都报此错,与本项目无关。解法二选一:① 用 `npx @wsxwj123/cc-gui`(推荐,无需任何配置);② 改 npm 前缀:`npm config set prefix ~/.npm-global`,再把 `~/.npm-global/bin` 加进 PATH。不要用 `sudo npm i -g`:能装上,但会把 `~/.npm` 缓存目录属主变成 root,之后普通 npm 命令开始报别的权限错,越修越乱 |
-| `npm i -g @wsxwj123/cc-gui` 报「没找到当前平台的安装包」 | 镜像源按需同步,平台分包可能滞后或暂缺。用官方源装一次:`npm i -g @wsxwj123/cc-gui@latest --registry=https://registry.npmjs.org`,也可直接走方式 B 下载 |
+| 安装时报「没找到当前平台的安装包」 | 镜像源按需同步,平台分包可能滞后或暂缺。用官方源装一次:`npx --registry=https://registry.npmjs.org @wsxwj123/cc-gui@latest`,也可直接走方式 B 下载 |
 | `cc-gui` 命令与本机其它工具重名 | 改用 `npx @wsxwj123/cc-gui`,逻辑完全相同 |
 
 ---

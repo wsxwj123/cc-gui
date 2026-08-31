@@ -448,7 +448,7 @@ function main() {
       '     若仍失败，先执行 npm cache clean --force 再重装。\n' +
       '  2. 你用的镜像源上还没有这个版本的平台包（镜像按需同步，可能一直缺）——\n' +
       '     换官方源装一次即可：\n' +
-      '       npm i -g @wsxwj123/cc-gui@latest --registry=https://registry.npmjs.org\n' +
+      '       npx --registry=https://registry.npmjs.org @wsxwj123/cc-gui@latest\n' +
       '     或直接从 ' + REPO_RELEASES + ' 下载安装包。');
   }
   // S3 载荷存在性 + 体积下限(< 下限判损坏;恰好等于放行)

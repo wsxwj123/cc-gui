@@ -200,7 +200,7 @@ Output lands in `src-tauri/target/release/bundle/` (`.dmg` on macOS, `.exe` / `.
 | **`.dmg` won't mount, says "damaged"** (rare; more likely when the file arrived over a non-browser channel) | Clear quarantine on the dmg itself (adjust the path; no sudo needed): `/usr/bin/xattr -dr com.apple.quarantine ~/Downloads/CC-GUI_*.dmg`, then double-click to mount |
 | `xattr` says `option -r not recognized` | A Python `xattr` (from pyenv / conda) shadows the system one on PATH. Use the absolute path `/usr/bin/xattr -dr ...` |
 | `npm i -g` fails with `EACCES: permission denied` | With node from the official .pkg installer, the global directory `/usr/local/lib/node_modules` is root-owned — every global install fails this way; it is not specific to this project. Either ① use `npx @wsxwj123/cc-gui` (recommended, zero setup), or ② move the npm prefix: `npm config set prefix ~/.npm-global` and add `~/.npm-global/bin` to PATH. Do not use `sudo npm i -g`: it installs, but leaves `~/.npm` cache files owned by root, so later npm commands fail with new permission errors |
-| `npm i -g @wsxwj123/cc-gui` fails with "platform package not found" | Registry mirrors sync on demand, so a fresh release's platform packages may lag or be missing entirely. Install once from the official registry: `npm i -g @wsxwj123/cc-gui@latest --registry=https://registry.npmjs.org`, or use Option B |
+| Install fails with "platform package not found" | Registry mirrors sync on demand, so a fresh release's platform packages may lag or be missing entirely. Install once from the official registry: `npx --registry=https://registry.npmjs.org @wsxwj123/cc-gui@latest`, or use Option B |
 | `cc-gui` collides with another command | Use `npx @wsxwj123/cc-gui` — identical behaviour |
 
 ---

@@ -31,7 +31,7 @@ npx @wsxwj123/cc-gui@latest
 先完全退出 CC-GUI（macOS 按 Cmd+Q，注意关闭窗口只是最小化到托盘）再执行，即自动换到新版并打开。启动器只升不降：若应用内自动更新已装到更高版本，该命令只会打开应用，不会降级。全局安装方式对应执行 `npm i -g @wsxwj123/cc-gui@latest` 后再跑一次 `cc-gui`。
 
 - macOS 升级后若读不到会话记录：到 系统设置 → 隐私与安全性 → 完全磁盘访问，把 CC-GUI 重新勾选一次（macOS 对未签名应用的既有行为，从官网下载覆盖升级同样如此）。
-- 镜像源（npmmirror 等）按需同步，新版本的平台分包可能滞后甚至暂缺；若报「没找到当前平台的安装包」，加 `--registry=https://registry.npmjs.org` 用官方源装一次即可，或到 [GitHub Release](https://github.com/wsxwj123/claude-gui/releases) 手动下载。
+- 镜像源（npmmirror 等）按需同步，新版本的平台分包可能滞后甚至暂缺；若报「没找到当前平台的安装包」，用官方源装一次即可：`npx --registry=https://registry.npmjs.org @wsxwj123/cc-gui@latest`，或到 [GitHub Release](https://github.com/wsxwj123/claude-gui/releases) 手动下载。
 
 ## 说明
 
