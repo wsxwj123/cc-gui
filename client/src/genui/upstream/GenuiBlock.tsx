@@ -10,6 +10,7 @@
 import { memo, useCallback, useEffect, useMemo, useState } from 'react'
 import { scheduleAction } from './action-debounce.ts'
 import { genuiActionId, useGenuiAction } from './action-context.ts'
+import { GenuiFeedbackProvider } from './action-feedback.tsx'
 import css from './GenuiBlock.module.css'
 import { loadBlockState, saveBlockState } from './interaction-store.ts'
 import { renderNode } from './blocks/render-node.tsx'
@@ -63,13 +64,39 @@ export const GenuiBlock = memo(function GenuiBlock({ spec, stateKey, settled = f
   // CGUI-PATCH:context 值现在是"本窗格的发送能力"(§1.3.2),不是裸回调。null = 只读面
   // (显式 `value={null}`)或窗格外 —— dispatch 保持 undefined,带 action 的控件渲染成禁用态。
   const capability = useGenuiAction()
+  // 直发/失败两态是本地瞬态(发出去就是发出去了);「已排队」不在这里 —— 它派生自
+  // 消息队列(§1.2.4),存了就有三个生命周期洞。value 是 'sent' | 'failed'。
+  const [sendState, setSendState] = useState<Record<string, 'sent' | 'failed'>>({})
+  const [truncated, setTruncated] = useState<ReadonlySet<string>>(new Set())
   const dispatch = useMemo(() => {
     if (capability === null) return undefined
     return (action: string, payload: Record<string, unknown>): void => {
-      capability.send(genuiActionId(stateKey, action), action, payload)
+      const result = capability.send(genuiActionId(stateKey, action), action, payload)
+      setTruncated(prev => {
+        if (prev.has(action) === result.truncated) return prev
+        const next = new Set(prev)
+        if (result.truncated) next.add(action); else next.delete(action)
+        return next
+      })
+      setSendState(prev => {
+        // 排队态不写本地:队列是它唯一的真相,写了就会在发出后留下清不掉的旧徽章。
+        if (result.state === 'queued') {
+          if (!(action in prev)) return prev
+          const next = { ...prev }
+          delete next[action]
+          return next
+        }
+        return prev[action] === result.state ? prev : { ...prev, [action]: result.state }
+      })
     }
   }, [capability, stateKey])
   const onAction = useDebouncedAction(dispatch, stateKey ?? '')
+  const feedback = useMemo(() => ({
+    stateOf: (action: string) => (capability?.queuedIds.has(genuiActionId(stateKey, action)) === true
+      ? 'queued' as const
+      : sendState[action] ?? null),
+    truncated: (action: string) => truncated.has(action),
+  }), [capability, stateKey, sendState, truncated])
   // v2.5/v2.6 answers registry: grouped radios record selections + question
   // metadata here; `submit` nodes grade locally (locked until 重新作答) or
   // collect into one action. Block-local state survives re-renders (streaming
@@ -170,6 +197,7 @@ export const GenuiBlock = memo(function GenuiBlock({ spec, stateKey, settled = f
     return () => clearTimeout(timer)
   }, [stateKey, answers, locked, fields, ui, secretFields, settled])
   return (
+    <GenuiFeedbackProvider value={feedback}>
     <div className={css.block} data-genui>
       {spec.title !== undefined && <div className={css.banner}>{spec.title}</div>}
       <div className={css.col} style={{ gap: `${gap}px` }}>
@@ -188,6 +216,7 @@ export const GenuiBlock = memo(function GenuiBlock({ spec, stateKey, settled = f
         ))}
       </div>
     </div>
+    </GenuiFeedbackProvider>
   )
 // CGUI-PATCH: `settled` 进比较器 —— 定稿是"该镜像落盘了"的信号,漏比就永远不落盘。
 }, (prev, next) => prev.stateKey === next.stateKey && prev.settled === next.settled

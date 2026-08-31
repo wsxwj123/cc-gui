@@ -958,10 +958,25 @@ button.ftNameBtn[aria-expanded] { cursor: pointer; }
    shift risk (it inherits the flex row's gap). */
 .btnSent { animation: genuiPopIn 0.2s ease both; }
 
+/* CGUI-PATCH(INTERFACE §3.5 / §9.2):发送态反馈(已发送 / 已排队 / 发送失败)。
+   挂在带 action 的控件旁,只在有反馈时进 DOM。配色暂用别名 token,M9 那一轮统一接主题。 */
+.actionFeedback {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--dsl-g-font-meta);
+  line-height: 1.5;
+  color: var(--dsw-alias-label-tertiary);
+  animation: genuiPopIn 0.2s ease both;
+}
+.actionTruncated { opacity: 0.85; }
+.actionTruncated::before { content: '·'; margin-right: 6px; }
+
 /* 尊重用户的减弱动效偏好 */
 @media (prefers-reduced-motion: reduce) {
   .reveal { animation: none; }
   .btnSent { animation: none; }
+  .actionFeedback { animation: none; }
   .fill { transition: none; }
   .barFill { transition: none; }
   .switch, .switchKnob { transition: none; }

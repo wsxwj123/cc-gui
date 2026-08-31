@@ -4,7 +4,8 @@
  * the sibling block modules. Depth-guarded against pathological specs.
  * @module @changfenhuang/dsh-genui/client/blocks/render-node
  */
-import { type ReactNode } from 'react'
+import { Fragment, type ReactNode } from 'react'
+import { ActionFeedback } from '../action-feedback.tsx'
 import css from '../GenuiBlock.module.css'
 import { GENUI_LIMITS } from '../guard.ts'
 import type { GenuiList, GenuiNode } from '../spec.ts'
@@ -26,7 +27,31 @@ function isListItemNode(item: GenuiList['items'][number]): item is GenuiNode {
   return typeof item === 'object' && item !== null && 'type' in item
 }
 
+/**
+ * CGUI-PATCH(INTERFACE §9.2):发送态反馈挂在**分发点**,不逐个组件改。
+ * 13 种可触发组件全从这里过,一处包一层就全覆盖;组件自己不需要知道反馈的存在。
+ * 没有 `action` 或没有能力对象(只读面)时原样返回 —— 那两种情况徽章根本不进 DOM。
+ */
 export function renderNode(
+  node: GenuiNode,
+  key: number,
+  onAction: GenuiBlockProps['onAction'] | undefined,
+  depth = 0,
+  answers?: AnswersState,
+  path = '',
+): ReactNode {
+  const el = renderNodeInner(node, key, onAction, depth, answers, path)
+  const action = (node as { action?: unknown }).action
+  if (el === null || onAction === undefined || typeof action !== 'string') return el
+  return (
+    <Fragment key={key}>
+      {el}
+      <ActionFeedback action={action} />
+    </Fragment>
+  )
+}
+
+function renderNodeInner(
   node: GenuiNode,
   key: number,
   onAction: GenuiBlockProps['onAction'] | undefined,
