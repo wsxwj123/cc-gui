@@ -910,6 +910,7 @@ function PaneCountPicker() {
   return (
     <div ref={wrapRef} className="relative">
       <button
+        data-testid="pane-count"
         onClick={() => setOpen(!open)}
         title="分屏数量（1–6）"
         className={`px-1.5 py-1 rounded-lg transition-all flex flex-col items-center gap-0.5 ${
@@ -926,6 +927,7 @@ function PaneCountPicker() {
             {[1, 2, 3, 4, 5, 6].map((n) => (
               <button
                 key={n}
+                data-testid={`pane-count-${n}`}
                 onClick={() => { setPaneCount(n); setOpen(false); }}
                 className={`py-1.5 rounded text-[12px] font-mono transition-colors ${
                   paneCount === n ? 'bg-accent text-on-accent' : 'hover:bg-canvas-warm text-ink'
@@ -994,6 +996,7 @@ function PanelDock({ rightPanel, setRightPanel, updateNotice, jumpToUpdate, atte
         </span>
       )}
       <button
+        data-testid="panel-dock-toggle"
         onClick={() => setRailOpen((v) => !v)}
         title={`设置${activeMeta ? ` — 当前:${activeMeta.label}` : ''}（分屏 + 文件 / 审查 / 监控 / Agent / 用量 / 进程 / 工具 / 技能 / 指令 / 通用。Cmd/Ctrl+1..9、0 直达）`}
         className={`relative px-1.5 py-1 rounded-lg transition-all flex flex-col items-center gap-0.5 ${
@@ -1242,7 +1245,7 @@ function SplitMain({ activeTabIndex, setActiveTabIndex }) {
   // 唯一窗格时(单屏 或 dock 单显聚焦窗格)用单屏那套填满样式 + 不渲分屏头/手柄。
   const soloPane = panes.length === 1;
   return (
-    <div ref={rowRef} className="flex-1 flex min-w-0 overflow-x-auto">
+    <div ref={rowRef} data-testid="pane-split" className="flex-1 flex min-w-0 overflow-x-auto">
       {panes.map((i) => {
         const focused = activeTabIndex === i;
         const paneSession = paneSessions && paneSessions[i];
@@ -1257,6 +1260,7 @@ function SplitMain({ activeTabIndex, setActiveTabIndex }) {
         return (
           <React.Fragment key={paneKey}>
             <div
+              data-testid="pane"
               onMouseDown={!soloPane ? () => setActiveTabIndex(i) : undefined}
               style={soloPane
                 // 唯一窗格:填满,无需固定宽
@@ -1562,6 +1566,7 @@ export const SessionItem = React.memo(function SessionItem({ session, isSelected
       <div data-cgui="session-actions" className={`absolute top-1.5 right-1 flex items-center transition-opacity ${(menuOpen || isSelected) ? 'opacity-100' : 'opacity-100 md:opacity-0 md:group-hover:opacity-100'}`}>
         <button
           ref={menuBtnRef}
+          data-testid="session-actions-btn"
           onClick={(e) => { e.stopPropagation(); setMenuOpen((v) => !v); }}
           className={`p-1 rounded-md md:bg-canvas-warm hover:bg-canvas-deep/60 transition-colors ${menuOpen ? 'bg-canvas-deep/60' : ''}`}
           title="会话操作"
@@ -1571,15 +1576,18 @@ export const SessionItem = React.memo(function SessionItem({ session, isSelected
         {/* r11-p5-2:gap=4 紧贴行下展开(默认态不覆盖本行标题;底部不足时沿用组件既有
             翻转逻辑);clampSelector=侧栏容器——菜单右缘 ≤ 侧栏右缘-8,窄栏宽度上限
             侧栏宽-16,不再溢出侧栏压到会话区。 */}
-        <AnchoredPopover anchorRef={menuBtnRef} open={menuOpen} onRequestClose={() => setMenuOpen(false)} drop="down" align="right" gap={4} clampSelector=".sidebar-flank" topAlignRef={rowRef} className="w-44 py-1">
+        <AnchoredPopover anchorRef={menuBtnRef} open={menuOpen} onRequestClose={() => setMenuOpen(false)} drop="down" align="right" gap={4} clampSelector=".sidebar-flank" topAlignRef={rowRef} className="w-44 py-1" data-testid="session-actions-menu">
+          {/* act:可测锚用的功能名(INTERFACE §9.3)。label 会随状态翻转(置顶↔取消置顶、
+              归档↔取消归档),照文字定位必红,故按功能命名。 */}
           {[
-            { icon: <Pin size={12} className={pinned ? 'text-accent fill-accent' : 'text-ink-faint'} />, label: pinned ? '取消置顶' : '置顶到列表最前', disabled: isDraft, run: () => onTogglePin?.(session.sessionId) },
-            { icon: <Pencil size={12} className="text-ink-faint" />, label: '重命名', disabled: isDraft, run: () => startRename() },
-            { icon: <GitBranch size={12} className={forking ? 'text-accent animate-spin' : 'text-ink-faint'} />, label: '分支会话', disabled: forking, run: () => onFork(session) },
-            { icon: isArchived ? <ArchiveRestore size={12} className="text-accent" /> : <Archive size={12} className="text-ink-faint" />, label: isArchived ? '取消归档' : '收纳到归档页', run: () => onArchive(session) },
+            { act: 'pin', icon: <Pin size={12} className={pinned ? 'text-accent fill-accent' : 'text-ink-faint'} />, label: pinned ? '取消置顶' : '置顶到列表最前', disabled: isDraft, run: () => onTogglePin?.(session.sessionId) },
+            { act: 'rename', icon: <Pencil size={12} className="text-ink-faint" />, label: '重命名', disabled: isDraft, run: () => startRename() },
+            { act: 'fork', icon: <GitBranch size={12} className={forking ? 'text-accent animate-spin' : 'text-ink-faint'} />, label: '分支会话', disabled: forking, run: () => onFork(session) },
+            { act: 'archive', icon: isArchived ? <ArchiveRestore size={12} className="text-accent" /> : <Archive size={12} className="text-ink-faint" />, label: isArchived ? '取消归档' : '收纳到归档页', run: () => onArchive(session) },
           ].map((it) => (
             <button
               key={it.label}
+              data-testid={`session-actions-${it.act}`}
               disabled={it.disabled}
               onClick={(e) => { e.stopPropagation(); setMenuOpen(false); it.run(); }}
               className="w-full flex items-center gap-2 px-2.5 py-1.5 text-left text-[12px] text-ink-soft font-body hover:bg-canvas-warm disabled:opacity-40 transition-colors"
@@ -1588,6 +1596,7 @@ export const SessionItem = React.memo(function SessionItem({ session, isSelected
             </button>
           ))}
           <button
+            data-testid="session-actions-delete"
             onClick={async (e) => {
               e.stopPropagation();
               setMenuOpen(false);

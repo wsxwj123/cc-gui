@@ -1393,13 +1393,13 @@ export function ChatInput({ onSend, onStop, onStopBackground, onAccelerate, canS
             属于对话而不属于"待发队列",改由对话流里的用户气泡呈现(Desktop 形态)。
             没落地时回合收尾的 reconcile 会把它翻回普通排队态,那时它自动回到这里可编辑。 */}
         {queueItems.filter((q) => !q.hidden && !isSteered(q)).length > 0 && (
-          <div className="mt-2 rounded-lg bg-accent/8 border border-accent/20 text-[11px] font-body overflow-hidden">
+          <div data-testid="queue-bar" className="mt-2 rounded-lg bg-accent/8 border border-accent/20 text-[11px] font-body overflow-hidden">
             <div className="px-3 py-1.5 flex items-center gap-2 border-b border-accent/15">
               <Send size={11} className="text-accent shrink-0" />
               <span className="text-ink-soft flex-1">
                 {queueItems.some((q) => q.steerState === 'needs-review' || q.steerState === 'claiming')
                   ? '并入结果无法确认，已暂停后续队列'
-                  : <><b>{queueItems.filter((q) => !q.hidden && !isSteered(q)).length}</b> 条消息已排队 · 当前回复完成后自动发出</>}
+                  : <><b data-testid="queue-count">{queueItems.filter((q) => !q.hidden && !isSteered(q)).length}</b> 条消息已排队 · 当前回复完成后自动发出</>}
               </span>
               {onAccelerate && (
                 <button
@@ -1420,7 +1420,7 @@ export function ChatInput({ onSend, onStop, onStopBackground, onAccelerate, canS
                 // 画成用户气泡(R7-3)。两者都返回 null 而不是过滤数组 —— 编辑/删除回调按
                 // 下标操作 store,索引必须与 store 对齐。
                 q.hidden || isSteered(q) ? null :
-                <li key={q.queueId || `${q.queuedAt}-${i}`} className="px-3 py-1.5 flex items-start gap-2 group hover:bg-accent/5">
+                <li key={q.queueId || `${q.queuedAt}-${i}`} data-testid="queue-item" className="px-3 py-1.5 flex items-start gap-2 group hover:bg-accent/5">
                   <span className="text-[10px] text-ink-faint font-mono shrink-0 mt-0.5">#{i + 1}</span>
                   <div className="flex-1 min-w-0">
                     <span className="text-ink-soft block line-clamp-2 leading-snug" title={q.text}>{q.text}</span>
@@ -1464,6 +1464,7 @@ export function ChatInput({ onSend, onStop, onStopBackground, onAccelerate, canS
                         claiming 仍不可删(结果在途,删了与对账竞态)。 */}
                     {onRemoveFromQueue && (!isSteerBarrier(q) || q.steerState === 'needs-review') && (
                       <button
+                        data-testid="queue-item-delete"
                         onClick={async () => {
                           if (q.steerState === 'needs-review' || q.steerState === 'kept') {
                             const ok = await confirmDialog(
