@@ -90,6 +90,9 @@ export const GenuiBlock = memo(function GenuiBlock({ spec, stateKey, settled = f
   const [persisted] = useState(() => (stateKey === undefined ? null : loadBlockState(stateKey)))
   const [answers, setAnswers] = useState<Record<string, string>>(persisted?.answers ?? {})
   const [fields, setFields] = useState<Record<string, string>>(persisted?.fields ?? {})
+  // CGUI-PATCH: 无天然键的界面态,按节点路径存。与 fields 同一条写透路径,
+  // 所以回合末重挂后照样从内存层读回来(INTERFACE §3.6「全部保留」)。
+  const [ui, setUiState] = useState<Record<string, string>>(persisted?.ui ?? {})
   const [meta, setMeta] = useState<Record<string, QuestionMeta>>({})
   const [locked, setLocked] = useState(persisted?.locked === true)
   const [round, setRound] = useState(0)
@@ -112,6 +115,18 @@ export const GenuiBlock = memo(function GenuiBlock({ spec, stateKey, settled = f
       return prev[id] === value ? prev : { ...prev, [id]: value }
     })
   }, [])
+  // CGUI-PATCH: 空串按"回到默认"处理并删除条目,与 setField 的空值不变量一致。
+  const setUi = useCallback((uiKey: string, value: string) => {
+    setUiState(prev => {
+      if (value === '') {
+        if (!(uiKey in prev)) return prev
+        const next = { ...prev }
+        delete next[uiKey]
+        return next
+      }
+      return prev[uiKey] === value ? prev : { ...prev, [uiKey]: value }
+    })
+  }, [])
   const registerSecretField = useCallback((id: string) => {
     setSecretFields(prev => (prev.has(id) ? prev : new Set(prev).add(id)))
   }, [])
@@ -130,10 +145,10 @@ export const GenuiBlock = memo(function GenuiBlock({ spec, stateKey, settled = f
   }, [])
   const answersState = useMemo<AnswersState>(
     () => ({
-      answers, fields, secretFields, meta, locked, round,
-      setAnswer, setField, registerSecretField, registerMeta, clear, setLocked,
+      answers, fields, ui, secretFields, meta, locked, round,
+      setAnswer, setField, setUi, registerSecretField, registerMeta, clear, setLocked,
     }),
-    [answers, fields, secretFields, meta, locked, round, setAnswer, setField, registerSecretField, registerMeta, clear],
+    [answers, fields, ui, secretFields, meta, locked, round, setAnswer, setField, setUi, registerSecretField, registerMeta, clear],
   )
   // Durable save. Secret field values are stripped before writing: passwords never persist.
   //
@@ -154,13 +169,16 @@ export const GenuiBlock = memo(function GenuiBlock({ spec, stateKey, settled = f
       answers,
       locked,
       ...(Object.keys(safeFields).length > 0 ? { fields: safeFields } : {}),
+      // CGUI-PATCH: ui 走同一条写透路径。密码框永远不写这里(无 id 的密码框在
+      // InputNode 里就不调 setUi),所以不需要第二道 secret 过滤。
+      ...(Object.keys(ui).length > 0 ? { ui } : {}),
     }
     saveBlockState(stateKey, next)
     if (!settled) return
     // 落盘仍防抖:输入框逐字符触发,不该逐字符 JSON.stringify 整张表。
     const timer = setTimeout(() => saveBlockState(stateKey, next, true), 300)
     return () => clearTimeout(timer)
-  }, [stateKey, answers, locked, fields, secretFields, settled])
+  }, [stateKey, answers, locked, fields, ui, secretFields, settled])
   return (
     <div className={css.block} data-genui>
       {spec.title !== undefined && <div className={css.banner}>{spec.title}</div>}

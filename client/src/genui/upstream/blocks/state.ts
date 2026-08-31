@@ -30,6 +30,26 @@ export interface GenuiBlockProps {
   settled?: boolean | undefined
 }
 
+/**
+ * CGUI-PATCH: 输入类节点存/取值的**唯一**两条路 —— 带 `id` 的进 `fields`(那本要发给
+ * 模型,submit 收集它),没有 `id` 的进 `ui`(只为"重挂后还在",不外发)。
+ * 散在各组件里写 `if (id !== undefined)` 是这次漏掉无 id 那一半的直接原因,收成一处。
+ */
+export function keepValue(
+  answers: AnswersState | undefined, id: string | undefined, uiKey: string | undefined, value: string,
+): void {
+  if (id !== undefined) answers?.setField(id, value)
+  else if (uiKey !== undefined) answers?.setUi(uiKey, value)
+}
+
+/** 读回上面那两本账;两处都没有时 undefined(调用方再回落到 spec 默认值)。 */
+export function keptValue(
+  answers: AnswersState | undefined, id: string | undefined, uiKey: string | undefined,
+): string | undefined {
+  if (id !== undefined) return answers?.fields[id]
+  return uiKey !== undefined ? answers?.ui[uiKey] : undefined
+}
+
 /** Per-question metadata registered by grouped radios for local grading. */
 export interface QuestionMeta {
   label: string
@@ -53,6 +73,13 @@ export interface AnswersState {
   fields: Record<string, string>
   /** Field ids whose value must never be persisted or collected (secrets). */
   secretFields: ReadonlySet<string>
+  /**
+   * CGUI-PATCH: 无天然键的界面态(见 BlockInteractionState.ui)。节点路径 → 字符串值。
+   * 与 `fields` 分开两本账,因为 `fields` 是**要发给模型的**那本(submit 收集它),
+   * 内部路径键混进去就会外发。
+   */
+  ui: Record<string, string>
+  setUi: (uiKey: string, value: string) => void
   meta: Record<string, QuestionMeta>
   /** True after a local grading: questions are locked until 重新作答. */
   locked: boolean

@@ -7,6 +7,8 @@ import { useEffect, useId, useRef, useState } from 'react'
 import css from '../GenuiBlock.module.css'
 import { GENUI_LIMITS } from '../guard.ts'
 import type { AnswersState, GenuiBlockProps, QuestionMeta } from './state.ts'
+// CGUI-PATCH: 无 id 输入值也要活过重挂(§3.6),存取统一走这两个
+import { keepValue, keptValue } from './state.ts'
 import type { GenuiInput, GenuiRadio, GenuiSelect, GenuiSlider, GenuiSubmit, GenuiSwitch, GenuiTextarea } from '../spec.ts'
 
 export function RadioNode({ node, onAction, answers }: {
@@ -207,8 +209,16 @@ export function SubmitNode({ node, onAction, answers }: {
 }
 
 /** Switch: toggle with local state. */
-export function SwitchNode({ node, onAction }: { node: GenuiSwitch; onAction?: GenuiBlockProps['onAction'] }) {
-  const [on, setOn] = useState(node.checked === true)
+export function SwitchNode({ node, onAction, answers, uiKey }: {
+  node: GenuiSwitch
+  onAction?: GenuiBlockProps['onAction']
+  answers?: AnswersState | undefined
+  uiKey?: string | undefined
+}) {
+  // CGUI-PATCH: 开关没有 id 这一说,状态一律按节点路径存(§3.6「选择」)。
+  // '1'/'0' 而不是 true/'' —— setUi 把空串当"回到默认"删条目,关掉的开关会存不住。
+  const kept = uiKey !== undefined ? answers?.ui[uiKey] : undefined
+  const [on, setOn] = useState(kept !== undefined ? kept === '1' : node.checked === true)
   const action = node.action
   return (
     <label className={css.switchRow}>
@@ -221,6 +231,7 @@ export function SwitchNode({ node, onAction }: { node: GenuiSwitch; onAction?: G
         onClick={() => {
           const next = !on
           setOn(next)
+          if (uiKey !== undefined) answers?.setUi(uiKey, next ? '1' : '0')
           if (action !== undefined && onAction !== undefined) onAction(action, { type: 'switch', checked: next })
         }}
       >
@@ -235,23 +246,23 @@ export function SwitchNode({ node, onAction }: { node: GenuiSwitch; onAction?: G
  * `fields` collection (stored as the numeric string); a model-provided
  * default registers at mount; a restored durable value wins. Dragging fires
  * the action (block-level debounce collapses the drag into one delivery). */
-export function SliderNode({ node, onAction, answers }: {
+export function SliderNode({ node, onAction, answers, uiKey }: {
   node: GenuiSlider
   onAction?: GenuiBlockProps['onAction']
   answers?: AnswersState | undefined
+  uiKey?: string | undefined
 }) {
   const action = node.action
   const id = node.id
-  const restored = id !== undefined && answers?.fields[id] !== undefined
-    ? Number(answers!.fields[id]!)
-    : NaN
+  // CGUI-PATCH: 无 id 的滑杆也要活过重挂(§3.6「输入」)。
+  const restored = Number(keptValue(answers, id, uiKey) ?? NaN)
   const initial = Number.isFinite(restored) ? restored : node.value ?? node.min ?? 0
   const [value, setValue] = useState<number>(initial)
   const mounted = useRef(false)
   useEffect(() => {
     if (mounted.current) return
     mounted.current = true
-    if (id !== undefined) answers?.setField(id, String(initial))
+    keepValue(answers, id, uiKey, String(initial))
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
   const send = (v: number): void => {
@@ -273,7 +284,7 @@ export function SliderNode({ node, onAction, answers }: {
         onChange={e => {
           const v = Number(e.currentTarget.value)
           setValue(v)
-          if (id !== undefined) answers?.setField(id, String(v))
+          keepValue(answers, id, uiKey, String(v))
           send(v)
         }}
       />
@@ -328,17 +339,18 @@ export function isImeSubmitKeydown(e: React.KeyboardEvent): boolean {
  * mount; a restored durable value wins over both. Without any default a
  * placeholder option shows — nothing is silently pre-registered (same
  * philosophy as radio). */
-export function SelectNode({ node, onAction, answers }: {
+export function SelectNode({ node, onAction, answers, uiKey }: {
   node: GenuiSelect
   onAction?: GenuiBlockProps['onAction']
   answers?: AnswersState | undefined
+  uiKey?: string | undefined
 }) {
   const action = node.action
   const id = node.id
   const options = node.options.slice(0, GENUI_LIMITS.maxOptions)
-  const restored = id !== undefined && answers?.fields[id] !== undefined
-    ? options.indexOf(answers!.fields[id]!)
-    : -1
+  // CGUI-PATCH: 无 id 的下拉也要活过重挂(§3.6「选择」)。
+  const kept = keptValue(answers, id, uiKey)
+  const restored = kept !== undefined ? options.indexOf(kept) : -1
   const defaultValue = restored >= 0
     ? options[restored]!
     : node.selected !== undefined && options[node.selected] !== undefined
@@ -350,7 +362,7 @@ export function SelectNode({ node, onAction, answers }: {
   useEffect(() => {
     if (mounted.current) return
     mounted.current = true
-    if (id !== undefined && defaultValue !== null) {
+    if (defaultValue !== null && id !== undefined) {
       answers?.setField(id, defaultValue)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -369,7 +381,7 @@ export function SelectNode({ node, onAction, answers }: {
         onChange={e => {
           const v = e.currentTarget.value
           setValue(v)
-          if (id !== undefined) answers?.setField(id, v)
+          keepValue(answers, id, uiKey, v)
           send(v)
         }}
       >
@@ -388,10 +400,12 @@ export function SelectNode({ node, onAction, answers }: {
  *  stays masked; its value is never persisted and never joins submit
  *  collection (secrets stay out of localStorage), while its own `action`
  *  still delivers on explicit user submit. */
-export function InputNode({ node, onAction, answers }: {
+export function InputNode({ node, onAction, answers, uiKey }: {
   node: GenuiInput
   onAction?: GenuiBlockProps['onAction']
   answers?: AnswersState | undefined
+  /** CGUI-PATCH: 节点路径,无 `id` 时的存取键。 */
+  uiKey?: string | undefined
 }) {
   const action = node.action
   const id = node.id
@@ -399,8 +413,10 @@ export function InputNode({ node, onAction, answers }: {
   // Initial value: spec default, else durable state (restored after refresh).
   // Secrets restore as blank: a password that survives a refresh would be a
   // stored secret, which is exactly what the boundary forbids.
+  // CGUI-PATCH: 存过的值**压过** spec 默认值 —— 顺序反了的话,带 default 的输入框
+  // 每次重挂都会把用户改的字冲掉(上游对带 id 的那一半也是这个毛病)。
   const [value, setValue] = useState<string>(() =>
-    secret ? '' : (node.value ?? (id !== undefined ? answers?.fields[id] ?? '' : '')))
+    secret ? '' : (keptValue(answers, id, uiKey) ?? node.value ?? ''))
   // Last value actually DELIVERED to the model: blur only sends when the
   // value changed since the last delivery (a focus-in/focus-out with no edit
   // used to fire a pointless action round trip). Seeded with the mount value
@@ -418,8 +434,8 @@ export function InputNode({ node, onAction, answers }: {
   useEffect(() => {
     if (mounted.current) return
     mounted.current = true
-    if (!secret && id !== undefined && node.value !== undefined && node.value.trim() !== '') {
-      answers?.setField(id, node.value)
+    if (!secret && node.value !== undefined && node.value.trim() !== '') {
+      keepValue(answers, id, uiKey, node.value)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
@@ -439,7 +455,8 @@ export function InputNode({ node, onAction, answers }: {
         onChange={e => {
           const v = e.currentTarget.value
           setValue(v)
-          if (id !== undefined) answers?.setField(id, v)
+          // 密码框一个字节都不留(§3.6 永不保留),连内存层也不写。
+          if (!secret) keepValue(answers, id, uiKey, v)
         }}
         onBlur={() => {
           if (value !== lastSent.current) send(false)
@@ -461,15 +478,16 @@ export function InputNode({ node, onAction, answers }: {
  *  Ctrl/Cmd+Enter submits immediately. Controlled when `id` is set (durable
  *  value + submit collection). Ctrl/Cmd+Enter during IME composition never
  *  submits. */
-export function TextareaNode({ node, onAction, answers }: {
+export function TextareaNode({ node, onAction, answers, uiKey }: {
   node: GenuiTextarea
   onAction?: GenuiBlockProps['onAction']
   answers?: AnswersState | undefined
+  uiKey?: string | undefined
 }) {
   const action = node.action
   const id = node.id
-  const [value, setValue] = useState<string>(() =>
-    node.value ?? (id !== undefined ? answers?.fields[id] ?? '' : ''))
+  // CGUI-PATCH: 同 InputNode —— 存过的值压过 spec 默认值,无 id 也存(§3.6)。
+  const [value, setValue] = useState<string>(() => keptValue(answers, id, uiKey) ?? node.value ?? '')
   // Last value delivered to the model: blur sends only on change. Seeded
   // with the mount value so an unedited blur stays silent.
   const lastSent = useRef<string | null>(value)
@@ -485,8 +503,8 @@ export function TextareaNode({ node, onAction, answers }: {
   useEffect(() => {
     if (mounted.current) return
     mounted.current = true
-    if (id !== undefined && node.value !== undefined && node.value.trim() !== '') {
-      answers?.setField(id, node.value)
+    if (node.value !== undefined && node.value.trim() !== '') {
+      keepValue(answers, id, uiKey, node.value)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
@@ -501,7 +519,7 @@ export function TextareaNode({ node, onAction, answers }: {
         onChange={e => {
           const v = e.currentTarget.value
           setValue(v)
-          if (id !== undefined) answers?.setField(id, v)
+          keepValue(answers, id, uiKey, v)
         }}
         onBlur={() => {
           if (value !== lastSent.current) send(false)

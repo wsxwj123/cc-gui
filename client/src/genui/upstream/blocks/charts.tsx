@@ -7,6 +7,7 @@ import { memo, useState } from 'react'
 import css from '../GenuiBlock.module.css'
 import { GENUI_LIMITS } from '../guard.ts'
 import type { GenuiChart, GenuiTable } from '../spec.ts'
+import type { AnswersState } from './state.ts'
 
 export const CHART_COLORS = [
   'var(--dsw-static-deepseek-400)',
@@ -69,10 +70,22 @@ function numericColumns(rows: GenuiTable['rows'], nCols: number): boolean[] {
   })
 }
 
-export const TableNode = memo(function TableNode({ node }: { node: GenuiTable }) {
+// CGUI-PATCH: 排序态按节点路径存进内存层 —— §3.6 的「排序」也在"回合结束全部保留"里,
+// 而它本来只活在组件本地 state,重挂即丢。编码 `col:dir`,解不出就当没排过。
+function parseSort(raw: string | undefined): { col: number; dir: 1 | -1 } | null {
+  const m = /^(\d+):(-?1)$/.exec(raw ?? '')
+  return m === null ? null : { col: Number(m[1]), dir: Number(m[2]) === -1 ? -1 : 1 }
+}
+
+export const TableNode = memo(function TableNode({ node, answers, uiKey }: {
+  node: GenuiTable
+  answers?: AnswersState | undefined
+  uiKey?: string | undefined
+}) {
   const columns = node.columns.slice(0, GENUI_LIMITS.maxTableCols)
   const rows = node.rows.slice(0, GENUI_LIMITS.maxTableRows)
-  const [sort, setSort] = useState<{ col: number; dir: 1 | -1 } | null>(null)
+  const [sort, setSort] = useState<{ col: number; dir: 1 | -1 } | null>(
+    () => parseSort(uiKey !== undefined ? answers?.ui[uiKey] : undefined))
   const sorted = sort === null
     ? rows
     : [...rows].sort((a, b) => {
@@ -85,9 +98,15 @@ export const TableNode = memo(function TableNode({ node }: { node: GenuiTable })
       return (as < bs ? -1 : as > bs ? 1 : 0) * sort.dir
     })
   const clickHeader = (i: number): void => {
-    setSort(prev => prev !== null && prev.col === i
-      ? prev.dir === 1 ? { col: i, dir: -1 } : null
-      : { col: i, dir: 1 })
+    setSort(prev => {
+      const next: { col: number; dir: 1 | -1 } | null = prev !== null && prev.col === i
+        ? prev.dir === 1 ? { col: i, dir: -1 } : null
+        : { col: i, dir: 1 }
+      // '0' 那一档:setUi 把空串当删除,所以"没排序"用 'none' 显式记,
+      // 否则点第三下(回到未排序)会被下次重挂恢复成第二下的降序。
+      if (uiKey !== undefined) answers?.setUi(uiKey, next === null ? 'none' : `${next.col}:${next.dir}`)
+      return next
+    })
   }
   const numeric = numericColumns(rows, columns.length)
   return (

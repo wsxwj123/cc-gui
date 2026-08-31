@@ -119,14 +119,18 @@ export function TabsNode({ tabs, onAction, depth = 0, answers }: {
   onAction?: GenuiBlockProps['onAction']
   depth?: number
   answers?: AnswersState | undefined
+  uiKey?: string | undefined
 }) {
-  const [active, setActive] = useState(0)
+  // CGUI-PATCH: 当前页签也按节点路径存(与折叠同一条理由)。
+  const [active, setActive] = useState(() => Number(
+    (uiKey !== undefined ? answers?.ui[uiKey] : undefined) ?? 0) || 0)
   const uid = useId()
   const list = tabs.tabs.slice(0, GENUI_LIMITS.maxTabs)
   const current = list[active]
   const move = (next: number): void => {
     const n = (next + list.length) % list.length
     setActive(n)
+    if (uiKey !== undefined) answers?.setUi(uiKey, String(n))
     document.getElementById(`${uid}-tab-${n}`)?.focus()
   }
   return (
@@ -160,7 +164,7 @@ export function TabsNode({ tabs, onAction, depth = 0, answers }: {
       </div>
       {current !== undefined && (
         <div className={css.col} role="tabpanel" id={`${uid}-panel-${active}`} aria-labelledby={`${uid}-tab-${active}`}>
-          {current.items.map((c, i) => renderNode(c, i, onAction, depth + 1, answers))}
+          {current.items.map((c, i) => renderNode(c, i, onAction, depth + 1, answers, uiKey))}
         </div>
       )}
     </div>
@@ -181,8 +185,15 @@ export function AccordionNode({ node, onAction, depth = 0, answers }: {
   onAction?: GenuiBlockProps['onAction']
   depth?: number
   answers?: AnswersState | undefined
+  uiKey?: string | undefined
 }) {
-  const [open, setOpen] = useState<number | null>(0)
+  // CGUI-PATCH: 展开的是第几条 —— '-1' 表示全收起(空串会被 setUi 当删除)。
+  const [open, setOpen] = useState<number | null>(() => {
+    const raw = uiKey !== undefined ? answers?.ui[uiKey] : undefined
+    if (raw === undefined) return 0
+    const n = Number(raw)
+    return Number.isFinite(n) && n >= 0 ? n : null
+  })
   const uid = useId()
   const items = node.items.slice(0, GENUI_LIMITS.maxAccordionItems)
   return (
@@ -195,14 +206,18 @@ export function AccordionNode({ node, onAction, depth = 0, answers }: {
             id={`${uid}-head-${i}`}
             aria-expanded={open === i}
             aria-controls={`${uid}-body-${i}`}
-            onClick={() => setOpen(open === i ? null : i)}
+            onClick={() => {
+              const next = open === i ? null : i
+              setOpen(next)
+              if (uiKey !== undefined) answers?.setUi(uiKey, next === null ? '-1' : String(next))
+            }}
           >
             <span className={css.accTitle}>{item.title}</span>
             <span className={css.accChevron}>{open === i ? '▾' : '▸'}</span>
           </button>
           {open === i && (
             <div className={css.accBody} id={`${uid}-body-${i}`} aria-labelledby={`${uid}-head-${i}`}>
-              {item.items.map((c, ci) => renderNode(c, ci, onAction, depth + 1, answers))}
+              {item.items.map((c, ci) => renderNode(c, ci, onAction, depth + 1, answers, uiKey))}
             </div>
           )}
         </div>
@@ -346,14 +361,28 @@ export const TimelineNode = memo(function TimelineNode({ node }: { node: GenuiTi
 /** FileTree: indented tree of files and folders. Directory rows are LOCAL
  * collapsible (spec.ts promised "collapsible children"; this makes it true)
  * — click a dir to fold/unfold, default fully open. Zero model round trip. */
-export const FileTreeNode = memo(function FileTreeNode({ node }: { node: GenuiFileTree }) {
-  const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(new Set())
+export const FileTreeNode = memo(function FileTreeNode({ node, answers, uiKey }: {
+  node: GenuiFileTree
+  answers?: AnswersState | undefined
+  uiKey?: string | undefined
+}) {
+  // CGUI-PATCH: 折叠态按节点路径存进内存层(§3.6「折叠」也在"回合结束全部保留"里)。
+  // 值 = 折叠中的行键 JSON 数组;解不出就当全展开。
+  const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(() => {
+    try {
+      const raw = uiKey !== undefined ? answers?.ui[uiKey] : undefined
+      const arr: unknown = raw === undefined ? null : JSON.parse(raw)
+      return new Set(Array.isArray(arr) ? arr.filter((x): x is string => typeof x === 'string') : [])
+    } catch { return new Set() }
+  })
   const pathKey = (depth: number, i: number): string => `${depth}-${i}`
   const toggle = (k: string): void => {
     setCollapsed(prev => {
       const next = new Set(prev)
       if (next.has(k)) next.delete(k)
       else next.add(k)
+      // 全展开时写 '[]' 而不是空串 —— setUi 把空串当"回到默认"删条目。
+      if (uiKey !== undefined) answers?.setUi(uiKey, JSON.stringify([...next]))
       return next
     })
   }
@@ -385,11 +414,18 @@ export const FileTreeNode = memo(function FileTreeNode({ node }: { node: GenuiFi
  * `action`, the chosen answer is ALSO sent back to the model
  * (`{type:'quiz', question, answer, correct}`) so the model can collect or
  * grade it — the in-place judging stays local (no round trip needed). */
-export const QuizNode = memo(function QuizNode({ node, onAction }: {
+export const QuizNode = memo(function QuizNode({ node, onAction, answers, uiKey }: {
   node: GenuiQuiz
   onAction?: GenuiBlockProps['onAction']
+  answers?: AnswersState | undefined
+  uiKey?: string | undefined
 }) {
-  const [selected, setSelected] = useState<number | null>(null)
+  // CGUI-PATCH: 已选的那一项按节点路径存(§3.6「选择」)。未作答用 undefined 表示,
+  // 存进去的一律是 >=0 的序号。
+  const [selected, setSelected] = useState<number | null>(() => {
+    const n = Number((uiKey !== undefined ? answers?.ui[uiKey] : undefined) ?? NaN)
+    return Number.isFinite(n) && n >= 0 ? n : null
+  })
   const options = node.options.slice(0, GENUI_LIMITS.maxQuizOptions)
   const answered = selected !== null
   const chosen = selected === null ? undefined : options[selected]
@@ -414,6 +450,7 @@ export const QuizNode = memo(function QuizNode({ node, onAction }: {
               disabled={answered}
               onClick={() => {
                 setSelected(i)
+                if (uiKey !== undefined) answers?.setUi(uiKey, String(i))
                 if (action !== undefined && onAction !== undefined) {
                   onAction(action, {
                     type: 'quiz',
@@ -437,7 +474,10 @@ export const QuizNode = memo(function QuizNode({ node, onAction }: {
             {chosen?.feedback !== undefined && <div className={css.quizFeedback}>{chosen.feedback}</div>}
           </div>
           {node.explanation !== undefined && <div className={css.quizExplanation}>{node.explanation}</div>}
-          <button type="button" className={css.quizRetry} onClick={() => setSelected(null)}>重新作答</button>
+          <button type="button" className={css.quizRetry} onClick={() => {
+            setSelected(null)
+            if (uiKey !== undefined) answers?.setUi(uiKey, '-1')
+          }}>重新作答</button>
         </div>
       )}
     </div>

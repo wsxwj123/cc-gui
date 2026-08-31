@@ -32,12 +32,17 @@ export function renderNode(
   onAction: GenuiBlockProps['onAction'] | undefined,
   depth = 0,
   answers?: AnswersState,
+  // CGUI-PATCH: 祖先路径。`key` 只是**兄弟序号**(每层从 0 重来),单独拿它当身份会
+  // 让不同容器里的同序号节点撞在一起。路径 = 节点在规格树里的位置,重挂前后不变、
+  // 流式期节点内容还在长的时候也不变 —— 无天然键的界面态就按它存(§3.6)。
+  path = '',
 ): ReactNode {
   // Depth guard: a pathological spec must never recurse past the limit
   // (stack overflow / DOM explosion). The fence path already repairs specs
   // against the same limit; this is the belt-and-suspenders for direct
   // GenuiBlock use and plugin-registered custom renderers.
   if (depth > GENUI_LIMITS.maxDepth) return null
+  const uiKey = path === '' ? String(key) : `${path}.${key}`
   switch (node.type) {
     case 'text': {
       const size = node.size ?? 'body'
@@ -50,7 +55,7 @@ export function renderNode(
     case 'row': {
       return (
         <div key={key} className={css.row + (node.wrap ? ` ${css.wrap}` : '')}>
-          {node.items.map((c, i) => renderNode(c, i, onAction, depth + 1, answers))}
+          {node.items.map((c, i) => renderNode(c, i, onAction, depth + 1, answers, uiKey))}
           {node.spacer && <div className={css.spacer} />}
         </div>
       )
@@ -58,14 +63,14 @@ export function renderNode(
     case 'col': {
       return (
         <div key={key} className={css.col} style={node.gap !== undefined ? { gap: `${node.gap}px` } : undefined}>
-          {node.items.map((c, i) => renderNode(c, i, onAction, depth + 1, answers))}
+          {node.items.map((c, i) => renderNode(c, i, onAction, depth + 1, answers, uiKey))}
         </div>
       )
     }
     case 'grid': {
       return (
         <div key={key} className={css.grid} style={{ gridTemplateColumns: `repeat(${Math.max(1, node.cols)}, minmax(0, 1fr))` }}>
-          {node.items.map((c, i) => renderNode(c, i, onAction, depth + 1, answers))}
+          {node.items.map((c, i) => renderNode(c, i, onAction, depth + 1, answers, uiKey))}
         </div>
       )
     }
@@ -73,7 +78,7 @@ export function renderNode(
       return (
         <div key={key} className={css.card}>
           {node.title !== undefined && <div className={css.cardTitle}>{node.title}</div>}
-          {node.items.map((c, i) => renderNode(c, i, onAction, depth + 1, answers))}
+          {node.items.map((c, i) => renderNode(c, i, onAction, depth + 1, answers, uiKey))}
         </div>
       )
     }
@@ -97,8 +102,8 @@ export function renderNode(
         </ClickFeedbackButton>
       )
     }
-    case 'input': return <InputNode key={key} node={node} onAction={onAction} answers={answers} />
-    case 'select': return <SelectNode key={key} node={node} onAction={onAction} answers={answers} />
+    case 'input': return <InputNode key={key} uiKey={uiKey} node={node} onAction={onAction} answers={answers} />
+    case 'select': return <SelectNode key={key} uiKey={uiKey} node={node} onAction={onAction} answers={answers} />
     case 'checkbox': {
       const action = node.action
       return (
@@ -174,16 +179,16 @@ export function renderNode(
           {items.map((item, i) => (
             <div key={i} className={css.li}>
               {isListItemNode(item)
-                ? renderNode(item, i, onAction, depth + 1, answers)
+                ? renderNode(item, i, onAction, depth + 1, answers, uiKey)
                 : <><span className={css.liTitle}>{typeof item === 'string' ? item : item.title}</span>{typeof item !== 'string' && item.desc !== undefined && <span className={css.liDesc}>{item.desc}</span>}</>}
             </div>
           ))}
         </div>
       )
     }
-    case 'table': return <TableNode key={key} node={node} />
+    case 'table': return <TableNode key={key} uiKey={uiKey} node={node} answers={answers} />
     case 'chart': return <ChartNode key={key} chart={node} />
-    case 'tabs': return <TabsNode key={key} tabs={node} onAction={onAction} depth={depth + 1} answers={answers} />
+    case 'tabs': return <TabsNode key={key} uiKey={uiKey} tabs={node} onAction={onAction} depth={depth + 1} answers={answers} />
     case 'avatar': {
       return (
         <div key={key} className={css.avatar} style={{ background: node.color ?? avatarColor(node.name) }}>
@@ -201,17 +206,17 @@ export function renderNode(
     case 'code': return <CodeNode key={key} node={node} />
     case 'radio': return <RadioNode key={`${key}:r${answers?.round ?? 0}`} node={node} onAction={onAction} answers={answers} />
     case 'submit': return <SubmitNode key={key} node={node} onAction={onAction} answers={answers} />
-    case 'switch': return <SwitchNode key={key} node={node} onAction={onAction} />
-    case 'slider': return <SliderNode key={key} node={node} onAction={onAction} answers={answers} />
-    case 'textarea': return <TextareaNode key={key} node={node} onAction={onAction} answers={answers} />
-    case 'accordion': return <AccordionNode key={key} node={node} onAction={onAction} depth={depth + 1} answers={answers} />
+    case 'switch': return <SwitchNode key={key} uiKey={uiKey} node={node} onAction={onAction} answers={answers} />
+    case 'slider': return <SliderNode key={key} uiKey={uiKey} node={node} onAction={onAction} answers={answers} />
+    case 'textarea': return <TextareaNode key={key} uiKey={uiKey} node={node} onAction={onAction} answers={answers} />
+    case 'accordion': return <AccordionNode key={key} uiKey={uiKey} node={node} onAction={onAction} depth={depth + 1} answers={answers} />
     case 'copy': return <CopyNode key={key} node={node} />
     case 'mermaid': return <MermaidNode key={key} node={node} />
     case 'scene3d': return <Scene3DNode key={key} node={node} />
     case 'timeline': return <TimelineNode key={key} node={node} />
-    case 'file-tree': return <FileTreeNode key={key} node={node} />
+    case 'file-tree': return <FileTreeNode key={key} uiKey={uiKey} node={node} answers={answers} />
     case 'breadcrumb': return <BreadcrumbNode key={key} node={node} />
-    case 'quiz': return <QuizNode key={key} node={node} onAction={onAction} />
+    case 'quiz': return <QuizNode key={key} uiKey={uiKey} node={node} onAction={onAction} answers={answers} />
     case 'diagram': return <DiagramNode key={key} node={node} />
 
     case 'echart': return <EChartNode key={key} node={node} />

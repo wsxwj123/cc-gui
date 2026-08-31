@@ -29,6 +29,14 @@ export interface BlockInteractionState {
   locked?: boolean
   /** field id → current value (input/textarea with an `id`). */
   fields?: Record<string, string>
+  /**
+   * CGUI-PATCH(INTERFACE §3.6「全部保留」):没有天然键的界面态 —— 无 `id` 的输入值、
+   * 表格排序、目录/手风琴折叠、开关与选择。键是**节点在规格树里的路径**(`0.2.1`),
+   * 与内容无关,所以流式期节点内容还在长的时候键也不动(同 A1 那套稳定性思路)。
+   * 值一律字符串,编解码在各组件内(排序 `col:dir`、折叠 JSON 数组)。
+   * **不进 submit 收集**(那条只收 `fields`),所以内部键不会外发给模型。
+   */
+  ui?: Record<string, string>
 }
 
 // CGUI-PATCH: 键前缀 dsh → cgui(本仓 localStorage 命名空间)。
