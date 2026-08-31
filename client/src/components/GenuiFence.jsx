@@ -132,7 +132,9 @@ const BADGE_DOT_STYLE = {
 /** 块内恒在的来源标识。无 props、无状态、无分支 —— 它不该有任何"不出现"的路径。 */
 function GenuiBadge() {
   return (
-    <span data-testid="genui-badge" data-cgui="genui-badge" style={BADGE_STYLE}>
+    /* 刻意**不给** data-cgui:那是皮肤的样式契约,登记进去等于给皮肤作者一个
+       `display:none` 的口子,与"不可关闭"直接冲突。测试用 data-testid 就够。 */
+    <span data-testid="genui-badge" style={BADGE_STYLE}>
       <span style={BADGE_DOT_STYLE} aria-hidden />
       模型生成界面
     </span>
