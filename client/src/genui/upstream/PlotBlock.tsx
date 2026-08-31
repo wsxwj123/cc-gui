@@ -126,6 +126,7 @@ function Polyline({ points, className, color }: { points: string; className: str
   return (
     <polyline
       key={key}
+      data-testid="genui-series"
       points={points}
       className={className}
       style={color !== undefined ? { stroke: color } : undefined}
@@ -303,7 +304,7 @@ export const PlotBlock = memo(function PlotBlock({
   const hasParams = series.some(s => (s.params?.length ?? 0) > 0)
 
   return (
-    <div className={css.block} data-genui-plot>
+    <div data-testid="genui-node-plot" className={css.block} data-genui-plot>
       {title !== undefined && <div className={css.title}>{title}</div>}
       {hasData && hasValidRange ? (
         <svg

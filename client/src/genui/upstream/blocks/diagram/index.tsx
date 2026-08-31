@@ -234,7 +234,7 @@ export function DiagramNode({ node }: { node: GenuiDiagram }) {
   const canvasH = contentH + LEGEND_H + 24
 
   return (
-    <figure className="genui-diagram" data-genui-diagram>
+    <figure data-testid="genui-node-diagram" className="genui-diagram" data-genui-diagram>
       {node.title !== undefined && (
         <figcaption id={captionId} style={{ fontFamily: "Instrument Serif, 'Times New Roman', serif", fontSize: 20, marginBottom: 8, color: palette.ink }}>
           {node.title}

@@ -49,6 +49,7 @@ export function ClickFeedbackButton({ className, disabled, onClick, children }: 
     <>
       <button
         type="button"
+        data-testid="genui-node-button"
         className={className}
         disabled={disabled}
         onClick={onClick === undefined ? undefined : () => {
@@ -74,7 +75,7 @@ export function ClickFeedbackButton({ className, disabled, onClick, children }: 
 export const AudioNode = memo(function AudioNode({ node }: { node: GenuiAudio }): ReactNode {
   const [failed, setFailed] = useState(false)
   return (
-    <figure className={css.media}>
+    <figure data-testid="genui-node-audio" className={css.media}>
       {node.alt !== undefined && <figcaption className={css.mediaLabel}>{node.alt}</figcaption>}
       {failed
         ? <div className={css.mediaError} role="alert">音频无法播放</div>
@@ -94,7 +95,7 @@ export const AudioNode = memo(function AudioNode({ node }: { node: GenuiAudio })
 export const VideoNode = memo(function VideoNode({ node }: { node: GenuiVideo }): ReactNode {
   const [failed, setFailed] = useState(false)
   return (
-    <figure className={css.media}>
+    <figure data-testid="genui-node-video" className={css.media}>
       {node.alt !== undefined && <figcaption className={css.mediaLabel}>{node.alt}</figcaption>}
       {failed
         ? <div className={css.mediaError} role="alert">视频无法播放</div>

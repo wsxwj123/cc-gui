@@ -265,7 +265,7 @@ export function EChartNode({ node }: { node: GenuiEChart }) {
 
   if (status === 'error') {
     return (
-      <div className={css.echartFallback} data-genui-echart>
+      <div data-testid="genui-node-echart" className={css.echartFallback} data-genui-echart>
         <div className={css.echartErr}>ECharts 渲染失败</div>
         {node.title !== undefined && <div className={css.echartHint}>{node.title}</div>}
       </div>
@@ -273,7 +273,7 @@ export function EChartNode({ node }: { node: GenuiEChart }) {
   }
 
   return (
-    <div className={css.echartWrap} data-genui-echart>
+    <div data-testid="genui-node-echart" className={css.echartWrap} data-genui-echart>
       {node.title !== undefined && <div className={css.echartTitle}>{node.title}</div>}
       <div
         ref={ref}

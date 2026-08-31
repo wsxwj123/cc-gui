@@ -72,7 +72,7 @@ function renderNodeInner(
     case 'text': {
       const size = node.size ?? 'body'
       return (
-        <div key={key} className={`${css.text} ${css[size]}` + (node.center ? ` ${css.center}` : '')}>
+        <div key={key} data-testid="genui-node-text" className={`${css.text} ${css[size]}` + (node.center ? ` ${css.center}` : '')}>
           {node.content}
         </div>
       )
@@ -81,7 +81,7 @@ function renderNodeInner(
       return (
         // CGUI-PATCH: 挂 data-genui-row —— 窄屏降级样式(genui-responsive.css)要在这里
         // 强制换行,而 CSS Module 的类名带哈希、外部样式表选不中(同 data-genui-echart 等既有做法)。
-        <div key={key} className={css.row + (node.wrap ? ` ${css.wrap}` : '')} data-genui-row>
+        <div key={key} data-testid="genui-node-row" className={css.row + (node.wrap ? ` ${css.wrap}` : '')} data-genui-row>
           {node.items.map((c, i) => renderNode(c, i, onAction, depth + 1, answers, uiKey))}
           {node.spacer && <div className={css.spacer} />}
         </div>
@@ -89,7 +89,7 @@ function renderNodeInner(
     }
     case 'col': {
       return (
-        <div key={key} className={css.col} style={node.gap !== undefined ? { gap: `${node.gap}px` } : undefined}>
+        <div key={key} data-testid="genui-node-col" className={css.col} style={node.gap !== undefined ? { gap: `${node.gap}px` } : undefined}>
           {node.items.map((c, i) => renderNode(c, i, onAction, depth + 1, answers, uiKey))}
         </div>
       )
@@ -98,14 +98,14 @@ function renderNodeInner(
       return (
         // CGUI-PATCH: 同上挂 data-genui-grid。列数是**内联样式**,窄屏转单列那条规则
         // 只能用 !important 压过它(内联样式没有别的压法),见 genui-responsive.css。
-        <div key={key} className={css.grid} data-genui-grid style={{ gridTemplateColumns: `repeat(${Math.max(1, node.cols)}, minmax(0, 1fr))` }}>
+        <div key={key} data-testid="genui-node-grid" className={css.grid} data-genui-grid style={{ gridTemplateColumns: `repeat(${Math.max(1, node.cols)}, minmax(0, 1fr))` }}>
           {node.items.map((c, i) => renderNode(c, i, onAction, depth + 1, answers, uiKey))}
         </div>
       )
     }
     case 'card': {
       return (
-        <div key={key} className={css.card}>
+        <div key={key} data-testid="genui-node-card" className={css.card}>
           {node.title !== undefined && <div className={css.cardTitle}>{node.title}</div>}
           {node.items.map((c, i) => renderNode(c, i, onAction, depth + 1, answers, uiKey))}
         </div>
@@ -136,7 +136,7 @@ function renderNodeInner(
     case 'checkbox': {
       const action = node.action
       return (
-        <label key={key} className={css.checkbox}>
+        <label key={key} data-testid="genui-node-checkbox" className={css.checkbox}>
           <input
             type="checkbox"
             defaultChecked={node.checked === true}
@@ -154,15 +154,15 @@ function renderNodeInner(
       // was the same complaint class as the disabled-button fix).
       const href = node.href
       return href !== undefined
-        ? <a key={key} className={css.link} href={href} target="_blank" rel="noopener noreferrer">{node.label}</a>
-        : <span key={key} className={css.linkText}>{node.label}</span>
+        ? <a key={key} data-testid="genui-node-link" className={css.link} href={href} target="_blank" rel="noopener noreferrer">{node.label}</a>
+        : <span key={key} data-testid="genui-node-link" className={css.linkText}>{node.label}</span>
     }
     case 'audio': return <AudioNode key={`${key}:${node.src}`} node={node} />
     case 'video': return <VideoNode key={`${key}:${node.src}`} node={node} />
     case 'badge': {
       const tone = node.tone ?? ''
       return (
-        <span key={key} className={`${css.badge} ${css[tone] || ''}`}>
+        <span key={key} data-testid="genui-node-badge" className={`${css.badge} ${css[tone] || ''}`}>
           {node.icon !== undefined && <span aria-hidden>{node.icon} </span>}
           {node.label}
         </span>
@@ -171,7 +171,7 @@ function renderNodeInner(
     case 'stat': {
       const down = node.delta !== undefined && node.delta.startsWith('-')
       return (
-        <div key={key} className={css.stat}>
+        <div key={key} data-testid="genui-node-stat" className={css.stat}>
           <span className={css.statLabel}>{node.label}</span>
           <span className={css.statValue}>{node.value}</span>
           {node.delta !== undefined && <span className={`${css.statDelta} ${down ? css.down : css.up}`}>{node.delta}</span>}
@@ -183,6 +183,7 @@ function renderNodeInner(
       return (
         <div
           key={key}
+          data-testid="genui-node-progress"
           className={css.progress}
           role="progressbar"
           aria-valuemin={0}
@@ -200,11 +201,11 @@ function renderNodeInner(
         </div>
       )
     }
-    case 'divider': return <hr key={key} className={css.divider} />
+    case 'divider': return <hr key={key} data-testid="genui-node-divider" className={css.divider} />
     case 'list': {
       const items = node.items.slice(0, GENUI_LIMITS.maxListItems)
       return (
-        <div key={key} className={css.list}>
+        <div key={key} data-testid="genui-node-list" className={css.list}>
           {items.map((item, i) => (
             <div key={i} className={css.li}>
               {isListItemNode(item)
@@ -220,12 +221,12 @@ function renderNodeInner(
     case 'tabs': return <TabsNode key={key} uiKey={uiKey} tabs={node} onAction={onAction} depth={depth + 1} answers={answers} />
     case 'avatar': {
       return (
-        <div key={key} className={css.avatar} style={{ background: node.color ?? avatarColor(node.name) }}>
+        <div key={key} data-testid="genui-node-avatar" className={css.avatar} style={{ background: node.color ?? avatarColor(node.name) }}>
           {node.name.slice(0, 1).toUpperCase()}
         </div>
       )
     }
-    case 'spacer': return <div key={key} className={css.spacer} />
+    case 'spacer': return <div key={key} data-testid="genui-node-spacer" className={css.spacer} />
     case 'plot': return <PlotNode key={key} plot={node} />
     case 'callout': return <CalloutNode key={key} node={node} />
     case 'steps': return <StepsNode key={key} steps={node} />

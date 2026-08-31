@@ -29,7 +29,7 @@ export const CalloutNode = memo(function CalloutNode({ node }: { node: GenuiCall
   const tone = node.tone ?? 'info'
   const toneClass = CALLOUT_TONES[tone] ?? css.calloutInfo
   return (
-    <div className={`${css.callout} ${toneClass}`} data-genui-callout>
+    <div data-testid="genui-node-callout" className={`${css.callout} ${toneClass}`} data-genui-callout>
       {node.title !== undefined && <div className={css.calloutTitle}>{node.title}</div>}
       <div className={css.calloutBody}>{node.content}</div>
     </div>
@@ -41,7 +41,7 @@ export const StepsNode = memo(function StepsNode({ steps }: { steps: GenuiSteps 
   const list = steps.steps.slice(0, GENUI_LIMITS.maxSteps)
   const current = steps.current ?? list.length
   return (
-    <ol className={css.steps}>
+    <ol data-testid="genui-node-steps" className={css.steps}>
       {list.map((step, i) => {
         const done = i < current
         const active = i === current
@@ -63,7 +63,7 @@ export const StepsNode = memo(function StepsNode({ steps }: { steps: GenuiSteps 
 export const KeyValueNode = memo(function KeyValueNode({ node }: { node: GenuiKeyValue }) {
   const pairs = node.pairs.slice(0, GENUI_LIMITS.maxKeyValuePairs)
   return (
-    <dl className={css.keyvalue}>
+    <dl data-testid="genui-node-keyvalue" className={css.keyvalue}>
       {pairs.map((pair, i) => (
         <div key={i} className={css.kvRow}>
           <dt className={css.kvKey}>{pair.key}</dt>
@@ -93,21 +93,25 @@ export const PlotNode = memo(function PlotNode({ plot }: { plot: GenuiPlot }) {
 
 /** Diff: 收编 dsh DiffBlock (same path/oldText/newText shape as DiffHunk). */
 export const DiffNode = memo(function DiffNode({ node }: { node: GenuiDiff }) {
-  return <DiffBlock diffs={node.diffs} />
+  // CGUI-PATCH(§9.1):DiffBlock/CodeBlock 是全仓共享的宿主组件,不能在它们身上写
+  // genui 专属锚,故套一层无样式容器承载 data-testid。块级子元素,视觉零变化。
+  return <div data-testid="genui-node-diff"><DiffBlock diffs={node.diffs} /></div>
 })
 
 /** Json: 收编 dsh JsonTree. */
 export const JsonNode = memo(function JsonNode({ node }: { node: GenuiJson }) {
   const data = node.value
   if (typeof data !== 'object' || data === null) {
-    return <div className={css.jsonScalar}>{String(data)}</div>
+    return <div data-testid="genui-node-json" className={css.jsonScalar}>{String(data)}</div>
   }
-  return <JsonTree data={data as object | unknown[]} copyable />
+  // CGUI-PATCH(§9.1):同 DiffNode —— 共享 CodeBlock 上不写 genui 锚,套一层容器。
+  return <div data-testid="genui-node-json"><JsonTree data={data as object | unknown[]} copyable /></div>
 })
 
 /** Code: 收编 dsh CodeBlock with explicit language. */
 export const CodeNode = memo(function CodeNode({ node }: { node: GenuiCode }) {
-  return <CodeBlock code={node.code.slice(0, GENUI_LIMITS.maxCode)} lang={node.lang} />
+  // CGUI-PATCH(§9.1):同 DiffNode —— 共享 CodeBlock 上不写 genui 锚,套一层容器。
+  return <div data-testid="genui-node-code"><CodeBlock code={node.code.slice(0, GENUI_LIMITS.maxCode)} lang={node.lang} /></div>
 })
 
 /**
@@ -136,7 +140,7 @@ export function TabsNode({ tabs, onAction, depth = 0, answers, uiKey }: {
     document.getElementById(`${uid}-tab-${n}`)?.focus()
   }
   return (
-    <div className={css.tabs}>
+    <div data-testid="genui-node-tabs" className={css.tabs}>
       <div
         className={css.tabBar}
         role="tablist"
@@ -205,7 +209,7 @@ export function AccordionNode({ node, onAction, depth = 0, answers, uiKey }: {
   const uid = useId()
   const items = node.items.slice(0, GENUI_LIMITS.maxAccordionItems)
   return (
-    <div className={css.accordion}>
+    <div data-testid="genui-node-accordion" className={css.accordion}>
       {items.map((item, i) => (
         <div key={i} className={css.accItem}>
           <button
@@ -273,6 +277,7 @@ export const CopyNode = memo(function CopyNode({ node }: { node: GenuiCopy }) {
     <>
       <button
         type="button"
+        data-testid="genui-node-copy"
         className={`${css.copyChip} ${copied ? css.copyChipDone : ''}`}
         onClick={() => {
           void writeCopyText(node.text).then((ok) => {
@@ -310,9 +315,9 @@ export const MermaidNode = memo(function MermaidNode({ node }: { node: GenuiMerm
     })
     return () => { alive = false }
   }, [code, themeEpoch])
-  if (failed) return <div className={css.mermaidFallback}><pre>{code}</pre><div className={css.mermaidErr}>图语法有误，已降级显示源码</div></div>
-  if (html === null) return <div className={css.mermaidFallback}><pre>{code}</pre><div className={css.mermaidHint}>渲染中…</div></div>
-  return <div className={css.mermaid} dangerouslySetInnerHTML={{ __html: html }} data-genui-mermaid />
+  if (failed) return <div data-testid="genui-node-mermaid" className={css.mermaidFallback}><pre>{code}</pre><div className={css.mermaidErr}>图语法有误，已降级显示源码</div></div>
+  if (html === null) return <div data-testid="genui-node-mermaid" className={css.mermaidFallback}><pre>{code}</pre><div className={css.mermaidHint}>渲染中…</div></div>
+  return <div data-testid="genui-node-mermaid" className={css.mermaid} dangerouslySetInnerHTML={{ __html: html }} data-genui-mermaid />
 })
 
 /** Scene3D: three.js WebGL canvas, lazily imported. */
@@ -337,7 +342,7 @@ export const Scene3DNode = memo(function Scene3DNode({ node }: { node: GenuiScen
     return () => { alive = false; dispose?.() }
   }, [scene])
   return (
-    <div className={css.scene3dWrap} data-genui-scene3d>
+    <div data-testid="genui-node-scene3d" className={css.scene3dWrap} data-genui-scene3d>
       {node.title !== undefined && <div className={css.scene3dTitle}>{node.title}</div>}
       <div ref={ref} className={css.scene3dCanvas} />
       {status === 'loading' && <div className={css.scene3dHint}>加载 3D 场景…</div>}
@@ -350,7 +355,7 @@ export const Scene3DNode = memo(function Scene3DNode({ node }: { node: GenuiScen
 export const TimelineNode = memo(function TimelineNode({ node }: { node: GenuiTimeline }) {
   const items = node.items.slice(0, GENUI_LIMITS.maxTimelineItems)
   return (
-    <div className={css.timeline}>
+    <div data-testid="genui-node-timeline" className={css.timeline}>
       {items.map((item, i) => (
         <div key={i} className={css.tlItem}>
           <div className={css.tlRail}>
@@ -417,7 +422,7 @@ export const FileTreeNode = memo(function FileTreeNode({ node, answers, uiKey }:
       </div>
     )
   }
-  return <div className={css.fileTree}>{node.items.slice(0, GENUI_LIMITS.maxListItems).map((n, i) => renderNode(n, 0, i))}</div>
+  return <div data-testid="genui-node-file-tree" className={css.fileTree}>{node.items.slice(0, GENUI_LIMITS.maxListItems).map((n, i) => renderNode(n, 0, i))}</div>
 })
 
 /** Quiz: a self-contained teaching question. Selecting an option marks it
@@ -443,7 +448,7 @@ export const QuizNode = memo(function QuizNode({ node, onAction, answers, uiKey 
   const correct = chosen?.correct === true
   const action = node.action
   return (
-    <div className={css.quiz} data-genui-quiz>
+    <div data-testid="genui-node-quiz" className={css.quiz} data-genui-quiz>
       <div className={css.quizQuestion}>{node.question}</div>
       <div className={css.quizOptions}>
         {options.map((opt, i) => {
@@ -499,7 +504,7 @@ export const QuizNode = memo(function QuizNode({ node, onAction, answers, uiKey 
 export const BreadcrumbNode = memo(function BreadcrumbNode({ node }: { node: GenuiBreadcrumb }) {
   const items = node.items.slice(0, GENUI_LIMITS.maxBreadcrumbItems)
   return (
-    <nav className={css.breadcrumb} aria-label="breadcrumb">
+    <nav data-testid="genui-node-breadcrumb" className={css.breadcrumb} aria-label="breadcrumb">
       {items.map((item, i) => (
         <span key={i} className={css.bcItem}>
           <span className={`${css.bcText} ${i === items.length - 1 ? css.bcCurrent : ''}`}>{item}</span>

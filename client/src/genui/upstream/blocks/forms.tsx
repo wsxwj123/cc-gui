@@ -51,7 +51,7 @@ export function RadioNode({ node, onAction, answers }: {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [group, node.label, node.answer, node.explanation, node.options, node.selected])
   return (
-    <div className={css.fieldGroup} role="radiogroup" aria-label={node.label}>
+    <div data-testid="genui-node-radio" className={css.fieldGroup} role="radiogroup" aria-label={node.label}>
       {node.label !== undefined && <span className={css.fieldLabel}>{node.label}</span>}
       {options.map((opt, i) => (
         <label key={i} className={css.radio}>
@@ -129,7 +129,7 @@ export function SubmitNode({ node, onAction, answers }: {
     const graded = scope.filter(g => recorded[g] !== undefined && meta[g]?.answer !== undefined)
     const score = graded.filter(g => recorded[g] === correctLabelOf(meta[g]!)).length
     return (
-      <div className={css.gradeWrap} data-genui-grade>
+      <div data-testid="genui-node-submit" className={css.gradeWrap} data-genui-grade>
         <div className={css.gradeScore}>
           <span className={css.gradeScoreValue}>{score} / {graded.length}</span>
           <span className={css.gradeScoreLabel}>得分{graded.length < scope.length ? `（${scope.length - graded.length} 题无答案未计分）` : ''}</span>
@@ -179,7 +179,7 @@ export function SubmitNode({ node, onAction, answers }: {
   }
 
   return (
-    <div className={css.submitRow}>
+    <div data-testid="genui-node-submit" className={css.submitRow}>
       <button
         type="button"
         className={`${css.button} ${css.primary} ${css.submit}`}
@@ -221,7 +221,7 @@ export function SwitchNode({ node, onAction, answers, uiKey }: {
   const [on, setOn] = useState(kept !== undefined ? kept === '1' : node.checked === true)
   const action = node.action
   return (
-    <label className={css.switchRow}>
+    <label data-testid="genui-node-switch" className={css.switchRow}>
       <span className={css.switchLabel}>{node.label}</span>
       <button
         type="button"
@@ -273,7 +273,7 @@ export function SliderNode({ node, onAction, answers, uiKey }: {
     }
   }
   return (
-    <label className={css.sliderRow}>
+    <label data-testid="genui-node-slider" className={css.sliderRow}>
       {node.label !== undefined && <span className={css.fieldLabel}>{node.label}</span>}
       <input
         type="range"
@@ -376,7 +376,7 @@ export function SelectNode({ node, onAction, answers, uiKey }: {
     }
   }
   return (
-    <label className={css.field}>
+    <label data-testid="genui-node-select" className={css.field}>
       {node.label !== undefined && <span>{node.label}</span>}
       <select
         className={css.select}
@@ -466,7 +466,7 @@ export function InputNode({ node, onAction, answers, uiKey }: {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [secret, id])
   return (
-    <label className={css.field}>
+    <label data-testid="genui-node-input" className={css.field}>
       {node.label !== undefined && <span>{node.label}</span>}
       <input
         className={css.input}
@@ -532,7 +532,7 @@ export function TextareaNode({ node, onAction, answers, uiKey }: {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
   return (
-    <label className={css.field}>
+    <label data-testid="genui-node-textarea" className={css.field}>
       {node.label !== undefined && <span>{node.label}</span>}
       <textarea
         className={css.textarea}

@@ -116,7 +116,7 @@ export const TableNode = memo(function TableNode({ node, answers, uiKey }: {
   }
   const numeric = numericColumns(rows, columns.length)
   return (
-    <div className={css.tableWrap}>
+    <div data-testid="genui-node-table" className={css.tableWrap}>
       <table className={css.table}>
         <thead>
           <tr>
@@ -163,7 +163,7 @@ export const BarsNode = memo(function BarsNode({ chart }: { chart: GenuiChart })
     const labels = grouped[0]!.data.map(d => d.label)
     const max = Math.max(...grouped.flatMap(s => s.data.map(d => Number(d.value) || 0)), 1)
     return (
-      <div className={css.chart}>
+      <div data-testid="genui-node-chart" className={css.chart}>
         <div className={css.chartPlot}>
           {[0, 25, 50, 75].map(p => (
             <span key={p} className={p === 0 ? css.baseline : css.gridline} style={{ bottom: `${p}%` }} />
@@ -181,6 +181,10 @@ export const BarsNode = memo(function BarsNode({ chart }: { chart: GenuiChart })
                     <div key={si} className={css.groupedBar} title={d === undefined ? s.label : `${s.label}: ${String(d.value)}`}>
                       <span className={css.groupValue}>{d === undefined ? '' : String(d.value)}</span>
                       <div
+                        // CGUI-PATCH(§9.1):genui-series =「可着色元素,每序列一个」。分组柱的颜色
+                        // 按序列分配,而 DOM 是标签为主序(每标签下并排 N 根柱) ⟹ 逐根打锚会让
+                        // 一条序列出现 N 个锚。只在第 0 组打,个数正好等于序列数。
+                        {...(i === 0 ? { 'data-testid': 'genui-series' } : {})}
                         className={css.groupedFill}
                         style={{
                           height: `${h}%`,
@@ -206,7 +210,7 @@ export const BarsNode = memo(function BarsNode({ chart }: { chart: GenuiChart })
   // and used to collapse the bar entirely.
   const max = Math.max(...data.map(d => Number(d.value) || 0), 1)
   return (
-    <div className={css.chart}>
+    <div data-testid="genui-node-chart" className={css.chart}>
       <div className={css.chartPlot}>
         {[0, 25, 50, 75].map(p => (
           <span key={p} className={p === 0 ? css.baseline : css.gridline} style={{ bottom: `${p}%` }} />
@@ -218,7 +222,7 @@ export const BarsNode = memo(function BarsNode({ chart }: { chart: GenuiChart })
           return (
             <div key={i} className={css.barCol} title={`${d.label}: ${String(d.value)}`}>
               <span className={css.barValue}>{String(d.value)}</span>
-              <div className={css.barFill} style={{ height: `${h}%`, ...(d.color !== undefined ? { background: d.color } : {}) }} />
+              <div data-testid="genui-series" className={css.barFill} style={{ height: `${h}%`, ...(d.color !== undefined ? { background: d.color } : {}) }} />
             </div>
           )
         })}
@@ -258,7 +262,7 @@ export const LineChartNode = memo(function LineChartNode({ chart }: { chart: Gen
     return t.toFixed(1)
   }
   return (
-    <div className={css.lineChart}>
+    <div data-testid="genui-node-chart" className={css.lineChart}>
       <svg width="100%" viewBox={`0 0 ${W} ${H}`}>
         {ticks.map((t, i) => {
           const y = padT + (1 - (t - min) / span) * (H - padT - padB)
@@ -277,7 +281,7 @@ export const LineChartNode = memo(function LineChartNode({ chart }: { chart: Gen
             </circle>
           )
         })}
-        <path d={path} className={css.linePath} />
+        <path d={path} data-testid="genui-series" className={css.linePath} />
       </svg>
       <div className={css.lineLabels}>
         {data.map((d, i) => <span key={i} className={css.barLabel}>{d.label}</span>)}
@@ -302,7 +306,7 @@ export const DonutNode = memo(function DonutNode({ chart }: { chart: GenuiChart 
   const C = 2 * Math.PI * R
   let offset = 0
   return (
-    <div className={css.donut}>
+    <div data-testid="genui-node-chart" className={css.donut}>
       <svg width="120" height="120" viewBox="0 0 120 120">
         <circle cx="60" cy="60" r={R} fill="none" strokeWidth="14" className={css.donutTrack} />
         {clamped.map((d, i) => {
@@ -311,6 +315,7 @@ export const DonutNode = memo(function DonutNode({ chart }: { chart: GenuiChart 
           const el = (
             <circle
               key={i}
+              data-testid="genui-series"
               cx="60" cy="60" r={R} fill="none" strokeWidth="14"
               className={css.donutSeg}
               style={{ stroke: seriesColor(i, data.length, d.color) ?? 'var(--dsw-alias-state-business-primary, #4f8ef7)' }}
