@@ -149,13 +149,13 @@ const SID = 'sess-aaa';
   // 终点取组件的 JSX 起点(effect 里可能有 `return (` 形态的语句,不能拿它当界)
   const body = block.slice(iEffect, at(block, '<div className={css.block}', '组件 JSX'));
   const iSecret = at(body, 'secretFields.has(id)', '密码过滤');
-  const iSave = at(body, 'saveBlockState(stateKey, next, settled)', '交给 store 的那一次写');
+  const iSave = at(body, 'saveBlockState(stateKey, next, settled, owner)', '交给 store 的那一次写');
   assert.ok(iSecret < iSave, '密码必须在写之前就滤掉:内存层也不许存密码');
   assert.equal((body.match(/secretFields\.has\(id\)/g) || []).length, 1, '密码过滤只该有一处');
   assert.equal((body.match(/saveBlockState\(/g) || []).length, 1,
     '组件里只该有一次 saveBlockState:内存写与镜像排队是同一次调用(mirror 位就是 settled)');
   assert.ok(!/setTimeout/.test(body), '组件里不许再有定时器(重挂即被清,那次编辑就丢了)');
-  assert.ok(/\[stateKey, answers, locked, fields, ui, secretFields, settled\]/.test(body),
+  assert.ok(/\[stateKey, answers, locked, fields, ui, secretFields, settled, owner\]/.test(body),
     'deps 必须含 stateKey(A2-② 靠它迁写)、ui(无 id 那本账)与 settled(定稿后才轮到镜像)');
   // memo 比较器漏了 settled 就永远不落盘(定稿只翻一次,没有第二次机会)
   assert.ok(/prev\.settled === next\.settled/.test(block), 'memo 比较器要比 settled');
@@ -340,6 +340,24 @@ const SID = 'sess-aaa';
   flushMirror();
   assert.equal(mirrored()[k], undefined, 'clear 之后再 flush 不许把旧值复活');
 
+  // 流式期编辑 + 立刻刷新:A3 不定时落盘,但页面要走时必须把最新那把键落下去
+  // (B73 就是这一路:填完还在流式,紧接着 reload)
+  {
+    cells.clear();
+    let raw = '{"items":[{"type":"input"';
+    for (let i = 0; i < 5; i++) {                 // 流式每 chunk 换一次键,同一个组件实例
+      raw += `,"x${i}":${i}`;
+      saveBlockState(genuiStateKey(SID, raw), { fields: { kept: 'EDIT-WHILE-STREAMING' } }, false, 'blk-1');
+    }
+    saveBlockState(genuiStateKey(SID, raw + 'other'), { answers: {} }, false, 'blk-2'); // 没碰过的块
+    assert.equal(localStorage.getItem(STORE_CELL), null, '流式期不定时落盘(A3 不变)');
+    flushMirror();
+    const keys = Object.keys(mirrored());
+    assert.deepEqual(keys, [genuiStateKey(SID, raw)],
+      '页面要走时只落**最新那把键**一条:按组件实例去重,否则流式期 200 把旧键会把 LRU 冲垮');
+    assert.deepEqual(mirrored()[keys[0]].fields, { kept: 'EDIT-WHILE-STREAMING' }, '值要对');
+  }
+
   // 兜底监听要真挂上(浏览器里没有这两句,防抖窗口内刷新照样丢)
   const src = read('client/src/genui/upstream/interaction-store.ts');
   assert.ok(/addEventListener\('pagehide', flushMirror\)/.test(src), 'pagehide 兜底');
@@ -348,7 +366,7 @@ const SID = 'sess-aaa';
   // 定时器不许再挂回组件:回合末 300ms 内重挂会被清理钩子吃掉
   const block = read('client/src/genui/upstream/GenuiBlock.tsx');
   assert.ok(!/setTimeout\(\(\) => saveBlockState/.test(block), '组件里不许再自己防抖落盘');
-  assert.ok(/saveBlockState\(stateKey, next, settled\)/.test(block), '组件一次调用:内存同步写 + 定稿后排镜像');
+  assert.ok(/saveBlockState\(stateKey, next, settled, owner\)/.test(block), '组件一次调用:内存同步写 + 排进待落盘槽');
 }
 
 console.log('check-genui-state-key: all passed');

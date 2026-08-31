@@ -113,11 +113,17 @@ export function loadBlockState(stateKey: string): BlockInteractionState | null {
  * 一个新指纹,边写边镜像会往 200 条 LRU 里塞满"这一帧的空状态",把真状态挤出去
  * ——那正是上游[§4.3 落差一]的形态。
  */
-export function saveBlockState(stateKey: string, state: BlockInteractionState, mirror = false): void {
+export function saveBlockState(
+  stateKey: string, state: BlockInteractionState, mirror = false, owner?: string,
+): void {
   if (stateKey === '') return
   memory.set(stateKey, state)
-  if (!mirror) return
-  scheduleMirror(stateKey, state)
+  // CGUI-PATCH:流式期也把"最新的键+状态"记进待落盘槽,但**不定时落盘**(A3 的本意是
+  // 不要每 chunk 往 LRU 里塞垃圾,不是"页面走了也不许存")。槽按 owner(组件实例)存,
+  // 所以一个块在流式期换 200 次键也只占一个槽、永远是最新那把键 —— 页面要走时
+  // 落一条,LRU 不会被冲。用户在流式期编辑完立刻刷新,就是靠这条(锁定验收 B73)。
+  pendingSlot(owner ?? stateKey, stateKey, state)
+  if (mirror) armMirrorTimer()
 }
 
 /**
@@ -135,13 +141,23 @@ export function saveBlockState(stateKey: string, state: BlockInteractionState, m
  * (掉电级)才需要换 IndexedDB。
  */
 const MIRROR_DEBOUNCE_MS = 300
-let pendingMirror: Map<string, BlockInteractionState> | null = null
+/** owner(组件实例)→ 它当前那把键与状态。一个块只占一个槽,键换了就覆盖。 */
+let pendingMirror: Map<string, { key: string; state: BlockInteractionState }> | null = null
 let mirrorTimer: ReturnType<typeof setTimeout> | null = null
 
-function scheduleMirror(stateKey: string, state: BlockInteractionState): void {
+function pendingSlot(owner: string, key: string, state: BlockInteractionState): void {
   if (pendingMirror === null) pendingMirror = new Map()
-  pendingMirror.set(stateKey, state)
+  pendingMirror.set(owner, { key, state })
+}
+
+function armMirrorTimer(): void {
   if (mirrorTimer === null) mirrorTimer = setTimeout(flushMirror, MIRROR_DEBOUNCE_MS)
+}
+
+/** 空状态不落盘:用户没碰过的块不该在 LRU 里占位(A3 要挡的就是这种垃圾)。 */
+function isEmptyState(s: BlockInteractionState): boolean {
+  return Object.keys(s.answers ?? {}).length === 0 && s.locked !== true
+    && Object.keys(s.fields ?? {}).length === 0 && Object.keys(s.ui ?? {}).length === 0
 }
 
 /** 把待镜像的条目立刻落盘。页面隐藏/卸载时兜底调用,单测直接调。 */
@@ -150,7 +166,9 @@ export function flushMirror(): void {
   const batch = pendingMirror
   pendingMirror = null
   if (batch === null) return
-  for (const [key, state] of batch) writeMirror(key, state)
+  for (const { key, state } of batch.values()) {
+    if (!isEmptyState(state)) writeMirror(key, state)
+  }
 }
 
 /** LRU 落盘一条(touched key 移到队首)。 */
@@ -180,7 +198,10 @@ if (typeof addEventListener === 'function') {
 export function clearBlockState(stateKey: string): void {
   if (stateKey === '') return
   memory.delete(stateKey)
-  pendingMirror?.delete(stateKey)   // CGUI-PATCH: 别让待落盘的旧值把刚清掉的又写回来
+  // CGUI-PATCH: 别让待落盘的旧值把刚清掉的又写回来(槽按 owner 存,按键找)
+  if (pendingMirror !== null) {
+    for (const [owner, slot] of pendingMirror) if (slot.key === stateKey) pendingMirror.delete(owner)
+  }
   const store = readStore()
   if (!(stateKey in store.blocks)) return
   const blocks = { ...store.blocks }

@@ -7,7 +7,7 @@
  * components live in src/client/blocks/*.
  */
 // CGUI-PATCH: 去掉 useRef —— 在飞定时器不再挂在组件里(见 action-debounce.ts)。
-import { memo, useCallback, useEffect, useMemo, useState } from 'react'
+import { memo, useCallback, useEffect, useId, useMemo, useState } from 'react'
 import { scheduleAction } from './action-debounce.ts'
 import { genuiActionId, useGenuiAction } from './action-context.ts'
 import { GenuiFeedbackProvider } from './action-feedback.tsx'
@@ -120,6 +120,9 @@ export const GenuiBlock = memo(function GenuiBlock({ spec, stateKey, settled = f
   // CGUI-PATCH: 无天然键的界面态,按节点路径存。与 fields 同一条写透路径,
   // 所以回合末重挂后照样从内存层读回来(INTERFACE §3.6「全部保留」)。
   const [ui, setUiState] = useState<Record<string, string>>(persisted?.ui ?? {})
+  // CGUI-PATCH: 本块在待落盘槽里的身份。流式期每 chunk 换一次 stateKey,按它去重才不会
+  // 在页面退出时把同一个块的 200 把旧键全写进 LRU(见 interaction-store 的 pendingSlot)。
+  const owner = useId()
   const [meta, setMeta] = useState<Record<string, QuestionMeta>>({})
   const [locked, setLocked] = useState(persisted?.locked === true)
   const [round, setRound] = useState(0)
@@ -204,8 +207,8 @@ export const GenuiBlock = memo(function GenuiBlock({ spec, stateKey, settled = f
     // "页面要走了立刻落盘"的兜底都在 store 里 —— 定时器**不能**挂在组件上:
     // 回合末组件会在 300ms 内被重挂,清理钩子一 clearTimeout,那次编辑就永远没落过盘
     // (锁定验收 B73 的形态,实测编辑后 50ms 时 localStorage 还是空的)。
-    saveBlockState(stateKey, next, settled)
-  }, [stateKey, answers, locked, fields, ui, secretFields, settled])
+    saveBlockState(stateKey, next, settled, owner)
+  }, [stateKey, answers, locked, fields, ui, secretFields, settled, owner])
   return (
     <GenuiFeedbackProvider value={feedback}>
     <div className={css.block} data-genui>
