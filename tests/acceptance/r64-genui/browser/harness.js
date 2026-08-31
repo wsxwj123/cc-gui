@@ -132,7 +132,8 @@ async function waitHealthy(port, proc, timeoutMs = 30_000) {
  * 绝不碰 6677 生产实例,绝不写真实 ~/.claude。
  */
 /** 允许的测试端口。6677 是生产实例,只许 GET,永远不在这个范围里。 */
-export const TEST_PORTS = [6703, 6704, 6705, 6706, 6707, 6708, 6709, 6710];
+// 6710 上有一个不属于本轮的常驻服务,排除掉。
+export const TEST_PORTS = [6703, 6704, 6705, 6706, 6707, 6708, 6709];
 
 export async function startApp(workerIndex) {
   // playwright 在用例失败后会换 worker,workerIndex 一路涨;所以不按序号取模死绑端口,
@@ -150,10 +151,27 @@ export async function startApp(workerIndex) {
     await waitPortFree(port);   // 全占满了才等,正常跑不到这一步
   }
   const home = fs.mkdtempSync(path.join(os.tmpdir(), `cgui-r64-home-${port}-`));
-  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), `cgui-r64-proj-${port}-`));
+  // realpath 是必须的:macOS 上 /var 是指向 /private/var 的软链,mkdtemp 返回 /var/... ,
+  // 而子进程里的 process.cwd() 拿到的是解析后的 /private/var/... —— 两者编码出**不同**的
+  // projects 目录名,于是假 CLI 落盘的会话记录应用侧读不到,刷新后侧栏「暂无会话」,
+  // 所有带 page.reload() 的用例(B40/B41/B73)全红。在源头解析一次,下游全都对齐。
+  const cwd = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), `cgui-r64-proj-${port}-`)));
   const bin = path.join(home, 'fakebin');
   fs.mkdirSync(path.join(home, '.claude', 'projects', encodeProjectDir(cwd)), { recursive: true });
   fs.mkdirSync(bin, { recursive: true });
+
+  // ── 把临时 HOME 预置成"不是第一次跑" ──────────────────────────────────
+  // 首启会连弹三层整屏遮罩,每一层都是 pointer-events 生效的,会**吃掉用例的第一次点击**
+  // (表现为交互像是没生效、断言压根跑不到)。三层各自的状态落点不同,逐个预置:
+  //   ① 使用指引  z-400 → localStorage 的 cgui-tour-seen(在 page fixture 里预置)
+  //   ② 更新说明  z-220 → 服务端 ~/.claude-gui/prefs.json 的 releaseNotesSeen
+  //   ③ 磁盘权限  z-210 → 服务端 ~/.claude-gui/permission-guide-shown.flag(文件存在即已看过)
+  // 这三项都与被测行为无关,清掉的是"够不到",不放宽任何断言。
+  fs.mkdirSync(path.join(home, '.claude-gui'), { recursive: true });
+  const appVersion = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8')).version;
+  fs.writeFileSync(path.join(home, '.claude-gui', 'prefs.json'),
+    JSON.stringify({ releaseNotesSeen: appVersion }));
+  fs.writeFileSync(path.join(home, '.claude-gui', 'permission-guide-shown.flag'), new Date().toISOString());
 
   // PATH 上的假 claude:一个 shell 薄壳,转交给 fake-claude.mjs
   const shim = path.join(bin, 'claude');
@@ -211,6 +229,10 @@ export function seedSession(app, assistantText, opts = {}) {
   const common = { isSidechain: false, userType: 'external', cwd: app.cwd, sessionId: sid,
     version: '2.1.227', gitBranch: '' };
   const lines = [
+    // 同一颗雷:产品把"少于 3 行"的 transcript 当空会话滤掉(session-reader),
+    // 真 CLI 的记录首个 user 之前本就有元数据行。只写 user+assistant 两行的话,
+    // 这条占位会话进不了侧栏。
+    { type: 'summary', summary: marker, leafUuid: u },
     { ...common, parentUuid: null, type: 'user', uuid: u, timestamp: now(),
       message: { role: 'user', content: `${marker} 画个界面` } },
     { ...common, parentUuid: u, type: 'assistant', uuid: a, timestamp: now(),
@@ -348,7 +370,14 @@ export async function waitTurnEnd(page, timeout = 25_000) {
 export async function messageCount(page, scope) {
   const list = (scope || page).locator(MSG_LIST).first();
   if (!(await list.count())) return 0;
-  return list.evaluate((el) => el.children.length);
+  // 只数**真实消息行**。消息容器里还挂着几行瞬态状态("正在预测下一步输入…"、
+  // 流式状态行、等待说明),它们出现/消失会让裸 children.length 自己跳动 ——
+  // 于是"操作前后消息数不变"这种反向断言会被它们污染成假红(B80/B81 栽过)。
+  // 判据:瞬态行都带转圈图标、或压根没有文本。
+  // ponytail: 契约 §9 没给"每条消息"的锚,只能这样近似;真给了锚就换成数锚。
+  return list.evaluate((el) => [...el.children].filter(
+    (c) => !c.querySelector('.animate-spin') && (c.textContent || '').trim() !== '',
+  ).length);
 }
 
 /** 队列条上的计数;§9.3 规定无可见排队条目时整条 queue-bar 不存在,所以缺席就算 0。 */
@@ -378,6 +407,18 @@ export async function openGenuiSettings(page) {
       + '设置分组归属没规定,只能靠搜索定位,不要去赌它在哪个分组下。');
   });
   return section;
+}
+
+/**
+ * 关设置。**别直接 press('Escape')**:openGenuiSettings 结束时焦点还在搜索框里,
+ * 面板的 Esc 守卫会把输入框内的那一下 Esc 吃掉(语义是"清空搜索框"),面板根本不关;
+ * 紧接着的下一次 Cmd/Ctrl+0 就成了"再开一次"= 把它关掉,后面的断言便跑在一个
+ * 已经关掉的面板上 —— 时序不同还会时红时绿。先把焦点挪出输入框再按 Esc。
+ */
+export async function closeSettings(page) {
+  await page.evaluate(() => { const el = document.activeElement; if (el && el.blur) el.blur(); });
+  await page.keyboard.press('Escape');
+  await page.getByTestId(TID.settingsSection).waitFor({ state: 'detached', timeout: 5000 }).catch(() => {});
 }
 
 /**
@@ -470,6 +511,30 @@ export const test = base.extend({
 
   // 每条用例:干净的 localStorage + 控制台/网络采集器 + 假 CLI 复位
   page: async ({ page, app }, use) => {
+    // 首启的「使用指引」浮层是一层 z-400 的整屏遮罩(pointer-events-auto),
+    // 会把用例的**第一次点击**吃掉 —— 表现为交互像是没生效,断言压根跑不到。
+    // 应用侧的判断是 localStorage.getItem('cgui-tour-seen') 为真就不弹(App.jsx:10525),
+    // 所以在任何导航之前预置成"已看过"。addInitScript 对后续 reload 同样生效(本组多条会刷新)。
+    // 这只是清掉一个与被测行为无关的拦路浮层,不放宽任何断言。
+    await page.addInitScript(() => {
+      try { localStorage.setItem('cgui-tour-seen', '1'); } catch { /* 隐私模式下忽略 */ }
+      // 产品**刻意**让冷启动停在首页、不自动打开上次的会话(有编号的历史设计,不是缺陷)。
+      // 于是 page.reload() 之后压根没有会话视图,围栏自然不渲染 —— B40/B41/B73 想验的
+      // "会话打开后围栏与交互状态能不能恢复"就一次也没测到。
+      // 这里预置成"用户开了『启动时恢复上次会话』这个选项",让用例走到它真正要测的路径上。
+      // **不动产品默认值**,只是把本套用例的前置条件补齐。
+      try { localStorage.setItem('cgui-restore-last-session', '1'); } catch { /* 同上 */ }
+    });
+    // 第四层遮罩:「发现新版本」大弹窗(z-200)。它由版本检查的结果驱动、
+    // 关闭态只存在组件 state 里(没有可预置的存储位),所以从数据源头掐掉:
+    // 把两个版本检查接口固定回"没有更新"。这两个接口与 genui 契约无关,
+    // 不属任何一条用例的被测对象;固定它同时也消掉了"今天上游发了新版就多一层弹窗"的抖动。
+    for (const api of ['**/api/version-check', '**/api/claude-version-check']) {
+      await page.route(api, (route) => route.fulfill({
+        status: 200, contentType: 'application/json',
+        body: JSON.stringify({ hasUpdate: false, localBuild: true }),
+      }));
+    }
     const logs = [];
     const requests = [];
     page.on('console', (m) => logs.push(`${m.type()}: ${m.text()}`));

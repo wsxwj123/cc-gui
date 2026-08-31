@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { MessageSquare, Minus, Send, Trash2, Loader2 } from './Icon.jsx';
 import { MarkdownRenderer } from './MarkdownRenderer.jsx';
+import { GenuiActionProvider } from '../genui/host/action-context.jsx';
 import { confirmDialog } from '../utils/confirmDialog.jsx';
 
 // 旁问浮窗:右下角可拖动/可最小化的浮动小窗,把 /btw 的"我问→AI答→我再问"渲染成
@@ -191,6 +192,9 @@ export default function BtwWindow({
     : { position: 'absolute', right: rightInset, bottom: bottomInset, width: BTW_W, height: 'min(60%, 460px)', zIndex: 46 };
 
   return (
+    // B4 显式只读退出(PLAN §1.3.2 / INTERFACE §3.4):旁问浮窗是只读面 —— 旁问不写入
+    // 会话历史,里面的界面回传给谁都没有确定答案,一律禁用。
+    <GenuiActionProvider value={null}>
     <div ref={rootRef} style={posStyle}
       className="flex flex-col rounded-[1.625rem] border border-canvas-deep bg-canvas shadow-popover overflow-hidden animate-fade-up">
       {/* 头部(拖动手柄) */}
@@ -258,5 +262,6 @@ export default function BtwWindow({
         旁问不写入会话历史，刷新后消失{pending ? ' · 回答中…' : ''}
       </div>
     </div>
+    </GenuiActionProvider>
   );
 }

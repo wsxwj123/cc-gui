@@ -71,7 +71,9 @@ export function fixedCalibration() {
 // r13-p2-2 扩参:topAlignRef = 所在行元素 ref。传了则弹层【顶缘与该行顶缘齐平】
 // (dsh 式:菜单贴着行的顶部展开,不再在行下方另起一段),放不下时回落视口夹紧;
 // 不传 = 既有行为逐字不变。
-export function AnchoredPopover({ anchorRef, open, onRequestClose, drop = 'down', align = 'left', gap: gapProp = 8, clampSelector = null, topAlignRef = null, className = '', children }) {
+// testId:可选可测锚,透传到浮层根元素(不传 = 不加属性,既有调用方零变化)。
+// 浮层是 portal,DOM 上不在触发按钮附近,只能由调用方在这里点名。
+export function AnchoredPopover({ anchorRef, open, onRequestClose, drop = 'down', align = 'left', gap: gapProp = 8, clampSelector = null, topAlignRef = null, className = '', 'data-testid': testId, children }) {
   const elRef = useRef(null);
   const [pos, setPos] = useState(null);
   const [bump, setBump] = useState(0);
@@ -146,7 +148,7 @@ export function AnchoredPopover({ anchorRef, open, onRequestClose, drop = 'down'
 
   if (!open) return null;
   return createPortal(
-    <div ref={elRef}
+    <div ref={elRef} data-testid={testId}
       style={{ position: 'fixed', left: pos ? pos.left : 0, top: pos ? pos.top : 0, zIndex: 9999, visibility: pos ? 'visible' : 'hidden', ...(pos?.maxWidth != null ? { maxWidth: pos.maxWidth } : {}) }}
       className={`glass-popover animate-glass-rise ${className}`}>
       {children}

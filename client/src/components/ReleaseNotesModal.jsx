@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { X, ChevronLeft, ChevronRight } from './Icon.jsx'; // 全仓 lucide 唯一出口(皮肤可替换)
 import { MarkdownRenderer } from './MarkdownRenderer.jsx';
+import { GenuiActionProvider } from '../genui/host/action-context.jsx';
 import { loadVersionNotes, releaseNotesIndex } from '../utils/releaseNotes.js';
 
 // 「更新说明」弹窗:装完新版打开 GUI 时自动弹一次(同版本只弹一次),也可从
@@ -54,6 +55,8 @@ export function ReleaseNotesModal({ open, initialVersion, initialNotes = null, o
   if (!open || !cur) return null;
   const groups = Array.isArray(notes?.groups) ? notes.groups : [];
   return (
+    // B4 显式只读退出(PLAN §1.3.2 / INTERFACE §3.4):发行说明是只读面。
+    <GenuiActionProvider value={null}>
     <div
       className="fixed inset-0 z-[220] flex items-center justify-center bg-black/40 backdrop-blur-soft animate-fade-in"
       onClick={close}
@@ -128,5 +131,6 @@ export function ReleaseNotesModal({ open, initialVersion, initialNotes = null, o
         </div>
       </div>
     </div>
+    </GenuiActionProvider>
   );
 }

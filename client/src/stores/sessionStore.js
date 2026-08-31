@@ -723,6 +723,13 @@ export const useStore = create((set, get) => ({
     try { return localStorage.getItem('cgui-prompt-suggestions') !== '0'; } catch { return true; }
   })(),
 
+  // genui 渲染开关(决策 7:默认开)。**只管本浏览器渲不渲染围栏**,不改模型行为、
+  // 不碰 ~/.claude —— 教不教模型这套语法是另一件事(设置里的技能装/卸,真相在磁盘)。
+  // 两件事各有唯一归属,故此处不做任何对账,也不镜像服务端。
+  genuiRender: (() => {
+    try { return localStorage.getItem('cgui-genui') !== '0'; } catch { return true; }
+  })(),
+
   // 收到的建议本身:{ [sessionId]: '建议文本' }。放 store 而非 SessionDetail 的 useState
   // ——建议在回合末到达,此时用户常已切走窗格/关掉分屏,组件 state 随卸载消失,切回来
   // 建议就没了;而 SSE 与 WS 兜底两条送达路径也需要同一个落点。按 sessionId(draft 期是
@@ -1516,6 +1523,11 @@ export const useStore = create((set, get) => ({
   setPromptSuggestions: (on) => {
     set({ promptSuggestions: !!on });
     try { localStorage.setItem('cgui-prompt-suggestions', on ? '1' : '0'); } catch {}
+  },
+
+  setGenuiRender: (on) => {
+    set({ genuiRender: !!on });
+    try { localStorage.setItem('cgui-genui', on ? '1' : '0'); } catch {}
   },
 
   // 建议入位。SSE(流内)与 WS 兜底(prompt-suggestion-bg)都调这里:同一条建议两条

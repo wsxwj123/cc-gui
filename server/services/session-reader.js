@@ -713,6 +713,16 @@ function isLocalCommandEcho(text) {
   return /^\s*<(local-command-(caveat|stdout|stderr)|command-(name|message|args)|task-notification|cgui-tool-retry)\b/.test(text);
 }
 
+// genui action 消息(INTERFACE §3.2,PLAN §1.3.5)。历史回读时打一个布尔标记,前端据它
+// 把这条渲染成折叠的「界面操作」小标记。**只加标记,不加过滤** —— 消息照常返回、照常
+// 可见:它是模型输出唯一一条"以用户身份发言"的通道,用户必须能回溯自己发了什么。
+// (顺带:`[genui-action] ` 不以 `<` 开头,isLocalCommandEcho 本来就不会误吞它。)
+// 前缀与 client/src/genui/host/action-send.js 的 ACTION_MESSAGE_PREFIX 逐字一致 ——
+// 不 import 那个模块:打包只带 server/ 与 client/dist,client/src 不在产物里。
+// 两处字面量的一致性由 tests/unit/check-genui-action-fold.mjs 锁住。
+const GENUI_ACTION_PREFIX = '[genui-action] ';
+const isGenuiAction = (t) => typeof t === 'string' && t.startsWith(GENUI_ACTION_PREFIX);
+
 /**
  * A slash-command invocation (e.g. `/general-sci-writing 看看进度`) is stored as a
  * `user` record whose text bundles `<command-message>` + `<command-name>` +
@@ -1042,6 +1052,7 @@ export async function getSessionMessages(sessionId, projectHash) {
             timestamp: record.timestamp,
             sessionId: record.sessionId,
             permissionMode: record.permissionMode,
+            ...(isGenuiAction(shownText) ? { genuiAction: true } : {}),
             ...(meta?.attachments ? { attachments: meta.attachments } : {}),
             ...(meta?.displayText !== undefined ? { displayText: meta.displayText } : {}),
           });
@@ -1167,6 +1178,9 @@ export async function getSessionMessages(sessionId, projectHash) {
           uuid: record.uuid,
           steered: true,
           steerUuid: a.source_uuid || null,
+          // 忙时触发的 action 会进队列、被 CLI 折叠成 queued_command(无 user 行),
+          // 这条路径漏打标记 = "排队发出去的那次操作重开会话后展成整段"。
+          ...(isGenuiAction(prompt) ? { genuiAction: true } : {}),
           text: prompt,
           timestamp: record.timestamp || a.timestamp,
         });

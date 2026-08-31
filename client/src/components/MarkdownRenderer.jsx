@@ -1,58 +1,23 @@
-import React, { useState, useMemo, useRef, useEffect } from 'react';
+import React, { useMemo } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
 import 'katex/dist/katex.min.css'; // CJ-3:KaTeX 样式(katex 本体经 mermaid 已在依赖里)
-import { Copy, Check } from './Icon.jsx';
-import { copyText } from '../utils/clipboard.js';
 import { openExternalUrl } from '../utils/openExternal.js';
-import { ArtifactPreview, isPreviewable, CollapsibleCode } from './ArtifactPreview.jsx';
+import { ArtifactPreview, isPreviewable } from './ArtifactPreview.jsx';
+import { CodeBlock } from './CodeBlock.jsx';
+import { isGenuiLang } from './GenuiFence.jsx';
+import { GenuiFenceGate } from './GenuiFenceGate.jsx';
 import { dockKeyFor } from '../utils/artifactDock.js';
-
-function CopyButton({ text }) {
-  const [copied, setCopied] = useState(false);
-  const timerRef = useRef(null);
-  useEffect(() => () => clearTimeout(timerRef.current), []);
-  return (
-    <button
-      onClick={async () => {
-        if (await copyText(text)) {
-          clearTimeout(timerRef.current); // 连点复制:清旧 timer,保住新状态的完整时长
-          setCopied(true);
-          timerRef.current = setTimeout(() => setCopied(false), 1500);
-        }
-      }}
-      className="flex items-center gap-1 text-[10px] text-[#9a8e78] hover:text-[#cabba0] transition-colors"
-    >
-      {copied ? <Check size={10} /> : <Copy size={10} />}
-      {copied ? '已复制' : '复制'}
-    </button>
-  );
-}
-
-// Code block with copy + collapse: long blocks show the first 5 lines and a
-// toggle to expand the rest (keeps long tool output / files from flooding chat).
-// 折叠逻辑抽到 ArtifactPreview 的 CollapsibleCode 共用(artifact 代码视图同款,防漂移)。
-function CodeBlock({ lang, code }) {
-  return (
-    <div className="relative group my-3">
-      <div className="flex items-center justify-between px-3.5 py-1.5 bg-[#2b2722] rounded-t-lg border border-[#3a342b] border-b-0">
-        <span className="text-[11px] font-mono text-[#9a8e78]">{lang || 'code'}</span>
-        <CopyButton text={code} />
-      </div>
-      <CollapsibleCode
-        code={code}
-        className="bg-[#211e19] border border-[#3a342b] border-t-0 p-4 overflow-x-auto text-[13px] leading-relaxed font-mono text-[#e8e2d6]"
-      />
-    </div>
-  );
-}
 
 // 围栏代码渲染。抽成函数以便注入 dockKeyPrefix(#3 稳定停靠身份的前缀);node 由
 // react-markdown 透传(passNode),node.position.start.offset 是本块在源文本中的起始偏移。
-function renderCode({ children, className, node, dockKeyPrefix, ...props }) {
-  const codeStr = String(children).replace(/\n$/, '');
+function renderCode({ children, className, node, dockKeyPrefix, isStreaming, ...props }) {
+  // children 空值守卫:围栏刚开头(```lang 已到、正文一个字都还没到)时 react-markdown 给的
+  // children 是 undefined,String(undefined) 会把字面量 "undefined" 当代码显示出来。
+  // 这是既有瑕疵(今天任何语言的围栏在流式首帧都会闪一下),修在这个共用点一次覆盖所有语言。
+  const codeStr = children == null ? '' : String(children).replace(/\n$/, '');
   // 块级判定:有 language-xxx 类名(带语言的围栏),或内容含换行。
   // 行内代码按 markdown 定义恒为单行,故"含换行"必是围栏代码块 —— 这一条专门兜住
   // **没标语言的围栏块**(纯 ``` ),否则它无 language- 类名会被误当行内,多行被压成
@@ -61,6 +26,12 @@ function renderCode({ children, className, node, dockKeyPrefix, ...props }) {
   const lang = className?.replace('language-', '') || '';
 
   if (isBlock) {
+    // genui 围栏拦截(r64):cgui-ui / dsh-ui 两个标记就地渲染成组件。放在 isPreviewable
+    // 之前只是顺序上的明确 —— 这两个标记不在可预览集合里,html/svg/mermaid 的既有预览
+    // 行为一字不变(INTERFACE §1.1 并存要求)。
+    // isStreaming 由调用点透传(TurnBubble 的 isLive/isLiveStream),不传即已定稿。
+    // 经 GenuiFenceGate 而不是直接 GenuiFence:设置里的渲染开关关掉时退回普通代码块(§4.1)。
+    if (isGenuiLang(lang)) return <GenuiFenceGate raw={codeStr} lang={lang} settled={!isStreaming} />;
     // html/svg/mermaid 代码块给「代码/预览」切换;其余语言走普通代码块。
     if (isPreviewable(lang)) {
       const dockKey = dockKeyFor(dockKeyPrefix, node?.position?.start?.offset);
@@ -245,13 +216,16 @@ function wrapSpacedImageUrls(md) {
   });
 }
 
-export function MarkdownRenderer({ content, basePath, dockKeyPrefix }) {
+// isStreaming:本条消息是否还在流式产出。genui 围栏据此决定要不要做结构补全、要不要
+// 报解析失败(PLAN §1.4)。只有会渲染流式正文的调用点需要传(TurnBubble 三处),其余
+// 一律不传 = 已定稿。**不查 DOM**:DOM 探测在 React 19 并发渲染下时序不可靠。
+export function MarkdownRenderer({ content, basePath, dockKeyPrefix, isStreaming = false }) {
   // basePath/dockKeyPrefix 变化时才重建 components,避免每次渲染都生成新组件。
   // dockKeyPrefix 在流式全程稳定(turn.uuid 恒为 'streaming' 哨兵 + 块序号),故不会抖动。
   const components = useMemo(() => ({
     ...markdownComponents,
     // #3 注入 dockKeyPrefix,让可预览代码块拿到稳定停靠身份。
-    code: (props) => renderCode({ ...props, dockKeyPrefix }),
+    code: (props) => renderCode({ ...props, dockKeyPrefix, isStreaming }),
     img: ({ src, alt, title }) => (
       <img
         src={resolveImageSrc(src, basePath)}
@@ -261,7 +235,7 @@ export function MarkdownRenderer({ content, basePath, dockKeyPrefix }) {
         className="max-w-full h-auto my-3 rounded border border-canvas-deep"
       />
     ),
-  }), [basePath, dockKeyPrefix]);
+  }), [basePath, dockKeyPrefix, isStreaming]);
   // 仅文件预览(有 basePath)才预处理空格图片 URL,聊天气泡保持原文不动。
   const text = useMemo(() => (basePath ? wrapSpacedImageUrls(content) : content), [content, basePath]);
   return (

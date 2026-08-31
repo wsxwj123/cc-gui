@@ -1,0 +1,125 @@
+/**
+ * Editorial diagram theme: the diagram-design semantic-token system ported
+ * into the dsh-genui renderer. Every diagram draws from these roles — never
+ * from inline hex in the layout code — and a spec-level `theme` override
+ * merges over the defaults, mirroring diagram-design's style-guide.md.
+ *
+ * Two skins ship: light and dark (the dark palette is the jet-black
+ * inversion, same roles). The `editorial` variant is the full skin and
+ * defaults to light unless the host theme is dark.
+ * @module @changfenhuang/dsh-genui/client/blocks/diagram/theme
+ */
+import type { GenuiDiagramTheme, GenuiDiagramVariant } from '../../spec.ts'
+// CGUI-PATCH: 明暗两套调色板保留(它是成套的编辑级语义配色,拆散接宿主 accent 会毁掉
+// 图本身的设计意图),只把"选哪套"接到宿主的 data-theme 上(PLAN §1.6 / §6.3)。
+import { hostPrefersDark } from '../../../host/host-theme.ts'
+
+export interface DiagramPalette {
+  paper: string
+  paper2: string
+  /** CGUI-PATCH: 普通节点的填充。上游把它写死成 '#ffffff'(nodeTreatment 的 default 分支),
+   * 浅色下是"比纸面更亮一档"的意思,深色下就是白盒子配白字 —— 深色调色板一旦真的被选中
+   * (本次接上 data-theme 之前它选不中,所以这条一直没暴露)就整个看不清。提成角色。 */
+  nodeFill: string
+  ink: string
+  muted: string
+  soft: string
+  rule: string
+  accent: string
+  accentTint: string
+  link: string
+}
+
+/** diagram-design default skin (style-guide.md § Tokens). */
+const LIGHT: DiagramPalette = {
+  paper: '#f5f5f5',
+  paper2: '#ececec',
+  nodeFill: '#ffffff',
+  ink: '#2d3142',
+  muted: '#4f5d75',
+  soft: '#7a8399',
+  rule: 'rgba(45,49,66,0.12)',
+  accent: '#eb6c36',
+  accentTint: 'rgba(235,108,54,0.08)',
+  link: '#2e5aa8',
+}
+
+/** Dark inversion: jet-black paper, white-smoke ink, silver muted. */
+const DARK: DiagramPalette = {
+  paper: '#2d3142',
+  paper2: '#393e53',
+  nodeFill: '#393e53',
+  ink: '#f5f5f5',
+  muted: '#bfc0c0',
+  soft: '#8e98ac',
+  rule: 'rgba(245,245,245,0.12)',
+  accent: '#f08a59',
+  accentTint: 'rgba(240,138,89,0.10)',
+  link: '#6a95d8',
+}
+
+/** Resolve the active palette from variant + optional theme overrides. */
+export function resolvePalette(variant: GenuiDiagramVariant | undefined, theme: GenuiDiagramTheme | undefined): DiagramPalette {
+  // CGUI-PATCH: 只有 spec 显式写了 'light' / 'dark' 才钉死(模型的显式选择优先);
+  // 缺省与 'editorial' 跟宿主明暗走 —— 这正是本文件头注释说的"defaults to light
+  // unless the host theme is dark",上游只是没有可用的宿主探测源。
+  // 上游原式 `variant === 'dark' ? DARK : LIGHT` 在深色主题下恒得浅色纸面。
+  const base = variant === 'dark' ? DARK
+    : variant === 'light' ? LIGHT
+      : (hostPrefersDark() ? DARK : LIGHT)
+  if (theme === undefined) return base
+  return {
+    paper: theme.paper ?? base.paper,
+    paper2: theme['paper-2'] ?? base.paper2,
+    // nodeFill 不开放给 spec 覆盖(上游本来就是写死的);跟随所选调色板即可。
+    nodeFill: base.nodeFill,
+    ink: theme.ink ?? base.ink,
+    muted: theme.muted ?? base.muted,
+    soft: theme.soft ?? base.soft,
+    rule: theme.rule ?? base.rule,
+    accent: theme.accent ?? base.accent,
+    accentTint: theme['accent-tint'] ?? base.accentTint,
+    link: theme.link ?? base.link,
+  }
+}
+
+/** Node treatment → { fill, stroke, dashed } per diagram-design §5. */
+export function nodeTreatment(type: string | undefined, p: DiagramPalette): { fill: string; stroke: string; dashed?: boolean } {
+  switch (type) {
+    case 'focal': return { fill: p.accentTint, stroke: p.accent }
+    case 'store': return { fill: inkAt(p.ink, 0.05), stroke: p.muted }
+    case 'external': return { fill: inkAt(p.ink, 0.03), stroke: inkAt(p.ink, 0.30) }
+    case 'input': return { fill: inkAt(p.muted, 0.10), stroke: p.soft }
+    case 'optional': return { fill: inkAt(p.ink, 0.02), stroke: inkAt(p.ink, 0.20), dashed: true }
+    case 'security': return { fill: inkAt(p.accent, 0.05), stroke: inkAt(p.accent, 0.50), dashed: true }
+    default: return { fill: p.nodeFill, stroke: p.ink }
+  }
+}
+
+/** Edge stroke color per semantic kind. */
+export function edgeStroke(kind: string | undefined, p: DiagramPalette): string {
+  switch (kind) {
+    case 'accent': return p.accent
+    case 'link': return p.link
+    default: return p.muted
+  }
+}
+
+/** Helper: a color at a given opacity (accepts #hex and rgba() strings). */
+export function inkAt(color: string, opacity: number): string {
+  if (color.startsWith('#')) {
+    const hex = color.slice(1)
+    const full = hex.length === 3 ? hex.split('').map(c => c + c).join('') : hex
+    const r = parseInt(full.slice(0, 2), 16)
+    const g = parseInt(full.slice(2, 4), 16)
+    const b = parseInt(full.slice(4, 6), 16)
+    return `rgba(${r},${g},${b},${opacity})`
+  }
+  // rgba(...) input: replace the alpha component.
+  return color.replace(/rgba?\(([^)]*)\)/, (_, inner: string) => {
+    const parts = inner.split(',').map(s => s.trim())
+    if (parts.length === 3) return `rgba(${parts.join(',')},${opacity})`
+    if (parts.length === 4) return `rgba(${parts[0]},${parts[1]},${parts[2]},${opacity})`
+    return color
+  })
+}

@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom';
 import { Folder, FolderOpen, File, RefreshCw, AlertCircle, ChevronRight, ChevronDown, FileText, Image as ImageIcon, ExternalLink, Film, Pencil, Save, Undo2, Redo2, X, Check, Trash2, AtSign, MoreVertical, ListChecks, Square, CheckSquare, Eye, EyeOff, ClipboardCopy } from './Icon.jsx';
 import { useStore } from '../stores/sessionStore.js';
 import { MarkdownRenderer } from './MarkdownRenderer.jsx';
+import { GenuiActionProvider } from '../genui/host/action-context.jsx';
 import { ArtifactPreview } from './ArtifactPreview.jsx';
 import { useResizable, Splitter } from '../hooks/useResizable.jsx';
 import { copyText } from '../utils/clipboard.js';
@@ -912,7 +913,10 @@ function PreviewBody({ preview, onAddToContext, onDelete, onClose }) {
           </div>
         ) : isMarkdown ? (
           <div className="px-3 py-2">
-            <MarkdownRenderer content={preview.content || ''} basePath={preview.path} />
+            {/* B4 显式只读退出(PLAN §1.3.2 / INTERFACE §3.4):文件预览是只读面。 */}
+            <GenuiActionProvider value={null}>
+              <MarkdownRenderer content={preview.content || ''} basePath={preview.path} />
+            </GenuiActionProvider>
           </div>
         ) : isHtml ? (
           <div className="px-3 py-2">

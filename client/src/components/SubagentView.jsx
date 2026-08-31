@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Bot, ChevronDown, GitBranch, Loader2, Square, User } from './Icon.jsx';
 import { useStore } from '../stores/sessionStore.js';
 import { MarkdownRenderer } from './MarkdownRenderer.jsx';
+import { GenuiActionProvider } from '../genui/host/action-context.jsx';
 import { CoworkBlocks } from './TurnBubble.jsx';
 import { PermissionPrompt } from './PermissionPrompt.jsx';
 import { LoadingMark, useCyclingVerb, ElapsedTime } from './LoadingBits.jsx';
@@ -141,7 +142,10 @@ export function SubagentView({ agentId, paneId, active = false, parentTitle, par
   }[status] || { label: status, cls: 'text-ink-muted' };
 
   return (
-    // bg-canvas 不透明 — 杜绝下层母会话内容透视(玻璃效果导致"下方显示母会话信息")
+    // B4 显式只读退出(PLAN §1.3.2 / INTERFACE §3.4):子代理结果是只读面 —— 这里的内容
+    // 是子代理的产出回显,不是用户的操作面。整棵子树退出,包括它内嵌的工具卡与权限卡。
+    <GenuiActionProvider value={null}>
+    {/* bg-canvas 不透明 — 杜绝下层母会话内容透视(玻璃效果导致"下方显示母会话信息") */}
     <div className="flex-1 flex flex-col min-h-0 bg-canvas">
       {/* 标题栏 — 与正常会话 header 同样式,层级:母会话 / 子代理 */}
       <div className="glass-bar shrink-0 px-6 py-3 border-b border-canvas-deep">
@@ -303,5 +307,6 @@ export function SubagentView({ agentId, paneId, active = false, parentTitle, par
         </div>
       </div>
     </div>
+    </GenuiActionProvider>
   );
 }

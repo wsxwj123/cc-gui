@@ -1,0 +1,83 @@
+/* genui 主题映射层(PLAN r64 §1.6)。上游 `--dsw-*` / `--ds-*` token 在本仓一个都不存在,
+   不补这一层则:CSS 侧 inline `var(--dsw-static-*)` 解析不出(柱/线/图例没颜色)、
+   JS 侧 `EChartNode.readToken` 全部回落上游写死的深色(ECharts 恒定深色不跟主题)。
+
+   ── 三条硬规矩(违反会被 tests/unit/check-genui-palette.mjs 当场判红)────────────
+   1. 值只许三种终值形态:**字面 hex** / **逗号形式 rgba()** / **单层 var(--color-*|--font-*)**。
+      禁 color-mix()、空格分隔 hsl()、calc() 套色。原因(§1.6.1 坑 A):
+      `getComputedStyle(root).getPropertyValue('--x')` 对自定义属性返回的是**替换后的声明串**
+      而不是计算出的颜色,EChartNode 把它直接塞进 ECharts option 走 zrender 自己的颜色解析器;
+      写 color-mix() 读回来就是 `color-mix(in srgb, …)` 这种 zrender 不一定认的字符串。
+      单层 `var(--color-*)` 安全的依据是 SPIKE V7 实测:本仓 `--color-*` 的终值本身就是
+      hex / 逗号 rgba,`var()` 会被提前替换,读回来直接是 `#1A1A1A`。
+   2. 8 个 `--dsw-static-*` 系列色是**新造的固定分类色板**,明暗两套,**不绑 accent**。
+      理由(§1.6.2 坑 B):default-dark 的 accent 是 `#52525B`,对画布 `#1A1A1B` 只有 2.25:1,
+      低于 WCAG 非文本 3:1;且 charts.tsx / PlotBlock.tsx 走 inline var() 没有运行时兜底的机会。
+      当前取值在全部 34 个主题变体的 canvas / canvas-warm 上最差 3.2:1(单测逐组算)。
+   3. 明暗切换只认 `data-theme`(含 auto + 系统深色)。本仓从不设 `documentElement.style.colorScheme`
+      —— SPIKE V7 实测 34/34 恒为空串,别拿它当探测源。
+
+   ── 一条必须知道的性质(INTERFACE §6)─────────────────────────────────────────
+   `--dsw-alias-*` 逐主题变(它们透传本仓 token);**8 个系列色只随明/暗翻转,不随预设变**
+   —— default-dark 与 rosepine 的系列色完全相同,这是设计如此,不是 bug。
+
+   皮肤:皮肤只改本仓 41 个既有变量,改不到 `--dsw-*`;但本层透传 `var(--color-*)`,
+   所以换皮肤时 genui 的文字/边框/强调色自动跟随,固定色板不跟随(与明暗策略一致)。 */
+
+:root {
+  /* ── 文字三级(逐主题)────────────────────────────────────── */
+  --dsw-alias-label-primary: var(--color-ink);
+  --dsw-alias-label-secondary: var(--color-ink-soft);
+  --dsw-alias-label-tertiary: var(--color-ink-muted);
+  --dsw-alias-label-caption: var(--color-ink-faint);
+
+  /* ── 边框两级(只随明暗:静态 rgba,规矩 1 禁 color-mix)──── */
+  --dsw-alias-border-l1: rgba(26, 26, 26, 0.12);
+  --dsw-alias-border-l2: rgba(26, 26, 26, 0.20);
+
+  /* ── 面(逐主题)──────────────────────────────────────────
+     bg-layer-1 = 块/卡片/代码块的面;bg-base = 输入框的底(比面更沉一档)。 */
+  --dsw-alias-bg-layer-1: var(--color-canvas-warm);
+  --dsw-alias-bg-base: var(--color-canvas);
+
+  /* ── 语义色(逐明暗,与本仓 chip/banner 同源)──────────────
+     上游把 *-primary 用作底色/边框、*-secondary 用作底色上的字;本仓只有一档语义色,
+     两者同映射(底色一律经 color-mix 淡化到 8%~30%,不会与字撞色)。 */
+  --dsw-alias-state-business-primary: var(--color-accent);
+  --dsw-alias-state-error-primary: var(--color-error);
+  --dsw-alias-state-success-primary: var(--color-success);
+  --dsw-alias-state-success-secondary: var(--color-success);
+  --dsw-alias-state-warn-primary: var(--color-warning);
+  --dsw-alias-state-warn-secondary: var(--color-warning);
+
+  --ds-font-family-code: var(--font-mono);
+
+  /* ── 8 色分类色板 · 浅色底(规矩 2)────────────────────────
+     token 名沿用上游(改名要动 charts.tsx / PlotBlock.tsx / EChartNode.tsx 三处数组),
+     取值是本仓新造:按 CHART_COLORS 的消费顺序排成 8 个互不相邻的色相
+     (蓝/绿/琥珀/红/青/品红/蓝灰/紫),同一亮度带,保证多序列图里两两可分。 */
+  --dsw-static-deepseek-400: #326BDE;
+  --dsw-static-green-400: #1E814F;
+  --dsw-static-amber-400: #97680A;
+  --dsw-static-red-400: #D43425;
+  --dsw-static-blue-450: #127B91;
+  --dsw-static-deepseek-450: #CD307E;
+  --dsw-static-neutral-bluish-400: #66718B;
+  --dsw-static-deepseek-300: #994CD0;
+}
+
+/* 深色两套:与本仓既有深色 mixin 用同一对选择器(显式 dark + auto 且系统深色)。 */
+:root[data-theme="dark"],
+:root[data-theme="auto"]:where([data-theme-system="dark"]) {
+  --dsw-alias-border-l1: rgba(245, 245, 246, 0.12);
+  --dsw-alias-border-l2: rgba(245, 245, 246, 0.20);
+
+  --dsw-static-deepseek-400: #6791E6;
+  --dsw-static-green-400: #27A667;
+  --dsw-static-amber-400: #C4870C;
+  --dsw-static-red-400: #E46F65;
+  --dsw-static-blue-450: #17A1BC;
+  --dsw-static-deepseek-450: #DD6DA5;
+  --dsw-static-neutral-bluish-400: #8993A8;
+  --dsw-static-deepseek-300: #B47BDC;
+}

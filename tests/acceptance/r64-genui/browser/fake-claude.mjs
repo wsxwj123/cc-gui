@@ -18,7 +18,10 @@ const CTL = process.env.CGUI_FAKE_CLAUDE_DIR || path.join(process.env.HOME || '.
 const argv = process.argv.slice(2);
 const argOf = (n) => { const i = argv.indexOf(n); return i >= 0 ? argv[i + 1] : undefined; };
 
-if (argv.includes('--version') || argv.includes('-v')) { console.log('2.1.227 (fake)'); process.exit(0); }
+// 自报一个高于任何真实上游的版本号:版本比较永不判定"有新版",
+// 「🎉 发现新版本」那层 z-200 弹窗就不会异步弹出来砸中在飞的点击。
+// (它只由内存 state 门控,没有可预置的存储位,所以只能从比较的输入端掐。)
+if (argv.includes('--version') || argv.includes('-v')) { console.log('99.0.0 (Claude Code)'); process.exit(0); }
 
 const sid = argOf('--session-id') || argOf('--resume') || crypto.randomUUID();
 const cwd = process.cwd();
@@ -35,6 +38,11 @@ const stamp = () => new Date().toISOString();
 
 async function turn(userText) {
   const uUuid = crypto.randomUUID();
+  // 真 CLI 的 transcript 在首个 user 之前压着一摞元数据行,所以任何真会话都 ≥3 行;
+  // 产品侧据此把"少于 3 行"当空会话滤掉(server/services/session-reader.js)。
+  // 假 CLI 原来每回合只写 user+assistant 两行,于是造出来的会话进不了侧栏,
+  // 刷新后所有历史断言全超时。补一条元数据行,把仿真度补齐(不是放宽产品的防御)。
+  append({ type: 'summary', summary: (userText || '').slice(0, 40) || '新会话', leafUuid: uUuid });
   append({ type: 'user', uuid: uUuid, parentUuid: null, sessionId: sid, cwd, timestamp: stamp(),
     message: { role: 'user', content: [{ type: 'text', text: userText }] } });
 

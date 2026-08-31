@@ -1,9 +1,10 @@
 import React, { useState, useRef, useEffect, useLayoutEffect } from 'react';
 import { createPortal } from 'react-dom';
-import { User, Brain, Copy, Check, RotateCcw, Pencil, GitBranch, Archive, Scissors } from './Icon.jsx';
+import { User, Brain, Copy, Check, RotateCcw, Pencil, GitBranch, Archive, Scissors, ChevronRight } from './Icon.jsx';
 import { computeCost, formatCost, costTitle } from '../utils/pricing.js';
 import { copyText } from '../utils/clipboard.js';
 import { useStore } from '../stores/sessionStore.js';
+import { isActionMessage, parseActionMessage } from '../genui/host/action-fold.js';
 
 // User messages can be huge (pasted logs, long prompts). Collapse to ~10 lines
 // by default with a fade + "展开全部" toggle so the chat stays scannable.
@@ -43,6 +44,46 @@ function CollapsibleUserText({ text }) {
           {expanded ? '收起' : '展开全部'}
         </button>
       )}
+    </div>
+  );
+}
+
+// genui action 消息的折叠标记(INTERFACE §3.2 / §9.2,PLAN §1.3.5)。这类消息是模型
+// 画的界面上的一次点击**以用户身份**发出的,所以:
+//   · 只折叠,不隐藏 —— 它照常占一条消息位,是用户对这条写通道的唯一审计入口(§1.3.3 L4);
+//   · 收起态直接显示动作名 + 组件类型,不用展开就知道自己发了什么;
+//   · 展开后是**完整外发原文**,一个字不省。
+// 展开态是本组件自己的 state(照 ThinkingFold 的做法):父级不因它展开而整树重渲,
+// 也不会给上层 React.memo 的消息列表传新身份 prop。
+// 收起时 body **不渲染**(不是 CSS 隐藏)——契约要求它不得存在于 DOM,否则"默认折叠"无法证伪。
+// **不带入场动画**(判官裁定):标记一出现用例就点 toggle,0.25s 的 animate-fade-up
+// 与"toHaveCount(1) 后立即点击"存在竞态 —— 间歇 flake 比没动画伤害大。别加回来。
+function GenuiActionFold({ text }) {
+  const [open, setOpen] = useState(false);
+  const { action, type } = parseActionMessage(text) || {};
+  return (
+    <div data-cgui="message-user" data-testid="message-card" className="group px-6 py-1">
+      <div className="max-w-[var(--content-max)] mx-auto flex flex-col items-end">
+        <div data-testid="genui-action-message" className="max-w-[85%] flex flex-col items-end">
+          <button
+            data-testid="genui-action-message-toggle"
+            onClick={() => setOpen((v) => !v)}
+            title="模型生成的界面上的一次操作，已以你的名义发出这条消息。点击查看原文"
+            className="flex items-center gap-1 px-1.5 py-0.5 rounded bg-accent/12 text-accent text-[10px] font-body hover:bg-accent/20 transition-colors cursor-pointer max-w-full"
+          >
+            <ChevronRight size={10} className={`transition-transform shrink-0 ${open ? 'rotate-90' : ''}`} />
+            <span className="shrink-0">界面操作</span>
+            <span className="font-mono truncate">{action || '(数据块无法解析)'}</span>
+            {type && <span className="text-accent/70 shrink-0">· {type}</span>}
+          </button>
+          {open && (
+            <div data-testid="genui-action-message-body"
+              className="mt-1 p-3 rounded-lg bg-canvas-warm border border-canvas-deep text-[11px] text-ink-muted whitespace-pre-wrap break-all max-h-64 overflow-y-auto font-mono leading-relaxed text-left">
+              {text}
+            </div>
+          )}
+        </div>
+      </div>
     </div>
   );
 }
@@ -340,6 +381,13 @@ export function MessageBubble({ message, onRollback, onFork }) {
   const [zoomImage, setZoomImage] = useState(null); // #7 单击放大的图片附件
 
   if (isUser) {
+    // genui action 消息折叠(M7)。用户消息只有 MessageBubble 一个渲染点(历史卡、
+    // 实时气泡、引导气泡都走它),折在这里就全覆盖。
+    // 两个判据同一条前缀规则:`genuiAction` 是 session-reader 读 jsonl 时打的标记
+    // (历史回读走它),前缀识别兜住实时发送与引导气泡这些没经过 session-reader 的路径。
+    if (message.genuiAction || isActionMessage(message.text)) {
+      return <GenuiActionFold text={message.text} />;
+    }
     return (
       <div data-cgui="message-user" data-testid="message-card" className="group px-6 py-4 animate-fade-up" style={{ animationDuration: '0.25s' }}>
         <div className="max-w-[var(--content-max)] mx-auto flex flex-row-reverse gap-3">
