@@ -77,18 +77,26 @@ Without this the GUI opens but cannot send messages.
 The installer bytes ship inside per-platform npm packages, so installing talks to **npm only — never GitHub**. Requires Node.js 20+.
 
 ```bash
-npm i -g @wsxwj123/cc-gui
-cc-gui
+npx @wsxwj123/cc-gui
 ```
 
-The first `cc-gui` run installs and launches the app:
+One command downloads, installs and launches the app. `cc-gui` is an installer, not an everyday command — it only runs to install or upgrade — so npx is the recommended form: no global install, and it is unaffected by npm's global-directory permissions (with node from the official .pkg, `npm i -g` fails with `EACCES`; see the FAQ):
 
 - **macOS (Apple Silicon)**: installs to `~/Applications/CC-GUI.app`. Files unpacked by npm carry no quarantine flag, so **no `xattr` step and no "damaged app" prompt**.
 - **Windows (x64)**: silently runs the bundled official installer (per-user, no admin prompt), with a Start Menu entry and normal uninstall.
 
-**Upgrade**: `npm i -g @wsxwj123/cc-gui@latest`, fully quit CC-GUI, then run `cc-gui` again. It only ever moves forward — if the app's own updater already installed a newer build, `cc-gui` just opens it instead of downgrading.
+**Upgrade**: `npx @wsxwj123/cc-gui@latest` after fully quitting CC-GUI. It only ever moves forward — if the app's own updater already installed a newer build, the command just opens it instead of downgrading.
 
-**Uninstall** takes two steps; the first alone leaves the app installed.
+**Alternative: global install** (for node installed via Homebrew / nvm, whose global directory is user-owned and has no permission issue):
+
+```bash
+npm i -g @wsxwj123/cc-gui
+cc-gui
+```
+
+Upgrade with `npm i -g @wsxwj123/cc-gui@latest`, quit the app, then run `cc-gui` again. Do not use `sudo npm i -g`: it installs, but leaves `~/.npm` cache files owned by root, and later npm commands start failing with new permission errors.
+
+**Uninstall** takes two steps; the first alone leaves the app installed (npx users have no global package — skip straight to step 2).
 
 **Step 1 — remove the npm package** (launcher + installer bytes, platform package included):
 
@@ -191,6 +199,7 @@ Output lands in `src-tauri/target/release/bundle/` (`.dmg` on macOS, `.exe` / `.
 | **macOS says "CC-GUI.app is damaged and can't be opened"** (and Privacy & Security has no **Open Anyway** button — common on macOS 15+) | Not actually damaged — Gatekeeper added a quarantine flag to the unsigned app. In Terminal (no sudo needed): `/usr/bin/xattr -dr com.apple.quarantine "/Applications/CC-GUI.app"`, then double-click again |
 | **`.dmg` won't mount, says "damaged"** (rare; more likely when the file arrived over a non-browser channel) | Clear quarantine on the dmg itself (adjust the path; no sudo needed): `/usr/bin/xattr -dr com.apple.quarantine ~/Downloads/CC-GUI_*.dmg`, then double-click to mount |
 | `xattr` says `option -r not recognized` | A Python `xattr` (from pyenv / conda) shadows the system one on PATH. Use the absolute path `/usr/bin/xattr -dr ...` |
+| `npm i -g` fails with `EACCES: permission denied` | With node from the official .pkg installer, the global directory `/usr/local/lib/node_modules` is root-owned — every global install fails this way; it is not specific to this project. Either ① use `npx @wsxwj123/cc-gui` (recommended, zero setup), or ② move the npm prefix: `npm config set prefix ~/.npm-global` and add `~/.npm-global/bin` to PATH. Do not use `sudo npm i -g`: it installs, but leaves `~/.npm` cache files owned by root, so later npm commands fail with new permission errors |
 | `npm i -g @wsxwj123/cc-gui` fails with "platform package not found" | Registry mirrors sync on demand, so a fresh release's platform packages may lag or be missing entirely. Install once from the official registry: `npm i -g @wsxwj123/cc-gui@latest --registry=https://registry.npmjs.org`, or use Option B |
 | `cc-gui` collides with another command | Use `npx @wsxwj123/cc-gui` — identical behaviour |
 

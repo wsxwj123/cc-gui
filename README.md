@@ -125,18 +125,26 @@ GUI 只是 `claude` CLI 的外壳,**唯一硬性前置是装好 Claude Code CLI*
 安装包字节随 npm 平台分包一起下载,**全程只连 npm,不需要访问 GitHub**;国内配好 npm 镜像源即可正常安装。需要本机已有 Node.js 20+。
 
 ```bash
-npm i -g @wsxwj123/cc-gui
-cc-gui
+npx @wsxwj123/cc-gui
 ```
 
-首次运行 `cc-gui` 完成安装并打开应用:
+一条命令完成下载、安装并打开应用。`cc-gui` 是安装器而非日常命令,只在装应用与升级时运行,故推荐 npx:无需全局安装,也不受 npm 全局目录权限影响(官方 .pkg 装的 node 用 `npm i -g` 会报 `EACCES`,见常见问题):
 
 - **macOS(Apple Silicon)**:应用装到 `~/Applications/CC-GUI.app`。npm 解包不带隔离标记,**无需 `xattr` 放行,也不会弹「已损坏」**。
 - **Windows(x64)**:静默运行包内官方安装器(用户级,无管理员弹窗),带开始菜单项、可正常卸载。
 
-**升级**:`npm i -g @wsxwj123/cc-gui@latest` → 完全退出 CC-GUI → 再跑一次 `cc-gui`(只升不降:应用内自动更新已装到更高版本时,`cc-gui` 只打开不降级)。
+**升级**:`npx @wsxwj123/cc-gui@latest` → 先完全退出 CC-GUI 再执行(只升不降:应用内自动更新已装到更高版本时,该命令只打开不降级)。
 
-**卸载**分两步,只做第一步删不掉应用:
+**备选:全局安装**(适合用 Homebrew / nvm 装 node 的人 —— 其全局目录归当前用户,无权限问题):
+
+```bash
+npm i -g @wsxwj123/cc-gui
+cc-gui
+```
+
+升级用 `npm i -g @wsxwj123/cc-gui@latest`,退出应用后再跑一次 `cc-gui`。不要用 `sudo npm i -g`:能装上,但会把 `~/.npm` 缓存目录属主变成 root,之后普通 npm 命令开始报别的权限错,越修越乱。
+
+**卸载**分两步,只做第一步删不掉应用(npx 方式没装全局包,直接做第 2 步):
 
 **第 1 步 —— 删 npm 包**(启动器 + 安装包字节,平台分包一并删除):
 
@@ -241,6 +249,7 @@ npm run tauri:build
 | **`.dmg` 双击报「已损坏」**(少数情况,经非浏览器渠道传输时更易出现;从 GitHub 直接下载通常不会) | 对 dmg 文件本身解除隔离(路径换成实际下载位置,不需要 sudo):`/usr/bin/xattr -dr com.apple.quarantine ~/Downloads/CC-GUI_*.dmg`,然后即可双击挂载 |
 | **macOS 提示「CC-GUI.app 已损坏,无法打开」**(且「隐私与安全性」里没有「仍要打开」按钮,macOS 15 后常见) | 同上,是 Gatekeeper 给未公证 app 加的 quarantine 标记,不是真损坏。装进「应用程序」后终端跑一次:`/usr/bin/xattr -dr com.apple.quarantine "/Applications/CC-GUI.app"` 再双击即可(不需要 sudo) |
 | 跑 xattr 报 `option -r not recognized` | 系统的 `xattr` 被 Python 版同名命令(pyenv / conda 自带)抢了 PATH。写绝对路径 `/usr/bin/xattr -dr ...` 即可 |
+| `npm i -g` 报 `EACCES: permission denied` | 官方 .pkg 装的 node 全局目录(`/usr/local/lib/node_modules`)属 root,装任何全局包都报此错,与本项目无关。解法二选一:① 用 `npx @wsxwj123/cc-gui`(推荐,无需任何配置);② 改 npm 前缀:`npm config set prefix ~/.npm-global`,再把 `~/.npm-global/bin` 加进 PATH。不要用 `sudo npm i -g`:能装上,但会把 `~/.npm` 缓存目录属主变成 root,之后普通 npm 命令开始报别的权限错,越修越乱 |
 | `npm i -g @wsxwj123/cc-gui` 报「没找到当前平台的安装包」 | 镜像源按需同步,平台分包可能滞后或暂缺。用官方源装一次:`npm i -g @wsxwj123/cc-gui@latest --registry=https://registry.npmjs.org`,也可直接走方式 B 下载 |
 | `cc-gui` 命令与本机其它工具重名 | 改用 `npx @wsxwj123/cc-gui`,逻辑完全相同 |
 
