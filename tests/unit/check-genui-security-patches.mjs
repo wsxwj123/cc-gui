@@ -285,7 +285,46 @@ const SOH = String.fromCharCode(1);
   }
 }
 
-// ── 9. send 的类型签名与实现/调用点一致(M6b 上报的类型谎言)────────────────────────
+// ── 9. 颜色字段:放行契约里的四种形态,其余降级为默认色(§2.7)──────────────────────
+{
+  // 颜色非法只**降级**(去掉该字段),不丢节点、不计入「已忽略」——与媒体地址那条
+  // (被拒就丢整个节点)是两套处置,别混。
+  for (const ok of ['#3ecf8e', '#fff', '#ABC', '#11223344', 'rgb(1,2,3)', 'rgba(0,0,0,.2)',
+    'hsl(210 40% 50%)', 'hsla(210,40%,50%,.5)', 'var(--color-accent)', 'var(--color-ink)',
+    'var(--color-accent, #3ecf8e)']) {
+    const r = withSibling({ type: 'avatar', name: 'A', color: ok });
+    assert.equal(r.items[0].color, ok, `合法颜色必须原样保留: ${ok}`);
+    assert.equal(r.dropped, 0, `颜色合法时不该有任何丢弃: ${ok}`);
+  }
+  for (const [why, bad] of [
+    ['url() 远程图片(外发通道)', 'url(https://evil.com/x.png)'],
+    ['image-set()', 'image-set("a.png" 1x)'],
+    ['CSS expression', 'expression(alert(1))'],
+    ['上游设计系统前缀(模型无从知道,契约也没给)', 'var(--dsw-alias-label-primary)'],
+    ['另一个上游前缀', 'var(--dsl-g-bg)'],
+    ['任意变量名', 'var(--evil)'],
+    ['变量兜底值里藏 url()', 'var(--color-accent, url(https://evil.com/x))'],
+    ['带分号的 CSS 注入', '#fff; background: url(https://evil.com/x)'],
+    ['命名颜色(不在四种形态里)', 'red'],
+    ['非法 hex 字母', '#gggggg'],
+    ['hex 只有 2 位', '#12'],
+    ['hex 9 位', '#123456789'],
+    ['超 64 字符', 'rgba(' + '0,'.repeat(40) + '0)'],
+    ['注释穿插', '#ff/*x*/ffff'],
+    ['空串', ''],
+  ]) {
+    const r = withSibling({ type: 'avatar', name: 'A', color: bad });
+    assert.ok(r.items[0] && r.items[0].type === 'avatar', `颜色非法只降级,不该丢节点(${why})`);
+    assert.equal(r.items[0].color, undefined, `非法颜色必须被去掉(${why})`);
+    assert.equal(r.dropped, 0, `颜色降级不计入「已忽略」(${why})`);
+  }
+  // chart / plot 的序列色走同一个校验:非法项降级,数据点不许跟着丢
+  const c = one({ type: 'chart', data: [{ label: 'a', value: 1, color: 'var(--evil)' }] });
+  assert.equal(c.data[0].value, 1, '序列色非法不该牵连数据点');
+  assert.equal(c.data[0].color, undefined, '序列里的非法颜色同样降级');
+}
+
+// ── 10. send 的类型签名与实现/调用点一致(M6b 上报的类型谎言)───────────────────────
 {
   const ctx = read('client/src/genui/upstream/action-context.ts');
   assert.ok(/send: \(\s*actionId: string,\s*action: string,\s*payload: Record<string, unknown>,?\s*\)/.test(ctx),

