@@ -50,6 +50,12 @@ export function parseSortableNumber(v: unknown): number {
     s = s.slice(0, -1)
   }
   s = s.replace(/[,，\s]/g, '')
+  // CGUI-PATCH: 剥完装饰后尾数为空 = 这串里根本没有数字,按文本排。
+  // 上游漏了这一步:`'b'` 被当成 10 亿的后缀、尾数剩空串,而 `Number('') === 0`
+  // ⟹ 一个纯字母单元格变成数字 0,排到所有文本行前面(锁定验收 B70 的第二条红因)。
+  // 同一个洞还吃掉 `'k'`/`'m'`/`'万'`/`'亿'`/`'%'`/`'¥'` 这些光杆装饰。
+  // 数字+后缀(`3k`/`1.2m`/`3.5万`)一个字节没动:它们的尾数非空。
+  if (s === '') return NaN
   const n = Number(s)
   if (!Number.isFinite(n)) return NaN
   return n * mult
