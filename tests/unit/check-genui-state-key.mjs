@@ -24,6 +24,7 @@ const mirrored = () => JSON.parse(localStorage.getItem(STORE_CELL) ?? '{"order":
 
 const store = await import('../../client/src/genui/upstream/interaction-store.ts');
 const { genuiStateKey, loadBlockState, saveBlockState, clearBlockState, fingerprint } = store;
+const { keepValue, keptValue } = await import('../../client/src/genui/upstream/blocks/state.ts');
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const read = (p) => readFileSync(join(root, p), 'utf8');
@@ -150,8 +151,8 @@ const SID = 'sess-aaa';
     '顺序必须是 同步写内存 → settled 门 → 防抖镜像:内存写进了定时器就等于没写透');
   assert.ok(/setTimeout\(\(\) => saveBlockState\(stateKey, next, true\)/.test(body),
     '只有防抖里那次带 mirror=true —— 镜像方向做反(流式期也镜像)就回到上游的落差一');
-  assert.ok(/\[stateKey, answers, locked, fields, secretFields, settled\]/.test(body),
-    'deps 必须含 stateKey(A2-② 靠它迁写)与 settled(定稿后才轮到镜像)');
+  assert.ok(/\[stateKey, answers, locked, fields, ui, secretFields, settled\]/.test(body),
+    'deps 必须含 stateKey(A2-② 靠它迁写)、ui(无 id 那本账)与 settled(定稿后才轮到镜像)');
   // 密码:两条写路共用同一个 safeFields,不许只在镜像那一路过滤(INTERFACE §3.6 永不保留)
   assert.equal((body.match(/secretFields\.has\(id\)/g) || []).length, 1, '密码过滤只该有一处');
   assert.ok(at(body, 'secretFields.has(id)', '密码过滤') < iSync,
@@ -187,6 +188,78 @@ const SID = 'sess-aaa';
   assert.ok(/<GenuiBlock spec=\{fence\.spec\} stateKey=\{genuiStateKey\(queueKey, raw\)\} settled=\{settled\}/.test(fence),
     'GenuiBlock 要同时收 stateKey 与 settled;指纹取围栏原文 raw,不取解析后的 spec');
   assert.equal((fence.match(/genuiStateKey\(/g) || []).length, 1, '接线点只有一处');
+}
+
+// ── 10. 收集面:无天然键的界面态也要进内存层(§3.6「全部保留」)────────────────────
+// b06/B71a 红过的那条:无 id 的输入格只活在组件本地 state,重挂即丢。
+// keepValue/keptValue 在 .ts 里,裸 node 真跑(不是源码锁)。
+{
+  const mk = () => {
+    const st = { fields: {}, ui: {} };
+    return { st, a: { fields: st.fields, ui: st.ui,
+      setField: (k, v) => { st.fields[k] = v; }, setUi: (k, v) => { st.ui[k] = v; } } };
+  };
+  // 带 id → fields(那本要发给模型);无 id → ui(只为活过重挂)
+  const withId = mk();
+  keepValue(withId.a, 'kept', '0.1', 'WITH-ID');
+  assert.deepEqual(withId.st.fields, { kept: 'WITH-ID' }, '带 id 的值必须进 fields');
+  assert.deepEqual(withId.st.ui, {}, '带 id 的值不该同时占一条 ui —— 两本账不许重复记');
+
+  const noId = mk();
+  keepValue(noId.a, undefined, '0.1', 'NO-ID');
+  assert.deepEqual(noId.st.ui, { '0.1': 'NO-ID' }, '无 id 的值必须进 ui(否则重挂即丢 = B71a 那条红)');
+  assert.deepEqual(noId.st.fields, {}, '无 id 的值绝不能进 fields —— 那本会被 submit 收集外发给模型');
+
+  // 读回:两本账各读各的,都没有时 undefined(调用方回落 spec 默认值)
+  assert.equal(keptValue(withId.a, 'kept', '0.1'), 'WITH-ID');
+  assert.equal(keptValue(noId.a, undefined, '0.1'), 'NO-ID');
+  assert.equal(keptValue(noId.a, undefined, '9.9'), undefined, '没存过就是 undefined,不许瞎给空串');
+  assert.equal(keptValue(undefined, undefined, '0.1'), undefined, '无 answers(独立渲染)不许炸');
+  assert.equal(keptValue(noId.a, undefined, undefined), undefined, '无 uiKey 时不读 ui');
+  // 无 uiKey 也不写(独立使用 GenuiBlock 时没有路径)
+  const bare = mk();
+  keepValue(bare.a, undefined, undefined, 'X');
+  assert.deepEqual([bare.st.fields, bare.st.ui], [{}, {}], '既无 id 又无 uiKey:两本账都不写');
+}
+
+// ── 11. 节点路径键:同 A1 的稳定性思路(不含内容、不含挂载次数)────────────────
+{
+  const rn = read('client/src/genui/upstream/blocks/render-node.tsx');
+  assert.ok(/const uiKey = path === '' \? String\(key\) : `\$\{path\}\.\$\{key\}`/.test(rn),
+    'uiKey = 祖先路径 + 兄弟序号');
+  assert.ok(!/uiKey[^\n]*JSON\.stringify|uiKey[^\n]*fingerprint/.test(rn),
+    '路径键不许掺节点内容:流式期节点还在长,掺了内容就是每 chunk 换一次键(A2-② 那类洞)');
+  // 容器必须把自己的路径传给孩子,否则不同容器里的同序号节点撞键
+  const adv = read('client/src/genui/upstream/blocks/advanced.tsx');
+  assert.equal((rn.match(/renderNode\([^)]*answers, uiKey\)/g) || []).length, 5,
+    'render-node 里 5 处递归都要把 uiKey 当孩子的 path 传下去');
+  assert.equal((adv.match(/renderNode\([^)]*answers, uiKey\)/g) || []).length, 2,
+    'Tabs / Accordion 两处递归同理(它们自己的 uiKey 就是孩子的 path)');
+}
+
+// ── 12. 两条红线:密码不进任何一层;ui 不外发 ──────────────────────────────────
+{
+  const forms = read('client/src/genui/upstream/blocks/forms.tsx');
+  assert.ok(/\/\/ 密码框一个字节都不留[\s\S]{0,80}if \(!secret\) keepValue\(answers, id, uiKey, v\)/.test(forms),
+    '密码框的值连内存层都不许写(§3.6 永不保留)——无 id 的密码框走 ui 就是把密码存起来了');
+  assert.ok(/secret \? '' : \(keptValue\(answers, id, uiKey\)/.test(forms),
+    '密码框也不许从任何一层读回(恢复出来的密码同样是"存过密码")');
+  // `secret` 只在 InputNode 里声明。别处引用它 = 运行时 ReferenceError,而 .tsx 不进
+  // eslint 的 no-undef 门(§2.0 的已知代价),只能在这里守
+  // (LEARNINGS cross-component-undefined-ref-whitescreen 同一形态)。
+  const inputBody = forms.slice(
+    at(forms, 'export function InputNode', 'InputNode'),
+    at(forms, 'export function TextareaNode', 'TextareaNode'));
+  assert.equal((forms.match(/if \(!secret\)/g) || []).length,
+    (inputBody.match(/if \(!secret\)/g) || []).length,
+    'secret 守卫只许出现在 InputNode 里:别的组件没有这个变量,引用即 ReferenceError');
+  assert.ok(!/\bsecret\b/.test(forms.slice(at(forms, 'export function TextareaNode', 'TextareaNode'))),
+    'TextareaNode 之后不许再出现 secret(textarea 没有 password 类型)');
+  // submit 只收 fields:ui 里的内部路径键不会跟着外发(§1.3.3-L2)
+  const submit = forms.slice(at(forms, 'export function SubmitNode', 'SubmitNode'));
+  assert.ok(/const fields = answers\?\.fields \?\? \{\}/.test(submit), 'submit 收集的是 fields');
+  assert.ok(!/answers\?\.ui|\bui\[/.test(submit.slice(0, 2000)),
+    'submit 绝不能收集 ui —— 那是内部路径键,外发即污染 payload');
 }
 
 console.log('check-genui-state-key: all passed');
