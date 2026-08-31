@@ -768,9 +768,10 @@ export function wrapSingleComponentRoot(value: unknown): GenuiSpec | null {
 /** Basic structural guard: is this object a valid GenuiSpec? */
 export function isGenuiSpec(value: unknown): value is GenuiSpec {
   if (typeof value !== 'object' || value === null) return false
-  const v = value as { items?: unknown; title?: unknown; gap?: unknown }
-  if (!Array.isArray(v.items)) return false
-  if (v.title !== undefined && typeof v.title !== 'string') return false
-  if (v.gap !== undefined && typeof v.gap !== 'number') return false
-  return true
+  const v = value as { items?: unknown }
+  // CGUI-PATCH(INTERFACE §1.2 / §2 表头):**只看 items**。上游还查了 title/gap 的类型,
+  // 于是 `{"gap":"big","items":[…]}` 整块判为"不是界面规格"→ 走红条 + 代码块。可 gap /
+  // title 是**选填**字段,契约写的是"非法值降级为缺省",不是"牵连整块拒渲染"。类型修正
+  // 本就是 repairGenuiSpec 的活(title 截断、gap 夹取),这里再判一遍只会把降级变成拒绝。
+  return Array.isArray(v.items)
 }

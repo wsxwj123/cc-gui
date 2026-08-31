@@ -38,6 +38,11 @@ export const GENUI_LIMITS = {
   maxCode: 12_000,
   /** Maximum length of a mermaid source. */
   maxMermaid: 8000,
+  // CGUI-PATCH(INTERFACE §2.6 例外表):`copy.text` 的上限是 4000,不是 code 的 12000。
+  // 上游借用了 maxCode —— 复制按钮旁边显示"将复制 N 字",N 能到 12000 时那颗按钮
+  // 一按就是一屏剪贴板,契约把它单列成一档就是这个道理。
+  /** Maximum length of a `copy` payload. */
+  maxCopyText: 4000,
   /** Maximum `grid` columns. */
   maxGridCols: 12,
   /** Maximum `tabs` count. */
@@ -58,6 +63,9 @@ export const GENUI_LIMITS = {
   maxPlotParams: 6,
   /** Maximum `scene3d` meshes. */
   maxMeshes: 5,
+  /** CGUI-PATCH(INTERFACE §2.5 末行):一个围栏内的 scene3d 节点数上限(WebGL 上下文
+   * 是浏览器全局资源,超了旧 canvas 被静默回收成黑块)。 */
+  maxScene3dPerSpec: 2,
   /** Maximum `quiz` options. */
   maxQuizOptions: 8,
   /** Maximum `steps` / `timeline` / `breadcrumb` / `keyvalue` entries. */
@@ -302,6 +310,12 @@ interface RepairCtx {
    * 退回原始代码块,而不是渲染成一张空卡(INTERFACE §5.2 末段)。
    */
   kept: number
+  /**
+   * CGUI-PATCH(INTERFACE §2.5 末行 / §5.3):**一个围栏内**已收下的 scene3d 个数。
+   * 上限 2 是防 WebGL 上下文耗尽 —— 那是浏览器的全局资源(超了旧 canvas 会被静默
+   * 回收成黑块),所以只能按整份 spec 计,不能像别的上限那样按节点自己算。
+   */
+  scene3d: number
 }
 
 /** Walk `list` with the shared node budget; drops invalid entries. */
@@ -336,7 +350,9 @@ function repairNode(value: unknown, ctx: RepairCtx, depth: number): GenuiNode | 
 }
 
 function repairNodeInner(value: unknown, ctx: RepairCtx, depth: number): GenuiNode | null {
-  if (depth > GENUI_LIMITS.maxDepth) return null
+  // CGUI-PATCH(INTERFACE §1.3):差一。`depth` 从 0 起算,所以"第 N 层" = depth N-1,
+  // 上限 8 层 ⟹ 允许的最大 depth 是 7。原来的 `depth > maxDepth` 放到了第 9 层。
+  if (depth >= GENUI_LIMITS.maxDepth) return null
   const v = obj(value)
   if (v === undefined) return null
   const type = v.type
@@ -606,7 +622,7 @@ function repairNodeInner(value: unknown, ctx: RepairCtx, depth: number): GenuiNo
       return { type: 'accordion', items }
     }
     case 'copy': {
-      const text = str(v.text, GENUI_LIMITS.maxCode)
+      const text = str(v.text, GENUI_LIMITS.maxCopyText)
       if (text === undefined) return null
       return { type: 'copy', text, ...opt('label', str(v.label, 128)) }
     }
@@ -616,8 +632,11 @@ function repairNodeInner(value: unknown, ctx: RepairCtx, depth: number): GenuiNo
       return { type: 'mermaid', code }
     }
     case 'scene3d': {
+      // CGUI-PATCH: 每个围栏至多 2 个 3D 场景,超出的丢弃(计入「已忽略」)。
+      if (ctx.scene3d >= GENUI_LIMITS.maxScene3dPerSpec) return null
       const meshes = repairMeshes(v.meshes)
       if (meshes === undefined) return null
+      ctx.scene3d += 1
       return { type: 'scene3d', meshes, ...opt('title', str(v.title, GENUI_LIMITS.maxString)), ...opt('ambient', num(v.ambient, 0, 2)), ...opt('background', color(v.background)) }
     }
     case 'diagram': {
@@ -979,9 +998,14 @@ function repairDiagramNodes(v: unknown): GenuiDiagram['nodes'] | undefined {
     if (out.length >= GENUI_LIMITS.maxDiagramNodes) break
     const o = obj(raw)
     if (o === undefined) continue
-    const id = str(o.id, 128)
     const label = str(o.label, GENUI_LIMITS.maxString)
-    if (id === undefined || label === undefined) continue
+    if (label === undefined) continue
+    // CGUI-PATCH(INTERFACE §2.5):`id` 不是必填 —— 那张表的必填只有 kind + nodes,
+    // 节点侧只写 label/type。上游把 id 当必填,于是最自然的写法
+    // `{"label":"API","type":"focal"}` 整批节点被静默丢光,图画出来是空的。
+    // 缺省取 label:边的 from/to 本来就按人看得懂的名字写(`{"from":"API","to":"DB"}`),
+    // 取 label 让这种写法直接连得上;真给了 id 就用 id。
+    const id = str(o.id, 128) ?? label.slice(0, 128)
     if (seen.has(id)) continue
     seen.add(id)
     const nodeType = enu(o.type, DIAGRAM_NODE_TYPES)
@@ -1262,7 +1286,7 @@ export function repairGenuiSpec(value: unknown): GenuiSpec | null {
     if (wrapped === null) return null
     return repairGenuiSpec(wrapped)
   }
-  const ctx: RepairCtx = { remaining: GENUI_LIMITS.maxNodes, dropped: 0, kept: 0 }
+  const ctx: RepairCtx = { remaining: GENUI_LIMITS.maxNodes, dropped: 0, kept: 0, scene3d: 0 }
   // 先走完再读计数:对象字面量里读 ctx 依赖属性求值顺序,是"改一行就静默错"的写法。
   const items = repairItems(v.items, ctx, 0)
   return {
