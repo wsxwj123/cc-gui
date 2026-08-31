@@ -76,6 +76,15 @@ export interface GenuiSpec {
   append?: boolean
   /** Root component list. */
   items: GenuiNode[]
+  /**
+   * CGUI-PATCH(INTERFACE §5.2 / §9.1):`repairGenuiSpec` 回填的两个计数,模型写不进来
+   * (repair 构造的是全新字面量,同名字段一律不继承)。
+   * - `dropped`:被丢弃的节点数 = 块底部灰字「N 个不支持的组件已忽略」的 N;0 表示不显示灰字。
+   * - `kept`:活下来的节点数;0 表示一个可渲染组件都没有 ⟹ 整块退回原始代码块,不渲染空卡。
+   * 两项均为可选:非 repair 产出的 spec(如测试夹具)拿不到它们,消费方按"缺失=不特殊处理"读。
+   */
+  dropped?: number
+  kept?: number
 }
 
 /* ---------------- leaf nodes ---------------- */

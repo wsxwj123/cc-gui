@@ -248,22 +248,51 @@ const ECHART_PRESETS = ['bar', 'line', 'area', 'pie', 'scatter'] as const
 interface RepairCtx {
   /** Nodes left in the budget; 0 stops the walk. */
   remaining: number
+  /**
+   * CGUI-PATCH(PLAN §5.3 补丁 1-3 / INTERFACE §5.2):被丢弃的节点数,就是块底部
+   * 灰字「N 个不支持的组件已忽略」的 N。上游"被拦下的节点静默消失,用户和开发者
+   * 都看不到"([安全 §9.2-6]),诊断能力弱于防护能力。
+   */
+  dropped: number
+  /**
+   * CGUI-PATCH:活下来的节点数(全树,不只根层)。0 = 一个可渲染组件都没有 ⟹ 整块
+   * 退回原始代码块,而不是渲染成一张空卡(INTERFACE §5.2 末段)。
+   */
+  kept: number
 }
 
 /** Walk `list` with the shared node budget; drops invalid entries. */
 function repairItems(list: unknown, ctx: RepairCtx, depth: number): GenuiNode[] {
   if (!Array.isArray(list)) return []
   const out: GenuiNode[] = []
-  for (const item of list) {
-    if (ctx.remaining <= 0) break
+  for (let i = 0; i < list.length; i++) {
+    if (ctx.remaining <= 0) {
+      // CGUI-PATCH: 预算耗尽而省略的兄弟同样计入「已忽略」(INTERFACE §9.1 把
+      // 「超预算裁剪」列进了灰字的触发条件)。只加个数,不遍历,超大列表零成本。
+      ctx.dropped += list.length - i
+      break
+    }
     ctx.remaining -= 1
-    const node = repairNode(item, ctx, depth)
+    const node = repairNode(list[i], ctx, depth)
     if (node !== null) out.push(node)
   }
   return out
 }
 
+/**
+ * CGUI-PATCH:计数外壳。每一条丢弃路径 —— 未知类型、标识符不合规、必填字段缺失或
+ * 类型不对、媒体地址被拒、超深 —— 最终都从 `repairNodeInner` 返回 `null`,所以计数
+ * 放在这一层就覆盖全部丢弃口。分散到十几个 `return null` 站点各记一次的话,漏一处
+ * 灰字就少数一个,而"少数一个"没有任何症状(测不出、看不见)。
+ */
 function repairNode(value: unknown, ctx: RepairCtx, depth: number): GenuiNode | null {
+  const node = repairNodeInner(value, ctx, depth)
+  if (node === null) ctx.dropped += 1
+  else ctx.kept += 1
+  return node
+}
+
+function repairNodeInner(value: unknown, ctx: RepairCtx, depth: number): GenuiNode | null {
   if (depth > GENUI_LIMITS.maxDepth) return null
   const v = obj(value)
   if (v === undefined) return null
@@ -609,9 +638,13 @@ function repairNode(value: unknown, ctx: RepairCtx, depth: number): GenuiNode | 
       }
     }
     default:
-      // Plugin-registered custom node types are opaque to the guard: pass
-      // through unchanged (the renderer's default branch resolves them).
-      return value as GenuiNode
+      // CGUI-PATCH(缺口 A / PLAN §5.3 补丁 1 / INTERFACE §5.2):上游这里是
+      // `return value as GenuiNode` —— 未知类型整棵子树**原样穿过**闸门:不限深度、
+      // 不限字符串长度、自己只占 1 个节点预算。`{"type":"zzz","x":<20MB 嵌套数组>}`
+      // 就把整张 GENUI_LIMITS 架空;更糟的是流式期每来一个 chunk 都要把它
+      // JSON.stringify 两遍(memo 比较器 + stateKey)= 主线程卡死([安全 §1.3])。
+      // CC-GUI 不做插件自定义组件,透传是纯负债 —— 丢弃,并计入「已忽略」。
+      return null
   }
 }
 
@@ -1144,13 +1177,21 @@ export function repairGenuiSpec(value: unknown): GenuiSpec | null {
     if (wrapped === null) return null
     return repairGenuiSpec(wrapped)
   }
-  const ctx: RepairCtx = { remaining: GENUI_LIMITS.maxNodes }
+  const ctx: RepairCtx = { remaining: GENUI_LIMITS.maxNodes, dropped: 0, kept: 0 }
+  // 先走完再读计数:对象字面量里读 ctx 依赖属性求值顺序,是"改一行就静默错"的写法。
+  const items = repairItems(v.items, ctx, 0)
   return {
     ...opt('title', str(v.title, GENUI_LIMITS.maxString)),
     ...opt('gap', num(v.gap, 0, 96)),
     ...opt('panel', v.panel === true ? true : undefined),
     ...opt('append', v.append === true ? true : undefined),
-    items: repairItems(v.items, ctx, 0),
+    items,
+    // CGUI-PATCH:两个计数随 spec 一起回传 —— 它们是"渲染成什么样"的输入
+    // (kept=0 ⟹ 退回代码块;dropped>0 ⟹ 底部灰字),不是诊断附加物。
+    // 注意:因此 `repairGenuiSpec(repairGenuiSpec(x))` 的 dropped 会归零(第二遍没东西
+    // 可丢)—— 幂等性对 items 仍成立,对计数按定义不成立,别拿修好的 spec 再修一遍。
+    dropped: ctx.dropped,
+    kept: ctx.kept,
   }
 }
 
