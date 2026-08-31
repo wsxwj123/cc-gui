@@ -48,7 +48,13 @@ export function classifyFence(raw, settled) {
   const bytes = fenceByteLength(raw);
   if (bytes > GENUI_LIMITS.maxFenceBytes) return { kind: 'oversize', kb: Math.round(bytes / 1024) };
   const spec = resolveGenuiSpec(raw, { settled });
-  return spec === null ? { kind: 'unparsed' } : { kind: 'spec', spec };
+  if (spec === null) return { kind: 'unparsed' };
+  // ③ 空卡守卫(§5.2 末段,M4 挂账的缺陷)。JSON 解析出来了、结构也对,但一个节点都没
+  //    活下来(类型全不在白名单 / 必填字段全非法)。此时渲染出来是一张**空卡**,比留着
+  //    原文更糟:用户既看不到模型写了什么,也不知道出了什么事。口径取 guard 回传的
+  //    kept(全树存活数),与灰字的 dropped 同源,不另算一遍。
+  if (spec.kept === 0) return { kind: 'no-node' };
+  return { kind: 'spec', spec };
 }
 
 const NOTICE_BASE = {
@@ -134,6 +140,9 @@ export function GenuiFence({ raw, lang = 'cgui-ui', settled = false }) {
   }
   // 空体:空代码块,不报错、不出红条(§5.1)。
   if (fence.kind === 'empty') return <DegradedFence raw="" lang={normLang} />;
+  // 一个可渲染组件都没有:同样只给代码块,且**不出任何说明条**(§5.2 末段)——
+  // JSON 是好的,说"解析失败"是撒谎;灰字「N 个已忽略」也没有承载它的块(§9.1)。
+  if (fence.kind === 'no-node') return <DegradedFence raw={raw} lang={normLang} />;
   // 剩下 unparsed。流式期的半截 JSON **不是错误**(用户还在看模型打字),只给代码块;
   // 定稿后仍解析不出来才配一条红条(§5.1)。
   if (!settled) return <DegradedFence raw={raw} lang={normLang} />;
