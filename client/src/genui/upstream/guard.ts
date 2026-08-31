@@ -20,6 +20,9 @@
  */
 import type { GenuiFileTreeNode, GenuiList, GenuiNode, GenuiPlot, GenuiPlotSeries, GenuiScene3D, GenuiSpec, GenuiDiagram, GenuiDiagramTheme, GenuiDiagramKind } from './spec.ts'
 import { wrapSingleComponentRoot } from './spec.ts'
+// CGUI-PATCH: 表达式合法性也归守卫管(见 repairPlotSeries)。safe-math 不 import 任何东西,
+// 不会成环。
+import { compileMathExpr } from './safe-math.ts'
 
 /** Hard resource limits enforced by repair (and mirrored at render time). */
 export const GENUI_LIMITS = {
@@ -878,14 +881,22 @@ function repairPlotSeries(v: unknown, cap: number): GenuiPlot['series'] | undefi
     const o = obj(s)
     const expr = o === undefined ? undefined : str(o.expr, 512)
     if (expr === undefined || o === undefined) continue
+    // CGUI-PATCH(INTERFACE §2.8 末行):表达式非法 ⟹ **该条曲线不绘制**,其余曲线与整个
+    // 组件照常。判定就是"能不能编译"(编译器本身不求值、不碰全局),放在守卫里而不是
+    // 渲染层:守卫是唯一决定"树里有什么"的地方,留一条画不出来的曲线进去,图例、序列色
+    // 分配、genui-series 计数就都多一格。截断到 512 之后再判 —— 截断本身可能截出半截。
+    if (compileMathExpr(expr) === null) continue
     const params: NonNullable<GenuiPlotSeries['params']> = []
     if (Array.isArray(o.params)) {
       for (const p of o.params) {
         if (params.length >= GENUI_LIMITS.maxPlotParams) break
         const po = obj(p)
+        // CGUI-PATCH(INTERFACE §2.3):`name` 必须是**单个小写字母** —— 它是表达式里的
+        // 参数名,而 safe-math 只把 /^[a-z]$/ 当参数。名字对不上的参数拖出一根永远
+        // 影响不到曲线的滑块,拖了没反应比没有更糟。
         const name = po === undefined ? undefined : str(po.name, 64)
         const value = po === undefined ? undefined : num(po.value, -1e9, 1e9)
-        if (name === undefined || value === undefined) continue
+        if (name === undefined || value === undefined || !/^[a-z]$/.test(name)) continue
         params.push({
           name, value,
           ...opt('min', po === undefined ? undefined : num(po.min, -1e9, 1e9)),

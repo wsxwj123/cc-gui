@@ -10,7 +10,7 @@
  *
  * Supported grammar:
  *   expr    := term (('+' | '-') term)*
- *   term    := unary (('*' | '/' | '%') unary)*
+ *   term    := unary (('*' | '/') unary)*
  *   unary   := ('-' | '+') unary | power
  *   power   := atom ('^' atom)?
  *   atom    := number | variable | constant | func '(' expr ')' | '(' expr ')'
@@ -87,16 +87,17 @@ class SafeMathParser {
     for (;;) {
       this.skipWs()
       const c = this.peek()
-      if (c === '*' || c === '/' || c === '%') {
+      // CGUI-PATCH(INTERFACE §2.8):取模不在运算符表里(`+ - * / ^ ( )` 就是全集,
+      // 内置技能 SKILL.md 也是这么教模型的)。留着 `%` 等于实现比契约宽 —— 契约是
+      // 白名单,宽出来的那一格没人测、也没人知道它在。
+      if (c === '*' || c === '/') {
         this.i++
         const right = this.parseUnary()
         const op = c
         const prev = left
         left = op === '*'
           ? (x) => this.asNum(prev, x) * this.asNum(right, x)
-          : op === '/'
-            ? (x) => this.asNum(prev, x) / this.asNum(right, x)
-            : (x) => this.asNum(prev, x) % this.asNum(right, x)
+          : (x) => this.asNum(prev, x) / this.asNum(right, x)
       } else return left
     }
   }
@@ -142,7 +143,19 @@ class SafeMathParser {
 
   private parseNumber(): number {
     const start = this.i
-    while (this.i < this.src.length && /[0-9.eE+\-]/.test(this.src[this.i]!)) this.i++
+    while (this.i < this.src.length && /[0-9.]/.test(this.src[this.i]!)) this.i++
+    // CGUI-PATCH(§5.4-V6 数字词法):`e/E` 与其后的符号只有在**真跟着数字**时才算指数,
+    // 否则不吞。上游一路吞 `[0-9.eE+-]`,于是 `1+2` 整串被当成一个数 ⟹ Number('1+2')
+    // = NaN ⟹ 抛 ParseError ⟹ 整条曲线不绘制。凡是含 `a+b` / `a-b` 的表达式(`(1+2)*3`、
+    // `abs(0-3)`、`1+2*3-4/2`)全军覆没,而这是最常见的写法。
+    if (this.i < this.src.length && /[eE]/.test(this.src[this.i]!)) {
+      let j = this.i + 1
+      if (j < this.src.length && (this.src[j] === '+' || this.src[j] === '-')) j++
+      if (j < this.src.length && /[0-9]/.test(this.src[j]!)) {
+        this.i = j
+        while (this.i < this.src.length && /[0-9]/.test(this.src[this.i]!)) this.i++
+      }
+    }
     const text = this.src.slice(start, this.i)
     const value = Number(text)
     if (Number.isNaN(value)) throw new ParseError(`invalid number '${text}'`, start)
