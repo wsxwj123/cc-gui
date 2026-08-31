@@ -42,6 +42,11 @@ const SETTINGS_INDEX = [
   { id: 'set-close-behavior', tab: 'general', title: '关闭窗口行为', keys: '关闭 最小化 退出 窗口' },
   { id: 'set-desktop-notify', tab: 'general', title: '桌面通知', keys: '通知 提醒 系统通知 notification 后台 等待' },
   { id: 'set-screenshot-hotkey', tab: 'general', title: '全局截图热键', keys: '截图 热键 快捷键 screenshot hotkey 屏幕录制' },
+  // r64 genui:落 general(=面板打开时的默认 tab)。分组归属方案没规定,但 INTERFACE §9.7
+  // 定的定位路径是「Cmd/Ctrl+0 → 搜索框输入 genui → 区块出现」;搜索框今天只列结果、
+  // 要点一下才跳 tab,而"只加锚不改既有控件行为"是硬规矩(§9.3),所以让区块本来就在
+  // 默认 tab 里,这条路径才无条件成立。
+  { id: 'set-genui', tab: 'general', title: '生成式界面（cgui-ui）', keys: 'genui cgui-ui dsh-ui 生成式 界面 组件 渲染 图表 表单 技能 skill' },
   { id: 'set-persistent-chat', tab: 'session', title: '会话常驻进程', keys: '常驻 复用 冷启动 进程 persistent 缓存' },
   { id: 'set-prompt-suggestions', tab: 'session', title: '输入预测', keys: '预测 建议 suggestion 输入' },
   { id: 'set-worktree-visibility', tab: 'session', title: '显示 worktree 项目', keys: 'worktree 工作树 项目 列表 隐藏 显示 分支' },
@@ -224,6 +229,7 @@ export function SettingsPanel() {
         <div className="relative">
           <Search size={12} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-faint pointer-events-none" />
           <input
+            data-testid="settings-search"
             value={searchQ}
             onChange={(e) => setSearchQ(e.target.value)}
             placeholder="搜索设置(如:压缩 / 密码 / 更新)…"
@@ -2195,6 +2201,105 @@ function PromptSuggestionsToggle() {
   );
 }
 
+// ── 生成式界面(genui,r64)──────────────────────────────────────────────
+// 这一块里是**两件独立的事**,各有各的真相来源,互不代表、互不纠正(INTERFACE §4):
+//   ① 渲染开关 —— 真相在浏览器 localStorage,只管本设备渲不渲染围栏,即时生效;
+//   ② 技能装/卸 —— 真相在磁盘(~/.claude/skills),决定模型学不学这套语法,仅新会话生效。
+// 所以「开关开着但技能已归档」不是错误、不弹警告、不自动纠正对方;两者都不做对账。
+const GENUI_SKILL_ID = 'cgui-ui';
+const GENUI_SKILL_STATE_LABEL = { installed: '已安装', archived: '已归档', missing: '未安装' };
+// 三态各配一个动作,同一时刻只有一个按钮。归档/恢复直接打既有的技能端点 ——
+// 与 Skill 面板同一个真相来源,用户在哪边操作另一边都跟着变,不需要同步逻辑。
+const GENUI_SKILL_ACTION = {
+  missing: { label: '安装', url: `/api/skills/builtin/${GENUI_SKILL_ID}/install` },
+  installed: { label: '归档', url: '/api/skills/archive', body: { id: GENUI_SKILL_ID } },
+  archived: { label: '恢复', url: '/api/skills/restore', body: { id: GENUI_SKILL_ID } },
+};
+
+function GenuiSection() {
+  const on = useStore((s) => s.genuiRender);
+  const setOn = useStore((s) => s.setGenuiRender);
+  const [skillState, setSkillState] = useState(null); // null=还没读到;之后恒为三态之一
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState(null);
+
+  // 现读服务端(它直接看磁盘,不走缓存)。面板每次打开都是一次新挂载,所以这一发
+  // fetch 就是「每次打开设置现读真实状态」;用户在别处手动删掉/装上都能看见。
+  const reload = async () => {
+    try {
+      const r = await fetch(`/api/skills/builtin/${GENUI_SKILL_ID}`);
+      const d = await r.json();
+      setSkillState(GENUI_SKILL_STATE_LABEL[d.state] ? d.state : 'missing');
+    } catch { setSkillState('missing'); }
+  };
+  useEffect(() => { reload(); }, []);
+
+  const act = GENUI_SKILL_ACTION[skillState] || null;
+  const runAct = async () => {
+    if (!act || busy) return;
+    setBusy(true); setErr(null);
+    try {
+      const r = await fetch(act.url, {
+        method: 'POST',
+        ...(act.body ? { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(act.body) } : {}),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) setErr(d.error || `操作失败 (HTTP ${r.status})`);
+    } catch (e) { setErr(`操作失败：${e.message}`); }
+    // 成功失败都重读磁盘:失败时状态必须保持真实的那一个(不能显示成功),
+    // 成功时也不拿本地猜的值顶替(比如"已存在不覆盖"回的是原状态)。
+    await reload();
+    setBusy(false);
+  };
+
+  return (
+    <div data-testid="genui-settings-section" className="bg-canvas-warm border border-canvas-deep rounded-lg divide-y divide-canvas-deep">
+      <div className="px-3 py-2.5 flex items-center gap-3">
+        <div className="min-w-0 flex-1">
+          <div className="text-xs text-ink font-body font-medium flex items-center gap-1.5">生成式界面渲染<EffectBadge level="immediate" /></div>
+          <div className="text-[10.5px] text-ink-faint font-body">
+            开启后，回复里的 <span className="font-mono">cgui-ui</span> 围栏渲染成可交互组件（表格、图表、表单、流程图等）。
+            关闭后这类围栏按普通代码块显示，JSON 原文可见可复制。此项只改变本设备的显示方式，不改变模型的输出，也不影响 html / svg / mermaid 围栏的预览。
+          </div>
+        </div>
+        {/* role=switch 而不是 input[type=checkbox]:面板的 Esc 关闭逻辑把焦点落在 INPUT 上的
+            那一击当作"取消本次编辑"截住,拨完开关就按不动 Esc 了。button 无此问题。 */}
+        <button data-testid="genui-render-toggle" role="switch" aria-checked={on} onClick={() => setOn(!on)}
+          className={`shrink-0 w-9 h-5 rounded-full transition-colors relative ${on ? 'bg-accent' : 'bg-ink-faint/30'}`}
+          title={on ? '已开启' : '已关闭'}>
+          <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-all ${on ? 'left-[18px]' : 'left-0.5'}`} />
+        </button>
+      </div>
+
+      <div className="px-3 py-2.5">
+        <div className="flex items-center gap-3">
+          <div className="min-w-0 flex-1">
+            <div className="text-xs text-ink font-body font-medium flex items-center gap-1.5">界面输出技能<EffectBadge level="session" /></div>
+            <div className="text-[10.5px] text-ink-faint font-body">
+              安装后模型才知道这套围栏语法，才会主动输出界面。未安装时上面的渲染开关仍然有效——它管的是「收到围栏怎么显示」，与「模型会不会写围栏」是两件事。
+            </div>
+            <div data-testid="genui-skill-scope-note" className="mt-1 text-[10.5px] text-ink-muted font-body">
+              安装与归档写的是 <span className="font-mono">~/.claude/skills</span> 目录，影响所有 claude CLI 会话（含终端里直接运行的 claude），不限于本应用；改动仅对新会话生效。
+            </div>
+          </div>
+          <div className="shrink-0 flex items-center gap-2">
+            <span data-testid="genui-skill-state" className="text-[11px] text-ink-muted font-body">
+              {skillState ? GENUI_SKILL_STATE_LABEL[skillState] : '读取中…'}
+            </span>
+            {act && (
+              <button data-testid="genui-skill-action" onClick={runAct} disabled={busy}
+                className="px-2 py-1 text-[11px] rounded-md font-body border border-canvas-deep bg-canvas-warm text-ink-muted hover:text-ink disabled:opacity-50 transition-colors">
+                {act.label}
+              </button>
+            )}
+          </div>
+        </div>
+        {err && <div className="mt-1.5 text-[10.5px] text-error font-body">{err}</div>}
+      </div>
+    </div>
+  );
+}
+
 function ExcludeDynamicPromptToggle() {
   const val = useStore((s) => s.excludeDynamicSystemPrompt); // 'auto' | true | false
   const setVal = useStore((s) => s.setExcludeDynamicSystemPrompt);
@@ -2421,6 +2526,7 @@ function GeneralTab({ settings }) {
       <div id="set-close-behavior"><CloseBehaviorPicker /></div>
       <div id="set-desktop-notify"><DesktopNotifyToggle /></div>
       <div id="set-screenshot-hotkey"><ScreenshotHotkeyPicker /></div>
+      <div id="set-genui"><GenuiSection /></div>
       {rows.length > 0 && (
         <div className="bg-canvas-warm border border-canvas-deep rounded-lg divide-y divide-canvas-deep">
           {rows.map(([k, v]) => (
