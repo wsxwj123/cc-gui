@@ -30,3 +30,8 @@ export function scheduleAction(key: string, run: () => void): void {
     run()
   }, GENUI_ACTION_DEBOUNCE_MS))
 }
+
+/** 在飞条目数。只给单测用 —— "触发后自删"在行为上不可观测,不暴露就只能靠文本锁。 */
+export function pendingActionCount(): number {
+  return pending.size
+}

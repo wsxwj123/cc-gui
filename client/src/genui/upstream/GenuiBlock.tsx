@@ -90,7 +90,17 @@ export const GenuiBlock = memo(function GenuiBlock({ spec, stateKey, settled = f
       })
     }
   }, [capability, stateKey])
-  const onAction = useDebouncedAction(dispatch, stateKey ?? '')
+  // 去抖作用域用 **queueKey**,不用 stateKey —— 这是审查军令②的落点。
+  // stateKey 含围栏原文指纹,流式期每来一个 chunk 就换一次;键跟着换 = 300ms 内连点
+  // 同一个按钮会落进两个不同的 Map 条目,两个定时器都触发 = **双发**(而流式期正是
+  // 用户最常点按钮的时候)。两条备选里选"改键分量"而不是"送达层去重":送达层只能
+  // 丢掉两次里的一次,而先触发的那个恰是**先排期**的那次 = 旧 payload —— input /
+  // select / slider 的后一次带的才是用户最新的值,丢后者就是静默发旧值,与
+  // INTERFACE §3.1「只发最后一次」直接矛盾。只有键级取消能保住"后来者居上"。
+  // ponytail: 代价 —— 同一会话里两个**不同的块**用了**同名 action**,且两次点击相隔
+  // 不到 300ms 时,前一次会被后一次取消。要清掉它得给块一个"内容无关又跨重挂稳定"
+  // 的身份,而那正是 §1.2.2 论证过不存在的东西;真撞上再补。
+  const onAction = useDebouncedAction(dispatch, capability?.queueKey ?? '')
   const feedback = useMemo(() => ({
     stateOf: (action: string) => (capability?.queuedIds.has(genuiActionId(stateKey, action)) === true
       ? 'queued' as const

@@ -23,8 +23,8 @@ export const GenuiActionProvider = GenuiActionContext.Provider;
  * @param enqueueTo      往**指定**键的队列里塞一条,返回是否落盘成功
  */
 export function useGenuiActionCapability({ queueKey, handleSendRef, messageQueue, enqueueTo }) {
-  // 送达这一刻本窗格的会话键。用 ref 而不是现读 store:B1 禁止 action 链路上出现
-  // `paneSessions[...]` / `activeTabIndex` 这类"当前选中"读取(那正是上游的 bug 形态)。
+  // 送达这一刻本窗格的会话键。用 ref 而不是现读 store —— B1 禁止 action 链路上出现
+  // 任何"当前选中会话/当前聚焦窗格"的读取,那正是上游 dom-fence 那个串扰 bug 的形态。
   const paneKeyRef = useRef(queueKey);
   useEffect(() => { paneKeyRef.current = queueKey; }, [queueKey]);
   const enqueueRef = useRef(enqueueTo);
