@@ -491,6 +491,12 @@ export function InputNode({ node, onAction, answers, uiKey }: {
           send(true)
         }}
       />
+      {/* CGUI-PATCH(INTERFACE §5.6 末行 / §9.1):密码框的值 blur / Enter / submit 聚合 /
+          落盘四条路全不通。没有这行提示,用户填完按回车界面毫无反应,只会以为坏了。
+          仅 password 出现 —— 其它 inputType 下该元素不进 DOM(契约的"必须不存在"那半)。 */}
+      {/* 无 className:`.field > span` 已经把直接子 span 定成了 meta 字号 + 三级标签色,
+          与上面那行 label 同一档,不必新造类(GenuiBlock.module.css 是 vendored 的)。 */}
+      {secret && <span data-testid="genui-password-hint">此字段的值不会被发送</span>}
     </label>
   )
 }
