@@ -36,7 +36,11 @@ export function describeJsonFailure(raw: string): string | null {
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
     const pos = msg.match(/position (\d+)/i)
-    const where = pos !== null ? `（字符 ${pos[1]} 附近）` : ''
+    // CGUI-PATCH(INTERFACE §5.1 的红条文案):位置**恒有**。V8 只在"读到一半才发现不对"
+    // 时才带 `position N`;第一个 token 就不对(纯散文、`<div>…`、裸词 `undefined`、
+    // 只有右括号)的报错里根本没有位置,于是红条变成没头没尾的一句英文。那种情形出错点
+    // 就在开头,补 0 —— 契约写的是「⚠️ …解析失败（字符 N 附近）」,不是「可能有位置」。
+    const where = `（字符 ${pos !== null ? pos[1] : '0'} 附近）`
     return `${where}${msg.slice(0, 140)}`
   }
 }
