@@ -1,4 +1,6 @@
 @import "tailwindcss";
+/* genui 的 --dsw-* 别名层(PLAN r64 §1.6)。必须在 :root 上、必须先于业务样式导入。 */
+@import "./genui/host/genui-tokens.css";
 
 /* ════════════════════════════════════════════════════════════════
    Studio Glass — Apple iOS 26 / macOS Tahoe Liquid Glass
