@@ -117,6 +117,44 @@ export function saveBlockState(stateKey: string, state: BlockInteractionState, m
   if (stateKey === '') return
   memory.set(stateKey, state)
   if (!mirror) return
+  scheduleMirror(stateKey, state)
+}
+
+/**
+ * CGUI-PATCH:镜像防抖搬进 store,并给"页面要走了"留一条兜底。
+ *
+ * 起因(锁定验收 B73 实测):输入框逐字符触发,所以落盘必须防抖;而防抖窗口里
+ * 用户按刷新/关页,那条编辑就**永远没落过盘** —— 实测编辑后 50ms 时 localStorage
+ * 还是 null、550ms 才有,B73 正是"编辑完立刻 reload",于是刷新后读回一片空白,
+ * 违 INTERFACE §3.6「刷新保留」。
+ *
+ * 搬到 store 里顺带治掉两件事:①原来定时器挂在每个 GenuiBlock 上,组件在 300ms
+ * 内卸载(回合末重挂!)就被 clearTimeout 吃掉,同样永远不落盘;②每块一个定时器
+ * 变成全局一个,N 个围栏同时改也只写一次盘。
+ * ponytail: 一个批次 Map + 一个定时器,条目在 flush 后清空;真要更强的持久化保证
+ * (掉电级)才需要换 IndexedDB。
+ */
+const MIRROR_DEBOUNCE_MS = 300
+let pendingMirror: Map<string, BlockInteractionState> | null = null
+let mirrorTimer: ReturnType<typeof setTimeout> | null = null
+
+function scheduleMirror(stateKey: string, state: BlockInteractionState): void {
+  if (pendingMirror === null) pendingMirror = new Map()
+  pendingMirror.set(stateKey, state)
+  if (mirrorTimer === null) mirrorTimer = setTimeout(flushMirror, MIRROR_DEBOUNCE_MS)
+}
+
+/** 把待镜像的条目立刻落盘。页面隐藏/卸载时兜底调用,单测直接调。 */
+export function flushMirror(): void {
+  if (mirrorTimer !== null) { clearTimeout(mirrorTimer); mirrorTimer = null }
+  const batch = pendingMirror
+  pendingMirror = null
+  if (batch === null) return
+  for (const [key, state] of batch) writeMirror(key, state)
+}
+
+/** LRU 落盘一条(touched key 移到队首)。 */
+function writeMirror(stateKey: string, state: BlockInteractionState): void {
   const store = readStore()
   const order = store.order.filter(k => k !== stateKey)
   order.unshift(stateKey)
@@ -128,10 +166,21 @@ export function saveBlockState(stateKey: string, state: BlockInteractionState, m
   writeStore({ order, blocks })
 }
 
+// CGUI-PATCH: 页面要走了就立刻落盘 —— 防抖窗口内刷新/关页是"编辑了等于没编辑"。
+// pagehide 覆盖刷新/关闭/前进后退;visibilitychange→hidden 覆盖移动端切走后被系统回收
+// (那种场合 pagehide 不保证触发)。两个都挂,flush 自身幂等(批次清空后再调是 no-op)。
+if (typeof addEventListener === 'function') {
+  addEventListener('pagehide', flushMirror)
+  addEventListener('visibilitychange', () => {
+    if (typeof document !== 'undefined' && document.visibilityState === 'hidden') flushMirror()
+  })
+}
+
 /** Forget a block's durable state (e.g. after a reset-to-empty). CGUI-PATCH: 两层一起清。 */
 export function clearBlockState(stateKey: string): void {
   if (stateKey === '') return
   memory.delete(stateKey)
+  pendingMirror?.delete(stateKey)   // CGUI-PATCH: 别让待落盘的旧值把刚清掉的又写回来
   const store = readStore()
   if (!(stateKey in store.blocks)) return
   const blocks = { ...store.blocks }

@@ -23,7 +23,7 @@ const STORE_CELL = 'cgui.genui.interaction';
 const mirrored = () => JSON.parse(localStorage.getItem(STORE_CELL) ?? '{"order":[],"blocks":{}}').blocks;
 
 const store = await import('../../client/src/genui/upstream/interaction-store.ts');
-const { genuiStateKey, loadBlockState, saveBlockState, clearBlockState, fingerprint } = store;
+const { genuiStateKey, loadBlockState, saveBlockState, clearBlockState, fingerprint, flushMirror } = store;
 const { keepValue, keptValue } = await import('../../client/src/genui/upstream/blocks/state.ts');
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -92,7 +92,9 @@ const SID = 'sess-aaa';
   assert.deepEqual(loadBlockState(k), { answers: { q1: '猫' } }, '内存层必须立刻可读(不等防抖)');
   assert.equal(localStorage.getItem(STORE_CELL), null, 'A3:流式期一个字节都不许落 localStorage');
 
-  saveBlockState(k, { answers: { q1: '狗' } }, true);                 // 定稿:镜像
+  saveBlockState(k, { answers: { q1: '狗' } }, true);                 // 定稿:排进镜像队列
+  assert.equal(localStorage.getItem(STORE_CELL), null, '镜像是防抖的:排进队列这一刻还没落盘');
+  flushMirror();                                                     // 防抖到点 / 页面要走了
   assert.deepEqual(mirrored()[k], { answers: { q1: '狗' } }, '定稿后必须镜像到 localStorage');
   assert.deepEqual(loadBlockState(k), { answers: { q1: '狗' } }, '内存层同时也是最新的');
 
@@ -106,6 +108,7 @@ const SID = 'sess-aaa';
   cells.clear();
   const k = genuiStateKey(SID, RAW_A);
   saveBlockState(k, { answers: { q1: '猫' }, fields: { name: '张三' } }, true);
+  flushMirror();
   // 换一份模块实例 = 新页面(内存 Map 空),localStorage 存根不变。
   const reloaded = await import('../../client/src/genui/upstream/interaction-store.ts?refresh=1');
   assert.equal(reloaded.loadBlockState('nope'), null, '前提:新实例的内存层是空的');
@@ -138,25 +141,22 @@ const SID = 'sess-aaa';
 }
 
 // ── 7. 写透的**时机**锁(A2/A3 在组件侧的落法)────────────────────────────────────
-// 纯函数测不到时机:内存写必须在 effect 体里同步跑,不能被防抖裹住(裹住 = 键每 chunk
-// 一变、定时器每次被清理钩子清掉,永远轮不到落 = A2-② 直接失效)。
+// 组件只管"同步交给 store",不许自己攒定时器:回合末组件会在 300ms 内被重挂,
+// 清理钩子一 clearTimeout 那次编辑就永远没落过盘(B73 的形态)。防抖与
+// "页面要走了立刻落盘"都在 store 里(见 §14)。
 {
   const iEffect = at(block, 'useEffect(() => {\n    if (stateKey === undefined) return', '持久化 effect');
-  // 终点取组件的 JSX 起点(effect 里自己也有 `return (` 形态的清理钩子,不能拿它当界)
+  // 终点取组件的 JSX 起点(effect 里可能有 `return (` 形态的语句,不能拿它当界)
   const body = block.slice(iEffect, at(block, '<div className={css.block}', '组件 JSX'));
-  const iSync = at(body, 'saveBlockState(stateKey, next)', '内存层同步写');
-  const iGate = at(body, 'if (!settled) return', '非流式不镜像的门');
-  const iTimer = at(body, 'setTimeout(', '镜像防抖');
-  assert.ok(iSync < iGate && iGate < iTimer,
-    '顺序必须是 同步写内存 → settled 门 → 防抖镜像:内存写进了定时器就等于没写透');
-  assert.ok(/setTimeout\(\(\) => saveBlockState\(stateKey, next, true\)/.test(body),
-    '只有防抖里那次带 mirror=true —— 镜像方向做反(流式期也镜像)就回到上游的落差一');
+  const iSecret = at(body, 'secretFields.has(id)', '密码过滤');
+  const iSave = at(body, 'saveBlockState(stateKey, next, settled)', '交给 store 的那一次写');
+  assert.ok(iSecret < iSave, '密码必须在写之前就滤掉:内存层也不许存密码');
+  assert.equal((body.match(/secretFields\.has\(id\)/g) || []).length, 1, '密码过滤只该有一处');
+  assert.equal((body.match(/saveBlockState\(/g) || []).length, 1,
+    '组件里只该有一次 saveBlockState:内存写与镜像排队是同一次调用(mirror 位就是 settled)');
+  assert.ok(!/setTimeout/.test(body), '组件里不许再有定时器(重挂即被清,那次编辑就丢了)');
   assert.ok(/\[stateKey, answers, locked, fields, ui, secretFields, settled\]/.test(body),
     'deps 必须含 stateKey(A2-② 靠它迁写)、ui(无 id 那本账)与 settled(定稿后才轮到镜像)');
-  // 密码:两条写路共用同一个 safeFields,不许只在镜像那一路过滤(INTERFACE §3.6 永不保留)
-  assert.equal((body.match(/secretFields\.has\(id\)/g) || []).length, 1, '密码过滤只该有一处');
-  assert.ok(at(body, 'secretFields.has(id)', '密码过滤') < iSync,
-    '密码必须在**两条写路之前**就滤掉:内存层也不许存密码');
   // memo 比较器漏了 settled 就永远不落盘(定稿只翻一次,没有第二次机会)
   assert.ok(/prev\.settled === next\.settled/.test(block), 'memo 比较器要比 settled');
 }
@@ -312,6 +312,43 @@ const SID = 'sess-aaa';
   const forms = read('client/src/genui/upstream/blocks/forms.tsx');
   assert.equal((forms.match(/keptValue\(answers, id, uiKey\) === undefined/g) || []).length, 4,
     'input/textarea/select/slider 四处挂载回写都要先问"存过没有"');
+}
+
+// ── 14. 编辑完立刻刷新/关页,那条编辑也必须落过盘(INTERFACE §3.6「刷新保留」)──
+// 锁定验收 B73 的真实形态:填完值紧接着 page.reload()。落盘必须防抖(输入框逐字符
+// 触发),而防抖窗口里页面就没了 ⟹ 编辑等于没编辑。真机实测:编辑后 50ms 时
+// localStorage 还是 null、550ms 才有。修法=防抖搬进 store + 页面隐藏/卸载时 flush。
+{
+  cells.clear();
+  const k = genuiStateKey(SID, RAW_A);
+  saveBlockState(k, { answers: {}, locked: false, fields: { kept: 'WITH-ID-VALUE' } }, true);
+  assert.deepEqual(loadBlockState(k).fields, { kept: 'WITH-ID-VALUE' }, '内存层照旧是同步的');
+  assert.equal(localStorage.getItem(STORE_CELL), null, '前提:镜像是防抖的,这一刻还没落盘');
+
+  flushMirror();                                   // = pagehide / visibilitychange 那一下
+  assert.deepEqual(mirrored()[k].fields, { kept: 'WITH-ID-VALUE' },
+    '页面要走了必须把待落盘的编辑写下去 —— 否则刷新后读回一片空白(B73)');
+
+  // 刷新:新模块实例(内存空),值要能从镜像读回来
+  const reloaded = await import('../../client/src/genui/upstream/interaction-store.ts?b73=1');
+  assert.deepEqual(reloaded.loadBlockState(k).fields, { kept: 'WITH-ID-VALUE' },
+    '刷新后按同一个键读得回来(键两端一致:写时与读时都是 g:{queueKey}:{djb2(raw)})');
+
+  // flush 幂等 + 清掉的条目不许被待落盘的旧值写回来
+  flushMirror();
+  clearBlockState(k);
+  flushMirror();
+  assert.equal(mirrored()[k], undefined, 'clear 之后再 flush 不许把旧值复活');
+
+  // 兜底监听要真挂上(浏览器里没有这两句,防抖窗口内刷新照样丢)
+  const src = read('client/src/genui/upstream/interaction-store.ts');
+  assert.ok(/addEventListener\('pagehide', flushMirror\)/.test(src), 'pagehide 兜底');
+  assert.ok(/addEventListener\('visibilitychange'/.test(src) && /visibilityState === 'hidden'/.test(src),
+    'visibilitychange→hidden 兜底(移动端切走 pagehide 不保证触发)');
+  // 定时器不许再挂回组件:回合末 300ms 内重挂会被清理钩子吃掉
+  const block = read('client/src/genui/upstream/GenuiBlock.tsx');
+  assert.ok(!/setTimeout\(\(\) => saveBlockState/.test(block), '组件里不许再自己防抖落盘');
+  assert.ok(/saveBlockState\(stateKey, next, settled\)/.test(block), '组件一次调用:内存同步写 + 定稿后排镜像');
 }
 
 console.log('check-genui-state-key: all passed');

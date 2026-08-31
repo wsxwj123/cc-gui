@@ -200,11 +200,11 @@ export const GenuiBlock = memo(function GenuiBlock({ spec, stateKey, settled = f
       // InputNode 里就不调 setUi),所以不需要第二道 secret 过滤。
       ...(Object.keys(ui).length > 0 ? { ui } : {}),
     }
-    saveBlockState(stateKey, next)
-    if (!settled) return
-    // 落盘仍防抖:输入框逐字符触发,不该逐字符 JSON.stringify 整张表。
-    const timer = setTimeout(() => saveBlockState(stateKey, next, true), 300)
-    return () => clearTimeout(timer)
+    // 一次调用两件事:内存同步写 + (定稿后)排进镜像队列。落盘的防抖与
+    // "页面要走了立刻落盘"的兜底都在 store 里 —— 定时器**不能**挂在组件上:
+    // 回合末组件会在 300ms 内被重挂,清理钩子一 clearTimeout,那次编辑就永远没落过盘
+    // (锁定验收 B73 的形态,实测编辑后 50ms 时 localStorage 还是空的)。
+    saveBlockState(stateKey, next, settled)
   }, [stateKey, answers, locked, fields, ui, secretFields, settled])
   return (
     <GenuiFeedbackProvider value={feedback}>
