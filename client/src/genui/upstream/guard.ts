@@ -146,8 +146,12 @@ const IDENT_FIELDS = ['action', 'resetAction', 'id', 'group'] as const
  *
  * 检查放在 `repairNode` 顶端而不是 17 个 `opt('action', …)` 站点上,是因为那 17 处只
  * 覆盖"这个类型认识 action"的情况:模型把注入载荷挂在 `card`/`text` 这类不读 action
- * 的类型上,逐站点校验一个都拦不住(t04 最后一条用例正是这个形态)。一道门覆盖全部
- * 类型,也覆盖将来新加的字段。
+ * 的类型上,逐站点校验一个都拦不住(t04 最后一条用例正是这个形态)。
+ *
+ * 覆盖面说准确:这道门覆盖**全部已知类型的顶层字段**(以及将来新加进 IDENT_FIELDS 的
+ * 字段)。未知类型的子树不归它管 —— 那条路在 `repairNodeInner` 的 default 分支就整个
+ * 丢弃(渲染出 null),再由 L4 的外发白名单兜底。换句话说:这里拦的是"进得来的节点",
+ * 进不来的东西压根不存在,不是这道门放过了它。
  */
 function identifiersOk(v: Record<string, unknown>): boolean {
   for (const k of IDENT_FIELDS) {
