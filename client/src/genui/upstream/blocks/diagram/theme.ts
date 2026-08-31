@@ -17,6 +17,10 @@ import { hostPrefersDark } from '../../../host/host-theme.ts'
 export interface DiagramPalette {
   paper: string
   paper2: string
+  /** CGUI-PATCH: 普通节点的填充。上游把它写死成 '#ffffff'(nodeTreatment 的 default 分支),
+   * 浅色下是"比纸面更亮一档"的意思,深色下就是白盒子配白字 —— 深色调色板一旦真的被选中
+   * (本次接上 data-theme 之前它选不中,所以这条一直没暴露)就整个看不清。提成角色。 */
+  nodeFill: string
   ink: string
   muted: string
   soft: string
@@ -30,6 +34,7 @@ export interface DiagramPalette {
 const LIGHT: DiagramPalette = {
   paper: '#f5f5f5',
   paper2: '#ececec',
+  nodeFill: '#ffffff',
   ink: '#2d3142',
   muted: '#4f5d75',
   soft: '#7a8399',
@@ -43,6 +48,7 @@ const LIGHT: DiagramPalette = {
 const DARK: DiagramPalette = {
   paper: '#2d3142',
   paper2: '#393e53',
+  nodeFill: '#393e53',
   ink: '#f5f5f5',
   muted: '#bfc0c0',
   soft: '#8e98ac',
@@ -65,6 +71,8 @@ export function resolvePalette(variant: GenuiDiagramVariant | undefined, theme: 
   return {
     paper: theme.paper ?? base.paper,
     paper2: theme['paper-2'] ?? base.paper2,
+    // nodeFill 不开放给 spec 覆盖(上游本来就是写死的);跟随所选调色板即可。
+    nodeFill: base.nodeFill,
     ink: theme.ink ?? base.ink,
     muted: theme.muted ?? base.muted,
     soft: theme.soft ?? base.soft,
@@ -84,7 +92,7 @@ export function nodeTreatment(type: string | undefined, p: DiagramPalette): { fi
     case 'input': return { fill: inkAt(p.muted, 0.10), stroke: p.soft }
     case 'optional': return { fill: inkAt(p.ink, 0.02), stroke: inkAt(p.ink, 0.20), dashed: true }
     case 'security': return { fill: inkAt(p.accent, 0.05), stroke: inkAt(p.accent, 0.50), dashed: true }
-    default: return { fill: '#ffffff', stroke: p.ink }
+    default: return { fill: p.nodeFill, stroke: p.ink }
   }
 }
 

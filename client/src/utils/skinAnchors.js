@@ -50,6 +50,9 @@ export const SKIN_ANCHORS = [
   { id: 'goal-clear', desc: 'goal 常驻条「清除」按钮' },
   { id: 'agent-monitor', desc: '子代理监控面板' },
   { id: 'permission-card', desc: '权限确认卡片' },
+  // r64:模型生成界面(genui 围栏)。挂在渲染成功的块根上,与 data-testid="genui-block"
+  // 同一个元素(INTERFACE r64 §9.0);围栏退回代码块时整个块不存在,选择器落空不炸。
+  { id: 'genui-block', desc: '模型生成界面块(genui 围栏渲染成功时的根容器)' },
   // ── Home ──
   { id: 'home', desc: 'Home(无会话首页)容器' },
   { id: 'home-greeting', desc: 'Home 问候标题' },

@@ -114,7 +114,7 @@ export function GenuiFence({ raw, lang = 'cgui-ui', settled = false }) {
       // ErrorBoundary 在外、genui-block 在内:某个组件渲染抛异常时整块换成灰卡
       // (§5.8),此时"渲染成功的块"并不存在,genui-block 也就不该留在 DOM 里(§9.1)。
       <ErrorBoundary label="该界面">
-        <div data-testid="genui-block" style={settled ? SETTLED_STYLE : undefined}>
+        <div data-cgui="genui-block" data-testid="genui-block" style={settled ? SETTLED_STYLE : undefined}>
           {/* 交互态的持久键(§1.2.2 A1)。只在 spec 分支算:空体/超大/解析失败三条降级路
               一个状态条目都不该产生。指纹取**围栏原文**,与解析结果无关。 */}
           <GenuiBlock spec={fence.spec} stateKey={genuiStateKey(queueKey, raw)} settled={settled} />

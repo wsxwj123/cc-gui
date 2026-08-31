@@ -43,6 +43,17 @@
   /* Row/surface hover: a 4% wash of the theme's own label color works on
    * dark AND light hosts without any off-brand literal. */
   --dsl-g-hover: color-mix(in srgb, var(--dsw-alias-label-primary) 4%, transparent);
+  /* CGUI-PATCH(PLAN §1.6 / §6.3):以下三个中间层顶掉本文件里的独立硬编码色。
+   * on-accent = accent 填充面上的字/图元色。写死白字在浅色 accent 的主题下就是
+   *   核心可读性失效(LEARNINGS accent-btn-two-styles-judge-grep-variants);本仓
+   *   每个主题都给了 --color-on-accent,未覆盖的主题回落 #fff 与上游同值,零回归。
+   * on-series = 分类色填充面(头像)上的字色。取画布色 = "从彩色圆盘里挖出画布",
+   *   浅深两套色板下都过 AA(浅 4.9:1 / 深 5.7:1),写死白字在深色套下只有 3.1:1。
+   * sheen = 填充面顶部的高光/描边。上游写死白色,在浅色 accent 上会把边缘吃掉;
+   *   跟着"这个面上的字色"走,自然随明暗翻。 */
+  --dsl-g-on-accent: var(--color-on-accent, #fff);
+  --dsl-g-on-series: var(--color-canvas, #fff);
+  --dsl-g-sheen: color-mix(in srgb, var(--dsl-g-on-accent) 14%, transparent);
   --dsl-g-tint: 8%;
   --dsl-g-tint-strong: 14%;
   --dsl-g-font-mono: var(--ds-font-family-code, ui-monospace, 'SF Mono', monospace);
@@ -140,8 +151,8 @@
 .button.primary {
   background: var(--dsl-g-accent);
   border: none;
-  color: #fff;
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.14);
+  color: var(--dsl-g-on-accent);
+  box-shadow: inset 0 1px 0 var(--dsl-g-sheen);
 }
 .button.danger {
   background: color-mix(in srgb, var(--dsw-alias-state-error-primary, #ff6b6b) var(--dsl-g-tint), transparent);
@@ -360,9 +371,12 @@
   font-weight: inherit;
   cursor: pointer;
   text-align: left;
+  /* CGUI-PATCH(B70): 按钮要铺满表头的内容宽,否则可点面积只有文字那几个像素宽,
+     点表头空白处不触发排序(数字列本来就有 width:100%,文本列漏了)。 */
+  width: 100%;
   transition: color 0.12s;
 }
-.table th.thNum .thSort { text-align: right; width: 100%; }
+.table th.thNum .thSort { text-align: right; }
 .thSort:hover { color: var(--dsw-alias-label-primary); }
 /* The ACTIVE sort column stays at full contrast — the sort direction mark
    alone is too faint to read which header owns the order. */
@@ -457,10 +471,10 @@
   place-items: center;
   font-size: var(--dsl-g-font-title);
   font-weight: 700;
-  color: #fff;
+  color: var(--dsl-g-on-series);
   flex-shrink: 0;
-  border: 1px solid rgba(255, 255, 255, 0.14);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.16);
+  border: 1px solid color-mix(in srgb, var(--dsl-g-on-series) 14%, transparent);
+  box-shadow: inset 0 1px 0 color-mix(in srgb, var(--dsl-g-on-series) 16%, transparent);
 }
 
 /* ---------- callout ----------
@@ -673,11 +687,13 @@
   top: 3px; left: 3px;
   width: 14px; height: 14px;
   border-radius: 50%;
-  background: #fff;
+  /* CGUI-PATCH: 关态的轨道底是 --dsw-alias-bg-base(= 画布色),白旋钮在浅色主题下
+     整个消失(只剩投影);取墨色一档,浅深都看得见。开态轨道是 accent,换 on-accent。 */
+  background: var(--dsw-alias-label-tertiary);
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
-  transition: left 0.2s;
+  transition: left 0.2s, background 0.2s;
 }
-.switchOn .switchKnob { left: 19px; }
+.switchOn .switchKnob { left: 19px; background: var(--dsl-g-on-accent); }
 
 /* slider form node (v2.9) */
 .sliderRow {
@@ -1190,7 +1206,10 @@ button.ftNameBtn[aria-expanded] { cursor: pointer; }
   cursor: pointer;
 }
 
-.panelToggle:hover { background: rgba(255, 255, 255, 0.04); }
+/* CGUI-PATCH: 白洗在浅色主题下(白底)等于没有;换成 --dsl-g-hover 的同款配方
+   —— 用主题自己的文字色调一份 wash。面板头不在 .block 里,拿不到 --dsl-g-*,
+   所以这里写全式。 */
+.panelToggle:hover { background: color-mix(in srgb, var(--dsw-alias-label-primary) 4%, transparent); }
 
 /* In-place dismiss (issue #23): a compact ✕ at the right end of the header,
    distinct from the collapse/expand toggle. Applies the exact `/panel clear`
@@ -1215,7 +1234,8 @@ button.ftNameBtn[aria-expanded] { cursor: pointer; }
 }
 
 .panelClose:hover {
-  background: rgba(255, 255, 255, 0.08);
+  /* CGUI-PATCH: 同上,白洗改主题文字色 wash。 */
+  background: color-mix(in srgb, var(--dsw-alias-label-primary) 8%, transparent);
   opacity: 1;
 }
 
