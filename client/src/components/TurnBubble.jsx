@@ -533,7 +533,7 @@ export function CoworkBlocks({
     list.forEach((b, i) => {
       if (b.type === 'text' && b.content) {
         flushBucket(i);
-        out.push(<MarkdownRenderer key={`b-${i}`} content={b.content} dockKeyPrefix={`${dockKeyPrefix}:${i}`} />);
+        out.push(<MarkdownRenderer key={`b-${i}`} content={b.content} dockKeyPrefix={`${dockKeyPrefix}:${i}`} isStreaming={isLive} />);
         return;
       }
       // 未展开:收起工具/子代理/skill(思考照常显示,清单不计)。
@@ -585,7 +585,7 @@ export function CoworkBlocks({
   const out = segments.map((seg) => {
     switch (seg.kind) {
       case 'text':
-        return <MarkdownRenderer key={`t-${seg.key}`} content={seg.content} dockKeyPrefix={`${dockKeyPrefix}:${seg.index}`} />;
+        return <MarkdownRenderer key={`t-${seg.key}`} content={seg.content} dockKeyPrefix={`${dockKeyPrefix}:${seg.index}`} isStreaming={isLive} />;
       case 'task':
         return (
           <ToolCallWithRetry key={`k-${seg.key}`} toolCall={seg.toolCall} onRetryTool={onRetryTool} hoverOnly>
@@ -873,7 +873,7 @@ function TurnBubbleInner({ turn, onRetry, onRetryTool, onFork, retryActive }) {
                   )}
                 </div>
               )}
-              {fullText && <MarkdownRenderer content={fullText} dockKeyPrefix={turn.uuid} />}
+              {fullText && <MarkdownRenderer content={fullText} dockKeyPrefix={turn.uuid} isStreaming={isLiveStream} />}
               {/* 任务清单只走输入框上方常驻面板,legacy 路径同样不再内联渲染(见上)。 */}
               {!(chatMode && !chatExpanded) && hasInlineCalls && (
                 <div className="mt-2 space-y-2">

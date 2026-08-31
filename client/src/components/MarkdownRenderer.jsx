@@ -7,11 +7,12 @@ import 'katex/dist/katex.min.css'; // CJ-3:KaTeX 样式(katex 本体经 mermaid 
 import { openExternalUrl } from '../utils/openExternal.js';
 import { ArtifactPreview, isPreviewable } from './ArtifactPreview.jsx';
 import { CodeBlock } from './CodeBlock.jsx';
+import { GenuiFence, isGenuiLang } from './GenuiFence.jsx';
 import { dockKeyFor } from '../utils/artifactDock.js';
 
 // 围栏代码渲染。抽成函数以便注入 dockKeyPrefix(#3 稳定停靠身份的前缀);node 由
 // react-markdown 透传(passNode),node.position.start.offset 是本块在源文本中的起始偏移。
-function renderCode({ children, className, node, dockKeyPrefix, ...props }) {
+function renderCode({ children, className, node, dockKeyPrefix, isStreaming, ...props }) {
   // children 空值守卫:围栏刚开头(```lang 已到、正文一个字都还没到)时 react-markdown 给的
   // children 是 undefined,String(undefined) 会把字面量 "undefined" 当代码显示出来。
   // 这是既有瑕疵(今天任何语言的围栏在流式首帧都会闪一下),修在这个共用点一次覆盖所有语言。
@@ -24,6 +25,11 @@ function renderCode({ children, className, node, dockKeyPrefix, ...props }) {
   const lang = className?.replace('language-', '') || '';
 
   if (isBlock) {
+    // genui 围栏拦截(r64):cgui-ui / dsh-ui 两个标记就地渲染成组件。放在 isPreviewable
+    // 之前只是顺序上的明确 —— 这两个标记不在可预览集合里,html/svg/mermaid 的既有预览
+    // 行为一字不变(INTERFACE §1.1 并存要求)。
+    // isStreaming 由调用点透传(TurnBubble 的 isLive/isLiveStream),不传即已定稿。
+    if (isGenuiLang(lang)) return <GenuiFence raw={codeStr} lang={lang} settled={!isStreaming} />;
     // html/svg/mermaid 代码块给「代码/预览」切换;其余语言走普通代码块。
     if (isPreviewable(lang)) {
       const dockKey = dockKeyFor(dockKeyPrefix, node?.position?.start?.offset);
@@ -208,13 +214,16 @@ function wrapSpacedImageUrls(md) {
   });
 }
 
-export function MarkdownRenderer({ content, basePath, dockKeyPrefix }) {
+// isStreaming:本条消息是否还在流式产出。genui 围栏据此决定要不要做结构补全、要不要
+// 报解析失败(PLAN §1.4)。只有会渲染流式正文的调用点需要传(TurnBubble 三处),其余
+// 一律不传 = 已定稿。**不查 DOM**:DOM 探测在 React 19 并发渲染下时序不可靠。
+export function MarkdownRenderer({ content, basePath, dockKeyPrefix, isStreaming = false }) {
   // basePath/dockKeyPrefix 变化时才重建 components,避免每次渲染都生成新组件。
   // dockKeyPrefix 在流式全程稳定(turn.uuid 恒为 'streaming' 哨兵 + 块序号),故不会抖动。
   const components = useMemo(() => ({
     ...markdownComponents,
     // #3 注入 dockKeyPrefix,让可预览代码块拿到稳定停靠身份。
-    code: (props) => renderCode({ ...props, dockKeyPrefix }),
+    code: (props) => renderCode({ ...props, dockKeyPrefix, isStreaming }),
     img: ({ src, alt, title }) => (
       <img
         src={resolveImageSrc(src, basePath)}
@@ -224,7 +233,7 @@ export function MarkdownRenderer({ content, basePath, dockKeyPrefix }) {
         className="max-w-full h-auto my-3 rounded border border-canvas-deep"
       />
     ),
-  }), [basePath, dockKeyPrefix]);
+  }), [basePath, dockKeyPrefix, isStreaming]);
   // 仅文件预览(有 basePath)才预处理空格图片 URL,聊天气泡保持原文不动。
   const text = useMemo(() => (basePath ? wrapSpacedImageUrls(content) : content), [content, basePath]);
   return (
