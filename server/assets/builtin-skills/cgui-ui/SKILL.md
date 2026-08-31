@@ -69,7 +69,7 @@ Claude GUI 把这一整块替换成真实组件，围栏前后的文字照常渲
 - audio：`{"type":"audio","src":"…","alt":"…"?,"loop":true?}` — 原生控制条，不自动播放
 - video：`{"type":"video","src":"…","alt":"…"?,"poster":"…"?,"loop":true?,"muted":true?,"aspectRatio":"16:9|4:3|1:1|9:16"?}` — 不自动播放
 
-`audio` / `video` / `poster` 的地址只接受 `http(s)` 与同源相对路径，其它协议（`file:` `data:` 等）整个节点被丢弃。
+`audio` / `video` / `poster` 的地址仅接受同源相对路径（`/api/files/x.mp3`、`./a.mp4`）。外部主机（`http(s)://…`、`//host/…`）与其它协议（`file:` `data:` `blob:` 等）一律拒绝，携带它的整个节点被丢弃。
 
 ### 图表
 
