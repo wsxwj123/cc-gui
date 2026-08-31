@@ -1,19 +1,8 @@
 import React, { useState } from 'react';
 import { FileText, ChevronDown, ChevronRight, Loader2, FilePlus2 } from '../Icon.jsx';
 import { DiffViewer } from '../DiffViewer.jsx';
-
-function unifiedDiff(filePath, oldStr, newStr, label = 'change') {
-  const file = String(filePath || label).replace(/^[/\\]+/, '');
-  const oldLines = oldStr == null ? [] : String(oldStr).split('\n');
-  const newLines = newStr == null ? [] : String(newStr).split('\n');
-  return [
-    `--- a/${file}`,
-    `+++ b/${file}`,
-    '@@',
-    ...oldLines.map((line) => `-${line}`),
-    ...newLines.map((line) => `+${line}`),
-  ].join('\n');
-}
+// r64 M3:原来的私有 unifiedDiff 提到 utils/ 共用(genui 的 diff 节点也要拼同一种文本)。
+import { unifiedDiff } from '../../utils/unifiedDiff.js';
 
 export function EditDiffCard({ toolCall }) {
   const [expanded, setExpanded] = useState(false);
