@@ -169,8 +169,16 @@ class SafeMathParser {
     this.skipWs()
     if (this.peek() === '(') {
       // Function call.
-      const fn = FUNCTIONS[name]
-      if (fn === undefined) throw new ParseError(`unknown function '${name}'`, start)
+      // CGUI-PATCH(§2.8 / 文件头「不可摸 prototype」):判据必须是**自有属性**,不是
+      // `=== undefined`。`FUNCTIONS` 是普通对象字面量,`FUNCTIONS['valueOf']` 命中的是
+      // 继承来的 `Object.prototype.valueOf`(非 undefined),于是 `valueOf(x)`、
+      // `constructor(x)`、`hasOwnProperty(x)`、`toString(x)`… 全部**编译通过**;守卫
+      // repairPlotSeries 靠 `compileMathExpr(expr) === null` 判非法,编译过了就不丢这条
+      // 曲线,留到渲染层 sampleExpr 求值时才抛 TypeError ⟹ ErrorBoundary 把**整块**降级
+      // 成错误卡,同块的兄弟组件一起没。与同文件 CONSTANTS(:193)、vars(:198) 的
+      // `Object.hasOwn` 写法对齐 —— 唯独这一处漏了。
+      if (!Object.hasOwn(FUNCTIONS, name)) throw new ParseError(`unknown function '${name}'`, start)
+      const fn = FUNCTIONS[name]!
       this.i++
       const args: Array<number | ((x: number) => number)> = []
       this.skipWs()
