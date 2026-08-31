@@ -230,8 +230,22 @@ const SID = 'sess-aaa';
   const adv = read('client/src/genui/upstream/blocks/advanced.tsx');
   assert.equal((rn.match(/renderNode\([^)]*answers, uiKey\)/g) || []).length, 5,
     'render-node 里 5 处递归都要把 uiKey 当孩子的 path 传下去');
-  assert.equal((adv.match(/renderNode\([^)]*answers, uiKey\)/g) || []).length, 2,
-    'Tabs / Accordion 两处递归同理(它们自己的 uiKey 就是孩子的 path)');
+  // Tabs / Accordion:孩子的 path 必须**带上页签/分节序号**。直接传自己的 uiKey 的话,
+  // 两页(两节)同位的输入格会算出同一个键 —— 在第一页填的字出现在第二页,
+  // 正是这批要防的串扰形态。
+  assert.ok(/current\.items\.map\(\(c, i\) => renderNode\(c, i, onAction, depth \+ 1, answers, `\$\{uiKey \?\? ''\}\.\$\{active\}`\)\)/.test(adv),
+    'TabsNode 的孩子路径要带页签序号 ${active}');
+  assert.ok(/item\.items\.map\(\(c, ci\) => renderNode\(c, ci, onAction, depth \+ 1, answers, `\$\{uiKey \?\? ''\}\.\$\{i\}`\)\)/.test(adv),
+    'AccordionNode 的孩子路径要带分节序号 ${i}');
+  assert.ok(!/renderNode\([^)]*answers, uiKey\)/.test(adv),
+    '不许再把容器自己的 uiKey 原样当孩子的 path(那就是撞键)');
+  // 路径拼出来长什么样:同一 tabs 的两页同位输入格必须不同键
+  const childPath = (parent, idx) => (parent === '' ? String(idx) : `${parent}.${idx}`);
+  const tabsAt = '0';                                   // tabs 节点自己在根下第 0 位
+  const p0 = childPath(`${tabsAt}.0`, 0);               // 第 1 页第 0 个孩子
+  const p1 = childPath(`${tabsAt}.1`, 0);               // 第 2 页第 0 个孩子
+  assert.notEqual(p0, p1, '两页同位输入格必须落在不同路径上');
+  assert.deepEqual([p0, p1], ['0.0.0', '0.1.0'], '路径形态:根序号.页签序号.孩子序号');
 }
 
 // ── 12. 两条红线:密码不进任何一层;ui 不外发 ──────────────────────────────────

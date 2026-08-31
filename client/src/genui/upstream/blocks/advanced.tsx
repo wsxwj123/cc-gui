@@ -164,7 +164,9 @@ export function TabsNode({ tabs, onAction, depth = 0, answers, uiKey }: {
       </div>
       {current !== undefined && (
         <div className={css.col} role="tabpanel" id={`${uid}-panel-${active}`} aria-labelledby={`${uid}-tab-${active}`}>
-          {current.items.map((c, i) => renderNode(c, i, onAction, depth + 1, answers, uiKey))}
+          {/* CGUI-PATCH: 路径要带**页签序号** —— 直接传 uiKey 的话,两页同位的输入格
+              算出同一个键(`${uiKey}.0`),在第一页填的字会出现在第二页。 */}
+          {current.items.map((c, i) => renderNode(c, i, onAction, depth + 1, answers, `${uiKey ?? ''}.${active}`))}
         </div>
       )}
     </div>
@@ -217,7 +219,8 @@ export function AccordionNode({ node, onAction, depth = 0, answers, uiKey }: {
           </button>
           {open === i && (
             <div className={css.accBody} id={`${uid}-body-${i}`} aria-labelledby={`${uid}-head-${i}`}>
-              {item.items.map((c, ci) => renderNode(c, ci, onAction, depth + 1, answers, uiKey))}
+              {/* CGUI-PATCH: 同 TabsNode —— 路径要带**分节序号**,否则两节同位撞键。 */}
+              {item.items.map((c, ci) => renderNode(c, ci, onAction, depth + 1, answers, `${uiKey ?? ''}.${i}`))}
             </div>
           )}
         </div>
