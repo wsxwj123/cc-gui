@@ -157,7 +157,6 @@ const SETTLED_STYLE = { '--genui-reveal': 'none' };
  */
 export function GenuiFence({ raw, lang = 'cgui-ui', settled = false }) {
   const queueKey = useGenuiAction()?.queueKey ?? '';
-  if (typeof console !== 'undefined') console.log('[b73dbg]', JSON.stringify({ queueKey, settled, key: genuiStateKey(queueKey, raw), len: raw.length }));
   const normLang = normGenuiLang(lang);
   // 解析结果按 [原文, 是否定稿] 记忆:流式每 chunk 都会重渲,不 memo 就是每帧重跑一遍
   // 修复+白名单遍历。settled 进 deps 是因为二级补全只在定稿后开(§1.4)。
