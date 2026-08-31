@@ -71,6 +71,12 @@ assert.ok(macNode.includes('/Users/u/.volta/bin/node'));
 const macPy = buildCandidates('python', macCtx).map((c) => c.pattern);
 assert.ok(macPy.includes('/Users/u/.pyenv/shims/python3'), 'pyenv shims');
 assert.ok(macPy.includes('/Library/Frameworks/Python.framework/Versions/*/bin/python3'), 'python.org 官方 pkg');
+// r65:git 官网 pkg 落 /usr/local/git/bin(/etc/paths.d 只进登录 shell,后端必须直扫)
+const macGit = buildCandidates('git', macCtx).map((c) => c.pattern);
+assert.ok(macGit.includes('/Library/Developer/CommandLineTools/usr/bin/git'), 'xcode CLT');
+assert.ok(macGit.includes('/usr/local/git/bin/git'), 'git-scm.com 官方 pkg 落点(仅 darwin)');
+const linuxGit = buildCandidates('git', { platform: 'linux', home: '/home/u', env: {}, drives: [] }).map((c) => c.pattern);
+assert.ok(!linuxGit.includes('/usr/local/git/bin/git'), '该落点是 macOS 专属,linux 不生成');
 const macUv = buildCandidates('uv', macCtx).map((c) => c.pattern);
 assert.ok(macUv.includes('/Users/u/.local/bin/uv'));
 assert.ok(macUv.includes('/Users/u/.cargo/bin/uv'));

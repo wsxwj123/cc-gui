@@ -86,6 +86,11 @@ const IS_LOCAL_BUILD = existsSync(join(__dirname, 'routes', 'bots.local.js'));
     '/opt/homebrew/bin',                          // mac Apple Silicon brew
     '/usr/local/bin',                             // mac Intel brew + 通用
   ];
+  if (process.platform === 'darwin') {
+    // r65:git-scm.com 官方安装包落 /usr/local/git/bin(靠 /etc/paths.d/git 写登录
+    // shell 的 PATH,桌面壳 spawn 的后端看不到)。补挂后 git 检测与所有 spawn 受益。
+    dirs.push('/usr/local/git/bin');
+  }
   if (process.platform === 'win32') {
     dirs.push(
       join(home, 'AppData', 'Local', 'AnthropicClaude'),

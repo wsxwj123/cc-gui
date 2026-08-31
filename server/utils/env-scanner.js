@@ -124,6 +124,9 @@ export function buildCandidates(tool, { platform, home, env = {}, drives = [] })
     add(join(home, '.pyenv', 'shims', 'uv'), 'pyenv');
   }
   if (tool === 'git') add('/Library/Developer/CommandLineTools/usr/bin/git', 'xcode-clt');
+  // r65:git-scm.com 官方安装包落 /usr/local/git/bin,靠 /etc/paths.d/git 只写进
+  // 登录 shell 的 PATH;桌面壳 spawn 的后端拿不到登录 shell PATH,必须直扫。仅 darwin。
+  if (tool === 'git' && platform === 'darwin') add('/usr/local/git/bin/git', 'git-scm-pkg');
   return out;
 }
 
