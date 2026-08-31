@@ -8,7 +8,8 @@
 // `my-skills/<id>/SKILL.md` 都算一个 skill(id = SKILL.md 的父目录),兼容四个源。
 import { Router } from 'express';
 import { readdir, readFile, mkdir, writeFile, stat, rm, rename } from 'fs/promises';
-import { join } from 'path';
+import { join, dirname } from 'path';
+import { fileURLToPath } from 'url';
 import { homedir } from 'os';
 import { request as httpRequest } from 'http';
 import { request as httpsRequest } from 'https';
@@ -26,6 +27,10 @@ const ARCHIVE_DIR = join(homedir(), '.claude', 'skills-archive');
 // 临时目录当成 skill 加载(用户会话冒出 `.xxx.tmp-...` 假 skill)。移出 skills/ 根治;仍在
 // ~/.claude 同一文件系统,rename 到 skills/<id> 保持原子。
 const IMPORT_TMP_DIR = join(homedir(), '.claude', '.cgui-skill-tmp');
+// 随应用分发的内置技能(r64:cgui-ui 生成式界面)。落在 server/assets 下是刻意的:
+// tauri.conf.json 的 bundle.resources 含 `../server`,放这里天然进安装包;放仓根 skills/
+// 则打包后 app 内根本没有该文件(dev 通过、装机版 ENOENT)。与 builtin-agents 同一手法。
+const BUILTIN_SKILLS_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', 'assets', 'builtin-skills');
 // 启动时清空导入临时目录:它定义上只在单次导入期间存在,进程崩溃/被杀会遗留半成品目录,
 // 无其它清理时机 → 长期堆垃圾。fire-and-forget,失败无所谓(下次导入照常)。
 rm(IMPORT_TMP_DIR, { recursive: true, force: true }).catch(() => {});
@@ -150,6 +155,11 @@ router.post('/skills/archive', async (req, res) => {
   const id = String(req.body?.id || '');
   if (!ID_RE.test(id)) return res.status(400).json({ error: '非法 skill id' });
   try {
+    // 源已不在(用户在别处手动删了/挪走了)= 归档这件事的目标已达成:直接回 ok,不报错。
+    // 早退还有一层必要:下面 rm(dest) 会先清掉同名旧归档,若此时源不存在,继续走等于
+    // "什么都没归进来,却把上一次的归档删了"。
+    try { await stat(join(SKILLS_DIR, id)); }
+    catch { return res.json({ ok: true, alreadyGone: true }); }
     await mkdir(ARCHIVE_DIR, { recursive: true });
     const dest = join(ARCHIVE_DIR, id);
     try { await rm(dest, { recursive: true, force: true }); } catch { /* 覆盖旧同名归档 */ }
@@ -171,6 +181,52 @@ router.post('/skills/restore', async (req, res) => {
     localCache = null;
     res.json({ ok: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── 随应用分发的内置技能:三态现读 + 安装 ──────────────────────────
+// 归档/恢复不另开端点,直接复用上面的 /skills/archive 与 /skills/restore——同一个真相
+// 来源(~/.claude/skills 与 skills-archive 两个目录),用户在 Skill 面板里做的操作与
+// 这里做的天然一致,不需要对账。
+//
+// ⚠️ 这两个端点写的是 **~/.claude/skills** ——终端里的 claude、bot 全都读这个目录,
+// 不是 GUI 私有配置。调用方(设置面板)必须在界面上明说这一点。
+async function builtinSkillState(id) {
+  const isDir = async (p) => { try { return (await stat(p)).isDirectory(); } catch { return false; } };
+  if (await isDir(join(SKILLS_DIR, id))) return 'installed';
+  if (await isDir(join(ARCHIVE_DIR, id))) return 'archived';
+  return 'missing';
+}
+
+// 现读磁盘,**不走 localCache**:设置面板每次打开都要看到真实状态(用户可能在别处
+// 手动删了/装了),缓存在这里只会制造"界面说已装、磁盘上没有"的假象。
+router.get('/skills/builtin/:id', async (req, res) => {
+  const id = String(req.params.id || '');
+  if (!ID_RE.test(id)) return res.status(400).json({ error: '非法 skill id' });
+  try { res.json({ id, state: await builtinSkillState(id) }); }
+  catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+router.post('/skills/builtin/:id/install', async (req, res) => {
+  const id = String(req.params.id || '');
+  if (!ID_RE.test(id)) return res.status(400).json({ error: '非法 skill id' });
+  try {
+    // 已装/已归档一律不覆盖:用户可能改过这份 SKILL.md,覆盖等于销毁用户数据。
+    // 回原状态而不是报错——"让它装上"这个目标本来就已达成。
+    const cur = await builtinSkillState(id);
+    if (cur !== 'missing') return res.json({ id, state: cur, skipped: true });
+    let md;
+    // ponytail: 内置技能目前都是单文件 SKILL.md;真出现带 references/ 的内置技能再换 fs.cp
+    try { md = await readFile(join(BUILTIN_SKILLS_DIR, id, 'SKILL.md'), 'utf-8'); }
+    catch { return res.status(404).json({ error: `安装失败:安装包里没有内置技能 ${id}`, state: 'missing' }); }
+    await mkdir(join(SKILLS_DIR, id), { recursive: true });
+    await writeFile(join(SKILLS_DIR, id, 'SKILL.md'), md);
+    localCache = null;
+    res.json({ id, state: 'installed' });
+  } catch (e) {
+    // 失败必须回真实状态(仍是"未安装"),不能让界面显示成功。目录只读/磁盘满都走这里。
+    const state = await builtinSkillState(id).catch(() => 'missing');
+    res.status(500).json({ error: `安装失败:${e.message}`, state });
+  }
 });
 
 router.get('/skills/sources', (req, res) => {
