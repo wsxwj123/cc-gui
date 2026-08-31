@@ -2329,6 +2329,10 @@ export function GitInitBanner({ cwd }) {
   // 权限态:显示「探测失败 + 重新检测」,绝不挂初始化引导(误诊会把用户指去开
   // 完全磁盘访问,或对着真仓库反复点初始化)。
   const [gitErr, setGitErr] = useState(null); // { error, detail }
+  // r65:macOS 命令行开发者工具未装(/usr/bin/git 是 CLT shim)。服务端回
+  // { isRepo:null, gitNoDevtools:true, fixCommand } —— 横幅显示人话与可复制的修复
+  // 命令,不贴原始 stderr(那句 xcode-select 系统输出用户读不懂)。
+  const [devtoolsCmd, setDevtoolsCmd] = useState('');
   // 探测 effect 里要读当前 status 又不能把它放进 deps(那会自触发),用 ref 取。
   const statusRef = useRef(null);
   const statusCwdRef = useRef(null);
@@ -2368,7 +2372,8 @@ export function GitInitBanner({ cwd }) {
         setRepoRoot(typeof s?.root === 'string' ? s.root : null);
         setAccess(s?.permissionDenied ? { hint: s.hint || '', canOpenSettings: !!s.canOpenSettings } : null);
         setGitErr(s?.gitError ? { error: s.error || '', detail: s.detail || '' } : null);
-        setStatus(s?.gitMissing ? 'nogit' : (s?.gitError ? 'giterror' : (s?.permissionDenied ? 'tcc' : (s?.isRepo === false ? 'norepo'
+        setDevtoolsCmd(s?.gitNoDevtools ? (s.fixCommand || 'xcode-select --install') : '');
+        setStatus(s?.gitNoDevtools ? 'nodevtools' : s?.gitMissing ? 'nogit' : (s?.gitError ? 'giterror' : (s?.permissionDenied ? 'tcc' : (s?.isRepo === false ? 'norepo'
           : ((s?.hasCommit === false || importGitState.get(cwd) === 'repoNoCommit') ? 'nocommit' : 'repo')))));
       })
       // fail-safe:探测失败(断网 / 手机隧道被拦 / 非 2xx)一律**不显示任何 git 横幅**。
@@ -2391,6 +2396,27 @@ export function GitInitBanner({ cwd }) {
             className="px-2 py-0.5 rounded bg-amber-100 hover:bg-amber-200 text-amber-900 text-[10px] font-medium shrink-0"
           >打开系统设置</button>
         )}
+        <button
+          onClick={() => setKick((k) => k + 1)}
+          className="px-2 py-0.5 rounded hover:bg-amber-100 text-amber-700 text-[10px] shrink-0"
+        >重新检测</button>
+      </div>
+    );
+  }
+
+  if (status === 'nodevtools') {
+    // r65:人话 + 可复制的修复命令,不含原始 stderr。此态下所有依赖 git 的功能
+    // (worktree / 回滚 / diff)都不可用,装完 CLT 点「重新检测」即恢复。
+    return (
+      <div className="bg-amber-50 border-b border-amber-200 px-4 py-2 text-[12px] font-body text-amber-900 flex items-center gap-2 flex-wrap">
+        <GitBranch size={13} className="text-amber-600 shrink-0" />
+        <span className="flex-1 min-w-[12rem]">
+          macOS 的 git 由命令行开发者工具提供，本机尚未安装。在终端执行 <code className="font-mono select-all">{devtoolsCmd}</code>，按提示完成安装后点「重新检测」。
+        </span>
+        <button
+          onClick={() => { copyText(devtoolsCmd); }}
+          className="px-2 py-0.5 rounded bg-amber-100 hover:bg-amber-200 text-amber-900 text-[10px] font-medium shrink-0"
+        >复制命令</button>
         <button
           onClick={() => setKick((k) => k + 1)}
           className="px-2 py-0.5 rounded hover:bg-amber-100 text-amber-700 text-[10px] shrink-0"

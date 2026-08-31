@@ -34,6 +34,28 @@ eq(classifyGitStatusError({ message: 'No space left on device' }).kind, 'unknown
   eq(long.detail.length, 200, 'detail 截断 200 字符');
 }
 
+// ── r65:no-devtools(全新 mac 的 CLT shim)正反用例 ───────────────────
+// 正:实报形态逐字命中;即便进程同时超时(killed)也归因 CLT 未装(文本判定在 killed 前)。
+eq(classifyGitStatusError({ stderr: 'xcode-select: note: No developer tools were found, requesting install.' }).kind,
+  'no-devtools', 'xcode-select note → no-devtools');
+eq(classifyGitStatusError({ killed: true, stderr: 'xcode-select: note: No developer tools were found, requesting install.' }).kind,
+  'no-devtools', '带 CLT 文本的超时归因 no-devtools,不落 killed');
+eq(classifyGitStatusError({ stderr: 'No developer tools were found at /Applications/Xcode.app' }).kind,
+  'no-devtools', '"No developer tools" 变体同样命中');
+// 反:不含该文本的失败一个都不许被吸进 no-devtools
+eq(classifyGitStatusError({ killed: true, message: 'Command failed: git ...' }).kind, 'killed', '普通超时仍是 killed');
+eq(classifyGitStatusError({ stderr: 'fatal: bad object HEAD' }).kind, 'unknown', '普通 git 错误仍落 unknown');
+eq(classifyGitStatusError({ stderr: 'fatal: Operation not permitted' }).kind, 'denied', '拒访仍是 denied');
+eq(classifyGitStatusError({ code: 'ENOENT', message: 'spawn git ENOENT' }).kind, 'missing', 'git 真没装仍是 missing');
+
+// 路由接线锚:no-devtools 分支带类别与修复命令(真实 CLT 缺失没法在开发机重现,锚源码)。
+{
+  const src = readFileSync(new URL('../../server/routes/git.js', import.meta.url), 'utf-8');
+  ok(/cls\.kind === 'no-devtools'/.test(src), '路由有 no-devtools 分支');
+  ok(/res\.json\(\{ isRepo: null, gitNoDevtools: true, fixCommand: 'xcode-select --install' \}\)/.test(src),
+    '响应形状:{isRepo:null, gitNoDevtools:true, fixCommand} 逐字固定');
+}
+
 // ── 路由薄壳:真实驱动 denied 与 norepo 两分支 ─────────────────────
 // safeCwd 只放行 $HOME 内路径,夹具建在临时 HOME(同 check-git-import-probe 做法)。
 {

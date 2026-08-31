@@ -67,6 +67,11 @@ export function classifyGitStatusError(err) {
   const msg = String(err?.stderr || err?.message || '');
   if (/not a git repository|不是.*git\s*仓库/i.test(msg)) return { kind: 'norepo' };
   if (err?.code === 'ENOENT') return { kind: 'missing' };
+  // r65:全新 macOS 的 /usr/bin/git 是 Xcode CLT 的 shim —— 文件存在(不走 ENOENT),
+  // 执行时向 stderr 报 "xcode-select: note: No developer tools were found..."。
+  // 修前落 'unknown',前端把这句系统输出原样贴给用户。判定放在 killed/denied 之前:
+  // 命中该文本时根因必是 CLT 未装(即便进程恰好同时超时,归因也应是它)。
+  if (/xcode-select|No developer tools/i.test(msg)) return { kind: 'no-devtools' };
   if (err?.killed) return { kind: 'killed' };
   if (isAccessDenied(err)) return { kind: 'denied' };
   return { kind: 'unknown', detail: msg.split('\n')[0].slice(0, 200) };
@@ -136,6 +141,11 @@ router.get('/git/status', async (req, res) => {
         // git 没装:之前静默(前端不挂横幅)→ 用户报"没装 git 时看不到任何 git 初始化提示"。
         // 改成显式上报 gitMissing,前端弹引导横幅(装了才能 init / 回滚)。
         return res.json({ isRepo: null, gitMissing: true });
+      }
+      if (cls.kind === 'no-devtools') {
+        // r65:命令行开发者工具未装 —— 带类别与修复命令,前端渲染人话横幅,
+        // 不再把原始 stderr 贴给用户。
+        return res.json({ isRepo: null, gitNoDevtools: true, fixCommand: 'xcode-select --install' });
       }
       if (cls.kind === 'killed') {
         // 超时:信息不足,静默。
