@@ -14,6 +14,7 @@ import { GenuiBlock } from '../genui/upstream/GenuiBlock.tsx';
 import { resolveGenuiSpec } from '../genui/upstream/fence-render.tsx';
 import { describeJsonFailure } from '../genui/upstream/fence-repair.ts';
 import { GENUI_LIMITS } from '../genui/upstream/guard.ts';
+import { useGenuiAction } from '../genui/upstream/action-context.ts';
 import { genuiStateKey } from '../genui/upstream/interaction-store.ts';
 
 // 语言标记判定(PLAN §1.8:照抄 ArtifactPreview 的 normLang —— 取第一个空白分隔词 + 小写)。
@@ -96,12 +97,13 @@ const SETTLED_STYLE = { '--genui-reveal': 'none' };
  * @param {string}  lang     围栏语言标记(原文形态,内部归一)
  * @param {boolean} settled  本条消息是否已定稿。**props 透传,不查 DOM**(PLAN §1.4):
  *                           DOM 探测在 React 19 并发渲染下时序不可靠,props 是渲染输入。
- * @param {string}  queueKey 本窗格的队列键(`queueKeyFor(selectedSession)`),交互态键的
- *                           会话分量(PLAN §1.2.2 A1)。⚠️ M6 落 `GenuiActionProvider`
- *                           后从 context 取;在那之前恒为 ''(键仍稳定 = 重挂不丢状态,
- *                           只是分屏两个窗格里**逐字节相同**的围栏会共用一条状态)。
+ *
+ * 交互态键的会话分量 `queueKey` 从 action Provider 取(PLAN §1.2.2 A1 / §1.3.2):
+ * 挂在窗格根,所以它天然是**本窗格**的会话键,分屏两个窗格里逐字节相同的围栏就此分家。
+ * 只读面(`value={null}`)与窗格外拿到 '' —— 键仍稳定(重挂不丢状态),只是不按会话分。
  */
-export function GenuiFence({ raw, lang = 'cgui-ui', settled = false, queueKey = '' }) {
+export function GenuiFence({ raw, lang = 'cgui-ui', settled = false }) {
+  const queueKey = useGenuiAction()?.queueKey ?? '';
   const normLang = normGenuiLang(lang);
   // 解析结果按 [原文, 是否定稿] 记忆:流式每 chunk 都会重渲,不 memo 就是每帧重跑一遍
   // 修复+白名单遍历。settled 进 deps 是因为二级补全只在定稿后开(§1.4)。
