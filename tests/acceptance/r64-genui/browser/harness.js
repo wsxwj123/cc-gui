@@ -132,7 +132,8 @@ async function waitHealthy(port, proc, timeoutMs = 30_000) {
  * 绝不碰 6677 生产实例,绝不写真实 ~/.claude。
  */
 /** 允许的测试端口。6677 是生产实例,只许 GET,永远不在这个范围里。 */
-export const TEST_PORTS = [6703, 6704, 6705, 6706, 6707, 6708, 6709, 6710];
+// 6710 上有一个不属于本轮的常驻服务,排除掉。
+export const TEST_PORTS = [6703, 6704, 6705, 6706, 6707, 6708, 6709];
 
 export async function startApp(workerIndex) {
   // playwright 在用例失败后会换 worker,workerIndex 一路涨;所以不按序号取模死绑端口,
@@ -154,6 +155,19 @@ export async function startApp(workerIndex) {
   const bin = path.join(home, 'fakebin');
   fs.mkdirSync(path.join(home, '.claude', 'projects', encodeProjectDir(cwd)), { recursive: true });
   fs.mkdirSync(bin, { recursive: true });
+
+  // ── 把临时 HOME 预置成"不是第一次跑" ──────────────────────────────────
+  // 首启会连弹三层整屏遮罩,每一层都是 pointer-events 生效的,会**吃掉用例的第一次点击**
+  // (表现为交互像是没生效、断言压根跑不到)。三层各自的状态落点不同,逐个预置:
+  //   ① 使用指引  z-400 → localStorage 的 cgui-tour-seen(在 page fixture 里预置)
+  //   ② 更新说明  z-220 → 服务端 ~/.claude-gui/prefs.json 的 releaseNotesSeen
+  //   ③ 磁盘权限  z-210 → 服务端 ~/.claude-gui/permission-guide-shown.flag(文件存在即已看过)
+  // 这三项都与被测行为无关,清掉的是"够不到",不放宽任何断言。
+  fs.mkdirSync(path.join(home, '.claude-gui'), { recursive: true });
+  const appVersion = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8')).version;
+  fs.writeFileSync(path.join(home, '.claude-gui', 'prefs.json'),
+    JSON.stringify({ releaseNotesSeen: appVersion }));
+  fs.writeFileSync(path.join(home, '.claude-gui', 'permission-guide-shown.flag'), new Date().toISOString());
 
   // PATH 上的假 claude:一个 shell 薄壳,转交给 fake-claude.mjs
   const shim = path.join(bin, 'claude');
@@ -470,6 +484,14 @@ export const test = base.extend({
 
   // 每条用例:干净的 localStorage + 控制台/网络采集器 + 假 CLI 复位
   page: async ({ page, app }, use) => {
+    // 首启的「使用指引」浮层是一层 z-400 的整屏遮罩(pointer-events-auto),
+    // 会把用例的**第一次点击**吃掉 —— 表现为交互像是没生效,断言压根跑不到。
+    // 应用侧的判断是 localStorage.getItem('cgui-tour-seen') 为真就不弹(App.jsx:10525),
+    // 所以在任何导航之前预置成"已看过"。addInitScript 对后续 reload 同样生效(本组多条会刷新)。
+    // 这只是清掉一个与被测行为无关的拦路浮层,不放宽任何断言。
+    await page.addInitScript(() => {
+      try { localStorage.setItem('cgui-tour-seen', '1'); } catch { /* 隐私模式下忽略 */ }
+    });
     const logs = [];
     const requests = [];
     page.on('console', (m) => logs.push(`${m.type()}: ${m.text()}`));
