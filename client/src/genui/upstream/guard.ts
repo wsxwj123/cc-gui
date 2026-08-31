@@ -659,13 +659,16 @@ function repairNodeInner(value: unknown, ctx: RepairCtx, depth: number): GenuiNo
       // Full option: depth-bounded pass-through (the model writes the ECharts
       // option object; the guard walks it to cap nesting but does not
       // validate ECharts semantics — that is echarts' own job).
+      const budget: EChartSanitizeBudget = { count: GENUI_LIMITS.maxEChartOptionNodes, voided: false }
       const sanitized = v.option !== undefined
-        ? sanitizeEChartOption(v.option, 0, { count: GENUI_LIMITS.maxEChartOptionNodes })
+        ? sanitizeEChartOption(v.option, 0, budget)
         : undefined
       // A chart option root is always a plain object; a scalar root is
       // invalid, so degrade to preset/data/series handling (option dropped).
+      // CGUI-PATCH: `budget.voided` = 三条预算越界 ⟹ 整份作废(INTERFACE §5.5),
+      // 与"根不是对象"同一条出口:回退 preset/data,都没有就整个节点不渲染。
       const option: Record<string, unknown> | undefined =
-        sanitized === undefined || typeof sanitized !== 'object' || sanitized === null || Array.isArray(sanitized)
+        budget.voided || sanitized === undefined || typeof sanitized !== 'object' || sanitized === null || Array.isArray(sanitized)
           ? undefined
           : sanitized as Record<string, unknown>
       // At least one of preset+data or option must be present.
@@ -1140,7 +1143,15 @@ const ECHART_HTML_DANGER_RE = /<(?:script|img|svg|iframe|video|audio|object|embe
  * Mutable budget counter for the sanitize walk — passed by reference so
  * every recursion shares one pool.
  */
-interface EChartSanitizeBudget { count: number }
+interface EChartSanitizeBudget {
+  count: number
+  /**
+   * CGUI-PATCH(INTERFACE §5.5):三条预算(深度 >10 / 任一数组 >500 / 总条目 >2000)
+   * 任意一条越界 ⟹ **option 整体作废**,不是"切到上限继续用"。切片保留等于告诉写规格
+   * 的人"500 条以内随便进",安全边界要从严:越界的 option 本身就不可信,回退 preset。
+   */
+  voided: boolean
+}
 
 /**
  * Sanitize an ECharts option object: depth-bounded, budget-bounded
@@ -1162,9 +1173,12 @@ interface EChartSanitizeBudget { count: number }
  * arbitrary script. `richText` renders as text, never touching innerHTML.
  */
 function sanitizeEChartOption(v: unknown, depth: number, budget: EChartSanitizeBudget): unknown {
-  if (budget.count <= 0) return undefined
+  // CGUI-PATCH: 越界即作废(见 EChartSanitizeBudget.voided)。作废后立刻停走 ——
+  // 结果反正要丢,继续遍历只是白烧主线程(超预算的 option 正是大到会卡页面的那种)。
+  if (budget.voided) return undefined
+  if (budget.count <= 0) { budget.voided = true; return undefined }
   budget.count -= 1
-  if (depth > GENUI_LIMITS.maxEChartOptionDepth) return undefined
+  if (depth > GENUI_LIMITS.maxEChartOptionDepth) { budget.voided = true; return undefined }
   // Scalars pass through: numbers/strings/booleans/null are legal ECharts
   // values both as object fields and as array elements.
   if (typeof v === 'string') {
@@ -1185,7 +1199,9 @@ function sanitizeEChartOption(v: unknown, depth: number, budget: EChartSanitizeB
   if (typeof v === 'boolean') return v
   if (v === null) return null
   if (Array.isArray(v)) {
-    const cap = Math.min(v.length, GENUI_LIMITS.maxEChartArrayLen)
+    // CGUI-PATCH: 超长数组不再切片保留,整份 option 作废(INTERFACE §5.5)。
+    if (v.length > GENUI_LIMITS.maxEChartArrayLen) { budget.voided = true; return undefined }
+    const cap = v.length
     const arr: unknown[] = []
     for (let i = 0; i < cap; i++) {
       const s = sanitizeEChartOption(v[i], depth + 1, budget)
