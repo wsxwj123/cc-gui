@@ -8,7 +8,25 @@ const CHART = { items: [{ type: 'chart', kind: 'bars', data: [
 /** 切主题:打开主题面板,按名字选。 */
 async function useTheme(page, name) {
   await page.getByRole('button', { name: '主题' }).click();
-  await page.getByText(name, { exact: false }).first().click();
+  // 主题浮层分了几个 tab:深浅色在最外层,**主题家族(默认/Rosé Pine…)在「配色」tab 下**,
+  // 默认没展开。名字当场找不到就先点「配色」再找。
+  // 主题家族(默认/Rosé Pine…)在「配色」分区下,而且色板按钮可能只把名字放在
+  // title/aria-label 里、正文没有文字 —— 三种找法都试一遍。
+  const find = () => page.getByText(name, { exact: false })
+    .or(page.locator(`[title*=${JSON.stringify(name)}]`))
+    .or(page.locator(`[aria-label*=${JSON.stringify(name)}]`)).first();
+  if (!(await find().count())) {
+    for (const tab of ['配色', '主题']) {
+      const t = page.getByText(tab, { exact: true });
+      if (await t.count()) { await t.first().click({ timeout: 4000 }).catch(() => {}); await page.waitForTimeout(400); }
+      if (await find().count()) break;
+    }
+  }
+  const target = find();
+  await target.click({ timeout: 8000 }).catch(() => {
+    throw new Error(`主题浮层里找不到「${name}」(正文/title/aria-label 三种找法都试过)。\n`
+      + '契约 §9 没给主题行的锚,只能按显示名找;主题浮层的结构一变本条就够不到。');
+  });
   await page.keyboard.press('Escape');
   await page.waitForTimeout(500);
 }
@@ -58,9 +76,12 @@ test.describe('主题', () => {
     const series = page.getByTestId(TID.series);
     await series.first().waitFor({ timeout: 20_000 });
     const colors = () => series.evaluateAll((els) => els.map((e) => getComputedStyle(e).backgroundColor + getComputedStyle(e).fill));
-    await useTheme(page, 'default-dark');
+    // 主题按**界面显示名**选,不是内部 id:列表里写的是「默认」「Rosé Pine」,
+    // 拿 'default-dark' / 'rosepine' 去 getByText 一个都点不到,后面的颜色断言压根没执行。
+    // 两次都在当前这套深浅色下切换(换主题家族不改深浅),正好是本条要比的"同深浅、不同家族"。
+    await useTheme(page, '默认');
     const a = await colors();
-    await useTheme(page, 'rosepine');
+    await useTheme(page, 'Rosé Pine');
     expect(await colors(), '序列色只随浅/深翻转,不随主题家族变——这是设计如此').toEqual(a);
   });
 
