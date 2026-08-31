@@ -114,7 +114,7 @@ export const CodeNode = memo(function CodeNode({ node }: { node: GenuiCode }) {
  * round trip. Numeric cells (numbers or numeric strings) compare numerically;
  * everything else compares as text.
  */
-export function TabsNode({ tabs, onAction, depth = 0, answers }: {
+export function TabsNode({ tabs, onAction, depth = 0, answers, uiKey }: {
   tabs: GenuiTabs
   onAction?: GenuiBlockProps['onAction']
   depth?: number
@@ -180,7 +180,7 @@ export function TabsNode({ tabs, onAction, depth = 0, answers }: {
  * carry `answer` data) or collects all groups in ONE action. Without
  * `group`, the legacy per-click action fires. After a local grading the
  * group locks until 重新作答 resets it. */
-export function AccordionNode({ node, onAction, depth = 0, answers }: {
+export function AccordionNode({ node, onAction, depth = 0, answers, uiKey }: {
   node: GenuiAccordion
   onAction?: GenuiBlockProps['onAction']
   depth?: number

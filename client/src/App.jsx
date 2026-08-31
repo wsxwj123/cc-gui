@@ -4201,8 +4201,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     if (!reattachPid && !opts.forceSend && (streamingRef.current || backgroundPidRef.current)) {
       const queuedAt = Date.now();
       const queueOpts = { ...opts };
-      delete queueOpts.onEnqueueFailure;
-      delete queueOpts.onQueued;   // 回调进不了 localStorage,与 onEnqueueFailure 同理
+      delete queueOpts.onEnqueueFailure; delete queueOpts.onQueued;
       // 只剥进队列这份克隆的整图预览(内存预览不动),否则超 localStorage 配额被硬拒。
       if (queueOpts.meta) queueOpts.meta = attachmentMetaForPersistence(queueOpts.meta);
       const queued = useStore.getState().enqueueMessage(sessionQueueKey, { text: prompt, queuedAt, hidden: !!hiddenUserMessage, opts: queueOpts });
@@ -6213,11 +6212,11 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // genui action 回路(PLAN §1.3.2):本窗格的发送能力,挂在下面的窗格根上。
   // 必须声明在 handleSendRef **之后** —— 它是 const,提前引用就是 TDZ 白屏
   // (LEARNINGS「跨组件引用未声明 const → 生产白屏」)。
-  // 归属不符时直接进**捕获到的那个键**自己的队列(INTERFACE §3.4),不经 handleSend 的窗格闭包。
-  const genuiEnqueue = useCallback((key, text, opts) => !!useStore.getState()
-    .enqueueMessage(key, { text, queuedAt: Date.now(), opts }), []);
+  // 归属不符时直接进**捕获到的那个键**自己的队列(INTERFACE §3.4),不经 handleSend 的
+  // 窗格闭包 —— 那次入队落在 host/action-context.jsx 的编排入口里(照 enqueueHomeDraft
+  // 的先例:App.jsx 内的直接入队点保持唯一,新通道走各自的编排层)。
   const genuiAction = useGenuiActionCapability({
-    queueKey: sessionQueueKey, handleSendRef, messageQueue, enqueueTo: genuiEnqueue,
+    queueKey: sessionQueueKey, handleSendRef, messageQueue,
   });
 
   // Bug8:回滚 / 重做 / 编辑重发的重发通道。这三条是【有意打断替换】,与用户手打的新消息

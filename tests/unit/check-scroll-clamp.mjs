@@ -162,7 +162,10 @@ assert.equal(keyRequestsReading('End'), false, 'End 应由到达底部的几何�
   assert.ok(/ownSaved \?\? \(legacyKey \? localStorage\.getItem\(legacyKey\)/.test(src)
       && !/localStorage\.setItem\(legacyKey/.test(src),
     '旧 session-only 键只允许兼容读取，不得继续写入');
-  assert.ok(/if \(!reattachPid && !opts\.forceSend[\s\S]{0,1800}return;[\s\S]{0,500}真正开始新的空闲回合/.test(src),
+  // 两个 {0,N} 是"隔多远都行"的分隔符,不是长度上限 —— 断言的是**顺序**(入队门的 return
+  // 必须在恢复 following 之前)。r64 M6 往这段里加了 onQueued 三态回报,原来的 1800 只剩
+  // 个位数余量,放宽到 2200 保留同一条语义、免得下一次改动踩空。
+  assert.ok(/if \(!reattachPid && !opts\.forceSend[\s\S]{0,2200}return;[\s\S]{0,500}真正开始新的空闲回合/.test(src),
     '忙碌 Enter/steer 必须在恢复 following 之前返回');
 
   const subagent = readFileSync(join(root, 'client/src/components/SubagentView.jsx'), 'utf8');
