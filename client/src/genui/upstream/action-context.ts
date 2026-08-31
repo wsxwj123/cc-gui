@@ -24,12 +24,22 @@ export type GenuiSendState = 'sent' | 'queued' | 'failed'
  * - `queueKey`:本窗格的会话身份。**渲染时固定**(B2),点击时闭包捕获它,不现读;
  *   同时也是交互态键的会话分量(§1.2.2 A1),让分屏两个窗格里逐字节相同的围栏分家。
  * - `send`:同步回报三态。忙则由宿主既有的门自动入队,组件不判断忙不忙。
+ *   第一个参数是这一次外发的身份(`genuiActionId(stateKey, action)`),写进 `opts.meta`
+ *   供「已排队」徽章按队列比对;第二、三个才是动作名与 payload。
+ *   CGUI-PATCH(M6b 上报):这里原先写成两参(`action, payload`),而调用点
+ *   (`GenuiBlock.tsx` dispatch)与实现(`host/action-context.jsx`)一直是三参 ——
+ *   类型谎言。`.ts`/`.tsx` 不进 tsc 门(vite 只剥类型不检查),所以它不会被任何构建
+ *   拦下来,只会在下一个照签名调用的人身上炸。按实现订正为三参。
  * - `queuedIds`:当前**还在队列里**的 action id 集合。「已排队」是派生态不是存储态
  *   (§1.2.4):发出即消失、用户删掉即消失、刷新后队列还在则它也还在,没有生命周期可写错。
  */
 export interface GenuiActionCapability {
   queueKey: string
-  send: (action: string, payload: Record<string, unknown>) => { state: GenuiSendState, truncated: boolean }
+  send: (
+    actionId: string,
+    action: string,
+    payload: Record<string, unknown>,
+  ) => { state: GenuiSendState, truncated: boolean }
   queuedIds: ReadonlySet<string>
 }
 
