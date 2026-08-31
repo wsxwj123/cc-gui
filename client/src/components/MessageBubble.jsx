@@ -56,11 +56,13 @@ function CollapsibleUserText({ text }) {
 // 展开态是本组件自己的 state(照 ThinkingFold 的做法):父级不因它展开而整树重渲,
 // 也不会给上层 React.memo 的消息列表传新身份 prop。
 // 收起时 body **不渲染**(不是 CSS 隐藏)——契约要求它不得存在于 DOM,否则"默认折叠"无法证伪。
+// **不带入场动画**(判官裁定):标记一出现用例就点 toggle,0.25s 的 animate-fade-up
+// 与"toHaveCount(1) 后立即点击"存在竞态 —— 间歇 flake 比没动画伤害大。别加回来。
 function GenuiActionFold({ text }) {
   const [open, setOpen] = useState(false);
   const { action, type } = parseActionMessage(text) || {};
   return (
-    <div data-cgui="message-user" data-testid="message-card" className="group px-6 py-1 animate-fade-up" style={{ animationDuration: '0.25s' }}>
+    <div data-cgui="message-user" data-testid="message-card" className="group px-6 py-1">
       <div className="max-w-[var(--content-max)] mx-auto flex flex-col items-end">
         <div data-testid="genui-action-message" className="max-w-[85%] flex flex-col items-end">
           <button
