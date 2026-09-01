@@ -36,11 +36,21 @@ assert.equal(resolveSelectorModel(S({
   selectedSession: { sessionId: 's1', model: 'claude-opus-4-6' },
 }), 's1'), 'claude-opus-4-8', 'pin 压过历史');
 
-// providerEpoch 门控(U1/U4 同族):切过 provider 后不信任无时间戳的会话元数据
+// providerEpoch 门控(U1/U4 同族):切过 provider 后不信任无时间戳的会话元数据。
+// r80(B1):官方 Anthropic 下 epoch 门控已取消(它会把官方下合法的 claude 模型也永久
+// 判死),这里的"旧 provider 模型不许再显示"改由白名单(availableModels)承担 —— 断言
+// 的意图不变,只是换了执行它的那道防线。
 assert.equal(resolveSelectorModel(S({
   providerEpoch: 1_700_000_000_000,
+  availableModels: [{ id: 'claude-sonnet-4-6' }, { id: 'claude-opus-4-8' }],
   selectedSession: { sessionId: 's1', model: 'mimo-v2.5-pro' },
 }), 's1'), 'claude-sonnet-4-6', '切过 provider 后旧 provider 的历史模型不许再显示/被 pin');
+// 非官方 provider 下 epoch 门控本身仍在(白名单未加载时的兜底防线)
+assert.equal(resolveSelectorModel(S({
+  providerEpoch: 1_700_000_000_000,
+  currentProvider: { providerHint: 'deepseek' },
+  selectedSession: { sessionId: 's1', model: 'mimo-v2.5-pro' },
+}), 's1'), 'claude-sonnet-4-6', '非官方 provider 下 epoch 门控原样保留');
 
 // ── ④ context1m 标记叠加(桌面/手机同一处,手机原先漏了)────────
 assert.equal(resolveSelectorModel(S({ context1mBySession: { s1: true } }), 's1'),
