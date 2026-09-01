@@ -1,6 +1,6 @@
 import React from 'react';
 import { useStore } from '../stores/sessionStore.js';
-import { resolveAssistantName } from '../utils/providerList.js';
+import { resolveAssistantProvider, parseAvatar } from '../utils/providerList.js';
 
 const MODEL_STYLES = {
   opus:     { bg: '#EDE9FE', fg: '#6D28D9', border: '#DDD6FE', label: 'Opus',     provider: 'anthropic' },
@@ -72,54 +72,127 @@ const PROVIDER_AVATARS = {
   system:    { gradient: 'linear-gradient(135deg, #94A3B8 0%, #475569 100%)', mark: ProviderMarks.letter('·'), label: '系统' },
 };
 
-export function providerAvatar(model) {
-  // The avatar is the GUI's branding — always show Claude's official logo,
-  // regardless of which provider the CLI is talking to (Anthropic / DeepSeek
-  // / Xiaomi / OpenRouter etc.). The GUI is for Claude Code, so the chat
-  // bubble identity stays Claude. (Provider-specific text/badge still shows
-  // elsewhere via ModelBadge.)
+// 官方那一枚:cc-gui 自有标识,与顶栏 logo 同源同色。官方端点恒用它(r78 不改)。
+export function providerAvatar() {
   return PROVIDER_AVATARS.anthropic;
 }
 
+// r78:首字母色块(默认回落的最后一档)。渐变按名字哈希取,同一个 provider 每次
+// 渲染同一色,不同 provider 大概率不同色。
+const LETTER_GRADIENTS = [
+  'linear-gradient(135deg, #64748B 0%, #334155 100%)',
+  'linear-gradient(135deg, #0EA5E9 0%, #0C4A6E 100%)',
+  'linear-gradient(135deg, #14B8A6 0%, #115E59 100%)',
+  'linear-gradient(135deg, #F59E0B 0%, #92400E 100%)',
+  'linear-gradient(135deg, #EF4444 0%, #7F1D1D 100%)',
+  'linear-gradient(135deg, #8B5CF6 0%, #4C1D95 100%)',
+];
+function letterAvatar(name) {
+  const s = String(name || '').trim();
+  const label = ([...s][0] || '?').toUpperCase();
+  let h = 0;
+  for (const ch of s) h = (h * 31 + ch.codePointAt(0)) % 100003;
+  return { gradient: LETTER_GRADIENTS[h % LETTER_GRADIENTS.length], mark: ProviderMarks.letter(label), label: s || '?' };
+}
+
+// 没设 avatar 时按【名字 + 首个模型 id】的关键字命中现成的 PROVIDER_AVATARS
+// (与 ModelBadge 的配色同一张 MODEL_STYLES 表,观感一致)。都不中 → null。
+function keywordAvatar(name, models) {
+  const hay = `${name || ''} ${(Array.isArray(models) ? models[0] : '') || ''}`.toLowerCase();
+  for (const [key, style] of Object.entries(MODEL_STYLES)) {
+    if (hay.includes(key) && PROVIDER_AVATARS[style.provider]) return PROVIDER_AVATARS[style.provider];
+  }
+  return null;
+}
+
 /**
- * Circular avatar tinted to the model's provider. Used for chat bubbles.
- * Falls back to a neutral gray when the model is unknown.
+ * r78:一行 provider 该显示什么头像。纯函数,四级:
+ *   ① avatar 是上传文件名 → 本地图片(永远走自家路由,不热链)
+ *   ② avatar 是内置图标名 → 该图标
+ *   ③ avatar 是 emoji/短文字 → 原样显示
+ *   ④ 未设 → 名字/模型关键字命中内置图标 → 都不中用首字母色块
  */
-// `thinking={true}` spins the inner mark, mirroring the CLI's animated
-// progress glyph (✻ rotating) so users see Claude is "alive" mid-stream.
-export function ProviderAvatar({ model, size = 28, className = '', thinking = false }) {
-  const av = providerAvatar(model);
-  // 去掉圆形背景圈,只裸放标识(用户嫌圆头像别扭)。头像恒为 cc-gui 自有标识
-  // (providerAvatar 统一返回同一枚),与顶栏 logo 同源同色。
+export function providerAvatarSpec({ row = null, name = '' } = {}) {
+  const label = String(name || row?.name || '').trim();
+  const parsed = parseAvatar(row?.avatar);
+  if (parsed?.kind === 'file') return { kind: 'file', file: parsed.value, label };
+  if (parsed?.kind === 'mark' && PROVIDER_AVATARS[parsed.value]) return { kind: 'mark', ...PROVIDER_AVATARS[parsed.value], label: label || PROVIDER_AVATARS[parsed.value].label };
+  if (parsed?.kind === 'text') return { kind: 'text', text: parsed.value, label };
+  return { kind: 'mark', ...(keywordAvatar(label, row?.models) || letterAvatar(label)), label: label || '?' };
+}
+
+/**
+ * r78:provider 头像。气泡头、顶栏切换卡片、管理列表、手机 Provider 页共用同一枚。
+ * 官方端点走 official 分支(裸标识,与 r77 前完全一致);其余按 providerAvatarSpec。
+ * 圆角方片而不是圆形 —— 用户嫌圆头像别扭(r13-p2-13 的取舍沿用)。
+ */
+export function ProviderMark({ row = null, name = '', size = 16, official = false, className = '', thinking = false }) {
+  const spin = thinking ? 'avatar-thinking-spin' : '';
+  if (official) {
+    const av = providerAvatar();
+    return (
+      <div className={`shrink-0 flex items-center justify-center provider-mark ${spin} ${className}`}
+        style={{ width: size, height: size, color: av.markColor || '#D97757' }} title={av.label}>
+        <div style={{ width: Math.round(size * 0.92), height: Math.round(size * 0.92), display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+          {av.mark}
+        </div>
+      </div>
+    );
+  }
+  const spec = providerAvatarSpec({ row, name });
+  const box = { width: size, height: size, borderRadius: Math.max(3, Math.round(size * 0.28)) };
+  if (spec.kind === 'text') {
+    // emoji/文字走 React 文本节点(不用 dangerouslySetInnerHTML)。
+    return (
+      <span className={`shrink-0 inline-flex items-center justify-center leading-none ${spin} ${className}`}
+        style={{ ...box, fontSize: Math.round(size * 0.86) }} title={spec.label}>{spec.text}</span>
+    );
+  }
+  if (spec.kind === 'file') {
+    return (
+      <img src={`/api/provider-avatars/${spec.file}`} alt="" title={spec.label} draggable={false}
+        className={`shrink-0 object-cover ${spin} ${className}`} style={box} />
+    );
+  }
   return (
-    <div
-      className={`shrink-0 flex items-center justify-center provider-mark ${thinking ? 'avatar-thinking-spin' : ''} ${className}`}
-      style={{ width: size, height: size, color: av.markColor || '#D97757' }}
-      title={av.label}
-    >
-      <div
-        style={{
-          width: Math.round(size * 0.92), height: Math.round(size * 0.92),
-          display: 'flex', alignItems: 'center', justifyContent: 'center',
-        }}
-      >
-        {av.mark}
+    <div className={`shrink-0 flex items-center justify-center text-white ${spin} ${className}`}
+      style={{ ...box, background: spec.gradient, color: spec.markColor || '#fff' }} title={spec.label}>
+      <div style={{ width: Math.round(size * 0.62), height: Math.round(size * 0.62), display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: Math.round(size * 0.56) }}>
+        {spec.mark}
       </div>
     </div>
   );
 }
 
 /**
+ * r76+r78:助手消息属于哪个 provider。名字与头像**同一次调用**的返回值,
+ * 不许各解析一遍(那样必然出现"名字是 A、头像是 B")。
+ */
+export function useAssistantProvider(model) {
+  const providers = useStore((s) => s.providerRows);
+  const activeName = useStore((s) => s.providerName || '');
+  const activeOfficial = useStore((s) => (s.currentProvider?.providerHint || 'anthropic') === 'anthropic');
+  return resolveAssistantProvider({ model, providers, activeName, activeOfficial });
+}
+
+/**
+ * 气泡头像。r78 起跟随 provider:官方端点恒 cc-gui 自有标识(不变),第三方按
+ * 该 provider 的头像设置(未设则按名字回落)。`thinking` 时旋转内部标识,
+ * 对应 CLI 的 ✻ 动画。
+ */
+export function ProviderAvatar({ model, size = 28, className = '', thinking = false }) {
+  const { official, row, name } = useAssistantProvider(model);
+  return <ProviderMark official={official} row={row} name={name} size={size} className={className} thinking={thinking} />;
+}
+
+/**
  * r76:助手气泡头的名字。官方端点恒「Claude」;走第三方中转时显示用户给该
- * provider 起的名字。解析链在 utils/providerList.js 的 resolveAssistantName
+ * provider 起的名字。解析链在 utils/providerList.js 的 resolveAssistantProvider
  * (纯函数,有单测);这里只负责把 store 里的三样输入喂给它 —— 两个渲染点
  * (TurnBubble / MessageBubble)共用同一个组件,不会再出现"改一处漏一处"。
  */
 export function AssistantName({ model }) {
-  const providers = useStore((s) => s.providerRows);
-  const activeName = useStore((s) => s.providerName || '');
-  const activeOfficial = useStore((s) => (s.currentProvider?.providerHint || 'anthropic') === 'anthropic');
-  const name = resolveAssistantName({ model, providers, activeName, activeOfficial });
+  const { name } = useAssistantProvider(model);
   return <span className="text-[13px] font-medium text-ink font-body">{name}</span>;
 }
 

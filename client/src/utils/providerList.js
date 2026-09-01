@@ -65,10 +65,16 @@ export const SOURCE_BADGE = {
   custom: '自定义',
 };
 
+// r78:provider 头像的形态判定。纯函数放在 server/utils/(Tauri 只打包 server 与
+// client/dist,共享核心必须落在会被打包的那棵树上;见 utils/plan.js 的事故注释),
+// 这里再导出,前端一律从 providerList.js 取。
+export { parseAvatar, AVATAR_MARKS, AVATAR_FILE_RE } from '../../../server/utils/avatar.js';
+
 // ── r76:助手气泡头的名字 ─────────────────────────────────────────
 // 官方端点恒显 Claude;走第三方中转时显示【用户在设置里给该 provider 起的名字】
-// (p.name,不是内部 id / providerHint)。头像不参与:providerAvatar() 恒返回
-// cc-gui 自有标识(与 provider 无关),所以名字只能自己解析。
+// (p.name,不是内部 id / providerHint)。
+// r78:头像与名字同源 —— 判定挪进 resolveAssistantProvider(返回那一行 provider),
+// resolveAssistantName 变成读 name 的薄封装(判定逻辑逐字未改,r76 单测原样过)。
 export const OFFICIAL_ASSISTANT_NAME = 'Claude';
 
 // 模型 id 归一:去掉 [1m] 之类后缀 + 大小写。清单里存的和 jsonl 里回来的常差这一层。
@@ -84,8 +90,15 @@ function rowDisplayName(p) {
   return n.toLowerCase() === 'anthropic' ? OFFICIAL_ASSISTANT_NAME : n;
 }
 
+// 一行 provider 是否官方。
+const rowIsOfficial = (p) => !!p && (p.source === 'official' || p.category === 'official');
+
 /**
- * 解析一条助手消息该署谁的名字。纯函数(全部入参为数据),四级优先级:
+ * 解析一条助手消息该署谁的名字 **以及它属于哪一行 provider**(头像要的是行,名字
+ * 要的是字符串,两者必须来自同一次判定 —— 各解析一遍迟早出现"名字是 A、头像是 B")。
+ * 返回 { official, row, name }:official=官方端点(头像恒用 cc-gui 自有标识);
+ * row=命中的 provider 行(可能为 null,交给按名字关键字/首字母的默认回落)。
+ * 判定逻辑与 r76 逐字相同,四级优先级见下。
  *   ① 官方端点下的 claude-* 模型 → 'Claude'(官方订阅/官方 API 恒 Claude);
  *   ② model id 在【唯一一个】已配置 provider 的模型清单里命中 → 该 provider 的 name
  *      (命中 0 个或 ≥2 个都算没确证,继续往下 —— 宁可回落也不标错名);
@@ -97,23 +110,33 @@ function rowDisplayName(p) {
  * @param {string}   a.activeName     当前激活 provider 的显示名(/api/model 的 provider)
  * @param {boolean}  a.activeOfficial 当前是否官方端点(providerHint === 'anthropic')
  */
-export function resolveAssistantName({ model = '', providers = [], activeName = '', activeOfficial = true } = {}) {
+export function resolveAssistantProvider({ model = '', providers = [], activeName = '', activeOfficial = true } = {}) {
   const id = normModel(model);
   // ① 官方端点 + claude 系模型 = 确证官方。必须排在 ② 前面,否则某个中转 provider
   //    的清单里也写了 claude-opus-5 时会把官方消息标成它的名字。
-  if (activeOfficial && id.startsWith('claude')) return OFFICIAL_ASSISTANT_NAME;
+  if (activeOfficial && id.startsWith('claude')) return { official: true, row: null, name: OFFICIAL_ASSISTANT_NAME };
   // ② 唯一命中某个 provider 的模型清单
   if (id && Array.isArray(providers)) {
     const hits = providers.filter((p) => Array.isArray(p?.models) && p.models.some((m) => normModel(m) === id));
     if (hits.length === 1) {
       const name = rowDisplayName(hits[0]);
-      if (name) return name;
+      if (name) return { official: rowIsOfficial(hits[0]), row: hits[0], name };
     }
   }
   // ③ 当前激活 provider
-  if (activeOfficial) return OFFICIAL_ASSISTANT_NAME;
+  if (activeOfficial) return { official: true, row: null, name: OFFICIAL_ASSISTANT_NAME };
   const active = String(activeName || '').trim();
-  if (active && active.toLowerCase() !== 'anthropic') return active;
+  if (active && active.toLowerCase() !== 'anthropic') {
+    // 头像要行,名字只要串:按【显示名】回找那一行,保证头像与署名同属一个 provider。
+    // 找不到(列表还没水合/名字对不上)→ row=null,回落到按名字关键字取图。
+    const row = (Array.isArray(providers) ? providers : []).find((p) => rowDisplayName(p) === active) || null;
+    return { official: false, row, name: active };
+  }
   // ④ 兜底
-  return OFFICIAL_ASSISTANT_NAME;
+  return { official: true, row: null, name: OFFICIAL_ASSISTANT_NAME };
+}
+
+/** r76 原签名:只要名字。判定全在 resolveAssistantProvider,此处不许有第二份逻辑。 */
+export function resolveAssistantName(a) {
+  return resolveAssistantProvider(a).name;
 }
