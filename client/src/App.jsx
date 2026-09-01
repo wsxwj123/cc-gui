@@ -43,7 +43,7 @@ import { confirmDialog } from './utils/confirmDialog.jsx';
 import { ChatInput, EffortSelector, EFFORT_LEVELS, markAutoUnavailable, MODE_META, PermissionModeSelector } from './components/ChatInput.jsx';
 import { ModelBadge, ProviderAvatar, ProviderMark } from './components/ModelBadge.jsx';
 import { RemoteControlButton, ProviderSwitcher, ModelSelector, ProviderSourceBadge, AnchoredPopover } from './components/SessionSelectors.jsx';
-import { mergeProviderLists, rowIsCurrent, parseAvatar, AVATAR_MARKS } from './utils/providerList.js';
+import { mergeProviderLists, rowIsCurrent, parseAvatar, searchMarks } from './utils/providerList.js';
 import { UsagePanel } from './components/UsagePanel.jsx';
 import { ProcessPanel } from './components/ProcessPanel.jsx';
 import { SettingsPanel, ChatBackgroundCard } from './components/SettingsPanel.jsx';
@@ -9093,6 +9093,9 @@ function CustomProviderForm({ onSaved, editing, onCancel, onDirtyChange, customC
   const [avatarInput, setAvatarInput] = useState('');
   const [avatarErr, setAvatarErr] = useState('');
   const [avatarBusy, setAvatarBusy] = useState(false);
+  // 内置图标 56 枚,平铺翻不动 —— 一个搜索框按【键名 / 显示名 / 别名】过滤。
+  const [markQ, setMarkQ] = useState('');
+  const markList = searchMarks(markQ);
   const avatarFileRef = useRef(null);
   const [busy, setBusy] = useState('');
   const isEdit = !!editing;
@@ -9144,7 +9147,7 @@ function CustomProviderForm({ onSaved, editing, onCancel, onDirtyChange, customC
     })();
     return () => { stale = true; };
   }, [editing?.id]);
-  const reset = () => { setName(''); setType('openai'); setBaseURL(''); setApiKey(''); setQuotaKey(''); setQuotaKeyCleared(false); setModelsText(''); setDefaultModel(''); setTierModels({ haiku: '', sonnet: '', opus: '', fable: '' }); setCtxWindow(''); setModelPrices({}); setModelCaps({}); setAvatar(''); setAvatarOpen(false); setAvatarInput(''); setAvatarErr(''); setTestResult(null); setOpen(false); };
+  const reset = () => { setName(''); setType('openai'); setBaseURL(''); setApiKey(''); setQuotaKey(''); setQuotaKeyCleared(false); setModelsText(''); setDefaultModel(''); setTierModels({ haiku: '', sonnet: '', opus: '', fable: '' }); setCtxWindow(''); setModelPrices({}); setModelCaps({}); setAvatar(''); setAvatarOpen(false); setMarkQ(''); setAvatarInput(''); setAvatarErr(''); setTestResult(null); setOpen(false); };
   const close = () => { reset(); onCancel?.(); };
   const parseModels = () => modelsText.split(/[\n,]+/).map((s) => s.trim()).filter(Boolean);
   // BZ-2:有未保存内容时上报 dirty,父级据此阻止外部点击/Esc 关闭下拉(避免丢输入)。
@@ -9399,14 +9402,21 @@ function CustomProviderForm({ onSaved, editing, onCancel, onDirtyChange, customC
       </div>
       {avatarOpen && (
         <div className="p-2.5 rounded-lg border border-canvas-deep bg-canvas-warm space-y-2">
-          <div className="text-[11px] text-ink-faint font-body">内置图标</div>
-          <div className="flex flex-wrap gap-1.5">
-            {AVATAR_MARKS.map((m) => (
+          <div className="flex items-center gap-2">
+            <span className="text-[11px] text-ink-faint font-body shrink-0">内置图标</span>
+            <input className={`${inputCls} flex-1`} placeholder="搜索图标(名称或厂商别名)" value={markQ}
+              onChange={(e) => setMarkQ(e.target.value)} />
+          </div>
+          <div className="flex flex-wrap gap-1.5 max-h-[168px] overflow-y-auto">
+            {markList.map((m) => (
               <button key={m} type="button" title={m} onClick={() => { setAvatar(m); setAvatarErr(''); }}
                 className={`p-1 rounded-md border ${avatar === m ? 'border-accent' : 'border-transparent hover:border-canvas-deep'}`}>
                 <ProviderMark row={{ avatar: m }} name={m} size={22} />
               </button>
             ))}
+            {markList.length === 0 && (
+              <p className="text-[11px] text-ink-faint font-body py-1">没有匹配的内置图标。可改用下方的上传图片或 emoji。</p>
+            )}
           </div>
           <div className="flex items-center gap-2">
             <button type="button" onClick={() => avatarFileRef.current?.click()} disabled={avatarBusy}

@@ -13,12 +13,28 @@
 // 三者互斥:emoji 不可能匹配文件名正则,也不会落进 mark 白名单。
 // 老条目没有这个键 = 未设置,走默认回落(关键字命中 → 首字母色块)。
 
-// 内置图标名 = client/src/components/ModelBadge.jsx 的 PROVIDER_AVATARS 键集合。
-// 这里是白名单的真相源;渲染端按名取图,取不到就当没设。
-export const AVATAR_MARKS = [
-  'anthropic', 'deepseek', 'gemini', 'openai', 'mimo',
-  'qwen', 'zhipu', 'moonshot', 'meta', 'system',
-];
+import { PROVIDER_ICONS, PROVIDER_ICON_NAMES } from './provider-icons.js';
+
+// 内置图标名 = provider-icons.js 那张表的键集合。r83 之前这里是一份手抄的名字数组,
+// 与渲染端的 PROVIDER_AVATARS 靠单测对账;图标扩到 56 枚之后手抄必漏,改成直接引用
+// 同一张表 —— 渲染端也从这张表生成,两边不可能再分叉。
+export const AVATAR_MARKS = PROVIDER_ICON_NAMES;
+
+/**
+ * 图标选择器的模糊匹配。56 枚平铺找不着,按【键名 / 显示名 / 别名】三处任一命中。
+ * 放在这里而不是组件里:纯函数、可单测,且与白名单同一张表,不会出现"搜得到却存不进"。
+ * 空查询返回全表(顺序即表的定义顺序)。
+ */
+export function searchMarks(q) {
+  const s = String(q ?? '').trim().toLowerCase();
+  if (!s) return AVATAR_MARKS;
+  return AVATAR_MARKS.filter((k) => {
+    const def = PROVIDER_ICONS[k];
+    return k.toLowerCase().includes(s)
+      || String(def?.label ?? '').toLowerCase().includes(s)
+      || String(def?.kw ?? '').toLowerCase().includes(s);
+  });
+}
 
 // 上传文件名:uuid 生成的名字只含 [A-Za-z0-9-],扩展名限四种位图。
 // 刻意不含 .svg —— SVG 可内嵌脚本,头像不需要矢量。正则本身排除路径分隔符与
