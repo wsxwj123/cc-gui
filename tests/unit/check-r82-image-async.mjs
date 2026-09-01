@@ -39,6 +39,8 @@ const {
   IMAGE_PROTOCOLS, buildImageRequest, extractImage,
   extractTaskId, buildTaskPollRequest, extractTaskState,
 } = await import('../../server/utils/image-protocols.js');
+// 路由层的轮询状态机(import 真函数,fetch / sleep / now 全部注入,绝不打真实网络)。
+const { pollTask } = await import('../../server/routes/image.js');
 
 let failure = null;
 try {
@@ -238,6 +240,240 @@ try {
       { mime: '', url: 'https://a/b.png' }, 't6【零回归】:chat markdown 仍认');
     // 任务制响应打进 openai 协议:取不到图 → 由路由层转去试 extractTaskId(不是直接判死)。
     assert.equal(extractImage('openai', SUBMIT), null, 't6: 任务制提交响应在 openai 协议下取不到图');
+  }
+
+  // ───────────── 7. pollTask:注入 fetch / sleep / now 的确定性轮询 ─────────────
+  {
+    const PROVIDER = { baseURL: 'https://api.apimart.ai/v1', apiKey: KEY, proxyUrl: '' };
+    // 假响应:只实现 pollTask + readCapped 真正用到的那几个面
+    // (status / ok / headers.get('content-length') / body 可异步迭代 / body.cancel)。
+    const reply = (status, bodyObj, raw) => {
+      const text = raw !== undefined ? raw : JSON.stringify(bodyObj);
+      return {
+        status,
+        ok: status >= 200 && status < 300,
+        headers: new Map(), // get('content-length') → undefined,走流式限量读那条路
+        body: {
+          cancel: async () => {},
+          async* [Symbol.asyncIterator]() { yield Buffer.from(text, 'utf8'); },
+        },
+      };
+    };
+    const progressing = (p) => ({ code: 200, data: { id: TASK_ID, status: 'processing', progress: p } });
+
+    // 每次调用按脚本回一条;记录收到的 url / options,供形态断言用。
+    function scriptedFetch(script) {
+      const calls = [];
+      const fn = async (url, opts) => {
+        calls.push({ url, opts });
+        const next = script[Math.min(calls.length - 1, script.length - 1)];
+        if (typeof next === 'function') return next();
+        return next;
+      };
+      fn.calls = calls;
+      return fn;
+    }
+    // 注入的 sleep:不真睡,只记账(并如实转达 signal —— 取消要能穿透等待)。
+    function fakeSleep() {
+      const seen = [];
+      const fn = async (ms, signal) => { seen.push({ ms, aborted: !!signal?.aborted, hasSignal: !!signal }); };
+      fn.seen = seen;
+      return fn;
+    }
+    // 注入的时钟:每次调用推进固定步长,用来把 15 分钟上限压进几次迭代。
+    const stepClock = (stepMs) => { let t = 0; return () => (t += stepMs); };
+
+    // ① completed:processing ×2 → completed,拿到 4 个 url;progress 只在变化时上报。
+    {
+      const ac = new AbortController();
+      const seenProgress = [];
+      const doFetch = scriptedFetch([reply(200, progressing(0)), reply(200, progressing(0)), reply(200, progressing(99)), reply(200, RESULT)]);
+      const sleep = fakeSleep();
+      const out = await pollTask(
+        { taskId: TASK_ID, provider: PROVIDER, signal: ac.signal, onProgress: (p) => seenProgress.push(p) },
+        { fetch: doFetch, sleep, now: () => 0 },
+      );
+      assert.deepEqual(out.urls, RESULT.data.result.images[0].url, 't7【completed】:拿到真机原件里的 4 个 url');
+      assert.equal(out.error, undefined, 't7: 成功路径不带 error');
+      assert.equal(doFetch.calls.length, 4, 't7: 非终态继续轮询,终态就停');
+      assert.deepEqual(seenProgress, [0, 99, 100], 't7【进度去重】:同一个进度值不重复上报');
+      // 请求形态:GET {base}/tasks/{id} + Bearer + redirect:'manual'(带密钥不跟随 3xx)。
+      assert.equal(doFetch.calls[0].url, `https://api.apimart.ai/v1/tasks/${TASK_ID}`, 't7: 轮询端点');
+      assert.equal(doFetch.calls[0].opts.headers.Authorization, `Bearer ${KEY}`, 't7: 轮询带鉴权');
+      assert.equal(doFetch.calls[0].opts.redirect, 'manual', "t7【安全】:轮询同样 redirect:'manual'");
+      assert.ok(doFetch.calls[0].opts.signal, 't7: 轮询挂了 signal(可取消/单次超时)');
+      // 先等再查:第一次 fetch 之前必须已经等过一轮(提交那一刻不可能出图)。
+      assert.equal(sleep.seen.length, 4, 't7: 每轮各等一次');
+      assert.equal(sleep.seen[0].ms, 5000, 't7: 轮询间隔 5s(文档建议 3–5s)');
+      assert.ok(sleep.seen[0].hasSignal, 't7【可中断等待】:sleep 收到 signal,取消不必等满 5s');
+    }
+
+    // ② failed:上游给了原因就带上,没给也要有人话。
+    {
+      const ac = new AbortController();
+      const out = await pollTask(
+        { taskId: TASK_ID, provider: PROVIDER, signal: ac.signal },
+        {
+          fetch: scriptedFetch([reply(200, { data: { status: 'failed', progress: 0, error: { message: 'Banned prompt detected' } } })]),
+          sleep: fakeSleep(),
+          now: () => 0,
+        },
+      );
+      assert.equal(out.urls, undefined, 't7【failed】:不产出 url');
+      assert.match(out.error, /上游任务失败/, 't7: 失败文案');
+      assert.match(out.error, /Banned prompt detected/, 't7: 带上上游给的原因');
+
+      const noWhy = await pollTask(
+        { taskId: TASK_ID, provider: PROVIDER, signal: new AbortController().signal },
+        { fetch: scriptedFetch([reply(200, { data: { status: 'failed' } })]), sleep: fakeSleep(), now: () => 0 },
+      );
+      assert.match(noWhy.error, /上游未给出原因/, 't7: 上游不说原因时也有人话');
+    }
+
+    // ③ 超时:到 15 分钟上限判死,文案要说明平台侧可能仍在跑(否则用户以为白花钱)。
+    {
+      const doFetch = scriptedFetch([reply(200, progressing(10))]);
+      const out = await pollTask(
+        { taskId: TASK_ID, provider: PROVIDER, signal: new AbortController().signal },
+        { fetch: doFetch, sleep: fakeSleep(), now: stepClock(10 * 60 * 1000) },
+      );
+      // 时钟:deadline = 10min + 15min = 25min;第 1 轮 20min 继续,第 2 轮 30min 超限。
+      assert.equal(doFetch.calls.length, 1, 't7【超时】:到点就不再发查询');
+      assert.match(out.error, /超时/, 't7: 超时文案');
+      assert.match(out.error, /15 分钟/, 't7: 说清本地上限是 15 分钟');
+      assert.match(out.error, /平台侧任务可能仍在生成/, 't7: 说明上游可能还在跑(别让用户以为没了)');
+    }
+
+    // ④ 取消:等待被打断后立刻回 cancelled,不再发查询、也不写 error 文案。
+    {
+      const ac = new AbortController();
+      ac.abort();
+      const doFetch = scriptedFetch([reply(200, RESULT)]);
+      const out = await pollTask(
+        { taskId: TASK_ID, provider: PROVIDER, signal: ac.signal },
+        { fetch: doFetch, sleep: fakeSleep(), now: () => 0 },
+      );
+      assert.deepEqual(out, { cancelled: true }, 't7【取消】:回 cancelled,不带 error');
+      assert.equal(doFetch.calls.length, 0, 't7: 取消后一次查询都不发');
+    }
+    // 取消发生在查询途中(fetch 抛 AbortError)同样落 cancelled,不当成网络抖动继续轮。
+    {
+      const ac = new AbortController();
+      let n = 0;
+      const doFetch = async () => { n += 1; ac.abort(); throw Object.assign(new Error('aborted'), { name: 'AbortError' }); };
+      const out = await pollTask(
+        { taskId: TASK_ID, provider: PROVIDER, signal: ac.signal },
+        { fetch: doFetch, sleep: async () => {}, now: () => 0 },
+      );
+      assert.deepEqual(out, { cancelled: true }, 't7: 查询途中被取消也落 cancelled');
+      assert.equal(n, 1, 't7: 不再重试');
+    }
+
+    // ⑤ 抖动不判死 / 确定性错误判死。
+    {
+      // 5xx、429、网络异常各一次后成功 —— 任务在上游照跑,单次查不到不该毙掉整个任务。
+      const doFetch = scriptedFetch([
+        reply(502, { error: 'bad gateway' }),
+        reply(429, { error: 'slow down' }),
+        () => { throw new Error('fetch failed'); },
+        reply(200, RESULT),
+      ]);
+      const out = await pollTask(
+        { taskId: TASK_ID, provider: PROVIDER, signal: new AbortController().signal },
+        { fetch: doFetch, sleep: fakeSleep(), now: () => 0 },
+      );
+      assert.equal(out.urls?.length, 4, 't7【抖动不判死】:5xx/429/网络异常后仍能拿到结果');
+      assert.equal(doFetch.calls.length, 4, 't7: 三次抖动都重试了');
+
+      // 4xx(id 不存在 / 鉴权变了)是确定性错误 → 立刻判死,不空转 15 分钟。
+      const dead = await pollTask(
+        { taskId: TASK_ID, provider: PROVIDER, signal: new AbortController().signal },
+        { fetch: scriptedFetch([reply(404, { message: 'task not found' })]), sleep: fakeSleep(), now: () => 0 },
+      );
+      assert.match(dead.error, /HTTP 404/, 't7【4xx 判死】:带上状态码');
+      assert.match(dead.error, /task not found/, 't7: 带上上游原文');
+
+      // 非 JSON(中转站回 HTML 错误页)同样判死,不空转。
+      const notJson = await pollTask(
+        { taskId: TASK_ID, provider: PROVIDER, signal: new AbortController().signal },
+        { fetch: scriptedFetch([reply(200, null, '<html>502</html>')]), sleep: fakeSleep(), now: () => 0 },
+      );
+      assert.match(notJson.error, /不是 JSON/, 't7: 非 JSON 判死');
+
+      // 3xx:带着密钥不跟随(与生成 POST / 图片下载同口径)。
+      const redir = await pollTask(
+        { taskId: TASK_ID, provider: PROVIDER, signal: new AbortController().signal },
+        { fetch: scriptedFetch([reply(302, {})]), sleep: fakeSleep(), now: () => 0 },
+      );
+      assert.match(redir.error, /重定向/, 't7【安全】:3xx 拒绝跟随');
+      assert.match(redir.error, /已拒绝跟随/, 't7: 说明理由');
+
+      // completed 但没有可用链接 → 明说,不是静默成功也不是"没找到图片"。
+      const empty = await pollTask(
+        { taskId: TASK_ID, provider: PROVIDER, signal: new AbortController().signal },
+        { fetch: scriptedFetch([reply(200, { data: { status: 'completed', result: { images: [] } } })]), sleep: fakeSleep(), now: () => 0 },
+      );
+      assert.match(empty.error, /已完成但没有返回可用的图片链接/, 't7: 完成但无图有专门文案');
+    }
+
+    // ⑥ 密钥绝不外泄:上游把 Authorization 回显进错误正文时必须被剥掉。
+    {
+      const leak = await pollTask(
+        { taskId: TASK_ID, provider: PROVIDER, signal: new AbortController().signal },
+        {
+          fetch: scriptedFetch([reply(401, { message: `invalid key Bearer ${KEY}` })]),
+          sleep: fakeSleep(),
+          now: () => 0,
+        },
+      );
+      assert.ok(!leak.error.includes(KEY), `t7【密钥不外泄】:错误文案里不得出现明文密钥(实际 ${leak.error})`);
+      assert.match(leak.error, /\*\*\*/, 't7: 已被 redactKey 打码');
+    }
+
+    // ⑦ 入参非法不抛,回可读错误(taskId 空 / baseURL 空)。
+    {
+      for (const [bad, why] of [[{ baseURL: '', apiKey: KEY }, '空 baseURL'], [null, 'taskId 空']]) {
+        const out = await pollTask(
+          { taskId: bad === null ? '' : TASK_ID, provider: bad || PROVIDER, signal: new AbortController().signal },
+          { fetch: scriptedFetch([reply(200, RESULT)]), sleep: fakeSleep(), now: () => 0 },
+        );
+        assert.match(out.error, /无法构造任务查询请求/, `t7: ${why} → 可读错误而不是抛栈`);
+      }
+    }
+  }
+
+  // ───────────── 8. 源码锁:接线位置与既有安全链路 ─────────────
+  {
+    const src = readFileSync(join(REPO, 'server/routes/image.js'), 'utf8');
+    const runnerStart = src.indexOf('async function runImageJob');
+    const pollStart = src.indexOf('export async function pollTask');
+    assert.ok(pollStart > 0 && runnerStart > 0, 't8: pollTask 与 runImageJob 都在');
+    // check-r51 的锚点锁按 runImageJob→router 的源码切片计数,pollTask 落进切片里会把
+    // "既有链路一行未动"这条锁的语义搞错 —— 位置本身就是契约。
+    assert.ok(pollStart < runnerStart, 't8【位置契约】:pollTask 必须定义在 runImageJob 之前');
+
+    const poll = src.slice(pollStart, runnerStart);
+    assert.match(poll, /redirect: 'manual'/, "t8: 轮询带 redirect:'manual'");
+    assert.match(poll, /readCapped\(/, 't8: 轮询响应限量读');
+    assert.match(poll, /redactKey\(/, 't8: 轮询错误透传前剥密钥');
+    assert.match(poll, /\.\.\.proxy/, 't8: 轮询走 provider 自己的代理');
+    assert.match(poll, /AbortSignal\.any\(\[signal/, 't8: 轮询可被取消,且单次查询有超时');
+    assert.match(src, /TASK_POLL_DEADLINE_MS = 15 \* 60 \* 1000/, 't8: 15 分钟本地上限写在常量里');
+    assert.match(src, /TASK_POLL_INTERVAL_MS = 5_000/, 't8: 5s 轮询间隔写在常量里');
+
+    const runner = src.slice(runnerStart, src.indexOf("router.post('/image/generate'", runnerStart));
+    // 顺序契约:先试同步取图,取不到才试任务制 —— 反过来会让同步响应绕道轮询。
+    assert.ok(runner.indexOf('extractImage(provider.protocol, data)') < runner.indexOf('extractTaskId(data)'),
+      't8【顺序】:extractImage 先于 extractTaskId');
+    assert.match(runner, /if \(polled\.cancelled\) return;/, 't8: 轮询期间被取消不覆写状态');
+    assert.match(runner, /pickedList = polled\.urls\.map/, 't8: 多张图逐张走既有下载分支');
+    assert.match(runner, /for \(const picked of pickedList\)/, 't8: 下载/落盘对多图循环执行');
+    assert.match(runner, /files\.length > 1 \? \{ files \}/, 't8: 单图任务不写 files 字段(与 r82 前逐字一致)');
+    // 既有安全链路锚点数不变(check-r51 同款判据,这里再钉一次:轮询没把它们冲淡)。
+    const count = (s, re) => (s.match(re) || []).length;
+    assert.equal(count(runner, /redirect: 'manual'/g), 2, 't8: runner 内仍是两处 redirect(生成 POST + 下载)');
+    assert.equal(count(runner, /await assertPublicBaseURL\(/g), 1, 't8: 下载链接的 SSRF 复检仍在 runner 内');
+    assert.equal(count(runner, /readCapped\(/g), 2, 't8: runner 内仍是两处限量读');
   }
 } catch (e) {
   failure = e;
