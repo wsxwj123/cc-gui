@@ -359,7 +359,8 @@ if (failure) throw failure;
   assert.match(src, /headers: formType \? \{ \.\.\.headers, 'Content-Type': formType \} : headers/,
     't3: boundary 跟着序列化结果走(不是自己编一个)');
   // 安全锚:换 fetch 实现不许动它们(r54/r26 系各自还会再验一遍)
-  assert.equal(count(src, /await assertPublicBaseURL\(/g), 4, 't3: assertPublicBaseURL 调用点数量不变');
+  // r84:新增 /image/actions(MJ 二次操作)后多一处前置校验 → 基线 4 → 5。只增不减。
+  assert.equal(count(src, /await assertPublicBaseURL\(/g), 5, 't3: assertPublicBaseURL 调用点数量不变');
   // r82 的第四处外联带同款 redirect:'manual' + 两处限量读 → 两条基线各 +1 / +2
   // (它的 fetch 默认就是 undiciFetch,单测可注入;"只许加不许减"的语义没变)。
   assert.equal(count(src, /redirect: 'manual'/g), 4, "t3: redirect:'manual' 出现次数(r51 的 3 处 + r82 轮询 1 处)");

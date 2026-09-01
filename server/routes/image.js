@@ -16,6 +16,7 @@ import {
   IMAGE_PROTOCOLS, IMAGE_CONTENT_TYPES, I2I_MODES, buildImageRequest, extractImage,
   buildImageFileName, imageExtFromMime, resolvePreviewPath, redactKey,
   geminiModelsRequest, extractTaskId, buildTaskPollRequest, extractTaskState,
+  MJ_VERSIONS, MJ_SPEEDS, MJ_RATIO_RE, buildMjActionRequest,
 } from '../utils/image-protocols.js';
 import { readCapped } from '../utils/read-capped.js';
 // r56 按 provider 生图代理:生图链路的三处外联(生成 POST / 图片下载 / 拉模型)统一
@@ -240,6 +241,9 @@ function publicView(p) {
     // r56:本 provider 的正向代理地址。保存时已禁掉内嵌账号密码,故【不是敏感值】,
     // 可以整条回给前端(不回传就没法在编辑表单里显示已配的代理)。
     proxyUrl: typeof p.proxyUrl === 'string' ? p.proxyUrl : '',
+    // r84:Midjourney 的具名结构化参数(仅 mj 协议下发)。空串 = 不指定该键。
+    mjVersion: MJ_VERSIONS.includes(p.mjVersion) ? p.mjVersion : '',
+    mjSpeed: MJ_SPEEDS.includes(p.mjSpeed) ? p.mjSpeed : '',
     extra: p.extra || null, hasKey: !!p.apiKey,
   };
 }
@@ -328,9 +332,23 @@ async function validateBody(body) {
   // r56:代理地址可选。不传 = 不动已存值;空串 = 清除。
   const pv = validateProxyUrl(body?.proxyUrl);
   if (pv.error) return { error: pv.error };
+  // r84:mj 的具名参数。取值必须在文档明列的清单里 —— 这两个值会原样进请求体,
+  // 不做白名单的话就是"表单里能填什么上游就收到什么"。空串/未传 = 不下发该键。
+  const mjVersion = body?.mjVersion === undefined || body?.mjVersion === null ? '' : String(body.mjVersion);
+  if (mjVersion && !MJ_VERSIONS.includes(mjVersion)) return { error: `Midjourney 版本必须是 ${MJ_VERSIONS.join(' / ')}` };
+  const mjSpeed = body?.mjSpeed === undefined || body?.mjSpeed === null ? '' : String(body.mjSpeed);
+  if (mjSpeed && !MJ_SPEEDS.includes(mjSpeed)) return { error: `Midjourney 速度必须是 ${MJ_SPEEDS.join(' / ')}` };
+  // mj 的 size 是宽高比不是像素。新保存的当场拒(填错要即时可见);【存量条目不受这里管】——
+  // 它们不经过保存,由协议层的同款守卫静默忽略掉非比例值(见 buildImageRequest 的 mj 分支)。
+  const sizeStr = typeof size === 'string' ? size.trim() : '';
+  if (protocol === 'mj' && sizeStr && !MJ_RATIO_RE.test(sizeStr)) {
+    return { error: 'Midjourney 的尺寸是宽高比（如 16:9 / 1:1 / 9:16），不是像素尺寸' };
+  }
   return {
     value: {
       i2iMode,
+      mjVersion,
+      mjSpeed,
       name: name.trim(),
       protocol,
       baseURL: baseURL.trim().replace(/\/+$/, ''),
@@ -756,6 +774,9 @@ async function runImageJob({ jobId, provider, prompt, spec, startedAt }) {
     if (!pickedList) {
       const taskId = extractTaskId(data);
       if (taskId) {
+        // r84:上游任务号写进条目 —— 二次操作(U/V)要拿它当 task_id 提交,不存就没得引用。
+        // 在轮询之前写:轮询要一分钟起,期间用户已经能看到这条记录。
+        await updateHistoryEntry(jobId, { taskId }).catch(() => {});
         const polled = await pollTask({
           taskId,
           provider,
@@ -989,6 +1010,75 @@ router.post('/image/generate', async (req, res) => {
     // 上游 120s —— 慢生成(4K 等)时前端先被掐断报 "Load failed",服务端其实已经出图。
     res.json({ ok: true, jobId });
     // fire-and-forget:任务与这次请求彻底脱钩,面板关掉/刷新都照跑。
+    runImageJob({ jobId, provider, prompt, spec, startedAt }); // 名额由 runner 的 finally 归还
+  } catch (err) {
+    if (counted) activeJobs -= 1;
+    res.status(500).json({ error: redactKey(err.message, apiKeyForRedact) });
+  }
+});
+
+/**
+ * POST /api/image/actions { jobId, action, index } — 对一条【已完成的 mj 任务】发起二次操作
+ * (upscale = U1–U4 放大选图,variation = V1–V4 变体)。
+ *
+ * 与 /image/generate 是同一条流水线:组装 → 秒回 jobId → runImageJob 后台跑(提交响应
+ * 与 imagine 逐字同形,轮询与下载一行不改)。差别只在请求组装换成 buildMjActionRequest,
+ * 以及新条目带上「来自哪个任务的哪个动作」。
+ *
+ * 前置校验一律同步做(填错/点错要即时可见,不沉进历史):
+ *  - 父条目必须存在、已完成、且【记了上游任务号】(r84 之前的老条目没有 taskId,不能操作);
+ *  - provider 必须还在且是 mj 协议(换协议/删 provider 之后老条目上的按钮不能仍然能点);
+ *  - index 与 action 的白名单在协议层(buildMjActionRequest 抛人话错误)。
+ */
+router.post('/image/actions', async (req, res) => {
+  let apiKeyForRedact = '';
+  let counted = false;
+  try {
+    const { jobId: parentId, action, index } = req.body || {};
+    if (typeof parentId !== 'string' || !parentId) return res.status(400).json({ error: '请求格式不正确:缺少任务 id' });
+    const parent = (await readHistory(MAX_HISTORY)).find((e) => e && e.id === parentId);
+    if (!parent) return res.status(404).json({ error: '未找到该任务记录' });
+    if (parent.status !== 'done') return res.status(400).json({ error: '只能对已完成的任务发起该操作' });
+    if (!parent.taskId) return res.status(400).json({ error: '该记录没有保存上游任务号（早于本功能的记录），请重新生成一次后再操作' });
+
+    const all = await readImageProviders();
+    const provider = all.find((p) => p.id === parent.providerId);
+    if (!provider) return res.status(404).json({ error: '该任务所用的生图 provider 已被删除' });
+    if (provider.protocol !== 'mj') return res.status(400).json({ error: '该操作仅适用于 Midjourney 协议的 provider' });
+    apiKeyForRedact = provider.apiKey || '';
+    const pathErr = await checkSavePath(provider.savePath);
+    if (pathErr) return res.status(400).json({ error: pathErr });
+
+    let spec;
+    try { spec = buildMjActionRequest(provider, action, index, parent.taskId); }
+    catch (e) { return res.status(400).json({ error: e.message }); }
+    try { await assertPublicBaseURL(provider.baseURL); }
+    catch (e) { return res.status(e.status || 400).json({ error: e.message }); }
+
+    // 与 /image/generate 同一个并发闸(检查与自增之间没有 await)。
+    if (activeJobs >= MAX_CONCURRENT_JOBS) {
+      return res.status(429).json({ error: `同时生成的任务已达 ${MAX_CONCURRENT_JOBS} 个上限，请等待任一任务完成` });
+    }
+    activeJobs += 1;
+    counted = true;
+    const jobId = randomUUID();
+    const startedAt = Date.now();
+    const prompt = String(parent.prompt || '').trim();
+    await addHistoryEntry({
+      id: jobId,
+      prompt,
+      providerId: provider.id,
+      providerName: provider.name || '',
+      model: provider.model || '',
+      size: provider.size || '',
+      status: 'running',
+      startedAt,
+      // 可追溯:这条图是从哪条任务的第几张、做了什么动作来的。
+      parentId,
+      mjAction: action,
+      mjIndex: spec.body.index,
+    });
+    res.json({ ok: true, jobId });
     runImageJob({ jobId, provider, prompt, spec, startedAt }); // 名额由 runner 的 finally 归还
   } catch (err) {
     if (counted) activeJobs -= 1;

@@ -12,6 +12,8 @@ import { ImageLightbox } from './ImageLightbox.jsx';
 import { ModelPickModal, mergeModelLines, stripJunkModels } from './ModelPickModal.jsx';
 // r56 尺寸候选按模型家族过滤(能力表在 utils/imageSizeCaps.js,未知模型回落全量)。
 import { SIZE_OPTIONS, sizeCapFor, sizeOptionsFor } from '../utils/imageSizeCaps.js';
+// r84 多图条目:一个任务可能出多张图(MJ 一次 4 张),单图操作一律作用于【选中的那张】。
+import { entryFiles, pickedIndex, pickedFile, entryPreviewUrl, pickedPreviewUrl } from '../utils/imageEntry.js';
 // r58 上传参考图的 MIME:File.type 为空(Win 缺注册表映射)时按扩展名认,别一律说成 png。
 import { refMime } from '../utils/refMime.js';
 // r59 程序化写入走撤销通道,否则「恢复」覆盖掉的提示词 ⌘Z 撤不回。
@@ -36,7 +38,45 @@ const I2I_MODES = [
 
 // r52:models = 用户勾选的模型白名单(落盘在 provider 上),「模型」输入框的候选列表读它。
 // r56:proxyUrl = 本 provider 的正向代理地址(可选,留空直连)。
-const EMPTY_FORM = { id: '', name: '', protocol: 'openai', baseURL: '', apiKey: '', model: '', models: [], size: '', savePath: '', extra: '', i2iMode: 'edits', proxyUrl: '' };
+// r84:mjVersion / mjSpeed = Midjourney 的具名结构化参数(仅 mj 协议下发,空 = 不指定)。
+const EMPTY_FORM = { id: '', name: '', protocol: 'openai', baseURL: '', apiKey: '', model: '', models: [], size: '', savePath: '', extra: '', i2iMode: 'edits', proxyUrl: '', mjVersion: '', mjSpeed: '' };
+
+// ─────────────────────── r84 Midjourney 参数的界面取值(与服务端清单同源) ───────────────────────
+// 服务端权威清单在 server/utils/image-protocols.js 的 MJ_VERSIONS / MJ_SPEEDS,那里才是校验闸;
+// 这里是同一份值的界面副本(前端不 import 服务端代码)。tests/unit/check-r84-mj-actions.mjs
+// 比对两处:版本【一一对应】,速度是【子集】—— 界面把默认档写成空串(= 不下发 speed 键)
+// 而不是字面量 'relax',所以前端只有 fast / turbo 两个真值。
+// 版本清单出自 apimart 文档 imagine.md 原文「线上已验证可用版本:8.2、8.1、7、6.1、5.2、5.1、
+// niji 7、niji 6」;niji 不是"另一种版本号",是 niji:true + version:"7"/"6" 的搭配,
+// 故界面按【写实 / 动漫】两档分组,存储仍是一个字符串(niji 档在协议层拆回两个字段)。
+const MJ_VERSION_GROUPS = [
+  { id: 'mj', label: '写实', hint: 'Midjourney 主线版本', versions: ['8.2', '8.1', '7', '6.1', '5.2', '5.1'] },
+  { id: 'niji', label: '动漫', hint: 'Niji 版本，动漫 / 插画风格', versions: ['niji7', 'niji6'] },
+];
+const MJ_VERSION_LABEL = { niji7: 'niji 7', niji6: 'niji 6' };
+const MJ_SPEEDS = [
+  { id: '', label: '默认（relax）' },
+  { id: 'fast', label: 'fast（快，计费更高）' },
+  { id: 'turbo', label: 'turbo（最快，计费最高）' },
+];
+// 宽高比预设。MJ 的 size 就是 --ar,不是像素 —— 用途标签只为说明该比例常用于什么，
+// 比例值本身可任填(下面还有自定义两格)。
+const MJ_RATIOS = [
+  ['1:1', '头像'], ['3:2', '文章配图'], ['3:4', '社交媒体'],
+  ['4:3', '公众号配图'], ['9:16', '海报图'], ['16:9', '电脑壁纸'],
+];
+// 附加参数示例:用户原话是「speed stylize chaos seed 这些要怎么写,不会啊」——
+// 手写 JSON 是门槛,给一份能直接复制的样例比列字段名有用。
+const MJ_EXTRA_EXAMPLE = '{"stylize": 250, "chaos": 20, "seed": 12345, "negative_prompt": "blurry, text"}';
+const MJ_EXTRA_FIELDS = 'stylize 风格化 0-1000 · chaos 混乱度 0-100 · weird 怪异度 0-3000 · seed 随机种子 · negative_prompt 负面提示词 · style（如 raw）· quality 0.25/0.5/1/2 · hd 布尔（仅 8.1 / 8.2）';
+
+// r84:MJ 四宫格里"第几张"的人话说法。上游的 index 是 1–4,顺序即返回的 image_urls 顺序,
+// 对应四宫格的【左上=1、右上=2、左下=3、右下=4】—— 这个映射被单测钉住,别改顺序。
+const MJ_GRID_POSITIONS = ['左上', '右上', '左下', '右下'];
+// r84 二次操作:放大 = MJ 的 U1–U4(从四宫格里取出那一张单图),变体 = V1–V4(以那张为基础
+// 重抽一组四宫格)。上游把这两件事都做成新任务,结果作为新记录进历史。
+const MJ_ACTION_LABEL = { upscale: '放大', variation: '变体' };
+const MJ_ACTION_TAG = { upscale: 'U', variation: 'V' };
 
 // 提示词草稿:出图是后台任务,面板关掉再打开输入框里的内容必须还在。
 const PROMPT_DRAFT_KEY = 'cgui-image-prompt-draft';
@@ -81,6 +121,18 @@ function ProviderForm({ initial, onDone, onCancel }) {
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
   // r56:命中能力表才有小字说明(未命中 = 走全量候选,不提示)。随「模型」输入实时变。
   const sizeCap = sizeCapFor(form.model);
+  // r84 mj:版本分档由已存的值反推(空 = 写实档的"默认")—— 存的仍是一个字符串,
+  // 不引入第二个字段,省掉"两个控件必须配对填对"的一整类 bug。
+  const mjGroup = MJ_VERSION_GROUPS.find((g) => g.versions.includes(form.mjVersion)) || MJ_VERSION_GROUPS[0];
+  // 自定义比例的两格必须有自己的状态:只填了宽时 form.size 还不成立(写进去就是半截值),
+  // 靠 form.size 反推会让刚敲进去的数字立刻消失。
+  const [customWH, setCustomWH] = useState(() => (/^\d+:\d+$/.test(initial.size || '') ? String(initial.size).split(':') : ['', '']));
+  const [customW, customH] = customWH;
+  const setCustomRatio = (w, h) => {
+    setCustomWH([w, h]);
+    // 两格都有值才成一个比例;缺一格时把 size 清空,避免把 "16:" 这种半截值发上去。
+    setForm((f) => ({ ...f, size: w && h ? `${w}:${h}` : '' }));
+  };
 
   // 拉模型:编辑态只传 id(服务端强制用存储的 baseURL 与密钥,请求体里的 baseURL 被忽略);
   // 新建态传表单里的地址与密钥。密钥留空也发 —— 部分中转站的模型列表接口不鉴权。
@@ -143,6 +195,9 @@ function ProviderForm({ initial, onDone, onCancel }) {
         models: form.models || [], size: form.size, savePath: form.savePath, extra,
         i2iMode: form.i2iMode || 'edits',
         proxyUrl: (form.proxyUrl || '').trim(), // 空串 = 清除(改回直连)
+        // r84:仅 mj 协议有意义;换成别的协议时一并清空,避免存量脏值在切回来时突然生效。
+        mjVersion: form.protocol === 'mj' ? (form.mjVersion || '') : '',
+        mjSpeed: form.protocol === 'mj' ? (form.mjSpeed || '') : '',
       };
       // apiKey 留空 = 保留服务端已存的 key(前端从不持有 key,不能被空字段抹掉)。
       if (form.apiKey.trim()) body.apiKey = form.apiKey.trim();
@@ -181,7 +236,7 @@ function ProviderForm({ initial, onDone, onCancel }) {
           用户会按同步协议的直觉去填尺寸与参考图，然后得到一个"填了没生效"的结果）。 */}
       {form.protocol === 'mj' && (
         <div className="text-[10px] text-ink-faint font-body leading-snug">
-          请求发往「接口地址」+ /midjourney/generations，请求体只包含提示词与附加参数（extra）：模型名与尺寸均不发送。宽高比等参数需写进提示词（如 --ar 16:9）或填入附加参数。当前版本不支持参考图，已选择的参考图不会随请求发送。提交后服务端每 5 秒查询一次任务状态，单次生成通常需要 1–2 分钟，一次可能返回多张图并分别落盘；超过 15 分钟未出结果记为失败，此时平台侧任务可能仍在继续。
+          请求发往「接口地址」+ /midjourney/generations，请求体包含提示词、宽高比、版本、速度与附加参数（extra）；模型名不发送，由该路由自动注入。当前版本不支持参考图，已选择的参考图不会随请求发送。提交后服务端每 5 秒查询一次任务状态，单次生成通常需要 1–2 分钟，一次返回 4 张图并分别落盘；超过 15 分钟未出结果记为失败，此时平台侧任务可能仍在继续。
         </div>
       )}
       <label className="space-y-1 block"><span className={labelCls}>接口地址（baseURL，不含 /images/generations 等路径后缀）</span>
@@ -210,24 +265,121 @@ function ProviderForm({ initial, onDone, onCancel }) {
         </div>
       </div>
       {modelsMsg && <div className="text-[10px] text-ink-faint font-body leading-snug whitespace-pre-wrap break-all">{modelsMsg}</div>}
-      <label className="space-y-1 block"><span className={labelCls}>尺寸 / 分辨率</span>
-        <input className={inputCls} list="cgui-image-size-options" value={form.size} onChange={set('size')} placeholder="1024x1024" />
-        {/* r56:候选随「模型」输入实时收窄 —— 命中已知家族用其官方支持范围,未知模型回落全量。
-            只影响候选显示,手输的值一律照发(发送逻辑零改动)。 */}
-        <datalist id="cgui-image-size-options">
-          {(sizeOptionsFor(form.model) ?? SIZE_OPTIONS).map((s) => <option key={s} value={s} />)}
-        </datalist>
-        <span className="text-[10px] text-ink-faint font-body leading-snug block">
-          {form.protocol === 'openai'
-            ? '随请求发送；服务不支持所选尺寸时会报错。'
-            : '该协议无原生尺寸字段，此值不发送；需在附加参数（extra）中按服务文档设置。'}
-        </span>
-        {sizeCap && (
+      {/* r84:mj 的 size 语义与其余协议不同(宽高比而非像素),故整块换掉 —— 沿用像素输入框
+          会让用户按 3840x2160 的直觉去填,上游把它当比例解析。 */}
+      {form.protocol === 'mj' ? (
+        <div className="space-y-1"><span className={labelCls}>宽高比（对应 Midjourney 的 --ar）</span>
+          <div className="flex flex-wrap gap-1">
+            {MJ_RATIOS.map(([r, use]) => (
+              <button
+                type="button"
+                key={r}
+                onClick={() => setForm((f) => ({ ...f, size: f.size === r ? '' : r }))}
+                className={`px-2 py-1 rounded-md border text-[11px] font-body leading-tight ${form.size === r ? 'border-accent bg-accent/10 text-ink' : 'border-canvas-deep text-ink-soft hover:bg-canvas-deep/60'}`}
+              >
+                <span className="block font-mono">{r}</span>
+                <span className="block text-[9.5px] text-ink-faint">{use}</span>
+              </button>
+            ))}
+          </div>
+          <div className="flex items-center gap-1">
+            <span className="text-[10.5px] text-ink-faint font-body">自定义</span>
+            <input
+              className={`${inputCls} w-16 text-center`}
+              inputMode="numeric"
+              value={customW}
+              onChange={(e) => setCustomRatio(e.target.value.replace(/\D/g, ''), customH)}
+              placeholder="宽"
+            />
+            <span className="text-[11px] text-ink-faint font-mono">:</span>
+            <input
+              className={`${inputCls} w-16 text-center`}
+              inputMode="numeric"
+              value={customH}
+              onChange={(e) => setCustomRatio(customW, e.target.value.replace(/\D/g, ''))}
+              placeholder="高"
+            />
+            <span className="text-[10px] text-ink-faint font-body">{form.size ? `当前 ${form.size}` : '未指定，由服务端取默认比例'}</span>
+          </div>
+          {/* 存量条目可能存着像素值(r82 时该字段不下发,填什么都不影响);现在它会真发出去。 */}
+          {form.size && !/^\d+:\d+$/.test(form.size) && (
+            <span className="text-[10px] text-error font-body leading-snug block">
+              当前值不是宽高比格式，会被上游按宽高比解析。请选择上面的预设或填写两格自定义值。
+            </span>
+          )}
           <span className="text-[10px] text-ink-faint font-body leading-snug block">
-            候选已按 {sizeCap.family} 的官方支持范围过滤；手动输入不受限制。
+            这里填的是比例不是像素。出图像素由服务端按该比例决定，提交时无法指定；需要更大的图，在出图后对单张使用放大。
           </span>
-        )}
-      </label>
+        </div>
+      ) : (
+        <label className="space-y-1 block"><span className={labelCls}>尺寸 / 分辨率</span>
+          <input className={inputCls} list="cgui-image-size-options" value={form.size} onChange={set('size')} placeholder="1024x1024" />
+          {/* r56:候选随「模型」输入实时收窄 —— 命中已知家族用其官方支持范围,未知模型回落全量。
+              只影响候选显示,手输的值一律照发(发送逻辑零改动)。 */}
+          <datalist id="cgui-image-size-options">
+            {(sizeOptionsFor(form.model) ?? SIZE_OPTIONS).map((s) => <option key={s} value={s} />)}
+          </datalist>
+          <span className="text-[10px] text-ink-faint font-body leading-snug block">
+            {form.protocol === 'openai'
+              ? '随请求发送；服务不支持所选尺寸时会报错。'
+              : '该协议无原生尺寸字段，此值不发送；需在附加参数（extra）中按服务文档设置。'}
+          </span>
+          {sizeCap && (
+            <span className="text-[10px] text-ink-faint font-body leading-snug block">
+              候选已按 {sizeCap.family} 的官方支持范围过滤；手动输入不受限制。
+            </span>
+          )}
+        </label>
+      )}
+      {/* r84:版本 / 速度是文档明列取值的具名参数,做成下拉;冷门参数(stylize / chaos / seed …)
+          仍走附加参数 JSON,但给一份可直接复制的样例 —— 用户原话是「不会写」。
+          默认折叠:首屏留给地址 / 密钥 / 模型 / 比例这些必填项。 */}
+      {form.protocol === 'mj' && (
+        <details className="rounded-md border border-canvas-deep px-2 py-1.5">
+          <summary className="text-[10.5px] text-ink-soft font-body cursor-pointer select-none">高级参数（版本 / 速度 / 附加参数示例）</summary>
+          <div className="pt-2 space-y-2">
+            <div className="space-y-1"><span className={labelCls}>风格分档</span>
+              <div className="flex items-center gap-0.5 p-0.5 rounded-md bg-canvas-warm text-[11px] font-body w-max">
+                {MJ_VERSION_GROUPS.map((g) => (
+                  <button
+                    type="button"
+                    key={g.id}
+                    title={g.hint}
+                    onClick={() => setForm((f) => ({ ...f, mjVersion: g.id === 'niji' ? g.versions[0] : '' }))}
+                    className={`px-3 py-0.5 rounded transition-colors ${g.id === mjGroup.id ? 'bg-accent text-on-accent' : 'text-ink-muted hover:text-ink'}`}
+                  >{g.label}</button>
+                ))}
+              </div>
+              <span className="text-[10px] text-ink-faint font-body leading-snug block">{mjGroup.hint}</span>
+            </div>
+            <div className="grid grid-cols-2 gap-2">
+              <label className="space-y-1"><span className={labelCls}>版本</span>
+                <select className={inputCls} value={form.mjVersion || ''} onChange={set('mjVersion')}>
+                  {mjGroup.id === 'mj' && <option value="">默认（不指定版本）</option>}
+                  {mjGroup.versions.map((v) => <option key={v} value={v}>{MJ_VERSION_LABEL[v] || `v${v}`}</option>)}
+                </select>
+              </label>
+              <label className="space-y-1"><span className={labelCls}>速度</span>
+                <select className={inputCls} value={form.mjSpeed || ''} onChange={set('mjSpeed')}>
+                  {MJ_SPEEDS.map((s) => <option key={s.id} value={s.id}>{s.label}</option>)}
+                </select>
+              </label>
+            </div>
+            <div className="space-y-1">
+              <span className={labelCls}>其余参数写进下方「附加参数」，可复制此样例后改数值</span>
+              <div className="flex items-center gap-1">
+                <code className="flex-1 min-w-0 truncate rounded-md bg-canvas-warm border border-canvas-deep px-2 py-1 text-[10.5px] text-ink-soft font-mono" title={MJ_EXTRA_EXAMPLE}>{MJ_EXTRA_EXAMPLE}</code>
+                <button
+                  type="button"
+                  onClick={() => setForm((f) => ({ ...f, extra: MJ_EXTRA_EXAMPLE }))}
+                  className="shrink-0 px-2 py-1 rounded-md border border-canvas-deep text-[10.5px] text-ink-soft font-body hover:bg-canvas-deep/60"
+                >填入</button>
+              </div>
+              <span className="text-[10px] text-ink-faint font-body leading-snug block">可用字段：{MJ_EXTRA_FIELDS}。同名键以附加参数为准，会覆盖上面的下拉与比例。</span>
+            </div>
+          </div>
+        </details>
+      )}
       {/* r54:图生图形态。两种协议形态官方不兼容 —— OpenAI 有 /images/edits 端点,
           方舟(Seedream)没有,图生图靠 generations 的 image 字段。选错则上游 404/400。 */}
       {form.protocol === 'openai' && (
@@ -304,6 +456,9 @@ export default function ImagePanel() {
   // r54 参考图(图生图)。刻意【不进 localStorage 草稿】:一张图就能把 5MB 配额撑爆,
   // 重开面板参考图清空可接受(提示词照旧保留)。
   const [refs, setRefs] = useState([]);
+  // r84 多图:条目 id → 选中的第几张。没有记录 = 第 0 张(单图条目永远走这条)。
+  // 刻意不持久化:它是"我现在在看哪张",不是配置。
+  const [picked, setPicked] = useState({});
   // r54 删除:selectMode = 批量选择开关,selectedIds = 勾中的 jobId 集合。
   const [selectMode, setSelectMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState(() => new Set());
@@ -388,6 +543,18 @@ export default function ImagePanel() {
   const current = history.find((h) => h.id === currentId) || null;
   // 任务列表:running 排最上,其余保持时间倒序(sort 稳定,组内次序不变)。
   const ordered = [...history].sort((a, b) => (a.status === 'running' ? 0 : 1) - (b.status === 'running' ? 0 : 1));
+  // r84:条目上"当前这张"的三件套。单图条目(无 files)与改动前逐字等价。
+  const shotIdx = (h) => pickedIndex(h, picked[h.id]);
+  const shotFile = (h) => pickedFile(h, picked[h.id]);
+  const shotUrl = (h) => pickedPreviewUrl(h, picked[h.id]) || h.previewUrl || '';
+  const pickShot = (h, i) => { setCurrentId(h.id); setPicked((m) => ({ ...m, [h.id]: i })); };
+  // r84 可追溯:二次操作产生的条目标出"从哪个任务的第几张来的"。
+  const originNote = (h) => {
+    const tag = `${MJ_ACTION_TAG[h.mjAction] || ''}${h.mjIndex || ''}`;
+    // 父记录还在列表里才说"来自…":被删掉之后再说"来自上一任务"是找不到的指路。
+    const hasParent = history.some((x) => x.id === h.parentId);
+    return `${MJ_ACTION_LABEL[h.mjAction] || h.mjAction} ${tag}${hasParent ? ` · 来自上一任务第 ${h.mjIndex} 张` : ''}`;
+  };
 
   // 参考图选择:单张与张数都先在前端拦一道(超限直接报错不发),真正的闸在服务端。
   const addRefFiles = async (files) => {
@@ -427,14 +594,28 @@ export default function ImagePanel() {
   };
 
   // 「以此图修改」:引用已生成的图 —— 只传 file 路径,不把图片内容回传一遍。
+  // r84:作用于【当前选中那张】—— 多图任务里恒取第一张的话,后 3 张永远改不了。
   const addHistoryRef = (h) => {
     setErr('');
     setTab('gen');
+    const file = shotFile(h);
+    if (!file) return;
     setRefs((cur) => {
-      if (cur.some((r) => r.kind === 'history' && r.file === h.file)) return cur;
+      if (cur.some((r) => r.kind === 'history' && r.file === file)) return cur;
       if (cur.length >= MAX_REFS) { setErr(`参考图最多 ${MAX_REFS} 张`); return cur; }
-      return [...cur, { kind: 'history', file: h.file, name: h.file.split(/[/\\]/).pop(), preview: h.previewUrl }];
+      return [...cur, { kind: 'history', file, name: file.split(/[/\\]/).pop(), preview: entryPreviewUrl(file) }];
     });
+  };
+
+  // r84「清空」:一键清掉提示词与参考图,准备下一张。刻意【不弹确认】——
+  // 它是随手要用的动作,且提示词经 restorePrompt 写入(走撤销通道,⌘Z 能撤回),
+  // 参考图重新选也就几秒。restorePrompt('') 同时会把 localStorage 草稿写空 ——
+  // 只清内存的话刷新一下提示词又回来了(草稿是刻意持久的)。
+  const clearInputs = () => {
+    setErr('');
+    restorePrompt('');
+    refs.forEach(revokeRefPreview); // objectURL 不撤就一直挂在文档上
+    setRefs([]);
   };
 
   const generate = async () => {
@@ -473,6 +654,9 @@ export default function ImagePanel() {
   };
 
   const [revealErr, setRevealErr] = useState('');
+  // r84:二次操作(放大 / 变体)的报错。与 revealErr 分开 —— 两者的成因与处置完全不同。
+  const [actionErr, setActionErr] = useState('');
+  const [actionBusy, setActionBusy] = useState(''); // 提交中的 `${jobId}:${action}:${index}`
 
   // r26-J6:系统打开失败(非 2xx / 网络异常)要内联提示 —— 原先 catch 静默吞掉,
   // 用户点了「在文件夹中显示」毫无反应,分不清是没点上还是失败了。非阻断操作,
@@ -490,6 +674,31 @@ export default function ImagePanel() {
   };
 
   // 取消生成中的任务:只作用于点名的那一个 jobId。不弹确认 —— 取消可重发,不是破坏性操作。
+  /**
+   * r84:对某条已完成的 mj 任务的第 index 张(1-4)发起放大 / 变体。
+   * 服务端复用同一条流水线(提交 → 轮询 → 落盘),这里只管发起与报错。
+   */
+  const submitAction = async (h, action, index) => {
+    const busyKey = `${h.id}:${action}:${index}`;
+    if (actionBusy) return; // 双击防重:提交那一瞬只允许一个
+    setActionErr('');
+    setActionBusy(busyKey);
+    try {
+      const r = await fetch('/api/image/actions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ jobId: h.id, action, index }),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(d.error || `提交失败（${r.status}）`);
+      loadHistory();
+    } catch (e) {
+      setActionErr(`${MJ_ACTION_LABEL[action] || action}失败：${e.message}`);
+    } finally {
+      setActionBusy('');
+    }
+  };
+
   const cancelJob = async (id) => {
     setErr('');
     try {
@@ -542,6 +751,54 @@ export default function ImagePanel() {
     return next;
   });
 
+  // r84 多图缩略条:一个任务出多张时才出现(单图条目返回 null,渲染与改动前一致)。
+  // 点某张 = 选中它,上面的大图、放大、以此图修改、在文件夹中显示随之切过去 ——
+  // 悬停虽然也能看,但"作用于哪一张"必须由一次明确的点击决定,不能靠鼠标停在哪。
+  const imageStrip = (h) => {
+    const list = entryFiles(h);
+    if (h.status !== 'done' || list.length < 2) return null;
+    const cur = shotIdx(h);
+    // 二次操作只对 mj 协议、且记了上游任务号的条目开放(r84 之前的老记录没有 taskId,
+    // provider 被删或改了协议时同样不给入口 —— 点了必然失败的按钮不该存在)。
+    const canAct = !!h.taskId && providers.find((p) => p.id === h.providerId)?.protocol === 'mj';
+    return (
+      <div className="grid grid-cols-4 gap-1">
+        {list.map((f, i) => (
+          <div key={f} className={`relative rounded overflow-hidden border ${i === cur ? 'border-accent' : 'border-canvas-deep hover:border-ink-faint'}`}>
+            <button
+              type="button"
+              onClick={() => pickShot(h, i)}
+              title={`第 ${i + 1} 张（${MJ_GRID_POSITIONS[i] || ''}）：点击选中，大图与单图操作都作用于它；选中后这张下方出现放大 / 变体`}
+              className="block w-full"
+            >
+              <img src={entryPreviewUrl(f)} alt={`第 ${i + 1} 张`} className="w-full aspect-square object-cover" />
+            </button>
+            {canAct && i === cur && (
+              // 【只给选中那张渲染】动作条,不用 opacity 藏 —— computed opacity:0 的按钮仍然
+              // 命中 elementFromPoint,它盖住缩略图底部约 1/4:在没有 hover 的触屏上,
+              // "点一下选中"的第一下就会落在隐藏按钮上直接提交一个【要计费】的任务。
+              // 隐藏态加 pointer-events-none 也能挡,但少一个"两个类必须同时对"的失效面。
+              <div className="absolute inset-x-0 bottom-0 flex gap-px">
+                {['upscale', 'variation'].map((act) => (
+                  <button
+                    type="button"
+                    key={act}
+                    disabled={!!actionBusy}
+                    onClick={() => submitAction(h, act, i + 1)}
+                    title={act === 'upscale'
+                      ? `放大：取出四宫格里的第 ${i + 1} 张（${MJ_GRID_POSITIONS[i] || ''}）作为单图，结果记为新任务`
+                      : `变体：以第 ${i + 1} 张（${MJ_GRID_POSITIONS[i] || ''}）为基础重新生成一组，结果记为新任务`}
+                    className="flex-1 py-0.5 bg-canvas-deep/85 text-[9.5px] text-ink font-body hover:bg-accent hover:text-on-accent disabled:opacity-50"
+                  >{MJ_ACTION_LABEL[act]}</button>
+                ))}
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+    );
+  };
+
   // 两种视图共用的条目操作,避免两处各写一份走样。
   const taskActions = (h) => (
     <>
@@ -553,7 +810,7 @@ export default function ImagePanel() {
           className="px-1.5 py-1 rounded border border-canvas-deep text-ink-soft hover:bg-canvas-deep/60 flex items-center"
         ><X size={13} /></button>
       )}
-      {h.status === 'done' && h.file && (
+      {h.status === 'done' && shotFile(h) && (
         <button
           type="button"
           onClick={() => addHistoryRef(h)}
@@ -561,10 +818,10 @@ export default function ImagePanel() {
           className="px-1.5 py-1 rounded border border-canvas-deep text-ink-soft hover:bg-canvas-deep/60 flex items-center"
         ><Image size={13} /></button>
       )}
-      {h.status === 'done' && h.file && (
+      {h.status === 'done' && shotFile(h) && (
         <button
           type="button"
-          onClick={() => reveal(h.file)}
+          onClick={() => reveal(shotFile(h))}
           title="在文件夹中显示"
           className="px-1.5 py-1 rounded border border-canvas-deep text-ink-soft hover:bg-canvas-deep/60 flex items-center"
         ><ExternalLink size={13} /></button>
@@ -677,6 +934,13 @@ export default function ImagePanel() {
             {submitting ? <Loader2 size={12} className="animate-spin" /> : <Sparkles size={12} />}
             生成
           </button>
+          <button
+            type="button"
+            onClick={clearInputs}
+            disabled={!prompt && !refs.length}
+            title="清空提示词与参考图；提示词可用撤销（⌘Z / Ctrl+Z）恢复"
+            className="px-3 py-1.5 rounded-md border border-canvas-deep text-[12px] text-ink-soft font-body hover:bg-canvas-deep/60 disabled:opacity-50"
+          >清空</button>
           {refs.length > 0 && (
             <span className="text-[11px] text-ink-faint font-body">图生图（{refs.length} 张参考）</span>
           )}
@@ -700,20 +964,22 @@ export default function ImagePanel() {
       {current && current.status === 'done' && (
         <div className={`space-y-1.5 ${tab === 'gen' ? '' : 'hidden'}`}>
           <img
-            src={current.previewUrl}
+            src={shotUrl(current)}
             alt={current.prompt}
-            onClick={() => setZoom({ src: current.previewUrl, name: current.prompt, path: current.file })}
+            onClick={() => setZoom({ src: shotUrl(current), name: current.prompt, path: shotFile(current) })}
             className="w-full rounded-panel border border-canvas-deep cursor-zoom-in"
           />
+          {imageStrip(current)}
           <div className="flex items-center gap-2">
-            <span className="text-[10.5px] text-ink-faint font-mono break-all flex-1">{current.file}</span>
+            <span className="text-[10.5px] text-ink-faint font-mono break-all flex-1">{shotFile(current)}</span>
             <button
               type="button"
-              onClick={() => reveal(current.file)}
+              onClick={() => reveal(shotFile(current))}
               className="shrink-0 px-2 py-1 rounded border border-canvas-deep text-[11px] text-ink-soft font-body hover:bg-canvas-deep/60 flex items-center gap-1"
             ><ExternalLink size={11} />在文件夹中显示</button>
           </div>
           {revealErr && <div className="text-[11px] text-error font-body">{revealErr}</div>}
+          {actionErr && <div className="text-[11px] text-error font-body break-all">{actionErr}</div>}
         </div>
       )}
 
@@ -756,14 +1022,15 @@ export default function ImagePanel() {
         </div>
         {!history.length && <div className="text-[11px] text-ink-faint font-body">还没有生成记录。</div>}
         {revealErr && <div className="text-[11px] text-error font-body">{revealErr}</div>}
+        {actionErr && <div className="text-[11px] text-error font-body break-all">{actionErr}</div>}
         <div className={taskView === 'grid' ? 'grid grid-cols-2 gap-2' : 'space-y-1.5'}>
           {ordered.map((h) => (taskView === 'grid' ? (
             <div key={h.id} className={`rounded-panel border overflow-hidden ${h.id === currentId ? 'border-accent' : 'border-canvas-deep'}`}>
-              {h.status === 'done' && h.previewUrl ? (
+              {h.status === 'done' && shotUrl(h) ? (
                 <img
-                  src={h.previewUrl}
+                  src={shotUrl(h)}
                   alt={h.prompt}
-                  onClick={() => { setCurrentId(h.id); setZoom({ src: h.previewUrl, name: h.prompt, path: h.file }); }}
+                  onClick={() => { setCurrentId(h.id); setZoom({ src: shotUrl(h), name: h.prompt, path: shotFile(h) }); }}
                   className="w-full aspect-square object-cover cursor-zoom-in"
                 />
               ) : (
@@ -783,6 +1050,7 @@ export default function ImagePanel() {
                 </div>
               )}
               <div className="px-1.5 py-1 space-y-1">
+                {imageStrip(h)}
                 <div className="flex items-start gap-1">
                   {selectMode && (
                     <input
@@ -799,7 +1067,8 @@ export default function ImagePanel() {
                   {h.refs?.length ? <span className="mr-1 px-1 rounded bg-canvas-deep/60 text-ink-soft">图生图</span> : null}
                   {/* r82:一个任务可能出多张图,预览只显示第一张 —— 张数写出来,否则用户
                       不知道保存目录里还多了几个文件。 */}
-                  {h.files?.length > 1 ? <span className="mr-1 px-1 rounded bg-canvas-deep/60 text-ink-soft">{h.files.length} 张</span> : null}
+                  {h.files?.length > 1 ? <span className="mr-1 px-1 rounded bg-canvas-deep/60 text-ink-soft">第 {shotIdx(h) + 1}/{h.files.length} 张</span> : null}
+                  {h.mjAction ? <span className="mr-1 px-1 rounded bg-canvas-deep/60 text-ink-soft">{originNote(h)}</span> : null}
                   {STATUS_LABEL[h.status] || h.status} · {shortTime(h.startedAt)}
                 </div>
                 <div className="flex items-center gap-1">{taskActions(h)}</div>
@@ -816,11 +1085,11 @@ export default function ImagePanel() {
                   className="shrink-0 accent-red-600"
                 />
               )}
-              {h.status === 'done' && h.previewUrl ? (
+              {h.status === 'done' && shotUrl(h) ? (
                 <img
-                  src={h.previewUrl}
+                  src={shotUrl(h)}
                   alt={h.prompt}
-                  onClick={() => { setCurrentId(h.id); setZoom({ src: h.previewUrl, name: h.prompt, path: h.file }); }}
+                  onClick={() => { setCurrentId(h.id); setZoom({ src: shotUrl(h), name: h.prompt, path: shotFile(h) }); }}
                   className="shrink-0 w-9 h-9 rounded object-cover border border-canvas-deep cursor-zoom-in"
                 />
               ) : (
@@ -834,12 +1103,14 @@ export default function ImagePanel() {
                 <div className="text-[11.5px] text-ink font-body truncate" title={h.prompt}>{h.prompt}</div>
                 <div className="text-[10px] text-ink-faint font-body truncate">
                   {h.refs?.length ? <span className="mr-1 px-1 rounded bg-canvas-deep/60 text-ink-soft">图生图</span> : null}
-                  {h.files?.length > 1 ? <span className="mr-1 px-1 rounded bg-canvas-deep/60 text-ink-soft">{h.files.length} 张</span> : null}
+                  {h.files?.length > 1 ? <span className="mr-1 px-1 rounded bg-canvas-deep/60 text-ink-soft">第 {shotIdx(h) + 1}/{h.files.length} 张</span> : null}
+                  {h.mjAction ? <span className="mr-1 px-1 rounded bg-canvas-deep/60 text-ink-soft">{originNote(h)}</span> : null}
                   {h.status === 'running' ? `生成中 · ${elapsedSec(h)}s${h.progress == null ? '' : ` · ${h.progress}%`}` : (STATUS_LABEL[h.status] || h.status)}
                   {h.status === 'cancelled' ? ` · ${CANCEL_NOTE}` : ''}
                   {h.status !== 'done' && h.error ? ` · ${h.error}` : ''}
                   {h.startedAt ? ` · ${shortTime(h.startedAt)}` : ''}
                 </div>
+                {imageStrip(h)}
               </div>
               <div className="shrink-0 flex items-center gap-1">{taskActions(h)}</div>
             </div>
@@ -874,6 +1145,7 @@ export default function ImagePanel() {
                     model: p.model, models: p.models || [], size: p.size, savePath: p.savePath,
                     extra: p.extra ? JSON.stringify(p.extra, null, 2) : '', i2iMode: p.i2iMode || 'edits',
                     proxyUrl: p.proxyUrl || '',
+                    mjVersion: p.mjVersion || '', mjSpeed: p.mjSpeed || '',
                   })}
                   className="shrink-0 p-1 rounded hover:bg-canvas-deep/60 text-ink-soft"
                 ><Pencil size={12} /></button>
