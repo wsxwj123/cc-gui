@@ -165,9 +165,17 @@ const S = (o = {}) => ({
   const ok = S({ currentProvider: { providerHint: 'anthropic' },
     paneSessions: [{ sessionId: 'p1', model: 'claude-opus-4-8' }], modelBySession: {} });
   assert.equal(resolveSelectorModel(ok, 'p1'), 'claude-opus-4-8', '⑫ 合法历史模型照常显示');
-  // providerEpoch 门控与新校验叠加:epoch 非 0 时历史整段不采信,与校验无交互
-  const ep = S({ providerEpoch: 1, paneSessions: [{ sessionId: 'p1', model: 'claude-opus-4-8' }], modelBySession: {} });
-  assert.equal(resolveSelectorModel(ep, 'p1'), 'claude-sonnet-4-6', '⑫ epoch 门控优先,历史不采信');
+  // providerEpoch 门控与新校验叠加。r80(B1)起分两侧:
+  //  官方 Anthropic 下 epoch 不再判死合法 claude 模型(epoch 永不清零,原来会把官方下
+  //  完全合法的模型永久打成全局默认 —— BUGREPORT 档 H);非官方仍整段不采信。
+  const epOfficial = S({ providerEpoch: 1, currentProvider: { providerHint: 'anthropic' },
+    paneSessions: [{ sessionId: 'p1', model: 'claude-opus-4-8' }], modelBySession: {} });
+  assert.equal(resolveSelectorModel(epOfficial, 'p1'), 'claude-opus-4-8',
+    '⑫ 官方下 epoch 不再判死合法历史模型(r80 B1)');
+  const epThird = S({ providerEpoch: 1, currentProvider: { providerHint: 'deepseek' },
+    paneSessions: [{ sessionId: 'p1', model: 'claude-opus-4-8' }], modelBySession: {} });
+  assert.equal(resolveSelectorModel(epThird, 'p1'), 'claude-sonnet-4-6',
+    '⑫ 非官方 provider 下 epoch 门控原样保留(防 U1/U4 回归)');
 }
 
 console.log('check-selector-model-guard: all passed');

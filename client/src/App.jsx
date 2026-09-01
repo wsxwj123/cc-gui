@@ -71,7 +71,7 @@ import { BUILTIN_PROVIDERS, findBuiltin } from './utils/builtinProviders.js';
 import { computeCost, formatCost, setUserPrices, observeOfficialBilling } from './utils/pricing.js';
 import { extractToolResultText, finalizePendingToolCalls, applyFinalizedToBlocks } from './utils/toolResult.js';
 import { rebuildTodosFromTaskCalls } from './utils/todos.js';
-import { isSteered, firstSteerableIndex, isSteerBarrier, persistedSteerKeys, queueKeyFor } from './utils/steerQueue.js';
+import { isSteered, firstSteerableIndex, isSteerBarrier, persistedSteerKeys, queueKeyFor, HOME_DRAFT_KEY } from './utils/steerQueue.js';
 import { isInitBindingOrigin, isResetBindingOrigin, isCliNoContentPlaceholder, makeProviderModelGuard, migrateDraftQueue, paneMessagesOwned, resolveHistModel, resolveSelectorModel, resolveSendModel } from './utils/routing.js';
 import { migrateOptimisticGoalOwner, optimisticGoalForOwner, parseGoalCommand } from './utils/goal.js';
 import { approvedPlanItems, migrateSessionVisibilityOwner } from './utils/plan.js';
@@ -1897,6 +1897,12 @@ function HomeState({ tabIndex = 0 }) {
     // r26-B5:先造 draft 再入队 —— 队列键带 draftId,与同项目其他 draft 窗格隔离。
     const _homeDraft = buildHomeDraft(project, _did);
     if (!_homeDraft) return; // 项目缺 path 造不出 draft(旧代码会入队后清空窗格,键还匹配不上)
+    // r80(A1):把顶栏在 Home 选的模型从「待发」键交接到这条真 draft 键上,后续由既有
+    // init 迁移(:4904 migrateSessionKey(draftKey, 真 sid))落到真 sessionId —— 交接链
+    // 全程复用同一个 store 原语。force=true:用户的显式选择压过 seed 的继承值。
+    // migrateSessionKey 搬完即删源键,所以下一次回到 Home 是干净的全局默认(新会话
+    // 不继承上一次的 Home 选择,与 seedNewSessionDefaults 原意一致)。
+    st.migrateSessionKey(HOME_DRAFT_KEY, queueKeyFor(_homeDraft), true);
     // 首页权限模式选择器(无会话时操作的是全局 mode)落到这条新 draft 的 permKey 上。
     const _homeMode = st.permissionMode || 'default';
     st.setPermissionMode(_homeMode, queueKeyFor(_homeDraft));
@@ -3248,18 +3254,23 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // 后,老会话徽章/发送都沿用旧 provider 的模型 id,上游报"无可用渠道/para error"。
   // 显示与发送解析保持一致(同样的 epoch 门控)。
   const providerEpoch = useStore((s) => s.providerEpoch);
+  // r80(B1):官方 Anthropic 下取消 epoch 门控 —— epoch 写进 localStorage 后永不清零,
+  // 切过一次 provider 就把官方下完全合法的 claude 模型也永久判死(档 H:sonnet→fable)。
+  // 判定口径与 makeProviderModelGuard 的 officialAnthropic 同一来源(下面 modelGuard 复用
+  // 同一个常量);声明必须在这条 useMemo 之前,写在后面就是 TDZ(渲染期即崩)。
+  const guardOfficial = useStore((s) => (s.currentProvider?.providerHint || 'anthropic') === 'anthropic');
   const measuredCtx = useStore((s) => (selectedSession?.sessionId && s.ctxMeasuredBySession[selectedSession.sessionId]) || null);
   const historyModel = useMemo(() => {
-    const fresh = (m) => !providerEpoch || (m?.timestamp && Date.parse(m.timestamp) > providerEpoch);
+    const fresh = (m) => !providerEpoch || guardOfficial || (m?.timestamp && Date.parse(m.timestamp) > providerEpoch);
     for (let i = messages.length - 1; i >= 0; i--) {
       if (!messages[i]?.model) continue;
       if (/^</.test(messages[i].model)) continue; // 跳过 <synthetic> 等伪模型 id
       return fresh(messages[i]) ? messages[i].model : null;
     }
-    // 会话元数据 model 无时间戳:仅在从未切换过 provider 时可信。
-    if (selectedSession?.model && !providerEpoch) return selectedSession.model;
+    // 会话元数据 model 无时间戳:非官方 provider 下仅在从未切换过 provider 时可信。
+    if (selectedSession?.model && (!providerEpoch || guardOfficial)) return selectedSession.model;
     return null;
-  }, [selectedSession?.model, messages, providerEpoch]);
+  }, [selectedSession?.model, messages, providerEpoch, guardOfficial]);
   // 服务端持久化的 1M 标记兜底:重装丢 localStorage 后 pin 没了,historyModel 恢复的是
   // 不带 [1m] 的 API 模型 id → 若该会话标记过 1M 且解析结果没带后缀,补回。pin 存在且
   // 不带 [1m](用户显式关掉)时 setModelFor 的 syncContext1m 已把标记清掉,不会误补。
@@ -3272,7 +3283,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // 函数会每次返回新引用,触发 Zustand 无限重渲(项目踩过:选择器新引用→React #185)。
   const guardAvailable = useStore((s) => s.availableModels);
   const guardCustom = useStore((s) => s.customModels);
-  const guardOfficial = useStore((s) => (s.currentProvider?.providerHint || 'anthropic') === 'anthropic');
+  // guardOfficial 在上面(historyModel 的 epoch 豁免要用)已声明,此处直接复用。
   const modelGuard = useMemo(
     () => ((Array.isArray(guardAvailable) && guardAvailable.length)
       ? makeProviderModelGuard({ availableModels: guardAvailable, customModels: guardCustom, officialAnthropic: guardOfficial })
@@ -4560,16 +4571,19 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       // 全局被 WS 重置成默认后,没 pin 的会话(尤其回滚后)会用默认模型发出,与徽章不符。
       // 模型解析(#8/U1/U4/BK-0 四轮 bug 聚集地)→ 纯逻辑抽到 utils/routing.js,
       // 语义不变,详细注释与测试见那里(npm run test:routing)。
-      const _pin = useStore.getState().modelBySession[sessionQueueKey];
-      const _hist = resolveHistModel(getLocalMessages(), useStore.getState().providerEpoch || 0);
       const _stM = useStore.getState();
+      // r80(B1):官方标志同时喂给历史解析与发送校验 —— 只给后者会让显示放行、发送
+      // 仍被 epoch 判死(徽章显示 sonnet 实际发全局默认)。
+      const _officialM = (_stM.currentProvider?.providerHint || 'anthropic') === 'anthropic';
+      const _pin = _stM.modelBySession[sessionQueueKey];
+      const _hist = resolveHistModel(getLocalMessages(), _stM.providerEpoch || 0, _officialM);
       let currentModel = resolveSendModel({
         pin: _pin,
         hist: _hist,
         globalModel: _stM.currentModel,
         availableModels: _stM.availableModels,
         customModels: _stM.customModels,
-        officialAnthropic: (_stM.currentProvider?.providerHint || 'anthropic') === 'anthropic',
+        officialAnthropic: _officialM,
       });
       // 1M 标记兜底(与徽章显示解析同一规则):重装丢 pin 后,发送也要带回 [1m],
       // 否则显示 1M 而实际按 200K 发。用 selectedSession?.sessionId(勿用下方 const sid,
@@ -10115,6 +10129,12 @@ export default function App() {
   // 未分屏 = selectedSession;分屏 = 聚焦格。返回既有对象引用,选择器稳定。
   const headerPane = useStore((s) => (s.paneSessions && s.paneSessions[s.activeTabIndex || 0]) || s.selectedSession);
   const headerPermKey = headerPane ? queueKeyFor(headerPane) : null;
+  // r80(A1):模型选择器在 Home(无会话)时改落 HOME_DRAFT_KEY —— null 分支的
+  // setModelFor 只改内存全局、零落盘,重启必回全局默认(BUGREPORT 档 G)。
+  // 只改模型这一颗:力度的 null 分支 setEffortFor(null,e) 本来就落盘(写全局
+  // cgui-effort,新会话经 seedNewSessionDefaults 继承),改成 pin 键反而会把
+  // 「在 Home 设全局默认力度」退化成一次性 pin,故 EffortSelector 维持 headerPermKey。
+  const headerModelKey = headerPane ? headerPermKey : HOME_DRAFT_KEY;
   const [rightPanel, setRightPanelRaw] = useState(null);
   // 修正批#7:原 T5#1 "离开设置面板丢 Provider 表单输入"守卫已删——表单随 Provider tab
   // 迁出设置,脏数据守卫改由 ProviderManagerModal 的关闭路径(Esc/点外/X)承担。
@@ -11112,7 +11132,7 @@ export default function App() {
             [权限模式][附件][旁问]。弹层均走 AnchoredPopover(portal 顶层)向下弹。 */}
         <div className="flex items-center gap-1 flex-wrap justify-end min-w-0 ml-auto">
           <ProviderSwitcher tourAnchor respondOpenProvider />
-          <ModelSelector compact permKey={headerPermKey} tourAnchor />
+          <ModelSelector compact permKey={headerModelKey} tourAnchor />
           <EffortSelector permKey={headerPermKey} tourAnchor />
           <span data-tour="remote-control" className="inline-flex">
             {/* r39:顶栏按钮一律竖排(图标上/文字下),与「主题」「设置」同高 —— 原来是

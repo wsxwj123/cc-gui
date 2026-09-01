@@ -69,13 +69,23 @@ export function migrateDraftQueue(messageQueue, draftKey, sid) {
  *    盲目回退会把伪 id 发出 → "模型不存在"(实测 /compact 后必现);
  *  - providerEpoch 门控:只信任【最近一次 provider 切换之后】的消息,否则老会话的
  *    旧 provider 模型 id(如 mimo-v2.5-pro)会发给新 provider → "无可用渠道"。
+ *  - r80(B1):官方 Anthropic 下取消该门控。epoch 一旦写进 localStorage 永不清零,
+ *    于是"切过一次 provider"之后,连官方下完全合法的 claude 模型也被永久判死 →
+ *    老会话显示/发送一律回落全局默认(BUGREPORT 档 H 实测:sonnet → fable)。
+ *    epoch 是 U1/U4 时代的唯一防线;r16-1 起 pin/历史/全局三环都过
+ *    makeProviderModelGuard 白名单,epoch 成了误伤面极大的重复防线。非官方 provider
+ *    保留原样 —— 那里白名单可能被"两家同名 id"绕过,epoch 仍有价值。
+ * @param {boolean} officialAnthropic 当前 provider 是否官方(口径同
+ *   makeProviderModelGuard:`(currentProvider?.providerHint || 'anthropic') === 'anthropic'`)。
+ *   默认 false = 保守(既有调用点不传时行为一字不变)。
  */
-export function resolveHistModel(messages, providerEpoch = 0) {
+export function resolveHistModel(messages, providerEpoch = 0, officialAnthropic = false) {
   const ms = messages || [];
   for (let i = ms.length - 1; i >= 0; i--) {
     if (!ms[i]?.model) continue;
     if (/^</.test(ms[i].model)) continue;
-    if (providerEpoch && (!ms[i].timestamp || Date.parse(ms[i].timestamp) <= providerEpoch)) return null;
+    if (providerEpoch && !officialAnthropic
+      && (!ms[i].timestamp || Date.parse(ms[i].timestamp) <= providerEpoch)) return null;
     return ms[i].model;
   }
   return null;
@@ -115,8 +125,9 @@ export function makeProviderModelGuard({ availableModels, customModels, official
  *  ② 手机页(MobileModelPage)连 context1m 标记都没叠,重装丢 pin 后开关显示"关",
  *    与徽章/发送反向,用户想关反而点成开。
  * 历史这一环用会话元数据 model —— 徽章在 messages 未加载时用的同一来源(选择器拿不到
- * messages),并沿用同样的 providerEpoch 门控:切过 provider 后不信任无时间戳的元数据,
- * 否则会把旧 provider 的模型 id 显示/pin 给新 provider(U1/U4 同一族)。
+ * messages),并沿用同样的 providerEpoch 门控(含 r80 的官方豁免):非官方 provider 下
+ * 切过 provider 后不信任无时间戳的元数据,否则会把旧 provider 的模型 id 显示/pin 给
+ * 新 provider(U1/U4 同一族)。
  * @param {object} s store 状态(读 modelBySession/paneSessions/selectedSession/currentModel/providerEpoch/context1mBySession)
  * @param {string|null} permKey 会话 key(真会话 = sessionId,草稿 = `draft-<hash>`)
  * @returns {string} 模型 id(可能带 [1m]);无从解析时返回全局默认(可能为空串)
@@ -131,16 +142,18 @@ export function resolveSelectorModel(s, permKey) {
   //  读出、开机即非空 —— 只要用户加过一个自定义模型,开机那一小段白名单里就只有那一个
   //  id,第三方用户的徽章会闪一下全局默认再跳回 pin。发送侧不能这么放宽:它宁可回落也
   //  不能把不存在的模型发上去。)
+  const officialAnthropic = (s.currentProvider?.providerHint || 'anthropic') === 'anthropic';
   const inProvider = (Array.isArray(s.availableModels) && s.availableModels.length)
     ? makeProviderModelGuard({
       availableModels: s.availableModels,
       customModels: s.customModels,
-      officialAnthropic: (s.currentProvider?.providerHint || 'anthropic') === 'anthropic',
+      officialAnthropic,
     })
     : () => true;
   const rawPin = permKey ? s.modelBySession?.[permKey] : null;
   const pin = inProvider(rawPin) ? rawPin : null;
-  const rawMeta = (permKey && !s.providerEpoch)
+  // r80(B1):epoch 门控加官方豁免,与 resolveHistModel 同口径(理由见那里)。
+  const rawMeta = (permKey && (officialAnthropic || !s.providerEpoch))
     ? [...(s.paneSessions || []), s.selectedSession].find((x) => x?.sessionId === permKey)?.model
     : null;
   const meta = inProvider(rawMeta) ? rawMeta : null;

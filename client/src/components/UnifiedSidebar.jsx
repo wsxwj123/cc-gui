@@ -45,7 +45,9 @@ export const seedNewSessionDefaults = (draftProjectHash, draftId) => {
     ? queueKeyFor({ projectHash: draftProjectHash || 'none', draftId })
     : `draft-${draftProjectHash || 'none'}`;
   if (prevKey && prevKey !== draftKey) {
-    st.setModelFor(draftKey, ''); // model 跟 provider 默认,不跟上条会话
+    // r80:原此处有一行 `st.setModelFor(draftKey, '')`(意为"model 跟 provider 默认,
+    // 不跟上条会话")—— 被 setModelFor 首行 `if (!model) return` 吞掉,恒 no-op,是死代码。
+    // 其意图由"新 draft 的 draftId 唯一 ⇒ 新键上本就没有 pin"天然达成,删除零行为变化。
     st.setEffortFor(draftKey, st.getEffortFor(prevKey));
   }
   st.setActiveAgentFor(draftKey, '');
