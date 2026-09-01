@@ -287,12 +287,19 @@ const mj = (over) => buildImageRequest({ protocol: 'mj', ...BASE, ...over }, '�
   const strip = (PANEL.match(/const imageStrip = \(h\) => \{[\s\S]*?\n  \};/) || [''])[0];
   assert.ok(strip, 't8: 找得到 imageStrip');
   assert.match(strip, /\{canAct && i === cur && \(/, 't8【付费误触】:动作条只在选中那张上渲染');
-  const bar = (strip.match(/\{canAct[\s\S]*?\n            \)\}/) || [''])[0];
+  // 【必须剥注释再断言】上面那段说明里就写着 opacity / pointer-events-none 这些词,
+  // 不剥的话断言恒真 = 死锁(第一版就栽在这:变异实跑是绿的才发现)。
+  const bar = (strip.match(/\{canAct[\s\S]*?\n            \)\}/) || [''])[0]
+    .split('\n').filter((l) => !l.trim().startsWith('//')).join('\n');
   assert.ok(bar.includes('submitAction'), 't8: 切到的是动作条那一段');
+  // 只看动作条【自己那层 div】的 className:按钮上的 disabled:opacity-50 是正当的,
+  // 拿整段做子串匹配会把它算进来。
+  const barDiv = (bar.match(/<div className=[^\n]*absolute inset-x-0 bottom-0[^\n]*/) || [''])[0];
+  assert.ok(barDiv, 't8: 找得到动作条那一层 div');
   // 若哪天改回"隐藏但保留在 DOM 里",必须同时挡住点击 —— 否则这条红。
-  assert.equal(/opacity-0|invisible/.test(bar) && !/pointer-events-none/.test(bar), false,
+  assert.equal(/opacity-0|invisible/.test(barDiv) && !/pointer-events-none/.test(barDiv), false,
     't8【付费误触】:隐藏态的动作条必须同时 pointer-events-none(或干脆不渲染)');
-  assert.equal(/group-hover/.test(bar), false, 't8: 动作条不靠 hover 出现(触屏没有 hover)');
+  assert.equal(/group-hover/.test(barDiv), false, 't8: 动作条不靠 hover 出现(触屏没有 hover)');
 }
 
 
