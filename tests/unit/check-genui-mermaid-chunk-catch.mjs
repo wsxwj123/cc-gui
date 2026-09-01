@@ -25,6 +25,16 @@
 //   D:删掉内层 `const svg = await m.renderMermaid` / setHtml(焊死降级态) → 红
 //   M10:删掉 <div className={css.mermaidHint}>渲染中…</div>       → 红
 //   M16:给 <pre> 加 className(纯格式化演进)                       → 绿(不许误红)
+//   Z1:两条早退分支调换顺序(loading 排到 failed 前)              → 红
+//   Y3/Y4:块注释 /* */ 、JSX 注释 {/* */} 里写"渲染中…"+删真 UI   → 红
+//   Y6:留一句 /* TODO ... .catch(...) ... */ + 删掉真 .catch      → 红
+//   X1:只删降级分支里的 <pre>{code}</pre>(留 loading 分支那份)    → 红
+//   S1/S2/S4:Scene3DNode 删掉 / 补 .catch / 内部砸烂              → 绿(切片隔离)
+//
+// ── 这份锁**管不到**什么(别误以为它管得更宽)────────────────────────────────────
+//   · 行尾 // 注释没剥(见下面 strip 处):`code` 后跟一句 // 渲染中… 仍能救绿,已知残留通道。
+//   · 只保**结构与顺序**,不保语义:守卫取反(if (!alive))、短路(alive && false)这类
+//     语义变异,任何源码锁都抓不到 —— 那是全仓源码锁的共同天花板,语义靠 r64 验收 harness。
 //
 // M10 / M16 是盲审揪出的两个不达标点,首版分别是**假锁**和**过死锁**:
 //   假锁:断言在含注释的切片上 includes('渲染中…'),而本文件自己的 CGUI-PATCH 注释里就有
@@ -47,13 +57,19 @@ const src = readFileSync(join(root, 'client/src/genui/upstream/blocks/advanced.t
 const iMermaid = src.indexOf('export const MermaidNode');
 assert.notEqual(iMermaid, -1, '找不到 MermaidNode(组件被改名/挪走了?这条锁需要跟着改)');
 const iNext = src.indexOf('\nexport ', iMermaid + 1);
-// 匹配前先把整行 // 注释剥掉。这不是洁癖:本组件的 CGUI-PATCH 注释里就写着 "渲染中…"、
+// 匹配前先把注释剥掉。这不是洁癖:本组件的 CGUI-PATCH 注释里就写着 "渲染中…"、
 // <pre>源码</pre>、import('mermaid') 这类和被锁对象一模一样的字样 —— 首版就栽在这:
 // 把 <div className={css.mermaidHint}>渲染中…</div> 整条删掉,断言却被注释里的"渲染中…"
-// 救绿(假锁)。剥一次,下面所有切片(chain/catchBody/thenBody)与锚点(import()/
-// return () =>/.then/.catch)全部继承,同类假绿/锚点被带偏一次性消掉。
-// 只剥整行注释、不动行尾注释与字符串:行尾 // 的通用剥法会误伤 URL 与字符串字面量。
+// 救绿(假锁)。剥一次,下面所有切片(chain/catchBody/thenBody/failedBranch)与锚点
+// (import()/return () =>/.then/.catch)全部继承。
+// 块注释 /* */ 与 JSX 注释 {/* */} 必须一起剥,不是理论风险:{/* CGUI-PATCH ... */} 就是
+// 本文件既有写法(advanced.tsx:178/232/293),而且切片尾巴天然含着下一个组件的 doc 块注释。
+// 最狠的一例:删掉真 .catch、留一句 /* TODO 以后补 .catch(() => { if (alive) setFailed(true) }) */,
+// 只剥整行 // 的话整份锁全绿 —— 这条锁存在的全部理由被一句 TODO 顶掉。
+// ⚠️ 已知残留通道:**行尾** // 注释没剥(通用剥法会误伤 URL 与字符串字面量),
+//    `code` 后面跟一句 // 渲染中… 仍能救绿。要堵得换真解析器,当前按性价比不做。
 const mermaid = src.slice(iMermaid, iNext === -1 ? src.length : iNext)
+  .replace(/\{?\/\*[\s\S]*?\*\/\}?/g, '')
   .replace(/^\s*\/\/.*$/gm, '');
 
 // effect 里那条 promise 链:从 import() 起,到清理函数 `return () =>` 止。
@@ -94,19 +110,35 @@ assert.ok(chain.indexOf('setHtml(') < iCatch,
   '成功路径仍属于 then 内,不该被挪进 catch');
 
 // 主题跟随不许被这次改动碰掉(CGUI-PATCH:epoch 进 deps 才会跟着换主题重画)。
-// 只锁"deps 里点了 themeEpoch",不锁顺序、不锁有没有别的 dep —— 加 dep / 换序是无害演进。
-assert.ok(/\}, \[[^\]]*\bthemeEpoch\b[^\]]*\]\)/.test(mermaid),
+// 只锁"deps 里点了 themeEpoch",不锁顺序、不锁有没有别的 dep、不锁 `}, [` 中间的空格。
+assert.ok(/\}\s*,\s*\[[^\]]*\bthemeEpoch\b[^\]]*\]\)/.test(mermaid),
   'effect deps 里必须仍有 themeEpoch:掉了 = 切深色后旧图停在旧主题直到刷新');
 
+// ── 3. 分支顺序锁:两条早退分支的**先后**是本次修复能生效的前提 ────────────────────
+// chunk 失败时 html 恒为 null,failed 才是 true。把这两条 return 调换(一次"读起来更顺"的
+// 整理就会这么干),loading 分支先命中 ⟹ 界面照样永卡"渲染中…",.catch 白设 —— 而
+// 上面所有断言(catch 在、置 failed、两条文案都在)统统还是绿的。所以顺序必须单独锁。
+const iFailedBranch = mermaid.search(/if\s*\(\s*failed\s*\)/);
+const iLoadingBranch = mermaid.search(/html\s*===\s*null/);
+assert.notEqual(iFailedBranch, -1, '降级 UI 要由 failed 驱动(找不到 if (failed) 早退分支)');
+assert.notEqual(iLoadingBranch, -1, '找不到 html === null 的 loading 早退分支');
+assert.ok(iFailedBranch < iLoadingBranch,
+  'failed 分支必须排在 loading 分支之前:反过来的话 chunk 失败(html 恒 null)会被 loading'
+  + ' 分支先命中,降级态永远显示不出来,这条 .catch 等于白设');
+
 // 两个提示都得在:降级态没有对应的 UI,置了也白置。
-// (这两条现在锁的是真 UI —— 上面已把注释剥掉,注释里的同名字样救不了它们。)
+// (现在锁的是真 UI —— 上面已把整行 // 、块注释、JSX 注释都剥掉,同名字样救不了它们。)
 assert.ok(mermaid.includes('渲染中…'), 'loading 提示必须还在');
 assert.ok(mermaid.includes('图语法有误，已降级显示源码'),
   '降级提示必须还在(catch 置的 failed 靠它显示;文案被 r64 验收 harness 逐字锁定,不许改)');
-assert.ok(/if\s*\(\s*failed\s*\)/.test(mermaid), '降级 UI 要由 failed 驱动');
+
+// 源码降级只认**降级分支自己**那份 <pre>{code}</pre>:整段切片上匹配的话,loading 分支
+// 里的同款 <pre> 会把它救绿(删光降级分支的源码展示仍全绿,而断言文案说的正是它)。
+// 取"failed 分支起 → loading 分支止"这段区间,而不是那一行 —— 对 JSX 换行重排也稳。
 // <pre> 允许带属性:加个 className / data-* 是无害演进,不该误红成"源码展示被删了"。
-assert.ok(/<pre[^>]*>\{code\}<\/pre>/.test(mermaid),
-  '降级时必须仍把原始源码显出来(plain-source fallback 的"source")');
+const failedBranch = mermaid.slice(iFailedBranch, iLoadingBranch);
+assert.ok(/<pre[^>]*>\{code\}<\/pre>/.test(failedBranch),
+  '降级分支里必须仍把原始源码显出来(plain-source fallback 的"source")');
 
 console.log('✅ check-genui-mermaid-chunk-catch:懒加载 chunk 拉取失败落降级态(.catch 在 .then 之后 + alive 守卫 + 置 failed),'
   + ' 且成功路径 / 内层 try-catch / themeEpoch deps / 渲染中-降级两个提示均未被焊掉');
