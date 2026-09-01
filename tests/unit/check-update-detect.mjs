@@ -26,8 +26,14 @@ import { readFileSync } from 'node:fs';
 {
   const gh = readFileSync(new URL('../../server/utils/github-fetch.js', import.meta.url), 'utf8');
   assert.match(gh, /export async function gfetch/, 't2: 导出 gfetch');
-  assert.match(gh, /try \{ r = await fetch\(url, opts\); \}/, 't2: 直连优先');
+  // r67:注入 GitHub 令牌后直连写法变为 fetch(url, { ...opts, headers })——锁"先直连 fetch"这一语义,
+  // 不锁参数字面(headers 里带不带令牌都必须直连优先)。
+  assert.match(gh, /try \{ r = await fetch\(url, [^)]*\); \}/, 't2: 直连优先');
   assert.match(gh, /r\.status === 403/, 't2: 限流换代理链路');
+  // r67:带令牌收到 401 = 令牌失效,必须作废缓存退回匿名重试(最坏=改动前的匿名行为),
+  // 否则一个失效 PAT 会让技能市场/版本检测全部变成 401,比不配令牌还糟。
+  assert.match(gh, /invalidateGithubToken\(\)/, 't2: 令牌 401 作废缓存');
+  assert.match(gh, /r\.status === 401 && usedToken/, 't2: 401 兜底只对注入令牌的请求生效');
   assert.match(gh, /CONNECT/, 't2: CONNECT 隧道(不设全局代理,不碰子进程环境)');
   // skills.js 不再各自持有一份实现
   const sk = readFileSync(new URL('../../server/routes/skills.js', import.meta.url), 'utf8');
